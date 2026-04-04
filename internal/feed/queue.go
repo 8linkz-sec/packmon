@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/8linkz/packmon/internal/db"
+	"github.com/8linkz/packmon/internal/telemetry"
 )
 
 const (
@@ -181,6 +182,7 @@ func (q *QueueProcessor) resetAllStuckJobs(ctx context.Context) {
 			continue
 		}
 		if count > 0 {
+			telemetry.Default().AddQueueStuckRecovered(count)
 			q.logger.Info("reset stuck jobs",
 				"source", w.Name(),
 				"count", count,

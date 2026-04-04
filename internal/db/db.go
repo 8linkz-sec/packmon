@@ -40,6 +40,10 @@ type Store interface {
 	// DeleteMaliciousFinding removes a malicious finding by id.
 	DeleteMaliciousFinding(ctx context.Context, id string) error
 
+	// ListMaliciousFindings returns malicious findings, optionally filtered
+	// by source, newest first.
+	ListMaliciousFindings(ctx context.Context, source string, limit int) ([]MaliciousFinding, error)
+
 	// -- Vulnerability enrichment (batch updates from enrichment feeds) ---------
 
 	// SetCISAKEV marks the given CVE IDs as being in the CISA KEV catalog.
@@ -105,6 +109,21 @@ type Store interface {
 	// InsertScanLog records a completed scan.
 	InsertScanLog(ctx context.Context, entry *ScanLogEntry) error
 
+	// ListRecentScans returns the most recent scan log entries, newest first.
+	// limit controls how many entries to return (max 100).
+	ListRecentScans(ctx context.Context, limit int) ([]ScanLogEntry, error)
+
+	// CountScansByDay returns the number of scans and total findings per day
+	// for the last N days (including today). Results are ordered oldest to newest.
+	CountScansByDay(ctx context.Context, days int) ([]DailyScanStats, error)
+
+	// -- Search -----------------------------------------------------------------
+
+	// SearchPackages searches the affected_packages and malicious_packages
+	// tables for packages whose name contains the query string.
+	// Returns a deduplicated list of matching packages with their finding counts.
+	SearchPackages(ctx context.Context, query string, limit int) ([]PackageSearchResult, error)
+
 	// -- API keys ---------------------------------------------------------------
 
 	// FindAPIKeyByHash looks up an API key by its hash. Returns nil if not
@@ -113,6 +132,15 @@ type Store interface {
 
 	// TouchAPIKeyLastUsed updates the last_used_at timestamp for a key.
 	TouchAPIKeyLastUsed(ctx context.Context, keyID int) error
+
+	// ListAPIKeys returns all API keys, including revoked ones.
+	ListAPIKeys(ctx context.Context) ([]APIKey, error)
+
+	// CreateAPIKey inserts a new API key and returns the assigned ID.
+	CreateAPIKey(ctx context.Context, name string, keyHash string) (int, error)
+
+	// RevokeAPIKey marks an API key as revoked.
+	RevokeAPIKey(ctx context.Context, keyID int) error
 
 	// -- Admin auth -------------------------------------------------------------
 
@@ -125,6 +153,28 @@ type Store interface {
 
 	// InsertAdminAuditLog appends an entry to the admin audit log.
 	InsertAdminAuditLog(ctx context.Context, entry *AdminAuditEntry) error
+
+	// ListAdminAuditLog returns audit log entries, newest first.
+	// limit controls how many entries to return (max 200).
+	ListAdminAuditLog(ctx context.Context, limit int) ([]AdminAuditLogEntry, error)
+
+	// -- Queue stats ------------------------------------------------------------
+
+	// QueueStats returns summary counts for the refresh queue, grouped
+	// by status.
+	QueueStats(ctx context.Context) (*QueueStatsResult, error)
+
+	// ListQueueJobs returns refresh queue jobs, newest first.
+	ListQueueJobs(ctx context.Context, status string, limit int) ([]RefreshJob, error)
+
+	// PurgeQueue removes all completed or errored jobs from the queue.
+	PurgeQueue(ctx context.Context) (int, error)
+
+	// -- Dashboard stats --------------------------------------------------------
+
+	// DashboardStats returns aggregate counts for the dashboard:
+	// total unique packages scanned, total findings in DB, counts by severity.
+	DashboardStats(ctx context.Context) (*DashboardStatsResult, error)
 
 	// -- Lifecycle --------------------------------------------------------------
 
@@ -141,83 +191,83 @@ type Store interface {
 // Vulnerability represents a full vulnerability record including related
 // aliases, sources, references, and affected packages.
 type Vulnerability struct {
-	ID             string
-	Summary        string
-	Details        string
-	Severity       string
-	CVSSScore      *float64
-	EPSSScore      *float64
-	EPSSPercentile *float64
-	CISAKEV        bool
-	ExploitExists  bool
-	Published      time.Time
-	Modified       time.Time
-	Withdrawn      *time.Time
+	ID             string     `json:"id"`
+	Summary        string     `json:"summary"`
+	Details        string     `json:"details"`
+	Severity       string     `json:"severity"`
+	CVSSScore      *float64   `json:"cvss_score,omitempty"`
+	EPSSScore      *float64   `json:"epss_score,omitempty"`
+	EPSSPercentile *float64   `json:"epss_percentile,omitempty"`
+	CISAKEV        bool       `json:"cisa_kev"`
+	ExploitExists  bool       `json:"exploit_exists"`
+	Published      time.Time  `json:"published"`
+	Modified       time.Time  `json:"modified"`
+	Withdrawn      *time.Time `json:"withdrawn,omitempty"`
 
-	Aliases          []VulnerabilityAlias
-	Sources          []VulnerabilitySource
-	References       []VulnerabilityReference
-	AffectedPackages []AffectedPackage
+	Aliases          []VulnerabilityAlias     `json:"aliases,omitempty"`
+	Sources          []VulnerabilitySource    `json:"sources,omitempty"`
+	References       []VulnerabilityReference `json:"references,omitempty"`
+	AffectedPackages []AffectedPackage        `json:"affected_packages,omitempty"`
 }
 
 // VulnerabilityAlias is one alternate identifier for a vulnerability.
 type VulnerabilityAlias struct {
-	AliasID string
+	AliasID string `json:"alias_id"`
 }
 
 // VulnerabilitySource records where a vulnerability was ingested from.
 type VulnerabilitySource struct {
-	Source   string
-	SourceID string
-	URL      string
-	RawJSON  json.RawMessage
+	Source   string          `json:"source"`
+	SourceID string          `json:"source_id"`
+	URL      string          `json:"url"`
+	RawJSON  json.RawMessage `json:"raw_json,omitempty"`
 }
 
 // VulnerabilityReference is a link associated with a vulnerability.
 type VulnerabilityReference struct {
-	Type   string
-	URL    string
-	Source string
+	Type   string `json:"type"`
+	URL    string `json:"url"`
+	Source string `json:"source"`
 }
 
 // AffectedPackage identifies one ecosystem/name pair affected by a
 // vulnerability, together with version constraints.
 type AffectedPackage struct {
-	Ecosystem        string
-	Name             string
-	VersionRanges    json.RawMessage // JSONB
-	VersionsAffected json.RawMessage // JSONB
+	Ecosystem        string          `json:"ecosystem"`
+	Name             string          `json:"name"`
+	VersionRanges    json.RawMessage `json:"version_ranges"`    // JSONB
+	VersionsAffected json.RawMessage `json:"versions_affected"` // JSONB
 }
 
 // MaliciousFinding is a malicious package record (DE-14).
 type MaliciousFinding struct {
-	ID            string
-	Ecosystem     string
-	Name          string
-	Versions      json.RawMessage // JSONB, nil = all versions
-	Source        string
-	RiskType      string
-	Severity      string
-	Summary       string
-	Description   string
-	ReferenceURLs json.RawMessage // JSONB
-	OriginRef     string
-	Published     *time.Time
-	CreatedBy     string
+	ID            string          `json:"id"`
+	Ecosystem     string          `json:"ecosystem"`
+	Name          string          `json:"name"`
+	Versions      json.RawMessage `json:"versions,omitempty"` // JSONB, nil = all versions
+	Source        string          `json:"source"`
+	RiskType      string          `json:"risk_type"`
+	Severity      string          `json:"severity"`
+	Summary       string          `json:"summary"`
+	Description   string          `json:"description"`
+	ReferenceURLs json.RawMessage `json:"reference_urls,omitempty"` // JSONB
+	OriginRef     string          `json:"origin_ref"`
+	Published     *time.Time      `json:"published,omitempty"`
+	CreatedBy     string          `json:"created_by"`
 }
 
 // FeedSyncStatus records the sync state for one feed.
 type FeedSyncStatus struct {
-	FeedName         string
-	LastSyncAt       *time.Time
-	LastSyncDuration *time.Duration
-	LastSyncStatus   string
-	LastError        string
-	EntriesSynced    int
-	EntriesTotal     int
-	LastEtag         string
-	LastCommitHash   string
-	Metadata         json.RawMessage
+	FeedName         string          `json:"feed_name"`
+	LastSyncAt       *time.Time      `json:"last_sync_at,omitempty"`
+	LastSyncDuration *time.Duration  `json:"last_sync_duration,omitempty"`
+	LastSyncStatus   string          `json:"last_sync_status"`
+	LastError        string          `json:"last_error"`
+	EntriesSynced    int             `json:"entries_synced"`
+	EntriesTotal     int             `json:"entries_total"`
+	LastEtag         string          `json:"last_etag"`
+	LastCommitHash   string          `json:"last_commit_hash"`
+	Metadata         json.RawMessage `json:"metadata,omitempty"`
 }
 
 // RefreshJob is one entry in the refresh queue.
@@ -286,16 +336,57 @@ type AdminAuditEntry struct {
 
 // EPSSEntry holds EPSS score data for a single CVE, used by SetEPSSScores.
 type EPSSEntry struct {
-	CVEID      string
-	Score      float64
-	Percentile float64
+	CVEID      string  `json:"cve_id"`
+	Score      float64 `json:"score"`
+	Percentile float64 `json:"percentile"`
 }
 
 // VulnCheckEntry holds enrichment data from VulnCheck for a single CVE.
 type VulnCheckEntry struct {
-	CVEID         string
-	CVSSScore     *float64
-	ExploitExists bool
-	SourceURL     string
-	RawJSON       json.RawMessage
+	CVEID         string          `json:"cve_id"`
+	CVSSScore     *float64        `json:"cvss_score,omitempty"`
+	ExploitExists bool            `json:"exploit_exists"`
+	SourceURL     string          `json:"source_url"`
+	RawJSON       json.RawMessage `json:"raw_json,omitempty"`
+}
+
+// DailyScanStats holds per-day aggregate counts for scan trends.
+type DailyScanStats struct {
+	Date          time.Time
+	ScanCount     int
+	FindingsCount int
+}
+
+// PackageSearchResult is one row from a package search query.
+type PackageSearchResult struct {
+	Ecosystem     string
+	Name          string
+	FindingsCount int
+	Sources       string // comma-separated list of feed sources
+}
+
+// AdminAuditLogEntry is a read-model for audit log entries, including the
+// auto-generated ID and timestamp.
+type AdminAuditLogEntry struct {
+	ID        int
+	Action    string
+	Details   json.RawMessage
+	IP        string
+	CreatedAt time.Time
+}
+
+// QueueStatsResult holds aggregate counts for the refresh queue.
+type QueueStatsResult struct {
+	Pending    int
+	Processing int
+	Done       int
+	Error      int
+}
+
+// DashboardStatsResult holds aggregate counts for the web dashboard.
+type DashboardStatsResult struct {
+	TotalPackages        int
+	TotalVulnerabilities int
+	TotalMalicious       int
+	BySeverity           map[string]int
 }

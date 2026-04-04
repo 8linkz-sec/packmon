@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/8linkz/packmon/internal/db/sqlite"
 	"github.com/8linkz/packmon/internal/domain"
 	"github.com/8linkz/packmon/internal/parser"
 	"github.com/8linkz/packmon/internal/scanner"
@@ -18,6 +19,7 @@ func newScanCmd() *cobra.Command {
 	var (
 		flagMode          string
 		flagServer        string
+		flagAPIKey        string
 		flagFailOn        string
 		flagEcosystems    string
 		flagMaxDepth      int
@@ -47,6 +49,10 @@ and malicious package databases.`,
 			serverURL := flagServer
 			if serverURL == "" {
 				serverURL = os.Getenv("PACKMON_SERVER")
+			}
+			apiKey := strings.TrimSpace(flagAPIKey)
+			if apiKey == "" {
+				apiKey = strings.TrimSpace(os.Getenv("PACKMON_API_KEY"))
 			}
 
 			// Parse fail-on severity.
@@ -87,6 +93,7 @@ and malicious package databases.`,
 				Path:       path,
 				Mode:       mode,
 				ServerURL:  serverURL,
+				APIKey:     apiKey,
 				FailOn:     failOn,
 				Ecosystems: ecosystems,
 				MaxDepth:   flagMaxDepth,
@@ -100,7 +107,32 @@ and malicious package databases.`,
 			sc := scanner.New(reg, cfg)
 
 			ctx := context.Background()
+			historyStore, advisoryDataAvailable, historyErr := openLocalSQLiteStore(ctx)
+			if historyErr != nil {
+				fmt.Fprintf(os.Stderr, "warning: unable to open local database %s: %v\n", defaultDBPath(), historyErr)
+			} else {
+				defer historyStore.Close()
+				if advisoryDataAvailable {
+					sc.SetLocalChecker(historyStore)
+				}
+			}
+
 			result, exitCode := sc.Run(ctx)
+			if historyStore != nil {
+				if err := applyLocalDBFreshness(ctx, historyStore, result); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: unable to determine local DB freshness: %v\n", err)
+				}
+			}
+
+			if historyStore != nil && historyEnabled() && (exitCode == ExitOK || exitCode == ExitBlocking) {
+				if err := recordScanHistory(ctx, historyStore, path, result); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: unable to store scan history: %v\n", err)
+				} else if maxPerRepo := historyMaxScansPerRepo(); maxPerRepo > 0 {
+					if err := historyStore.EnforceRetention(ctx, maxPerRepo); err != nil {
+						fmt.Fprintf(os.Stderr, "warning: unable to enforce history retention: %v\n", err)
+					}
+				}
+			}
 
 			// Write table to stdout unless --quiet.
 			if !flagQuiet {
@@ -171,6 +203,7 @@ and malicious package databases.`,
 	f := cmd.Flags()
 	f.StringVar(&flagMode, "mode", envOrDefault("PACKMON_MODE", "auto"), "scan mode (local|remote|auto)")
 	f.StringVar(&flagServer, "server", "", "feed server URL")
+	f.StringVar(&flagAPIKey, "api-key", "", "API key for authenticated remote scans")
 	f.StringVar(&flagFailOn, "fail-on", envOrDefault("PACKMON_FAIL_ON", "CRITICAL"), "block on severity (CRITICAL|HIGH|MEDIUM|LOW|NONE)")
 	f.StringVar(&flagEcosystems, "ecosystems", os.Getenv("PACKMON_ECOSYSTEMS"), "comma-separated ecosystem filter")
 	f.IntVar(&flagMaxDepth, "max-depth", 10, "directory walk depth")
@@ -194,4 +227,19 @@ func writeJSONFile(path string, result *domain.ScanResult) error {
 		return fmt.Errorf("write file %s: %w", path, err)
 	}
 	return nil
+}
+
+func openLocalSQLiteStore(ctx context.Context) (*sqlite.Store, bool, error) {
+	store, err := sqlite.New(defaultDBPath())
+	if err != nil {
+		return nil, false, err
+	}
+
+	advisoryDataAvailable, err := store.HasAdvisoryData(ctx)
+	if err != nil {
+		store.Close()
+		return nil, false, err
+	}
+
+	return store, advisoryDataAvailable, nil
 }

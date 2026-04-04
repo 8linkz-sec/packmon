@@ -2,7 +2,9 @@ package main
 
 import (
 	"fmt"
+	"time"
 
+	"github.com/8linkz/packmon/internal/db/sqlite"
 	"github.com/spf13/cobra"
 )
 
@@ -29,8 +31,41 @@ func newHistoryClearCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "clear",
 		Short: "Clear scan history",
-		Run: func(_ *cobra.Command, _ []string) {
-			fmt.Println("history clear not yet implemented")
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			store, err := sqlite.New(defaultDBPath())
+			if err != nil {
+				return fmt.Errorf("open local database: %w", err)
+			}
+			defer store.Close()
+
+			var before *time.Time
+			if flagBefore != "" {
+				parsed, err := time.Parse("2006-01-02", flagBefore)
+				if err != nil {
+					return fmt.Errorf("parse --before: %w", err)
+				}
+				before = &parsed
+			}
+
+			deleted, err := store.ClearHistory(cmd.Context(), before, flagRepo)
+			if err != nil {
+				return fmt.Errorf("clear scan history: %w", err)
+			}
+
+			fmt.Printf("Cleared %d scan history entr", deleted)
+			if deleted == 1 {
+				fmt.Print("y")
+			} else {
+				fmt.Print("ies")
+			}
+			if flagRepo != "" {
+				fmt.Printf(" for repo %q", flagRepo)
+			}
+			if before != nil {
+				fmt.Printf(" before %s", before.Format("2006-01-02"))
+			}
+			fmt.Println(".")
+			return nil
 		},
 	}
 

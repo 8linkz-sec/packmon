@@ -5,13 +5,16 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/8linkz/packmon/internal/api/admin"
 	v1 "github.com/8linkz/packmon/internal/api/v1"
+	"github.com/8linkz/packmon/internal/auth"
 	"github.com/8linkz/packmon/internal/db"
 	"github.com/8linkz/packmon/internal/health"
+	"github.com/8linkz/packmon/internal/web"
 )
 
 // registerRoutes wires all HTTP routes on the given mux.
-func registerRoutes(mux *http.ServeMux, hc *health.Checker, store db.Store, logger *slog.Logger, buildInfo BuildInfo) {
+func registerRoutes(mux *http.ServeMux, hc *health.Checker, store db.Store, sm *auth.SessionManager, logger *slog.Logger, buildInfo BuildInfo) {
 	api := v1.NewHandler(store, logger)
 
 	// -- Operations (no auth required) ----------------------------------------
@@ -30,13 +33,21 @@ func registerRoutes(mux *http.ServeMux, hc *health.Checker, store db.Store, logg
 	mux.HandleFunc("GET /api/v1/packages/{ecosystem}/{rest...}", api.HandlePackageDetail)
 	mux.HandleFunc("POST /api/v1/packages/{ecosystem}/{rest...}", api.HandlePackageOrRefresh)
 	mux.HandleFunc("GET /api/v1/sync", api.HandleSync)
+
+	// -- Admin (session-protected) --------------------------------------------
+	admin.RegisterRoutes(mux, store, sm, logger)
+
+	// -- Web GUI (public pages: dashboard, search, package, feeds) -----------
+	renderer := web.NewRenderer(web.TemplateFS(), false)
+	web.RegisterRoutes(mux, store, renderer, logger)
 }
 
 // BuildInfo is injected at build time via ldflags.
 type BuildInfo struct {
-	Version string
-	Commit  string
-	Date    string
+	Version       string
+	Commit        string
+	Date          string
+	SchemaVersion uint
 }
 
 func versionHandler(bi BuildInfo) http.HandlerFunc {

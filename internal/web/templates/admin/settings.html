@@ -1,0 +1,123 @@
+{{define "title"}}Packmon - Admin Settings{{end}}
+
+{{define "content"}}
+<div class="space-y-6">
+
+  <div class="flex items-center justify-between">
+    <h1 class="text-2xl font-bold">System Settings</h1>
+    <form action="/admin/logout" method="POST" class="inline">
+      <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+      <button type="submit" class="text-sm text-gray-500 hover:text-gray-700 underline">Logout</button>
+    </form>
+  </div>
+
+  <!-- Admin nav tabs -->
+  <div class="border-b border-gray-200">
+    <nav class="flex space-x-6 text-sm">
+      <a href="/admin/" class="text-gray-500 hover:text-gray-700 pb-2 px-1">Overview</a>
+      <a href="/admin/feeds" class="text-gray-500 hover:text-gray-700 pb-2 px-1">Feeds</a>
+      <a href="/admin/queue" class="text-gray-500 hover:text-gray-700 pb-2 px-1">Queue</a>
+      <a href="/admin/keys" class="text-gray-500 hover:text-gray-700 pb-2 px-1">API Keys</a>
+      <a href="/admin/audit" class="text-gray-500 hover:text-gray-700 pb-2 px-1">Audit Log</a>
+      <a href="/admin/settings" class="border-b-2 border-blue-500 text-blue-600 pb-2 px-1 font-medium">Settings</a>
+    </nav>
+  </div>
+
+  {{if .Message}}
+  <div class="bg-green-50 border border-green-200 text-green-800 rounded-md px-4 py-3 text-sm">
+    {{.Message}}
+  </div>
+  {{end}}
+
+  {{if .Error}}
+  <div class="bg-red-50 border border-red-200 text-red-700 rounded-md px-4 py-3 text-sm">
+    {{.Error}}
+  </div>
+  {{end}}
+
+  <!-- Change password -->
+  <div class="bg-white rounded-lg shadow p-5 border border-gray-200">
+    <h2 class="text-lg font-semibold mb-3">Change Admin Password</h2>
+    <form action="/admin/settings/password" method="POST" class="space-y-4 max-w-md">
+      <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+
+      <!-- Hidden username for Bitwarden/password-manager compatibility -->
+      <input type="hidden" name="username" value="admin" autocomplete="username">
+
+      <div>
+        <label for="current-password" class="block text-sm font-medium text-gray-700 mb-1">Current Password</label>
+        <input
+          type="password"
+          name="current_password"
+          id="current-password"
+          required
+          autocomplete="current-password"
+          class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+        >
+      </div>
+
+      <div>
+        <label for="new-password" class="block text-sm font-medium text-gray-700 mb-1">New Password</label>
+        <input
+          type="password"
+          name="new_password"
+          id="new-password"
+          required
+          minlength="8"
+          autocomplete="new-password"
+          class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+        >
+      </div>
+
+      <div>
+        <label for="confirm-password" class="block text-sm font-medium text-gray-700 mb-1">Confirm New Password</label>
+        <input
+          type="password"
+          name="confirm_password"
+          id="confirm-password"
+          required
+          minlength="8"
+          autocomplete="new-password"
+          class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+        >
+      </div>
+
+      <button
+        type="submit"
+        class="bg-blue-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-700"
+      >
+        Change Password
+      </button>
+    </form>
+  </div>
+
+  <!-- Server info -->
+  <div class="bg-white rounded-lg shadow p-5 border border-gray-200">
+    <h2 class="text-lg font-semibold mb-3">Server Information</h2>
+    <dl class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2 text-sm">
+      <div class="flex justify-between sm:block">
+        <dt class="text-gray-500">Server Mode</dt>
+        <dd class="font-medium">{{.ServerMode}}</dd>
+      </div>
+      <div class="flex justify-between sm:block">
+        <dt class="text-gray-500">Feed Sync Interval</dt>
+        <dd class="font-medium">{{.SyncInterval}}</dd>
+      </div>
+      <div class="flex justify-between sm:block">
+        <dt class="text-gray-500">Admin Last Login</dt>
+        <dd class="font-medium">{{if .LastLoginAt}}{{formatTime .LastLoginAt}}{{else}}never{{end}}</dd>
+      </div>
+      <div class="flex justify-between sm:block">
+        <dt class="text-gray-500">Password Changed</dt>
+        <dd class="font-medium">{{if .PasswordChangedAt}}{{formatTime .PasswordChangedAt}}{{else}}never{{end}}</dd>
+      </div>
+    </dl>
+  </div>
+
+  <div class="bg-yellow-50 border border-yellow-200 rounded-md p-4 text-sm text-yellow-800">
+    Most server settings are configured via environment variables (PACKMON_*) and require a restart to take effect.
+    See the deployment documentation for the full list.
+  </div>
+
+</div>
+{{end}}

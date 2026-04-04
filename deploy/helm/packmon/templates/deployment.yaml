@@ -1,0 +1,96 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "packmon.fullname" . }}
+  labels:
+    {{- include "packmon.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "packmon.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        {{- include "packmon.labels" . | nindent 8 }}
+    spec:
+      initContainers:
+        - name: migrate
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - migrate
+          env:
+            - name: PACKMON_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "packmon.fullname" . }}-secret
+                  key: db-password
+            - name: PACKMON_ADMIN_INITIAL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "packmon.fullname" . }}-secret
+                  key: admin-initial-password
+            - name: PACKMON_SOCKET_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "packmon.fullname" . }}-secret
+                  key: socket-api-key
+            - name: PACKMON_VULNCHECK_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "packmon.fullname" . }}-secret
+                  key: vulncheck-api-key
+          envFrom:
+            - configMapRef:
+                name: {{ include "packmon.fullname" . }}-config
+      containers:
+        - name: packmon-server
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.server.port }}
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+          env:
+            - name: PACKMON_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "packmon.fullname" . }}-secret
+                  key: db-password
+            - name: PACKMON_ADMIN_INITIAL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "packmon.fullname" . }}-secret
+                  key: admin-initial-password
+            - name: PACKMON_SOCKET_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "packmon.fullname" . }}-secret
+                  key: socket-api-key
+            - name: PACKMON_VULNCHECK_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "packmon.fullname" . }}-secret
+                  key: vulncheck-api-key
+          envFrom:
+            - configMapRef:
+                name: {{ include "packmon.fullname" . }}-config
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      nodeSelector:
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
+      tolerations:
+        {{- toYaml .Values.tolerations | nindent 8 }}
+      affinity:
+        {{- toYaml .Values.affinity | nindent 8 }}

@@ -48,6 +48,7 @@ type Config struct {
 	Path       string
 	Mode       Mode
 	ServerURL  string
+	APIKey     string
 	FailOn     domain.Severity
 	Ecosystems []string
 	MaxDepth   int
@@ -133,11 +134,12 @@ func (s *Scanner) Run(ctx context.Context) (*domain.ScanResult, int) {
 	mode := s.resolveMode()
 	var findings []domain.Finding
 	var feedVersions map[string]string
+	var feedStatus string
 	var checkErr error
 
 	switch mode {
 	case ModeRemote:
-		findings, feedVersions, checkErr = s.checkRemote(ctx, allPackages)
+		findings, feedVersions, feedStatus, checkErr = s.checkRemote(ctx, allPackages)
 		if checkErr != nil {
 			return s.errorResult(scanID, start, fmt.Sprintf("remote check failed: %v", checkErr)), ExitOperational
 		}
@@ -151,7 +153,7 @@ func (s *Scanner) Run(ctx context.Context) (*domain.ScanResult, int) {
 		}
 		feedVersions = map[string]string{}
 	case ModeAuto:
-		findings, feedVersions, checkErr = s.checkRemote(ctx, allPackages)
+		findings, feedVersions, feedStatus, checkErr = s.checkRemote(ctx, allPackages)
 		if checkErr != nil {
 			// Auto mode: fall back to local database.
 			if s.localChecker == nil {
@@ -187,6 +189,7 @@ func (s *Scanner) Run(ctx context.Context) (*domain.ScanResult, int) {
 		FindingsBlocking: blocking,
 		Summary:          buildSummary(findings),
 		Findings:         findings,
+		FeedStatus:       feedStatus,
 		FeedVersions:     feedVersions,
 	}
 
@@ -231,9 +234,9 @@ func (s *Scanner) parseLockFile(lf LockFile) ([]domain.Package, error) {
 }
 
 // checkRemote sends packages to the server's POST /api/v1/check endpoint.
-func (s *Scanner) checkRemote(ctx context.Context, pkgs []domain.Package) ([]domain.Finding, map[string]string, error) {
+func (s *Scanner) checkRemote(ctx context.Context, pkgs []domain.Package) ([]domain.Finding, map[string]string, string, error) {
 	if s.cfg.ServerURL == "" {
-		return nil, nil, fmt.Errorf("no server URL configured (set --server or PACKMON_SERVER)")
+		return nil, nil, "", fmt.Errorf("no server URL configured (set --server or PACKMON_SERVER)")
 	}
 
 	url := strings.TrimRight(s.cfg.ServerURL, "/") + "/api/v1/check"
@@ -243,37 +246,40 @@ func (s *Scanner) checkRemote(ctx context.Context, pkgs []domain.Package) ([]dom
 	}
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
-		return nil, nil, fmt.Errorf("marshal request: %w", err)
+		return nil, nil, "", fmt.Errorf("marshal request: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
 	if err != nil {
-		return nil, nil, fmt.Errorf("create request: %w", err)
+		return nil, nil, "", fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 	req.Header.Set("User-Agent", "packmon-cli/dev")
+	if strings.TrimSpace(s.cfg.APIKey) != "" {
+		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(s.cfg.APIKey))
+	}
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return nil, nil, fmt.Errorf("server request: %w", err)
+		return nil, nil, "", fmt.Errorf("server request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, nil, fmt.Errorf("read response: %w", err)
+		return nil, nil, "", fmt.Errorf("read response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, nil, fmt.Errorf("server returned %d: %s", resp.StatusCode, truncate(string(body), 200))
+		return nil, nil, "", fmt.Errorf("server returned %d: %s", resp.StatusCode, truncate(string(body), 200))
 	}
 
 	var result domain.ScanResult
 	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, nil, fmt.Errorf("decode response: %w", err)
+		return nil, nil, "", fmt.Errorf("decode response: %w", err)
 	}
 
-	return result.Findings, result.FeedVersions, nil
+	return result.Findings, result.FeedVersions, result.FeedStatus, nil
 }
 
 // checkLocal resolves findings against the local SQLite database.

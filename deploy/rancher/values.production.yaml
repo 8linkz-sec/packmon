@@ -1,0 +1,39 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/8linkz/packmon-server
+  tag: latest
+
+ingress:
+  enabled: true
+  className: nginx
+  hosts:
+    - host: packmon.example.internal
+      paths:
+        - path: /
+          pathType: Prefix
+
+admin:
+  initialPassword: replace-in-rancher-secret
+
+metrics:
+  host: 127.0.0.1
+  port: 9090
+
+postgresql:
+  enabled: true
+  storageClassName: local-path
+  size: 20Gi
+
+backup:
+  enabled: true
+  storageClassName: local-path
+  size: 20Gi
+  schedule: "0 3 * * *"
+  retentionDays: 7
+
+feeds:
+  socketEnabled: true
+  socketApiKey: replace-me
+  vulncheckEnabled: true
+  vulncheckApiKey: replace-me

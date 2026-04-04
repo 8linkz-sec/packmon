@@ -1,0 +1,64 @@
+{
+  "name": "Packmon On Demand Scan",
+  "active": false,
+  "settings": {},
+  "nodes": [
+    {
+      "id": "webhook",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [240, 260],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "packmon/scan",
+        "responseMode": "responseNode"
+      }
+    },
+    {
+      "id": "run-scan",
+      "name": "Run Scan",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [540, 260],
+      "parameters": {
+        "command": "packmon scan {{$json.body.path || $env.PACKMON_SCAN_PATH}} --output-json /tmp/packmon-scan.json"
+      }
+    },
+    {
+      "id": "respond",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [820, 260],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\"workflow\":\"on-demand-scan\",\"status\":\"queued\",\"path\":$json.body.path || $env.PACKMON_SCAN_PATH}"
+      }
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Run Scan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Scan": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

@@ -53,8 +53,8 @@ func (s *Store) InsertScan(ctx context.Context, entry ScanEntry) error {
 // ClearHistory deletes scan history entries. If before is non-nil, only
 // entries older than that timestamp are deleted. If repo is non-empty,
 // only entries for that repository are deleted. Both filters can be
-// combined.
-func (s *Store) ClearHistory(ctx context.Context, before *time.Time, repo string) error {
+// combined. The number of deleted rows is returned.
+func (s *Store) ClearHistory(ctx context.Context, before *time.Time, repo string) (int, error) {
 	var conditions []string
 	var args []interface{}
 
@@ -72,11 +72,17 @@ func (s *Store) ClearHistory(ctx context.Context, before *time.Time, repo string
 		query += " WHERE " + joinAnd(conditions)
 	}
 
-	_, err := s.db.ExecContext(ctx, query, args...)
+	result, err := s.db.ExecContext(ctx, query, args...)
 	if err != nil {
-		return fmt.Errorf("sqlite: clear history: %w", err)
+		return 0, fmt.Errorf("sqlite: clear history: %w", err)
 	}
-	return nil
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("sqlite: clear history rows affected: %w", err)
+	}
+
+	return int(rowsAffected), nil
 }
 
 // EnforceRetention keeps at most maxPerRepo entries per repository,

@@ -1,0 +1,89 @@
+image:
+  repository: ghcr.io/8linkz/packmon-server
+  tag: latest
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+server:
+  mode: production
+  port: 8080
+  readTimeout: 30s
+  writeTimeout: 30s
+  shutdownTimeout: 15s
+
+metrics:
+  host: 127.0.0.1
+  port: 9090
+
+admin:
+  initialPassword: change-me
+  sessionTimeout: 8h
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: packmon.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+feeds:
+  dataDir: /tmp/packmon-feeds
+  osvEnabled: true
+  ghsaEnabled: true
+  maliciousEnabled: true
+  vulncheckEnabled: true
+  socketEnabled: false
+  cisakevEnabled: true
+  epssEnabled: true
+  osvMode: self
+  ghsaMode: self
+  maliciousMode: self
+  vulncheckMode: self
+  socketMode: self
+  cisakevMode: self
+  epssMode: self
+  socketApiKey: ""
+  vulncheckApiKey: ""
+
+externalDatabase:
+  host: ""
+  port: 5432
+  name: packmon
+  user: packmon
+  password: ""
+  sslmode: disable
+
+postgresql:
+  enabled: true
+  image: postgres:16-alpine
+  storageClassName: ""
+  size: 20Gi
+  database: packmon
+  user: packmon
+  password: packmon
+
+backup:
+  enabled: true
+  schedule: "0 3 * * *"
+  retentionDays: 7
+  image: postgres:16-alpine
+  path: /backups
+  storageClassName: ""
+  size: 10Gi
+
+resources: {}
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}

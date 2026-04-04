@@ -1,0 +1,69 @@
+{
+  "name": "Packmon Weekly Maintenance",
+  "active": false,
+  "settings": {},
+  "nodes": [
+    {
+      "id": "weekly-trigger",
+      "name": "Weekly Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [260, 260],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 4 * * 0"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "export-db",
+      "name": "Export Local DB",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [520, 260],
+      "parameters": {
+        "command": "packmon db export --output /tmp/packmon-weekly-export.json"
+      }
+    },
+    {
+      "id": "fetch-metrics",
+      "name": "Fetch Metrics",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [780, 260],
+      "parameters": {
+        "url": "http://127.0.0.1:9090/metrics",
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Weekly Trigger": {
+      "main": [
+        [
+          {
+            "node": "Export Local DB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Export Local DB": {
+      "main": [
+        [
+          {
+            "node": "Fetch Metrics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

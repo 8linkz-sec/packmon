@@ -5,6 +5,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -105,12 +106,14 @@ type LogConfig struct {
 
 // MetricsConfig groups the Prometheus metrics server settings.
 type MetricsConfig struct {
+	Host string
 	Port int
 }
 
 // AdminConfig holds initial admin bootstrap values.
 type AdminConfig struct {
 	InitialPassword string
+	SessionTimeout  time.Duration
 }
 
 // FeedSyncConfig holds feed sync scheduling settings.
@@ -163,6 +166,11 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
+	sessionTimeout, err := envDurationOrDefault("PACKMON_ADMIN_SESSION_TIMEOUT", 8*time.Hour)
+	if err != nil {
+		return nil, err
+	}
+
 	// Default SSL mode depends on server mode.
 	defaultSSL := "require"
 	if mode == ModeDevelopment {
@@ -196,10 +204,12 @@ func Load() (*Config, error) {
 			Format: envOrDefault("PACKMON_LOG_FORMAT", "json"),
 		},
 		Metrics: MetricsConfig{
+			Host: envOrDefault("PACKMON_METRICS_HOST", defaultMetricsHost(mode)),
 			Port: metricsPort,
 		},
 		Admin: AdminConfig{
 			InitialPassword: os.Getenv("PACKMON_ADMIN_INITIAL_PASSWORD"),
+			SessionTimeout:  sessionTimeout,
 		},
 		FeedSync: FeedSyncConfig{
 			Interval:  syncInterval,
@@ -231,6 +241,22 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func defaultMetricsHost(mode ServerMode) string {
+	if mode == ModeDevelopment {
+		return "127.0.0.1"
+	}
+	return "127.0.0.1"
+}
+
+// Addr returns the metrics listen address.
+func (m MetricsConfig) Addr() string {
+	host := strings.TrimSpace(m.Host)
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	return net.JoinHostPort(host, strconv.Itoa(m.Port))
 }
 
 // IsDevelopment is a convenience check on the server mode.

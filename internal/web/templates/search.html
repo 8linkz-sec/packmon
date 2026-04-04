@@ -1,0 +1,79 @@
+{{define "title"}}Packmon - Search{{end}}
+
+{{define "content"}}
+<div class="space-y-6">
+
+  <h1 class="text-2xl font-bold">Package Search</h1>
+
+  <!-- Search box with HTMX live search -->
+  <div class="bg-white rounded-lg shadow p-5 border border-gray-200">
+    <label for="search-input" class="block text-sm font-medium text-gray-700 mb-2">Search packages by name</label>
+    <input
+      type="search"
+      id="search-input"
+      name="q"
+      value="{{.Query}}"
+      placeholder="e.g. lodash, requests, express..."
+      autocomplete="off"
+      class="w-full border border-gray-300 rounded-md px-4 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+      hx-get="/search"
+      hx-trigger="keyup changed delay:300ms, search"
+      hx-target="#search-results"
+      hx-push-url="true"
+      hx-include="this"
+    >
+  </div>
+
+  <!-- Results -->
+  <div id="search-results">
+    {{template "search-results" .}}
+  </div>
+
+</div>
+{{end}}
+
+{{define "search-results"}}
+{{if .Query}}
+  {{if .Results}}
+  <div class="bg-white rounded-lg shadow border border-gray-200">
+    <div class="px-5 py-3 border-b border-gray-200 text-sm text-gray-500">
+      {{len .Results}} result(s) for "{{.Query}}"
+    </div>
+    <div class="overflow-x-auto">
+      <table class="min-w-full text-sm">
+        <thead>
+          <tr class="text-left text-gray-500 border-b bg-gray-50">
+            <th class="px-5 py-2">Package</th>
+            <th class="px-5 py-2">Ecosystem</th>
+            <th class="px-5 py-2 text-right">Findings</th>
+            <th class="px-5 py-2">Sources</th>
+          </tr>
+        </thead>
+        <tbody>
+          {{range .Results}}
+          <tr class="border-b border-gray-100 hover:bg-gray-50">
+            <td class="px-5 py-2">
+              <a href="/package/{{.Ecosystem}}/{{.Name}}" class="text-blue-600 hover:underline font-medium">{{.Name}}</a>
+            </td>
+            <td class="px-5 py-2">
+              <span class="inline-block bg-gray-100 text-gray-700 px-2 py-0.5 rounded text-xs font-medium">{{.Ecosystem}}</span>
+            </td>
+            <td class="px-5 py-2 text-right {{if gt .FindingsCount 0}}text-red-600 font-medium{{end}}">{{.FindingsCount}}</td>
+            <td class="px-5 py-2 text-xs text-gray-500">{{.Sources}}</td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {{else}}
+  <div class="bg-white rounded-lg shadow p-10 border border-gray-200 text-center text-gray-400">
+    No packages found matching "{{.Query}}".
+  </div>
+  {{end}}
+{{else}}
+  <div class="bg-white rounded-lg shadow p-10 border border-gray-200 text-center text-gray-400">
+    Enter a package name above to search the vulnerability database.
+  </div>
+{{end}}
+{{end}}

@@ -1,0 +1,62 @@
+{{define "title"}}Packmon - Feed Status{{end}}
+
+{{define "content"}}
+<div class="space-y-6">
+
+  <h1 class="text-2xl font-bold">Feed Status</h1>
+
+  <div hx-get="/feeds?partial=status" hx-trigger="load, every 30s" hx-swap="innerHTML" id="feed-status-container">
+    <div class="text-sm text-gray-400">Loading feed status...</div>
+  </div>
+
+</div>
+{{end}}
+
+{{define "feed-status-partial"}}
+<div class="bg-white rounded-lg shadow border border-gray-200">
+  {{if .Feeds}}
+  <div class="overflow-x-auto">
+    <table class="min-w-full text-sm">
+      <thead>
+        <tr class="text-left text-gray-500 border-b bg-gray-50">
+          <th class="px-5 py-2">Feed</th>
+          <th class="px-5 py-2">Status</th>
+          <th class="px-5 py-2">Last Sync</th>
+          <th class="px-5 py-2 text-right">Entries</th>
+          <th class="px-5 py-2">Message</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Feeds}}
+        <tr class="border-b border-gray-100 hover:bg-gray-50">
+          <td class="px-5 py-2 font-medium">{{.FeedName}}</td>
+          <td class="px-5 py-2">
+            <span class="inline-block px-2 py-0.5 rounded text-xs font-medium {{statusClass .Status}}">{{.Status}}</span>
+          </td>
+          <td class="px-5 py-2 text-gray-500">
+            {{if .LastSyncAt}}
+              <span title="{{formatTime .LastSyncAtTime}}">{{formatTimeAgo .LastSyncAtTime}}</span>
+            {{else}}
+              <span class="text-gray-400">never</span>
+            {{end}}
+          </td>
+          <td class="px-5 py-2 text-right">{{.EntriesTotal}}</td>
+          <td class="px-5 py-2 text-xs text-gray-500">
+            {{if .LastError}}
+              <span class="text-red-600" title="{{.LastError}}">{{truncate .LastError 60}}</span>
+            {{else}}
+              -
+            {{end}}
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <div class="px-5 py-10 text-center text-gray-400">
+    No feed sync data available. Feeds may not have run yet.
+  </div>
+  {{end}}
+</div>
+{{end}}

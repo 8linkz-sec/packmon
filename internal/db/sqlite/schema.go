@@ -8,7 +8,8 @@ package sqlite
 // PostgreSQL schema -- see Phase 1, DE-17 for the parity matrix.
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS vulnerabilities_local (
-	id             TEXT PRIMARY KEY,
+	row_key        TEXT PRIMARY KEY,
+	id             TEXT NOT NULL,
 	ecosystem      TEXT NOT NULL,
 	name           TEXT NOT NULL,
 	version_ranges TEXT,                  -- JSON string
@@ -21,6 +22,9 @@ CREATE TABLE IF NOT EXISTS vulnerabilities_local (
 
 CREATE INDEX IF NOT EXISTS idx_vuln_eco_name
 	ON vulnerabilities_local(ecosystem, name);
+
+CREATE INDEX IF NOT EXISTS idx_vuln_id
+	ON vulnerabilities_local(id);
 
 CREATE TABLE IF NOT EXISTS malicious_local (
 	id        TEXT PRIMARY KEY,

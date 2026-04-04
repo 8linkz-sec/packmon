@@ -2,6 +2,7 @@
 .claude/
 CLAUDE.md
 Phase *.md
+CONTRIBUTING.md
 
 # Docker
 docker-compose.yml

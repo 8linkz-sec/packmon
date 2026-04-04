@@ -11,8 +11,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -21,15 +19,14 @@ import (
 // serverBinaryPath returns the absolute path to the built packmon-server binary.
 func serverBinaryPath(t *testing.T) string {
 	t.Helper()
-	suffix := ""
-	if runtime.GOOS == "windows" {
-		suffix = ".exe"
+	for _, candidate := range binaryCandidates(testBinDir(t), "packmon-server") {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
 	}
-	path := filepath.Join(testBinDir(t), "packmon-server"+suffix)
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("packmon-server binary not found at %s -- run 'go build -o %s ./cmd/packmon-server' first", path, path)
-	}
-	return path
+	path := binaryCandidates(testBinDir(t), "packmon-server")[0]
+	t.Fatalf("packmon-server binary not found near %s -- run 'go build -o %s ./cmd/packmon-server' first", path, path)
+	return ""
 }
 
 // freePort returns an available TCP port on localhost.
@@ -44,9 +41,9 @@ func freePort(t *testing.T) int {
 	return port
 }
 
-// startServer starts the packmon-server binary in development mode on a
-// random port and returns the base URL and a cleanup function.
-func startServer(t *testing.T) (baseURL string, cleanup func()) {
+// startServerWithMetrics starts the packmon-server binary in development mode
+// on random ports and returns both base URLs plus a cleanup function.
+func startServerWithMetrics(t *testing.T) (baseURL, metricsURL string, cleanup func()) {
 	t.Helper()
 
 	serverPort := freePort(t)
@@ -106,7 +103,13 @@ func startServer(t *testing.T) (baseURL string, cleanup func()) {
 		cmd.Wait()
 	}
 
-	return base, cleanup
+	return base, fmt.Sprintf("http://127.0.0.1:%d", metricsPort), cleanup
+}
+
+// startServer is a convenience wrapper for tests that only need the main URL.
+func startServer(t *testing.T) (baseURL string, cleanup func()) {
+	baseURL, _, cleanup = startServerWithMetrics(t)
+	return baseURL, cleanup
 }
 
 // --- Test: GET /healthz -> 200 -----------------------------------------------
@@ -362,6 +365,42 @@ func TestServerFeedStatus(t *testing.T) {
 	// The noop store returns empty feeds list.
 	if _, ok := body["feeds"]; !ok {
 		t.Error("missing 'feeds' field in feed status response")
+	}
+}
+
+// --- Test: GET /metrics -> Prometheus metrics payload ------------------------
+
+func TestServerMetrics(t *testing.T) {
+	t.Parallel()
+
+	_, metricsURL, cleanup := startServerWithMetrics(t)
+	defer cleanup()
+
+	resp, err := http.Get(metricsURL + "/metrics")
+	if err != nil {
+		t.Fatalf("GET /metrics failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("failed to read metrics body: %v", err)
+	}
+	text := string(body)
+
+	for _, expected := range []string{
+		"packmon_auth_login_failures_total",
+		"packmon_degraded_responses_total",
+		"packmon_queue_stuck_jobs_recovered_total",
+		"packmon_db_migration_version",
+	} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("metrics output missing %q\n%s", expected, text)
+		}
 	}
 }
 

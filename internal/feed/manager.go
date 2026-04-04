@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/8linkz/packmon/internal/db"
+	"github.com/8linkz/packmon/internal/telemetry"
 )
 
 // backoffSchedule defines the delays between retry attempts.
@@ -220,6 +222,9 @@ func (m *Manager) syncWithRetry(ctx context.Context, rf *registeredFeed) (*SyncR
 		}
 
 		lastErr = err
+		if isTimeoutError(err) {
+			telemetry.Default().IncFeedSyncTimeout(name)
+		}
 		log.Warn("feed sync attempt failed",
 			slog.Int("attempt", attempt+1),
 			slog.String("duration", duration.String()),
@@ -259,4 +264,13 @@ func (m *Manager) recordStatus(ctx context.Context, feedName, status, errMsg str
 			slog.String("error", err.Error()),
 		)
 	}
+}
+
+func isTimeoutError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "timeout") || strings.Contains(msg, "deadline exceeded")
 }

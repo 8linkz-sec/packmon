@@ -133,7 +133,7 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 func (s *Syncer) walkAdvisories(ctx context.Context, store db.Store, root string) (synced, total int, err error) {
 	err = filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
-			s.logger.Warn("walk error", slog.String("path", path), slog.String("error", walkErr.Error()))
+			s.logger.Warn("walk error", slog.String("file", filepath.Base(path)), slog.String("error", walkErr.Error()))
 			return nil // continue walking
 		}
 
@@ -154,7 +154,7 @@ func (s *Syncer) walkAdvisories(ctx context.Context, store db.Store, root string
 		data, readErr := os.ReadFile(path)
 		if readErr != nil {
 			s.logger.Warn("failed to read advisory file",
-				slog.String("path", path),
+				slog.String("file", d.Name()),
 				slog.String("error", readErr.Error()),
 			)
 			return nil
@@ -163,14 +163,14 @@ func (s *Syncer) walkAdvisories(ctx context.Context, store db.Store, root string
 		var advisory ghsaAdvisory
 		if parseErr := json.Unmarshal(data, &advisory); parseErr != nil {
 			s.logger.Warn("failed to parse advisory JSON",
-				slog.String("path", path),
+				slog.String("file", d.Name()),
 				slog.String("error", parseErr.Error()),
 			)
 			return nil
 		}
 
 		if advisory.ID == "" {
-			s.logger.Warn("advisory has no ID, skipping", slog.String("path", path))
+			s.logger.Warn("advisory has no ID, skipping", slog.String("file", d.Name()))
 			return nil
 		}
 

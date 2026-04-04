@@ -149,7 +149,7 @@ func (s *Syncer) walkEntries(ctx context.Context, store db.Store, root string) (
 	err = filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			s.logger.Warn("walk error",
-				slog.String("path", path),
+				slog.String("file", filepath.Base(path)),
 				slog.String("error", walkErr.Error()),
 			)
 			return nil
@@ -171,7 +171,7 @@ func (s *Syncer) walkEntries(ctx context.Context, store db.Store, root string) (
 		data, readErr := os.ReadFile(path)
 		if readErr != nil {
 			s.logger.Warn("failed to read entry file",
-				slog.String("path", path),
+				slog.String("file", d.Name()),
 				slog.String("error", readErr.Error()),
 			)
 			return nil
@@ -180,7 +180,7 @@ func (s *Syncer) walkEntries(ctx context.Context, store db.Store, root string) (
 		var entry malEntry
 		if parseErr := json.Unmarshal(data, &entry); parseErr != nil {
 			s.logger.Warn("failed to parse entry JSON",
-				slog.String("path", path),
+				slog.String("file", d.Name()),
 				slog.String("error", parseErr.Error()),
 			)
 			return nil

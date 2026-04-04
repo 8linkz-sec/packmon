@@ -52,6 +52,10 @@ func New(dbPath string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("sqlite: create schema: %w", err)
 	}
+	if err := migrateSchema(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 
 	return &Store{db: db, dbPath: dbPath}, nil
 }
@@ -330,4 +334,82 @@ func parseSegment(s string) int {
 		}
 	}
 	return n
+}
+
+func migrateSchema(db *sql.DB) error {
+	hasRowKey, err := tableHasColumn(db, "vulnerabilities_local", "row_key")
+	if err != nil {
+		return err
+	}
+	if hasRowKey {
+		return nil
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("sqlite: begin schema migration: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // rollback after commit is a no-op
+
+	statements := []string{
+		`ALTER TABLE vulnerabilities_local RENAME TO vulnerabilities_local_old`,
+		`CREATE TABLE vulnerabilities_local (
+			row_key        TEXT PRIMARY KEY,
+			id             TEXT NOT NULL,
+			ecosystem      TEXT NOT NULL,
+			name           TEXT NOT NULL,
+			version_ranges TEXT,
+			severity       TEXT NOT NULL,
+			cvss_score     REAL,
+			epss_score     REAL,
+			cisa_kev       INTEGER DEFAULT 0,
+			summary        TEXT
+		)`,
+		`INSERT INTO vulnerabilities_local(row_key, id, ecosystem, name, version_ranges, severity, cvss_score, epss_score, cisa_kev, summary)
+		 SELECT id || '|' || ecosystem || '|' || name, id, ecosystem, name, version_ranges, severity, cvss_score, epss_score, cisa_kev, summary
+		 FROM vulnerabilities_local_old`,
+		`DROP TABLE vulnerabilities_local_old`,
+		`CREATE INDEX idx_vuln_eco_name ON vulnerabilities_local(ecosystem, name)`,
+		`CREATE INDEX idx_vuln_id ON vulnerabilities_local(id)`,
+	}
+
+	for _, stmt := range statements {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("sqlite: migrate schema: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("sqlite: commit schema migration: %w", err)
+	}
+	return nil
+}
+
+func tableHasColumn(db *sql.DB, tableName, columnName string) (bool, error) {
+	rows, err := db.Query(`PRAGMA table_info(` + tableName + `)`)
+	if err != nil {
+		return false, fmt.Errorf("sqlite: inspect table %s: %w", tableName, err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			cid        int
+			name       string
+			columnType string
+			notNull    int
+			defaultVal sql.NullString
+			pk         int
+		)
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultVal, &pk); err != nil {
+			return false, fmt.Errorf("sqlite: scan table info for %s: %w", tableName, err)
+		}
+		if strings.EqualFold(name, columnName) {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("sqlite: iterate table info for %s: %w", tableName, err)
+	}
+	return false, nil
 }

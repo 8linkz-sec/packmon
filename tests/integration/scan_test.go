@@ -16,15 +16,26 @@ import (
 // The binary must have been built before running integration tests.
 func binaryPath(t *testing.T) string {
 	t.Helper()
-	suffix := ""
+	for _, candidate := range binaryCandidates(testBinDir(t), "packmon") {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	path := binaryCandidates(testBinDir(t), "packmon")[0]
+	t.Fatalf("packmon binary not found near %s -- run 'go build -o %s ./cmd/packmon' first", path, path)
+	return ""
+}
+
+func binaryCandidates(dir, name string) []string {
 	if runtime.GOOS == "windows" {
-		suffix = ".exe"
+		return []string{
+			filepath.Join(dir, name+".exe"),
+			filepath.Join(dir, name),
+		}
 	}
-	path := filepath.Join(testBinDir(t), "packmon"+suffix)
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("packmon binary not found at %s -- run 'go build -o %s ./cmd/packmon' first", path, path)
+	return []string{
+		filepath.Join(dir, name),
 	}
-	return path
 }
 
 // testBinDir returns the directory where test binaries are stored.
@@ -33,6 +44,9 @@ func testBinDir(t *testing.T) string {
 	t.Helper()
 	dir := os.Getenv("PACKMON_TEST_BIN_DIR")
 	if dir != "" {
+		if !filepath.IsAbs(dir) {
+			dir = filepath.Join(projectRoot(t), dir)
+		}
 		return dir
 	}
 	// Fallback: look in the project root.
@@ -64,6 +78,11 @@ func projectRoot(t *testing.T) string {
 // stdout, stderr, and the exit code.
 func runPackmon(t *testing.T, args ...string) (stdout, stderr string, exitCode int) {
 	t.Helper()
+	return runPackmonWithEnv(t, nil, args...)
+}
+
+func runPackmonWithEnv(t *testing.T, extraEnv map[string]string, args ...string) (stdout, stderr string, exitCode int) {
+	t.Helper()
 	bin := binaryPath(t)
 	cmd := exec.Command(bin, args...)
 	// Clear environment to avoid inheriting PACKMON_SERVER, etc.
@@ -73,6 +92,9 @@ func runPackmon(t *testing.T, args ...string) (stdout, stderr string, exitCode i
 		"USERPROFILE=" + os.Getenv("USERPROFILE"),
 		"TEMP=" + os.Getenv("TEMP"),
 		"TMP=" + os.Getenv("TMP"),
+	}
+	for key, value := range extraEnv {
+		cmd.Env = append(cmd.Env, key+"="+value)
 	}
 
 	var outBuf, errBuf strings.Builder

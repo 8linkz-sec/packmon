@@ -1,0 +1,67 @@
+{{define "title"}}Packmon - Admin Audit Log{{end}}
+
+{{define "content"}}
+<div class="space-y-6">
+
+  <div class="flex items-center justify-between">
+    <h1 class="text-2xl font-bold">Audit Log</h1>
+    <form action="/admin/logout" method="POST" class="inline">
+      <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+      <button type="submit" class="text-sm text-gray-500 hover:text-gray-700 underline">Logout</button>
+    </form>
+  </div>
+
+  <!-- Admin nav tabs -->
+  <div class="border-b border-gray-200">
+    <nav class="flex space-x-6 text-sm">
+      <a href="/admin/" class="text-gray-500 hover:text-gray-700 pb-2 px-1">Overview</a>
+      <a href="/admin/feeds" class="text-gray-500 hover:text-gray-700 pb-2 px-1">Feeds</a>
+      <a href="/admin/queue" class="text-gray-500 hover:text-gray-700 pb-2 px-1">Queue</a>
+      <a href="/admin/keys" class="text-gray-500 hover:text-gray-700 pb-2 px-1">API Keys</a>
+      <a href="/admin/audit" class="border-b-2 border-blue-500 text-blue-600 pb-2 px-1 font-medium">Audit Log</a>
+      <a href="/admin/settings" class="text-gray-500 hover:text-gray-700 pb-2 px-1">Settings</a>
+    </nav>
+  </div>
+
+  <!-- Audit log table -->
+  <div class="bg-white rounded-lg shadow border border-gray-200">
+    {{if .Entries}}
+    <div class="overflow-x-auto">
+      <table class="min-w-full text-sm">
+        <thead>
+          <tr class="text-left text-gray-500 border-b bg-gray-50">
+            <th class="px-5 py-2">ID</th>
+            <th class="px-5 py-2">Time</th>
+            <th class="px-5 py-2">Action</th>
+            <th class="px-5 py-2">Details</th>
+            <th class="px-5 py-2">IP</th>
+          </tr>
+        </thead>
+        <tbody>
+          {{range .Entries}}
+          <tr class="border-b border-gray-100 hover:bg-gray-50">
+            <td class="px-5 py-2 font-mono text-xs">{{.ID}}</td>
+            <td class="px-5 py-2 text-gray-500" title="{{formatTime .CreatedAt}}">{{formatTimeAgo .CreatedAt}}</td>
+            <td class="px-5 py-2">
+              <span class="inline-block px-2 py-0.5 rounded text-xs font-medium
+                {{if eq .Action "login"}}bg-blue-100 text-blue-800
+                {{else if eq .Action "login_failed"}}bg-red-100 text-red-800
+                {{else}}bg-gray-100 text-gray-800{{end}}
+              ">{{.Action}}</span>
+            </td>
+            <td class="px-5 py-2 text-xs font-mono text-gray-600">{{truncate .DetailsStr 80}}</td>
+            <td class="px-5 py-2 text-xs text-gray-500">{{.IP}}</td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}
+    <div class="px-5 py-10 text-center text-gray-400">
+      No audit log entries yet.
+    </div>
+    {{end}}
+  </div>
+
+</div>
+{{end}}

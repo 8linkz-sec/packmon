@@ -39,6 +39,7 @@ func newConfigShowCmd() *cobra.Command {
 			fmt.Println()
 			fmt.Println("# Environment")
 			printEnvVar("PACKMON_SERVER")
+			printEnvVar("PACKMON_API_KEY")
 			printEnvVar("PACKMON_MODE")
 			printEnvVar("PACKMON_FAIL_ON")
 			printEnvVar("PACKMON_LOG_LEVEL")

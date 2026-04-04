@@ -11,11 +11,17 @@ import (
 )
 
 // skipAuth lists path prefixes that never require an API key.
+// Admin routes use session-based auth instead and are therefore exempt.
+// The .well-known path is a standard redirect that must be reachable
+// without credentials (Bitwarden compatibility).
 var skipAuth = []string{
 	"/healthz",
 	"/readyz",
 	"/version",
 	"/metrics",
+	"/admin/",
+	"/admin",
+	"/.well-known/",
 }
 
 // Auth validates the Bearer token in the Authorization header against

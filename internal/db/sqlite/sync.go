@@ -195,9 +195,10 @@ func applySync(ctx context.Context, store *Store, full bool, resp *syncResponse)
 
 	// Upsert vulnerabilities.
 	vulnStmt, err := tx.PrepareContext(ctx, `
-		INSERT INTO vulnerabilities_local(id, ecosystem, name, version_ranges, severity, cvss_score, epss_score, cisa_kev, summary)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET
+		INSERT INTO vulnerabilities_local(row_key, id, ecosystem, name, version_ranges, severity, cvss_score, epss_score, cisa_kev, summary)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(row_key) DO UPDATE SET
+			id             = excluded.id,
 			ecosystem      = excluded.ecosystem,
 			name           = excluded.name,
 			version_ranges = excluded.version_ranges,
@@ -239,7 +240,7 @@ func applySync(ctx context.Context, store *Store, full bool, resp *syncResponse)
 		}
 
 		if _, err := vulnStmt.ExecContext(ctx,
-			v.ID, v.Ecosystem, v.Name, v.VersionRanges,
+			syncVulnerabilityRowKey(v.ID, v.Ecosystem, v.Name), v.ID, v.Ecosystem, v.Name, v.VersionRanges,
 			v.Severity, cvss, epss, cisaKEV, v.Summary,
 		); err != nil {
 			return fmt.Errorf("sync: upsert vuln %s: %w", v.ID, err)
@@ -301,4 +302,8 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
+}
+
+func syncVulnerabilityRowKey(id, ecosystem, name string) string {
+	return id + "|" + ecosystem + "|" + name
 }

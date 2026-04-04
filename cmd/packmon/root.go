@@ -46,6 +46,7 @@ func newRootCmd() *cobra.Command {
 	rootCmd.AddCommand(
 		newScanCmd(),
 		newVersionCmd(),
+		newDashboardCmd(),
 		newDBCmd(),
 		newConfigCmd(),
 		newHookCmd(),

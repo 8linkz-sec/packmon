@@ -13,10 +13,12 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/8linkz/packmon/internal/auth"
 	"github.com/8linkz/packmon/internal/config"
 	"github.com/8linkz/packmon/internal/db"
 	"github.com/8linkz/packmon/internal/health"
 	"github.com/8linkz/packmon/internal/server/middleware"
+	"github.com/8linkz/packmon/internal/telemetry"
 )
 
 // Server is the top-level HTTP server for Packmon. It manages two
@@ -37,14 +39,19 @@ type Server struct {
 func New(cfg *config.Config, store db.Store, pinger health.Pinger, logger *slog.Logger, build BuildInfo) *Server {
 	devMode := cfg.IsDevelopment()
 
+	// Session manager for admin authentication.
+	// In production mode, session cookies require HTTPS (Secure flag).
+	sm := auth.NewSessionManager(cfg.Admin.SessionTimeout, !devMode)
+
 	// -- Build middleware chain ------------------------------------------------
 	// Order matters: outermost middleware runs first.
-	// Correlation -> Recovery -> Logging -> UserAgent -> Auth -> RateLimit -> Handler
+	// Correlation -> Recovery -> Logging -> UserAgent -> Auth -> Session -> RateLimit -> Handler
 	chain := func(h http.Handler) http.Handler {
 		h = middleware.RateLimit(logger, middleware.RateLimitConfig{
 			Rate:  1.0, // 1 token/sec refill = 60/min sustained
 			Burst: 60,  // allow bursts up to 60 requests
 		})(h)
+		h = middleware.RequireAdminSession(sm, logger)(h)
 		h = middleware.Auth(logger, store, devMode)(h)
 		h = middleware.UserAgent(logger, devMode)(h)
 		h = middleware.Logging(logger)(h)
@@ -56,7 +63,7 @@ func New(cfg *config.Config, store db.Store, pinger health.Pinger, logger *slog.
 	// -- Register routes ------------------------------------------------------
 	mux := http.NewServeMux()
 	hc := health.NewChecker(pinger)
-	registerRoutes(mux, hc, store, logger, build)
+	registerRoutes(mux, hc, store, sm, logger, build)
 
 	mainAddr := fmt.Sprintf(":%d", cfg.Server.Port)
 	mainServer := &http.Server{
@@ -68,11 +75,8 @@ func New(cfg *config.Config, store db.Store, pinger health.Pinger, logger *slog.
 
 	// -- Metrics server (plain, no middleware chain) ---------------------------
 	metricsMux := http.NewServeMux()
-	metricsMux.HandleFunc("GET /metrics", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = w.Write([]byte("# Packmon metrics placeholder\n"))
-	})
-	metricsAddr := fmt.Sprintf(":%d", cfg.Metrics.Port)
+	metricsMux.HandleFunc("GET /metrics", telemetry.MetricsHandler(store, build.SchemaVersion))
+	metricsAddr := cfg.Metrics.Addr()
 	metricsServer := &http.Server{
 		Addr:    metricsAddr,
 		Handler: metricsMux,
@@ -133,14 +137,13 @@ func (s *Server) Run(ctx context.Context) error {
 	return s.shutdown()
 }
 
-// shutdown performs an orderly shutdown of both HTTP servers and
-// releases database resources.
+// shutdown performs an orderly shutdown of both HTTP servers.
 func (s *Server) shutdown() error {
 	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.Server.ShutdownTimeout)
 	defer cancel()
 
 	// Shut down main server first (stops accepting new requests).
-	var mainErr, metricsErr, storeErr error
+	var mainErr, metricsErr error
 
 	s.logger.Info("shutting down main server")
 	mainErr = s.main.Shutdown(ctx)
@@ -148,8 +151,5 @@ func (s *Server) shutdown() error {
 	s.logger.Info("shutting down metrics server")
 	metricsErr = s.metrics.Shutdown(ctx)
 
-	s.logger.Info("closing database connections")
-	storeErr = s.store.Close()
-
-	return errors.Join(mainErr, metricsErr, storeErr)
+	return errors.Join(mainErr, metricsErr)
 }

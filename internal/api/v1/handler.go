@@ -14,10 +14,14 @@ import (
 
 	"github.com/8linkz/packmon/internal/db"
 	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz/packmon/internal/telemetry"
 )
 
-// maxRequestBody is the maximum allowed size for a JSON request body (1 MB).
+// maxRequestBody is the maximum allowed size for standard JSON request bodies.
 const maxRequestBody = 1 << 20
+
+// maxImportBody is the maximum allowed size for external feed import payloads.
+const maxImportBody = 100 << 20
 
 // maxPackagesPerCheck is the maximum number of packages in a single /check request.
 const maxPackagesPerCheck = 5000
@@ -30,6 +34,88 @@ var defaultBlockThreshold = domain.SeverityCritical
 type Handler struct {
 	store  db.Store
 	logger *slog.Logger
+}
+
+type syncExporter interface {
+	ExportSync(ctx context.Context, opts db.SyncExportOptions) (*db.SyncExport, error)
+}
+
+type feedSyncStatusInput struct {
+	LastSyncAt         *time.Time      `json:"last_sync_at"`
+	LastSyncDurationMs *int64          `json:"last_sync_duration_ms"`
+	LastSyncStatus     string          `json:"last_sync_status"`
+	LastError          string          `json:"last_error"`
+	EntriesSynced      int             `json:"entries_synced"`
+	EntriesTotal       int             `json:"entries_total"`
+	LastEtag           string          `json:"last_etag"`
+	LastCommitHash     string          `json:"last_commit_hash"`
+	Metadata           json.RawMessage `json:"metadata"`
+}
+
+type vulnerabilityImportRequest struct {
+	Vulnerabilities        []db.Vulnerability   `json:"vulnerabilities"`
+	DeleteVulnerabilityIDs []string             `json:"delete_vulnerability_ids"`
+	Status                 *feedSyncStatusInput `json:"status"`
+}
+
+type maliciousImportRequest struct {
+	Malicious          []db.MaliciousFinding `json:"malicious"`
+	DeleteMaliciousIDs []string              `json:"delete_malicious_ids"`
+	Status             *feedSyncStatusInput  `json:"status"`
+}
+
+type epssImportRequest struct {
+	Entries []db.EPSSEntry       `json:"entries"`
+	Status  *feedSyncStatusInput `json:"status"`
+}
+
+type vulnCheckImportRequest struct {
+	Entries []db.VulnCheckEntry  `json:"entries"`
+	Status  *feedSyncStatusInput `json:"status"`
+}
+
+type cisaKEVImportRequest struct {
+	CVEIDs       []string             `json:"cve_ids"`
+	ClearMissing bool                 `json:"clear_missing"`
+	Status       *feedSyncStatusInput `json:"status"`
+}
+
+type importResponse struct {
+	Feed         string `json:"feed"`
+	Imported     int    `json:"imported"`
+	Deleted      int    `json:"deleted,omitempty"`
+	EntriesTotal int    `json:"entries_total,omitempty"`
+}
+
+type syncVulnerabilityResponse struct {
+	ID            string   `json:"id"`
+	Ecosystem     string   `json:"ecosystem"`
+	Name          string   `json:"name"`
+	VersionRanges string   `json:"version_ranges"`
+	Severity      string   `json:"severity"`
+	CVSSScore     *float64 `json:"cvss_score"`
+	EPSSScore     *float64 `json:"epss_score"`
+	CISAKEV       bool     `json:"cisa_kev"`
+	Summary       string   `json:"summary"`
+	Withdrawn     bool     `json:"withdrawn"`
+}
+
+type syncMaliciousResponse struct {
+	ID        string `json:"id"`
+	Ecosystem string `json:"ecosystem"`
+	Name      string `json:"name"`
+	Versions  string `json:"versions"`
+	RiskType  string `json:"risk_type"`
+	Severity  string `json:"severity"`
+	Summary   string `json:"summary"`
+	Withdrawn bool   `json:"withdrawn"`
+}
+
+type syncResponsePayload struct {
+	SyncedAt        string                      `json:"synced_at"`
+	Vulnerabilities []syncVulnerabilityResponse `json:"vulnerabilities"`
+	Malicious       []syncMaliciousResponse     `json:"malicious"`
+	Truncated       bool                        `json:"truncated"`
 }
 
 // NewHandler creates a Handler with the given store and logger.
@@ -92,8 +178,11 @@ func (h *Handler) HandleCheck(w http.ResponseWriter, r *http.Request) {
 	// Vulnerability findings block when their severity meets the threshold.
 	blocking := isBlocking(findings, defaultBlockThreshold)
 
-	// Assemble feed versions from sync statuses.
-	feedVersions := h.feedVersions(ctx)
+	// Assemble feed status and versions from sync state.
+	feedStatus, feedVersions := h.feedState(ctx)
+	if feedStatus == "degraded" {
+		telemetry.Default().IncDegradedResponses()
+	}
 
 	durationMs := time.Since(start).Milliseconds()
 
@@ -105,7 +194,7 @@ func (h *Handler) HandleCheck(w http.ResponseWriter, r *http.Request) {
 		PackagesScanned:  len(req.Packages),
 		FindingsCount:    len(findings),
 		FindingsBlocking: blocking,
-		FeedStatus:       "healthy",
+		FeedStatus:       feedStatus,
 		Summary:          summary,
 		Findings:         findings,
 		FeedVersions:     feedVersions,
@@ -177,14 +266,18 @@ func isBlocking(findings []domain.Finding, threshold domain.Severity) bool {
 	return false
 }
 
-// feedVersions builds a map of feed names to their last-sync timestamps.
-func (h *Handler) feedVersions(ctx context.Context) map[string]string {
+// feedState builds both the overall remote feed status and the per-feed versions.
+func (h *Handler) feedState(ctx context.Context) (string, map[string]string) {
 	statuses, err := h.store.ListFeedSyncStatuses(ctx)
 	if err != nil {
 		h.logger.Warn("failed to list feed sync statuses", "error", err)
-		return map[string]string{}
+		return "degraded", map[string]string{}
 	}
 
+	return overallFeedStatus(statuses), feedVersionsFromStatuses(statuses)
+}
+
+func feedVersionsFromStatuses(statuses []db.FeedSyncStatus) map[string]string {
 	m := make(map[string]string, len(statuses))
 	for _, s := range statuses {
 		if s.LastSyncAt != nil {
@@ -192,6 +285,19 @@ func (h *Handler) feedVersions(ctx context.Context) map[string]string {
 		}
 	}
 	return m
+}
+
+func overallFeedStatus(statuses []db.FeedSyncStatus) string {
+	if len(statuses) == 0 {
+		return "degraded"
+	}
+
+	for _, status := range statuses {
+		if feedHealthStatus(status) != "healthy" {
+			return "degraded"
+		}
+	}
+	return "healthy"
 }
 
 // logScan persists a scan log entry. Failures are logged but do not affect the response.
@@ -282,8 +388,6 @@ func feedHealthStatus(s db.FeedSyncStatus) string {
 // POST /api/v1/feeds/{feed}/import
 // ----------------------------------------------------------------------------
 
-// HandleFeedImport is a placeholder for bulk feed data import.
-// The real implementation will arrive in Phase 2.
 func (h *Handler) HandleFeedImport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -296,27 +400,75 @@ func (h *Handler) HandleFeedImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	validFeeds := map[string]bool{
-		"osv": true, "ghsa": true, "malicious": true,
-		"vulncheck": true, "cisakev": true, "epss": true, "socket": true,
-	}
-	if !validFeeds[feed] {
+	if !isKnownFeed(feed) {
 		errorResponse(w, http.StatusBadRequest, fmt.Sprintf("unknown feed: %s", feed))
 		return
 	}
 
-	// Consume and discard the body to avoid connection issues, respecting size limit.
-	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
-	var raw json.RawMessage
-	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
-		h.logger.Warn("feed import: invalid body", "feed", feed, "error", err)
-		errorResponse(w, http.StatusBadRequest, "invalid JSON body")
+	var (
+		resp *importResponse
+		err  error
+	)
+
+	switch feed {
+	case "osv", "ghsa":
+		var req vulnerabilityImportRequest
+		if err := readJSONWithLimit(r, &req, maxImportBody); err != nil {
+			h.logger.Warn("feed import: invalid vulnerability body", "feed", feed, "error", err)
+			errorResponse(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+			return
+		}
+		resp, err = h.importVulnerabilities(r.Context(), feed, &req)
+	case "malicious", "socket":
+		var req maliciousImportRequest
+		if err := readJSONWithLimit(r, &req, maxImportBody); err != nil {
+			h.logger.Warn("feed import: invalid malicious body", "feed", feed, "error", err)
+			errorResponse(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+			return
+		}
+		resp, err = h.importMalicious(r.Context(), feed, &req)
+	case "vulncheck":
+		var req vulnCheckImportRequest
+		if err := readJSONWithLimit(r, &req, maxImportBody); err != nil {
+			h.logger.Warn("feed import: invalid vulncheck body", "feed", feed, "error", err)
+			errorResponse(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+			return
+		}
+		resp, err = h.importVulnCheck(r.Context(), feed, &req)
+	case "cisakev":
+		var req cisaKEVImportRequest
+		if err := readJSONWithLimit(r, &req, maxImportBody); err != nil {
+			h.logger.Warn("feed import: invalid cisakev body", "feed", feed, "error", err)
+			errorResponse(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+			return
+		}
+		resp, err = h.importCISAKEV(r.Context(), feed, &req)
+	case "epss":
+		var req epssImportRequest
+		if err := readJSONWithLimit(r, &req, maxImportBody); err != nil {
+			h.logger.Warn("feed import: invalid epss body", "feed", feed, "error", err)
+			errorResponse(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+			return
+		}
+		resp, err = h.importEPSS(r.Context(), feed, &req)
+	default:
+		errorResponse(w, http.StatusBadRequest, fmt.Sprintf("unsupported feed: %s", feed))
 		return
 	}
 
-	h.logger.Info("feed import accepted (placeholder)", "feed", feed, "body_bytes", len(raw))
+	if err != nil {
+		h.logger.Error("feed import failed", "feed", feed, "error", err)
+		errorResponse(w, http.StatusInternalServerError, "feed import failed")
+		return
+	}
 
-	writeJSON(w, http.StatusOK, map[string]bool{"accepted": true})
+	h.logger.Info("feed import completed",
+		"feed", feed,
+		"imported", resp.Imported,
+		"deleted", resp.Deleted,
+		"entries_total", resp.EntriesTotal,
+	)
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // ----------------------------------------------------------------------------
@@ -482,25 +634,327 @@ func (h *Handler) handleRefresh(w http.ResponseWriter, r *http.Request, ecosyste
 // GET /api/v1/sync
 // ----------------------------------------------------------------------------
 
-// HandleSync is a placeholder for the local-client database sync endpoint.
-// The real implementation will arrive later in Phase 1.
 func (h *Handler) HandleSync(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 
-	// Log the query params for future implementation context.
-	since := r.URL.Query().Get("since")
-	ecosystem := r.URL.Query().Get("ecosystem")
-	h.logger.Info("sync endpoint called (not implemented)", "since", since, "ecosystem", ecosystem)
+	exporter, ok := h.store.(syncExporter)
+	if !ok {
+		errorResponse(w, http.StatusNotImplemented, "sync endpoint is not supported by this store")
+		return
+	}
 
-	errorResponse(w, http.StatusNotImplemented, "sync endpoint is not yet implemented")
+	var sincePtr *time.Time
+	sinceRaw := strings.TrimSpace(r.URL.Query().Get("since"))
+	if sinceRaw != "" {
+		since, err := parseRFC3339Timestamp(sinceRaw)
+		if err != nil {
+			errorResponse(w, http.StatusBadRequest, "invalid since timestamp")
+			return
+		}
+		sincePtr = &since
+	}
+
+	exported, err := exporter.ExportSync(r.Context(), db.SyncExportOptions{
+		Since:      sincePtr,
+		SnapshotAt: time.Now().UTC(),
+		Ecosystems: splitCSV(r.URL.Query().Get("ecosystem")),
+	})
+	if err != nil {
+		h.logger.Error("sync export failed", "error", err)
+		errorResponse(w, http.StatusInternalServerError, "failed to export sync data")
+		return
+	}
+
+	resp := syncResponsePayload{
+		SyncedAt:        exported.SyncedAt.UTC().Format(time.RFC3339Nano),
+		Vulnerabilities: make([]syncVulnerabilityResponse, 0, len(exported.Vulnerabilities)),
+		Malicious:       make([]syncMaliciousResponse, 0, len(exported.Malicious)),
+		Truncated:       exported.Truncated,
+	}
+
+	for _, vuln := range exported.Vulnerabilities {
+		resp.Vulnerabilities = append(resp.Vulnerabilities, syncVulnerabilityResponse{
+			ID:            vuln.ID,
+			Ecosystem:     vuln.Ecosystem,
+			Name:          vuln.Name,
+			VersionRanges: vuln.VersionRanges,
+			Severity:      vuln.Severity,
+			CVSSScore:     vuln.CVSSScore,
+			EPSSScore:     vuln.EPSSScore,
+			CISAKEV:       vuln.CISAKEV,
+			Summary:       vuln.Summary,
+			Withdrawn:     vuln.Withdrawn,
+		})
+	}
+
+	for _, finding := range exported.Malicious {
+		resp.Malicious = append(resp.Malicious, syncMaliciousResponse{
+			ID:        finding.ID,
+			Ecosystem: finding.Ecosystem,
+			Name:      finding.Name,
+			Versions:  finding.Versions,
+			RiskType:  finding.RiskType,
+			Severity:  finding.Severity,
+			Summary:   finding.Summary,
+			Withdrawn: finding.Withdrawn,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // ----------------------------------------------------------------------------
 // Helper functions
 // ----------------------------------------------------------------------------
+
+func isKnownFeed(feed string) bool {
+	switch feed {
+	case "osv", "ghsa", "malicious", "vulncheck", "cisakev", "epss", "socket":
+		return true
+	default:
+		return false
+	}
+}
+
+func (h *Handler) importVulnerabilities(ctx context.Context, feed string, req *vulnerabilityImportRequest) (*importResponse, error) {
+	imported := 0
+	for i := range req.Vulnerabilities {
+		item := req.Vulnerabilities[i]
+		if err := normalizeImportedVulnerability(feed, &item); err != nil {
+			return nil, err
+		}
+		if err := h.store.UpsertVulnerability(ctx, &item); err != nil {
+			return nil, err
+		}
+		imported++
+	}
+
+	deleted := 0
+	for _, id := range req.DeleteVulnerabilityIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if err := h.store.DeleteVulnerability(ctx, id); err != nil {
+			return nil, err
+		}
+		deleted++
+	}
+
+	if err := h.applyImportStatus(ctx, feed, req.Status, imported, imported+deleted); err != nil {
+		return nil, err
+	}
+
+	return &importResponse{
+		Feed:         feed,
+		Imported:     imported,
+		Deleted:      deleted,
+		EntriesTotal: imported + deleted,
+	}, nil
+}
+
+func (h *Handler) importMalicious(ctx context.Context, feed string, req *maliciousImportRequest) (*importResponse, error) {
+	imported := 0
+	for i := range req.Malicious {
+		item := req.Malicious[i]
+		if err := normalizeImportedMalicious(feed, &item); err != nil {
+			return nil, err
+		}
+		if err := h.store.UpsertMaliciousFinding(ctx, &item); err != nil {
+			return nil, err
+		}
+		imported++
+	}
+
+	deleted := 0
+	for _, id := range req.DeleteMaliciousIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if err := h.store.DeleteMaliciousFinding(ctx, id); err != nil {
+			return nil, err
+		}
+		deleted++
+	}
+
+	if err := h.applyImportStatus(ctx, feed, req.Status, imported, imported+deleted); err != nil {
+		return nil, err
+	}
+
+	return &importResponse{
+		Feed:         feed,
+		Imported:     imported,
+		Deleted:      deleted,
+		EntriesTotal: imported + deleted,
+	}, nil
+}
+
+func (h *Handler) importVulnCheck(ctx context.Context, feed string, req *vulnCheckImportRequest) (*importResponse, error) {
+	updated, err := h.store.EnrichVulnCheck(ctx, req.Entries)
+	if err != nil {
+		return nil, err
+	}
+	if err := h.applyImportStatus(ctx, feed, req.Status, updated, len(req.Entries)); err != nil {
+		return nil, err
+	}
+	return &importResponse{
+		Feed:         feed,
+		Imported:     updated,
+		EntriesTotal: len(req.Entries),
+	}, nil
+}
+
+func (h *Handler) importCISAKEV(ctx context.Context, feed string, req *cisaKEVImportRequest) (*importResponse, error) {
+	updated, err := h.store.SetCISAKEV(ctx, req.CVEIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	if req.ClearMissing {
+		if _, err := h.store.ClearCISAKEV(ctx, req.CVEIDs); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := h.applyImportStatus(ctx, feed, req.Status, updated, len(req.CVEIDs)); err != nil {
+		return nil, err
+	}
+
+	return &importResponse{
+		Feed:         feed,
+		Imported:     updated,
+		EntriesTotal: len(req.CVEIDs),
+	}, nil
+}
+
+func (h *Handler) importEPSS(ctx context.Context, feed string, req *epssImportRequest) (*importResponse, error) {
+	updated, err := h.store.SetEPSSScores(ctx, req.Entries)
+	if err != nil {
+		return nil, err
+	}
+	if err := h.applyImportStatus(ctx, feed, req.Status, updated, len(req.Entries)); err != nil {
+		return nil, err
+	}
+	return &importResponse{
+		Feed:         feed,
+		Imported:     updated,
+		EntriesTotal: len(req.Entries),
+	}, nil
+}
+
+func (h *Handler) applyImportStatus(ctx context.Context, feed string, input *feedSyncStatusInput, entriesSynced, entriesTotal int) error {
+	if input == nil {
+		return nil
+	}
+
+	status := &db.FeedSyncStatus{
+		FeedName:       feed,
+		LastSyncAt:     input.LastSyncAt,
+		LastSyncStatus: strings.TrimSpace(input.LastSyncStatus),
+		LastError:      strings.TrimSpace(input.LastError),
+		EntriesSynced:  input.EntriesSynced,
+		EntriesTotal:   input.EntriesTotal,
+		LastEtag:       strings.TrimSpace(input.LastEtag),
+		LastCommitHash: strings.TrimSpace(input.LastCommitHash),
+		Metadata:       append(json.RawMessage(nil), input.Metadata...),
+	}
+
+	if status.LastSyncAt == nil {
+		now := time.Now().UTC()
+		status.LastSyncAt = &now
+	}
+	if status.LastSyncStatus == "" {
+		status.LastSyncStatus = "success"
+	}
+	if status.EntriesTotal == 0 {
+		status.EntriesTotal = entriesTotal
+	}
+	if status.EntriesSynced == 0 {
+		status.EntriesSynced = entriesSynced
+	}
+	if input.LastSyncDurationMs != nil {
+		duration := time.Duration(*input.LastSyncDurationMs) * time.Millisecond
+		status.LastSyncDuration = &duration
+	}
+
+	return h.store.UpsertFeedSyncStatus(ctx, status)
+}
+
+func normalizeImportedVulnerability(feed string, vuln *db.Vulnerability) error {
+	if strings.TrimSpace(vuln.ID) == "" {
+		return fmt.Errorf("vulnerability import requires id")
+	}
+
+	now := time.Now().UTC()
+	if vuln.Published.IsZero() {
+		vuln.Published = now
+	}
+	if vuln.Modified.IsZero() {
+		vuln.Modified = now
+	}
+	if strings.TrimSpace(vuln.Severity) == "" {
+		vuln.Severity = "UNKNOWN"
+	}
+
+	if len(vuln.Sources) == 0 {
+		vuln.Sources = []db.VulnerabilitySource{{
+			Source:   feed,
+			SourceID: vuln.ID,
+		}}
+	}
+	for i := range vuln.Sources {
+		if strings.TrimSpace(vuln.Sources[i].Source) == "" {
+			vuln.Sources[i].Source = feed
+		}
+		if strings.TrimSpace(vuln.Sources[i].SourceID) == "" {
+			vuln.Sources[i].SourceID = vuln.ID
+		}
+	}
+
+	return nil
+}
+
+func normalizeImportedMalicious(feed string, finding *db.MaliciousFinding) error {
+	if strings.TrimSpace(finding.ID) == "" {
+		return fmt.Errorf("malicious import requires id")
+	}
+	if strings.TrimSpace(finding.Source) == "" {
+		finding.Source = feed
+	}
+	if strings.TrimSpace(finding.Severity) == "" {
+		finding.Severity = "CRITICAL"
+	}
+	return nil
+}
+
+func splitCSV(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func parseRFC3339Timestamp(raw string) (time.Time, error) {
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		if ts, err := time.Parse(layout, raw); err == nil {
+			return ts.UTC(), nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("invalid RFC3339 timestamp")
+}
 
 // writeJSON encodes v as JSON and writes it with the given HTTP status code.
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -517,13 +971,17 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 // readJSON decodes the request body into v with a 1 MB size limit.
 func readJSON(r *http.Request, v any) error {
-	r.Body = http.MaxBytesReader(nil, r.Body, maxRequestBody)
+	return readJSONWithLimit(r, v, maxRequestBody)
+}
+
+func readJSONWithLimit(r *http.Request, v any, limit int64) error {
+	r.Body = http.MaxBytesReader(nil, r.Body, limit)
 
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
 		if strings.Contains(err.Error(), "http: request body too large") {
-			return fmt.Errorf("request body exceeds %d bytes", maxRequestBody)
+			return fmt.Errorf("request body exceeds %d bytes", limit)
 		}
 		return err
 	}

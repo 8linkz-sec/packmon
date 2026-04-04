@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/8linkz/packmon/internal/db"
+	"github.com/8linkz/packmon/internal/telemetry"
 )
 
 const (
@@ -229,6 +230,7 @@ func (w *Worker) processNextJob(ctx context.Context) {
 	}
 
 	if checkErr != nil {
+		telemetry.Default().IncQueueError(FeedName)
 		w.logger.Warn("socket check failed",
 			slog.String("ecosystem", job.Ecosystem),
 			slog.String("name", job.Name),
@@ -401,6 +403,7 @@ func (w *Worker) resetStuckJobs(ctx context.Context) {
 		return
 	}
 	if count > 0 {
+		telemetry.Default().AddQueueStuckRecovered(count)
 		w.logger.Info("reset stuck jobs", slog.Int("count", count))
 	}
 }
