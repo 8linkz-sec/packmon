@@ -1,0 +1,176 @@
+# Reusable workflow: Dependency Security Scan with Packmon.
+#
+# Called from consumer repositories via:
+#   uses: 8linkz-sec/packmon/.github/workflows/packmon-scan.yml@main
+#
+# All input and secret names use underscores (not hyphens) per DE-20.
+# GitHub Actions expressions interpret hyphens as subtraction.
+name: Packmon Scan
+
+on:
+  workflow_call:
+    inputs:
+      fail_on:
+        description: "Minimum severity that blocks the pipeline (CRITICAL|HIGH|MEDIUM|LOW|NONE)"
+        required: false
+        default: "CRITICAL"
+        type: string
+      scan_path:
+        description: "Directory to scan (relative to repo root)"
+        required: false
+        default: "."
+        type: string
+      upload_sarif:
+        description: "Upload SARIF to GitHub Security tab"
+        required: false
+        default: true
+        type: boolean
+      post_pr_comment:
+        description: "Post findings as a PR comment"
+        required: false
+        default: true
+        type: boolean
+    secrets:
+      packmon_server_url:
+        description: "Packmon feed server URL"
+        required: true
+      packmon_api_key:
+        description: "Packmon API key for authenticating with the feed server"
+        required: true
+
+permissions:
+  contents: read
+  security-events: write
+  pull-requests: write
+
+jobs:
+  scan:
+    name: Packmon Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install packmon
+        run: |
+          ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+          DOWNLOAD_URL="https://github.com/8linkz-sec/packmon/releases/latest/download/packmon-linux-${ARCH}"
+          echo "Downloading packmon from ${DOWNLOAD_URL}"
+          curl -sfL "${DOWNLOAD_URL}" -o /usr/local/bin/packmon
+          chmod +x /usr/local/bin/packmon
+          packmon version
+
+      - name: Run scan
+        id: scan
+        env:
+          PACKMON_SERVER: ${{ secrets.packmon_server_url }}
+          PACKMON_API_KEY: ${{ secrets.packmon_api_key }}
+        run: |
+          set +e
+          packmon scan "${{ inputs.scan_path }}" \
+            --fail-on "${{ inputs.fail_on }}" \
+            --mode remote \
+            --output-json /tmp/results.json \
+            --output-sarif /tmp/results.sarif \
+            --output-junit /tmp/results.xml
+          EXIT_CODE=$?
+          set -e
+
+          echo "exit_code=${EXIT_CODE}" >> "$GITHUB_OUTPUT"
+
+          # Extract findings count from JSON output.
+          FINDINGS=$(jq '.findings_count // 0' /tmp/results.json 2>/dev/null || echo 0)
+          echo "findings_count=${FINDINGS}" >> "$GITHUB_OUTPUT"
+
+          exit $EXIT_CODE
+
+      - name: Upload SARIF
+        if: always() && inputs.upload_sarif
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: /tmp/results.sarif
+          category: packmon
+
+      - name: PR comment
+        if: >-
+          always()
+          && inputs.post_pr_comment
+          && github.event_name == 'pull_request'
+          && steps.scan.outputs.findings_count > 0
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const results = JSON.parse(fs.readFileSync('/tmp/results.json', 'utf8'));
+
+            // Separate vulnerability findings from malicious findings (DE-23).
+            const vulns = results.findings.filter(f => f.type === 'vulnerability');
+            const malicious = results.findings.filter(f => f.type === 'malicious');
+
+            let body = `## Packmon Security Scan\n\n`;
+            body += `**${results.findings_count} finding(s)** in ${results.packages_scanned} packages`;
+            body += ` | mode: \`${results.mode}\``;
+            body += ` | threshold: \`${{ inputs.fail_on }}\`\n\n`;
+
+            // Vulnerability table -- only if there are vulnerability findings.
+            if (vulns.length > 0) {
+              body += `### Vulnerability Findings\n\n`;
+              body += `| Severity | Package | Ecosystem | Advisory | Fix Version | Source |\n`;
+              body += `|---|---|---|---|---|---|\n`;
+              for (const f of vulns) {
+                const pkg = `\`${f.name}@${f.version}\``;
+                const fix = f.fixed_version || 'n/a';
+                const advisory = f.url ? `[${f.advisory_id}](${f.url})` : f.advisory_id;
+                body += `| ${f.severity} | ${pkg} | ${f.ecosystem} | ${advisory} | ${fix} | ${f.source} |\n`;
+              }
+              body += `\n`;
+            }
+
+            // Malicious table -- only if there are malicious findings.
+            if (malicious.length > 0) {
+              body += `### Malicious Findings\n\n`;
+              body += `| Severity | Package | Ecosystem | Threat | Action | Source |\n`;
+              body += `|---|---|---|---|---|---|\n`;
+              for (const f of malicious) {
+                const pkg = `\`${f.name}@${f.version}\``;
+                const threat = f.risk_type || f.title || 'unknown';
+                body += `| ${f.severity} | ${pkg} | ${f.ecosystem} | ${threat} | Remove package | ${f.source} |\n`;
+              }
+              body += `\n`;
+            }
+
+            // Update existing comment or create a new one.
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const marker = '## Packmon Security Scan';
+            const existing = comments.data.find(c => c.body?.startsWith(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: packmon-results
+          path: |
+            /tmp/results.json
+            /tmp/results.sarif
+            /tmp/results.xml
+          retention-days: 30

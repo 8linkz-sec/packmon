@@ -23,8 +23,12 @@ func registerRoutes(mux *http.ServeMux, hc *health.Checker, store db.Store, logg
 	mux.HandleFunc("POST /api/v1/check", api.HandleCheck)
 	mux.HandleFunc("GET /api/v1/feeds/status", api.HandleFeedStatus)
 	mux.HandleFunc("POST /api/v1/feeds/{feed}/import", api.HandleFeedImport)
-	mux.HandleFunc("GET /api/v1/packages/{ecosystem}/{name...}", api.HandlePackageDetail)
-	mux.HandleFunc("POST /api/v1/packages/{ecosystem}/{name...}/refresh", api.HandleRefresh)
+	// The {name...} wildcard must be at the end of the pattern in Go's
+	// ServeMux. We register a single catch-all and dispatch to the detail
+	// or refresh handler based on the HTTP method and whether the trailing
+	// path segment is "refresh". See HandlePackageOrRefresh.
+	mux.HandleFunc("GET /api/v1/packages/{ecosystem}/{rest...}", api.HandlePackageDetail)
+	mux.HandleFunc("POST /api/v1/packages/{ecosystem}/{rest...}", api.HandlePackageOrRefresh)
 	mux.HandleFunc("GET /api/v1/sync", api.HandleSync)
 }
 

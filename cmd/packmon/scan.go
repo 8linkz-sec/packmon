@@ -16,14 +16,18 @@ import (
 
 func newScanCmd() *cobra.Command {
 	var (
-		flagMode       string
-		flagServer     string
-		flagFailOn     string
-		flagEcosystems string
-		flagMaxDepth   int
-		flagTimeout    int
-		flagIncludeDev bool
-		flagOutputJSON string
+		flagMode          string
+		flagServer        string
+		flagFailOn        string
+		flagEcosystems    string
+		flagMaxDepth      int
+		flagTimeout       int
+		flagIncludeDev    bool
+		flagOutputJSON    string
+		flagOutputSARIF   string
+		flagOutputJUnit   string
+		flagWebhookURL    string
+		flagWebhookSecret string
 	)
 
 	cmd := &cobra.Command{
@@ -116,6 +120,47 @@ and malicious package databases.`,
 				}
 			}
 
+			// Write SARIF to file if requested.
+			if flagOutputSARIF != "" {
+				sw := scanner.NewSARIFWriter(version)
+				if err := sw.WriteFile(flagOutputSARIF, result); err != nil {
+					fmt.Fprintf(os.Stderr, "error writing SARIF output: %v\n", err)
+					if exitCode == ExitOK {
+						exitCode = ExitOperational
+					}
+				}
+			}
+
+			// Write JUnit XML to file if requested.
+			if flagOutputJUnit != "" {
+				jw := scanner.NewJUnitWriter()
+				if err := jw.WriteFile(flagOutputJUnit, result); err != nil {
+					fmt.Fprintf(os.Stderr, "error writing JUnit output: %v\n", err)
+					if exitCode == ExitOK {
+						exitCode = ExitOperational
+					}
+				}
+			}
+
+			// Send webhook if configured. Delivery is best-effort;
+			// failures are logged but do not change the exit code.
+			webhookURL := flagWebhookURL
+			if webhookURL == "" {
+				webhookURL = os.Getenv("PACKMON_WEBHOOK_URL")
+			}
+			webhookSecret := flagWebhookSecret
+			if webhookSecret == "" {
+				webhookSecret = os.Getenv("PACKMON_WEBHOOK_SECRET")
+			}
+			if webhookURL != "" {
+				whCfg := scanner.WebhookConfig{
+					URL:     webhookURL,
+					Secret:  webhookSecret,
+					Version: version,
+				}
+				scanner.SendWebhook(ctx, whCfg, result, nil)
+			}
+
 			if exitCode != ExitOK {
 				os.Exit(exitCode)
 			}
@@ -132,6 +177,10 @@ and malicious package databases.`,
 	f.IntVar(&flagTimeout, "timeout", 30, "HTTP timeout in seconds")
 	f.BoolVar(&flagIncludeDev, "include-dev", false, "include dev dependencies")
 	f.StringVar(&flagOutputJSON, "output-json", "", "write JSON results to file")
+	f.StringVar(&flagOutputSARIF, "output-sarif", "", "write SARIF 2.1.0 results to file")
+	f.StringVar(&flagOutputJUnit, "output-junit", "", "write JUnit XML results to file")
+	f.StringVar(&flagWebhookURL, "webhook-url", "", "webhook URL to POST results to")
+	f.StringVar(&flagWebhookSecret, "webhook-secret", os.Getenv("PACKMON_WEBHOOK_SECRET"), "HMAC-SHA256 secret for webhook signature")
 
 	return cmd
 }

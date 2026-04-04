@@ -320,7 +320,7 @@ func (h *Handler) HandleFeedImport(w http.ResponseWriter, r *http.Request) {
 }
 
 // ----------------------------------------------------------------------------
-// GET /api/v1/packages/{ecosystem}/{name...}
+// GET /api/v1/packages/{ecosystem}/{rest...}
 // ----------------------------------------------------------------------------
 
 // PackageDetailResponse is the JSON response for HandlePackageDetail.
@@ -331,6 +331,7 @@ type PackageDetailResponse struct {
 }
 
 // HandlePackageDetail returns all known findings for a package.
+// The package name is extracted from the {rest...} wildcard.
 func (h *Handler) HandlePackageDetail(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -338,7 +339,7 @@ func (h *Handler) HandlePackageDetail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ecosystem := r.PathValue("ecosystem")
-	name := r.PathValue("name")
+	name := r.PathValue("rest")
 	if ecosystem == "" || name == "" {
 		errorResponse(w, http.StatusBadRequest, "ecosystem and package name are required")
 		return
@@ -378,8 +379,29 @@ func (h *Handler) HandlePackageDetail(w http.ResponseWriter, r *http.Request) {
 }
 
 // ----------------------------------------------------------------------------
-// POST /api/v1/packages/{ecosystem}/{name...}/refresh
+// POST /api/v1/packages/{ecosystem}/{rest...}
+// Dispatches to HandleRefresh when the rest path ends with "/refresh".
 // ----------------------------------------------------------------------------
+
+// HandlePackageOrRefresh is the dispatcher for POST requests on the
+// packages resource. Since Go's ServeMux does not allow a {name...}
+// wildcard in the middle of a pattern, we register a single catch-all
+// for POST and split here: if {rest} ends with "/refresh", we strip
+// the suffix and delegate to HandleRefresh; otherwise we return 405.
+func (h *Handler) HandlePackageOrRefresh(w http.ResponseWriter, r *http.Request) {
+	rest := r.PathValue("rest")
+	if strings.HasSuffix(rest, "/refresh") {
+		// Inject the trimmed name back so HandleRefresh can read it.
+		name := strings.TrimSuffix(rest, "/refresh")
+		if name == "" {
+			errorResponse(w, http.StatusBadRequest, "package name is required")
+			return
+		}
+		h.handleRefresh(w, r, r.PathValue("ecosystem"), name)
+		return
+	}
+	errorResponse(w, http.StatusMethodNotAllowed, "method not allowed; did you mean POST .../refresh?")
+}
 
 // RefreshRequest is the optional JSON body for HandleRefresh.
 type RefreshRequest struct {
@@ -395,6 +417,7 @@ type RefreshResponse struct {
 }
 
 // HandleRefresh enqueues an async re-check for a package.
+// It is kept exported for direct route registration in alternative setups.
 func (h *Handler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -402,12 +425,21 @@ func (h *Handler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ecosystem := r.PathValue("ecosystem")
-	name := r.PathValue("name")
+	name := r.PathValue("rest")
+	if name != "" {
+		name = strings.TrimSuffix(name, "/refresh")
+	}
 	if ecosystem == "" || name == "" {
 		errorResponse(w, http.StatusBadRequest, "ecosystem and package name are required")
 		return
 	}
 
+	h.handleRefresh(w, r, ecosystem, name)
+}
+
+// handleRefresh is the internal implementation shared by both HandleRefresh
+// and HandlePackageOrRefresh.
+func (h *Handler) handleRefresh(w http.ResponseWriter, r *http.Request, ecosystem, name string) {
 	// Body is optional. If present, it may contain a version filter.
 	var req RefreshRequest
 	if r.Body != nil && r.ContentLength != 0 {
