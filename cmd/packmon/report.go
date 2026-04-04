@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"text/tabwriter"
 
@@ -24,7 +23,10 @@ func newReportCmd() *cobra.Command {
 severity distribution, and trend over time. Data is read from the local
 SQLite scan history.`,
 		RunE: func(c *cobra.Command, _ []string) error {
-			dbPath := defaultDBPath()
+			dbPath, err := resolveLocalDBPath()
+			if err != nil {
+				return err
+			}
 			store, err := sqlite.New(dbPath)
 			if err != nil {
 				return fmt.Errorf("open local database: %w", err)
@@ -137,17 +139,4 @@ SQLite scan history.`,
 	f.IntVar(&flagLimit, "limit", 20, "number of recent scans to show")
 
 	return cmd
-}
-
-// defaultDBPath returns the default path to the local SQLite database.
-// It checks PACKMON_DB_PATH first, then falls back to ~/.packmon/db/packmon.db.
-func defaultDBPath() string {
-	if p := os.Getenv("PACKMON_DB_PATH"); p != "" {
-		return filepath.Join(p, "packmon.db")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		home = "."
-	}
-	return filepath.Join(home, ".packmon", "db", "packmon.db")
 }

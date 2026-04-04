@@ -41,24 +41,70 @@ func newDBSyncCmd() *cobra.Command {
 		Use:   "sync",
 		Short: "Synchronize local database",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg, _, err := loadCurrentCLIConfig()
+			if err != nil {
+				return err
+			}
+
 			if strings.TrimSpace(strings.ToLower(flagSource)) != "server" {
 				return fmt.Errorf("db sync source %q is not yet implemented (supported: server)", flagSource)
 			}
 
-			serverURL := strings.TrimSpace(flagServer)
-			if serverURL == "" {
-				serverURL = strings.TrimSpace(os.Getenv("PACKMON_SERVER"))
+			serverURL := ""
+			if cfg != nil && cfg.Server != "" {
+				serverURL = cfg.Server
+			}
+			if envServer := strings.TrimSpace(os.Getenv("PACKMON_SERVER")); envServer != "" {
+				serverURL = envServer
+			}
+			if cmd.Flags().Changed("server") {
+				serverURL = strings.TrimSpace(flagServer)
 			}
 			if serverURL == "" {
-				return fmt.Errorf("missing server URL (use --server or PACKMON_SERVER)")
+				return fmt.Errorf("missing server URL (use --server, PACKMON_SERVER, or .packmon.yaml)")
 			}
 
-			apiKey := strings.TrimSpace(flagAPIKey)
-			if apiKey == "" {
-				apiKey = strings.TrimSpace(os.Getenv("PACKMON_API_KEY"))
+			apiKey := ""
+			if cfg != nil && cfg.APIKey != "" {
+				apiKey = cfg.APIKey
+			}
+			if envAPIKey := strings.TrimSpace(os.Getenv("PACKMON_API_KEY")); envAPIKey != "" {
+				apiKey = envAPIKey
+			}
+			if cmd.Flags().Changed("api-key") {
+				apiKey = strings.TrimSpace(flagAPIKey)
 			}
 
-			store, err := sqlite.New(defaultDBPath())
+			ecosystems := []string{}
+			if cfg != nil && len(cfg.Ecosystems) > 0 {
+				ecosystems = append(ecosystems, cfg.Ecosystems...)
+			}
+			if envEcosystems := strings.TrimSpace(os.Getenv("PACKMON_ECOSYSTEMS")); envEcosystems != "" {
+				ecosystems = splitCSV(envEcosystems)
+			}
+			if cmd.Flags().Changed("ecosystems") {
+				ecosystems = splitCSV(flagEcosystems)
+			}
+
+			timeoutSeconds := flagTimeout
+			if cfg != nil && cfg.Timeout > 0 {
+				timeoutSeconds = cfg.Timeout
+			}
+			if envTimeout := strings.TrimSpace(os.Getenv("PACKMON_TIMEOUT")); envTimeout != "" {
+				if parsed, parseErr := parseTimeoutSeconds(envTimeout); parseErr == nil && parsed > 0 {
+					timeoutSeconds = parsed
+				}
+			}
+			if cmd.Flags().Changed("timeout") {
+				timeoutSeconds = flagTimeout
+			}
+
+			dbPath, err := resolveLocalDBPath()
+			if err != nil {
+				return err
+			}
+
+			store, err := sqlite.New(dbPath)
 			if err != nil {
 				return fmt.Errorf("open local database: %w", err)
 			}
@@ -67,9 +113,9 @@ func newDBSyncCmd() *cobra.Command {
 			if err := sqlite.Sync(cmd.Context(), store, sqlite.SyncConfig{
 				ServerURL:  serverURL,
 				APIKey:     apiKey,
-				Ecosystems: splitCSV(flagEcosystems),
+				Ecosystems: ecosystems,
 				Full:       flagFull,
-				Timeout:    time.Duration(flagTimeout) * time.Second,
+				Timeout:    time.Duration(timeoutSeconds) * time.Second,
 			}); err != nil {
 				return err
 			}
@@ -107,7 +153,11 @@ func newDBInfoCmd() *cobra.Command {
 		Use:   "info",
 		Short: "Show local database version, age, and entry count",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			info, err := inspectLocalDB(cmd.Context(), defaultDBPath())
+			dbPath, err := resolveLocalDBPath()
+			if err != nil {
+				return err
+			}
+			info, err := inspectLocalDB(cmd.Context(), dbPath)
 			if err != nil {
 				return err
 			}
@@ -154,7 +204,11 @@ func newDBExportCmd() *cobra.Command {
 		Use:   "export",
 		Short: "Export local database as JSON",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			info, err := inspectLocalDB(cmd.Context(), defaultDBPath())
+			dbPath, err := resolveLocalDBPath()
+			if err != nil {
+				return err
+			}
+			info, err := inspectLocalDB(cmd.Context(), dbPath)
 			if err != nil {
 				return err
 			}
@@ -162,7 +216,7 @@ func newDBExportCmd() *cobra.Command {
 				return fmt.Errorf("local database does not exist yet")
 			}
 
-			store, err := sqlite.New(defaultDBPath())
+			store, err := sqlite.New(dbPath)
 			if err != nil {
 				return fmt.Errorf("open local database: %w", err)
 			}

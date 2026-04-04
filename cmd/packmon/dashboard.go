@@ -35,7 +35,12 @@ func newDashboardCmd() *cobra.Command {
 			ctx, stop := signalContext(cmd.Context())
 			defer stop()
 
-			store, err := sqlite.New(defaultDBPath())
+			dbPath, err := resolveLocalDBPath()
+			if err != nil {
+				return err
+			}
+
+			store, err := sqlite.New(dbPath)
 			if err != nil {
 				return fmt.Errorf("open local database: %w", err)
 			}

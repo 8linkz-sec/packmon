@@ -55,11 +55,52 @@ The Docker stack runs PostgreSQL, applies migrations, and starts `packmon-server
 ```bash
 packmon scan .
 packmon scan . --mode remote --server http://localhost:8080 --api-key your-key
+packmon config init
+packmon scan --all
+packmon scan --repo packmon
+packmon db sync
 packmon db info
 packmon db export --output local-db.json
 packmon history clear
 packmon dashboard
 ```
+
+## CLI Config
+
+The CLI can read a local `.packmon.yaml` file. Create a starter config with:
+
+```bash
+packmon config init
+packmon config validate
+packmon config show
+```
+
+Example:
+
+```yaml
+server: "http://localhost:8080"
+api_key: "your-api-key"
+mode: auto
+fail_on: CRITICAL
+timeout: 30
+
+repos:
+  - name: packmon
+    path: "."
+  - name: another-service
+    path: "../another-service"
+    mode: remote
+```
+
+Then you can scan configured repositories directly:
+
+```bash
+packmon scan --repo packmon
+packmon scan --all
+packmon db sync
+```
+
+Config precedence is: command-line flags > environment variables > `.packmon.yaml` > built-in defaults.
 
 ## Server Configuration
 

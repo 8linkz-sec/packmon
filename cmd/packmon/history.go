@@ -32,7 +32,11 @@ func newHistoryClearCmd() *cobra.Command {
 		Use:   "clear",
 		Short: "Clear scan history",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			store, err := sqlite.New(defaultDBPath())
+			dbPath, err := resolveLocalDBPath()
+			if err != nil {
+				return err
+			}
+			store, err := sqlite.New(dbPath)
 			if err != nil {
 				return fmt.Errorf("open local database: %w", err)
 			}
