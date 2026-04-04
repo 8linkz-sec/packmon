@@ -48,12 +48,13 @@ func TestAdminFeedsPageShowsRuntimeConfig(t *testing.T) {
 		"Current Runtime",
 		"Saved Configuration",
 		"GHSA",
-		"ghsa",
+		"OpenSSF Malicious",
 		"external",
 		"15m (default)",
 		"success",
 		"VulnCheck",
 		"configured",
+		"Sync now",
 		"Socket.dev",
 		"disabled",
 		"not configured",
@@ -94,6 +95,114 @@ func TestAdminSettingsPageShowsRuntimeValues(t *testing.T) {
 	}
 	if strings.Contains(body, "0001-01-01") {
 		t.Fatalf("GET /admin/settings body contains zero timestamp: %s", body)
+	}
+}
+
+func TestHandleFeedSyncNowTriggersSync(t *testing.T) {
+	store := newNoopStore()
+	syncCalled := make(chan string, 1)
+	handler, sm := newAdminTestHandler(t, store, testAdminConfig(), func(_ context.Context, feedName string) error {
+		syncCalled <- feedName
+		return nil
+	})
+	req := newAuthenticatedAdminFormRequest(t, sm, "/admin/feeds/sync", url.Values{
+		"feed_name": {"ghsa"},
+	})
+	rec := httptest.NewRecorder()
+
+	handler.HandleFeedSyncNow(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST /admin/feeds/sync status = %d, want 303", rec.Code)
+	}
+
+	select {
+	case feedName := <-syncCalled:
+		if feedName != "ghsa" {
+			t.Fatalf("sync feedName = %q, want ghsa", feedName)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("manual sync was not triggered")
+	}
+
+	audit, err := store.ListAdminAuditLog(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("ListAdminAuditLog() error = %v", err)
+	}
+	if len(audit) != 1 || audit[0].Action != "feed_sync_trigger" {
+		t.Fatalf("audit entries = %+v, want feed_sync_trigger", audit)
+	}
+}
+
+func TestHandleFeedSyncNowHTMXDoesNotRedirectAndMarksRunning(t *testing.T) {
+	store := newNoopStore()
+	block := make(chan struct{})
+	syncCalled := make(chan string, 1)
+	handler, sm := newAdminTestHandler(t, store, testAdminConfig(), func(_ context.Context, feedName string) error {
+		syncCalled <- feedName
+		<-block
+		return nil
+	})
+	req := newAuthenticatedAdminFormRequest(t, sm, "/admin/feeds/sync", url.Values{
+		"feed_name": {"osv"},
+	})
+	req.Header.Set("HX-Request", "true")
+	rec := httptest.NewRecorder()
+
+	handler.HandleFeedSyncNow(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("HTMX POST /admin/feeds/sync status = %d, want 200", rec.Code)
+	}
+	if rec.Body.String() != "" {
+		t.Fatalf("HTMX POST /admin/feeds/sync body = %q, want empty body on success", rec.Body.String())
+	}
+	if trigger := rec.Header().Get("HX-Trigger"); !strings.Contains(trigger, "feed-runtime-refresh") {
+		t.Fatalf("HX-Trigger = %q, want feed-runtime-refresh", trigger)
+	}
+
+	status, err := store.GetFeedSyncStatus(context.Background(), "osv")
+	if err != nil {
+		t.Fatalf("GetFeedSyncStatus() error = %v", err)
+	}
+	if status == nil || status.LastSyncStatus != "running" {
+		t.Fatalf("feed sync status = %+v, want running", status)
+	}
+
+	select {
+	case feedName := <-syncCalled:
+		if feedName != "osv" {
+			t.Fatalf("sync feedName = %q, want osv", feedName)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("manual sync was not triggered")
+	}
+
+	close(block)
+}
+
+func TestHandleAdminFeedsHTMXWithoutSessionRedirectsToLogin(t *testing.T) {
+	store := newNoopStore()
+	handler, _ := newAdminTestHandler(t, store, testAdminConfig())
+	req := httptest.NewRequest(http.MethodGet, "/admin/feeds?partial=runtime", nil)
+	req.Header.Set("HX-Request", "true")
+	req.AddCookie(&http.Cookie{
+		Name:  auth.SessionCookieName,
+		Value: "stale-session",
+		Path:  "/",
+	})
+	rec := httptest.NewRecorder()
+
+	handler.HandleAdminFeeds(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /admin/feeds?partial=runtime status = %d, want 200", rec.Code)
+	}
+	if redirect := rec.Header().Get("HX-Redirect"); redirect != "/admin/login" {
+		t.Fatalf("HX-Redirect = %q, want /admin/login", redirect)
+	}
+	if location := rec.Header().Get("Location"); location != "" {
+		t.Fatalf("Location = %q, want empty for HTMX redirect", location)
 	}
 }
 
@@ -205,13 +314,17 @@ func TestHandleFeedConfigResetDeletesOverride(t *testing.T) {
 	}
 }
 
-func newAdminTestHandler(t *testing.T, store *noopStore, cfg *config.Config) (*admin.AdminHandler, *auth.SessionManager) {
+func newAdminTestHandler(t *testing.T, store *noopStore, cfg *config.Config, syncFeed ...admin.FeedSyncFunc) (*admin.AdminHandler, *auth.SessionManager) {
 	t.Helper()
 
 	renderer := web.NewRenderer(web.TemplateFS(), false)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	sm := auth.NewSessionManager(time.Hour, false)
-	return admin.NewAdminHandler(store, sm, renderer, logger, cfg), sm
+	var trigger admin.FeedSyncFunc
+	if len(syncFeed) > 0 {
+		trigger = syncFeed[0]
+	}
+	return admin.NewAdminHandler(store, sm, renderer, logger, cfg, trigger), sm
 }
 
 func newAuthenticatedAdminRequest(t *testing.T, sm *auth.SessionManager, method, target string) *http.Request {

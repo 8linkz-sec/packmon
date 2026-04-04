@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/8linkz/packmon/internal/api/admin"
 	"github.com/8linkz/packmon/internal/auth"
 	"github.com/8linkz/packmon/internal/config"
 	"github.com/8linkz/packmon/internal/db"
@@ -36,7 +37,7 @@ type Server struct {
 // New creates a Server with all middleware and routes wired up.
 // The caller must provide a Store implementation and a Pinger for
 // health checks (typically the same pgxpool.Pool satisfies both).
-func New(cfg *config.Config, store db.Store, pinger health.Pinger, logger *slog.Logger, build BuildInfo) *Server {
+func New(cfg *config.Config, store db.Store, pinger health.Pinger, logger *slog.Logger, build BuildInfo, syncFeed admin.FeedSyncFunc) *Server {
 	devMode := cfg.IsDevelopment()
 
 	// Session manager for admin authentication.
@@ -63,7 +64,7 @@ func New(cfg *config.Config, store db.Store, pinger health.Pinger, logger *slog.
 	// -- Register routes ------------------------------------------------------
 	mux := http.NewServeMux()
 	hc := health.NewChecker(pinger)
-	registerRoutes(mux, hc, cfg, store, sm, logger, build)
+	registerRoutes(mux, hc, cfg, store, sm, logger, build, syncFeed)
 
 	mainAddr := fmt.Sprintf(":%d", cfg.Server.Port)
 	mainServer := &http.Server{

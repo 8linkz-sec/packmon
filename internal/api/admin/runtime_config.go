@@ -15,9 +15,12 @@ type adminFeedFormRow struct {
 	Enabled                 bool
 	Mode                    string
 	SyncInterval            string
+	SyncIntervalLabel       string
+	SyncIntervalHelp        string
 	SupportsSyncInterval    bool
 	RequiresAPIKey          bool
 	APIKeyConfigured        bool
+	CanSyncNow              bool
 	OverrideActive          bool
 	PendingRestart          bool
 	HasUpdatedAt            bool
@@ -35,7 +38,7 @@ func (h *AdminHandler) adminFeedRows(statuses []db.FeedSyncStatus) []adminFeedRo
 		statusByName[config.NormalizeFeedName(status.FeedName)] = status
 	}
 
-	runtimeFeeds := configuredFeeds(h.cfg)
+	runtimeFeeds := configuredEditableFeeds(h.cfg)
 	rows := make([]adminFeedRow, 0, len(runtimeFeeds)+len(statuses))
 	seen := make(map[string]struct{}, len(runtimeFeeds))
 
@@ -68,7 +71,7 @@ func (h *AdminHandler) adminFeedFormRows(overrides []db.FeedConfig) []adminFeedF
 		overrideByName[config.NormalizeFeedName(override.FeedName)] = override
 	}
 
-	runtimeFeeds := configuredFeeds(h.cfg)
+	runtimeFeeds := configuredEditableFeeds(h.cfg)
 	rows := make([]adminFeedFormRow, 0, len(runtimeFeeds))
 	for _, runtimeFeed := range runtimeFeeds {
 		override, hasOverride := overrideByName[config.NormalizeFeedName(runtimeFeed.Name)]
@@ -118,6 +121,7 @@ func buildAdminFeedFormRow(cfg *config.Config, runtimeFeed config.FeedSettings, 
 		FeedKey:                 runtimeFeed.Name,
 		SupportsSyncInterval:    runtimeFeed.SupportsSyncInterval,
 		RequiresAPIKey:          runtimeFeed.RequiresAPIKey,
+		CanSyncNow:              supportsManualFeedSync(runtimeFeed.Name),
 		RuntimeMode:             string(runtimeFeed.Mode),
 		RuntimeEnabled:          runtimeFeed.Enabled,
 		RuntimeSyncInterval:     formRuntimeIntervalLabel(cfg, runtimeFeed),
@@ -149,6 +153,14 @@ func buildAdminFeedFormRow(cfg *config.Config, runtimeFeed config.FeedSettings, 
 	row.APIKeyConfigured = strings.TrimSpace(desired.APIKey) != ""
 	if desired.SupportsSyncInterval {
 		row.SyncInterval = formatOptionalDuration(desired.SyncInterval)
+		row.SyncIntervalLabel = "Self-sync interval"
+		row.SyncIntervalHelp = "How often Packmon syncs this feed while mode is self. Blank uses the global default."
+		if desired.Mode == config.FeedModeExternal {
+			row.SyncIntervalHelp = "Ignored while mode is external. External feeds wait for imports or webhooks instead."
+		}
+	} else {
+		row.SyncIntervalLabel = "Sync cadence"
+		row.SyncIntervalHelp = "This feed does not run on a periodic timer. It is queue-driven."
 	}
 
 	row.PendingRestart = runtimeFeed.Enabled != desired.Enabled ||
@@ -159,7 +171,7 @@ func buildAdminFeedFormRow(cfg *config.Config, runtimeFeed config.FeedSettings, 
 	return row
 }
 
-func configuredFeeds(cfg *config.Config) []config.FeedSettings {
+func configuredEditableFeeds(cfg *config.Config) []config.FeedSettings {
 	if cfg == nil {
 		return nil
 	}
@@ -233,4 +245,13 @@ func formatOptionalDuration(d time.Duration) string {
 		return ""
 	}
 	return formatRuntimeDuration(d)
+}
+
+func supportsManualFeedSync(feedName string) bool {
+	switch config.NormalizeFeedName(feedName) {
+	case "osv", "ghsa", "malicious", "vulncheck", "cisakev", "epss":
+		return true
+	default:
+		return false
+	}
 }

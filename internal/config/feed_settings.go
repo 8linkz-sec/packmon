@@ -59,7 +59,7 @@ func (c *Config) FeedSettings(name string) (FeedSettings, bool) {
 	case "malicious":
 		return FeedSettings{
 			Name:                 "malicious",
-			DisplayName:          "Malicious",
+			DisplayName:          "OpenSSF Malicious",
 			Enabled:              c.Feeds.MaliciousEnabled,
 			Mode:                 c.Feeds.MaliciousMode,
 			SyncInterval:         c.Feeds.MaliciousInterval,

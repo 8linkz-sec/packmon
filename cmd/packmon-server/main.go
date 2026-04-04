@@ -161,8 +161,9 @@ func run() error {
 	defer cancel()
 
 	background := startBackgroundServices(rootCtx, cfg, store, logger)
+	syncFeed := newFeedSyncTrigger(cfg, store, logger, background)
 
-	srv := server.New(cfg, store, pinger, logger, build)
+	srv := server.New(cfg, store, pinger, logger, build, syncFeed)
 	err = srv.Run(rootCtx)
 	cancel()
 	background.Wait()

@@ -41,6 +41,15 @@ PACKMON_SERVER_MODE=development ./packmon-server
 
 The development server uses the in-memory dev store, exposes the web UI, and binds metrics to `127.0.0.1:9090` by default.
 
+### Local Docker stack
+
+```bash
+cp .env.example .env
+docker compose up --build
+```
+
+The Docker stack runs PostgreSQL, applies migrations, and starts `packmon-server` in production mode so synced feed data is persisted.
+
 ## Common Commands
 
 ```bash

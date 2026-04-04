@@ -1,45 +1,20 @@
 {{define "title"}}Packmon - Admin Feeds{{end}}
 
-{{define "content"}}
-<div class="space-y-6">
-
-  <div class="flex items-center justify-between">
-    <h1 class="text-2xl font-bold">Feed Configuration</h1>
-    <form action="/admin/logout" method="POST" class="inline">
-      <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
-      <button type="submit" class="text-sm text-gray-500 hover:text-gray-700 underline">Logout</button>
-    </form>
-  </div>
-
-  <!-- Admin nav tabs -->
-  <div class="border-b border-gray-200">
-    <nav class="flex space-x-6 text-sm">
-      <a href="/admin/" class="text-gray-500 hover:text-gray-700 pb-2 px-1">Overview</a>
-      <a href="/admin/feeds" class="border-b-2 border-blue-500 text-blue-600 pb-2 px-1 font-medium">Feeds</a>
-      <a href="/admin/queue" class="text-gray-500 hover:text-gray-700 pb-2 px-1">Queue</a>
-      <a href="/admin/keys" class="text-gray-500 hover:text-gray-700 pb-2 px-1">API Keys</a>
-      <a href="/admin/audit" class="text-gray-500 hover:text-gray-700 pb-2 px-1">Audit Log</a>
-      <a href="/admin/settings" class="text-gray-500 hover:text-gray-700 pb-2 px-1">Settings</a>
-    </nav>
-  </div>
-
+{{define "admin-feed-flash"}}
   {{if .Message}}
   <div class="bg-green-50 border border-green-200 text-green-800 rounded-md px-4 py-3 text-sm">
     {{.Message}}
   </div>
-  {{end}}
-
-  {{if .Error}}
+  {{else if .Error}}
   <div class="bg-red-50 border border-red-200 text-red-700 rounded-md px-4 py-3 text-sm">
     {{.Error}}
   </div>
+  {{else}}
+  <div></div>
   {{end}}
+{{end}}
 
-  <div class="bg-blue-50 border border-blue-200 rounded-md p-4 text-sm text-blue-900">
-    The table below shows the current runtime state. Saved configuration changes are stored separately and apply after the next server restart.
-  </div>
-
-  <!-- Runtime status table -->
+{{define "admin-feed-runtime"}}
   <div class="bg-white rounded-lg shadow border border-gray-200">
     <div class="px-5 py-3 border-b border-gray-200">
       <h2 class="text-lg font-semibold">Current Runtime</h2>
@@ -48,26 +23,24 @@
     <div class="overflow-x-auto">
       <table class="min-w-full text-sm">
         <thead>
-          <tr class="text-left text-gray-500 border-b bg-gray-50">
+          <tr class="text-center text-gray-500 border-b bg-gray-50">
             <th class="px-5 py-2">Feed</th>
             <th class="px-5 py-2">Status</th>
             <th class="px-5 py-2">Mode</th>
-            <th class="px-5 py-2">Interval</th>
+            <th class="px-5 py-2">Self-sync cadence</th>
             <th class="px-5 py-2">API Key</th>
             <th class="px-5 py-2">Last Result</th>
             <th class="px-5 py-2">Last Sync</th>
-            <th class="px-5 py-2">Duration</th>
             <th class="px-5 py-2 text-right">Synced</th>
             <th class="px-5 py-2 text-right">Total</th>
-            <th class="px-5 py-2">Error</th>
+            <th class="px-5 py-2 text-center">Error</th>
           </tr>
         </thead>
         <tbody>
           {{range .Feeds}}
-          <tr class="border-b border-gray-100 hover:bg-gray-50">
+          <tr class="border-b border-gray-100 hover:bg-gray-50 text-center">
             <td class="px-5 py-2">
               <div class="font-medium">{{.FeedName}}</div>
-              <div class="text-xs text-gray-400">{{.FeedKey}}</div>
             </td>
             <td class="px-5 py-2">
               <span class="inline-block px-2 py-0.5 rounded text-xs font-medium {{statusClass .Status}}">{{.Status}}</span>
@@ -106,10 +79,9 @@
                 <span class="text-gray-400">never</span>
               {{end}}
             </td>
-            <td class="px-5 py-2 text-gray-500 text-xs">{{.DurationStr}}</td>
             <td class="px-5 py-2 text-right">{{.EntriesSynced}}</td>
             <td class="px-5 py-2 text-right">{{.EntriesTotal}}</td>
-            <td class="px-5 py-2 text-xs">
+            <td class="px-5 py-2 text-xs text-center">
               {{if .LastError}}
                 <span class="text-red-600" title="{{.LastError}}">{{truncate .LastError 40}}</span>
               {{else}}
@@ -127,6 +99,48 @@
     </div>
     {{end}}
   </div>
+{{end}}
+
+{{define "content"}}
+<div class="space-y-6">
+
+  <div class="flex items-center justify-between">
+    <h1 class="text-2xl font-bold">Feed Configuration</h1>
+    <form action="/admin/logout" method="POST" class="inline">
+      <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+      <button type="submit" class="text-sm text-gray-500 hover:text-gray-700 underline">Logout</button>
+    </form>
+  </div>
+
+  <!-- Admin nav tabs -->
+  <div class="border-b border-gray-200">
+    <nav class="flex space-x-6 text-sm">
+      <a href="/admin/" class="text-gray-500 hover:text-gray-700 pb-2 px-1">Overview</a>
+      <a href="/admin/feeds" class="border-b-2 border-blue-500 text-blue-600 pb-2 px-1 font-medium">Feeds</a>
+      <a href="/admin/queue" class="text-gray-500 hover:text-gray-700 pb-2 px-1">Queue</a>
+      <a href="/admin/keys" class="text-gray-500 hover:text-gray-700 pb-2 px-1">API Keys</a>
+      <a href="/admin/audit" class="text-gray-500 hover:text-gray-700 pb-2 px-1">Audit Log</a>
+      <a href="/admin/settings" class="text-gray-500 hover:text-gray-700 pb-2 px-1">Settings</a>
+    </nav>
+  </div>
+
+  <div id="admin-feed-flash">
+    {{template "admin-feed-flash" .}}
+  </div>
+
+  <div class="bg-blue-50 border border-blue-200 rounded-md p-4 text-sm text-blue-900">
+    The table below shows the current runtime state. Saved configuration changes are stored separately and apply after the next server restart.
+  </div>
+
+  <!-- Runtime status table -->
+  <div
+    id="admin-feed-runtime"
+    hx-get="/admin/feeds?partial=runtime"
+    hx-trigger="load, every 10s, feed-runtime-refresh from:body"
+    hx-swap="innerHTML"
+  >
+    {{template "admin-feed-runtime" .}}
+  </div>
 
   <div class="bg-yellow-50 border border-yellow-200 rounded-md p-4 text-sm text-yellow-800">
     Runtime values are derived from the currently running process. Feed sync intervals fall back to the global default of {{.DefaultSyncInterval}} when no per-feed override is configured.
@@ -140,11 +154,10 @@
     <div class="p-5 space-y-4">
       {{range .EditableFeeds}}
       <div class="border border-gray-200 rounded-lg p-4">
-        <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div class="space-y-4">
           <div class="space-y-2">
             <div>
               <div class="font-semibold">{{.FeedName}}</div>
-              <div class="text-xs text-gray-400">{{.FeedKey}}</div>
             </div>
             <div class="flex flex-wrap gap-2 text-xs">
               {{if .OverrideActive}}
@@ -162,86 +175,99 @@
               {{end}}
             </div>
             <div class="text-xs text-gray-500">
-              Runtime: {{.RuntimeMode}}, {{if .RuntimeEnabled}}enabled{{else}}disabled{{end}}, interval {{.RuntimeSyncInterval}}, api key {{if .RuntimeAPIKeyConfigured}}configured{{else}}not configured{{end}}.
+              Runtime: {{.RuntimeMode}}, {{if .RuntimeEnabled}}enabled{{else}}disabled{{end}}, {{if .RuntimeSupportsInterval}}self-sync {{.RuntimeSyncInterval}}{{else}}queue-driven{{end}}, api key {{if .RuntimeAPIKeyConfigured}}configured{{else}}not configured{{end}}.
             </div>
           </div>
 
-          <div class="flex flex-wrap gap-2">
-            <form action="/admin/feeds/save" method="POST" class="contents">
-              <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
-              <input type="hidden" name="feed_name" value="{{.FeedKey}}">
+          <form action="/admin/feeds/save" method="POST" class="space-y-4">
+            <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
+            <input type="hidden" name="feed_name" value="{{.FeedKey}}">
 
-              <label class="flex items-center gap-2 text-sm text-gray-700">
+            <div class="grid gap-4 md:grid-cols-2 xl:grid-cols-4 xl:items-start">
+              <label class="flex items-center gap-2 pt-8 text-sm text-gray-700">
                 <input type="checkbox" name="enabled" {{if .Enabled}}checked{{end}} class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
                 enabled
               </label>
 
               <label class="text-sm text-gray-700">
                 <span class="block mb-1">Mode</span>
-                <select name="mode" class="border border-gray-300 rounded-md px-3 py-2 text-sm bg-white">
+                <select name="mode" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm bg-white">
                   <option value="self" {{if eq .Mode "self"}}selected{{end}}>self</option>
                   <option value="external" {{if eq .Mode "external"}}selected{{end}}>external</option>
                 </select>
               </label>
 
               <label class="text-sm text-gray-700">
-                <span class="block mb-1">Interval</span>
+                <span class="block mb-1">{{.SyncIntervalLabel}}</span>
                 {{if .SupportsSyncInterval}}
                   <input
                     type="text"
                     name="sync_interval"
                     value="{{.SyncInterval}}"
                     placeholder="blank = global default"
-                    class="w-44 border border-gray-300 rounded-md px-3 py-2 text-sm"
+                    class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm"
                   >
                 {{else}}
                   <input
                     type="text"
                     value="queue-driven"
                     disabled
-                    class="w-44 border border-gray-200 rounded-md px-3 py-2 text-sm bg-gray-50 text-gray-500"
+                    class="w-full border border-gray-200 rounded-md px-3 py-2 text-sm bg-gray-50 text-gray-500"
                   >
                 {{end}}
+                <span class="mt-1 block text-xs text-gray-500">{{.SyncIntervalHelp}}</span>
               </label>
 
+              {{if .RequiresAPIKey}}
               <div class="text-sm text-gray-700">
                 <span class="block mb-1">API Key</span>
-                {{if .RequiresAPIKey}}
-                  <input
-                    type="password"
-                    name="api_key"
-                    placeholder="{{if .APIKeyConfigured}}leave blank to keep stored key{{else}}paste new key{{end}}"
-                    class="w-56 border border-gray-300 rounded-md px-3 py-2 text-sm"
-                  >
-                  <label class="mt-2 flex items-center gap-2 text-xs text-gray-500">
-                    <input type="checkbox" name="clear_api_key" class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
-                    clear stored key
-                  </label>
-                {{else}}
-                  <input
-                    type="text"
-                    value="not required"
-                    disabled
-                    class="w-56 border border-gray-200 rounded-md px-3 py-2 text-sm bg-gray-50 text-gray-500"
-                  >
-                {{end}}
+                <input
+                  type="password"
+                  name="api_key"
+                  placeholder="{{if .APIKeyConfigured}}leave blank to keep stored key{{else}}paste new key{{end}}"
+                  class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm"
+                >
+                <label class="mt-2 flex items-center gap-2 text-xs text-gray-500">
+                  <input type="checkbox" name="clear_api_key" class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                  clear stored key
+                </label>
               </div>
+              {{end}}
+            </div>
 
-              <div class="flex items-end gap-2">
-                <button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-700">
-                  Save
-                </button>
-            </form>
-            {{if .OverrideActive}}
-            <form action="/admin/feeds/reset" method="POST">
-              <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
-              <input type="hidden" name="feed_name" value="{{.FeedKey}}">
-              <button type="submit" class="border border-gray-300 text-gray-700 px-4 py-2 rounded-md text-sm font-medium hover:bg-gray-50">
-                Reset
+            <div class="flex flex-wrap items-center gap-2">
+              <button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-700">
+                Save
               </button>
-            </form>
-            {{end}}
-          </div>
+              {{if .CanSyncNow}}
+              <button
+                type="submit"
+                formaction="/admin/feeds/sync"
+                formmethod="POST"
+                hx-post="/admin/feeds/sync"
+                hx-target="#admin-feed-flash"
+                hx-swap="innerHTML"
+                hx-disabled-elt="this"
+                hx-on::before-request="this.dataset.originalText = this.textContent; this.textContent = 'Syncing...'"
+                hx-on::after-request="if (event.detail.successful) { const btn = this; clearTimeout(btn._syncFlashTimer); btn.classList.remove('border-blue-300','text-blue-700','hover:bg-blue-50'); btn.classList.add('border-green-600','bg-green-600','text-white'); btn.textContent = 'Started'; btn._syncFlashTimer = setTimeout(() => { btn.classList.remove('border-green-600','bg-green-600','text-white'); btn.classList.add('border-blue-300','text-blue-700','hover:bg-blue-50'); btn.textContent = btn.dataset.originalText || 'Sync now'; }, 1200); } else { this.textContent = this.dataset.originalText || 'Sync now'; }"
+                class="border border-blue-300 text-blue-700 px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-50"
+              >
+                Sync now
+              </button>
+              {{end}}
+              <span class="text-xs text-gray-500">Sync now uses the current runtime settings. Saved changes apply after restart.</span>
+            </div>
+          </form>
+
+          {{if .OverrideActive}}
+          <form action="/admin/feeds/reset" method="POST" class="flex justify-start">
+            <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
+            <input type="hidden" name="feed_name" value="{{.FeedKey}}">
+            <button type="submit" class="border border-gray-300 text-gray-700 px-4 py-2 rounded-md text-sm font-medium hover:bg-gray-50">
+              Reset
+            </button>
+          </form>
+          {{end}}
         </div>
       </div>
       {{end}}

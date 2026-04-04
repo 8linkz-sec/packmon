@@ -41,6 +41,13 @@ func TestOverallFeedStatus(t *testing.T) {
 			},
 			want: "degraded",
 		},
+		{
+			name: "skipped feed degrades response",
+			statuses: []db.FeedSyncStatus{
+				{FeedName: "vulncheck", LastSyncStatus: "skipped", LastSyncAt: ptrFeedTime(now.Add(-30 * time.Minute))},
+			},
+			want: "degraded",
+		},
 	}
 
 	for _, tt := range tests {
@@ -49,6 +56,19 @@ func TestOverallFeedStatus(t *testing.T) {
 				t.Fatalf("overallFeedStatus() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestFeedHealthStatusSkippedIsWarning(t *testing.T) {
+	now := time.Now().UTC()
+	status := db.FeedSyncStatus{
+		FeedName:       "vulncheck",
+		LastSyncStatus: "skipped",
+		LastSyncAt:     ptrFeedTime(now.Add(-10 * time.Minute)),
+	}
+
+	if got := feedHealthStatus(status); got != "warning" {
+		t.Fatalf("feedHealthStatus() = %q, want %q", got, "warning")
 	}
 }
 

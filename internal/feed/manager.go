@@ -170,6 +170,12 @@ func (m *Manager) runSync(ctx context.Context, rf *registeredFeed, log *slog.Log
 
 	result, err := m.syncWithRetry(ctx, rf)
 	if err != nil {
+		if IsPermanentError(err) {
+			log.Warn("feed sync skipped",
+				slog.String("error", err.Error()),
+			)
+			return
+		}
 		log.Error("feed sync failed after all retries",
 			slog.String("error", err.Error()),
 		)
@@ -222,6 +228,10 @@ func (m *Manager) syncWithRetry(ctx context.Context, rf *registeredFeed) (*SyncR
 		}
 
 		lastErr = err
+		if IsPermanentError(err) {
+			m.recordStatus(ctx, name, "skipped", err.Error(), duration, nil)
+			return nil, err
+		}
 		if isTimeoutError(err) {
 			telemetry.Default().IncFeedSyncTimeout(name)
 		}

@@ -28,10 +28,21 @@ type manualAdvisoryView struct {
 func (h *AdminHandler) requireAdmin(w http.ResponseWriter, r *http.Request) *auth.Session {
 	sess := h.sm.Get(r)
 	if sess == nil || !sess.Admin {
-		http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
+		h.redirectToLogin(w, r)
 		return nil
 	}
 	return sess
+}
+
+func (h *AdminHandler) redirectToLogin(w http.ResponseWriter, r *http.Request) {
+	h.sm.Delete(w, r)
+	w.Header().Set("Cache-Control", "no-store")
+	if isHTMXRequest(r) {
+		w.Header().Set("HX-Redirect", "/admin/login")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
 }
 
 // HandleAdminFeeds serves GET /admin/feeds with detailed feed configuration.
@@ -65,6 +76,23 @@ func (h *AdminHandler) HandleAdminFeeds(w http.ResponseWriter, r *http.Request) 
 		"DefaultSyncInterval": defaultSyncInterval,
 		"Message":             r.URL.Query().Get("msg"),
 		"Error":               r.URL.Query().Get("err"),
+	}
+
+	switch r.URL.Query().Get("partial") {
+	case "runtime":
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if err := h.renderer.RenderPartial(w, "admin/feeds.html", "admin-feed-runtime", data); err != nil {
+			h.logger.Error("admin feeds: partial runtime render failed", "error", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+		}
+		return
+	case "flash":
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if err := h.renderer.RenderPartial(w, "admin/feeds.html", "admin-feed-flash", data); err != nil {
+			h.logger.Error("admin feeds: partial flash render failed", "error", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+		}
+		return
 	}
 	h.renderAdmin(w, "admin/feeds.html", data)
 }

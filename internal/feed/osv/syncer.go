@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -40,6 +41,15 @@ const (
 
 // Compile-time interface assertion.
 var _ feed.FeedSyncer = (*Syncer)(nil)
+
+type errArchiveUnavailable struct {
+	url        string
+	statusCode int
+}
+
+func (e *errArchiveUnavailable) Error() string {
+	return fmt.Sprintf("archive unavailable: HTTP %d from %s", e.statusCode, e.url)
+}
 
 // Syncer downloads OSV vulnerability data from the public GCS bucket
 // and upserts it into the Packmon database. It implements the
@@ -97,6 +107,14 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 
 		synced, entries, err := s.syncEcosystem(ctx, store, eco)
 		if err != nil {
+			var unavailable *errArchiveUnavailable
+			if errors.As(err, &unavailable) {
+				s.logger.Info("ecosystem archive unavailable, skipping",
+					slog.String("ecosystem", eco),
+					slog.Int("status", unavailable.statusCode),
+				)
+				continue
+			}
 			s.logger.Error("ecosystem sync failed, continuing with next",
 				slog.String("ecosystem", eco),
 				slog.String("error", err.Error()),
@@ -212,7 +230,10 @@ func (s *Syncer) download(ctx context.Context, url string) ([]byte, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d from %s", resp.StatusCode, url)
+		return nil, &errArchiveUnavailable{
+			url:        url,
+			statusCode: resp.StatusCode,
+		}
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxZIPSize))

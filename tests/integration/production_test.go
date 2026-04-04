@@ -97,6 +97,15 @@ func TestProductionServerWithPostgresAndAPIKey(t *testing.T) {
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", serverPort)
 	waitForHTTPStatus(t, baseURL+"/healthz", http.StatusOK, stderrBuf.String())
 
+	publicResp, err := http.Get(baseURL + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	publicResp.Body.Close()
+	if publicResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET / status = %d, want 200", publicResp.StatusCode)
+	}
+
 	apiKey := "integration-key"
 	if err := insertAPIKeyIntoContainer(containerName, hashSHA256(apiKey)); err != nil {
 		t.Fatalf("insert api key: %v", err)

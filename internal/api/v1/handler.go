@@ -359,7 +359,7 @@ func (h *Handler) HandleFeedStatus(w http.ResponseWriter, r *http.Request) {
 			ts := s.LastSyncAt.UTC().Format(time.RFC3339)
 			item.LastSyncAt = &ts
 		}
-		if s.LastSyncStatus == "error" && s.LastError != "" {
+		if (s.LastSyncStatus == "error" || s.LastSyncStatus == "skipped") && s.LastError != "" {
 			item.Message = s.LastError
 		}
 		items = append(items, item)
@@ -369,11 +369,18 @@ func (h *Handler) HandleFeedStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 // feedHealthStatus derives a health string from sync status.
-// A feed is "error" if its last sync failed, "warning" if the last successful
-// sync is more than 48 hours ago, and "healthy" otherwise.
+// A feed is "error" if its last sync failed, "warning" if the last run was
+// skipped or the last successful sync is more than 48 hours ago, and
+// "healthy" otherwise.
 func feedHealthStatus(s db.FeedSyncStatus) string {
 	if s.LastSyncStatus == "error" {
 		return "error"
+	}
+	if s.LastSyncStatus == "running" {
+		return "pending"
+	}
+	if s.LastSyncStatus == "skipped" {
+		return "warning"
 	}
 	if s.LastSyncAt == nil {
 		return "error"

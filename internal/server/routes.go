@@ -15,7 +15,7 @@ import (
 )
 
 // registerRoutes wires all HTTP routes on the given mux.
-func registerRoutes(mux *http.ServeMux, hc *health.Checker, cfg *config.Config, store db.Store, sm *auth.SessionManager, logger *slog.Logger, buildInfo BuildInfo) {
+func registerRoutes(mux *http.ServeMux, hc *health.Checker, cfg *config.Config, store db.Store, sm *auth.SessionManager, logger *slog.Logger, buildInfo BuildInfo, syncFeed admin.FeedSyncFunc) {
 	api := v1.NewHandler(store, logger)
 
 	// -- Operations (no auth required) ----------------------------------------
@@ -36,7 +36,7 @@ func registerRoutes(mux *http.ServeMux, hc *health.Checker, cfg *config.Config, 
 	mux.HandleFunc("GET /api/v1/sync", api.HandleSync)
 
 	// -- Admin (session-protected) --------------------------------------------
-	admin.RegisterRoutes(mux, store, sm, logger, cfg)
+	admin.RegisterRoutes(mux, store, sm, logger, cfg, syncFeed)
 
 	// -- Web GUI (public pages: dashboard, search, package, feeds) -----------
 	renderer := web.NewRenderer(web.TemplateFS(), false)

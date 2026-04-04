@@ -34,11 +34,22 @@ func RequireAdminSession(sm *auth.SessionManager, logger *slog.Logger) func(http
 					slog.String("path", r.URL.Path),
 					slog.String("remote_addr", r.RemoteAddr),
 				)
-				http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
+				redirectToAdminLogin(w, r, sm)
 				return
 			}
 
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+func redirectToAdminLogin(w http.ResponseWriter, r *http.Request, sm *auth.SessionManager) {
+	sm.Delete(w, r)
+	w.Header().Set("Cache-Control", "no-store")
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get("HX-Request")), "true") {
+		w.Header().Set("HX-Redirect", "/admin/login")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
 }

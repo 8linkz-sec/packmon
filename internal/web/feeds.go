@@ -88,6 +88,12 @@ func feedHealthStatus(s db.FeedSyncStatus) string {
 	if s.LastSyncStatus == "error" {
 		return "error"
 	}
+	if s.LastSyncStatus == "running" {
+		return "pending"
+	}
+	if s.LastSyncStatus == "skipped" {
+		return "warning"
+	}
 	if s.LastSyncAt == nil {
 		return "error"
 	}

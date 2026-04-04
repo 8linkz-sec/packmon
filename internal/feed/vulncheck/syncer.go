@@ -3,7 +3,8 @@
 // an extended KEV list, and exploit PoC references (XDB).
 //
 // This syncer uses the /v3/backup/ bulk-download endpoint which requires a
-// free VulnCheck API key. If no key is configured the syncer skips silently.
+// free VulnCheck API key. If no key is configured the syncer reports a
+// non-retryable configuration issue.
 // The data enriches existing vulnerabilities rather than creating new ones:
 // it improves CVSS scores, adds exploit-exists flags, and stores source
 // provenance records.
@@ -91,7 +92,7 @@ func WithBaseURL(url string) Option {
 }
 
 // NewSyncer creates a VulnCheck syncer. If apiKey is empty the syncer will
-// skip silently on Sync (the feed is optional).
+// report a non-retryable configuration issue on Sync.
 func NewSyncer(apiKey string, logger *slog.Logger, opts ...Option) *Syncer {
 	if logger == nil {
 		logger = slog.Default()
@@ -115,11 +116,11 @@ func (s *Syncer) Name() string { return feedName }
 
 // Sync implements feed.FeedSyncer. It downloads VulnCheck bulk data and
 // enriches existing vulnerabilities. If no API key is configured the sync
-// is skipped with an info-level log and a zero-entry result.
+// is skipped as a non-retryable configuration issue.
 func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, error) {
 	if s.apiKey == "" {
-		s.logger.Info("VulnCheck API key not configured, skipping sync")
-		return &feed.SyncResult{}, nil
+		s.logger.Warn("VulnCheck API key not configured, skipping sync")
+		return nil, feed.PermanentError(fmt.Errorf("VulnCheck API key not configured"))
 	}
 
 	s.logger.Info("starting VulnCheck sync")

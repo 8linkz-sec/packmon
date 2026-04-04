@@ -4,6 +4,7 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -33,6 +34,9 @@ type loginAttempt struct {
 	lockedAt time.Time
 }
 
+// FeedSyncFunc triggers an immediate feed synchronisation.
+type FeedSyncFunc func(ctx context.Context, feedName string) error
+
 // AdminHandler holds the dependencies for admin HTTP handlers.
 type AdminHandler struct {
 	store    db.Store
@@ -40,6 +44,7 @@ type AdminHandler struct {
 	renderer *web.Renderer
 	logger   *slog.Logger
 	cfg      *config.Config
+	syncFeed FeedSyncFunc
 
 	// loginMu protects the loginAttempts map.
 	loginMu       sync.Mutex
@@ -47,7 +52,7 @@ type AdminHandler struct {
 }
 
 // NewAdminHandler creates an AdminHandler with the given dependencies.
-func NewAdminHandler(store db.Store, sm *auth.SessionManager, renderer *web.Renderer, logger *slog.Logger, cfg *config.Config) *AdminHandler {
+func NewAdminHandler(store db.Store, sm *auth.SessionManager, renderer *web.Renderer, logger *slog.Logger, cfg *config.Config, syncFeed FeedSyncFunc) *AdminHandler {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -57,6 +62,7 @@ func NewAdminHandler(store db.Store, sm *auth.SessionManager, renderer *web.Rend
 		renderer:      renderer,
 		logger:        logger,
 		cfg:           cfg,
+		syncFeed:      syncFeed,
 		loginAttempts: make(map[string]*loginAttempt),
 	}
 	// Background goroutine to evict stale lockout entries.
@@ -230,9 +236,8 @@ func (h *AdminHandler) HandleDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sess := h.sm.Get(r)
-	if sess == nil || !sess.Admin {
-		http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
+	sess := h.requireAdmin(w, r)
+	if sess == nil {
 		return
 	}
 
@@ -318,6 +323,12 @@ func adminFeedHealth(enabled bool, mode config.FeedMode, s *db.FeedSyncStatus) s
 	}
 	if s.LastSyncStatus == "error" {
 		return "error"
+	}
+	if s.LastSyncStatus == "running" {
+		return "pending"
+	}
+	if s.LastSyncStatus == "skipped" {
+		return "warning"
 	}
 	if time.Since(*s.LastSyncAt) > 48*time.Hour {
 		return "warning"

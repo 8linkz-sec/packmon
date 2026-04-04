@@ -10,10 +10,9 @@ import (
 	"github.com/8linkz/packmon/internal/db"
 )
 
-// skipAuth lists path prefixes that never require an API key.
-// Admin routes use session-based auth instead and are therefore exempt.
-// The .well-known path is a standard redirect that must be reachable
-// without credentials (Bitwarden compatibility).
+// skipAuth lists path prefixes that never require an API key inside the API
+// namespace. Public web pages and admin routes are handled outside the API and
+// are therefore never subject to Bearer-token auth.
 var skipAuth = []string{
 	"/healthz",
 	"/readyz",
@@ -24,15 +23,20 @@ var skipAuth = []string{
 	"/.well-known/",
 }
 
-// Auth validates the Bearer token in the Authorization header against
-// hashed API keys stored in the database. Requests to health/version/metrics
-// endpoints are exempt.
+// Auth validates the Bearer token in the Authorization header against hashed
+// API keys stored in the database. Only /api/v1/* endpoints are protected.
+// Public web pages and admin routes remain reachable without an API key.
 //
 // In development mode, auth is skipped entirely so that local testing
 // does not require key provisioning.
 func Auth(logger *slog.Logger, store db.Store, devMode bool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !strings.HasPrefix(r.URL.Path, "/api/v1/") {
+				next.ServeHTTP(w, r)
+				return
+			}
+
 			// Skip auth for exempt paths.
 			for _, prefix := range skipAuth {
 				if strings.HasPrefix(r.URL.Path, prefix) {

@@ -6,6 +6,7 @@ package feed
 
 import (
 	"context"
+	"errors"
 
 	"github.com/8linkz/packmon/internal/db"
 )
@@ -18,6 +19,33 @@ type SyncResult struct {
 	// EntriesTotal is the total number of entries the syncer is aware of
 	// (may equal EntriesSynced for a full sync, or differ for deltas).
 	EntriesTotal int
+}
+
+type permanentSyncError struct {
+	err error
+}
+
+func (e *permanentSyncError) Error() string {
+	return e.err.Error()
+}
+
+func (e *permanentSyncError) Unwrap() error {
+	return e.err
+}
+
+// PermanentError marks a sync failure as non-retryable, for example when a
+// required API key is missing or the feed is statically misconfigured.
+func PermanentError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &permanentSyncError{err: err}
+}
+
+// IsPermanentError reports whether err should not be retried by the manager.
+func IsPermanentError(err error) bool {
+	var target *permanentSyncError
+	return errors.As(err, &target)
 }
 
 // FeedSyncer is the interface every feed source must implement.

@@ -32,6 +32,8 @@ services:
       context: .
       dockerfile: Dockerfile
       target: server
+    environment:
+      PACKMON_SERVER_MODE: production
     ports:
       - "8080:8080"
       - "127.0.0.1:9090:9090"
