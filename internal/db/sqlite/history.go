@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -55,24 +56,31 @@ func (s *Store) InsertScan(ctx context.Context, entry ScanEntry) error {
 // only entries for that repository are deleted. Both filters can be
 // combined. The number of deleted rows is returned.
 func (s *Store) ClearHistory(ctx context.Context, before *time.Time, repo string) (int, error) {
-	var conditions []string
-	var args []interface{}
+	var (
+		result sql.Result
+		err    error
+	)
 
-	if before != nil {
-		conditions = append(conditions, "scanned_at < ?")
-		args = append(args, before.UTC().Format(time.RFC3339))
+	switch {
+	case before != nil && repo != "":
+		result, err = s.db.ExecContext(ctx,
+			`DELETE FROM scan_history WHERE scanned_at < ? AND repo_name = ?`,
+			before.UTC().Format(time.RFC3339),
+			repo,
+		)
+	case before != nil:
+		result, err = s.db.ExecContext(ctx,
+			`DELETE FROM scan_history WHERE scanned_at < ?`,
+			before.UTC().Format(time.RFC3339),
+		)
+	case repo != "":
+		result, err = s.db.ExecContext(ctx,
+			`DELETE FROM scan_history WHERE repo_name = ?`,
+			repo,
+		)
+	default:
+		result, err = s.db.ExecContext(ctx, `DELETE FROM scan_history`)
 	}
-	if repo != "" {
-		conditions = append(conditions, "repo_name = ?")
-		args = append(args, repo)
-	}
-
-	query := "DELETE FROM scan_history"
-	if len(conditions) > 0 {
-		query += " WHERE " + joinAnd(conditions)
-	}
-
-	result, err := s.db.ExecContext(ctx, query, args...)
 	if err != nil {
 		return 0, fmt.Errorf("sqlite: clear history: %w", err)
 	}
@@ -98,7 +106,7 @@ func (s *Store) EnforceRetention(ctx context.Context, maxPerRepo int) error {
 	if err != nil {
 		return fmt.Errorf("sqlite: list repos for retention: %w", err)
 	}
-	defer rows.Close()
+	defer closeSilently(rows)
 
 	var repos []string
 	for rows.Next() {
@@ -163,7 +171,7 @@ func (s *Store) GetRecentScans(ctx context.Context, repo string, limit int) ([]S
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: query scan history: %w", err)
 	}
-	defer rows.Close()
+	defer closeSilently(rows)
 
 	var entries []ScanEntry
 	for rows.Next() {
@@ -207,16 +215,4 @@ func (s *Store) GetRecentScans(ctx context.Context, repo string, limit int) ([]S
 	}
 
 	return entries, nil
-}
-
-// joinAnd joins SQL conditions with " AND ".
-func joinAnd(parts []string) string {
-	result := ""
-	for i, p := range parts {
-		if i > 0 {
-			result += " AND "
-		}
-		result += p
-	}
-	return result
 }

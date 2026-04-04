@@ -43,7 +43,7 @@ func (s *Store) FindVulnerabilities(ctx context.Context, ecosystem, name, versio
 	if err != nil {
 		return nil, fmt.Errorf("postgres: find vulnerabilities: %w", err)
 	}
-	defer rows.Close()
+	defer closeSilently(rows)
 
 	findings := make([]domain.Finding, 0)
 	for rows.Next() {
@@ -108,7 +108,7 @@ func (s *Store) FindMalicious(ctx context.Context, ecosystem, name string) ([]do
 	if err != nil {
 		return nil, fmt.Errorf("postgres: find malicious findings: %w", err)
 	}
-	defer rows.Close()
+	defer closeSilently(rows)
 
 	findings := make([]domain.Finding, 0)
 	for rows.Next() {
@@ -354,7 +354,7 @@ func (s *Store) ListMaliciousFindings(ctx context.Context, source string, limit 
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list malicious findings: %w", err)
 	}
-	defer rows.Close()
+	defer closeSilently(rows)
 
 	out := make([]db.MaliciousFinding, 0)
 	for rows.Next() {

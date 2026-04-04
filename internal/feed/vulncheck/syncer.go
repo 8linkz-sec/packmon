@@ -178,7 +178,7 @@ func (s *Syncer) downloadBulk(ctx context.Context) ([]db.VulnCheckEntry, error) 
 	if err != nil {
 		return nil, fmt.Errorf("http get: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		return nil, fmt.Errorf("authentication failed (status %d): check PACKMON_VULNCHECK_API_KEY", resp.StatusCode)

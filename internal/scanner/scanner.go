@@ -229,7 +229,7 @@ func (s *Scanner) parseLockFile(lf LockFile) ([]domain.Package, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer closeSilently(f)
 	return lf.Parser.Parse(f)
 }
 
@@ -263,7 +263,7 @@ func (s *Scanner) checkRemote(ctx context.Context, pkgs []domain.Package) ([]dom
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("server request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer closeSilently(resp.Body)
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

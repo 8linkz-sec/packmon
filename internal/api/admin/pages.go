@@ -134,6 +134,9 @@ func (h *AdminHandler) HandleQueuePurge(w http.ResponseWriter, r *http.Request) 
 	if sess == nil {
 		return
 	}
+	if !parseAdminForm(w, r) {
+		return
+	}
 
 	if !auth.ValidateCSRF(r, sess) {
 		http.Error(w, "invalid CSRF token", http.StatusForbidden)
@@ -205,13 +208,16 @@ func (h *AdminHandler) HandleKeyCreate(w http.ResponseWriter, r *http.Request) {
 	if sess == nil {
 		return
 	}
+	if !parseAdminForm(w, r) {
+		return
+	}
 
 	if !auth.ValidateCSRF(r, sess) {
 		http.Error(w, "invalid CSRF token", http.StatusForbidden)
 		return
 	}
 
-	name := r.FormValue("name")
+	name := r.PostForm.Get("name")
 	if name == "" {
 		http.Redirect(w, r, "/admin/keys?err=Key+name+is+required", http.StatusSeeOther)
 		return
@@ -246,13 +252,16 @@ func (h *AdminHandler) HandleKeyRevoke(w http.ResponseWriter, r *http.Request) {
 	if sess == nil {
 		return
 	}
+	if !parseAdminForm(w, r) {
+		return
+	}
 
 	if !auth.ValidateCSRF(r, sess) {
 		http.Error(w, "invalid CSRF token", http.StatusForbidden)
 		return
 	}
 
-	keyIDStr := r.FormValue("key_id")
+	keyIDStr := r.PostForm.Get("key_id")
 	keyID, err := strconv.Atoi(keyIDStr)
 	if err != nil {
 		http.Redirect(w, r, "/admin/keys?err=Invalid+key+ID", http.StatusSeeOther)
@@ -276,13 +285,16 @@ func (h *AdminHandler) HandleKeyDelete(w http.ResponseWriter, r *http.Request) {
 	if sess == nil {
 		return
 	}
+	if !parseAdminForm(w, r) {
+		return
+	}
 
 	if !auth.ValidateCSRF(r, sess) {
 		http.Error(w, "invalid CSRF token", http.StatusForbidden)
 		return
 	}
 
-	keyIDStr := r.FormValue("key_id")
+	keyIDStr := r.PostForm.Get("key_id")
 	keyID, err := strconv.Atoi(keyIDStr)
 	if err != nil {
 		http.Redirect(w, r, "/admin/keys?err=Invalid+key+ID", http.StatusSeeOther)
@@ -351,19 +363,22 @@ func (h *AdminHandler) HandleAdvisoryCreate(w http.ResponseWriter, r *http.Reque
 	if sess == nil {
 		return
 	}
+	if !parseAdminForm(w, r) {
+		return
+	}
 
 	if !auth.ValidateCSRF(r, sess) {
 		http.Error(w, "invalid CSRF token", http.StatusForbidden)
 		return
 	}
 
-	ecosystem := r.FormValue("ecosystem")
-	name := r.FormValue("name")
-	advisoryID := r.FormValue("id")
-	severity := r.FormValue("severity")
-	riskType := r.FormValue("risk_type")
-	summary := r.FormValue("summary")
-	description := r.FormValue("description")
+	ecosystem := r.PostForm.Get("ecosystem")
+	name := r.PostForm.Get("name")
+	advisoryID := r.PostForm.Get("id")
+	severity := r.PostForm.Get("severity")
+	riskType := r.PostForm.Get("risk_type")
+	summary := r.PostForm.Get("summary")
+	description := r.PostForm.Get("description")
 
 	if ecosystem == "" || name == "" || severity == "" || summary == "" {
 		http.Redirect(w, r, "/admin/advisories?err=All+required+fields+must+be+filled", http.StatusSeeOther)
@@ -408,13 +423,16 @@ func (h *AdminHandler) HandleAdvisoryDelete(w http.ResponseWriter, r *http.Reque
 	if sess == nil {
 		return
 	}
+	if !parseAdminForm(w, r) {
+		return
+	}
 
 	if !auth.ValidateCSRF(r, sess) {
 		http.Error(w, "invalid CSRF token", http.StatusForbidden)
 		return
 	}
 
-	advisoryID := r.FormValue("id")
+	advisoryID := r.PostForm.Get("id")
 	if advisoryID == "" {
 		http.Redirect(w, r, "/admin/advisories?err=Missing+advisory+ID", http.StatusSeeOther)
 		return
@@ -551,15 +569,18 @@ func (h *AdminHandler) HandlePasswordChange(w http.ResponseWriter, r *http.Reque
 	if sess == nil {
 		return
 	}
+	if !parseAdminForm(w, r) {
+		return
+	}
 
 	if !auth.ValidateCSRF(r, sess) {
 		http.Error(w, "invalid CSRF token", http.StatusForbidden)
 		return
 	}
 
-	currentPassword := r.FormValue("current_password")
-	newPassword := r.FormValue("new_password")
-	confirmPassword := r.FormValue("confirm_password")
+	currentPassword := r.PostForm.Get("current_password")
+	newPassword := r.PostForm.Get("new_password")
+	confirmPassword := r.PostForm.Get("confirm_password")
 
 	if newPassword != confirmPassword {
 		http.Redirect(w, r, "/admin/settings?err=New+passwords+do+not+match", http.StatusSeeOther)

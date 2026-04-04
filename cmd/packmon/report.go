@@ -29,7 +29,7 @@ SQLite scan history.`,
 			if err != nil {
 				return fmt.Errorf("open local database: %w", err)
 			}
-			defer store.Close()
+			defer closeSilently(store)
 
 			ctx := c.Context()
 			entries, err := store.GetRecentScans(ctx, flagRepo, flagLimit)
@@ -94,7 +94,9 @@ SQLite scan history.`,
 			fmt.Println(strings.Repeat("-", 60))
 
 			tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-			fmt.Fprintln(tw, "DATE\tREPO\tPACKAGES\tFINDINGS\tTREND")
+			if _, err := fmt.Fprintln(tw, "DATE\tREPO\tPACKAGES\tFINDINGS\tTREND"); err != nil {
+				return fmt.Errorf("write report header: %w", err)
+			}
 
 			for i, e := range entries {
 				dateStr := e.ScannedAt.Format("2006-01-02 15:04")
@@ -116,10 +118,14 @@ SQLite scan history.`,
 					}
 				}
 
-				fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%s\n",
-					dateStr, repo, e.PackagesCount, e.FindingsCount, trend)
+				if _, err := fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%s\n",
+					dateStr, repo, e.PackagesCount, e.FindingsCount, trend); err != nil {
+					return fmt.Errorf("write report row: %w", err)
+				}
 			}
-			tw.Flush()
+			if err := tw.Flush(); err != nil {
+				return fmt.Errorf("flush report output: %w", err)
+			}
 			fmt.Println()
 
 			return nil

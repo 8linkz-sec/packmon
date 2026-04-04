@@ -13,7 +13,7 @@ func TestHistoryQueriesAndClear(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	defer store.Close()
+	defer closeSilently(store)
 
 	ctx := context.Background()
 	baseDay := time.Now().UTC().Truncate(24 * time.Hour)
@@ -107,7 +107,7 @@ func TestDashboardStatsAndSearchPackages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	defer store.Close()
+	defer closeSilently(store)
 
 	ctx := context.Background()
 

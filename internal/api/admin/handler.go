@@ -136,6 +136,9 @@ func (h *AdminHandler) showLoginForm(w http.ResponseWriter, r *http.Request, err
 // processLogin validates the credentials from the POST form.
 func (h *AdminHandler) processLogin(w http.ResponseWriter, r *http.Request) {
 	ip := clientIP(r)
+	if !parseAdminForm(w, r) {
+		return
+	}
 
 	// Check rate limit before doing any work.
 	if h.isLockedOut(ip) {
@@ -160,8 +163,8 @@ func (h *AdminHandler) processLogin(w http.ResponseWriter, r *http.Request) {
 	// on success or show a new form on failure.
 	h.sm.Delete(w, r)
 
-	username := r.FormValue("username")
-	password := r.FormValue("password")
+	username := r.PostForm.Get("username")
+	password := r.PostForm.Get("password")
 
 	if username != "admin" {
 		h.recordFailedAttempt(ip)

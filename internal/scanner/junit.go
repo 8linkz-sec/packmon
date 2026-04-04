@@ -69,13 +69,14 @@ func (jw *JUnitWriter) Write(w io.Writer, result *domain.ScanResult) error {
 
 // WriteFile writes the JUnit output to the given file path.
 func (jw *JUnitWriter) WriteFile(path string, result *domain.ScanResult) error {
+	// #nosec G304 -- CLI output path is provided intentionally by the local user.
 	f, err := os.Create(path)
 	if err != nil {
 		return fmt.Errorf("junit: create file %s: %w", path, err)
 	}
-	defer f.Close()
 
 	if err := jw.Write(f, result); err != nil {
+		closeSilently(f)
 		return err
 	}
 	return f.Close()
@@ -163,18 +164,18 @@ func (jw *JUnitWriter) buildTestcase(f domain.Finding) junitTestcase {
 	var body strings.Builder
 	body.WriteString(f.Title)
 	if f.AdvisoryID != "" {
-		body.WriteString(fmt.Sprintf("\nAdvisory: %s", f.AdvisoryID))
+		_, _ = fmt.Fprintf(&body, "\nAdvisory: %s", f.AdvisoryID)
 	}
 	if f.RiskType != "" {
-		body.WriteString(fmt.Sprintf("\nRisk Type: %s", f.RiskType))
+		_, _ = fmt.Fprintf(&body, "\nRisk Type: %s", f.RiskType)
 	}
 	if f.FixedVersion != "" {
-		body.WriteString(fmt.Sprintf("\nFixed Version: %s", f.FixedVersion))
+		_, _ = fmt.Fprintf(&body, "\nFixed Version: %s", f.FixedVersion)
 	}
 	if f.URL != "" {
-		body.WriteString(fmt.Sprintf("\nURL: %s", f.URL))
+		_, _ = fmt.Fprintf(&body, "\nURL: %s", f.URL)
 	}
-	body.WriteString(fmt.Sprintf("\nSource: %s", f.Source))
+	_, _ = fmt.Fprintf(&body, "\nSource: %s", f.Source)
 
 	// Build failure message (short summary for CI).
 	message := f.Title

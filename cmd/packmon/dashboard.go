@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -38,7 +39,7 @@ func newDashboardCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("open local database: %w", err)
 			}
-			defer store.Close()
+			defer closeSilently(store)
 
 			logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 			renderer := web.NewRenderer(web.TemplateFS(), false)
@@ -51,7 +52,7 @@ func newDashboardCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("listen on localhost:%d: %w", flagPort, err)
 			}
-			defer listener.Close()
+			defer closeSilently(listener)
 
 			url := "http://" + listener.Addr().String()
 			fmt.Printf("Local dashboard available at %s\n", url)
@@ -118,12 +119,36 @@ func signalContext(parent context.Context) (context.Context, context.CancelFunc)
 }
 
 func openBrowser(url string) error {
+	if err := validateBrowserURL(url); err != nil {
+		return err
+	}
+
 	switch runtime.GOOS {
 	case "windows":
+		// #nosec G204 -- URL is validated and only opened in the user's default browser.
 		return exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
 	case "darwin":
+		// #nosec G204 -- URL is validated and only opened in the user's default browser.
 		return exec.Command("open", url).Start()
 	default:
+		// #nosec G204 -- URL is validated and only opened in the user's default browser.
 		return exec.Command("xdg-open", url).Start()
+	}
+}
+
+func validateBrowserURL(rawURL string) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("parse browser URL: %w", err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("unsupported browser URL scheme %q", parsed.Scheme)
+	}
+
+	switch parsed.Hostname() {
+	case "127.0.0.1", "localhost", "::1":
+		return nil
+	default:
+		return fmt.Errorf("refusing to open non-local URL %q", rawURL)
 	}
 }

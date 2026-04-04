@@ -143,7 +143,7 @@ func (s *Store) ListFeedSyncStatuses(ctx context.Context) ([]db.FeedSyncStatus, 
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list feed sync statuses: %w", err)
 	}
-	defer rows.Close()
+	defer closeSilently(rows)
 
 	out := make([]db.FeedSyncStatus, 0)
 	for rows.Next() {

@@ -37,7 +37,7 @@ func freePort(t *testing.T) int {
 		t.Fatalf("failed to find free port: %v", err)
 	}
 	port := listener.Addr().(*net.TCPAddr).Port
-	listener.Close()
+	closeSilently(listener)
 	return port
 }
 
@@ -83,7 +83,7 @@ func startServerWithMetrics(t *testing.T) (baseURL, metricsURL string, cleanup f
 	for time.Now().Before(deadline) {
 		resp, err := http.Get(base + "/healthz")
 		if err == nil {
-			resp.Body.Close()
+			closeSilently(resp.Body)
 			if resp.StatusCode == http.StatusOK {
 				ready = true
 				break
@@ -124,7 +124,7 @@ func TestServerHealthz(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /healthz failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer closeSilently(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected 200, got %d", resp.StatusCode)
@@ -151,7 +151,7 @@ func TestServerReadyz(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /readyz failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer closeSilently(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected 200, got %d", resp.StatusCode)
@@ -178,7 +178,7 @@ func TestServerVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /version failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer closeSilently(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected 200, got %d", resp.StatusCode)
@@ -225,7 +225,7 @@ func TestServerCheckValid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST /api/v1/check failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer closeSilently(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -305,7 +305,7 @@ func TestServerCheckEmptyPackages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST /api/v1/check failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer closeSilently(resp.Body)
 
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d", resp.StatusCode)
@@ -332,7 +332,7 @@ func TestServerCheckNoBody(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST /api/v1/check failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer closeSilently(resp.Body)
 
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d", resp.StatusCode)
@@ -351,7 +351,7 @@ func TestServerFeedStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /api/v1/feeds/status failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer closeSilently(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected 200, got %d", resp.StatusCode)
@@ -380,7 +380,7 @@ func TestServerMetrics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /metrics failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer closeSilently(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)

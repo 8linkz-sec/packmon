@@ -15,7 +15,7 @@ func FuzzNPMParser(f *testing.F) {
 	f.Add([]byte(``))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		p := NewNPMParser()
-		p.Parse(bytes.NewReader(data))
+		_, _ = p.Parse(bytes.NewReader(data))
 	})
 }
 
@@ -25,7 +25,7 @@ func FuzzYarnParser(f *testing.F) {
 	f.Add([]byte(``))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		p := NewYarnParser()
-		p.Parse(bytes.NewReader(data))
+		_, _ = p.Parse(bytes.NewReader(data))
 	})
 }
 
@@ -34,7 +34,7 @@ func FuzzPnpmParser(f *testing.F) {
 	f.Add([]byte(``))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		p := NewPnpmParser()
-		p.Parse(bytes.NewReader(data))
+		_, _ = p.Parse(bytes.NewReader(data))
 	})
 }
 
@@ -44,7 +44,7 @@ func FuzzPipfileParser(f *testing.F) {
 	f.Add([]byte(``))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		p := NewPipfileParser()
-		p.Parse(bytes.NewReader(data))
+		_, _ = p.Parse(bytes.NewReader(data))
 	})
 }
 
@@ -53,7 +53,7 @@ func FuzzPoetryParser(f *testing.F) {
 	f.Add([]byte(``))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		p := NewPoetryParser()
-		p.Parse(bytes.NewReader(data))
+		_, _ = p.Parse(bytes.NewReader(data))
 	})
 }
 
@@ -62,7 +62,7 @@ func FuzzUVParser(f *testing.F) {
 	f.Add([]byte(``))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		p := NewUVParser()
-		p.Parse(bytes.NewReader(data))
+		_, _ = p.Parse(bytes.NewReader(data))
 	})
 }
 
@@ -72,7 +72,7 @@ func FuzzRequirementsParser(f *testing.F) {
 	f.Add([]byte(``))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		p := NewRequirementsParser()
-		p.Parse(bytes.NewReader(data))
+		_, _ = p.Parse(bytes.NewReader(data))
 	})
 }
 
@@ -81,7 +81,7 @@ func FuzzGoSumParser(f *testing.F) {
 	f.Add([]byte(``))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		p := NewGoSumParser()
-		p.Parse(bytes.NewReader(data))
+		_, _ = p.Parse(bytes.NewReader(data))
 	})
 }
 
@@ -91,7 +91,7 @@ func FuzzGoModParser(f *testing.F) {
 	f.Add([]byte(``))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		p := NewGoModParser()
-		p.Parse(bytes.NewReader(data))
+		_, _ = p.Parse(bytes.NewReader(data))
 	})
 }
 
@@ -100,7 +100,7 @@ func FuzzCargoParser(f *testing.F) {
 	f.Add([]byte(``))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		p := NewCargoParser()
-		p.Parse(bytes.NewReader(data))
+		_, _ = p.Parse(bytes.NewReader(data))
 	})
 }
 
@@ -110,7 +110,7 @@ func FuzzNuGetParser(f *testing.F) {
 	f.Add([]byte(``))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		p := NewNuGetParser()
-		p.Parse(bytes.NewReader(data))
+		_, _ = p.Parse(bytes.NewReader(data))
 	})
 }
 
@@ -120,7 +120,7 @@ func FuzzComposerParser(f *testing.F) {
 	f.Add([]byte(``))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		p := NewComposerParser()
-		p.Parse(bytes.NewReader(data))
+		_, _ = p.Parse(bytes.NewReader(data))
 	})
 }
 
@@ -129,7 +129,7 @@ func FuzzGemParser(f *testing.F) {
 	f.Add([]byte(``))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		p := NewGemParser()
-		p.Parse(bytes.NewReader(data))
+		_, _ = p.Parse(bytes.NewReader(data))
 	})
 }
 
@@ -138,7 +138,7 @@ func FuzzPubParser(f *testing.F) {
 	f.Add([]byte(``))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		p := NewPubParser()
-		p.Parse(bytes.NewReader(data))
+		_, _ = p.Parse(bytes.NewReader(data))
 	})
 }
 
@@ -147,7 +147,7 @@ func FuzzCocoaPodsParser(f *testing.F) {
 	f.Add([]byte(``))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		p := NewCocoaPodsParser()
-		p.Parse(bytes.NewReader(data))
+		_, _ = p.Parse(bytes.NewReader(data))
 	})
 }
 
@@ -158,7 +158,7 @@ func FuzzSwiftPMParser(f *testing.F) {
 	f.Add([]byte(``))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		p := NewSwiftPMParser()
-		p.Parse(bytes.NewReader(data))
+		_, _ = p.Parse(bytes.NewReader(data))
 	})
 }
 
@@ -167,7 +167,7 @@ func FuzzHexParser(f *testing.F) {
 	f.Add([]byte(``))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		p := NewHexParser()
-		p.Parse(bytes.NewReader(data))
+		_, _ = p.Parse(bytes.NewReader(data))
 	})
 }
 
@@ -177,6 +177,6 @@ func FuzzCRANParser(f *testing.F) {
 	f.Add([]byte(``))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		p := NewCRANParser()
-		p.Parse(bytes.NewReader(data))
+		_, _ = p.Parse(bytes.NewReader(data))
 	})
 }

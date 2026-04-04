@@ -93,7 +93,7 @@ func SendWebhook(ctx context.Context, cfg WebhookConfig, result *domain.ScanResu
 		log.Printf("webhook: POST %s failed: %v", cfg.URL, err)
 		return
 	}
-	defer resp.Body.Close()
+	defer closeSilently(resp.Body)
 
 	// Drain and discard response body to allow connection reuse.
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, webhookMaxRespBody))

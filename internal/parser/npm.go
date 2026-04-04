@@ -243,7 +243,7 @@ func (p *PnpmParser) Parse(r io.Reader) ([]domain.Package, error) {
 //
 // When the key does not contain a version, the entryVersion from the YAML
 // value is used as fallback.
-func parsePnpmKey(key string, entryVersion string) (name, version string) {
+func parsePnpmKey(key, entryVersion string) (name, version string) {
 	// Strip leading slash.
 	key = strings.TrimPrefix(key, "/")
 	if key == "" {

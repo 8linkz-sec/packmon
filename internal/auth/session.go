@@ -124,6 +124,7 @@ func (sm *SessionManager) Delete(w http.ResponseWriter, r *http.Request) {
 	sm.mu.Unlock()
 
 	// Overwrite the cookie with an expired value.
+	// #nosec G124 -- Secure is intentionally configurable so local HTTP development remains usable; production enables it.
 	http.SetCookie(w, &http.Cookie{
 		Name:     SessionCookieName,
 		Value:    "",
@@ -137,6 +138,7 @@ func (sm *SessionManager) Delete(w http.ResponseWriter, r *http.Request) {
 
 // setCookie writes the session cookie to the response.
 func (sm *SessionManager) setCookie(w http.ResponseWriter, sessionID string) {
+	// #nosec G124 -- Secure is intentionally configurable so local HTTP development remains usable; production enables it.
 	http.SetCookie(w, &http.Cookie{
 		Name:     SessionCookieName,
 		Value:    sessionID,

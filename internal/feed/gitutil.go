@@ -66,22 +66,22 @@ func (g *GitRepo) isCloned() bool {
 func (g *GitRepo) clone(ctx context.Context) error {
 	// Ensure parent directory exists.
 	parent := filepath.Dir(g.Dir)
-	if err := os.MkdirAll(parent, 0o755); err != nil {
+	if err := os.MkdirAll(parent, 0o750); err != nil {
 		return fmt.Errorf("creating parent directory: %w", err)
 	}
 
 	return g.run(ctx, parent,
-		"git", "clone", "--depth=1", "--single-branch", g.URL, filepath.Base(g.Dir),
+		"clone", "--depth=1", "--single-branch", g.URL, filepath.Base(g.Dir),
 	)
 }
 
 // pull fetches and resets to the latest remote HEAD. We use fetch+reset
 // rather than plain pull to handle force-pushes gracefully.
 func (g *GitRepo) pull(ctx context.Context) error {
-	if err := g.run(ctx, g.Dir, "git", "fetch", "--depth=1", "origin"); err != nil {
+	if err := g.run(ctx, g.Dir, "fetch", "--depth=1", "origin"); err != nil {
 		return err
 	}
-	return g.run(ctx, g.Dir, "git", "reset", "--hard", "origin/HEAD")
+	return g.run(ctx, g.Dir, "reset", "--hard", "origin/HEAD")
 }
 
 // headHash reads the current HEAD commit hash.
@@ -100,8 +100,9 @@ func (g *GitRepo) headHash(ctx context.Context) (string, error) {
 }
 
 // run executes a git command in the given directory and returns any error.
-func (g *GitRepo) run(ctx context.Context, dir string, name string, args ...string) error {
-	cmd := exec.CommandContext(ctx, name, args...)
+func (g *GitRepo) run(ctx context.Context, dir string, args ...string) error {
+	// #nosec G204 -- command is fixed to git; arguments are internal git subcommands and repo values.
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 
 	var stderr bytes.Buffer
@@ -109,7 +110,7 @@ func (g *GitRepo) run(ctx context.Context, dir string, name string, args ...stri
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("%s %s: %w\nstderr: %s", name, strings.Join(args, " "), err, stderr.String())
+		return fmt.Errorf("git %s: %w\nstderr: %s", strings.Join(args, " "), err, stderr.String())
 	}
 	return nil
 }

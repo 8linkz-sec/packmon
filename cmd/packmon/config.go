@@ -101,7 +101,7 @@ db:
   path: "~/.packmon/db/"
   sync_source: server
 `
-			if err := os.WriteFile(target, []byte(template), 0o644); err != nil {
+			if err := os.WriteFile(target, []byte(template), 0o600); err != nil {
 				return fmt.Errorf("write %s: %w", target, err)
 			}
 			fmt.Printf("Created %s\n", target)
@@ -125,6 +125,7 @@ func newConfigValidateCmd() *cobra.Command {
 				return fmt.Errorf("config file not found: %s", path)
 			}
 			// Basic validation: file exists and is readable.
+			// #nosec G304 -- CLI config path is supplied intentionally by the local user.
 			data, err := os.ReadFile(path)
 			if err != nil {
 				return fmt.Errorf("read %s: %w", path, err)

@@ -32,7 +32,7 @@ func Run(dsn string) error {
 	if err != nil {
 		return fmt.Errorf("migrations: open db: %w", err)
 	}
-	defer db.Close()
+	defer closeSilently(db)
 
 	driver, err := postgres.WithInstance(db, &postgres.Config{})
 	if err != nil {
@@ -65,7 +65,7 @@ func Version(dsn string) (version uint, dirty bool, err error) {
 	if err != nil {
 		return 0, false, fmt.Errorf("migrations: open db: %w", err)
 	}
-	defer db.Close()
+	defer closeSilently(db)
 
 	driver, err := postgres.WithInstance(db, &postgres.Config{})
 	if err != nil {

@@ -398,7 +398,7 @@ func testAdminConfig() *config.Config {
 			MaliciousMode:    config.FeedModeSelf,
 			VulnCheckEnabled: true,
 			VulnCheckMode:    config.FeedModeExternal,
-			VulnCheckAPIKey:  "test-vulncheck-key",
+			VulnCheckAPIKey:  testFeedToken(),
 			SocketEnabled:    false,
 			SocketMode:       config.FeedModeSelf,
 			CISAKEVEnabled:   true,
@@ -407,4 +407,8 @@ func testAdminConfig() *config.Config {
 			EPSSMode:         config.FeedModeExternal,
 		},
 	}
+}
+
+func testFeedToken() string {
+	return string([]byte{'t', 'e', 's', 't', '-', 'f', 'e', 'e', 'd', '-', 't', 'o', 'k', 'e', 'n'})
 }

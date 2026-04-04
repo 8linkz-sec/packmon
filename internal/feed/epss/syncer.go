@@ -140,7 +140,7 @@ func (s *Syncer) downloadScores(ctx context.Context) ([]db.EPSSEntry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("http get: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("unexpected status %d", resp.StatusCode)
@@ -151,7 +151,7 @@ func (s *Syncer) downloadScores(ctx context.Context) ([]db.EPSSEntry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("gzip reader: %w", err)
 	}
-	defer gzReader.Close()
+	defer func() { _ = gzReader.Close() }()
 
 	limitedReader := io.LimitReader(gzReader, maxBodySize)
 	return parseCSV(limitedReader)

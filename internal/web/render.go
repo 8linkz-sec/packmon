@@ -132,7 +132,6 @@ func defaultFuncMap() template.FuncMap {
 		"add":           func(a, b int) int { return a + b },
 		"sub":           func(a, b int) int { return a - b },
 		"seq":           seq,
-		"safeHTML":      func(s string) template.HTML { return template.HTML(s) }, //nolint:gosec // trusted content only
 	}
 }
 

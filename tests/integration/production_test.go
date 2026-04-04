@@ -101,7 +101,7 @@ func TestProductionServerWithPostgresAndAPIKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /: %v", err)
 	}
-	publicResp.Body.Close()
+	closeSilently(publicResp.Body)
 	if publicResp.StatusCode != http.StatusOK {
 		t.Fatalf("GET / status = %d, want 200", publicResp.StatusCode)
 	}
@@ -130,7 +130,7 @@ func TestProductionServerWithPostgresAndAPIKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST /api/v1/check without auth: %v", err)
 	}
-	respNoAuth.Body.Close()
+	closeSilently(respNoAuth.Body)
 	if respNoAuth.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("POST /api/v1/check without auth status = %d, want 401", respNoAuth.StatusCode)
 	}
@@ -167,7 +167,7 @@ func TestProductionServerWithPostgresAndAPIKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST malicious import: %v", err)
 	}
-	importResp.Body.Close()
+	closeSilently(importResp.Body)
 	if importResp.StatusCode != http.StatusOK {
 		t.Fatalf("POST malicious import status = %d, want 200", importResp.StatusCode)
 	}
@@ -182,7 +182,7 @@ func TestProductionServerWithPostgresAndAPIKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /api/v1/sync: %v", err)
 	}
-	defer syncResp.Body.Close()
+	defer closeSilently(syncResp.Body)
 	if syncResp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(syncResp.Body)
 		t.Fatalf("GET /api/v1/sync status = %d, body = %s", syncResp.StatusCode, string(body))
@@ -259,7 +259,7 @@ func waitForHTTPStatus(t *testing.T, url string, want int, stderr string) {
 	for time.Now().Before(deadline) {
 		resp, err := http.Get(url)
 		if err == nil {
-			resp.Body.Close()
+			closeSilently(resp.Body)
 			if resp.StatusCode == want {
 				return
 			}

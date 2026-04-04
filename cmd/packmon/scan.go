@@ -77,7 +77,7 @@ and malicious package databases.`,
 			}
 
 			// Parse mode.
-			mode := scanner.ModeAuto
+			var mode scanner.Mode
 			switch strings.ToLower(flagMode) {
 			case "remote":
 				mode = scanner.ModeRemote
@@ -111,7 +111,7 @@ and malicious package databases.`,
 			if historyErr != nil {
 				fmt.Fprintf(os.Stderr, "warning: unable to open local database %s: %v\n", defaultDBPath(), historyErr)
 			} else {
-				defer historyStore.Close()
+				defer closeSilently(historyStore)
 				if advisoryDataAvailable {
 					sc.SetLocalChecker(historyStore)
 				}
@@ -223,7 +223,7 @@ func writeJSONFile(path string, result *domain.ScanResult) error {
 	if err != nil {
 		return fmt.Errorf("marshal JSON: %w", err)
 	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return fmt.Errorf("write file %s: %w", path, err)
 	}
 	return nil
@@ -237,7 +237,7 @@ func openLocalSQLiteStore(ctx context.Context) (*sqlite.Store, bool, error) {
 
 	advisoryDataAvailable, err := store.HasAdvisoryData(ctx)
 	if err != nil {
-		store.Close()
+		closeSilently(store)
 		return nil, false, err
 	}
 

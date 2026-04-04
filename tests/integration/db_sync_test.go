@@ -44,7 +44,7 @@ func TestDBSyncAndLocalScan(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST feed import failed: %v", err)
 	}
-	resp.Body.Close()
+	closeSilently(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("POST feed import status = %d, want 200", resp.StatusCode)
 	}

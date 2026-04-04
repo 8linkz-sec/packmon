@@ -36,7 +36,7 @@ func newHistoryClearCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("open local database: %w", err)
 			}
-			defer store.Close()
+			defer closeSilently(store)
 
 			var before *time.Time
 			if flagBefore != "" {

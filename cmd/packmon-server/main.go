@@ -56,7 +56,7 @@ func runMigrate() error {
 	dsn := cfg.DB.DSN()
 
 	logger.Info("running database migrations",
-		slog.Int("expected_version", int(migrations.ExpectedVersion)),
+		slog.Uint64("expected_version", uint64(migrations.ExpectedVersion)),
 	)
 
 	if err := migrations.Run(dsn); err != nil {
@@ -73,7 +73,7 @@ func runMigrate() error {
 	}
 
 	logger.Info("migrations completed successfully",
-		slog.Int("schema_version", int(ver)),
+		slog.Uint64("schema_version", uint64(ver)),
 	)
 
 	return nil
@@ -104,14 +104,14 @@ func run() error {
 		}
 		if dirty {
 			logger.Error("database schema is in dirty state -- manual intervention required",
-				slog.Int("schema_version", int(ver)),
+				slog.Uint64("schema_version", uint64(ver)),
 			)
 			return fmt.Errorf("database schema is dirty at version %d", ver)
 		}
 		if ver != uint(migrations.ExpectedVersion) {
 			logger.Error("database schema version mismatch -- run 'packmon-server migrate'",
-				slog.Int("current_version", int(ver)),
-				slog.Int("expected_version", int(migrations.ExpectedVersion)),
+				slog.Uint64("current_version", uint64(ver)),
+				slog.Uint64("expected_version", uint64(migrations.ExpectedVersion)),
 			)
 			return fmt.Errorf("schema version mismatch: database is at %d, binary expects %d", ver, migrations.ExpectedVersion)
 		}
@@ -121,7 +121,7 @@ func run() error {
 		slog.String("version", version),
 		slog.String("commit", commit),
 		slog.String("mode", string(cfg.Server.Mode)),
-		slog.Int("schema_version", int(ver)),
+		slog.Uint64("schema_version", uint64(ver)),
 	)
 
 	var (
@@ -140,7 +140,7 @@ func run() error {
 		store = pg
 		pinger = pg
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	if err := auth.BootstrapAdmin(context.Background(), store, cfg.Admin.InitialPassword, logger); err != nil {
 		return fmt.Errorf("bootstrap admin auth: %w", err)

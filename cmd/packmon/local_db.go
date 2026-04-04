@@ -86,7 +86,7 @@ func inspectLocalDB(ctx context.Context, path string) (*localDBInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open local database: %w", err)
 	}
-	defer store.Close()
+	defer closeSilently(store)
 
 	info.Exists = true
 	info.FileSizeBytes = fileInfo.Size()
@@ -191,7 +191,7 @@ func exportLocalDB(ctx context.Context, store *sqlite.Store, writer io.Writer) e
 	if err != nil {
 		return fmt.Errorf("query local vulnerabilities: %w", err)
 	}
-	defer vulnRows.Close()
+	defer closeSilently(vulnRows)
 
 	for vulnRows.Next() {
 		var (
@@ -237,7 +237,7 @@ func exportLocalDB(ctx context.Context, store *sqlite.Store, writer io.Writer) e
 	if err != nil {
 		return fmt.Errorf("query local malicious findings: %w", err)
 	}
-	defer malRows.Close()
+	defer closeSilently(malRows)
 
 	for malRows.Next() {
 		var (

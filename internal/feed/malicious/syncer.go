@@ -146,6 +146,14 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 // walkEntries traverses an entry root directory and processes each
 // JSON file.
 func (s *Syncer) walkEntries(ctx context.Context, store db.Store, root string) (synced, total int, err error) {
+	rootDir, err := os.OpenRoot(root)
+	if err != nil {
+		return 0, 0, fmt.Errorf("open malicious feed root: %w", err)
+	}
+	defer func() {
+		_ = rootDir.Close()
+	}()
+
 	err = filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			s.logger.Warn("walk error",
@@ -168,7 +176,16 @@ func (s *Syncer) walkEntries(ctx context.Context, store db.Store, root string) (
 		}
 		total++
 
-		data, readErr := os.ReadFile(path)
+		relativePath, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			s.logger.Warn("failed to resolve entry path",
+				slog.String("file", d.Name()),
+				slog.String("error", relErr.Error()),
+			)
+			return nil
+		}
+
+		data, readErr := rootDir.ReadFile(relativePath)
 		if readErr != nil {
 			s.logger.Warn("failed to read entry file",
 				slog.String("file", d.Name()),
@@ -186,7 +203,7 @@ func (s *Syncer) walkEntries(ctx context.Context, store db.Store, root string) (
 			return nil
 		}
 
-		mf := mapToMaliciousFinding(&entry, path)
+		mf := mapToMaliciousFinding(&entry, relativePath)
 		if mf == nil {
 			return nil
 		}

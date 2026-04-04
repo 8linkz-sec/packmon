@@ -62,7 +62,7 @@ func newDBSyncCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("open local database: %w", err)
 			}
-			defer store.Close()
+			defer closeSilently(store)
 
 			if err := sqlite.Sync(cmd.Context(), store, sqlite.SyncConfig{
 				ServerURL:  serverURL,
@@ -166,15 +166,16 @@ func newDBExportCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("open local database: %w", err)
 			}
-			defer store.Close()
+			defer closeSilently(store)
 
 			output := os.Stdout
 			if strings.TrimSpace(flagOutput) != "" {
+				// #nosec G304 -- CLI export path is supplied intentionally by the local user.
 				file, err := os.Create(flagOutput)
 				if err != nil {
 					return fmt.Errorf("create export file: %w", err)
 				}
-				defer file.Close()
+				defer closeSilently(file)
 				output = file
 			}
 

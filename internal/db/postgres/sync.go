@@ -67,7 +67,7 @@ func (s *Store) exportSyncVulnerabilities(ctx context.Context, opts db.SyncExpor
 	if err != nil {
 		return nil, fmt.Errorf("postgres: export sync vulnerabilities: %w", err)
 	}
-	defer rows.Close()
+	defer closeSilently(rows)
 
 	out := make([]db.SyncVulnerability, 0)
 	for rows.Next() {
@@ -125,7 +125,7 @@ func (s *Store) exportSyncMalicious(ctx context.Context, opts db.SyncExportOptio
 	if err != nil {
 		return nil, fmt.Errorf("postgres: export sync malicious findings: %w", err)
 	}
-	defer rows.Close()
+	defer closeSilently(rows)
 
 	out := make([]db.SyncMalicious, 0)
 	for rows.Next() {

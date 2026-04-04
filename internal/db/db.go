@@ -152,7 +152,7 @@ type Store interface {
 	ListAPIKeys(ctx context.Context) ([]APIKey, error)
 
 	// CreateAPIKey inserts a new API key and returns the assigned ID.
-	CreateAPIKey(ctx context.Context, name string, keyHash string) (int, error)
+	CreateAPIKey(ctx context.Context, name, keyHash string) (int, error)
 
 	// RevokeAPIKey marks an API key as revoked.
 	RevokeAPIKey(ctx context.Context, keyID int) error

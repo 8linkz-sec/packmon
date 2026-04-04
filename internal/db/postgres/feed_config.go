@@ -106,7 +106,7 @@ func (s *Store) ListFeedConfigs(ctx context.Context) ([]db.FeedConfig, error) {
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list feed configs: %w", err)
 	}
-	defer rows.Close()
+	defer closeSilently(rows)
 
 	out := make([]db.FeedConfig, 0)
 	for rows.Next() {

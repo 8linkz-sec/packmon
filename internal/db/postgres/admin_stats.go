@@ -47,7 +47,7 @@ func (s *Store) ListRecentScans(ctx context.Context, limit int) ([]db.ScanLogEnt
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list recent scans: %w", err)
 	}
-	defer rows.Close()
+	defer closeSilently(rows)
 
 	out := make([]db.ScanLogEntry, 0)
 	for rows.Next() {
@@ -101,7 +101,7 @@ func (s *Store) CountScansByDay(ctx context.Context, days int) ([]db.DailyScanSt
 	if err != nil {
 		return nil, fmt.Errorf("postgres: count scans by day: %w", err)
 	}
-	defer rows.Close()
+	defer closeSilently(rows)
 
 	out := make([]db.DailyScanStats, 0, days)
 	for rows.Next() {
@@ -190,7 +190,7 @@ func (s *Store) collectSearchResults(ctx context.Context, acc map[string]*db.Pac
 	if err != nil {
 		return fmt.Errorf("postgres: search packages: %w", err)
 	}
-	defer rows.Close()
+	defer closeSilently(rows)
 
 	for rows.Next() {
 		var (
@@ -253,7 +253,7 @@ func (s *Store) ListAPIKeys(ctx context.Context) ([]db.APIKey, error) {
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list API keys: %w", err)
 	}
-	defer rows.Close()
+	defer closeSilently(rows)
 
 	out := make([]db.APIKey, 0)
 	for rows.Next() {
@@ -269,7 +269,7 @@ func (s *Store) ListAPIKeys(ctx context.Context) ([]db.APIKey, error) {
 	return out, nil
 }
 
-func (s *Store) CreateAPIKey(ctx context.Context, name string, keyHash string) (int, error) {
+func (s *Store) CreateAPIKey(ctx context.Context, name, keyHash string) (int, error) {
 	var id int
 	err := s.pool.QueryRow(ctx,
 		`INSERT INTO api_keys (name, key_hash) VALUES ($1, $2) RETURNING id`,
@@ -382,7 +382,7 @@ func (s *Store) ListAdminAuditLog(ctx context.Context, limit int) ([]db.AdminAud
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list admin audit log: %w", err)
 	}
-	defer rows.Close()
+	defer closeSilently(rows)
 
 	out := make([]db.AdminAuditLogEntry, 0)
 	for rows.Next() {
@@ -436,7 +436,7 @@ func (s *Store) ListQueueJobs(ctx context.Context, status string, limit int) ([]
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list queue jobs: %w", err)
 	}
-	defer rows.Close()
+	defer closeSilently(rows)
 
 	out := make([]db.RefreshJob, 0)
 	for rows.Next() {
@@ -511,7 +511,7 @@ func (s *Store) DashboardStats(ctx context.Context) (*db.DashboardStatsResult, e
 	if err != nil {
 		return nil, fmt.Errorf("postgres: dashboard severities: %w", err)
 	}
-	defer rows.Close()
+	defer closeSilently(rows)
 
 	for rows.Next() {
 		var (

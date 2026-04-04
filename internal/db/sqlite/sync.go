@@ -154,7 +154,7 @@ func fetchSyncPage(ctx context.Context, client *http.Client, cfg SyncConfig, sin
 	if err != nil {
 		return nil, fmt.Errorf("sync: server request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer closeSilently(resp.Body)
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -210,13 +210,13 @@ func applySync(ctx context.Context, store *Store, full bool, resp *syncResponse)
 	if err != nil {
 		return fmt.Errorf("sync: prepare vuln upsert: %w", err)
 	}
-	defer vulnStmt.Close()
+	defer closeSilently(vulnStmt)
 
 	vulnDelStmt, err := tx.PrepareContext(ctx, `DELETE FROM vulnerabilities_local WHERE id = ?`)
 	if err != nil {
 		return fmt.Errorf("sync: prepare vuln delete: %w", err)
 	}
-	defer vulnDelStmt.Close()
+	defer closeSilently(vulnDelStmt)
 
 	for _, v := range resp.Vulnerabilities {
 		if v.Withdrawn {
@@ -261,13 +261,13 @@ func applySync(ctx context.Context, store *Store, full bool, resp *syncResponse)
 	if err != nil {
 		return fmt.Errorf("sync: prepare malicious upsert: %w", err)
 	}
-	defer malStmt.Close()
+	defer closeSilently(malStmt)
 
 	malDelStmt, err := tx.PrepareContext(ctx, `DELETE FROM malicious_local WHERE id = ?`)
 	if err != nil {
 		return fmt.Errorf("sync: prepare malicious delete: %w", err)
 	}
-	defer malDelStmt.Close()
+	defer closeSilently(malDelStmt)
 
 	for _, m := range resp.Malicious {
 		if m.Withdrawn {

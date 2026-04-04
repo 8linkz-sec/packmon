@@ -33,16 +33,24 @@ func NewTableWriter(noColor bool) *TableWriter {
 // Write formats the scan result as a table and writes it to w.
 func (tw *TableWriter) Write(w io.Writer, result *domain.ScanResult) error {
 	if result.Mode == "local" && result.DBAgeDays != nil && result.DBStale {
-		fmt.Fprintf(w, "\n!! ATTENTION: Local database last synced %d days ago.\n", *result.DBAgeDays)
-		fmt.Fprintln(w, "!! Results may be incomplete. Update with: packmon db sync")
+		if _, err := fmt.Fprintf(w, "\n!! ATTENTION: Local database last synced %d days ago.\n", *result.DBAgeDays); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintln(w, "!! Results may be incomplete. Update with: packmon db sync"); err != nil {
+			return err
+		}
 	}
 
 	switch result.FeedStatus {
 	case "", "healthy":
 	case "degraded":
-		fmt.Fprintln(w, "\nWARN  Server reports degraded feed status. Some feeds may be outdated.")
+		if _, err := fmt.Fprintln(w, "\nWARN  Server reports degraded feed status. Some feeds may be outdated."); err != nil {
+			return err
+		}
 	default:
-		fmt.Fprintf(w, "\n%s\n", result.FeedStatus)
+		if _, err := fmt.Fprintf(w, "\n%s\n", result.FeedStatus); err != nil {
+			return err
+		}
 	}
 
 	if len(result.Findings) == 0 {

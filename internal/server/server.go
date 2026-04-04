@@ -79,8 +79,9 @@ func New(cfg *config.Config, store db.Store, pinger health.Pinger, logger *slog.
 	metricsMux.HandleFunc("GET /metrics", telemetry.MetricsHandler(store, build.SchemaVersion))
 	metricsAddr := cfg.Metrics.Addr()
 	metricsServer := &http.Server{
-		Addr:    metricsAddr,
-		Handler: metricsMux,
+		Addr:              metricsAddr,
+		Handler:           metricsMux,
+		ReadHeaderTimeout: cfg.Server.ReadTimeout,
 	}
 
 	return &Server{

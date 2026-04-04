@@ -43,17 +43,17 @@ func New(dbPath string) (*Store, error) {
 	db.SetMaxOpenConns(1)
 
 	if err := db.Ping(); err != nil {
-		db.Close()
+		closeSilently(db)
 		return nil, fmt.Errorf("sqlite: ping %s: %w", dbPath, err)
 	}
 
 	// Create schema tables (idempotent).
 	if _, err := db.Exec(schemaSQL); err != nil {
-		db.Close()
+		closeSilently(db)
 		return nil, fmt.Errorf("sqlite: create schema: %w", err)
 	}
 	if err := migrateSchema(db); err != nil {
-		db.Close()
+		closeSilently(db)
 		return nil, err
 	}
 
@@ -93,7 +93,7 @@ func (s *Store) FindVulnerabilities(ctx context.Context, ecosystem, name, versio
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: query vulnerabilities: %w", err)
 	}
-	defer rows.Close()
+	defer closeSilently(rows)
 
 	var findings []domain.Finding
 	for rows.Next() {
@@ -161,7 +161,7 @@ func (s *Store) FindMalicious(ctx context.Context, ecosystem, name string) ([]do
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: query malicious: %w", err)
 	}
-	defer rows.Close()
+	defer closeSilently(rows)
 
 	var findings []domain.Finding
 	for rows.Next() {
@@ -390,7 +390,7 @@ func tableHasColumn(db *sql.DB, tableName, columnName string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("sqlite: inspect table %s: %w", tableName, err)
 	}
-	defer rows.Close()
+	defer closeSilently(rows)
 
 	for rows.Next() {
 		var (

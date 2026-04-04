@@ -139,40 +139,40 @@ func MetricsHandler(store db.Store, schemaVersion uint) http.HandlerFunc {
 }
 
 func writeMetrics(w *bufio.Writer, counters CounterSnapshot, statuses []db.FeedSyncStatus, jobs []db.RefreshJob, schemaVersion uint) {
-	fmt.Fprintln(w, "# HELP packmon_auth_login_failures_total Failed admin login attempts since process start.")
-	fmt.Fprintln(w, "# TYPE packmon_auth_login_failures_total counter")
-	fmt.Fprintf(w, "packmon_auth_login_failures_total %d\n", counters.AuthLoginFailures)
+	_, _ = fmt.Fprintln(w, "# HELP packmon_auth_login_failures_total Failed admin login attempts since process start.")
+	_, _ = fmt.Fprintln(w, "# TYPE packmon_auth_login_failures_total counter")
+	_, _ = fmt.Fprintf(w, "packmon_auth_login_failures_total %d\n", counters.AuthLoginFailures)
 
-	fmt.Fprintln(w, "# HELP packmon_degraded_responses_total API responses sent with feed_status=degraded.")
-	fmt.Fprintln(w, "# TYPE packmon_degraded_responses_total counter")
-	fmt.Fprintf(w, "packmon_degraded_responses_total %d\n", counters.DegradedResponses)
+	_, _ = fmt.Fprintln(w, "# HELP packmon_degraded_responses_total API responses sent with feed_status=degraded.")
+	_, _ = fmt.Fprintln(w, "# TYPE packmon_degraded_responses_total counter")
+	_, _ = fmt.Fprintf(w, "packmon_degraded_responses_total %d\n", counters.DegradedResponses)
 
-	fmt.Fprintln(w, "# HELP packmon_queue_stuck_jobs_recovered_total Queue jobs recovered from a stuck processing state.")
-	fmt.Fprintln(w, "# TYPE packmon_queue_stuck_jobs_recovered_total counter")
-	fmt.Fprintf(w, "packmon_queue_stuck_jobs_recovered_total %d\n", counters.QueueStuckRecovered)
+	_, _ = fmt.Fprintln(w, "# HELP packmon_queue_stuck_jobs_recovered_total Queue jobs recovered from a stuck processing state.")
+	_, _ = fmt.Fprintln(w, "# TYPE packmon_queue_stuck_jobs_recovered_total counter")
+	_, _ = fmt.Fprintf(w, "packmon_queue_stuck_jobs_recovered_total %d\n", counters.QueueStuckRecovered)
 
-	fmt.Fprintln(w, "# HELP packmon_db_migration_version Current database schema version expected by the running server.")
-	fmt.Fprintln(w, "# TYPE packmon_db_migration_version gauge")
-	fmt.Fprintf(w, "packmon_db_migration_version %d\n", schemaVersion)
+	_, _ = fmt.Fprintln(w, "# HELP packmon_db_migration_version Current database schema version expected by the running server.")
+	_, _ = fmt.Fprintln(w, "# TYPE packmon_db_migration_version gauge")
+	_, _ = fmt.Fprintf(w, "packmon_db_migration_version %d\n", schemaVersion)
 
 	now := time.Now().UTC()
 	timeoutFeeds := unionKeys(counters.FeedSyncTimeouts, feedNames(statuses))
 	sort.Strings(timeoutFeeds)
 
-	fmt.Fprintln(w, "# HELP packmon_feed_last_sync_timestamp Unix timestamp of the last successful or attempted feed sync.")
-	fmt.Fprintln(w, "# TYPE packmon_feed_last_sync_timestamp gauge")
+	_, _ = fmt.Fprintln(w, "# HELP packmon_feed_last_sync_timestamp Unix timestamp of the last successful or attempted feed sync.")
+	_, _ = fmt.Fprintln(w, "# TYPE packmon_feed_last_sync_timestamp gauge")
 	for _, status := range statuses {
 		if status.LastSyncAt == nil {
 			continue
 		}
-		fmt.Fprintf(w, "packmon_feed_last_sync_timestamp{feed=%q} %d\n",
+		_, _ = fmt.Fprintf(w, "packmon_feed_last_sync_timestamp{feed=%q} %d\n",
 			escapeLabelValue(status.FeedName),
 			status.LastSyncAt.UTC().Unix(),
 		)
 	}
 
-	fmt.Fprintln(w, "# HELP packmon_feed_entries_age_seconds Freshness proxy for feed data, derived from time since the last sync.")
-	fmt.Fprintln(w, "# TYPE packmon_feed_entries_age_seconds gauge")
+	_, _ = fmt.Fprintln(w, "# HELP packmon_feed_entries_age_seconds Freshness proxy for feed data, derived from time since the last sync.")
+	_, _ = fmt.Fprintln(w, "# TYPE packmon_feed_entries_age_seconds gauge")
 	for _, status := range statuses {
 		if status.LastSyncAt == nil {
 			continue
@@ -181,16 +181,16 @@ func writeMetrics(w *bufio.Writer, counters CounterSnapshot, statuses []db.FeedS
 		if ageSeconds < 0 {
 			ageSeconds = 0
 		}
-		fmt.Fprintf(w, "packmon_feed_entries_age_seconds{feed=%q} %.0f\n",
+		_, _ = fmt.Fprintf(w, "packmon_feed_entries_age_seconds{feed=%q} %.0f\n",
 			escapeLabelValue(status.FeedName),
 			ageSeconds,
 		)
 	}
 
-	fmt.Fprintln(w, "# HELP packmon_feed_sync_timeout_total Feed sync attempts that failed due to timeouts since process start.")
-	fmt.Fprintln(w, "# TYPE packmon_feed_sync_timeout_total counter")
+	_, _ = fmt.Fprintln(w, "# HELP packmon_feed_sync_timeout_total Feed sync attempts that failed due to timeouts since process start.")
+	_, _ = fmt.Fprintln(w, "# TYPE packmon_feed_sync_timeout_total counter")
 	for _, feed := range timeoutFeeds {
-		fmt.Fprintf(w, "packmon_feed_sync_timeout_total{feed=%q} %d\n",
+		_, _ = fmt.Fprintf(w, "packmon_feed_sync_timeout_total{feed=%q} %d\n",
 			escapeLabelValue(feed),
 			counters.FeedSyncTimeouts[feed],
 		)
@@ -200,8 +200,8 @@ func writeMetrics(w *bufio.Writer, counters CounterSnapshot, statuses []db.FeedS
 	errorSources := unionKeys(counters.QueueErrors, activeSources)
 	sort.Strings(errorSources)
 
-	fmt.Fprintln(w, "# HELP packmon_queue_oldest_job_seconds Age in seconds of the oldest pending or processing queue job per source.")
-	fmt.Fprintln(w, "# TYPE packmon_queue_oldest_job_seconds gauge")
+	_, _ = fmt.Fprintln(w, "# HELP packmon_queue_oldest_job_seconds Age in seconds of the oldest pending or processing queue job per source.")
+	_, _ = fmt.Fprintln(w, "# TYPE packmon_queue_oldest_job_seconds gauge")
 	for _, source := range activeSources {
 		requestedAt, ok := oldestBySource[source]
 		if !ok {
@@ -211,16 +211,16 @@ func writeMetrics(w *bufio.Writer, counters CounterSnapshot, statuses []db.FeedS
 		if ageSeconds < 0 {
 			ageSeconds = 0
 		}
-		fmt.Fprintf(w, "packmon_queue_oldest_job_seconds{source=%q} %.0f\n",
+		_, _ = fmt.Fprintf(w, "packmon_queue_oldest_job_seconds{source=%q} %.0f\n",
 			escapeLabelValue(source),
 			ageSeconds,
 		)
 	}
 
-	fmt.Fprintln(w, "# HELP packmon_queue_error_total Queue jobs that failed while being processed since process start.")
-	fmt.Fprintln(w, "# TYPE packmon_queue_error_total counter")
+	_, _ = fmt.Fprintln(w, "# HELP packmon_queue_error_total Queue jobs that failed while being processed since process start.")
+	_, _ = fmt.Fprintln(w, "# TYPE packmon_queue_error_total counter")
 	for _, source := range errorSources {
-		fmt.Fprintf(w, "packmon_queue_error_total{source=%q} %d\n",
+		_, _ = fmt.Fprintf(w, "packmon_queue_error_total{source=%q} %d\n",
 			escapeLabelValue(source),
 			counters.QueueErrors[source],
 		)

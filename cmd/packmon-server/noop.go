@@ -559,7 +559,7 @@ func (s *noopStore) ListAPIKeys(context.Context) ([]db.APIKey, error) {
 	return out, nil
 }
 
-func (s *noopStore) CreateAPIKey(_ context.Context, name string, keyHash string) (int, error) {
+func (s *noopStore) CreateAPIKey(_ context.Context, name, keyHash string) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

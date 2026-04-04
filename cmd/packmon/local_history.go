@@ -112,6 +112,7 @@ func gitOutput(dir string, args ...string) (string, error) {
 	}
 
 	cmdArgs := append([]string{"-C", dir}, args...)
+	// #nosec G204 -- command is fixed to git; arguments are internally constructed.
 	out, err := exec.Command("git", cmdArgs...).Output()
 	if err != nil {
 		return "", err

@@ -72,7 +72,7 @@ func (s *Store) CountScansByDay(ctx context.Context, days int) ([]db.DailyScanSt
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: count scans by day: %w", err)
 	}
-	defer rows.Close()
+	defer closeSilently(rows)
 
 	type aggregate struct {
 		scans    int
@@ -172,7 +172,7 @@ func (s *Store) collectSearchResults(ctx context.Context, acc map[searchKey]*db.
 	if err != nil {
 		return fmt.Errorf("sqlite: search packages: %w", err)
 	}
-	defer rows.Close()
+	defer closeSilently(rows)
 
 	for rows.Next() {
 		var (
@@ -242,7 +242,7 @@ func (s *Store) collectSeverityCounts(ctx context.Context, acc map[string]int, q
 	if err != nil {
 		return fmt.Errorf("sqlite: dashboard severities: %w", err)
 	}
-	defer rows.Close()
+	defer closeSilently(rows)
 
 	for rows.Next() {
 		var (

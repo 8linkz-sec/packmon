@@ -84,13 +84,14 @@ func (sw *SARIFWriter) Write(w io.Writer, result *domain.ScanResult) error {
 
 // WriteFile writes the SARIF output to the given file path.
 func (sw *SARIFWriter) WriteFile(path string, result *domain.ScanResult) error {
+	// #nosec G304 -- CLI output path is provided intentionally by the local user.
 	f, err := os.Create(path)
 	if err != nil {
 		return fmt.Errorf("sarif: create file %s: %w", path, err)
 	}
-	defer f.Close()
 
 	if err := sw.Write(f, result); err != nil {
+		closeSilently(f)
 		return err
 	}
 	return f.Close()

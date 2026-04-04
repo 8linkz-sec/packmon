@@ -20,10 +20,30 @@ type adminFeedFlashData struct {
 	Error   string
 }
 
+const maxAdminFormBytes = 1 << 20
+
+func parseAdminForm(w http.ResponseWriter, r *http.Request) bool {
+	if r.Body != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, maxAdminFormBytes)
+	}
+	if err := r.ParseForm(); err != nil {
+		status := http.StatusBadRequest
+		if strings.Contains(strings.ToLower(err.Error()), "request body too large") {
+			status = http.StatusRequestEntityTooLarge
+		}
+		http.Error(w, "invalid form payload", status)
+		return false
+	}
+	return true
+}
+
 // HandleFeedConfigSave handles POST /admin/feeds/save.
 func (h *AdminHandler) HandleFeedConfigSave(w http.ResponseWriter, r *http.Request) {
 	sess := h.requireAdmin(w, r)
 	if sess == nil {
+		return
+	}
+	if !parseAdminForm(w, r) {
 		return
 	}
 
@@ -32,22 +52,23 @@ func (h *AdminHandler) HandleFeedConfigSave(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	feed, err := h.desiredFeedSettings(r.Context(), r.FormValue("feed_name"))
+	feedName := r.PostForm.Get("feed_name")
+	feed, err := h.desiredFeedSettings(r.Context(), feedName)
 	if err != nil {
 		http.Redirect(w, r, "/admin/feeds?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
 		return
 	}
 
-	mode, err := config.ParseFeedMode(r.FormValue("mode"))
+	mode, err := config.ParseFeedMode(r.PostForm.Get("mode"))
 	if err != nil {
 		http.Redirect(w, r, "/admin/feeds?err="+url.QueryEscape("Invalid feed mode"), http.StatusSeeOther)
 		return
 	}
 	feed.Mode = mode
-	feed.Enabled = r.FormValue("enabled") == "on"
+	feed.Enabled = r.PostForm.Get("enabled") == "on"
 
 	if feed.SupportsSyncInterval {
-		rawInterval := strings.TrimSpace(r.FormValue("sync_interval"))
+		rawInterval := strings.TrimSpace(r.PostForm.Get("sync_interval"))
 		if rawInterval == "" {
 			feed.SyncInterval = 0
 		} else {
@@ -62,10 +83,10 @@ func (h *AdminHandler) HandleFeedConfigSave(w http.ResponseWriter, r *http.Reque
 
 	if feed.RequiresAPIKey {
 		switch {
-		case r.FormValue("clear_api_key") == "on":
+		case r.PostForm.Get("clear_api_key") == "on":
 			feed.APIKey = ""
-		case strings.TrimSpace(r.FormValue("api_key")) != "":
-			feed.APIKey = strings.TrimSpace(r.FormValue("api_key"))
+		case strings.TrimSpace(r.PostForm.Get("api_key")) != "":
+			feed.APIKey = strings.TrimSpace(r.PostForm.Get("api_key"))
 		}
 	}
 
@@ -103,13 +124,16 @@ func (h *AdminHandler) HandleFeedConfigReset(w http.ResponseWriter, r *http.Requ
 	if sess == nil {
 		return
 	}
+	if !parseAdminForm(w, r) {
+		return
+	}
 
 	if !auth.ValidateCSRF(r, sess) {
 		http.Error(w, "invalid CSRF token", http.StatusForbidden)
 		return
 	}
 
-	feedName := config.NormalizeFeedName(r.FormValue("feed_name"))
+	feedName := config.NormalizeFeedName(r.PostForm.Get("feed_name"))
 	if _, ok := h.cfg.FeedSettings(feedName); !ok {
 		http.Redirect(w, r, "/admin/feeds?err="+url.QueryEscape("Unknown feed"), http.StatusSeeOther)
 		return
@@ -131,13 +155,16 @@ func (h *AdminHandler) HandleFeedSyncNow(w http.ResponseWriter, r *http.Request)
 	if sess == nil {
 		return
 	}
+	if !parseAdminForm(w, r) {
+		return
+	}
 
 	if !auth.ValidateCSRF(r, sess) {
 		http.Error(w, "invalid CSRF token", http.StatusForbidden)
 		return
 	}
 
-	feedName := config.NormalizeFeedName(r.FormValue("feed_name"))
+	feedName := config.NormalizeFeedName(r.PostForm.Get("feed_name"))
 	feed, ok := h.cfg.FeedSettings(feedName)
 	if !ok {
 		h.respondFeedSyncResult(w, r, "", "Unknown feed", http.StatusBadRequest, false)
@@ -155,7 +182,7 @@ func (h *AdminHandler) HandleFeedSyncNow(w http.ResponseWriter, r *http.Request)
 	h.markFeedSyncRunning(r.Context(), feed.Name)
 
 	go func(feed config.FeedSettings) {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 30*time.Minute)
 		defer cancel()
 
 		if err := h.syncFeed(ctx, feed.Name); err != nil {

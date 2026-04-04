@@ -265,7 +265,7 @@ func (w *Worker) checkPackage(ctx context.Context, job *db.RefreshJob) error {
 	if err != nil {
 		return fmt.Errorf("http get: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
 	if err != nil {

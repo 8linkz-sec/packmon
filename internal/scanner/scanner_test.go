@@ -29,7 +29,7 @@ func TestCheckRemoteSendsAPIKey(t *testing.T) {
 			FeedVersions: map[string]string{},
 		})
 	}))
-	defer server.Close()
+	defer closeSilently(server)
 
 	sc := New(nil, Config{
 		ServerURL: server.URL,

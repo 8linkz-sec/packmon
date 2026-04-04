@@ -131,6 +131,14 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 // walkAdvisories traverses the advisories directory tree and processes
 // each JSON file.
 func (s *Syncer) walkAdvisories(ctx context.Context, store db.Store, root string) (synced, total int, err error) {
+	rootDir, err := os.OpenRoot(root)
+	if err != nil {
+		return 0, 0, fmt.Errorf("open advisory root: %w", err)
+	}
+	defer func() {
+		_ = rootDir.Close()
+	}()
+
 	err = filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			s.logger.Warn("walk error", slog.String("file", filepath.Base(path)), slog.String("error", walkErr.Error()))
@@ -151,7 +159,16 @@ func (s *Syncer) walkAdvisories(ctx context.Context, store db.Store, root string
 		}
 		total++
 
-		data, readErr := os.ReadFile(path)
+		relativePath, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			s.logger.Warn("failed to resolve advisory path",
+				slog.String("file", d.Name()),
+				slog.String("error", relErr.Error()),
+			)
+			return nil
+		}
+
+		data, readErr := rootDir.ReadFile(relativePath)
 		if readErr != nil {
 			s.logger.Warn("failed to read advisory file",
 				slog.String("file", d.Name()),
