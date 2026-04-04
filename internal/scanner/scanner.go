@@ -18,6 +18,13 @@ import (
 	"github.com/8linkz/packmon/internal/parser"
 )
 
+// LocalChecker is the interface required for local-mode scanning.
+// It is satisfied by the sqlite.Store type.
+type LocalChecker interface {
+	FindVulnerabilities(ctx context.Context, ecosystem, name, version string) ([]domain.Finding, error)
+	FindMalicious(ctx context.Context, ecosystem, name string) ([]domain.Finding, error)
+}
+
 // Mode controls how the scanner resolves findings.
 type Mode string
 
@@ -52,9 +59,10 @@ type Config struct {
 
 // Scanner orchestrates the walk-parse-check-format pipeline.
 type Scanner struct {
-	registry *parser.Registry
-	cfg      Config
-	client   *http.Client
+	registry     *parser.Registry
+	cfg          Config
+	client       *http.Client
+	localChecker LocalChecker
 }
 
 // New creates a Scanner with the given configuration.
@@ -66,6 +74,12 @@ func New(reg *parser.Registry, cfg Config) *Scanner {
 			Timeout: cfg.Timeout,
 		},
 	}
+}
+
+// SetLocalChecker assigns a local database for offline scanning.
+// When set, the scanner can resolve findings in local and auto modes.
+func (s *Scanner) SetLocalChecker(lc LocalChecker) {
+	s.localChecker = lc
 }
 
 // Run executes the full scan pipeline and returns the result plus an exit code.
@@ -128,14 +142,27 @@ func (s *Scanner) Run(ctx context.Context) (*domain.ScanResult, int) {
 			return s.errorResult(scanID, start, fmt.Sprintf("remote check failed: %v", checkErr)), ExitOperational
 		}
 	case ModeLocal:
-		// Local mode is not yet implemented.
-		return s.errorResult(scanID, start, "local mode not yet implemented"), ExitOperational
+		if s.localChecker == nil {
+			return s.errorResult(scanID, start, "local mode requested but no local database available (run 'packmon db sync' first)"), ExitOperational
+		}
+		findings, checkErr = s.checkLocal(ctx, allPackages)
+		if checkErr != nil {
+			return s.errorResult(scanID, start, fmt.Sprintf("local check failed: %v", checkErr)), ExitOperational
+		}
+		feedVersions = map[string]string{}
 	case ModeAuto:
 		findings, feedVersions, checkErr = s.checkRemote(ctx, allPackages)
 		if checkErr != nil {
-			// Auto mode: try local fallback. Since local is not implemented,
-			// report operational error.
-			return s.errorResult(scanID, start, fmt.Sprintf("remote check failed and local mode not yet implemented: %v", checkErr)), ExitOperational
+			// Auto mode: fall back to local database.
+			if s.localChecker == nil {
+				return s.errorResult(scanID, start, fmt.Sprintf("remote check failed and no local database available: %v", checkErr)), ExitOperational
+			}
+			findings, checkErr = s.checkLocal(ctx, allPackages)
+			if checkErr != nil {
+				return s.errorResult(scanID, start, fmt.Sprintf("remote and local check failed: %v", checkErr)), ExitOperational
+			}
+			mode = ModeLocal
+			feedVersions = map[string]string{}
 		}
 	}
 
@@ -247,6 +274,33 @@ func (s *Scanner) checkRemote(ctx context.Context, pkgs []domain.Package) ([]dom
 	}
 
 	return result.Findings, result.FeedVersions, nil
+}
+
+// checkLocal resolves findings against the local SQLite database.
+func (s *Scanner) checkLocal(ctx context.Context, pkgs []domain.Package) ([]domain.Finding, error) {
+	var allFindings []domain.Finding
+
+	for _, pkg := range pkgs {
+		eco := string(pkg.Ecosystem)
+
+		vulns, err := s.localChecker.FindVulnerabilities(ctx, eco, pkg.Name, pkg.Version)
+		if err != nil {
+			return nil, fmt.Errorf("local vuln check %s/%s: %w", eco, pkg.Name, err)
+		}
+		allFindings = append(allFindings, vulns...)
+
+		mals, err := s.localChecker.FindMalicious(ctx, eco, pkg.Name)
+		if err != nil {
+			return nil, fmt.Errorf("local malicious check %s/%s: %w", eco, pkg.Name, err)
+		}
+		// Set the version on malicious findings for consistent output.
+		for i := range mals {
+			mals[i].Version = pkg.Version
+		}
+		allFindings = append(allFindings, mals...)
+	}
+
+	return allFindings, nil
 }
 
 // hasBlockingFindings checks if any finding is blocking per DE-2 rules:
