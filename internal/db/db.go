@@ -40,6 +40,25 @@ type Store interface {
 	// DeleteMaliciousFinding removes a malicious finding by id.
 	DeleteMaliciousFinding(ctx context.Context, id string) error
 
+	// -- Vulnerability enrichment (batch updates from enrichment feeds) ---------
+
+	// SetCISAKEV marks the given CVE IDs as being in the CISA KEV catalog.
+	// IDs not present in the vulnerabilities table are silently ignored.
+	SetCISAKEV(ctx context.Context, cveIDs []string) (updated int, err error)
+
+	// ClearCISAKEV resets the cisa_kev flag to false for all vulnerabilities
+	// not in the provided set. Used during full-sync to remove stale flags.
+	ClearCISAKEV(ctx context.Context, keepIDs []string) (cleared int, err error)
+
+	// SetEPSSScores updates the epss_score and epss_percentile for the given
+	// CVEs. Each entry in the slice maps a CVE ID to its scores. IDs not
+	// present in the vulnerabilities table are silently ignored.
+	SetEPSSScores(ctx context.Context, scores []EPSSEntry) (updated int, err error)
+
+	// EnrichVulnCheck applies VulnCheck-sourced enrichment data to existing
+	// vulnerabilities: CVSS scores, exploit-exists flags, and source records.
+	EnrichVulnCheck(ctx context.Context, entries []VulnCheckEntry) (updated int, err error)
+
 	// -- Feed sync status -------------------------------------------------------
 
 	// GetFeedSyncStatus returns the sync state for the named feed.
@@ -66,6 +85,11 @@ type Store interface {
 
 	// CompleteRefresh marks a queued job as done or errored.
 	CompleteRefresh(ctx context.Context, jobID int, jobErr error) error
+
+	// ResetStuckJobs sets any job that has been in 'processing' state for
+	// longer than the given duration back to 'pending'. Returns the number
+	// of jobs reset.
+	ResetStuckJobs(ctx context.Context, source string, stuckThreshold time.Duration) (int, error)
 
 	// -- Package check status ---------------------------------------------------
 
@@ -258,4 +282,20 @@ type AdminAuditEntry struct {
 	Action  string
 	Details json.RawMessage
 	IP      string
+}
+
+// EPSSEntry holds EPSS score data for a single CVE, used by SetEPSSScores.
+type EPSSEntry struct {
+	CVEID      string
+	Score      float64
+	Percentile float64
+}
+
+// VulnCheckEntry holds enrichment data from VulnCheck for a single CVE.
+type VulnCheckEntry struct {
+	CVEID         string
+	CVSSScore     *float64
+	ExploitExists bool
+	SourceURL     string
+	RawJSON       json.RawMessage
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"time"
 
 	"github.com/8linkz/packmon/internal/db"
 	"github.com/8linkz/packmon/internal/domain"
@@ -31,6 +32,14 @@ func (*noopStore) DeleteVulnerability(context.Context, string) error { return ni
 
 func (*noopStore) DeleteMaliciousFinding(context.Context, string) error { return nil }
 
+func (*noopStore) SetCISAKEV(context.Context, []string) (int, error) { return 0, nil }
+
+func (*noopStore) ClearCISAKEV(context.Context, []string) (int, error) { return 0, nil }
+
+func (*noopStore) SetEPSSScores(context.Context, []db.EPSSEntry) (int, error) { return 0, nil }
+
+func (*noopStore) EnrichVulnCheck(context.Context, []db.VulnCheckEntry) (int, error) { return 0, nil }
+
 func (*noopStore) GetFeedSyncStatus(context.Context, string) (*db.FeedSyncStatus, error) {
 	return nil, nil
 }
@@ -50,6 +59,10 @@ func (*noopStore) DequeueRefresh(context.Context, string) (*db.RefreshJob, error
 }
 
 func (*noopStore) CompleteRefresh(context.Context, int, error) error { return nil }
+
+func (*noopStore) ResetStuckJobs(context.Context, string, time.Duration) (int, error) {
+	return 0, nil
+}
 
 func (*noopStore) GetPackageCheckStatus(context.Context, string, string, string) (*db.PackageCheckStatus, error) {
 	return nil, nil

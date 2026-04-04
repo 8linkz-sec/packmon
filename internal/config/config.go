@@ -6,7 +6,9 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -26,6 +28,46 @@ type Config struct {
 	Metrics  MetricsConfig
 	Admin    AdminConfig
 	FeedSync FeedSyncConfig
+	Feeds    FeedsConfig
+}
+
+// FeedMode controls whether the server runs a feed syncer itself or
+// expects an external system (e.g. N8N) to push data. See DE-18.
+type FeedMode string
+
+const (
+	FeedModeSelf     FeedMode = "self"
+	FeedModeExternal FeedMode = "external"
+)
+
+// FeedsConfig holds per-feed settings including API keys, enabled state,
+// and per-feed sync mode (self vs. external).
+type FeedsConfig struct {
+	// DataDir is the directory where feed syncers store cloned repos and
+	// other working data. Defaults to os.TempDir()/packmon-feeds.
+	DataDir string
+
+	// Per-feed enabled flags.
+	OSVEnabled       bool
+	GHSAEnabled      bool
+	MaliciousEnabled bool
+	VulnCheckEnabled bool
+	SocketEnabled    bool
+	CISAKEVEnabled   bool
+	EPSSEnabled      bool
+
+	// Per-feed mode: "self" (server syncs) or "external" (N8N pushes).
+	OSVMode       FeedMode
+	GHSAMode      FeedMode
+	MaliciousMode FeedMode
+	VulnCheckMode FeedMode
+	CISAKEVMode   FeedMode
+	EPSSMode      FeedMode
+	SocketMode    FeedMode
+
+	// API keys for feeds that require authentication.
+	VulnCheckAPIKey string
+	SocketAPIKey    string
 }
 
 // ServerConfig groups HTTP server settings.
@@ -163,6 +205,29 @@ func Load() (*Config, error) {
 			Interval:  syncInterval,
 			OnStartup: envBoolOrDefault("PACKMON_FEED_SYNC_ON_STARTUP", true),
 		},
+		Feeds: FeedsConfig{
+			DataDir: envOrDefault("PACKMON_FEED_DATA_DIR",
+				filepath.Join(os.TempDir(), "packmon-feeds")),
+
+			OSVEnabled:       envBoolOrDefault("PACKMON_FEED_OSV_ENABLED", true),
+			GHSAEnabled:      envBoolOrDefault("PACKMON_FEED_GHSA_ENABLED", true),
+			MaliciousEnabled: envBoolOrDefault("PACKMON_FEED_MALICIOUS_ENABLED", true),
+			VulnCheckEnabled: envBoolOrDefault("PACKMON_FEED_VULNCHECK_ENABLED", true),
+			SocketEnabled:    envBoolOrDefault("PACKMON_FEED_SOCKET_ENABLED", false),
+			CISAKEVEnabled:   envBoolOrDefault("PACKMON_FEED_CISAKEV_ENABLED", true),
+			EPSSEnabled:      envBoolOrDefault("PACKMON_FEED_EPSS_ENABLED", true),
+
+			OSVMode:       parseFeedMode("PACKMON_FEED_OSV_MODE"),
+			GHSAMode:      parseFeedMode("PACKMON_FEED_GHSA_MODE"),
+			MaliciousMode: parseFeedMode("PACKMON_FEED_MALICIOUS_MODE"),
+			VulnCheckMode: parseFeedMode("PACKMON_FEED_VULNCHECK_MODE"),
+			CISAKEVMode:   parseFeedMode("PACKMON_FEED_CISAKEV_MODE"),
+			EPSSMode:      parseFeedMode("PACKMON_FEED_EPSS_MODE"),
+			SocketMode:    parseFeedMode("PACKMON_FEED_SOCKET_MODE"),
+
+			VulnCheckAPIKey: os.Getenv("PACKMON_VULNCHECK_API_KEY"),
+			SocketAPIKey:    os.Getenv("PACKMON_SOCKET_API_KEY"),
+		},
 	}
 
 	return cfg, nil
@@ -216,4 +281,14 @@ func envBoolOrDefault(key string, fallback bool) bool {
 		return fallback
 	}
 	return b
+}
+
+// parseFeedMode reads a feed mode from an environment variable.
+// Valid values are "self" and "external". Default is "self".
+func parseFeedMode(key string) FeedMode {
+	v := strings.ToLower(os.Getenv(key))
+	if v == "external" {
+		return FeedModeExternal
+	}
+	return FeedModeSelf
 }
