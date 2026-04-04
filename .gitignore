@@ -1,0 +1,31 @@
+# Claude
+.claude/
+CLAUDE.md
+Phase *.md
+
+# Docker
+docker-compose.yml
+docker-compose.override.yml
+
+# Binaries (root only, not cmd/ directories)
+/packmon
+/packmon.exe
+/packmon-server
+/packmon-server.exe
+/dist/
+
+# Go
+coverage.out
+*.test
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
