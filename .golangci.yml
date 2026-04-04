@@ -1,22 +1,23 @@
 version: "2"
 
-run:
-  timeout: 5m
-
 linters:
+  default: none
   enable:
     - errcheck
-    - gofumpt
     - gosec
     - govet
     - ineffassign
     - misspell
     - staticcheck
     - unused
+  settings:
+    gosec:
+      excludes:
+        - G104
 
-linters-settings:
-  gofumpt:
-    extra-rules: true
-  gosec:
-    excludes:
-      - G104
+formatters:
+  enable:
+    - gofumpt
+  settings:
+    gofumpt:
+      extra-rules: true
