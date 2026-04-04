@@ -4,8 +4,8 @@ import "time"
 
 // ScanRequest is the input for a scan via API or CLI.
 type ScanRequest struct {
-	Packages []Package    `json:"packages"`
-	Repo     *RepoInfo    `json:"repo,omitempty"`
+	Packages []Package `json:"packages"`
+	Repo     *RepoInfo `json:"repo,omitempty"`
 }
 
 // RepoInfo contains optional repository metadata sent with a scan.
