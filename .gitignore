@@ -7,6 +7,9 @@ Phase *.md
 docker-compose.yml
 docker-compose.override.yml
 
+# Secrets
+.env
+
 # Binaries (root only, not cmd/ directories)
 /packmon
 /packmon.exe

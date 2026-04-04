@@ -1,0 +1,416 @@
+openapi: "3.2.0"
+info:
+  title: Packmon API
+  description: Dependency Security Scanner API
+  version: "1.0.0"
+  license:
+    name: Private
+    identifier: LicenseRef-Private
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+
+security:
+  - bearerAuth: []
+
+paths:
+  /api/v1/check:
+    post:
+      summary: Check packages for vulnerabilities and malicious findings
+      operationId: checkPackages
+      tags: [scan]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ScanRequest"
+      responses:
+        "200":
+          description: Scan completed
+          headers:
+            X-Correlation-ID:
+              schema:
+                type: string
+            X-Scan-Duration-Ms:
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScanResult"
+        "400":
+          description: Invalid request (malformed JSON, too many packages)
+        "401":
+          description: Missing or invalid API key
+        "429":
+          description: Rate limit exceeded
+
+  /api/v1/feeds/status:
+    get:
+      summary: Get status of all feed sources
+      operationId: getFeedStatus
+      tags: [feeds]
+      responses:
+        "200":
+          description: Feed status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeedStatusResponse"
+
+  /api/v1/feeds/{feed}/import:
+    post:
+      summary: Import feed data (for N8N integration)
+      operationId: importFeed
+      tags: [feeds]
+      parameters:
+        - name: feed
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [osv, ghsa, malicious, vulncheck, cisakev, epss, socket]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: Import accepted
+        "401":
+          description: Missing or invalid API key
+
+  /api/v1/packages/{ecosystem}/{name}:
+    get:
+      summary: Get package details and findings
+      operationId: getPackage
+      tags: [packages]
+      parameters:
+        - name: ecosystem
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/Ecosystem"
+        - name: name
+          in: path
+          required: true
+          description: "Package name (catch-all, supports scoped names like @types/node)"
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Package details
+        "404":
+          description: Package not found
+
+  /api/v1/packages/{ecosystem}/{name}/refresh:
+    post:
+      summary: Trigger async re-check for a package
+      operationId: refreshPackage
+      tags: [packages]
+      parameters:
+        - name: ecosystem
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/Ecosystem"
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Refresh queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RefreshResponse"
+        "429":
+          description: Rate limit exceeded
+
+  /api/v1/sync:
+    get:
+      summary: Sync endpoint for local client database
+      operationId: syncDatabase
+      tags: [sync]
+      parameters:
+        - name: since
+          in: query
+          description: "ISO 8601 timestamp for delta sync"
+          schema:
+            type: string
+            format: date-time
+        - name: ecosystem
+          in: query
+          description: "Filter by ecosystem"
+          schema:
+            $ref: "#/components/schemas/Ecosystem"
+      responses:
+        "200":
+          description: Sync data stream
+
+  /healthz:
+    get:
+      summary: Liveness probe
+      operationId: healthz
+      tags: [operations]
+      security: []
+      responses:
+        "200":
+          description: Alive
+
+  /readyz:
+    get:
+      summary: Readiness probe
+      operationId: readyz
+      tags: [operations]
+      security: []
+      responses:
+        "200":
+          description: Ready
+        "503":
+          description: Not ready
+
+  /version:
+    get:
+      summary: Build info
+      operationId: version
+      tags: [operations]
+      security: []
+      responses:
+        "200":
+          description: Version info
+
+  /metrics:
+    get:
+      summary: Prometheus metrics
+      operationId: metrics
+      tags: [operations]
+      security: []
+      responses:
+        "200":
+          description: Prometheus metrics
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+
+  schemas:
+    Ecosystem:
+      type: string
+      enum:
+        - npm
+        - pypi
+        - go
+        - maven
+        - cargo
+        - nuget
+        - composer
+        - gem
+        - pub
+        - cocoapods
+        - swiftpm
+        - hex
+        - cran
+
+    ScanRequest:
+      type: object
+      required: [packages]
+      properties:
+        packages:
+          type: array
+          items:
+            $ref: "#/components/schemas/Package"
+          maxItems: 5000
+        repo:
+          $ref: "#/components/schemas/RepoInfo"
+
+    Package:
+      type: object
+      required: [name, version, ecosystem]
+      properties:
+        name:
+          type: string
+        version:
+          type: string
+        ecosystem:
+          $ref: "#/components/schemas/Ecosystem"
+
+    RepoInfo:
+      type: object
+      properties:
+        name:
+          type: string
+        branch:
+          type: string
+        commit:
+          type: string
+
+    ScanResult:
+      type: object
+      required:
+        - scan_id
+        - mode
+        - scanned_at
+        - duration_ms
+        - packages_scanned
+        - findings_count
+        - findings_blocking
+        - feed_status
+        - db_stale
+        - summary
+        - findings
+        - feed_versions
+        - manual_advisories_count
+      properties:
+        scan_id:
+          type: string
+        mode:
+          type: string
+          enum: [remote, local]
+        scanned_at:
+          type: string
+          format: date-time
+        duration_ms:
+          type: integer
+        packages_scanned:
+          type: integer
+        findings_count:
+          type: integer
+        findings_blocking:
+          type: boolean
+        feed_status:
+          type: string
+          enum: [healthy, degraded]
+        db_age_days:
+          type: integer
+          nullable: true
+        db_stale:
+          type: boolean
+        summary:
+          $ref: "#/components/schemas/ScanSummary"
+        findings:
+          type: array
+          items:
+            $ref: "#/components/schemas/Finding"
+        feed_versions:
+          type: object
+          additionalProperties:
+            type: string
+            format: date-time
+        manual_advisories_count:
+          type: integer
+
+    ScanSummary:
+      type: object
+      properties:
+        by_severity:
+          type: object
+          additionalProperties:
+            type: integer
+        by_type:
+          type: object
+          additionalProperties:
+            type: integer
+        by_source:
+          type: object
+          additionalProperties:
+            type: integer
+
+    Finding:
+      type: object
+      required: [name, version, ecosystem, type, severity, title, source]
+      properties:
+        name:
+          type: string
+        version:
+          type: string
+        ecosystem:
+          $ref: "#/components/schemas/Ecosystem"
+        type:
+          type: string
+          enum: [vulnerability, malicious]
+        severity:
+          type: string
+          enum: [CRITICAL, HIGH, MEDIUM, LOW, UNKNOWN]
+        advisory_id:
+          type: string
+          description: "CVE/GHSA ID (vulnerability only)"
+        title:
+          type: string
+        url:
+          type: string
+          format: uri
+        fixed_version:
+          type: string
+          description: "Version that fixes the vulnerability (vulnerability only)"
+        risk_type:
+          type: string
+          enum: [malware, typosquatting, supply_chain]
+          description: "Threat category (malicious only)"
+        source:
+          type: string
+          description: "Feed source: osv, ghsa, vulncheck, openssf, socket, manual"
+
+    RefreshResponse:
+      type: object
+      properties:
+        queued:
+          type: boolean
+        new:
+          type: boolean
+        position:
+          type: integer
+        message:
+          type: string
+
+    FeedStatusResponse:
+      type: object
+      properties:
+        feeds:
+          type: array
+          items:
+            $ref: "#/components/schemas/FeedStatus"
+
+    FeedStatus:
+      type: object
+      properties:
+        name:
+          type: string
+        status:
+          type: string
+          enum: [healthy, warning, error]
+        last_sync_at:
+          type: string
+          format: date-time
+          nullable: true
+        entries_count:
+          type: integer
+        message:
+          type: string
+
+    WebhookEnvelope:
+      type: object
+      required: [event, version, timestamp, source, result]
+      properties:
+        event:
+          type: string
+          enum: [scan_completed]
+        version:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        source:
+          type: string
+        repository:
+          $ref: "#/components/schemas/RepoInfo"
+        result:
+          $ref: "#/components/schemas/ScanResult"
