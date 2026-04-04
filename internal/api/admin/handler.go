@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/8linkz/packmon/internal/auth"
+	"github.com/8linkz/packmon/internal/config"
 	"github.com/8linkz/packmon/internal/db"
 	"github.com/8linkz/packmon/internal/telemetry"
 	"github.com/8linkz/packmon/internal/web"
@@ -38,6 +39,7 @@ type AdminHandler struct {
 	sm       *auth.SessionManager
 	renderer *web.Renderer
 	logger   *slog.Logger
+	cfg      *config.Config
 
 	// loginMu protects the loginAttempts map.
 	loginMu       sync.Mutex
@@ -45,7 +47,7 @@ type AdminHandler struct {
 }
 
 // NewAdminHandler creates an AdminHandler with the given dependencies.
-func NewAdminHandler(store db.Store, sm *auth.SessionManager, renderer *web.Renderer, logger *slog.Logger) *AdminHandler {
+func NewAdminHandler(store db.Store, sm *auth.SessionManager, renderer *web.Renderer, logger *slog.Logger, cfg *config.Config) *AdminHandler {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -54,6 +56,7 @@ func NewAdminHandler(store db.Store, sm *auth.SessionManager, renderer *web.Rend
 		sm:            sm,
 		renderer:      renderer,
 		logger:        logger,
+		cfg:           cfg,
 		loginAttempts: make(map[string]*loginAttempt),
 	}
 	// Background goroutine to evict stale lockout entries.
@@ -252,7 +255,7 @@ func (h *AdminHandler) HandleDashboard(w http.ResponseWriter, r *http.Request) {
 	for _, f := range feeds {
 		row := adminFeedRow{
 			FeedName:     f.FeedName,
-			Status:       adminFeedHealth(f),
+			Status:       adminFeedHealth(true, "", &f),
 			EntriesTotal: f.EntriesTotal,
 		}
 		if f.LastSyncAt != nil {
@@ -286,23 +289,34 @@ func (h *AdminHandler) HandleDashboard(w http.ResponseWriter, r *http.Request) {
 
 // adminFeedRow is a view model for feed status rows in admin templates.
 type adminFeedRow struct {
-	FeedName       string
-	Status         string
-	LastSyncAt     *time.Time
-	LastSyncAtTime time.Time
-	LastSyncStatus string
-	EntriesSynced  int
-	EntriesTotal   int
-	LastError      string
-	DurationStr    string
+	FeedName        string
+	Status          string
+	LastSyncAt      *time.Time
+	LastSyncAtTime  time.Time
+	LastSyncStatus  string
+	EntriesSynced   int
+	EntriesTotal    int
+	LastError       string
+	DurationStr     string
+	ConfigMode      string
+	ConfigEnabled   bool
+	APIKeyState     string
+	FeedKey         string
+	SyncIntervalStr string
 }
 
 // adminFeedHealth derives a health string from sync status for admin views.
-func adminFeedHealth(s db.FeedSyncStatus) string {
-	if s.LastSyncStatus == "error" {
-		return "error"
+func adminFeedHealth(enabled bool, mode config.FeedMode, s *db.FeedSyncStatus) string {
+	if !enabled {
+		return "disabled"
 	}
-	if s.LastSyncAt == nil {
+	if s == nil || s.LastSyncAt == nil {
+		if mode == config.FeedModeExternal {
+			return "configured"
+		}
+		return "pending"
+	}
+	if s.LastSyncStatus == "error" {
 		return "error"
 	}
 	if time.Since(*s.LastSyncAt) > 48*time.Hour {

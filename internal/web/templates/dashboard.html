@@ -40,7 +40,7 @@
   {{end}}
 
   <!-- Scan trend (last 7 days) -->
-  {{if .DailyStats}}
+  {{if gt .TotalScans7d 0}}
   <div class="bg-white rounded-lg shadow p-5 border border-gray-200">
     <h2 class="text-lg font-semibold mb-3">Scan Activity (Last 7 Days)</h2>
     <div class="overflow-x-auto">
@@ -71,6 +71,10 @@
         </tbody>
       </table>
     </div>
+  </div>
+  {{else}}
+  <div class="bg-white rounded-lg shadow p-5 border border-gray-200 text-center text-gray-400 py-10">
+    No scan activity yet.
   </div>
   {{end}}
 

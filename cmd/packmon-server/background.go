@@ -60,36 +60,12 @@ func (b *backgroundServices) Wait() {
 func newFeedManager(cfg *config.Config, store db.Store, logger *slog.Logger) *feed.Manager {
 	manager := feed.NewManager(store, logger.With("component", "feed_manager"), cfg.FeedSync.Interval)
 
-	manager.Register(feed.FeedConfig{
-		Syncer:  osv.NewSyncer(store, logger),
-		Mode:    feed.FeedMode(cfg.Feeds.OSVMode),
-		Enabled: cfg.Feeds.OSVEnabled,
-	})
-	manager.Register(feed.FeedConfig{
-		Syncer:  ghsa.NewSyncer(store, logger, cfg.Feeds.DataDir),
-		Mode:    feed.FeedMode(cfg.Feeds.GHSAMode),
-		Enabled: cfg.Feeds.GHSAEnabled,
-	})
-	manager.Register(feed.FeedConfig{
-		Syncer:  malicious.NewSyncer(store, logger, cfg.Feeds.DataDir),
-		Mode:    feed.FeedMode(cfg.Feeds.MaliciousMode),
-		Enabled: cfg.Feeds.MaliciousEnabled,
-	})
-	manager.Register(feed.FeedConfig{
-		Syncer:  vulncheck.NewSyncer(cfg.Feeds.VulnCheckAPIKey, logger),
-		Mode:    feed.FeedMode(cfg.Feeds.VulnCheckMode),
-		Enabled: cfg.Feeds.VulnCheckEnabled,
-	})
-	manager.Register(feed.FeedConfig{
-		Syncer:  cisakev.NewSyncer(logger),
-		Mode:    feed.FeedMode(cfg.Feeds.CISAKEVMode),
-		Enabled: cfg.Feeds.CISAKEVEnabled,
-	})
-	manager.Register(feed.FeedConfig{
-		Syncer:  epss.NewSyncer(logger),
-		Mode:    feed.FeedMode(cfg.Feeds.EPSSMode),
-		Enabled: cfg.Feeds.EPSSEnabled,
-	})
+	registerFeedSyncer(manager, cfg, "osv", osv.NewSyncer(store, logger))
+	registerFeedSyncer(manager, cfg, "ghsa", ghsa.NewSyncer(store, logger, cfg.Feeds.DataDir))
+	registerFeedSyncer(manager, cfg, "malicious", malicious.NewSyncer(store, logger, cfg.Feeds.DataDir))
+	registerFeedSyncer(manager, cfg, "vulncheck", vulncheck.NewSyncer(cfg.Feeds.VulnCheckAPIKey, logger))
+	registerFeedSyncer(manager, cfg, "cisakev", cisakev.NewSyncer(logger))
+	registerFeedSyncer(manager, cfg, "epss", epss.NewSyncer(logger))
 
 	return manager
 }
@@ -103,4 +79,23 @@ func newQueueProcessor(cfg *config.Config, store db.Store, logger *slog.Logger) 
 		return nil
 	}
 	return feed.NewQueueProcessor(store, logger, workers)
+}
+
+func registerFeedSyncer(manager *feed.Manager, cfg *config.Config, name string, syncer feed.FeedSyncer) {
+	settings, ok := cfg.FeedSettings(name)
+	if !ok {
+		return
+	}
+
+	feedCfg := feed.FeedConfig{
+		Syncer:  syncer,
+		Mode:    feed.FeedMode(settings.Mode),
+		Enabled: settings.Enabled,
+	}
+
+	if interval := cfg.EffectiveFeedInterval(name); interval > 0 && settings.SupportsSyncInterval {
+		manager.RegisterWithInterval(feedCfg, interval)
+		return
+	}
+	manager.Register(feedCfg)
 }

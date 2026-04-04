@@ -66,6 +66,15 @@ type FeedsConfig struct {
 	EPSSMode      FeedMode
 	SocketMode    FeedMode
 
+	// Optional per-feed sync interval overrides. Zero means "use
+	// PACKMON_FEED_SYNC_INTERVAL".
+	OSVInterval       time.Duration
+	GHSAInterval      time.Duration
+	MaliciousInterval time.Duration
+	VulnCheckInterval time.Duration
+	CISAKEVInterval   time.Duration
+	EPSSInterval      time.Duration
+
 	// API keys for feeds that require authentication.
 	VulnCheckAPIKey string
 	SocketAPIKey    string

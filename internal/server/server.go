@@ -63,7 +63,7 @@ func New(cfg *config.Config, store db.Store, pinger health.Pinger, logger *slog.
 	// -- Register routes ------------------------------------------------------
 	mux := http.NewServeMux()
 	hc := health.NewChecker(pinger)
-	registerRoutes(mux, hc, store, sm, logger, build)
+	registerRoutes(mux, hc, cfg, store, sm, logger, build)
 
 	mainAddr := fmt.Sprintf(":%d", cfg.Server.Port)
 	mainServer := &http.Server{

@@ -5,8 +5,7 @@ Phase *.md
 CONTRIBUTING.md
 
 # Docker
-docker-compose.yml
-docker-compose.override.yml
+
 
 # Secrets
 .env

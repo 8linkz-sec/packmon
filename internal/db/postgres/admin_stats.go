@@ -292,6 +292,20 @@ func (s *Store) RevokeAPIKey(ctx context.Context, keyID int) error {
 	return nil
 }
 
+func (s *Store) DeleteAPIKey(ctx context.Context, keyID int) error {
+	tag, err := s.pool.Exec(ctx,
+		`DELETE FROM api_keys WHERE id = $1 AND revoked_at IS NOT NULL`,
+		keyID,
+	)
+	if err != nil {
+		return fmt.Errorf("postgres: delete API key %d: %w", keyID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("postgres: delete API key %d: key not found or not revoked", keyID)
+	}
+	return nil
+}
+
 func (s *Store) GetAdminAuth(ctx context.Context) (*db.AdminAuth, error) {
 	const query = `
 		SELECT password_hash, created_at, password_changed_at, last_login_at

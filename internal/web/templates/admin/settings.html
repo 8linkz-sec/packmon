@@ -104,12 +104,36 @@
         <dd class="font-medium">{{.SyncInterval}}</dd>
       </div>
       <div class="flex justify-between sm:block">
+        <dt class="text-gray-500">Feed Sync On Startup</dt>
+        <dd class="font-medium">{{.FeedSyncOnStartup}}</dd>
+      </div>
+      <div class="flex justify-between sm:block">
+        <dt class="text-gray-500">Admin Session Timeout</dt>
+        <dd class="font-medium">{{.AdminSessionTimeout}}</dd>
+      </div>
+      <div class="flex justify-between sm:block">
+        <dt class="text-gray-500">Metrics Address</dt>
+        <dd class="font-medium">{{.MetricsAddr}}</dd>
+      </div>
+      <div class="flex justify-between sm:block">
+        <dt class="text-gray-500">Database Host</dt>
+        <dd class="font-medium">{{.DatabaseHost}}</dd>
+      </div>
+      <div class="flex justify-between sm:block">
+        <dt class="text-gray-500">Database Name</dt>
+        <dd class="font-medium">{{.DatabaseName}}</dd>
+      </div>
+      <div class="flex justify-between sm:block">
+        <dt class="text-gray-500">Database SSL Mode</dt>
+        <dd class="font-medium">{{.DatabaseSSLMode}}</dd>
+      </div>
+      <div class="flex justify-between sm:block">
         <dt class="text-gray-500">Admin Last Login</dt>
-        <dd class="font-medium">{{if .LastLoginAt}}{{formatTime .LastLoginAt}}{{else}}never{{end}}</dd>
+        <dd class="font-medium">{{if .HasLastLoginAt}}{{formatTime .LastLoginAt}}{{else}}never{{end}}</dd>
       </div>
       <div class="flex justify-between sm:block">
         <dt class="text-gray-500">Password Changed</dt>
-        <dd class="font-medium">{{if .PasswordChangedAt}}{{formatTime .PasswordChangedAt}}{{else}}never{{end}}</dd>
+        <dd class="font-medium">{{if .HasPasswordChangedAt}}{{formatTime .PasswordChangedAt}}{{else}}never{{end}}</dd>
       </div>
     </dl>
   </div>

@@ -22,6 +22,7 @@ type noopStore struct {
 	adminAuth    *db.AdminAuth
 	apiKeys      []db.APIKey
 	auditLog     []db.AdminAuditLogEntry
+	feedConfigs  map[string]db.FeedConfig
 	feedStatuses map[string]db.FeedSyncStatus
 	malicious    map[string]db.MaliciousFinding
 	scanLogs     []db.ScanLogEntry
@@ -36,6 +37,7 @@ var _ db.Store = (*noopStore)(nil)
 
 func newNoopStore() *noopStore {
 	return &noopStore{
+		feedConfigs:  make(map[string]db.FeedConfig),
 		feedStatuses: make(map[string]db.FeedSyncStatus),
 		malicious:    make(map[string]db.MaliciousFinding),
 	}
@@ -177,6 +179,69 @@ func (s *noopStore) ListFeedSyncStatuses(context.Context) ([]db.FeedSyncStatus, 
 	}
 
 	slices.SortFunc(out, func(a, b db.FeedSyncStatus) int {
+		return strings.Compare(a.FeedName, b.FeedName)
+	})
+	return out, nil
+}
+
+func (s *noopStore) GetFeedConfig(_ context.Context, feedName string) (*db.FeedConfig, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	item, ok := s.feedConfigs[strings.ToLower(strings.TrimSpace(feedName))]
+	if !ok {
+		return nil, nil
+	}
+	copyValue := item
+	if item.SyncInterval != nil {
+		duration := *item.SyncInterval
+		copyValue.SyncInterval = &duration
+	}
+	return &copyValue, nil
+}
+
+func (s *noopStore) UpsertFeedConfig(_ context.Context, cfg *db.FeedConfig) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if cfg == nil || strings.TrimSpace(cfg.FeedName) == "" {
+		return nil
+	}
+
+	copyValue := *cfg
+	copyValue.FeedName = strings.ToLower(strings.TrimSpace(copyValue.FeedName))
+	copyValue.UpdatedAt = time.Now().UTC()
+	if cfg.SyncInterval != nil {
+		duration := *cfg.SyncInterval
+		copyValue.SyncInterval = &duration
+	}
+	s.feedConfigs[copyValue.FeedName] = copyValue
+	return nil
+}
+
+func (s *noopStore) DeleteFeedConfig(_ context.Context, feedName string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	delete(s.feedConfigs, strings.ToLower(strings.TrimSpace(feedName)))
+	return nil
+}
+
+func (s *noopStore) ListFeedConfigs(context.Context) ([]db.FeedConfig, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	out := make([]db.FeedConfig, 0, len(s.feedConfigs))
+	for _, item := range s.feedConfigs {
+		copyValue := item
+		if item.SyncInterval != nil {
+			duration := *item.SyncInterval
+			copyValue.SyncInterval = &duration
+		}
+		out = append(out, copyValue)
+	}
+
+	slices.SortFunc(out, func(a, b db.FeedConfig) int {
 		return strings.Compare(a.FeedName, b.FeedName)
 	})
 	return out, nil
@@ -521,6 +586,23 @@ func (s *noopStore) RevokeAPIKey(_ context.Context, keyID int) error {
 		break
 	}
 	return nil
+}
+
+func (s *noopStore) DeleteAPIKey(_ context.Context, keyID int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for i := range s.apiKeys {
+		if s.apiKeys[i].ID != keyID {
+			continue
+		}
+		if s.apiKeys[i].RevokedAt == nil {
+			return fmt.Errorf("api key %d is not revoked", keyID)
+		}
+		s.apiKeys = append(s.apiKeys[:i], s.apiKeys[i+1:]...)
+		return nil
+	}
+	return fmt.Errorf("api key %d not found", keyID)
 }
 
 func (s *noopStore) GetAdminAuth(context.Context) (*db.AdminAuth, error) {

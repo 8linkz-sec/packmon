@@ -146,6 +146,10 @@ func run() error {
 		return fmt.Errorf("bootstrap admin auth: %w", err)
 	}
 
+	if err := applyStoredFeedConfigOverrides(context.Background(), cfg, store, logger); err != nil {
+		return fmt.Errorf("apply stored feed config overrides: %w", err)
+	}
+
 	build := server.BuildInfo{
 		Version:       version,
 		Commit:        commit,

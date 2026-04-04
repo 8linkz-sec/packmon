@@ -48,31 +48,23 @@ func (h *AdminHandler) HandleAdminFeeds(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		h.logger.Error("admin feeds: failed to load statuses", "error", err)
 	}
-
-	rows := make([]adminFeedRow, 0, len(feeds))
-	for _, f := range feeds {
-		row := adminFeedRow{
-			FeedName:       f.FeedName,
-			Status:         adminFeedHealth(f),
-			LastSyncStatus: f.LastSyncStatus,
-			EntriesSynced:  f.EntriesSynced,
-			EntriesTotal:   f.EntriesTotal,
-			LastError:      f.LastError,
-		}
-		if f.LastSyncAt != nil {
-			row.LastSyncAt = f.LastSyncAt
-			row.LastSyncAtTime = *f.LastSyncAt
-		}
-		if f.LastSyncDuration != nil {
-			row.DurationStr = f.LastSyncDuration.Round(time.Millisecond).String()
-		}
-		rows = append(rows, row)
+	overrides, err := h.store.ListFeedConfigs(ctx)
+	if err != nil {
+		h.logger.Error("admin feeds: failed to load config overrides", "error", err)
+	}
+	defaultSyncInterval := "unknown"
+	if h.cfg != nil {
+		defaultSyncInterval = formatRuntimeDuration(h.cfg.FeedSync.Interval)
 	}
 
 	data := map[string]any{
-		"ActiveNav": "admin",
-		"CSRFToken": csrfToken,
-		"Feeds":     rows,
+		"ActiveNav":           "admin",
+		"CSRFToken":           csrfToken,
+		"Feeds":               h.adminFeedRows(feeds),
+		"EditableFeeds":       h.adminFeedFormRows(overrides),
+		"DefaultSyncInterval": defaultSyncInterval,
+		"Message":             r.URL.Query().Get("msg"),
+		"Error":               r.URL.Query().Get("err"),
 	}
 	h.renderAdmin(w, "admin/feeds.html", data)
 }
@@ -248,6 +240,36 @@ func (h *AdminHandler) HandleKeyRevoke(w http.ResponseWriter, r *http.Request) {
 	h.auditLog(r, "api_key_revoke", map[string]string{"key_id": keyIDStr})
 
 	http.Redirect(w, r, "/admin/keys?msg=Key+revoked", http.StatusSeeOther)
+}
+
+// HandleKeyDelete handles POST /admin/keys/delete.
+func (h *AdminHandler) HandleKeyDelete(w http.ResponseWriter, r *http.Request) {
+	sess := h.requireAdmin(w, r)
+	if sess == nil {
+		return
+	}
+
+	if !auth.ValidateCSRF(r, sess) {
+		http.Error(w, "invalid CSRF token", http.StatusForbidden)
+		return
+	}
+
+	keyIDStr := r.FormValue("key_id")
+	keyID, err := strconv.Atoi(keyIDStr)
+	if err != nil {
+		http.Redirect(w, r, "/admin/keys?err=Invalid+key+ID", http.StatusSeeOther)
+		return
+	}
+
+	if err := h.store.DeleteAPIKey(r.Context(), keyID); err != nil {
+		h.logger.Error("admin keys: failed to delete key", "error", err, "key_id", keyID)
+		http.Redirect(w, r, "/admin/keys?err=Failed+to+delete+key", http.StatusSeeOther)
+		return
+	}
+
+	h.auditLog(r, "api_key_delete", map[string]string{"key_id": keyIDStr})
+
+	http.Redirect(w, r, "/admin/keys?msg=Key+deleted", http.StatusSeeOther)
 }
 
 // HandleAdminAdvisories serves GET /admin/advisories with the manual advisory form.
@@ -438,25 +460,59 @@ func (h *AdminHandler) HandleAdminSettings(w http.ResponseWriter, r *http.Reques
 		h.logger.Error("admin settings: failed to get auth info", "error", err)
 	}
 
-	var lastLoginAt, passwordChangedAt time.Time
+	var (
+		lastLoginAt          time.Time
+		passwordChangedAt    time.Time
+		hasLastLoginAt       bool
+		hasPasswordChangedAt bool
+	)
 	if adminAuth != nil {
 		if adminAuth.LastLoginAt != nil {
 			lastLoginAt = *adminAuth.LastLoginAt
+			hasLastLoginAt = true
 		}
 		if adminAuth.PasswordChangedAt != nil {
 			passwordChangedAt = *adminAuth.PasswordChangedAt
+			hasPasswordChangedAt = true
 		}
 	}
 
+	serverMode := "unknown"
+	syncInterval := "unknown"
+	syncOnStartup := "unknown"
+	adminSessionTimeout := "unknown"
+	metricsAddr := "unknown"
+	databaseHost := "unknown"
+	databaseName := "unknown"
+	databaseSSLMode := "unknown"
+	if h.cfg != nil {
+		serverMode = string(h.cfg.Server.Mode)
+		syncInterval = formatRuntimeDuration(h.cfg.FeedSync.Interval)
+		syncOnStartup = strconv.FormatBool(h.cfg.FeedSync.OnStartup)
+		adminSessionTimeout = formatRuntimeDuration(h.cfg.Admin.SessionTimeout)
+		metricsAddr = h.cfg.Metrics.Addr()
+		databaseHost = h.cfg.DB.Host
+		databaseName = h.cfg.DB.Name
+		databaseSSLMode = h.cfg.DB.SSLMode
+	}
+
 	data := map[string]any{
-		"ActiveNav":         "admin",
-		"CSRFToken":         csrfToken,
-		"ServerMode":        "production",
-		"SyncInterval":      "6h",
-		"LastLoginAt":       lastLoginAt,
-		"PasswordChangedAt": passwordChangedAt,
-		"Message":           r.URL.Query().Get("msg"),
-		"Error":             r.URL.Query().Get("err"),
+		"ActiveNav":            "admin",
+		"CSRFToken":            csrfToken,
+		"ServerMode":           serverMode,
+		"SyncInterval":         syncInterval,
+		"FeedSyncOnStartup":    syncOnStartup,
+		"AdminSessionTimeout":  adminSessionTimeout,
+		"MetricsAddr":          metricsAddr,
+		"DatabaseHost":         databaseHost,
+		"DatabaseName":         databaseName,
+		"DatabaseSSLMode":      databaseSSLMode,
+		"LastLoginAt":          lastLoginAt,
+		"HasLastLoginAt":       hasLastLoginAt,
+		"PasswordChangedAt":    passwordChangedAt,
+		"HasPasswordChangedAt": hasPasswordChangedAt,
+		"Message":              r.URL.Query().Get("msg"),
+		"Error":                r.URL.Query().Get("err"),
 	}
 	h.renderAdmin(w, "admin/settings.html", data)
 }

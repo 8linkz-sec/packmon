@@ -19,7 +19,7 @@ var fs embed.FS
 
 // ExpectedVersion is the schema version that this binary expects.
 // It must match the highest migration number embedded in the binary.
-const ExpectedVersion = 1
+const ExpectedVersion = 2
 
 // Run applies all pending migrations to the database at the given DSN.
 // The DSN must be a valid PostgreSQL connection string

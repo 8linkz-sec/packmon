@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/8linkz/packmon/internal/auth"
+	"github.com/8linkz/packmon/internal/config"
 	"github.com/8linkz/packmon/internal/db"
 	"github.com/8linkz/packmon/internal/web"
 )
@@ -14,9 +15,9 @@ import (
 //
 // The wellKnownChangePassword handler implements the .well-known
 // redirect for password managers (Bitwarden compatibility).
-func RegisterRoutes(mux *http.ServeMux, store db.Store, sm *auth.SessionManager, logger *slog.Logger) {
+func RegisterRoutes(mux *http.ServeMux, store db.Store, sm *auth.SessionManager, logger *slog.Logger, cfg *config.Config) {
 	renderer := web.NewRenderer(web.TemplateFS(), false)
-	h := NewAdminHandler(store, sm, renderer, logger)
+	h := NewAdminHandler(store, sm, renderer, logger, cfg)
 
 	// Login and logout are handled specially:
 	// - GET /admin/login: show form (no session required)
@@ -31,11 +32,14 @@ func RegisterRoutes(mux *http.ServeMux, store db.Store, sm *auth.SessionManager,
 	// only register the route handlers.
 	mux.HandleFunc("GET /admin/", h.HandleDashboard)
 	mux.HandleFunc("GET /admin/feeds", h.HandleAdminFeeds)
+	mux.HandleFunc("POST /admin/feeds/save", h.HandleFeedConfigSave)
+	mux.HandleFunc("POST /admin/feeds/reset", h.HandleFeedConfigReset)
 	mux.HandleFunc("GET /admin/queue", h.HandleAdminQueue)
 	mux.HandleFunc("POST /admin/queue/purge", h.HandleQueuePurge)
 	mux.HandleFunc("GET /admin/keys", h.HandleAdminKeys)
 	mux.HandleFunc("POST /admin/keys/create", h.HandleKeyCreate)
 	mux.HandleFunc("POST /admin/keys/revoke", h.HandleKeyRevoke)
+	mux.HandleFunc("POST /admin/keys/delete", h.HandleKeyDelete)
 	mux.HandleFunc("GET /admin/advisories", h.HandleAdminAdvisories)
 	mux.HandleFunc("POST /admin/advisories/create", h.HandleAdvisoryCreate)
 	mux.HandleFunc("POST /admin/advisories/delete", h.HandleAdvisoryDelete)

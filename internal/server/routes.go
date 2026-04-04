@@ -8,13 +8,14 @@ import (
 	"github.com/8linkz/packmon/internal/api/admin"
 	v1 "github.com/8linkz/packmon/internal/api/v1"
 	"github.com/8linkz/packmon/internal/auth"
+	"github.com/8linkz/packmon/internal/config"
 	"github.com/8linkz/packmon/internal/db"
 	"github.com/8linkz/packmon/internal/health"
 	"github.com/8linkz/packmon/internal/web"
 )
 
 // registerRoutes wires all HTTP routes on the given mux.
-func registerRoutes(mux *http.ServeMux, hc *health.Checker, store db.Store, sm *auth.SessionManager, logger *slog.Logger, buildInfo BuildInfo) {
+func registerRoutes(mux *http.ServeMux, hc *health.Checker, cfg *config.Config, store db.Store, sm *auth.SessionManager, logger *slog.Logger, buildInfo BuildInfo) {
 	api := v1.NewHandler(store, logger)
 
 	// -- Operations (no auth required) ----------------------------------------
@@ -35,7 +36,7 @@ func registerRoutes(mux *http.ServeMux, hc *health.Checker, store db.Store, sm *
 	mux.HandleFunc("GET /api/v1/sync", api.HandleSync)
 
 	// -- Admin (session-protected) --------------------------------------------
-	admin.RegisterRoutes(mux, store, sm, logger)
+	admin.RegisterRoutes(mux, store, sm, logger, cfg)
 
 	// -- Web GUI (public pages: dashboard, search, package, feeds) -----------
 	renderer := web.NewRenderer(web.TemplateFS(), false)

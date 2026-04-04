@@ -79,11 +79,7 @@ func TestProductionServerWithPostgresAndAPIKey(t *testing.T) {
 		"TMP=" + os.Getenv("TMP"),
 	}
 
-	migrate := exec.Command(serverBin, "migrate")
-	migrate.Env = env
-	if output, err := migrate.CombinedOutput(); err != nil {
-		t.Fatalf("packmon-server migrate failed: %v\n%s", err, string(output))
-	}
+	runMigrateWithRetry(t, serverBin, env)
 
 	cmd := exec.Command(serverBin)
 	cmd.Env = env
@@ -224,6 +220,27 @@ func waitForDockerPostgres(t *testing.T, containerName string) {
 		time.Sleep(500 * time.Millisecond)
 	}
 	t.Fatalf("postgres container %s did not become ready", containerName)
+}
+
+func runMigrateWithRetry(t *testing.T, serverBin string, env []string) {
+	t.Helper()
+
+	var lastErr error
+	var lastOutput []byte
+
+	for attempt := 0; attempt < 3; attempt++ {
+		migrate := exec.Command(serverBin, "migrate")
+		migrate.Env = env
+		output, err := migrate.CombinedOutput()
+		if err == nil {
+			return
+		}
+		lastErr = err
+		lastOutput = output
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	t.Fatalf("packmon-server migrate failed: %v\n%s", lastErr, string(lastOutput))
 }
 
 func waitForHTTPStatus(t *testing.T, url string, want int, stderr string) {

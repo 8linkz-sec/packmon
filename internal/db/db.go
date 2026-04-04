@@ -74,6 +74,21 @@ type Store interface {
 	// ListFeedSyncStatuses returns sync state for all known feeds.
 	ListFeedSyncStatuses(ctx context.Context) ([]FeedSyncStatus, error)
 
+	// GetFeedConfig returns a persisted feed configuration override, or nil
+	// if the feed uses the built-in runtime defaults.
+	GetFeedConfig(ctx context.Context, feedName string) (*FeedConfig, error)
+
+	// UpsertFeedConfig creates or updates a persisted feed configuration
+	// override.
+	UpsertFeedConfig(ctx context.Context, cfg *FeedConfig) error
+
+	// DeleteFeedConfig removes a persisted feed configuration override so the
+	// server falls back to runtime defaults again.
+	DeleteFeedConfig(ctx context.Context, feedName string) error
+
+	// ListFeedConfigs returns all persisted feed configuration overrides.
+	ListFeedConfigs(ctx context.Context) ([]FeedConfig, error)
+
 	// -- Refresh queue ----------------------------------------------------------
 
 	// EnqueueRefresh adds a job to the refresh queue. If an identical
@@ -141,6 +156,9 @@ type Store interface {
 
 	// RevokeAPIKey marks an API key as revoked.
 	RevokeAPIKey(ctx context.Context, keyID int) error
+
+	// DeleteAPIKey permanently removes a revoked API key.
+	DeleteAPIKey(ctx context.Context, keyID int) error
 
 	// -- Admin auth -------------------------------------------------------------
 
@@ -268,6 +286,16 @@ type FeedSyncStatus struct {
 	LastEtag         string          `json:"last_etag"`
 	LastCommitHash   string          `json:"last_commit_hash"`
 	Metadata         json.RawMessage `json:"metadata,omitempty"`
+}
+
+// FeedConfig is one persisted admin override for a feed.
+type FeedConfig struct {
+	FeedName     string
+	Enabled      bool
+	Mode         string
+	SyncInterval *time.Duration
+	APIKey       string
+	UpdatedAt    time.Time
 }
 
 // RefreshJob is one entry in the refresh queue.
