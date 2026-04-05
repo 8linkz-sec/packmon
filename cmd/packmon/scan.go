@@ -34,6 +34,7 @@ func newScanCmd() *cobra.Command {
 		flagAll           bool
 		flagRepo          string
 		flagListPackages  bool
+		flagOutdated      bool
 	)
 
 	cmd := &cobra.Command{
@@ -46,6 +47,9 @@ and malicious package databases.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if flagListPackages {
 				return runListPackages(args, flagEcosystems, flagMaxDepth, flagNoColor)
+			}
+			if flagOutdated {
+				return runOutdated(args, flagEcosystems, flagMaxDepth, flagNoColor)
 			}
 			return runScanCommand(cmd, args, scanFlagValues{
 				Mode:          flagMode,
@@ -86,6 +90,7 @@ and malicious package databases.`,
 	f.BoolVar(&flagAll, "all", false, "scan all repositories configured in .packmon.yaml")
 	f.StringVar(&flagRepo, "repo", "", "scan a configured repository by name")
 	f.BoolVar(&flagListPackages, "list-packages", false, "list all detected packages and exit (no vulnerability check)")
+	f.BoolVar(&flagOutdated, "outdated", false, "show packages with newer versions available")
 
 	return cmd
 }
