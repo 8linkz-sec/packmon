@@ -101,8 +101,8 @@ func TestLoadWithNoEnvVarsReturnsDefaults(t *testing.T) {
 	}
 
 	// Feed sync defaults.
-	if cfg.FeedSync.Interval != 6*time.Hour {
-		t.Errorf("FeedSync.Interval = %v, want 6h", cfg.FeedSync.Interval)
+	if cfg.FeedSync.Interval != 8*time.Hour {
+		t.Errorf("FeedSync.Interval = %v, want 8h", cfg.FeedSync.Interval)
 	}
 	if !cfg.FeedSync.OnStartup {
 		t.Error("FeedSync.OnStartup = false, want true")

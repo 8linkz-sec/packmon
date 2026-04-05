@@ -43,10 +43,10 @@ type registeredFeed struct {
 
 // NewManager creates a Manager. The default sync interval applies to
 // every feed that does not specify its own interval. Pass 0 to use the
-// hard-coded default of 6 hours.
+// hard-coded default of 8 hours.
 func NewManager(store db.Store, logger *slog.Logger, defaultInterval time.Duration) *Manager {
 	if defaultInterval <= 0 {
-		defaultInterval = 6 * time.Hour
+		defaultInterval = 8 * time.Hour
 	}
 	if logger == nil {
 		logger = slog.Default()

@@ -239,8 +239,8 @@ func TestNewManagerDefaults(t *testing.T) {
 	store := &managerStoreStub{}
 	m := NewManager(store, nil, 0)
 
-	if m.interval != 6*time.Hour {
-		t.Fatalf("default interval = %v, want 6h", m.interval)
+	if m.interval != 8*time.Hour {
+		t.Fatalf("default interval = %v, want 8h", m.interval)
 	}
 	if m.logger == nil {
 		t.Fatal("logger is nil, want non-nil default")

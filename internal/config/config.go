@@ -170,7 +170,7 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
-	syncInterval, err := envDurationOrDefault("PACKMON_FEED_SYNC_INTERVAL", 6*time.Hour)
+	syncInterval, err := envDurationOrDefault("PACKMON_FEED_SYNC_INTERVAL", 8*time.Hour)
 	if err != nil {
 		return nil, err
 	}

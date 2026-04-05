@@ -41,6 +41,7 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+    stop_grace_period: 10s
     restart: unless-stopped
 
 volumes:

@@ -33,6 +33,7 @@ func newScanCmd() *cobra.Command {
 		flagWebhookSecret string
 		flagAll           bool
 		flagRepo          string
+		flagListPackages  bool
 	)
 
 	cmd := &cobra.Command{
@@ -43,6 +44,9 @@ parse dependencies, and check them against known vulnerabilities
 and malicious package databases.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if flagListPackages {
+				return runListPackages(args, flagEcosystems, flagMaxDepth, flagNoColor)
+			}
 			return runScanCommand(cmd, args, scanFlagValues{
 				Mode:          flagMode,
 				Server:        flagServer,
@@ -81,6 +85,7 @@ and malicious package databases.`,
 	f.StringVar(&flagWebhookSecret, "webhook-secret", "", "HMAC-SHA256 secret for webhook signature")
 	f.BoolVar(&flagAll, "all", false, "scan all repositories configured in .packmon.yaml")
 	f.StringVar(&flagRepo, "repo", "", "scan a configured repository by name")
+	f.BoolVar(&flagListPackages, "list-packages", false, "list all detected packages and exit (no vulnerability check)")
 
 	return cmd
 }
@@ -508,4 +513,108 @@ func openLocalSQLiteStore(ctx context.Context, dbPath string) (*sqlite.Store, bo
 	}
 
 	return store, advisoryDataAvailable, nil
+}
+
+// runListPackages walks the target directory, parses all lock files, and
+// prints every detected package with version and ecosystem. No
+// vulnerability check is performed.
+func runListPackages(args []string, ecosystems string, maxDepth int, noColor bool) error {
+	scanPath := "."
+	if len(args) > 0 {
+		scanPath = args[0]
+	}
+
+	absPath, err := filepath.Abs(scanPath)
+	if err != nil {
+		return fmt.Errorf("resolve path: %w", err)
+	}
+
+	reg := parser.NewRegistry()
+
+	var ecoFilter []string
+	if ecosystems != "" {
+		for _, e := range strings.Split(ecosystems, ",") {
+			if trimmed := strings.TrimSpace(e); trimmed != "" {
+				ecoFilter = append(ecoFilter, trimmed)
+			}
+		}
+	}
+
+	walker := scanner.NewWalker(reg, maxDepth, ecoFilter)
+	lockFiles, err := walker.Walk(absPath)
+	if err != nil {
+		return fmt.Errorf("walk: %w", err)
+	}
+
+	if len(lockFiles) == 0 {
+		fmt.Println("No lock files found.")
+		return nil
+	}
+
+	// Parse all lock files and collect packages.
+	type pkgEntry struct {
+		Name      string `json:"name"`
+		Version   string `json:"version"`
+		Ecosystem string `json:"ecosystem"`
+		LockFile  string `json:"lock_file"`
+	}
+
+	seen := make(map[string]struct{})
+	var packages []pkgEntry
+
+	for _, lf := range lockFiles {
+		f, err := os.Open(lf.Path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: cannot open %s: %v\n", lf.RelPath, err)
+			continue
+		}
+		pkgs, parseErr := lf.Parser.Parse(f)
+		closeSilently(f)
+		if parseErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: parse error in %s: %v\n", lf.RelPath, parseErr)
+		}
+		for _, p := range pkgs {
+			key := string(p.Ecosystem) + "/" + p.Name + "@" + p.Version
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			packages = append(packages, pkgEntry{
+				Name:      p.Name,
+				Version:   p.Version,
+				Ecosystem: string(p.Ecosystem),
+				LockFile:  lf.RelPath,
+			})
+		}
+	}
+
+	if len(packages) == 0 {
+		fmt.Println("No packages found.")
+		return nil
+	}
+
+	// Compute column widths.
+	maxName, maxVer, maxEco := 4, 7, 9 // header widths: NAME, VERSION, ECOSYSTEM
+	for _, p := range packages {
+		if len(p.Name) > maxName {
+			maxName = len(p.Name)
+		}
+		if len(p.Version) > maxVer {
+			maxVer = len(p.Version)
+		}
+		if len(p.Ecosystem) > maxEco {
+			maxEco = len(p.Ecosystem)
+		}
+	}
+
+	gap := "  "
+	fmtStr := fmt.Sprintf("%%-%ds%s%%-%ds%s%%-%ds%s%%s\n", maxName, gap, maxVer, gap, maxEco, gap)
+
+	fmt.Printf(fmtStr, "NAME", "VERSION", "ECOSYSTEM", "LOCK FILE")
+	for _, p := range packages {
+		fmt.Printf(fmtStr, p.Name, p.Version, p.Ecosystem, p.LockFile)
+	}
+
+	fmt.Printf("\n%d package(s) found in %d lock file(s)\n", len(packages), len(lockFiles))
+	return nil
 }
