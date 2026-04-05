@@ -272,10 +272,10 @@ func TestSplitPrerelease(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name       string
-		input      string
-		wantRel    string
-		wantPre    string
+		name    string
+		input   string
+		wantRel string
+		wantPre string
 	}{
 		{name: "no prerelease", input: "1.2.3", wantRel: "1.2.3", wantPre: ""},
 		{name: "simple prerelease", input: "1.2.3-rc1", wantRel: "1.2.3", wantPre: "rc1"},
@@ -588,10 +588,10 @@ func TestVersionAffected_EmptyRangesAndVersions(t *testing.T) {
 	// (was a false-positive bug, now the code returns true when both are empty
 	//  because we cannot determine safety).
 	tests := []struct {
-		name       string
-		ranges     string
-		versions   string
-		want       bool
+		name     string
+		ranges   string
+		versions string
+		want     bool
 	}{
 		{name: "both empty arrays", ranges: `[]`, versions: `[]`, want: true},
 		{name: "both empty strings", ranges: ``, versions: ``, want: true},

@@ -48,7 +48,7 @@ func findGitRoot(dir string) string {
 
 // isPackmonHook returns true if the file at path contains the packmon marker.
 func isPackmonHook(path string) bool {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- path is built from .git/hooks/ + known hook name
 	if err != nil {
 		return false
 	}
@@ -111,12 +111,12 @@ func newHookInstallCmd() *cobra.Command {
 			}
 
 			// Ensure hooks directory exists (some bare clones may lack it).
-			if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+			if err := os.MkdirAll(hooksDir, 0o750); err != nil { // #nosec G301
 				fmt.Fprintf(os.Stderr, "Error: cannot create hooks directory: %v\n", err)
 				os.Exit(ExitOperational)
 			}
 
-			if err := os.WriteFile(hookPath, []byte(hookScript()), 0o755); err != nil {
+			if err := os.WriteFile(hookPath, []byte(hookScript()), 0o755); err != nil { // #nosec G306 -- hooks must be executable
 				fmt.Fprintf(os.Stderr, "Error: cannot write hook file: %v\n", err)
 				os.Exit(ExitOperational)
 			}

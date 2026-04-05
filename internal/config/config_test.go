@@ -259,7 +259,7 @@ func TestLoadReadsDBVars(t *testing.T) {
 	}
 
 	// Verify DSN composition.
-	wantDSN := "postgres://myuser:s3cret@db.internal:15432/mydb?sslmode=verify-full"
+	wantDSN := "postgres://myuser:s3cret@db.internal:15432/mydb?sslmode=verify-full" // #nosec G101 -- test fixture, not a real credential
 	if cfg.DB.DSN() != wantDSN {
 		t.Errorf("DB.DSN() = %q, want %q", cfg.DB.DSN(), wantDSN)
 	}

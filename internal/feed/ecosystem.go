@@ -19,22 +19,22 @@ func MapOSVEcosystem(osv string) (domain.Ecosystem, bool) {
 // ecosystem values. OSV sometimes appends a scope suffix (e.g. "Maven:org.apache")
 // which callers should strip before looking up.
 var osvEcosystemMap = map[string]domain.Ecosystem{
-	"npm":        domain.EcosystemNPM,
-	"pypi":       domain.EcosystemPyPI,
-	"go":         domain.EcosystemGo,
-	"maven":      domain.EcosystemMaven,
-	"crates.io":  domain.EcosystemCargo,
-	"nuget":      domain.EcosystemNuGet,
-	"packagist":  domain.EcosystemComposer,
-	"rubygems":   domain.EcosystemGem,
-	"pub":        domain.EcosystemPub,
-	"cocoapods":  domain.EcosystemCocoaPods,
-	"swifturl":   domain.EcosystemSwiftPM,
-	"hex":        domain.EcosystemHex,
-	"cran":       domain.EcosystemCRAN,
-	"cargo":      domain.EcosystemCargo, // alias used by some sources
-	"composer":   domain.EcosystemComposer,
-	"gem":        domain.EcosystemGem,
+	"npm":       domain.EcosystemNPM,
+	"pypi":      domain.EcosystemPyPI,
+	"go":        domain.EcosystemGo,
+	"maven":     domain.EcosystemMaven,
+	"crates.io": domain.EcosystemCargo,
+	"nuget":     domain.EcosystemNuGet,
+	"packagist": domain.EcosystemComposer,
+	"rubygems":  domain.EcosystemGem,
+	"pub":       domain.EcosystemPub,
+	"cocoapods": domain.EcosystemCocoaPods,
+	"swifturl":  domain.EcosystemSwiftPM,
+	"hex":       domain.EcosystemHex,
+	"cran":      domain.EcosystemCRAN,
+	"cargo":     domain.EcosystemCargo, // alias used by some sources
+	"composer":  domain.EcosystemComposer,
+	"gem":       domain.EcosystemGem,
 }
 
 // MapGHSAEcosystem maps a GHSA ecosystem string (from the advisory JSON

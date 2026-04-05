@@ -126,9 +126,9 @@ func TestCVSSToSeverity(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name     string
-		score    float64
-		wantSev  string
+		name    string
+		score   float64
+		wantSev string
 	}{
 		{"critical lower bound", 9.0, "CRITICAL"},
 		{"critical exact ten", 10.0, "CRITICAL"},
