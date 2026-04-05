@@ -62,7 +62,7 @@ func newFeedManager(cfg *config.Config, store db.Store, logger *slog.Logger) *fe
 
 	registerFeedSyncer(manager, cfg, "osv", osv.NewSyncer(store, logger))
 	registerFeedSyncer(manager, cfg, "ghsa", ghsa.NewSyncer(store, logger, cfg.Feeds.DataDir))
-	registerFeedSyncer(manager, cfg, "malicious", malicious.NewSyncer(store, logger, cfg.Feeds.DataDir))
+	registerFeedSyncer(manager, cfg, "openssf", malicious.NewSyncer(store, logger, cfg.Feeds.DataDir))
 	registerFeedSyncer(manager, cfg, "vulncheck", vulncheck.NewSyncer(cfg.Feeds.VulnCheckAPIKey, logger))
 	registerFeedSyncer(manager, cfg, "cisakev", cisakev.NewSyncer(logger))
 	registerFeedSyncer(manager, cfg, "epss", epss.NewSyncer(logger))

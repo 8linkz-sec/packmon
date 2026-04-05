@@ -426,7 +426,7 @@ func (h *Handler) HandleFeedImport(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		resp, err = h.importVulnerabilities(r.Context(), feed, &req)
-	case "malicious", "socket":
+	case "openssf", "socket":
 		var req maliciousImportRequest
 		if err := readJSONWithLimit(r, &req, maxImportBody); err != nil {
 			h.logger.Warn("feed import: invalid malicious body", "feed", feed, "error", err)
@@ -719,7 +719,7 @@ func (h *Handler) HandleSync(w http.ResponseWriter, r *http.Request) {
 
 func isKnownFeed(feed string) bool {
 	switch feed {
-	case "osv", "ghsa", "malicious", "vulncheck", "cisakev", "epss", "socket":
+	case "osv", "ghsa", "openssf", "vulncheck", "cisakev", "epss", "socket":
 		return true
 	default:
 		return false

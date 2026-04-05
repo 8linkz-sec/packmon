@@ -56,13 +56,13 @@ func (c *Config) FeedSettings(name string) (FeedSettings, bool) {
 			SyncInterval:         c.Feeds.GHSAInterval,
 			SupportsSyncInterval: true,
 		}, true
-	case "malicious":
+	case "openssf":
 		return FeedSettings{
-			Name:                 "malicious",
+			Name:                 "openssf",
 			DisplayName:          "OpenSSF Malicious",
-			Enabled:              c.Feeds.MaliciousEnabled,
-			Mode:                 c.Feeds.MaliciousMode,
-			SyncInterval:         c.Feeds.MaliciousInterval,
+			Enabled:              c.Feeds.OpenSSFEnabled,
+			Mode:                 c.Feeds.OpenSSFMode,
+			SyncInterval:         c.Feeds.OpenSSFInterval,
 			SupportsSyncInterval: true,
 		}, true
 	case "vulncheck":
@@ -115,7 +115,7 @@ func (c *Config) FeedSettingsList() []FeedSettings {
 		return nil
 	}
 
-	names := []string{"osv", "ghsa", "malicious", "vulncheck", "cisakev", "epss", "socket"}
+	names := []string{"osv", "ghsa", "openssf", "vulncheck", "cisakev", "epss", "socket"}
 	out := make([]FeedSettings, 0, len(names))
 	for _, name := range names {
 		feed, ok := c.FeedSettings(name)
@@ -155,10 +155,10 @@ func (c *Config) SetFeedSettings(feed FeedSettings) error {
 		c.Feeds.GHSAEnabled = feed.Enabled
 		c.Feeds.GHSAMode = mode
 		c.Feeds.GHSAInterval = normalizeOptionalDuration(feed.SyncInterval)
-	case "malicious":
-		c.Feeds.MaliciousEnabled = feed.Enabled
-		c.Feeds.MaliciousMode = mode
-		c.Feeds.MaliciousInterval = normalizeOptionalDuration(feed.SyncInterval)
+	case "openssf":
+		c.Feeds.OpenSSFEnabled = feed.Enabled
+		c.Feeds.OpenSSFMode = mode
+		c.Feeds.OpenSSFInterval = normalizeOptionalDuration(feed.SyncInterval)
 	case "vulncheck":
 		c.Feeds.VulnCheckEnabled = feed.Enabled
 		c.Feeds.VulnCheckMode = mode

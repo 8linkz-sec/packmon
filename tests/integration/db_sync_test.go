@@ -40,7 +40,7 @@ func TestDBSyncAndLocalScan(t *testing.T) {
 		t.Fatalf("json.Marshal() error = %v", err)
 	}
 
-	resp, err := http.Post(baseURL+"/api/v1/feeds/malicious/import", "application/json", bytes.NewReader(payload))
+	resp, err := http.Post(baseURL+"/api/v1/feeds/openssf/import", "application/json", bytes.NewReader(payload))
 	if err != nil {
 		t.Fatalf("POST feed import failed: %v", err)
 	}

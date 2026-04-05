@@ -39,8 +39,8 @@ func TestNoopStoreFeedImportAndSync(t *testing.T) {
 		t.Fatalf("json.Marshal() error = %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/feeds/malicious/import", bytes.NewReader(payload))
-	req.SetPathValue("feed", "malicious")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/feeds/openssf/import", bytes.NewReader(payload))
+	req.SetPathValue("feed", "openssf")
 	rec := httptest.NewRecorder()
 	handler.HandleFeedImport(rec, req)
 	if rec.Code != http.StatusOK {

@@ -67,7 +67,7 @@ func TestProductionServerWithPostgresAndAPIKey(t *testing.T) {
 		"PACKMON_ADMIN_INITIAL_PASSWORD=integration-admin",
 		"PACKMON_FEED_OSV_ENABLED=false",
 		"PACKMON_FEED_GHSA_ENABLED=false",
-		"PACKMON_FEED_MALICIOUS_ENABLED=false",
+		"PACKMON_FEED_OPENSSF_ENABLED=false",
 		"PACKMON_FEED_VULNCHECK_ENABLED=false",
 		"PACKMON_FEED_SOCKET_ENABLED=false",
 		"PACKMON_FEED_CISAKEV_ENABLED=false",
@@ -156,7 +156,7 @@ func TestProductionServerWithPostgresAndAPIKey(t *testing.T) {
 		t.Fatalf("json.Marshal import body: %v", err)
 	}
 
-	importReq, err := http.NewRequest(http.MethodPost, baseURL+"/api/v1/feeds/malicious/import", bytes.NewReader(importBody))
+	importReq, err := http.NewRequest(http.MethodPost, baseURL+"/api/v1/feeds/openssf/import", bytes.NewReader(importBody))
 	if err != nil {
 		t.Fatalf("NewRequest import: %v", err)
 	}

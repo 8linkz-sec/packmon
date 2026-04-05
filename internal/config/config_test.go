@@ -115,8 +115,8 @@ func TestLoadWithNoEnvVarsReturnsDefaults(t *testing.T) {
 	if !cfg.Feeds.GHSAEnabled {
 		t.Error("Feeds.GHSAEnabled = false, want true")
 	}
-	if !cfg.Feeds.MaliciousEnabled {
-		t.Error("Feeds.MaliciousEnabled = false, want true")
+	if !cfg.Feeds.OpenSSFEnabled {
+		t.Error("Feeds.OpenSSFEnabled = false, want true")
 	}
 	if !cfg.Feeds.VulnCheckEnabled {
 		t.Error("Feeds.VulnCheckEnabled = false, want true")
@@ -269,7 +269,7 @@ func TestLoadReadsFeedEnabledFlags(t *testing.T) {
 	clearPackmonEnv(t)
 	t.Setenv("PACKMON_FEED_OSV_ENABLED", "false")
 	t.Setenv("PACKMON_FEED_GHSA_ENABLED", "false")
-	t.Setenv("PACKMON_FEED_MALICIOUS_ENABLED", "false")
+	t.Setenv("PACKMON_FEED_OPENSSF_ENABLED", "false")
 	t.Setenv("PACKMON_FEED_VULNCHECK_ENABLED", "false")
 	t.Setenv("PACKMON_FEED_SOCKET_ENABLED", "true")
 	t.Setenv("PACKMON_FEED_CISAKEV_ENABLED", "false")
@@ -286,8 +286,8 @@ func TestLoadReadsFeedEnabledFlags(t *testing.T) {
 	if cfg.Feeds.GHSAEnabled {
 		t.Error("Feeds.GHSAEnabled = true, want false")
 	}
-	if cfg.Feeds.MaliciousEnabled {
-		t.Error("Feeds.MaliciousEnabled = true, want false")
+	if cfg.Feeds.OpenSSFEnabled {
+		t.Error("Feeds.OpenSSFEnabled = true, want false")
 	}
 	if cfg.Feeds.VulnCheckEnabled {
 		t.Error("Feeds.VulnCheckEnabled = true, want false")

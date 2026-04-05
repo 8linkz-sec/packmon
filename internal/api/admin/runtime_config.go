@@ -249,7 +249,7 @@ func formatOptionalDuration(d time.Duration) string {
 
 func supportsManualFeedSync(feedName string) bool {
 	switch config.NormalizeFeedName(feedName) {
-	case "osv", "ghsa", "malicious", "vulncheck", "cisakev", "epss":
+	case "osv", "ghsa", "openssf", "vulncheck", "cisakev", "epss":
 		return true
 	default:
 		return false

@@ -20,7 +20,7 @@ import (
 
 const (
 	// FeedName is the canonical name used in feed_sync_status.
-	FeedName = "malicious"
+	FeedName = "openssf"
 
 	// repoURL is the OpenSSF malicious-packages repository.
 	repoURL = "https://github.com/ossf/malicious-packages.git"

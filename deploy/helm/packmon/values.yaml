@@ -39,14 +39,14 @@ feeds:
   dataDir: /tmp/packmon-feeds
   osvEnabled: true
   ghsaEnabled: true
-  maliciousEnabled: true
+  openssfEnabled: true
   vulncheckEnabled: true
   socketEnabled: false
   cisakevEnabled: true
   epssEnabled: true
   osvMode: self
   ghsaMode: self
-  maliciousMode: self
+  openssfMode: self
   vulncheckMode: self
   socketMode: self
   cisakevMode: self

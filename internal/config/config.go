@@ -51,7 +51,7 @@ type FeedsConfig struct {
 	// Per-feed enabled flags.
 	OSVEnabled       bool
 	GHSAEnabled      bool
-	MaliciousEnabled bool
+	OpenSSFEnabled   bool
 	VulnCheckEnabled bool
 	SocketEnabled    bool
 	CISAKEVEnabled   bool
@@ -60,7 +60,7 @@ type FeedsConfig struct {
 	// Per-feed mode: "self" (server syncs) or "external" (N8N pushes).
 	OSVMode       FeedMode
 	GHSAMode      FeedMode
-	MaliciousMode FeedMode
+	OpenSSFMode   FeedMode
 	VulnCheckMode FeedMode
 	CISAKEVMode   FeedMode
 	EPSSMode      FeedMode
@@ -70,7 +70,7 @@ type FeedsConfig struct {
 	// PACKMON_FEED_SYNC_INTERVAL".
 	OSVInterval       time.Duration
 	GHSAInterval      time.Duration
-	MaliciousInterval time.Duration
+	OpenSSFInterval   time.Duration
 	VulnCheckInterval time.Duration
 	CISAKEVInterval   time.Duration
 	EPSSInterval      time.Duration
@@ -230,7 +230,7 @@ func Load() (*Config, error) {
 
 			OSVEnabled:       envBoolOrDefault("PACKMON_FEED_OSV_ENABLED", true),
 			GHSAEnabled:      envBoolOrDefault("PACKMON_FEED_GHSA_ENABLED", true),
-			MaliciousEnabled: envBoolOrDefault("PACKMON_FEED_MALICIOUS_ENABLED", true),
+			OpenSSFEnabled:   envBoolOrDefault("PACKMON_FEED_OPENSSF_ENABLED", true),
 			VulnCheckEnabled: envBoolOrDefault("PACKMON_FEED_VULNCHECK_ENABLED", true),
 			SocketEnabled:    envBoolOrDefault("PACKMON_FEED_SOCKET_ENABLED", false),
 			CISAKEVEnabled:   envBoolOrDefault("PACKMON_FEED_CISAKEV_ENABLED", true),
@@ -238,7 +238,7 @@ func Load() (*Config, error) {
 
 			OSVMode:       parseFeedMode("PACKMON_FEED_OSV_MODE"),
 			GHSAMode:      parseFeedMode("PACKMON_FEED_GHSA_MODE"),
-			MaliciousMode: parseFeedMode("PACKMON_FEED_MALICIOUS_MODE"),
+			OpenSSFMode:   parseFeedMode("PACKMON_FEED_OPENSSF_MODE"),
 			VulnCheckMode: parseFeedMode("PACKMON_FEED_VULNCHECK_MODE"),
 			CISAKEVMode:   parseFeedMode("PACKMON_FEED_CISAKEV_MODE"),
 			EPSSMode:      parseFeedMode("PACKMON_FEED_EPSS_MODE"),

@@ -16,14 +16,14 @@ data:
   PACKMON_FEED_DATA_DIR: {{ .Values.feeds.dataDir | quote }}
   PACKMON_FEED_OSV_ENABLED: {{ .Values.feeds.osvEnabled | quote }}
   PACKMON_FEED_GHSA_ENABLED: {{ .Values.feeds.ghsaEnabled | quote }}
-  PACKMON_FEED_MALICIOUS_ENABLED: {{ .Values.feeds.maliciousEnabled | quote }}
+  PACKMON_FEED_OPENSSF_ENABLED: {{ .Values.feeds.openssfEnabled | quote }}
   PACKMON_FEED_VULNCHECK_ENABLED: {{ .Values.feeds.vulncheckEnabled | quote }}
   PACKMON_FEED_SOCKET_ENABLED: {{ .Values.feeds.socketEnabled | quote }}
   PACKMON_FEED_CISAKEV_ENABLED: {{ .Values.feeds.cisakevEnabled | quote }}
   PACKMON_FEED_EPSS_ENABLED: {{ .Values.feeds.epssEnabled | quote }}
   PACKMON_FEED_OSV_MODE: {{ .Values.feeds.osvMode | quote }}
   PACKMON_FEED_GHSA_MODE: {{ .Values.feeds.ghsaMode | quote }}
-  PACKMON_FEED_MALICIOUS_MODE: {{ .Values.feeds.maliciousMode | quote }}
+  PACKMON_FEED_OPENSSF_MODE: {{ .Values.feeds.openssfMode | quote }}
   PACKMON_FEED_VULNCHECK_MODE: {{ .Values.feeds.vulncheckMode | quote }}
   PACKMON_FEED_SOCKET_MODE: {{ .Values.feeds.socketMode | quote }}
   PACKMON_FEED_CISAKEV_MODE: {{ .Values.feeds.cisakevMode | quote }}

@@ -51,7 +51,7 @@ func IsPermanentError(err error) bool {
 // FeedSyncer is the interface every feed source must implement.
 type FeedSyncer interface {
 	// Name returns a short, stable identifier for the feed (e.g. "osv",
-	// "ghsa", "malicious"). It is used as the key in feed_sync_status.
+	// "ghsa", "openssf"). It is used as the key in feed_sync_status.
 	Name() string
 
 	// Sync fetches data from the upstream source and upserts it into the
