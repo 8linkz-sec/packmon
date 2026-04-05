@@ -99,11 +99,6 @@ func runOutdated(args []string, ecosystems string, maxDepth int, noColor bool) e
 	fmt.Fprintf(os.Stderr, "Checking %d packages for updates...\n", len(packages))
 
 	// Look up latest versions in parallel (max 10 concurrent).
-	type result struct {
-		idx    int
-		latest string
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
