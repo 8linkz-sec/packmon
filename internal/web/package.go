@@ -39,7 +39,7 @@ func HandlePackage(store Store, renderer *Renderer, logger *slog.Logger) http.Ha
 				"ecosystem", ecosystem, "name", name, "error", err)
 		}
 
-		mal, err := store.FindMalicious(ctx, ecosystem, name)
+		mal, err := store.FindMalicious(ctx, ecosystem, name, "")
 		if err != nil {
 			logger.Error("package: failed to find malicious findings",
 				"ecosystem", ecosystem, "name", name, "error", err)

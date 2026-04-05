@@ -97,14 +97,19 @@ func (s *Store) FindVulnerabilities(ctx context.Context, ecosystem, name, versio
 	return findings, nil
 }
 
-func (s *Store) FindMalicious(ctx context.Context, ecosystem, name string) ([]domain.Finding, error) {
+func (s *Store) FindMalicious(ctx context.Context, ecosystem, name, version string) ([]domain.Finding, error) {
+	// versions is a JSONB array of affected versions. NULL means all
+	// versions are affected. When a specific version is requested, only
+	// return findings where versions IS NULL or the array contains
+	// that version.
 	const query = `
 		SELECT id, severity, summary, risk_type, source, reference_urls::text
 		FROM malicious_findings
 		WHERE ecosystem = $1 AND name = $2
+		  AND (versions IS NULL OR versions = 'null'::jsonb OR $3 = '' OR versions @> to_jsonb($3::text))
 		ORDER BY updated_at DESC, id DESC`
 
-	rows, err := s.pool.Query(ctx, query, ecosystem, name)
+	rows, err := s.pool.Query(ctx, query, ecosystem, name, version)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: find malicious findings: %w", err)
 	}

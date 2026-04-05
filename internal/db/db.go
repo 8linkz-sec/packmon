@@ -22,8 +22,10 @@ type Store interface {
 	FindVulnerabilities(ctx context.Context, ecosystem, name, version string) ([]domain.Finding, error)
 
 	// FindMalicious returns all malicious-package findings that match the
-	// given ecosystem and package name.
-	FindMalicious(ctx context.Context, ecosystem, name string) ([]domain.Finding, error)
+	// given ecosystem and package name. When version is non-empty, only
+	// findings whose versions list contains that version (or is NULL,
+	// meaning all versions are affected) are returned.
+	FindMalicious(ctx context.Context, ecosystem, name, version string) ([]domain.Finding, error)
 
 	// -- Vulnerability writes (feed sync) ---------------------------------------
 

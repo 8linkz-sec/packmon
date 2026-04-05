@@ -222,9 +222,13 @@ func (h *Handler) collectFindings(ctx context.Context, packages []domain.Package
 		}
 		all = append(all, vulns...)
 
-		mal, err := h.store.FindMalicious(ctx, eco, pkg.Name)
+		mal, err := h.store.FindMalicious(ctx, eco, pkg.Name, pkg.Version)
 		if err != nil {
-			return nil, fmt.Errorf("FindMalicious(%s/%s): %w", eco, pkg.Name, err)
+			return nil, fmt.Errorf("FindMalicious(%s/%s@%s): %w", eco, pkg.Name, pkg.Version, err)
+		}
+		// Set version on malicious findings so the client can display it.
+		for i := range mal {
+			mal[i].Version = pkg.Version
 		}
 		all = append(all, mal...)
 	}
@@ -514,7 +518,7 @@ func (h *Handler) HandlePackageDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mal, err := h.store.FindMalicious(ctx, ecosystem, name)
+	mal, err := h.store.FindMalicious(ctx, ecosystem, name, "")
 	if err != nil {
 		h.logger.Error("failed to find malicious findings", "ecosystem", ecosystem, "name", name, "error", err)
 		errorResponse(w, http.StatusInternalServerError, "failed to query malicious findings")

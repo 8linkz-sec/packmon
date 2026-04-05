@@ -16,6 +16,6 @@ type Store interface {
 	ListRecentScans(ctx context.Context, limit int) ([]db.ScanLogEntry, error)
 	SearchPackages(ctx context.Context, query string, limit int) ([]db.PackageSearchResult, error)
 	FindVulnerabilities(ctx context.Context, ecosystem, name, version string) ([]domain.Finding, error)
-	FindMalicious(ctx context.Context, ecosystem, name string) ([]domain.Finding, error)
+	FindMalicious(ctx context.Context, ecosystem, name, version string) ([]domain.Finding, error)
 	ListFeedSyncStatuses(ctx context.Context) ([]db.FeedSyncStatus, error)
 }

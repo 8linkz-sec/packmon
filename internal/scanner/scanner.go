@@ -22,7 +22,7 @@ import (
 // It is satisfied by the sqlite.Store type.
 type LocalChecker interface {
 	FindVulnerabilities(ctx context.Context, ecosystem, name, version string) ([]domain.Finding, error)
-	FindMalicious(ctx context.Context, ecosystem, name string) ([]domain.Finding, error)
+	FindMalicious(ctx context.Context, ecosystem, name, version string) ([]domain.Finding, error)
 }
 
 // Mode controls how the scanner resolves findings.
@@ -295,7 +295,7 @@ func (s *Scanner) checkLocal(ctx context.Context, pkgs []domain.Package) ([]doma
 		}
 		allFindings = append(allFindings, vulns...)
 
-		mals, err := s.localChecker.FindMalicious(ctx, eco, pkg.Name)
+		mals, err := s.localChecker.FindMalicious(ctx, eco, pkg.Name, pkg.Version)
 		if err != nil {
 			return nil, fmt.Errorf("local malicious check %s/%s: %w", eco, pkg.Name, err)
 		}

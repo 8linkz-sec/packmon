@@ -47,7 +47,7 @@ func (*noopStore) FindVulnerabilities(context.Context, string, string, string) (
 	return nil, nil
 }
 
-func (s *noopStore) FindMalicious(_ context.Context, ecosystem, name string) ([]domain.Finding, error) {
+func (s *noopStore) FindMalicious(_ context.Context, ecosystem, name, version string) ([]domain.Finding, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -55,6 +55,24 @@ func (s *noopStore) FindMalicious(_ context.Context, ecosystem, name string) ([]
 	for _, mf := range s.malicious {
 		if mf.Ecosystem != ecosystem || mf.Name != name {
 			continue
+		}
+
+		// If version is specified and the finding has a versions list, check membership.
+		if version != "" && len(mf.Versions) > 0 {
+			versionsJSON := string(mf.Versions)
+			var versions []string
+			if err := json.Unmarshal([]byte(versionsJSON), &versions); err == nil && len(versions) > 0 {
+				found := false
+				for _, v := range versions {
+					if v == version {
+						found = true
+						break
+					}
+				}
+				if !found {
+					continue
+				}
+			}
 		}
 
 		title := mf.Summary

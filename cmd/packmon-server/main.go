@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
 	"runtime"
 	"strings"
+	"syscall"
 
 	"github.com/8linkz/packmon/internal/auth"
 	"github.com/8linkz/packmon/internal/config"
@@ -157,15 +159,20 @@ func run() error {
 		SchemaVersion: ver,
 	}
 
-	rootCtx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	// Use signal.NotifyContext so SIGTERM/SIGINT cancels the root context
+	// immediately. This lets feed syncers, queue workers, and the HTTP
+	// server all observe ctx.Done() at the same time -- preventing the
+	// 60+ second Docker stop delay that occurred when background services
+	// only learned about shutdown after the HTTP server had already exited.
+	rootCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
 
 	background := startBackgroundServices(rootCtx, cfg, store, logger)
 	syncFeed := newFeedSyncTrigger(cfg, store, logger, background)
 
 	srv := server.New(cfg, store, pinger, logger, build, syncFeed)
 	err = srv.Run(rootCtx)
-	cancel()
+	stop() // ensure context is cancelled if Run returned due to error
 	background.Wait()
 	return err
 }

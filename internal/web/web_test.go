@@ -71,7 +71,7 @@ func (m *mockStore) FindVulnerabilities(_ context.Context, _, _, _ string) ([]do
 	return []domain.Finding{}, nil
 }
 
-func (m *mockStore) FindMalicious(_ context.Context, _, _ string) ([]domain.Finding, error) {
+func (m *mockStore) FindMalicious(_ context.Context, _, _, _ string) ([]domain.Finding, error) {
 	if m.malErr != nil {
 		return nil, m.malErr
 	}

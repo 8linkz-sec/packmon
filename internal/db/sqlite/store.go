@@ -151,7 +151,7 @@ func (s *Store) FindVulnerabilities(ctx context.Context, ecosystem, name, versio
 
 // FindMalicious returns all malicious-package findings that match the
 // given ecosystem and package name.
-func (s *Store) FindMalicious(ctx context.Context, ecosystem, name string) ([]domain.Finding, error) {
+func (s *Store) FindMalicious(ctx context.Context, ecosystem, name, version string) ([]domain.Finding, error) {
 	const query = `
 		SELECT id, ecosystem, name, versions, risk_type, severity, summary
 		FROM malicious_local
@@ -178,6 +178,23 @@ func (s *Store) FindMalicious(ctx context.Context, ecosystem, name string) ([]do
 		if err := rows.Scan(&id, &eco, &pkg, &versionsRaw, &riskType,
 			&severity, &summary); err != nil {
 			return nil, fmt.Errorf("sqlite: scan malicious row: %w", err)
+		}
+
+		// If version is specified and the finding has a versions list, check membership.
+		if version != "" && versionsRaw.Valid && versionsRaw.String != "" {
+			var versions []string
+			if err := json.Unmarshal([]byte(versionsRaw.String), &versions); err == nil && len(versions) > 0 {
+				found := false
+				for _, v := range versions {
+					if v == version {
+						found = true
+						break
+					}
+				}
+				if !found {
+					continue
+				}
+			}
 		}
 
 		title := summary.String

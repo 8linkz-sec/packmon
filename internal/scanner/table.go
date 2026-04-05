@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"strings"
-	"text/tabwriter"
 
 	"github.com/8linkz/packmon/internal/domain"
 )
@@ -58,17 +57,25 @@ func (tw *TableWriter) Write(w io.Writer, result *domain.ScanResult) error {
 		return err
 	}
 
-	tab := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
+	// We avoid tabwriter for the table because ANSI escape codes break
+	// its width calculation. Instead we compute column widths manually
+	// and pad with spaces.
+	const sevWidth = 10 // "CRITICAL" = 8, padded to 10
 
-	// Header.
-	header := "SEVERITY\tPACKAGE\tECOSYSTEM\tADVISORY\tFIX VERSION\tSOURCE"
-	if _, err := fmt.Fprintln(tab, header); err != nil {
-		return err
+	type row struct {
+		severity string // plain text for width, colored for output
+		colored  string
+		pkg      string
+		eco      string
+		advisory string
+		fixVer   string
+		source   string
 	}
 
-	// Rows.
+	rows := make([]row, 0, len(result.Findings))
+	maxPkg, maxEco, maxAdv, maxFix, maxSrc := 7, 9, 8, 11, 6 // header widths
+
 	for _, f := range result.Findings {
-		sev := tw.colorSeverity(f.Severity)
 		pkg := fmt.Sprintf("%s@%s", f.Name, f.Version)
 		advisory := f.AdvisoryID
 		if f.Type == domain.FindingTypeMalicious && advisory == "" {
@@ -83,15 +90,59 @@ func (tw *TableWriter) Write(w io.Writer, result *domain.ScanResult) error {
 			}
 		}
 
-		line := fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%s",
-			sev, pkg, f.Ecosystem, advisory, fixVer, f.Source)
-		if _, err := fmt.Fprintln(tab, line); err != nil {
-			return err
+		r := row{
+			severity: string(f.Severity),
+			colored:  tw.colorSeverity(f.Severity),
+			pkg:      pkg,
+			eco:      string(f.Ecosystem),
+			advisory: advisory,
+			fixVer:   fixVer,
+			source:   f.Source,
+		}
+		rows = append(rows, r)
+
+		if len(r.pkg) > maxPkg {
+			maxPkg = len(r.pkg)
+		}
+		if len(r.eco) > maxEco {
+			maxEco = len(r.eco)
+		}
+		if len(r.advisory) > maxAdv {
+			maxAdv = len(r.advisory)
+		}
+		if len(r.fixVer) > maxFix {
+			maxFix = len(r.fixVer)
+		}
+		if len(r.source) > maxSrc {
+			maxSrc = len(r.source)
 		}
 	}
 
-	if err := tab.Flush(); err != nil {
+	gap := "  " // column gap
+	fmtPlain := fmt.Sprintf("%%-%ds%s%%-%ds%s%%-%ds%s%%-%ds%s%%-%ds%s%%s\n",
+		sevWidth, gap, maxPkg, gap, maxEco, gap, maxAdv, gap, maxFix, gap)
+
+	// Header.
+	if _, err := fmt.Fprintf(w, fmtPlain,
+		"SEVERITY", "PACKAGE", "ECOSYSTEM", "ADVISORY", "FIX VERSION", "SOURCE"); err != nil {
 		return err
+	}
+
+	// Rows -- severity uses colored string but is padded to sevWidth based
+	// on the plain-text length so ANSI codes don't shift the columns.
+	for _, r := range rows {
+		pad := ""
+		if diff := sevWidth - len(r.severity); diff > 0 {
+			pad = strings.Repeat(" ", diff)
+		}
+		if _, err := fmt.Fprintf(w, "%s%s%s", r.colored, pad, gap); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(w, fmt.Sprintf("%%-%ds%s%%-%ds%s%%-%ds%s%%-%ds%s%%s\n",
+			maxPkg, gap, maxEco, gap, maxAdv, gap, maxFix, gap),
+			r.pkg, r.eco, r.advisory, r.fixVer, r.source); err != nil {
+			return err
+		}
 	}
 
 	// Summary line.
