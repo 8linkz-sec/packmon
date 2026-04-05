@@ -14,9 +14,9 @@ type MavenParser struct{}
 
 // mavenProject represents the top-level <project> element of a pom.xml file.
 type mavenProject struct {
-	XMLName              xml.Name              `xml:"project"`
-	Dependencies         []mavenDependency     `xml:"dependencies>dependency"`
-	DependencyManagement mavenDepManagement    `xml:"dependencyManagement"`
+	XMLName              xml.Name           `xml:"project"`
+	Dependencies         []mavenDependency  `xml:"dependencies>dependency"`
+	DependencyManagement mavenDepManagement `xml:"dependencyManagement"`
 }
 
 // mavenDepManagement represents the <dependencyManagement> element.

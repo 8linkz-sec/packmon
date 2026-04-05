@@ -425,11 +425,11 @@ func TestSyncOneTransientErrorRetriesAndFails(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 type eventualSuccessSyncerStub struct {
-	name       string
-	calls      int
-	failUntil  int
-	transErr   error
-	result     SyncResult
+	name      string
+	calls     int
+	failUntil int
+	transErr  error
+	result    SyncResult
 }
 
 func (s *eventualSuccessSyncerStub) Name() string { return s.name }

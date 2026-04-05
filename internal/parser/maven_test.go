@@ -16,8 +16,8 @@ func TestMavenParser_CanParse(t *testing.T) {
 		want     bool
 	}{
 		{"pom.xml", true},
-		{"POM.XML", true},   // case-insensitive
-		{"Pom.Xml", true},   // case-insensitive
+		{"POM.XML", true}, // case-insensitive
+		{"Pom.Xml", true}, // case-insensitive
 		{"build.gradle", false},
 		{"package-lock.json", false},
 		{"", false},
@@ -70,8 +70,8 @@ func TestMavenParser_Parse(t *testing.T) {
 </project>`,
 			wantCount: 2,
 			wantPkgs: map[string]string{
-				"com.google.guava:guava":             "33.0.0-jre",
-				"org.apache.commons:commons-lang3":   "3.14.0",
+				"com.google.guava:guava":           "33.0.0-jre",
+				"org.apache.commons:commons-lang3": "3.14.0",
 			},
 		},
 		{

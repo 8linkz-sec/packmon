@@ -29,7 +29,7 @@ func createSession(t *testing.T, sm *SessionManager) (*Session, string) {
 
 	// Extract the session ID from the Set-Cookie header.
 	resp := rec.Result()
-	defer resp.Body.Close() //nolint:errcheck // test helper
+	defer resp.Body.Close() //nolint:errcheck // test helper //nolint:errcheck // test helper
 	var cookieValue string
 	for _, c := range resp.Cookies() {
 		if c.Name == SessionCookieName {
@@ -161,7 +161,7 @@ func TestDeleteRemovesSession(t *testing.T) {
 
 	// Verify the response clears the cookie (MaxAge = -1).
 	resp := rec.Result()
-	defer resp.Body.Close() //nolint:errcheck // test helper
+	defer resp.Body.Close() //nolint:errcheck // test helper //nolint:errcheck // test helper
 	for _, c := range resp.Cookies() {
 		if c.Name == SessionCookieName {
 			if c.MaxAge != -1 {
@@ -187,7 +187,7 @@ func TestDeleteWithoutCookieIsNoop(t *testing.T) {
 	sm.Delete(rec, req)
 
 	resp := rec.Result()
-	defer resp.Body.Close() //nolint:errcheck // test helper
+	defer resp.Body.Close() //nolint:errcheck // test helper //nolint:errcheck // test helper
 	if len(resp.Cookies()) != 0 {
 		t.Fatal("Delete without cookie should not set any cookies")
 	}
@@ -249,7 +249,7 @@ func TestNewSessionManagerDefaultsMaxAge(t *testing.T) {
 	}
 
 	resp := rec.Result()
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck // test helper
 	for _, c := range resp.Cookies() {
 		if c.Name == SessionCookieName {
 			expected := int((8 * time.Hour).Seconds())
@@ -299,7 +299,7 @@ func TestCookieAttributes(t *testing.T) {
 	}
 
 	resp := rec.Result()
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck // test helper
 	for _, c := range resp.Cookies() {
 		if c.Name == SessionCookieName {
 			if !c.HttpOnly {
