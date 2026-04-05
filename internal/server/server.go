@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/8linkz/packmon/internal/api/admin"
 	"github.com/8linkz/packmon/internal/auth"
@@ -133,17 +134,24 @@ func (s *Server) Run(ctx context.Context) error {
 
 // shutdown performs an orderly shutdown of both HTTP servers.
 func (s *Server) shutdown() error {
+	start := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.Server.ShutdownTimeout)
 	defer cancel()
 
-	// Shut down main server first (stops accepting new requests).
 	var mainErr, metricsErr error
 
-	s.logger.Info("shutting down main server")
+	s.logger.Info("shutdown: stopping main HTTP server",
+		slog.String("timeout", s.cfg.Server.ShutdownTimeout.String()))
 	mainErr = s.main.Shutdown(ctx)
+	s.logger.Info("shutdown: main HTTP server stopped",
+		slog.String("elapsed", time.Since(start).String()),
+		slog.Bool("error", mainErr != nil))
 
-	s.logger.Info("shutting down metrics server")
+	s.logger.Info("shutdown: stopping metrics server")
 	metricsErr = s.metrics.Shutdown(ctx)
+	s.logger.Info("shutdown: metrics server stopped",
+		slog.String("elapsed", time.Since(start).String()),
+		slog.Bool("error", metricsErr != nil))
 
 	return errors.Join(mainErr, metricsErr)
 }

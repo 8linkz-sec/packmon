@@ -44,22 +44,35 @@ func startBackgroundServices(ctx context.Context, cfg *config.Config, store db.S
 }
 
 // Wait blocks until all background services have stopped or the hard
-// shutdown deadline (5 seconds) is reached. This prevents the container
+// shutdown deadline (3 seconds) is reached. This prevents the container
 // from hanging when a feed syncer is stuck mid-download.
 func (b *backgroundServices) Wait() {
 	if b == nil {
 		return
 	}
 
+	start := time.Now()
 	done := make(chan struct{})
 	go func() {
 		if b.manager != nil {
+			if b.logger != nil {
+				b.logger.Info("shutdown: waiting for feed manager")
+			}
 			b.manager.Wait()
+			if b.logger != nil {
+				b.logger.Info("shutdown: feed manager stopped", "elapsed", time.Since(start).String())
+			}
 		}
 		if b.queueDone != nil {
+			if b.logger != nil {
+				b.logger.Info("shutdown: waiting for queue processor")
+			}
 			err := <-b.queueDone
 			if err != nil && !errors.Is(err, context.Canceled) && b.logger != nil {
 				b.logger.Error("queue processor stopped with error", "error", err)
+			}
+			if b.logger != nil {
+				b.logger.Info("shutdown: queue processor stopped", "elapsed", time.Since(start).String())
 			}
 		}
 		close(done)
@@ -68,11 +81,12 @@ func (b *backgroundServices) Wait() {
 	select {
 	case <-done:
 		if b.logger != nil {
-			b.logger.Info("all background services stopped")
+			b.logger.Info("shutdown: all background services stopped", "elapsed", time.Since(start).String())
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(3 * time.Second):
 		if b.logger != nil {
-			b.logger.Warn("background services did not stop within 5s, forcing exit")
+			b.logger.Warn("shutdown: background services did not stop within 3s, abandoning",
+				"elapsed", time.Since(start).String())
 		}
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // GitRepo manages a shallow clone of a git repository on disk. It
@@ -91,6 +92,7 @@ func (g *GitRepo) headHash(ctx context.Context) (string, error) {
 	cmd.Dir = g.Dir
 	cmd.Stdout = &stdout
 	cmd.Stderr = os.Stderr
+	cmd.WaitDelay = 2 * time.Second
 
 	if err := cmd.Run(); err != nil {
 		return "", err
@@ -104,6 +106,11 @@ func (g *GitRepo) run(ctx context.Context, dir string, args ...string) error {
 	// #nosec G204 -- command is fixed to git; arguments are internal git subcommands and repo values.
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
+	// WaitDelay prevents cmd.Wait() from blocking indefinitely draining
+	// stdout/stderr pipes after the process has been killed via context
+	// cancellation. Without this, a killed git clone can leave the Go
+	// goroutine stuck in Wait() for 30+ seconds.
+	cmd.WaitDelay = 2 * time.Second
 
 	var stderr bytes.Buffer
 	cmd.Stdout = os.Stderr // git clone/fetch progress goes to stderr anyway

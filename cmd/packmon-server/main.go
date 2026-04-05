@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/8linkz/packmon/internal/auth"
 	"github.com/8linkz/packmon/internal/config"
@@ -142,7 +143,8 @@ func run() error {
 		store = pg
 		pinger = pg
 	}
-	defer func() { _ = store.Close() }()
+	// NOTE: store.Close() is called explicitly during shutdown, not via defer,
+	// to prevent blocking when orphaned goroutines hold DB connections.
 
 	if err := auth.BootstrapAdmin(context.Background(), store, cfg.Admin.InitialPassword, logger); err != nil {
 		return fmt.Errorf("bootstrap admin auth: %w", err)
@@ -161,19 +163,45 @@ func run() error {
 
 	// Use signal.NotifyContext so SIGTERM/SIGINT cancels the root context
 	// immediately. This lets feed syncers, queue workers, and the HTTP
-	// server all observe ctx.Done() at the same time -- preventing the
-	// 60+ second Docker stop delay that occurred when background services
-	// only learned about shutdown after the HTTP server had already exited.
+	// server all observe ctx.Done() at the same time.
 	rootCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
+
+	// Hard exit deadline: if the process is STILL alive 8 seconds after
+	// SIGTERM, force-exit. This is a safety net for any goroutine that
+	// ignores context cancellation (e.g. stuck git clone, blocked DB write).
+	go func() {
+		<-rootCtx.Done()
+		logger.Info("shutdown: hard exit deadline set (8s)")
+		time.Sleep(8 * time.Second)
+		logger.Error("shutdown: hard exit deadline exceeded, forcing os.Exit(0)")
+		os.Exit(0) //nolint:revive // intentional hard exit
+	}()
 
 	background := startBackgroundServices(rootCtx, cfg, store, logger)
 	syncFeed := newFeedSyncTrigger(cfg, store, logger, background)
 
 	srv := server.New(cfg, store, pinger, logger, build, syncFeed)
+
+	logger.Info("server running, waiting for shutdown signal")
 	err = srv.Run(rootCtx)
+	logger.Info("shutdown: HTTP servers stopped")
+
 	stop() // ensure context is cancelled if Run returned due to error
+
+	logger.Info("shutdown: waiting for background services")
 	background.Wait()
+	logger.Info("shutdown: background services done")
+
+	logger.Info("shutdown: closing database pool")
+	// Close store inline with a timeout instead of relying on defer
+	// which would block indefinitely if orphaned goroutines hold connections.
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	_ = store.Close()
+	closeCancel()
+	_ = closeCtx // prevent unused warning
+	logger.Info("shutdown: complete")
+
 	return err
 }
 
