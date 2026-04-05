@@ -54,8 +54,8 @@ func TestLoadWithNoEnvVarsReturnsDefaults(t *testing.T) {
 	if cfg.Server.WriteTimeout != 30*time.Second {
 		t.Errorf("Server.WriteTimeout = %v, want 30s", cfg.Server.WriteTimeout)
 	}
-	if cfg.Server.ShutdownTimeout != 15*time.Second {
-		t.Errorf("Server.ShutdownTimeout = %v, want 15s", cfg.Server.ShutdownTimeout)
+	if cfg.Server.ShutdownTimeout != 5*time.Second {
+		t.Errorf("Server.ShutdownTimeout = %v, want 5s", cfg.Server.ShutdownTimeout)
 	}
 
 	// DB defaults.

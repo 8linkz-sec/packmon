@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"time"
 
 	"github.com/8linkz/packmon/internal/config"
 	"github.com/8linkz/packmon/internal/db"
@@ -42,17 +43,36 @@ func startBackgroundServices(ctx context.Context, cfg *config.Config, store db.S
 	return services
 }
 
+// Wait blocks until all background services have stopped or the hard
+// shutdown deadline (5 seconds) is reached. This prevents the container
+// from hanging when a feed syncer is stuck mid-download.
 func (b *backgroundServices) Wait() {
 	if b == nil {
 		return
 	}
-	if b.manager != nil {
-		b.manager.Wait()
-	}
-	if b.queueDone != nil {
-		err := <-b.queueDone
-		if err != nil && !errors.Is(err, context.Canceled) && b.logger != nil {
-			b.logger.Error("queue processor stopped with error", "error", err)
+
+	done := make(chan struct{})
+	go func() {
+		if b.manager != nil {
+			b.manager.Wait()
+		}
+		if b.queueDone != nil {
+			err := <-b.queueDone
+			if err != nil && !errors.Is(err, context.Canceled) && b.logger != nil {
+				b.logger.Error("queue processor stopped with error", "error", err)
+			}
+		}
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		if b.logger != nil {
+			b.logger.Info("all background services stopped")
+		}
+	case <-time.After(5 * time.Second):
+		if b.logger != nil {
+			b.logger.Warn("background services did not stop within 5s, forcing exit")
 		}
 	}
 }

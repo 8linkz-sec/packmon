@@ -9,9 +9,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"os"
-	"os/signal"
-	"syscall"
 
 	"github.com/8linkz/packmon/internal/api/admin"
 	"github.com/8linkz/packmon/internal/auth"
@@ -95,9 +92,9 @@ func New(cfg *config.Config, store db.Store, pinger health.Pinger, logger *slog.
 	}
 }
 
-// Run starts both HTTP servers and blocks until a termination signal
-// is received. It then performs a graceful shutdown within the
-// configured timeout.
+// Run starts both HTTP servers and blocks until the context is
+// cancelled or a fatal server error occurs. Signal handling is the
+// caller's responsibility (e.g. via signal.NotifyContext).
 func (s *Server) Run(ctx context.Context) error {
 	// Channel for fatal server errors.
 	errCh := make(chan error, 2)
@@ -122,13 +119,8 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 	}()
 
-	// Wait for termination signal or fatal error.
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
-
+	// Wait for context cancellation or fatal error.
 	select {
-	case sig := <-sigCh:
-		s.logger.Info("received signal, shutting down", slog.String("signal", sig.String()))
 	case err := <-errCh:
 		s.logger.Error("server error, shutting down", slog.String("error", err.Error()))
 		return err

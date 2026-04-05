@@ -165,7 +165,7 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
-	shutdownTimeout, err := envDurationOrDefault("PACKMON_SERVER_SHUTDOWN_TIMEOUT", 15*time.Second)
+	shutdownTimeout, err := envDurationOrDefault("PACKMON_SERVER_SHUTDOWN_TIMEOUT", 5*time.Second)
 	if err != nil {
 		return nil, err
 	}
