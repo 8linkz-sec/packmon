@@ -258,8 +258,9 @@ func versionAffected(version, rangesJSON string) (bool, error) {
 	}
 
 	if len(ranges) == 0 {
-		// No ranges specified means all versions are affected.
-		return true, nil
+		// No ranges specified -- we cannot determine if the version is
+		// affected. Return false to avoid false positives.
+		return false, nil
 	}
 
 	for _, r := range ranges {
@@ -280,11 +281,29 @@ func versionAffected(version, rangesJSON string) (bool, error) {
 	return false, nil
 }
 
-// compareVersions compares two version strings segment by segment.
+// compareVersions compares two version strings with semver-aware rules.
 // Returns -1 if a < b, 0 if a == b, 1 if a > b.
+//
+// Key semver rules applied:
+//   - Build metadata (after '+') is ignored.
+//   - A pre-release version (1.0.0-rc1) is LESS than its release (1.0.0).
+//   - Pre-release identifiers are compared per semver 2.0 spec.
 func compareVersions(a, b string) int {
-	partsA := strings.Split(a, ".")
-	partsB := strings.Split(b, ".")
+	// Strip build metadata.
+	if idx := strings.IndexByte(a, '+'); idx >= 0 {
+		a = a[:idx]
+	}
+	if idx := strings.IndexByte(b, '+'); idx >= 0 {
+		b = b[:idx]
+	}
+
+	// Separate release from pre-release.
+	releaseA, preA := splitPrerelease(a)
+	releaseB, preB := splitPrerelease(b)
+
+	// Compare release segments numerically.
+	partsA := strings.Split(releaseA, ".")
+	partsB := strings.Split(releaseB, ".")
 
 	maxLen := len(partsA)
 	if len(partsB) > maxLen {
@@ -309,17 +328,87 @@ func compareVersions(a, b string) int {
 		if numA > numB {
 			return 1
 		}
+	}
 
-		// If numeric parts are equal, compare the string remainder
-		// (handles pre-release suffixes like "1.0.0-rc1").
-		if segA < segB {
+	// Release parts equal. Pre-release rules:
+	// no pre-release > has pre-release (1.0.0 > 1.0.0-rc1).
+	if preA == "" && preB == "" {
+		return 0
+	}
+	if preA == "" {
+		return 1 // 1.0.0 > 1.0.0-rc1
+	}
+	if preB == "" {
+		return -1 // 1.0.0-rc1 < 1.0.0
+	}
+
+	return comparePrerelease(preA, preB)
+}
+
+func splitPrerelease(version string) (string, string) {
+	if idx := strings.IndexByte(version, '-'); idx > 0 {
+		return version[:idx], version[idx+1:]
+	}
+	return version, ""
+}
+
+func comparePrerelease(a, b string) int {
+	partsA := strings.Split(a, ".")
+	partsB := strings.Split(b, ".")
+
+	maxLen := len(partsA)
+	if len(partsB) > maxLen {
+		maxLen = len(partsB)
+	}
+
+	for i := 0; i < maxLen; i++ {
+		if i >= len(partsA) {
 			return -1
 		}
-		if segA > segB {
+		if i >= len(partsB) {
 			return 1
+		}
+
+		sa, sb := partsA[i], partsB[i]
+		isNumA, numA := isNumericSegment(sa)
+		isNumB, numB := isNumericSegment(sb)
+
+		switch {
+		case isNumA && isNumB:
+			if numA < numB {
+				return -1
+			}
+			if numA > numB {
+				return 1
+			}
+		case isNumA:
+			return -1 // numeric < string
+		case isNumB:
+			return 1
+		default:
+			if sa < sb {
+				return -1
+			}
+			if sa > sb {
+				return 1
+			}
 		}
 	}
 	return 0
+}
+
+func isNumericSegment(s string) (bool, int) {
+	if s == "" {
+		return false, 0
+	}
+	n := 0
+	for _, ch := range s {
+		if ch < '0' || ch > '9' {
+			return false, 0
+		}
+		n = n*10 + int(ch-'0')
+	}
+	return true, n
 }
 
 // parseSegment extracts the leading integer from a version segment.

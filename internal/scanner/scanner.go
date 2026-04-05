@@ -195,8 +195,8 @@ func (s *Scanner) Run(ctx context.Context) (*domain.ScanResult, int) {
 
 	// Sort findings: CRITICAL first, then HIGH, MEDIUM, LOW.
 	sort.Slice(result.Findings, func(i, j int) bool {
-		ri := severityRank(result.Findings[i].Severity)
-		rj := severityRank(result.Findings[j].Severity)
+		ri := result.Findings[i].Severity.Rank()
+		rj := result.Findings[j].Severity.Rank()
 		if ri != rj {
 			return ri > rj
 		}
@@ -361,21 +361,6 @@ func buildSummary(findings []domain.Finding) domain.ScanSummary {
 		s.BySource[f.Source]++
 	}
 	return s
-}
-
-func severityRank(s domain.Severity) int {
-	switch s {
-	case domain.SeverityCritical:
-		return 4
-	case domain.SeverityHigh:
-		return 3
-	case domain.SeverityMedium:
-		return 2
-	case domain.SeverityLow:
-		return 1
-	default:
-		return 0
-	}
 }
 
 // dedup removes duplicate packages (same name+version+ecosystem).

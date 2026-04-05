@@ -9,12 +9,13 @@ const (
 	SeverityMedium   Severity = "MEDIUM"
 	SeverityLow      Severity = "LOW"
 	SeverityUnknown  Severity = "UNKNOWN"
+	SeverityNone     Severity = "NONE"
 )
 
 // Valid returns true if the severity is a known value.
 func (s Severity) Valid() bool {
 	switch s {
-	case SeverityCritical, SeverityHigh, SeverityMedium, SeverityLow, SeverityUnknown:
+	case SeverityCritical, SeverityHigh, SeverityMedium, SeverityLow, SeverityUnknown, SeverityNone:
 		return true
 	}
 	return false
@@ -22,10 +23,11 @@ func (s Severity) Valid() bool {
 
 // Blocks returns true if this severity is at or above the given threshold.
 func (s Severity) Blocks(threshold Severity) bool {
-	return s.rank() >= threshold.rank()
+	return s.Rank() >= threshold.Rank()
 }
 
-func (s Severity) rank() int {
+// Rank returns a numeric rank for sorting (higher = more severe).
+func (s Severity) Rank() int {
 	switch s {
 	case SeverityCritical:
 		return 4

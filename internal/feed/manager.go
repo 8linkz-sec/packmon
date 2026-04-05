@@ -171,9 +171,12 @@ func (m *Manager) runSync(ctx context.Context, rf *registeredFeed, log *slog.Log
 	result, err := m.syncWithRetry(ctx, rf)
 	if err != nil {
 		if IsPermanentError(err) {
-			log.Warn("feed sync skipped",
+			log.Warn("feed sync skipped (permanent error)",
 				slog.String("error", err.Error()),
 			)
+			// Record the permanent failure so it surfaces in /admin/feeds
+			// and /readyz instead of being hidden in logs only (C-3).
+			m.recordStatus(ctx, rf.config.Syncer.Name(), "permanent_error", err.Error(), 0, nil)
 			return
 		}
 		log.Error("feed sync failed after all retries",
@@ -251,6 +254,11 @@ func (m *Manager) syncWithRetry(ctx context.Context, rf *registeredFeed) (*SyncR
 // own status tracking. Individual syncers may also write their own
 // status records with additional details (commit hashes, etc.).
 func (m *Manager) recordStatus(ctx context.Context, feedName, status, errMsg string, duration time.Duration, result *SyncResult) {
+	// Use a separate timeout so a slow/stuck DB doesn't block the sync loop.
+	recordCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = ctx // original context is only used for logging context, not for the DB call
+
 	now := time.Now().UTC()
 	fss := &db.FeedSyncStatus{
 		FeedName:       feedName,
@@ -268,7 +276,7 @@ func (m *Manager) recordStatus(ctx context.Context, feedName, status, errMsg str
 		fss.EntriesTotal = result.EntriesTotal
 	}
 
-	if err := m.store.UpsertFeedSyncStatus(ctx, fss); err != nil {
+	if err := m.store.UpsertFeedSyncStatus(recordCtx, fss); err != nil {
 		m.logger.Error("failed to record feed sync status",
 			slog.String("feed", feedName),
 			slog.String("error", err.Error()),

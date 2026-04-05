@@ -12,8 +12,8 @@ func TestNewRegistry_AllParsersRegistered(t *testing.T) {
 	r := NewRegistry()
 	parsers := r.AllParsers()
 
-	// There are 18 built-in parsers according to the Registry constructor.
-	const expectedCount = 18
+	// There are 20 built-in parsers according to the Registry constructor.
+	const expectedCount = 20
 	if len(parsers) != expectedCount {
 		t.Fatalf("AllParsers() returned %d parsers, want %d", len(parsers), expectedCount)
 	}
@@ -46,6 +46,8 @@ func TestRegistry_ParserFor(t *testing.T) {
 		{"Package.resolved", domain.EcosystemSwiftPM, false},
 		{"mix.lock", domain.EcosystemHex, false},
 		{"renv.lock", domain.EcosystemCRAN, false},
+		{"pom.xml", domain.EcosystemMaven, false},
+		{"gradle.lockfile", domain.EcosystemMaven, false},
 		// Negative cases.
 		{"unknown.file", "", true},
 		{"README.md", "", true},
@@ -126,6 +128,8 @@ func TestRegistry_SupportedFiles(t *testing.T) {
 		"Package.resolved":   false,
 		"mix.lock":           false,
 		"renv.lock":          false,
+		"pom.xml":            false,
+		"gradle.lockfile":    false,
 	}
 
 	for _, f := range files {

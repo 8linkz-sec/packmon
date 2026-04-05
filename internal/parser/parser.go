@@ -53,6 +53,8 @@ func NewRegistry() *Registry {
 			NewSwiftPMParser(),
 			NewHexParser(),
 			NewCRANParser(),
+			NewMavenParser(),
+			NewGradleParser(),
 		},
 	}
 }
@@ -105,6 +107,8 @@ func (r *Registry) SupportedFiles() []string {
 		"Package.resolved",
 		"mix.lock",
 		"renv.lock",
+		"pom.xml",
+		"gradle.lockfile",
 	}
 	return known
 }

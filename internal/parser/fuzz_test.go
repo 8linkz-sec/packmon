@@ -180,3 +180,24 @@ func FuzzCRANParser(f *testing.F) {
 		_, _ = p.Parse(bytes.NewReader(data))
 	})
 }
+
+func FuzzMavenParser(f *testing.F) {
+	f.Add([]byte(`<?xml version="1.0"?><project><dependencies><dependency><groupId>com.google.guava</groupId><artifactId>guava</artifactId><version>33.0.0-jre</version></dependency></dependencies></project>`))
+	f.Add([]byte(`<project><dependencyManagement><dependencies><dependency><groupId>org.springframework</groupId><artifactId>spring-core</artifactId><version>6.1.4</version></dependency></dependencies></dependencyManagement></project>`))
+	f.Add([]byte(`<project></project>`))
+	f.Add([]byte(``))
+	f.Fuzz(func(t *testing.T, data []byte) {
+		p := NewMavenParser()
+		_, _ = p.Parse(bytes.NewReader(data))
+	})
+}
+
+func FuzzGradleParser(f *testing.F) {
+	f.Add([]byte("# This is a Gradle generated file\ncom.google.guava:guava:33.0.0-jre=compileClasspath\nempty=\n"))
+	f.Add([]byte("org.apache.commons:commons-lang3:3.14.0=runtimeClasspath\n"))
+	f.Add([]byte(``))
+	f.Fuzz(func(t *testing.T, data []byte) {
+		p := NewGradleParser()
+		_, _ = p.Parse(bytes.NewReader(data))
+	})
+}

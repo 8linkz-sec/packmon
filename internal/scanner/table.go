@@ -163,7 +163,7 @@ func SeverityFromString(s string) (domain.Severity, bool) {
 	case "LOW":
 		return domain.SeverityLow, true
 	case "NONE":
-		return "NONE", true
+		return domain.SeverityNone, true
 	default:
 		return "", false
 	}

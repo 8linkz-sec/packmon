@@ -446,31 +446,13 @@ func extractCVSSScore(severities []osvSeverity) float64 {
 		if s.Type != "CVSS_V3" && s.Type != "CVSS_V2" {
 			continue
 		}
-		// CVSS v3 vectors look like "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
-		// We do not ship a full CVSS calculator; instead we estimate from
-		// the base metrics. For now, return 0 and rely on VulnCheck/NVD
-		// enrichment for precise scores. The severity mapping will fall
-		// back to database_specific or UNKNOWN.
-		//
-		// A full CVSS parser can be added later when VulnCheck enrichment
-		// provides numeric scores.
+		if score := feed.ParseCVSSVector(s.Score); score > 0 {
+			return score
+		}
 	}
 	return 0
 }
 
-// cvssToSeverity maps a CVSS base score (0-10) to the Packmon Severity
-// enum string. Uses the standard NVD ranges.
 func cvssToSeverity(score float64) string {
-	switch {
-	case score >= 9.0:
-		return "CRITICAL"
-	case score >= 7.0:
-		return "HIGH"
-	case score >= 4.0:
-		return "MEDIUM"
-	case score > 0:
-		return "LOW"
-	default:
-		return "UNKNOWN"
-	}
+	return feed.CVSSToSeverity(score)
 }

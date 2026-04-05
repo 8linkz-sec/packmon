@@ -400,7 +400,12 @@ func mapSeverity(advisory *ghsaAdvisory) string {
 		}
 	}
 
-	// Fallback: try to derive from CVSS vector (not yet implemented,
-	// would require a CVSS parser).
+	// Fallback: try CVSS severity entries (shared CVSS parser).
+	for _, s := range advisory.Severity {
+		if score := feed.ParseCVSSVector(s.Score); score > 0 {
+			return feed.CVSSToSeverity(score)
+		}
+	}
+
 	return "UNKNOWN"
 }

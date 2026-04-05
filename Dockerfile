@@ -10,15 +10,19 @@ RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /packmon-server ./cmd/packmon-ser
 
 FROM alpine:3.23 AS server
 
-RUN apk add --no-cache ca-certificates git tzdata
+RUN apk add --no-cache ca-certificates git tzdata && \
+    addgroup -S packmon && adduser -S packmon -G packmon
 COPY --from=build /packmon-server /usr/local/bin/packmon-server
 
+USER packmon
 EXPOSE 8080 9090
 ENTRYPOINT ["packmon-server"]
 
 FROM alpine:3.23 AS cli
 
-RUN apk add --no-cache ca-certificates tzdata
+RUN apk add --no-cache ca-certificates tzdata && \
+    addgroup -S packmon && adduser -S packmon -G packmon
 COPY --from=build /packmon /usr/local/bin/packmon
 
+USER packmon
 ENTRYPOINT ["packmon"]

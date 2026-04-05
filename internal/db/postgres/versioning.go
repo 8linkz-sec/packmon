@@ -110,8 +110,23 @@ func normalizeIntroduced(introduced string) string {
 }
 
 func compareVersions(a, b string) int {
-	partsA := strings.Split(a, ".")
-	partsB := strings.Split(b, ".")
+	// Strip build metadata (semver: everything after '+' is ignored).
+	if idx := strings.IndexByte(a, '+'); idx >= 0 {
+		a = a[:idx]
+	}
+	if idx := strings.IndexByte(b, '+'); idx >= 0 {
+		b = b[:idx]
+	}
+
+	// Separate release from pre-release at the first hyphen that follows
+	// at least one dot-separated segment. For "1.2.3-rc1" this yields
+	// release="1.2.3", pre="rc1".
+	releaseA, preA := splitPrerelease(a)
+	releaseB, preB := splitPrerelease(b)
+
+	// Compare release segments numerically.
+	partsA := strings.Split(releaseA, ".")
+	partsB := strings.Split(releaseB, ".")
 
 	maxLen := len(partsA)
 	if len(partsB) > maxLen {
@@ -135,14 +150,99 @@ func compareVersions(a, b string) int {
 		if numA > numB {
 			return 1
 		}
-		if segA < segB {
-			return -1
+	}
+
+	// Release parts are equal. Apply semver pre-release rules:
+	// a version WITHOUT a pre-release tag is GREATER than one WITH.
+	if preA == "" && preB == "" {
+		return 0
+	}
+	if preA == "" {
+		return 1 // 1.0.0 > 1.0.0-rc1
+	}
+	if preB == "" {
+		return -1 // 1.0.0-rc1 < 1.0.0
+	}
+
+	// Both have pre-release identifiers: compare dot-separated sub-segments.
+	return comparePrerelease(preA, preB)
+}
+
+// splitPrerelease splits a version string into its release and pre-release
+// parts. The first hyphen that appears after at least one character is used
+// as the separator. Returns (release, prerelease) where prerelease is ""
+// if there is no pre-release suffix.
+func splitPrerelease(version string) (string, string) {
+	if idx := strings.IndexByte(version, '-'); idx > 0 {
+		return version[:idx], version[idx+1:]
+	}
+	return version, ""
+}
+
+// comparePrerelease compares two pre-release strings per semver 2.0
+// rules: identifiers are compared left to right, numeric identifiers
+// are compared as integers, string identifiers are compared
+// lexicographically, and numeric identifiers always sort before string
+// identifiers.
+func comparePrerelease(a, b string) int {
+	partsA := strings.Split(a, ".")
+	partsB := strings.Split(b, ".")
+
+	maxLen := len(partsA)
+	if len(partsB) > maxLen {
+		maxLen = len(partsB)
+	}
+
+	for i := 0; i < maxLen; i++ {
+		if i >= len(partsA) {
+			return -1 // fewer identifiers = lower precedence
 		}
-		if segA > segB {
+		if i >= len(partsB) {
 			return 1
+		}
+
+		sa, sb := partsA[i], partsB[i]
+		isNumA, numA := isNumeric(sa)
+		isNumB, numB := isNumeric(sb)
+
+		switch {
+		case isNumA && isNumB:
+			if numA < numB {
+				return -1
+			}
+			if numA > numB {
+				return 1
+			}
+		case isNumA:
+			return -1 // numeric < string
+		case isNumB:
+			return 1
+		default:
+			if sa < sb {
+				return -1
+			}
+			if sa > sb {
+				return 1
+			}
 		}
 	}
 	return 0
+}
+
+// isNumeric returns true and the parsed value if s is composed entirely
+// of ASCII digits.
+func isNumeric(s string) (bool, int) {
+	if s == "" {
+		return false, 0
+	}
+	n := 0
+	for _, ch := range s {
+		if ch < '0' || ch > '9' {
+			return false, 0
+		}
+		n = n*10 + int(ch-'0')
+	}
+	return true, n
 }
 
 func parseVersionSegment(segment string) int {

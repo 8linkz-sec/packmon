@@ -16,6 +16,7 @@ package feed
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -30,7 +31,19 @@ const (
 	// defaultStuckThreshold is the time after which a 'processing' job is
 	// considered stuck and eligible for reset.
 	defaultStuckThreshold = 5 * time.Minute
+
+	// maxWorkerRestarts is the maximum number of restart attempts per worker
+	// before giving up.
+	maxWorkerRestarts = 3
 )
+
+// workerBackoffs defines the exponential backoff delays for worker restarts.
+// Index maps to restart attempt (0-based).
+var workerBackoffs = [maxWorkerRestarts]time.Duration{
+	5 * time.Second,
+	30 * time.Second,
+	5 * time.Minute,
+}
 
 // AsyncWorker is the interface that async feed workers (e.g. Socket.dev)
 // must implement to be dispatched by the QueueProcessor. Each worker owns
@@ -93,9 +106,12 @@ func NewQueueProcessor(store db.Store, logger *slog.Logger, workers []AsyncWorke
 }
 
 // Run starts all registered async workers and a periodic stuck-job
-// scanner. It blocks until the context is cancelled. Worker failures
-// are logged but do not bring down the processor; the worker goroutine
-// simply exits and its jobs accumulate in the queue.
+// scanner. It blocks until the context is cancelled.
+//
+// If a worker exits with a non-nil error (and the context is not cancelled),
+// it will be restarted with exponential backoff (5s, 30s, 5min). After 3
+// failed restart attempts the worker is considered dead and its jobs will
+// accumulate in the queue until the processor is restarted.
 func (q *QueueProcessor) Run(ctx context.Context) error {
 	if len(q.workers) == 0 {
 		q.logger.Info("no async workers registered, queue processor idle")
@@ -112,10 +128,12 @@ func (q *QueueProcessor) Run(ctx context.Context) error {
 	// Reset any stuck jobs left from a previous crash before starting workers.
 	q.resetAllStuckJobs(ctx)
 
+	// Track restart counts per worker name.
+	restartCounts := make(map[string]int, len(q.workers))
+
 	// Start each worker in its own goroutine.
 	done := make(chan workerResult, len(q.workers))
 	for _, w := range q.workers {
-		w := w // capture loop variable
 		go func() {
 			err := w.Run(ctx)
 			done <- workerResult{name: w.Name(), err: err}
@@ -137,8 +155,8 @@ func (q *QueueProcessor) Run(ctx context.Context) error {
 			for exited < len(q.workers) {
 				result := <-done
 				exited++
-				if result.err != nil && result.err != context.Canceled {
-					q.logger.Warn("worker exited with error",
+				if result.err != nil && !errors.Is(result.err, context.Canceled) {
+					q.logger.Warn("worker exited with error during shutdown",
 						"worker", result.name,
 						"error", result.err,
 					)
@@ -148,16 +166,66 @@ func (q *QueueProcessor) Run(ctx context.Context) error {
 			return ctx.Err()
 
 		case result := <-done:
-			exited++
-			if result.err != nil && result.err != context.Canceled {
-				q.logger.Error("worker exited unexpectedly",
-					"worker", result.name,
-					"error", result.err,
-				)
-			} else {
+			// Determine whether this is a clean exit or a crash.
+			isCanceled := errors.Is(result.err, context.Canceled) || ctx.Err() != nil
+
+			if isCanceled || result.err == nil {
+				// Clean exit (context cancelled or nil error): count as done.
+				exited++
 				q.logger.Info("worker exited", "worker", result.name)
+			} else {
+				// Unexpected error: attempt restart with backoff.
+				attempt := restartCounts[result.name]
+				if attempt >= maxWorkerRestarts {
+					// Exhausted restart attempts; give up on this worker.
+					exited++
+					q.logger.Error("worker permanently failed after max restarts",
+						"worker", result.name,
+						"error", result.err,
+						"restarts_attempted", attempt,
+					)
+				} else {
+					backoff := workerBackoffs[attempt]
+					restartCounts[result.name] = attempt + 1
+					q.logger.Warn("worker crashed, scheduling restart",
+						"worker", result.name,
+						"error", result.err,
+						"restart_attempt", attempt+1,
+						"max_restarts", maxWorkerRestarts,
+						"backoff", backoff,
+					)
+
+					// Find the worker to restart.
+					w := q.findWorker(result.name)
+					if w == nil {
+						// Should not happen, but be defensive.
+						exited++
+						q.logger.Error("cannot restart worker: not found in registry",
+							"worker", result.name,
+						)
+					} else {
+						// Restart in a background goroutine that waits for the
+						// backoff period (or context cancellation) before relaunching.
+						attemptNum := attempt + 1
+						go func(worker AsyncWorker, delay time.Duration, restartNum int) {
+							select {
+							case <-ctx.Done():
+								done <- workerResult{name: worker.Name(), err: ctx.Err()}
+								return
+							case <-time.After(delay):
+							}
+							q.logger.Info("restarting worker after backoff",
+								"worker", worker.Name(),
+								"restart_attempt", restartNum,
+							)
+							err := worker.Run(ctx)
+							done <- workerResult{name: worker.Name(), err: err}
+						}(w, backoff, attemptNum)
+					}
+				}
 			}
-			// If all workers have exited, wait for context cancellation.
+
+			// If all workers have permanently exited, wait for context cancellation.
 			if exited >= len(q.workers) {
 				q.logger.Info("all workers have exited, waiting for shutdown signal")
 				<-ctx.Done()
@@ -168,6 +236,16 @@ func (q *QueueProcessor) Run(ctx context.Context) error {
 			q.resetAllStuckJobs(ctx)
 		}
 	}
+}
+
+// findWorker returns the registered AsyncWorker with the given name, or nil.
+func (q *QueueProcessor) findWorker(name string) AsyncWorker {
+	for _, w := range q.workers {
+		if w.Name() == name {
+			return w
+		}
+	}
+	return nil
 }
 
 // resetAllStuckJobs resets stuck jobs for every registered worker source.

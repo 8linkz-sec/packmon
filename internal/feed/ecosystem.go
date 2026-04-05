@@ -35,7 +35,6 @@ var osvEcosystemMap = map[string]domain.Ecosystem{
 	"cargo":      domain.EcosystemCargo, // alias used by some sources
 	"composer":   domain.EcosystemComposer,
 	"gem":        domain.EcosystemGem,
-	"cocoapods ": domain.EcosystemCocoaPods,
 }
 
 // MapGHSAEcosystem maps a GHSA ecosystem string (from the advisory JSON
