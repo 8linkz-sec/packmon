@@ -379,14 +379,7 @@ func (s *failingSyncerStub) Sync(_ context.Context, _ db.Store) (*SyncResult, er
 }
 
 func TestSyncOneTransientErrorRetriesAndFails(t *testing.T) {
-	t.Parallel()
-
-	// Use a cancelled context with a generous timeout so backoff sleeps are
-	// short-circuited. We use a real context but set the backoff to be
-	// tested indirectly: the syncer is called maxAttempts times.
-	//
-	// NOTE: with the real backoffSchedule (5s, 30s, 5min) this test would
-	// be too slow. We shorten the schedule for this test only.
+	// Not parallel: mutates package-level backoffSchedule.
 	saved := backoffSchedule
 	backoffSchedule = [3]time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
 	defer func() { backoffSchedule = saved }()
@@ -443,8 +436,7 @@ func (s *eventualSuccessSyncerStub) Sync(_ context.Context, _ db.Store) (*SyncRe
 }
 
 func TestSyncOneSucceedsOnRetry(t *testing.T) {
-	t.Parallel()
-
+	// Not parallel: mutates package-level backoffSchedule.
 	saved := backoffSchedule
 	backoffSchedule = [3]time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
 	defer func() { backoffSchedule = saved }()
