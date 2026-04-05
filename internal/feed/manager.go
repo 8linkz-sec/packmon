@@ -143,9 +143,14 @@ func (m *Manager) loop(ctx context.Context, rf *registeredFeed, interval time.Du
 		slog.String("interval", interval.String()),
 	)
 
-	// Run first sync immediately (but non-blocking from the caller's
-	// perspective because we are already in a goroutine).
-	m.runSync(ctx, rf, log)
+	// Check whether the last successful sync is still fresh. If it is,
+	// skip the immediate sync and just wait for the next tick. This
+	// prevents hammering upstream APIs on every container restart.
+	if m.lastSyncFresh(ctx, name, interval) {
+		log.Info("last sync still within interval, skipping initial sync")
+	} else {
+		m.runSync(ctx, rf, log)
+	}
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -282,6 +287,20 @@ func (m *Manager) recordStatus(ctx context.Context, feedName, status, errMsg str
 			slog.String("error", err.Error()),
 		)
 	}
+}
+
+// lastSyncFresh returns true if the named feed was successfully synced
+// within the given interval. On any error (e.g. first run, DB
+// unreachable) it returns false so the sync proceeds.
+func (m *Manager) lastSyncFresh(ctx context.Context, feedName string, interval time.Duration) bool {
+	status, err := m.store.GetFeedSyncStatus(ctx, feedName)
+	if err != nil || status == nil || status.LastSyncAt == nil {
+		return false
+	}
+	if status.LastSyncStatus != "success" {
+		return false
+	}
+	return time.Since(*status.LastSyncAt) < interval
 }
 
 func isTimeoutError(err error) bool {
