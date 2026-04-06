@@ -8,12 +8,16 @@ replicaCount: 1
 server:
   mode: production
   port: 8080
+  # Public hostname used for safe HTTP->HTTPS redirects behind a reverse proxy.
+  # Leave empty to disable redirects for non-loopback hosts.
+  publicHost: ""
   readTimeout: 30s
   writeTimeout: 30s
   shutdownTimeout: 15s
 
 metrics:
   # Bind to 0.0.0.0 so Kubernetes sidecar Prometheus can scrape metrics.
+  # Do not publish this port via Service/Ingress to untrusted networks.
   host: 0.0.0.0
   port: 9090
 

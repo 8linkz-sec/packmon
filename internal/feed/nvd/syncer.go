@@ -15,10 +15,14 @@ package nvd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/8linkz/packmon/internal/db"
@@ -45,6 +49,10 @@ const (
 
 	// rateLimitWindow is the NVD rate limit window.
 	rateLimitWindow = 30 * time.Second
+
+	// maxRateLimitRetries limits how often one CVE lookup is retried after
+	// a typed rate-limit response from NVD.
+	maxRateLimitRetries = 2
 )
 
 // nvdResponse is the top-level NVD API v2.0 response for a single CVE lookup.
@@ -74,6 +82,15 @@ type nvdCvssData struct {
 	BaseScore    float64 `json:"baseScore"`
 	BaseSeverity string  `json:"baseSeverity"`
 	VectorString string  `json:"vectorString"`
+}
+
+type rateLimitError struct {
+	status     int
+	retryAfter time.Duration
+}
+
+func (e *rateLimitError) Error() string {
+	return fmt.Sprintf("rate limited (HTTP %d), retry after %s", e.status, e.retryAfter)
 }
 
 // Syncer fetches CVSS scores from the NVD API and updates UNKNOWN-severity
@@ -142,9 +159,6 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 
 	// Deduplicate CVE IDs -- multiple vulnerabilities can share the same
 	// CVE alias, and we only need to fetch each CVE once.
-	type cveEntry struct {
-		cveID string
-	}
 	seen := make(map[string]struct{}, len(aliases))
 	var uniqueCVEs []string
 	for _, a := range aliases {
@@ -205,6 +219,23 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 			}
 
 			score, severity, fetchErr := s.fetchCVSS(ctx, cveID)
+			for retries := 0; retries < maxRateLimitRetries; retries++ {
+				var rlErr *rateLimitError
+				if !errors.As(fetchErr, &rlErr) {
+					break
+				}
+
+				s.logger.Warn("NVD enrichment: rate limited, retrying CVE lookup",
+					slog.String("cve_id", cveID),
+					slog.Int("attempt", retries+1),
+					slog.Duration("retry_after", rlErr.retryAfter),
+				)
+				if err := waitForRetry(ctx, rlErr.retryAfter); err != nil {
+					return nil, fmt.Errorf("nvd: context cancelled during rate limit retry: %w", err)
+				}
+
+				score, severity, fetchErr = s.fetchCVSS(ctx, cveID)
+			}
 			processed++
 
 			if fetchErr != nil {
@@ -258,9 +289,12 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 // base score and severity. Returns (0, "UNKNOWN", nil) when the CVE has no
 // CVSS data. Returns an error for HTTP/network failures.
 func (s *Syncer) fetchCVSS(ctx context.Context, cveID string) (float64, string, error) {
-	url := s.apiURL + "?cveId=" + cveID
+	reqURL, err := buildRequestURL(s.apiURL, cveID)
+	if err != nil {
+		return 0, "UNKNOWN", err
+	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return 0, "UNKNOWN", fmt.Errorf("create request: %w", err)
 	}
@@ -283,10 +317,13 @@ func (s *Syncer) fetchCVSS(ctx context.Context, cveID string) (float64, string, 
 		// CVE not found in NVD -- skip gracefully.
 		return 0, "UNKNOWN", nil
 	case http.StatusForbidden, http.StatusTooManyRequests:
-		// Rate limited. Read body for diagnostics, then return a
-		// retryable error so the caller can sleep and retry.
+		// Rate limited. Read body for diagnostics, then return a typed
+		// rate-limit error so the caller can back off and retry.
 		_, _ = io.Copy(io.Discard, resp.Body)
-		return 0, "UNKNOWN", fmt.Errorf("rate limited (HTTP %d) for %s", resp.StatusCode, cveID)
+		return 0, "UNKNOWN", &rateLimitError{
+			status:     resp.StatusCode,
+			retryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
+		}
 	default:
 		_, _ = io.Copy(io.Discard, resp.Body)
 		return 0, "UNKNOWN", fmt.Errorf("unexpected status %d for %s", resp.StatusCode, cveID)
@@ -321,4 +358,53 @@ func (s *Syncer) fetchCVSS(ctx context.Context, cveID string) (float64, string, 
 	severity := feed.CVSSToSeverity(score)
 
 	return score, severity, nil
+}
+
+func buildRequestURL(apiURL, cveID string) (string, error) {
+	endpoint, err := url.Parse(apiURL)
+	if err != nil {
+		return "", fmt.Errorf("parse API URL: %w", err)
+	}
+
+	query := endpoint.Query()
+	query.Set("cveId", cveID)
+	endpoint.RawQuery = query.Encode()
+	return endpoint.String(), nil
+}
+
+func parseRetryAfter(value string) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return rateLimitWindow
+	}
+
+	if seconds, err := strconv.Atoi(value); err == nil && seconds >= 0 {
+		return time.Duration(seconds) * time.Second
+	}
+
+	if when, err := http.ParseTime(value); err == nil {
+		wait := time.Until(when)
+		if wait > 0 {
+			return wait
+		}
+		return 0
+	}
+
+	return rateLimitWindow
+}
+
+func waitForRetry(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }

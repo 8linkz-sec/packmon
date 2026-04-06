@@ -253,9 +253,11 @@ func matchRanges(version, rangesJSON, ecosystem string) (affected bool, evaluate
 		}
 
 		introduced := ""
+		hadIntroduced := false
 		for _, event := range item.Events {
 			if event.Introduced != "" {
 				introduced = normalizeIntroduced(event.Introduced)
+				hadIntroduced = true
 			}
 			if event.Fixed == "" && event.LastAffected == "" && event.Limit == "" {
 				continue
@@ -264,10 +266,11 @@ func matchRanges(version, rangesJSON, ecosystem string) (affected bool, evaluate
 				return true, evaluated, nil
 			}
 			introduced = ""
+			hadIntroduced = false
 		}
 		// Open-ended: introduced with no fixed/lastAffected means
 		// everything >= introduced is affected.
-		if introduced != "" && cmp(version, introduced) >= 0 {
+		if hadIntroduced && (introduced == "" || cmp(version, introduced) >= 0) {
 			return true, evaluated, nil
 		}
 	}
@@ -573,6 +576,7 @@ func parsePEP440(v string) pep440Version {
 //	"1.0.0.post1" -> ("1.0.0", 1, 1)
 //	"1.0.0.dev3"  -> ("1.0.0", -5, 3)
 //	"1.0.0b2"     -> ("1.0.0", -3, 2)
+//
 // pep440DotSuffixes lists dot-separated PEP 440 suffixes in order of
 // decreasing length so that ".alpha" matches before ".a", ".beta" before
 // ".b", ".post" before ".p", and ".rc" before ".r".

@@ -20,7 +20,6 @@ jobs:
           go-version: "1.26"
 
       - name: Run fuzz tests
-        continue-on-error: true
         run: |
           FUZZ_TARGETS=$(grep -r "func Fuzz" --include="*_test.go" -l . || true)
           if [ -z "$FUZZ_TARGETS" ]; then

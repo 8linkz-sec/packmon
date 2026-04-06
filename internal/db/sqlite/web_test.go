@@ -186,7 +186,7 @@ func TestDashboardStatsAndSearchPackages(t *testing.T) {
 	if stats.TotalMalicious != 2 {
 		t.Fatalf("TotalMalicious = %d, want 2", stats.TotalMalicious)
 	}
-	if stats.BySeverity["CRITICAL"] != 1 || stats.BySeverity["HIGH"] != 2 || stats.BySeverity["MEDIUM"] != 1 || stats.BySeverity["LOW"] != 1 {
-		t.Fatalf("BySeverity = %#v, want CRITICAL=1 HIGH=2 MEDIUM=1 LOW=1", stats.BySeverity)
+	if len(stats.BySeverity) != 3 || stats.BySeverity["HIGH"] != 1 || stats.BySeverity["MEDIUM"] != 1 || stats.BySeverity["LOW"] != 1 {
+		t.Fatalf("BySeverity = %#v, want HIGH=1 MEDIUM=1 LOW=1 (vulnerabilities only)", stats.BySeverity)
 	}
 }

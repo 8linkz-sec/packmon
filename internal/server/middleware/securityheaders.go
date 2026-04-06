@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"net"
 	"net/http"
 	"strings"
 )
@@ -11,8 +12,9 @@ import (
 // X-Forwarded-Proto) to HTTPS.
 //
 // The productionMode flag should be true when the server is running
-// behind TLS (directly or via a reverse proxy).
-func SecurityHeaders(productionMode bool) func(http.Handler) http.Handler {
+// behind TLS (directly or via a reverse proxy). redirectHost should be set
+// to the public host name when HTTPS redirects are enabled behind a proxy.
+func SecurityHeaders(productionMode bool, redirectHost string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// In production, redirect HTTP to HTTPS when behind a
@@ -20,9 +22,11 @@ func SecurityHeaders(productionMode bool) func(http.Handler) http.Handler {
 			if productionMode {
 				proto := r.Header.Get("X-Forwarded-Proto")
 				if strings.EqualFold(proto, "http") {
-					target := "https://" + r.Host + r.RequestURI
-					http.Redirect(w, r, target, http.StatusMovedPermanently)
-					return
+					if host := redirectTargetHost(redirectHost, r.Host); host != "" {
+						target := "https://" + host + r.URL.RequestURI()
+						http.Redirect(w, r, target, http.StatusMovedPermanently)
+						return
+					}
 				}
 			}
 
@@ -40,6 +44,10 @@ func SecurityHeaders(productionMode bool) func(http.Handler) http.Handler {
 			// Disable legacy XSS filter (modern best practice: rely on CSP).
 			h.Set("X-XSS-Protection", "0")
 
+			h.Set("Content-Security-Policy",
+				"default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; "+
+					"img-src 'self' data: https:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'")
+
 			// Restrict browser features.
 			h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 
@@ -51,4 +59,45 @@ func SecurityHeaders(productionMode bool) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+func redirectTargetHost(configuredHost, requestHost string) string {
+	if host := sanitizeHost(configuredHost); host != "" {
+		return host
+	}
+
+	host := sanitizeHost(requestHost)
+	if host == "" {
+		return ""
+	}
+	if isLoopbackHost(host) {
+		return host
+	}
+	return ""
+}
+
+func sanitizeHost(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || strings.ContainsAny(raw, "/\\@") {
+		return ""
+	}
+	return raw
+}
+
+func isLoopbackHost(hostport string) bool {
+	host := hostport
+	if strings.HasPrefix(host, "[") && strings.Contains(host, "]") {
+		end := strings.Index(host, "]")
+		host = host[1:end]
+	} else if parsedHost, _, err := net.SplitHostPort(hostport); err == nil {
+		host = parsedHost
+	}
+
+	host = strings.TrimSpace(host)
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

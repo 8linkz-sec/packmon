@@ -94,6 +94,9 @@ func run() error {
 
 	devMode := cfg.IsDevelopment()
 	ver := uint(migrations.ExpectedVersion)
+	if !devMode && strings.TrimSpace(cfg.Server.PublicHost) == "" {
+		logger.Warn("PACKMON_SERVER_PUBLIC_HOST is not set -- HTTPS redirect is disabled for non-loopback hosts")
+	}
 	if !devMode {
 		// Verify database schema version before starting the server.
 		// Migrations must be run separately via "packmon-server migrate" (DE-27).

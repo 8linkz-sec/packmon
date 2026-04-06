@@ -14,9 +14,12 @@ import (
 func TestCheckRemoteSendsAPIKey(t *testing.T) {
 	t.Parallel()
 
+	authErrCh := make(chan string, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
-			t.Fatalf("Authorization header = %q, want %q", got, "Bearer test-key")
+			authErrCh <- "Authorization header = " + got + ", want Bearer test-key"
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -43,6 +46,12 @@ func TestCheckRemoteSendsAPIKey(t *testing.T) {
 		Ecosystem: domain.Ecosystem("npm"),
 	}}); err != nil {
 		t.Fatalf("checkRemote() error = %v", err)
+	}
+
+	select {
+	case msg := <-authErrCh:
+		t.Fatal(msg)
+	default:
 	}
 }
 

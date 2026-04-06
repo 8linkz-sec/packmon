@@ -287,9 +287,6 @@ func (s *Store) DashboardStats(ctx context.Context) (*db.DashboardStatsResult, e
 	if err := s.collectSeverityCounts(ctx, stats.BySeverity, `SELECT severity, COUNT(*) FROM (SELECT DISTINCT id, severity FROM vulnerabilities_local) GROUP BY severity`); err != nil {
 		return nil, err
 	}
-	if err := s.collectSeverityCounts(ctx, stats.BySeverity, `SELECT severity, COUNT(*) FROM malicious_local GROUP BY severity`); err != nil {
-		return nil, err
-	}
 
 	return stats, nil
 }

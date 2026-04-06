@@ -9,7 +9,7 @@ import (
 func TestSecurityHeaders_SetsAllHeaders(t *testing.T) {
 	t.Parallel()
 
-	handler := SecurityHeaders(false)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := SecurityHeaders(false, "")(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -21,11 +21,12 @@ func TestSecurityHeaders_SetsAllHeaders(t *testing.T) {
 	defer resp.Body.Close()
 
 	expected := map[string]string{
-		"X-Content-Type-Options": "nosniff",
-		"X-Frame-Options":       "DENY",
-		"Referrer-Policy":       "strict-origin-when-cross-origin",
-		"X-XSS-Protection":     "0",
-		"Permissions-Policy":    "camera=(), microphone=(), geolocation=()",
+		"X-Content-Type-Options":  "nosniff",
+		"X-Frame-Options":         "DENY",
+		"Referrer-Policy":         "strict-origin-when-cross-origin",
+		"X-XSS-Protection":        "0",
+		"Content-Security-Policy": "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data: https:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'",
+		"Permissions-Policy":      "camera=(), microphone=(), geolocation=()",
 	}
 
 	for header, want := range expected {
@@ -41,7 +42,7 @@ func TestSecurityHeaders_HSTS_ProductionOnly(t *testing.T) {
 
 	t.Run("production mode sets HSTS", func(t *testing.T) {
 		t.Parallel()
-		handler := SecurityHeaders(true)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		handler := SecurityHeaders(true, "")(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		}))
 
@@ -61,7 +62,7 @@ func TestSecurityHeaders_HSTS_ProductionOnly(t *testing.T) {
 
 	t.Run("development mode omits HSTS", func(t *testing.T) {
 		t.Parallel()
-		handler := SecurityHeaders(false)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		handler := SecurityHeaders(false, "")(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		}))
 
@@ -79,7 +80,7 @@ func TestSecurityHeaders_HSTS_ProductionOnly(t *testing.T) {
 func TestSecurityHeaders_RedirectsHTTP(t *testing.T) {
 	t.Parallel()
 
-	handler := SecurityHeaders(true)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := SecurityHeaders(true, "packmon.example.com")(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("should not reach here"))
 	}))
@@ -88,7 +89,7 @@ func TestSecurityHeaders_RedirectsHTTP(t *testing.T) {
 	// Use a path-only target so r.RequestURI = "/dashboard".
 	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
 	req.Header.Set("X-Forwarded-Proto", "http")
-	req.Host = "example.com"
+	req.Host = "attacker.example"
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -100,7 +101,7 @@ func TestSecurityHeaders_RedirectsHTTP(t *testing.T) {
 	}
 
 	location := resp.Header.Get("Location")
-	want := "https://example.com/dashboard"
+	want := "https://packmon.example.com/dashboard"
 	if location != want {
 		t.Errorf("Location = %q, want %q", location, want)
 	}
@@ -109,7 +110,7 @@ func TestSecurityHeaders_RedirectsHTTP(t *testing.T) {
 func TestSecurityHeaders_NoRedirectWithoutXForwardedProto(t *testing.T) {
 	t.Parallel()
 
-	handler := SecurityHeaders(true)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := SecurityHeaders(true, "")(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -126,7 +127,7 @@ func TestSecurityHeaders_NoRedirectWithoutXForwardedProto(t *testing.T) {
 func TestSecurityHeaders_NoRedirectInDevelopment(t *testing.T) {
 	t.Parallel()
 
-	handler := SecurityHeaders(false)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := SecurityHeaders(false, "")(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -144,7 +145,7 @@ func TestSecurityHeaders_NoRedirectInDevelopment(t *testing.T) {
 func TestSecurityHeaders_HTTPSDoesNotRedirect(t *testing.T) {
 	t.Parallel()
 
-	handler := SecurityHeaders(true)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := SecurityHeaders(true, "")(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -155,5 +156,27 @@ func TestSecurityHeaders_HTTPSDoesNotRedirect(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("status = %d, want %d (HTTPS should not redirect)", rec.Code, http.StatusOK)
+	}
+}
+
+func TestSecurityHeaders_SkipsRedirectForUnconfiguredExternalHost(t *testing.T) {
+	t.Parallel()
+
+	handler := SecurityHeaders(true, "")(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
+	req.Host = "evil.example"
+	req.Header.Set("X-Forwarded-Proto", "http")
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d (skip redirect without trusted public host)", rec.Code, http.StatusOK)
+	}
+	if location := rec.Header().Get("Location"); location != "" {
+		t.Errorf("Location = %q, want empty", location)
 	}
 }

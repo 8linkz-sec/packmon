@@ -90,6 +90,7 @@ type FeedsConfig struct {
 type ServerConfig struct {
 	Port            int
 	Mode            ServerMode
+	PublicHost      string
 	ReadTimeout     time.Duration
 	WriteTimeout    time.Duration
 	ShutdownTimeout time.Duration
@@ -218,6 +219,7 @@ func Load() (*Config, error) {
 		Server: ServerConfig{
 			Port:            serverPort,
 			Mode:            mode,
+			PublicHost:      envOrDefault("PACKMON_SERVER_PUBLIC_HOST", ""),
 			ReadTimeout:     readTimeout,
 			WriteTimeout:    writeTimeout,
 			ShutdownTimeout: shutdownTimeout,

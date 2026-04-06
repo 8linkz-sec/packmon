@@ -7,6 +7,7 @@ metadata:
 data:
   PACKMON_SERVER_MODE: {{ .Values.server.mode | quote }}
   PACKMON_SERVER_PORT: {{ .Values.server.port | quote }}
+  PACKMON_SERVER_PUBLIC_HOST: {{ .Values.server.publicHost | quote }}
   PACKMON_SERVER_READ_TIMEOUT: {{ .Values.server.readTimeout | quote }}
   PACKMON_SERVER_WRITE_TIMEOUT: {{ .Values.server.writeTimeout | quote }}
   PACKMON_SERVER_SHUTDOWN_TIMEOUT: {{ .Values.server.shutdownTimeout | quote }}

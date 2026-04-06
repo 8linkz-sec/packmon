@@ -327,3 +327,106 @@ func TestSync_SendsAPIKeyHeader(t *testing.T) {
 		t.Errorf("apiKey header = %q, want %q", gotAPIKey, "test-key-12345")
 	}
 }
+
+func TestFetchCVSS_EncodesCVEQuery(t *testing.T) {
+	t.Parallel()
+
+	var (
+		gotQuery string
+		gotCVEID string
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		gotCVEID = r.URL.Query().Get("cveId")
+		resp := nvdResponse{
+			Vulnerabilities: []nvdVulnWrapper{
+				{CVE: nvdCVE{
+					ID: gotCVEID,
+					Metrics: nvdMetrics{
+						CvssMetricV31: []nvdCvssMetric{
+							{CvssData: nvdCvssData{BaseScore: 5.0, BaseSeverity: "MEDIUM"}},
+						},
+					},
+				}},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	syncer := NewSyncer(slog.New(slog.NewTextHandler(io.Discard, nil)),
+		WithAPIURL(srv.URL),
+		WithHTTPClient(srv.Client()),
+	)
+
+	score, severity, err := syncer.fetchCVSS(context.Background(), "CVE-&apiKey=stolen&x=")
+	if err != nil {
+		t.Fatalf("fetchCVSS() error = %v", err)
+	}
+	if score != 5.0 || severity != "MEDIUM" {
+		t.Fatalf("fetchCVSS() = (%v, %q), want (5.0, MEDIUM)", score, severity)
+	}
+	if gotCVEID != "CVE-&apiKey=stolen&x=" {
+		t.Fatalf("cveId query value = %q, want original CVE string", gotCVEID)
+	}
+	if gotQuery != "cveId=CVE-%26apiKey%3Dstolen%26x%3D" {
+		t.Fatalf("raw query = %q, want encoded cveId parameter", gotQuery)
+	}
+}
+
+func TestSync_RetriesRateLimitedCVE(t *testing.T) {
+	t.Parallel()
+
+	var requestCount atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requestCount.Add(1) == 1 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+
+		resp := nvdResponse{
+			Vulnerabilities: []nvdVulnWrapper{
+				{CVE: nvdCVE{
+					ID: r.URL.Query().Get("cveId"),
+					Metrics: nvdMetrics{
+						CvssMetricV31: []nvdCvssMetric{
+							{CvssData: nvdCvssData{BaseScore: 8.8, BaseSeverity: "HIGH"}},
+						},
+					},
+				}},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	store := &nvdStoreStub{
+		aliases: []db.UnknownCVEAlias{
+			{VulnerabilityID: "GO-2026-0003", CVEID: "CVE-2025-42424"},
+		},
+	}
+
+	syncer := NewSyncer(slog.New(slog.NewTextHandler(io.Discard, nil)),
+		WithAPIURL(srv.URL),
+		WithHTTPClient(srv.Client()),
+	)
+
+	result, err := syncer.Sync(context.Background(), store)
+	if err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	if result.EntriesSynced != 1 || result.EntriesTotal != 1 {
+		t.Fatalf("Sync() result = %+v, want 1 synced / 1 total", result)
+	}
+	if int(requestCount.Load()) != 2 {
+		t.Fatalf("request count = %d, want 2 (initial + retry)", requestCount.Load())
+	}
+	if rec := store.updated["CVE-2025-42424"]; rec.severity != "HIGH" || rec.cvssScore != 8.8 {
+		t.Fatalf("updated record = %+v, want HIGH / 8.8", rec)
+	}
+}

@@ -58,7 +58,7 @@ func New(ctx context.Context, cfg *config.Config, store db.Store, pinger health.
 		h = middleware.Logging(logger)(h)
 		h = middleware.Recovery(logger)(h)
 		h = middleware.Correlation(h)
-		h = middleware.SecurityHeaders(!devMode)(h)
+		h = middleware.SecurityHeaders(!devMode, cfg.Server.PublicHost)(h)
 		return h
 	}
 

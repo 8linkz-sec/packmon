@@ -414,6 +414,33 @@ func TestVersionAffected_FullOSV_OpenEnded(t *testing.T) {
 	}
 }
 
+func TestVersionAffected_FullOSV_OpenEndedZeroIntroduced(t *testing.T) {
+	t.Parallel()
+
+	ranges := `[{"type":"ECOSYSTEM","events":[{"introduced":"0"}]}]`
+
+	tests := []struct {
+		name    string
+		version string
+		want    bool
+	}{
+		{name: "zero style introduced matches early version", version: "0.0.1", want: true},
+		{name: "zero style introduced matches later version", version: "99.0.0", want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := VersionAffected(tt.version, ranges, `[]`, "npm")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("VersionAffected(%q) = %v, want %v", tt.version, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestVersionAffected_FullOSV_MultipleRanges(t *testing.T) {
 	t.Parallel()
 
