@@ -150,7 +150,7 @@ func (s *Syncer) downloadScores(ctx context.Context) ([]db.EPSSEntry, error) {
 	// Determine whether the response body is gzip-compressed. The
 	// Content-Encoding header is the primary signal. As a fallback we
 	// peek at the first two bytes for the gzip magic number (0x1f 0x8b).
-	var bodyReader io.Reader = resp.Body
+	var bodyReader io.Reader
 
 	contentEncoding := strings.ToLower(resp.Header.Get("Content-Encoding"))
 	if contentEncoding == "gzip" {

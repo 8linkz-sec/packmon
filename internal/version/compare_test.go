@@ -872,7 +872,7 @@ func TestCompare_PEP440_Transitivity(t *testing.T) {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-func TestParseRanges_FlatDetection(t *testing.T) {
+func TestInternalParseRanges_FlatDetection(t *testing.T) {
 	t.Parallel()
 
 	// Full format should parse normally.

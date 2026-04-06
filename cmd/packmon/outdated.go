@@ -16,11 +16,17 @@ import (
 	"github.com/8linkz/packmon/internal/domain"
 	"github.com/8linkz/packmon/internal/parser"
 	"github.com/8linkz/packmon/internal/scanner"
+	versioncmp "github.com/8linkz/packmon/internal/version"
+)
+
+const (
+	maxConcurrentRegistryRequests = 10
+	maxRegistryResponseSize       = 512 * 1024
 )
 
 // runOutdated walks the target, parses lock files, queries package
 // registries for the latest version, and prints a comparison table.
-func runOutdated(args []string, ecosystems string, maxDepth int, noColor bool) error {
+func runOutdated(args []string, ecosystems string, maxDepth int) error {
 	scanPath := "."
 	if len(args) > 0 {
 		scanPath = args[0]
@@ -98,13 +104,13 @@ func runOutdated(args []string, ecosystems string, maxDepth int, noColor bool) e
 
 	fmt.Fprintf(os.Stderr, "Checking %d packages for updates...\n", len(packages))
 
-	// Look up latest versions in parallel (max 10 concurrent).
+	// Look up latest versions in parallel with a bounded request fan-out.
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	results := make([]string, len(packages))
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, 10) // concurrency limit
+	sem := make(chan struct{}, maxConcurrentRegistryRequests)
 
 	for i, pkg := range packages {
 		wg.Add(1)
@@ -240,7 +246,7 @@ func registryGet(ctx context.Context, url string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("status %d", resp.StatusCode)
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, 512*1024)) // 512 KB limit
+	return io.ReadAll(io.LimitReader(resp.Body, maxRegistryResponseSize))
 }
 
 // npm: GET https://registry.npmjs.org/{name}/latest
@@ -320,7 +326,21 @@ func fetchNuGetLatest(ctx context.Context, name string) string {
 	if json.Unmarshal(data, &res) != nil || len(res.Versions) == 0 {
 		return ""
 	}
-	return res.Versions[len(res.Versions)-1]
+	return selectLatestNuGetVersion(res.Versions)
+}
+
+func selectLatestNuGetVersion(versions []string) string {
+	if len(versions) == 0 {
+		return ""
+	}
+
+	best := versions[0]
+	for _, candidate := range versions[1:] {
+		if versioncmp.Compare(candidate, best, "ECOSYSTEM", "NuGet") > 0 {
+			best = candidate
+		}
+	}
+	return best
 }
 
 // rubygems: GET https://rubygems.org/api/v1/gems/{name}.json

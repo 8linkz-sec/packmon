@@ -49,7 +49,7 @@ and malicious package databases.`,
 				return runListPackages(args, flagEcosystems, flagMaxDepth, flagNoColor)
 			}
 			if flagOutdated {
-				return runOutdated(args, flagEcosystems, flagMaxDepth, flagNoColor)
+				return runOutdated(args, flagEcosystems, flagMaxDepth)
 			}
 			return runScanCommand(cmd, args, scanFlagValues{
 				Mode:          flagMode,
@@ -152,7 +152,7 @@ func runScanCommand(cmd *cobra.Command, args []string, flags scanFlagValues) err
 		return err
 	}
 	if len(targets) > 1 && (strings.TrimSpace(flags.OutputJSON) != "" || strings.TrimSpace(flags.OutputSARIF) != "" || strings.TrimSpace(flags.OutputJUnit) != "") {
-		return fmt.Errorf("--output-json, --output-sarif and --output-junit are only supported for a single scan target")
+		return fmt.Errorf("--output-json, --output-sarif, and --output-junit can only be used when scanning a single target, not multiple targets")
 	}
 
 	finalExitCode := ExitOK
@@ -232,7 +232,7 @@ func buildScanTargets(cfg *cliConfig, args []string, flags scanFlagValues) ([]sc
 		path = args[0]
 	}
 	targetName := filepath.Base(path)
-	if targetName == "" || targetName == "." || targetName == string(filepath.Separator) {
+	if targetName == "" || targetName == "." || (len(targetName) == 1 && os.IsPathSeparator(targetName[0])) {
 		targetName = "local"
 	}
 	return []scanTarget{{Name: targetName, Path: path}}, nil
@@ -462,21 +462,35 @@ func runSingleScan(ctx context.Context, settings scanSettings) (int, error) {
 	}
 
 	if settings.OutputSARIF != "" {
-		sw := scanner.NewSARIFWriter(version)
-		if err := sw.WriteFile(settings.OutputSARIF, result); err != nil {
-			fmt.Fprintf(os.Stderr, "error writing SARIF output: %v\n", err)
+		if err := ensureOutputDir(settings.OutputSARIF); err != nil {
+			fmt.Fprintf(os.Stderr, "error preparing SARIF output: %v\n", err)
 			if exitCode == ExitOK {
 				exitCode = ExitOperational
+			}
+		} else {
+			sw := scanner.NewSARIFWriter(version)
+			if err := sw.WriteFile(settings.OutputSARIF, result); err != nil {
+				fmt.Fprintf(os.Stderr, "error writing SARIF output: %v\n", err)
+				if exitCode == ExitOK {
+					exitCode = ExitOperational
+				}
 			}
 		}
 	}
 
 	if settings.OutputJUnit != "" {
-		jw := scanner.NewJUnitWriter()
-		if err := jw.WriteFile(settings.OutputJUnit, result); err != nil {
-			fmt.Fprintf(os.Stderr, "error writing JUnit output: %v\n", err)
+		if err := ensureOutputDir(settings.OutputJUnit); err != nil {
+			fmt.Fprintf(os.Stderr, "error preparing JUnit output: %v\n", err)
 			if exitCode == ExitOK {
 				exitCode = ExitOperational
+			}
+		} else {
+			jw := scanner.NewJUnitWriter()
+			if err := jw.WriteFile(settings.OutputJUnit, result); err != nil {
+				fmt.Fprintf(os.Stderr, "error writing JUnit output: %v\n", err)
+				if exitCode == ExitOK {
+					exitCode = ExitOperational
+				}
 			}
 		}
 	}
@@ -499,8 +513,22 @@ func writeJSONFile(path string, result *domain.ScanResult) error {
 	if err != nil {
 		return fmt.Errorf("marshal JSON: %w", err)
 	}
+	if err := ensureOutputDir(path); err != nil {
+		return err
+	}
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return fmt.Errorf("write file %s: %w", path, err)
+	}
+	return nil
+}
+
+func ensureOutputDir(path string) error {
+	dir := filepath.Dir(path)
+	if dir == "" || dir == "." {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return fmt.Errorf("create output directory %s: %w", dir, err)
 	}
 	return nil
 }
