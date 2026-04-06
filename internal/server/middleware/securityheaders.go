@@ -6,6 +6,11 @@ import (
 	"strings"
 )
 
+const contentSecurityPolicy = "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; " +
+	"img-src 'self' data: https:; " +
+	"script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://unpkg.com; " +
+	"style-src 'self' 'unsafe-inline'"
+
 // SecurityHeaders returns a middleware that sets essential security
 // response headers on every response. In production mode it also
 // enforces HSTS and redirects plain-HTTP requests (detected via
@@ -44,9 +49,9 @@ func SecurityHeaders(productionMode bool, redirectHost string) func(http.Handler
 			// Disable legacy XSS filter (modern best practice: rely on CSP).
 			h.Set("X-XSS-Protection", "0")
 
-			h.Set("Content-Security-Policy",
-				"default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; "+
-					"img-src 'self' data: https:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'")
+			// The web UI currently loads Tailwind and htmx from trusted CDNs.
+			// Keep the policy strict while explicitly allowing those script hosts.
+			h.Set("Content-Security-Policy", contentSecurityPolicy)
 
 			// Restrict browser features.
 			h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
