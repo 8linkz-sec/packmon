@@ -59,9 +59,9 @@ func TestComposerParser_Parse(t *testing.T) {
 			}`,
 			wantCount: 3,
 			wantPkgs: map[string]string{
-				"monolog/monolog": "3.5.0",
-				"symfony/console": "7.0.4",
-				"phpunit/phpunit": "11.0.3",
+				"monolog/monolog": "v3.5.0",
+				"symfony/console": "v7.0.4",
+				"phpunit/phpunit": "v11.0.3",
 			},
 		},
 		{
@@ -87,14 +87,14 @@ func TestComposerParser_Parse(t *testing.T) {
 			wantErr:   true,
 		},
 		{
-			name: "v prefix stripped",
+			name: "v prefix preserved",
 			input: `{
 				"packages": [
 					{"name": "vendor/pkg", "version": "v1.2.3"}
 				]
 			}`,
 			wantCount: 1,
-			wantPkgs:  map[string]string{"vendor/pkg": "1.2.3"},
+			wantPkgs:  map[string]string{"vendor/pkg": "v1.2.3"},
 		},
 		{
 			name: "dedup across packages and packages-dev",

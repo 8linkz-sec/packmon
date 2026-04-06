@@ -8,6 +8,7 @@
 package epss
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/csv"
@@ -146,14 +147,43 @@ func (s *Syncer) downloadScores(ctx context.Context) ([]db.EPSSEntry, error) {
 		return nil, fmt.Errorf("unexpected status %d", resp.StatusCode)
 	}
 
-	// The endpoint returns gzip-compressed data.
-	gzReader, err := gzip.NewReader(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("gzip reader: %w", err)
-	}
-	defer func() { _ = gzReader.Close() }()
+	// Determine whether the response body is gzip-compressed. The
+	// Content-Encoding header is the primary signal. As a fallback we
+	// peek at the first two bytes for the gzip magic number (0x1f 0x8b).
+	var bodyReader io.Reader = resp.Body
 
-	limitedReader := io.LimitReader(gzReader, maxBodySize)
+	contentEncoding := strings.ToLower(resp.Header.Get("Content-Encoding"))
+	if contentEncoding == "gzip" {
+		gz, gzErr := gzip.NewReader(resp.Body)
+		if gzErr != nil {
+			return nil, fmt.Errorf("gzip reader: %w", gzErr)
+		}
+		defer func() { _ = gz.Close() }()
+		bodyReader = gz
+	} else {
+		// No Content-Encoding header (or non-gzip). Peek at the stream
+		// to detect gzip magic bytes in case the server omitted the header.
+		peek := make([]byte, 2)
+		n, peekErr := io.ReadFull(resp.Body, peek)
+		if peekErr != nil && peekErr != io.ErrUnexpectedEOF {
+			return nil, fmt.Errorf("peek response: %w", peekErr)
+		}
+		// Reassemble the stream: prepend the peeked bytes.
+		bodyReader = io.MultiReader(
+			bytes.NewReader(peek[:n]),
+			resp.Body,
+		)
+		if n == 2 && peek[0] == 0x1f && peek[1] == 0x8b {
+			gz, gzErr := gzip.NewReader(bodyReader)
+			if gzErr != nil {
+				return nil, fmt.Errorf("gzip reader (detected from magic bytes): %w", gzErr)
+			}
+			defer func() { _ = gz.Close() }()
+			bodyReader = gz
+		}
+	}
+
+	limitedReader := io.LimitReader(bodyReader, maxBodySize)
 	return parseCSV(limitedReader)
 }
 

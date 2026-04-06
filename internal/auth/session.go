@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -29,6 +30,11 @@ type Session struct {
 	// CSRFToken is the per-session CSRF token, generated lazily on first
 	// access via CSRFToken().
 	csrfToken string
+
+	// flash holds one-time key/value pairs that are deleted on first read.
+	// Used to pass sensitive data (like newly created API keys) between
+	// requests without exposing them in the URL.
+	flash map[string]string
 }
 
 // SessionManager manages in-memory admin sessions. It is safe for
@@ -46,8 +52,10 @@ type SessionManager struct {
 
 // NewSessionManager creates a SessionManager with the given maximum
 // session age and cookie security mode. If maxAge is zero, it defaults
-// to 8 hours.
-func NewSessionManager(maxAge time.Duration, secure bool) *SessionManager {
+// to 8 hours. The provided context controls the lifetime of the
+// background cleanup goroutine; when the context is cancelled the
+// goroutine exits.
+func NewSessionManager(ctx context.Context, maxAge time.Duration, secure bool) *SessionManager {
 	if maxAge <= 0 {
 		maxAge = 8 * time.Hour
 	}
@@ -57,7 +65,7 @@ func NewSessionManager(maxAge time.Duration, secure bool) *SessionManager {
 		secure:   secure,
 	}
 	// Background goroutine to evict expired sessions every 5 minutes.
-	go sm.cleanup()
+	go sm.cleanup(ctx)
 	return sm
 }
 
@@ -150,19 +158,61 @@ func (sm *SessionManager) setCookie(w http.ResponseWriter, sessionID string) {
 	})
 }
 
+// SetFlash stores a one-time value in the session that will be deleted
+// on first read via GetFlash. The caller must hold the session (obtained
+// via sm.Get or sm.Create). The session manager's lock is taken
+// internally to protect concurrent access to the flash map.
+func (sm *SessionManager) SetFlash(sessionID, key, value string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	sess, ok := sm.sessions[sessionID]
+	if !ok {
+		return
+	}
+	if sess.flash == nil {
+		sess.flash = make(map[string]string)
+	}
+	sess.flash[key] = value
+}
+
+// GetFlash retrieves and deletes a one-time value from the session.
+// Returns the empty string if the key does not exist or the session is
+// not found.
+func (sm *SessionManager) GetFlash(sessionID, key string) string {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	sess, ok := sm.sessions[sessionID]
+	if !ok || sess.flash == nil {
+		return ""
+	}
+	val, exists := sess.flash[key]
+	if !exists {
+		return ""
+	}
+	delete(sess.flash, key)
+	return val
+}
+
 // cleanup periodically evicts expired sessions. It runs in its own
-// goroutine, started by NewSessionManager.
-func (sm *SessionManager) cleanup() {
+// goroutine, started by NewSessionManager. It exits when ctx is cancelled.
+func (sm *SessionManager) cleanup(ctx context.Context) {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
-	for range ticker.C {
-		sm.mu.Lock()
-		for id, sess := range sm.sessions {
-			if time.Since(sess.CreatedAt) > sm.maxAge {
-				delete(sm.sessions, id)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			sm.mu.Lock()
+			for id, sess := range sm.sessions {
+				if time.Since(sess.CreatedAt) > sm.maxAge {
+					delete(sm.sessions, id)
+				}
 			}
+			sm.mu.Unlock()
 		}
-		sm.mu.Unlock()
 	}
 }
 

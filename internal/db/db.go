@@ -27,6 +27,15 @@ type Store interface {
 	// meaning all versions are affected) are returned.
 	FindMalicious(ctx context.Context, ecosystem, name, version string) ([]domain.Finding, error)
 
+	// FindVulnerabilitiesBatch returns vulnerability findings for all
+	// packages in a single batch query. Version matching is still done
+	// in Go for each result. This avoids the N+1 query problem.
+	FindVulnerabilitiesBatch(ctx context.Context, packages []PackageQuery) ([]domain.Finding, error)
+
+	// FindMaliciousBatch returns malicious-package findings for all
+	// packages in a single batch query.
+	FindMaliciousBatch(ctx context.Context, packages []PackageQuery) ([]domain.Finding, error)
+
 	// -- Vulnerability writes (feed sync) ---------------------------------------
 
 	// UpsertVulnerability inserts or updates a vulnerability and its aliases,
@@ -169,7 +178,10 @@ type Store interface {
 	GetAdminAuth(ctx context.Context) (*AdminAuth, error)
 
 	// UpsertAdminAuth creates or updates the admin password hash.
-	UpsertAdminAuth(ctx context.Context, passwordHash string) error
+	// When isBootstrap is true, the password_is_bootstrap flag is set,
+	// indicating that the initial environment-variable password is still
+	// active. A manual password change should pass false to clear the flag.
+	UpsertAdminAuth(ctx context.Context, passwordHash string, isBootstrap bool) error
 
 	// InsertAdminAuditLog appends an entry to the admin audit log.
 	InsertAdminAuditLog(ctx context.Context, entry *AdminAuditEntry) error
@@ -207,6 +219,13 @@ type Store interface {
 // These mirror the database tables and are distinct from the domain types
 // that face outward (API, CLI).
 // ---------------------------------------------------------------------------
+
+// PackageQuery identifies a single package for batch lookup operations.
+type PackageQuery struct {
+	Ecosystem string
+	Name      string
+	Version   string
+}
 
 // Vulnerability represents a full vulnerability record including related
 // aliases, sources, references, and affected packages.
@@ -351,10 +370,11 @@ type APIKey struct {
 
 // AdminAuth is the single-row admin credentials.
 type AdminAuth struct {
-	PasswordHash      string
-	CreatedAt         time.Time
-	PasswordChangedAt *time.Time
-	LastLoginAt       *time.Time
+	PasswordHash        string
+	PasswordIsBootstrap bool
+	CreatedAt           time.Time
+	PasswordChangedAt   *time.Time
+	LastLoginAt         *time.Time
 }
 
 // AdminAuditEntry is one row in the admin audit log.

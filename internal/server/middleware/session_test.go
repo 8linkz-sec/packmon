@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"net/http"
@@ -15,7 +16,7 @@ import (
 func TestRequireAdminSessionRedirectsBrowserRequestsToLogin(t *testing.T) {
 	t.Parallel()
 
-	sm := auth.NewSessionManager(time.Hour, false)
+	sm := auth.NewSessionManager(context.Background(), time.Hour, false)
 	handler := RequireAdminSession(sm, slog.New(slog.NewTextHandler(io.Discard, nil)))(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
@@ -44,7 +45,7 @@ func TestRequireAdminSessionRedirectsBrowserRequestsToLogin(t *testing.T) {
 func TestRequireAdminSessionUsesHXRedirectForHTMXRequests(t *testing.T) {
 	t.Parallel()
 
-	sm := auth.NewSessionManager(time.Hour, false)
+	sm := auth.NewSessionManager(context.Background(), time.Hour, false)
 	handler := RequireAdminSession(sm, slog.New(slog.NewTextHandler(io.Discard, nil)))(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))

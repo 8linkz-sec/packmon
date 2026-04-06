@@ -11,11 +11,16 @@ RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /packmon-server ./cmd/packmon-ser
 FROM alpine:3.23 AS server
 
 RUN apk add --no-cache ca-certificates git tzdata && \
-    addgroup -S packmon && adduser -S packmon -G packmon
+    addgroup -S packmon && adduser -S packmon -G packmon && \
+    mkdir -p /data/feeds && chown packmon:packmon /data/feeds
 COPY --from=build /packmon-server /usr/local/bin/packmon-server
 
 USER packmon
 EXPOSE 8080 9090
+
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+  CMD wget -qO- http://localhost:8080/healthz || exit 1
+
 ENTRYPOINT ["packmon-server"]
 
 FROM alpine:3.23 AS cli

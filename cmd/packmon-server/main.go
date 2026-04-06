@@ -120,6 +120,16 @@ func run() error {
 		}
 	}
 
+	// Warn if the metrics endpoint is bound to a non-localhost address,
+	// which could expose operational intelligence to untrusted networks.
+	metricsHost := strings.ToLower(strings.TrimSpace(cfg.Metrics.Host))
+	if metricsHost != "127.0.0.1" && metricsHost != "::1" && metricsHost != "localhost" && metricsHost != "" {
+		logger.Warn("metrics endpoint bound to non-localhost address, consider restricting access",
+			slog.String("metrics_host", cfg.Metrics.Host),
+			slog.String("metrics_addr", cfg.Metrics.Addr()),
+		)
+	}
+
 	logger.Info("packmon-server starting",
 		slog.String("version", version),
 		slog.String("commit", commit),
@@ -132,11 +142,23 @@ func run() error {
 		pinger health.Pinger
 	)
 
+	// Create field encryptor for sensitive at-rest data (feed API keys).
+	encryptor, err := auth.NewFieldEncryptor(cfg.Admin.EncryptionKey)
+	if err != nil {
+		return fmt.Errorf("create field encryptor: %w", err)
+	}
+	if !encryptor.Active() {
+		logger.Warn("PACKMON_ENCRYPTION_KEY is not set -- feed API keys will be stored in plaintext")
+	}
+
 	if devMode {
 		store = newNoopStore()
 		pinger = &noopPinger{}
 	} else {
-		pg, err := pgstore.New(context.Background(), cfg.DB.DSN())
+		pg, err := pgstore.New(context.Background(), cfg.DB.DSN(), encryptor, &pgstore.PoolConfig{
+			MaxConns: cfg.DB.MaxConns,
+			MinConns: cfg.DB.MinConns,
+		})
 		if err != nil {
 			return fmt.Errorf("open postgres store: %w", err)
 		}
@@ -181,7 +203,7 @@ func run() error {
 	background := startBackgroundServices(rootCtx, cfg, store, logger)
 	syncFeed := newFeedSyncTrigger(cfg, store, logger, background)
 
-	srv := server.New(cfg, store, pinger, logger, build, syncFeed)
+	srv := server.New(rootCtx, cfg, store, pinger, logger, build, syncFeed)
 
 	logger.Info("server running, waiting for shutdown signal")
 	err = srv.Run(rootCtx)
@@ -194,12 +216,10 @@ func run() error {
 	logger.Info("shutdown: background services done")
 
 	logger.Info("shutdown: closing database pool")
-	// Close store inline with a timeout instead of relying on defer
-	// which would block indefinitely if orphaned goroutines hold connections.
-	closeCtx, closeCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	// pool.Close() does not accept a context, so there is no way to
+	// enforce a timeout here. The hard exit deadline goroutine above
+	// already provides a safety net if Close blocks indefinitely.
 	_ = store.Close()
-	closeCancel()
-	_ = closeCtx // prevent unused warning
 	logger.Info("shutdown: complete")
 
 	return err

@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -10,7 +11,7 @@ import (
 // newTestSessionManager creates a SessionManager with a short maxAge for
 // testing. It uses secure=false so we do not need TLS in tests.
 func newTestSessionManager(maxAge time.Duration) *SessionManager {
-	return NewSessionManager(maxAge, false)
+	return NewSessionManager(context.Background(), maxAge, false)
 }
 
 // createSession is a helper that creates a session and returns both the
@@ -239,7 +240,7 @@ func TestGetUpdatesLastAccessed(t *testing.T) {
 func TestNewSessionManagerDefaultsMaxAge(t *testing.T) {
 	t.Parallel()
 
-	sm := NewSessionManager(0, false)
+	sm := NewSessionManager(context.Background(), 0, false)
 	// We cannot read maxAge directly, but creating a session with maxAge=0
 	// should default to 8h. We verify the cookie MaxAge reflects this.
 	rec := httptest.NewRecorder()
@@ -291,7 +292,7 @@ func TestCSRFTokenIsSetOnSession(t *testing.T) {
 func TestCookieAttributes(t *testing.T) {
 	t.Parallel()
 
-	sm := NewSessionManager(time.Hour, true) // secure=true
+	sm := NewSessionManager(context.Background(), time.Hour, true) // secure=true
 	rec := httptest.NewRecorder()
 	_, err := sm.Create(rec)
 	if err != nil {

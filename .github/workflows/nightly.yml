@@ -20,20 +20,26 @@ jobs:
           go-version: "1.26"
 
       - name: Run fuzz tests
+        continue-on-error: true
         run: |
           FUZZ_TARGETS=$(grep -r "func Fuzz" --include="*_test.go" -l . || true)
           if [ -z "$FUZZ_TARGETS" ]; then
             echo "No fuzz targets found, skipping"
             exit 0
           fi
+          EXIT=0
           for f in $FUZZ_TARGETS; do
             DIR=$(dirname "$f")
             FUNCS=$(grep -oP 'func \KFuzz\w+' "$f")
             for func in $FUNCS; do
               echo "Fuzzing $func in $DIR for 5m..."
-              go test -fuzz="^${func}$" -fuzztime=5m "$DIR" || true
+              if ! go test -fuzz="^${func}$" -fuzztime=5m "$DIR"; then
+                echo "FAIL: $func in $DIR"
+                EXIT=1
+              fi
             done
           done
+          exit $EXIT
 
   e2e:
     name: E2E

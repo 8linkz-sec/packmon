@@ -101,6 +101,86 @@ func (g *GitRepo) headHash(ctx context.Context) (string, error) {
 	return strings.TrimSpace(stdout.String()), nil
 }
 
+// PullWithChangedFiles fetches the latest changes, computes the list of
+// changed files between the current HEAD and the fetched origin/HEAD,
+// then resets to origin/HEAD. It returns the new commit hash and the
+// list of changed files. If the repo was freshly cloned (oldHash is
+// empty), changedFiles will be nil (meaning the caller should do a full
+// walk). This method must be called instead of EnsureCloned when delta
+// detection is desired, because after a shallow fetch+reset the old
+// commit is no longer reachable.
+func (g *GitRepo) PullWithChangedFiles(ctx context.Context) (newHash string, changedFiles []string, err error) {
+	log := g.Logger.With(slog.String("repo", g.URL), slog.String("dir", g.Dir))
+
+	if !g.isCloned() {
+		log.Info("cloning repository (shallow)")
+		if err := g.clone(ctx); err != nil {
+			return "", nil, fmt.Errorf("git clone: %w", err)
+		}
+		hash, err := g.headHash(ctx)
+		if err != nil {
+			return "", nil, fmt.Errorf("git rev-parse HEAD: %w", err)
+		}
+		// Fresh clone: no delta available.
+		return hash, nil, nil
+	}
+
+	log.Debug("repository already cloned, fetching updates")
+
+	// Step 1: record current HEAD before fetch.
+	oldHash, err := g.headHash(ctx)
+	if err != nil {
+		return "", nil, fmt.Errorf("git rev-parse HEAD (pre-fetch): %w", err)
+	}
+
+	// Step 2: fetch latest from origin.
+	if err := g.run(ctx, g.Dir, "fetch", "--depth=1", "origin"); err != nil {
+		return "", nil, fmt.Errorf("git fetch: %w", err)
+	}
+
+	// Step 3: compute diff between local HEAD and fetched origin/HEAD.
+	// Both commits are still reachable at this point (before reset).
+	var diffFiles []string
+	var stdout bytes.Buffer
+	cmd := exec.CommandContext(ctx, "git", "diff", "--name-only", oldHash, "origin/HEAD")
+	cmd.Dir = g.Dir
+	cmd.Stdout = &stdout
+	cmd.Stderr = os.Stderr
+	cmd.WaitDelay = 2 * time.Second
+
+	if diffErr := cmd.Run(); diffErr != nil {
+		log.Warn("git diff failed, delta sync not available",
+			slog.String("error", diffErr.Error()),
+		)
+		// diffFiles stays nil -> caller does full walk.
+	} else {
+		lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line != "" {
+				diffFiles = append(diffFiles, line)
+			}
+		}
+	}
+
+	// Step 4: reset to origin/HEAD.
+	if err := g.run(ctx, g.Dir, "reset", "--hard", "origin/HEAD"); err != nil {
+		return "", nil, fmt.Errorf("git reset: %w", err)
+	}
+
+	hash, err := g.headHash(ctx)
+	if err != nil {
+		return "", nil, fmt.Errorf("git rev-parse HEAD (post-reset): %w", err)
+	}
+
+	if oldHash == hash {
+		// No changes -- return empty list (not nil) to signal "no changes".
+		return hash, []string{}, nil
+	}
+
+	return hash, diffFiles, nil
+}
+
 // run executes a git command in the given directory and returns any error.
 func (g *GitRepo) run(ctx context.Context, dir string, args ...string) error {
 	// #nosec G204 -- command is fixed to git; arguments are internal git subcommands and repo values.

@@ -101,10 +101,11 @@ type Worker struct {
 	pollInterval time.Duration
 
 	// Token bucket for rate limiting.
-	tokensMu   sync.Mutex
-	tokens     int
-	maxTokens  int
-	lastRefill time.Time
+	tokensMu         sync.Mutex
+	tokens           int
+	maxTokens        int
+	lastRefill       time.Time
+	fractionalTokens float64 // accumulates sub-integer token fractions between refills
 }
 
 // Option configures a Worker.
@@ -444,6 +445,9 @@ func (w *Worker) drainTokens() {
 
 // refillTokens adds tokens proportional to the time elapsed since the
 // last refill, up to the maximum. Must be called under tokensMu lock.
+//
+// Fractional tokens are accumulated across calls so that small elapsed
+// durations do not lose precision through int truncation (FEED-M3).
 func (w *Worker) refillTokens() {
 	now := time.Now()
 	elapsed := now.Sub(w.lastRefill)
@@ -452,12 +456,16 @@ func (w *Worker) refillTokens() {
 	}
 
 	// Tokens per second = maxTokens / 3600.
-	tokensToAdd := int(elapsed.Seconds() * float64(w.maxTokens) / 3600.0)
-	if tokensToAdd <= 0 {
+	raw := elapsed.Seconds() * float64(w.maxTokens) / 3600.0
+	w.fractionalTokens += raw
+	whole := int(w.fractionalTokens)
+	w.fractionalTokens -= float64(whole)
+
+	if whole <= 0 {
 		return
 	}
 
-	w.tokens += tokensToAdd
+	w.tokens += whole
 	if w.tokens > w.maxTokens {
 		w.tokens = w.maxTokens
 	}

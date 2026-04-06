@@ -115,16 +115,30 @@ func newQueueProcessor(cfg *config.Config, store db.Store, logger *slog.Logger) 
 	return feed.NewQueueProcessor(store, logger, workers)
 }
 
+// enrichmentFeeds are feeds that enrich existing vulnerability data
+// and must wait for Phase 1 (vulnerability data) to complete first.
+var enrichmentFeeds = map[string]bool{
+	"vulncheck": true,
+	"cisakev":   true,
+	"epss":      true,
+}
+
 func registerFeedSyncer(manager *feed.Manager, cfg *config.Config, name string, syncer feed.FeedSyncer) {
 	settings, ok := cfg.FeedSettings(name)
 	if !ok {
 		return
 	}
 
+	phase := feed.FeedPhaseVulnerability
+	if enrichmentFeeds[name] {
+		phase = feed.FeedPhaseEnrichment
+	}
+
 	feedCfg := feed.FeedConfig{
 		Syncer:  syncer,
 		Mode:    feed.FeedMode(settings.Mode),
 		Enabled: settings.Enabled,
+		Phase:   phase,
 	}
 
 	if interval := cfg.EffectiveFeedInterval(name); interval > 0 && settings.SupportsSyncInterval {

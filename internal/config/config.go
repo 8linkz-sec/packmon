@@ -97,6 +97,8 @@ type DBConfig struct {
 	User     string
 	Password string
 	SSLMode  string
+	MaxConns int32
+	MinConns int32
 }
 
 // DSN returns a PostgreSQL connection string.
@@ -123,6 +125,10 @@ type MetricsConfig struct {
 type AdminConfig struct {
 	InitialPassword string
 	SessionTimeout  time.Duration
+	// EncryptionKey is used to encrypt sensitive fields (e.g. feed API
+	// keys) at rest with AES-256-GCM. When empty, fields are stored in
+	// plaintext and a startup warning is emitted.
+	EncryptionKey string
 }
 
 // FeedSyncConfig holds feed sync scheduling settings.
@@ -151,6 +157,16 @@ func Load() (*Config, error) {
 	}
 
 	dbPort, err := envIntOrDefault("PACKMON_DB_PORT", 5432)
+	if err != nil {
+		return nil, err
+	}
+
+	dbMaxConns, err := envIntOrDefault("PACKMON_DB_MAX_CONNS", 20)
+	if err != nil {
+		return nil, err
+	}
+
+	dbMinConns, err := envIntOrDefault("PACKMON_DB_MIN_CONNS", 2)
 	if err != nil {
 		return nil, err
 	}
@@ -207,18 +223,21 @@ func Load() (*Config, error) {
 			User:     envOrDefault("PACKMON_DB_USER", "packmon"),
 			Password: os.Getenv("PACKMON_DB_PASSWORD"),
 			SSLMode:  envOrDefault("PACKMON_DB_SSLMODE", defaultSSL),
+			MaxConns: int32(dbMaxConns),
+			MinConns: int32(dbMinConns),
 		},
 		Log: LogConfig{
 			Level:  envOrDefault("PACKMON_LOG_LEVEL", defaultLogLevel),
 			Format: envOrDefault("PACKMON_LOG_FORMAT", "json"),
 		},
 		Metrics: MetricsConfig{
-			Host: envOrDefault("PACKMON_METRICS_HOST", defaultMetricsHost(mode)),
+			Host: envOrDefault("PACKMON_METRICS_HOST", "127.0.0.1"),
 			Port: metricsPort,
 		},
 		Admin: AdminConfig{
 			InitialPassword: os.Getenv("PACKMON_ADMIN_INITIAL_PASSWORD"),
 			SessionTimeout:  sessionTimeout,
+			EncryptionKey:   os.Getenv("PACKMON_ENCRYPTION_KEY"),
 		},
 		FeedSync: FeedSyncConfig{
 			Interval:  syncInterval,
@@ -250,13 +269,6 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
-}
-
-func defaultMetricsHost(mode ServerMode) string {
-	if mode == ModeDevelopment {
-		return "127.0.0.1"
-	}
-	return "127.0.0.1"
 }
 
 // Addr returns the metrics listen address.

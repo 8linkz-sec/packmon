@@ -13,7 +13,8 @@ server:
   shutdownTimeout: 15s
 
 metrics:
-  host: 127.0.0.1
+  # Bind to 0.0.0.0 so Kubernetes sidecar Prometheus can scrape metrics.
+  host: 0.0.0.0
   port: 9090
 
 admin:
@@ -69,7 +70,8 @@ postgresql:
   size: 20Gi
   database: packmon
   user: packmon
-  password: packmon
+  # REQUIRED: Set a strong password. Empty default forces explicit configuration.
+  password: ""
 
 backup:
   enabled: true

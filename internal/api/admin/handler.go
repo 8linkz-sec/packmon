@@ -14,6 +14,7 @@ import (
 	"github.com/8linkz/packmon/internal/auth"
 	"github.com/8linkz/packmon/internal/config"
 	"github.com/8linkz/packmon/internal/db"
+	"github.com/8linkz/packmon/internal/server/middleware"
 	"github.com/8linkz/packmon/internal/telemetry"
 	"github.com/8linkz/packmon/internal/web"
 )
@@ -52,7 +53,9 @@ type AdminHandler struct {
 }
 
 // NewAdminHandler creates an AdminHandler with the given dependencies.
-func NewAdminHandler(store db.Store, sm *auth.SessionManager, renderer *web.Renderer, logger *slog.Logger, cfg *config.Config, syncFeed FeedSyncFunc) *AdminHandler {
+// The provided context controls the lifetime of the background cleanup
+// goroutine; when the context is cancelled the goroutine exits.
+func NewAdminHandler(ctx context.Context, store db.Store, sm *auth.SessionManager, renderer *web.Renderer, logger *slog.Logger, cfg *config.Config, syncFeed FeedSyncFunc) *AdminHandler {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -66,7 +69,7 @@ func NewAdminHandler(store db.Store, sm *auth.SessionManager, renderer *web.Rend
 		loginAttempts: make(map[string]*loginAttempt),
 	}
 	// Background goroutine to evict stale lockout entries.
-	go h.cleanupAttempts()
+	go h.cleanupAttempts(ctx)
 	return h
 }
 
@@ -216,9 +219,21 @@ func (h *AdminHandler) processLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleLogout destroys the admin session and redirects to the login page.
+// Requires a valid CSRF token to prevent cross-site logout attacks (SEC-H6).
 func (h *AdminHandler) HandleLogout(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if !parseAdminForm(w, r) {
+		return
+	}
+
+	sess := h.sm.Get(r)
+	if sess == nil || !auth.ValidateCSRF(r, sess) {
+		h.logger.Warn("CSRF validation failed on logout", "ip", clientIP(r))
+		http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
 		return
 	}
 
@@ -247,6 +262,15 @@ func (h *AdminHandler) HandleDashboard(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	csrfToken, _ := auth.CSRFToken(sess)
+
+	// Check if the admin is still using the bootstrap password.
+	bootstrapWarning := false
+	adminAuth, err := h.store.GetAdminAuth(ctx)
+	if err != nil {
+		h.logger.Error("admin dashboard: failed to check bootstrap flag", "error", err)
+	} else if adminAuth != nil && adminAuth.PasswordIsBootstrap {
+		bootstrapWarning = true
+	}
 
 	stats, err := h.store.DashboardStats(ctx)
 	if err != nil {
@@ -283,11 +307,12 @@ func (h *AdminHandler) HandleDashboard(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 
 	data := map[string]any{
-		"ActiveNav":  "admin",
-		"CSRFToken":  csrfToken,
-		"Stats":      stats,
-		"Feeds":      feedRows,
-		"QueueStats": queueStats,
+		"ActiveNav":        "admin",
+		"CSRFToken":        csrfToken,
+		"Stats":            stats,
+		"Feeds":            feedRows,
+		"QueueStats":       queueStats,
+		"BootstrapWarning": bootstrapWarning,
 	}
 	if err := h.renderer.Render(w, "admin/dashboard.html", data); err != nil {
 		h.logger.Error("admin dashboard: render failed", "error", err)
@@ -393,19 +418,25 @@ func (h *AdminHandler) resetAttempts(ip string) {
 }
 
 // cleanupAttempts periodically removes stale lockout entries. It runs
-// in its own goroutine, started by NewAdminHandler.
-func (h *AdminHandler) cleanupAttempts() {
+// in its own goroutine, started by NewAdminHandler. It exits when ctx
+// is cancelled.
+func (h *AdminHandler) cleanupAttempts(ctx context.Context) {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
-	for range ticker.C {
-		h.loginMu.Lock()
-		cutoff := time.Now().Add(-loginLockoutDuration)
-		for ip, a := range h.loginAttempts {
-			if !a.lockedAt.IsZero() && a.lockedAt.Before(cutoff) {
-				delete(h.loginAttempts, ip)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			h.loginMu.Lock()
+			cutoff := time.Now().Add(-loginLockoutDuration)
+			for ip, a := range h.loginAttempts {
+				if !a.lockedAt.IsZero() && a.lockedAt.Before(cutoff) {
+					delete(h.loginAttempts, ip)
+				}
 			}
+			h.loginMu.Unlock()
 		}
-		h.loginMu.Unlock()
 	}
 }
 
@@ -428,22 +459,8 @@ func (h *AdminHandler) auditLog(r *http.Request, action string, details map[stri
 	}
 }
 
-// clientIP extracts the client IP from the request, preferring
-// X-Forwarded-For when set (first entry only).
+// clientIP delegates to the shared middleware.ClientIP function which
+// only trusts r.RemoteAddr to prevent X-Forwarded-For spoofing.
 func clientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		for i := range len(xff) {
-			if xff[i] == ',' {
-				return xff[:i]
-			}
-		}
-		return xff
-	}
-	addr := r.RemoteAddr
-	for i := len(addr) - 1; i >= 0; i-- {
-		if addr[i] == ':' {
-			return addr[:i]
-		}
-	}
-	return addr
+	return middleware.ClientIP(r)
 }

@@ -203,19 +203,21 @@ func (s *Syncer) walkEntries(ctx context.Context, store db.Store, root string) (
 			return nil
 		}
 
-		mf := mapToMaliciousFinding(&entry, relativePath)
-		if mf == nil {
+		findings := mapToMaliciousFindings(&entry, relativePath)
+		if len(findings) == 0 {
 			return nil
 		}
 
-		if upsertErr := store.UpsertMaliciousFinding(ctx, mf); upsertErr != nil {
-			s.logger.Warn("failed to upsert malicious finding",
-				slog.String("id", mf.ID),
-				slog.String("error", upsertErr.Error()),
-			)
-			return nil
+		for _, mf := range findings {
+			if upsertErr := store.UpsertMaliciousFinding(ctx, mf); upsertErr != nil {
+				s.logger.Warn("failed to upsert malicious finding",
+					slog.String("id", mf.ID),
+					slog.String("error", upsertErr.Error()),
+				)
+				continue
+			}
+			synced++
 		}
-		synced++
 
 		return nil
 	})
@@ -313,44 +315,19 @@ type malCredit struct {
 // Mapping: OpenSSF entry -> Packmon db.MaliciousFinding
 // ---------------------------------------------------------------------------
 
-// mapToMaliciousFinding converts an OpenSSF malicious-packages entry
-// into the Packmon MaliciousFinding model. Returns nil if the entry
-// has no recognised ecosystem.
-func mapToMaliciousFinding(entry *malEntry, filePath string) *db.MaliciousFinding {
+// mapToMaliciousFindings converts an OpenSSF malicious-packages entry
+// into one or more Packmon MaliciousFinding models -- one per affected
+// ecosystem/package pair. Returns nil if the entry has no recognised
+// ecosystems.
+func mapToMaliciousFindings(entry *malEntry, filePath string) []*db.MaliciousFinding {
 	if len(entry.Affected) == 0 {
-		return nil
-	}
-
-	// Use the first affected entry for the primary ecosystem/name.
-	aff := entry.Affected[0]
-	canonicalEco, ok := feed.MapOpenSSFEcosystem(aff.Package.Ecosystem)
-	if !ok {
 		return nil
 	}
 
 	// Determine risk type from the ID prefix or summary heuristics.
 	riskType := classifyRiskType(entry)
 
-	// Collect all affected versions across all affected entries.
-	var allVersions []string
-	for _, a := range entry.Affected {
-		allVersions = append(allVersions, a.Versions...)
-		// Also extract versions from ranges.
-		for _, r := range a.Ranges {
-			for _, e := range r.Events {
-				if e.Introduced != "" && e.Introduced != "0" {
-					allVersions = append(allVersions, e.Introduced)
-				}
-			}
-		}
-	}
-
-	var versionsJSON json.RawMessage
-	if len(allVersions) > 0 {
-		versionsJSON, _ = json.Marshal(allVersions)
-	}
-
-	// Collect reference URLs.
+	// Collect reference URLs (shared across all findings from this entry).
 	var refURLs []string
 	for _, ref := range entry.References {
 		if ref.URL != "" {
@@ -359,10 +336,10 @@ func mapToMaliciousFinding(entry *malEntry, filePath string) *db.MaliciousFindin
 	}
 	refURLsJSON, _ := json.Marshal(refURLs)
 
-	// Use the entry ID as the finding ID. If empty, derive from file path.
-	id := entry.ID
-	if id == "" {
-		id = deriveIDFromPath(filePath)
+	// Use the entry ID as the base finding ID. If empty, derive from file path.
+	baseID := entry.ID
+	if baseID == "" {
+		baseID = deriveIDFromPath(filePath)
 	}
 
 	published := &entry.Published
@@ -370,21 +347,57 @@ func mapToMaliciousFinding(entry *malEntry, filePath string) *db.MaliciousFindin
 		published = nil
 	}
 
-	return &db.MaliciousFinding{
-		ID:            id,
-		Ecosystem:     string(canonicalEco),
-		Name:          aff.Package.Name,
-		Versions:      versionsJSON,
-		Source:        "openssf",
-		RiskType:      riskType,
-		Severity:      "CRITICAL", // malicious packages are always critical
-		Summary:       entry.Summary,
-		Description:   entry.Details,
-		ReferenceURLs: refURLsJSON,
-		OriginRef:     filePath,
-		Published:     published,
-		CreatedBy:     "feed-sync",
+	var findings []*db.MaliciousFinding
+
+	// Iterate over ALL affected entries, not just the first one.
+	for i, aff := range entry.Affected {
+		canonicalEco, ok := feed.MapOpenSSFEcosystem(aff.Package.Ecosystem)
+		if !ok {
+			continue
+		}
+
+		// Collect versions for this specific affected entry.
+		var versions []string
+		versions = append(versions, aff.Versions...)
+		for _, r := range aff.Ranges {
+			for _, e := range r.Events {
+				if e.Introduced != "" && e.Introduced != "0" {
+					versions = append(versions, e.Introduced)
+				}
+			}
+		}
+
+		var versionsJSON json.RawMessage
+		if len(versions) > 0 {
+			versionsJSON, _ = json.Marshal(versions)
+		}
+
+		// For entries with multiple affected ecosystems, append a suffix
+		// to keep IDs unique. The first entry keeps the original ID for
+		// backwards compatibility.
+		id := baseID
+		if i > 0 {
+			id = fmt.Sprintf("%s-%d", baseID, i)
+		}
+
+		findings = append(findings, &db.MaliciousFinding{
+			ID:            id,
+			Ecosystem:     string(canonicalEco),
+			Name:          aff.Package.Name,
+			Versions:      versionsJSON,
+			Source:        "openssf",
+			RiskType:      riskType,
+			Severity:      "CRITICAL", // malicious packages are always critical
+			Summary:       entry.Summary,
+			Description:   entry.Details,
+			ReferenceURLs: refURLsJSON,
+			OriginRef:     filePath,
+			Published:     published,
+			CreatedBy:     "feed-sync",
+		})
 	}
+
+	return findings
 }
 
 // classifyRiskType attempts to determine whether a malicious package is

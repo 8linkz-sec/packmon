@@ -26,11 +26,18 @@ func (s *Store) ExportSync(ctx context.Context, opts db.SyncExportOptions) (*db.
 		return nil, err
 	}
 
+	// When pagination is active, signal that more data may follow if
+	// either result set filled the limit exactly.
+	truncated := false
+	if opts.Limit > 0 && (len(vulns) == opts.Limit || len(malicious) == opts.Limit) {
+		truncated = true
+	}
+
 	return &db.SyncExport{
 		SyncedAt:        snapshot,
 		Vulnerabilities: vulns,
 		Malicious:       malicious,
-		Truncated:       false,
+		Truncated:       truncated,
 	}, nil
 }
 
@@ -62,6 +69,14 @@ func (s *Store) exportSyncVulnerabilities(ctx context.Context, opts db.SyncExpor
 		args = append(args, opts.Ecosystems)
 	}
 	query += ` ORDER BY ap.ecosystem ASC, ap.name ASC, v.id ASC`
+	if opts.Limit > 0 {
+		query += fmt.Sprintf(` LIMIT $%d`, len(args)+1)
+		args = append(args, opts.Limit)
+		if opts.Offset > 0 {
+			query += fmt.Sprintf(` OFFSET $%d`, len(args)+1)
+			args = append(args, opts.Offset)
+		}
+	}
 
 	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
@@ -120,6 +135,14 @@ func (s *Store) exportSyncMalicious(ctx context.Context, opts db.SyncExportOptio
 		args = append(args, opts.Ecosystems)
 	}
 	query += ` ORDER BY ecosystem ASC, name ASC, id ASC`
+	if opts.Limit > 0 {
+		query += fmt.Sprintf(` LIMIT $%d`, len(args)+1)
+		args = append(args, opts.Limit)
+		if opts.Offset > 0 {
+			query += fmt.Sprintf(` OFFSET $%d`, len(args)+1)
+			args = append(args, opts.Offset)
+		}
+	}
 
 	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {

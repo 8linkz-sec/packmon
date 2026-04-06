@@ -6,7 +6,6 @@ package osv
 
 import (
 	"archive/zip"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,6 +13,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -37,6 +37,10 @@ const (
 	// maxZIPSize is a safety limit for the decompressed ZIP payload.
 	// This prevents runaway memory usage if a ZIP is unexpectedly huge.
 	maxZIPSize = 500 * 1024 * 1024 // 500 MB
+
+	// maxEntrySize is a safety limit for individual JSON entries within
+	// the ZIP archive. A single OSV entry should never exceed 10 MB.
+	maxEntrySize = 10 * 1024 * 1024 // 10 MB
 )
 
 // Compile-time interface assertion.
@@ -91,13 +95,18 @@ func (s *Syncer) Name() string { return FeedName }
 // Sync implements feed.FeedSyncer. It iterates over all supported
 // ecosystems, downloads the all.zip archive for each, parses every
 // JSON vulnerability entry, maps it to the Packmon data model, and
-// upserts it into the store.
+// upserts it into the store. It uses ETag-based delta updates to
+// skip re-downloading unchanged ecosystem archives.
 func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, error) {
 	start := time.Now()
 	s.logger.Info("starting OSV sync")
 
+	// Load stored per-ecosystem ETags from feed_sync_status.metadata.
+	etags := s.loadEcosystemETags(ctx)
+
 	ecosystems := feed.OSVBucketEcosystems()
 	var totalSynced, totalEntries int
+	var skippedByETag int
 
 	for _, eco := range ecosystems {
 		if ctx.Err() != nil {
@@ -105,8 +114,16 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 			return nil, ctx.Err()
 		}
 
-		synced, entries, err := s.syncEcosystem(ctx, store, eco)
+		storedETag := etags[eco]
+		synced, entries, newETag, err := s.syncEcosystem(ctx, store, eco, storedETag)
 		if err != nil {
+			if errors.Is(err, errNotModified) {
+				s.logger.Debug("ecosystem unchanged (304), skipping",
+					slog.String("ecosystem", eco),
+				)
+				skippedByETag++
+				continue
+			}
 			var unavailable *errArchiveUnavailable
 			if errors.As(err, &unavailable) {
 				s.logger.Info("ecosystem archive unavailable, skipping",
@@ -125,6 +142,11 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 		totalSynced += synced
 		totalEntries += entries
 
+		// Store the new ETag for this ecosystem.
+		if newETag != "" {
+			etags[eco] = newETag
+		}
+
 		s.logger.Info("ecosystem sync completed",
 			slog.String("ecosystem", eco),
 			slog.Int("synced", synced),
@@ -136,34 +158,92 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 	s.logger.Info("OSV sync completed",
 		slog.Int("total_synced", totalSynced),
 		slog.Int("total_entries", totalEntries),
+		slog.Int("skipped_by_etag", skippedByETag),
 		slog.String("duration", duration.String()),
 	)
 
 	s.recordSyncSuccess(ctx, start, duration, totalEntries, totalSynced)
+	s.saveEcosystemETags(ctx, etags)
 	return &feed.SyncResult{
 		EntriesSynced: totalSynced,
 		EntriesTotal:  totalEntries,
 	}, nil
 }
 
+// errNotModified is returned by download when the server responds with
+// HTTP 304 Not Modified, meaning the ETag matched and no new data is
+// available.
+var errNotModified = errors.New("not modified (HTTP 304)")
+
+// loadEcosystemETags reads the per-ecosystem ETag map from the
+// feed_sync_status metadata JSONB column.
+func (s *Syncer) loadEcosystemETags(ctx context.Context) map[string]string {
+	status, err := s.store.GetFeedSyncStatus(ctx, FeedName)
+	if err != nil || status == nil || len(status.Metadata) == 0 {
+		return make(map[string]string)
+	}
+
+	var meta struct {
+		ETags map[string]string `json:"ecosystem_etags"`
+	}
+	if err := json.Unmarshal(status.Metadata, &meta); err != nil || meta.ETags == nil {
+		return make(map[string]string)
+	}
+	return meta.ETags
+}
+
+// saveEcosystemETags persists the per-ecosystem ETag map into the
+// feed_sync_status metadata JSONB column.
+func (s *Syncer) saveEcosystemETags(ctx context.Context, etags map[string]string) {
+	meta := struct {
+		ETags map[string]string `json:"ecosystem_etags"`
+	}{ETags: etags}
+
+	metaJSON, err := json.Marshal(meta)
+	if err != nil {
+		s.logger.Warn("failed to marshal ecosystem ETags", "error", err)
+		return
+	}
+
+	status, err := s.store.GetFeedSyncStatus(ctx, FeedName)
+	if err != nil || status == nil {
+		// The status row should already exist from recordSyncSuccess.
+		// If not, we just skip saving ETags this time.
+		s.logger.Warn("failed to load feed status for ETag save", "error", err)
+		return
+	}
+
+	status.Metadata = metaJSON
+	if err := s.store.UpsertFeedSyncStatus(ctx, status); err != nil {
+		s.logger.Warn("failed to save ecosystem ETags", "error", err)
+	}
+}
+
 // syncEcosystem downloads and processes a single ecosystem's all.zip.
-func (s *Syncer) syncEcosystem(ctx context.Context, store db.Store, ecosystem string) (synced, total int, err error) {
+// It returns the new ETag from the server response (empty if none).
+// If the stored ETag matches, it returns errNotModified.
+func (s *Syncer) syncEcosystem(ctx context.Context, store db.Store, ecosystem, storedETag string) (synced, total int, newETag string, err error) {
 	url := fmt.Sprintf("%s/%s/all.zip", bucketBaseURL, ecosystem)
 	s.logger.Debug("downloading ecosystem archive", slog.String("url", url))
 
-	body, err := s.download(ctx, url)
+	tmpPath, respETag, err := s.download(ctx, url, storedETag)
 	if err != nil {
-		return 0, 0, fmt.Errorf("download %s: %w", url, err)
+		return 0, 0, "", fmt.Errorf("download %s: %w", url, err)
 	}
+	newETag = respETag
 
-	reader, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
+	// Clean up the temporary ZIP file when done.
+	defer func() { _ = os.Remove(tmpPath) }()
+
+	reader, err := zip.OpenReader(tmpPath)
 	if err != nil {
-		return 0, 0, fmt.Errorf("open zip for %s: %w", ecosystem, err)
+		return 0, 0, "", fmt.Errorf("open zip for %s: %w", ecosystem, err)
 	}
+	defer func() { _ = reader.Close() }()
 
 	for _, f := range reader.File {
 		if ctx.Err() != nil {
-			return synced, total, ctx.Err()
+			return synced, total, newETag, ctx.Err()
 		}
 
 		// Only process .json files.
@@ -181,7 +261,7 @@ func (s *Syncer) syncEcosystem(ctx context.Context, store db.Store, ecosystem st
 			continue
 		}
 
-		data, err := io.ReadAll(io.LimitReader(rc, maxZIPSize))
+		data, err := io.ReadAll(io.LimitReader(rc, maxEntrySize))
 		_ = rc.Close()
 		if err != nil {
 			s.logger.Warn("failed to read zip entry",
@@ -211,37 +291,70 @@ func (s *Syncer) syncEcosystem(ctx context.Context, store db.Store, ecosystem st
 		synced++
 	}
 
-	return synced, total, nil
+	return synced, total, newETag, nil
 }
 
-// download fetches a URL and returns the response body. It checks the
-// status code and respects context cancellation.
-func (s *Syncer) download(ctx context.Context, url string) ([]byte, error) {
+// download fetches a URL and streams the response body to a temporary
+// file. It returns the path to the temp file along with the ETag from
+// the response. The caller is responsible for removing the temp file.
+// If storedETag is non-empty, it sends an If-None-Match header. When
+// the server responds with 304 Not Modified, download returns
+// errNotModified (wrapped so errors.Is works).
+func (s *Syncer) download(ctx context.Context, url, storedETag string) (tmpPath string, etag string, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, err
+		return "", "", err
 	}
 	req.Header.Set("User-Agent", "packmon-feedsync/1.0")
+	if storedETag != "" {
+		req.Header.Set("If-None-Match", storedETag)
+	}
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return nil, err
+		return "", "", err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	if resp.StatusCode == http.StatusNotModified {
+		return "", storedETag, errNotModified
+	}
+
 	if resp.StatusCode != http.StatusOK {
-		return nil, &errArchiveUnavailable{
+		return "", "", &errArchiveUnavailable{
 			url:        url,
 			statusCode: resp.StatusCode,
 		}
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxZIPSize))
+	// Stream the response body to a temporary file instead of loading
+	// the entire ZIP into memory.
+	tmpFile, err := os.CreateTemp("", "packmon-osv-*.zip")
 	if err != nil {
-		return nil, fmt.Errorf("reading response body: %w", err)
+		return "", "", fmt.Errorf("creating temp file: %w", err)
+	}
+	tmpPath = tmpFile.Name()
+
+	// If anything goes wrong after creating the file, clean it up.
+	defer func() {
+		_ = tmpFile.Close()
+		if err != nil {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	written, err := io.Copy(tmpFile, io.LimitReader(resp.Body, maxZIPSize))
+	if err != nil {
+		return "", "", fmt.Errorf("writing response to temp file: %w", err)
 	}
 
-	return body, nil
+	s.logger.Debug("downloaded archive to temp file",
+		slog.String("path", tmpPath),
+		slog.Int64("bytes", written),
+	)
+
+	respETag := resp.Header.Get("ETag")
+	return tmpPath, respETag, nil
 }
 
 // recordSyncSuccess persists a successful sync status.
@@ -431,11 +544,37 @@ func mapToVulnerability(entry *osvEntry, rawJSON []byte) *db.Vulnerability {
 }
 
 // mapSeverity derives a Packmon severity string from OSV severity entries.
-// It looks for a CVSS_V3 or CVSS_V2 vector and maps the base score to a
-// severity level. If no CVSS data is available it falls back to "UNKNOWN".
+// It checks (in order):
+//  1. CVSS_V3 or CVSS_V2 vectors in the severity array
+//  2. database_specific.severity (used by GHSA, PYSEC, and others)
+//
+// If neither is available it falls back to "UNKNOWN".
 func mapSeverity(entry *osvEntry) string {
-	score := extractCVSSScore(entry.Severity)
-	return cvssToSeverity(score)
+	// Try CVSS vectors first (most precise).
+	if score := extractCVSSScore(entry.Severity); score > 0 {
+		return cvssToSeverity(score)
+	}
+
+	// Fallback: database_specific.severity (human-readable string).
+	if len(entry.DatabaseSpecific) > 0 {
+		var dbSpec struct {
+			Severity string `json:"severity"`
+		}
+		if json.Unmarshal(entry.DatabaseSpecific, &dbSpec) == nil && dbSpec.Severity != "" {
+			switch strings.ToUpper(dbSpec.Severity) {
+			case "CRITICAL":
+				return "CRITICAL"
+			case "HIGH":
+				return "HIGH"
+			case "MODERATE", "MEDIUM":
+				return "MEDIUM"
+			case "LOW":
+				return "LOW"
+			}
+		}
+	}
+
+	return "UNKNOWN"
 }
 
 // extractCVSSScore attempts to extract a numeric CVSS base score from the

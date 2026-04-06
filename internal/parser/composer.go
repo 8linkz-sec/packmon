@@ -68,10 +68,10 @@ func (p *ComposerParser) Parse(r io.Reader) ([]domain.Package, error) {
 			continue
 		}
 
-		// Composer versions often start with "v" prefix (e.g. "v2.3.1").
-		// Normalize by stripping the leading "v" for consistency.
+		// Keep the version exactly as declared in composer.lock. Advisory
+		// databases (OSV, GHSA) store Composer versions with the v-prefix,
+		// so stripping it would cause mismatches.
 		version := entry.Version
-		version = strings.TrimPrefix(version, "v")
 
 		key := strings.ToLower(entry.Name) + "@" + version
 		if _, exists := seen[key]; exists {

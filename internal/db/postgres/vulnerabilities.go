@@ -12,30 +12,37 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// normalizePackageName lowercases the package name for ecosystems where
+// names are case-insensitive (NuGet). For all other ecosystems the name
+// is returned unchanged.
+func normalizePackageName(ecosystem, name string) string {
+	if strings.EqualFold(ecosystem, "nuget") {
+		return strings.ToLower(name)
+	}
+	return name
+}
+
 func (s *Store) FindVulnerabilities(ctx context.Context, ecosystem, name, version string) ([]domain.Finding, error) {
+	name = normalizePackageName(ecosystem, name)
 	const query = `
 		SELECT
 			v.id,
 			v.summary,
 			v.severity,
-			COALESCE((
-				SELECT url
-				FROM vulnerability_references vr
-				WHERE vr.vulnerability_id = v.id
-				ORDER BY vr.id
-				LIMIT 1
-			), '') AS ref_url,
-			COALESCE((
-				SELECT source
-				FROM vulnerability_sources vs
-				WHERE vs.vulnerability_id = v.id
-				ORDER BY vs.id
-				LIMIT 1
-			), '') AS source,
+			COALESCE(vr.url, '') AS ref_url,
+			COALESCE(vs.source, '') AS source,
 			ap.version_ranges::text,
 			ap.versions_affected::text
 		FROM vulnerabilities v
 		INNER JOIN affected_packages ap ON ap.vulnerability_id = v.id
+		LEFT JOIN LATERAL (
+			SELECT url FROM vulnerability_references
+			WHERE vulnerability_id = v.id ORDER BY id LIMIT 1
+		) vr ON true
+		LEFT JOIN LATERAL (
+			SELECT source FROM vulnerability_sources
+			WHERE vulnerability_id = v.id ORDER BY id LIMIT 1
+		) vs ON true
 		WHERE ap.ecosystem = $1 AND ap.name = $2
 		ORDER BY v.modified DESC, v.id`
 
@@ -63,7 +70,7 @@ func (s *Store) FindVulnerabilities(ctx context.Context, ecosystem, name, versio
 
 		fixedVersion := extractFixedVersion(versionRangesRaw)
 		if version != "" {
-			affected, err := versionAffected(version, versionRangesRaw, versionsRaw)
+			affected, err := versionAffectedWithEcosystem(version, versionRangesRaw, versionsRaw, ecosystem)
 			if err == nil && !affected {
 				continue
 			}
@@ -98,6 +105,7 @@ func (s *Store) FindVulnerabilities(ctx context.Context, ecosystem, name, versio
 }
 
 func (s *Store) FindMalicious(ctx context.Context, ecosystem, name, version string) ([]domain.Finding, error) {
+	name = normalizePackageName(ecosystem, name)
 	// versions is a JSONB array of affected versions. NULL means all
 	// versions are affected. When a specific version is requested, only
 	// return findings where versions IS NULL or the array contains
@@ -157,6 +165,216 @@ func (s *Store) FindMalicious(ctx context.Context, ecosystem, name, version stri
 	return findings, nil
 }
 
+func (s *Store) FindVulnerabilitiesBatch(ctx context.Context, packages []db.PackageQuery) ([]domain.Finding, error) {
+	if len(packages) == 0 {
+		return nil, nil
+	}
+
+	type ecoName struct{ ecosystem, name string }
+	seen := make(map[ecoName]struct{}, len(packages))
+	var args []any
+	var placeholders []string
+	paramIdx := 1
+	for _, pkg := range packages {
+		normalizedName := normalizePackageName(pkg.Ecosystem, pkg.Name)
+		key := ecoName{ecosystem: pkg.Ecosystem, name: normalizedName}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		placeholders = append(placeholders, fmt.Sprintf("($%d, $%d)", paramIdx, paramIdx+1))
+		args = append(args, pkg.Ecosystem, normalizedName)
+		paramIdx += 2
+	}
+
+	query := `
+		SELECT
+			v.id, v.summary, v.severity,
+			COALESCE(vr.url, '') AS ref_url,
+			COALESCE(vs.source, '') AS source,
+			ap.ecosystem, ap.name, ap.version_ranges::text, ap.versions_affected::text
+		FROM vulnerabilities v
+		INNER JOIN affected_packages ap ON ap.vulnerability_id = v.id
+		LEFT JOIN LATERAL (
+			SELECT url FROM vulnerability_references
+			WHERE vulnerability_id = v.id ORDER BY id LIMIT 1
+		) vr ON true
+		LEFT JOIN LATERAL (
+			SELECT source FROM vulnerability_sources
+			WHERE vulnerability_id = v.id ORDER BY id LIMIT 1
+		) vs ON true
+		WHERE (ap.ecosystem, ap.name) IN (VALUES ` + strings.Join(placeholders, ", ") + `)
+		ORDER BY v.modified DESC, v.id`
+
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: find vulnerabilities batch: %w", err)
+	}
+	defer closeSilently(rows)
+
+	type pkgVersions struct{ versions []string }
+	versionMap := make(map[ecoName]*pkgVersions, len(packages))
+	for _, pkg := range packages {
+		key := ecoName{ecosystem: pkg.Ecosystem, name: normalizePackageName(pkg.Ecosystem, pkg.Name)}
+		entry, ok := versionMap[key]
+		if !ok {
+			entry = &pkgVersions{}
+			versionMap[key] = entry
+		}
+		if pkg.Version != "" {
+			entry.versions = append(entry.versions, pkg.Version)
+		}
+	}
+
+	var findings []domain.Finding
+	for rows.Next() {
+		var advisoryID, summary, severity, url, source, ecosystem, name, versionRangesRaw, versionsRaw string
+		if err := rows.Scan(&advisoryID, &summary, &severity, &url, &source, &ecosystem, &name, &versionRangesRaw, &versionsRaw); err != nil {
+			return nil, fmt.Errorf("postgres: scan vulnerability batch row: %w", err)
+		}
+		fixedVersion := extractFixedVersion(versionRangesRaw)
+		title := summary
+		if title == "" {
+			title = advisoryID
+		}
+		if source == "" {
+			source = "unknown"
+		}
+		key := ecoName{ecosystem: ecosystem, name: normalizePackageName(ecosystem, name)}
+		entry := versionMap[key]
+		if entry != nil && len(entry.versions) > 0 {
+			for _, version := range entry.versions {
+				affected, matchErr := versionAffectedWithEcosystem(version, versionRangesRaw, versionsRaw, ecosystem)
+				if matchErr == nil && !affected {
+					continue
+				}
+				findings = append(findings, domain.Finding{
+					Name: name, Version: version, Ecosystem: domain.Ecosystem(ecosystem),
+					Type: domain.FindingTypeVulnerability, Severity: domain.Severity(normalizeSeverity(severity)),
+					AdvisoryID: advisoryID, Title: title, URL: url, FixedVersion: fixedVersion, Source: source,
+				})
+			}
+		} else {
+			findings = append(findings, domain.Finding{
+				Name: name, Ecosystem: domain.Ecosystem(ecosystem),
+				Type: domain.FindingTypeVulnerability, Severity: domain.Severity(normalizeSeverity(severity)),
+				AdvisoryID: advisoryID, Title: title, URL: url, FixedVersion: fixedVersion, Source: source,
+			})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: iterate vulnerabilities batch: %w", err)
+	}
+	return findings, nil
+}
+
+func (s *Store) FindMaliciousBatch(ctx context.Context, packages []db.PackageQuery) ([]domain.Finding, error) {
+	if len(packages) == 0 {
+		return nil, nil
+	}
+
+	type ecoName struct{ ecosystem, name string }
+	seen := make(map[ecoName]struct{}, len(packages))
+	var args []any
+	var placeholders []string
+	paramIdx := 1
+	for _, pkg := range packages {
+		normalizedName := normalizePackageName(pkg.Ecosystem, pkg.Name)
+		key := ecoName{ecosystem: pkg.Ecosystem, name: normalizedName}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		placeholders = append(placeholders, fmt.Sprintf("($%d, $%d)", paramIdx, paramIdx+1))
+		args = append(args, pkg.Ecosystem, normalizedName)
+		paramIdx += 2
+	}
+
+	query := `
+		SELECT id, ecosystem, name, severity, summary, risk_type, source, versions::text, reference_urls::text
+		FROM malicious_findings
+		WHERE (ecosystem, name) IN (VALUES ` + strings.Join(placeholders, ", ") + `)
+		ORDER BY updated_at DESC, id DESC`
+
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: find malicious batch: %w", err)
+	}
+	defer closeSilently(rows)
+
+	type pkgVersions struct{ versions []string }
+	versionMap := make(map[ecoName]*pkgVersions, len(packages))
+	for _, pkg := range packages {
+		key := ecoName{ecosystem: pkg.Ecosystem, name: normalizePackageName(pkg.Ecosystem, pkg.Name)}
+		entry, ok := versionMap[key]
+		if !ok {
+			entry = &pkgVersions{}
+			versionMap[key] = entry
+		}
+		if pkg.Version != "" {
+			entry.versions = append(entry.versions, pkg.Version)
+		}
+	}
+
+	var findings []domain.Finding
+	for rows.Next() {
+		var id, ecosystem, name, severity, summary, riskType, source, versionsRaw, referenceURLsRaw string
+		if err := rows.Scan(&id, &ecosystem, &name, &severity, &summary, &riskType, &source, &versionsRaw, &referenceURLsRaw); err != nil {
+			return nil, fmt.Errorf("postgres: scan malicious batch row: %w", err)
+		}
+		title := summary
+		if title == "" {
+			title = fmt.Sprintf("malicious package: %s (%s)", name, riskType)
+		}
+		if source == "" {
+			source = "unknown"
+		}
+
+		var findingVersions []string
+		hasVersionList := false
+		trimmed := strings.TrimSpace(versionsRaw)
+		if trimmed != "" && trimmed != "null" {
+			if err := json.Unmarshal([]byte(trimmed), &findingVersions); err == nil && len(findingVersions) > 0 {
+				hasVersionList = true
+			}
+		}
+
+		key := ecoName{ecosystem: ecosystem, name: normalizePackageName(ecosystem, name)}
+		entry := versionMap[key]
+		if entry != nil && len(entry.versions) > 0 {
+			for _, version := range entry.versions {
+				if hasVersionList {
+					found := false
+					for _, v := range findingVersions {
+						if v == version {
+							found = true
+							break
+						}
+					}
+					if !found {
+						continue
+					}
+				}
+				findings = append(findings, domain.Finding{
+					Name: name, Version: version, Ecosystem: domain.Ecosystem(ecosystem),
+					Type: domain.FindingTypeMalicious, Severity: domain.Severity(normalizeSeverity(severity)),
+					AdvisoryID: id, Title: title, URL: extractFirstURL(referenceURLsRaw), RiskType: riskType, Source: source,
+				})
+			}
+		} else {
+			findings = append(findings, domain.Finding{
+				Name: name, Ecosystem: domain.Ecosystem(ecosystem),
+				Type: domain.FindingTypeMalicious, Severity: domain.Severity(normalizeSeverity(severity)),
+				AdvisoryID: id, Title: title, URL: extractFirstURL(referenceURLsRaw), RiskType: riskType, Source: source,
+			})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: iterate malicious batch: %w", err)
+	}
+	return findings, nil
+}
+
 func (s *Store) UpsertVulnerability(ctx context.Context, vuln *db.Vulnerability) error {
 	return withTx(ctx, s.pool, func(tx pgx.Tx) error {
 		const upsertVulnerability = `
@@ -167,9 +385,13 @@ func (s *Store) UpsertVulnerability(ctx context.Context, vuln *db.Vulnerability)
 				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
 			)
 			ON CONFLICT (id) DO UPDATE SET
-				summary = EXCLUDED.summary,
-				details = EXCLUDED.details,
-				severity = EXCLUDED.severity,
+				summary = CASE WHEN EXCLUDED.summary != '' THEN EXCLUDED.summary ELSE vulnerabilities.summary END,
+				details = CASE WHEN EXCLUDED.details IS NOT NULL AND EXCLUDED.details != '' THEN EXCLUDED.details ELSE vulnerabilities.details END,
+				severity = CASE
+					WHEN vulnerabilities.severity = 'UNKNOWN' THEN EXCLUDED.severity
+					WHEN EXCLUDED.severity = 'UNKNOWN' THEN vulnerabilities.severity
+					ELSE EXCLUDED.severity
+				END,
 				cvss_score = COALESCE(EXCLUDED.cvss_score, vulnerabilities.cvss_score),
 				published = EXCLUDED.published,
 				modified = EXCLUDED.modified,
@@ -221,11 +443,13 @@ func (s *Store) UpsertVulnerability(ctx context.Context, vuln *db.Vulnerability)
 			if alias.AliasID == "" {
 				continue
 			}
+			// Use composite unique constraint (vulnerability_id, alias_id)
+			// so the same alias can be linked to multiple vulnerabilities
+			// without silently moving it (ARCH-H3 fix).
 			const insertAlias = `
 				INSERT INTO vulnerability_aliases (vulnerability_id, alias_id)
 				VALUES ($1, $2)
-				ON CONFLICT (alias_id) DO UPDATE SET
-					vulnerability_id = EXCLUDED.vulnerability_id`
+				ON CONFLICT (vulnerability_id, alias_id) DO NOTHING`
 			if _, err := tx.Exec(ctx, insertAlias, vuln.ID, alias.AliasID); err != nil {
 				return fmt.Errorf("insert alias %s: %w", alias.AliasID, err)
 			}
@@ -466,98 +690,153 @@ func (s *Store) ClearCISAKEV(ctx context.Context, keepIDs []string) (int, error)
 }
 
 func (s *Store) SetEPSSScores(ctx context.Context, scores []db.EPSSEntry) (int, error) {
+	if len(scores) == 0 {
+		return 0, nil
+	}
+
+	const batchSize = 5000
 	updated := 0
-	err := withTx(ctx, s.pool, func(tx pgx.Tx) error {
+
+	for i := 0; i < len(scores); i += batchSize {
+		end := i + batchSize
+		if end > len(scores) {
+			end = len(scores)
+		}
+		batch := scores[i:end]
+
+		cveIDs := make([]string, len(batch))
+		epssScores := make([]float64, len(batch))
+		percentiles := make([]float64, len(batch))
+		for j, s := range batch {
+			cveIDs[j] = s.CVEID
+			epssScores[j] = s.Score
+			percentiles[j] = s.Percentile
+		}
+
 		const query = `
-			WITH targets AS (
-				SELECT id
-				FROM vulnerabilities
-				WHERE id = $1
+			WITH data AS (
+				SELECT
+					unnest($1::text[]) AS cve_id,
+					unnest($2::float8[]) AS score,
+					unnest($3::float8[]) AS percentile
+			),
+			targets AS (
+				SELECT v.id, d.score, d.percentile
+				FROM data d
+				INNER JOIN vulnerabilities v ON v.id = d.cve_id
 				UNION
-				SELECT vulnerability_id
-				FROM vulnerability_aliases
-				WHERE alias_id = $1
+				SELECT va.vulnerability_id, d.score, d.percentile
+				FROM data d
+				INNER JOIN vulnerability_aliases va ON va.alias_id = d.cve_id
 			)
 			UPDATE vulnerabilities v
-			SET epss_score = $2, epss_percentile = $3, updated_at = NOW()
+			SET epss_score = t.score, epss_percentile = t.percentile, updated_at = NOW()
 			FROM targets t
 			WHERE v.id = t.id`
 
-		for _, score := range scores {
-			tag, err := tx.Exec(ctx, query, score.CVEID, score.Score, score.Percentile)
-			if err != nil {
-				return fmt.Errorf("set EPSS score for %s: %w", score.CVEID, err)
-			}
-			updated += int(tag.RowsAffected())
+		tag, err := s.pool.Exec(ctx, query, cveIDs, epssScores, percentiles)
+		if err != nil {
+			return updated, fmt.Errorf("postgres: set EPSS scores batch: %w", err)
 		}
-		return nil
-	})
-	if err != nil {
-		return 0, fmt.Errorf("postgres: set EPSS scores: %w", err)
+		updated += int(tag.RowsAffected())
 	}
+
 	return updated, nil
 }
 
 func (s *Store) EnrichVulnCheck(ctx context.Context, entries []db.VulnCheckEntry) (int, error) {
+	if len(entries) == 0 {
+		return 0, nil
+	}
+
+	const batchSize = 5000
 	updated := 0
-	err := withTx(ctx, s.pool, func(tx pgx.Tx) error {
-		const updateVulnerability = `
-			WITH targets AS (
-				SELECT id
-				FROM vulnerabilities
-				WHERE id = $1
+
+	for i := 0; i < len(entries); i += batchSize {
+		end := i + batchSize
+		if end > len(entries) {
+			end = len(entries)
+		}
+		batch := entries[i:end]
+
+		// Batch the vulnerability UPDATE using unnest arrays.
+		cveIDs := make([]string, len(batch))
+		cvssScores := make([]*float64, len(batch))
+		exploitFlags := make([]bool, len(batch))
+		for j, e := range batch {
+			cveIDs[j] = e.CVEID
+			cvssScores[j] = e.CVSSScore
+			exploitFlags[j] = e.ExploitExists
+		}
+
+		const batchUpdate = `
+			WITH data AS (
+				SELECT
+					unnest($1::text[]) AS cve_id,
+					unnest($2::float8[]) AS cvss_score,
+					unnest($3::bool[]) AS exploit_exists
+			),
+			targets AS (
+				SELECT v.id, d.cvss_score, d.exploit_exists
+				FROM data d
+				INNER JOIN vulnerabilities v ON v.id = d.cve_id
 				UNION
-				SELECT vulnerability_id
-				FROM vulnerability_aliases
-				WHERE alias_id = $1
+				SELECT va.vulnerability_id, d.cvss_score, d.exploit_exists
+				FROM data d
+				INNER JOIN vulnerability_aliases va ON va.alias_id = d.cve_id
 			)
 			UPDATE vulnerabilities v
 			SET
-				cvss_score = COALESCE($2, v.cvss_score),
-				exploit_exists = v.exploit_exists OR $3,
+				cvss_score = COALESCE(t.cvss_score, v.cvss_score),
+				exploit_exists = v.exploit_exists OR t.exploit_exists,
 				updated_at = NOW()
 			FROM targets t
 			WHERE v.id = t.id`
 
-		const upsertSource = `
-			WITH targets AS (
-				SELECT id
-				FROM vulnerabilities
-				WHERE id = $1
-				UNION
-				SELECT vulnerability_id
-				FROM vulnerability_aliases
-				WHERE alias_id = $1
-			)
-			INSERT INTO vulnerability_sources (vulnerability_id, source, source_id, url, raw_json)
-			SELECT id, 'vulncheck', $1, $2, $3
-			FROM targets
-			ON CONFLICT (vulnerability_id, source) DO UPDATE SET
-				source_id = EXCLUDED.source_id,
-				url = EXCLUDED.url,
-				raw_json = EXCLUDED.raw_json,
-				updated_at = NOW()`
-
-		for _, entry := range entries {
-			tag, err := tx.Exec(ctx, updateVulnerability, entry.CVEID, entry.CVSSScore, entry.ExploitExists)
-			if err != nil {
-				return fmt.Errorf("update vulnerability enrichment for %s: %w", entry.CVEID, err)
-			}
-			updated += int(tag.RowsAffected())
-
-			if _, err := tx.Exec(ctx, upsertSource,
-				entry.CVEID,
-				nullableString(entry.SourceURL),
-				normalizeJSON(entry.RawJSON, nil),
-			); err != nil {
-				return fmt.Errorf("upsert VulnCheck source for %s: %w", entry.CVEID, err)
-			}
+		tag, err := s.pool.Exec(ctx, batchUpdate, cveIDs, cvssScores, exploitFlags)
+		if err != nil {
+			return updated, fmt.Errorf("postgres: enrich VulnCheck batch update: %w", err)
 		}
-		return nil
-	})
-	if err != nil {
-		return 0, fmt.Errorf("postgres: enrich VulnCheck: %w", err)
+		updated += int(tag.RowsAffected())
+
+		// Source upserts still require per-entry execution because each
+		// carries its own raw_json blob that cannot be efficiently unnested.
+		err = withTx(ctx, s.pool, func(tx pgx.Tx) error {
+			const upsertSource = `
+				WITH targets AS (
+					SELECT id
+					FROM vulnerabilities
+					WHERE id = $1
+					UNION
+					SELECT vulnerability_id
+					FROM vulnerability_aliases
+					WHERE alias_id = $1
+				)
+				INSERT INTO vulnerability_sources (vulnerability_id, source, source_id, url, raw_json)
+				SELECT id, 'vulncheck', $1, $2, $3
+				FROM targets
+				ON CONFLICT (vulnerability_id, source) DO UPDATE SET
+					source_id = EXCLUDED.source_id,
+					url = EXCLUDED.url,
+					raw_json = EXCLUDED.raw_json,
+					updated_at = NOW()`
+
+			for _, entry := range batch {
+				if _, err := tx.Exec(ctx, upsertSource,
+					entry.CVEID,
+					nullableString(entry.SourceURL),
+					normalizeJSON(entry.RawJSON, nil),
+				); err != nil {
+					return fmt.Errorf("upsert VulnCheck source for %s: %w", entry.CVEID, err)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return updated, fmt.Errorf("postgres: enrich VulnCheck sources: %w", err)
+		}
 	}
+
 	return updated, nil
 }
 

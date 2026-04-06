@@ -9,11 +9,13 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/8linkz/packmon/internal/db"
 	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz/packmon/internal/server/middleware"
 	"github.com/8linkz/packmon/internal/telemetry"
 )
 
@@ -116,6 +118,7 @@ type syncResponsePayload struct {
 	Vulnerabilities []syncVulnerabilityResponse `json:"vulnerabilities"`
 	Malicious       []syncMaliciousResponse     `json:"malicious"`
 	Truncated       bool                        `json:"truncated"`
+	HasMore         bool                        `json:"has_more"`
 }
 
 // NewHandler creates a Handler with the given store and logger.
@@ -187,17 +190,17 @@ func (h *Handler) HandleCheck(w http.ResponseWriter, r *http.Request) {
 	durationMs := time.Since(start).Milliseconds()
 
 	result := domain.ScanResult{
-		ScanID:           scanID,
-		Mode:             "remote",
-		ScannedAt:        start.UTC(),
-		DurationMs:       durationMs,
-		PackagesScanned:  len(req.Packages),
-		FindingsCount:    len(findings),
-		FindingsBlocking: blocking,
-		FeedStatus:       feedStatus,
-		Summary:          summary,
-		Findings:         findings,
-		FeedVersions:     feedVersions,
+		ScanID:            scanID,
+		Mode:              "remote",
+		ScannedAt:         start.UTC(),
+		DurationMs:        durationMs,
+		PackagesScanned:   len(req.Packages),
+		FindingsCount:     len(findings),
+		FindingsBlocking:  blocking,
+		FeedStatus:        feedStatus,
+		Summary:           summary,
+		Findings:     findings,
+		FeedVersions: feedVersions,
 	}
 
 	// Persist scan log (best-effort).
@@ -209,29 +212,31 @@ func (h *Handler) HandleCheck(w http.ResponseWriter, r *http.Request) {
 }
 
 // collectFindings queries the store for vulnerabilities and malicious packages
-// for every package in the request.
+// using batch queries to avoid the N+1 pattern. All findings are returned
+// without truncation -- vulnerability data must never be silently discarded.
 func (h *Handler) collectFindings(ctx context.Context, packages []domain.Package) ([]domain.Finding, error) {
-	var all []domain.Finding
-
-	for _, pkg := range packages {
-		eco := string(pkg.Ecosystem)
-
-		vulns, err := h.store.FindVulnerabilities(ctx, eco, pkg.Name, pkg.Version)
-		if err != nil {
-			return nil, fmt.Errorf("FindVulnerabilities(%s/%s@%s): %w", eco, pkg.Name, pkg.Version, err)
+	queries := make([]db.PackageQuery, len(packages))
+	for i, pkg := range packages {
+		queries[i] = db.PackageQuery{
+			Ecosystem: string(pkg.Ecosystem),
+			Name:      pkg.Name,
+			Version:   pkg.Version,
 		}
-		all = append(all, vulns...)
-
-		mal, err := h.store.FindMalicious(ctx, eco, pkg.Name, pkg.Version)
-		if err != nil {
-			return nil, fmt.Errorf("FindMalicious(%s/%s@%s): %w", eco, pkg.Name, pkg.Version, err)
-		}
-		// Set version on malicious findings so the client can display it.
-		for i := range mal {
-			mal[i].Version = pkg.Version
-		}
-		all = append(all, mal...)
 	}
+
+	vulns, err := h.store.FindVulnerabilitiesBatch(ctx, queries)
+	if err != nil {
+		return nil, fmt.Errorf("FindVulnerabilitiesBatch: %w", err)
+	}
+
+	mal, err := h.store.FindMaliciousBatch(ctx, queries)
+	if err != nil {
+		return nil, fmt.Errorf("FindMaliciousBatch: %w", err)
+	}
+
+	all := make([]domain.Finding, 0, len(vulns)+len(mal))
+	all = append(all, vulns...)
+	all = append(all, mal...)
 
 	return all, nil
 }
@@ -645,6 +650,12 @@ func (h *Handler) handleRefresh(w http.ResponseWriter, r *http.Request, ecosyste
 // GET /api/v1/sync
 // ----------------------------------------------------------------------------
 
+// syncDefaultLimit is the default number of rows per page for /api/v1/sync.
+const syncDefaultLimit = 1000
+
+// syncMaxLimit is the maximum allowed limit for /api/v1/sync pagination.
+const syncMaxLimit = 10000
+
 func (h *Handler) HandleSync(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -668,10 +679,35 @@ func (h *Handler) HandleSync(w http.ResponseWriter, r *http.Request) {
 		sincePtr = &since
 	}
 
+	limit := syncDefaultLimit
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 {
+			errorResponse(w, http.StatusBadRequest, "invalid limit parameter")
+			return
+		}
+		limit = parsed
+		if limit > syncMaxLimit {
+			limit = syncMaxLimit
+		}
+	}
+
+	offset := 0
+	if raw := strings.TrimSpace(r.URL.Query().Get("offset")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 0 {
+			errorResponse(w, http.StatusBadRequest, "invalid offset parameter")
+			return
+		}
+		offset = parsed
+	}
+
 	exported, err := exporter.ExportSync(r.Context(), db.SyncExportOptions{
 		Since:      sincePtr,
 		SnapshotAt: time.Now().UTC(),
 		Ecosystems: splitCSV(r.URL.Query().Get("ecosystem")),
+		Limit:      limit,
+		Offset:     offset,
 	})
 	if err != nil {
 		h.logger.Error("sync export failed", "error", err)
@@ -713,6 +749,8 @@ func (h *Handler) HandleSync(w http.ResponseWriter, r *http.Request) {
 			Withdrawn: finding.Withdrawn,
 		})
 	}
+
+	resp.HasMore = exported.Truncated
 
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -1026,18 +1064,8 @@ func generateID() string {
 	return hex.EncodeToString(b)
 }
 
-// clientIP extracts the client IP from the request, preferring
-// X-Forwarded-For when set (first entry only).
+// clientIP delegates to the shared middleware.ClientIP function which
+// only trusts r.RemoteAddr to prevent X-Forwarded-For spoofing.
 func clientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		if i := strings.IndexByte(xff, ','); i != -1 {
-			return strings.TrimSpace(xff[:i])
-		}
-		return strings.TrimSpace(xff)
-	}
-	// RemoteAddr is "host:port"; strip port.
-	if i := strings.LastIndex(r.RemoteAddr, ":"); i != -1 {
-		return r.RemoteAddr[:i]
-	}
-	return r.RemoteAddr
+	return middleware.ClientIP(r)
 }

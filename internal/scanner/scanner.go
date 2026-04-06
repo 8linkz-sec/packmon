@@ -265,7 +265,10 @@ func (s *Scanner) checkRemote(ctx context.Context, pkgs []domain.Package) ([]dom
 	}
 	defer closeSilently(resp.Body)
 
-	body, err := io.ReadAll(resp.Body)
+	// Limit response body to 500 MB to prevent unbounded reads from a
+	// misbehaving or compromised server.
+	const maxResponseSize = 500 << 20 // 500 MB
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("read response: %w", err)
 	}

@@ -1,18 +1,9 @@
 package migrations
 
-type closeErrer interface {
-	Close() error
-}
+import "github.com/8linkz/packmon/internal/ioutils"
 
-type closeOnly interface {
-	Close()
-}
-
+// closeSilently is a package-level alias for the shared ioutils.CloseSilently
+// helper, kept so that existing call sites remain unchanged.
 func closeSilently(c any) {
-	switch closer := c.(type) {
-	case closeErrer:
-		_ = closer.Close()
-	case closeOnly:
-		closer.Close()
-	}
+	ioutils.CloseSilently(c)
 }

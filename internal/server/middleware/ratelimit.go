@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"log/slog"
 	"math"
 	"net/http"
@@ -32,14 +33,15 @@ type rateLimiter struct {
 	burst   int
 }
 
-func newRateLimiter(rate float64, burst int) *rateLimiter {
+func newRateLimiter(ctx context.Context, rate float64, burst int) *rateLimiter {
 	rl := &rateLimiter{
 		buckets: make(map[string]*bucket),
 		rate:    rate,
 		burst:   burst,
 	}
 	// Background goroutine to evict stale entries (older than 10 minutes).
-	go rl.cleanup()
+	// It exits when ctx is cancelled.
+	go rl.cleanup(ctx)
 	return rl
 }
 
@@ -71,26 +73,32 @@ func (rl *rateLimiter) allow(ip string) bool {
 	return true
 }
 
-func (rl *rateLimiter) cleanup() {
+func (rl *rateLimiter) cleanup(ctx context.Context) {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
-	for range ticker.C {
-		rl.mu.Lock()
-		cutoff := time.Now().Add(-10 * time.Minute)
-		for ip, b := range rl.buckets {
-			if b.lastSeen.Before(cutoff) {
-				delete(rl.buckets, ip)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			rl.mu.Lock()
+			cutoff := time.Now().Add(-10 * time.Minute)
+			for ip, b := range rl.buckets {
+				if b.lastSeen.Before(cutoff) {
+					delete(rl.buckets, ip)
+				}
 			}
+			rl.mu.Unlock()
 		}
-		rl.mu.Unlock()
 	}
 }
 
 // RateLimit applies a per-IP token-bucket rate limiter. When a client
 // exceeds the allowed rate, subsequent requests receive 429 Too Many
-// Requests until tokens are replenished.
-func RateLimit(logger *slog.Logger, cfg RateLimitConfig) func(http.Handler) http.Handler {
-	rl := newRateLimiter(cfg.Rate, cfg.Burst)
+// Requests until tokens are replenished. The context controls the
+// lifetime of the background cleanup goroutine.
+func RateLimit(ctx context.Context, logger *slog.Logger, cfg RateLimitConfig) func(http.Handler) http.Handler {
+	rl := newRateLimiter(ctx, cfg.Rate, cfg.Burst)
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -109,26 +117,8 @@ func RateLimit(logger *slog.Logger, cfg RateLimitConfig) func(http.Handler) http
 	}
 }
 
-// clientIP extracts the client IP from the request. It checks
-// X-Forwarded-For first (leftmost entry), then falls back to
-// RemoteAddr. A full trusted-proxy implementation belongs in a
-// separate middleware; this is a basic extraction for rate-limiting.
+// clientIP delegates to the shared ClientIP function which only trusts
+// r.RemoteAddr to prevent X-Forwarded-For spoofing.
 func clientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		// Take the first (leftmost) IP.
-		for i := range len(xff) {
-			if xff[i] == ',' {
-				return xff[:i]
-			}
-		}
-		return xff
-	}
-	// RemoteAddr is "host:port"; strip the port.
-	addr := r.RemoteAddr
-	for i := len(addr) - 1; i >= 0; i-- {
-		if addr[i] == ':' {
-			return addr[:i]
-		}
-	}
-	return addr
+	return ClientIP(r)
 }

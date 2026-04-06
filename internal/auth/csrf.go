@@ -2,6 +2,7 @@ package auth
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
 	"net/http"
@@ -46,5 +47,5 @@ func ValidateCSRF(r *http.Request, sess *Session) bool {
 	if formToken == "" {
 		return false
 	}
-	return formToken == sess.csrfToken
+	return subtle.ConstantTimeCompare([]byte(formToken), []byte(sess.csrfToken)) == 1
 }

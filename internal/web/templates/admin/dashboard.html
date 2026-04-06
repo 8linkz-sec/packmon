@@ -3,6 +3,22 @@
 {{define "content"}}
 <div class="space-y-6">
 
+  {{if .BootstrapWarning}}
+  <div class="rounded-lg border border-yellow-400 bg-yellow-50 p-4">
+    <div class="flex items-start">
+      <div class="flex-shrink-0 text-yellow-600 text-xl mr-3">!</div>
+      <div>
+        <h3 class="text-sm font-semibold text-yellow-800">Bootstrap password still active</h3>
+        <p class="mt-1 text-sm text-yellow-700">
+          The admin password was set from the <code>PACKMON_ADMIN_INITIAL_PASSWORD</code> environment variable
+          and has not been changed. Please <a href="/admin/settings" class="underline font-medium">change it now</a>
+          to prevent anyone with access to the deployment configuration from logging in.
+        </p>
+      </div>
+    </div>
+  </div>
+  {{end}}
+
   <div class="flex items-center justify-between">
     <h1 class="text-2xl font-bold">Admin Dashboard</h1>
     <form action="/admin/logout" method="POST" class="inline">

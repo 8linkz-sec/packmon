@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 
@@ -13,11 +14,14 @@ import (
 // RegisterRoutes registers all admin routes on the given mux. The
 // session middleware protects every /admin/* route except /admin/login.
 //
+// The provided context controls the lifetime of background goroutines
+// started by the admin handler (e.g. login-attempt cleanup).
+//
 // The wellKnownChangePassword handler implements the .well-known
 // redirect for password managers (Bitwarden compatibility).
-func RegisterRoutes(mux *http.ServeMux, store db.Store, sm *auth.SessionManager, logger *slog.Logger, cfg *config.Config, syncFeed FeedSyncFunc) {
+func RegisterRoutes(ctx context.Context, mux *http.ServeMux, store db.Store, sm *auth.SessionManager, logger *slog.Logger, cfg *config.Config, syncFeed FeedSyncFunc) {
 	renderer := web.NewRenderer(web.TemplateFS(), false)
-	h := NewAdminHandler(store, sm, renderer, logger, cfg, syncFeed)
+	h := NewAdminHandler(ctx, store, sm, renderer, logger, cfg, syncFeed)
 
 	// Login and logout are handled specially:
 	// - GET /admin/login: show form (no session required)

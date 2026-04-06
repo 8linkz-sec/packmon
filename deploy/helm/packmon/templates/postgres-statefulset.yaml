@@ -30,7 +30,10 @@ spec:
             - name: POSTGRES_USER
               value: {{ .Values.postgresql.user | quote }}
             - name: POSTGRES_PASSWORD
-              value: {{ .Values.postgresql.password | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "packmon.fullname" . }}-secret
+                  key: db-password
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql/data

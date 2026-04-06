@@ -95,6 +95,22 @@ func (s *noopStore) FindMalicious(_ context.Context, ecosystem, name, version st
 	return findings, nil
 }
 
+func (*noopStore) FindVulnerabilitiesBatch(_ context.Context, _ []db.PackageQuery) ([]domain.Finding, error) {
+	return nil, nil
+}
+
+func (s *noopStore) FindMaliciousBatch(ctx context.Context, packages []db.PackageQuery) ([]domain.Finding, error) {
+	var all []domain.Finding
+	for _, pkg := range packages {
+		findings, err := s.FindMalicious(ctx, pkg.Ecosystem, pkg.Name, pkg.Version)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, findings...)
+	}
+	return all, nil
+}
+
 func (*noopStore) UpsertVulnerability(context.Context, *db.Vulnerability) error { return nil }
 
 func (s *noopStore) UpsertMaliciousFinding(_ context.Context, mf *db.MaliciousFinding) error {
@@ -634,7 +650,7 @@ func (s *noopStore) GetAdminAuth(context.Context) (*db.AdminAuth, error) {
 	return &copyValue, nil
 }
 
-func (s *noopStore) UpsertAdminAuth(_ context.Context, passwordHash string) error {
+func (s *noopStore) UpsertAdminAuth(_ context.Context, passwordHash string, _ bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

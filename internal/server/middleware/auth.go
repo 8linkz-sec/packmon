@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"log/slog"
@@ -21,6 +22,13 @@ var skipAuth = []string{
 	"/admin/",
 	"/admin",
 	"/.well-known/",
+}
+
+// requireAuthEvenInDev lists path prefixes that require a valid API key
+// even when running in development mode. These are write-heavy endpoints
+// that must never be exposed without authentication.
+var requireAuthEvenInDev = []string{
+	"/api/v1/feeds/",
 }
 
 // Auth validates the Bearer token in the Authorization header against hashed
@@ -45,10 +53,21 @@ func Auth(logger *slog.Logger, store db.Store, devMode bool) func(http.Handler) 
 				}
 			}
 
-			// Development mode: skip auth entirely.
+			// Development mode: skip auth for most endpoints, but
+			// always require auth for sensitive write endpoints
+			// (e.g. feed import).
 			if devMode {
-				next.ServeHTTP(w, r)
-				return
+				forceAuth := false
+				for _, prefix := range requireAuthEvenInDev {
+					if strings.HasPrefix(r.URL.Path, prefix) {
+						forceAuth = true
+						break
+					}
+				}
+				if !forceAuth {
+					next.ServeHTTP(w, r)
+					return
+				}
 			}
 
 			token := extractBearerToken(r)
@@ -80,9 +99,11 @@ func Auth(logger *slog.Logger, store db.Store, devMode bool) func(http.Handler) 
 				return
 			}
 
-			// Fire-and-forget: update last_used_at.
+			// Fire-and-forget: update last_used_at using a detached context
+			// so the write completes even after the request handler returns.
 			go func() {
-				_ = store.TouchAPIKeyLastUsed(r.Context(), apiKey.ID)
+				detached := context.WithoutCancel(r.Context())
+				_ = store.TouchAPIKeyLastUsed(detached, apiKey.ID)
 			}()
 
 			next.ServeHTTP(w, r)

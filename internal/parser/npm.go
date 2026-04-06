@@ -125,9 +125,11 @@ var yarnVersionRe = regexp.MustCompile(`^\s+version\s+"?([^"]+)"?\s*$`)
 
 func (p *YarnParser) Parse(r io.Reader) ([]domain.Package, error) {
 	var (
-		pkgs    []domain.Package
-		errs    []error
-		curName string
+		pkgs            []domain.Package
+		errs            []error
+		curName         string
+		hasContentLines bool
+		matchedHeaders  int
 	)
 
 	scanner := bufio.NewScanner(r)
@@ -141,9 +143,12 @@ func (p *YarnParser) Parse(r io.Reader) ([]domain.Package, error) {
 			continue
 		}
 
+		hasContentLines = true
+
 		// Try to match a header line.
 		if m := yarnHeaderRe.FindStringSubmatch(line); m != nil {
 			curName = unquoteYarnName(m[1])
+			matchedHeaders++
 			continue
 		}
 
@@ -164,6 +169,13 @@ func (p *YarnParser) Parse(r io.Reader) ([]domain.Package, error) {
 	}
 	if err := scanner.Err(); err != nil {
 		errs = append(errs, fmt.Errorf("yarn: read error: %w", err))
+	}
+
+	// If the file had non-comment content but we could not match any
+	// yarn v1 header lines, it is likely a Yarn Berry (v2+) lockfile
+	// whose format we do not support yet.
+	if len(pkgs) == 0 && hasContentLines && matchedHeaders == 0 {
+		errs = append(errs, fmt.Errorf("yarn: lock file format not recognized (possibly Yarn Berry v2+)"))
 	}
 
 	return dedup(pkgs), joinErrors(errs)

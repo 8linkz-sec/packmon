@@ -177,13 +177,18 @@ func (h *AdminHandler) HandleAdminKeys(w http.ResponseWriter, r *http.Request) {
 		keyViews[i] = apiKeyView{APIKey: k}
 	}
 
+	// Read the newly created key from session flash (one-time read)
+	// instead of URL query parameter to avoid exposing it in logs and
+	// browser history (SEC-H5).
+	newKey := h.sm.GetFlash(sess.ID, "newkey")
+
 	data := map[string]any{
 		"ActiveNav": "admin",
 		"CSRFToken": csrfToken,
 		"Keys":      keyViews,
 		"Message":   r.URL.Query().Get("msg"),
 		"Error":     r.URL.Query().Get("err"),
-		"NewKey":    r.URL.Query().Get("newkey"),
+		"NewKey":    newKey,
 	}
 	h.renderAdmin(w, "admin/keys.html", data)
 }
@@ -243,7 +248,10 @@ func (h *AdminHandler) HandleKeyCreate(w http.ResponseWriter, r *http.Request) {
 
 	h.auditLog(r, "api_key_create", map[string]string{"name": name})
 
-	http.Redirect(w, r, "/admin/keys?newkey="+plaintext, http.StatusSeeOther)
+	// Store the plaintext key in a flash message so it is never exposed
+	// in the URL query string (SEC-H5).
+	h.sm.SetFlash(sess.ID, "newkey", plaintext)
+	http.Redirect(w, r, "/admin/keys?msg=Key+created", http.StatusSeeOther)
 }
 
 // HandleKeyRevoke handles POST /admin/keys/revoke.
@@ -587,8 +595,8 @@ func (h *AdminHandler) HandlePasswordChange(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	if len(newPassword) < 8 {
-		http.Redirect(w, r, "/admin/settings?err=Password+must+be+at+least+8+characters", http.StatusSeeOther)
+	if len(newPassword) < 12 {
+		http.Redirect(w, r, "/admin/settings?err=Password+must+be+at+least+12+characters", http.StatusSeeOther)
 		return
 	}
 
@@ -613,7 +621,7 @@ func (h *AdminHandler) HandlePasswordChange(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	if err := h.store.UpsertAdminAuth(r.Context(), newHash); err != nil {
+	if err := h.store.UpsertAdminAuth(r.Context(), newHash, false); err != nil {
 		h.logger.Error("admin settings: failed to update password", "error", err)
 		http.Redirect(w, r, "/admin/settings?err=Failed+to+update+password", http.StatusSeeOther)
 		return

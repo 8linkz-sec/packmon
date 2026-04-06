@@ -308,7 +308,7 @@ func (s *Store) DeleteAPIKey(ctx context.Context, keyID int) error {
 
 func (s *Store) GetAdminAuth(ctx context.Context) (*db.AdminAuth, error) {
 	const query = `
-		SELECT password_hash, created_at, password_changed_at, last_login_at
+		SELECT password_hash, password_is_bootstrap, created_at, password_changed_at, last_login_at
 		FROM admin_auth
 		WHERE id = 1`
 
@@ -320,6 +320,7 @@ func (s *Store) GetAdminAuth(ctx context.Context) (*db.AdminAuth, error) {
 
 	err := s.pool.QueryRow(ctx, query).Scan(
 		&authInfo.PasswordHash,
+		&authInfo.PasswordIsBootstrap,
 		&authInfo.CreatedAt,
 		&passwordChangedAt,
 		&lastLoginAt,
@@ -336,15 +337,16 @@ func (s *Store) GetAdminAuth(ctx context.Context) (*db.AdminAuth, error) {
 	return &authInfo, nil
 }
 
-func (s *Store) UpsertAdminAuth(ctx context.Context, passwordHash string) error {
+func (s *Store) UpsertAdminAuth(ctx context.Context, passwordHash string, isBootstrap bool) error {
 	const query = `
-		INSERT INTO admin_auth (id, username, password_hash)
-		VALUES (1, 'admin', $1)
+		INSERT INTO admin_auth (id, username, password_hash, password_is_bootstrap)
+		VALUES (1, 'admin', $1, $2)
 		ON CONFLICT (id) DO UPDATE SET
 			password_hash = EXCLUDED.password_hash,
+			password_is_bootstrap = EXCLUDED.password_is_bootstrap,
 			password_changed_at = NOW()`
 
-	_, err := s.pool.Exec(ctx, query, passwordHash)
+	_, err := s.pool.Exec(ctx, query, passwordHash, isBootstrap)
 	if err != nil {
 		return fmt.Errorf("postgres: upsert admin auth: %w", err)
 	}
@@ -500,13 +502,13 @@ func (s *Store) DashboardStats(ctx context.Context) (*db.DashboardStatsResult, e
 		return nil, fmt.Errorf("postgres: dashboard totals: %w", err)
 	}
 
+	// Only count vulnerability severities for the dashboard chart.
+	// Malicious findings are always CRITICAL and shown separately in
+	// the "Malicious Packages" card to avoid inflating the severity
+	// distribution.
 	rows, err := s.pool.Query(ctx, `
 		SELECT severity, COUNT(*)::int
-		FROM (
-			SELECT severity FROM vulnerabilities
-			UNION ALL
-			SELECT severity FROM malicious_findings
-		) AS severities
+		FROM vulnerabilities
 		GROUP BY severity`)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: dashboard severities: %w", err)

@@ -30,23 +30,25 @@ type Server struct {
 	build   BuildInfo
 	main    *http.Server
 	metrics *http.Server
+	health  *health.Checker
 }
 
 // New creates a Server with all middleware and routes wired up.
 // The caller must provide a Store implementation and a Pinger for
 // health checks (typically the same pgxpool.Pool satisfies both).
-func New(cfg *config.Config, store db.Store, pinger health.Pinger, logger *slog.Logger, build BuildInfo, syncFeed admin.FeedSyncFunc) *Server {
+func New(ctx context.Context, cfg *config.Config, store db.Store, pinger health.Pinger, logger *slog.Logger, build BuildInfo, syncFeed admin.FeedSyncFunc) *Server {
 	devMode := cfg.IsDevelopment()
 
 	// Session manager for admin authentication.
 	// In production mode, session cookies require HTTPS (Secure flag).
-	sm := auth.NewSessionManager(cfg.Admin.SessionTimeout, !devMode)
+	// The context controls the lifetime of the session cleanup goroutine.
+	sm := auth.NewSessionManager(ctx, cfg.Admin.SessionTimeout, !devMode)
 
 	// -- Build middleware chain ------------------------------------------------
 	// Order matters: outermost middleware runs first.
-	// Correlation -> Recovery -> Logging -> UserAgent -> Auth -> Session -> RateLimit -> Handler
+	// SecurityHeaders -> Correlation -> Recovery -> Logging -> UserAgent -> Auth -> Session -> RateLimit -> Handler
 	chain := func(h http.Handler) http.Handler {
-		h = middleware.RateLimit(logger, middleware.RateLimitConfig{
+		h = middleware.RateLimit(ctx, logger, middleware.RateLimitConfig{
 			Rate:  1.0, // 1 token/sec refill = 60/min sustained
 			Burst: 60,  // allow bursts up to 60 requests
 		})(h)
@@ -56,13 +58,14 @@ func New(cfg *config.Config, store db.Store, pinger health.Pinger, logger *slog.
 		h = middleware.Logging(logger)(h)
 		h = middleware.Recovery(logger)(h)
 		h = middleware.Correlation(h)
+		h = middleware.SecurityHeaders(!devMode)(h)
 		return h
 	}
 
 	// -- Register routes ------------------------------------------------------
 	mux := http.NewServeMux()
 	hc := health.NewChecker(pinger)
-	registerRoutes(mux, hc, cfg, store, sm, logger, build, syncFeed)
+	registerRoutes(ctx, mux, hc, cfg, store, sm, logger, build, syncFeed)
 
 	mainAddr := fmt.Sprintf(":%d", cfg.Server.Port)
 	mainServer := &http.Server{
@@ -90,7 +93,16 @@ func New(cfg *config.Config, store db.Store, pinger health.Pinger, logger *slog.
 		build:   build,
 		main:    mainServer,
 		metrics: metricsServer,
+		health:  hc,
 	}
+}
+
+// SetShuttingDown marks the server as shutting down so that the
+// /readyz endpoint immediately returns 503. This should be called
+// as the first step after receiving SIGTERM, before stopping the
+// HTTP listener, to give the load balancer time to drain traffic.
+func (s *Server) SetShuttingDown() {
+	s.health.SetShuttingDown()
 }
 
 // Run starts both HTTP servers and blocks until the context is
@@ -128,6 +140,10 @@ func (s *Server) Run(ctx context.Context) error {
 	case <-ctx.Done():
 		s.logger.Info("context cancelled, shutting down")
 	}
+
+	// Mark as shutting down so /readyz returns 503 immediately for any
+	// in-flight health probes during the graceful shutdown window.
+	s.SetShuttingDown()
 
 	return s.shutdown()
 }

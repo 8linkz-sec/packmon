@@ -77,6 +77,22 @@ const (
 	FeedModeExternal FeedMode = "external"
 )
 
+// FeedPhase controls the execution order of feeds. Phase 1 feeds
+// (vulnerability data: OSV, GHSA, OpenSSF) run first. Phase 2 feeds
+// (enrichment: EPSS, CISA KEV, VulnCheck) wait for all Phase 1 feeds
+// to finish their initial sync before starting. This ensures
+// enrichment feeds find vulnerability data to enrich.
+type FeedPhase int
+
+const (
+	// FeedPhaseVulnerability is for feeds that provide base vulnerability
+	// data (OSV, GHSA, OpenSSF). They run first.
+	FeedPhaseVulnerability FeedPhase = 1
+	// FeedPhaseEnrichment is for feeds that enrich existing vulnerability
+	// data (EPSS, CISA KEV, VulnCheck). They wait for Phase 1.
+	FeedPhaseEnrichment FeedPhase = 2
+)
+
 // FeedConfig holds per-feed configuration used by the FeedManager.
 type FeedConfig struct {
 	// Syncer is the concrete feed syncer implementation.
@@ -86,4 +102,7 @@ type FeedConfig struct {
 	Mode FeedMode
 	// Enabled controls whether the feed is active at all.
 	Enabled bool
+	// Phase controls execution order. Phase 1 runs before Phase 2.
+	// Default (0) is treated as Phase 1.
+	Phase FeedPhase
 }

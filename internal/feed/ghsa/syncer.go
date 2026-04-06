@@ -78,10 +78,14 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 		Logger: s.logger,
 	}
 
-	commitHash, err := repo.EnsureCloned(ctx)
+	// PullWithChangedFiles handles clone-or-pull and computes the diff
+	// between old HEAD and fetched origin/HEAD before resetting. This is
+	// necessary because after a shallow fetch+reset the old commit is
+	// unreachable and git diff would fail.
+	commitHash, changedFiles, err := repo.PullWithChangedFiles(ctx)
 	if err != nil {
 		s.recordSyncFailure(ctx, start, err)
-		return nil, fmt.Errorf("ghsa: ensure cloned: %w", err)
+		return nil, fmt.Errorf("ghsa: pull with changed files: %w", err)
 	}
 	s.logger.Info("advisory-database ready", slog.String("commit", commitHash))
 
@@ -105,12 +109,27 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 		}, nil
 	}
 
-	// Walk the reviewed directory and process each advisory.
 	advisoryRoot := filepath.Join(repoDir, reviewedDir)
-	synced, total, err := s.walkAdvisories(ctx, store, advisoryRoot)
-	if err != nil {
-		s.recordSyncFailure(ctx, start, err)
-		return nil, fmt.Errorf("ghsa: walk advisories: %w", err)
+	var synced, total int
+
+	if changedFiles != nil {
+		// Delta sync: only process changed advisory files.
+		s.logger.Info("delta sync: processing changed files only",
+			slog.String("commit", commitHash),
+			slog.Int("changed_files", len(changedFiles)),
+		)
+		synced, total, err = s.processChangedFiles(ctx, store, repoDir, changedFiles)
+		if err != nil {
+			s.recordSyncFailure(ctx, start, err)
+			return nil, fmt.Errorf("ghsa: process changed files: %w", err)
+		}
+	} else {
+		// Full walk: first clone or diff unavailable.
+		synced, total, err = s.walkAdvisories(ctx, store, advisoryRoot)
+		if err != nil {
+			s.recordSyncFailure(ctx, start, err)
+			return nil, fmt.Errorf("ghsa: walk advisories: %w", err)
+		}
 	}
 
 	duration := time.Since(start)
@@ -126,6 +145,63 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 		EntriesSynced: synced,
 		EntriesTotal:  total,
 	}, nil
+}
+
+// processChangedFiles processes only the advisory files that were
+// modified between two git commits. It filters for JSON files under
+// the reviewed directory and upserts each one.
+func (s *Syncer) processChangedFiles(ctx context.Context, store db.Store, repoDir string, changedFiles []string) (synced, total int, err error) {
+	for _, relPath := range changedFiles {
+		if ctx.Err() != nil {
+			return synced, total, ctx.Err()
+		}
+
+		// Only process JSON files under the reviewed advisories directory.
+		if !strings.HasPrefix(relPath, reviewedDir+"/") {
+			continue
+		}
+		if !strings.HasSuffix(relPath, ".json") {
+			continue
+		}
+		total++
+
+		absPath := filepath.Join(repoDir, relPath)
+		data, readErr := os.ReadFile(absPath)
+		if readErr != nil {
+			// File may have been deleted in this diff range; skip.
+			s.logger.Debug("skipping changed file (read failed)",
+				slog.String("file", relPath),
+				slog.String("error", readErr.Error()),
+			)
+			continue
+		}
+
+		var advisory ghsaAdvisory
+		if parseErr := json.Unmarshal(data, &advisory); parseErr != nil {
+			s.logger.Warn("failed to parse advisory JSON",
+				slog.String("file", relPath),
+				slog.String("error", parseErr.Error()),
+			)
+			continue
+		}
+
+		if advisory.ID == "" {
+			s.logger.Warn("advisory has no ID, skipping", slog.String("file", relPath))
+			continue
+		}
+
+		vuln := mapToVulnerability(&advisory, data)
+		if upsertErr := store.UpsertVulnerability(ctx, vuln); upsertErr != nil {
+			s.logger.Warn("failed to upsert advisory",
+				slog.String("id", advisory.ID),
+				slog.String("error", upsertErr.Error()),
+			)
+			continue
+		}
+		synced++
+	}
+
+	return synced, total, nil
 }
 
 // walkAdvisories traverses the advisories directory tree and processes

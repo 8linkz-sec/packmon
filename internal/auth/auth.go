@@ -62,7 +62,7 @@ func BootstrapAdmin(ctx context.Context, store db.Store, initialPassword string,
 		return fmt.Errorf("auth: bootstrap admin: %w", err)
 	}
 
-	if err := store.UpsertAdminAuth(ctx, hash); err != nil {
+	if err := store.UpsertAdminAuth(ctx, hash, true); err != nil {
 		return fmt.Errorf("auth: bootstrap admin: %w", err)
 	}
 

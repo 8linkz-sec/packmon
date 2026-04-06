@@ -48,7 +48,11 @@ func (s *Store) GetFeedConfig(ctx context.Context, feedName string) (*db.FeedCon
 		item.SyncInterval = &d
 	}
 	if apiKey != nil {
-		item.APIKey = *apiKey
+		decrypted, err := s.encryptor.Decrypt(*apiKey)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: decrypt feed api key %s: %w", feedName, err)
+		}
+		item.APIKey = decrypted
 	}
 
 	return &item, nil
@@ -70,12 +74,22 @@ func (s *Store) UpsertFeedConfig(ctx context.Context, cfg *db.FeedConfig) error 
 		intervalMicros = cfg.SyncInterval.Microseconds()
 	}
 
+	// Encrypt the API key before storing (SEC-C2).
+	apiKeyVal := cfg.APIKey
+	if apiKeyVal != "" {
+		encrypted, encErr := s.encryptor.Encrypt(apiKeyVal)
+		if encErr != nil {
+			return fmt.Errorf("postgres: encrypt feed api key %s: %w", cfg.FeedName, encErr)
+		}
+		apiKeyVal = encrypted
+	}
+
 	_, err := s.pool.Exec(ctx, query,
 		cfg.FeedName,
 		cfg.Enabled,
 		cfg.Mode,
 		intervalMicros,
-		nullableString(cfg.APIKey),
+		nullableString(apiKeyVal),
 	)
 	if err != nil {
 		return fmt.Errorf("postgres: upsert feed config %s: %w", cfg.FeedName, err)
@@ -132,7 +146,11 @@ func (s *Store) ListFeedConfigs(ctx context.Context) ([]db.FeedConfig, error) {
 			item.SyncInterval = &d
 		}
 		if apiKey != nil {
-			item.APIKey = *apiKey
+			decrypted, decErr := s.encryptor.Decrypt(*apiKey)
+			if decErr != nil {
+				return nil, fmt.Errorf("postgres: decrypt feed api key %s: %w", item.FeedName, decErr)
+			}
+			item.APIKey = decrypted
 		}
 
 		out = append(out, item)

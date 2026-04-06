@@ -29,9 +29,10 @@ type ScanResult struct {
 	DBAgeDays        *int              `json:"db_age_days"`
 	DBStale          bool              `json:"db_stale"`
 	Summary          ScanSummary       `json:"summary"`
-	Findings         []Finding         `json:"findings"`
-	FeedVersions     map[string]string `json:"feed_versions"`
-	ManualCount      int               `json:"manual_advisories_count"`
+	Findings          []Finding         `json:"findings"`
+	FindingsTruncated bool              `json:"findings_truncated,omitempty"`
+	FeedVersions      map[string]string `json:"feed_versions"`
+	ManualCount       int               `json:"manual_advisories_count"`
 }
 
 // ScanSummary aggregates findings by severity, type, and source.

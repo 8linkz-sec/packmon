@@ -7,6 +7,8 @@ type SyncExportOptions struct {
 	Since      *time.Time
 	SnapshotAt time.Time
 	Ecosystems []string
+	Limit      int
+	Offset     int
 }
 
 // SyncExport is the server-side payload consumed by local SQLite sync.

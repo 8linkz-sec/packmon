@@ -20,7 +20,10 @@ spec:
               image: {{ .Values.backup.image | quote }}
               env:
                 - name: PGPASSWORD
-                  value: {{ .Values.postgresql.password | quote }}
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "packmon.fullname" . }}-secret
+                      key: db-password
               command:
                 - /bin/sh
                 - -c

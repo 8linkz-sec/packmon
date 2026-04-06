@@ -9,7 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -57,7 +57,7 @@ func SendWebhook(ctx context.Context, cfg WebhookConfig, result *domain.ScanResu
 
 	body, err := json.Marshal(envelope)
 	if err != nil {
-		log.Printf("webhook: marshal error: %v", err)
+		slog.Warn("webhook: marshal error", slog.String("error", err.Error()))
 		return
 	}
 
@@ -67,7 +67,7 @@ func SendWebhook(ctx context.Context, cfg WebhookConfig, result *domain.ScanResu
 
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, cfg.URL, bytes.NewReader(body))
 	if err != nil {
-		log.Printf("webhook: create request error: %v", err)
+		slog.Warn("webhook: create request error", slog.String("error", err.Error()))
 		return
 	}
 
@@ -90,7 +90,7 @@ func SendWebhook(ctx context.Context, cfg WebhookConfig, result *domain.ScanResu
 	client := &http.Client{Timeout: webhookTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("webhook: POST %s failed: %v", cfg.URL, err)
+		slog.Error("webhook: POST failed", slog.String("url", cfg.URL), slog.String("error", err.Error()))
 		return
 	}
 	defer closeSilently(resp.Body)
@@ -99,9 +99,9 @@ func SendWebhook(ctx context.Context, cfg WebhookConfig, result *domain.ScanResu
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, webhookMaxRespBody))
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		log.Printf("webhook: POST %s succeeded (HTTP %d)", cfg.URL, resp.StatusCode)
+		slog.Info("webhook: POST succeeded", slog.String("url", cfg.URL), slog.Int("status", resp.StatusCode))
 	} else {
-		log.Printf("webhook: POST %s returned HTTP %d", cfg.URL, resp.StatusCode)
+		slog.Warn("webhook: POST returned non-2xx", slog.String("url", cfg.URL), slog.Int("status", resp.StatusCode))
 	}
 }
 

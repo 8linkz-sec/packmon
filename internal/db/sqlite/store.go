@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/8linkz/packmon/internal/domain"
+	versionpkg "github.com/8linkz/packmon/internal/version"
 
 	_ "modernc.org/sqlite"
 )
@@ -115,8 +116,10 @@ func (s *Store) FindVulnerabilities(ctx context.Context, ecosystem, name, versio
 		}
 
 		// Check whether the requested version falls within any affected range.
+		// Uses the shared version package which handles both full OSV and
+		// flat range formats, and dispatches to ecosystem-specific comparators.
 		if version != "" && rangesJSON.Valid && rangesJSON.String != "" {
-			affected, matchErr := versionAffected(version, rangesJSON.String)
+			affected, matchErr := versionpkg.VersionAffected(version, rangesJSON.String, "", eco)
 			if matchErr != nil {
 				// If we cannot parse ranges, treat the package as affected
 				// (fail-safe: do not silently hide vulnerabilities).
@@ -243,204 +246,9 @@ func (s *Store) SetSyncMeta(ctx context.Context, key, value string) error {
 	return nil
 }
 
-// ---------------------------------------------------------------------------
-// Version matching helpers
-// ---------------------------------------------------------------------------
-
-// versionRange is a single semver-style range from the version_ranges
-// JSON stored per vulnerability row. The format mirrors OSV:
-//
-//	[{"introduced":"1.0.0","fixed":"1.0.5"}, {"introduced":"2.0.0"}]
-type versionRange struct {
-	Introduced string `json:"introduced"`
-	Fixed      string `json:"fixed"`
-}
-
-// versionAffected returns true if the given version falls within any of
-// the ranges encoded as a JSON array of versionRange objects.
-//
-// Matching rules:
-//   - If "introduced" is empty or "0", the range starts at the beginning.
-//   - If "fixed" is empty, every version >= introduced is affected.
-//   - Comparison is a simple string-based semver comparison (split on ".",
-//     compare each segment numerically, fall back to lexicographic).
-//
-// This is deliberately simple and covers >95% of real-world advisories.
-// Edge cases (pre-release tags, epochs) are handled fail-safe: if we
-// cannot parse a version, we assume the package IS affected.
-func versionAffected(version, rangesJSON string) (bool, error) {
-	var ranges []versionRange
-	if err := json.Unmarshal([]byte(rangesJSON), &ranges); err != nil {
-		return true, fmt.Errorf("parse version_ranges: %w", err)
-	}
-
-	if len(ranges) == 0 {
-		// No ranges specified -- we cannot determine if the version is
-		// affected. Return false to avoid false positives.
-		return false, nil
-	}
-
-	for _, r := range ranges {
-		intro := r.Introduced
-		if intro == "" || intro == "0" {
-			intro = ""
-		}
-		// Check: version >= introduced
-		if intro != "" && compareVersions(version, intro) < 0 {
-			continue
-		}
-		// Check: version < fixed
-		if r.Fixed != "" && compareVersions(version, r.Fixed) >= 0 {
-			continue
-		}
-		return true, nil
-	}
-	return false, nil
-}
-
-// compareVersions compares two version strings with semver-aware rules.
-// Returns -1 if a < b, 0 if a == b, 1 if a > b.
-//
-// Key semver rules applied:
-//   - Build metadata (after '+') is ignored.
-//   - A pre-release version (1.0.0-rc1) is LESS than its release (1.0.0).
-//   - Pre-release identifiers are compared per semver 2.0 spec.
-func compareVersions(a, b string) int {
-	// Strip build metadata.
-	if idx := strings.IndexByte(a, '+'); idx >= 0 {
-		a = a[:idx]
-	}
-	if idx := strings.IndexByte(b, '+'); idx >= 0 {
-		b = b[:idx]
-	}
-
-	// Separate release from pre-release.
-	releaseA, preA := splitPrerelease(a)
-	releaseB, preB := splitPrerelease(b)
-
-	// Compare release segments numerically.
-	partsA := strings.Split(releaseA, ".")
-	partsB := strings.Split(releaseB, ".")
-
-	maxLen := len(partsA)
-	if len(partsB) > maxLen {
-		maxLen = len(partsB)
-	}
-
-	for i := 0; i < maxLen; i++ {
-		var segA, segB string
-		if i < len(partsA) {
-			segA = partsA[i]
-		}
-		if i < len(partsB) {
-			segB = partsB[i]
-		}
-
-		numA := parseSegment(segA)
-		numB := parseSegment(segB)
-
-		if numA < numB {
-			return -1
-		}
-		if numA > numB {
-			return 1
-		}
-	}
-
-	// Release parts equal. Pre-release rules:
-	// no pre-release > has pre-release (1.0.0 > 1.0.0-rc1).
-	if preA == "" && preB == "" {
-		return 0
-	}
-	if preA == "" {
-		return 1 // 1.0.0 > 1.0.0-rc1
-	}
-	if preB == "" {
-		return -1 // 1.0.0-rc1 < 1.0.0
-	}
-
-	return comparePrerelease(preA, preB)
-}
-
-func splitPrerelease(version string) (string, string) {
-	if idx := strings.IndexByte(version, '-'); idx > 0 {
-		return version[:idx], version[idx+1:]
-	}
-	return version, ""
-}
-
-func comparePrerelease(a, b string) int {
-	partsA := strings.Split(a, ".")
-	partsB := strings.Split(b, ".")
-
-	maxLen := len(partsA)
-	if len(partsB) > maxLen {
-		maxLen = len(partsB)
-	}
-
-	for i := 0; i < maxLen; i++ {
-		if i >= len(partsA) {
-			return -1
-		}
-		if i >= len(partsB) {
-			return 1
-		}
-
-		sa, sb := partsA[i], partsB[i]
-		isNumA, numA := isNumericSegment(sa)
-		isNumB, numB := isNumericSegment(sb)
-
-		switch {
-		case isNumA && isNumB:
-			if numA < numB {
-				return -1
-			}
-			if numA > numB {
-				return 1
-			}
-		case isNumA:
-			return -1 // numeric < string
-		case isNumB:
-			return 1
-		default:
-			if sa < sb {
-				return -1
-			}
-			if sa > sb {
-				return 1
-			}
-		}
-	}
-	return 0
-}
-
-func isNumericSegment(s string) (bool, int) {
-	if s == "" {
-		return false, 0
-	}
-	n := 0
-	for _, ch := range s {
-		if ch < '0' || ch > '9' {
-			return false, 0
-		}
-		n = n*10 + int(ch-'0')
-	}
-	return true, n
-}
-
-// parseSegment extracts the leading integer from a version segment.
-// "17" -> 17, "21-beta" -> 21, "" -> 0.
-func parseSegment(s string) int {
-	n := 0
-	for _, c := range s {
-		if c >= '0' && c <= '9' {
-			n = n*10 + int(c-'0')
-		} else {
-			break
-		}
-	}
-	return n
-}
+// Version matching is now handled by the shared versionpkg
+// (github.com/8linkz/packmon/internal/version) package. The local
+// duplicated helpers have been removed.
 
 func migrateSchema(db *sql.DB) error {
 	hasRowKey, err := tableHasColumn(db, "vulnerabilities_local", "row_key")

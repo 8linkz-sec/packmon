@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sync/atomic"
 	"time"
 )
 
@@ -18,12 +19,19 @@ type Pinger interface {
 
 // Checker aggregates health signals.
 type Checker struct {
-	db Pinger
+	db           Pinger
+	shuttingDown atomic.Bool
 }
 
 // NewChecker creates a Checker that probes the given database.
 func NewChecker(db Pinger) *Checker {
 	return &Checker{db: db}
+}
+
+// SetShuttingDown marks the server as shutting down. Once called,
+// ReadyHandler will return 503 to stop receiving new traffic.
+func (c *Checker) SetShuttingDown() {
+	c.shuttingDown.Store(true)
 }
 
 // LiveHandler returns 200 with {"status":"ok"}. It indicates that the
@@ -39,6 +47,14 @@ func (c *Checker) LiveHandler() http.HandlerFunc {
 // traffic to the pod.
 func (c *Checker) ReadyHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if c.shuttingDown.Load() {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+				"status": "unavailable",
+				"reason": "shutting down",
+			})
+			return
+		}
+
 		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 		defer cancel()
 

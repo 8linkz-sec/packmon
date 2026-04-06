@@ -319,12 +319,12 @@ func newAdminTestHandler(t *testing.T, store *noopStore, cfg *config.Config, syn
 
 	renderer := web.NewRenderer(web.TemplateFS(), false)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	sm := auth.NewSessionManager(time.Hour, false)
+	sm := auth.NewSessionManager(context.Background(), time.Hour, false)
 	var trigger admin.FeedSyncFunc
 	if len(syncFeed) > 0 {
 		trigger = syncFeed[0]
 	}
-	return admin.NewAdminHandler(store, sm, renderer, logger, cfg, trigger), sm
+	return admin.NewAdminHandler(context.Background(), store, sm, renderer, logger, cfg, trigger), sm
 }
 
 func newAuthenticatedAdminRequest(t *testing.T, sm *auth.SessionManager, method, target string) *http.Request {
