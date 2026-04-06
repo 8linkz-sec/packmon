@@ -132,6 +132,14 @@
     The table below shows the current runtime state. Saved configuration changes are stored separately and apply after the next server restart.
   </div>
 
+  {{if and .UnknownSeverityCount (gt .UnknownSeverityCount 0)}}
+  <div class="bg-amber-50 border border-amber-200 rounded-md p-4 text-sm text-amber-900">
+    <span class="font-medium">{{.UnknownSeverityCount}} vulnerabilities have unknown severity.</span>
+    The NVD feed syncer resolves CVSS scores automatically during each sync cycle.
+    Configure an NVD API key (<code class="bg-amber-100 px-1 rounded">PACKMON_NVD_API_KEY</code>) for faster resolution (50 req/30s instead of 5 req/30s).
+  </div>
+  {{end}}
+
   <!-- Runtime status table -->
   <div
     id="admin-feed-runtime"

@@ -17,6 +17,10 @@ type managerStoreStub struct {
 	status *db.FeedSyncStatus
 }
 
+func (s *managerStoreStub) PropagateSeverityViaAliases(context.Context) (int, error) {
+	return 0, nil
+}
+
 func (s *managerStoreStub) UpsertFeedSyncStatus(_ context.Context, status *db.FeedSyncStatus) error {
 	copyValue := *status
 	s.status = &copyValue

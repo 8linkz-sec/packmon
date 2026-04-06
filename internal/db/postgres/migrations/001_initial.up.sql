@@ -1,5 +1,5 @@
 -- 001_initial.up.sql
--- Packmon initial schema. All tables use TIMESTAMPTZ for timestamps.
+-- Packmon consolidated schema. All tables use TIMESTAMPTZ for timestamps.
 -- Database must be created with ENCODING 'UTF8' (DE-14).
 
 -- =============================================================================
@@ -24,16 +24,17 @@ CREATE TABLE vulnerabilities (
 
 -- =============================================================================
 -- 2. vulnerability_aliases -- All IDs for a vulnerability (DE-7)
---    Deduplication on import: check if any ID already exists as alias.
+--    Many-to-many: same alias can link to multiple vulnerabilities.
 -- =============================================================================
 CREATE TABLE vulnerability_aliases (
     id               SERIAL      PRIMARY KEY,
     vulnerability_id TEXT        NOT NULL REFERENCES vulnerabilities(id) ON DELETE CASCADE,
     alias_id         TEXT        NOT NULL,
-    UNIQUE(alias_id)
+    UNIQUE(vulnerability_id, alias_id)
 );
 
 CREATE INDEX idx_vuln_aliases_vuln_id ON vulnerability_aliases(vulnerability_id);
+CREATE INDEX idx_vuln_aliases_alias_id ON vulnerability_aliases(alias_id);
 
 -- =============================================================================
 -- 3. vulnerability_sources -- Provenance and freshness per feed (DE-7)
@@ -53,7 +54,6 @@ CREATE INDEX idx_vuln_sources_vuln_id ON vulnerability_sources(vulnerability_id)
 
 -- =============================================================================
 -- 4. vulnerability_references -- Read links (DE-7)
---    Types follow OSV schema: advisory, article, exploit, fix, package, report, web.
 -- =============================================================================
 CREATE TABLE vulnerability_references (
     id               SERIAL      PRIMARY KEY,
@@ -83,7 +83,6 @@ CREATE INDEX idx_affected_eco_name ON affected_packages(ecosystem, name);
 
 -- =============================================================================
 -- 6. malicious_findings -- Malicious package findings (DE-14)
---    Sources: openssf, socket, manual.
 -- =============================================================================
 CREATE TABLE malicious_findings (
     id             TEXT        PRIMARY KEY,
@@ -144,8 +143,6 @@ CREATE TABLE feed_sync_status (
 
 -- =============================================================================
 -- 9. refresh_queue -- Priority queue for async feed checks (DE-15, DE-16)
---    version field omitted per DE-15 (package-wide checks).
---    Partial unique index for dedup per DE-16.
 -- =============================================================================
 CREATE TABLE refresh_queue (
     id           SERIAL      PRIMARY KEY,
@@ -161,13 +158,12 @@ CREATE TABLE refresh_queue (
 
 CREATE INDEX idx_queue_priority ON refresh_queue(source, status, priority, requested_at);
 
--- DE-16: Only one pending/processing job per (ecosystem, name, source).
 CREATE UNIQUE INDEX idx_queue_dedup
     ON refresh_queue(ecosystem, name, source)
     WHERE status IN ('pending', 'processing');
 
 -- =============================================================================
--- 10. scan_log -- Scan audit log (DE-25: includes repo info)
+-- 10. scan_log -- Scan audit log (DE-25)
 -- =============================================================================
 CREATE TABLE scan_log (
     id              SERIAL      PRIMARY KEY,
@@ -190,12 +186,13 @@ CREATE INDEX idx_scan_log_scan_id ON scan_log(scan_id);
 -- 11. admin_auth -- Single-row shared admin login
 -- =============================================================================
 CREATE TABLE admin_auth (
-    id                  SMALLINT    PRIMARY KEY DEFAULT 1 CHECK (id = 1),
-    username            TEXT        NOT NULL UNIQUE DEFAULT 'admin' CHECK (username = 'admin'),
-    password_hash       TEXT        NOT NULL,
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    password_changed_at TIMESTAMPTZ,
-    last_login_at       TIMESTAMPTZ
+    id                    SMALLINT    PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    username              TEXT        NOT NULL UNIQUE DEFAULT 'admin' CHECK (username = 'admin'),
+    password_hash         TEXT        NOT NULL,
+    password_is_bootstrap BOOLEAN     NOT NULL DEFAULT TRUE,
+    created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    password_changed_at   TIMESTAMPTZ,
+    last_login_at         TIMESTAMPTZ
 );
 
 -- =============================================================================
@@ -224,3 +221,15 @@ CREATE TABLE api_keys (
 );
 
 CREATE INDEX idx_api_keys_hash ON api_keys(key_hash);
+
+-- =============================================================================
+-- 14. feed_configs -- Per-feed runtime configuration
+-- =============================================================================
+CREATE TABLE feed_configs (
+    feed_name     TEXT        PRIMARY KEY,
+    enabled       BOOLEAN     NOT NULL,
+    mode          TEXT        NOT NULL CHECK (mode IN ('self', 'external')),
+    sync_interval INTERVAL,
+    api_key       TEXT,
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

@@ -39,6 +39,7 @@ type Manager struct {
 type registeredFeed struct {
 	config   FeedConfig
 	interval time.Duration // 0 = use manager default
+	mu       sync.Mutex    // prevents concurrent syncs of the same feed
 }
 
 // NewManager creates a Manager. The default sync interval applies to
@@ -130,6 +131,16 @@ func (m *Manager) Start(ctx context.Context) {
 		for _, ch := range phase1Signals {
 			<-ch
 		}
+
+		// Propagate severity from known entries to UNKNOWN aliases.
+		// E.g. GO-2026-4856 (UNKNOWN) shares alias CVE-2026-33726 with
+		// GHSA-hxv8-4j4r-cqgv (MEDIUM) -- copy MEDIUM to GO-2026-4856.
+		if updated, err := m.store.PropagateSeverityViaAliases(ctx); err != nil {
+			m.logger.Warn("failed to propagate severity via aliases", "error", err)
+		} else if updated > 0 {
+			m.logger.Info("propagated severity via aliases", slog.Int("updated", updated))
+		}
+
 		close(phase1Done)
 	}()
 
@@ -254,6 +265,11 @@ func (m *Manager) runSync(ctx context.Context, rf *registeredFeed, log *slog.Log
 // On the first call there is no delay; subsequent retries use the
 // exponential backoff schedule. It records the outcome in feed_sync_status.
 func (m *Manager) syncWithRetry(ctx context.Context, rf *registeredFeed) (*SyncResult, error) {
+	// Prevent concurrent syncs of the same feed (e.g. manual trigger
+	// via admin panel while the background loop is already syncing).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	name := rf.config.Syncer.Name()
 	log := m.logger.With(slog.String("feed", name))
 

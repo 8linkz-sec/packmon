@@ -94,6 +94,17 @@ func (c *Config) FeedSettings(name string) (FeedSettings, bool) {
 			SyncInterval:         c.Feeds.EPSSInterval,
 			SupportsSyncInterval: true,
 		}, true
+	case "nvd":
+		return FeedSettings{
+			Name:                 "nvd",
+			DisplayName:          "NVD",
+			Enabled:              c.Feeds.NVDEnabled,
+			Mode:                 c.Feeds.NVDMode,
+			SyncInterval:         c.Feeds.NVDInterval,
+			APIKey:               c.Feeds.NVDAPIKey,
+			RequiresAPIKey:       false,
+			SupportsSyncInterval: true,
+		}, true
 	case "socket":
 		return FeedSettings{
 			Name:                 "socket",
@@ -115,7 +126,7 @@ func (c *Config) FeedSettingsList() []FeedSettings {
 		return nil
 	}
 
-	names := []string{"osv", "ghsa", "openssf", "vulncheck", "cisakev", "epss", "socket"}
+	names := []string{"osv", "ghsa", "openssf", "vulncheck", "cisakev", "epss", "nvd", "socket"}
 	out := make([]FeedSettings, 0, len(names))
 	for _, name := range names {
 		feed, ok := c.FeedSettings(name)
@@ -172,6 +183,11 @@ func (c *Config) SetFeedSettings(feed FeedSettings) error {
 		c.Feeds.EPSSEnabled = feed.Enabled
 		c.Feeds.EPSSMode = mode
 		c.Feeds.EPSSInterval = normalizeOptionalDuration(feed.SyncInterval)
+	case "nvd":
+		c.Feeds.NVDEnabled = feed.Enabled
+		c.Feeds.NVDMode = mode
+		c.Feeds.NVDInterval = normalizeOptionalDuration(feed.SyncInterval)
+		c.Feeds.NVDAPIKey = strings.TrimSpace(feed.APIKey)
 	case "socket":
 		c.Feeds.SocketEnabled = feed.Enabled
 		c.Feeds.SocketMode = mode

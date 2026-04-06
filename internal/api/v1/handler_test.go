@@ -46,6 +46,7 @@ func (s *stubStore) FindVulnerabilitiesBatch(_ context.Context, _ []db.PackageQu
 func (s *stubStore) FindMaliciousBatch(_ context.Context, _ []db.PackageQuery) ([]domain.Finding, error) {
 	return s.malBatchFindings, s.malBatchErr
 }
+func (s *stubStore) PropagateSeverityViaAliases(context.Context) (int, error) { return 0, nil }
 func (s *stubStore) UpsertVulnerability(context.Context, *db.Vulnerability) error { return nil }
 func (s *stubStore) UpsertMaliciousFinding(context.Context, *db.MaliciousFinding) error {
 	return nil
@@ -60,6 +61,12 @@ func (s *stubStore) ClearCISAKEV(context.Context, []string) (int, error)        
 func (s *stubStore) SetEPSSScores(context.Context, []db.EPSSEntry) (int, error)     { return 0, nil }
 func (s *stubStore) EnrichVulnCheck(context.Context, []db.VulnCheckEntry) (int, error) {
 	return 0, nil
+}
+func (s *stubStore) FindUnknownSeverityCVEAliases(context.Context) ([]db.UnknownCVEAlias, error) {
+	return nil, nil
+}
+func (s *stubStore) UpdateSeverityByCVE(context.Context, string, string, float64) error {
+	return nil
 }
 func (s *stubStore) GetFeedSyncStatus(context.Context, string) (*db.FeedSyncStatus, error) {
 	return nil, nil

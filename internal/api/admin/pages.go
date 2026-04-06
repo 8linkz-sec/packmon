@@ -68,14 +68,21 @@ func (h *AdminHandler) HandleAdminFeeds(w http.ResponseWriter, r *http.Request) 
 		defaultSyncInterval = formatRuntimeDuration(h.cfg.FeedSync.Interval)
 	}
 
+	// Count UNKNOWN-severity vulnerabilities for the NVD info hint.
+	unknownCount := 0
+	if stats, statsErr := h.store.DashboardStats(ctx); statsErr == nil && stats != nil {
+		unknownCount = stats.BySeverity["UNKNOWN"]
+	}
+
 	data := map[string]any{
-		"ActiveNav":           "admin",
-		"CSRFToken":           csrfToken,
-		"Feeds":               h.adminFeedRows(feeds),
-		"EditableFeeds":       h.adminFeedFormRows(overrides),
-		"DefaultSyncInterval": defaultSyncInterval,
-		"Message":             r.URL.Query().Get("msg"),
-		"Error":               r.URL.Query().Get("err"),
+		"ActiveNav":            "admin",
+		"CSRFToken":            csrfToken,
+		"Feeds":                h.adminFeedRows(feeds),
+		"EditableFeeds":        h.adminFeedFormRows(overrides),
+		"DefaultSyncInterval":  defaultSyncInterval,
+		"UnknownSeverityCount": unknownCount,
+		"Message":              r.URL.Query().Get("msg"),
+		"Error":                r.URL.Query().Get("err"),
 	}
 
 	switch r.URL.Query().Get("partial") {

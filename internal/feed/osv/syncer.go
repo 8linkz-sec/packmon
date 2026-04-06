@@ -280,6 +280,13 @@ func (s *Syncer) syncEcosystem(ctx context.Context, store db.Store, ecosystem, s
 			continue
 		}
 
+		// Skip MAL-* entries -- these are malicious package advisories
+		// from OpenSSF that OSV aggregates. They belong in the
+		// malicious_findings table, handled by the OpenSSF syncer.
+		if strings.HasPrefix(entry.ID, "MAL-") {
+			continue
+		}
+
 		vuln := mapToVulnerability(&entry, data)
 		if err := store.UpsertVulnerability(ctx, vuln); err != nil {
 			s.logger.Warn("failed to upsert vulnerability",

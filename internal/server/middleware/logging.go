@@ -3,6 +3,7 @@ package middleware
 import (
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -46,6 +47,8 @@ func Logging(logger *slog.Logger) func(http.Handler) http.Handler {
 				level = slog.LevelError
 			} else if sc.code >= 400 {
 				level = slog.LevelWarn
+			} else if strings.HasPrefix(r.URL.Path, "/static/") {
+				level = slog.LevelDebug
 			}
 
 			logger.LogAttrs(r.Context(), level, "request completed", attrs...)

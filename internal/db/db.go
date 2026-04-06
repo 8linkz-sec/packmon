@@ -45,6 +45,12 @@ type Store interface {
 	// UpsertMaliciousFinding inserts or updates a malicious finding.
 	UpsertMaliciousFinding(ctx context.Context, mf *MaliciousFinding) error
 
+	// PropagateSeverityViaAliases updates UNKNOWN-severity vulnerabilities
+	// by copying the severity from a linked vulnerability (via shared alias)
+	// that has a known severity. This handles cases where e.g. GO-2026-4856
+	// is UNKNOWN but its alias GHSA-hxv8-4j4r-cqgv has MEDIUM.
+	PropagateSeverityViaAliases(ctx context.Context) (int, error)
+
 	// DeleteVulnerability removes a vulnerability and all related rows.
 	DeleteVulnerability(ctx context.Context, id string) error
 
@@ -73,6 +79,16 @@ type Store interface {
 	// EnrichVulnCheck applies VulnCheck-sourced enrichment data to existing
 	// vulnerabilities: CVSS scores, exploit-exists flags, and source records.
 	EnrichVulnCheck(ctx context.Context, entries []VulnCheckEntry) (updated int, err error)
+
+	// FindUnknownSeverityCVEAliases returns CVE aliases linked to
+	// vulnerabilities with UNKNOWN severity. Used by the NVD syncer to
+	// fetch CVSS scores for entries that lack severity information.
+	FindUnknownSeverityCVEAliases(ctx context.Context) ([]UnknownCVEAlias, error)
+
+	// UpdateSeverityByCVE updates the severity and CVSS score for a
+	// vulnerability identified by its CVE alias. Only updates rows that
+	// still have UNKNOWN severity to avoid overwriting richer data.
+	UpdateSeverityByCVE(ctx context.Context, cveID, severity string, cvssScore float64) error
 
 	// -- Feed sync status -------------------------------------------------------
 
@@ -439,4 +455,12 @@ type DashboardStatsResult struct {
 	TotalVulnerabilities int
 	TotalMalicious       int
 	BySeverity           map[string]int
+}
+
+// UnknownCVEAlias pairs a vulnerability ID with one of its CVE aliases.
+// Used by the NVD syncer to look up CVSS scores for vulnerabilities that
+// have UNKNOWN severity.
+type UnknownCVEAlias struct {
+	VulnerabilityID string
+	CVEID           string
 }

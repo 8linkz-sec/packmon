@@ -75,9 +75,15 @@ type FeedsConfig struct {
 	CISAKEVInterval   time.Duration
 	EPSSInterval      time.Duration
 
+	// NVD enrichment feed settings.
+	NVDEnabled  bool
+	NVDMode     FeedMode
+	NVDInterval time.Duration
+
 	// API keys for feeds that require authentication.
 	VulnCheckAPIKey string
 	SocketAPIKey    string
+	NVDAPIKey       string
 }
 
 // ServerConfig groups HTTP server settings.
@@ -254,6 +260,7 @@ func Load() (*Config, error) {
 			SocketEnabled:    envBoolOrDefault("PACKMON_FEED_SOCKET_ENABLED", false),
 			CISAKEVEnabled:   envBoolOrDefault("PACKMON_FEED_CISAKEV_ENABLED", true),
 			EPSSEnabled:      envBoolOrDefault("PACKMON_FEED_EPSS_ENABLED", true),
+			NVDEnabled:       envBoolOrDefault("PACKMON_FEED_NVD_ENABLED", true),
 
 			OSVMode:       parseFeedMode("PACKMON_FEED_OSV_MODE"),
 			GHSAMode:      parseFeedMode("PACKMON_FEED_GHSA_MODE"),
@@ -261,10 +268,12 @@ func Load() (*Config, error) {
 			VulnCheckMode: parseFeedMode("PACKMON_FEED_VULNCHECK_MODE"),
 			CISAKEVMode:   parseFeedMode("PACKMON_FEED_CISAKEV_MODE"),
 			EPSSMode:      parseFeedMode("PACKMON_FEED_EPSS_MODE"),
+			NVDMode:       parseFeedMode("PACKMON_FEED_NVD_MODE"),
 			SocketMode:    parseFeedMode("PACKMON_FEED_SOCKET_MODE"),
 
 			VulnCheckAPIKey: os.Getenv("PACKMON_VULNCHECK_API_KEY"),
 			SocketAPIKey:    os.Getenv("PACKMON_SOCKET_API_KEY"),
+			NVDAPIKey:       os.Getenv("PACKMON_NVD_API_KEY"),
 		},
 	}
 

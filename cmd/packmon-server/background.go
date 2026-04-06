@@ -13,6 +13,7 @@ import (
 	"github.com/8linkz/packmon/internal/feed/epss"
 	"github.com/8linkz/packmon/internal/feed/ghsa"
 	"github.com/8linkz/packmon/internal/feed/malicious"
+	"github.com/8linkz/packmon/internal/feed/nvd"
 	"github.com/8linkz/packmon/internal/feed/osv"
 	"github.com/8linkz/packmon/internal/feed/socket"
 	"github.com/8linkz/packmon/internal/feed/vulncheck"
@@ -100,6 +101,7 @@ func newFeedManager(cfg *config.Config, store db.Store, logger *slog.Logger) *fe
 	registerFeedSyncer(manager, cfg, "vulncheck", vulncheck.NewSyncer(cfg.Feeds.VulnCheckAPIKey, logger))
 	registerFeedSyncer(manager, cfg, "cisakev", cisakev.NewSyncer(logger))
 	registerFeedSyncer(manager, cfg, "epss", epss.NewSyncer(logger))
+	registerFeedSyncer(manager, cfg, "nvd", newNVDSyncer(cfg, logger))
 
 	return manager
 }
@@ -115,12 +117,21 @@ func newQueueProcessor(cfg *config.Config, store db.Store, logger *slog.Logger) 
 	return feed.NewQueueProcessor(store, logger, workers)
 }
 
+func newNVDSyncer(cfg *config.Config, logger *slog.Logger) *nvd.Syncer {
+	var opts []nvd.Option
+	if cfg.Feeds.NVDAPIKey != "" {
+		opts = append(opts, nvd.WithAPIKey(cfg.Feeds.NVDAPIKey))
+	}
+	return nvd.NewSyncer(logger, opts...)
+}
+
 // enrichmentFeeds are feeds that enrich existing vulnerability data
 // and must wait for Phase 1 (vulnerability data) to complete first.
 var enrichmentFeeds = map[string]bool{
 	"vulncheck": true,
 	"cisakev":   true,
 	"epss":      true,
+	"nvd":       true,
 }
 
 func registerFeedSyncer(manager *feed.Manager, cfg *config.Config, name string, syncer feed.FeedSyncer) {

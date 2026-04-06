@@ -163,7 +163,14 @@ func (g *GitRepo) PullWithChangedFiles(ctx context.Context) (newHash string, cha
 		}
 	}
 
-	// Step 4: reset to origin/HEAD.
+	// Step 4: remove stale index.lock if a previous git process crashed.
+	lockFile := filepath.Join(g.Dir, ".git", "index.lock")
+	if _, statErr := os.Stat(lockFile); statErr == nil {
+		log.Warn("removing stale git index.lock", slog.String("path", lockFile))
+		_ = os.Remove(lockFile)
+	}
+
+	// Step 5: reset to origin/HEAD.
 	if err := g.run(ctx, g.Dir, "reset", "--hard", "origin/HEAD"); err != nil {
 		return "", nil, fmt.Errorf("git reset: %w", err)
 	}

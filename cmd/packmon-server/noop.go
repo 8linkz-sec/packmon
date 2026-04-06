@@ -111,6 +111,7 @@ func (s *noopStore) FindMaliciousBatch(ctx context.Context, packages []db.Packag
 	return all, nil
 }
 
+func (*noopStore) PropagateSeverityViaAliases(context.Context) (int, error) { return 0, nil }
 func (*noopStore) UpsertVulnerability(context.Context, *db.Vulnerability) error { return nil }
 
 func (s *noopStore) UpsertMaliciousFinding(_ context.Context, mf *db.MaliciousFinding) error {
@@ -174,6 +175,12 @@ func (*noopStore) ClearCISAKEV(context.Context, []string) (int, error) { return 
 func (*noopStore) SetEPSSScores(context.Context, []db.EPSSEntry) (int, error) { return 0, nil }
 
 func (*noopStore) EnrichVulnCheck(context.Context, []db.VulnCheckEntry) (int, error) { return 0, nil }
+
+func (*noopStore) FindUnknownSeverityCVEAliases(context.Context) ([]db.UnknownCVEAlias, error) {
+	return nil, nil
+}
+
+func (*noopStore) UpdateSeverityByCVE(context.Context, string, string, float64) error { return nil }
 
 func (s *noopStore) GetFeedSyncStatus(_ context.Context, feedName string) (*db.FeedSyncStatus, error) {
 	s.mu.Lock()

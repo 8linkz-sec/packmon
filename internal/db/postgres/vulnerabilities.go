@@ -689,6 +689,41 @@ func (s *Store) ClearCISAKEV(ctx context.Context, keepIDs []string) (int, error)
 	return int(tag.RowsAffected()), nil
 }
 
+func (s *Store) PropagateSeverityViaAliases(ctx context.Context) (int, error) {
+	// Find vulnerabilities with UNKNOWN severity that share an alias with
+	// a vulnerability that has a known severity, and copy it over.
+	const query = `
+		UPDATE vulnerabilities v
+		SET severity = donor.severity, updated_at = NOW()
+		FROM (
+			SELECT DISTINCT ON (unknown_id)
+				va1.vulnerability_id AS unknown_id,
+				v2.severity
+			FROM vulnerability_aliases va1
+			INNER JOIN vulnerability_aliases va2 ON va2.alias_id = va1.alias_id
+				AND va2.vulnerability_id != va1.vulnerability_id
+			INNER JOIN vulnerabilities v1 ON v1.id = va1.vulnerability_id
+			INNER JOIN vulnerabilities v2 ON v2.id = va2.vulnerability_id
+			WHERE v1.severity = 'UNKNOWN'
+			  AND v2.severity != 'UNKNOWN'
+			ORDER BY unknown_id,
+				CASE v2.severity
+					WHEN 'CRITICAL' THEN 1
+					WHEN 'HIGH' THEN 2
+					WHEN 'MEDIUM' THEN 3
+					WHEN 'LOW' THEN 4
+					ELSE 5
+				END
+		) donor
+		WHERE v.id = donor.unknown_id`
+
+	tag, err := s.pool.Exec(ctx, query)
+	if err != nil {
+		return 0, fmt.Errorf("postgres: propagate severity via aliases: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
 func (s *Store) SetEPSSScores(ctx context.Context, scores []db.EPSSEntry) (int, error) {
 	if len(scores) == 0 {
 		return 0, nil
@@ -838,6 +873,47 @@ func (s *Store) EnrichVulnCheck(ctx context.Context, entries []db.VulnCheckEntry
 	}
 
 	return updated, nil
+}
+
+func (s *Store) FindUnknownSeverityCVEAliases(ctx context.Context) ([]db.UnknownCVEAlias, error) {
+	const query = `
+		SELECT va.vulnerability_id, va.alias_id
+		FROM vulnerability_aliases va
+		INNER JOIN vulnerabilities v ON v.id = va.vulnerability_id
+		WHERE v.severity = 'UNKNOWN' AND va.alias_id LIKE 'CVE-%'`
+
+	rows, err := s.pool.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: find unknown severity CVE aliases: %w", err)
+	}
+	defer closeSilently(rows)
+
+	var results []db.UnknownCVEAlias
+	for rows.Next() {
+		var a db.UnknownCVEAlias
+		if err := rows.Scan(&a.VulnerabilityID, &a.CVEID); err != nil {
+			return nil, fmt.Errorf("postgres: scan unknown CVE alias row: %w", err)
+		}
+		results = append(results, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: iterate unknown CVE aliases: %w", err)
+	}
+	return results, nil
+}
+
+func (s *Store) UpdateSeverityByCVE(ctx context.Context, cveID, severity string, cvssScore float64) error {
+	const query = `
+		UPDATE vulnerabilities v
+		SET severity = $2, cvss_score = $3, updated_at = NOW()
+		FROM vulnerability_aliases va
+		WHERE va.alias_id = $1 AND va.vulnerability_id = v.id AND v.severity = 'UNKNOWN'`
+
+	_, err := s.pool.Exec(ctx, query, cveID, severity, cvssScore)
+	if err != nil {
+		return fmt.Errorf("postgres: update severity by CVE %s: %w", cveID, err)
+	}
+	return nil
 }
 
 func extractFirstURL(raw string) string {

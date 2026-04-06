@@ -1,6 +1,7 @@
 -- 001_initial.down.sql
 -- Reverse of 001_initial.up.sql. Drop in dependency order.
 
+DROP TABLE IF EXISTS feed_configs;
 DROP TABLE IF EXISTS api_keys;
 DROP TABLE IF EXISTS admin_audit_log;
 DROP TABLE IF EXISTS admin_auth;
