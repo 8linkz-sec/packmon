@@ -1,9 +1,12 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description: "Version/tag to release (for example v1.2.3)"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -24,7 +27,7 @@ jobs:
 
       - name: Build all targets
         run: |
-          VERSION=${GITHUB_REF_NAME}
+          VERSION="${{ inputs.release_version }}"
           COMMIT=${GITHUB_SHA::8}
           DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           LDFLAGS="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${DATE}"
@@ -56,6 +59,9 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.release_version }}
+          name: ${{ inputs.release_version }}
+          target_commitish: ${{ github.sha }}
           generate_release_notes: true
           files: dist/*
 
@@ -66,7 +72,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Login to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -79,5 +85,5 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}/packmon-server:${{ github.ref_name }}
+            ghcr.io/${{ github.repository }}/packmon-server:${{ inputs.release_version }}
             ghcr.io/${{ github.repository }}/packmon-server:latest
