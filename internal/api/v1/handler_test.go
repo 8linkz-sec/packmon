@@ -100,6 +100,9 @@ func (s *stubStore) InsertScanLog(_ context.Context, entry *db.ScanLogEntry) err
 func (s *stubStore) ListRecentScans(context.Context, int) ([]db.ScanLogEntry, error) {
 	return nil, nil
 }
+func (s *stubStore) ListRecentVulnerabilities(context.Context, int, int) ([]db.RecentVulnerability, error) {
+	return nil, nil
+}
 func (s *stubStore) CountScansByDay(context.Context, int) ([]db.DailyScanStats, error) {
 	return nil, nil
 }

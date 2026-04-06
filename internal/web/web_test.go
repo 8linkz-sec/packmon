@@ -52,6 +52,10 @@ func (m *mockStore) ListRecentScans(_ context.Context, _ int) ([]db.ScanLogEntry
 	return []db.ScanLogEntry{}, nil
 }
 
+func (m *mockStore) ListRecentVulnerabilities(_ context.Context, _, _ int) ([]db.RecentVulnerability, error) {
+	return nil, nil
+}
+
 func (m *mockStore) SearchPackages(_ context.Context, query string, _ int) ([]db.PackageSearchResult, error) {
 	if m.searchErr != nil {
 		return nil, m.searchErr

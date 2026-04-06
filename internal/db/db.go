@@ -159,6 +159,10 @@ type Store interface {
 	// for the last N days (including today). Results are ordered oldest to newest.
 	CountScansByDay(ctx context.Context, days int) ([]DailyScanStats, error)
 
+	// ListRecentVulnerabilities returns vulnerabilities added or updated in
+	// the last N days, newest first. Limit caps the result count.
+	ListRecentVulnerabilities(ctx context.Context, days, limit int) ([]RecentVulnerability, error)
+
 	// -- Search -----------------------------------------------------------------
 
 	// SearchPackages searches the affected_packages and malicious_packages
@@ -372,6 +376,16 @@ type ScanLogEntry struct {
 	DurationMs    int
 	ClientIP      string
 	UserAgent     string
+}
+
+// RecentVulnerability is a summary row for recently added/updated vulns.
+type RecentVulnerability struct {
+	ID        string
+	Summary   string
+	Severity  string
+	Ecosystem string
+	Name      string
+	UpdatedAt time.Time
 }
 
 // APIKey represents a stored API key (DE-12).

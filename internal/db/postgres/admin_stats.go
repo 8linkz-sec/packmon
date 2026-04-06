@@ -74,6 +74,39 @@ func (s *Store) ListRecentScans(ctx context.Context, limit int) ([]db.ScanLogEnt
 	return out, nil
 }
 
+func (s *Store) ListRecentVulnerabilities(ctx context.Context, days, limit int) ([]db.RecentVulnerability, error) {
+	if limit <= 0 || limit > 50 {
+		limit = 20
+	}
+	if days <= 0 {
+		days = 7
+	}
+
+	rows, err := s.pool.Query(ctx, `
+		SELECT v.id, v.summary, v.severity,
+			COALESCE((SELECT ap.ecosystem FROM affected_packages ap WHERE ap.vulnerability_id = v.id LIMIT 1), '') AS ecosystem,
+			COALESCE((SELECT ap.name FROM affected_packages ap WHERE ap.vulnerability_id = v.id LIMIT 1), '') AS name,
+			v.updated_at
+		FROM vulnerabilities v
+		WHERE v.created_at >= NOW() - make_interval(days => $1)
+		ORDER BY v.created_at DESC
+		LIMIT $2`, days, limit)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list recent vulnerabilities: %w", err)
+	}
+	defer closeSilently(rows)
+
+	var out []db.RecentVulnerability
+	for rows.Next() {
+		var r db.RecentVulnerability
+		if err := rows.Scan(&r.ID, &r.Summary, &r.Severity, &r.Ecosystem, &r.Name, &r.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("postgres: scan recent vulnerability row: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) CountScansByDay(ctx context.Context, days int) ([]db.DailyScanStats, error) {
 	if days <= 0 {
 		days = 7

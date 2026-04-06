@@ -18,4 +18,5 @@ type Store interface {
 	FindVulnerabilities(ctx context.Context, ecosystem, name, version string) ([]domain.Finding, error)
 	FindMalicious(ctx context.Context, ecosystem, name, version string) ([]domain.Finding, error)
 	ListFeedSyncStatuses(ctx context.Context) ([]db.FeedSyncStatus, error)
+	ListRecentVulnerabilities(ctx context.Context, days, limit int) ([]db.RecentVulnerability, error)
 }

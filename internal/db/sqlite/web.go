@@ -271,3 +271,7 @@ func (s *Store) collectSeverityCounts(ctx context.Context, acc map[string]int, q
 func (s *Store) ListFeedSyncStatuses(context.Context) ([]db.FeedSyncStatus, error) {
 	return []db.FeedSyncStatus{}, nil
 }
+
+func (s *Store) ListRecentVulnerabilities(context.Context, int, int) ([]db.RecentVulnerability, error) {
+	return nil, nil
+}

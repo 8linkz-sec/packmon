@@ -9,11 +9,10 @@ import (
 
 // DashboardData is the view model for the dashboard template.
 type DashboardData struct {
-	ActiveNav    string
-	Stats        *db.DashboardStatsResult
-	DailyStats   []DailyStatRow
-	TotalScans7d int
-	RecentScans  []db.ScanLogEntry
+	ActiveNav             string
+	Stats                 *db.DashboardStatsResult
+	TotalScans7d          int
+	RecentVulnerabilities []db.RecentVulnerability
 }
 
 // DailyStatRow extends DailyScanStats with a computed bar width for the
@@ -40,44 +39,26 @@ func HandleDashboard(store Store, renderer *Renderer, logger *slog.Logger) http.
 			stats = &db.DashboardStatsResult{BySeverity: map[string]int{}}
 		}
 
+		// Quick scan count for the stats card.
 		daily, err := store.CountScansByDay(ctx, 7)
 		if err != nil {
 			logger.Error("dashboard: failed to load daily stats", "error", err)
 		}
-
-		// Compute bar widths relative to max finding count.
-		maxFindings := 0
 		totalScans := 0
 		for _, d := range daily {
-			if d.FindingsCount > maxFindings {
-				maxFindings = d.FindingsCount
-			}
 			totalScans += d.ScanCount
 		}
 
-		rows := make([]DailyStatRow, len(daily))
-		for i, d := range daily {
-			width := 0
-			if maxFindings > 0 {
-				width = (d.FindingsCount * 100) / maxFindings
-			}
-			if width < 2 && d.FindingsCount > 0 {
-				width = 2
-			}
-			rows[i] = DailyStatRow{DailyScanStats: d, BarWidth: width}
-		}
-
-		scans, err := store.ListRecentScans(ctx, 15)
+		recentVulns, err := store.ListRecentVulnerabilities(ctx, 7, 20)
 		if err != nil {
-			logger.Error("dashboard: failed to load recent scans", "error", err)
+			logger.Error("dashboard: failed to load recent vulnerabilities", "error", err)
 		}
 
 		data := DashboardData{
-			ActiveNav:    "dashboard",
-			Stats:        stats,
-			DailyStats:   rows,
-			TotalScans7d: totalScans,
-			RecentScans:  scans,
+			ActiveNav:             "dashboard",
+			Stats:                 stats,
+			TotalScans7d:          totalScans,
+			RecentVulnerabilities: recentVulns,
 		}
 
 		if err := renderer.Render(w, "dashboard.html", data); err != nil {

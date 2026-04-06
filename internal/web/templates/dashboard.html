@@ -3,23 +3,21 @@
 {{define "content"}}
 <div class="space-y-6">
 
-  <h1 class="text-2xl font-bold">Dashboard</h1>
-
   <!-- Stats cards -->
   <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-    <div class="bg-white rounded-lg shadow p-5 border border-gray-200">
+    <div class="bg-white rounded-lg shadow p-5 border border-gray-200 text-center">
       <div class="text-sm text-gray-500 uppercase tracking-wide">Packages Tracked</div>
       <div class="mt-1 text-3xl font-semibold">{{.Stats.TotalPackages}}</div>
     </div>
-    <div class="bg-white rounded-lg shadow p-5 border border-gray-200">
+    <div class="bg-white rounded-lg shadow p-5 border border-gray-200 text-center">
       <div class="text-sm text-gray-500 uppercase tracking-wide">Vulnerabilities</div>
       <div class="mt-1 text-3xl font-semibold">{{.Stats.TotalVulnerabilities}}</div>
     </div>
-    <div class="bg-white rounded-lg shadow p-5 border border-gray-200">
+    <div class="bg-white rounded-lg shadow p-5 border border-gray-200 text-center">
       <div class="text-sm text-gray-500 uppercase tracking-wide">Malicious Packages</div>
       <div class="mt-1 text-3xl font-semibold">{{.Stats.TotalMalicious}}</div>
     </div>
-    <div class="bg-white rounded-lg shadow p-5 border border-gray-200">
+    <div class="bg-white rounded-lg shadow p-5 border border-gray-200 text-center">
       <div class="text-sm text-gray-500 uppercase tracking-wide">Total Scans (7d)</div>
       <div class="mt-1 text-3xl font-semibold">{{.TotalScans7d}}</div>
     </div>
@@ -27,96 +25,57 @@
 
   <!-- Severity breakdown -->
   {{if .Stats.BySeverity}}
-  <div class="bg-white rounded-lg shadow p-5 border border-gray-200">
+  <div class="bg-white rounded-lg shadow p-5 border border-gray-200 text-center">
     <h2 class="text-lg font-semibold mb-3">Findings by Severity</h2>
-    <div class="flex flex-wrap gap-3">
-      {{range $sev, $count := .Stats.BySeverity}}
-      <span class="inline-flex items-center px-3 py-1.5 rounded-full text-sm font-medium border {{severityClass $sev}}">
-        {{$sev}}: {{$count}}
-      </span>
+    <div class="flex flex-wrap gap-3 justify-center">
+      {{with .Stats.BySeverity}}
+      {{if index . "CRITICAL"}}<span class="inline-flex items-center px-3 py-1.5 rounded-full text-sm font-medium border {{severityClass "CRITICAL"}}">CRITICAL: {{index . "CRITICAL"}}</span>{{end}}
+      {{if index . "HIGH"}}<span class="inline-flex items-center px-3 py-1.5 rounded-full text-sm font-medium border {{severityClass "HIGH"}}">HIGH: {{index . "HIGH"}}</span>{{end}}
+      {{if index . "MEDIUM"}}<span class="inline-flex items-center px-3 py-1.5 rounded-full text-sm font-medium border {{severityClass "MEDIUM"}}">MEDIUM: {{index . "MEDIUM"}}</span>{{end}}
+      {{if index . "LOW"}}<span class="inline-flex items-center px-3 py-1.5 rounded-full text-sm font-medium border {{severityClass "LOW"}}">LOW: {{index . "LOW"}}</span>{{end}}
+      {{if index . "UNKNOWN"}}<span class="inline-flex items-center px-3 py-1.5 rounded-full text-sm font-medium border {{severityClass "UNKNOWN"}}">UNKNOWN: {{index . "UNKNOWN"}}</span>{{end}}
       {{end}}
     </div>
   </div>
   {{end}}
 
-  <!-- Scan trend (last 7 days) -->
-  {{if gt .TotalScans7d 0}}
+  <!-- Recently added vulnerabilities (7 days) -->
+  {{if .RecentVulnerabilities}}
   <div class="bg-white rounded-lg shadow p-5 border border-gray-200">
-    <h2 class="text-lg font-semibold mb-3">Scan Activity (Last 7 Days)</h2>
+    <h2 class="text-lg font-semibold mb-3">Recently Added Vulnerabilities (7 Days)</h2>
     <div class="overflow-x-auto">
       <table class="min-w-full text-sm">
         <thead>
           <tr class="text-left text-gray-500 border-b">
-            <th class="pb-2 pr-4">Date</th>
-            <th class="pb-2 pr-4 text-right">Scans</th>
-            <th class="pb-2 pr-4 text-right">Findings</th>
-            <th class="pb-2"></th>
+            <th class="pb-2 pr-4">Advisory</th>
+            <th class="pb-2 pr-4">Package</th>
+            <th class="pb-2 pr-4">Severity</th>
+            <th class="pb-2 pr-4">Summary</th>
+            <th class="pb-2">Updated</th>
           </tr>
         </thead>
         <tbody>
-          {{range .DailyStats}}
+          {{range .RecentVulnerabilities}}
           <tr class="border-b border-gray-100 hover:bg-gray-50">
-            <td class="py-2 pr-4">{{.Date.Format "2006-01-02"}}</td>
-            <td class="py-2 pr-4 text-right">{{.ScanCount}}</td>
-            <td class="py-2 pr-4 text-right">{{.FindingsCount}}</td>
-            <td class="py-2">
-              {{if gt .FindingsCount 0}}
-              <div class="bg-red-200 rounded h-2" style="width: {{.BarWidth}}%"></div>
-              {{else}}
-              <div class="bg-green-200 rounded h-2" style="width: 2%"></div>
-              {{end}}
+            <td class="py-2 pr-4 font-mono text-xs">
+              {{if and .Ecosystem .Name}}<a href="/package/{{.Ecosystem}}/{{.Name}}" class="text-blue-600 hover:underline">{{.ID}}</a>{{else if hasPrefix .ID "GHSA-"}}<a href="https://github.com/advisories/{{.ID}}" target="_blank" rel="noopener" class="text-blue-600 hover:underline">{{.ID}}</a>{{else}}{{.ID}}{{end}}
             </td>
+            <td class="py-2 pr-4">
+              {{if .Name}}<span class="text-gray-600">{{.Ecosystem}}/</span><span class="font-medium">{{.Name}}</span>{{else}}<span class="text-gray-400">-</span>{{end}}
+            </td>
+            <td class="py-2 pr-4">
+              <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium {{severityClass .Severity}}">{{.Severity}}</span>
+            </td>
+            <td class="py-2 pr-4 text-gray-600 max-w-md truncate">{{truncate .Summary 80}}</td>
+            <td class="py-2 text-gray-500 whitespace-nowrap" title="{{formatTime .UpdatedAt}}">{{formatTimeAgo .UpdatedAt}}</td>
           </tr>
           {{end}}
         </tbody>
       </table>
     </div>
   </div>
-  {{else}}
-  <div class="bg-white rounded-lg shadow p-5 border border-gray-200 text-center text-gray-400 py-10">
-    No scan activity yet.
-  </div>
   {{end}}
 
-  <!-- Feed status summary (auto-refresh) -->
-  <div hx-get="/feeds?partial=status" hx-trigger="load, every 30s" hx-swap="innerHTML">
-    <div class="text-sm text-gray-400">Loading feed status...</div>
-  </div>
-
-  <!-- Recent scans -->
-  {{if .RecentScans}}
-  <div class="bg-white rounded-lg shadow p-5 border border-gray-200">
-    <h2 class="text-lg font-semibold mb-3">Recent Scans</h2>
-    <div class="overflow-x-auto">
-      <table class="min-w-full text-sm">
-        <thead>
-          <tr class="text-left text-gray-500 border-b">
-            <th class="pb-2 pr-4">Scan ID</th>
-            <th class="pb-2 pr-4">Time</th>
-            <th class="pb-2 pr-4 text-right">Packages</th>
-            <th class="pb-2 pr-4 text-right">Findings</th>
-            <th class="pb-2 pr-4 text-right">Duration</th>
-          </tr>
-        </thead>
-        <tbody>
-          {{range .RecentScans}}
-          <tr class="border-b border-gray-100 hover:bg-gray-50">
-            <td class="py-2 pr-4 font-mono text-xs">{{truncate .ScanID 12}}</td>
-            <td class="py-2 pr-4 text-gray-500" title="{{formatTime .ScannedAt}}">{{formatTimeAgo .ScannedAt}}</td>
-            <td class="py-2 pr-4 text-right">{{.PackagesCount}}</td>
-            <td class="py-2 pr-4 text-right {{if gt .FindingsCount 0}}text-red-600 font-medium{{end}}">{{.FindingsCount}}</td>
-            <td class="py-2 pr-4 text-right text-gray-500">{{if gt .DurationMs 0}}{{.DurationMs}}ms{{else}}-{{end}}</td>
-          </tr>
-          {{end}}
-        </tbody>
-      </table>
-    </div>
-  </div>
-  {{else}}
-  <div class="bg-white rounded-lg shadow p-5 border border-gray-200 text-center text-gray-400 py-10">
-    No scans recorded yet. Run <code class="bg-gray-100 px-1 rounded">packmon scan</code> to get started.
-  </div>
-  {{end}}
 
 </div>
 {{end}}

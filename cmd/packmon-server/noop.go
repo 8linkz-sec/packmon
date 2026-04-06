@@ -479,6 +479,10 @@ func (s *noopStore) ListRecentScans(_ context.Context, limit int) ([]db.ScanLogE
 	return out, nil
 }
 
+func (*noopStore) ListRecentVulnerabilities(context.Context, int, int) ([]db.RecentVulnerability, error) {
+	return nil, nil
+}
+
 func (s *noopStore) CountScansByDay(_ context.Context, days int) ([]db.DailyScanStats, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

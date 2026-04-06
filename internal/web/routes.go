@@ -15,6 +15,7 @@ func RegisterRoutes(mux *http.ServeMux, store Store, renderer *Renderer, logger 
 	// -- Public pages ----------------------------------------------------------
 	mux.HandleFunc("GET /{$}", HandleDashboard(store, renderer, logger))
 	mux.HandleFunc("GET /search", HandleSearch(store, renderer, logger))
+	mux.HandleFunc("GET /scans", HandleScans(store, renderer, logger))
 	mux.HandleFunc("GET /feeds", HandleFeeds(store, renderer, logger))
 	mux.HandleFunc("GET /package/{ecosystem}/{name...}", HandlePackage(store, renderer, logger))
 
