@@ -111,10 +111,13 @@ func (s *Store) CountScansByDay(ctx context.Context, days int) ([]db.DailyScanSt
 }
 
 // SearchPackages searches local vulnerability and malicious-package data
-// for packages whose name contains the query.
-func (s *Store) SearchPackages(ctx context.Context, query string, limit int) ([]db.PackageSearchResult, error) {
-	query = strings.TrimSpace(query)
-	if query == "" {
+// for packages matching the optional name query and/or severity filter.
+func (s *Store) SearchPackages(ctx context.Context, params db.PackageSearchParams) ([]db.PackageSearchResult, error) {
+	query := strings.TrimSpace(params.Query)
+	severity := strings.ToUpper(strings.TrimSpace(params.Severity))
+	findingType := strings.ToLower(strings.TrimSpace(params.FindingType))
+	limit := params.Limit
+	if query == "" && severity == "" && findingType == "" {
 		return []db.PackageSearchResult{}, nil
 	}
 	if limit <= 0 {
@@ -122,30 +125,40 @@ func (s *Store) SearchPackages(ctx context.Context, query string, limit int) ([]
 	}
 
 	results := make(map[searchKey]*db.PackageSearchResult)
-	like := "%" + strings.ToLower(query) + "%"
-
-	if err := s.collectSearchResults(ctx, results, `
-		SELECT ecosystem, name, COUNT(*) AS findings_count
-		FROM vulnerabilities_local
-		WHERE lower(name) LIKE ?
-		GROUP BY ecosystem, name
-		ORDER BY name ASC
-		LIMIT ?`, like, limit); err != nil {
-		return nil, err
+	like := ""
+	if query != "" {
+		like = "%" + strings.ToLower(query) + "%"
 	}
 
-	if err := s.collectSearchResults(ctx, results, `
-		SELECT ecosystem, name, COUNT(*) AS findings_count
-		FROM malicious_local
-		WHERE lower(name) LIKE ?
-		GROUP BY ecosystem, name
-		ORDER BY name ASC
-		LIMIT ?`, like, limit); err != nil {
-		return nil, err
+	if findingType == "" || findingType == "vulnerability" {
+		if err := s.collectSearchResults(ctx, results, `
+			SELECT ecosystem, name, COUNT(*) AS findings_count, COUNT(*) AS vulnerability_count, COALESCE(GROUP_CONCAT(DISTINCT id), '')
+			FROM vulnerabilities_local
+			WHERE (? = '' OR lower(name) LIKE ?)
+			  AND (? = '' OR upper(coalesce(severity, 'UNKNOWN')) = ?)
+			GROUP BY ecosystem, name
+			ORDER BY name ASC
+			LIMIT ?`, like, like, severity, severity, limit); err != nil {
+			return nil, err
+		}
+	}
+
+	if findingType == "" || findingType == "malicious" {
+		if err := s.collectSearchResults(ctx, results, `
+			SELECT ecosystem, name, COUNT(*) AS findings_count, 0 AS vulnerability_count, '' AS vulnerability_ids
+			FROM malicious_local
+			WHERE (? = '' OR lower(name) LIKE ?)
+			  AND (? = '' OR upper(coalesce(severity, 'UNKNOWN')) = ?)
+			GROUP BY ecosystem, name
+			ORDER BY name ASC
+			LIMIT ?`, like, like, severity, severity, limit); err != nil {
+			return nil, err
+		}
 	}
 
 	out := make([]db.PackageSearchResult, 0, len(results))
 	for _, result := range results {
+		result.VulnerabilityIDs = joinLocalCSV(result.VulnerabilityIDs)
 		result.Sources = "local"
 		out = append(out, *result)
 	}
@@ -176,23 +189,29 @@ func (s *Store) collectSearchResults(ctx context.Context, acc map[searchKey]*db.
 
 	for rows.Next() {
 		var (
-			ecosystem     string
-			name          string
-			findingsCount int
+			ecosystem          string
+			name               string
+			findingsCount      int
+			vulnerabilityCount int
+			vulnerabilityIDs   string
 		)
-		if err := rows.Scan(&ecosystem, &name, &findingsCount); err != nil {
+		if err := rows.Scan(&ecosystem, &name, &findingsCount, &vulnerabilityCount, &vulnerabilityIDs); err != nil {
 			return fmt.Errorf("sqlite: scan package search row: %w", err)
 		}
 
 		k := searchKey{ecosystem: ecosystem, name: name}
 		if existing, ok := acc[k]; ok {
 			existing.FindingsCount += findingsCount
+			existing.VulnerabilityCount += vulnerabilityCount
+			existing.VulnerabilityIDs = mergeLocalCSV(existing.VulnerabilityIDs, vulnerabilityIDs)
 			continue
 		}
 		acc[k] = &db.PackageSearchResult{
-			Ecosystem:     ecosystem,
-			Name:          name,
-			FindingsCount: findingsCount,
+			Ecosystem:          ecosystem,
+			Name:               name,
+			FindingsCount:      findingsCount,
+			VulnerabilityCount: vulnerabilityCount,
+			VulnerabilityIDs:   vulnerabilityIDs,
 		}
 	}
 
@@ -201,6 +220,44 @@ func (s *Store) collectSearchResults(ctx context.Context, acc map[searchKey]*db.
 	}
 
 	return nil
+}
+
+func mergeLocalCSV(current, incoming string) string {
+	set := make(map[string]struct{})
+	for _, part := range strings.Split(current, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			set[part] = struct{}{}
+		}
+	}
+	for _, part := range strings.Split(incoming, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			set[part] = struct{}{}
+		}
+	}
+
+	out := make([]string, 0, len(set))
+	for part := range set {
+		out = append(out, part)
+	}
+	for i := 1; i < len(out); i++ {
+		current := out[i]
+		j := i - 1
+		for j >= 0 && out[j] > current {
+			out[j+1] = out[j]
+			j--
+		}
+		out[j+1] = current
+	}
+	return strings.Join(out, ", ")
+}
+
+func joinLocalCSV(current string) string {
+	if current == "" {
+		return ""
+	}
+	return mergeLocalCSV("", current)
 }
 
 // DashboardStats returns aggregate counts for the local dashboard.

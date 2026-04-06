@@ -43,6 +43,10 @@ type Syncer struct {
 	dataDir string // parent directory for the cloned repo
 }
 
+type affectedPackageRepairer interface {
+	RepairGHSAAffectedPackages(ctx context.Context) (int, error)
+}
+
 // NewSyncer creates a GHSA Syncer. dataDir is the parent directory
 // where the advisory-database repo will be cloned. If dataDir is
 // empty, os.TempDir() is used.
@@ -100,6 +104,7 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 		s.logger.Info("advisory-database unchanged, skipping sync",
 			slog.String("commit", commitHash),
 		)
+		s.repairAffectedPackages(ctx, store)
 		// Still record a successful status to update the timestamp.
 		dur := time.Since(start)
 		s.recordSyncSuccessWithCommit(ctx, start, dur, status.EntriesTotal, 0, commitHash)
@@ -132,10 +137,13 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 		}
 	}
 
+	repaired := s.repairAffectedPackages(ctx, store)
+
 	duration := time.Since(start)
 	s.logger.Info("GHSA sync completed",
 		slog.Int("synced", synced),
 		slog.Int("total", total),
+		slog.Int("repaired_packages", repaired),
 		slog.String("commit", commitHash),
 		slog.String("duration", duration.String()),
 	)
@@ -315,6 +323,27 @@ func (s *Syncer) recordSyncFailure(ctx context.Context, start time.Time, syncErr
 	if err != nil {
 		s.logger.Warn("failed to record sync failure", "error", err)
 	}
+}
+
+func (s *Syncer) repairAffectedPackages(ctx context.Context, store db.Store) int {
+	repairer, ok := store.(affectedPackageRepairer)
+	if !ok {
+		return 0
+	}
+
+	repaired, err := repairer.RepairGHSAAffectedPackages(ctx)
+	if err != nil {
+		s.logger.Warn("failed to repair GHSA affected packages from stored raw JSON",
+			slog.String("error", err.Error()),
+		)
+		return 0
+	}
+	if repaired > 0 {
+		s.logger.Info("repaired GHSA affected packages from stored raw JSON",
+			slog.Int("repaired", repaired),
+		)
+	}
+	return repaired
 }
 
 // ---------------------------------------------------------------------------

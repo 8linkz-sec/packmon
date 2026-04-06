@@ -175,6 +175,7 @@ func run() error {
 	if err := applyStoredFeedConfigOverrides(context.Background(), cfg, store, logger); err != nil {
 		return fmt.Errorf("apply stored feed config overrides: %w", err)
 	}
+	runStartupRepairs(context.Background(), store, logger)
 
 	build := server.BuildInfo{
 		Version:       version,

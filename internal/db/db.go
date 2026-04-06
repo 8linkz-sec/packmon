@@ -159,16 +159,18 @@ type Store interface {
 	// for the last N days (including today). Results are ordered oldest to newest.
 	CountScansByDay(ctx context.Context, days int) ([]DailyScanStats, error)
 
-	// ListRecentVulnerabilities returns vulnerabilities added or updated in
-	// the last N days, newest first. Limit caps the result count.
+	// ListRecentVulnerabilities returns vulnerabilities published in the
+	// last N days, newest first by advisory publication date. Limit caps
+	// the result count.
 	ListRecentVulnerabilities(ctx context.Context, days, limit int) ([]RecentVulnerability, error)
 
 	// -- Search -----------------------------------------------------------------
 
 	// SearchPackages searches the affected_packages and malicious_packages
-	// tables for packages whose name contains the query string.
-	// Returns a deduplicated list of matching packages with their finding counts.
-	SearchPackages(ctx context.Context, query string, limit int) ([]PackageSearchResult, error)
+	// tables for packages matching the optional name query and/or
+	// severity filter. Returns a deduplicated list of matching packages
+	// with their finding counts.
+	SearchPackages(ctx context.Context, params PackageSearchParams) ([]PackageSearchResult, error)
 
 	// -- API keys ---------------------------------------------------------------
 
@@ -378,14 +380,14 @@ type ScanLogEntry struct {
 	UserAgent     string
 }
 
-// RecentVulnerability is a summary row for recently added/updated vulns.
+// RecentVulnerability is a summary row for recently published vulnerabilities.
 type RecentVulnerability struct {
-	ID        string
-	Summary   string
-	Severity  string
-	Ecosystem string
-	Name      string
-	UpdatedAt time.Time
+	ID          string
+	Summary     string
+	Severity    string
+	Ecosystem   string
+	Name        string
+	PublishedAt time.Time
 }
 
 // APIKey represents a stored API key (DE-12).
@@ -439,10 +441,20 @@ type DailyScanStats struct {
 
 // PackageSearchResult is one row from a package search query.
 type PackageSearchResult struct {
-	Ecosystem     string
-	Name          string
-	FindingsCount int
-	Sources       string // comma-separated list of feed sources
+	Ecosystem          string
+	Name               string
+	FindingsCount      int
+	VulnerabilityCount int
+	VulnerabilityIDs   string // comma-separated advisory IDs
+	Sources            string // comma-separated list of feed sources
+}
+
+// PackageSearchParams describes the optional filters for package search.
+type PackageSearchParams struct {
+	Query       string
+	Severity    string
+	FindingType string
+	Limit       int
 }
 
 // AdminAuditLogEntry is a read-model for audit log entries, including the

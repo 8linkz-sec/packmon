@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -11,6 +14,8 @@ import (
 	"github.com/8linkz/packmon/internal/domain"
 	"github.com/jackc/pgx/v5"
 )
+
+var ghsaIDPattern = regexp.MustCompile(`GHSA-[A-Za-z0-9-]+`)
 
 // normalizePackageName lowercases the package name for ecosystems where
 // names are case-insensitive (NuGet). For all other ecosystems the name
@@ -29,15 +34,25 @@ func (s *Store) FindVulnerabilities(ctx context.Context, ecosystem, name, versio
 			v.id,
 			v.summary,
 			v.severity,
-			COALESCE(vr.url, '') AS ref_url,
+			COALESCE(vr.refs_json, '[]') AS refs_json,
 			COALESCE(vs.source, '') AS source,
 			ap.version_ranges::text,
 			ap.versions_affected::text
 		FROM vulnerabilities v
 		INNER JOIN affected_packages ap ON ap.vulnerability_id = v.id
 		LEFT JOIN LATERAL (
-			SELECT url FROM vulnerability_references
-			WHERE vulnerability_id = v.id ORDER BY id LIMIT 1
+			SELECT COALESCE(
+				json_agg(
+					json_build_object(
+						'type', COALESCE(type, ''),
+						'url', url
+					)
+					ORDER BY id
+				)::text,
+				'[]'
+			) AS refs_json
+			FROM vulnerability_references
+			WHERE vulnerability_id = v.id
 		) vr ON true
 		LEFT JOIN LATERAL (
 			SELECT source FROM vulnerability_sources
@@ -58,13 +73,13 @@ func (s *Store) FindVulnerabilities(ctx context.Context, ecosystem, name, versio
 			advisoryID       string
 			summary          string
 			severity         string
-			url              string
+			refsJSON         string
 			source           string
 			versionRangesRaw string
 			versionsRaw      string
 		)
 
-		if err := rows.Scan(&advisoryID, &summary, &severity, &url, &source, &versionRangesRaw, &versionsRaw); err != nil {
+		if err := rows.Scan(&advisoryID, &summary, &severity, &refsJSON, &source, &versionRangesRaw, &versionsRaw); err != nil {
 			return nil, fmt.Errorf("postgres: scan vulnerability row: %w", err)
 		}
 
@@ -83,6 +98,11 @@ func (s *Store) FindVulnerabilities(ctx context.Context, ecosystem, name, versio
 		if source == "" {
 			source = "unknown"
 		}
+		resources := buildFindingResources(advisoryID, refsJSON)
+		primaryURL := ""
+		if len(resources) > 0 {
+			primaryURL = resources[0].URL
+		}
 
 		findings = append(findings, domain.Finding{
 			Name:         name,
@@ -92,7 +112,8 @@ func (s *Store) FindVulnerabilities(ctx context.Context, ecosystem, name, versio
 			Severity:     domain.Severity(normalizeSeverity(severity)),
 			AdvisoryID:   advisoryID,
 			Title:        title,
-			URL:          url,
+			URL:          primaryURL,
+			Resources:    resources,
 			FixedVersion: fixedVersion,
 			Source:       source,
 		})
@@ -197,7 +218,18 @@ func (s *Store) FindVulnerabilitiesBatch(ctx context.Context, packages []db.Pack
 		INNER JOIN affected_packages ap ON ap.vulnerability_id = v.id
 		LEFT JOIN LATERAL (
 			SELECT url FROM vulnerability_references
-			WHERE vulnerability_id = v.id ORDER BY id LIMIT 1
+			WHERE vulnerability_id = v.id
+			ORDER BY
+				CASE UPPER(COALESCE(type, ''))
+					WHEN 'ADVISORY' THEN 0
+					WHEN 'REPORT' THEN 1
+					WHEN 'ARTICLE' THEN 2
+					WHEN 'WEB' THEN 3
+					WHEN 'PACKAGE' THEN 8
+					ELSE 9
+				END,
+				id
+			LIMIT 1
 		) vr ON true
 		LEFT JOIN LATERAL (
 			SELECT source FROM vulnerability_sources
@@ -459,6 +491,9 @@ func (s *Store) UpsertVulnerability(ctx context.Context, vuln *db.Vulnerability)
 			return fmt.Errorf("delete vulnerability references: %w", err)
 		}
 		for _, ref := range vuln.References {
+			if !shouldStoreVulnerabilityReference(ref.URL) {
+				continue
+			}
 			const insertReference = `
 				INSERT INTO vulnerability_references (vulnerability_id, type, url, source)
 				VALUES ($1, $2, $3, $4)
@@ -928,4 +963,225 @@ func extractFirstURL(raw string) string {
 		return ""
 	}
 	return urls[0]
+}
+
+type findingReference struct {
+	Type string `json:"type"`
+	URL  string `json:"url"`
+}
+
+type resourceCandidate struct {
+	link  domain.ResourceLink
+	score int
+}
+
+func buildFindingResources(advisoryID, raw string) []domain.ResourceLink {
+	selected := make(map[string]resourceCandidate)
+	if link, score, ok := canonicalFindingResource(advisoryID); ok {
+		selected[link.Label] = resourceCandidate{link: link, score: score}
+	}
+
+	if strings.TrimSpace(raw) == "" {
+		return sortedResourceCandidates(selected)
+	}
+
+	var refs []findingReference
+	if err := json.Unmarshal([]byte(raw), &refs); err != nil {
+		return sortedResourceCandidates(selected)
+	}
+
+	for _, ref := range refs {
+		link, score, ok := classifyFindingResource(advisoryID, ref)
+		if !ok {
+			continue
+		}
+		existing, exists := selected[link.Label]
+		if !exists || score < existing.score {
+			selected[link.Label] = resourceCandidate{link: link, score: score}
+		}
+	}
+
+	return sortedResourceCandidates(selected)
+}
+
+func sortedResourceCandidates(selected map[string]resourceCandidate) []domain.ResourceLink {
+	if len(selected) == 0 {
+		return nil
+	}
+	labels := make([]string, 0, len(selected))
+	for label := range selected {
+		labels = append(labels, label)
+	}
+
+	sort.Slice(labels, func(i, j int) bool {
+		left := selected[labels[i]]
+		right := selected[labels[j]]
+		if left.score != right.score {
+			return left.score < right.score
+		}
+		return labels[i] < labels[j]
+	})
+
+	out := make([]domain.ResourceLink, 0, len(labels))
+	for _, label := range labels {
+		out = append(out, selected[label].link)
+	}
+	return out
+}
+
+func canonicalFindingResource(advisoryID string) (domain.ResourceLink, int, bool) {
+	switch {
+	case strings.HasPrefix(advisoryID, "GHSA-"):
+		return domain.ResourceLink{
+			Label: "GHSA",
+			URL:   "https://github.com/advisories/" + advisoryID,
+		}, 5, true
+	case strings.HasPrefix(advisoryID, "RUSTSEC-"):
+		return domain.ResourceLink{
+			Label: "RustSec",
+			URL:   "https://rustsec.org/advisories/" + advisoryID + ".html",
+		}, 5, true
+	case strings.HasPrefix(advisoryID, "CVE-"):
+		return domain.ResourceLink{
+			Label: "NVD",
+			URL:   "https://nvd.nist.gov/vuln/detail/" + advisoryID,
+		}, 5, true
+	default:
+		return domain.ResourceLink{}, 0, false
+	}
+}
+
+func classifyFindingResource(advisoryID string, ref findingReference) (domain.ResourceLink, int, bool) {
+	if strings.TrimSpace(ref.URL) == "" {
+		return domain.ResourceLink{}, 0, false
+	}
+	if !shouldStoreVulnerabilityReference(ref.URL) {
+		return domain.ResourceLink{}, 0, false
+	}
+	if strings.EqualFold(strings.TrimSpace(ref.Type), "PACKAGE") {
+		return domain.ResourceLink{}, 0, false
+	}
+
+	parsed, err := url.Parse(ref.URL)
+	if err != nil {
+		return domain.ResourceLink{}, 0, false
+	}
+
+	host := strings.TrimPrefix(strings.ToLower(parsed.Hostname()), "www.")
+	if isGenericReferenceLandingPage(host, parsed) {
+		return domain.ResourceLink{}, 0, false
+	}
+	path := strings.ToLower(parsed.EscapedPath())
+	link := domain.ResourceLink{URL: ref.URL}
+
+	switch {
+	case isBlockedReferenceHost(host):
+		return domain.ResourceLink{}, 0, false
+	case host == "github.com" && strings.Contains(path, "/security/advisories/"):
+		link.Label = "GHSA"
+		score := 10
+		if ghsaID := ghsaIDPattern.FindString(ref.URL); strings.EqualFold(ghsaID, advisoryID) {
+			score = 0
+		}
+		return link, score, true
+	case host == "nvd.nist.gov":
+		return domain.ResourceLink{Label: "NVD", URL: ref.URL}, resourceScore(advisoryID, "NVD"), true
+	case host == "rustsec.org" && strings.Contains(path, "/advisories/"):
+		return domain.ResourceLink{Label: "RustSec", URL: ref.URL}, resourceScore(advisoryID, "RustSec"), true
+	case host == "osv.dev":
+		return domain.ResourceLink{Label: "OSV", URL: ref.URL}, resourceScore(advisoryID, "OSV"), true
+	case host == "huntr.com" || host == "huntr.dev":
+		return domain.ResourceLink{Label: "Huntr", URL: ref.URL}, resourceScore(advisoryID, "Huntr"), true
+	case host == "cve.org" || host == "cve.mitre.org":
+		return domain.ResourceLink{Label: "CVE", URL: ref.URL}, resourceScore(advisoryID, "CVE"), true
+	case host == "github.com":
+		return domain.ResourceLink{Label: "GitHub", URL: ref.URL}, resourceScore(advisoryID, "GitHub"), true
+	case host != "":
+		return domain.ResourceLink{Label: host, URL: ref.URL}, resourceScore(advisoryID, host), true
+	default:
+		return domain.ResourceLink{}, 0, false
+	}
+}
+
+func shouldStoreVulnerabilityReference(rawURL string) bool {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return false
+	}
+	if containsBlockedReferenceValue(rawURL) {
+		return false
+	}
+
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		// Keep unknown-but-non-empty URLs; we only want to block known-bad hosts.
+		return true
+	}
+
+	return !isBlockedReferenceHost(strings.TrimPrefix(strings.ToLower(parsed.Hostname()), "www."))
+}
+
+func containsBlockedReferenceValue(rawURL string) bool {
+	lower := strings.ToLower(rawURL)
+	return strings.Contains(lower, "packetstormsecurity.com") || strings.Contains(lower, "packetstorm.news")
+}
+
+func isGenericReferenceLandingPage(host string, parsed *url.URL) bool {
+	path := strings.Trim(strings.ToLower(parsed.EscapedPath()), "/")
+	if path == "" && parsed.RawQuery == "" && parsed.Fragment == "" {
+		return true
+	}
+
+	if host == "github.com" && parsed.RawQuery == "" && parsed.Fragment == "" {
+		segments := strings.Split(path, "/")
+		if len(segments) == 2 && segments[0] != "" && segments[1] != "" && segments[0] != "advisories" {
+			return true
+		}
+	}
+
+	return false
+}
+
+func isBlockedReferenceHost(host string) bool {
+	switch host {
+	case "packetstormsecurity.com", "packetstorm.news":
+		return true
+	default:
+		return false
+	}
+}
+
+func resourceScore(advisoryID, label string) int {
+	preferred := ""
+	switch {
+	case strings.HasPrefix(advisoryID, "GHSA-"):
+		preferred = "GHSA"
+	case strings.HasPrefix(advisoryID, "RUSTSEC-"):
+		preferred = "RustSec"
+	case strings.HasPrefix(advisoryID, "CVE-"):
+		preferred = "NVD"
+	}
+
+	if label == preferred {
+		return 0
+	}
+
+	switch label {
+	case "GHSA":
+		return 10
+	case "NVD":
+		return 20
+	case "RustSec":
+		return 30
+	case "OSV":
+		return 40
+	case "Huntr":
+		return 50
+	case "CVE":
+		return 60
+	case "GitHub":
+		return 70
+	default:
+		return 100
+	}
 }

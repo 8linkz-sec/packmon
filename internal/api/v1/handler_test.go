@@ -106,7 +106,7 @@ func (s *stubStore) ListRecentVulnerabilities(context.Context, int, int) ([]db.R
 func (s *stubStore) CountScansByDay(context.Context, int) ([]db.DailyScanStats, error) {
 	return nil, nil
 }
-func (s *stubStore) SearchPackages(context.Context, string, int) ([]db.PackageSearchResult, error) {
+func (s *stubStore) SearchPackages(context.Context, db.PackageSearchParams) ([]db.PackageSearchResult, error) {
 	return nil, nil
 }
 func (s *stubStore) FindAPIKeyByHash(context.Context, string) (*db.APIKey, error) { return nil, nil }

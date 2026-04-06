@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/8linkz/packmon/internal/db"
@@ -86,10 +87,10 @@ func (s *Store) ListRecentVulnerabilities(ctx context.Context, days, limit int) 
 		SELECT v.id, v.summary, v.severity,
 			COALESCE((SELECT ap.ecosystem FROM affected_packages ap WHERE ap.vulnerability_id = v.id LIMIT 1), '') AS ecosystem,
 			COALESCE((SELECT ap.name FROM affected_packages ap WHERE ap.vulnerability_id = v.id LIMIT 1), '') AS name,
-			v.updated_at
+			v.published
 		FROM vulnerabilities v
-		WHERE v.created_at >= NOW() - make_interval(days => $1)
-		ORDER BY v.created_at DESC
+		WHERE v.published >= NOW() - make_interval(days => $1)
+		ORDER BY v.published DESC, v.id DESC
 		LIMIT $2`, days, limit)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list recent vulnerabilities: %w", err)
@@ -99,7 +100,7 @@ func (s *Store) ListRecentVulnerabilities(ctx context.Context, days, limit int) 
 	var out []db.RecentVulnerability
 	for rows.Next() {
 		var r db.RecentVulnerability
-		if err := rows.Scan(&r.ID, &r.Summary, &r.Severity, &r.Ecosystem, &r.Name, &r.UpdatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.Summary, &r.Severity, &r.Ecosystem, &r.Name, &r.PublishedAt); err != nil {
 			return nil, fmt.Errorf("postgres: scan recent vulnerability row: %w", err)
 		}
 		out = append(out, r)
@@ -164,30 +165,45 @@ func (s *Store) CountScansByDay(ctx context.Context, days int) ([]db.DailyScanSt
 	return out, nil
 }
 
-func (s *Store) SearchPackages(ctx context.Context, query string, limit int) ([]db.PackageSearchResult, error) {
-	limit = clampLimit(limit, 50, 200)
-	if query == "" {
+func (s *Store) SearchPackages(ctx context.Context, params db.PackageSearchParams) ([]db.PackageSearchResult, error) {
+	query := strings.TrimSpace(params.Query)
+	severity := strings.ToUpper(strings.TrimSpace(params.Severity))
+	if severity != "" {
+		severity = normalizeSeverity(severity)
+	}
+	findingType := strings.ToLower(strings.TrimSpace(params.FindingType))
+	limit := clampLimit(params.Limit, 50, 200)
+	if query == "" && severity == "" && findingType == "" {
 		return []db.PackageSearchResult{}, nil
 	}
 
 	results := make(map[string]*db.PackageSearchResult)
-	like := "%" + query + "%"
+	like := ""
+	if query != "" {
+		like = "%" + query + "%"
+	}
 
 	const vulnerabilityQuery = `
 		SELECT
 			ap.ecosystem,
 			ap.name,
 			COUNT(DISTINCT ap.vulnerability_id)::int,
+			COUNT(DISTINCT ap.vulnerability_id)::int,
+			COALESCE(string_agg(DISTINCT v.id, ', ' ORDER BY v.id), ''),
 			COALESCE(string_agg(DISTINCT COALESCE(vs.source, 'unknown'), ', ' ORDER BY COALESCE(vs.source, 'unknown')), '')
 		FROM affected_packages ap
+		INNER JOIN vulnerabilities v ON v.id = ap.vulnerability_id
 		LEFT JOIN vulnerability_sources vs ON vs.vulnerability_id = ap.vulnerability_id
-		WHERE ap.name ILIKE $1
+		WHERE ($1 = '' OR ap.name ILIKE $1)
+		  AND ($2 = '' OR UPPER(COALESCE(v.severity, 'UNKNOWN')) = $2)
 		GROUP BY ap.ecosystem, ap.name
 		ORDER BY ap.name ASC, ap.ecosystem ASC
-		LIMIT $2`
+		LIMIT $3`
 
-	if err := s.collectSearchResults(ctx, results, vulnerabilityQuery, like, limit); err != nil {
-		return nil, err
+	if findingType == "" || findingType == "vulnerability" {
+		if err := s.collectSearchResults(ctx, results, vulnerabilityQuery, like, severity, limit); err != nil {
+			return nil, err
+		}
 	}
 
 	const maliciousQuery = `
@@ -195,19 +211,25 @@ func (s *Store) SearchPackages(ctx context.Context, query string, limit int) ([]
 			ecosystem,
 			name,
 			COUNT(*)::int,
+			0::int,
+			''::text,
 			COALESCE(string_agg(DISTINCT source, ', ' ORDER BY source), '')
 		FROM malicious_findings
-		WHERE name ILIKE $1
+		WHERE ($1 = '' OR name ILIKE $1)
+		  AND ($2 = '' OR UPPER(COALESCE(severity, 'UNKNOWN')) = $2)
 		GROUP BY ecosystem, name
 		ORDER BY name ASC, ecosystem ASC
-		LIMIT $2`
+		LIMIT $3`
 
-	if err := s.collectSearchResults(ctx, results, maliciousQuery, like, limit); err != nil {
-		return nil, err
+	if findingType == "" || findingType == "malicious" {
+		if err := s.collectSearchResults(ctx, results, maliciousQuery, like, severity, limit); err != nil {
+			return nil, err
+		}
 	}
 
 	out := make([]db.PackageSearchResult, 0, len(results))
 	for _, result := range results {
+		result.VulnerabilityIDs = joinSortedCSV(result.VulnerabilityIDs)
 		result.Sources = joinSortedCSV(result.Sources)
 		out = append(out, *result)
 	}
@@ -227,26 +249,32 @@ func (s *Store) collectSearchResults(ctx context.Context, acc map[string]*db.Pac
 
 	for rows.Next() {
 		var (
-			ecosystem     string
-			name          string
-			findingsCount int
-			sources       string
+			ecosystem          string
+			name               string
+			findingsCount      int
+			vulnerabilityCount int
+			vulnerabilityIDs   string
+			sources            string
 		)
-		if err := rows.Scan(&ecosystem, &name, &findingsCount, &sources); err != nil {
+		if err := rows.Scan(&ecosystem, &name, &findingsCount, &vulnerabilityCount, &vulnerabilityIDs, &sources); err != nil {
 			return fmt.Errorf("postgres: scan package search row: %w", err)
 		}
 
 		key := ecosystem + "\x00" + name
 		if existing, ok := acc[key]; ok {
 			existing.FindingsCount += findingsCount
+			existing.VulnerabilityCount += vulnerabilityCount
+			existing.VulnerabilityIDs = mergeCSV(existing.VulnerabilityIDs, vulnerabilityIDs)
 			existing.Sources = mergeCSV(existing.Sources, sources)
 			continue
 		}
 		acc[key] = &db.PackageSearchResult{
-			Ecosystem:     ecosystem,
-			Name:          name,
-			FindingsCount: findingsCount,
-			Sources:       sources,
+			Ecosystem:          ecosystem,
+			Name:               name,
+			FindingsCount:      findingsCount,
+			VulnerabilityCount: vulnerabilityCount,
+			VulnerabilityIDs:   vulnerabilityIDs,
+			Sources:            sources,
 		}
 	}
 

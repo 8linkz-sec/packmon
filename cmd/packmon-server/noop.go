@@ -111,7 +111,7 @@ func (s *noopStore) FindMaliciousBatch(ctx context.Context, packages []db.Packag
 	return all, nil
 }
 
-func (*noopStore) PropagateSeverityViaAliases(context.Context) (int, error) { return 0, nil }
+func (*noopStore) PropagateSeverityViaAliases(context.Context) (int, error)     { return 0, nil }
 func (*noopStore) UpsertVulnerability(context.Context, *db.Vulnerability) error { return nil }
 
 func (s *noopStore) UpsertMaliciousFinding(_ context.Context, mf *db.MaliciousFinding) error {
@@ -516,12 +516,15 @@ func (s *noopStore) CountScansByDay(_ context.Context, days int) ([]db.DailyScan
 	return out, nil
 }
 
-func (s *noopStore) SearchPackages(_ context.Context, query string, limit int) ([]db.PackageSearchResult, error) {
+func (s *noopStore) SearchPackages(_ context.Context, params db.PackageSearchParams) ([]db.PackageSearchResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	query = strings.TrimSpace(strings.ToLower(query))
-	if query == "" {
+	query := strings.TrimSpace(strings.ToLower(params.Query))
+	severity := strings.ToUpper(strings.TrimSpace(params.Severity))
+	findingType := strings.ToLower(strings.TrimSpace(params.FindingType))
+	limit := params.Limit
+	if query == "" && severity == "" && findingType == "" {
 		return []db.PackageSearchResult{}, nil
 	}
 
@@ -531,21 +534,28 @@ func (s *noopStore) SearchPackages(_ context.Context, query string, limit int) (
 	}
 
 	results := make(map[key]*db.PackageSearchResult)
-	for _, mf := range s.malicious {
-		if !strings.Contains(strings.ToLower(mf.Name), query) {
-			continue
-		}
+	if findingType == "" || findingType == "malicious" {
+		for _, mf := range s.malicious {
+			if query != "" && !strings.Contains(strings.ToLower(mf.Name), query) {
+				continue
+			}
+			if severity != "" && strings.ToUpper(strings.TrimSpace(mf.Severity)) != severity {
+				continue
+			}
 
-		k := key{ecosystem: mf.Ecosystem, name: mf.Name}
-		if existing, ok := results[k]; ok {
-			existing.FindingsCount++
-			continue
-		}
-		results[k] = &db.PackageSearchResult{
-			Ecosystem:     mf.Ecosystem,
-			Name:          mf.Name,
-			FindingsCount: 1,
-			Sources:       mf.Source,
+			k := key{ecosystem: mf.Ecosystem, name: mf.Name}
+			if existing, ok := results[k]; ok {
+				existing.FindingsCount++
+				continue
+			}
+			results[k] = &db.PackageSearchResult{
+				Ecosystem:          mf.Ecosystem,
+				Name:               mf.Name,
+				FindingsCount:      1,
+				VulnerabilityCount: 0,
+				VulnerabilityIDs:   "",
+				Sources:            mf.Source,
+			}
 		}
 	}
 

@@ -40,26 +40,30 @@ var osvEcosystemMap = map[string]domain.Ecosystem{
 // MapGHSAEcosystem maps a GHSA ecosystem string (from the advisory JSON
 // "ecosystem" field) to our canonical Ecosystem enum. GHSA uses names
 // like "npm", "pip", "go", "maven", "nuget", "composer", "rubygems",
-// "crates.io", "pub", "hex".
+// "crates.io", "pub", "hex", and now also "GitHub Actions".
 func MapGHSAEcosystem(ghsa string) (domain.Ecosystem, bool) {
 	eco, ok := ghsaEcosystemMap[strings.ToLower(ghsa)]
 	return eco, ok
 }
 
 var ghsaEcosystemMap = map[string]domain.Ecosystem{
-	"npm":       domain.EcosystemNPM,
-	"pip":       domain.EcosystemPyPI,
-	"go":        domain.EcosystemGo,
-	"maven":     domain.EcosystemMaven,
-	"nuget":     domain.EcosystemNuGet,
-	"composer":  domain.EcosystemComposer,
-	"rubygems":  domain.EcosystemGem,
-	"crates.io": domain.EcosystemCargo,
-	"pub":       domain.EcosystemPub,
-	"hex":       domain.EcosystemHex,
-	"actions":   domain.Ecosystem(""), // GitHub Actions - not a Packmon ecosystem
-	"rust":      domain.EcosystemCargo,
-	"cargo":     domain.EcosystemCargo,
+	"npm":            domain.EcosystemNPM,
+	"pip":            domain.EcosystemPyPI,
+	"pypi":           domain.EcosystemPyPI,
+	"go":             domain.EcosystemGo,
+	"maven":          domain.EcosystemMaven,
+	"nuget":          domain.EcosystemNuGet,
+	"composer":       domain.EcosystemComposer,
+	"packagist":      domain.EcosystemComposer,
+	"rubygems":       domain.EcosystemGem,
+	"crates.io":      domain.EcosystemCargo,
+	"pub":            domain.EcosystemPub,
+	"swifturl":       domain.EcosystemSwiftPM,
+	"hex":            domain.EcosystemHex,
+	"actions":        domain.EcosystemGitHubActions,
+	"github actions": domain.EcosystemGitHubActions,
+	"rust":           domain.EcosystemCargo,
+	"cargo":          domain.EcosystemCargo,
 }
 
 // MapOpenSSFEcosystem maps an OpenSSF malicious-packages ecosystem string

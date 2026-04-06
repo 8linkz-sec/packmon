@@ -12,6 +12,8 @@ import (
 type SearchData struct {
 	ActiveNav string
 	Query     string
+	Severity  string
+	Finding   string
 	Results   []db.PackageSearchResult
 }
 
@@ -21,20 +23,29 @@ type SearchData struct {
 func HandleSearch(store Store, renderer *Renderer, logger *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := strings.TrimSpace(r.URL.Query().Get("q"))
+		severity := normalizeSearchSeverity(r.URL.Query().Get("severity"))
+		finding := normalizeSearchFindingType(r.URL.Query().Get("finding"))
 		ctx := r.Context()
 
 		var results []db.PackageSearchResult
-		if query != "" {
+		if query != "" || severity != "" || finding != "" {
 			var err error
-			results, err = store.SearchPackages(ctx, query, 50)
+			results, err = store.SearchPackages(ctx, db.PackageSearchParams{
+				Query:       query,
+				Severity:    severity,
+				FindingType: finding,
+				Limit:       50,
+			})
 			if err != nil {
-				logger.Error("search: query failed", "error", err, "query", query)
+				logger.Error("search: query failed", "error", err, "query", query, "severity", severity, "finding", finding)
 			}
 		}
 
 		data := SearchData{
 			ActiveNav: "search",
 			Query:     query,
+			Severity:  severity,
+			Finding:   finding,
 			Results:   results,
 		}
 
@@ -52,5 +63,25 @@ func HandleSearch(store Store, renderer *Renderer, logger *slog.Logger) http.Han
 			logger.Error("search: render failed", "error", err)
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 		}
+	}
+}
+
+func normalizeSearchSeverity(raw string) string {
+	severity := strings.ToUpper(strings.TrimSpace(raw))
+	switch severity {
+	case "", "CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN":
+		return severity
+	default:
+		return ""
+	}
+}
+
+func normalizeSearchFindingType(raw string) string {
+	finding := strings.ToLower(strings.TrimSpace(raw))
+	switch finding {
+	case "", "vulnerability", "malicious":
+		return finding
+	default:
+		return ""
 	}
 }

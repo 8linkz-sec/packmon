@@ -7,21 +7,63 @@
 
   <!-- Search box with HTMX live search -->
   <div class="bg-white rounded-lg shadow p-5 border border-gray-200">
-    <label for="search-input" class="block text-sm font-medium text-gray-700 mb-2">Search packages by name</label>
-    <input
-      type="search"
-      id="search-input"
-      name="q"
-      value="{{.Query}}"
-      placeholder="e.g. lodash, requests, express..."
-      autocomplete="off"
-      class="w-full border border-gray-300 rounded-md px-4 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
-      hx-get="/search"
-      hx-trigger="keyup changed delay:300ms, search"
-      hx-target="#search-results"
-      hx-push-url="true"
-      hx-include="this"
-    >
+    <form id="search-form" action="/search" method="get" class="grid gap-4 md:grid-cols-[minmax(0,1fr)_220px_220px] md:items-end">
+      <div>
+        <label for="search-input" class="block text-sm font-medium text-gray-700 mb-2">Search packages by name</label>
+        <input
+          type="search"
+          id="search-input"
+          name="q"
+          value="{{.Query}}"
+          placeholder="e.g. lodash, requests, express..."
+          autocomplete="off"
+          class="w-full border border-gray-300 rounded-md px-4 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+          hx-get="/search"
+          hx-trigger="keyup changed delay:300ms, search"
+          hx-target="#search-results"
+          hx-push-url="true"
+          hx-include="#search-form"
+        >
+      </div>
+      <div>
+        <label for="severity-filter" class="block text-sm font-medium text-gray-700 mb-2">Severity Filter</label>
+        <select
+          id="severity-filter"
+          name="severity"
+          class="w-full border border-gray-300 rounded-md px-4 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none bg-white"
+          hx-get="/search"
+          hx-trigger="change"
+          hx-target="#search-results"
+          hx-push-url="true"
+          hx-include="#search-form"
+        >
+          <option value="" {{if eq .Severity ""}}selected{{end}}>All severities</option>
+          <option value="CRITICAL" {{if eq .Severity "CRITICAL"}}selected{{end}}>CRITICAL</option>
+          <option value="HIGH" {{if eq .Severity "HIGH"}}selected{{end}}>HIGH</option>
+          <option value="MEDIUM" {{if eq .Severity "MEDIUM"}}selected{{end}}>MEDIUM</option>
+          <option value="LOW" {{if eq .Severity "LOW"}}selected{{end}}>LOW</option>
+          <option value="UNKNOWN" {{if eq .Severity "UNKNOWN"}}selected{{end}}>UNKNOWN</option>
+        </select>
+      </div>
+      <div>
+        <label for="finding-filter" class="block text-sm font-medium text-gray-700 mb-2">Finding Type</label>
+        <select
+          id="finding-filter"
+          name="finding"
+          class="w-full border border-gray-300 rounded-md px-4 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none bg-white"
+          hx-get="/search"
+          hx-trigger="change"
+          hx-target="#search-results"
+          hx-push-url="true"
+          hx-include="#search-form"
+        >
+          <option value="" {{if eq .Finding ""}}selected{{end}}>All findings</option>
+          <option value="vulnerability" {{if eq .Finding "vulnerability"}}selected{{end}}>Vulnerabilities</option>
+          <option value="malicious" {{if eq .Finding "malicious"}}selected{{end}}>Malicious packages</option>
+        </select>
+      </div>
+    </form>
+    <p class="mt-3 text-xs text-gray-500">Search by package name, severity, finding type, or any combination of them.</p>
   </div>
 
   <!-- Results -->
@@ -33,11 +75,15 @@
 {{end}}
 
 {{define "search-results"}}
-{{if .Query}}
+{{if or .Query .Severity .Finding}}
   {{if .Results}}
   <div class="bg-white rounded-lg shadow border border-gray-200">
     <div class="px-5 py-3 border-b border-gray-200 text-sm text-gray-500">
-      {{len .Results}} result(s) for "{{.Query}}"
+      {{len .Results}} result(s)
+      {{if .Query}} for "{{.Query}}"{{end}}
+      {{if .Severity}}{{if .Query}} with{{else}} for{{end}} severity {{.Severity}}{{end}}
+      {{if eq .Finding "vulnerability"}}{{if or .Query .Severity}} in{{else}} for{{end}} vulnerabilities{{end}}
+      {{if eq .Finding "malicious"}}{{if or .Query .Severity}} in{{else}} for{{end}} malicious packages{{end}}
     </div>
     <div class="overflow-x-auto">
       <table class="min-w-full text-sm">
@@ -46,6 +92,7 @@
             <th class="px-5 py-2">Package</th>
             <th class="px-5 py-2">Ecosystem</th>
             <th class="px-5 py-2 text-right">Findings</th>
+            <th class="px-5 py-2">Vulnerabilities</th>
             <th class="px-5 py-2">Sources</th>
           </tr>
         </thead>
@@ -59,6 +106,13 @@
               <span class="inline-block bg-gray-100 text-gray-700 px-2 py-0.5 rounded text-xs font-medium">{{.Ecosystem}}</span>
             </td>
             <td class="px-5 py-2 text-right {{if gt .FindingsCount 0}}text-red-600 font-medium{{end}}">{{.FindingsCount}}</td>
+            <td class="px-5 py-2">
+              {{if gt .VulnerabilityCount 0}}
+              <div class="text-sm font-medium text-gray-900">{{if eq .VulnerabilityCount 1}}1 advisory{{else}}{{.VulnerabilityCount}} advisories{{end}}</div>
+              {{else}}
+              <span class="text-gray-400 text-sm">No known vulnerabilities</span>
+              {{end}}
+            </td>
             <td class="px-5 py-2 text-xs text-gray-500">{{.Sources}}</td>
           </tr>
           {{end}}
@@ -68,12 +122,12 @@
   </div>
   {{else}}
   <div class="bg-white rounded-lg shadow p-10 border border-gray-200 text-center text-gray-400">
-    No packages found matching "{{.Query}}".
+    No packages found for the current search and filter.
   </div>
   {{end}}
 {{else}}
   <div class="bg-white rounded-lg shadow p-10 border border-gray-200 text-center text-gray-400">
-    Enter a package name above to search the vulnerability database.
+    Enter a package name above or choose filters to search the vulnerability database.
   </div>
 {{end}}
 {{end}}

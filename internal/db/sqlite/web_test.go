@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/8linkz/packmon/internal/db"
 )
 
 func TestHistoryQueriesAndClear(t *testing.T) {
@@ -136,7 +138,7 @@ func TestDashboardStatsAndSearchPackages(t *testing.T) {
 		t.Fatal("HasAdvisoryData() = false, want true")
 	}
 
-	results, err := store.SearchPackages(ctx, "lod", 10)
+	results, err := store.SearchPackages(ctx, db.PackageSearchParams{Query: "lod", Limit: 10})
 	if err != nil {
 		t.Fatalf("SearchPackages() error = %v", err)
 	}
@@ -145,6 +147,30 @@ func TestDashboardStatsAndSearchPackages(t *testing.T) {
 	}
 	if results[0].Name != "lodash" || results[0].FindingsCount != 3 {
 		t.Fatalf("SearchPackages() result = %+v, want lodash with 3 findings", results[0])
+	}
+	if results[0].VulnerabilityCount != 2 || results[0].VulnerabilityIDs != "V-1, V-2" {
+		t.Fatalf("SearchPackages() vulnerabilities = (%d, %q), want (2, %q)", results[0].VulnerabilityCount, results[0].VulnerabilityIDs, "V-1, V-2")
+	}
+
+	highResults, err := store.SearchPackages(ctx, db.PackageSearchParams{Severity: "HIGH", Limit: 10})
+	if err != nil {
+		t.Fatalf("SearchPackages() with severity error = %v", err)
+	}
+	if len(highResults) != 2 {
+		t.Fatalf("SearchPackages() with severity len = %d, want 2", len(highResults))
+	}
+
+	maliciousResults, err := store.SearchPackages(ctx, db.PackageSearchParams{FindingType: "malicious", Limit: 10})
+	if err != nil {
+		t.Fatalf("SearchPackages() with malicious finding filter error = %v", err)
+	}
+	if len(maliciousResults) != 2 {
+		t.Fatalf("SearchPackages() with malicious finding filter len = %d, want 2", len(maliciousResults))
+	}
+	for _, result := range maliciousResults {
+		if result.Name == "requests-evil" && result.VulnerabilityCount != 0 {
+			t.Fatalf("SearchPackages() malicious-only result has vulnerability count %d, want 0", result.VulnerabilityCount)
+		}
 	}
 
 	stats, err := store.DashboardStats(ctx)

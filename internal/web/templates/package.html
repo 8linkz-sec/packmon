@@ -47,7 +47,8 @@
         <thead>
           <tr class="text-left text-gray-500 border-b bg-gray-50">
             <th class="px-5 py-2">Severity</th>
-            <th class="px-5 py-2">Advisory</th>
+            <th class="px-5 py-2 whitespace-nowrap">Advisory</th>
+            <th class="px-5 py-2">Resources</th>
             <th class="px-5 py-2">Title</th>
             <th class="px-5 py-2">Fixed In</th>
             <th class="px-5 py-2">Source</th>
@@ -56,15 +57,26 @@
         <tbody>
           {{range .Vulnerabilities}}
           <tr class="border-b border-gray-100 hover:bg-gray-50">
-            <td class="px-5 py-2">
+            <td class="px-5 py-2 align-top">
               <span class="inline-block px-2 py-0.5 rounded text-xs font-medium border {{severityClass (printf "%s" .Severity)}}">{{.Severity}}</span>
             </td>
-            <td class="px-5 py-2 font-mono text-xs">
-              {{if .URL}}<a href="{{.URL}}" target="_blank" rel="noopener" class="text-blue-600 hover:underline">{{.AdvisoryID}}</a>{{else}}{{.AdvisoryID}}{{end}}
+            <td class="px-5 py-2 font-mono text-xs align-top whitespace-nowrap min-w-[13rem]">
+              {{.AdvisoryID}}
             </td>
-            <td class="px-5 py-2">{{truncate .Title 80}}</td>
-            <td class="px-5 py-2 text-xs">{{if .FixedVersion}}{{.FixedVersion}}{{else}}<span class="text-gray-400">-</span>{{end}}</td>
-            <td class="px-5 py-2 text-xs text-gray-500">{{.Source}}</td>
+            <td class="px-5 py-2 text-xs align-top">
+              {{if .Resources}}
+              <div class="flex flex-wrap gap-2">
+                {{range .Resources}}
+                <a href="{{.URL}}" target="_blank" rel="noopener" class="inline-block bg-gray-100 text-gray-700 px-2 py-0.5 rounded text-xs font-medium hover:bg-gray-200">{{.Label}}</a>
+                {{end}}
+              </div>
+              {{else}}
+              <span class="text-gray-400">-</span>
+              {{end}}
+            </td>
+            <td class="px-5 py-2 align-top min-w-[28rem]">{{.Title}}</td>
+            <td class="px-5 py-2 text-xs align-top whitespace-nowrap">{{if .FixedVersion}}{{.FixedVersion}}{{else}}<span class="text-gray-400">-</span>{{end}}</td>
+            <td class="px-5 py-2 text-xs text-gray-500 align-top whitespace-nowrap">{{.Source}}</td>
           </tr>
           {{end}}
         </tbody>

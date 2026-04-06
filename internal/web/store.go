@@ -14,7 +14,7 @@ type Store interface {
 	DashboardStats(ctx context.Context) (*db.DashboardStatsResult, error)
 	CountScansByDay(ctx context.Context, days int) ([]db.DailyScanStats, error)
 	ListRecentScans(ctx context.Context, limit int) ([]db.ScanLogEntry, error)
-	SearchPackages(ctx context.Context, query string, limit int) ([]db.PackageSearchResult, error)
+	SearchPackages(ctx context.Context, params db.PackageSearchParams) ([]db.PackageSearchResult, error)
 	FindVulnerabilities(ctx context.Context, ecosystem, name, version string) ([]domain.Finding, error)
 	FindMalicious(ctx context.Context, ecosystem, name, version string) ([]domain.Finding, error)
 	ListFeedSyncStatuses(ctx context.Context) ([]db.FeedSyncStatus, error)

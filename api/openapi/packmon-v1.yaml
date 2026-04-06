@@ -215,6 +215,7 @@ components:
         - composer
         - gem
         - pub
+        - actions
         - cocoapods
         - swiftpm
         - hex

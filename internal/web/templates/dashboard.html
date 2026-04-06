@@ -13,10 +13,10 @@
       <div class="text-sm text-gray-500 uppercase tracking-wide">Vulnerabilities</div>
       <div class="mt-1 text-3xl font-semibold">{{.Stats.TotalVulnerabilities}}</div>
     </div>
-    <div class="bg-white rounded-lg shadow p-5 border border-gray-200 text-center">
+    <a href="/search?finding=malicious" class="bg-white rounded-lg shadow p-5 border border-gray-200 text-center block hover:border-red-200 hover:shadow-md transition">
       <div class="text-sm text-gray-500 uppercase tracking-wide">Malicious Packages</div>
       <div class="mt-1 text-3xl font-semibold">{{.Stats.TotalMalicious}}</div>
-    </div>
+    </a>
     <div class="bg-white rounded-lg shadow p-5 border border-gray-200 text-center">
       <div class="text-sm text-gray-500 uppercase tracking-wide">Total Scans (7d)</div>
       <div class="mt-1 text-3xl font-semibold">{{.TotalScans7d}}</div>
@@ -29,20 +29,20 @@
     <h2 class="text-lg font-semibold mb-3">Findings by Severity</h2>
     <div class="flex flex-wrap gap-3 justify-center">
       {{with .Stats.BySeverity}}
-      {{if index . "CRITICAL"}}<span class="inline-flex items-center px-3 py-1.5 rounded-full text-sm font-medium border {{severityClass "CRITICAL"}}">CRITICAL: {{index . "CRITICAL"}}</span>{{end}}
-      {{if index . "HIGH"}}<span class="inline-flex items-center px-3 py-1.5 rounded-full text-sm font-medium border {{severityClass "HIGH"}}">HIGH: {{index . "HIGH"}}</span>{{end}}
-      {{if index . "MEDIUM"}}<span class="inline-flex items-center px-3 py-1.5 rounded-full text-sm font-medium border {{severityClass "MEDIUM"}}">MEDIUM: {{index . "MEDIUM"}}</span>{{end}}
-      {{if index . "LOW"}}<span class="inline-flex items-center px-3 py-1.5 rounded-full text-sm font-medium border {{severityClass "LOW"}}">LOW: {{index . "LOW"}}</span>{{end}}
-      {{if index . "UNKNOWN"}}<span class="inline-flex items-center px-3 py-1.5 rounded-full text-sm font-medium border {{severityClass "UNKNOWN"}}">UNKNOWN: {{index . "UNKNOWN"}}</span>{{end}}
+      {{if index . "CRITICAL"}}<a href="/search?severity=CRITICAL" class="inline-flex items-center px-3 py-1.5 rounded-full text-sm font-medium border hover:brightness-95 transition {{severityClass "CRITICAL"}}">CRITICAL: {{index . "CRITICAL"}}</a>{{end}}
+      {{if index . "HIGH"}}<a href="/search?severity=HIGH" class="inline-flex items-center px-3 py-1.5 rounded-full text-sm font-medium border hover:brightness-95 transition {{severityClass "HIGH"}}">HIGH: {{index . "HIGH"}}</a>{{end}}
+      {{if index . "MEDIUM"}}<a href="/search?severity=MEDIUM" class="inline-flex items-center px-3 py-1.5 rounded-full text-sm font-medium border hover:brightness-95 transition {{severityClass "MEDIUM"}}">MEDIUM: {{index . "MEDIUM"}}</a>{{end}}
+      {{if index . "LOW"}}<a href="/search?severity=LOW" class="inline-flex items-center px-3 py-1.5 rounded-full text-sm font-medium border hover:brightness-95 transition {{severityClass "LOW"}}">LOW: {{index . "LOW"}}</a>{{end}}
+      {{if index . "UNKNOWN"}}<a href="/search?severity=UNKNOWN" class="inline-flex items-center px-3 py-1.5 rounded-full text-sm font-medium border hover:brightness-95 transition {{severityClass "UNKNOWN"}}">UNKNOWN: {{index . "UNKNOWN"}}</a>{{end}}
       {{end}}
     </div>
   </div>
   {{end}}
 
-  <!-- Recently added vulnerabilities (7 days) -->
+  <!-- Recently published vulnerabilities (7 days) -->
   {{if .RecentVulnerabilities}}
   <div class="bg-white rounded-lg shadow p-5 border border-gray-200">
-    <h2 class="text-lg font-semibold mb-3">Recently Added Vulnerabilities (7 Days)</h2>
+    <h2 class="text-lg font-semibold mb-3">Recently Published Vulnerabilities (7 Days)</h2>
     <div class="overflow-x-auto">
       <table class="min-w-full text-sm">
         <thead>
@@ -51,7 +51,7 @@
             <th class="pb-2 pr-4">Package</th>
             <th class="pb-2 pr-4">Severity</th>
             <th class="pb-2 pr-4">Summary</th>
-            <th class="pb-2">Updated</th>
+            <th class="pb-2">Published</th>
           </tr>
         </thead>
         <tbody>
@@ -67,7 +67,7 @@
               <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium {{severityClass .Severity}}">{{.Severity}}</span>
             </td>
             <td class="py-2 pr-4 text-gray-600 max-w-md truncate">{{truncate .Summary 80}}</td>
-            <td class="py-2 text-gray-500 whitespace-nowrap" title="{{formatTime .UpdatedAt}}">{{formatTimeAgo .UpdatedAt}}</td>
+            <td class="py-2 text-gray-500 whitespace-nowrap" title="{{formatTime .PublishedAt}}">{{formatTimeAgo .PublishedAt}}</td>
           </tr>
           {{end}}
         </tbody>
