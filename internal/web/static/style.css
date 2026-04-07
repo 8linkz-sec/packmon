@@ -1,6 +1,6 @@
 /*
  * Packmon -- minimal custom styles.
- * Tailwind CSS (loaded from CDN) handles the vast majority of styling.
+ * Tailwind CSS is built locally into /static/tailwind.css.
  * This file contains only overrides that cannot be expressed inline.
  */
 

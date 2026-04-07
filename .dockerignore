@@ -1,0 +1,8 @@
+.git
+.env
+node_modules
+packmon
+packmon.exe
+packmon-server
+packmon-server.exe
+dist

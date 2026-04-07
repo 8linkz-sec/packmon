@@ -1,7 +1,7 @@
 // Package web provides the HTML-based web interface for the Packmon server.
 // All templates are loaded from an embedded filesystem and rendered using
 // Go's html/template package. HTMX handles client-side interactivity;
-// Tailwind CSS (loaded from CDN) handles styling.
+// Tailwind CSS is built into a local static asset.
 package web
 
 import (
