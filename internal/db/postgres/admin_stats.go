@@ -96,8 +96,14 @@ func (s *Store) ListRecentVulnerabilities(ctx context.Context, days, limit int) 
 			FROM affected_packages ap
 			WHERE ap.vulnerability_id = v.id
 			ORDER BY
-				jsonb_array_length(ap.version_ranges) DESC,
-				jsonb_array_length(ap.versions_affected) DESC,
+				CASE
+					WHEN jsonb_typeof(ap.version_ranges) = 'array' THEN jsonb_array_length(ap.version_ranges)
+					ELSE 0
+				END DESC,
+				CASE
+					WHEN jsonb_typeof(ap.versions_affected) = 'array' THEN jsonb_array_length(ap.versions_affected)
+					ELSE 0
+				END DESC,
 				ap.id ASC
 			LIMIT 1
 		) ap ON true
