@@ -808,6 +808,41 @@ func TestExtractFixedVersion(t *testing.T) {
 	}
 }
 
+func TestExtractFixedVersionConstraint(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		ranges string
+		want   string
+	}{
+		{
+			name:   "single fixed becomes inclusive lower bound",
+			ranges: `[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"1.2.3"}]}]`,
+			want:   ">= 1.2.3",
+		},
+		{
+			name:   "lowest fixed is preserved in formatted output",
+			ranges: `[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"4.5.0"},{"introduced":"5.0.0"},{"fixed":"5.1.0"}]}]`,
+			want:   ">= 4.5.0",
+		},
+		{
+			name:   "no fixed stays empty",
+			ranges: `[{"type":"ECOSYSTEM","events":[{"introduced":"1.0.0"}]}]`,
+			want:   "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ExtractFixedVersionConstraint(tt.ranges)
+			if got != tt.want {
+				t.Fatalf("ExtractFixedVersionConstraint() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Symmetry and transitivity
 // ---------------------------------------------------------------------------

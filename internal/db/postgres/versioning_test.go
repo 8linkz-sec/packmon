@@ -806,17 +806,17 @@ func TestExtractFixedVersion(t *testing.T) {
 		{
 			name:   "single fixed version",
 			ranges: `[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"1.2.3"}]}]`,
-			want:   "1.2.3",
+			want:   ">= 1.2.3",
 		},
 		{
 			name:   "multiple fixed returns lowest",
 			ranges: `[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"4.5.0"},{"introduced":"5.0.0"},{"fixed":"5.1.0"}]}]`,
-			want:   "4.5.0",
+			want:   ">= 4.5.0",
 		},
 		{
 			name:   "multiple range objects returns lowest",
 			ranges: `[{"type":"ECOSYSTEM","events":[{"introduced":"2.0.0"},{"fixed":"2.5.0"}]},{"type":"ECOSYSTEM","events":[{"introduced":"1.0.0"},{"fixed":"1.3.0"}]}]`,
-			want:   "1.3.0",
+			want:   ">= 1.3.0",
 		},
 		{
 			name:   "no fixed version",

@@ -23,10 +23,10 @@ func versionAffected(ver, versionRangesJSON, versionsJSON string) (bool, error) 
 	return version.VersionAffected(ver, versionRangesJSON, versionsJSON, "")
 }
 
-// extractFixedVersion returns the lowest fixed version found across all
-// ranges in the given OSV-format JSON. Supports both full and flat formats.
+// extractFixedVersion returns a user-facing fixed-version constraint derived
+// from the lowest fixed version found across all OSV ranges.
 func extractFixedVersion(versionRangesJSON string) string {
-	return version.ExtractFixedVersion(versionRangesJSON)
+	return version.ExtractFixedVersionConstraint(versionRangesJSON)
 }
 
 // normalizeIntroduced maps "0" to "" (beginning of time) and passes all

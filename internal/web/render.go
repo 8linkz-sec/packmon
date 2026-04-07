@@ -124,6 +124,7 @@ func defaultFuncMap() template.FuncMap {
 	return template.FuncMap{
 		"formatTime":    formatTime,
 		"formatTimeAgo": formatTimeAgo,
+		"formatFixedIn": formatFixedIn,
 		"severityClass": severityClass,
 		"statusClass":   statusClass,
 		"truncate":      truncate,
@@ -172,6 +173,22 @@ func formatTimeAgo(t time.Time) string {
 			return "1 day ago"
 		}
 		return fmt.Sprintf("%d days ago", days)
+	}
+}
+
+// formatFixedIn renders a fixed-version value for the package details UI.
+// Bare versions are shown as a lower-bound safe range (">= 1.2.3"), while
+// values that already carry an operator are preserved as-is.
+func formatFixedIn(fixed string) string {
+	fixed = strings.TrimSpace(fixed)
+	if fixed == "" {
+		return ""
+	}
+	switch fixed[0] {
+	case '<', '>', '=':
+		return fixed
+	default:
+		return ">= " + fixed
 	}
 }
 

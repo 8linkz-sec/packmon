@@ -75,7 +75,7 @@
               {{end}}
             </td>
             <td class="px-5 py-2 align-top min-w-[28rem]">{{.Title}}</td>
-            <td class="px-5 py-2 text-xs align-top whitespace-nowrap">{{if .FixedVersion}}{{.FixedVersion}}{{else}}<span class="text-gray-400">-</span>{{end}}</td>
+            <td class="px-5 py-2 text-xs align-top whitespace-nowrap">{{if .FixedVersion}}{{formatFixedIn .FixedVersion}}{{else}}<span class="text-gray-400">-</span>{{end}}</td>
             <td class="px-5 py-2 text-xs text-gray-500 align-top whitespace-nowrap">{{.Source}}</td>
           </tr>
           {{end}}

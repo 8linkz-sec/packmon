@@ -225,7 +225,7 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 					break
 				}
 
-				s.logger.Warn("NVD enrichment: rate limited, retrying CVE lookup",
+				s.logger.Debug("NVD enrichment: rate limited, retrying CVE lookup",
 					slog.String("cve_id", cveID),
 					slog.Int("attempt", retries+1),
 					slog.Duration("retry_after", rlErr.retryAfter),
@@ -239,7 +239,7 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 			processed++
 
 			if fetchErr != nil {
-				s.logger.Warn("NVD enrichment: failed to fetch CVE",
+				s.logger.Debug("NVD enrichment: failed to fetch CVE",
 					slog.String("cve_id", cveID),
 					slog.String("error", fetchErr.Error()),
 				)

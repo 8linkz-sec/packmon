@@ -439,12 +439,13 @@ func TestHandlePackage_ReturnsOK(t *testing.T) {
 	store := &mockStore{
 		vulnFindings: []domain.Finding{
 			{
-				Name:       "lodash",
-				Ecosystem:  domain.EcosystemNPM,
-				Type:       domain.FindingTypeVulnerability,
-				Severity:   domain.SeverityHigh,
-				AdvisoryID: "GHSA-test-1234",
-				Title:      "Example advisory title that should remain fully visible in the package table",
+				Name:         "lodash",
+				Ecosystem:    domain.EcosystemNPM,
+				Type:         domain.FindingTypeVulnerability,
+				Severity:     domain.SeverityHigh,
+				AdvisoryID:   "GHSA-test-1234",
+				Title:        "Example advisory title that should remain fully visible in the package table",
+				FixedVersion: "1.2.3",
 				Resources: []domain.ResourceLink{
 					{Label: "GHSA", URL: "https://github.com/advisories/GHSA-test-1234"},
 					{Label: "NVD", URL: "https://nvd.nist.gov/vuln/detail/CVE-2026-0001"},
@@ -473,6 +474,9 @@ func TestHandlePackage_ReturnsOK(t *testing.T) {
 	body := rec.Body.String()
 	if !strings.Contains(body, "Resources") {
 		t.Fatal("Package response does not contain the resources column")
+	}
+	if !strings.Contains(body, "&gt;= 1.2.3") {
+		t.Fatal("Package response does not contain the formatted fixed-in version")
 	}
 	if !strings.Contains(body, ">GHSA<") || !strings.Contains(body, ">NVD<") {
 		t.Fatal("Package response does not contain the expected resource links")

@@ -135,14 +135,15 @@ func (s *Store) FindVulnerabilities(ctx context.Context, ecosystem, name, versio
 		}
 
 		findings = append(findings, domain.Finding{
-			Name:       pkg,
-			Version:    version,
-			Ecosystem:  domain.Ecosystem(eco),
-			Type:       domain.FindingTypeVulnerability,
-			Severity:   domain.Severity(severity),
-			AdvisoryID: id,
-			Title:      title,
-			Source:     "local",
+			Name:         pkg,
+			Version:      version,
+			Ecosystem:    domain.Ecosystem(eco),
+			Type:         domain.FindingTypeVulnerability,
+			Severity:     domain.Severity(severity),
+			AdvisoryID:   id,
+			Title:        title,
+			FixedVersion: versionpkg.ExtractFixedVersionConstraint(rangesJSON.String),
+			Source:       "local",
 		})
 	}
 	if err := rows.Err(); err != nil {

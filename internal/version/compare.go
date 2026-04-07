@@ -130,6 +130,17 @@ func ExtractFixedVersion(versionRangesJSON string) string {
 	return best
 }
 
+// ExtractFixedVersionConstraint formats the extracted fixed version as an
+// inclusive lower-bound constraint suitable for user-facing output.
+// For example, a fixed version of "1.2.3" becomes ">= 1.2.3".
+func ExtractFixedVersionConstraint(versionRangesJSON string) string {
+	fixed := ExtractFixedVersion(versionRangesJSON)
+	if fixed == "" {
+		return ""
+	}
+	return ">= " + fixed
+}
+
 // ---------------------------------------------------------------------------
 // Range parsing (handles both full OSV and flat formats)
 // ---------------------------------------------------------------------------

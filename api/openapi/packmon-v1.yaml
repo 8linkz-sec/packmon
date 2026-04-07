@@ -351,7 +351,7 @@ components:
           format: uri
         fixed_version:
           type: string
-          description: "Version that fixes the vulnerability (vulnerability only)"
+          description: "Inclusive fix constraint for the vulnerability, for example >= 1.2.3 (vulnerability only)"
         risk_type:
           type: string
           enum: [malware, typosquatting, supply_chain]
