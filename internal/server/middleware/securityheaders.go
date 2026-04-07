@@ -6,6 +6,8 @@ import (
 	"strings"
 )
 
+const contentSecurityPolicy = "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'"
+
 // SecurityHeaders returns a middleware that sets essential security
 // response headers on every response. In production mode it also
 // enforces HSTS and redirects plain-HTTP requests (detected via
@@ -46,6 +48,9 @@ func SecurityHeaders(productionMode bool, redirectHost string) func(http.Handler
 
 			// Restrict browser features.
 			h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+
+			// Serve the UI with local-only assets and deny external origins by default.
+			h.Set("Content-Security-Policy", contentSecurityPolicy)
 
 			// HSTS only in production (do not lock dev environments into HTTPS).
 			if productionMode {

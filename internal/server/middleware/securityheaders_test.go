@@ -26,6 +26,7 @@ func TestSecurityHeaders_SetsAllHeaders(t *testing.T) {
 		"Referrer-Policy":         "strict-origin-when-cross-origin",
 		"X-XSS-Protection":        "0",
 		"Permissions-Policy":      "camera=(), microphone=(), geolocation=()",
+		"Content-Security-Policy": contentSecurityPolicy,
 	}
 
 	for header, want := range expected {
