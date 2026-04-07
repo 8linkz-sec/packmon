@@ -387,6 +387,7 @@ type RecentVulnerability struct {
 	Severity    string
 	Ecosystem   string
 	Name        string
+	Affected    string
 	PublishedAt time.Time
 }
 

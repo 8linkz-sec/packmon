@@ -61,7 +61,16 @@
               {{if and .Ecosystem .Name}}<a href="/package/{{.Ecosystem}}/{{.Name}}" class="text-blue-600 hover:underline">{{.ID}}</a>{{else if hasPrefix .ID "GHSA-"}}<a href="https://github.com/advisories/{{.ID}}" target="_blank" rel="noopener" class="text-blue-600 hover:underline">{{.ID}}</a>{{else}}{{.ID}}{{end}}
             </td>
             <td class="py-2 pr-4">
-              {{if .Name}}<span class="text-gray-600">{{.Ecosystem}}/</span><span class="font-medium">{{.Name}}</span>{{else}}<span class="text-gray-400">-</span>{{end}}
+              {{if .Name}}
+              <div>
+                <span class="text-gray-600">{{.Ecosystem}}/</span><span class="font-medium">{{.Name}}</span>
+                {{if .Affected}}
+                <div class="text-xs text-gray-500 mt-0.5">Affected: {{.Affected}}</div>
+                {{end}}
+              </div>
+              {{else}}
+              <span class="text-gray-400">-</span>
+              {{end}}
             </td>
             <td class="py-2 pr-4">
               <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium {{severityClass .Severity}}">{{.Severity}}</span>

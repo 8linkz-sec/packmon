@@ -168,6 +168,7 @@ func TestHandleDashboard_ReturnsOK(t *testing.T) {
 				Severity:    "HIGH",
 				Ecosystem:   "actions",
 				Name:        "example/action",
+				Affected:    ">= 1.2.0, < 1.2.5",
 				PublishedAt: time.Now().UTC().Add(-2 * time.Hour),
 			},
 		},
@@ -201,6 +202,9 @@ func TestHandleDashboard_ReturnsOK(t *testing.T) {
 	}
 	if !strings.Contains(body, "Published") {
 		t.Fatal("Dashboard response does not contain the published column heading")
+	}
+	if !strings.Contains(body, "Affected: &gt;= 1.2.0, &lt; 1.2.5") {
+		t.Fatal("Dashboard response does not contain affected version details")
 	}
 	if !strings.Contains(body, "<!DOCTYPE html>") {
 		t.Fatal("Dashboard response does not contain full HTML layout")

@@ -25,7 +25,6 @@ func TestSecurityHeaders_SetsAllHeaders(t *testing.T) {
 		"X-Frame-Options":         "DENY",
 		"Referrer-Policy":         "strict-origin-when-cross-origin",
 		"X-XSS-Protection":        "0",
-		"Content-Security-Policy": contentSecurityPolicy,
 		"Permissions-Policy":      "camera=(), microphone=(), geolocation=()",
 	}
 

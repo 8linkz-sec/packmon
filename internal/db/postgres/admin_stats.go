@@ -85,10 +85,22 @@ func (s *Store) ListRecentVulnerabilities(ctx context.Context, days, limit int) 
 
 	rows, err := s.pool.Query(ctx, `
 		SELECT v.id, v.summary, v.severity,
-			COALESCE((SELECT ap.ecosystem FROM affected_packages ap WHERE ap.vulnerability_id = v.id LIMIT 1), '') AS ecosystem,
-			COALESCE((SELECT ap.name FROM affected_packages ap WHERE ap.vulnerability_id = v.id LIMIT 1), '') AS name,
+			COALESCE(ap.ecosystem, '') AS ecosystem,
+			COALESCE(ap.name, '') AS name,
+			COALESCE(ap.version_ranges::text, '[]') AS version_ranges,
+			COALESCE(ap.versions_affected::text, '[]') AS versions_affected,
 			v.published
 		FROM vulnerabilities v
+		LEFT JOIN LATERAL (
+			SELECT ap.ecosystem, ap.name, ap.version_ranges, ap.versions_affected
+			FROM affected_packages ap
+			WHERE ap.vulnerability_id = v.id
+			ORDER BY
+				jsonb_array_length(ap.version_ranges) DESC,
+				jsonb_array_length(ap.versions_affected) DESC,
+				ap.id ASC
+			LIMIT 1
+		) ap ON true
 		WHERE v.published >= NOW() - make_interval(days => $1)
 		ORDER BY v.published DESC, v.id DESC
 		LIMIT $2`, days, limit)
@@ -100,9 +112,11 @@ func (s *Store) ListRecentVulnerabilities(ctx context.Context, days, limit int) 
 	var out []db.RecentVulnerability
 	for rows.Next() {
 		var r db.RecentVulnerability
-		if err := rows.Scan(&r.ID, &r.Summary, &r.Severity, &r.Ecosystem, &r.Name, &r.PublishedAt); err != nil {
+		var versionRanges, versionsAffected string
+		if err := rows.Scan(&r.ID, &r.Summary, &r.Severity, &r.Ecosystem, &r.Name, &versionRanges, &versionsAffected, &r.PublishedAt); err != nil {
 			return nil, fmt.Errorf("postgres: scan recent vulnerability row: %w", err)
 		}
+		r.Affected = summarizeAffectedVersions(versionRanges, versionsAffected)
 		out = append(out, r)
 	}
 	return out, rows.Err()
