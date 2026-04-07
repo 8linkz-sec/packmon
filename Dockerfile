@@ -1,5 +1,7 @@
 FROM golang:1.26-alpine AS build
 
+RUN apk upgrade --no-cache
+
 WORKDIR /src
 COPY go.mod go.sum* ./
 RUN go mod download 2>/dev/null || true
@@ -10,7 +12,8 @@ RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /packmon-server ./cmd/packmon-ser
 
 FROM alpine:3.23 AS server
 
-RUN apk add --no-cache ca-certificates git tzdata && \
+RUN apk upgrade --no-cache && \
+    apk add --no-cache ca-certificates git tzdata && \
     addgroup -S packmon && adduser -S packmon -G packmon && \
     mkdir -p /data/feeds && chown packmon:packmon /data/feeds
 COPY --from=build /packmon-server /usr/local/bin/packmon-server
@@ -25,7 +28,8 @@ ENTRYPOINT ["packmon-server"]
 
 FROM alpine:3.23 AS cli
 
-RUN apk add --no-cache ca-certificates tzdata && \
+RUN apk upgrade --no-cache && \
+    apk add --no-cache ca-certificates tzdata && \
     addgroup -S packmon && adduser -S packmon -G packmon
 COPY --from=build /packmon /usr/local/bin/packmon
 
