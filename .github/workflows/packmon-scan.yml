@@ -96,7 +96,7 @@ jobs:
           && inputs.post_pr_comment
           && github.event_name == 'pull_request'
           && steps.scan.outputs.findings_count > 0
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             const fs = require('fs');
