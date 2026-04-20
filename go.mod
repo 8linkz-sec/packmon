@@ -5,7 +5,7 @@ go 1.26
 require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/golang-migrate/migrate/v4 v4.19.1
-	github.com/jackc/pgx/v5 v5.9.1
+	github.com/jackc/pgx/v5 v5.9.2
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/crypto v0.49.0
 	gopkg.in/yaml.v3 v3.0.1
