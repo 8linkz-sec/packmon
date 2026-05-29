@@ -28,10 +28,7 @@ func (s *Store) ExportSync(ctx context.Context, opts db.SyncExportOptions) (*db.
 
 	// When pagination is active, signal that more data may follow if
 	// either result set filled the limit exactly.
-	truncated := false
-	if opts.Limit > 0 && (len(vulns) == opts.Limit || len(malicious) == opts.Limit) {
-		truncated = true
-	}
+	truncated := opts.Limit > 0 && (len(vulns) == opts.Limit || len(malicious) == opts.Limit)
 
 	return &db.SyncExport{
 		SyncedAt:        snapshot,

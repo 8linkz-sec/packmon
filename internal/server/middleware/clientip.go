@@ -6,7 +6,14 @@
 // any anonymous client can set that header to spoof their IP.
 package middleware
 
-import "net/http"
+import (
+	"context"
+	"net/http"
+	"net/netip"
+	"strings"
+)
+
+type clientIPContextKey struct{}
 
 // ClientIP returns the client IP address from the request. It strips
 // the port from RemoteAddr and returns only the host portion.
@@ -15,7 +22,104 @@ import "net/http"
 // this header to bypass IP-based rate limiting. When a reverse proxy
 // is deployed, a trusted-proxy aware implementation should be added.
 func ClientIP(r *http.Request) string {
+	if value, ok := r.Context().Value(clientIPContextKey{}).(string); ok && value != "" {
+		return value
+	}
 	return stripPort(r.RemoteAddr)
+}
+
+// TrustedClientIP resolves the client IP once per request using a trusted
+// proxy list and stores it in request context for downstream middleware and
+// handlers.
+func TrustedClientIP(trustedProxies []string) func(http.Handler) http.Handler {
+	proxies := parseTrustedProxies(trustedProxies)
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ip := clientIPWithTrustedProxyRules(r, proxies)
+			ctx := context.WithValue(r.Context(), clientIPContextKey{}, ip)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+// ClientIPWithTrustedProxies returns the forwarded client IP only when the
+// direct peer is in the configured trusted proxy list.
+func ClientIPWithTrustedProxies(r *http.Request, trustedProxies []string) string {
+	return clientIPWithTrustedProxyRules(r, parseTrustedProxies(trustedProxies))
+}
+
+type trustedProxySet struct {
+	prefixes []netip.Prefix
+}
+
+func parseTrustedProxies(values []string) trustedProxySet {
+	set := trustedProxySet{}
+	for _, raw := range values {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		if prefix, err := netip.ParsePrefix(raw); err == nil {
+			set.prefixes = append(set.prefixes, prefix)
+			continue
+		}
+		if addr, err := netip.ParseAddr(raw); err == nil {
+			set.prefixes = append(set.prefixes, netip.PrefixFrom(addr, addr.BitLen()))
+		}
+	}
+	return set
+}
+
+func clientIPWithTrustedProxyRules(r *http.Request, proxies trustedProxySet) string {
+	remote := stripPort(r.RemoteAddr)
+	if remote == "" || !proxies.contains(remote) {
+		return remote
+	}
+
+	if forwarded := forwardedClientIP(r.Header.Get("X-Forwarded-For"), proxies); forwarded != "" {
+		return forwarded
+	}
+	if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); validIP(realIP) {
+		return realIP
+	}
+	return remote
+}
+
+func forwardedClientIP(raw string, proxies trustedProxySet) string {
+	if strings.TrimSpace(raw) == "" {
+		return ""
+	}
+
+	parts := strings.Split(raw, ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		candidate := strings.TrimSpace(parts[i])
+		if !validIP(candidate) {
+			continue
+		}
+		if proxies.contains(candidate) {
+			continue
+		}
+		return candidate
+	}
+	return ""
+}
+
+func (p trustedProxySet) contains(raw string) bool {
+	addr, err := netip.ParseAddr(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	for _, prefix := range p.prefixes {
+		if prefix.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+func validIP(raw string) bool {
+	_, err := netip.ParseAddr(strings.TrimSpace(raw))
+	return err == nil
 }
 
 // stripPort removes the :port suffix from an address string.

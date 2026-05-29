@@ -10,11 +10,12 @@ import (
 
 // Exit codes per DE-2.
 const (
-	ExitOK          = scanner.ExitOK
-	ExitBlocking    = scanner.ExitBlocking
-	ExitOperational = scanner.ExitOperational
-	ExitParser      = scanner.ExitParser
-	ExitInternal    = scanner.ExitInternal
+	ExitOK             = scanner.ExitOK
+	ExitBlocking       = scanner.ExitBlocking
+	ExitOperational    = scanner.ExitOperational
+	ExitUnderThreshold = scanner.ExitUnderThreshold
+	ExitParser         = scanner.ExitParser
+	ExitInternal       = scanner.ExitInternal
 )
 
 // Global flag values bound at the root level.

@@ -67,6 +67,7 @@ func (p *NPMParser) Parse(r io.Reader) ([]domain.Package, error) {
 				Name:      name,
 				Version:   entry.Version,
 				Ecosystem: domain.EcosystemNPM,
+				Dev:       entry.Dev,
 			})
 		}
 	} else if len(lock.Dependencies) > 0 {
@@ -79,6 +80,7 @@ func (p *NPMParser) Parse(r io.Reader) ([]domain.Package, error) {
 				Name:      name,
 				Version:   entry.Version,
 				Ecosystem: domain.EcosystemNPM,
+				Dev:       entry.Dev,
 			})
 		}
 	}

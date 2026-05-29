@@ -16,10 +16,10 @@ import (
 // needed. The file contains minimal content to avoid empty-file edge cases.
 func createFile(t *testing.T, path string) {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil { //nolint:gosec // test fixture directories do not hold secrets
 		t.Fatalf("failed to create dir for %s: %v", path, err)
 	}
-	if err := os.WriteFile(path, []byte("# placeholder\n"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte("# placeholder\n"), 0o644); err != nil { //nolint:gosec // test fixture file
 		t.Fatalf("failed to create file %s: %v", path, err)
 	}
 }
@@ -67,8 +67,8 @@ func TestWalk_RespectsMaxDepth(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Create lock files at depth 1 and depth 3.
-	createFile(t, filepath.Join(tmpDir, "a", "package-lock.json"))                  // depth 1
-	createFile(t, filepath.Join(tmpDir, "a", "b", "c", "package-lock.json"))        // depth 3
+	createFile(t, filepath.Join(tmpDir, "a", "package-lock.json"))           // depth 1
+	createFile(t, filepath.Join(tmpDir, "a", "b", "c", "package-lock.json")) // depth 3
 
 	reg := parser.NewRegistry()
 

@@ -122,6 +122,30 @@ func TestPipfileParser_Parse(t *testing.T) {
 	}
 }
 
+func TestPipfileParser_ParseMarksDevDependencies(t *testing.T) {
+	t.Parallel()
+
+	input := `{
+		"default": {"requests": {"version": "==2.31.0"}},
+		"develop": {"pytest": {"version": "==8.0.0"}}
+	}`
+	pkgs, err := NewPipfileParser().Parse(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	dev := make(map[string]bool, len(pkgs))
+	for _, p := range pkgs {
+		dev[p.Name] = p.Dev
+	}
+	if dev["requests"] {
+		t.Errorf("default dependency wrongly marked dev")
+	}
+	if !dev["pytest"] {
+		t.Errorf("develop dependency not marked dev")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // PoetryParser
 // ---------------------------------------------------------------------------

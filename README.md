@@ -12,6 +12,14 @@ It can run as a local CLI, as a central API server, or both together.
 - CLI warnings for stale local advisory data
 - operational documentation, ADRs, and E2E test entry points
 
+## Canonical Project Docs
+
+- `AGENTS.md`: operating rules for Codex, Claude, and other coding agents.
+- `DESIGN.md`: product requirements, architecture, data flow, and non-goals.
+- `SECURITY.md`: security model, invariants, and audit checklist.
+
+Use these files as the baseline for future audits and implementation reviews.
+
 ## Quick Start
 
 ### CLI only
@@ -112,6 +120,10 @@ Important environment variables:
 
 - `PACKMON_SERVER_MODE=production|development`
 - `PACKMON_SERVER_PORT=8080`
+- `PACKMON_TRUSTED_PROXIES=10.0.0.0/8,192.168.10.10`
+- `PACKMON_BLOCK_THRESHOLD=CRITICAL`
+- `PACKMON_RATE_LIMIT_PER_MINUTE=60`
+- `PACKMON_RATE_LIMIT_BURST=60`
 - `PACKMON_METRICS_HOST=127.0.0.1`
 - `PACKMON_METRICS_PORT=9090`
 - `PACKMON_API_KEY`
@@ -119,6 +131,9 @@ Important environment variables:
 - `PACKMON_ADMIN_INITIAL_PASSWORD`
 - `PACKMON_SOCKET_API_KEY`
 - `PACKMON_VULNCHECK_API_KEY`
+
+Block threshold and rate-limit values can also be saved from `/admin/settings`; persisted values are loaded when the server starts.
+Manual advisories can be managed from `/admin/advisories` as either vulnerability or malicious findings.
 
 For CLI local freshness warnings:
 
@@ -128,11 +143,26 @@ For CLI local freshness warnings:
 
 ```bash
 go test ./...
+go test ./tests/ci
 make test-integration
 make test-e2e
 ```
 
-`test-integration` and `test-e2e` build the binaries first and then run the integration suite under `tests/integration`.
+`go test ./tests/ci` validates the reusable GitLab template under `ci/gitlab`,
+including release binary download defaults, checksum verification, and GitLab
+report artifacts. `make test-ci` is available as a wrapper on systems with
+`make`. `test-integration` and `test-e2e` build the binaries first and then run
+the integration suite under `tests/integration`.
+
+On Windows systems without `make`, use the direct commands:
+
+```powershell
+go build -o .build\packmon.exe .\cmd\packmon
+go build -o .build\packmon-server.exe .\cmd\packmon-server
+$env:PACKMON_TEST_BIN_DIR = ".build"
+go test -tags integration .\tests\integration
+go test -tags e2e .\tests\e2e
+```
 
 ## Deployment
 

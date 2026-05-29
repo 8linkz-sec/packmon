@@ -19,9 +19,9 @@ import (
 //
 // The wellKnownChangePassword handler implements the .well-known
 // redirect for password managers (Bitwarden compatibility).
-func RegisterRoutes(ctx context.Context, mux *http.ServeMux, store db.Store, sm *auth.SessionManager, logger *slog.Logger, cfg *config.Config, syncFeed FeedSyncFunc) {
+func RegisterRoutes(ctx context.Context, mux *http.ServeMux, store db.Store, sm *auth.SessionManager, logger *slog.Logger, cfg *config.Config, runtime *config.RuntimeSettings, syncFeed FeedSyncFunc) {
 	renderer := web.NewRenderer(web.TemplateFS(), false)
-	h := NewAdminHandler(ctx, store, sm, renderer, logger, cfg, syncFeed)
+	h := NewAdminHandler(ctx, store, sm, renderer, logger, cfg, runtime, syncFeed)
 
 	// Login and logout are handled specially:
 	// - GET /admin/login: show form (no session required)
@@ -41,6 +41,11 @@ func RegisterRoutes(ctx context.Context, mux *http.ServeMux, store db.Store, sm 
 	mux.HandleFunc("POST /admin/feeds/sync", h.HandleFeedSyncNow)
 	mux.HandleFunc("GET /admin/queue", h.HandleAdminQueue)
 	mux.HandleFunc("POST /admin/queue/purge", h.HandleQueuePurge)
+	mux.HandleFunc("POST /admin/queue/priority", h.HandleQueuePriorityUpdate)
+	mux.HandleFunc("POST /admin/queue/pause", h.HandleQueuePause)
+	mux.HandleFunc("POST /admin/queue/resume", h.HandleQueueResume)
+	mux.HandleFunc("POST /admin/queue/retry", h.HandleQueueRetry)
+	mux.HandleFunc("POST /admin/queue/clear", h.HandleQueueClear)
 	mux.HandleFunc("GET /admin/keys", h.HandleAdminKeys)
 	mux.HandleFunc("POST /admin/keys/create", h.HandleKeyCreate)
 	mux.HandleFunc("POST /admin/keys/revoke", h.HandleKeyRevoke)
@@ -50,9 +55,10 @@ func RegisterRoutes(ctx context.Context, mux *http.ServeMux, store db.Store, sm 
 	mux.HandleFunc("POST /admin/advisories/delete", h.HandleAdvisoryDelete)
 	mux.HandleFunc("GET /admin/audit", h.HandleAdminAudit)
 	mux.HandleFunc("GET /admin/settings", h.HandleAdminSettings)
+	mux.HandleFunc("POST /admin/settings/system", h.HandleSystemSettingsSave)
 	mux.HandleFunc("POST /admin/settings/password", h.HandlePasswordChange)
 
-	// Bitwarden .well-known redirect (CLAUDE.md section 4.2).
+	// Password-manager .well-known redirect (DESIGN.md Web UI).
 	mux.HandleFunc("GET /.well-known/change-password", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/settings", http.StatusSeeOther)
 	})

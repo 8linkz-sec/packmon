@@ -18,6 +18,11 @@ const (
 	// sessionIDBytes is the number of random bytes used for session IDs.
 	// 32 bytes = 256 bits of entropy, hex-encoded to 64 characters.
 	sessionIDBytes = 32
+
+	// preAuthSessionTTL bounds the lifetime of the throwaway, non-admin
+	// sessions created to carry a CSRF token on public forms (login page),
+	// so anonymous form loads cannot accumulate long-lived session entries.
+	preAuthSessionTTL = 15 * time.Minute
 )
 
 // Session holds the data associated with an authenticated admin session.
@@ -26,6 +31,9 @@ type Session struct {
 	Admin        bool
 	CreatedAt    time.Time
 	LastAccessed time.Time
+	// expiresAt is when the session becomes invalid. Most sessions expire
+	// maxAge after creation; pre-auth login-form sessions expire sooner.
+	expiresAt time.Time
 
 	// CSRFToken is the per-session CSRF token, generated lazily on first
 	// access via CSRFToken().
@@ -83,13 +91,44 @@ func (sm *SessionManager) Create(w http.ResponseWriter) (*Session, error) {
 		Admin:        true,
 		CreatedAt:    now,
 		LastAccessed: now,
+		expiresAt:    now.Add(sm.maxAge),
 	}
 
 	sm.mu.Lock()
 	sm.sessions[id] = sess
 	sm.mu.Unlock()
 
-	sm.setCookie(w, id)
+	sm.setCookie(w, id, sm.maxAge)
+	return sess, nil
+}
+
+// CreatePreAuth creates a short-lived, non-admin session used only to carry a
+// CSRF token on a public form (the login page). The session is created
+// non-admin atomically (no post-creation mutation, so there is no window in
+// which it could be treated as authenticated) and expires quickly so anonymous
+// form loads cannot accumulate long-lived session entries.
+func (sm *SessionManager) CreatePreAuth(w http.ResponseWriter) (*Session, error) {
+	id, err := generateSessionID()
+	if err != nil {
+		return nil, fmt.Errorf("auth: generate session id: %w", err)
+	}
+
+	ttl := min(sm.maxAge, preAuthSessionTTL)
+
+	now := time.Now()
+	sess := &Session{
+		ID:           id,
+		Admin:        false,
+		CreatedAt:    now,
+		LastAccessed: now,
+		expiresAt:    now.Add(ttl),
+	}
+
+	sm.mu.Lock()
+	sm.sessions[id] = sess
+	sm.mu.Unlock()
+
+	sm.setCookie(w, id, ttl)
 	return sess, nil
 }
 
@@ -111,7 +150,7 @@ func (sm *SessionManager) Get(r *http.Request) *Session {
 	}
 
 	// Check expiration.
-	if time.Since(sess.CreatedAt) > sm.maxAge {
+	if !sess.expiresAt.IsZero() && time.Now().After(sess.expiresAt) {
 		delete(sm.sessions, cookie.Value)
 		return nil
 	}
@@ -144,14 +183,14 @@ func (sm *SessionManager) Delete(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// setCookie writes the session cookie to the response.
-func (sm *SessionManager) setCookie(w http.ResponseWriter, sessionID string) {
+// setCookie writes the session cookie to the response with the given lifetime.
+func (sm *SessionManager) setCookie(w http.ResponseWriter, sessionID string, ttl time.Duration) {
 	// #nosec G124 -- Secure is intentionally configurable so local HTTP development remains usable; production enables it.
 	http.SetCookie(w, &http.Cookie{
 		Name:     SessionCookieName,
 		Value:    sessionID,
 		Path:     "/",
-		MaxAge:   int(sm.maxAge.Seconds()),
+		MaxAge:   int(ttl.Seconds()),
 		HttpOnly: true,
 		Secure:   sm.secure,
 		SameSite: http.SameSiteStrictMode,
@@ -206,8 +245,9 @@ func (sm *SessionManager) cleanup(ctx context.Context) {
 			return
 		case <-ticker.C:
 			sm.mu.Lock()
+			now := time.Now()
 			for id, sess := range sm.sessions {
-				if time.Since(sess.CreatedAt) > sm.maxAge {
+				if !sess.expiresAt.IsZero() && now.After(sess.expiresAt) {
 					delete(sm.sessions, id)
 				}
 			}

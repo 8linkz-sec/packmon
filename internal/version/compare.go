@@ -466,22 +466,6 @@ func comparePrereleaseIdentifiers(a, b string) int {
 // PEP 440 comparison (Python)
 // ---------------------------------------------------------------------------
 
-// pep440Phase maps pre-release/post-release suffixes to an ordering value.
-// The canonical ordering is: dev < alpha < beta < rc < release < post.
-var pep440Phase = map[string]int{
-	"dev":   -5,
-	"a":     -4,
-	"alpha": -4,
-	"b":     -3,
-	"beta":  -3,
-	"c":     -2, // PEP 440: "c" is an alias for "rc"
-	"rc":    -2,
-	// release = 0 (implicit)
-	"post": 1,
-	"rev":  1, // alias for post
-	"r":    1, // alias for post
-}
-
 // comparePEP440 compares two Python version strings per a simplified
 // PEP 440 implementation that covers the vast majority of real-world
 // Python packages. It handles:
@@ -607,7 +591,7 @@ var pep440DotSuffixes = []struct {
 	{".r", 1},
 }
 
-func splitPEP440Suffix(v string) (release string, phase int, phaseNum int) {
+func splitPEP440Suffix(v string) (release string, phase, phaseNum int) {
 	// First try dot-separated suffixes: ".dev3", ".post1", ".rc2", ".a1", ".b2", etc.
 	// Use a fixed-order slice instead of map iteration to avoid non-determinism.
 	for _, s := range pep440DotSuffixes {
@@ -648,7 +632,7 @@ func splitPEP440Suffix(v string) (release string, phase int, phaseNum int) {
 
 // splitInlineSuffix extracts an inline PEP 440 suffix from a version
 // segment like "0a1", "2b3", "1rc2", "5alpha1", "3beta2".
-func splitInlineSuffix(seg string) (release string, phase int, num int) {
+func splitInlineSuffix(seg string) (release string, phase, num int) {
 	// Try longest suffixes first to match "alpha" before "a", "beta" before "b".
 	suffixes := []struct {
 		name  string

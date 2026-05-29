@@ -18,17 +18,17 @@ type RepoInfo struct {
 // ScanResult is the canonical scan result schema.
 // Used identically for CLI JSON output, API response, and webhook result.
 type ScanResult struct {
-	ScanID           string            `json:"scan_id"`
-	Mode             string            `json:"mode"`
-	ScannedAt        time.Time         `json:"scanned_at"`
-	DurationMs       int64             `json:"duration_ms"`
-	PackagesScanned  int               `json:"packages_scanned"`
-	FindingsCount    int               `json:"findings_count"`
-	FindingsBlocking bool              `json:"findings_blocking"`
-	FeedStatus       string            `json:"feed_status"`
-	DBAgeDays        *int              `json:"db_age_days"`
-	DBStale          bool              `json:"db_stale"`
-	Summary          ScanSummary       `json:"summary"`
+	ScanID            string            `json:"scan_id"`
+	Mode              string            `json:"mode"`
+	ScannedAt         time.Time         `json:"scanned_at"`
+	DurationMs        int64             `json:"duration_ms"`
+	PackagesScanned   int               `json:"packages_scanned"`
+	FindingsCount     int               `json:"findings_count"`
+	FindingsBlocking  bool              `json:"findings_blocking"`
+	FeedStatus        string            `json:"feed_status"`
+	DBAgeDays         *int              `json:"db_age_days"`
+	DBStale           bool              `json:"db_stale"`
+	Summary           ScanSummary       `json:"summary"`
 	Findings          []Finding         `json:"findings"`
 	FindingsTruncated bool              `json:"findings_truncated,omitempty"`
 	FeedVersions      map[string]string `json:"feed_versions"`

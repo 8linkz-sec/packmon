@@ -114,21 +114,26 @@ func (r *Registry) SupportedFiles() []string {
 }
 
 // dedup returns a new slice with duplicate packages removed. Two packages are
-// considered duplicates when name, version, and ecosystem all match.
+// considered duplicates when name, version, and ecosystem all match. If a
+// package appears as both production and development dependency, keep the
+// production classification.
 func dedup(pkgs []domain.Package) []domain.Package {
 	type key struct {
 		name      string
 		version   string
 		ecosystem domain.Ecosystem
 	}
-	seen := make(map[key]struct{}, len(pkgs))
+	seen := make(map[key]int, len(pkgs))
 	out := make([]domain.Package, 0, len(pkgs))
 	for _, p := range pkgs {
 		k := key{p.Name, p.Version, p.Ecosystem}
-		if _, ok := seen[k]; ok {
+		if idx, ok := seen[k]; ok {
+			if out[idx].Dev && !p.Dev {
+				out[idx].Dev = false
+			}
 			continue
 		}
-		seen[k] = struct{}{}
+		seen[k] = len(out)
 		out = append(out, p)
 	}
 	return out

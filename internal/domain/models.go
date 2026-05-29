@@ -21,11 +21,23 @@ const (
 	EcosystemCRAN          Ecosystem = "cran"
 )
 
+// Valid reports whether e is one of the canonical supported ecosystems.
+func (e Ecosystem) Valid() bool {
+	switch e {
+	case EcosystemNPM, EcosystemPyPI, EcosystemGo, EcosystemMaven, EcosystemCargo,
+		EcosystemNuGet, EcosystemComposer, EcosystemGem, EcosystemPub, EcosystemGitHubActions,
+		EcosystemCocoaPods, EcosystemSwiftPM, EcosystemHex, EcosystemCRAN:
+		return true
+	}
+	return false
+}
+
 // Package represents a dependency found in a lock file.
 type Package struct {
 	Name      string    `json:"name"`
 	Version   string    `json:"version"`
 	Ecosystem Ecosystem `json:"ecosystem"`
+	Dev       bool      `json:"dev,omitempty"`
 }
 
 // FindingType distinguishes vulnerability findings from malicious package findings.

@@ -142,6 +142,7 @@ func (g *GitRepo) PullWithChangedFiles(ctx context.Context) (newHash string, cha
 	// Both commits are still reachable at this point (before reset).
 	var diffFiles []string
 	var stdout bytes.Buffer
+	// #nosec G204 -- command is fixed to git; oldHash is read from git itself and origin/HEAD is fixed.
 	cmd := exec.CommandContext(ctx, "git", "diff", "--name-only", oldHash, "origin/HEAD")
 	cmd.Dir = g.Dir
 	cmd.Stdout = &stdout

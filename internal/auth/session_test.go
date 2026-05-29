@@ -237,6 +237,35 @@ func TestGetUpdatesLastAccessed(t *testing.T) {
 	}
 }
 
+func TestCreatePreAuthIsNonAdminAndShortLived(t *testing.T) {
+	t.Parallel()
+
+	// maxAge is long, but a pre-auth session must use the shorter pre-auth TTL.
+	sm := newTestSessionManager(8 * time.Hour)
+	rec := httptest.NewRecorder()
+	sess, err := sm.CreatePreAuth(rec)
+	if err != nil {
+		t.Fatalf("CreatePreAuth returned error: %v", err)
+	}
+	if sess.Admin {
+		t.Fatal("pre-auth session must not be marked admin")
+	}
+
+	// The cookie lifetime must be the bounded pre-auth TTL, not maxAge.
+	var maxAge int
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == SessionCookieName {
+			maxAge = c.MaxAge
+		}
+	}
+	if want := int(preAuthSessionTTL.Seconds()); maxAge != want {
+		t.Fatalf("pre-auth cookie MaxAge = %d, want %d", maxAge, want)
+	}
+	if sess.expiresAt.IsZero() || time.Until(sess.expiresAt) > preAuthSessionTTL+time.Second {
+		t.Fatalf("pre-auth session expiry not bounded to %s", preAuthSessionTTL)
+	}
+}
+
 func TestNewSessionManagerDefaultsMaxAge(t *testing.T) {
 	t.Parallel()
 

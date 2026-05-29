@@ -4,7 +4,7 @@ DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 GOEXE   ?= $(shell go env GOEXE)
 LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 
-.PHONY: build build-server test test-integration test-e2e lint fmt security clean helm-template
+.PHONY: build build-server test test-ci test-integration test-e2e lint fmt security clean helm-template
 
 build:
 	CGO_ENABLED=0 go build -ldflags="$(LDFLAGS)" -o packmon$(GOEXE) ./cmd/packmon
@@ -15,10 +15,14 @@ build-server:
 test:
 	go test -race -coverprofile=coverage.out ./...
 
+test-ci:
+	go test ./tests/ci
+
 test-integration: build build-server
 	PACKMON_TEST_BIN_DIR=$(CURDIR) go test -tags integration ./tests/integration
 
-test-e2e: test-integration
+test-e2e: build
+	PACKMON_TEST_BIN_DIR=$(CURDIR) go test -tags e2e ./tests/e2e
 
 helm-template:
 	helm template packmon ./deploy/helm/packmon

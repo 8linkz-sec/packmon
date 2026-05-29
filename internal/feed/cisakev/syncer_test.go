@@ -17,10 +17,10 @@ import (
 
 type kevStoreStub struct {
 	db.Store
-	setCISAKEVIDs     []string
-	clearCISAKEVKeep  []string
-	setUpdated        int
-	clearCleared      int
+	setCISAKEVIDs    []string
+	clearCISAKEVKeep []string
+	setUpdated       int
+	clearCleared     int
 }
 
 func (s *kevStoreStub) SetCISAKEV(_ context.Context, cveIDs []string) (int, error) {

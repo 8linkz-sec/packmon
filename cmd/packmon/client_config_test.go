@@ -55,6 +55,47 @@ repos:
 	}
 }
 
+func TestLoadCLIConfigLayersUserGlobalUnderProject(t *testing.T) {
+	// Uses t.Chdir/t.Setenv, so it cannot run in parallel.
+	home := t.TempDir()
+	t.Setenv("HOME", home)        // Unix
+	t.Setenv("USERPROFILE", home) // Windows
+
+	userCfgDir := filepath.Join(home, ".packmon", "config")
+	if err := os.MkdirAll(userCfgDir, 0o750); err != nil {
+		t.Fatalf("mkdir user config dir: %v", err)
+	}
+	userCfg := "server: \"https://global.example\"\nfail_on: HIGH\ntimeout: 99\n"
+	if err := os.WriteFile(filepath.Join(userCfgDir, "packmon.yaml"), []byte(userCfg), 0o600); err != nil {
+		t.Fatalf("write user config: %v", err)
+	}
+
+	project := t.TempDir()
+	if err := os.WriteFile(filepath.Join(project, ".packmon.yaml"), []byte("fail_on: CRITICAL\n"), 0o600); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+	t.Chdir(project)
+
+	cfg, _, err := loadCLIConfig("")
+	if err != nil {
+		t.Fatalf("loadCLIConfig: %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("expected a merged config, got nil")
+	}
+	// Inherited from the user-global layer (project did not set these).
+	if cfg.Server != "https://global.example" {
+		t.Errorf("server = %q, want user-global value", cfg.Server)
+	}
+	if cfg.Timeout != 99 {
+		t.Errorf("timeout = %d, want 99 from user-global", cfg.Timeout)
+	}
+	// Project overrides the user-global value.
+	if cfg.FailOn != "CRITICAL" {
+		t.Errorf("fail_on = %q, want CRITICAL (project overrides user-global)", cfg.FailOn)
+	}
+}
+
 func TestLoadCLIConfigRejectsDuplicateRepoNames(t *testing.T) {
 	t.Parallel()
 

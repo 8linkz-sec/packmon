@@ -1,10 +1,24 @@
 package ghsa
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/8linkz/packmon/internal/db"
 	"github.com/8linkz/packmon/internal/domain"
 )
+
+type ghsaStoreStub struct {
+	db.Store
+	upserts int
+}
+
+func (s *ghsaStoreStub) UpsertVulnerability(context.Context, *db.Vulnerability) error {
+	s.upserts++
+	return nil
+}
 
 func TestMapToVulnerability_PreservesGitHubActionsPackage(t *testing.T) {
 	t.Parallel()
@@ -45,5 +59,27 @@ func TestMapToVulnerability_PreservesGitHubActionsPackage(t *testing.T) {
 	}
 	if vuln.AffectedPackages[0].Name != "actions/setup-node" {
 		t.Fatalf("AffectedPackages[0].Name = %q, want %q", vuln.AffectedPackages[0].Name, "actions/setup-node")
+	}
+}
+
+func TestProcessChangedFilesDoesNotReadOutsideRepo(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	outsidePath := filepath.Join(filepath.Dir(repoDir), "outside.json")
+	if err := os.WriteFile(outsidePath, []byte(`{"id":"GHSA-outside-1234-5678"}`), 0o600); err != nil {
+		t.Fatalf("write outside advisory: %v", err)
+	}
+
+	store := &ghsaStoreStub{}
+	syncer := NewSyncer(store, nil, "")
+	_, _, err := syncer.processChangedFiles(context.Background(), store, repoDir, []string{
+		reviewedDir + "/../../../outside.json",
+	})
+	if err != nil {
+		t.Fatalf("processChangedFiles() error = %v", err)
+	}
+	if store.upserts != 0 {
+		t.Fatalf("upserts = %d, want 0 for path outside repo", store.upserts)
 	}
 }

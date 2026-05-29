@@ -167,6 +167,34 @@ func TestNPMParser_Parse(t *testing.T) {
 	}
 }
 
+func TestNPMParser_ParseMarksDevDependencies(t *testing.T) {
+	t.Parallel()
+
+	input := `{
+		"lockfileVersion": 3,
+		"packages": {
+			"": {"version": "1.0.0"},
+			"node_modules/prod": {"version": "1.0.0"},
+			"node_modules/dev-tool": {"version": "2.0.0", "dev": true}
+		}
+	}`
+	pkgs, err := NewNPMParser().Parse(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	dev := make(map[string]bool, len(pkgs))
+	for _, p := range pkgs {
+		dev[p.Name] = p.Dev
+	}
+	if dev["prod"] {
+		t.Errorf("prod dependency wrongly marked dev")
+	}
+	if !dev["dev-tool"] {
+		t.Errorf("dev dependency not marked dev")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // YarnParser
 // ---------------------------------------------------------------------------

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -174,15 +175,42 @@ func runScanCommand(cmd *cobra.Command, args []string, flags scanFlagValues) err
 		if err != nil {
 			return err
 		}
-		if exitCode > finalExitCode {
-			finalExitCode = exitCode
-		}
+		finalExitCode = worstExitCode(finalExitCode, exitCode)
 	}
 
 	if finalExitCode != ExitOK {
 		os.Exit(finalExitCode)
 	}
 	return nil
+}
+
+// worstExitCode merges two scan exit codes into the most severe one. Severity
+// order (worst first): internal(10) > parser(4) > operational(2) >
+// blocking(1) > under-threshold(3) > ok(0). A blocking target therefore wins
+// over a sibling that only had non-blocking findings, even though 3 > 1
+// numerically.
+func worstExitCode(a, b int) int {
+	if exitCodeSeverity(b) > exitCodeSeverity(a) {
+		return b
+	}
+	return a
+}
+
+func exitCodeSeverity(code int) int {
+	switch code {
+	case ExitInternal:
+		return 5
+	case ExitParser:
+		return 4
+	case ExitOperational:
+		return 3
+	case ExitBlocking:
+		return 2
+	case ExitUnderThreshold:
+		return 1
+	default: // ExitOK
+		return 0
+	}
 }
 
 func buildScanTargets(cfg *cliConfig, args []string, flags scanFlagValues) ([]scanTarget, error) {
@@ -378,6 +406,38 @@ func resolveScanSettings(cmd *cobra.Command, cfg *cliConfig, target scanTarget, 
 	return settings, nil
 }
 
+// scanLogger builds the structured logger for the scan pipeline. It writes
+// text to stderr at the level selected by --log-level (raised to ERROR when
+// --quiet is set). Sensitive values are never logged by the scanner.
+func scanLogger(quiet bool) *slog.Logger {
+	level := slog.LevelInfo
+	switch strings.ToUpper(strings.TrimSpace(flagLogLevel)) {
+	case "DEBUG":
+		level = slog.LevelDebug
+	case "WARN":
+		level = slog.LevelWarn
+	case "ERROR":
+		level = slog.LevelError
+	}
+	if quiet {
+		level = slog.LevelError
+	}
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+}
+
+// autoFallbackWarning returns a user-facing warning when an auto-mode scan fell
+// back to the local database (remote unreachable), or "" when no warning is
+// needed. The local DB age is included when known.
+func autoFallbackWarning(mode scanner.Mode, result *domain.ScanResult) string {
+	if mode != scanner.ModeAuto || result == nil || result.Mode != string(scanner.ModeLocal) {
+		return ""
+	}
+	if result.DBAgeDays != nil {
+		return fmt.Sprintf("warning: remote server unreachable, scanned against local database (%d day(s) old)", *result.DBAgeDays)
+	}
+	return "warning: remote server unreachable, scanned against local database"
+}
+
 func runSingleScan(ctx context.Context, settings scanSettings) (int, error) {
 	failOn, ok := scanner.SeverityFromString(settings.FailOn)
 	if !ok {
@@ -401,6 +461,7 @@ func runSingleScan(ctx context.Context, settings scanSettings) (int, error) {
 		Mode:       mode,
 		ServerURL:  settings.ServerURL,
 		APIKey:     settings.APIKey,
+		Repo:       scanRepoInfo(settings.Path),
 		FailOn:     failOn,
 		Ecosystems: settings.Ecosystems,
 		MaxDepth:   settings.MaxDepth,
@@ -408,6 +469,7 @@ func runSingleScan(ctx context.Context, settings scanSettings) (int, error) {
 		IncludeDev: settings.IncludeDev,
 		Quiet:      settings.Quiet,
 		NoColor:    settings.NoColor,
+		Logger:     scanLogger(settings.Quiet),
 	}
 
 	reg := parser.NewRegistry()
@@ -435,7 +497,14 @@ func runSingleScan(ctx context.Context, settings scanSettings) (int, error) {
 		}
 	}
 
-	if historyStore != nil && historyEnabled() && (exitCode == ExitOK || exitCode == ExitBlocking) {
+	// Auto mode falls back to the local database when the remote server is
+	// unreachable. Surface this to the user along with the local DB age so a
+	// silent stale-data scan cannot be mistaken for a fresh remote scan.
+	if msg := autoFallbackWarning(mode, result); msg != "" && !settings.Quiet {
+		fmt.Fprintln(os.Stderr, msg)
+	}
+
+	if historyStore != nil && historyEnabled() && (exitCode == ExitOK || exitCode == ExitBlocking || exitCode == ExitUnderThreshold) {
 		if err := recordScanHistory(ctx, historyStore, settings.Path, result); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: unable to store scan history: %v\n", err)
 		} else if maxPerRepo := historyMaxScansPerRepo(); maxPerRepo > 0 {
@@ -501,8 +570,7 @@ func runSingleScan(ctx context.Context, settings scanSettings) (int, error) {
 			Secret:  settings.WebhookSecret,
 			Version: version,
 		}
-		repoName, branch := scanRepoMetadata(settings.Path)
-		scanner.SendWebhook(ctx, whCfg, result, &domain.RepoInfo{Name: repoName, Branch: branch})
+		scanner.SendWebhook(ctx, whCfg, result, scanRepoInfo(settings.Path))
 	}
 
 	return exitCode, nil

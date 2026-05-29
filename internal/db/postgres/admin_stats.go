@@ -185,6 +185,18 @@ func (s *Store) CountScansByDay(ctx context.Context, days int) ([]db.DailyScanSt
 	return out, nil
 }
 
+func (s *Store) ScanTotals(ctx context.Context) (*db.ScanTotals, error) {
+	totals := &db.ScanTotals{}
+	if err := s.pool.QueryRow(ctx, `
+		SELECT
+			COALESCE(SUM(packages_count), 0)::int,
+			COALESCE(SUM(findings_count), 0)::int
+		FROM scan_log`).Scan(&totals.PackagesScanned, &totals.Findings); err != nil {
+		return nil, fmt.Errorf("postgres: scan totals: %w", err)
+	}
+	return totals, nil
+}
+
 func (s *Store) SearchPackages(ctx context.Context, params db.PackageSearchParams) ([]db.PackageSearchResult, error) {
 	query := strings.TrimSpace(params.Query)
 	severity := strings.ToUpper(strings.TrimSpace(params.Severity))
@@ -494,8 +506,9 @@ func (s *Store) QueueStats(ctx context.Context) (*db.QueueStatsResult, error) {
 			COUNT(*) FILTER (WHERE status = 'pending')::int,
 			COUNT(*) FILTER (WHERE status = 'processing')::int,
 			COUNT(*) FILTER (WHERE status = 'done')::int,
-			COUNT(*) FILTER (WHERE status = 'error')::int
-		FROM refresh_queue`).Scan(&stats.Pending, &stats.Processing, &stats.Done, &stats.Error); err != nil {
+			COUNT(*) FILTER (WHERE status = 'error')::int,
+			COUNT(*) FILTER (WHERE status = 'paused')::int
+		FROM refresh_queue`).Scan(&stats.Pending, &stats.Processing, &stats.Done, &stats.Error, &stats.Paused); err != nil {
 		return nil, fmt.Errorf("postgres: queue stats: %w", err)
 	}
 	return stats, nil
@@ -559,6 +572,97 @@ func (s *Store) PurgeQueue(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("postgres: purge queue: %w", err)
 	}
 	return int(tag.RowsAffected()), nil
+}
+
+func (s *Store) UpdateQueueJobPriority(ctx context.Context, jobID, priority int) error {
+	tag, err := s.pool.Exec(ctx, `UPDATE refresh_queue SET priority = $2 WHERE id = $1`, jobID, priority)
+	if err != nil {
+		return fmt.Errorf("postgres: update queue job %d priority: %w", jobID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("postgres: update queue job %d priority: job not found", jobID)
+	}
+	return nil
+}
+
+func (s *Store) RetryQueueJob(ctx context.Context, jobID int) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE refresh_queue
+		SET status = 'pending', requested_at = NOW(), processed_at = NULL, error = NULL
+		WHERE id = $1 AND status IN ('done', 'error', 'paused')`, jobID)
+	if err != nil {
+		return fmt.Errorf("postgres: retry queue job %d: %w", jobID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("postgres: retry queue job %d: job not found or not retryable", jobID)
+	}
+	return nil
+}
+
+func (s *Store) PauseQueueJob(ctx context.Context, jobID int) error {
+	tag, err := s.pool.Exec(ctx, `UPDATE refresh_queue SET status = 'paused' WHERE id = $1 AND status = 'pending'`, jobID)
+	if err != nil {
+		return fmt.Errorf("postgres: pause queue job %d: %w", jobID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("postgres: pause queue job %d: job not found or not pending", jobID)
+	}
+	return nil
+}
+
+func (s *Store) ResumeQueueJob(ctx context.Context, jobID int) error {
+	tag, err := s.pool.Exec(ctx, `UPDATE refresh_queue SET status = 'pending', processed_at = NULL, error = NULL WHERE id = $1 AND status = 'paused'`, jobID)
+	if err != nil {
+		return fmt.Errorf("postgres: resume queue job %d: %w", jobID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("postgres: resume queue job %d: job not found or not paused", jobID)
+	}
+	return nil
+}
+
+func (s *Store) ClearQueue(ctx context.Context, statuses []string) (int, error) {
+	statuses = normalizeQueueStatuses(statuses)
+	if len(statuses) == 0 {
+		return 0, nil
+	}
+
+	placeholders := make([]string, 0, len(statuses))
+	args := make([]any, 0, len(statuses))
+	for i, status := range statuses {
+		placeholders = append(placeholders, fmt.Sprintf("$%d", i+1))
+		args = append(args, status)
+	}
+
+	query := fmt.Sprintf(`DELETE FROM refresh_queue WHERE status IN (%s)`, strings.Join(placeholders, ", "))
+	tag, err := s.pool.Exec(ctx, query, args...)
+	if err != nil {
+		return 0, fmt.Errorf("postgres: clear queue: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
+func normalizeQueueStatuses(statuses []string) []string {
+	allowed := map[string]struct{}{
+		"pending": {},
+		"paused":  {},
+		"done":    {},
+		"error":   {},
+	}
+	seen := make(map[string]struct{}, len(statuses))
+	out := make([]string, 0, len(statuses))
+	for _, status := range statuses {
+		status = strings.ToLower(strings.TrimSpace(status))
+		if _, ok := allowed[status]; !ok {
+			continue
+		}
+		if _, ok := seen[status]; ok {
+			continue
+		}
+		seen[status] = struct{}{}
+		out = append(out, status)
+	}
+	return out
 }
 
 func (s *Store) DashboardStats(ctx context.Context) (*db.DashboardStatsResult, error) {

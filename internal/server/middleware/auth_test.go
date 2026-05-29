@@ -87,3 +87,41 @@ func TestAuthAllowsPublicDashboardInProduction(t *testing.T) {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
 }
+
+func TestAuthSkipsAPIKeyForDevelopmentFeedImportFromLoopback(t *testing.T) {
+	t.Parallel()
+
+	store := &authStoreStub{}
+	handler := Auth(slog.New(slog.NewTextHandler(io.Discard, nil)), store, true)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/feeds/openssf/import", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNoContent)
+	}
+}
+
+func TestAuthRequiresAPIKeyForDevelopmentFeedImportFromNonLoopback(t *testing.T) {
+	t.Parallel()
+
+	store := &authStoreStub{}
+	handler := Auth(slog.New(slog.NewTextHandler(io.Discard, nil)), store, true)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	// A dev-mode server reachable from a non-loopback peer must still require
+	// a valid API key for data-mutating write endpoints.
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/feeds/openssf/import", nil)
+	req.RemoteAddr = "203.0.113.10:44444"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}

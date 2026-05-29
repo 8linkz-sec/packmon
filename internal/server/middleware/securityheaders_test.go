@@ -9,7 +9,7 @@ import (
 func TestSecurityHeaders_SetsAllHeaders(t *testing.T) {
 	t.Parallel()
 
-	handler := SecurityHeaders(false, "")(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := SecurityHeaders(false, "", nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -18,7 +18,7 @@ func TestSecurityHeaders_SetsAllHeaders(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 
 	resp := rec.Result()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	expected := map[string]string{
 		"X-Content-Type-Options":  "nosniff",
@@ -42,7 +42,7 @@ func TestSecurityHeaders_HSTS_ProductionOnly(t *testing.T) {
 
 	t.Run("production mode sets HSTS", func(t *testing.T) {
 		t.Parallel()
-		handler := SecurityHeaders(true, "")(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		handler := SecurityHeaders(true, "", nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		}))
 
@@ -62,7 +62,7 @@ func TestSecurityHeaders_HSTS_ProductionOnly(t *testing.T) {
 
 	t.Run("development mode omits HSTS", func(t *testing.T) {
 		t.Parallel()
-		handler := SecurityHeaders(false, "")(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		handler := SecurityHeaders(false, "", nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		}))
 
@@ -80,7 +80,9 @@ func TestSecurityHeaders_HSTS_ProductionOnly(t *testing.T) {
 func TestSecurityHeaders_RedirectsHTTP(t *testing.T) {
 	t.Parallel()
 
-	handler := SecurityHeaders(true, "packmon.example.com")(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	// httptest.NewRequest sets RemoteAddr to 192.0.2.1:1234; trust that peer
+	// so the proxy-supplied X-Forwarded-Proto is honored.
+	handler := SecurityHeaders(true, "packmon.example.com", []string{"192.0.2.1"})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("should not reach here"))
 	}))
@@ -94,7 +96,7 @@ func TestSecurityHeaders_RedirectsHTTP(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 
 	resp := rec.Result()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusMovedPermanently {
 		t.Errorf("status = %d, want %d (MovedPermanently)", resp.StatusCode, http.StatusMovedPermanently)
@@ -110,7 +112,7 @@ func TestSecurityHeaders_RedirectsHTTP(t *testing.T) {
 func TestSecurityHeaders_NoRedirectWithoutXForwardedProto(t *testing.T) {
 	t.Parallel()
 
-	handler := SecurityHeaders(true, "")(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := SecurityHeaders(true, "", []string{"192.0.2.1"})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -124,10 +126,32 @@ func TestSecurityHeaders_NoRedirectWithoutXForwardedProto(t *testing.T) {
 	}
 }
 
+func TestSecurityHeaders_NoRedirectFromUntrustedProxy(t *testing.T) {
+	t.Parallel()
+
+	// No trusted proxies configured: an attacker-supplied X-Forwarded-Proto
+	// must be ignored and must not drive a redirect.
+	handler := SecurityHeaders(true, "packmon.example.com", nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
+	req.Header.Set("X-Forwarded-Proto", "http")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d (untrusted X-Forwarded-Proto must not redirect)", rec.Code, http.StatusOK)
+	}
+	if location := rec.Header().Get("Location"); location != "" {
+		t.Errorf("Location = %q, want empty", location)
+	}
+}
+
 func TestSecurityHeaders_NoRedirectInDevelopment(t *testing.T) {
 	t.Parallel()
 
-	handler := SecurityHeaders(false, "")(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := SecurityHeaders(false, "", []string{"192.0.2.1"})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -145,7 +169,7 @@ func TestSecurityHeaders_NoRedirectInDevelopment(t *testing.T) {
 func TestSecurityHeaders_HTTPSDoesNotRedirect(t *testing.T) {
 	t.Parallel()
 
-	handler := SecurityHeaders(true, "")(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := SecurityHeaders(true, "", []string{"192.0.2.1"})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -162,7 +186,7 @@ func TestSecurityHeaders_HTTPSDoesNotRedirect(t *testing.T) {
 func TestSecurityHeaders_SkipsRedirectForUnconfiguredExternalHost(t *testing.T) {
 	t.Parallel()
 
-	handler := SecurityHeaders(true, "")(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := SecurityHeaders(true, "", []string{"192.0.2.1"})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 

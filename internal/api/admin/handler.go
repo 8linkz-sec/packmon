@@ -45,6 +45,7 @@ type AdminHandler struct {
 	renderer *web.Renderer
 	logger   *slog.Logger
 	cfg      *config.Config
+	runtime  *config.RuntimeSettings
 	syncFeed FeedSyncFunc
 
 	// loginMu protects the loginAttempts map.
@@ -55,7 +56,7 @@ type AdminHandler struct {
 // NewAdminHandler creates an AdminHandler with the given dependencies.
 // The provided context controls the lifetime of the background cleanup
 // goroutine; when the context is cancelled the goroutine exits.
-func NewAdminHandler(ctx context.Context, store db.Store, sm *auth.SessionManager, renderer *web.Renderer, logger *slog.Logger, cfg *config.Config, syncFeed FeedSyncFunc) *AdminHandler {
+func NewAdminHandler(ctx context.Context, store db.Store, sm *auth.SessionManager, renderer *web.Renderer, logger *slog.Logger, cfg *config.Config, runtime *config.RuntimeSettings, syncFeed FeedSyncFunc) *AdminHandler {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -65,6 +66,7 @@ func NewAdminHandler(ctx context.Context, store db.Store, sm *auth.SessionManage
 		renderer:      renderer,
 		logger:        logger,
 		cfg:           cfg,
+		runtime:       runtime,
 		syncFeed:      syncFeed,
 		loginAttempts: make(map[string]*loginAttempt),
 	}
@@ -102,18 +104,16 @@ func (h *AdminHandler) showLoginForm(w http.ResponseWriter, r *http.Request, err
 		return
 	}
 
-	// Create a temporary session just for the CSRF token on the login form.
-	// This session is not an authenticated session -- it only carries the
-	// CSRF token. On successful login, a new authenticated session replaces it.
-	sess, err := h.sm.Create(w)
+	// Create a short-lived, non-admin session just to carry the CSRF token on
+	// the login form. It is created non-admin atomically (no post-hoc mutation)
+	// and expires quickly, so anonymous form loads cannot accumulate long-lived
+	// sessions. On successful login a new authenticated session replaces it.
+	sess, err := h.sm.CreatePreAuth(w)
 	if err != nil {
 		h.logger.Error("failed to create login session", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
-	// Mark this session as not-admin so the session middleware does not
-	// treat it as authenticated.
-	sess.Admin = false
 
 	csrfToken, err := auth.CSRFToken(sess)
 	if err != nil {
@@ -359,6 +359,11 @@ func adminFeedHealth(enabled bool, mode config.FeedMode, s *db.FeedSyncStatus) s
 		return "warning"
 	}
 	if time.Since(*s.LastSyncAt) > 48*time.Hour {
+		return "warning"
+	}
+	// A successful sync that persisted zero entries is not usable for lookups
+	// (DESIGN.md 3.5: zero entries => unhealthy).
+	if s.EntriesTotal == 0 && s.EntriesSynced == 0 {
 		return "warning"
 	}
 	return "healthy"

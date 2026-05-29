@@ -5,10 +5,15 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz/packmon/internal/parser"
+	"github.com/8linkz/packmon/internal/server/middleware"
 )
 
 func TestCheckRemoteSendsAPIKey(t *testing.T) {
@@ -52,6 +57,205 @@ func TestCheckRemoteSendsAPIKey(t *testing.T) {
 	case msg := <-authErrCh:
 		t.Fatal(msg)
 	default:
+	}
+}
+
+func TestCheckRemoteSendsCorrelationIDAndRepoMetadata(t *testing.T) {
+	t.Parallel()
+
+	requestErrCh := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get(middleware.HeaderCorrelationID); got == "" || !strings.Contains(got, "-") {
+			requestErrCh <- "missing UUID-like X-Correlation-ID header"
+			http.Error(w, "missing correlation", http.StatusBadRequest)
+			return
+		}
+		var req domain.ScanRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			requestErrCh <- "decode request: " + err.Error()
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if req.Repo == nil || req.Repo.Name != "packmon" || req.Repo.Branch != "main" || req.Repo.Commit != "abcdef" {
+			requestErrCh <- "repo metadata not sent"
+			http.Error(w, "missing repo", http.StatusBadRequest)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(domain.ScanResult{
+			ScanID:       "scan-1",
+			Mode:         "remote",
+			ScannedAt:    time.Now().UTC(),
+			Summary:      domain.ScanSummary{BySeverity: map[string]int{}, ByType: map[string]int{}, BySource: map[string]int{}},
+			Findings:     []domain.Finding{},
+			FeedVersions: map[string]string{},
+		})
+	}))
+	defer closeSilently(server)
+
+	sc := New(nil, Config{
+		ServerURL: server.URL,
+		Timeout:   5 * time.Second,
+		Repo:      &domain.RepoInfo{Name: "packmon", Branch: "main", Commit: "abcdef"},
+	})
+
+	if _, _, _, err := sc.checkRemote(context.Background(), []domain.Package{{
+		Name:      "lodash",
+		Version:   "1.0.0",
+		Ecosystem: domain.EcosystemNPM,
+	}}); err != nil {
+		t.Fatalf("checkRemote() error = %v", err)
+	}
+
+	select {
+	case msg := <-requestErrCh:
+		t.Fatal(msg)
+	default:
+	}
+}
+
+func TestScannerFiltersDevDependenciesByDefault(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	lockFile := filepath.Join(dir, "package-lock.json")
+	if err := os.WriteFile(lockFile, []byte(`{
+		"lockfileVersion": 3,
+		"packages": {
+			"": {"version":"1.0.0"},
+			"node_modules/prod": {"version":"1.0.0"},
+			"node_modules/dev-only": {"version":"2.0.0","dev":true}
+		}
+	}`), 0o600); err != nil {
+		t.Fatalf("write lock file: %v", err)
+	}
+
+	sc := New(parser.NewRegistry(), Config{
+		Path:     dir,
+		Mode:     ModeLocal,
+		FailOn:   domain.SeverityCritical,
+		MaxDepth: 3,
+		Timeout:  5 * time.Second,
+	})
+	checker := &captureLocalChecker{}
+	sc.SetLocalChecker(checker)
+
+	result, exitCode := sc.Run(context.Background())
+	if exitCode != ExitOK {
+		t.Fatalf("Run exit = %d, result = %+v", exitCode, result)
+	}
+	if len(checker.packages) != 1 {
+		t.Fatalf("checked packages = %d, want 1: %#v", len(checker.packages), checker.packages)
+	}
+	if checker.packages[0].Name != "prod" {
+		t.Fatalf("checked package = %q, want prod", checker.packages[0].Name)
+	}
+}
+
+func TestScannerIncludesDevDependenciesWhenRequested(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	lockFile := filepath.Join(dir, "package-lock.json")
+	if err := os.WriteFile(lockFile, []byte(`{
+		"lockfileVersion": 3,
+		"packages": {
+			"": {"version":"1.0.0"},
+			"node_modules/prod": {"version":"1.0.0"},
+			"node_modules/dev-only": {"version":"2.0.0","dev":true}
+		}
+	}`), 0o600); err != nil {
+		t.Fatalf("write lock file: %v", err)
+	}
+
+	sc := New(parser.NewRegistry(), Config{
+		Path:       dir,
+		Mode:       ModeLocal,
+		FailOn:     domain.SeverityCritical,
+		MaxDepth:   3,
+		Timeout:    5 * time.Second,
+		IncludeDev: true,
+	})
+	checker := &captureLocalChecker{}
+	sc.SetLocalChecker(checker)
+
+	result, exitCode := sc.Run(context.Background())
+	if exitCode != ExitOK {
+		t.Fatalf("Run exit = %d, result = %+v", exitCode, result)
+	}
+	if len(checker.packages) != 2 {
+		t.Fatalf("checked packages = %d, want 2: %#v", len(checker.packages), checker.packages)
+	}
+}
+
+type captureLocalChecker struct {
+	packages []domain.Package
+}
+
+func (c *captureLocalChecker) FindVulnerabilities(_ context.Context, ecosystem, name, version string) ([]domain.Finding, error) {
+	c.packages = append(c.packages, domain.Package{Ecosystem: domain.Ecosystem(ecosystem), Name: name, Version: version})
+	return nil, nil
+}
+
+func (c *captureLocalChecker) FindMalicious(context.Context, string, string, string) ([]domain.Finding, error) {
+	return nil, nil
+}
+
+// severityLocalChecker reports a single vulnerability finding of a fixed
+// severity for every package, used to exercise the blocking/non-blocking
+// exit-code logic.
+type severityLocalChecker struct {
+	severity domain.Severity
+}
+
+func (c severityLocalChecker) FindVulnerabilities(_ context.Context, ecosystem, name, version string) ([]domain.Finding, error) {
+	return []domain.Finding{{
+		Name:      name,
+		Version:   version,
+		Ecosystem: domain.Ecosystem(ecosystem),
+		Type:      domain.FindingType("vulnerability"),
+		Severity:  c.severity,
+		Title:     "test finding",
+		Source:    "test",
+	}}, nil
+}
+
+func (c severityLocalChecker) FindMalicious(context.Context, string, string, string) ([]domain.Finding, error) {
+	return nil, nil
+}
+
+func TestScannerReturnsUnderThresholdForNonBlockingFindings(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	lockFile := filepath.Join(dir, "package-lock.json")
+	if err := os.WriteFile(lockFile, []byte(`{
+		"lockfileVersion": 3,
+		"packages": {"": {"version":"1.0.0"}, "node_modules/prod": {"version":"1.0.0"}}
+	}`), 0o600); err != nil {
+		t.Fatalf("write lock file: %v", err)
+	}
+
+	sc := New(parser.NewRegistry(), Config{
+		Path:     dir,
+		Mode:     ModeLocal,
+		FailOn:   domain.SeverityCritical,
+		MaxDepth: 3,
+		Timeout:  5 * time.Second,
+	})
+	// A HIGH finding with a CRITICAL threshold is non-blocking.
+	sc.SetLocalChecker(severityLocalChecker{severity: domain.SeverityHigh})
+
+	result, exitCode := sc.Run(context.Background())
+	if exitCode != ExitUnderThreshold {
+		t.Fatalf("exit = %d, want %d (non-blocking findings); result = %+v", exitCode, ExitUnderThreshold, result)
+	}
+	if result.FindingsBlocking {
+		t.Fatal("expected findings to be non-blocking")
+	}
+	if result.FindingsCount == 0 {
+		t.Fatal("expected at least one finding")
 	}
 }
 

@@ -12,8 +12,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/8linkz/packmon/internal/config"
 	"github.com/8linkz/packmon/internal/db"
 	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz/packmon/internal/server/middleware"
 )
 
 // ---------------------------------------------------------------------------
@@ -37,37 +39,48 @@ type stubStore struct {
 func (s *stubStore) FindVulnerabilities(context.Context, string, string, string) ([]domain.Finding, error) {
 	return nil, nil
 }
+
 func (s *stubStore) FindMalicious(context.Context, string, string, string) ([]domain.Finding, error) {
 	return nil, nil
 }
+
 func (s *stubStore) FindVulnerabilitiesBatch(_ context.Context, _ []db.PackageQuery) ([]domain.Finding, error) {
 	return s.vulnBatchFindings, s.vulnBatchErr
 }
+
 func (s *stubStore) FindMaliciousBatch(_ context.Context, _ []db.PackageQuery) ([]domain.Finding, error) {
 	return s.malBatchFindings, s.malBatchErr
 }
-func (s *stubStore) PropagateSeverityViaAliases(context.Context) (int, error) { return 0, nil }
+func (s *stubStore) PropagateSeverityViaAliases(context.Context) (int, error)     { return 0, nil }
 func (s *stubStore) UpsertVulnerability(context.Context, *db.Vulnerability) error { return nil }
 func (s *stubStore) UpsertMaliciousFinding(context.Context, *db.MaliciousFinding) error {
 	return nil
 }
-func (s *stubStore) DeleteVulnerability(context.Context, string) error        { return nil }
-func (s *stubStore) DeleteMaliciousFinding(context.Context, string) error     { return nil }
+func (s *stubStore) DeleteVulnerability(context.Context, string) error    { return nil }
+func (s *stubStore) DeleteMaliciousFinding(context.Context, string) error { return nil }
 func (s *stubStore) ListMaliciousFindings(context.Context, string, int) ([]db.MaliciousFinding, error) {
 	return nil, nil
 }
-func (s *stubStore) SetCISAKEV(context.Context, []string) (int, error)              { return 0, nil }
-func (s *stubStore) ClearCISAKEV(context.Context, []string) (int, error)            { return 0, nil }
-func (s *stubStore) SetEPSSScores(context.Context, []db.EPSSEntry) (int, error)     { return 0, nil }
+func (s *stubStore) UpsertManualAdvisory(context.Context, *db.ManualAdvisory) error { return nil }
+func (s *stubStore) DeleteManualAdvisory(context.Context, string) error             { return nil }
+func (s *stubStore) ListManualAdvisories(context.Context, int) ([]db.ManualAdvisory, error) {
+	return nil, nil
+}
+func (s *stubStore) SetCISAKEV(context.Context, []string) (int, error)          { return 0, nil }
+func (s *stubStore) ClearCISAKEV(context.Context, []string) (int, error)        { return 0, nil }
+func (s *stubStore) SetEPSSScores(context.Context, []db.EPSSEntry) (int, error) { return 0, nil }
 func (s *stubStore) EnrichVulnCheck(context.Context, []db.VulnCheckEntry) (int, error) {
 	return 0, nil
 }
+
 func (s *stubStore) FindUnknownSeverityCVEAliases(context.Context) ([]db.UnknownCVEAlias, error) {
 	return nil, nil
 }
+
 func (s *stubStore) UpdateSeverityByCVE(context.Context, string, string, float64) error {
 	return nil
 }
+
 func (s *stubStore) GetFeedSyncStatus(context.Context, string) (*db.FeedSyncStatus, error) {
 	return nil, nil
 }
@@ -75,10 +88,12 @@ func (s *stubStore) UpsertFeedSyncStatus(context.Context, *db.FeedSyncStatus) er
 func (s *stubStore) ListFeedSyncStatuses(context.Context) ([]db.FeedSyncStatus, error) {
 	return s.feedStatuses, s.feedStatusesErr
 }
-func (s *stubStore) GetFeedConfig(context.Context, string) (*db.FeedConfig, error) { return nil, nil }
-func (s *stubStore) UpsertFeedConfig(context.Context, *db.FeedConfig) error        { return nil }
-func (s *stubStore) DeleteFeedConfig(context.Context, string) error                { return nil }
-func (s *stubStore) ListFeedConfigs(context.Context) ([]db.FeedConfig, error)      { return nil, nil }
+func (s *stubStore) GetFeedConfig(context.Context, string) (*db.FeedConfig, error)  { return nil, nil }
+func (s *stubStore) UpsertFeedConfig(context.Context, *db.FeedConfig) error         { return nil }
+func (s *stubStore) DeleteFeedConfig(context.Context, string) error                 { return nil }
+func (s *stubStore) ListFeedConfigs(context.Context) ([]db.FeedConfig, error)       { return nil, nil }
+func (s *stubStore) GetSystemSettings(context.Context) (*db.SystemSettings, error)  { return nil, nil }
+func (s *stubStore) UpsertSystemSettings(context.Context, *db.SystemSettings) error { return nil }
 func (s *stubStore) EnqueueRefresh(_ context.Context, _ *db.RefreshJob) (bool, int, error) {
 	return true, 1, nil
 }
@@ -87,25 +102,32 @@ func (s *stubStore) CompleteRefresh(context.Context, int, error) error          
 func (s *stubStore) ResetStuckJobs(context.Context, string, time.Duration) (int, error) {
 	return 0, nil
 }
+
 func (s *stubStore) GetPackageCheckStatus(context.Context, string, string, string) (*db.PackageCheckStatus, error) {
 	return nil, nil
 }
+
 func (s *stubStore) UpsertPackageCheckStatus(context.Context, *db.PackageCheckStatus) error {
 	return nil
 }
+
 func (s *stubStore) InsertScanLog(_ context.Context, entry *db.ScanLogEntry) error {
 	s.scanLogEntries = append(s.scanLogEntries, *entry)
 	return nil
 }
+
 func (s *stubStore) ListRecentScans(context.Context, int) ([]db.ScanLogEntry, error) {
 	return nil, nil
 }
+
 func (s *stubStore) ListRecentVulnerabilities(context.Context, int, int) ([]db.RecentVulnerability, error) {
 	return nil, nil
 }
+
 func (s *stubStore) CountScansByDay(context.Context, int) ([]db.DailyScanStats, error) {
 	return nil, nil
 }
+
 func (s *stubStore) SearchPackages(context.Context, db.PackageSearchParams) ([]db.PackageSearchResult, error) {
 	return nil, nil
 }
@@ -120,14 +142,24 @@ func (s *stubStore) UpsertAdminAuth(context.Context, string, bool) error        
 func (s *stubStore) InsertAdminAuditLog(context.Context, *db.AdminAuditEntry) error {
 	return nil
 }
+
 func (s *stubStore) ListAdminAuditLog(context.Context, int) ([]db.AdminAuditLogEntry, error) {
 	return nil, nil
 }
-func (s *stubStore) QueueStats(context.Context) (*db.QueueStatsResult, error)         { return &db.QueueStatsResult{}, nil }
+
+func (s *stubStore) QueueStats(context.Context) (*db.QueueStatsResult, error) {
+	return &db.QueueStatsResult{}, nil
+}
+
 func (s *stubStore) ListQueueJobs(context.Context, string, int) ([]db.RefreshJob, error) {
 	return nil, nil
 }
-func (s *stubStore) PurgeQueue(context.Context) (int, error)                       { return 0, nil }
+func (s *stubStore) PurgeQueue(context.Context) (int, error)                { return 0, nil }
+func (s *stubStore) UpdateQueueJobPriority(context.Context, int, int) error { return nil }
+func (s *stubStore) RetryQueueJob(context.Context, int) error               { return nil }
+func (s *stubStore) PauseQueueJob(context.Context, int) error               { return nil }
+func (s *stubStore) ResumeQueueJob(context.Context, int) error              { return nil }
+func (s *stubStore) ClearQueue(context.Context, []string) (int, error)      { return 0, nil }
 func (s *stubStore) DashboardStats(context.Context) (*db.DashboardStatsResult, error) {
 	return &db.DashboardStatsResult{BySeverity: map[string]int{}}, nil
 }
@@ -212,6 +244,90 @@ func TestHandleCheck_ValidRequest(t *testing.T) {
 	}
 	if ct := rr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
 		t.Fatalf("Content-Type = %q, want application/json", ct)
+	}
+}
+
+func TestHandleCheckUsesConfiguredBlockThreshold(t *testing.T) {
+	t.Parallel()
+
+	store := &stubStore{
+		vulnBatchFindings: []domain.Finding{
+			{
+				Name:       "lodash",
+				Version:    "4.17.15",
+				Ecosystem:  domain.EcosystemNPM,
+				Type:       domain.FindingTypeVulnerability,
+				Severity:   domain.SeverityMedium,
+				AdvisoryID: "CVE-2021-0001",
+				Title:      "Medium vulnerability",
+				Source:     "osv",
+			},
+		},
+		feedStatuses: []db.FeedSyncStatus{
+			{FeedName: "osv", LastSyncStatus: "success", LastSyncAt: ptrFeedTime(time.Now().UTC())},
+		},
+	}
+
+	h := NewHandlerWithBlockThreshold(store, slog.Default(), domain.SeverityMedium)
+
+	body := `{"packages":[{"name":"lodash","version":"4.17.15","ecosystem":"npm"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/check", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	h.HandleCheck(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var result domain.ScanResult
+	if err := json.Unmarshal(rr.Body.Bytes(), &result); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if !result.FindingsBlocking {
+		t.Fatal("FindingsBlocking = false, want true for MEDIUM threshold")
+	}
+}
+
+func TestHandleCheck_PropagatesCorrelationIDAndRepoMetadata(t *testing.T) {
+	t.Parallel()
+
+	incomingCorrelationID := "11111111-2222-4333-8444-555555555555"
+	store := &stubStore{
+		feedStatuses: []db.FeedSyncStatus{
+			{FeedName: "osv", LastSyncStatus: "success", LastSyncAt: ptrFeedTime(time.Now().UTC())},
+		},
+	}
+	h := newTestHandler(store)
+
+	body := `{
+		"repo":{"name":"packmon","branch":"main","commit":"abcdef123456"},
+		"packages":[{"name":"lodash","version":"4.17.15","ecosystem":"npm"}]
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/check", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(middleware.HeaderCorrelationID, incomingCorrelationID)
+	rr := httptest.NewRecorder()
+
+	// Route through the Correlation middleware as in production: it validates
+	// the incoming UUID and stores it in the request context, which the handler
+	// then propagates. (The handler deliberately does not echo a raw,
+	// unvalidated client header on its own.)
+	handler := middleware.Correlation(http.HandlerFunc(h.HandleCheck))
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get(middleware.HeaderCorrelationID); got != incomingCorrelationID {
+		t.Fatalf("X-Correlation-ID = %q, want %q", got, incomingCorrelationID)
+	}
+	if len(store.scanLogEntries) != 1 {
+		t.Fatalf("scan log entries = %d, want 1", len(store.scanLogEntries))
+	}
+	entry := store.scanLogEntries[0]
+	if entry.RepoName != "packmon" || entry.Branch != "main" || entry.Commit != "abcdef123456" {
+		t.Fatalf("scan log repo metadata = (%q,%q,%q), want (packmon,main,abcdef123456)", entry.RepoName, entry.Branch, entry.Commit)
 	}
 }
 
@@ -445,6 +561,21 @@ func TestIsBlocking_VulnBelowThreshold(t *testing.T) {
 	}
 }
 
+func TestIsBlocking_NoneThresholdNeverBlocksVulnerabilities(t *testing.T) {
+	t.Parallel()
+
+	findings := []domain.Finding{
+		{
+			Type:     domain.FindingTypeVulnerability,
+			Severity: domain.SeverityCritical,
+		},
+	}
+
+	if isBlocking(findings, domain.SeverityNone) {
+		t.Fatal("vulnerabilities should not block with NONE threshold")
+	}
+}
+
 func TestIsBlocking_NoFindings(t *testing.T) {
 	t.Parallel()
 
@@ -579,10 +710,17 @@ func TestOverallFeedStatus(t *testing.T) {
 		{
 			name: "all feeds healthy",
 			statuses: []db.FeedSyncStatus{
-				{FeedName: "osv", LastSyncStatus: "success", LastSyncAt: ptrFeedTime(now.Add(-2 * time.Hour))},
-				{FeedName: "ghsa", LastSyncStatus: "success", LastSyncAt: ptrFeedTime(now.Add(-3 * time.Hour))},
+				{FeedName: "osv", LastSyncStatus: "success", LastSyncAt: ptrFeedTime(now.Add(-2 * time.Hour)), EntriesSynced: 100, EntriesTotal: 100},
+				{FeedName: "ghsa", LastSyncStatus: "success", LastSyncAt: ptrFeedTime(now.Add(-3 * time.Hour)), EntriesSynced: 200, EntriesTotal: 200},
 			},
 			want: "healthy",
+		},
+		{
+			name: "zero-entry feed degrades response",
+			statuses: []db.FeedSyncStatus{
+				{FeedName: "osv", LastSyncStatus: "success", LastSyncAt: ptrFeedTime(now.Add(-1 * time.Hour)), EntriesSynced: 0, EntriesTotal: 0},
+			},
+			want: "degraded",
 		},
 		{
 			name: "stale feed degrades response",
@@ -626,6 +764,65 @@ func TestFeedHealthStatusSkippedIsWarning(t *testing.T) {
 
 	if got := feedHealthStatus(status); got != "warning" {
 		t.Fatalf("feedHealthStatus() = %q, want %q", got, "warning")
+	}
+}
+
+func TestEffectiveBlockThresholdFollowsRuntime(t *testing.T) {
+	t.Parallel()
+
+	runtime := config.NewRuntimeSettings("CRITICAL", 60, 60)
+	h := NewHandlerWithRuntime(&stubStore{}, nil, runtime)
+
+	if got := h.effectiveBlockThreshold(); got != domain.SeverityCritical {
+		t.Fatalf("initial threshold = %q, want CRITICAL", got)
+	}
+
+	// An admin lowering the threshold must take effect immediately (no restart).
+	runtime.Update("HIGH", 0, 0)
+	if got := h.effectiveBlockThreshold(); got != domain.SeverityHigh {
+		t.Fatalf("threshold after runtime update = %q, want HIGH", got)
+	}
+}
+
+func TestHandleFeedImportAcceptsMaliciousAlias(t *testing.T) {
+	t.Parallel()
+
+	store := &stubStore{}
+	h := newTestHandler(store)
+
+	body := `{"malicious":[{"id":"MAL-1","ecosystem":"npm","name":"evil","risk_type":"malware","summary":"bad"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/feeds/malicious/import", strings.NewReader(body))
+	req.SetPathValue("feed", "malicious")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	h.HandleFeedImport(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var resp importResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Feed != "openssf" {
+		t.Fatalf("feed = %q, want openssf", resp.Feed)
+	}
+}
+
+func TestHandleRefreshRejectsVersionBody(t *testing.T) {
+	t.Parallel()
+
+	h := newTestHandler(&stubStore{})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/packages/npm/lodash/refresh", strings.NewReader(`{"version":"4.17.15"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	h.handleRefresh(rr, req, "npm", "lodash")
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d: %s", rr.Code, rr.Body.String())
 	}
 }
 

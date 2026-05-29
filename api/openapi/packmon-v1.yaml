@@ -71,7 +71,7 @@ paths:
           required: true
           schema:
             type: string
-            enum: [osv, ghsa, malicious, vulncheck, cisakev, epss, socket]
+            enum: [osv, ghsa, openssf, vulncheck, cisakev, epss, socket]
       requestBody:
         required: true
         content:
@@ -243,6 +243,9 @@ components:
           type: string
         ecosystem:
           $ref: "#/components/schemas/Ecosystem"
+        dev:
+          type: boolean
+          default: false
 
     RepoInfo:
       type: object

@@ -323,7 +323,9 @@ func (s *Store) FindMaliciousBatch(ctx context.Context, packages []db.PackageQue
 	}
 
 	query := `
-		SELECT id, ecosystem, name, severity, summary, risk_type, source, versions::text, reference_urls::text
+		SELECT id, ecosystem, name, severity, summary, risk_type, source,
+			COALESCE(versions::text, ''),
+			COALESCE(reference_urls::text, '[]')
 		FROM malicious_findings
 		WHERE (ecosystem, name) IN (VALUES ` + strings.Join(placeholders, ", ") + `)
 		ORDER BY updated_at DESC, id DESC`
@@ -603,8 +605,8 @@ func (s *Store) ListMaliciousFindings(ctx context.Context, source string, limit 
 
 	query := `
 		SELECT
-			id, ecosystem, name, versions::text, source, risk_type, severity,
-			summary, description, reference_urls::text, origin_ref, published, created_by
+			id, ecosystem, name, COALESCE(versions::text, ''), source, risk_type, severity,
+			summary, description, COALESCE(reference_urls::text, '[]'), origin_ref, published, created_by
 		FROM malicious_findings`
 	args := []any{}
 	if source != "" {

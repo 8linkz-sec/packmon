@@ -33,6 +33,46 @@ func TestRateLimiter_AllowsUnderLimit(t *testing.T) {
 	}
 }
 
+type fakeRateLimitSource struct {
+	perMinute int
+	burst     int
+}
+
+func (f *fakeRateLimitSource) RateLimit() (int, int) { return f.perMinute, f.burst }
+
+func TestRateLimitWithSourceUsesDynamicLimit(t *testing.T) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	// Static fallback is generous; the dynamic source tightens it to burst 2.
+	source := &fakeRateLimitSource{perMinute: 1, burst: 2}
+	handler := RateLimitWithSource(context.Background(), logger, RateLimitConfig{Rate: 1000, Burst: 1000}, source)(
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+
+	send := func() int {
+		req := httptest.NewRequest(http.MethodGet, "/test", nil)
+		req.RemoteAddr = "10.9.9.9:12345"
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	// The source caps the burst at 2, so the first two pass and the third is
+	// limited -- proving the limiter reads the dynamic source, not the static
+	// fallback (which would have allowed 1000).
+	if code := send(); code != http.StatusOK {
+		t.Fatalf("request 1: status = %d, want 200", code)
+	}
+	if code := send(); code != http.StatusOK {
+		t.Fatalf("request 2: status = %d, want 200", code)
+	}
+	if code := send(); code != http.StatusTooManyRequests {
+		t.Fatalf("request 3: status = %d, want 429", code)
+	}
+}
+
 func TestRateLimiter_BlocksOverLimit(t *testing.T) {
 	t.Parallel()
 

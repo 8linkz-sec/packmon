@@ -18,9 +18,8 @@ import (
 
 type nvdStoreStub struct {
 	db.Store
-	aliases  []db.UnknownCVEAlias
-	updated  map[string]updateRecord
-	updateOK bool
+	aliases []db.UnknownCVEAlias
+	updated map[string]updateRecord
 }
 
 type updateRecord struct {

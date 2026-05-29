@@ -88,12 +88,16 @@ type FeedsConfig struct {
 
 // ServerConfig groups HTTP server settings.
 type ServerConfig struct {
-	Port            int
-	Mode            ServerMode
-	PublicHost      string
-	ReadTimeout     time.Duration
-	WriteTimeout    time.Duration
-	ShutdownTimeout time.Duration
+	Port               int
+	Mode               ServerMode
+	PublicHost         string
+	TrustedProxies     []string
+	BlockThreshold     string
+	RateLimitPerMinute int
+	RateLimitBurst     int
+	ReadTimeout        time.Duration
+	WriteTimeout       time.Duration
+	ShutdownTimeout    time.Duration
 }
 
 // DBConfig groups PostgreSQL connection settings.
@@ -168,12 +172,27 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
-	dbMaxConns, err := envIntOrDefault("PACKMON_DB_MAX_CONNS", 20)
+	dbMaxConns, err := envInt32OrDefault("PACKMON_DB_MAX_CONNS", 20)
 	if err != nil {
 		return nil, err
 	}
 
-	dbMinConns, err := envIntOrDefault("PACKMON_DB_MIN_CONNS", 2)
+	dbMinConns, err := envInt32OrDefault("PACKMON_DB_MIN_CONNS", 2)
+	if err != nil {
+		return nil, err
+	}
+
+	rateLimitPerMinute, err := envPositiveIntOrDefault("PACKMON_RATE_LIMIT_PER_MINUTE", 60)
+	if err != nil {
+		return nil, err
+	}
+
+	rateLimitBurst, err := envPositiveIntOrDefault("PACKMON_RATE_LIMIT_BURST", 60)
+	if err != nil {
+		return nil, err
+	}
+
+	blockThreshold, err := parseBlockThreshold(envOrDefault("PACKMON_BLOCK_THRESHOLD", "CRITICAL"))
 	if err != nil {
 		return nil, err
 	}
@@ -217,12 +236,16 @@ func Load() (*Config, error) {
 
 	cfg := &Config{
 		Server: ServerConfig{
-			Port:            serverPort,
-			Mode:            mode,
-			PublicHost:      envOrDefault("PACKMON_SERVER_PUBLIC_HOST", ""),
-			ReadTimeout:     readTimeout,
-			WriteTimeout:    writeTimeout,
-			ShutdownTimeout: shutdownTimeout,
+			Port:               serverPort,
+			Mode:               mode,
+			PublicHost:         envOrDefault("PACKMON_SERVER_PUBLIC_HOST", ""),
+			TrustedProxies:     splitCSVEnv(os.Getenv("PACKMON_TRUSTED_PROXIES")),
+			BlockThreshold:     blockThreshold,
+			RateLimitPerMinute: rateLimitPerMinute,
+			RateLimitBurst:     rateLimitBurst,
+			ReadTimeout:        readTimeout,
+			WriteTimeout:       writeTimeout,
+			ShutdownTimeout:    shutdownTimeout,
 		},
 		DB: DBConfig{
 			Host:     envOrDefault("PACKMON_DB_HOST", "localhost"),
@@ -231,8 +254,8 @@ func Load() (*Config, error) {
 			User:     envOrDefault("PACKMON_DB_USER", "packmon"),
 			Password: os.Getenv("PACKMON_DB_PASSWORD"),
 			SSLMode:  envOrDefault("PACKMON_DB_SSLMODE", defaultSSL),
-			MaxConns: int32(dbMaxConns),
-			MinConns: int32(dbMinConns),
+			MaxConns: dbMaxConns,
+			MinConns: dbMinConns,
 		},
 		Log: LogConfig{
 			Level:  envOrDefault("PACKMON_LOG_LEVEL", defaultLogLevel),
@@ -317,6 +340,33 @@ func envIntOrDefault(key string, fallback int) (int, error) {
 	return n, nil
 }
 
+func envInt32OrDefault(key string, fallback int32) (int32, error) {
+	const (
+		minInt32 = -1 << 31
+		maxInt32 = 1<<31 - 1
+	)
+
+	n, err := envIntOrDefault(key, int(fallback))
+	if err != nil {
+		return 0, err
+	}
+	if n < minInt32 || n > maxInt32 {
+		return 0, fmt.Errorf("config: %s must fit in int32", key)
+	}
+	return int32(n), nil
+}
+
+func envPositiveIntOrDefault(key string, fallback int) (int, error) {
+	n, err := envIntOrDefault(key, fallback)
+	if err != nil {
+		return 0, err
+	}
+	if n <= 0 {
+		return 0, fmt.Errorf("config: %s must be greater than zero", key)
+	}
+	return n, nil
+}
+
 func envDurationOrDefault(key string, fallback time.Duration) (time.Duration, error) {
 	v := os.Getenv(key)
 	if v == "" {
@@ -349,4 +399,29 @@ func parseFeedMode(key string) FeedMode {
 		return FeedModeExternal
 	}
 	return FeedModeSelf
+}
+
+func parseBlockThreshold(raw string) (string, error) {
+	normalized := strings.ToUpper(strings.TrimSpace(raw))
+	switch normalized {
+	case "CRITICAL", "HIGH", "MEDIUM", "LOW", "NONE":
+		return normalized, nil
+	default:
+		return "", fmt.Errorf("config: invalid PACKMON_BLOCK_THRESHOLD %q (want CRITICAL, HIGH, MEDIUM, LOW, or NONE)", raw)
+	}
+}
+
+func splitCSVEnv(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }

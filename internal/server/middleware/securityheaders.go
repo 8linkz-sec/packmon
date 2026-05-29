@@ -16,12 +16,19 @@ const contentSecurityPolicy = "default-src 'self'; base-uri 'self'; form-action 
 // The productionMode flag should be true when the server is running
 // behind TLS (directly or via a reverse proxy). redirectHost should be set
 // to the public host name when HTTPS redirects are enabled behind a proxy.
-func SecurityHeaders(productionMode bool, redirectHost string) func(http.Handler) http.Handler {
+//
+// X-Forwarded-Proto is an attacker-controllable header, so it is honored only
+// when the direct peer is in trustedProxies (mirroring the X-Forwarded-For
+// trust model). With no trusted proxies configured the proxy-driven HTTPS
+// redirect is disabled.
+func SecurityHeaders(productionMode bool, redirectHost string, trustedProxies []string) func(http.Handler) http.Handler {
+	proxies := parseTrustedProxies(trustedProxies)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// In production, redirect HTTP to HTTPS when behind a
-			// reverse proxy that sets X-Forwarded-Proto.
-			if productionMode {
+			// In production, redirect HTTP to HTTPS when behind a trusted
+			// reverse proxy that sets X-Forwarded-Proto. The header is trusted
+			// only from a configured trusted-proxy peer.
+			if productionMode && proxies.contains(stripPort(r.RemoteAddr)) {
 				proto := r.Header.Get("X-Forwarded-Proto")
 				if strings.EqualFold(proto, "http") {
 					if host := redirectTargetHost(redirectHost, r.Host); host != "" {

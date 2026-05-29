@@ -307,7 +307,7 @@ func (s *Syncer) syncEcosystem(ctx context.Context, store db.Store, ecosystem, s
 // If storedETag is non-empty, it sends an If-None-Match header. When
 // the server responds with 304 Not Modified, download returns
 // errNotModified (wrapped so errors.Is works).
-func (s *Syncer) download(ctx context.Context, url, storedETag string) (tmpPath string, etag string, err error) {
+func (s *Syncer) download(ctx context.Context, url, storedETag string) (tmpPath, etag string, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", "", err

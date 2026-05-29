@@ -52,9 +52,20 @@ func (p *ComposerParser) Parse(r io.Reader) ([]domain.Package, error) {
 		errs     []string
 	)
 
-	allEntries := make([]composerPackageEntry, 0, len(lockFile.Packages)+len(lockFile.PackagesDev))
-	allEntries = append(allEntries, lockFile.Packages...)
-	allEntries = append(allEntries, lockFile.PackagesDev...)
+	// composer.lock separates production (`packages`) from development
+	// (`packages-dev`) dependencies. Track which list each entry came from so
+	// the scanner can filter dev dependencies unless --include-dev is set.
+	type taggedEntry struct {
+		composerPackageEntry
+		dev bool
+	}
+	allEntries := make([]taggedEntry, 0, len(lockFile.Packages)+len(lockFile.PackagesDev))
+	for _, e := range lockFile.Packages {
+		allEntries = append(allEntries, taggedEntry{composerPackageEntry: e, dev: false})
+	}
+	for _, e := range lockFile.PackagesDev {
+		allEntries = append(allEntries, taggedEntry{composerPackageEntry: e, dev: true})
+	}
 
 	seen := make(map[string]struct{})
 
@@ -83,6 +94,7 @@ func (p *ComposerParser) Parse(r io.Reader) ([]domain.Package, error) {
 			Name:      entry.Name,
 			Version:   version,
 			Ecosystem: domain.EcosystemComposer,
+			Dev:       entry.dev,
 		})
 	}
 

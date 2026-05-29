@@ -17,6 +17,14 @@ type RateLimitConfig struct {
 	Burst int
 }
 
+// RateLimitSource supplies the current rate limit at request time. It allows
+// the limit to be reconfigured at runtime (e.g. from the admin UI) without
+// restarting the server. perMinute is the allowed requests per minute and
+// burst is the bucket capacity.
+type RateLimitSource interface {
+	RateLimit() (perMinute, burst int)
+}
+
 // bucket is a single per-IP token bucket.
 type bucket struct {
 	tokens   float64
@@ -26,11 +34,16 @@ type bucket struct {
 // rateLimiter is a simple in-memory token-bucket rate limiter keyed by
 // client IP. It uses sync.Map for concurrent access without a global lock
 // on the hot path.
+//
+// When source is non-nil the rate and burst are read from it on every request
+// so runtime configuration changes take effect immediately; otherwise the
+// static rate/burst captured at construction are used.
 type rateLimiter struct {
 	mu      sync.Mutex
 	buckets map[string]*bucket
 	rate    float64
 	burst   int
+	source  RateLimitSource
 }
 
 func newRateLimiter(ctx context.Context, rate float64, burst int) *rateLimiter {
@@ -45,15 +58,29 @@ func newRateLimiter(ctx context.Context, rate float64, burst int) *rateLimiter {
 	return rl
 }
 
+// currentLimits returns the rate (tokens/second) and burst to apply right now,
+// reading the dynamic source when one is configured.
+func (rl *rateLimiter) currentLimits() (float64, int) {
+	if rl.source != nil {
+		perMinute, burst := rl.source.RateLimit()
+		if perMinute > 0 && burst > 0 {
+			return float64(perMinute) / 60, burst
+		}
+	}
+	return rl.rate, rl.burst
+}
+
 func (rl *rateLimiter) allow(ip string) bool {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
+
+	rate, burst := rl.currentLimits()
 
 	now := time.Now()
 	b, ok := rl.buckets[ip]
 	if !ok {
 		rl.buckets[ip] = &bucket{
-			tokens:   float64(rl.burst) - 1,
+			tokens:   float64(burst) - 1,
 			lastSeen: now,
 		}
 		return true
@@ -61,8 +88,8 @@ func (rl *rateLimiter) allow(ip string) bool {
 
 	// Refill tokens based on elapsed time.
 	elapsed := now.Sub(b.lastSeen).Seconds()
-	b.tokens += elapsed * rl.rate
-	b.tokens = math.Min(b.tokens, float64(rl.burst))
+	b.tokens += elapsed * rate
+	b.tokens = math.Min(b.tokens, float64(burst))
 	b.lastSeen = now
 
 	if b.tokens < 1 {
@@ -98,8 +125,20 @@ func (rl *rateLimiter) cleanup(ctx context.Context) {
 // Requests until tokens are replenished. The context controls the
 // lifetime of the background cleanup goroutine.
 func RateLimit(ctx context.Context, logger *slog.Logger, cfg RateLimitConfig) func(http.Handler) http.Handler {
-	rl := newRateLimiter(ctx, cfg.Rate, cfg.Burst)
+	return rateLimitMiddleware(newRateLimiter(ctx, cfg.Rate, cfg.Burst), logger)
+}
 
+// RateLimitWithSource is like RateLimit but reads the current limit from source
+// on every request, so admin changes take effect without a restart. cfg
+// provides the initial fallback values used until/unless the source returns
+// valid limits.
+func RateLimitWithSource(ctx context.Context, logger *slog.Logger, cfg RateLimitConfig, source RateLimitSource) func(http.Handler) http.Handler {
+	rl := newRateLimiter(ctx, cfg.Rate, cfg.Burst)
+	rl.source = source
+	return rateLimitMiddleware(rl, logger)
+}
+
+func rateLimitMiddleware(rl *rateLimiter, logger *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ip := clientIP(r)

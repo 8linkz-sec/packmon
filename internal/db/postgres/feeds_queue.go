@@ -218,14 +218,34 @@ func (s *Store) EnqueueRefresh(ctx context.Context, job *db.RefreshJob) (bool, i
 	)
 	err = tx.QueryRow(ctx, insertQuery, job.Ecosystem, job.Name, job.Source, job.Priority).Scan(&jobID)
 	if errors.Is(err, pgx.ErrNoRows) {
+		// A non-terminal job already exists for this package (the dedup index
+		// covers pending/processing/paused). Raise its priority if it is
+		// active, but never resurrect a job an admin has explicitly paused.
 		const updateQuery = `
 			UPDATE refresh_queue
-			SET priority = LEAST(priority, $4)
+			SET priority = LEAST(priority, $4),
+			    status = 'pending',
+			    processed_at = NULL,
+			    error = NULL
 			WHERE ecosystem = $1 AND name = $2 AND source = $3
 			  AND status IN ('pending', 'processing')
 			RETURNING id`
-		if err := tx.QueryRow(ctx, updateQuery, job.Ecosystem, job.Name, job.Source, job.Priority).Scan(&jobID); err != nil {
-			return false, 0, fmt.Errorf("postgres: update existing refresh job: %w", err)
+		switch updErr := tx.QueryRow(ctx, updateQuery, job.Ecosystem, job.Name, job.Source, job.Priority).Scan(&jobID); {
+		case errors.Is(updErr, pgx.ErrNoRows):
+			// The existing job is paused. Leave it paused and report its
+			// position without changing its state.
+			const selectQuery = `
+				SELECT id
+				FROM refresh_queue
+				WHERE ecosystem = $1 AND name = $2 AND source = $3
+				  AND status IN ('pending', 'processing', 'paused')
+				ORDER BY id ASC
+				LIMIT 1`
+			if selErr := tx.QueryRow(ctx, selectQuery, job.Ecosystem, job.Name, job.Source).Scan(&jobID); selErr != nil {
+				return false, 0, fmt.Errorf("postgres: locate existing refresh job: %w", selErr)
+			}
+		case updErr != nil:
+			return false, 0, fmt.Errorf("postgres: update existing refresh job: %w", updErr)
 		}
 	} else if err != nil {
 		return false, 0, fmt.Errorf("postgres: insert refresh job: %w", err)

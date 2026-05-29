@@ -61,6 +61,19 @@ type Store interface {
 	// by source, newest first.
 	ListMaliciousFindings(ctx context.Context, source string, limit int) ([]MaliciousFinding, error)
 
+	// UpsertManualAdvisory creates or updates an operator-managed advisory.
+	// Vulnerability advisories are stored in the vulnerability tables, while
+	// malicious advisories are stored in malicious_findings.
+	UpsertManualAdvisory(ctx context.Context, advisory *ManualAdvisory) error
+
+	// DeleteManualAdvisory removes an operator-managed advisory from whichever
+	// backing table owns it. Feed-sourced advisories must not be removed.
+	DeleteManualAdvisory(ctx context.Context, id string) error
+
+	// ListManualAdvisories returns operator-managed advisories across all
+	// supported finding types, newest first.
+	ListManualAdvisories(ctx context.Context, limit int) ([]ManualAdvisory, error)
+
 	// -- Vulnerability enrichment (batch updates from enrichment feeds) ---------
 
 	// SetCISAKEV marks the given CVE IDs as being in the CISA KEV catalog.
@@ -115,6 +128,16 @@ type Store interface {
 
 	// ListFeedConfigs returns all persisted feed configuration overrides.
 	ListFeedConfigs(ctx context.Context) ([]FeedConfig, error)
+
+	// -- System settings -------------------------------------------------------
+
+	// GetSystemSettings returns persisted server-level admin settings, or nil
+	// if runtime defaults are still in use.
+	GetSystemSettings(ctx context.Context) (*SystemSettings, error)
+
+	// UpsertSystemSettings creates or updates persisted server-level admin
+	// settings.
+	UpsertSystemSettings(ctx context.Context, settings *SystemSettings) error
 
 	// -- Refresh queue ----------------------------------------------------------
 
@@ -224,6 +247,21 @@ type Store interface {
 	// PurgeQueue removes all completed or errored jobs from the queue.
 	PurgeQueue(ctx context.Context) (int, error)
 
+	// UpdateQueueJobPriority changes the priority of a queued job.
+	UpdateQueueJobPriority(ctx context.Context, jobID, priority int) error
+
+	// RetryQueueJob moves a terminal or paused job back to pending.
+	RetryQueueJob(ctx context.Context, jobID int) error
+
+	// PauseQueueJob prevents a pending job from being dequeued.
+	PauseQueueJob(ctx context.Context, jobID int) error
+
+	// ResumeQueueJob moves a paused job back to pending.
+	ResumeQueueJob(ctx context.Context, jobID int) error
+
+	// ClearQueue removes queued jobs matching the given statuses.
+	ClearQueue(ctx context.Context, statuses []string) (int, error)
+
 	// -- Dashboard stats --------------------------------------------------------
 
 	// DashboardStats returns aggregate counts for the dashboard:
@@ -317,6 +355,19 @@ type MaliciousFinding struct {
 	CreatedBy     string          `json:"created_by"`
 }
 
+// ManualAdvisory is the admin-facing model for operator-managed advisories.
+type ManualAdvisory struct {
+	ID          string
+	FindingType string
+	Ecosystem   string
+	Name        string
+	Severity    string
+	RiskType    string
+	Summary     string
+	Description string
+	UpdatedAt   time.Time
+}
+
 // FeedSyncStatus records the sync state for one feed.
 type FeedSyncStatus struct {
 	FeedName         string          `json:"feed_name"`
@@ -339,6 +390,14 @@ type FeedConfig struct {
 	SyncInterval *time.Duration
 	APIKey       string
 	UpdatedAt    time.Time
+}
+
+// SystemSettings stores admin-managed server-level settings.
+type SystemSettings struct {
+	BlockThreshold     string
+	RateLimitPerMinute int
+	RateLimitBurst     int
+	UpdatedAt          time.Time
 }
 
 // RefreshJob is one entry in the refresh queue.
@@ -474,6 +533,7 @@ type QueueStatsResult struct {
 	Processing int
 	Done       int
 	Error      int
+	Paused     int
 }
 
 // DashboardStatsResult holds aggregate counts for the web dashboard.
@@ -482,6 +542,20 @@ type DashboardStatsResult struct {
 	TotalVulnerabilities int
 	TotalMalicious       int
 	BySeverity           map[string]int
+}
+
+// ScanTotals holds cumulative scan-log counters used by telemetry.
+type ScanTotals struct {
+	PackagesScanned int
+	Findings        int
+}
+
+// DBPoolStats holds PostgreSQL connection pool gauges used by telemetry.
+type DBPoolStats struct {
+	MaxConns          int32
+	AcquiredConns     int32
+	IdleConns         int32
+	ConstructingConns int32
 }
 
 // UnknownCVEAlias pairs a vulnerability ID with one of its CVE aliases.

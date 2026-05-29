@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -76,15 +78,68 @@ func loadCurrentCLIConfig() (*cliConfig, string, error) {
 
 func loadCLIConfig(path string) (*cliConfig, string, error) {
 	configPath := strings.TrimSpace(path)
-	explicitPath := configPath != ""
-	if configPath == "" {
-		configPath = defaultCLIConfigFile
+	if configPath != "" {
+		// An explicit --config path is loaded as a single file.
+		return loadExplicitCLIConfig(configPath)
 	}
 
-	if _, err := os.Stat(configPath); err != nil {
-		if os.IsNotExist(err) && !explicitPath {
-			return nil, "", nil
+	// Layered precedence (DESIGN.md CLI behavior): the user-global config
+	// (~/.packmon/config/packmon.yaml) is the base, with the project
+	// ./.packmon.yaml overlaid on top. Decoding both documents into the same
+	// struct overlays only the fields present in each file, so the project
+	// config overrides the user-global one field by field.
+	var (
+		cfg        cliConfig
+		loaded     bool
+		sourcePath string
+		baseDir    string
+	)
+
+	if userPath, ok := userGlobalConfigPath(); ok {
+		data, err := os.ReadFile(userPath) // #nosec G304 -- user-owned config path.
+		switch {
+		case err == nil:
+			if derr := decodeCLIConfig(data, &cfg); derr != nil {
+				return nil, "", fmt.Errorf("parse %s: %w", userPath, derr)
+			}
+			loaded = true
+			sourcePath = userPath
+			baseDir = filepath.Dir(userPath)
+		case !os.IsNotExist(err):
+			return nil, "", fmt.Errorf("read %s: %w", userPath, err)
 		}
+	}
+
+	projectData, err := os.ReadFile(defaultCLIConfigFile) // #nosec G304 -- repo-local config.
+	switch {
+	case err == nil:
+		if derr := decodeCLIConfig(projectData, &cfg); derr != nil {
+			return nil, "", fmt.Errorf("parse %s: %w", defaultCLIConfigFile, derr)
+		}
+		loaded = true
+		abs, aerr := filepath.Abs(defaultCLIConfigFile)
+		if aerr != nil {
+			abs = defaultCLIConfigFile
+		}
+		sourcePath = abs
+		baseDir = filepath.Dir(abs)
+	case !os.IsNotExist(err):
+		return nil, "", fmt.Errorf("read %s: %w", defaultCLIConfigFile, err)
+	}
+
+	if !loaded {
+		return nil, "", nil
+	}
+
+	if err := cfg.normalize(baseDir); err != nil {
+		return nil, "", fmt.Errorf("validate %s: %w", sourcePath, err)
+	}
+	return &cfg, sourcePath, nil
+}
+
+// loadExplicitCLIConfig loads a single config file supplied via --config.
+func loadExplicitCLIConfig(configPath string) (*cliConfig, string, error) {
+	if _, err := os.Stat(configPath); err != nil {
 		return nil, "", fmt.Errorf("config file not found: %s", configPath)
 	}
 
@@ -95,9 +150,7 @@ func loadCLIConfig(path string) (*cliConfig, string, error) {
 	}
 
 	var cfg cliConfig
-	decoder := yaml.NewDecoder(bytes.NewReader(data))
-	decoder.KnownFields(true)
-	if err := decoder.Decode(&cfg); err != nil {
+	if err := decodeCLIConfig(data, &cfg); err != nil {
 		return nil, "", fmt.Errorf("parse %s: %w", configPath, err)
 	}
 
@@ -105,12 +158,35 @@ func loadCLIConfig(path string) (*cliConfig, string, error) {
 	if err != nil {
 		absPath = configPath
 	}
-
 	if err := cfg.normalize(filepath.Dir(absPath)); err != nil {
 		return nil, "", fmt.Errorf("validate %s: %w", configPath, err)
 	}
-
 	return &cfg, absPath, nil
+}
+
+// decodeCLIConfig decodes YAML into cfg, overlaying onto any existing values.
+// An empty document is a no-op so a present-but-empty file does not clear the
+// base layer.
+func decodeCLIConfig(data []byte, cfg *cliConfig) error {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(cfg); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+// userGlobalConfigPath returns the path to the user-global CLI config
+// (~/.packmon/config/packmon.yaml) and whether the home directory is known.
+func userGlobalConfigPath() (string, bool) {
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return "", false
+	}
+	return filepath.Join(home, ".packmon", "config", "packmon.yaml"), true
 }
 
 func (c *cliConfig) normalize(baseDir string) error {

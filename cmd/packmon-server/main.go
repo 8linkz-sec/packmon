@@ -94,6 +94,9 @@ func run() error {
 
 	devMode := cfg.IsDevelopment()
 	ver := uint(migrations.ExpectedVersion)
+	if devMode {
+		logger.Warn("running in DEVELOPMENT mode -- API authentication is relaxed and an in-memory store is used; never expose this mode on an untrusted network")
+	}
 	if !devMode && strings.TrimSpace(cfg.Server.PublicHost) == "" {
 		logger.Warn("PACKMON_SERVER_PUBLIC_HOST is not set -- HTTPS redirect is disabled for non-loopback hosts")
 	}
@@ -177,6 +180,9 @@ func run() error {
 
 	if err := applyStoredFeedConfigOverrides(context.Background(), cfg, store, logger); err != nil {
 		return fmt.Errorf("apply stored feed config overrides: %w", err)
+	}
+	if err := applyStoredSystemSettings(context.Background(), cfg, store, logger); err != nil {
+		return fmt.Errorf("apply stored system settings: %w", err)
 	}
 	runStartupRepairs(context.Background(), store, logger)
 

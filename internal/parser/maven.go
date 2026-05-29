@@ -77,10 +77,7 @@ func (p *MavenParser) Parse(r io.Reader) ([]domain.Package, error) {
 			continue
 		}
 
-		// Skip test-scoped dependencies (they are devDependencies).
-		if strings.EqualFold(strings.TrimSpace(dep.Scope), "test") {
-			continue
-		}
+		isDev := strings.EqualFold(strings.TrimSpace(dep.Scope), "test")
 
 		version := strings.TrimSpace(dep.Version)
 
@@ -108,6 +105,7 @@ func (p *MavenParser) Parse(r io.Reader) ([]domain.Package, error) {
 			Name:      name,
 			Version:   version,
 			Ecosystem: domain.EcosystemMaven,
+			Dev:       isDev,
 		})
 	}
 

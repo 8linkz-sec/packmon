@@ -39,6 +39,12 @@ type Server struct {
 func New(ctx context.Context, cfg *config.Config, store db.Store, pinger health.Pinger, logger *slog.Logger, build BuildInfo, syncFeed admin.FeedSyncFunc) *Server {
 	devMode := cfg.IsDevelopment()
 
+	// Shared runtime settings (block threshold + rate limit) that the admin UI
+	// can change without a restart. Seeded from the (already startup-applied)
+	// config so the live handlers and rate limiter read current values.
+	perMinute, burst := resolveRateLimit(cfg)
+	runtime := config.NewRuntimeSettings(cfg.Server.BlockThreshold, perMinute, burst)
+
 	// Session manager for admin authentication.
 	// In production mode, session cookies require HTTPS (Secure flag).
 	// The context controls the lifetime of the session cleanup goroutine.
@@ -48,24 +54,23 @@ func New(ctx context.Context, cfg *config.Config, store db.Store, pinger health.
 	// Order matters: outermost middleware runs first.
 	// SecurityHeaders -> Correlation -> Recovery -> Logging -> UserAgent -> Auth -> Session -> RateLimit -> Handler
 	chain := func(h http.Handler) http.Handler {
-		h = middleware.RateLimit(ctx, logger, middleware.RateLimitConfig{
-			Rate:  1.0, // 1 token/sec refill = 60/min sustained
-			Burst: 60,  // allow bursts up to 60 requests
-		})(h)
+		h = middleware.RateLimitWithSource(ctx, logger, rateLimitConfig(cfg), runtime)(h)
 		h = middleware.RequireAdminSession(sm, logger)(h)
 		h = middleware.Auth(logger, store, devMode)(h)
 		h = middleware.UserAgent(logger, devMode)(h)
 		h = middleware.Logging(logger)(h)
 		h = middleware.Recovery(logger)(h)
 		h = middleware.Correlation(h)
-		h = middleware.SecurityHeaders(!devMode, cfg.Server.PublicHost)(h)
+		h = middleware.SecurityHeaders(!devMode, cfg.Server.PublicHost, cfg.Server.TrustedProxies)(h)
+		h = middleware.TrustedClientIP(cfg.Server.TrustedProxies)(h)
+		h = telemetry.HTTPMiddleware(telemetry.Default())(h)
 		return h
 	}
 
 	// -- Register routes ------------------------------------------------------
 	mux := http.NewServeMux()
 	hc := health.NewChecker(pinger)
-	registerRoutes(ctx, mux, hc, cfg, store, sm, logger, build, syncFeed)
+	registerRoutes(ctx, mux, hc, cfg, runtime, store, sm, logger, build, syncFeed)
 
 	mainAddr := fmt.Sprintf(":%d", cfg.Server.Port)
 	mainServer := &http.Server{
@@ -77,7 +82,7 @@ func New(ctx context.Context, cfg *config.Config, store db.Store, pinger health.
 
 	// -- Metrics server (plain, no middleware chain) ---------------------------
 	metricsMux := http.NewServeMux()
-	metricsMux.HandleFunc("GET /metrics", telemetry.MetricsHandler(store, build.SchemaVersion))
+	metricsMux.HandleFunc("GET /metrics", telemetry.MetricsHandler(store, build.SchemaVersion, logger))
 	metricsAddr := cfg.Metrics.Addr()
 	metricsServer := &http.Server{
 		Addr:              metricsAddr,
@@ -94,6 +99,30 @@ func New(ctx context.Context, cfg *config.Config, store db.Store, pinger health.
 		main:    mainServer,
 		metrics: metricsServer,
 		health:  hc,
+	}
+}
+
+// resolveRateLimit returns the effective per-minute rate and burst, applying
+// defaults when the config values are unset.
+func resolveRateLimit(cfg *config.Config) (perMinute, burst int) {
+	perMinute = 60
+	burst = 60
+	if cfg != nil {
+		if cfg.Server.RateLimitPerMinute > 0 {
+			perMinute = cfg.Server.RateLimitPerMinute
+		}
+		if cfg.Server.RateLimitBurst > 0 {
+			burst = cfg.Server.RateLimitBurst
+		}
+	}
+	return perMinute, burst
+}
+
+func rateLimitConfig(cfg *config.Config) middleware.RateLimitConfig {
+	perMinute, burst := resolveRateLimit(cfg)
+	return middleware.RateLimitConfig{
+		Rate:  float64(perMinute) / 60,
+		Burst: burst,
 	}
 }
 

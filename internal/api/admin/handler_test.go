@@ -155,7 +155,7 @@ func TestHandleLogin_Success(t *testing.T) {
 	h.HandleLogin(rec, req)
 
 	resp := rec.Result()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Successful login should redirect to /admin/.
 	if resp.StatusCode != http.StatusSeeOther {
@@ -227,7 +227,7 @@ func TestHandleLogin_WrongPassword(t *testing.T) {
 	h.HandleLogin(rec, req)
 
 	resp := rec.Result()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Wrong password should NOT redirect to /admin/.
 	if resp.Header.Get("Location") == "/admin/" {
@@ -318,7 +318,7 @@ func TestHandleLogin_RateLimited(t *testing.T) {
 	h.HandleLogin(rec, req)
 
 	resp := rec.Result()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// The handler should NOT create an authenticated session. Verify no
 	// "login_success" audit entry was added.
@@ -369,7 +369,7 @@ func TestHandleLogout_RequiresCSRF(t *testing.T) {
 	h.HandleLogout(rec, req)
 
 	resp := rec.Result()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// With invalid CSRF, logout redirects to /admin/login.
 	if resp.StatusCode != http.StatusSeeOther {
@@ -406,7 +406,7 @@ func TestRequireAdmin_NoSession(t *testing.T) {
 	}
 
 	resp := rec.Result()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Should redirect to login.
 	if resp.StatusCode != http.StatusSeeOther {
@@ -444,7 +444,7 @@ func TestRequireAdmin_NonAdminSession(t *testing.T) {
 	}
 
 	resp := rec.Result()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusSeeOther {
 		t.Errorf("status = %d, want %d (redirect)", resp.StatusCode, http.StatusSeeOther)
@@ -464,7 +464,7 @@ func TestHandleLogin_MethodNotAllowed(t *testing.T) {
 	h.HandleLogin(rec, req)
 
 	resp := rec.Result()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusMethodNotAllowed)
@@ -484,7 +484,7 @@ func TestHandleLogin_GET_RendersForm(t *testing.T) {
 	h.HandleLogin(rec, req)
 
 	resp := rec.Result()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// The GET renders the login form.
 	if resp.StatusCode != http.StatusOK {
@@ -589,7 +589,7 @@ func TestHandleLogin_InvalidUsername(t *testing.T) {
 	h.HandleLogin(rec, req)
 
 	resp := rec.Result()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Should NOT redirect to /admin/.
 	if resp.Header.Get("Location") == "/admin/" {

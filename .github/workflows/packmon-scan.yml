@@ -48,7 +48,7 @@ jobs:
     name: Packmon Scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install packmon
         run: |
@@ -81,11 +81,18 @@ jobs:
           FINDINGS=$(jq '.findings_count // 0' /tmp/results.json 2>/dev/null || echo 0)
           echo "findings_count=${FINDINGS}" >> "$GITHUB_OUTPUT"
 
+          # Exit code 3 means findings below the blocking threshold were
+          # reported. Per the exit-code contract this is a passing run.
+          if [ "${EXIT_CODE}" = "3" ]; then
+            echo "Findings below blocking threshold; job stays green."
+            EXIT_CODE=0
+          fi
+
           exit $EXIT_CODE
 
       - name: Upload SARIF
         if: always() && inputs.upload_sarif
-        uses: github/codeql-action/upload-sarif@v4
+        uses: github/codeql-action/upload-sarif@7211b7c8077ea37d8641b6271f6a365a22a5fbfa # v4
         with:
           sarif_file: /tmp/results.sarif
           category: packmon
@@ -96,7 +103,7 @@ jobs:
           && inputs.post_pr_comment
           && github.event_name == 'pull_request'
           && steps.scan.outputs.findings_count > 0
-        uses: actions/github-script@v8
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
           script: |
             const fs = require('fs');
@@ -165,7 +172,7 @@ jobs:
             }
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
           name: packmon-results

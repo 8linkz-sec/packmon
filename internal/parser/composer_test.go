@@ -44,6 +44,7 @@ func TestComposerParser_Parse(t *testing.T) {
 		input     string
 		wantCount int
 		wantPkgs  map[string]string
+		wantDev   map[string]bool
 		wantErr   bool
 	}{
 		{
@@ -62,6 +63,13 @@ func TestComposerParser_Parse(t *testing.T) {
 				"monolog/monolog": "v3.5.0",
 				"symfony/console": "v7.0.4",
 				"phpunit/phpunit": "v11.0.3",
+			},
+			// packages-dev entries must be flagged as dev so the scanner can
+			// filter them unless --include-dev is set.
+			wantDev: map[string]bool{
+				"monolog/monolog": false,
+				"symfony/console": false,
+				"phpunit/phpunit": true,
 			},
 		},
 		{
@@ -136,6 +144,11 @@ func TestComposerParser_Parse(t *testing.T) {
 				if wantVer, ok := tt.wantPkgs[pkg.Name]; ok {
 					if pkg.Version != wantVer {
 						t.Errorf("package %q version = %q, want %q", pkg.Name, pkg.Version, wantVer)
+					}
+				}
+				if wantDev, ok := tt.wantDev[pkg.Name]; ok {
+					if pkg.Dev != wantDev {
+						t.Errorf("package %q Dev = %v, want %v", pkg.Name, pkg.Dev, wantDev)
 					}
 				}
 			}

@@ -78,6 +78,17 @@ func (s *Store) Close() error {
 	return nil
 }
 
+// DBPoolStats returns current PostgreSQL connection-pool gauges.
+func (s *Store) DBPoolStats() db.DBPoolStats {
+	stats := s.pool.Stat()
+	return db.DBPoolStats{
+		MaxConns:          stats.MaxConns(),
+		AcquiredConns:     stats.AcquiredConns(),
+		IdleConns:         stats.IdleConns(),
+		ConstructingConns: stats.ConstructingConns(),
+	}
+}
+
 func withTx(ctx context.Context, pool *pgxpool.Pool, fn func(tx pgx.Tx) error) error {
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {

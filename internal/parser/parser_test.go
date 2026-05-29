@@ -176,6 +176,38 @@ func TestDedup(t *testing.T) {
 	}
 }
 
+func TestDedupProductionWins(t *testing.T) {
+	t.Parallel()
+
+	// The same name+version+ecosystem seen as both a dev and a production
+	// dependency must collapse to a single production entry, regardless of the
+	// order in which they appear.
+	devThenProd := dedup([]domain.Package{
+		{Name: "a", Version: "1.0.0", Ecosystem: domain.EcosystemNPM, Dev: true},
+		{Name: "a", Version: "1.0.0", Ecosystem: domain.EcosystemNPM, Dev: false},
+	})
+	if len(devThenProd) != 1 || devThenProd[0].Dev {
+		t.Fatalf("dev-then-prod = %+v, want a single non-dev entry", devThenProd)
+	}
+
+	prodThenDev := dedup([]domain.Package{
+		{Name: "a", Version: "1.0.0", Ecosystem: domain.EcosystemNPM, Dev: false},
+		{Name: "a", Version: "1.0.0", Ecosystem: domain.EcosystemNPM, Dev: true},
+	})
+	if len(prodThenDev) != 1 || prodThenDev[0].Dev {
+		t.Fatalf("prod-then-dev = %+v, want a single non-dev entry", prodThenDev)
+	}
+
+	// A package that is only ever dev stays dev.
+	devOnly := dedup([]domain.Package{
+		{Name: "a", Version: "1.0.0", Ecosystem: domain.EcosystemNPM, Dev: true},
+		{Name: "a", Version: "1.0.0", Ecosystem: domain.EcosystemNPM, Dev: true},
+	})
+	if len(devOnly) != 1 || !devOnly[0].Dev {
+		t.Fatalf("dev-only = %+v, want a single dev entry", devOnly)
+	}
+}
+
 func TestJoinErrors(t *testing.T) {
 	t.Parallel()
 

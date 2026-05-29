@@ -57,6 +57,15 @@ func TestLoadWithNoEnvVarsReturnsDefaults(t *testing.T) {
 	if cfg.Server.ShutdownTimeout != 5*time.Second {
 		t.Errorf("Server.ShutdownTimeout = %v, want 5s", cfg.Server.ShutdownTimeout)
 	}
+	if cfg.Server.BlockThreshold != "CRITICAL" {
+		t.Errorf("Server.BlockThreshold = %q, want CRITICAL", cfg.Server.BlockThreshold)
+	}
+	if cfg.Server.RateLimitPerMinute != 60 {
+		t.Errorf("Server.RateLimitPerMinute = %d, want 60", cfg.Server.RateLimitPerMinute)
+	}
+	if cfg.Server.RateLimitBurst != 60 {
+		t.Errorf("Server.RateLimitBurst = %d, want 60", cfg.Server.RateLimitBurst)
+	}
 
 	// DB defaults.
 	if cfg.DB.Host != "localhost" {
@@ -184,6 +193,10 @@ func TestLoadWithInvalidServerModeReturnsError(t *testing.T) {
 func TestLoadWithCustomServerPort(t *testing.T) {
 	clearPackmonEnv(t)
 	t.Setenv("PACKMON_SERVER_PORT", "9999")
+	t.Setenv("PACKMON_TRUSTED_PROXIES", "10.0.0.0/8, 192.168.10.10")
+	t.Setenv("PACKMON_BLOCK_THRESHOLD", "HIGH")
+	t.Setenv("PACKMON_RATE_LIMIT_PER_MINUTE", "120")
+	t.Setenv("PACKMON_RATE_LIMIT_BURST", "25")
 
 	cfg, err := Load()
 	if err != nil {
@@ -192,6 +205,18 @@ func TestLoadWithCustomServerPort(t *testing.T) {
 
 	if cfg.Server.Port != 9999 {
 		t.Errorf("Server.Port = %d, want 9999", cfg.Server.Port)
+	}
+	if got := cfg.Server.TrustedProxies; len(got) != 2 || got[0] != "10.0.0.0/8" || got[1] != "192.168.10.10" {
+		t.Errorf("Server.TrustedProxies = %#v, want configured proxy list", got)
+	}
+	if cfg.Server.BlockThreshold != "HIGH" {
+		t.Errorf("Server.BlockThreshold = %q, want HIGH", cfg.Server.BlockThreshold)
+	}
+	if cfg.Server.RateLimitPerMinute != 120 {
+		t.Errorf("Server.RateLimitPerMinute = %d, want 120", cfg.Server.RateLimitPerMinute)
+	}
+	if cfg.Server.RateLimitBurst != 25 {
+		t.Errorf("Server.RateLimitBurst = %d, want 25", cfg.Server.RateLimitBurst)
 	}
 }
 
@@ -212,6 +237,16 @@ func TestLoadWithInvalidDBPortReturnsError(t *testing.T) {
 	_, err := Load()
 	if err == nil {
 		t.Fatal("Load with invalid PACKMON_DB_PORT should return error")
+	}
+}
+
+func TestLoadWithDBPoolSizeOverflowReturnsError(t *testing.T) {
+	clearPackmonEnv(t)
+	t.Setenv("PACKMON_DB_MAX_CONNS", "2147483648")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load with overflowing PACKMON_DB_MAX_CONNS should return error")
 	}
 }
 

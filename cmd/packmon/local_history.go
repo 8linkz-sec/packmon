@@ -42,7 +42,7 @@ func historyMaxScansPerRepo() int {
 }
 
 func recordScanHistory(ctx context.Context, store *sqlite.Store, scanPath string, result *domain.ScanResult) error {
-	repoName, branch := scanRepoMetadata(scanPath)
+	repoName, branch, _ := scanRepoMetadata(scanPath)
 
 	entry := sqlite.ScanEntry{
 		RepoName:          repoName,
@@ -80,7 +80,12 @@ func findingHistoryID(finding domain.Finding) string {
 	)
 }
 
-func scanRepoMetadata(scanPath string) (repoName, branch string) {
+func scanRepoInfo(scanPath string) *domain.RepoInfo {
+	repoName, branch, commit := scanRepoMetadata(scanPath)
+	return &domain.RepoInfo{Name: repoName, Branch: branch, Commit: commit}
+}
+
+func scanRepoMetadata(scanPath string) (repoName, branch, commit string) {
 	absPath, err := filepath.Abs(scanPath)
 	if err != nil {
 		absPath = scanPath
@@ -101,9 +106,12 @@ func scanRepoMetadata(scanPath string) (repoName, branch string) {
 		if currentBranch, err := gitOutput(gitRoot, "branch", "--show-current"); err == nil {
 			branch = currentBranch
 		}
+		if currentCommit, err := gitOutput(gitRoot, "rev-parse", "HEAD"); err == nil {
+			commit = currentCommit
+		}
 	}
 
-	return repoName, branch
+	return repoName, branch, commit
 }
 
 func gitOutput(dir string, args ...string) (string, error) {

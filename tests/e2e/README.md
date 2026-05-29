@@ -1,15 +1,18 @@
 # E2E Tests
 
-Packmon uses the integration suite in `tests/integration` as the default end-to-end smoke path.
-
-Run:
+The E2E target builds the CLI binary and runs black-box smoke tests against it:
 
 ```bash
 make test-e2e
 ```
 
-That target:
+On Windows hosts without `make`, build the CLI and run the tagged test directly:
 
-1. builds `packmon`
-2. builds `packmon-server`
-3. runs the integration suite with the `integration` build tag
+```powershell
+go build -o .build\packmon.exe .\cmd\packmon
+$env:PACKMON_TEST_BIN_DIR = ".build"
+go test -tags e2e .\tests\e2e
+```
+
+The current suite verifies that the built binary starts and can parse a real
+`package-lock.json` through `packmon scan --list-packages`.

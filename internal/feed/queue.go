@@ -3,7 +3,7 @@
 //
 // This file implements the priority queue processor that reads jobs from
 // the refresh_queue table and dispatches them to registered async workers.
-// Priority levels (from CLAUDE.md):
+// Priority levels (see DESIGN.md refresh queue behavior):
 //
 //	0: Manual trigger (user clicks "check now")
 //	1: Unknown packages (never checked before)

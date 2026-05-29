@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"sort"
@@ -36,11 +37,12 @@ const (
 
 // Exit codes per DE-2.
 const (
-	ExitOK          = 0
-	ExitBlocking    = 1
-	ExitOperational = 2
-	ExitParser      = 4
-	ExitInternal    = 10
+	ExitOK             = 0
+	ExitBlocking       = 1
+	ExitOperational    = 2
+	ExitUnderThreshold = 3
+	ExitParser         = 4
+	ExitInternal       = 10
 )
 
 // Config holds all parameters needed for a single scan invocation.
@@ -49,6 +51,7 @@ type Config struct {
 	Mode       Mode
 	ServerURL  string
 	APIKey     string
+	Repo       *domain.RepoInfo
 	FailOn     domain.Severity
 	Ecosystems []string
 	MaxDepth   int
@@ -56,6 +59,9 @@ type Config struct {
 	IncludeDev bool
 	Quiet      bool
 	NoColor    bool
+	// Logger receives structured DEBUG/WARN diagnostics for the scan
+	// pipeline. When nil, scan logging is discarded.
+	Logger *slog.Logger
 }
 
 // Scanner orchestrates the walk-parse-check-format pipeline.
@@ -75,6 +81,14 @@ func New(reg *parser.Registry, cfg Config) *Scanner {
 			Timeout: cfg.Timeout,
 		},
 	}
+}
+
+// log returns the configured logger, or a discard logger when none is set.
+func (s *Scanner) log() *slog.Logger {
+	if s.cfg.Logger != nil {
+		return s.cfg.Logger
+	}
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
 // SetLocalChecker assigns a local database for offline scanning.
@@ -114,16 +128,31 @@ func (s *Scanner) Run(ctx context.Context) (*domain.ScanResult, int) {
 	var allPackages []domain.Package
 	var parseErrors []string
 	for _, lf := range lockFiles {
+		s.log().Debug("found lock file",
+			slog.String("path", lf.RelPath),
+			slog.String("ecosystem", string(lf.Parser.Ecosystem())),
+		)
 		pkgs, parseErr := s.parseLockFile(lf)
 		if parseErr != nil {
 			parseErrors = append(parseErrors, fmt.Sprintf("%s: %v", lf.RelPath, parseErr))
 			continue
 		}
+		s.log().Debug("parsed lock file",
+			slog.String("path", lf.RelPath),
+			slog.Int("packages", len(pkgs)),
+		)
 		allPackages = append(allPackages, pkgs...)
 	}
 
 	// Deduplicate packages.
 	allPackages = dedup(allPackages)
+	if !s.cfg.IncludeDev {
+		allPackages = filterDevPackages(allPackages)
+	}
+	s.log().Debug("packages collected",
+		slog.Int("total", len(allPackages)),
+		slog.Bool("include_dev", s.cfg.IncludeDev),
+	)
 
 	// If all files had parse errors and we got zero packages, exit 4.
 	if len(allPackages) == 0 && len(parseErrors) > 0 {
@@ -204,8 +233,14 @@ func (s *Scanner) Run(ctx context.Context) (*domain.ScanResult, int) {
 	})
 
 	exitCode := ExitOK
-	if blocking {
+	switch {
+	case blocking:
 		exitCode = ExitBlocking
+	case len(findings) > 0:
+		// Findings exist but none reach the blocking threshold: signal them
+		// distinctly from a clean scan so CI/automation can react (exit 3 is
+		// treated as a passing/"green" outcome).
+		exitCode = ExitUnderThreshold
 	}
 	// Partial parse errors: still return findings but note the errors.
 	// We do not elevate exit code for partial parse errors when findings
@@ -243,6 +278,7 @@ func (s *Scanner) checkRemote(ctx context.Context, pkgs []domain.Package) ([]dom
 
 	reqBody := domain.ScanRequest{
 		Packages: pkgs,
+		Repo:     s.cfg.Repo,
 	}
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
@@ -255,6 +291,7 @@ func (s *Scanner) checkRemote(ctx context.Context, pkgs []domain.Package) ([]dom
 	}
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 	req.Header.Set("User-Agent", "packmon-cli/dev")
+	req.Header.Set("X-Correlation-ID", generateCorrelationID())
 	if strings.TrimSpace(s.cfg.APIKey) != "" {
 		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(s.cfg.APIKey))
 	}
@@ -373,17 +410,47 @@ func dedup(pkgs []domain.Package) []domain.Package {
 		version   string
 		ecosystem domain.Ecosystem
 	}
-	seen := make(map[key]struct{}, len(pkgs))
+	seen := make(map[key]int, len(pkgs))
 	out := make([]domain.Package, 0, len(pkgs))
 	for _, p := range pkgs {
 		k := key{p.Name, p.Version, p.Ecosystem}
-		if _, ok := seen[k]; ok {
+		if idx, ok := seen[k]; ok {
+			if out[idx].Dev && !p.Dev {
+				out[idx].Dev = false
+			}
 			continue
 		}
-		seen[k] = struct{}{}
+		seen[k] = len(out)
 		out = append(out, p)
 	}
 	return out
+}
+
+func filterDevPackages(pkgs []domain.Package) []domain.Package {
+	out := pkgs[:0]
+	for _, pkg := range pkgs {
+		if !pkg.Dev {
+			out = append(out, pkg)
+		}
+	}
+	return out
+}
+
+func generateCorrelationID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+			time.Now().UnixNano(),
+			0,
+			0x4000,
+			0x8000,
+			time.Now().UnixNano(),
+		)
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 func truncate(s string, maxLen int) string {

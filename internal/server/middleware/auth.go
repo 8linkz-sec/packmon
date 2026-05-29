@@ -24,9 +24,10 @@ var skipAuth = []string{
 	"/.well-known/",
 }
 
-// requireAuthEvenInDev lists path prefixes that require a valid API key
-// even when running in development mode. These are write-heavy endpoints
-// that must never be exposed without authentication.
+// requireAuthEvenInDev lists path prefixes that are data-mutating and must not
+// be exposed unauthenticated to a network. In development mode they remain
+// reachable without an API key, but only from a loopback peer (local
+// integration tests); a non-loopback caller still needs a valid key.
 var requireAuthEvenInDev = []string{
 	"/api/v1/feeds/",
 }
@@ -53,21 +54,21 @@ func Auth(logger *slog.Logger, store db.Store, devMode bool) func(http.Handler) 
 				}
 			}
 
-			// Development mode: skip auth for most endpoints, but
-			// always require auth for sensitive write endpoints
-			// (e.g. feed import).
+			// Development mode is intentionally unauthenticated so local
+			// integration tests can run without provisioning API keys. Data-
+			// mutating write endpoints (feed import) are an exception: in dev
+			// mode they are allowed without a key only from a loopback peer,
+			// so a dev-mode server accidentally exposed on a network does not
+			// offer unauthenticated writes.
 			if devMode {
-				forceAuth := false
-				for _, prefix := range requireAuthEvenInDev {
-					if strings.HasPrefix(r.URL.Path, prefix) {
-						forceAuth = true
-						break
-					}
-				}
-				if !forceAuth {
+				if !requiresAuthInDev(r.URL.Path) || isLoopbackHost(r.RemoteAddr) {
 					next.ServeHTTP(w, r)
 					return
 				}
+				logger.Warn("dev-mode write endpoint requires auth from non-loopback peer",
+					slog.String("path", r.URL.Path),
+					slog.String("remote_addr", r.RemoteAddr),
+				)
 			}
 
 			token := extractBearerToken(r)
@@ -109,6 +110,18 @@ func Auth(logger *slog.Logger, store db.Store, devMode bool) func(http.Handler) 
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// requiresAuthInDev reports whether the given path is a sensitive write
+// endpoint that must not be served unauthenticated to a non-loopback peer
+// even in development mode.
+func requiresAuthInDev(path string) bool {
+	for _, prefix := range requireAuthEvenInDev {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // extractBearerToken pulls the token from "Authorization: Bearer <token>".

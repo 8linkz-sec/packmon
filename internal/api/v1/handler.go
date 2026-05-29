@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/8linkz/packmon/internal/config"
 	"github.com/8linkz/packmon/internal/db"
 	"github.com/8linkz/packmon/internal/domain"
 	"github.com/8linkz/packmon/internal/server/middleware"
@@ -29,13 +30,16 @@ const maxImportBody = 100 << 20
 const maxPackagesPerCheck = 5000
 
 // defaultBlockThreshold is the severity threshold above which findings block.
-// TODO: make configurable via server config.
 var defaultBlockThreshold = domain.SeverityCritical
 
 // Handler holds the dependencies for all API v1 HTTP handlers.
 type Handler struct {
-	store  db.Store
-	logger *slog.Logger
+	store          db.Store
+	logger         *slog.Logger
+	blockThreshold domain.Severity
+	// runtime, when set, supplies the block threshold dynamically so admin
+	// changes take effect without a restart. It overrides blockThreshold.
+	runtime *config.RuntimeSettings
 }
 
 type syncExporter interface {
@@ -124,12 +128,72 @@ type syncResponsePayload struct {
 // NewHandler creates a Handler with the given store and logger.
 // If logger is nil, slog.Default() is used.
 func NewHandler(store db.Store, logger *slog.Logger) *Handler {
+	return NewHandlerWithBlockThreshold(store, logger, defaultBlockThreshold)
+}
+
+// NewHandlerWithConfig creates a Handler using server runtime configuration.
+func NewHandlerWithConfig(store db.Store, logger *slog.Logger, cfg *config.Config) *Handler {
+	threshold := defaultBlockThreshold
+	if cfg != nil {
+		threshold = parseBlockThreshold(cfg.Server.BlockThreshold)
+	}
+	return NewHandlerWithBlockThreshold(store, logger, threshold)
+}
+
+// NewHandlerWithRuntime creates a Handler whose block threshold is read from
+// the shared RuntimeSettings on every request, so admin changes apply without
+// a restart. The initial value seeds the static fallback.
+func NewHandlerWithRuntime(store db.Store, logger *slog.Logger, runtime *config.RuntimeSettings) *Handler {
+	threshold := defaultBlockThreshold
+	if runtime != nil {
+		threshold = parseBlockThreshold(runtime.BlockThreshold())
+	}
+	h := NewHandlerWithBlockThreshold(store, logger, threshold)
+	h.runtime = runtime
+	return h
+}
+
+// effectiveBlockThreshold returns the threshold to apply right now, preferring
+// the live RuntimeSettings value when configured.
+func (h *Handler) effectiveBlockThreshold() domain.Severity {
+	if h.runtime != nil {
+		if t := parseBlockThreshold(h.runtime.BlockThreshold()); validBlockThreshold(t) {
+			return t
+		}
+	}
+	return h.blockThreshold
+}
+
+// NewHandlerWithBlockThreshold creates a Handler using an explicit block
+// threshold. It is used by tests and by NewHandlerWithConfig.
+func NewHandlerWithBlockThreshold(store db.Store, logger *slog.Logger, threshold domain.Severity) *Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	if !validBlockThreshold(threshold) {
+		threshold = defaultBlockThreshold
+	}
 	return &Handler{
-		store:  store,
-		logger: logger,
+		store:          store,
+		logger:         logger,
+		blockThreshold: threshold,
+	}
+}
+
+func parseBlockThreshold(raw string) domain.Severity {
+	threshold := domain.Severity(strings.ToUpper(strings.TrimSpace(raw)))
+	if validBlockThreshold(threshold) {
+		return threshold
+	}
+	return defaultBlockThreshold
+}
+
+func validBlockThreshold(threshold domain.Severity) bool {
+	switch threshold {
+	case domain.SeverityCritical, domain.SeverityHigh, domain.SeverityMedium, domain.SeverityLow, domain.SeverityNone:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -146,7 +210,7 @@ func (h *Handler) HandleCheck(w http.ResponseWriter, r *http.Request) {
 	}
 
 	start := time.Now()
-	correlationID := generateID()
+	correlationID := requestCorrelationID(r)
 
 	var req domain.ScanRequest
 	if err := readJSON(r, &req); err != nil {
@@ -179,7 +243,7 @@ func (h *Handler) HandleCheck(w http.ResponseWriter, r *http.Request) {
 
 	// Determine blocking status. Malicious findings always block.
 	// Vulnerability findings block when their severity meets the threshold.
-	blocking := isBlocking(findings, defaultBlockThreshold)
+	blocking := isBlocking(findings, h.effectiveBlockThreshold())
 
 	// Assemble feed status and versions from sync state.
 	feedStatus, feedVersions := h.feedState(ctx)
@@ -190,21 +254,21 @@ func (h *Handler) HandleCheck(w http.ResponseWriter, r *http.Request) {
 	durationMs := time.Since(start).Milliseconds()
 
 	result := domain.ScanResult{
-		ScanID:            scanID,
-		Mode:              "remote",
-		ScannedAt:         start.UTC(),
-		DurationMs:        durationMs,
-		PackagesScanned:   len(req.Packages),
-		FindingsCount:     len(findings),
-		FindingsBlocking:  blocking,
-		FeedStatus:        feedStatus,
-		Summary:           summary,
-		Findings:     findings,
-		FeedVersions: feedVersions,
+		ScanID:           scanID,
+		Mode:             "remote",
+		ScannedAt:        start.UTC(),
+		DurationMs:       durationMs,
+		PackagesScanned:  len(req.Packages),
+		FindingsCount:    len(findings),
+		FindingsBlocking: blocking,
+		FeedStatus:       feedStatus,
+		Summary:          summary,
+		Findings:         findings,
+		FeedVersions:     feedVersions,
 	}
 
 	// Persist scan log (best-effort).
-	h.logScan(ctx, &result, r, correlationID)
+	h.logScan(ctx, &result, r, &req, correlationID)
 
 	w.Header().Set("X-Correlation-ID", correlationID)
 	w.Header().Set("X-Scan-Duration-Ms", fmt.Sprintf("%d", durationMs))
@@ -268,6 +332,9 @@ func isBlocking(findings []domain.Finding, threshold domain.Severity) bool {
 		if f.Type == domain.FindingTypeMalicious {
 			return true
 		}
+		if threshold == domain.SeverityNone {
+			continue
+		}
 		if f.Severity.Blocks(threshold) {
 			return true
 		}
@@ -310,7 +377,7 @@ func overallFeedStatus(statuses []db.FeedSyncStatus) string {
 }
 
 // logScan persists a scan log entry. Failures are logged but do not affect the response.
-func (h *Handler) logScan(ctx context.Context, result *domain.ScanResult, r *http.Request, correlationID string) {
+func (h *Handler) logScan(ctx context.Context, result *domain.ScanResult, r *http.Request, req *domain.ScanRequest, correlationID string) {
 	entry := &db.ScanLogEntry{
 		ScanID:        result.ScanID,
 		ScannedAt:     result.ScannedAt,
@@ -319,6 +386,11 @@ func (h *Handler) logScan(ctx context.Context, result *domain.ScanResult, r *htt
 		DurationMs:    int(result.DurationMs),
 		ClientIP:      clientIP(r),
 		UserAgent:     r.UserAgent(),
+	}
+	if req != nil && req.Repo != nil {
+		entry.RepoName = strings.TrimSpace(req.Repo.Name)
+		entry.Branch = strings.TrimSpace(req.Repo.Branch)
+		entry.Commit = strings.TrimSpace(req.Repo.Commit)
 	}
 	if err := h.store.InsertScanLog(ctx, entry); err != nil {
 		h.logger.Warn("failed to insert scan log", "error", err, "correlation_id", correlationID)
@@ -379,8 +451,8 @@ func (h *Handler) HandleFeedStatus(w http.ResponseWriter, r *http.Request) {
 
 // feedHealthStatus derives a health string from sync status.
 // A feed is "error" if its last sync failed, "warning" if the last run was
-// skipped or the last successful sync is more than 48 hours ago, and
-// "healthy" otherwise.
+// skipped, the last successful sync is more than 48 hours ago, or the feed
+// holds zero entries, and "healthy" otherwise.
 func feedHealthStatus(s db.FeedSyncStatus) string {
 	if s.LastSyncStatus == "error" {
 		return "error"
@@ -397,6 +469,11 @@ func feedHealthStatus(s db.FeedSyncStatus) string {
 	if time.Since(*s.LastSyncAt) > 48*time.Hour {
 		return "warning"
 	}
+	// A feed that reports a successful sync but persisted zero entries is not
+	// usable for lookups (DESIGN.md 3.5: zero entries => unhealthy).
+	if s.EntriesTotal == 0 && s.EntriesSynced == 0 {
+		return "warning"
+	}
 	return "healthy"
 }
 
@@ -410,7 +487,7 @@ func (h *Handler) HandleFeedImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	feed := r.PathValue("feed")
+	feed := normalizeFeedName(r.PathValue("feed"))
 	if feed == "" {
 		errorResponse(w, http.StatusBadRequest, "feed name is required")
 		return
@@ -571,11 +648,6 @@ func (h *Handler) HandlePackageOrRefresh(w http.ResponseWriter, r *http.Request)
 	errorResponse(w, http.StatusMethodNotAllowed, "method not allowed; did you mean POST .../refresh?")
 }
 
-// RefreshRequest is the optional JSON body for HandleRefresh.
-type RefreshRequest struct {
-	Version string `json:"version,omitempty"`
-}
-
 // RefreshResponse is the JSON response for HandleRefresh.
 type RefreshResponse struct {
 	Queued   bool   `json:"queued"`
@@ -608,9 +680,9 @@ func (h *Handler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 // handleRefresh is the internal implementation shared by both HandleRefresh
 // and HandlePackageOrRefresh.
 func (h *Handler) handleRefresh(w http.ResponseWriter, r *http.Request, ecosystem, name string) {
-	// Body is optional. If present, it may contain a version filter.
-	var req RefreshRequest
+	// Body is optional. If present, it must be an empty JSON object.
 	if r.Body != nil && r.ContentLength != 0 {
+		var req struct{}
 		if err := readJSON(r, &req); err != nil {
 			h.logger.Warn("invalid refresh request body", "error", err)
 			errorResponse(w, http.StatusBadRequest, "invalid request body: "+err.Error())
@@ -766,6 +838,14 @@ func isKnownFeed(feed string) bool {
 	default:
 		return false
 	}
+}
+
+func normalizeFeedName(feed string) string {
+	feed = strings.TrimSpace(strings.ToLower(feed))
+	if feed == "malicious" {
+		return "openssf"
+	}
+	return feed
 }
 
 func (h *Handler) importVulnerabilities(ctx context.Context, feed string, req *vulnerabilityImportRequest) (*importResponse, error) {
@@ -1003,6 +1083,18 @@ func parseRFC3339Timestamp(raw string) (time.Time, error) {
 		}
 	}
 	return time.Time{}, fmt.Errorf("invalid RFC3339 timestamp")
+}
+
+func requestCorrelationID(r *http.Request) string {
+	// Prefer the value established by the Correlation middleware, which
+	// validates/normalizes the incoming header to a canonical UUID. Only when
+	// the middleware is not in the chain (e.g. direct handler unit tests) do we
+	// generate a fresh ID. We deliberately do NOT echo a raw, unvalidated
+	// client-supplied header here, to avoid log/response injection.
+	if id := middleware.CorrelationIDFromContext(r.Context()); id != "" {
+		return id
+	}
+	return generateID()
 }
 
 // writeJSON encodes v as JSON and writes it with the given HTTP status code.

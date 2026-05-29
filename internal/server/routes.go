@@ -17,8 +17,8 @@ import (
 
 // registerRoutes wires all HTTP routes on the given mux. The context is
 // forwarded to subsystems that start background goroutines.
-func registerRoutes(ctx context.Context, mux *http.ServeMux, hc *health.Checker, cfg *config.Config, store db.Store, sm *auth.SessionManager, logger *slog.Logger, buildInfo BuildInfo, syncFeed admin.FeedSyncFunc) {
-	api := v1.NewHandler(store, logger)
+func registerRoutes(ctx context.Context, mux *http.ServeMux, hc *health.Checker, cfg *config.Config, runtime *config.RuntimeSettings, store db.Store, sm *auth.SessionManager, logger *slog.Logger, buildInfo BuildInfo, syncFeed admin.FeedSyncFunc) {
+	api := v1.NewHandlerWithRuntime(store, logger, runtime)
 
 	// -- Operations (no auth required) ----------------------------------------
 	mux.HandleFunc("GET /healthz", hc.LiveHandler())
@@ -38,7 +38,7 @@ func registerRoutes(ctx context.Context, mux *http.ServeMux, hc *health.Checker,
 	mux.HandleFunc("GET /api/v1/sync", api.HandleSync)
 
 	// -- Admin (session-protected) --------------------------------------------
-	admin.RegisterRoutes(ctx, mux, store, sm, logger, cfg, syncFeed)
+	admin.RegisterRoutes(ctx, mux, store, sm, logger, cfg, runtime, syncFeed)
 
 	// -- Web GUI (public pages: dashboard, search, package, feeds) -----------
 	renderer := web.NewRenderer(web.TemplateFS(), false)

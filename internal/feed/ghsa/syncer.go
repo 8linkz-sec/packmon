@@ -159,6 +159,14 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 // modified between two git commits. It filters for JSON files under
 // the reviewed directory and upserts each one.
 func (s *Syncer) processChangedFiles(ctx context.Context, store db.Store, repoDir string, changedFiles []string) (synced, total int, err error) {
+	repoRoot, err := os.OpenRoot(repoDir)
+	if err != nil {
+		return 0, 0, fmt.Errorf("open repo root: %w", err)
+	}
+	defer func() {
+		_ = repoRoot.Close()
+	}()
+
 	for _, relPath := range changedFiles {
 		if ctx.Err() != nil {
 			return synced, total, ctx.Err()
@@ -173,8 +181,7 @@ func (s *Syncer) processChangedFiles(ctx context.Context, store db.Store, repoDi
 		}
 		total++
 
-		absPath := filepath.Join(repoDir, relPath)
-		data, readErr := os.ReadFile(absPath)
+		data, readErr := repoRoot.ReadFile(relPath)
 		if readErr != nil {
 			// File may have been deleted in this diff range; skip.
 			s.logger.Debug("skipping changed file (read failed)",

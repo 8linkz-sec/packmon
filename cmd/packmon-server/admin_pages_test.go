@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -95,6 +96,383 @@ func TestAdminSettingsPageShowsRuntimeValues(t *testing.T) {
 	}
 	if strings.Contains(body, "0001-01-01") {
 		t.Fatalf("GET /admin/settings body contains zero timestamp: %s", body)
+	}
+}
+
+func TestHandleSystemSettingsSavePersistsSettings(t *testing.T) {
+	store := newNoopStore()
+	handler, sm := newAdminTestHandler(t, store, testAdminConfig())
+	req := newAuthenticatedAdminFormRequest(t, sm, "/admin/settings/system", url.Values{
+		"block_threshold":       {"HIGH"},
+		"rate_limit_per_minute": {"120"},
+		"rate_limit_burst":      {"25"},
+	})
+	rec := httptest.NewRecorder()
+
+	handler.HandleSystemSettingsSave(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST /admin/settings/system status = %d, want 303", rec.Code)
+	}
+
+	settings, err := store.GetSystemSettings(context.Background())
+	if err != nil {
+		t.Fatalf("GetSystemSettings() error = %v", err)
+	}
+	if settings == nil {
+		t.Fatal("GetSystemSettings() = nil, want saved settings")
+	}
+	if settings.BlockThreshold != "HIGH" {
+		t.Fatalf("BlockThreshold = %q, want HIGH", settings.BlockThreshold)
+	}
+	if settings.RateLimitPerMinute != 120 {
+		t.Fatalf("RateLimitPerMinute = %d, want 120", settings.RateLimitPerMinute)
+	}
+	if settings.RateLimitBurst != 25 {
+		t.Fatalf("RateLimitBurst = %d, want 25", settings.RateLimitBurst)
+	}
+
+	audit, err := store.ListAdminAuditLog(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("ListAdminAuditLog() error = %v", err)
+	}
+	if len(audit) != 1 || audit[0].Action != "system_settings_save" {
+		t.Fatalf("audit entries = %+v, want system_settings_save", audit)
+	}
+}
+
+func TestQueueAdminActionsManagePriorityPauseResumeRetryAndClear(t *testing.T) {
+	store := newNoopStore()
+	created, _, err := store.EnqueueRefresh(context.Background(), &db.RefreshJob{
+		Ecosystem: "npm",
+		Name:      "lodash",
+		Source:    "socket",
+		Priority:  3,
+	})
+	if err != nil {
+		t.Fatalf("EnqueueRefresh() error = %v", err)
+	}
+	if !created {
+		t.Fatal("EnqueueRefresh() created = false, want true")
+	}
+
+	jobs, err := store.ListQueueJobs(context.Background(), "", 10)
+	if err != nil {
+		t.Fatalf("ListQueueJobs() error = %v", err)
+	}
+	jobID := jobs[0].ID
+
+	handler, sm := newAdminTestHandler(t, store, testAdminConfig())
+	rec := httptest.NewRecorder()
+	handler.HandleQueuePriorityUpdate(rec, newAuthenticatedAdminFormRequest(t, sm, "/admin/queue/priority", url.Values{
+		"job_id":   {strconv.Itoa(jobID)},
+		"priority": {"0"},
+	}))
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST /admin/queue/priority status = %d, want 303", rec.Code)
+	}
+
+	jobs, _ = store.ListQueueJobs(context.Background(), "", 10)
+	if jobs[0].Priority != 0 {
+		t.Fatalf("priority = %d, want 0", jobs[0].Priority)
+	}
+
+	rec = httptest.NewRecorder()
+	handler.HandleQueuePause(rec, newAuthenticatedAdminFormRequest(t, sm, "/admin/queue/pause", url.Values{
+		"job_id": {strconv.Itoa(jobID)},
+	}))
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST /admin/queue/pause status = %d, want 303", rec.Code)
+	}
+	stats, _ := store.QueueStats(context.Background())
+	if stats.Paused != 1 {
+		t.Fatalf("QueueStats().Paused = %d, want 1", stats.Paused)
+	}
+	dequeued, err := store.DequeueRefresh(context.Background(), "socket")
+	if err != nil {
+		t.Fatalf("DequeueRefresh() error = %v", err)
+	}
+	if dequeued != nil {
+		t.Fatalf("DequeueRefresh() returned paused job %+v, want nil", *dequeued)
+	}
+
+	rec = httptest.NewRecorder()
+	handler.HandleQueueResume(rec, newAuthenticatedAdminFormRequest(t, sm, "/admin/queue/resume", url.Values{
+		"job_id": {strconv.Itoa(jobID)},
+	}))
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST /admin/queue/resume status = %d, want 303", rec.Code)
+	}
+	jobs, _ = store.ListQueueJobs(context.Background(), "", 10)
+	if jobs[0].Status != "pending" {
+		t.Fatalf("status after resume = %q, want pending", jobs[0].Status)
+	}
+
+	dequeued, err = store.DequeueRefresh(context.Background(), "socket")
+	if err != nil {
+		t.Fatalf("DequeueRefresh() error = %v", err)
+	}
+	if dequeued == nil {
+		t.Fatal("DequeueRefresh() = nil, want processing job")
+	}
+	if err := store.CompleteRefresh(context.Background(), dequeued.ID, io.ErrUnexpectedEOF); err != nil {
+		t.Fatalf("CompleteRefresh() error = %v", err)
+	}
+
+	rec = httptest.NewRecorder()
+	handler.HandleQueueRetry(rec, newAuthenticatedAdminFormRequest(t, sm, "/admin/queue/retry", url.Values{
+		"job_id": {strconv.Itoa(jobID)},
+	}))
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST /admin/queue/retry status = %d, want 303", rec.Code)
+	}
+	jobs, _ = store.ListQueueJobs(context.Background(), "", 10)
+	if jobs[0].Status != "pending" || jobs[0].Error != "" {
+		t.Fatalf("job after retry = %+v, want pending with empty error", jobs[0])
+	}
+
+	rec = httptest.NewRecorder()
+	handler.HandleQueueClear(rec, newAuthenticatedAdminFormRequest(t, sm, "/admin/queue/clear", url.Values{
+		"status": {"pending"},
+	}))
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST /admin/queue/clear status = %d, want 303", rec.Code)
+	}
+	jobs, _ = store.ListQueueJobs(context.Background(), "", 10)
+	if len(jobs) != 0 {
+		t.Fatalf("jobs after clear = %+v, want empty queue", jobs)
+	}
+
+	audit, err := store.ListAdminAuditLog(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("ListAdminAuditLog() error = %v", err)
+	}
+	for _, want := range []string{"queue_priority_update", "queue_pause", "queue_resume", "queue_retry", "queue_clear"} {
+		if !auditContainsAction(audit, want) {
+			t.Fatalf("audit log missing %q: %+v", want, audit)
+		}
+	}
+}
+
+func TestHandleAdvisoryCreateGeneratesManualUUID(t *testing.T) {
+	store := newNoopStore()
+	handler, sm := newAdminTestHandler(t, store, testAdminConfig())
+	req := newAuthenticatedAdminFormRequest(t, sm, "/admin/advisories/create", url.Values{
+		"ecosystem":   {"npm"},
+		"name":        {"left-pad"},
+		"severity":    {"HIGH"},
+		"risk_type":   {"other"},
+		"summary":     {"manual advisory without upstream CVE"},
+		"description": {"operator-created advisory"},
+	})
+	rec := httptest.NewRecorder()
+
+	handler.HandleAdvisoryCreate(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST /admin/advisories/create status = %d, want 303", rec.Code)
+	}
+	advisories, err := store.ListMaliciousFindings(context.Background(), "manual", 10)
+	if err != nil {
+		t.Fatalf("ListMaliciousFindings() error = %v", err)
+	}
+	if len(advisories) != 1 {
+		t.Fatalf("manual advisories len = %d, want 1", len(advisories))
+	}
+	id := advisories[0].ID
+	if !strings.HasPrefix(id, "manual:") || len(id) != len("manual:00000000-0000-0000-0000-000000000000") {
+		t.Fatalf("manual advisory ID = %q, want manual:<uuid>", id)
+	}
+}
+
+func TestHandleAdvisoryCreatePersistsVulnerabilityAdvisory(t *testing.T) {
+	store := newNoopStore()
+	handler, sm := newAdminTestHandler(t, store, testAdminConfig())
+	req := newAuthenticatedAdminFormRequest(t, sm, "/admin/advisories/create", url.Values{
+		"finding_type": {"vulnerability"},
+		"ecosystem":    {"npm"},
+		"name":         {"left-pad"},
+		"severity":     {"HIGH"},
+		"summary":      {"manual vulnerability advisory"},
+		"description":  {"operator-created non-malicious advisory"},
+	})
+	rec := httptest.NewRecorder()
+
+	handler.HandleAdvisoryCreate(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST /admin/advisories/create status = %d, want 303", rec.Code)
+	}
+
+	advisories, err := store.ListManualAdvisories(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("ListManualAdvisories() error = %v", err)
+	}
+	if len(advisories) != 1 {
+		t.Fatalf("manual advisories len = %d, want 1", len(advisories))
+	}
+	advisory := advisories[0]
+	if advisory.FindingType != "vulnerability" {
+		t.Fatalf("FindingType = %q, want vulnerability", advisory.FindingType)
+	}
+	if !strings.HasPrefix(advisory.ID, "manual:") {
+		t.Fatalf("manual advisory ID = %q, want manual:<uuid>", advisory.ID)
+	}
+
+	malicious, err := store.ListMaliciousFindings(context.Background(), "manual", 10)
+	if err != nil {
+		t.Fatalf("ListMaliciousFindings() error = %v", err)
+	}
+	if len(malicious) != 0 {
+		t.Fatalf("manual malicious findings len = %d, want 0", len(malicious))
+	}
+
+	findings, err := store.FindVulnerabilities(context.Background(), "npm", "left-pad", "1.0.0")
+	if err != nil {
+		t.Fatalf("FindVulnerabilities() error = %v", err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("vulnerability findings len = %d, want 1", len(findings))
+	}
+	if string(findings[0].Type) != "vulnerability" || findings[0].Source != "manual" || findings[0].AdvisoryID != advisory.ID {
+		t.Fatalf("unexpected vulnerability finding = %+v", findings[0])
+	}
+}
+
+func TestHandleAdvisoryCreateRejectsInvalidInput(t *testing.T) {
+	cases := []struct {
+		name string
+		form url.Values
+	}{
+		{
+			name: "invalid severity",
+			form: url.Values{
+				"finding_type": {"vulnerability"}, "ecosystem": {"npm"},
+				"name": {"left-pad"}, "severity": {"BOGUS"}, "summary": {"s"},
+			},
+		},
+		{
+			name: "unknown ecosystem",
+			form: url.Values{
+				"finding_type": {"vulnerability"}, "ecosystem": {"rubygemsX"},
+				"name": {"left-pad"}, "severity": {"HIGH"}, "summary": {"s"},
+			},
+		},
+		{
+			name: "operator id outside manual namespace",
+			form: url.Values{
+				"id": {"CVE-2021-23337"}, "finding_type": {"vulnerability"},
+				"ecosystem": {"npm"}, "name": {"left-pad"}, "severity": {"HIGH"}, "summary": {"s"},
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newNoopStore()
+			handler, sm := newAdminTestHandler(t, store, testAdminConfig())
+			req := newAuthenticatedAdminFormRequest(t, sm, "/admin/advisories/create", tc.form)
+			rec := httptest.NewRecorder()
+
+			handler.HandleAdvisoryCreate(rec, req)
+
+			// Invalid input must not be persisted in either backing table.
+			vulns, err := store.ListManualAdvisories(context.Background(), 10)
+			if err != nil {
+				t.Fatalf("ListManualAdvisories() error = %v", err)
+			}
+			mal, err := store.ListMaliciousFindings(context.Background(), "manual", 10)
+			if err != nil {
+				t.Fatalf("ListMaliciousFindings() error = %v", err)
+			}
+			if len(vulns)+len(mal) != 0 {
+				t.Fatalf("invalid advisory was persisted: manual=%d malicious=%d", len(vulns), len(mal))
+			}
+		})
+	}
+}
+
+func TestAdminAdvisoriesPageShowsManualFindingTypes(t *testing.T) {
+	store := newNoopStore()
+	if err := store.UpsertManualAdvisory(context.Background(), &db.ManualAdvisory{
+		ID:          "manual:vuln",
+		FindingType: "vulnerability",
+		Ecosystem:   "npm",
+		Name:        "left-pad",
+		Severity:    "MEDIUM",
+		Summary:     "manual vuln",
+		Description: "non-malicious manual advisory",
+	}); err != nil {
+		t.Fatalf("UpsertManualAdvisory(vulnerability) error = %v", err)
+	}
+	if err := store.UpsertManualAdvisory(context.Background(), &db.ManualAdvisory{
+		ID:          "manual:malicious",
+		FindingType: "malicious",
+		Ecosystem:   "pypi",
+		Name:        "evil",
+		Severity:    "CRITICAL",
+		RiskType:    "malware",
+		Summary:     "manual malicious",
+	}); err != nil {
+		t.Fatalf("UpsertManualAdvisory(malicious) error = %v", err)
+	}
+
+	handler, sm := newAdminTestHandler(t, store, testAdminConfig())
+	req := newAuthenticatedAdminRequest(t, sm, http.MethodGet, "/admin/advisories")
+	rec := httptest.NewRecorder()
+
+	handler.HandleAdminAdvisories(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /admin/advisories status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"vulnerability", "malicious", "left-pad", "evil"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("GET /admin/advisories body missing %q\nbody=%s", want, body)
+		}
+	}
+}
+
+func TestHandleAdvisoryDeleteRemovesManualVulnerabilityAdvisory(t *testing.T) {
+	store := newNoopStore()
+	if err := store.UpsertManualAdvisory(context.Background(), &db.ManualAdvisory{
+		ID:          "manual:vuln-delete",
+		FindingType: "vulnerability",
+		Ecosystem:   "npm",
+		Name:        "left-pad",
+		Severity:    "HIGH",
+		Summary:     "manual vulnerability",
+	}); err != nil {
+		t.Fatalf("UpsertManualAdvisory() error = %v", err)
+	}
+
+	handler, sm := newAdminTestHandler(t, store, testAdminConfig())
+	req := newAuthenticatedAdminFormRequest(t, sm, "/admin/advisories/delete", url.Values{
+		"id": {"manual:vuln-delete"},
+	})
+	rec := httptest.NewRecorder()
+
+	handler.HandleAdvisoryDelete(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST /admin/advisories/delete status = %d, want 303", rec.Code)
+	}
+
+	findings, err := store.FindVulnerabilities(context.Background(), "npm", "left-pad", "1.0.0")
+	if err != nil {
+		t.Fatalf("FindVulnerabilities() error = %v", err)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("vulnerability findings len = %d, want 0", len(findings))
+	}
+
+	audit, err := store.ListAdminAuditLog(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("ListAdminAuditLog() error = %v", err)
+	}
+	if len(audit) != 1 || audit[0].Action != "advisory_delete" {
+		t.Fatalf("audit entries = %+v, want advisory_delete", audit)
 	}
 }
 
@@ -314,6 +692,15 @@ func TestHandleFeedConfigResetDeletesOverride(t *testing.T) {
 	}
 }
 
+func auditContainsAction(entries []db.AdminAuditLogEntry, action string) bool {
+	for _, entry := range entries {
+		if entry.Action == action {
+			return true
+		}
+	}
+	return false
+}
+
 func newAdminTestHandler(t *testing.T, store *noopStore, cfg *config.Config, syncFeed ...admin.FeedSyncFunc) (*admin.AdminHandler, *auth.SessionManager) {
 	t.Helper()
 
@@ -324,7 +711,8 @@ func newAdminTestHandler(t *testing.T, store *noopStore, cfg *config.Config, syn
 	if len(syncFeed) > 0 {
 		trigger = syncFeed[0]
 	}
-	return admin.NewAdminHandler(context.Background(), store, sm, renderer, logger, cfg, trigger), sm
+	runtime := config.NewRuntimeSettings(cfg.Server.BlockThreshold, cfg.Server.RateLimitPerMinute, cfg.Server.RateLimitBurst)
+	return admin.NewAdminHandler(context.Background(), store, sm, renderer, logger, cfg, runtime, trigger), sm
 }
 
 func newAuthenticatedAdminRequest(t *testing.T, sm *auth.SessionManager, method, target string) *http.Request {

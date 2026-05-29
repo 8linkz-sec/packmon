@@ -35,6 +35,84 @@
   </div>
   {{end}}
 
+  <!-- System settings -->
+  <div class="bg-white rounded-lg shadow p-5 border border-gray-200">
+    <div class="flex flex-wrap items-start justify-between gap-3 mb-4">
+      <div>
+        <h2 class="text-lg font-semibold">Runtime Policy</h2>
+        <p class="text-sm text-gray-500 mt-1">Saved values are loaded on server start.</p>
+      </div>
+      {{if .HasSystemSettings}}
+        {{if .HasSystemSettingsUpdatedAt}}
+        <span class="inline-block bg-blue-50 text-blue-700 px-2 py-0.5 rounded text-xs font-medium">updated {{formatTimeAgo .SystemSettingsUpdatedAt}}</span>
+        {{else}}
+        <span class="inline-block bg-blue-50 text-blue-700 px-2 py-0.5 rounded text-xs font-medium">database override</span>
+        {{end}}
+      {{else}}
+      <span class="inline-block bg-gray-100 text-gray-600 px-2 py-0.5 rounded text-xs font-medium">runtime default</span>
+      {{end}}
+    </div>
+
+    <form action="/admin/settings/system" method="POST" class="space-y-4 max-w-3xl">
+      <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+
+      <div class="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_220px_220px] gap-4">
+        <div>
+          <label for="block-threshold" class="block text-sm font-medium text-gray-700 mb-1">Block Threshold</label>
+          <select
+            name="block_threshold"
+            id="block-threshold"
+            class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+          >
+            <option value="CRITICAL" {{if eq .SystemBlockThreshold "CRITICAL"}}selected{{end}}>CRITICAL</option>
+            <option value="HIGH" {{if eq .SystemBlockThreshold "HIGH"}}selected{{end}}>HIGH</option>
+            <option value="MEDIUM" {{if eq .SystemBlockThreshold "MEDIUM"}}selected{{end}}>MEDIUM</option>
+            <option value="LOW" {{if eq .SystemBlockThreshold "LOW"}}selected{{end}}>LOW</option>
+            <option value="NONE" {{if eq .SystemBlockThreshold "NONE"}}selected{{end}}>NONE</option>
+          </select>
+          <p class="mt-1 text-xs text-gray-500">Runtime: {{.RuntimeBlockThreshold}}</p>
+        </div>
+
+        <div>
+          <label for="rate-limit-per-minute" class="block text-sm font-medium text-gray-700 mb-1">Rate Limit / Minute</label>
+          <input
+            type="number"
+            name="rate_limit_per_minute"
+            id="rate-limit-per-minute"
+            min="1"
+            max="100000"
+            required
+            value="{{.SystemRateLimitPerMinute}}"
+            class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+          >
+          <p class="mt-1 text-xs text-gray-500">Runtime: {{.RuntimeRateLimitPerMinute}}</p>
+        </div>
+
+        <div>
+          <label for="rate-limit-burst" class="block text-sm font-medium text-gray-700 mb-1">Rate Limit Burst</label>
+          <input
+            type="number"
+            name="rate_limit_burst"
+            id="rate-limit-burst"
+            min="1"
+            max="100000"
+            required
+            value="{{.SystemRateLimitBurst}}"
+            class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+          >
+          <p class="mt-1 text-xs text-gray-500">Runtime: {{.RuntimeRateLimitBurst}}</p>
+        </div>
+      </div>
+
+      <button
+        type="submit"
+        class="bg-blue-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-700"
+      >
+        Save System Settings
+      </button>
+    </form>
+  </div>
+
   <!-- Change password -->
   <div class="bg-white rounded-lg shadow p-5 border border-gray-200">
     <h2 class="text-lg font-semibold mb-3">Change Admin Password</h2>

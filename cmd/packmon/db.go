@@ -138,7 +138,7 @@ func newDBSyncCmd() *cobra.Command {
 	f := cmd.Flags()
 	f.StringVar(&flagEcosystems, "ecosystems", "", "comma-separated ecosystem filter")
 	f.BoolVar(&flagFull, "full", false, "full sync instead of incremental")
-	f.StringVar(&flagSource, "source", "server", "sync source (server|osv)")
+	f.StringVar(&flagSource, "source", "server", "sync source (server)")
 	f.StringVar(&flagServer, "server", "", "feed server URL")
 	f.StringVar(&flagAPIKey, "api-key", "", "API key for authenticated sync requests")
 	f.IntVar(&flagTimeout, "timeout", 60, "sync timeout in seconds")

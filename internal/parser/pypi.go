@@ -66,6 +66,7 @@ func (p *PipfileParser) Parse(r io.Reader) ([]domain.Package, error) {
 			Name:      normalizePyName(name),
 			Version:   v,
 			Ecosystem: domain.EcosystemPyPI,
+			Dev:       true,
 		})
 	}
 

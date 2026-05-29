@@ -1,0 +1,328 @@
+# Packmon Design and Requirements
+
+This document is the canonical product and architecture baseline for Packmon.
+Use it to answer "how is this intended to work?" and to compare implementation
+against intent during audits.
+
+## Product Goal
+
+Packmon detects vulnerable and malicious dependencies in developer repositories.
+It must work as:
+
+- a local CLI for developers;
+- a central feed/API server for teams;
+- a CI/CD scanner for GitHub Actions and GitLab CI;
+- an automation component for N8N workflows.
+
+The expected scale is internal organizational use: hundreds of developers and
+tens of thousands of unique packages. Packmon is not designed as a public SaaS
+or a public internet-facing API.
+
+## Primary Requirements
+
+- Scan dependency lockfiles and supported manifest-like files across the
+  canonical ecosystems.
+- Detect known vulnerabilities and malicious package findings.
+- Support remote server mode, local SQLite mode, and auto fallback mode.
+- Produce human-readable terminal output and machine-readable JSON, SARIF, and
+  JUnit files.
+- Use stable exit codes for CI:
+  - `0`: no findings;
+  - `1`: blocking findings;
+  - `2`: operational error;
+  - `3`: findings below the blocking threshold (non-blocking; treated as a
+    passing pipeline by the shipped CI templates);
+  - `4`: parser error;
+  - `10`: internal bug.
+- Treat malicious findings as always blocking.
+- Let teams configure vulnerability blocking thresholds.
+- Keep CLI, API, and webhook scan result schemas aligned.
+- Keep server feed data in PostgreSQL.
+- Keep local CLI data in SQLite and sync it from the Packmon server only.
+- Provide a web dashboard, package search, admin settings, feed status, queue
+  management, manual advisories, and API-key management.
+- Provide internal monitoring metrics and operational runbook coverage.
+
+## Non-Goals
+
+- Public SaaS multi-tenancy.
+- User-account management beyond one shared admin login.
+- Client-side direct synchronization from public vulnerability feeds.
+- Server-side parsing of repository lockfiles from N8N or CI. Clients parse
+  lockfiles and send package lists.
+- Automatic database migrations on normal server startup.
+- Point-in-time database recovery or WAL archiving managed by Packmon.
+- Replay protection for webhooks. This is intentionally omitted for internal
+  tooling simplicity.
+
+## Repository Layout
+
+- `cmd/packmon`: CLI entry point and commands.
+- `cmd/packmon-server`: server entry point, migration command, dev/noop store.
+- `internal/domain`: canonical domain models, severity, scan result schema.
+- `internal/parser`: lockfile parsers and ecosystem registry.
+- `internal/scanner`: file discovery, scan orchestration, output writers,
+  webhook delivery, local history integration.
+- `internal/api/v1`: public API handlers.
+- `internal/api/admin`: admin web/API handlers and form processing.
+- `internal/server`: HTTP server setup and middleware.
+- `internal/db/postgres`: server persistence and PostgreSQL queries.
+- `internal/db/sqlite`: local CLI database and sync store.
+- `internal/feed`: feed sync interfaces, manager, queue, and feed syncers.
+- `internal/web`: public web UI handlers and embedded templates/assets.
+- `internal/telemetry`: in-process counters and Prometheus text output.
+- `api/openapi`: versioned API contract.
+- `ci/gitlab`: reusable GitLab CI template.
+- `.github/workflows`: project CI, nightly, release, and Packmon scan workflow.
+- `deploy`: Helm, Rancher, and N8N deployment/automation assets.
+
+## Architecture
+
+Packmon has two main runtime surfaces.
+
+The CLI discovers lockfiles, parses packages, applies config and filters, and
+checks findings using either a remote server or the local SQLite database. The
+CLI owns all repository filesystem access.
+
+The server owns feed synchronization, normalized advisory storage, API checks,
+admin UI, web UI, queue operations, and metrics. The server receives package
+lists, not source code or lockfile contents.
+
+```text
+Developer repo
+  -> packmon CLI
+     -> parser registry
+     -> scanner/checker
+     -> remote /api/v1/check or local SQLite
+     -> table + JSON/SARIF/JUnit + optional webhook
+
+Feeds
+  -> feed syncers or N8N feed imports
+  -> PostgreSQL normalized tables
+  -> /api/v1/check, /api/v1/sync, web UI, metrics
+```
+
+## Supported Ecosystems
+
+The canonical ecosystem identifiers are lowercase:
+
+```text
+npm, pypi, go, maven, cargo, nuget, composer, gem, pub,
+cocoapods, swiftpm, hex, cran, actions
+```
+
+Feed-specific names must be mapped into this enum at the import boundary.
+
+## CLI Behavior
+
+`packmon scan` is the primary command. It discovers supported lockfiles up to a
+configured depth, parses packages, filters ignored ecosystems/packages, and
+checks findings.
+
+Important behavior:
+
+- stdout is human-readable unless `--quiet` is used.
+- JSON, SARIF, and JUnit are written with explicit output-file flags.
+- `--include-dev` includes dependencies marked as dev/test scope.
+- config precedence is flags, environment, project `.packmon.yaml`, user-global
+  `~/.packmon/config/packmon.yaml`, defaults.
+- local history is stored compactly in SQLite for report/dashboard features.
+- stale local DB data produces warnings but does not block scans by itself.
+- repo metadata such as name, branch, and commit may be sent to the server for
+  scan logging.
+
+## Server Behavior
+
+The server provides:
+
+- `POST /api/v1/check` for package-list checks;
+- `GET /api/v1/sync` for local SQLite sync;
+- feed status and import endpoints;
+- refresh queue endpoints;
+- health, readiness, version, and metrics endpoints;
+- public web dashboard/package search;
+- admin UI for login, API keys, queue, feed config, advisories, settings, and
+  audit log.
+
+Production mode uses PostgreSQL. Development mode uses a local in-memory/noop
+store to support fast local integration tests and UI development.
+
+## Data Model
+
+Vulnerabilities are normalized across multiple tables:
+
+- core vulnerability facts;
+- aliases such as CVE, GHSA, OSV IDs;
+- source records with source-specific IDs and freshness;
+- references;
+- affected packages and version ranges.
+
+Alias relationships are many-to-many in practice. The project intentionally
+uses a composite uniqueness model for vulnerability aliases where needed rather
+than assuming a single alias belongs globally to only one record.
+
+Malicious findings are separate entities with stable IDs, package identity,
+source, risk type, severity, optional affected versions, summary, and
+description.
+
+Manual advisories are admin-managed records. They can represent either
+vulnerability findings or malicious findings. New manual records without an
+operator-supplied ID use stable `manual:<uuid>` IDs.
+
+## Feed Sources
+
+Server-side feed sources include:
+
+- OSV.dev;
+- GitHub Advisory Database;
+- OpenSSF malicious packages;
+- VulnCheck;
+- CISA KEV;
+- EPSS;
+- Socket.dev through async queue behavior.
+
+Feed sync can run inside the server or be supplied externally through N8N feed
+import endpoints. Feed failure must not delete existing good data. Check
+responses must indicate degraded feed state when data is missing, skipped, or
+stale.
+
+## Refresh Queue
+
+The refresh queue is package-wide, not version-specific. Jobs are deduplicated
+by ecosystem, package name, and source while active.
+
+Queue priority levels are:
+
+- `0`: manual admin trigger;
+- `1`: unknown packages never checked before;
+- `2`: packages with known findings;
+- `3`: oldest `updated_at` / normal re-check work.
+
+Queue statuses include:
+
+- `pending`;
+- `processing`;
+- `paused`;
+- `done`;
+- `error`.
+
+Admins can update priority, pause, resume, retry, purge, and clear matching
+statuses. Paused jobs must not be dequeued.
+
+## Local SQLite Mode
+
+Local mode uses a compact SQLite database populated from `GET /api/v1/sync`.
+It stores enough data for equivalent finding quality but not full server detail.
+
+Remote and local modes should detect the same vulnerability and malicious
+findings when local data is fresh. Differences are allowed only in detail level
+and freshness.
+
+## Web UI
+
+The web UI uses Go templates, Tailwind CSS, and htmx. Assets are local and
+embedded into the binary. The UI should stay operational and utilitarian:
+dashboard, package search, package details, scans, admin pages, and forms.
+
+Admin pages are protected by the shared admin session model described in
+`SECURITY.md`.
+
+The admin UI exposes `/.well-known/change-password` as a redirect to the
+password settings page so password managers can discover the password-change
+entry point.
+
+## Configuration
+
+Important server environment variables:
+
+- `PACKMON_SERVER_MODE`;
+- `PACKMON_SERVER_PORT`;
+- `PACKMON_SERVER_PUBLIC_HOST`;
+- `PACKMON_TRUSTED_PROXIES`;
+- `PACKMON_BLOCK_THRESHOLD`;
+- `PACKMON_RATE_LIMIT_PER_MINUTE`;
+- `PACKMON_RATE_LIMIT_BURST`;
+- `PACKMON_METRICS_HOST`;
+- `PACKMON_METRICS_PORT`;
+- `PACKMON_DB_*`;
+- `PACKMON_ADMIN_INITIAL_PASSWORD`;
+- feed API keys and feed mode/enabled flags.
+
+Admin system settings can persist selected runtime values such as block
+threshold and rate-limit settings. Persisted values are loaded on server start.
+
+## CI/CD Integration
+
+Packmon supports:
+
+- GitHub Actions workflows;
+- a GitLab shared CI template under `ci/gitlab`;
+- SARIF upload;
+- JUnit report files;
+- JSON result artifacts;
+- optional PR comments;
+- optional webhook delivery.
+
+The GitLab template is locally validated by `tests/ci`. A real GitLab runner
+validation remains externally dependent on a GitLab project and registered
+runner.
+
+## Monitoring and Operations
+
+The metrics endpoint emits Prometheus text metrics for:
+
+- HTTP request count and duration;
+- packages scanned and scan findings;
+- vulnerability/malicious/finding severity totals;
+- feed last sync and age;
+- feed timeouts;
+- queue size, oldest job, errors, and recovered stuck jobs;
+- DB pool state;
+- migration version;
+- auth login failures and degraded responses.
+
+Metrics bind to `127.0.0.1` by default.
+
+Backups are intentionally simple: periodic `pg_dump`, seven-day local
+retention, and storage outside the application data path. External backup
+systems are responsible for off-host retention.
+
+## Test and Quality Requirements
+
+Normal local gate:
+
+```bash
+gofumpt -extra -l .
+go test -count=1 ./...
+go test -race -count=1 ./...
+go vet ./...
+golangci-lint run ./...
+govulncheck ./...
+gosec ./...
+```
+
+Build and tagged test gate:
+
+```bash
+go build -o .build/packmon ./cmd/packmon
+go build -o .build/packmon-server ./cmd/packmon-server
+PACKMON_TEST_BIN_DIR=.build go test -count=1 -tags integration ./tests/integration
+PACKMON_TEST_BIN_DIR=.build go test -count=1 -tags e2e ./tests/e2e
+```
+
+The Docker/PostgreSQL production integration test is the strongest local proxy
+for a real deployment:
+
+```bash
+PACKMON_TEST_BIN_DIR=.build go test -count=1 -tags integration -run '^TestProductionServerWithPostgresAndAPIKey$' -v ./tests/integration
+```
+
+## Open External Validation
+
+The only documented open validation gap is the real GitLab runner test:
+
+- GitLab server/project available;
+- runner registered;
+- shared template run in a real pipeline;
+- binary download and checksum verified in pipeline;
+- JSON, SARIF, and JUnit artifacts visible in GitLab.

@@ -34,10 +34,9 @@ type WebhookConfig struct {
 }
 
 // SendWebhook delivers the scan result to the configured webhook URL.
-// It wraps the result in a WebhookEnvelope per the contract in CLAUDE.md
-// section 5.4. If a secret is configured, the request body is signed
-// with HMAC-SHA256 and the signature is sent in the X-Packmon-Signature
-// header.
+// It wraps the result in a domain.WebhookEnvelope. If a secret is configured,
+// the request body is signed with HMAC-SHA256 and the signature is sent in the
+// X-Packmon-Signature header as described in SECURITY.md.
 //
 // Webhook delivery is best-effort: failures are logged but never cause
 // the scan command to return a non-zero exit code.

@@ -1,20 +1,25 @@
 package admin
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/8linkz/packmon/internal/auth"
 	"github.com/8linkz/packmon/internal/db"
+	"github.com/8linkz/packmon/internal/domain"
 )
 
 type manualAdvisoryView struct {
 	ID          string
+	FindingType string
 	Ecosystem   string
 	Name        string
 	Severity    string
@@ -131,6 +136,7 @@ func (h *AdminHandler) HandleAdminQueue(w http.ResponseWriter, r *http.Request) 
 		"QueueStats": queueStats,
 		"Jobs":       jobs,
 		"Message":    r.URL.Query().Get("msg"),
+		"Error":      r.URL.Query().Get("err"),
 	}
 	h.renderAdmin(w, "admin/queue.html", data)
 }
@@ -161,6 +167,133 @@ func (h *AdminHandler) HandleQueuePurge(w http.ResponseWriter, r *http.Request) 
 
 	msg := fmt.Sprintf("Purged %d completed/errored jobs.", purged)
 	http.Redirect(w, r, "/admin/queue?msg="+msg, http.StatusSeeOther)
+}
+
+// HandleQueuePriorityUpdate handles POST /admin/queue/priority.
+func (h *AdminHandler) HandleQueuePriorityUpdate(w http.ResponseWriter, r *http.Request) {
+	sess := h.requireAdmin(w, r)
+	if sess == nil {
+		return
+	}
+	if !parseAdminForm(w, r) {
+		return
+	}
+	if !auth.ValidateCSRF(r, sess) {
+		http.Error(w, "invalid CSRF token", http.StatusForbidden)
+		return
+	}
+
+	jobID, ok := queueJobIDFromForm(w, r)
+	if !ok {
+		return
+	}
+	priority, err := strconv.Atoi(strings.TrimSpace(r.PostForm.Get("priority")))
+	if err != nil || priority < 0 || priority > 9 {
+		redirectQueue(w, r, "Invalid priority", true)
+		return
+	}
+
+	if err := h.store.UpdateQueueJobPriority(r.Context(), jobID, priority); err != nil {
+		h.logger.Error("admin queue priority update failed", "job_id", jobID, "error", err)
+		redirectQueue(w, r, "Priority update failed", true)
+		return
+	}
+	h.auditLog(r, "queue_priority_update", map[string]string{
+		"job_id":   strconv.Itoa(jobID),
+		"priority": strconv.Itoa(priority),
+	})
+	redirectQueue(w, r, "Priority updated", false)
+}
+
+// HandleQueuePause handles POST /admin/queue/pause.
+func (h *AdminHandler) HandleQueuePause(w http.ResponseWriter, r *http.Request) {
+	h.handleQueueJobAction(w, r, "queue_pause", "Job paused", h.store.PauseQueueJob)
+}
+
+// HandleQueueResume handles POST /admin/queue/resume.
+func (h *AdminHandler) HandleQueueResume(w http.ResponseWriter, r *http.Request) {
+	h.handleQueueJobAction(w, r, "queue_resume", "Job resumed", h.store.ResumeQueueJob)
+}
+
+// HandleQueueRetry handles POST /admin/queue/retry.
+func (h *AdminHandler) HandleQueueRetry(w http.ResponseWriter, r *http.Request) {
+	h.handleQueueJobAction(w, r, "queue_retry", "Job queued for retry", h.store.RetryQueueJob)
+}
+
+// HandleQueueClear handles POST /admin/queue/clear.
+func (h *AdminHandler) HandleQueueClear(w http.ResponseWriter, r *http.Request) {
+	sess := h.requireAdmin(w, r)
+	if sess == nil {
+		return
+	}
+	if !parseAdminForm(w, r) {
+		return
+	}
+	if !auth.ValidateCSRF(r, sess) {
+		http.Error(w, "invalid CSRF token", http.StatusForbidden)
+		return
+	}
+
+	status := strings.ToLower(strings.TrimSpace(r.PostForm.Get("status")))
+	statuses := []string{status}
+	if status == "all" {
+		statuses = []string{"pending", "paused", "done", "error"}
+	}
+
+	cleared, err := h.store.ClearQueue(r.Context(), statuses)
+	if err != nil {
+		h.logger.Error("admin queue clear failed", "status", status, "error", err)
+		redirectQueue(w, r, "Queue clear failed", true)
+		return
+	}
+	h.auditLog(r, "queue_clear", map[string]string{
+		"status":  status,
+		"cleared": strconv.Itoa(cleared),
+	})
+	redirectQueue(w, r, fmt.Sprintf("Cleared %d queue jobs.", cleared), false)
+}
+
+func (h *AdminHandler) handleQueueJobAction(w http.ResponseWriter, r *http.Request, auditAction, message string, action func(context.Context, int) error) {
+	sess := h.requireAdmin(w, r)
+	if sess == nil {
+		return
+	}
+	if !parseAdminForm(w, r) {
+		return
+	}
+	if !auth.ValidateCSRF(r, sess) {
+		http.Error(w, "invalid CSRF token", http.StatusForbidden)
+		return
+	}
+
+	jobID, ok := queueJobIDFromForm(w, r)
+	if !ok {
+		return
+	}
+	if err := action(r.Context(), jobID); err != nil {
+		h.logger.Error("admin queue action failed", "action", auditAction, "job_id", jobID, "error", err)
+		redirectQueue(w, r, message+" failed", true)
+		return
+	}
+	h.auditLog(r, auditAction, map[string]string{"job_id": strconv.Itoa(jobID)})
+	redirectQueue(w, r, message, false)
+}
+
+func queueJobIDFromForm(w http.ResponseWriter, r *http.Request) (int, bool) {
+	jobID, err := strconv.Atoi(strings.TrimSpace(r.PostForm.Get("job_id")))
+	if err != nil || jobID <= 0 {
+		redirectQueue(w, r, "Invalid queue job ID", true)
+		return 0, false
+	}
+	return jobID, true
+}
+
+func redirectQueue(w http.ResponseWriter, r *http.Request, message string, isError bool) {
+	key := "msg"
+	if isError {
+		key = "err"
+	}
+	http.Redirect(w, r, "/admin/queue?"+key+"="+url.QueryEscape(message), http.StatusSeeOther)
 }
 
 // HandleAdminKeys serves GET /admin/keys with API key list.
@@ -335,7 +468,7 @@ func (h *AdminHandler) HandleAdminAdvisories(w http.ResponseWriter, r *http.Requ
 	}
 
 	csrfToken, _ := auth.CSRFToken(sess)
-	advisories, err := h.store.ListMaliciousFindings(r.Context(), "manual", 100)
+	advisories, err := h.store.ListManualAdvisories(r.Context(), 100)
 	if err != nil {
 		h.logger.Error("admin advisories: failed to list advisories", "error", err)
 	}
@@ -346,6 +479,7 @@ func (h *AdminHandler) HandleAdminAdvisories(w http.ResponseWriter, r *http.Requ
 	for _, advisory := range advisories {
 		view := manualAdvisoryView{
 			ID:          advisory.ID,
+			FindingType: advisory.FindingType,
 			Ecosystem:   advisory.Ecosystem,
 			Name:        advisory.Name,
 			Severity:    advisory.Severity,
@@ -387,49 +521,115 @@ func (h *AdminHandler) HandleAdvisoryCreate(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	ecosystem := r.PostForm.Get("ecosystem")
-	name := r.PostForm.Get("name")
-	advisoryID := r.PostForm.Get("id")
-	severity := r.PostForm.Get("severity")
-	riskType := r.PostForm.Get("risk_type")
-	summary := r.PostForm.Get("summary")
+	ecosystem := strings.ToLower(strings.TrimSpace(r.PostForm.Get("ecosystem")))
+	name := strings.TrimSpace(r.PostForm.Get("name"))
+	advisoryID := strings.TrimSpace(r.PostForm.Get("id"))
+	findingType := normalizeAdvisoryFindingType(r.PostForm.Get("finding_type"))
+	severity := strings.ToUpper(strings.TrimSpace(r.PostForm.Get("severity")))
+	riskType := strings.TrimSpace(r.PostForm.Get("risk_type"))
+	summary := strings.TrimSpace(r.PostForm.Get("summary"))
 	description := r.PostForm.Get("description")
+	isEditing := advisoryID != ""
 
 	if ecosystem == "" || name == "" || severity == "" || summary == "" {
 		http.Redirect(w, r, "/admin/advisories?err=All+required+fields+must+be+filled", http.StatusSeeOther)
 		return
 	}
 
-	mf := &db.MaliciousFinding{
+	// The HTML <select> only constrains the browser; a direct request can
+	// submit arbitrary values. Validate against the supported sets so a
+	// mistyped severity cannot silently rank 0 (and never block) and a bogus
+	// ecosystem cannot create findings that never match a real scan.
+	switch severity {
+	case "CRITICAL", "HIGH", "MEDIUM", "LOW":
+	default:
+		http.Redirect(w, r, "/admin/advisories?err=Invalid+severity", http.StatusSeeOther)
+		return
+	}
+	if !domain.Ecosystem(ecosystem).Valid() {
+		http.Redirect(w, r, "/admin/advisories?err=Unknown+ecosystem", http.StatusSeeOther)
+		return
+	}
+	if len(name) > 256 || len(summary) > 1000 || len(description) > 8000 {
+		http.Redirect(w, r, "/admin/advisories?err=Field+exceeds+maximum+length", http.StatusSeeOther)
+		return
+	}
+
+	if advisoryID == "" {
+		var err error
+		advisoryID, err = generateManualAdvisoryID()
+		if err != nil {
+			h.logger.Error("admin advisories: failed to generate advisory ID", "error", err)
+			http.Redirect(w, r, "/admin/advisories?err=Failed+to+generate+advisory+ID", http.StatusSeeOther)
+			return
+		}
+	} else if !strings.HasPrefix(advisoryID, "manual:") {
+		// Operator-supplied IDs must stay within the manual: namespace so they
+		// cannot collide with and overwrite a feed-sourced advisory (e.g. a
+		// CVE/GHSA ID) via ON CONFLICT (id) DO UPDATE.
+		http.Redirect(w, r, "/admin/advisories?err=Advisory+ID+must+start+with+manual%3A", http.StatusSeeOther)
+		return
+	}
+	if findingType == "malicious" && strings.TrimSpace(riskType) == "" {
+		riskType = "other"
+	}
+
+	advisory := &db.ManualAdvisory{
 		ID:          advisoryID,
+		FindingType: findingType,
 		Ecosystem:   ecosystem,
 		Name:        name,
-		Source:      "manual",
 		RiskType:    riskType,
 		Severity:    severity,
 		Summary:     summary,
 		Description: description,
-		CreatedBy:   "admin",
 	}
 
-	if err := h.store.UpsertMaliciousFinding(r.Context(), mf); err != nil {
+	if err := h.store.UpsertManualAdvisory(r.Context(), advisory); err != nil {
 		h.logger.Error("admin advisories: failed to create advisory", "error", err)
 		http.Redirect(w, r, "/admin/advisories?err=Failed+to+create+advisory", http.StatusSeeOther)
 		return
 	}
 
 	h.auditLog(r, "advisory_create", map[string]string{
-		"id":        advisoryID,
-		"ecosystem": ecosystem,
-		"name":      name,
-		"severity":  severity,
+		"id":           advisoryID,
+		"finding_type": findingType,
+		"ecosystem":    ecosystem,
+		"name":         name,
+		"severity":     severity,
 	})
 
 	msg := "Advisory+created"
-	if advisoryID != "" {
+	if isEditing {
 		msg = "Advisory+updated"
 	}
 	http.Redirect(w, r, "/admin/advisories?msg="+msg, http.StatusSeeOther)
+}
+
+func normalizeAdvisoryFindingType(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "vulnerability":
+		return "vulnerability"
+	default:
+		return "malicious"
+	}
+}
+
+func generateManualAdvisoryID() (string, error) {
+	raw := make([]byte, 16)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	raw[6] = (raw[6] & 0x0f) | 0x40
+	raw[8] = (raw[8] & 0x3f) | 0x80
+	encoded := hex.EncodeToString(raw)
+	return fmt.Sprintf("manual:%s-%s-%s-%s-%s",
+		encoded[0:8],
+		encoded[8:12],
+		encoded[12:16],
+		encoded[16:20],
+		encoded[20:32],
+	), nil
 }
 
 // HandleAdvisoryDelete handles POST /admin/advisories/delete.
@@ -453,7 +653,7 @@ func (h *AdminHandler) HandleAdvisoryDelete(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	if err := h.store.DeleteMaliciousFinding(r.Context(), advisoryID); err != nil {
+	if err := h.store.DeleteManualAdvisory(r.Context(), advisoryID); err != nil {
 		h.logger.Error("admin advisories: failed to delete advisory", "error", err, "id", advisoryID)
 		http.Redirect(w, r, "/admin/advisories?err=Failed+to+delete+advisory", http.StatusSeeOther)
 		return
@@ -538,6 +738,11 @@ func (h *AdminHandler) HandleAdminSettings(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	systemSettings, err := h.store.GetSystemSettings(ctx)
+	if err != nil {
+		h.logger.Error("admin settings: failed to get system settings", "error", err)
+	}
+
 	serverMode := "unknown"
 	syncInterval := "unknown"
 	syncOnStartup := "unknown"
@@ -546,6 +751,9 @@ func (h *AdminHandler) HandleAdminSettings(w http.ResponseWriter, r *http.Reques
 	databaseHost := "unknown"
 	databaseName := "unknown"
 	databaseSSLMode := "unknown"
+	runtimeBlockThreshold := "CRITICAL"
+	runtimeRateLimitPerMinute := 60
+	runtimeRateLimitBurst := 60
 	if h.cfg != nil {
 		serverMode = string(h.cfg.Server.Mode)
 		syncInterval = formatRuntimeDuration(h.cfg.FeedSync.Interval)
@@ -555,25 +763,65 @@ func (h *AdminHandler) HandleAdminSettings(w http.ResponseWriter, r *http.Reques
 		databaseHost = h.cfg.DB.Host
 		databaseName = h.cfg.DB.Name
 		databaseSSLMode = h.cfg.DB.SSLMode
+		if h.cfg.Server.BlockThreshold != "" {
+			runtimeBlockThreshold = h.cfg.Server.BlockThreshold
+		}
+		if h.cfg.Server.RateLimitPerMinute > 0 {
+			runtimeRateLimitPerMinute = h.cfg.Server.RateLimitPerMinute
+		}
+		if h.cfg.Server.RateLimitBurst > 0 {
+			runtimeRateLimitBurst = h.cfg.Server.RateLimitBurst
+		}
+	}
+	formBlockThreshold := runtimeBlockThreshold
+	formRateLimitPerMinute := runtimeRateLimitPerMinute
+	formRateLimitBurst := runtimeRateLimitBurst
+	var systemSettingsUpdatedAt time.Time
+	hasSystemSettings := false
+	hasSystemSettingsUpdatedAt := false
+	if systemSettings != nil {
+		hasSystemSettings = true
+		if systemSettings.BlockThreshold != "" {
+			formBlockThreshold = systemSettings.BlockThreshold
+		}
+		if systemSettings.RateLimitPerMinute > 0 {
+			formRateLimitPerMinute = systemSettings.RateLimitPerMinute
+		}
+		if systemSettings.RateLimitBurst > 0 {
+			formRateLimitBurst = systemSettings.RateLimitBurst
+		}
+		if !systemSettings.UpdatedAt.IsZero() {
+			systemSettingsUpdatedAt = systemSettings.UpdatedAt
+			hasSystemSettingsUpdatedAt = true
+		}
 	}
 
 	data := map[string]any{
-		"ActiveNav":            "admin",
-		"CSRFToken":            csrfToken,
-		"ServerMode":           serverMode,
-		"SyncInterval":         syncInterval,
-		"FeedSyncOnStartup":    syncOnStartup,
-		"AdminSessionTimeout":  adminSessionTimeout,
-		"MetricsAddr":          metricsAddr,
-		"DatabaseHost":         databaseHost,
-		"DatabaseName":         databaseName,
-		"DatabaseSSLMode":      databaseSSLMode,
-		"LastLoginAt":          lastLoginAt,
-		"HasLastLoginAt":       hasLastLoginAt,
-		"PasswordChangedAt":    passwordChangedAt,
-		"HasPasswordChangedAt": hasPasswordChangedAt,
-		"Message":              r.URL.Query().Get("msg"),
-		"Error":                r.URL.Query().Get("err"),
+		"ActiveNav":                  "admin",
+		"CSRFToken":                  csrfToken,
+		"ServerMode":                 serverMode,
+		"SyncInterval":               syncInterval,
+		"FeedSyncOnStartup":          syncOnStartup,
+		"AdminSessionTimeout":        adminSessionTimeout,
+		"MetricsAddr":                metricsAddr,
+		"DatabaseHost":               databaseHost,
+		"DatabaseName":               databaseName,
+		"DatabaseSSLMode":            databaseSSLMode,
+		"RuntimeBlockThreshold":      runtimeBlockThreshold,
+		"RuntimeRateLimitPerMinute":  runtimeRateLimitPerMinute,
+		"RuntimeRateLimitBurst":      runtimeRateLimitBurst,
+		"SystemBlockThreshold":       formBlockThreshold,
+		"SystemRateLimitPerMinute":   formRateLimitPerMinute,
+		"SystemRateLimitBurst":       formRateLimitBurst,
+		"HasSystemSettings":          hasSystemSettings,
+		"SystemSettingsUpdatedAt":    systemSettingsUpdatedAt,
+		"HasSystemSettingsUpdatedAt": hasSystemSettingsUpdatedAt,
+		"LastLoginAt":                lastLoginAt,
+		"HasLastLoginAt":             hasLastLoginAt,
+		"PasswordChangedAt":          passwordChangedAt,
+		"HasPasswordChangedAt":       hasPasswordChangedAt,
+		"Message":                    r.URL.Query().Get("msg"),
+		"Error":                      r.URL.Query().Get("err"),
 	}
 	h.renderAdmin(w, "admin/settings.html", data)
 }

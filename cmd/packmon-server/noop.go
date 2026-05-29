@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"slices"
@@ -24,6 +25,8 @@ type noopStore struct {
 	auditLog     []db.AdminAuditLogEntry
 	feedConfigs  map[string]db.FeedConfig
 	feedStatuses map[string]db.FeedSyncStatus
+	systemConfig *db.SystemSettings
+	vulnerable   map[string]db.Vulnerability
 	malicious    map[string]db.MaliciousFinding
 	scanLogs     []db.ScanLogEntry
 	refreshJobs  []db.RefreshJob
@@ -39,12 +42,42 @@ func newNoopStore() *noopStore {
 	return &noopStore{
 		feedConfigs:  make(map[string]db.FeedConfig),
 		feedStatuses: make(map[string]db.FeedSyncStatus),
+		vulnerable:   make(map[string]db.Vulnerability),
 		malicious:    make(map[string]db.MaliciousFinding),
 	}
 }
 
-func (*noopStore) FindVulnerabilities(context.Context, string, string, string) ([]domain.Finding, error) {
-	return nil, nil
+func (s *noopStore) FindVulnerabilities(_ context.Context, ecosystem, name, version string) ([]domain.Finding, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	findings := make([]domain.Finding, 0)
+	for _, vuln := range s.vulnerable {
+		for _, pkg := range vuln.AffectedPackages {
+			if pkg.Ecosystem != ecosystem || pkg.Name != name {
+				continue
+			}
+			source := "unknown"
+			if len(vuln.Sources) > 0 && strings.TrimSpace(vuln.Sources[0].Source) != "" {
+				source = vuln.Sources[0].Source
+			}
+			title := vuln.Summary
+			if title == "" {
+				title = vuln.ID
+			}
+			findings = append(findings, domain.Finding{
+				Name:       name,
+				Version:    version,
+				Ecosystem:  domain.Ecosystem(ecosystem),
+				Type:       domain.FindingTypeVulnerability,
+				Severity:   domain.Severity(strings.ToUpper(strings.TrimSpace(vuln.Severity))),
+				AdvisoryID: vuln.ID,
+				Title:      title,
+				Source:     source,
+			})
+		}
+	}
+	return findings, nil
 }
 
 func (s *noopStore) FindMalicious(_ context.Context, ecosystem, name, version string) ([]domain.Finding, error) {
@@ -95,8 +128,16 @@ func (s *noopStore) FindMalicious(_ context.Context, ecosystem, name, version st
 	return findings, nil
 }
 
-func (*noopStore) FindVulnerabilitiesBatch(_ context.Context, _ []db.PackageQuery) ([]domain.Finding, error) {
-	return nil, nil
+func (s *noopStore) FindVulnerabilitiesBatch(ctx context.Context, packages []db.PackageQuery) ([]domain.Finding, error) {
+	var all []domain.Finding
+	for _, pkg := range packages {
+		findings, err := s.FindVulnerabilities(ctx, pkg.Ecosystem, pkg.Name, pkg.Version)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, findings...)
+	}
+	return all, nil
 }
 
 func (s *noopStore) FindMaliciousBatch(ctx context.Context, packages []db.PackageQuery) ([]domain.Finding, error) {
@@ -111,8 +152,19 @@ func (s *noopStore) FindMaliciousBatch(ctx context.Context, packages []db.Packag
 	return all, nil
 }
 
-func (*noopStore) PropagateSeverityViaAliases(context.Context) (int, error)     { return 0, nil }
-func (*noopStore) UpsertVulnerability(context.Context, *db.Vulnerability) error { return nil }
+func (*noopStore) PropagateSeverityViaAliases(context.Context) (int, error) { return 0, nil }
+
+func (s *noopStore) UpsertVulnerability(_ context.Context, vuln *db.Vulnerability) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if vuln == nil || strings.TrimSpace(vuln.ID) == "" {
+		return nil
+	}
+	copyValue := cloneVulnerability(*vuln)
+	s.vulnerable[copyValue.ID] = copyValue
+	return nil
+}
 
 func (s *noopStore) UpsertMaliciousFinding(_ context.Context, mf *db.MaliciousFinding) error {
 	s.mu.Lock()
@@ -130,7 +182,12 @@ func (s *noopStore) UpsertMaliciousFinding(_ context.Context, mf *db.MaliciousFi
 	return nil
 }
 
-func (*noopStore) DeleteVulnerability(context.Context, string) error { return nil }
+func (s *noopStore) DeleteVulnerability(_ context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.vulnerable, id)
+	return nil
+}
 
 func (s *noopStore) DeleteMaliciousFinding(_ context.Context, id string) error {
 	s.mu.Lock()
@@ -166,6 +223,179 @@ func (s *noopStore) ListMaliciousFindings(_ context.Context, source string, limi
 	}
 
 	return out, nil
+}
+
+func (s *noopStore) UpsertManualAdvisory(ctx context.Context, advisory *db.ManualAdvisory) error {
+	if advisory == nil {
+		return nil
+	}
+	findingType := normalizeManualAdvisoryType(advisory.FindingType)
+	if findingType == "malicious" {
+		if err := s.UpsertMaliciousFinding(ctx, manualAdvisoryToMaliciousFinding(advisory)); err != nil {
+			return err
+		}
+		return s.DeleteVulnerability(ctx, advisory.ID)
+	}
+
+	if err := s.UpsertVulnerability(ctx, manualAdvisoryToVulnerability(advisory)); err != nil {
+		return err
+	}
+	return s.DeleteMaliciousFinding(ctx, advisory.ID)
+}
+
+func (s *noopStore) DeleteManualAdvisory(ctx context.Context, id string) error {
+	if err := s.DeleteMaliciousFinding(ctx, id); err != nil {
+		return err
+	}
+	return s.DeleteVulnerability(ctx, id)
+}
+
+func (s *noopStore) ListManualAdvisories(_ context.Context, limit int) ([]db.ManualAdvisory, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	out := make([]db.ManualAdvisory, 0, len(s.malicious)+len(s.vulnerable))
+	for _, finding := range s.malicious {
+		if finding.Source != "manual" {
+			continue
+		}
+		out = append(out, db.ManualAdvisory{
+			ID:          finding.ID,
+			FindingType: "malicious",
+			Ecosystem:   finding.Ecosystem,
+			Name:        finding.Name,
+			Severity:    finding.Severity,
+			RiskType:    finding.RiskType,
+			Summary:     finding.Summary,
+			Description: finding.Description,
+		})
+	}
+	for _, vuln := range s.vulnerable {
+		if !vulnerabilityHasManualSource(vuln) {
+			continue
+		}
+		for _, pkg := range vuln.AffectedPackages {
+			out = append(out, db.ManualAdvisory{
+				ID:          vuln.ID,
+				FindingType: "vulnerability",
+				Ecosystem:   pkg.Ecosystem,
+				Name:        pkg.Name,
+				Severity:    vuln.Severity,
+				RiskType:    "vulnerability",
+				Summary:     vuln.Summary,
+				Description: vuln.Details,
+			})
+		}
+	}
+
+	slices.SortFunc(out, func(a, b db.ManualAdvisory) int {
+		if a.ID == b.ID {
+			return strings.Compare(a.FindingType, b.FindingType)
+		}
+		if a.ID > b.ID {
+			return -1
+		}
+		return 1
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func normalizeManualAdvisoryType(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "vulnerability":
+		return "vulnerability"
+	default:
+		return "malicious"
+	}
+}
+
+func manualAdvisoryToVulnerability(advisory *db.ManualAdvisory) *db.Vulnerability {
+	now := time.Now().UTC()
+	severity := strings.ToUpper(strings.TrimSpace(advisory.Severity))
+	if severity == "" {
+		severity = "UNKNOWN"
+	}
+	return &db.Vulnerability{
+		ID:        strings.TrimSpace(advisory.ID),
+		Summary:   strings.TrimSpace(advisory.Summary),
+		Details:   strings.TrimSpace(advisory.Description),
+		Severity:  severity,
+		Published: now,
+		Modified:  now,
+		Aliases: []db.VulnerabilityAlias{
+			{AliasID: strings.TrimSpace(advisory.ID)},
+		},
+		Sources: []db.VulnerabilitySource{
+			{
+				Source:   "manual",
+				SourceID: strings.TrimSpace(advisory.ID),
+			},
+		},
+		AffectedPackages: []db.AffectedPackage{
+			{
+				Ecosystem:        strings.TrimSpace(advisory.Ecosystem),
+				Name:             strings.TrimSpace(advisory.Name),
+				VersionRanges:    json.RawMessage("[]"),
+				VersionsAffected: json.RawMessage("[]"),
+			},
+		},
+	}
+}
+
+func manualAdvisoryToMaliciousFinding(advisory *db.ManualAdvisory) *db.MaliciousFinding {
+	riskType := strings.TrimSpace(advisory.RiskType)
+	if riskType == "" {
+		riskType = "other"
+	}
+	severity := strings.ToUpper(strings.TrimSpace(advisory.Severity))
+	if severity == "" {
+		severity = "CRITICAL"
+	}
+	return &db.MaliciousFinding{
+		ID:          strings.TrimSpace(advisory.ID),
+		Ecosystem:   strings.TrimSpace(advisory.Ecosystem),
+		Name:        strings.TrimSpace(advisory.Name),
+		Source:      "manual",
+		RiskType:    riskType,
+		Severity:    severity,
+		Summary:     strings.TrimSpace(advisory.Summary),
+		Description: strings.TrimSpace(advisory.Description),
+		CreatedBy:   "admin",
+	}
+}
+
+func vulnerabilityHasManualSource(vuln db.Vulnerability) bool {
+	for _, source := range vuln.Sources {
+		if source.Source == "manual" {
+			return true
+		}
+	}
+	return false
+}
+
+func cloneVulnerability(vuln db.Vulnerability) db.Vulnerability {
+	copyValue := vuln
+	copyValue.Aliases = append([]db.VulnerabilityAlias(nil), vuln.Aliases...)
+	copyValue.Sources = append([]db.VulnerabilitySource(nil), vuln.Sources...)
+	copyValue.References = append([]db.VulnerabilityReference(nil), vuln.References...)
+	copyValue.AffectedPackages = append([]db.AffectedPackage(nil), vuln.AffectedPackages...)
+	for i := range copyValue.Sources {
+		if copyValue.Sources[i].RawJSON != nil {
+			copyValue.Sources[i].RawJSON = append(json.RawMessage(nil), copyValue.Sources[i].RawJSON...)
+		}
+	}
+	for i := range copyValue.AffectedPackages {
+		if copyValue.AffectedPackages[i].VersionRanges != nil {
+			copyValue.AffectedPackages[i].VersionRanges = append(json.RawMessage(nil), copyValue.AffectedPackages[i].VersionRanges...)
+		}
+		if copyValue.AffectedPackages[i].VersionsAffected != nil {
+			copyValue.AffectedPackages[i].VersionsAffected = append(json.RawMessage(nil), copyValue.AffectedPackages[i].VersionsAffected...)
+		}
+	}
+	return copyValue
 }
 
 func (*noopStore) SetCISAKEV(context.Context, []string) (int, error) { return 0, nil }
@@ -288,6 +518,30 @@ func (s *noopStore) ListFeedConfigs(context.Context) ([]db.FeedConfig, error) {
 	return out, nil
 }
 
+func (s *noopStore) GetSystemSettings(context.Context) (*db.SystemSettings, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.systemConfig == nil {
+		return nil, nil
+	}
+	copyValue := *s.systemConfig
+	return &copyValue, nil
+}
+
+func (s *noopStore) UpsertSystemSettings(_ context.Context, settings *db.SystemSettings) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if settings == nil {
+		return nil
+	}
+	copyValue := *settings
+	copyValue.UpdatedAt = time.Now().UTC()
+	s.systemConfig = &copyValue
+	return nil
+}
+
 func (s *noopStore) ExportSync(_ context.Context, opts db.SyncExportOptions) (*db.SyncExport, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -352,9 +606,14 @@ func (s *noopStore) EnqueueRefresh(_ context.Context, job *db.RefreshJob) (bool,
 	for i := range s.refreshJobs {
 		existing := &s.refreshJobs[i]
 		if existing.Ecosystem == job.Ecosystem && existing.Name == job.Name && existing.Source == job.Source &&
-			(existing.Status == "pending" || existing.Status == "processing") {
+			(existing.Status == "pending" || existing.Status == "processing" || existing.Status == "paused") {
 			if job.Priority < existing.Priority {
 				existing.Priority = job.Priority
+			}
+			if existing.Status == "paused" {
+				existing.Status = "pending"
+				existing.ProcessedAt = nil
+				existing.Error = ""
 			}
 			return false, s.queuePositionLocked(existing.ID), nil
 		}
@@ -582,7 +841,8 @@ func (s *noopStore) FindAPIKeyByHash(_ context.Context, keyHash string) (*db.API
 	defer s.mu.Unlock()
 
 	for _, apiKey := range s.apiKeys {
-		if apiKey.KeyHash == keyHash && apiKey.RevokedAt == nil {
+		if apiKey.RevokedAt == nil &&
+			subtle.ConstantTimeCompare([]byte(apiKey.KeyHash), []byte(keyHash)) == 1 {
 			copyValue := apiKey
 			return &copyValue, nil
 		}
@@ -740,6 +1000,8 @@ func (s *noopStore) QueueStats(context.Context) (*db.QueueStatsResult, error) {
 			stats.Done++
 		case "error":
 			stats.Error++
+		case "paused":
+			stats.Paused++
 		}
 	}
 	return stats, nil
@@ -779,6 +1041,106 @@ func (s *noopStore) PurgeQueue(context.Context) (int, error) {
 	return purged, nil
 }
 
+func (s *noopStore) UpdateQueueJobPriority(_ context.Context, jobID, priority int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for i := range s.refreshJobs {
+		if s.refreshJobs[i].ID == jobID {
+			s.refreshJobs[i].Priority = priority
+			return nil
+		}
+	}
+	return fmt.Errorf("queue job %d not found", jobID)
+}
+
+func (s *noopStore) RetryQueueJob(_ context.Context, jobID int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for i := range s.refreshJobs {
+		if s.refreshJobs[i].ID != jobID {
+			continue
+		}
+		switch s.refreshJobs[i].Status {
+		case "done", "error", "paused":
+			s.refreshJobs[i].Status = "pending"
+			s.refreshJobs[i].RequestedAt = time.Now().UTC()
+			s.refreshJobs[i].ProcessedAt = nil
+			s.refreshJobs[i].Error = ""
+			return nil
+		default:
+			return fmt.Errorf("queue job %d is not retryable", jobID)
+		}
+	}
+	return fmt.Errorf("queue job %d not found", jobID)
+}
+
+func (s *noopStore) PauseQueueJob(_ context.Context, jobID int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for i := range s.refreshJobs {
+		if s.refreshJobs[i].ID != jobID {
+			continue
+		}
+		if s.refreshJobs[i].Status != "pending" {
+			return fmt.Errorf("queue job %d is not pending", jobID)
+		}
+		s.refreshJobs[i].Status = "paused"
+		return nil
+	}
+	return fmt.Errorf("queue job %d not found", jobID)
+}
+
+func (s *noopStore) ResumeQueueJob(_ context.Context, jobID int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for i := range s.refreshJobs {
+		if s.refreshJobs[i].ID != jobID {
+			continue
+		}
+		if s.refreshJobs[i].Status != "paused" {
+			return fmt.Errorf("queue job %d is not paused", jobID)
+		}
+		s.refreshJobs[i].Status = "pending"
+		s.refreshJobs[i].ProcessedAt = nil
+		s.refreshJobs[i].Error = ""
+		return nil
+	}
+	return fmt.Errorf("queue job %d not found", jobID)
+}
+
+func (s *noopStore) ClearQueue(_ context.Context, statuses []string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	allowed := map[string]struct{}{}
+	for _, status := range statuses {
+		status = strings.ToLower(strings.TrimSpace(status))
+		switch status {
+		case "pending", "paused", "done", "error":
+			allowed[status] = struct{}{}
+		}
+	}
+	if len(allowed) == 0 {
+		return 0, nil
+	}
+
+	cleared := 0
+	kept := s.refreshJobs[:0]
+	for _, job := range s.refreshJobs {
+		if _, ok := allowed[job.Status]; ok {
+			cleared++
+			continue
+		}
+		kept = append(kept, job)
+	}
+	s.refreshJobs = kept
+	return cleared, nil
+}
+
 func (s *noopStore) DashboardStats(context.Context) (*db.DashboardStatsResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -801,6 +1163,18 @@ func (s *noopStore) DashboardStats(context.Context) (*db.DashboardStatsResult, e
 	}
 	stats.TotalPackages = len(packages)
 	return stats, nil
+}
+
+func (s *noopStore) ScanTotals(context.Context) (*db.ScanTotals, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	totals := &db.ScanTotals{}
+	for _, entry := range s.scanLogs {
+		totals.PackagesScanned += entry.PackagesCount
+		totals.Findings += entry.FindingsCount
+	}
+	return totals, nil
 }
 
 func (s *noopStore) queuePositionLocked(jobID int) int {

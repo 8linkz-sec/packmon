@@ -19,7 +19,6 @@ variables:
   PACKMON_FAIL_ON: "CRITICAL"
   PACKMON_SCAN_PATH: "."
   PACKMON_SERVER: "https://packmon.intern"
-  PACKMON_BINARY_URL: "${PACKMON_BINARY_MIRROR:-https://github.com/8linkz-sec/packmon/releases/latest/download}"
 
 packmon:
   image: alpine:3.23
@@ -27,11 +26,20 @@ packmon:
   before_script:
     - apk add --no-cache curl jq
     - |
+      set -e
       ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
-      BINARY_URL="${PACKMON_BINARY_URL}/packmon-linux-${ARCH}"
+      BINARY_BASE_URL="${PACKMON_BINARY_MIRROR:-https://github.com/8linkz-sec/packmon/releases/latest/download}"
+      BINARY_BASE_URL="${BINARY_BASE_URL%/}"
+      BINARY_NAME="packmon-linux-${ARCH}"
+      BINARY_URL="${BINARY_BASE_URL}/${BINARY_NAME}"
+      CHECKSUM_URL="${BINARY_BASE_URL}/checksums.txt"
       echo "Downloading packmon from ${BINARY_URL}"
-      curl -sfL "${BINARY_URL}" -o /usr/local/bin/packmon
-      chmod +x /usr/local/bin/packmon
+      curl -sfL "${BINARY_URL}" -o "/tmp/${BINARY_NAME}"
+      curl -sfL "${CHECKSUM_URL}" -o /tmp/packmon-checksums.txt
+      grep " ${BINARY_NAME}$" /tmp/packmon-checksums.txt > "/tmp/${BINARY_NAME}.sha256"
+      (cd /tmp && sha256sum -c "${BINARY_NAME}.sha256")
+      chmod +x "/tmp/${BINARY_NAME}"
+      mv "/tmp/${BINARY_NAME}" /usr/local/bin/packmon
       packmon version
   script:
     - |
@@ -49,6 +57,13 @@ packmon:
       echo "Packmon exit code: ${EXIT_CODE}"
       if [ -f results.json ]; then
         jq -r '"Packages scanned: \(.packages_scanned), Findings: \(.findings_count)"' results.json
+      fi
+
+      # Exit code 3 means findings below the blocking threshold were reported.
+      # Per the exit-code contract this is a passing ("green") pipeline.
+      if [ "${EXIT_CODE}" = "3" ]; then
+        echo "Findings below blocking threshold; pipeline stays green."
+        EXIT_CODE=0
       fi
 
       exit $EXIT_CODE

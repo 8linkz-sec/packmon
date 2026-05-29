@@ -108,7 +108,7 @@ func TestMavenParser_Parse(t *testing.T) {
 			},
 		},
 		{
-			name: "skip test scope dependencies",
+			name: "marks test scope dependencies as dev",
 			input: `<?xml version="1.0" encoding="UTF-8"?>
 <project>
   <dependencies>
@@ -125,9 +125,10 @@ func TestMavenParser_Parse(t *testing.T) {
     </dependency>
   </dependencies>
 </project>`,
-			wantCount: 1,
+			wantCount: 2,
 			wantPkgs: map[string]string{
 				"com.google.guava:guava": "33.0.0-jre",
+				"junit:junit":            "4.13.2",
 			},
 		},
 		{
@@ -268,5 +269,29 @@ func TestMavenParser_Parse(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestMavenParser_MarksTestScopeAsDev(t *testing.T) {
+	t.Parallel()
+
+	pkgs, err := NewMavenParser().Parse(strings.NewReader(`<project>
+  <dependencies>
+    <dependency>
+      <groupId>junit</groupId>
+      <artifactId>junit</artifactId>
+      <version>4.13.2</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+</project>`))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if len(pkgs) != 1 {
+		t.Fatalf("packages = %d, want 1", len(pkgs))
+	}
+	if !pkgs[0].Dev {
+		t.Fatal("test-scoped dependency should be marked Dev")
 	}
 }

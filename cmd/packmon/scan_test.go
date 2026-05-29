@@ -7,7 +7,33 @@ import (
 	"testing"
 
 	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz/packmon/internal/scanner"
 )
+
+func TestAutoFallbackWarning(t *testing.T) {
+	t.Parallel()
+
+	age := 5
+	cases := []struct {
+		name   string
+		mode   scanner.Mode
+		result *domain.ScanResult
+		want   string
+	}{
+		{"auto fallback with age", scanner.ModeAuto, &domain.ScanResult{Mode: "local", DBAgeDays: &age}, "warning: remote server unreachable, scanned against local database (5 day(s) old)"},
+		{"auto fallback without age", scanner.ModeAuto, &domain.ScanResult{Mode: "local"}, "warning: remote server unreachable, scanned against local database"},
+		{"auto remote success", scanner.ModeAuto, &domain.ScanResult{Mode: "remote"}, ""},
+		{"explicit local mode", scanner.ModeLocal, &domain.ScanResult{Mode: "local"}, ""},
+		{"nil result", scanner.ModeAuto, nil, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := autoFallbackWarning(tc.mode, tc.result); got != tc.want {
+				t.Fatalf("autoFallbackWarning() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
 
 func TestBuildScanTargets_UsesLocalNameForRootPath(t *testing.T) {
 	t.Parallel()

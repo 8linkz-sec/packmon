@@ -44,6 +44,15 @@
       <input type="hidden" name="id" value="{{.ID}}">
       {{end}}
 
+      <div>
+        <label for="adv-finding-type" class="block text-sm font-medium text-gray-700 mb-1">Finding Type</label>
+        <select name="finding_type" id="adv-finding-type" required
+          class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none">
+          <option value="vulnerability" {{with .EditAdvisory}}{{if eq .FindingType "vulnerability"}}selected{{end}}{{end}}>vulnerability</option>
+          <option value="malicious" {{if .IsEditing}}{{with .EditAdvisory}}{{if eq .FindingType "malicious"}}selected{{end}}{{end}}{{else}}selected{{end}}>malicious</option>
+        </select>
+      </div>
+
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div>
           <label for="adv-ecosystem" class="block text-sm font-medium text-gray-700 mb-1">Ecosystem</label>
@@ -125,6 +134,7 @@
         <thead>
           <tr class="text-left text-gray-500 border-b bg-gray-50">
             <th class="px-4 py-2">ID</th>
+            <th class="px-4 py-2">Type</th>
             <th class="px-4 py-2">Package</th>
             <th class="px-4 py-2">Severity</th>
             <th class="px-4 py-2">Risk Type</th>
@@ -136,6 +146,7 @@
           {{range .Advisories}}
           <tr class="border-b border-gray-100">
             <td class="px-4 py-2 font-mono text-xs">{{.ID}}</td>
+            <td class="px-4 py-2">{{.FindingType}}</td>
             <td class="px-4 py-2">{{.Ecosystem}} / {{.Name}}</td>
             <td class="px-4 py-2">
               <span class="inline-block px-2 py-0.5 rounded text-xs font-medium border {{severityClass .Severity}}">{{.Severity}}</span>
@@ -163,7 +174,7 @@
   </div>
 
   <div class="bg-yellow-50 border border-yellow-200 rounded-md p-4 text-sm text-yellow-800">
-    Manual advisories are stored with source "manual" and appear alongside feed-sourced findings. They can be managed via the admin API or this interface.
+    Manual advisories are stored with source "manual", get a stable manual:&lt;uuid&gt; ID when no ID is provided, and appear alongside feed-sourced vulnerability or malicious findings.
   </div>
 
 </div>

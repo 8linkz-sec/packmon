@@ -104,10 +104,10 @@ func TestSendWebhook_Success(t *testing.T) {
 	t.Parallel()
 
 	var (
-		mu          sync.Mutex
-		gotBody     []byte
-		gotHeaders  http.Header
-		gotMethod   string
+		mu           sync.Mutex
+		gotBody      []byte
+		gotHeaders   http.Header
+		gotMethod    string
 		serverCalled bool
 	)
 
@@ -127,7 +127,7 @@ func TestSendWebhook_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	secret := "test-webhook-secret"
+	secret := "test-webhook-secret" //nolint:gosec // test fixture secret
 	cfg := WebhookConfig{
 		URL:     server.URL,
 		Secret:  secret,
@@ -242,7 +242,7 @@ func TestSendWebhook_Timeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create listener: %v", err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	// Accept connections in the background but never respond.
 	go func() {
@@ -254,7 +254,7 @@ func TestSendWebhook_Timeout(t *testing.T) {
 			// Hold the connection open without sending anything.
 			go func(c net.Conn) {
 				<-time.After(30 * time.Second)
-				c.Close()
+				_ = c.Close()
 			}(conn)
 		}
 	}()
