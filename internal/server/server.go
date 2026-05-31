@@ -5,9 +5,11 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 
@@ -36,7 +38,7 @@ type Server struct {
 // New creates a Server with all middleware and routes wired up.
 // The caller must provide a Store implementation and a Pinger for
 // health checks (typically the same pgxpool.Pool satisfies both).
-func New(ctx context.Context, cfg *config.Config, store db.Store, pinger health.Pinger, logger *slog.Logger, build BuildInfo, syncFeed admin.FeedSyncFunc) *Server {
+func New(ctx context.Context, cfg *config.Config, store db.Store, pinger health.Pinger, logger *slog.Logger, build BuildInfo, syncFeed admin.FeedSyncFunc, applyFeedConfig admin.FeedConfigApplyFunc, resetFeedConfig admin.FeedConfigResetFunc) *Server {
 	devMode := cfg.IsDevelopment()
 
 	// Shared runtime settings (block threshold + rate limit) that the admin UI
@@ -45,10 +47,9 @@ func New(ctx context.Context, cfg *config.Config, store db.Store, pinger health.
 	perMinute, burst := resolveRateLimit(cfg)
 	runtime := config.NewRuntimeSettings(cfg.Server.BlockThreshold, perMinute, burst)
 
-	// Session manager for admin authentication.
-	// In production mode, session cookies require HTTPS (Secure flag).
-	// The context controls the lifetime of the session cleanup goroutine.
-	sm := auth.NewSessionManager(ctx, cfg.Admin.SessionTimeout, !devMode)
+	// Session manager for admin authentication. The context controls the
+	// lifetime of the session cleanup goroutine.
+	sm := auth.NewSessionManager(ctx, cfg.Admin.SessionTimeout, sessionCookieSecure(cfg))
 
 	// -- Build middleware chain ------------------------------------------------
 	// Order matters: outermost middleware runs first.
@@ -70,7 +71,7 @@ func New(ctx context.Context, cfg *config.Config, store db.Store, pinger health.
 	// -- Register routes ------------------------------------------------------
 	mux := http.NewServeMux()
 	hc := health.NewChecker(pinger)
-	registerRoutes(ctx, mux, hc, cfg, runtime, store, sm, logger, build, syncFeed)
+	registerRoutes(ctx, mux, hc, cfg, runtime, store, sm, logger, build, syncFeed, applyFeedConfig, resetFeedConfig)
 
 	mainAddr := fmt.Sprintf(":%d", cfg.Server.Port)
 	mainServer := &http.Server{
@@ -100,6 +101,24 @@ func New(ctx context.Context, cfg *config.Config, store db.Store, pinger health.
 		metrics: metricsServer,
 		health:  hc,
 	}
+}
+
+func sessionCookieSecure(cfg *config.Config) bool {
+	if cfg == nil || cfg.IsDevelopment() {
+		return false
+	}
+	if cfg.Server.AllowInsecureLocalHTTP {
+		return false
+	}
+	return true
+}
+
+// buildServerTLSConfig constructs the *tls.Config used for in-app TLS
+// termination from the validated TLS settings. It is a pure helper so the
+// minimum-version wiring can be unit-tested without binding a listener.
+func buildServerTLSConfig(tlsCfg config.TLSConfig) *tls.Config {
+	// #nosec G402 -- TLS minimum is validated config: Packmon supports TLS 1.2 or 1.3 by policy.
+	return &tls.Config{MinVersion: tlsCfg.MinVersionTLS()}
 }
 
 // resolveRateLimit returns the effective per-minute rate and burst, applying
@@ -149,14 +168,41 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 	}()
 
-	// Start main server.
+	// Start main server. When a TLS cert+key are configured, terminate TLS
+	// in-app (no reverse proxy required); otherwise serve cleartext HTTP.
+	tlsCfg := s.cfg.Server.TLS
 	go func() {
-		s.logger.Info("main server starting",
-			slog.String("addr", s.main.Addr),
+		listener, err := net.Listen("tcp", s.main.Addr)
+		if err != nil {
+			errCh <- fmt.Errorf("main server listen: %w", err)
+			return
+		}
+		boundAddr := listener.Addr().String()
+		dashboard := dashboardURL(s.cfg, boundAddr)
+
+		if tlsCfg.Enabled() {
+			s.main.TLSConfig = buildServerTLSConfig(tlsCfg)
+			s.logger.Info("main server listening",
+				slog.String("addr", boundAddr),
+				slog.String("mode", string(s.cfg.Server.Mode)),
+				slog.String("transport", "https"),
+				slog.String("dashboard_url", dashboard),
+				slog.String("tls_min_version", tlsCfg.MinVersion),
+				slog.String("version", s.build.Version),
+			)
+			if err := s.main.ServeTLS(listener, tlsCfg.CertFile, tlsCfg.KeyFile); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- fmt.Errorf("main server (tls): %w", err)
+			}
+			return
+		}
+		s.logger.Info("main server listening",
+			slog.String("addr", boundAddr),
 			slog.String("mode", string(s.cfg.Server.Mode)),
+			slog.String("transport", "http"),
+			slog.String("dashboard_url", dashboard),
 			slog.String("version", s.build.Version),
 		)
-		if err := s.main.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := s.main.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- fmt.Errorf("main server: %w", err)
 		}
 	}()

@@ -24,6 +24,12 @@ var (
 	version = "dev"
 	commit  = "none"
 	date    = "unknown"
+
+	serverSignalContext = func(parent context.Context) (context.Context, context.CancelFunc) {
+		return signal.NotifyContext(parent, syscall.SIGTERM, syscall.SIGINT)
+	}
+	hardExit      = os.Exit
+	hardExitDelay = 8 * time.Second
 )
 
 func main() {
@@ -92,10 +98,20 @@ func run() error {
 	// Set up structured logger.
 	logger := newLogger(cfg.Log)
 
+	// Fail closed: refuse to start in production without transport security
+	// (in-app TLS or a trusted reverse proxy), so bearer tokens never travel
+	// over cleartext on the network.
+	if err := cfg.ValidateTransportSecurity(); err != nil {
+		return err
+	}
+
 	devMode := cfg.IsDevelopment()
 	ver := uint(migrations.ExpectedVersion)
 	if devMode {
 		logger.Warn("running in DEVELOPMENT mode -- API authentication is relaxed and an in-memory store is used; never expose this mode on an untrusted network")
+	}
+	if !devMode && cfg.Server.AllowInsecureLocalHTTP {
+		logger.Warn("production transport security relaxed for local-only HTTP -- keep the Docker port bound to loopback and do not expose this server on a network")
 	}
 	if !devMode && strings.TrimSpace(cfg.Server.PublicHost) == "" {
 		logger.Warn("PACKMON_SERVER_PUBLIC_HOST is not set -- HTTPS redirect is disabled for non-loopback hosts")
@@ -178,6 +194,7 @@ func run() error {
 		return fmt.Errorf("bootstrap admin auth: %w", err)
 	}
 
+	defaultFeeds := cfg.Feeds
 	if err := applyStoredFeedConfigOverrides(context.Background(), cfg, store, logger); err != nil {
 		return fmt.Errorf("apply stored feed config overrides: %w", err)
 	}
@@ -196,7 +213,7 @@ func run() error {
 	// Use signal.NotifyContext so SIGTERM/SIGINT cancels the root context
 	// immediately. This lets feed syncers, queue workers, and the HTTP
 	// server all observe ctx.Done() at the same time.
-	rootCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	rootCtx, stop := serverSignalContext(context.Background())
 	defer stop()
 
 	// Hard exit deadline: if the process is STILL alive 8 seconds after
@@ -204,16 +221,18 @@ func run() error {
 	// ignores context cancellation (e.g. stuck git clone, blocked DB write).
 	go func() {
 		<-rootCtx.Done()
-		logger.Info("shutdown: hard exit deadline set (8s)")
-		time.Sleep(8 * time.Second)
+		logger.Info("shutdown: hard exit deadline set", slog.String("timeout", hardExitDelay.String()))
+		time.Sleep(hardExitDelay)
 		logger.Error("shutdown: hard exit deadline exceeded, forcing os.Exit(0)")
-		os.Exit(0) //nolint:revive // intentional hard exit
+		hardExit(0) //nolint:revive // intentional hard exit
 	}()
 
-	background := startBackgroundServices(rootCtx, cfg, store, logger)
+	background := startBackgroundServices(rootCtx, cfg, defaultFeeds, store, logger)
 	syncFeed := newFeedSyncTrigger(cfg, store, logger, background)
+	applyFeedConfig := background.ApplyFeedConfig
+	resetFeedConfig := background.ResetFeedConfig
 
-	srv := server.New(rootCtx, cfg, store, pinger, logger, build, syncFeed)
+	srv := server.New(rootCtx, cfg, store, pinger, logger, build, syncFeed, applyFeedConfig, resetFeedConfig)
 
 	logger.Info("server running, waiting for shutdown signal")
 	err = srv.Run(rootCtx)

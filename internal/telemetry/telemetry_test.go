@@ -2,6 +2,10 @@ package telemetry
 
 import (
 	"bufio"
+	"context"
+	"errors"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -150,6 +154,180 @@ func TestHTTPMiddlewareBucketsUnmatchedRoutes(t *testing.T) {
 	for _, raw := range []string{"/.env", "/wp-admin", "/random-scan-path"} {
 		if strings.Contains(output, raw) {
 			t.Fatalf("raw request path %q leaked into a metric label\n%s", raw, output)
+		}
+	}
+}
+
+type metricsStoreStub struct {
+	db.Store
+	statuses []db.FeedSyncStatus
+	jobs     []db.RefreshJob
+	queue    *db.QueueStatsResult
+	dash     *db.DashboardStatsResult
+	scans    *db.ScanTotals
+	pool     db.DBPoolStats
+}
+
+func (s *metricsStoreStub) ListFeedSyncStatuses(context.Context) ([]db.FeedSyncStatus, error) {
+	return s.statuses, nil
+}
+
+func (s *metricsStoreStub) ListQueueJobs(context.Context, string, int) ([]db.RefreshJob, error) {
+	return s.jobs, nil
+}
+
+func (s *metricsStoreStub) QueueStats(context.Context) (*db.QueueStatsResult, error) {
+	return s.queue, nil
+}
+
+func (s *metricsStoreStub) DashboardStats(context.Context) (*db.DashboardStatsResult, error) {
+	return s.dash, nil
+}
+
+func (s *metricsStoreStub) ScanTotals(context.Context) (*db.ScanTotals, error) {
+	return s.scans, nil
+}
+
+func (s *metricsStoreStub) DBPoolStats() db.DBPoolStats {
+	return s.pool
+}
+
+type failingMetricsStore struct {
+	db.Store
+}
+
+func (failingMetricsStore) ListFeedSyncStatuses(context.Context) ([]db.FeedSyncStatus, error) {
+	return nil, errors.New("feeds failed")
+}
+
+func (failingMetricsStore) ListQueueJobs(context.Context, string, int) ([]db.RefreshJob, error) {
+	return nil, errors.New("jobs failed")
+}
+
+func (failingMetricsStore) QueueStats(context.Context) (*db.QueueStatsResult, error) {
+	return nil, errors.New("queue failed")
+}
+
+func (failingMetricsStore) DashboardStats(context.Context) (*db.DashboardStatsResult, error) {
+	return nil, errors.New("dashboard failed")
+}
+
+func (failingMetricsStore) ScanTotals(context.Context) (*db.ScanTotals, error) {
+	return nil, errors.New("scans failed")
+}
+
+func TestMetricsHandlerUsesStoreDerivedSeries(t *testing.T) {
+	now := time.Now().UTC()
+	store := &metricsStoreStub{
+		statuses: []db.FeedSyncStatus{{FeedName: `feed"quoted`, LastSyncAt: ptrTime(now), LastSyncStatus: "success"}},
+		jobs: []db.RefreshJob{
+			{Source: `socket\dev`, Status: "pending", RequestedAt: now.Add(-time.Minute)},
+			{Source: "ignored", Status: "done", RequestedAt: now.Add(-2 * time.Minute)},
+		},
+		queue: &db.QueueStatsResult{Pending: 1},
+		dash:  &db.DashboardStatsResult{TotalPackages: 3, BySeverity: map[string]int{`HI"GH`: 2}},
+		scans: &db.ScanTotals{PackagesScanned: 4, Findings: 5},
+		pool:  db.DBPoolStats{MaxConns: 9},
+	}
+
+	rec := httptest.NewRecorder()
+	MetricsHandler(store, 7, slog.New(slog.NewTextHandler(io.Discard, nil)))(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("Content-Type"); !strings.HasPrefix(got, "text/plain") {
+		t.Fatalf("Content-Type = %q, want text/plain", got)
+	}
+	output := rec.Body.String()
+	for _, want := range []string{
+		"packmon_db_migration_version 7",
+		`packmon_feed_last_sync_timestamp{feed="feed\\\"quoted"}`,
+		`packmon_queue_oldest_job_seconds{source="socket\\\\dev"}`,
+		`packmon_findings_by_severity{severity="HI\\\"GH"} 2`,
+		"packmon_packages_scanned_total 4",
+		`packmon_db_pool_connections{state="max"} 9`,
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("metrics output missing %q\n%s", want, output)
+		}
+	}
+	if strings.Contains(output, `source="ignored"`) {
+		t.Fatalf("done queue job should not create oldest-job metric\n%s", output)
+	}
+}
+
+func TestMetricsHandlerToleratesStoreErrorsAndNilLogger(t *testing.T) {
+	rec := httptest.NewRecorder()
+	MetricsHandler(failingMetricsStore{}, 3, nil)(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "packmon_db_migration_version 3") {
+		t.Fatalf("metrics output missing schema version after store errors\n%s", body)
+	}
+}
+
+func TestStatusRecorderWriteDefaultsStatus(t *testing.T) {
+	rec := httptest.NewRecorder()
+	status := &statusRecorder{ResponseWriter: rec}
+
+	if _, err := status.Write([]byte("ok")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	if status.status != http.StatusOK {
+		t.Fatalf("status = %d, want %d", status.status, http.StatusOK)
+	}
+	if rec.Body.String() != "ok" {
+		t.Fatalf("body = %q, want ok", rec.Body.String())
+	}
+}
+
+func TestRegistrySnapshotAndHelpersHandleEmptyInputs(t *testing.T) {
+	registry := NewRegistry()
+	registry.AddQueueStuckRecovered(-1)
+	registry.IncFeedSyncTimeout("")
+	registry.IncQueueError("")
+	registry.RecordHTTPRequest("", "", 0, -time.Second)
+
+	snapshot := registry.Snapshot()
+	if snapshot.QueueStuckRecovered != 0 {
+		t.Fatalf("QueueStuckRecovered = %d, want 0 for negative increment", snapshot.QueueStuckRecovered)
+	}
+	if len(snapshot.FeedSyncTimeouts) != 0 || len(snapshot.QueueErrors) != 0 {
+		t.Fatalf("empty labels should be ignored: %+v", snapshot)
+	}
+	key := httpMetricKey{Method: "UNKNOWN", Route: "unknown", Status: "200"}
+	if metric, ok := snapshot.HTTPRequests[key]; !ok || metric.Count != 1 || metric.DurationNanos != 0 {
+		t.Fatalf("default HTTP metric = %+v ok=%v", metric, ok)
+	}
+
+	if got := feedNames([]db.FeedSyncStatus{{FeedName: ""}, {FeedName: "osv"}}); len(got) != 1 || got[0] != "osv" {
+		t.Fatalf("feedNames() = %#v", got)
+	}
+	if got := unionKeys(map[string]uint64{"": 1, "a": 2}, []string{"b", ""}); len(got) != 2 {
+		t.Fatalf("unionKeys() = %#v, want two non-empty keys", got)
+	}
+	if got := escapeLabelValue("a\\b\nc\"d"); got != `a\\b\nc\"d` {
+		t.Fatalf("escapeLabelValue() = %q", got)
+	}
+}
+
+func TestSortedHTTPMetricKeysOrdersByRouteMethodStatus(t *testing.T) {
+	keys := sortedHTTPMetricKeys(map[httpMetricKey]httpMetricSnapshot{
+		{Method: "POST", Route: "/b", Status: "200"}: {},
+		{Method: "GET", Route: "/a", Status: "500"}:  {},
+		{Method: "GET", Route: "/a", Status: "200"}:  {},
+	})
+	got := []string{
+		keys[0].Route + " " + keys[0].Method + " " + keys[0].Status,
+		keys[1].Route + " " + keys[1].Method + " " + keys[1].Status,
+		keys[2].Route + " " + keys[2].Method + " " + keys[2].Status,
+	}
+	want := []string{"/a GET 200", "/a GET 500", "/b POST 200"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("sorted key %d = %q, want %q (all: %v)", i, got[i], want[i], got)
 		}
 	}
 }

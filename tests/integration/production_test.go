@@ -55,6 +55,8 @@ func TestProductionServerWithPostgresAndAPIKey(t *testing.T) {
 	env := []string{
 		"PACKMON_SERVER_MODE=production",
 		fmt.Sprintf("PACKMON_SERVER_PORT=%d", serverPort),
+		fmt.Sprintf("PACKMON_SERVER_PUBLIC_HOST=127.0.0.1:%d", serverPort),
+		"PACKMON_ALLOW_INSECURE_LOCAL_HTTP=true",
 		fmt.Sprintf("PACKMON_METRICS_PORT=%d", metricsPort),
 		"PACKMON_LOG_LEVEL=warn",
 		"PACKMON_LOG_FORMAT=console",
@@ -211,7 +213,7 @@ func TestProductionServerWithPostgresAndAPIKey(t *testing.T) {
 	jsonFile := filepath.Join(projectDir, "scan.json")
 	stdout, stderr, exitCode := runPackmonWithEnv(t, map[string]string{
 		"PACKMON_DB_PATH": dbDir,
-	}, "scan", projectDir, "--mode", "remote", "--server", baseURL, "--api-key", apiKey, "--output-json", jsonFile)
+	}, "scan", projectDir, "--mode", "remote", "--server", baseURL, "--api-key", apiKey, "--insecure-allow-http", "--output-json", jsonFile)
 	if exitCode != 1 {
 		t.Fatalf("packmon remote scan exit=%d stdout=%s stderr=%s", exitCode, stdout, stderr)
 	}

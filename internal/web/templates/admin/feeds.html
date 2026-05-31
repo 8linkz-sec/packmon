@@ -31,6 +31,7 @@
             <th class="px-5 py-2">API Key</th>
             <th class="px-5 py-2">Last Result</th>
             <th class="px-5 py-2">Last Sync</th>
+            <th class="px-5 py-2">Duration</th>
             <th class="px-5 py-2 text-right">Synced</th>
             <th class="px-5 py-2 text-right">Total</th>
             <th class="px-5 py-2 text-center">Error</th>
@@ -77,6 +78,13 @@
                 <span title="{{formatTime .LastSyncAtTime}}">{{formatTimeAgo .LastSyncAtTime}}</span>
               {{else}}
                 <span class="text-gray-400">never</span>
+              {{end}}
+            </td>
+            <td class="px-5 py-2 text-xs text-gray-500">
+              {{if .DurationStr}}
+                {{.DurationStr}}
+              {{else}}
+                <span class="text-gray-400">-</span>
               {{end}}
             </td>
             <td class="px-5 py-2 text-right">{{.EntriesSynced}}</td>
@@ -129,7 +137,7 @@
   </div>
 
   <div class="bg-blue-50 border border-blue-200 rounded-md p-4 text-sm text-blue-900">
-    The table below shows the current runtime state. Saved configuration changes are stored separately and apply after the next server restart.
+    The table below shows the current runtime state. Saved configuration changes are stored in the database and applied immediately.
   </div>
 
   {{if and .UnknownSeverityCount (gt .UnknownSeverityCount 0)}}
@@ -157,11 +165,11 @@
   <div class="bg-white rounded-lg shadow border border-gray-200">
     <div class="px-5 py-3 border-b border-gray-200">
       <h2 class="text-lg font-semibold">Saved Configuration</h2>
-      <p class="mt-1 text-sm text-gray-500">These values are persisted in the database and applied on the next restart.</p>
+      <p class="mt-1 text-sm text-gray-500">These values are persisted in the database and applied to the running server when saved.</p>
     </div>
     <div class="p-5 space-y-4">
       {{range .EditableFeeds}}
-      <div class="border border-gray-200 rounded-lg p-4">
+      <div class="border border-gray-200 rounded-lg p-4" data-feed-key="{{.FeedKey}}">
         <div class="space-y-4">
           <div class="space-y-2">
             <div>
@@ -174,7 +182,7 @@
                 <span class="inline-block bg-gray-100 text-gray-600 px-2 py-0.5 rounded">runtime default</span>
               {{end}}
               {{if .PendingRestart}}
-                <span class="inline-block bg-yellow-100 text-yellow-800 px-2 py-0.5 rounded">restart pending</span>
+                <span class="inline-block bg-yellow-100 text-yellow-800 px-2 py-0.5 rounded">differs from runtime</span>
               {{else}}
                 <span class="inline-block bg-green-50 text-green-700 px-2 py-0.5 rounded">matches runtime</span>
               {{end}}
@@ -201,7 +209,9 @@
                 <span class="block mb-1">Mode</span>
                 <select name="mode" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm bg-white">
                   <option value="self" {{if eq .Mode "self"}}selected{{end}}>self</option>
+                  {{if .SupportsExternalMode}}
                   <option value="external" {{if eq .Mode "external"}}selected{{end}}>external</option>
+                  {{end}}
                 </select>
               </label>
 
@@ -263,7 +273,7 @@
                 Sync now
               </button>
               {{end}}
-              <span class="text-xs text-gray-500">Sync now uses the current runtime settings. Saved changes apply after restart.</span>
+              <span class="text-xs text-gray-500">Sync now uses the current runtime settings.</span>
             </div>
           </form>
 
@@ -283,7 +293,7 @@
   </div>
 
   <div class="bg-yellow-50 border border-yellow-200 rounded-md p-4 text-sm text-yellow-800">
-    Saved feed settings override the built-in PACKMON_FEED_* defaults after a restart. Use Reset to remove the DB override and fall back to runtime defaults again.
+    Saved feed settings override the built-in PACKMON_FEED_* defaults immediately and are reloaded on restart. Use Reset to remove the DB override and fall back to environment defaults again.
   </div>
 
 </div>

@@ -152,6 +152,10 @@ func (s *noopStore) FindMaliciousBatch(ctx context.Context, packages []db.Packag
 	return all, nil
 }
 
+func (*noopStore) FindReputationFindingsBatch(context.Context, []db.PackageQuery, string) ([]domain.Finding, error) {
+	return nil, nil
+}
+
 func (*noopStore) PropagateSeverityViaAliases(context.Context) (int, error) { return 0, nil }
 
 func (s *noopStore) UpsertVulnerability(_ context.Context, vuln *db.Vulnerability) error {
@@ -179,6 +183,18 @@ func (s *noopStore) UpsertMaliciousFinding(_ context.Context, mf *db.MaliciousFi
 		copyValue.Source = "manual"
 	}
 	s.malicious[copyValue.ID] = copyValue
+	return nil
+}
+
+func (*noopStore) MarkPackageReputationDue(context.Context, *db.PackageReputation) (bool, error) {
+	return false, nil
+}
+
+func (*noopStore) ListDuePackageReputations(context.Context, string, string, string, int) ([]db.PackageReputation, error) {
+	return nil, nil
+}
+
+func (*noopStore) UpsertPackageReputation(context.Context, *db.PackageReputation) error {
 	return nil
 }
 
@@ -842,6 +858,7 @@ func (s *noopStore) FindAPIKeyByHash(_ context.Context, keyHash string) (*db.API
 
 	for _, apiKey := range s.apiKeys {
 		if apiKey.RevokedAt == nil &&
+			!apiKey.IsExpired(time.Now().UTC()) &&
 			subtle.ConstantTimeCompare([]byte(apiKey.KeyHash), []byte(keyHash)) == 1 {
 			copyValue := apiKey
 			return &copyValue, nil
@@ -874,7 +891,7 @@ func (s *noopStore) ListAPIKeys(context.Context) ([]db.APIKey, error) {
 	return out, nil
 }
 
-func (s *noopStore) CreateAPIKey(_ context.Context, name, keyHash string) (int, error) {
+func (s *noopStore) CreateAPIKey(_ context.Context, name, keyHash string, expiresAt *time.Time) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -884,6 +901,7 @@ func (s *noopStore) CreateAPIKey(_ context.Context, name, keyHash string) (int, 
 		Name:      name,
 		KeyHash:   keyHash,
 		CreatedAt: time.Now().UTC(),
+		ExpiresAt: expiresAt,
 	})
 	return s.nextAPIKeyID, nil
 }

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -33,6 +34,16 @@ func TestAdminFeedsPageShowsRuntimeConfig(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("upsert feed sync status: %v", err)
 	}
+	runningStarted := now.Add(-2 * time.Minute)
+	if err := store.UpsertFeedSyncStatus(context.Background(), &db.FeedSyncStatus{
+		FeedName:       "osv",
+		LastSyncAt:     &runningStarted,
+		LastSyncStatus: "running",
+		EntriesSynced:  12,
+		EntriesTotal:   42,
+	}); err != nil {
+		t.Fatalf("upsert running feed sync status: %v", err)
+	}
 
 	handler, sm := newAdminTestHandler(t, store, testAdminConfig())
 	req := newAuthenticatedAdminRequest(t, sm, http.MethodGet, "/admin/feeds")
@@ -53,10 +64,13 @@ func TestAdminFeedsPageShowsRuntimeConfig(t *testing.T) {
 		"external",
 		"15m (default)",
 		"success",
+		"running for",
+		"2s",
 		"VulnCheck",
 		"configured",
 		"Sync now",
 		"Socket.dev",
+		"ReversingLabs",
 		"disabled",
 		"not configured",
 		"PACKMON_FEED_*",
@@ -64,6 +78,50 @@ func TestAdminFeedsPageShowsRuntimeConfig(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Fatalf("GET /admin/feeds body missing %q\nbody=%s", want, body)
 		}
+	}
+	rlRowStart := strings.Index(body, `data-feed-key="reversinglabs"`)
+	if rlRowStart < 0 {
+		t.Fatalf("GET /admin/feeds body missing ReversingLabs editable row\nbody=%s", body)
+	}
+	rlRowEnd := strings.Index(body[rlRowStart+1:], `data-feed-key="`)
+	if rlRowEnd < 0 {
+		rlRowEnd = len(body) - rlRowStart
+	} else {
+		rlRowEnd++
+	}
+	rlRow := body[rlRowStart : rlRowStart+rlRowEnd]
+	if strings.Contains(rlRow, `value="external"`) {
+		t.Fatalf("ReversingLabs row rendered unsupported external option: %s", rlRow)
+	}
+}
+
+func TestAdminFeedsPageShowsQueueDrivenFeedConfiguredWithoutSyncStatus(t *testing.T) {
+	store := newNoopStore()
+	cfg := testAdminConfig()
+	cfg.Feeds.ReversingLabsEnabled = true
+	cfg.Feeds.ReversingLabsAPIKey = testFeedToken()
+
+	handler, sm := newAdminTestHandler(t, store, cfg)
+	req := newAuthenticatedAdminRequest(t, sm, http.MethodGet, "/admin/feeds?partial=runtime")
+	rec := httptest.NewRecorder()
+
+	handler.HandleAdminFeeds(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /admin/feeds partial status = %d, want 200", rec.Code)
+	}
+
+	body := rec.Body.String()
+	rlRow := tableRowContaining(body, "ReversingLabs")
+	if rlRow == "" {
+		t.Fatalf("GET /admin/feeds runtime body missing ReversingLabs row\nbody=%s", body)
+	}
+	if strings.Contains(rlRow, ">pending</span>") {
+		t.Fatalf("ReversingLabs runtime row status = pending, want configured\nrow=%s", rlRow)
+	}
+	configuredStatus := regexp.MustCompile(`(?s)<td class="px-5 py-2">\s*<span[^>]*>configured</span>\s*</td>`)
+	if !configuredStatus.MatchString(rlRow) {
+		t.Fatalf("ReversingLabs runtime row missing configured status\nrow=%s", rlRow)
 	}
 }
 
@@ -96,6 +154,75 @@ func TestAdminSettingsPageShowsRuntimeValues(t *testing.T) {
 	}
 	if strings.Contains(body, "0001-01-01") {
 		t.Fatalf("GET /admin/settings body contains zero timestamp: %s", body)
+	}
+}
+
+func TestAdminSettingsPasswordFormUsesServerMinimumLength(t *testing.T) {
+	store := newNoopStore()
+	handler, sm := newAdminTestHandler(t, store, testAdminConfig())
+	req := newAuthenticatedAdminRequest(t, sm, http.MethodGet, "/admin/settings")
+	rec := httptest.NewRecorder()
+
+	handler.HandleAdminSettings(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /admin/settings status = %d, want 200", rec.Code)
+	}
+
+	body := rec.Body.String()
+	for _, field := range []string{`name="new_password"`, `name="confirm_password"`} {
+		start := strings.Index(body, field)
+		if start < 0 {
+			t.Fatalf("GET /admin/settings body missing %s\nbody=%s", field, body)
+		}
+		inputEnd := strings.Index(body[start:], ">")
+		if inputEnd < 0 {
+			t.Fatalf("GET /admin/settings input %s is not closed\nbody=%s", field, body)
+		}
+		input := body[start : start+inputEnd]
+		if !strings.Contains(input, `minlength="12"`) {
+			t.Fatalf("GET /admin/settings input %s = %s, want minlength 12", field, input)
+		}
+	}
+}
+
+func TestHandlePasswordChangeAcceptsExactlyMinimumLength(t *testing.T) {
+	store := newNoopStore()
+	currentPassword := "current-password"
+	hash, err := auth.HashPassword(currentPassword)
+	if err != nil {
+		t.Fatalf("HashPassword() error = %v", err)
+	}
+	if err := store.UpsertAdminAuth(context.Background(), hash, true); err != nil {
+		t.Fatalf("UpsertAdminAuth() error = %v", err)
+	}
+
+	handler, sm := newAdminTestHandler(t, store, testAdminConfig())
+	newPassword := "newpass12345"
+	if len(newPassword) != 12 {
+		t.Fatalf("test password length = %d, want 12", len(newPassword))
+	}
+	req := newAuthenticatedAdminFormRequest(t, sm, "/admin/settings/password", url.Values{
+		"current_password": {currentPassword},
+		"new_password":     {newPassword},
+		"confirm_password": {newPassword},
+	})
+	rec := httptest.NewRecorder()
+
+	handler.HandlePasswordChange(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST /admin/settings/password status = %d, want 303", rec.Code)
+	}
+	if location := rec.Header().Get("Location"); location != "/admin/settings?msg=Password+changed+successfully" {
+		t.Fatalf("Location = %q, want password changed success redirect", location)
+	}
+	adminAuth, err := store.GetAdminAuth(context.Background())
+	if err != nil {
+		t.Fatalf("GetAdminAuth() error = %v", err)
+	}
+	if adminAuth == nil || !auth.CheckPassword(adminAuth.PasswordHash, newPassword) {
+		t.Fatal("stored admin password does not match the 12-character new password")
 	}
 }
 
@@ -138,6 +265,100 @@ func TestHandleSystemSettingsSavePersistsSettings(t *testing.T) {
 	}
 	if len(audit) != 1 || audit[0].Action != "system_settings_save" {
 		t.Fatalf("audit entries = %+v, want system_settings_save", audit)
+	}
+}
+
+func TestHandleKeyCreateStoresExpiration(t *testing.T) {
+	store := newNoopStore()
+	handler, sm := newAdminTestHandler(t, store, testAdminConfig())
+	req := newAuthenticatedAdminFormRequest(t, sm, "/admin/keys/create", url.Values{
+		"name":       {"ci-short-lived"},
+		"expires_at": {"2030-01-02"},
+	})
+	rec := httptest.NewRecorder()
+
+	handler.HandleKeyCreate(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST /admin/keys/create status = %d, want 303", rec.Code)
+	}
+	keys, err := store.ListAPIKeys(context.Background())
+	if err != nil {
+		t.Fatalf("ListAPIKeys() error = %v", err)
+	}
+	if len(keys) != 1 {
+		t.Fatalf("ListAPIKeys() len = %d, want 1", len(keys))
+	}
+	if keys[0].ExpiresAt == nil {
+		t.Fatal("ExpiresAt = nil, want parsed expiration")
+	}
+	if got := keys[0].ExpiresAt.UTC().Format("2006-01-02"); got != "2030-01-02" {
+		t.Fatalf("ExpiresAt date = %q, want 2030-01-02", got)
+	}
+}
+
+func TestHandleKeyCreateRejectsPastExpiration(t *testing.T) {
+	store := newNoopStore()
+	handler, sm := newAdminTestHandler(t, store, testAdminConfig())
+	req := newAuthenticatedAdminFormRequest(t, sm, "/admin/keys/create", url.Values{
+		"name":       {"ci-expired"},
+		"expires_at": {"2000-01-01"},
+	})
+	rec := httptest.NewRecorder()
+
+	handler.HandleKeyCreate(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST /admin/keys/create status = %d, want 303", rec.Code)
+	}
+	keys, err := store.ListAPIKeys(context.Background())
+	if err != nil {
+		t.Fatalf("ListAPIKeys() error = %v", err)
+	}
+	if len(keys) != 0 {
+		t.Fatalf("ListAPIKeys() len = %d, want 0 after invalid expiration", len(keys))
+	}
+	if location := rec.Header().Get("Location"); !strings.Contains(location, "expiration+must+be+in+the+future") {
+		t.Fatalf("Location = %q, want expiration error", location)
+	}
+}
+
+func TestHandleFeedConfigSaveAppliesRuntimeConfig(t *testing.T) {
+	store := newNoopStore()
+	cfg := testAdminConfig()
+	cfg.Feeds.VulnCheckEnabled = false
+	cfg.Feeds.VulnCheckMode = config.FeedModeSelf
+
+	var applied config.FeedSettings
+	applyCalls := 0
+	handler, sm := newAdminTestHandler(t, store, cfg)
+	handler.SetFeedConfigApplyFunc(func(_ context.Context, feed config.FeedSettings) error {
+		applyCalls++
+		applied = feed
+		return nil
+	})
+
+	req := newAuthenticatedAdminFormRequest(t, sm, "/admin/feeds/save", url.Values{
+		"feed_name": {"vulncheck"},
+		"enabled":   {"on"},
+		"mode":      {"self"},
+		"api_key":   {"vc-live-key"},
+	})
+	rec := httptest.NewRecorder()
+
+	handler.HandleFeedConfigSave(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST /admin/feeds/save status = %d, want 303", rec.Code)
+	}
+	if applyCalls != 1 {
+		t.Fatalf("apply calls = %d, want 1", applyCalls)
+	}
+	if applied.Name != "vulncheck" || !applied.Enabled || applied.APIKey != "vc-live-key" {
+		t.Fatalf("applied feed = %+v, want enabled vulncheck with api key", applied)
+	}
+	if location := rec.Header().Get("Location"); location != "/admin/feeds?msg=Feed+configuration+saved+and+applied." {
+		t.Fatalf("Location = %q, want saved-and-applied redirect", location)
 	}
 }
 
@@ -756,6 +977,19 @@ func newAuthenticatedAdminFormRequest(t *testing.T, sm *auth.SessionManager, tar
 	return req
 }
 
+func tableRowContaining(body, needle string) string {
+	index := strings.Index(body, needle)
+	if index < 0 {
+		return ""
+	}
+	start := strings.LastIndex(body[:index], "<tr")
+	end := strings.Index(body[index:], "</tr>")
+	if start < 0 || end < 0 {
+		return ""
+	}
+	return body[start : index+end+len("</tr>")]
+}
+
 func testAdminConfig() *config.Config {
 	return &config.Config{
 		Server: config.ServerConfig{
@@ -778,21 +1012,23 @@ func testAdminConfig() *config.Config {
 			OnStartup: false,
 		},
 		Feeds: config.FeedsConfig{
-			OSVEnabled:       true,
-			OSVMode:          config.FeedModeSelf,
-			GHSAEnabled:      true,
-			GHSAMode:         config.FeedModeExternal,
-			OpenSSFEnabled:   true,
-			OpenSSFMode:      config.FeedModeSelf,
-			VulnCheckEnabled: true,
-			VulnCheckMode:    config.FeedModeExternal,
-			VulnCheckAPIKey:  testFeedToken(),
-			SocketEnabled:    false,
-			SocketMode:       config.FeedModeSelf,
-			CISAKEVEnabled:   true,
-			CISAKEVMode:      config.FeedModeSelf,
-			EPSSEnabled:      true,
-			EPSSMode:         config.FeedModeExternal,
+			OSVEnabled:           true,
+			OSVMode:              config.FeedModeSelf,
+			GHSAEnabled:          true,
+			GHSAMode:             config.FeedModeExternal,
+			OpenSSFEnabled:       true,
+			OpenSSFMode:          config.FeedModeSelf,
+			VulnCheckEnabled:     true,
+			VulnCheckMode:        config.FeedModeExternal,
+			VulnCheckAPIKey:      testFeedToken(),
+			SocketEnabled:        false,
+			SocketMode:           config.FeedModeSelf,
+			ReversingLabsEnabled: false,
+			ReversingLabsMode:    config.FeedModeSelf,
+			CISAKEVEnabled:       true,
+			CISAKEVMode:          config.FeedModeSelf,
+			EPSSEnabled:          true,
+			EPSSMode:             config.FeedModeExternal,
 		},
 	}
 }

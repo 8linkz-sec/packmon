@@ -154,9 +154,12 @@ func (jw *JUnitWriter) buildTestcase(f domain.Finding) junitTestcase {
 	classname := fmt.Sprintf("packmon.%s", f.Ecosystem)
 
 	var failType string
-	if f.Type == domain.FindingTypeMalicious {
+	switch f.Type {
+	case domain.FindingTypeMalicious:
 		failType = "malicious"
-	} else {
+	case domain.FindingTypeSupplyChainRisk:
+		failType = "supply_chain_risk"
+	default:
 		failType = "vulnerability"
 	}
 

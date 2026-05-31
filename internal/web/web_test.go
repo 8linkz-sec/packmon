@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -28,6 +29,7 @@ type mockStore struct {
 	recentVulns  []db.RecentVulnerability
 	vulnFindings []domain.Finding
 	malFindings  []domain.Finding
+	repFindings  []domain.Finding
 }
 
 func (m *mockStore) DashboardStats(_ context.Context) (*db.DashboardStatsResult, error) {
@@ -124,6 +126,13 @@ func (m *mockStore) FindMalicious(_ context.Context, _, _, _ string) ([]domain.F
 	}
 	if m.malFindings != nil {
 		return m.malFindings, nil
+	}
+	return []domain.Finding{}, nil
+}
+
+func (m *mockStore) FindReputationFindings(_ context.Context, _, _, _ string) ([]domain.Finding, error) {
+	if m.repFindings != nil {
+		return m.repFindings, nil
 	}
 	return []domain.Finding{}, nil
 }
@@ -225,6 +234,26 @@ func TestHandleDashboard_NonRootPath_Returns404(t *testing.T) {
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("Dashboard non-root status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
+func TestHandleDashboard_StoreErrorsRenderFallback(t *testing.T) {
+	store := &mockStore{
+		dashboardErr: errors.New("stats unavailable"),
+		dailyErr:     errors.New("daily unavailable"),
+	}
+	handler := HandleDashboard(store, testRenderer(), discardLogger())
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+
+	handler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Dashboard fallback status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "Dashboard") {
+		t.Fatalf("Dashboard fallback body does not contain heading: %s", body)
 	}
 }
 
@@ -382,6 +411,37 @@ func TestHandleSearch_ShowsVulnerabilityCountOnly(t *testing.T) {
 	}
 }
 
+func TestHandleSearch_ErrorAndNormalizationBranches(t *testing.T) {
+	store := &mockStore{searchErr: errors.New("search unavailable")}
+	handler := HandleSearch(store, testRenderer(), discardLogger())
+
+	req := httptest.NewRequest(http.MethodGet, "/search?q=%20lodash%20&severity=invalid&finding=invalid", nil)
+	req.Header.Set("HX-Request", "true")
+	rec := httptest.NewRecorder()
+
+	handler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Search error partial status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if strings.Contains(rec.Body.String(), "<!DOCTYPE html>") {
+		t.Fatal("Search error partial should not contain full HTML layout")
+	}
+
+	if got := normalizeSearchSeverity(" unknown "); got != "UNKNOWN" {
+		t.Fatalf("normalizeSearchSeverity(unknown) = %q, want UNKNOWN", got)
+	}
+	if got := normalizeSearchSeverity("invalid"); got != "" {
+		t.Fatalf("normalizeSearchSeverity(invalid) = %q, want empty", got)
+	}
+	if got := normalizeSearchFindingType(" VULNERABILITY "); got != "vulnerability" {
+		t.Fatalf("normalizeSearchFindingType(vulnerability) = %q", got)
+	}
+	if got := normalizeSearchFindingType("invalid"); got != "" {
+		t.Fatalf("normalizeSearchFindingType(invalid) = %q, want empty", got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Feeds tests
 // ---------------------------------------------------------------------------
@@ -428,6 +488,76 @@ func TestHandleFeeds_PartialStatus(t *testing.T) {
 	// The partial response should NOT contain the full layout.
 	if strings.Contains(body, "<!DOCTYPE html>") {
 		t.Fatal("Feeds partial should not contain full HTML layout")
+	}
+}
+
+func TestFeedHealthStatusDisabledIsNeutral(t *testing.T) {
+	status := db.FeedSyncStatus{
+		FeedName:       "vulncheck",
+		LastSyncStatus: "disabled",
+		EntriesSynced:  0,
+		EntriesTotal:   0,
+	}
+
+	if got := feedHealthStatus(status); got != "disabled" {
+		t.Fatalf("feedHealthStatus() = %q, want %q", got, "disabled")
+	}
+}
+
+func TestFeedHealthStatusZeroEntriesIsWarning(t *testing.T) {
+	now := time.Now().UTC()
+	status := db.FeedSyncStatus{
+		FeedName:       "osv",
+		LastSyncStatus: "success",
+		LastSyncAt:     &now,
+		EntriesSynced:  0,
+		EntriesTotal:   0,
+	}
+
+	if got := feedHealthStatus(status); got != "warning" {
+		t.Fatalf("feedHealthStatus() = %q, want %q", got, "warning")
+	}
+}
+
+func TestHandleFeeds_StoreErrorRendersEmptyStatus(t *testing.T) {
+	handler := HandleFeeds(&mockStore{feedsErr: errors.New("feeds unavailable")}, testRenderer(), discardLogger())
+
+	req := httptest.NewRequest(http.MethodGet, "/feeds?partial=status", nil)
+	rec := httptest.NewRecorder()
+
+	handler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Feeds error partial status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if strings.Contains(rec.Body.String(), "<!DOCTYPE html>") {
+		t.Fatal("Feeds error partial should not contain full HTML layout")
+	}
+}
+
+func TestFeedHealthStatusBranches(t *testing.T) {
+	now := time.Now().UTC()
+	old := now.Add(-49 * time.Hour)
+
+	tests := []struct {
+		name string
+		in   db.FeedSyncStatus
+		want string
+	}{
+		{name: "error", in: db.FeedSyncStatus{LastSyncStatus: "error"}, want: "error"},
+		{name: "running", in: db.FeedSyncStatus{LastSyncStatus: "running"}, want: "pending"},
+		{name: "skipped", in: db.FeedSyncStatus{LastSyncStatus: "skipped"}, want: "warning"},
+		{name: "never", in: db.FeedSyncStatus{LastSyncStatus: "success"}, want: "error"},
+		{name: "stale", in: db.FeedSyncStatus{LastSyncStatus: "success", LastSyncAt: &old, EntriesSynced: 1}, want: "warning"},
+		{name: "healthy", in: db.FeedSyncStatus{LastSyncStatus: "success", LastSyncAt: &now, EntriesSynced: 1, EntriesTotal: 1}, want: "healthy"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := feedHealthStatus(tt.in); got != tt.want {
+				t.Fatalf("feedHealthStatus() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -486,6 +616,43 @@ func TestHandlePackage_ReturnsOK(t *testing.T) {
 	}
 	if strings.Contains(body, "href=\"https://nvd.nist.gov/vuln/detail/CVE-2026-0001\" target=\"_blank\" rel=\"noopener\" class=\"text-blue-600 hover:underline\">GHSA-test-1234</a>") {
 		t.Fatal("Package response should not link the advisory ID directly to NVD")
+	}
+}
+
+func TestHandlePackageShowsReputationFindings(t *testing.T) {
+	store := &mockStore{
+		repFindings: []domain.Finding{
+			{
+				Name:       "left-pad",
+				Version:    "1.3.0",
+				Ecosystem:  domain.EcosystemNPM,
+				Type:       domain.FindingTypeSupplyChainRisk,
+				Severity:   domain.SeverityCritical,
+				AdvisoryID: "reversinglabs:npm/left-pad@1.3.0",
+				Title:      "ReversingLabs: package version was removed",
+				RiskType:   "removed_package",
+				Source:     db.ReputationSourceReversingLabs,
+			},
+		},
+	}
+	handler := HandlePackage(store, testRenderer(), discardLogger())
+
+	req := httptest.NewRequest(http.MethodGet, "/package/npm/left-pad", nil)
+	req.SetPathValue("ecosystem", "npm")
+	req.SetPathValue("name", "left-pad")
+	rec := httptest.NewRecorder()
+
+	handler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Package status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "ReversingLabs: package version was removed") {
+		t.Fatal("Package response does not contain ReversingLabs reputation finding")
+	}
+	if !strings.Contains(body, db.ReputationSourceReversingLabs) {
+		t.Fatal("Package response does not contain ReversingLabs source")
 	}
 }
 

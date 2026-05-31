@@ -19,9 +19,11 @@ import (
 //
 // The wellKnownChangePassword handler implements the .well-known
 // redirect for password managers (Bitwarden compatibility).
-func RegisterRoutes(ctx context.Context, mux *http.ServeMux, store db.Store, sm *auth.SessionManager, logger *slog.Logger, cfg *config.Config, runtime *config.RuntimeSettings, syncFeed FeedSyncFunc) {
+func RegisterRoutes(ctx context.Context, mux *http.ServeMux, store db.Store, sm *auth.SessionManager, logger *slog.Logger, cfg *config.Config, runtime *config.RuntimeSettings, syncFeed FeedSyncFunc, applyFeedConfig FeedConfigApplyFunc, resetFeedConfig FeedConfigResetFunc) {
 	renderer := web.NewRenderer(web.TemplateFS(), false)
 	h := NewAdminHandler(ctx, store, sm, renderer, logger, cfg, runtime, syncFeed)
+	h.SetFeedConfigApplyFunc(applyFeedConfig)
+	h.SetFeedConfigResetFunc(resetFeedConfig)
 
 	// Login and logout are handled specially:
 	// - GET /admin/login: show form (no session required)

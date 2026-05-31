@@ -1,10 +1,12 @@
 package web
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"strings"
 
+	"github.com/8linkz/packmon/internal/db"
 	"github.com/8linkz/packmon/internal/domain"
 )
 
@@ -16,6 +18,10 @@ type PackageData struct {
 	Vulnerabilities []domain.Finding
 	Malicious       []domain.Finding
 	Sources         []string
+}
+
+type reputationFindingStore interface {
+	FindReputationFindings(ctx context.Context, ecosystem, name, source string) ([]domain.Finding, error)
 }
 
 // HandlePackage serves GET /package/{ecosystem}/{name...}.
@@ -43,6 +49,16 @@ func HandlePackage(store Store, renderer *Renderer, logger *slog.Logger) http.Ha
 		if err != nil {
 			logger.Error("package: failed to find malicious findings",
 				"ecosystem", ecosystem, "name", name, "error", err)
+		}
+
+		if reputationStore, ok := store.(reputationFindingStore); ok {
+			reputation, err := reputationStore.FindReputationFindings(ctx, ecosystem, name, db.ReputationSourceReversingLabs)
+			if err != nil {
+				logger.Error("package: failed to find reputation findings",
+					"ecosystem", ecosystem, "name", name, "error", err)
+			} else {
+				mal = append(mal, reputation...)
+			}
 		}
 
 		// Collect unique sources.

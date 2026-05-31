@@ -21,12 +21,19 @@ const (
 // TableWriter writes scan results as a human-readable table.
 type TableWriter struct {
 	noColor bool
+	failOn  domain.Severity
 }
 
 // NewTableWriter creates a TableWriter. When noColor is true, ANSI escape
 // sequences are suppressed.
-func NewTableWriter(noColor bool) *TableWriter {
-	return &TableWriter{noColor: noColor}
+func NewTableWriter(noColor bool, failOn ...domain.Severity) *TableWriter {
+	threshold := domain.SeverityCritical
+	if len(failOn) > 0 {
+		if parsed, ok := SeverityFromString(string(failOn[0])); ok {
+			threshold = parsed
+		}
+	}
+	return &TableWriter{noColor: noColor, failOn: threshold}
 }
 
 // Write formats the scan result as a table and writes it to w.
@@ -78,14 +85,22 @@ func (tw *TableWriter) Write(w io.Writer, result *domain.ScanResult) error {
 	for _, f := range result.Findings {
 		pkg := fmt.Sprintf("%s@%s", f.Name, f.Version)
 		advisory := f.AdvisoryID
-		if f.Type == domain.FindingTypeMalicious && advisory == "" {
-			advisory = "MALWARE"
+		if advisory == "" {
+			switch f.Type {
+			case domain.FindingTypeMalicious:
+				advisory = "MALWARE"
+			case domain.FindingTypeSupplyChainRisk:
+				advisory = "SUPPLY-CHAIN"
+			}
 		}
 		fixVer := f.FixedVersion
 		if fixVer == "" {
-			if f.Type == domain.FindingTypeMalicious {
+			switch f.Type {
+			case domain.FindingTypeMalicious:
 				fixVer = "Remove pkg"
-			} else {
+			case domain.FindingTypeSupplyChainRisk:
+				fixVer = "Review pkg"
+			default:
 				fixVer = "n/a"
 			}
 		}
@@ -174,28 +189,12 @@ func (tw *TableWriter) colorSeverity(s domain.Severity) string {
 func (tw *TableWriter) countBlocking(result *domain.ScanResult) int {
 	count := 0
 	for _, f := range result.Findings {
-		if f.Type == domain.FindingTypeMalicious {
+		if isAlwaysBlockingFinding(f) {
 			count++
 			continue
 		}
-		// We cannot access the fail-on threshold here, so we count
-		// based on the result's blocking flag.
-		_ = f
-	}
-	// Use the result-level flag: if blocking, at least 1.
-	// For a more accurate count we would need the threshold, but the
-	// summary by_severity gives us enough info.
-	if result.FindingsBlocking {
-		// Count all malicious plus all above threshold (approximate).
-		count = 0
-		for _, f := range result.Findings {
-			if f.Type == domain.FindingTypeMalicious {
-				count++
-			}
-		}
-		// If count is 0 but blocking is true, it must be severity-based.
-		if count == 0 {
-			count = result.FindingsCount
+		if tw.failOn != domain.SeverityNone && f.Severity.Blocks(tw.failOn) {
+			count++
 		}
 	}
 	return count

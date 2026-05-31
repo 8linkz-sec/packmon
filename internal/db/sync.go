@@ -16,6 +16,7 @@ type SyncExport struct {
 	SyncedAt        time.Time
 	Vulnerabilities []SyncVulnerability
 	Malicious       []SyncMalicious
+	Reputation      []SyncReputationFinding
 	Truncated       bool
 }
 
@@ -39,6 +40,20 @@ type SyncMalicious struct {
 	Ecosystem string
 	Name      string
 	Versions  string
+	RiskType  string
+	Severity  string
+	Summary   string
+	Withdrawn bool
+}
+
+// SyncReputationFinding is a flattened cached reputation row exported to local
+// SQLite. Withdrawn rows are tombstones keyed by ID.
+type SyncReputationFinding struct {
+	ID        string
+	Ecosystem string
+	Name      string
+	Version   string
+	Type      string
 	RiskType  string
 	Severity  string
 	Summary   string

@@ -61,4 +61,12 @@ func TestApplyStoredFeedConfigOverrides(t *testing.T) {
 	if socket.APIKey != "socket-live-key" {
 		t.Fatalf("socket.APIKey = %q, want socket-live-key", socket.APIKey)
 	}
+
+	rl, ok := cfg.FeedSettings("reversinglabs")
+	if !ok {
+		t.Fatal("cfg.FeedSettings(reversinglabs) = !ok")
+	}
+	if rl.DisplayName != "ReversingLabs" || !rl.RequiresAPIKey || rl.SupportsSyncInterval {
+		t.Fatalf("reversinglabs feed settings = %+v", rl)
+	}
 }

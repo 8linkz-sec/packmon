@@ -6,6 +6,39 @@
 - metrics: `127.0.0.1:9090`
 - PostgreSQL: port `5432`
 
+## Transport security (read before first production start)
+
+In production mode (`PACKMON_SERVER_MODE=production`, the default) the server is
+**fail-closed**: it refuses to start unless the client channel is protected by
+one of these:
+
+1. In-app TLS: set both `PACKMON_TLS_CERT_FILE` and `PACKMON_TLS_KEY_FILE`
+   (optional `PACKMON_TLS_MIN_VERSION`, default `1.2`, accepts `1.2` or `1.3`).
+   The certificate's SAN must include every hostname/IP that clients use to
+   reach the server -- important when clients sit in separate networks.
+2. A TLS-terminating reverse proxy in front: set `PACKMON_TRUSTED_PROXIES` to
+   the proxy IPs/CIDRs.
+3. Local-only Docker: `PACKMON_ALLOW_INSECURE_LOCAL_HTTP=true` together with a
+   loopback `PACKMON_SERVER_PUBLIC_HOST` (e.g. `localhost:8080`). Plain HTTP,
+   only safe when the port is bound to `127.0.0.1`.
+
+When none is configured the server exits with:
+
+```text
+config: refusing to start in production without transport security: set
+PACKMON_TLS_CERT_FILE and PACKMON_TLS_KEY_FILE for in-app TLS, or
+PACKMON_TRUSTED_PROXIES when running behind a TLS-terminating reverse proxy
+```
+
+The startup log states which transport is active (`https` listener vs `http`).
+
+CLI clients enforce `https://` for `--server` and refuse to send the API key
+over plain HTTP unless `--insecure-allow-http` / `PACKMON_INSECURE_ALLOW_HTTP`
+is set. Distribute an internal CA bundle to clients via `--cacert` /
+`PACKMON_CA_CERT`. Use `--require-remote` / `PACKMON_REQUIRE_REMOTE` on CI
+runners so a broken or unreachable server fails the pipeline instead of
+silently falling back to the (possibly stale) local DB.
+
 ## Backup
 
 Packmon uses a daily `pg_dump` backup job with 7-day local retention.
@@ -36,11 +69,52 @@ pg_restore -d packmon /backups/packmon/packmon-YYYYMMDD-HHMMSS.dump
 5. Verify:
 
 ```bash
+# Use https:// when in-app TLS is enabled (PACKMON_TLS_CERT_FILE/KEY_FILE).
 curl http://127.0.0.1:8080/healthz
 curl http://127.0.0.1:9090/metrics
 ```
 
 ## Troubleshooting
+
+### Server refuses to start (transport security)
+
+Symptom: startup exits immediately with `config: refusing to start in
+production without transport security: ...`.
+
+Cause: production mode with no TLS, no trusted proxy, and no local override.
+
+Actions: pick one option from the "Transport security" section above:
+
+- enable in-app TLS (`PACKMON_TLS_CERT_FILE` + `PACKMON_TLS_KEY_FILE`), or
+- set `PACKMON_TRUSTED_PROXIES` if a TLS-terminating proxy fronts the server, or
+- for local Docker only, set `PACKMON_ALLOW_INSECURE_LOCAL_HTTP=true` with a
+  loopback `PACKMON_SERVER_PUBLIC_HOST`.
+
+A related variant -- `PACKMON_ALLOW_INSECURE_LOCAL_HTTP requires
+PACKMON_SERVER_PUBLIC_HOST to be localhost/127.0.0.1/::1` -- means the insecure
+override is set but the public host is not loopback. Either point the public
+host at loopback or configure real TLS / a trusted proxy.
+
+### ReversingLabs reputation feed (demand-driven)
+
+ReversingLabs is optional, self-mode only, and disabled by default
+(`PACKMON_FEED_REVERSINGLABS_ENABLED=false`). It does NOT do a bulk sync, so it
+will not show a normal "last sync" age like OSV/GHSA -- it lazily looks up a
+package version (at most once per `PACKMON_REVERSINGLABS_LOOKUP_TTL`, default
+24h) only when that package appears in a `/api/v1/check` and no other feed
+already covers it.
+
+Operational notes:
+
+- Requires `PACKMON_REVERSINGLABS_API_KEY`. `external` mode is rejected at
+  startup (there is no import endpoint).
+- Batch size is capped at 5 (free-plan `/find/packages` limit).
+- Rate-limit, capacity, or network failures degrade the feed but must NOT fail
+  scans or delete cached data. Watch the queue metrics below; the worker shares
+  the refresh queue (`source = reversinglabs`).
+- A `removed` package maps to a blocking `supply_chain_risk` finding; a
+  `malicious` package maps to a blocking malware finding. The first scan of an
+  unseen package only schedules the lookup, so it blocks on a later scan.
 
 ### CLI warns that the local DB is stale
 
@@ -99,7 +173,9 @@ Use SSH tunneling, node-local Prometheus, or a PodMonitor/sidecar pattern instea
 
 By default Packmon ignores forwarded IP headers. Set `PACKMON_TRUSTED_PROXIES`
 to a comma-separated list of trusted proxy IPs or CIDRs before using
-`X-Forwarded-For` or `X-Real-IP` for rate limiting and audit logs.
+`X-Forwarded-For` or `X-Real-IP` for rate limiting and audit logs. Setting this
+also satisfies the fail-closed transport requirement (it tells the server a
+TLS-terminating proxy is in front).
 
 ### Admin system settings do not appear to apply
 

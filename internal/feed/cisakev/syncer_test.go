@@ -3,10 +3,12 @@ package cisakev
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/8linkz/packmon/internal/db"
@@ -21,17 +23,41 @@ type kevStoreStub struct {
 	clearCISAKEVKeep []string
 	setUpdated       int
 	clearCleared     int
+	setErr           error
+	clearErr         error
 }
 
 func (s *kevStoreStub) SetCISAKEV(_ context.Context, cveIDs []string) (int, error) {
 	s.setCISAKEVIDs = cveIDs
+	if s.setErr != nil {
+		return 0, s.setErr
+	}
 	s.setUpdated = len(cveIDs)
 	return s.setUpdated, nil
 }
 
 func (s *kevStoreStub) ClearCISAKEV(_ context.Context, keepIDs []string) (int, error) {
 	s.clearCISAKEVKeep = keepIDs
+	if s.clearErr != nil {
+		return 0, s.clearErr
+	}
 	return s.clearCleared, nil
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
+}
+
+type errorReadCloser struct{}
+
+func (errorReadCloser) Read([]byte) (int, error) {
+	return 0, errors.New("read failed")
+}
+
+func (errorReadCloser) Close() error {
+	return nil
 }
 
 // -- Tests --------------------------------------------------------------------
@@ -171,6 +197,87 @@ func TestSync_HandlesHTTPError(t *testing.T) {
 	}
 }
 
+func TestSync_PropagatesStoreErrors(t *testing.T) {
+	t.Parallel()
+
+	catalogJSON, err := json.Marshal(catalog{
+		CatalogVersion: "2026.04.03",
+		Vulnerabilities: []catalogVulnEntry{
+			{CVEID: "CVE-2026-0001"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal catalog: %v", err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(catalogJSON)
+	}))
+	defer srv.Close()
+
+	tests := []struct {
+		name  string
+		store *kevStoreStub
+		want  string
+	}{
+		{name: "set", store: &kevStoreStub{setErr: errors.New("set failed")}, want: "set flags"},
+		{name: "clear", store: &kevStoreStub{clearErr: errors.New("clear failed")}, want: "clear stale flags"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			syncer := NewSyncer(discardLogger(),
+				WithCatalogURL(srv.URL),
+				WithHTTPClient(srv.Client()),
+			)
+			result, err := syncer.Sync(context.Background(), tt.store)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Sync() error = %v, want containing %q", err, tt.want)
+			}
+			if result != nil {
+				t.Fatalf("Sync() result = %+v, want nil", result)
+			}
+		})
+	}
+}
+
+func TestDownloadCatalog_ErrorBranches(t *testing.T) {
+	t.Parallel()
+
+	if _, _, err := NewSyncer(discardLogger(), WithCatalogURL("://bad")).downloadCatalog(context.Background()); err == nil {
+		t.Fatal("downloadCatalog(bad URL) error = nil, want error")
+	}
+
+	invalidJSON := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{`))
+	}))
+	defer invalidJSON.Close()
+
+	if _, _, err := NewSyncer(discardLogger(),
+		WithCatalogURL(invalidJSON.URL),
+		WithHTTPClient(invalidJSON.Client()),
+	).downloadCatalog(context.Background()); err == nil || !strings.Contains(err.Error(), "parse json") {
+		t.Fatalf("downloadCatalog(invalid JSON) error = %v, want parse json error", err)
+	}
+
+	readErrClient := &http.Client{
+		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       errorReadCloser{},
+			}, nil
+		}),
+	}
+	if _, _, err := NewSyncer(discardLogger(),
+		WithCatalogURL("https://example.test/catalog.json"),
+		WithHTTPClient(readErrClient),
+	).downloadCatalog(context.Background()); err == nil || !strings.Contains(err.Error(), "read body") {
+		t.Fatalf("downloadCatalog(read error) error = %v, want read body error", err)
+	}
+}
+
 func TestSync_SkipsEmptyCVEIDs(t *testing.T) {
 	t.Parallel()
 
@@ -220,6 +327,10 @@ func TestSyncerName(t *testing.T) {
 	if syncer.Name() != "cisakev" {
 		t.Errorf("Name() = %q, want %q", syncer.Name(), "cisakev")
 	}
+}
+
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
 // Verify compile-time interface compliance.

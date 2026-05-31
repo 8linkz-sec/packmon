@@ -44,6 +44,7 @@ func newConfigShowCmd() *cobra.Command {
 			if cfg != nil {
 				fmt.Printf("server:       %s\n", valueOrDefault(cfg.Server, "(not set)"))
 				fmt.Printf("api_key:      %s\n", maskSecret(cfg.APIKey))
+				fmt.Printf("api_key_env:  %s\n", valueOrDefault(cfg.APIKeyEnv, "(not set)"))
 				fmt.Printf("mode:         %s\n", valueOrDefault(cfg.Mode, "auto"))
 				fmt.Printf("fail_on:      %s\n", valueOrDefault(cfg.FailOn, "CRITICAL"))
 				fmt.Printf("timeout:      %ds\n", defaultConfigTimeout(cfg.Timeout))
@@ -99,11 +100,12 @@ func newConfigInitCmd() *cobra.Command {
 			template := `# packmon configuration
 # See https://github.com/8linkz/packmon for documentation.
 
-server: "http://localhost:8080"
-api_key: ""
+server: "https://packmon.internal:8080"
+api_key_env: "PACKMON_API_KEY"
 mode: auto
 fail_on: CRITICAL
 timeout: 30
+require_remote: true
 include_dev: false
 
 ecosystems:

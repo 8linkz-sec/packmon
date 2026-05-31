@@ -14,10 +14,11 @@ not drift -- update both in the same change.
 - `POST /api/v1/check` caps at 5000 packages, uses strict JSON decoding
   (`DisallowUnknownFields`, reject trailing data, `MaxBytesReader`), and returns
   the canonical scan-result shape shared with CLI JSON output and webhooks.
-- Malicious findings always block. Vulnerability blocking uses the configured
-  severity threshold; `SeverityNone` disables vuln blocking only. Severity
-  ordering lives in `internal/domain` (`Rank()`/`Blocks()`) -- reuse it, do not
-  re-implement comparisons.
+- Malicious AND `supply_chain_risk` findings always block, regardless of the
+  severity threshold (`isBlocking` / scanner `hasBlockingFindings`).
+  Vulnerability blocking uses the configured severity threshold; `SeverityNone`
+  disables vuln blocking only. Severity ordering lives in `internal/domain`
+  (`Rank()`/`Blocks()`) -- reuse it, do not re-implement comparisons.
 - `POST /api/v1/.../refresh`: body is optional and must be an empty JSON object;
   `version` is not accepted.
 - `X-Correlation-ID`: read from request, generate if absent, echo on response,

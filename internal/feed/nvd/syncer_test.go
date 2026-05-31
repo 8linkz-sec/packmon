@@ -3,12 +3,15 @@ package nvd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/8linkz/packmon/internal/db"
 	"github.com/8linkz/packmon/internal/feed"
@@ -18,8 +21,10 @@ import (
 
 type nvdStoreStub struct {
 	db.Store
-	aliases []db.UnknownCVEAlias
-	updated map[string]updateRecord
+	aliases   []db.UnknownCVEAlias
+	updated   map[string]updateRecord
+	findErr   error
+	updateErr error
 }
 
 type updateRecord struct {
@@ -28,10 +33,16 @@ type updateRecord struct {
 }
 
 func (s *nvdStoreStub) FindUnknownSeverityCVEAliases(_ context.Context) ([]db.UnknownCVEAlias, error) {
+	if s.findErr != nil {
+		return nil, s.findErr
+	}
 	return s.aliases, nil
 }
 
 func (s *nvdStoreStub) UpdateSeverityByCVE(_ context.Context, cveID, severity string, cvssScore float64) error {
+	if s.updateErr != nil {
+		return s.updateErr
+	}
 	if s.updated == nil {
 		s.updated = make(map[string]updateRecord)
 	}
@@ -427,5 +438,98 @@ func TestSync_RetriesRateLimitedCVE(t *testing.T) {
 	}
 	if rec := store.updated["CVE-2025-42424"]; rec.severity != "HIGH" || rec.cvssScore != 8.8 {
 		t.Fatalf("updated record = %+v, want HIGH / 8.8", rec)
+	}
+}
+
+func TestSyncSkipsFetchAndUpdateFailures(t *testing.T) {
+	t.Parallel()
+
+	if _, err := NewSyncer(nil).Sync(context.Background(), &nvdStoreStub{findErr: errors.New("db down")}); err == nil || !strings.Contains(err.Error(), "find unknown") {
+		t.Fatalf("Sync(find error) error = %v", err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("cveId") {
+		case "CVE-NO-METRICS":
+			_, _ = w.Write([]byte(`{"vulnerabilities":[{"cve":{"id":"CVE-NO-METRICS","metrics":{}}}]}`))
+		case "CVE-BAD-JSON":
+			_, _ = w.Write([]byte(`{bad json`))
+		default:
+			resp := nvdResponse{Vulnerabilities: []nvdVulnWrapper{{CVE: nvdCVE{Metrics: nvdMetrics{
+				CvssMetricV31: []nvdCvssMetric{{CvssData: nvdCvssData{BaseScore: 9.1}}},
+			}}}}}
+			_ = json.NewEncoder(w).Encode(resp)
+		}
+	}))
+	defer srv.Close()
+
+	store := &nvdStoreStub{
+		aliases: []db.UnknownCVEAlias{
+			{CVEID: "CVE-NO-METRICS"},
+			{CVEID: "CVE-BAD-JSON"},
+			{CVEID: "CVE-UPDATE-FAILS"},
+		},
+		updateErr: errors.New("update failed"),
+	}
+	syncer := NewSyncer(slog.New(slog.NewTextHandler(io.Discard, nil)), WithAPIURL(srv.URL), WithHTTPClient(srv.Client()))
+	result, err := syncer.Sync(context.Background(), store)
+	if err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	if result.EntriesSynced != 0 || result.EntriesTotal != 3 {
+		t.Fatalf("Sync() result = %+v, want 0 synced / 3 total", result)
+	}
+}
+
+func TestFetchCVSSErrorBranchesAndRetryHelpers(t *testing.T) {
+	t.Parallel()
+
+	if _, _, err := NewSyncer(nil, WithAPIURL("://bad")).fetchCVSS(context.Background(), "CVE-1"); err == nil || !strings.Contains(err.Error(), "parse API URL") {
+		t.Fatalf("fetchCVSS(bad URL) error = %v", err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/forbidden":
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusForbidden)
+		case "/error":
+			w.WriteHeader(http.StatusInternalServerError)
+		default:
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"vulnerabilities":[]}`))
+		}
+	}))
+	defer srv.Close()
+
+	syncer := NewSyncer(nil, WithHTTPClient(srv.Client()), WithAPIURL(srv.URL+"/forbidden"))
+	_, _, err := syncer.fetchCVSS(context.Background(), "CVE-1")
+	var rl *rateLimitError
+	if !errors.As(err, &rl) || rl.retryAfter != time.Second {
+		t.Fatalf("fetchCVSS(rate limit) error = %v, want one-second rate limit", err)
+	}
+
+	syncer = NewSyncer(nil, WithHTTPClient(srv.Client()), WithAPIURL(srv.URL+"/error"))
+	if _, _, err := syncer.fetchCVSS(context.Background(), "CVE-1"); err == nil || !strings.Contains(err.Error(), "unexpected status 500") {
+		t.Fatalf("fetchCVSS(500) error = %v", err)
+	}
+
+	future := time.Now().UTC().Add(10 * time.Millisecond).Format(http.TimeFormat)
+	if got := parseRetryAfter(""); got != rateLimitWindow {
+		t.Fatalf("parseRetryAfter(empty) = %v, want default", got)
+	}
+	if got := parseRetryAfter("-1"); got != rateLimitWindow {
+		t.Fatalf("parseRetryAfter(negative) = %v, want default", got)
+	}
+	if got := parseRetryAfter(future); got < 0 || got > time.Second {
+		t.Fatalf("parseRetryAfter(date) = %v, want small positive duration", got)
+	}
+	if err := waitForRetry(context.Background(), 0); err != nil {
+		t.Fatalf("waitForRetry(0) error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := waitForRetry(ctx, time.Hour); !errors.Is(err, context.Canceled) {
+		t.Fatalf("waitForRetry(canceled) error = %v", err)
 	}
 }

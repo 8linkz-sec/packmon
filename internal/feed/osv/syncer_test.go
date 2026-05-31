@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -22,9 +23,13 @@ import (
 type osvStoreStub struct {
 	db.Store
 
-	mu     sync.Mutex
-	vulns  []*db.Vulnerability
-	status *db.FeedSyncStatus
+	mu           sync.Mutex
+	vulns        []*db.Vulnerability
+	malicious    []*db.MaliciousFinding
+	deletedVulns []string
+	status       *db.FeedSyncStatus
+	statusErr    error
+	upsertErr    error
 }
 
 func (s *osvStoreStub) UpsertVulnerability(_ context.Context, vuln *db.Vulnerability) error {
@@ -34,15 +39,35 @@ func (s *osvStoreStub) UpsertVulnerability(_ context.Context, vuln *db.Vulnerabi
 	return nil
 }
 
+func (s *osvStoreStub) UpsertMaliciousFinding(_ context.Context, finding *db.MaliciousFinding) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.malicious = append(s.malicious, finding)
+	return nil
+}
+
+func (s *osvStoreStub) DeleteVulnerability(_ context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.deletedVulns = append(s.deletedVulns, id)
+	return nil
+}
+
 func (s *osvStoreStub) GetFeedSyncStatus(_ context.Context, _ string) (*db.FeedSyncStatus, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.statusErr != nil {
+		return nil, s.statusErr
+	}
 	return s.status, nil
 }
 
 func (s *osvStoreStub) UpsertFeedSyncStatus(_ context.Context, status *db.FeedSyncStatus) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.upsertErr != nil {
+		return s.upsertErr
+	}
 	copy := *status
 	s.status = &copy
 	return nil
@@ -237,12 +262,252 @@ func TestSync_ParsesVulnerability(t *testing.T) {
 	}
 }
 
+func TestSync_ClassifiesRustSecMaliciousCategoryAsMaliciousFinding(t *testing.T) {
+	t.Parallel()
+
+	raw := []byte(`{
+		"id":"RUSTSEC-2023-0115",
+		"summary":"` + "`" + `acceptxmr-rs` + "`" + ` was removed from crates.io for malicious code",
+		"details":"This crate was part of a typosquatting malware cluster published by the user Kraded to run an arbitrary malware payload on Windows hosts.",
+		"modified":"2026-03-26T06:30:46Z",
+		"published":"2023-11-15T12:00:00Z",
+		"references":[
+			{"type":"PACKAGE","url":"https://crates.io/crates/acceptxmr-rs"},
+			{"type":"ADVISORY","url":"https://rustsec.org/advisories/RUSTSEC-2023-0115.html"}
+		],
+		"affected":[
+			{
+				"package":{"name":"acceptxmr-rs","ecosystem":"crates.io","purl":"pkg:cargo/acceptxmr-rs"},
+				"ranges":[{"type":"SEMVER","events":[{"introduced":"0.0.0-0"}]}],
+				"database_specific":{
+					"categories":["malicious"],
+					"source":"https://github.com/rustsec/advisory-db/blob/osv/crates/RUSTSEC-2023-0115.json"
+				}
+			}
+		]
+	}`)
+
+	zipData := createZIP(t, map[string][]byte{
+		"RUSTSEC-2023-0115.json": raw,
+	})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/crates.io/all.zip" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(zipData)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	store := &osvStoreStub{}
+	syncer := NewSyncer(store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	syncer.client = &http.Client{
+		Transport: &rewriteTransport{base: srv.URL, inner: http.DefaultTransport},
+		Timeout:   10 * time.Second,
+	}
+
+	result, err := syncer.Sync(context.Background(), store)
+	if err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	if result.EntriesSynced < 1 {
+		t.Fatalf("EntriesSynced = %d, want at least one malicious finding", result.EntriesSynced)
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	if len(store.vulns) != 0 {
+		t.Fatalf("vulnerabilities = %d, want 0 for malicious RustSec category", len(store.vulns))
+	}
+	if len(store.deletedVulns) != 1 || store.deletedVulns[0] != "RUSTSEC-2023-0115" {
+		t.Fatalf("deleted vulnerabilities = %+v, want RUSTSEC-2023-0115 cleanup", store.deletedVulns)
+	}
+	if len(store.malicious) != 1 {
+		t.Fatalf("malicious findings = %d, want 1", len(store.malicious))
+	}
+	finding := store.malicious[0]
+	if finding.ID != "RUSTSEC-2023-0115" {
+		t.Fatalf("ID = %q, want RUSTSEC-2023-0115", finding.ID)
+	}
+	if finding.Ecosystem != "cargo" || finding.Name != "acceptxmr-rs" {
+		t.Fatalf("package = %s/%s, want cargo/acceptxmr-rs", finding.Ecosystem, finding.Name)
+	}
+	if finding.Source != FeedName || finding.Severity != "CRITICAL" {
+		t.Fatalf("source/severity = %s/%s, want osv/CRITICAL", finding.Source, finding.Severity)
+	}
+	if finding.RiskType != "typosquatting" {
+		t.Fatalf("risk type = %q, want typosquatting", finding.RiskType)
+	}
+	if string(finding.Versions) != "" {
+		t.Fatalf("versions = %s, want empty/all versions when RustSec version records are unavailable", finding.Versions)
+	}
+}
+
 func TestSyncerName(t *testing.T) {
 	t.Parallel()
 	syncer := NewSyncer(nil, nil)
 	if syncer.Name() != "osv" {
 		t.Errorf("Name() = %q, want %q", syncer.Name(), "osv")
 	}
+}
+
+func TestOSVMetadataHelpersHandleInvalidAndPersistedETags(t *testing.T) {
+	t.Parallel()
+
+	syncer := NewSyncer(&osvStoreStub{status: &db.FeedSyncStatus{Metadata: json.RawMessage(`not json`)}}, nil)
+	if got := syncer.loadEcosystemETags(context.Background()); len(got) != 0 {
+		t.Fatalf("loadEcosystemETags(invalid) = %+v, want empty map", got)
+	}
+
+	store := &osvStoreStub{status: &db.FeedSyncStatus{FeedName: FeedName}}
+	syncer = NewSyncer(store, nil)
+	syncer.saveEcosystemETags(context.Background(), map[string]string{"npm": `"etag"`})
+	if store.status == nil || !bytes.Contains(store.status.Metadata, []byte(`"npm"`)) {
+		t.Fatalf("saved metadata = %s", store.status.Metadata)
+	}
+
+	store.statusErr = io.ErrUnexpectedEOF
+	if got := syncer.loadEcosystemETags(context.Background()); len(got) != 0 {
+		t.Fatalf("loadEcosystemETags(error) = %+v, want empty map", got)
+	}
+	syncer.saveEcosystemETags(context.Background(), map[string]string{"go": "etag"})
+}
+
+func TestOSVMappingHelpersCoverMaliciousAndSeverityBranches(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		summary string
+		details string
+		want    string
+	}{
+		{summary: "typosquat package", want: "typosquatting"},
+		{details: "dependency confusion attack", want: "supply_chain"},
+		{details: "supply-chain compromise", want: "supply_chain"},
+		{summary: "malware", want: "malware"},
+	} {
+		got := classifyMaliciousRiskType(&osvEntry{Summary: tt.summary, Details: tt.details})
+		if got != tt.want {
+			t.Fatalf("classifyMaliciousRiskType(%q,%q) = %q, want %q", tt.summary, tt.details, got, tt.want)
+		}
+	}
+
+	affected := osvAffected{
+		Package:          osvPackage{Ecosystem: "npm", Name: "left-pad"},
+		Versions:         []string{"1.0.0"},
+		Ranges:           []osvRange{{Events: []osvEvent{{Introduced: "1.1.0"}, {Introduced: "0"}}}},
+		DatabaseSpecific: json.RawMessage(`{"categories":["malicious"],"source":"https://example.test/source"}`),
+	}
+	if !affectedHasMaliciousCategory(affected) {
+		t.Fatal("affectedHasMaliciousCategory() = false, want true")
+	}
+	if got := affectedSource(affected); got != "https://example.test/source" {
+		t.Fatalf("affectedSource() = %q", got)
+	}
+	if versions := string(maliciousVersions(affected)); !strings.Contains(versions, "1.0.0") || !strings.Contains(versions, "1.1.0") {
+		t.Fatalf("maliciousVersions() = %s", versions)
+	}
+	if got := string(marshalReferenceURLs([]osvReference{{URL: ""}, {URL: "https://example.test/ref"}})); got != `["https://example.test/ref"]` {
+		t.Fatalf("marshalReferenceURLs() = %s", got)
+	}
+
+	findings := mapToMaliciousFindings(&osvEntry{
+		ID:        "OSV-MAL",
+		Summary:   "malware",
+		Published: time.Date(2026, 5, 30, 0, 0, 0, 0, time.UTC),
+		Affected:  []osvAffected{affected, affected},
+	})
+	if len(findings) != 2 || findings[1].ID != "OSV-MAL-1" {
+		t.Fatalf("mapToMaliciousFindings() = %+v", findings)
+	}
+
+	if got := mapSeverity(&osvEntry{DatabaseSpecific: json.RawMessage(`{"severity":"moderate"}`)}); got != "MEDIUM" {
+		t.Fatalf("mapSeverity(database_specific) = %q, want MEDIUM", got)
+	}
+	if got := mapSeverity(&osvEntry{DatabaseSpecific: json.RawMessage(`{"severity":"unknown"}`)}); got != "UNKNOWN" {
+		t.Fatalf("mapSeverity(unknown db severity) = %q, want UNKNOWN", got)
+	}
+	for raw, want := range map[string]string{
+		`{"severity":"critical"}`: "CRITICAL",
+		`{"severity":"HIGH"}`:     "HIGH",
+		`{"severity":"LOW"}`:      "LOW",
+		`not json`:                "UNKNOWN",
+	} {
+		if got := mapSeverity(&osvEntry{DatabaseSpecific: json.RawMessage(raw)}); got != want {
+			t.Fatalf("mapSeverity(%s) = %q, want %q", raw, got, want)
+		}
+	}
+	if affectedHasMaliciousCategory(osvAffected{DatabaseSpecific: json.RawMessage(`not json`)}) {
+		t.Fatal("affectedHasMaliciousCategory(invalid json) = true")
+	}
+	if got := affectedSource(osvAffected{DatabaseSpecific: json.RawMessage(`not json`)}); got != "" {
+		t.Fatalf("affectedSource(invalid json) = %q, want empty", got)
+	}
+	if got := maliciousVersions(osvAffected{}); got != nil {
+		t.Fatalf("maliciousVersions(empty) = %s, want nil", string(got))
+	}
+}
+
+func TestMapToVulnerabilityCoversAliasesWithdrawnAndUnsupportedEcosystem(t *testing.T) {
+	t.Parallel()
+
+	withdrawn := "2026-05-30T12:00:00Z"
+	vuln := mapToVulnerability(&osvEntry{
+		ID:        "OSV-2026-0001",
+		Summary:   "summary",
+		Details:   "details",
+		Aliases:   []string{"CVE-2026-0001", "OSV-2026-0001"},
+		Published: time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC),
+		Modified:  time.Date(2026, 5, 30, 12, 0, 0, 0, time.UTC),
+		Withdrawn: &withdrawn,
+		Affected: []osvAffected{
+			{Package: osvPackage{Ecosystem: "Maven:org.example", Name: "artifact"}},
+			{Package: osvPackage{Ecosystem: "unsupported", Name: "ignored"}},
+		},
+		References: []osvReference{{Type: "ADVISORY", URL: ""}, {Type: "WEB", URL: "https://example.test"}},
+	}, []byte(`{"id":"OSV-2026-0001"}`))
+
+	if vuln.Withdrawn == nil || !vuln.Withdrawn.Equal(time.Date(2026, 5, 30, 12, 0, 0, 0, time.UTC)) {
+		t.Fatalf("Withdrawn = %v, want parsed timestamp", vuln.Withdrawn)
+	}
+	if len(vuln.Aliases) != 2 {
+		t.Fatalf("aliases = %+v, want ID plus CVE without duplicate", vuln.Aliases)
+	}
+	if len(vuln.AffectedPackages) != 1 || vuln.AffectedPackages[0].Ecosystem != "maven" {
+		t.Fatalf("affected packages = %+v, want only canonical maven package", vuln.AffectedPackages)
+	}
+	if len(vuln.References) != 1 || vuln.References[0].URL != "https://example.test" {
+		t.Fatalf("references = %+v", vuln.References)
+	}
+
+	badWithdrawn := "not a timestamp"
+	vuln = mapToVulnerability(&osvEntry{ID: "OSV-2026-0002", Withdrawn: &badWithdrawn}, nil)
+	if vuln.Withdrawn != nil {
+		t.Fatalf("invalid withdrawn parsed as %v, want nil", vuln.Withdrawn)
+	}
+}
+
+func TestRecordSyncStatusBranches(t *testing.T) {
+	t.Parallel()
+
+	store := &osvStoreStub{}
+	syncer := NewSyncer(store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	start := time.Now().Add(-time.Second)
+
+	syncer.recordSyncSuccess(context.Background(), start, time.Second, 7, 5)
+	if store.status == nil || store.status.LastSyncStatus != "success" || store.status.EntriesSynced != 5 {
+		t.Fatalf("success status = %+v", store.status)
+	}
+	syncer.recordSyncFailure(context.Background(), start, io.ErrUnexpectedEOF)
+	if store.status == nil || store.status.LastSyncStatus != "error" || !strings.Contains(store.status.LastError, "unexpected EOF") {
+		t.Fatalf("failure status = %+v", store.status)
+	}
+
+	store.upsertErr = io.ErrClosedPipe
+	syncer.recordSyncSuccess(context.Background(), start, time.Second, 1, 1)
+	syncer.recordSyncFailure(context.Background(), start, io.ErrUnexpectedEOF)
 }
 
 // Verify compile-time interface compliance.

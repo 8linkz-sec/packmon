@@ -64,7 +64,9 @@ Authorization: Bearer <api-key>
 ```
 
 API keys are stored hashed. Plaintext keys are shown only at creation time.
-Keys have labels/names for auditability and may be revoked.
+Keys have labels/names for auditability, record `last_used_at`, may be
+revoked, and may have an optional `expires_at` timestamp. Expired keys must be
+treated the same as missing or revoked keys by API authentication.
 
 Expected clients include:
 
@@ -75,6 +77,15 @@ Expected clients include:
 
 User-Agent validation is a hygiene control, not a primary auth control. It
 helps reject accidental or malformed traffic but must not replace API keys.
+
+Client key handling:
+
+- use a separate named key per client class or runner group;
+- store keys in CI secrets, OS secret stores, or environment variables;
+- reference keys from `.packmon.yaml` with `api_key_env` rather than plaintext
+  `api_key` values;
+- use short expirations for CI and automation where rotation is practical;
+- review `last_used_at` before revoking stale keys.
 
 ## Admin Authentication
 
@@ -130,6 +141,15 @@ If a proxy is not trusted:
 HTTPS redirect behavior must use configured public host data, not arbitrary
 request `Host` values.
 
+Production startup must fail unless transport security is configured through
+in-app TLS or a trusted TLS-terminating reverse proxy. The only exception is
+`PACKMON_ALLOW_INSECURE_LOCAL_HTTP=true`, which is reserved for local Docker
+use with a loopback `PACKMON_SERVER_PUBLIC_HOST` and host-port binding. Do not
+enable that override on shared hosts or network-exposed deployments. When this
+local-only override is active, admin session cookies intentionally omit the
+`Secure` flag so login works over `http://localhost`; all non-override
+production deployments must keep `Secure` session cookies.
+
 ## Request Limits
 
 Production API behavior must enforce:
@@ -149,6 +169,8 @@ Feed syncers and imports must:
 
 - normalize ecosystem names at import boundaries;
 - preserve source identity and freshness;
+- preserve malicious-package semantics when an advisory feed exposes them as
+  category metadata rather than severity data;
 - not delete existing good data on failed sync;
 - mark feed status as skipped/error/degraded when data is unavailable;
 - handle rate limits and timeouts without corrupting stored data;
@@ -158,6 +180,17 @@ Feed syncers and imports must:
 
 GHSA and malicious package git repositories are external input. Treat changed
 file paths from git as untrusted until scoped under the repository root.
+
+ReversingLabs API tokens are sensitive feed API keys and follow the same
+handling rules as VulnCheck, NVD, and Socket.dev keys. Packmon stores only
+normalized ReversingLabs status and minimal evidence, not full raw reports.
+ReversingLabs rate-limit, capacity, and network failures degrade that source
+but must not fail scans or delete existing cached blocking data.
+
+Vulnerability advisories without upstream severity or CVSS data are treated as
+`LOW` until enrichment can raise them. Malicious-package categories from
+OSV/RustSec are stored as malicious findings rather than unresolved
+vulnerabilities.
 
 ## Manual Advisories
 
@@ -187,9 +220,9 @@ The canonical scan result is shared by:
 Downstream tools should trust `findings_blocking`, exit code, and finding type
 semantics only if the result was produced by a verified Packmon binary/server.
 
-Malicious findings always block. Vulnerability findings block according to the
-configured threshold. Feed-degraded responses must be visible so CI/N8N can make
-policy decisions.
+Malicious and supply-chain risk findings always block. Vulnerability findings
+block according to the configured threshold. Feed-degraded responses must be
+visible so CI/N8N can make policy decisions.
 
 ## Webhooks
 
@@ -262,7 +295,7 @@ Requirements:
 Local SQLite sync:
 
 - pulls from Packmon server only;
-- stores compact finding data, not raw feed JSON;
+- stores compact finding and reputation data, not raw feed JSON;
 - warns when data is stale;
 - does not block solely because data is stale.
 
@@ -276,6 +309,10 @@ GitHub Actions and GitLab CI templates must:
 - verify checksums where downloads occur;
 - avoid embedding secrets in logs;
 - treat `PACKMON_SERVER` and API key values as CI secrets;
+- use `PACKMON_REQUIRE_REMOTE=true` for remote CI scans so server failures do
+  not silently fall back to stale local data;
+- use short-lived, named API keys where the CI platform supports routine
+  rotation;
 - upload SARIF/JUnit/JSON artifacts according to platform conventions;
 - preserve exit codes so blocking findings fail pipelines.
 

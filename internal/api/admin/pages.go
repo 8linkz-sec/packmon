@@ -17,6 +17,8 @@ import (
 	"github.com/8linkz/packmon/internal/domain"
 )
 
+const adminPasswordMinLength = 12
+
 type manualAdvisoryView struct {
 	ID          string
 	FindingType string
@@ -347,6 +349,19 @@ func (k apiKeyView) DerefLastUsedAt() time.Time {
 	return time.Time{}
 }
 
+// DerefExpiresAt returns the dereferenced ExpiresAt time, or zero time if nil.
+func (k apiKeyView) DerefExpiresAt() time.Time {
+	if k.ExpiresAt != nil {
+		return *k.ExpiresAt
+	}
+	return time.Time{}
+}
+
+// IsExpired reports whether the key is past its optional expiry timestamp.
+func (k apiKeyView) IsExpired() bool {
+	return k.APIKey.IsExpired(time.Now().UTC())
+}
+
 // HandleKeyCreate handles POST /admin/keys/create.
 func (h *AdminHandler) HandleKeyCreate(w http.ResponseWriter, r *http.Request) {
 	sess := h.requireAdmin(w, r)
@@ -362,9 +377,14 @@ func (h *AdminHandler) HandleKeyCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	name := r.PostForm.Get("name")
+	name := strings.TrimSpace(r.PostForm.Get("name"))
 	if name == "" {
 		http.Redirect(w, r, "/admin/keys?err=Key+name+is+required", http.StatusSeeOther)
+		return
+	}
+	expiresAt, err := parseAPIKeyExpiresAt(r.PostForm.Get("expires_at"), time.Now().UTC())
+	if err != nil {
+		http.Redirect(w, r, "/admin/keys?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
 		return
 	}
 
@@ -379,19 +399,47 @@ func (h *AdminHandler) HandleKeyCreate(w http.ResponseWriter, r *http.Request) {
 
 	keyHash := sha256Hash(plaintext)
 
-	_, err := h.store.CreateAPIKey(r.Context(), name, keyHash)
+	_, err = h.store.CreateAPIKey(r.Context(), name, keyHash, expiresAt)
 	if err != nil {
 		h.logger.Error("admin keys: failed to create key", "error", err)
 		http.Redirect(w, r, "/admin/keys?err=Failed+to+create+key", http.StatusSeeOther)
 		return
 	}
 
-	h.auditLog(r, "api_key_create", map[string]string{"name": name})
+	auditDetails := map[string]string{"name": name}
+	if expiresAt != nil {
+		auditDetails["expires_at"] = expiresAt.Format(time.RFC3339)
+	}
+	h.auditLog(r, "api_key_create", auditDetails)
 
 	// Store the plaintext key in a flash message so it is never exposed
 	// in the URL query string (SEC-H5).
 	h.sm.SetFlash(sess.ID, "newkey", plaintext)
 	http.Redirect(w, r, "/admin/keys?msg=Key+created", http.StatusSeeOther)
+}
+
+func parseAPIKeyExpiresAt(raw string, now time.Time) (*time.Time, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+
+	layouts := []string{"2006-01-02T15:04", "2006-01-02", time.RFC3339}
+	var (
+		expiresAt time.Time
+		parseErr  error
+	)
+	for _, layout := range layouts {
+		expiresAt, parseErr = time.Parse(layout, raw)
+		if parseErr == nil {
+			expiresAt = expiresAt.UTC()
+			if !expiresAt.After(now.UTC()) {
+				return nil, fmt.Errorf("expiration must be in the future")
+			}
+			return &expiresAt, nil
+		}
+	}
+	return nil, fmt.Errorf("invalid expiration timestamp")
 }
 
 // HandleKeyRevoke handles POST /admin/keys/revoke.
@@ -820,6 +868,7 @@ func (h *AdminHandler) HandleAdminSettings(w http.ResponseWriter, r *http.Reques
 		"HasLastLoginAt":             hasLastLoginAt,
 		"PasswordChangedAt":          passwordChangedAt,
 		"HasPasswordChangedAt":       hasPasswordChangedAt,
+		"MinPasswordLength":          adminPasswordMinLength,
 		"Message":                    r.URL.Query().Get("msg"),
 		"Error":                      r.URL.Query().Get("err"),
 	}
@@ -850,8 +899,8 @@ func (h *AdminHandler) HandlePasswordChange(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	if len(newPassword) < 12 {
-		http.Redirect(w, r, "/admin/settings?err=Password+must+be+at+least+12+characters", http.StatusSeeOther)
+	if len(newPassword) < adminPasswordMinLength {
+		http.Redirect(w, r, fmt.Sprintf("/admin/settings?err=Password+must+be+at+least+%d+characters", adminPasswordMinLength), http.StatusSeeOther)
 		return
 	}
 

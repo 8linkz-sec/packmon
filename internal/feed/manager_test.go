@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,15 +15,37 @@ import (
 
 type managerStoreStub struct {
 	db.Store
-	status *db.FeedSyncStatus
+	statuses        []db.FeedSyncStatus
+	status          *db.FeedSyncStatus
+	getErr          error
+	upsertErr       error
+	propagated      int
+	propagateErr    error
+	propagateCalled atomic.Bool
 }
 
 func (s *managerStoreStub) PropagateSeverityViaAliases(context.Context) (int, error) {
-	return 0, nil
+	s.propagateCalled.Store(true)
+	return s.propagated, s.propagateErr
+}
+
+func (s *managerStoreStub) GetFeedSyncStatus(_ context.Context, _ string) (*db.FeedSyncStatus, error) {
+	if s.getErr != nil {
+		return nil, s.getErr
+	}
+	if s.status == nil {
+		return nil, nil
+	}
+	copyValue := *s.status
+	return &copyValue, nil
 }
 
 func (s *managerStoreStub) UpsertFeedSyncStatus(_ context.Context, status *db.FeedSyncStatus) error {
+	if s.upsertErr != nil {
+		return s.upsertErr
+	}
 	copyValue := *status
+	s.statuses = append(s.statuses, copyValue)
 	s.status = &copyValue
 	return nil
 }
@@ -37,6 +60,21 @@ func (s *permanentSyncerStub) Name() string { return s.name }
 func (s *permanentSyncerStub) Sync(context.Context, db.Store) (*SyncResult, error) {
 	s.calls++
 	return nil, PermanentError(errors.New("missing api key"))
+}
+
+type notifySyncerStub struct {
+	name   string
+	called chan struct{}
+}
+
+func (s *notifySyncerStub) Name() string { return s.name }
+
+func (s *notifySyncerStub) Sync(context.Context, db.Store) (*SyncResult, error) {
+	select {
+	case s.called <- struct{}{}:
+	default:
+	}
+	return &SyncResult{EntriesSynced: 1, EntriesTotal: 1}, nil
 }
 
 func TestManagerSyncOneRecordsSkippedWithoutRetry(t *testing.T) {
@@ -67,6 +105,238 @@ func TestManagerSyncOneRecordsSkippedWithoutRetry(t *testing.T) {
 	}
 	if store.status.LastError != "missing api key" {
 		t.Fatalf("LastError = %q, want %q", store.status.LastError, "missing api key")
+	}
+}
+
+func TestManagerApplyConfigStartsPreviouslyDisabledFeed(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	store := &managerStoreStub{}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	manager := NewManager(store, logger, time.Hour)
+	disabledSyncer := &notifySyncerStub{name: "vulncheck", called: make(chan struct{}, 1)}
+	manager.Register(FeedConfig{
+		Syncer:  disabledSyncer,
+		Mode:    FeedModeSelf,
+		Enabled: false,
+	})
+	manager.Start(ctx)
+
+	enabledSyncer := &notifySyncerStub{name: "vulncheck", called: make(chan struct{}, 1)}
+	manager.ApplyConfig(context.Background(), FeedConfig{
+		Syncer:  enabledSyncer,
+		Mode:    FeedModeSelf,
+		Enabled: true,
+	}, time.Hour)
+
+	select {
+	case <-enabledSyncer.called:
+	case <-time.After(time.Second):
+		t.Fatal("enabled feed did not start after ApplyConfig")
+	}
+}
+
+func TestManagerApplyConfigRecordsDisabledAndExternalStatus(t *testing.T) {
+	t.Parallel()
+
+	store := &managerStoreStub{}
+	manager := NewManager(store, slog.New(slog.NewTextHandler(io.Discard, nil)), time.Hour)
+	syncer := &successSyncerStub{name: "osv"}
+
+	manager.ApplyConfig(context.Background(), FeedConfig{Syncer: syncer, Enabled: false, Mode: FeedModeSelf}, 0)
+	manager.ApplyConfig(context.Background(), FeedConfig{Syncer: syncer, Enabled: true, Mode: FeedModeExternal}, 0)
+	manager.ApplyConfig(context.Background(), FeedConfig{}, 0)
+
+	if len(store.statuses) != 2 {
+		t.Fatalf("statuses = %d, want disabled and external", len(store.statuses))
+	}
+	if store.statuses[0].LastSyncStatus != "disabled" {
+		t.Fatalf("first status = %q, want disabled", store.statuses[0].LastSyncStatus)
+	}
+	if store.statuses[1].LastSyncStatus != "external" {
+		t.Fatalf("second status = %q, want external", store.statuses[1].LastSyncStatus)
+	}
+}
+
+func TestManagerHelpersAndLastSyncFresh(t *testing.T) {
+	t.Parallel()
+
+	store := &managerStoreStub{}
+	manager := NewManager(store, slog.New(slog.NewTextHandler(io.Discard, nil)), time.Hour)
+	syncer := &successSyncerStub{name: "osv"}
+	rf := &registeredFeed{config: FeedConfig{Syncer: syncer, Enabled: true, Mode: FeedModeSelf}}
+
+	if !managerFeedShouldRun(rf) {
+		t.Fatal("enabled self feed should run")
+	}
+	if managerFeedShouldRun(nil) {
+		t.Fatal("nil registered feed should not run")
+	}
+	rf.config.Enabled = false
+	if managerFeedShouldRun(rf) {
+		t.Fatal("disabled feed should not run")
+	}
+	rf.config.Enabled = true
+	rf.config.Mode = FeedModeExternal
+	if managerFeedShouldRun(rf) {
+		t.Fatal("external feed should not run")
+	}
+	rf.config.Mode = FeedModeSelf
+	if got := feedPhase(rf.config); got != FeedPhaseVulnerability {
+		t.Fatalf("default feed phase = %d, want vulnerability", got)
+	}
+	rf.config.Phase = FeedPhaseEnrichment
+	if got := feedPhase(rf.config); got != FeedPhaseEnrichment {
+		t.Fatalf("explicit feed phase = %d, want enrichment", got)
+	}
+	if got := manager.effectiveInterval(rf); got != time.Hour {
+		t.Fatalf("effective default interval = %v, want 1h", got)
+	}
+	rf.interval = time.Minute
+	if got := manager.effectiveInterval(rf); got != time.Minute {
+		t.Fatalf("effective feed interval = %v, want 1m", got)
+	}
+
+	now := time.Now().UTC()
+	store.status = &db.FeedSyncStatus{LastSyncStatus: "success", LastSyncAt: &now}
+	if !manager.lastSyncFresh(context.Background(), "osv", time.Hour) {
+		t.Fatal("fresh success should be fresh")
+	}
+	old := now.Add(-2 * time.Hour)
+	store.status.LastSyncAt = &old
+	if manager.lastSyncFresh(context.Background(), "osv", time.Hour) {
+		t.Fatal("old sync should not be fresh")
+	}
+	store.status.LastSyncStatus = "error"
+	store.status.LastSyncAt = &now
+	if manager.lastSyncFresh(context.Background(), "osv", time.Hour) {
+		t.Fatal("error sync should not be fresh")
+	}
+	store.status = nil
+	if manager.lastSyncFresh(context.Background(), "osv", time.Hour) {
+		t.Fatal("missing status should not be fresh")
+	}
+	store.getErr = errors.New("db down")
+	if manager.lastSyncFresh(context.Background(), "osv", time.Hour) {
+		t.Fatal("status error should not be fresh")
+	}
+}
+
+func TestManagerStartIsIdempotentAndPropagatesAfterPhaseOne(t *testing.T) {
+	t.Parallel()
+
+	store := &managerStoreStub{propagated: 2}
+	manager := NewManager(store, slog.New(slog.NewTextHandler(io.Discard, nil)), time.Hour)
+	syncer := &successSyncerStub{name: "osv", result: SyncResult{EntriesSynced: 1, EntriesTotal: 1}}
+	manager.Register(FeedConfig{Syncer: syncer, Enabled: true, Mode: FeedModeSelf})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	manager.Start(ctx)
+	manager.Start(ctx)
+
+	deadline := time.After(time.Second)
+	for !store.propagateCalled.Load() {
+		select {
+		case <-deadline:
+			t.Fatal("PropagateSeverityViaAliases was not called after phase one")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	cancel()
+	manager.Wait()
+	if syncer.calls != 1 {
+		t.Fatalf("syncer calls = %d, want one initial call despite double Start", syncer.calls)
+	}
+}
+
+func TestManagerRunSyncBranches(t *testing.T) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	cancelledStore := &managerStoreStub{}
+	cancelledManager := NewManager(cancelledStore, logger, time.Hour)
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cancelledManager.runSync(cancelledCtx, &registeredFeed{
+		config: FeedConfig{Syncer: &successSyncerStub{name: "cancelled"}, Enabled: true, Mode: FeedModeSelf},
+	}, logger)
+	if len(cancelledStore.statuses) != 0 {
+		t.Fatalf("cancelled runSync recorded %d statuses, want 0", len(cancelledStore.statuses))
+	}
+
+	permanentStore := &managerStoreStub{}
+	permanentManager := NewManager(permanentStore, logger, time.Hour)
+	permanentManager.runSync(context.Background(), &registeredFeed{
+		config: FeedConfig{Syncer: &permanentSyncerStub{name: "vulncheck"}, Enabled: true, Mode: FeedModeSelf},
+	}, logger)
+	if permanentStore.status == nil || permanentStore.status.LastSyncStatus != "permanent_error" {
+		t.Fatalf("permanent runSync status = %+v, want permanent_error", permanentStore.status)
+	}
+
+	upsertFailStore := &managerStoreStub{upsertErr: errors.New("db down")}
+	upsertFailManager := NewManager(upsertFailStore, logger, time.Hour)
+	upsertFailManager.recordStatus(context.Background(), "osv", "success", "", time.Millisecond, &SyncResult{EntriesSynced: 1, EntriesTotal: 1})
+	upsertFailManager.recordRunningStatus(context.Background(), "osv")
+}
+
+func TestRecordRunningStatusPreservesExistingMetadata(t *testing.T) {
+	t.Parallel()
+
+	metadata := []byte(`{"etag":"old"}`)
+	store := &managerStoreStub{
+		status: &db.FeedSyncStatus{
+			FeedName:       "osv",
+			LastSyncStatus: "success",
+			EntriesSynced:  7,
+			EntriesTotal:   9,
+			LastEtag:       "etag-old",
+			LastCommitHash: "commit-old",
+			Metadata:       metadata,
+		},
+	}
+	manager := NewManager(store, slog.New(slog.NewTextHandler(io.Discard, nil)), time.Hour)
+
+	manager.recordRunningStatus(context.Background(), "osv")
+	metadata[0] = '['
+
+	if store.status == nil || store.status.LastSyncStatus != "running" {
+		t.Fatalf("recorded status = %+v, want running", store.status)
+	}
+	if store.status.EntriesSynced != 7 || store.status.EntriesTotal != 9 {
+		t.Fatalf("recorded entries = %d/%d, want 7/9", store.status.EntriesSynced, store.status.EntriesTotal)
+	}
+	if store.status.LastEtag != "etag-old" || store.status.LastCommitHash != "commit-old" {
+		t.Fatalf("recorded status lost sync metadata: %+v", store.status)
+	}
+	if string(store.status.Metadata) != `{"etag":"old"}` {
+		t.Fatalf("metadata = %s, want copied old metadata", string(store.status.Metadata))
+	}
+}
+
+func TestManagerStartFeedLockedWaitForPhaseCancellation(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	manager := NewManager(&managerStoreStub{}, slog.New(slog.NewTextHandler(io.Discard, nil)), time.Hour)
+	manager.ctx = ctx
+	manager.phase1Done = make(chan struct{})
+	rf := &registeredFeed{
+		config: FeedConfig{Syncer: &successSyncerStub{name: "epss"}, Enabled: true, Mode: FeedModeSelf, Phase: FeedPhaseEnrichment},
+	}
+	manager.feeds["epss"] = rf
+
+	manager.startFeedLocked(rf, time.Hour, nil, true)
+	cancel()
+	manager.Wait()
+
+	if rf.cancel != nil {
+		t.Fatal("rf.cancel was not cleared after phase-wait cancellation")
 	}
 }
 
@@ -282,6 +552,11 @@ func TestRegisterWithIntervalOverridesDefault(t *testing.T) {
 
 	store := &managerStoreStub{}
 	m := NewManager(store, nil, time.Hour)
+	m.RegisterWithInterval(FeedConfig{}, time.Minute)
+	if len(m.feeds) != 0 {
+		t.Fatalf("feeds count = %d, want 0 after nil RegisterWithInterval", len(m.feeds))
+	}
+
 	syncer := &permanentSyncerStub{name: "fast-feed"}
 	m.RegisterWithInterval(FeedConfig{
 		Syncer:  syncer,
@@ -325,6 +600,56 @@ func (s *successSyncerStub) Name() string { return s.name }
 func (s *successSyncerStub) Sync(_ context.Context, _ db.Store) (*SyncResult, error) {
 	s.calls++
 	return &s.result, nil
+}
+
+type observingSyncerStub struct {
+	name     string
+	observed *db.FeedSyncStatus
+	store    *managerStoreStub
+}
+
+func (s *observingSyncerStub) Name() string { return s.name }
+
+func (s *observingSyncerStub) Sync(context.Context, db.Store) (*SyncResult, error) {
+	if s.store.status != nil {
+		copyValue := *s.store.status
+		s.observed = &copyValue
+	}
+	return &SyncResult{EntriesSynced: 7, EntriesTotal: 9}, nil
+}
+
+func TestSyncOneRecordsRunningBeforeSyncerStarts(t *testing.T) {
+	t.Parallel()
+
+	store := &managerStoreStub{}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	m := NewManager(store, logger, time.Hour)
+	syncer := &observingSyncerStub{name: "osv", store: store}
+	m.Register(FeedConfig{
+		Syncer:  syncer,
+		Mode:    FeedModeSelf,
+		Enabled: true,
+	})
+
+	err := m.SyncOne(context.Background(), "osv")
+	if err != nil {
+		t.Fatalf("SyncOne() unexpected error: %v", err)
+	}
+	if syncer.observed == nil {
+		t.Fatal("syncer started before any feed status was recorded")
+	}
+	if syncer.observed.LastSyncStatus != "running" {
+		t.Fatalf("status observed by syncer = %q, want running", syncer.observed.LastSyncStatus)
+	}
+	if len(store.statuses) < 2 {
+		t.Fatalf("recorded statuses = %d, want running and final success", len(store.statuses))
+	}
+	if store.statuses[0].LastSyncStatus != "running" {
+		t.Fatalf("first recorded status = %q, want running", store.statuses[0].LastSyncStatus)
+	}
+	if store.statuses[len(store.statuses)-1].LastSyncStatus != "success" {
+		t.Fatalf("final recorded status = %q, want success", store.statuses[len(store.statuses)-1].LastSyncStatus)
+	}
 }
 
 func TestSyncOneSuccessRecordsStatus(t *testing.T) {
@@ -479,8 +804,7 @@ func TestSyncOneSucceedsOnRetry(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSyncOneCancelledContextAbortsRetries(t *testing.T) {
-	t.Parallel()
-
+	// Not parallel: mutates package-level backoffSchedule.
 	saved := backoffSchedule
 	backoffSchedule = [3]time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
 	defer func() { backoffSchedule = saved }()

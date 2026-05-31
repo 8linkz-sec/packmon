@@ -3,6 +3,7 @@ package scanner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -40,9 +41,10 @@ func TestCheckRemoteSendsAPIKey(t *testing.T) {
 	defer closeSilently(server)
 
 	sc := New(nil, Config{
-		ServerURL: server.URL,
-		APIKey:    "test-key",
-		Timeout:   5 * time.Second,
+		ServerURL:         server.URL,
+		AllowInsecureHTTP: true,
+		APIKey:            "test-key",
+		Timeout:           5 * time.Second,
 	})
 
 	if _, _, _, err := sc.checkRemote(context.Background(), []domain.Package{{
@@ -95,9 +97,10 @@ func TestCheckRemoteSendsCorrelationIDAndRepoMetadata(t *testing.T) {
 	defer closeSilently(server)
 
 	sc := New(nil, Config{
-		ServerURL: server.URL,
-		Timeout:   5 * time.Second,
-		Repo:      &domain.RepoInfo{Name: "packmon", Branch: "main", Commit: "abcdef"},
+		ServerURL:         server.URL,
+		AllowInsecureHTTP: true,
+		Timeout:           5 * time.Second,
+		Repo:              &domain.RepoInfo{Name: "packmon", Branch: "main", Commit: "abcdef"},
 	})
 
 	if _, _, _, err := sc.checkRemote(context.Background(), []domain.Package{{
@@ -112,6 +115,38 @@ func TestCheckRemoteSendsCorrelationIDAndRepoMetadata(t *testing.T) {
 	case msg := <-requestErrCh:
 		t.Fatal(msg)
 	default:
+	}
+}
+
+func TestCheckRemoteValidationAndResponseErrors(t *testing.T) {
+	t.Parallel()
+
+	sc := New(nil, Config{Timeout: time.Second})
+	if _, _, _, err := sc.checkRemote(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "no server URL") {
+		t.Fatalf("checkRemote(no URL) error = %v", err)
+	}
+
+	sc = New(nil, Config{ServerURL: "http://example.test", Timeout: time.Second})
+	if _, _, _, err := sc.checkRemote(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "refusing to use insecure") {
+		t.Fatalf("checkRemote(insecure) error = %v", err)
+	}
+
+	badStatus := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, strings.Repeat("x", 300), http.StatusTeapot)
+	}))
+	defer closeSilently(badStatus)
+	sc = New(nil, Config{ServerURL: badStatus.URL, AllowInsecureHTTP: true, Timeout: time.Second})
+	if _, _, _, err := sc.checkRemote(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "server returned 418") {
+		t.Fatalf("checkRemote(status) error = %v", err)
+	}
+
+	invalidJSON := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("not json"))
+	}))
+	defer closeSilently(invalidJSON)
+	sc = New(nil, Config{ServerURL: invalidJSON.URL, AllowInsecureHTTP: true, Timeout: time.Second})
+	if _, _, _, err := sc.checkRemote(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "decode response") {
+		t.Fatalf("checkRemote(json) error = %v", err)
 	}
 }
 
@@ -202,6 +237,51 @@ func (c *captureLocalChecker) FindMalicious(context.Context, string, string, str
 	return nil, nil
 }
 
+type errorLocalChecker struct {
+	vulnErr      error
+	maliciousErr error
+}
+
+func (c errorLocalChecker) FindVulnerabilities(context.Context, string, string, string) ([]domain.Finding, error) {
+	if c.vulnErr != nil {
+		return nil, c.vulnErr
+	}
+	return nil, nil
+}
+
+func (c errorLocalChecker) FindMalicious(_ context.Context, ecosystem, name, _ string) ([]domain.Finding, error) {
+	if c.maliciousErr != nil {
+		return nil, c.maliciousErr
+	}
+	return []domain.Finding{{Name: name, Ecosystem: domain.Ecosystem(ecosystem), Type: domain.FindingTypeMalicious}}, nil
+}
+
+func TestCheckLocalErrorsAndMaliciousVersion(t *testing.T) {
+	t.Parallel()
+
+	pkgs := []domain.Package{{Name: "evil", Version: "1.2.3", Ecosystem: domain.EcosystemNPM}}
+
+	sc := New(nil, Config{})
+	sc.SetLocalChecker(errorLocalChecker{vulnErr: errors.New("vuln db down")})
+	if _, err := sc.checkLocal(context.Background(), pkgs); err == nil || !strings.Contains(err.Error(), "local vuln check") {
+		t.Fatalf("checkLocal(vuln error) = %v", err)
+	}
+
+	sc.SetLocalChecker(errorLocalChecker{maliciousErr: errors.New("mal db down")})
+	if _, err := sc.checkLocal(context.Background(), pkgs); err == nil || !strings.Contains(err.Error(), "local malicious check") {
+		t.Fatalf("checkLocal(malicious error) = %v", err)
+	}
+
+	sc.SetLocalChecker(errorLocalChecker{})
+	findings, err := sc.checkLocal(context.Background(), pkgs)
+	if err != nil {
+		t.Fatalf("checkLocal() error = %v", err)
+	}
+	if len(findings) != 1 || findings[0].Version != "1.2.3" {
+		t.Fatalf("findings = %+v, want malicious finding with package version", findings)
+	}
+}
+
 // severityLocalChecker reports a single vulnerability finding of a fixed
 // severity for every package, used to exercise the blocking/non-blocking
 // exit-code logic.
@@ -256,6 +336,114 @@ func TestScannerReturnsUnderThresholdForNonBlockingFindings(t *testing.T) {
 	}
 	if result.FindingsCount == 0 {
 		t.Fatal("expected at least one finding")
+	}
+}
+
+func TestScannerRunNoLockFilesReturnsCleanResult(t *testing.T) {
+	t.Parallel()
+
+	sc := New(parser.NewRegistry(), Config{
+		Path:     t.TempDir(),
+		Mode:     ModeAuto,
+		FailOn:   domain.SeverityCritical,
+		MaxDepth: 2,
+	})
+	result, exitCode := sc.Run(context.Background())
+	if exitCode != ExitOK {
+		t.Fatalf("exit = %d, result = %+v", exitCode, result)
+	}
+	if result.PackagesScanned != 0 || result.FindingsCount != 0 || result.FeedVersions == nil {
+		t.Fatalf("result = %+v, want clean empty scan with feed_versions map", result)
+	}
+}
+
+func TestScannerRunParserAndLocalModeErrors(t *testing.T) {
+	t.Parallel()
+
+	badDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(badDir, "package-lock.json"), []byte(`not json`), 0o600); err != nil {
+		t.Fatalf("write bad lock: %v", err)
+	}
+	sc := New(parser.NewRegistry(), Config{
+		Path:     badDir,
+		Mode:     ModeLocal,
+		FailOn:   domain.SeverityCritical,
+		MaxDepth: 2,
+	})
+	result, exitCode := sc.Run(context.Background())
+	if exitCode != ExitParser || !strings.Contains(result.FeedStatus, "invalid JSON") {
+		t.Fatalf("parser result exit=%d result=%+v", exitCode, result)
+	}
+
+	localDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(localDir, "package-lock.json"), []byte(`{
+		"lockfileVersion": 3,
+		"packages": {"": {"version":"1.0.0"}, "node_modules/prod": {"version":"1.0.0"}}
+	}`), 0o600); err != nil {
+		t.Fatalf("write lock: %v", err)
+	}
+	sc = New(parser.NewRegistry(), Config{
+		Path:     localDir,
+		Mode:     ModeLocal,
+		FailOn:   domain.SeverityCritical,
+		MaxDepth: 2,
+	})
+	result, exitCode = sc.Run(context.Background())
+	if exitCode != ExitOperational || !strings.Contains(result.FeedStatus, "no local database") {
+		t.Fatalf("local no checker exit=%d result=%+v", exitCode, result)
+	}
+}
+
+type sortingLocalChecker struct{}
+
+func (sortingLocalChecker) FindVulnerabilities(_ context.Context, ecosystem, name, version string) ([]domain.Finding, error) {
+	return []domain.Finding{{
+		Name:       name + "-low",
+		Version:    version,
+		Ecosystem:  domain.Ecosystem(ecosystem),
+		Type:       domain.FindingTypeVulnerability,
+		Severity:   domain.SeverityLow,
+		AdvisoryID: "LOW-1",
+		Source:     "test",
+	}, {
+		Name:       name + "-critical",
+		Version:    version,
+		Ecosystem:  domain.Ecosystem(ecosystem),
+		Type:       domain.FindingTypeVulnerability,
+		Severity:   domain.SeverityCritical,
+		AdvisoryID: "CRIT-1",
+		Source:     "test",
+	}}, nil
+}
+
+func (sortingLocalChecker) FindMalicious(context.Context, string, string, string) ([]domain.Finding, error) {
+	return nil, nil
+}
+
+func TestScannerRunSortsFindingsAndReturnsBlockingExit(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "package-lock.json"), []byte(`{
+		"lockfileVersion": 3,
+		"packages": {"": {"version":"1.0.0"}, "node_modules/prod": {"version":"1.0.0"}}
+	}`), 0o600); err != nil {
+		t.Fatalf("write lock: %v", err)
+	}
+	sc := New(parser.NewRegistry(), Config{
+		Path:     dir,
+		Mode:     ModeLocal,
+		FailOn:   domain.SeverityCritical,
+		MaxDepth: 2,
+	})
+	sc.SetLocalChecker(sortingLocalChecker{})
+
+	result, exitCode := sc.Run(context.Background())
+	if exitCode != ExitBlocking || !result.FindingsBlocking {
+		t.Fatalf("exit=%d result=%+v, want blocking", exitCode, result)
+	}
+	if len(result.Findings) != 2 || result.Findings[0].Severity != domain.SeverityCritical {
+		t.Fatalf("findings order = %+v, want critical first", result.Findings)
 	}
 }
 
@@ -335,6 +523,19 @@ func TestHasBlockingFindings_MalwareBlocksEvenWithNoneThreshold(t *testing.T) {
 
 	if !sc.hasBlockingFindings(findings) {
 		t.Fatal("malware must block even with NONE threshold")
+	}
+}
+
+func TestSupplyChainRiskBlocksEvenWithNoneThreshold(t *testing.T) {
+	t.Parallel()
+
+	sc := New(nil, Config{FailOn: domain.SeverityNone})
+	findings := []domain.Finding{
+		{Type: domain.FindingTypeSupplyChainRisk, Severity: domain.SeverityCritical, Source: "reversinglabs"},
+	}
+
+	if !sc.hasBlockingFindings(findings) {
+		t.Fatal("supply-chain risk findings must block regardless of vulnerability threshold")
 	}
 }
 

@@ -47,6 +47,11 @@ func TestCompare_Semver_Prerelease(t *testing.T) {
 		{name: "numeric pre 1 < 2", a: "1.0.0-1", b: "1.0.0-2", want: -1},
 		{name: "numeric < string", a: "1.0.0-1", b: "1.0.0-alpha", want: -1},
 		{name: "dotted alpha.1 < alpha.2", a: "1.0.0-alpha.1", b: "1.0.0-alpha.2", want: -1},
+		{name: "longer prerelease wins after equal prefix", a: "1.0.0-alpha.1", b: "1.0.0-alpha", want: 1},
+		{name: "shorter prerelease loses after equal prefix", a: "1.0.0-alpha", b: "1.0.0-alpha.1", want: -1},
+		{name: "numeric greater", a: "1.0.0-2", b: "1.0.0-1", want: 1},
+		{name: "string greater than numeric", a: "1.0.0-alpha", b: "1.0.0-1", want: 1},
+		{name: "equal prerelease", a: "1.0.0-alpha", b: "1.0.0-alpha", want: 0},
 	}
 
 	for _, tt := range tests {
@@ -56,6 +61,27 @@ func TestCompare_Semver_Prerelease(t *testing.T) {
 				t.Fatalf("Compare(%q, %q, SEMVER) = %d, want %d", tt.a, tt.b, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestExportedHelperFunctions(t *testing.T) {
+	t.Parallel()
+
+	base, prerelease := SplitPrerelease("1.2.3-alpha.1+build")
+	if base != "1.2.3" || prerelease != "alpha.1+build" {
+		t.Fatalf("SplitPrerelease() = %q, %q", base, prerelease)
+	}
+	if got := ComparePrerelease("alpha.1", "alpha.2"); got != -1 {
+		t.Fatalf("ComparePrerelease() = %d, want -1", got)
+	}
+	if ok, n := IsNumeric("42"); !ok || n != 42 {
+		t.Fatalf("IsNumeric(42) = %v, %d", ok, n)
+	}
+	if ok, n := IsNumeric(""); ok || n != 0 {
+		t.Fatalf("IsNumeric(empty) = %v, %d", ok, n)
+	}
+	if got := ParseLeadingInt("123abc"); got != 123 {
+		t.Fatalf("ParseLeadingInt() = %d, want 123", got)
 	}
 }
 
@@ -349,6 +375,34 @@ func TestVersionAffected_FullOSV_ZeroIntroduced(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := VersionAffected(tt.version, ranges, `[]`, "npm")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("VersionAffected(%q) = %v, want %v", tt.version, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestVersionAffected_GoLeadingVRespectsFixedBoundary(t *testing.T) {
+	t.Parallel()
+
+	ranges := `[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"5.9.0"}]}]`
+
+	tests := []struct {
+		name    string
+		version string
+		want    bool
+	}{
+		{name: "before fixed", version: "v5.8.9", want: true},
+		{name: "at fixed", version: "v5.9.0", want: false},
+		{name: "after fixed", version: "v5.9.1", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := VersionAffected(tt.version, ranges, `[]`, "go")
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}

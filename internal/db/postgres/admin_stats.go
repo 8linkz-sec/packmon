@@ -40,7 +40,7 @@ func (s *Store) ListRecentScans(ctx context.Context, limit int) ([]db.ScanLogEnt
 	limit = clampLimit(limit, 15, 100)
 
 	rows, err := s.pool.Query(ctx, `
-		SELECT scan_id, repo_name, branch, commit, scanned_at, packages_count, findings_count, duration_ms,
+		SELECT scan_id, COALESCE(repo_name, ''), COALESCE(branch, ''), COALESCE(commit, ''), scanned_at, packages_count, findings_count, duration_ms,
 		       COALESCE(client_ip::text, ''), COALESCE(user_agent, '')
 		FROM scan_log
 		ORDER BY scanned_at DESC, id DESC
@@ -318,9 +318,11 @@ func (s *Store) collectSearchResults(ctx context.Context, acc map[string]*db.Pac
 
 func (s *Store) FindAPIKeyByHash(ctx context.Context, keyHash string) (*db.APIKey, error) {
 	key, err := scanAPIKey(s.pool.QueryRow(ctx, `
-		SELECT id, name, key_hash, created_at, revoked_at, last_used_at
+		SELECT id, name, key_hash, created_at, revoked_at, last_used_at, expires_at
 		FROM api_keys
-		WHERE key_hash = $1 AND revoked_at IS NULL`, keyHash))
+		WHERE key_hash = $1
+		  AND revoked_at IS NULL
+		  AND (expires_at IS NULL OR expires_at > NOW())`, keyHash))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -340,7 +342,7 @@ func (s *Store) TouchAPIKeyLastUsed(ctx context.Context, keyID int) error {
 
 func (s *Store) ListAPIKeys(ctx context.Context) ([]db.APIKey, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, name, key_hash, created_at, revoked_at, last_used_at
+		SELECT id, name, key_hash, created_at, revoked_at, last_used_at, expires_at
 		FROM api_keys
 		ORDER BY created_at DESC, id DESC`)
 	if err != nil {
@@ -362,11 +364,11 @@ func (s *Store) ListAPIKeys(ctx context.Context) ([]db.APIKey, error) {
 	return out, nil
 }
 
-func (s *Store) CreateAPIKey(ctx context.Context, name, keyHash string) (int, error) {
+func (s *Store) CreateAPIKey(ctx context.Context, name, keyHash string, expiresAt *time.Time) (int, error) {
 	var id int
 	err := s.pool.QueryRow(ctx,
-		`INSERT INTO api_keys (name, key_hash) VALUES ($1, $2) RETURNING id`,
-		name, keyHash,
+		`INSERT INTO api_keys (name, key_hash, expires_at) VALUES ($1, $2, $3) RETURNING id`,
+		name, keyHash, expiresAt,
 	).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("postgres: create API key: %w", err)

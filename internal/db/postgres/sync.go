@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/8linkz/packmon/internal/db"
+	"github.com/8linkz/packmon/internal/domain"
 )
 
 // ExportSync returns the flattened vulnerability and malicious data consumed by
@@ -26,14 +27,21 @@ func (s *Store) ExportSync(ctx context.Context, opts db.SyncExportOptions) (*db.
 		return nil, err
 	}
 
+	reputation, err := s.exportSyncReputation(ctx, opts, snapshot)
+	if err != nil {
+		return nil, err
+	}
+
 	// When pagination is active, signal that more data may follow if
-	// either result set filled the limit exactly.
-	truncated := opts.Limit > 0 && (len(vulns) == opts.Limit || len(malicious) == opts.Limit)
+	// any result set filled the limit exactly.
+	truncated := opts.Limit > 0 &&
+		(len(vulns) == opts.Limit || len(malicious) == opts.Limit || len(reputation) == opts.Limit)
 
 	return &db.SyncExport{
 		SyncedAt:        snapshot,
 		Vulnerabilities: vulns,
 		Malicious:       malicious,
+		Reputation:      reputation,
 		Truncated:       truncated,
 	}, nil
 }
@@ -106,6 +114,81 @@ func (s *Store) exportSyncVulnerabilities(ctx context.Context, opts db.SyncExpor
 	}
 
 	return out, nil
+}
+
+func (s *Store) exportSyncReputation(ctx context.Context, opts db.SyncExportOptions, snapshot time.Time) ([]db.SyncReputationFinding, error) {
+	query := `
+		SELECT
+			ecosystem, name, version, source, status, severity, summary, description,
+			reference_urls::text, evidence::text, last_checked_at, next_check_at, last_error, updated_at
+		FROM package_reputation_cache
+		WHERE source = $2
+		  AND status IN ('malicious', 'removed', 'clean', 'not_found', 'unsupported', 'error')
+		  AND updated_at <= $1`
+
+	args := []any{snapshot, db.ReputationSourceReversingLabs}
+	if opts.Since != nil {
+		since := opts.Since.UTC()
+		query += fmt.Sprintf(` AND updated_at > $%d`, len(args)+1)
+		args = append(args, since)
+	}
+	if len(opts.Ecosystems) > 0 {
+		query += fmt.Sprintf(` AND ecosystem = ANY($%d)`, len(args)+1)
+		args = append(args, opts.Ecosystems)
+	}
+	query += ` ORDER BY ecosystem ASC, name ASC, version ASC`
+	if opts.Limit > 0 {
+		query += fmt.Sprintf(` LIMIT $%d`, len(args)+1)
+		args = append(args, opts.Limit)
+		if opts.Offset > 0 {
+			query += fmt.Sprintf(` OFFSET $%d`, len(args)+1)
+			args = append(args, opts.Offset)
+		}
+	}
+
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: export sync reputation findings: %w", err)
+	}
+	defer closeSilently(rows)
+
+	out := make([]db.SyncReputationFinding, 0)
+	for rows.Next() {
+		rep, err := scanPackageReputation(rows)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: scan sync reputation row: %w", err)
+		}
+		out = append(out, reputationSyncFinding(rep))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: iterate sync reputation rows: %w", err)
+	}
+
+	return out, nil
+}
+
+func reputationSyncFinding(rep db.PackageReputation) db.SyncReputationFinding {
+	item := db.SyncReputationFinding{
+		ID:        reputationFindingID(rep.Ecosystem, rep.Name, rep.Version),
+		Ecosystem: rep.Ecosystem,
+		Name:      rep.Name,
+		Version:   rep.Version,
+		Summary:   rep.Summary,
+	}
+
+	switch rep.Status {
+	case "malicious":
+		item.Type = string(domain.FindingTypeMalicious)
+		item.RiskType = "malware"
+		item.Severity = normalizeReputationSeverity(rep.Severity)
+	case "removed":
+		item.Type = string(domain.FindingTypeSupplyChainRisk)
+		item.RiskType = "removed_package"
+		item.Severity = normalizeReputationSeverity(rep.Severity)
+	default:
+		item.Withdrawn = true
+	}
+	return item
 }
 
 func (s *Store) exportSyncMalicious(ctx context.Context, opts db.SyncExportOptions, snapshot time.Time) ([]db.SyncMalicious, error) {

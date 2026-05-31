@@ -219,6 +219,8 @@ func statusClass(status string) string {
 		return "bg-red-100 text-red-800"
 	case "configured":
 		return "bg-blue-100 text-blue-800"
+	case "running":
+		return "bg-blue-100 text-blue-800"
 	case "pending":
 		return "bg-gray-100 text-gray-700"
 	case "disabled":

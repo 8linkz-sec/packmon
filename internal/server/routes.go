@@ -17,8 +17,35 @@ import (
 
 // registerRoutes wires all HTTP routes on the given mux. The context is
 // forwarded to subsystems that start background goroutines.
-func registerRoutes(ctx context.Context, mux *http.ServeMux, hc *health.Checker, cfg *config.Config, runtime *config.RuntimeSettings, store db.Store, sm *auth.SessionManager, logger *slog.Logger, buildInfo BuildInfo, syncFeed admin.FeedSyncFunc) {
+func registerRoutes(ctx context.Context, mux *http.ServeMux, hc *health.Checker, cfg *config.Config, runtime *config.RuntimeSettings, store db.Store, sm *auth.SessionManager, logger *slog.Logger, buildInfo BuildInfo, syncFeed admin.FeedSyncFunc, applyFeedConfig admin.FeedConfigApplyFunc, resetFeedConfig admin.FeedConfigResetFunc) {
 	api := v1.NewHandlerWithRuntime(store, logger, runtime)
+	if cfg != nil {
+		api.ConfigureReversingLabs(cfg.Feeds)
+	}
+	applyAndRefreshAPI := applyFeedConfig
+	if applyFeedConfig != nil {
+		applyAndRefreshAPI = func(ctx context.Context, feed config.FeedSettings) error {
+			if err := applyFeedConfig(ctx, feed); err != nil {
+				return err
+			}
+			if cfg != nil {
+				api.ConfigureReversingLabs(cfg.Feeds)
+			}
+			return nil
+		}
+	}
+	resetAndRefreshAPI := resetFeedConfig
+	if resetFeedConfig != nil {
+		resetAndRefreshAPI = func(ctx context.Context, feedName string) error {
+			if err := resetFeedConfig(ctx, feedName); err != nil {
+				return err
+			}
+			if cfg != nil {
+				api.ConfigureReversingLabs(cfg.Feeds)
+			}
+			return nil
+		}
+	}
 
 	// -- Operations (no auth required) ----------------------------------------
 	mux.HandleFunc("GET /healthz", hc.LiveHandler())
@@ -38,7 +65,7 @@ func registerRoutes(ctx context.Context, mux *http.ServeMux, hc *health.Checker,
 	mux.HandleFunc("GET /api/v1/sync", api.HandleSync)
 
 	// -- Admin (session-protected) --------------------------------------------
-	admin.RegisterRoutes(ctx, mux, store, sm, logger, cfg, runtime, syncFeed)
+	admin.RegisterRoutes(ctx, mux, store, sm, logger, cfg, runtime, syncFeed, applyAndRefreshAPI, resetAndRefreshAPI)
 
 	// -- Web GUI (public pages: dashboard, search, package, feeds) -----------
 	renderer := web.NewRenderer(web.TemplateFS(), false)

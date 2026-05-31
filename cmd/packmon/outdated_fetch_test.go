@@ -1,0 +1,227 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/8linkz/packmon/internal/domain"
+)
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestFetchLatestVersionParsesSupportedRegistryResponses(t *testing.T) {
+	originalClient := registryClient
+	t.Cleanup(func() { registryClient = originalClient })
+
+	responses := map[string]string{
+		"registry.npmjs.org/pkg/latest":                             `{"version":"1.2.3"}`,
+		"pypi.org/pypi/pkg/json":                                    `{"info":{"version":"2.3.4"}}`,
+		"proxy.golang.org/github.com/acme/lib/@latest":              `{"Version":"v1.2.0"}`,
+		"crates.io/api/v1/crates/pkg":                               `{"crate":{"max_stable_version":"3.4.5"}}`,
+		"api.nuget.org/v3-flatcontainer/newtonsoft.json/index.json": `{"versions":["12.0.1","13.0.3","13.0.2"]}`,
+		"rubygems.org/api/v1/gems/pkg.json":                         `{"version":"4.5.6"}`,
+		"repo.packagist.org/p2/vendor/package.json":                 `{"packages":{"vendor/package":[{"version":"dev-main"},{"version":"5.6.7"}]}}`,
+	}
+	registryClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Header.Get("Accept") != "application/json" {
+			t.Fatalf("Accept header = %q, want application/json", req.Header.Get("Accept"))
+		}
+		key := req.URL.Host + req.URL.EscapedPath()
+		body, ok := responses[key]
+		if !ok {
+			t.Fatalf("unexpected registry request: %s %s", req.Method, req.URL.String())
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})}
+
+	tests := []struct {
+		ecosystem domain.Ecosystem
+		name      string
+		want      string
+	}{
+		{domain.EcosystemNPM, "pkg", "1.2.3"},
+		{domain.EcosystemPyPI, "pkg", "2.3.4"},
+		{domain.EcosystemGo, "github.com/acme/lib", "v1.2.0"},
+		{domain.EcosystemCargo, "pkg", "3.4.5"},
+		{domain.EcosystemNuGet, "Newtonsoft.Json", "13.0.3"},
+		{domain.EcosystemGem, "pkg", "4.5.6"},
+		{domain.EcosystemComposer, "vendor/package", "5.6.7"},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.ecosystem), func(t *testing.T) {
+			if got := fetchLatestVersion(context.Background(), tt.ecosystem, tt.name); got != tt.want {
+				t.Fatalf("fetchLatestVersion(%s, %q) = %q, want %q", tt.ecosystem, tt.name, got, tt.want)
+			}
+		})
+	}
+
+	if got := fetchLatestVersion(context.Background(), domain.EcosystemMaven, "pkg"); got != "" {
+		t.Fatalf("fetchLatestVersion(unsupported) = %q, want empty", got)
+	}
+}
+
+func TestRegistryGetHandlesTransportAndStatusErrors(t *testing.T) {
+	originalClient := registryClient
+	t.Cleanup(func() { registryClient = originalClient })
+
+	registryClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return nil, errors.New("network down")
+	})}
+	if _, err := registryGet(context.Background(), "https://registry.example/pkg"); err == nil {
+		t.Fatal("registryGet transport error = nil")
+	}
+
+	registryClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Body:       io.NopCloser(strings.NewReader(`{}`)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})}
+	if _, err := registryGet(context.Background(), "https://registry.example/pkg"); err == nil || !strings.Contains(err.Error(), "status 404") {
+		t.Fatalf("registryGet status error = %v", err)
+	}
+
+	registryClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`not json`)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})}
+	if got := fetchNPMLatest(context.Background(), "pkg"); got != "" {
+		t.Fatalf("fetchNPMLatest(invalid json) = %q, want empty", got)
+	}
+}
+
+func TestRunOutdatedReportsNoLockFiles(t *testing.T) {
+	output := captureStdout(t, func() {
+		if err := runOutdated([]string{t.TempDir()}, "", 2); err != nil {
+			t.Fatalf("run outdated: %v", err)
+		}
+	})
+	if !strings.Contains(output, "No lock files found.") {
+		t.Fatalf("run outdated output = %q", output)
+	}
+}
+
+func TestRunOutdatedPrintsOnlyOutdatedPackages(t *testing.T) {
+	originalClient := registryClient
+	t.Cleanup(func() { registryClient = originalClient })
+
+	registryClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		key := req.URL.Host + req.URL.EscapedPath()
+		responses := map[string]string{
+			"registry.npmjs.org/outdated/latest": `{"version":"2.0.0"}`,
+			"registry.npmjs.org/current/latest":  `{"version":"1.0.0"}`,
+		}
+		body, ok := responses[key]
+		if !ok {
+			return &http.Response{
+				StatusCode: http.StatusInternalServerError,
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})}
+
+	dir := t.TempDir()
+	lockPath := filepath.Join(dir, "package-lock.json")
+	if err := os.WriteFile(lockPath, []byte(`{
+		"lockfileVersion": 3,
+		"packages": {
+			"": {"version": "1.0.0"},
+			"node_modules/outdated": {"version": "1.0.0"},
+			"node_modules/current": {"version": "1.0.0"},
+			"node_modules/unknown": {"version": "1.0.0"}
+		}
+	}`), 0o600); err != nil {
+		t.Fatalf("write package-lock: %v", err)
+	}
+
+	output := captureStdout(t, func() {
+		if err := runOutdated([]string{dir}, "npm", 2); err != nil {
+			t.Fatalf("run outdated: %v", err)
+		}
+	})
+
+	for _, want := range []string{"PACKAGE", "outdated", "1.0.0", "2.0.0", "1 outdated, 1 up to date, 1 unknown (3 total)"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("run outdated output missing %q:\n%s", want, output)
+		}
+	}
+	if strings.Contains(output, "current  ") || strings.Contains(output, "unknown  ") {
+		t.Fatalf("run outdated should not print current/unknown packages as outdated:\n%s", output)
+	}
+}
+
+func TestRunOutdatedReportsNoPackagesAfterParseErrors(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "package-lock.json"), []byte(`not json`), 0o600); err != nil {
+		t.Fatalf("write package-lock: %v", err)
+	}
+
+	output := captureStdout(t, func() {
+		if err := runOutdated([]string{dir}, "npm", 2); err != nil {
+			t.Fatalf("run outdated: %v", err)
+		}
+	})
+	if !strings.Contains(output, "No packages found.") {
+		t.Fatalf("run outdated output = %q, want no packages", output)
+	}
+}
+
+func TestFetchLatestVersionReturnsEmptyForInvalidRegistryJSON(t *testing.T) {
+	originalClient := registryClient
+	t.Cleanup(func() { registryClient = originalClient })
+
+	registryClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`not json`)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})}
+
+	for _, ecosystem := range []domain.Ecosystem{
+		domain.EcosystemNPM,
+		domain.EcosystemPyPI,
+		domain.EcosystemGo,
+		domain.EcosystemCargo,
+		domain.EcosystemNuGet,
+		domain.EcosystemGem,
+		domain.EcosystemComposer,
+	} {
+		t.Run(string(ecosystem), func(t *testing.T) {
+			if got := fetchLatestVersion(context.Background(), ecosystem, "pkg"); got != "" {
+				t.Fatalf("fetchLatestVersion(%s invalid JSON) = %q, want empty", ecosystem, got)
+			}
+		})
+	}
+}

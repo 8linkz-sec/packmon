@@ -107,6 +107,14 @@ func (h *AdminHandler) HandleFeedConfigSave(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	if h.applyFeedConfig != nil {
+		if err := h.applyFeedConfig(r.Context(), feed); err != nil {
+			h.logger.Error("admin feeds: failed to apply config", "feed", feed.Name, "error", err)
+			http.Redirect(w, r, "/admin/feeds?err="+url.QueryEscape("Feed configuration saved, but applying it failed"), http.StatusSeeOther)
+			return
+		}
+	}
+
 	h.auditLog(r, "feed_config_save", map[string]string{
 		"feed":               feed.Name,
 		"enabled":            strconv.FormatBool(feed.Enabled),
@@ -115,7 +123,7 @@ func (h *AdminHandler) HandleFeedConfigSave(w http.ResponseWriter, r *http.Reque
 		"api_key_configured": strconv.FormatBool(strings.TrimSpace(feed.APIKey) != ""),
 	})
 
-	http.Redirect(w, r, "/admin/feeds?msg="+url.QueryEscape("Feed configuration saved. Restart the server to apply changes."), http.StatusSeeOther)
+	http.Redirect(w, r, "/admin/feeds?msg="+url.QueryEscape("Feed configuration saved and applied."), http.StatusSeeOther)
 }
 
 // HandleFeedConfigReset handles POST /admin/feeds/reset.
@@ -145,8 +153,16 @@ func (h *AdminHandler) HandleFeedConfigReset(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	if h.resetFeedConfig != nil {
+		if err := h.resetFeedConfig(r.Context(), feedName); err != nil {
+			h.logger.Error("admin feeds: failed to apply reset config", "feed", feedName, "error", err)
+			http.Redirect(w, r, "/admin/feeds?err="+url.QueryEscape("Feed configuration reset, but applying it failed"), http.StatusSeeOther)
+			return
+		}
+	}
+
 	h.auditLog(r, "feed_config_reset", map[string]string{"feed": feedName})
-	http.Redirect(w, r, "/admin/feeds?msg="+url.QueryEscape("Feed configuration reset to runtime defaults."), http.StatusSeeOther)
+	http.Redirect(w, r, "/admin/feeds?msg="+url.QueryEscape("Feed configuration reset and applied."), http.StatusSeeOther)
 }
 
 // HandleFeedSyncNow handles POST /admin/feeds/sync.

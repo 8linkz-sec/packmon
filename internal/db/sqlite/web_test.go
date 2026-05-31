@@ -190,3 +190,129 @@ func TestDashboardStatsAndSearchPackages(t *testing.T) {
 		t.Fatalf("BySeverity = %#v, want HIGH=1 MEDIUM=1 LOW=1 (vulnerabilities only)", stats.BySeverity)
 	}
 }
+
+func TestSearchPackagesWithoutFiltersReturnsEmptyWithoutQuerying(t *testing.T) {
+	t.Parallel()
+
+	store, err := New(t.TempDir() + "/packmon.db")
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	results, err := store.SearchPackages(context.Background(), db.PackageSearchParams{})
+	if err != nil {
+		t.Fatalf("SearchPackages() error = %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("SearchPackages() len = %d, want 0", len(results))
+	}
+}
+
+func TestDashboardStatsNormalizesBlankSeverity(t *testing.T) {
+	t.Parallel()
+
+	store, err := New(t.TempDir() + "/packmon.db")
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer closeSilently(store)
+
+	ctx := context.Background()
+	if _, err := store.DB().ExecContext(ctx, `
+		INSERT INTO vulnerabilities_local(row_key, id, ecosystem, name, version_ranges, severity, summary)
+		VALUES
+			('V-blank|npm|blank', 'V-blank', 'npm', 'blank', '[]', '', 'blank severity'),
+			('V-spaced|npm|spaced', 'V-spaced', 'npm', 'spaced', '[]', ' high ', 'spaced severity')`); err != nil {
+		t.Fatalf("insert vulnerabilities: %v", err)
+	}
+
+	stats, err := store.DashboardStats(ctx)
+	if err != nil {
+		t.Fatalf("DashboardStats() error = %v", err)
+	}
+	if stats.BySeverity["UNKNOWN"] != 1 {
+		t.Fatalf("UNKNOWN severity count = %d, want 1 in %#v", stats.BySeverity["UNKNOWN"], stats.BySeverity)
+	}
+	if stats.BySeverity["HIGH"] != 1 {
+		t.Fatalf("HIGH severity count = %d, want 1 in %#v", stats.BySeverity["HIGH"], stats.BySeverity)
+	}
+}
+
+func TestClosedStoreReturnsQueryErrors(t *testing.T) {
+	t.Parallel()
+
+	store, err := New(t.TempDir() + "/packmon.db")
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	ctx := context.Background()
+	checks := []struct {
+		name string
+		run  func() error
+	}{
+		{name: "HasAdvisoryData", run: func() error {
+			_, err := store.HasAdvisoryData(ctx)
+			return err
+		}},
+		{name: "ListRecentScans", run: func() error {
+			_, err := store.ListRecentScans(ctx, 1)
+			return err
+		}},
+		{name: "CountScansByDay", run: func() error {
+			_, err := store.CountScansByDay(ctx, 1)
+			return err
+		}},
+		{name: "SearchPackages", run: func() error {
+			_, err := store.SearchPackages(ctx, db.PackageSearchParams{Query: "lodash"})
+			return err
+		}},
+		{name: "DashboardStats", run: func() error {
+			_, err := store.DashboardStats(ctx)
+			return err
+		}},
+		{name: "FindVulnerabilities", run: func() error {
+			_, err := store.FindVulnerabilities(ctx, "npm", "lodash", "")
+			return err
+		}},
+		{name: "FindMalicious", run: func() error {
+			_, err := store.FindMalicious(ctx, "npm", "evil", "")
+			return err
+		}},
+		{name: "FindReputationFindings", run: func() error {
+			_, err := store.FindReputationFindings(ctx, "npm", "evil", db.ReputationSourceReversingLabs)
+			return err
+		}},
+		{name: "GetSyncMeta", run: func() error {
+			_, err := store.GetSyncMeta(ctx, "last_sync")
+			return err
+		}},
+		{name: "SetSyncMeta", run: func() error {
+			return store.SetSyncMeta(ctx, "last_sync", "now")
+		}},
+		{name: "InsertScan", run: func() error {
+			return store.InsertScan(ctx, ScanEntry{ScannedAt: time.Now().UTC()})
+		}},
+		{name: "ClearHistory", run: func() error {
+			_, err := store.ClearHistory(ctx, nil, "")
+			return err
+		}},
+		{name: "EnforceRetention", run: func() error {
+			return store.EnforceRetention(ctx, 1)
+		}},
+	}
+
+	for _, check := range checks {
+		t.Run(check.name, func(t *testing.T) {
+			if err := check.run(); err == nil {
+				t.Fatal("error = nil, want closed database error")
+			}
+		})
+	}
+}

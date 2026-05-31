@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/8linkz/packmon/internal/db"
 )
@@ -93,6 +94,14 @@ func Auth(logger *slog.Logger, store db.Store, devMode bool) func(http.Handler) 
 			}
 			if apiKey == nil {
 				logger.Warn("invalid api key",
+					slog.String("path", r.URL.Path),
+					slog.String("remote_addr", r.RemoteAddr),
+				)
+				http.Error(w, `{"error":"invalid api key"}`, http.StatusUnauthorized)
+				return
+			}
+			if apiKey.IsExpired(time.Now().UTC()) {
+				logger.Warn("expired api key",
 					slog.String("path", r.URL.Path),
 					slog.String("remote_addr", r.RemoteAddr),
 				)

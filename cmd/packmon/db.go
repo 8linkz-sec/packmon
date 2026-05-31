@@ -65,10 +65,19 @@ func newDBSyncCmd() *cobra.Command {
 			}
 
 			apiKey := ""
+			envAPIKey := strings.TrimSpace(os.Getenv("PACKMON_API_KEY"))
+			skipConfigAPIKeyEnv := envAPIKey != "" || cmd.Flags().Changed("api-key")
 			if cfg != nil && cfg.APIKey != "" {
 				apiKey = cfg.APIKey
 			}
-			if envAPIKey := strings.TrimSpace(os.Getenv("PACKMON_API_KEY")); envAPIKey != "" {
+			if cfg != nil && cfg.APIKeyEnv != "" && !skipConfigAPIKeyEnv {
+				resolvedAPIKey, keyErr := resolveAPIKeyEnv(cfg.APIKeyEnv)
+				if keyErr != nil {
+					return keyErr
+				}
+				apiKey = resolvedAPIKey
+			}
+			if envAPIKey != "" {
 				apiKey = envAPIKey
 			}
 			if cmd.Flags().Changed("api-key") {

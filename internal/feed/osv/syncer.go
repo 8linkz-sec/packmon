@@ -287,6 +287,26 @@ func (s *Syncer) syncEcosystem(ctx context.Context, store db.Store, ecosystem, s
 			continue
 		}
 
+		if findings := mapToMaliciousFindings(&entry); len(findings) > 0 {
+			if err := store.DeleteVulnerability(ctx, entry.ID); err != nil {
+				s.logger.Warn("failed to delete vulnerability superseded by malicious OSV category",
+					slog.String("id", entry.ID),
+					slog.String("error", err.Error()),
+				)
+			}
+			for _, finding := range findings {
+				if err := store.UpsertMaliciousFinding(ctx, finding); err != nil {
+					s.logger.Warn("failed to upsert malicious finding",
+						slog.String("id", finding.ID),
+						slog.String("error", err.Error()),
+					)
+					continue
+				}
+				synced++
+			}
+			continue
+		}
+
 		vuln := mapToVulnerability(&entry, data)
 		if err := store.UpsertVulnerability(ctx, vuln); err != nil {
 			s.logger.Warn("failed to upsert vulnerability",
@@ -548,6 +568,130 @@ func mapToVulnerability(entry *osvEntry, rawJSON []byte) *db.Vulnerability {
 	}
 
 	return vuln
+}
+
+func mapToMaliciousFindings(entry *osvEntry) []*db.MaliciousFinding {
+	if entry == nil || len(entry.Affected) == 0 {
+		return nil
+	}
+
+	refURLsJSON := marshalReferenceURLs(entry.References)
+	riskType := classifyMaliciousRiskType(entry)
+	published := &entry.Published
+	if published.IsZero() {
+		published = nil
+	}
+
+	var findings []*db.MaliciousFinding
+	for i, aff := range entry.Affected {
+		if !affectedHasMaliciousCategory(aff) {
+			continue
+		}
+
+		ecosystemRaw := aff.Package.Ecosystem
+		if idx := strings.IndexByte(ecosystemRaw, ':'); idx != -1 {
+			ecosystemRaw = ecosystemRaw[:idx]
+		}
+		canonicalEco, ok := feed.MapOSVEcosystem(ecosystemRaw)
+		if !ok {
+			continue
+		}
+
+		id := entry.ID
+		if i > 0 {
+			id = fmt.Sprintf("%s-%d", entry.ID, i)
+		}
+
+		findings = append(findings, &db.MaliciousFinding{
+			ID:            id,
+			Ecosystem:     string(canonicalEco),
+			Name:          aff.Package.Name,
+			Versions:      maliciousVersions(aff),
+			Source:        FeedName,
+			RiskType:      riskType,
+			Severity:      "CRITICAL",
+			Summary:       entry.Summary,
+			Description:   entry.Details,
+			ReferenceURLs: refURLsJSON,
+			OriginRef:     affectedSource(aff),
+			Published:     published,
+			CreatedBy:     "feed-sync",
+		})
+	}
+	return findings
+}
+
+func affectedHasMaliciousCategory(aff osvAffected) bool {
+	if len(aff.DatabaseSpecific) == 0 {
+		return false
+	}
+	var dbSpec struct {
+		Categories []string `json:"categories"`
+	}
+	if err := json.Unmarshal(aff.DatabaseSpecific, &dbSpec); err != nil {
+		return false
+	}
+	for _, category := range dbSpec.Categories {
+		if strings.EqualFold(strings.TrimSpace(category), "malicious") {
+			return true
+		}
+	}
+	return false
+}
+
+func affectedSource(aff osvAffected) string {
+	if len(aff.DatabaseSpecific) == 0 {
+		return ""
+	}
+	var dbSpec struct {
+		Source string `json:"source"`
+	}
+	if err := json.Unmarshal(aff.DatabaseSpecific, &dbSpec); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(dbSpec.Source)
+}
+
+func maliciousVersions(aff osvAffected) json.RawMessage {
+	versions := make([]string, 0, len(aff.Versions))
+	versions = append(versions, aff.Versions...)
+	for _, r := range aff.Ranges {
+		for _, event := range r.Events {
+			if event.Introduced != "" && event.Introduced != "0" && event.Introduced != "0.0.0-0" {
+				versions = append(versions, event.Introduced)
+			}
+		}
+	}
+	if len(versions) == 0 {
+		return nil
+	}
+	out, _ := json.Marshal(versions)
+	return out
+}
+
+func marshalReferenceURLs(refs []osvReference) json.RawMessage {
+	urls := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		if ref.URL != "" {
+			urls = append(urls, ref.URL)
+		}
+	}
+	out, _ := json.Marshal(urls)
+	return out
+}
+
+func classifyMaliciousRiskType(entry *osvEntry) string {
+	lower := strings.ToLower(entry.Summary + " " + entry.Details)
+	switch {
+	case strings.Contains(lower, "typosquat"):
+		return "typosquatting"
+	case strings.Contains(lower, "supply chain") || strings.Contains(lower, "supply-chain"):
+		return "supply_chain"
+	case strings.Contains(lower, "dependency confusion"):
+		return "supply_chain"
+	default:
+		return "malware"
+	}
 }
 
 // mapSeverity derives a Packmon severity string from OSV severity entries.

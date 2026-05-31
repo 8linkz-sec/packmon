@@ -60,6 +60,65 @@ hat dennoch mehrere echte Design-/Security-Drifts gefunden.
 Wichtig: **H1 und H5 sind widerlegt** und sollten nicht als offene High
 Findings behandelt werden.
 
+## Feature-Erweiterungen (2026-05-30)
+
+Nach dem Audit umgesetzte Features. Beide sind gegen `go build ./...`,
+`go vet ./...` und `go test -count=1 ./...` (alle gruen) verifiziert.
+
+### Sichere Agent<->Server-Kommunikation (TLS-Haertung)
+
+Ziel: sichere Kommunikation ueber mehrere Netze ohne vorgelagerten
+Reverse-Proxy. Bearer-Token-Auth war bereits vorhanden
+(`internal/server/middleware/auth.go`); ergaenzt wurden Transport-Sicherheit
+und Fail-closed-Verhalten.
+
+- Server In-App-TLS: `PACKMON_TLS_CERT_FILE`, `PACKMON_TLS_KEY_FILE`,
+  `PACKMON_TLS_MIN_VERSION` (Default `1.2`, akzeptiert `1.2`/`1.3`). Bei
+  gesetztem Cert+Key serviert `internal/server/server.go` via
+  `ListenAndServeTLS` mit `tls.Config{MinVersion: ...}`, sonst weiterhin
+  Klartext-`ListenAndServe`.
+- Fail-closed-Start: `Config.ValidateTransportSecurity()`
+  (`internal/config/config.go`), aufgerufen aus `cmd/packmon-server/main.go`.
+  In Production verweigert der Server den Start ohne TLS-Cert ODER
+  `PACKMON_TRUSTED_PROXIES` ODER den Loopback-Override
+  `PACKMON_ALLOW_INSECURE_LOCAL_HTTP`. **Verhaltensaenderung:** bisherige
+  Klartext-Deployments ohne diese Vars starten nicht mehr.
+- Client/Agent (`internal/scanner/scanner.go`, `cmd/packmon/scan.go`,
+  `cmd/packmon/client_config.go`): expliziter `http.Transport`
+  (`ProxyFromEnvironment`, `TLSClientConfig.MinVersion` TLS 1.2, optionaler
+  `RootCAs`-Pool). `https://` wird erzwungen (Bearer-Token geht nie im
+  Klartext raus); Opt-out nur via `--insecure-allow-http` /
+  `PACKMON_INSECURE_ALLOW_HTTP`. Neue Flags/Env: `--cacert`/`PACKMON_CA_CERT`,
+  `--require-remote`/`PACKMON_REQUIRE_REMOTE` (kein stiller Local-Fallback im
+  auto-Modus). Kein `InsecureSkipVerify`-Schalter.
+- Tests: `internal/config/tls_test.go`, `internal/scanner/tls_test.go`,
+  `internal/server/tls_test.go`, `cmd/packmon/scan_tls_test.go`.
+- Doku: `SECURITY.md`, `README.md`, `DESIGN.md`, `docs/runbook.md`,
+  `.env.example`, `CLAUDE.md`.
+- Zurueckgestellt (bewusst): Key-Rotation/`expires_at` fuer API-Keys
+  (braucht eigene Migration); nur manuelles Revoke per Admin-UI.
+
+### ReversingLabs Demand-Driven Reputation Cache
+
+Optionale, serverseitige Package-Reputation; self-mode only, standardmaessig
+deaktiviert.
+
+- Env: `PACKMON_FEED_REVERSINGLABS_ENABLED`, `PACKMON_FEED_REVERSINGLABS_MODE`
+  (`external` wird beim Start abgelehnt), `PACKMON_REVERSINGLABS_API_KEY`,
+  `PACKMON_REVERSINGLABS_API_BASE_URL`, `PACKMON_REVERSINGLABS_LOOKUP_TTL`
+  (Default 24h), `PACKMON_REVERSINGLABS_BATCH_SIZE` (Cap 5).
+- Neuer Finding-Typ `supply_chain_risk` (`internal/domain/models.go`):
+  `removed` blockt immer; `malicious` -> Malware. Blockt sowohl im API-Handler
+  (`internal/api/v1/handler.go`) als auch im CLI-Scanner
+  (`internal/scanner/scanner.go`).
+- Migration `004_reversinglabs_reputation` (Tabelle
+  `package_reputation_cache`), Worker `internal/feed/reversinglabs/worker.go`,
+  geteiltes PURL-Praedikat `internal/feed/reversinglabs/purl.go`; Admin-Feed-UI
+  listet ReversingLabs. Detailplan:
+  `docs/superpowers/plans/2026-05-30-reversinglabs-demand-driven-cache.md`.
+- Demand-driven: der erste `/check` eines Pakets terminiert nur die
+  Suche; geblockt wird erst beim spaeteren Scan. Kein synchrones Malware-Gate.
+
 ## Fix-Runde 3 -- 2026-05-29 (Claude): Action-Pinning + Test-Luecken
 
 Die zuletzt verbliebenen, lokal umsetzbaren Punkte wurden geschlossen.

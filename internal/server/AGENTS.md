@@ -22,7 +22,15 @@ context (`ClientIP(r)`), not `r.RemoteAddr`. Verify the wrap order in
   forwarded headers from an untrusted peer (`clientip.go`).
 - Production `/api/v1/*` requires a Bearer API key (SHA-256 hashed lookup).
   Health/version/metrics are the only API-namespace exemptions.
-- Session cookies: `HttpOnly`, `SameSite=Strict`, `Secure` outside dev mode.
+- Transport is fail-closed in production (`Config.ValidateTransportSecurity`,
+  called from `cmd/packmon-server/main.go`): the server refuses to start unless
+  in-app TLS (`PACKMON_TLS_CERT_FILE` + `PACKMON_TLS_KEY_FILE`),
+  `PACKMON_TRUSTED_PROXIES`, or the loopback `PACKMON_ALLOW_INSECURE_LOCAL_HTTP`
+  override is set. In-app TLS uses `ListenAndServeTLS` with a configurable
+  `MinVersion` (default 1.2); otherwise plain `ListenAndServe`. Do not weaken
+  this guard.
+- Session cookies: `HttpOnly`, `SameSite=Strict`, `Secure` outside dev mode
+  except the explicit local Docker `PACKMON_ALLOW_INSECURE_LOCAL_HTTP` override.
   Session IDs are 256-bit `crypto/rand`. CSRF token on every admin POST,
   compared with `crypto/subtle.ConstantTimeCompare`.
 - Never log API keys, tokens, passwords, or full file paths.

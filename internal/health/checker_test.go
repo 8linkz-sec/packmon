@@ -101,6 +101,27 @@ func TestReadyHandler_DatabaseUnreachable(t *testing.T) {
 	}
 }
 
+func TestReadyHandler_ShuttingDown(t *testing.T) {
+	c := NewChecker(&mockPinger{})
+	c.SetShuttingDown()
+	handler := c.ReadyHandler()
+
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("ReadyHandler(shutting down) status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("ReadyHandler body decode error: %v", err)
+	}
+	if body["reason"] != "shutting down" {
+		t.Fatalf("ReadyHandler reason = %q, want shutting down", body["reason"])
+	}
+}
+
 func TestReadyHandler_DatabaseTimeout(t *testing.T) {
 	// The ReadyHandler uses a 3-second internal timeout. We simulate a
 	// pinger that takes much longer than that. To keep the test fast we

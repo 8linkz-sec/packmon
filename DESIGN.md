@@ -22,7 +22,8 @@ or a public internet-facing API.
 
 - Scan dependency lockfiles and supported manifest-like files across the
   canonical ecosystems.
-- Detect known vulnerabilities and malicious package findings.
+- Detect known vulnerabilities, malicious package findings, and configured
+  supply-chain risk findings.
 - Support remote server mode, local SQLite mode, and auto fallback mode.
 - Produce human-readable terminal output and machine-readable JSON, SARIF, and
   JUnit files.
@@ -34,7 +35,7 @@ or a public internet-facing API.
     passing pipeline by the shipped CI templates);
   - `4`: parser error;
   - `10`: internal bug.
-- Treat malicious findings as always blocking.
+- Treat malicious and supply-chain risk findings as always blocking.
 - Let teams configure vulnerability blocking thresholds.
 - Keep CLI, API, and webhook scan result schemas aligned.
 - Keep server feed data in PostgreSQL.
@@ -165,6 +166,13 @@ Malicious findings are separate entities with stable IDs, package identity,
 source, risk type, severity, optional affected versions, summary, and
 description.
 
+Package reputation cache rows are version-specific normalized records from
+demand-driven reputation sources. They store status, minimal evidence,
+timestamps, and refresh scheduling data. `malicious` status produces a
+malicious finding. `removed` status produces a blocking `supply_chain_risk`
+finding. `clean`, `not_found`, `unsupported`, and transient `error` statuses do
+not produce findings.
+
 Manual advisories are admin-managed records. They can represent either
 vulnerability findings or malicious findings. New manual records without an
 operator-supplied ID use stable `manual:<uuid>` IDs.
@@ -180,11 +188,26 @@ Server-side feed sources include:
 - CISA KEV;
 - EPSS;
 - Socket.dev through async queue behavior.
+- ReversingLabs Spectra Assure Community API as an optional server-side,
+  demand-driven reputation source. The server stores normalized package
+  reputation cache rows and refreshes a package version at most once per 24
+  hours when it appears in a check request and no non-ReversingLabs feed already
+  covers it.
+
+OSV/RustSec affected-package records with `database_specific.categories`
+containing `malicious` are normalized as malicious package findings, not as
+vulnerability findings. Vulnerabilities whose upstream source has no severity
+or CVSS data are stored with a conservative `LOW` fallback until alias or NVD
+enrichment can raise them. `UNKNOWN` vulnerability severity is not a final
+user-facing state.
 
 Feed sync can run inside the server or be supplied externally through N8N feed
 import endpoints. Feed failure must not delete existing good data. Check
 responses must indicate degraded feed state when data is missing, skipped, or
 stale.
+
+ReversingLabs is self-managed only and has no external import endpoint. Initial
+enabled ecosystems are `npm`, `pypi`, `gem`, `nuget`, and `maven`.
 
 ## Refresh Queue
 
@@ -214,9 +237,9 @@ statuses. Paused jobs must not be dequeued.
 Local mode uses a compact SQLite database populated from `GET /api/v1/sync`.
 It stores enough data for equivalent finding quality but not full server detail.
 
-Remote and local modes should detect the same vulnerability and malicious
-findings when local data is fresh. Differences are allowed only in detail level
-and freshness.
+Remote and local modes should detect the same vulnerability, malicious, and
+synced reputation findings when local data is fresh. Differences are allowed
+only in detail level and freshness.
 
 ## Web UI
 
@@ -238,7 +261,11 @@ Important server environment variables:
 - `PACKMON_SERVER_MODE`;
 - `PACKMON_SERVER_PORT`;
 - `PACKMON_SERVER_PUBLIC_HOST`;
+- `PACKMON_TLS_CERT_FILE`;
+- `PACKMON_TLS_KEY_FILE`;
+- `PACKMON_TLS_MIN_VERSION`;
 - `PACKMON_TRUSTED_PROXIES`;
+- `PACKMON_ALLOW_INSECURE_LOCAL_HTTP`;
 - `PACKMON_BLOCK_THRESHOLD`;
 - `PACKMON_RATE_LIMIT_PER_MINUTE`;
 - `PACKMON_RATE_LIMIT_BURST`;
@@ -250,6 +277,17 @@ Important server environment variables:
 
 Admin system settings can persist selected runtime values such as block
 threshold and rate-limit settings. Persisted values are loaded on server start.
+Admin feed settings can persist enablement, mode, cadence, and feed API keys.
+Feed setting changes are applied to the running process immediately and are
+also loaded on future server starts.
+
+CLI configuration may reference API keys via `api_key_env` so project config
+files do not need plaintext secrets. Environment variables and flags still take
+precedence over project and user-global config.
+
+API keys are named, hashed at rest, track `last_used_at`, support revocation,
+and can optionally expire via `expires_at`. Expired keys are not accepted by
+production `/api/v1/*` authentication.
 
 ## CI/CD Integration
 

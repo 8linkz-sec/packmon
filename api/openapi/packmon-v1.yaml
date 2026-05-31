@@ -145,6 +145,26 @@ paths:
           schema:
             type: string
             format: date-time
+        - name: snapshot
+          in: query
+          description: "Stable snapshot timestamp returned by the first page of a paginated sync"
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          description: "Rows per source category"
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 10000
+            default: 1000
+        - name: offset
+          in: query
+          description: "Page offset used with the same since and snapshot values"
+          schema:
+            type: integer
+            minimum: 0
         - name: ecosystem
           in: query
           description: "Filter by ecosystem"
@@ -153,6 +173,10 @@ paths:
       responses:
         "200":
           description: Sync data stream
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SyncResponse"
 
   /healthz:
     get:
@@ -340,13 +364,13 @@ components:
           $ref: "#/components/schemas/Ecosystem"
         type:
           type: string
-          enum: [vulnerability, malicious]
+          enum: [vulnerability, malicious, supply_chain_risk]
         severity:
           type: string
           enum: [CRITICAL, HIGH, MEDIUM, LOW, UNKNOWN]
         advisory_id:
           type: string
-          description: "CVE/GHSA ID (vulnerability only)"
+          description: "CVE/GHSA/reputation finding ID"
         title:
           type: string
         url:
@@ -357,11 +381,105 @@ components:
           description: "Inclusive fix constraint for the vulnerability, for example >= 1.2.3 (vulnerability only)"
         risk_type:
           type: string
-          enum: [malware, typosquatting, supply_chain]
-          description: "Threat category (malicious only)"
+          enum: [malware, typosquatting, supply_chain, removed_package]
+          description: "Threat or supply-chain risk category"
         source:
           type: string
-          description: "Feed source: osv, ghsa, vulncheck, openssf, socket, manual"
+          description: "Feed source: osv, ghsa, vulncheck, openssf, socket, reversinglabs, manual"
+
+    SyncResponse:
+      type: object
+      required: [synced_at, vulnerabilities, malicious, reputation, truncated, has_more]
+      properties:
+        synced_at:
+          type: string
+          format: date-time
+        vulnerabilities:
+          type: array
+          items:
+            $ref: "#/components/schemas/SyncVulnerability"
+        malicious:
+          type: array
+          items:
+            $ref: "#/components/schemas/SyncMalicious"
+        reputation:
+          type: array
+          items:
+            $ref: "#/components/schemas/SyncReputation"
+        truncated:
+          type: boolean
+        has_more:
+          type: boolean
+
+    SyncVulnerability:
+      type: object
+      properties:
+        id:
+          type: string
+        ecosystem:
+          $ref: "#/components/schemas/Ecosystem"
+        name:
+          type: string
+        version_ranges:
+          type: string
+        severity:
+          type: string
+        cvss_score:
+          type: number
+          nullable: true
+        epss_score:
+          type: number
+          nullable: true
+        cisa_kev:
+          type: boolean
+        summary:
+          type: string
+        withdrawn:
+          type: boolean
+
+    SyncMalicious:
+      type: object
+      properties:
+        id:
+          type: string
+        ecosystem:
+          $ref: "#/components/schemas/Ecosystem"
+        name:
+          type: string
+        versions:
+          type: string
+        risk_type:
+          type: string
+        severity:
+          type: string
+        summary:
+          type: string
+        withdrawn:
+          type: boolean
+
+    SyncReputation:
+      type: object
+      properties:
+        id:
+          type: string
+        ecosystem:
+          $ref: "#/components/schemas/Ecosystem"
+        name:
+          type: string
+        version:
+          type: string
+        type:
+          type: string
+          description: "Finding type for active rows; empty for withdrawn tombstones"
+        risk_type:
+          type: string
+          description: "Risk type for active rows; empty for withdrawn tombstones"
+        severity:
+          type: string
+        summary:
+          type: string
+        withdrawn:
+          type: boolean
 
     RefreshResponse:
       type: object

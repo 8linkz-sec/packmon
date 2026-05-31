@@ -4,8 +4,10 @@
 package config
 
 import (
+	"crypto/tls"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -49,22 +51,24 @@ type FeedsConfig struct {
 	DataDir string
 
 	// Per-feed enabled flags.
-	OSVEnabled       bool
-	GHSAEnabled      bool
-	OpenSSFEnabled   bool
-	VulnCheckEnabled bool
-	SocketEnabled    bool
-	CISAKEVEnabled   bool
-	EPSSEnabled      bool
+	OSVEnabled           bool
+	GHSAEnabled          bool
+	OpenSSFEnabled       bool
+	VulnCheckEnabled     bool
+	SocketEnabled        bool
+	ReversingLabsEnabled bool
+	CISAKEVEnabled       bool
+	EPSSEnabled          bool
 
 	// Per-feed mode: "self" (server syncs) or "external" (N8N pushes).
-	OSVMode       FeedMode
-	GHSAMode      FeedMode
-	OpenSSFMode   FeedMode
-	VulnCheckMode FeedMode
-	CISAKEVMode   FeedMode
-	EPSSMode      FeedMode
-	SocketMode    FeedMode
+	OSVMode           FeedMode
+	GHSAMode          FeedMode
+	OpenSSFMode       FeedMode
+	VulnCheckMode     FeedMode
+	CISAKEVMode       FeedMode
+	EPSSMode          FeedMode
+	SocketMode        FeedMode
+	ReversingLabsMode FeedMode
 
 	// Optional per-feed sync interval overrides. Zero means "use
 	// PACKMON_FEED_SYNC_INTERVAL".
@@ -81,23 +85,56 @@ type FeedsConfig struct {
 	NVDInterval time.Duration
 
 	// API keys for feeds that require authentication.
-	VulnCheckAPIKey string
-	SocketAPIKey    string
-	NVDAPIKey       string
+	VulnCheckAPIKey        string
+	SocketAPIKey           string
+	ReversingLabsAPIKey    string
+	ReversingLabsBaseURL   string
+	ReversingLabsLookupTTL time.Duration
+	ReversingLabsBatchSize int
+	NVDAPIKey              string
 }
 
 // ServerConfig groups HTTP server settings.
 type ServerConfig struct {
-	Port               int
-	Mode               ServerMode
-	PublicHost         string
-	TrustedProxies     []string
-	BlockThreshold     string
-	RateLimitPerMinute int
-	RateLimitBurst     int
-	ReadTimeout        time.Duration
-	WriteTimeout       time.Duration
-	ShutdownTimeout    time.Duration
+	Port                   int
+	Mode                   ServerMode
+	PublicHost             string
+	TrustedProxies         []string
+	AllowInsecureLocalHTTP bool
+	BlockThreshold         string
+	RateLimitPerMinute     int
+	RateLimitBurst         int
+	ReadTimeout            time.Duration
+	WriteTimeout           time.Duration
+	ShutdownTimeout        time.Duration
+	TLS                    TLSConfig
+}
+
+// TLSConfig groups in-app TLS termination settings. When both CertFile and
+// KeyFile are set, the server terminates TLS itself (no reverse proxy needed).
+type TLSConfig struct {
+	CertFile string
+	KeyFile  string
+	// MinVersion is the configured minimum TLS version string ("1.2" or "1.3").
+	MinVersion string
+}
+
+// Enabled reports whether in-app TLS termination is configured (both cert and
+// key files set).
+func (t TLSConfig) Enabled() bool {
+	return strings.TrimSpace(t.CertFile) != "" && strings.TrimSpace(t.KeyFile) != ""
+}
+
+// MinVersionTLS maps the configured MinVersion string to the corresponding
+// crypto/tls constant. It assumes the value was validated at load time and
+// falls back to TLS 1.2 for an empty/unknown value.
+func (t TLSConfig) MinVersionTLS() uint16 {
+	switch strings.TrimSpace(t.MinVersion) {
+	case "1.3":
+		return tls.VersionTLS13
+	default:
+		return tls.VersionTLS12
+	}
 }
 
 // DBConfig groups PostgreSQL connection settings.
@@ -217,7 +254,30 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
+	reversingLabsTTL, err := envDurationOrDefault("PACKMON_REVERSINGLABS_LOOKUP_TTL", 24*time.Hour)
+	if err != nil {
+		return nil, err
+	}
+
+	reversingLabsBatchSize, err := envPositiveIntOrDefault("PACKMON_REVERSINGLABS_BATCH_SIZE", 5)
+	if err != nil {
+		return nil, err
+	}
+	if reversingLabsBatchSize > 5 {
+		reversingLabsBatchSize = 5
+	}
+
+	reversingLabsMode := parseFeedMode("PACKMON_FEED_REVERSINGLABS_MODE")
+	if reversingLabsMode == FeedModeExternal {
+		return nil, fmt.Errorf("PACKMON_FEED_REVERSINGLABS_MODE=external is not supported: ReversingLabs is demand-driven and has no import endpoint")
+	}
+
 	sessionTimeout, err := envDurationOrDefault("PACKMON_ADMIN_SESSION_TIMEOUT", 8*time.Hour)
+	if err != nil {
+		return nil, err
+	}
+
+	tlsMinVersion, err := parseTLSMinVersion(envOrDefault("PACKMON_TLS_MIN_VERSION", "1.2"))
 	if err != nil {
 		return nil, err
 	}
@@ -236,16 +296,22 @@ func Load() (*Config, error) {
 
 	cfg := &Config{
 		Server: ServerConfig{
-			Port:               serverPort,
-			Mode:               mode,
-			PublicHost:         envOrDefault("PACKMON_SERVER_PUBLIC_HOST", ""),
-			TrustedProxies:     splitCSVEnv(os.Getenv("PACKMON_TRUSTED_PROXIES")),
-			BlockThreshold:     blockThreshold,
-			RateLimitPerMinute: rateLimitPerMinute,
-			RateLimitBurst:     rateLimitBurst,
-			ReadTimeout:        readTimeout,
-			WriteTimeout:       writeTimeout,
-			ShutdownTimeout:    shutdownTimeout,
+			Port:                   serverPort,
+			Mode:                   mode,
+			PublicHost:             envOrDefault("PACKMON_SERVER_PUBLIC_HOST", ""),
+			TrustedProxies:         splitCSVEnv(os.Getenv("PACKMON_TRUSTED_PROXIES")),
+			AllowInsecureLocalHTTP: envBoolOrDefault("PACKMON_ALLOW_INSECURE_LOCAL_HTTP", false),
+			BlockThreshold:         blockThreshold,
+			RateLimitPerMinute:     rateLimitPerMinute,
+			RateLimitBurst:         rateLimitBurst,
+			ReadTimeout:            readTimeout,
+			WriteTimeout:           writeTimeout,
+			ShutdownTimeout:        shutdownTimeout,
+			TLS: TLSConfig{
+				CertFile:   envOrDefault("PACKMON_TLS_CERT_FILE", ""),
+				KeyFile:    envOrDefault("PACKMON_TLS_KEY_FILE", ""),
+				MinVersion: tlsMinVersion,
+			},
 		},
 		DB: DBConfig{
 			Host:     envOrDefault("PACKMON_DB_HOST", "localhost"),
@@ -278,27 +344,33 @@ func Load() (*Config, error) {
 			DataDir: envOrDefault("PACKMON_FEED_DATA_DIR",
 				filepath.Join(os.TempDir(), "packmon-feeds")),
 
-			OSVEnabled:       envBoolOrDefault("PACKMON_FEED_OSV_ENABLED", true),
-			GHSAEnabled:      envBoolOrDefault("PACKMON_FEED_GHSA_ENABLED", true),
-			OpenSSFEnabled:   envBoolOrDefault("PACKMON_FEED_OPENSSF_ENABLED", true),
-			VulnCheckEnabled: envBoolOrDefault("PACKMON_FEED_VULNCHECK_ENABLED", true),
-			SocketEnabled:    envBoolOrDefault("PACKMON_FEED_SOCKET_ENABLED", false),
-			CISAKEVEnabled:   envBoolOrDefault("PACKMON_FEED_CISAKEV_ENABLED", true),
-			EPSSEnabled:      envBoolOrDefault("PACKMON_FEED_EPSS_ENABLED", true),
-			NVDEnabled:       envBoolOrDefault("PACKMON_FEED_NVD_ENABLED", true),
+			OSVEnabled:           envBoolOrDefault("PACKMON_FEED_OSV_ENABLED", true),
+			GHSAEnabled:          envBoolOrDefault("PACKMON_FEED_GHSA_ENABLED", true),
+			OpenSSFEnabled:       envBoolOrDefault("PACKMON_FEED_OPENSSF_ENABLED", true),
+			VulnCheckEnabled:     envBoolOrDefault("PACKMON_FEED_VULNCHECK_ENABLED", true),
+			SocketEnabled:        envBoolOrDefault("PACKMON_FEED_SOCKET_ENABLED", false),
+			ReversingLabsEnabled: envBoolOrDefault("PACKMON_FEED_REVERSINGLABS_ENABLED", false),
+			CISAKEVEnabled:       envBoolOrDefault("PACKMON_FEED_CISAKEV_ENABLED", true),
+			EPSSEnabled:          envBoolOrDefault("PACKMON_FEED_EPSS_ENABLED", true),
+			NVDEnabled:           envBoolOrDefault("PACKMON_FEED_NVD_ENABLED", true),
 
-			OSVMode:       parseFeedMode("PACKMON_FEED_OSV_MODE"),
-			GHSAMode:      parseFeedMode("PACKMON_FEED_GHSA_MODE"),
-			OpenSSFMode:   parseFeedMode("PACKMON_FEED_OPENSSF_MODE"),
-			VulnCheckMode: parseFeedMode("PACKMON_FEED_VULNCHECK_MODE"),
-			CISAKEVMode:   parseFeedMode("PACKMON_FEED_CISAKEV_MODE"),
-			EPSSMode:      parseFeedMode("PACKMON_FEED_EPSS_MODE"),
-			NVDMode:       parseFeedMode("PACKMON_FEED_NVD_MODE"),
-			SocketMode:    parseFeedMode("PACKMON_FEED_SOCKET_MODE"),
+			OSVMode:           parseFeedMode("PACKMON_FEED_OSV_MODE"),
+			GHSAMode:          parseFeedMode("PACKMON_FEED_GHSA_MODE"),
+			OpenSSFMode:       parseFeedMode("PACKMON_FEED_OPENSSF_MODE"),
+			VulnCheckMode:     parseFeedMode("PACKMON_FEED_VULNCHECK_MODE"),
+			CISAKEVMode:       parseFeedMode("PACKMON_FEED_CISAKEV_MODE"),
+			EPSSMode:          parseFeedMode("PACKMON_FEED_EPSS_MODE"),
+			NVDMode:           parseFeedMode("PACKMON_FEED_NVD_MODE"),
+			SocketMode:        parseFeedMode("PACKMON_FEED_SOCKET_MODE"),
+			ReversingLabsMode: reversingLabsMode,
 
-			VulnCheckAPIKey: os.Getenv("PACKMON_VULNCHECK_API_KEY"),
-			SocketAPIKey:    os.Getenv("PACKMON_SOCKET_API_KEY"),
-			NVDAPIKey:       os.Getenv("PACKMON_NVD_API_KEY"),
+			VulnCheckAPIKey:        os.Getenv("PACKMON_VULNCHECK_API_KEY"),
+			SocketAPIKey:           os.Getenv("PACKMON_SOCKET_API_KEY"),
+			ReversingLabsAPIKey:    os.Getenv("PACKMON_REVERSINGLABS_API_KEY"),
+			ReversingLabsBaseURL:   envOrDefault("PACKMON_REVERSINGLABS_API_BASE_URL", "https://data.reversinglabs.com/api/oss/community/v2/free"),
+			ReversingLabsLookupTTL: reversingLabsTTL,
+			ReversingLabsBatchSize: reversingLabsBatchSize,
+			NVDAPIKey:              os.Getenv("PACKMON_NVD_API_KEY"),
 		},
 	}
 
@@ -317,6 +389,33 @@ func (m MetricsConfig) Addr() string {
 // IsDevelopment is a convenience check on the server mode.
 func (c *Config) IsDevelopment() bool {
 	return c.Server.Mode == ModeDevelopment
+}
+
+// ValidateTransportSecurity enforces a fail-closed transport policy in
+// production: the server must either terminate TLS itself (cert+key) or sit
+// behind a trusted reverse proxy (PACKMON_TRUSTED_PROXIES). Otherwise it would
+// serve cleartext HTTP directly on the network, exposing bearer tokens.
+//
+// In development mode this always returns nil. It is intended to be called
+// from main.go at startup, not from server.New, so that httptest-based tests
+// can construct production servers without configuring TLS.
+func (c *Config) ValidateTransportSecurity() error {
+	if c.IsDevelopment() {
+		return nil
+	}
+	if c.Server.TLS.Enabled() {
+		return nil
+	}
+	if len(c.Server.TrustedProxies) > 0 {
+		return nil
+	}
+	if c.Server.AllowInsecureLocalHTTP {
+		if isLoopbackPublicHost(c.Server.PublicHost) {
+			return nil
+		}
+		return fmt.Errorf("config: PACKMON_ALLOW_INSECURE_LOCAL_HTTP requires PACKMON_SERVER_PUBLIC_HOST to be localhost, 127.0.0.1, or ::1; configure TLS or PACKMON_TRUSTED_PROXIES for non-local production use")
+	}
+	return fmt.Errorf("config: refusing to start in production without transport security: set PACKMON_TLS_CERT_FILE and PACKMON_TLS_KEY_FILE for in-app TLS, or PACKMON_TRUSTED_PROXIES when running behind a TLS-terminating reverse proxy")
 }
 
 // --- helpers ----------------------------------------------------------------
@@ -399,6 +498,43 @@ func parseFeedMode(key string) FeedMode {
 		return FeedModeExternal
 	}
 	return FeedModeSelf
+}
+
+// parseTLSMinVersion validates and normalizes the configured minimum TLS
+// version. Only "1.2" and "1.3" are accepted.
+func parseTLSMinVersion(raw string) (string, error) {
+	normalized := strings.TrimSpace(raw)
+	switch normalized {
+	case "1.2", "1.3":
+		return normalized, nil
+	default:
+		return "", fmt.Errorf("config: invalid PACKMON_TLS_MIN_VERSION %q (want 1.2 or 1.3)", raw)
+	}
+}
+
+func isLoopbackPublicHost(raw string) bool {
+	hostport := strings.TrimSpace(raw)
+	if hostport == "" {
+		return false
+	}
+	if strings.Contains(hostport, "://") {
+		u, err := url.Parse(hostport)
+		if err != nil {
+			return false
+		}
+		hostport = u.Host
+	}
+
+	host := hostport
+	if parsedHost, _, err := net.SplitHostPort(hostport); err == nil {
+		host = parsedHost
+	}
+	host = strings.Trim(strings.ToLower(strings.TrimSpace(host)), "[]")
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func parseBlockThreshold(raw string) (string, error) {

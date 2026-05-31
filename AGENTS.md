@@ -10,9 +10,9 @@ to decide whether a change is complete.
 - `SECURITY.md` is the security model and audit checklist.
 - `README.md` is the developer quick-start.
 - `Audit.md` records the latest local audit/fix pass and open validation gaps.
-- `Phase *.md` files are historical decision logs. Use them to understand why a
-  design exists, but prefer `DESIGN.md` and `SECURITY.md` as the current
-  reference.
+- `docs/superpowers/plans/` holds task-by-task implementation plans for in-flight
+  features. Use them to understand intended changes, but prefer `DESIGN.md` and
+  `SECURITY.md` as the current reference once a feature lands.
 - `CLAUDE.md` is older broad concept context. Do not treat it as more canonical
   than `AGENTS.md`, `DESIGN.md`, or `SECURITY.md` when there is drift.
 

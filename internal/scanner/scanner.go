@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -59,6 +62,17 @@ type Config struct {
 	IncludeDev bool
 	Quiet      bool
 	NoColor    bool
+	// CACertFile is an optional path to a PEM bundle (one or more certs)
+	// used to verify the server's TLS certificate. When empty, the system
+	// trust store is used.
+	CACertFile string
+	// AllowInsecureHTTP permits plain http:// server URLs in remote mode.
+	// When false (default), a non-https server URL is rejected before any
+	// request is sent so the bearer token never travels in cleartext.
+	AllowInsecureHTTP bool
+	// RequireRemote disables the silent local-DB fallback in auto mode: a
+	// remote failure becomes a hard error instead of falling back.
+	RequireRemote bool
 	// Logger receives structured DEBUG/WARN diagnostics for the scan
 	// pipeline. When nil, scan logging is discarded.
 	Logger *slog.Logger
@@ -69,18 +83,56 @@ type Scanner struct {
 	registry     *parser.Registry
 	cfg          Config
 	client       *http.Client
+	clientErr    error
 	localChecker LocalChecker
 }
 
 // New creates a Scanner with the given configuration.
+//
+// It builds an explicit HTTP transport that enforces a minimum TLS version of
+// 1.2 and honors proxy environment variables. When cfg.CACertFile is set, the
+// referenced PEM bundle is loaded into the transport's RootCAs. A bad CA file
+// (unreadable, or containing no valid certificate) is recorded and surfaced as
+// an error on the remote-check path rather than panicking at construction, so
+// existing New(reg, cfg) callers keep compiling.
 func New(reg *parser.Registry, cfg Config) *Scanner {
-	return &Scanner{
-		registry: reg,
-		cfg:      cfg,
-		client: &http.Client{
-			Timeout: cfg.Timeout,
+	pool, err := loadCAPool(cfg.CACertFile)
+
+	tr := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			RootCAs:    pool,
 		},
 	}
+
+	return &Scanner{
+		registry:  reg,
+		cfg:       cfg,
+		clientErr: err,
+		client: &http.Client{
+			Timeout:   cfg.Timeout,
+			Transport: tr,
+		},
+	}
+}
+
+// loadCAPool builds a certificate pool from the given PEM file. When path is
+// empty it returns (nil, nil), meaning "use the system trust store". When the
+// file cannot be read or contains no valid certificate it returns an error.
+func loadCAPool(path string) (*x509.CertPool, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, nil
+	}
+	pem, err := os.ReadFile(path) // #nosec G304 -- user-specified CA bundle path
+	if err != nil {
+		return nil, fmt.Errorf("read CA bundle %s: %w", path, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("CA bundle %s contains no valid certificate", path)
+	}
+	return pool, nil
 }
 
 // log returns the configured logger, or a discard logger when none is set.
@@ -184,6 +236,15 @@ func (s *Scanner) Run(ctx context.Context) (*domain.ScanResult, int) {
 	case ModeAuto:
 		findings, feedVersions, feedStatus, checkErr = s.checkRemote(ctx, allPackages)
 		if checkErr != nil {
+			s.log().Warn("remote check failed",
+				slog.Bool("require_remote", s.cfg.RequireRemote),
+				slog.String("error", checkErr.Error()),
+			)
+			// RequireRemote: do not mask a broken/insecure server channel by
+			// silently falling back to a (possibly stale) local database.
+			if s.cfg.RequireRemote {
+				return s.errorResult(scanID, start, fmt.Sprintf("remote check failed and --require-remote is set: %v", checkErr)), ExitOperational
+			}
 			// Auto mode: fall back to local database.
 			if s.localChecker == nil {
 				return s.errorResult(scanID, start, fmt.Sprintf("remote check failed and no local database available: %v", checkErr)), ExitOperational
@@ -274,7 +335,22 @@ func (s *Scanner) checkRemote(ctx context.Context, pkgs []domain.Package) ([]dom
 		return nil, nil, "", fmt.Errorf("no server URL configured (set --server or PACKMON_SERVER)")
 	}
 
-	url := strings.TrimRight(s.cfg.ServerURL, "/") + "/api/v1/check"
+	// Surface any deferred CA-bundle load error from New().
+	if s.clientErr != nil {
+		return nil, nil, "", s.clientErr
+	}
+
+	// Enforce HTTPS so the bearer token is never sent in cleartext. Plain
+	// http:// is opt-in only via AllowInsecureHTTP / --insecure-allow-http.
+	parsed, err := url.Parse(strings.TrimSpace(s.cfg.ServerURL))
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("invalid server URL %q: %w", s.cfg.ServerURL, err)
+	}
+	if !strings.EqualFold(parsed.Scheme, "https") && !s.cfg.AllowInsecureHTTP {
+		return nil, nil, "", fmt.Errorf("refusing to use insecure server URL %q: scheme must be https (set --insecure-allow-http / PACKMON_INSECURE_ALLOW_HTTP to override)", s.cfg.ServerURL)
+	}
+
+	endpoint := strings.TrimRight(s.cfg.ServerURL, "/") + "/api/v1/check"
 
 	reqBody := domain.ScanRequest{
 		Packages: pkgs,
@@ -285,7 +361,7 @@ func (s *Scanner) checkRemote(ctx context.Context, pkgs []domain.Package) ([]dom
 		return nil, nil, "", fmt.Errorf("marshal request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("create request: %w", err)
 	}
@@ -350,11 +426,11 @@ func (s *Scanner) checkLocal(ctx context.Context, pkgs []domain.Package) ([]doma
 }
 
 // hasBlockingFindings checks if any finding is blocking per DE-2 rules:
-// - Malware always blocks (regardless of fail-on threshold)
+// - Malware and supply-chain risk always block (regardless of fail-on threshold)
 // - Vulnerabilities block if severity >= fail-on threshold
 func (s *Scanner) hasBlockingFindings(findings []domain.Finding) bool {
 	for _, f := range findings {
-		if f.Type == domain.FindingTypeMalicious {
+		if isAlwaysBlockingFinding(f) {
 			return true
 		}
 		if s.cfg.FailOn != "NONE" && f.Severity.Blocks(s.cfg.FailOn) {
@@ -362,6 +438,10 @@ func (s *Scanner) hasBlockingFindings(findings []domain.Finding) bool {
 		}
 	}
 	return false
+}
+
+func isAlwaysBlockingFinding(f domain.Finding) bool {
+	return f.Type == domain.FindingTypeMalicious || f.Type == domain.FindingTypeSupplyChainRisk
 }
 
 func (s *Scanner) errorResult(scanID string, start time.Time, msg string) *domain.ScanResult {

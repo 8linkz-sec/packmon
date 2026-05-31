@@ -28,18 +28,23 @@ var backoffSchedule = [3]time.Duration{
 // Per DE-19 there is NO blocking sync on startup. The manager starts its
 // loops immediately in the background and the caller returns right away.
 type Manager struct {
-	feeds    map[string]*registeredFeed
-	store    db.Store
-	logger   *slog.Logger
-	interval time.Duration // default interval; per-feed override possible
-	wg       sync.WaitGroup
+	feeds      map[string]*registeredFeed
+	store      db.Store
+	logger     *slog.Logger
+	interval   time.Duration // default interval; per-feed override possible
+	mu         sync.Mutex
+	ctx        context.Context
+	started    bool
+	phase1Done chan struct{}
+	wg         sync.WaitGroup
 }
 
 // registeredFeed pairs a FeedConfig with optional per-feed overrides.
 type registeredFeed struct {
 	config   FeedConfig
 	interval time.Duration // 0 = use manager default
-	mu       sync.Mutex    // prevents concurrent syncs of the same feed
+	cancel   context.CancelFunc
+	mu       sync.Mutex // prevents concurrent syncs of the same feed
 }
 
 // NewManager creates a Manager. The default sync interval applies to
@@ -67,6 +72,8 @@ func (m *Manager) Register(cfg FeedConfig) {
 	if cfg.Syncer == nil {
 		return
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.feeds[cfg.Syncer.Name()] = &registeredFeed{
 		config: cfg,
 	}
@@ -78,6 +85,8 @@ func (m *Manager) RegisterWithInterval(cfg FeedConfig, interval time.Duration) {
 	if cfg.Syncer == nil {
 		return
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.feeds[cfg.Syncer.Name()] = &registeredFeed{
 		config:   cfg,
 		interval: interval,
@@ -94,39 +103,41 @@ func (m *Manager) RegisterWithInterval(cfg FeedConfig, interval time.Duration) {
 // waits for all Phase 1 feeds to complete their initial sync. This
 // ensures enrichment feeds find vulnerability data to enrich.
 func (m *Manager) Start(ctx context.Context) {
+	m.mu.Lock()
+	if m.started {
+		m.mu.Unlock()
+		return
+	}
+	m.started = true
+	m.ctx = ctx
+	m.phase1Done = make(chan struct{})
+	phase1Done := m.phase1Done
+
 	// Collect Phase 1 initial-done signals so Phase 2 can wait for them.
 	var phase1Signals []<-chan struct{}
 
 	for name, rf := range m.feeds {
-		if !rf.config.Enabled {
-			m.logger.Info("feed disabled, skipping", slog.String("feed", name))
-			continue
-		}
-		if rf.config.Mode == FeedModeExternal {
-			m.logger.Info("feed in external mode, skipping self-sync", slog.String("feed", name))
+		if !managerFeedShouldRun(rf) {
+			if !rf.config.Enabled {
+				m.logger.Info("feed disabled, skipping", slog.String("feed", name))
+			} else if rf.config.Mode == FeedModeExternal {
+				m.logger.Info("feed in external mode, skipping self-sync", slog.String("feed", name))
+			}
 			continue
 		}
 
-		interval := rf.interval
-		if interval <= 0 {
-			interval = m.interval
-		}
-
-		phase := rf.config.Phase
-		if phase == 0 {
-			phase = FeedPhaseVulnerability
-		}
+		interval := m.effectiveInterval(rf)
+		phase := feedPhase(rf.config)
 
 		if phase == FeedPhaseVulnerability {
 			done := make(chan struct{}, 1)
 			phase1Signals = append(phase1Signals, done)
-			m.wg.Add(1)
-			go m.loop(ctx, rf, interval, done)
+			m.startFeedLocked(rf, interval, done, false)
 		}
 	}
+	m.mu.Unlock()
 
 	// phase1Done is closed once ALL Phase 1 feeds finish their initial sync.
-	phase1Done := make(chan struct{})
 	go func() {
 		for _, ch := range phase1Signals {
 			<-ch
@@ -145,31 +156,105 @@ func (m *Manager) Start(ctx context.Context) {
 	}()
 
 	// Start Phase 2 (enrichment) feeds after Phase 1 completes.
+	m.mu.Lock()
 	for name, rf := range m.feeds {
-		if !rf.config.Enabled || rf.config.Mode == FeedModeExternal {
+		if !managerFeedShouldRun(rf) {
 			continue
 		}
-		if rf.config.Phase != FeedPhaseEnrichment {
+		if feedPhase(rf.config) != FeedPhaseEnrichment {
 			continue
 		}
 
-		interval := rf.interval
-		if interval <= 0 {
-			interval = m.interval
-		}
+		m.startFeedLocked(rf, m.effectiveInterval(rf), nil, true)
+		m.logger.Debug("enrichment feed queued behind phase 1", slog.String("feed", name))
+	}
+	m.mu.Unlock()
+}
 
+// ApplyConfig replaces one registered feed's runtime configuration. If the
+// manager has already started, the affected feed loop is stopped or started
+// immediately so admin feed changes take effect without a process restart.
+func (m *Manager) ApplyConfig(ctx context.Context, cfg FeedConfig, interval time.Duration) {
+	if cfg.Syncer == nil {
+		return
+	}
+	name := cfg.Syncer.Name()
+	rf := &registeredFeed{config: cfg, interval: interval}
+
+	m.mu.Lock()
+	if old, ok := m.feeds[name]; ok && old.cancel != nil {
+		old.cancel()
+	}
+	m.feeds[name] = rf
+	if m.started && managerFeedShouldRun(rf) && m.ctx != nil && m.ctx.Err() == nil {
+		m.startFeedLocked(rf, m.effectiveInterval(rf), nil, feedPhase(rf.config) == FeedPhaseEnrichment)
+	}
+	m.mu.Unlock()
+
+	switch {
+	case !cfg.Enabled:
+		m.recordStatus(ctx, name, "disabled", "", 0, nil)
+	case cfg.Mode == FeedModeExternal:
+		m.recordStatus(ctx, name, "external", "", 0, nil)
+	}
+}
+
+func (m *Manager) startFeedLocked(rf *registeredFeed, interval time.Duration, initialDone chan<- struct{}, waitForPhase1 bool) {
+	if rf.cancel != nil || m.ctx == nil || m.ctx.Err() != nil {
+		return
+	}
+
+	feedCtx, cancel := context.WithCancel(m.ctx)
+	rf.cancel = cancel
+
+	if waitForPhase1 {
+		phaseDone := m.phase1Done
+		name := rf.config.Syncer.Name()
 		m.wg.Add(1)
-		go func(rf *registeredFeed, interval time.Duration, name string) {
+		go func() {
 			select {
-			case <-phase1Done:
+			case <-phaseDone:
 				m.logger.Info("phase 1 complete, starting enrichment feed", slog.String("feed", name))
-			case <-ctx.Done():
+			case <-feedCtx.Done():
+				m.markFeedStopped(rf)
 				m.wg.Done()
 				return
 			}
-			m.loop(ctx, rf, interval, nil)
-		}(rf, interval, name)
+			m.loop(feedCtx, rf, interval, nil)
+		}()
+		return
 	}
+
+	m.wg.Add(1)
+	go m.loop(feedCtx, rf, interval, initialDone)
+}
+
+func (m *Manager) markFeedStopped(rf *registeredFeed) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	name := rf.config.Syncer.Name()
+	if current, ok := m.feeds[name]; ok && current == rf {
+		rf.cancel = nil
+	}
+}
+
+func (m *Manager) effectiveInterval(rf *registeredFeed) time.Duration {
+	if rf.interval > 0 {
+		return rf.interval
+	}
+	return m.interval
+}
+
+func managerFeedShouldRun(rf *registeredFeed) bool {
+	return rf != nil && rf.config.Enabled && rf.config.Mode != FeedModeExternal
+}
+
+func feedPhase(cfg FeedConfig) FeedPhase {
+	if cfg.Phase == 0 {
+		return FeedPhaseVulnerability
+	}
+	return cfg.Phase
 }
 
 // Wait blocks until all background sync goroutines have returned.
@@ -183,7 +268,9 @@ func (m *Manager) Wait() {
 // (e.g. admin panel, tests). It returns an error if the feed is
 // unknown or the sync itself fails after all retries.
 func (m *Manager) SyncOne(ctx context.Context, feedName string) error {
+	m.mu.Lock()
 	rf, ok := m.feeds[feedName]
+	m.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("feed %q is not registered", feedName)
 	}
@@ -195,7 +282,10 @@ func (m *Manager) SyncOne(ctx context.Context, feedName string) error {
 // is cancelled. If initialDone is non-nil, it is closed after the
 // initial sync attempt (success or skip) to signal Phase 2 feeds.
 func (m *Manager) loop(ctx context.Context, rf *registeredFeed, interval time.Duration, initialDone chan<- struct{}) {
-	defer m.wg.Done()
+	defer func() {
+		m.markFeedStopped(rf)
+		m.wg.Done()
+	}()
 
 	name := rf.config.Syncer.Name()
 	log := m.logger.With(slog.String("feed", name))
@@ -272,6 +362,11 @@ func (m *Manager) syncWithRetry(ctx context.Context, rf *registeredFeed) (*SyncR
 
 	name := rf.config.Syncer.Name()
 	log := m.logger.With(slog.String("feed", name))
+
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	m.recordRunningStatus(ctx, name)
 
 	maxAttempts := len(backoffSchedule) + 1
 	var lastErr error
@@ -354,6 +449,42 @@ func (m *Manager) recordStatus(ctx context.Context, feedName, status, errMsg str
 
 	if err := m.store.UpsertFeedSyncStatus(recordCtx, fss); err != nil {
 		m.logger.Error("failed to record feed sync status",
+			slog.String("feed", feedName),
+			slog.String("error", err.Error()),
+		)
+	}
+}
+
+func (m *Manager) recordRunningStatus(ctx context.Context, feedName string) {
+	recordCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = ctx
+
+	now := time.Now().UTC()
+	status := &db.FeedSyncStatus{
+		FeedName:       feedName,
+		LastSyncAt:     &now,
+		LastSyncStatus: "running",
+	}
+
+	current, err := m.store.GetFeedSyncStatus(recordCtx, feedName)
+	if err != nil {
+		m.logger.Warn("failed to load current feed sync status",
+			slog.String("feed", feedName),
+			slog.String("error", err.Error()),
+		)
+	} else if current != nil {
+		status.EntriesSynced = current.EntriesSynced
+		status.EntriesTotal = current.EntriesTotal
+		status.LastEtag = current.LastEtag
+		status.LastCommitHash = current.LastCommitHash
+		if current.Metadata != nil {
+			status.Metadata = append([]byte(nil), current.Metadata...)
+		}
+	}
+
+	if err := m.store.UpsertFeedSyncStatus(recordCtx, status); err != nil {
+		m.logger.Error("failed to record feed sync running status",
 			slog.String("feed", feedName),
 			slog.String("error", err.Error()),
 		)

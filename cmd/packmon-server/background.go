@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/8linkz/packmon/internal/config"
@@ -15,18 +16,26 @@ import (
 	"github.com/8linkz/packmon/internal/feed/malicious"
 	"github.com/8linkz/packmon/internal/feed/nvd"
 	"github.com/8linkz/packmon/internal/feed/osv"
+	"github.com/8linkz/packmon/internal/feed/reversinglabs"
 	"github.com/8linkz/packmon/internal/feed/socket"
 	"github.com/8linkz/packmon/internal/feed/vulncheck"
 )
 
 type backgroundServices struct {
-	logger    *slog.Logger
-	manager   *feed.Manager
-	queueDone chan error
+	logger       *slog.Logger
+	cfg          *config.Config
+	defaultFeeds config.FeedsConfig
+	store        db.Store
+	rootCtx      context.Context
+	manager      *feed.Manager
+	queueMu      sync.Mutex
+	queueCancel  context.CancelFunc
+	queueDone    chan error
+	queueDones   []chan error
 }
 
-func startBackgroundServices(ctx context.Context, cfg *config.Config, store db.Store, logger *slog.Logger) *backgroundServices {
-	services := &backgroundServices{logger: logger}
+func startBackgroundServices(ctx context.Context, cfg *config.Config, defaultFeeds config.FeedsConfig, store db.Store, logger *slog.Logger) *backgroundServices {
+	services := &backgroundServices{logger: logger, cfg: cfg, defaultFeeds: defaultFeeds, store: store, rootCtx: ctx}
 	if cfg.IsDevelopment() {
 		return services
 	}
@@ -34,14 +43,94 @@ func startBackgroundServices(ctx context.Context, cfg *config.Config, store db.S
 	services.manager = newFeedManager(cfg, store, logger)
 	services.manager.Start(ctx)
 
-	if processor := newQueueProcessor(cfg, store, logger); processor != nil {
-		services.queueDone = make(chan error, 1)
-		go func() {
-			services.queueDone <- processor.Run(ctx)
-		}()
-	}
+	services.queueMu.Lock()
+	services.startQueueProcessorLocked()
+	services.queueMu.Unlock()
 
 	return services
+}
+
+func (b *backgroundServices) ApplyFeedConfig(ctx context.Context, settings config.FeedSettings) error {
+	if b == nil || b.cfg == nil {
+		return nil
+	}
+
+	if err := b.cfg.SetFeedSettings(settings); err != nil {
+		return err
+	}
+
+	feedName := config.NormalizeFeedName(settings.Name)
+	if b.manager != nil {
+		if syncer := newFeedSyncer(feedName, b.cfg, b.store, b.logger); syncer != nil {
+			feedCfg := feed.FeedConfig{
+				Syncer:  syncer,
+				Mode:    feed.FeedMode(settings.Mode),
+				Enabled: settings.Enabled,
+				Phase:   feedPhaseForName(feedName),
+			}
+
+			interval := time.Duration(0)
+			if settings.SupportsSyncInterval {
+				interval = b.cfg.EffectiveFeedInterval(feedName)
+			}
+			b.manager.ApplyConfig(ctx, feedCfg, interval)
+		}
+	}
+
+	if feedName == "socket" || feedName == "reversinglabs" {
+		b.restartQueueProcessor()
+	}
+
+	return nil
+}
+
+func (b *backgroundServices) ResetFeedConfig(ctx context.Context, feedName string) error {
+	if b == nil || b.cfg == nil {
+		return nil
+	}
+	defaultCfg := *b.cfg
+	defaultCfg.Feeds = b.defaultFeeds
+	settings, ok := defaultCfg.FeedSettings(feedName)
+	if !ok {
+		return nil
+	}
+	return b.ApplyFeedConfig(ctx, settings)
+}
+
+func (b *backgroundServices) restartQueueProcessor() {
+	if b == nil || b.cfg == nil || b.cfg.IsDevelopment() {
+		return
+	}
+
+	b.queueMu.Lock()
+	defer b.queueMu.Unlock()
+
+	if b.queueCancel != nil {
+		b.queueCancel()
+		b.queueCancel = nil
+	}
+	b.startQueueProcessorLocked()
+}
+
+func (b *backgroundServices) startQueueProcessorLocked() {
+	if b.rootCtx == nil || b.rootCtx.Err() != nil {
+		return
+	}
+
+	processor := newQueueProcessor(b.cfg, b.store, b.logger)
+	if processor == nil {
+		b.queueDone = nil
+		return
+	}
+
+	queueCtx, cancel := context.WithCancel(b.rootCtx)
+	done := make(chan error, 1)
+	b.queueCancel = cancel
+	b.queueDone = done
+	b.queueDones = append(b.queueDones, done)
+	go func() {
+		done <- processor.Run(queueCtx)
+	}()
 }
 
 // Wait blocks until all background services have stopped or the hard
@@ -64,11 +153,18 @@ func (b *backgroundServices) Wait() {
 				b.logger.Info("shutdown: feed manager stopped", "elapsed", time.Since(start).String())
 			}
 		}
-		if b.queueDone != nil {
+		b.queueMu.Lock()
+		if b.queueCancel != nil {
+			b.queueCancel()
+		}
+		queueDones := append([]chan error(nil), b.queueDones...)
+		b.queueMu.Unlock()
+
+		for _, queueDone := range queueDones {
 			if b.logger != nil {
 				b.logger.Info("shutdown: waiting for queue processor")
 			}
-			err := <-b.queueDone
+			err := <-queueDone
 			if err != nil && !errors.Is(err, context.Canceled) && b.logger != nil {
 				b.logger.Error("queue processor stopped with error", "error", err)
 			}
@@ -95,21 +191,52 @@ func (b *backgroundServices) Wait() {
 func newFeedManager(cfg *config.Config, store db.Store, logger *slog.Logger) *feed.Manager {
 	manager := feed.NewManager(store, logger.With("component", "feed_manager"), cfg.FeedSync.Interval)
 
-	registerFeedSyncer(manager, cfg, "osv", osv.NewSyncer(store, logger))
-	registerFeedSyncer(manager, cfg, "ghsa", ghsa.NewSyncer(store, logger, cfg.Feeds.DataDir))
-	registerFeedSyncer(manager, cfg, "openssf", malicious.NewSyncer(store, logger, cfg.Feeds.DataDir))
-	registerFeedSyncer(manager, cfg, "vulncheck", vulncheck.NewSyncer(cfg.Feeds.VulnCheckAPIKey, logger))
-	registerFeedSyncer(manager, cfg, "cisakev", cisakev.NewSyncer(logger))
-	registerFeedSyncer(manager, cfg, "epss", epss.NewSyncer(logger))
-	registerFeedSyncer(manager, cfg, "nvd", newNVDSyncer(cfg, logger))
+	registerFeedSyncer(manager, cfg, "osv", newFeedSyncer("osv", cfg, store, logger))
+	registerFeedSyncer(manager, cfg, "ghsa", newFeedSyncer("ghsa", cfg, store, logger))
+	registerFeedSyncer(manager, cfg, "openssf", newFeedSyncer("openssf", cfg, store, logger))
+	registerFeedSyncer(manager, cfg, "vulncheck", newFeedSyncer("vulncheck", cfg, store, logger))
+	registerFeedSyncer(manager, cfg, "cisakev", newFeedSyncer("cisakev", cfg, store, logger))
+	registerFeedSyncer(manager, cfg, "epss", newFeedSyncer("epss", cfg, store, logger))
+	registerFeedSyncer(manager, cfg, "nvd", newFeedSyncer("nvd", cfg, store, logger))
 
 	return manager
 }
 
+func newFeedSyncer(name string, cfg *config.Config, store db.Store, logger *slog.Logger) feed.FeedSyncer {
+	switch config.NormalizeFeedName(name) {
+	case "osv":
+		return osv.NewSyncer(store, logger)
+	case "ghsa":
+		return ghsa.NewSyncer(store, logger, cfg.Feeds.DataDir)
+	case "openssf":
+		return malicious.NewSyncer(store, logger, cfg.Feeds.DataDir)
+	case "vulncheck":
+		return vulncheck.NewSyncer(cfg.Feeds.VulnCheckAPIKey, logger)
+	case "cisakev":
+		return cisakev.NewSyncer(logger)
+	case "epss":
+		return epss.NewSyncer(logger)
+	case "nvd":
+		return newNVDSyncer(cfg, logger)
+	default:
+		return nil
+	}
+}
+
 func newQueueProcessor(cfg *config.Config, store db.Store, logger *slog.Logger) *feed.QueueProcessor {
-	workers := make([]feed.AsyncWorker, 0, 1)
+	workers := make([]feed.AsyncWorker, 0, 2)
 	if cfg.Feeds.SocketEnabled && cfg.Feeds.SocketMode == config.FeedModeSelf {
 		workers = append(workers, socket.NewWorker(store, cfg.Feeds.SocketAPIKey, logger))
+	}
+	if cfg.Feeds.ReversingLabsEnabled && cfg.Feeds.ReversingLabsMode == config.FeedModeSelf {
+		workers = append(workers, reversinglabs.NewWorker(
+			store,
+			cfg.Feeds.ReversingLabsAPIKey,
+			logger,
+			reversinglabs.WithBaseURL(cfg.Feeds.ReversingLabsBaseURL),
+			reversinglabs.WithLookupTTL(cfg.Feeds.ReversingLabsLookupTTL),
+			reversinglabs.WithBatchSize(cfg.Feeds.ReversingLabsBatchSize),
+		))
 	}
 	if len(workers) == 0 {
 		return nil
@@ -134,22 +261,24 @@ var enrichmentFeeds = map[string]bool{
 	"nvd":       true,
 }
 
+func feedPhaseForName(name string) feed.FeedPhase {
+	if enrichmentFeeds[config.NormalizeFeedName(name)] {
+		return feed.FeedPhaseEnrichment
+	}
+	return feed.FeedPhaseVulnerability
+}
+
 func registerFeedSyncer(manager *feed.Manager, cfg *config.Config, name string, syncer feed.FeedSyncer) {
 	settings, ok := cfg.FeedSettings(name)
 	if !ok {
 		return
 	}
 
-	phase := feed.FeedPhaseVulnerability
-	if enrichmentFeeds[name] {
-		phase = feed.FeedPhaseEnrichment
-	}
-
 	feedCfg := feed.FeedConfig{
 		Syncer:  syncer,
 		Mode:    feed.FeedMode(settings.Mode),
 		Enabled: settings.Enabled,
-		Phase:   phase,
+		Phase:   feedPhaseForName(name),
 	}
 
 	if interval := cfg.EffectiveFeedInterval(name); interval > 0 && settings.SupportsSyncInterval {

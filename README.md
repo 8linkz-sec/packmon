@@ -1,16 +1,17 @@
 # packmon
 
-Packmon scans dependency lockfiles for known vulnerabilities and malicious packages.
+Packmon scans dependency lockfiles for known vulnerabilities, malicious packages, and configured supply-chain risk findings.
 It can run as a local CLI, as a central API server, or both together.
 
-## What Phase 5 Adds
+## Current Capabilities
 
-- production-oriented deployment assets for Helm and Rancher
+- local CLI, central API/web server, and CI/CD scanner workflows
+- production-oriented deployment assets for Helm, Rancher, Docker Compose, and N8N
 - onboarding scripts for Bash and PowerShell
 - documented backup and restore flow for PostgreSQL
 - localhost-only metrics exposure by default
 - CLI warnings for stale local advisory data
-- operational documentation, ADRs, and E2E test entry points
+- operational documentation, ADRs, and integration/E2E test entry points
 
 ## Canonical Project Docs
 
@@ -57,6 +58,8 @@ docker compose up --build
 ```
 
 The Docker stack runs PostgreSQL, applies migrations, and starts `packmon-server` in production mode so synced feed data is persisted.
+For local-only use, the compose file binds the dashboard to `127.0.0.1:8080` and `.env.example` enables `PACKMON_ALLOW_INSECURE_LOCAL_HTTP=true`; remove that override and configure TLS or a TLS-terminating reverse proxy for shared deployments.
+After the server binds its HTTP listener, the container log prints `dashboard_url`, for example `http://localhost:8080/`.
 The PostgreSQL cluster is stored in the named Docker volume `packmon-postgres-data`, so normal `docker compose stop`, `docker compose down`, and `docker compose up` cycles keep the database intact.
 Only explicit volume removal such as `docker compose down -v` or `docker volume rm packmon-postgres-data` will delete the database.
 The UI ships local Tailwind and htmx assets from the repository, so runtime and normal container builds do not depend on external CDNs.
@@ -66,7 +69,7 @@ When you change web templates or Tailwind classes, refresh the generated assets 
 
 ```bash
 packmon scan .
-packmon scan . --mode remote --server http://localhost:8080 --api-key your-key
+PACKMON_API_KEY=... packmon scan . --mode remote --server https://packmon.internal:8080 --cacert /etc/packmon/ca.pem --require-remote
 packmon config init
 packmon scan --all
 packmon scan --repo packmon
@@ -90,11 +93,13 @@ packmon config show
 Example:
 
 ```yaml
-server: "http://localhost:8080"
-api_key: "your-api-key"
+server: "https://packmon.internal:8080"
+api_key_env: "PACKMON_API_KEY"
 mode: auto
 fail_on: CRITICAL
 timeout: 30
+cacert: "/etc/packmon/ca.pem"
+require_remote: true
 
 repos:
   - name: packmon
@@ -112,7 +117,8 @@ packmon scan --all
 packmon db sync
 ```
 
-Config precedence is: command-line flags > environment variables > `.packmon.yaml` > built-in defaults.
+Config precedence is: command-line flags > environment variables > project `.packmon.yaml` > user-global `~/.packmon/config/packmon.yaml` > built-in defaults.
+Store API keys in environment variables or CI secrets. Use `api_key_env` in config files rather than writing plaintext keys to `.packmon.yaml`.
 
 ## Server Configuration
 
@@ -120,20 +126,35 @@ Important environment variables:
 
 - `PACKMON_SERVER_MODE=production|development`
 - `PACKMON_SERVER_PORT=8080`
+- `PACKMON_TLS_CERT_FILE`, `PACKMON_TLS_KEY_FILE`, `PACKMON_TLS_MIN_VERSION=1.2|1.3`
 - `PACKMON_TRUSTED_PROXIES=10.0.0.0/8,192.168.10.10`
 - `PACKMON_BLOCK_THRESHOLD=CRITICAL`
 - `PACKMON_RATE_LIMIT_PER_MINUTE=60`
 - `PACKMON_RATE_LIMIT_BURST=60`
 - `PACKMON_METRICS_HOST=127.0.0.1`
 - `PACKMON_METRICS_PORT=9090`
-- `PACKMON_API_KEY`
 - `PACKMON_DB_HOST`, `PACKMON_DB_PORT`, `PACKMON_DB_NAME`, `PACKMON_DB_USER`, `PACKMON_DB_PASSWORD`
 - `PACKMON_ADMIN_INITIAL_PASSWORD`
 - `PACKMON_SOCKET_API_KEY`
 - `PACKMON_VULNCHECK_API_KEY`
+- `PACKMON_FEED_REVERSINGLABS_ENABLED=false`
+- `PACKMON_FEED_REVERSINGLABS_MODE=self`
+- `PACKMON_REVERSINGLABS_API_KEY`
+- `PACKMON_REVERSINGLABS_LOOKUP_TTL=24h`
+- `PACKMON_REVERSINGLABS_BATCH_SIZE=5`
 
-Block threshold and rate-limit values can also be saved from `/admin/settings`; persisted values are loaded when the server starts.
+Block threshold and rate-limit values can also be saved from `/admin/settings`; saved values are applied immediately and persisted for future server starts.
+Feed enablement, mode, cadence, and feed API keys can be saved from `/admin/feeds`; saved values are applied immediately and persisted for future server starts.
 Manual advisories can be managed from `/admin/advisories` as either vulnerability or malicious findings.
+API keys can be created, revoked, deleted after revocation, and optionally given an expiration timestamp from `/admin/keys`. Create separate named keys per client class so `last_used_at` and revocation are useful.
+ReversingLabs lookups are disabled by default. When enabled, the server performs demand-driven lookups only for supported packages that are not already covered by other feeds, stores normalized cache rows internally, and refreshes each package version at most once per day.
+
+## Client Profiles
+
+- Dev laptops: use the HTTPS server URL, `PACKMON_CA_CERT` or `--cacert` for the internal CA, and `PACKMON_API_KEY` from the user environment or OS secret store.
+- CI runners: create a dedicated named key, store it as a CI secret, set `PACKMON_REQUIRE_REMOTE=true`, and prefer an expiration date aligned with your rotation window.
+- Segmented production networks: distribute the internal CA bundle to scanners, allow only the Packmon TLS port through the firewall, and make sure the server certificate SAN covers the address clients use.
+- N8N: create a dedicated key for the workflow and call `/api/v1/check` or feed import endpoints over HTTPS with `Authorization: Bearer <key>`.
 
 For CLI local freshness warnings:
 
@@ -151,8 +172,11 @@ make test-e2e
 `go test ./tests/ci` validates the reusable GitLab template under `ci/gitlab`,
 including release binary download defaults, checksum verification, and GitLab
 report artifacts. `make test-ci` is available as a wrapper on systems with
-`make`. `test-integration` and `test-e2e` build the binaries first and then run
-the integration suite under `tests/integration`.
+`make`. A real GitLab Runner smoke test remains externally dependent on an
+available GitLab project and registered runner.
+
+`test-integration` and `test-e2e` build the binaries first and then run the
+integration suite under `tests/integration` and the E2E suite under `tests/e2e`.
 
 On Windows systems without `make`, use the direct commands:
 

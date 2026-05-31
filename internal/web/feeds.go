@@ -88,6 +88,9 @@ func feedHealthStatus(s db.FeedSyncStatus) string {
 	if s.LastSyncStatus == "error" {
 		return "error"
 	}
+	if s.LastSyncStatus == "disabled" {
+		return "disabled"
+	}
 	if s.LastSyncStatus == "running" {
 		return "pending"
 	}
@@ -98,6 +101,9 @@ func feedHealthStatus(s db.FeedSyncStatus) string {
 		return "error"
 	}
 	if time.Since(*s.LastSyncAt) > 48*time.Hour {
+		return "warning"
+	}
+	if s.EntriesTotal == 0 && s.EntriesSynced == 0 {
 		return "warning"
 	}
 	return "healthy"

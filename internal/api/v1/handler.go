@@ -11,11 +11,13 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/8linkz/packmon/internal/config"
 	"github.com/8linkz/packmon/internal/db"
 	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz/packmon/internal/feed/reversinglabs"
 	"github.com/8linkz/packmon/internal/server/middleware"
 	"github.com/8linkz/packmon/internal/telemetry"
 )
@@ -34,9 +36,10 @@ var defaultBlockThreshold = domain.SeverityCritical
 
 // Handler holds the dependencies for all API v1 HTTP handlers.
 type Handler struct {
-	store          db.Store
-	logger         *slog.Logger
-	blockThreshold domain.Severity
+	store                db.Store
+	logger               *slog.Logger
+	blockThreshold       domain.Severity
+	reversingLabsEnabled atomic.Bool
 	// runtime, when set, supplies the block threshold dynamically so admin
 	// changes take effect without a restart. It overrides blockThreshold.
 	runtime *config.RuntimeSettings
@@ -44,6 +47,10 @@ type Handler struct {
 
 type syncExporter interface {
 	ExportSync(ctx context.Context, opts db.SyncExportOptions) (*db.SyncExport, error)
+}
+
+type reputationPackageFinder interface {
+	FindReputationFindings(ctx context.Context, ecosystem, name, source string) ([]domain.Finding, error)
 }
 
 type feedSyncStatusInput struct {
@@ -117,10 +124,23 @@ type syncMaliciousResponse struct {
 	Withdrawn bool   `json:"withdrawn"`
 }
 
+type syncReputationResponse struct {
+	ID        string `json:"id"`
+	Ecosystem string `json:"ecosystem"`
+	Name      string `json:"name"`
+	Version   string `json:"version"`
+	Type      string `json:"type"`
+	RiskType  string `json:"risk_type"`
+	Severity  string `json:"severity"`
+	Summary   string `json:"summary"`
+	Withdrawn bool   `json:"withdrawn"`
+}
+
 type syncResponsePayload struct {
 	SyncedAt        string                      `json:"synced_at"`
 	Vulnerabilities []syncVulnerabilityResponse `json:"vulnerabilities"`
 	Malicious       []syncMaliciousResponse     `json:"malicious"`
+	Reputation      []syncReputationResponse    `json:"reputation"`
 	Truncated       bool                        `json:"truncated"`
 	HasMore         bool                        `json:"has_more"`
 }
@@ -137,7 +157,11 @@ func NewHandlerWithConfig(store db.Store, logger *slog.Logger, cfg *config.Confi
 	if cfg != nil {
 		threshold = parseBlockThreshold(cfg.Server.BlockThreshold)
 	}
-	return NewHandlerWithBlockThreshold(store, logger, threshold)
+	h := NewHandlerWithBlockThreshold(store, logger, threshold)
+	if cfg != nil {
+		h.ConfigureReversingLabs(cfg.Feeds)
+	}
+	return h
 }
 
 // NewHandlerWithRuntime creates a Handler whose block threshold is read from
@@ -178,6 +202,16 @@ func NewHandlerWithBlockThreshold(store db.Store, logger *slog.Logger, threshold
 		logger:         logger,
 		blockThreshold: threshold,
 	}
+}
+
+// ConfigureReversingLabs enables optional demand-driven ReversingLabs cache
+// lookups for API checks. The handler only schedules work; the async worker
+// performs external calls and refreshes the cache.
+func (h *Handler) ConfigureReversingLabs(feeds config.FeedsConfig) {
+	if h == nil {
+		return
+	}
+	h.reversingLabsEnabled.Store(feeds.ReversingLabsEnabled && feeds.ReversingLabsMode == config.FeedModeSelf)
 }
 
 func parseBlockThreshold(raw string) domain.Severity {
@@ -298,11 +332,117 @@ func (h *Handler) collectFindings(ctx context.Context, packages []domain.Package
 		return nil, fmt.Errorf("FindMaliciousBatch: %w", err)
 	}
 
-	all := make([]domain.Finding, 0, len(vulns)+len(mal))
+	var reputation []domain.Finding
+	if h.reversingLabsEnabled.Load() {
+		reputation, err = h.store.FindReputationFindingsBatch(ctx, queries, db.ReputationSourceReversingLabs)
+		if err != nil {
+			return nil, fmt.Errorf("FindReputationFindingsBatch: %w", err)
+		}
+	}
+
+	all := make([]domain.Finding, 0, len(vulns)+len(mal)+len(reputation))
 	all = append(all, vulns...)
 	all = append(all, mal...)
+	all = append(all, reputation...)
+
+	if h.reversingLabsEnabled.Load() {
+		h.scheduleReversingLabsLookups(ctx, packages, all)
+	}
 
 	return all, nil
+}
+
+func (h *Handler) scheduleReversingLabsLookups(ctx context.Context, packages []domain.Package, findings []domain.Finding) {
+	covered := nonReversingLabsCoverage(findings)
+	for _, pkg := range packages {
+		key := packageCoverageKey(string(pkg.Ecosystem), pkg.Name, pkg.Version)
+		if covered[key] || covered[packageCoverageKey(string(pkg.Ecosystem), pkg.Name, "")] {
+			continue
+		}
+
+		rep := db.PackageReputation{
+			Ecosystem: string(pkg.Ecosystem),
+			Name:      pkg.Name,
+			Version:   pkg.Version,
+			Source:    db.ReputationSourceReversingLabs,
+			Status:    "pending",
+			Severity:  "CRITICAL",
+		}
+
+		if !reversinglabs.SupportsPackage(rep.Ecosystem, rep.Name, rep.Version) {
+			rep.Status = "unsupported"
+			rep.NextCheckAt = nil
+			if err := h.store.UpsertPackageReputation(ctx, &rep); err != nil {
+				h.logger.Warn("failed to mark package reputation unsupported",
+					"ecosystem", rep.Ecosystem,
+					"name", rep.Name,
+					"source", rep.Source,
+					"error", err,
+				)
+			}
+			continue
+		}
+
+		queued, err := h.store.MarkPackageReputationDue(ctx, &rep)
+		if err != nil {
+			h.logger.Warn("failed to mark package reputation due",
+				"ecosystem", rep.Ecosystem,
+				"name", rep.Name,
+				"source", rep.Source,
+				"error", err,
+			)
+			continue
+		}
+		if !queued {
+			continue
+		}
+
+		job := &db.RefreshJob{
+			Ecosystem: rep.Ecosystem,
+			Name:      rep.Name,
+			Source:    db.ReputationSourceReversingLabs,
+			Priority:  1,
+			Status:    "pending",
+		}
+		if _, _, err := h.store.EnqueueRefresh(ctx, job); err != nil {
+			h.logger.Warn("failed to enqueue package reputation refresh",
+				"ecosystem", rep.Ecosystem,
+				"name", rep.Name,
+				"source", rep.Source,
+				"error", err,
+			)
+		}
+	}
+}
+
+type coverageKey struct {
+	ecosystem string
+	name      string
+	version   string
+}
+
+func nonReversingLabsCoverage(findings []domain.Finding) map[coverageKey]bool {
+	covered := make(map[coverageKey]bool)
+	for _, finding := range findings {
+		if finding.Source == db.ReputationSourceReversingLabs {
+			continue
+		}
+		covered[packageCoverageKey(string(finding.Ecosystem), finding.Name, finding.Version)] = true
+	}
+	return covered
+}
+
+func packageCoverageKey(ecosystem, name, version string) coverageKey {
+	ecosystem = strings.ToLower(strings.TrimSpace(ecosystem))
+	name = strings.TrimSpace(name)
+	if ecosystem == "nuget" {
+		name = strings.ToLower(name)
+	}
+	return coverageKey{
+		ecosystem: ecosystem,
+		name:      name,
+		version:   strings.TrimSpace(version),
+	}
 }
 
 // buildSummary aggregates findings by severity, type, and source.
@@ -325,11 +465,11 @@ func buildSummary(findings []domain.Finding) domain.ScanSummary {
 }
 
 // isBlocking returns true when at least one finding should block the pipeline.
-// Malicious findings always block. Vulnerability findings block when their
-// severity is at or above the given threshold.
+// Malicious and supply-chain risk findings always block. Vulnerability findings
+// block when their severity is at or above the given threshold.
 func isBlocking(findings []domain.Finding, threshold domain.Severity) bool {
 	for _, f := range findings {
-		if f.Type == domain.FindingTypeMalicious {
+		if f.Type == domain.FindingTypeMalicious || f.Type == domain.FindingTypeSupplyChainRisk {
 			return true
 		}
 		if threshold == domain.SeverityNone {
@@ -368,12 +508,34 @@ func overallFeedStatus(statuses []db.FeedSyncStatus) string {
 		return "degraded"
 	}
 
+	active := false
 	for _, status := range statuses {
-		if feedHealthStatus(status) != "healthy" {
+		health := feedHealthStatus(status)
+		if health == "disabled" {
+			continue
+		}
+		active = true
+		if health == "pending" && feedHasFreshEntries(status) {
+			continue
+		}
+		if health != "healthy" {
 			return "degraded"
 		}
 	}
+	if !active {
+		return "degraded"
+	}
 	return "healthy"
+}
+
+func feedHasFreshEntries(s db.FeedSyncStatus) bool {
+	if s.LastSyncAt == nil {
+		return false
+	}
+	if time.Since(*s.LastSyncAt) > 48*time.Hour {
+		return false
+	}
+	return s.EntriesTotal != 0 || s.EntriesSynced != 0
 }
 
 // logScan persists a scan log entry. Failures are logged but do not affect the response.
@@ -456,6 +618,9 @@ func (h *Handler) HandleFeedStatus(w http.ResponseWriter, r *http.Request) {
 func feedHealthStatus(s db.FeedSyncStatus) string {
 	if s.LastSyncStatus == "error" {
 		return "error"
+	}
+	if s.LastSyncStatus == "disabled" {
+		return "disabled"
 	}
 	if s.LastSyncStatus == "running" {
 		return "pending"
@@ -607,9 +772,22 @@ func (h *Handler) HandlePackageDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	findings := make([]domain.Finding, 0, len(vulns)+len(mal))
+	var reputation []domain.Finding
+	if h.reversingLabsEnabled.Load() {
+		if finder, ok := h.store.(reputationPackageFinder); ok {
+			reputation, err = finder.FindReputationFindings(ctx, ecosystem, name, db.ReputationSourceReversingLabs)
+			if err != nil {
+				h.logger.Error("failed to find reputation findings", "ecosystem", ecosystem, "name", name, "error", err)
+				errorResponse(w, http.StatusInternalServerError, "failed to query reputation findings")
+				return
+			}
+		}
+	}
+
+	findings := make([]domain.Finding, 0, len(vulns)+len(mal)+len(reputation))
 	findings = append(findings, vulns...)
 	findings = append(findings, mal...)
+	findings = append(findings, reputation...)
 
 	if len(findings) == 0 {
 		errorResponse(w, http.StatusNotFound, fmt.Sprintf("no findings for %s/%s", ecosystem, name))
@@ -751,6 +929,16 @@ func (h *Handler) HandleSync(w http.ResponseWriter, r *http.Request) {
 		sincePtr = &since
 	}
 
+	snapshot := time.Now().UTC()
+	if raw := strings.TrimSpace(r.URL.Query().Get("snapshot")); raw != "" {
+		parsed, err := parseRFC3339Timestamp(raw)
+		if err != nil {
+			errorResponse(w, http.StatusBadRequest, "invalid snapshot parameter")
+			return
+		}
+		snapshot = parsed.UTC()
+	}
+
 	limit := syncDefaultLimit
 	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
 		parsed, err := strconv.Atoi(raw)
@@ -776,7 +964,7 @@ func (h *Handler) HandleSync(w http.ResponseWriter, r *http.Request) {
 
 	exported, err := exporter.ExportSync(r.Context(), db.SyncExportOptions{
 		Since:      sincePtr,
-		SnapshotAt: time.Now().UTC(),
+		SnapshotAt: snapshot,
 		Ecosystems: splitCSV(r.URL.Query().Get("ecosystem")),
 		Limit:      limit,
 		Offset:     offset,
@@ -791,6 +979,7 @@ func (h *Handler) HandleSync(w http.ResponseWriter, r *http.Request) {
 		SyncedAt:        exported.SyncedAt.UTC().Format(time.RFC3339Nano),
 		Vulnerabilities: make([]syncVulnerabilityResponse, 0, len(exported.Vulnerabilities)),
 		Malicious:       make([]syncMaliciousResponse, 0, len(exported.Malicious)),
+		Reputation:      make([]syncReputationResponse, 0, len(exported.Reputation)),
 		Truncated:       exported.Truncated,
 	}
 
@@ -815,6 +1004,20 @@ func (h *Handler) HandleSync(w http.ResponseWriter, r *http.Request) {
 			Ecosystem: finding.Ecosystem,
 			Name:      finding.Name,
 			Versions:  finding.Versions,
+			RiskType:  finding.RiskType,
+			Severity:  finding.Severity,
+			Summary:   finding.Summary,
+			Withdrawn: finding.Withdrawn,
+		})
+	}
+
+	for _, finding := range exported.Reputation {
+		resp.Reputation = append(resp.Reputation, syncReputationResponse{
+			ID:        finding.ID,
+			Ecosystem: finding.Ecosystem,
+			Name:      finding.Name,
+			Version:   finding.Version,
+			Type:      finding.Type,
 			RiskType:  finding.RiskType,
 			Severity:  finding.Severity,
 			Summary:   finding.Summary,

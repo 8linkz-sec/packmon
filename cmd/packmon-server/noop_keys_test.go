@@ -10,7 +10,7 @@ func TestNoopStoreDeleteAPIKeyRequiresRevocation(t *testing.T) {
 
 	store := newNoopStore()
 
-	keyID, err := store.CreateAPIKey(context.Background(), "n8n", "hash")
+	keyID, err := store.CreateAPIKey(context.Background(), "n8n", "hash", nil)
 	if err != nil {
 		t.Fatalf("CreateAPIKey() error = %v", err)
 	}

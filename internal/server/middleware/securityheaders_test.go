@@ -204,3 +204,29 @@ func TestSecurityHeaders_SkipsRedirectForUnconfiguredExternalHost(t *testing.T) 
 		t.Errorf("Location = %q, want empty", location)
 	}
 }
+
+func TestRedirectTargetHostAndLoopbackBranches(t *testing.T) {
+	t.Parallel()
+
+	if got := redirectTargetHost(" packmon.example.com ", "ignored.example"); got != "packmon.example.com" {
+		t.Fatalf("configured redirect host = %q", got)
+	}
+	if got := redirectTargetHost("bad/host", "127.0.0.1:8080"); got != "127.0.0.1:8080" {
+		t.Fatalf("loopback request host = %q", got)
+	}
+	if got := redirectTargetHost("", "[::1]:8080"); got != "[::1]:8080" {
+		t.Fatalf("IPv6 loopback request host = %q", got)
+	}
+	if got := redirectTargetHost("", "localhost"); got != "localhost" {
+		t.Fatalf("localhost request host = %q", got)
+	}
+	if got := redirectTargetHost("", "example.com"); got != "" {
+		t.Fatalf("external request host = %q, want empty", got)
+	}
+	if got := sanitizeHost("bad@host"); got != "" {
+		t.Fatalf("sanitizeHost(bad@host) = %q, want empty", got)
+	}
+	if isLoopbackHost("203.0.113.10") {
+		t.Fatal("203.0.113.10 should not be loopback")
+	}
+}

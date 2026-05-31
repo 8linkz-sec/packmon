@@ -436,7 +436,7 @@ func (s *Store) UpsertVulnerability(ctx context.Context, vuln *db.Vulnerability)
 			vuln.ID,
 			vuln.Summary,
 			nullableString(vuln.Details),
-			normalizeSeverity(vuln.Severity),
+			normalizeVulnerabilitySeverity(vuln.Severity),
 			vuln.CVSSScore,
 			vuln.EPSSScore,
 			vuln.EPSSPercentile,
@@ -917,7 +917,8 @@ func (s *Store) FindUnknownSeverityCVEAliases(ctx context.Context) ([]db.Unknown
 		SELECT va.vulnerability_id, va.alias_id
 		FROM vulnerability_aliases va
 		INNER JOIN vulnerabilities v ON v.id = va.vulnerability_id
-		WHERE v.severity = 'UNKNOWN' AND va.alias_id LIKE 'CVE-%'`
+		WHERE (v.severity = 'UNKNOWN' OR (v.severity = 'LOW' AND v.cvss_score IS NULL))
+		  AND va.alias_id LIKE 'CVE-%'`
 
 	rows, err := s.pool.Query(ctx, query)
 	if err != nil {
@@ -944,7 +945,8 @@ func (s *Store) UpdateSeverityByCVE(ctx context.Context, cveID, severity string,
 		UPDATE vulnerabilities v
 		SET severity = $2, cvss_score = $3, updated_at = NOW()
 		FROM vulnerability_aliases va
-		WHERE va.alias_id = $1 AND va.vulnerability_id = v.id AND v.severity = 'UNKNOWN'`
+		WHERE va.alias_id = $1 AND va.vulnerability_id = v.id
+		  AND (v.severity = 'UNKNOWN' OR (v.severity = 'LOW' AND v.cvss_score IS NULL))`
 
 	_, err := s.pool.Exec(ctx, query, cveID, severity, cvssScore)
 	if err != nil {

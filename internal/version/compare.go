@@ -340,8 +340,8 @@ func compareEcosystem(a, b, ecosystem string) int {
 //   - Python-style inline pre-release suffixes (1.0a1, 1.0b2) are NOT
 //     recognized in semver mode; use PEP 440 mode for those.
 func compareSemver(a, b string) int {
-	a = stripBuildMeta(a)
-	b = stripBuildMeta(b)
+	a = normalizeSemverInput(a)
+	b = normalizeSemverInput(b)
 
 	releaseA, preA := splitPrerelease(a)
 	releaseB, preB := splitPrerelease(b)
@@ -351,6 +351,14 @@ func compareSemver(a, b string) int {
 	}
 
 	return comparePrereleaseStrings(preA, preB)
+}
+
+func normalizeSemverInput(v string) string {
+	v = strings.TrimSpace(v)
+	if len(v) > 1 && (v[0] == 'v' || v[0] == 'V') && isDigit(rune(v[1])) {
+		v = v[1:]
+	}
+	return stripBuildMeta(v)
 }
 
 func stripBuildMeta(v string) string {

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -38,15 +39,25 @@ type loginAttempt struct {
 // FeedSyncFunc triggers an immediate feed synchronisation.
 type FeedSyncFunc func(ctx context.Context, feedName string) error
 
+// FeedConfigApplyFunc applies a saved feed configuration to the running
+// process so changes take effect without a server restart.
+type FeedConfigApplyFunc func(ctx context.Context, feed config.FeedSettings) error
+
+// FeedConfigResetFunc applies the runtime default for a feed after its saved
+// database override has been removed.
+type FeedConfigResetFunc func(ctx context.Context, feedName string) error
+
 // AdminHandler holds the dependencies for admin HTTP handlers.
 type AdminHandler struct {
-	store    db.Store
-	sm       *auth.SessionManager
-	renderer *web.Renderer
-	logger   *slog.Logger
-	cfg      *config.Config
-	runtime  *config.RuntimeSettings
-	syncFeed FeedSyncFunc
+	store           db.Store
+	sm              *auth.SessionManager
+	renderer        *web.Renderer
+	logger          *slog.Logger
+	cfg             *config.Config
+	runtime         *config.RuntimeSettings
+	syncFeed        FeedSyncFunc
+	applyFeedConfig FeedConfigApplyFunc
+	resetFeedConfig FeedConfigResetFunc
 
 	// loginMu protects the loginAttempts map.
 	loginMu       sync.Mutex
@@ -73,6 +84,24 @@ func NewAdminHandler(ctx context.Context, store db.Store, sm *auth.SessionManage
 	// Background goroutine to evict stale lockout entries.
 	go h.cleanupAttempts(ctx)
 	return h
+}
+
+// SetFeedConfigApplyFunc installs the callback used after admin feed saves.
+// It is kept as a setter so tests and server wiring can opt in without making
+// older handler construction sites carry nil placeholders.
+func (h *AdminHandler) SetFeedConfigApplyFunc(fn FeedConfigApplyFunc) {
+	if h == nil {
+		return
+	}
+	h.applyFeedConfig = fn
+}
+
+// SetFeedConfigResetFunc installs the callback used after admin feed resets.
+func (h *AdminHandler) SetFeedConfigResetFunc(fn FeedConfigResetFunc) {
+	if h == nil {
+		return
+	}
+	h.resetFeedConfig = fn
 }
 
 // HandleLogin processes both GET (show login form) and POST (validate
@@ -287,7 +316,7 @@ func (h *AdminHandler) HandleDashboard(w http.ResponseWriter, r *http.Request) {
 	for _, f := range feeds {
 		row := adminFeedRow{
 			FeedName:     f.FeedName,
-			Status:       adminFeedHealth(true, "", &f),
+			Status:       adminFeedHealth(config.FeedSettings{Enabled: true, SupportsSyncInterval: true}, &f),
 			EntriesTotal: f.EntriesTotal,
 		}
 		if f.LastSyncAt != nil {
@@ -338,13 +367,20 @@ type adminFeedRow struct {
 	SyncIntervalStr string
 }
 
-// adminFeedHealth derives a health string from sync status for admin views.
-func adminFeedHealth(enabled bool, mode config.FeedMode, s *db.FeedSyncStatus) string {
-	if !enabled {
+// adminFeedHealth derives a health string from runtime config and sync status
+// for admin views.
+func adminFeedHealth(feed config.FeedSettings, s *db.FeedSyncStatus) string {
+	if !feed.Enabled {
 		return "disabled"
 	}
 	if s == nil || s.LastSyncAt == nil {
-		if mode == config.FeedModeExternal {
+		if feed.Mode == config.FeedModeExternal {
+			return "configured"
+		}
+		if feed.RequiresAPIKey && strings.TrimSpace(feed.APIKey) == "" {
+			return "warning"
+		}
+		if !feed.SupportsSyncInterval {
 			return "configured"
 		}
 		return "pending"
@@ -353,7 +389,7 @@ func adminFeedHealth(enabled bool, mode config.FeedMode, s *db.FeedSyncStatus) s
 		return "error"
 	}
 	if s.LastSyncStatus == "running" {
-		return "pending"
+		return "running"
 	}
 	if s.LastSyncStatus == "skipped" {
 		return "warning"

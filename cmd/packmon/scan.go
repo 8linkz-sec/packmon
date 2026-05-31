@@ -36,6 +36,9 @@ func newScanCmd() *cobra.Command {
 		flagRepo          string
 		flagListPackages  bool
 		flagOutdated      bool
+		flagCACert        string
+		flagInsecureHTTP  bool
+		flagRequireRemote bool
 	)
 
 	cmd := &cobra.Command{
@@ -70,6 +73,9 @@ and malicious package databases.`,
 				Repo:          flagRepo,
 				Quiet:         flagQuiet,
 				NoColor:       flagNoColor,
+				CACert:        flagCACert,
+				InsecureHTTP:  flagInsecureHTTP,
+				RequireRemote: flagRequireRemote,
 			})
 		},
 	}
@@ -92,6 +98,9 @@ and malicious package databases.`,
 	f.StringVar(&flagRepo, "repo", "", "scan a configured repository by name")
 	f.BoolVar(&flagListPackages, "list-packages", false, "list all detected packages and exit (no vulnerability check)")
 	f.BoolVar(&flagOutdated, "outdated", false, "show packages with newer versions available")
+	f.StringVar(&flagCACert, "cacert", "", "path to a PEM CA bundle used to verify the server's TLS certificate")
+	f.BoolVar(&flagInsecureHTTP, "insecure-allow-http", false, "allow plain http:// server URLs (sends bearer token in cleartext; opt-in)")
+	f.BoolVar(&flagRequireRemote, "require-remote", false, "in auto mode, fail hard on remote error instead of falling back to the local database")
 
 	return cmd
 }
@@ -114,6 +123,9 @@ type scanFlagValues struct {
 	Repo          string
 	Quiet         bool
 	NoColor       bool
+	CACert        string
+	InsecureHTTP  bool
+	RequireRemote bool
 }
 
 type scanTarget struct {
@@ -140,6 +152,9 @@ type scanSettings struct {
 	WebhookSecret string
 	Quiet         bool
 	NoColor       bool
+	CACertFile    string
+	InsecureHTTP  bool
+	RequireRemote bool
 }
 
 func runScanCommand(cmd *cobra.Command, args []string, flags scanFlagValues) error {
@@ -267,6 +282,8 @@ func buildScanTargets(cfg *cliConfig, args []string, flags scanFlagValues) ([]sc
 }
 
 func resolveScanSettings(cmd *cobra.Command, cfg *cliConfig, target scanTarget, flags scanFlagValues) (scanSettings, error) {
+	envAPIKey := strings.TrimSpace(os.Getenv("PACKMON_API_KEY"))
+	skipConfigAPIKeyEnv := envAPIKey != "" || cmd.Flags().Changed("api-key")
 	settings := scanSettings{
 		TargetName: target.Name,
 		Path:       target.Path,
@@ -284,6 +301,13 @@ func resolveScanSettings(cmd *cobra.Command, cfg *cliConfig, target scanTarget, 
 		}
 		if cfg.APIKey != "" {
 			settings.APIKey = cfg.APIKey
+		}
+		if cfg.APIKeyEnv != "" && !skipConfigAPIKeyEnv {
+			apiKey, err := resolveAPIKeyEnv(cfg.APIKeyEnv)
+			if err != nil {
+				return scanSettings{}, err
+			}
+			settings.APIKey = apiKey
 		}
 		if cfg.Mode != "" {
 			settings.Mode = cfg.Mode
@@ -304,6 +328,11 @@ func resolveScanSettings(cmd *cobra.Command, cfg *cliConfig, target scanTarget, 
 		if cfg.Webhook.Secret != "" {
 			settings.WebhookSecret = cfg.Webhook.Secret
 		}
+		if cfg.CACert != "" {
+			settings.CACertFile = cfg.CACert
+		}
+		settings.InsecureHTTP = boolValue(cfg.InsecureAllowHTTP, settings.InsecureHTTP)
+		settings.RequireRemote = boolValue(cfg.RequireRemote, settings.RequireRemote)
 	}
 
 	if target.Repo != nil {
@@ -312,6 +341,13 @@ func resolveScanSettings(cmd *cobra.Command, cfg *cliConfig, target scanTarget, 
 		}
 		if target.Repo.APIKey != "" {
 			settings.APIKey = target.Repo.APIKey
+		}
+		if target.Repo.APIKeyEnv != "" && !skipConfigAPIKeyEnv {
+			apiKey, err := resolveAPIKeyEnv(target.Repo.APIKeyEnv)
+			if err != nil {
+				return scanSettings{}, err
+			}
+			settings.APIKey = apiKey
 		}
 		if target.Repo.Mode != "" {
 			settings.Mode = target.Repo.Mode
@@ -337,7 +373,7 @@ func resolveScanSettings(cmd *cobra.Command, cfg *cliConfig, target scanTarget, 
 	if envServer := strings.TrimSpace(os.Getenv("PACKMON_SERVER")); envServer != "" {
 		settings.ServerURL = envServer
 	}
-	if envAPIKey := strings.TrimSpace(os.Getenv("PACKMON_API_KEY")); envAPIKey != "" {
+	if envAPIKey != "" {
 		settings.APIKey = envAPIKey
 	}
 	if envMode := normalizeModeString(os.Getenv("PACKMON_MODE")); envMode != "" {
@@ -359,6 +395,15 @@ func resolveScanSettings(cmd *cobra.Command, cfg *cliConfig, target scanTarget, 
 	}
 	if envWebhookSecret := strings.TrimSpace(os.Getenv("PACKMON_WEBHOOK_SECRET")); envWebhookSecret != "" {
 		settings.WebhookSecret = envWebhookSecret
+	}
+	if envCACert := strings.TrimSpace(os.Getenv("PACKMON_CA_CERT")); envCACert != "" {
+		settings.CACertFile = envCACert
+	}
+	if envInsecure := strings.TrimSpace(os.Getenv("PACKMON_INSECURE_ALLOW_HTTP")); envInsecure != "" {
+		settings.InsecureHTTP = envBool("PACKMON_INSECURE_ALLOW_HTTP")
+	}
+	if envRequireRemote := strings.TrimSpace(os.Getenv("PACKMON_REQUIRE_REMOTE")); envRequireRemote != "" {
+		settings.RequireRemote = envBool("PACKMON_REQUIRE_REMOTE")
 	}
 
 	if cmd.Flags().Changed("mode") {
@@ -388,6 +433,15 @@ func resolveScanSettings(cmd *cobra.Command, cfg *cliConfig, target scanTarget, 
 	if cmd.Flags().Changed("webhook-secret") {
 		settings.WebhookSecret = strings.TrimSpace(flags.WebhookSecret)
 	}
+	if cmd.Flags().Changed("cacert") {
+		settings.CACertFile = strings.TrimSpace(flags.CACert)
+	}
+	if cmd.Flags().Changed("insecure-allow-http") {
+		settings.InsecureHTTP = flags.InsecureHTTP
+	}
+	if cmd.Flags().Changed("require-remote") {
+		settings.RequireRemote = flags.RequireRemote
+	}
 
 	settings.OutputJSON = strings.TrimSpace(flags.OutputJSON)
 	settings.OutputSARIF = strings.TrimSpace(flags.OutputSARIF)
@@ -404,6 +458,18 @@ func resolveScanSettings(cmd *cobra.Command, cfg *cliConfig, target scanTarget, 
 	}
 
 	return settings, nil
+}
+
+func resolveAPIKeyEnv(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", nil
+	}
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return "", fmt.Errorf("api_key_env %q is not set", name)
+	}
+	return value, nil
 }
 
 // scanLogger builds the structured logger for the scan pipeline. It writes
@@ -469,7 +535,12 @@ func runSingleScan(ctx context.Context, settings scanSettings) (int, error) {
 		IncludeDev: settings.IncludeDev,
 		Quiet:      settings.Quiet,
 		NoColor:    settings.NoColor,
-		Logger:     scanLogger(settings.Quiet),
+
+		CACertFile:        settings.CACertFile,
+		AllowInsecureHTTP: settings.InsecureHTTP,
+		RequireRemote:     settings.RequireRemote,
+
+		Logger: scanLogger(settings.Quiet),
 	}
 
 	reg := parser.NewRegistry()
@@ -515,7 +586,7 @@ func runSingleScan(ctx context.Context, settings scanSettings) (int, error) {
 	}
 
 	if !settings.Quiet {
-		tw := scanner.NewTableWriter(settings.NoColor)
+		tw := scanner.NewTableWriter(settings.NoColor, failOn)
 		if err := tw.Write(os.Stdout, result); err != nil {
 			fmt.Fprintf(os.Stderr, "error writing table output: %v\n", err)
 		}

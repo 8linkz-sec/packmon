@@ -36,6 +36,10 @@ type Store interface {
 	// packages in a single batch query.
 	FindMaliciousBatch(ctx context.Context, packages []PackageQuery) ([]domain.Finding, error)
 
+	// FindReputationFindingsBatch returns cached package reputation findings
+	// for exact package versions from one reputation source.
+	FindReputationFindingsBatch(ctx context.Context, packages []PackageQuery, source string) ([]domain.Finding, error)
+
 	// -- Vulnerability writes (feed sync) ---------------------------------------
 
 	// UpsertVulnerability inserts or updates a vulnerability and its aliases,
@@ -44,6 +48,16 @@ type Store interface {
 
 	// UpsertMaliciousFinding inserts or updates a malicious finding.
 	UpsertMaliciousFinding(ctx context.Context, mf *MaliciousFinding) error
+
+	// MarkPackageReputationDue ensures a package version has a due reputation
+	// cache row. It returns true when a worker should be queued.
+	MarkPackageReputationDue(ctx context.Context, rep *PackageReputation) (queued bool, err error)
+
+	// ListDuePackageReputations returns due reputation rows for one package.
+	ListDuePackageReputations(ctx context.Context, ecosystem, name, source string, limit int) ([]PackageReputation, error)
+
+	// UpsertPackageReputation inserts or updates a package reputation cache row.
+	UpsertPackageReputation(ctx context.Context, rep *PackageReputation) error
 
 	// PropagateSeverityViaAliases updates UNKNOWN-severity vulnerabilities
 	// by copying the severity from a linked vulnerability (via shared alias)
@@ -94,13 +108,14 @@ type Store interface {
 	EnrichVulnCheck(ctx context.Context, entries []VulnCheckEntry) (updated int, err error)
 
 	// FindUnknownSeverityCVEAliases returns CVE aliases linked to
-	// vulnerabilities with UNKNOWN severity. Used by the NVD syncer to
-	// fetch CVSS scores for entries that lack severity information.
+	// vulnerabilities whose severity still needs CVSS enrichment. Used by the
+	// NVD syncer to fetch CVSS scores for entries that lack severity
+	// information from their primary source.
 	FindUnknownSeverityCVEAliases(ctx context.Context) ([]UnknownCVEAlias, error)
 
 	// UpdateSeverityByCVE updates the severity and CVSS score for a
-	// vulnerability identified by its CVE alias. Only updates rows that
-	// still have UNKNOWN severity to avoid overwriting richer data.
+	// vulnerability identified by its CVE alias. Only unresolved rows are
+	// updated to avoid overwriting richer data.
 	UpdateSeverityByCVE(ctx context.Context, cveID, severity string, cvssScore float64) error
 
 	// -- Feed sync status -------------------------------------------------------
@@ -198,7 +213,7 @@ type Store interface {
 	// -- API keys ---------------------------------------------------------------
 
 	// FindAPIKeyByHash looks up an API key by its hash. Returns nil if not
-	// found or if the key has been revoked.
+	// found or if the key has been revoked or expired.
 	FindAPIKeyByHash(ctx context.Context, keyHash string) (*APIKey, error)
 
 	// TouchAPIKeyLastUsed updates the last_used_at timestamp for a key.
@@ -208,7 +223,7 @@ type Store interface {
 	ListAPIKeys(ctx context.Context) ([]APIKey, error)
 
 	// CreateAPIKey inserts a new API key and returns the assigned ID.
-	CreateAPIKey(ctx context.Context, name, keyHash string) (int, error)
+	CreateAPIKey(ctx context.Context, name, keyHash string, expiresAt *time.Time) (int, error)
 
 	// RevokeAPIKey marks an API key as revoked.
 	RevokeAPIKey(ctx context.Context, keyID int) error
@@ -287,6 +302,12 @@ type PackageQuery struct {
 	Version   string
 }
 
+const (
+	// ReputationSourceReversingLabs identifies cached ReversingLabs package
+	// reputation rows.
+	ReputationSourceReversingLabs = "reversinglabs"
+)
+
 // Vulnerability represents a full vulnerability record including related
 // aliases, sources, references, and affected packages.
 type Vulnerability struct {
@@ -353,6 +374,24 @@ type MaliciousFinding struct {
 	OriginRef     string          `json:"origin_ref"`
 	Published     *time.Time      `json:"published,omitempty"`
 	CreatedBy     string          `json:"created_by"`
+}
+
+// PackageReputation is a normalized cache row from a package reputation source.
+type PackageReputation struct {
+	Ecosystem     string
+	Name          string
+	Version       string
+	Source        string
+	Status        string
+	Severity      string
+	Summary       string
+	Description   string
+	ReferenceURLs json.RawMessage
+	Evidence      json.RawMessage
+	LastCheckedAt *time.Time
+	NextCheckAt   *time.Time
+	LastError     string
+	UpdatedAt     time.Time
 }
 
 // ManualAdvisory is the admin-facing model for operator-managed advisories.
@@ -458,6 +497,12 @@ type APIKey struct {
 	CreatedAt  time.Time
 	RevokedAt  *time.Time
 	LastUsedAt *time.Time
+	ExpiresAt  *time.Time
+}
+
+// IsExpired reports whether the API key has an expiry timestamp at or before now.
+func (k APIKey) IsExpired(now time.Time) bool {
+	return k.ExpiresAt != nil && !k.ExpiresAt.After(now)
 }
 
 // AdminAuth is the single-row admin credentials.

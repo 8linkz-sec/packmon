@@ -39,6 +39,20 @@ CREATE TABLE IF NOT EXISTS malicious_local (
 CREATE INDEX IF NOT EXISTS idx_mal_eco_name
 	ON malicious_local(ecosystem, name);
 
+CREATE TABLE IF NOT EXISTS reputation_findings_local (
+	id        TEXT PRIMARY KEY,
+	ecosystem TEXT NOT NULL,
+	name      TEXT NOT NULL,
+	version   TEXT NOT NULL,
+	type      TEXT NOT NULL,
+	risk_type TEXT NOT NULL,
+	severity  TEXT NOT NULL DEFAULT 'CRITICAL',
+	summary   TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_rep_eco_name
+	ON reputation_findings_local(ecosystem, name);
+
 CREATE TABLE IF NOT EXISTS sync_meta (
 	key   TEXT PRIMARY KEY,
 	value TEXT

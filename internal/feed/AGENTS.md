@@ -3,7 +3,8 @@
 Scope: `internal/feed/` -- `manager.go` (orchestration/scheduler), `queue.go`
 (priority queue), `gitutil.go`, ecosystem/cvss helpers, and the per-source
 syncers `osv/`, `ghsa/`, `malicious/`, `vulncheck/`, `nvd/`, `cisakev/`,
-`epss/`, `socket/`. Primary owner agent: **data-feeds-engineer**.
+`epss/`, `socket/`, `reversinglabs/`. Primary owner agent:
+**data-feeds-engineer**.
 
 Read `AGENTS.md` (root) and `DESIGN.md` (feed source table, priority queue,
 health rules) first.
@@ -15,6 +16,13 @@ health rules) first.
   TTL); re-check priority is driven by oldest `updated_at`.
 - Socket.dev is async, rate-limited (500/h), behind the priority queue
   (0 manual, 1 unknown, 2 has-findings, 3 oldest). It is disabled by default.
+- ReversingLabs (`reversinglabs/`) is async, demand-driven, self-mode only, and
+  disabled by default. It is NOT a bulk syncer: `/api/v1/check` schedules a
+  version lookup (at most once per TTL, default 24h) only for packages no other
+  feed covers, and the worker writes `package_reputation_cache`. The scheduler
+  and worker MUST share one PURL predicate; unmappable/unsupported packages get
+  a terminal `unsupported` cache row (no HTTP call, excluded from due queries).
+  `external` mode is rejected at config load; batch size is capped at 5.
 - Git-based syncers (GHSA, OpenSSF) clone untrusted content. Read files only
   through `os.OpenRoot`/`Root.ReadFile` confinement to prevent path traversal;
   pass fixed argv to `git` (never shell). The `#nosec G204` on the fixed-argv

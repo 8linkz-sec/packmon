@@ -132,6 +132,14 @@ func normalizeSeverity(severity string) string {
 	return normalized
 }
 
+func normalizeVulnerabilitySeverity(severity string) string {
+	normalized := normalizeSeverity(severity)
+	if normalized == "UNKNOWN" {
+		return "LOW"
+	}
+	return normalized
+}
+
 func clampLimit(limit, fallback, max int) int {
 	if limit <= 0 {
 		limit = fallback
@@ -204,6 +212,7 @@ func scanAPIKey(row pgx.Row) (*db.APIKey, error) {
 		item       db.APIKey
 		revokedAt  *time.Time
 		lastUsedAt *time.Time
+		expiresAt  *time.Time
 	)
 
 	if err := row.Scan(
@@ -213,11 +222,13 @@ func scanAPIKey(row pgx.Row) (*db.APIKey, error) {
 		&item.CreatedAt,
 		&revokedAt,
 		&lastUsedAt,
+		&expiresAt,
 	); err != nil {
 		return nil, err
 	}
 
 	item.RevokedAt = revokedAt
 	item.LastUsedAt = lastUsedAt
+	item.ExpiresAt = expiresAt
 	return &item, nil
 }

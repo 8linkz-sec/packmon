@@ -115,6 +115,16 @@ func (c *Config) FeedSettings(name string) (FeedSettings, bool) {
 			RequiresAPIKey:       true,
 			SupportsSyncInterval: false,
 		}, true
+	case "reversinglabs":
+		return FeedSettings{
+			Name:                 "reversinglabs",
+			DisplayName:          "ReversingLabs",
+			Enabled:              c.Feeds.ReversingLabsEnabled,
+			Mode:                 c.Feeds.ReversingLabsMode,
+			APIKey:               c.Feeds.ReversingLabsAPIKey,
+			RequiresAPIKey:       true,
+			SupportsSyncInterval: false,
+		}, true
 	default:
 		return FeedSettings{}, false
 	}
@@ -126,7 +136,7 @@ func (c *Config) FeedSettingsList() []FeedSettings {
 		return nil
 	}
 
-	names := []string{"osv", "ghsa", "openssf", "vulncheck", "cisakev", "epss", "nvd", "socket"}
+	names := []string{"osv", "ghsa", "openssf", "vulncheck", "cisakev", "epss", "nvd", "socket", "reversinglabs"}
 	out := make([]FeedSettings, 0, len(names))
 	for _, name := range names {
 		feed, ok := c.FeedSettings(name)
@@ -192,6 +202,13 @@ func (c *Config) SetFeedSettings(feed FeedSettings) error {
 		c.Feeds.SocketEnabled = feed.Enabled
 		c.Feeds.SocketMode = mode
 		c.Feeds.SocketAPIKey = strings.TrimSpace(feed.APIKey)
+	case "reversinglabs":
+		if mode == FeedModeExternal {
+			return fmt.Errorf("reversinglabs does not support external mode")
+		}
+		c.Feeds.ReversingLabsEnabled = feed.Enabled
+		c.Feeds.ReversingLabsMode = FeedModeSelf
+		c.Feeds.ReversingLabsAPIKey = strings.TrimSpace(feed.APIKey)
 	default:
 		return fmt.Errorf("unknown feed %q", feed.Name)
 	}

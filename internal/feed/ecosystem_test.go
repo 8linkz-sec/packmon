@@ -1,57 +1,53 @@
 package feed
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/8linkz/packmon/internal/domain"
 )
 
-func TestMapGHSAEcosystem_GitHubActions(t *testing.T) {
+func TestEcosystemMappingHelpers(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name  string
-		input string
+	for _, tt := range []struct {
+		name string
+		fn   func(string) (domain.Ecosystem, bool)
+		in   string
+		want domain.Ecosystem
 	}{
-		{name: "legacy actions token", input: "actions"},
-		{name: "new GitHub Actions label", input: "GitHub Actions"},
-		{name: "mixed case GitHub Actions label", input: "github actions"},
-	}
-
-	for _, tt := range tests {
+		{name: "osv pypi", fn: MapOSVEcosystem, in: "PyPI", want: domain.EcosystemPyPI},
+		{name: "osv alias cargo", fn: MapOSVEcosystem, in: "cargo", want: domain.EcosystemCargo},
+		{name: "ghsa actions", fn: MapGHSAEcosystem, in: "GitHub Actions", want: domain.EcosystemGitHubActions},
+		{name: "ghsa pip", fn: MapGHSAEcosystem, in: "pip", want: domain.EcosystemPyPI},
+		{name: "openssf crates", fn: MapOpenSSFEcosystem, in: "crates.io", want: domain.EcosystemCargo},
+	} {
 		t.Run(tt.name, func(t *testing.T) {
-			got, ok := MapGHSAEcosystem(tt.input)
-			if !ok {
-				t.Fatalf("MapGHSAEcosystem(%q) reported unsupported ecosystem", tt.input)
-			}
-			if got != domain.EcosystemGitHubActions {
-				t.Fatalf("MapGHSAEcosystem(%q) = %q, want %q", tt.input, got, domain.EcosystemGitHubActions)
+			got, ok := tt.fn(tt.in)
+			if !ok || got != tt.want {
+				t.Fatalf("mapping(%q) = %q, %v; want %q true", tt.in, got, ok, tt.want)
 			}
 		})
+	}
+
+	if got, ok := MapOSVEcosystem("unknown"); ok || got != "" {
+		t.Fatalf("MapOSVEcosystem(unknown) = %q, %v; want empty false", got, ok)
+	}
+	if got, ok := MapGHSAEcosystem("unknown"); ok || got != "" {
+		t.Fatalf("MapGHSAEcosystem(unknown) = %q, %v; want empty false", got, ok)
+	}
+	if got, ok := MapOpenSSFEcosystem("go"); ok || got != "" {
+		t.Fatalf("MapOpenSSFEcosystem(go) = %q, %v; want empty false", got, ok)
 	}
 }
 
-func TestMapGHSAEcosystem_AliasValues(t *testing.T) {
+func TestOSVBucketEcosystemsIncludesSupportedBuckets(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		input string
-		want  domain.Ecosystem
-	}{
-		{input: "PyPI", want: domain.EcosystemPyPI},
-		{input: "packagist", want: domain.EcosystemComposer},
-		{input: "swifturl", want: domain.EcosystemSwiftPM},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			got, ok := MapGHSAEcosystem(tt.input)
-			if !ok {
-				t.Fatalf("MapGHSAEcosystem(%q) reported unsupported ecosystem", tt.input)
-			}
-			if got != tt.want {
-				t.Fatalf("MapGHSAEcosystem(%q) = %q, want %q", tt.input, got, tt.want)
-			}
-		})
+	buckets := OSVBucketEcosystems()
+	for _, want := range []string{"npm", "PyPI", "Go", "Maven", "crates.io", "CRAN"} {
+		if !slices.Contains(buckets, want) {
+			t.Fatalf("OSVBucketEcosystems() = %#v, missing %q", buckets, want)
+		}
 	}
 }

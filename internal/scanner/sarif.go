@@ -183,9 +183,9 @@ func (sw *SARIFWriter) buildResult(f domain.Finding) sarifResult {
 
 // sarifLevel maps packmon severity to SARIF level.
 // SARIF levels: "error", "warning", "note", "none".
-// Malicious findings are always "error".
+// Malicious and supply-chain risk findings are always "error".
 func (sw *SARIFWriter) sarifLevel(f domain.Finding) string {
-	if f.Type == domain.FindingTypeMalicious {
+	if isAlwaysBlockingFinding(f) {
 		return "error"
 	}
 	switch f.Severity {

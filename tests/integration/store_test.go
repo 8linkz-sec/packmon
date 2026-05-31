@@ -4,6 +4,7 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -187,5 +188,318 @@ func TestPostgresSystemSettingsRoundTrip(t *testing.T) {
 	}
 	if got.BlockThreshold != "HIGH" || got.RateLimitPerMinute != 120 || got.RateLimitBurst != 30 {
 		t.Fatalf("round-trip mismatch: got %+v", got)
+	}
+}
+
+func TestPostgresAPIKeyExpirationRevocationAndDeletion(t *testing.T) {
+	store := startPostgresStore(t)
+	ctx := context.Background()
+
+	future := time.Now().UTC().Add(24 * time.Hour)
+	keyID, err := store.CreateAPIKey(ctx, "ci-runner", "hash-active", &future)
+	if err != nil {
+		t.Fatalf("CreateAPIKey(active): %v", err)
+	}
+
+	key, err := store.FindAPIKeyByHash(ctx, "hash-active")
+	if err != nil {
+		t.Fatalf("FindAPIKeyByHash(active): %v", err)
+	}
+	if key == nil || key.ID != keyID || key.ExpiresAt == nil {
+		t.Fatalf("active key = %+v, want id %d with expiration", key, keyID)
+	}
+	if err := store.TouchAPIKeyLastUsed(ctx, keyID); err != nil {
+		t.Fatalf("TouchAPIKeyLastUsed: %v", err)
+	}
+	keys, err := store.ListAPIKeys(ctx)
+	if err != nil {
+		t.Fatalf("ListAPIKeys: %v", err)
+	}
+	if len(keys) != 1 || keys[0].LastUsedAt == nil {
+		t.Fatalf("keys after touch = %+v, want LastUsedAt", keys)
+	}
+
+	past := time.Now().UTC().Add(-1 * time.Hour)
+	if _, err := store.CreateAPIKey(ctx, "expired", "hash-expired", &past); err != nil {
+		t.Fatalf("CreateAPIKey(expired): %v", err)
+	}
+	expired, err := store.FindAPIKeyByHash(ctx, "hash-expired")
+	if err != nil {
+		t.Fatalf("FindAPIKeyByHash(expired): %v", err)
+	}
+	if expired != nil {
+		t.Fatalf("expired key = %+v, want nil", expired)
+	}
+
+	if err := store.RevokeAPIKey(ctx, keyID); err != nil {
+		t.Fatalf("RevokeAPIKey: %v", err)
+	}
+	revoked, err := store.FindAPIKeyByHash(ctx, "hash-active")
+	if err != nil {
+		t.Fatalf("FindAPIKeyByHash(revoked): %v", err)
+	}
+	if revoked != nil {
+		t.Fatalf("revoked key = %+v, want nil", revoked)
+	}
+	if err := store.DeleteAPIKey(ctx, keyID); err != nil {
+		t.Fatalf("DeleteAPIKey(revoked): %v", err)
+	}
+	keys, err = store.ListAPIKeys(ctx)
+	if err != nil {
+		t.Fatalf("ListAPIKeys(after delete): %v", err)
+	}
+	for _, key := range keys {
+		if key.ID == keyID {
+			t.Fatalf("deleted key still listed: %+v", keys)
+		}
+	}
+}
+
+func TestPostgresStoreSearchSyncReputationAndAdminStats(t *testing.T) {
+	store := startPostgresStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	vuln := &db.Vulnerability{
+		ID:        "GHSA-store-0001",
+		Summary:   "store integration vulnerability",
+		Severity:  "HIGH",
+		Published: now.Add(-2 * time.Hour),
+		Modified:  now.Add(-1 * time.Hour),
+		Aliases: []db.VulnerabilityAlias{
+			{AliasID: "CVE-2026-0001"},
+		},
+		Sources: []db.VulnerabilitySource{
+			{Source: "osv", SourceID: "GHSA-store-0001", URL: "https://osv.dev/vulnerability/GHSA-store-0001"},
+		},
+		References: []db.VulnerabilityReference{
+			{Type: "ADVISORY", URL: "https://github.com/advisories/GHSA-store-0001", Source: "ghsa"},
+		},
+		AffectedPackages: []db.AffectedPackage{
+			{
+				Ecosystem:        "npm",
+				Name:             "left-pad",
+				VersionRanges:    json.RawMessage(`[{"type":"SEMVER","events":[{"introduced":"0"},{"fixed":"2.0.0"}]}]`),
+				VersionsAffected: json.RawMessage(`[]`),
+			},
+		},
+	}
+	if err := store.UpsertVulnerability(ctx, vuln); err != nil {
+		t.Fatalf("UpsertVulnerability: %v", err)
+	}
+	if _, err := store.SetCISAKEV(ctx, []string{"CVE-2026-0001"}); err != nil {
+		t.Fatalf("SetCISAKEV: %v", err)
+	}
+	cvss := 9.8
+	if _, err := store.EnrichVulnCheck(ctx, []db.VulnCheckEntry{
+		{CVEID: "CVE-2026-0001", CVSSScore: &cvss, ExploitExists: true, SourceURL: "https://vulncheck.test/CVE-2026-0001"},
+	}); err != nil {
+		t.Fatalf("EnrichVulnCheck: %v", err)
+	}
+	if _, err := store.SetEPSSScores(ctx, []db.EPSSEntry{{CVEID: "CVE-2026-0001", Score: 0.91, Percentile: 0.99}}); err != nil {
+		t.Fatalf("SetEPSSScores: %v", err)
+	}
+
+	vulnFindings, err := store.FindVulnerabilities(ctx, "npm", "left-pad", "1.5.0")
+	if err != nil {
+		t.Fatalf("FindVulnerabilities: %v", err)
+	}
+	if len(vulnFindings) != 1 || vulnFindings[0].AdvisoryID != "GHSA-store-0001" {
+		t.Fatalf("vulnerability findings = %+v", vulnFindings)
+	}
+	vulnBatch, err := store.FindVulnerabilitiesBatch(ctx, []db.PackageQuery{{Ecosystem: "npm", Name: "left-pad", Version: "1.5.0"}})
+	if err != nil {
+		t.Fatalf("FindVulnerabilitiesBatch: %v", err)
+	}
+	if len(vulnBatch) != 1 {
+		t.Fatalf("batch vulnerability findings = %d, want 1", len(vulnBatch))
+	}
+
+	malPublished := now.Add(-30 * time.Minute)
+	if err := store.UpsertMaliciousFinding(ctx, &db.MaliciousFinding{
+		ID:            "MAL-store-0001",
+		Ecosystem:     "npm",
+		Name:          "evil-pkg",
+		Versions:      json.RawMessage(`["9.9.9"]`),
+		Source:        "openssf",
+		RiskType:      "malware",
+		Severity:      "CRITICAL",
+		Summary:       "malicious package",
+		ReferenceURLs: json.RawMessage(`["https://example.test/mal"]`),
+		Published:     &malPublished,
+		CreatedBy:     "feed-sync",
+	}); err != nil {
+		t.Fatalf("UpsertMaliciousFinding: %v", err)
+	}
+	malicious, err := store.FindMalicious(ctx, "npm", "evil-pkg", "9.9.9")
+	if err != nil {
+		t.Fatalf("FindMalicious: %v", err)
+	}
+	if len(malicious) != 1 || malicious[0].AdvisoryID != "MAL-store-0001" {
+		t.Fatalf("malicious findings = %+v", malicious)
+	}
+	maliciousBatch, err := store.FindMaliciousBatch(ctx, []db.PackageQuery{{Ecosystem: "npm", Name: "evil-pkg", Version: "9.9.9"}})
+	if err != nil {
+		t.Fatalf("FindMaliciousBatch: %v", err)
+	}
+	if len(maliciousBatch) != 1 {
+		t.Fatalf("batch malicious findings = %d, want 1", len(maliciousBatch))
+	}
+
+	nextCheck := now.Add(-time.Minute)
+	lastChecked := now.Add(-2 * time.Hour)
+	if err := store.UpsertPackageReputation(ctx, &db.PackageReputation{
+		Ecosystem:     "npm",
+		Name:          "removed-pkg",
+		Version:       "1.0.0",
+		Source:        db.ReputationSourceReversingLabs,
+		Status:        "removed",
+		Severity:      "LOW",
+		Summary:       "package version was removed",
+		ReferenceURLs: json.RawMessage(`["https://rl.example/removed"]`),
+		Evidence:      json.RawMessage(`{"removed":true}`),
+		LastCheckedAt: &lastChecked,
+		NextCheckAt:   &nextCheck,
+	}); err != nil {
+		t.Fatalf("UpsertPackageReputation: %v", err)
+	}
+	repFindings, err := store.FindReputationFindings(ctx, "npm", "removed-pkg", db.ReputationSourceReversingLabs)
+	if err != nil {
+		t.Fatalf("FindReputationFindings: %v", err)
+	}
+	if len(repFindings) != 1 || repFindings[0].Type != "supply_chain_risk" {
+		t.Fatalf("reputation findings = %+v", repFindings)
+	}
+	repBatch, err := store.FindReputationFindingsBatch(ctx, []db.PackageQuery{{Ecosystem: "npm", Name: "removed-pkg", Version: "1.0.0"}}, db.ReputationSourceReversingLabs)
+	if err != nil {
+		t.Fatalf("FindReputationFindingsBatch: %v", err)
+	}
+	if len(repBatch) != 1 {
+		t.Fatalf("batch reputation findings = %d, want 1", len(repBatch))
+	}
+	queued, err := store.MarkPackageReputationDue(ctx, &db.PackageReputation{
+		Ecosystem: "npm", Name: "due-pkg", Version: "1.0.0", Source: db.ReputationSourceReversingLabs,
+	})
+	if err != nil {
+		t.Fatalf("MarkPackageReputationDue: %v", err)
+	}
+	if !queued {
+		t.Fatal("MarkPackageReputationDue queued = false, want true for new package")
+	}
+	due, err := store.ListDuePackageReputations(ctx, "npm", "due-pkg", db.ReputationSourceReversingLabs, 10)
+	if err != nil {
+		t.Fatalf("ListDuePackageReputations: %v", err)
+	}
+	if len(due) != 1 || due[0].Status != "pending" {
+		t.Fatalf("due reputations = %+v", due)
+	}
+
+	if err := store.InsertScanLog(ctx, &db.ScanLogEntry{
+		ScanID:        "scan-store-1",
+		RepoName:      "packmon",
+		Branch:        "main",
+		Commit:        "abc123",
+		ScannedAt:     now,
+		PackagesCount: 3,
+		FindingsCount: 3,
+		DurationMs:    12,
+		ClientIP:      "127.0.0.1",
+		UserAgent:     "packmon/test",
+	}); err != nil {
+		t.Fatalf("InsertScanLog: %v", err)
+	}
+	recentScans, err := store.ListRecentScans(ctx, 5)
+	if err != nil {
+		t.Fatalf("ListRecentScans: %v", err)
+	}
+	if len(recentScans) != 1 || recentScans[0].ScanID != "scan-store-1" {
+		t.Fatalf("recent scans = %+v", recentScans)
+	}
+	totals, err := store.ScanTotals(ctx)
+	if err != nil {
+		t.Fatalf("ScanTotals: %v", err)
+	}
+	if totals.PackagesScanned != 3 || totals.Findings != 3 {
+		t.Fatalf("scan totals = %+v", totals)
+	}
+	byDay, err := store.CountScansByDay(ctx, 7)
+	if err != nil {
+		t.Fatalf("CountScansByDay: %v", err)
+	}
+	if len(byDay) == 0 {
+		t.Fatal("CountScansByDay returned no rows")
+	}
+
+	search, err := store.SearchPackages(ctx, db.PackageSearchParams{Query: "left", Limit: 10})
+	if err != nil {
+		t.Fatalf("SearchPackages: %v", err)
+	}
+	if len(search) == 0 || search[0].Name != "left-pad" {
+		t.Fatalf("search results = %+v", search)
+	}
+	recentVulns, err := store.ListRecentVulnerabilities(ctx, 30, 10)
+	if err != nil {
+		t.Fatalf("ListRecentVulnerabilities: %v", err)
+	}
+	if len(recentVulns) == 0 || recentVulns[0].ID != "GHSA-store-0001" {
+		t.Fatalf("recent vulnerabilities = %+v", recentVulns)
+	}
+
+	exported, err := store.ExportSync(ctx, db.SyncExportOptions{SnapshotAt: time.Now().UTC().Add(time.Minute)})
+	if err != nil {
+		t.Fatalf("ExportSync: %v", err)
+	}
+	if len(exported.Vulnerabilities) == 0 || len(exported.Malicious) == 0 || len(exported.Reputation) == 0 {
+		t.Fatalf("sync export missing rows: vulns=%d malicious=%d reputation=%d", len(exported.Vulnerabilities), len(exported.Malicious), len(exported.Reputation))
+	}
+}
+
+func TestPostgresUnknownSeverityAliasUpdate(t *testing.T) {
+	store := startPostgresStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	if err := store.UpsertVulnerability(ctx, &db.Vulnerability{
+		ID:        "OSV-UNKNOWN-1",
+		Summary:   "unknown severity",
+		Severity:  "UNKNOWN",
+		Published: now,
+		Modified:  now,
+		Aliases:   []db.VulnerabilityAlias{{AliasID: "CVE-2026-0999"}},
+		Sources:   []db.VulnerabilitySource{{Source: "osv", SourceID: "OSV-UNKNOWN-1"}},
+		AffectedPackages: []db.AffectedPackage{{
+			Ecosystem:        "npm",
+			Name:             "unknown-severity-pkg",
+			VersionRanges:    json.RawMessage(`[]`),
+			VersionsAffected: json.RawMessage(`[]`),
+		}},
+	}); err != nil {
+		t.Fatalf("UpsertVulnerability: %v", err)
+	}
+
+	unknown, err := store.FindUnknownSeverityCVEAliases(ctx)
+	if err != nil {
+		t.Fatalf("FindUnknownSeverityCVEAliases: %v", err)
+	}
+	found := false
+	for _, item := range unknown {
+		if item.CVEID == "CVE-2026-0999" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("unknown CVE aliases = %+v, want CVE-2026-0999", unknown)
+	}
+
+	if err := store.UpdateSeverityByCVE(ctx, "CVE-2026-0999", "CRITICAL", 9.9); err != nil {
+		t.Fatalf("UpdateSeverityByCVE: %v", err)
+	}
+	findings, err := store.FindVulnerabilities(ctx, "npm", "unknown-severity-pkg", "1.0.0")
+	if err != nil {
+		t.Fatalf("FindVulnerabilities: %v", err)
+	}
+	if len(findings) != 1 || findings[0].Severity != "CRITICAL" {
+		t.Fatalf("findings after severity update = %+v", findings)
 	}
 }

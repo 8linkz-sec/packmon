@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -14,6 +15,8 @@ import (
 // syncMetaKeyLastSync is the sync_meta key storing the ISO 8601 timestamp
 // of the last successful sync.
 const syncMetaKeyLastSync = "last_sync_at"
+
+const syncPageLimit = 1000
 
 // SyncConfig holds parameters for a client-to-server sync operation.
 type SyncConfig struct {
@@ -52,13 +55,28 @@ type syncMalicious struct {
 	Withdrawn bool   `json:"withdrawn"`
 }
 
+// syncReputation is the wire format for a cached reputation finding or
+// tombstone delivered by the server's GET /api/v1/sync endpoint.
+type syncReputation struct {
+	ID        string `json:"id"`
+	Ecosystem string `json:"ecosystem"`
+	Name      string `json:"name"`
+	Version   string `json:"version"`
+	Type      string `json:"type"`
+	RiskType  string `json:"risk_type"`
+	Severity  string `json:"severity"`
+	Summary   string `json:"summary"`
+	Withdrawn bool   `json:"withdrawn"`
+}
+
 // syncResponse is the JSON envelope returned by the server sync endpoint.
 type syncResponse struct {
 	SyncedAt        string              `json:"synced_at"`
 	Vulnerabilities []syncVulnerability `json:"vulnerabilities"`
 	Malicious       []syncMalicious     `json:"malicious"`
-	// Truncated is true when more data is available and the client
-	// should call again with the updated since parameter.
+	Reputation      []syncReputation    `json:"reputation"`
+	// Truncated is true when more data is available and the client should call
+	// again with the same since/snapshot parameters and the next offset.
 	Truncated bool `json:"truncated"`
 }
 
@@ -94,39 +112,45 @@ func Sync(ctx context.Context, store *Store, cfg SyncConfig) error {
 		}
 	}
 
+	offset := 0
+	snapshot := ""
+
 	// Loop to handle paginated responses.
 	for {
-		resp, err := fetchSyncPage(ctx, client, cfg, since)
+		resp, err := fetchSyncPage(ctx, client, cfg, since, offset, snapshot)
 		if err != nil {
 			return err
 		}
 
-		if err := applySync(ctx, store, cfg.Full, resp); err != nil {
-			return err
+		if resp.SyncedAt != "" && snapshot == "" {
+			snapshot = resp.SyncedAt
 		}
 
-		// Store the new sync timestamp.
-		if resp.SyncedAt != "" {
-			if err := store.SetSyncMeta(ctx, syncMetaKeyLastSync, resp.SyncedAt); err != nil {
-				return fmt.Errorf("sync: store sync timestamp: %w", err)
-			}
-			since = resp.SyncedAt
+		if err := applySync(ctx, store, cfg.Full && offset == 0, resp); err != nil {
+			return err
 		}
 
 		if !resp.Truncated {
 			break
 		}
 
-		// After the first page of a full sync, switch to delta mode
-		// so subsequent pages use the since parameter.
-		cfg.Full = false
+		if snapshot == "" {
+			return fmt.Errorf("sync: truncated response missing synced_at")
+		}
+		offset += syncPageLimit
+	}
+
+	if snapshot != "" {
+		if err := store.SetSyncMeta(ctx, syncMetaKeyLastSync, snapshot); err != nil {
+			return fmt.Errorf("sync: store sync timestamp: %w", err)
+		}
 	}
 
 	return nil
 }
 
 // fetchSyncPage makes a single HTTP request to the server sync endpoint.
-func fetchSyncPage(ctx context.Context, client *http.Client, cfg SyncConfig, since string) (*syncResponse, error) {
+func fetchSyncPage(ctx context.Context, client *http.Client, cfg SyncConfig, since string, offset int, snapshot string) (*syncResponse, error) {
 	u, err := url.Parse(strings.TrimRight(cfg.ServerURL, "/") + "/api/v1/sync")
 	if err != nil {
 		return nil, fmt.Errorf("sync: parse server URL: %w", err)
@@ -135,6 +159,13 @@ func fetchSyncPage(ctx context.Context, client *http.Client, cfg SyncConfig, sin
 	q := u.Query()
 	if since != "" {
 		q.Set("since", since)
+	}
+	if snapshot != "" {
+		q.Set("snapshot", snapshot)
+	}
+	q.Set("limit", strconv.Itoa(syncPageLimit))
+	if offset > 0 {
+		q.Set("offset", strconv.Itoa(offset))
 	}
 	if len(cfg.Ecosystems) > 0 {
 		q.Set("ecosystem", strings.Join(cfg.Ecosystems, ","))
@@ -190,6 +221,9 @@ func applySync(ctx context.Context, store *Store, full bool, resp *syncResponse)
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM malicious_local`); err != nil {
 			return fmt.Errorf("sync: clear malicious: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM reputation_findings_local`); err != nil {
+			return fmt.Errorf("sync: clear reputation findings: %w", err)
 		}
 	}
 
@@ -287,6 +321,44 @@ func applySync(ctx context.Context, store *Store, full bool, resp *syncResponse)
 			m.RiskType, m.Severity, m.Summary,
 		); err != nil {
 			return fmt.Errorf("sync: upsert malicious %s: %w", m.ID, err)
+		}
+	}
+
+	repStmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO reputation_findings_local(id, ecosystem, name, version, type, risk_type, severity, summary)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			ecosystem = excluded.ecosystem,
+			name      = excluded.name,
+			version   = excluded.version,
+			type      = excluded.type,
+			risk_type = excluded.risk_type,
+			severity  = excluded.severity,
+			summary   = excluded.summary`)
+	if err != nil {
+		return fmt.Errorf("sync: prepare reputation upsert: %w", err)
+	}
+	defer closeSilently(repStmt)
+
+	repDelStmt, err := tx.PrepareContext(ctx, `DELETE FROM reputation_findings_local WHERE id = ?`)
+	if err != nil {
+		return fmt.Errorf("sync: prepare reputation delete: %w", err)
+	}
+	defer closeSilently(repDelStmt)
+
+	for _, rep := range resp.Reputation {
+		if rep.Withdrawn {
+			if _, err := repDelStmt.ExecContext(ctx, rep.ID); err != nil {
+				return fmt.Errorf("sync: delete withdrawn reputation %s: %w", rep.ID, err)
+			}
+			continue
+		}
+
+		if _, err := repStmt.ExecContext(ctx,
+			rep.ID, rep.Ecosystem, rep.Name, rep.Version,
+			rep.Type, rep.RiskType, rep.Severity, rep.Summary,
+		); err != nil {
+			return fmt.Errorf("sync: upsert reputation %s: %w", rep.ID, err)
 		}
 	}
 

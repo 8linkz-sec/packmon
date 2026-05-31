@@ -220,6 +220,83 @@ func (s *Store) FindMalicious(ctx context.Context, ecosystem, name, version stri
 		return nil, fmt.Errorf("sqlite: iterate malicious rows: %w", err)
 	}
 
+	reputationFindings, err := s.findReputationFindings(ctx, ecosystem, name, version)
+	if err != nil {
+		return nil, err
+	}
+	findings = append(findings, reputationFindings...)
+
+	return findings, nil
+}
+
+func (s *Store) FindReputationFindings(ctx context.Context, ecosystem, name, source string) ([]domain.Finding, error) {
+	if source != "" && source != "reversinglabs" {
+		return nil, nil
+	}
+	return s.queryReputationFindings(ctx, ecosystem, name, "")
+}
+
+func (s *Store) findReputationFindings(ctx context.Context, ecosystem, name, version string) ([]domain.Finding, error) {
+	if version == "" {
+		return nil, nil
+	}
+	return s.queryReputationFindings(ctx, ecosystem, name, version)
+}
+
+func (s *Store) queryReputationFindings(ctx context.Context, ecosystem, name, version string) ([]domain.Finding, error) {
+	query := `
+		SELECT id, ecosystem, name, version, type, risk_type, severity, summary
+		FROM reputation_findings_local
+		WHERE ecosystem = ? AND name = ?`
+	args := []any{ecosystem, name}
+	if version != "" {
+		query += ` AND version = ?`
+		args = append(args, version)
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: query reputation findings: %w", err)
+	}
+	defer closeSilently(rows)
+
+	var findings []domain.Finding
+	for rows.Next() {
+		var (
+			id       string
+			eco      string
+			pkg      string
+			ver      string
+			typ      string
+			riskType string
+			severity string
+			summary  sql.NullString
+		)
+
+		if err := rows.Scan(&id, &eco, &pkg, &ver, &typ, &riskType, &severity, &summary); err != nil {
+			return nil, fmt.Errorf("sqlite: scan reputation finding row: %w", err)
+		}
+
+		title := summary.String
+		if title == "" {
+			title = id
+		}
+
+		findings = append(findings, domain.Finding{
+			Name:       pkg,
+			Version:    ver,
+			Ecosystem:  domain.Ecosystem(eco),
+			Type:       domain.FindingType(typ),
+			Severity:   domain.Severity(severity),
+			AdvisoryID: id,
+			Title:      title,
+			RiskType:   riskType,
+			Source:     "reversinglabs",
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("sqlite: iterate reputation finding rows: %w", err)
+	}
 	return findings, nil
 }
 

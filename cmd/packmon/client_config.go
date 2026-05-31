@@ -18,19 +18,23 @@ import (
 const defaultCLIConfigFile = ".packmon.yaml"
 
 type cliConfig struct {
-	Server     string           `yaml:"server"`
-	APIKey     string           `yaml:"api_key"`
-	Mode       string           `yaml:"mode"`
-	FailOn     string           `yaml:"fail_on"`
-	Timeout    int              `yaml:"timeout"`
-	Ecosystems []string         `yaml:"ecosystems"`
-	IncludeDev *bool            `yaml:"include_dev"`
-	Webhook    cliWebhookConfig `yaml:"webhook"`
-	Output     cliOutputConfig  `yaml:"output"`
-	Log        cliLogConfig     `yaml:"log"`
-	Hook       cliHookConfig    `yaml:"hook"`
-	DB         cliDBConfig      `yaml:"db"`
-	Repos      []cliRepoConfig  `yaml:"repos"`
+	Server            string           `yaml:"server"`
+	APIKey            string           `yaml:"api_key"`
+	APIKeyEnv         string           `yaml:"api_key_env"`
+	Mode              string           `yaml:"mode"`
+	FailOn            string           `yaml:"fail_on"`
+	Timeout           int              `yaml:"timeout"`
+	Ecosystems        []string         `yaml:"ecosystems"`
+	IncludeDev        *bool            `yaml:"include_dev"`
+	CACert            string           `yaml:"cacert"`
+	InsecureAllowHTTP *bool            `yaml:"insecure_allow_http"`
+	RequireRemote     *bool            `yaml:"require_remote"`
+	Webhook           cliWebhookConfig `yaml:"webhook"`
+	Output            cliOutputConfig  `yaml:"output"`
+	Log               cliLogConfig     `yaml:"log"`
+	Hook              cliHookConfig    `yaml:"hook"`
+	DB                cliDBConfig      `yaml:"db"`
+	Repos             []cliRepoConfig  `yaml:"repos"`
 }
 
 type cliWebhookConfig struct {
@@ -64,6 +68,7 @@ type cliRepoConfig struct {
 	Path       string           `yaml:"path"`
 	Server     string           `yaml:"server"`
 	APIKey     string           `yaml:"api_key"`
+	APIKeyEnv  string           `yaml:"api_key_env"`
 	Mode       string           `yaml:"mode"`
 	FailOn     string           `yaml:"fail_on"`
 	Timeout    int              `yaml:"timeout"`
@@ -192,9 +197,11 @@ func userGlobalConfigPath() (string, bool) {
 func (c *cliConfig) normalize(baseDir string) error {
 	c.Server = strings.TrimSpace(c.Server)
 	c.APIKey = strings.TrimSpace(c.APIKey)
+	c.APIKeyEnv = strings.TrimSpace(c.APIKeyEnv)
 	c.Mode = normalizeModeString(c.Mode)
 	c.FailOn = normalizeSeverityString(c.FailOn)
 	c.Ecosystems = normalizeStringList(c.Ecosystems)
+	c.CACert = strings.TrimSpace(c.CACert)
 	c.Webhook.URL = strings.TrimSpace(c.Webhook.URL)
 	c.Webhook.Secret = strings.TrimSpace(c.Webhook.Secret)
 	c.DB.Path = strings.TrimSpace(c.DB.Path)
@@ -225,6 +232,7 @@ func (c *cliConfig) normalize(baseDir string) error {
 		repo.Path = strings.TrimSpace(repo.Path)
 		repo.Server = strings.TrimSpace(repo.Server)
 		repo.APIKey = strings.TrimSpace(repo.APIKey)
+		repo.APIKeyEnv = strings.TrimSpace(repo.APIKeyEnv)
 		repo.Mode = normalizeModeString(repo.Mode)
 		repo.FailOn = normalizeSeverityString(repo.FailOn)
 		repo.Ecosystems = normalizeStringList(repo.Ecosystems)

@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -31,8 +32,6 @@ func indexOf(s string, c byte) int {
 }
 
 func TestLoadWithNoEnvVarsReturnsDefaults(t *testing.T) {
-	t.Parallel()
-
 	// Use a sub-test with Setenv to isolate env changes.
 	clearPackmonEnv(t)
 
@@ -338,6 +337,83 @@ func TestLoadReadsFeedEnabledFlags(t *testing.T) {
 	}
 }
 
+func TestReversingLabsDefaults(t *testing.T) {
+	clearPackmonEnv(t)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Feeds.ReversingLabsEnabled {
+		t.Fatal("ReversingLabs should be disabled by default")
+	}
+	if cfg.Feeds.ReversingLabsMode != FeedModeSelf {
+		t.Fatalf("ReversingLabsMode = %q, want self", cfg.Feeds.ReversingLabsMode)
+	}
+	if cfg.Feeds.ReversingLabsLookupTTL != 24*time.Hour {
+		t.Fatalf("ReversingLabsLookupTTL = %v, want 24h", cfg.Feeds.ReversingLabsLookupTTL)
+	}
+	if cfg.Feeds.ReversingLabsBatchSize != 5 {
+		t.Fatalf("ReversingLabsBatchSize = %d, want 5", cfg.Feeds.ReversingLabsBatchSize)
+	}
+}
+
+func TestReversingLabsEnv(t *testing.T) {
+	clearPackmonEnv(t)
+	t.Setenv("PACKMON_FEED_REVERSINGLABS_ENABLED", "true")
+	t.Setenv("PACKMON_FEED_REVERSINGLABS_MODE", "self")
+	t.Setenv("PACKMON_REVERSINGLABS_API_KEY", "rl-token")
+	t.Setenv("PACKMON_REVERSINGLABS_API_BASE_URL", "https://example.test/community")
+	t.Setenv("PACKMON_REVERSINGLABS_LOOKUP_TTL", "12h")
+	t.Setenv("PACKMON_REVERSINGLABS_BATCH_SIZE", "3")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.Feeds.ReversingLabsEnabled {
+		t.Fatal("ReversingLabsEnabled = false, want true")
+	}
+	if cfg.Feeds.ReversingLabsMode != FeedModeSelf {
+		t.Fatalf("ReversingLabsMode = %q, want self", cfg.Feeds.ReversingLabsMode)
+	}
+	if cfg.Feeds.ReversingLabsAPIKey != "rl-token" {
+		t.Fatalf("ReversingLabsAPIKey = %q, want rl-token", cfg.Feeds.ReversingLabsAPIKey)
+	}
+	if cfg.Feeds.ReversingLabsBaseURL != "https://example.test/community" {
+		t.Fatalf("ReversingLabsBaseURL = %q", cfg.Feeds.ReversingLabsBaseURL)
+	}
+	if cfg.Feeds.ReversingLabsLookupTTL != 12*time.Hour {
+		t.Fatalf("ReversingLabsLookupTTL = %v, want 12h", cfg.Feeds.ReversingLabsLookupTTL)
+	}
+	if cfg.Feeds.ReversingLabsBatchSize != 3 {
+		t.Fatalf("ReversingLabsBatchSize = %d, want 3", cfg.Feeds.ReversingLabsBatchSize)
+	}
+}
+
+func TestReversingLabsRejectsExternalMode(t *testing.T) {
+	clearPackmonEnv(t)
+	t.Setenv("PACKMON_FEED_REVERSINGLABS_ENABLED", "true")
+	t.Setenv("PACKMON_FEED_REVERSINGLABS_MODE", "external")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() error = nil, want error for ReversingLabs external mode")
+	}
+}
+
+func TestReversingLabsBatchSizeCappedAtFive(t *testing.T) {
+	clearPackmonEnv(t)
+	t.Setenv("PACKMON_REVERSINGLABS_BATCH_SIZE", "25")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Feeds.ReversingLabsBatchSize != 5 {
+		t.Fatalf("ReversingLabsBatchSize = %d, want 5 (capped)", cfg.Feeds.ReversingLabsBatchSize)
+	}
+}
+
 func TestLoadReadsAPIKeys(t *testing.T) {
 	clearPackmonEnv(t)
 	t.Setenv("PACKMON_VULNCHECK_API_KEY", "vc-key-123")
@@ -545,5 +621,69 @@ func TestEnvBoolOrDefaultHandlesInvalidValues(t *testing.T) {
 	// Default for PACKMON_FEED_SYNC_ON_STARTUP is true.
 	if !cfg.FeedSync.OnStartup {
 		t.Error("FeedSync.OnStartup = false, want true (default fallback for invalid bool)")
+	}
+}
+
+func TestConfigRemainingHelperBranches(t *testing.T) {
+	clearPackmonEnv(t)
+
+	if got := (MetricsConfig{Port: 9090}).Addr(); got != "127.0.0.1:9090" {
+		t.Fatalf("MetricsConfig.Addr(empty host) = %q, want loopback default", got)
+	}
+
+	t.Setenv("PACKMON_TEST_INT32", "-2147483649")
+	if _, err := envInt32OrDefault("PACKMON_TEST_INT32", 1); err == nil || !strings.Contains(err.Error(), "must fit in int32") {
+		t.Fatalf("envInt32OrDefault(lower overflow) error = %v", err)
+	}
+
+	t.Setenv("PACKMON_TEST_POSITIVE", "0")
+	if _, err := envPositiveIntOrDefault("PACKMON_TEST_POSITIVE", 1); err == nil || !strings.Contains(err.Error(), "greater than zero") {
+		t.Fatalf("envPositiveIntOrDefault(zero) error = %v", err)
+	}
+
+	for _, raw := range []string{"localhost", "http://localhost:8080/admin", "[::1]:9090", "http://127.0.0.1:8080"} {
+		if !isLoopbackPublicHost(raw) {
+			t.Fatalf("isLoopbackPublicHost(%q) = false, want true", raw)
+		}
+	}
+	for _, raw := range []string{"", "https://example.com", "http://%zz"} {
+		if isLoopbackPublicHost(raw) {
+			t.Fatalf("isLoopbackPublicHost(%q) = true, want false", raw)
+		}
+	}
+
+	if threshold, err := parseBlockThreshold(" none "); err != nil || threshold != "NONE" {
+		t.Fatalf("parseBlockThreshold(none) = %q, %v; want NONE nil", threshold, err)
+	}
+	if _, err := parseBlockThreshold("SEVERE"); err == nil {
+		t.Fatal("parseBlockThreshold(invalid) error = nil")
+	}
+}
+
+func TestLoadValidationErrorBranches(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		key  string
+		val  string
+		want string
+	}{
+		{name: "db min conns overflow", key: "PACKMON_DB_MIN_CONNS", val: "2147483648", want: "must fit in int32"},
+		{name: "rate limit minute zero", key: "PACKMON_RATE_LIMIT_PER_MINUTE", val: "0", want: "greater than zero"},
+		{name: "rate limit burst zero", key: "PACKMON_RATE_LIMIT_BURST", val: "0", want: "greater than zero"},
+		{name: "block threshold invalid", key: "PACKMON_BLOCK_THRESHOLD", val: "SEVERE", want: "invalid PACKMON_BLOCK_THRESHOLD"},
+		{name: "write timeout invalid", key: "PACKMON_SERVER_WRITE_TIMEOUT", val: "later", want: "PACKMON_SERVER_WRITE_TIMEOUT"},
+		{name: "shutdown timeout invalid", key: "PACKMON_SERVER_SHUTDOWN_TIMEOUT", val: "later", want: "PACKMON_SERVER_SHUTDOWN_TIMEOUT"},
+		{name: "reversinglabs ttl invalid", key: "PACKMON_REVERSINGLABS_LOOKUP_TTL", val: "later", want: "PACKMON_REVERSINGLABS_LOOKUP_TTL"},
+		{name: "reversinglabs batch invalid", key: "PACKMON_REVERSINGLABS_BATCH_SIZE", val: "0", want: "greater than zero"},
+		{name: "tls min invalid", key: "PACKMON_TLS_MIN_VERSION", val: "1.1", want: "invalid PACKMON_TLS_MIN_VERSION"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			clearPackmonEnv(t)
+			t.Setenv(tt.key, tt.val)
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Load() error = %v, want containing %q", err, tt.want)
+			}
+		})
 	}
 }

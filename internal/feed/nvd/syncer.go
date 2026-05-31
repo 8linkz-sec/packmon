@@ -1,11 +1,11 @@
 // Package nvd implements a feed syncer that enriches vulnerabilities with
 // CVSS scores from the NIST National Vulnerability Database (NVD) API v2.0.
 //
-// Many vulnerability entries (GO-*, RUSTSEC-*, PYSEC-*) are ingested with
-// severity=UNKNOWN because their upstream sources do not include CVSS data.
-// However, these entries often carry CVE aliases (e.g. GO-2026-4337 has alias
-// CVE-2025-68121). The NVD API provides CVSS v3.1 base scores for these CVEs
-// at no cost.
+// Many vulnerability entries (GO-*, RUSTSEC-*, PYSEC-*) lack CVSS data in
+// their upstream source and are initially stored at Packmon's LOW fallback
+// severity. However, these entries often carry CVE aliases (e.g. GO-2026-4337
+// has alias CVE-2025-68121). The NVD API provides CVSS v3.1 base scores for
+// these CVEs at no cost.
 //
 // The syncer queries the database for UNKNOWN-severity vulnerabilities that
 // have CVE aliases, fetches scores from the NVD API (respecting rate limits),
@@ -141,9 +141,9 @@ func NewSyncer(logger *slog.Logger, opts ...Option) *Syncer {
 // Name implements feed.FeedSyncer.
 func (s *Syncer) Name() string { return feedName }
 
-// Sync implements feed.FeedSyncer. It finds all UNKNOWN-severity
-// vulnerabilities with CVE aliases, fetches their CVSS scores from
-// the NVD API, and updates the database.
+// Sync implements feed.FeedSyncer. It finds unresolved vulnerabilities with
+// CVE aliases, fetches their CVSS scores from the NVD API, and updates the
+// database.
 func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, error) {
 	s.logger.Info("starting NVD enrichment sync")
 

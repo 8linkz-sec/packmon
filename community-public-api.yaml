@@ -1,0 +1,2104 @@
+openapi: 3.0.3
+info:
+  title: ReversingLabs Spectra Assure Community API
+  version: '2.0'
+  contact:
+    name: ReversingLabs Support
+    url: https://secure.software/
+    email: support@reversinglabs.com
+  license:
+    name: Proprietary
+    url: https://www.reversinglabs.com/hubfs/ReversingLabs_MLSA.pdf
+  description: >+
+    # About the API
+
+
+    ReversingLabs Spectra Assure Community is a free-to-use SaaS platform where
+    software developers, DevOps engineers, and IT security specialists can check
+    the security status of widely distributed developer tools and open source
+    software packages from the most popular communities. 
+
+    The contents of these software package and developer tool repositories are
+    continually analyzed by ReversingLabs with the latest findings immediately
+    available on the Spectra Assure Community website. 
+
+
+    With Spectra Assure Community, you can search for software packages across
+    the most popular software repositories (such as npm, NuGet, PyPI, RubyGems)
+    and gain visibility into their integrity and security to ensure that the
+    tools you rely on to build, test, and deploy applications can be trusted.
+
+
+    The Spectra Assure Community API is an extension of the Community platform
+    and a companion solution to the free SaaS tool.
+
+    It allows you to automate common actions; specifically, searching for
+    packages and retrieving information about individual software packages and
+    their versions.
+
+
+    ## API versioning
+
+
+    The current Community API version is **v2**, which is indicated in all
+    request paths.
+
+
+    ## Servers
+
+
+    Request paths for **Community** users use the following server URL:
+
+
+    `https://data.reversinglabs.com/api/oss/community/v2/free/`
+
+
+    Request paths for **Spectra Intelligence** users use the following server
+    URL:
+
+
+    `https://data.reversinglabs.com/api/oss/community/v2/`
+
+
+    All requests must be made over HTTPS. This API does not support HTTP.
+
+
+
+    ## Authentication
+
+
+    All endpoints in the Community API support Basic and Bearer authentication.
+
+
+    **Community** users should use token-based authentication. Create an access
+    token in your Spectra Assure Community account and provide it in the
+    `Authorization: Bearer` HTTP header of every request.
+
+
+    **Spectra Intelligence** users should authenticate to the API with their
+    ReversingLabs Cloud user account credentials. Provide the username and the
+    password for your account in the `Authorization` HTTP header of every
+    request.
+
+
+    Make sure to treat your credentials as confidential. If you suspect any of
+    your passwords or tokens have been compromised, change them in your account
+    settings.
+
+
+
+    ## Responses and error handling
+
+
+    Successful requests return `2xx` status codes.
+
+
+    Errors are indicated by `4xx` and `5xx` status codes. 
+
+    In some cases, the JSON response will contain a more informative message
+    about the problem in the `error` key.
+
+    Expected responses and status codes are listed for every endpoint in this
+    reference documentation.
+
+
+    The following table provides an overview of all expected error responses and
+    suggested resolution steps.
+
+
+    | Status code | Description |
+
+    | :--------- | ------ |
+
+    | `400 Bad request` | Usually indicates a syntax error in the request.
+    Confirm that all parts of your request are correctly formatted and make sure
+    you're not using any unsupported characters.  |
+
+    | `401 Not authorized` | The service is not able to authenticate you with
+    the information provided in the request. This may be caused by missing,
+    malformed, expired, or revoked credentials. Make sure you're correctly
+    providing the username and password in the `Authorization` header in your
+    requests. |
+
+    | `402 Insufficient remaining capacity` | Usually indicates a licensing
+    issue. The service is not able to fulfill your request because it would
+    exceed the capacity configured for your account. |
+
+    | `403 Forbidden` | You don't have permission to access the requested
+    resource. |
+
+    | `404 Not found` | The resource you're trying to access doesn't exist.
+    Check if the endpoint is correctly formatted in your request, and make sure
+    all required parameters are present. This response is also returned if an
+    unsupported protocol is used in the request (for example, HTTP instead of
+    HTTPS). |
+
+    | `413 Too many packages requested` | The request body exceeds the limit of
+    items allowed in a single request for your account type. |
+
+    | `429 Too many requests` | The service detected an excessive amount of
+    requests from your account in a short period. Review the tools and
+    applications you use to work with the API to make sure they're not sending
+    redundant requests. |
+
+    | `500 Internal server error` | Usually indicates an issue with the service
+    itself. Try re-sending your request later. If the issue persists, contact
+    ReversingLabs Support. |
+
+servers:
+  - name: Community tiers
+    url: https://data.reversinglabs.com/api/oss/community/v2/free
+    description: Community server for Community tier users
+  - name: Spectra Intelligence
+    url: https://data.reversinglabs.com/api/oss/community/v2/
+    description: Community server for users with a Spectra Intelligence account
+paths:
+  /find/packages:
+    post:
+      security: []
+      summary: Search for packages
+      tags:
+        - Community
+      description: >-
+        Search the Spectra Assure Community catalogue for information on one or
+        more software packages specified in the request. The response contains
+        the list of all software packages that match the search criteria.
+
+
+        Enterprise users can search for a maximum of 50 packages per request.
+        Users on the Free plan can search for a maximum of 5 packages per
+        request.
+
+
+        To search for a package, provide either of the following in the request
+        body:
+
+
+        - the correct **purl** (package URL) in the format
+        `pkg:community/namespace/package@version`. The `version` part of the
+        purl may be omitted. In that case, the API returns information about the
+        latest published version of the software package. It's also possible to
+        search for packages by partial purl with matching patterns and version
+        expressions. **Maven package search does not support version
+        expressions.**  
+
+
+        - the package **hash** in the SHA1 or SHA256 format. When searching for
+        packages by hash, the results will include packages with that hash as
+        well as those that contain it. Note that hashes of embedded files are
+        tracked only if they are malware artifacts.
+
+
+        For more advanced search queries, the request body supports matching a
+        range of package versions by a glob pattern or a community-specific
+        version expression. It is also possible to search for artifacts by file
+        name or tag, but only in software repositories (communities) that
+        support multiple version artifacts for software packages.
+
+
+        Every request must also contain a unique search identifier string that
+        will be included in the response. The string value is arbitrary.
+
+
+        To make integrations easier, you can use the `compact` query parameter
+        in the request. This parameter instructs the API to return a simplified
+        response in which all optional fields are automatically omitted.    
+      operationId: postFindPackageMetadata
+      requestBody:
+        $ref: '#/components/requestBodies/json_search'
+      parameters:
+        - $ref: '#/components/parameters/query_offset'
+        - $ref: '#/components/parameters/query_limit'
+        - $ref: '#/components/parameters/is_compact'
+      responses:
+        '200':
+          $ref: '#/components/responses/oss-search'
+        '400':
+          $ref: '#/components/responses/bad-request'
+        '401':
+          $ref: '#/components/responses/unauthorized'
+        '402':
+          $ref: '#/components/responses/low-capacity'
+        '403':
+          $ref: '#/components/responses/forbidden'
+        '413':
+          $ref: '#/components/responses/content-too-large'
+        '429':
+          $ref: '#/components/responses/too-many-requests'
+        '500':
+          $ref: '#/components/responses/server-error'
+  /report/version/pkg:{community}/{namespace}/{package}@{version}:
+    get:
+      security: []
+      summary: Show report for a package version
+      tags:
+        - Community
+      description: >-
+        This endpoint is used to retrieve detailed information about a software
+        package version specified in the request. The response contains the
+        Spectra Assure Community analysis report for the requested package
+        version. Only one package version can be specified per request.  
+
+
+        To successfully retrieve the information, you must specify the correct
+        purl (package URL) by using the required path parameters. The `version`
+        part of the purl may be omitted. In that case, the API returns
+        information about the latest published version of the software package.
+
+
+        Optionally, you can specify the artifact file(s) for which you want to
+        retrieve the information with query parameters `artifact` and
+        `artifact_tag`. Note that these parameters work only with software
+        repositories that support multiple version artifacts for software
+        packages.
+      operationId: getCommunityVersionAssessment
+      parameters:
+        - $ref: '#/components/parameters/purl_community'
+        - $ref: '#/components/parameters/purl_namespace'
+        - $ref: '#/components/parameters/purl_package'
+        - $ref: '#/components/parameters/purl_version'
+        - $ref: '#/components/parameters/purl_artifact'
+        - $ref: '#/components/parameters/purl_artifact_tag'
+      responses:
+        '200':
+          $ref: '#/components/responses/oss-version'
+        '400':
+          $ref: '#/components/responses/bad-request'
+        '401':
+          $ref: '#/components/responses/unauthorized'
+        '402':
+          $ref: '#/components/responses/low-capacity'
+        '403':
+          $ref: '#/components/responses/forbidden'
+        '404':
+          $ref: '#/components/responses/not-found'
+        '429':
+          $ref: '#/components/responses/too-many-requests'
+        '500':
+          $ref: '#/components/responses/server-error'
+  /report/package/pkg:{community}/{namespace}/{package}@{version}:
+    get:
+      security: []
+      summary: Show details about a package
+      tags:
+        - Community
+      description: >-
+        This endpoint is used to retrieve detailed information about a software
+        package specified in the request. By default, the response includes
+        relevant package metadata and the information about the latest published
+        version of the software package. 
+
+
+        To include information about a specific package version in the response,
+        you can use the `version` path parameter in the request. Multiple
+        package versions can be targeted with optional query parameters
+        `match_pattern` and `match_expression`. These parameters are mutually
+        exclusive (cannot be used together in a single request) and incompatible
+        with the `version` parameter.
+
+
+        To successfully show the software package information, the purl (package
+        URL) must be correctly specified by using the required path parameters.
+
+
+        Optionally, you can specify the artifact file(s) for which you want to
+        retrieve the information with query parameters `artifact` and
+        `artifact_tag`. Note that these parameters work only with software
+        repositories that support multiple version artifacts for software
+        packages.
+      operationId: getCommunityPackageMetadata
+      parameters:
+        - $ref: '#/components/parameters/purl_community'
+        - $ref: '#/components/parameters/purl_namespace'
+        - $ref: '#/components/parameters/purl_package'
+        - $ref: '#/components/parameters/purl_version'
+        - $ref: '#/components/parameters/purl_artifact'
+        - $ref: '#/components/parameters/purl_artifact_tag'
+        - $ref: '#/components/parameters/match_pattern'
+        - $ref: '#/components/parameters/match_expression'
+        - $ref: '#/components/parameters/query_offset'
+        - $ref: '#/components/parameters/query_limit'
+      responses:
+        '200':
+          $ref: '#/components/responses/oss-package'
+        '400':
+          $ref: '#/components/responses/bad-request'
+        '401':
+          $ref: '#/components/responses/unauthorized'
+        '402':
+          $ref: '#/components/responses/low-capacity'
+        '403':
+          $ref: '#/components/responses/forbidden'
+        '404':
+          $ref: '#/components/responses/not-found'
+        '429':
+          $ref: '#/components/responses/too-many-requests'
+        '500':
+          $ref: '#/components/responses/server-error'
+  /user/account:
+    get:
+      security: []
+      summary: View Community user account details
+      tags:
+        - Community
+      description: >-
+        This endpoint is used to retrieve details about the user account and its
+        entitlements. Spectra Assure Community users can rely on it to check
+        their subscription details, view token status and expiration dates, and
+        confirm their remaining API usage entitlements.
+
+
+        **Requests sent to this endpoint do not count against the API usage
+        quota.**
+      operationId: getUserAccountDetails
+      responses:
+        '200':
+          $ref: '#/components/responses/oss-account'
+        '400':
+          $ref: '#/components/responses/bad-request'
+        '401':
+          $ref: '#/components/responses/unauthorized'
+        '402':
+          $ref: '#/components/responses/low-capacity'
+        '403':
+          $ref: '#/components/responses/forbidden'
+        '404':
+          $ref: '#/components/responses/not-found'
+        '429':
+          $ref: '#/components/responses/too-many-requests'
+        '500':
+          $ref: '#/components/responses/server-error'
+components:
+  securitySchemes:
+    basicAuth:
+      type: http
+      scheme: basic
+    tokenAuth:
+      type: http
+      scheme: bearer
+  schemas:
+    oss-version: &ref_1
+      type: object
+      required:
+        - community
+      properties:
+        community:
+          description: Spectra Assure Community analysis report for a package version.
+          type: object
+          required:
+            - report
+          properties:
+            report:
+              type: object
+              required:
+                - info
+              properties:
+                info:
+                  type: object
+                  required:
+                    - file
+                    - analysis
+                  properties:
+                    file:
+                      $ref: '#/components/schemas/file'
+                    analysis:
+                      type: object
+                      required:
+                        - version
+                        - catalogue
+                        - timestamp
+                      properties:
+                        version:
+                          type: string
+                          description: Spectra Assure analysis engine version.
+                        catalogue:
+                          type: integer
+                          nullable: true
+                          description: Spectra Assure policy catalogue version.
+                        timestamp:
+                          type: string
+                          description: Last package analysis time as ISO-8601 string.
+                    statistics:
+                      $ref: '#/components/schemas/statistics'
+                    detections:
+                      $ref: '#/components/schemas/detections'
+                    disabled:
+                      type: array
+                      description: List of disabled policy checks.
+                metadata:
+                  type: object
+                  properties:
+                    assessments:
+                      $ref: '#/components/schemas/assessments'
+                    incidents:
+                      $ref: '#/components/schemas/incidents'
+                    violations:
+                      $ref: '#/components/schemas/violations'
+                    indicators:
+                      $ref: '#/components/schemas/indicators'
+                    classifications:
+                      $ref: '#/components/schemas/classifications'
+                    vulnerabilities:
+                      $ref: '#/components/schemas/vulnerabilities-2'
+                    dependencies:
+                      $ref: '#/components/schemas/dependencies'
+    oss-package: &ref_2
+      type: object
+      required:
+        - community
+      properties:
+        community:
+          type: object
+          description: Spectra Assure Community analysis report for a package.
+          required:
+            - package
+          properties:
+            package:
+              type: object
+              allOf:
+                - $ref: '#/components/schemas/package'
+                - type: object
+                  required:
+                    - contributors
+                  properties:
+                    contributors:
+                      $ref: '#/components/schemas/contributors'
+    oss-search: &ref_0
+      type: object
+      required:
+        - community
+      properties:
+        community:
+          type: object
+          description: Results of a Spectra Assure Community search.
+          required:
+            - packages
+          properties:
+            packages:
+              type: array
+              description: >-
+                One or more software packages that match the search criteria
+                from the request.
+              items:
+                required:
+                  - uuid
+                  - package
+                properties:
+                  uuid:
+                    $ref: '#/components/schemas/uuid'
+                  package:
+                    $ref: '#/components/schemas/package'
+            errors:
+              type: array
+              items:
+                required:
+                  - uuid
+                  - error
+                properties:
+                  uuid:
+                    $ref: '#/components/schemas/uuid'
+                  error:
+                    type: object
+                    description: Package lookup error information.
+                    required:
+                      - code
+                      - info
+                    properties:
+                      code:
+                        type: integer
+                        description: Package lookup HTTP error code.
+                      info:
+                        type: string
+                        description: Package lookup HTTP error code description.
+    oss-account: &ref_3
+      type: object
+      required:
+        - account
+      properties:
+        account:
+          type: object
+          description: >-
+            Information about the Spectra Assure Community user account sending
+            the request.
+          required:
+            - name
+            - role
+            - email
+            - company
+            - country
+            - subscription
+            - entitlements
+            - tokens
+          properties:
+            name:
+              type: string
+              description: User name associated with the account.
+            role:
+              type: string
+              description: User role within their organization.
+            email:
+              type: string
+              description: User email address associated with the account.
+            company:
+              type: string
+              description: Company that the user belongs to.
+            country:
+              type: string
+              description: Country in which the user is based.
+            subscription:
+              type: object
+              required:
+                - tier
+                - expiration
+              properties:
+                tier:
+                  type: string
+                  enum:
+                    - Community
+                    - Community+
+                    - Essentials
+                    - Enterprise
+                  description: >-
+                    Spectra Assure Community subscription tier. Community
+                    accounts are free, and have enforced usage limits.
+                expiration:
+                  type: string
+                  description: Subscription expiration date as an ISO-8601 string.
+            entitlements:
+              type: object
+              required:
+                - api_tokens
+                - api_requests
+              properties:
+                api_tokens:
+                  allOf:
+                    - $ref: '#/components/schemas/entitlements'
+                    - description: Token creation entitlement details.
+                api_requests:
+                  allOf:
+                    - $ref: '#/components/schemas/entitlements'
+                    - description: >-
+                        Community usage entitlements details. Usage resets at
+                        the beginning of each calendar month.
+                pkg_monitoring:
+                  allOf:
+                    - $ref: '#/components/schemas/entitlements'
+                    - description: Package subscription entitlements details.
+            tokens:
+              type: array
+              items:
+                type: object
+                required:
+                  - label
+                  - created_on
+                  - last_used
+                  - expires_on
+                  - expired
+                properties:
+                  label:
+                    type: string
+                    description: User-provided token label or description.
+                  created_on:
+                    type: string
+                    description: Token creation date as an ISO-8601 string.
+                  last_used:
+                    type: string
+                    description: >-
+                      The date when the token was last used, represented as an
+                      ISO-8601 string.
+                  expires_on:
+                    type: string
+                    description: Token expiration date as an ISO-8601 string.
+                  expired:
+                    type: boolean
+                    description: >-
+                      Indicates that the token has expired and can no longer be
+                      used.
+    uuid:
+      type: string
+      description: >-
+        Unique, user-provided search identifier tied to each search query. The
+        server returns this identifier in the response.
+      example: 12-01
+    communities:
+      type: string
+      enum:
+        - npm
+        - pypi
+        - gem
+        - nuget
+        - vsx
+        - psgallery
+        - maven
+      description: >-
+        Open source community identifier of the software repository that hosts
+        the requested software package. Must match one of the [software
+        repositories](https://docs.secure.software/community/#supported-communities)
+        supported by Spectra Assure Community.
+      example: npm
+    identity:
+      type: object
+      required:
+        - purl
+        - community
+        - namespace
+        - package
+        - product
+        - version
+        - artifact
+        - license
+        - published
+        - deprecated
+        - removed
+        - category
+        - homepage
+        - repository
+        - description
+      properties:
+        purl:
+          type: string
+          description: >-
+            Fully qualified software package URL (including the artifact
+            reference).
+          example: pkg:npm/mock_react@19.0.0
+        community:
+          $ref: '#/components/schemas/communities'
+        namespace:
+          type: string
+          description: >-
+            Namespace of the software package (according to the purl schema
+            pkg:community/namespace/package@version?artifact=filename.ext).
+          example: ''
+        package:
+          type: string
+          description: >-
+            Name of the software package (according to the purl schema
+            pkg:community/namespace/package@version?artifact=filename.ext).
+          example: mock_react
+        product:
+          type: string
+          description: Product name as declared by the publisher.
+          example: Mock React
+        version:
+          type: string
+          nullable: true
+          description: >-
+            Version of the software package (according to the purl schema
+            pkg:community/namespace/package@version?artifact=filename.ext).
+          example: 19.0.0
+        artifact:
+          type: string
+          nullable: true
+          description: >-
+            Artifact file name (according to the purl schema
+            pkg:community/namespace/package@version?artifact=filename.ext).
+          example: ''
+        license:
+          type: string
+          description: >-
+            Package license as the SPDX license expression. The format is
+            ReversingLabs-specific: LicenseFamily (SPDX-expression).
+          example: MIT
+        published:
+          type: string
+          description: Package version publication date as ISO-8601 string.
+          example: 2024-12-05T18:10:21+0000
+        deprecated:
+          type: boolean
+          nullable: true
+          description: >-
+            Indicates if the version has been deprecated. Can be null if
+            information is not available.
+          example: false
+        removed:
+          type: boolean
+          description: Indicates if the version has been removed.
+          example: false
+        category:
+          type: string
+          nullable: true
+          description: >-
+            Indicates the software category for the package version. Can be null
+            if information is not available.
+          example: ''
+        homepage:
+          type: string
+          description: Package homepage or related website.
+          example: www.example.com
+        repository:
+          type: string
+          description: Source code related to the package.
+          example: https://github.com/facebook/react
+        description:
+          type: string
+          description: Package description as declared by the publisher.
+          example: Mock React package for testing purposes.
+        keywords:
+          type: array
+          description: Keywords associated with the software package.
+    impl_quality:
+      type: object
+      required:
+        - status
+        - priority
+        - assessment
+      properties:
+        status:
+          type: string
+          enum:
+            - fail
+            - warning
+            - pass
+          description: Overall package risk assessment evaluation result/status.
+        priority:
+          type: integer
+          description: >-
+            Highest priority issue within the software package. Range from P0
+            (highest) to P4 (lowest). Optional.
+          nullable: true
+        assessment:
+          type: string
+          description: Overall package deployment risk.
+        metrics:
+          type: object
+          description: Software quality metrics.
+          required:
+            - high
+            - medium
+            - low
+          properties:
+            high:
+              type: integer
+              description: >-
+                Total number of policy violations with high severity on
+                components.
+            medium:
+              type: integer
+              description: >-
+                Total number of policy violations with medium severity on
+                components.
+            low:
+              type: integer
+              description: >-
+                Total number of policy violations with low severity on
+                components.
+    impl_artifacts:
+      type: array
+      items:
+        type: object
+        description: Artifacts related to the package version.
+        required:
+          - type
+          - ref
+        properties:
+          type:
+            type: string
+            enum:
+              - linked-package
+              - rl-sbom-cyclonedx
+              - rl-sbom-spdx
+              - rl-safe
+            description: >-
+              Package artifact type. Linked packages are found in the package
+              repository. RL packages are Spectra Assure generated artifacts.
+              They might not be available for all packages or package versions.
+            example: linked-package
+          ref:
+            type: string
+            description: >-
+              Package artifact reference. Linked packages use file names as
+              references. RL packages use SHA-256 hashes as references.
+            example: mock-1.22.4-.tar.gz'
+    base_assessment:
+      type: object
+      required:
+        - final
+        - enabled
+        - priority
+        - label
+        - violations
+        - count
+      properties:
+        final:
+          type: boolean
+          description: Risk is considered deciding when the final value is set to true.
+        enabled:
+          type: boolean
+          description: >-
+            Indicates that the risk assessment was performed during analysis.
+            Spectra Assure license determines which risk assessments are
+            performed.
+        priority:
+          type: integer
+          description: >-
+            Highest priority issue within the software package. Range from P0
+            (highest) to P4 (lowest). Optional.
+          nullable: true
+        label:
+          type: string
+          description: Risk assessment label to be displayed to the user.
+        violations:
+          type: array
+          description: Policy violations that have caused the reported risk.
+          items:
+            type: string
+        count:
+          type: integer
+          description: Number of risk associated with the risk label.
+    impl_assessment:
+      allOf:
+        - $ref: '#/components/schemas/base_assessment'
+        - type: object
+          required:
+            - status
+          properties:
+            status:
+              type: string
+              enum:
+                - fail
+                - warning
+                - pass
+              description: Risk assessment evaluation result/status.
+    repo_assessment:
+      allOf:
+        - $ref: '#/components/schemas/base_assessment'
+        - type: object
+          required:
+            - status
+          properties:
+            status:
+              type: string
+              enum:
+                - fail
+                - warning
+                - pass
+                - pending
+              description: Risk assessment evaluation result/status.
+    assessments:
+      type: object
+      oneOf:
+        - type: object
+          required:
+            - licenses
+            - malware
+            - hardening
+            - secrets
+            - tampering
+            - vulnerabilities
+          properties:
+            licenses:
+              $ref: '#/components/schemas/impl_assessment'
+            malware:
+              $ref: '#/components/schemas/impl_assessment'
+            hardening:
+              $ref: '#/components/schemas/impl_assessment'
+            secrets:
+              $ref: '#/components/schemas/impl_assessment'
+            tampering:
+              $ref: '#/components/schemas/impl_assessment'
+            vulnerabilities:
+              $ref: '#/components/schemas/impl_assessment'
+            repository:
+              $ref: '#/components/schemas/repo_assessment'
+        - type: object
+          required:
+            - repository
+          properties:
+            repository:
+              $ref: '#/components/schemas/repo_assessment'
+          additionalProperties: false
+    incidents:
+      type: object
+      additionalProperties:
+        type: object
+        required:
+          - type
+          - reporters
+        properties:
+          type:
+            type: string
+            enum:
+              - malware
+              - removal
+            description: Describes the type of the incident.
+          reporters:
+            type: array
+            items:
+              type: object
+              required:
+                - type
+                - name
+                - date
+                - link
+              properties:
+                type:
+                  type: string
+                  enum:
+                    - rl-analyst
+                    - rl-scanner
+                    - community
+                  description: >-
+                    Incident reporter. Differentiates between analysts,
+                    automated reporting, and community contributions.
+                name:
+                  type: string
+                  description: >-
+                    Incident reporter name. Name is displayed to the user within
+                    the UI.
+                date:
+                  type: string
+                  description: Incident date as ISO-8601 string.
+                link:
+                  type: string
+                  description: >-
+                    Link to a resource that contains more information on the
+                    incident. Value is optional.
+    impl_versions:
+      type: array
+      items:
+        type: object
+        description: List of package versions and their most important details.
+        required:
+          - version
+          - published
+          - incidents
+        properties:
+          version:
+            type: string
+            description: Package version.
+            example: 19.0.0
+          published:
+            type: string
+            description: Package version publication date as ISO-8601 string.
+            example: 2024-12-05T18:10:21+0000
+          quality:
+            $ref: '#/components/schemas/impl_quality'
+          artifacts:
+            $ref: '#/components/schemas/impl_artifacts'
+          assessments:
+            $ref: '#/components/schemas/assessments'
+          incidents:
+            $ref: '#/components/schemas/incidents'
+    impl_incidents:
+      type: object
+      description: Statistics for incidents reported for any package version.
+      required:
+        - malware
+        - recent_malware
+        - removal
+        - recent_removal
+      properties:
+        malware:
+          type: integer
+          description: Total number of malware incidents reported for the package.
+          example: 0
+        recent_malware:
+          type: object
+          description: Describes malware incidents.
+          required:
+            - latest_version
+            - latest_timestamp
+            - recent_count
+          properties:
+            latest_version:
+              type: string
+              description: The latest malware package version.
+            latest_timestamp:
+              type: string
+              description: >-
+                The time when the latest malware version was published as
+                ISO-8601 string.
+            recent_count:
+              type: integer
+              description: The number of malware incidents in the last two years.
+        removal:
+          type: integer
+          description: Total number of removal incidents reported for the package.
+          example: 1
+        recent_removal:
+          type: object
+          description: Describes removal incidents.
+          required:
+            - latest_version
+            - latest_timestamp
+            - recent_count
+          properties:
+            latest_version:
+              type: string
+              description: The latest removed package version.
+              example: 1.2.0rc1
+            latest_timestamp:
+              type: string
+              description: >-
+                The time when the latest package removal occurred as ISO-8601
+                string.
+              example: 2020-05-14T11:25:54+0000
+            recent_count:
+              type: integer
+              description: The number of removal incidents in the last two years.
+              example: 0
+    package:
+      type: object
+      description: Software package metadata.
+      required:
+        - owner_verified
+        - is_quarantined
+        - first_published
+        - total_versions
+        - total_installs
+        - total_downloads
+        - latest_version
+        - direct_imports
+        - all_malicious
+        - was_archived
+        - was_removed
+        - key_project
+        - popularity
+        - identity
+        - versions
+        - incidents
+      properties:
+        owner_verified:
+          type: boolean
+          description: >-
+            Indicates that package ownership was verified by the package
+            repository.
+          example: false
+        is_quarantined:
+          type: boolean
+          description: >-
+            Indicates that the package may be quarantined in the package
+            repository.
+          nullable: true
+        first_published:
+          type: string
+          description: Initial package publication date as ISO-8601 string.
+          example: 2022-04-26T18:40:14+0000
+        total_versions:
+          type: integer
+          description: Total number of currently published package/extension versions.
+          example: 7
+        total_installs:
+          type: integer
+          description: >-
+            Total number of package/extension installations as tracked by the
+            package repository.
+          nullable: true
+        total_downloads:
+          type: integer
+          description: >-
+            Total number of package/extension downloads as tracked by the
+            package repository.
+          nullable: true
+          example: 6231
+        latest_version:
+          type: string
+          description: Latest published package version.
+          example: 7.0.0
+        direct_imports:
+          type: integer
+          description: >-
+            Total number of other packages in the repository that directly
+            import this one.
+          nullable: true
+          example: 312
+        all_malicious:
+          type: boolean
+          description: >-
+            Indicates that currently all package versions are reported as
+            malware.
+          example: false
+        was_archived:
+          type: boolean
+          description: >-
+            Indicates that the package may be archived in the package
+            repository.
+          nullable: true
+        was_removed:
+          type: boolean
+          description: >-
+            Indicates that the package was completely removed from the package
+            repository.
+          example: false
+        key_project:
+          type: boolean
+          description: >-
+            Indicates that the package is considered to be a key project in the
+            community.
+          example: false
+        popularity:
+          type: integer
+          enum:
+            - 10
+            - 100
+            - 1000
+            - 10000
+          description: Package ranking in the community based on the number of downloads.
+          example: 1000
+          nullable: true
+        identity:
+          $ref: '#/components/schemas/identity'
+        versions:
+          $ref: '#/components/schemas/impl_versions'
+        incidents:
+          $ref: '#/components/schemas/impl_incidents'
+    oss-search-2: *ref_0
+    oss-error:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
+    hashes:
+      type: array
+      items:
+        type: string
+    file:
+      type: object
+      description: Details about the software package file.
+      required:
+        - name
+        - size
+        - source_url
+        - downloaded
+        - hashes
+      properties:
+        name:
+          type: string
+          description: Package artifact file name.
+        size:
+          type: integer
+          description: Package artifact size in bytes.
+          nullable: true
+        source_url:
+          type: string
+          description: Location of the package artifact in the remote repository.
+        downloaded:
+          type: boolean
+          description: >-
+            Indicates that the package has been successfully downloaded from the
+            repository.
+        hashes:
+          type: array
+          items:
+            $ref: '#/components/schemas/hashes'
+        identity:
+          $ref: '#/components/schemas/identity'
+    license:
+      type: object
+      description: Discovered license statistics.
+      required:
+        - undeclared
+        - public_domain
+        - permissive
+        - weak_copyleft
+        - copyleft
+        - freeware
+        - shareware
+        - freemium
+        - non_commercial
+        - proprietary
+      properties:
+        undeclared:
+          type: integer
+          description: >-
+            Number of software components and dependencies without a declared
+            license.
+        public_domain:
+          type: integer
+          description: Number of public domain software licenses.
+        permissive:
+          type: integer
+          description: Number of permissive software licenses.
+        weak_copyleft:
+          type: integer
+          description: Number of weak copyleft software licenses.
+        copyleft:
+          type: integer
+          description: Number of copyleft software licenses.
+        freeware:
+          type: integer
+          description: Number of freeware software licenses.
+        shareware:
+          type: integer
+          description: Number of shareware software licenses.
+        freemium:
+          type: integer
+          description: Number of freemium software licenses.
+        non_commercial:
+          type: integer
+          description: Number of non-commercial software licenses.
+        proprietary:
+          type: integer
+          description: Number of proprietary software licenses.
+    vulnerabilities:
+      type: object
+      description: Discovered vulnerability statistics.
+      properties:
+        total:
+          type: integer
+          description: Total number of detected vulnerabilities.
+        critical:
+          type: integer
+          description: Total number of critical severity vulnerabilities.
+        high:
+          type: integer
+          description: Total number of high severity vulnerabilities.
+        medium:
+          type: integer
+          description: Total number of medium severity vulnerabilities.
+        low:
+          type: integer
+          description: Total number of low severity vulnerabilities.
+        exploit:
+          type: integer
+          description: Number of vulnerabilities that have a known exploit.
+        malware:
+          type: integer
+          description: Number of vulnerabilities that are exploited by malware.
+        mandate:
+          type: integer
+          description: Number of vulnerabilities that are patching-mandated.
+        fixable:
+          type: integer
+          description: >-
+            Number of vulnerabilities that can be resolved by a package version
+            update.
+        named:
+          type: integer
+          description: Number of vulnerabilities that have distinguished marketing names.
+    quality:
+      type: object
+      description: Overall software quality metrics.
+      required:
+        - status
+        - priority
+        - metrics
+      properties:
+        status:
+          type: string
+          enum:
+            - fail
+            - pass
+          description: Overall software package policy evaluation result.
+        priority:
+          type: integer
+          description: >-
+            Highest priority issue within the software package. Range from P0
+            (highest) to P4 (lowest).
+        metrics:
+          type: object
+          description: Software quality metrics.
+          required:
+            - total
+            - pass
+            - warning
+            - fail
+            - high
+            - medium
+            - low
+          properties:
+            total:
+              type: integer
+              description: Total number of policy violations on components.
+            pass:
+              type: integer
+              description: Total number of policy violations that passed on components.
+            warning:
+              type: integer
+              description: >-
+                Total number of policy violations that caused a warning on
+                components.
+            fail:
+              type: integer
+              description: >-
+                Total number of policy violations that caused a failure on
+                components.
+            high:
+              type: integer
+              description: >-
+                Total number of policy violations with high severity on
+                components.
+            medium:
+              type: integer
+              description: >-
+                Total number of policy violations with medium severity on
+                components.
+            low:
+              type: integer
+              description: >-
+                Total number of policy violations with low severity on
+                components.
+    statistics:
+      type: object
+      properties:
+        components:
+          type: integer
+          description: >-
+            Number of software components discovered during Spectra Assure
+            analysis.
+        dependencies:
+          type: integer
+          description: >-
+            Number of software dependencies discovered during Spectra Assure
+            analysis.
+        extracted:
+          type: integer
+          description: Number of artifacts extracted during Spectra Assure analysis.
+        license:
+          $ref: '#/components/schemas/license'
+        vulnerabilities:
+          $ref: '#/components/schemas/vulnerabilities'
+        quality:
+          $ref: '#/components/schemas/quality'
+    detections:
+      type: object
+      description: File classification results.
+      additionalProperties:
+        type: object
+        description: >-
+          Detected threat type if any. 'No Threats Detected' used for Goodware
+          and Unknown results.
+        additionalProperties:
+          type: integer
+          description: Number of files that were detected as threats.
+      example:
+        Goodware:
+          No Threats Detected: 19
+        Malicious:
+          Downloader: 1
+    violations:
+      type: object
+      additionalProperties:
+        type: object
+        required:
+          - rule_id
+          - status
+          - priority
+          - severity
+          - category
+          - description
+          - statistics
+        properties:
+          rule_id:
+            type: string
+            description: >-
+              Unique policy identifier. A four digit number prefixed by a type
+              identifier: SQ (software quality) or TH (threat hunting).
+          status:
+            type: string
+            enum:
+              - fail
+              - warning
+              - pass
+            description: Policy evaluation result/status.
+          priority:
+            type: integer
+            enum:
+              - 0
+              - 1
+              - 2
+              - 3
+              - 4
+            description: >-
+              Recommended policy violation fix priority. Range from P0 (highest)
+              to P4 (lowest).
+          severity:
+            type: string
+            enum:
+              - high
+              - medium
+              - low
+            description: Severity/impact of the matching policy.
+          category:
+            type: string
+            description: Category of the matching policy.
+          description:
+            type: string
+            description: Display label for the matching policy.
+          statistics:
+            type: object
+            required:
+              - applicable
+              - enforcements
+              - exclusions
+              - violations
+            properties:
+              applicable:
+                type: integer
+                description: Number of files that the policy can be applied to.
+              enforcements:
+                type: integer
+                description: Number of files that have failed due to the policy match.
+              exclusions:
+                type: integer
+                description: Number of files that have an excluded policy match.
+              violations:
+                type: integer
+                description: Number of files that have the policy match.
+    indicators:
+      type: object
+      additionalProperties:
+        type: object
+        required:
+          - rule_id
+          - priority
+          - category
+          - description
+          - exclusions
+          - occurrences
+          - violations
+        properties:
+          rule_id:
+            type: string
+            description: >-
+              Unique behavior identifier. A four digit number prefixed by a type
+              identifier: BH (behavior).
+          priority:
+            type: integer
+            description: >-
+              Helps order behaviors for display. More impactful behaviors have a
+              higher priority value.
+          category:
+            type: string
+            description: Category that best describes the behavior.
+          description:
+            type: string
+            description: Human-readable behavior description.
+          exclusions:
+            type: integer
+            description: Number of files that have an excluded behavior match.
+          occurrences:
+            type: integer
+            description: Number of files that have exhibit this behavior.
+          violations:
+            type: integer
+            description: Number of files that have failed due to the behavior presence.
+    classifications:
+      type: array
+      items:
+        type: object
+        required:
+          - object
+          - status
+          - result
+          - hashes
+        properties:
+          object:
+            type: string
+            enum:
+              - file
+              - dependency
+            description: >-
+              Determines if the classified object is an embedded file or a
+              component dependency.
+          status:
+            type: string
+            enum:
+              - Goodware
+              - Suspicious
+              - Malicious
+              - Unknown
+            description: Object classification.
+          result:
+            type: string
+            description: >-
+              Fully qualified threat name. String validation can be done with
+              the ReversingLabs Malware Naming Standard.
+          hashes:
+            type: array
+            description: Hashes are collected for classified files only.
+            items:
+              $ref: '#/components/schemas/hashes'
+    vulnerabilities-2:
+      type: object
+      additionalProperties:
+        type: object
+        required:
+          - name
+          - cvss
+          - updated
+          - affects
+          - summary
+          - audit
+          - exploit
+        properties:
+          name:
+            type: string
+            description: >-
+              Popular vulnerability name. Usually used by media or marketing
+              departments.
+          cvss:
+            type: object
+            required:
+              - version
+              - baseScore
+            properties:
+              version:
+                type: string
+                description: CVSS schema version.
+              baseScore:
+                type: number
+                format: float
+                description: CVSS base score.
+          updated:
+            type: string
+            description: Last vulnerability database update timestamp as ISO-8601 string.
+          affects:
+            type: array
+            description: >-
+              List of dependency PURLs affected by this vulnerability. For
+              non-declared dependencies value 'non-manifest-component' is used.
+          summary:
+            type: string
+            description: >-
+              AI-generated summary of the original vulnerability description
+              provided by the reporting source.
+          audit:
+            type: object
+            required:
+              - author
+              - timestamp
+              - reason
+            properties:
+              author:
+                type: string
+                description: >-
+                  When vulnerabilities are triaged the audit record is populated
+                  to track who triaged the vulnerability.
+              timestamp:
+                type: string
+                description: >-
+                  When vulnerabilities are triaged the audit record is populated
+                  to track when vulnerability was triaged. Timestamp is a
+                  ISO-8601 string.
+              reason:
+                type: string
+                description: >-
+                  When vulnerabilities are triaged the audit record is populated
+                  to track the reason why the triage was performed.
+                  User-provided reason.
+          exploit:
+            type: array
+            description: List of tags that describe the vulnerability.
+            items:
+              type: string
+              enum:
+                - UNKNOWN
+                - EXISTS
+                - MALWARE
+                - MANDATE
+                - FIXABLE
+                - TRIAGED
+                - UNPROVEN
+    dependencies:
+      type: object
+      additionalProperties:
+        type: object
+        required:
+          - type
+          - purl
+          - community
+          - framework
+          - version
+          - vulnerabilities
+          - classification
+        properties:
+          type:
+            type: string
+            enum:
+              - package
+              - extension
+            description: Software dependency declared by the package repository.
+          purl:
+            type: string
+            description: >-
+              Fully qualified package identifier (including the artifact
+              reference)
+          community:
+            $ref: '#/components/schemas/communities'
+          framework:
+            type: string
+            description: >-
+              Defines the framework requirements needed to run the dependency.
+              Currently only for .NET community use.
+            nullable: true
+          product:
+            type: string
+            description: Product name as declared by the publisher.
+            nullable: true
+          version:
+            type: string
+            description: PURL - version from pkg:community/namespace/package@version
+          license:
+            type: string
+            description: >-
+              Package license as the SPDX license expression. The format is
+              ReversingLabs-specific: LicenseFamily (SPDX-expression).
+            nullable: true
+          vulnerabilities:
+            type: array
+            description: List of CVEs that were detected to affect the dependency.
+          classification:
+            type: object
+            description: >-
+              Declared package dependency classification. Used to annotate
+              declared dependencies that resolve to known malware packages.
+            properties:
+              status:
+                type: string
+                enum:
+                  - Suspicious
+                  - Malicious
+                description: Dependency classification.
+                nullable: true
+              result:
+                type: string
+                description: >-
+                  Fully qualified threat name. String validation can be done
+                  with the ReversingLabs Malware Naming Standard.
+    oss-version-2: *ref_1
+    contributors:
+      type: array
+      items:
+        type: object
+        description: List of package contributor roles and people related to the project.
+        required:
+          - role
+          - name
+          - user
+          - email
+        properties:
+          role:
+            type: string
+            enum:
+              - developer
+              - maintainer
+              - author
+              - contributor
+              - owner
+            description: Project contributor role.
+          name:
+            type: string
+            description: >-
+              Display name of the account associated with the contributor in the
+              package repository.
+          user:
+            type: string
+            description: >-
+              User name of the account associated with the contributor in the
+              package repository.
+          email:
+            type: string
+            description: >-
+              E-mail account associated with the contributor in the package
+              repository.
+    oss-package-2: *ref_2
+    entitlements:
+      type: object
+      required:
+        - used
+        - allowed
+      properties:
+        used:
+          type: integer
+          nullable: true
+          description: >-
+            Number of entitlement units used by the account up to the moment of
+            sending the request.
+        allowed:
+          type: integer
+          nullable: true
+          description: Maximum number of entitlement units allowed for this account.
+    oss-account-2: *ref_3
+  parameters:
+    query_offset:
+      name: offset
+      in: query
+      description: >-
+        This optional parameter is used for pagination to specify the starting
+        index when enumerating package versions in the response.
+      required: false
+      schema:
+        type: integer
+        default: 0
+    query_limit:
+      name: limit
+      in: query
+      description: >-
+        Specify the maximum number of package versions to include in the
+        response.
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 5
+    is_compact:
+      name: compact
+      in: query
+      description: >-
+        When this parameter is specified in the request, all optional response
+        fields are automatically removed from the response to reduce its size.
+        Intended for OEM and product integrations.
+      required: false
+      schema:
+        type: boolean
+        default: false
+    purl_community:
+      name: community
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/communities'
+    purl_namespace:
+      name: namespace
+      in: path
+      description: >-
+        Namespace of the requested software package (according to the purl
+        schema `pkg:repository/namespace/package@version`).
+      required: false
+      example: '@ampproject'
+      schema:
+        type: string
+    purl_package:
+      name: package
+      in: path
+      description: >-
+        Name of the requested software package (according to the purl schema
+        `pkg:repository/namespace/package@version`).
+      required: true
+      example: remapping
+      schema:
+        type: string
+    purl_version:
+      name: version
+      in: path
+      description: >-
+        Version of the requested software package (according to the purl schema
+        `pkg:repository/namespace/package@version`).
+      required: false
+      example: 2.3.0
+      schema:
+        type: string
+    purl_artifact:
+      name: artifact
+      in: query
+      description: >-
+        Qualifier that specifies the artifact file of the requested software
+        package (according to the purl schema
+        `pkg:repository/namespace/package@version?artifact=filename.ext`). Note
+        that some software repositories (communities) do not support searching
+        for artifacts.
+      required: false
+      example: mock_numpy-2.2.0-.tar.gz
+      schema:
+        type: string
+    purl_artifact_tag:
+      name: artifact_tag
+      in: query
+      description: >-
+        Qualifier that specifies the artifact file of the requested software
+        package by a repository-specific tag (according to the purl schema
+        `pkg:repository/namespace/package@version?artifact_tag=example_tag`).
+        Note that some software repositories (communities) do not support
+        searching for artifacts.
+      required: false
+      example: cp310-cp310-win_amd64
+      schema:
+        type: string
+    match_pattern:
+      name: match_pattern
+      in: query
+      description: >-
+        Specifies the community-specific version glob pattern. Used for
+        dependency resolution. Should not be used together with `version` or
+        `match_expression`.
+      required: false
+      example: 1.3.*
+      schema:
+        type: string
+    match_expression:
+      name: match_expression
+      in: query
+      description: >-
+        Specifies the community-specific version expression. Used for dependency
+        resolution. Should not be used together with `version` or
+        `match_pattern`.
+      required: false
+      example: <= 18.3.0
+      schema:
+        type: string
+  requestBodies:
+    json_search:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: array
+            items:
+              oneOf:
+                - type: object
+                  title: SearchByPurl
+                  required:
+                    - uuid
+                    - purl
+                  properties:
+                    uuid:
+                      $ref: '#/components/schemas/uuid'
+                    purl:
+                      type: string
+                      description: >-
+                        Fully qualified package URL (purl) of the software
+                        package to search for, in the format
+                        `pkg:community/namespace/package@version`. If the
+                        `version` part of the purl is omitted, the response
+                        contains information about the latest published version.
+                        The purl is case-insensitive. For more information on
+                        the correct purl syntax, consult the [official purl
+                        specification](https://github.com/package-url/purl-spec).
+                      example: pkg:pypi/numpy@1.2.3
+                - type: object
+                  title: SearchBySha1
+                  required:
+                    - uuid
+                    - sha1
+                  properties:
+                    uuid:
+                      $ref: '#/components/schemas/uuid'
+                    sha1:
+                      type: string
+                      description: >-
+                        Search for a package with this hash, or packages that
+                        contain this hash. Hashes of embedded files are tracked
+                        only if they are malware artifacts.
+                      example: d63932d669fe6da664b4183d8e1d5a33a9492b9f
+                - type: object
+                  title: SearchBySha256
+                  required:
+                    - uuid
+                    - sha256
+                  properties:
+                    uuid:
+                      $ref: '#/components/schemas/uuid'
+                    sha256:
+                      type: string
+                      description: >-
+                        Search for a package with this hash, or packages that
+                        contain this hash. Hashes of embedded files are tracked
+                        only if they are malware artifacts.
+                      example: >-
+                        94957715a483aa3b9db60c8f22d5498227d8025c407f982eef81e34f37574ffd
+                - type: object
+                  title: MatchPurlByPattern
+                  required:
+                    - uuid
+                    - purl
+                    - match_pattern
+                  properties:
+                    uuid:
+                      $ref: '#/components/schemas/uuid'
+                    purl:
+                      type: string
+                      description: >-
+                        Partial package URL (purl) of the software package to
+                        search for. Must satisfy the following purl schema:
+                        `pkg:community/namespace/package?artifact=filename.ext`.
+                        For more information on the correct purl syntax, consult
+                        the [official purl
+                        specification](https://github.com/package-url/purl-spec/blob/main/purl-specification.md#rules-for-each-purl-component).
+                      example: pkg:pypi/mock-numpy
+                    match_pattern:
+                      type: string
+                      description: >-
+                        Search for all versions that match the
+                        community-agnostic glob pattern.
+                      example: 1.*.*
+                - type: object
+                  title: MatchPurlByExpression
+                  required:
+                    - uuid
+                    - purl
+                    - match_expression
+                  properties:
+                    uuid:
+                      $ref: '#/components/schemas/uuid'
+                    purl:
+                      type: string
+                      description: >-
+                        Partial package URL (purl) of the software package to
+                        search for. Must satisfy the following purl schema:
+                        `pkg:community/namespace/package?artifact=filename.ext`.
+                        For more information on the correct purl syntax, consult
+                        the [official purl
+                        specification](https://github.com/package-url/purl-spec/blob/main/purl-specification.md#rules-for-each-purl-component).
+                      example: pkg:pypi/mock-numpy
+                    match_expression:
+                      type: string
+                      description: >-
+                        Search for all versions that match the
+                        community-specific expression.
+                      example: '> 1.3.4'
+                - type: object
+                  title: MatchArtifacts
+                  required:
+                    - uuid
+                    - community
+                    - package
+                  properties:
+                    uuid:
+                      $ref: '#/components/schemas/uuid'
+                    community:
+                      $ref: '#/components/schemas/communities'
+                    namespace:
+                      type: string
+                      description: >-
+                        The namespace part of the purl to search for (according
+                        to the schema
+                        `pkg:community/namespace/package@version?artifact=filename.ext`).
+                    package:
+                      type: string
+                      description: >-
+                        The package part of the purl to search for (according to
+                        the schema
+                        `pkg:community/namespace/package@version?artifact=filename.ext`).
+                    version:
+                      type: string
+                      description: >-
+                        The version part of the purl to search for (according to
+                        the schema
+                        `pkg:community/namespace/package@version?artifact=filename.ext`).
+                    artifact:
+                      type: string
+                      description: >-
+                        The artifact part of the purl to search for (according
+                        to the schema
+                        `pkg:community/namespace/package@version?artifact=filename.ext`).
+                        Note that some software repositories (communities) do
+                        not support searching for artifacts.
+                    artifact_tag:
+                      type: string
+                      description: >-
+                        The artifact_tag part of the purl to search for
+                        (according to the schema
+                        `pkg:community/namespace/package@version?artifact_tag=example_tag`).
+                        Note that some software repositories (communities) do
+                        not support searching for artifacts.
+                    match_expression:
+                      type: string
+                      description: >-
+                        Search for all versions that match the
+                        community-specific expression. Should not be used
+                        together with `version`.
+                      example: '> 1.3.4'
+                    match_pattern:
+                      type: string
+                      description: >-
+                        Search for all versions that match the
+                        community-agnostic glob pattern. Should not be used
+                        together with `version`.
+                      example: 1.*.*
+  responses:
+    oss-search:
+      description: OK
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/oss-search-2'
+    bad-request:
+      description: Bad request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/oss-error'
+          examples:
+            MalformedRequest:
+              value:
+                error: Invalid structure of the request body
+            UnsupportedParameter:
+              value:
+                error: >-
+                  Invalid argument, the {purl_type} repository doesn't support
+                  artifact argument in the request.
+    unauthorized:
+      description: Not authorized
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/oss-error'
+          examples:
+            NoToken:
+              value:
+                error: Authentication credentials were not provided
+            WrongToken:
+              value:
+                error: Invalid token
+    low-capacity:
+      description: Insufficient remaining capacity
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/oss-error'
+          examples:
+            PaymentRequired:
+              value:
+                error: Insufficient remaining capacity
+    forbidden:
+      description: Forbidden
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/oss-error'
+          example:
+            error: Forbidden
+    content-too-large:
+      description: Content too large
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/oss-error'
+          example:
+            error: Too many packages requested
+    too-many-requests:
+      description: Too many requests
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/oss-error'
+          example:
+            error: Too many requests
+    server-error:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/oss-error'
+          example:
+            error: Server error
+    oss-version:
+      description: OK
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/oss-version-2'
+    not-found:
+      description: Not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/oss-error'
+          example:
+            error: Not found
+    oss-package:
+      description: OK
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/oss-package-2'
+    oss-account:
+      description: Spectra Assure Community user account
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/oss-account-2'

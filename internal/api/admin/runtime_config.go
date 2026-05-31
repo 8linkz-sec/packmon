@@ -18,6 +18,7 @@ type adminFeedFormRow struct {
 	SyncIntervalLabel       string
 	SyncIntervalHelp        string
 	SupportsSyncInterval    bool
+	SupportsExternalMode    bool
 	RequiresAPIKey          bool
 	APIKeyConfigured        bool
 	CanSyncNow              bool
@@ -55,10 +56,11 @@ func (h *AdminHandler) adminFeedRows(statuses []db.FeedSyncStatus) []adminFeedRo
 			continue
 		}
 		rows = append(rows, buildAdminFeedRow(h.cfg, config.FeedSettings{
-			Name:        status.FeedName,
-			DisplayName: strings.ToUpper(status.FeedName),
-			Enabled:     true,
-			Mode:        config.FeedModeSelf,
+			Name:                 status.FeedName,
+			DisplayName:          strings.ToUpper(status.FeedName),
+			Enabled:              true,
+			Mode:                 config.FeedModeSelf,
+			SupportsSyncInterval: true,
 		}, true, status))
 	}
 
@@ -102,9 +104,16 @@ func buildAdminFeedRow(cfg *config.Config, feedCfg config.FeedSettings, hasStatu
 		if status.LastSyncDuration != nil {
 			row.DurationStr = status.LastSyncDuration.Round(time.Millisecond).String()
 		}
+		if strings.EqualFold(status.LastSyncStatus, "running") && status.LastSyncAt != nil {
+			elapsed := time.Since(*status.LastSyncAt)
+			if elapsed < 0 {
+				elapsed = 0
+			}
+			row.DurationStr = "running for " + elapsed.Round(time.Second).String()
+		}
 	}
 
-	row.Status = adminFeedHealth(feedCfg.Enabled, feedCfg.Mode, statusOrNil(hasStatus, status))
+	row.Status = adminFeedHealth(feedCfg, statusOrNil(hasStatus, status))
 	if row.ConfigMode == "" {
 		row.ConfigMode = "unknown"
 	}
@@ -120,6 +129,7 @@ func buildAdminFeedFormRow(cfg *config.Config, runtimeFeed config.FeedSettings, 
 		FeedName:                runtimeFeed.DisplayName,
 		FeedKey:                 runtimeFeed.Name,
 		SupportsSyncInterval:    runtimeFeed.SupportsSyncInterval,
+		SupportsExternalMode:    config.NormalizeFeedName(runtimeFeed.Name) != "reversinglabs",
 		RequiresAPIKey:          runtimeFeed.RequiresAPIKey,
 		CanSyncNow:              supportsManualFeedSync(runtimeFeed.Name),
 		RuntimeMode:             string(runtimeFeed.Mode),
