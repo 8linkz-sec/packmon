@@ -119,7 +119,7 @@ func runOutdated(args []string, ecosystems string, maxDepth int) error {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			latest := fetchLatestVersion(ctx, p.Ecosystem, p.Name)
+			latest := fetchLatestVersionFn(ctx, p.Ecosystem, p.Name)
 			results[idx] = latest
 		}(i, pkg)
 	}
@@ -204,6 +204,11 @@ func runOutdated(args []string, ecosystems string, maxDepth int) error {
 	fmt.Printf(" (%d total)\n", len(packages))
 	return nil
 }
+
+// fetchLatestVersionFn is the indirection point for latest-version lookups so
+// tests can stub registry access without hitting the network. Production code
+// points it at fetchLatestVersion.
+var fetchLatestVersionFn = fetchLatestVersion
 
 // fetchLatestVersion queries the package registry for the latest version.
 // Returns "" if the lookup fails or the ecosystem is unsupported.

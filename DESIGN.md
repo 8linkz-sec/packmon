@@ -330,6 +330,8 @@ systems are responsible for off-host retention.
 Normal local gate:
 
 ```bash
+mkdir -p .gotmp
+export GOTMPDIR="$PWD/.gotmp"
 gofumpt -extra -l .
 go test -count=1 ./...
 go test -race -count=1 ./...
@@ -344,8 +346,8 @@ Build and tagged test gate:
 ```bash
 go build -o .build/packmon ./cmd/packmon
 go build -o .build/packmon-server ./cmd/packmon-server
-PACKMON_TEST_BIN_DIR=.build go test -count=1 -tags integration ./tests/integration
-PACKMON_TEST_BIN_DIR=.build go test -count=1 -tags e2e ./tests/e2e
+GOTMPDIR="$PWD/.gotmp" PACKMON_TEST_BIN_DIR=.build go test -count=1 -tags integration ./tests/integration
+GOTMPDIR="$PWD/.gotmp" PACKMON_TEST_BIN_DIR=.build go test -count=1 -tags e2e ./tests/e2e
 ```
 
 The Docker/PostgreSQL production integration test is the strongest local proxy

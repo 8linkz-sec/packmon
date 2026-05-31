@@ -103,6 +103,8 @@ working in or dispatching an agent to a subsystem, read the nearest-ancestor
 Use these from the repository root.
 
 ```bash
+mkdir -p .gotmp
+export GOTMPDIR="$PWD/.gotmp"
 go test -count=1 ./...
 go test -race -count=1 ./...
 go vet ./...
@@ -129,6 +131,8 @@ PACKMON_TEST_BIN_DIR=.build go test -count=1 -tags e2e ./tests/e2e
 Windows PowerShell equivalent:
 
 ```powershell
+New-Item -ItemType Directory -Force .gotmp | Out-Null
+$env:GOTMPDIR = (Resolve-Path .\.gotmp).Path
 go build -o .build\packmon.exe .\cmd\packmon
 go build -o .build\packmon-server.exe .\cmd\packmon-server
 $env:PACKMON_TEST_BIN_DIR = ".build"
@@ -155,6 +159,8 @@ Before claiming a change is complete, run the smallest commands that prove the
 claim. For broad or release-facing changes, run the full local gate:
 
 ```bash
+mkdir -p .gotmp
+export GOTMPDIR="$PWD/.gotmp"
 gofumpt -extra -l .
 go test -count=1 ./...
 go test -race -count=1 ./...

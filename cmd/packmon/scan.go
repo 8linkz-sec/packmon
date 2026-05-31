@@ -36,6 +36,7 @@ func newScanCmd() *cobra.Command {
 		flagRepo          string
 		flagListPackages  bool
 		flagOutdated      bool
+		flagListAll       bool
 		flagCACert        string
 		flagInsecureHTTP  bool
 		flagRequireRemote bool
@@ -54,6 +55,42 @@ and malicious package databases.`,
 			}
 			if flagOutdated {
 				return runOutdated(args, flagEcosystems, flagMaxDepth)
+			}
+			if flagListAll {
+				cfg, _, err := loadCurrentCLIConfig()
+				if err != nil {
+					return err
+				}
+				targets, err := buildScanTargets(cfg, args, scanFlagValues{})
+				if err != nil {
+					return err
+				}
+				settings, err := resolveScanSettings(cmd, cfg, targets[0], scanFlagValues{
+					Mode:          flagMode,
+					Server:        flagServer,
+					APIKey:        flagAPIKey,
+					FailOn:        flagFailOn,
+					Ecosystems:    flagEcosystems,
+					MaxDepth:      flagMaxDepth,
+					Timeout:       flagTimeout,
+					IncludeDev:    flagIncludeDev,
+					Quiet:         flagQuiet,
+					NoColor:       flagNoColor,
+					CACert:        flagCACert,
+					InsecureHTTP:  flagInsecureHTTP,
+					RequireRemote: flagRequireRemote,
+				})
+				if err != nil {
+					return err
+				}
+				exitCode, err := runListAll(cmd.Context(), settings)
+				if err != nil {
+					return err
+				}
+				if exitCode != ExitOK {
+					os.Exit(exitCode)
+				}
+				return nil
 			}
 			return runScanCommand(cmd, args, scanFlagValues{
 				Mode:          flagMode,
@@ -98,6 +135,7 @@ and malicious package databases.`,
 	f.StringVar(&flagRepo, "repo", "", "scan a configured repository by name")
 	f.BoolVar(&flagListPackages, "list-packages", false, "list all detected packages and exit (no vulnerability check)")
 	f.BoolVar(&flagOutdated, "outdated", false, "show packages with newer versions available")
+	f.BoolVar(&flagListAll, "list-all", false, "list findings, then all packages with available-update info")
 	f.StringVar(&flagCACert, "cacert", "", "path to a PEM CA bundle used to verify the server's TLS certificate")
 	f.BoolVar(&flagInsecureHTTP, "insecure-allow-http", false, "allow plain http:// server URLs (sends bearer token in cleartext; opt-in)")
 	f.BoolVar(&flagRequireRemote, "require-remote", false, "in auto mode, fail hard on remote error instead of falling back to the local database")
@@ -504,10 +542,16 @@ func autoFallbackWarning(mode scanner.Mode, result *domain.ScanResult) string {
 	return "warning: remote server unreachable, scanned against local database"
 }
 
-func runSingleScan(ctx context.Context, settings scanSettings) (int, error) {
+// runScanPipeline builds the scanner.Config from settings, opens the local
+// SQLite checker, runs the scan, applies DB freshness, surfaces the auto
+// fallback warning, and records scan history. It is the shared core used by
+// both runSingleScan (which then prints tables and writes output files) and
+// runListAll (which renders its own combined report). It does NOT print the
+// findings table or write any output files.
+func runScanPipeline(ctx context.Context, settings scanSettings) (*domain.ScanResult, domain.Severity, int, error) {
 	failOn, ok := scanner.SeverityFromString(settings.FailOn)
 	if !ok {
-		return ExitOperational, fmt.Errorf("invalid fail_on value %q", settings.FailOn)
+		return nil, failOn, ExitOperational, fmt.Errorf("invalid fail_on value %q", settings.FailOn)
 	}
 
 	var mode scanner.Mode
@@ -519,7 +563,7 @@ func runSingleScan(ctx context.Context, settings scanSettings) (int, error) {
 	case "", string(scanner.ModeAuto):
 		mode = scanner.ModeAuto
 	default:
-		return ExitOperational, fmt.Errorf("invalid mode value %q", settings.Mode)
+		return nil, failOn, ExitOperational, fmt.Errorf("invalid mode value %q", settings.Mode)
 	}
 
 	cfg := scanner.Config{
@@ -548,7 +592,7 @@ func runSingleScan(ctx context.Context, settings scanSettings) (int, error) {
 
 	dbPath, err := resolveLocalDBPath()
 	if err != nil {
-		return ExitOperational, err
+		return nil, failOn, ExitOperational, err
 	}
 
 	historyStore, advisoryDataAvailable, historyErr := openLocalSQLiteStore(ctx, dbPath)
@@ -583,6 +627,15 @@ func runSingleScan(ctx context.Context, settings scanSettings) (int, error) {
 				fmt.Fprintf(os.Stderr, "warning: unable to enforce history retention: %v\n", err)
 			}
 		}
+	}
+
+	return result, failOn, exitCode, nil
+}
+
+func runSingleScan(ctx context.Context, settings scanSettings) (int, error) {
+	result, failOn, exitCode, err := runScanPipeline(ctx, settings)
+	if err != nil {
+		return exitCode, err
 	}
 
 	if !settings.Quiet {

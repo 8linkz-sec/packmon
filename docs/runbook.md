@@ -202,7 +202,8 @@ The shared GitLab template lives at `ci/gitlab/.packmon-scan.yml`. Local and
 GitHub CI validation is covered by:
 
 ```bash
-go test ./tests/ci
+mkdir -p .gotmp
+GOTMPDIR="$PWD/.gotmp" go test ./tests/ci
 ```
 
 The test parses the YAML template and checks that the job downloads the release
@@ -215,6 +216,8 @@ On Windows hosts without `make`, build the binaries and point the integration
 tests at that directory directly:
 
 ```powershell
+New-Item -ItemType Directory -Force .gotmp | Out-Null
+$env:GOTMPDIR = (Resolve-Path .\.gotmp).Path
 go build -o .build\packmon.exe .\cmd\packmon
 go build -o .build\packmon-server.exe .\cmd\packmon-server
 $env:PACKMON_TEST_BIN_DIR = ".build"

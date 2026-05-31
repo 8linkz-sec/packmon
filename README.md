@@ -120,23 +120,50 @@ packmon db sync
 Config precedence is: command-line flags > environment variables > project `.packmon.yaml` > user-global `~/.packmon/config/packmon.yaml` > built-in defaults.
 Store API keys in environment variables or CI secrets. Use `api_key_env` in config files rather than writing plaintext keys to `.packmon.yaml`.
 
+## Git Hooks
+
+Install a packmon Git hook in the current repository to scan automatically.
+Hooks are per-repository (written to `.git/hooks/`); packmon does not change
+`core.hooksPath`.
+
+```bash
+packmon hook install                   # install a pre-push hook (default)
+packmon hook install --type pre-commit
+packmon hook uninstall                 # remove packmon-managed hooks
+packmon hook status                    # show hook status for this repo
+```
+
+The installed hook runs `packmon scan . --fail-on CRITICAL --quiet`, so a push
+(or commit) is blocked only when a CRITICAL vulnerability, malicious package, or
+supply-chain-risk finding is present. `install` refuses to overwrite an existing
+hook that packmon did not create; `uninstall` only removes packmon-managed
+hooks. Supported types: `pre-push` (default) and `pre-commit`. The hook type and
+fail-on threshold can also be set under a `hook:` block in `.packmon.yaml`.
+
 ## Server Configuration
 
 Important environment variables:
 
 - `PACKMON_SERVER_MODE=production|development`
 - `PACKMON_SERVER_PORT=8080`
+- `PACKMON_SERVER_PUBLIC_HOST` (host:port clients use to reach the server)
 - `PACKMON_TLS_CERT_FILE`, `PACKMON_TLS_KEY_FILE`, `PACKMON_TLS_MIN_VERSION=1.2|1.3`
+- `PACKMON_ALLOW_INSECURE_LOCAL_HTTP=false` (loopback-only override for the fail-closed transport check)
 - `PACKMON_TRUSTED_PROXIES=10.0.0.0/8,192.168.10.10`
+- `PACKMON_SERVER_READ_TIMEOUT=30s`, `PACKMON_SERVER_WRITE_TIMEOUT=30s`, `PACKMON_SERVER_SHUTDOWN_TIMEOUT=5s`
 - `PACKMON_BLOCK_THRESHOLD=CRITICAL`
 - `PACKMON_RATE_LIMIT_PER_MINUTE=60`
 - `PACKMON_RATE_LIMIT_BURST=60`
 - `PACKMON_METRICS_HOST=127.0.0.1`
 - `PACKMON_METRICS_PORT=9090`
 - `PACKMON_DB_HOST`, `PACKMON_DB_PORT`, `PACKMON_DB_NAME`, `PACKMON_DB_USER`, `PACKMON_DB_PASSWORD`
+- `PACKMON_DB_SSLMODE` (default `require` in production, `disable` in development)
+- `PACKMON_ENCRYPTION_KEY` (encrypts stored feed API keys at rest; without it keys are stored in plaintext and the server logs a startup warning)
 - `PACKMON_ADMIN_INITIAL_PASSWORD`
+- `PACKMON_ADMIN_SESSION_TIMEOUT=8h`
 - `PACKMON_SOCKET_API_KEY`
 - `PACKMON_VULNCHECK_API_KEY`
+- `PACKMON_NVD_API_KEY`
 - `PACKMON_FEED_REVERSINGLABS_ENABLED=false`
 - `PACKMON_FEED_REVERSINGLABS_MODE=self`
 - `PACKMON_REVERSINGLABS_API_KEY`
@@ -163,11 +190,15 @@ For CLI local freshness warnings:
 ## Testing
 
 ```bash
-go test ./...
-go test ./tests/ci
+mkdir -p .gotmp
+GOTMPDIR="$PWD/.gotmp" go test ./...
+GOTMPDIR="$PWD/.gotmp" go test ./tests/ci
 make test-integration
 make test-e2e
 ```
+
+The `make test*` targets set `GOTMPDIR` to the ignored local `.gotmp` directory
+so temporary Go test binaries do not get written to the system temp folder.
 
 `go test ./tests/ci` validates the reusable GitLab template under `ci/gitlab`,
 including release binary download defaults, checksum verification, and GitLab
@@ -181,6 +212,8 @@ integration suite under `tests/integration` and the E2E suite under `tests/e2e`.
 On Windows systems without `make`, use the direct commands:
 
 ```powershell
+New-Item -ItemType Directory -Force .gotmp | Out-Null
+$env:GOTMPDIR = (Resolve-Path .\.gotmp).Path
 go build -o .build\packmon.exe .\cmd\packmon
 go build -o .build\packmon-server.exe .\cmd\packmon-server
 $env:PACKMON_TEST_BIN_DIR = ".build"
