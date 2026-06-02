@@ -117,7 +117,8 @@ func newHookInstallCmd() *cobra.Command {
 			}
 
 			//nolint:gosec // hooks must be executable for Git to run them.
-			if err := os.WriteFile(hookPath, []byte(hookScript()), 0o755); err != nil { // #nosec G306 -- hooks must be executable
+			// #nosec G306 -- hooks must be executable for Git to run them.
+			if err := os.WriteFile(hookPath, []byte(hookScript()), 0o755); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: cannot write hook file: %v\n", err)
 				os.Exit(ExitOperational)
 			}

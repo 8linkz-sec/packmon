@@ -524,6 +524,7 @@ type rewriteTransport struct {
 
 func (t *rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	newURL := t.base + req.URL.Path
+	// #nosec G704 -- test transport rewrites requests to a local httptest server.
 	newReq, err := http.NewRequestWithContext(req.Context(), req.Method, newURL, req.Body)
 	if err != nil {
 		return nil, err

@@ -122,6 +122,7 @@ func TestResolveScanSettings_APIKeyEnvFromCLIConfig(t *testing.T) {
 	t.Setenv("PACKMON_API_KEY", "")
 	t.Setenv("PACKMON_CI_KEY", "secret-from-env-ref")
 
+	// #nosec G101 -- test fixture references an environment variable name, not a secret.
 	cfg := &cliConfig{APIKeyEnv: "PACKMON_CI_KEY"}
 	cmd := newTestScanCmdForTLS()
 	target := scanTarget{Name: "local", Path: "."}

@@ -204,6 +204,7 @@ func (m *Manager) startFeedLocked(rf *registeredFeed, interval time.Duration, in
 		return
 	}
 
+	// #nosec G118 -- cancel is stored on the registered feed and called by ApplyConfig/Stop.
 	feedCtx, cancel := context.WithCancel(m.ctx)
 	rf.cancel = cancel
 

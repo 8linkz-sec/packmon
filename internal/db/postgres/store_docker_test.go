@@ -86,6 +86,7 @@ func waitForPostgresContainer(t *testing.T, containerName string) {
 
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
+		// #nosec G204 -- test helper executes docker with fixed test-provided container name.
 		cmd := exec.Command("docker", "exec", containerName, "pg_isready", "-U", "packmon", "-d", "packmon")
 		if err := cmd.Run(); err == nil {
 			return

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,6 +31,8 @@ type socketTestStore struct {
 	statuses      []db.PackageCheckStatus
 	completed     []socketCompletion
 	resetSource   string
+	resetCh       chan struct{}
+	resetOnce     sync.Once
 }
 
 type socketCompletion struct {
@@ -68,6 +71,11 @@ func (s *socketTestStore) CompleteRefresh(_ context.Context, id int, err error) 
 
 func (s *socketTestStore) ResetStuckJobs(_ context.Context, source string, _ time.Duration) (int, error) {
 	s.resetSource = source
+	if s.resetCh != nil {
+		s.resetOnce.Do(func() {
+			close(s.resetCh)
+		})
+	}
 	return s.resetCount, s.resetErr
 }
 
@@ -302,21 +310,26 @@ func TestProcessNextJobSkipsWhenNoToken(t *testing.T) {
 func TestRunProcessesUntilContextCancellation(t *testing.T) {
 	t.Parallel()
 
-	store := &socketTestStore{resetCount: 1}
+	resetCh := make(chan struct{})
+	store := &socketTestStore{resetCount: 1, resetCh: resetCh}
 	worker := NewWorker(store, "socket-secret", nil, WithPollInterval(time.Millisecond), WithRateLimit(1))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- worker.Run(ctx) }()
 
-	time.Sleep(10 * time.Millisecond)
+	select {
+	case <-resetCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run() did not reset stuck jobs")
+	}
 	cancel()
 	select {
 	case err := <-done:
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("Run() error = %v, want context.Canceled", err)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("Run() did not exit after cancellation")
 	}
 	if store.resetSource != FeedName {

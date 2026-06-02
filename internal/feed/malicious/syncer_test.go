@@ -388,6 +388,7 @@ func gitCommitAll(t *testing.T, repoDir string) {
 
 func runGit(t *testing.T, repoDir string, args ...string) {
 	t.Helper()
+	// #nosec G204 -- test helper executes git with fixed test-provided args.
 	cmd := exec.Command("git", args...)
 	cmd.Dir = repoDir
 	out, err := cmd.CombinedOutput()

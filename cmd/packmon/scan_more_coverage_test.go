@@ -236,6 +236,7 @@ func TestBuildScanTargetsValidationBranches(t *testing.T) {
 
 func TestResolveScanSettingsAPIKeyEnvAndValidationBranches(t *testing.T) {
 	t.Setenv("PACKMON_TEST_API_KEY", "from-env")
+	// #nosec G101 -- test fixture references an environment variable name, not a secret.
 	repo := &cliRepoConfig{APIKeyEnv: "PACKMON_TEST_API_KEY"}
 	settings, err := resolveScanSettings(newScanCmd(), nil, scanTarget{Path: ".", Repo: repo}, scanFlagValues{
 		Mode:    "local",

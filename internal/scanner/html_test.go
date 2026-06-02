@@ -225,12 +225,16 @@ func TestBuildReportUnknownSeverityBadgeCountsAllFindings(t *testing.T) {
 	r := buildReport("svc", "dev", domain.SeverityCritical, &domain.ScanResult{
 		Mode: "local", PackagesScanned: 2,
 		Findings: []domain.Finding{
-			{Name: "a", Version: "1", Ecosystem: domain.EcosystemNPM,
+			{
+				Name: "a", Version: "1", Ecosystem: domain.EcosystemNPM,
 				Type: domain.FindingTypeVulnerability, Severity: domain.SeverityCritical,
-				Title: "crit", Source: "osv"},
-			{Name: "b", Version: "1", Ecosystem: domain.EcosystemNPM,
+				Title: "crit", Source: "osv",
+			},
+			{
+				Name: "b", Version: "1", Ecosystem: domain.EcosystemNPM,
 				Type: domain.FindingTypeVulnerability, Severity: domain.SeverityUnknown,
-				Title: "no severity", Source: "osv"},
+				Title: "no severity", Source: "osv",
+			},
 		},
 	})
 

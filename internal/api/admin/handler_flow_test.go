@@ -440,6 +440,7 @@ func adminFlowConfig() *config.Config {
 			Interval:  time.Hour,
 			OnStartup: true,
 		},
+		// #nosec G101 -- this test fixture uses fake feed credentials.
 		Feeds: config.FeedsConfig{
 			OSVEnabled:           true,
 			OSVMode:              config.FeedModeSelf,

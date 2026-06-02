@@ -164,6 +164,7 @@ func TestGitRepoRunAndCloneErrorBranches(t *testing.T) {
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 
+	// #nosec G204 -- test helper executes git with fixed test-provided args.
 	cmd := exec.Command("git", args...)
 	if dir != "" {
 		cmd.Dir = dir
