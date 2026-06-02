@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"strings"
 
 	"github.com/8linkz/packmon/internal/domain"
@@ -102,7 +103,7 @@ func parseSwiftV2(data []byte) ([]domain.Package, error) {
 	)
 
 	for _, pin := range resolved.Pins {
-		name := pin.Identity
+		name := swiftPackageName(pin.Location, pin.Identity)
 		if name == "" {
 			errs = append(errs, fmt.Sprintf("pin with empty identity (location: %s)", pin.Location))
 			continue
@@ -141,7 +142,7 @@ func parseSwiftV1(data []byte) ([]domain.Package, error) {
 	)
 
 	for _, pin := range resolved.Object.Pins {
-		name := pin.Package
+		name := swiftPackageName(pin.RepositoryURL, pin.Package)
 		if name == "" {
 			errs = append(errs, fmt.Sprintf("pin with empty package name (repo: %s)", pin.RepositoryURL))
 			continue
@@ -169,4 +170,53 @@ func parseSwiftV1(data []byte) ([]domain.Package, error) {
 
 func (p *SwiftPMParser) Ecosystem() domain.Ecosystem {
 	return domain.EcosystemSwiftPM
+}
+
+func swiftPackageName(location, fallback string) string {
+	if canonical := canonicalSwiftPackageLocation(location); canonical != "" {
+		return canonical
+	}
+	return strings.TrimSpace(fallback)
+}
+
+func canonicalSwiftPackageLocation(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+
+	if strings.Contains(raw, "://") {
+		parsed, err := url.Parse(raw)
+		if err == nil && parsed.Host != "" {
+			return canonicalSwiftHostPath(parsed.Host, parsed.Path)
+		}
+	}
+
+	if _, rest, ok := strings.Cut(raw, "@"); ok {
+		if host, path, ok := strings.Cut(rest, ":"); ok {
+			return canonicalSwiftHostPath(host, path)
+		}
+	}
+
+	if host, path, ok := strings.Cut(raw, "/"); ok && strings.Contains(host, ".") {
+		return canonicalSwiftHostPath(host, path)
+	}
+
+	return raw
+}
+
+func canonicalSwiftHostPath(host, path string) string {
+	host = strings.ToLower(strings.TrimSpace(host))
+	path = strings.TrimSpace(path)
+	if idx := strings.IndexAny(path, "?#"); idx >= 0 {
+		path = path[:idx]
+	}
+	path = strings.Trim(path, "/")
+	if strings.HasSuffix(strings.ToLower(path), ".git") {
+		path = path[:len(path)-len(".git")]
+	}
+	if host == "" || path == "" {
+		return ""
+	}
+	return host + "/" + path
 }

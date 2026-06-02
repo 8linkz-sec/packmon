@@ -159,6 +159,58 @@ func TestFindVulnerabilitiesMatchesRangesAndFailsSafeOnInvalidJSON(t *testing.T)
 	}
 }
 
+func TestFindLocalSecurityRowsNormalizeNuGetNames(t *testing.T) {
+	t.Parallel()
+
+	store := newSQLiteTestStore(t)
+	ctx := context.Background()
+
+	if _, err := store.DB().ExecContext(ctx, `
+		INSERT INTO vulnerabilities_local(row_key, id, ecosystem, name, version_ranges, severity, summary)
+		VALUES ('V-NUGET|nuget|newtonsoft.json', 'V-NUGET', 'nuget', 'newtonsoft.json', NULL, 'HIGH', 'nuget vuln');
+		INSERT INTO malicious_local(id, ecosystem, name, versions, risk_type, severity, summary)
+		VALUES ('M-NUGET', 'nuget', 'newtonsoft.json', '["13.0.3"]', 'malware', 'CRITICAL', 'nuget malicious');
+		INSERT INTO reputation_findings_local(id, ecosystem, name, version, type, risk_type, severity, summary)
+		VALUES ('R-NUGET', 'nuget', 'newtonsoft.json', '13.0.3', 'supply_chain_risk', 'removed_package', 'LOW', 'nuget reputation')`); err != nil {
+		t.Fatalf("insert nuget rows: %v", err)
+	}
+
+	vulns, err := store.FindVulnerabilities(ctx, "nuget", "Newtonsoft.Json", "13.0.3")
+	if err != nil {
+		t.Fatalf("FindVulnerabilities() error = %v", err)
+	}
+	if len(vulns) != 1 || vulns[0].AdvisoryID != "V-NUGET" || vulns[0].Name != "newtonsoft.json" {
+		t.Fatalf("FindVulnerabilities() = %+v, want normalized NuGet hit", vulns)
+	}
+
+	malicious, err := store.FindMalicious(ctx, "nuget", "Newtonsoft.Json", "13.0.3")
+	if err != nil {
+		t.Fatalf("FindMalicious() error = %v", err)
+	}
+	byID := make(map[string]domain.Finding, len(malicious))
+	sawMalicious := false
+	for _, finding := range malicious {
+		byID[finding.AdvisoryID] = finding
+		if finding.Type == domain.FindingTypeMalicious && finding.RiskType == "malware" && finding.Name == "newtonsoft.json" {
+			sawMalicious = true
+		}
+	}
+	if !sawMalicious {
+		t.Fatalf("FindMalicious() = %+v, want normalized malicious hit", malicious)
+	}
+	if byID["R-NUGET"].Name != "newtonsoft.json" {
+		t.Fatalf("FindMalicious() = %+v, want normalized reputation hit", malicious)
+	}
+
+	reputation, err := store.FindReputationFindings(ctx, "nuget", "Newtonsoft.Json", "reversinglabs")
+	if err != nil {
+		t.Fatalf("FindReputationFindings() error = %v", err)
+	}
+	if len(reputation) != 1 || reputation[0].AdvisoryID != "R-NUGET" || reputation[0].Name != "newtonsoft.json" {
+		t.Fatalf("FindReputationFindings() = %+v, want normalized NuGet hit", reputation)
+	}
+}
+
 func TestFindMaliciousFiltersVersionsAndIncludesReputation(t *testing.T) {
 	t.Parallel()
 

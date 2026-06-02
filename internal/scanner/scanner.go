@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/8linkz/packmon/internal/db"
 	"github.com/8linkz/packmon/internal/domain"
 	"github.com/8linkz/packmon/internal/parser"
 )
@@ -27,6 +28,12 @@ import (
 type LocalChecker interface {
 	FindVulnerabilities(ctx context.Context, ecosystem, name, version string) ([]domain.Finding, error)
 	FindMalicious(ctx context.Context, ecosystem, name, version string) ([]domain.Finding, error)
+}
+
+// LifecycleChecker is an optional local checker extension for cached
+// lifecycle/EOL findings.
+type LifecycleChecker interface {
+	FindLifecycleFindingsBatch(ctx context.Context, packages []db.PackageQuery, now time.Time) ([]domain.Finding, error)
 }
 
 // Mode controls how the scanner resolves findings.
@@ -57,6 +64,7 @@ type Config struct {
 	Repo       *domain.RepoInfo
 	FailOn     domain.Severity
 	Ecosystems []string
+	SBOMFiles  []string
 	MaxDepth   int
 	Timeout    time.Duration
 	IncludeDev bool
@@ -154,14 +162,20 @@ func (s *Scanner) Run(ctx context.Context) (*domain.ScanResult, int) {
 	start := time.Now()
 	scanID := generateScanID()
 
-	// 1. Walk: discover lock files.
-	walker := NewWalker(s.registry, s.cfg.MaxDepth, s.cfg.Ecosystems)
-	lockFiles, err := walker.Walk(s.cfg.Path)
+	// 1. Collect packages from lockfiles and explicit SBOM inputs.
+	collection, err := CollectPackages(CollectConfig{
+		Registry:   s.registry,
+		Root:       s.cfg.Path,
+		MaxDepth:   s.cfg.MaxDepth,
+		Ecosystems: s.cfg.Ecosystems,
+		SBOMFiles:  s.cfg.SBOMFiles,
+		IncludeDev: s.cfg.IncludeDev,
+	})
 	if err != nil {
-		return s.errorResult(scanID, start, fmt.Sprintf("walk error: %v", err)), ExitOperational
+		return s.errorResult(scanID, start, fmt.Sprintf("collect packages: %v", err)), ExitOperational
 	}
 
-	if len(lockFiles) == 0 {
+	if collection.LockFiles == 0 && collection.SBOMFiles == 0 {
 		result := &domain.ScanResult{
 			ScanID:          scanID,
 			Mode:            string(s.resolveMode()),
@@ -176,33 +190,12 @@ func (s *Scanner) Run(ctx context.Context) (*domain.ScanResult, int) {
 		return result, ExitOK
 	}
 
-	// 2. Parse: extract packages from all lock files.
-	var allPackages []domain.Package
-	var parseErrors []string
-	for _, lf := range lockFiles {
-		s.log().Debug("found lock file",
-			slog.String("path", lf.RelPath),
-			slog.String("ecosystem", string(lf.Parser.Ecosystem())),
-		)
-		pkgs, parseErr := s.parseLockFile(lf)
-		if parseErr != nil {
-			parseErrors = append(parseErrors, fmt.Sprintf("%s: %v", lf.RelPath, parseErr))
-			continue
-		}
-		s.log().Debug("parsed lock file",
-			slog.String("path", lf.RelPath),
-			slog.Int("packages", len(pkgs)),
-		)
-		allPackages = append(allPackages, pkgs...)
-	}
-
-	// Deduplicate packages.
-	allPackages = dedup(allPackages)
-	if !s.cfg.IncludeDev {
-		allPackages = filterDevPackages(allPackages)
-	}
+	allPackages := collection.Packages
+	parseErrors := collection.ParseErrors
 	s.log().Debug("packages collected",
 		slog.Int("total", len(allPackages)),
+		slog.Int("lock_files", collection.LockFiles),
+		slog.Int("sbom_files", collection.SBOMFiles),
 		slog.Bool("include_dev", s.cfg.IncludeDev),
 	)
 
@@ -320,15 +313,6 @@ func (s *Scanner) resolveMode() Mode {
 	}
 }
 
-func (s *Scanner) parseLockFile(lf LockFile) ([]domain.Package, error) {
-	f, err := os.Open(lf.Path)
-	if err != nil {
-		return nil, err
-	}
-	defer closeSilently(f)
-	return lf.Parser.Parse(f)
-}
-
 // checkRemote sends packages to the server's POST /api/v1/check endpoint.
 func (s *Scanner) checkRemote(ctx context.Context, pkgs []domain.Package) ([]domain.Finding, map[string]string, string, error) {
 	if s.cfg.ServerURL == "" {
@@ -422,6 +406,22 @@ func (s *Scanner) checkLocal(ctx context.Context, pkgs []domain.Package) ([]doma
 		allFindings = append(allFindings, mals...)
 	}
 
+	if lifecycleChecker, ok := s.localChecker.(LifecycleChecker); ok {
+		queries := make([]db.PackageQuery, 0, len(pkgs))
+		for _, pkg := range pkgs {
+			queries = append(queries, db.PackageQuery{
+				Ecosystem: string(pkg.Ecosystem),
+				Name:      pkg.Name,
+				Version:   pkg.Version,
+			})
+		}
+		lifecycle, err := lifecycleChecker.FindLifecycleFindingsBatch(ctx, queries, time.Now().UTC())
+		if err != nil {
+			return nil, fmt.Errorf("local lifecycle check: %w", err)
+		}
+		allFindings = append(allFindings, lifecycle...)
+	}
+
 	return allFindings, nil
 }
 
@@ -502,16 +502,6 @@ func dedup(pkgs []domain.Package) []domain.Package {
 		}
 		seen[k] = len(out)
 		out = append(out, p)
-	}
-	return out
-}
-
-func filterDevPackages(pkgs []domain.Package) []domain.Package {
-	out := pkgs[:0]
-	for _, pkg := range pkgs {
-		if !pkg.Dev {
-			out = append(out, pkg)
-		}
 	}
 	return out
 }

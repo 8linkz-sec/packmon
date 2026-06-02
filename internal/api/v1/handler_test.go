@@ -36,6 +36,8 @@ type stubStore struct {
 	reputationFindings   []domain.Finding
 	reputationPackage    []domain.Finding
 	reputationErr        error
+	lifecycleFindings    []domain.Finding
+	lifecycleErr         error
 	markReputationQueued bool
 	markReputationErr    error
 	feedStatuses         []db.FeedSyncStatus
@@ -49,6 +51,7 @@ type stubStore struct {
 	}
 	markedReputations   []db.PackageReputation
 	upsertedReputations []db.PackageReputation
+	upsertedLifecycle   []db.LifecycleProduct
 	enqueuedRefreshJobs []db.RefreshJob
 	upsertedVulns       []db.Vulnerability
 	deletedVulnIDs      []string
@@ -64,6 +67,7 @@ type stubStore struct {
 		name      string
 		source    string
 	}
+	lifecycleQueries []db.PackageQuery
 }
 
 type syncExportStore struct {
@@ -101,6 +105,11 @@ func (s *stubStore) FindReputationFindingsBatch(_ context.Context, packages []db
 		source   string
 	}{packages: copied, source: source})
 	return s.reputationFindings, s.reputationErr
+}
+
+func (s *stubStore) FindLifecycleFindingsBatch(_ context.Context, packages []db.PackageQuery, _ time.Time) ([]domain.Finding, error) {
+	s.lifecycleQueries = append(s.lifecycleQueries, packages...)
+	return s.lifecycleFindings, s.lifecycleErr
 }
 
 func (s *stubStore) FindReputationFindings(_ context.Context, ecosystem, name, source string) ([]domain.Finding, error) {
@@ -142,6 +151,11 @@ func (s *stubStore) UpsertPackageReputation(_ context.Context, rep *db.PackageRe
 	if rep != nil {
 		s.upsertedReputations = append(s.upsertedReputations, *rep)
 	}
+	return nil
+}
+
+func (s *stubStore) UpsertLifecycleProducts(_ context.Context, products []db.LifecycleProduct) error {
+	s.upsertedLifecycle = append(s.upsertedLifecycle, products...)
 	return nil
 }
 
@@ -409,6 +423,97 @@ func TestHandleCheckUsesConfiguredBlockThreshold(t *testing.T) {
 	}
 	if !result.FindingsBlocking {
 		t.Fatal("FindingsBlocking = false, want true for MEDIUM threshold")
+	}
+}
+
+func TestHandleCheckIncludesLifecycleFindings(t *testing.T) {
+	t.Parallel()
+
+	store := &stubStore{
+		vulnBatchFindings: []domain.Finding{
+			{
+				Name:       "django",
+				Version:    "4.2.11",
+				Ecosystem:  domain.EcosystemPyPI,
+				Type:       domain.FindingTypeVulnerability,
+				Severity:   domain.SeverityHigh,
+				AdvisoryID: "GHSA-django",
+				Title:      "Django vulnerability",
+				Source:     "osv",
+			},
+		},
+		malBatchFindings: []domain.Finding{
+			{
+				Name:       "django",
+				Version:    "4.2.11",
+				Ecosystem:  domain.EcosystemPyPI,
+				Type:       domain.FindingTypeMalicious,
+				Severity:   domain.SeverityCritical,
+				AdvisoryID: "MAL-django",
+				Title:      "Malicious package",
+				RiskType:   "malware",
+				Source:     "openssf",
+			},
+		},
+		lifecycleFindings: []domain.Finding{
+			{
+				Name:       "django",
+				Version:    "4.2.11",
+				Ecosystem:  domain.EcosystemPyPI,
+				Type:       domain.FindingTypeLifecycle,
+				Severity:   domain.SeverityLow,
+				AdvisoryID: "endoflife:django:4.2:security_support_only",
+				Title:      "Django 4.2 is in security support only",
+				RiskType:   "security_support_only",
+				Source:     "endoflife.date",
+			},
+		},
+		feedStatuses: []db.FeedSyncStatus{
+			{FeedName: "endoflife", LastSyncStatus: "error", LastError: "rate limited"},
+		},
+	}
+
+	h := newTestHandler(store)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/check", strings.NewReader(
+		`{"packages":[{"name":"django","version":"4.2.11","ecosystem":"pypi"}]}`,
+	))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	h.HandleCheck(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var result domain.ScanResult
+	if err := json.Unmarshal(rr.Body.Bytes(), &result); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(result.Findings) != 3 || result.FindingsCount != 3 {
+		t.Fatalf("findings = %d count=%d, want 3/3: %+v", len(result.Findings), result.FindingsCount, result.Findings)
+	}
+	if result.Summary.ByType[string(domain.FindingTypeLifecycle)] != 1 {
+		t.Fatalf("summary.by_type.lifecycle = %d, want 1", result.Summary.ByType[string(domain.FindingTypeLifecycle)])
+	}
+	if len(store.lifecycleQueries) != 1 {
+		t.Fatalf("lifecycle queries = %d, want 1", len(store.lifecycleQueries))
+	}
+	if result.FeedStatus != "degraded" {
+		t.Fatalf("FeedStatus = %q, want degraded", result.FeedStatus)
+	}
+
+	statusReq := httptest.NewRequest(http.MethodGet, "/api/v1/feeds/status", nil)
+	statusRR := httptest.NewRecorder()
+	h.HandleFeedStatus(statusRR, statusReq)
+	if statusRR.Code != http.StatusOK {
+		t.Fatalf("feed status code = %d: %s", statusRR.Code, statusRR.Body.String())
+	}
+	var statusResp FeedStatusResponse
+	if err := json.Unmarshal(statusRR.Body.Bytes(), &statusResp); err != nil {
+		t.Fatalf("decode feed status: %v", err)
+	}
+	if len(statusResp.Feeds) != 1 || statusResp.Feeds[0].Name != "endoflife" || !strings.Contains(statusResp.Feeds[0].Message, "rate limited") {
+		t.Fatalf("feed status response = %+v, want endoflife rate limited message", statusResp)
 	}
 }
 
@@ -809,6 +914,31 @@ func TestIsBlocking_SupplyChainRiskAlwaysBlocks(t *testing.T) {
 
 	if !isBlocking(findings, domain.SeverityNone) {
 		t.Fatal("supply-chain risk findings must block even when vulnerability threshold is NONE")
+	}
+}
+
+func TestIsBlocking_LifecycleFindingsUseSeverityThreshold(t *testing.T) {
+	t.Parallel()
+
+	findings := []domain.Finding{
+		{
+			Name:       "django",
+			Version:    "3.2.25",
+			Ecosystem:  domain.EcosystemPyPI,
+			Type:       domain.FindingTypeLifecycle,
+			Severity:   domain.SeverityMedium,
+			AdvisoryID: "eol:django:3.2",
+			Title:      "Django 3.2 reaches EOL soon",
+			RiskType:   "eol_soon",
+			Source:     "endoflife.date",
+		},
+	}
+
+	if !isBlocking(findings, domain.SeverityMedium) {
+		t.Fatal("MEDIUM lifecycle finding should block at MEDIUM threshold")
+	}
+	if isBlocking(findings, domain.SeverityHigh) {
+		t.Fatal("MEDIUM lifecycle finding should not block at HIGH threshold")
 	}
 }
 

@@ -36,6 +36,7 @@ func NewRegistry() *Registry {
 	return &Registry{
 		parsers: []Parser{
 			NewNPMParser(),
+			NewActionsParser(),
 			NewYarnParser(),
 			NewPnpmParser(),
 			NewPipfileParser(),
@@ -66,12 +67,13 @@ func (r *Registry) Register(p Parser) {
 }
 
 // ParserFor returns the first parser whose CanParse returns true for the
-// given path. The path is reduced to its base name before matching.
+// given path. Path-aware parsers can inspect directories; legacy filename
+// parsers still receive the base name as a fallback.
 // Returns nil if no parser matches.
 func (r *Registry) ParserFor(path string) Parser {
 	base := filepath.Base(path)
 	for _, p := range r.parsers {
-		if p.CanParse(base) {
+		if p.CanParse(path) || (base != path && p.CanParse(base)) {
 			return p
 		}
 	}
@@ -109,6 +111,8 @@ func (r *Registry) SupportedFiles() []string {
 		"renv.lock",
 		"pom.xml",
 		"gradle.lockfile",
+		".github/workflows/*.yml",
+		".github/workflows/*.yaml",
 	}
 	return known
 }

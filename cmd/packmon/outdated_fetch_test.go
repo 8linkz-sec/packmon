@@ -21,7 +21,9 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 
 func TestFetchLatestVersionParsesSupportedRegistryResponses(t *testing.T) {
 	originalClient := registryClient
+	originalGitRemoteTags := gitRemoteTagsFn
 	t.Cleanup(func() { registryClient = originalClient })
+	t.Cleanup(func() { gitRemoteTagsFn = originalGitRemoteTags })
 
 	responses := map[string]string{
 		"registry.npmjs.org/pkg/latest":                             `{"version":"1.2.3"}`,
@@ -31,12 +33,20 @@ func TestFetchLatestVersionParsesSupportedRegistryResponses(t *testing.T) {
 		"api.nuget.org/v3-flatcontainer/newtonsoft.json/index.json": `{"versions":["12.0.1","13.0.3","13.0.2"]}`,
 		"rubygems.org/api/v1/gems/pkg.json":                         `{"version":"4.5.6"}`,
 		"repo.packagist.org/p2/vendor/package.json":                 `{"packages":{"vendor/package":[{"version":"dev-main"},{"version":"5.6.7"}]}}`,
+		"search.maven.org/solrsearch/select?q=g%3A%22com.google.guava%22+AND+a%3A%22guava%22&rows=1&wt=json": `{"response":{"docs":[{"latestVersion":"33.4.8-jre"}]}}`,
+		"pub.dev/api/packages/http":                              `{"latest":{"version":"1.5.0"}}`,
+		"hex.pm/api/packages/jason":                              `{"latest_version":"1.5.0-alpha.2","latest_stable_version":"1.4.5"}`,
+		"cran.r-project.org/web/packages/dplyr/DESCRIPTION":      "Package: dplyr\nVersion: 1.1.4\n",
+		"trunk.cocoapods.org/api/v1/pods/Alamofire/specs/latest": `{"name":"Alamofire","version":"5.11.2"}`,
 	}
 	registryClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		if req.Header.Get("Accept") != "application/json" {
 			t.Fatalf("Accept header = %q, want application/json", req.Header.Get("Accept"))
 		}
 		key := req.URL.Host + req.URL.EscapedPath()
+		if req.URL.RawQuery != "" {
+			key += "?" + req.URL.RawQuery
+		}
 		body, ok := responses[key]
 		if !ok {
 			t.Fatalf("unexpected registry request: %s %s", req.Method, req.URL.String())
@@ -48,6 +58,17 @@ func TestFetchLatestVersionParsesSupportedRegistryResponses(t *testing.T) {
 			Request:    req,
 		}, nil
 	})}
+	gitRemoteTagsFn = func(_ context.Context, remote string) ([]string, error) {
+		switch remote {
+		case "https://github.com/Alamofire/Alamofire.git":
+			return []string{"5.9.0", "5.11.2", "5.10.0"}, nil
+		case "https://github.com/actions/checkout.git":
+			return []string{"v3", "v4", "v4.2.2"}, nil
+		default:
+			t.Fatalf("unexpected git remote: %s", remote)
+			return nil, nil
+		}
+	}
 
 	tests := []struct {
 		ecosystem domain.Ecosystem
@@ -61,6 +82,13 @@ func TestFetchLatestVersionParsesSupportedRegistryResponses(t *testing.T) {
 		{domain.EcosystemNuGet, "Newtonsoft.Json", "13.0.3"},
 		{domain.EcosystemGem, "pkg", "4.5.6"},
 		{domain.EcosystemComposer, "vendor/package", "5.6.7"},
+		{domain.EcosystemMaven, "com.google.guava:guava", "33.4.8-jre"},
+		{domain.EcosystemPub, "http", "1.5.0"},
+		{domain.EcosystemHex, "jason", "1.4.5"},
+		{domain.EcosystemCRAN, "dplyr", "1.1.4"},
+		{domain.EcosystemCocoaPods, "Alamofire", "5.11.2"},
+		{domain.EcosystemSwiftPM, "github.com/Alamofire/Alamofire", "5.11.2"},
+		{domain.EcosystemGitHubActions, "actions/checkout", "v4.2.2"},
 	}
 
 	for _, tt := range tests {
@@ -71,7 +99,7 @@ func TestFetchLatestVersionParsesSupportedRegistryResponses(t *testing.T) {
 		})
 	}
 
-	if got := fetchLatestVersion(context.Background(), domain.EcosystemMaven, "pkg"); got != "" {
+	if got := fetchLatestVersion(context.Background(), domain.Ecosystem("unknown"), "pkg"); got != "" {
 		t.Fatalf("fetchLatestVersion(unsupported) = %q, want empty", got)
 	}
 }
@@ -217,6 +245,10 @@ func TestFetchLatestVersionReturnsEmptyForInvalidRegistryJSON(t *testing.T) {
 		domain.EcosystemNuGet,
 		domain.EcosystemGem,
 		domain.EcosystemComposer,
+		domain.EcosystemMaven,
+		domain.EcosystemPub,
+		domain.EcosystemHex,
+		domain.EcosystemCocoaPods,
 	} {
 		t.Run(string(ecosystem), func(t *testing.T) {
 			if got := fetchLatestVersion(context.Background(), ecosystem, "pkg"); got != "" {

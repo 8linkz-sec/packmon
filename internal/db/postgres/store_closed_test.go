@@ -146,6 +146,8 @@ func TestPostgresStoreClosedPoolReturnsErrors(t *testing.T) {
 	expectErr("FindReputationFindings", err)
 	_, err = store.FindReputationFindingsBatch(ctx, []db.PackageQuery{{Ecosystem: "npm", Name: "pkg", Version: "1.0.0"}}, db.ReputationSourceReversingLabs)
 	expectErr("FindReputationFindingsBatch", err)
+	_, err = store.FindLifecycleFindingsBatch(ctx, []db.PackageQuery{{Ecosystem: "npm", Name: "pkg", Version: "1.0.0"}}, time.Now().UTC())
+	expectErr("FindLifecycleFindingsBatch", err)
 	_, err = store.MarkPackageReputationDue(ctx, &db.PackageReputation{Ecosystem: "npm", Name: "pkg", Version: "1.0.0", Source: db.ReputationSourceReversingLabs})
 	expectErr("MarkPackageReputationDue", err)
 	_, err = store.ListDuePackageReputations(ctx, "npm", "pkg", db.ReputationSourceReversingLabs, 1)
@@ -158,4 +160,8 @@ func TestPostgresStoreClosedPoolReturnsErrors(t *testing.T) {
 		Evidence:      json.RawMessage(`{}`),
 		ReferenceURLs: json.RawMessage(`[]`),
 	}))
+	expectErr("UpsertLifecycleProducts", store.UpsertLifecycleProducts(ctx, []db.LifecycleProduct{{
+		ProductSlug: "nodejs",
+		Name:        "Node.js",
+	}}))
 }

@@ -153,6 +153,21 @@ func TestSARIFLevelsCoverSeverityMapping(t *testing.T) {
 	}
 }
 
+func TestSARIFLifecycleRuleIDFallback(t *testing.T) {
+	t.Parallel()
+
+	writer := NewSARIFWriter("dev")
+	got := writer.ruleID(domain.Finding{
+		Name:      "django",
+		Ecosystem: domain.EcosystemPyPI,
+		Type:      domain.FindingTypeLifecycle,
+		RiskType:  "eol_soon",
+	})
+	if got != "lifecycle:pypi:django" {
+		t.Fatalf("lifecycle ruleID = %q, want lifecycle:pypi:django", got)
+	}
+}
+
 func TestJUnitWriterSerializesPassingAndFailingScans(t *testing.T) {
 	t.Parallel()
 
@@ -197,6 +212,40 @@ func TestJUnitWriterSerializesPassingAndFailingScans(t *testing.T) {
 	}
 	if !strings.Contains(failingSuites.Testsuites[0].Cases[0].Failure.Body, "Fixed Version: 1.2.3") {
 		t.Fatalf("failure body missing fixed version: %q", failingSuites.Testsuites[0].Cases[0].Failure.Body)
+	}
+}
+
+func TestJUnitWriterLabelsLifecycleFindings(t *testing.T) {
+	t.Parallel()
+
+	result := &domain.ScanResult{
+		Findings: []domain.Finding{
+			{
+				Name:      "django",
+				Version:   "3.2.25",
+				Ecosystem: domain.EcosystemPyPI,
+				Type:      domain.FindingTypeLifecycle,
+				Severity:  domain.SeverityMedium,
+				Title:     "Django 3.2 reaches EOL soon",
+				RiskType:  "eol_soon",
+				Source:    "endoflife.date",
+			},
+		},
+	}
+	var out bytes.Buffer
+	if err := NewJUnitWriter().Write(&out, result); err != nil {
+		t.Fatalf("JUnit Write() error = %v", err)
+	}
+	var suites junitTestsuites
+	if err := xml.Unmarshal(out.Bytes(), &suites); err != nil {
+		t.Fatalf("unmarshal JUnit: %v", err)
+	}
+	failure := suites.Testsuites[0].Cases[0].Failure
+	if failure.Type != "lifecycle" {
+		t.Fatalf("failure type = %q, want lifecycle", failure.Type)
+	}
+	if !strings.Contains(failure.Body, "Risk Type: eol_soon") || !strings.Contains(failure.Body, "Source: endoflife.date") {
+		t.Fatalf("failure body missing lifecycle context: %q", failure.Body)
 	}
 }
 

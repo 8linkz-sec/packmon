@@ -89,6 +89,38 @@ func TestTableWriterShowsSupplyChainRiskDistinctly(t *testing.T) {
 	}
 }
 
+func TestTableWriterShowsLifecycleDistinctly(t *testing.T) {
+	result := &domain.ScanResult{
+		Mode:            "remote",
+		PackagesScanned: 1,
+		FindingsCount:   1,
+		Findings: []domain.Finding{
+			{
+				Name:      "django",
+				Version:   "3.2.25",
+				Ecosystem: domain.EcosystemPyPI,
+				Type:      domain.FindingTypeLifecycle,
+				Severity:  domain.SeverityMedium,
+				Title:     "Django 3.2 reaches EOL soon",
+				RiskType:  "eol_soon",
+				Source:    "endoflife.date",
+			},
+		},
+	}
+
+	var out bytes.Buffer
+	if err := NewTableWriter(true, domain.SeverityMedium).Write(&out, result); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	output := out.String()
+	for _, expected := range []string{"LIFECYCLE", "Review lifecycle", "endoflife.date", "(1 blocking)"} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("table output missing %q\n%s", expected, output)
+		}
+	}
+}
+
 func TestTableWriterCountsOnlyDefaultBlockingSeverity(t *testing.T) {
 	findings := make([]domain.Finding, 0, 67)
 	for i := 0; i < 11; i++ {

@@ -138,6 +138,12 @@ func TestLoadWithNoEnvVarsReturnsDefaults(t *testing.T) {
 	if !cfg.Feeds.EPSSEnabled {
 		t.Error("Feeds.EPSSEnabled = false, want true")
 	}
+	if !cfg.Feeds.EndOfLifeEnabled {
+		t.Error("Feeds.EndOfLifeEnabled = false, want true")
+	}
+	if cfg.Feeds.EndOfLifeBaseURL != "https://endoflife.date/api/v1" {
+		t.Errorf("Feeds.EndOfLifeBaseURL = %q, want default endoflife API URL", cfg.Feeds.EndOfLifeBaseURL)
+	}
 
 	// Feed modes default to "self".
 	if cfg.Feeds.OSVMode != FeedModeSelf {
@@ -308,6 +314,7 @@ func TestLoadReadsFeedEnabledFlags(t *testing.T) {
 	t.Setenv("PACKMON_FEED_SOCKET_ENABLED", "true")
 	t.Setenv("PACKMON_FEED_CISAKEV_ENABLED", "false")
 	t.Setenv("PACKMON_FEED_EPSS_ENABLED", "false")
+	t.Setenv("PACKMON_FEED_ENDOFLIFE_ENABLED", "false")
 
 	cfg, err := Load()
 	if err != nil {
@@ -334,6 +341,30 @@ func TestLoadReadsFeedEnabledFlags(t *testing.T) {
 	}
 	if cfg.Feeds.EPSSEnabled {
 		t.Error("Feeds.EPSSEnabled = true, want false")
+	}
+	if cfg.Feeds.EndOfLifeEnabled {
+		t.Error("Feeds.EndOfLifeEnabled = true, want false")
+	}
+}
+
+func TestEndOfLifeEnv(t *testing.T) {
+	clearPackmonEnv(t)
+	t.Setenv("PACKMON_FEED_ENDOFLIFE_ENABLED", "true")
+	t.Setenv("PACKMON_FEED_ENDOFLIFE_MODE", "self")
+	t.Setenv("PACKMON_ENDOFLIFE_API_BASE_URL", "https://eol.example/api/v1")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.Feeds.EndOfLifeEnabled {
+		t.Fatal("EndOfLifeEnabled = false, want true")
+	}
+	if cfg.Feeds.EndOfLifeMode != FeedModeSelf {
+		t.Fatalf("EndOfLifeMode = %q, want self", cfg.Feeds.EndOfLifeMode)
+	}
+	if cfg.Feeds.EndOfLifeBaseURL != "https://eol.example/api/v1" {
+		t.Fatalf("EndOfLifeBaseURL = %q", cfg.Feeds.EndOfLifeBaseURL)
 	}
 }
 

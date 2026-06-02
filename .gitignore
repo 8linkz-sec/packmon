@@ -1,9 +1,13 @@
 # Claude
 .claude/
+.superpowers/
 CLAUDE.md
 Phase *.md
 Audit.md
 CONTRIBUTING.md
+
+# Docs
+docs/
 
 # Docker
 node_modules/
@@ -20,6 +24,7 @@ node_modules/
 /dist/
 
 # Go
+.gotmp/
 coverage.out
 *.test
 

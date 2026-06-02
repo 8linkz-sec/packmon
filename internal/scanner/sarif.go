@@ -140,6 +140,9 @@ func (sw *SARIFWriter) ruleID(f domain.Finding) string {
 	if f.AdvisoryID != "" {
 		return f.AdvisoryID
 	}
+	if f.Type == domain.FindingTypeLifecycle {
+		return fmt.Sprintf("lifecycle:%s:%s", f.Ecosystem, f.Name)
+	}
 	if f.RiskType != "" {
 		return f.RiskType
 	}

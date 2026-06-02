@@ -40,13 +40,14 @@ type Package struct {
 	Dev       bool      `json:"dev,omitempty"`
 }
 
-// FindingType distinguishes vulnerability, malicious, and supply-chain findings.
+// FindingType distinguishes vulnerability, malicious, supply-chain, and lifecycle findings.
 type FindingType string
 
 const (
 	FindingTypeVulnerability   FindingType = "vulnerability"
 	FindingTypeMalicious       FindingType = "malicious"
 	FindingTypeSupplyChainRisk FindingType = "supply_chain_risk"
+	FindingTypeLifecycle       FindingType = "lifecycle"
 )
 
 // ResourceLink is an external reference associated with a finding.

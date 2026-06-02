@@ -3,7 +3,7 @@
 Scope: `internal/feed/` -- `manager.go` (orchestration/scheduler), `queue.go`
 (priority queue), `gitutil.go`, ecosystem/cvss helpers, and the per-source
 syncers `osv/`, `ghsa/`, `malicious/`, `vulncheck/`, `nvd/`, `cisakev/`,
-`epss/`, `socket/`, `reversinglabs/`. Primary owner agent:
+`epss/`, `socket/`, `reversinglabs/`, `endoflife/`. Primary owner agent:
 **data-feeds-engineer**.
 
 Read `AGENTS.md` (root) and `DESIGN.md` (feed source table, priority queue,
@@ -23,6 +23,10 @@ health rules) first.
   and worker MUST share one PURL predicate; unmappable/unsupported packages get
   a terminal `unsupported` cache row (no HTTP call, excluded from due queries).
   `external` mode is rejected at config load; batch size is capped at 5.
+- endoflife.date (`endoflife/`) is a free public lifecycle metadata feed with
+  no API key. It is self-mode only, stores normalized product/release/package-map
+  rows, and must preserve existing cached data on 304, rate-limit, parse, or
+  network failures. It has no external import endpoint.
 - Git-based syncers (GHSA, OpenSSF) clone untrusted content. Read files only
   through `os.OpenRoot`/`Root.ReadFile` confinement to prevent path traversal;
   pass fixed argv to `git` (never shell). The `#nosec G204` on the fixed-argv

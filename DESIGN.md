@@ -22,8 +22,9 @@ or a public internet-facing API.
 
 - Scan dependency lockfiles and supported manifest-like files across the
   canonical ecosystems.
+- Accept explicit CycloneDX and SPDX SBOM files as package inventory inputs.
 - Detect known vulnerabilities, malicious package findings, and configured
-  supply-chain risk findings.
+  supply-chain and lifecycle risk findings.
 - Support remote server mode, local SQLite mode, and auto fallback mode.
 - Produce human-readable terminal output and machine-readable JSON, SARIF, and
   JUnit files.
@@ -49,6 +50,8 @@ or a public internet-facing API.
 - Public SaaS multi-tenancy.
 - User-account management beyond one shared admin login.
 - Client-side direct synchronization from public vulnerability feeds.
+- Treating SBOM-embedded vulnerability or VEX statements as authoritative scan
+  findings.
 - Server-side parsing of repository lockfiles from N8N or CI. Clients parse
   lockfiles and send package lists.
 - Automatic database migrations on normal server startup.
@@ -62,6 +65,7 @@ or a public internet-facing API.
 - `cmd/packmon-server`: server entry point, migration command, dev/noop store.
 - `internal/domain`: canonical domain models, severity, scan result schema.
 - `internal/parser`: lockfile parsers and ecosystem registry.
+- `internal/sbom`: CycloneDX/SPDX inventory parsing and Package URL mapping.
 - `internal/scanner`: file discovery, scan orchestration, output writers,
   webhook delivery, local history integration.
 - `internal/api/v1`: public API handlers.
@@ -81,9 +85,9 @@ or a public internet-facing API.
 
 Packmon has two main runtime surfaces.
 
-The CLI discovers lockfiles, parses packages, applies config and filters, and
-checks findings using either a remote server or the local SQLite database. The
-CLI owns all repository filesystem access.
+The CLI discovers lockfiles, parses explicit SBOM inventory files, applies
+config and filters, and checks findings using either a remote server or the
+local SQLite database. The CLI owns all repository filesystem access.
 
 The server owns feed synchronization, normalized advisory storage, API checks,
 admin UI, web UI, queue operations, and metrics. The server receives package
@@ -93,6 +97,7 @@ lists, not source code or lockfile contents.
 Developer repo
   -> packmon CLI
      -> parser registry
+     -> SBOM inventory importer
      -> scanner/checker
      -> remote /api/v1/check or local SQLite
      -> table + JSON/SARIF/JUnit + optional webhook
@@ -113,24 +118,44 @@ cocoapods, swiftpm, hex, cran, actions
 ```
 
 Feed-specific names must be mapped into this enum at the import boundary.
+SwiftPM packages are identified by OSV/PURL SwiftURL name
+(`host/owner/repo`, without URL scheme or `.git`) when `Package.resolved`
+provides a repository location. GitHub Actions workflow references are
+identified as `owner/repo` from external `uses: owner/repo@ref` entries under
+`.github/workflows/`.
 
 ## CLI Behavior
 
 `packmon scan` is the primary command. It discovers supported lockfiles up to a
-configured depth, parses packages, filters ignored ecosystems/packages, and
-checks findings.
+configured depth, parses packages from lockfiles and explicit SBOM inputs,
+filters ignored ecosystems/packages, and checks findings.
 
 Important behavior:
 
 - stdout is human-readable unless `--quiet` is used.
-- JSON, SARIF, and JUnit are written with explicit output-file flags.
+- JSON, SARIF, JUnit, and HTML reports are written with explicit output-file
+  flags. `--html <path>` writes a single self-contained report with no external
+  assets and no JavaScript. Findings are grouped by type (Malicious ->
+  Supply-Chain/EOL -> Vulnerabilities -> Lifecycle), severity-sorted within
+  each group, and each vulnerability/EOL finding links to its source. A scan
+  with zero findings still produces a clean "all clear" report. Like the other
+  file outputs, `--html` only works when scanning a single target.
 - `--include-dev` includes dependencies marked as dev/test scope.
+- `--sbom <file>` can be repeated to add CycloneDX JSON/XML or SPDX JSON
+  package inventory to scans, `--list-packages`, and `--outdated`.
+- SBOM input contributes package coordinates only. Embedded SBOM
+  vulnerability, VEX, license, and provenance assertions are not used as
+  authoritative Packmon findings.
 - config precedence is flags, environment, project `.packmon.yaml`, user-global
   `~/.packmon/config/packmon.yaml`, defaults.
 - local history is stored compactly in SQLite for report/dashboard features.
 - stale local DB data produces warnings but does not block scans by itself.
 - repo metadata such as name, branch, and commit may be sent to the server for
   scan logging.
+- `--outdated` uses free public registry metadata for every canonical
+  ecosystem where a package version can be resolved. Private registries,
+  branch pins, commit-only pins, and unavailable upstream metadata are reported
+  as unknown rather than failing the scan.
 
 ## Server Behavior
 
@@ -173,21 +198,36 @@ malicious finding. `removed` status produces a blocking `supply_chain_risk`
 finding. `clean`, `not_found`, `unsupported`, and transient `error` statuses do
 not produce findings.
 
+Lifecycle rows are normalized from product release metadata into package
+ecosystem/name mappings and release cycles. Exact end-of-life matches produce a
+blocking `supply_chain_risk` finding with `risk_type=eol`. Upcoming
+end-of-life and security-support-only states produce `lifecycle` findings and
+block only according to severity threshold. Unknown or unmapped lifecycle state
+does not produce a finding.
+
 Manual advisories are admin-managed records. They can represent either
 vulnerability findings or malicious findings. New manual records without an
 operator-supplied ID use stable `manual:<uuid>` IDs.
 
 ## Feed Sources
 
-Server-side feed sources include:
+Core server-side vulnerability, malicious-package, and lifecycle coverage must
+not depend on paid APIs or account-gated services. Server-side feed sources
+include:
 
-- OSV.dev;
+- OSV.dev public bulk data, including GitHub Actions advisories;
 - GitHub Advisory Database;
 - OpenSSF malicious packages;
-- VulnCheck;
 - CISA KEV;
 - EPSS;
-- Socket.dev through async queue behavior.
+- NVD CVE enrichment, optionally with an API key only for higher rate limits.
+- endoflife.date public lifecycle metadata, with no API key.
+
+Optional reputation/enrichment sources can be enabled by operators but are not
+part of the required free core coverage:
+
+- VulnCheck;
+- Socket.dev through async queue behavior;
 - ReversingLabs Spectra Assure Community API as an optional server-side,
   demand-driven reputation source. The server stores normalized package
   reputation cache rows and refreshes a package version at most once per 24
@@ -208,6 +248,14 @@ stale.
 
 ReversingLabs is self-managed only and has no external import endpoint. Initial
 enabled ecosystems are `npm`, `pypi`, `gem`, `nuget`, and `maven`.
+
+endoflife.date is self-managed only and has no external import endpoint in
+Packmon. The server fetches product release metadata, maps Package URL
+identifiers and conservative built-in package mappings to canonical ecosystems,
+and stores normalized lifecycle rows. Only packages that can be mapped to an
+endoflife.date product and release cycle can receive lifecycle findings.
+Unmapped libraries may still be vulnerable or outdated, but they are not
+reported as end-of-life.
 
 ## Refresh Queue
 
@@ -237,9 +285,11 @@ statuses. Paused jobs must not be dequeued.
 Local mode uses a compact SQLite database populated from `GET /api/v1/sync`.
 It stores enough data for equivalent finding quality but not full server detail.
 
-Remote and local modes should detect the same vulnerability, malicious, and
-synced reputation findings when local data is fresh. Differences are allowed
-only in detail level and freshness.
+Remote and local modes should detect the same vulnerability, malicious, synced
+reputation, and lifecycle findings when local data is fresh. Local SQLite sync
+stores raw lifecycle status booleans and dates, then computes current lifecycle
+findings at scan time. Differences are allowed only in detail level and
+freshness.
 
 ## Web UI
 
@@ -273,6 +323,9 @@ Important server environment variables:
 - `PACKMON_METRICS_PORT`;
 - `PACKMON_DB_*`;
 - `PACKMON_ADMIN_INITIAL_PASSWORD`;
+- `PACKMON_FEED_ENDOFLIFE_ENABLED`;
+- `PACKMON_FEED_ENDOFLIFE_MODE`;
+- `PACKMON_ENDOFLIFE_API_BASE_URL`;
 - feed API keys and feed mode/enabled flags.
 
 Admin system settings can persist selected runtime values such as block

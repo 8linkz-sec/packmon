@@ -12,8 +12,8 @@ func TestNewRegistry_AllParsersRegistered(t *testing.T) {
 	r := NewRegistry()
 	parsers := r.AllParsers()
 
-	// There are 20 built-in parsers according to the Registry constructor.
-	const expectedCount = 20
+	// There are 21 built-in parsers according to the Registry constructor.
+	const expectedCount = 21
 	if len(parsers) != expectedCount {
 		t.Fatalf("AllParsers() returned %d parsers, want %d", len(parsers), expectedCount)
 	}
@@ -48,9 +48,13 @@ func TestRegistry_ParserFor(t *testing.T) {
 		{"renv.lock", domain.EcosystemCRAN, false},
 		{"pom.xml", domain.EcosystemMaven, false},
 		{"gradle.lockfile", domain.EcosystemMaven, false},
+		{".github/workflows/ci.yml", domain.EcosystemGitHubActions, false},
+		{".github/workflows/release.yaml", domain.EcosystemGitHubActions, false},
 		// Negative cases.
 		{"unknown.file", "", true},
 		{"README.md", "", true},
+		{".github/dependabot.yml", "", true},
+		{"ci.yml", "", true},
 		{"", "", true},
 	}
 
@@ -110,26 +114,28 @@ func TestRegistry_SupportedFiles(t *testing.T) {
 
 	// Verify all expected file names are present.
 	expected := map[string]bool{
-		"package-lock.json":  false,
-		"yarn.lock":          false,
-		"pnpm-lock.yaml":     false,
-		"Pipfile.lock":       false,
-		"poetry.lock":        false,
-		"uv.lock":            false,
-		"requirements.txt":   false,
-		"go.sum":             false,
-		"go.mod":             false,
-		"Cargo.lock":         false,
-		"packages.lock.json": false,
-		"composer.lock":      false,
-		"Gemfile.lock":       false,
-		"pubspec.lock":       false,
-		"Podfile.lock":       false,
-		"Package.resolved":   false,
-		"mix.lock":           false,
-		"renv.lock":          false,
-		"pom.xml":            false,
-		"gradle.lockfile":    false,
+		"package-lock.json":        false,
+		"yarn.lock":                false,
+		"pnpm-lock.yaml":           false,
+		"Pipfile.lock":             false,
+		"poetry.lock":              false,
+		"uv.lock":                  false,
+		"requirements.txt":         false,
+		"go.sum":                   false,
+		"go.mod":                   false,
+		"Cargo.lock":               false,
+		"packages.lock.json":       false,
+		"composer.lock":            false,
+		"Gemfile.lock":             false,
+		"pubspec.lock":             false,
+		"Podfile.lock":             false,
+		"Package.resolved":         false,
+		"mix.lock":                 false,
+		"renv.lock":                false,
+		"pom.xml":                  false,
+		"gradle.lockfile":          false,
+		".github/workflows/*.yml":  false,
+		".github/workflows/*.yaml": false,
 	}
 
 	for _, f := range files {

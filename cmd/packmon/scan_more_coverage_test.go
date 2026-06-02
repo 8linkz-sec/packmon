@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,6 +48,162 @@ func TestNewScanCmdRunEBranches(t *testing.T) {
 	cmd.SetArgs([]string{"--mode", "local", emptyDir})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("scan command default branch error = %v", err)
+	}
+}
+
+func TestRunSingleScanLocalChecksSBOMPackages(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	ctx := context.Background()
+	dbDir := t.TempDir()
+	t.Setenv("PACKMON_DB_PATH", dbDir)
+	store, _ := newTestSQLiteStore(t, dbDir)
+	if _, err := store.DB().ExecContext(ctx, `
+		INSERT INTO vulnerabilities_local(row_key, id, ecosystem, name, severity, summary)
+		VALUES('GHSA-sbom|pypi|django', 'GHSA-sbom', 'pypi', 'django', 'HIGH', 'SBOM package advisory')`); err != nil {
+		t.Fatalf("seed local vulnerability: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close seed store: %v", err)
+	}
+
+	projectDir := t.TempDir()
+	sbomPath := filepath.Join(projectDir, "bom.cdx.json")
+	if err := os.WriteFile(sbomPath, []byte(`{
+		"bomFormat":"CycloneDX",
+		"components":[{"type":"library","name":"django","version":"4.2.11","purl":"pkg:pypi/django@4.2.11"}]
+	}`), 0o600); err != nil {
+		t.Fatalf("write SBOM: %v", err)
+	}
+
+	output := captureStdout(t, func() {
+		exitCode, err := runSingleScan(ctx, scanSettings{
+			Path:      projectDir,
+			Mode:      "local",
+			FailOn:    "HIGH",
+			MaxDepth:  2,
+			Timeout:   1,
+			NoColor:   true,
+			SBOMFiles: []string{sbomPath},
+		})
+		if err != nil {
+			t.Fatalf("runSingleScan(SBOM local) error = %v", err)
+		}
+		if exitCode != ExitBlocking {
+			t.Fatalf("exitCode = %d, want %d", exitCode, ExitBlocking)
+		}
+	})
+	if !strings.Contains(output, "GHSA-sbom") || !strings.Contains(output, "django") {
+		t.Fatalf("SBOM local scan output missing finding:\n%s", output)
+	}
+}
+
+func TestRunListPackagesIncludesSPDXSBOM(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	projectDir := t.TempDir()
+	sbomPath := filepath.Join(projectDir, "sbom.spdx.json")
+	if err := os.WriteFile(sbomPath, []byte(`{
+		"spdxVersion":"SPDX-2.3",
+		"packages":[{
+			"name":"Django",
+			"externalRefs":[{
+				"referenceCategory":"PACKAGE-MANAGER",
+				"referenceType":"purl",
+				"referenceLocator":"pkg:pypi/django@4.2.11"
+			}]
+		}]
+	}`), 0o600); err != nil {
+		t.Fatalf("write SPDX SBOM: %v", err)
+	}
+
+	output := captureStdout(t, func() {
+		if err := runListPackages([]string{projectDir}, "", 2, true, []string{sbomPath}); err != nil {
+			t.Fatalf("runListPackages(SBOM) error = %v", err)
+		}
+	})
+	if !strings.Contains(output, "django") || !strings.Contains(output, "4.2.11") || !strings.Contains(output, "sbom.spdx.json") {
+		t.Fatalf("list-packages SBOM output = %q", output)
+	}
+}
+
+func TestRunOutdatedIncludesCycloneDXSBOM(t *testing.T) {
+	originalClient := registryClient
+	t.Cleanup(func() { registryClient = originalClient })
+	registryClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Host+req.URL.EscapedPath() != "registry.npmjs.org/outdated/latest" {
+			t.Fatalf("unexpected registry request: %s", req.URL.String())
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"version":"2.0.0"}`)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})}
+
+	projectDir := t.TempDir()
+	sbomPath := filepath.Join(projectDir, "bom.cdx.json")
+	if err := os.WriteFile(sbomPath, []byte(`{
+		"bomFormat":"CycloneDX",
+		"components":[{"type":"library","name":"outdated","version":"1.0.0","purl":"pkg:npm/outdated@1.0.0"}]
+	}`), 0o600); err != nil {
+		t.Fatalf("write CycloneDX SBOM: %v", err)
+	}
+
+	output := captureStdout(t, func() {
+		if err := runOutdated([]string{projectDir}, "npm", 2, []string{sbomPath}); err != nil {
+			t.Fatalf("runOutdated(SBOM) error = %v", err)
+		}
+	})
+	if !strings.Contains(output, "outdated") || !strings.Contains(output, "1.0.0") || !strings.Contains(output, "2.0.0") {
+		t.Fatalf("outdated SBOM output = %q", output)
+	}
+}
+
+func TestRunSingleScanSBOMErrors(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	dbDir := t.TempDir()
+	t.Setenv("PACKMON_DB_PATH", dbDir)
+	store, _ := newTestSQLiteStore(t, dbDir)
+	if err := store.Close(); err != nil {
+		t.Fatalf("close seed store: %v", err)
+	}
+
+	projectDir := t.TempDir()
+	missingPath := filepath.Join(projectDir, "missing.cdx.json")
+	exitCode, err := runSingleScan(context.Background(), scanSettings{
+		Path:      projectDir,
+		Mode:      "local",
+		FailOn:    "CRITICAL",
+		MaxDepth:  2,
+		Timeout:   1,
+		Quiet:     true,
+		SBOMFiles: []string{missingPath},
+	})
+	if err != nil {
+		t.Fatalf("runSingleScan(missing SBOM) error = %v", err)
+	}
+	if exitCode != ExitOperational {
+		t.Fatalf("missing SBOM exitCode = %d, want %d", exitCode, ExitOperational)
+	}
+
+	badPath := filepath.Join(projectDir, "bad.cdx.json")
+	if err := os.WriteFile(badPath, []byte(`{"bomFormat":"CycloneDX",`), 0o600); err != nil {
+		t.Fatalf("write malformed SBOM: %v", err)
+	}
+	exitCode, err = runSingleScan(context.Background(), scanSettings{
+		Path:      projectDir,
+		Mode:      "local",
+		FailOn:    "CRITICAL",
+		MaxDepth:  2,
+		Timeout:   1,
+		Quiet:     true,
+		SBOMFiles: []string{badPath},
+	})
+	if err != nil {
+		t.Fatalf("runSingleScan(malformed SBOM) error = %v", err)
+	}
+	if exitCode != ExitParser {
+		t.Fatalf("malformed SBOM exitCode = %d, want %d", exitCode, ExitParser)
 	}
 }
 

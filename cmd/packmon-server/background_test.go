@@ -38,7 +38,7 @@ func TestNewFeedSyncerRecognizesKnownFeeds(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 	store := newNoopStore()
 
-	for _, name := range []string{"osv", "ghsa", "openssf", "vulncheck", "cisakev", "epss", "nvd"} {
+	for _, name := range []string{"osv", "ghsa", "openssf", "vulncheck", "cisakev", "epss", "nvd", "endoflife"} {
 		if syncer := newFeedSyncer(name, cfg, store, logger); syncer == nil {
 			t.Fatalf("newFeedSyncer(%q) = nil", name)
 		}

@@ -40,6 +40,10 @@ type Store interface {
 	// for exact package versions from one reputation source.
 	FindReputationFindingsBatch(ctx context.Context, packages []PackageQuery, source string) ([]domain.Finding, error)
 
+	// FindLifecycleFindingsBatch returns lifecycle/EOL findings for all
+	// packages using the cached lifecycle feed data.
+	FindLifecycleFindingsBatch(ctx context.Context, packages []PackageQuery, now time.Time) ([]domain.Finding, error)
+
 	// -- Vulnerability writes (feed sync) ---------------------------------------
 
 	// UpsertVulnerability inserts or updates a vulnerability and its aliases,
@@ -58,6 +62,10 @@ type Store interface {
 
 	// UpsertPackageReputation inserts or updates a package reputation cache row.
 	UpsertPackageReputation(ctx context.Context, rep *PackageReputation) error
+
+	// UpsertLifecycleProducts inserts or replaces cached lifecycle products,
+	// releases, and package mappings from the lifecycle feed.
+	UpsertLifecycleProducts(ctx context.Context, products []LifecycleProduct) error
 
 	// PropagateSeverityViaAliases updates UNKNOWN-severity vulnerabilities
 	// by copying the severity from a linked vulnerability (via shared alias)
@@ -392,6 +400,48 @@ type PackageReputation struct {
 	NextCheckAt   *time.Time
 	LastError     string
 	UpdatedAt     time.Time
+}
+
+// LifecycleProduct is one product from a package lifecycle feed.
+type LifecycleProduct struct {
+	ProductSlug string
+	Name        string
+	Category    string
+	Identifiers json.RawMessage
+	Raw         json.RawMessage
+	Releases    []LifecycleRelease
+	PackageMaps []LifecyclePackageMap
+}
+
+// LifecycleRelease is one support/lifecycle cycle for a lifecycle product.
+type LifecycleRelease struct {
+	ProductSlug      string
+	Cycle            string
+	Latest           string
+	ReleaseDate      *time.Time
+	IsLTS            bool
+	LTSFrom          *time.Time
+	IsEOAS           bool
+	EOASFrom         *time.Time
+	IsEOL            bool
+	EOLFrom          *time.Time
+	IsDiscontinued   bool
+	DiscontinuedFrom *time.Time
+	IsEOES           *bool
+	EOESFrom         *time.Time
+	IsMaintained     bool
+	Raw              json.RawMessage
+}
+
+// LifecyclePackageMap links a package identity to a lifecycle product.
+type LifecyclePackageMap struct {
+	Ecosystem     string
+	Name          string
+	ProductSlug   string
+	PURLType      string
+	PURLNamespace string
+	PURLName      string
+	Source        string
 }
 
 // ManualAdvisory is the admin-facing model for operator-managed advisories.

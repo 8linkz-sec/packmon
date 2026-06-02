@@ -1,6 +1,8 @@
 # packmon
 
-Packmon scans dependency lockfiles for known vulnerabilities, malicious packages, and configured supply-chain risk findings.
+Packmon scans dependency lockfiles and SBOM inventory for known
+vulnerabilities, malicious packages, lifecycle risks, and configured
+supply-chain risk findings.
 It can run as a local CLI, as a central API server, or both together.
 
 ## Current Capabilities
@@ -11,6 +13,9 @@ It can run as a local CLI, as a central API server, or both together.
 - documented backup and restore flow for PostgreSQL
 - localhost-only metrics exposure by default
 - CLI warnings for stale local advisory data
+- free public vulnerability, lifecycle, and outdated-version coverage for the
+  canonical package ecosystems; optional account/API-key reputation feeds are
+  not required
 - operational documentation, ADRs, and integration/E2E test entry points
 
 ## Canonical Project Docs
@@ -69,16 +74,25 @@ When you change web templates or Tailwind classes, refresh the generated assets 
 
 ```bash
 packmon scan .
+packmon scan --html report.html .
 PACKMON_API_KEY=... packmon scan . --mode remote --server https://packmon.internal:8080 --cacert /etc/packmon/ca.pem --require-remote
 packmon config init
 packmon scan --all
 packmon scan --repo packmon
+packmon scan --outdated .
+packmon scan --sbom bom.cdx.json .
+packmon scan --sbom sbom.spdx.json --list-packages .
+packmon scan --sbom bom.cdx.json --outdated .
 packmon db sync
 packmon db info
 packmon db export --output local-db.json
 packmon history clear
 packmon dashboard
 ```
+
+`packmon scan --html report.html .` writes a colorful, self-contained mini
+report grouped by finding type. It uses the repo name as its title and links
+vulnerability and EOL findings back to their source.
 
 ## CLI Config
 
@@ -120,6 +134,17 @@ packmon db sync
 Config precedence is: command-line flags > environment variables > project `.packmon.yaml` > user-global `~/.packmon/config/packmon.yaml` > built-in defaults.
 Store API keys in environment variables or CI secrets. Use `api_key_env` in config files rather than writing plaintext keys to `.packmon.yaml`.
 
+## SBOM Input
+
+`packmon scan --sbom <file>` can be repeated to add CycloneDX JSON/XML or SPDX
+JSON package inventory to the normal lockfile scan. The same SBOM inputs are
+used by `--list-packages` and `--outdated`.
+
+SBOM files are package-coordinate input only. Packmon does not treat embedded
+SBOM vulnerability, VEX, license, or provenance assertions as authoritative
+findings; vulnerabilities, malicious packages, reputation, outdated versions,
+and lifecycle state still come from Packmon's configured data sources.
+
 ## Git Hooks
 
 Install a packmon Git hook in the current repository to scan automatically.
@@ -134,11 +159,12 @@ packmon hook status                    # show hook status for this repo
 ```
 
 The installed hook runs `packmon scan . --fail-on CRITICAL --quiet`, so a push
-(or commit) is blocked only when a CRITICAL vulnerability, malicious package, or
-supply-chain-risk finding is present. `install` refuses to overwrite an existing
-hook that packmon did not create; `uninstall` only removes packmon-managed
-hooks. Supported types: `pre-push` (default) and `pre-commit`. The hook type and
-fail-on threshold can also be set under a `hook:` block in `.packmon.yaml`.
+(or commit) is blocked only when a CRITICAL vulnerability or lifecycle finding,
+malicious package, or supply-chain-risk finding is present. `install` refuses
+to overwrite an existing hook that packmon did not create; `uninstall` only
+removes packmon-managed hooks. Supported types: `pre-push` (default) and
+`pre-commit`. The hook type and fail-on threshold can also be set under a
+`hook:` block in `.packmon.yaml`.
 
 ## Server Configuration
 
@@ -164,6 +190,9 @@ Important environment variables:
 - `PACKMON_SOCKET_API_KEY`
 - `PACKMON_VULNCHECK_API_KEY`
 - `PACKMON_NVD_API_KEY`
+- `PACKMON_FEED_ENDOFLIFE_ENABLED=true`
+- `PACKMON_FEED_ENDOFLIFE_MODE=self`
+- `PACKMON_ENDOFLIFE_API_BASE_URL=https://endoflife.date/api/v1`
 - `PACKMON_FEED_REVERSINGLABS_ENABLED=false`
 - `PACKMON_FEED_REVERSINGLABS_MODE=self`
 - `PACKMON_REVERSINGLABS_API_KEY`
@@ -174,6 +203,15 @@ Block threshold and rate-limit values can also be saved from `/admin/settings`; 
 Feed enablement, mode, cadence, and feed API keys can be saved from `/admin/feeds`; saved values are applied immediately and persisted for future server starts.
 Manual advisories can be managed from `/admin/advisories` as either vulnerability or malicious findings.
 API keys can be created, revoked, deleted after revocation, and optionally given an expiration timestamp from `/admin/keys`. Create separate named keys per client class so `last_used_at` and revocation are useful.
+The core OSV, GHSA, OpenSSF, CISA KEV, EPSS, NVD-without-key, endoflife.date,
+and registry latest-version paths are free public sources.
+`PACKMON_SOCKET_API_KEY`, `PACKMON_VULNCHECK_API_KEY`, `PACKMON_NVD_API_KEY`,
+and ReversingLabs settings are optional enrichment/reputation inputs and are
+not required for baseline vulnerability, lifecycle, or outdated detection.
+Lifecycle/EOL findings are available only where package coordinates map to an
+endoflife.date product and release cycle. Library packages without official
+lifecycle metadata may still be vulnerable or outdated without being reported
+as EOL.
 ReversingLabs lookups are disabled by default. When enabled, the server performs demand-driven lookups only for supported packages that are not already covered by other feeds, stores normalized cache rows internally, and refreshes each package version at most once per day.
 
 ## Client Profiles

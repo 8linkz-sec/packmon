@@ -159,6 +159,8 @@ func (jw *JUnitWriter) buildTestcase(f domain.Finding) junitTestcase {
 		failType = "malicious"
 	case domain.FindingTypeSupplyChainRisk:
 		failType = "supply_chain_risk"
+	case domain.FindingTypeLifecycle:
+		failType = "lifecycle"
 	default:
 		failType = "vulnerability"
 	}

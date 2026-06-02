@@ -53,6 +53,31 @@ CREATE TABLE IF NOT EXISTS reputation_findings_local (
 CREATE INDEX IF NOT EXISTS idx_rep_eco_name
 	ON reputation_findings_local(ecosystem, name);
 
+CREATE TABLE IF NOT EXISTS lifecycle_releases_local (
+	id                TEXT PRIMARY KEY,
+	ecosystem         TEXT NOT NULL,
+	name              TEXT NOT NULL,
+	product_slug      TEXT NOT NULL,
+	product_label     TEXT NOT NULL DEFAULT '',
+	cycle             TEXT NOT NULL,
+	latest            TEXT NOT NULL DEFAULT '',
+	release_date      TEXT,
+	is_lts            INTEGER NOT NULL DEFAULT 0,
+	lts_from          TEXT,
+	is_eoas           INTEGER NOT NULL DEFAULT 0,
+	eoas_from         TEXT,
+	is_eol            INTEGER NOT NULL DEFAULT 0,
+	eol_from          TEXT,
+	is_discontinued   INTEGER NOT NULL DEFAULT 0,
+	discontinued_from TEXT,
+	is_eoes           INTEGER,
+	eoes_from         TEXT,
+	is_maintained     INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS lifecycle_releases_local_lookup_idx
+	ON lifecycle_releases_local(ecosystem, name);
+
 CREATE TABLE IF NOT EXISTS sync_meta (
 	key   TEXT PRIMARY KEY,
 	value TEXT

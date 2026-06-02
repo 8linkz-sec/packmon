@@ -1,0 +1,96 @@
+package postgres
+
+import (
+	"context"
+	"encoding/json"
+	"testing"
+	"time"
+
+	"github.com/8linkz/packmon/internal/db"
+	"github.com/8linkz/packmon/internal/domain"
+)
+
+func TestPostgresLifecycleDockerUpsertAndFindings(t *testing.T) {
+	store, _ := startDockerPostgresStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)
+	eolPast := now.AddDate(0, 0, -1)
+	eoasPast := now.AddDate(0, 0, -7)
+	eolSoon := now.AddDate(0, 0, 30)
+
+	if err := store.UpsertLifecycleProducts(ctx, []db.LifecycleProduct{
+		{
+			ProductSlug: "django",
+			Name:        "Django",
+			Category:    "framework",
+			Identifiers: json.RawMessage(`[{"type":"purl","id":"pkg:pypi/django"}]`),
+			Raw:         json.RawMessage(`{"name":"django"}`),
+			Releases: []db.LifecycleRelease{
+				{Cycle: "3.2", Latest: "3.2.25", EOLFrom: &eolPast, IsMaintained: false, Raw: json.RawMessage(`{"name":"3.2"}`)},
+				{Cycle: "4", Latest: "4.1.13", IsEOL: true, IsMaintained: false, Raw: json.RawMessage(`{"name":"4"}`)},
+				{Cycle: "4.2", Latest: "4.2.22", IsEOAS: true, EOASFrom: &eoasPast, IsMaintained: true, Raw: json.RawMessage(`{"name":"4.2"}`)},
+				{Cycle: "5.0", Latest: "5.0.14", EOLFrom: &eolSoon, IsMaintained: true, Raw: json.RawMessage(`{"name":"5.0"}`)},
+				{Cycle: "6.0", Latest: "6.0.1", IsMaintained: true, Raw: json.RawMessage(`{"name":"6.0"}`)},
+			},
+			PackageMaps: []db.LifecyclePackageMap{
+				{Ecosystem: "pypi", Name: "django", ProductSlug: "django", PURLType: "pypi", PURLName: "django"},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("UpsertLifecycleProducts() error = %v", err)
+	}
+
+	findings, err := store.FindLifecycleFindingsBatch(ctx, []db.PackageQuery{
+		{Ecosystem: "pypi", Name: "django", Version: "3.2.25"},
+		{Ecosystem: "pypi", Name: "django", Version: "4.1.1"},
+		{Ecosystem: "pypi", Name: "django", Version: "4.2.11"},
+		{Ecosystem: "pypi", Name: "django", Version: "5.0.1"},
+		{Ecosystem: "pypi", Name: "django", Version: "6.0.0"},
+	}, now)
+	if err != nil {
+		t.Fatalf("FindLifecycleFindingsBatch() error = %v", err)
+	}
+
+	byVersion := make(map[string]domain.Finding, len(findings))
+	for _, finding := range findings {
+		byVersion[finding.Version] = finding
+	}
+	if len(byVersion) != 4 {
+		t.Fatalf("FindLifecycleFindingsBatch() returned %d findings: %+v", len(findings), findings)
+	}
+
+	assertLifecycleFinding(t, byVersion["3.2.25"], domain.FindingTypeSupplyChainRisk, domain.SeverityCritical, "eol")
+	assertLifecycleFinding(t, byVersion["4.1.1"], domain.FindingTypeSupplyChainRisk, domain.SeverityCritical, "eol")
+	assertLifecycleFinding(t, byVersion["4.2.11"], domain.FindingTypeLifecycle, domain.SeverityLow, "security_support_only")
+	assertLifecycleFinding(t, byVersion["5.0.1"], domain.FindingTypeLifecycle, domain.SeverityMedium, "eol_soon")
+	if _, ok := byVersion["6.0.0"]; ok {
+		t.Fatalf("6.0.0 produced lifecycle finding despite no EOL/EOAS signal: %+v", byVersion["6.0.0"])
+	}
+
+	exported, err := store.ExportSync(ctx, db.SyncExportOptions{SnapshotAt: time.Now().UTC().Add(time.Minute)})
+	if err != nil {
+		t.Fatalf("ExportSync() error = %v", err)
+	}
+	if len(exported.Lifecycle) != 5 {
+		t.Fatalf("ExportSync().Lifecycle = %d, want 5 release rows: %+v", len(exported.Lifecycle), exported.Lifecycle)
+	}
+	first := exported.Lifecycle[0]
+	if first.ID == "" || first.Ecosystem != "pypi" || first.Name != "django" || first.ProductSlug != "django" || first.Cycle == "" {
+		t.Fatalf("ExportSync().Lifecycle[0] = %+v, want flattened lifecycle release row", first)
+	}
+}
+
+func assertLifecycleFinding(t *testing.T, finding domain.Finding, typ domain.FindingType, severity domain.Severity, riskType string) {
+	t.Helper()
+
+	if finding.Type != typ || finding.Severity != severity || finding.RiskType != riskType {
+		t.Fatalf("finding for %s = type %s severity %s risk %s, want type %s severity %s risk %s",
+			finding.Version, finding.Type, finding.Severity, finding.RiskType, typ, severity, riskType)
+	}
+	if finding.Source != "endoflife.date" {
+		t.Fatalf("finding source = %q, want endoflife.date", finding.Source)
+	}
+	if finding.AdvisoryID == "" || finding.Title == "" || finding.URL == "" {
+		t.Fatalf("finding missing identity fields: %+v", finding)
+	}
+}

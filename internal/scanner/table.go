@@ -91,6 +91,8 @@ func (tw *TableWriter) Write(w io.Writer, result *domain.ScanResult) error {
 				advisory = "MALWARE"
 			case domain.FindingTypeSupplyChainRisk:
 				advisory = "SUPPLY-CHAIN"
+			case domain.FindingTypeLifecycle:
+				advisory = "LIFECYCLE"
 			}
 		}
 		fixVer := f.FixedVersion
@@ -100,6 +102,8 @@ func (tw *TableWriter) Write(w io.Writer, result *domain.ScanResult) error {
 				fixVer = "Remove pkg"
 			case domain.FindingTypeSupplyChainRisk:
 				fixVer = "Review pkg"
+			case domain.FindingTypeLifecycle:
+				fixVer = "Review lifecycle"
 			default:
 				fixVer = "n/a"
 			}

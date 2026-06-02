@@ -106,6 +106,37 @@ func TestRunAndVersionAgainstPostgres(t *testing.T) {
 	}
 }
 
+func TestRunCreatesLifecycleTablesAgainstPostgres(t *testing.T) {
+	dsn := startMigrationPostgres(t)
+
+	if err := Run(dsn); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	sqlDB, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	defer closeSilently(sqlDB)
+
+	ctx := context.Background()
+	for _, table := range []string{"lifecycle_products", "lifecycle_releases", "lifecycle_package_map"} {
+		var exists bool
+		err := sqlDB.QueryRowContext(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM information_schema.tables
+				WHERE table_schema = 'public' AND table_name = $1
+			)`, table).Scan(&exists)
+		if err != nil {
+			t.Fatalf("check lifecycle table %s: %v", table, err)
+		}
+		if !exists {
+			t.Fatalf("lifecycle table %s does not exist after migration", table)
+		}
+	}
+}
+
 func TestRunRejectsDirtyDatabase(t *testing.T) {
 	dsn := startMigrationPostgres(t)
 

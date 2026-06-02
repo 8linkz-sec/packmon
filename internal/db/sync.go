@@ -17,6 +17,7 @@ type SyncExport struct {
 	Vulnerabilities []SyncVulnerability
 	Malicious       []SyncMalicious
 	Reputation      []SyncReputationFinding
+	Lifecycle       []SyncLifecycleRelease
 	Truncated       bool
 }
 
@@ -58,4 +59,30 @@ type SyncReputationFinding struct {
 	Severity  string
 	Summary   string
 	Withdrawn bool
+}
+
+// SyncLifecycleRelease is a flattened lifecycle package-map x release-cycle
+// row exported to local SQLite. Local scans compute current lifecycle findings
+// from these raw status booleans and dates.
+type SyncLifecycleRelease struct {
+	ID               string
+	Ecosystem        string
+	Name             string
+	ProductSlug      string
+	ProductLabel     string
+	Cycle            string
+	Latest           string
+	ReleaseDate      *time.Time
+	IsLTS            bool
+	LTSFrom          *time.Time
+	IsEOAS           bool
+	EOASFrom         *time.Time
+	IsEOL            bool
+	EOLFrom          *time.Time
+	IsDiscontinued   bool
+	DiscontinuedFrom *time.Time
+	IsEOES           *bool
+	EOESFrom         *time.Time
+	IsMaintained     bool
+	Withdrawn        bool
 }

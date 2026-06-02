@@ -17,7 +17,7 @@ security:
 paths:
   /api/v1/check:
     post:
-      summary: Check packages for vulnerabilities and malicious findings
+      summary: Check packages for vulnerability, malicious, supply-chain, and lifecycle findings
       operationId: checkPackages
       tags: [scan]
       requestBody:
@@ -364,7 +364,7 @@ components:
           $ref: "#/components/schemas/Ecosystem"
         type:
           type: string
-          enum: [vulnerability, malicious, supply_chain_risk]
+          enum: [vulnerability, malicious, supply_chain_risk, lifecycle]
         severity:
           type: string
           enum: [CRITICAL, HIGH, MEDIUM, LOW, UNKNOWN]
@@ -381,15 +381,15 @@ components:
           description: "Inclusive fix constraint for the vulnerability, for example >= 1.2.3 (vulnerability only)"
         risk_type:
           type: string
-          enum: [malware, typosquatting, supply_chain, removed_package]
+          enum: [malware, typosquatting, supply_chain, removed_package, eol, eol_soon, security_support_only]
           description: "Threat or supply-chain risk category"
         source:
           type: string
-          description: "Feed source: osv, ghsa, vulncheck, openssf, socket, reversinglabs, manual"
+          description: "Feed source: osv, ghsa, vulncheck, openssf, socket, reversinglabs, endoflife.date, manual"
 
     SyncResponse:
       type: object
-      required: [synced_at, vulnerabilities, malicious, reputation, truncated, has_more]
+      required: [synced_at, vulnerabilities, malicious, reputation, lifecycle, truncated, has_more]
       properties:
         synced_at:
           type: string
@@ -406,6 +406,10 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/SyncReputation"
+        lifecycle:
+          type: array
+          items:
+            $ref: "#/components/schemas/SyncLifecycle"
         truncated:
           type: boolean
         has_more:
@@ -478,6 +482,63 @@ components:
           type: string
         summary:
           type: string
+        withdrawn:
+          type: boolean
+
+    SyncLifecycle:
+      type: object
+      properties:
+        id:
+          type: string
+        ecosystem:
+          $ref: "#/components/schemas/Ecosystem"
+        name:
+          type: string
+        product_slug:
+          type: string
+        product_label:
+          type: string
+        cycle:
+          type: string
+        latest:
+          type: string
+        release_date:
+          type: string
+          format: date-time
+          nullable: true
+        is_lts:
+          type: boolean
+        lts_from:
+          type: string
+          format: date-time
+          nullable: true
+        is_eoas:
+          type: boolean
+        eoas_from:
+          type: string
+          format: date-time
+          nullable: true
+        is_eol:
+          type: boolean
+        eol_from:
+          type: string
+          format: date-time
+          nullable: true
+        is_discontinued:
+          type: boolean
+        discontinued_from:
+          type: string
+          format: date-time
+          nullable: true
+        is_eoes:
+          type: boolean
+          nullable: true
+        eoes_from:
+          type: string
+          format: date-time
+          nullable: true
+        is_maintained:
+          type: boolean
         withdrawn:
           type: boolean
 

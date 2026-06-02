@@ -43,6 +43,7 @@ func TestFeedSettingsListAndEffectiveIntervals(t *testing.T) {
 			CISAKEVEnabled:       true,
 			EPSSEnabled:          true,
 			NVDEnabled:           true,
+			EndOfLifeEnabled:     true,
 			SocketEnabled:        true,
 			ReversingLabsEnabled: true,
 			OSVMode:              FeedModeSelf,
@@ -52,11 +53,13 @@ func TestFeedSettingsListAndEffectiveIntervals(t *testing.T) {
 			CISAKEVMode:          FeedModeSelf,
 			EPSSMode:             FeedModeSelf,
 			NVDMode:              FeedModeExternal,
+			EndOfLifeMode:        FeedModeSelf,
 			SocketMode:           FeedModeExternal,
 			ReversingLabsMode:    FeedModeSelf,
 			OSVInterval:          30 * time.Minute,
 			GHSAInterval:         time.Hour,
 			VulnCheckInterval:    2 * time.Hour,
+			EndOfLifeInterval:    3 * time.Hour,
 			VulnCheckAPIKey:      "vc-token",
 			NVDAPIKey:            "nvd-token",
 			SocketAPIKey:         "socket-token",
@@ -68,7 +71,7 @@ func TestFeedSettingsListAndEffectiveIntervals(t *testing.T) {
 	for _, feed := range cfg.FeedSettingsList() {
 		gotNames = append(gotNames, feed.Name)
 	}
-	wantNames := []string{"osv", "ghsa", "openssf", "vulncheck", "cisakev", "epss", "nvd", "socket", "reversinglabs"}
+	wantNames := []string{"osv", "ghsa", "openssf", "vulncheck", "cisakev", "epss", "nvd", "endoflife", "socket", "reversinglabs"}
 	if !reflect.DeepEqual(gotNames, wantNames) {
 		t.Fatalf("FeedSettingsList names = %#v, want %#v", gotNames, wantNames)
 	}
@@ -87,6 +90,7 @@ func TestFeedSettingsListAndEffectiveIntervals(t *testing.T) {
 		{"cisakev", "cisakev", "", false, true},
 		{"epss", "epss", "", false, true},
 		{"nvd", "nvd", "nvd-token", false, true},
+		{"endoflife", "endoflife", "", false, true},
 		{"socket", "socket", "socket-token", true, false},
 		{"reversinglabs", "reversinglabs", "rl-token", true, false},
 	}
@@ -122,6 +126,9 @@ func TestFeedSettingsListAndEffectiveIntervals(t *testing.T) {
 	}
 	if got := cfg.EffectiveFeedInterval("epss"); got != 8*time.Hour {
 		t.Fatalf("EffectiveFeedInterval(epss) = %v, want global interval", got)
+	}
+	if got := cfg.EffectiveFeedInterval("endoflife"); got != 3*time.Hour {
+		t.Fatalf("EffectiveFeedInterval(endoflife) = %v, want 3h", got)
 	}
 	if got := cfg.EffectiveFeedInterval("socket"); got != 0 {
 		t.Fatalf("EffectiveFeedInterval(socket) = %v, want 0", got)
@@ -171,6 +178,11 @@ func TestSetFeedSettingsUpdatesEveryFeed(t *testing.T) {
 		{FeedSettings{Name: "nvd", Enabled: true, Mode: FeedModeExternal, SyncInterval: 6 * time.Hour, APIKey: " nvd "}, func(t *testing.T) {
 			if !cfg.Feeds.NVDEnabled || cfg.Feeds.NVDMode != FeedModeExternal || cfg.Feeds.NVDInterval != 6*time.Hour || cfg.Feeds.NVDAPIKey != "nvd" {
 				t.Fatalf("NVD settings not applied: %#v", cfg.Feeds)
+			}
+		}},
+		{FeedSettings{Name: "endoflife", Enabled: true, Mode: FeedModeSelf, SyncInterval: 7 * time.Hour}, func(t *testing.T) {
+			if !cfg.Feeds.EndOfLifeEnabled || cfg.Feeds.EndOfLifeMode != FeedModeSelf || cfg.Feeds.EndOfLifeInterval != 7*time.Hour {
+				t.Fatalf("EndOfLife settings not applied: %#v", cfg.Feeds)
 			}
 		}},
 		{FeedSettings{Name: "socket", Enabled: true, Mode: FeedModeExternal, APIKey: " socket "}, func(t *testing.T) {

@@ -130,6 +130,33 @@ func TestWalk_SkipsHiddenDirs(t *testing.T) {
 	}
 }
 
+func TestWalk_IncludesGitHubWorkflowFiles(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	createFile(t, filepath.Join(tmpDir, ".github", "workflows", "ci.yml"))
+	createFile(t, filepath.Join(tmpDir, ".github", "dependabot.yml"))
+	createFile(t, filepath.Join(tmpDir, ".hidden", "workflows", "ci.yml"))
+
+	reg := parser.NewRegistry()
+	w := NewWalker(reg, 10, nil)
+	files, err := w.Walk(tmpDir)
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+
+	if len(files) != 1 {
+		names := make([]string, len(files))
+		for i, f := range files {
+			names[i] = f.RelPath
+		}
+		t.Fatalf("Walk() found %d files %v, want exactly the GitHub workflow", len(files), names)
+	}
+	if files[0].RelPath != ".github/workflows/ci.yml" {
+		t.Fatalf("Walk() found %q, want .github/workflows/ci.yml", files[0].RelPath)
+	}
+}
+
 func TestWalk_SkipsVendorDirs(t *testing.T) {
 	t.Parallel()
 

@@ -156,6 +156,10 @@ func (*noopStore) FindReputationFindingsBatch(context.Context, []db.PackageQuery
 	return nil, nil
 }
 
+func (*noopStore) FindLifecycleFindingsBatch(context.Context, []db.PackageQuery, time.Time) ([]domain.Finding, error) {
+	return nil, nil
+}
+
 func (*noopStore) PropagateSeverityViaAliases(context.Context) (int, error) { return 0, nil }
 
 func (s *noopStore) UpsertVulnerability(_ context.Context, vuln *db.Vulnerability) error {
@@ -195,6 +199,10 @@ func (*noopStore) ListDuePackageReputations(context.Context, string, string, str
 }
 
 func (*noopStore) UpsertPackageReputation(context.Context, *db.PackageReputation) error {
+	return nil
+}
+
+func (*noopStore) UpsertLifecycleProducts(context.Context, []db.LifecycleProduct) error {
 	return nil
 }
 

@@ -70,6 +70,9 @@ func TestResolveScanSettingsPrecedenceAndValidation(t *testing.T) {
 	mustSetFlag(t, cmd, "cacert", "flag-ca.pem")
 	mustSetFlag(t, cmd, "insecure-allow-http", "false")
 	mustSetFlag(t, cmd, "require-remote", "false")
+	mustSetFlag(t, cmd, "html", "result.html")
+	mustSetFlag(t, cmd, "sbom", "bom-one.cdx.json")
+	mustSetFlag(t, cmd, "sbom", "bom-two.spdx.json")
 
 	settings, err := resolveScanSettings(cmd, cfg, scanTarget{Name: "repo", Path: ".", Repo: repo}, scanFlagValues{
 		Mode:          "remote",
@@ -83,11 +86,13 @@ func TestResolveScanSettingsPrecedenceAndValidation(t *testing.T) {
 		OutputJSON:    "result.json",
 		OutputSARIF:   "result.sarif",
 		OutputJUnit:   "result.xml",
+		OutputHTML:    "result.html",
 		WebhookURL:    "https://flag.example/hook",
 		WebhookSecret: "flag-secret",
 		CACert:        "flag-ca.pem",
 		InsecureHTTP:  false,
 		RequireRemote: false,
+		SBOMFiles:     []string{"bom-one.cdx.json", "bom-two.spdx.json"},
 		Quiet:         true,
 		NoColor:       true,
 	})
@@ -110,8 +115,12 @@ func TestResolveScanSettingsPrecedenceAndValidation(t *testing.T) {
 	if settings.InsecureHTTP || settings.RequireRemote {
 		t.Fatalf("flag bool overrides not applied: insecure=%v requireRemote=%v", settings.InsecureHTTP, settings.RequireRemote)
 	}
-	if settings.OutputJSON != "result.json" || settings.OutputSARIF != "result.sarif" || settings.OutputJUnit != "result.xml" {
+	if settings.OutputJSON != "result.json" || settings.OutputSARIF != "result.sarif" ||
+		settings.OutputJUnit != "result.xml" || settings.OutputHTML != "result.html" {
 		t.Fatalf("output paths not applied: %+v", settings)
+	}
+	if got := strings.Join(settings.SBOMFiles, ","); got != "bom-one.cdx.json,bom-two.spdx.json" {
+		t.Fatalf("SBOMFiles = %q", got)
 	}
 }
 

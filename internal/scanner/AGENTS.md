@@ -17,6 +17,9 @@ Read `AGENTS.md` (root) and `DESIGN.md` first.
   over threshold, 2 operational error, 3 findings under threshold, 4 parser
   error, 10 internal. Multi-target aggregation must be severity-aware, not a raw
   numeric max.
+- Explicit SBOM inputs are package inventory sources only. They are collected
+  alongside lockfiles before filtering/checking, and embedded SBOM
+  vulnerability/VEX assertions are not scan findings.
 - Dev dependencies are filtered out by default; `--include-dev` keeps them.
 - Correlation-ID is generated client-side and sent as `X-Correlation-ID`.
 
@@ -33,9 +36,6 @@ Read `AGENTS.md` (root) and `DESIGN.md` first.
 - **M7:** the auto-mode local fallback is silent. Add the warning.
 - **L1:** the scan pipeline emits no DEBUG logs. DESIGN.md sec 7.1 expects
   "found lock file path=... ecosystem=..." and "parsed N packages". Add them.
-- `filterDevPackages` mutates the caller's backing array (`pkgs[:0]`). Safe for
-  the single current caller; document/guard if you add another.
-
 ## Tests
 
 ```bash

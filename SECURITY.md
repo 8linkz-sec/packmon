@@ -9,7 +9,7 @@ fix the code or update this file in the same change with a clear rationale.
 - Prevent unauthorized writes to feed data, admin settings, queue state, API
   keys, and manual advisories.
 - Prevent accidental public exposure of internal APIs and metrics.
-- Preserve integrity of vulnerability and malicious package data.
+- Preserve integrity of vulnerability, malicious package, and lifecycle data.
 - Avoid leaking secrets, repository paths, file contents, or environment values.
 - Provide trustworthy CI outputs for dependency security decisions.
 - Keep local developer use safe even when remote services are unavailable.
@@ -187,6 +187,13 @@ normalized ReversingLabs status and minimal evidence, not full raw reports.
 ReversingLabs rate-limit, capacity, and network failures degrade that source
 but must not fail scans or delete existing cached blocking data.
 
+endoflife.date lifecycle metadata is external feed input. Packmon fetches it
+server-side, validates and normalizes product/release data, and exposes only
+normalized lifecycle rows and findings to scan clients. Raw endoflife.date JSON
+is not exposed through scan results. The feed requires no API key, and upstream
+rate limits, 304 responses, network failures, or schema parse failures must
+degrade feed status without deleting existing cached lifecycle data.
+
 Vulnerability advisories without upstream severity or CVSS data are treated as
 `LOW` until enrichment can raise them. Malicious-package categories from
 OSV/RustSec are stored as malicious findings rather than unresolved
@@ -220,9 +227,12 @@ The canonical scan result is shared by:
 Downstream tools should trust `findings_blocking`, exit code, and finding type
 semantics only if the result was produced by a verified Packmon binary/server.
 
-Malicious and supply-chain risk findings always block. Vulnerability findings
-block according to the configured threshold. Feed-degraded responses must be
-visible so CI/N8N can make policy decisions.
+Malicious and supply-chain risk findings always block. Vulnerability and
+`lifecycle` findings block according to the configured threshold. Exact EOL
+matches from lifecycle data are represented as blocking `supply_chain_risk`
+findings, while upcoming EOL and security-support-only states remain
+severity-gated `lifecycle` findings. Feed-degraded responses must be visible so
+CI/N8N can make policy decisions.
 
 ## Webhooks
 
@@ -295,7 +305,7 @@ Requirements:
 Local SQLite sync:
 
 - pulls from Packmon server only;
-- stores compact finding and reputation data, not raw feed JSON;
+- stores compact finding, reputation, and lifecycle data, not raw feed JSON;
 - warns when data is stale;
 - does not block solely because data is stale.
 

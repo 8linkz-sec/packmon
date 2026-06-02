@@ -11,6 +11,7 @@ import (
 	"github.com/8linkz/packmon/internal/db"
 	"github.com/8linkz/packmon/internal/feed"
 	"github.com/8linkz/packmon/internal/feed/cisakev"
+	"github.com/8linkz/packmon/internal/feed/endoflife"
 	"github.com/8linkz/packmon/internal/feed/epss"
 	"github.com/8linkz/packmon/internal/feed/ghsa"
 	"github.com/8linkz/packmon/internal/feed/malicious"
@@ -198,6 +199,7 @@ func newFeedManager(cfg *config.Config, store db.Store, logger *slog.Logger) *fe
 	registerFeedSyncer(manager, cfg, "cisakev", newFeedSyncer("cisakev", cfg, store, logger))
 	registerFeedSyncer(manager, cfg, "epss", newFeedSyncer("epss", cfg, store, logger))
 	registerFeedSyncer(manager, cfg, "nvd", newFeedSyncer("nvd", cfg, store, logger))
+	registerFeedSyncer(manager, cfg, "endoflife", newFeedSyncer("endoflife", cfg, store, logger))
 
 	return manager
 }
@@ -218,6 +220,8 @@ func newFeedSyncer(name string, cfg *config.Config, store db.Store, logger *slog
 		return epss.NewSyncer(logger)
 	case "nvd":
 		return newNVDSyncer(cfg, logger)
+	case "endoflife":
+		return endoflife.NewSyncer(logger, endoflife.WithBaseURL(cfg.Feeds.EndOfLifeBaseURL))
 	default:
 		return nil
 	}

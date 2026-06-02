@@ -64,8 +64,8 @@ func TestSwiftPMParser_Parse(t *testing.T) {
 			}`,
 			wantCount: 2,
 			wantPkgs: map[string]string{
-				"alamofire":             "5.9.0",
-				"swift-argument-parser": "1.3.0",
+				"github.com/Alamofire/Alamofire":         "5.9.0",
+				"github.com/apple/swift-argument-parser": "1.3.0",
 			},
 		},
 		{
@@ -89,8 +89,8 @@ func TestSwiftPMParser_Parse(t *testing.T) {
 			}`,
 			wantCount: 2,
 			wantPkgs: map[string]string{
-				"Alamofire":  "5.9.0",
-				"Kingfisher": "7.11.0",
+				"github.com/Alamofire/Alamofire": "5.9.0",
+				"github.com/onevcat/Kingfisher":  "7.11.0",
 			},
 		},
 		{
@@ -106,7 +106,7 @@ func TestSwiftPMParser_Parse(t *testing.T) {
 				]
 			}`,
 			wantCount: 1,
-			wantPkgs:  map[string]string{"swift-nio": "2.65.0"},
+			wantPkgs:  map[string]string{"github.com/apple/swift-nio": "2.65.0"},
 		},
 		{
 			name: "branch pin skipped (no version)",
@@ -126,7 +126,7 @@ func TestSwiftPMParser_Parse(t *testing.T) {
 				]
 			}`,
 			wantCount: 1,
-			wantPkgs:  map[string]string{"versioned-dep": "1.0.0"},
+			wantPkgs:  map[string]string{"example.com/other": "1.0.0"},
 		},
 		{
 			name:      "empty pins",
@@ -139,13 +139,43 @@ func TestSwiftPMParser_Parse(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "v2 pin with empty identity",
+			name: "v2 pin with empty identity and location",
 			input: `{
 				"version": 2,
 				"pins": [
 					{
 						"identity": "",
 						"location": "https://example.com/repo.git",
+						"state": {"version": "1.0.0", "revision": "abc"}
+					}
+				]
+			}`,
+			wantCount: 1,
+			wantPkgs:  map[string]string{"example.com/repo": "1.0.0"},
+		},
+		{
+			name: "scp-style location canonicalized",
+			input: `{
+				"version": 2,
+				"pins": [
+					{
+						"identity": "swift-nio",
+						"location": "git@github.com:apple/swift-nio.git",
+						"state": {"version": "2.65.0", "revision": "abc"}
+					}
+				]
+			}`,
+			wantCount: 1,
+			wantPkgs:  map[string]string{"github.com/apple/swift-nio": "2.65.0"},
+		},
+		{
+			name: "v2 pin with empty identity and location",
+			input: `{
+				"version": 2,
+				"pins": [
+					{
+						"identity": "",
+						"location": "",
 						"state": {"version": "1.0.0", "revision": "abc"}
 					}
 				]
@@ -174,6 +204,7 @@ func TestSwiftPMParser_Parse(t *testing.T) {
 			if len(pkgs) != tt.wantCount {
 				t.Fatalf("got %d packages, want %d", len(pkgs), tt.wantCount)
 			}
+			seen := make(map[string]struct{}, len(pkgs))
 			for _, pkg := range pkgs {
 				if pkg.Ecosystem != domain.EcosystemSwiftPM {
 					t.Errorf("package %q ecosystem = %q, want %q", pkg.Name, pkg.Ecosystem, domain.EcosystemSwiftPM)
@@ -182,6 +213,14 @@ func TestSwiftPMParser_Parse(t *testing.T) {
 					if pkg.Version != wantVer {
 						t.Errorf("package %q version = %q, want %q", pkg.Name, pkg.Version, wantVer)
 					}
+				} else if len(tt.wantPkgs) > 0 {
+					t.Errorf("unexpected package %q@%s", pkg.Name, pkg.Version)
+				}
+				seen[pkg.Name] = struct{}{}
+			}
+			for wantName := range tt.wantPkgs {
+				if _, ok := seen[wantName]; !ok {
+					t.Errorf("missing package %q", wantName)
 				}
 			}
 		})

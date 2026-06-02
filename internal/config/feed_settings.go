@@ -105,6 +105,15 @@ func (c *Config) FeedSettings(name string) (FeedSettings, bool) {
 			RequiresAPIKey:       false,
 			SupportsSyncInterval: true,
 		}, true
+	case "endoflife":
+		return FeedSettings{
+			Name:                 "endoflife",
+			DisplayName:          "endoflife.date",
+			Enabled:              c.Feeds.EndOfLifeEnabled,
+			Mode:                 c.Feeds.EndOfLifeMode,
+			SyncInterval:         c.Feeds.EndOfLifeInterval,
+			SupportsSyncInterval: true,
+		}, true
 	case "socket":
 		return FeedSettings{
 			Name:                 "socket",
@@ -136,7 +145,7 @@ func (c *Config) FeedSettingsList() []FeedSettings {
 		return nil
 	}
 
-	names := []string{"osv", "ghsa", "openssf", "vulncheck", "cisakev", "epss", "nvd", "socket", "reversinglabs"}
+	names := []string{"osv", "ghsa", "openssf", "vulncheck", "cisakev", "epss", "nvd", "endoflife", "socket", "reversinglabs"}
 	out := make([]FeedSettings, 0, len(names))
 	for _, name := range names {
 		feed, ok := c.FeedSettings(name)
@@ -198,6 +207,13 @@ func (c *Config) SetFeedSettings(feed FeedSettings) error {
 		c.Feeds.NVDMode = mode
 		c.Feeds.NVDInterval = normalizeOptionalDuration(feed.SyncInterval)
 		c.Feeds.NVDAPIKey = strings.TrimSpace(feed.APIKey)
+	case "endoflife":
+		if mode == FeedModeExternal {
+			return fmt.Errorf("endoflife does not support external mode")
+		}
+		c.Feeds.EndOfLifeEnabled = feed.Enabled
+		c.Feeds.EndOfLifeMode = FeedModeSelf
+		c.Feeds.EndOfLifeInterval = normalizeOptionalDuration(feed.SyncInterval)
 	case "socket":
 		c.Feeds.SocketEnabled = feed.Enabled
 		c.Feeds.SocketMode = mode

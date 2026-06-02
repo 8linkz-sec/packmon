@@ -57,6 +57,14 @@ func TestExpectedVersionMatchesHighestEmbeddedMigration(t *testing.T) {
 	}
 }
 
+func TestExpectedVersionIncludesLifecycleMigration(t *testing.T) {
+	t.Parallel()
+
+	if ExpectedVersion != 7 {
+		t.Fatalf("ExpectedVersion = %d, want 7 for lifecycle schema", ExpectedVersion)
+	}
+}
+
 func TestEmbeddedUpMigrationsAreSortedAndComplete(t *testing.T) {
 	t.Parallel()
 

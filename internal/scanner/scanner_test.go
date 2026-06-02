@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/8linkz/packmon/internal/db"
 	"github.com/8linkz/packmon/internal/domain"
 	"github.com/8linkz/packmon/internal/parser"
 	"github.com/8linkz/packmon/internal/server/middleware"
@@ -224,6 +225,94 @@ func TestScannerIncludesDevDependenciesWhenRequested(t *testing.T) {
 	}
 }
 
+func TestScannerRunIncludesSBOMPackages(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	sbomPath := filepath.Join(dir, "bom.cdx.json")
+	if err := os.WriteFile(sbomPath, []byte(`{
+		"bomFormat":"CycloneDX",
+		"components":[{"type":"library","name":"django","version":"4.2.11","purl":"pkg:pypi/django@4.2.11"}]
+	}`), 0o600); err != nil {
+		t.Fatalf("write SBOM: %v", err)
+	}
+
+	sc := New(parser.NewRegistry(), Config{
+		Path:      dir,
+		Mode:      ModeLocal,
+		FailOn:    domain.SeverityCritical,
+		MaxDepth:  3,
+		Timeout:   5 * time.Second,
+		SBOMFiles: []string{sbomPath},
+	})
+	checker := &captureLocalChecker{}
+	sc.SetLocalChecker(checker)
+
+	result, exitCode := sc.Run(context.Background())
+	if exitCode != ExitOK {
+		t.Fatalf("Run exit = %d, result = %+v", exitCode, result)
+	}
+	if result.PackagesScanned != 1 {
+		t.Fatalf("PackagesScanned = %d, want 1", result.PackagesScanned)
+	}
+	if len(checker.packages) != 1 || checker.packages[0].Name != "django" || checker.packages[0].Ecosystem != domain.EcosystemPyPI {
+		t.Fatalf("checked packages = %#v, want django pypi", checker.packages)
+	}
+}
+
+func TestCheckLocalIncludesOptionalLifecycleFindings(t *testing.T) {
+	t.Parallel()
+
+	checker := &lifecycleLocalChecker{
+		lifecycleFindings: []domain.Finding{
+			{
+				Name:       "django",
+				Version:    "4.2.11",
+				Ecosystem:  domain.EcosystemPyPI,
+				Type:       domain.FindingTypeLifecycle,
+				Severity:   domain.SeverityLow,
+				AdvisoryID: "endoflife:django:4.2:security_support_only",
+				Title:      "Django 4.2 is in security support only",
+				RiskType:   "security_support_only",
+				Source:     "endoflife.date",
+			},
+		},
+	}
+	sc := New(nil, Config{})
+	sc.SetLocalChecker(checker)
+
+	findings, err := sc.checkLocal(context.Background(), []domain.Package{
+		{Name: "django", Version: "4.2.11", Ecosystem: domain.EcosystemPyPI},
+	})
+	if err != nil {
+		t.Fatalf("checkLocal() error = %v", err)
+	}
+	if len(findings) != 1 || findings[0].Type != domain.FindingTypeLifecycle {
+		t.Fatalf("findings = %+v, want lifecycle finding", findings)
+	}
+	if len(checker.lifecycleQueries) != 1 || checker.lifecycleQueries[0].Name != "django" {
+		t.Fatalf("lifecycle queries = %+v, want django query", checker.lifecycleQueries)
+	}
+
+	sc.SetLocalChecker(&captureLocalChecker{})
+	if findings, err := sc.checkLocal(context.Background(), []domain.Package{
+		{Name: "django", Version: "4.2.11", Ecosystem: domain.EcosystemPyPI},
+	}); err != nil || len(findings) != 0 {
+		t.Fatalf("checkLocal(old checker) findings=%+v err=%v, want none nil", findings, err)
+	}
+}
+
+func TestAlwaysBlockingFindingKeepsLifecycleSeverityGated(t *testing.T) {
+	t.Parallel()
+
+	if isAlwaysBlockingFinding(domain.Finding{Type: domain.FindingTypeLifecycle, RiskType: "eol_soon"}) {
+		t.Fatal("lifecycle findings should not be always blocking")
+	}
+	if !isAlwaysBlockingFinding(domain.Finding{Type: domain.FindingTypeSupplyChainRisk, RiskType: "eol"}) {
+		t.Fatal("EOL supply-chain risk findings should be always blocking")
+	}
+}
+
 type captureLocalChecker struct {
 	packages []domain.Package
 }
@@ -235,6 +324,24 @@ func (c *captureLocalChecker) FindVulnerabilities(_ context.Context, ecosystem, 
 
 func (c *captureLocalChecker) FindMalicious(context.Context, string, string, string) ([]domain.Finding, error) {
 	return nil, nil
+}
+
+type lifecycleLocalChecker struct {
+	lifecycleFindings []domain.Finding
+	lifecycleQueries  []db.PackageQuery
+}
+
+func (c *lifecycleLocalChecker) FindVulnerabilities(context.Context, string, string, string) ([]domain.Finding, error) {
+	return nil, nil
+}
+
+func (c *lifecycleLocalChecker) FindMalicious(context.Context, string, string, string) ([]domain.Finding, error) {
+	return nil, nil
+}
+
+func (c *lifecycleLocalChecker) FindLifecycleFindingsBatch(_ context.Context, packages []db.PackageQuery, _ time.Time) ([]domain.Finding, error) {
+	c.lifecycleQueries = append(c.lifecycleQueries, packages...)
+	return c.lifecycleFindings, nil
 }
 
 type errorLocalChecker struct {

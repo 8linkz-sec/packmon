@@ -18,6 +18,7 @@ func TestEcosystemMappingHelpers(t *testing.T) {
 	}{
 		{name: "osv pypi", fn: MapOSVEcosystem, in: "PyPI", want: domain.EcosystemPyPI},
 		{name: "osv alias cargo", fn: MapOSVEcosystem, in: "cargo", want: domain.EcosystemCargo},
+		{name: "osv github actions", fn: MapOSVEcosystem, in: "GitHub Actions", want: domain.EcosystemGitHubActions},
 		{name: "ghsa actions", fn: MapGHSAEcosystem, in: "GitHub Actions", want: domain.EcosystemGitHubActions},
 		{name: "ghsa pip", fn: MapGHSAEcosystem, in: "pip", want: domain.EcosystemPyPI},
 		{name: "openssf crates", fn: MapOpenSSFEcosystem, in: "crates.io", want: domain.EcosystemCargo},
@@ -45,7 +46,7 @@ func TestOSVBucketEcosystemsIncludesSupportedBuckets(t *testing.T) {
 	t.Parallel()
 
 	buckets := OSVBucketEcosystems()
-	for _, want := range []string{"npm", "PyPI", "Go", "Maven", "crates.io", "CRAN"} {
+	for _, want := range []string{"npm", "PyPI", "Go", "Maven", "crates.io", "CRAN", "GitHub Actions"} {
 		if !slices.Contains(buckets, want) {
 			t.Fatalf("OSVBucketEcosystems() = %#v, missing %q", buckets, want)
 		}

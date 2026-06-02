@@ -13,7 +13,7 @@ Read `AGENTS.md` (root) and `DESIGN.md` first.
   server must not silently migrate on startup -- it reads the schema version and
   refuses to start on mismatch (`cmd/packmon-server/main.go`, migrator
   `ExpectedVersion`). When you add a migration, bump `ExpectedVersion` and ship
-  symmetric `*.up.sql` / `*.down.sql`. Current version: 3.
+  symmetric `*.up.sql` / `*.down.sql`. Current version: 7.
 - All SQL is parameterized (`$N`). Never concatenate user input into SQL. For
   dynamic status/IN lists, whitelist values (see `ClearQueue`).
 - Nullable JSONB text columns must be `COALESCE`d (e.g. `versions::text`,

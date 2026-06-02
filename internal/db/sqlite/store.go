@@ -84,6 +84,10 @@ func (s *Store) Close() error {
 // given ecosystem and package name. Version matching is done in
 // application code against the stored version_ranges JSON.
 func (s *Store) FindVulnerabilities(ctx context.Context, ecosystem, name, version string) ([]domain.Finding, error) {
+	ecosystem = strings.TrimSpace(ecosystem)
+	name = normalizePackageName(ecosystem, strings.TrimSpace(name))
+	version = strings.TrimSpace(version)
+
 	const query = `
 		SELECT id, ecosystem, name, version_ranges, severity,
 		       cvss_score, epss_score, cisa_kev, summary
@@ -156,6 +160,10 @@ func (s *Store) FindVulnerabilities(ctx context.Context, ecosystem, name, versio
 // FindMalicious returns all malicious-package findings that match the
 // given ecosystem and package name.
 func (s *Store) FindMalicious(ctx context.Context, ecosystem, name, version string) ([]domain.Finding, error) {
+	ecosystem = strings.TrimSpace(ecosystem)
+	name = normalizePackageName(ecosystem, strings.TrimSpace(name))
+	version = strings.TrimSpace(version)
+
 	const query = `
 		SELECT id, ecosystem, name, versions, risk_type, severity, summary
 		FROM malicious_local
@@ -244,6 +252,10 @@ func (s *Store) findReputationFindings(ctx context.Context, ecosystem, name, ver
 }
 
 func (s *Store) queryReputationFindings(ctx context.Context, ecosystem, name, version string) ([]domain.Finding, error) {
+	ecosystem = strings.TrimSpace(ecosystem)
+	name = normalizePackageName(ecosystem, strings.TrimSpace(name))
+	version = strings.TrimSpace(version)
+
 	query := `
 		SELECT id, ecosystem, name, version, type, risk_type, severity, summary
 		FROM reputation_findings_local

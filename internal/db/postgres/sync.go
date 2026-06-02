@@ -32,16 +32,22 @@ func (s *Store) ExportSync(ctx context.Context, opts db.SyncExportOptions) (*db.
 		return nil, err
 	}
 
+	lifecycle, err := s.exportSyncLifecycle(ctx, opts, snapshot)
+	if err != nil {
+		return nil, err
+	}
+
 	// When pagination is active, signal that more data may follow if
 	// any result set filled the limit exactly.
 	truncated := opts.Limit > 0 &&
-		(len(vulns) == opts.Limit || len(malicious) == opts.Limit || len(reputation) == opts.Limit)
+		(len(vulns) == opts.Limit || len(malicious) == opts.Limit || len(reputation) == opts.Limit || len(lifecycle) == opts.Limit)
 
 	return &db.SyncExport{
 		SyncedAt:        snapshot,
 		Vulnerabilities: vulns,
 		Malicious:       malicious,
 		Reputation:      reputation,
+		Lifecycle:       lifecycle,
 		Truncated:       truncated,
 	}, nil
 }
@@ -249,6 +255,94 @@ func (s *Store) exportSyncMalicious(ctx context.Context, opts db.SyncExportOptio
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("postgres: iterate sync malicious rows: %w", err)
+	}
+
+	return out, nil
+}
+
+func (s *Store) exportSyncLifecycle(ctx context.Context, opts db.SyncExportOptions, snapshot time.Time) ([]db.SyncLifecycleRelease, error) {
+	query := `
+		SELECT
+			'endoflife:' || m.ecosystem || ':' || m.name || ':' || p.product_slug || ':' || r.cycle AS id,
+			m.ecosystem,
+			m.name,
+			p.product_slug,
+			p.name AS product_label,
+			r.cycle,
+			r.latest,
+			r.release_date,
+			r.is_lts,
+			r.lts_from,
+			r.is_eoas,
+			r.eoas_from,
+			r.is_eol,
+			r.eol_from,
+			r.is_discontinued,
+			r.discontinued_from,
+			r.is_eoes,
+			r.eoes_from,
+			r.is_maintained
+		FROM lifecycle_package_map m
+		INNER JOIN lifecycle_products p ON p.product_slug = m.product_slug
+		INNER JOIN lifecycle_releases r ON r.product_slug = p.product_slug
+		WHERE GREATEST(m.updated_at, p.updated_at, r.updated_at) <= $1`
+
+	args := []any{snapshot}
+	if opts.Since != nil {
+		since := opts.Since.UTC()
+		query += fmt.Sprintf(` AND GREATEST(m.updated_at, p.updated_at, r.updated_at) > $%d`, len(args)+1)
+		args = append(args, since)
+	}
+	if len(opts.Ecosystems) > 0 {
+		query += fmt.Sprintf(` AND m.ecosystem = ANY($%d)`, len(args)+1)
+		args = append(args, opts.Ecosystems)
+	}
+	query += ` ORDER BY m.ecosystem ASC, m.name ASC, p.product_slug ASC, r.cycle ASC`
+	if opts.Limit > 0 {
+		query += fmt.Sprintf(` LIMIT $%d`, len(args)+1)
+		args = append(args, opts.Limit)
+		if opts.Offset > 0 {
+			query += fmt.Sprintf(` OFFSET $%d`, len(args)+1)
+			args = append(args, opts.Offset)
+		}
+	}
+
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: export sync lifecycle releases: %w", err)
+	}
+	defer closeSilently(rows)
+
+	out := make([]db.SyncLifecycleRelease, 0)
+	for rows.Next() {
+		var item db.SyncLifecycleRelease
+		if err := rows.Scan(
+			&item.ID,
+			&item.Ecosystem,
+			&item.Name,
+			&item.ProductSlug,
+			&item.ProductLabel,
+			&item.Cycle,
+			&item.Latest,
+			&item.ReleaseDate,
+			&item.IsLTS,
+			&item.LTSFrom,
+			&item.IsEOAS,
+			&item.EOASFrom,
+			&item.IsEOL,
+			&item.EOLFrom,
+			&item.IsDiscontinued,
+			&item.DiscontinuedFrom,
+			&item.IsEOES,
+			&item.EOESFrom,
+			&item.IsMaintained,
+		); err != nil {
+			return nil, fmt.Errorf("postgres: scan sync lifecycle row: %w", err)
+		}
+		out = append(out, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: iterate sync lifecycle rows: %w", err)
 	}
 
 	return out, nil

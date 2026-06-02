@@ -65,6 +65,106 @@ func TestRunSingleScanWritesAllReportFormatsForCleanLocalScan(t *testing.T) {
 	}
 }
 
+func TestScanCommandHTMLFlagWritesReport(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	dbDir := t.TempDir()
+	t.Setenv("PACKMON_DB_PATH", dbDir)
+	store, _ := newTestSQLiteStore(t, dbDir)
+	if err := store.Close(); err != nil {
+		t.Fatalf("close seed store: %v", err)
+	}
+
+	scanDir := filepath.Join(t.TempDir(), "empty-project")
+	if err := os.MkdirAll(scanDir, 0o750); err != nil {
+		t.Fatalf("mkdir scan dir: %v", err)
+	}
+	htmlPath := filepath.Join(t.TempDir(), "report.html")
+
+	cmd := newScanCmd()
+	// NOTE: --quiet / --no-color are persistent flags on the ROOT command
+	// (cmd/packmon/root.go), not on the scan command. A standalone newScanCmd()
+	// does not know them, so passing --quiet here would fail with
+	// "unknown flag: --quiet". Only flags registered on the scan command itself
+	// (--mode, --html, the scan target) may be used in this isolated execution.
+	cmd.SetArgs([]string{"--mode", "local", "--html", htmlPath, scanDir})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("scan command execute: %v", err)
+	}
+
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads a generated report path.
+	if err != nil {
+		t.Fatalf("read HTML report: %v", err)
+	}
+	out := string(data)
+	if !strings.HasPrefix(out, "<!DOCTYPE html>") {
+		t.Fatalf("report is not HTML:\n%.80s", out)
+	}
+	if !strings.Contains(out, "<h1>empty-project</h1>") {
+		t.Fatal("report missing repo-name H1 title")
+	}
+}
+
+func TestRunSingleScanWritesHTMLReport(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	dbDir := t.TempDir()
+	t.Setenv("PACKMON_DB_PATH", dbDir)
+	store, _ := newTestSQLiteStore(t, dbDir)
+	if err := store.Close(); err != nil {
+		t.Fatalf("close seed store: %v", err)
+	}
+
+	scanDir := filepath.Join(t.TempDir(), "empty-project")
+	if err := os.MkdirAll(scanDir, 0o750); err != nil {
+		t.Fatalf("mkdir scan dir: %v", err)
+	}
+	outDir := t.TempDir()
+	htmlPath := filepath.Join(outDir, "html", "report.html")
+
+	exitCode, err := runSingleScan(context.Background(), scanSettings{
+		TargetName: "empty-project",
+		Path:       scanDir,
+		Mode:       "local",
+		FailOn:     "CRITICAL",
+		MaxDepth:   2,
+		Timeout:    1,
+		Quiet:      true,
+		OutputHTML: htmlPath,
+	})
+	if err != nil {
+		t.Fatalf("runSingleScan() error = %v", err)
+	}
+	if exitCode != ExitOK {
+		t.Fatalf("exitCode = %d, want %d", exitCode, ExitOK)
+	}
+
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads a generated report path.
+	if err != nil {
+		t.Fatalf("read HTML report: %v", err)
+	}
+	out := string(data)
+	if !strings.HasPrefix(out, "<!DOCTYPE html>") {
+		t.Fatalf("report is not HTML:\n%.80s", out)
+	}
+	if !strings.Contains(out, "<h1>empty-project</h1>") {
+		t.Fatal("report missing repo-name H1 title")
+	}
+}
+
+func TestRunScanCommandRejectsHTMLForMultipleTargets(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	yaml := "repos:\n" +
+		"  - name: a\n    path: .\n    mode: local\n" +
+		"  - name: b\n    path: .\n    mode: local\n"
+	if err := os.WriteFile(".packmon.yaml", []byte(yaml), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cmd := newScanCmd()
+	err := runScanCommand(cmd, nil, scanFlagValues{All: true, OutputHTML: "out.html"})
+	if err == nil || !strings.Contains(err.Error(), "--html") {
+		t.Fatalf("err = %v, want error mentioning --html", err)
+	}
+}
+
 func TestRunSingleScanRemotePostsPackagesAndSendsWebhook(t *testing.T) {
 	isolateCLIConfigDiscovery(t)
 	dbDir := t.TempDir()

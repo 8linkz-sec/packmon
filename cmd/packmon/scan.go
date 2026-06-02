@@ -30,6 +30,7 @@ func newScanCmd() *cobra.Command {
 		flagOutputJSON    string
 		flagOutputSARIF   string
 		flagOutputJUnit   string
+		flagOutputHTML    string
 		flagWebhookURL    string
 		flagWebhookSecret string
 		flagAll           bool
@@ -40,6 +41,7 @@ func newScanCmd() *cobra.Command {
 		flagCACert        string
 		flagInsecureHTTP  bool
 		flagRequireRemote bool
+		flagSBOMFiles     []string
 	)
 
 	cmd := &cobra.Command{
@@ -51,10 +53,10 @@ and malicious package databases.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if flagListPackages {
-				return runListPackages(args, flagEcosystems, flagMaxDepth, flagNoColor)
+				return runListPackages(args, flagEcosystems, flagMaxDepth, flagNoColor, flagSBOMFiles)
 			}
 			if flagOutdated {
-				return runOutdated(args, flagEcosystems, flagMaxDepth)
+				return runOutdated(args, flagEcosystems, flagMaxDepth, flagSBOMFiles)
 			}
 			if flagListAll {
 				cfg, _, err := loadCurrentCLIConfig()
@@ -79,6 +81,7 @@ and malicious package databases.`,
 					CACert:        flagCACert,
 					InsecureHTTP:  flagInsecureHTTP,
 					RequireRemote: flagRequireRemote,
+					SBOMFiles:     flagSBOMFiles,
 				})
 				if err != nil {
 					return err
@@ -104,6 +107,7 @@ and malicious package databases.`,
 				OutputJSON:    flagOutputJSON,
 				OutputSARIF:   flagOutputSARIF,
 				OutputJUnit:   flagOutputJUnit,
+				OutputHTML:    flagOutputHTML,
 				WebhookURL:    flagWebhookURL,
 				WebhookSecret: flagWebhookSecret,
 				All:           flagAll,
@@ -113,6 +117,7 @@ and malicious package databases.`,
 				CACert:        flagCACert,
 				InsecureHTTP:  flagInsecureHTTP,
 				RequireRemote: flagRequireRemote,
+				SBOMFiles:     flagSBOMFiles,
 			})
 		},
 	}
@@ -129,6 +134,7 @@ and malicious package databases.`,
 	f.StringVar(&flagOutputJSON, "output-json", "", "write JSON results to file")
 	f.StringVar(&flagOutputSARIF, "output-sarif", "", "write SARIF 2.1.0 results to file")
 	f.StringVar(&flagOutputJUnit, "output-junit", "", "write JUnit XML results to file")
+	f.StringVar(&flagOutputHTML, "html", "", "write a self-contained HTML report to file")
 	f.StringVar(&flagWebhookURL, "webhook-url", "", "webhook URL to POST results to")
 	f.StringVar(&flagWebhookSecret, "webhook-secret", "", "HMAC-SHA256 secret for webhook signature")
 	f.BoolVar(&flagAll, "all", false, "scan all repositories configured in .packmon.yaml")
@@ -139,6 +145,7 @@ and malicious package databases.`,
 	f.StringVar(&flagCACert, "cacert", "", "path to a PEM CA bundle used to verify the server's TLS certificate")
 	f.BoolVar(&flagInsecureHTTP, "insecure-allow-http", false, "allow plain http:// server URLs (sends bearer token in cleartext; opt-in)")
 	f.BoolVar(&flagRequireRemote, "require-remote", false, "in auto mode, fail hard on remote error instead of falling back to the local database")
+	f.StringArrayVar(&flagSBOMFiles, "sbom", nil, "SBOM file to include as package input (CycloneDX JSON/XML or SPDX JSON); can be repeated")
 
 	return cmd
 }
@@ -155,6 +162,7 @@ type scanFlagValues struct {
 	OutputJSON    string
 	OutputSARIF   string
 	OutputJUnit   string
+	OutputHTML    string
 	WebhookURL    string
 	WebhookSecret string
 	All           bool
@@ -164,6 +172,7 @@ type scanFlagValues struct {
 	CACert        string
 	InsecureHTTP  bool
 	RequireRemote bool
+	SBOMFiles     []string
 }
 
 type scanTarget struct {
@@ -186,6 +195,7 @@ type scanSettings struct {
 	OutputJSON    string
 	OutputSARIF   string
 	OutputJUnit   string
+	OutputHTML    string
 	WebhookURL    string
 	WebhookSecret string
 	Quiet         bool
@@ -193,6 +203,7 @@ type scanSettings struct {
 	CACertFile    string
 	InsecureHTTP  bool
 	RequireRemote bool
+	SBOMFiles     []string
 }
 
 func runScanCommand(cmd *cobra.Command, args []string, flags scanFlagValues) error {
@@ -205,8 +216,8 @@ func runScanCommand(cmd *cobra.Command, args []string, flags scanFlagValues) err
 	if err != nil {
 		return err
 	}
-	if len(targets) > 1 && (strings.TrimSpace(flags.OutputJSON) != "" || strings.TrimSpace(flags.OutputSARIF) != "" || strings.TrimSpace(flags.OutputJUnit) != "") {
-		return fmt.Errorf("--output-json, --output-sarif, and --output-junit can only be used when scanning a single target, not multiple targets")
+	if len(targets) > 1 && (strings.TrimSpace(flags.OutputJSON) != "" || strings.TrimSpace(flags.OutputSARIF) != "" || strings.TrimSpace(flags.OutputJUnit) != "" || strings.TrimSpace(flags.OutputHTML) != "") {
+		return fmt.Errorf("--output-json, --output-sarif, --output-junit, and --html can only be used when scanning a single target, not multiple targets")
 	}
 
 	finalExitCode := ExitOK
@@ -480,10 +491,14 @@ func resolveScanSettings(cmd *cobra.Command, cfg *cliConfig, target scanTarget, 
 	if cmd.Flags().Changed("require-remote") {
 		settings.RequireRemote = flags.RequireRemote
 	}
+	if cmd.Flags().Changed("sbom") {
+		settings.SBOMFiles = append([]string(nil), flags.SBOMFiles...)
+	}
 
 	settings.OutputJSON = strings.TrimSpace(flags.OutputJSON)
 	settings.OutputSARIF = strings.TrimSpace(flags.OutputSARIF)
 	settings.OutputJUnit = strings.TrimSpace(flags.OutputJUnit)
+	settings.OutputHTML = strings.TrimSpace(flags.OutputHTML)
 
 	if err := validateModeString(settings.Mode); err != nil {
 		return scanSettings{}, err
@@ -579,6 +594,7 @@ func runScanPipeline(ctx context.Context, settings scanSettings) (*domain.ScanRe
 		IncludeDev: settings.IncludeDev,
 		Quiet:      settings.Quiet,
 		NoColor:    settings.NoColor,
+		SBOMFiles:  settings.SBOMFiles,
 
 		CACertFile:        settings.CACertFile,
 		AllowInsecureHTTP: settings.InsecureHTTP,
@@ -688,6 +704,23 @@ func runSingleScan(ctx context.Context, settings scanSettings) (int, error) {
 		}
 	}
 
+	if settings.OutputHTML != "" {
+		if err := ensureOutputDir(settings.OutputHTML); err != nil {
+			fmt.Fprintf(os.Stderr, "error preparing HTML output: %v\n", err)
+			if exitCode == ExitOK {
+				exitCode = ExitOperational
+			}
+		} else {
+			hw := scanner.NewHTMLWriter(version)
+			if err := hw.WriteFile(settings.OutputHTML, settings.TargetName, failOn, result); err != nil {
+				fmt.Fprintf(os.Stderr, "error writing HTML output: %v\n", err)
+				if exitCode == ExitOK {
+					exitCode = ExitOperational
+				}
+			}
+		}
+	}
+
 	if settings.WebhookURL != "" {
 		whCfg := scanner.WebhookConfig{
 			URL:     settings.WebhookURL,
@@ -743,7 +776,11 @@ func openLocalSQLiteStore(ctx context.Context, dbPath string) (*sqlite.Store, bo
 // runListPackages walks the target directory, parses all lock files, and
 // prints every detected package with version and ecosystem. No
 // vulnerability check is performed.
-func runListPackages(args []string, ecosystems string, maxDepth int, noColor bool) error {
+func runListPackages(args []string, ecosystems string, maxDepth int, noColor bool, sbomFilesOpt ...[]string) error {
+	var sbomFiles []string
+	if len(sbomFilesOpt) > 0 {
+		sbomFiles = sbomFilesOpt[0]
+	}
 	scanPath := "."
 	if len(args) > 0 {
 		scanPath = args[0]
@@ -755,23 +792,20 @@ func runListPackages(args []string, ecosystems string, maxDepth int, noColor boo
 	}
 
 	reg := parser.NewRegistry()
-
-	var ecoFilter []string
-	if ecosystems != "" {
-		for _, e := range strings.Split(ecosystems, ",") {
-			if trimmed := strings.TrimSpace(e); trimmed != "" {
-				ecoFilter = append(ecoFilter, trimmed)
-			}
-		}
-	}
-
-	walker := scanner.NewWalker(reg, maxDepth, ecoFilter)
-	lockFiles, err := walker.Walk(absPath)
+	ecoFilter := splitCSV(ecosystems)
+	collection, err := scanner.CollectPackages(scanner.CollectConfig{
+		Registry:   reg,
+		Root:       absPath,
+		MaxDepth:   maxDepth,
+		Ecosystems: ecoFilter,
+		SBOMFiles:  sbomFiles,
+		IncludeDev: true,
+	})
 	if err != nil {
-		return fmt.Errorf("walk: %w", err)
+		return err
 	}
 
-	if len(lockFiles) == 0 {
+	if collection.LockFiles == 0 && collection.SBOMFiles == 0 {
 		fmt.Println("No lock files found.")
 		return nil
 	}
@@ -787,30 +821,22 @@ func runListPackages(args []string, ecosystems string, maxDepth int, noColor boo
 	seen := make(map[string]struct{})
 	var packages []pkgEntry
 
-	for _, lf := range lockFiles {
-		f, err := os.Open(lf.Path)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: cannot open %s: %v\n", lf.RelPath, err)
+	for _, parseErr := range collection.ParseErrors {
+		fmt.Fprintf(os.Stderr, "warning: parse error in %s\n", parseErr)
+	}
+	for _, entry := range collection.Entries {
+		p := entry.Package
+		key := string(p.Ecosystem) + "/" + p.Name + "@" + p.Version
+		if _, ok := seen[key]; ok {
 			continue
 		}
-		pkgs, parseErr := lf.Parser.Parse(f)
-		closeSilently(f)
-		if parseErr != nil {
-			fmt.Fprintf(os.Stderr, "warning: parse error in %s: %v\n", lf.RelPath, parseErr)
-		}
-		for _, p := range pkgs {
-			key := string(p.Ecosystem) + "/" + p.Name + "@" + p.Version
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
-			packages = append(packages, pkgEntry{
-				Name:      p.Name,
-				Version:   p.Version,
-				Ecosystem: string(p.Ecosystem),
-				LockFile:  lf.RelPath,
-			})
-		}
+		seen[key] = struct{}{}
+		packages = append(packages, pkgEntry{
+			Name:      p.Name,
+			Version:   p.Version,
+			Ecosystem: string(p.Ecosystem),
+			LockFile:  entry.SourceFile,
+		})
 	}
 
 	if len(packages) == 0 {
@@ -840,6 +866,6 @@ func runListPackages(args []string, ecosystems string, maxDepth int, noColor boo
 		fmt.Printf(fmtStr, p.Name, p.Version, p.Ecosystem, p.LockFile)
 	}
 
-	fmt.Printf("\n%d package(s) found in %d lock file(s)\n", len(packages), len(lockFiles))
+	fmt.Printf("\n%d package(s) found in %d input file(s)\n", len(packages), collection.LockFiles+collection.SBOMFiles)
 	return nil
 }

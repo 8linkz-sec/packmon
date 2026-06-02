@@ -59,6 +59,7 @@ type FeedsConfig struct {
 	ReversingLabsEnabled bool
 	CISAKEVEnabled       bool
 	EPSSEnabled          bool
+	EndOfLifeEnabled     bool
 
 	// Per-feed mode: "self" (server syncs) or "external" (N8N pushes).
 	OSVMode           FeedMode
@@ -67,6 +68,7 @@ type FeedsConfig struct {
 	VulnCheckMode     FeedMode
 	CISAKEVMode       FeedMode
 	EPSSMode          FeedMode
+	EndOfLifeMode     FeedMode
 	SocketMode        FeedMode
 	ReversingLabsMode FeedMode
 
@@ -78,6 +80,7 @@ type FeedsConfig struct {
 	VulnCheckInterval time.Duration
 	CISAKEVInterval   time.Duration
 	EPSSInterval      time.Duration
+	EndOfLifeInterval time.Duration
 
 	// NVD enrichment feed settings.
 	NVDEnabled  bool
@@ -91,6 +94,7 @@ type FeedsConfig struct {
 	ReversingLabsBaseURL   string
 	ReversingLabsLookupTTL time.Duration
 	ReversingLabsBatchSize int
+	EndOfLifeBaseURL       string
 	NVDAPIKey              string
 }
 
@@ -271,6 +275,10 @@ func Load() (*Config, error) {
 	if reversingLabsMode == FeedModeExternal {
 		return nil, fmt.Errorf("PACKMON_FEED_REVERSINGLABS_MODE=external is not supported: ReversingLabs is demand-driven and has no import endpoint")
 	}
+	endOfLifeMode := parseFeedMode("PACKMON_FEED_ENDOFLIFE_MODE")
+	if endOfLifeMode == FeedModeExternal {
+		return nil, fmt.Errorf("PACKMON_FEED_ENDOFLIFE_MODE=external is not supported: endoflife has no import endpoint")
+	}
 
 	sessionTimeout, err := envDurationOrDefault("PACKMON_ADMIN_SESSION_TIMEOUT", 8*time.Hour)
 	if err != nil {
@@ -353,6 +361,7 @@ func Load() (*Config, error) {
 			CISAKEVEnabled:       envBoolOrDefault("PACKMON_FEED_CISAKEV_ENABLED", true),
 			EPSSEnabled:          envBoolOrDefault("PACKMON_FEED_EPSS_ENABLED", true),
 			NVDEnabled:           envBoolOrDefault("PACKMON_FEED_NVD_ENABLED", true),
+			EndOfLifeEnabled:     envBoolOrDefault("PACKMON_FEED_ENDOFLIFE_ENABLED", true),
 
 			OSVMode:           parseFeedMode("PACKMON_FEED_OSV_MODE"),
 			GHSAMode:          parseFeedMode("PACKMON_FEED_GHSA_MODE"),
@@ -361,6 +370,7 @@ func Load() (*Config, error) {
 			CISAKEVMode:       parseFeedMode("PACKMON_FEED_CISAKEV_MODE"),
 			EPSSMode:          parseFeedMode("PACKMON_FEED_EPSS_MODE"),
 			NVDMode:           parseFeedMode("PACKMON_FEED_NVD_MODE"),
+			EndOfLifeMode:     endOfLifeMode,
 			SocketMode:        parseFeedMode("PACKMON_FEED_SOCKET_MODE"),
 			ReversingLabsMode: reversingLabsMode,
 
@@ -370,6 +380,7 @@ func Load() (*Config, error) {
 			ReversingLabsBaseURL:   envOrDefault("PACKMON_REVERSINGLABS_API_BASE_URL", "https://data.reversinglabs.com/api/oss/community/v2/free"),
 			ReversingLabsLookupTTL: reversingLabsTTL,
 			ReversingLabsBatchSize: reversingLabsBatchSize,
+			EndOfLifeBaseURL:       envOrDefault("PACKMON_ENDOFLIFE_API_BASE_URL", "https://endoflife.date/api/v1"),
 			NVDAPIKey:              os.Getenv("PACKMON_NVD_API_KEY"),
 		},
 	}

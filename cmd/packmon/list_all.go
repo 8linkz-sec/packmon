@@ -75,39 +75,37 @@ func collectAllPackages(settings scanSettings) ([]listAllPackage, error) {
 	}
 
 	reg := parser.NewRegistry()
-	walker := scanner.NewWalker(reg, settings.MaxDepth, settings.Ecosystems)
-	lockFiles, err := walker.Walk(absPath)
+	collection, err := scanner.CollectPackages(scanner.CollectConfig{
+		Registry:   reg,
+		Root:       absPath,
+		MaxDepth:   settings.MaxDepth,
+		Ecosystems: settings.Ecosystems,
+		SBOMFiles:  settings.SBOMFiles,
+		IncludeDev: settings.IncludeDev,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("walk: %w", err)
+		return nil, err
 	}
 
 	seen := make(map[string]struct{})
 	var packages []listAllPackage
 
-	for _, lf := range lockFiles {
-		f, err := os.Open(lf.Path)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: cannot open %s: %v\n", lf.RelPath, err)
+	for _, parseErr := range collection.ParseErrors {
+		fmt.Fprintf(os.Stderr, "warning: parse error in %s\n", parseErr)
+	}
+	for _, entry := range collection.Entries {
+		p := entry.Package
+		key := string(p.Ecosystem) + "/" + p.Name + "@" + p.Version
+		if _, ok := seen[key]; ok {
 			continue
 		}
-		pkgs, parseErr := lf.Parser.Parse(f)
-		closeSilently(f)
-		if parseErr != nil {
-			fmt.Fprintf(os.Stderr, "warning: parse error in %s: %v\n", lf.RelPath, parseErr)
-		}
-		for _, p := range pkgs {
-			key := string(p.Ecosystem) + "/" + p.Name + "@" + p.Version
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
-			packages = append(packages, listAllPackage{
-				Name:      p.Name,
-				Version:   p.Version,
-				Ecosystem: p.Ecosystem,
-				LockFile:  lf.RelPath,
-			})
-		}
+		seen[key] = struct{}{}
+		packages = append(packages, listAllPackage{
+			Name:      p.Name,
+			Version:   p.Version,
+			Ecosystem: p.Ecosystem,
+			LockFile:  entry.SourceFile,
+		})
 	}
 
 	return packages, nil
@@ -153,7 +151,7 @@ func printFullPackageList(packages []listAllPackage, result *domain.ScanResult, 
 	for i, p := range packages {
 		lat := latest[i]
 		latestCol := lat
-		update := "-"
+		var update string
 		switch {
 		case lat == "":
 			latestCol = "unknown"

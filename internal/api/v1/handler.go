@@ -136,11 +136,35 @@ type syncReputationResponse struct {
 	Withdrawn bool   `json:"withdrawn"`
 }
 
+type syncLifecycleResponse struct {
+	ID               string     `json:"id"`
+	Ecosystem        string     `json:"ecosystem"`
+	Name             string     `json:"name"`
+	ProductSlug      string     `json:"product_slug"`
+	ProductLabel     string     `json:"product_label"`
+	Cycle            string     `json:"cycle"`
+	Latest           string     `json:"latest"`
+	ReleaseDate      *time.Time `json:"release_date"`
+	IsLTS            bool       `json:"is_lts"`
+	LTSFrom          *time.Time `json:"lts_from"`
+	IsEOAS           bool       `json:"is_eoas"`
+	EOASFrom         *time.Time `json:"eoas_from"`
+	IsEOL            bool       `json:"is_eol"`
+	EOLFrom          *time.Time `json:"eol_from"`
+	IsDiscontinued   bool       `json:"is_discontinued"`
+	DiscontinuedFrom *time.Time `json:"discontinued_from"`
+	IsEOES           *bool      `json:"is_eoes"`
+	EOESFrom         *time.Time `json:"eoes_from"`
+	IsMaintained     bool       `json:"is_maintained"`
+	Withdrawn        bool       `json:"withdrawn"`
+}
+
 type syncResponsePayload struct {
 	SyncedAt        string                      `json:"synced_at"`
 	Vulnerabilities []syncVulnerabilityResponse `json:"vulnerabilities"`
 	Malicious       []syncMaliciousResponse     `json:"malicious"`
 	Reputation      []syncReputationResponse    `json:"reputation"`
+	Lifecycle       []syncLifecycleResponse     `json:"lifecycle"`
 	Truncated       bool                        `json:"truncated"`
 	HasMore         bool                        `json:"has_more"`
 }
@@ -340,10 +364,16 @@ func (h *Handler) collectFindings(ctx context.Context, packages []domain.Package
 		}
 	}
 
-	all := make([]domain.Finding, 0, len(vulns)+len(mal)+len(reputation))
+	lifecycle, err := h.store.FindLifecycleFindingsBatch(ctx, queries, time.Now().UTC())
+	if err != nil {
+		return nil, fmt.Errorf("FindLifecycleFindingsBatch: %w", err)
+	}
+
+	all := make([]domain.Finding, 0, len(vulns)+len(mal)+len(reputation)+len(lifecycle))
 	all = append(all, vulns...)
 	all = append(all, mal...)
 	all = append(all, reputation...)
+	all = append(all, lifecycle...)
 
 	if h.reversingLabsEnabled.Load() {
 		h.scheduleReversingLabsLookups(ctx, packages, all)
@@ -980,6 +1010,7 @@ func (h *Handler) HandleSync(w http.ResponseWriter, r *http.Request) {
 		Vulnerabilities: make([]syncVulnerabilityResponse, 0, len(exported.Vulnerabilities)),
 		Malicious:       make([]syncMaliciousResponse, 0, len(exported.Malicious)),
 		Reputation:      make([]syncReputationResponse, 0, len(exported.Reputation)),
+		Lifecycle:       make([]syncLifecycleResponse, 0, len(exported.Lifecycle)),
 		Truncated:       exported.Truncated,
 	}
 
@@ -1022,6 +1053,31 @@ func (h *Handler) HandleSync(w http.ResponseWriter, r *http.Request) {
 			Severity:  finding.Severity,
 			Summary:   finding.Summary,
 			Withdrawn: finding.Withdrawn,
+		})
+	}
+
+	for _, release := range exported.Lifecycle {
+		resp.Lifecycle = append(resp.Lifecycle, syncLifecycleResponse{
+			ID:               release.ID,
+			Ecosystem:        release.Ecosystem,
+			Name:             release.Name,
+			ProductSlug:      release.ProductSlug,
+			ProductLabel:     release.ProductLabel,
+			Cycle:            release.Cycle,
+			Latest:           release.Latest,
+			ReleaseDate:      release.ReleaseDate,
+			IsLTS:            release.IsLTS,
+			LTSFrom:          release.LTSFrom,
+			IsEOAS:           release.IsEOAS,
+			EOASFrom:         release.EOASFrom,
+			IsEOL:            release.IsEOL,
+			EOLFrom:          release.EOLFrom,
+			IsDiscontinued:   release.IsDiscontinued,
+			DiscontinuedFrom: release.DiscontinuedFrom,
+			IsEOES:           release.IsEOES,
+			EOESFrom:         release.EOESFrom,
+			IsMaintained:     release.IsMaintained,
+			Withdrawn:        release.Withdrawn,
 		})
 	}
 

@@ -69,12 +69,38 @@ type syncReputation struct {
 	Withdrawn bool   `json:"withdrawn"`
 }
 
+// syncLifecycleRelease is the wire format for one lifecycle cache row
+// delivered by the server's GET /api/v1/sync endpoint.
+type syncLifecycleRelease struct {
+	ID               string     `json:"id"`
+	Ecosystem        string     `json:"ecosystem"`
+	Name             string     `json:"name"`
+	ProductSlug      string     `json:"product_slug"`
+	ProductLabel     string     `json:"product_label"`
+	Cycle            string     `json:"cycle"`
+	Latest           string     `json:"latest"`
+	ReleaseDate      *time.Time `json:"release_date"`
+	IsLTS            bool       `json:"is_lts"`
+	LTSFrom          *time.Time `json:"lts_from"`
+	IsEOAS           bool       `json:"is_eoas"`
+	EOASFrom         *time.Time `json:"eoas_from"`
+	IsEOL            bool       `json:"is_eol"`
+	EOLFrom          *time.Time `json:"eol_from"`
+	IsDiscontinued   bool       `json:"is_discontinued"`
+	DiscontinuedFrom *time.Time `json:"discontinued_from"`
+	IsEOES           *bool      `json:"is_eoes"`
+	EOESFrom         *time.Time `json:"eoes_from"`
+	IsMaintained     bool       `json:"is_maintained"`
+	Withdrawn        bool       `json:"withdrawn"`
+}
+
 // syncResponse is the JSON envelope returned by the server sync endpoint.
 type syncResponse struct {
-	SyncedAt        string              `json:"synced_at"`
-	Vulnerabilities []syncVulnerability `json:"vulnerabilities"`
-	Malicious       []syncMalicious     `json:"malicious"`
-	Reputation      []syncReputation    `json:"reputation"`
+	SyncedAt        string                 `json:"synced_at"`
+	Vulnerabilities []syncVulnerability    `json:"vulnerabilities"`
+	Malicious       []syncMalicious        `json:"malicious"`
+	Reputation      []syncReputation       `json:"reputation"`
+	Lifecycle       []syncLifecycleRelease `json:"lifecycle"`
 	// Truncated is true when more data is available and the client should call
 	// again with the same since/snapshot parameters and the next offset.
 	Truncated bool `json:"truncated"`
@@ -225,6 +251,9 @@ func applySync(ctx context.Context, store *Store, full bool, resp *syncResponse)
 		if _, err := tx.ExecContext(ctx, `DELETE FROM reputation_findings_local`); err != nil {
 			return fmt.Errorf("sync: clear reputation findings: %w", err)
 		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM lifecycle_releases_local`); err != nil {
+			return fmt.Errorf("sync: clear lifecycle releases: %w", err)
+		}
 	}
 
 	// Upsert vulnerabilities.
@@ -362,6 +391,76 @@ func applySync(ctx context.Context, store *Store, full bool, resp *syncResponse)
 		}
 	}
 
+	lifecycleStmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO lifecycle_releases_local(
+			id, ecosystem, name, product_slug, product_label, cycle, latest,
+			release_date, is_lts, lts_from, is_eoas, eoas_from, is_eol, eol_from,
+			is_discontinued, discontinued_from, is_eoes, eoes_from, is_maintained
+		)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			ecosystem         = excluded.ecosystem,
+			name              = excluded.name,
+			product_slug      = excluded.product_slug,
+			product_label     = excluded.product_label,
+			cycle             = excluded.cycle,
+			latest            = excluded.latest,
+			release_date      = excluded.release_date,
+			is_lts            = excluded.is_lts,
+			lts_from          = excluded.lts_from,
+			is_eoas           = excluded.is_eoas,
+			eoas_from         = excluded.eoas_from,
+			is_eol            = excluded.is_eol,
+			eol_from          = excluded.eol_from,
+			is_discontinued   = excluded.is_discontinued,
+			discontinued_from = excluded.discontinued_from,
+			is_eoes           = excluded.is_eoes,
+			eoes_from         = excluded.eoes_from,
+			is_maintained     = excluded.is_maintained`)
+	if err != nil {
+		return fmt.Errorf("sync: prepare lifecycle upsert: %w", err)
+	}
+	defer closeSilently(lifecycleStmt)
+
+	lifecycleDelStmt, err := tx.PrepareContext(ctx, `DELETE FROM lifecycle_releases_local WHERE id = ?`)
+	if err != nil {
+		return fmt.Errorf("sync: prepare lifecycle delete: %w", err)
+	}
+	defer closeSilently(lifecycleDelStmt)
+
+	for _, lifecycle := range resp.Lifecycle {
+		if lifecycle.Withdrawn {
+			if _, err := lifecycleDelStmt.ExecContext(ctx, lifecycle.ID); err != nil {
+				return fmt.Errorf("sync: delete withdrawn lifecycle %s: %w", lifecycle.ID, err)
+			}
+			continue
+		}
+
+		if _, err := lifecycleStmt.ExecContext(ctx,
+			lifecycle.ID,
+			lifecycle.Ecosystem,
+			lifecycle.Name,
+			lifecycle.ProductSlug,
+			lifecycle.ProductLabel,
+			lifecycle.Cycle,
+			lifecycle.Latest,
+			syncDateValue(lifecycle.ReleaseDate),
+			boolInt(lifecycle.IsLTS),
+			syncDateValue(lifecycle.LTSFrom),
+			boolInt(lifecycle.IsEOAS),
+			syncDateValue(lifecycle.EOASFrom),
+			boolInt(lifecycle.IsEOL),
+			syncDateValue(lifecycle.EOLFrom),
+			boolInt(lifecycle.IsDiscontinued),
+			syncDateValue(lifecycle.DiscontinuedFrom),
+			nullableBoolInt(lifecycle.IsEOES),
+			syncDateValue(lifecycle.EOESFrom),
+			boolInt(lifecycle.IsMaintained),
+		); err != nil {
+			return fmt.Errorf("sync: upsert lifecycle %s: %w", lifecycle.ID, err)
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("sync: commit transaction: %w", err)
 	}
@@ -378,4 +477,25 @@ func truncate(s string, maxLen int) string {
 
 func syncVulnerabilityRowKey(id, ecosystem, name string) string {
 	return id + "|" + ecosystem + "|" + name
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+func nullableBoolInt(value *bool) any {
+	if value == nil {
+		return nil
+	}
+	return boolInt(*value)
+}
+
+func syncDateValue(value *time.Time) any {
+	if value == nil {
+		return nil
+	}
+	return value.UTC().Format(time.DateOnly)
 }

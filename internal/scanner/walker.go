@@ -77,8 +77,9 @@ func (w *Walker) Walk(root string) ([]LockFile, error) {
 
 		if d.IsDir() {
 			name := d.Name()
-			// Skip hidden directories, vendor, and node_modules.
-			if name != "." && strings.HasPrefix(name, ".") {
+			// Skip hidden directories except .github, where workflow dependency
+			// references live.
+			if name != "." && name != ".github" && strings.HasPrefix(name, ".") {
 				return fs.SkipDir
 			}
 			if name == "node_modules" || name == "vendor" || name == "__pycache__" {
