@@ -39,10 +39,17 @@ type outdatedOptions struct {
 }
 
 type outdatedPackage struct {
-	Name      string
-	Version   string
-	Ecosystem domain.Ecosystem
-	LockFile  string
+	Name       string
+	Version    string
+	Ecosystem  domain.Ecosystem
+	LockFile   string
+	SourceType string
+	Dev        bool
+	Direct     bool
+	Indirect   bool
+	Optional   bool
+	Peer       bool
+	Via        []string
 }
 
 type outdatedRow struct {
@@ -50,6 +57,10 @@ type outdatedRow struct {
 	Installed string
 	Latest    string
 	Ecosystem string
+	Scope     string
+	Relation  string
+	Via       string
+	Flags     string
 	LockFile  string
 }
 
@@ -135,10 +146,17 @@ func runOutdatedWithOptions(args []string, opts outdatedOptions) error {
 		}
 		seen[key] = struct{}{}
 		packages = append(packages, outdatedPackage{
-			Name:      p.Name,
-			Version:   p.Version,
-			Ecosystem: p.Ecosystem,
-			LockFile:  entry.SourceFile,
+			Name:       p.Name,
+			Version:    p.Version,
+			Ecosystem:  p.Ecosystem,
+			LockFile:   entry.SourceFile,
+			SourceType: entry.SourceType,
+			Dev:        p.Dev,
+			Direct:     p.Direct,
+			Indirect:   p.Indirect,
+			Optional:   p.Optional,
+			Peer:       p.Peer,
+			Via:        append([]string(nil), p.Via...),
 		})
 	}
 
@@ -191,6 +209,10 @@ func runOutdatedWithOptions(args []string, opts outdatedOptions) error {
 			Installed: pkg.Version,
 			Latest:    latest,
 			Ecosystem: string(pkg.Ecosystem),
+			Scope:     outdatedPackageScope(pkg),
+			Relation:  outdatedPackageRelation(pkg),
+			Via:       strings.Join(pkg.Via, ", "),
+			Flags:     outdatedPackageFlags(pkg),
 			LockFile:  pkg.LockFile,
 		})
 	}
@@ -215,7 +237,7 @@ func printOutdatedReport(report outdatedReport) {
 		return
 	}
 	// Compute column widths.
-	maxName, maxInst, maxLat, maxEco := 7, 9, 6, 9
+	maxName, maxInst, maxLat, maxEco, maxScope, maxRel, maxVia, maxFlags := 7, 9, 6, 9, 5, 8, 3, 5
 	for _, r := range report.Outdated {
 		if len(r.Name) > maxName {
 			maxName = len(r.Name)
@@ -229,16 +251,28 @@ func printOutdatedReport(report outdatedReport) {
 		if len(r.Ecosystem) > maxEco {
 			maxEco = len(r.Ecosystem)
 		}
+		if len(r.Scope) > maxScope {
+			maxScope = len(r.Scope)
+		}
+		if len(r.Relation) > maxRel {
+			maxRel = len(r.Relation)
+		}
+		if len(r.Via) > maxVia {
+			maxVia = len(r.Via)
+		}
+		if len(r.Flags) > maxFlags {
+			maxFlags = len(r.Flags)
+		}
 	}
 
 	gap := "  "
-	fmtStr := fmt.Sprintf("%%-%ds%s%%-%ds%s%%-%ds%s%%-%ds%s%%s\n",
-		maxName, gap, maxInst, gap, maxLat, gap, maxEco, gap)
+	fmtStr := fmt.Sprintf("%%-%ds%s%%-%ds%s%%-%ds%s%%-%ds%s%%-%ds%s%%-%ds%s%%-%ds%s%%-%ds%s%%s\n",
+		maxName, gap, maxInst, gap, maxLat, gap, maxEco, gap, maxScope, gap, maxRel, gap, maxVia, gap, maxFlags, gap)
 
 	fmt.Println()
-	fmt.Printf(fmtStr, "PACKAGE", "INSTALLED", "LATEST", "ECOSYSTEM", "LOCK FILE")
+	fmt.Printf(fmtStr, "PACKAGE", "INSTALLED", "LATEST", "ECOSYSTEM", "SCOPE", "RELATION", "VIA", "FLAGS", "LOCK FILE")
 	for _, r := range report.Outdated {
-		fmt.Printf(fmtStr, r.Name, r.Installed, r.Latest, r.Ecosystem, r.LockFile)
+		fmt.Printf(fmtStr, r.Name, r.Installed, r.Latest, r.Ecosystem, r.Scope, r.Relation, r.Via, r.Flags, r.LockFile)
 	}
 
 	fmt.Printf("\n%d outdated, %d up to date", len(report.Outdated), report.UpToDate)
@@ -262,6 +296,34 @@ func finishOutdatedReport(opts outdatedOptions, report outdatedReport) error {
 		fmt.Printf("HTML report written to: %s\n", opts.OutputHTML)
 	}
 	return nil
+}
+
+func outdatedPackageScope(p outdatedPackage) string {
+	return listAllPackageScope(outdatedAsListAllPackage(p))
+}
+
+func outdatedPackageRelation(p outdatedPackage) string {
+	return listAllPackageRelation(outdatedAsListAllPackage(p))
+}
+
+func outdatedPackageFlags(p outdatedPackage) string {
+	return listAllPackageFlags(outdatedAsListAllPackage(p))
+}
+
+func outdatedAsListAllPackage(p outdatedPackage) listAllPackage {
+	return listAllPackage{
+		Name:       p.Name,
+		Version:    p.Version,
+		Ecosystem:  p.Ecosystem,
+		LockFile:   p.LockFile,
+		SourceType: p.SourceType,
+		Dev:        p.Dev,
+		Direct:     p.Direct,
+		Indirect:   p.Indirect,
+		Optional:   p.Optional,
+		Peer:       p.Peer,
+		Via:        append([]string(nil), p.Via...),
+	}
 }
 
 var outdatedHTMLTemplate = template.Must(template.New("outdated").Parse(outdatedHTML))
@@ -300,13 +362,14 @@ h1{font-size:22px;margin:0;color:#e6edf3;}
 .ok{color:#56d4c4;border-color:#56d4c4;}
 .unknown{color:#8b949e;border-color:#8b949e;}
 .table-scroll{overflow-x:auto;border:1px solid #30363d;border-radius:6px;background:#161b22;}
-table{width:100%;min-width:1280px;border-collapse:collapse;background:#161b22;}
+table{width:100%;min-width:1600px;border-collapse:collapse;background:#161b22;}
 th,td{padding:8px 10px;border-bottom:1px solid #30363d;text-align:left;vertical-align:top;}
 th{color:#e6edf3;font-size:12px;text-transform:uppercase;}
 td{word-break:normal;}
 .name{min-width:260px;word-break:break-word;}
 .version{white-space:nowrap;min-width:260px;}
 .ecosystem{white-space:nowrap;min-width:96px;}
+.short{white-space:nowrap;min-width:90px;}
 .lockfile{min-width:260px;word-break:break-word;}
 .empty{margin:24px 0;padding:14px 16px;background:#0f2d2a;border:1px solid #56d4c4;border-radius:6px;color:#56d4c4;font-size:15px;}
 .footer{border-top:1px solid #30363d;margin-top:28px;padding-top:10px;color:#8b949e;font-size:12px;}
@@ -324,9 +387,9 @@ td{word-break:normal;}
 {{if .Outdated}}
 <div class="table-scroll">
 <table>
-<thead><tr><th class="name">Package</th><th class="version">Installed</th><th class="version">Latest</th><th class="ecosystem">Ecosystem</th><th class="lockfile">Lock File</th></tr></thead>
+<thead><tr><th class="name">Package</th><th class="version">Installed</th><th class="version">Latest</th><th class="ecosystem">Ecosystem</th><th class="short">Scope</th><th class="short">Relation</th><th>Via</th><th class="short">Flags</th><th class="lockfile">Lock File</th></tr></thead>
 <tbody>
-{{range .Outdated}}<tr><td class="name">{{.Name}}</td><td class="version">{{.Installed}}</td><td class="version">{{.Latest}}</td><td class="ecosystem">{{.Ecosystem}}</td><td class="lockfile">{{.LockFile}}</td></tr>{{end}}
+{{range .Outdated}}<tr><td class="name">{{.Name}}</td><td class="version">{{.Installed}}</td><td class="version">{{.Latest}}</td><td class="ecosystem">{{.Ecosystem}}</td><td class="short">{{.Scope}}</td><td class="short">{{.Relation}}</td><td>{{.Via}}</td><td class="short">{{.Flags}}</td><td class="lockfile">{{.LockFile}}</td></tr>{{end}}
 </tbody>
 </table>
 </div>

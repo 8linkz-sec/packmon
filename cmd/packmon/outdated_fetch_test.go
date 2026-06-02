@@ -296,6 +296,69 @@ func TestScanCommandOutdatedIncludesDevByDefault(t *testing.T) {
 	}
 }
 
+func TestScanCommandOutdatedRendersScopeRelationViaAndFlags(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	stubLatestVersion(t, func(_ context.Context, _ domain.Ecosystem, name string) string {
+		switch name {
+		case "tailwindcss":
+			return "4.3.0"
+		case "postcss":
+			return "8.5.15"
+		default:
+			return ""
+		}
+	})
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "package-lock.json"), []byte(`{
+		"lockfileVersion": 3,
+		"packages": {
+			"": {
+				"name": "test",
+				"version": "1.0.0",
+				"devDependencies": {"tailwindcss": "^3.4.17"}
+			},
+			"node_modules/tailwindcss": {
+				"version": "3.4.17",
+				"dev": true,
+				"dependencies": {"postcss": "^8.4.47"}
+			},
+			"node_modules/postcss": {
+				"version": "8.5.8",
+				"dev": true,
+				"peer": true
+			}
+		}
+	}`), 0o600); err != nil {
+		t.Fatalf("write package-lock: %v", err)
+	}
+	htmlPath := filepath.Join(t.TempDir(), "outdated.html")
+
+	output := captureStdout(t, func() {
+		cmd := newScanCmd()
+		cmd.SetArgs([]string{"--outdated", "--html", htmlPath, dir})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("scan command execute: %v", err)
+		}
+	})
+	for _, want := range []string{"SCOPE", "RELATION", "VIA", "FLAGS", "postcss", "dev", "transitive", "tailwindcss", "peer"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("outdated output missing %q:\n%s", want, output)
+		}
+	}
+
+	data, err := os.ReadFile(htmlPath)
+	if err != nil {
+		t.Fatalf("read outdated HTML report: %v", err)
+	}
+	html := string(data)
+	for _, want := range []string{"Scope", "Relation", "Via", "Flags", "postcss", "dev", "transitive", "tailwindcss", "peer"} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("outdated HTML missing %q:\n%s", want, html)
+		}
+	}
+}
+
 func TestRunOutdatedDoesNotReportNewerGoPseudoVersionAsOutdated(t *testing.T) {
 	stubLatestVersion(t, func(_ context.Context, _ domain.Ecosystem, name string) string {
 		if name == "github.com/davecgh/go-spew" {

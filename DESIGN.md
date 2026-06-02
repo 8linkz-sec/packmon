@@ -160,7 +160,9 @@ Important behavior:
 - `--outdated` uses free public registry metadata for every canonical
   ecosystem where a package version can be resolved. Private registries,
   branch pins, commit-only pins, and unavailable upstream metadata are reported
-  as unknown rather than failing the scan.
+  as unknown rather than failing the scan. Its terminal and HTML reports include
+  the same package provenance columns (`scope`, `relation`, `via`, and flags)
+  as `--list-all`.
 - `--list-all` also inventories Docker image declarations from `Dockerfile`,
   `Dockerfile.*`, `docker-compose.yml`, `docker-compose.yaml`, `compose.yml`,
   and `compose.yaml`. Docker rows use ecosystem `docker`, show declared
