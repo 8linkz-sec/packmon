@@ -19,6 +19,7 @@ const (
 	EcosystemSwiftPM       Ecosystem = "swiftpm"
 	EcosystemHex           Ecosystem = "hex"
 	EcosystemCRAN          Ecosystem = "cran"
+	EcosystemDocker        Ecosystem = "docker"
 )
 
 // Valid reports whether e is one of the canonical supported ecosystems.
@@ -26,7 +27,7 @@ func (e Ecosystem) Valid() bool {
 	switch e {
 	case EcosystemNPM, EcosystemPyPI, EcosystemGo, EcosystemMaven, EcosystemCargo,
 		EcosystemNuGet, EcosystemComposer, EcosystemGem, EcosystemPub, EcosystemGitHubActions,
-		EcosystemCocoaPods, EcosystemSwiftPM, EcosystemHex, EcosystemCRAN:
+		EcosystemCocoaPods, EcosystemSwiftPM, EcosystemHex, EcosystemCRAN, EcosystemDocker:
 		return true
 	}
 	return false
@@ -38,6 +39,11 @@ type Package struct {
 	Version   string    `json:"version"`
 	Ecosystem Ecosystem `json:"ecosystem"`
 	Dev       bool      `json:"dev,omitempty"`
+	Direct    bool      `json:"direct,omitempty"`
+	Indirect  bool      `json:"indirect,omitempty"`
+	Optional  bool      `json:"optional,omitempty"`
+	Peer      bool      `json:"peer,omitempty"`
+	Via       []string  `json:"via,omitempty"`
 }
 
 // FindingType distinguishes vulnerability, malicious, supply-chain, and lifecycle findings.

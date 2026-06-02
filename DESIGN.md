@@ -156,6 +156,16 @@ Important behavior:
   ecosystem where a package version can be resolved. Private registries,
   branch pins, commit-only pins, and unavailable upstream metadata are reported
   as unknown rather than failing the scan.
+- `--list-all` also inventories Docker image declarations from `Dockerfile`,
+  `Dockerfile.*`, `docker-compose.yml`, `docker-compose.yaml`, `compose.yml`,
+  and `compose.yaml`. Docker rows use ecosystem `docker`, show declared
+  tags/digests, and resolve public registry manifest digests best-effort. If
+  the local Docker CLI can inspect the declared image, Packmon compares the
+  local repo digest with the current registry digest and marks `UPDATE yes`,
+  `-`, or `unknown`.
+- Docker image inventory is not a container-layer vulnerability scan. Packmon
+  does not pull images, scan OS packages inside images, or read private
+  registry credentials as part of `--list-all`.
 
 ## Server Behavior
 

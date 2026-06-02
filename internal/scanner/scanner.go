@@ -219,11 +219,11 @@ func (s *Scanner) Run(ctx context.Context) (*domain.ScanResult, int) {
 		}
 	case ModeLocal:
 		if s.localChecker == nil {
-			return s.errorResult(scanID, start, "local mode requested but no local database available (run 'packmon db sync' first)"), ExitOperational
+			return s.errorResultWithPackages(scanID, start, "local advisory data unavailable (run 'packmon db sync' first)", len(allPackages)), ExitOperational
 		}
 		findings, checkErr = s.checkLocal(ctx, allPackages)
 		if checkErr != nil {
-			return s.errorResult(scanID, start, fmt.Sprintf("local check failed: %v", checkErr)), ExitOperational
+			return s.errorResultWithPackages(scanID, start, fmt.Sprintf("local check failed: %v", checkErr), len(allPackages)), ExitOperational
 		}
 		feedVersions = map[string]string{}
 	case ModeAuto:
@@ -240,11 +240,11 @@ func (s *Scanner) Run(ctx context.Context) (*domain.ScanResult, int) {
 			}
 			// Auto mode: fall back to local database.
 			if s.localChecker == nil {
-				return s.errorResult(scanID, start, fmt.Sprintf("remote check failed and no local database available: %v", checkErr)), ExitOperational
+				return s.errorResultWithPackages(scanID, start, fmt.Sprintf("remote check failed and no local advisory data available: %v", checkErr), len(allPackages)), ExitOperational
 			}
 			findings, checkErr = s.checkLocal(ctx, allPackages)
 			if checkErr != nil {
-				return s.errorResult(scanID, start, fmt.Sprintf("remote and local check failed: %v", checkErr)), ExitOperational
+				return s.errorResultWithPackages(scanID, start, fmt.Sprintf("remote and local check failed: %v", checkErr), len(allPackages)), ExitOperational
 			}
 			mode = ModeLocal
 			feedVersions = map[string]string{}
@@ -445,15 +445,20 @@ func isAlwaysBlockingFinding(f domain.Finding) bool {
 }
 
 func (s *Scanner) errorResult(scanID string, start time.Time, msg string) *domain.ScanResult {
+	return s.errorResultWithPackages(scanID, start, msg, 0)
+}
+
+func (s *Scanner) errorResultWithPackages(scanID string, start time.Time, msg string, packagesScanned int) *domain.ScanResult {
 	return &domain.ScanResult{
-		ScanID:       scanID,
-		Mode:         string(s.resolveMode()),
-		ScannedAt:    start.UTC(),
-		DurationMs:   time.Since(start).Milliseconds(),
-		FeedStatus:   msg,
-		Summary:      emptySummary(),
-		Findings:     []domain.Finding{},
-		FeedVersions: map[string]string{},
+		ScanID:          scanID,
+		Mode:            string(s.resolveMode()),
+		ScannedAt:       start.UTC(),
+		DurationMs:      time.Since(start).Milliseconds(),
+		PackagesScanned: packagesScanned,
+		FeedStatus:      msg,
+		Summary:         emptySummary(),
+		Findings:        []domain.Finding{},
+		FeedVersions:    map[string]string{},
 	}
 }
 

@@ -56,7 +56,14 @@ and malicious package databases.`,
 				return runListPackages(args, flagEcosystems, flagMaxDepth, flagNoColor, flagSBOMFiles)
 			}
 			if flagOutdated {
-				return runOutdated(args, flagEcosystems, flagMaxDepth, flagSBOMFiles)
+				return runOutdatedWithOptions(args, outdatedOptions{
+					Ecosystems: flagEcosystems,
+					MaxDepth:   flagMaxDepth,
+					IncludeDev: true,
+					OutputHTML: flagOutputHTML,
+					Quiet:      flagQuiet,
+					SBOMFiles:  flagSBOMFiles,
+				})
 			}
 			if flagListAll {
 				cfg, _, err := loadCurrentCLIConfig()
@@ -76,6 +83,7 @@ and malicious package databases.`,
 					MaxDepth:      flagMaxDepth,
 					Timeout:       flagTimeout,
 					IncludeDev:    flagIncludeDev,
+					OutputHTML:    flagOutputHTML,
 					Quiet:         flagQuiet,
 					NoColor:       flagNoColor,
 					CACert:        flagCACert,
@@ -717,6 +725,8 @@ func runSingleScan(ctx context.Context, settings scanSettings) (int, error) {
 				if exitCode == ExitOK {
 					exitCode = ExitOperational
 				}
+			} else if !settings.Quiet {
+				fmt.Fprintf(os.Stdout, "HTML report written to: %s\n", settings.OutputHTML)
 			}
 		}
 	}

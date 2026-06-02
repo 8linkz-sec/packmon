@@ -29,6 +29,7 @@ func TestFetchLatestVersionParsesSupportedRegistryResponses(t *testing.T) {
 		"registry.npmjs.org/pkg/latest":                             `{"version":"1.2.3"}`,
 		"pypi.org/pypi/pkg/json":                                    `{"info":{"version":"2.3.4"}}`,
 		"proxy.golang.org/github.com/acme/lib/@latest":              `{"Version":"v1.2.0"}`,
+		"proxy.golang.org/github.com/!burnt!sushi/toml/@latest":     `{"Version":"v1.6.0"}`,
 		"crates.io/api/v1/crates/pkg":                               `{"crate":{"max_stable_version":"3.4.5"}}`,
 		"api.nuget.org/v3-flatcontainer/newtonsoft.json/index.json": `{"versions":["12.0.1","13.0.3","13.0.2"]}`,
 		"rubygems.org/api/v1/gems/pkg.json":                         `{"version":"4.5.6"}`,
@@ -78,6 +79,7 @@ func TestFetchLatestVersionParsesSupportedRegistryResponses(t *testing.T) {
 		{domain.EcosystemNPM, "pkg", "1.2.3"},
 		{domain.EcosystemPyPI, "pkg", "2.3.4"},
 		{domain.EcosystemGo, "github.com/acme/lib", "v1.2.0"},
+		{domain.EcosystemGo, "github.com/BurntSushi/toml", "v1.6.0"},
 		{domain.EcosystemCargo, "pkg", "3.4.5"},
 		{domain.EcosystemNuGet, "Newtonsoft.Json", "13.0.3"},
 		{domain.EcosystemGem, "pkg", "4.5.6"},
@@ -205,6 +207,124 @@ func TestRunOutdatedPrintsOnlyOutdatedPackages(t *testing.T) {
 	}
 	if strings.Contains(output, "current  ") || strings.Contains(output, "unknown  ") {
 		t.Fatalf("run outdated should not print current/unknown packages as outdated:\n%s", output)
+	}
+}
+
+func TestScanCommandOutdatedHTMLFlagWritesReport(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	stubLatestVersion(t, func(_ context.Context, _ domain.Ecosystem, name string) string {
+		if name == "outdated" {
+			return "2.0.0"
+		}
+		return ""
+	})
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "package-lock.json"), []byte(`{
+		"lockfileVersion": 3,
+		"packages": {
+			"node_modules/outdated": {"version": "1.0.0"}
+		}
+	}`), 0o600); err != nil {
+		t.Fatalf("write package-lock: %v", err)
+	}
+	htmlPath := filepath.Join(t.TempDir(), "outdated.html")
+
+	cmd := newScanCmd()
+	cmd.SetArgs([]string{"--outdated", "--html", htmlPath, dir})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("scan command execute: %v", err)
+	}
+
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read outdated HTML report: %v", err)
+	}
+	out := string(data)
+	for _, want := range []string{
+		"<!DOCTYPE html>",
+		"Outdated Packages",
+		"outdated",
+		"1.0.0",
+		"2.0.0",
+		".wrap{max-width:1600px",
+		".version{white-space:nowrap",
+		"<th class=\"version\">Installed</th>",
+		"<td class=\"version\">1.0.0</td>",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("outdated HTML missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestScanCommandOutdatedIncludesDevByDefault(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	stubLatestVersion(t, func(_ context.Context, _ domain.Ecosystem, name string) string {
+		switch name {
+		case "prod", "dev-only":
+			return "2.0.0"
+		default:
+			return ""
+		}
+	})
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "package-lock.json"), []byte(`{
+		"lockfileVersion": 3,
+		"packages": {
+			"node_modules/prod": {"version": "1.0.0"},
+			"node_modules/dev-only": {"version": "1.0.0", "dev": true}
+		}
+	}`), 0o600); err != nil {
+		t.Fatalf("write package-lock: %v", err)
+	}
+
+	output := captureStdout(t, func() {
+		cmd := newScanCmd()
+		cmd.SetArgs([]string{"--outdated", dir})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("scan command execute: %v", err)
+		}
+	})
+
+	if !strings.Contains(output, "prod") {
+		t.Fatalf("outdated output missing production package:\n%s", output)
+	}
+	if !strings.Contains(output, "dev-only") {
+		t.Fatalf("outdated output should include dev packages by default:\n%s", output)
+	}
+}
+
+func TestRunOutdatedDoesNotReportNewerGoPseudoVersionAsOutdated(t *testing.T) {
+	stubLatestVersion(t, func(_ context.Context, _ domain.Ecosystem, name string) string {
+		if name == "github.com/davecgh/go-spew" {
+			return "v1.1.1"
+		}
+		return ""
+	})
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(`module example.com/app
+
+go 1.26
+
+require github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc
+`), 0o600); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+
+	output := captureStdout(t, func() {
+		if err := runOutdated([]string{dir}, "go", 2); err != nil {
+			t.Fatalf("run outdated: %v", err)
+		}
+	})
+
+	if strings.Contains(output, "github.com/davecgh/go-spew") {
+		t.Fatalf("newer Go pseudo-version should not be reported as outdated:\n%s", output)
+	}
+	if !strings.Contains(output, "All 1 packages are up to date.") {
+		t.Fatalf("run outdated output = %q, want up-to-date summary", output)
 	}
 }
 

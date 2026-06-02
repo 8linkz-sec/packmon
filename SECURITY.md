@@ -194,6 +194,13 @@ is not exposed through scan results. The feed requires no API key, and upstream
 rate limits, 304 responses, network failures, or schema parse failures must
 degrade feed status without deleting existing cached lifecycle data.
 
+Docker image freshness checks are metadata-only client behavior. The CLI may
+execute `docker image inspect` with fixed argv to read local image metadata
+when Docker is installed, but it must not execute compose files, build images,
+pull images, or log full local Docker errors. Registry checks use public
+manifest metadata requests and bearer-token challenges; private registry
+credentials are not read. Failures degrade to `unknown` in reports.
+
 Vulnerability advisories without upstream severity or CVSS data are treated as
 `LOW` until enrichment can raise them. Malicious-package categories from
 OSV/RustSec are stored as malicious findings rather than unresolved

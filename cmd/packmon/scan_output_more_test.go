@@ -150,6 +150,45 @@ func TestRunSingleScanWritesHTMLReport(t *testing.T) {
 	}
 }
 
+func TestRunSingleScanPrintsHTMLReportPath(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	dbDir := t.TempDir()
+	t.Setenv("PACKMON_DB_PATH", dbDir)
+	store, _ := newTestSQLiteStore(t, dbDir)
+	if err := store.Close(); err != nil {
+		t.Fatalf("close seed store: %v", err)
+	}
+
+	scanDir := filepath.Join(t.TempDir(), "empty-project")
+	if err := os.MkdirAll(scanDir, 0o750); err != nil {
+		t.Fatalf("mkdir scan dir: %v", err)
+	}
+	htmlPath := filepath.Join(t.TempDir(), "report.html")
+
+	out := captureStdout(t, func() {
+		exitCode, err := runSingleScan(context.Background(), scanSettings{
+			TargetName: "empty-project",
+			Path:       scanDir,
+			Mode:       "local",
+			FailOn:     "CRITICAL",
+			MaxDepth:   2,
+			Timeout:    1,
+			NoColor:    true,
+			OutputHTML: htmlPath,
+		})
+		if err != nil {
+			t.Fatalf("runSingleScan() error = %v", err)
+		}
+		if exitCode != ExitOK {
+			t.Fatalf("exitCode = %d, want %d", exitCode, ExitOK)
+		}
+	})
+
+	if !strings.Contains(out, "HTML report written to: "+htmlPath) {
+		t.Fatalf("scan output missing HTML report path %q:\n%s", htmlPath, out)
+	}
+}
+
 func TestRunScanCommandRejectsHTMLForMultipleTargets(t *testing.T) {
 	isolateCLIConfigDiscovery(t)
 	yaml := "repos:\n" +

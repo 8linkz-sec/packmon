@@ -20,6 +20,7 @@ func TestEcosystemValid(t *testing.T) {
 		EcosystemSwiftPM,
 		EcosystemHex,
 		EcosystemCRAN,
+		EcosystemDocker,
 	} {
 		if !eco.Valid() {
 			t.Fatalf("%q should be valid", eco)
@@ -27,5 +28,11 @@ func TestEcosystemValid(t *testing.T) {
 	}
 	if Ecosystem("unknown").Valid() {
 		t.Fatal("unknown ecosystem should be invalid")
+	}
+}
+
+func TestDockerEcosystemIsValid(t *testing.T) {
+	if !EcosystemDocker.Valid() {
+		t.Fatalf("EcosystemDocker.Valid() = false, want true")
 	}
 }

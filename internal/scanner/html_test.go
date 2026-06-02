@@ -194,6 +194,24 @@ func TestHTMLWriteCleanReport(t *testing.T) {
 	}
 }
 
+func TestHTMLWriteOperationalStatusIsNotCleanReport(t *testing.T) {
+	var buf bytes.Buffer
+	if err := NewHTMLWriter("dev").Write(&buf, "svc", domain.SeverityCritical, &domain.ScanResult{
+		Mode:            "local",
+		PackagesScanned: 23,
+		FeedStatus:      "local advisory data unavailable (run 'packmon db sync' first)",
+	}); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	out := buf.String()
+	if strings.Contains(out, "No findings in 23 packages") {
+		t.Fatal("operational error report must not render a clean all-clear message")
+	}
+	if !strings.Contains(out, "Scan did not complete") || !strings.Contains(out, "local advisory data unavailable") {
+		t.Fatalf("operational status message missing from report:\n%s", out)
+	}
+}
+
 func TestHTMLWriteTitleFallback(t *testing.T) {
 	var buf bytes.Buffer
 	if err := NewHTMLWriter("dev").Write(&buf, "  ", domain.SeverityCritical, &domain.ScanResult{}); err != nil {

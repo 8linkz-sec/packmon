@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"io"
 	"net/http"
 	"net/url"
@@ -20,12 +21,49 @@ import (
 	"github.com/8linkz/packmon/internal/parser"
 	"github.com/8linkz/packmon/internal/scanner"
 	versioncmp "github.com/8linkz/packmon/internal/version"
+	"golang.org/x/mod/module"
 )
 
 const (
 	maxConcurrentRegistryRequests = 10
 	maxRegistryResponseSize       = 512 * 1024
 )
+
+type outdatedOptions struct {
+	Ecosystems string
+	MaxDepth   int
+	IncludeDev bool
+	OutputHTML string
+	Quiet      bool
+	SBOMFiles  []string
+}
+
+type outdatedPackage struct {
+	Name      string
+	Version   string
+	Ecosystem domain.Ecosystem
+	LockFile  string
+}
+
+type outdatedRow struct {
+	Name      string
+	Installed string
+	Latest    string
+	Ecosystem string
+	LockFile  string
+}
+
+type outdatedReport struct {
+	Target      string
+	ScannedAt   string
+	Total       int
+	Outdated    []outdatedRow
+	UpToDate    int
+	Unknown     int
+	LockFiles   int
+	SBOMFiles   int
+	PackageWord string
+}
 
 // runOutdated walks the target, parses lock files, queries package
 // registries for the latest version, and prints a comparison table.
@@ -34,6 +72,15 @@ func runOutdated(args []string, ecosystems string, maxDepth int, sbomFilesOpt ..
 	if len(sbomFilesOpt) > 0 {
 		sbomFiles = sbomFilesOpt[0]
 	}
+	return runOutdatedWithOptions(args, outdatedOptions{
+		Ecosystems: ecosystems,
+		MaxDepth:   maxDepth,
+		IncludeDev: true,
+		SBOMFiles:  sbomFiles,
+	})
+}
+
+func runOutdatedWithOptions(args []string, opts outdatedOptions) error {
 	scanPath := "."
 	if len(args) > 0 {
 		scanPath = args[0]
@@ -47,32 +94,35 @@ func runOutdated(args []string, ecosystems string, maxDepth int, sbomFilesOpt ..
 	collection, err := scanner.CollectPackages(scanner.CollectConfig{
 		Registry:   reg,
 		Root:       absPath,
-		MaxDepth:   maxDepth,
-		Ecosystems: splitCSV(ecosystems),
-		SBOMFiles:  sbomFiles,
-		IncludeDev: true,
+		MaxDepth:   opts.MaxDepth,
+		Ecosystems: splitCSV(opts.Ecosystems),
+		SBOMFiles:  opts.SBOMFiles,
+		IncludeDev: opts.IncludeDev,
 	})
 	if err != nil {
 		return err
 	}
+	report := outdatedReport{
+		Target:      scanPath,
+		ScannedAt:   time.Now().UTC().Format("2006-01-02 15:04"),
+		LockFiles:   collection.LockFiles,
+		SBOMFiles:   collection.SBOMFiles,
+		PackageWord: "packages",
+	}
 	if collection.LockFiles == 0 && collection.SBOMFiles == 0 {
-		fmt.Println("No lock files found.")
-		return nil
+		if !opts.Quiet {
+			fmt.Println("No lock files found.")
+		}
+		return finishOutdatedReport(opts, report)
 	}
 
 	// Parse and deduplicate packages.
 	type pkgKey struct {
 		eco, name string
 	}
-	type pkgInfo struct {
-		Name      string
-		Version   string
-		Ecosystem domain.Ecosystem
-		LockFile  string
-	}
 
 	seen := make(map[pkgKey]struct{})
-	var packages []pkgInfo
+	var packages []outdatedPackage
 
 	for _, parseErr := range collection.ParseErrors {
 		fmt.Fprintf(os.Stderr, "warning: parse error in %s\n", parseErr)
@@ -84,7 +134,7 @@ func runOutdated(args []string, ecosystems string, maxDepth int, sbomFilesOpt ..
 			continue
 		}
 		seen[key] = struct{}{}
-		packages = append(packages, pkgInfo{
+		packages = append(packages, outdatedPackage{
 			Name:      p.Name,
 			Version:   p.Version,
 			Ecosystem: p.Ecosystem,
@@ -93,8 +143,14 @@ func runOutdated(args []string, ecosystems string, maxDepth int, sbomFilesOpt ..
 	}
 
 	if len(packages) == 0 {
-		fmt.Println("No packages found.")
-		return nil
+		if !opts.Quiet {
+			fmt.Println("No packages found.")
+		}
+		return finishOutdatedReport(opts, report)
+	}
+	report.Total = len(packages)
+	if report.Total == 1 {
+		report.PackageWord = "package"
 	}
 
 	fmt.Fprintf(os.Stderr, "Checking %d packages for updates...\n", len(packages))
@@ -109,7 +165,7 @@ func runOutdated(args []string, ecosystems string, maxDepth int, sbomFilesOpt ..
 
 	for i, pkg := range packages {
 		wg.Add(1)
-		go func(idx int, p pkgInfo) {
+		go func(idx int, p outdatedPackage) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
@@ -120,65 +176,58 @@ func runOutdated(args []string, ecosystems string, maxDepth int, sbomFilesOpt ..
 	}
 	wg.Wait()
 
-	// Build output rows (only outdated packages).
-	type outputRow struct {
-		name      string
-		installed string
-		latest    string
-		ecosystem string
-		lockFile  string
-	}
-
-	var outdated []outputRow
-	var upToDate int
-	var unknown int
-
 	for i, pkg := range packages {
 		latest := results[i]
 		if latest == "" {
-			unknown++
+			report.Unknown++
 			continue
 		}
-		if latest == pkg.Version {
-			upToDate++
+		if !updateAvailable(pkg.Version, latest, pkg.Ecosystem) {
+			report.UpToDate++
 			continue
 		}
-		outdated = append(outdated, outputRow{
-			name:      pkg.Name,
-			installed: pkg.Version,
-			latest:    latest,
-			ecosystem: string(pkg.Ecosystem),
-			lockFile:  pkg.LockFile,
+		report.Outdated = append(report.Outdated, outdatedRow{
+			Name:      pkg.Name,
+			Installed: pkg.Version,
+			Latest:    latest,
+			Ecosystem: string(pkg.Ecosystem),
+			LockFile:  pkg.LockFile,
 		})
 	}
 
 	// Sort: ecosystem, then name.
-	sort.Slice(outdated, func(i, j int) bool {
-		if outdated[i].ecosystem != outdated[j].ecosystem {
-			return outdated[i].ecosystem < outdated[j].ecosystem
+	sort.Slice(report.Outdated, func(i, j int) bool {
+		if report.Outdated[i].Ecosystem != report.Outdated[j].Ecosystem {
+			return report.Outdated[i].Ecosystem < report.Outdated[j].Ecosystem
 		}
-		return outdated[i].name < outdated[j].name
+		return report.Outdated[i].Name < report.Outdated[j].Name
 	})
 
-	if len(outdated) == 0 {
-		fmt.Printf("\nAll %d packages are up to date.\n", upToDate)
-		return nil
+	if !opts.Quiet {
+		printOutdatedReport(report)
 	}
+	return finishOutdatedReport(opts, report)
+}
 
+func printOutdatedReport(report outdatedReport) {
+	if len(report.Outdated) == 0 {
+		fmt.Printf("\nAll %d packages are up to date.\n", report.UpToDate)
+		return
+	}
 	// Compute column widths.
 	maxName, maxInst, maxLat, maxEco := 7, 9, 6, 9
-	for _, r := range outdated {
-		if len(r.name) > maxName {
-			maxName = len(r.name)
+	for _, r := range report.Outdated {
+		if len(r.Name) > maxName {
+			maxName = len(r.Name)
 		}
-		if len(r.installed) > maxInst {
-			maxInst = len(r.installed)
+		if len(r.Installed) > maxInst {
+			maxInst = len(r.Installed)
 		}
-		if len(r.latest) > maxLat {
-			maxLat = len(r.latest)
+		if len(r.Latest) > maxLat {
+			maxLat = len(r.Latest)
 		}
-		if len(r.ecosystem) > maxEco {
-			maxEco = len(r.ecosystem)
+		if len(r.Ecosystem) > maxEco {
+			maxEco = len(r.Ecosystem)
 		}
 	}
 
@@ -188,17 +237,106 @@ func runOutdated(args []string, ecosystems string, maxDepth int, sbomFilesOpt ..
 
 	fmt.Println()
 	fmt.Printf(fmtStr, "PACKAGE", "INSTALLED", "LATEST", "ECOSYSTEM", "LOCK FILE")
-	for _, r := range outdated {
-		fmt.Printf(fmtStr, r.name, r.installed, r.latest, r.ecosystem, r.lockFile)
+	for _, r := range report.Outdated {
+		fmt.Printf(fmtStr, r.Name, r.Installed, r.Latest, r.Ecosystem, r.LockFile)
 	}
 
-	fmt.Printf("\n%d outdated, %d up to date", len(outdated), upToDate)
-	if unknown > 0 {
-		fmt.Printf(", %d unknown", unknown)
+	fmt.Printf("\n%d outdated, %d up to date", len(report.Outdated), report.UpToDate)
+	if report.Unknown > 0 {
+		fmt.Printf(", %d unknown", report.Unknown)
 	}
-	fmt.Printf(" (%d total)\n", len(packages))
+	fmt.Printf(" (%d total)\n", report.Total)
+}
+
+func finishOutdatedReport(opts outdatedOptions, report outdatedReport) error {
+	if strings.TrimSpace(opts.OutputHTML) == "" {
+		return nil
+	}
+	if err := ensureOutputDir(opts.OutputHTML); err != nil {
+		return fmt.Errorf("prepare HTML output: %w", err)
+	}
+	if err := writeOutdatedHTML(opts.OutputHTML, report); err != nil {
+		return err
+	}
+	if !opts.Quiet {
+		fmt.Printf("HTML report written to: %s\n", opts.OutputHTML)
+	}
 	return nil
 }
+
+var outdatedHTMLTemplate = template.Must(template.New("outdated").Parse(outdatedHTML))
+
+func writeOutdatedHTML(path string, report outdatedReport) error {
+	// #nosec G304 -- CLI output path is provided intentionally by the local user.
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("html: create file %s: %w", path, err)
+	}
+	if err := outdatedHTMLTemplate.Execute(f, report); err != nil {
+		closeSilently(f)
+		return fmt.Errorf("html: render outdated report: %w", err)
+	}
+	return f.Close()
+}
+
+func updateAvailable(installed, latest string, ecosystem domain.Ecosystem) bool {
+	return versioncmp.Compare(latest, installed, "ECOSYSTEM", string(ecosystem)) > 0
+}
+
+const outdatedHTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Outdated Packages - Packmon Report</title>
+<style>
+body{margin:0;background:#0d1117;color:#c9d1d9;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:14px;line-height:1.5;}
+.wrap{max-width:1600px;margin:0 auto;padding:28px 20px 48px;}
+h1{font-size:22px;margin:0;color:#e6edf3;}
+.meta{color:#8b949e;font-size:13px;margin:4px 0 18px;}
+.summary{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 22px;}
+.badge{border:1px solid #30363d;border-radius:6px;padding:3px 11px;font-size:13px;color:#8b949e;}
+.warn{color:#ffa657;border-color:#ffa657;}
+.ok{color:#56d4c4;border-color:#56d4c4;}
+.unknown{color:#8b949e;border-color:#8b949e;}
+.table-scroll{overflow-x:auto;border:1px solid #30363d;border-radius:6px;background:#161b22;}
+table{width:100%;min-width:1280px;border-collapse:collapse;background:#161b22;}
+th,td{padding:8px 10px;border-bottom:1px solid #30363d;text-align:left;vertical-align:top;}
+th{color:#e6edf3;font-size:12px;text-transform:uppercase;}
+td{word-break:normal;}
+.name{min-width:260px;word-break:break-word;}
+.version{white-space:nowrap;min-width:260px;}
+.ecosystem{white-space:nowrap;min-width:96px;}
+.lockfile{min-width:260px;word-break:break-word;}
+.empty{margin:24px 0;padding:14px 16px;background:#0f2d2a;border:1px solid #56d4c4;border-radius:6px;color:#56d4c4;font-size:15px;}
+.footer{border-top:1px solid #30363d;margin-top:28px;padding-top:10px;color:#8b949e;font-size:12px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>Outdated Packages</h1>
+<div class="meta">Packmon Outdated Report &middot; {{.Total}} {{.PackageWord}}{{if .Target}} &middot; {{.Target}}{{end}}{{if .ScannedAt}} &middot; {{.ScannedAt}}{{end}}</div>
+<div class="summary">
+<span class="badge warn">{{len .Outdated}} outdated</span>
+<span class="badge ok">{{.UpToDate}} up to date</span>
+<span class="badge unknown">{{.Unknown}} unknown</span>
+</div>
+{{if .Outdated}}
+<div class="table-scroll">
+<table>
+<thead><tr><th class="name">Package</th><th class="version">Installed</th><th class="version">Latest</th><th class="ecosystem">Ecosystem</th><th class="lockfile">Lock File</th></tr></thead>
+<tbody>
+{{range .Outdated}}<tr><td class="name">{{.Name}}</td><td class="version">{{.Installed}}</td><td class="version">{{.Latest}}</td><td class="ecosystem">{{.Ecosystem}}</td><td class="lockfile">{{.LockFile}}</td></tr>{{end}}
+</tbody>
+</table>
+</div>
+{{else}}
+<div class="empty">All {{.UpToDate}} packages are up to date.</div>
+{{end}}
+<div class="footer">{{.LockFiles}} lock files &middot; {{.SBOMFiles}} SBOM files</div>
+</div>
+</body>
+</html>`
 
 // fetchLatestVersionFn is the indirection point for latest-version lookups so
 // tests can stub registry access without hitting the network. Production code
@@ -297,7 +435,11 @@ func fetchPyPILatest(ctx context.Context, name string) string {
 
 // go: GET https://proxy.golang.org/{module}/@latest
 func fetchGoLatest(ctx context.Context, name string) string {
-	data, err := registryGet(ctx, "https://proxy.golang.org/"+name+"/@latest")
+	escaped, err := module.EscapePath(name)
+	if err != nil {
+		return ""
+	}
+	data, err := registryGet(ctx, "https://proxy.golang.org/"+escaped+"/@latest")
 	if err != nil {
 		return ""
 	}

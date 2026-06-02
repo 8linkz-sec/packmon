@@ -200,6 +200,47 @@ func TestLookupBatchClassifiesMaliciousRemovedAndClean(t *testing.T) {
 	}
 }
 
+func TestLookupBatchToleratesNumericIncidentValues(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"community": {
+				"packages": [
+					{"uuid":"npm:cssesc@3.0.0","package":{"identity":{"removed":false},"incidents":{"malware":0,"removal":0}}},
+					{"uuid":"npm:bad@1.0.0","package":{"incidents":{"malware":1}}},
+					{"uuid":"npm:gone@1.0.0","package":{"incidents":{"removal":1}}}
+				]
+			}
+		}`))
+	}))
+	defer server.Close()
+
+	w := newWorker(&fakeStore{}, "token", slog.Default(), WithBaseURL(server.URL), WithLookupTTL(24*time.Hour))
+	results, err := w.lookupBatch(context.Background(), []db.PackageReputation{
+		{Ecosystem: "npm", Name: "cssesc", Version: "3.0.0", Source: FeedName, Status: "pending"},
+		{Ecosystem: "npm", Name: "bad", Version: "1.0.0", Source: FeedName, Status: "pending"},
+		{Ecosystem: "npm", Name: "gone", Version: "1.0.0", Source: FeedName, Status: "pending"},
+	})
+	if err != nil {
+		t.Fatalf("lookupBatch() error = %v", err)
+	}
+
+	statuses := map[string]string{}
+	for _, rep := range results {
+		statuses[rep.Name] = rep.Status
+	}
+	if statuses["cssesc"] != "clean" {
+		t.Fatalf("cssesc status = %q, want clean", statuses["cssesc"])
+	}
+	if statuses["bad"] != "malicious" {
+		t.Fatalf("bad status = %q, want malicious", statuses["bad"])
+	}
+	if statuses["gone"] != "removed" {
+		t.Fatalf("gone status = %q, want removed", statuses["gone"])
+	}
+}
+
 func TestLookupBatchMapsPackageErrorToNotFound(t *testing.T) {
 	t.Parallel()
 

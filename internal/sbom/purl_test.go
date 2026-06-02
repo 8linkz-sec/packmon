@@ -1,6 +1,7 @@
 package sbom
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/8linkz/packmon/internal/domain"
@@ -34,7 +35,7 @@ func TestPackageFromPURL(t *testing.T) {
 
 	for _, tt := range tests {
 		got, ok := PackageFromPURL(tt.purl)
-		if ok != tt.ok || got != tt.want {
+		if ok != tt.ok || !reflect.DeepEqual(got, tt.want) {
 			t.Fatalf("PackageFromPURL(%q) = %+v, %v; want %+v, %v", tt.purl, got, ok, tt.want, tt.ok)
 		}
 	}
@@ -43,11 +44,11 @@ func TestPackageFromPURL(t *testing.T) {
 func TestPackageIdentityFromPURLAllowsVersionlessIdentifiers(t *testing.T) {
 	got, ok := PackageIdentityFromPURL("pkg:pypi/django")
 	want := domain.Package{Name: "django", Ecosystem: domain.EcosystemPyPI}
-	if !ok || got != want {
+	if !ok || !reflect.DeepEqual(got, want) {
 		t.Fatalf("PackageIdentityFromPURL(versionless) = %+v, %v; want %+v, true", got, ok, want)
 	}
 
-	if got, ok := PackageFromPURL("pkg:pypi/django"); ok || got != (domain.Package{}) {
+	if got, ok := PackageFromPURL("pkg:pypi/django"); ok || !reflect.DeepEqual(got, domain.Package{}) {
 		t.Fatalf("PackageFromPURL(versionless) = %+v, %v; want zero, false", got, ok)
 	}
 }

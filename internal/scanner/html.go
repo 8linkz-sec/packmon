@@ -63,6 +63,7 @@ type htmlReport struct {
 	FindingsTotal int
 	Blocking      int
 	Clean         bool
+	Status        string
 	Sections      []htmlSection
 	FooterParts   []string
 }
@@ -123,7 +124,8 @@ func buildReport(title, toolVersion string, failOn domain.Severity, result *doma
 		Packages:      result.PackagesScanned,
 		Duration:      formatDurationMs(result.DurationMs),
 		FindingsTotal: len(result.Findings),
-		Clean:         len(result.Findings) == 0,
+		Clean:         len(result.Findings) == 0 && !hasOperationalStatus(result.FeedStatus),
+		Status:        operationalStatusMessage(result.FeedStatus),
 	}
 	if !result.ScannedAt.IsZero() {
 		rep.ScannedAt = result.ScannedAt.Format("2006-01-02 15:04")
@@ -216,6 +218,20 @@ func buildReport(title, toolVersion string, failOn domain.Severity, result *doma
 
 	rep.FooterParts = footerParts(toolVersion, result)
 	return rep
+}
+
+func hasOperationalStatus(status string) bool {
+	return operationalStatusMessage(status) != ""
+}
+
+func operationalStatusMessage(status string) string {
+	status = strings.TrimSpace(status)
+	switch status {
+	case "", "healthy", "degraded":
+		return ""
+	default:
+		return status
+	}
 }
 
 func makeLinks(f domain.Finding) (links []htmlLink, plain []string) {
@@ -357,6 +373,7 @@ h2{font-size:16px;font-weight:700;border-bottom:1px solid var(--border);padding-
 .links{margin-top:4px;color:var(--dim);font-size:13px;}
 .links a{color:var(--link);text-decoration:underline;}
 .clean{margin:24px 0;padding:14px 16px;background:#0f2d2a;border:1px solid var(--low);border-radius:6px;color:var(--low);font-size:15px;}
+.status{margin:24px 0;padding:14px 16px;background:#321820;border:1px solid var(--crit);border-radius:6px;color:var(--crit);font-size:15px;}
 .footer{border-top:1px solid var(--border);margin-top:28px;padding-top:10px;color:var(--dim);font-size:12px;}
 </style>
 </head>
@@ -369,6 +386,7 @@ h2{font-size:16px;font-weight:700;border-bottom:1px solid var(--border);padding-
 {{range .TypeCounts}}<span class="badge {{.Class}}">{{.Count}} {{.Label}}</span>{{end}}
 <span class="badge b-dim">{{.FindingsTotal}} findings &middot; {{.Blocking}} blocking</span>
 </div>
+{{if .Status}}<div class="status">Scan did not complete: {{.Status}}</div>{{end}}
 {{if .Clean}}<div class="clean">&#10003; No findings in {{.Packages}} packages.</div>{{end}}
 {{range .Sections}}
 <h2 class="{{.Class}}">{{.Title}} <span class="count">({{len .Findings}})</span></h2>

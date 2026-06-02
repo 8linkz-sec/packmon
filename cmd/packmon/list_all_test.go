@@ -2,10 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/8linkz/packmon/internal/domain"
 )
@@ -121,6 +125,181 @@ func TestRunListAll_ListsAllPackagesWithUpdateInfo(t *testing.T) {
 	}
 }
 
+func TestRunListAll_IncludesDevPackagesByDefault(t *testing.T) {
+	isolatedListAllEnv(t)
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "package-lock.json"), `{
+  "name": "test",
+  "lockfileVersion": 3,
+  "packages": {
+    "node_modules/prod": { "version": "1.0.0" },
+    "node_modules/dev-only": { "version": "1.0.0", "dev": true }
+  }
+}`)
+
+	stubLatestVersion(t, func(_ context.Context, _ domain.Ecosystem, name string) string {
+		switch name {
+		case "prod", "dev-only":
+			return "1.0.0"
+		default:
+			return ""
+		}
+	})
+
+	out := captureStdout(t, func() {
+		if _, err := runListAll(context.Background(), listAllSettings(dir, false)); err != nil {
+			t.Fatalf("runListAll: %v", err)
+		}
+	})
+
+	if !contains(out, "prod") {
+		t.Fatalf("output missing prod package:\n%s", out)
+	}
+	if !contains(out, "dev-only") {
+		t.Fatalf("list-all should include dev packages by default:\n%s", out)
+	}
+	if !contains(out, "2 packages (") {
+		t.Fatalf("list-all package count should include dev packages:\n%s", out)
+	}
+}
+
+func TestRunListAll_WritesHTMLReportWithFullPackageList(t *testing.T) {
+	isolatedListAllEnv(t)
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "package-lock.json"), `{
+  "name": "test",
+  "lockfileVersion": 3,
+  "packages": {
+    "node_modules/leftpad": { "version": "1.0.0" },
+    "node_modules/dev-only": { "version": "1.0.0", "dev": true }
+  }
+}`)
+	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+
+	stubLatestVersion(t, func(_ context.Context, _ domain.Ecosystem, name string) string {
+		switch name {
+		case "leftpad":
+			return "2.0.0"
+		case "dev-only":
+			return "1.0.0"
+		default:
+			return ""
+		}
+	})
+
+	settings := listAllSettings(dir, false)
+	settings.OutputHTML = htmlPath
+	if _, err := runListAll(context.Background(), settings); err != nil {
+		t.Fatalf("runListAll: %v", err)
+	}
+
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read list-all HTML report: %v", err)
+	}
+	out := string(data)
+	for _, want := range []string{
+		"<!DOCTYPE html>",
+		"Packmon List-All Report",
+		"Findings",
+		"All Packages",
+		"leftpad",
+		"dev-only",
+		"1.0.0",
+		"2.0.0",
+		"<th class=\"version\">Installed</th>",
+	} {
+		if !contains(out, want) {
+			t.Fatalf("list-all HTML missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestScanCommandListAllHTMLFlagWritesFullReport(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "package-lock.json"), `{
+  "name": "test",
+  "lockfileVersion": 3,
+  "packages": {
+    "node_modules/prod": { "version": "1.0.0" },
+    "node_modules/dev-only": { "version": "1.0.0", "dev": true }
+  }
+}`)
+	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+
+	stubLatestVersion(t, func(_ context.Context, _ domain.Ecosystem, name string) string {
+		switch name {
+		case "prod", "dev-only":
+			return "2.0.0"
+		default:
+			return ""
+		}
+	})
+
+	checkRequests := make(chan domain.ScanRequest, 1)
+	checkServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/check" {
+			http.NotFound(w, r)
+			return
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer remote-key" {
+			http.Error(w, "bad auth", http.StatusUnauthorized)
+			return
+		}
+		var req domain.ScanRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		checkRequests <- req
+		writeJSONForTest(t, w, domain.ScanResult{
+			ScanID:          "list-all-remote",
+			Mode:            "remote",
+			ScannedAt:       time.Now().UTC(),
+			PackagesScanned: len(req.Packages),
+			Findings:        []domain.Finding{},
+			FeedStatus:      "healthy",
+			FeedVersions:    map[string]string{"test": time.Now().UTC().Format(time.RFC3339)},
+		})
+	}))
+	defer checkServer.Close()
+
+	cmd := newScanCmd()
+	cmd.SetArgs([]string{
+		"--mode", "remote",
+		"--server", checkServer.URL,
+		"--api-key", "remote-key",
+		"--insecure-allow-http",
+		"--html", htmlPath,
+		"--list-all",
+		dir,
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("scan command execute: %v", err)
+	}
+
+	select {
+	case req := <-checkRequests:
+		if len(req.Packages) != 2 {
+			t.Fatalf("remote list-all request packages = %d, want prod and dev-only", len(req.Packages))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("remote list-all check request was not received")
+	}
+
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read list-all HTML report: %v", err)
+	}
+	out := string(data)
+	for _, want := range []string{"Packmon List-All Report", "All Packages", "prod", "dev-only", "2 packages"} {
+		if !contains(out, want) {
+			t.Fatalf("list-all command HTML missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestRunListAll_UnknownLatestWhenResolverReturnsEmpty(t *testing.T) {
 	isolatedListAllEnv(t)
 	dir := t.TempDir()
@@ -219,6 +398,50 @@ func TestRunListAll_UpdateColumnLogic(t *testing.T) {
 	}
 }
 
+func TestRunListAllDoesNotMarkNewerGoPseudoVersionAsUpdate(t *testing.T) {
+	isolatedListAllEnv(t)
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "go.mod"), `module example.com/app
+
+go 1.26
+
+require github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc
+`)
+
+	stubLatestVersion(t, func(_ context.Context, _ domain.Ecosystem, name string) string {
+		if name == "github.com/davecgh/go-spew" {
+			return "v1.1.1"
+		}
+		return ""
+	})
+
+	out := captureStdout(t, func() {
+		if _, err := runListAll(context.Background(), listAllSettings(dir, false)); err != nil {
+			t.Fatalf("runListAll: %v", err)
+		}
+	})
+
+	lines := strings.Split(out, "\n")
+	var spewLine string
+	for _, l := range lines {
+		fields := strings.Fields(l)
+		if len(fields) > 0 && fields[0] == "github.com/davecgh/go-spew" {
+			spewLine = l
+			break
+		}
+	}
+	if spewLine == "" {
+		t.Fatalf("could not find go-spew row in output:\n%s", out)
+	}
+	fields := strings.Fields(spewLine)
+	if len(fields) < 4 || fields[3] != "-" {
+		t.Fatalf("expected UPDATE=- for newer Go pseudo-version, got line: %q", spewLine)
+	}
+	if !strings.Contains(out, "1 packages (0 with updates") {
+		t.Fatalf("expected zero updates in summary:\n%s", out)
+	}
+}
+
 func TestRunListAll_VulnerablePackageAppearsInBothSections(t *testing.T) {
 	isolatedListAllEnv(t)
 	dbDir := os.Getenv("PACKMON_DB_PATH")
@@ -276,13 +499,14 @@ func TestRunListAll_VulnerablePackageAppearsInBothSections(t *testing.T) {
 	if vulnLine == "" || safeLine == "" {
 		t.Fatalf("could not find package rows in section 2:\n%s", out)
 	}
-	// VULN is column index 5 (0-based): PACKAGE INSTALLED LATEST UPDATE ECOSYSTEM VULN LOCKFILE
+	// VULN is the field before LOCK FILE. Empty VIA/FLAGS columns collapse under
+	// strings.Fields, so do not assert a fixed column index here.
 	vf := strings.Fields(vulnLine)
-	if len(vf) < 6 || vf[5] != "yes" {
+	if len(vf) < 2 || vf[len(vf)-2] != "yes" {
 		t.Errorf("expected VULN=yes for vulnpkg, got line: %q", vulnLine)
 	}
 	sf := strings.Fields(safeLine)
-	if len(sf) < 6 || sf[5] != "-" {
+	if len(sf) < 2 || sf[len(sf)-2] != "-" {
 		t.Errorf("expected VULN=- for safe, got line: %q", safeLine)
 	}
 }
@@ -307,10 +531,13 @@ func TestRunListAll_FindingsSectionRendersTable(t *testing.T) {
 		}
 	})
 
-	// Local mode with empty advisory DB -> no findings. The normal scan still
-	// prints a "No findings" summary line.
-	if !contains(out, "No findings") {
-		t.Errorf("expected findings-section summary line:\n%s", out)
+	// Local mode with an empty advisory DB is operationally incomplete. The
+	// normal scan section must not present it as a clean "No findings" scan.
+	if !contains(out, "Scan did not complete") {
+		t.Errorf("expected findings-section operational status line:\n%s", out)
+	}
+	if contains(out, "No findings") {
+		t.Errorf("operational status must not be rendered as clean:\n%s", out)
 	}
 }
 
@@ -336,5 +563,180 @@ func TestRunListAll_QuietSuppressesHumanOutput(t *testing.T) {
 
 	if strings.TrimSpace(out) != "" {
 		t.Errorf("expected no stdout in quiet mode, got:\n%s", out)
+	}
+}
+
+func TestBuildListAllPackageReportDockerUpdateStatus(t *testing.T) {
+	old := resolveDockerImageStatusFn
+	t.Cleanup(func() { resolveDockerImageStatusFn = old })
+	resolveDockerImageStatusFn = func(_ context.Context, p listAllPackage) listAllLatest {
+		if p.Name != "docker.io/library/postgres" || p.Version != "18-alpine" {
+			t.Fatalf("docker status package = %#v", p)
+		}
+		return listAllLatest{Latest: "sha256:remote", Update: "unknown", Unknown: true}
+	}
+
+	report := buildListAllPackageReport([]listAllPackage{{
+		Name:      "docker.io/library/postgres",
+		Version:   "18-alpine",
+		Ecosystem: domain.EcosystemDocker,
+		LockFile:  "docker-compose.yml",
+	}}, &domain.ScanResult{}, ".")
+
+	if len(report.Rows) != 1 {
+		t.Fatalf("Rows = %#v", report.Rows)
+	}
+	row := report.Rows[0]
+	if row.Latest != "sha256:remote" || row.Update != "unknown" || report.Unknown != 1 {
+		t.Fatalf("row=%#v report=%#v", row, report)
+	}
+}
+
+func TestRunListAllIncludesDockerImages(t *testing.T) {
+	isolatedListAllEnv(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte("FROM golang:1.26-alpine AS build\nFROM alpine:3.23 AS server\n"), 0o600); err != nil {
+		t.Fatalf("write Dockerfile: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "docker-compose.yml"), []byte("services:\n  db:\n    image: postgres:18-alpine\n"), 0o600); err != nil {
+		t.Fatalf("write compose: %v", err)
+	}
+
+	oldLatest := fetchLatestVersionFn
+	oldDocker := resolveDockerImageStatusFn
+	t.Cleanup(func() {
+		fetchLatestVersionFn = oldLatest
+		resolveDockerImageStatusFn = oldDocker
+	})
+	fetchLatestVersionFn = func(context.Context, domain.Ecosystem, string) string { return "" }
+	resolveDockerImageStatusFn = func(context.Context, listAllPackage) listAllLatest {
+		return listAllLatest{Latest: "sha256:remote", Update: "unknown", Unknown: true}
+	}
+
+	output := captureStdout(t, func() {
+		if _, err := runListAll(context.Background(), listAllSettings(dir, false)); err != nil {
+			t.Fatalf("runListAll: %v", err)
+		}
+	})
+
+	for _, want := range []string{
+		"docker.io/library/golang",
+		"docker.io/library/alpine",
+		"docker.io/library/postgres",
+		"docker",
+		"Dockerfile",
+		"docker-compose.yml",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("list-all output missing %q:\n%s", want, output)
+		}
+	}
+}
+
+func TestRunListAllHTMLIncludesDockerImages(t *testing.T) {
+	isolatedListAllEnv(t)
+	dir := t.TempDir()
+	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte("FROM alpine:3.23\n"), 0o600); err != nil {
+		t.Fatalf("write Dockerfile: %v", err)
+	}
+
+	oldDocker := resolveDockerImageStatusFn
+	t.Cleanup(func() { resolveDockerImageStatusFn = oldDocker })
+	resolveDockerImageStatusFn = func(context.Context, listAllPackage) listAllLatest {
+		return listAllLatest{Latest: "sha256:remote", Update: "unknown", Unknown: true}
+	}
+
+	settings := listAllSettings(dir, false)
+	settings.OutputHTML = htmlPath
+	if _, err := runListAll(context.Background(), settings); err != nil {
+		t.Fatalf("runListAll: %v", err)
+	}
+	data, err := os.ReadFile(htmlPath)
+	if err != nil {
+		t.Fatalf("read HTML: %v", err)
+	}
+	out := string(data)
+	for _, want := range []string{"docker.io/library/alpine", "docker", "Dockerfile", "sha256:remote"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("list-all HTML missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestPlainScanDoesNotSendDockerInventoryPackages(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte("FROM alpine:3.23\n"), 0o600); err != nil {
+		t.Fatalf("write Dockerfile: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "package-lock.json"), []byte(`{
+		"lockfileVersion": 3,
+		"packages": {
+			"node_modules/left-pad": {"version": "1.3.0"}
+		}
+	}`), 0o600); err != nil {
+		t.Fatalf("write package-lock.json: %v", err)
+	}
+	var requestSeen bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/check" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		requestSeen = true
+		var req struct {
+			Packages []domain.Package `json:"packages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		var sawNPM bool
+		for _, pkg := range req.Packages {
+			if pkg.Ecosystem == domain.EcosystemNPM && pkg.Name == "left-pad" && pkg.Version == "1.3.0" {
+				sawNPM = true
+			}
+			if pkg.Ecosystem == domain.EcosystemDocker {
+				t.Fatalf("plain scan request included docker package: %#v", pkg)
+			}
+		}
+		if !sawNPM {
+			t.Fatalf("plain scan request packages = %#v, want npm left-pad and no docker packages", req.Packages)
+		}
+		writeJSONForTest(t, w, domain.ScanResult{ScanID: "scan", Mode: "remote"})
+	}))
+	defer server.Close()
+
+	cmd := newScanCmd()
+	cmd.SetArgs([]string{"--mode", "remote", "--server", server.URL, "--api-key", "test", "--insecure-allow-http", dir})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !requestSeen {
+		t.Fatal("plain scan did not call remote check; test would not prove docker exclusion")
+	}
+}
+
+func TestListAllDockerRowsRenderScopeRelationAndFlags(t *testing.T) {
+	report := listAllPackageReport{
+		Rows: []listAllRow{{
+			Name:      "docker.io/library/postgres",
+			Installed: "18-alpine",
+			Latest:    "sha256:remote",
+			Update:    "unknown",
+			Ecosystem: "docker",
+			Vuln:      "-",
+			Scope:     "runtime",
+			Relation:  "compose",
+			Flags:     "service=postgres",
+			LockFile:  "docker-compose.yml",
+		}},
+		Unknown: 1,
+	}
+	output := captureStdout(t, func() {
+		printListAllPackageReport(report)
+	})
+	for _, want := range []string{"SCOPE", "RELATION", "VIA", "FLAGS", "runtime", "compose", "service=postgres"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q:\n%s", want, output)
+		}
 	}
 }

@@ -53,6 +53,28 @@ func TestTableWriterWriteShowsDegradedFeedWarning(t *testing.T) {
 	}
 }
 
+func TestTableWriterOperationalStatusIsNotCleanReport(t *testing.T) {
+	result := &domain.ScanResult{
+		Mode:            "local",
+		FeedStatus:      "local advisory data unavailable (run 'packmon db sync' first)",
+		PackagesScanned: 43,
+		FindingsCount:   0,
+	}
+
+	var out bytes.Buffer
+	if err := NewTableWriter(true).Write(&out, result); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	output := out.String()
+	if strings.Contains(output, "No findings in 43 packages") {
+		t.Fatalf("operational error table must not render a clean all-clear message:\n%s", output)
+	}
+	if !strings.Contains(output, "Scan did not complete") || !strings.Contains(output, "43 packages") {
+		t.Fatalf("expected operational status table message:\n%s", output)
+	}
+}
+
 func TestTableWriterShowsSupplyChainRiskDistinctly(t *testing.T) {
 	result := &domain.ScanResult{
 		Mode:             "remote",

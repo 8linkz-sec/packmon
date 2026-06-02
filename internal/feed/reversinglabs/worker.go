@@ -308,7 +308,39 @@ type searchDependency struct {
 }
 
 type searchIncident struct {
-	Type string `json:"type"`
+	Type  string `json:"type"`
+	Count int    `json:"-"`
+}
+
+func (i *searchIncident) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || bytes.Equal(data, []byte("null")) {
+		return nil
+	}
+	if data[0] == '{' {
+		var obj struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(data, &obj); err != nil {
+			return err
+		}
+		i.Type = obj.Type
+		return nil
+	}
+	if data[0] == '"' {
+		var typ string
+		if err := json.Unmarshal(data, &typ); err != nil {
+			return err
+		}
+		i.Type = typ
+		return nil
+	}
+	var count int
+	if err := json.Unmarshal(data, &count); err != nil {
+		return err
+	}
+	i.Count = count
+	return nil
 }
 
 func (w *Worker) lookupBatch(ctx context.Context, reps []db.PackageReputation) ([]db.PackageReputation, error) {
@@ -511,8 +543,8 @@ func maliciousSignals(pkg searchPackageData) []string {
 			break
 		}
 	}
-	for _, incident := range pkg.Incidents {
-		if strings.EqualFold(incident.Type, "malware") {
+	for key, incident := range pkg.Incidents {
+		if incidentMatches(key, incident, "malware") {
 			signals = append(signals, "incidents.type.malware")
 			break
 		}
@@ -528,13 +560,20 @@ func removedSignals(pkg searchPackageData) []string {
 	if pkg.WasRemoved {
 		signals = append(signals, "package.was_removed")
 	}
-	for _, incident := range pkg.Incidents {
-		if strings.EqualFold(incident.Type, "removal") {
+	for key, incident := range pkg.Incidents {
+		if incidentMatches(key, incident, "removal") {
 			signals = append(signals, "incidents.type.removal")
 			break
 		}
 	}
 	return signals
+}
+
+func incidentMatches(key string, incident searchIncident, want string) bool {
+	if strings.EqualFold(incident.Type, want) {
+		return true
+	}
+	return incident.Count > 0 && strings.EqualFold(strings.TrimSpace(key), want)
 }
 
 func marshalEvidence(purl, assessment string, signals []string) json.RawMessage {

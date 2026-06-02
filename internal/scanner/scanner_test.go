@@ -496,8 +496,11 @@ func TestScannerRunParserAndLocalModeErrors(t *testing.T) {
 		MaxDepth: 2,
 	})
 	result, exitCode = sc.Run(context.Background())
-	if exitCode != ExitOperational || !strings.Contains(result.FeedStatus, "no local database") {
+	if exitCode != ExitOperational || !strings.Contains(result.FeedStatus, "local advisory data unavailable") {
 		t.Fatalf("local no checker exit=%d result=%+v", exitCode, result)
+	}
+	if result.PackagesScanned != 1 {
+		t.Fatalf("local no checker packages = %d, want 1", result.PackagesScanned)
 	}
 }
 

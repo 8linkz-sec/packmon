@@ -59,6 +59,11 @@ func (tw *TableWriter) Write(w io.Writer, result *domain.ScanResult) error {
 		}
 	}
 
+	if len(result.Findings) == 0 && hasOperationalStatus(result.FeedStatus) {
+		_, err := fmt.Fprintf(w, "\nScan did not complete; findings were not evaluated for %d packages.\n", result.PackagesScanned)
+		return err
+	}
+
 	if len(result.Findings) == 0 {
 		_, err := fmt.Fprintf(w, "\nNo findings in %d packages.\n", result.PackagesScanned)
 		return err
