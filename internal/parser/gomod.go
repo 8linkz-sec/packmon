@@ -123,11 +123,20 @@ func (p *GoModParser) Parse(r io.Reader) ([]domain.Package, error) {
 			continue
 		}
 
+		// code drops any inline comment and is used only for structural
+		// decisions, so a '(' or ')' inside a comment (e.g. "// see (note)")
+		// cannot open or close the require block. The original line is passed
+		// to parseGoRequireLine, which detects "// indirect" itself.
+		code := line
+		if idx := strings.Index(code, "//"); idx >= 0 {
+			code = strings.TrimSpace(code[:idx])
+		}
+
 		// Detect start/end of require block.
-		if strings.HasPrefix(line, "require") && strings.Contains(line, "(") {
+		if strings.HasPrefix(code, "require") && strings.Contains(code, "(") {
 			inBlock = true
 			// A require ( on the same line as a package is unusual but handle it.
-			rest := strings.TrimPrefix(line, "require")
+			rest := strings.TrimPrefix(code, "require")
 			rest = strings.TrimSpace(strings.TrimPrefix(rest, "("))
 			if rest != "" && rest != ")" {
 				if pkg, err := parseGoRequireLine(rest, lineNo); err == nil {
@@ -137,7 +146,7 @@ func (p *GoModParser) Parse(r io.Reader) ([]domain.Package, error) {
 			continue
 		}
 
-		if inBlock && strings.Contains(line, ")") {
+		if inBlock && strings.Contains(code, ")") {
 			inBlock = false
 			continue
 		}
@@ -153,9 +162,8 @@ func (p *GoModParser) Parse(r io.Reader) ([]domain.Package, error) {
 		}
 
 		// Single-line require without parentheses: require module version
-		if strings.HasPrefix(line, "require ") {
-			rest := strings.TrimPrefix(line, "require ")
-			rest = strings.TrimSpace(rest)
+		if strings.HasPrefix(code, "require ") {
+			rest := strings.TrimSpace(strings.TrimPrefix(line, "require "))
 			pkg, err := parseGoRequireLine(rest, lineNo)
 			if err != nil {
 				errs = append(errs, err)

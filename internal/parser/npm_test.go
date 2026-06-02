@@ -596,3 +596,54 @@ func packagesByName(pkgs []domain.Package) map[string]domain.Package {
 	}
 	return out
 }
+
+func TestNPMParserParsePackageLockProvenance(t *testing.T) {
+	t.Parallel()
+
+	input := `{
+		"lockfileVersion": 3,
+		"packages": {
+			"": {
+				"version": "1.0.0",
+				"dependencies": {"runtime-lib": "^1.0.0"},
+				"devDependencies": {"tailwindcss": "3.4.17"},
+				"optionalDependencies": {"optional-root": "1.0.0"}
+			},
+			"node_modules/runtime-lib": {"version": "1.0.0"},
+			"node_modules/optional-root": {"version": "1.0.0", "optional": true},
+			"node_modules/tailwindcss": {
+				"version": "3.4.17",
+				"dev": true,
+				"dependencies": {"postcss": "^8.4.47", "postcss-import": "^15.1.0"}
+			},
+			"node_modules/postcss": {"version": "8.5.8", "dev": true, "peer": true},
+			"node_modules/postcss-import": {
+				"version": "15.1.0",
+				"dev": true,
+				"peerDependencies": {"postcss": "^8.0.0"}
+			}
+		}
+	}`
+
+	pkgs, err := NewNPMParser().Parse(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	by := packagesByName(pkgs)
+
+	if r := by["runtime-lib"]; !r.Direct || r.Dev || r.Indirect || r.Peer || r.Optional || len(r.Via) != 0 {
+		t.Fatalf("runtime-lib = %+v, want direct runtime only", r)
+	}
+	if tw := by["tailwindcss"]; !tw.Direct || !tw.Dev || tw.Indirect || len(tw.Via) != 0 {
+		t.Fatalf("tailwindcss = %+v, want direct dev root", tw)
+	}
+	if o := by["optional-root"]; !o.Direct || !o.Optional {
+		t.Fatalf("optional-root = %+v, want direct optional root", o)
+	}
+	if pc := by["postcss"]; pc.Direct || !pc.Dev || !pc.Indirect || !pc.Peer || len(pc.Via) != 1 || pc.Via[0] != "tailwindcss" {
+		t.Fatalf("postcss = %+v, want dev peer transitive via tailwindcss", pc)
+	}
+	if pi := by["postcss-import"]; pi.Direct || !pi.Dev || !pi.Indirect || len(pi.Via) != 1 || pi.Via[0] != "tailwindcss" {
+		t.Fatalf("postcss-import = %+v, want dev transitive via tailwindcss", pi)
+	}
+}

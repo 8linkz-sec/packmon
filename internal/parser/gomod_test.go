@@ -314,3 +314,28 @@ func assertPackagesEco(t *testing.T, pkgs []domain.Package, wantPkgs map[string]
 		}
 	}
 }
+
+// Regression: a '(' or ')' inside a require-block comment must not be treated
+// as a block boundary, otherwise that line and every following require would be
+// silently dropped from the scan.
+func TestGoModParserKeepsRequiresWithParenInComment(t *testing.T) {
+	t.Parallel()
+
+	input := "module x\n\ngo 1.26\n\nrequire (\n\tgithub.com/a/one v1.0.0 // kept (legacy)\n\tgithub.com/b/two v2.0.0\n)\n"
+
+	pkgs, err := NewGoModParser().Parse(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	by := packagesByName(pkgs)
+
+	if len(pkgs) != 2 {
+		t.Fatalf("got %d packages %v, want 2 (')' in a comment closed the block early)", len(pkgs), pkgs)
+	}
+	if _, ok := by["github.com/a/one"]; !ok {
+		t.Errorf("missing github.com/a/one (line with paren comment was dropped)")
+	}
+	if _, ok := by["github.com/b/two"]; !ok {
+		t.Errorf("missing github.com/b/two (block closed early)")
+	}
+}
