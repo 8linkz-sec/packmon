@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/8linkz/packmon/internal/domain"
@@ -187,9 +188,7 @@ func (c *PackageCollection) add(pkg domain.Package, sourceFile, sourceType strin
 		if (packageCollectionKey{existing.Name, existing.Version, existing.Ecosystem}) != k {
 			continue
 		}
-		if c.Entries[i].Package.Dev && !pkg.Dev {
-			c.Entries[i].Package.Dev = false
-		}
+		mergeCollectedPackageMetadata(&c.Entries[i].Package, pkg)
 		return
 	}
 	c.Entries = append(c.Entries, CollectedPackage{
@@ -214,6 +213,42 @@ func (c *PackageCollection) rebuildPackages() {
 	for _, entry := range c.Entries {
 		c.Packages = append(c.Packages, entry.Package)
 	}
+}
+
+func mergeCollectedPackageMetadata(dst *domain.Package, src domain.Package) {
+	if dst.Dev && !src.Dev {
+		dst.Dev = false
+	}
+	dst.Direct = dst.Direct || src.Direct
+	dst.Indirect = dst.Indirect || src.Indirect
+	dst.Optional = dst.Optional || src.Optional
+	dst.Peer = dst.Peer || src.Peer
+	dst.Via = mergeCollectedStringSet(dst.Via, src.Via)
+}
+
+func mergeCollectedStringSet(left, right []string) []string {
+	if len(left) == 0 && len(right) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(left)+len(right))
+	for _, value := range left {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			seen[value] = struct{}{}
+		}
+	}
+	for _, value := range right {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			seen[value] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for value := range seen {
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
 }
 
 type ecosystemNameFilter map[string]struct{}

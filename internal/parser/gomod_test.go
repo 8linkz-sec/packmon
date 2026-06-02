@@ -271,6 +271,35 @@ require (
 	}
 }
 
+func TestGoModParser_MarksDirectAndIndirectRequires(t *testing.T) {
+	t.Parallel()
+
+	input := `module example.com/mymodule
+
+go 1.26
+
+require (
+	github.com/direct/pkg v1.2.3
+	github.com/indirect/pkg v0.4.5 // indirect
+)
+`
+	pkgs, err := NewGoModParser().Parse(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	byName := make(map[string]domain.Package, len(pkgs))
+	for _, pkg := range pkgs {
+		byName[pkg.Name] = pkg
+	}
+	if direct := byName["github.com/direct/pkg"]; !direct.Direct || direct.Indirect {
+		t.Fatalf("direct package metadata = %+v, want direct only", direct)
+	}
+	if indirect := byName["github.com/indirect/pkg"]; indirect.Direct || !indirect.Indirect {
+		t.Fatalf("indirect package metadata = %+v, want indirect only", indirect)
+	}
+}
+
 // assertPackagesEco verifies ecosystem and version for each package.
 func assertPackagesEco(t *testing.T, pkgs []domain.Package, wantPkgs map[string]string, eco domain.Ecosystem) {
 	t.Helper()

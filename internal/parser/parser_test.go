@@ -214,6 +214,41 @@ func TestDedupProductionWins(t *testing.T) {
 	}
 }
 
+func TestDedupMergesPackageMetadata(t *testing.T) {
+	t.Parallel()
+
+	result := dedup([]domain.Package{
+		{
+			Name:      "postcss",
+			Version:   "8.5.8",
+			Ecosystem: domain.EcosystemNPM,
+			Dev:       true,
+			Indirect:  true,
+			Peer:      true,
+			Via:       []string{"tailwindcss"},
+		},
+		{
+			Name:      "postcss",
+			Version:   "8.5.8",
+			Ecosystem: domain.EcosystemNPM,
+			Direct:    true,
+			Optional:  true,
+			Via:       []string{"other"},
+		},
+	})
+
+	if len(result) != 1 {
+		t.Fatalf("dedup returned %d packages, want 1", len(result))
+	}
+	pkg := result[0]
+	if pkg.Dev || !pkg.Direct || !pkg.Indirect || !pkg.Optional || !pkg.Peer {
+		t.Fatalf("merged metadata = %+v, want production direct+indirect optional peer", pkg)
+	}
+	if len(pkg.Via) != 2 || pkg.Via[0] != "other" || pkg.Via[1] != "tailwindcss" {
+		t.Fatalf("Via = %#v, want sorted merged roots", pkg.Via)
+	}
+}
+
 func TestJoinErrors(t *testing.T) {
 	t.Parallel()
 

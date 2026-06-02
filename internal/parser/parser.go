@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/8linkz/packmon/internal/domain"
@@ -132,14 +133,48 @@ func dedup(pkgs []domain.Package) []domain.Package {
 	for _, p := range pkgs {
 		k := key{p.Name, p.Version, p.Ecosystem}
 		if idx, ok := seen[k]; ok {
-			if out[idx].Dev && !p.Dev {
-				out[idx].Dev = false
-			}
+			mergePackageMetadata(&out[idx], p)
 			continue
 		}
 		seen[k] = len(out)
 		out = append(out, p)
 	}
+	return out
+}
+
+func mergePackageMetadata(dst *domain.Package, src domain.Package) {
+	if dst.Dev && !src.Dev {
+		dst.Dev = false
+	}
+	dst.Direct = dst.Direct || src.Direct
+	dst.Indirect = dst.Indirect || src.Indirect
+	dst.Optional = dst.Optional || src.Optional
+	dst.Peer = dst.Peer || src.Peer
+	dst.Via = mergeStringSet(dst.Via, src.Via)
+}
+
+func mergeStringSet(left, right []string) []string {
+	if len(left) == 0 && len(right) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(left)+len(right))
+	for _, value := range left {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			seen[value] = struct{}{}
+		}
+	}
+	for _, value := range right {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			seen[value] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for value := range seen {
+		out = append(out, value)
+	}
+	sort.Strings(out)
 	return out
 }
 

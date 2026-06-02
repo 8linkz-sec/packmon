@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/8linkz/packmon/internal/domain"
@@ -35,8 +36,14 @@ type packageLock struct {
 }
 
 type packageLockPkg struct {
-	Version string `json:"version"`
-	Dev     bool   `json:"dev"`
+	Version              string            `json:"version"`
+	Dev                  bool              `json:"dev"`
+	Optional             bool              `json:"optional"`
+	Peer                 bool              `json:"peer"`
+	Dependencies         map[string]string `json:"dependencies"`
+	DevDependencies      map[string]string `json:"devDependencies"`
+	OptionalDependencies map[string]string `json:"optionalDependencies"`
+	PeerDependencies     map[string]string `json:"peerDependencies"`
 }
 
 type packageLockDep struct {
@@ -55,6 +62,7 @@ func (p *NPMParser) Parse(r io.Reader) ([]domain.Package, error) {
 	// v2/v3 use the "packages" map. Keys are paths like
 	// "node_modules/lodash" or "" for the root package.
 	if len(lock.Packages) > 0 {
+		metadata := npmPackageMetadata(lock.Packages)
 		for key, entry := range lock.Packages {
 			if key == "" {
 				continue // root project
@@ -67,7 +75,12 @@ func (p *NPMParser) Parse(r io.Reader) ([]domain.Package, error) {
 				Name:      name,
 				Version:   entry.Version,
 				Ecosystem: domain.EcosystemNPM,
-				Dev:       entry.Dev,
+				Dev:       entry.Dev || metadata[key].dev,
+				Direct:    metadata[key].direct,
+				Indirect:  metadata[key].indirect,
+				Optional:  entry.Optional || metadata[key].optional,
+				Peer:      entry.Peer || metadata[key].peer,
+				Via:       append([]string(nil), metadata[key].via...),
 			})
 		}
 	} else if len(lock.Dependencies) > 0 {
@@ -81,6 +94,7 @@ func (p *NPMParser) Parse(r io.Reader) ([]domain.Package, error) {
 				Version:   entry.Version,
 				Ecosystem: domain.EcosystemNPM,
 				Dev:       entry.Dev,
+				Direct:    true,
 			})
 		}
 	}
@@ -98,6 +112,181 @@ func npmNameFromKey(key string) string {
 		return ""
 	}
 	return key[idx+len(prefix):]
+}
+
+type npmPackageMeta struct {
+	direct   bool
+	indirect bool
+	dev      bool
+	optional bool
+	peer     bool
+	via      []string
+}
+
+func npmPackageMetadata(packages map[string]packageLockPkg) map[string]npmPackageMeta {
+	metadata := make(map[string]npmPackageMeta, len(packages))
+	root := packages[""]
+	directDeps := npmRootDependencies(root)
+	directByKey := make(map[string]npmRootDependency, len(directDeps))
+	for name, info := range directDeps {
+		if key := npmResolveRootPackageKey(packages, name); key != "" {
+			directByKey[key] = info
+		}
+	}
+
+	for key, entry := range packages {
+		if key == "" {
+			continue
+		}
+		name := npmNameFromKey(key)
+		if name == "" {
+			continue
+		}
+		rootInfo, direct := directByKey[key]
+		metadata[key] = npmPackageMeta{
+			direct:   direct,
+			indirect: !direct,
+			dev:      rootInfo.dev,
+			optional: entry.Optional || rootInfo.optional,
+			peer:     entry.Peer || rootInfo.peer,
+		}
+	}
+
+	for rootName := range directDeps {
+		rootKey := npmResolveRootPackageKey(packages, rootName)
+		if rootKey == "" {
+			continue
+		}
+		for _, depKey := range npmReachableDependencyKeys(packages, rootKey) {
+			if depKey == rootKey {
+				continue
+			}
+			meta := metadata[depKey]
+			if meta.direct {
+				continue
+			}
+			meta.via = mergeStringSet(meta.via, []string{rootName})
+			metadata[depKey] = meta
+		}
+	}
+
+	return metadata
+}
+
+type npmRootDependency struct {
+	dev      bool
+	optional bool
+	peer     bool
+}
+
+func npmRootDependencies(root packageLockPkg) map[string]npmRootDependency {
+	out := make(map[string]npmRootDependency)
+	add := func(deps map[string]string, dev, optional, peer bool) {
+		for name := range deps {
+			if strings.TrimSpace(name) == "" {
+				continue
+			}
+			info := out[name]
+			info.dev = info.dev || dev
+			info.optional = info.optional || optional
+			info.peer = info.peer || peer
+			out[name] = info
+		}
+	}
+	add(root.Dependencies, false, false, false)
+	add(root.DevDependencies, true, false, false)
+	add(root.OptionalDependencies, false, true, false)
+	add(root.PeerDependencies, false, false, true)
+	return out
+}
+
+func npmReachableDependencyKeys(packages map[string]packageLockPkg, rootKey string) []string {
+	var out []string
+	seen := map[string]struct{}{rootKey: {}}
+	queue := npmResolvedDependencyKeys(packages, rootKey)
+	for len(queue) > 0 {
+		key := queue[0]
+		queue = queue[1:]
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, key)
+		queue = append(queue, npmResolvedDependencyKeys(packages, key)...)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func npmResolvedDependencyKeys(packages map[string]packageLockPkg, packageKey string) []string {
+	entry := packages[packageKey]
+	names := npmDependencyNames(entry)
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		if depKey := npmResolveDependencyKey(packages, packageKey, name); depKey != "" {
+			out = append(out, depKey)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func npmDependencyNames(entry packageLockPkg) []string {
+	seen := make(map[string]struct{})
+	add := func(deps map[string]string) {
+		for name := range deps {
+			if strings.TrimSpace(name) != "" {
+				seen[name] = struct{}{}
+			}
+		}
+	}
+	add(entry.Dependencies)
+	add(entry.OptionalDependencies)
+	add(entry.PeerDependencies)
+	out := make([]string, 0, len(seen))
+	for name := range seen {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func npmResolveRootPackageKey(packages map[string]packageLockPkg, name string) string {
+	return npmResolveDependencyKey(packages, "", name)
+}
+
+func npmResolveDependencyKey(packages map[string]packageLockPkg, parentKey, name string) string {
+	if strings.TrimSpace(name) == "" {
+		return ""
+	}
+	if parentKey != "" {
+		for base := parentKey; ; {
+			candidate := base + "/node_modules/" + name
+			if _, ok := packages[candidate]; ok {
+				return candidate
+			}
+			idx := strings.LastIndex(base, "/node_modules/")
+			if idx == -1 {
+				break
+			}
+			base = base[:idx]
+		}
+	}
+	rootCandidate := "node_modules/" + name
+	if _, ok := packages[rootCandidate]; ok {
+		return rootCandidate
+	}
+	var matches []string
+	for key := range packages {
+		if key != "" && npmNameFromKey(key) == name {
+			matches = append(matches, key)
+		}
+	}
+	sort.Strings(matches)
+	if len(matches) > 0 {
+		return matches[0]
+	}
+	return ""
 }
 
 // ---------------------------------------------------------------------------

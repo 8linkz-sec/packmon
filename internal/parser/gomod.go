@@ -119,12 +119,7 @@ func (p *GoModParser) Parse(r io.Reader) ([]domain.Package, error) {
 		lineNo++
 		line := strings.TrimSpace(scanner.Text())
 
-		// Strip inline comments.
-		if idx := strings.Index(line, "//"); idx >= 0 {
-			line = strings.TrimSpace(line[:idx])
-		}
-
-		if line == "" {
+		if line == "" || strings.HasPrefix(line, "//") {
 			continue
 		}
 
@@ -180,8 +175,15 @@ func (p *GoModParser) Parse(r io.Reader) ([]domain.Package, error) {
 // parseGoRequireLine parses a single require directive like
 // "golang.org/x/text v0.3.7".
 func parseGoRequireLine(line string, lineNo int) (domain.Package, error) {
-	// Strip "// indirect" comments.
+	indirect := false
 	if idx := strings.Index(line, "//"); idx >= 0 {
+		comment := line[idx+len("//"):]
+		for _, field := range strings.Fields(comment) {
+			if field == "indirect" {
+				indirect = true
+				break
+			}
+		}
 		line = strings.TrimSpace(line[:idx])
 	}
 
@@ -200,5 +202,7 @@ func parseGoRequireLine(line string, lineNo int) (domain.Package, error) {
 		Name:      module,
 		Version:   version,
 		Ecosystem: domain.EcosystemGo,
+		Direct:    !indirect,
+		Indirect:  indirect,
 	}, nil
 }

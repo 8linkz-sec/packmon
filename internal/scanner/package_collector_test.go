@@ -72,3 +72,35 @@ func TestCollectPackagesReportsSBOMParseErrors(t *testing.T) {
 		t.Fatalf("packages=%d parseErrors=%d, want 0/1", len(got.Packages), len(got.ParseErrors))
 	}
 }
+
+func TestPackageCollectionAddMergesPackageMetadata(t *testing.T) {
+	c := &PackageCollection{}
+	c.add(domain.Package{
+		Name:      "postcss",
+		Version:   "8.5.8",
+		Ecosystem: domain.EcosystemNPM,
+		Dev:       true,
+		Indirect:  true,
+		Peer:      true,
+		Via:       []string{"tailwindcss"},
+	}, "package-lock.json", "lockfile")
+	c.add(domain.Package{
+		Name:      "postcss",
+		Version:   "8.5.8",
+		Ecosystem: domain.EcosystemNPM,
+		Direct:    true,
+		Optional:  true,
+		Via:       []string{"other"},
+	}, "bom.json", "sbom")
+
+	if len(c.Entries) != 1 {
+		t.Fatalf("Entries = %d, want 1", len(c.Entries))
+	}
+	pkg := c.Entries[0].Package
+	if pkg.Dev || !pkg.Direct || !pkg.Indirect || !pkg.Optional || !pkg.Peer {
+		t.Fatalf("merged metadata = %+v, want production direct+indirect optional peer", pkg)
+	}
+	if len(pkg.Via) != 2 || pkg.Via[0] != "other" || pkg.Via[1] != "tailwindcss" {
+		t.Fatalf("Via = %#v, want sorted merged roots", pkg.Via)
+	}
+}

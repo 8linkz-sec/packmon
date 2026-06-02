@@ -40,6 +40,7 @@ type listAllPackageReport struct {
 	Target      string
 	ScannedAt   string
 	Rows        []listAllRow
+	ScopeCounts map[string]int
 	WithUpdates int
 	Vulnerable  int
 	Unknown     int
@@ -72,6 +73,11 @@ type listAllFindingRow struct {
 	Flags        string
 }
 
+type listAllScopeSummary struct {
+	Scope string
+	Count int
+}
+
 type listAllLatest struct {
 	Latest  string
 	Update  string
@@ -87,8 +93,6 @@ var resolveDockerImageStatusFn = resolveDockerImageStatus
 // exit code is returned unchanged: --list-all is a reporting view and must not
 // suppress a blocking exit code.
 func runListAll(ctx context.Context, settings scanSettings) (int, error) {
-	settings.IncludeDev = true
-
 	result, failOn, exitCode, err := runScanPipeline(ctx, settings)
 	if err != nil {
 		return exitCode, err
@@ -104,7 +108,9 @@ func runListAll(ctx context.Context, settings scanSettings) (int, error) {
 
 	// Collect the full package list independently of the findings, so packages
 	// that are also vulnerable appear in BOTH sections.
-	packages, err := collectAllPackages(settings)
+	inventorySettings := settings
+	inventorySettings.IncludeDev = true
+	packages, err := collectAllPackages(inventorySettings)
 	if err != nil {
 		return exitCode, err
 	}
@@ -278,9 +284,10 @@ func buildListAllPackageReport(packages []listAllPackage, result *domain.ScanRes
 	}
 
 	report := listAllPackageReport{
-		Target:    scanPath,
-		ScannedAt: time.Now().UTC().Format("2006-01-02 15:04"),
-		Rows:      make([]listAllRow, 0, len(packages)),
+		Target:      scanPath,
+		ScannedAt:   time.Now().UTC().Format("2006-01-02 15:04"),
+		Rows:        make([]listAllRow, 0, len(packages)),
+		ScopeCounts: make(map[string]int),
 	}
 	for i, p := range packages {
 		lat := latest[i]
@@ -305,13 +312,15 @@ func buildListAllPackageReport(packages []listAllPackage, result *domain.ScanRes
 			report.Vulnerable++
 		}
 
+		scope := listAllPackageScope(p)
+		report.ScopeCounts[scope]++
 		report.Rows = append(report.Rows, listAllRow{
 			Name:      p.Name,
 			Installed: p.Version,
 			Latest:    latestCol,
 			Update:    update,
 			Ecosystem: string(p.Ecosystem),
-			Scope:     listAllPackageScope(p),
+			Scope:     scope,
 			Relation:  listAllPackageRelation(p),
 			Via:       strings.Join(p.Via, ", "),
 			Flags:     listAllPackageFlags(p),
@@ -477,25 +486,29 @@ func writeListAllHTML(path, title string, failOn domain.Severity, result *domain
 		title = "Packmon List-All Report"
 	}
 	rep := struct {
-		Title       string
-		Mode        string
-		PackageRows []listAllRow
-		PackageInfo listAllPackageReport
-		Findings    []listAllFindingRow
-		FindingsN   int
-		Blocking    int
-		Status      string
-		FailOn      string
+		Title        string
+		Mode         string
+		PackageRows  []listAllRow
+		PackageInfo  listAllPackageReport
+		ScopeSummary []listAllScopeSummary
+		Findings     []listAllFindingRow
+		FindingsN    int
+		Blocking     int
+		Status       string
+		FailOn       string
 	}{
-		Title:       title,
-		Mode:        result.Mode,
-		PackageRows: packages.Rows,
-		PackageInfo: packages,
-		FindingsN:   len(result.Findings),
-		Status:      listAllOperationalStatus(result.FeedStatus),
-		FailOn:      string(failOn),
+		Title:        title,
+		Mode:         result.Mode,
+		PackageRows:  packages.Rows,
+		PackageInfo:  packages,
+		ScopeSummary: listAllScopeSummaries(packages),
+		FindingsN:    len(result.Findings),
+		Status:       listAllOperationalStatus(result.FeedStatus),
+		FailOn:       string(failOn),
 	}
+	packageMetadata := listAllRowsByPackage(packages.Rows)
 	for _, f := range result.Findings {
+		meta := packageMetadata[listAllFindingKey(f)]
 		rep.Findings = append(rep.Findings, listAllFindingRow{
 			Severity:     string(f.Severity),
 			Package:      fmt.Sprintf("%s@%s", f.Name, f.Version),
@@ -503,10 +516,10 @@ func writeListAllHTML(path, title string, failOn domain.Severity, result *domain
 			Advisory:     listAllAdvisoryLabel(f),
 			FixedVersion: f.FixedVersion,
 			Source:       f.Source,
-			Scope:        "",
-			Relation:     "",
-			Via:          "",
-			Flags:        "",
+			Scope:        meta.Scope,
+			Relation:     meta.Relation,
+			Via:          meta.Via,
+			Flags:        meta.Flags,
 		})
 		if listAllFindingBlocks(f, failOn) {
 			rep.Blocking++
@@ -523,6 +536,56 @@ func writeListAllHTML(path, title string, failOn domain.Severity, result *domain
 		return fmt.Errorf("html: render list-all report: %w", err)
 	}
 	return file.Close()
+}
+
+func listAllRowsByPackage(rows []listAllRow) map[string]listAllRow {
+	out := make(map[string]listAllRow, len(rows))
+	for _, row := range rows {
+		out[row.Ecosystem+"/"+row.Name+"@"+row.Installed] = row
+	}
+	return out
+}
+
+func listAllFindingKey(f domain.Finding) string {
+	return string(f.Ecosystem) + "/" + f.Name + "@" + f.Version
+}
+
+func listAllScopeSummaries(report listAllPackageReport) []listAllScopeSummary {
+	counts := report.ScopeCounts
+	if len(counts) == 0 && len(report.Rows) > 0 {
+		counts = make(map[string]int)
+		for _, row := range report.Rows {
+			if strings.TrimSpace(row.Scope) != "" {
+				counts[row.Scope]++
+			}
+		}
+	}
+	if len(counts) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(counts))
+	order := []string{"runtime", "dev", "ci", "sbom", "build"}
+	out := make([]listAllScopeSummary, 0, len(counts))
+	for _, scope := range order {
+		if count := counts[scope]; count > 0 {
+			out = append(out, listAllScopeSummary{Scope: scope, Count: count})
+			seen[scope] = struct{}{}
+		}
+	}
+	var rest []string
+	for scope, count := range counts {
+		if count <= 0 {
+			continue
+		}
+		if _, ok := seen[scope]; !ok {
+			rest = append(rest, scope)
+		}
+	}
+	sort.Strings(rest)
+	for _, scope := range rest {
+		out = append(out, listAllScopeSummary{Scope: scope, Count: counts[scope]})
+	}
+	return out
 }
 
 func listAllOperationalStatus(status string) string {
@@ -603,6 +666,7 @@ td{word-break:normal;}
 <span class="badge bad">{{.PackageInfo.Vulnerable}} vulnerable</span>
 <span class="badge">{{.PackageInfo.Unknown}} unknown</span>
 <span class="badge">{{.FindingsN}} findings &middot; {{.Blocking}} blocking</span>
+{{range .ScopeSummary}}<span class="badge">{{.Scope}} {{.Count}}</span>{{end}}
 </div>
 {{if .Status}}<div class="status">Scan did not complete: {{.Status}}</div>{{end}}
 <h2>Findings</h2>

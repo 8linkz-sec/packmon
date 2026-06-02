@@ -141,6 +141,11 @@ Important behavior:
   with zero findings still produces a clean "all clear" report. Like the other
   file outputs, `--html` only works when scanning a single target.
 - `--include-dev` includes dependencies marked as dev/test scope.
+- `--list-all` keeps the findings scan scope identical to a normal scan:
+  dev/test packages are checked only when `--include-dev` is set. Its package
+  inventory section still lists every detected package by default and annotates
+  scope (`runtime`, `dev`, `ci`, `sbom`, `build`), relation (`direct`,
+  `transitive`, `workflow`, etc.), npm `via` roots, and optional/peer flags.
 - `--sbom <file>` can be repeated to add CycloneDX JSON/XML or SPDX JSON
   package inventory to scans, `--list-packages`, and `--outdated`.
 - SBOM input contributes package coordinates only. Embedded SBOM

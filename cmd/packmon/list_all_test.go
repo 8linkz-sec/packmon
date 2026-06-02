@@ -281,8 +281,8 @@ func TestScanCommandListAllHTMLFlagWritesFullReport(t *testing.T) {
 
 	select {
 	case req := <-checkRequests:
-		if len(req.Packages) != 2 {
-			t.Fatalf("remote list-all request packages = %d, want prod and dev-only", len(req.Packages))
+		if len(req.Packages) != 1 || req.Packages[0].Name != "prod" {
+			t.Fatalf("remote list-all request packages = %#v, want only prod by default", req.Packages)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("remote list-all check request was not received")
@@ -297,6 +297,63 @@ func TestScanCommandListAllHTMLFlagWritesFullReport(t *testing.T) {
 		if !contains(out, want) {
 			t.Fatalf("list-all command HTML missing %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestScanCommandListAllIncludeDevScansDevPackages(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "package-lock.json"), `{
+  "name": "test",
+  "lockfileVersion": 3,
+  "packages": {
+    "node_modules/prod": { "version": "1.0.0" },
+    "node_modules/dev-only": { "version": "1.0.0", "dev": true }
+  }
+}`)
+
+	stubLatestVersion(t, func(_ context.Context, _ domain.Ecosystem, name string) string {
+		switch name {
+		case "prod", "dev-only":
+			return "1.0.0"
+		default:
+			return ""
+		}
+	})
+
+	checkRequests := make(chan domain.ScanRequest, 1)
+	checkServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req domain.ScanRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		checkRequests <- req
+		writeJSONForTest(t, w, domain.ScanResult{ScanID: "include-dev", Mode: "remote"})
+	}))
+	defer checkServer.Close()
+
+	cmd := newScanCmd()
+	cmd.SetArgs([]string{
+		"--mode", "remote",
+		"--server", checkServer.URL,
+		"--api-key", "remote-key",
+		"--insecure-allow-http",
+		"--list-all",
+		"--include-dev",
+		dir,
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("scan command execute: %v", err)
+	}
+
+	select {
+	case req := <-checkRequests:
+		if len(req.Packages) != 2 {
+			t.Fatalf("remote list-all --include-dev request packages = %#v, want prod and dev-only", req.Packages)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("remote list-all check request was not received")
 	}
 }
 
@@ -738,5 +795,46 @@ func TestListAllDockerRowsRenderScopeRelationAndFlags(t *testing.T) {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output missing %q:\n%s", want, output)
 		}
+	}
+}
+
+func TestListAllHTMLRendersScopeSummaryAndFindingMetadata(t *testing.T) {
+	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+	report := listAllPackageReport{
+		Rows: []listAllRow{
+			{Name: "runtime", Installed: "1.0.0", Ecosystem: "npm", Scope: "runtime", Relation: "direct", Vuln: "-"},
+			{Name: "postcss", Installed: "8.5.8", Ecosystem: "npm", Scope: "dev", Relation: "transitive", Via: "tailwindcss", Flags: "peer", Vuln: "yes"},
+			{Name: "actions/checkout", Installed: "v6", Ecosystem: "actions", Scope: "ci", Relation: "workflow", Vuln: "-"},
+		},
+		Vulnerable: 1,
+	}
+	result := &domain.ScanResult{
+		Mode: "remote",
+		Findings: []domain.Finding{{
+			Name:         "postcss",
+			Version:      "8.5.8",
+			Ecosystem:    domain.EcosystemNPM,
+			Severity:     domain.SeverityMedium,
+			AdvisoryID:   "GHSA-postcss-test",
+			FixedVersion: "8.5.10",
+			Source:       "osv",
+		}},
+	}
+	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+		t.Fatalf("writeListAllHTML: %v", err)
+	}
+	data, err := os.ReadFile(htmlPath)
+	if err != nil {
+		t.Fatalf("read HTML: %v", err)
+	}
+	out := string(data)
+	for _, want := range []string{"runtime 1", "dev 1", "ci 1"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("HTML missing scope summary %q:\n%s", want, out)
+		}
+	}
+	wantFinding := `<td class="finding-package">postcss@8.5.8</td><td class="short">npm</td><td>GHSA-postcss-test</td><td>8.5.10</td><td>osv</td><td class="short">dev</td><td class="short">transitive</td><td>tailwindcss</td><td class="short">peer</td>`
+	if !strings.Contains(out, wantFinding) {
+		t.Fatalf("HTML finding row missing package provenance:\n%s", out)
 	}
 }

@@ -196,6 +196,112 @@ func TestNPMParser_ParseMarksDevDependencies(t *testing.T) {
 	}
 }
 
+func TestNPMParser_ParsePackageLockV3Metadata(t *testing.T) {
+	t.Parallel()
+
+	input := `{
+		"lockfileVersion": 3,
+		"packages": {
+			"": {
+				"name": "app",
+				"version": "1.0.0",
+				"dependencies": {"runtime": "^1.0.0"},
+				"devDependencies": {"tailwindcss": "^3.4.17"},
+				"optionalDependencies": {"optional-root": "^1.0.0"}
+			},
+			"node_modules/runtime": {"version": "1.0.0"},
+			"node_modules/tailwindcss": {
+				"version": "3.4.17",
+				"dev": true,
+				"dependencies": {"postcss": "^8.4.47"}
+			},
+			"node_modules/postcss": {
+				"version": "8.5.8",
+				"dev": true,
+				"peer": true
+			},
+			"node_modules/optional-root": {
+				"version": "1.0.0",
+				"optional": true
+			}
+		}
+	}`
+
+	pkgs, err := NewNPMParser().Parse(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	byName := packagesByName(pkgs)
+
+	runtime := byName["runtime"]
+	if !runtime.Direct || runtime.Indirect || runtime.Dev || runtime.Optional || runtime.Peer || len(runtime.Via) != 0 {
+		t.Fatalf("runtime metadata = %+v, want direct runtime package", runtime)
+	}
+
+	tailwind := byName["tailwindcss"]
+	if !tailwind.Direct || tailwind.Indirect || !tailwind.Dev || len(tailwind.Via) != 0 {
+		t.Fatalf("tailwindcss metadata = %+v, want direct dev package", tailwind)
+	}
+
+	postcss := byName["postcss"]
+	if postcss.Direct || !postcss.Indirect || !postcss.Dev || !postcss.Peer || postcss.Optional {
+		t.Fatalf("postcss metadata = %+v, want dev peer transitive package", postcss)
+	}
+	if len(postcss.Via) != 1 || postcss.Via[0] != "tailwindcss" {
+		t.Fatalf("postcss Via = %#v, want tailwindcss", postcss.Via)
+	}
+
+	optionalRoot := byName["optional-root"]
+	if !optionalRoot.Direct || !optionalRoot.Optional {
+		t.Fatalf("optional-root metadata = %+v, want direct optional package", optionalRoot)
+	}
+}
+
+func TestNPMParser_DoesNotMarkNestedDuplicateNameAsDirect(t *testing.T) {
+	t.Parallel()
+
+	input := `{
+		"lockfileVersion": 3,
+		"packages": {
+			"": {
+				"name": "app",
+				"version": "1.0.0",
+				"dependencies": {
+					"left-pad": "^1.0.0",
+					"other": "^1.0.0"
+				}
+			},
+			"node_modules/left-pad": {"version": "1.0.0"},
+			"node_modules/other": {
+				"version": "1.0.0",
+				"dependencies": {"left-pad": "^2.0.0"}
+			},
+			"node_modules/other/node_modules/left-pad": {"version": "2.0.0"}
+		}
+	}`
+
+	pkgs, err := NewNPMParser().Parse(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	byKey := make(map[string]domain.Package, len(pkgs))
+	for _, pkg := range pkgs {
+		byKey[pkg.Name+"@"+pkg.Version] = pkg
+	}
+
+	root := byKey["left-pad@1.0.0"]
+	if !root.Direct || root.Indirect {
+		t.Fatalf("root left-pad metadata = %+v, want direct only", root)
+	}
+	nested := byKey["left-pad@2.0.0"]
+	if nested.Direct || !nested.Indirect {
+		t.Fatalf("nested left-pad metadata = %+v, want transitive only", nested)
+	}
+	if len(nested.Via) != 1 || nested.Via[0] != "other" {
+		t.Fatalf("nested left-pad Via = %#v, want other", nested.Via)
+	}
+}
+
 func TestNPMParserNameHelperRejectsNonNodeModulePath(t *testing.T) {
 	t.Parallel()
 
@@ -481,4 +587,12 @@ type errorReader struct{}
 
 func (errorReader) Read([]byte) (int, error) {
 	return 0, errors.New("forced read error")
+}
+
+func packagesByName(pkgs []domain.Package) map[string]domain.Package {
+	out := make(map[string]domain.Package, len(pkgs))
+	for _, pkg := range pkgs {
+		out[pkg.Name] = pkg
+	}
+	return out
 }
