@@ -68,9 +68,13 @@ working in or dispatching an agent to a subsystem, read the nearest-ancestor
 - `POST /api/v1/check`, CLI JSON output, and webhook result payloads use the
   same canonical scan result shape.
 - Client local sync always talks to the Packmon server, never directly to OSV,
-  GHSA, OpenSSF, VulnCheck, Socket.dev, CISA KEV, or EPSS.
+  GHSA, OpenSSF, VulnCheck, Socket.dev, ReversingLabs, CISA KEV, EPSS, NVD,
+  endoflife.date, or public registries.
 - Migrations are a separate operational step via `packmon-server migrate`.
   The server must not silently migrate on normal startup.
+- Normal startup may run bounded, idempotent feed-data reconciliation only after
+  the schema version is verified. These repairs must not perform DDL, update
+  `schema_migrations`, or bring an outdated schema current.
 - Production `/api/v1/*` endpoints require API-key auth and expected
   User-Agent handling. Health/version/metrics endpoints are exceptions as
   described in `SECURITY.md`.

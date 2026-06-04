@@ -37,6 +37,7 @@ type Session struct {
 
 	// CSRFToken is the per-session CSRF token, generated lazily on first
 	// access via CSRFToken().
+	csrfMu    sync.Mutex
 	csrfToken string
 
 	// flash holds one-time key/value pairs that are deleted on first read.

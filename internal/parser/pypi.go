@@ -1,7 +1,6 @@
 package parser
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -95,8 +94,10 @@ type poetryLock struct {
 }
 
 type poetryPkg struct {
-	Name    string `toml:"name"`
-	Version string `toml:"version"`
+	Name     string   `toml:"name"`
+	Version  string   `toml:"version"`
+	Category string   `toml:"category"`
+	Groups   []string `toml:"groups"`
 }
 
 func (p *PoetryParser) Parse(r io.Reader) ([]domain.Package, error) {
@@ -119,6 +120,7 @@ func (p *PoetryParser) Parse(r io.Reader) ([]domain.Package, error) {
 			Name:      normalizePyName(entry.Name),
 			Version:   entry.Version,
 			Ecosystem: domain.EcosystemPyPI,
+			Dev:       pythonLockEntryDev(entry.Category, entry.Groups, false),
 		})
 	}
 
@@ -147,8 +149,11 @@ type uvLock struct {
 }
 
 type uvPkg struct {
-	Name    string `toml:"name"`
-	Version string `toml:"version"`
+	Name     string   `toml:"name"`
+	Version  string   `toml:"version"`
+	Category string   `toml:"category"`
+	Groups   []string `toml:"groups"`
+	Dev      bool     `toml:"dev"`
 }
 
 func (p *UVParser) Parse(r io.Reader) ([]domain.Package, error) {
@@ -171,6 +176,7 @@ func (p *UVParser) Parse(r io.Reader) ([]domain.Package, error) {
 			Name:      normalizePyName(entry.Name),
 			Version:   entry.Version,
 			Ecosystem: domain.EcosystemPyPI,
+			Dev:       pythonLockEntryDev(entry.Category, entry.Groups, entry.Dev),
 		})
 	}
 
@@ -199,15 +205,18 @@ func (p *RequirementsParser) Parse(r io.Reader) ([]domain.Package, error) {
 		errs []error
 	)
 
-	scanner := bufio.NewScanner(r)
-	lineNo := 0
-	for scanner.Scan() {
-		lineNo++
-		line := strings.TrimSpace(scanner.Text())
+	lines, scanErr := readRequirementLogicalLines(r)
+	for _, logical := range lines {
+		lineNo := logical.lineNo
+		line := strings.TrimSpace(logical.text)
 
-		// Skip blank lines, comments, and pip options (-i, --index-url, etc.).
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "-") {
+		// Skip blank lines, comments, include/constraint directives, and pip
+		// options (-i, --index-url, etc.).
+		if shouldSkipRequirementLine(line) {
 			continue
+		}
+		if editable := parseEditableRequirement(line); editable != "" {
+			line = editable
 		}
 
 		// Strip inline comments.
@@ -245,11 +254,100 @@ func (p *RequirementsParser) Parse(r io.Reader) ([]domain.Package, error) {
 		})
 	}
 
-	if err := scanner.Err(); err != nil {
-		errs = append(errs, fmt.Errorf("requirements.txt: read error: %w", err))
+	if scanErr != nil {
+		errs = append(errs, fmt.Errorf("requirements.txt: read error: %w", scanErr))
 	}
 
 	return dedup(pkgs), joinErrors(errs)
+}
+
+type requirementLogicalLine struct {
+	lineNo int
+	text   string
+}
+
+func readRequirementLogicalLines(r io.Reader) ([]requirementLogicalLine, error) {
+	scanner := newLineScanner(r)
+	var (
+		lines       []requirementLogicalLine
+		pending     strings.Builder
+		pendingLine int
+		lineNo      int
+	)
+	for scanner.Scan() {
+		lineNo++
+		line := strings.TrimSpace(scanner.Text())
+		if pending.Len() == 0 {
+			pendingLine = lineNo
+		}
+		continued := strings.HasSuffix(line, "\\")
+		if continued {
+			line = strings.TrimSpace(strings.TrimSuffix(line, "\\"))
+		}
+		if pending.Len() > 0 && line != "" {
+			pending.WriteByte(' ')
+		}
+		pending.WriteString(line)
+		if continued {
+			continue
+		}
+		lines = append(lines, requirementLogicalLine{lineNo: pendingLine, text: pending.String()})
+		pending.Reset()
+	}
+	if pending.Len() > 0 {
+		lines = append(lines, requirementLogicalLine{lineNo: pendingLine, text: pending.String()})
+	}
+	return lines, scanner.Err()
+}
+
+func shouldSkipRequirementLine(line string) bool {
+	if line == "" || strings.HasPrefix(line, "#") {
+		return true
+	}
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return true
+	}
+	switch fields[0] {
+	case "-r", "--requirement", "-c", "--constraint", "-i", "--index-url",
+		"--extra-index-url", "--find-links", "-f", "--trusted-host",
+		"--no-index", "--pre":
+		return true
+	}
+	return strings.HasPrefix(fields[0], "--") && fields[0] != "--editable"
+}
+
+func parseEditableRequirement(line string) string {
+	fields := strings.Fields(line)
+	if len(fields) < 2 {
+		return ""
+	}
+	if fields[0] != "-e" && fields[0] != "--editable" {
+		return ""
+	}
+	spec := strings.TrimSpace(strings.Join(fields[1:], " "))
+	if strings.Contains(spec, "==") {
+		return spec
+	}
+	name := ""
+	if marker := "#egg="; strings.Contains(spec, marker) {
+		name = spec[strings.LastIndex(spec, marker)+len(marker):]
+		if idx := strings.IndexAny(name, "&?"); idx >= 0 {
+			name = name[:idx]
+		}
+	}
+	version := ""
+	if at := strings.LastIndex(spec, "@"); at >= 0 {
+		version = spec[at+1:]
+		if idx := strings.IndexAny(version, "#?&"); idx >= 0 {
+			version = version[:idx]
+		}
+		version = strings.TrimPrefix(version, "v")
+	}
+	if name == "" || version == "" {
+		return ""
+	}
+	return name + "==" + version
 }
 
 // parseRequirementLine parses a single requirements line like "requests==2.28.0".
@@ -288,4 +386,21 @@ func normalizePyName(name string) string {
 	name = strings.ReplaceAll(name, "_", "-")
 	name = strings.ReplaceAll(name, ".", "-")
 	return name
+}
+
+func pythonLockEntryDev(category string, groups []string, explicitDev bool) bool {
+	if explicitDev {
+		return true
+	}
+	category = strings.ToLower(strings.TrimSpace(category))
+	if category != "" && category != "main" {
+		return true
+	}
+	for _, group := range groups {
+		group = strings.ToLower(strings.TrimSpace(group))
+		if group != "" && group != "main" && group != "default" {
+			return true
+		}
+	}
+	return false
 }

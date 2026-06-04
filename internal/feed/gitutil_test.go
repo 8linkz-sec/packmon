@@ -1,12 +1,14 @@
 package feed
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -27,10 +29,11 @@ func TestGitRepoClonePullHeadHashAndChangedFiles(t *testing.T) {
 	runGit(t, remote, "commit", "-m", "initial")
 
 	cloneDir := filepath.Join(t.TempDir(), "clone")
+	var logs bytes.Buffer
 	repo := &GitRepo{
 		URL:    remote,
 		Dir:    cloneDir,
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Logger: slog.New(slog.NewTextHandler(&logs, nil)),
 	}
 
 	firstHash, err := repo.EnsureCloned(ctx)
@@ -43,8 +46,8 @@ func TestGitRepoClonePullHeadHashAndChangedFiles(t *testing.T) {
 	if !repo.isCloned() {
 		t.Fatal("repo should be cloned")
 	}
-	if got, err := repo.HeadHash(ctx); err != nil || got != firstHash {
-		t.Fatalf("HeadHash() = %q, %v; want %q", got, err, firstHash)
+	if got, err := repo.headHash(ctx); err != nil || got != firstHash {
+		t.Fatalf("headHash() = %q, %v; want %q", got, err, firstHash)
 	}
 	if got, err := repo.EnsureCloned(ctx); err != nil || got != firstHash {
 		t.Fatalf("EnsureCloned(existing) = %q, %v; want %q", got, err, firstHash)
@@ -94,6 +97,13 @@ func TestGitRepoClonePullHeadHashAndChangedFiles(t *testing.T) {
 	if _, err := os.Stat(lockFile); !os.IsNotExist(err) {
 		t.Fatalf("stale index lock stat = %v, want removed", err)
 	}
+	logText := logs.String()
+	if strings.Contains(logText, cloneDir) || strings.Contains(logText, lockFile) {
+		t.Fatalf("git logs contain local paths: %q", logText)
+	}
+	if !strings.Contains(logText, `file=index.lock`) {
+		t.Fatalf("git logs missing sanitized stale-lock filename: %q", logText)
+	}
 }
 
 func TestGitRepoPullWithChangedFilesFreshClone(t *testing.T) {
@@ -132,8 +142,8 @@ func TestGitRepoHeadHashFailsOutsideRepo(t *testing.T) {
 	}
 
 	repo := &GitRepo{Dir: t.TempDir(), Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	if _, err := repo.HeadHash(context.Background()); err == nil {
-		t.Fatal("HeadHash outside repo error = nil")
+	if _, err := repo.headHash(context.Background()); err == nil {
+		t.Fatal("headHash outside repo error = nil")
 	}
 }
 

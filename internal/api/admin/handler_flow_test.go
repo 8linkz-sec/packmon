@@ -560,6 +560,18 @@ func TestAdminPagesRenderWithAuthenticatedSession(t *testing.T) {
 			if !strings.Contains(rec.Body.String(), tt.want) {
 				t.Fatalf("%s body missing %q\nbody=%s", tt.target, tt.want, rec.Body.String())
 			}
+			if !strings.Contains(rec.Body.String(), `href="/admin/advisories"`) {
+				t.Fatalf("%s body missing advisories nav link\nbody=%s", tt.target, rec.Body.String())
+			}
+			if tt.name == "feeds" && !strings.Contains(rec.Body.String(), "hx-on::response-error") {
+				t.Fatalf("%s body missing htmx response-error handling\nbody=%s", tt.target, rec.Body.String())
+			}
+			if tt.name == "keys" && !strings.Contains(rec.Body.String(), "Interpreted as UTC") {
+				t.Fatalf("%s body missing API-key expiry timezone hint\nbody=%s", tt.target, rec.Body.String())
+			}
+			if tt.name == "advisories" && !strings.Contains(rec.Body.String(), "apply to all versions") {
+				t.Fatalf("%s body missing manual vulnerability version-scope warning\nbody=%s", tt.target, rec.Body.String())
+			}
 		})
 	}
 }
@@ -620,6 +632,53 @@ func TestAdminKeyLifecycleUsesFlashAndAudit(t *testing.T) {
 		if !adminFlowAuditContains(audit, want) {
 			t.Fatalf("audit missing %q: %+v", want, audit)
 		}
+	}
+}
+
+func TestBootstrapPasswordBlocksAdminWritesUntilRotated(t *testing.T) {
+	t.Parallel()
+
+	store := newAdminStoreStub()
+	hash, err := auth.HashPassword("current-password")
+	if err != nil {
+		t.Fatalf("HashPassword() error = %v", err)
+	}
+	store.adminAuth = &db.AdminAuth{PasswordHash: hash, PasswordIsBootstrap: true, CreatedAt: time.Now().UTC()}
+	handler, sm, _ := newAdminFlowHandler(t, store, adminFlowConfig())
+
+	req, _ := authenticatedAdminFormRequest(t, sm, "/admin/keys/create", url.Values{"name": {"ci"}})
+	rec := httptest.NewRecorder()
+	handler.HandleKeyCreate(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("HandleKeyCreate status = %d, want 303", rec.Code)
+	}
+	if got := rec.Header().Get("Location"); !strings.Contains(got, "bootstrap+password") {
+		t.Fatalf("HandleKeyCreate Location = %q, want bootstrap rotation error", got)
+	}
+	keys, err := store.ListAPIKeys(context.Background())
+	if err != nil {
+		t.Fatalf("ListAPIKeys() error = %v", err)
+	}
+	if len(keys) != 0 {
+		t.Fatalf("keys after blocked create = %+v, want none", keys)
+	}
+
+	req, _ = authenticatedAdminFormRequest(t, sm, "/admin/settings/password", url.Values{
+		"current_password": {"current-password"},
+		"new_password":     {"new-password-123"},
+		"confirm_password": {"new-password-123"},
+	})
+	rec = httptest.NewRecorder()
+	handler.HandlePasswordChange(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("HandlePasswordChange status = %d, want 303", rec.Code)
+	}
+	authInfo, err := store.GetAdminAuth(context.Background())
+	if err != nil {
+		t.Fatalf("GetAdminAuth() error = %v", err)
+	}
+	if authInfo == nil || authInfo.PasswordIsBootstrap {
+		t.Fatalf("admin auth after password change = %+v, want bootstrap flag cleared", authInfo)
 	}
 }
 

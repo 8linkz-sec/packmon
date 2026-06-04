@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -36,6 +37,10 @@ const (
 
 // Compile-time interface assertion.
 var _ feed.FeedSyncer = (*Syncer)(nil)
+
+type sourceMaliciousPruner interface {
+	DeleteMaliciousFindingsNotInSource(ctx context.Context, source string, ids []string) (int, error)
+}
 
 // Syncer clones or pulls the OpenSSF malicious-packages repository and
 // parses all entries into the Packmon malicious_findings table. It
@@ -113,13 +118,14 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 	//   osv/{ecosystem}/{name}/...json
 	// We try both.
 	var totalSynced, totalEntries int
+	seenIDs := make(map[string]struct{})
 
 	for _, dir := range []string{maliciousDir, osvDir} {
 		root := filepath.Join(repoDir, dir)
 		if _, statErr := os.Stat(root); os.IsNotExist(statErr) {
 			continue
 		}
-		synced, entries, walkErr := s.walkEntries(ctx, store, root)
+		synced, entries, walkErr := s.walkEntries(ctx, store, root, seenIDs)
 		if walkErr != nil {
 			s.recordSyncFailure(ctx, start, walkErr)
 			return nil, fmt.Errorf("malicious: walk %s: %w", dir, walkErr)
@@ -127,11 +133,17 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 		totalSynced += synced
 		totalEntries += entries
 	}
+	pruned, pruneErr := s.pruneStaleFindings(ctx, store, seenIDs)
+	if pruneErr != nil {
+		s.recordSyncFailure(ctx, start, pruneErr)
+		return nil, fmt.Errorf("malicious: prune stale findings: %w", pruneErr)
+	}
 
 	duration := time.Since(start)
 	s.logger.Info("OpenSSF malicious packages sync completed",
 		slog.Int("synced", totalSynced),
 		slog.Int("total", totalEntries),
+		slog.Int("pruned", pruned),
 		slog.String("commit", commitHash),
 		slog.String("duration", duration.String()),
 	)
@@ -145,7 +157,7 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 
 // walkEntries traverses an entry root directory and processes each
 // JSON file.
-func (s *Syncer) walkEntries(ctx context.Context, store db.Store, root string) (synced, total int, err error) {
+func (s *Syncer) walkEntries(ctx context.Context, store db.Store, root string, seenIDs map[string]struct{}) (synced, total int, err error) {
 	rootDir, err := os.OpenRoot(root)
 	if err != nil {
 		return 0, 0, fmt.Errorf("open malicious feed root: %w", err)
@@ -160,7 +172,7 @@ func (s *Syncer) walkEntries(ctx context.Context, store db.Store, root string) (
 				slog.String("file", filepath.Base(path)),
 				slog.String("error", walkErr.Error()),
 			)
-			return nil
+			return walkErr
 		}
 
 		if ctx.Err() != nil {
@@ -182,7 +194,7 @@ func (s *Syncer) walkEntries(ctx context.Context, store db.Store, root string) (
 				slog.String("file", d.Name()),
 				slog.String("error", relErr.Error()),
 			)
-			return nil
+			return relErr
 		}
 
 		data, readErr := rootDir.ReadFile(relativePath)
@@ -191,7 +203,7 @@ func (s *Syncer) walkEntries(ctx context.Context, store db.Store, root string) (
 				slog.String("file", d.Name()),
 				slog.String("error", readErr.Error()),
 			)
-			return nil
+			return fmt.Errorf("read entry %s: %w", d.Name(), readErr)
 		}
 
 		var entry malEntry
@@ -200,7 +212,7 @@ func (s *Syncer) walkEntries(ctx context.Context, store db.Store, root string) (
 				slog.String("file", d.Name()),
 				slog.String("error", parseErr.Error()),
 			)
-			return nil
+			return fmt.Errorf("parse entry %s: %w", d.Name(), parseErr)
 		}
 
 		findings := mapToMaliciousFindings(&entry, relativePath)
@@ -214,7 +226,10 @@ func (s *Syncer) walkEntries(ctx context.Context, store db.Store, root string) (
 					slog.String("id", mf.ID),
 					slog.String("error", upsertErr.Error()),
 				)
-				continue
+				return fmt.Errorf("upsert malicious finding %s: %w", mf.ID, upsertErr)
+			}
+			if seenIDs != nil {
+				seenIDs[mf.ID] = struct{}{}
 			}
 			synced++
 		}
@@ -223,6 +238,20 @@ func (s *Syncer) walkEntries(ctx context.Context, store db.Store, root string) (
 	})
 
 	return synced, total, err
+}
+
+func (s *Syncer) pruneStaleFindings(ctx context.Context, store db.Store, seenIDs map[string]struct{}) (int, error) {
+	pruner, ok := store.(sourceMaliciousPruner)
+	if !ok {
+		s.logger.Warn("store cannot prune stale OpenSSF findings")
+		return 0, nil
+	}
+	ids := make([]string, 0, len(seenIDs))
+	for id := range seenIDs {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return pruner.DeleteMaliciousFindingsNotInSource(ctx, "openssf", ids)
 }
 
 // recordSyncSuccessWithCommit persists a successful sync status including
@@ -274,15 +303,17 @@ type malEntry struct {
 	Modified  time.Time `json:"modified"`
 	Published time.Time `json:"published"`
 
-	Affected   []malAffected  `json:"affected"`
-	References []malReference `json:"references"`
-	Credits    []malCredit    `json:"credits"`
+	Affected         []malAffected   `json:"affected"`
+	References       []malReference  `json:"references"`
+	Credits          []malCredit     `json:"credits"`
+	DatabaseSpecific json.RawMessage `json:"database_specific"`
 }
 
 type malAffected struct {
-	Package  malPackage `json:"package"`
-	Ranges   []malRange `json:"ranges"`
-	Versions []string   `json:"versions"`
+	Package          malPackage      `json:"package"`
+	Ranges           []malRange      `json:"ranges"`
+	Versions         []string        `json:"versions"`
+	DatabaseSpecific json.RawMessage `json:"database_specific"`
 }
 
 type malPackage struct {
@@ -324,8 +355,9 @@ func mapToMaliciousFindings(entry *malEntry, filePath string) []*db.MaliciousFin
 		return nil
 	}
 
-	// Determine risk type from the ID prefix or summary heuristics.
-	riskType := classifyRiskType(entry)
+	// Determine risk type from explicit feed metadata first, then fall back to
+	// older summary/details heuristics.
+	entryRiskType := classifyRiskType(entry)
 
 	// Collect reference URLs (shared across all findings from this entry).
 	var refURLs []string
@@ -354,6 +386,10 @@ func mapToMaliciousFindings(entry *malEntry, filePath string) []*db.MaliciousFin
 		canonicalEco, ok := feed.MapOpenSSFEcosystem(aff.Package.Ecosystem)
 		if !ok {
 			continue
+		}
+		riskType := entryRiskType
+		if affRiskType := riskTypeFromJSON(aff.DatabaseSpecific); affRiskType != "" {
+			riskType = affRiskType
 		}
 
 		// Collect versions for this specific affected entry.
@@ -404,6 +440,9 @@ func mapToMaliciousFindings(entry *malEntry, filePath string) []*db.MaliciousFin
 // malware, typosquatting, or a supply-chain attack based on heuristics
 // in the entry ID and summary.
 func classifyRiskType(entry *malEntry) string {
+	if riskType := riskTypeFromJSON(entry.DatabaseSpecific); riskType != "" {
+		return riskType
+	}
 	lower := strings.ToLower(entry.Summary + " " + entry.Details)
 
 	switch {
@@ -421,6 +460,40 @@ func classifyRiskType(entry *malEntry) string {
 		return "malware"
 	default:
 		return "malware"
+	}
+}
+
+func riskTypeFromJSON(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var spec struct {
+		RiskType       string   `json:"risk_type"`
+		Type           string   `json:"type"`
+		Classification string   `json:"classification"`
+		Categories     []string `json:"categories"`
+	}
+	if err := json.Unmarshal(raw, &spec); err != nil {
+		return ""
+	}
+	for _, candidate := range append([]string{spec.RiskType, spec.Type, spec.Classification}, spec.Categories...) {
+		if normalized := normalizeRiskType(candidate); normalized != "" {
+			return normalized
+		}
+	}
+	return ""
+}
+
+func normalizeRiskType(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "malware", "trojan", "backdoor", "cryptominer", "cryptomining", "exfiltration", "protestware":
+		return "malware"
+	case "typosquat", "typosquatting", "typo-squatting":
+		return "typosquatting"
+	case "supply_chain", "supply-chain", "supply chain", "dependency_confusion", "dependency confusion":
+		return "supply_chain"
+	default:
+		return ""
 	}
 }
 

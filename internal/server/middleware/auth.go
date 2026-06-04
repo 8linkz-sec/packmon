@@ -12,18 +12,10 @@ import (
 	"github.com/8linkz/packmon/internal/db"
 )
 
-// skipAuth lists path prefixes that never require an API key inside the API
-// namespace. Public web pages and admin routes are handled outside the API and
-// are therefore never subject to Bearer-token auth.
-var skipAuth = []string{
-	"/healthz",
-	"/readyz",
-	"/version",
-	"/metrics",
-	"/admin/",
-	"/admin",
-	"/.well-known/",
-}
+// skipAuth lists API path prefixes that never require an API key. Public web,
+// health, metrics, admin, and well-known routes are outside /api/v1/ and are
+// handled before API-key auth reaches this middleware.
+var skipAuth []string
 
 // requireAuthEvenInDev lists path prefixes that are data-mutating and must not
 // be exposed unauthenticated to a network. In development mode they remain

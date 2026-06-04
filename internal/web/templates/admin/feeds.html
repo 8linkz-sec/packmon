@@ -128,6 +128,7 @@
       <a href="/admin/queue" class="text-gray-500 hover:text-gray-700 pb-2 px-1">Queue</a>
       <a href="/admin/keys" class="text-gray-500 hover:text-gray-700 pb-2 px-1">API Keys</a>
       <a href="/admin/audit" class="text-gray-500 hover:text-gray-700 pb-2 px-1">Audit Log</a>
+      <a href="/admin/advisories" class="text-gray-500 hover:text-gray-700 pb-2 px-1">Advisories</a>
       <a href="/admin/settings" class="text-gray-500 hover:text-gray-700 pb-2 px-1">Settings</a>
     </nav>
   </div>
@@ -268,6 +269,7 @@
                 hx-disabled-elt="this"
                 hx-on::before-request="this.dataset.originalText = this.textContent; this.textContent = 'Syncing...'"
                 hx-on::after-request="if (event.detail.successful) { const btn = this; clearTimeout(btn._syncFlashTimer); btn.classList.remove('border-blue-300','text-blue-700','hover:bg-blue-50'); btn.classList.add('border-green-600','bg-green-600','text-white'); btn.textContent = 'Started'; btn._syncFlashTimer = setTimeout(() => { btn.classList.remove('border-green-600','bg-green-600','text-white'); btn.classList.add('border-blue-300','text-blue-700','hover:bg-blue-50'); btn.textContent = btn.dataset.originalText || 'Sync now'; }, 1200); } else { this.textContent = this.dataset.originalText || 'Sync now'; }"
+                hx-on::response-error="document.querySelector('#admin-feed-flash').innerHTML = event.detail.xhr.responseText; this.textContent = this.dataset.originalText || 'Sync now';"
                 class="border border-blue-300 text-blue-700 px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-50"
               >
                 Sync now

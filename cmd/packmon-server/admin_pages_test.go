@@ -586,6 +586,13 @@ func TestHandleAdvisoryCreateRejectsInvalidInput(t *testing.T) {
 				"ecosystem": {"npm"}, "name": {"left-pad"}, "severity": {"HIGH"}, "summary": {"s"},
 			},
 		},
+		{
+			name: "invalid finding type",
+			form: url.Values{
+				"finding_type": {"other"}, "ecosystem": {"npm"},
+				"name": {"left-pad"}, "severity": {"HIGH"}, "summary": {"s"},
+			},
+		},
 	}
 
 	for _, tc := range cases {
@@ -648,7 +655,7 @@ func TestAdminAdvisoriesPageShowsManualFindingTypes(t *testing.T) {
 		t.Fatalf("GET /admin/advisories status = %d, want 200", rec.Code)
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"vulnerability", "malicious", "left-pad", "evil"} {
+	for _, want := range []string{"vulnerability", "malicious", "left-pad", "evil", `value="actions"`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("GET /admin/advisories body missing %q\nbody=%s", want, body)
 		}

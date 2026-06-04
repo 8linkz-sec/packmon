@@ -19,8 +19,21 @@ type sarifLog struct {
 }
 
 type sarifRun struct {
-	Tool    sarifTool     `json:"tool"`
-	Results []sarifResult `json:"results"`
+	Tool        sarifTool         `json:"tool"`
+	Results     []sarifResult     `json:"results"`
+	Invocations []sarifInvocation `json:"invocations,omitempty"`
+}
+
+// sarifInvocation carries tool-level diagnostics such as partial parse errors,
+// which are not tied to any single result.
+type sarifInvocation struct {
+	ExecutionSuccessful        bool                `json:"executionSuccessful"`
+	ToolExecutionNotifications []sarifNotification `json:"toolExecutionNotifications,omitempty"`
+}
+
+type sarifNotification struct {
+	Level   string       `json:"level"`
+	Message sarifMessage `json:"message"`
 }
 
 type sarifTool struct {
@@ -117,6 +130,24 @@ func (sw *SARIFWriter) buildSARIF(result *domain.ScanResult) sarifLog {
 		results = append(results, sw.buildResult(f))
 	}
 
+	// Surface partial parse errors as tool-execution notifications so consumers
+	// reading only the SARIF artifact still see that part of the dependency
+	// graph was skipped.
+	var invocations []sarifInvocation
+	if len(result.ParseErrors) > 0 {
+		notes := make([]sarifNotification, 0, len(result.ParseErrors))
+		for _, pe := range result.ParseErrors {
+			notes = append(notes, sarifNotification{
+				Level:   "warning",
+				Message: sarifMessage{Text: pe},
+			})
+		}
+		invocations = []sarifInvocation{{
+			ExecutionSuccessful:        true,
+			ToolExecutionNotifications: notes,
+		}}
+	}
+
 	return sarifLog{
 		Schema:  "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/main/sarif-2.1/schema/sarif-schema-2.1.0.json",
 		Version: "2.1.0",
@@ -130,7 +161,8 @@ func (sw *SARIFWriter) buildSARIF(result *domain.ScanResult) sarifLog {
 						Rules:          rules,
 					},
 				},
-				Results: results,
+				Results:     results,
+				Invocations: invocations,
 			},
 		},
 	}

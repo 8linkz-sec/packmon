@@ -28,6 +28,10 @@ type Syncer struct {
 	client *Client
 }
 
+type lifecycleReconciler interface {
+	DeleteLifecycleProductsNotIn(ctx context.Context, productSlugs []string) (int, error)
+}
+
 type Option func(*Syncer)
 
 func WithBaseURL(baseURL string) Option {
@@ -39,6 +43,12 @@ func WithBaseURL(baseURL string) Option {
 func WithHTTPClient(client *http.Client) Option {
 	return func(s *Syncer) {
 		s.client.HTTPClient = client
+	}
+}
+
+func WithUserAgent(userAgent string) Option {
+	return func(s *Syncer) {
+		s.client.UserAgent = userAgent
 	}
 }
 
@@ -88,6 +98,16 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 	if err := store.UpsertLifecycleProducts(ctx, products); err != nil {
 		s.recordSyncFailure(ctx, store, start, err)
 		return nil, fmt.Errorf("upsert lifecycle products: %w", err)
+	}
+	if reconciler, ok := store.(lifecycleReconciler); ok && len(products) > 0 {
+		slugs := make([]string, 0, len(products))
+		for _, product := range products {
+			slugs = append(slugs, product.ProductSlug)
+		}
+		if _, err := reconciler.DeleteLifecycleProductsNotIn(ctx, slugs); err != nil {
+			s.recordSyncFailure(ctx, store, start, err)
+			return nil, fmt.Errorf("reconcile lifecycle products: %w", err)
+		}
 	}
 
 	total := resp.Total

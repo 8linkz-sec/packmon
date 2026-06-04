@@ -54,7 +54,7 @@ func TestDBSyncAndLocalScan(t *testing.T) {
 		"PACKMON_DB_PATH": dbDir,
 	}
 
-	if stdout, stderr, exitCode := runPackmonWithEnv(t, extraEnv, "db", "sync", "--server", baseURL); exitCode != 0 {
+	if stdout, stderr, exitCode := runPackmonWithEnv(t, extraEnv, "db", "sync", "--server", baseURL, "--insecure-allow-http"); exitCode != 0 {
 		t.Fatalf("packmon db sync exit=%d stdout=%s stderr=%s", exitCode, stdout, stderr)
 	}
 

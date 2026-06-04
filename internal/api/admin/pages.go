@@ -17,7 +17,10 @@ import (
 	"github.com/8linkz/packmon/internal/domain"
 )
 
-const adminPasswordMinLength = 12
+const (
+	adminPasswordMinLength           = 12
+	bootstrapRotationRequiredMessage = "Change the bootstrap password before making admin changes."
+)
 
 type manualAdvisoryView struct {
 	ID          string
@@ -50,6 +53,38 @@ func (h *AdminHandler) redirectToLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
+}
+
+func (h *AdminHandler) requireBootstrapPasswordRotated(w http.ResponseWriter, r *http.Request, redirectPath string) bool {
+	adminAuth, err := h.store.GetAdminAuth(r.Context())
+	if err != nil {
+		h.logger.Error("admin write blocked: failed to check bootstrap password state", "error", err)
+		redirectAdminError(w, r, redirectPath, "Failed to verify admin password state")
+		return false
+	}
+	if adminAuth == nil || !adminAuth.PasswordIsBootstrap {
+		return true
+	}
+
+	h.auditLog(r, "bootstrap_rotation_required", map[string]string{"path": r.URL.Path})
+	if isHTMXRequest(r) && strings.HasPrefix(redirectPath, "/admin/feeds") {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusForbidden)
+		if renderErr := h.renderer.RenderPartial(w, "admin/feeds.html", "admin-feed-flash", adminFeedFlashData{
+			Error: bootstrapRotationRequiredMessage,
+		}); renderErr != nil {
+			h.logger.Error("admin feeds: bootstrap flash render failed", "error", renderErr)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+		}
+		return false
+	}
+
+	redirectAdminError(w, r, redirectPath, bootstrapRotationRequiredMessage)
+	return false
+}
+
+func redirectAdminError(w http.ResponseWriter, r *http.Request, path, message string) {
+	http.Redirect(w, r, path+"?err="+url.QueryEscape(message), http.StatusSeeOther)
 }
 
 // HandleAdminFeeds serves GET /admin/feeds with detailed feed configuration.
@@ -157,11 +192,14 @@ func (h *AdminHandler) HandleQueuePurge(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "invalid CSRF token", http.StatusForbidden)
 		return
 	}
+	if !h.requireBootstrapPasswordRotated(w, r, "/admin/queue") {
+		return
+	}
 
 	purged, err := h.store.PurgeQueue(r.Context())
 	if err != nil {
 		h.logger.Error("admin queue purge failed", "error", err)
-		http.Redirect(w, r, "/admin/queue?msg=Purge+failed", http.StatusSeeOther)
+		http.Redirect(w, r, "/admin/queue?err="+url.QueryEscape("Purge failed"), http.StatusSeeOther)
 		return
 	}
 
@@ -182,6 +220,9 @@ func (h *AdminHandler) HandleQueuePriorityUpdate(w http.ResponseWriter, r *http.
 	}
 	if !auth.ValidateCSRF(r, sess) {
 		http.Error(w, "invalid CSRF token", http.StatusForbidden)
+		return
+	}
+	if !h.requireBootstrapPasswordRotated(w, r, "/admin/queue") {
 		return
 	}
 
@@ -235,6 +276,9 @@ func (h *AdminHandler) HandleQueueClear(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "invalid CSRF token", http.StatusForbidden)
 		return
 	}
+	if !h.requireBootstrapPasswordRotated(w, r, "/admin/queue") {
+		return
+	}
 
 	status := strings.ToLower(strings.TrimSpace(r.PostForm.Get("status")))
 	statuses := []string{status}
@@ -265,6 +309,9 @@ func (h *AdminHandler) handleQueueJobAction(w http.ResponseWriter, r *http.Reque
 	}
 	if !auth.ValidateCSRF(r, sess) {
 		http.Error(w, "invalid CSRF token", http.StatusForbidden)
+		return
+	}
+	if !h.requireBootstrapPasswordRotated(w, r, "/admin/queue") {
 		return
 	}
 
@@ -376,6 +423,9 @@ func (h *AdminHandler) HandleKeyCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid CSRF token", http.StatusForbidden)
 		return
 	}
+	if !h.requireBootstrapPasswordRotated(w, r, "/admin/keys") {
+		return
+	}
 
 	name := strings.TrimSpace(r.PostForm.Get("name"))
 	if name == "" {
@@ -456,6 +506,9 @@ func (h *AdminHandler) HandleKeyRevoke(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid CSRF token", http.StatusForbidden)
 		return
 	}
+	if !h.requireBootstrapPasswordRotated(w, r, "/admin/keys") {
+		return
+	}
 
 	keyIDStr := r.PostForm.Get("key_id")
 	keyID, err := strconv.Atoi(keyIDStr)
@@ -487,6 +540,9 @@ func (h *AdminHandler) HandleKeyDelete(w http.ResponseWriter, r *http.Request) {
 
 	if !auth.ValidateCSRF(r, sess) {
 		http.Error(w, "invalid CSRF token", http.StatusForbidden)
+		return
+	}
+	if !h.requireBootstrapPasswordRotated(w, r, "/admin/keys") {
 		return
 	}
 
@@ -568,11 +624,18 @@ func (h *AdminHandler) HandleAdvisoryCreate(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "invalid CSRF token", http.StatusForbidden)
 		return
 	}
+	if !h.requireBootstrapPasswordRotated(w, r, "/admin/advisories") {
+		return
+	}
 
 	ecosystem := strings.ToLower(strings.TrimSpace(r.PostForm.Get("ecosystem")))
 	name := strings.TrimSpace(r.PostForm.Get("name"))
 	advisoryID := strings.TrimSpace(r.PostForm.Get("id"))
-	findingType := normalizeAdvisoryFindingType(r.PostForm.Get("finding_type"))
+	findingType, ok := normalizeAdvisoryFindingType(r.PostForm.Get("finding_type"))
+	if !ok {
+		http.Redirect(w, r, "/admin/advisories?err=Invalid+finding+type", http.StatusSeeOther)
+		return
+	}
 	severity := strings.ToUpper(strings.TrimSpace(r.PostForm.Get("severity")))
 	riskType := strings.TrimSpace(r.PostForm.Get("risk_type"))
 	summary := strings.TrimSpace(r.PostForm.Get("summary"))
@@ -654,12 +717,14 @@ func (h *AdminHandler) HandleAdvisoryCreate(w http.ResponseWriter, r *http.Reque
 	http.Redirect(w, r, "/admin/advisories?msg="+msg, http.StatusSeeOther)
 }
 
-func normalizeAdvisoryFindingType(raw string) string {
+func normalizeAdvisoryFindingType(raw string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "malicious":
+		return "malicious", true
 	case "vulnerability":
-		return "vulnerability"
+		return "vulnerability", true
 	default:
-		return "malicious"
+		return "", false
 	}
 }
 
@@ -692,6 +757,9 @@ func (h *AdminHandler) HandleAdvisoryDelete(w http.ResponseWriter, r *http.Reque
 
 	if !auth.ValidateCSRF(r, sess) {
 		http.Error(w, "invalid CSRF token", http.StatusForbidden)
+		return
+	}
+	if !h.requireBootstrapPasswordRotated(w, r, "/admin/advisories") {
 		return
 	}
 

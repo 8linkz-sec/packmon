@@ -31,7 +31,7 @@ func startDockerPostgresStore(t *testing.T) (*Store, string) {
 		"-e", "POSTGRES_USER=packmon",
 		"-e", "POSTGRES_PASSWORD=packmon",
 		"-p", fmt.Sprintf("%d:5432", port),
-		"postgres:16-alpine",
+		"postgres:18-alpine",
 	)
 	out, err := run.Output()
 	if err != nil {
@@ -361,6 +361,22 @@ func TestPostgresStoreDockerEndToEnd(t *testing.T) {
 	}
 	if status.LastError != "previous warning" {
 		t.Fatalf("GetFeedSyncStatus().LastError = %q", status.LastError)
+	}
+	if err := store.UpsertFeedSyncStatus(ctx, &db.FeedSyncStatus{
+		FeedName:       "osv",
+		LastSyncStatus: "success",
+		EntriesSynced:  0,
+		EntriesTotal:   0,
+		LastSyncAt:     &now,
+	}); err != nil {
+		t.Fatalf("UpsertFeedSyncStatus(no-op success) error = %v", err)
+	}
+	status, err = store.GetFeedSyncStatus(ctx, "osv")
+	if err != nil {
+		t.Fatalf("GetFeedSyncStatus(after no-op) error = %v", err)
+	}
+	if status.EntriesSynced != 5 || status.EntriesTotal != 6 {
+		t.Fatalf("no-op success counters = %d/%d, want preserved 5/6", status.EntriesSynced, status.EntriesTotal)
 	}
 	missingStatus, err := store.GetFeedSyncStatus(ctx, "missing-feed")
 	if err != nil {
@@ -697,8 +713,36 @@ func TestPostgresStoreDockerEndToEnd(t *testing.T) {
 	if err := store.DeleteVulnerability(ctx, "GHSA-docker-0001"); err != nil {
 		t.Fatalf("DeleteVulnerability() error = %v", err)
 	}
+	beforeMaliciousDelete := time.Now().UTC().Add(-time.Second)
 	if err := store.DeleteMaliciousFinding(ctx, "MAL-docker-1"); err != nil {
 		t.Fatalf("DeleteMaliciousFinding() error = %v", err)
+	}
+	deletedMalicious, err := store.FindMalicious(ctx, "npm", "evil-pad", "9.9.9")
+	if err != nil {
+		t.Fatalf("FindMalicious(after delete) error = %v", err)
+	}
+	if len(deletedMalicious) != 0 {
+		t.Fatalf("FindMalicious(after delete) = %+v, want no active findings", deletedMalicious)
+	}
+	tombstoneExport, err := store.ExportSync(ctx, db.SyncExportOptions{
+		Since:      &beforeMaliciousDelete,
+		SnapshotAt: time.Now().UTC().Add(time.Minute),
+		Limit:      100,
+	})
+	if err != nil {
+		t.Fatalf("ExportSync(after malicious delete) error = %v", err)
+	}
+	var foundTombstone bool
+	for _, item := range tombstoneExport.Malicious {
+		if item.ID == "MAL-docker-1" {
+			if !item.Withdrawn {
+				t.Fatalf("malicious tombstone = %+v, want withdrawn", item)
+			}
+			foundTombstone = true
+		}
+	}
+	if !foundTombstone {
+		t.Fatalf("ExportSync(after malicious delete) missing MAL-docker-1 tombstone: %+v", tombstoneExport.Malicious)
 	}
 }
 

@@ -28,6 +28,7 @@ type noopStore struct {
 	systemConfig *db.SystemSettings
 	vulnerable   map[string]db.Vulnerability
 	malicious    map[string]db.MaliciousFinding
+	maliciousDel map[string]db.SyncMalicious
 	scanLogs     []db.ScanLogEntry
 	refreshJobs  []db.RefreshJob
 	nextAPIKeyID int
@@ -44,6 +45,7 @@ func newNoopStore() *noopStore {
 		feedStatuses: make(map[string]db.FeedSyncStatus),
 		vulnerable:   make(map[string]db.Vulnerability),
 		malicious:    make(map[string]db.MaliciousFinding),
+		maliciousDel: make(map[string]db.SyncMalicious),
 	}
 }
 
@@ -187,6 +189,7 @@ func (s *noopStore) UpsertMaliciousFinding(_ context.Context, mf *db.MaliciousFi
 		copyValue.Source = "manual"
 	}
 	s.malicious[copyValue.ID] = copyValue
+	delete(s.maliciousDel, copyValue.ID)
 	return nil
 }
 
@@ -216,8 +219,34 @@ func (s *noopStore) DeleteVulnerability(_ context.Context, id string) error {
 func (s *noopStore) DeleteMaliciousFinding(_ context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if finding, ok := s.malicious[id]; ok {
+		s.maliciousDel[id] = noopMaliciousTombstone(finding)
+	}
 	delete(s.malicious, id)
 	return nil
+}
+
+func (s *noopStore) DeleteMaliciousFindingsNotInSource(_ context.Context, source string, ids []string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	keepIDs := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		keepIDs[id] = struct{}{}
+	}
+	pruned := 0
+	for id, finding := range s.malicious {
+		if finding.Source != source {
+			continue
+		}
+		if _, keep := keepIDs[id]; keep {
+			continue
+		}
+		s.maliciousDel[id] = noopMaliciousTombstone(finding)
+		delete(s.malicious, id)
+		pruned++
+	}
+	return pruned, nil
 }
 
 func (s *noopStore) ListMaliciousFindings(_ context.Context, source string, limit int) ([]db.MaliciousFinding, error) {
@@ -598,16 +627,31 @@ func (s *noopStore) ExportSync(_ context.Context, opts db.SyncExportOptions) (*d
 		if len(finding.Versions) > 0 {
 			versions = string(finding.Versions)
 		}
+		referenceURLs := ""
+		if len(finding.ReferenceURLs) > 0 {
+			referenceURLs = string(finding.ReferenceURLs)
+		}
 
 		out.Malicious = append(out.Malicious, db.SyncMalicious{
-			ID:        finding.ID,
-			Ecosystem: finding.Ecosystem,
-			Name:      finding.Name,
-			Versions:  versions,
-			RiskType:  finding.RiskType,
-			Severity:  finding.Severity,
-			Summary:   finding.Summary,
+			ID:            finding.ID,
+			Ecosystem:     finding.Ecosystem,
+			Name:          finding.Name,
+			Versions:      versions,
+			ReferenceURLs: referenceURLs,
+			RiskType:      finding.RiskType,
+			Severity:      finding.Severity,
+			Summary:       finding.Summary,
 		})
+	}
+	if opts.Since != nil {
+		for _, tombstone := range s.maliciousDel {
+			if len(ecosystems) > 0 {
+				if _, ok := ecosystems[tombstone.Ecosystem]; !ok {
+					continue
+				}
+			}
+			out.Malicious = append(out.Malicious, tombstone)
+		}
 	}
 
 	slices.SortFunc(out.Malicious, func(a, b db.SyncMalicious) int {
@@ -623,6 +667,28 @@ func (s *noopStore) ExportSync(_ context.Context, opts db.SyncExportOptions) (*d
 	return out, nil
 }
 
+func noopMaliciousTombstone(finding db.MaliciousFinding) db.SyncMalicious {
+	versions := ""
+	if len(finding.Versions) > 0 {
+		versions = string(finding.Versions)
+	}
+	referenceURLs := ""
+	if len(finding.ReferenceURLs) > 0 {
+		referenceURLs = string(finding.ReferenceURLs)
+	}
+	return db.SyncMalicious{
+		ID:            finding.ID,
+		Ecosystem:     finding.Ecosystem,
+		Name:          finding.Name,
+		Versions:      versions,
+		ReferenceURLs: referenceURLs,
+		RiskType:      finding.RiskType,
+		Severity:      finding.Severity,
+		Summary:       finding.Summary,
+		Withdrawn:     true,
+	}
+}
+
 func (s *noopStore) EnqueueRefresh(_ context.Context, job *db.RefreshJob) (bool, int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -633,11 +699,6 @@ func (s *noopStore) EnqueueRefresh(_ context.Context, job *db.RefreshJob) (bool,
 			(existing.Status == "pending" || existing.Status == "processing" || existing.Status == "paused") {
 			if job.Priority < existing.Priority {
 				existing.Priority = job.Priority
-			}
-			if existing.Status == "paused" {
-				existing.Status = "pending"
-				existing.ProcessedAt = nil
-				existing.Error = ""
 			}
 			return false, s.queuePositionLocked(existing.ID), nil
 		}

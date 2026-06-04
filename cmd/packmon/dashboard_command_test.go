@@ -13,14 +13,36 @@ func TestDashboardCommandStartsAndStopsWithContext(t *testing.T) {
 	t.Setenv("PACKMON_DB_PATH", dbDir)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cmd := newDashboardCmd()
+	defer cancel()
+	ready := make(chan string, 1)
+	cmd := newDashboardCmdWithOptions(dashboardOptions{
+		shutdownTimeout: 200 * time.Millisecond,
+		onReady: func(url string) {
+			ready <- url
+		},
+	})
 	cmd.SetContext(ctx)
 	cmd.SetArgs([]string{"--open=false", "--port=0"})
 
 	done := make(chan error, 1)
 	go func() { done <- cmd.Execute() }()
 
-	time.Sleep(100 * time.Millisecond)
+	select {
+	case <-ready:
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("dashboard command error before ready = %v", err)
+		}
+		t.Fatal("dashboard command exited before ready")
+	case <-time.After(15 * time.Second):
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+		}
+		t.Fatal("dashboard command did not become ready")
+	}
+
 	cancel()
 
 	select {
@@ -28,7 +50,7 @@ func TestDashboardCommandStartsAndStopsWithContext(t *testing.T) {
 		if err != nil {
 			t.Fatalf("dashboard command error = %v", err)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("dashboard command did not stop after context cancellation")
 	}
 }

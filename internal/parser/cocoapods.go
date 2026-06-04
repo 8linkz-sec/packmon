@@ -1,7 +1,6 @@
 package parser
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"regexp"
@@ -36,7 +35,7 @@ func (p *CocoaPodsParser) CanParse(filename string) bool {
 }
 
 func (p *CocoaPodsParser) Parse(r io.Reader) ([]domain.Package, error) {
-	scanner := bufio.NewScanner(r)
+	scanner := newLineScanner(r)
 
 	// Find the PODS: section first.
 	inPods := false

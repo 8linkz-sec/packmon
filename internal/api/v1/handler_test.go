@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,23 +26,27 @@ import (
 // ---------------------------------------------------------------------------
 
 type stubStore struct {
-	vulnBatchFindings    []domain.Finding
-	vulnBatchErr         error
-	vulnFindings         []domain.Finding
-	vulnErr              error
-	malBatchFindings     []domain.Finding
-	malBatchErr          error
-	malFindings          []domain.Finding
-	malErr               error
-	reputationFindings   []domain.Finding
-	reputationPackage    []domain.Finding
-	reputationErr        error
-	lifecycleFindings    []domain.Finding
-	lifecycleErr         error
-	markReputationQueued bool
-	markReputationErr    error
-	feedStatuses         []db.FeedSyncStatus
-	feedStatusesErr      error
+	mu sync.Mutex
+
+	vulnBatchFindings     []domain.Finding
+	vulnBatchErr          error
+	vulnFindings          []domain.Finding
+	vulnErr               error
+	malBatchFindings      []domain.Finding
+	malBatchErr           error
+	malFindings           []domain.Finding
+	malErr                error
+	reputationFindings    []domain.Finding
+	reputationPackage     []domain.Finding
+	reputationErr         error
+	lifecycleFindings     []domain.Finding
+	lifecycleErr          error
+	markReputationQueued  bool
+	markReputationErr     error
+	markReputationBlock   <-chan struct{}
+	markReputationStarted chan<- struct{}
+	feedStatuses          []db.FeedSyncStatus
+	feedStatusesErr       error
 
 	// capture InsertScanLog calls
 	scanLogEntries    []db.ScanLogEntry
@@ -100,6 +105,8 @@ func (s *stubStore) FindMaliciousBatch(_ context.Context, _ []db.PackageQuery) (
 
 func (s *stubStore) FindReputationFindingsBatch(_ context.Context, packages []db.PackageQuery, source string) ([]domain.Finding, error) {
 	copied := append([]db.PackageQuery(nil), packages...)
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.reputationQueries = append(s.reputationQueries, struct {
 		packages []db.PackageQuery
 		source   string
@@ -108,6 +115,8 @@ func (s *stubStore) FindReputationFindingsBatch(_ context.Context, packages []db
 }
 
 func (s *stubStore) FindLifecycleFindingsBatch(_ context.Context, packages []db.PackageQuery, _ time.Time) ([]domain.Finding, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.lifecycleQueries = append(s.lifecycleQueries, packages...)
 	return s.lifecycleFindings, s.lifecycleErr
 }
@@ -137,8 +146,19 @@ func (s *stubStore) UpsertMaliciousFinding(_ context.Context, finding *db.Malici
 }
 
 func (s *stubStore) MarkPackageReputationDue(_ context.Context, rep *db.PackageReputation) (bool, error) {
+	if s.markReputationStarted != nil {
+		select {
+		case s.markReputationStarted <- struct{}{}:
+		default:
+		}
+	}
+	if s.markReputationBlock != nil {
+		<-s.markReputationBlock
+	}
 	if rep != nil {
+		s.mu.Lock()
 		s.markedReputations = append(s.markedReputations, *rep)
+		s.mu.Unlock()
 	}
 	return s.markReputationQueued, s.markReputationErr
 }
@@ -149,7 +169,9 @@ func (s *stubStore) ListDuePackageReputations(context.Context, string, string, s
 
 func (s *stubStore) UpsertPackageReputation(_ context.Context, rep *db.PackageReputation) error {
 	if rep != nil {
+		s.mu.Lock()
 		s.upsertedReputations = append(s.upsertedReputations, *rep)
+		s.mu.Unlock()
 	}
 	return nil
 }
@@ -228,9 +250,45 @@ func (s *stubStore) GetSystemSettings(context.Context) (*db.SystemSettings, erro
 func (s *stubStore) UpsertSystemSettings(context.Context, *db.SystemSettings) error { return nil }
 func (s *stubStore) EnqueueRefresh(_ context.Context, job *db.RefreshJob) (bool, int, error) {
 	if job != nil {
+		s.mu.Lock()
 		s.enqueuedRefreshJobs = append(s.enqueuedRefreshJobs, *job)
+		s.mu.Unlock()
 	}
 	return true, 1, nil
+}
+
+func (s *stubStore) enqueuedRefreshJobsSnapshot() []db.RefreshJob {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]db.RefreshJob(nil), s.enqueuedRefreshJobs...)
+}
+
+func (s *stubStore) markedReputationsSnapshot() []db.PackageReputation {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]db.PackageReputation(nil), s.markedReputations...)
+}
+
+func (s *stubStore) upsertedReputationsSnapshot() []db.PackageReputation {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]db.PackageReputation(nil), s.upsertedReputations...)
+}
+
+func waitForRefreshJobs(t *testing.T, store *stubStore, want int) []db.RefreshJob {
+	t.Helper()
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		jobs := store.enqueuedRefreshJobsSnapshot()
+		if len(jobs) >= want {
+			return jobs
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("enqueued refresh jobs = %d, want at least %d", len(jobs), want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 func (s *stubStore) DequeueRefresh(context.Context, string) (*db.RefreshJob, error) { return nil, nil }
 func (s *stubStore) CompleteRefresh(context.Context, int, error) error              { return nil }
@@ -594,24 +652,74 @@ func TestCollectFindingsSchedulesReversingLabsOnlyForUncoveredSupportedPackages(
 		t.Fatalf("collectFindings() error = %v", err)
 	}
 
-	if len(store.markedReputations) != 1 {
-		t.Fatalf("marked reputations = %d, want 1", len(store.markedReputations))
+	jobs := waitForRefreshJobs(t, store, 1)
+	marked := store.markedReputationsSnapshot()
+	if len(marked) != 1 {
+		t.Fatalf("marked reputations = %d, want 1", len(marked))
 	}
-	if got := store.markedReputations[0]; got.Ecosystem != "npm" || got.Name != "left-pad" || got.Version != "1.3.0" {
+	if got := marked[0]; got.Ecosystem != "npm" || got.Name != "left-pad" || got.Version != "1.3.0" {
 		t.Fatalf("marked reputation = %+v, want npm/left-pad@1.3.0", got)
 	}
-	if len(store.enqueuedRefreshJobs) != 1 {
-		t.Fatalf("enqueued refresh jobs = %d, want 1", len(store.enqueuedRefreshJobs))
-	}
-	if got := store.enqueuedRefreshJobs[0]; got.Source != db.ReputationSourceReversingLabs || got.Ecosystem != "npm" || got.Name != "left-pad" {
+	if got := jobs[0]; got.Source != db.ReputationSourceReversingLabs || got.Ecosystem != "npm" || got.Name != "left-pad" {
 		t.Fatalf("enqueued job = %+v, want ReversingLabs left-pad job", got)
 	}
-	if len(store.upsertedReputations) != 1 {
-		t.Fatalf("upserted reputations = %d, want unsupported Go row", len(store.upsertedReputations))
+	upserted := store.upsertedReputationsSnapshot()
+	if len(upserted) != 1 {
+		t.Fatalf("upserted reputations = %d, want unsupported Go row", len(upserted))
 	}
-	if got := store.upsertedReputations[0]; got.Status != "unsupported" || got.Ecosystem != "go" {
+	if got := upserted[0]; got.Status != "unsupported" || got.Ecosystem != "go" {
 		t.Fatalf("unsupported reputation = %+v, want go unsupported", got)
 	}
+}
+
+func TestHandleCheckSchedulesReversingLabsOffRequestPath(t *testing.T) {
+	release := make(chan struct{})
+	started := make(chan struct{}, 1)
+	store := &stubStore{
+		markReputationQueued:  true,
+		markReputationBlock:   release,
+		markReputationStarted: started,
+		feedStatuses: []db.FeedSyncStatus{
+			{FeedName: "osv", LastSyncStatus: "success", LastSyncAt: ptrFeedTime(time.Now().UTC()), EntriesSynced: 1, EntriesTotal: 1},
+		},
+	}
+	h := newTestHandler(store)
+	h.ConfigureReversingLabs(config.FeedsConfig{
+		ReversingLabsEnabled: true,
+		ReversingLabsMode:    config.FeedModeSelf,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/check", strings.NewReader(
+		`{"packages":[{"name":"left-pad","version":"1.3.0","ecosystem":"npm"}]}`,
+	))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		h.HandleCheck(rr, req)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("HandleCheck blocked on ReversingLabs scheduling")
+	}
+	if rr.Code != http.StatusOK {
+		close(release)
+		t.Fatalf("HandleCheck status = %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("ReversingLabs scheduling did not start")
+	}
+	close(release)
+	_ = waitForRefreshJobs(t, store, 1)
 }
 
 func TestHandleCheck_PropagatesCorrelationIDAndRepoMetadata(t *testing.T) {
@@ -719,6 +827,50 @@ func TestHandleCheck_TooManyPackages(t *testing.T) {
 	}
 	if !strings.Contains(errResp.Error, "too many packages") {
 		t.Fatalf("error message should mention 'too many packages', got: %q", errResp.Error)
+	}
+}
+
+func TestHandleCheck_InvalidPackageFields(t *testing.T) {
+	t.Parallel()
+
+	h := NewHandler(&stubStore{}, slog.Default())
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "missing name",
+			body: `{"packages":[{"ecosystem":"npm","name":" ","version":"1.0.0"}]}`,
+			want: "packages[1].name is required",
+		},
+		{
+			name: "missing version",
+			body: `{"packages":[{"ecosystem":"npm","name":"left-pad","version":" "}]}`,
+			want: "packages[1].version is required",
+		},
+		{
+			name: "invalid ecosystem",
+			body: `{"packages":[{"ecosystem":"unknown","name":"left-pad","version":"1.0.0"}]}`,
+			want: "packages[1].ecosystem is invalid",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/check", strings.NewReader(tt.body))
+			rr := httptest.NewRecorder()
+			h.HandleCheck(rr, req)
+
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", rr.Code, rr.Body.String())
+			}
+			if !strings.Contains(rr.Body.String(), tt.want) {
+				t.Fatalf("body = %s, want containing %q", rr.Body.String(), tt.want)
+			}
+		})
 	}
 }
 
@@ -1581,6 +1733,54 @@ func TestHandleSyncEmitsReputationRows(t *testing.T) {
 	}
 	if resp.Reputation[0].Type != "supply_chain_risk" || resp.Reputation[0].RiskType != "removed_package" {
 		t.Fatalf("reputation row = %+v", resp.Reputation[0])
+	}
+}
+
+func TestHandleSyncEmitsPerDatasetNextCursor(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	store := &syncExportStore{
+		export: &db.SyncExport{
+			SyncedAt: now,
+			Vulnerabilities: []db.SyncVulnerability{
+				{ID: "GHSA-1", Ecosystem: "npm", Name: "a", VersionRanges: "[]", References: `[{"type":"ADVISORY","url":"https://github.com/advisories/GHSA-1"}]`, Severity: "LOW"},
+				{ID: "GHSA-2", Ecosystem: "npm", Name: "b", VersionRanges: "[]", Severity: "LOW"},
+			},
+			Malicious: []db.SyncMalicious{
+				{ID: "MAL-1", Ecosystem: "npm", Name: "evil", ReferenceURLs: `["https://example.test/mal"]`, RiskType: "malware", Severity: "CRITICAL"},
+			},
+			Truncated: true,
+			NextCursor: &db.SyncCursor{
+				Vulnerabilities: 1002,
+				Malicious:       6,
+				Reputation:      7,
+				Lifecycle:       8,
+			},
+		},
+	}
+	h := newTestHandler(&store.stubStore)
+	h.store = store
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sync?vulnerabilities_offset=1000&malicious_offset=5&reputation_offset=7&lifecycle_offset=8&limit=2", nil)
+	rr := httptest.NewRecorder()
+	h.HandleSync(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("sync status = %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp syncResponsePayload
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode sync response: %v", err)
+	}
+	if !resp.Truncated || resp.NextCursor == nil {
+		t.Fatalf("sync response missing next cursor: %+v", resp)
+	}
+	if resp.NextCursor.Vulnerabilities != 1002 || resp.NextCursor.Malicious != 6 || resp.NextCursor.Reputation != 7 || resp.NextCursor.Lifecycle != 8 {
+		t.Fatalf("next cursor = %+v", resp.NextCursor)
+	}
+	if resp.Vulnerabilities[0].References == "" || resp.Malicious[0].ReferenceURLs == "" {
+		t.Fatalf("sync response dropped references: %+v %+v", resp.Vulnerabilities[0], resp.Malicious[0])
 	}
 }
 

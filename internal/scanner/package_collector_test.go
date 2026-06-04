@@ -3,6 +3,7 @@ package scanner
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/8linkz/packmon/internal/domain"
@@ -73,6 +74,36 @@ func TestCollectPackagesReportsSBOMParseErrors(t *testing.T) {
 	}
 }
 
+func TestCollectPackagesReportsSkippedSBOMComponents(t *testing.T) {
+	dir := t.TempDir()
+	sbomPath := filepath.Join(dir, "bom.cdx.json")
+	if err := os.WriteFile(sbomPath, []byte(`{
+		"bomFormat":"CycloneDX",
+		"components":[
+			{"type":"library","name":"django","version":"4.2.11","purl":"pkg:pypi/django@4.2.11"},
+			{"type":"library","name":"no-purl","version":"1.0.0"}
+		]
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := CollectPackages(CollectConfig{
+		Registry:  parser.NewRegistry(),
+		Root:      dir,
+		MaxDepth:  2,
+		SBOMFiles: []string{sbomPath},
+	})
+	if err != nil {
+		t.Fatalf("CollectPackages() error = %v", err)
+	}
+	if len(got.Packages) != 1 {
+		t.Fatalf("packages = %+v, want one imported package", got.Packages)
+	}
+	if len(got.ParseErrors) != 1 || !strings.Contains(got.ParseErrors[0], `skipped SBOM component "no-purl": missing purl`) {
+		t.Fatalf("parse errors = %#v, want skipped component warning", got.ParseErrors)
+	}
+}
+
 func TestPackageCollectionAddMergesPackageMetadata(t *testing.T) {
 	c := &PackageCollection{}
 	c.add(domain.Package{
@@ -102,5 +133,18 @@ func TestPackageCollectionAddMergesPackageMetadata(t *testing.T) {
 	}
 	if len(pkg.Via) != 2 || pkg.Via[0] != "other" || pkg.Via[1] != "tailwindcss" {
 		t.Fatalf("Via = %#v, want sorted merged roots", pkg.Via)
+	}
+}
+
+func TestPackageCollectionIndexRebuildsAfterDevFilter(t *testing.T) {
+	t.Parallel()
+
+	c := &PackageCollection{}
+	c.add(domain.Package{Name: "dev-only", Version: "1.0.0", Ecosystem: domain.EcosystemNPM, Dev: true}, "package-lock.json", "lockfile")
+	c.filterDev()
+	c.add(domain.Package{Name: "dev-only", Version: "1.0.0", Ecosystem: domain.EcosystemNPM}, "bom.json", "sbom")
+
+	if len(c.Entries) != 1 || c.Entries[0].Package.Dev {
+		t.Fatalf("entries after filter/add = %+v, want one production package", c.Entries)
 	}
 }

@@ -3,6 +3,8 @@ package dockerimage
 import (
 	"fmt"
 	"os"
+
+	"github.com/8linkz/packmon/internal/ioutils"
 )
 
 type Collection struct {
@@ -34,7 +36,7 @@ func parseFile(file File) ([]Image, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer ioutils.CloseSilently(f)
 	switch file.Kind {
 	case KindDockerfile:
 		return ParseDockerfileImages(f, file.RelPath)

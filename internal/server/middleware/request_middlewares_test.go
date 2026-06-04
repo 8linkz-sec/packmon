@@ -117,12 +117,14 @@ func TestLoggingCapturesStatusAndCorrelationID(t *testing.T) {
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	req := httptest.NewRequest(http.MethodGet, "/missing", nil)
+	req.RemoteAddr = "10.0.0.1:12345"
+	req.Header.Set("X-Forwarded-For", "203.0.113.12, 10.0.0.1")
 	req.Header.Set("User-Agent", "packmon-cli/test")
 	req = req.WithContext(context.WithValue(req.Context(), correlationKey{}, "corr-1"))
 
-	handler := Logging(logger)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := TrustedClientIP([]string{"10.0.0.1"})(Logging(logger)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "missing", http.StatusNotFound)
-	}))
+	})))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -130,10 +132,13 @@ func TestLoggingCapturesStatusAndCorrelationID(t *testing.T) {
 		t.Fatalf("status = %d, want 404", rec.Code)
 	}
 	logLine := logs.String()
-	for _, want := range []string{`"level":"WARN"`, `"status":404`, `"correlation_id":"corr-1"`, `"path":"/missing"`} {
+	for _, want := range []string{`"level":"WARN"`, `"status":404`, `"correlation_id":"corr-1"`, `"path":"/missing"`, `"remote_addr":"203.0.113.12"`} {
 		if !strings.Contains(logLine, want) {
 			t.Fatalf("log line missing %s: %s", want, logLine)
 		}
+	}
+	if strings.Contains(logLine, "10.0.0.1:12345") {
+		t.Fatalf("log line contains unnormalized direct peer address: %s", logLine)
 	}
 }
 
@@ -185,6 +190,11 @@ func TestRecoveryReturnsInternalServerErrorOnPanic(t *testing.T) {
 	for _, want := range []string{`"level":"ERROR"`, `"msg":"panic recovered"`, `"correlation_id":"corr-2"`} {
 		if !strings.Contains(logLine, want) {
 			t.Fatalf("log line missing %s: %s", want, logLine)
+		}
+	}
+	for _, forbidden := range []string{`"stack"`, "request_middlewares_test.go"} {
+		if strings.Contains(logLine, forbidden) {
+			t.Fatalf("log line contains %s: %s", forbidden, logLine)
 		}
 	}
 }

@@ -1,7 +1,6 @@
 package parser
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"strings"
@@ -37,8 +36,7 @@ func (p *GoSumParser) Parse(r io.Reader) ([]domain.Package, error) {
 		errs []error
 	)
 
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
+	scanner := newLineScanner(r)
 
 	lineNo := 0
 	for scanner.Scan() {
@@ -111,8 +109,7 @@ func (p *GoModParser) Parse(r io.Reader) ([]domain.Package, error) {
 		inBlock bool
 	)
 
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
+	scanner := newLineScanner(r)
 
 	lineNo := 0
 	for scanner.Scan() {

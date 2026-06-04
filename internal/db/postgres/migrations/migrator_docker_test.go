@@ -28,7 +28,7 @@ func startMigrationPostgres(t *testing.T) string {
 		"-e", "POSTGRES_USER=packmon",
 		"-e", "POSTGRES_PASSWORD=packmon",
 		"-p", fmt.Sprintf("%d:5432", port),
-		"postgres:16-alpine",
+		"postgres:18-alpine",
 	)
 	out, err := run.Output()
 	if err != nil {

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -32,6 +33,8 @@ type Config struct {
 	Admin    AdminConfig
 	FeedSync FeedSyncConfig
 	Feeds    FeedsConfig
+
+	feedsMu *sync.RWMutex
 }
 
 // FeedMode controls whether the server runs a feed syncer itself or
@@ -355,7 +358,7 @@ func Load() (*Config, error) {
 			OSVEnabled:           envBoolOrDefault("PACKMON_FEED_OSV_ENABLED", true),
 			GHSAEnabled:          envBoolOrDefault("PACKMON_FEED_GHSA_ENABLED", true),
 			OpenSSFEnabled:       envBoolOrDefault("PACKMON_FEED_OPENSSF_ENABLED", true),
-			VulnCheckEnabled:     envBoolOrDefault("PACKMON_FEED_VULNCHECK_ENABLED", true),
+			VulnCheckEnabled:     envBoolOrDefault("PACKMON_FEED_VULNCHECK_ENABLED", false),
 			SocketEnabled:        envBoolOrDefault("PACKMON_FEED_SOCKET_ENABLED", false),
 			ReversingLabsEnabled: envBoolOrDefault("PACKMON_FEED_REVERSINGLABS_ENABLED", false),
 			CISAKEVEnabled:       envBoolOrDefault("PACKMON_FEED_CISAKEV_ENABLED", true),

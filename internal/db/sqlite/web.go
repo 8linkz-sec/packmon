@@ -156,6 +156,44 @@ func (s *Store) SearchPackages(ctx context.Context, params db.PackageSearchParam
 		}
 	}
 
+	if findingType == "" || findingType == "supply_chain_risk" {
+		if err := s.collectSearchResults(ctx, results, `
+			SELECT ecosystem, name, COUNT(*) AS findings_count, 0 AS vulnerability_count, '' AS vulnerability_ids
+			FROM reputation_findings_local
+			WHERE type = 'supply_chain_risk'
+			  AND (? = '' OR lower(name) LIKE ?)
+			  AND (? = '' OR upper(coalesce(severity, 'UNKNOWN')) = ?)
+			GROUP BY ecosystem, name
+			ORDER BY name ASC
+			LIMIT ?`, like, like, severity, severity, limit); err != nil {
+			return nil, err
+		}
+	}
+
+	if findingType == "" || findingType == "lifecycle" {
+		if err := s.collectSearchResults(ctx, results, `
+			WITH lifecycle_findings AS (
+				SELECT ecosystem, name,
+					CASE
+						WHEN is_eol = 1 OR (eol_from IS NOT NULL AND eol_from <= date('now')) THEN 'CRITICAL'
+						WHEN eol_from IS NOT NULL AND eol_from <= date('now', '+90 days') THEN 'MEDIUM'
+						WHEN is_eoas = 1 OR (eoas_from IS NOT NULL AND eoas_from <= date('now')) THEN 'LOW'
+						ELSE ''
+					END AS severity
+				FROM lifecycle_releases_local
+			)
+			SELECT ecosystem, name, COUNT(*) AS findings_count, 0 AS vulnerability_count, '' AS vulnerability_ids
+			FROM lifecycle_findings
+			WHERE severity <> ''
+			  AND (? = '' OR lower(name) LIKE ?)
+			  AND (? = '' OR severity = ?)
+			GROUP BY ecosystem, name
+			ORDER BY name ASC
+			LIMIT ?`, like, like, severity, severity, limit); err != nil {
+			return nil, err
+		}
+	}
+
 	out := make([]db.PackageSearchResult, 0, len(results))
 	for _, result := range results {
 		result.VulnerabilityIDs = joinLocalCSV(result.VulnerabilityIDs)

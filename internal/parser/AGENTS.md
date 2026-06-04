@@ -24,20 +24,15 @@ Read `AGENTS.md` (root) and `DESIGN.md` (supported ecosystems table) first.
 
 ## Current open landmines (see Audit.md)
 
-> Status (2026-05-29): the items in this section were addressed across the
-> Audit.md "Fix-Runde" passes. Audit.md is authoritative; project-wide only the
-> external GitLab-runner test remains open. Keep the notes below as guardrails
-> so the fixes are not regressed.
+Audit.md is authoritative; project-wide only the external GitLab-runner test is
+documented as an external validation gap. Keep these guardrails in mind:
 
-- **H4:** `composer.go` reads `packages-dev` but emits every entry with
-  `Dev:false` -- dev deps are wrongly scanned by default. Set `Dev:true` when
-  appending `PackagesDev`.
-- Other parsers that could but do not yet model dev scope: pnpm (`dev:` per
-  package), poetry/uv (groups/category), gradle (test* configurations). Setting
-  `Dev` inconsistently across ecosystems is a UX trap -- prefer parity.
-- The `dedup` "production wins" merge rule (a name+version seen as both dev and
-  prod stays prod) exists in BOTH `parser.go` and `scanner.go` and is currently
-  untested. Assert it when you touch either copy; consider consolidating.
+- Preserve dev/test dependency marking in parser tests when touching npm, pnpm,
+  Pipfile, poetry, uv, Maven, Gradle, Composer, or equivalent lock formats.
+- Keep the parser-level `dedup` "production wins" merge rule covered by tests.
+- `requirements.txt` parsing intentionally skips recursive include files because
+  parser instances receive only an `io.Reader`; adding recursive includes needs
+  a collector-level design rather than ad hoc filesystem access here.
 
 ## Tests
 

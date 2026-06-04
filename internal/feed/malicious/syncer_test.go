@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,6 +23,9 @@ type maliciousTestStore struct {
 	upsertErr    error
 	statusErr    error
 	getStatusErr error
+	prunedSource string
+	prunedIDs    []string
+	pruneErr     error
 }
 
 func (s *maliciousTestStore) UpsertMaliciousFinding(_ context.Context, finding *db.MaliciousFinding) error {
@@ -51,6 +55,15 @@ func (s *maliciousTestStore) GetFeedSyncStatus(context.Context, string) (*db.Fee
 	}
 	copyValue := *s.status
 	return &copyValue, nil
+}
+
+func (s *maliciousTestStore) DeleteMaliciousFindingsNotInSource(_ context.Context, source string, ids []string) (int, error) {
+	if s.pruneErr != nil {
+		return 0, s.pruneErr
+	}
+	s.prunedSource = source
+	s.prunedIDs = append([]string(nil), ids...)
+	return 0, nil
 }
 
 func TestSyncerNameDefaultsAndStatusRecording(t *testing.T) {
@@ -193,6 +206,20 @@ func TestClassifyRiskTypeHeuristics(t *testing.T) {
 			t.Fatalf("classifyRiskType(%q) = %q, want %q", summary, got, want)
 		}
 	}
+	if got := classifyRiskType(&malEntry{Summary: "generic bad behavior", DatabaseSpecific: json.RawMessage(`{"risk_type":"typosquatting"}`)}); got != "typosquatting" {
+		t.Fatalf("classifyRiskType(database_specific) = %q, want typosquatting", got)
+	}
+
+	affSpecific := mapToMaliciousFindings(&malEntry{
+		Summary: "generic bad behavior",
+		Affected: []malAffected{{
+			Package:          malPackage{Ecosystem: "npm", Name: "leftpad"},
+			DatabaseSpecific: json.RawMessage(`{"categories":["dependency_confusion"]}`),
+		}},
+	}, "MAL-aff-risk.json")
+	if len(affSpecific) != 1 || affSpecific[0].RiskType != "supply_chain" {
+		t.Fatalf("affected risk type findings = %+v, want supply_chain", affSpecific)
+	}
 
 	if got := mapToMaliciousFindings(&malEntry{}, "MAL-empty.json"); got != nil {
 		t.Fatalf("mapToMaliciousFindings(no affected) = %#v, want nil", got)
@@ -202,7 +229,7 @@ func TestClassifyRiskTypeHeuristics(t *testing.T) {
 	}
 }
 
-func TestWalkEntriesSkipsMalformedAndUnsupportedFiles(t *testing.T) {
+func TestWalkEntriesSkipsUnsupportedFiles(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
@@ -216,21 +243,24 @@ func TestWalkEntriesSkipsMalformedAndUnsupportedFiles(t *testing.T) {
 		"summary":"ignored",
 		"affected":[{"package":{"ecosystem":"unknown","name":"pkg"}}]
 	}`)
-	writeFile(t, filepath.Join(root, "npm", "broken", "MAL-3.json"), `{`)
 	writeFile(t, filepath.Join(root, "npm", "ignored", "README.txt"), `not json`)
 
 	store := &maliciousTestStore{}
 	syncer := NewSyncer(store, slog.New(slog.NewTextHandler(os.Stdout, nil)), t.TempDir())
-	synced, total, err := syncer.walkEntries(context.Background(), store, root)
+	seen := map[string]struct{}{}
+	synced, total, err := syncer.walkEntries(context.Background(), store, root, seen)
 	if err != nil {
 		t.Fatalf("walkEntries() error = %v", err)
 	}
 
-	if total != 3 {
-		t.Fatalf("total JSON entries = %d, want 3", total)
+	if total != 2 {
+		t.Fatalf("total JSON entries = %d, want 2", total)
 	}
 	if synced != 1 {
 		t.Fatalf("synced = %d, want 1", synced)
+	}
+	if _, ok := seen["MAL-1"]; !ok {
+		t.Fatalf("seen IDs = %#v, missing MAL-1", seen)
 	}
 	if len(store.findings) != 1 {
 		t.Fatalf("upserted findings = %d, want 1", len(store.findings))
@@ -244,7 +274,7 @@ func TestWalkEntriesErrorBranches(t *testing.T) {
 	t.Parallel()
 
 	syncer := NewSyncer(&maliciousTestStore{}, nil, t.TempDir())
-	if _, _, err := syncer.walkEntries(context.Background(), &maliciousTestStore{}, filepath.Join(t.TempDir(), "missing")); err == nil {
+	if _, _, err := syncer.walkEntries(context.Background(), &maliciousTestStore{}, filepath.Join(t.TempDir(), "missing"), nil); err == nil {
 		t.Fatal("walkEntries(missing root) error = nil, want error")
 	}
 
@@ -256,9 +286,16 @@ func TestWalkEntriesErrorBranches(t *testing.T) {
 	}`)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, _, err := syncer.walkEntries(ctx, &maliciousTestStore{}, canceledRoot)
+	_, _, err := syncer.walkEntries(ctx, &maliciousTestStore{}, canceledRoot, nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("walkEntries(canceled) error = %v, want context.Canceled", err)
+	}
+
+	parseRoot := t.TempDir()
+	writeFile(t, filepath.Join(parseRoot, "npm", "broken", "MAL-broken.json"), `{`)
+	_, _, err = syncer.walkEntries(context.Background(), &maliciousTestStore{}, parseRoot, nil)
+	if err == nil || !strings.Contains(err.Error(), "parse") {
+		t.Fatalf("walkEntries(parse error) error = %v", err)
 	}
 
 	upsertRoot := t.TempDir()
@@ -268,8 +305,8 @@ func TestWalkEntriesErrorBranches(t *testing.T) {
 		"affected":[{"package":{"ecosystem":"npm","name":"leftpad"}}]
 	}`)
 	erroringStore := &maliciousTestStore{upsertErr: errors.New("upsert failed")}
-	synced, total, err := syncer.walkEntries(context.Background(), erroringStore, upsertRoot)
-	if err != nil {
+	synced, total, err := syncer.walkEntries(context.Background(), erroringStore, upsertRoot, nil)
+	if err == nil || !strings.Contains(err.Error(), "upsert") {
 		t.Fatalf("walkEntries(upsert error) error = %v", err)
 	}
 	if synced != 0 || total != 1 {
@@ -308,6 +345,9 @@ func TestSyncUsesExistingGitCheckoutAndWalksEntries(t *testing.T) {
 	}
 	if len(store.findings) != 1 || store.findings[0].ID != "MAL-sync" {
 		t.Fatalf("findings = %+v, want MAL-sync", store.findings)
+	}
+	if store.prunedSource != "openssf" || len(store.prunedIDs) != 1 || store.prunedIDs[0] != "MAL-sync" {
+		t.Fatalf("prune source/ids = %q/%v, want openssf [MAL-sync]", store.prunedSource, store.prunedIDs)
 	}
 	if len(store.statuses) == 0 || store.statuses[len(store.statuses)-1].LastSyncStatus != "success" {
 		t.Fatalf("statuses = %+v, want success", store.statuses)

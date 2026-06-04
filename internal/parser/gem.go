@@ -1,7 +1,6 @@
 package parser
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"regexp"
@@ -49,7 +48,7 @@ func (p *GemParser) Ecosystem() domain.Ecosystem {
 //
 // Only top-level entries under "specs:" are extracted (4-space indent, not 6+).
 func (p *GemParser) Parse(r io.Reader) ([]domain.Package, error) {
-	scanner := bufio.NewScanner(r)
+	scanner := newLineScanner(r)
 
 	var (
 		packages   []domain.Package

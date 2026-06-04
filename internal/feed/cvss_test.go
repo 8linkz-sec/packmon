@@ -69,6 +69,24 @@ func TestParseCVSSVector(t *testing.T) {
 			wantMax: 10.0,
 		},
 		{
+			name:    "CVSS 2.0 high vector",
+			vector:  "AV:N/AC:L/Au:N/C:P/I:P/A:P",
+			wantMin: 7.5,
+			wantMax: 7.5,
+		},
+		{
+			name:    "CVSS 2.0 prefixed critical vector",
+			vector:  "CVSS:2.0/AV:N/AC:L/Au:N/C:C/I:C/A:C",
+			wantMin: 10.0,
+			wantMax: 10.0,
+		},
+		{
+			name:    "CVSS 2.0 no impact returns zero",
+			vector:  "AV:N/AC:L/Au:N/C:N/I:N/A:N",
+			wantMin: 0,
+			wantMax: 0,
+		},
+		{
 			name:    "physical access vector reduces score",
 			vector:  "CVSS:3.1/AV:P/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
 			wantMin: 4.0,

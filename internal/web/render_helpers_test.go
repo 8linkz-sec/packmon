@@ -35,6 +35,8 @@ func TestRenderHelperFunctions(t *testing.T) {
 		{"hours", time.Now().Add(-5 * time.Hour), "5 hours ago"},
 		{"one day", time.Now().Add(-24 * time.Hour), "1 day ago"},
 		{"days", time.Now().Add(-72 * time.Hour), "3 days ago"},
+		{"future minute", time.Now().Add(2*time.Minute + 5*time.Second), "in 2 minutes"},
+		{"future hour", time.Now().Add(2*time.Hour + 5*time.Minute), "in 2 hours"},
 	}
 	for _, tt := range agoTests {
 		t.Run(tt.name, func(t *testing.T) {

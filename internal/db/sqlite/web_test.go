@@ -129,6 +129,19 @@ func TestDashboardStatsAndSearchPackages(t *testing.T) {
 			('M-2', 'pypi', 'requests-evil', NULL, 'typosquatting', 'HIGH', 'requests clone')`); err != nil {
 		t.Fatalf("insert malicious rows: %v", err)
 	}
+	if _, err := store.DB().ExecContext(ctx, `
+		INSERT INTO reputation_findings_local(id, ecosystem, name, version, type, risk_type, severity, summary)
+		VALUES ('REP-1', 'npm', 'supply-only', '1.0.0', 'supply_chain_risk', 'removed_package', 'MEDIUM', 'removed package')`); err != nil {
+		t.Fatalf("insert reputation rows: %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `
+		INSERT INTO lifecycle_releases_local(
+			id, ecosystem, name, product_slug, product_label, cycle, is_eoas, eoas_from
+		) VALUES (
+			'LIFE-1', 'pypi', 'django', 'django', 'Django', '3.2', 1, '2020-01-01'
+		)`); err != nil {
+		t.Fatalf("insert lifecycle rows: %v", err)
+	}
 
 	hasData, err := store.HasAdvisoryData(ctx)
 	if err != nil {
@@ -171,6 +184,20 @@ func TestDashboardStatsAndSearchPackages(t *testing.T) {
 		if result.Name == "requests-evil" && result.VulnerabilityCount != 0 {
 			t.Fatalf("SearchPackages() malicious-only result has vulnerability count %d, want 0", result.VulnerabilityCount)
 		}
+	}
+	supplyResults, err := store.SearchPackages(ctx, db.PackageSearchParams{FindingType: "supply_chain_risk", Limit: 10})
+	if err != nil {
+		t.Fatalf("SearchPackages() with supply-chain finding filter error = %v", err)
+	}
+	if len(supplyResults) != 1 || supplyResults[0].Name != "supply-only" || supplyResults[0].FindingsCount != 1 {
+		t.Fatalf("SearchPackages() supply-chain results = %+v, want supply-only", supplyResults)
+	}
+	lifecycleResults, err := store.SearchPackages(ctx, db.PackageSearchParams{FindingType: "lifecycle", Limit: 10})
+	if err != nil {
+		t.Fatalf("SearchPackages() with lifecycle finding filter error = %v", err)
+	}
+	if len(lifecycleResults) != 1 || lifecycleResults[0].Name != "django" || lifecycleResults[0].FindingsCount != 1 {
+		t.Fatalf("SearchPackages() lifecycle results = %+v, want django", lifecycleResults)
 	}
 
 	stats, err := store.DashboardStats(ctx)

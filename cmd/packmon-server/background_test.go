@@ -23,6 +23,7 @@ func TestFeedPhaseForNameSeparatesEnrichmentFeeds(t *testing.T) {
 		"cisakev":   feed.FeedPhaseEnrichment,
 		"epss":      feed.FeedPhaseEnrichment,
 		"nvd":       feed.FeedPhaseEnrichment,
+		"endoflife": feed.FeedPhaseEnrichment,
 	}
 	for name, want := range tests {
 		if got := feedPhaseForName(name); got != want {

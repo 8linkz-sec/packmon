@@ -1,7 +1,6 @@
 package parser
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"strings"
@@ -26,13 +25,13 @@ func (p *GradleParser) Ecosystem() domain.Ecosystem {
 }
 
 func (p *GradleParser) Parse(r io.Reader) ([]domain.Package, error) {
-	scanner := bufio.NewScanner(r)
+	scanner := newLineScanner(r)
 
 	type pkgKey struct {
 		name    string
 		version string
 	}
-	seen := make(map[pkgKey]struct{})
+	seen := make(map[pkgKey]int)
 
 	var (
 		packages []domain.Package
@@ -61,7 +60,7 @@ func (p *GradleParser) Parse(r io.Reader) ([]domain.Package, error) {
 
 		// Expected format: group:artifact:version=variant(s)
 		// Split on "=" first to separate the coordinate from the configuration list.
-		coordinate, _, _ := strings.Cut(line, "=")
+		coordinate, configurations, _ := strings.Cut(line, "=")
 
 		// Split coordinate into group:artifact:version.
 		parts := strings.SplitN(coordinate, ":", 3)
@@ -85,15 +84,20 @@ func (p *GradleParser) Parse(r io.Reader) ([]domain.Package, error) {
 
 		name := group + ":" + artifact
 		key := pkgKey{name: strings.ToLower(name), version: version}
-		if _, exists := seen[key]; exists {
+		dev := gradleConfigurationsDev(configurations)
+		if idx, exists := seen[key]; exists {
+			if packages[idx].Dev && !dev {
+				packages[idx].Dev = false
+			}
 			continue
 		}
-		seen[key] = struct{}{}
+		seen[key] = len(packages)
 
 		packages = append(packages, domain.Package{
 			Name:      name,
 			Version:   version,
 			Ecosystem: domain.EcosystemMaven,
+			Dev:       dev,
 		})
 	}
 
@@ -107,4 +111,24 @@ func (p *GradleParser) Parse(r io.Reader) ([]domain.Package, error) {
 	}
 
 	return packages, retErr
+}
+
+func gradleConfigurationsDev(configurations string) bool {
+	configurations = strings.TrimSpace(configurations)
+	if configurations == "" {
+		return false
+	}
+	hasDev := false
+	for _, raw := range strings.Split(configurations, ",") {
+		config := strings.ToLower(strings.TrimSpace(raw))
+		if config == "" {
+			continue
+		}
+		if strings.Contains(config, "test") || strings.Contains(config, "dev") {
+			hasDev = true
+			continue
+		}
+		return false
+	}
+	return hasDev
 }

@@ -107,6 +107,9 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 	ecosystems := feed.OSVBucketEcosystems()
 	var totalSynced, totalEntries int
 	var skippedByETag int
+	var unavailableArchives int
+	var failedEcosystems int
+	var syncErrors []error
 
 	for _, eco := range ecosystems {
 		if ctx.Err() != nil {
@@ -126,12 +129,26 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 			}
 			var unavailable *errArchiveUnavailable
 			if errors.As(err, &unavailable) {
-				s.logger.Info("ecosystem archive unavailable, skipping",
+				if unavailable.statusCode == http.StatusNotFound {
+					s.logger.Info("ecosystem archive unavailable, skipping",
+						slog.String("ecosystem", eco),
+						slog.Int("status", unavailable.statusCode),
+					)
+					unavailableArchives++
+					continue
+				}
+				failedEcosystems++
+				syncErrors = append(syncErrors, err)
+				s.logger.Warn("ecosystem archive request failed",
 					slog.String("ecosystem", eco),
 					slog.Int("status", unavailable.statusCode),
 				)
 				continue
 			}
+			failedEcosystems++
+			syncErrors = append(syncErrors, err)
+			totalSynced += synced
+			totalEntries += entries
 			s.logger.Error("ecosystem sync failed, continuing with next",
 				slog.String("ecosystem", eco),
 				slog.String("error", err.Error()),
@@ -159,8 +176,16 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 		slog.Int("total_synced", totalSynced),
 		slog.Int("total_entries", totalEntries),
 		slog.Int("skipped_by_etag", skippedByETag),
+		slog.Int("unavailable_archives", unavailableArchives),
+		slog.Int("failed_ecosystems", failedEcosystems),
 		slog.String("duration", duration.String()),
 	)
+
+	if failedEcosystems > 0 {
+		syncErr := fmt.Errorf("OSV sync failed for %d ecosystem(s): %w", failedEcosystems, errors.Join(syncErrors...))
+		s.recordSyncFailure(ctx, start, syncErr)
+		return nil, syncErr
+	}
 
 	s.recordSyncSuccess(ctx, start, duration, totalEntries, totalSynced)
 	s.saveEcosystemETags(ctx, etags)
@@ -241,6 +266,8 @@ func (s *Syncer) syncEcosystem(ctx context.Context, store db.Store, ecosystem, s
 	}
 	defer func() { _ = reader.Close() }()
 
+	var entryErrors int
+
 	for _, f := range reader.File {
 		if ctx.Err() != nil {
 			return synced, total, newETag, ctx.Err()
@@ -254,6 +281,7 @@ func (s *Syncer) syncEcosystem(ctx context.Context, store db.Store, ecosystem, s
 
 		rc, err := f.Open()
 		if err != nil {
+			entryErrors++
 			s.logger.Warn("failed to open zip entry",
 				slog.String("file", f.Name),
 				slog.String("error", err.Error()),
@@ -264,6 +292,7 @@ func (s *Syncer) syncEcosystem(ctx context.Context, store db.Store, ecosystem, s
 		data, err := io.ReadAll(io.LimitReader(rc, maxEntrySize))
 		_ = rc.Close()
 		if err != nil {
+			entryErrors++
 			s.logger.Warn("failed to read zip entry",
 				slog.String("file", f.Name),
 				slog.String("error", err.Error()),
@@ -273,6 +302,7 @@ func (s *Syncer) syncEcosystem(ctx context.Context, store db.Store, ecosystem, s
 
 		var entry osvEntry
 		if err := json.Unmarshal(data, &entry); err != nil {
+			entryErrors++
 			s.logger.Warn("failed to parse OSV entry",
 				slog.String("file", f.Name),
 				slog.String("error", err.Error()),
@@ -289,6 +319,7 @@ func (s *Syncer) syncEcosystem(ctx context.Context, store db.Store, ecosystem, s
 
 		if findings := mapToMaliciousFindings(&entry); len(findings) > 0 {
 			if err := store.DeleteVulnerability(ctx, entry.ID); err != nil {
+				entryErrors++
 				s.logger.Warn("failed to delete vulnerability superseded by malicious OSV category",
 					slog.String("id", entry.ID),
 					slog.String("error", err.Error()),
@@ -296,6 +327,7 @@ func (s *Syncer) syncEcosystem(ctx context.Context, store db.Store, ecosystem, s
 			}
 			for _, finding := range findings {
 				if err := store.UpsertMaliciousFinding(ctx, finding); err != nil {
+					entryErrors++
 					s.logger.Warn("failed to upsert malicious finding",
 						slog.String("id", finding.ID),
 						slog.String("error", err.Error()),
@@ -309,6 +341,7 @@ func (s *Syncer) syncEcosystem(ctx context.Context, store db.Store, ecosystem, s
 
 		vuln := mapToVulnerability(&entry, data)
 		if err := store.UpsertVulnerability(ctx, vuln); err != nil {
+			entryErrors++
 			s.logger.Warn("failed to upsert vulnerability",
 				slog.String("id", entry.ID),
 				slog.String("error", err.Error()),
@@ -316,6 +349,10 @@ func (s *Syncer) syncEcosystem(ctx context.Context, store db.Store, ecosystem, s
 			continue
 		}
 		synced++
+	}
+
+	if entryErrors > 0 {
+		return synced, total, newETag, fmt.Errorf("ecosystem %s: %d entry import error(s)", ecosystem, entryErrors)
 	}
 
 	return synced, total, newETag, nil
@@ -576,7 +613,7 @@ func mapToMaliciousFindings(entry *osvEntry) []*db.MaliciousFinding {
 	}
 
 	refURLsJSON := marshalReferenceURLs(entry.References)
-	riskType := classifyMaliciousRiskType(entry)
+	entryRiskType := classifyMaliciousRiskType(entry)
 	published := &entry.Published
 	if published.IsZero() {
 		published = nil
@@ -595,6 +632,10 @@ func mapToMaliciousFindings(entry *osvEntry) []*db.MaliciousFinding {
 		canonicalEco, ok := feed.MapOSVEcosystem(ecosystemRaw)
 		if !ok {
 			continue
+		}
+		riskType := entryRiskType
+		if affRiskType := maliciousRiskTypeFromJSON(aff.DatabaseSpecific); affRiskType != "" {
+			riskType = affRiskType
 		}
 
 		id := entry.ID
@@ -681,6 +722,9 @@ func marshalReferenceURLs(refs []osvReference) json.RawMessage {
 }
 
 func classifyMaliciousRiskType(entry *osvEntry) string {
+	if riskType := maliciousRiskTypeFromJSON(entry.DatabaseSpecific); riskType != "" {
+		return riskType
+	}
 	lower := strings.ToLower(entry.Summary + " " + entry.Details)
 	switch {
 	case strings.Contains(lower, "typosquat"):
@@ -691,6 +735,40 @@ func classifyMaliciousRiskType(entry *osvEntry) string {
 		return "supply_chain"
 	default:
 		return "malware"
+	}
+}
+
+func maliciousRiskTypeFromJSON(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var spec struct {
+		RiskType       string   `json:"risk_type"`
+		Type           string   `json:"type"`
+		Classification string   `json:"classification"`
+		Categories     []string `json:"categories"`
+	}
+	if err := json.Unmarshal(raw, &spec); err != nil {
+		return ""
+	}
+	for _, candidate := range append([]string{spec.RiskType, spec.Type, spec.Classification}, spec.Categories...) {
+		if normalized := normalizeMaliciousRiskType(candidate); normalized != "" {
+			return normalized
+		}
+	}
+	return ""
+}
+
+func normalizeMaliciousRiskType(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "malware", "trojan", "backdoor", "cryptominer", "cryptomining", "exfiltration", "protestware":
+		return "malware"
+	case "typosquat", "typosquatting", "typo-squatting":
+		return "typosquatting"
+	case "supply_chain", "supply-chain", "supply chain", "dependency_confusion", "dependency confusion":
+		return "supply_chain"
+	default:
+		return ""
 	}
 }
 

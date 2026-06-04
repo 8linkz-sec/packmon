@@ -41,7 +41,7 @@ jobs:
 
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
-          go-version: "1.26"
+          go-version: "1.26.4"
 
       - name: Build all targets
         run: |
@@ -101,6 +101,7 @@ jobs:
         with:
           context: .
           platforms: linux/amd64,linux/arm64
+          target: server
           push: true
           tags: |
             ghcr.io/${{ github.repository }}/packmon-server:${{ env.RELEASE_VERSION }}

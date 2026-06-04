@@ -169,6 +169,35 @@ func (tw *TableWriter) Write(w io.Writer, result *domain.ScanResult) error {
 		}
 	}
 
+	// References -- show a resolvable link per finding so terminal users do not
+	// have to look advisory IDs up manually (parity with the SARIF/JUnit/HTML
+	// writers, which already render f.URL / f.Resources).
+	type ref struct{ advisory, url string }
+	refs := make([]ref, 0, len(result.Findings))
+	seen := make(map[string]bool)
+	for i, f := range result.Findings {
+		url := referenceURL(f)
+		if url == "" {
+			continue
+		}
+		key := rows[i].advisory + "\x00" + url
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		refs = append(refs, ref{advisory: rows[i].advisory, url: url})
+	}
+	if len(refs) > 0 {
+		if _, err := fmt.Fprintln(w, "\nReferences:"); err != nil {
+			return err
+		}
+		for _, r := range refs {
+			if _, err := fmt.Fprintf(w, "  %-*s  %s\n", maxAdv, r.advisory, r.url); err != nil {
+				return err
+			}
+		}
+	}
+
 	// Summary line.
 	blocking := tw.countBlocking(result)
 	_, err := fmt.Fprintf(w, "\nFound %d finding(s) (%d blocking) in %d packages\n",
@@ -193,6 +222,20 @@ func (tw *TableWriter) colorSeverity(s domain.Severity) string {
 	default:
 		return colorWhite + text + colorReset
 	}
+}
+
+// referenceURL returns the best link for a finding: its primary URL, or the
+// first resource link with a URL if no primary URL is set.
+func referenceURL(f domain.Finding) string {
+	if f.URL != "" {
+		return f.URL
+	}
+	for _, r := range f.Resources {
+		if r.URL != "" {
+			return r.URL
+		}
+	}
+	return ""
 }
 
 func (tw *TableWriter) countBlocking(result *domain.ScanResult) int {

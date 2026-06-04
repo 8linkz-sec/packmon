@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 
 type managerStoreStub struct {
 	db.Store
+	mu              sync.Mutex
 	statuses        []db.FeedSyncStatus
 	status          *db.FeedSyncStatus
 	getErr          error
@@ -30,6 +32,9 @@ func (s *managerStoreStub) PropagateSeverityViaAliases(context.Context) (int, er
 }
 
 func (s *managerStoreStub) GetFeedSyncStatus(_ context.Context, _ string) (*db.FeedSyncStatus, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if s.getErr != nil {
 		return nil, s.getErr
 	}
@@ -41,6 +46,9 @@ func (s *managerStoreStub) GetFeedSyncStatus(_ context.Context, _ string) (*db.F
 }
 
 func (s *managerStoreStub) UpsertFeedSyncStatus(_ context.Context, status *db.FeedSyncStatus) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if s.upsertErr != nil {
 		return s.upsertErr
 	}
@@ -65,6 +73,23 @@ func (s *permanentSyncerStub) Sync(context.Context, db.Store) (*SyncResult, erro
 type notifySyncerStub struct {
 	name   string
 	called chan struct{}
+}
+
+type blockingSyncerStub struct {
+	name    string
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s *blockingSyncerStub) Name() string { return s.name }
+
+func (s *blockingSyncerStub) Sync(context.Context, db.Store) (*SyncResult, error) {
+	select {
+	case s.entered <- struct{}{}:
+	default:
+	}
+	<-s.release
+	return &SyncResult{EntriesSynced: 1, EntriesTotal: 1}, nil
 }
 
 func (s *notifySyncerStub) Name() string { return s.name }
@@ -137,6 +162,53 @@ func TestManagerApplyConfigStartsPreviouslyDisabledFeed(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("enabled feed did not start after ApplyConfig")
 	}
+}
+
+func TestManagerApplyConfigSerializesOldAndNewSyncForSameFeed(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	store := &managerStoreStub{}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	manager := NewManager(store, logger, time.Hour)
+	oldSyncer := &blockingSyncerStub{name: "osv", entered: make(chan struct{}, 1), release: make(chan struct{})}
+	manager.Register(FeedConfig{
+		Syncer:  oldSyncer,
+		Mode:    FeedModeSelf,
+		Enabled: true,
+	})
+	manager.Start(ctx)
+
+	select {
+	case <-oldSyncer.entered:
+	case <-time.After(time.Second):
+		t.Fatal("old feed sync did not start")
+	}
+
+	newSyncer := &blockingSyncerStub{name: "osv", entered: make(chan struct{}, 1), release: make(chan struct{})}
+	manager.ApplyConfig(context.Background(), FeedConfig{
+		Syncer:  newSyncer,
+		Mode:    FeedModeSelf,
+		Enabled: true,
+	}, time.Hour)
+
+	select {
+	case <-newSyncer.entered:
+		t.Fatal("new feed sync overlapped old sync for the same feed")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(oldSyncer.release)
+
+	select {
+	case <-newSyncer.entered:
+	case <-time.After(time.Second):
+		t.Fatal("new feed sync did not start after old sync released")
+	}
+
+	close(newSyncer.release)
+	cancel()
+	manager.Wait()
 }
 
 func TestManagerApplyConfigRecordsDisabledAndExternalStatus(t *testing.T) {

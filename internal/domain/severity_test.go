@@ -35,7 +35,8 @@ func TestSeverityBlocks(t *testing.T) {
 		{SeverityHigh, SeverityHigh, true},
 		{SeverityMedium, SeverityHigh, false},
 		{SeverityLow, SeverityLow, true},
-		{SeverityUnknown, SeverityLow, false},
+		{SeverityUnknown, SeverityLow, true},
+		{SeverityUnknown, SeverityMedium, false},
 	}
 
 	for _, tt := range tests {

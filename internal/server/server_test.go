@@ -6,10 +6,12 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/8linkz/packmon/internal/config"
+	"github.com/8linkz/packmon/internal/db"
 )
 
 func TestRateLimitConfigUsesServerSettings(t *testing.T) {
@@ -85,6 +87,55 @@ func TestNewWiresServersAndRoutes(t *testing.T) {
 	}
 }
 
+func TestRateLimitRunsBeforeAuthForInvalidAPIKeys(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	store := &rateLimitAuthStore{}
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Port:               0,
+			Mode:               config.ModeProduction,
+			BlockThreshold:     "CRITICAL",
+			RateLimitPerMinute: 1,
+			RateLimitBurst:     1,
+			ReadTimeout:        time.Second,
+			WriteTimeout:       time.Second,
+			ShutdownTimeout:    time.Second,
+		},
+		Metrics:  config.MetricsConfig{Port: 0},
+		Admin:    config.AdminConfig{SessionTimeout: time.Hour},
+		FeedSync: config.FeedSyncConfig{Interval: time.Hour},
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := New(ctx, cfg, store, routePinger{}, logger, BuildInfo{}, nil, nil, nil)
+
+	req1 := httptest.NewRequest(http.MethodPost, "/api/v1/check", nil)
+	req1.Header.Set("User-Agent", "packmon-cli/test")
+	req1.Header.Set("Authorization", "Bearer invalid-one")
+	req1.RemoteAddr = "203.0.113.10:12345"
+	rec1 := httptest.NewRecorder()
+	srv.main.Handler.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusUnauthorized {
+		t.Fatalf("first invalid-key request status = %d, want 401; body=%s", rec1.Code, rec1.Body.String())
+	}
+
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/check", nil)
+	req2.Header.Set("User-Agent", "packmon-cli/test")
+	req2.Header.Set("Authorization", "Bearer invalid-two")
+	req2.RemoteAddr = "203.0.113.10:12345"
+	rec2 := httptest.NewRecorder()
+	srv.main.Handler.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusTooManyRequests {
+		t.Fatalf("second invalid-key request status = %d, want 429; body=%s", rec2.Code, rec2.Body.String())
+	}
+	if got := store.lookups.Load(); got != 1 {
+		t.Fatalf("FindAPIKeyByHash calls = %d, want 1", got)
+	}
+}
+
 func TestRunShutsDownOnContextCancel(t *testing.T) {
 	t.Parallel()
 
@@ -117,6 +168,16 @@ func TestRunShutsDownOnContextCancel(t *testing.T) {
 	if err := srv.Run(ctx); err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
+}
+
+type rateLimitAuthStore struct {
+	db.Store
+	lookups atomic.Int64
+}
+
+func (s *rateLimitAuthStore) FindAPIKeyByHash(context.Context, string) (*db.APIKey, error) {
+	s.lookups.Add(1)
+	return nil, nil
 }
 
 func TestSetShuttingDownMakesReadyEndpointUnavailable(t *testing.T) {

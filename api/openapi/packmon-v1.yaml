@@ -71,7 +71,7 @@ paths:
           required: true
           schema:
             type: string
-            enum: [osv, ghsa, openssf, vulncheck, cisakev, epss, socket]
+            enum: [osv, ghsa, openssf, malicious, vulncheck, cisakev, epss, socket]
       requestBody:
         required: true
         content:
@@ -316,7 +316,13 @@ components:
           type: boolean
         feed_status:
           type: string
-          enum: [healthy, degraded]
+          enum: [healthy, degraded, warning, error, disabled, pending]
+        parse_errors:
+          type: array
+          items:
+            type: string
+        findings_truncated:
+          type: boolean
         db_age_days:
           type: integer
           nullable: true
@@ -376,6 +382,10 @@ components:
         url:
           type: string
           format: uri
+        resources:
+          type: array
+          items:
+            $ref: "#/components/schemas/ResourceLink"
         fixed_version:
           type: string
           description: "Inclusive fix constraint for the vulnerability, for example >= 1.2.3 (vulnerability only)"
@@ -386,6 +396,16 @@ components:
         source:
           type: string
           description: "Feed source: osv, ghsa, vulncheck, openssf, socket, reversinglabs, endoflife.date, manual"
+
+    ResourceLink:
+      type: object
+      required: [label, url]
+      properties:
+        label:
+          type: string
+        url:
+          type: string
+          format: uri
 
     SyncResponse:
       type: object
@@ -426,6 +446,11 @@ components:
           type: string
         version_ranges:
           type: string
+        versions_affected:
+          type: string
+        references:
+          type: string
+          description: "JSON array of vulnerability reference objects with type/url"
         severity:
           type: string
         cvss_score:
@@ -452,6 +477,9 @@ components:
           type: string
         versions:
           type: string
+        reference_urls:
+          type: string
+          description: "JSON array of reference URLs"
         risk_type:
           type: string
         severity:
@@ -569,7 +597,7 @@ components:
           type: string
         status:
           type: string
-          enum: [healthy, warning, error]
+          enum: [healthy, warning, error, disabled, pending]
         last_sync_at:
           type: string
           format: date-time

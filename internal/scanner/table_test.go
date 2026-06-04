@@ -212,3 +212,62 @@ func TestTableWriterCountsConfiguredBlockingSeverity(t *testing.T) {
 		t.Fatalf("table output should count CRITICAL and HIGH findings as blocking\n%s", output)
 	}
 }
+
+func TestTableWriterShowsReferenceLinks(t *testing.T) {
+	result := &domain.ScanResult{
+		Mode:            "remote",
+		PackagesScanned: 2,
+		FindingsCount:   2,
+		Findings: []domain.Finding{
+			{
+				Name: "lodash", Version: "4.17.0", Ecosystem: domain.EcosystemNPM,
+				Type: domain.FindingTypeVulnerability, Severity: domain.SeverityHigh,
+				AdvisoryID: "GHSA-xxxx", Title: "Prototype pollution", Source: "ghsa",
+				URL: "https://github.com/advisories/GHSA-xxxx",
+			},
+			{
+				Name: "left-pad", Version: "1.0.0", Ecosystem: domain.EcosystemNPM,
+				Type: domain.FindingTypeVulnerability, Severity: domain.SeverityLow,
+				AdvisoryID: "CVE-2020-0001", Title: "Example", Source: "osv",
+				Resources: []domain.ResourceLink{{Label: "NVD", URL: "https://nvd.nist.gov/vuln/detail/CVE-2020-0001"}},
+			},
+		},
+	}
+
+	var out bytes.Buffer
+	if err := NewTableWriter(true).Write(&out, result); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	output := out.String()
+	for _, expected := range []string{
+		"References:",
+		"https://github.com/advisories/GHSA-xxxx",        // from f.URL
+		"https://nvd.nist.gov/vuln/detail/CVE-2020-0001", // fallback from Resources
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("table output missing reference %q\n%s", expected, output)
+		}
+	}
+}
+
+func TestTableWriterOmitsReferenceSectionWhenNoLinks(t *testing.T) {
+	result := &domain.ScanResult{
+		Mode:            "local",
+		PackagesScanned: 1,
+		FindingsCount:   1,
+		Findings: []domain.Finding{
+			{
+				Name: "foo", Version: "1.0.0", Ecosystem: domain.EcosystemNPM,
+				Type: domain.FindingTypeMalicious, Severity: domain.SeverityCritical,
+				Title: "malware", Source: "openssf",
+			},
+		},
+	}
+	var out bytes.Buffer
+	if err := NewTableWriter(true).Write(&out, result); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	if strings.Contains(out.String(), "References:") {
+		t.Fatalf("unexpected References section when no finding has a link\n%s", out.String())
+	}
+}

@@ -158,6 +158,23 @@ func (s *Store) UpsertLifecycleProducts(ctx context.Context, products []db.Lifec
 	})
 }
 
+func (s *Store) DeleteLifecycleProductsNotIn(ctx context.Context, productSlugs []string) (int, error) {
+	if len(productSlugs) == 0 {
+		return 0, nil
+	}
+	result, err := s.pool.Exec(ctx, `
+		DELETE FROM lifecycle_products
+		WHERE source = $1
+		  AND NOT (product_slug = ANY($2))`,
+		lifecycleSource,
+		productSlugs,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("postgres: delete stale lifecycle products: %w", err)
+	}
+	return int(result.RowsAffected()), nil
+}
+
 func (s *Store) FindLifecycleFindingsBatch(ctx context.Context, packages []db.PackageQuery, now time.Time) ([]domain.Finding, error) {
 	if len(packages) == 0 {
 		return nil, nil

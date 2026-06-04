@@ -16,23 +16,24 @@ func (s *Store) ExportSync(ctx context.Context, opts db.SyncExportOptions) (*db.
 	if snapshot.IsZero() {
 		snapshot = time.Now().UTC()
 	}
+	cursor := opts.EffectiveCursor()
 
-	vulns, err := s.exportSyncVulnerabilities(ctx, opts, snapshot)
+	vulns, err := s.exportSyncVulnerabilities(ctx, syncOptionsWithOffset(opts, cursor.Vulnerabilities), snapshot)
 	if err != nil {
 		return nil, err
 	}
 
-	malicious, err := s.exportSyncMalicious(ctx, opts, snapshot)
+	malicious, err := s.exportSyncMalicious(ctx, syncOptionsWithOffset(opts, cursor.Malicious), snapshot)
 	if err != nil {
 		return nil, err
 	}
 
-	reputation, err := s.exportSyncReputation(ctx, opts, snapshot)
+	reputation, err := s.exportSyncReputation(ctx, syncOptionsWithOffset(opts, cursor.Reputation), snapshot)
 	if err != nil {
 		return nil, err
 	}
 
-	lifecycle, err := s.exportSyncLifecycle(ctx, opts, snapshot)
+	lifecycle, err := s.exportSyncLifecycle(ctx, syncOptionsWithOffset(opts, cursor.Lifecycle), snapshot)
 	if err != nil {
 		return nil, err
 	}
@@ -41,6 +42,15 @@ func (s *Store) ExportSync(ctx context.Context, opts db.SyncExportOptions) (*db.
 	// any result set filled the limit exactly.
 	truncated := opts.Limit > 0 &&
 		(len(vulns) == opts.Limit || len(malicious) == opts.Limit || len(reputation) == opts.Limit || len(lifecycle) == opts.Limit)
+	var nextCursor *db.SyncCursor
+	if truncated {
+		nextCursor = &db.SyncCursor{
+			Vulnerabilities: cursor.Vulnerabilities + len(vulns),
+			Malicious:       cursor.Malicious + len(malicious),
+			Reputation:      cursor.Reputation + len(reputation),
+			Lifecycle:       cursor.Lifecycle + len(lifecycle),
+		}
+	}
 
 	return &db.SyncExport{
 		SyncedAt:        snapshot,
@@ -49,7 +59,14 @@ func (s *Store) ExportSync(ctx context.Context, opts db.SyncExportOptions) (*db.
 		Reputation:      reputation,
 		Lifecycle:       lifecycle,
 		Truncated:       truncated,
+		NextCursor:      nextCursor,
 	}, nil
+}
+
+func syncOptionsWithOffset(opts db.SyncExportOptions, offset int) db.SyncExportOptions {
+	opts.Offset = offset
+	opts.Cursor = db.SyncCursor{}
+	return opts
 }
 
 func (s *Store) exportSyncVulnerabilities(ctx context.Context, opts db.SyncExportOptions, snapshot time.Time) ([]db.SyncVulnerability, error) {
@@ -59,6 +76,8 @@ func (s *Store) exportSyncVulnerabilities(ctx context.Context, opts db.SyncExpor
 			ap.ecosystem,
 			ap.name,
 			ap.version_ranges::text,
+			ap.versions_affected::text,
+			COALESCE(vr.refs_json, '[]') AS refs_json,
 			v.severity,
 			v.cvss_score,
 			v.epss_score,
@@ -67,12 +86,26 @@ func (s *Store) exportSyncVulnerabilities(ctx context.Context, opts db.SyncExpor
 			(v.withdrawn IS NOT NULL) AS withdrawn
 		FROM vulnerabilities v
 		INNER JOIN affected_packages ap ON ap.vulnerability_id = v.id
+		LEFT JOIN LATERAL (
+			SELECT COALESCE(
+				json_agg(
+					json_build_object(
+						'type', COALESCE(type, ''),
+						'url', url
+					)
+					ORDER BY id
+				)::text,
+				'[]'
+			) AS refs_json
+			FROM vulnerability_references
+			WHERE vulnerability_id = v.id
+		) vr ON true
 		WHERE v.updated_at <= $1`
 
 	args := []any{snapshot}
 	if opts.Since != nil {
 		since := opts.Since.UTC()
-		query += fmt.Sprintf(` AND v.updated_at > $%d`, len(args)+1)
+		query += fmt.Sprintf(` AND v.updated_at >= $%d`, len(args)+1)
 		args = append(args, since)
 	}
 	if len(opts.Ecosystems) > 0 {
@@ -103,6 +136,8 @@ func (s *Store) exportSyncVulnerabilities(ctx context.Context, opts db.SyncExpor
 			&item.Ecosystem,
 			&item.Name,
 			&item.VersionRanges,
+			&item.VersionsAffected,
+			&item.References,
 			&item.Severity,
 			&item.CVSSScore,
 			&item.EPSSScore,
@@ -135,7 +170,7 @@ func (s *Store) exportSyncReputation(ctx context.Context, opts db.SyncExportOpti
 	args := []any{snapshot, db.ReputationSourceReversingLabs}
 	if opts.Since != nil {
 		since := opts.Since.UTC()
-		query += fmt.Sprintf(` AND updated_at > $%d`, len(args)+1)
+		query += fmt.Sprintf(` AND updated_at >= $%d`, len(args)+1)
 		args = append(args, since)
 	}
 	if len(opts.Ecosystems) > 0 {
@@ -204,17 +239,21 @@ func (s *Store) exportSyncMalicious(ctx context.Context, opts db.SyncExportOptio
 			ecosystem,
 			name,
 			COALESCE(versions::text, ''),
+			COALESCE(reference_urls::text, '[]'),
 			risk_type,
 			severity,
-			summary
+			summary,
+			(removed_at IS NOT NULL) AS withdrawn
 		FROM malicious_findings
 		WHERE updated_at <= $1`
 
 	args := []any{snapshot}
 	if opts.Since != nil {
 		since := opts.Since.UTC()
-		query += fmt.Sprintf(` AND updated_at > $%d`, len(args)+1)
+		query += fmt.Sprintf(` AND updated_at >= $%d`, len(args)+1)
 		args = append(args, since)
+	} else {
+		query += ` AND removed_at IS NULL`
 	}
 	if len(opts.Ecosystems) > 0 {
 		query += fmt.Sprintf(` AND ecosystem = ANY($%d)`, len(args)+1)
@@ -244,9 +283,11 @@ func (s *Store) exportSyncMalicious(ctx context.Context, opts db.SyncExportOptio
 			&item.Ecosystem,
 			&item.Name,
 			&item.Versions,
+			&item.ReferenceURLs,
 			&item.RiskType,
 			&item.Severity,
 			&item.Summary,
+			&item.Withdrawn,
 		); err != nil {
 			return nil, fmt.Errorf("postgres: scan sync malicious row: %w", err)
 		}
@@ -290,7 +331,7 @@ func (s *Store) exportSyncLifecycle(ctx context.Context, opts db.SyncExportOptio
 	args := []any{snapshot}
 	if opts.Since != nil {
 		since := opts.Since.UTC()
-		query += fmt.Sprintf(` AND GREATEST(m.updated_at, p.updated_at, r.updated_at) > $%d`, len(args)+1)
+		query += fmt.Sprintf(` AND GREATEST(m.updated_at, p.updated_at, r.updated_at) >= $%d`, len(args)+1)
 		args = append(args, since)
 	}
 	if len(opts.Ecosystems) > 0 {

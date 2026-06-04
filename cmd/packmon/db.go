@@ -29,12 +29,13 @@ func newDBCmd() *cobra.Command {
 
 func newDBSyncCmd() *cobra.Command {
 	var (
-		flagEcosystems string
-		flagFull       bool
-		flagSource     string
-		flagServer     string
-		flagAPIKey     string
-		flagTimeout    int
+		flagEcosystems   string
+		flagFull         bool
+		flagSource       string
+		flagServer       string
+		flagAPIKey       string
+		flagTimeout      int
+		flagInsecureHTTP bool
 	)
 
 	cmd := &cobra.Command{
@@ -46,8 +47,15 @@ func newDBSyncCmd() *cobra.Command {
 				return err
 			}
 
-			if strings.TrimSpace(strings.ToLower(flagSource)) != "server" {
-				return fmt.Errorf("db sync source %q is not yet implemented (supported: server)", flagSource)
+			source := "server"
+			if cfg != nil && cfg.DB.SyncSource != "" {
+				source = cfg.DB.SyncSource
+			}
+			if cmd.Flags().Changed("source") {
+				source = flagSource
+			}
+			if strings.TrimSpace(strings.ToLower(source)) != "server" {
+				return fmt.Errorf("db sync source %q is not yet implemented (supported: server)", source)
 			}
 
 			serverURL := ""
@@ -82,6 +90,17 @@ func newDBSyncCmd() *cobra.Command {
 			}
 			if cmd.Flags().Changed("api-key") {
 				apiKey = strings.TrimSpace(flagAPIKey)
+			}
+
+			insecureHTTP := false
+			if cfg != nil {
+				insecureHTTP = boolValue(cfg.InsecureAllowHTTP, false)
+			}
+			if strings.TrimSpace(os.Getenv("PACKMON_INSECURE_ALLOW_HTTP")) != "" {
+				insecureHTTP = envBool("PACKMON_INSECURE_ALLOW_HTTP")
+			}
+			if cmd.Flags().Changed("insecure-allow-http") {
+				insecureHTTP = flagInsecureHTTP
 			}
 
 			ecosystems := []string{}
@@ -120,11 +139,12 @@ func newDBSyncCmd() *cobra.Command {
 			defer closeSilently(store)
 
 			if err := sqlite.Sync(cmd.Context(), store, sqlite.SyncConfig{
-				ServerURL:  serverURL,
-				APIKey:     apiKey,
-				Ecosystems: ecosystems,
-				Full:       flagFull,
-				Timeout:    time.Duration(timeoutSeconds) * time.Second,
+				ServerURL:         serverURL,
+				APIKey:            apiKey,
+				Ecosystems:        ecosystems,
+				Full:              flagFull,
+				Timeout:           time.Duration(timeoutSeconds) * time.Second,
+				AllowInsecureHTTP: insecureHTTP,
 			}); err != nil {
 				return err
 			}
@@ -151,6 +171,7 @@ func newDBSyncCmd() *cobra.Command {
 	f.StringVar(&flagServer, "server", "", "feed server URL")
 	f.StringVar(&flagAPIKey, "api-key", "", "API key for authenticated sync requests")
 	f.IntVar(&flagTimeout, "timeout", 60, "sync timeout in seconds")
+	f.BoolVar(&flagInsecureHTTP, "insecure-allow-http", false, "allow plain http:// server URLs (sends bearer token in cleartext; opt-in)")
 
 	return cmd
 }

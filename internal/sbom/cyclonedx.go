@@ -1,6 +1,7 @@
 package sbom
 
 import (
+	"bytes"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
@@ -41,7 +42,10 @@ func ParseCycloneDX(r io.Reader) (*ParseResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	return parseCycloneDX(data)
+}
 
+func parseCycloneDX(data []byte) (*ParseResult, error) {
 	if IsCycloneDXJSON(data) {
 		var doc cyclonedxJSON
 		if err := json.Unmarshal(data, &doc); err != nil {
@@ -78,7 +82,7 @@ func IsCycloneDXJSON(data []byte) bool {
 
 // IsCycloneDXXML reports whether data looks like CycloneDX XML.
 func IsCycloneDXXML(data []byte) bool {
-	decoder := xml.NewDecoder(strings.NewReader(string(data)))
+	decoder := xml.NewDecoder(bytes.NewReader(data))
 	for {
 		tok, err := decoder.Token()
 		if err != nil {

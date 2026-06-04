@@ -60,6 +60,8 @@
           <option value="" {{if eq .Finding ""}}selected{{end}}>All findings</option>
           <option value="vulnerability" {{if eq .Finding "vulnerability"}}selected{{end}}>Vulnerabilities</option>
           <option value="malicious" {{if eq .Finding "malicious"}}selected{{end}}>Malicious packages</option>
+          <option value="supply_chain_risk" {{if eq .Finding "supply_chain_risk"}}selected{{end}}>Supply-chain risks</option>
+          <option value="lifecycle" {{if eq .Finding "lifecycle"}}selected{{end}}>Lifecycle</option>
         </select>
       </div>
     </form>
@@ -76,6 +78,11 @@
 
 {{define "search-results"}}
 {{if or .Query .Severity .Finding}}
+  {{if .Error}}
+  <div class="bg-red-50 border border-red-200 text-red-800 rounded-md px-4 py-3 text-sm">
+    {{.Error}}
+  </div>
+  {{else}}
   {{if .Results}}
   <div class="bg-white rounded-lg shadow border border-gray-200">
     <div class="px-5 py-3 border-b border-gray-200 text-sm text-gray-500">
@@ -84,6 +91,8 @@
       {{if .Severity}}{{if .Query}} with{{else}} for{{end}} severity {{.Severity}}{{end}}
       {{if eq .Finding "vulnerability"}}{{if or .Query .Severity}} in{{else}} for{{end}} vulnerabilities{{end}}
       {{if eq .Finding "malicious"}}{{if or .Query .Severity}} in{{else}} for{{end}} malicious packages{{end}}
+      {{if eq .Finding "supply_chain_risk"}}{{if or .Query .Severity}} in{{else}} for{{end}} supply-chain risks{{end}}
+      {{if eq .Finding "lifecycle"}}{{if or .Query .Severity}} in{{else}} for{{end}} lifecycle findings{{end}}
     </div>
     <div class="overflow-x-auto">
       <table class="min-w-full text-sm">
@@ -109,6 +118,7 @@
             <td class="px-5 py-2">
               {{if gt .VulnerabilityCount 0}}
               <div class="text-sm font-medium text-gray-900">{{if eq .VulnerabilityCount 1}}1 advisory{{else}}{{.VulnerabilityCount}} advisories{{end}}</div>
+              {{if .VulnerabilityIDs}}<div class="text-xs text-gray-500 mt-0.5">{{.VulnerabilityIDs}}</div>{{end}}
               {{else}}
               <span class="text-gray-400 text-sm">No known vulnerabilities</span>
               {{end}}
@@ -124,6 +134,7 @@
   <div class="bg-white rounded-lg shadow p-10 border border-gray-200 text-center text-gray-400">
     No packages found for the current search and filter.
   </div>
+  {{end}}
   {{end}}
 {{else}}
   <div class="bg-white rounded-lg shadow p-10 border border-gray-200 text-center text-gray-400">

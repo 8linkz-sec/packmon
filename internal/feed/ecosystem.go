@@ -68,18 +68,35 @@ var ghsaEcosystemMap = map[string]domain.Ecosystem{
 }
 
 // MapOpenSSFEcosystem maps an OpenSSF malicious-packages ecosystem string
-// to our canonical Ecosystem enum. OpenSSF uses directory names like
-// "npm", "pypi", "crates.io", "nuget".
+// to our canonical Ecosystem enum. OpenSSF commonly uses directory names like
+// "npm", "pypi", "crates.io", and "nuget"; aliases are accepted when entries
+// use OSV/GHSA-style names.
 func MapOpenSSFEcosystem(openssf string) (domain.Ecosystem, bool) {
 	eco, ok := openssfEcosystemMap[strings.ToLower(openssf)]
 	return eco, ok
 }
 
 var openssfEcosystemMap = map[string]domain.Ecosystem{
-	"npm":       domain.EcosystemNPM,
-	"pypi":      domain.EcosystemPyPI,
-	"crates.io": domain.EcosystemCargo,
-	"nuget":     domain.EcosystemNuGet,
+	"npm":            domain.EcosystemNPM,
+	"pypi":           domain.EcosystemPyPI,
+	"pip":            domain.EcosystemPyPI,
+	"go":             domain.EcosystemGo,
+	"maven":          domain.EcosystemMaven,
+	"crates.io":      domain.EcosystemCargo,
+	"cargo":          domain.EcosystemCargo,
+	"rust":           domain.EcosystemCargo,
+	"nuget":          domain.EcosystemNuGet,
+	"packagist":      domain.EcosystemComposer,
+	"composer":       domain.EcosystemComposer,
+	"rubygems":       domain.EcosystemGem,
+	"gem":            domain.EcosystemGem,
+	"pub":            domain.EcosystemPub,
+	"hex":            domain.EcosystemHex,
+	"cocoapods":      domain.EcosystemCocoaPods,
+	"swifturl":       domain.EcosystemSwiftPM,
+	"cran":           domain.EcosystemCRAN,
+	"actions":        domain.EcosystemGitHubActions,
+	"github actions": domain.EcosystemGitHubActions,
 }
 
 // OSVBucketEcosystems returns the list of OSV ecosystem names (as used

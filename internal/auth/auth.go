@@ -74,7 +74,7 @@ func BootstrapAdmin(ctx context.Context, store db.Store, initialPassword string,
 	_ = store.InsertAdminAuditLog(ctx, &db.AdminAuditEntry{
 		Action:  "admin_bootstrap",
 		Details: details,
-		IP:      "127.0.0.1",
+		IP:      "system",
 	})
 
 	logger.Info("initial admin password was set from environment")

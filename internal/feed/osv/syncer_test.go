@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -23,18 +24,25 @@ import (
 type osvStoreStub struct {
 	db.Store
 
-	mu           sync.Mutex
-	vulns        []*db.Vulnerability
-	malicious    []*db.MaliciousFinding
-	deletedVulns []string
-	status       *db.FeedSyncStatus
-	statusErr    error
-	upsertErr    error
+	mu               sync.Mutex
+	vulns            []*db.Vulnerability
+	malicious        []*db.MaliciousFinding
+	deletedVulns     []string
+	status           *db.FeedSyncStatus
+	statusHistory    []db.FeedSyncStatus
+	statusErr        error
+	upsertErr        error
+	vulnUpsertErrIDs map[string]error
 }
 
 func (s *osvStoreStub) UpsertVulnerability(_ context.Context, vuln *db.Vulnerability) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.vulnUpsertErrIDs != nil {
+		if err := s.vulnUpsertErrIDs[vuln.ID]; err != nil {
+			return err
+		}
+	}
 	s.vulns = append(s.vulns, vuln)
 	return nil
 }
@@ -70,6 +78,7 @@ func (s *osvStoreStub) UpsertFeedSyncStatus(_ context.Context, status *db.FeedSy
 	}
 	copy := *status
 	s.status = &copy
+	s.statusHistory = append(s.statusHistory, copy)
 	return nil
 }
 
@@ -157,6 +166,39 @@ func TestSync_ETagNotModified(t *testing.T) {
 	// No vulnerabilities should have been upserted.
 	if len(store.vulns) != 0 {
 		t.Errorf("UpsertVulnerability called %d times, want 0", len(store.vulns))
+	}
+}
+
+func TestSync_HTTPRateLimitRecordsFailure(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	store := &osvStoreStub{}
+	syncer := NewSyncer(store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	syncer.client = &http.Client{
+		Transport: &rewriteTransport{base: srv.URL, inner: http.DefaultTransport},
+		Timeout:   10 * time.Second,
+	}
+
+	result, err := syncer.Sync(context.Background(), store)
+	if err == nil {
+		t.Fatal("Sync() error = nil, want rate-limit failure")
+	}
+	if result != nil {
+		t.Fatalf("Sync() result = %+v, want nil on failed sync", result)
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.status == nil || store.status.LastSyncStatus != "error" {
+		t.Fatalf("status = %+v, want error", store.status)
+	}
+	if !strings.Contains(store.status.LastError, "429") {
+		t.Fatalf("LastError = %q, want HTTP 429 context", store.status.LastError)
 	}
 }
 
@@ -259,6 +301,70 @@ func TestSync_ParsesVulnerability(t *testing.T) {
 	}
 	if vuln.References[0].URL != "https://example.com/advisory" {
 		t.Errorf("References[0].URL = %q, want %q", vuln.References[0].URL, "https://example.com/advisory")
+	}
+}
+
+func TestSync_DoesNotPersistNewETagWhenArchiveImportPartiallyFails(t *testing.T) {
+	t.Parallel()
+
+	entry := osvEntry{
+		ID:        "GHSA-import-fails",
+		Summary:   "Import failure fixture",
+		Published: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
+		Modified:  time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC),
+		Affected: []osvAffected{
+			{Package: osvPackage{Ecosystem: "npm", Name: "broken"}},
+		},
+	}
+	entryJSON, _ := json.Marshal(entry)
+	zipData := createZIP(t, map[string][]byte{
+		"GHSA-import-fails.json": entryJSON,
+	})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/npm/all.zip" {
+			w.Header().Set("ETag", `"new-etag"`)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(zipData)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	oldMeta, _ := json.Marshal(struct {
+		ETags map[string]string `json:"ecosystem_etags"`
+	}{ETags: map[string]string{"npm": `"old-etag"`}})
+	store := &osvStoreStub{
+		status: &db.FeedSyncStatus{
+			FeedName: FeedName,
+			Metadata: oldMeta,
+		},
+		vulnUpsertErrIDs: map[string]error{"GHSA-import-fails": errors.New("db down")},
+	}
+	syncer := NewSyncer(store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	syncer.client = &http.Client{
+		Transport: &rewriteTransport{base: srv.URL, inner: http.DefaultTransport},
+		Timeout:   10 * time.Second,
+	}
+
+	result, err := syncer.Sync(context.Background(), store)
+	if err == nil {
+		t.Fatal("Sync() error = nil, want partial import failure")
+	}
+	if result != nil {
+		t.Fatalf("Sync() result = %+v, want nil on failed sync", result)
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	for _, status := range store.statusHistory {
+		if bytes.Contains(status.Metadata, []byte("new-etag")) {
+			t.Fatalf("persisted new ETag despite failed import: %s", status.Metadata)
+		}
+	}
+	if store.status == nil || store.status.LastSyncStatus != "error" {
+		t.Fatalf("status = %+v, want error", store.status)
 	}
 }
 
@@ -393,6 +499,12 @@ func TestOSVMappingHelpersCoverMaliciousAndSeverityBranches(t *testing.T) {
 			t.Fatalf("classifyMaliciousRiskType(%q,%q) = %q, want %q", tt.summary, tt.details, got, tt.want)
 		}
 	}
+	if got := classifyMaliciousRiskType(&osvEntry{
+		Summary:          "generic malicious package",
+		DatabaseSpecific: json.RawMessage(`{"classification":"typo-squatting"}`),
+	}); got != "typosquatting" {
+		t.Fatalf("classifyMaliciousRiskType(database_specific) = %q, want typosquatting", got)
+	}
 
 	affected := osvAffected{
 		Package:          osvPackage{Ecosystem: "npm", Name: "left-pad"},
@@ -421,6 +533,11 @@ func TestOSVMappingHelpersCoverMaliciousAndSeverityBranches(t *testing.T) {
 	})
 	if len(findings) != 2 || findings[1].ID != "OSV-MAL-1" {
 		t.Fatalf("mapToMaliciousFindings() = %+v", findings)
+	}
+	affected.DatabaseSpecific = json.RawMessage(`{"categories":["malicious","dependency_confusion"],"source":"https://example.test/source"}`)
+	findings = mapToMaliciousFindings(&osvEntry{ID: "OSV-MAL-RISK", Summary: "malware", Affected: []osvAffected{affected}})
+	if len(findings) != 1 || findings[0].RiskType != "supply_chain" {
+		t.Fatalf("mapToMaliciousFindings(affected risk) = %+v, want supply_chain", findings)
 	}
 
 	if got := mapSeverity(&osvEntry{DatabaseSpecific: json.RawMessage(`{"severity":"moderate"}`)}); got != "MEDIUM" {

@@ -13,6 +13,8 @@ CREATE TABLE IF NOT EXISTS vulnerabilities_local (
 	ecosystem      TEXT NOT NULL,
 	name           TEXT NOT NULL,
 	version_ranges TEXT,                  -- JSON string
+	versions_affected TEXT,              -- JSON string
+	references_json TEXT,                 -- JSON string
 	severity       TEXT NOT NULL,
 	cvss_score     REAL,
 	epss_score     REAL,
@@ -31,6 +33,7 @@ CREATE TABLE IF NOT EXISTS malicious_local (
 	ecosystem TEXT NOT NULL,
 	name      TEXT NOT NULL,
 	versions  TEXT,                        -- JSON string, NULL = all versions
+	reference_urls TEXT,                   -- JSON string
 	risk_type TEXT NOT NULL,
 	severity  TEXT NOT NULL DEFAULT 'CRITICAL',
 	summary   TEXT

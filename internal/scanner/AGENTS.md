@@ -25,17 +25,15 @@ Read `AGENTS.md` (root) and `DESIGN.md` first.
 
 ## Current open landmines (see Audit.md)
 
-> Status (2026-05-29): the items in this section were addressed across the
-> Audit.md "Fix-Runde" passes. Audit.md is authoritative; project-wide only the
-> external GitLab-runner test remains open. Keep the notes below as guardrails
-> so the fixes are not regressed.
+Audit.md is authoritative; project-wide only the external GitLab-runner test is
+documented as an external validation gap. Keep these guardrails in mind:
 
-- **M6:** exit code 3 is never emitted -- non-blocking findings currently return
-  0. CI/N8N consumers distinguish 0 from 3. Emit 3 when findings exist but none
-  block, and fix the aggregation so a 3 does not dominate a sibling blocking 1.
-- **M7:** the auto-mode local fallback is silent. Add the warning.
-- **L1:** the scan pipeline emits no DEBUG logs. DESIGN.md sec 7.1 expects
-  "found lock file path=... ecosystem=..." and "parsed N packages". Add them.
+- Exit code 3 is part of the CI contract for non-blocking findings; do not fold
+  it back into exit code 0.
+- Auto-mode local fallback must remain user-visible so stale local DB data is
+  not mistaken for a fresh remote result.
+- Explicit SBOM inputs may produce skipped-component warnings; keep them visible
+  in CLI terminal output and JSON via the canonical scan result.
 ## Tests
 
 ```bash

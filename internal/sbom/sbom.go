@@ -1,7 +1,6 @@
 package sbom
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 
@@ -35,9 +34,9 @@ func Parse(r io.Reader) (*ParseResult, error) {
 	}
 	switch {
 	case IsCycloneDXJSON(data), IsCycloneDXXML(data):
-		return ParseCycloneDX(bytes.NewReader(data))
+		return parseCycloneDX(data)
 	case IsSPDXJSON(data):
-		return ParseSPDXJSON(bytes.NewReader(data))
+		return parseSPDXJSON(data)
 	default:
 		return nil, fmt.Errorf("unsupported SBOM format")
 	}

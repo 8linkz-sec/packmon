@@ -152,6 +152,9 @@ func formatTimeAgo(t time.Time) string {
 		return "never"
 	}
 	d := time.Since(t)
+	if d < 0 {
+		return formatTimeUntil(-d)
+	}
 	switch {
 	case d < time.Minute:
 		return "just now"
@@ -173,6 +176,31 @@ func formatTimeAgo(t time.Time) string {
 			return "1 day ago"
 		}
 		return fmt.Sprintf("%d days ago", days)
+	}
+}
+
+func formatTimeUntil(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return "in less than a minute"
+	case d < time.Hour:
+		m := int(d.Minutes())
+		if m == 1 {
+			return "in 1 minute"
+		}
+		return fmt.Sprintf("in %d minutes", m)
+	case d < 24*time.Hour:
+		h := int(d.Hours())
+		if h == 1 {
+			return "in 1 hour"
+		}
+		return fmt.Sprintf("in %d hours", h)
+	default:
+		days := int(d.Hours() / 24)
+		if days == 1 {
+			return "in 1 day"
+		}
+		return fmt.Sprintf("in %d days", days)
 	}
 }
 

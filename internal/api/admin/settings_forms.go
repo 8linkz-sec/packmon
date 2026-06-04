@@ -26,6 +26,9 @@ func (h *AdminHandler) HandleSystemSettingsSave(w http.ResponseWriter, r *http.R
 		http.Error(w, "invalid CSRF token", http.StatusForbidden)
 		return
 	}
+	if !h.requireBootstrapPasswordRotated(w, r, "/admin/settings") {
+		return
+	}
 
 	blockThreshold, ok := normalizeSystemBlockThreshold(r.PostForm.Get("block_threshold"))
 	if !ok {

@@ -154,14 +154,25 @@ func TestNPMParser_Parse(t *testing.T) {
 				t.Fatalf("got %d packages, want %d", len(pkgs), tt.wantCount)
 			}
 
+			seen := make(map[string]string, len(pkgs))
 			for _, pkg := range pkgs {
 				if pkg.Ecosystem != domain.EcosystemNPM {
 					t.Errorf("package %q has ecosystem %q, want %q", pkg.Name, pkg.Ecosystem, domain.EcosystemNPM)
 				}
+				seen[pkg.Name] = pkg.Version
 				if wantVer, ok := tt.wantPkgs[pkg.Name]; ok {
 					if pkg.Version != wantVer {
 						t.Errorf("package %q version = %q, want %q", pkg.Name, pkg.Version, wantVer)
 					}
+				} else if tt.wantPkgs != nil {
+					t.Errorf("unexpected package parsed from pnpm lock: %s@%s", pkg.Name, pkg.Version)
+				}
+			}
+			for wantName, wantVersion := range tt.wantPkgs {
+				if gotVersion, ok := seen[wantName]; !ok {
+					t.Errorf("missing package %s@%s", wantName, wantVersion)
+				} else if gotVersion != wantVersion {
+					t.Errorf("package %q version = %q, want %q", wantName, gotVersion, wantVersion)
 				}
 			}
 		})
@@ -506,6 +517,36 @@ packages:
 			wantErr: false,
 		},
 		{
+			name: "v9 package keys with peer suffix",
+			input: `lockfileVersion: '9.0'
+packages:
+  vue@3.4.0(typescript@5.4.0):
+    resolution: {integrity: sha512-abc}
+  '@scope/pkg@1.2.3(@types/node@20.0.0)':
+    resolution: {integrity: sha512-def}
+`,
+			wantCount: 2,
+			wantPkgs: map[string]string{
+				"vue":        "3.4.0",
+				"@scope/pkg": "1.2.3",
+			},
+			wantErr: false,
+		},
+		{
+			name: "v9 snapshots only",
+			input: `lockfileVersion: '9.0'
+snapshots:
+  vue@3.4.0(typescript@5.4.0): {}
+  '@scope/pkg@1.2.3(@types/node@20.0.0)': {}
+`,
+			wantCount: 2,
+			wantPkgs: map[string]string{
+				"vue":        "3.4.0",
+				"@scope/pkg": "1.2.3",
+			},
+			wantErr: false,
+		},
+		{
 			name: "v5 format with slash separator",
 			input: `lockfileVersion: 5
 packages:
@@ -559,6 +600,34 @@ packages:
 				}
 			}
 		})
+	}
+}
+
+func TestPnpmParserMarksDevEntries(t *testing.T) {
+	t.Parallel()
+
+	input := `lockfileVersion: '9.0'
+packages:
+  prod@1.0.0: {}
+  dev-tool@2.0.0:
+    dev: true
+snapshots:
+  snapshot-dev@3.0.0:
+    dev: true
+`
+	pkgs, err := NewPnpmParser().Parse(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	byName := packagesByName(pkgs)
+	if byName["prod"].Dev {
+		t.Fatalf("prod package marked dev: %+v", byName["prod"])
+	}
+	if !byName["dev-tool"].Dev {
+		t.Fatalf("dev-tool package not marked dev: %+v", byName["dev-tool"])
+	}
+	if !byName["snapshot-dev"].Dev {
+		t.Fatalf("snapshot-dev package not marked dev: %+v", byName["snapshot-dev"])
 	}
 }
 

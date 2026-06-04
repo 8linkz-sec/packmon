@@ -1,6 +1,8 @@
 package vulncheck
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -62,28 +64,36 @@ func TestDownloadBulkMapsEntriesAndSkipsInvalidCVEs(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != nvd2Endpoint {
-			t.Fatalf("path = %q, want %q", r.URL.Path, nvd2Endpoint)
+		switch r.URL.Path {
+		case nvd2Endpoint:
+			if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
+				t.Fatalf("Authorization = %q", got)
+			}
+			if got := r.Header.Get("User-Agent"); got == "" {
+				t.Fatal("User-Agent header is empty")
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"data":[{"filename":"vulncheck-nvd2.zip","url":"`+absoluteTestURL(r, "/bulk/vulncheck-nvd2.zip")+`"}]}`)
+		case "/bulk/vulncheck-nvd2.zip":
+			if got := r.Header.Get("Authorization"); got != "" {
+				t.Fatalf("backup download leaked Authorization header = %q", got)
+			}
+			w.Header().Set("Content-Type", "application/zip")
+			writeVulnCheckZip(t, w, `{
+			  "data": [
+			    {
+			      "id": "CVE-2026-0001",
+			      "cvss": {"base_score": 9.8, "vector_string": "CVSS:3.1/...", "version": "3.1"},
+			      "exploits": [{"url": "https://example.test/poc", "name": "poc", "source": "xdb"}],
+			      "url": "https://vulncheck.test/CVE-2026-0001"
+			    },
+			    {"id": "VC-2026-ignored"},
+			    {"cve_id": "CVE-2026-0002", "url": "https://vulncheck.test/CVE-2026-0002"}
+			  ]
+			}`)
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
 		}
-		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
-			t.Fatalf("Authorization = %q", got)
-		}
-		if got := r.Header.Get("User-Agent"); got == "" {
-			t.Fatal("User-Agent header is empty")
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{
-		  "data": [
-		    {
-		      "id": "CVE-2026-0001",
-		      "cvss": {"base_score": 9.8, "vector_string": "CVSS:3.1/...", "version": "3.1"},
-		      "exploits": [{"url": "https://example.test/poc", "name": "poc", "source": "xdb"}],
-		      "url": "https://vulncheck.test/CVE-2026-0001"
-		    },
-		    {"id": "VC-2026-ignored"},
-		    {"cve_id": "CVE-2026-0002", "url": "https://vulncheck.test/CVE-2026-0002"}
-		  ]
-		}`)
 	}))
 	defer server.Close()
 
@@ -152,7 +162,14 @@ func TestSyncDownloadsAndEnrichesInBatches(t *testing.T) {
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write(body)
+		switch r.URL.Path {
+		case nvd2Endpoint:
+			_, _ = io.WriteString(w, `{"data":[{"url":"`+absoluteTestURL(r, "/bulk.json")+`"}]}`)
+		case "/bulk.json":
+			_, _ = w.Write(body)
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
 	}))
 	defer server.Close()
 
@@ -170,6 +187,36 @@ func TestSyncDownloadsAndEnrichesInBatches(t *testing.T) {
 	}
 }
 
+func TestSyncStreamsZipBackup(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case nvd2Endpoint:
+			_, _ = io.WriteString(w, `{"data":[{"url":"`+absoluteTestURL(r, "/bulk.zip")+`"}]}`)
+		case "/bulk.zip":
+			w.Header().Set("Content-Type", "application/zip")
+			writeVulnCheckZip(t, w, `{"data":[{"id":"CVE-2026-4242"}]}`)
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	store := &vulncheckStoreStub{}
+	syncer := NewSyncer("test-key", slog.New(slog.NewTextHandler(io.Discard, nil)), WithBaseURL(server.URL))
+	result, err := syncer.Sync(context.Background(), store)
+	if err != nil {
+		t.Fatalf("Sync(zip): %v", err)
+	}
+	if result.EntriesTotal != 1 || result.EntriesSynced != 1 {
+		t.Fatalf("sync result = %+v, want 1/1", result)
+	}
+	if len(store.batchSizes) != 1 || store.batchSizes[0] != 1 {
+		t.Fatalf("batch sizes = %v, want [1]", store.batchSizes)
+	}
+}
+
 func TestSyncReportsContextAndEnrichErrors(t *testing.T) {
 	t.Parallel()
 
@@ -180,8 +227,15 @@ func TestSyncReportsContextAndEnrichErrors(t *testing.T) {
 	}
 	syncCtx, cancelSync := context.WithCancel(context.Background())
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write(body)
-		cancelSync()
+		switch r.URL.Path {
+		case nvd2Endpoint:
+			_, _ = io.WriteString(w, `{"data":[{"url":"`+absoluteTestURL(r, "/bulk.json")+`"}]}`)
+		case "/bulk.json":
+			_, _ = w.Write(body)
+			cancelSync()
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
 	}))
 	defer server.Close()
 
@@ -193,6 +247,30 @@ func TestSyncReportsContextAndEnrichErrors(t *testing.T) {
 	store := &vulncheckStoreStub{err: errors.New("db down")}
 	if _, err := syncer.Sync(context.Background(), store); err == nil || !strings.Contains(err.Error(), "enrich") {
 		t.Fatalf("Sync(enrich error) = %v, want enrich error", err)
+	}
+}
+
+func absoluteTestURL(r *http.Request, path string) string {
+	return "http://" + r.Host + path
+}
+
+func writeVulnCheckZip(t *testing.T, w io.Writer, payload string) {
+	t.Helper()
+
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	file, err := zw.Create("vulncheck-nvd2.json")
+	if err != nil {
+		t.Fatalf("create zip entry: %v", err)
+	}
+	if _, err := io.WriteString(file, payload); err != nil {
+		t.Fatalf("write zip entry: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("close zip: %v", err)
+	}
+	if _, err := w.Write(buf.Bytes()); err != nil {
+		t.Fatalf("write zip response: %v", err)
 	}
 }
 

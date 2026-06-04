@@ -22,7 +22,7 @@
       "typeVersion": 1,
       "position": [540, 260],
       "parameters": {
-        "command": "packmon scan {{$json.body.path || $env.PACKMON_SCAN_PATH}} --output-json /tmp/packmon-scan.json"
+        "command": "packmon scan {{$env.PACKMON_SCAN_PATH}} --output-json /tmp/packmon-scan.json"
       }
     },
     {
@@ -33,7 +33,7 @@
       "position": [820, 260],
       "parameters": {
         "respondWith": "json",
-        "responseBody": "={\"workflow\":\"on-demand-scan\",\"status\":\"queued\",\"path\":$json.body.path || $env.PACKMON_SCAN_PATH}"
+        "responseBody": "={\"workflow\":\"on-demand-scan\",\"status\":\"queued\",\"path\":$env.PACKMON_SCAN_PATH}"
       }
     }
   ],

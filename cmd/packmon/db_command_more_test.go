@@ -206,6 +206,18 @@ func TestDBSyncCommandRejectsUnsupportedSourceBeforeOpeningDatabase(t *testing.T
 	}
 }
 
+func TestDBSyncCommandReadsConfigSource(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	if err := os.WriteFile(defaultCLIConfigFile, []byte("db:\n  sync_source: osv\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	err := newDBSyncCmd().Execute()
+	if err == nil || !strings.Contains(err.Error(), `source "osv"`) {
+		t.Fatalf("db sync config source error = %v, want unsupported osv source", err)
+	}
+}
+
 func TestDBSyncCommandRequiresServerURL(t *testing.T) {
 	isolateCLIConfigDiscovery(t)
 
@@ -240,7 +252,7 @@ func TestDBSyncCommandFetchesFromServerAndPrintsSummary(t *testing.T) {
 	defer srv.Close()
 
 	cmd := newDBSyncCmd()
-	cmd.SetArgs([]string{"--server", srv.URL, "--api-key", "secret", "--ecosystems", " npm,go ", "--full", "--timeout", "3"})
+	cmd.SetArgs([]string{"--server", srv.URL, "--api-key", "secret", "--ecosystems", " npm,go ", "--full", "--timeout", "3", "--insecure-allow-http"})
 	output := captureStdout(t, func() {
 		if err := cmd.Execute(); err != nil {
 			t.Fatalf("db sync: %v", err)
@@ -264,11 +276,30 @@ func TestDBSyncCommandFetchesFromServerAndPrintsSummary(t *testing.T) {
 	}
 }
 
+func TestDBSyncCommandRejectsInsecureHTTPWithoutOptIn(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	dbDir := t.TempDir()
+	t.Setenv("PACKMON_DB_PATH", dbDir)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Fatal("db sync sent request over plain HTTP without opt-in")
+	}))
+	defer srv.Close()
+
+	cmd := newDBSyncCmd()
+	cmd.SetArgs([]string{"--server", srv.URL, "--api-key", "secret"})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "refusing to use insecure server URL") {
+		t.Fatalf("db sync insecure HTTP error = %v", err)
+	}
+}
+
 func TestDBSyncCommandUsesConfigAndEnvironmentPrecedence(t *testing.T) {
 	isolateCLIConfigDiscovery(t)
 	dbDir := t.TempDir()
 	t.Setenv("PACKMON_DB_PATH", dbDir)
 	t.Setenv("PACKMON_SYNC_KEY", "config-env-key")
+	t.Setenv("PACKMON_INSECURE_ALLOW_HTTP", "true")
 
 	var requests []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

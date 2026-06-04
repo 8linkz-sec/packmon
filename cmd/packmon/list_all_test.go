@@ -709,7 +709,7 @@ func TestRunListAllHTMLIncludesDockerImages(t *testing.T) {
 	if _, err := runListAll(context.Background(), settings); err != nil {
 		t.Fatalf("runListAll: %v", err)
 	}
-	data, err := os.ReadFile(htmlPath)
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
 	if err != nil {
 		t.Fatalf("read HTML: %v", err)
 	}
@@ -823,7 +823,7 @@ func TestListAllHTMLRendersScopeSummaryAndFindingMetadata(t *testing.T) {
 	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
 		t.Fatalf("writeListAllHTML: %v", err)
 	}
-	data, err := os.ReadFile(htmlPath)
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
 	if err != nil {
 		t.Fatalf("read HTML: %v", err)
 	}

@@ -290,6 +290,9 @@ func TestLookupBatchDrainsTokensOnRateLimit(t *testing.T) {
 	if w.tokens != 0 {
 		t.Fatalf("tokens = %d, want drained tokens after 429", w.tokens)
 	}
+	if w.fractionalTokens != 0 {
+		t.Fatalf("fractionalTokens = %.2f, want drained fractional tokens after 429", w.fractionalTokens)
+	}
 }
 
 func TestProcessJobMarksUnsupportedWithoutCallingAPI(t *testing.T) {
@@ -478,6 +481,11 @@ func TestWorkerHelperBranches(t *testing.T) {
 	w.returnToken()
 	if w.tokens != w.maxTokens {
 		t.Fatalf("tokens after capped return = %d, want %d", w.tokens, w.maxTokens)
+	}
+	w.fractionalTokens = 0.75
+	w.drainTokens()
+	if w.tokens != 0 || w.fractionalTokens != 0 {
+		t.Fatalf("drained tokens = %d fractional %.2f, want 0/0", w.tokens, w.fractionalTokens)
 	}
 
 	store := &fakeStore{resetCount: 2}

@@ -30,6 +30,7 @@ type ScanResult struct {
 	DBStale           bool              `json:"db_stale"`
 	Summary           ScanSummary       `json:"summary"`
 	Findings          []Finding         `json:"findings"`
+	ParseErrors       []string          `json:"parse_errors,omitempty"`
 	FindingsTruncated bool              `json:"findings_truncated,omitempty"`
 	FeedVersions      map[string]string `json:"feed_versions"`
 	ManualCount       int               `json:"manual_advisories_count"`

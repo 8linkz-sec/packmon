@@ -2,6 +2,7 @@ package config
 
 import (
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 )
@@ -213,6 +214,52 @@ func TestSetFeedSettingsUpdatesEveryFeed(t *testing.T) {
 	if err := cfg.SetFeedSettings(FeedSettings{Name: "osv", Mode: FeedMode("bad")}); err == nil {
 		t.Fatal("SetFeedSettings(invalid mode) error = nil, want error")
 	}
+}
+
+func TestFeedSettingsConcurrentReadWriteRaceFree(t *testing.T) {
+	cfg := &Config{
+		FeedSync: FeedSyncConfig{Interval: time.Hour},
+		Feeds: FeedsConfig{
+			VulnCheckEnabled: true,
+			VulnCheckMode:    FeedModeSelf,
+			VulnCheckAPIKey:  "initial",
+			OSVEnabled:       true,
+			OSVMode:          FeedModeSelf,
+			OSVInterval:      time.Minute,
+		},
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for n := 0; n < 200; n++ {
+				if err := cfg.SetFeedSettings(FeedSettings{
+					Name:         "vulncheck",
+					Enabled:      n%2 == 0,
+					Mode:         FeedModeSelf,
+					SyncInterval: time.Duration(n+1) * time.Minute,
+					APIKey:       "key",
+				}); err != nil {
+					t.Errorf("SetFeedSettings writer %d: %v", id, err)
+				}
+			}
+		}(i)
+	}
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for n := 0; n < 200; n++ {
+				_, _ = cfg.FeedSettings("vulncheck")
+				_ = cfg.FeedSettingsList()
+				_ = cfg.EffectiveFeedInterval("vulncheck")
+				_ = cfg.FeedsSnapshot()
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 func TestRuntimeSettingsUpdateIgnoresEmptyValues(t *testing.T) {

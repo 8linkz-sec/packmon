@@ -32,7 +32,11 @@ func (s *Store) UpsertManualAdvisory(ctx context.Context, advisory *db.ManualAdv
 
 func (s *Store) DeleteManualAdvisory(ctx context.Context, id string) error {
 	return withTx(ctx, s.pool, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `DELETE FROM malicious_findings WHERE id = $1 AND source = 'manual'`, id); err != nil {
+		if _, err := tx.Exec(ctx, `
+			UPDATE malicious_findings
+			SET removed_at = COALESCE(removed_at, NOW()),
+			    updated_at = NOW()
+			WHERE id = $1 AND source = 'manual'`, id); err != nil {
 			return fmt.Errorf("delete manual malicious finding %s: %w", id, err)
 		}
 		if _, err := tx.Exec(ctx, `
@@ -65,7 +69,7 @@ func (s *Store) ListManualAdvisories(ctx context.Context, limit int) ([]db.Manua
 				COALESCE(description, '') AS description,
 				updated_at
 			FROM malicious_findings
-			WHERE source = 'manual'
+			WHERE source = 'manual' AND removed_at IS NULL
 
 			UNION ALL
 
@@ -121,7 +125,11 @@ func (s *Store) ListManualAdvisories(ctx context.Context, limit int) ([]db.Manua
 }
 
 func (s *Store) deleteManualMaliciousFinding(ctx context.Context, id string) error {
-	if _, err := s.pool.Exec(ctx, `DELETE FROM malicious_findings WHERE id = $1 AND source = 'manual'`, id); err != nil {
+	if _, err := s.pool.Exec(ctx, `
+		UPDATE malicious_findings
+		SET removed_at = COALESCE(removed_at, NOW()),
+		    updated_at = NOW()
+		WHERE id = $1 AND source = 'manual'`, id); err != nil {
 		return fmt.Errorf("postgres: delete manual malicious finding %s: %w", id, err)
 	}
 	return nil

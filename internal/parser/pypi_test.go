@@ -253,6 +253,40 @@ version = "2.0.0"
 	}
 }
 
+func TestPoetryParserMarksDevGroups(t *testing.T) {
+	t.Parallel()
+
+	input := `[[package]]
+name = "requests"
+version = "2.31.0"
+category = "main"
+
+[[package]]
+name = "pytest"
+version = "8.0.0"
+category = "dev"
+
+[[package]]
+name = "coverage"
+version = "7.5.0"
+groups = ["dev"]
+`
+	pkgs, err := NewPoetryParser().Parse(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	dev := make(map[string]bool, len(pkgs))
+	for _, pkg := range pkgs {
+		dev[pkg.Name] = pkg.Dev
+	}
+	if dev["requests"] {
+		t.Fatalf("requests marked dev")
+	}
+	if !dev["pytest"] || !dev["coverage"] {
+		t.Fatalf("dev map = %+v, want pytest and coverage marked dev", dev)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // UVParser
 // ---------------------------------------------------------------------------
@@ -334,6 +368,40 @@ version = "4.3.0"
 			}
 			assertPackages(t, pkgs, tt.wantPkgs, domain.EcosystemPyPI)
 		})
+	}
+}
+
+func TestUVParserMarksDevGroups(t *testing.T) {
+	t.Parallel()
+
+	input := `[[package]]
+name = "httpx"
+version = "0.27.0"
+groups = ["main"]
+
+[[package]]
+name = "ruff"
+version = "0.4.0"
+groups = ["dev"]
+
+[[package]]
+name = "pytest"
+version = "8.0.0"
+dev = true
+`
+	pkgs, err := NewUVParser().Parse(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	dev := make(map[string]bool, len(pkgs))
+	for _, pkg := range pkgs {
+		dev[pkg.Name] = pkg.Dev
+	}
+	if dev["httpx"] {
+		t.Fatalf("httpx marked dev")
+	}
+	if !dev["ruff"] || !dev["pytest"] {
+		t.Fatalf("dev map = %+v, want ruff and pytest marked dev", dev)
 	}
 }
 
@@ -428,6 +496,28 @@ flask==3.0.0 ; python_version >= "3.8"
 			wantCount: 1,
 			wantPkgs:  map[string]string{"requests": "2.31.0"},
 		},
+		{
+			name: "known include and constraint directives skipped",
+			input: `-r base.txt
+--requirement dev.txt
+-c constraints.txt
+requests==2.31.0
+`,
+			wantCount: 1,
+			wantPkgs:  map[string]string{"requests": "2.31.0"},
+		},
+		{
+			name: "line continuations and editable pinned entries",
+			input: `requests[security]==2.31.0 \
+    ; python_version >= "3.8"
+-e git+https://example.test/acme/demo.git@v1.2.3#egg=demo_pkg
+`,
+			wantCount: 2,
+			wantPkgs: map[string]string{
+				"requests": "2.31.0",
+				"demo-pkg": "1.2.3",
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -452,6 +542,19 @@ flask==3.0.0 ; python_version >= "3.8"
 			}
 			assertPackages(t, pkgs, tt.wantPkgs, domain.EcosystemPyPI)
 		})
+	}
+}
+
+func TestRequirementsParserAcceptsLongLines(t *testing.T) {
+	t.Parallel()
+
+	input := "requests==2.31.0 # " + strings.Repeat("x", 70*1024) + "\n"
+	pkgs, err := NewRequirementsParser().Parse(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("Parse(long line) error = %v", err)
+	}
+	if len(pkgs) != 1 || pkgs[0].Name != "requests" || pkgs[0].Version != "2.31.0" {
+		t.Fatalf("Parse(long line) = %+v, want requests 2.31.0", pkgs)
 	}
 }
 

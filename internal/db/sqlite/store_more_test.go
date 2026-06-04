@@ -103,13 +103,25 @@ func TestMigrateSchemaAddsRowKeyToOldVulnerabilityTable(t *testing.T) {
 	if hasRowKey, err := tableHasColumn(rawDB, "vulnerabilities_local", "row_key"); err != nil || !hasRowKey {
 		t.Fatalf("tableHasColumn(after) = %v, %v; want true nil", hasRowKey, err)
 	}
+	if hasVersionsAffected, err := tableHasColumn(rawDB, "vulnerabilities_local", "versions_affected"); err != nil || !hasVersionsAffected {
+		t.Fatalf("tableHasColumn(versions_affected) = %v, %v; want true nil", hasVersionsAffected, err)
+	}
+	if hasReferences, err := tableHasColumn(rawDB, "vulnerabilities_local", "references_json"); err != nil || !hasReferences {
+		t.Fatalf("tableHasColumn(references_json) = %v, %v; want true nil", hasReferences, err)
+	}
 
-	var rowKey string
-	if err := rawDB.QueryRow(`SELECT row_key FROM vulnerabilities_local WHERE id = 'GHSA-old'`).Scan(&rowKey); err != nil {
+	var rowKey, versionsAffected, referencesJSON string
+	if err := rawDB.QueryRow(`SELECT row_key, versions_affected, references_json FROM vulnerabilities_local WHERE id = 'GHSA-old'`).Scan(&rowKey, &versionsAffected, &referencesJSON); err != nil {
 		t.Fatalf("read migrated row key: %v", err)
 	}
 	if rowKey != "GHSA-old|npm|left-pad" {
 		t.Fatalf("row_key = %q", rowKey)
+	}
+	if versionsAffected != "[]" {
+		t.Fatalf("versions_affected = %q, want []", versionsAffected)
+	}
+	if referencesJSON != "[]" {
+		t.Fatalf("references_json = %q, want []", referencesJSON)
 	}
 
 	if err := migrateSchema(rawDB); err != nil {
@@ -268,6 +280,50 @@ func TestFindMaliciousFiltersVersionsAndIncludesReputation(t *testing.T) {
 	}
 	if len(otherSource) != 0 {
 		t.Fatalf("FindReputationFindings(other source) len = %d, want 0", len(otherSource))
+	}
+}
+
+func TestFindLocalSecurityRowsBatchMatchesVersionsAndReputation(t *testing.T) {
+	t.Parallel()
+
+	store := newSQLiteTestStore(t)
+	ctx := context.Background()
+
+	if _, err := store.DB().ExecContext(ctx, `
+		INSERT INTO vulnerabilities_local(row_key, id, ecosystem, name, version_ranges, severity, summary)
+		VALUES
+			('V-B1|npm|lodash', 'V-B1', 'npm', 'lodash', '[{"type":"SEMVER","events":[{"introduced":"0"},{"fixed":"2.0.0"}]}]', 'HIGH', 'affected'),
+			('V-B2|npm|lodash', 'V-B2', 'npm', 'lodash', '[{"type":"SEMVER","events":[{"introduced":"3.0.0"},{"fixed":"4.0.0"}]}]', 'LOW', 'unaffected');
+		INSERT INTO malicious_local(id, ecosystem, name, versions, risk_type, severity, summary)
+		VALUES
+			('M-B1', 'npm', 'evil', '["1.0.0"]', 'malware', 'CRITICAL', 'known bad'),
+			('M-B2', 'npm', 'evil', '["2.0.0"]', 'typosquatting', 'HIGH', 'other version');
+		INSERT INTO reputation_findings_local(id, ecosystem, name, version, type, risk_type, severity, summary)
+		VALUES ('R-B1', 'npm', 'evil', '1.0.0', 'supply_chain_risk', 'removed_package', 'LOW', 'removed')`); err != nil {
+		t.Fatalf("insert batch rows: %v", err)
+	}
+
+	vulns, err := store.FindVulnerabilitiesBatch(ctx, []db.PackageQuery{{Ecosystem: "npm", Name: "lodash", Version: "1.5.0"}})
+	if err != nil {
+		t.Fatalf("FindVulnerabilitiesBatch() error = %v", err)
+	}
+	if len(vulns) != 1 || vulns[0].AdvisoryID != "V-B1" {
+		t.Fatalf("FindVulnerabilitiesBatch() = %+v, want only affected range", vulns)
+	}
+
+	malicious, err := store.FindMaliciousBatch(ctx, []db.PackageQuery{{Ecosystem: "npm", Name: "evil", Version: "1.0.0"}})
+	if err != nil {
+		t.Fatalf("FindMaliciousBatch() error = %v", err)
+	}
+	byID := make(map[string]domain.Finding, len(malicious))
+	for _, finding := range malicious {
+		byID[finding.AdvisoryID] = finding
+	}
+	if byID["M-B1"].Type != domain.FindingTypeMalicious || byID["R-B1"].Type != domain.FindingTypeSupplyChainRisk {
+		t.Fatalf("FindMaliciousBatch() = %+v, want malicious and reputation hits", malicious)
+	}
+	if _, ok := byID["M-B2"]; ok {
+		t.Fatalf("FindMaliciousBatch() included non-matching version row: %+v", malicious)
 	}
 }
 

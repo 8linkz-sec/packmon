@@ -30,6 +30,10 @@ func ParseSPDXJSON(r io.Reader) (*ParseResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	return parseSPDXJSON(data)
+}
+
+func parseSPDXJSON(data []byte) (*ParseResult, error) {
 	if !IsSPDXJSON(data) {
 		return nil, fmt.Errorf("unsupported SPDX JSON format")
 	}

@@ -67,6 +67,9 @@ func (p *NuGetParser) Parse(r io.Reader) ([]domain.Package, error) {
 				errs = append(errs, fmt.Sprintf("framework %s: empty package name", framework))
 				continue
 			}
+			if nugetEntryIsProjectReference(entry.Type) {
+				continue
+			}
 			if entry.Resolved == "" {
 				errs = append(errs, fmt.Sprintf("framework %s, package %s: missing resolved version", framework, name))
 				continue
@@ -92,4 +95,9 @@ func (p *NuGetParser) Parse(r io.Reader) ([]domain.Package, error) {
 	}
 
 	return packages, retErr
+}
+
+func nugetEntryIsProjectReference(entryType string) bool {
+	entryType = strings.ToLower(strings.TrimSpace(entryType))
+	return entryType == "project" || entryType == "projectreference"
 }

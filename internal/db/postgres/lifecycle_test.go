@@ -78,6 +78,33 @@ func TestPostgresLifecycleDockerUpsertAndFindings(t *testing.T) {
 	if first.ID == "" || first.Ecosystem != "pypi" || first.Name != "django" || first.ProductSlug != "django" || first.Cycle == "" {
 		t.Fatalf("ExportSync().Lifecycle[0] = %+v, want flattened lifecycle release row", first)
 	}
+
+	if err := store.UpsertLifecycleProducts(ctx, []db.LifecycleProduct{
+		{
+			ProductSlug: "oldlib",
+			Name:        "OldLib",
+			Releases:    []db.LifecycleRelease{{Cycle: "1", IsEOL: true}},
+			PackageMaps: []db.LifecyclePackageMap{{Ecosystem: "npm", Name: "oldlib", ProductSlug: "oldlib"}},
+		},
+	}); err != nil {
+		t.Fatalf("UpsertLifecycleProducts(oldlib) error = %v", err)
+	}
+	deleted, err := store.DeleteLifecycleProductsNotIn(ctx, []string{"django"})
+	if err != nil {
+		t.Fatalf("DeleteLifecycleProductsNotIn() error = %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("DeleteLifecycleProductsNotIn() = %d, want 1 stale product", deleted)
+	}
+	findings, err = store.FindLifecycleFindingsBatch(ctx, []db.PackageQuery{
+		{Ecosystem: "npm", Name: "oldlib", Version: "1.0.0"},
+	}, now)
+	if err != nil {
+		t.Fatalf("FindLifecycleFindingsBatch(oldlib) error = %v", err)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("oldlib findings after reconcile = %+v, want none", findings)
+	}
 }
 
 func assertLifecycleFinding(t *testing.T, finding domain.Finding, typ domain.FindingType, severity domain.Severity, riskType string) {

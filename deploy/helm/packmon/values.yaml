@@ -1,6 +1,6 @@
 image:
   repository: ghcr.io/8linkz/packmon-server
-  tag: latest
+  tag: "0.5.0"
   pullPolicy: IfNotPresent
 
 replicaCount: 1
@@ -11,9 +11,19 @@ server:
   # Public hostname used for safe HTTP->HTTPS redirects behind a reverse proxy.
   # Leave empty to disable redirects for non-loopback hosts.
   publicHost: ""
+  # Comma-rendered into PACKMON_TRUSTED_PROXIES. In production, configure the
+  # CIDR(s) of the TLS-terminating ingress/reverse proxy or configure in-app TLS.
+  trustedProxies: []
+  allowInsecureLocalHTTP: false
+  tls:
+    certFile: ""
+    keyFile: ""
+    minVersion: "1.2"
   readTimeout: 30s
   writeTimeout: 30s
   shutdownTimeout: 15s
+  # REQUIRED: 32+ bytes recommended. Encrypts stored feed API keys at rest.
+  encryptionKey: ""
 
 metrics:
   # Bind to 0.0.0.0 so Kubernetes sidecar Prometheus can scrape metrics.
@@ -22,7 +32,8 @@ metrics:
   port: 9090
 
 admin:
-  initialPassword: change-me
+  # REQUIRED: Set a strong one-time bootstrap password. "change-me" is rejected.
+  initialPassword: ""
   sessionTimeout: 8h
 
 service:
@@ -42,22 +53,36 @@ ingress:
 
 feeds:
   dataDir: /tmp/packmon-feeds
+  syncInterval: 8h
+  syncOnStartup: true
   osvEnabled: true
   ghsaEnabled: true
   openssfEnabled: true
-  vulncheckEnabled: true
+  vulncheckEnabled: false
+  nvdEnabled: true
   socketEnabled: false
+  reversinglabsEnabled: false
   cisakevEnabled: true
   epssEnabled: true
+  endoflifeEnabled: true
   osvMode: self
   ghsaMode: self
   openssfMode: self
   vulncheckMode: self
+  nvdMode: self
   socketMode: self
+  reversinglabsMode: self
   cisakevMode: self
   epssMode: self
+  endoflifeMode: self
   socketApiKey: ""
   vulncheckApiKey: ""
+  nvdApiKey: ""
+  reversinglabsApiKey: ""
+  reversinglabsBaseUrl: https://data.reversinglabs.com/api/oss/community/v2/free
+  reversinglabsLookupTtl: 24h
+  reversinglabsBatchSize: 5
+  endoflifeBaseUrl: https://endoflife.date/api/v1
 
 externalDatabase:
   host: ""
@@ -65,28 +90,70 @@ externalDatabase:
   name: packmon
   user: packmon
   password: ""
-  sslmode: disable
+  sslmode: require
 
 postgresql:
   enabled: true
-  image: postgres:16-alpine
+  image: postgres:18-alpine
   storageClassName: ""
   size: 20Gi
   database: packmon
   user: packmon
   # REQUIRED: Set a strong password. Empty default forces explicit configuration.
   password: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
 
 backup:
   enabled: true
   schedule: "0 3 * * *"
   retentionDays: 7
-  image: postgres:16-alpine
+  image: postgres:18-alpine
   path: /backups
   storageClassName: ""
   size: 10Gi
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
 
-resources: {}
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: "2"
+    memory: 1Gi
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+postgresqlSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 999
+  runAsGroup: 999
+  fsGroup: 999
+  seccompProfile:
+    type: RuntimeDefault
 
 nodeSelector: {}
 

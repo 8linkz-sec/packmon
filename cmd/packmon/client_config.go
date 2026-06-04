@@ -204,6 +204,13 @@ func (c *cliConfig) normalize(baseDir string) error {
 	c.CACert = strings.TrimSpace(c.CACert)
 	c.Webhook.URL = strings.TrimSpace(c.Webhook.URL)
 	c.Webhook.Secret = strings.TrimSpace(c.Webhook.Secret)
+	c.Output.Format = strings.ToLower(strings.TrimSpace(c.Output.Format))
+	c.Output.File = strings.TrimSpace(c.Output.File)
+	c.Log.Level = normalizeLogLevel(c.Log.Level)
+	c.Log.Format = strings.ToLower(strings.TrimSpace(c.Log.Format))
+	c.Log.File = strings.TrimSpace(c.Log.File)
+	c.Hook.Type = strings.TrimSpace(c.Hook.Type)
+	c.Hook.FailOn = normalizeSeverityString(c.Hook.FailOn)
 	c.DB.Path = strings.TrimSpace(c.DB.Path)
 	c.DB.SyncSource = strings.TrimSpace(c.DB.SyncSource)
 
@@ -215,6 +222,18 @@ func (c *cliConfig) normalize(baseDir string) error {
 	}
 	if c.Timeout < 0 {
 		return fmt.Errorf("timeout must not be negative")
+	}
+	if err := validateOutputConfig(c.Output); err != nil {
+		return err
+	}
+	if err := validateLogConfig(c.Log); err != nil {
+		return err
+	}
+	if c.Hook.Type != "" && c.Hook.Type != "pre-push" && c.Hook.Type != "pre-commit" {
+		return fmt.Errorf("invalid hook.type %q (want pre-push|pre-commit)", c.Hook.Type)
+	}
+	if err := validateSeverityString(c.Hook.FailOn); err != nil {
+		return fmt.Errorf("hook.fail_on: %w", err)
 	}
 
 	if c.DB.Path != "" {
@@ -271,6 +290,42 @@ func (c *cliConfig) normalize(baseDir string) error {
 	}
 
 	return nil
+}
+
+func validateOutputConfig(cfg cliOutputConfig) error {
+	switch cfg.Format {
+	case "", "table", "json", "sarif", "junit", "html":
+	default:
+		return fmt.Errorf("invalid output.format %q (want table|json|sarif|junit|html)", cfg.Format)
+	}
+	if cfg.File != "" && cfg.Format == "" {
+		return fmt.Errorf("output.format is required when output.file is set")
+	}
+	if cfg.File != "" && cfg.Format == "table" {
+		return fmt.Errorf("output.file does not support output.format table")
+	}
+	return nil
+}
+
+func validateLogConfig(cfg cliLogConfig) error {
+	switch cfg.Level {
+	case "", "INFO", "DEBUG", "WARN", "ERROR":
+	default:
+		return fmt.Errorf("invalid log.level %q (want DEBUG|INFO|WARN|ERROR)", cfg.Level)
+	}
+	switch cfg.Format {
+	case "", "text", "json":
+	default:
+		return fmt.Errorf("invalid log.format %q (want text|json)", cfg.Format)
+	}
+	if cfg.File != "" {
+		return fmt.Errorf("log.file is not supported by the CLI scanner")
+	}
+	return nil
+}
+
+func normalizeLogLevel(value string) string {
+	return strings.ToUpper(strings.TrimSpace(value))
 }
 
 func resolveConfigPath(baseDir, rawPath string) (string, error) {

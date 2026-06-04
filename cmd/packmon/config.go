@@ -63,6 +63,9 @@ func newConfigShowCmd() *cobra.Command {
 			fmt.Println("# Environment")
 			printEnvVar("PACKMON_SERVER")
 			printEnvVar("PACKMON_API_KEY")
+			if cfg != nil && cfg.APIKeyEnv != "" && cfg.APIKeyEnv != "PACKMON_API_KEY" {
+				printEnvVar(cfg.APIKeyEnv)
+			}
 			printEnvVar("PACKMON_MODE")
 			printEnvVar("PACKMON_FAIL_ON")
 			printEnvVar("PACKMON_LOG_LEVEL")
@@ -71,6 +74,7 @@ func newConfigShowCmd() *cobra.Command {
 			printEnvVar("PACKMON_DB_PATH")
 			printEnvVar("PACKMON_ECOSYSTEMS")
 			printEnvVar("PACKMON_WEBHOOK_URL")
+			printEnvVar("PACKMON_WEBHOOK_SECRET")
 			printEnvVar("PACKMON_OUTPUT")
 			printEnvVar("PACKMON_NO_COLOR")
 			printEnvVar("PACKMON_IGNORE")
@@ -113,12 +117,6 @@ ecosystems:
   # - npm
   # - go
   # - pypi
-
-ignore:
-  # - package: lodash
-  #   version: "4.17.15"
-  #   reason: "False positive, reviewed 2026-03-15"
-  #   expires: "2026-06-15"
 
 output:
   format: table
@@ -204,8 +202,18 @@ func printEnvVar(key string) {
 	v := os.Getenv(key)
 	if v == "" {
 		v = "(not set)"
+	} else if isSecretEnvVar(key) {
+		v = maskSecret(v)
 	}
 	fmt.Printf("  %-25s %s\n", key+":", v)
+}
+
+func isSecretEnvVar(key string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(key))
+	return strings.Contains(upper, "API_KEY") ||
+		strings.Contains(upper, "SECRET") ||
+		strings.Contains(upper, "TOKEN") ||
+		strings.Contains(upper, "PASSWORD")
 }
 
 func valueOrDefault(v, fallback string) string {

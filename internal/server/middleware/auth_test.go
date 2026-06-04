@@ -210,6 +210,9 @@ func TestAuthRejectsInvalidAndLookupError(t *testing.T) {
 func TestAuthHelpers(t *testing.T) {
 	t.Parallel()
 
+	if len(skipAuth) != 0 {
+		t.Fatalf("skipAuth = %#v, want no placeholder paths inside /api/v1", skipAuth)
+	}
 	if !requiresAuthInDev("/api/v1/feeds/osv/import") {
 		t.Fatal("feeds import should require auth in dev from non-loopback peers")
 	}

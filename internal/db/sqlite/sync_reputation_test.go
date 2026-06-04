@@ -89,20 +89,28 @@ func TestSyncPaginatesWithOffsetAndStableSnapshot(t *testing.T) {
 	defer closeSilently(store)
 
 	type requestState struct {
-		offset   string
-		limit    string
-		snapshot string
-		since    string
+		offset                string
+		vulnerabilitiesOffset string
+		maliciousOffset       string
+		reputationOffset      string
+		lifecycleOffset       string
+		limit                 string
+		snapshot              string
+		since                 string
 	}
 
 	var requests []requestState
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		requests = append(requests, requestState{
-			offset:   q.Get("offset"),
-			limit:    q.Get("limit"),
-			snapshot: q.Get("snapshot"),
-			since:    q.Get("since"),
+			offset:                q.Get("offset"),
+			vulnerabilitiesOffset: q.Get("vulnerabilities_offset"),
+			maliciousOffset:       q.Get("malicious_offset"),
+			reputationOffset:      q.Get("reputation_offset"),
+			lifecycleOffset:       q.Get("lifecycle_offset"),
+			limit:                 q.Get("limit"),
+			snapshot:              q.Get("snapshot"),
+			since:                 q.Get("since"),
 		})
 
 		resp := syncResponse{
@@ -121,6 +129,11 @@ func TestSyncPaginatesWithOffsetAndStableSnapshot(t *testing.T) {
 			},
 			Truncated: len(requests) == 1,
 		}
+		if len(requests) == 1 {
+			resp.NextCursor = &syncCursor{
+				Reputation: 1,
+			}
+		}
 		if len(requests) == 2 {
 			resp.Reputation[0].ID = "reversinglabs:npm/other@2.0.0"
 			resp.Reputation[0].Name = "other"
@@ -138,8 +151,9 @@ func TestSyncPaginatesWithOffsetAndStableSnapshot(t *testing.T) {
 	defer server.Close()
 
 	if err := Sync(context.Background(), store, SyncConfig{
-		ServerURL: server.URL,
-		Full:      true,
+		ServerURL:         server.URL,
+		Full:              true,
+		AllowInsecureHTTP: true,
 	}); err != nil {
 		t.Fatalf("Sync() error = %v", err)
 	}
@@ -150,8 +164,8 @@ func TestSyncPaginatesWithOffsetAndStableSnapshot(t *testing.T) {
 	if requests[0].limit != "1000" || requests[0].offset != "" || requests[0].snapshot != "" || requests[0].since != "" {
 		t.Fatalf("first request = %+v, want limit only", requests[0])
 	}
-	if requests[1].limit != "1000" || requests[1].offset != "1000" || requests[1].snapshot != "2026-05-30T10:00:00Z" || requests[1].since != "" {
-		t.Fatalf("second request = %+v, want offset and stable snapshot", requests[1])
+	if requests[1].limit != "1000" || requests[1].offset != "" || requests[1].reputationOffset != "1" || requests[1].snapshot != "2026-05-30T10:00:00Z" || requests[1].since != "" {
+		t.Fatalf("second request = %+v, want reputation cursor and stable snapshot", requests[1])
 	}
 
 	for _, pkg := range []string{"left-pad", "other"} {

@@ -80,6 +80,19 @@ func TestHexParser_Parse(t *testing.T) {
 			wantCount: 1,
 			wantPkgs:  map[string]string{"jason": "1.4.1"},
 		},
+		{
+			name: "quoted package fields",
+			input: `%{
+  "plug-cowboy": {:hex, :"plug-cowboy", "2.7.1", "hash", [:mix], [], "hexpm", "hash"},
+  "typed_struct": {:hex, "typed_struct", "0.3.0", "hash", [:mix], [], "hexpm", "hash"},
+}
+`,
+			wantCount: 2,
+			wantPkgs: map[string]string{
+				"plug-cowboy":  "2.7.1",
+				"typed_struct": "0.3.0",
+			},
+		},
 	}
 
 	for _, tt := range tests {

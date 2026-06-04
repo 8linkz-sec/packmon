@@ -28,7 +28,7 @@ type GitRepo struct {
 // the latest changes if it does. It returns the current HEAD commit
 // hash after the operation.
 func (g *GitRepo) EnsureCloned(ctx context.Context) (commitHash string, err error) {
-	log := g.Logger.With(slog.String("repo", g.URL), slog.String("dir", g.Dir))
+	log := g.Logger.With(slog.String("repo", g.URL))
 
 	if g.isCloned() {
 		log.Debug("repository already cloned, pulling updates")
@@ -49,12 +49,6 @@ func (g *GitRepo) EnsureCloned(ctx context.Context) (commitHash string, err erro
 
 	log.Debug("repository ready", slog.String("commit", hash))
 	return hash, nil
-}
-
-// HeadHash returns the current HEAD commit hash without modifying the
-// repository. Returns an error if the directory is not a git repository.
-func (g *GitRepo) HeadHash(ctx context.Context) (string, error) {
-	return g.headHash(ctx)
 }
 
 // isCloned checks whether the local directory contains a .git directory.
@@ -87,6 +81,10 @@ func (g *GitRepo) pull(ctx context.Context) error {
 
 // headHash reads the current HEAD commit hash.
 func (g *GitRepo) headHash(ctx context.Context) (string, error) {
+	if !g.isCloned() {
+		return "", fmt.Errorf("not a git clone")
+	}
+
 	var stdout bytes.Buffer
 	cmd := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
 	cmd.Dir = g.Dir
@@ -110,7 +108,7 @@ func (g *GitRepo) headHash(ctx context.Context) (string, error) {
 // detection is desired, because after a shallow fetch+reset the old
 // commit is no longer reachable.
 func (g *GitRepo) PullWithChangedFiles(ctx context.Context) (newHash string, changedFiles []string, err error) {
-	log := g.Logger.With(slog.String("repo", g.URL), slog.String("dir", g.Dir))
+	log := g.Logger.With(slog.String("repo", g.URL))
 
 	if !g.isCloned() {
 		log.Info("cloning repository (shallow)")
@@ -167,7 +165,7 @@ func (g *GitRepo) PullWithChangedFiles(ctx context.Context) (newHash string, cha
 	// Step 4: remove stale index.lock if a previous git process crashed.
 	lockFile := filepath.Join(g.Dir, ".git", "index.lock")
 	if _, statErr := os.Stat(lockFile); statErr == nil {
-		log.Warn("removing stale git index.lock", slog.String("path", lockFile))
+		log.Warn("removing stale git index.lock", slog.String("file", filepath.Base(lockFile)))
 		_ = os.Remove(lockFile)
 	}
 

@@ -29,6 +29,7 @@ var backoffSchedule = [3]time.Duration{
 // loops immediately in the background and the caller returns right away.
 type Manager struct {
 	feeds      map[string]*registeredFeed
+	feedLocks  map[string]*sync.Mutex
 	store      db.Store
 	logger     *slog.Logger
 	interval   time.Duration // default interval; per-feed override possible
@@ -44,7 +45,8 @@ type registeredFeed struct {
 	config   FeedConfig
 	interval time.Duration // 0 = use manager default
 	cancel   context.CancelFunc
-	mu       sync.Mutex // prevents concurrent syncs of the same feed
+	mu       sync.Mutex  // fallback for tests that construct registeredFeed directly
+	syncMu   *sync.Mutex // shared by feed name across runtime reconfiguration
 }
 
 // NewManager creates a Manager. The default sync interval applies to
@@ -58,10 +60,11 @@ func NewManager(store db.Store, logger *slog.Logger, defaultInterval time.Durati
 		logger = slog.Default()
 	}
 	return &Manager{
-		feeds:    make(map[string]*registeredFeed),
-		store:    store,
-		logger:   logger,
-		interval: defaultInterval,
+		feeds:     make(map[string]*registeredFeed),
+		feedLocks: make(map[string]*sync.Mutex),
+		store:     store,
+		logger:    logger,
+		interval:  defaultInterval,
 	}
 }
 
@@ -74,8 +77,10 @@ func (m *Manager) Register(cfg FeedConfig) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	name := cfg.Syncer.Name()
 	m.feeds[cfg.Syncer.Name()] = &registeredFeed{
 		config: cfg,
+		syncMu: m.feedLockForNameLocked(name),
 	}
 }
 
@@ -87,9 +92,11 @@ func (m *Manager) RegisterWithInterval(cfg FeedConfig, interval time.Duration) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	name := cfg.Syncer.Name()
 	m.feeds[cfg.Syncer.Name()] = &registeredFeed{
 		config:   cfg,
 		interval: interval,
+		syncMu:   m.feedLockForNameLocked(name),
 	}
 }
 
@@ -179,9 +186,9 @@ func (m *Manager) ApplyConfig(ctx context.Context, cfg FeedConfig, interval time
 		return
 	}
 	name := cfg.Syncer.Name()
-	rf := &registeredFeed{config: cfg, interval: interval}
 
 	m.mu.Lock()
+	rf := &registeredFeed{config: cfg, interval: interval, syncMu: m.feedLockForNameLocked(name)}
 	if old, ok := m.feeds[name]; ok && old.cancel != nil {
 		old.cancel()
 	}
@@ -197,6 +204,18 @@ func (m *Manager) ApplyConfig(ctx context.Context, cfg FeedConfig, interval time
 	case cfg.Mode == FeedModeExternal:
 		m.recordStatus(ctx, name, "external", "", 0, nil)
 	}
+}
+
+func (m *Manager) feedLockForNameLocked(name string) *sync.Mutex {
+	if m.feedLocks == nil {
+		m.feedLocks = make(map[string]*sync.Mutex)
+	}
+	if lock := m.feedLocks[name]; lock != nil {
+		return lock
+	}
+	lock := &sync.Mutex{}
+	m.feedLocks[name] = lock
+	return lock
 }
 
 func (m *Manager) startFeedLocked(rf *registeredFeed, interval time.Duration, initialDone chan<- struct{}, waitForPhase1 bool) {
@@ -358,8 +377,12 @@ func (m *Manager) runSync(ctx context.Context, rf *registeredFeed, log *slog.Log
 func (m *Manager) syncWithRetry(ctx context.Context, rf *registeredFeed) (*SyncResult, error) {
 	// Prevent concurrent syncs of the same feed (e.g. manual trigger
 	// via admin panel while the background loop is already syncing).
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	syncMu := rf.syncMu
+	if syncMu == nil {
+		syncMu = &rf.mu
+	}
+	syncMu.Lock()
+	defer syncMu.Unlock()
 
 	name := rf.config.Syncer.Name()
 	log := m.logger.With(slog.String("feed", name))

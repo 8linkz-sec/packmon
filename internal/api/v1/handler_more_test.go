@@ -275,6 +275,16 @@ func TestHandleSyncValidationAndOptions(t *testing.T) {
 		t.Fatalf("ecosystems = %#v", store.opts.Ecosystems)
 	}
 
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/sync?vulnerabilities_offset=1000&malicious_offset=1&reputation_offset=2&lifecycle_offset=3", nil)
+	rr = httptest.NewRecorder()
+	h.HandleSync(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("sync cursor status = %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+	if store.opts.Cursor.Vulnerabilities != 1000 || store.opts.Cursor.Malicious != 1 || store.opts.Cursor.Reputation != 2 || store.opts.Cursor.Lifecycle != 3 {
+		t.Fatalf("sync cursor options = %+v", store.opts.Cursor)
+	}
+
 	errorCases := []string{
 		"/api/v1/sync?since=bad",
 		"/api/v1/sync?snapshot=bad",
@@ -282,6 +292,8 @@ func TestHandleSyncValidationAndOptions(t *testing.T) {
 		"/api/v1/sync?limit=abc",
 		"/api/v1/sync?offset=-1",
 		"/api/v1/sync?offset=abc",
+		"/api/v1/sync?vulnerabilities_offset=-1",
+		"/api/v1/sync?malicious_offset=abc",
 	}
 	for _, target := range errorCases {
 		req := httptest.NewRequest(http.MethodGet, target, nil)

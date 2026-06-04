@@ -51,6 +51,9 @@ func (h *AdminHandler) HandleFeedConfigSave(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "invalid CSRF token", http.StatusForbidden)
 		return
 	}
+	if !h.requireBootstrapPasswordRotated(w, r, "/admin/feeds") {
+		return
+	}
 
 	feedName := r.PostForm.Get("feed_name")
 	feed, err := h.desiredFeedSettings(r.Context(), feedName)
@@ -140,6 +143,9 @@ func (h *AdminHandler) HandleFeedConfigReset(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "invalid CSRF token", http.StatusForbidden)
 		return
 	}
+	if !h.requireBootstrapPasswordRotated(w, r, "/admin/feeds") {
+		return
+	}
 
 	feedName := config.NormalizeFeedName(r.PostForm.Get("feed_name"))
 	if _, ok := h.cfg.FeedSettings(feedName); !ok {
@@ -177,6 +183,9 @@ func (h *AdminHandler) HandleFeedSyncNow(w http.ResponseWriter, r *http.Request)
 
 	if !auth.ValidateCSRF(r, sess) {
 		http.Error(w, "invalid CSRF token", http.StatusForbidden)
+		return
+	}
+	if !h.requireBootstrapPasswordRotated(w, r, "/admin/feeds") {
 		return
 	}
 

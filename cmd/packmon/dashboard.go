@@ -21,7 +21,20 @@ import (
 	"github.com/spf13/cobra"
 )
 
+type dashboardOptions struct {
+	shutdownTimeout time.Duration
+	onReady         func(string)
+}
+
 func newDashboardCmd() *cobra.Command {
+	return newDashboardCmdWithOptions(dashboardOptions{})
+}
+
+func newDashboardCmdWithOptions(options dashboardOptions) *cobra.Command {
+	if options.shutdownTimeout <= 0 {
+		options.shutdownTimeout = 5 * time.Second
+	}
+
 	var (
 		flagPort int
 		flagOpen bool
@@ -59,9 +72,23 @@ func newDashboardCmd() *cobra.Command {
 			}
 			defer closeSilently(listener)
 
+			srv := &http.Server{
+				Handler:           mux,
+				ReadHeaderTimeout: 5 * time.Second,
+			}
+
+			serveErr := make(chan error, 1)
+			go func() {
+				serveErr <- srv.Serve(listener)
+			}()
+
 			url := "http://" + listener.Addr().String()
 			fmt.Printf("Local dashboard available at %s\n", url)
 			fmt.Println("Press Ctrl+C to stop.")
+
+			if options.onReady != nil {
+				options.onReady(url)
+			}
 
 			if flagOpen {
 				go func() {
@@ -70,20 +97,23 @@ func newDashboardCmd() *cobra.Command {
 				}()
 			}
 
-			srv := &http.Server{
-				Handler:           mux,
-				ReadHeaderTimeout: 5 * time.Second,
-			}
+			select {
+			case err := <-serveErr:
+				if err != nil && !errors.Is(err, http.ErrServerClosed) {
+					return fmt.Errorf("serve dashboard: %w", err)
+				}
+			case <-ctx.Done():
+				shutdownCtx, cancel := context.WithTimeout(context.Background(), options.shutdownTimeout)
+				err := srv.Shutdown(shutdownCtx)
+				cancel()
+				if err != nil {
+					closeSilently(srv)
+				}
 
-			go func() {
-				<-ctx.Done()
-				shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancel()
-				_ = srv.Shutdown(shutdownCtx)
-			}()
-
-			if err := srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				return fmt.Errorf("serve dashboard: %w", err)
+				err = <-serveErr
+				if err != nil && !errors.Is(err, http.ErrServerClosed) {
+					return fmt.Errorf("serve dashboard: %w", err)
+				}
 			}
 
 			return nil

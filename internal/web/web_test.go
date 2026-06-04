@@ -30,6 +30,11 @@ type mockStore struct {
 	vulnFindings []domain.Finding
 	malFindings  []domain.Finding
 	repFindings  []domain.Finding
+	lifecycle    []domain.Finding
+	refreshErr   error
+	refreshNew   bool
+	refreshPos   int
+	refreshJobs  []db.RefreshJob
 }
 
 func (m *mockStore) DashboardStats(_ context.Context) (*db.DashboardStatsResult, error) {
@@ -137,6 +142,10 @@ func (m *mockStore) FindReputationFindings(_ context.Context, _, _, _ string) ([
 	return []domain.Finding{}, nil
 }
 
+func (m *mockStore) FindLifecycleFindingsBatch(_ context.Context, _ []db.PackageQuery, _ time.Time) ([]domain.Finding, error) {
+	return m.lifecycle, nil
+}
+
 func (m *mockStore) ListFeedSyncStatuses(_ context.Context) ([]db.FeedSyncStatus, error) {
 	if m.feedsErr != nil {
 		return nil, m.feedsErr
@@ -144,6 +153,19 @@ func (m *mockStore) ListFeedSyncStatuses(_ context.Context) ([]db.FeedSyncStatus
 	return []db.FeedSyncStatus{
 		{FeedName: "osv", LastSyncStatus: "success", EntriesSynced: 500, EntriesTotal: 500},
 	}, nil
+}
+
+func (m *mockStore) EnqueueRefresh(_ context.Context, job *db.RefreshJob) (bool, int, error) {
+	if m.refreshErr != nil {
+		return false, 0, m.refreshErr
+	}
+	copyValue := *job
+	m.refreshJobs = append(m.refreshJobs, copyValue)
+	position := m.refreshPos
+	if position == 0 {
+		position = len(m.refreshJobs)
+	}
+	return m.refreshNew, position, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -386,7 +408,7 @@ func TestHandleSearch_WithMaliciousFindingOnly_ReturnsOK(t *testing.T) {
 	}
 }
 
-func TestHandleSearch_ShowsVulnerabilityCountOnly(t *testing.T) {
+func TestHandleSearch_ShowsVulnerabilityCountAndIDs(t *testing.T) {
 	store := &mockStore{}
 	renderer := testRenderer()
 	logger := discardLogger()
@@ -406,8 +428,8 @@ func TestHandleSearch_ShowsVulnerabilityCountOnly(t *testing.T) {
 	if !strings.Contains(body, "1 advisory") {
 		t.Fatal("Search response does not contain the vulnerability advisory count")
 	}
-	if strings.Contains(body, "RUSTSEC-2026-0081") {
-		t.Fatal("Search response should not contain the advisory IDs directly")
+	if !strings.Contains(body, "RUSTSEC-2026-0081") {
+		t.Fatal("Search response does not contain the advisory IDs")
 	}
 }
 
@@ -427,6 +449,9 @@ func TestHandleSearch_ErrorAndNormalizationBranches(t *testing.T) {
 	if strings.Contains(rec.Body.String(), "<!DOCTYPE html>") {
 		t.Fatal("Search error partial should not contain full HTML layout")
 	}
+	if !strings.Contains(rec.Body.String(), "Search failed") {
+		t.Fatal("Search error partial should contain an error message")
+	}
 
 	if got := normalizeSearchSeverity(" unknown "); got != "UNKNOWN" {
 		t.Fatalf("normalizeSearchSeverity(unknown) = %q, want UNKNOWN", got)
@@ -436,6 +461,12 @@ func TestHandleSearch_ErrorAndNormalizationBranches(t *testing.T) {
 	}
 	if got := normalizeSearchFindingType(" VULNERABILITY "); got != "vulnerability" {
 		t.Fatalf("normalizeSearchFindingType(vulnerability) = %q", got)
+	}
+	if got := normalizeSearchFindingType("supply_chain_risk"); got != "supply_chain_risk" {
+		t.Fatalf("normalizeSearchFindingType(supply_chain_risk) = %q", got)
+	}
+	if got := normalizeSearchFindingType("lifecycle"); got != "lifecycle" {
+		t.Fatalf("normalizeSearchFindingType(lifecycle) = %q", got)
 	}
 	if got := normalizeSearchFindingType("invalid"); got != "" {
 		t.Fatalf("normalizeSearchFindingType(invalid) = %q, want empty", got)
@@ -489,6 +520,9 @@ func TestHandleFeeds_PartialStatus(t *testing.T) {
 	if strings.Contains(body, "<!DOCTYPE html>") {
 		t.Fatal("Feeds partial should not contain full HTML layout")
 	}
+	if !strings.Contains(body, "500 / 500") {
+		t.Fatalf("Feeds partial missing synced/total entries:\n%s", body)
+	}
 }
 
 func TestFeedHealthStatusDisabledIsNeutral(t *testing.T) {
@@ -517,6 +551,9 @@ func TestFeedHealthStatusZeroEntriesIsWarning(t *testing.T) {
 	if got := feedHealthStatus(status); got != "warning" {
 		t.Fatalf("feedHealthStatus() = %q, want %q", got, "warning")
 	}
+	if _, reason := feedHealth(status); reason != "no entries synced yet" {
+		t.Fatalf("feedHealth() reason = %q, want no entries reason", reason)
+	}
 }
 
 func TestHandleFeeds_StoreErrorRendersEmptyStatus(t *testing.T) {
@@ -540,15 +577,16 @@ func TestFeedHealthStatusBranches(t *testing.T) {
 	old := now.Add(-49 * time.Hour)
 
 	tests := []struct {
-		name string
-		in   db.FeedSyncStatus
-		want string
+		name   string
+		in     db.FeedSyncStatus
+		want   string
+		reason string
 	}{
-		{name: "error", in: db.FeedSyncStatus{LastSyncStatus: "error"}, want: "error"},
-		{name: "running", in: db.FeedSyncStatus{LastSyncStatus: "running"}, want: "pending"},
-		{name: "skipped", in: db.FeedSyncStatus{LastSyncStatus: "skipped"}, want: "warning"},
-		{name: "never", in: db.FeedSyncStatus{LastSyncStatus: "success"}, want: "error"},
-		{name: "stale", in: db.FeedSyncStatus{LastSyncStatus: "success", LastSyncAt: &old, EntriesSynced: 1}, want: "warning"},
+		{name: "error", in: db.FeedSyncStatus{LastSyncStatus: "error"}, want: "error", reason: "last sync failed"},
+		{name: "running", in: db.FeedSyncStatus{LastSyncStatus: "running"}, want: "pending", reason: "sync running"},
+		{name: "skipped", in: db.FeedSyncStatus{LastSyncStatus: "skipped"}, want: "warning", reason: "last sync skipped"},
+		{name: "never", in: db.FeedSyncStatus{LastSyncStatus: "success"}, want: "error", reason: "never synced"},
+		{name: "stale", in: db.FeedSyncStatus{LastSyncStatus: "success", LastSyncAt: &old, EntriesSynced: 1}, want: "warning", reason: "stale: no sync in 48h+"},
 		{name: "healthy", in: db.FeedSyncStatus{LastSyncStatus: "success", LastSyncAt: &now, EntriesSynced: 1, EntriesTotal: 1}, want: "healthy"},
 	}
 
@@ -556,6 +594,9 @@ func TestFeedHealthStatusBranches(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := feedHealthStatus(tt.in); got != tt.want {
 				t.Fatalf("feedHealthStatus() = %q, want %q", got, tt.want)
+			}
+			if _, reason := feedHealth(tt.in); reason != tt.reason {
+				t.Fatalf("feedHealth() reason = %q, want %q", reason, tt.reason)
 			}
 		})
 	}
@@ -617,6 +658,38 @@ func TestHandlePackage_ReturnsOK(t *testing.T) {
 	if strings.Contains(body, "href=\"https://nvd.nist.gov/vuln/detail/CVE-2026-0001\" target=\"_blank\" rel=\"noopener\" class=\"text-blue-600 hover:underline\">GHSA-test-1234</a>") {
 		t.Fatal("Package response should not link the advisory ID directly to NVD")
 	}
+	if strings.Contains(body, "/api/v1/packages/npm/lodash/refresh") {
+		t.Fatalf("Package response still posts refresh to API route:\n%s", body)
+	}
+	if !strings.Contains(body, `hx-post="/package/npm/refresh/lodash"`) {
+		t.Fatalf("Package response missing web refresh route:\n%s", body)
+	}
+}
+
+func TestHandlePackageRefreshQueuesJob(t *testing.T) {
+	store := &mockStore{refreshNew: true, refreshPos: 2}
+	handler := HandlePackageRefresh(store, testRenderer(), discardLogger())
+
+	req := httptest.NewRequest(http.MethodPost, "/package/npm/refresh/@scope/pkg", nil)
+	req.SetPathValue("ecosystem", "npm")
+	req.SetPathValue("name", "@scope/pkg")
+	rec := httptest.NewRecorder()
+
+	handler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("refresh status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(store.refreshJobs) != 1 {
+		t.Fatalf("refreshJobs len = %d, want 1", len(store.refreshJobs))
+	}
+	job := store.refreshJobs[0]
+	if job.Ecosystem != "npm" || job.Name != "@scope/pkg" || job.Source != "socket" || job.Priority != 0 || job.Status != "pending" {
+		t.Fatalf("refresh job = %+v", job)
+	}
+	if !strings.Contains(rec.Body.String(), "Refresh queued at position 2") {
+		t.Fatalf("refresh response body = %s", rec.Body.String())
+	}
 }
 
 func TestHandlePackageShowsReputationFindings(t *testing.T) {
@@ -653,6 +726,46 @@ func TestHandlePackageShowsReputationFindings(t *testing.T) {
 	}
 	if !strings.Contains(body, db.ReputationSourceReversingLabs) {
 		t.Fatal("Package response does not contain ReversingLabs source")
+	}
+	if !strings.Contains(body, "Supply Chain Risks (1)") {
+		t.Fatal("Package response does not render reputation finding in supply-chain section")
+	}
+	if !strings.Contains(body, "Malicious Package Reports (0)") {
+		t.Fatal("Package response should not count supply-chain reputation as malicious")
+	}
+}
+
+func TestHandlePackageShowsLifecycleFindingsForVersion(t *testing.T) {
+	store := &mockStore{
+		lifecycle: []domain.Finding{
+			{
+				Name:       "django",
+				Version:    "3.2.25",
+				Ecosystem:  domain.EcosystemPyPI,
+				Type:       domain.FindingTypeLifecycle,
+				Severity:   domain.SeverityLow,
+				AdvisoryID: "endoflife:pypi:django:django:3.2",
+				Title:      "Django 3.2 is in security support only",
+				RiskType:   "security_support_only",
+				Source:     "endoflife.date",
+			},
+		},
+	}
+	handler := HandlePackage(store, testRenderer(), discardLogger())
+
+	req := httptest.NewRequest(http.MethodGet, "/package/pypi/django?version=3.2.25", nil)
+	req.SetPathValue("ecosystem", "pypi")
+	req.SetPathValue("name", "django")
+	rec := httptest.NewRecorder()
+
+	handler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Package status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "Lifecycle (1)") || !strings.Contains(body, "Django 3.2 is in security support only") {
+		t.Fatalf("Package response missing lifecycle finding:\n%s", body)
 	}
 }
 

@@ -14,7 +14,7 @@ type CommandRunner interface {
 type execRunner struct{}
 
 func (execRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
+	cmd := exec.CommandContext(ctx, name, args...) // #nosec G204 -- production calls this runner with fixed "docker" argv; tests inject alternatives.
 	return cmd.Output()
 }
 

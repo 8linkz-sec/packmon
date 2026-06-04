@@ -31,6 +31,11 @@ const maxImportBody = 100 << 20
 // maxPackagesPerCheck is the maximum number of packages in a single /check request.
 const maxPackagesPerCheck = 5000
 
+const (
+	reversingLabsScheduleWorkers = 4
+	reversingLabsScheduleTimeout = 30 * time.Second
+)
+
 // defaultBlockThreshold is the severity threshold above which findings block.
 var defaultBlockThreshold = domain.SeverityCritical
 
@@ -40,6 +45,7 @@ type Handler struct {
 	logger               *slog.Logger
 	blockThreshold       domain.Severity
 	reversingLabsEnabled atomic.Bool
+	reversingLabsSlots   chan struct{}
 	// runtime, when set, supplies the block threshold dynamically so admin
 	// changes take effect without a restart. It overrides blockThreshold.
 	runtime *config.RuntimeSettings
@@ -101,27 +107,30 @@ type importResponse struct {
 }
 
 type syncVulnerabilityResponse struct {
-	ID            string   `json:"id"`
-	Ecosystem     string   `json:"ecosystem"`
-	Name          string   `json:"name"`
-	VersionRanges string   `json:"version_ranges"`
-	Severity      string   `json:"severity"`
-	CVSSScore     *float64 `json:"cvss_score"`
-	EPSSScore     *float64 `json:"epss_score"`
-	CISAKEV       bool     `json:"cisa_kev"`
-	Summary       string   `json:"summary"`
-	Withdrawn     bool     `json:"withdrawn"`
+	ID               string   `json:"id"`
+	Ecosystem        string   `json:"ecosystem"`
+	Name             string   `json:"name"`
+	VersionRanges    string   `json:"version_ranges"`
+	VersionsAffected string   `json:"versions_affected"`
+	References       string   `json:"references"`
+	Severity         string   `json:"severity"`
+	CVSSScore        *float64 `json:"cvss_score"`
+	EPSSScore        *float64 `json:"epss_score"`
+	CISAKEV          bool     `json:"cisa_kev"`
+	Summary          string   `json:"summary"`
+	Withdrawn        bool     `json:"withdrawn"`
 }
 
 type syncMaliciousResponse struct {
-	ID        string `json:"id"`
-	Ecosystem string `json:"ecosystem"`
-	Name      string `json:"name"`
-	Versions  string `json:"versions"`
-	RiskType  string `json:"risk_type"`
-	Severity  string `json:"severity"`
-	Summary   string `json:"summary"`
-	Withdrawn bool   `json:"withdrawn"`
+	ID            string `json:"id"`
+	Ecosystem     string `json:"ecosystem"`
+	Name          string `json:"name"`
+	Versions      string `json:"versions"`
+	ReferenceURLs string `json:"reference_urls"`
+	RiskType      string `json:"risk_type"`
+	Severity      string `json:"severity"`
+	Summary       string `json:"summary"`
+	Withdrawn     bool   `json:"withdrawn"`
 }
 
 type syncReputationResponse struct {
@@ -167,6 +176,7 @@ type syncResponsePayload struct {
 	Lifecycle       []syncLifecycleResponse     `json:"lifecycle"`
 	Truncated       bool                        `json:"truncated"`
 	HasMore         bool                        `json:"has_more"`
+	NextCursor      *db.SyncCursor              `json:"next_cursor,omitempty"`
 }
 
 // NewHandler creates a Handler with the given store and logger.
@@ -183,7 +193,7 @@ func NewHandlerWithConfig(store db.Store, logger *slog.Logger, cfg *config.Confi
 	}
 	h := NewHandlerWithBlockThreshold(store, logger, threshold)
 	if cfg != nil {
-		h.ConfigureReversingLabs(cfg.Feeds)
+		h.ConfigureReversingLabs(cfg.FeedsSnapshot())
 	}
 	return h
 }
@@ -222,9 +232,10 @@ func NewHandlerWithBlockThreshold(store db.Store, logger *slog.Logger, threshold
 		threshold = defaultBlockThreshold
 	}
 	return &Handler{
-		store:          store,
-		logger:         logger,
-		blockThreshold: threshold,
+		store:              store,
+		logger:             logger,
+		blockThreshold:     threshold,
+		reversingLabsSlots: make(chan struct{}, reversingLabsScheduleWorkers),
 	}
 }
 
@@ -285,6 +296,10 @@ func (h *Handler) HandleCheck(w http.ResponseWriter, r *http.Request) {
 		errorResponse(w, http.StatusBadRequest, fmt.Sprintf("too many packages: %d (max %d)", len(req.Packages), maxPackagesPerCheck))
 		return
 	}
+	if err := validateCheckPackages(req.Packages); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	ctx := r.Context()
 	scanID := generateID()
@@ -333,6 +348,27 @@ func (h *Handler) HandleCheck(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
+func validateCheckPackages(packages []domain.Package) error {
+	for i := range packages {
+		pkg := &packages[i]
+		pkg.Name = strings.TrimSpace(pkg.Name)
+		pkg.Version = strings.TrimSpace(pkg.Version)
+		pkg.Ecosystem = domain.Ecosystem(strings.ToLower(strings.TrimSpace(string(pkg.Ecosystem))))
+
+		position := i + 1
+		if pkg.Name == "" {
+			return fmt.Errorf("packages[%d].name is required", position)
+		}
+		if pkg.Version == "" {
+			return fmt.Errorf("packages[%d].version is required", position)
+		}
+		if !pkg.Ecosystem.Valid() {
+			return fmt.Errorf("packages[%d].ecosystem is invalid", position)
+		}
+	}
+	return nil
+}
+
 // collectFindings queries the store for vulnerabilities and malicious packages
 // using batch queries to avoid the N+1 pattern. All findings are returned
 // without truncation -- vulnerability data must never be silently discarded.
@@ -376,10 +412,37 @@ func (h *Handler) collectFindings(ctx context.Context, packages []domain.Package
 	all = append(all, lifecycle...)
 
 	if h.reversingLabsEnabled.Load() {
-		h.scheduleReversingLabsLookups(ctx, packages, all)
+		h.scheduleReversingLabsLookupsAsync(ctx, packages, all)
 	}
 
 	return all, nil
+}
+
+func (h *Handler) scheduleReversingLabsLookupsAsync(ctx context.Context, packages []domain.Package, findings []domain.Finding) {
+	packages = append([]domain.Package(nil), packages...)
+	findings = append([]domain.Finding(nil), findings...)
+
+	slots := h.reversingLabsSlots
+	if slots == nil {
+		h.scheduleReversingLabsLookups(ctx, packages, findings)
+		return
+	}
+	select {
+	case slots <- struct{}{}:
+	default:
+		h.logger.Warn("reversinglabs scheduling skipped: scheduler saturated", "packages", len(packages))
+		return
+	}
+
+	go func() {
+		defer func() { <-slots }()
+
+		scheduleCtx := context.WithoutCancel(ctx)
+		scheduleCtx, cancel := context.WithTimeout(scheduleCtx, reversingLabsScheduleTimeout)
+		defer cancel()
+
+		h.scheduleReversingLabsLookups(scheduleCtx, packages, findings)
+	}()
 }
 
 func (h *Handler) scheduleReversingLabsLookups(ctx context.Context, packages []domain.Package, findings []domain.Finding) {
@@ -936,6 +999,31 @@ const syncDefaultLimit = 1000
 // syncMaxLimit is the maximum allowed limit for /api/v1/sync pagination.
 const syncMaxLimit = 10000
 
+func parseSyncCursor(r *http.Request) (db.SyncCursor, error) {
+	var cursor db.SyncCursor
+	params := []struct {
+		name   string
+		target *int
+	}{
+		{name: "vulnerabilities_offset", target: &cursor.Vulnerabilities},
+		{name: "malicious_offset", target: &cursor.Malicious},
+		{name: "reputation_offset", target: &cursor.Reputation},
+		{name: "lifecycle_offset", target: &cursor.Lifecycle},
+	}
+	for _, param := range params {
+		raw := strings.TrimSpace(r.URL.Query().Get(param.name))
+		if raw == "" {
+			continue
+		}
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 0 {
+			return db.SyncCursor{}, fmt.Errorf("invalid %s parameter", param.name)
+		}
+		*param.target = parsed
+	}
+	return cursor, nil
+}
+
 func (h *Handler) HandleSync(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -991,6 +1079,11 @@ func (h *Handler) HandleSync(w http.ResponseWriter, r *http.Request) {
 		}
 		offset = parsed
 	}
+	cursor, err := parseSyncCursor(r)
+	if err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	exported, err := exporter.ExportSync(r.Context(), db.SyncExportOptions{
 		Since:      sincePtr,
@@ -998,6 +1091,7 @@ func (h *Handler) HandleSync(w http.ResponseWriter, r *http.Request) {
 		Ecosystems: splitCSV(r.URL.Query().Get("ecosystem")),
 		Limit:      limit,
 		Offset:     offset,
+		Cursor:     cursor,
 	})
 	if err != nil {
 		h.logger.Error("sync export failed", "error", err)
@@ -1012,33 +1106,37 @@ func (h *Handler) HandleSync(w http.ResponseWriter, r *http.Request) {
 		Reputation:      make([]syncReputationResponse, 0, len(exported.Reputation)),
 		Lifecycle:       make([]syncLifecycleResponse, 0, len(exported.Lifecycle)),
 		Truncated:       exported.Truncated,
+		NextCursor:      exported.NextCursor,
 	}
 
 	for _, vuln := range exported.Vulnerabilities {
 		resp.Vulnerabilities = append(resp.Vulnerabilities, syncVulnerabilityResponse{
-			ID:            vuln.ID,
-			Ecosystem:     vuln.Ecosystem,
-			Name:          vuln.Name,
-			VersionRanges: vuln.VersionRanges,
-			Severity:      vuln.Severity,
-			CVSSScore:     vuln.CVSSScore,
-			EPSSScore:     vuln.EPSSScore,
-			CISAKEV:       vuln.CISAKEV,
-			Summary:       vuln.Summary,
-			Withdrawn:     vuln.Withdrawn,
+			ID:               vuln.ID,
+			Ecosystem:        vuln.Ecosystem,
+			Name:             vuln.Name,
+			VersionRanges:    vuln.VersionRanges,
+			VersionsAffected: vuln.VersionsAffected,
+			References:       vuln.References,
+			Severity:         vuln.Severity,
+			CVSSScore:        vuln.CVSSScore,
+			EPSSScore:        vuln.EPSSScore,
+			CISAKEV:          vuln.CISAKEV,
+			Summary:          vuln.Summary,
+			Withdrawn:        vuln.Withdrawn,
 		})
 	}
 
 	for _, finding := range exported.Malicious {
 		resp.Malicious = append(resp.Malicious, syncMaliciousResponse{
-			ID:        finding.ID,
-			Ecosystem: finding.Ecosystem,
-			Name:      finding.Name,
-			Versions:  finding.Versions,
-			RiskType:  finding.RiskType,
-			Severity:  finding.Severity,
-			Summary:   finding.Summary,
-			Withdrawn: finding.Withdrawn,
+			ID:            finding.ID,
+			Ecosystem:     finding.Ecosystem,
+			Name:          finding.Name,
+			Versions:      finding.Versions,
+			ReferenceURLs: finding.ReferenceURLs,
+			RiskType:      finding.RiskType,
+			Severity:      finding.Severity,
+			Summary:       finding.Summary,
+			Withdrawn:     finding.Withdrawn,
 		})
 	}
 

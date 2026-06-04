@@ -40,10 +40,12 @@
               <span class="text-gray-400">never</span>
             {{end}}
           </td>
-          <td class="px-5 py-2 text-right">{{.EntriesTotal}}</td>
+          <td class="px-5 py-2 text-right">{{.EntriesSynced}} / {{.EntriesTotal}}</td>
           <td class="px-5 py-2 text-xs text-gray-500">
             {{if .LastError}}
               <span class="text-red-600" title="{{.LastError}}">{{truncate .LastError 60}}</span>
+            {{else if .StatusReason}}
+              <span title="{{.StatusReason}}">{{.StatusReason}}</span>
             {{else}}
               -
             {{end}}

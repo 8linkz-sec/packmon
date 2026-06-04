@@ -55,6 +55,9 @@ or a public internet-facing API.
 - Server-side parsing of repository lockfiles from N8N or CI. Clients parse
   lockfiles and send package lists.
 - Automatic database migrations on normal server startup.
+- Startup feed-data reconciliation that is bounded, idempotent, and runs only
+  after schema-version verification is not a schema migration. It must not alter
+  database structure or be required to upgrade an old schema.
 - Point-in-time database recovery or WAL archiving managed by Packmon.
 - Replay protection for webhooks. This is intentionally omitted for internal
   tooling simplicity.

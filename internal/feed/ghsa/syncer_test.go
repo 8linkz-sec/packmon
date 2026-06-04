@@ -19,7 +19,9 @@ type ghsaStoreStub struct {
 	statuses        []*db.FeedSyncStatus
 	status          *db.FeedSyncStatus
 	vulns           []*db.Vulnerability
+	deleted         []string
 	upsertErr       error
+	deleteErr       error
 	statusUpsertErr error
 }
 
@@ -29,6 +31,14 @@ func (s *ghsaStoreStub) UpsertVulnerability(_ context.Context, vuln *db.Vulnerab
 	}
 	s.upserts++
 	s.vulns = append(s.vulns, vuln)
+	return nil
+}
+
+func (s *ghsaStoreStub) DeleteVulnerability(_ context.Context, id string) error {
+	if s.deleteErr != nil {
+		return s.deleteErr
+	}
+	s.deleted = append(s.deleted, id)
 	return nil
 }
 
@@ -172,6 +182,9 @@ func TestProcessChangedFilesDoesNotReadOutsideRepo(t *testing.T) {
 	if store.upserts != 0 {
 		t.Fatalf("upserts = %d, want 0 for path outside repo", store.upserts)
 	}
+	if len(store.deleted) != 0 {
+		t.Fatalf("deleted IDs = %v, want none for path outside repo", store.deleted)
+	}
 }
 
 func TestProcessChangedFilesFiltersAndUpsertsReviewedJSON(t *testing.T) {
@@ -205,11 +218,42 @@ func TestProcessChangedFilesFiltersAndUpsertsReviewedJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("processChangedFiles: %v", err)
 	}
-	if synced != 1 || total != 2 || store.upserts != 1 {
+	if synced != 2 || total != 2 || store.upserts != 1 {
 		t.Fatalf("synced=%d total=%d upserts=%d", synced, total, store.upserts)
 	}
 	if got := store.vulns[0].Severity; got != "MEDIUM" {
 		t.Fatalf("severity = %q, want MEDIUM", got)
+	}
+	if len(store.deleted) != 1 || store.deleted[0] != "missing" {
+		t.Fatalf("deleted IDs = %v, want [missing]", store.deleted)
+	}
+}
+
+func TestProcessChangedFilesDeletesRemovedReviewedJSON(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	store := &ghsaStoreStub{}
+	syncer := NewSyncer(store, nil, "")
+	synced, total, err := syncer.processChangedFiles(context.Background(), store, repoDir, []string{
+		reviewedDir + "/2026/05/GHSA-deleted-1234-5678.json",
+	})
+	if err != nil {
+		t.Fatalf("processChangedFiles(deleted): %v", err)
+	}
+	if synced != 1 || total != 1 {
+		t.Fatalf("deleted changed file synced=%d total=%d, want 1/1", synced, total)
+	}
+	if len(store.deleted) != 1 || store.deleted[0] != "GHSA-deleted-1234-5678" {
+		t.Fatalf("deleted IDs = %v", store.deleted)
+	}
+
+	store = &ghsaStoreStub{deleteErr: errors.New("delete failed")}
+	_, _, err = syncer.processChangedFiles(context.Background(), store, repoDir, []string{
+		reviewedDir + "/2026/05/GHSA-delete-failed.json",
+	})
+	if err == nil || !errors.Is(err, store.deleteErr) {
+		t.Fatalf("processChangedFiles(delete error) = %v", err)
 	}
 }
 

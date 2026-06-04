@@ -9,6 +9,7 @@ type SyncExportOptions struct {
 	Ecosystems []string
 	Limit      int
 	Offset     int
+	Cursor     SyncCursor
 }
 
 // SyncExport is the server-side payload consumed by local SQLite sync.
@@ -19,32 +20,62 @@ type SyncExport struct {
 	Reputation      []SyncReputationFinding
 	Lifecycle       []SyncLifecycleRelease
 	Truncated       bool
+	NextCursor      *SyncCursor
+}
+
+type SyncCursor struct {
+	Vulnerabilities int `json:"vulnerabilities"`
+	Malicious       int `json:"malicious"`
+	Reputation      int `json:"reputation"`
+	Lifecycle       int `json:"lifecycle"`
+}
+
+func (c SyncCursor) IsZero() bool {
+	return c.Vulnerabilities == 0 && c.Malicious == 0 && c.Reputation == 0 && c.Lifecycle == 0
+}
+
+func (opts SyncExportOptions) EffectiveCursor() SyncCursor {
+	if !opts.Cursor.IsZero() {
+		return opts.Cursor
+	}
+	if opts.Offset <= 0 {
+		return SyncCursor{}
+	}
+	return SyncCursor{
+		Vulnerabilities: opts.Offset,
+		Malicious:       opts.Offset,
+		Reputation:      opts.Offset,
+		Lifecycle:       opts.Offset,
+	}
 }
 
 // SyncVulnerability is the flattened vulnerability row exported to local SQLite.
 type SyncVulnerability struct {
-	ID            string
-	Ecosystem     string
-	Name          string
-	VersionRanges string
-	Severity      string
-	CVSSScore     *float64
-	EPSSScore     *float64
-	CISAKEV       bool
-	Summary       string
-	Withdrawn     bool
+	ID               string
+	Ecosystem        string
+	Name             string
+	VersionRanges    string
+	VersionsAffected string
+	References       string
+	Severity         string
+	CVSSScore        *float64
+	EPSSScore        *float64
+	CISAKEV          bool
+	Summary          string
+	Withdrawn        bool
 }
 
 // SyncMalicious is the flattened malicious finding row exported to local SQLite.
 type SyncMalicious struct {
-	ID        string
-	Ecosystem string
-	Name      string
-	Versions  string
-	RiskType  string
-	Severity  string
-	Summary   string
-	Withdrawn bool
+	ID            string
+	Ecosystem     string
+	Name          string
+	Versions      string
+	ReferenceURLs string
+	RiskType      string
+	Severity      string
+	Summary       string
+	Withdrawn     bool
 }
 
 // SyncReputationFinding is a flattened cached reputation row exported to local

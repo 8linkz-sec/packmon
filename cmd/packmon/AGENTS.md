@@ -25,18 +25,16 @@ config precedence) first.
 
 ## Current open landmines (see Audit.md)
 
-> Status (2026-05-29): the items in this section were addressed across the
-> Audit.md "Fix-Runde" passes. Audit.md is authoritative; project-wide only the
-> external GitLab-runner test remains open. Keep the notes below as guardrails
-> so the fixes are not regressed.
+Audit.md is authoritative; project-wide only the external GitLab-runner test is
+documented as an external validation gap. Keep these guardrails in mind:
 
-- **M5:** the user-global config layer (`~/.packmon/config/packmon.yaml`) is not
-  loaded at all -- only the project file. Implement the missing precedence level.
-- `db sync` ignores `db.sync_source` from the config file (only the flag is read).
-- `db_test.go` only checks the help string; it does not test `--source osv`
-  rejection or case-insensitivity. Deepen it when you touch `db.go`.
-- The new git-metadata path (`local_history.go`) has no cmd-layer test; add a
-  temp-`git init` table test (with and without a commit).
+- Preserve config precedence: flags > environment > project config >
+  user-global config > defaults.
+- `db sync` must keep using the Packmon server as its only source. Config
+  `db.sync_source` is read, but values other than `server` must stay rejected.
+- The git-metadata path (`local_history.go`) has cmd-layer tests for no-git,
+  committed repo, and no-commit repo cases; keep them hermetic when changing
+  `GOTMPDIR` or git discovery behavior.
 
 ## Tests
 

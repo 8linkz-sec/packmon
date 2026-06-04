@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -41,5 +42,52 @@ func TestGitHubReleaseWorkflowHasTagTrigger(t *testing.T) {
 
 	if wf.On.WorkflowDispatch == nil {
 		t.Fatal("release workflow should also keep the manual workflow_dispatch trigger")
+	}
+}
+
+func TestGitHubReusableScanWorkflowVerifiesReleaseChecksum(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join("..", "..", ".github", "workflows", "packmon-scan.yml")
+	data, err := os.ReadFile(path) //nolint:gosec // static repository fixture path
+	if err != nil {
+		t.Fatalf("read packmon-scan.yml: %v", err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		"set -euo pipefail",
+		`BINARY_NAME="packmon-linux-${ARCH}"`,
+		`CHECKSUM_URL="${BINARY_BASE_URL}/checksums.txt"`,
+		`curl -sfL "${BINARY_URL}" -o "/tmp/${BINARY_NAME}"`,
+		`curl -sfL "${CHECKSUM_URL}" -o /tmp/checksums.txt`,
+		`sha256sum -c "${BINARY_NAME}.sha256"`,
+		`sudo install -m 0755 "/tmp/${BINARY_NAME}" /usr/local/bin/packmon`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("packmon-scan.yml missing %q", want)
+		}
+	}
+}
+
+func TestGitHubReusableScanWorkflowCommentsAllFindingTypes(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join("..", "..", ".github", "workflows", "packmon-scan.yml")
+	data, err := os.ReadFile(path) //nolint:gosec // static repository fixture path
+	if err != nil {
+		t.Fatalf("read packmon-scan.yml: %v", err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		"f.type === 'vulnerability'",
+		"f.type === 'malicious'",
+		"f.type === 'supply_chain_risk'",
+		"f.type === 'lifecycle'",
+		"### Supply Chain Risk Findings",
+		"### Lifecycle Findings",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("packmon-scan.yml missing PR comment marker %q", want)
+		}
 	}
 }

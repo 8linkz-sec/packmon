@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,39 +21,43 @@ const syncPageLimit = 1000
 
 // SyncConfig holds parameters for a client-to-server sync operation.
 type SyncConfig struct {
-	ServerURL  string
-	APIKey     string
-	Ecosystems []string
-	Full       bool
-	Timeout    time.Duration
+	ServerURL         string
+	APIKey            string
+	Ecosystems        []string
+	Full              bool
+	Timeout           time.Duration
+	AllowInsecureHTTP bool
 }
 
 // syncVulnerability is the wire format for a single vulnerability
 // delivered by the server's GET /api/v1/sync endpoint.
 type syncVulnerability struct {
-	ID            string   `json:"id"`
-	Ecosystem     string   `json:"ecosystem"`
-	Name          string   `json:"name"`
-	VersionRanges string   `json:"version_ranges"` // JSON string
-	Severity      string   `json:"severity"`
-	CVSSScore     *float64 `json:"cvss_score"`
-	EPSSScore     *float64 `json:"epss_score"`
-	CISAKEV       bool     `json:"cisa_kev"`
-	Summary       string   `json:"summary"`
-	Withdrawn     bool     `json:"withdrawn"`
+	ID               string   `json:"id"`
+	Ecosystem        string   `json:"ecosystem"`
+	Name             string   `json:"name"`
+	VersionRanges    string   `json:"version_ranges"`    // JSON string
+	VersionsAffected string   `json:"versions_affected"` // JSON string
+	References       string   `json:"references"`        // JSON string
+	Severity         string   `json:"severity"`
+	CVSSScore        *float64 `json:"cvss_score"`
+	EPSSScore        *float64 `json:"epss_score"`
+	CISAKEV          bool     `json:"cisa_kev"`
+	Summary          string   `json:"summary"`
+	Withdrawn        bool     `json:"withdrawn"`
 }
 
 // syncMalicious is the wire format for a single malicious finding
 // delivered by the server's GET /api/v1/sync endpoint.
 type syncMalicious struct {
-	ID        string `json:"id"`
-	Ecosystem string `json:"ecosystem"`
-	Name      string `json:"name"`
-	Versions  string `json:"versions"` // JSON string, empty = all
-	RiskType  string `json:"risk_type"`
-	Severity  string `json:"severity"`
-	Summary   string `json:"summary"`
-	Withdrawn bool   `json:"withdrawn"`
+	ID            string `json:"id"`
+	Ecosystem     string `json:"ecosystem"`
+	Name          string `json:"name"`
+	Versions      string `json:"versions"` // JSON string, empty = all
+	ReferenceURLs string `json:"reference_urls"`
+	RiskType      string `json:"risk_type"`
+	Severity      string `json:"severity"`
+	Summary       string `json:"summary"`
+	Withdrawn     bool   `json:"withdrawn"`
 }
 
 // syncReputation is the wire format for a cached reputation finding or
@@ -102,8 +107,20 @@ type syncResponse struct {
 	Reputation      []syncReputation       `json:"reputation"`
 	Lifecycle       []syncLifecycleRelease `json:"lifecycle"`
 	// Truncated is true when more data is available and the client should call
-	// again with the same since/snapshot parameters and the next offset.
-	Truncated bool `json:"truncated"`
+	// again with the same since/snapshot parameters and the next cursor.
+	Truncated  bool        `json:"truncated"`
+	NextCursor *syncCursor `json:"next_cursor"`
+}
+
+type syncCursor struct {
+	Vulnerabilities int `json:"vulnerabilities"`
+	Malicious       int `json:"malicious"`
+	Reputation      int `json:"reputation"`
+	Lifecycle       int `json:"lifecycle"`
+}
+
+func (c syncCursor) isZero() bool {
+	return c.Vulnerabilities == 0 && c.Malicious == 0 && c.Reputation == 0 && c.Lifecycle == 0
 }
 
 // Sync fetches vulnerability and malicious data from the packmon server
@@ -125,8 +142,11 @@ func Sync(ctx context.Context, store *Store, cfg SyncConfig) error {
 	if cfg.Timeout == 0 {
 		cfg.Timeout = 60 * time.Second
 	}
+	if err := validateSyncServerURL(cfg.ServerURL, cfg.AllowInsecureHTTP); err != nil {
+		return err
+	}
 
-	client := &http.Client{Timeout: cfg.Timeout}
+	client := newSyncHTTPClient(cfg.Timeout)
 
 	// Determine the since timestamp for delta sync.
 	var since string
@@ -138,12 +158,14 @@ func Sync(ctx context.Context, store *Store, cfg SyncConfig) error {
 		}
 	}
 
-	offset := 0
+	legacyOffset := 0
+	cursor := syncCursor{}
 	snapshot := ""
+	firstPage := true
 
 	// Loop to handle paginated responses.
 	for {
-		resp, err := fetchSyncPage(ctx, client, cfg, since, offset, snapshot)
+		resp, err := fetchSyncPage(ctx, client, cfg, since, cursor, legacyOffset, snapshot)
 		if err != nil {
 			return err
 		}
@@ -152,9 +174,10 @@ func Sync(ctx context.Context, store *Store, cfg SyncConfig) error {
 			snapshot = resp.SyncedAt
 		}
 
-		if err := applySync(ctx, store, cfg.Full && offset == 0, resp); err != nil {
+		if err := applySync(ctx, store, cfg.Full && firstPage, resp); err != nil {
 			return err
 		}
+		firstPage = false
 
 		if !resp.Truncated {
 			break
@@ -163,7 +186,16 @@ func Sync(ctx context.Context, store *Store, cfg SyncConfig) error {
 		if snapshot == "" {
 			return fmt.Errorf("sync: truncated response missing synced_at")
 		}
-		offset += syncPageLimit
+		if resp.NextCursor != nil {
+			nextCursor := *resp.NextCursor
+			if nextCursor == cursor {
+				return fmt.Errorf("sync: truncated response did not advance next_cursor")
+			}
+			cursor = nextCursor
+			legacyOffset = 0
+		} else {
+			legacyOffset += syncPageLimit
+		}
 	}
 
 	if snapshot != "" {
@@ -175,8 +207,32 @@ func Sync(ctx context.Context, store *Store, cfg SyncConfig) error {
 	return nil
 }
 
+func validateSyncServerURL(serverURL string, allowInsecureHTTP bool) error {
+	parsed, err := url.Parse(strings.TrimSpace(serverURL))
+	if err != nil {
+		return fmt.Errorf("sync: parse server URL: %w", err)
+	}
+	if !strings.EqualFold(parsed.Scheme, "https") && !allowInsecureHTTP {
+		return fmt.Errorf("sync: refusing to use insecure server URL %q: scheme must be https (set --insecure-allow-http / PACKMON_INSECURE_ALLOW_HTTP to override)", serverURL)
+	}
+	return nil
+}
+
+func newSyncHTTPClient(timeout time.Duration) *http.Client {
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		},
+	}
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: transport,
+	}
+}
+
 // fetchSyncPage makes a single HTTP request to the server sync endpoint.
-func fetchSyncPage(ctx context.Context, client *http.Client, cfg SyncConfig, since string, offset int, snapshot string) (*syncResponse, error) {
+func fetchSyncPage(ctx context.Context, client *http.Client, cfg SyncConfig, since string, cursor syncCursor, legacyOffset int, snapshot string) (*syncResponse, error) {
 	u, err := url.Parse(strings.TrimRight(cfg.ServerURL, "/") + "/api/v1/sync")
 	if err != nil {
 		return nil, fmt.Errorf("sync: parse server URL: %w", err)
@@ -190,8 +246,10 @@ func fetchSyncPage(ctx context.Context, client *http.Client, cfg SyncConfig, sin
 		q.Set("snapshot", snapshot)
 	}
 	q.Set("limit", strconv.Itoa(syncPageLimit))
-	if offset > 0 {
-		q.Set("offset", strconv.Itoa(offset))
+	if !cursor.isZero() {
+		setSyncCursorQuery(q, cursor)
+	} else if legacyOffset > 0 {
+		q.Set("offset", strconv.Itoa(legacyOffset))
 	}
 	if len(cfg.Ecosystems) > 0 {
 		q.Set("ecosystem", strings.Join(cfg.Ecosystems, ","))
@@ -230,6 +288,21 @@ func fetchSyncPage(ctx context.Context, client *http.Client, cfg SyncConfig, sin
 	return &syncResp, nil
 }
 
+func setSyncCursorQuery(q url.Values, cursor syncCursor) {
+	if cursor.Vulnerabilities > 0 {
+		q.Set("vulnerabilities_offset", strconv.Itoa(cursor.Vulnerabilities))
+	}
+	if cursor.Malicious > 0 {
+		q.Set("malicious_offset", strconv.Itoa(cursor.Malicious))
+	}
+	if cursor.Reputation > 0 {
+		q.Set("reputation_offset", strconv.Itoa(cursor.Reputation))
+	}
+	if cursor.Lifecycle > 0 {
+		q.Set("lifecycle_offset", strconv.Itoa(cursor.Lifecycle))
+	}
+}
+
 // applySync writes one page of sync data into the local database inside
 // a single transaction. On full sync the first page drops all existing
 // rows before inserting.
@@ -258,13 +331,15 @@ func applySync(ctx context.Context, store *Store, full bool, resp *syncResponse)
 
 	// Upsert vulnerabilities.
 	vulnStmt, err := tx.PrepareContext(ctx, `
-		INSERT INTO vulnerabilities_local(row_key, id, ecosystem, name, version_ranges, severity, cvss_score, epss_score, cisa_kev, summary)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO vulnerabilities_local(row_key, id, ecosystem, name, version_ranges, versions_affected, references_json, severity, cvss_score, epss_score, cisa_kev, summary)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(row_key) DO UPDATE SET
 			id             = excluded.id,
 			ecosystem      = excluded.ecosystem,
 			name           = excluded.name,
 			version_ranges = excluded.version_ranges,
+			versions_affected = excluded.versions_affected,
+			references_json = excluded.references_json,
 			severity       = excluded.severity,
 			cvss_score     = excluded.cvss_score,
 			epss_score     = excluded.epss_score,
@@ -304,7 +379,7 @@ func applySync(ctx context.Context, store *Store, full bool, resp *syncResponse)
 
 		if _, err := vulnStmt.ExecContext(ctx,
 			syncVulnerabilityRowKey(v.ID, v.Ecosystem, v.Name), v.ID, v.Ecosystem, v.Name, v.VersionRanges,
-			v.Severity, cvss, epss, cisaKEV, v.Summary,
+			v.VersionsAffected, v.References, v.Severity, cvss, epss, cisaKEV, v.Summary,
 		); err != nil {
 			return fmt.Errorf("sync: upsert vuln %s: %w", v.ID, err)
 		}
@@ -312,12 +387,13 @@ func applySync(ctx context.Context, store *Store, full bool, resp *syncResponse)
 
 	// Upsert malicious findings.
 	malStmt, err := tx.PrepareContext(ctx, `
-		INSERT INTO malicious_local(id, ecosystem, name, versions, risk_type, severity, summary)
-		VALUES(?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO malicious_local(id, ecosystem, name, versions, reference_urls, risk_type, severity, summary)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			ecosystem = excluded.ecosystem,
 			name      = excluded.name,
 			versions  = excluded.versions,
+			reference_urls = excluded.reference_urls,
 			risk_type = excluded.risk_type,
 			severity  = excluded.severity,
 			summary   = excluded.summary`)
@@ -347,7 +423,7 @@ func applySync(ctx context.Context, store *Store, full bool, resp *syncResponse)
 
 		if _, err := malStmt.ExecContext(ctx,
 			m.ID, m.Ecosystem, m.Name, versions,
-			m.RiskType, m.Severity, m.Summary,
+			m.ReferenceURLs, m.RiskType, m.Severity, m.Summary,
 		); err != nil {
 			return fmt.Errorf("sync: upsert malicious %s: %w", m.ID, err)
 		}

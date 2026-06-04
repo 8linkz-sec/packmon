@@ -22,24 +22,35 @@ func TestApplySyncVulnerabilityAndMaliciousRowsAndTombstones(t *testing.T) {
 	epss := 0.42
 	resp := &syncResponse{
 		Vulnerabilities: []syncVulnerability{{
-			ID:            "GHSA-sync",
-			Ecosystem:     "npm",
-			Name:          "left-pad",
-			VersionRanges: `[{"type":"SEMVER","events":[{"introduced":"0"},{"fixed":"2.0.0"}]}]`,
-			Severity:      "HIGH",
-			CVSSScore:     &cvss,
-			EPSSScore:     &epss,
-			CISAKEV:       true,
-			Summary:       "sync vuln",
+			ID:               "GHSA-sync",
+			Ecosystem:        "npm",
+			Name:             "left-pad",
+			VersionRanges:    `[{"type":"SEMVER","events":[{"introduced":"0"},{"fixed":"2.0.0"}]}]`,
+			VersionsAffected: `[]`,
+			References:       `[{"type":"ADVISORY","url":"https://github.com/advisories/GHSA-sync"},{"type":"WEB","url":"https://osv.dev/vulnerability/GHSA-sync"}]`,
+			Severity:         "HIGH",
+			CVSSScore:        &cvss,
+			EPSSScore:        &epss,
+			CISAKEV:          true,
+			Summary:          "sync vuln",
+		}, {
+			ID:               "GHSA-versions",
+			Ecosystem:        "npm",
+			Name:             "only-listed",
+			VersionRanges:    `[]`,
+			VersionsAffected: `["1.0.1"]`,
+			Severity:         "MEDIUM",
+			Summary:          "explicit versions",
 		}},
 		Malicious: []syncMalicious{{
-			ID:        "MAL-sync",
-			Ecosystem: "npm",
-			Name:      "evil",
-			Versions:  `["1.0.0"]`,
-			RiskType:  "malware",
-			Severity:  "CRITICAL",
-			Summary:   "bad",
+			ID:            "MAL-sync",
+			Ecosystem:     "npm",
+			Name:          "evil",
+			Versions:      `["1.0.0"]`,
+			ReferenceURLs: `["https://example.test/malware/MAL-sync"]`,
+			RiskType:      "malware",
+			Severity:      "CRITICAL",
+			Summary:       "bad",
 		}},
 	}
 	if err := applySync(ctx, store, true, resp); err != nil {
@@ -53,12 +64,32 @@ func TestApplySyncVulnerabilityAndMaliciousRowsAndTombstones(t *testing.T) {
 	if len(vulns) != 1 || vulns[0].AdvisoryID != "GHSA-sync" || vulns[0].FixedVersion != ">= 2.0.0" {
 		t.Fatalf("vulns = %+v, want synced vulnerability with fixed version", vulns)
 	}
+	if vulns[0].URL == "" || len(vulns[0].Resources) < 2 {
+		t.Fatalf("vuln resources = url %q resources %+v, want synced links", vulns[0].URL, vulns[0].Resources)
+	}
+	vulns, err = store.FindVulnerabilities(ctx, "npm", "only-listed", "1.0.1")
+	if err != nil {
+		t.Fatalf("FindVulnerabilities(versions_affected hit) error = %v", err)
+	}
+	if len(vulns) != 1 || vulns[0].AdvisoryID != "GHSA-versions" {
+		t.Fatalf("versions_affected hit = %+v, want GHSA-versions", vulns)
+	}
+	vulns, err = store.FindVulnerabilities(ctx, "npm", "only-listed", "1.0.2")
+	if err != nil {
+		t.Fatalf("FindVulnerabilities(versions_affected miss) error = %v", err)
+	}
+	if len(vulns) != 0 {
+		t.Fatalf("versions_affected miss = %+v, want no findings", vulns)
+	}
 	mal, err := store.FindMalicious(ctx, "npm", "evil", "1.0.0")
 	if err != nil {
 		t.Fatalf("FindMalicious() error = %v", err)
 	}
 	if len(mal) != 1 || mal[0].Type != domain.FindingTypeMalicious {
 		t.Fatalf("malicious = %+v, want synced malicious finding", mal)
+	}
+	if mal[0].AdvisoryID != "MAL-sync" || mal[0].URL != "https://example.test/malware/MAL-sync" {
+		t.Fatalf("malicious link fields = %+v, want advisory id and URL", mal[0])
 	}
 
 	if err := applySync(ctx, store, false, &syncResponse{
@@ -245,7 +276,7 @@ func TestSyncErrorBranches(t *testing.T) {
 		http.Error(w, strings.Repeat("x", 250), http.StatusBadGateway)
 	}))
 	defer server.Close()
-	if err := Sync(context.Background(), store, SyncConfig{ServerURL: server.URL, Full: true}); err == nil || !strings.Contains(err.Error(), "server returned 502") || !strings.Contains(err.Error(), "...") {
+	if err := Sync(context.Background(), store, SyncConfig{ServerURL: server.URL, Full: true, AllowInsecureHTTP: true}); err == nil || !strings.Contains(err.Error(), "server returned 502") || !strings.Contains(err.Error(), "...") {
 		t.Fatalf("Sync(server error) = %v", err)
 	}
 
@@ -253,7 +284,7 @@ func TestSyncErrorBranches(t *testing.T) {
 		_, _ = w.Write([]byte(`{"truncated":true}`))
 	}))
 	defer truncated.Close()
-	if err := Sync(context.Background(), store, SyncConfig{ServerURL: truncated.URL, Full: true}); err == nil || !strings.Contains(err.Error(), "truncated response missing synced_at") {
+	if err := Sync(context.Background(), store, SyncConfig{ServerURL: truncated.URL, Full: true, AllowInsecureHTTP: true}); err == nil || !strings.Contains(err.Error(), "truncated response missing synced_at") {
 		t.Fatalf("Sync(truncated without snapshot) = %v", err)
 	}
 
@@ -261,8 +292,23 @@ func TestSyncErrorBranches(t *testing.T) {
 		_, _ = w.Write([]byte(`not json`))
 	}))
 	defer invalidJSON.Close()
-	if err := Sync(context.Background(), store, SyncConfig{ServerURL: invalidJSON.URL, Full: true}); err == nil || !strings.Contains(err.Error(), "decode response") {
+	if err := Sync(context.Background(), store, SyncConfig{ServerURL: invalidJSON.URL, Full: true, AllowInsecureHTTP: true}); err == nil || !strings.Contains(err.Error(), "decode response") {
 		t.Fatalf("Sync(invalid JSON) = %v", err)
+	}
+}
+
+func TestSyncRejectsPlainHTTPWithoutExplicitOptIn(t *testing.T) {
+	t.Parallel()
+
+	store := newSQLiteTestStore(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Fatal("Sync sent request over plain HTTP without opt-in")
+	}))
+	defer server.Close()
+
+	err := Sync(context.Background(), store, SyncConfig{ServerURL: server.URL, APIKey: "secret"})
+	if err == nil || !strings.Contains(err.Error(), "refusing to use insecure server URL") {
+		t.Fatalf("Sync(insecure HTTP) error = %v", err)
 	}
 }
 
@@ -287,9 +333,10 @@ func TestSyncIncrementalUsesSinceAuthorizationAndEcosystems(t *testing.T) {
 	defer server.Close()
 
 	if err := Sync(ctx, store, SyncConfig{
-		ServerURL:  server.URL,
-		APIKey:     "sync-key",
-		Ecosystems: []string{"npm", "go"},
+		ServerURL:         server.URL,
+		APIKey:            "sync-key",
+		Ecosystems:        []string{"npm", "go"},
+		AllowInsecureHTTP: true,
 	}); err != nil {
 		t.Fatalf("Sync(incremental) error = %v", err)
 	}
@@ -322,7 +369,7 @@ func TestFetchSyncPageReadErrorIncludesContext(t *testing.T) {
 	_, err := fetchSyncPage(context.Background(), client, SyncConfig{
 		ServerURL: "https://packmon.example",
 		APIKey:    "read-key",
-	}, "2026-05-30T10:00:00Z", syncPageLimit, "snap")
+	}, "2026-05-30T10:00:00Z", syncCursor{}, syncPageLimit, "snap")
 	if err == nil || !strings.Contains(err.Error(), "read response") {
 		t.Fatalf("fetchSyncPage(read error) = %v", err)
 	}

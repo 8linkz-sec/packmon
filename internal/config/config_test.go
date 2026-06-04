@@ -126,8 +126,8 @@ func TestLoadWithNoEnvVarsReturnsDefaults(t *testing.T) {
 	if !cfg.Feeds.OpenSSFEnabled {
 		t.Error("Feeds.OpenSSFEnabled = false, want true")
 	}
-	if !cfg.Feeds.VulnCheckEnabled {
-		t.Error("Feeds.VulnCheckEnabled = false, want true")
+	if cfg.Feeds.VulnCheckEnabled {
+		t.Error("Feeds.VulnCheckEnabled = true, want false")
 	}
 	if cfg.Feeds.SocketEnabled {
 		t.Error("Feeds.SocketEnabled = true, want false (default)")

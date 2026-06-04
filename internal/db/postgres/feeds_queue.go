@@ -90,8 +90,20 @@ func (s *Store) UpsertFeedSyncStatus(ctx context.Context, status *db.FeedSyncSta
 			last_sync_duration = COALESCE(EXCLUDED.last_sync_duration, feed_sync_status.last_sync_duration),
 			last_sync_status = EXCLUDED.last_sync_status,
 			last_error = EXCLUDED.last_error,
-			entries_synced = EXCLUDED.entries_synced,
-			entries_total = EXCLUDED.entries_total,
+			entries_synced = CASE
+				WHEN EXCLUDED.last_sync_status = 'success'
+					AND EXCLUDED.entries_synced = 0
+					AND EXCLUDED.entries_total = 0
+					THEN feed_sync_status.entries_synced
+				ELSE EXCLUDED.entries_synced
+			END,
+			entries_total = CASE
+				WHEN EXCLUDED.last_sync_status = 'success'
+					AND EXCLUDED.entries_synced = 0
+					AND EXCLUDED.entries_total = 0
+					THEN feed_sync_status.entries_total
+				ELSE EXCLUDED.entries_total
+			END,
 			last_etag = COALESCE(NULLIF(EXCLUDED.last_etag, ''), feed_sync_status.last_etag),
 			last_commit_hash = COALESCE(NULLIF(EXCLUDED.last_commit_hash, ''), feed_sync_status.last_commit_hash),
 			metadata = CASE
@@ -212,45 +224,68 @@ func (s *Store) EnqueueRefresh(ctx context.Context, job *db.RefreshJob) (bool, i
 		ON CONFLICT DO NOTHING
 		RETURNING id`
 
+	// Raise the priority of an already-active (pending/processing) job.
+	const updateQuery = `
+		UPDATE refresh_queue
+		SET priority = LEAST(priority, $4),
+		    status = 'pending',
+		    processed_at = NULL,
+		    error = NULL
+		WHERE ecosystem = $1 AND name = $2 AND source = $3
+		  AND status IN ('pending', 'processing')
+		RETURNING id`
+
+	// A job an admin has explicitly paused must never be resurrected; locate it
+	// so we can report its position without changing its state.
+	const selectPausedQuery = `
+		SELECT id
+		FROM refresh_queue
+		WHERE ecosystem = $1 AND name = $2 AND source = $3
+		  AND status = 'paused'
+		ORDER BY id ASC
+		LIMIT 1`
+
 	var (
 		jobID   int
 		created bool
+		settled bool
 	)
-	err = tx.QueryRow(ctx, insertQuery, job.Ecosystem, job.Name, job.Source, job.Priority).Scan(&jobID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		// A non-terminal job already exists for this package (the dedup index
-		// covers pending/processing/paused). Raise its priority if it is
-		// active, but never resurrect a job an admin has explicitly paused.
-		const updateQuery = `
-			UPDATE refresh_queue
-			SET priority = LEAST(priority, $4),
-			    status = 'pending',
-			    processed_at = NULL,
-			    error = NULL
-			WHERE ecosystem = $1 AND name = $2 AND source = $3
-			  AND status IN ('pending', 'processing')
-			RETURNING id`
-		switch updErr := tx.QueryRow(ctx, updateQuery, job.Ecosystem, job.Name, job.Source, job.Priority).Scan(&jobID); {
-		case errors.Is(updErr, pgx.ErrNoRows):
-			// The existing job is paused. Leave it paused and report its
-			// position without changing its state.
-			const selectQuery = `
-				SELECT id
-				FROM refresh_queue
-				WHERE ecosystem = $1 AND name = $2 AND source = $3
-				  AND status IN ('pending', 'processing', 'paused')
-				ORDER BY id ASC
-				LIMIT 1`
-			if selErr := tx.QueryRow(ctx, selectQuery, job.Ecosystem, job.Name, job.Source).Scan(&jobID); selErr != nil {
-				return false, 0, fmt.Errorf("postgres: locate existing refresh job: %w", selErr)
+	// The dedup index covers pending/processing/paused. Under READ COMMITTED the
+	// INSERT, UPDATE and SELECT each take a fresh snapshot, so a conflicting job
+	// can transition to done/error between statements. When that happens the row
+	// leaves the partial index and none of the three statements match; retrying
+	// the INSERT then succeeds because the conflict is gone. The loop is bounded
+	// so a pathological churn cannot spin forever.
+	const maxAttempts = 3
+	for attempt := 0; attempt < maxAttempts && !settled; attempt++ {
+		switch insErr := tx.QueryRow(ctx, insertQuery, job.Ecosystem, job.Name, job.Source, job.Priority).Scan(&jobID); {
+		case insErr == nil:
+			created, settled = true, true
+		case !errors.Is(insErr, pgx.ErrNoRows):
+			return false, 0, fmt.Errorf("postgres: insert refresh job: %w", insErr)
+		default:
+			// Conflict with an existing pending/processing/paused job.
+			switch updErr := tx.QueryRow(ctx, updateQuery, job.Ecosystem, job.Name, job.Source, job.Priority).Scan(&jobID); {
+			case updErr == nil:
+				settled = true
+			case !errors.Is(updErr, pgx.ErrNoRows):
+				return false, 0, fmt.Errorf("postgres: update existing refresh job: %w", updErr)
+			default:
+				// No active job to bump: it is either paused (leave it paused)
+				// or it just transitioned to done/error (retry the insert).
+				switch selErr := tx.QueryRow(ctx, selectPausedQuery, job.Ecosystem, job.Name, job.Source).Scan(&jobID); {
+				case selErr == nil:
+					settled = true
+				case !errors.Is(selErr, pgx.ErrNoRows):
+					return false, 0, fmt.Errorf("postgres: locate existing refresh job: %w", selErr)
+				}
+				// selErr == ErrNoRows: the conflicting job left the dedup index
+				// between statements; loop to retry the insert.
 			}
-		case updErr != nil:
-			return false, 0, fmt.Errorf("postgres: update existing refresh job: %w", updErr)
 		}
-	} else if err != nil {
-		return false, 0, fmt.Errorf("postgres: insert refresh job: %w", err)
-	} else {
-		created = true
+	}
+	if !settled {
+		return false, 0, fmt.Errorf("postgres: enqueue refresh job: no row settled after %d attempts", maxAttempts)
 	}
 
 	position, err := queuePosition(ctx, tx, jobID, job.Source)

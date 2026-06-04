@@ -18,6 +18,7 @@ type FeedStatusData struct {
 type FeedRow struct {
 	FeedName       string
 	Status         string
+	StatusReason   string
 	LastSyncAt     *time.Time
 	LastSyncAtTime time.Time // dereferenced for template convenience
 	LastSyncStatus string
@@ -41,9 +42,11 @@ func HandleFeeds(store Store, renderer *Renderer, logger *slog.Logger) http.Hand
 
 		rows := make([]FeedRow, 0, len(statuses))
 		for _, s := range statuses {
+			status, reason := feedHealth(s)
 			row := FeedRow{
 				FeedName:       s.FeedName,
-				Status:         feedHealthStatus(s),
+				Status:         status,
+				StatusReason:   reason,
 				LastSyncAt:     s.LastSyncAt,
 				LastSyncStatus: s.LastSyncStatus,
 				EntriesSynced:  s.EntriesSynced,
@@ -85,26 +88,31 @@ func HandleFeeds(store Store, renderer *Renderer, logger *slog.Logger) http.Hand
 // Duplicated from api/v1 to avoid a cross-package dependency; both use
 // the same logic.
 func feedHealthStatus(s db.FeedSyncStatus) string {
+	status, _ := feedHealth(s)
+	return status
+}
+
+func feedHealth(s db.FeedSyncStatus) (string, string) {
 	if s.LastSyncStatus == "error" {
-		return "error"
+		return "error", "last sync failed"
 	}
 	if s.LastSyncStatus == "disabled" {
-		return "disabled"
+		return "disabled", "feed disabled"
 	}
 	if s.LastSyncStatus == "running" {
-		return "pending"
+		return "pending", "sync running"
 	}
 	if s.LastSyncStatus == "skipped" {
-		return "warning"
+		return "warning", "last sync skipped"
 	}
 	if s.LastSyncAt == nil {
-		return "error"
+		return "error", "never synced"
 	}
 	if time.Since(*s.LastSyncAt) > 48*time.Hour {
-		return "warning"
+		return "warning", "stale: no sync in 48h+"
 	}
 	if s.EntriesTotal == 0 && s.EntriesSynced == 0 {
-		return "warning"
+		return "warning", "no entries synced yet"
 	}
-	return "healthy"
+	return "healthy", ""
 }

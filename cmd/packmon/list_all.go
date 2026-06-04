@@ -248,13 +248,6 @@ func listAllAllowsEcosystem(ecosystems []string, eco domain.Ecosystem) bool {
 	return false
 }
 
-// printFullPackageList renders section 2: every detected package with its
-// latest-version lookup, whether an update is available, and whether the exact
-// package@version had a finding in section 1.
-func printFullPackageList(packages []listAllPackage, result *domain.ScanResult, scanPath string) {
-	printListAllPackageReport(buildListAllPackageReport(packages, result, scanPath))
-}
-
 func buildListAllPackageReport(packages []listAllPackage, result *domain.ScanResult, scanPath string) listAllPackageReport {
 	// Look up latest versions in parallel with a bounded request fan-out and a
 	// 60s timeout, exactly like runOutdated.

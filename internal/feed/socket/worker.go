@@ -78,10 +78,14 @@ type scoreData struct {
 
 // issueEntry is one security or quality issue found by Socket.dev.
 type issueEntry struct {
-	Type        string `json:"type"`
-	Severity    string `json:"severity"`
-	Title       string `json:"title"`
-	Description string `json:"description"`
+	Type             string   `json:"type"`
+	Severity         string   `json:"severity"`
+	Title            string   `json:"title"`
+	Description      string   `json:"description"`
+	Version          string   `json:"version"`
+	PackageVersion   string   `json:"packageVersion"`
+	Versions         []string `json:"versions"`
+	AffectedVersions []string `json:"affectedVersions"`
 }
 
 // packageInfo holds basic package metadata from the Socket.dev response.
@@ -350,6 +354,7 @@ func (w *Worker) processIssues(ctx context.Context, job *db.RefreshJob, resp *sc
 			ID:            findingID,
 			Ecosystem:     job.Ecosystem,
 			Name:          job.Name,
+			Versions:      socketIssueVersions(issue, resp.Package),
 			Source:        FeedName,
 			RiskType:      riskType,
 			Severity:      severity,
@@ -370,6 +375,35 @@ func (w *Worker) processIssues(ctx context.Context, job *db.RefreshJob, resp *sc
 	}
 
 	return nil
+}
+
+func socketIssueVersions(issue issueEntry, pkg *packageInfo) json.RawMessage {
+	values := make([]string, 0, 2+len(issue.Versions)+len(issue.AffectedVersions))
+	values = append(values, issue.Version, issue.PackageVersion)
+	if pkg != nil {
+		values = append(values, pkg.Version)
+	}
+	values = append(values, issue.Versions...)
+	values = append(values, issue.AffectedVersions...)
+
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	encoded, _ := json.Marshal(out)
+	return encoded
 }
 
 // updateCheckStatus records that a package was checked, regardless of outcome.
@@ -440,6 +474,7 @@ func (w *Worker) drainTokens() {
 	w.tokensMu.Lock()
 	defer w.tokensMu.Unlock()
 	w.tokens = 0
+	w.fractionalTokens = 0
 	w.lastRefill = time.Now()
 }
 

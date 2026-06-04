@@ -16,9 +16,11 @@ import (
 
 type lifecycleStoreStub struct {
 	db.Store
-	status   *db.FeedSyncStatus
-	statuses []db.FeedSyncStatus
-	products []db.LifecycleProduct
+	status          *db.FeedSyncStatus
+	statuses        []db.FeedSyncStatus
+	products        []db.LifecycleProduct
+	reconciledSlugs []string
+	reconcileErr    error
 }
 
 func (s *lifecycleStoreStub) GetFeedSyncStatus(context.Context, string) (*db.FeedSyncStatus, error) {
@@ -41,6 +43,11 @@ func (s *lifecycleStoreStub) UpsertLifecycleProducts(_ context.Context, products
 	return nil
 }
 
+func (s *lifecycleStoreStub) DeleteLifecycleProductsNotIn(_ context.Context, productSlugs []string) (int, error) {
+	s.reconciledSlugs = append([]string(nil), productSlugs...)
+	return 0, s.reconcileErr
+}
+
 func TestFetchProductsFullSendsHeadersAndParsesResponse(t *testing.T) {
 	t.Parallel()
 
@@ -51,8 +58,8 @@ func TestFetchProductsFullSendsHeadersAndParsesResponse(t *testing.T) {
 		if got := r.Header.Get("Accept"); got != "application/json" {
 			t.Fatalf("Accept = %q, want application/json", got)
 		}
-		if got := r.Header.Get("User-Agent"); got != "packmon-server/dev" {
-			t.Fatalf("User-Agent = %q, want packmon-server/dev", got)
+		if got := r.Header.Get("User-Agent"); got != "packmon-server" {
+			t.Fatalf("User-Agent = %q, want packmon-server", got)
 		}
 		if got := r.Header.Get("If-None-Match"); got != "old-etag" {
 			t.Fatalf("If-None-Match = %q, want old-etag", got)
@@ -79,6 +86,23 @@ func TestFetchProductsFullSendsHeadersAndParsesResponse(t *testing.T) {
 	release := resp.Result[0].Releases[0]
 	if release.Name != "4.2" || release.Latest == nil || release.Latest.Name != "4.2.22" || !release.IsEOAS {
 		t.Fatalf("release = %+v", release)
+	}
+}
+
+func TestFetchProductsFullUsesConfiguredUserAgent(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("User-Agent"); got != "packmon-server/1.2.3" {
+			t.Fatalf("User-Agent = %q, want configured value", got)
+		}
+		_, _ = w.Write([]byte(sampleProductsResponse()))
+	}))
+	defer server.Close()
+
+	client := &Client{BaseURL: server.URL, UserAgent: "packmon-server/1.2.3", HTTPClient: server.Client()}
+	if _, _, _, err := client.FetchProductsFull(context.Background(), ""); err != nil {
+		t.Fatalf("FetchProductsFull() error = %v", err)
 	}
 }
 
@@ -144,6 +168,9 @@ func TestSyncerUpsertsProductsAndPackageMapsFromPURLs(t *testing.T) {
 	}
 	if len(product.Releases) != 1 || product.Releases[0].Cycle != "4.2" || product.Releases[0].Latest != "4.2.22" || !product.Releases[0].IsEOAS {
 		t.Fatalf("releases = %+v", product.Releases)
+	}
+	if len(store.reconciledSlugs) != 1 || store.reconciledSlugs[0] != "django" {
+		t.Fatalf("reconciled slugs = %+v, want django", store.reconciledSlugs)
 	}
 	if len(store.statuses) != 1 || store.statuses[0].LastSyncStatus != "success" || store.statuses[0].LastEtag != "fresh-etag" {
 		t.Fatalf("status = %+v", store.statuses)

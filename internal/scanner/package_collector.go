@@ -39,6 +39,7 @@ type PackageCollection struct {
 	ParseErrors []string
 	LockFiles   int
 	SBOMFiles   int
+	index       map[packageCollectionKey]int
 }
 
 // CollectPackages walks lockfiles under the root and parses explicit SBOM
@@ -87,7 +88,7 @@ func CollectPackages(cfg CollectConfig) (*PackageCollection, error) {
 			continue
 		}
 		result.SBOMFiles++
-		displayPath, packages, parseErr := parseCollectedSBOM(absRoot, sbomPath)
+		displayPath, packages, skipped, parseErr := parseCollectedSBOM(absRoot, sbomPath)
 		if parseErr != nil {
 			var inputErr *sbomInputError
 			if errors.As(parseErr, &inputErr) {
@@ -95,6 +96,9 @@ func CollectPackages(cfg CollectConfig) (*PackageCollection, error) {
 			}
 			result.ParseErrors = append(result.ParseErrors, fmt.Sprintf("%s: %v", displayPath, parseErr))
 			continue
+		}
+		for _, item := range skipped {
+			result.ParseErrors = append(result.ParseErrors, formatSBOMSkippedComponent(displayPath, item))
 		}
 		for _, pkg := range packages {
 			if !ecoFilter.allows(pkg.Ecosystem) {
@@ -132,10 +136,10 @@ func parseCollectedLockFile(lf LockFile) ([]domain.Package, error) {
 	return lf.Parser.Parse(f)
 }
 
-func parseCollectedSBOM(root, path string) (string, []domain.Package, error) {
+func parseCollectedSBOM(root, path string) (string, []domain.Package, []sbom.SkippedComponent, error) {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
-		return path, nil, &sbomInputError{err: fmt.Errorf("resolve SBOM path: %w", err)}
+		return path, nil, nil, &sbomInputError{err: fmt.Errorf("resolve SBOM path: %w", err)}
 	}
 	displayPath := displayRelativePath(root, absPath)
 
@@ -145,26 +149,41 @@ func parseCollectedSBOM(root, path string) (string, []domain.Package, error) {
 	}
 	rootHandle, err := os.OpenRoot(rootDir)
 	if err != nil {
-		return displayPath, nil, &sbomInputError{err: fmt.Errorf("open SBOM root: %w", err)}
+		return displayPath, nil, nil, &sbomInputError{err: fmt.Errorf("open SBOM root: %w", err)}
 	}
 	defer closeSilently(rootHandle)
 
 	f, err := rootHandle.Open(fileName)
 	if err != nil {
-		return displayPath, nil, &sbomInputError{err: fmt.Errorf("open SBOM: %w", err)}
+		return displayPath, nil, nil, &sbomInputError{err: fmt.Errorf("open SBOM: %w", err)}
 	}
 	defer closeSilently(f)
 
 	parsed, err := sbom.Parse(f)
 	if err != nil {
-		return displayPath, nil, err
+		return displayPath, nil, nil, err
 	}
 
 	packages := make([]domain.Package, 0, len(parsed.Packages))
 	for _, entry := range parsed.Packages {
 		packages = append(packages, entry.Package)
 	}
-	return displayPath, packages, nil
+	return displayPath, packages, parsed.Skipped, nil
+}
+
+func formatSBOMSkippedComponent(path string, item sbom.SkippedComponent) string {
+	name := strings.TrimSpace(item.Name)
+	reason := strings.TrimSpace(item.Reason)
+	switch {
+	case name != "" && reason != "":
+		return fmt.Sprintf("%s: skipped SBOM component %q: %s", path, name, reason)
+	case name != "":
+		return fmt.Sprintf("%s: skipped SBOM component %q", path, name)
+	case reason != "":
+		return fmt.Sprintf("%s: skipped SBOM component: %s", path, reason)
+	default:
+		return fmt.Sprintf("%s: skipped SBOM component", path)
+	}
 }
 
 func displayRelativePath(root, path string) string {
@@ -182,15 +201,13 @@ type packageCollectionKey struct {
 }
 
 func (c *PackageCollection) add(pkg domain.Package, sourceFile, sourceType string) {
+	c.ensureIndex()
 	k := packageCollectionKey{pkg.Name, pkg.Version, pkg.Ecosystem}
-	for i, entry := range c.Entries {
-		existing := entry.Package
-		if (packageCollectionKey{existing.Name, existing.Version, existing.Ecosystem}) != k {
-			continue
-		}
+	if i, ok := c.index[k]; ok {
 		mergeCollectedPackageMetadata(&c.Entries[i].Package, pkg)
 		return
 	}
+	c.index[k] = len(c.Entries)
 	c.Entries = append(c.Entries, CollectedPackage{
 		Package:    pkg,
 		SourceFile: sourceFile,
@@ -206,12 +223,28 @@ func (c *PackageCollection) filterDev() {
 		}
 	}
 	c.Entries = out
+	c.rebuildIndex()
 }
 
 func (c *PackageCollection) rebuildPackages() {
 	c.Packages = make([]domain.Package, 0, len(c.Entries))
 	for _, entry := range c.Entries {
 		c.Packages = append(c.Packages, entry.Package)
+	}
+}
+
+func (c *PackageCollection) ensureIndex() {
+	if c.index != nil {
+		return
+	}
+	c.rebuildIndex()
+}
+
+func (c *PackageCollection) rebuildIndex() {
+	c.index = make(map[packageCollectionKey]int, len(c.Entries))
+	for i, entry := range c.Entries {
+		pkg := entry.Package
+		c.index[packageCollectionKey{pkg.Name, pkg.Version, pkg.Ecosystem}] = i
 	}
 }
 

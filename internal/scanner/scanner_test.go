@@ -48,7 +48,7 @@ func TestCheckRemoteSendsAPIKey(t *testing.T) {
 		Timeout:           5 * time.Second,
 	})
 
-	if _, _, _, err := sc.checkRemote(context.Background(), []domain.Package{{
+	if _, _, _, _, err := sc.checkRemote(context.Background(), []domain.Package{{
 		Name:      "lodash",
 		Version:   "1.0.0",
 		Ecosystem: domain.Ecosystem("npm"),
@@ -104,7 +104,7 @@ func TestCheckRemoteSendsCorrelationIDAndRepoMetadata(t *testing.T) {
 		Repo:              &domain.RepoInfo{Name: "packmon", Branch: "main", Commit: "abcdef"},
 	})
 
-	if _, _, _, err := sc.checkRemote(context.Background(), []domain.Package{{
+	if _, _, _, _, err := sc.checkRemote(context.Background(), []domain.Package{{
 		Name:      "lodash",
 		Version:   "1.0.0",
 		Ecosystem: domain.EcosystemNPM,
@@ -123,12 +123,12 @@ func TestCheckRemoteValidationAndResponseErrors(t *testing.T) {
 	t.Parallel()
 
 	sc := New(nil, Config{Timeout: time.Second})
-	if _, _, _, err := sc.checkRemote(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "no server URL") {
+	if _, _, _, _, err := sc.checkRemote(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "no server URL") {
 		t.Fatalf("checkRemote(no URL) error = %v", err)
 	}
 
 	sc = New(nil, Config{ServerURL: "http://example.test", Timeout: time.Second})
-	if _, _, _, err := sc.checkRemote(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "refusing to use insecure") {
+	if _, _, _, _, err := sc.checkRemote(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "refusing to use insecure") {
 		t.Fatalf("checkRemote(insecure) error = %v", err)
 	}
 
@@ -137,8 +137,17 @@ func TestCheckRemoteValidationAndResponseErrors(t *testing.T) {
 	}))
 	defer closeSilently(badStatus)
 	sc = New(nil, Config{ServerURL: badStatus.URL, AllowInsecureHTTP: true, Timeout: time.Second})
-	if _, _, _, err := sc.checkRemote(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "server returned 418") {
+	if _, _, _, _, err := sc.checkRemote(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "server returned 418") {
 		t.Fatalf("checkRemote(status) error = %v", err)
+	}
+
+	unauthorized := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "invalid api key", http.StatusUnauthorized)
+	}))
+	defer closeSilently(unauthorized)
+	sc = New(nil, Config{ServerURL: unauthorized.URL, AllowInsecureHTTP: true, Timeout: time.Second})
+	if _, _, _, _, err := sc.checkRemote(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "check PACKMON_API_KEY") {
+		t.Fatalf("checkRemote(unauthorized) error = %v, want api-key hint", err)
 	}
 
 	invalidJSON := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -146,8 +155,61 @@ func TestCheckRemoteValidationAndResponseErrors(t *testing.T) {
 	}))
 	defer closeSilently(invalidJSON)
 	sc = New(nil, Config{ServerURL: invalidJSON.URL, AllowInsecureHTTP: true, Timeout: time.Second})
-	if _, _, _, err := sc.checkRemote(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "decode response") {
+	if _, _, _, _, err := sc.checkRemote(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "decode response") {
 		t.Fatalf("checkRemote(json) error = %v", err)
+	}
+}
+
+func TestScannerRunHonorsRemoteBlockingDecision(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "package-lock.json"), []byte(`{
+		"lockfileVersion": 3,
+		"packages": {
+			"node_modules/remote-only": {"version":"1.0.0"}
+		}
+	}`), 0o600); err != nil {
+		t.Fatalf("write package-lock: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(domain.ScanResult{
+			ScanID:           "remote-blocking",
+			Mode:             "remote",
+			ScannedAt:        time.Now().UTC(),
+			FindingsBlocking: true,
+			Summary:          domain.ScanSummary{BySeverity: map[string]int{}, ByType: map[string]int{}, BySource: map[string]int{}},
+			Findings: []domain.Finding{{
+				Name:       "remote-only",
+				Version:    "1.0.0",
+				Ecosystem:  domain.EcosystemNPM,
+				Type:       domain.FindingTypeVulnerability,
+				Severity:   domain.SeverityLow,
+				AdvisoryID: "GHSA-remote-policy",
+				Title:      "server policy blocks this finding",
+			}},
+			FeedVersions: map[string]string{},
+		})
+	}))
+	defer closeSilently(server)
+
+	sc := New(parser.NewRegistry(), Config{
+		Path:              dir,
+		Mode:              ModeRemote,
+		ServerURL:         server.URL,
+		AllowInsecureHTTP: true,
+		FailOn:            domain.SeverityNone,
+		Timeout:           time.Second,
+	})
+
+	result, exitCode := sc.Run(context.Background())
+	if exitCode != ExitBlocking {
+		t.Fatalf("exit = %d, want blocking; result=%+v", exitCode, result)
+	}
+	if !result.FindingsBlocking {
+		t.Fatalf("FindingsBlocking = false, want true from remote policy")
 	}
 }
 
@@ -260,6 +322,42 @@ func TestScannerRunIncludesSBOMPackages(t *testing.T) {
 	}
 }
 
+func TestScannerRunReportsPartialParseErrors(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "package-lock.json"), []byte(`{
+		"lockfileVersion": 3,
+		"packages": {"": {"version":"1.0.0"}, "node_modules/prod": {"version":"1.0.0"}}
+	}`), 0o600); err != nil {
+		t.Fatalf("write package-lock: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pnpm-lock.yaml"), []byte(`{{{not yaml`), 0o600); err != nil {
+		t.Fatalf("write pnpm-lock: %v", err)
+	}
+
+	sc := New(parser.NewRegistry(), Config{
+		Path:     dir,
+		Mode:     ModeLocal,
+		FailOn:   domain.SeverityCritical,
+		MaxDepth: 2,
+		Timeout:  5 * time.Second,
+	})
+	checker := &captureLocalChecker{}
+	sc.SetLocalChecker(checker)
+
+	result, exitCode := sc.Run(context.Background())
+	if exitCode != ExitOK {
+		t.Fatalf("exit = %d, result = %+v", exitCode, result)
+	}
+	if len(result.ParseErrors) != 1 || !strings.Contains(result.ParseErrors[0], "pnpm-lock.yaml") {
+		t.Fatalf("ParseErrors = %#v, want pnpm parse error", result.ParseErrors)
+	}
+	if result.PackagesScanned != 1 || len(checker.packages) != 1 {
+		t.Fatalf("packages scanned=%d checked=%d, want 1/1", result.PackagesScanned, len(checker.packages))
+	}
+}
+
 func TestCheckLocalIncludesOptionalLifecycleFindings(t *testing.T) {
 	t.Parallel()
 
@@ -324,6 +422,51 @@ func (c *captureLocalChecker) FindVulnerabilities(_ context.Context, ecosystem, 
 
 func (c *captureLocalChecker) FindMalicious(context.Context, string, string, string) ([]domain.Finding, error) {
 	return nil, nil
+}
+
+type captureBatchLocalChecker struct {
+	vulnQueries      []db.PackageQuery
+	maliciousQueries []db.PackageQuery
+}
+
+func (c *captureBatchLocalChecker) FindVulnerabilities(context.Context, string, string, string) ([]domain.Finding, error) {
+	panic("single vulnerability lookup should not be used when batch is available")
+}
+
+func (c *captureBatchLocalChecker) FindMalicious(context.Context, string, string, string) ([]domain.Finding, error) {
+	panic("single malicious lookup should not be used when batch is available")
+}
+
+func (c *captureBatchLocalChecker) FindVulnerabilitiesBatch(_ context.Context, packages []db.PackageQuery) ([]domain.Finding, error) {
+	c.vulnQueries = append(c.vulnQueries, packages...)
+	return []domain.Finding{{Name: packages[0].Name, Version: packages[0].Version, Ecosystem: domain.Ecosystem(packages[0].Ecosystem), Type: domain.FindingTypeVulnerability, Severity: domain.SeverityHigh}}, nil
+}
+
+func (c *captureBatchLocalChecker) FindMaliciousBatch(_ context.Context, packages []db.PackageQuery) ([]domain.Finding, error) {
+	c.maliciousQueries = append(c.maliciousQueries, packages...)
+	return []domain.Finding{{Name: packages[1].Name, Version: packages[1].Version, Ecosystem: domain.Ecosystem(packages[1].Ecosystem), Type: domain.FindingTypeMalicious, Severity: domain.SeverityCritical}}, nil
+}
+
+func TestCheckLocalUsesBatchCheckerWhenAvailable(t *testing.T) {
+	t.Parallel()
+
+	checker := &captureBatchLocalChecker{}
+	sc := New(nil, Config{})
+	sc.SetLocalChecker(checker)
+
+	findings, err := sc.checkLocal(context.Background(), []domain.Package{
+		{Name: "left-pad", Version: "1.0.0", Ecosystem: domain.EcosystemNPM},
+		{Name: "evil", Version: "2.0.0", Ecosystem: domain.EcosystemNPM},
+	})
+	if err != nil {
+		t.Fatalf("checkLocal() error = %v", err)
+	}
+	if len(findings) != 2 {
+		t.Fatalf("findings = %+v, want batch vulnerability + malicious findings", findings)
+	}
+	if len(checker.vulnQueries) != 2 || len(checker.maliciousQueries) != 2 {
+		t.Fatalf("batch queries = vuln %+v malicious %+v, want both package queries", checker.vulnQueries, checker.maliciousQueries)
+	}
 }
 
 type lifecycleLocalChecker struct {
@@ -720,25 +863,5 @@ func TestBuildSummary_Scanner(t *testing.T) {
 	}
 	if s.BySource["osv"] != 1 {
 		t.Fatalf("BySource[osv] = %d, want 1", s.BySource["osv"])
-	}
-}
-
-// ---------------------------------------------------------------------------
-// dedup tests
-// ---------------------------------------------------------------------------
-
-func TestDedup(t *testing.T) {
-	t.Parallel()
-
-	pkgs := []domain.Package{
-		{Name: "lodash", Version: "4.17.15", Ecosystem: domain.EcosystemNPM},
-		{Name: "lodash", Version: "4.17.15", Ecosystem: domain.EcosystemNPM}, // duplicate
-		{Name: "lodash", Version: "4.17.21", Ecosystem: domain.EcosystemNPM}, // different version
-		{Name: "requests", Version: "2.28.0", Ecosystem: domain.EcosystemPyPI},
-	}
-
-	result := dedup(pkgs)
-	if len(result) != 3 {
-		t.Fatalf("dedup() returned %d packages, want 3", len(result))
 	}
 }

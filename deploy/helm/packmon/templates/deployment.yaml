@@ -15,10 +15,14 @@ spec:
       labels:
         {{- include "packmon.labels" . | nindent 8 }}
     spec:
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
       initContainers:
         - name: migrate
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
           args:
             - migrate
           env:
@@ -32,6 +36,11 @@ spec:
                 secretKeyRef:
                   name: {{ include "packmon.fullname" . }}-secret
                   key: admin-initial-password
+            - name: PACKMON_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "packmon.fullname" . }}-secret
+                  key: encryption-key
             - name: PACKMON_SOCKET_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -42,13 +51,30 @@ spec:
                 secretKeyRef:
                   name: {{ include "packmon.fullname" . }}-secret
                   key: vulncheck-api-key
+            - name: PACKMON_NVD_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "packmon.fullname" . }}-secret
+                  key: nvd-api-key
+            - name: PACKMON_REVERSINGLABS_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "packmon.fullname" . }}-secret
+                  key: reversinglabs-api-key
           envFrom:
             - configMapRef:
                 name: {{ include "packmon.fullname" . }}-config
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
       containers:
         - name: packmon-server
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
           ports:
             - name: http
               containerPort: {{ .Values.server.port }}
@@ -65,6 +91,11 @@ spec:
                 secretKeyRef:
                   name: {{ include "packmon.fullname" . }}-secret
                   key: admin-initial-password
+            - name: PACKMON_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "packmon.fullname" . }}-secret
+                  key: encryption-key
             - name: PACKMON_SOCKET_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -75,6 +106,16 @@ spec:
                 secretKeyRef:
                   name: {{ include "packmon.fullname" . }}-secret
                   key: vulncheck-api-key
+            - name: PACKMON_NVD_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "packmon.fullname" . }}-secret
+                  key: nvd-api-key
+            - name: PACKMON_REVERSINGLABS_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "packmon.fullname" . }}-secret
+                  key: reversinglabs-api-key
           envFrom:
             - configMapRef:
                 name: {{ include "packmon.fullname" . }}-config
@@ -86,8 +127,14 @@ spec:
             httpGet:
               path: /healthz
               port: http
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
       nodeSelector:
         {{- toYaml .Values.nodeSelector | nindent 8 }}
       tolerations:

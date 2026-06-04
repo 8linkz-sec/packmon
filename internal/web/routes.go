@@ -18,6 +18,7 @@ func RegisterRoutes(mux *http.ServeMux, store Store, renderer *Renderer, logger 
 	mux.HandleFunc("GET /scans", HandleScans(store, renderer, logger))
 	mux.HandleFunc("GET /feeds", HandleFeeds(store, renderer, logger))
 	mux.HandleFunc("GET /package/{ecosystem}/{name...}", HandlePackage(store, renderer, logger))
+	mux.HandleFunc("POST /package/{ecosystem}/refresh/{name...}", HandlePackageRefresh(store, renderer, logger))
 
 	// -- Static assets from embedded FS ----------------------------------------
 	staticFS, err := fs.Sub(content, "static")

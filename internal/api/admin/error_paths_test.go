@@ -321,7 +321,7 @@ func TestAdminWriteHandlersRedirectOnStoreFailures(t *testing.T) {
 		{name: "key create", fail: "CreateAPIKey", target: "/admin/keys/create", values: url.Values{"name": {"ci"}}, call: handler.HandleKeyCreate, want: "Failed+to+create"},
 		{name: "key revoke", fail: "RevokeAPIKey", target: "/admin/keys/revoke", values: url.Values{"key_id": {"1"}}, call: handler.HandleKeyRevoke, want: "Failed+to+revoke"},
 		{name: "key delete", fail: "DeleteAPIKey", target: "/admin/keys/delete", values: url.Values{"key_id": {"1"}}, call: handler.HandleKeyDelete, want: "Failed+to+delete"},
-		{name: "queue purge", fail: "PurgeQueue", target: "/admin/queue/purge", values: url.Values{}, call: handler.HandleQueuePurge, want: "Purge+failed"},
+		{name: "queue purge", fail: "PurgeQueue", target: "/admin/queue/purge", values: url.Values{}, call: handler.HandleQueuePurge, want: "err=Purge+failed"},
 		{name: "queue priority", fail: "UpdateQueueJobPriority", target: "/admin/queue/priority", values: url.Values{"job_id": {"1"}, "priority": {"1"}}, call: handler.HandleQueuePriorityUpdate, want: "Priority+update+failed"},
 		{name: "queue pause", fail: "PauseQueueJob", target: "/admin/queue/pause", values: url.Values{"job_id": {"1"}}, call: handler.HandleQueuePause, want: "Job+paused+failed"},
 		{name: "queue clear", fail: "ClearQueue", target: "/admin/queue/clear", values: url.Values{"status": {"pending"}}, call: handler.HandleQueueClear, want: "Queue+clear+failed"},

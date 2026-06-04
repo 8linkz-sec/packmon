@@ -65,11 +65,17 @@ func TestParseAPIKeyExpiresAt(t *testing.T) {
 func TestManualAdvisoryHelpers(t *testing.T) {
 	t.Parallel()
 
-	if got := normalizeAdvisoryFindingType(" vulnerability "); got != "vulnerability" {
-		t.Fatalf("normalizeAdvisoryFindingType(vulnerability) = %q", got)
+	if got, ok := normalizeAdvisoryFindingType(" vulnerability "); !ok || got != "vulnerability" {
+		t.Fatalf("normalizeAdvisoryFindingType(vulnerability) = %q, %v", got, ok)
 	}
-	if got := normalizeAdvisoryFindingType("other"); got != "malicious" {
-		t.Fatalf("normalizeAdvisoryFindingType(other) = %q", got)
+	if got, ok := normalizeAdvisoryFindingType(""); !ok || got != "malicious" {
+		t.Fatalf("normalizeAdvisoryFindingType(blank) = %q, %v", got, ok)
+	}
+	if got, ok := normalizeAdvisoryFindingType("malicious"); !ok || got != "malicious" {
+		t.Fatalf("normalizeAdvisoryFindingType(malicious) = %q, %v", got, ok)
+	}
+	if got, ok := normalizeAdvisoryFindingType("other"); ok || got != "" {
+		t.Fatalf("normalizeAdvisoryFindingType(other) = %q, %v; want invalid", got, ok)
 	}
 
 	id, err := generateManualAdvisoryID()

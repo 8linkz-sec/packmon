@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -82,8 +83,6 @@ func TestFindingHistoryIDUsesAdvisoryOrDeterministicFallback(t *testing.T) {
 }
 
 func TestScanRepoMetadataUsesDirectoryOrFileNameWithoutGit(t *testing.T) {
-	t.Parallel()
-
 	repoDir := filepath.Join(t.TempDir(), "repo")
 	if err := os.MkdirAll(repoDir, 0o750); err != nil {
 		t.Fatalf("mkdir repo: %v", err)
@@ -92,6 +91,7 @@ func TestScanRepoMetadataUsesDirectoryOrFileNameWithoutGit(t *testing.T) {
 	if err := os.WriteFile(lockFile, []byte("{}"), 0o600); err != nil {
 		t.Fatalf("write lock file: %v", err)
 	}
+	t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(repoDir))
 
 	repoName, branch, commit := scanRepoMetadata(lockFile)
 	if repoName != "repo" || branch != "" || commit != "" {
@@ -104,12 +104,67 @@ func TestScanRepoMetadataUsesDirectoryOrFileNameWithoutGit(t *testing.T) {
 	}
 }
 
+func TestScanRepoMetadataReadsGitBranchAndCommit(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repoDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(repoDir, 0o750); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	runLocalHistoryGit(t, repoDir, "init")
+	runLocalHistoryGit(t, repoDir, "config", "user.email", "packmon@example.test")
+	runLocalHistoryGit(t, repoDir, "config", "user.name", "Packmon Test")
+	runLocalHistoryGit(t, repoDir, "checkout", "-b", "packmon-test")
+	runLocalHistoryGit(t, repoDir, "commit", "--allow-empty", "-m", "initial")
+
+	repoName, branch, commit := scanRepoMetadata(repoDir)
+	if repoName != "repo" || branch != "packmon-test" || len(commit) != 40 {
+		t.Fatalf("scanRepoMetadata(git repo) = %q, %q, %q; want repo, packmon-test, 40-char commit", repoName, branch, commit)
+	}
+}
+
+func TestScanRepoMetadataHandlesGitRepoWithoutCommit(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repoDir := filepath.Join(t.TempDir(), "repo-no-commit")
+	if err := os.MkdirAll(repoDir, 0o750); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	runLocalHistoryGit(t, repoDir, "init")
+
+	repoName, _, commit := scanRepoMetadata(repoDir)
+	if repoName != "repo-no-commit" || commit != "" {
+		t.Fatalf("scanRepoMetadata(no commit) = %q, %q; want repo name and empty commit", repoName, commit)
+	}
+}
+
+func runLocalHistoryGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=Packmon Test",
+		"GIT_AUTHOR_EMAIL=packmon@example.test",
+		"GIT_COMMITTER_NAME=Packmon Test",
+		"GIT_COMMITTER_EMAIL=packmon@example.test",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, out)
+	}
+}
+
 func TestRecordScanHistoryStoresFindingIDsAndSeverities(t *testing.T) {
 	store, _ := newTestSQLiteStore(t, t.TempDir())
 	scanDir := filepath.Join(t.TempDir(), "app")
 	if err := os.MkdirAll(scanDir, 0o750); err != nil {
 		t.Fatalf("mkdir scan dir: %v", err)
 	}
+	t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(scanDir))
 	scannedAt := time.Date(2026, 5, 30, 10, 0, 0, 0, time.UTC)
 	result := &domain.ScanResult{
 		ScannedAt:       scannedAt,

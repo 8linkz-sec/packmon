@@ -109,6 +109,28 @@ func TestConfigInitTemplateUsesSecretFreeDefaults(t *testing.T) {
 	}
 }
 
+func TestConfigInitTemplateValidatesRoundTrip(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "packmon.yaml")
+	initCmd := newConfigInitCmd()
+	initCmd.SetArgs([]string{"--file", target})
+	captureStdout(t, func() {
+		if err := initCmd.Execute(); err != nil {
+			t.Fatalf("config init failed: %v", err)
+		}
+	})
+
+	validateCmd := newConfigValidateCmd()
+	validateCmd.SetArgs([]string{"--file", target})
+	output := captureStdout(t, func() {
+		if err := validateCmd.Execute(); err != nil {
+			t.Fatalf("config validate generated template: %v", err)
+		}
+	})
+	if !strings.Contains(output, "is valid") {
+		t.Fatalf("validate output = %q", output)
+	}
+}
+
 func TestConfigValidateReportsConfiguredRepos(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "packmon.yaml")
@@ -174,6 +196,42 @@ repos:
 	}
 }
 
+func TestConfigShowMasksSecretEnvironmentValues(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	configPath := filepath.Join(t.TempDir(), "packmon.yaml")
+	if err := os.WriteFile(configPath, []byte(`
+server: "https://packmon.internal"
+api_key_env: "PACKMON_CUSTOM_API_KEY"
+`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("PACKMON_API_KEY", "env-secret-key")
+	t.Setenv("PACKMON_CUSTOM_API_KEY", "custom-secret-key")
+	t.Setenv("PACKMON_WEBHOOK_SECRET", "webhook-secret-key")
+
+	cmd := newConfigShowCmd()
+	cmd.SetArgs([]string{"--file", configPath})
+	output := captureStdout(t, func() {
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("config show: %v", err)
+		}
+	})
+
+	for _, leaked := range []string{"env-secret-key", "custom-secret-key", "webhook-secret-key"} {
+		if strings.Contains(output, leaked) {
+			t.Fatalf("config show leaked %q:\n%s", leaked, output)
+		}
+	}
+	for _, want := range []string{"PACKMON_API_KEY:", "PACKMON_CUSTOM_API_KEY:", "PACKMON_WEBHOOK_SECRET:"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("config show output missing %q:\n%s", want, output)
+		}
+	}
+	if !strings.Contains(output, "en**********ey") || !strings.Contains(output, "cu*************ey") || !strings.Contains(output, "we**************ey") {
+		t.Fatalf("config show did not mask expected secret env values:\n%s", output)
+	}
+}
+
 func TestConfigCommandHelpers(t *testing.T) {
 	if got := valueOrDefault("", "fallback"); got != "fallback" {
 		t.Fatalf("valueOrDefault(empty) = %q", got)
@@ -220,6 +278,29 @@ func captureStdout(t *testing.T, fn func()) string {
 	out, err := io.ReadAll(read)
 	if err != nil {
 		t.Fatalf("read stdout: %v", err)
+	}
+	return string(out)
+}
+
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+
+	original := os.Stderr
+	read, write, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe stderr: %v", err)
+	}
+	os.Stderr = write
+	defer func() { os.Stderr = original }()
+
+	fn()
+
+	if err := write.Close(); err != nil {
+		t.Fatalf("close stderr writer: %v", err)
+	}
+	out, err := io.ReadAll(read)
+	if err != nil {
+		t.Fatalf("read stderr: %v", err)
 	}
 	return string(out)
 }

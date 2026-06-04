@@ -19,6 +19,7 @@
       <a href="/admin/queue" class="text-gray-500 hover:text-gray-700 pb-2 px-1">Queue</a>
       <a href="/admin/keys" class="text-gray-500 hover:text-gray-700 pb-2 px-1">API Keys</a>
       <a href="/admin/audit" class="text-gray-500 hover:text-gray-700 pb-2 px-1">Audit Log</a>
+      <a href="/admin/advisories" class="border-b-2 border-blue-500 text-blue-600 pb-2 px-1 font-medium">Advisories</a>
       <a href="/admin/settings" class="text-gray-500 hover:text-gray-700 pb-2 px-1">Settings</a>
     </nav>
   </div>
@@ -68,6 +69,8 @@
             <option value="composer" {{with .EditAdvisory}}{{if eq .Ecosystem "composer"}}selected{{end}}{{end}}>composer</option>
             <option value="gem" {{with .EditAdvisory}}{{if eq .Ecosystem "gem"}}selected{{end}}{{end}}>gem</option>
             <option value="pub" {{with .EditAdvisory}}{{if eq .Ecosystem "pub"}}selected{{end}}{{end}}>pub</option>
+            <option value="actions" {{with .EditAdvisory}}{{if eq .Ecosystem "actions"}}selected{{end}}{{end}}>actions</option>
+            <option value="docker" {{with .EditAdvisory}}{{if eq .Ecosystem "docker"}}selected{{end}}{{end}}>docker</option>
             <option value="cocoapods" {{with .EditAdvisory}}{{if eq .Ecosystem "cocoapods"}}selected{{end}}{{end}}>cocoapods</option>
             <option value="swiftpm" {{with .EditAdvisory}}{{if eq .Ecosystem "swiftpm"}}selected{{end}}{{end}}>swiftpm</option>
             <option value="hex" {{with .EditAdvisory}}{{if eq .Ecosystem "hex"}}selected{{end}}{{end}}>hex</option>
@@ -108,6 +111,10 @@
         <label for="adv-summary" class="block text-sm font-medium text-gray-700 mb-1">Summary</label>
         <input type="text" name="summary" id="adv-summary" required value="{{with .EditAdvisory}}{{.Summary}}{{end}}"
           class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none">
+      </div>
+
+      <div class="bg-amber-50 border border-amber-200 text-amber-800 rounded-md px-3 py-2 text-sm">
+        Vulnerability advisories created here apply to all versions of the package.
       </div>
 
       <div>

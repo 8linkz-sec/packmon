@@ -630,6 +630,7 @@ func (w *Worker) drainTokens() {
 	w.tokensMu.Lock()
 	defer w.tokensMu.Unlock()
 	w.tokens = 0
+	w.fractionalTokens = 0
 	w.lastRefill = time.Now()
 }
 

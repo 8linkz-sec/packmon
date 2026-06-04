@@ -159,6 +159,26 @@ func TestNoopStoreEdgeBranches(t *testing.T) {
 	if len(filtered.Malicious) != 0 {
 		t.Fatalf("ExportSync(filtered) malicious len = %d, want 0", len(filtered.Malicious))
 	}
+	since := time.Date(2026, 5, 30, 11, 0, 0, 0, time.UTC)
+	if err := store.DeleteMaliciousFinding(ctx, "manual:default-mal"); err != nil {
+		t.Fatalf("DeleteMaliciousFinding() error = %v", err)
+	}
+	deletedExport, err := store.ExportSync(ctx, db.SyncExportOptions{Since: &since})
+	if err != nil {
+		t.Fatalf("ExportSync(after delete) error = %v", err)
+	}
+	foundDeleted := false
+	for _, item := range deletedExport.Malicious {
+		if item.ID == "manual:default-mal" {
+			if !item.Withdrawn {
+				t.Fatalf("deleted malicious sync row = %+v, want withdrawn", item)
+			}
+			foundDeleted = true
+		}
+	}
+	if !foundDeleted {
+		t.Fatalf("ExportSync(after delete) missing manual:default-mal tombstone: %+v", deletedExport.Malicious)
+	}
 
 	if err := store.UpsertFeedSyncStatus(ctx, nil); err != nil {
 		t.Fatalf("UpsertFeedSyncStatus(nil) error = %v", err)
@@ -222,11 +242,11 @@ func TestNoopStoreQueueEdgeBranches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnqueueRefresh(paused duplicate) error = %v", err)
 	}
-	if created || pos != 1 {
-		t.Fatalf("EnqueueRefresh(paused duplicate) = %v,%d, want resumed existing job", created, pos)
+	if created || pos != 0 {
+		t.Fatalf("EnqueueRefresh(paused duplicate) = %v,%d, want existing paused job outside active queue", created, pos)
 	}
-	if err := store.ResumeQueueJob(ctx, 1); err == nil {
-		t.Fatal("ResumeQueueJob(pending after duplicate) error = nil, want not paused")
+	if err := store.ResumeQueueJob(ctx, 1); err != nil {
+		t.Fatalf("ResumeQueueJob(paused after duplicate) error = %v", err)
 	}
 
 	job, err := store.DequeueRefresh(ctx, "socket")

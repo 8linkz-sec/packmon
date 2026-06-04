@@ -9,3 +9,7 @@ Recommended variables:
 - `PACKMON_SCAN_PATH`
 
 The workflows are templates, not fully opinionated production flows. Adjust commands, credentials, and notification nodes for your environment.
+
+The on-demand scan template intentionally ignores request-body path values. Set
+`PACKMON_SCAN_PATH` in the n8n runtime environment or add your own allowlisted
+path-selection node before re-enabling the workflow.

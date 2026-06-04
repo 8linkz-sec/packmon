@@ -25,6 +25,9 @@ func CSRFToken(sess *Session) (string, error) {
 	if sess == nil {
 		return "", fmt.Errorf("auth: csrf: nil session")
 	}
+	sess.csrfMu.Lock()
+	defer sess.csrfMu.Unlock()
+
 	if sess.csrfToken != "" {
 		return sess.csrfToken, nil
 	}
@@ -40,12 +43,19 @@ func CSRFToken(sess *Session) (string, error) {
 // ValidateCSRF checks that the form value of _csrf matches the token
 // stored in the session. Returns true only on an exact, non-empty match.
 func ValidateCSRF(r *http.Request, sess *Session) bool {
-	if sess == nil || sess.csrfToken == "" {
+	if sess == nil {
+		return false
+	}
+	sess.csrfMu.Lock()
+	token := sess.csrfToken
+	sess.csrfMu.Unlock()
+
+	if token == "" {
 		return false
 	}
 	formToken := r.FormValue(CSRFFieldName)
 	if formToken == "" {
 		return false
 	}
-	return subtle.ConstantTimeCompare([]byte(formToken), []byte(sess.csrfToken)) == 1
+	return subtle.ConstantTimeCompare([]byte(formToken), []byte(token)) == 1
 }

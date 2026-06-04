@@ -249,12 +249,70 @@ func (s *Store) SearchPackages(ctx context.Context, params db.PackageSearchParam
 		FROM malicious_findings
 		WHERE ($1 = '' OR name ILIKE $1)
 		  AND ($2 = '' OR UPPER(COALESCE(severity, 'UNKNOWN')) = $2)
+		  AND removed_at IS NULL
 		GROUP BY ecosystem, name
 		ORDER BY name ASC, ecosystem ASC
 		LIMIT $3`
 
 	if findingType == "" || findingType == "malicious" {
 		if err := s.collectSearchResults(ctx, results, maliciousQuery, like, severity, limit); err != nil {
+			return nil, err
+		}
+	}
+
+	const supplyChainQuery = `
+		SELECT
+			ecosystem,
+			name,
+			COUNT(*)::int,
+			0::int,
+			''::text,
+			COALESCE(string_agg(DISTINCT source, ', ' ORDER BY source), '')
+		FROM package_reputation_cache
+		WHERE status = 'removed'
+		  AND ($1 = '' OR name ILIKE $1)
+		  AND ($2 = '' OR UPPER(COALESCE(severity, 'UNKNOWN')) = $2)
+		GROUP BY ecosystem, name
+		ORDER BY name ASC, ecosystem ASC
+		LIMIT $3`
+
+	if findingType == "" || findingType == "supply_chain_risk" {
+		if err := s.collectSearchResults(ctx, results, supplyChainQuery, like, severity, limit); err != nil {
+			return nil, err
+		}
+	}
+
+	const lifecycleQuery = `
+		WITH lifecycle_findings AS (
+			SELECT
+				m.ecosystem,
+				m.name,
+				CASE
+					WHEN r.is_eol OR (r.eol_from IS NOT NULL AND r.eol_from <= CURRENT_DATE) THEN 'CRITICAL'
+					WHEN r.eol_from IS NOT NULL AND r.eol_from <= CURRENT_DATE + INTERVAL '90 days' THEN 'MEDIUM'
+					WHEN r.is_eoas OR (r.eoas_from IS NOT NULL AND r.eoas_from <= CURRENT_DATE) THEN 'LOW'
+					ELSE ''
+				END AS severity
+			FROM lifecycle_package_map m
+			INNER JOIN lifecycle_releases r ON r.product_slug = m.product_slug
+		)
+		SELECT
+			ecosystem,
+			name,
+			COUNT(*)::int,
+			0::int,
+			''::text,
+			'endoflife.date'::text
+		FROM lifecycle_findings
+		WHERE severity <> ''
+		  AND ($1 = '' OR name ILIKE $1)
+		  AND ($2 = '' OR severity = $2)
+		GROUP BY ecosystem, name
+		ORDER BY name ASC, ecosystem ASC
+		LIMIT $3`
+
+	if findingType == "" || findingType == "lifecycle" {
+		if err := s.collectSearchResults(ctx, results, lifecycleQuery, like, severity, limit); err != nil {
 			return nil, err
 		}
 	}
@@ -678,10 +736,10 @@ func (s *Store) DashboardStats(ctx context.Context) (*db.DashboardStatsResult, e
 			 FROM (
 				SELECT ecosystem, name FROM affected_packages
 				UNION
-				SELECT ecosystem, name FROM malicious_findings
+				SELECT ecosystem, name FROM malicious_findings WHERE removed_at IS NULL
 			 ) AS packages)::int,
 			(SELECT COUNT(*) FROM vulnerabilities)::int,
-			(SELECT COUNT(*) FROM malicious_findings)::int`).Scan(
+			(SELECT COUNT(*) FROM malicious_findings WHERE removed_at IS NULL)::int`).Scan(
 		&stats.TotalPackages,
 		&stats.TotalVulnerabilities,
 		&stats.TotalMalicious,

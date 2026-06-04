@@ -53,18 +53,18 @@ func New(ctx context.Context, cfg *config.Config, store db.Store, pinger health.
 
 	// -- Build middleware chain ------------------------------------------------
 	// Order matters: outermost middleware runs first.
-	// SecurityHeaders -> Correlation -> Recovery -> Logging -> UserAgent -> Auth -> Session -> RateLimit -> Handler
+	// TrustedClientIP -> Telemetry -> SecurityHeaders -> Correlation -> Recovery -> Logging -> RateLimit -> UserAgent -> Auth -> Session -> Handler
 	chain := func(h http.Handler) http.Handler {
-		h = middleware.RateLimitWithSource(ctx, logger, rateLimitConfig(cfg), runtime)(h)
 		h = middleware.RequireAdminSession(sm, logger)(h)
 		h = middleware.Auth(logger, store, devMode)(h)
 		h = middleware.UserAgent(logger, devMode)(h)
+		h = middleware.RateLimitWithSource(ctx, logger, rateLimitConfig(cfg), runtime)(h)
 		h = middleware.Logging(logger)(h)
 		h = middleware.Recovery(logger)(h)
 		h = middleware.Correlation(h)
 		h = middleware.SecurityHeaders(!devMode, cfg.Server.PublicHost, cfg.Server.TrustedProxies)(h)
-		h = middleware.TrustedClientIP(cfg.Server.TrustedProxies)(h)
 		h = telemetry.HTTPMiddleware(telemetry.Default())(h)
+		h = middleware.TrustedClientIP(cfg.Server.TrustedProxies)(h)
 		return h
 	}
 

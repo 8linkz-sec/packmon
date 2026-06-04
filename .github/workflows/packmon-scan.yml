@@ -52,11 +52,18 @@ jobs:
 
       - name: Install packmon
         run: |
+          set -euo pipefail
           ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
-          DOWNLOAD_URL="https://github.com/8linkz-sec/packmon/releases/latest/download/packmon-linux-${ARCH}"
-          echo "Downloading packmon from ${DOWNLOAD_URL}"
-          curl -sfL "${DOWNLOAD_URL}" -o /usr/local/bin/packmon
-          chmod +x /usr/local/bin/packmon
+          BINARY_BASE_URL="https://github.com/8linkz-sec/packmon/releases/latest/download"
+          BINARY_NAME="packmon-linux-${ARCH}"
+          BINARY_URL="${BINARY_BASE_URL}/${BINARY_NAME}"
+          CHECKSUM_URL="${BINARY_BASE_URL}/checksums.txt"
+          echo "Downloading packmon from ${BINARY_URL}"
+          curl -sfL "${BINARY_URL}" -o "/tmp/${BINARY_NAME}"
+          curl -sfL "${CHECKSUM_URL}" -o /tmp/checksums.txt
+          grep -E "[[:space:]]${BINARY_NAME}$" /tmp/checksums.txt > "/tmp/${BINARY_NAME}.sha256"
+          (cd /tmp && sha256sum -c "${BINARY_NAME}.sha256")
+          sudo install -m 0755 "/tmp/${BINARY_NAME}" /usr/local/bin/packmon
           packmon version
 
       - name: Run scan
@@ -109,9 +116,10 @@ jobs:
             const fs = require('fs');
             const results = JSON.parse(fs.readFileSync('/tmp/results.json', 'utf8'));
 
-            // Separate vulnerability findings from malicious findings (DE-23).
             const vulns = results.findings.filter(f => f.type === 'vulnerability');
             const malicious = results.findings.filter(f => f.type === 'malicious');
+            const supplyChain = results.findings.filter(f => f.type === 'supply_chain_risk');
+            const lifecycle = results.findings.filter(f => f.type === 'lifecycle');
 
             let body = `## Packmon Security Scan\n\n`;
             body += `**${results.findings_count} finding(s)** in ${results.packages_scanned} packages`;
@@ -141,6 +149,31 @@ jobs:
                 const pkg = `\`${f.name}@${f.version}\``;
                 const threat = f.risk_type || f.title || 'unknown';
                 body += `| ${f.severity} | ${pkg} | ${f.ecosystem} | ${threat} | Remove package | ${f.source} |\n`;
+              }
+              body += `\n`;
+            }
+
+            if (supplyChain.length > 0) {
+              body += `### Supply Chain Risk Findings\n\n`;
+              body += `| Severity | Package | Ecosystem | Risk | Action | Source |\n`;
+              body += `|---|---|---|---|---|---|\n`;
+              for (const f of supplyChain) {
+                const pkg = `\`${f.name}@${f.version}\``;
+                const risk = f.risk_type || f.title || f.advisory_id || 'unknown';
+                body += `| ${f.severity} | ${pkg} | ${f.ecosystem} | ${risk} | Review package | ${f.source} |\n`;
+              }
+              body += `\n`;
+            }
+
+            if (lifecycle.length > 0) {
+              body += `### Lifecycle Findings\n\n`;
+              body += `| Severity | Package | Ecosystem | Status | Fixed Version | Source |\n`;
+              body += `|---|---|---|---|---|---|\n`;
+              for (const f of lifecycle) {
+                const pkg = `\`${f.name}@${f.version}\``;
+                const status = f.title || f.advisory_id || 'unsupported';
+                const fix = f.fixed_version || 'n/a';
+                body += `| ${f.severity} | ${pkg} | ${f.ecosystem} | ${status} | ${fix} | ${f.source} |\n`;
               }
               body += `\n`;
             }

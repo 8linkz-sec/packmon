@@ -37,15 +37,15 @@ health rules) first.
 
 ## Current open landmines (see Audit.md)
 
-> Status (2026-05-29): the items in this section were addressed across the
-> Audit.md "Fix-Runde" passes. Audit.md is authoritative; project-wide only the
-> external GitLab-runner test remains open. Keep the notes below as guardrails
-> so the fixes are not regressed.
+Audit.md is authoritative; project-wide only the external GitLab-runner test is
+documented as an external validation gap. Keep these guardrails in mind:
 
-- **L6:** the "zero entries => unhealthy" rule is NOT implemented; health checks
-  only cover 48h/failed. There are also two parallel health functions
-  (`api/v1/handler.go` and `api/admin/handler.go`) that can drift. Add the
-  zero-entries check to both, or unify them.
+- Feed health must continue to surface failed, stale, skipped, and zero-entry
+  states to API, admin, and public web consumers.
+- Runtime feed reconfiguration must not allow overlapping syncers for the same
+  feed name.
+- Bulk feed parsers should stream or batch where practical; avoid adding new
+  unbounded `io.ReadAll` paths for external feed responses.
 
 ## Tests
 

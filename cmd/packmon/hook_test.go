@@ -21,12 +21,16 @@ func TestFindGitRootAndIsPackmonHook(t *testing.T) {
 		t.Fatalf("mkdir nested: %v", err)
 	}
 
-	if got := findGitRoot(nested); got != root {
-		t.Fatalf("findGitRoot() = %q, want %q", got, root)
+	// findGitRoot normalizes via filepath.Abs, so compare against a cleaned
+	// path: t.TempDir() echoes GOTMPDIR verbatim, which may use forward slashes
+	// on Windows when GOTMPDIR is set that way.
+	wantRoot := filepath.Clean(root)
+	if got := findGitRoot(nested); got != wantRoot {
+		t.Fatalf("findGitRoot() = %q, want %q", got, wantRoot)
 	}
 	hookPath := filepath.Join(root, ".git", "hooks", "pre-push")
 	// #nosec G306 -- git hooks must be executable.
-	if err := os.WriteFile(hookPath, []byte(hookScript()), 0o755); err != nil {
+	if err := os.WriteFile(hookPath, []byte(hookScript("CRITICAL")), 0o755); err != nil {
 		t.Fatalf("write hook: %v", err)
 	}
 	if !isPackmonHook(hookPath) {
@@ -95,6 +99,36 @@ func TestHookInstallStatusAndUninstallManagedHook(t *testing.T) {
 	}
 	if _, err := os.Stat(hookPath); !os.IsNotExist(err) {
 		t.Fatalf("pre-commit hook still exists or stat failed: %v", err)
+	}
+}
+
+func TestHookInstallUsesConfigDefaults(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o750); err != nil {
+		t.Fatalf("mkdir .git: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, defaultCLIConfigFile), []byte(`hook:
+  type: pre-commit
+  fail_on: HIGH
+`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Chdir(root)
+
+	output := captureStdout(t, func() {
+		if err := newHookInstallCmd().Execute(); err != nil {
+			t.Fatalf("hook install: %v", err)
+		}
+	})
+	if !strings.Contains(output, "Installed packmon pre-commit hook") {
+		t.Fatalf("hook install output = %q", output)
+	}
+	data, err := os.ReadFile(filepath.Join(root, ".git", "hooks", "pre-commit")) // #nosec G304 -- test reads generated hook path.
+	if err != nil {
+		t.Fatalf("read hook: %v", err)
+	}
+	if !strings.Contains(string(data), "--fail-on HIGH") {
+		t.Fatalf("hook script = %s, want HIGH threshold", data)
 	}
 }
 

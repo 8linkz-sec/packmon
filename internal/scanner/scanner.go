@@ -30,6 +30,14 @@ type LocalChecker interface {
 	FindMalicious(ctx context.Context, ecosystem, name, version string) ([]domain.Finding, error)
 }
 
+// BatchLocalChecker is an optional local checker extension that avoids per-
+// package database roundtrips for stores that can query multiple packages at
+// once.
+type BatchLocalChecker interface {
+	FindVulnerabilitiesBatch(ctx context.Context, packages []db.PackageQuery) ([]domain.Finding, error)
+	FindMaliciousBatch(ctx context.Context, packages []db.PackageQuery) ([]domain.Finding, error)
+}
+
 // LifecycleChecker is an optional local checker extension for cached
 // lifecycle/EOL findings.
 type LifecycleChecker interface {
@@ -185,6 +193,7 @@ func (s *Scanner) Run(ctx context.Context) (*domain.ScanResult, int) {
 			FindingsCount:   0,
 			Summary:         emptySummary(),
 			Findings:        []domain.Finding{},
+			ParseErrors:     append([]string(nil), collection.ParseErrors...),
 			FeedVersions:    map[string]string{},
 		}
 		return result, ExitOK
@@ -201,7 +210,9 @@ func (s *Scanner) Run(ctx context.Context) (*domain.ScanResult, int) {
 
 	// If all files had parse errors and we got zero packages, exit 4.
 	if len(allPackages) == 0 && len(parseErrors) > 0 {
-		return s.errorResult(scanID, start, strings.Join(parseErrors, "; ")), ExitParser
+		result := s.errorResult(scanID, start, strings.Join(parseErrors, "; "))
+		result.ParseErrors = append([]string(nil), parseErrors...)
+		return result, ExitParser
 	}
 
 	// 3. Check: resolve findings.
@@ -209,14 +220,17 @@ func (s *Scanner) Run(ctx context.Context) (*domain.ScanResult, int) {
 	var findings []domain.Finding
 	var feedVersions map[string]string
 	var feedStatus string
+	var remoteBlocking bool
+	var hasRemoteBlocking bool
 	var checkErr error
 
 	switch mode {
 	case ModeRemote:
-		findings, feedVersions, feedStatus, checkErr = s.checkRemote(ctx, allPackages)
+		findings, feedVersions, feedStatus, remoteBlocking, checkErr = s.checkRemote(ctx, allPackages)
 		if checkErr != nil {
 			return s.errorResult(scanID, start, fmt.Sprintf("remote check failed: %v", checkErr)), ExitOperational
 		}
+		hasRemoteBlocking = true
 	case ModeLocal:
 		if s.localChecker == nil {
 			return s.errorResultWithPackages(scanID, start, "local advisory data unavailable (run 'packmon db sync' first)", len(allPackages)), ExitOperational
@@ -227,7 +241,7 @@ func (s *Scanner) Run(ctx context.Context) (*domain.ScanResult, int) {
 		}
 		feedVersions = map[string]string{}
 	case ModeAuto:
-		findings, feedVersions, feedStatus, checkErr = s.checkRemote(ctx, allPackages)
+		findings, feedVersions, feedStatus, remoteBlocking, checkErr = s.checkRemote(ctx, allPackages)
 		if checkErr != nil {
 			s.log().Warn("remote check failed",
 				slog.Bool("require_remote", s.cfg.RequireRemote),
@@ -248,6 +262,8 @@ func (s *Scanner) Run(ctx context.Context) (*domain.ScanResult, int) {
 			}
 			mode = ModeLocal
 			feedVersions = map[string]string{}
+		} else {
+			hasRemoteBlocking = true
 		}
 	}
 
@@ -260,6 +276,9 @@ func (s *Scanner) Run(ctx context.Context) (*domain.ScanResult, int) {
 
 	// 4. Determine blocking status.
 	blocking := s.hasBlockingFindings(findings)
+	if hasRemoteBlocking && remoteBlocking {
+		blocking = true
+	}
 
 	// 5. Build result.
 	result := &domain.ScanResult{
@@ -272,6 +291,7 @@ func (s *Scanner) Run(ctx context.Context) (*domain.ScanResult, int) {
 		FindingsBlocking: blocking,
 		Summary:          buildSummary(findings),
 		Findings:         findings,
+		ParseErrors:      append([]string(nil), parseErrors...),
 		FeedStatus:       feedStatus,
 		FeedVersions:     feedVersions,
 	}
@@ -314,24 +334,24 @@ func (s *Scanner) resolveMode() Mode {
 }
 
 // checkRemote sends packages to the server's POST /api/v1/check endpoint.
-func (s *Scanner) checkRemote(ctx context.Context, pkgs []domain.Package) ([]domain.Finding, map[string]string, string, error) {
+func (s *Scanner) checkRemote(ctx context.Context, pkgs []domain.Package) ([]domain.Finding, map[string]string, string, bool, error) {
 	if s.cfg.ServerURL == "" {
-		return nil, nil, "", fmt.Errorf("no server URL configured (set --server or PACKMON_SERVER)")
+		return nil, nil, "", false, fmt.Errorf("no server URL configured (set --server or PACKMON_SERVER)")
 	}
 
 	// Surface any deferred CA-bundle load error from New().
 	if s.clientErr != nil {
-		return nil, nil, "", s.clientErr
+		return nil, nil, "", false, s.clientErr
 	}
 
 	// Enforce HTTPS so the bearer token is never sent in cleartext. Plain
 	// http:// is opt-in only via AllowInsecureHTTP / --insecure-allow-http.
 	parsed, err := url.Parse(strings.TrimSpace(s.cfg.ServerURL))
 	if err != nil {
-		return nil, nil, "", fmt.Errorf("invalid server URL %q: %w", s.cfg.ServerURL, err)
+		return nil, nil, "", false, fmt.Errorf("invalid server URL %q: %w", s.cfg.ServerURL, err)
 	}
 	if !strings.EqualFold(parsed.Scheme, "https") && !s.cfg.AllowInsecureHTTP {
-		return nil, nil, "", fmt.Errorf("refusing to use insecure server URL %q: scheme must be https (set --insecure-allow-http / PACKMON_INSECURE_ALLOW_HTTP to override)", s.cfg.ServerURL)
+		return nil, nil, "", false, fmt.Errorf("refusing to use insecure server URL %q: scheme must be https (set --insecure-allow-http / PACKMON_INSECURE_ALLOW_HTTP to override)", s.cfg.ServerURL)
 	}
 
 	endpoint := strings.TrimRight(s.cfg.ServerURL, "/") + "/api/v1/check"
@@ -342,12 +362,12 @@ func (s *Scanner) checkRemote(ctx context.Context, pkgs []domain.Package) ([]dom
 	}
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
-		return nil, nil, "", fmt.Errorf("marshal request: %w", err)
+		return nil, nil, "", false, fmt.Errorf("marshal request: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
 	if err != nil {
-		return nil, nil, "", fmt.Errorf("create request: %w", err)
+		return nil, nil, "", false, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 	req.Header.Set("User-Agent", "packmon-cli/dev")
@@ -358,7 +378,7 @@ func (s *Scanner) checkRemote(ctx context.Context, pkgs []domain.Package) ([]dom
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return nil, nil, "", fmt.Errorf("server request: %w", err)
+		return nil, nil, "", false, fmt.Errorf("server request: %w", err)
 	}
 	defer closeSilently(resp.Body)
 
@@ -367,54 +387,64 @@ func (s *Scanner) checkRemote(ctx context.Context, pkgs []domain.Package) ([]dom
 	const maxResponseSize = 500 << 20 // 500 MB
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
 	if err != nil {
-		return nil, nil, "", fmt.Errorf("read response: %w", err)
+		return nil, nil, "", false, fmt.Errorf("read response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, nil, "", fmt.Errorf("server returned %d: %s", resp.StatusCode, truncate(string(body), 200))
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			return nil, nil, "", false, fmt.Errorf("server returned %d: %s (check PACKMON_API_KEY, --api-key, or api_key_env configuration)", resp.StatusCode, truncate(string(body), 200))
+		}
+		return nil, nil, "", false, fmt.Errorf("server returned %d: %s", resp.StatusCode, truncate(string(body), 200))
 	}
 
 	var result domain.ScanResult
 	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, nil, "", fmt.Errorf("decode response: %w", err)
+		return nil, nil, "", false, fmt.Errorf("decode response: %w", err)
 	}
 
-	return result.Findings, result.FeedVersions, result.FeedStatus, nil
+	return result.Findings, result.FeedVersions, result.FeedStatus, result.FindingsBlocking, nil
 }
 
 // checkLocal resolves findings against the local SQLite database.
 func (s *Scanner) checkLocal(ctx context.Context, pkgs []domain.Package) ([]domain.Finding, error) {
 	var allFindings []domain.Finding
+	queries := packageQueries(pkgs)
 
-	for _, pkg := range pkgs {
-		eco := string(pkg.Ecosystem)
-
-		vulns, err := s.localChecker.FindVulnerabilities(ctx, eco, pkg.Name, pkg.Version)
+	if batchChecker, ok := s.localChecker.(BatchLocalChecker); ok {
+		vulns, err := batchChecker.FindVulnerabilitiesBatch(ctx, queries)
 		if err != nil {
-			return nil, fmt.Errorf("local vuln check %s/%s: %w", eco, pkg.Name, err)
+			return nil, fmt.Errorf("local vuln batch check: %w", err)
 		}
 		allFindings = append(allFindings, vulns...)
 
-		mals, err := s.localChecker.FindMalicious(ctx, eco, pkg.Name, pkg.Version)
+		mals, err := batchChecker.FindMaliciousBatch(ctx, queries)
 		if err != nil {
-			return nil, fmt.Errorf("local malicious check %s/%s: %w", eco, pkg.Name, err)
-		}
-		// Set the version on malicious findings for consistent output.
-		for i := range mals {
-			mals[i].Version = pkg.Version
+			return nil, fmt.Errorf("local malicious batch check: %w", err)
 		}
 		allFindings = append(allFindings, mals...)
+	} else {
+		for _, pkg := range pkgs {
+			eco := string(pkg.Ecosystem)
+
+			vulns, err := s.localChecker.FindVulnerabilities(ctx, eco, pkg.Name, pkg.Version)
+			if err != nil {
+				return nil, fmt.Errorf("local vuln check %s/%s: %w", eco, pkg.Name, err)
+			}
+			allFindings = append(allFindings, vulns...)
+
+			mals, err := s.localChecker.FindMalicious(ctx, eco, pkg.Name, pkg.Version)
+			if err != nil {
+				return nil, fmt.Errorf("local malicious check %s/%s: %w", eco, pkg.Name, err)
+			}
+			// Set the version on malicious findings for consistent output.
+			for i := range mals {
+				mals[i].Version = pkg.Version
+			}
+			allFindings = append(allFindings, mals...)
+		}
 	}
 
 	if lifecycleChecker, ok := s.localChecker.(LifecycleChecker); ok {
-		queries := make([]db.PackageQuery, 0, len(pkgs))
-		for _, pkg := range pkgs {
-			queries = append(queries, db.PackageQuery{
-				Ecosystem: string(pkg.Ecosystem),
-				Name:      pkg.Name,
-				Version:   pkg.Version,
-			})
-		}
 		lifecycle, err := lifecycleChecker.FindLifecycleFindingsBatch(ctx, queries, time.Now().UTC())
 		if err != nil {
 			return nil, fmt.Errorf("local lifecycle check: %w", err)
@@ -423,6 +453,18 @@ func (s *Scanner) checkLocal(ctx context.Context, pkgs []domain.Package) ([]doma
 	}
 
 	return allFindings, nil
+}
+
+func packageQueries(pkgs []domain.Package) []db.PackageQuery {
+	queries := make([]db.PackageQuery, 0, len(pkgs))
+	for _, pkg := range pkgs {
+		queries = append(queries, db.PackageQuery{
+			Ecosystem: string(pkg.Ecosystem),
+			Name:      pkg.Name,
+			Version:   pkg.Version,
+		})
+	}
+	return queries
 }
 
 // hasBlockingFindings checks if any finding is blocking per DE-2 rules:
@@ -486,29 +528,6 @@ func buildSummary(findings []domain.Finding) domain.ScanSummary {
 		s.BySource[f.Source]++
 	}
 	return s
-}
-
-// dedup removes duplicate packages (same name+version+ecosystem).
-func dedup(pkgs []domain.Package) []domain.Package {
-	type key struct {
-		name      string
-		version   string
-		ecosystem domain.Ecosystem
-	}
-	seen := make(map[key]int, len(pkgs))
-	out := make([]domain.Package, 0, len(pkgs))
-	for _, p := range pkgs {
-		k := key{p.Name, p.Version, p.Ecosystem}
-		if idx, ok := seen[k]; ok {
-			if out[idx].Dev && !p.Dev {
-				out[idx].Dev = false
-			}
-			continue
-		}
-		seen[k] = len(out)
-		out = append(out, p)
-	}
-	return out
 }
 
 func generateCorrelationID() string {

@@ -22,6 +22,8 @@ func TestEcosystemMappingHelpers(t *testing.T) {
 		{name: "ghsa actions", fn: MapGHSAEcosystem, in: "GitHub Actions", want: domain.EcosystemGitHubActions},
 		{name: "ghsa pip", fn: MapGHSAEcosystem, in: "pip", want: domain.EcosystemPyPI},
 		{name: "openssf crates", fn: MapOpenSSFEcosystem, in: "crates.io", want: domain.EcosystemCargo},
+		{name: "openssf go alias", fn: MapOpenSSFEcosystem, in: "go", want: domain.EcosystemGo},
+		{name: "openssf rubygems alias", fn: MapOpenSSFEcosystem, in: "RubyGems", want: domain.EcosystemGem},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			got, ok := tt.fn(tt.in)
@@ -37,8 +39,8 @@ func TestEcosystemMappingHelpers(t *testing.T) {
 	if got, ok := MapGHSAEcosystem("unknown"); ok || got != "" {
 		t.Fatalf("MapGHSAEcosystem(unknown) = %q, %v; want empty false", got, ok)
 	}
-	if got, ok := MapOpenSSFEcosystem("go"); ok || got != "" {
-		t.Fatalf("MapOpenSSFEcosystem(go) = %q, %v; want empty false", got, ok)
+	if got, ok := MapOpenSSFEcosystem("unknown"); ok || got != "" {
+		t.Fatalf("MapOpenSSFEcosystem(unknown) = %q, %v; want empty false", got, ok)
 	}
 }
 

@@ -38,7 +38,7 @@ func Logging(logger *slog.Logger) func(http.Handler) http.Handler {
 				slog.Int("status", sc.code),
 				slog.Int64("duration_ms", duration.Milliseconds()),
 				slog.String("correlation_id", correlationID),
-				slog.String("remote_addr", r.RemoteAddr),
+				slog.String("remote_addr", ClientIP(r)),
 				slog.String("user_agent", r.UserAgent()),
 			}
 

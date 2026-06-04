@@ -135,6 +135,7 @@ func (s *Store) FindMalicious(ctx context.Context, ecosystem, name, version stri
 		SELECT id, severity, summary, risk_type, source, reference_urls::text
 		FROM malicious_findings
 		WHERE ecosystem = $1 AND name = $2
+		  AND removed_at IS NULL
 		  AND (versions IS NULL OR versions = 'null'::jsonb OR $3 = '' OR versions @> to_jsonb($3::text))
 		ORDER BY updated_at DESC, id DESC`
 
@@ -328,6 +329,7 @@ func (s *Store) FindMaliciousBatch(ctx context.Context, packages []db.PackageQue
 			COALESCE(reference_urls::text, '[]')
 		FROM malicious_findings
 		WHERE (ecosystem, name) IN (VALUES ` + strings.Join(placeholders, ", ") + `)
+		  AND removed_at IS NULL
 		ORDER BY updated_at DESC, id DESC`
 
 	rows, err := s.pool.Query(ctx, query, args...)
@@ -561,6 +563,7 @@ func (s *Store) UpsertMaliciousFinding(ctx context.Context, mf *db.MaliciousFind
 			origin_ref = EXCLUDED.origin_ref,
 			published = EXCLUDED.published,
 			created_by = EXCLUDED.created_by,
+			removed_at = NULL,
 			updated_at = NOW()`
 
 	_, err := s.pool.Exec(ctx, query,
@@ -593,11 +596,29 @@ func (s *Store) DeleteVulnerability(ctx context.Context, id string) error {
 }
 
 func (s *Store) DeleteMaliciousFinding(ctx context.Context, id string) error {
-	_, err := s.pool.Exec(ctx, `DELETE FROM malicious_findings WHERE id = $1`, id)
+	_, err := s.pool.Exec(ctx, `
+		UPDATE malicious_findings
+		SET removed_at = COALESCE(removed_at, NOW()),
+		    updated_at = NOW()
+		WHERE id = $1`, id)
 	if err != nil {
 		return fmt.Errorf("postgres: delete malicious finding %s: %w", id, err)
 	}
 	return nil
+}
+
+func (s *Store) DeleteMaliciousFindingsNotInSource(ctx context.Context, source string, ids []string) (int, error) {
+	cmd, err := s.pool.Exec(ctx, `
+		UPDATE malicious_findings
+		SET removed_at = COALESCE(removed_at, NOW()),
+		    updated_at = NOW()
+		WHERE source = $1
+		  AND removed_at IS NULL
+		  AND NOT (id = ANY($2))`, source, ids)
+	if err != nil {
+		return 0, fmt.Errorf("postgres: prune malicious findings for source %s: %w", source, err)
+	}
+	return int(cmd.RowsAffected()), nil
 }
 
 func (s *Store) ListMaliciousFindings(ctx context.Context, source string, limit int) ([]db.MaliciousFinding, error) {
@@ -610,8 +631,10 @@ func (s *Store) ListMaliciousFindings(ctx context.Context, source string, limit 
 		FROM malicious_findings`
 	args := []any{}
 	if source != "" {
-		query += ` WHERE source = $1`
+		query += ` WHERE source = $1 AND removed_at IS NULL`
 		args = append(args, source)
+	} else {
+		query += ` WHERE removed_at IS NULL`
 	}
 	query += fmt.Sprintf(` ORDER BY updated_at DESC, created_at DESC, id DESC LIMIT $%d`, len(args)+1)
 	args = append(args, limit)

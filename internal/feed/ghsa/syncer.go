@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -171,37 +172,50 @@ func (s *Syncer) processChangedFiles(ctx context.Context, store db.Store, repoDi
 		if ctx.Err() != nil {
 			return synced, total, ctx.Err()
 		}
+		cleanRelPath := path.Clean(relPath)
 
 		// Only process JSON files under the reviewed advisories directory.
-		if !strings.HasPrefix(relPath, reviewedDir+"/") {
+		if !strings.HasPrefix(cleanRelPath, reviewedDir+"/") {
 			continue
 		}
-		if !strings.HasSuffix(relPath, ".json") {
+		if !strings.HasSuffix(cleanRelPath, ".json") {
 			continue
 		}
 		total++
 
-		data, readErr := repoRoot.ReadFile(relPath)
+		data, readErr := repoRoot.ReadFile(cleanRelPath)
 		if readErr != nil {
-			// File may have been deleted in this diff range; skip.
-			s.logger.Debug("skipping changed file (read failed)",
-				slog.String("file", relPath),
-				slog.String("error", readErr.Error()),
+			advisoryID := strings.TrimSuffix(path.Base(cleanRelPath), ".json")
+			if advisoryID == "" {
+				return synced, total, fmt.Errorf("derive deleted advisory ID from %s", cleanRelPath)
+			}
+			if deleteErr := store.DeleteVulnerability(ctx, advisoryID); deleteErr != nil {
+				s.logger.Warn("failed to delete removed advisory",
+					slog.String("id", advisoryID),
+					slog.String("file", cleanRelPath),
+					slog.String("error", deleteErr.Error()),
+				)
+				return synced, total, fmt.Errorf("delete removed advisory %s: %w", advisoryID, deleteErr)
+			}
+			s.logger.Info("deleted removed advisory",
+				slog.String("id", advisoryID),
+				slog.String("file", cleanRelPath),
 			)
+			synced++
 			continue
 		}
 
 		var advisory ghsaAdvisory
 		if parseErr := json.Unmarshal(data, &advisory); parseErr != nil {
 			s.logger.Warn("failed to parse advisory JSON",
-				slog.String("file", relPath),
+				slog.String("file", cleanRelPath),
 				slog.String("error", parseErr.Error()),
 			)
 			continue
 		}
 
 		if advisory.ID == "" {
-			s.logger.Warn("advisory has no ID, skipping", slog.String("file", relPath))
+			s.logger.Warn("advisory has no ID, skipping", slog.String("file", cleanRelPath))
 			continue
 		}
 

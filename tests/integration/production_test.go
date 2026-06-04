@@ -36,7 +36,7 @@ func TestProductionServerWithPostgresAndAPIKey(t *testing.T) {
 		"-e", "POSTGRES_USER=packmon",
 		"-e", "POSTGRES_PASSWORD=packmon",
 		"-p", fmt.Sprintf("%d:5432", dbPort),
-		"postgres:16-alpine",
+		"postgres:18-alpine",
 	)
 	out, err := run.Output()
 	if err != nil {

@@ -15,6 +15,7 @@ type SearchData struct {
 	Severity  string
 	Finding   string
 	Results   []db.PackageSearchResult
+	Error     string
 }
 
 // HandleSearch serves GET /search. It supports both full-page and HTMX
@@ -28,6 +29,7 @@ func HandleSearch(store Store, renderer *Renderer, logger *slog.Logger) http.Han
 		ctx := r.Context()
 
 		var results []db.PackageSearchResult
+		var searchError string
 		if query != "" || severity != "" || finding != "" {
 			var err error
 			results, err = store.SearchPackages(ctx, db.PackageSearchParams{
@@ -38,6 +40,7 @@ func HandleSearch(store Store, renderer *Renderer, logger *slog.Logger) http.Han
 			})
 			if err != nil {
 				logger.Error("search: query failed", "error", err, "query", query, "severity", severity, "finding", finding)
+				searchError = "Search failed. Try again or narrow the filters."
 			}
 		}
 
@@ -47,6 +50,7 @@ func HandleSearch(store Store, renderer *Renderer, logger *slog.Logger) http.Han
 			Severity:  severity,
 			Finding:   finding,
 			Results:   results,
+			Error:     searchError,
 		}
 
 		// HTMX partial response: only render the results block.
@@ -79,7 +83,7 @@ func normalizeSearchSeverity(raw string) string {
 func normalizeSearchFindingType(raw string) string {
 	finding := strings.ToLower(strings.TrimSpace(raw))
 	switch finding {
-	case "", "vulnerability", "malicious":
+	case "", "vulnerability", "malicious", "supply_chain_risk", "lifecycle":
 		return finding
 	default:
 		return ""

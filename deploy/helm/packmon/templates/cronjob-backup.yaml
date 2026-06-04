@@ -15,9 +15,13 @@ spec:
             {{- include "packmon.labels" . | nindent 12 }}
         spec:
           restartPolicy: OnFailure
+          securityContext:
+            {{- toYaml .Values.postgresqlSecurityContext | nindent 12 }}
           containers:
             - name: pg-dump
               image: {{ .Values.backup.image | quote }}
+              securityContext:
+                {{- toYaml .Values.containerSecurityContext | nindent 16 }}
               env:
                 - name: PGPASSWORD
                   valueFrom:
@@ -36,6 +40,8 @@ spec:
               volumeMounts:
                 - name: backup
                   mountPath: {{ .Values.backup.path }}
+              resources:
+                {{- toYaml .Values.backup.resources | nindent 16 }}
           volumes:
             - name: backup
               persistentVolumeClaim:

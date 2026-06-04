@@ -97,6 +97,9 @@ Admin properties:
   admin hash exists yet;
 - password is stored as a bcrypt hash;
 - existing admin hash takes precedence over bootstrap env;
+- sessions authenticated with the bootstrap password may only rotate that
+  password; API-key, feed, queue, advisory, and system-setting writes are
+  blocked until `password_is_bootstrap` is cleared by a password change;
 - login form uses standard username/password fields and browser/vault-friendly
   autocomplete attributes;
 - sessions use secure cookies with HttpOnly and SameSite behavior;
@@ -305,6 +308,9 @@ Requirements:
 - migrations run through `packmon-server migrate`;
 - normal server startup verifies expected schema version and exits on mismatch;
 - no automatic schema mutation on normal server startup;
+- bounded, idempotent feed-data reconciliation may run after schema-version
+  verification, but it must not perform DDL, update schema migration state, or
+  bring an outdated schema current;
 - backups use `pg_dump` and local retention as documented in the runbook.
 
 ## Local Mode Security

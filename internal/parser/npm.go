@@ -1,7 +1,6 @@
 package parser
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -323,8 +322,7 @@ func (p *YarnParser) Parse(r io.Reader) ([]domain.Package, error) {
 		matchedHeaders  int
 	)
 
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
+	scanner := newLineScanner(r)
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -398,14 +396,19 @@ type pnpmLock struct {
 	// pnpm v6+: keys like "/lodash@4.17.21"
 	Packages map[string]pnpmPkgEntry `yaml:"packages"`
 	// pnpm v9+: snapshot-style with snapshots map
-	Snapshots map[string]interface{} `yaml:"snapshots"`
+	Snapshots map[string]pnpmSnapshotEntry `yaml:"snapshots"`
 }
 
 type pnpmPkgEntry struct {
 	Version    string `yaml:"version"`
+	Dev        bool   `yaml:"dev"`
 	Resolution struct {
 		Integrity string `yaml:"integrity"`
 	} `yaml:"resolution"`
+}
+
+type pnpmSnapshotEntry struct {
+	Dev bool `yaml:"dev"`
 }
 
 func (p *PnpmParser) Parse(r io.Reader) ([]domain.Package, error) {
@@ -430,6 +433,20 @@ func (p *PnpmParser) Parse(r io.Reader) ([]domain.Package, error) {
 			Name:      name,
 			Version:   version,
 			Ecosystem: domain.EcosystemNPM,
+			Dev:       entry.Dev,
+		})
+	}
+
+	for key, entry := range lock.Snapshots {
+		name, version := parsePnpmKey(key, "")
+		if name == "" || version == "" {
+			continue
+		}
+		pkgs = append(pkgs, domain.Package{
+			Name:      name,
+			Version:   version,
+			Ecosystem: domain.EcosystemNPM,
+			Dev:       entry.Dev,
 		})
 	}
 
@@ -452,6 +469,7 @@ func parsePnpmKey(key, entryVersion string) (name, version string) {
 	if key == "" {
 		return "", ""
 	}
+	key = stripPnpmPeerSuffix(key)
 
 	// pnpm v6+: name@version
 	if atIdx := lastAtIndex(key); atIdx > 0 {
@@ -468,6 +486,13 @@ func parsePnpmKey(key, entryVersion string) (name, version string) {
 		return key, entryVersion
 	}
 	return key, ""
+}
+
+func stripPnpmPeerSuffix(key string) string {
+	if idx := strings.Index(key, "("); idx > 0 {
+		return key[:idx]
+	}
+	return key
 }
 
 // lastAtIndex returns the index of the last '@' that is not the scope prefix.

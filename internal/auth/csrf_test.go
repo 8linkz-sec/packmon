@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -65,6 +66,48 @@ func TestCSRFTokenDiffersBetweenSessions(t *testing.T) {
 
 	if token1 == token2 {
 		t.Fatal("two different sessions generated the same CSRF token")
+	}
+}
+
+func TestCSRFTokenConcurrentAccessIsRaceFree(t *testing.T) {
+	t.Parallel()
+
+	sess := &Session{ID: "test-session"}
+
+	var wg sync.WaitGroup
+	tokens := make(chan string, 64)
+	for i := 0; i < 64; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			token, err := CSRFToken(sess)
+			if err != nil {
+				t.Errorf("CSRFToken returned error: %v", err)
+				return
+			}
+
+			form := url.Values{}
+			form.Set(CSRFFieldName, token)
+			req := httptest.NewRequest(http.MethodPost, "/admin/action", strings.NewReader(form.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			if !ValidateCSRF(req, sess) {
+				t.Errorf("ValidateCSRF returned false for generated token")
+			}
+			tokens <- token
+		}()
+	}
+	wg.Wait()
+	close(tokens)
+
+	var first string
+	for token := range tokens {
+		if first == "" {
+			first = token
+			continue
+		}
+		if token != first {
+			t.Fatalf("CSRFToken returned different concurrent tokens: %q vs %q", first, token)
+		}
 	}
 }
 

@@ -1,7 +1,6 @@
 package parser
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"regexp"
@@ -19,9 +18,10 @@ import (
 // We extract the quoted package name key and the version string.
 type HexParser struct{}
 
-// mixLockLineRe matches a dependency line in mix.lock.
-// It captures the package name (first quoted string) and the version (third quoted string after :hex, :name).
-var mixLockLineRe = regexp.MustCompile(`^\s*"([^"]+)":\s*\{:hex,\s*:[^,]+,\s*"([^"]+)"`)
+// mixLockLineRe matches a Hex dependency line in mix.lock. It captures the map
+// key as the package name and the version string after the Hex package field.
+// Mix can render the package field as :name, :"quoted-name", or "name".
+var mixLockLineRe = regexp.MustCompile(`^\s*"([^"]+)":\s*\{:hex,\s*(?::"[^"]+"|:[^,]+|"[^"]+"),\s*"([^"]+)"`)
 
 // NewHexParser creates a new HexParser.
 func NewHexParser() *HexParser {
@@ -33,7 +33,7 @@ func (p *HexParser) CanParse(filename string) bool {
 }
 
 func (p *HexParser) Parse(r io.Reader) ([]domain.Package, error) {
-	scanner := bufio.NewScanner(r)
+	scanner := newLineScanner(r)
 
 	var (
 		packages []domain.Package

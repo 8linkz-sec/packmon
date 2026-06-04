@@ -18,6 +18,8 @@ spec:
         app.kubernetes.io/name: {{ include "packmon.name" . }}-postgresql
         app.kubernetes.io/instance: {{ .Release.Name }}
     spec:
+      securityContext:
+        {{- toYaml .Values.postgresqlSecurityContext | nindent 8 }}
       containers:
         - name: postgres
           image: {{ .Values.postgresql.image | quote }}
@@ -59,6 +61,8 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql/data
+          resources:
+            {{- toYaml .Values.postgresql.resources | nindent 12 }}
   volumeClaimTemplates:
     - metadata:
         name: data

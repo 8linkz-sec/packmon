@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/8linkz/packmon/internal/ioutils"
 )
 
 const manifestAccept = "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json"
@@ -55,7 +57,7 @@ func (c *RegistryClient) resolveDigestOnce(ctx context.Context, ref Ref, token s
 	if err != nil {
 		return "", "", err
 	}
-	defer resp.Body.Close()
+	defer ioutils.CloseSilently(resp.Body)
 	if resp.StatusCode == http.StatusUnauthorized {
 		return "", resp.Header.Get("WWW-Authenticate"), ErrDigestUnavailable
 	}
@@ -111,7 +113,7 @@ func (c *RegistryClient) fetchBearerToken(ctx context.Context, challenge string)
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer ioutils.CloseSilently(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", fmt.Errorf("%w: token status %d", ErrDigestUnavailable, resp.StatusCode)
 	}

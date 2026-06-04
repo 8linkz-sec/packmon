@@ -92,6 +92,20 @@ func TestNuGetParser_Parse(t *testing.T) {
 			wantPkgs:  map[string]string{"Newtonsoft.Json": "13.0.3"},
 			wantErr:   true,
 		},
+		{
+			name: "project references are ignored",
+			input: `{
+				"version": 2,
+				"dependencies": {
+					"net8.0": {
+						"Newtonsoft.Json": {"type": "Direct", "resolved": "13.0.3"},
+						"Local.Project": {"type": "Project", "resolved": ""}
+					}
+				}
+			}`,
+			wantCount: 1,
+			wantPkgs:  map[string]string{"Newtonsoft.Json": "13.0.3"},
+		},
 	}
 
 	for _, tt := range tests {

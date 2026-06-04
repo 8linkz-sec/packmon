@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -282,6 +283,39 @@ func TestResolveScanSettingsAPIKeyEnvAndValidationBranches(t *testing.T) {
 	}
 }
 
+func TestResolveScanSettingsUsesOutputAndLogConfig(t *testing.T) {
+	cfg := &cliConfig{
+		Output: cliOutputConfig{Format: "json", File: "configured.json"},
+		Log:    cliLogConfig{Level: "WARN"},
+	}
+	cmd := newScanCmd()
+	settings, err := resolveScanSettings(cmd, cfg, scanTarget{Path: "."}, scanFlagValues{
+		Mode:    "local",
+		FailOn:  "CRITICAL",
+		Timeout: 1,
+	})
+	if err != nil {
+		t.Fatalf("resolveScanSettings(config output) error = %v", err)
+	}
+	if settings.OutputJSON != "configured.json" || settings.LogLevel != "WARN" {
+		t.Fatalf("settings = %+v, want configured JSON output and WARN log level", settings)
+	}
+
+	mustSetFlag(t, cmd, "output-json", "flag.json")
+	settings, err = resolveScanSettings(cmd, cfg, scanTarget{Path: "."}, scanFlagValues{
+		Mode:       "local",
+		FailOn:     "CRITICAL",
+		Timeout:    1,
+		OutputJSON: "flag.json",
+	})
+	if err != nil {
+		t.Fatalf("resolveScanSettings(flag output) error = %v", err)
+	}
+	if settings.OutputJSON != "flag.json" {
+		t.Fatalf("OutputJSON = %q, want flag.json", settings.OutputJSON)
+	}
+}
+
 func TestRunSingleScanReportPreparationErrorsBecomeOperational(t *testing.T) {
 	isolateCLIConfigDiscovery(t)
 	dbDir := t.TempDir()
@@ -316,6 +350,74 @@ func TestRunSingleScanReportPreparationErrorsBecomeOperational(t *testing.T) {
 	}
 }
 
+func TestRunSingleScanReportErrorsOverrideFindingExit(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	ctx := context.Background()
+	dbDir := t.TempDir()
+	t.Setenv("PACKMON_DB_PATH", dbDir)
+	store, _ := newTestSQLiteStore(t, dbDir)
+	if _, err := store.DB().ExecContext(ctx, `
+		INSERT INTO vulnerabilities_local(row_key, id, ecosystem, name, severity, summary)
+		VALUES('GHSA-report|npm|vulnerable', 'GHSA-report', 'npm', 'vulnerable', 'HIGH', 'local advisory')`); err != nil {
+		t.Fatalf("seed local vulnerability: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close seed store: %v", err)
+	}
+
+	projectDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(projectDir, "package-lock.json"), []byte(`{
+		"lockfileVersion": 3,
+		"packages": {
+			"": {"version":"1.0.0"},
+			"node_modules/vulnerable": {"version":"1.2.3"}
+		}
+	}`), 0o600); err != nil {
+		t.Fatalf("write package-lock: %v", err)
+	}
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+
+	exitCode, err := runSingleScan(ctx, scanSettings{
+		Path:       projectDir,
+		Mode:       "local",
+		FailOn:     "HIGH",
+		MaxDepth:   2,
+		Timeout:    1,
+		Quiet:      true,
+		OutputJSON: filepath.Join(blocker, "result.json"),
+	})
+	if err != nil {
+		t.Fatalf("runSingleScan() error = %v", err)
+	}
+	if exitCode != ExitOperational {
+		t.Fatalf("exitCode = %d, want %d", exitCode, ExitOperational)
+	}
+}
+
+func TestRunScanCommandReturnsTypedOperationalError(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	cmd := newScanCmd()
+	cmd.SetContext(context.Background())
+	mustSetFlag(t, cmd, "fail-on", "SEVERE")
+
+	err := runScanCommand(cmd, []string{t.TempDir()}, scanFlagValues{
+		Mode:     "local",
+		FailOn:   "SEVERE",
+		MaxDepth: 2,
+		Timeout:  1,
+	})
+	var codeErr exitCodeError
+	if !errors.As(err, &codeErr) {
+		t.Fatalf("runScanCommand() error = %T %[1]v, want exitCodeError", err)
+	}
+	if codeErr.Code() != ExitOperational {
+		t.Fatalf("exit code = %d, want %d", codeErr.Code(), ExitOperational)
+	}
+}
+
 func TestScanSmallHelpersAndLogLevels(t *testing.T) {
 	isolateCLIConfigDiscovery(t)
 
@@ -344,7 +446,7 @@ func TestScanSmallHelpersAndLogLevels(t *testing.T) {
 	} {
 		t.Run(tt.level, func(t *testing.T) {
 			flagLogLevel = tt.level
-			logger := scanLogger(false)
+			logger := scanLogger(false, tt.level)
 			if !logger.Enabled(ctx, tt.enabledLevel) {
 				t.Fatalf("scanLogger(%s) disabled %s level", tt.level, tt.wantEnabledName)
 			}
@@ -355,7 +457,7 @@ func TestScanSmallHelpersAndLogLevels(t *testing.T) {
 	}
 
 	flagLogLevel = "DEBUG"
-	quietLogger := scanLogger(true)
+	quietLogger := scanLogger(true, "DEBUG")
 	if !quietLogger.Enabled(ctx, slog.LevelError) || quietLogger.Enabled(ctx, slog.LevelWarn) {
 		t.Fatal("quiet scanLogger did not raise threshold to error")
 	}
@@ -431,5 +533,71 @@ func TestRunSingleScanLocalUsesSeededAdvisoryData(t *testing.T) {
 	})
 	if !strings.Contains(output, "GHSA-local") || !strings.Contains(output, "vulnerable") {
 		t.Fatalf("local advisory output missing finding:\n%s", output)
+	}
+}
+
+func TestRunSingleScanWarnsAboutPartialParseErrors(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	dbDir := t.TempDir()
+	t.Setenv("PACKMON_DB_PATH", dbDir)
+	store, _ := newTestSQLiteStore(t, dbDir)
+	if _, err := store.DB().ExecContext(context.Background(), `
+		INSERT INTO vulnerabilities_local(row_key, id, ecosystem, name, severity, summary)
+		VALUES('GHSA-parse-warn-seed|npm|unrelated', 'GHSA-parse-warn-seed', 'npm', 'unrelated', 'LOW', 'unrelated advisory')`); err != nil {
+		t.Fatalf("seed unrelated advisory: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close seed store: %v", err)
+	}
+
+	projectDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(projectDir, "package-lock.json"), []byte(`{
+		"lockfileVersion": 3,
+		"packages": {"": {"version":"1.0.0"}, "node_modules/prod": {"version":"1.0.0"}}
+	}`), 0o600); err != nil {
+		t.Fatalf("write package-lock: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "pnpm-lock.yaml"), []byte(`{{{not yaml`), 0o600); err != nil {
+		t.Fatalf("write pnpm-lock: %v", err)
+	}
+
+	stderr := captureStderr(t, func() {
+		exitCode, err := runSingleScan(context.Background(), scanSettings{
+			Path:     projectDir,
+			Mode:     "local",
+			FailOn:   "CRITICAL",
+			MaxDepth: 2,
+			Timeout:  1,
+			NoColor:  true,
+		})
+		if err != nil {
+			t.Fatalf("runSingleScan() error = %v", err)
+		}
+		if exitCode != ExitOK {
+			t.Fatalf("exitCode = %d, want %d", exitCode, ExitOK)
+		}
+	})
+	if !strings.Contains(stderr, "warning: parse error in pnpm-lock.yaml") {
+		t.Fatalf("stderr missing parse warning:\n%s", stderr)
+	}
+
+	quietStderr := captureStderr(t, func() {
+		exitCode, err := runSingleScan(context.Background(), scanSettings{
+			Path:     projectDir,
+			Mode:     "local",
+			FailOn:   "CRITICAL",
+			MaxDepth: 2,
+			Timeout:  1,
+			Quiet:    true,
+		})
+		if err != nil {
+			t.Fatalf("quiet runSingleScan() error = %v", err)
+		}
+		if exitCode != ExitOK {
+			t.Fatalf("quiet exitCode = %d, want %d", exitCode, ExitOK)
+		}
+	})
+	if strings.Contains(quietStderr, "parse error") {
+		t.Fatalf("quiet stderr contains parse warning:\n%s", quietStderr)
 	}
 }

@@ -206,6 +206,7 @@ type scanSettings struct {
 	OutputHTML    string
 	WebhookURL    string
 	WebhookSecret string
+	LogLevel      string
 	Quiet         bool
 	NoColor       bool
 	CACertFile    string
@@ -217,22 +218,23 @@ type scanSettings struct {
 func runScanCommand(cmd *cobra.Command, args []string, flags scanFlagValues) error {
 	cfg, _, err := loadCurrentCLIConfig()
 	if err != nil {
-		return err
+		return withExitCode(ExitOperational, err)
 	}
 
 	targets, err := buildScanTargets(cfg, args, flags)
 	if err != nil {
-		return err
+		return withExitCode(ExitOperational, err)
 	}
-	if len(targets) > 1 && (strings.TrimSpace(flags.OutputJSON) != "" || strings.TrimSpace(flags.OutputSARIF) != "" || strings.TrimSpace(flags.OutputJUnit) != "" || strings.TrimSpace(flags.OutputHTML) != "") {
-		return fmt.Errorf("--output-json, --output-sarif, --output-junit, and --html can only be used when scanning a single target, not multiple targets")
+	hasConfigOutput := cfg != nil && strings.TrimSpace(cfg.Output.File) != ""
+	if len(targets) > 1 && (hasConfigOutput || strings.TrimSpace(flags.OutputJSON) != "" || strings.TrimSpace(flags.OutputSARIF) != "" || strings.TrimSpace(flags.OutputJUnit) != "" || strings.TrimSpace(flags.OutputHTML) != "") {
+		return withExitCode(ExitOperational, fmt.Errorf("--output-json, --output-sarif, --output-junit, and --html can only be used when scanning a single target, not multiple targets"))
 	}
 
 	finalExitCode := ExitOK
 	for i, target := range targets {
 		settings, err := resolveScanSettings(cmd, cfg, target, flags)
 		if err != nil {
-			return err
+			return withExitCode(ExitOperational, err)
 		}
 
 		if len(targets) > 1 && !flags.Quiet {
@@ -245,7 +247,7 @@ func runScanCommand(cmd *cobra.Command, args []string, flags scanFlagValues) err
 
 		exitCode, err := runSingleScan(cmd.Context(), settings)
 		if err != nil {
-			return err
+			return withExitCode(exitCode, err)
 		}
 		finalExitCode = worstExitCode(finalExitCode, exitCode)
 	}
@@ -350,6 +352,7 @@ func resolveScanSettings(cmd *cobra.Command, cfg *cliConfig, target scanTarget, 
 		Timeout:    30,
 		Quiet:      flags.Quiet,
 		NoColor:    flags.NoColor,
+		LogLevel:   strings.ToUpper(strings.TrimSpace(flagLogLevel)),
 	}
 
 	if cfg != nil {
@@ -384,6 +387,12 @@ func resolveScanSettings(cmd *cobra.Command, cfg *cliConfig, target scanTarget, 
 		}
 		if cfg.Webhook.Secret != "" {
 			settings.WebhookSecret = cfg.Webhook.Secret
+		}
+		if cfg.Output.File != "" {
+			applyOutputConfig(&settings, cfg.Output)
+		}
+		if cfg.Log.Level != "" {
+			settings.LogLevel = cfg.Log.Level
 		}
 		if cfg.CACert != "" {
 			settings.CACertFile = cfg.CACert
@@ -503,10 +512,18 @@ func resolveScanSettings(cmd *cobra.Command, cfg *cliConfig, target scanTarget, 
 		settings.SBOMFiles = append([]string(nil), flags.SBOMFiles...)
 	}
 
-	settings.OutputJSON = strings.TrimSpace(flags.OutputJSON)
-	settings.OutputSARIF = strings.TrimSpace(flags.OutputSARIF)
-	settings.OutputJUnit = strings.TrimSpace(flags.OutputJUnit)
-	settings.OutputHTML = strings.TrimSpace(flags.OutputHTML)
+	if cmd.Flags().Changed("output-json") || strings.TrimSpace(flags.OutputJSON) != "" {
+		settings.OutputJSON = strings.TrimSpace(flags.OutputJSON)
+	}
+	if cmd.Flags().Changed("output-sarif") || strings.TrimSpace(flags.OutputSARIF) != "" {
+		settings.OutputSARIF = strings.TrimSpace(flags.OutputSARIF)
+	}
+	if cmd.Flags().Changed("output-junit") || strings.TrimSpace(flags.OutputJUnit) != "" {
+		settings.OutputJUnit = strings.TrimSpace(flags.OutputJUnit)
+	}
+	if cmd.Flags().Changed("html") || strings.TrimSpace(flags.OutputHTML) != "" {
+		settings.OutputHTML = strings.TrimSpace(flags.OutputHTML)
+	}
 
 	if err := validateModeString(settings.Mode); err != nil {
 		return scanSettings{}, err
@@ -533,12 +550,29 @@ func resolveAPIKeyEnv(name string) (string, error) {
 	return value, nil
 }
 
+func applyOutputConfig(settings *scanSettings, cfg cliOutputConfig) {
+	file := strings.TrimSpace(cfg.File)
+	if file == "" {
+		return
+	}
+	switch strings.ToLower(strings.TrimSpace(cfg.Format)) {
+	case "json":
+		settings.OutputJSON = file
+	case "sarif":
+		settings.OutputSARIF = file
+	case "junit":
+		settings.OutputJUnit = file
+	case "html":
+		settings.OutputHTML = file
+	}
+}
+
 // scanLogger builds the structured logger for the scan pipeline. It writes
 // text to stderr at the level selected by --log-level (raised to ERROR when
 // --quiet is set). Sensitive values are never logged by the scanner.
-func scanLogger(quiet bool) *slog.Logger {
+func scanLogger(quiet bool, logLevel string) *slog.Logger {
 	level := slog.LevelInfo
-	switch strings.ToUpper(strings.TrimSpace(flagLogLevel)) {
+	switch strings.ToUpper(strings.TrimSpace(logLevel)) {
 	case "DEBUG":
 		level = slog.LevelDebug
 	case "WARN":
@@ -608,7 +642,7 @@ func runScanPipeline(ctx context.Context, settings scanSettings) (*domain.ScanRe
 		AllowInsecureHTTP: settings.InsecureHTTP,
 		RequireRemote:     settings.RequireRemote,
 
-		Logger: scanLogger(settings.Quiet),
+		Logger: scanLogger(settings.Quiet, settings.LogLevel),
 	}
 
 	reg := parser.NewRegistry()
@@ -662,6 +696,8 @@ func runSingleScan(ctx context.Context, settings scanSettings) (int, error) {
 		return exitCode, err
 	}
 
+	reportScanParseErrors(result, settings.Quiet)
+
 	if !settings.Quiet {
 		tw := scanner.NewTableWriter(settings.NoColor, failOn)
 		if err := tw.Write(os.Stdout, result); err != nil {
@@ -672,25 +708,19 @@ func runSingleScan(ctx context.Context, settings scanSettings) (int, error) {
 	if settings.OutputJSON != "" {
 		if err := writeJSONFile(settings.OutputJSON, result); err != nil {
 			fmt.Fprintf(os.Stderr, "error writing JSON output: %v\n", err)
-			if exitCode == ExitOK {
-				exitCode = ExitOperational
-			}
+			exitCode = ExitOperational
 		}
 	}
 
 	if settings.OutputSARIF != "" {
 		if err := ensureOutputDir(settings.OutputSARIF); err != nil {
 			fmt.Fprintf(os.Stderr, "error preparing SARIF output: %v\n", err)
-			if exitCode == ExitOK {
-				exitCode = ExitOperational
-			}
+			exitCode = ExitOperational
 		} else {
 			sw := scanner.NewSARIFWriter(version)
 			if err := sw.WriteFile(settings.OutputSARIF, result); err != nil {
 				fmt.Fprintf(os.Stderr, "error writing SARIF output: %v\n", err)
-				if exitCode == ExitOK {
-					exitCode = ExitOperational
-				}
+				exitCode = ExitOperational
 			}
 		}
 	}
@@ -698,16 +728,12 @@ func runSingleScan(ctx context.Context, settings scanSettings) (int, error) {
 	if settings.OutputJUnit != "" {
 		if err := ensureOutputDir(settings.OutputJUnit); err != nil {
 			fmt.Fprintf(os.Stderr, "error preparing JUnit output: %v\n", err)
-			if exitCode == ExitOK {
-				exitCode = ExitOperational
-			}
+			exitCode = ExitOperational
 		} else {
 			jw := scanner.NewJUnitWriter()
 			if err := jw.WriteFile(settings.OutputJUnit, result); err != nil {
 				fmt.Fprintf(os.Stderr, "error writing JUnit output: %v\n", err)
-				if exitCode == ExitOK {
-					exitCode = ExitOperational
-				}
+				exitCode = ExitOperational
 			}
 		}
 	}
@@ -715,18 +741,14 @@ func runSingleScan(ctx context.Context, settings scanSettings) (int, error) {
 	if settings.OutputHTML != "" {
 		if err := ensureOutputDir(settings.OutputHTML); err != nil {
 			fmt.Fprintf(os.Stderr, "error preparing HTML output: %v\n", err)
-			if exitCode == ExitOK {
-				exitCode = ExitOperational
-			}
+			exitCode = ExitOperational
 		} else {
 			hw := scanner.NewHTMLWriter(version)
 			if err := hw.WriteFile(settings.OutputHTML, settings.TargetName, failOn, result); err != nil {
 				fmt.Fprintf(os.Stderr, "error writing HTML output: %v\n", err)
-				if exitCode == ExitOK {
-					exitCode = ExitOperational
-				}
+				exitCode = ExitOperational
 			} else if !settings.Quiet {
-				fmt.Fprintf(os.Stdout, "HTML report written to: %s\n", settings.OutputHTML)
+				_, _ = fmt.Fprintf(os.Stdout, "HTML report written to: %s\n", settings.OutputHTML)
 			}
 		}
 	}
@@ -741,6 +763,15 @@ func runSingleScan(ctx context.Context, settings scanSettings) (int, error) {
 	}
 
 	return exitCode, nil
+}
+
+func reportScanParseErrors(result *domain.ScanResult, quiet bool) {
+	if quiet || result == nil {
+		return
+	}
+	for _, parseErr := range result.ParseErrors {
+		fmt.Fprintf(os.Stderr, "warning: parse error in %s\n", parseErr)
+	}
 }
 
 func writeJSONFile(path string, result *domain.ScanResult) error {

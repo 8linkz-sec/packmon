@@ -347,7 +347,7 @@ func TestScanCommandOutdatedRendersScopeRelationViaAndFlags(t *testing.T) {
 		}
 	}
 
-	data, err := os.ReadFile(htmlPath)
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
 	if err != nil {
 		t.Fatalf("read outdated HTML report: %v", err)
 	}

@@ -162,3 +162,30 @@ org.apache.commons:commons-lang3:3.14.0=compileClasspath
 		})
 	}
 }
+
+func TestGradleParserMarksTestConfigurationsAsDev(t *testing.T) {
+	t.Parallel()
+
+	input := `com.example:runtime:1.0.0=compileClasspath,runtimeClasspath
+com.example:test-helper:2.0.0=testRuntimeClasspath,testCompileClasspath
+com.example:both:3.0.0=testRuntimeClasspath
+com.example:both:3.0.0=runtimeClasspath
+`
+	pkgs, err := NewGradleParser().Parse(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	dev := make(map[string]bool, len(pkgs))
+	for _, pkg := range pkgs {
+		dev[pkg.Name] = pkg.Dev
+	}
+	if dev["com.example:runtime"] {
+		t.Fatalf("runtime dependency marked dev")
+	}
+	if !dev["com.example:test-helper"] {
+		t.Fatalf("test-helper not marked dev")
+	}
+	if dev["com.example:both"] {
+		t.Fatalf("package present in runtime and test configurations should be runtime")
+	}
+}

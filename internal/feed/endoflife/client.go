@@ -13,7 +13,7 @@ import (
 
 const (
 	defaultBaseURL   = "https://endoflife.date/api/v1"
-	defaultUserAgent = "packmon-server/dev"
+	defaultUserAgent = "packmon-server"
 	maxResponseSize  = 100 << 20
 )
 
@@ -23,6 +23,7 @@ var ErrHTTPStatus = errors.New("endoflife http status")
 // Client fetches lifecycle data from the endoflife.date v1 API.
 type Client struct {
 	BaseURL    string
+	UserAgent  string
 	HTTPClient *http.Client
 }
 
@@ -77,7 +78,7 @@ func (c *Client) FetchProductsFull(ctx context.Context, etag string) (ProductsRe
 		return ProductsResponse{}, "", false, err
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", defaultUserAgent)
+	req.Header.Set("User-Agent", c.userAgent())
 	if strings.TrimSpace(etag) != "" {
 		req.Header.Set("If-None-Match", etag)
 	}
@@ -127,4 +128,11 @@ func (c *Client) httpClient() *http.Client {
 		return c.HTTPClient
 	}
 	return &http.Client{Timeout: 30 * time.Second}
+}
+
+func (c *Client) userAgent() string {
+	if value := strings.TrimSpace(c.UserAgent); value != "" {
+		return value
+	}
+	return defaultUserAgent
 }

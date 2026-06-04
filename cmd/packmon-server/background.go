@@ -89,8 +89,10 @@ func (b *backgroundServices) ResetFeedConfig(ctx context.Context, feedName strin
 	if b == nil || b.cfg == nil {
 		return nil
 	}
-	defaultCfg := *b.cfg
-	defaultCfg.Feeds = b.defaultFeeds
+	defaultCfg := &config.Config{
+		Feeds:    b.defaultFeeds,
+		FeedSync: b.cfg.FeedSync,
+	}
 	settings, ok := defaultCfg.FeedSettings(feedName)
 	if !ok {
 		return nil
@@ -205,15 +207,16 @@ func newFeedManager(cfg *config.Config, store db.Store, logger *slog.Logger) *fe
 }
 
 func newFeedSyncer(name string, cfg *config.Config, store db.Store, logger *slog.Logger) feed.FeedSyncer {
+	feeds := cfg.FeedsSnapshot()
 	switch config.NormalizeFeedName(name) {
 	case "osv":
 		return osv.NewSyncer(store, logger)
 	case "ghsa":
-		return ghsa.NewSyncer(store, logger, cfg.Feeds.DataDir)
+		return ghsa.NewSyncer(store, logger, feeds.DataDir)
 	case "openssf":
-		return malicious.NewSyncer(store, logger, cfg.Feeds.DataDir)
+		return malicious.NewSyncer(store, logger, feeds.DataDir)
 	case "vulncheck":
-		return vulncheck.NewSyncer(cfg.Feeds.VulnCheckAPIKey, logger)
+		return vulncheck.NewSyncer(feeds.VulnCheckAPIKey, logger)
 	case "cisakev":
 		return cisakev.NewSyncer(logger)
 	case "epss":
@@ -221,25 +224,26 @@ func newFeedSyncer(name string, cfg *config.Config, store db.Store, logger *slog
 	case "nvd":
 		return newNVDSyncer(cfg, logger)
 	case "endoflife":
-		return endoflife.NewSyncer(logger, endoflife.WithBaseURL(cfg.Feeds.EndOfLifeBaseURL))
+		return endoflife.NewSyncer(logger, endoflife.WithBaseURL(feeds.EndOfLifeBaseURL))
 	default:
 		return nil
 	}
 }
 
 func newQueueProcessor(cfg *config.Config, store db.Store, logger *slog.Logger) *feed.QueueProcessor {
+	feeds := cfg.FeedsSnapshot()
 	workers := make([]feed.AsyncWorker, 0, 2)
-	if cfg.Feeds.SocketEnabled && cfg.Feeds.SocketMode == config.FeedModeSelf {
-		workers = append(workers, socket.NewWorker(store, cfg.Feeds.SocketAPIKey, logger))
+	if feeds.SocketEnabled && feeds.SocketMode == config.FeedModeSelf {
+		workers = append(workers, socket.NewWorker(store, feeds.SocketAPIKey, logger))
 	}
-	if cfg.Feeds.ReversingLabsEnabled && cfg.Feeds.ReversingLabsMode == config.FeedModeSelf {
+	if feeds.ReversingLabsEnabled && feeds.ReversingLabsMode == config.FeedModeSelf {
 		workers = append(workers, reversinglabs.NewWorker(
 			store,
-			cfg.Feeds.ReversingLabsAPIKey,
+			feeds.ReversingLabsAPIKey,
 			logger,
-			reversinglabs.WithBaseURL(cfg.Feeds.ReversingLabsBaseURL),
-			reversinglabs.WithLookupTTL(cfg.Feeds.ReversingLabsLookupTTL),
-			reversinglabs.WithBatchSize(cfg.Feeds.ReversingLabsBatchSize),
+			reversinglabs.WithBaseURL(feeds.ReversingLabsBaseURL),
+			reversinglabs.WithLookupTTL(feeds.ReversingLabsLookupTTL),
+			reversinglabs.WithBatchSize(feeds.ReversingLabsBatchSize),
 		))
 	}
 	if len(workers) == 0 {
@@ -249,9 +253,10 @@ func newQueueProcessor(cfg *config.Config, store db.Store, logger *slog.Logger) 
 }
 
 func newNVDSyncer(cfg *config.Config, logger *slog.Logger) *nvd.Syncer {
+	feeds := cfg.FeedsSnapshot()
 	var opts []nvd.Option
-	if cfg.Feeds.NVDAPIKey != "" {
-		opts = append(opts, nvd.WithAPIKey(cfg.Feeds.NVDAPIKey))
+	if feeds.NVDAPIKey != "" {
+		opts = append(opts, nvd.WithAPIKey(feeds.NVDAPIKey))
 	}
 	return nvd.NewSyncer(logger, opts...)
 }
@@ -263,6 +268,7 @@ var enrichmentFeeds = map[string]bool{
 	"cisakev":   true,
 	"epss":      true,
 	"nvd":       true,
+	"endoflife": true,
 }
 
 func feedPhaseForName(name string) feed.FeedPhase {

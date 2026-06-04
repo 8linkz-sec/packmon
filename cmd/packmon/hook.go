@@ -16,12 +16,16 @@ const hookMarker = "# packmon managed hook"
 var hookTypes = []string{"pre-push", "pre-commit"}
 
 // hookScript returns the shell script content for a packmon Git hook.
-func hookScript() string {
-	return `#!/bin/sh
+func hookScript(failOn string) string {
+	failOn = normalizeSeverityString(failOn)
+	if err := validateSeverityString(failOn); err != nil || failOn == "" {
+		failOn = "CRITICAL"
+	}
+	return fmt.Sprintf(`#!/bin/sh
 # packmon managed hook -- do not edit
 # To remove: packmon hook uninstall
-packmon scan . --fail-on CRITICAL --quiet
-`
+packmon scan . --fail-on %s --quiet
+`, failOn)
 }
 
 // findGitRoot walks up from dir looking for a .git directory.
@@ -78,9 +82,18 @@ func newHookInstallCmd() *cobra.Command {
 		Use:   "install",
 		Short: "Install packmon hook in current repo",
 		RunE: func(_ *cobra.Command, _ []string) error {
+			hookType, failOn, err := hookDefaultsFromConfig()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: cannot load hook configuration: %v\n", err)
+				os.Exit(ExitOperational)
+			}
+			if strings.TrimSpace(flagType) != "" {
+				hookType = strings.TrimSpace(flagType)
+			}
+
 			// Validate hook type.
-			if flagType != "pre-push" && flagType != "pre-commit" {
-				fmt.Fprintf(os.Stderr, "Error: unsupported hook type %q (use pre-push or pre-commit)\n", flagType)
+			if hookType != "pre-push" && hookType != "pre-commit" {
+				fmt.Fprintf(os.Stderr, "Error: unsupported hook type %q (use pre-push or pre-commit)\n", hookType)
 				os.Exit(ExitOperational)
 			}
 
@@ -97,12 +110,12 @@ func newHookInstallCmd() *cobra.Command {
 			}
 
 			hooksDir := filepath.Join(root, ".git", "hooks")
-			hookPath := filepath.Join(hooksDir, flagType)
+			hookPath := filepath.Join(hooksDir, hookType)
 
 			// Check if hook already exists.
 			if _, err := os.Stat(hookPath); err == nil {
 				if !isPackmonHook(hookPath) {
-					fmt.Fprintf(os.Stderr, "Warning: %s hook already exists and is not managed by packmon.\n", flagType)
+					fmt.Fprintf(os.Stderr, "Warning: %s hook already exists and is not managed by packmon.\n", hookType)
 					fmt.Fprintf(os.Stderr, "Remove it manually or back it up before installing the packmon hook.\n")
 					fmt.Fprintf(os.Stderr, "Path: %s\n", hookPath)
 					os.Exit(ExitOperational)
@@ -118,19 +131,40 @@ func newHookInstallCmd() *cobra.Command {
 
 			//nolint:gosec // hooks must be executable for Git to run them.
 			// #nosec G306 -- hooks must be executable for Git to run them.
-			if err := os.WriteFile(hookPath, []byte(hookScript()), 0o755); err != nil {
+			if err := os.WriteFile(hookPath, []byte(hookScript(failOn)), 0o755); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: cannot write hook file: %v\n", err)
 				os.Exit(ExitOperational)
 			}
 
-			fmt.Printf("Installed packmon %s hook in %s\n", flagType, hookPath)
+			fmt.Printf("Installed packmon %s hook in %s\n", hookType, hookPath)
 			return nil
 		},
 	}
 
-	cmd.Flags().StringVar(&flagType, "type", "pre-push", "hook type (pre-push|pre-commit)")
+	cmd.Flags().StringVar(&flagType, "type", "", "hook type (pre-push|pre-commit; default: config hook.type or pre-push)")
 
 	return cmd
+}
+
+func hookDefaultsFromConfig() (hookType, failOn string, err error) {
+	hookType = "pre-push"
+	failOn = "CRITICAL"
+	cfg, _, err := loadCurrentCLIConfig()
+	if err != nil {
+		return "", "", err
+	}
+	if cfg == nil {
+		return hookType, failOn, nil
+	}
+	if cfg.Hook.Type != "" {
+		hookType = cfg.Hook.Type
+	}
+	if cfg.Hook.FailOn != "" {
+		failOn = cfg.Hook.FailOn
+	} else if cfg.FailOn != "" {
+		failOn = cfg.FailOn
+	}
+	return hookType, failOn, nil
 }
 
 func newHookUninstallCmd() *cobra.Command {

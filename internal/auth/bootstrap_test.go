@@ -18,6 +18,7 @@ type bootstrapStoreStub struct {
 	upsertErr error
 	upserts   int
 	audits    int
+	lastAudit *db.AdminAuditEntry
 }
 
 func (s *bootstrapStoreStub) GetAdminAuth(context.Context) (*db.AdminAuth, error) {
@@ -36,8 +37,12 @@ func (s *bootstrapStoreStub) UpsertAdminAuth(_ context.Context, passwordHash str
 	return nil
 }
 
-func (s *bootstrapStoreStub) InsertAdminAuditLog(context.Context, *db.AdminAuditEntry) error {
+func (s *bootstrapStoreStub) InsertAdminAuditLog(_ context.Context, entry *db.AdminAuditEntry) error {
 	s.audits++
+	if entry != nil {
+		copyEntry := *entry
+		s.lastAudit = &copyEntry
+	}
 	return nil
 }
 
@@ -68,6 +73,9 @@ func TestBootstrapAdminBranches(t *testing.T) {
 	}
 	if created.upserts != 1 || created.audits != 1 || created.auth == nil || !created.auth.PasswordIsBootstrap {
 		t.Fatalf("created store = %+v", created)
+	}
+	if created.lastAudit == nil || created.lastAudit.IP != "system" {
+		t.Fatalf("bootstrap audit = %+v, want system IP marker", created.lastAudit)
 	}
 	if !CheckPassword(created.auth.PasswordHash, "initial-password") {
 		t.Fatal("created password hash does not validate")

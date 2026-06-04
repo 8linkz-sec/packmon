@@ -112,8 +112,9 @@ func TestCheckPackageStoresSecurityIssuesAndStatus(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
+			"package":{"name":"left-pad","version":"1.0.1"},
 			"issues":[
-				{"type":"malware","severity":"high","title":"Malware detected","description":"exfiltrates tokens"},
+				{"type":"malware","severity":"high","title":"Malware detected","description":"exfiltrates tokens","version":"1.0.0","affectedVersions":["1.0.1"]},
 				{"type":"maintenance","severity":"low","title":"not security relevant"}
 			]
 		}`))
@@ -136,6 +137,13 @@ func TestCheckPackageStoresSecurityIssuesAndStatus(t *testing.T) {
 	finding := store.findings[0]
 	if finding.ID != "socket:npm/left-pad:malware" || finding.RiskType != "malware" || finding.Severity != "HIGH" {
 		t.Fatalf("finding = %+v", finding)
+	}
+	var versions []string
+	if err := json.Unmarshal(finding.Versions, &versions); err != nil {
+		t.Fatalf("versions JSON: %v", err)
+	}
+	if len(versions) != 2 || versions[0] != "1.0.0" || versions[1] != "1.0.1" {
+		t.Fatalf("versions = %#v, want 1.0.0 and 1.0.1", versions)
 	}
 	var refs []string
 	if err := json.Unmarshal(finding.ReferenceURLs, &refs); err != nil {
@@ -363,6 +371,20 @@ func TestRefillTokensAccumulatesFractionalTokens(t *testing.T) {
 	}
 	if worker.tokens != 0 {
 		t.Fatalf("tokens after acquire = %d, want 0", worker.tokens)
+	}
+}
+
+func TestDrainTokensClearsFractionalTokens(t *testing.T) {
+	t.Parallel()
+
+	worker := NewWorker(&socketTestStore{}, "socket-secret", nil, WithRateLimit(60))
+	worker.tokens = 3
+	worker.fractionalTokens = 0.75
+
+	worker.drainTokens()
+
+	if worker.tokens != 0 || worker.fractionalTokens != 0 {
+		t.Fatalf("drained tokens = %d fractional %.2f, want 0/0", worker.tokens, worker.fractionalTokens)
 	}
 }
 
