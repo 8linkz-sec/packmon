@@ -41,8 +41,38 @@ func TestFindGitRootAndIsPackmonHook(t *testing.T) {
 	}
 }
 
+func tempDirOutsideGit(t *testing.T) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	root := findGitRoot(dir)
+	if root == "" {
+		return dir
+	}
+
+	parent := filepath.Dir(root)
+	if parent == root {
+		t.Fatalf("cannot create temp directory outside git root %q", root)
+	}
+
+	outside, err := os.MkdirTemp(parent, "packmon-outside-git-*")
+	if err != nil {
+		t.Fatalf("create temp directory outside git root %q: %v", root, err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(outside); err != nil {
+			t.Errorf("remove temp directory outside git root %q: %v", outside, err)
+		}
+	})
+
+	if found := findGitRoot(outside); found != "" {
+		t.Fatalf("temp directory %q is still inside git repository %q", outside, found)
+	}
+	return outside
+}
+
 func TestHookStatusOutsideGitRepository(t *testing.T) {
-	t.Chdir(t.TempDir())
+	t.Chdir(tempDirOutsideGit(t))
 
 	cmd := newHookStatusCmd()
 	output := captureStdout(t, func() {
@@ -163,7 +193,7 @@ func TestHookInstallUpdatesExistingPackmonHook(t *testing.T) {
 }
 
 func TestHookInstallAndUninstallOutsideGitRepository(t *testing.T) {
-	t.Chdir(t.TempDir())
+	t.Chdir(tempDirOutsideGit(t))
 
 	for _, cmd := range []*cobra.Command{newHookInstallCmd(), newHookUninstallCmd()} {
 		output := captureStdout(t, func() {
