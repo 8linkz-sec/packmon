@@ -6,7 +6,7 @@ toolchain go1.26.4
 
 require (
 	github.com/BurntSushi/toml v1.6.0
-	github.com/jackc/pgx/v5 v5.9.2
+	github.com/jackc/pgx/v5 v5.10.0
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/crypto v0.52.0
 	golang.org/x/mod v0.35.0
