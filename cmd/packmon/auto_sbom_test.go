@@ -162,6 +162,34 @@ func TestRunAutoSBOMCommandAppendsGeneratedSBOMs(t *testing.T) {
 	}
 }
 
+func TestRunAutoSBOMCommandUsesDefaultDeps(t *testing.T) {
+	root := t.TempDir()
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+
+	originalDeps := defaultAutoSBOMDeps
+	t.Cleanup(func() { defaultAutoSBOMDeps = originalDeps })
+
+	scanCalled := false
+	defaultAutoSBOMDeps = autoSBOMDeps{
+		loadConfig: func() (*cliConfig, string, error) { return nil, "", nil },
+		generate: func(context.Context, sbomgen.Config) (sbomgen.Result, error) {
+			return sbomgen.Result{SBOMPaths: []string{"generated.cdx.json"}}, nil
+		},
+		scan: func(context.Context, scanSettings) (int, error) {
+			scanCalled = true
+			return ExitOK, nil
+		},
+	}
+
+	if err := runAutoSBOMCommand(cmd, []string{root}, scanFlagValues{Quiet: true}, autoSBOMFlags{Enabled: true}); err != nil {
+		t.Fatalf("runAutoSBOMCommand() error = %v", err)
+	}
+	if !scanCalled {
+		t.Fatal("runAutoSBOMCommand() did not use the configured default scan dependency")
+	}
+}
+
 func TestScanCommandRejectsAutoSBOMListModes(t *testing.T) {
 	cmd := newScanCmd()
 	cmd.SilenceErrors = true
