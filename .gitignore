@@ -21,6 +21,8 @@ node_modules/
 /packmon.exe
 /packmon-server
 /packmon-server.exe
+/.build/
+/.builds/
 /dist/
 
 # Go
