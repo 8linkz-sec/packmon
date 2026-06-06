@@ -326,6 +326,62 @@ func TestManagerStartIsIdempotentAndPropagatesAfterPhaseOne(t *testing.T) {
 	}
 }
 
+func TestManagerStartMarksInterruptedRunningStatusBeforeRestartingFeed(t *testing.T) {
+	t.Parallel()
+
+	started := time.Now().UTC().Add(-3 * time.Hour)
+	store := &managerStoreStub{
+		status: &db.FeedSyncStatus{
+			FeedName:       "nvd",
+			LastSyncStatus: "running",
+			LastSyncAt:     &started,
+			EntriesSynced:  70,
+			EntriesTotal:   96,
+			LastEtag:       "etag-old",
+			LastCommitHash: "commit-old",
+			Metadata:       []byte(`{"cursor":"old"}`),
+		},
+	}
+	manager := NewManager(store, slog.New(slog.NewTextHandler(io.Discard, nil)), time.Hour)
+	syncer := &blockingSyncerStub{name: "nvd", entered: make(chan struct{}, 1), release: make(chan struct{})}
+	manager.Register(FeedConfig{Syncer: syncer, Enabled: true, Mode: FeedModeSelf})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	manager.Start(ctx)
+
+	select {
+	case <-syncer.entered:
+	case <-time.After(time.Second):
+		t.Fatal("feed sync did not start")
+	}
+	close(syncer.release)
+	cancel()
+	manager.Wait()
+
+	if len(store.statuses) == 0 {
+		t.Fatal("no feed status was recorded")
+	}
+	recovered := store.statuses[0]
+	if recovered.LastSyncStatus != "error" {
+		t.Fatalf("first recorded status = %q, want error for interrupted running sync", recovered.LastSyncStatus)
+	}
+	if recovered.LastError != "previous feed sync was interrupted before completion" {
+		t.Fatalf("LastError = %q, want interrupted sync message", recovered.LastError)
+	}
+	if recovered.LastSyncAt == nil || !recovered.LastSyncAt.Equal(started) {
+		t.Fatalf("LastSyncAt = %v, want original start time %v", recovered.LastSyncAt, started)
+	}
+	if recovered.LastSyncDuration == nil || *recovered.LastSyncDuration < 3*time.Hour {
+		t.Fatalf("LastSyncDuration = %v, want elapsed interrupted duration", recovered.LastSyncDuration)
+	}
+	if recovered.EntriesSynced != 70 || recovered.EntriesTotal != 96 {
+		t.Fatalf("entries = %d/%d, want preserved 70/96", recovered.EntriesSynced, recovered.EntriesTotal)
+	}
+	if recovered.LastEtag != "etag-old" || recovered.LastCommitHash != "commit-old" || string(recovered.Metadata) != `{"cursor":"old"}` {
+		t.Fatalf("sync metadata was not preserved: %+v", recovered)
+	}
+}
+
 func TestManagerRunSyncBranches(t *testing.T) {
 	t.Parallel()
 

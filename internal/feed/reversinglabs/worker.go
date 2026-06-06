@@ -279,7 +279,7 @@ type searchPackageData struct {
 	Assessments     searchAssessments           `json:"assessments"`
 	Classifications []searchClassification      `json:"classifications"`
 	Dependencies    map[string]searchDependency `json:"dependencies"`
-	Incidents       map[string]searchIncident   `json:"incidents"`
+	Incidents       searchIncidents             `json:"incidents"`
 }
 
 type searchIdentity struct {
@@ -310,6 +310,32 @@ type searchDependency struct {
 type searchIncident struct {
 	Type  string `json:"type"`
 	Count int    `json:"-"`
+}
+
+type searchIncidents map[string]searchIncident
+
+func (i *searchIncidents) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || bytes.Equal(data, []byte("null")) {
+		return nil
+	}
+	if data[0] == '{' {
+		var incidents map[string]searchIncident
+		if err := json.Unmarshal(data, &incidents); err != nil {
+			return err
+		}
+		*i = incidents
+		return nil
+	}
+	if data[0] == '-' || (data[0] >= '0' && data[0] <= '9') {
+		var count float64
+		if err := json.Unmarshal(data, &count); err != nil {
+			return err
+		}
+		*i = nil
+		return nil
+	}
+	return fmt.Errorf("unexpected incidents value %q", string(data))
 }
 
 func (i *searchIncident) UnmarshalJSON(data []byte) error {

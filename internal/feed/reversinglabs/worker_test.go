@@ -241,6 +241,35 @@ func TestLookupBatchToleratesNumericIncidentValues(t *testing.T) {
 	}
 }
 
+func TestLookupBatchToleratesNumericIncidentsField(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"community": {
+				"packages": [
+					{"uuid":"npm:cssesc@3.0.0","package":{"identity":{"removed":false},"incidents":0}}
+				]
+			}
+		}`))
+	}))
+	defer server.Close()
+
+	w := newWorker(&fakeStore{}, "token", slog.Default(), WithBaseURL(server.URL), WithLookupTTL(24*time.Hour))
+	results, err := w.lookupBatch(context.Background(), []db.PackageReputation{
+		{Ecosystem: "npm", Name: "cssesc", Version: "3.0.0", Source: FeedName, Status: "pending"},
+	})
+	if err != nil {
+		t.Fatalf("lookupBatch() error = %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("results = %d, want 1", len(results))
+	}
+	if results[0].Status != "clean" {
+		t.Fatalf("status = %q, want clean", results[0].Status)
+	}
+}
+
 func TestLookupBatchMapsPackageErrorToNotFound(t *testing.T) {
 	t.Parallel()
 

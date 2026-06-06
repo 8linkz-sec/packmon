@@ -20,6 +20,8 @@ var backoffSchedule = [3]time.Duration{
 	5 * time.Minute,
 }
 
+const interruptedFeedSyncError = "previous feed sync was interrupted before completion"
+
 // Manager orchestrates all registered feed syncers. It runs background
 // goroutines that invoke each syncer on a configurable interval, records
 // sync status in the database, and shuts down gracefully when the
@@ -226,12 +228,13 @@ func (m *Manager) startFeedLocked(rf *registeredFeed, interval time.Duration, in
 	// #nosec G118 -- cancel is stored on the registered feed and called by ApplyConfig/Stop.
 	feedCtx, cancel := context.WithCancel(m.ctx)
 	rf.cancel = cancel
+	name := rf.config.Syncer.Name()
 
 	if waitForPhase1 {
 		phaseDone := m.phase1Done
-		name := rf.config.Syncer.Name()
 		m.wg.Add(1)
 		go func() {
+			m.recoverInterruptedRunningStatus(name)
 			select {
 			case <-phaseDone:
 				m.logger.Info("phase 1 complete, starting enrichment feed", slog.String("feed", name))
@@ -309,6 +312,8 @@ func (m *Manager) loop(ctx context.Context, rf *registeredFeed, interval time.Du
 
 	name := rf.config.Syncer.Name()
 	log := m.logger.With(slog.String("feed", name))
+
+	m.recoverInterruptedRunningStatus(name)
 
 	log.Info("starting feed sync loop",
 		slog.String("interval", interval.String()),
@@ -477,6 +482,45 @@ func (m *Manager) recordStatus(ctx context.Context, feedName, status, errMsg str
 			slog.String("error", err.Error()),
 		)
 	}
+}
+
+func (m *Manager) recoverInterruptedRunningStatus(feedName string) {
+	recordCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	status, err := m.store.GetFeedSyncStatus(recordCtx, feedName)
+	if err != nil {
+		m.logger.Warn("failed to load feed sync status for interrupted sync recovery",
+			slog.String("feed", feedName),
+			slog.String("error", err.Error()),
+		)
+		return
+	}
+	if status == nil || status.LastSyncStatus != "running" {
+		return
+	}
+
+	status.LastSyncStatus = "error"
+	status.LastError = interruptedFeedSyncError
+	if status.LastSyncAt != nil {
+		duration := time.Since(*status.LastSyncAt)
+		if duration < 0 {
+			duration = 0
+		}
+		status.LastSyncDuration = &duration
+	}
+
+	if err := m.store.UpsertFeedSyncStatus(recordCtx, status); err != nil {
+		m.logger.Warn("failed to recover interrupted feed sync status",
+			slog.String("feed", feedName),
+			slog.String("error", err.Error()),
+		)
+		return
+	}
+
+	m.logger.Warn("recovered interrupted feed sync status",
+		slog.String("feed", feedName),
+	)
 }
 
 func (m *Manager) recordRunningStatus(ctx context.Context, feedName string) {
