@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -187,6 +188,65 @@ func TestRunAutoSBOMCommandUsesDefaultDeps(t *testing.T) {
 	}
 	if !scanCalled {
 		t.Fatal("runAutoSBOMCommand() did not use the configured default scan dependency")
+	}
+}
+
+func TestRunAutoSBOMCommandWithDepsErrorBranches(t *testing.T) {
+	root := t.TempDir()
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+
+	loadErr := errors.New("config failed")
+	err := runAutoSBOMCommandWithDeps(cmd, []string{root}, scanFlagValues{}, autoSBOMFlags{Enabled: true}, autoSBOMDeps{
+		loadConfig: func() (*cliConfig, string, error) { return nil, "", loadErr },
+	})
+	if !errors.Is(err, loadErr) {
+		t.Fatalf("load config error = %v, want wrapped config error", err)
+	}
+
+	cfg := &cliConfig{
+		Repos: []cliRepoConfig{
+			{Name: "one", Path: filepath.Join(root, "one")},
+			{Name: "two", Path: filepath.Join(root, "two")},
+		},
+	}
+	err = runAutoSBOMCommandWithDeps(cmd, nil, scanFlagValues{All: true}, autoSBOMFlags{Enabled: true}, autoSBOMDeps{
+		loadConfig: func() (*cliConfig, string, error) { return cfg, "", nil },
+	})
+	if err == nil || !strings.Contains(err.Error(), "exactly one target") {
+		t.Fatalf("multi-target error = %v, want exactly one target", err)
+	}
+
+	err = runAutoSBOMCommandWithDeps(cmd, []string{root}, scanFlagValues{}, autoSBOMFlags{Enabled: true, SBOMOnly: true}, autoSBOMDeps{
+		loadConfig: func() (*cliConfig, string, error) {
+			return &cliConfig{Output: cliOutputConfig{Format: "json", File: "scan.json"}}, "", nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "report outputs") {
+		t.Fatalf("sbom-only output error = %v, want report outputs", err)
+	}
+
+	generateErr := errors.New("generator failed")
+	err = runAutoSBOMCommandWithDeps(cmd, []string{root}, scanFlagValues{}, autoSBOMFlags{Enabled: true}, autoSBOMDeps{
+		loadConfig: func() (*cliConfig, string, error) { return nil, "", nil },
+		generate:   func(context.Context, sbomgen.Config) (sbomgen.Result, error) { return sbomgen.Result{}, generateErr },
+	})
+	if !errors.Is(err, generateErr) {
+		t.Fatalf("generate error = %v, want wrapped generator error", err)
+	}
+
+	scanErr := errors.New("scan failed")
+	err = runAutoSBOMCommandWithDeps(cmd, []string{root}, scanFlagValues{}, autoSBOMFlags{Enabled: true}, autoSBOMDeps{
+		loadConfig: func() (*cliConfig, string, error) { return nil, "", nil },
+		generate: func(context.Context, sbomgen.Config) (sbomgen.Result, error) {
+			return sbomgen.Result{SBOMPaths: []string{"generated.cdx.json"}}, nil
+		},
+		scan: func(context.Context, scanSettings) (int, error) {
+			return ExitOperational, scanErr
+		},
+	})
+	if !errors.Is(err, scanErr) {
+		t.Fatalf("scan error = %v, want wrapped scan error", err)
 	}
 }
 
