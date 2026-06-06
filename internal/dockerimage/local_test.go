@@ -3,6 +3,7 @@ package dockerimage
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 )
@@ -32,6 +33,18 @@ func TestLocalInspectorDegradesWhenDockerUnavailable(t *testing.T) {
 	got := inspector.Digests(context.Background(), []Ref{ref})
 	if len(got) != 0 {
 		t.Fatalf("digests = %#v, want empty when docker is unavailable", got)
+	}
+}
+
+func TestExecRunnerRunUsesProvidedExecutable(t *testing.T) {
+	t.Parallel()
+
+	out, err := (execRunner{}).Run(context.Background(), os.Args[0], "-test.run=^$")
+	if err != nil {
+		t.Fatalf("execRunner.Run(test binary) error = %v", err)
+	}
+	if strings.Contains(string(out), "FAIL") {
+		t.Fatalf("execRunner.Run(test binary) output contains FAIL: %s", out)
 	}
 }
 

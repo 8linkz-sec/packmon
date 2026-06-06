@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/8linkz/packmon/internal/domain"
 )
 
 func TestLoadCLIConfigNormalizesRepoPaths(t *testing.T) {
@@ -282,5 +284,71 @@ func TestBuildScanTargets(t *testing.T) {
 	}
 	if len(targets) != 1 || targets[0].Name != "backend" {
 		t.Fatalf("unexpected named target result: %+v", targets)
+	}
+}
+
+func TestCLIConfigHelperBranches(t *testing.T) {
+	t.Parallel()
+
+	outputCases := []struct {
+		name string
+		cfg  cliOutputConfig
+		want string
+	}{
+		{"invalid format", cliOutputConfig{Format: "xml"}, "invalid output.format"},
+		{"file without format", cliOutputConfig{File: "scan.json"}, "output.format is required"},
+		{"table file", cliOutputConfig{Format: "table", File: "scan.txt"}, "does not support"},
+	}
+	for _, tt := range outputCases {
+		if err := validateOutputConfig(tt.cfg); err == nil || !strings.Contains(err.Error(), tt.want) {
+			t.Fatalf("validateOutputConfig(%s) = %v, want %q", tt.name, err, tt.want)
+		}
+	}
+	if err := validateOutputConfig(cliOutputConfig{Format: "html", File: "scan.html"}); err != nil {
+		t.Fatalf("validateOutputConfig(html file) error = %v", err)
+	}
+
+	logCases := []struct {
+		name string
+		cfg  cliLogConfig
+		want string
+	}{
+		{"invalid level", cliLogConfig{Level: "TRACE"}, "invalid log.level"},
+		{"invalid format", cliLogConfig{Format: "xml"}, "invalid log.format"},
+		{"file unsupported", cliLogConfig{File: "packmon.log"}, "not supported"},
+	}
+	for _, tt := range logCases {
+		if err := validateLogConfig(tt.cfg); err == nil || !strings.Contains(err.Error(), tt.want) {
+			t.Fatalf("validateLogConfig(%s) = %v, want %q", tt.name, err, tt.want)
+		}
+	}
+
+	if got := normalizeLogLevel(" warn "); got != "WARN" {
+		t.Fatalf("normalizeLogLevel() = %q, want WARN", got)
+	}
+	if got := boolValue(nil, true); !got {
+		t.Fatal("boolValue(nil,true) = false")
+	}
+	no := false
+	if got := boolValue(&no, true); got {
+		t.Fatal("boolValue(false,true) = true")
+	}
+	if got := defaultFailSeverity(); got != domain.SeverityCritical {
+		t.Fatalf("defaultFailSeverity() = %s", got)
+	}
+	for input, want := range map[string]string{
+		"":       "(not set)",
+		"abcd":   "****",
+		"secret": "se**et",
+	} {
+		if got := maskSecret(input); got != want {
+			t.Fatalf("maskSecret(%q) = %q, want %q", input, got, want)
+		}
+	}
+	if timeout, err := parseTimeoutSeconds("45s"); err != nil || timeout != 45 {
+		t.Fatalf("parseTimeoutSeconds(45s) = %d, %v", timeout, err)
+	}
+	if _, err := parseTimeoutSeconds("bad"); err == nil || !strings.Contains(err.Error(), "invalid timeout") {
+		t.Fatalf("parseTimeoutSeconds(bad) error = %v", err)
 	}
 }

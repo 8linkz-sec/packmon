@@ -154,6 +154,15 @@ Important behavior:
 - SBOM input contributes package coordinates only. Embedded SBOM
   vulnerability, VEX, license, and provenance assertions are not used as
   authoritative Packmon findings.
+- `--auto-sbom` detects Go, npm, PyPI, and Maven manifests, invokes the
+  matching CycloneDX generator, validates CycloneDX JSON output, and appends
+  the generated SBOM files to the normal scan input. `--sbom-only` generates
+  SBOM files without running a scan; `--keep-sbom <dir>` keeps generated files;
+  `--install-tools` may install missing pinned generator tools. Pinned
+  generator versions are `cyclonedx-gomod` v1.10.0, `cyclonedx-npm` 4.2.1,
+  `cyclonedx-bom` 7.3.0, and `cyclonedx-maven-plugin` 2.9.1. Generation runs
+  local external toolchains and may cause those toolchains to contact package
+  registries.
 - config precedence is flags, environment, project `.packmon.yaml`, user-global
   `~/.packmon/config/packmon.yaml`, defaults.
 - local history is stored compactly in SQLite for report/dashboard features.

@@ -838,3 +838,89 @@ func TestListAllHTMLRendersScopeSummaryAndFindingMetadata(t *testing.T) {
 		t.Fatalf("HTML finding row missing package provenance:\n%s", out)
 	}
 }
+
+func TestListAllHelperBranches(t *testing.T) {
+	if !listAllAllowsEcosystem(nil, domain.EcosystemDocker) {
+		t.Fatal("empty ecosystem filter should allow docker")
+	}
+	if !listAllAllowsEcosystem([]string{" NPM ", " docker "}, domain.EcosystemDocker) {
+		t.Fatal("docker filter with whitespace should allow docker")
+	}
+	if listAllAllowsEcosystem([]string{"npm"}, domain.EcosystemDocker) {
+		t.Fatal("npm-only filter should not allow docker")
+	}
+
+	local := resolveListAllLatest(context.Background(), listAllPackage{
+		Ecosystem: domain.EcosystemDocker,
+		Name:      "local/image",
+		Version:   "latest",
+	})
+	if !local.Unknown || local.Update != "unknown" {
+		t.Fatalf("local docker status = %+v, want unknown", local)
+	}
+	invalidDocker := resolveListAllLatest(context.Background(), listAllPackage{
+		Ecosystem: domain.EcosystemDocker,
+		Name:      "bad ref",
+		Version:   "latest",
+	})
+	if !invalidDocker.Unknown {
+		t.Fatalf("invalid docker status = %+v, want unknown", invalidDocker)
+	}
+
+	ref, ok := dockerRefFromListAllPackage(listAllPackage{Name: "docker.io/library/postgres", Version: "sha256:abcdef"})
+	if !ok || ref.Name != "docker.io/library/postgres" || ref.Reference != "sha256:abcdef" {
+		t.Fatalf("docker ref = %+v/%v", ref, ok)
+	}
+	if got := shortDigest("sha256:1234567890abcdef"); got != "sha256:1234567890ab" {
+		t.Fatalf("shortDigest = %q", got)
+	}
+	if got := shortDigest("not-a-digest"); got != "not-a-digest" {
+		t.Fatalf("shortDigest(non digest) = %q", got)
+	}
+
+	summary := listAllScopeSummaries(listAllPackageReport{Rows: []listAllRow{
+		{Scope: "custom"},
+		{Scope: "runtime"},
+		{Scope: ""},
+	}})
+	if len(summary) != 2 || summary[0].Scope != "runtime" || summary[1].Scope != "custom" {
+		t.Fatalf("scope summary = %+v", summary)
+	}
+	for _, raw := range []string{"", "healthy", "degraded"} {
+		if got := listAllOperationalStatus(raw); got != "" {
+			t.Fatalf("operational status %q = %q, want empty", raw, got)
+		}
+	}
+	if got := listAllOperationalStatus("parser_error"); got != "parser_error" {
+		t.Fatalf("operational status parser_error = %q", got)
+	}
+	for _, tt := range []struct {
+		f    domain.Finding
+		want string
+	}{
+		{f: domain.Finding{AdvisoryID: "GHSA-x"}, want: "GHSA-x"},
+		{f: domain.Finding{Type: domain.FindingTypeMalicious}, want: "MALWARE"},
+		{f: domain.Finding{Type: domain.FindingTypeSupplyChainRisk}, want: "SUPPLY-CHAIN"},
+		{f: domain.Finding{Type: domain.FindingTypeLifecycle}, want: "LIFECYCLE"},
+		{f: domain.Finding{Type: domain.FindingTypeVulnerability}, want: ""},
+	} {
+		if got := listAllAdvisoryLabel(tt.f); got != tt.want {
+			t.Fatalf("listAllAdvisoryLabel(%+v) = %q, want %q", tt.f, got, tt.want)
+		}
+	}
+	if !listAllFindingBlocks(domain.Finding{Type: domain.FindingTypeMalicious}, domain.SeverityNone) {
+		t.Fatal("malicious finding should always block")
+	}
+	if listAllFindingBlocks(domain.Finding{Type: domain.FindingTypeVulnerability, Severity: domain.SeverityCritical}, domain.SeverityNone) {
+		t.Fatal("vulnerability should not block when fail-on NONE")
+	}
+
+	parentFile := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(parentFile, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write parent file: %v", err)
+	}
+	err := writeListAllHTML(filepath.Join(parentFile, "report.html"), "", domain.SeverityCritical, &domain.ScanResult{}, listAllPackageReport{})
+	if err == nil || !strings.Contains(err.Error(), "prepare HTML output") {
+		t.Fatalf("writeListAllHTML(parent file) = %v", err)
+	}
+}

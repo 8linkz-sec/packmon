@@ -533,3 +533,12 @@ func TestFetchCVSSErrorBranchesAndRetryHelpers(t *testing.T) {
 		t.Fatalf("waitForRetry(canceled) error = %v", err)
 	}
 }
+
+func TestRateLimitErrorString(t *testing.T) {
+	t.Parallel()
+
+	err := (&rateLimitError{status: http.StatusTooManyRequests, retryAfter: time.Second}).Error()
+	if !strings.Contains(err, "HTTP 429") || !strings.Contains(err, "1s") {
+		t.Fatalf("rateLimitError.Error() = %q", err)
+	}
+}

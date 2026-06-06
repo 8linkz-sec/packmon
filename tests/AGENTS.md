@@ -22,7 +22,7 @@ Read `AGENTS.md` (root) first for the full command list and verification gate.
 
 ## Test-strategy reminders (DESIGN.md sec 8)
 
-- Coverage targets: overall >= 80%, parsers >= 90%, API handlers >= 85%, DB layer
+- Coverage targets: overall >= 90%, parsers >= 90%, API handlers >= 90%, DB layer
   >= 80%, new code per PR >= 80%.
 - For every security-sensitive or bug fix, add a regression test that FAILS
   before the fix.

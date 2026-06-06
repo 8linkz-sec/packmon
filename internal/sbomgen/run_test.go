@@ -1,0 +1,247 @@
+package sbomgen
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+type fakeGenerator struct {
+	ecosystem      string
+	tool           string
+	install        InstallSpec
+	declares       bool
+	declaresErr    error
+	generateErr    error
+	generateOutput string
+	generateCalls  int
+}
+
+func (g *fakeGenerator) Ecosystem() string { return g.ecosystem }
+func (g *fakeGenerator) Tool() string      { return g.tool }
+func (g *fakeGenerator) InstallSpec() InstallSpec {
+	return g.install
+}
+
+func (g *fakeGenerator) Generate(_ context.Context, _ Detection, outPath string, _ GenerateOptions, _ RunnerFunc) error {
+	g.generateCalls++
+	if g.generateErr != nil {
+		return g.generateErr
+	}
+	content := g.generateOutput
+	if content == "" {
+		content = validCycloneDXWithPackage()
+	}
+	return os.WriteFile(outPath, []byte(content), 0o600)
+}
+
+func (g *fakeGenerator) DeclaresDependencies(Detection, GenerateOptions) (bool, error) {
+	return g.declares, g.declaresErr
+}
+
+func validCycloneDXWithPackage() string {
+	return `{"bomFormat":"CycloneDX","specVersion":"1.6","version":1,"components":[{"type":"library","name":"left-pad","version":"1.3.0","purl":"pkg:npm/left-pad@1.3.0"}]}`
+}
+
+func validCycloneDXNoPackages() string {
+	return `{"bomFormat":"CycloneDX","specVersion":"1.6","version":1,"components":[]}`
+}
+
+func TestRunRequiresAtLeastOneDetectedEcosystem(t *testing.T) {
+	root := t.TempDir()
+	_, err := Run(context.Background(), Config{Target: root, Logger: slog.Default()})
+	if err == nil || !strings.Contains(err.Error(), "no supported manifests") {
+		t.Fatalf("Run err = %v, want no supported manifests", err)
+	}
+}
+
+func TestRunMissingToolSuggestsInstallTools(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "package.json", `{"dependencies":{"left-pad":"1.3.0"}}`)
+	gen := &fakeGenerator{ecosystem: "npm", tool: "cyclonedx-npm", install: InstallSpec{CanAutoInstall: true}}
+	_, err := Run(context.Background(), Config{
+		Target:   root,
+		Registry: map[string]Generator{"npm": gen},
+		LookPath: func(string) (string, error) { return "", errors.New("missing") },
+		Logger:   slog.Default(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "--install-tools") {
+		t.Fatalf("Run err = %v, want --install-tools hint", err)
+	}
+}
+
+func TestRunInstallsMissingToolThenGenerates(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "package.json", `{"dependencies":{"left-pad":"1.3.0"}}`)
+	gen := &fakeGenerator{
+		ecosystem: "npm",
+		tool:      "cyclonedx-npm",
+		install: InstallSpec{
+			Package:        "@cyclonedx/cyclonedx-npm",
+			Source:         "npm registry",
+			Args:           []string{"npm", "install", "--global", "@cyclonedx/cyclonedx-npm@" + npmGeneratorVersion},
+			CanAutoInstall: true,
+		},
+		declares: true,
+	}
+	var lookups []string
+	var runs []RunOptions
+	result, err := Run(context.Background(), Config{
+		Target:       root,
+		InstallTools: true,
+		Registry:     map[string]Generator{"npm": gen},
+		LookPath: func(name string) (string, error) {
+			lookups = append(lookups, name)
+			if name == "npm" || len(lookups) > 2 {
+				return "found", nil
+			}
+			return "", errors.New("missing")
+		},
+		Runner: func(_ context.Context, opts RunOptions) ([]byte, error) {
+			runs = append(runs, opts)
+			return nil, nil
+		},
+		Logger: slog.Default(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	defer func() { _ = result.Cleanup() }()
+	if len(runs) != 1 || runs[0].Name != "npm" {
+		t.Fatalf("install runs = %+v, want npm installer", runs)
+	}
+	if gen.generateCalls != 1 || len(result.SBOMPaths) != 1 {
+		t.Fatalf("generateCalls/SBOMPaths = %d/%v", gen.generateCalls, result.SBOMPaths)
+	}
+}
+
+func TestRunZeroPackagesCrossCheck(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "package.json", `{"dependencies":{"left-pad":"1.3.0"}}`)
+	gen := &fakeGenerator{
+		ecosystem:      "npm",
+		tool:           "cyclonedx-npm",
+		declares:       true,
+		generateOutput: validCycloneDXNoPackages(),
+	}
+	_, err := Run(context.Background(), Config{
+		Target:   root,
+		Registry: map[string]Generator{"npm": gen},
+		LookPath: func(string) (string, error) { return "found", nil },
+		Logger:   slog.Default(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "declares dependencies but generated SBOM imported 0 packages") {
+		t.Fatalf("Run err = %v, want zero-package cross-check", err)
+	}
+}
+
+func TestRunKeepCollisionDoesNotDeleteExistingFile(t *testing.T) {
+	root := t.TempDir()
+	keep := t.TempDir()
+	writeFile(t, root, "package.json", `{"dependencies":{"left-pad":"1.3.0"}}`)
+	collision := filepath.Join(keep, "package.cdx.json")
+	if err := os.WriteFile(collision, []byte("do-not-delete"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gen := &fakeGenerator{ecosystem: "npm", tool: "cyclonedx-npm"}
+	_, err := Run(context.Background(), Config{
+		Target:      root,
+		KeepSBOMDir: keep,
+		Registry:    map[string]Generator{"npm": gen},
+		LookPath:    func(string) (string, error) { return "found", nil },
+		Logger:      slog.Default(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "refusing to overwrite") {
+		t.Fatalf("Run err = %v, want overwrite rejection", err)
+	}
+	got, readErr := os.ReadFile(collision) // #nosec G304 -- test reads a file it just created in t.TempDir.
+	if readErr != nil {
+		t.Fatalf("collision file was deleted: %v", readErr)
+	}
+	if string(got) != "do-not-delete" {
+		t.Fatalf("collision file = %q, want preserved content", got)
+	}
+}
+
+func TestRunRespectsMaxDepthZero(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "package.json", `{"dependencies":{"root":"1.0.0"}}`)
+	writeFile(t, root, filepath.Join("nested", "package.json"), `{"dependencies":{"child":"1.0.0"}}`)
+	gen := &fakeGenerator{ecosystem: "npm", tool: "cyclonedx-npm", declares: true}
+	result, err := Run(context.Background(), Config{
+		Target:      root,
+		MaxDepth:    0,
+		KeepSBOMDir: t.TempDir(),
+		Registry:    map[string]Generator{"npm": gen},
+		LookPath:    func(string) (string, error) { return "found", nil },
+		Logger:      slog.Default(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(result.SBOMPaths) != 1 {
+		t.Fatalf("SBOMPaths = %v, want only root manifest with max-depth 0", result.SBOMPaths)
+	}
+	if got := filepath.Base(result.SBOMPaths[0]); got != "package.cdx.json" {
+		t.Fatalf("SBOM path = %v, want root package SBOM", result.SBOMPaths)
+	}
+}
+
+func TestRunDisambiguatesInternalOutputNameCollisions(t *testing.T) {
+	root := t.TempDir()
+	keep := t.TempDir()
+	writeFile(t, root, filepath.Join("a", "b", "package.json"), `{"dependencies":{"a":"1.0.0"}}`)
+	writeFile(t, root, filepath.Join("a_b", "package.json"), `{"dependencies":{"b":"1.0.0"}}`)
+	gen := &fakeGenerator{ecosystem: "npm", tool: "cyclonedx-npm", declares: true}
+	result, err := Run(context.Background(), Config{
+		Target:      root,
+		MaxDepth:    3,
+		KeepSBOMDir: keep,
+		Registry:    map[string]Generator{"npm": gen},
+		LookPath:    func(string) (string, error) { return "found", nil },
+		Logger:      slog.Default(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(result.SBOMPaths) != 2 {
+		t.Fatalf("SBOMPaths = %v, want both package manifests", result.SBOMPaths)
+	}
+	seen := map[string]struct{}{}
+	for _, path := range result.SBOMPaths {
+		name := filepath.Base(path)
+		if _, ok := seen[name]; ok {
+			t.Fatalf("duplicate SBOM basename %q in %v", name, result.SBOMPaths)
+		}
+		seen[name] = struct{}{}
+	}
+}
+
+func TestRunTemporaryCleanupRemovesGeneratedDirectory(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "package.json", `{"dependencies":{"left-pad":"1.3.0"}}`)
+	gen := &fakeGenerator{ecosystem: "npm", tool: "cyclonedx-npm", declares: true}
+	result, err := Run(context.Background(), Config{
+		Target:   root,
+		Registry: map[string]Generator{"npm": gen},
+		LookPath: func(string) (string, error) { return "found", nil },
+		Logger:   slog.Default(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(result.SBOMPaths) != 1 {
+		t.Fatalf("SBOMPaths = %v", result.SBOMPaths)
+	}
+	dir := filepath.Dir(result.SBOMPaths[0])
+	if err := result.Cleanup(); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("generated dir still exists or unexpected err: %v", err)
+	}
+}

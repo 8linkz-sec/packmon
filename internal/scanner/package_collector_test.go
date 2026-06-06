@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/8linkz/packmon/internal/domain"
 	"github.com/8linkz/packmon/internal/parser"
+	"github.com/8linkz/packmon/internal/sbom"
 )
 
 func TestCollectPackagesIncludesExplicitSBOM(t *testing.T) {
@@ -146,5 +148,50 @@ func TestPackageCollectionIndexRebuildsAfterDevFilter(t *testing.T) {
 
 	if len(c.Entries) != 1 || c.Entries[0].Package.Dev {
 		t.Fatalf("entries after filter/add = %+v, want one production package", c.Entries)
+	}
+}
+
+func TestPackageCollectorHelperBranches(t *testing.T) {
+	t.Parallel()
+
+	baseErr := errors.New("open failed")
+	inputErr := &sbomInputError{err: baseErr}
+	if inputErr.Error() != "open failed" {
+		t.Fatalf("sbomInputError.Error() = %q", inputErr.Error())
+	}
+	if !errors.Is(inputErr, baseErr) {
+		t.Fatal("sbomInputError should unwrap base error")
+	}
+
+	for _, item := range []struct {
+		component string
+		reason    string
+		want      string
+	}{
+		{component: "pkg", reason: "", want: `skipped SBOM component "pkg"`},
+		{component: "", reason: "missing purl", want: "skipped SBOM component: missing purl"},
+		{component: "", reason: "", want: "skipped SBOM component"},
+	} {
+		got := formatSBOMSkippedComponent("bom.json", sbom.SkippedComponent{Name: item.component, Reason: item.reason})
+		if !strings.Contains(got, item.want) {
+			t.Fatalf("formatSBOMSkippedComponent() = %q, want %q", got, item.want)
+		}
+	}
+
+	filter := ecosystemFilter([]string{" npm ", "", "Go"})
+	if !filter.allows(domain.EcosystemNPM) || !filter.allows(domain.EcosystemGo) {
+		t.Fatalf("filter should allow npm and go: %#v", filter)
+	}
+	if filter.allows(domain.EcosystemPyPI) {
+		t.Fatal("filter should reject pypi")
+	}
+	if !ecosystemFilter(nil).allows(domain.EcosystemPyPI) {
+		t.Fatal("empty filter should allow all ecosystems")
+	}
+	if got := mergeCollectedStringSet([]string{" b ", "", "a"}, []string{"a", "c"}); strings.Join(got, ",") != "a,b,c" {
+		t.Fatalf("mergeCollectedStringSet() = %#v", got)
+	}
+	if got := mergeCollectedStringSet(nil, nil); got != nil {
+		t.Fatalf("mergeCollectedStringSet(nil,nil) = %#v, want nil", got)
 	}
 }

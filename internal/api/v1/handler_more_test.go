@@ -121,6 +121,74 @@ func TestHandleFeedImportValidationAndDeleteBranches(t *testing.T) {
 	}
 }
 
+type importErrorStore struct {
+	stubStore
+	vulnCheckErr error
+	cisaErr      error
+	cisaClearErr error
+	epssErr      error
+	statusErr    error
+}
+
+func (s *importErrorStore) EnrichVulnCheck(context.Context, []db.VulnCheckEntry) (int, error) {
+	return 0, s.vulnCheckErr
+}
+
+func (s *importErrorStore) SetCISAKEV(context.Context, []string) (int, error) {
+	return 0, s.cisaErr
+}
+
+func (s *importErrorStore) ClearCISAKEV(context.Context, []string) (int, error) {
+	return 0, s.cisaClearErr
+}
+
+func (s *importErrorStore) SetEPSSScores(context.Context, []db.EPSSEntry) (int, error) {
+	return 0, s.epssErr
+}
+
+func (s *importErrorStore) UpsertFeedSyncStatus(context.Context, *db.FeedSyncStatus) error {
+	return s.statusErr
+}
+
+func TestImportHelperStoreErrorBranches(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+	status := &feedSyncStatusInput{LastSyncAt: &now, LastSyncStatus: "success", EntriesSynced: 1, EntriesTotal: 1}
+
+	store := &importErrorStore{vulnCheckErr: errors.New("vulncheck down")}
+	h := newTestHandler(&store.stubStore)
+	h.store = store
+	if _, err := h.importVulnCheck(ctx, "vulncheck", &vulnCheckImportRequest{Entries: []db.VulnCheckEntry{{CVEID: "CVE-2026-0001"}}}); err == nil {
+		t.Fatal("importVulnCheck(store error) = nil")
+	}
+
+	store = &importErrorStore{cisaErr: errors.New("kev down")}
+	h.store = store
+	if _, err := h.importCISAKEV(ctx, "cisakev", &cisaKEVImportRequest{CVEIDs: []string{"CVE-2026-0001"}}); err == nil {
+		t.Fatal("importCISAKEV(set error) = nil")
+	}
+
+	store = &importErrorStore{cisaClearErr: errors.New("clear down")}
+	h.store = store
+	if _, err := h.importCISAKEV(ctx, "cisakev", &cisaKEVImportRequest{CVEIDs: []string{"CVE-2026-0001"}, ClearMissing: true}); err == nil {
+		t.Fatal("importCISAKEV(clear error) = nil")
+	}
+
+	store = &importErrorStore{epssErr: errors.New("epss down")}
+	h.store = store
+	if _, err := h.importEPSS(ctx, "epss", &epssImportRequest{Entries: []db.EPSSEntry{{CVEID: "CVE-2026-0001", Score: 0.5}}}); err == nil {
+		t.Fatal("importEPSS(store error) = nil")
+	}
+
+	store = &importErrorStore{statusErr: errors.New("status down")}
+	h.store = store
+	if _, err := h.importVulnCheck(ctx, "vulncheck", &vulnCheckImportRequest{Entries: []db.VulnCheckEntry{{CVEID: "CVE-2026-0001"}}, Status: status}); err == nil {
+		t.Fatal("importVulnCheck(status error) = nil")
+	}
+}
+
 func TestHandlePackageDetailErrors(t *testing.T) {
 	t.Parallel()
 

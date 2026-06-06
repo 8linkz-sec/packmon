@@ -83,6 +83,8 @@ packmon scan --outdated .
 packmon scan --sbom bom.cdx.json .
 packmon scan --sbom sbom.spdx.json --list-packages .
 packmon scan --sbom bom.cdx.json --outdated .
+packmon scan --auto-sbom .
+packmon scan --auto-sbom --sbom-only --keep-sbom ./sboms .
 packmon db sync
 packmon db info
 packmon db export --output local-db.json
@@ -144,6 +146,21 @@ SBOM files are package-coordinate input only. Packmon does not treat embedded
 SBOM vulnerability, VEX, license, or provenance assertions as authoritative
 findings; vulnerabilities, malicious packages, reputation, outdated versions,
 and lifecycle state still come from Packmon's configured data sources.
+
+### Generate and scan an SBOM in one step
+
+```bash
+# Detect the project's ecosystem, generate a CycloneDX SBOM, and scan it:
+packmon scan --auto-sbom ./my-project
+
+# Only produce the SBOM (no scan), keeping the files:
+packmon scan --auto-sbom --sbom-only --keep-sbom ./sboms ./my-project
+```
+
+This requires the matching CycloneDX generator on `PATH`, such as
+`cyclonedx-gomod`, `cyclonedx-npm`, `cyclonedx-py`, or `mvn` for Maven
+projects. Add `--install-tools` to let Packmon install pinned versions where
+automatic installation is supported.
 
 ## Git Hooks
 

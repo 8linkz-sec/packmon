@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -68,5 +70,45 @@ func TestApplyStoredFeedConfigOverrides(t *testing.T) {
 	}
 	if rl.DisplayName != "ReversingLabs" || !rl.RequiresAPIKey || rl.SupportsSyncInterval {
 		t.Fatalf("reversinglabs feed settings = %+v", rl)
+	}
+}
+
+type feedConfigErrorStore struct {
+	db.Store
+}
+
+func (*feedConfigErrorStore) ListFeedConfigs(context.Context) ([]db.FeedConfig, error) {
+	return nil, errors.New("feed configs unavailable")
+}
+
+func TestApplyStoredFeedConfigOverridesErrorAndIgnoredBranches(t *testing.T) {
+	t.Parallel()
+
+	cfg := testAdminConfig()
+	if err := applyStoredFeedConfigOverrides(context.Background(), cfg, &feedConfigErrorStore{}, nil); err == nil || !strings.Contains(err.Error(), "list feed config overrides") {
+		t.Fatalf("applyStoredFeedConfigOverrides(error store) = %v", err)
+	}
+
+	store := newNoopStore()
+	for _, override := range []*db.FeedConfig{
+		{FeedName: "unknown", Enabled: true, Mode: "self"},
+		{FeedName: "osv", Enabled: true, Mode: "sideways"},
+		{FeedName: "vulncheck", Enabled: true, Mode: "external", APIKey: "  persisted-key  "},
+	} {
+		if err := store.UpsertFeedConfig(context.Background(), override); err != nil {
+			t.Fatalf("UpsertFeedConfig(%s) error = %v", override.FeedName, err)
+		}
+	}
+	if err := applyStoredFeedConfigOverrides(context.Background(), cfg, store, slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
+		t.Fatalf("applyStoredFeedConfigOverrides(ignored branches) error = %v", err)
+	}
+
+	osv, _ := cfg.FeedSettings("osv")
+	if osv.Mode == config.FeedMode("sideways") {
+		t.Fatalf("invalid OSV mode was applied: %+v", osv)
+	}
+	vulncheck, _ := cfg.FeedSettings("vulncheck")
+	if vulncheck.Mode != config.FeedModeExternal || vulncheck.APIKey != "persisted-key" {
+		t.Fatalf("vulncheck override = %+v, want external mode with trimmed key", vulncheck)
 	}
 }

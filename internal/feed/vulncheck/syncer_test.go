@@ -250,6 +250,197 @@ func TestSyncReportsContextAndEnrichErrors(t *testing.T) {
 	}
 }
 
+func TestFetchAndDownloadBackupErrorBranches(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case nvd2Endpoint:
+			_, _ = io.WriteString(w, `{"data":[{}]}`)
+		case "/backup":
+			http.Error(w, "down", http.StatusBadGateway)
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	syncer := NewSyncer("test-key", slog.New(slog.NewTextHandler(io.Discard, nil)), WithBaseURL(server.URL))
+	if _, err := syncer.fetchBackupURL(context.Background()); err == nil || !strings.Contains(err.Error(), "download URL") {
+		t.Fatalf("fetchBackupURL(missing url) = %v", err)
+	}
+	if _, _, err := syncer.downloadBackupFile(context.Background(), server.URL+"/backup"); err == nil || !strings.Contains(err.Error(), "status 502") {
+		t.Fatalf("downloadBackupFile(status) = %v", err)
+	}
+}
+
+func TestVulnCheckBackupHelperBranches(t *testing.T) {
+	t.Parallel()
+
+	resolved, err := resolveBackupURL("https://api.example.test/root", "backup/file.json")
+	if err != nil {
+		t.Fatalf("resolveBackupURL(relative): %v", err)
+	}
+	if resolved != "https://api.example.test/root/backup/file.json" {
+		t.Fatalf("resolved URL = %q", resolved)
+	}
+	if _, err := resolveBackupURL("https://api.example.test", "%zz"); err == nil || !strings.Contains(err.Error(), "parse backup URL") {
+		t.Fatalf("resolveBackupURL(bad raw) = %v", err)
+	}
+	if _, err := resolveBackupURL("http://[::1", "/backup.json"); err == nil || !strings.Contains(err.Error(), "parse base URL") {
+		t.Fatalf("resolveBackupURL(bad base) = %v", err)
+	}
+
+	if !isZipPayload([]byte("PK\x03\x04x"), "", "") {
+		t.Fatal("zip magic body should be detected")
+	}
+	if !isZipPayload([]byte("json"), "application/zip", "") {
+		t.Fatal("zip content type should be detected")
+	}
+	if !isZipPayloadHeader([]byte("json"), "", "https://example.test/bulk.zip") {
+		t.Fatal("zip URL suffix should be detected")
+	}
+
+	jsonEntries, err := decodeBackupPayload([]byte(`[{"id":"CVE-2026-0001"}]`), "application/json", "https://example.test/bulk.json")
+	if err != nil || len(jsonEntries) != 1 {
+		t.Fatalf("decodeBackupPayload(json) = %+v, %v", jsonEntries, err)
+	}
+	if _, err := decodeBackupJSON([]byte(`{"not":"an array"}`)); err == nil || !strings.Contains(err.Error(), "parse json") {
+		t.Fatalf("decodeBackupJSON(object without data) = %v", err)
+	}
+
+	_, err = io.ReadAll(newMaxBytesReader(strings.NewReader("abcd"), 3))
+	if err == nil || !strings.Contains(err.Error(), "exceeds 3") {
+		t.Fatalf("maxBytesReader overflow = %v", err)
+	}
+}
+
+func TestStreamBackupJSONAndZipErrorBranches(t *testing.T) {
+	t.Parallel()
+
+	var emitted []db.VulnCheckEntry
+	total, err := streamBackupJSON(strings.NewReader(`{"meta":{"ignored":true},"data":[{"id":"CVE-2026-0001"}]}`), func(entries []db.VulnCheckEntry) error {
+		emitted = append(emitted, entries...)
+		return nil
+	})
+	if err != nil || total != 1 || len(emitted) != 1 {
+		t.Fatalf("streamBackupJSON(object) total=%d emitted=%+v err=%v", total, emitted, err)
+	}
+
+	errorCases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "scalar", body: `"bad"`, want: "expected object or array"},
+		{name: "data not array", body: `{"data":{}}`, want: "data is not an array"},
+		{name: "missing data", body: `{"meta":{}}`, want: "data array missing"},
+		{name: "bad cve", body: `[{"id":`, want: "parse cve"},
+	}
+	for _, tt := range errorCases {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := streamBackupJSON(strings.NewReader(tt.body), func([]db.VulnCheckEntry) error { return nil }); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("streamBackupJSON(%s) = %v, want %q", tt.name, err, tt.want)
+			}
+		})
+	}
+
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	txt, err := zw.Create("readme.txt")
+	if err != nil {
+		t.Fatalf("create txt zip entry: %v", err)
+	}
+	if _, err := io.WriteString(txt, "not json"); err != nil {
+		t.Fatalf("write txt zip entry: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("close txt zip: %v", err)
+	}
+	if _, err := streamBackupZip(bytes.NewReader(buf.Bytes()), func([]db.VulnCheckEntry) error { return nil }); err == nil || !strings.Contains(err.Error(), "no JSON") {
+		t.Fatalf("streamBackupZip(no json) = %v", err)
+	}
+	if _, err := decodeBackupZip(buf.Bytes()); err == nil || !strings.Contains(err.Error(), "no JSON") {
+		t.Fatalf("decodeBackupZip(no json) = %v", err)
+	}
+}
+
+func TestVulnCheckDownloadStreamAndZipFailureBranches(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/backup.json":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `[{"id":"CVE-2026-0101"}]`)
+		case "/bad.zip":
+			w.Header().Set("Content-Type", "application/zip")
+			_, _ = io.WriteString(w, "not a zip")
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	syncer := NewSyncer("test-key", slog.New(slog.NewTextHandler(io.Discard, nil)), WithBaseURL(server.URL))
+	body, contentType, err := syncer.downloadBackupFile(context.Background(), server.URL+"/backup.json")
+	if err != nil {
+		t.Fatalf("downloadBackupFile(success) error = %v", err)
+	}
+	if contentType != "application/json" || !bytes.Contains(body, []byte("CVE-2026-0101")) {
+		t.Fatalf("downloadBackupFile() = %q %s", contentType, body)
+	}
+
+	var emitted []db.VulnCheckEntry
+	total, err := syncer.streamBackupFile(context.Background(), server.URL+"/backup.json", func(entries []db.VulnCheckEntry) error {
+		emitted = append(emitted, entries...)
+		return nil
+	})
+	if err != nil || total != 1 || len(emitted) != 1 {
+		t.Fatalf("streamBackupFile(json) total=%d emitted=%+v err=%v", total, emitted, err)
+	}
+	if _, err := syncer.streamBackupFile(context.Background(), server.URL+"/bad.zip", func([]db.VulnCheckEntry) error { return nil }); err == nil || !strings.Contains(err.Error(), "parse zip") {
+		t.Fatalf("streamBackupFile(bad zip) = %v, want parse zip error", err)
+	}
+	if _, _, err := syncer.downloadBackupFile(context.Background(), "://bad"); err == nil || !strings.Contains(err.Error(), "create backup request") {
+		t.Fatalf("downloadBackupFile(bad URL) = %v", err)
+	}
+	if _, err := syncer.streamBackupFile(context.Background(), "://bad", func([]db.VulnCheckEntry) error { return nil }); err == nil || !strings.Contains(err.Error(), "create backup request") {
+		t.Fatalf("streamBackupFile(bad URL) = %v", err)
+	}
+
+	if body, err := readLimited(strings.NewReader("ok")); err != nil || string(body) != "ok" {
+		t.Fatalf("readLimited(success) = %q, %v", body, err)
+	}
+	if _, ok := vulnCheckEntryFromBackupCVE(backupCVE{ID: "VC-2026-ignored"}); ok {
+		t.Fatal("vulnCheckEntryFromBackupCVE(non-CVE) = ok, want false")
+	}
+	if _, err := streamBackupJSON(strings.NewReader(`[{"id":"CVE-2026-0102"}]`), func([]db.VulnCheckEntry) error {
+		return errors.New("emit failed")
+	}); err == nil || !strings.Contains(err.Error(), "emit failed") {
+		t.Fatalf("streamBackupJSON(emit error) = %v", err)
+	}
+
+	var badJSONZip bytes.Buffer
+	zw := zip.NewWriter(&badJSONZip)
+	file, err := zw.Create("vulncheck-nvd2.json")
+	if err != nil {
+		t.Fatalf("create bad json zip entry: %v", err)
+	}
+	if _, err := io.WriteString(file, `{bad json`); err != nil {
+		t.Fatalf("write bad json zip entry: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("close bad json zip: %v", err)
+	}
+	if _, err := streamBackupZip(bytes.NewReader(badJSONZip.Bytes()), func([]db.VulnCheckEntry) error { return nil }); err == nil || !strings.Contains(err.Error(), "parse zip JSON") {
+		t.Fatalf("streamBackupZip(bad json) = %v", err)
+	}
+	if _, err := decodeBackupZip(badJSONZip.Bytes()); err == nil || !strings.Contains(err.Error(), "parse zip JSON") {
+		t.Fatalf("decodeBackupZip(bad json) = %v", err)
+	}
+}
+
 func absoluteTestURL(r *http.Request, path string) string {
 	return "http://" + r.Host + path
 }

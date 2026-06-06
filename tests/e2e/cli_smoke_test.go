@@ -57,6 +57,31 @@ func TestPackmonScanListPackagesFromBuiltBinary(t *testing.T) {
 	}
 }
 
+func TestAutoSBOMOnlySmoke(t *testing.T) {
+	if _, err := exec.LookPath("cyclonedx-gomod"); err != nil {
+		t.Skip("cyclonedx-gomod not installed")
+	}
+	bin := packmonBinary(t)
+	projectDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(projectDir, "go.mod"), []byte("module example.test\n\ngo 1.21\n\nrequire golang.org/x/text v0.3.7\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outDir := filepath.Join(t.TempDir(), "sboms")
+
+	cmd := exec.Command(bin, "scan", "--auto-sbom", "--sbom-only", "--keep-sbom", outDir, projectDir)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("auto-sbom --sbom-only failed: %v\n%s", err, output)
+	}
+	entries, err := os.ReadDir(outDir)
+	if err != nil {
+		t.Fatalf("read SBOM output dir: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatalf("expected at least one generated SBOM in %s", outDir)
+	}
+}
+
 func packmonBinary(t *testing.T) string {
 	t.Helper()
 

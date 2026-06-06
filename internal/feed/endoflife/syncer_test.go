@@ -21,9 +21,15 @@ type lifecycleStoreStub struct {
 	products        []db.LifecycleProduct
 	reconciledSlugs []string
 	reconcileErr    error
+	statusErr       error
+	upsertErr       error
+	statusWriteErr  error
 }
 
 func (s *lifecycleStoreStub) GetFeedSyncStatus(context.Context, string) (*db.FeedSyncStatus, error) {
+	if s.statusErr != nil {
+		return nil, s.statusErr
+	}
 	if s.status == nil {
 		return nil, nil
 	}
@@ -32,6 +38,9 @@ func (s *lifecycleStoreStub) GetFeedSyncStatus(context.Context, string) (*db.Fee
 }
 
 func (s *lifecycleStoreStub) UpsertFeedSyncStatus(_ context.Context, status *db.FeedSyncStatus) error {
+	if s.statusWriteErr != nil {
+		return s.statusWriteErr
+	}
 	copied := *status
 	s.statuses = append(s.statuses, copied)
 	s.status = &copied
@@ -39,6 +48,9 @@ func (s *lifecycleStoreStub) UpsertFeedSyncStatus(_ context.Context, status *db.
 }
 
 func (s *lifecycleStoreStub) UpsertLifecycleProducts(_ context.Context, products []db.LifecycleProduct) error {
+	if s.upsertErr != nil {
+		return s.upsertErr
+	}
 	s.products = append(s.products, products...)
 	return nil
 }
@@ -232,6 +244,55 @@ func TestSyncerHTTP429RecordsFailureWithoutUpsert(t *testing.T) {
 	if !errors.Is(err, ErrHTTPStatus) {
 		t.Fatalf("Sync(429) error = %v, want ErrHTTPStatus", err)
 	}
+}
+
+func TestSyncerOptionsNameStatusAndFailureBranches(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("User-Agent"); got != "custom-agent" {
+			t.Fatalf("User-Agent = %q, want custom-agent", got)
+		}
+		w.Header().Set("ETag", "fresh-etag")
+		_, _ = w.Write([]byte(sampleProductsResponse()))
+	}))
+	defer server.Close()
+
+	store := &lifecycleStoreStub{statusErr: errors.New("status down")}
+	syncer := NewSyncer(nil, WithBaseURL(server.URL), WithHTTPClient(server.Client()), WithUserAgent("custom-agent"))
+	if syncer.Name() != FeedName {
+		t.Fatalf("Name() = %q, want %q", syncer.Name(), FeedName)
+	}
+	if _, err := syncer.Sync(context.Background(), store); err != nil {
+		t.Fatalf("Sync(status read error still proceeds) error = %v", err)
+	}
+
+	if got := statusETag(&db.FeedSyncStatus{LastEtag: " direct "}); got != "direct" {
+		t.Fatalf("statusETag(last_etag) = %q", got)
+	}
+	if got := statusETag(&db.FeedSyncStatus{Metadata: json.RawMessage(`{"etag":" meta "}`)}); got != "meta" {
+		t.Fatalf("statusETag(metadata) = %q", got)
+	}
+	if got := statusETag(&db.FeedSyncStatus{Metadata: json.RawMessage(`not json`)}); got != "" {
+		t.Fatalf("statusETag(invalid metadata) = %q, want empty", got)
+	}
+
+	store = &lifecycleStoreStub{upsertErr: errors.New("upsert down")}
+	if _, err := syncer.Sync(context.Background(), store); err == nil || !strings.Contains(err.Error(), "upsert lifecycle products") {
+		t.Fatalf("Sync(upsert error) = %v", err)
+	}
+	if len(store.statuses) != 1 || store.statuses[0].LastSyncStatus != "error" {
+		t.Fatalf("upsert error status = %+v", store.statuses)
+	}
+
+	store = &lifecycleStoreStub{reconcileErr: errors.New("reconcile down")}
+	if _, err := syncer.Sync(context.Background(), store); err == nil || !strings.Contains(err.Error(), "reconcile lifecycle products") {
+		t.Fatalf("Sync(reconcile error) = %v", err)
+	}
+
+	store = &lifecycleStoreStub{statusWriteErr: errors.New("status write down")}
+	syncer.recordSyncSuccess(context.Background(), store, time.Now(), 1, 1, "etag", syncMetadata{})
+	syncer.recordSyncFailure(context.Background(), store, time.Now(), errors.New("sync down"))
 }
 
 func sampleProductsResponse() string {

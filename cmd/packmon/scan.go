@@ -42,6 +42,10 @@ func newScanCmd() *cobra.Command {
 		flagInsecureHTTP  bool
 		flagRequireRemote bool
 		flagSBOMFiles     []string
+		flagAutoSBOM      bool
+		flagInstallTools  bool
+		flagKeepSBOM      string
+		flagSBOMOnly      bool
 	)
 
 	cmd := &cobra.Command{
@@ -52,6 +56,45 @@ parse dependencies, and check them against known vulnerabilities
 and malicious package databases.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			scanFlags := scanFlagValues{
+				Mode:          flagMode,
+				Server:        flagServer,
+				APIKey:        flagAPIKey,
+				FailOn:        flagFailOn,
+				Ecosystems:    flagEcosystems,
+				MaxDepth:      flagMaxDepth,
+				Timeout:       flagTimeout,
+				IncludeDev:    flagIncludeDev,
+				OutputJSON:    flagOutputJSON,
+				OutputSARIF:   flagOutputSARIF,
+				OutputJUnit:   flagOutputJUnit,
+				OutputHTML:    flagOutputHTML,
+				WebhookURL:    flagWebhookURL,
+				WebhookSecret: flagWebhookSecret,
+				All:           flagAll,
+				Repo:          flagRepo,
+				Quiet:         flagQuiet,
+				NoColor:       flagNoColor,
+				CACert:        flagCACert,
+				InsecureHTTP:  flagInsecureHTTP,
+				RequireRemote: flagRequireRemote,
+				SBOMFiles:     flagSBOMFiles,
+			}
+			auto := autoSBOMFlags{
+				Enabled:      flagAutoSBOM,
+				InstallTools: flagInstallTools,
+				KeepSBOM:     flagKeepSBOM,
+				SBOMOnly:     flagSBOMOnly,
+			}
+			if err := validateAutoSBOMFlags(auto, scanFlags, args); err != nil {
+				return withExitCode(ExitOperational, err)
+			}
+			if flagAutoSBOM {
+				if flagListPackages || flagOutdated || flagListAll {
+					return withExitCode(ExitOperational, fmt.Errorf("--auto-sbom cannot be combined with --list-packages, --outdated, or --list-all"))
+				}
+				return runAutoSBOMCommand(cmd, args, scanFlags, auto)
+			}
 			if flagListPackages {
 				return runListPackages(args, flagEcosystems, flagMaxDepth, flagNoColor, flagSBOMFiles)
 			}
@@ -103,30 +146,7 @@ and malicious package databases.`,
 				}
 				return nil
 			}
-			return runScanCommand(cmd, args, scanFlagValues{
-				Mode:          flagMode,
-				Server:        flagServer,
-				APIKey:        flagAPIKey,
-				FailOn:        flagFailOn,
-				Ecosystems:    flagEcosystems,
-				MaxDepth:      flagMaxDepth,
-				Timeout:       flagTimeout,
-				IncludeDev:    flagIncludeDev,
-				OutputJSON:    flagOutputJSON,
-				OutputSARIF:   flagOutputSARIF,
-				OutputJUnit:   flagOutputJUnit,
-				OutputHTML:    flagOutputHTML,
-				WebhookURL:    flagWebhookURL,
-				WebhookSecret: flagWebhookSecret,
-				All:           flagAll,
-				Repo:          flagRepo,
-				Quiet:         flagQuiet,
-				NoColor:       flagNoColor,
-				CACert:        flagCACert,
-				InsecureHTTP:  flagInsecureHTTP,
-				RequireRemote: flagRequireRemote,
-				SBOMFiles:     flagSBOMFiles,
-			})
+			return runScanCommand(cmd, args, scanFlags)
 		},
 	}
 
@@ -154,6 +174,10 @@ and malicious package databases.`,
 	f.BoolVar(&flagInsecureHTTP, "insecure-allow-http", false, "allow plain http:// server URLs (sends bearer token in cleartext; opt-in)")
 	f.BoolVar(&flagRequireRemote, "require-remote", false, "in auto mode, fail hard on remote error instead of falling back to the local database")
 	f.StringArrayVar(&flagSBOMFiles, "sbom", nil, "SBOM file to include as package input (CycloneDX JSON/XML or SPDX JSON); can be repeated")
+	f.BoolVar(&flagAutoSBOM, "auto-sbom", false, "generate an SBOM with CycloneDX tools and scan it")
+	f.BoolVar(&flagInstallTools, "install-tools", false, "with --auto-sbom: auto-install missing CycloneDX generators (pinned versions)")
+	f.StringVar(&flagKeepSBOM, "keep-sbom", "", "with --auto-sbom: write generated SBOMs to this dir and keep them")
+	f.BoolVar(&flagSBOMOnly, "sbom-only", false, "with --auto-sbom: only generate SBOMs, do not scan")
 
 	return cmd
 }

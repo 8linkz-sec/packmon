@@ -344,6 +344,16 @@ GitLab runner execution remains an external validation requirement.
 
 ## Dependency and Tooling Security
 
+`packmon scan --auto-sbom` is local CLI behavior only; the server remains
+unaffected. The CLI invokes fixed-name CycloneDX generators with argument
+arrays and no shell. `--install-tools` is off by default because it runs
+third-party package-manager installs, including any behavior those ecosystems
+perform during installation. When enabled, Packmon logs the package, source,
+and exact argv before running the pinned install command. Generated SBOM files
+are written with `0600` permissions in a `0700` temporary directory and deleted
+after the scan unless `--keep-sbom` is set; keep mode refuses to overwrite an
+existing file.
+
 Required checks:
 
 ```bash

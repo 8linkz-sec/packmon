@@ -305,3 +305,86 @@ func TestHTMLWriteEmptyModeAndUnknownRendering(t *testing.T) {
 		t.Fatal("missing .f-none CSS rule for unknown-severity findings")
 	}
 }
+
+func TestHTMLHelperRemainingBranches(t *testing.T) {
+	t.Parallel()
+
+	if writer := NewHTMLWriter(""); writer.toolVersion != "dev" {
+		t.Fatalf("NewHTMLWriter(empty).toolVersion = %q, want dev", writer.toolVersion)
+	}
+	if got := formatDurationMs(0); got != "" {
+		t.Fatalf("formatDurationMs(0) = %q, want empty", got)
+	}
+	if got := formatDurationMs(999); got != "999ms" {
+		t.Fatalf("formatDurationMs(999) = %q, want 999ms", got)
+	}
+	if got := formatDurationMs(1500); got != "1.5s" {
+		t.Fatalf("formatDurationMs(1500) = %q, want 1.5s", got)
+	}
+
+	age := 3
+	parts := footerParts("v1.2.3", &domain.ScanResult{
+		DurationMs:  1500,
+		Mode:        "local",
+		DBAgeDays:   &age,
+		DBStale:     true,
+		FeedStatus:  "healthy",
+		ScanID:      "scan-123",
+		ManualCount: 2,
+	})
+	for _, want := range []string{"Scan 1.5s", "DB synced 3 days ago (stale)", "feeds: healthy", "packmon v1.2.3", "scan_id scan-123", "2 manual advisories"} {
+		if !containsString(parts, want) {
+			t.Fatalf("footerParts() = %+v, missing %q", parts, want)
+		}
+	}
+	if parts := footerParts("dev", &domain.ScanResult{FeedStatus: "degraded"}); !containsString(parts, "feeds: degraded") {
+		t.Fatalf("footerParts(degraded) = %+v", parts)
+	}
+	if parts := footerParts("dev", &domain.ScanResult{FeedStatus: "local-db-missing"}); !containsString(parts, "local-db-missing") {
+		t.Fatalf("footerParts(custom status) = %+v", parts)
+	}
+
+	links, plain := makeLinks(domain.Finding{
+		URL: "https://example.test/advisory",
+		Resources: []domain.ResourceLink{
+			{URL: "https://example.test/empty-label"},
+			{Label: "bad", URL: "mailto:security@example.test"},
+			{Label: "blank", URL: " "},
+		},
+	})
+	if len(links) != 2 || links[1].Label != "example.test/empty-label" {
+		t.Fatalf("links = %+v, want generated label for empty label URL", links)
+	}
+	if len(plain) != 1 || plain[0] != "mailto:security@example.test" {
+		t.Fatalf("plain = %+v, want mailto as plain text", plain)
+	}
+
+	if got := advisoryLabel(domain.Finding{Type: domain.FindingTypeSupplyChainRisk}); got != "SUPPLY-CHAIN" {
+		t.Fatalf("advisoryLabel(supply chain) = %q", got)
+	}
+	if got := sevSlug(domain.SeverityLow); got != "low" {
+		t.Fatalf("sevSlug(LOW) = %q", got)
+	}
+}
+
+func TestHTMLWriteFileCreateError(t *testing.T) {
+	t.Parallel()
+
+	parentFile := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(parentFile, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write parent file: %v", err)
+	}
+	err := NewHTMLWriter("dev").WriteFile(filepath.Join(parentFile, "report.html"), "svc", domain.SeverityCritical, &domain.ScanResult{})
+	if err == nil || !strings.Contains(err.Error(), "html: create file") {
+		t.Fatalf("WriteFile(parent file) error = %v, want create error", err)
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}

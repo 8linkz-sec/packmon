@@ -2,6 +2,7 @@ package reversinglabs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -81,6 +82,91 @@ func TestWorkerOptionsAndName(t *testing.T) {
 	}
 	if w.tokens != 12 || w.maxTokens != 12 {
 		t.Fatalf("tokens = %d/%d, want 12/12", w.tokens, w.maxTokens)
+	}
+}
+
+type dbStoreFake struct {
+	db.Store
+}
+
+func (*dbStoreFake) DequeueRefresh(context.Context, string) (*db.RefreshJob, error) {
+	return nil, nil
+}
+
+func (*dbStoreFake) CompleteRefresh(context.Context, int, error) error {
+	return nil
+}
+
+func (*dbStoreFake) ResetStuckJobs(context.Context, string, time.Duration) (int, error) {
+	return 0, nil
+}
+
+func (*dbStoreFake) ListDuePackageReputations(context.Context, string, string, string, int) ([]db.PackageReputation, error) {
+	return nil, nil
+}
+
+func (*dbStoreFake) UpsertPackageReputation(context.Context, *db.PackageReputation) error {
+	return nil
+}
+
+func TestNewWorkerWrapperAndOptionGuardBranches(t *testing.T) {
+	t.Parallel()
+
+	store := &dbStoreFake{}
+	w := NewWorker(store, "token", nil,
+		WithHTTPClient(nil),
+		WithBaseURL(" "),
+		WithPollInterval(0),
+		WithLookupTTL(0),
+		WithBatchSize(0),
+		WithRateLimit(0),
+	)
+
+	if w.store != store {
+		t.Fatalf("worker store = %T, want wrapper store", w.store)
+	}
+	if w.baseURL != DefaultBaseURL {
+		t.Fatalf("baseURL = %q, want default", w.baseURL)
+	}
+	if w.pollInterval != defaultPollInterval || w.lookupTTL != defaultLookupTTL {
+		t.Fatalf("defaults = %v/%v, want %v/%v", w.pollInterval, w.lookupTTL, defaultPollInterval, defaultLookupTTL)
+	}
+	if w.batchSize != defaultBatchSize || w.tokens != defaultRateLimitPerHour || w.maxTokens != defaultRateLimitPerHour {
+		t.Fatalf("batch/tokens = %d/%d/%d, want defaults", w.batchSize, w.tokens, w.maxTokens)
+	}
+
+	w = NewWorker(store, "token", nil, WithBatchSize(3), WithRateLimit(7))
+	if w.batchSize != 3 || w.tokens != 7 || w.maxTokens != 7 {
+		t.Fatalf("valid option values = batch %d tokens %d/%d", w.batchSize, w.tokens, w.maxTokens)
+	}
+}
+
+func TestSearchIncidentJSONBranches(t *testing.T) {
+	t.Parallel()
+
+	var pkg searchPackageData
+	err := json.Unmarshal([]byte(`{"incidents":{"malware":"malware","removal":{"type":"removal"},"counter":2}}`), &pkg)
+	if err != nil {
+		t.Fatalf("unmarshal incidents object: %v", err)
+	}
+	if pkg.Incidents["malware"].Type != "malware" || pkg.Incidents["removal"].Type != "removal" || pkg.Incidents["counter"].Count != 2 {
+		t.Fatalf("incidents = %+v", pkg.Incidents)
+	}
+
+	var incidents searchIncidents
+	if err := json.Unmarshal([]byte(`null`), &incidents); err != nil || incidents != nil {
+		t.Fatalf("unmarshal null incidents = %+v, %v", incidents, err)
+	}
+	if err := json.Unmarshal([]byte(`"bad"`), &incidents); err == nil || !strings.Contains(err.Error(), "unexpected incidents") {
+		t.Fatalf("unmarshal string incidents error = %v", err)
+	}
+
+	var incident searchIncident
+	if err := json.Unmarshal([]byte(`null`), &incident); err != nil {
+		t.Fatalf("unmarshal null incident: %v", err)
+	}
+	if err := json.Unmarshal([]byte(`{bad`), &incident); err == nil {
+		t.Fatal("unmarshal malformed incident object error = nil")
 	}
 }
 

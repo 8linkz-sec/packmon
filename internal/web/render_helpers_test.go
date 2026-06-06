@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/8linkz/packmon/internal/db"
@@ -103,6 +104,72 @@ func TestDefaultFuncMapIncludesTemplateHelpers(t *testing.T) {
 	}
 	if got := funcs["sub"].(func(int, int) int)(7, 4); got != 3 {
 		t.Fatalf("sub helper = %d, want 3", got)
+	}
+}
+
+func TestRenderHelperFutureAndBoundaryBranches(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	cases := []struct {
+		name string
+		when time.Time
+		want string
+	}{
+		{"future less than minute", now.Add(30 * time.Second), "in less than a minute"},
+		{"future one minute", now.Add(time.Minute + time.Second), "in 1 minute"},
+		{"future one hour", now.Add(time.Hour + time.Minute), "in 1 hour"},
+		{"future one day", now.Add(24*time.Hour + time.Minute), "in 1 day"},
+		{"future days", now.Add(72*time.Hour + time.Minute), "in 3 days"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatTimeAgo(tt.when); got != tt.want {
+				t.Fatalf("formatTimeAgo() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+	if got := seq(0); len(got) != 0 {
+		t.Fatalf("seq(0) = %#v, want empty", got)
+	}
+}
+
+func TestRendererCacheAndParseErrorBranches(t *testing.T) {
+	t.Parallel()
+
+	okFS := fstest.MapFS{
+		"templates/layout.html": {Data: []byte(`{{define "layout"}}<main>{{template "content" .}}</main>{{end}}`)},
+		"templates/page.html":   {Data: []byte(`{{define "content"}}{{.Name}}{{end}}`)},
+	}
+	renderer := NewRenderer(okFS, false)
+	var out strings.Builder
+	if err := renderer.Render(&out, "page.html", map[string]string{"Name": "first"}); err != nil {
+		t.Fatalf("Render(first) error = %v", err)
+	}
+	if err := renderer.Render(&out, "page.html", map[string]string{"Name": "second"}); err != nil {
+		t.Fatalf("Render(cached) error = %v", err)
+	}
+	if len(renderer.cache) != 1 {
+		t.Fatalf("cache len = %d, want 1", len(renderer.cache))
+	}
+
+	err := NewRenderer(fstest.MapFS{}, false).Render(&out, "page.html", nil)
+	if err == nil || !strings.Contains(err.Error(), "read layout") {
+		t.Fatalf("Render(missing layout) error = %v", err)
+	}
+	err = NewRenderer(fstest.MapFS{
+		"templates/layout.html": {Data: []byte(`{{define`)},
+		"templates/page.html":   {Data: []byte(`{{define "content"}}ok{{end}}`)},
+	}, true).Render(&out, "page.html", nil)
+	if err == nil || !strings.Contains(err.Error(), "parse layout") {
+		t.Fatalf("Render(bad layout) error = %v", err)
+	}
+	err = NewRenderer(fstest.MapFS{
+		"templates/layout.html": {Data: []byte(`{{define "layout"}}{{template "content" .}}{{end}}`)},
+		"templates/page.html":   {Data: []byte(`{{define`)},
+	}, true).Render(&out, "page.html", nil)
+	if err == nil || !strings.Contains(err.Error(), "parse page") {
+		t.Fatalf("Render(bad page) error = %v", err)
 	}
 }
 

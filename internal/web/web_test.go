@@ -37,6 +37,10 @@ type mockStore struct {
 	refreshJobs  []db.RefreshJob
 }
 
+type storeWithoutRefresh struct {
+	Store
+}
+
 func (m *mockStore) DashboardStats(_ context.Context) (*db.DashboardStatsResult, error) {
 	if m.dashboardErr != nil {
 		return nil, m.dashboardErr
@@ -689,6 +693,61 @@ func TestHandlePackageRefreshQueuesJob(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "Refresh queued at position 2") {
 		t.Fatalf("refresh response body = %s", rec.Body.String())
+	}
+}
+
+func TestHandlePackageRefreshErrorBranches(t *testing.T) {
+	t.Parallel()
+
+	renderer := testRenderer()
+	logger := discardLogger()
+
+	methodHandler := HandlePackageRefresh(&mockStore{}, renderer, logger)
+	req := httptest.NewRequest(http.MethodGet, "/package/npm/refresh/lodash", nil)
+	rec := httptest.NewRecorder()
+	methodHandler(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET refresh status = %d, want 405", rec.Code)
+	}
+
+	invalidHandler := HandlePackageRefresh(&mockStore{}, renderer, logger)
+	req = httptest.NewRequest(http.MethodPost, "/package/notvalid/refresh/lodash", nil)
+	req.SetPathValue("ecosystem", "notvalid")
+	req.SetPathValue("name", "lodash")
+	rec = httptest.NewRecorder()
+	invalidHandler(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "Invalid package refresh request") {
+		t.Fatalf("invalid refresh = %d %q", rec.Code, rec.Body.String())
+	}
+
+	unavailableHandler := HandlePackageRefresh(storeWithoutRefresh{}, renderer, logger)
+	req = httptest.NewRequest(http.MethodPost, "/package/npm/refresh/lodash", nil)
+	req.SetPathValue("ecosystem", "npm")
+	req.SetPathValue("name", "lodash")
+	rec = httptest.NewRecorder()
+	unavailableHandler(rec, req)
+	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "not available") {
+		t.Fatalf("unavailable refresh = %d %q", rec.Code, rec.Body.String())
+	}
+
+	errorHandler := HandlePackageRefresh(&mockStore{refreshErr: errors.New("queue down")}, renderer, logger)
+	req = httptest.NewRequest(http.MethodPost, "/package/npm/refresh/lodash", nil)
+	req.SetPathValue("ecosystem", "npm")
+	req.SetPathValue("name", "lodash")
+	rec = httptest.NewRecorder()
+	errorHandler(rec, req)
+	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "Failed to queue") {
+		t.Fatalf("enqueue error refresh = %d %q", rec.Code, rec.Body.String())
+	}
+
+	duplicateHandler := HandlePackageRefresh(&mockStore{refreshNew: false, refreshPos: 4}, renderer, logger)
+	req = httptest.NewRequest(http.MethodPost, "/package/npm/refresh/lodash", nil)
+	req.SetPathValue("ecosystem", "npm")
+	req.SetPathValue("name", "lodash")
+	rec = httptest.NewRecorder()
+	duplicateHandler(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "already queued at position 4") {
+		t.Fatalf("duplicate refresh = %d %q", rec.Code, rec.Body.String())
 	}
 }
 

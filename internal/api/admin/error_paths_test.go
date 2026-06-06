@@ -406,3 +406,104 @@ func TestAdminAdditionalValidationAndRenderBranches(t *testing.T) {
 		t.Fatalf("renderAdmin(missing template) status = %d, want 500", rec.Code)
 	}
 }
+
+func TestAdminAdvisoryCreateValidationBranches(t *testing.T) {
+	store := newAdminErrorStore()
+	handler, sm := newAdminHandlerForStore(t, store, adminFlowConfig())
+
+	base := url.Values{
+		"id":           {"manual:one"},
+		"finding_type": {"vulnerability"},
+		"ecosystem":    {"npm"},
+		"name":         {"left-pad"},
+		"severity":     {"HIGH"},
+		"summary":      {"summary"},
+	}
+	cases := []struct {
+		name   string
+		mutate func(url.Values)
+		want   string
+	}{
+		{name: "invalid finding type", mutate: func(v url.Values) { v.Set("finding_type", "other") }, want: "Invalid+finding+type"},
+		{name: "missing required", mutate: func(v url.Values) { v.Set("summary", "") }, want: "required+fields"},
+		{name: "invalid severity", mutate: func(v url.Values) { v.Set("severity", "INFO") }, want: "Invalid+severity"},
+		{name: "unknown ecosystem", mutate: func(v url.Values) { v.Set("ecosystem", "unknown") }, want: "Unknown+ecosystem"},
+		{name: "too long", mutate: func(v url.Values) { v.Set("name", strings.Repeat("x", 257)) }, want: "maximum+length"},
+		{name: "non manual id", mutate: func(v url.Values) { v.Set("id", "GHSA-real") }, want: "manual%3A"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			values := url.Values{}
+			for key, vals := range base {
+				values[key] = append([]string(nil), vals...)
+			}
+			tt.mutate(values)
+			req, _ := authenticatedAdminFormRequest(t, sm, "/admin/advisories/create", values)
+			rec := httptest.NewRecorder()
+			handler.HandleAdvisoryCreate(rec, req)
+			if rec.Code != http.StatusSeeOther {
+				t.Fatalf("status = %d, want 303", rec.Code)
+			}
+			if got := rec.Header().Get("Location"); !strings.Contains(got, tt.want) {
+				t.Fatalf("Location = %q, want containing %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAdminFeedSyncResponseBranches(t *testing.T) {
+	store := newAdminErrorStore()
+	handler, sm := newAdminHandlerForStore(t, store, adminFlowConfig())
+
+	req, _ := authenticatedAdminFormRequest(t, sm, "/admin/feeds/sync", url.Values{"feed_name": {"missing"}})
+	rec := httptest.NewRecorder()
+	handler.HandleFeedSyncNow(rec, req)
+	if rec.Code != http.StatusSeeOther || !strings.Contains(rec.Header().Get("Location"), "Unknown+feed") {
+		t.Fatalf("unknown feed response = %d %q", rec.Code, rec.Header().Get("Location"))
+	}
+
+	req, _ = authenticatedAdminFormRequest(t, sm, "/admin/feeds/sync", url.Values{"feed_name": {"reversinglabs"}})
+	rec = httptest.NewRecorder()
+	handler.HandleFeedSyncNow(rec, req)
+	if rec.Code != http.StatusSeeOther || !strings.Contains(rec.Header().Get("Location"), "Manual+sync") {
+		t.Fatalf("unsupported sync response = %d %q", rec.Code, rec.Header().Get("Location"))
+	}
+
+	req, _ = authenticatedAdminFormRequest(t, sm, "/admin/feeds/sync", url.Values{"feed_name": {"osv"}})
+	req.Header.Set("HX-Request", "true")
+	rec = httptest.NewRecorder()
+	handler.HandleFeedSyncNow(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "Manual sync") {
+		t.Fatalf("htmx unavailable response = %d %q", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDesiredFeedSettingsStoredBranches(t *testing.T) {
+	store := newAdminErrorStore()
+	handler, _ := newAdminHandlerForStore(t, store, adminFlowConfig())
+	interval := 2 * time.Hour
+	store.feedConfigs["vulncheck"] = db.FeedConfig{
+		FeedName:     "vulncheck",
+		Enabled:      true,
+		Mode:         "self",
+		APIKey:       "stored-key",
+		SyncInterval: &interval,
+	}
+	feed, err := handler.desiredFeedSettings(context.Background(), "vulncheck")
+	if err != nil {
+		t.Fatalf("desiredFeedSettings: %v", err)
+	}
+	if feed.Mode != config.FeedModeSelf || feed.APIKey != "stored-key" || feed.SyncInterval != interval {
+		t.Fatalf("feed = %+v, want stored mode/api key/interval", feed)
+	}
+
+	store.feedConfigs["vulncheck"] = db.FeedConfig{FeedName: "vulncheck", Enabled: true, Mode: "bad"}
+	if _, err := handler.desiredFeedSettings(context.Background(), "vulncheck"); err == nil || !strings.Contains(err.Error(), "invalid persisted mode") {
+		t.Fatalf("desiredFeedSettings(invalid mode) = %v", err)
+	}
+
+	store.fail = map[string]error{"GetFeedConfig": errors.New("db down")}
+	if _, err := handler.desiredFeedSettings(context.Background(), "vulncheck"); err == nil || !strings.Contains(err.Error(), "load persisted") {
+		t.Fatalf("desiredFeedSettings(load error) = %v", err)
+	}
+}
