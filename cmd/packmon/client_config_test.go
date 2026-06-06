@@ -228,8 +228,11 @@ func TestResolveConfigPathExpandsHomeEnvAndRelativePaths(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve home root: %v", err)
 	}
-	if got != home {
-		t.Fatalf("home root path = %q, want %q", got, home)
+	// resolveConfigPath normalises to OS-native separators; compare against a
+	// cleaned home so the test is robust to how GOTMPDIR/TMP was set (e.g. a
+	// forward-slash value on Windows yields a mixed-separator t.TempDir()).
+	if got != filepath.Clean(home) {
+		t.Fatalf("home root path = %q, want %q", got, filepath.Clean(home))
 	}
 
 	got, err = resolveConfigPath(base, "$PACKMON_CONFIG_TEST_DIR/db")
