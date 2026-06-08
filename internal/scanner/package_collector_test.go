@@ -55,6 +55,44 @@ func TestCollectPackagesIncludesExplicitSBOM(t *testing.T) {
 	}
 }
 
+func TestCollectPackagesDropsStaleGoSumVersionWhenGoModSelectsModule(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(`module example.com/app
+
+go 1.26
+
+require github.com/klauspost/compress v1.18.6
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.sum"), []byte(`github.com/klauspost/compress v1.18.0 h1:old
+github.com/klauspost/compress v1.18.0/go.mod h1:oldmod
+github.com/klauspost/compress v1.18.6 h1:new
+github.com/klauspost/compress v1.18.6/go.mod h1:newmod
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := CollectPackages(CollectConfig{
+		Registry: parser.NewRegistry(),
+		Root:     dir,
+		MaxDepth: 2,
+	})
+	if err != nil {
+		t.Fatalf("CollectPackages() error = %v", err)
+	}
+
+	versions := []string{}
+	for _, entry := range got.Entries {
+		if entry.Package.Ecosystem == domain.EcosystemGo && entry.Package.Name == "github.com/klauspost/compress" {
+			versions = append(versions, entry.Package.Version)
+		}
+	}
+	if len(versions) != 1 || versions[0] != "v1.18.6" {
+		t.Fatalf("github.com/klauspost/compress versions = %v, want only selected go.mod version v1.18.6", versions)
+	}
+}
+
 func TestCollectPackagesReportsSBOMParseErrors(t *testing.T) {
 	dir := t.TempDir()
 	sbomPath := filepath.Join(dir, "bad.json")

@@ -500,6 +500,9 @@ func (w *Worker) resultFromPackage(rep db.PackageReputation, pkg searchPackageDa
 	if signals := removedSignals(pkg); len(signals) > 0 {
 		return w.statusResult(rep, "removed", "ReversingLabs: package version was removed", signals, now)
 	}
+	if signals := riskSignals(pkg); len(signals) > 0 {
+		return w.statusResult(rep, "risk", riskSummary(signals), signals, now)
+	}
 	return w.statusResult(rep, "clean", "ReversingLabs: no malicious signals", nil, now)
 }
 
@@ -508,6 +511,9 @@ func (w *Worker) statusResult(rep db.PackageReputation, status, summary string, 
 	next := now.Add(w.lookupTTL)
 	rep.Status = status
 	rep.Severity = "CRITICAL"
+	if status == "risk" {
+		rep.Severity = "HIGH"
+	}
 	rep.Summary = summary
 	rep.Description = ""
 	rep.LastCheckedAt = &now
@@ -542,7 +548,7 @@ func (w *Worker) errorResult(rep db.PackageReputation, err error, now time.Time)
 
 func isDefinitiveStatus(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "malicious", "removed", "clean", "not_found":
+	case "malicious", "removed", "risk", "clean", "not_found":
 		return true
 	default:
 		return false
@@ -569,12 +575,6 @@ func maliciousSignals(pkg searchPackageData) []string {
 			break
 		}
 	}
-	for key, incident := range pkg.Incidents {
-		if incidentMatches(key, incident, "malware") {
-			signals = append(signals, "incidents.type.malware")
-			break
-		}
-	}
 	return signals
 }
 
@@ -587,6 +587,29 @@ func removedSignals(pkg searchPackageData) []string {
 		signals = append(signals, "package.was_removed")
 	}
 	return signals
+}
+
+func riskSignals(pkg searchPackageData) []string {
+	var signals []string
+	for key, incident := range pkg.Incidents {
+		if incidentMatches(key, incident, "malware") {
+			signals = append(signals, "incidents.type.malware")
+			continue
+		}
+		if incidentMatches(key, incident, "tampering") {
+			signals = append(signals, "incidents.type.tampering")
+		}
+	}
+	return signals
+}
+
+func riskSummary(signals []string) string {
+	for _, signal := range signals {
+		if signal == "incidents.type.malware" {
+			return "ReversingLabs: malware incident history"
+		}
+	}
+	return "ReversingLabs: supply-chain incident history"
 }
 
 func incidentMatches(key string, incident searchIncident, want string) bool {

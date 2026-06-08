@@ -5,7 +5,6 @@ import "context"
 const (
 	npmGeneratorVersion  = "4.2.1"
 	pypiGeneratorVersion = "7.3.0"
-	goGeneratorVersion   = "v1.10.0"
 	mavenPluginVersion   = "2.9.1"
 )
 
@@ -14,6 +13,7 @@ type RunOptions struct {
 	Name string
 	Args []string
 	Dir  string
+	Env  []string
 }
 
 // RunnerFunc runs an external command and returns combined output.

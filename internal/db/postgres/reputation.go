@@ -13,6 +13,7 @@ const (
 	reputationStatusPending     = "pending"
 	reputationStatusMalicious   = "malicious"
 	reputationStatusRemoved     = "removed"
+	reputationStatusRisk        = "risk"
 	reputationStatusUnsupported = "unsupported"
 )
 
@@ -58,7 +59,7 @@ func (s *Store) FindReputationFindingsBatch(ctx context.Context, packages []db.P
 			reference_urls::text, evidence::text, last_checked_at, next_check_at, last_error, updated_at
 		FROM package_reputation_cache
 		WHERE source = $1
-		  AND status IN ('malicious', 'removed')
+		  AND status IN ('malicious', 'removed', 'risk')
 		  AND (ecosystem, name, version) IN (VALUES ` + strings.Join(placeholders, ", ") + `)
 		ORDER BY updated_at DESC, ecosystem, name, version`
 
@@ -95,7 +96,7 @@ func (s *Store) FindReputationFindings(ctx context.Context, ecosystem, name, sou
 			reference_urls::text, evidence::text, last_checked_at, next_check_at, last_error, updated_at
 		FROM package_reputation_cache
 		WHERE source = $1
-		  AND status IN ('malicious', 'removed')
+		  AND status IN ('malicious', 'removed', 'risk')
 		  AND ecosystem = $2
 		  AND name = $3
 		ORDER BY version ASC, updated_at DESC`
@@ -265,6 +266,10 @@ func reputationToFinding(rep db.PackageReputation) (domain.Finding, bool) {
 		findingType = domain.FindingTypeSupplyChainRisk
 		riskType = "removed_package"
 		title = "ReversingLabs: package version was removed"
+	case reputationStatusRisk:
+		findingType = domain.FindingTypeSupplyChainRisk
+		riskType = "malware_history"
+		title = "ReversingLabs: malware incident history"
 	default:
 		return domain.Finding{}, false
 	}

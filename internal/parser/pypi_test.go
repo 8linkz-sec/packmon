@@ -518,6 +518,19 @@ requests==2.31.0
 				"demo-pkg": "1.2.3",
 			},
 		},
+		{
+			name: "hashed pinned requirements",
+			input: `requests==2.31.0 \
+    --hash=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    --hash=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+flask==3.0.0 --hash=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+`,
+			wantCount: 2,
+			wantPkgs: map[string]string{
+				"requests": "2.31.0",
+				"flask":    "3.0.0",
+			},
+		},
 	}
 
 	for _, tt := range tests {

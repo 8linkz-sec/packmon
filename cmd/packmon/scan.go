@@ -79,6 +79,7 @@ and malicious package databases.`,
 				InsecureHTTP:  flagInsecureHTTP,
 				RequireRemote: flagRequireRemote,
 				SBOMFiles:     flagSBOMFiles,
+				ListAll:       flagListAll,
 			}
 			auto := autoSBOMFlags{
 				Enabled:      flagAutoSBOM,
@@ -90,8 +91,8 @@ and malicious package databases.`,
 				return withExitCode(ExitOperational, err)
 			}
 			if flagAutoSBOM {
-				if flagListPackages || flagOutdated || flagListAll {
-					return withExitCode(ExitOperational, fmt.Errorf("--auto-sbom cannot be combined with --list-packages, --outdated, or --list-all"))
+				if flagListPackages || flagOutdated {
+					return withExitCode(ExitOperational, fmt.Errorf("--auto-sbom cannot be combined with --list-packages or --outdated"))
 				}
 				return runAutoSBOMCommand(cmd, args, scanFlags, auto)
 			}
@@ -174,8 +175,8 @@ and malicious package databases.`,
 	f.BoolVar(&flagInsecureHTTP, "insecure-allow-http", false, "allow plain http:// server URLs (sends bearer token in cleartext; opt-in)")
 	f.BoolVar(&flagRequireRemote, "require-remote", false, "in auto mode, fail hard on remote error instead of falling back to the local database")
 	f.StringArrayVar(&flagSBOMFiles, "sbom", nil, "SBOM file to include as package input (CycloneDX JSON/XML or SPDX JSON); can be repeated")
-	f.BoolVar(&flagAutoSBOM, "auto-sbom", false, "generate an SBOM with CycloneDX tools and scan it")
-	f.BoolVar(&flagInstallTools, "install-tools", false, "with --auto-sbom: auto-install missing CycloneDX generators (pinned versions)")
+	f.BoolVar(&flagAutoSBOM, "auto-sbom", false, "generate SBOMs with local ecosystem tools and scan them")
+	f.BoolVar(&flagInstallTools, "install-tools", false, "with --auto-sbom: auto-install supported missing CycloneDX generators (pinned versions)")
 	f.StringVar(&flagKeepSBOM, "keep-sbom", "", "with --auto-sbom: write timestamped generated SBOM snapshots to this dir and keep them")
 	f.BoolVar(&flagSBOMOnly, "sbom-only", false, "with --auto-sbom: only generate SBOMs, do not scan")
 
@@ -205,6 +206,7 @@ type scanFlagValues struct {
 	InsecureHTTP  bool
 	RequireRemote bool
 	SBOMFiles     []string
+	ListAll       bool
 }
 
 type scanTarget struct {

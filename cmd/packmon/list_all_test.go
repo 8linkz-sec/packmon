@@ -527,6 +527,38 @@ func TestResolveListAllLatestNPMTransitiveUsesParentWantedVersion(t *testing.T) 
 	}
 }
 
+func TestResolveListAllLatestGitHubActionSHAAtLatestTagDoesNotReportUpdate(t *testing.T) {
+	oldLatest := fetchLatestVersionFn
+	oldTagCommit := gitRemoteTagCommitFn
+	t.Cleanup(func() {
+		fetchLatestVersionFn = oldLatest
+		gitRemoteTagCommitFn = oldTagCommit
+	})
+
+	sha := "4a3601121dd01d1626a1e23e37211e3254c1c06c"
+	fetchLatestVersionFn = func(_ context.Context, eco domain.Ecosystem, name string) string {
+		if eco != domain.EcosystemGitHubActions || name != "actions/setup-go" {
+			t.Fatalf("fetchLatestVersionFn(%s, %q)", eco, name)
+		}
+		return "v6.4.0"
+	}
+	gitRemoteTagCommitFn = func(_ context.Context, remote, tag string) (string, bool) {
+		if remote != "https://github.com/actions/setup-go.git" || tag != "v6.4.0" {
+			t.Fatalf("gitRemoteTagCommitFn(%q, %q)", remote, tag)
+		}
+		return sha, true
+	}
+
+	got := resolveListAllLatest(context.Background(), listAllPackage{
+		Name:      "actions/setup-go",
+		Version:   sha,
+		Ecosystem: domain.EcosystemGitHubActions,
+	})
+	if got.Latest != "v6.4.0" || got.Update != "-" || got.Unknown {
+		t.Fatalf("resolveListAllLatest() = %+v, want latest tag without update for matching SHA", got)
+	}
+}
+
 func TestRunListAllDoesNotMarkNewerGoPseudoVersionAsUpdate(t *testing.T) {
 	isolatedListAllEnv(t)
 	dir := t.TempDir()
@@ -888,6 +920,7 @@ func TestListAllHTMLRendersScopeSummaryAndFindingMetadata(t *testing.T) {
 			Ecosystem:    domain.EcosystemNPM,
 			Severity:     domain.SeverityMedium,
 			AdvisoryID:   "GHSA-postcss-test",
+			Title:        "PostCSS test advisory",
 			FixedVersion: "8.5.10",
 			Source:       "osv",
 		}},
@@ -905,7 +938,7 @@ func TestListAllHTMLRendersScopeSummaryAndFindingMetadata(t *testing.T) {
 			t.Fatalf("HTML missing scope summary %q:\n%s", want, out)
 		}
 	}
-	wantFinding := `<td class="finding-package">postcss@8.5.8</td><td class="short">npm</td><td class="advisory nowrap"><a href="https://github.com/advisories/GHSA-postcss-test" target="_blank" rel="noopener">GHSA-postcss-test</a></td><td>8.5.10</td><td>osv</td><td class="short">dev</td><td class="short">transitive</td>`
+	wantFinding := `<td class="finding-package">postcss@8.5.8</td><td class="short">npm</td><td class="advisory nowrap"><a href="https://github.com/advisories/GHSA-postcss-test" target="_blank" rel="noopener">GHSA-postcss-test</a></td><td>PostCSS test advisory</td><td>8.5.10</td><td>osv</td><td class="short">dev</td><td class="short">transitive</td>`
 	if !strings.Contains(out, wantFinding) {
 		t.Fatalf("HTML finding row missing package provenance:\n%s", out)
 	}
@@ -1108,6 +1141,60 @@ func TestListAllHTMLMarksMaliciousPackagesAsAttention(t *testing.T) {
 	}
 	if !strings.Contains(out, `<td class="advisory nowrap"><a href="https://secure.software/pypi/packages/evilpkg" target="_blank" rel="noopener">reversinglabs:pypi/evilpkg@2.0.0</a></td>`) {
 		t.Fatalf("HTML missing ReversingLabs advisory link:\n%s", out)
+	}
+}
+
+func TestListAllHTMLMarksMalwareHistoryPackagesClearly(t *testing.T) {
+	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+	report := listAllPackageReport{
+		Rows: []listAllRow{{
+			Name:      "polars-runtime-32",
+			Installed: "1.40.1",
+			Latest:    "1.40.1",
+			Update:    "-",
+			Ecosystem: "pypi",
+			Source:    "lockfile",
+			Scope:     "runtime",
+			Relation:  "direct",
+			Vuln:      "-",
+			LockFile:  "requirements.txt",
+		}},
+	}
+	result := &domain.ScanResult{
+		Mode: "remote",
+		Findings: []domain.Finding{{
+			Name:       "polars-runtime-32",
+			Version:    "1.40.1",
+			Ecosystem:  domain.EcosystemPyPI,
+			Type:       domain.FindingTypeSupplyChainRisk,
+			Severity:   domain.SeverityHigh,
+			AdvisoryID: "reversinglabs:pypi/polars-runtime-32@1.40.1",
+			Title:      "ReversingLabs: malware incident history",
+			RiskType:   "malware_history",
+			Source:     "reversinglabs",
+		}},
+	}
+
+	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+		t.Fatalf("writeListAllHTML: %v", err)
+	}
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read HTML: %v", err)
+	}
+	out := string(data)
+	attentionStart := strings.Index(out, "<h2>Packages Needing Attention</h2>")
+	securityStart := strings.Index(out, "<h2>Security Findings</h2>")
+	if attentionStart < 0 || securityStart < 0 || securityStart <= attentionStart {
+		t.Fatalf("HTML missing expected sections:\n%s", out)
+	}
+	attention := out[attentionStart:securityStart]
+	wantRow := `<td class="name">polars-runtime-32</td><td class="version">1.40.1</td><td class="version">1.40.1</td><td class="short">Malware history</td>`
+	if !strings.Contains(attention, wantRow) {
+		t.Fatalf("malware history package should be explicit in attention section:\n%s", attention)
+	}
+	if !strings.Contains(out, "ReversingLabs: malware incident history") {
+		t.Fatalf("HTML missing clear malware history finding title:\n%s", out)
 	}
 }
 

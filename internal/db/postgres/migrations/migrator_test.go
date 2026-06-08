@@ -57,11 +57,11 @@ func TestExpectedVersionMatchesHighestEmbeddedMigration(t *testing.T) {
 	}
 }
 
-func TestExpectedVersionIncludesMaliciousTombstoneMigration(t *testing.T) {
+func TestExpectedVersionIncludesReputationRiskStatusMigration(t *testing.T) {
 	t.Parallel()
 
-	if ExpectedVersion != 8 {
-		t.Fatalf("ExpectedVersion = %d, want 8 for malicious tombstone schema", ExpectedVersion)
+	if ExpectedVersion != 9 {
+		t.Fatalf("ExpectedVersion = %d, want 9 for reputation risk status schema", ExpectedVersion)
 	}
 }
 

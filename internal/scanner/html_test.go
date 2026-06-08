@@ -104,6 +104,30 @@ func TestBuildReportLinkValidationAndAdvisoryFallback(t *testing.T) {
 	}
 }
 
+func TestBuildReportLabelsMalwareHistoryRiskClearly(t *testing.T) {
+	r := buildReport("x", "dev", domain.SeverityCritical, &domain.ScanResult{
+		Findings: []domain.Finding{
+			{
+				Name: "polars-runtime-32", Version: "1.40.1", Ecosystem: domain.EcosystemPyPI,
+				Type: domain.FindingTypeSupplyChainRisk, Severity: domain.SeverityHigh,
+				RiskType: "malware_history", Title: "ReversingLabs: malware incident history",
+				Source: "reversinglabs",
+			},
+		},
+	})
+
+	if len(r.Sections) != 1 || len(r.Sections[0].Findings) != 1 {
+		t.Fatalf("sections = %+v, want one malware history finding", r.Sections)
+	}
+	f := r.Sections[0].Findings[0]
+	if f.Advisory != "MALWARE-HISTORY" {
+		t.Fatalf("Advisory = %q, want MALWARE-HISTORY", f.Advisory)
+	}
+	if f.RiskType != "malware_history" || f.Title != "ReversingLabs: malware incident history" {
+		t.Fatalf("finding = %+v, want explicit malware history risk", f)
+	}
+}
+
 func TestBuildReportBlockingCount(t *testing.T) {
 	r := buildReport("x", "dev", domain.SeverityHigh, &domain.ScanResult{
 		Findings: []domain.Finding{

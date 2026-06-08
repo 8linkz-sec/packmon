@@ -265,7 +265,12 @@ func advisoryLabel(f domain.Finding) string {
 	case domain.FindingTypeMalicious:
 		return "MALWARE"
 	case domain.FindingTypeSupplyChainRisk:
+		if strings.EqualFold(strings.TrimSpace(f.RiskType), "malware_history") {
+			return "MALWARE-HISTORY"
+		}
 		return "SUPPLY-CHAIN"
+	case domain.FindingTypeLifecycle:
+		return "LIFECYCLE"
 	default:
 		return ""
 	}

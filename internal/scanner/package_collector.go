@@ -111,6 +111,7 @@ func CollectPackages(cfg CollectConfig) (*PackageCollection, error) {
 		}
 	}
 
+	result.filterStaleGoSumVersions()
 	if !cfg.IncludeDev {
 		result.filterDev()
 	}
@@ -227,6 +228,42 @@ func (c *PackageCollection) filterDev() {
 	}
 	c.Entries = out
 	c.rebuildIndex()
+}
+
+func (c *PackageCollection) filterStaleGoSumVersions() {
+	selected := make(map[string]struct{})
+	selectedNames := make(map[string]struct{})
+	for _, entry := range c.Entries {
+		pkg := entry.Package
+		if pkg.Ecosystem != domain.EcosystemGo || isGoSumSource(entry.SourceFile) {
+			continue
+		}
+		key := pkg.Name + "@" + pkg.Version
+		selected[key] = struct{}{}
+		selectedNames[pkg.Name] = struct{}{}
+	}
+	if len(selectedNames) == 0 {
+		return
+	}
+
+	out := c.Entries[:0]
+	for _, entry := range c.Entries {
+		pkg := entry.Package
+		if pkg.Ecosystem == domain.EcosystemGo && isGoSumSource(entry.SourceFile) {
+			if _, hasSelectedName := selectedNames[pkg.Name]; hasSelectedName {
+				if _, selectedVersion := selected[pkg.Name+"@"+pkg.Version]; !selectedVersion {
+					continue
+				}
+			}
+		}
+		out = append(out, entry)
+	}
+	c.Entries = out
+	c.rebuildIndex()
+}
+
+func isGoSumSource(sourceFile string) bool {
+	return strings.EqualFold(filepath.Base(filepath.Clean(sourceFile)), "go.sum")
 }
 
 func (c *PackageCollection) rebuildPackages() {

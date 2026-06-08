@@ -163,6 +163,49 @@ func TestRunAutoSBOMCommandAppendsGeneratedSBOMs(t *testing.T) {
 	}
 }
 
+func TestRunAutoSBOMCommandRoutesListAllWithGeneratedSBOMs(t *testing.T) {
+	root := t.TempDir()
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.Flags().StringArray("sbom", nil, "")
+
+	var listed scanSettings
+	scanCalled := false
+	cleanupCalled := false
+	err := runAutoSBOMCommandWithDeps(cmd, []string{root}, scanFlagValues{Quiet: true, ListAll: true}, autoSBOMFlags{Enabled: true}, autoSBOMDeps{
+		loadConfig: func() (*cliConfig, string, error) { return nil, "", nil },
+		generate: func(_ context.Context, cfg sbomgen.Config) (sbomgen.Result, error) {
+			if cfg.Target != root {
+				t.Fatalf("generator Target = %q, want %q", cfg.Target, root)
+			}
+			return sbomgen.Result{SBOMPaths: []string{"generated.cdx.json"}, Cleanup: func() error {
+				cleanupCalled = true
+				return nil
+			}}, nil
+		},
+		scan: func(context.Context, scanSettings) (int, error) {
+			scanCalled = true
+			return ExitOK, nil
+		},
+		listAll: func(_ context.Context, settings scanSettings) (int, error) {
+			listed = settings
+			return ExitOK, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("runAutoSBOMCommandWithDeps: %v", err)
+	}
+	if scanCalled {
+		t.Fatalf("--auto-sbom --list-all must use list-all, not normal scan")
+	}
+	if got := strings.Join(listed.SBOMFiles, ","); got != "generated.cdx.json" {
+		t.Fatalf("list-all SBOMFiles = %q", got)
+	}
+	if !cleanupCalled {
+		t.Fatalf("generated SBOM cleanup was not called")
+	}
+}
+
 func TestRunAutoSBOMCommandUsesDefaultDeps(t *testing.T) {
 	root := t.TempDir()
 	cmd := &cobra.Command{}
@@ -250,7 +293,7 @@ func TestRunAutoSBOMCommandWithDepsErrorBranches(t *testing.T) {
 	}
 }
 
-func TestScanCommandRejectsAutoSBOMListModes(t *testing.T) {
+func TestScanCommandRejectsAutoSBOMPackageListModes(t *testing.T) {
 	cmd := newScanCmd()
 	cmd.SilenceErrors = true
 	cmd.SilenceUsage = true

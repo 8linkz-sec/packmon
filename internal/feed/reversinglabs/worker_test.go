@@ -319,8 +319,8 @@ func TestLookupBatchToleratesNumericIncidentValues(t *testing.T) {
 	if statuses["cssesc"] != "clean" {
 		t.Fatalf("cssesc status = %q, want clean", statuses["cssesc"])
 	}
-	if statuses["bad"] != "malicious" {
-		t.Fatalf("bad status = %q, want malicious", statuses["bad"])
+	if statuses["bad"] != "risk" {
+		t.Fatalf("bad status = %q, want risk", statuses["bad"])
 	}
 	if statuses["gone"] != "clean" {
 		t.Fatalf("gone status = %q, want clean", statuses["gone"])
@@ -611,14 +611,17 @@ func TestWorkerHelperBranches(t *testing.T) {
 	pkg.Identity.Removed = true
 	pkg.WasRemoved = true
 
-	if got := maliciousSignals(pkg); len(got) != 5 {
-		t.Fatalf("maliciousSignals() = %#v, want all five signals", got)
+	if got := maliciousSignals(pkg); len(got) != 4 {
+		t.Fatalf("maliciousSignals() = %#v, want active malware signals only", got)
 	}
 	if got := removedSignals(pkg); len(got) != 2 {
 		t.Fatalf("removedSignals() = %#v, want current-state removal signals only", got)
 	}
+	if got := riskSignals(pkg); len(got) != 1 || got[0] != "incidents.type.malware" {
+		t.Fatalf("riskSignals() = %#v, want malware incident history signal", got)
+	}
 
-	for _, status := range []string{"malicious", "removed", "clean", "not_found"} {
+	for _, status := range []string{"malicious", "removed", "risk", "clean", "not_found"} {
 		if !isDefinitiveStatus(status) {
 			t.Fatalf("isDefinitiveStatus(%q) = false, want true", status)
 		}
@@ -648,4 +651,36 @@ func TestWorkerHelperBranches(t *testing.T) {
 	newWorker(store, "token", slog.Default()).resetStuckJobs(context.Background())
 	store.resetErr = errors.New("reset failed")
 	newWorker(store, "token", slog.Default()).resetStuckJobs(context.Background())
+}
+
+func TestResultFromPackageMapsMalwareIncidentHistoryToRisk(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	w := newWorker(&fakeStore{}, "token", slog.Default())
+	rep := db.PackageReputation{
+		Ecosystem: "pypi",
+		Name:      "polars-runtime-32",
+		Version:   "1.40.1",
+		Source:    FeedName,
+	}
+	pkg := searchPackageData{
+		Incidents: map[string]searchIncident{
+			"malware": {Type: "malware"},
+		},
+	}
+
+	got := w.resultFromPackage(rep, pkg, now)
+	if got.Status != "risk" {
+		t.Fatalf("Status = %q, want risk for malware incident history", got.Status)
+	}
+	if got.Severity != "HIGH" {
+		t.Fatalf("Severity = %q, want HIGH", got.Severity)
+	}
+	if got.Summary != "ReversingLabs: malware incident history" {
+		t.Fatalf("Summary = %q, want clear malware history summary", got.Summary)
+	}
+	if !strings.Contains(string(got.Evidence), `"incidents.type.malware"`) {
+		t.Fatalf("Evidence = %s, want incidents.type.malware signal", string(got.Evidence))
+	}
 }

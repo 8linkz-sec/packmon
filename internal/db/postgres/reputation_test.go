@@ -56,6 +56,35 @@ func TestReputationToFindingMapsMalicious(t *testing.T) {
 	}
 }
 
+func TestReputationToFindingMapsMalwareHistoryRisk(t *testing.T) {
+	rep := db.PackageReputation{
+		Ecosystem: "pypi",
+		Name:      "polars-runtime-32",
+		Version:   "1.40.1",
+		Source:    db.ReputationSourceReversingLabs,
+		Status:    "risk",
+		Severity:  "HIGH",
+		Summary:   "ReversingLabs: malware incident history",
+	}
+
+	finding, ok := reputationToFinding(rep)
+	if !ok {
+		t.Fatal("reputationToFinding returned !ok for malware history risk reputation")
+	}
+	if finding.Type != domain.FindingTypeSupplyChainRisk {
+		t.Fatalf("Type = %q, want supply_chain_risk", finding.Type)
+	}
+	if finding.RiskType != "malware_history" {
+		t.Fatalf("RiskType = %q, want malware_history", finding.RiskType)
+	}
+	if finding.Severity != domain.SeverityHigh {
+		t.Fatalf("Severity = %q, want HIGH", finding.Severity)
+	}
+	if finding.Title != "ReversingLabs: malware incident history" {
+		t.Fatalf("Title = %q, want malware incident history summary", finding.Title)
+	}
+}
+
 func TestReputationToFindingSkipsClean(t *testing.T) {
 	rep := db.PackageReputation{
 		Ecosystem: "nuget",
@@ -88,6 +117,17 @@ func TestReputationSyncFindingMapsRowsAndTombstones(t *testing.T) {
 	}
 	if got.Type != "supply_chain_risk" || got.RiskType != "removed_package" || got.Withdrawn {
 		t.Fatalf("removed sync row = %+v", got)
+	}
+
+	risk := removed
+	risk.Name = "polars-runtime-32"
+	risk.Version = "1.40.1"
+	risk.Status = "risk"
+	risk.Severity = "HIGH"
+	risk.Summary = "ReversingLabs: malware incident history"
+	got = reputationSyncFinding(risk)
+	if got.Type != "supply_chain_risk" || got.RiskType != "malware_history" || got.Severity != "HIGH" || got.Withdrawn {
+		t.Fatalf("malware history sync row = %+v", got)
 	}
 
 	clean := removed

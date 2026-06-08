@@ -92,6 +92,7 @@ type listAllFindingRow struct {
 	Ecosystem    string
 	Advisory     string
 	AdvisoryURL  string
+	Title        string
 	FixedVersion string
 	Source       string
 	Scope        string
@@ -562,6 +563,7 @@ func writeListAllHTML(path, title string, failOn domain.Severity, result *domain
 			Ecosystem:    string(f.Ecosystem),
 			Advisory:     listAllAdvisoryLabel(f),
 			AdvisoryURL:  listAllAdvisoryURL(f),
+			Title:        f.Title,
 			FixedVersion: f.FixedVersion,
 			Source:       f.Source,
 			Scope:        meta.Scope,
@@ -659,6 +661,9 @@ func listAllHTMLFindingStatus(finding domain.Finding) (string, int) {
 	if finding.Type == domain.FindingTypeMalicious {
 		return "Malicious", 50
 	}
+	if strings.EqualFold(strings.TrimSpace(finding.RiskType), "malware_history") {
+		return "Malware history", 35
+	}
 	if strings.EqualFold(strings.TrimSpace(finding.RiskType), "removed_package") {
 		return "Removed", 40
 	}
@@ -682,6 +687,7 @@ func listAllHTMLAttentionRows(rows []listAllHTMLPackageRow) []listAllHTMLPackage
 		if row.Status == "Update available" ||
 			row.Status == "Malicious" ||
 			row.Status == "Removed" ||
+			row.Status == "Malware history" ||
 			row.Status == "Supply-chain risk" ||
 			row.Status == "Lifecycle" ||
 			row.Status == "Vulnerable" ||
@@ -942,6 +948,9 @@ func listAllAdvisoryLabel(f domain.Finding) string {
 	case domain.FindingTypeMalicious:
 		return "MALWARE"
 	case domain.FindingTypeSupplyChainRisk:
+		if strings.EqualFold(strings.TrimSpace(f.RiskType), "malware_history") {
+			return "MALWARE-HISTORY"
+		}
 		return "SUPPLY-CHAIN"
 	case domain.FindingTypeLifecycle:
 		return "LIFECYCLE"
@@ -1086,9 +1095,9 @@ a:hover{text-decoration:underline;}
 {{if .Findings}}
 <div class="table-scroll">
 <table>
-<thead><tr><th class="short">Severity</th><th class="finding-package">Package</th><th class="short">Ecosystem</th><th class="advisory nowrap">Advisory</th><th>Fix Version</th><th>Source</th><th class="short">Scope</th><th class="short">Relation</th></tr></thead>
+<thead><tr><th class="short">Severity</th><th class="finding-package">Package</th><th class="short">Ecosystem</th><th class="advisory nowrap">Advisory</th><th>Finding</th><th>Fix Version</th><th>Source</th><th class="short">Scope</th><th class="short">Relation</th></tr></thead>
 <tbody>
-{{range .Findings}}<tr><td class="short">{{.Severity}}</td><td class="finding-package">{{.Package}}</td><td class="short">{{.Ecosystem}}</td><td class="advisory nowrap">{{if .AdvisoryURL}}<a href="{{.AdvisoryURL}}" target="_blank" rel="noopener">{{.Advisory}}</a>{{else}}{{.Advisory}}{{end}}</td><td>{{.FixedVersion}}</td><td>{{.Source}}</td><td class="short">{{.Scope}}</td><td class="short">{{.Relation}}</td></tr>{{end}}
+{{range .Findings}}<tr><td class="short">{{.Severity}}</td><td class="finding-package">{{.Package}}</td><td class="short">{{.Ecosystem}}</td><td class="advisory nowrap">{{if .AdvisoryURL}}<a href="{{.AdvisoryURL}}" target="_blank" rel="noopener">{{.Advisory}}</a>{{else}}{{.Advisory}}{{end}}</td><td>{{.Title}}</td><td>{{.FixedVersion}}</td><td>{{.Source}}</td><td class="short">{{.Scope}}</td><td class="short">{{.Relation}}</td></tr>{{end}}
 </tbody>
 </table>
 </div>

@@ -305,6 +305,9 @@ func defaultRunner(ctx context.Context, opts RunOptions) ([]byte, error) {
 	if opts.Dir != "" {
 		cmd.Dir = opts.Dir
 	}
+	if len(opts.Env) > 0 {
+		cmd.Env = append(os.Environ(), opts.Env...)
+	}
 	cmd.WaitDelay = 2 * time.Second
 	return cmd.CombinedOutput()
 }

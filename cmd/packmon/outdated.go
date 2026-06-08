@@ -437,9 +437,52 @@ func resolvePackageUpdateStatus(ctx context.Context, name, installed string, eco
 		}
 	}
 	if updateAvailable(installed, target, eco) {
+		if eco == domain.EcosystemGitHubActions && githubActionSHAAtTag(ctx, name, installed, target) {
+			return listAllLatest{Latest: target, Update: "-"}
+		}
 		return listAllLatest{Latest: target, Update: "yes"}
 	}
 	return listAllLatest{Latest: target, Update: "-"}
+}
+
+func githubActionSHAAtTag(ctx context.Context, name, installed, tag string) bool {
+	if !isLikelyGitSHA(installed) {
+		return false
+	}
+	remote := githubActionRemote(name)
+	if remote == "" {
+		return false
+	}
+	commit, ok := gitRemoteTagCommitFn(ctx, remote, tag)
+	return ok && gitSHAMatches(installed, commit)
+}
+
+func githubActionRemote(name string) string {
+	parts := strings.Split(name, "/")
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		return ""
+	}
+	return "https://github.com/" + name + ".git"
+}
+
+func isLikelyGitSHA(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) < 7 || len(value) > 64 {
+		return false
+	}
+	for _, ch := range value {
+		if (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func gitSHAMatches(installed, commit string) bool {
+	installed = strings.ToLower(strings.TrimSpace(installed))
+	commit = strings.ToLower(strings.TrimSpace(commit))
+	return isLikelyGitSHA(installed) && isLikelyGitSHA(commit) && strings.HasPrefix(commit, installed)
 }
 
 func resolveNPMWantedVersion(ctx context.Context, name, installed, latest string, parents []domain.PackageParent) string {
@@ -854,11 +897,7 @@ func fetchCocoaPodsLatest(ctx context.Context, name string) string {
 }
 
 func fetchGitHubActionLatest(ctx context.Context, name string) string {
-	parts := strings.Split(name, "/")
-	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
-		return ""
-	}
-	return fetchGitLatest(ctx, "https://github.com/"+name+".git", domain.EcosystemGitHubActions)
+	return fetchGitLatest(ctx, githubActionRemote(name), domain.EcosystemGitHubActions)
 }
 
 func fetchSwiftPMLatest(ctx context.Context, name string) string {
@@ -899,6 +938,7 @@ func fetchGitLatest(ctx context.Context, remote string, eco domain.Ecosystem) st
 }
 
 var gitRemoteTagsFn = gitRemoteTags
+var gitRemoteTagCommitFn = gitRemoteTagCommit
 
 func gitRemoteTags(ctx context.Context, remote string) ([]string, error) {
 	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--tags", remote) // #nosec G204 -- fixed argv; remote is passed as one git URL argument without a shell.
@@ -926,6 +966,47 @@ func gitRemoteTags(ctx context.Context, remote string) ([]string, error) {
 		return nil, err
 	}
 	return tags, nil
+}
+
+func gitRemoteTagCommit(ctx context.Context, remote, tag string) (string, bool) {
+	remote = strings.TrimSpace(remote)
+	tag = strings.TrimSpace(tag)
+	if remote == "" || tag == "" || !strings.Contains(remote, "://") || strings.ContainsAny(tag, " \t\r\n") {
+		return "", false
+	}
+
+	tagRef := "refs/tags/" + tag
+	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--tags", remote, tagRef, tagRef+"^{}") // #nosec G204 -- fixed argv; remote and tag refs are passed as single git arguments without a shell.
+	out, err := cmd.Output()
+	if err != nil {
+		return "", false
+	}
+
+	object := ""
+	peeled := ""
+	scanner := bufio.NewScanner(strings.NewReader(string(out)))
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) < 2 {
+			continue
+		}
+		switch fields[1] {
+		case tagRef:
+			object = fields[0]
+		case tagRef + "^{}":
+			peeled = fields[0]
+		}
+	}
+	if scanner.Err() != nil {
+		return "", false
+	}
+	if peeled != "" {
+		return peeled, true
+	}
+	if object != "" {
+		return object, true
+	}
+	return "", false
 }
 
 func selectLatestVersion(versions []string, eco domain.Ecosystem) string {

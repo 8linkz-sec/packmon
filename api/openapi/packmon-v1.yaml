@@ -391,7 +391,7 @@ components:
           description: "Inclusive fix constraint for the vulnerability, for example >= 1.2.3 (vulnerability only)"
         risk_type:
           type: string
-          enum: [malware, typosquatting, supply_chain, removed_package, eol, eol_soon, security_support_only]
+          enum: [malware, typosquatting, supply_chain, removed_package, malware_history, eol, eol_soon, security_support_only]
           description: "Threat or supply-chain risk category"
         source:
           type: string

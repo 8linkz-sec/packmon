@@ -164,7 +164,7 @@ func (s *Store) exportSyncReputation(ctx context.Context, opts db.SyncExportOpti
 			reference_urls::text, evidence::text, last_checked_at, next_check_at, last_error, updated_at
 		FROM package_reputation_cache
 		WHERE source = $2
-		  AND status IN ('malicious', 'removed', 'clean', 'not_found', 'unsupported', 'error')
+		  AND status IN ('malicious', 'removed', 'risk', 'clean', 'not_found', 'unsupported', 'error')
 		  AND updated_at <= $1`
 
 	args := []any{snapshot, db.ReputationSourceReversingLabs}
@@ -225,6 +225,10 @@ func reputationSyncFinding(rep db.PackageReputation) db.SyncReputationFinding {
 	case "removed":
 		item.Type = string(domain.FindingTypeSupplyChainRisk)
 		item.RiskType = "removed_package"
+		item.Severity = normalizeReputationSeverity(rep.Severity)
+	case "risk":
+		item.Type = string(domain.FindingTypeSupplyChainRisk)
+		item.RiskType = "malware_history"
 		item.Severity = normalizeReputationSeverity(rep.Severity)
 	default:
 		item.Withdrawn = true

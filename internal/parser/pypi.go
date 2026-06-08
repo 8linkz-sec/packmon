@@ -355,7 +355,11 @@ func parseEditableRequirement(line string) string {
 func parseRequirementLine(line string) (name, version string, pinned bool) {
 	// Pinned: name==version
 	if idx := strings.Index(line, "=="); idx > 0 {
-		return strings.TrimSpace(line[:idx]), strings.TrimSpace(line[idx+2:]), true
+		version := strings.TrimSpace(line[idx+2:])
+		if fields := strings.Fields(version); len(fields) > 0 {
+			version = fields[0]
+		}
+		return strings.TrimSpace(line[:idx]), version, true
 	}
 
 	// Not pinned but has a version specifier (>=, <=, ~=, !=, etc.).

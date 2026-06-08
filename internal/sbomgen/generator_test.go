@@ -26,7 +26,6 @@ func TestInstallSpecPinsVersions(t *testing.T) {
 	cases := map[string]string{
 		"npm":  "@cyclonedx/cyclonedx-npm@" + npmGeneratorVersion,
 		"pypi": "cyclonedx-bom==" + pypiGeneratorVersion,
-		"go":   "github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@" + goGeneratorVersion,
 	}
 	for eco, wantPkg := range cases {
 		spec := reg[eco].InstallSpec()
@@ -39,5 +38,8 @@ func TestInstallSpecPinsVersions(t *testing.T) {
 	}
 	if reg["maven"].InstallSpec().CanAutoInstall {
 		t.Errorf("maven must not be auto-installable")
+	}
+	if reg["go"].InstallSpec().CanAutoInstall {
+		t.Errorf("go must use the local Go toolchain and not be auto-installable")
 	}
 }

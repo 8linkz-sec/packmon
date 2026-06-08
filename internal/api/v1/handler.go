@@ -362,6 +362,9 @@ func validateCheckPackages(packages []domain.Package) error {
 		if pkg.Version == "" {
 			return fmt.Errorf("packages[%d].version is required", position)
 		}
+		if len(strings.Fields(pkg.Version)) != 1 {
+			return fmt.Errorf("packages[%d].version is invalid", position)
+		}
 		if !pkg.Ecosystem.Valid() {
 			return fmt.Errorf("packages[%d].ecosystem is invalid", position)
 		}

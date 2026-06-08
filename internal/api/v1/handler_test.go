@@ -850,6 +850,11 @@ func TestHandleCheck_InvalidPackageFields(t *testing.T) {
 			want: "packages[1].version is required",
 		},
 		{
+			name: "invalid version with requirement options",
+			body: `{"packages":[{"ecosystem":"pypi","name":"requests","version":"2.31.0 --hash=sha256:abc"}]}`,
+			want: "packages[1].version is invalid",
+		},
+		{
 			name: "invalid ecosystem",
 			body: `{"packages":[{"ecosystem":"unknown","name":"left-pad","version":"1.0.0"}]}`,
 			want: "packages[1].ecosystem is invalid",

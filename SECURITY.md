@@ -187,6 +187,9 @@ file paths from git as untrusted until scoped under the repository root.
 ReversingLabs API tokens are sensitive feed API keys and follow the same
 handling rules as VulnCheck, NVD, and Socket.dev keys. Packmon stores only
 normalized ReversingLabs status and minimal evidence, not full raw reports.
+Historical ReversingLabs incident evidence is exposed as supply-chain
+reputation risk, not as an active malicious-package finding unless active
+malware signals are present.
 ReversingLabs rate-limit, capacity, and network failures degrade that source
 but must not fail scans or delete existing cached blocking data.
 
@@ -351,8 +354,9 @@ GitLab runner execution remains an external validation requirement.
 ## Dependency and Tooling Security
 
 `packmon scan --auto-sbom` is local CLI behavior only; the server remains
-unaffected. The CLI invokes fixed-name CycloneDX generators with argument
-arrays and no shell. `--install-tools` is off by default because it runs
+unaffected. The CLI invokes fixed-name local tools with argument arrays and no
+shell: Go uses the local Go toolchain, while npm, PyPI, and Maven use
+CycloneDX generators. `--install-tools` is off by default because it runs
 third-party package-manager installs, including any behavior those ecosystems
 perform during installation. When enabled, Packmon logs the package, source,
 and exact argv before running the pinned install command. Generated SBOM files

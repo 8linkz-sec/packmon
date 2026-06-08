@@ -164,10 +164,10 @@ Kept SBOMs use timestamped snapshot names such as
 `go-20260607T131329Z.cdx.json` and `package-20260607T131329Z.cdx.json`, so
 repeated automated runs in the same directory do not overwrite previous SBOMs.
 
-This requires the matching CycloneDX generator on `PATH`, such as
-`cyclonedx-gomod`, `cyclonedx-npm`, `cyclonedx-py`, or `mvn` for Maven
-projects. Add `--install-tools` to let Packmon install pinned versions where
-automatic installation is supported.
+This requires the matching local tool on `PATH`: the Go toolchain for Go
+modules, `cyclonedx-npm` for npm, `cyclonedx-py` for Python, or `mvn` for
+Maven projects. Add `--install-tools` to let Packmon install pinned CycloneDX
+generators where automatic installation is supported.
 
 ## List-All Reports
 
@@ -178,14 +178,18 @@ and vulnerability marker. The HTML report intentionally omits noisy `Via` and
 `Flags` columns. Its `Packages Needing Attention` section shows actionable
 updates, removed packages, and packages with security findings; unknown
 latest-status rows stay in `All Packages`. Finding-derived states such as
-`Malicious`, `Removed`, `Supply-chain risk`, and `Lifecycle` override general
-latest-version status. Vulnerability findings with a known fix or update path
+`Malicious`, `Removed`, `Malware history`, `Supply-chain risk`, and `Lifecycle`
+override general latest-version status. Vulnerability findings with a known fix
+or update path
 render as `Update available`; only vulnerability findings without a known update
 path render as `Vulnerable`, and vulnerable packages are not shown as
 `Up-to-Date`. Full source paths are deduplicated at the bottom under `Checked
 Inventory Sources`. Security finding advisory IDs link to their external
 advisory pages where Packmon can derive one. Long Docker digests are shown with
-a trailing `..` and a `Copy` button for the full digest.
+a trailing `..` and a `Copy` button for the full digest. GitHub Actions pinned
+by commit SHA are treated as current when the pin matches the dereferenced
+latest tag commit, and stale `go.sum` versions are suppressed when Go selected
+module versions are available from `go.mod` or generated SBOMs.
 
 Docker inventory is metadata-only. Packmon reads image declarations from
 `Dockerfile`, `Dockerfile.*`, `docker-compose.yml`, `docker-compose.yaml`,
@@ -259,7 +263,7 @@ Lifecycle/EOL findings are available only where package coordinates map to an
 endoflife.date product and release cycle. Library packages without official
 lifecycle metadata may still be vulnerable or outdated without being reported
 as EOL.
-ReversingLabs lookups are disabled by default. When enabled, the server performs demand-driven lookups only for supported packages that are not already covered by other feeds, stores normalized cache rows internally, and refreshes each package version at most once per day.
+ReversingLabs lookups are disabled by default. When enabled, the server performs demand-driven lookups only for supported packages that are not already covered by other feeds, stores normalized cache rows internally, and refreshes each package version at most once per day. Active malware signals are reported as malicious findings; historical malware incident evidence is reported separately as supply-chain reputation risk.
 
 ## Client Profiles
 

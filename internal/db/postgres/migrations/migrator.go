@@ -21,7 +21,7 @@ var fs embed.FS
 
 // ExpectedVersion is the schema version that this binary expects.
 // It must match the highest migration number embedded in the binary.
-const ExpectedVersion = 8
+const ExpectedVersion = 9
 
 type migrationFile struct {
 	version int

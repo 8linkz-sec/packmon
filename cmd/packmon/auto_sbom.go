@@ -55,12 +55,14 @@ type autoSBOMDeps struct {
 	loadConfig func() (*cliConfig, string, error)
 	generate   func(context.Context, sbomgen.Config) (sbomgen.Result, error)
 	scan       func(context.Context, scanSettings) (int, error)
+	listAll    func(context.Context, scanSettings) (int, error)
 }
 
 var defaultAutoSBOMDeps = autoSBOMDeps{
 	loadConfig: loadCurrentCLIConfig,
 	generate:   sbomgen.Run,
 	scan:       runSingleScan,
+	listAll:    runListAll,
 }
 
 func validateAutoSBOMOnlySettings(settings scanSettings) error {
@@ -144,7 +146,11 @@ func runAutoSBOMCommandWithDeps(cmd *cobra.Command, args []string, flags scanFla
 	}
 
 	settings.SBOMFiles = append(append([]string(nil), settings.SBOMFiles...), res.SBOMPaths...)
-	exitCode, err := deps.scan(cmd.Context(), settings)
+	run := deps.scan
+	if flags.ListAll {
+		run = deps.listAll
+	}
+	exitCode, err := run(cmd.Context(), settings)
 	if err != nil {
 		return withExitCode(exitCode, err)
 	}

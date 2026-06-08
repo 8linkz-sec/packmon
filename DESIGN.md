@@ -156,8 +156,9 @@ Important behavior:
   "Packages Needing Attention" section lists actionable updates, removed
   packages, and packages with security findings; unknown latest-status rows
   remain visible only in "All Packages". Finding-derived states such as
-  `Malicious`, `Removed`, `Supply-chain risk`, and `Lifecycle` override general
-  latest-version status. Vulnerability findings with a known fix or update path
+  `Malicious`, `Removed`, `Malware history`, `Supply-chain risk`, and
+  `Lifecycle` override general latest-version status. Vulnerability findings
+  with a known fix or update path
   render as `Update available`; only vulnerability findings without a known
   update path render as `Vulnerable`, and a package with a security finding is
   never shown as merely `Up-to-Date`. Security finding advisories link to
@@ -172,15 +173,17 @@ Important behavior:
   package graph metadata for scope, relation, `via`, and parent-aware npm
   update resolution.
 - `--auto-sbom` detects Go, npm, PyPI, and Maven manifests, invokes the
-  matching CycloneDX generator, validates CycloneDX JSON output, and appends
-  the generated SBOM files to the normal scan input. `--sbom-only` generates
-  SBOM files without running a scan; `--keep-sbom <dir>` keeps generated files
-  as timestamped snapshots so repeated runs do not overwrite previous SBOMs;
-  `--install-tools` may install missing pinned generator tools. Pinned
-  generator versions are `cyclonedx-gomod` v1.10.0, `cyclonedx-npm` 4.2.1,
-  `cyclonedx-bom` 7.3.0, and `cyclonedx-maven-plugin` 2.9.1. Generation runs
-  local external toolchains and may cause those toolchains to contact package
-  registries.
+  matching local ecosystem tooling, validates CycloneDX JSON output, and
+  appends the generated SBOM files to the normal scan input. Go modules are
+  converted from `go list -mod=readonly -m -json all` output with
+  `GOWORK=off`; npm, PyPI, and Maven use CycloneDX generators. `--sbom-only`
+  generates SBOM files without running a scan; `--keep-sbom <dir>` keeps
+  generated files as timestamped snapshots so repeated runs do not overwrite
+  previous SBOMs; `--install-tools` may install missing pinned generator tools
+  where automatic installation is supported. Pinned generator versions are
+  `cyclonedx-npm` 4.2.1, `cyclonedx-bom` 7.3.0, and
+  `cyclonedx-maven-plugin` 2.9.1. Generation runs local external toolchains and
+  may cause those toolchains to contact package registries.
 - config precedence is flags, environment, project `.packmon.yaml`, user-global
   `~/.packmon/config/packmon.yaml`, defaults.
 - local history is stored compactly in SQLite for report/dashboard features.
@@ -195,7 +198,10 @@ Important behavior:
   as `--list-all`. For npm transitive packages with known immediate parents,
   Packmon resolves the highest version allowed by the parents' dependency
   ranges and does not report a registry-latest major as an actionable update
-  when the parent range cannot select it.
+  when the parent range cannot select it. GitHub Actions pinned by commit SHA
+  are not reported as outdated when the pin matches the dereferenced latest tag
+  commit. Go inventory suppresses stale `go.sum` versions when `go.mod` or a
+  generated Go SBOM provides the selected module version.
 - `--list-all` also inventories Docker image declarations from `Dockerfile`,
   `Dockerfile.*`, `docker-compose.yml`, `docker-compose.yaml`, `compose.yml`,
   and `compose.yaml`. Docker rows use ecosystem `docker`, show declared
@@ -245,8 +251,11 @@ Package reputation cache rows are version-specific normalized records from
 demand-driven reputation sources. They store status, minimal evidence,
 timestamps, and refresh scheduling data. `malicious` status produces a
 malicious finding. `removed` status produces a blocking `supply_chain_risk`
-finding. `clean`, `not_found`, `unsupported`, and transient `error` statuses do
-not produce findings.
+finding with `risk_type=removed_package`. `risk` status represents
+non-active supply-chain reputation evidence, such as ReversingLabs malware
+incident history, and produces a blocking `supply_chain_risk` finding with
+`risk_type=malware_history`. `clean`, `not_found`, `unsupported`, and transient
+`error` statuses do not produce findings.
 
 Lifecycle rows are normalized from product release metadata into package
 ecosystem/name mappings and release cycles. Exact end-of-life matches produce a
@@ -282,7 +291,9 @@ part of the required free core coverage:
   demand-driven reputation source. The server stores normalized package
   reputation cache rows and refreshes a package version at most once per 24
   hours when it appears in a check request and no non-ReversingLabs feed already
-  covers it.
+  covers it. Active malware signals are reported as malicious findings;
+  historical malware incident evidence is reported separately as supply-chain
+  reputation risk.
 
 OSV/RustSec affected-package records with `database_specific.categories`
 containing `malicious` are normalized as malicious package findings, not as

@@ -111,6 +111,39 @@ func TestTableWriterShowsSupplyChainRiskDistinctly(t *testing.T) {
 	}
 }
 
+func TestTableWriterShowsMalwareHistoryRiskDistinctly(t *testing.T) {
+	result := &domain.ScanResult{
+		Mode:             "remote",
+		PackagesScanned:  1,
+		FindingsCount:    1,
+		FindingsBlocking: true,
+		Findings: []domain.Finding{
+			{
+				Name:      "polars-runtime-32",
+				Version:   "1.40.1",
+				Ecosystem: domain.EcosystemPyPI,
+				Type:      domain.FindingTypeSupplyChainRisk,
+				Severity:  domain.SeverityHigh,
+				Title:     "ReversingLabs: malware incident history",
+				RiskType:  "malware_history",
+				Source:    "reversinglabs",
+			},
+		},
+	}
+
+	var out bytes.Buffer
+	if err := NewTableWriter(true).Write(&out, result); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	output := out.String()
+	for _, expected := range []string{"MALWARE-HISTORY", "Review history", "reversinglabs", "(1 blocking)"} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("table output missing %q\n%s", expected, output)
+		}
+	}
+}
+
 func TestTableWriterShowsLifecycleDistinctly(t *testing.T) {
 	result := &domain.ScanResult{
 		Mode:            "remote",

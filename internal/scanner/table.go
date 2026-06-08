@@ -91,14 +91,7 @@ func (tw *TableWriter) Write(w io.Writer, result *domain.ScanResult) error {
 		pkg := fmt.Sprintf("%s@%s", f.Name, f.Version)
 		advisory := f.AdvisoryID
 		if advisory == "" {
-			switch f.Type {
-			case domain.FindingTypeMalicious:
-				advisory = "MALWARE"
-			case domain.FindingTypeSupplyChainRisk:
-				advisory = "SUPPLY-CHAIN"
-			case domain.FindingTypeLifecycle:
-				advisory = "LIFECYCLE"
-			}
+			advisory = advisoryLabel(f)
 		}
 		fixVer := f.FixedVersion
 		if fixVer == "" {
@@ -106,7 +99,11 @@ func (tw *TableWriter) Write(w io.Writer, result *domain.ScanResult) error {
 			case domain.FindingTypeMalicious:
 				fixVer = "Remove pkg"
 			case domain.FindingTypeSupplyChainRisk:
-				fixVer = "Review pkg"
+				if strings.EqualFold(strings.TrimSpace(f.RiskType), "malware_history") {
+					fixVer = "Review history"
+				} else {
+					fixVer = "Review pkg"
+				}
 			case domain.FindingTypeLifecycle:
 				fixVer = "Review lifecycle"
 			default:
