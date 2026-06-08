@@ -18,6 +18,7 @@ import (
 type maliciousTestStore struct {
 	db.Store
 	findings     []db.MaliciousFinding
+	deletedIDs   []string
 	statuses     []db.FeedSyncStatus
 	status       *db.FeedSyncStatus
 	upsertErr    error
@@ -33,6 +34,11 @@ func (s *maliciousTestStore) UpsertMaliciousFinding(_ context.Context, finding *
 		return s.upsertErr
 	}
 	s.findings = append(s.findings, *finding)
+	return nil
+}
+
+func (s *maliciousTestStore) DeleteMaliciousFinding(_ context.Context, id string) error {
+	s.deletedIDs = append(s.deletedIDs, id)
 	return nil
 }
 
@@ -229,6 +235,39 @@ func TestClassifyRiskTypeHeuristics(t *testing.T) {
 	}
 }
 
+func TestWalkEntriesTombstonesWithdrawnReports(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "withdrawn", "pypi", "fastapi", "MAL-2026-4750.json"), `{
+		"id":"MAL-2026-4750",
+		"summary":"Malicious code in fastapi (PyPI)",
+		"withdrawn":"2026-05-26T13:04:03Z",
+		"affected":[{"package":{"ecosystem":"PyPI","name":"fastapi"},"versions":["0.136.3"]}]
+	}`)
+
+	store := &maliciousTestStore{}
+	syncer := NewSyncer(store, slog.New(slog.NewTextHandler(os.Stdout, nil)), t.TempDir())
+	seen := map[string]struct{}{}
+	synced, total, err := syncer.walkEntries(context.Background(), store, root, seen)
+	if err != nil {
+		t.Fatalf("walkEntries() error = %v", err)
+	}
+
+	if total != 1 || synced != 1 {
+		t.Fatalf("walkEntries() = synced %d total %d, want 1/1", synced, total)
+	}
+	if len(store.findings) != 0 {
+		t.Fatalf("withdrawn report was upserted as active finding: %+v", store.findings)
+	}
+	if len(store.deletedIDs) != 1 || store.deletedIDs[0] != "MAL-2026-4750" {
+		t.Fatalf("deleted IDs = %+v, want [MAL-2026-4750]", store.deletedIDs)
+	}
+	if _, ok := seen["MAL-2026-4750"]; ok {
+		t.Fatalf("withdrawn ID should not be included in active seen IDs: %#v", seen)
+	}
+}
+
 func TestWalkEntriesSkipsUnsupportedFiles(t *testing.T) {
 	t.Parallel()
 
@@ -367,6 +406,42 @@ func TestSyncUsesExistingGitCheckoutAndWalksEntries(t *testing.T) {
 	}
 }
 
+func TestSyncResyncsSameCommitWhenImporterMetadataMissing(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	dataDir := t.TempDir()
+	repoDir := filepath.Join(dataDir, "malicious-packages")
+	initGitRepo(t, repoDir)
+	writeFile(t, filepath.Join(repoDir, maliciousDir, "npm", "leftpad", "MAL-sync.json"), `{
+		"id":"MAL-sync",
+		"summary":"supply chain malware",
+		"affected":[{"package":{"ecosystem":"npm","name":"leftpad"}}]
+	}`)
+	gitCommitAll(t, repoDir)
+
+	store := &maliciousTestStore{status: &db.FeedSyncStatus{
+		FeedName:       FeedName,
+		LastSyncStatus: "success",
+		LastCommitHash: gitRevParse(t, repoDir, "HEAD"),
+	}}
+	syncer := NewSyncer(store, slog.New(slog.NewTextHandler(os.Stdout, nil)), dataDir)
+	result, err := syncer.Sync(context.Background(), store)
+	if err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+
+	if result.EntriesSynced != 1 || result.EntriesTotal != 1 {
+		t.Fatalf("Sync() result = %+v, want 1/1", result)
+	}
+	if len(store.findings) != 1 || store.findings[0].ID != "MAL-sync" {
+		t.Fatalf("findings = %+v, want MAL-sync", store.findings)
+	}
+}
+
 func TestSyncContinuesWhenStatusLookupFails(t *testing.T) {
 	t.Parallel()
 
@@ -435,4 +510,16 @@ func runGit(t *testing.T, repoDir string, args ...string) {
 	if err != nil {
 		t.Fatalf("git %v: %v\n%s", args, err, out)
 	}
+}
+
+func gitRevParse(t *testing.T, repoDir, rev string) string {
+	t.Helper()
+	// #nosec G204 -- test helper executes git with fixed test-provided args.
+	cmd := exec.Command("git", "rev-parse", rev)
+	cmd.Dir = repoDir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git rev-parse %s: %v", rev, err)
+	}
+	return strings.TrimSpace(string(out))
 }

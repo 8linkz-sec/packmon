@@ -23,6 +23,10 @@ const (
 	// FeedName is the canonical name used in feed_sync_status.
 	FeedName = "openssf"
 
+	// importerVersion is bumped when the importer semantics change and an
+	// unchanged git feed commit must be reprocessed.
+	importerVersion = 2
+
 	// repoURL is the OpenSSF malicious-packages repository.
 	repoURL = "https://github.com/ossf/malicious-packages.git"
 
@@ -102,15 +106,20 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 		)
 	}
 	if status != nil && status.LastCommitHash == commitHash && status.LastSyncStatus == "success" {
-		s.logger.Info("malicious-packages unchanged, skipping sync",
+		if hasCurrentImporterMetadata(status) {
+			s.logger.Info("malicious-packages unchanged, skipping sync",
+				slog.String("commit", commitHash),
+			)
+			dur := time.Since(start)
+			s.recordSyncSuccessWithCommit(ctx, start, dur, status.EntriesTotal, 0, commitHash)
+			return &feed.SyncResult{
+				EntriesSynced: 0,
+				EntriesTotal:  status.EntriesTotal,
+			}, nil
+		}
+		s.logger.Info("malicious-packages importer changed, reprocessing unchanged commit",
 			slog.String("commit", commitHash),
 		)
-		dur := time.Since(start)
-		s.recordSyncSuccessWithCommit(ctx, start, dur, status.EntriesTotal, 0, commitHash)
-		return &feed.SyncResult{
-			EntriesSynced: 0,
-			EntriesTotal:  status.EntriesTotal,
-		}, nil
 	}
 
 	// The repository has two potential directory layouts:
@@ -216,6 +225,23 @@ func (s *Syncer) walkEntries(ctx context.Context, store db.Store, root string, s
 		}
 
 		findings := mapToMaliciousFindings(&entry, relativePath)
+		if isWithdrawnEntry(&entry, relativePath) {
+			ids := findingIDsForTombstone(&entry, relativePath, findings)
+			for _, id := range ids {
+				if deleteErr := store.DeleteMaliciousFinding(ctx, id); deleteErr != nil {
+					s.logger.Warn("failed to tombstone withdrawn malicious finding",
+						slog.String("id", id),
+						slog.String("error", deleteErr.Error()),
+					)
+					return fmt.Errorf("tombstone withdrawn malicious finding %s: %w", id, deleteErr)
+				}
+				if seenIDs != nil {
+					delete(seenIDs, id)
+				}
+				synced++
+			}
+			return nil
+		}
 		if len(findings) == 0 {
 			return nil
 		}
@@ -266,6 +292,7 @@ func (s *Syncer) recordSyncSuccessWithCommit(ctx context.Context, start time.Tim
 		EntriesSynced:    synced,
 		EntriesTotal:     total,
 		LastCommitHash:   commitHash,
+		Metadata:         importerMetadata(),
 	})
 	if err != nil {
 		s.logger.Warn("failed to record sync status", "error", err)
@@ -288,6 +315,26 @@ func (s *Syncer) recordSyncFailure(ctx context.Context, start time.Time, syncErr
 	}
 }
 
+type syncMetadata struct {
+	ImporterVersion int `json:"importer_version"`
+}
+
+func hasCurrentImporterMetadata(status *db.FeedSyncStatus) bool {
+	if status == nil || len(status.Metadata) == 0 {
+		return false
+	}
+	var meta syncMetadata
+	if err := json.Unmarshal(status.Metadata, &meta); err != nil {
+		return false
+	}
+	return meta.ImporterVersion >= importerVersion
+}
+
+func importerMetadata() json.RawMessage {
+	data, _ := json.Marshal(syncMetadata{ImporterVersion: importerVersion})
+	return data
+}
+
 // ---------------------------------------------------------------------------
 // OpenSSF Malicious Packages JSON schema
 //
@@ -296,12 +343,13 @@ func (s *Syncer) recordSyncFailure(ctx context.Context, start time.Time, syncErr
 // ---------------------------------------------------------------------------
 
 type malEntry struct {
-	ID        string    `json:"id"`
-	Summary   string    `json:"summary"`
-	Details   string    `json:"details"`
-	Aliases   []string  `json:"aliases"`
-	Modified  time.Time `json:"modified"`
-	Published time.Time `json:"published"`
+	ID        string     `json:"id"`
+	Summary   string     `json:"summary"`
+	Details   string     `json:"details"`
+	Aliases   []string   `json:"aliases"`
+	Modified  time.Time  `json:"modified"`
+	Published time.Time  `json:"published"`
+	Withdrawn *time.Time `json:"withdrawn"`
 
 	Affected         []malAffected   `json:"affected"`
 	References       []malReference  `json:"references"`
@@ -434,6 +482,35 @@ func mapToMaliciousFindings(entry *malEntry, filePath string) []*db.MaliciousFin
 	}
 
 	return findings
+}
+
+func isWithdrawnEntry(entry *malEntry, filePath string) bool {
+	if entry.Withdrawn != nil {
+		return true
+	}
+	path := filepath.ToSlash(filePath)
+	return path == "withdrawn" || strings.HasPrefix(path, "withdrawn/")
+}
+
+func findingIDsForTombstone(entry *malEntry, filePath string, findings []*db.MaliciousFinding) []string {
+	if len(findings) > 0 {
+		ids := make([]string, 0, len(findings))
+		for _, finding := range findings {
+			if finding.ID != "" {
+				ids = append(ids, finding.ID)
+			}
+		}
+		return ids
+	}
+
+	id := entry.ID
+	if id == "" {
+		id = deriveIDFromPath(filePath)
+	}
+	if id == "" {
+		return nil
+	}
+	return []string{id}
 }
 
 // classifyRiskType attempts to determine whether a malicious package is
