@@ -204,6 +204,12 @@ pull images, or log full local Docker errors. Registry checks use public
 manifest metadata requests and bearer-token challenges; private registry
 credentials are not read. Failures degrade to `unknown` in reports.
 
+npm transitive update checks may fetch public npm package manifests for
+immediate parent packages and child version lists to compute the highest
+version allowed by declared parent dependency ranges. This metadata is used
+only for report status; private registry credentials are not read, and lookup
+failures fall back to normal best-effort latest-version handling.
+
 Vulnerability advisories without upstream severity or CVSS data are treated as
 `LOW` until enrichment can raise them. Malicious-package categories from
 OSV/RustSec are stored as malicious findings rather than unresolved
@@ -351,8 +357,9 @@ third-party package-manager installs, including any behavior those ecosystems
 perform during installation. When enabled, Packmon logs the package, source,
 and exact argv before running the pinned install command. Generated SBOM files
 are written with `0600` permissions in a `0700` temporary directory and deleted
-after the scan unless `--keep-sbom` is set; keep mode refuses to overwrite an
-existing file.
+after the scan unless `--keep-sbom` is set. Keep mode writes timestamped
+snapshot filenames and never overwrites existing files; if a snapshot filename
+already exists, Packmon adds a numeric suffix.
 
 Required checks:
 

@@ -2,6 +2,7 @@ package ghsa
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -99,6 +100,50 @@ func TestMapToVulnerability_PreservesGitHubActionsPackage(t *testing.T) {
 	}
 	if vuln.AffectedPackages[0].Name != "actions/setup-node" {
 		t.Fatalf("AffectedPackages[0].Name = %q, want %q", vuln.AffectedPackages[0].Name, "actions/setup-node")
+	}
+}
+
+func TestMapToVulnerabilityMergesDuplicateGitHubActionsRanges(t *testing.T) {
+	t.Parallel()
+
+	raw := []byte(`{
+		"id":"GHSA-codeql-action",
+		"summary":"CodeQL Action advisory",
+		"affected":[
+			{
+				"package":{"ecosystem":"GitHub Actions","name":"github/codeql-action"},
+				"ranges":[{"type":"ECOSYSTEM","events":[{"introduced":"3.26.11"},{"fixed":"3.28.3"}]}]
+			},
+			{
+				"package":{"ecosystem":"GitHub Actions","name":"github/codeql-action"},
+				"ranges":[{"type":"ECOSYSTEM","events":[{"introduced":"2.26.11"}]}],
+				"database_specific":{"last_known_affected_version_range":"< 3.0.0"}
+			}
+		],
+		"database_specific":{"severity":"HIGH"}
+	}`)
+	var advisory ghsaAdvisory
+	if err := json.Unmarshal(raw, &advisory); err != nil {
+		t.Fatalf("unmarshal advisory: %v", err)
+	}
+
+	vuln := mapToVulnerability(&advisory, raw)
+	if len(vuln.AffectedPackages) != 1 {
+		t.Fatalf("AffectedPackages count = %d, want 1 merged package", len(vuln.AffectedPackages))
+	}
+
+	var ranges []ghsaRange
+	if err := json.Unmarshal(vuln.AffectedPackages[0].VersionRanges, &ranges); err != nil {
+		t.Fatalf("unmarshal version ranges: %v", err)
+	}
+	if len(ranges) != 2 {
+		t.Fatalf("merged ranges count = %d, want 2: %s", len(ranges), vuln.AffectedPackages[0].VersionRanges)
+	}
+	if ranges[0].Events[1].Fixed != "3.28.3" {
+		t.Fatalf("first merged range = %+v, want fixed 3.28.3 preserved", ranges[0])
+	}
+	if len(ranges[1].Events) != 2 || ranges[1].Events[1].Fixed != "3.0.0" {
+		t.Fatalf("second merged range = %+v, want fixed 3.0.0 derived from last_known_affected_version_range", ranges[1])
 	}
 }
 

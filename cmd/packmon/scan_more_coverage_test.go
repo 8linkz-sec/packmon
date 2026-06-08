@@ -208,6 +208,22 @@ func TestRunSingleScanSBOMErrors(t *testing.T) {
 	}
 }
 
+func TestRunListPackagesMalformedSBOMReturnsParserExit(t *testing.T) {
+	projectDir := t.TempDir()
+	badPath := filepath.Join(projectDir, "bad.cdx.json")
+	if err := os.WriteFile(badPath, []byte(`{"bomFormat":"CycloneDX",`), 0o600); err != nil {
+		t.Fatalf("write malformed SBOM: %v", err)
+	}
+
+	err := runListPackages([]string{projectDir}, "", 2, true, []string{badPath})
+	if err == nil {
+		t.Fatal("runListPackages(malformed SBOM) error = nil")
+	}
+	if code := exitCodeForError(err); code != ExitParser {
+		t.Fatalf("exitCodeForError = %d, want %d; err=%v", code, ExitParser, err)
+	}
+}
+
 func TestBuildScanTargetsValidationBranches(t *testing.T) {
 	cfg := &cliConfig{Repos: []cliRepoConfig{{Name: "app", Path: "."}}}
 

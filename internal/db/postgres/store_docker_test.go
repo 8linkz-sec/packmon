@@ -270,6 +270,55 @@ func TestPostgresStoreDockerEndToEnd(t *testing.T) {
 		t.Fatalf("RepairGHSAAffectedPackages() = %d, %v; want 1 nil", count, err)
 	}
 
+	ghsaMergeRepair := &db.Vulnerability{
+		ID:        "GHSA-repair-merge-0001",
+		Summary:   "repair merged affected ranges",
+		Severity:  "HIGH",
+		Published: now,
+		Modified:  now,
+		Sources: []db.VulnerabilitySource{
+			{
+				Source:   "ghsa",
+				SourceID: "GHSA-repair-merge-0001",
+				RawJSON: json.RawMessage(`{
+					"affected":[
+						{
+							"package":{"ecosystem":"GitHub Actions","name":"github/codeql-action"},
+							"ranges":[{"type":"ECOSYSTEM","events":[{"introduced":"3.26.11"},{"fixed":"3.28.3"}]}]
+						},
+						{
+							"package":{"ecosystem":"GitHub Actions","name":"github/codeql-action"},
+							"ranges":[{"type":"ECOSYSTEM","events":[{"introduced":"2.26.11"}]}],
+							"database_specific":{"last_known_affected_version_range":"< 3.0.0"}
+						}
+					]
+				}`),
+			},
+		},
+		AffectedPackages: []db.AffectedPackage{
+			{
+				Ecosystem:     "actions",
+				Name:          "github/codeql-action",
+				VersionRanges: json.RawMessage(`[{"type":"ECOSYSTEM","events":[{"introduced":"2.26.11"}]}]`),
+			},
+		},
+	}
+	if err := store.UpsertVulnerability(ctx, ghsaMergeRepair); err != nil {
+		t.Fatalf("UpsertVulnerability(ghsa merge repair) error = %v", err)
+	}
+	if count, err := store.RepairGHSAAffectedPackages(ctx); err != nil || count != 1 {
+		t.Fatalf("RepairGHSAAffectedPackages(merge) = %d, %v; want 1 nil", count, err)
+	}
+	if findings, err := store.FindVulnerabilities(ctx, "actions", "github/codeql-action", "v4.36.2"); err != nil || len(findings) != 0 {
+		t.Fatalf("FindVulnerabilities(fixed CodeQL Action) = %+v, %v; want none", findings, err)
+	}
+	if findings, err := store.FindVulnerabilities(ctx, "actions", "github/codeql-action", "v3.27.0"); err != nil || len(findings) != 1 {
+		t.Fatalf("FindVulnerabilities(vulnerable CodeQL Action v3) = %+v, %v; want one", findings, err)
+	}
+	if findings, err := store.FindVulnerabilities(ctx, "actions", "github/codeql-action", "v2.27.0"); err != nil || len(findings) != 1 {
+		t.Fatalf("FindVulnerabilities(vulnerable CodeQL Action v2) = %+v, %v; want one", findings, err)
+	}
+
 	if err := store.UpsertMaliciousFinding(ctx, &db.MaliciousFinding{
 		ID:            "MAL-docker-1",
 		Ecosystem:     "npm",

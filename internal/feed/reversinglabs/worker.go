@@ -586,12 +586,6 @@ func removedSignals(pkg searchPackageData) []string {
 	if pkg.WasRemoved {
 		signals = append(signals, "package.was_removed")
 	}
-	for key, incident := range pkg.Incidents {
-		if incidentMatches(key, incident, "removal") {
-			signals = append(signals, "incidents.type.removal")
-			break
-		}
-	}
 	return signals
 }
 

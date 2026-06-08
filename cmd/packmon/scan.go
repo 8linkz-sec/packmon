@@ -176,7 +176,7 @@ and malicious package databases.`,
 	f.StringArrayVar(&flagSBOMFiles, "sbom", nil, "SBOM file to include as package input (CycloneDX JSON/XML or SPDX JSON); can be repeated")
 	f.BoolVar(&flagAutoSBOM, "auto-sbom", false, "generate an SBOM with CycloneDX tools and scan it")
 	f.BoolVar(&flagInstallTools, "install-tools", false, "with --auto-sbom: auto-install missing CycloneDX generators (pinned versions)")
-	f.StringVar(&flagKeepSBOM, "keep-sbom", "", "with --auto-sbom: write generated SBOMs to this dir and keep them")
+	f.StringVar(&flagKeepSBOM, "keep-sbom", "", "with --auto-sbom: write timestamped generated SBOM snapshots to this dir and keep them")
 	f.BoolVar(&flagSBOMOnly, "sbom-only", false, "with --auto-sbom: only generate SBOMs, do not scan")
 
 	return cmd
@@ -869,6 +869,9 @@ func runListPackages(args []string, ecosystems string, maxDepth int, noColor boo
 	if err != nil {
 		return err
 	}
+	if err := fatalCollectionParseError(collection); err != nil {
+		return err
+	}
 
 	if collection.LockFiles == 0 && collection.SBOMFiles == 0 {
 		fmt.Println("No lock files found.")
@@ -933,4 +936,11 @@ func runListPackages(args []string, ecosystems string, maxDepth int, noColor boo
 
 	fmt.Printf("\n%d package(s) found in %d input file(s)\n", len(packages), collection.LockFiles+collection.SBOMFiles)
 	return nil
+}
+
+func fatalCollectionParseError(collection *scanner.PackageCollection) error {
+	if collection == nil || len(collection.FatalParseErrors) == 0 {
+		return nil
+	}
+	return withExitCode(ExitParser, fmt.Errorf("%s", strings.Join(collection.FatalParseErrors, "; ")))
 }

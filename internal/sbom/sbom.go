@@ -12,6 +12,7 @@ type Package struct {
 	Package domain.Package
 	PURL    string
 	Source  string
+	BOMRef  string
 }
 
 // ParseResult contains successfully imported packages and skipped components.

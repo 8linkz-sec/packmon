@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 type fakeGenerator struct {
@@ -148,15 +149,16 @@ func TestRunKeepCollisionDoesNotDeleteExistingFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	gen := &fakeGenerator{ecosystem: "npm", tool: "cyclonedx-npm"}
-	_, err := Run(context.Background(), Config{
+	result, err := Run(context.Background(), Config{
 		Target:      root,
 		KeepSBOMDir: keep,
 		Registry:    map[string]Generator{"npm": gen},
 		LookPath:    func(string) (string, error) { return "found", nil },
+		Now:         fixedSBOMTestTime,
 		Logger:      slog.Default(),
 	})
-	if err == nil || !strings.Contains(err.Error(), "refusing to overwrite") {
-		t.Fatalf("Run err = %v, want overwrite rejection", err)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
 	}
 	got, readErr := os.ReadFile(collision) // #nosec G304 -- test reads a file it just created in t.TempDir.
 	if readErr != nil {
@@ -164,6 +166,40 @@ func TestRunKeepCollisionDoesNotDeleteExistingFile(t *testing.T) {
 	}
 	if string(got) != "do-not-delete" {
 		t.Fatalf("collision file = %q, want preserved content", got)
+	}
+	if len(result.SBOMPaths) != 1 {
+		t.Fatalf("SBOMPaths = %v", result.SBOMPaths)
+	}
+	if got := filepath.Base(result.SBOMPaths[0]); got != "package-20260607T150405Z.cdx.json" {
+		t.Fatalf("SBOM path = %q, want timestamped snapshot name", got)
+	}
+}
+
+func TestRunKeepTimestampCollisionUsesCounterSuffix(t *testing.T) {
+	root := t.TempDir()
+	keep := t.TempDir()
+	writeFile(t, root, "package.json", `{"dependencies":{"left-pad":"1.3.0"}}`)
+	existing := filepath.Join(keep, "package-20260607T150405Z.cdx.json")
+	if err := os.WriteFile(existing, []byte("do-not-delete"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gen := &fakeGenerator{ecosystem: "npm", tool: "cyclonedx-npm"}
+	result, err := Run(context.Background(), Config{
+		Target:      root,
+		KeepSBOMDir: keep,
+		Registry:    map[string]Generator{"npm": gen},
+		LookPath:    func(string) (string, error) { return "found", nil },
+		Now:         fixedSBOMTestTime,
+		Logger:      slog.Default(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := filepath.Base(result.SBOMPaths[0]); got != "package-20260607T150405Z-2.cdx.json" {
+		t.Fatalf("SBOM path = %q, want collision suffix", got)
+	}
+	if got, err := os.ReadFile(existing); err != nil || string(got) != "do-not-delete" {
+		t.Fatalf("existing timestamped file changed, got %q err %v", got, err)
 	}
 }
 
@@ -178,6 +214,7 @@ func TestRunRespectsMaxDepthZero(t *testing.T) {
 		KeepSBOMDir: t.TempDir(),
 		Registry:    map[string]Generator{"npm": gen},
 		LookPath:    func(string) (string, error) { return "found", nil },
+		Now:         fixedSBOMTestTime,
 		Logger:      slog.Default(),
 	})
 	if err != nil {
@@ -186,9 +223,13 @@ func TestRunRespectsMaxDepthZero(t *testing.T) {
 	if len(result.SBOMPaths) != 1 {
 		t.Fatalf("SBOMPaths = %v, want only root manifest with max-depth 0", result.SBOMPaths)
 	}
-	if got := filepath.Base(result.SBOMPaths[0]); got != "package.cdx.json" {
+	if got := filepath.Base(result.SBOMPaths[0]); got != "package-20260607T150405Z.cdx.json" {
 		t.Fatalf("SBOM path = %v, want root package SBOM", result.SBOMPaths)
 	}
+}
+
+func fixedSBOMTestTime() time.Time {
+	return time.Date(2026, 6, 7, 15, 4, 5, 0, time.UTC)
 }
 
 func TestRunDisambiguatesInternalOutputNameCollisions(t *testing.T) {

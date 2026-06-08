@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -116,6 +118,53 @@ func TestCheckRemoteSendsCorrelationIDAndRepoMetadata(t *testing.T) {
 	case msg := <-requestErrCh:
 		t.Fatal(msg)
 	default:
+	}
+}
+
+func TestCheckRemoteOmitsClientOnlyPackageParents(t *testing.T) {
+	t.Parallel()
+
+	bodyCh := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		bodyCh <- string(body)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(domain.ScanResult{
+			ScanID:       "scan-1",
+			Mode:         "remote",
+			ScannedAt:    time.Now().UTC(),
+			Summary:      domain.ScanSummary{BySeverity: map[string]int{}, ByType: map[string]int{}, BySource: map[string]int{}},
+			Findings:     []domain.Finding{},
+			FeedVersions: map[string]string{},
+		})
+	}))
+	defer closeSilently(server)
+
+	sc := New(nil, Config{
+		ServerURL:         server.URL,
+		AllowInsecureHTTP: true,
+		Timeout:           5 * time.Second,
+	})
+	if _, _, _, _, err := sc.checkRemote(context.Background(), []domain.Package{{
+		Name:      "child",
+		Version:   "1.0.1",
+		Ecosystem: domain.EcosystemNPM,
+		Indirect:  true,
+		Parents: []domain.PackageParent{{
+			Name:      "parent",
+			Version:   "1.0.0",
+			Ecosystem: domain.EcosystemNPM,
+		}},
+	}}); err != nil {
+		t.Fatalf("checkRemote() error = %v", err)
+	}
+
+	body := <-bodyCh
+	if strings.Contains(body, `"parents"`) {
+		t.Fatalf("remote request leaked client-only parents metadata:\n%s", body)
+	}
+	if !strings.Contains(body, `"name":"child"`) {
+		t.Fatalf("remote request missing package identity:\n%s", body)
 	}
 }
 
@@ -319,6 +368,88 @@ func TestScannerRunIncludesSBOMPackages(t *testing.T) {
 	}
 	if len(checker.packages) != 1 || checker.packages[0].Name != "django" || checker.packages[0].Ecosystem != domain.EcosystemPyPI {
 		t.Fatalf("checked packages = %#v, want django pypi", checker.packages)
+	}
+}
+
+func TestScannerRunSkipsRemoteWhenFiltersRemoveAllPackages(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "package-lock.json"), []byte(`{
+		"lockfileVersion": 3,
+		"packages": {
+			"": {"version":"1.0.0"},
+			"node_modules/dev-only": {"version":"1.0.0","dev":true}
+		}
+	}`), 0o600); err != nil {
+		t.Fatalf("write package-lock: %v", err)
+	}
+
+	var called atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called.Store(true)
+		http.Error(w, "remote should not be called for an empty package set", http.StatusInternalServerError)
+	}))
+	defer closeSilently(server)
+
+	sc := New(parser.NewRegistry(), Config{
+		Path:              dir,
+		Mode:              ModeRemote,
+		ServerURL:         server.URL,
+		AllowInsecureHTTP: true,
+		Ecosystems:        []string{"npm"},
+		FailOn:            domain.SeverityCritical,
+		MaxDepth:          2,
+		Timeout:           time.Second,
+	})
+
+	result, exitCode := sc.Run(context.Background())
+	if exitCode != ExitOK {
+		t.Fatalf("exit = %d, result = %+v, want clean empty scan", exitCode, result)
+	}
+	if result.PackagesScanned != 0 || result.FindingsCount != 0 {
+		t.Fatalf("result = %+v, want zero packages and zero findings", result)
+	}
+	if called.Load() {
+		t.Fatal("remote check was called with an empty package set")
+	}
+}
+
+func TestScannerRunMalformedExplicitSBOMIsParserErrorWithLockfilePackages(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "package-lock.json"), []byte(`{
+		"lockfileVersion": 3,
+		"packages": {"": {"version":"1.0.0"}, "node_modules/prod": {"version":"1.0.0"}}
+	}`), 0o600); err != nil {
+		t.Fatalf("write package-lock: %v", err)
+	}
+	sbomPath := filepath.Join(dir, "bad.cdx.json")
+	if err := os.WriteFile(sbomPath, []byte(`{"bomFormat":"CycloneDX",`), 0o600); err != nil {
+		t.Fatalf("write malformed SBOM: %v", err)
+	}
+
+	sc := New(parser.NewRegistry(), Config{
+		Path:      dir,
+		Mode:      ModeLocal,
+		FailOn:    domain.SeverityCritical,
+		MaxDepth:  2,
+		Timeout:   time.Second,
+		SBOMFiles: []string{sbomPath},
+	})
+	checker := &captureLocalChecker{}
+	sc.SetLocalChecker(checker)
+
+	result, exitCode := sc.Run(context.Background())
+	if exitCode != ExitParser {
+		t.Fatalf("exit = %d, result = %+v, want parser error", exitCode, result)
+	}
+	if len(result.ParseErrors) != 1 || !strings.Contains(result.ParseErrors[0], "bad.cdx.json") {
+		t.Fatalf("ParseErrors = %#v, want malformed SBOM error", result.ParseErrors)
+	}
+	if len(checker.packages) != 0 {
+		t.Fatalf("local checker was called despite malformed explicit SBOM: %#v", checker.packages)
 	}
 }
 

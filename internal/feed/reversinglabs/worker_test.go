@@ -322,8 +322,49 @@ func TestLookupBatchToleratesNumericIncidentValues(t *testing.T) {
 	if statuses["bad"] != "malicious" {
 		t.Fatalf("bad status = %q, want malicious", statuses["bad"])
 	}
-	if statuses["gone"] != "removed" {
-		t.Fatalf("gone status = %q, want removed", statuses["gone"])
+	if statuses["gone"] != "clean" {
+		t.Fatalf("gone status = %q, want clean", statuses["gone"])
+	}
+}
+
+func TestRemovalIncidentsAreNotCurrentRemovedStatus(t *testing.T) {
+	t.Parallel()
+
+	if got := removedSignals(searchPackageData{
+		Incidents: map[string]searchIncident{
+			"removal": {Type: "removal"},
+		},
+	}); len(got) != 0 {
+		t.Fatalf("removedSignals(removal incident) = %#v, want no active removal signal", got)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"community": {
+				"packages": [
+					{"uuid":"npm:braces@3.0.3","package":{"identity":{"removed":false},"incidents":{"removal":1}}}
+				]
+			}
+		}`))
+	}))
+	defer server.Close()
+
+	w := newWorker(&fakeStore{}, "token", slog.Default(), WithBaseURL(server.URL), WithLookupTTL(24*time.Hour))
+	results, err := w.lookupBatch(context.Background(), []db.PackageReputation{{
+		Ecosystem: "npm",
+		Name:      "braces",
+		Version:   "3.0.3",
+		Source:    FeedName,
+		Status:    "pending",
+	}})
+	if err != nil {
+		t.Fatalf("lookupBatch() error = %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("results = %d, want 1", len(results))
+	}
+	if results[0].Status != "clean" {
+		t.Fatalf("status = %q, want clean for removal incident without current removed marker", results[0].Status)
 	}
 }
 
@@ -573,8 +614,8 @@ func TestWorkerHelperBranches(t *testing.T) {
 	if got := maliciousSignals(pkg); len(got) != 5 {
 		t.Fatalf("maliciousSignals() = %#v, want all five signals", got)
 	}
-	if got := removedSignals(pkg); len(got) != 3 {
-		t.Fatalf("removedSignals() = %#v, want all three signals", got)
+	if got := removedSignals(pkg); len(got) != 2 {
+		t.Fatalf("removedSignals() = %#v, want current-state removal signals only", got)
 	}
 
 	for _, status := range []string{"malicious", "removed", "clean", "not_found"} {

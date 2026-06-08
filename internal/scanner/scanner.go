@@ -184,19 +184,7 @@ func (s *Scanner) Run(ctx context.Context) (*domain.ScanResult, int) {
 	}
 
 	if collection.LockFiles == 0 && collection.SBOMFiles == 0 {
-		result := &domain.ScanResult{
-			ScanID:          scanID,
-			Mode:            string(s.resolveMode()),
-			ScannedAt:       start.UTC(),
-			DurationMs:      time.Since(start).Milliseconds(),
-			PackagesScanned: 0,
-			FindingsCount:   0,
-			Summary:         emptySummary(),
-			Findings:        []domain.Finding{},
-			ParseErrors:     append([]string(nil), collection.ParseErrors...),
-			FeedVersions:    map[string]string{},
-		}
-		return result, ExitOK
+		return s.emptyScanResult(scanID, start, collection.ParseErrors), ExitOK
 	}
 
 	allPackages := collection.Packages
@@ -208,11 +196,21 @@ func (s *Scanner) Run(ctx context.Context) (*domain.ScanResult, int) {
 		slog.Bool("include_dev", s.cfg.IncludeDev),
 	)
 
+	if len(collection.FatalParseErrors) > 0 {
+		result := s.errorResultWithPackages(scanID, start, strings.Join(collection.FatalParseErrors, "; "), len(allPackages))
+		result.ParseErrors = append([]string(nil), parseErrors...)
+		return result, ExitParser
+	}
+
 	// If all files had parse errors and we got zero packages, exit 4.
 	if len(allPackages) == 0 && len(parseErrors) > 0 {
 		result := s.errorResult(scanID, start, strings.Join(parseErrors, "; "))
 		result.ParseErrors = append([]string(nil), parseErrors...)
 		return result, ExitParser
+	}
+
+	if len(allPackages) == 0 {
+		return s.emptyScanResult(scanID, start, parseErrors), ExitOK
 	}
 
 	// 3. Check: resolve findings.
@@ -357,7 +355,7 @@ func (s *Scanner) checkRemote(ctx context.Context, pkgs []domain.Package) ([]dom
 	endpoint := strings.TrimRight(s.cfg.ServerURL, "/") + "/api/v1/check"
 
 	reqBody := domain.ScanRequest{
-		Packages: pkgs,
+		Packages: remoteScanPackages(pkgs),
 		Repo:     s.cfg.Repo,
 	}
 	bodyBytes, err := json.Marshal(reqBody)
@@ -403,6 +401,18 @@ func (s *Scanner) checkRemote(ctx context.Context, pkgs []domain.Package) ([]dom
 	}
 
 	return result.Findings, result.FeedVersions, result.FeedStatus, result.FindingsBlocking, nil
+}
+
+func remoteScanPackages(pkgs []domain.Package) []domain.Package {
+	if len(pkgs) == 0 {
+		return pkgs
+	}
+	out := make([]domain.Package, len(pkgs))
+	for i, pkg := range pkgs {
+		pkg.Parents = nil
+		out[i] = pkg
+	}
+	return out
 }
 
 // checkLocal resolves findings against the local SQLite database.
@@ -500,6 +510,21 @@ func (s *Scanner) errorResultWithPackages(scanID string, start time.Time, msg st
 		FeedStatus:      msg,
 		Summary:         emptySummary(),
 		Findings:        []domain.Finding{},
+		FeedVersions:    map[string]string{},
+	}
+}
+
+func (s *Scanner) emptyScanResult(scanID string, start time.Time, parseErrors []string) *domain.ScanResult {
+	return &domain.ScanResult{
+		ScanID:          scanID,
+		Mode:            string(s.resolveMode()),
+		ScannedAt:       start.UTC(),
+		DurationMs:      time.Since(start).Milliseconds(),
+		PackagesScanned: 0,
+		FindingsCount:   0,
+		Summary:         emptySummary(),
+		Findings:        []domain.Finding{},
+		ParseErrors:     append([]string(nil), parseErrors...),
 		FeedVersions:    map[string]string{},
 	}
 }

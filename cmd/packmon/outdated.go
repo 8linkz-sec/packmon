@@ -21,6 +21,7 @@ import (
 	"github.com/8linkz/packmon/internal/parser"
 	"github.com/8linkz/packmon/internal/scanner"
 	versioncmp "github.com/8linkz/packmon/internal/version"
+	semver "github.com/Masterminds/semver/v3"
 	"golang.org/x/mod/module"
 )
 
@@ -50,6 +51,7 @@ type outdatedPackage struct {
 	Optional   bool
 	Peer       bool
 	Via        []string
+	Parents    []domain.PackageParent
 }
 
 type outdatedRow struct {
@@ -113,6 +115,9 @@ func runOutdatedWithOptions(args []string, opts outdatedOptions) error {
 	if err != nil {
 		return err
 	}
+	if err := fatalCollectionParseError(collection); err != nil {
+		return err
+	}
 	report := outdatedReport{
 		Target:      scanPath,
 		ScannedAt:   time.Now().UTC().Format("2006-01-02 15:04"),
@@ -157,6 +162,7 @@ func runOutdatedWithOptions(args []string, opts outdatedOptions) error {
 			Optional:   p.Optional,
 			Peer:       p.Peer,
 			Via:        append([]string(nil), p.Via...),
+			Parents:    append([]domain.PackageParent(nil), p.Parents...),
 		})
 	}
 
@@ -177,7 +183,7 @@ func runOutdatedWithOptions(args []string, opts outdatedOptions) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	results := make([]string, len(packages))
+	results := make([]listAllLatest, len(packages))
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, maxConcurrentRegistryRequests)
 
@@ -188,26 +194,25 @@ func runOutdatedWithOptions(args []string, opts outdatedOptions) error {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			latest := fetchLatestVersionFn(ctx, p.Ecosystem, p.Name)
-			results[idx] = latest
+			results[idx] = resolvePackageUpdateStatus(ctx, p.Name, p.Version, p.Ecosystem, p.Direct, p.Parents)
 		}(i, pkg)
 	}
 	wg.Wait()
 
 	for i, pkg := range packages {
-		latest := results[i]
-		if latest == "" {
+		status := results[i]
+		if status.Unknown || status.Latest == "" {
 			report.Unknown++
 			continue
 		}
-		if !updateAvailable(pkg.Version, latest, pkg.Ecosystem) {
+		if status.Update != "yes" {
 			report.UpToDate++
 			continue
 		}
 		report.Outdated = append(report.Outdated, outdatedRow{
 			Name:      pkg.Name,
 			Installed: pkg.Version,
-			Latest:    latest,
+			Latest:    status.Latest,
 			Ecosystem: string(pkg.Ecosystem),
 			Scope:     outdatedPackageScope(pkg),
 			Relation:  outdatedPackageRelation(pkg),
@@ -323,6 +328,7 @@ func outdatedAsListAllPackage(p outdatedPackage) listAllPackage {
 		Optional:   p.Optional,
 		Peer:       p.Peer,
 		Via:        append([]string(nil), p.Via...),
+		Parents:    append([]domain.PackageParent(nil), p.Parents...),
 	}
 }
 
@@ -405,6 +411,132 @@ td{word-break:normal;}
 // tests can stub registry access without hitting the network. Production code
 // points it at fetchLatestVersion.
 var fetchLatestVersionFn = fetchLatestVersion
+var fetchNPMMetadataFn = fetchNPMMetadata
+
+type npmRegistryMetadata struct {
+	DistTags map[string]string             `json:"dist-tags"`
+	Versions map[string]npmVersionManifest `json:"versions"`
+}
+
+type npmVersionManifest struct {
+	Version              string            `json:"version"`
+	Dependencies         map[string]string `json:"dependencies"`
+	OptionalDependencies map[string]string `json:"optionalDependencies"`
+	PeerDependencies     map[string]string `json:"peerDependencies"`
+}
+
+func resolvePackageUpdateStatus(ctx context.Context, name, installed string, eco domain.Ecosystem, direct bool, parents []domain.PackageParent) listAllLatest {
+	latest := fetchLatestVersionFn(ctx, eco, name)
+	if latest == "" {
+		return listAllLatest{Latest: "unknown", Update: "-", Unknown: true}
+	}
+	target := latest
+	if eco == domain.EcosystemNPM && !direct && len(parents) > 0 {
+		if wanted := resolveNPMWantedVersion(ctx, name, installed, latest, parents); wanted != "" {
+			target = wanted
+		}
+	}
+	if updateAvailable(installed, target, eco) {
+		return listAllLatest{Latest: target, Update: "yes"}
+	}
+	return listAllLatest{Latest: target, Update: "-"}
+}
+
+func resolveNPMWantedVersion(ctx context.Context, name, installed, latest string, parents []domain.PackageParent) string {
+	ranges := npmParentDependencyRanges(ctx, name, parents)
+	if len(ranges) == 0 {
+		return latest
+	}
+
+	meta, ok := fetchNPMMetadataFn(ctx, name)
+	if !ok || len(meta.Versions) == 0 {
+		return latest
+	}
+
+	wanted := selectNPMWantedVersion(meta.Versions, ranges)
+	if wanted == "" {
+		return latest
+	}
+	if versioncmp.Compare(wanted, installed, "ECOSYSTEM", string(domain.EcosystemNPM)) < 0 {
+		return installed
+	}
+	return wanted
+}
+
+func npmParentDependencyRanges(ctx context.Context, childName string, parents []domain.PackageParent) []string {
+	seen := make(map[string]struct{})
+	out := make([]string, 0, len(parents))
+	for _, parent := range parents {
+		if parent.Ecosystem != "" && parent.Ecosystem != domain.EcosystemNPM {
+			continue
+		}
+		parentName := strings.TrimSpace(parent.Name)
+		parentVersion := strings.TrimSpace(parent.Version)
+		if parentName == "" || parentVersion == "" {
+			continue
+		}
+		meta, ok := fetchNPMMetadataFn(ctx, parentName)
+		if !ok {
+			continue
+		}
+		manifest, ok := meta.Versions[parentVersion]
+		if !ok {
+			continue
+		}
+		if constraint := npmDependencyConstraint(manifest, childName); constraint != "" {
+			if _, duplicate := seen[constraint]; duplicate {
+				continue
+			}
+			seen[constraint] = struct{}{}
+			out = append(out, constraint)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func npmDependencyConstraint(manifest npmVersionManifest, childName string) string {
+	for _, deps := range []map[string]string{
+		manifest.Dependencies,
+		manifest.OptionalDependencies,
+		manifest.PeerDependencies,
+	} {
+		if constraint := strings.TrimSpace(deps[childName]); constraint != "" {
+			return constraint
+		}
+	}
+	return ""
+}
+
+func selectNPMWantedVersion(versions map[string]npmVersionManifest, ranges []string) string {
+	best := ""
+	for version := range versions {
+		if !isVersionLike(version) || !npmVersionSatisfiesAll(version, ranges) {
+			continue
+		}
+		if best == "" || versioncmp.Compare(version, best, "ECOSYSTEM", string(domain.EcosystemNPM)) > 0 {
+			best = version
+		}
+	}
+	return best
+}
+
+func npmVersionSatisfiesAll(version string, ranges []string) bool {
+	parsed, err := semver.NewVersion(version)
+	if err != nil {
+		return false
+	}
+	for _, raw := range ranges {
+		constraint, err := semver.NewConstraint(raw)
+		if err != nil {
+			return false
+		}
+		if !constraint.Check(parsed) {
+			return false
+		}
+	}
+	return true
+}
 
 // fetchLatestVersion queries the package registry for the latest version.
 // Returns "" if the lookup fails or the ecosystem is unsupported.
@@ -477,6 +609,21 @@ func fetchNPMLatest(ctx context.Context, name string) string {
 		return ""
 	}
 	return res.Version
+}
+
+func fetchNPMMetadata(ctx context.Context, name string) (npmRegistryMetadata, bool) {
+	data, err := registryGet(ctx, "https://registry.npmjs.org/"+name)
+	if err != nil {
+		return npmRegistryMetadata{}, false
+	}
+	var res npmRegistryMetadata
+	if json.Unmarshal(data, &res) != nil {
+		return npmRegistryMetadata{}, false
+	}
+	if len(res.Versions) == 0 {
+		return npmRegistryMetadata{}, false
+	}
+	return res, true
 }
 
 // pypi: GET https://pypi.org/pypi/{name}/json

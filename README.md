@@ -68,7 +68,7 @@ After the server binds its HTTP listener, the container log prints `dashboard_ur
 The PostgreSQL cluster is stored in the named Docker volume `packmon-postgres-data`, so normal `docker compose stop`, `docker compose down`, and `docker compose up` cycles keep the database intact.
 Only explicit volume removal such as `docker compose down -v` or `docker volume rm packmon-postgres-data` will delete the database.
 The UI ships local Tailwind and htmx assets from the repository, so runtime and normal container builds do not depend on external CDNs.
-When you change web templates or Tailwind classes, refresh the generated assets with `npm ci && npm run build:web` before building the image.
+When you change web templates or Tailwind classes, refresh the generated Tailwind v4 and htmx assets with `npm ci && npm run build:web` before building the image.
 
 ## Common Commands
 
@@ -146,6 +146,9 @@ SBOM files are package-coordinate input only. Packmon does not treat embedded
 SBOM vulnerability, VEX, license, or provenance assertions as authoritative
 findings; vulnerabilities, malicious packages, reputation, outdated versions,
 and lifecycle state still come from Packmon's configured data sources.
+CycloneDX dependency edges are used as package graph metadata, so npm
+transitive update checks can distinguish a truly wanted update from a newer
+registry major that is blocked by the parent dependency range.
 
 ### Generate and scan an SBOM in one step
 
@@ -157,10 +160,37 @@ packmon scan --auto-sbom ./my-project
 packmon scan --auto-sbom --sbom-only --keep-sbom ./sboms ./my-project
 ```
 
+Kept SBOMs use timestamped snapshot names such as
+`go-20260607T131329Z.cdx.json` and `package-20260607T131329Z.cdx.json`, so
+repeated automated runs in the same directory do not overwrite previous SBOMs.
+
 This requires the matching CycloneDX generator on `PATH`, such as
 `cyclonedx-gomod`, `cyclonedx-npm`, `cyclonedx-py`, or `mvn` for Maven
 projects. Add `--install-tools` to let Packmon install pinned versions where
 automatic installation is supported.
+
+## List-All Reports
+
+`packmon scan --list-all --html <file> <target>` runs the normal findings scan
+and adds a full package inventory. The package table includes each package's
+input source (`lockfile`, `sbom`, `dockerfile`, or `compose`), scope, relation,
+and vulnerability marker. The HTML report intentionally omits noisy `Via` and
+`Flags` columns. Its `Packages Needing Attention` section shows actionable
+updates, removed packages, and packages with security findings; unknown
+latest-status rows stay in `All Packages`. Finding-derived states such as
+`Malicious`, `Removed`, `Supply-chain risk`, and `Lifecycle` override general
+latest-version status. Vulnerability findings with a known fix or update path
+render as `Update available`; only vulnerability findings without a known update
+path render as `Vulnerable`, and vulnerable packages are not shown as
+`Up-to-Date`. Full source paths are deduplicated at the bottom under `Checked
+Inventory Sources`. Security finding advisory IDs link to their external
+advisory pages where Packmon can derive one. Long Docker digests are shown with
+a trailing `..` and a `Copy` button for the full digest.
+
+Docker inventory is metadata-only. Packmon reads image declarations from
+`Dockerfile`, `Dockerfile.*`, `docker-compose.yml`, `docker-compose.yaml`,
+`compose.yml`, and `compose.yaml`; it does not build, pull, or layer-scan
+images.
 
 ## Git Hooks
 

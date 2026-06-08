@@ -27,6 +27,7 @@ type Config struct {
 	Registry     map[string]Generator
 	LookPath     func(string) (string, error)
 	Runner       RunnerFunc
+	Now          func() time.Time
 }
 
 // Result contains generated SBOM paths and the cleanup action for temporary mode.
@@ -65,6 +66,10 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 	paths := make([]string, 0, len(detections))
 	opts := GenerateOptions{IncludeDev: cfg.IncludeDev}
 	usedNames := map[string]int{}
+	nameTag := ""
+	if cfg.KeepSBOMDir != "" {
+		nameTag = sbomSnapshotTag(cfg.Now().UTC())
+	}
 	for _, d := range detections {
 		gen, ok := cfg.Registry[d.Ecosystem]
 		if !ok {
@@ -74,8 +79,8 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 			return Result{}, fmt.Errorf("%s: %w", d.DisplayPath, err)
 		}
 
-		outPath := filepath.Join(outDir, uniqueOutputFileName(d, usedNames))
-		if err := reserveOutputPath(outPath); err != nil {
+		outPath, err := reserveUniqueOutputPath(outDir, d, usedNames, nameTag)
+		if err != nil {
 			return Result{}, err
 		}
 		if cfg.KeepSBOMDir != "" {
@@ -83,7 +88,7 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 		}
 
 		genCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
-		err := gen.Generate(genCtx, d, outPath, opts, cfg.Runner)
+		err = gen.Generate(genCtx, d, outPath, opts, cfg.Runner)
 		cancel()
 		if err != nil {
 			return Result{}, fmt.Errorf("generate SBOM for %s: %w", d.DisplayPath, err)
@@ -126,6 +131,9 @@ func normalizeConfig(cfg Config) Config {
 	}
 	if cfg.Runner == nil {
 		cfg.Runner = defaultRunner
+	}
+	if cfg.Now == nil {
+		cfg.Now = time.Now
 	}
 	return cfg
 }
@@ -186,8 +194,8 @@ func outputFileName(d Detection) string {
 	return name + ".cdx.json"
 }
 
-func uniqueOutputFileName(d Detection, used map[string]int) string {
-	name := outputFileName(d)
+func uniqueOutputFileName(d Detection, used map[string]int, tag string) string {
+	name := taggedOutputFileName(d, tag)
 	count := used[name]
 	used[name] = count + 1
 	if count == 0 {
@@ -195,6 +203,36 @@ func uniqueOutputFileName(d Detection, used map[string]int) string {
 	}
 	base := strings.TrimSuffix(name, ".cdx.json")
 	return fmt.Sprintf("%s-%d.cdx.json", base, count+1)
+}
+
+func taggedOutputFileName(d Detection, tag string) string {
+	name := outputFileName(d)
+	tag = strings.TrimSpace(tag)
+	if tag == "" {
+		return name
+	}
+	base := strings.TrimSuffix(name, ".cdx.json")
+	return base + "-" + tag + ".cdx.json"
+}
+
+func sbomSnapshotTag(t time.Time) string {
+	return t.UTC().Format("20060102T150405Z")
+}
+
+var errOutputExists = errors.New("SBOM output already exists")
+
+func reserveUniqueOutputPath(outDir string, d Detection, used map[string]int, tag string) (string, error) {
+	for attempts := 0; attempts < 1000; attempts++ {
+		outPath := filepath.Join(outDir, uniqueOutputFileName(d, used, tag))
+		if err := reserveOutputPath(outPath); err != nil {
+			if errors.Is(err, errOutputExists) {
+				continue
+			}
+			return "", err
+		}
+		return outPath, nil
+	}
+	return "", fmt.Errorf("reserve SBOM output for %s: too many filename collisions", d.DisplayPath)
 }
 
 func reserveOutputPath(path string) error {
@@ -205,7 +243,7 @@ func reserveOutputPath(path string) error {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304 -- path is built from a caller-selected output directory plus a sanitized SBOM filename.
 	if err != nil {
 		if errors.Is(err, os.ErrExist) {
-			return fmt.Errorf("refusing to overwrite existing SBOM file %s", path)
+			return fmt.Errorf("%w: %s", errOutputExists, path)
 		}
 		return fmt.Errorf("reserve SBOM output %s: %w", path, err)
 	}

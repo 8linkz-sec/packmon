@@ -138,7 +138,7 @@ Important behavior:
 - stdout is human-readable unless `--quiet` is used.
 - JSON, SARIF, JUnit, and HTML reports are written with explicit output-file
   flags. `--html <path>` writes a single self-contained report with no external
-  assets and no JavaScript. Findings are grouped by type (Malicious ->
+  assets or external JavaScript. Findings are grouped by type (Malicious ->
   Supply-Chain/EOL -> Vulnerabilities -> Lifecycle), severity-sorted within
   each group, and each vulnerability/EOL finding links to its source. A scan
   with zero findings still produces a clean "all clear" report. Like the other
@@ -147,17 +147,35 @@ Important behavior:
 - `--list-all` keeps the findings scan scope identical to a normal scan:
   dev/test packages are checked only when `--include-dev` is set. Its package
   inventory section still lists every detected package by default and annotates
-  scope (`runtime`, `dev`, `ci`, `sbom`, `build`), relation (`direct`,
-  `transitive`, `workflow`, etc.), npm `via` roots, and optional/peer flags.
+  source (`lockfile`, `sbom`, `dockerfile`, `compose`), scope (`runtime`,
+  `dev`, `ci`, `sbom`, `build`), relation (`direct`, `transitive`,
+  `workflow`, etc.), npm `via` roots, and optional/peer flags. HTML reports
+  omit the noisy `Via` and `Flags` columns, keep full source paths out of
+  package rows, and render a deduplicated "Checked Inventory Sources" section
+  at the bottom for lockfiles, SBOMs, and Docker inventory files. The HTML
+  "Packages Needing Attention" section lists actionable updates, removed
+  packages, and packages with security findings; unknown latest-status rows
+  remain visible only in "All Packages". Finding-derived states such as
+  `Malicious`, `Removed`, `Supply-chain risk`, and `Lifecycle` override general
+  latest-version status. Vulnerability findings with a known fix or update path
+  render as `Update available`; only vulnerability findings without a known
+  update path render as `Vulnerable`, and a package with a security finding is
+  never shown as merely `Up-to-Date`. Security finding advisories link to
+  canonical external reports when available. Long digest values are shortened
+  with `..` in the visible table and exposed through a local copy-to-clipboard
+  control containing the full value.
 - `--sbom <file>` can be repeated to add CycloneDX JSON/XML or SPDX JSON
   package inventory to scans, `--list-packages`, and `--outdated`.
 - SBOM input contributes package coordinates only. Embedded SBOM
   vulnerability, VEX, license, and provenance assertions are not used as
-  authoritative Packmon findings.
+  authoritative Packmon findings. CycloneDX dependency edges are used as
+  package graph metadata for scope, relation, `via`, and parent-aware npm
+  update resolution.
 - `--auto-sbom` detects Go, npm, PyPI, and Maven manifests, invokes the
   matching CycloneDX generator, validates CycloneDX JSON output, and appends
   the generated SBOM files to the normal scan input. `--sbom-only` generates
-  SBOM files without running a scan; `--keep-sbom <dir>` keeps generated files;
+  SBOM files without running a scan; `--keep-sbom <dir>` keeps generated files
+  as timestamped snapshots so repeated runs do not overwrite previous SBOMs;
   `--install-tools` may install missing pinned generator tools. Pinned
   generator versions are `cyclonedx-gomod` v1.10.0, `cyclonedx-npm` 4.2.1,
   `cyclonedx-bom` 7.3.0, and `cyclonedx-maven-plugin` 2.9.1. Generation runs
@@ -174,14 +192,17 @@ Important behavior:
   branch pins, commit-only pins, and unavailable upstream metadata are reported
   as unknown rather than failing the scan. Its terminal and HTML reports include
   the same package provenance columns (`scope`, `relation`, `via`, and flags)
-  as `--list-all`.
+  as `--list-all`. For npm transitive packages with known immediate parents,
+  Packmon resolves the highest version allowed by the parents' dependency
+  ranges and does not report a registry-latest major as an actionable update
+  when the parent range cannot select it.
 - `--list-all` also inventories Docker image declarations from `Dockerfile`,
   `Dockerfile.*`, `docker-compose.yml`, `docker-compose.yaml`, `compose.yml`,
   and `compose.yaml`. Docker rows use ecosystem `docker`, show declared
-  tags/digests, and resolve public registry manifest digests best-effort. If
-  the local Docker CLI can inspect the declared image, Packmon compares the
-  local repo digest with the current registry digest and marks `UPDATE yes`,
-  `-`, or `unknown`.
+  tags/digests, record their package source as `dockerfile` or `compose`, and
+  resolve public registry manifest digests best-effort. If the local Docker
+  CLI can inspect the declared image, Packmon compares the local repo digest
+  with the current registry digest and marks `UPDATE yes`, `-`, or `unknown`.
 - Docker image inventory is not a container-layer vulnerability scan. Packmon
   does not pull images, scan OS packages inside images, or read private
   registry credentials as part of `--list-all`.
@@ -322,9 +343,11 @@ freshness.
 
 ## Web UI
 
-The web UI uses Go templates, Tailwind CSS, and htmx. Assets are local and
-embedded into the binary. The UI should stay operational and utilitarian:
-dashboard, package search, package details, scans, admin pages, and forms.
+The web UI uses Go templates, Tailwind CSS v4, and htmx. Assets are local and
+embedded into the binary. Tailwind v4 uses modern CSS features, so the UI
+browser baseline follows Tailwind's v4 targets: Safari 16.4+, Chrome 111+, and
+Firefox 128+. The UI should stay operational and utilitarian: dashboard,
+package search, package details, scans, admin pages, and forms.
 
 Admin pages are protected by the shared admin session model described in
 `SECURITY.md`.

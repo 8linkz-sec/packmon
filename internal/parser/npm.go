@@ -80,6 +80,7 @@ func (p *NPMParser) Parse(r io.Reader) ([]domain.Package, error) {
 				Optional:  entry.Optional || metadata[key].optional,
 				Peer:      entry.Peer || metadata[key].peer,
 				Via:       append([]string(nil), metadata[key].via...),
+				Parents:   append([]domain.PackageParent(nil), metadata[key].parents...),
 			})
 		}
 	} else if len(lock.Dependencies) > 0 {
@@ -120,6 +121,7 @@ type npmPackageMeta struct {
 	optional bool
 	peer     bool
 	via      []string
+	parents  []domain.PackageParent
 }
 
 func npmPackageMetadata(packages map[string]packageLockPkg) map[string]npmPackageMeta {
@@ -165,6 +167,30 @@ func npmPackageMetadata(packages map[string]packageLockPkg) map[string]npmPackag
 				continue
 			}
 			meta.via = mergeStringSet(meta.via, []string{rootName})
+			metadata[depKey] = meta
+		}
+	}
+
+	for parentKey, parentEntry := range packages {
+		if parentKey == "" {
+			continue
+		}
+		parentName := npmNameFromKey(parentKey)
+		if parentName == "" || parentEntry.Version == "" {
+			continue
+		}
+		parent := domain.PackageParent{
+			Name:      parentName,
+			Version:   parentEntry.Version,
+			Ecosystem: domain.EcosystemNPM,
+		}
+		for _, depName := range npmDependencyNames(parentEntry) {
+			depKey := npmResolveDependencyKey(packages, parentKey, depName)
+			if depKey == "" || depKey == parentKey {
+				continue
+			}
+			meta := metadata[depKey]
+			meta.parents = mergePackageParents(meta.parents, []domain.PackageParent{parent})
 			metadata[depKey] = meta
 		}
 	}

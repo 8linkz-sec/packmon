@@ -34,12 +34,13 @@ type CollectedPackage struct {
 // PackageCollection is the result of package collection from all configured
 // inputs.
 type PackageCollection struct {
-	Packages    []domain.Package
-	Entries     []CollectedPackage
-	ParseErrors []string
-	LockFiles   int
-	SBOMFiles   int
-	index       map[packageCollectionKey]int
+	Packages         []domain.Package
+	Entries          []CollectedPackage
+	ParseErrors      []string
+	FatalParseErrors []string
+	LockFiles        int
+	SBOMFiles        int
+	index            map[packageCollectionKey]int
 }
 
 // CollectPackages walks lockfiles under the root and parses explicit SBOM
@@ -94,7 +95,9 @@ func CollectPackages(cfg CollectConfig) (*PackageCollection, error) {
 			if errors.As(parseErr, &inputErr) {
 				return nil, fmt.Errorf("%s: %w", displayPath, inputErr)
 			}
-			result.ParseErrors = append(result.ParseErrors, fmt.Sprintf("%s: %v", displayPath, parseErr))
+			msg := fmt.Sprintf("%s: %v", displayPath, parseErr)
+			result.ParseErrors = append(result.ParseErrors, msg)
+			result.FatalParseErrors = append(result.FatalParseErrors, msg)
 			continue
 		}
 		for _, item := range skipped {
@@ -257,6 +260,7 @@ func mergeCollectedPackageMetadata(dst *domain.Package, src domain.Package) {
 	dst.Optional = dst.Optional || src.Optional
 	dst.Peer = dst.Peer || src.Peer
 	dst.Via = mergeCollectedStringSet(dst.Via, src.Via)
+	dst.Parents = mergeCollectedPackageParents(dst.Parents, src.Parents)
 }
 
 func mergeCollectedStringSet(left, right []string) []string {
@@ -281,6 +285,45 @@ func mergeCollectedStringSet(left, right []string) []string {
 		out = append(out, value)
 	}
 	sort.Strings(out)
+	return out
+}
+
+func mergeCollectedPackageParents(left, right []domain.PackageParent) []domain.PackageParent {
+	if len(left) == 0 && len(right) == 0 {
+		return nil
+	}
+	type parentKey struct {
+		name, version string
+		ecosystem     domain.Ecosystem
+	}
+	seen := make(map[parentKey]domain.PackageParent, len(left)+len(right))
+	add := func(parent domain.PackageParent) {
+		parent.Name = strings.TrimSpace(parent.Name)
+		parent.Version = strings.TrimSpace(parent.Version)
+		if parent.Name == "" {
+			return
+		}
+		seen[parentKey{parent.Name, parent.Version, parent.Ecosystem}] = parent
+	}
+	for _, parent := range left {
+		add(parent)
+	}
+	for _, parent := range right {
+		add(parent)
+	}
+	out := make([]domain.PackageParent, 0, len(seen))
+	for _, parent := range seen {
+		out = append(out, parent)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Ecosystem != out[j].Ecosystem {
+			return out[i].Ecosystem < out[j].Ecosystem
+		}
+		if out[i].Name != out[j].Name {
+			return out[i].Name < out[j].Name
+		}
+		return out[i].Version < out[j].Version
+	})
 	return out
 }
 

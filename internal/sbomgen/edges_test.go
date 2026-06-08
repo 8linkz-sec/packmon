@@ -133,8 +133,12 @@ func TestRunKeepModeFailureRemovesCreatedSBOM(t *testing.T) {
 	if err == nil {
 		t.Fatalf("Run should fail on invalid generated SBOM")
 	}
-	if _, statErr := os.Stat(filepath.Join(keep, "package.cdx.json")); !os.IsNotExist(statErr) {
-		t.Fatalf("created SBOM should be removed on failure, stat err = %v", statErr)
+	leftovers, globErr := filepath.Glob(filepath.Join(keep, "*.cdx.json"))
+	if globErr != nil {
+		t.Fatalf("glob generated SBOMs: %v", globErr)
+	}
+	if len(leftovers) != 0 {
+		t.Fatalf("created SBOM should be removed on failure, leftovers = %v", leftovers)
 	}
 }
 

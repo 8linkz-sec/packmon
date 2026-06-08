@@ -35,15 +35,24 @@ func (e Ecosystem) Valid() bool {
 
 // Package represents a dependency found in a lock file.
 type Package struct {
+	Name      string          `json:"name"`
+	Version   string          `json:"version"`
+	Ecosystem Ecosystem       `json:"ecosystem"`
+	Dev       bool            `json:"dev,omitempty"`
+	Direct    bool            `json:"direct,omitempty"`
+	Indirect  bool            `json:"indirect,omitempty"`
+	Optional  bool            `json:"optional,omitempty"`
+	Peer      bool            `json:"peer,omitempty"`
+	Via       []string        `json:"via,omitempty"`
+	Parents   []PackageParent `json:"parents,omitempty"`
+}
+
+// PackageParent identifies an immediate dependency parent for graph-aware
+// package metadata such as npm wanted-version range evaluation.
+type PackageParent struct {
 	Name      string    `json:"name"`
-	Version   string    `json:"version"`
-	Ecosystem Ecosystem `json:"ecosystem"`
-	Dev       bool      `json:"dev,omitempty"`
-	Direct    bool      `json:"direct,omitempty"`
-	Indirect  bool      `json:"indirect,omitempty"`
-	Optional  bool      `json:"optional,omitempty"`
-	Peer      bool      `json:"peer,omitempty"`
-	Via       []string  `json:"via,omitempty"`
+	Version   string    `json:"version,omitempty"`
+	Ecosystem Ecosystem `json:"ecosystem,omitempty"`
 }
 
 // FindingType distinguishes vulnerability, malicious, supply-chain, and lifecycle findings.

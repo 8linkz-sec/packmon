@@ -48,6 +48,24 @@ func isolatedListAllEnv(t *testing.T) {
 	}
 }
 
+func TestCollectAllPackagesMalformedSBOMReturnsParserExit(t *testing.T) {
+	dir := t.TempDir()
+	badPath := filepath.Join(dir, "bad.cdx.json")
+	writeFile(t, badPath, `{"bomFormat":"CycloneDX",`)
+
+	_, err := collectAllPackages(scanSettings{
+		Path:      dir,
+		MaxDepth:  2,
+		SBOMFiles: []string{badPath},
+	})
+	if err == nil {
+		t.Fatal("collectAllPackages(malformed SBOM) error = nil")
+	}
+	if code := exitCodeForError(err); code != ExitParser {
+		t.Fatalf("exitCodeForError = %d, want %d; err=%v", code, ExitParser, err)
+	}
+}
+
 // seedListAllAdvisory inserts a CRITICAL advisory for npm/vulnpkg@1.0.0 into
 // the local SQLite advisory tables so the scanner reports a finding.
 func seedListAllAdvisory(t *testing.T, dbDir string) {
@@ -106,7 +124,7 @@ func TestRunListAll_ListsAllPackagesWithUpdateInfo(t *testing.T) {
 	})
 
 	// Section 2 header + both packages present.
-	for _, col := range []string{"PACKAGE", "INSTALLED", "LATEST", "UPDATE", "ECOSYSTEM", "VULN", "LOCK FILE"} {
+	for _, col := range []string{"PACKAGE", "INSTALLED", "LATEST", "UPDATE", "ECOSYSTEM", "SOURCE", "VULN", "SOURCE FILE"} {
 		if !contains(out, col) {
 			t.Errorf("output missing section-2 column %q:\n%s", col, out)
 		}
@@ -452,6 +470,60 @@ func TestRunListAll_UpdateColumnLogic(t *testing.T) {
 	currentFields := strings.Fields(currentLine)
 	if len(currentFields) < 4 || currentFields[3] != "-" {
 		t.Errorf("expected UPDATE=- for current, got line: %q", currentLine)
+	}
+}
+
+func TestResolveListAllLatestNPMTransitiveUsesParentWantedVersion(t *testing.T) {
+	oldLatest := fetchLatestVersionFn
+	oldMetadata := fetchNPMMetadataFn
+	t.Cleanup(func() {
+		fetchLatestVersionFn = oldLatest
+		fetchNPMMetadataFn = oldMetadata
+	})
+
+	fetchLatestVersionFn = func(_ context.Context, eco domain.Ecosystem, name string) string {
+		if eco == domain.EcosystemNPM && name == "node-addon-api" {
+			return "8.8.0"
+		}
+		return ""
+	}
+	fetchNPMMetadataFn = func(_ context.Context, name string) (npmRegistryMetadata, bool) {
+		switch name {
+		case "node-addon-api":
+			return npmRegistryMetadata{
+				DistTags: map[string]string{"latest": "8.8.0"},
+				Versions: map[string]npmVersionManifest{
+					"7.1.1": {Version: "7.1.1"},
+					"8.8.0": {Version: "8.8.0"},
+				},
+			}, true
+		case "@parcel/watcher":
+			return npmRegistryMetadata{
+				Versions: map[string]npmVersionManifest{
+					"2.5.6": {
+						Version:      "2.5.6",
+						Dependencies: map[string]string{"node-addon-api": "^7.0.0"},
+					},
+				},
+			}, true
+		default:
+			return npmRegistryMetadata{}, false
+		}
+	}
+
+	got := resolveListAllLatest(context.Background(), listAllPackage{
+		Name:      "node-addon-api",
+		Version:   "7.1.1",
+		Ecosystem: domain.EcosystemNPM,
+		Indirect:  true,
+		Parents: []domain.PackageParent{{
+			Name:      "@parcel/watcher",
+			Version:   "2.5.6",
+			Ecosystem: domain.EcosystemNPM,
+		}},
+	})
+	if got.Latest != "7.1.1" || got.Update != "-" || got.Unknown {
+		t.Fatalf("resolveListAllLatest() = %+v, want wanted 7.1.1 without update", got)
 	}
 }
 
@@ -833,9 +905,604 @@ func TestListAllHTMLRendersScopeSummaryAndFindingMetadata(t *testing.T) {
 			t.Fatalf("HTML missing scope summary %q:\n%s", want, out)
 		}
 	}
-	wantFinding := `<td class="finding-package">postcss@8.5.8</td><td class="short">npm</td><td>GHSA-postcss-test</td><td>8.5.10</td><td>osv</td><td class="short">dev</td><td class="short">transitive</td><td>tailwindcss</td><td class="short">peer</td>`
+	wantFinding := `<td class="finding-package">postcss@8.5.8</td><td class="short">npm</td><td class="advisory nowrap"><a href="https://github.com/advisories/GHSA-postcss-test" target="_blank" rel="noopener">GHSA-postcss-test</a></td><td>8.5.10</td><td>osv</td><td class="short">dev</td><td class="short">transitive</td>`
 	if !strings.Contains(out, wantFinding) {
 		t.Fatalf("HTML finding row missing package provenance:\n%s", out)
+	}
+	for _, removed := range []string{
+		`<th class="text via">Via</th>`,
+		`<th class="text flags">Flags</th>`,
+		`<td class="text via">tailwindcss</td>`,
+		`<td class="text flags">peer</td>`,
+	} {
+		if strings.Contains(out, removed) {
+			t.Fatalf("HTML still contains noisy provenance column %q:\n%s", removed, out)
+		}
+	}
+}
+
+func TestListAllHTMLLinksSecurityFindingAdvisoryWithoutWrapping(t *testing.T) {
+	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+	report := listAllPackageReport{
+		Rows: []listAllRow{{
+			Name:      "github/codeql-action",
+			Installed: "7211b7c8077ea37d8641b6271f6a365a22a5fbfa",
+			Latest:    "v4.36.2",
+			Update:    "-",
+			Ecosystem: "actions",
+			Scope:     "ci",
+			Relation:  "workflow",
+			Vuln:      "yes",
+		}},
+		Vulnerable: 1,
+	}
+	result := &domain.ScanResult{
+		Mode: "remote",
+		Findings: []domain.Finding{{
+			Name:       "github/codeql-action",
+			Version:    "7211b7c8077ea37d8641b6271f6a365a22a5fbfa",
+			Ecosystem:  domain.EcosystemGitHubActions,
+			Severity:   domain.SeverityHigh,
+			AdvisoryID: "GHSA-vqf5-2xx6-9wfm",
+			URL:        "https://nvd.nist.gov/vuln/detail/CVE-2025-24362",
+			Source:     "ghsa",
+		}},
+	}
+
+	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+		t.Fatalf("writeListAllHTML: %v", err)
+	}
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read HTML: %v", err)
+	}
+	out := string(data)
+	want := `<td class="advisory nowrap"><a href="https://github.com/advisories/GHSA-vqf5-2xx6-9wfm" target="_blank" rel="noopener">GHSA-vqf5-2xx6-9wfm</a></td>`
+	if !strings.Contains(out, want) {
+		t.Fatalf("HTML finding advisory missing nowrap external link:\n%s", out)
+	}
+}
+
+func TestListAllHTMLOmitsFindingBlockingSummaryBadge(t *testing.T) {
+	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+	report := listAllPackageReport{
+		Rows: []listAllRow{{
+			Name:      "github/codeql-action",
+			Installed: "7211b7c8077ea37d8641b6271f6a365a22a5fbfa",
+			Latest:    "v4.36.2",
+			Update:    "-",
+			Ecosystem: "actions",
+			Scope:     "ci",
+			Relation:  "workflow",
+			Vuln:      "yes",
+		}},
+		Vulnerable: 1,
+	}
+	result := &domain.ScanResult{
+		Mode: "remote",
+		Findings: []domain.Finding{{
+			Name:       "github/codeql-action",
+			Version:    "7211b7c8077ea37d8641b6271f6a365a22a5fbfa",
+			Ecosystem:  domain.EcosystemGitHubActions,
+			Severity:   domain.SeverityHigh,
+			AdvisoryID: "GHSA-vqf5-2xx6-9wfm",
+			Source:     "ghsa",
+		}},
+	}
+
+	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+		t.Fatalf("writeListAllHTML: %v", err)
+	}
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read HTML: %v", err)
+	}
+	out := string(data)
+	if strings.Contains(out, "findings &middot;") || strings.Contains(out, " blocking</span>") {
+		t.Fatalf("HTML still renders findings/blocking summary badge:\n%s", out)
+	}
+	if !strings.Contains(out, "<h2>Security Findings</h2>") ||
+		!strings.Contains(out, "GHSA-vqf5-2xx6-9wfm") {
+		t.Fatalf("HTML should still render the Security Findings section:\n%s", out)
+	}
+}
+
+func TestListAllHTMLKeepsUnknownOnlyPackagesOutOfAttention(t *testing.T) {
+	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+	report := listAllPackageReport{
+		Rows: []listAllRow{{
+			Name:      "docker.io/library/alpine",
+			Installed: "3.23",
+			Latest:    "sha256:5b10f432ef3d..",
+			Update:    "unknown",
+			Ecosystem: "docker",
+			Source:    "dockerfile",
+			Scope:     "runtime",
+			Relation:  "base",
+			Vuln:      "-",
+			LockFile:  "Dockerfile",
+		}},
+		Unknown: 1,
+	}
+	result := &domain.ScanResult{Mode: "remote"}
+
+	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+		t.Fatalf("writeListAllHTML: %v", err)
+	}
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read HTML: %v", err)
+	}
+	out := string(data)
+	attentionStart := strings.Index(out, "<h2>Packages Needing Attention</h2>")
+	securityStart := strings.Index(out, "<h2>Security Findings</h2>")
+	if attentionStart < 0 || securityStart < 0 || securityStart <= attentionStart {
+		t.Fatalf("HTML missing expected sections:\n%s", out)
+	}
+	attention := out[attentionStart:securityStart]
+	if strings.Contains(attention, `<td class="name">docker.io/library/alpine</td>`) {
+		t.Fatalf("unknown-only docker package should not be in attention section:\n%s", attention)
+	}
+	if !strings.Contains(attention, "No package status issues requiring attention.") {
+		t.Fatalf("attention section should explain there are no actionable package issues:\n%s", attention)
+	}
+	allPackagesStart := strings.Index(out, "<h2>All Packages</h2>")
+	if allPackagesStart < 0 {
+		t.Fatalf("HTML missing All Packages section:\n%s", out)
+	}
+	allPackages := out[allPackagesStart:]
+	if !strings.Contains(allPackages, `<td class="name">docker.io/library/alpine</td>`) ||
+		!strings.Contains(allPackages, `<td class="short">Unknown</td>`) {
+		t.Fatalf("unknown docker package should still be visible in All Packages:\n%s", allPackages)
+	}
+}
+
+func TestListAllHTMLMarksMaliciousPackagesAsAttention(t *testing.T) {
+	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+	report := listAllPackageReport{
+		Rows: []listAllRow{{
+			Name:      "evilpkg",
+			Installed: "2.0.0",
+			Latest:    "2.0.0",
+			Update:    "-",
+			Ecosystem: "pypi",
+			Source:    "lockfile",
+			Scope:     "runtime",
+			Relation:  "direct",
+			Vuln:      "-",
+			LockFile:  "requirements.txt",
+		}},
+	}
+	result := &domain.ScanResult{
+		Mode: "remote",
+		Findings: []domain.Finding{{
+			Name:       "evilpkg",
+			Version:    "2.0.0",
+			Ecosystem:  domain.EcosystemPyPI,
+			Type:       domain.FindingTypeMalicious,
+			Severity:   domain.SeverityCritical,
+			AdvisoryID: "reversinglabs:pypi/evilpkg@2.0.0",
+			Title:      "ReversingLabs: malware detected",
+			RiskType:   "malware",
+			Source:     "reversinglabs",
+		}},
+	}
+
+	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+		t.Fatalf("writeListAllHTML: %v", err)
+	}
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read HTML: %v", err)
+	}
+	out := string(data)
+	attentionStart := strings.Index(out, "<h2>Packages Needing Attention</h2>")
+	securityStart := strings.Index(out, "<h2>Security Findings</h2>")
+	if attentionStart < 0 || securityStart < 0 || securityStart <= attentionStart {
+		t.Fatalf("HTML missing expected sections:\n%s", out)
+	}
+	attention := out[attentionStart:securityStart]
+	wantRow := `<td class="name">evilpkg</td><td class="version">2.0.0</td><td class="version">2.0.0</td><td class="short">Malicious</td>`
+	if !strings.Contains(attention, wantRow) {
+		t.Fatalf("malicious package should be explicit in attention section:\n%s", attention)
+	}
+	if !strings.Contains(out, `<td class="advisory nowrap"><a href="https://secure.software/pypi/packages/evilpkg" target="_blank" rel="noopener">reversinglabs:pypi/evilpkg@2.0.0</a></td>`) {
+		t.Fatalf("HTML missing ReversingLabs advisory link:\n%s", out)
+	}
+}
+
+func TestListAllHTMLDoesNotMarkVulnerablePackageUpToDate(t *testing.T) {
+	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+	report := listAllPackageReport{
+		Rows: []listAllRow{
+			{
+				Name:      "github/codeql-action",
+				Installed: "7211b7c8077ea37d8641b6271f6a365a22a5fbfa",
+				Latest:    "v4.36.2",
+				Update:    "-",
+				Ecosystem: "actions",
+				Source:    "lockfile",
+				Scope:     "ci",
+				Relation:  "workflow",
+				Vuln:      "-",
+				LockFile:  ".github/workflows/codeql.yml",
+			},
+			{
+				Name:      "lodash",
+				Installed: "4.17.20",
+				Latest:    "4.17.20",
+				Update:    "-",
+				Ecosystem: "npm",
+				Source:    "lockfile",
+				Scope:     "runtime",
+				Relation:  "transitive",
+				Vuln:      "-",
+				LockFile:  "package-lock.json",
+			},
+			{
+				Name:      "left-pad",
+				Installed: "1.3.0",
+				Latest:    "1.3.0",
+				Update:    "-",
+				Ecosystem: "npm",
+				Source:    "lockfile",
+				Scope:     "runtime",
+				Relation:  "transitive",
+				Vuln:      "-",
+				LockFile:  "package-lock.json",
+			},
+		},
+	}
+	result := &domain.ScanResult{
+		Mode: "remote",
+		Findings: []domain.Finding{
+			{
+				Name:         "github/codeql-action",
+				Version:      "7211b7c8077ea37d8641b6271f6a365a22a5fbfa",
+				Ecosystem:    domain.EcosystemGitHubActions,
+				Type:         domain.FindingTypeVulnerability,
+				Severity:     domain.SeverityHigh,
+				AdvisoryID:   "GHSA-vqf5-2xx6-9wfm",
+				FixedVersion: "3.28.3",
+				Source:       "ghsa",
+			},
+			{
+				Name:         "lodash",
+				Version:      "4.17.20",
+				Ecosystem:    domain.EcosystemNPM,
+				Type:         domain.FindingTypeVulnerability,
+				Severity:     domain.SeverityHigh,
+				AdvisoryID:   "GHSA-35jh-r3h4-6jhm",
+				FixedVersion: "4.17.21",
+				Source:       "ghsa",
+			},
+			{
+				Name:       "left-pad",
+				Version:    "1.3.0",
+				Ecosystem:  domain.EcosystemNPM,
+				Type:       domain.FindingTypeVulnerability,
+				Severity:   domain.SeverityHigh,
+				AdvisoryID: "GHSA-left-pad-no-fix",
+				Source:     "ghsa",
+			},
+		},
+	}
+
+	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+		t.Fatalf("writeListAllHTML: %v", err)
+	}
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read HTML: %v", err)
+	}
+	out := string(data)
+	if !strings.Contains(out, `<span class="badge bad">3 vulnerable</span>`) {
+		t.Fatalf("HTML summary should count vulnerability findings:\n%s", out)
+	}
+	if !strings.Contains(out, `<span class="badge warn">2 with updates</span>`) {
+		t.Fatalf("HTML summary should count vulnerability findings with update paths:\n%s", out)
+	}
+	for _, pkg := range []struct {
+		name      string
+		installed string
+		latest    string
+		status    string
+	}{
+		{name: "github/codeql-action", installed: "7211b7c8077ea37d8641b6271f6a365a22a5fbfa", latest: "v4.36.2", status: "Update available"},
+		{name: "lodash", installed: "4.17.20", latest: "4.17.20", status: "Update available"},
+		{name: "left-pad", installed: "1.3.0", latest: "1.3.0", status: "Vulnerable"},
+	} {
+		want := `<td class="name">` + pkg.name + `</td><td class="version">` + pkg.installed + `</td><td class="version">` + pkg.latest + `</td><td class="short">` + pkg.status + `</td>`
+		if !strings.Contains(out, want) {
+			t.Fatalf("vulnerable package should be marked %s, not Up-to-Date:\n%s", pkg.status, out)
+		}
+		bad := `<td class="name">` + pkg.name + `</td><td class="version">` + pkg.installed + `</td><td class="version">` + pkg.latest + `</td><td class="short">Up-to-Date</td>`
+		if strings.Contains(out, bad) {
+			t.Fatalf("vulnerable package is still marked Up-to-Date:\n%s", out)
+		}
+	}
+}
+
+func TestListAllHTMLOmitsViaAndFlagsColumns(t *testing.T) {
+	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+	longVia := "github.com/jackc/pgx/v5, golang.org/x/crypto, modernc.org/sqlite"
+	longFlags := "service=packmon-server, local-build, context=., dockerfile=Dockerfile, target=server"
+	report := listAllPackageReport{
+		Rows: []listAllRow{{
+			Name:      "golang.org/x/text",
+			Installed: "v0.37.0",
+			Latest:    "v0.37.0",
+			Update:    "-",
+			Ecosystem: "go",
+			Source:    "lockfile",
+			Scope:     "runtime",
+			Relation:  "transitive",
+			Via:       longVia,
+			Flags:     longFlags,
+			Vuln:      "-",
+			LockFile:  "go.mod",
+		}},
+	}
+	result := &domain.ScanResult{Mode: "remote"}
+
+	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+		t.Fatalf("writeListAllHTML: %v", err)
+	}
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read HTML: %v", err)
+	}
+	out := string(data)
+	for _, want := range []string{
+		`<th class="short">Relation</th>`,
+		`<th class="short">Vuln</th>`,
+		`<td class="short">transitive</td>`,
+		`<td class="short">-</td>`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("HTML missing retained package column %q:\n%s", want, out)
+		}
+	}
+	for _, removed := range []string{
+		`<th class="text via">Via</th>`,
+		`<th class="text flags">Flags</th>`,
+		`<td class="text via">`,
+		`<td class="text flags">`,
+		`.via{`,
+		`.flags{`,
+		longVia,
+		longFlags,
+	} {
+		if strings.Contains(out, removed) {
+			t.Fatalf("HTML still contains noisy Via/Flags content %q:\n%s", removed, out)
+		}
+	}
+}
+
+func TestListAllHTMLShortensDigestAndRendersCopyButton(t *testing.T) {
+	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+	const digest = "sha256:5b10f432ef3d1234567890abcdef1234567890abcdef1234567890abcdef12"
+	report := listAllPackageReport{
+		Rows: []listAllRow{{
+			Name:       "docker.io/library/alpine",
+			Installed:  "3.23",
+			Latest:     digest,
+			LatestCopy: digest,
+			Update:     "unknown",
+			Ecosystem:  "docker",
+			Source:     "dockerfile",
+			Scope:      "runtime",
+			Relation:   "base",
+			Flags:      "stage=server",
+			Vuln:       "-",
+			LockFile:   "Dockerfile",
+		}},
+		Unknown: 1,
+	}
+	result := &domain.ScanResult{Mode: "remote"}
+
+	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+		t.Fatalf("writeListAllHTML: %v", err)
+	}
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read HTML: %v", err)
+	}
+	out := string(data)
+	for _, want := range []string{
+		`<span class="copy-value">sha256:5b10f432ef3d..</span>`,
+		`<button type="button" class="copy-btn" data-copy="` + digest + `" aria-label="Copy full value">Copy</button>`,
+		`navigator.clipboard.writeText`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("HTML missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, `<td class="version">`+digest+`</td>`) {
+		t.Fatalf("HTML renders full digest inline instead of shortened copy UI:\n%s", out)
+	}
+}
+
+func TestListAllHTMLRendersStatusAndCheckedLockFiles(t *testing.T) {
+	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+	sharedLock := filepath.Join("repo", "package-lock.json")
+	report := listAllPackageReport{
+		Rows: []listAllRow{
+			{Name: "braces", Installed: "3.0.3", Latest: "3.0.3", Update: "-", Ecosystem: "npm", Scope: "sbom", Relation: "declared", Vuln: "yes", LockFile: sharedLock},
+			{Name: "postcss", Installed: "8.5.8", Latest: "8.5.10", Update: "yes", Ecosystem: "npm", Scope: "sbom", Relation: "declared", Vuln: "yes", LockFile: sharedLock},
+			{Name: "yaml", Installed: "2.8.3", Latest: "2.8.3", Update: "-", Ecosystem: "npm", Scope: "sbom", Relation: "declared", Vuln: "-", LockFile: filepath.Join("repo", "go.cdx.json")},
+			{Name: "local/image", Installed: "latest", Latest: "unknown", Update: "unknown", Ecosystem: "docker", Scope: "runtime", Relation: "image", Vuln: "-", LockFile: ""},
+		},
+		Vulnerable: 2,
+	}
+	result := &domain.ScanResult{
+		Mode: "remote",
+		Findings: []domain.Finding{{
+			Name:       "braces",
+			Version:    "3.0.3",
+			Ecosystem:  domain.EcosystemNPM,
+			Type:       domain.FindingTypeSupplyChainRisk,
+			RiskType:   "removed_package",
+			Severity:   domain.SeverityCritical,
+			AdvisoryID: "reversinglabs:npm/braces@3.0.3",
+			Source:     "reversinglabs",
+		}},
+	}
+	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+		t.Fatalf("writeListAllHTML: %v", err)
+	}
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read HTML: %v", err)
+	}
+	out := string(data)
+	for _, want := range []string{
+		"<h2>Packages Needing Attention</h2>",
+		"<h2>Checked Inventory Sources</h2>",
+		`<th class="short">Status</th>`,
+		`<td class="short">Removed</td>`,
+		`<td class="short">Update available</td>`,
+		`<td class="short">Up-to-Date</td>`,
+		`<td class="short">Unknown</td>`,
+		`<td class="name">postcss</td><td class="version">8.5.8</td><td class="version">8.5.10</td><td class="short">Update available</td>`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("HTML missing %q:\n%s", want, out)
+		}
+	}
+	for _, removed := range []string{
+		`<th class="short">Update</th>`,
+		`<th class="lockfile">Lock File</th>`,
+		`<td class="lockfile">`,
+	} {
+		if strings.Contains(out, removed) {
+			t.Fatalf("HTML still contains removed table element %q:\n%s", removed, out)
+		}
+	}
+	if strings.Count(out, sharedLock) != 1 {
+		t.Fatalf("shared lock file should be rendered once, got %d occurrences:\n%s", strings.Count(out, sharedLock), out)
+	}
+	if !strings.Contains(out, filepath.Join("repo", "go.cdx.json")) {
+		t.Fatalf("HTML missing second checked lock file:\n%s", out)
+	}
+}
+
+func TestListAllHTMLOmitsLongFlagsAndListsInventorySources(t *testing.T) {
+	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+	longFlags := "service=packmon-server, local-build, context=., dockerfile=Dockerfile, target=server"
+	report := listAllPackageReport{
+		Rows: []listAllRow{
+			{Name: "docker.io/library/alpine", Installed: "3.23", Latest: "sha256:remote", Update: "unknown", Ecosystem: "docker", Scope: "runtime", Relation: "base", Flags: "stage=server", Vuln: "-", LockFile: "Dockerfile"},
+			{Name: "local/packmon-server", Installed: "server", Latest: "unknown", Update: "unknown", Ecosystem: "docker", Scope: "runtime", Relation: "compose-build", Flags: longFlags, Vuln: "-", LockFile: "docker-compose.yml"},
+			{Name: "left-pad", Installed: "1.3.0", Latest: "1.3.0", Update: "-", Ecosystem: "npm", Scope: "runtime", Relation: "direct", Vuln: "-", LockFile: "package-lock.json"},
+		},
+		Unknown: 2,
+	}
+	result := &domain.ScanResult{Mode: "remote"}
+
+	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+		t.Fatalf("writeListAllHTML: %v", err)
+	}
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read HTML: %v", err)
+	}
+	out := string(data)
+	for _, want := range []string{
+		"<h2>Checked Inventory Sources</h2>",
+		`<span class="source-kind">docker</span><span class="source-path">Dockerfile</span>`,
+		`<span class="source-kind">docker</span><span class="source-path">docker-compose.yml</span>`,
+		`<span class="source-kind">lockfile</span><span class="source-path">package-lock.json</span>`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("HTML missing %q:\n%s", want, out)
+		}
+	}
+	for _, removed := range []string{
+		`<th class="text flags">Flags</th>`,
+		`<td class="text flags">` + longFlags + `</td>`,
+		`<td class="short">` + longFlags + `</td>`,
+		longFlags,
+	} {
+		if strings.Contains(out, removed) {
+			t.Fatalf("HTML still renders noisy flags content %q:\n%s", removed, out)
+		}
+	}
+}
+
+func TestListAllHTMLUsesReportInventorySources(t *testing.T) {
+	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+	report := listAllPackageReport{
+		Rows: []listAllRow{{
+			Name:      "left-pad",
+			Installed: "1.3.0",
+			Latest:    "1.3.0",
+			Update:    "-",
+			Ecosystem: "npm",
+			Source:    "lockfile",
+			Scope:     "runtime",
+			Relation:  "direct",
+			Vuln:      "-",
+			LockFile:  "package-lock.json",
+		}},
+		Sources: []listAllSourceRow{
+			{Kind: "lockfile", Path: "package-lock.json"},
+			{Kind: "sbom", Path: "sbom/package.cdx.json"},
+		},
+	}
+	result := &domain.ScanResult{Mode: "remote"}
+
+	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+		t.Fatalf("writeListAllHTML: %v", err)
+	}
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read HTML: %v", err)
+	}
+	out := string(data)
+	for _, want := range []string{
+		`<span class="source-kind">lockfile</span><span class="source-path">package-lock.json</span>`,
+		`<span class="source-kind">sbom</span><span class="source-path">sbom/package.cdx.json</span>`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("HTML missing source %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestListAllHTMLSurfacesUpdatesWithoutSecurityFindings(t *testing.T) {
+	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+	report := listAllPackageReport{
+		Rows: []listAllRow{{
+			Name:      "node-addon-api",
+			Installed: "7.1.1",
+			Latest:    "8.8.0",
+			Update:    "yes",
+			Ecosystem: "npm",
+			Scope:     "sbom",
+			Relation:  "declared",
+			Vuln:      "-",
+		}},
+		WithUpdates: 1,
+	}
+	result := &domain.ScanResult{Mode: "remote"}
+	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+		t.Fatalf("writeListAllHTML: %v", err)
+	}
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read HTML: %v", err)
+	}
+	out := string(data)
+	for _, want := range []string{
+		"No security findings in 1 packages.",
+		"<h2>Packages Needing Attention</h2>",
+		"<h2>Security Findings</h2>",
+		`<td class="name">node-addon-api</td><td class="version">7.1.1</td><td class="version">8.8.0</td><td class="short">Update available</td>`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("HTML missing %q:\n%s", want, out)
+		}
 	}
 }
 
@@ -871,7 +1538,7 @@ func TestListAllHelperBranches(t *testing.T) {
 	if !ok || ref.Name != "docker.io/library/postgres" || ref.Reference != "sha256:abcdef" {
 		t.Fatalf("docker ref = %+v/%v", ref, ok)
 	}
-	if got := shortDigest("sha256:1234567890abcdef"); got != "sha256:1234567890ab" {
+	if got := shortDigest("sha256:1234567890abcdef"); got != "sha256:1234567890ab.." {
 		t.Fatalf("shortDigest = %q", got)
 	}
 	if got := shortDigest("not-a-digest"); got != "not-a-digest" {

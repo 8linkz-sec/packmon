@@ -407,6 +407,22 @@ func TestRunOutdatedReportsNoPackagesAfterParseErrors(t *testing.T) {
 	}
 }
 
+func TestRunOutdatedMalformedSBOMReturnsParserExit(t *testing.T) {
+	dir := t.TempDir()
+	badPath := filepath.Join(dir, "bad.cdx.json")
+	if err := os.WriteFile(badPath, []byte(`{"bomFormat":"CycloneDX",`), 0o600); err != nil {
+		t.Fatalf("write malformed SBOM: %v", err)
+	}
+
+	err := runOutdated([]string{dir}, "", 2, []string{badPath})
+	if err == nil {
+		t.Fatal("runOutdated(malformed SBOM) error = nil")
+	}
+	if code := exitCodeForError(err); code != ExitParser {
+		t.Fatalf("exitCodeForError = %d, want %d; err=%v", code, ExitParser, err)
+	}
+}
+
 func TestFetchLatestVersionReturnsEmptyForInvalidRegistryJSON(t *testing.T) {
 	originalClient := registryClient
 	t.Cleanup(func() { registryClient = originalClient })

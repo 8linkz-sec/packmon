@@ -394,9 +394,14 @@ type ghsaSeverity struct {
 }
 
 type ghsaAffected struct {
-	Package  ghsaPackage `json:"package"`
-	Ranges   []ghsaRange `json:"ranges"`
-	Versions []string    `json:"versions"`
+	Package          ghsaPackage                   `json:"package"`
+	Ranges           []ghsaRange                   `json:"ranges"`
+	Versions         []string                      `json:"versions"`
+	DatabaseSpecific *ghsaAffectedDatabaseSpecific `json:"database_specific"`
+}
+
+type ghsaAffectedDatabaseSpecific struct {
+	LastKnownAffectedVersionRange string `json:"last_known_affected_version_range"`
 }
 
 type ghsaPackage struct {
@@ -487,25 +492,118 @@ func mapToVulnerability(advisory *ghsaAdvisory, rawJSON []byte) *db.Vulnerabilit
 		})
 	}
 
-	// Affected packages.
+	// Affected packages. GHSA can contain multiple affected entries for the
+	// same package; keep all ranges on one canonical package row so later
+	// entries do not overwrite earlier fixed boundaries during upsert.
+	type affectedKey struct {
+		ecosystem string
+		name      string
+	}
+	type mergedAffected struct {
+		ecosystem string
+		name      string
+		ranges    []ghsaRange
+		versions  []string
+		seen      map[string]struct{}
+	}
+	affectedOrder := make([]affectedKey, 0, len(advisory.Affected))
+	affectedByKey := make(map[affectedKey]*mergedAffected)
 	for _, aff := range advisory.Affected {
 		canonicalEco, ok := feed.MapGHSAEcosystem(aff.Package.Ecosystem)
 		if !ok || canonicalEco == "" {
 			continue
 		}
 
-		rangesJSON, _ := json.Marshal(aff.Ranges)
-		versionsJSON, _ := json.Marshal(aff.Versions)
+		key := affectedKey{ecosystem: string(canonicalEco), name: aff.Package.Name}
+		merged := affectedByKey[key]
+		if merged == nil {
+			merged = &mergedAffected{
+				ecosystem: key.ecosystem,
+				name:      key.name,
+				seen:      map[string]struct{}{},
+			}
+			affectedByKey[key] = merged
+			affectedOrder = append(affectedOrder, key)
+		}
 
+		merged.ranges = append(merged.ranges, normalizeAffectedRanges(aff.Ranges, aff.DatabaseSpecific)...)
+		for _, version := range aff.Versions {
+			if _, ok := merged.seen[version]; ok {
+				continue
+			}
+			merged.seen[version] = struct{}{}
+			merged.versions = append(merged.versions, version)
+		}
+	}
+
+	for _, key := range affectedOrder {
+		merged := affectedByKey[key]
+		rangesJSON, _ := json.Marshal(merged.ranges)
+		versionsJSON, _ := json.Marshal(merged.versions)
 		vuln.AffectedPackages = append(vuln.AffectedPackages, db.AffectedPackage{
-			Ecosystem:        string(canonicalEco),
-			Name:             aff.Package.Name,
+			Ecosystem:        merged.ecosystem,
+			Name:             merged.name,
 			VersionRanges:    rangesJSON,
 			VersionsAffected: versionsJSON,
 		})
 	}
 
 	return vuln
+}
+
+func normalizeAffectedRanges(ranges []ghsaRange, specific *ghsaAffectedDatabaseSpecific) []ghsaRange {
+	if len(ranges) == 0 {
+		return nil
+	}
+
+	closure, hasClosure := closureEventFromLastKnownAffectedRange(specific)
+	out := make([]ghsaRange, 0, len(ranges))
+	for _, r := range ranges {
+		normalized := ghsaRange{
+			Type:   r.Type,
+			Events: append([]ghsaEvent(nil), r.Events...),
+		}
+		if hasClosure && len(normalized.Events) > 0 && !hasRangeClosure(normalized.Events) {
+			normalized.Events = append(normalized.Events, closure)
+		}
+		out = append(out, normalized)
+	}
+	return out
+}
+
+func hasRangeClosure(events []ghsaEvent) bool {
+	for _, event := range events {
+		if strings.TrimSpace(event.Fixed) != "" || strings.TrimSpace(event.LastAffected) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func closureEventFromLastKnownAffectedRange(specific *ghsaAffectedDatabaseSpecific) (ghsaEvent, bool) {
+	if specific == nil {
+		return ghsaEvent{}, false
+	}
+	for _, part := range strings.Split(specific.LastKnownAffectedVersionRange, ",") {
+		part = strings.TrimSpace(part)
+		switch {
+		case strings.HasPrefix(part, "<="):
+			version := cleanConstraintVersion(strings.TrimPrefix(part, "<="))
+			if version != "" {
+				return ghsaEvent{LastAffected: version}, true
+			}
+		case strings.HasPrefix(part, "<"):
+			version := cleanConstraintVersion(strings.TrimPrefix(part, "<"))
+			if version != "" {
+				return ghsaEvent{Fixed: version}, true
+			}
+		}
+	}
+	return ghsaEvent{}, false
+}
+
+func cleanConstraintVersion(version string) string {
+	return strings.Trim(strings.TrimSpace(version), "`\"'")
 }
 
 // mapSeverity derives a Packmon severity string from the GHSA advisory.
