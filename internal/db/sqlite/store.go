@@ -478,6 +478,9 @@ func (s *Store) queryReputationFindings(ctx context.Context, ecosystem, name, ve
 		if err := rows.Scan(&id, &eco, &pkg, &ver, &typ, &riskType, &severity, &summary); err != nil {
 			return nil, fmt.Errorf("sqlite: scan reputation finding row: %w", err)
 		}
+		if isHistoricalReputationRisk(riskType) {
+			continue
+		}
 
 		title := summary.String
 		if title == "" {
@@ -533,6 +536,9 @@ func (s *Store) findReputationFindingsBatch(ctx context.Context, packageWhere st
 		if !containsString(versionsByPackage[localPackageKey{ecosystem: eco, name: pkg}], ver) {
 			continue
 		}
+		if isHistoricalReputationRisk(riskType) {
+			continue
+		}
 
 		title := summary.String
 		if title == "" {
@@ -554,6 +560,10 @@ func (s *Store) findReputationFindingsBatch(ctx context.Context, packageWhere st
 		return nil, fmt.Errorf("sqlite: iterate reputation batch rows: %w", err)
 	}
 	return findings, nil
+}
+
+func isHistoricalReputationRisk(riskType string) bool {
+	return strings.EqualFold(strings.TrimSpace(riskType), "malware_history")
 }
 
 type localPackageKey struct {

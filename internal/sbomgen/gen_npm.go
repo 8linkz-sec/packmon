@@ -26,7 +26,7 @@ func (npmGenerator) Generate(ctx context.Context, d Detection, outPath string, o
 	if !opts.IncludeDev {
 		args = append(args, "--omit", "dev")
 	}
-	args = append(args, d.ManifestPath)
+	args = append(args, "--", d.ManifestPath)
 	out, err := run(ctx, RunOptions{Name: "cyclonedx-npm", Args: args})
 	if err != nil {
 		return fmt.Errorf("cyclonedx-npm: %w: %s", err, string(out))

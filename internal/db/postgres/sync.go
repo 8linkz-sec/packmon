@@ -226,10 +226,6 @@ func reputationSyncFinding(rep db.PackageReputation) db.SyncReputationFinding {
 		item.Type = string(domain.FindingTypeSupplyChainRisk)
 		item.RiskType = "removed_package"
 		item.Severity = normalizeReputationSeverity(rep.Severity)
-	case "risk":
-		item.Type = string(domain.FindingTypeSupplyChainRisk)
-		item.RiskType = "malware_history"
-		item.Severity = normalizeReputationSeverity(rep.Severity)
 	default:
 		item.Withdrawn = true
 	}

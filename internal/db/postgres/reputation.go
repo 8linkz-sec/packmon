@@ -267,9 +267,7 @@ func reputationToFinding(rep db.PackageReputation) (domain.Finding, bool) {
 		riskType = "removed_package"
 		title = "ReversingLabs: package version was removed"
 	case reputationStatusRisk:
-		findingType = domain.FindingTypeSupplyChainRisk
-		riskType = "malware_history"
-		title = "ReversingLabs: malware incident history"
+		return domain.Finding{}, false
 	default:
 		return domain.Finding{}, false
 	}

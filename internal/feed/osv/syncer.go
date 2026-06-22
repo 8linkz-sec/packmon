@@ -317,6 +317,19 @@ func (s *Syncer) syncEcosystem(ctx context.Context, store db.Store, ecosystem, s
 			continue
 		}
 
+		if entry.Withdrawn != nil && strings.TrimSpace(*entry.Withdrawn) != "" {
+			if err := store.DeleteVulnerability(ctx, entry.ID); err != nil {
+				entryErrors++
+				s.logger.Warn("failed to delete withdrawn vulnerability",
+					slog.String("id", entry.ID),
+					slog.String("error", err.Error()),
+				)
+				continue
+			}
+			synced++
+			continue
+		}
+
 		if findings := mapToMaliciousFindings(&entry); len(findings) > 0 {
 			if err := store.DeleteVulnerability(ctx, entry.ID); err != nil {
 				entryErrors++

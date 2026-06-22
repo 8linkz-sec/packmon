@@ -28,6 +28,7 @@ import (
 const (
 	maxConcurrentRegistryRequests = 10
 	maxRegistryResponseSize       = 512 * 1024
+	maxPyPIRegistryResponseSize   = 16 * 1024 * 1024
 )
 
 type outdatedOptions struct {
@@ -410,8 +411,10 @@ td{word-break:normal;}
 // fetchLatestVersionFn is the indirection point for latest-version lookups so
 // tests can stub registry access without hitting the network. Production code
 // points it at fetchLatestVersion.
-var fetchLatestVersionFn = fetchLatestVersion
-var fetchNPMMetadataFn = fetchNPMMetadata
+var (
+	fetchLatestVersionFn = fetchLatestVersion
+	fetchNPMMetadataFn   = fetchNPMMetadata
+)
 
 type npmRegistryMetadata struct {
 	DistTags map[string]string             `json:"dist-tags"`
@@ -621,6 +624,10 @@ func fetchLatestVersion(ctx context.Context, eco domain.Ecosystem, name string) 
 var registryClient = &http.Client{Timeout: 10 * time.Second}
 
 func registryGet(ctx context.Context, url string) ([]byte, error) {
+	return registryGetLimited(ctx, url, maxRegistryResponseSize)
+}
+
+func registryGetLimited(ctx context.Context, url string, limit int64) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -636,7 +643,7 @@ func registryGet(ctx context.Context, url string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("status %d", resp.StatusCode)
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, maxRegistryResponseSize))
+	return io.ReadAll(io.LimitReader(resp.Body, limit))
 }
 
 // npm: GET https://registry.npmjs.org/{name}/latest
@@ -671,7 +678,7 @@ func fetchNPMMetadata(ctx context.Context, name string) (npmRegistryMetadata, bo
 
 // pypi: GET https://pypi.org/pypi/{name}/json
 func fetchPyPILatest(ctx context.Context, name string) string {
-	data, err := registryGet(ctx, "https://pypi.org/pypi/"+name+"/json")
+	data, err := registryGetLimited(ctx, "https://pypi.org/pypi/"+name+"/json", maxPyPIRegistryResponseSize)
 	if err != nil {
 		return ""
 	}
@@ -937,8 +944,10 @@ func fetchGitLatest(ctx context.Context, remote string, eco domain.Ecosystem) st
 	return selectLatestVersion(tags, eco)
 }
 
-var gitRemoteTagsFn = gitRemoteTags
-var gitRemoteTagCommitFn = gitRemoteTagCommit
+var (
+	gitRemoteTagsFn      = gitRemoteTags
+	gitRemoteTagCommitFn = gitRemoteTagCommit
+)
 
 func gitRemoteTags(ctx context.Context, remote string) ([]string, error) {
 	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--tags", remote) // #nosec G204 -- fixed argv; remote is passed as one git URL argument without a shell.

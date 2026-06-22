@@ -79,6 +79,31 @@ func TestApplySyncReputationRowsAndTombstones(t *testing.T) {
 	}
 }
 
+func TestFindReputationSkipsHistoricalRiskRows(t *testing.T) {
+	t.Parallel()
+
+	store, err := New(t.TempDir() + "/packmon.db")
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer closeSilently(store)
+
+	ctx := context.Background()
+	if _, err := store.db.ExecContext(ctx, `
+		INSERT INTO reputation_findings_local(id, ecosystem, name, version, type, risk_type, severity, summary)
+		VALUES ('reversinglabs:pypi/pillow@12.2.0', 'pypi', 'pillow', '12.2.0', 'supply_chain_risk', 'malware_history', 'HIGH', 'ReversingLabs: malware incident history')`); err != nil {
+		t.Fatalf("insert reputation row: %v", err)
+	}
+
+	findings, err := store.FindMalicious(ctx, "pypi", "pillow", "12.2.0")
+	if err != nil {
+		t.Fatalf("FindMalicious() error = %v", err)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("historical risk findings = %+v, want none", findings)
+	}
+}
+
 func TestSyncPaginatesWithOffsetAndStableSnapshot(t *testing.T) {
 	t.Parallel()
 

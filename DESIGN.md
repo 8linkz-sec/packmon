@@ -153,12 +153,13 @@ Important behavior:
   omit the noisy `Via` and `Flags` columns, keep full source paths out of
   package rows, and render a deduplicated "Checked Inventory Sources" section
   at the bottom for lockfiles, SBOMs, and Docker inventory files. The HTML
-  "Packages Needing Attention" section lists actionable updates, removed
-  packages, and packages with security findings; unknown latest-status rows
-  remain visible only in "All Packages". Finding-derived states such as
-  `Malicious`, `Removed`, `Malware history`, `Supply-chain risk`, and
-  `Lifecycle` override general latest-version status. Vulnerability findings
-  with a known fix or update path
+  "Packages Needing Attention" section lists actionable updates, current
+  ReversingLabs malware/removed-package findings, lifecycle findings, and
+  vulnerability findings; unknown latest-status rows remain visible only in
+  "All Packages". Historical ReversingLabs incident context is not treated as
+  an active package status. Finding-derived states such as `Malicious`,
+  `Removed`, `Supply-chain risk`, and `Lifecycle` override general
+  latest-version status. Vulnerability findings with a known fix or update path
   render as `Update available`; only vulnerability findings without a known
   update path render as `Vulnerable`, and a package with a security finding is
   never shown as merely `Up-to-Date`. Security finding advisories link to

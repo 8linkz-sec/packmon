@@ -26,6 +26,9 @@ func ParseRef(raw string) (Ref, bool) {
 		reference = namePart[at+1:]
 		namePart = namePart[:at]
 		digest = true
+		if colon := strings.LastIndex(namePart, ":"); colon > strings.LastIndex(namePart, "/") {
+			namePart = namePart[:colon]
+		}
 	} else if colon := strings.LastIndex(namePart, ":"); colon > strings.LastIndex(namePart, "/") {
 		reference = namePart[colon+1:]
 		namePart = namePart[:colon]

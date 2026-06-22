@@ -23,6 +23,9 @@ func TestNpmGeneratorGenerateArgsOmitDevByDefault(t *testing.T) {
 	if got.Name != "cyclonedx-npm" || !strings.Contains(joined, "--omit dev") || !strings.Contains(joined, d.ManifestPath) {
 		t.Fatalf("RunOptions = %+v", got)
 	}
+	if len(got.Args) < 2 || got.Args[len(got.Args)-2] != "--" || got.Args[len(got.Args)-1] != d.ManifestPath {
+		t.Fatalf("manifest must be separated from variadic --omit args with --, got %+v", got.Args)
+	}
 }
 
 func TestNpmGeneratorGenerateArgsIncludeDevDoesNotOmitDev(t *testing.T) {

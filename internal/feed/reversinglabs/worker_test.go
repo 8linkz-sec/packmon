@@ -319,8 +319,8 @@ func TestLookupBatchToleratesNumericIncidentValues(t *testing.T) {
 	if statuses["cssesc"] != "clean" {
 		t.Fatalf("cssesc status = %q, want clean", statuses["cssesc"])
 	}
-	if statuses["bad"] != "risk" {
-		t.Fatalf("bad status = %q, want risk", statuses["bad"])
+	if statuses["bad"] != "clean" {
+		t.Fatalf("bad status = %q, want clean", statuses["bad"])
 	}
 	if statuses["gone"] != "clean" {
 		t.Fatalf("gone status = %q, want clean", statuses["gone"])
@@ -617,9 +617,6 @@ func TestWorkerHelperBranches(t *testing.T) {
 	if got := removedSignals(pkg); len(got) != 2 {
 		t.Fatalf("removedSignals() = %#v, want current-state removal signals only", got)
 	}
-	if got := riskSignals(pkg); len(got) != 1 || got[0] != "incidents.type.malware" {
-		t.Fatalf("riskSignals() = %#v, want malware incident history signal", got)
-	}
 
 	for _, status := range []string{"malicious", "removed", "risk", "clean", "not_found"} {
 		if !isDefinitiveStatus(status) {
@@ -653,7 +650,7 @@ func TestWorkerHelperBranches(t *testing.T) {
 	newWorker(store, "token", slog.Default()).resetStuckJobs(context.Background())
 }
 
-func TestResultFromPackageMapsMalwareIncidentHistoryToRisk(t *testing.T) {
+func TestResultFromPackageIgnoresHistoricalIncidents(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
@@ -671,16 +668,13 @@ func TestResultFromPackageMapsMalwareIncidentHistoryToRisk(t *testing.T) {
 	}
 
 	got := w.resultFromPackage(rep, pkg, now)
-	if got.Status != "risk" {
-		t.Fatalf("Status = %q, want risk for malware incident history", got.Status)
+	if got.Status != "clean" {
+		t.Fatalf("Status = %q, want clean for historical incidents only", got.Status)
 	}
-	if got.Severity != "HIGH" {
-		t.Fatalf("Severity = %q, want HIGH", got.Severity)
+	if got.Summary != "ReversingLabs: no malicious signals" {
+		t.Fatalf("Summary = %q, want clean summary", got.Summary)
 	}
-	if got.Summary != "ReversingLabs: malware incident history" {
-		t.Fatalf("Summary = %q, want clear malware history summary", got.Summary)
-	}
-	if !strings.Contains(string(got.Evidence), `"incidents.type.malware"`) {
-		t.Fatalf("Evidence = %s, want incidents.type.malware signal", string(got.Evidence))
+	if strings.Contains(string(got.Evidence), "incidents.type.malware") {
+		t.Fatalf("Evidence = %s, want no historical incident signal", string(got.Evidence))
 	}
 }

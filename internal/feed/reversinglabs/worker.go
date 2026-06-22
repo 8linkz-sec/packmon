@@ -500,9 +500,7 @@ func (w *Worker) resultFromPackage(rep db.PackageReputation, pkg searchPackageDa
 	if signals := removedSignals(pkg); len(signals) > 0 {
 		return w.statusResult(rep, "removed", "ReversingLabs: package version was removed", signals, now)
 	}
-	if signals := riskSignals(pkg); len(signals) > 0 {
-		return w.statusResult(rep, "risk", riskSummary(signals), signals, now)
-	}
+	// ReversingLabs incidents are historical context, not active package state.
 	return w.statusResult(rep, "clean", "ReversingLabs: no malicious signals", nil, now)
 }
 
@@ -587,36 +585,6 @@ func removedSignals(pkg searchPackageData) []string {
 		signals = append(signals, "package.was_removed")
 	}
 	return signals
-}
-
-func riskSignals(pkg searchPackageData) []string {
-	var signals []string
-	for key, incident := range pkg.Incidents {
-		if incidentMatches(key, incident, "malware") {
-			signals = append(signals, "incidents.type.malware")
-			continue
-		}
-		if incidentMatches(key, incident, "tampering") {
-			signals = append(signals, "incidents.type.tampering")
-		}
-	}
-	return signals
-}
-
-func riskSummary(signals []string) string {
-	for _, signal := range signals {
-		if signal == "incidents.type.malware" {
-			return "ReversingLabs: malware incident history"
-		}
-	}
-	return "ReversingLabs: supply-chain incident history"
-}
-
-func incidentMatches(key string, incident searchIncident, want string) bool {
-	if strings.EqualFold(incident.Type, want) {
-		return true
-	}
-	return incident.Count > 0 && strings.EqualFold(strings.TrimSpace(key), want)
 }
 
 func marshalEvidence(purl, assessment string, signals []string) json.RawMessage {

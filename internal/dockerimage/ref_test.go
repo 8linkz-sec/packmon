@@ -17,6 +17,7 @@ func TestParseRefNormalizesDockerHubReferences(t *testing.T) {
 		{"docker.io/library/alpine:3.23", "docker.io/library/alpine", "3.23", "registry-1.docker.io", "library/alpine", false},
 		{"ghcr.io/acme/app:v1.2.3", "ghcr.io/acme/app", "v1.2.3", "ghcr.io", "acme/app", false},
 		{"postgres@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "docker.io/library/postgres", "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "registry-1.docker.io", "library/postgres", true},
+		{"python:3.14.5-slim@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "docker.io/library/python", "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "registry-1.docker.io", "library/python", true},
 	}
 
 	for _, tt := range tests {

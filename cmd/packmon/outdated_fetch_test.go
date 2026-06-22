@@ -142,6 +142,25 @@ func TestRegistryGetHandlesTransportAndStatusErrors(t *testing.T) {
 	}
 }
 
+func TestFetchPyPILatestHandlesLargeMetadataResponses(t *testing.T) {
+	originalClient := registryClient
+	t.Cleanup(func() { registryClient = originalClient })
+
+	largePayload := `{"info":{"version":"2.47.0"},"releases":{"old":["` + strings.Repeat("x", 8*1024*1024+1024) + `"]}}`
+	registryClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(largePayload)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})}
+
+	if got := fetchPyPILatest(context.Background(), "pydantic-core"); got != "2.47.0" {
+		t.Fatalf("fetchPyPILatest(large metadata) = %q, want 2.47.0", got)
+	}
+}
+
 func TestRunOutdatedReportsNoLockFiles(t *testing.T) {
 	output := captureStdout(t, func() {
 		if err := runOutdated([]string{t.TempDir()}, "", 2); err != nil {

@@ -56,7 +56,7 @@ func TestReputationToFindingMapsMalicious(t *testing.T) {
 	}
 }
 
-func TestReputationToFindingMapsMalwareHistoryRisk(t *testing.T) {
+func TestReputationToFindingSkipsHistoricalRisk(t *testing.T) {
 	rep := db.PackageReputation{
 		Ecosystem: "pypi",
 		Name:      "polars-runtime-32",
@@ -67,21 +67,8 @@ func TestReputationToFindingMapsMalwareHistoryRisk(t *testing.T) {
 		Summary:   "ReversingLabs: malware incident history",
 	}
 
-	finding, ok := reputationToFinding(rep)
-	if !ok {
-		t.Fatal("reputationToFinding returned !ok for malware history risk reputation")
-	}
-	if finding.Type != domain.FindingTypeSupplyChainRisk {
-		t.Fatalf("Type = %q, want supply_chain_risk", finding.Type)
-	}
-	if finding.RiskType != "malware_history" {
-		t.Fatalf("RiskType = %q, want malware_history", finding.RiskType)
-	}
-	if finding.Severity != domain.SeverityHigh {
-		t.Fatalf("Severity = %q, want HIGH", finding.Severity)
-	}
-	if finding.Title != "ReversingLabs: malware incident history" {
-		t.Fatalf("Title = %q, want malware incident history summary", finding.Title)
+	if finding, ok := reputationToFinding(rep); ok {
+		t.Fatalf("reputationToFinding(%+v) = %+v, true; want skipped historical risk", rep, finding)
 	}
 }
 
@@ -126,8 +113,11 @@ func TestReputationSyncFindingMapsRowsAndTombstones(t *testing.T) {
 	risk.Severity = "HIGH"
 	risk.Summary = "ReversingLabs: malware incident history"
 	got = reputationSyncFinding(risk)
-	if got.Type != "supply_chain_risk" || got.RiskType != "malware_history" || got.Severity != "HIGH" || got.Withdrawn {
-		t.Fatalf("malware history sync row = %+v", got)
+	if !got.Withdrawn {
+		t.Fatalf("historical risk sync row = %+v, want withdrawn tombstone", got)
+	}
+	if got.Type != "" || got.RiskType != "" {
+		t.Fatalf("historical risk tombstone should not carry finding fields: %+v", got)
 	}
 
 	clean := removed

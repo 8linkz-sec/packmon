@@ -19,8 +19,10 @@ func TestBuildToolchainPinsPatchedGoVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read Dockerfile: %v", err)
 	}
-	if !strings.Contains(string(dockerData), "FROM golang:"+patchedGoVersion+"-alpine AS build") {
-		t.Fatalf("Dockerfile must pin golang:%s-alpine in the build stage", patchedGoVersion)
+	wantBuildImage := "FROM golang:" + patchedGoVersion + "-alpine@sha256:"
+	dockerText := string(dockerData)
+	if !strings.Contains(dockerText, wantBuildImage) || !strings.Contains(dockerText, " AS build") {
+		t.Fatalf("Dockerfile must pin golang:%s-alpine by digest in the build stage", patchedGoVersion)
 	}
 
 	for _, rel := range []string{

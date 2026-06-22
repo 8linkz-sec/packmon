@@ -304,6 +304,67 @@ func TestSync_ParsesVulnerability(t *testing.T) {
 	}
 }
 
+func TestSyncDeletesWithdrawnVulnerability(t *testing.T) {
+	t.Parallel()
+
+	withdrawn := time.Date(2026, 6, 9, 15, 56, 0, 0, time.UTC).Format(time.RFC3339)
+	entry := osvEntry{
+		ID:        "PYSEC-2025-74",
+		Summary:   "Withdrawn Jinja2 advisory",
+		Published: time.Date(2025, 6, 10, 16, 15, 42, 0, time.UTC),
+		Modified:  time.Date(2026, 6, 9, 17, 0, 5, 0, time.UTC),
+		Withdrawn: &withdrawn,
+		Aliases:   []string{"CVE-2025-49142", "GHSA-wjw6-95h5-4jpx"},
+		Affected: []osvAffected{
+			{
+				Package: osvPackage{
+					Ecosystem: "PyPI",
+					Name:      "jinja2",
+				},
+			},
+		},
+	}
+	entryJSON, _ := json.Marshal(entry)
+	zipData := createZIP(t, map[string][]byte{
+		"PYSEC-2025-74.json": entryJSON,
+	})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/PyPI/all.zip" {
+			w.Header().Set("ETag", `"pypi-etag"`)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(zipData)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	store := &osvStoreStub{}
+	syncer := NewSyncer(store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	syncer.client = &http.Client{
+		Transport: &rewriteTransport{base: srv.URL, inner: http.DefaultTransport},
+		Timeout:   10 * time.Second,
+	}
+
+	result, err := syncer.Sync(context.Background(), store)
+	if err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	if result.EntriesSynced != 1 {
+		t.Fatalf("EntriesSynced = %d, want 1 withdrawn deletion", result.EntriesSynced)
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.deletedVulns) != 1 || store.deletedVulns[0] != "PYSEC-2025-74" {
+		t.Fatalf("deleted vulnerabilities = %#v, want PYSEC-2025-74", store.deletedVulns)
+	}
+	if len(store.vulns) != 0 {
+		t.Fatalf("upserted vulnerabilities = %d, want 0 for withdrawn entry", len(store.vulns))
+	}
+}
+
 func TestSync_DoesNotPersistNewETagWhenArchiveImportPartiallyFails(t *testing.T) {
 	t.Parallel()
 

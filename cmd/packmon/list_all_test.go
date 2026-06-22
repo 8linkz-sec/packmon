@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -225,7 +226,7 @@ func TestRunListAll_WritesHTMLReportWithFullPackageList(t *testing.T) {
 		"dev-only",
 		"1.0.0",
 		"2.0.0",
-		"<th class=\"version\">Installed</th>",
+		"<th class=\"installed\">Installed</th>",
 	} {
 		if !contains(out, want) {
 			t.Fatalf("list-all HTML missing %q:\n%s", want, out)
@@ -938,7 +939,7 @@ func TestListAllHTMLRendersScopeSummaryAndFindingMetadata(t *testing.T) {
 			t.Fatalf("HTML missing scope summary %q:\n%s", want, out)
 		}
 	}
-	wantFinding := `<td class="finding-package">postcss@8.5.8</td><td class="short">npm</td><td class="advisory nowrap"><a href="https://github.com/advisories/GHSA-postcss-test" target="_blank" rel="noopener">GHSA-postcss-test</a></td><td>PostCSS test advisory</td><td>8.5.10</td><td>osv</td><td class="short">dev</td><td class="short">transitive</td>`
+	wantFinding := `<td class="finding-package">postcss@8.5.8</td><td class="short">npm</td><td class="finding-advisory"><a href="https://github.com/advisories/GHSA-postcss-test" target="_blank" rel="noopener">GHSA-postcss-test</a></td><td class="finding-title">PostCSS test advisory</td><td class="finding-fixed">8.5.10</td><td class="short">osv</td><td class="short">dev</td><td class="short">transitive</td>`
 	if !strings.Contains(out, wantFinding) {
 		t.Fatalf("HTML finding row missing package provenance:\n%s", out)
 	}
@@ -990,7 +991,7 @@ func TestListAllHTMLLinksSecurityFindingAdvisoryWithoutWrapping(t *testing.T) {
 		t.Fatalf("read HTML: %v", err)
 	}
 	out := string(data)
-	want := `<td class="advisory nowrap"><a href="https://github.com/advisories/GHSA-vqf5-2xx6-9wfm" target="_blank" rel="noopener">GHSA-vqf5-2xx6-9wfm</a></td>`
+	want := `<td class="finding-advisory"><a href="https://github.com/advisories/GHSA-vqf5-2xx6-9wfm" target="_blank" rel="noopener">GHSA-vqf5-2xx6-9wfm</a></td>`
 	if !strings.Contains(out, want) {
 		t.Fatalf("HTML finding advisory missing nowrap external link:\n%s", out)
 	}
@@ -1085,7 +1086,7 @@ func TestListAllHTMLKeepsUnknownOnlyPackagesOutOfAttention(t *testing.T) {
 	}
 	allPackages := out[allPackagesStart:]
 	if !strings.Contains(allPackages, `<td class="name">docker.io/library/alpine</td>`) ||
-		!strings.Contains(allPackages, `<td class="short">Unknown</td>`) {
+		!strings.Contains(allPackages, `<td class="package-status">Unknown</td>`) {
 		t.Fatalf("unknown docker package should still be visible in All Packages:\n%s", allPackages)
 	}
 }
@@ -1135,16 +1136,16 @@ func TestListAllHTMLMarksMaliciousPackagesAsAttention(t *testing.T) {
 		t.Fatalf("HTML missing expected sections:\n%s", out)
 	}
 	attention := out[attentionStart:securityStart]
-	wantRow := `<td class="name">evilpkg</td><td class="version">2.0.0</td><td class="version">2.0.0</td><td class="short">Malicious</td>`
+	wantRow := `<td class="name">evilpkg</td><td class="installed">2.0.0</td><td class="version">2.0.0</td><td class="package-status">Malicious</td>`
 	if !strings.Contains(attention, wantRow) {
 		t.Fatalf("malicious package should be explicit in attention section:\n%s", attention)
 	}
-	if !strings.Contains(out, `<td class="advisory nowrap"><a href="https://secure.software/pypi/packages/evilpkg" target="_blank" rel="noopener">reversinglabs:pypi/evilpkg@2.0.0</a></td>`) {
+	if !strings.Contains(out, `<td class="finding-advisory"><a href="https://secure.software/pypi/packages/evilpkg" target="_blank" rel="noopener">reversinglabs:pypi/evilpkg@2.0.0</a></td>`) {
 		t.Fatalf("HTML missing ReversingLabs advisory link:\n%s", out)
 	}
 }
 
-func TestListAllHTMLMarksMalwareHistoryPackagesClearly(t *testing.T) {
+func TestListAllHTMLSuppressesHistoricalReputationRisk(t *testing.T) {
 	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
 	report := listAllPackageReport{
 		Rows: []listAllRow{{
@@ -1189,12 +1190,50 @@ func TestListAllHTMLMarksMalwareHistoryPackagesClearly(t *testing.T) {
 		t.Fatalf("HTML missing expected sections:\n%s", out)
 	}
 	attention := out[attentionStart:securityStart]
-	wantRow := `<td class="name">polars-runtime-32</td><td class="version">1.40.1</td><td class="version">1.40.1</td><td class="short">Malware history</td>`
-	if !strings.Contains(attention, wantRow) {
-		t.Fatalf("malware history package should be explicit in attention section:\n%s", attention)
+	if strings.Contains(out, "Malware history") || strings.Contains(strings.ToLower(out), "malware incident history") {
+		t.Fatalf("HTML should not render historical reputation risk as malware history:\n%s", out)
 	}
-	if !strings.Contains(out, "ReversingLabs: malware incident history") {
-		t.Fatalf("HTML missing clear malware history finding title:\n%s", out)
+	if strings.Contains(attention, "polars-runtime-32") {
+		t.Fatalf("historical reputation risk should not appear as package attention:\n%s", attention)
+	}
+	if !strings.Contains(out, "No package status issues requiring attention.") {
+		t.Fatalf("historical reputation risk should not create attention rows:\n%s", out)
+	}
+	if !strings.Contains(out, "No security findings in 1 packages.") {
+		t.Fatalf("historical reputation risk should not create security finding rows:\n%s", out)
+	}
+	if !strings.Contains(out, `<span class="badge bad">0 vulnerable</span>`) {
+		t.Fatalf("historical reputation risk should not increment vulnerable count:\n%s", out)
+	}
+}
+
+func TestBuildListAllPackageReportOnlyVulnerabilityFindingsSetVuln(t *testing.T) {
+	stubLatestVersion(t, func(_ context.Context, _ domain.Ecosystem, _ string) string {
+		return "12.2.0"
+	})
+	report := buildListAllPackageReport([]listAllPackage{{
+		Name:      "pillow",
+		Version:   "12.2.0",
+		Ecosystem: domain.EcosystemPyPI,
+		LockFile:  "requirements.txt",
+		Direct:    true,
+	}}, &domain.ScanResult{Findings: []domain.Finding{{
+		Name:      "pillow",
+		Version:   "12.2.0",
+		Ecosystem: domain.EcosystemPyPI,
+		Type:      domain.FindingTypeSupplyChainRisk,
+		RiskType:  "malware_history",
+		Source:    "reversinglabs",
+	}}}, "repo")
+
+	if len(report.Rows) != 1 {
+		t.Fatalf("Rows = %d, want 1", len(report.Rows))
+	}
+	if report.Rows[0].Vuln != "-" {
+		t.Fatalf("supply-chain risk Vuln = %q, want -", report.Rows[0].Vuln)
+	}
+	if report.Vulnerable != 0 {
+		t.Fatalf("Vulnerable = %d, want 0", report.Vulnerable)
 	}
 }
 
@@ -1299,11 +1338,15 @@ func TestListAllHTMLDoesNotMarkVulnerablePackageUpToDate(t *testing.T) {
 		{name: "lodash", installed: "4.17.20", latest: "4.17.20", status: "Update available"},
 		{name: "left-pad", installed: "1.3.0", latest: "1.3.0", status: "Vulnerable"},
 	} {
-		want := `<td class="name">` + pkg.name + `</td><td class="version">` + pkg.installed + `</td><td class="version">` + pkg.latest + `</td><td class="short">` + pkg.status + `</td>`
+		statusClass := ""
+		if pkg.status == "Update available" {
+			statusClass = " status-update"
+		}
+		want := `<td class="name">` + pkg.name + `</td><td class="installed">` + pkg.installed + `</td><td class="version">` + pkg.latest + `</td><td class="package-status` + statusClass + `">` + pkg.status + `</td>`
 		if !strings.Contains(out, want) {
 			t.Fatalf("vulnerable package should be marked %s, not Up-to-Date:\n%s", pkg.status, out)
 		}
-		bad := `<td class="name">` + pkg.name + `</td><td class="version">` + pkg.installed + `</td><td class="version">` + pkg.latest + `</td><td class="short">Up-to-Date</td>`
+		bad := `<td class="name">` + pkg.name + `</td><td class="installed">` + pkg.installed + `</td><td class="version">` + pkg.latest + `</td><td class="package-status">Up-to-Date</td>`
 		if strings.Contains(out, bad) {
 			t.Fatalf("vulnerable package is still marked Up-to-Date:\n%s", out)
 		}
@@ -1342,9 +1385,9 @@ func TestListAllHTMLOmitsViaAndFlagsColumns(t *testing.T) {
 	out := string(data)
 	for _, want := range []string{
 		`<th class="short">Relation</th>`,
-		`<th class="short">Vuln</th>`,
+		`<th class="vuln-col">Vuln</th>`,
 		`<td class="short">transitive</td>`,
-		`<td class="short">-</td>`,
+		`<td class="vuln-col">-</td>`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("HTML missing retained package column %q:\n%s", want, out)
@@ -1410,6 +1453,63 @@ func TestListAllHTMLShortensDigestAndRendersCopyButton(t *testing.T) {
 	}
 }
 
+func TestListAllHTMLAppliesTableLayoutAndAttentionClasses(t *testing.T) {
+	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+	const installedDigest = "sha256:aaaaaaaaaaaa1234567890abcdef1234567890abcdef1234567890abcdef12"
+	report := listAllPackageReport{
+		Rows: []listAllRow{
+			{Name: "postcss", Installed: "8.5.8", Latest: "8.5.10", Update: "yes", Ecosystem: "npm", Source: "lockfile", Scope: "runtime", Relation: "transitive", Vuln: "yes", LockFile: "package-lock.json"},
+			{Name: "docker.io/library/nginx", Installed: installedDigest, Latest: "sha256:bbbbbbbbbbbb1234567890abcdef1234567890abcdef1234567890abcdef12", LatestCopy: "sha256:bbbbbbbbbbbb1234567890abcdef1234567890abcdef1234567890abcdef12", Update: "yes", Ecosystem: "docker", Source: "dockerfile", Scope: "runtime", Relation: "base", Vuln: "-", LockFile: "Dockerfile"},
+		},
+	}
+	result := &domain.ScanResult{
+		Mode: "remote",
+		Findings: []domain.Finding{{
+			Name:         "postcss",
+			Version:      "8.5.8",
+			Ecosystem:    domain.EcosystemNPM,
+			Type:         domain.FindingTypeVulnerability,
+			Severity:     domain.SeverityHigh,
+			AdvisoryID:   "GHSA-long-advisory",
+			Title:        "A long finding title may wrap while package and advisory stay readable",
+			FixedVersion: ">= 8.5.10",
+			Source:       "osv",
+		}},
+	}
+
+	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+		t.Fatalf("writeListAllHTML: %v", err)
+	}
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read HTML: %v", err)
+	}
+	out := string(data)
+	for _, want := range []string{
+		`.status-update{color:var(--high);font-weight:700;}`,
+		`.vuln-yes{color:var(--crit);font-weight:700;}`,
+		`.vuln-col{text-align:center;`,
+		`.findings-table{table-layout:auto;min-width:0;}`,
+		`.findings-table .finding-package{width:1%;min-width:0;white-space:nowrap;word-break:normal;}`,
+		`.findings-table .finding-advisory{width:1%;min-width:0;white-space:nowrap;}`,
+		`.finding-title{white-space:normal;overflow-wrap:anywhere;}`,
+		`.finding-fixed{white-space:nowrap;}`,
+		`<td class="package-status status-update">Update available</td>`,
+		`<td class="vuln-col vuln-yes">yes</td>`,
+		`<table class="findings-table">`,
+		`<th class="finding-package">Package</th>`,
+		`<th class="finding-advisory">Advisory</th>`,
+		`<th class="finding-title">Finding</th>`,
+		`<th class="finding-fixed">Fix Version</th>`,
+		`<td class="finding-fixed">&gt;= 8.5.10</td>`,
+		`<td class="installed"><span class="copy-value">sha256:aaaaaaaaaaaa..</span><button type="button" class="copy-btn" data-copy="` + installedDigest + `" aria-label="Copy full value">Copy</button></td>`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("HTML missing layout requirement %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestListAllHTMLRendersStatusAndCheckedLockFiles(t *testing.T) {
 	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
 	sharedLock := filepath.Join("repo", "package-lock.json")
@@ -1418,7 +1518,7 @@ func TestListAllHTMLRendersStatusAndCheckedLockFiles(t *testing.T) {
 			{Name: "braces", Installed: "3.0.3", Latest: "3.0.3", Update: "-", Ecosystem: "npm", Scope: "sbom", Relation: "declared", Vuln: "yes", LockFile: sharedLock},
 			{Name: "postcss", Installed: "8.5.8", Latest: "8.5.10", Update: "yes", Ecosystem: "npm", Scope: "sbom", Relation: "declared", Vuln: "yes", LockFile: sharedLock},
 			{Name: "yaml", Installed: "2.8.3", Latest: "2.8.3", Update: "-", Ecosystem: "npm", Scope: "sbom", Relation: "declared", Vuln: "-", LockFile: filepath.Join("repo", "go.cdx.json")},
-			{Name: "local/image", Installed: "latest", Latest: "unknown", Update: "unknown", Ecosystem: "docker", Scope: "runtime", Relation: "image", Vuln: "-", LockFile: ""},
+			{Name: "local/image", Installed: "latest", Latest: "-", Update: "local", Ecosystem: "docker", Scope: "runtime", Relation: "compose-build", Vuln: "-", LockFile: ""},
 		},
 		Vulnerable: 2,
 	}
@@ -1446,12 +1546,12 @@ func TestListAllHTMLRendersStatusAndCheckedLockFiles(t *testing.T) {
 	for _, want := range []string{
 		"<h2>Packages Needing Attention</h2>",
 		"<h2>Checked Inventory Sources</h2>",
-		`<th class="short">Status</th>`,
-		`<td class="short">Removed</td>`,
-		`<td class="short">Update available</td>`,
-		`<td class="short">Up-to-Date</td>`,
-		`<td class="short">Unknown</td>`,
-		`<td class="name">postcss</td><td class="version">8.5.8</td><td class="version">8.5.10</td><td class="short">Update available</td>`,
+		`<th class="package-status">Status</th>`,
+		`<td class="package-status">Removed</td>`,
+		`<td class="package-status status-update">Update available</td>`,
+		`<td class="package-status">Up-to-Date</td>`,
+		`<td class="package-status">Local build</td>`,
+		`<td class="name">postcss</td><td class="installed">8.5.8</td><td class="version">8.5.10</td><td class="package-status status-update">Update available</td>`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("HTML missing %q:\n%s", want, out)
@@ -1585,7 +1685,7 @@ func TestListAllHTMLSurfacesUpdatesWithoutSecurityFindings(t *testing.T) {
 		"No security findings in 1 packages.",
 		"<h2>Packages Needing Attention</h2>",
 		"<h2>Security Findings</h2>",
-		`<td class="name">node-addon-api</td><td class="version">7.1.1</td><td class="version">8.8.0</td><td class="short">Update available</td>`,
+		`<td class="name">node-addon-api</td><td class="installed">7.1.1</td><td class="version">8.8.0</td><td class="package-status status-update">Update available</td>`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("HTML missing %q:\n%s", want, out)
@@ -1609,8 +1709,8 @@ func TestListAllHelperBranches(t *testing.T) {
 		Name:      "local/image",
 		Version:   "latest",
 	})
-	if !local.Unknown || local.Update != "unknown" {
-		t.Fatalf("local docker status = %+v, want unknown", local)
+	if local.Unknown || local.Latest != "-" || local.Update != "local" {
+		t.Fatalf("local docker status = %+v, want local non-unknown", local)
 	}
 	invalidDocker := resolveListAllLatest(context.Background(), listAllPackage{
 		Ecosystem: domain.EcosystemDocker,
@@ -1676,5 +1776,68 @@ func TestListAllHelperBranches(t *testing.T) {
 	err := writeListAllHTML(filepath.Join(parentFile, "report.html"), "", domain.SeverityCritical, &domain.ScanResult{}, listAllPackageReport{})
 	if err == nil || !strings.Contains(err.Error(), "prepare HTML output") {
 		t.Fatalf("writeListAllHTML(parent file) = %v", err)
+	}
+}
+
+func TestResolveDockerImageStatusLabelsMatchingPinnedTagDigestAsPinned(t *testing.T) {
+	oldTransport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = oldTransport })
+
+	const digest = "sha256:92cf5e2f488744c90d3df4378dfa3f0842704950cfa1353975d5510c945b072f"
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Method != http.MethodHead {
+			t.Fatalf("registry request method = %s, want HEAD", req.Method)
+		}
+		if req.URL.Host != "registry.example.test" || !strings.Contains(req.URL.Path, "/v2/acme/app/manifests/stable") {
+			t.Fatalf("registry request URL = %s", req.URL.String())
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Docker-Content-Digest": []string{digest}},
+			Body:       io.NopCloser(strings.NewReader("")),
+			Request:    req,
+		}, nil
+	})
+
+	got := resolveDockerImageStatus(context.Background(), listAllPackage{
+		Ecosystem: domain.EcosystemDocker,
+		Name:      "registry.example.test/acme/app",
+		Version:   digest,
+		DockerRef: "registry.example.test/acme/app:stable@" + digest,
+	})
+	if got.Unknown || got.Update != "pinned" || got.Latest != shortDigest(digest) || got.LatestCopy != digest {
+		t.Fatalf("resolveDockerImageStatus() = %+v, want pinned digest status", got)
+	}
+}
+
+func TestResolveDockerImageStatusMarksMovedPinnedTagAsUpdateAvailable(t *testing.T) {
+	oldTransport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = oldTransport })
+
+	const pinned = "sha256:92cf5e2f488744c90d3df4378dfa3f0842704950cfa1353975d5510c945b072f"
+	const current = "sha256:c2d5ade763cacfb03fe9cb8e8af5d1be5041ff331921fa26a9b231ca3a4f780a"
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Method != http.MethodHead {
+			t.Fatalf("registry request method = %s, want HEAD", req.Method)
+		}
+		if req.URL.Host != "registry.example.test" || !strings.Contains(req.URL.Path, "/v2/acme/app/manifests/stable") {
+			t.Fatalf("registry request URL = %s", req.URL.String())
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Docker-Content-Digest": []string{current}},
+			Body:       io.NopCloser(strings.NewReader("")),
+			Request:    req,
+		}, nil
+	})
+
+	got := resolveDockerImageStatus(context.Background(), listAllPackage{
+		Ecosystem: domain.EcosystemDocker,
+		Name:      "registry.example.test/acme/app",
+		Version:   pinned,
+		DockerRef: "registry.example.test/acme/app:stable@" + pinned,
+	})
+	if got.Unknown || got.Update != "yes" || got.Latest != shortDigest(current) || got.LatestCopy != current {
+		t.Fatalf("resolveDockerImageStatus() = %+v, want update to current tag digest", got)
 	}
 }
