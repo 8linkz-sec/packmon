@@ -100,6 +100,24 @@ func TestGitHubReleaseDockerBuildTargetsServerStage(t *testing.T) {
 	t.Fatal("release workflow has no docker/build-push-action step")
 }
 
+func TestGitHubReleaseUsesCurrentBuildxAction(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join("..", "..", ".github", "workflows", "release.yml")
+	data, err := os.ReadFile(path) //nolint:gosec // static repository fixture path
+	if err != nil {
+		t.Fatalf("read release.yml: %v", err)
+	}
+	text := string(data)
+	const wantBuildxAction = "docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0"
+	if !strings.Contains(text, wantBuildxAction) {
+		t.Fatalf("release workflow must pin current Buildx action %q", wantBuildxAction)
+	}
+	if strings.Contains(text, "docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f") {
+		t.Fatal("release workflow still pins docker/setup-buildx-action v3")
+	}
+}
+
 func TestGitHubCIWorkflowRunsTaggedIntegrationTests(t *testing.T) {
 	t.Parallel()
 
