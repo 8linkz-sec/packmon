@@ -10,7 +10,7 @@ COPY . .
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /packmon ./cmd/packmon
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /packmon-server ./cmd/packmon-server
 
-FROM alpine:3.23 AS server
+FROM alpine:3.24 AS server
 
 RUN apk upgrade --no-cache && \
     apk add --no-cache ca-certificates git tzdata && \
@@ -26,7 +26,7 @@ HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
 
 ENTRYPOINT ["packmon-server"]
 
-FROM alpine:3.23 AS cli
+FROM alpine:3.24 AS cli
 
 RUN apk upgrade --no-cache && \
     apk add --no-cache ca-certificates tzdata && \

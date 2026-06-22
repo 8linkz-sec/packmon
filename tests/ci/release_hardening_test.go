@@ -45,6 +45,28 @@ func TestBuildToolchainPinsPatchedGoVersion(t *testing.T) {
 	}
 }
 
+func TestDockerRuntimeStagesUseCurrentAlpine(t *testing.T) {
+	t.Parallel()
+
+	dockerfile := filepath.Join("..", "..", "Dockerfile")
+	dockerData, err := os.ReadFile(dockerfile) //nolint:gosec // static repository fixture path
+	if err != nil {
+		t.Fatalf("read Dockerfile: %v", err)
+	}
+	dockerText := string(dockerData)
+	for _, want := range []string{
+		"FROM alpine:3.24 AS server",
+		"FROM alpine:3.24 AS cli",
+	} {
+		if !strings.Contains(dockerText, want) {
+			t.Fatalf("Dockerfile missing runtime stage %q", want)
+		}
+	}
+	if strings.Contains(dockerText, "FROM alpine:3.23") {
+		t.Fatal("Dockerfile still uses alpine:3.23 in a runtime stage")
+	}
+}
+
 func TestGitHubReleaseDockerBuildTargetsServerStage(t *testing.T) {
 	t.Parallel()
 
