@@ -3,12 +3,13 @@
 package scanner
 
 import (
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/8linkz/packmon/internal/parser"
+	"github.com/8linkz-sec/packmon/internal/parser"
 )
 
 // LockFile represents a discovered lock file on disk.
@@ -28,6 +29,8 @@ type Walker struct {
 	maxDepth   int
 	ecosystems map[string]struct{} // nil means all
 }
+
+type walkDirFunc func(root string, fn fs.WalkDirFunc) error
 
 // NewWalker creates a Walker. If ecosystems is empty, all ecosystems are
 // included.
@@ -50,6 +53,10 @@ func NewWalker(reg *parser.Registry, maxDepth int, ecosystems []string) *Walker 
 // It skips hidden directories (starting with ".") and common vendor/node_modules
 // directories.
 func (w *Walker) Walk(root string) ([]LockFile, error) {
+	return w.walk(root, filepath.WalkDir)
+}
+
+func (w *Walker) walk(root string, walkDir walkDirFunc) ([]LockFile, error) {
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		return nil, err
@@ -66,13 +73,9 @@ func (w *Walker) Walk(root string) ([]LockFile, error) {
 	var files []LockFile
 	rootDepth := strings.Count(filepath.ToSlash(absRoot), "/")
 
-	err = filepath.WalkDir(absRoot, func(path string, d fs.DirEntry, walkErr error) error {
+	err = walkDir(absRoot, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
-			// Skip directories we cannot read.
-			if d != nil && d.IsDir() {
-				return fs.SkipDir
-			}
-			return nil
+			return walkInputError(absRoot, path, walkErr)
 		}
 
 		if d.IsDir() {
@@ -120,4 +123,12 @@ func (w *Walker) Walk(root string) ([]LockFile, error) {
 	})
 
 	return files, err
+}
+
+func walkInputError(root, path string, cause error) error {
+	display := filepath.ToSlash(path)
+	if rel, err := filepath.Rel(root, path); err == nil && rel != "." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != ".." {
+		display = filepath.ToSlash(rel)
+	}
+	return fmt.Errorf("discover input %s: %w", display, cause)
 }

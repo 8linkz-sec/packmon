@@ -5,13 +5,16 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/8linkz/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/db"
+	feedhealth "github.com/8linkz-sec/packmon/internal/feed"
+	"github.com/8linkz-sec/packmon/internal/logsafe"
 )
 
 // FeedStatusData is the view model for the feeds template.
 type FeedStatusData struct {
 	ActiveNav string
 	Feeds     []FeedRow
+	LoadError string
 }
 
 // FeedRow is the view model for one feed in the status table.
@@ -36,8 +39,10 @@ func HandleFeeds(store Store, renderer *Renderer, logger *slog.Logger) http.Hand
 		ctx := r.Context()
 
 		statuses, err := store.ListFeedSyncStatuses(ctx)
+		loadError := ""
 		if err != nil {
 			logger.Error("feeds: failed to list statuses", "error", err)
+			loadError = "Feed status could not be loaded. Check the server logs and database connection before relying on feed health."
 		}
 
 		rows := make([]FeedRow, 0, len(statuses))
@@ -51,7 +56,7 @@ func HandleFeeds(store Store, renderer *Renderer, logger *slog.Logger) http.Hand
 				LastSyncStatus: s.LastSyncStatus,
 				EntriesSynced:  s.EntriesSynced,
 				EntriesTotal:   s.EntriesTotal,
-				LastError:      s.LastError,
+				LastError:      logsafe.RedactDiagnosticMessage(s.LastError),
 			}
 			if s.LastSyncAt != nil {
 				row.LastSyncAtTime = *s.LastSyncAt
@@ -65,6 +70,7 @@ func HandleFeeds(store Store, renderer *Renderer, logger *slog.Logger) http.Hand
 		data := FeedStatusData{
 			ActiveNav: "feeds",
 			Feeds:     rows,
+			LoadError: loadError,
 		}
 
 		// Partial response for HTMX polling.
@@ -85,34 +91,7 @@ func HandleFeeds(store Store, renderer *Renderer, logger *slog.Logger) http.Hand
 }
 
 // feedHealthStatus derives a health string from sync status.
-// Duplicated from api/v1 to avoid a cross-package dependency; both use
-// the same logic.
-func feedHealthStatus(s db.FeedSyncStatus) string {
-	status, _ := feedHealth(s)
-	return status
-}
-
 func feedHealth(s db.FeedSyncStatus) (string, string) {
-	if s.LastSyncStatus == "error" {
-		return "error", "last sync failed"
-	}
-	if s.LastSyncStatus == "disabled" {
-		return "disabled", "feed disabled"
-	}
-	if s.LastSyncStatus == "running" {
-		return "pending", "sync running"
-	}
-	if s.LastSyncStatus == "skipped" {
-		return "warning", "last sync skipped"
-	}
-	if s.LastSyncAt == nil {
-		return "error", "never synced"
-	}
-	if time.Since(*s.LastSyncAt) > 48*time.Hour {
-		return "warning", "stale: no sync in 48h+"
-	}
-	if s.EntriesTotal == 0 && s.EntriesSynced == 0 {
-		return "warning", "no entries synced yet"
-	}
-	return "healthy", ""
+	health := feedhealth.FeedStatusHealth(s, feedhealth.HealthOptions{})
+	return health.Status, health.Reason
 }

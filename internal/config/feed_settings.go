@@ -16,8 +16,14 @@ type FeedSettings struct {
 	SyncInterval         time.Duration
 	APIKey               string
 	RequiresAPIKey       bool
+	SupportsAPIKey       bool
 	SupportsSyncInterval bool
+	SupportsManualSync   bool
 }
+
+// FeedSyncMinInterval is the minimum persisted self-managed provider sync
+// interval accepted for feed-specific overrides.
+const FeedSyncMinInterval = 15 * time.Minute
 
 var configFeedLockInit sync.Mutex
 
@@ -47,6 +53,32 @@ func ParseFeedMode(raw string) (FeedMode, error) {
 	}
 }
 
+// FeedSupportsExternalMode reports whether Packmon has an import/API path for
+// externally managed data for the named feed.
+func FeedSupportsExternalMode(name string) bool {
+	switch NormalizeFeedName(name) {
+	case "osv", "ghsa", "openssf", "vulncheck", "cisakev", "epss", "socket":
+		return true
+	default:
+		return false
+	}
+}
+
+func feedSupportsSyncInterval(name string) bool {
+	switch NormalizeFeedName(name) {
+	case "osv", "ghsa", "openssf", "vulncheck", "cisakev", "epss", "nvd", "endoflife":
+		return true
+	default:
+		return false
+	}
+}
+
+// FeedSupportsManualSync reports whether the feed manager registers a syncer
+// that can be triggered on demand from the admin UI.
+func FeedSupportsManualSync(name string) bool {
+	return feedSupportsSyncInterval(name)
+}
+
 // FeedsSnapshot returns a consistent copy of the mutable feed configuration.
 func (c *Config) FeedsSnapshot() FeedsConfig {
 	if c == nil {
@@ -55,7 +87,9 @@ func (c *Config) FeedsSnapshot() FeedsConfig {
 	mu := c.feedLock()
 	mu.RLock()
 	defer mu.RUnlock()
-	return c.Feeds
+	feeds := c.Feeds
+	feeds.ReversingLabsExcludedNamespaces = append([]string(nil), c.Feeds.ReversingLabsExcludedNamespaces...)
+	return feeds
 }
 
 // FeedSettings returns one feed's configuration.
@@ -74,6 +108,7 @@ func (c *Config) FeedSettings(name string) (FeedSettings, bool) {
 			Mode:                 feeds.OSVMode,
 			SyncInterval:         feeds.OSVInterval,
 			SupportsSyncInterval: true,
+			SupportsManualSync:   true,
 		}, true
 	case "ghsa":
 		return FeedSettings{
@@ -83,6 +118,7 @@ func (c *Config) FeedSettings(name string) (FeedSettings, bool) {
 			Mode:                 feeds.GHSAMode,
 			SyncInterval:         feeds.GHSAInterval,
 			SupportsSyncInterval: true,
+			SupportsManualSync:   true,
 		}, true
 	case "openssf":
 		return FeedSettings{
@@ -92,6 +128,7 @@ func (c *Config) FeedSettings(name string) (FeedSettings, bool) {
 			Mode:                 feeds.OpenSSFMode,
 			SyncInterval:         feeds.OpenSSFInterval,
 			SupportsSyncInterval: true,
+			SupportsManualSync:   true,
 		}, true
 	case "vulncheck":
 		return FeedSettings{
@@ -102,7 +139,9 @@ func (c *Config) FeedSettings(name string) (FeedSettings, bool) {
 			SyncInterval:         feeds.VulnCheckInterval,
 			APIKey:               feeds.VulnCheckAPIKey,
 			RequiresAPIKey:       true,
+			SupportsAPIKey:       true,
 			SupportsSyncInterval: true,
+			SupportsManualSync:   true,
 		}, true
 	case "cisakev":
 		return FeedSettings{
@@ -112,6 +151,7 @@ func (c *Config) FeedSettings(name string) (FeedSettings, bool) {
 			Mode:                 feeds.CISAKEVMode,
 			SyncInterval:         feeds.CISAKEVInterval,
 			SupportsSyncInterval: true,
+			SupportsManualSync:   true,
 		}, true
 	case "epss":
 		return FeedSettings{
@@ -121,6 +161,7 @@ func (c *Config) FeedSettings(name string) (FeedSettings, bool) {
 			Mode:                 feeds.EPSSMode,
 			SyncInterval:         feeds.EPSSInterval,
 			SupportsSyncInterval: true,
+			SupportsManualSync:   true,
 		}, true
 	case "nvd":
 		return FeedSettings{
@@ -131,7 +172,9 @@ func (c *Config) FeedSettings(name string) (FeedSettings, bool) {
 			SyncInterval:         feeds.NVDInterval,
 			APIKey:               feeds.NVDAPIKey,
 			RequiresAPIKey:       false,
+			SupportsAPIKey:       true,
 			SupportsSyncInterval: true,
+			SupportsManualSync:   true,
 		}, true
 	case "endoflife":
 		return FeedSettings{
@@ -141,6 +184,7 @@ func (c *Config) FeedSettings(name string) (FeedSettings, bool) {
 			Mode:                 feeds.EndOfLifeMode,
 			SyncInterval:         feeds.EndOfLifeInterval,
 			SupportsSyncInterval: true,
+			SupportsManualSync:   true,
 		}, true
 	case "socket":
 		return FeedSettings{
@@ -150,6 +194,7 @@ func (c *Config) FeedSettings(name string) (FeedSettings, bool) {
 			Mode:                 feeds.SocketMode,
 			APIKey:               feeds.SocketAPIKey,
 			RequiresAPIKey:       true,
+			SupportsAPIKey:       true,
 			SupportsSyncInterval: false,
 		}, true
 	case "reversinglabs":
@@ -160,6 +205,7 @@ func (c *Config) FeedSettings(name string) (FeedSettings, bool) {
 			Mode:                 feeds.ReversingLabsMode,
 			APIKey:               feeds.ReversingLabsAPIKey,
 			RequiresAPIKey:       true,
+			SupportsAPIKey:       true,
 			SupportsSyncInterval: false,
 		}, true
 	default:
@@ -197,12 +243,37 @@ func (c *Config) EffectiveFeedInterval(name string) time.Duration {
 	return c.FeedSync.Interval
 }
 
+func ValidateFeedSettings(feed FeedSettings) error {
+	_, err := validateFeedSettings(feed)
+	return err
+}
+
+func validateFeedSettings(feed FeedSettings) (FeedMode, error) {
+	mode, err := ParseFeedMode(string(feed.Mode))
+	if err != nil {
+		return "", err
+	}
+	name := NormalizeFeedName(feed.Name)
+	switch name {
+	case "osv", "ghsa", "openssf", "vulncheck", "cisakev", "epss", "nvd", "endoflife", "socket", "reversinglabs":
+		if mode == FeedModeExternal && !FeedSupportsExternalMode(name) {
+			return "", fmt.Errorf("%s does not support external mode", name)
+		}
+		if mode == FeedModeSelf && feedSupportsSyncInterval(name) && feed.SyncInterval > 0 && feed.SyncInterval < FeedSyncMinInterval {
+			return "", fmt.Errorf("%s sync interval must be at least %s", name, FeedSyncMinInterval)
+		}
+		return mode, nil
+	default:
+		return "", fmt.Errorf("unknown feed %q", feed.Name)
+	}
+}
+
 // SetFeedSettings mutates the config for one feed.
 func (c *Config) SetFeedSettings(feed FeedSettings) error {
 	if c == nil {
 		return fmt.Errorf("nil config")
 	}
-	mode, err := ParseFeedMode(string(feed.Mode))
+	mode, err := validateFeedSettings(feed)
 	if err != nil {
 		return err
 	}
@@ -243,9 +314,6 @@ func (c *Config) SetFeedSettings(feed FeedSettings) error {
 		c.Feeds.NVDInterval = normalizeOptionalDuration(feed.SyncInterval)
 		c.Feeds.NVDAPIKey = strings.TrimSpace(feed.APIKey)
 	case "endoflife":
-		if mode == FeedModeExternal {
-			return fmt.Errorf("endoflife does not support external mode")
-		}
 		c.Feeds.EndOfLifeEnabled = feed.Enabled
 		c.Feeds.EndOfLifeMode = FeedModeSelf
 		c.Feeds.EndOfLifeInterval = normalizeOptionalDuration(feed.SyncInterval)
@@ -254,9 +322,6 @@ func (c *Config) SetFeedSettings(feed FeedSettings) error {
 		c.Feeds.SocketMode = mode
 		c.Feeds.SocketAPIKey = strings.TrimSpace(feed.APIKey)
 	case "reversinglabs":
-		if mode == FeedModeExternal {
-			return fmt.Errorf("reversinglabs does not support external mode")
-		}
 		c.Feeds.ReversingLabsEnabled = feed.Enabled
 		c.Feeds.ReversingLabsMode = FeedModeSelf
 		c.Feeds.ReversingLabsAPIKey = strings.TrimSpace(feed.APIKey)

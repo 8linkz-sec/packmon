@@ -13,11 +13,23 @@ New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $HOME ".packmon\db") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $HOME ".packmon\config") | Out-Null
 
+$Version = if ($env:PACKMON_VERSION) { $env:PACKMON_VERSION } else { "dev" }
+$GitCommit = ""
+if (Get-Command git -ErrorAction SilentlyContinue) {
+    $GitCommit = (& git -C $RootDir rev-parse --short HEAD 2>$null | Select-Object -First 1)
+    if ($GitCommit) {
+        $GitCommit = $GitCommit.Trim()
+    }
+}
+$Commit = if ($env:PACKMON_COMMIT) { $env:PACKMON_COMMIT } elseif ($GitCommit) { $GitCommit } else { "none" }
+$Date = if ($env:PACKMON_BUILD_DATE) { $env:PACKMON_BUILD_DATE } else { (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ") }
+$Ldflags = "-s -w -X main.version=$Version -X main.commit=$Commit -X main.date=$Date"
+
 Write-Host "Building packmon binaries..."
 Push-Location $RootDir
 try {
-    go build -o (Join-Path $BuildDir "packmon.exe") ./cmd/packmon
-    go build -o (Join-Path $BuildDir "packmon-server.exe") ./cmd/packmon-server
+    go build -ldflags $Ldflags -o (Join-Path $BuildDir "packmon.exe") ./cmd/packmon
+    go build -ldflags $Ldflags -o (Join-Path $BuildDir "packmon-server.exe") ./cmd/packmon-server
 } finally {
     Pop-Location
 }

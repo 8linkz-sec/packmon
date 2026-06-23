@@ -3,13 +3,19 @@
 package integration
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/8linkz-sec/packmon/internal/db/sqlite"
+	"github.com/8linkz-sec/packmon/internal/scanner"
 )
 
 // binaryPath returns the absolute path to the built packmon binary.
@@ -84,24 +90,16 @@ func runPackmon(t *testing.T, args ...string) (stdout, stderr string, exitCode i
 func runPackmonWithEnv(t *testing.T, extraEnv map[string]string, args ...string) (stdout, stderr string, exitCode int) {
 	t.Helper()
 	bin := binaryPath(t)
-	cmd := exec.Command(bin, args...)
-	// Clear environment to avoid inheriting PACKMON_SERVER, etc.
-	cmd.Env = []string{
-		"PATH=" + os.Getenv("PATH"),
-		"HOME=" + os.Getenv("HOME"),
-		"USERPROFILE=" + os.Getenv("USERPROFILE"),
-		"TEMP=" + os.Getenv("TEMP"),
-		"TMP=" + os.Getenv("TMP"),
-	}
-	for key, value := range extraEnv {
-		cmd.Env = append(cmd.Env, key+"="+value)
-	}
+	cmd, ctx, cancel := integrationCommand(t, bin, args...)
+	defer cancel()
+	cmd.Env = hermeticPackmonEnv(t, extraEnv)
 
 	var outBuf, errBuf strings.Builder
 	cmd.Stdout = &outBuf
 	cmd.Stderr = &errBuf
 
 	err := cmd.Run()
+	failIfIntegrationCommandTimedOut(t, ctx, integrationCommandTimeout, "packmon "+strings.Join(args, " "), []byte(outBuf.String()+errBuf.String()))
 	exitCode = 0
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
@@ -112,6 +110,79 @@ func runPackmonWithEnv(t *testing.T, extraEnv map[string]string, args ...string)
 	}
 
 	return outBuf.String(), errBuf.String(), exitCode
+}
+
+func hermeticPackmonEnv(t *testing.T, extraEnv map[string]string) []string {
+	t.Helper()
+
+	home := filepath.Join(t.TempDir(), "home")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatalf("create hermetic home: %v", err)
+	}
+	dbDir := filepath.Join(t.TempDir(), "db")
+	if err := os.MkdirAll(dbDir, 0o700); err != nil {
+		t.Fatalf("create hermetic db dir: %v", err)
+	}
+
+	values := map[string]string{
+		"APPDATA":         filepath.Join(home, "AppData", "Roaming"),
+		"HOME":            home,
+		"LOCALAPPDATA":    filepath.Join(home, "AppData", "Local"),
+		"PACKMON_DB_PATH": dbDir,
+		"USERPROFILE":     home,
+		"XDG_CONFIG_HOME": filepath.Join(home, ".config"),
+	}
+	for _, key := range []string{"PATH", "TEMP", "TMP", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT"} {
+		if value := os.Getenv(key); value != "" {
+			values[key] = value
+		}
+	}
+	for key, value := range extraEnv {
+		values[key] = value
+	}
+
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	env := make([]string, 0, len(keys))
+	for _, key := range keys {
+		env = append(env, key+"="+values[key])
+	}
+	return env
+}
+
+func seedLocalScanDB(t *testing.T, vulnerablePackages ...string) map[string]string {
+	t.Helper()
+
+	dbDir := filepath.Join(t.TempDir(), "db")
+	store, err := sqlite.New(filepath.Join(dbDir, "packmon.db"))
+	if err != nil {
+		t.Fatalf("open local sqlite store: %v", err)
+	}
+
+	ctx := context.Background()
+	if len(vulnerablePackages) == 0 {
+		vulnerablePackages = []string{"unmatched-seed"}
+	}
+	for _, name := range vulnerablePackages {
+		if _, err := store.DB().ExecContext(ctx, `
+		INSERT INTO vulnerabilities_local(row_key, id, ecosystem, name, severity, summary)
+		VALUES(?, ?, 'npm', ?, 'HIGH', 'integration seed advisory')`,
+			"GHSA-integration-seed|npm|"+name, "GHSA-integration-seed-"+name, name); err != nil {
+			t.Fatalf("seed local sqlite advisory: %v", err)
+		}
+	}
+	if err := store.SetSyncMeta(ctx, "last_sync_at", time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatalf("seed local sqlite sync time: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close local sqlite store: %v", err)
+	}
+
+	return map[string]string{"PACKMON_DB_PATH": dbDir}
 }
 
 // --- Test: version command ---------------------------------------------------
@@ -152,9 +223,12 @@ func TestScanEmptyDirectory(t *testing.T) {
 		t.Errorf("expected exit code 0 for empty directory, got %d", exitCode)
 	}
 
-	// Table output should indicate no findings.
-	if !strings.Contains(stdout, "0 packages") && !strings.Contains(strings.ToLower(stdout), "no lock files") && !strings.Contains(stdout, "0 findings") {
-		t.Logf("stdout: %s", stdout)
+	// Table output should indicate no packages were evaluated.
+	if !strings.Contains(stdout, "No packages were evaluated") &&
+		!strings.Contains(stdout, "0 packages") &&
+		!strings.Contains(strings.ToLower(stdout), "no lock files") &&
+		!strings.Contains(stdout, "0 findings") {
+		t.Fatalf("expected empty-directory scan output to mention no evaluated packages, 0 packages, no lock files, or 0 findings; stdout=%q", stdout)
 	}
 
 	// Verify JSON output structure.
@@ -173,6 +247,16 @@ func TestScanEmptyDirectory(t *testing.T) {
 	}
 	if count, ok := result["packages_scanned"].(float64); !ok || count != 0 {
 		t.Errorf("expected packages_scanned=0, got %v", result["packages_scanned"])
+	}
+	if threshold, ok := result["block_threshold"].(string); !ok || threshold != "CRITICAL" {
+		t.Errorf("expected block_threshold=CRITICAL, got %v", result["block_threshold"])
+	}
+	findings, ok := result["findings"].([]any)
+	if !ok {
+		t.Fatalf("expected findings to be an array, got %T", result["findings"])
+	}
+	if len(findings) != 0 {
+		t.Errorf("expected no findings, got %d", len(findings))
 	}
 }
 
@@ -214,30 +298,19 @@ func TestScanWithPackageLock(t *testing.T) {
 
 	jsonFile := filepath.Join(tmpDir, "results.json")
 
-	// Use local mode to avoid needing a server. Without a local DB,
-	// this will fail in local mode. Use auto mode so it falls through
-	// gracefully, or just validate the parse and output structure.
-	// We use --mode local which will fail because no DB is configured,
-	// so we accept exit code 2 (operational error) but still check the
-	// JSON output if it was written.
-	_, _, exitCode := runPackmon(t,
+	stdout, stderr, exitCode := runPackmonWithEnv(t, seedLocalScanDB(t),
 		"scan", tmpDir,
 		"--mode", "local",
 		"--output-json", jsonFile,
 	)
 
-	// In local mode without a database, the scanner exits 2 (operational).
-	// The JSON output may still be written with the error result.
-	if exitCode != 0 && exitCode != 2 {
-		t.Errorf("expected exit code 0 or 2, got %d", exitCode)
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d\nstdout:\n%s\nstderr:\n%s", exitCode, stdout, stderr)
 	}
 
-	// If JSON was written, validate its structure.
 	data, err := os.ReadFile(jsonFile)
 	if err != nil {
-		// JSON might not be written on operational error; that is acceptable.
-		t.Logf("JSON output not written (exit code %d), skipping structure check", exitCode)
-		return
+		t.Fatalf("failed to read JSON output: %v", err)
 	}
 
 	var result map[string]any
@@ -246,11 +319,35 @@ func TestScanWithPackageLock(t *testing.T) {
 	}
 
 	// Check required fields exist.
-	requiredFields := []string{"scan_id", "mode", "scanned_at", "packages_scanned", "findings_count", "findings"}
+	requiredFields := []string{
+		"scan_id", "mode", "scanned_at", "duration_ms", "packages_scanned",
+		"findings_count", "findings_blocking", "block_threshold", "feed_status",
+		"db_age_days", "db_stale", "summary", "findings", "feed_versions",
+		"manual_advisories_count",
+	}
 	for _, field := range requiredFields {
 		if _, ok := result[field]; !ok {
 			t.Errorf("missing required field %q in JSON output", field)
 		}
+	}
+	if count, ok := result["packages_scanned"].(float64); !ok || count != 2 {
+		t.Fatalf("packages_scanned = %v, want 2", result["packages_scanned"])
+	}
+	if count, ok := result["findings_count"].(float64); !ok || count != 0 {
+		t.Fatalf("findings_count = %v, want 0", result["findings_count"])
+	}
+	if threshold, ok := result["block_threshold"].(string); !ok || threshold != "CRITICAL" {
+		t.Fatalf("block_threshold = %v, want CRITICAL", result["block_threshold"])
+	}
+	if feedStatus, ok := result["feed_status"].(string); !ok || !allowedScanFeedStatus(feedStatus) {
+		t.Fatalf("feed_status = %v, want machine-readable status", result["feed_status"])
+	}
+	findings, ok := result["findings"].([]any)
+	if !ok {
+		t.Fatalf("findings = %T %[1]v, want array", result["findings"])
+	}
+	if len(findings) != 0 {
+		t.Fatalf("findings = %d, want 0", len(findings))
 	}
 }
 
@@ -347,21 +444,47 @@ golang.org/x/text v0.3.7/go.mod h1:def456=
 
 	jsonFile := filepath.Join(tmpDir, "results.json")
 
-	// Filter to only npm ecosystem. The go.sum should be ignored.
-	// Since local mode without a DB will fail, we use auto mode with
-	// an unreachable server and short timeout. We mainly care that the
-	// parser handles the filter and that exit code is not a parser error.
-	_, _, exitCode := runPackmon(t,
+	stdout, stderr, exitCode := runPackmonWithEnv(t, seedLocalScanDB(t, "lodash"),
 		"scan", tmpDir,
-		"--ecosystems", "go",
+		"--ecosystems", "npm",
 		"--mode", "local",
 		"--output-json", jsonFile,
 	)
 
-	// We accept either 0 (no findings, local DB not needed for no packages)
-	// or 2 (operational, because local DB unavailable).
-	if exitCode != 0 && exitCode != 2 {
-		t.Errorf("expected exit code 0 or 2, got %d", exitCode)
+	if exitCode != scanner.ExitUnderThreshold {
+		t.Fatalf("expected exit code %d, got %d\nstdout:\n%s\nstderr:\n%s", scanner.ExitUnderThreshold, exitCode, stdout, stderr)
+	}
+
+	data, err := os.ReadFile(jsonFile)
+	if err != nil {
+		t.Fatalf("failed to read JSON output: %v", err)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatalf("failed to parse JSON output: %v", err)
+	}
+	if mode, ok := result["mode"].(string); !ok || mode != "local" {
+		t.Fatalf("mode = %v, want local", result["mode"])
+	}
+	if count, ok := result["packages_scanned"].(float64); !ok || count != 1 {
+		t.Fatalf("packages_scanned = %v, want 1 npm package", result["packages_scanned"])
+	}
+	if count, ok := result["findings_count"].(float64); !ok || count != 1 {
+		t.Fatalf("findings_count = %v, want 1 npm finding", result["findings_count"])
+	}
+	if threshold, ok := result["block_threshold"].(string); !ok || threshold != "CRITICAL" {
+		t.Fatalf("block_threshold = %v, want CRITICAL", result["block_threshold"])
+	}
+	findings, ok := result["findings"].([]any)
+	if !ok || len(findings) != 1 {
+		t.Fatalf("findings = %T %[1]v, want one finding", result["findings"])
+	}
+	finding, ok := findings[0].(map[string]any)
+	if !ok {
+		t.Fatalf("finding = %T %[1]v, want object", findings[0])
+	}
+	if finding["ecosystem"] != "npm" || finding["name"] != "lodash" {
+		t.Fatalf("finding identity = ecosystem:%v name:%v, want npm lodash", finding["ecosystem"], finding["name"])
 	}
 }
 

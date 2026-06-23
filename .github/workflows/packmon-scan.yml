@@ -1,7 +1,7 @@
 # Reusable workflow: Dependency Security Scan with Packmon.
 #
 # Called from consumer repositories via:
-#   uses: 8linkz-sec/packmon/.github/workflows/packmon-scan.yml@main
+#   uses: 8linkz-sec/packmon/.github/workflows/packmon-scan.yml@v0.5.0
 #
 # All input and secret names use underscores (not hyphens) per DE-20.
 # GitHub Actions expressions interpret hyphens as subtraction.
@@ -11,7 +11,7 @@ on:
   workflow_call:
     inputs:
       fail_on:
-        description: "Minimum severity that blocks the pipeline (CRITICAL|HIGH|MEDIUM|LOW|NONE)"
+        description: "Minimum vulnerability severity that blocks the pipeline (CRITICAL|HIGH|MEDIUM|LOW|NONE). NONE disables vulnerability blocking only; malicious and supply-chain risk findings still block."
         required: false
         default: "CRITICAL"
         type: string
@@ -20,16 +20,26 @@ on:
         required: false
         default: "."
         type: string
+      packmon_version:
+        description: "Immutable Packmon release tag to install (for example v0.5.0)"
+        required: false
+        default: "v0.5.0"
+        type: string
       upload_sarif:
         description: "Upload SARIF to GitHub Security tab"
         required: false
         default: true
         type: boolean
       post_pr_comment:
-        description: "Post findings as a PR comment"
+        description: "Post detailed findings as a PR comment (opt-in because comments can disclose dependency-security data)"
         required: false
-        default: true
+        default: false
         type: boolean
+      artifact_retention_days:
+        description: "Retention period for JSON, SARIF, and JUnit scan evidence artifacts. Must fit the repository's GitHub Actions retention policy."
+        required: false
+        default: 90
+        type: number
     secrets:
       packmon_server_url:
         description: "Packmon feed server URL"
@@ -40,21 +50,37 @@ on:
 
 permissions:
   contents: read
-  security-events: write
-  pull-requests: write
 
 jobs:
   scan:
     name: Packmon Scan
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      findings_count: ${{ steps.scan.outputs.findings_count }}
+      exit_code: ${{ steps.scan.outputs.exit_code }}
+      feed_status: ${{ steps.scan.outputs.feed_status }}
+      db_stale: ${{ steps.scan.outputs.db_stale }}
+      db_age_days: ${{ steps.scan.outputs.db_age_days }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
 
       - name: Install packmon
+        env:
+          PACKMON_VERSION: ${{ inputs.packmon_version }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          PACKMON_VERSION_REGEX='^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z][0-9A-Za-z.-]*)?$'
+          if [[ ! "${PACKMON_VERSION}" =~ ${PACKMON_VERSION_REGEX} ]]; then
+            echo "PACKMON_VERSION must be an immutable release tag like v1.2.3" >&2
+            exit 1
+          fi
           ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
-          BINARY_BASE_URL="https://github.com/8linkz-sec/packmon/releases/latest/download"
+          BINARY_BASE_URL="https://github.com/8linkz-sec/packmon/releases/download/${PACKMON_VERSION}"
           BINARY_NAME="packmon-linux-${ARCH}"
           BINARY_URL="${BINARY_BASE_URL}/${BINARY_NAME}"
           CHECKSUM_URL="${BINARY_BASE_URL}/checksums.txt"
@@ -63,6 +89,10 @@ jobs:
           curl -sfL "${CHECKSUM_URL}" -o /tmp/checksums.txt
           grep -E "[[:space:]]${BINARY_NAME}$" /tmp/checksums.txt > "/tmp/${BINARY_NAME}.sha256"
           (cd /tmp && sha256sum -c "${BINARY_NAME}.sha256")
+          gh attestation verify "/tmp/${BINARY_NAME}" \
+            --repo 8linkz-sec/packmon \
+            --signer-workflow 8linkz-sec/packmon/.github/workflows/release.yml \
+            --source-ref "refs/tags/${PACKMON_VERSION}"
           sudo install -m 0755 "/tmp/${BINARY_NAME}" /usr/local/bin/packmon
           packmon version
 
@@ -71,14 +101,34 @@ jobs:
         env:
           PACKMON_SERVER: ${{ secrets.packmon_server_url }}
           PACKMON_API_KEY: ${{ secrets.packmon_api_key }}
+          PACKMON_SCAN_PATH: ${{ inputs.scan_path }}
+          PACKMON_FAIL_ON: ${{ inputs.fail_on }}
         run: |
+          set -euo pipefail
+          case "${PACKMON_FAIL_ON}" in
+            CRITICAL|HIGH|MEDIUM|LOW|NONE) ;;
+            *)
+              echo "fail_on must be one of CRITICAL, HIGH, MEDIUM, LOW, or NONE" >&2
+              exit 1
+              ;;
+          esac
+
+          case "${PACKMON_SCAN_PATH}" in
+            ""|/*|-*|*..*|*$'\n'*|*$'\r'*)
+              echo "scan_path must be a non-empty relative path without parent traversal or leading dash" >&2
+              exit 1
+              ;;
+          esac
+
           set +e
-          packmon scan "${{ inputs.scan_path }}" \
-            --fail-on "${{ inputs.fail_on }}" \
+          packmon scan \
+            --fail-on "${PACKMON_FAIL_ON}" \
             --mode remote \
+            --no-project-config \
             --output-json /tmp/results.json \
             --output-sarif /tmp/results.sarif \
-            --output-junit /tmp/results.xml
+            --output-junit /tmp/results.xml \
+            -- "${PACKMON_SCAN_PATH}"
           EXIT_CODE=$?
           set -e
 
@@ -87,6 +137,28 @@ jobs:
           # Extract findings count from JSON output.
           FINDINGS=$(jq '.findings_count // 0' /tmp/results.json 2>/dev/null || echo 0)
           echo "findings_count=${FINDINGS}" >> "$GITHUB_OUTPUT"
+          FEED_STATUS=$(jq -r '.feed_status // "unknown"' /tmp/results.json 2>/dev/null || echo unknown)
+          DB_STALE=$(jq -r 'if .db_stale == true then "true" else "false" end' /tmp/results.json 2>/dev/null || echo false)
+          DB_AGE_DAYS=$(jq -r 'if .db_age_days == null then "" else (.db_age_days | tostring) end' /tmp/results.json 2>/dev/null || echo "")
+          echo "feed_status=${FEED_STATUS}" >> "$GITHUB_OUTPUT"
+          echo "db_stale=${DB_STALE}" >> "$GITHUB_OUTPUT"
+          echo "db_age_days=${DB_AGE_DAYS}" >> "$GITHUB_OUTPUT"
+
+          echo "Packmon feed status: ${FEED_STATUS}"
+          echo "Packmon local DB stale: ${DB_STALE}"
+          if [ -n "${DB_AGE_DAYS}" ]; then
+            echo "Packmon local DB age days: ${DB_AGE_DAYS}"
+          fi
+          if [ "${FEED_STATUS}" != "healthy" ] || [ "${DB_STALE}" = "true" ]; then
+            echo "::warning::Packmon scan coverage degraded (feed_status=${FEED_STATUS}, db_stale=${DB_STALE}, db_age_days=${DB_AGE_DAYS:-unknown})"
+            {
+              echo "### Packmon Coverage Warning"
+              echo ""
+              echo "- feed_status: \`${FEED_STATUS}\`"
+              echo "- db_stale: \`${DB_STALE}\`"
+              echo "- db_age_days: \`${DB_AGE_DAYS:-unknown}\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
           # Exit code 3 means findings below the blocking threshold were
           # reported. Per the exit-code contract this is a passing run.
@@ -97,34 +169,164 @@ jobs:
 
           exit $EXIT_CODE
 
-      - name: Upload SARIF
-        if: always() && inputs.upload_sarif
-        uses: github/codeql-action/upload-sarif@v4.36.2
+      - name: Upload artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
         with:
-          sarif_file: /tmp/results.sarif
+          name: packmon-results
+          path: |
+            /tmp/results.json
+            /tmp/results.sarif
+            /tmp/results.xml
+          retention-days: ${{ inputs.artifact_retention_days }}
+
+  attest-results:
+    name: Attest scan results
+    runs-on: ubuntu-latest
+    needs: scan
+    if: >-
+      always()
+      && needs.scan.outputs.exit_code != ''
+      && needs.scan.result != 'cancelled'
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
+    steps:
+      - name: Download scan artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: packmon-results
+          path: /tmp/packmon-results
+
+      - name: Attest scan result artifacts
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: |
+            /tmp/packmon-results/results.json
+            /tmp/packmon-results/results.sarif
+            /tmp/packmon-results/results.xml
+
+  upload-sarif:
+    name: Upload SARIF
+    runs-on: ubuntu-latest
+    needs: scan
+    if: >-
+      always()
+      && inputs.upload_sarif
+      && needs.scan.outputs.exit_code != ''
+      && needs.scan.result != 'cancelled'
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Download scan artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: packmon-results
+          path: /tmp/packmon-results
+
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@1a818fd5f97ed0ee9a823421bd5b171add01227f # v4.36.2
+        with:
+          sarif_file: /tmp/packmon-results/results.sarif
           category: packmon
 
+  pr-comment:
+    name: PR comment
+    runs-on: ubuntu-latest
+    needs: scan
+    if: >-
+      always()
+      && inputs.post_pr_comment
+      && github.event_name == 'pull_request'
+      && needs.scan.outputs.findings_count > 0
+      && needs.scan.outputs.exit_code != ''
+      && needs.scan.result != 'cancelled'
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Download scan artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: packmon-results
+          path: /tmp/packmon-results
+
       - name: PR comment
-        if: >-
-          always()
-          && inputs.post_pr_comment
-          && github.event_name == 'pull_request'
-          && steps.scan.outputs.findings_count > 0
-        uses: actions/github-script@v9
+        uses: actions/github-script@373c709c69115d41ff229c7e5df9f8788daa9553 # v9
+        env:
+          PACKMON_FAIL_ON: ${{ inputs.fail_on }}
         with:
           script: |
             const fs = require('fs');
-            const results = JSON.parse(fs.readFileSync('/tmp/results.json', 'utf8'));
+            const results = JSON.parse(fs.readFileSync('/tmp/packmon-results/results.json', 'utf8'));
+            const findings = Array.isArray(results.findings) ? results.findings : [];
+            const feedStatusRaw = results.feed_status || 'unknown';
+            const dbStale = results.db_stale === true;
+            const dbAgeDays = results.db_age_days === undefined || results.db_age_days === null ? '' : String(results.db_age_days);
 
-            const vulns = results.findings.filter(f => f.type === 'vulnerability');
-            const malicious = results.findings.filter(f => f.type === 'malicious');
-            const supplyChain = results.findings.filter(f => f.type === 'supply_chain_risk');
-            const lifecycle = results.findings.filter(f => f.type === 'lifecycle');
+            const mdCell = (value, fallback = 'n/a') => {
+              const raw = value === undefined || value === null || value === '' ? fallback : String(value);
+              return raw
+                .replace(/[\r\n\t]+/g, ' ')
+                .replace(/\\/g, '\\\\')
+                .replace(/\|/g, '\\|')
+                .replace(/`/g, '\\`')
+                .replace(/\[/g, '\\[')
+                .replace(/\]/g, '\\]')
+                .replace(/\(/g, '\\(')
+                .replace(/\)/g, '\\)')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .slice(0, 240);
+            };
+
+            const safeMarkdownURL = (value) => {
+              if (!value) {
+                return '';
+              }
+              const raw = String(value).trim();
+              try {
+                const parsed = new URL(raw);
+                if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+                  return '';
+                }
+                return parsed.toString().replace(/\)/g, '%29');
+              } catch {
+                return '';
+              }
+            };
+
+            const packageCell = (finding) => mdCell(`${finding.name ?? 'unknown'}@${finding.version ?? 'unknown'}`);
+            const advisoryCell = (finding) => {
+              const id = mdCell(finding.advisory_id || 'n/a');
+              const url = safeMarkdownURL(finding.url);
+              return url ? `[${id}](${url})` : id;
+            };
+            const row = (cells) => `| ${cells.join(' | ')} |\n`;
+
+            const vulns = findings.filter(f => f.type === 'vulnerability');
+            const malicious = findings.filter(f => f.type === 'malicious');
+            const supplyChain = findings.filter(f => f.type === 'supply_chain_risk');
+            const lifecycle = findings.filter(f => f.type === 'lifecycle');
 
             let body = `## Packmon Security Scan\n\n`;
-            body += `**${results.findings_count} finding(s)** in ${results.packages_scanned} packages`;
-            body += ` | mode: \`${results.mode}\``;
-            body += ` | threshold: \`${{ inputs.fail_on }}\`\n\n`;
+            body += `**${mdCell(results.findings_count ?? findings.length)} finding(s)** in ${mdCell(results.packages_scanned ?? 0)} packages`;
+            body += ` | mode: ${mdCell(results.mode || 'unknown')}`;
+            body += ` | threshold: ${mdCell(process.env.PACKMON_FAIL_ON || 'CRITICAL')}`;
+            body += ` | feed: ${mdCell(feedStatusRaw)}`;
+            if (dbStale) {
+              body += ` | local DB stale`;
+            }
+            if (dbAgeDays) {
+              body += ` | local DB age: ${mdCell(dbAgeDays)} day(s)`;
+            }
+            body += `\n\n`;
+
+            if (String(feedStatusRaw) !== 'healthy' || results.db_stale === true) {
+              body += `> **Coverage warning:** Packmon scan coverage degraded. feed_status=${mdCell(feedStatusRaw)}, db_stale=${mdCell(dbStale)}, db_age_days=${mdCell(dbAgeDays || 'unknown')}\n\n`;
+            }
 
             // Vulnerability table -- only if there are vulnerability findings.
             if (vulns.length > 0) {
@@ -132,10 +334,14 @@ jobs:
               body += `| Severity | Package | Ecosystem | Advisory | Fix Version | Source |\n`;
               body += `|---|---|---|---|---|---|\n`;
               for (const f of vulns) {
-                const pkg = `\`${f.name}@${f.version}\``;
-                const fix = f.fixed_version || 'n/a';
-                const advisory = f.url ? `[${f.advisory_id}](${f.url})` : f.advisory_id;
-                body += `| ${f.severity} | ${pkg} | ${f.ecosystem} | ${advisory} | ${fix} | ${f.source} |\n`;
+                body += row([
+                  mdCell(f.severity),
+                  packageCell(f),
+                  mdCell(f.ecosystem),
+                  advisoryCell(f),
+                  mdCell(f.fixed_version),
+                  mdCell(f.source),
+                ]);
               }
               body += `\n`;
             }
@@ -146,9 +352,14 @@ jobs:
               body += `| Severity | Package | Ecosystem | Threat | Action | Source |\n`;
               body += `|---|---|---|---|---|---|\n`;
               for (const f of malicious) {
-                const pkg = `\`${f.name}@${f.version}\``;
-                const threat = f.risk_type || f.title || 'unknown';
-                body += `| ${f.severity} | ${pkg} | ${f.ecosystem} | ${threat} | Remove package | ${f.source} |\n`;
+                body += row([
+                  mdCell(f.severity),
+                  packageCell(f),
+                  mdCell(f.ecosystem),
+                  mdCell(f.risk_type || f.title || 'unknown'),
+                  'Remove package',
+                  mdCell(f.source),
+                ]);
               }
               body += `\n`;
             }
@@ -158,9 +369,14 @@ jobs:
               body += `| Severity | Package | Ecosystem | Risk | Action | Source |\n`;
               body += `|---|---|---|---|---|---|\n`;
               for (const f of supplyChain) {
-                const pkg = `\`${f.name}@${f.version}\``;
-                const risk = f.risk_type || f.title || f.advisory_id || 'unknown';
-                body += `| ${f.severity} | ${pkg} | ${f.ecosystem} | ${risk} | Review package | ${f.source} |\n`;
+                body += row([
+                  mdCell(f.severity),
+                  packageCell(f),
+                  mdCell(f.ecosystem),
+                  mdCell(f.risk_type || f.title || f.advisory_id || 'unknown'),
+                  'Review package',
+                  mdCell(f.source),
+                ]);
               }
               body += `\n`;
             }
@@ -170,10 +386,14 @@ jobs:
               body += `| Severity | Package | Ecosystem | Status | Fixed Version | Source |\n`;
               body += `|---|---|---|---|---|---|\n`;
               for (const f of lifecycle) {
-                const pkg = `\`${f.name}@${f.version}\``;
-                const status = f.title || f.advisory_id || 'unsupported';
-                const fix = f.fixed_version || 'n/a';
-                body += `| ${f.severity} | ${pkg} | ${f.ecosystem} | ${status} | ${fix} | ${f.source} |\n`;
+                body += row([
+                  mdCell(f.severity),
+                  packageCell(f),
+                  mdCell(f.ecosystem),
+                  mdCell(f.title || f.advisory_id || 'unsupported'),
+                  mdCell(f.fixed_version),
+                  mdCell(f.source),
+                ]);
               }
               body += `\n`;
             }
@@ -203,14 +423,3 @@ jobs:
                 body,
               });
             }
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        if: always()
-        with:
-          name: packmon-results
-          path: |
-            /tmp/results.json
-            /tmp/results.sarif
-            /tmp/results.xml
-          retention-days: 30

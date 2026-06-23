@@ -6,8 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/8linkz/packmon/internal/sbomgen"
+	"github.com/8linkz-sec/packmon/internal/sbomgen"
 	"github.com/spf13/cobra"
 )
 
@@ -74,6 +75,7 @@ func TestBuildAutoSBOMConfigUsesResolvedSettings(t *testing.T) {
 		MaxDepth:   4,
 		Quiet:      true,
 		LogLevel:   "WARN",
+		Timeout:    75,
 	}
 
 	cfg := buildAutoSBOMConfig(settings, autoSBOMFlags{Enabled: true, SBOMOnly: true})
@@ -85,6 +87,9 @@ func TestBuildAutoSBOMConfigUsesResolvedSettings(t *testing.T) {
 	}
 	if !cfg.IncludeDev || cfg.MaxDepth != 4 {
 		t.Fatalf("IncludeDev/MaxDepth not copied from resolved settings: %+v", cfg)
+	}
+	if cfg.Timeout != 75*time.Second {
+		t.Fatalf("Timeout = %s, want 75s", cfg.Timeout)
 	}
 	if cfg.KeepSBOMDir != "." {
 		t.Fatalf("--sbom-only without --keep-sbom must keep files in cwd, got %q", cfg.KeepSBOMDir)
@@ -160,6 +165,60 @@ func TestRunAutoSBOMCommandAppendsGeneratedSBOMs(t *testing.T) {
 	}
 	if !cleanupCalled {
 		t.Fatalf("generated SBOM cleanup was not called")
+	}
+}
+
+func TestRunAutoSBOMCommandReturnsCleanupError(t *testing.T) {
+	root := t.TempDir()
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+
+	cleanupErr := errors.New("cleanup failed")
+	err := runAutoSBOMCommandWithDeps(cmd, []string{root}, scanFlagValues{Quiet: true}, autoSBOMFlags{Enabled: true}, autoSBOMDeps{
+		loadConfig: func() (*cliConfig, string, error) { return nil, "", nil },
+		generate: func(_ context.Context, _ sbomgen.Config) (sbomgen.Result, error) {
+			return sbomgen.Result{SBOMPaths: []string{"generated.cdx.json"}, Cleanup: func() error {
+				return cleanupErr
+			}}, nil
+		},
+		scan: func(context.Context, scanSettings) (int, error) {
+			return ExitOK, nil
+		},
+	})
+	if !errors.Is(err, cleanupErr) || !strings.Contains(err.Error(), "cleanup generated SBOMs") {
+		t.Fatalf("cleanup error = %v, want wrapped cleanup failure", err)
+	}
+}
+
+func TestRunAutoSBOMInstallDisclosureVisibleWhenQuiet(t *testing.T) {
+	root := t.TempDir()
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+
+	var runErr error
+	stderr := captureStderr(t, func() {
+		runErr = runAutoSBOMCommandWithDeps(cmd, []string{root}, scanFlagValues{Quiet: true}, autoSBOMFlags{Enabled: true, InstallTools: true}, autoSBOMDeps{
+			loadConfig: func() (*cliConfig, string, error) { return nil, "", nil },
+			generate: func(_ context.Context, cfg sbomgen.Config) (sbomgen.Result, error) {
+				cfg.Logger.Info("installing SBOM generator", "package", "@cyclonedx/cyclonedx-npm", "source", "npm registry", "command", "npm install --global @cyclonedx/cyclonedx-npm")
+				return sbomgen.Result{SBOMPaths: []string{"generated.cdx.json"}}, nil
+			},
+			scan: func(context.Context, scanSettings) (int, error) {
+				return ExitOK, nil
+			},
+		})
+	})
+	if runErr != nil {
+		t.Fatalf("runAutoSBOMCommandWithDeps: %v", runErr)
+	}
+	for _, want := range []string{
+		"installing SBOM generator",
+		"@cyclonedx/cyclonedx-npm",
+		"npm install --global",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("stderr missing install disclosure %q:\n%s", want, stderr)
+		}
 	}
 }
 

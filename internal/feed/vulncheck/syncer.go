@@ -15,18 +15,23 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"hash"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"strings"
 	"time"
 
-	"github.com/8linkz/packmon/internal/db"
-	"github.com/8linkz/packmon/internal/feed"
+	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/feed"
+	"github.com/8linkz-sec/packmon/internal/logsafe"
 )
 
 const (
@@ -57,9 +62,9 @@ type backupLink struct {
 	URL      string `json:"url"`
 }
 
-// backupResponse is the top-level shape stored inside VulnCheck backup files.
-type backupResponse struct {
-	Data []backupCVE `json:"data"`
+type backupSelection struct {
+	URL    string
+	SHA256 string
 }
 
 // backupCVE is one CVE record from the VulnCheck backup.
@@ -158,11 +163,11 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 }
 
 func (s *Syncer) processBulk(ctx context.Context, store db.Store) (updated, total int, err error) {
-	downloadURL, err := s.fetchBackupURL(ctx)
+	backup, err := s.fetchBackupSelection(ctx)
 	if err != nil {
 		return 0, 0, err
 	}
-	entriesTotal, err := s.streamBackupFile(ctx, downloadURL, func(entries []db.VulnCheckEntry) error {
+	entriesTotal, err := s.streamVerifiedBackupFile(ctx, backup, func(entries []db.VulnCheckEntry) error {
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("context cancelled: %w", err)
 		}
@@ -175,35 +180,6 @@ func (s *Syncer) processBulk(ctx context.Context, store db.Store) (updated, tota
 		return nil
 	})
 	return updated, entriesTotal, err
-}
-
-// downloadBulk fetches the VulnCheck NVD2 backup and converts each entry
-// into a VulnCheckEntry for database enrichment.
-func (s *Syncer) downloadBulk(ctx context.Context) ([]db.VulnCheckEntry, error) {
-	downloadURL, err := s.fetchBackupURL(ctx)
-	if err != nil {
-		return nil, err
-	}
-	body, contentType, err := s.downloadBackupFile(ctx, downloadURL)
-	if err != nil {
-		return nil, err
-	}
-
-	cves, err := decodeBackupPayload(body, contentType, downloadURL)
-	if err != nil {
-		return nil, err
-	}
-
-	entries := make([]db.VulnCheckEntry, 0, len(cves))
-	for _, cve := range cves {
-		entry, ok := vulnCheckEntryFromBackupCVE(cve)
-		if !ok {
-			continue
-		}
-		entries = append(entries, entry)
-	}
-
-	return entries, nil
 }
 
 func vulnCheckEntryFromBackupCVE(cve backupCVE) (db.VulnCheckEntry, bool) {
@@ -233,82 +209,66 @@ func vulnCheckEntryFromBackupCVE(cve backupCVE) (db.VulnCheckEntry, bool) {
 	return entry, true
 }
 
-func (s *Syncer) fetchBackupURL(ctx context.Context) (string, error) {
+func (s *Syncer) fetchBackupSelection(ctx context.Context) (backupSelection, error) {
 	endpoint := strings.TrimRight(s.baseURL, "/") + nvd2Endpoint
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return "", fmt.Errorf("create request: %w", err)
+		return backupSelection{}, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+s.apiKey)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "packmon-feedsync/1.0")
 
-	resp, err := s.httpClient.Do(req)
+	resp, err := s.doBackupRequest(req)
 	if err != nil {
-		return "", fmt.Errorf("http get: %w", err)
+		return backupSelection{}, fmt.Errorf("http get: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return "", fmt.Errorf("authentication failed (status %d): check PACKMON_VULNCHECK_API_KEY", resp.StatusCode)
+		return backupSelection{}, fmt.Errorf("authentication failed (status %d): check PACKMON_VULNCHECK_API_KEY", resp.StatusCode)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("unexpected status %d", resp.StatusCode)
+		return backupSelection{}, fmt.Errorf("unexpected status %d", resp.StatusCode)
 	}
 
 	body, err := readLimited(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("read body: %w", err)
+		return backupSelection{}, fmt.Errorf("read body: %w", err)
 	}
 
 	var links backupLinkResponse
 	if err := json.Unmarshal(body, &links); err != nil {
-		return "", fmt.Errorf("parse json: %w", err)
+		return backupSelection{}, fmt.Errorf("parse json: %w", err)
 	}
 	for _, item := range links.Data {
 		if strings.TrimSpace(item.URL) != "" {
-			return resolveBackupURL(s.baseURL, item.URL)
+			resolved, err := resolveBackupURL(s.baseURL, item.URL)
+			if err != nil {
+				return backupSelection{}, err
+			}
+			digest, err := normalizeBackupSHA256(item.SHA256)
+			if err != nil {
+				return backupSelection{}, err
+			}
+			return backupSelection{URL: resolved, SHA256: digest}, nil
 		}
 	}
-	return "", fmt.Errorf("backup response did not include a download URL")
-}
-
-func (s *Syncer) downloadBackupFile(ctx context.Context, downloadURL string) ([]byte, string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
-	if err != nil {
-		return nil, "", fmt.Errorf("create backup request: %w", err)
-	}
-	req.Header.Set("Accept", "application/zip, application/json")
-	req.Header.Set("User-Agent", "packmon-feedsync/1.0")
-
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return nil, "", fmt.Errorf("backup http get: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, "", fmt.Errorf("backup unexpected status %d", resp.StatusCode)
-	}
-	body, err := readLimited(resp.Body)
-	if err != nil {
-		return nil, "", fmt.Errorf("read backup body: %w", err)
-	}
-	return body, resp.Header.Get("Content-Type"), nil
+	return backupSelection{}, fmt.Errorf("backup response did not include a download URL")
 }
 
 func (s *Syncer) streamBackupFile(ctx context.Context, downloadURL string, emit func([]db.VulnCheckEntry) error) (int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
 	if err != nil {
-		return 0, fmt.Errorf("create backup request: %w", err)
+		return 0, fmt.Errorf("create backup request: %s", logsafe.RedactDiagnosticMessage(err.Error()))
 	}
 	req.Header.Set("Accept", "application/zip, application/json")
 	req.Header.Set("User-Agent", "packmon-feedsync/1.0")
 
-	resp, err := s.httpClient.Do(req)
+	resp, err := s.doBackupRequest(req)
 	if err != nil {
-		return 0, fmt.Errorf("backup http get: %w", err)
+		return 0, fmt.Errorf("backup http get: %s", logsafe.RedactDiagnosticMessage(err.Error()))
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -316,13 +276,104 @@ func (s *Syncer) streamBackupFile(ctx context.Context, downloadURL string, emit 
 		return 0, fmt.Errorf("backup unexpected status %d", resp.StatusCode)
 	}
 
-	limited := newMaxBytesReader(resp.Body, maxBodySize)
-	buffered := bufio.NewReader(limited)
+	return streamBackupPayload(newMaxBytesReader(resp.Body, maxBodySize), resp.Header.Get("Content-Type"), downloadURL, emit)
+}
+
+func (s *Syncer) streamVerifiedBackupFile(ctx context.Context, backup backupSelection, emit func([]db.VulnCheckEntry) error) (int, error) {
+	path, contentType, digest, err := s.downloadBackupToTemp(ctx, backup.URL)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = os.Remove(path) }()
+	if err := verifyBackupSHA256Digest(backup.SHA256, digest); err != nil {
+		return 0, err
+	}
+	file, err := os.Open(path) // #nosec G304 -- path was created by downloadBackupToTemp via os.CreateTemp and verified by digest before opening.
+	if err != nil {
+		return 0, fmt.Errorf("open verified backup: %w", err)
+	}
+	defer func() { _ = file.Close() }()
+	return streamBackupPayload(file, contentType, backup.URL, emit)
+}
+
+func (s *Syncer) downloadBackupToTemp(ctx context.Context, downloadURL string) (path, contentType, digest string, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
+	if err != nil {
+		return "", "", "", fmt.Errorf("create backup request: %s", logsafe.RedactDiagnosticMessage(err.Error()))
+	}
+	req.Header.Set("Accept", "application/zip, application/json")
+	req.Header.Set("User-Agent", "packmon-feedsync/1.0")
+
+	resp, err := s.doBackupRequest(req)
+	if err != nil {
+		return "", "", "", fmt.Errorf("backup http get: %s", logsafe.RedactDiagnosticMessage(err.Error()))
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", "", "", fmt.Errorf("backup unexpected status %d", resp.StatusCode)
+	}
+
+	tmp, err := os.CreateTemp("", "packmon-vulncheck-backup-*.bin")
+	if err != nil {
+		return "", "", "", fmt.Errorf("create temp backup: %w", err)
+	}
+	removeTemp := true
+	defer func() {
+		if removeTemp {
+			_ = tmp.Close()
+			_ = os.Remove(tmp.Name())
+		}
+	}()
+
+	hasher := sha256.New()
+	if _, err := copyAndHash(tmp, newMaxBytesReader(resp.Body, maxBodySize), hasher); err != nil {
+		return "", "", "", fmt.Errorf("write temp backup: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return "", "", "", fmt.Errorf("close temp backup: %w", err)
+	}
+	removeTemp = false
+	return tmp.Name(), resp.Header.Get("Content-Type"), hex.EncodeToString(hasher.Sum(nil)), nil
+}
+
+func streamBackupPayload(r io.Reader, contentType, sourceURL string, emit func([]db.VulnCheckEntry) error) (int, error) {
+	buffered := bufio.NewReader(r)
 	peek, _ := buffered.Peek(4)
-	if isZipPayloadHeader(peek, resp.Header.Get("Content-Type"), downloadURL) {
+	if isZipPayloadHeader(peek, contentType, sourceURL) {
 		return streamBackupZip(buffered, emit)
 	}
 	return streamBackupJSON(buffered, emit)
+}
+
+func normalizeBackupSHA256(raw string) (string, error) {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	if value == "" {
+		return "", fmt.Errorf("backup response missing sha256")
+	}
+	if len(value) != sha256.Size*2 {
+		return "", fmt.Errorf("backup response sha256 has invalid length")
+	}
+	if _, err := hex.DecodeString(value); err != nil {
+		return "", fmt.Errorf("backup response sha256 is invalid: %w", err)
+	}
+	return value, nil
+}
+
+func verifyBackupSHA256Digest(expected, actual string) error {
+	expected = strings.ToLower(strings.TrimSpace(expected))
+	actual = strings.ToLower(strings.TrimSpace(actual))
+	if expected == "" {
+		return fmt.Errorf("backup response missing sha256")
+	}
+	if expected != actual {
+		return fmt.Errorf("backup sha256 mismatch")
+	}
+	return nil
+}
+
+func copyAndHash(dst io.Writer, src io.Reader, h hash.Hash) (int64, error) {
+	return io.Copy(io.MultiWriter(dst, h), src)
 }
 
 func resolveBackupURL(baseURL, raw string) (string, error) {
@@ -330,14 +381,136 @@ func resolveBackupURL(baseURL, raw string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("parse backup URL: %w", err)
 	}
-	if parsed.IsAbs() {
-		return parsed.String(), nil
-	}
 	base, err := url.Parse(strings.TrimRight(baseURL, "/") + "/")
 	if err != nil {
 		return "", fmt.Errorf("parse base URL: %w", err)
 	}
-	return base.ResolveReference(parsed).String(), nil
+	resolved := parsed
+	if !parsed.IsAbs() {
+		resolved = base.ResolveReference(parsed)
+	}
+	if err := validateBackupURL(base, resolved); err != nil {
+		return "", err
+	}
+	return resolved.String(), nil
+}
+
+func validateBackupURL(base, candidate *url.URL) error {
+	scheme := strings.ToLower(strings.TrimSpace(candidate.Scheme))
+	baseScheme := strings.ToLower(strings.TrimSpace(base.Scheme))
+	if scheme != "http" && scheme != "https" {
+		return fmt.Errorf("backup URL scheme %q is not supported", candidate.Scheme)
+	}
+	if baseScheme != "http" && baseScheme != "https" {
+		return fmt.Errorf("base URL scheme %q is not supported", base.Scheme)
+	}
+	if scheme != baseScheme {
+		return fmt.Errorf("backup URL scheme %q does not match base scheme %q", candidate.Scheme, base.Scheme)
+	}
+	if candidate.User != nil {
+		return fmt.Errorf("backup URL must not include credentials")
+	}
+	if strings.TrimSpace(candidate.Hostname()) == "" {
+		return fmt.Errorf("backup URL host is required")
+	}
+	if sameBackupOrigin(base, candidate) {
+		return nil
+	}
+	if err := validateCrossOriginBackupHost(candidate.Hostname()); err != nil {
+		return err
+	}
+	if port := candidate.Port(); port != "" && port != defaultPortForScheme(scheme) {
+		return fmt.Errorf("cross-origin backup URL must not use non-default port %q", port)
+	}
+	return nil
+}
+
+func (s *Syncer) doBackupRequest(req *http.Request) (*http.Response, error) {
+	client := *s.httpClient
+	originalURL := req.URL
+	existingRedirectPolicy := client.CheckRedirect
+	client.CheckRedirect = func(next *http.Request, via []*http.Request) error {
+		if existingRedirectPolicy != nil {
+			if err := existingRedirectPolicy(next, via); err != nil {
+				return err
+			}
+		} else if len(via) >= 10 {
+			return fmt.Errorf("stopped after 10 redirects")
+		}
+		if next == nil || next.URL == nil {
+			return fmt.Errorf("backup redirect target is missing")
+		}
+		if err := validateBackupURL(originalURL, next.URL); err != nil {
+			return fmt.Errorf("refusing backup redirect: %w", err)
+		}
+		return nil
+	}
+	return client.Do(req)
+}
+
+func sameBackupOrigin(a, b *url.URL) bool {
+	return strings.EqualFold(a.Scheme, b.Scheme) &&
+		strings.EqualFold(strings.TrimSuffix(a.Hostname(), "."), strings.TrimSuffix(b.Hostname(), ".")) &&
+		normalizedURLPort(a) == normalizedURLPort(b)
+}
+
+func normalizedURLPort(u *url.URL) string {
+	if port := u.Port(); port != "" {
+		return port
+	}
+	return defaultPortForScheme(strings.ToLower(u.Scheme))
+}
+
+func defaultPortForScheme(scheme string) string {
+	switch strings.ToLower(scheme) {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	default:
+		return ""
+	}
+}
+
+func validateCrossOriginBackupHost(rawHost string) error {
+	host := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(rawHost)), ".")
+	if host == "" {
+		return fmt.Errorf("backup URL host is required")
+	}
+	if strings.Contains(host, "%") {
+		return fmt.Errorf("cross-origin backup URL host must not include zone identifiers")
+	}
+	if addr, err := netip.ParseAddr(host); err == nil {
+		addr = addr.Unmap()
+		if addr.IsUnspecified() ||
+			addr.IsLoopback() ||
+			addr.IsPrivate() ||
+			addr.IsLinkLocalUnicast() ||
+			addr.IsLinkLocalMulticast() ||
+			addr.IsInterfaceLocalMulticast() ||
+			addr.IsMulticast() {
+			return fmt.Errorf("cross-origin backup URL host %q is not public", rawHost)
+		}
+		return fmt.Errorf("cross-origin backup URL host %q is not an allowed VulnCheck backup host", rawHost)
+	}
+	if host == "localhost" ||
+		strings.HasSuffix(host, ".localhost") ||
+		strings.HasSuffix(host, ".local") ||
+		strings.HasSuffix(host, ".internal") ||
+		!strings.Contains(host, ".") {
+		return fmt.Errorf("cross-origin backup URL host %q is not public", rawHost)
+	}
+	if !isAllowedCrossOriginBackupHost(host) {
+		return fmt.Errorf("cross-origin backup URL host %q is not an allowed VulnCheck backup host", rawHost)
+	}
+	return nil
+}
+
+func isAllowedCrossOriginBackupHost(host string) bool {
+	return host == "amazonaws.com" ||
+		strings.HasSuffix(host, ".amazonaws.com") ||
+		host == "amazonaws.com.cn" ||
+		strings.HasSuffix(host, ".amazonaws.com.cn")
 }
 
 func readLimited(r io.Reader) ([]byte, error) {
@@ -349,24 +522,6 @@ func readLimited(r io.Reader) ([]byte, error) {
 		return nil, fmt.Errorf("response exceeds %d bytes", maxBodySize)
 	}
 	return body, nil
-}
-
-func decodeBackupPayload(body []byte, contentType, sourceURL string) ([]backupCVE, error) {
-	if isZipPayload(body, contentType, sourceURL) {
-		return decodeBackupZip(body)
-	}
-	return decodeBackupJSON(body)
-}
-
-func isZipPayload(body []byte, contentType, sourceURL string) bool {
-	if bytes.HasPrefix(body, []byte("PK\x03\x04")) {
-		return true
-	}
-	if strings.Contains(strings.ToLower(contentType), "zip") {
-		return true
-	}
-	parsed, err := url.Parse(sourceURL)
-	return err == nil && strings.HasSuffix(strings.ToLower(parsed.Path), ".zip")
 }
 
 func isZipPayloadHeader(header []byte, contentType, sourceURL string) bool {
@@ -438,8 +593,17 @@ func streamBackupJSON(r io.Reader, emit func([]db.VulnCheckEntry) error) (int, e
 	}
 	switch delim {
 	case '[':
-		return streamBackupCVEArray(dec, emit)
+		total, err := streamBackupCVEArray(dec, emit)
+		if err != nil {
+			return total, err
+		}
+		if err := requireJSONEOF(dec); err != nil {
+			return total, err
+		}
+		return total, nil
 	case '{':
+		total := 0
+		foundData := false
 		for dec.More() {
 			keyTok, err := dec.Token()
 			if err != nil {
@@ -464,12 +628,37 @@ func streamBackupJSON(r io.Reader, emit func([]db.VulnCheckEntry) error) (int, e
 			if !ok || dataDelim != '[' {
 				return 0, fmt.Errorf("parse json: data is not an array")
 			}
-			return streamBackupCVEArray(dec, emit)
+			foundData = true
+			parsed, err := streamBackupCVEArray(dec, emit)
+			total += parsed
+			if err != nil {
+				return total, err
+			}
 		}
-		return 0, fmt.Errorf("parse json: data array missing")
+		if !foundData {
+			return 0, fmt.Errorf("parse json: data array missing")
+		}
+		if _, err := dec.Token(); err != nil {
+			return total, fmt.Errorf("parse json object close: %w", err)
+		}
+		if err := requireJSONEOF(dec); err != nil {
+			return total, err
+		}
+		return total, nil
 	default:
 		return 0, fmt.Errorf("parse json: expected object or array")
 	}
+}
+
+func requireJSONEOF(dec *json.Decoder) error {
+	tok, err := dec.Token()
+	if err == io.EOF {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("parse json trailing data: %w", err)
+	}
+	return fmt.Errorf("parse json trailing token %v", tok)
 }
 
 func streamBackupCVEArray(dec *json.Decoder, emit func([]db.VulnCheckEntry) error) (int, error) {
@@ -529,55 +718,4 @@ func (r *maxBytesReader) Read(p []byte) (int, error) {
 	n, err := r.r.Read(p)
 	r.remaining -= int64(n)
 	return n, err
-}
-
-func decodeBackupZip(body []byte) ([]backupCVE, error) {
-	reader, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
-	if err != nil {
-		return nil, fmt.Errorf("parse zip: %w", err)
-	}
-
-	var lastErr error
-	for _, file := range reader.File {
-		if file.FileInfo().IsDir() || !strings.HasSuffix(strings.ToLower(file.Name), ".json") {
-			continue
-		}
-		rc, err := file.Open()
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		data, readErr := readLimited(rc)
-		closeErr := rc.Close()
-		if readErr != nil {
-			lastErr = readErr
-			continue
-		}
-		if closeErr != nil {
-			lastErr = closeErr
-			continue
-		}
-		cves, err := decodeBackupJSON(data)
-		if err == nil {
-			return cves, nil
-		}
-		lastErr = err
-	}
-	if lastErr != nil {
-		return nil, fmt.Errorf("parse zip JSON: %w", lastErr)
-	}
-	return nil, fmt.Errorf("parse zip: no JSON backup file found")
-}
-
-func decodeBackupJSON(body []byte) ([]backupCVE, error) {
-	var bulk backupResponse
-	if err := json.Unmarshal(body, &bulk); err == nil && bulk.Data != nil {
-		return bulk.Data, nil
-	}
-
-	var cves []backupCVE
-	if err := json.Unmarshal(body, &cves); err != nil {
-		return nil, fmt.Errorf("parse json: %w", err)
-	}
-	return cves, nil
 }

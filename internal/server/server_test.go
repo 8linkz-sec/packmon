@@ -1,17 +1,20 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/8linkz/packmon/internal/config"
-	"github.com/8linkz/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/config"
+	"github.com/8linkz-sec/packmon/internal/db"
 )
 
 func TestRateLimitConfigUsesServerSettings(t *testing.T) {
@@ -77,6 +80,15 @@ func TestNewWiresServersAndRoutes(t *testing.T) {
 	if srv.metrics.Addr != "127.0.0.1:0" {
 		t.Fatalf("metrics addr = %q, want 127.0.0.1:0", srv.metrics.Addr)
 	}
+	if srv.metrics.ReadTimeout != cfg.Server.ReadTimeout {
+		t.Fatalf("metrics ReadTimeout = %s, want %s", srv.metrics.ReadTimeout, cfg.Server.ReadTimeout)
+	}
+	if srv.metrics.WriteTimeout != cfg.Server.WriteTimeout {
+		t.Fatalf("metrics WriteTimeout = %s, want %s", srv.metrics.WriteTimeout, cfg.Server.WriteTimeout)
+	}
+	if srv.metrics.IdleTimeout != cfg.Server.ReadTimeout {
+		t.Fatalf("metrics IdleTimeout = %s, want %s", srv.metrics.IdleTimeout, cfg.Server.ReadTimeout)
+	}
 
 	req := httptest.NewRequest(http.MethodGet, "/version", nil)
 	req.Header.Set("User-Agent", "packmon-test")
@@ -84,6 +96,80 @@ func TestNewWiresServersAndRoutes(t *testing.T) {
 	srv.main.Handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("/version through New handler status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestNewWiresMetricsSecurityHeaders(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Port:            0,
+			Mode:            config.ModeDevelopment,
+			ReadTimeout:     time.Second,
+			WriteTimeout:    time.Second,
+			ShutdownTimeout: time.Second,
+		},
+		Metrics:  config.MetricsConfig{Port: 0},
+		Admin:    config.AdminConfig{SessionTimeout: time.Hour},
+		FeedSync: config.FeedSyncConfig{Interval: time.Hour},
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := New(ctx, cfg, metricsHeaderStore{}, routePinger{}, logger, BuildInfo{}, nil, nil, nil)
+
+	rec := httptest.NewRecorder()
+	srv.metrics.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/metrics status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	headers := rec.Result().Header
+	for name, want := range map[string]string{
+		"X-Content-Type-Options": "nosniff",
+		"X-Frame-Options":        "DENY",
+		"Referrer-Policy":        "strict-origin-when-cross-origin",
+		"Permissions-Policy":     "camera=(), microphone=(), geolocation=()",
+	} {
+		if got := headers.Get(name); got != want {
+			t.Fatalf("%s = %q, want %q", name, got, want)
+		}
+	}
+	if got := headers.Get("Content-Security-Policy"); !strings.Contains(got, "default-src 'self'") {
+		t.Fatalf("Content-Security-Policy = %q, want self baseline", got)
+	}
+}
+
+func TestNewBindsLocalHTTPOverrideToLoopback(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Port:                   8080,
+			Mode:                   config.ModeProduction,
+			PublicHost:             "localhost:8080",
+			AllowInsecureLocalHTTP: true,
+			BlockThreshold:         "HIGH",
+			RateLimitPerMinute:     120,
+			RateLimitBurst:         10,
+			ReadTimeout:            time.Second,
+			WriteTimeout:           time.Second,
+			ShutdownTimeout:        time.Second,
+		},
+		Metrics:  config.MetricsConfig{Port: 0},
+		Admin:    config.AdminConfig{SessionTimeout: time.Hour},
+		FeedSync: config.FeedSyncConfig{Interval: time.Hour},
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	srv := New(ctx, cfg, nil, routePinger{}, logger, BuildInfo{Version: "v-new"}, nil, nil, nil)
+	if srv.main.Addr != "127.0.0.1:8080" {
+		t.Fatalf("main addr = %q, want loopback bind", srv.main.Addr)
 	}
 }
 
@@ -170,6 +256,57 @@ func TestRunShutsDownOnContextCancel(t *testing.T) {
 	}
 }
 
+func TestRunFatalServerErrorMarksShuttingDown(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Port:               0,
+			Mode:               config.ModeDevelopment,
+			BlockThreshold:     "CRITICAL",
+			RateLimitPerMinute: 60,
+			RateLimitBurst:     60,
+			ReadTimeout:        time.Second,
+			WriteTimeout:       time.Second,
+			ShutdownTimeout:    time.Second,
+		},
+		Metrics:  config.MetricsConfig{Port: 0},
+		Admin:    config.AdminConfig{SessionTimeout: time.Hour},
+		FeedSync: config.FeedSyncConfig{Interval: time.Hour},
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := New(ctx, cfg, nil, routePinger{}, logger, BuildInfo{}, nil, nil, nil)
+	srv.metrics.Addr = "127.0.0.1:bad-port"
+
+	if err := srv.Run(ctx); err == nil {
+		t.Fatal("Run returned nil, want fatal metrics server error")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	req.Header.Set("User-Agent", "packmon-test")
+	rec := httptest.NewRecorder()
+	srv.main.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("/readyz after fatal server error status = %d, want 503; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestLogHTTPServerStoppedIncludesConcreteError(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+
+	logHTTPServerStopped(logger, "main HTTP server", time.Now(), errors.New("context deadline exceeded"))
+
+	output := logs.String()
+	if !strings.Contains(output, `"error":"context deadline exceeded"`) {
+		t.Fatalf("shutdown log missing concrete error: %s", output)
+	}
+	if strings.Contains(output, `"error":true`) {
+		t.Fatalf("shutdown log still uses boolean-only error field: %s", output)
+	}
+}
+
 type rateLimitAuthStore struct {
 	db.Store
 	lookups atomic.Int64
@@ -177,6 +314,26 @@ type rateLimitAuthStore struct {
 
 func (s *rateLimitAuthStore) FindAPIKeyByHash(context.Context, string) (*db.APIKey, error) {
 	s.lookups.Add(1)
+	return nil, nil
+}
+
+type metricsHeaderStore struct {
+	db.Store
+}
+
+func (metricsHeaderStore) ListFeedSyncStatuses(context.Context) ([]db.FeedSyncStatus, error) {
+	return nil, nil
+}
+
+func (metricsHeaderStore) ListQueueJobs(context.Context, string, int) ([]db.RefreshJob, error) {
+	return nil, nil
+}
+
+func (metricsHeaderStore) QueueStats(context.Context) (*db.QueueStatsResult, error) {
+	return nil, nil
+}
+
+func (metricsHeaderStore) DashboardStats(context.Context) (*db.DashboardStatsResult, error) {
 	return nil, nil
 }
 

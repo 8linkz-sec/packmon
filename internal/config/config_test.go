@@ -1,6 +1,7 @@
 package config
 
 import (
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -82,9 +83,12 @@ func TestLoadWithNoEnvVarsReturnsDefaults(t *testing.T) {
 	if cfg.DB.Password != "" {
 		t.Errorf("DB.Password = %q, want empty", cfg.DB.Password)
 	}
-	// Production default SSL mode is "require".
-	if cfg.DB.SSLMode != "require" {
-		t.Errorf("DB.SSLMode = %q, want require", cfg.DB.SSLMode)
+	// Production default SSL mode verifies both encryption and server identity.
+	if cfg.DB.SSLMode != "verify-full" {
+		t.Errorf("DB.SSLMode = %q, want verify-full", cfg.DB.SSLMode)
+	}
+	if cfg.DB.ConnectTimeout != 10*time.Second {
+		t.Errorf("DB.ConnectTimeout = %v, want 10s", cfg.DB.ConnectTimeout)
 	}
 
 	// Log defaults (production mode).
@@ -100,12 +104,36 @@ func TestLoadWithNoEnvVarsReturnsDefaults(t *testing.T) {
 		t.Errorf("Metrics.Port = %d, want 9090", cfg.Metrics.Port)
 	}
 
+	if cfg.Web.PrivacyURL != "/privacy" {
+		t.Errorf("Web.PrivacyURL = %q, want /privacy", cfg.Web.PrivacyURL)
+	}
+	if cfg.Web.LegalURL != "" {
+		t.Errorf("Web.LegalURL = %q, want empty", cfg.Web.LegalURL)
+	}
+
 	// Admin defaults.
 	if cfg.Admin.InitialPassword != "" {
 		t.Errorf("Admin.InitialPassword = %q, want empty", cfg.Admin.InitialPassword)
 	}
 	if cfg.Admin.SessionTimeout != 8*time.Hour {
 		t.Errorf("Admin.SessionTimeout = %v, want 8h", cfg.Admin.SessionTimeout)
+	}
+	if cfg.Admin.IdleTimeout != 15*time.Minute {
+		t.Errorf("Admin.IdleTimeout = %v, want 15m", cfg.Admin.IdleTimeout)
+	}
+
+	// Audit retention defaults.
+	if cfg.Retention.ScanLog != 90*24*time.Hour {
+		t.Errorf("Retention.ScanLog = %v, want 2160h", cfg.Retention.ScanLog)
+	}
+	if cfg.Retention.AdminAuditLog != 365*24*time.Hour {
+		t.Errorf("Retention.AdminAuditLog = %v, want 8760h", cfg.Retention.AdminAuditLog)
+	}
+	if cfg.Retention.RefreshQueue != 30*24*time.Hour {
+		t.Errorf("Retention.RefreshQueue = %v, want 720h", cfg.Retention.RefreshQueue)
+	}
+	if cfg.Retention.Interval != 24*time.Hour {
+		t.Errorf("Retention.Interval = %v, want 24h", cfg.Retention.Interval)
 	}
 
 	// Feed sync defaults.
@@ -157,6 +185,60 @@ func TestLoadWithNoEnvVarsReturnsDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadAuditRetentionConfigFromEnv(t *testing.T) {
+	clearPackmonEnv(t)
+	t.Setenv("PACKMON_SCAN_LOG_RETENTION", "48h")
+	t.Setenv("PACKMON_ADMIN_AUDIT_LOG_RETENTION", "72h")
+	t.Setenv("PACKMON_REFRESH_QUEUE_RETENTION", "96h")
+	t.Setenv("PACKMON_AUDIT_RETENTION_INTERVAL", "6h")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Retention.ScanLog != 48*time.Hour {
+		t.Errorf("Retention.ScanLog = %v, want 48h", cfg.Retention.ScanLog)
+	}
+	if cfg.Retention.AdminAuditLog != 72*time.Hour {
+		t.Errorf("Retention.AdminAuditLog = %v, want 72h", cfg.Retention.AdminAuditLog)
+	}
+	if cfg.Retention.RefreshQueue != 96*time.Hour {
+		t.Errorf("Retention.RefreshQueue = %v, want 96h", cfg.Retention.RefreshQueue)
+	}
+	if cfg.Retention.Interval != 6*time.Hour {
+		t.Errorf("Retention.Interval = %v, want 6h", cfg.Retention.Interval)
+	}
+}
+
+func TestLoadDBConnectTimeoutFromEnv(t *testing.T) {
+	clearPackmonEnv(t)
+	t.Setenv("PACKMON_DB_CONNECT_TIMEOUT", "7s")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.DB.ConnectTimeout != 7*time.Second {
+		t.Fatalf("DB.ConnectTimeout = %v, want 7s", cfg.DB.ConnectTimeout)
+	}
+}
+
+func TestLoadRejectsNegativeAuditRetention(t *testing.T) {
+	clearPackmonEnv(t)
+	t.Setenv("PACKMON_SCAN_LOG_RETENTION", "-1h")
+
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "PACKMON_SCAN_LOG_RETENTION must be zero or greater") {
+		t.Fatalf("Load() error = %v, want negative retention rejection", err)
+	}
+
+	clearPackmonEnv(t)
+	t.Setenv("PACKMON_REFRESH_QUEUE_RETENTION", "-1h")
+
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "PACKMON_REFRESH_QUEUE_RETENTION must be zero or greater") {
+		t.Fatalf("Load() error = %v, want refresh queue retention rejection", err)
+	}
+}
+
 func TestLoadWithDevelopmentModeSetsDevDefaults(t *testing.T) {
 	clearPackmonEnv(t)
 	t.Setenv("PACKMON_SERVER_MODE", "development")
@@ -182,6 +264,36 @@ func TestLoadWithDevelopmentModeSetsDevDefaults(t *testing.T) {
 
 	if !cfg.IsDevelopment() {
 		t.Error("IsDevelopment() = false, want true")
+	}
+}
+
+func TestLoadProductionDBSSLModeDefaultsToVerifyFull(t *testing.T) {
+	clearPackmonEnv(t)
+	t.Setenv("PACKMON_SERVER_MODE", "production")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.DB.SSLMode != "verify-full" {
+		t.Fatalf("DB.SSLMode = %q, want verify-full", cfg.DB.SSLMode)
+	}
+	if got := cfg.DB.DSN(); !strings.Contains(got, "sslmode=verify-full") {
+		t.Fatalf("DB.DSN() = %q, want sslmode=verify-full", got)
+	}
+}
+
+func TestLoadExplicitDBSSLModeOverridesProductionDefault(t *testing.T) {
+	clearPackmonEnv(t)
+	t.Setenv("PACKMON_SERVER_MODE", "production")
+	t.Setenv("PACKMON_DB_SSLMODE", "require")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.DB.SSLMode != "require" {
+		t.Fatalf("DB.SSLMode = %q, want explicit require override", cfg.DB.SSLMode)
 	}
 }
 
@@ -222,6 +334,46 @@ func TestLoadWithCustomServerPort(t *testing.T) {
 	}
 	if cfg.Server.RateLimitBurst != 25 {
 		t.Errorf("Server.RateLimitBurst = %d, want 25", cfg.Server.RateLimitBurst)
+	}
+}
+
+func TestLoadWebNoticeURLsFromEnv(t *testing.T) {
+	clearPackmonEnv(t)
+	t.Setenv("PACKMON_WEB_PRIVACY_URL", "https://privacy.example.test/packmon")
+	t.Setenv("PACKMON_WEB_LEGAL_URL", "/legal-notice")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if cfg.Web.PrivacyURL != "https://privacy.example.test/packmon" {
+		t.Fatalf("Web.PrivacyURL = %q", cfg.Web.PrivacyURL)
+	}
+	if cfg.Web.LegalURL != "/legal-notice" {
+		t.Fatalf("Web.LegalURL = %q", cfg.Web.LegalURL)
+	}
+}
+
+func TestLoadRejectsUnsafeWebNoticeURLs(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		key  string
+		val  string
+	}{
+		{name: "privacy javascript", key: "PACKMON_WEB_PRIVACY_URL", val: "javascript:alert(1)"},
+		{name: "privacy protocol-relative", key: "PACKMON_WEB_PRIVACY_URL", val: "//example.test/privacy"},
+		{name: "legal ftp", key: "PACKMON_WEB_LEGAL_URL", val: "ftp://example.test/legal"},
+		{name: "legal relative", key: "PACKMON_WEB_LEGAL_URL", val: "legal"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearPackmonEnv(t)
+			t.Setenv(tc.key, tc.val)
+
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), tc.key) {
+				t.Fatalf("Load() error = %v, want %s validation error", err, tc.key)
+			}
+		})
 	}
 }
 
@@ -305,6 +457,133 @@ func TestLoadReadsDBVars(t *testing.T) {
 	}
 }
 
+func TestDBConfigDSNEscapesCredentials(t *testing.T) {
+	const (
+		wantUser     = "user:name@example"
+		wantPassword = `pa:ss/word@secret?x=1&y=2` // #nosec G101 -- fake password fixture verifies DSN escaping.
+	)
+
+	dsn := DBConfig{
+		Host:     "db.internal",
+		Port:     15432,
+		Name:     "mydb",
+		User:     wantUser,
+		Password: wantPassword,
+		SSLMode:  "verify-full",
+	}.DSN()
+
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatalf("url.Parse(%q) error = %v", dsn, err)
+	}
+	if got := parsed.User.Username(); got != wantUser {
+		t.Fatalf("DSN username = %q, want %q; dsn=%q", got, wantUser, dsn)
+	}
+	gotPassword, ok := parsed.User.Password()
+	if !ok {
+		t.Fatalf("DSN did not contain a password; dsn=%q", dsn)
+	}
+	if gotPassword != wantPassword {
+		t.Fatalf("DSN password = %q, want %q; dsn=%q", gotPassword, wantPassword, dsn)
+	}
+	if parsed.Host != "db.internal:15432" {
+		t.Fatalf("DSN host = %q, want db.internal:15432; dsn=%q", parsed.Host, dsn)
+	}
+	if parsed.Query().Get("sslmode") != "verify-full" {
+		t.Fatalf("DSN sslmode = %q, want verify-full; dsn=%q", parsed.Query().Get("sslmode"), dsn)
+	}
+}
+
+func TestLoadConfigErrorsDoNotIncludeRawEnvValues(t *testing.T) {
+	tests := []struct {
+		name      string
+		key       string
+		value     string
+		setup     func(*testing.T)
+		wantLabel string
+	}{
+		{
+			name:      "server mode",
+			key:       "PACKMON_SERVER_MODE",
+			value:     "production-secret",
+			wantLabel: "PACKMON_SERVER_MODE",
+		},
+		{
+			name:      "integer",
+			key:       "PACKMON_DB_PORT",
+			value:     "5432-secret",
+			wantLabel: "PACKMON_DB_PORT",
+		},
+		{
+			name:      "duration",
+			key:       "PACKMON_SERVER_READ_TIMEOUT",
+			value:     "duration-secret",
+			wantLabel: "PACKMON_SERVER_READ_TIMEOUT",
+		},
+		{
+			name:      "boolean",
+			key:       "PACKMON_FEED_SYNC_ON_STARTUP",
+			value:     "boolean-secret",
+			wantLabel: "PACKMON_FEED_SYNC_ON_STARTUP",
+		},
+		{
+			name:      "feed mode",
+			key:       "PACKMON_FEED_GHSA_MODE",
+			value:     "feed-mode-secret",
+			wantLabel: "PACKMON_FEED_GHSA_MODE",
+		},
+		{
+			name:      "tls min version",
+			key:       "PACKMON_TLS_MIN_VERSION",
+			value:     "tls-secret",
+			wantLabel: "PACKMON_TLS_MIN_VERSION",
+		},
+		{
+			name:      "local http bind mode",
+			key:       "PACKMON_INSECURE_LOCAL_HTTP_BIND_MODE",
+			value:     "bind-secret",
+			wantLabel: "PACKMON_INSECURE_LOCAL_HTTP_BIND_MODE",
+		},
+		{
+			name:      "block threshold",
+			key:       "PACKMON_BLOCK_THRESHOLD",
+			value:     "threshold-secret",
+			wantLabel: "PACKMON_BLOCK_THRESHOLD",
+		},
+		{
+			name:  "reversinglabs base url",
+			key:   "PACKMON_REVERSINGLABS_API_BASE_URL",
+			value: "base-url-secret",
+			setup: func(t *testing.T) {
+				t.Setenv("PACKMON_REVERSINGLABS_API_KEY", "configured")
+			},
+			wantLabel: "PACKMON_REVERSINGLABS_API_BASE_URL",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			clearPackmonEnv(t)
+			if tc.setup != nil {
+				tc.setup(t)
+			}
+			t.Setenv(tc.key, tc.value)
+
+			_, err := Load()
+			if err == nil {
+				t.Fatal("Load() error = nil, want validation error")
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, tc.wantLabel) {
+				t.Fatalf("Load() error = %q, want key label %q", msg, tc.wantLabel)
+			}
+			if strings.Contains(msg, tc.value) {
+				t.Fatalf("Load() error leaked raw environment value %q: %q", tc.value, msg)
+			}
+		})
+	}
+}
+
 func TestLoadReadsFeedEnabledFlags(t *testing.T) {
 	clearPackmonEnv(t)
 	t.Setenv("PACKMON_FEED_OSV_ENABLED", "false")
@@ -368,6 +647,38 @@ func TestEndOfLifeEnv(t *testing.T) {
 	}
 }
 
+func TestEndOfLifeRejectsNonHTTPSBaseURL(t *testing.T) {
+	clearPackmonEnv(t)
+	t.Setenv("PACKMON_ENDOFLIFE_API_BASE_URL", "http://downloads.example.test/api/v1")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() error = nil, want error for non-HTTPS endoflife base URL")
+	} else if !strings.Contains(err.Error(), "PACKMON_ENDOFLIFE_API_BASE_URL") || !strings.Contains(err.Error(), "https") {
+		t.Fatalf("Load() error = %v, want explicit HTTPS base URL error", err)
+	}
+}
+
+func TestEndOfLifeAllowsLoopbackHTTPBaseURL(t *testing.T) {
+	for _, baseURL := range []string{
+		"http://127.0.0.1:8080/api/v1",
+		"http://localhost:8080/api/v1",
+		"http://[::1]:8080/api/v1",
+	} {
+		t.Run(baseURL, func(t *testing.T) {
+			clearPackmonEnv(t)
+			t.Setenv("PACKMON_ENDOFLIFE_API_BASE_URL", baseURL)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v, want loopback HTTP allowed", err)
+			}
+			if cfg.Feeds.EndOfLifeBaseURL != baseURL {
+				t.Fatalf("EndOfLifeBaseURL = %q, want %q", cfg.Feeds.EndOfLifeBaseURL, baseURL)
+			}
+		})
+	}
+}
+
 func TestReversingLabsDefaults(t *testing.T) {
 	clearPackmonEnv(t)
 
@@ -397,6 +708,9 @@ func TestReversingLabsEnv(t *testing.T) {
 	t.Setenv("PACKMON_REVERSINGLABS_API_BASE_URL", "https://example.test/community")
 	t.Setenv("PACKMON_REVERSINGLABS_LOOKUP_TTL", "12h")
 	t.Setenv("PACKMON_REVERSINGLABS_BATCH_SIZE", "3")
+	t.Setenv("PACKMON_REVERSINGLABS_MAX_SCHEDULE_PER_CHECK", "17")
+	t.Setenv("PACKMON_REVERSINGLABS_CACHE_RETENTION", "48h")
+	t.Setenv("PACKMON_REVERSINGLABS_EXCLUDED_NAMESPACES", "npm/@school/,maven/edu.school:")
 
 	cfg, err := Load()
 	if err != nil {
@@ -420,6 +734,15 @@ func TestReversingLabsEnv(t *testing.T) {
 	if cfg.Feeds.ReversingLabsBatchSize != 3 {
 		t.Fatalf("ReversingLabsBatchSize = %d, want 3", cfg.Feeds.ReversingLabsBatchSize)
 	}
+	if cfg.Feeds.ReversingLabsMaxSchedulePerCheck != 17 {
+		t.Fatalf("ReversingLabsMaxSchedulePerCheck = %d, want 17", cfg.Feeds.ReversingLabsMaxSchedulePerCheck)
+	}
+	if cfg.Feeds.ReversingLabsCacheRetention != 48*time.Hour {
+		t.Fatalf("ReversingLabsCacheRetention = %v, want 48h", cfg.Feeds.ReversingLabsCacheRetention)
+	}
+	if got := strings.Join(cfg.Feeds.ReversingLabsExcludedNamespaces, ","); got != "npm/@school/,maven/edu.school:" {
+		t.Fatalf("ReversingLabsExcludedNamespaces = %q", got)
+	}
 }
 
 func TestReversingLabsRejectsExternalMode(t *testing.T) {
@@ -429,6 +752,52 @@ func TestReversingLabsRejectsExternalMode(t *testing.T) {
 
 	if _, err := Load(); err == nil {
 		t.Fatal("Load() error = nil, want error for ReversingLabs external mode")
+	}
+}
+
+func TestNVDRejectsExternalMode(t *testing.T) {
+	clearPackmonEnv(t)
+	t.Setenv("PACKMON_FEED_NVD_ENABLED", "true")
+	t.Setenv("PACKMON_FEED_NVD_MODE", "external")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() error = nil, want error for NVD external mode")
+	} else if !strings.Contains(err.Error(), "PACKMON_FEED_NVD_MODE") || !strings.Contains(err.Error(), "external") {
+		t.Fatalf("Load() error = %v, want explicit NVD external-mode error", err)
+	}
+}
+
+func TestReversingLabsRejectsNonHTTPSBaseURLWithToken(t *testing.T) {
+	clearPackmonEnv(t)
+	t.Setenv("PACKMON_REVERSINGLABS_API_KEY", "rl-token")
+	t.Setenv("PACKMON_REVERSINGLABS_API_BASE_URL", "http://downloads.example.test/community")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() error = nil, want error for non-HTTPS ReversingLabs base URL with token")
+	} else if !strings.Contains(err.Error(), "PACKMON_REVERSINGLABS_API_BASE_URL") || !strings.Contains(err.Error(), "https") {
+		t.Fatalf("Load() error = %v, want explicit HTTPS base URL error", err)
+	}
+}
+
+func TestReversingLabsAllowsLoopbackHTTPBaseURLWithToken(t *testing.T) {
+	for _, baseURL := range []string{
+		"http://127.0.0.1:8080/community",
+		"http://localhost:8080/community",
+		"http://[::1]:8080/community",
+	} {
+		t.Run(baseURL, func(t *testing.T) {
+			clearPackmonEnv(t)
+			t.Setenv("PACKMON_REVERSINGLABS_API_KEY", "rl-token")
+			t.Setenv("PACKMON_REVERSINGLABS_API_BASE_URL", baseURL)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v, want loopback HTTP allowed", err)
+			}
+			if cfg.Feeds.ReversingLabsBaseURL != baseURL {
+				t.Fatalf("ReversingLabsBaseURL = %q, want %q", cfg.Feeds.ReversingLabsBaseURL, baseURL)
+			}
+		})
 	}
 }
 
@@ -449,6 +818,7 @@ func TestLoadReadsAPIKeys(t *testing.T) {
 	clearPackmonEnv(t)
 	t.Setenv("PACKMON_VULNCHECK_API_KEY", "vc-key-123")
 	t.Setenv("PACKMON_SOCKET_API_KEY", "sock-key-456")
+	t.Setenv("PACKMON_FEED_IMPORT_SECRET", "import-secret")
 
 	cfg, err := Load()
 	if err != nil {
@@ -460,6 +830,9 @@ func TestLoadReadsAPIKeys(t *testing.T) {
 	}
 	if cfg.Feeds.SocketAPIKey != "sock-key-456" {
 		t.Errorf("Feeds.SocketAPIKey = %q, want sock-key-456", cfg.Feeds.SocketAPIKey)
+	}
+	if cfg.Feeds.FeedImportSecret != "import-secret" {
+		t.Errorf("Feeds.FeedImportSecret = %q, want import-secret", cfg.Feeds.FeedImportSecret)
 	}
 }
 
@@ -523,6 +896,7 @@ func TestLoadReadsCustomTimeouts(t *testing.T) {
 	t.Setenv("PACKMON_SERVER_WRITE_TIMEOUT", "45s")
 	t.Setenv("PACKMON_SERVER_SHUTDOWN_TIMEOUT", "30s")
 	t.Setenv("PACKMON_ADMIN_SESSION_TIMEOUT", "4h")
+	t.Setenv("PACKMON_ADMIN_IDLE_TIMEOUT", "10m")
 
 	cfg, err := Load()
 	if err != nil {
@@ -540,6 +914,9 @@ func TestLoadReadsCustomTimeouts(t *testing.T) {
 	}
 	if cfg.Admin.SessionTimeout != 4*time.Hour {
 		t.Errorf("Admin.SessionTimeout = %v, want 4h", cfg.Admin.SessionTimeout)
+	}
+	if cfg.Admin.IdleTimeout != 10*time.Minute {
+		t.Errorf("Admin.IdleTimeout = %v, want 10m", cfg.Admin.IdleTimeout)
 	}
 }
 
@@ -626,6 +1003,16 @@ func TestLoadWithInvalidSessionTimeoutReturnsError(t *testing.T) {
 	}
 }
 
+func TestLoadWithInvalidAdminIdleTimeoutReturnsError(t *testing.T) {
+	clearPackmonEnv(t)
+	t.Setenv("PACKMON_ADMIN_IDLE_TIMEOUT", "nope")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load with invalid PACKMON_ADMIN_IDLE_TIMEOUT should return error")
+	}
+}
+
 func TestIsDevelopmentReturnsFalseForProduction(t *testing.T) {
 	clearPackmonEnv(t)
 
@@ -639,19 +1026,23 @@ func TestIsDevelopmentReturnsFalseForProduction(t *testing.T) {
 	}
 }
 
-func TestEnvBoolOrDefaultHandlesInvalidValues(t *testing.T) {
+func TestLoadRejectsInvalidBooleanEnvValues(t *testing.T) {
 	clearPackmonEnv(t)
-	// An invalid boolean value should fall back to the default.
 	t.Setenv("PACKMON_FEED_SYNC_ON_STARTUP", "maybe")
 
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load returned error: %v", err)
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "PACKMON_FEED_SYNC_ON_STARTUP") {
+		t.Fatalf("Load() error = %v, want invalid PACKMON_FEED_SYNC_ON_STARTUP rejection", err)
 	}
+}
 
-	// Default for PACKMON_FEED_SYNC_ON_STARTUP is true.
-	if !cfg.FeedSync.OnStartup {
-		t.Error("FeedSync.OnStartup = false, want true (default fallback for invalid bool)")
+func TestLoadRejectsInvalidFeedModeEnvValues(t *testing.T) {
+	clearPackmonEnv(t)
+	t.Setenv("PACKMON_FEED_GHSA_MODE", "externl")
+
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "PACKMON_FEED_GHSA_MODE") {
+		t.Fatalf("Load() error = %v, want invalid PACKMON_FEED_GHSA_MODE rejection", err)
 	}
 }
 
@@ -707,6 +1098,7 @@ func TestLoadValidationErrorBranches(t *testing.T) {
 		{name: "reversinglabs ttl invalid", key: "PACKMON_REVERSINGLABS_LOOKUP_TTL", val: "later", want: "PACKMON_REVERSINGLABS_LOOKUP_TTL"},
 		{name: "reversinglabs batch invalid", key: "PACKMON_REVERSINGLABS_BATCH_SIZE", val: "0", want: "greater than zero"},
 		{name: "tls min invalid", key: "PACKMON_TLS_MIN_VERSION", val: "1.1", want: "invalid PACKMON_TLS_MIN_VERSION"},
+		{name: "local http bind mode invalid", key: "PACKMON_INSECURE_LOCAL_HTTP_BIND_MODE", val: "public", want: "invalid PACKMON_INSECURE_LOCAL_HTTP_BIND_MODE"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			clearPackmonEnv(t)

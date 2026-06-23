@@ -1,6 +1,7 @@
 package dockerimage
 
 import (
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -20,23 +21,32 @@ type File struct {
 	Kind    Kind
 }
 
+var walkDockerInventoryDir = filepath.WalkDir
+
 func DiscoverFiles(root string, maxDepth int) ([]File, error) {
+	files, _, err := DiscoverFilesWithWarnings(root, maxDepth)
+	return files, err
+}
+
+func DiscoverFilesWithWarnings(root string, maxDepth int) ([]File, []string, error) {
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	info, err := os.Stat(absRoot)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if !info.IsDir() {
-		return nil, &fs.PathError{Op: "walk", Path: absRoot, Err: fs.ErrInvalid}
+		return nil, nil, &fs.PathError{Op: "walk", Path: absRoot, Err: fs.ErrInvalid}
 	}
 
 	rootDepth := strings.Count(filepath.ToSlash(absRoot), "/")
 	var files []File
-	err = filepath.WalkDir(absRoot, func(path string, d fs.DirEntry, walkErr error) error {
+	var warnings []string
+	err = walkDockerInventoryDir(absRoot, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
+			warnings = append(warnings, dockerInventoryWalkWarning(absRoot, path, walkErr))
 			if d != nil && d.IsDir() {
 				return fs.SkipDir
 			}
@@ -67,7 +77,18 @@ func DiscoverFiles(root string, maxDepth int) ([]File, error) {
 		files = append(files, File{Path: path, RelPath: filepath.ToSlash(rel), Kind: kind})
 		return nil
 	})
-	return files, err
+	return files, warnings, err
+}
+
+func dockerInventoryWalkWarning(root, path string, cause error) string {
+	display := filepath.ToSlash(path)
+	if rel, err := filepath.Rel(root, path); err == nil && rel != "." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != ".." {
+		display = filepath.ToSlash(rel)
+	}
+	if pathErr, ok := cause.(*fs.PathError); ok {
+		return fmt.Sprintf("%s: %v", display, pathErr.Err)
+	}
+	return fmt.Sprintf("%s: %v", display, cause)
 }
 
 func classifyFile(base string) (Kind, bool) {

@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/8linkz/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/db"
 )
 
 // Registry stores lightweight in-process counters for operational metrics.
@@ -37,6 +37,12 @@ type CounterSnapshot struct {
 	QueueErrors         map[string]uint64
 	HTTPRequests        map[httpMetricKey]httpMetricSnapshot
 }
+
+const (
+	metricsStoreTimeout          = 2 * time.Second
+	metricsDerivedCacheTTL       = 30 * time.Second
+	metricsStoreErrorLogInterval = 30 * time.Second
+)
 
 var defaultRegistry = NewRegistry()
 
@@ -105,9 +111,7 @@ func (r *Registry) IncQueueError(source string) {
 
 // RecordHTTPRequest records one completed HTTP request.
 func (r *Registry) RecordHTTPRequest(method, route string, status int, duration time.Duration) {
-	if method == "" {
-		method = "UNKNOWN"
-	}
+	method = normalizeHTTPMethod(method)
 	if route == "" {
 		route = "unknown"
 	}
@@ -127,6 +131,31 @@ func (r *Registry) RecordHTTPRequest(method, route string, status int, duration 
 	nanos := duration.Nanoseconds()
 	if nanos > 0 {
 		counter.durationNanos.Add(uint64(nanos)) // #nosec G115 -- duration is clamped to a non-negative value above.
+	}
+}
+
+func normalizeHTTPMethod(method string) string {
+	switch strings.ToUpper(strings.TrimSpace(method)) {
+	case http.MethodGet:
+		return http.MethodGet
+	case http.MethodHead:
+		return http.MethodHead
+	case http.MethodPost:
+		return http.MethodPost
+	case http.MethodPut:
+		return http.MethodPut
+	case http.MethodPatch:
+		return http.MethodPatch
+	case http.MethodDelete:
+		return http.MethodDelete
+	case http.MethodConnect:
+		return http.MethodConnect
+	case http.MethodOptions:
+		return http.MethodOptions
+	case http.MethodTrace:
+		return http.MethodTrace
+	default:
+		return "OTHER"
 	}
 }
 
@@ -202,8 +231,30 @@ type scanTotalsProvider interface {
 	ScanTotals(ctx context.Context) (*db.ScanTotals, error)
 }
 
+type queueOldestProvider interface {
+	OldestQueueJobs(ctx context.Context) (map[string]time.Time, error)
+}
+
 type dbPoolStatsProvider interface {
 	DBPoolStats() db.DBPoolStats
+}
+
+type metricsStoreFailure struct {
+	operation string
+	err       error
+}
+
+type metricsDerivedCache struct {
+	mu             sync.Mutex
+	expiresAt      time.Time
+	dashboardStats *db.DashboardStatsResult
+	scanTotals     *db.ScanTotals
+}
+
+type metricsStoreErrorLogger struct {
+	logger  *slog.Logger
+	mu      sync.Mutex
+	nextLog time.Time
 }
 
 // unmatchedRouteLabel is the route label used for requests that did not match
@@ -252,53 +303,189 @@ func (r *statusRecorder) Write(data []byte) (int, error) {
 	return r.ResponseWriter.Write(data)
 }
 
-// MetricsHandler renders a Prometheus-compatible plaintext metrics response.
-// A failing store read does not fail the response (metrics stay best-effort),
-// but each error is logged at WARN so DB outages are not silently masked.
+// MetricsHandler renders a Prometheus-compatible plaintext metrics response
+// using the process-wide telemetry registry.
 func MetricsHandler(store db.Store, schemaVersion uint, logger *slog.Logger) http.HandlerFunc {
+	return MetricsHandlerWithRegistry(Default(), store, schemaVersion, logger)
+}
+
+// MetricsHandlerWithRegistry renders a Prometheus-compatible plaintext metrics
+// response using the supplied in-process telemetry registry. A failing store
+// read does not fail the response; failures are collapsed into a bounded WARN so
+// repeated scrapes during an outage do not produce one warning per failed query.
+func MetricsHandlerWithRegistry(registry *Registry, store db.Store, schemaVersion uint, logger *slog.Logger) http.HandlerFunc {
+	if registry == nil {
+		registry = Default()
+	}
 	if logger == nil {
 		logger = slog.Default()
 	}
+	derivedCache := &metricsDerivedCache{}
+	errorLogger := &metricsStoreErrorLogger{logger: logger}
+
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 
-		statuses, err := store.ListFeedSyncStatuses(r.Context())
-		if err != nil {
-			logger.Warn("metrics: list feed sync statuses failed", slog.String("error", err.Error()))
-		}
-		jobs, err := store.ListQueueJobs(r.Context(), "", 1000)
-		if err != nil {
-			logger.Warn("metrics: list queue jobs failed", slog.String("error", err.Error()))
-		}
-		queueStats, err := store.QueueStats(r.Context())
-		if err != nil {
-			logger.Warn("metrics: queue stats failed", slog.String("error", err.Error()))
-		}
-		dashboardStats, err := store.DashboardStats(r.Context())
-		if err != nil {
-			logger.Warn("metrics: dashboard stats failed", slog.String("error", err.Error()))
-		}
+		storeCtx, cancel := context.WithTimeout(r.Context(), metricsStoreTimeout)
+		defer cancel()
 
+		var failures []metricsStoreFailure
+
+		var statuses []db.FeedSyncStatus
+		var jobs []db.RefreshJob
+		var queueStats *db.QueueStatsResult
+		var dashboardStats *db.DashboardStatsResult
 		var scanTotals *db.ScanTotals
-		if provider, ok := store.(scanTotalsProvider); ok {
-			totals, terr := provider.ScanTotals(r.Context())
-			if terr != nil {
-				logger.Warn("metrics: scan totals failed", slog.String("error", terr.Error()))
+		var dbPoolStats *db.DBPoolStats
+
+		if store != nil {
+			var err error
+			statuses, err = store.ListFeedSyncStatuses(storeCtx)
+			if err != nil {
+				failures = appendMetricStoreFailure(failures, "feed_sync_statuses", err)
+			}
+			if provider, ok := store.(queueOldestProvider); ok {
+				oldest, oerr := provider.OldestQueueJobs(storeCtx)
+				if oerr != nil {
+					failures = appendMetricStoreFailure(failures, "oldest_queue_jobs", oerr)
+				} else {
+					jobs = queueJobsFromOldest(oldest)
+				}
 			} else {
-				scanTotals = totals
+				var jerr error
+				jobs, jerr = store.ListQueueJobs(storeCtx, "", 1000)
+				if jerr != nil {
+					failures = appendMetricStoreFailure(failures, "queue_jobs", jerr)
+				}
+			}
+			queueStats, err = store.QueueStats(storeCtx)
+			if err != nil {
+				failures = appendMetricStoreFailure(failures, "queue_stats", err)
+			}
+
+			var derivedFailures []metricsStoreFailure
+			dashboardStats, scanTotals, derivedFailures = derivedCache.load(storeCtx, store)
+			failures = append(failures, derivedFailures...)
+
+			if provider, ok := store.(dbPoolStatsProvider); ok {
+				stats := provider.DBPoolStats()
+				dbPoolStats = &stats
 			}
 		}
 
-		var dbPoolStats *db.DBPoolStats
-		if provider, ok := store.(dbPoolStatsProvider); ok {
-			stats := provider.DBPoolStats()
-			dbPoolStats = &stats
-		}
+		errorLogger.log(failures)
 
 		writer := bufio.NewWriter(w)
-		writeMetrics(writer, Default().Snapshot(), statuses, jobs, queueStats, dashboardStats, scanTotals, dbPoolStats, schemaVersion)
+		writeMetrics(writer, registry.Snapshot(), statuses, jobs, queueStats, dashboardStats, scanTotals, dbPoolStats, schemaVersion)
 		_ = writer.Flush()
 	}
+}
+
+func (c *metricsDerivedCache) load(ctx context.Context, store db.Store) (*db.DashboardStatsResult, *db.ScanTotals, []metricsStoreFailure) {
+	now := time.Now()
+
+	c.mu.Lock()
+	if c.expiresAt.After(now) {
+		dashboardStats := cloneDashboardStats(c.dashboardStats)
+		scanTotals := cloneScanTotals(c.scanTotals)
+		c.mu.Unlock()
+		return dashboardStats, scanTotals, nil
+	}
+	c.mu.Unlock()
+
+	var failures []metricsStoreFailure
+	dashboardStats, err := store.DashboardStats(ctx)
+	if err != nil {
+		failures = appendMetricStoreFailure(failures, "dashboard_stats", err)
+	}
+
+	var scanTotals *db.ScanTotals
+	if provider, ok := store.(scanTotalsProvider); ok {
+		totals, terr := provider.ScanTotals(ctx)
+		if terr != nil {
+			failures = appendMetricStoreFailure(failures, "scan_totals", terr)
+		} else {
+			scanTotals = totals
+		}
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err == nil {
+		c.dashboardStats = cloneDashboardStats(dashboardStats)
+	}
+	if scanTotals != nil {
+		c.scanTotals = cloneScanTotals(scanTotals)
+	}
+	c.expiresAt = now.Add(metricsDerivedCacheTTL)
+
+	return cloneDashboardStats(c.dashboardStats), cloneScanTotals(c.scanTotals), failures
+}
+
+func cloneDashboardStats(stats *db.DashboardStatsResult) *db.DashboardStatsResult {
+	if stats == nil {
+		return nil
+	}
+	out := *stats
+	if stats.BySeverity != nil {
+		out.BySeverity = make(map[string]int, len(stats.BySeverity))
+		for severity, count := range stats.BySeverity {
+			out.BySeverity[severity] = count
+		}
+	}
+	return &out
+}
+
+func cloneScanTotals(totals *db.ScanTotals) *db.ScanTotals {
+	if totals == nil {
+		return nil
+	}
+	out := *totals
+	return &out
+}
+
+func appendMetricStoreFailure(failures []metricsStoreFailure, operation string, err error) []metricsStoreFailure {
+	if err == nil {
+		return failures
+	}
+	return append(failures, metricsStoreFailure{operation: operation, err: err})
+}
+
+func (l *metricsStoreErrorLogger) log(failures []metricsStoreFailure) {
+	if len(failures) == 0 {
+		return
+	}
+	if l.logger == nil {
+		l.logger = slog.Default()
+	}
+
+	now := time.Now()
+	l.mu.Lock()
+	if l.nextLog.After(now) {
+		l.mu.Unlock()
+		return
+	}
+	l.nextLog = now.Add(metricsStoreErrorLogInterval)
+	l.mu.Unlock()
+
+	operations := make([]string, 0, len(failures))
+	for _, failure := range failures {
+		if failure.operation != "" {
+			operations = append(operations, failure.operation)
+		}
+	}
+	sort.Strings(operations)
+
+	firstErr := ""
+	if failures[0].err != nil {
+		firstErr = failures[0].err.Error()
+	}
+
+	l.logger.Warn("metrics: store-derived metrics read failed",
+		slog.Int("failures", len(failures)),
+		slog.String("operations", strings.Join(operations, ",")),
+		slog.String("error", firstErr),
+	)
 }
 
 func writeMetrics(w *bufio.Writer, counters CounterSnapshot, statuses []db.FeedSyncStatus, jobs []db.RefreshJob, queueStats *db.QueueStatsResult, dashboardStats *db.DashboardStatsResult, scanTotals *db.ScanTotals, dbPoolStats *db.DBPoolStats, schemaVersion uint) {
@@ -323,10 +510,10 @@ func writeMetrics(w *bufio.Writer, counters CounterSnapshot, statuses []db.FeedS
 	_, _ = fmt.Fprintln(w, "# TYPE packmon_http_requests_total counter")
 	for _, key := range httpKeys {
 		metric := counters.HTTPRequests[key]
-		_, _ = fmt.Fprintf(w, "packmon_http_requests_total{method=%q,route=%q,status=%q} %d\n",
-			escapeLabelValue(key.Method),
-			escapeLabelValue(key.Route),
-			escapeLabelValue(key.Status),
+		_, _ = fmt.Fprintf(w, "packmon_http_requests_total{method=%s,route=%s,status=%s} %d\n",
+			prometheusLabelValue(key.Method),
+			prometheusLabelValue(key.Route),
+			prometheusLabelValue(key.Status),
 			metric.Count,
 		)
 	}
@@ -335,16 +522,16 @@ func writeMetrics(w *bufio.Writer, counters CounterSnapshot, statuses []db.FeedS
 	_, _ = fmt.Fprintln(w, "# TYPE packmon_http_request_duration_seconds summary")
 	for _, key := range httpKeys {
 		metric := counters.HTTPRequests[key]
-		_, _ = fmt.Fprintf(w, "packmon_http_request_duration_seconds_count{method=%q,route=%q,status=%q} %d\n",
-			escapeLabelValue(key.Method),
-			escapeLabelValue(key.Route),
-			escapeLabelValue(key.Status),
+		_, _ = fmt.Fprintf(w, "packmon_http_request_duration_seconds_count{method=%s,route=%s,status=%s} %d\n",
+			prometheusLabelValue(key.Method),
+			prometheusLabelValue(key.Route),
+			prometheusLabelValue(key.Status),
 			metric.Count,
 		)
-		_, _ = fmt.Fprintf(w, "packmon_http_request_duration_seconds_sum{method=%q,route=%q,status=%q} %.9f\n",
-			escapeLabelValue(key.Method),
-			escapeLabelValue(key.Route),
-			escapeLabelValue(key.Status),
+		_, _ = fmt.Fprintf(w, "packmon_http_request_duration_seconds_sum{method=%s,route=%s,status=%s} %.9f\n",
+			prometheusLabelValue(key.Method),
+			prometheusLabelValue(key.Route),
+			prometheusLabelValue(key.Status),
 			float64(metric.DurationNanos)/float64(time.Second),
 		)
 	}
@@ -368,18 +555,21 @@ func writeMetrics(w *bufio.Writer, counters CounterSnapshot, statuses []db.FeedS
 		_, _ = fmt.Fprintln(w, "# TYPE packmon_findings_total gauge")
 		_, _ = fmt.Fprintf(w, "packmon_findings_total{type=%q} %d\n", "vulnerability", dashboardStats.TotalVulnerabilities)
 		_, _ = fmt.Fprintf(w, "packmon_findings_total{type=%q} %d\n", "malicious", dashboardStats.TotalMalicious)
+		_, _ = fmt.Fprintf(w, "packmon_findings_total{type=%q} %d\n", "supply_chain_risk", dashboardStats.TotalSupplyChainRisk)
+		_, _ = fmt.Fprintf(w, "packmon_findings_total{type=%q} %d\n", "lifecycle", dashboardStats.TotalLifecycle)
 
-		_, _ = fmt.Fprintln(w, "# HELP packmon_findings_by_severity Current vulnerability finding count by severity.")
+		_, _ = fmt.Fprintln(w, "# HELP packmon_findings_by_severity Current finding count by severity.")
 		_, _ = fmt.Fprintln(w, "# TYPE packmon_findings_by_severity gauge")
-		severities := make([]string, 0, len(dashboardStats.BySeverity))
-		for severity := range dashboardStats.BySeverity {
+		bySeverity := canonicalSeverityCounts(dashboardStats.BySeverity)
+		severities := make([]string, 0, len(bySeverity))
+		for severity := range bySeverity {
 			severities = append(severities, severity)
 		}
 		sort.Strings(severities)
 		for _, severity := range severities {
-			_, _ = fmt.Fprintf(w, "packmon_findings_by_severity{severity=%q} %d\n",
-				escapeLabelValue(severity),
-				dashboardStats.BySeverity[severity],
+			_, _ = fmt.Fprintf(w, "packmon_findings_by_severity{severity=%s} %d\n",
+				prometheusLabelValue(severity),
+				bySeverity[severity],
 			)
 		}
 	}
@@ -407,19 +597,20 @@ func writeMetrics(w *bufio.Writer, counters CounterSnapshot, statuses []db.FeedS
 	timeoutFeeds := unionKeys(counters.FeedSyncTimeouts, feedNames(statuses))
 	sort.Strings(timeoutFeeds)
 
-	_, _ = fmt.Fprintln(w, "# HELP packmon_feed_last_sync_timestamp Unix timestamp of the last successful or attempted feed sync.")
+	_, _ = fmt.Fprintln(w, "# HELP packmon_feed_last_sync_timestamp Unix timestamp of the latest feed sync attempt or status heartbeat.")
 	_, _ = fmt.Fprintln(w, "# TYPE packmon_feed_last_sync_timestamp gauge")
 	for _, status := range statuses {
-		if status.LastSyncAt == nil {
+		attemptAt := feedAttemptTimestamp(status)
+		if attemptAt.IsZero() {
 			continue
 		}
-		_, _ = fmt.Fprintf(w, "packmon_feed_last_sync_timestamp{feed=%q} %d\n",
-			escapeLabelValue(status.FeedName),
-			status.LastSyncAt.UTC().Unix(),
+		_, _ = fmt.Fprintf(w, "packmon_feed_last_sync_timestamp{feed=%s} %d\n",
+			prometheusLabelValue(status.FeedName),
+			attemptAt.UTC().Unix(),
 		)
 	}
 
-	_, _ = fmt.Fprintln(w, "# HELP packmon_feed_entries_age_seconds Freshness proxy for feed data, derived from time since the last sync.")
+	_, _ = fmt.Fprintln(w, "# HELP packmon_feed_entries_age_seconds Freshness proxy for feed data, derived from time since the last usable sync.")
 	_, _ = fmt.Fprintln(w, "# TYPE packmon_feed_entries_age_seconds gauge")
 	for _, status := range statuses {
 		if status.LastSyncAt == nil {
@@ -429,8 +620,8 @@ func writeMetrics(w *bufio.Writer, counters CounterSnapshot, statuses []db.FeedS
 		if ageSeconds < 0 {
 			ageSeconds = 0
 		}
-		_, _ = fmt.Fprintf(w, "packmon_feed_entries_age_seconds{feed=%q} %.0f\n",
-			escapeLabelValue(status.FeedName),
+		_, _ = fmt.Fprintf(w, "packmon_feed_entries_age_seconds{feed=%s} %.0f\n",
+			prometheusLabelValue(status.FeedName),
 			ageSeconds,
 		)
 	}
@@ -438,8 +629,8 @@ func writeMetrics(w *bufio.Writer, counters CounterSnapshot, statuses []db.FeedS
 	_, _ = fmt.Fprintln(w, "# HELP packmon_feed_sync_timeout_total Feed sync attempts that failed due to timeouts since process start.")
 	_, _ = fmt.Fprintln(w, "# TYPE packmon_feed_sync_timeout_total counter")
 	for _, feed := range timeoutFeeds {
-		_, _ = fmt.Fprintf(w, "packmon_feed_sync_timeout_total{feed=%q} %d\n",
-			escapeLabelValue(feed),
+		_, _ = fmt.Fprintf(w, "packmon_feed_sync_timeout_total{feed=%s} %d\n",
+			prometheusLabelValue(feed),
 			counters.FeedSyncTimeouts[feed],
 		)
 	}
@@ -459,8 +650,8 @@ func writeMetrics(w *bufio.Writer, counters CounterSnapshot, statuses []db.FeedS
 		if ageSeconds < 0 {
 			ageSeconds = 0
 		}
-		_, _ = fmt.Fprintf(w, "packmon_queue_oldest_job_seconds{source=%q} %.0f\n",
-			escapeLabelValue(source),
+		_, _ = fmt.Fprintf(w, "packmon_queue_oldest_job_seconds{source=%s} %.0f\n",
+			prometheusLabelValue(source),
 			ageSeconds,
 		)
 	}
@@ -468,8 +659,8 @@ func writeMetrics(w *bufio.Writer, counters CounterSnapshot, statuses []db.FeedS
 	_, _ = fmt.Fprintln(w, "# HELP packmon_queue_error_total Queue jobs that failed while being processed since process start.")
 	_, _ = fmt.Fprintln(w, "# TYPE packmon_queue_error_total counter")
 	for _, source := range errorSources {
-		_, _ = fmt.Fprintf(w, "packmon_queue_error_total{source=%q} %d\n",
-			escapeLabelValue(source),
+		_, _ = fmt.Fprintf(w, "packmon_queue_error_total{source=%s} %d\n",
+			prometheusLabelValue(source),
 			counters.QueueErrors[source],
 		)
 	}
@@ -484,6 +675,16 @@ func feedNames(statuses []db.FeedSyncStatus) []string {
 		names = append(names, status.FeedName)
 	}
 	return names
+}
+
+func feedAttemptTimestamp(status db.FeedSyncStatus) time.Time {
+	if !status.UpdatedAt.IsZero() {
+		return status.UpdatedAt
+	}
+	if status.LastSyncAt != nil {
+		return *status.LastSyncAt
+	}
+	return time.Time{}
 }
 
 func oldestQueueJobs(jobs []db.RefreshJob) (map[string]time.Time, []string) {
@@ -509,6 +710,21 @@ func oldestQueueJobs(jobs []db.RefreshJob) (map[string]time.Time, []string) {
 	return oldest, sources
 }
 
+func queueJobsFromOldest(oldest map[string]time.Time) []db.RefreshJob {
+	jobs := make([]db.RefreshJob, 0, len(oldest))
+	for source, requestedAt := range oldest {
+		if source == "" || requestedAt.IsZero() {
+			continue
+		}
+		jobs = append(jobs, db.RefreshJob{
+			Source:      source,
+			Status:      "pending",
+			RequestedAt: requestedAt,
+		})
+	}
+	return jobs
+}
+
 func unionKeys(counterMap map[string]uint64, extra []string) []string {
 	set := make(map[string]struct{}, len(counterMap)+len(extra))
 	for key := range counterMap {
@@ -527,6 +743,31 @@ func unionKeys(counterMap map[string]uint64, extra []string) []string {
 		out = append(out, key)
 	}
 	return out
+}
+
+func canonicalSeverityCounts(raw map[string]int) map[string]int {
+	out := make(map[string]int, len(raw))
+	for severity, count := range raw {
+		out[canonicalSeverityLabel(severity)] += count
+	}
+	return out
+}
+
+func canonicalSeverityLabel(raw string) string {
+	switch strings.ToUpper(strings.TrimSpace(raw)) {
+	case "CRITICAL":
+		return "CRITICAL"
+	case "HIGH":
+		return "HIGH"
+	case "MEDIUM":
+		return "MEDIUM"
+	case "LOW":
+		return "LOW"
+	case "UNKNOWN":
+		return "UNKNOWN"
+	default:
+		return "UNKNOWN"
+	}
 }
 
 func sortedHTTPMetricKeys(metrics map[httpMetricKey]httpMetricSnapshot) []httpMetricKey {
@@ -549,4 +790,8 @@ func sortedHTTPMetricKeys(metrics map[httpMetricKey]httpMetricSnapshot) []httpMe
 func escapeLabelValue(value string) string {
 	replacer := strings.NewReplacer(`\`, `\\`, "\n", `\n`, `"`, `\"`)
 	return replacer.Replace(value)
+}
+
+func prometheusLabelValue(value string) string {
+	return `"` + escapeLabelValue(value) + `"`
 }

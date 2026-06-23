@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 func TestActionsParserCanParseOnlyWorkflowFiles(t *testing.T) {
@@ -43,7 +43,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: Actions/Checkout@v4
       - uses: docker/login-action@v3.1.0
       - uses: github/codeql-action/init@v3
       - uses: actions/checkout@v4

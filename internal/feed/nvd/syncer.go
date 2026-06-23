@@ -25,8 +25,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/8linkz/packmon/internal/db"
-	"github.com/8linkz/packmon/internal/feed"
+	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/feed"
 )
 
 const (
@@ -38,6 +38,10 @@ const (
 
 	// maxBodySize limits the response body to 5 MB per CVE lookup.
 	maxBodySize = 5 << 20
+
+	// maxErrorBodyDrain limits non-success response drains used only to make
+	// short keep-alive reuse possible before returning an error.
+	maxErrorBodyDrain = 64 << 10
 
 	// batchSizeNoKey is the number of requests per window without an API key.
 	// NVD allows 5 requests per 30 seconds for unauthenticated callers.
@@ -182,6 +186,7 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 	updated := 0
 	processed := 0
 	skipped := 0
+	var operationErrors []error
 
 	for i := 0; i < len(uniqueCVEs); i += batchSize {
 		// Check context cancellation between batches.
@@ -243,6 +248,7 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 					slog.String("cve_id", cveID),
 					slog.String("error", fetchErr.Error()),
 				)
+				operationErrors = append(operationErrors, fmt.Errorf("fetch %s: %w", cveID, fetchErr))
 				skipped++
 				continue
 			}
@@ -257,6 +263,7 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 					slog.String("cve_id", cveID),
 					slog.String("error", err.Error()),
 				)
+				operationErrors = append(operationErrors, fmt.Errorf("update %s: %w", cveID, err))
 				continue
 			}
 			updated++
@@ -278,6 +285,10 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 		slog.Int("updated", updated),
 		slog.Int("skipped", skipped),
 	)
+
+	if len(operationErrors) > 0 {
+		return nil, fmt.Errorf("nvd: %d CVE enrichment error(s): %w", len(operationErrors), errors.Join(operationErrors...))
+	}
 
 	return &feed.SyncResult{
 		EntriesSynced: updated,
@@ -319,13 +330,13 @@ func (s *Syncer) fetchCVSS(ctx context.Context, cveID string) (float64, string, 
 	case http.StatusForbidden, http.StatusTooManyRequests:
 		// Rate limited. Read body for diagnostics, then return a typed
 		// rate-limit error so the caller can back off and retry.
-		_, _ = io.Copy(io.Discard, resp.Body)
+		drainErrorBody(resp.Body)
 		return 0, "UNKNOWN", &rateLimitError{
 			status:     resp.StatusCode,
 			retryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
 		}
 	default:
-		_, _ = io.Copy(io.Discard, resp.Body)
+		drainErrorBody(resp.Body)
 		return 0, "UNKNOWN", fmt.Errorf("unexpected status %d for %s", resp.StatusCode, cveID)
 	}
 
@@ -358,6 +369,10 @@ func (s *Syncer) fetchCVSS(ctx context.Context, cveID string) (float64, string, 
 	severity := feed.CVSSToSeverity(score)
 
 	return score, severity, nil
+}
+
+func drainErrorBody(r io.Reader) {
+	_, _ = io.Copy(io.Discard, io.LimitReader(r, maxErrorBodyDrain))
 }
 
 func buildRequestURL(apiURL, cveID string) (string, error) {

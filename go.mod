@@ -1,4 +1,4 @@
-module github.com/8linkz/packmon
+module github.com/8linkz-sec/packmon
 
 go 1.26
 

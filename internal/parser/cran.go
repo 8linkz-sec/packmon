@@ -6,7 +6,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 // CRANParser parses R renv.lock files.
@@ -68,7 +68,7 @@ func (p *CRANParser) Parse(r io.Reader) ([]domain.Package, error) {
 	for name, pkg := range lock.Packages {
 		version := pkg.Version
 		if version == "" {
-			errs = append(errs, fmt.Sprintf("package %q: empty version", name))
+			errs = append(errs, "package entry: empty version")
 			continue
 		}
 
@@ -76,6 +76,10 @@ func (p *CRANParser) Parse(r io.Reader) ([]domain.Package, error) {
 			Name:      name,
 			Version:   version,
 			Ecosystem: domain.EcosystemCRAN,
+			SourceRefs: cleanSourceRefs(
+				"repository="+pkg.Repository,
+				"source="+pkg.Source,
+			),
 		})
 	}
 

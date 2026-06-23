@@ -13,7 +13,8 @@ Read `AGENTS.md` (root) and `DESIGN.md` first.
   server must not silently migrate on startup -- it reads the schema version and
   refuses to start on mismatch (`cmd/packmon-server/main.go`, migrator
   `ExpectedVersion`). When you add a migration, bump `ExpectedVersion` and ship
-  symmetric `*.up.sql` / `*.down.sql`. Current version: 7.
+  symmetric `*.up.sql` / `*.down.sql`. Treat the migrator's `ExpectedVersion`
+  as the current schema version; do not duplicate that number in guidance.
 - All SQL is parameterized (`$N`). Never concatenate user input into SQL. For
   dynamic status/IN lists, whitelist values (see `ClearQueue`).
 - Nullable JSONB text columns must be `COALESCE`d (e.g. `versions::text`,
@@ -26,25 +27,25 @@ Read `AGENTS.md` (root) and `DESIGN.md` first.
 - `paused` queue jobs must never be dequeued and must remain visible in
   stats/metrics.
 
-## Current open landmines (see Audit.md)
+## Current Guardrails
 
-> Status (2026-05-29): the items in this section were addressed across the
-> Audit.md "Fix-Runde" passes. Audit.md is authoritative; project-wide only the
-> external GitLab-runner test remains open. Keep the notes below as guardrails
-> so the fixes are not regressed.
+These notes are guardrails for behavior that has regressed before. Keep them in
+sync with `DESIGN.md` and `SECURITY.md` when the behavior intentionally changes.
 
 - Manual vulnerability advisories are stored with empty
   `version_ranges`/`versions_affected` (`[]`). This is intentional and correct:
   `version.VersionAffected(_, "[]", "[]", _)` returns fail-safe `true`
-  (compare.go) so the advisory matches every scanned version. (Audit.md H1 was
-  refuted -- do NOT "fix" this into a non-matching state.) Covered by
+  (compare.go) so the advisory matches every scanned version. Do NOT "fix" this
+  into a non-matching state. Covered by
   `TestVersionAffected_EmptyRangesAndVersions`.
 - **M3:** `EnqueueRefresh`'s resurrection UPDATE flips `paused` jobs back to
   `pending`. Exclude `paused` from the resurrection so admin pause is durable.
-- **M9:** there are no DB-backed tests for `manual_advisories`, `system_settings`,
-  or queue management. Add them when you touch these (target >= 80%).
-- **L7:** an operator-supplied advisory ID that collides with a feed CVE
-  overwrites feed data via `ON CONFLICT (id) DO UPDATE`. Reject feed-owned IDs.
+- **M9:** keep DB-backed regression coverage for `manual_advisories`,
+  `system_settings`, and queue management when touching those paths (target
+  >= 80% for DB-layer changes).
+- **L7:** manual advisory creation must reject feed-owned IDs such as CVE, GHSA,
+  and OSV identifiers before insert/upsert so operator input cannot replace
+  feed-owned vulnerability data.
 
 ## Tests
 

@@ -119,6 +119,18 @@ func TestValidateTransportSecurity(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name:    "production with invalid trusted proxies errors",
+			mode:    ModeProduction,
+			proxies: []string{"nginx"},
+			wantErr: true,
+		},
+		{
+			name:    "production with invalid trusted proxy cidr errors",
+			mode:    ModeProduction,
+			proxies: []string{"10.0.0.0/33"},
+			wantErr: true,
+		},
+		{
 			name:    "production with local insecure HTTP override and loopback host ok",
 			mode:    ModeProduction,
 			public:  "localhost:8080",
@@ -180,5 +192,28 @@ func TestLoadReadsInsecureLocalHTTPOverride(t *testing.T) {
 	}
 	if err := cfg.ValidateTransportSecurity(); err != nil {
 		t.Fatalf("ValidateTransportSecurity() error: %v", err)
+	}
+}
+
+func TestServerConfigAddrBindsLocalHTTPOverrideToLoopback(t *testing.T) {
+	cfg := ServerConfig{
+		Mode:                   ModeProduction,
+		Port:                   8080,
+		PublicHost:             "localhost:8080",
+		AllowInsecureLocalHTTP: true,
+	}
+	if got := cfg.Addr(); got != "127.0.0.1:8080" {
+		t.Fatalf("Addr() = %q, want loopback bind for local HTTP override", got)
+	}
+
+	cfg.InsecureLocalHTTPBind = "container"
+	if got := cfg.Addr(); got != ":8080" {
+		t.Fatalf("Addr() with container bind mode = %q, want wildcard bind", got)
+	}
+
+	cfg.InsecureLocalHTTPBind = "loopback"
+	cfg.TLS = TLSConfig{CertFile: "server.crt", KeyFile: "server.key"}
+	if got := cfg.Addr(); got != ":8080" {
+		t.Fatalf("Addr() with TLS = %q, want wildcard bind", got)
 	}
 }

@@ -4,82 +4,91 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
-	"github.com/8linkz/packmon/internal/db/sqlite"
-	"github.com/8linkz/packmon/internal/domain"
-	"github.com/8linkz/packmon/internal/parser"
-	"github.com/8linkz/packmon/internal/scanner"
+	"github.com/8linkz-sec/packmon/internal/db/sqlite"
+	"github.com/8linkz-sec/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/ioutils"
+	"github.com/8linkz-sec/packmon/internal/parser"
+	"github.com/8linkz-sec/packmon/internal/plural"
+	"github.com/8linkz-sec/packmon/internal/scanner"
+	"github.com/8linkz-sec/packmon/internal/termtext"
 	"github.com/spf13/cobra"
 )
 
 func newScanCmd() *cobra.Command {
 	var (
-		flagMode          string
-		flagServer        string
-		flagAPIKey        string
-		flagFailOn        string
-		flagEcosystems    string
-		flagMaxDepth      int
-		flagTimeout       int
-		flagIncludeDev    bool
-		flagOutputJSON    string
-		flagOutputSARIF   string
-		flagOutputJUnit   string
-		flagOutputHTML    string
-		flagWebhookURL    string
-		flagWebhookSecret string
-		flagAll           bool
-		flagRepo          string
-		flagListPackages  bool
-		flagOutdated      bool
-		flagListAll       bool
-		flagCACert        string
-		flagInsecureHTTP  bool
-		flagRequireRemote bool
-		flagSBOMFiles     []string
-		flagAutoSBOM      bool
-		flagInstallTools  bool
-		flagKeepSBOM      string
-		flagSBOMOnly      bool
+		flagMode           string
+		flagServer         string
+		flagAPIKey         string
+		flagFailOn         string
+		flagEcosystems     string
+		flagMaxDepth       int
+		flagTimeout        int
+		flagIncludeDev     bool
+		flagOutputJSON     string
+		flagOutputSARIF    string
+		flagOutputJUnit    string
+		flagOutputHTML     string
+		flagWebhookURL     string
+		flagWebhookSecret  string
+		flagAll            bool
+		flagRepo           string
+		flagListPackages   bool
+		flagOutdated       bool
+		flagListAll        bool
+		flagListAllOffline bool
+		flagCACert         string
+		flagInsecureHTTP   bool
+		flagRequireRemote  bool
+		flagNoRepoMetadata bool
+		flagSBOMFiles      []string
+		flagAutoSBOM       bool
+		flagInstallTools   bool
+		flagKeepSBOM       string
+		flagSBOMOnly       bool
 	)
 
 	cmd := &cobra.Command{
 		Use:   "scan [PATH]",
-		Short: "Scan directory for vulnerable dependencies",
-		Long: `Scan the given directory (default ".") for lock files,
-parse dependencies, and check them against known vulnerabilities
-and malicious package databases.`,
+		Short: "Scan dependencies and SBOMs for security and lifecycle findings",
+		Long: `Scan the given directory (default ".") for lock files and SBOMs,
+parse dependencies, and check them for known vulnerabilities, malicious
+packages, supply-chain risk findings, and lifecycle risks.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			scanFlags := scanFlagValues{
-				Mode:          flagMode,
-				Server:        flagServer,
-				APIKey:        flagAPIKey,
-				FailOn:        flagFailOn,
-				Ecosystems:    flagEcosystems,
-				MaxDepth:      flagMaxDepth,
-				Timeout:       flagTimeout,
-				IncludeDev:    flagIncludeDev,
-				OutputJSON:    flagOutputJSON,
-				OutputSARIF:   flagOutputSARIF,
-				OutputJUnit:   flagOutputJUnit,
-				OutputHTML:    flagOutputHTML,
-				WebhookURL:    flagWebhookURL,
-				WebhookSecret: flagWebhookSecret,
-				All:           flagAll,
-				Repo:          flagRepo,
-				Quiet:         flagQuiet,
-				NoColor:       flagNoColor,
-				CACert:        flagCACert,
-				InsecureHTTP:  flagInsecureHTTP,
-				RequireRemote: flagRequireRemote,
-				SBOMFiles:     flagSBOMFiles,
-				ListAll:       flagListAll,
+				Mode:             flagMode,
+				Server:           flagServer,
+				APIKey:           flagAPIKey,
+				FailOn:           flagFailOn,
+				Ecosystems:       flagEcosystems,
+				MaxDepth:         flagMaxDepth,
+				Timeout:          flagTimeout,
+				IncludeDev:       flagIncludeDev,
+				OutputJSON:       flagOutputJSON,
+				OutputSARIF:      flagOutputSARIF,
+				OutputJUnit:      flagOutputJUnit,
+				OutputHTML:       flagOutputHTML,
+				WebhookURL:       flagWebhookURL,
+				WebhookSecret:    flagWebhookSecret,
+				All:              flagAll,
+				Repo:             flagRepo,
+				Quiet:            flagQuiet,
+				NoColor:          flagNoColor,
+				CACert:           flagCACert,
+				InsecureHTTP:     flagInsecureHTTP,
+				RequireRemote:    flagRequireRemote,
+				OmitRepoMetadata: flagNoRepoMetadata,
+				SBOMFiles:        flagSBOMFiles,
+				ListAll:          flagListAll,
+				ListAllOffline:   flagListAllOffline,
 			}
 			auto := autoSBOMFlags{
 				Enabled:      flagAutoSBOM,
@@ -96,51 +105,43 @@ and malicious package databases.`,
 				}
 				return runAutoSBOMCommand(cmd, args, scanFlags, auto)
 			}
+			if err := validateScanReportModeFlags(flagListPackages, flagOutdated, flagListAll); err != nil {
+				return withExitCode(ExitOperational, err)
+			}
+			if flagListAllOffline && !flagListAll {
+				return withExitCode(ExitOperational, fmt.Errorf("--list-all-offline can only be used with --list-all"))
+			}
 			if flagListPackages {
-				return runListPackages(args, flagEcosystems, flagMaxDepth, flagNoColor, flagSBOMFiles)
+				settings, err := resolveSingleTargetScanSettings(cmd, args, scanFlags, "--list-packages")
+				if err != nil {
+					return err
+				}
+				return withDefaultExitCode(ExitOperational, runListPackagesWithSettings(settings))
 			}
 			if flagOutdated {
-				return runOutdatedWithOptions(args, outdatedOptions{
-					Ecosystems: flagEcosystems,
-					MaxDepth:   flagMaxDepth,
+				settings, err := resolveSingleTargetScanSettings(cmd, args, scanFlags, "--outdated")
+				if err != nil {
+					return err
+				}
+				return withDefaultExitCode(ExitOperational, runOutdatedWithOptions([]string{settings.Path}, outdatedOptions{
+					Context:    cmd.Context(),
+					Ecosystems: strings.Join(settings.Ecosystems, ","),
+					MaxDepth:   settings.MaxDepth,
 					IncludeDev: true,
-					OutputHTML: flagOutputHTML,
-					Quiet:      flagQuiet,
-					SBOMFiles:  flagSBOMFiles,
-				})
+					OutputHTML: settings.OutputHTML,
+					Quiet:      settings.Quiet,
+					SBOMFiles:  settings.SBOMFiles,
+					Timeout:    settings.Timeout,
+				}))
 			}
 			if flagListAll {
-				cfg, _, err := loadCurrentCLIConfig()
-				if err != nil {
-					return err
-				}
-				targets, err := buildScanTargets(cfg, args, scanFlagValues{})
-				if err != nil {
-					return err
-				}
-				settings, err := resolveScanSettings(cmd, cfg, targets[0], scanFlagValues{
-					Mode:          flagMode,
-					Server:        flagServer,
-					APIKey:        flagAPIKey,
-					FailOn:        flagFailOn,
-					Ecosystems:    flagEcosystems,
-					MaxDepth:      flagMaxDepth,
-					Timeout:       flagTimeout,
-					IncludeDev:    flagIncludeDev,
-					OutputHTML:    flagOutputHTML,
-					Quiet:         flagQuiet,
-					NoColor:       flagNoColor,
-					CACert:        flagCACert,
-					InsecureHTTP:  flagInsecureHTTP,
-					RequireRemote: flagRequireRemote,
-					SBOMFiles:     flagSBOMFiles,
-				})
+				settings, err := resolveSingleTargetScanSettings(cmd, args, scanFlags, "--list-all")
 				if err != nil {
 					return err
 				}
 				exitCode, err := runListAll(cmd.Context(), settings)
 				if err != nil {
-					return err
+					return withDefaultExitCode(ExitOperational, err)
 				}
 				if exitCode != ExitOK {
 					os.Exit(exitCode)
@@ -155,7 +156,7 @@ and malicious package databases.`,
 	f.StringVar(&flagMode, "mode", "auto", "scan mode (local|remote|auto)")
 	f.StringVar(&flagServer, "server", "", "feed server URL")
 	f.StringVar(&flagAPIKey, "api-key", "", "API key for authenticated remote scans")
-	f.StringVar(&flagFailOn, "fail-on", "CRITICAL", "block on severity (CRITICAL|HIGH|MEDIUM|LOW|NONE)")
+	f.StringVar(&flagFailOn, "fail-on", "CRITICAL", "block on vulnerability severity (CRITICAL|HIGH|MEDIUM|LOW|NONE); NONE disables vulnerability blocking only; malicious and supply-chain risk findings still block")
 	f.StringVar(&flagEcosystems, "ecosystems", "", "comma-separated ecosystem filter")
 	f.IntVar(&flagMaxDepth, "max-depth", 10, "directory walk depth")
 	f.IntVar(&flagTimeout, "timeout", 30, "HTTP timeout in seconds")
@@ -165,15 +166,17 @@ and malicious package databases.`,
 	f.StringVar(&flagOutputJUnit, "output-junit", "", "write JUnit XML results to file")
 	f.StringVar(&flagOutputHTML, "html", "", "write a self-contained HTML report to file")
 	f.StringVar(&flagWebhookURL, "webhook-url", "", "webhook URL to POST results to")
-	f.StringVar(&flagWebhookSecret, "webhook-secret", "", "HMAC-SHA256 secret for webhook signature")
+	f.StringVar(&flagWebhookSecret, "webhook-secret", "", "HMAC-SHA256 secret for webhook authentication header")
 	f.BoolVar(&flagAll, "all", false, "scan all repositories configured in .packmon.yaml")
 	f.StringVar(&flagRepo, "repo", "", "scan a configured repository by name")
 	f.BoolVar(&flagListPackages, "list-packages", false, "list all detected packages and exit (no vulnerability check)")
-	f.BoolVar(&flagOutdated, "outdated", false, "show packages with newer versions available")
+	f.BoolVar(&flagOutdated, "outdated", false, "show packages with newer versions available by querying public registries and Git remotes")
 	f.BoolVar(&flagListAll, "list-all", false, "list findings, then all packages with available-update info")
+	f.BoolVar(&flagListAllOffline, "list-all-offline", false, "with --list-all: skip external latest-version and Docker digest lookups")
 	f.StringVar(&flagCACert, "cacert", "", "path to a PEM CA bundle used to verify the server's TLS certificate")
 	f.BoolVar(&flagInsecureHTTP, "insecure-allow-http", false, "allow plain http:// server URLs (sends bearer token in cleartext; opt-in)")
 	f.BoolVar(&flagRequireRemote, "require-remote", false, "in auto mode, fail hard on remote error instead of falling back to the local database")
+	f.BoolVar(&flagNoRepoMetadata, "no-repo-metadata", false, "omit optional repository metadata from remote scan requests and webhooks")
 	f.StringArrayVar(&flagSBOMFiles, "sbom", nil, "SBOM file to include as package input (CycloneDX JSON/XML or SPDX JSON); can be repeated")
 	f.BoolVar(&flagAutoSBOM, "auto-sbom", false, "generate SBOMs with local ecosystem tools and scan them")
 	f.BoolVar(&flagInstallTools, "install-tools", false, "with --auto-sbom: auto-install supported missing CycloneDX generators (pinned versions)")
@@ -183,30 +186,49 @@ and malicious package databases.`,
 	return cmd
 }
 
+func validateScanReportModeFlags(listPackages, outdated, listAll bool) error {
+	var modes []string
+	if listPackages {
+		modes = append(modes, "--list-packages")
+	}
+	if outdated {
+		modes = append(modes, "--outdated")
+	}
+	if listAll {
+		modes = append(modes, "--list-all")
+	}
+	if len(modes) > 1 {
+		return fmt.Errorf("choose only one report mode flag: %s", strings.Join(modes, ", "))
+	}
+	return nil
+}
+
 type scanFlagValues struct {
-	Mode          string
-	Server        string
-	APIKey        string
-	FailOn        string
-	Ecosystems    string
-	MaxDepth      int
-	Timeout       int
-	IncludeDev    bool
-	OutputJSON    string
-	OutputSARIF   string
-	OutputJUnit   string
-	OutputHTML    string
-	WebhookURL    string
-	WebhookSecret string
-	All           bool
-	Repo          string
-	Quiet         bool
-	NoColor       bool
-	CACert        string
-	InsecureHTTP  bool
-	RequireRemote bool
-	SBOMFiles     []string
-	ListAll       bool
+	Mode             string
+	Server           string
+	APIKey           string
+	FailOn           string
+	Ecosystems       string
+	MaxDepth         int
+	Timeout          int
+	IncludeDev       bool
+	OutputJSON       string
+	OutputSARIF      string
+	OutputJUnit      string
+	OutputHTML       string
+	WebhookURL       string
+	WebhookSecret    string
+	All              bool
+	Repo             string
+	Quiet            bool
+	NoColor          bool
+	CACert           string
+	InsecureHTTP     bool
+	RequireRemote    bool
+	OmitRepoMetadata bool
+	SBOMFiles        []string
+	ListAll          bool
+	ListAllOffline   bool
 }
 
 type scanTarget struct {
@@ -216,29 +238,33 @@ type scanTarget struct {
 }
 
 type scanSettings struct {
-	TargetName    string
-	Path          string
-	Mode          string
-	ServerURL     string
-	APIKey        string
-	FailOn        string
-	Ecosystems    []string
-	MaxDepth      int
-	Timeout       int
-	IncludeDev    bool
-	OutputJSON    string
-	OutputSARIF   string
-	OutputJUnit   string
-	OutputHTML    string
-	WebhookURL    string
-	WebhookSecret string
-	LogLevel      string
-	Quiet         bool
-	NoColor       bool
-	CACertFile    string
-	InsecureHTTP  bool
-	RequireRemote bool
-	SBOMFiles     []string
+	TargetName       string
+	Path             string
+	Mode             string
+	ServerURL        string
+	APIKey           string
+	FailOn           string
+	Ecosystems       []string
+	MaxDepth         int
+	Timeout          int
+	IncludeDev       bool
+	OutputJSON       string
+	OutputSARIF      string
+	OutputJUnit      string
+	OutputHTML       string
+	WebhookURL       string
+	WebhookSecret    string
+	LogLevel         string
+	LogFormat        string
+	Quiet            bool
+	NoColor          bool
+	CACertFile       string
+	InsecureHTTP     bool
+	RequireRemote    bool
+	OmitRepoMetadata bool
+	SBOMFiles        []string
+	ListAllOffline   bool
+	InventoryAll     bool
 }
 
 func runScanCommand(cmd *cobra.Command, args []string, flags scanFlagValues) error {
@@ -282,6 +308,25 @@ func runScanCommand(cmd *cobra.Command, args []string, flags scanFlagValues) err
 		os.Exit(finalExitCode)
 	}
 	return nil
+}
+
+func resolveSingleTargetScanSettings(cmd *cobra.Command, args []string, flags scanFlagValues, commandName string) (scanSettings, error) {
+	cfg, _, err := loadCurrentCLIConfig()
+	if err != nil {
+		return scanSettings{}, withExitCode(ExitOperational, err)
+	}
+	targets, err := buildScanTargets(cfg, args, flags)
+	if err != nil {
+		return scanSettings{}, withExitCode(ExitOperational, err)
+	}
+	if len(targets) != 1 {
+		return scanSettings{}, withExitCode(ExitOperational, fmt.Errorf("%s can only be used with a single target; use --repo or a positional PATH", commandName))
+	}
+	settings, err := resolveScanSettings(cmd, cfg, targets[0], flags)
+	if err != nil {
+		return scanSettings{}, withExitCode(ExitOperational, err)
+	}
+	return settings, nil
 }
 
 // worstExitCode merges two scan exit codes into the most severe one. Severity
@@ -368,8 +413,28 @@ func buildScanTargets(cfg *cliConfig, args []string, flags scanFlagValues) ([]sc
 
 func resolveScanSettings(cmd *cobra.Command, cfg *cliConfig, target scanTarget, flags scanFlagValues) (scanSettings, error) {
 	envAPIKey := strings.TrimSpace(os.Getenv("PACKMON_API_KEY"))
-	skipConfigAPIKeyEnv := envAPIKey != "" || cmd.Flags().Changed("api-key")
-	settings := scanSettings{
+	settings := defaultScanSettings(target, flags)
+	skipConfigAPIKeyEnv := envAPIKey != "" || commandFlagChanged(cmd, "api-key")
+
+	if err := applyScanConfigSettings(&settings, cfg, skipConfigAPIKeyEnv); err != nil {
+		return scanSettings{}, err
+	}
+	if err := applyScanRepoSettings(&settings, target.Repo, skipConfigAPIKeyEnv); err != nil {
+		return scanSettings{}, err
+	}
+	if err := applyScanEnvSettings(&settings, envAPIKey); err != nil {
+		return scanSettings{}, err
+	}
+	applyScanFlagSettings(&settings, cmd, flags)
+	if err := validateResolvedScanSettings(&settings, flags); err != nil {
+		return scanSettings{}, err
+	}
+
+	return settings, nil
+}
+
+func defaultScanSettings(target scanTarget, flags scanFlagValues) scanSettings {
+	return scanSettings{
 		TargetName: target.Name,
 		Path:       target.Path,
 		Mode:       "auto",
@@ -378,90 +443,125 @@ func resolveScanSettings(cmd *cobra.Command, cfg *cliConfig, target scanTarget, 
 		Timeout:    30,
 		Quiet:      flags.Quiet,
 		NoColor:    flags.NoColor,
-		LogLevel:   strings.ToUpper(strings.TrimSpace(flagLogLevel)),
+		LogLevel:   "INFO",
+		LogFormat:  "text",
+	}
+}
+
+func applyScanConfigSettings(settings *scanSettings, cfg *cliConfig, skipAPIKeyEnv bool) error {
+	if cfg == nil {
+		return nil
 	}
 
-	if cfg != nil {
-		if cfg.Server != "" {
-			settings.ServerURL = cfg.Server
+	if cfg.Server != "" {
+		settings.ServerURL = cfg.Server
+	}
+	if cfg.APIKey != "" {
+		settings.APIKey = cfg.APIKey
+	}
+	if cfg.APIKeyEnv != "" && !skipAPIKeyEnv {
+		apiKey, err := resolveAPIKeyEnv(cfg.APIKeyEnv)
+		if err != nil {
+			return err
 		}
-		if cfg.APIKey != "" {
-			settings.APIKey = cfg.APIKey
-		}
-		if cfg.APIKeyEnv != "" && !skipConfigAPIKeyEnv {
-			apiKey, err := resolveAPIKeyEnv(cfg.APIKeyEnv)
-			if err != nil {
-				return scanSettings{}, err
-			}
-			settings.APIKey = apiKey
-		}
-		if cfg.Mode != "" {
-			settings.Mode = cfg.Mode
-		}
-		if cfg.FailOn != "" {
-			settings.FailOn = cfg.FailOn
-		}
-		if cfg.Timeout > 0 {
-			settings.Timeout = cfg.Timeout
-		}
-		if len(cfg.Ecosystems) > 0 {
-			settings.Ecosystems = append([]string(nil), cfg.Ecosystems...)
-		}
-		settings.IncludeDev = boolValue(cfg.IncludeDev, settings.IncludeDev)
-		if cfg.Webhook.URL != "" {
-			settings.WebhookURL = cfg.Webhook.URL
-		}
-		if cfg.Webhook.Secret != "" {
-			settings.WebhookSecret = cfg.Webhook.Secret
-		}
-		if cfg.Output.File != "" {
-			applyOutputConfig(&settings, cfg.Output)
-		}
-		if cfg.Log.Level != "" {
-			settings.LogLevel = cfg.Log.Level
-		}
-		if cfg.CACert != "" {
-			settings.CACertFile = cfg.CACert
-		}
-		settings.InsecureHTTP = boolValue(cfg.InsecureAllowHTTP, settings.InsecureHTTP)
-		settings.RequireRemote = boolValue(cfg.RequireRemote, settings.RequireRemote)
+		settings.APIKey = apiKey
+	}
+	if cfg.Mode != "" {
+		settings.Mode = cfg.Mode
+	}
+	if cfg.FailOn != "" {
+		settings.FailOn = cfg.FailOn
+	}
+	if cfg.Timeout > 0 {
+		settings.Timeout = cfg.Timeout
+	}
+	if len(cfg.Ecosystems) > 0 {
+		settings.Ecosystems = append([]string(nil), cfg.Ecosystems...)
+	}
+	settings.IncludeDev = boolValue(cfg.IncludeDev, settings.IncludeDev)
+	if cfg.Webhook.URL != "" {
+		settings.WebhookURL = cfg.Webhook.URL
+	}
+	if cfg.Webhook.Secret != "" {
+		settings.WebhookSecret = cfg.Webhook.Secret
+	}
+	if cfg.Output.File != "" {
+		applyOutputConfig(settings, cfg.Output)
+	}
+	if cfg.Log.Level != "" {
+		settings.LogLevel = cfg.Log.Level
+	}
+	if cfg.Log.Format != "" {
+		settings.LogFormat = strings.ToLower(strings.TrimSpace(cfg.Log.Format))
+	}
+	if cfg.CACert != "" {
+		settings.CACertFile = cfg.CACert
+	}
+	settings.InsecureHTTP = boolValue(cfg.InsecureAllowHTTP, settings.InsecureHTTP)
+	settings.RequireRemote = boolValue(cfg.RequireRemote, settings.RequireRemote)
+	if cfg.SendRepoMetadata != nil {
+		settings.OmitRepoMetadata = !*cfg.SendRepoMetadata
 	}
 
-	if target.Repo != nil {
-		if target.Repo.Server != "" {
-			settings.ServerURL = target.Repo.Server
-		}
-		if target.Repo.APIKey != "" {
-			settings.APIKey = target.Repo.APIKey
-		}
-		if target.Repo.APIKeyEnv != "" && !skipConfigAPIKeyEnv {
-			apiKey, err := resolveAPIKeyEnv(target.Repo.APIKeyEnv)
-			if err != nil {
-				return scanSettings{}, err
-			}
-			settings.APIKey = apiKey
-		}
-		if target.Repo.Mode != "" {
-			settings.Mode = target.Repo.Mode
-		}
-		if target.Repo.FailOn != "" {
-			settings.FailOn = target.Repo.FailOn
-		}
-		if target.Repo.Timeout > 0 {
-			settings.Timeout = target.Repo.Timeout
-		}
-		if len(target.Repo.Ecosystems) > 0 {
-			settings.Ecosystems = append([]string(nil), target.Repo.Ecosystems...)
-		}
-		settings.IncludeDev = boolValue(target.Repo.IncludeDev, settings.IncludeDev)
-		if target.Repo.Webhook.URL != "" {
-			settings.WebhookURL = target.Repo.Webhook.URL
-		}
-		if target.Repo.Webhook.Secret != "" {
-			settings.WebhookSecret = target.Repo.Webhook.Secret
-		}
+	return nil
+}
+
+func applyScanRepoSettings(settings *scanSettings, repo *cliRepoConfig, skipAPIKeyEnv bool) error {
+	if repo == nil {
+		return nil
 	}
 
+	if repo.Server != "" {
+		settings.ServerURL = repo.Server
+	}
+	if repo.APIKey != "" {
+		settings.APIKey = repo.APIKey
+	}
+	if repo.APIKeyEnv != "" && !skipAPIKeyEnv {
+		apiKey, err := resolveAPIKeyEnv(repo.APIKeyEnv)
+		if err != nil {
+			return err
+		}
+		settings.APIKey = apiKey
+	}
+	if repo.Mode != "" {
+		settings.Mode = repo.Mode
+	}
+	if repo.FailOn != "" {
+		settings.FailOn = repo.FailOn
+	}
+	if repo.Timeout > 0 {
+		settings.Timeout = repo.Timeout
+	}
+	if len(repo.Ecosystems) > 0 {
+		settings.Ecosystems = append([]string(nil), repo.Ecosystems...)
+	}
+	settings.IncludeDev = boolValue(repo.IncludeDev, settings.IncludeDev)
+	if repo.SendRepoMetadata != nil {
+		settings.OmitRepoMetadata = !*repo.SendRepoMetadata
+	}
+	if repo.Webhook.URL != "" {
+		settings.WebhookURL = repo.Webhook.URL
+	}
+	if repo.Webhook.Secret != "" {
+		settings.WebhookSecret = repo.Webhook.Secret
+	}
+
+	return nil
+}
+
+func applyScanEnvSettings(settings *scanSettings, envAPIKey string) error {
+	applyScanStringEnvSettings(settings, envAPIKey)
+	if err := applyScanTimeoutEnvSetting(settings); err != nil {
+		return err
+	}
+	if err := applyScanBooleanEnvSettings(settings); err != nil {
+		return err
+	}
+	return nil
+}
+
+func applyScanStringEnvSettings(settings *scanSettings, envAPIKey string) {
 	if envServer := strings.TrimSpace(os.Getenv("PACKMON_SERVER")); envServer != "" {
 		settings.ServerURL = envServer
 	}
@@ -473,11 +573,6 @@ func resolveScanSettings(cmd *cobra.Command, cfg *cliConfig, target scanTarget, 
 	}
 	if envFailOn := normalizeSeverityString(os.Getenv("PACKMON_FAIL_ON")); envFailOn != "" {
 		settings.FailOn = envFailOn
-	}
-	if envTimeout := strings.TrimSpace(os.Getenv("PACKMON_TIMEOUT")); envTimeout != "" {
-		if parsed, parseErr := parseTimeoutSeconds(envTimeout); parseErr == nil && parsed > 0 {
-			settings.Timeout = parsed
-		}
 	}
 	if envEcosystems := strings.TrimSpace(os.Getenv("PACKMON_ECOSYSTEMS")); envEcosystems != "" {
 		settings.Ecosystems = splitCSV(envEcosystems)
@@ -491,77 +586,201 @@ func resolveScanSettings(cmd *cobra.Command, cfg *cliConfig, target scanTarget, 
 	if envCACert := strings.TrimSpace(os.Getenv("PACKMON_CA_CERT")); envCACert != "" {
 		settings.CACertFile = envCACert
 	}
+	if envLogLevel := normalizeLogLevel(os.Getenv("PACKMON_LOG_LEVEL")); envLogLevel != "" {
+		settings.LogLevel = envLogLevel
+	}
+}
+
+func applyScanTimeoutEnvSetting(settings *scanSettings) error {
+	if envTimeout := strings.TrimSpace(os.Getenv("PACKMON_TIMEOUT")); envTimeout != "" {
+		parsed, parseErr := parseTimeoutSeconds(envTimeout)
+		if parseErr != nil {
+			return fmt.Errorf("PACKMON_TIMEOUT: %w", parseErr)
+		}
+		if parsed <= 0 {
+			return fmt.Errorf("PACKMON_TIMEOUT must be greater than zero")
+		}
+		settings.Timeout = parsed
+	}
+	return nil
+}
+
+func applyScanBooleanEnvSettings(settings *scanSettings) error {
 	if envInsecure := strings.TrimSpace(os.Getenv("PACKMON_INSECURE_ALLOW_HTTP")); envInsecure != "" {
-		settings.InsecureHTTP = envBool("PACKMON_INSECURE_ALLOW_HTTP")
+		insecure, _, parseErr := strictEnvBool("PACKMON_INSECURE_ALLOW_HTTP")
+		if parseErr != nil {
+			return parseErr
+		}
+		settings.InsecureHTTP = insecure
 	}
 	if envRequireRemote := strings.TrimSpace(os.Getenv("PACKMON_REQUIRE_REMOTE")); envRequireRemote != "" {
-		settings.RequireRemote = envBool("PACKMON_REQUIRE_REMOTE")
+		requireRemote, _, parseErr := strictEnvBool("PACKMON_REQUIRE_REMOTE")
+		if parseErr != nil {
+			return parseErr
+		}
+		settings.RequireRemote = requireRemote
+	}
+	if envNoRepoMetadata := strings.TrimSpace(os.Getenv("PACKMON_NO_REPO_METADATA")); envNoRepoMetadata != "" {
+		noRepoMetadata, _, parseErr := strictEnvBool("PACKMON_NO_REPO_METADATA")
+		if parseErr != nil {
+			return parseErr
+		}
+		settings.OmitRepoMetadata = noRepoMetadata
 	}
 
-	if cmd.Flags().Changed("mode") {
+	return nil
+}
+
+func applyScanFlagSettings(settings *scanSettings, cmd *cobra.Command, flags scanFlagValues) {
+	applyScanCoreFlagSettings(settings, cmd, flags)
+	applyScanRemoteFlagSettings(settings, cmd, flags)
+	applyScanOutputFlagSettings(settings, cmd, flags)
+}
+
+func applyScanCoreFlagSettings(settings *scanSettings, cmd *cobra.Command, flags scanFlagValues) {
+	if commandFlagChanged(cmd, "mode") {
 		settings.Mode = normalizeModeString(flags.Mode)
 	}
-	if cmd.Flags().Changed("server") {
+	if commandFlagChanged(cmd, "server") {
 		settings.ServerURL = strings.TrimSpace(flags.Server)
 	}
-	if cmd.Flags().Changed("api-key") {
+	if commandFlagChanged(cmd, "api-key") {
 		settings.APIKey = strings.TrimSpace(flags.APIKey)
 	}
-	if cmd.Flags().Changed("fail-on") {
+	if commandFlagChanged(cmd, "fail-on") {
 		settings.FailOn = normalizeSeverityString(flags.FailOn)
 	}
-	if cmd.Flags().Changed("ecosystems") {
+	if commandFlagChanged(cmd, "ecosystems") {
 		settings.Ecosystems = splitCSV(flags.Ecosystems)
 	}
-	if cmd.Flags().Changed("timeout") {
+	if commandFlagChanged(cmd, "timeout") {
 		settings.Timeout = flags.Timeout
 	}
-	if cmd.Flags().Changed("include-dev") {
+	if commandFlagChanged(cmd, "include-dev") {
 		settings.IncludeDev = flags.IncludeDev
 	}
-	if cmd.Flags().Changed("webhook-url") {
-		settings.WebhookURL = strings.TrimSpace(flags.WebhookURL)
-	}
-	if cmd.Flags().Changed("webhook-secret") {
-		settings.WebhookSecret = strings.TrimSpace(flags.WebhookSecret)
-	}
-	if cmd.Flags().Changed("cacert") {
-		settings.CACertFile = strings.TrimSpace(flags.CACert)
-	}
-	if cmd.Flags().Changed("insecure-allow-http") {
-		settings.InsecureHTTP = flags.InsecureHTTP
-	}
-	if cmd.Flags().Changed("require-remote") {
-		settings.RequireRemote = flags.RequireRemote
-	}
-	if cmd.Flags().Changed("sbom") {
+	if commandFlagChanged(cmd, "sbom") {
 		settings.SBOMFiles = append([]string(nil), flags.SBOMFiles...)
 	}
+	if commandFlagChanged(cmd, "list-all-offline") {
+		settings.ListAllOffline = flags.ListAllOffline
+	}
+}
 
-	if cmd.Flags().Changed("output-json") || strings.TrimSpace(flags.OutputJSON) != "" {
+func applyScanRemoteFlagSettings(settings *scanSettings, cmd *cobra.Command, flags scanFlagValues) {
+	if commandFlagChanged(cmd, "webhook-url") {
+		settings.WebhookURL = strings.TrimSpace(flags.WebhookURL)
+	}
+	if commandFlagChanged(cmd, "webhook-secret") {
+		settings.WebhookSecret = strings.TrimSpace(flags.WebhookSecret)
+	}
+	if commandFlagChanged(cmd, "cacert") {
+		settings.CACertFile = strings.TrimSpace(flags.CACert)
+	}
+	if commandFlagChanged(cmd, "insecure-allow-http") {
+		settings.InsecureHTTP = flags.InsecureHTTP
+	}
+	if commandFlagChanged(cmd, "require-remote") {
+		settings.RequireRemote = flags.RequireRemote
+	}
+	if commandFlagChanged(cmd, "no-repo-metadata") {
+		settings.OmitRepoMetadata = flags.OmitRepoMetadata
+	}
+	if commandFlagChanged(cmd, "log-level") {
+		settings.LogLevel = normalizeLogLevel(flagLogLevel)
+	}
+}
+
+func applyScanOutputFlagSettings(settings *scanSettings, cmd *cobra.Command, flags scanFlagValues) {
+	if commandFlagChanged(cmd, "output-json") || strings.TrimSpace(flags.OutputJSON) != "" {
 		settings.OutputJSON = strings.TrimSpace(flags.OutputJSON)
 	}
-	if cmd.Flags().Changed("output-sarif") || strings.TrimSpace(flags.OutputSARIF) != "" {
+	if commandFlagChanged(cmd, "output-sarif") || strings.TrimSpace(flags.OutputSARIF) != "" {
 		settings.OutputSARIF = strings.TrimSpace(flags.OutputSARIF)
 	}
-	if cmd.Flags().Changed("output-junit") || strings.TrimSpace(flags.OutputJUnit) != "" {
+	if commandFlagChanged(cmd, "output-junit") || strings.TrimSpace(flags.OutputJUnit) != "" {
 		settings.OutputJUnit = strings.TrimSpace(flags.OutputJUnit)
 	}
-	if cmd.Flags().Changed("html") || strings.TrimSpace(flags.OutputHTML) != "" {
+	if commandFlagChanged(cmd, "html") || strings.TrimSpace(flags.OutputHTML) != "" {
 		settings.OutputHTML = strings.TrimSpace(flags.OutputHTML)
 	}
+}
 
+func validateResolvedScanSettings(settings *scanSettings, flags scanFlagValues) error {
 	if err := validateModeString(settings.Mode); err != nil {
-		return scanSettings{}, err
+		return err
 	}
 	if err := validateSeverityString(settings.FailOn); err != nil {
-		return scanSettings{}, err
+		return err
 	}
 	if settings.Timeout <= 0 {
-		return scanSettings{}, fmt.Errorf("timeout must be greater than zero")
+		return fmt.Errorf("timeout must be greater than zero")
 	}
+	if settings.MaxDepth < 0 {
+		return fmt.Errorf("max-depth must be zero or greater")
+	}
+	ecosystems, err := validateScanEcosystemFilters(settings.Ecosystems, flags.ListAll)
+	if err != nil {
+		return err
+	}
+	settings.Ecosystems = ecosystems
 
-	return settings, nil
+	return nil
+}
+
+func commandFlagChanged(cmd *cobra.Command, name string) bool {
+	if cmd == nil {
+		return false
+	}
+	flag := cmd.Flag(name)
+	return flag != nil && flag.Changed
+}
+
+func validateScanEcosystemFilters(ecosystems []string, allowDocker bool) ([]string, error) {
+	if len(ecosystems) == 0 {
+		return nil, nil
+	}
+	valid := validScanEcosystemFilterValues(allowDocker)
+	allowed := make(map[string]struct{}, len(valid))
+	for _, value := range valid {
+		allowed[value] = struct{}{}
+	}
+	out := make([]string, 0, len(ecosystems))
+	for _, raw := range ecosystems {
+		ecosystem := strings.ToLower(strings.TrimSpace(raw))
+		if ecosystem == "" {
+			continue
+		}
+		if _, ok := allowed[ecosystem]; !ok {
+			return nil, fmt.Errorf("unknown ecosystem filter %q (valid values: %s)", ecosystem, strings.Join(valid, ", "))
+		}
+		out = append(out, ecosystem)
+	}
+	return out, nil
+}
+
+func validScanEcosystemFilterValues(allowDocker bool) []string {
+	values := []string{
+		string(domain.EcosystemNPM),
+		string(domain.EcosystemPyPI),
+		string(domain.EcosystemGo),
+		string(domain.EcosystemMaven),
+		string(domain.EcosystemCargo),
+		string(domain.EcosystemNuGet),
+		string(domain.EcosystemComposer),
+		string(domain.EcosystemGem),
+		string(domain.EcosystemPub),
+		string(domain.EcosystemGitHubActions),
+		string(domain.EcosystemCocoaPods),
+		string(domain.EcosystemSwiftPM),
+		string(domain.EcosystemHex),
+		string(domain.EcosystemCRAN),
+	}
+	if allowDocker {
+		values = append(values, string(domain.EcosystemDocker))
+	}
+	sort.Strings(values)
+	return values
 }
 
 func resolveAPIKeyEnv(name string) (string, error) {
@@ -596,7 +815,11 @@ func applyOutputConfig(settings *scanSettings, cfg cliOutputConfig) {
 // scanLogger builds the structured logger for the scan pipeline. It writes
 // text to stderr at the level selected by --log-level (raised to ERROR when
 // --quiet is set). Sensitive values are never logged by the scanner.
-func scanLogger(quiet bool, logLevel string) *slog.Logger {
+func scanLogger(quiet bool, logLevel, logFormat string) *slog.Logger {
+	return newScanLogger(os.Stderr, quiet, logLevel, logFormat)
+}
+
+func newScanLogger(w io.Writer, quiet bool, logLevel, logFormat string) *slog.Logger {
 	level := slog.LevelInfo
 	switch strings.ToUpper(strings.TrimSpace(logLevel)) {
 	case "DEBUG":
@@ -609,7 +832,11 @@ func scanLogger(quiet bool, logLevel string) *slog.Logger {
 	if quiet {
 		level = slog.LevelError
 	}
-	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	options := &slog.HandlerOptions{Level: level}
+	if strings.EqualFold(strings.TrimSpace(logFormat), "json") {
+		return slog.New(slog.NewJSONHandler(w, options))
+	}
+	return slog.New(slog.NewTextHandler(w, options))
 }
 
 // autoFallbackWarning returns a user-facing warning when an auto-mode scan fell
@@ -620,21 +847,23 @@ func autoFallbackWarning(mode scanner.Mode, result *domain.ScanResult) string {
 		return ""
 	}
 	if result.DBAgeDays != nil {
-		return fmt.Sprintf("warning: remote server unreachable, scanned against local database (%d day(s) old)", *result.DBAgeDays)
+		return fmt.Sprintf("warning: remote server unreachable, scanned against local database (%s old)", plural.Count(*result.DBAgeDays, "day", "days"))
 	}
 	return "warning: remote server unreachable, scanned against local database"
 }
 
-// runScanPipeline builds the scanner.Config from settings, opens the local
-// SQLite checker, runs the scan, applies DB freshness, surfaces the auto
-// fallback warning, and records scan history. It is the shared core used by
-// both runSingleScan (which then prints tables and writes output files) and
-// runListAll (which renders its own combined report). It does NOT print the
-// findings table or write any output files.
-func runScanPipeline(ctx context.Context, settings scanSettings) (*domain.ScanResult, domain.Severity, int, error) {
+const failOnNoneWarning = "warning: fail_on NONE disables vulnerability blocking only; malicious and supply-chain risk findings still block."
+
+// runScanPipeline builds the scanner.Config from settings, opens local SQLite
+// only when local checking or history needs it, runs the scan, applies DB
+// freshness, surfaces the auto fallback warning, and records scan history. It is
+// the shared core used by both runSingleScan (which then prints tables and
+// writes output files) and runListAll (which renders its own combined report).
+// It does NOT print the findings table or write any output files.
+func runScanPipeline(ctx context.Context, settings scanSettings) (*domain.ScanResult, domain.Severity, int, *domain.RepoInfo, *scanner.PackageCollection, error) {
 	failOn, ok := scanner.SeverityFromString(settings.FailOn)
 	if !ok {
-		return nil, failOn, ExitOperational, fmt.Errorf("invalid fail_on value %q", settings.FailOn)
+		return nil, failOn, ExitOperational, nil, nil, fmt.Errorf("invalid fail_on value %q", settings.FailOn)
 	}
 
 	var mode scanner.Mode
@@ -646,50 +875,65 @@ func runScanPipeline(ctx context.Context, settings scanSettings) (*domain.ScanRe
 	case "", string(scanner.ModeAuto):
 		mode = scanner.ModeAuto
 	default:
-		return nil, failOn, ExitOperational, fmt.Errorf("invalid mode value %q", settings.Mode)
+		return nil, failOn, ExitOperational, nil, nil, fmt.Errorf("invalid mode value %q", settings.Mode)
 	}
 
+	if failOn == domain.SeverityNone {
+		fmt.Fprintln(os.Stderr, failOnNoneWarning)
+	}
+
+	repoInfo := scanRepoInfo(settings.Path)
 	cfg := scanner.Config{
-		Path:       settings.Path,
-		Mode:       mode,
-		ServerURL:  settings.ServerURL,
-		APIKey:     settings.APIKey,
-		Repo:       scanRepoInfo(settings.Path),
-		FailOn:     failOn,
-		Ecosystems: settings.Ecosystems,
-		MaxDepth:   settings.MaxDepth,
-		Timeout:    time.Duration(settings.Timeout) * time.Second,
-		IncludeDev: settings.IncludeDev,
-		Quiet:      settings.Quiet,
-		NoColor:    settings.NoColor,
-		SBOMFiles:  settings.SBOMFiles,
+		Path:                 settings.Path,
+		Mode:                 mode,
+		ServerURL:            settings.ServerURL,
+		APIKey:               settings.APIKey,
+		Repo:                 repoInfo,
+		FailOn:               failOn,
+		Ecosystems:           settings.Ecosystems,
+		MaxDepth:             settings.MaxDepth,
+		Timeout:              time.Duration(settings.Timeout) * time.Second,
+		IncludeDev:           settings.IncludeDev,
+		InventoryAllPackages: settings.InventoryAll,
+		Quiet:                settings.Quiet,
+		NoColor:              settings.NoColor,
+		Version:              version,
+		SBOMFiles:            settings.SBOMFiles,
 
 		CACertFile:        settings.CACertFile,
 		AllowInsecureHTTP: settings.InsecureHTTP,
 		RequireRemote:     settings.RequireRemote,
+		OmitRepoMetadata:  settings.OmitRepoMetadata,
 
-		Logger: scanLogger(settings.Quiet, settings.LogLevel),
+		Logger: scanLogger(settings.Quiet, settings.LogLevel, settings.LogFormat),
 	}
 
 	reg := parser.NewRegistry()
 	sc := scanner.New(reg, cfg)
 
-	dbPath, err := resolveLocalDBPath()
-	if err != nil {
-		return nil, failOn, ExitOperational, err
-	}
+	var dbPath string
+	var historyStore *sqlite.Store
+	if scanNeedsLocalChecker(mode, settings.RequireRemote) {
+		var err error
+		dbPath, err = resolveLocalDBPath()
+		if err != nil {
+			return nil, failOn, ExitOperational, repoInfo, nil, err
+		}
 
-	historyStore, advisoryDataAvailable, historyErr := openLocalSQLiteStore(ctx, dbPath)
-	if historyErr != nil {
-		fmt.Fprintf(os.Stderr, "warning: unable to open local database %s: %v\n", dbPath, historyErr)
-	} else {
-		defer closeSilently(historyStore)
-		if advisoryDataAvailable {
-			sc.SetLocalChecker(historyStore)
+		var advisoryDataAvailable bool
+		var historyErr error
+		historyStore, advisoryDataAvailable, historyErr = openLocalSQLiteStore(ctx, dbPath)
+		if historyErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: unable to open local database %s: %v\n", dbPath, historyErr)
+		} else {
+			defer closeSilently(historyStore)
+			if advisoryDataAvailable {
+				sc.SetLocalChecker(historyStore)
+			}
 		}
 	}
 
-	result, exitCode := sc.Run(ctx)
+	result, exitCode, collection := sc.RunWithCollection(ctx)
 	if historyStore != nil {
 		if err := applyLocalDBFreshness(ctx, historyStore, result); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: unable to determine local DB freshness: %v\n", err)
@@ -699,12 +943,32 @@ func runScanPipeline(ctx context.Context, settings scanSettings) (*domain.ScanRe
 	// Auto mode falls back to the local database when the remote server is
 	// unreachable. Surface this to the user along with the local DB age so a
 	// silent stale-data scan cannot be mistaken for a fresh remote scan.
-	if msg := autoFallbackWarning(mode, result); msg != "" && !settings.Quiet {
+	if msg := autoFallbackWarning(mode, result); msg != "" {
 		fmt.Fprintln(os.Stderr, msg)
 	}
 
+	if historyEnabled() && (exitCode == ExitOK || exitCode == ExitBlocking || exitCode == ExitUnderThreshold) {
+		if historyStore == nil {
+			if dbPath == "" {
+				var err error
+				dbPath, err = resolveLocalDBPath()
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "warning: unable to resolve local database path: %v\n", err)
+				}
+			}
+			if dbPath != "" {
+				store, _, historyErr := openLocalSQLiteStore(ctx, dbPath)
+				if historyErr != nil {
+					fmt.Fprintf(os.Stderr, "warning: unable to open local database %s: %v\n", dbPath, historyErr)
+				} else {
+					historyStore = store
+					defer closeSilently(historyStore)
+				}
+			}
+		}
+	}
 	if historyStore != nil && historyEnabled() && (exitCode == ExitOK || exitCode == ExitBlocking || exitCode == ExitUnderThreshold) {
-		if err := recordScanHistory(ctx, historyStore, settings.Path, result); err != nil {
+		if err := recordScanHistoryWithRepo(ctx, historyStore, repoInfo, result); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: unable to store scan history: %v\n", err)
 		} else if maxPerRepo := historyMaxScansPerRepo(); maxPerRepo > 0 {
 			if err := historyStore.EnforceRetention(ctx, maxPerRepo); err != nil {
@@ -713,16 +977,20 @@ func runScanPipeline(ctx context.Context, settings scanSettings) (*domain.ScanRe
 		}
 	}
 
-	return result, failOn, exitCode, nil
+	return result, failOn, exitCode, repoInfo, collection, nil
+}
+
+func scanNeedsLocalChecker(mode scanner.Mode, requireRemote bool) bool {
+	return mode == scanner.ModeLocal || (mode == scanner.ModeAuto && !requireRemote)
 }
 
 func runSingleScan(ctx context.Context, settings scanSettings) (int, error) {
-	result, failOn, exitCode, err := runScanPipeline(ctx, settings)
+	result, failOn, exitCode, repoInfo, _, err := runScanPipeline(ctx, settings)
 	if err != nil {
 		return exitCode, err
 	}
 
-	reportScanParseErrors(result, settings.Quiet)
+	reportScanParseErrors(result)
 
 	if !settings.Quiet {
 		tw := scanner.NewTableWriter(settings.NoColor, failOn)
@@ -780,23 +1048,27 @@ func runSingleScan(ctx context.Context, settings scanSettings) (int, error) {
 	}
 
 	if settings.WebhookURL != "" {
+		webhookRepo := repoInfo
+		if settings.OmitRepoMetadata {
+			webhookRepo = nil
+		}
 		whCfg := scanner.WebhookConfig{
 			URL:     settings.WebhookURL,
 			Secret:  settings.WebhookSecret,
 			Version: version,
 		}
-		scanner.SendWebhook(ctx, whCfg, result, scanRepoInfo(settings.Path))
+		scanner.SendWebhook(ctx, whCfg, result, webhookRepo)
 	}
 
 	return exitCode, nil
 }
 
-func reportScanParseErrors(result *domain.ScanResult, quiet bool) {
-	if quiet || result == nil {
+func reportScanParseErrors(result *domain.ScanResult) {
+	if result == nil {
 		return
 	}
 	for _, parseErr := range result.ParseErrors {
-		fmt.Fprintf(os.Stderr, "warning: parse error in %s\n", parseErr)
+		fmt.Fprintf(os.Stderr, "warning: parse error in %s\n", termtext.Sanitize(parseErr))
 	}
 }
 
@@ -808,8 +1080,16 @@ func writeJSONFile(path string, result *domain.ScanResult) error {
 	if err := ensureOutputDir(path); err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	file, err := ioutils.OpenPrivateFile(path)
+	if err != nil {
 		return fmt.Errorf("write file %s: %w", path, err)
+	}
+	if _, err := file.Write(data); err != nil {
+		closeSilently(file)
+		return fmt.Errorf("write file %s: %w", path, err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close file %s: %w", path, err)
 	}
 	return nil
 }
@@ -843,7 +1123,7 @@ func openLocalSQLiteStore(ctx context.Context, dbPath string) (*sqlite.Store, bo
 // runListPackages walks the target directory, parses all lock files, and
 // prints every detected package with version and ecosystem. No
 // vulnerability check is performed.
-func runListPackages(args []string, ecosystems string, maxDepth int, noColor bool, sbomFilesOpt ...[]string) error {
+func runListPackages(args []string, ecosystems string, maxDepth int, sbomFilesOpt ...[]string) error {
 	var sbomFiles []string
 	if len(sbomFilesOpt) > 0 {
 		sbomFiles = sbomFilesOpt[0]
@@ -852,24 +1132,32 @@ func runListPackages(args []string, ecosystems string, maxDepth int, noColor boo
 	if len(args) > 0 {
 		scanPath = args[0]
 	}
-
-	absPath, err := filepath.Abs(scanPath)
-	if err != nil {
-		return fmt.Errorf("resolve path: %w", err)
-	}
-
-	reg := parser.NewRegistry()
-	ecoFilter := splitCSV(ecosystems)
-	collection, err := scanner.CollectPackages(scanner.CollectConfig{
-		Registry:   reg,
-		Root:       absPath,
+	return runListPackagesWithSettings(scanSettings{
+		Path:       scanPath,
+		Ecosystems: splitCSV(ecosystems),
 		MaxDepth:   maxDepth,
-		Ecosystems: ecoFilter,
 		SBOMFiles:  sbomFiles,
 		IncludeDev: true,
 	})
+}
+
+func runListPackagesWithSettings(settings scanSettings) error {
+	absPath, err := filepath.Abs(settings.Path)
 	if err != nil {
-		return err
+		return withExitCode(ExitOperational, fmt.Errorf("resolve path: %w", err))
+	}
+
+	reg := parser.NewRegistry()
+	collection, err := scanner.CollectPackages(scanner.CollectConfig{
+		Registry:   reg,
+		Root:       absPath,
+		MaxDepth:   settings.MaxDepth,
+		Ecosystems: settings.Ecosystems,
+		SBOMFiles:  settings.SBOMFiles,
+		IncludeDev: true,
+	})
+	if err != nil {
+		return withDefaultExitCode(ExitOperational, err)
 	}
 	if err := fatalCollectionParseError(collection); err != nil {
 		return err
@@ -892,7 +1180,7 @@ func runListPackages(args []string, ecosystems string, maxDepth int, noColor boo
 	var packages []pkgEntry
 
 	for _, parseErr := range collection.ParseErrors {
-		fmt.Fprintf(os.Stderr, "warning: parse error in %s\n", parseErr)
+		fmt.Fprintf(os.Stderr, "warning: parse error in %s\n", termtext.Sanitize(parseErr))
 	}
 	for _, entry := range collection.Entries {
 		p := entry.Package
@@ -902,10 +1190,10 @@ func runListPackages(args []string, ecosystems string, maxDepth int, noColor boo
 		}
 		seen[key] = struct{}{}
 		packages = append(packages, pkgEntry{
-			Name:      p.Name,
-			Version:   p.Version,
-			Ecosystem: string(p.Ecosystem),
-			LockFile:  entry.SourceFile,
+			Name:      termtext.Sanitize(p.Name),
+			Version:   termtext.Sanitize(p.Version),
+			Ecosystem: termtext.Sanitize(string(p.Ecosystem)),
+			LockFile:  termtext.Sanitize(entry.SourceFile),
 		})
 	}
 
@@ -936,7 +1224,9 @@ func runListPackages(args []string, ecosystems string, maxDepth int, noColor boo
 		fmt.Printf(fmtStr, p.Name, p.Version, p.Ecosystem, p.LockFile)
 	}
 
-	fmt.Printf("\n%d package(s) found in %d input file(s)\n", len(packages), collection.LockFiles+collection.SBOMFiles)
+	fmt.Printf("\n%s found in %s\n",
+		plural.Count(len(packages), "package", "packages"),
+		plural.Count(collection.LockFiles+collection.SBOMFiles, "input file", "input files"))
 	return nil
 }
 
@@ -944,5 +1234,5 @@ func fatalCollectionParseError(collection *scanner.PackageCollection) error {
 	if collection == nil || len(collection.FatalParseErrors) == 0 {
 		return nil
 	}
-	return withExitCode(ExitParser, fmt.Errorf("%s", strings.Join(collection.FatalParseErrors, "; ")))
+	return withExitCode(ExitParser, fmt.Errorf("%s", termtext.Sanitize(strings.Join(collection.FatalParseErrors, "; "))))
 }

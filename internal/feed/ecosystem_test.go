@@ -4,7 +4,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 func TestEcosystemMappingHelpers(t *testing.T) {

@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 func TestDBSyncAndLocalScan(t *testing.T) {
@@ -40,7 +42,7 @@ func TestDBSyncAndLocalScan(t *testing.T) {
 		t.Fatalf("json.Marshal() error = %v", err)
 	}
 
-	resp, err := http.Post(baseURL+"/api/v1/feeds/openssf/import", "application/json", bytes.NewReader(payload))
+	resp, err := integrationHTTPPost(baseURL+"/api/v1/feeds/openssf/import", "application/json", bytes.NewReader(payload))
 	if err != nil {
 		t.Fatalf("POST feed import failed: %v", err)
 	}
@@ -88,12 +90,52 @@ func TestDBSyncAndLocalScan(t *testing.T) {
 		t.Fatalf("read scan result: %v", err)
 	}
 
-	var result map[string]any
+	var result domain.ScanResult
 	if err := json.Unmarshal(data, &result); err != nil {
 		t.Fatalf("parse scan result: %v", err)
 	}
+	assertDBSyncLocalMaliciousScanResult(t, result)
+}
 
-	if count, ok := result["findings_count"].(float64); !ok || count < 1 {
-		t.Fatalf("findings_count = %v, want >= 1", result["findings_count"])
+func assertDBSyncLocalMaliciousScanResult(t *testing.T, result domain.ScanResult) {
+	t.Helper()
+
+	if result.Mode != "local" {
+		t.Fatalf("ScanResult.Mode = %q, want local", result.Mode)
 	}
+	if result.PackagesScanned != 1 {
+		t.Fatalf("PackagesScanned = %d, want 1", result.PackagesScanned)
+	}
+	if result.FindingsCount != 1 {
+		t.Fatalf("FindingsCount = %d, want 1: %+v", result.FindingsCount, result.Findings)
+	}
+	if !result.FindingsBlocking {
+		t.Fatalf("FindingsBlocking = false, want malicious finding to block: %+v", result)
+	}
+	if result.Summary.ByType[string(domain.FindingTypeMalicious)] != 1 {
+		t.Fatalf("malicious summary count = %d, want 1: %+v", result.Summary.ByType[string(domain.FindingTypeMalicious)], result.Summary)
+	}
+
+	for _, finding := range result.Findings {
+		if finding.AdvisoryID != "MAL-LOCAL-1" {
+			continue
+		}
+		if finding.Type != domain.FindingTypeMalicious {
+			t.Fatalf("MAL-LOCAL-1 Type = %q, want malicious", finding.Type)
+		}
+		if finding.RiskType != "malware" {
+			t.Fatalf("MAL-LOCAL-1 RiskType = %q, want malware", finding.RiskType)
+		}
+		if finding.Severity != domain.SeverityCritical {
+			t.Fatalf("MAL-LOCAL-1 Severity = %q, want CRITICAL", finding.Severity)
+		}
+		if finding.Ecosystem != domain.EcosystemNPM || finding.Name != "left-pad-evil" || finding.Version != "1.2.3" {
+			t.Fatalf("MAL-LOCAL-1 package = %s/%s@%s, want npm/left-pad-evil@1.2.3", finding.Ecosystem, finding.Name, finding.Version)
+		}
+		if finding.Source != "openssf" {
+			t.Fatalf("MAL-LOCAL-1 Source = %q, want openssf", finding.Source)
+		}
+		return
+	}
+	t.Fatalf("scan result missing MAL-LOCAL-1 finding: %+v", result.Findings)
 }

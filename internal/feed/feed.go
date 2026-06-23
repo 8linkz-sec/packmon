@@ -6,9 +6,10 @@ package feed
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 
-	"github.com/8linkz/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/db"
 )
 
 // SyncResult is returned by a FeedSyncer after a successful sync.
@@ -19,6 +20,9 @@ type SyncResult struct {
 	// EntriesTotal is the total number of entries the syncer is aware of
 	// (may equal EntriesSynced for a full sync, or differ for deltas).
 	EntriesTotal int
+	// Metadata carries optional feed-specific provenance or cursor data that
+	// the manager persists in feed_sync_status.metadata after a successful sync.
+	Metadata json.RawMessage
 }
 
 type permanentSyncError struct {

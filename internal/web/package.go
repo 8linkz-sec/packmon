@@ -2,44 +2,42 @@ package web
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
-	"github.com/8linkz/packmon/internal/db"
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 // PackageData is the view model for the package detail template.
 type PackageData struct {
-	ActiveNav       string
-	Ecosystem       string
-	Name            string
-	Version         string
-	Vulnerabilities []domain.Finding
-	Malicious       []domain.Finding
-	SupplyChain     []domain.Finding
-	Lifecycle       []domain.Finding
-	Sources         []string
+	ActiveNav                string
+	Ecosystem                string
+	Name                     string
+	Version                  string
+	Vulnerabilities          []domain.Finding
+	VulnerabilitiesLoadError string
+	Malicious                []domain.Finding
+	MaliciousLoadError       string
+	SupplyChain              []domain.Finding
+	ReputationLoadError      string
+	Lifecycle                []domain.Finding
+	LifecycleLoadError       string
+	Sources                  []string
 }
 
 type reputationFindingStore interface {
 	FindReputationFindings(ctx context.Context, ecosystem, name, source string) ([]domain.Finding, error)
 }
 
-type refreshQueueStore interface {
-	EnqueueRefresh(ctx context.Context, job *db.RefreshJob) (bool, int, error)
+type reputationFindingBatchStore interface {
+	FindReputationFindingsBatch(ctx context.Context, packages []db.PackageQuery, source string) ([]domain.Finding, error)
 }
 
 type lifecycleFindingStore interface {
 	FindLifecycleFindingsBatch(ctx context.Context, packages []db.PackageQuery, now time.Time) ([]domain.Finding, error)
-}
-
-type refreshStatusData struct {
-	Message string
-	Error   bool
 }
 
 // HandlePackage serves GET /package/{ecosystem}/{name...}.
@@ -47,10 +45,10 @@ type refreshStatusData struct {
 // necessary for scoped package names like @scope/pkg or go module paths.
 func HandlePackage(store Store, renderer *Renderer, logger *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ecosystem := r.PathValue("ecosystem")
+		ecosystem := strings.ToLower(strings.TrimSpace(r.PathValue("ecosystem")))
 		name := r.PathValue("name")
 
-		if ecosystem == "" || name == "" {
+		if ecosystem == "" || name == "" || !domain.Ecosystem(ecosystem).Valid() {
 			http.NotFound(w, r)
 			return
 		}
@@ -59,23 +57,48 @@ func HandlePackage(store Store, renderer *Renderer, logger *slog.Logger) http.Ha
 		version := strings.TrimSpace(r.URL.Query().Get("version"))
 
 		vulns, err := store.FindVulnerabilities(ctx, ecosystem, name, version)
+		vulnerabilitiesLoadError := ""
 		if err != nil {
 			logger.Error("package: failed to find vulnerabilities",
 				"ecosystem", ecosystem, "name", name, "error", err)
+			vulnerabilitiesLoadError = "Vulnerability findings could not be loaded. Check the server logs and database connection before relying on this section."
 		}
 
 		mal, err := store.FindMalicious(ctx, ecosystem, name, version)
+		maliciousLoadError := ""
 		if err != nil {
 			logger.Error("package: failed to find malicious findings",
 				"ecosystem", ecosystem, "name", name, "error", err)
+			maliciousLoadError = "Malicious package reports could not be loaded. Check the server logs and database connection before relying on this section."
 		}
 
 		supplyChain := []domain.Finding{}
-		if reputationStore, ok := store.(reputationFindingStore); ok {
+		reputationLoadError := ""
+		if reputationStore, ok := store.(reputationFindingBatchStore); ok && version != "" {
+			reputation, err := reputationStore.FindReputationFindingsBatch(ctx, []db.PackageQuery{{
+				Ecosystem: ecosystem,
+				Name:      name,
+				Version:   version,
+			}}, db.ReputationSourceReversingLabs)
+			if err != nil {
+				logger.Error("package: failed to find reputation findings",
+					"ecosystem", ecosystem, "name", name, "version", version, "error", err)
+				reputationLoadError = "Reputation findings could not be loaded. Check the server logs and database connection before relying on malicious or supply-chain reputation sections."
+			} else {
+				for _, finding := range reputation {
+					if finding.Type == domain.FindingTypeSupplyChainRisk {
+						supplyChain = append(supplyChain, finding)
+					} else {
+						mal = append(mal, finding)
+					}
+				}
+			}
+		} else if reputationStore, ok := store.(reputationFindingStore); ok && version == "" {
 			reputation, err := reputationStore.FindReputationFindings(ctx, ecosystem, name, db.ReputationSourceReversingLabs)
 			if err != nil {
 				logger.Error("package: failed to find reputation findings",
 					"ecosystem", ecosystem, "name", name, "error", err)
+				reputationLoadError = "Reputation findings could not be loaded. Check the server logs and database connection before relying on malicious or supply-chain reputation sections."
 			} else {
 				for _, finding := range reputation {
 					if finding.Type == domain.FindingTypeSupplyChainRisk {
@@ -88,6 +111,7 @@ func HandlePackage(store Store, renderer *Renderer, logger *slog.Logger) http.Ha
 		}
 
 		lifecycle := []domain.Finding{}
+		lifecycleLoadError := ""
 		if lifecycleStore, ok := store.(lifecycleFindingStore); ok && version != "" {
 			lifecycle, err = lifecycleStore.FindLifecycleFindingsBatch(ctx, []db.PackageQuery{{
 				Ecosystem: ecosystem,
@@ -97,6 +121,7 @@ func HandlePackage(store Store, renderer *Renderer, logger *slog.Logger) http.Ha
 			if err != nil {
 				logger.Error("package: failed to find lifecycle findings",
 					"ecosystem", ecosystem, "name", name, "version", version, "error", err)
+				lifecycleLoadError = "Lifecycle findings could not be loaded. Check the server logs and database connection before relying on this section."
 			}
 		}
 
@@ -123,75 +148,25 @@ func HandlePackage(store Store, renderer *Renderer, logger *slog.Logger) http.Ha
 		sortStrings(sources)
 
 		data := PackageData{
-			ActiveNav:       "",
-			Ecosystem:       ecosystem,
-			Name:            name,
-			Version:         version,
-			Vulnerabilities: vulns,
-			Malicious:       mal,
-			SupplyChain:     supplyChain,
-			Lifecycle:       lifecycle,
-			Sources:         sources,
+			ActiveNav:                "",
+			Ecosystem:                ecosystem,
+			Name:                     name,
+			Version:                  version,
+			Vulnerabilities:          vulns,
+			VulnerabilitiesLoadError: vulnerabilitiesLoadError,
+			Malicious:                mal,
+			MaliciousLoadError:       maliciousLoadError,
+			SupplyChain:              supplyChain,
+			ReputationLoadError:      reputationLoadError,
+			Lifecycle:                lifecycle,
+			LifecycleLoadError:       lifecycleLoadError,
+			Sources:                  sources,
 		}
 
 		if err := renderer.Render(w, "package.html", data); err != nil {
 			logger.Error("package: render failed", "error", err)
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 		}
-	}
-}
-
-// HandlePackageRefresh serves POST /package/{ecosystem}/refresh/{name...}.
-// It is the browser-facing refresh endpoint; API-key protected refresh remains
-// under /api/v1 for CLI and integration clients.
-func HandlePackageRefresh(store Store, renderer *Renderer, logger *slog.Logger) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		ecosystem := strings.ToLower(strings.TrimSpace(r.PathValue("ecosystem")))
-		name := strings.TrimSpace(r.PathValue("name"))
-		if ecosystem == "" || name == "" || !domain.Ecosystem(ecosystem).Valid() {
-			renderRefreshStatus(w, renderer, logger, http.StatusBadRequest, "Invalid package refresh request.", true)
-			return
-		}
-
-		queueStore, ok := store.(refreshQueueStore)
-		if !ok {
-			renderRefreshStatus(w, renderer, logger, http.StatusServiceUnavailable, "Package refresh is not available on this instance.", true)
-			return
-		}
-
-		created, position, err := queueStore.EnqueueRefresh(r.Context(), &db.RefreshJob{
-			Ecosystem: ecosystem,
-			Name:      name,
-			Source:    "socket",
-			Priority:  0,
-			Status:    "pending",
-		})
-		if err != nil {
-			logger.Error("package refresh: enqueue failed", "ecosystem", ecosystem, "name", name, "error", err)
-			renderRefreshStatus(w, renderer, logger, http.StatusInternalServerError, "Failed to queue package refresh.", true)
-			return
-		}
-
-		message := fmt.Sprintf("Refresh queued at position %d.", position)
-		if !created {
-			message = fmt.Sprintf("Refresh already queued at position %d.", position)
-		}
-		renderRefreshStatus(w, renderer, logger, http.StatusOK, message, false)
-	}
-}
-
-func renderRefreshStatus(w http.ResponseWriter, renderer *Renderer, logger *slog.Logger, status int, message string, isError bool) {
-	w.WriteHeader(status)
-	if err := renderer.RenderPartial(w, "package.html", "refresh-response", refreshStatusData{
-		Message: message,
-		Error:   isError,
-	}); err != nil {
-		logger.Error("package refresh: render failed", "error", err)
 	}
 }
 

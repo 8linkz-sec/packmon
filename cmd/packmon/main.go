@@ -50,10 +50,21 @@ func withExitCode(code int, err error) error {
 	return exitCodeError{code: code, err: err}
 }
 
+func withDefaultExitCode(code int, err error) error {
+	if err == nil {
+		return nil
+	}
+	var codeErr exitCodeError
+	if errors.As(err, &codeErr) {
+		return err
+	}
+	return withExitCode(code, err)
+}
+
 func exitCodeForError(err error) int {
 	var codeErr exitCodeError
 	if errors.As(err, &codeErr) {
 		return codeErr.Code()
 	}
-	return ExitInternal
+	return ExitOperational
 }

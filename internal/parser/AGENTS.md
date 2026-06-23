@@ -22,10 +22,9 @@ Read `AGENTS.md` (root) and `DESIGN.md` (supported ecosystems table) first.
   `scope=test`). The scanner filters dev deps by default and includes them with
   `--include-dev`.
 
-## Current open landmines (see Audit.md)
+## Current Guardrails
 
-Audit.md is authoritative; project-wide only the external GitLab-runner test is
-documented as an external validation gap. Keep these guardrails in mind:
+Keep these tracked guardrails in mind:
 
 - Preserve dev/test dependency marking in parser tests when touching npm, pnpm,
   Pipfile, poetry, uv, Maven, Gradle, Composer, or equivalent lock formats.

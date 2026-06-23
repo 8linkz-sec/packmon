@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/8linkz/packmon/internal/config"
-	"github.com/8linkz/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/config"
+	"github.com/8linkz-sec/packmon/internal/db"
 )
 
 func TestApplyStoredFeedConfigOverrides(t *testing.T) {
@@ -93,7 +93,7 @@ func TestApplyStoredFeedConfigOverridesErrorAndIgnoredBranches(t *testing.T) {
 	for _, override := range []*db.FeedConfig{
 		{FeedName: "unknown", Enabled: true, Mode: "self"},
 		{FeedName: "osv", Enabled: true, Mode: "sideways"},
-		{FeedName: "vulncheck", Enabled: true, Mode: "external", APIKey: "  persisted-key  "},
+		{FeedName: "vulncheck", Enabled: true, Mode: "external", APIKey: "  persisted-key  "}, //nolint:gosec // fake persisted test credential.
 	} {
 		if err := store.UpsertFeedConfig(context.Background(), override); err != nil {
 			t.Fatalf("UpsertFeedConfig(%s) error = %v", override.FeedName, err)
@@ -110,5 +110,32 @@ func TestApplyStoredFeedConfigOverridesErrorAndIgnoredBranches(t *testing.T) {
 	vulncheck, _ := cfg.FeedSettings("vulncheck")
 	if vulncheck.Mode != config.FeedModeExternal || vulncheck.APIKey != "persisted-key" {
 		t.Fatalf("vulncheck override = %+v, want external mode with trimmed key", vulncheck)
+	}
+}
+
+func TestApplyStoredFeedConfigOverridesRejectsUnsafeSyncInterval(t *testing.T) {
+	t.Parallel()
+
+	store := newNoopStore()
+	interval := time.Second
+	if err := store.UpsertFeedConfig(context.Background(), &db.FeedConfig{
+		FeedName:     "vulncheck",
+		Enabled:      true,
+		Mode:         "self",
+		SyncInterval: &interval,
+		APIKey:       "persisted-key",
+	}); err != nil {
+		t.Fatalf("UpsertFeedConfig(vulncheck) error = %v", err)
+	}
+
+	cfg := testAdminConfig()
+	err := applyStoredFeedConfigOverrides(context.Background(), cfg, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err == nil || !strings.Contains(err.Error(), "at least 15m0s") {
+		t.Fatalf("applyStoredFeedConfigOverrides() error = %v, want minimum interval error", err)
+	}
+
+	vulncheck, _ := cfg.FeedSettings("vulncheck")
+	if vulncheck.SyncInterval == interval {
+		t.Fatalf("unsafe vulncheck interval was applied: %+v", vulncheck)
 	}
 }

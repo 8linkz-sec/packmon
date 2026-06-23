@@ -35,10 +35,9 @@ health rules) first.
 - Feed health (DESIGN.md sec 3.5): unhealthy if last successful sync > 48h, last
   sync failed, OR zero entries in DB.
 
-## Current open landmines (see Audit.md)
+## Current Guardrails
 
-Audit.md is authoritative; project-wide only the external GitLab-runner test is
-documented as an external validation gap. Keep these guardrails in mind:
+Keep these tracked guardrails in mind:
 
 - Feed health must continue to surface failed, stale, skipped, and zero-entry
   states to API, admin, and public web consumers.

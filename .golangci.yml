@@ -8,12 +8,16 @@ linters:
     - govet
     - ineffassign
     - misspell
+    - nolintlint
     - staticcheck
     - unused
   settings:
     gosec:
       excludes:
         - G104
+    misspell:
+      ignore-rules:
+        - packageid
 
 formatters:
   enable:

@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/8linkz/packmon/internal/auth"
-	"github.com/8linkz/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/secret"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -18,7 +18,7 @@ import (
 // production Packmon server.
 type Store struct {
 	pool      *pgxpool.Pool
-	encryptor *auth.FieldEncryptor
+	encryptor *secret.FieldEncryptor
 }
 
 var _ db.Store = (*Store)(nil)
@@ -34,7 +34,7 @@ type PoolConfig struct {
 // The encryptor parameter encrypts sensitive fields (e.g. feed API keys)
 // at rest. Pass nil to disable encryption (plaintext fallback).
 // poolCfg may be nil to use pgxpool defaults.
-func New(ctx context.Context, dsn string, encryptor *auth.FieldEncryptor, poolCfg *PoolConfig) (*Store, error) {
+func New(ctx context.Context, dsn string, encryptor *secret.FieldEncryptor, poolCfg *PoolConfig) (*Store, error) {
 	pgCfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: parse dsn: %w", err)
@@ -61,7 +61,7 @@ func New(ctx context.Context, dsn string, encryptor *auth.FieldEncryptor, poolCf
 
 	if encryptor == nil {
 		// Inactive encryptor: passthrough, no encryption.
-		encryptor = &auth.FieldEncryptor{}
+		encryptor = &secret.FieldEncryptor{}
 	}
 
 	return &Store{pool: pool, encryptor: encryptor}, nil
@@ -203,7 +203,10 @@ func sortSearchResults(results []db.PackageSearchResult) {
 		if a.Name != b.Name {
 			return strings.Compare(a.Name, b.Name)
 		}
-		return strings.Compare(a.Ecosystem, b.Ecosystem)
+		if a.Ecosystem != b.Ecosystem {
+			return strings.Compare(a.Ecosystem, b.Ecosystem)
+		}
+		return strings.Compare(a.Version, b.Version)
 	})
 }
 
@@ -213,6 +216,7 @@ func scanAPIKey(row pgx.Row) (*db.APIKey, error) {
 		revokedAt  *time.Time
 		lastUsedAt *time.Time
 		expiresAt  *time.Time
+		deletedAt  *time.Time
 	)
 
 	if err := row.Scan(
@@ -223,6 +227,7 @@ func scanAPIKey(row pgx.Row) (*db.APIKey, error) {
 		&revokedAt,
 		&lastUsedAt,
 		&expiresAt,
+		&deletedAt,
 	); err != nil {
 		return nil, err
 	}
@@ -230,5 +235,6 @@ func scanAPIKey(row pgx.Row) (*db.APIKey, error) {
 	item.RevokedAt = revokedAt
 	item.LastUsedAt = lastUsedAt
 	item.ExpiresAt = expiresAt
+	item.DeletedAt = deletedAt
 	return &item, nil
 }

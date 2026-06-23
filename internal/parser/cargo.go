@@ -5,7 +5,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
 	"github.com/BurntSushi/toml"
 )
 
@@ -58,14 +58,15 @@ func (p *CargoParser) Parse(r io.Reader) ([]domain.Package, error) {
 			continue
 		}
 		if entry.Version == "" {
-			errs = append(errs, fmt.Sprintf("entry %d (%s): missing version", i, entry.Name))
+			errs = append(errs, fmt.Sprintf("entry %d: missing version", i))
 			continue
 		}
 
 		packages = append(packages, domain.Package{
-			Name:      entry.Name,
-			Version:   entry.Version,
-			Ecosystem: domain.EcosystemCargo,
+			Name:       entry.Name,
+			Version:    entry.Version,
+			Ecosystem:  domain.EcosystemCargo,
+			SourceRefs: cleanSourceRefs(entry.Source),
 		})
 	}
 

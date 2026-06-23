@@ -4,17 +4,20 @@ import "time"
 
 // SyncExportOptions controls the dataset returned by a server-side sync export.
 type SyncExportOptions struct {
-	Since      *time.Time
-	SnapshotAt time.Time
-	Ecosystems []string
-	Limit      int
-	Offset     int
-	Cursor     SyncCursor
+	Since       *time.Time
+	SinceXID    uint64
+	SnapshotAt  time.Time
+	SnapshotXID uint64
+	Ecosystems  []string
+	Limit       int
+	Offset      int
+	Cursor      SyncCursor
 }
 
 // SyncExport is the server-side payload consumed by local SQLite sync.
 type SyncExport struct {
 	SyncedAt        time.Time
+	SyncedXID       uint64
 	Vulnerabilities []SyncVulnerability
 	Malicious       []SyncMalicious
 	Reputation      []SyncReputationFinding
@@ -28,10 +31,31 @@ type SyncCursor struct {
 	Malicious       int `json:"malicious"`
 	Reputation      int `json:"reputation"`
 	Lifecycle       int `json:"lifecycle"`
+
+	VulnerabilitiesCursor string `json:"vulnerabilities_cursor,omitempty"`
+	MaliciousCursor       string `json:"malicious_cursor,omitempty"`
+	ReputationCursor      string `json:"reputation_cursor,omitempty"`
+	LifecycleCursor       string `json:"lifecycle_cursor,omitempty"`
+
+	VulnerabilitiesDone bool `json:"vulnerabilities_done,omitempty"`
+	MaliciousDone       bool `json:"malicious_done,omitempty"`
+	ReputationDone      bool `json:"reputation_done,omitempty"`
+	LifecycleDone       bool `json:"lifecycle_done,omitempty"`
 }
 
 func (c SyncCursor) IsZero() bool {
-	return c.Vulnerabilities == 0 && c.Malicious == 0 && c.Reputation == 0 && c.Lifecycle == 0
+	return c.Vulnerabilities == 0 &&
+		c.Malicious == 0 &&
+		c.Reputation == 0 &&
+		c.Lifecycle == 0 &&
+		c.VulnerabilitiesCursor == "" &&
+		c.MaliciousCursor == "" &&
+		c.ReputationCursor == "" &&
+		c.LifecycleCursor == "" &&
+		!c.VulnerabilitiesDone &&
+		!c.MaliciousDone &&
+		!c.ReputationDone &&
+		!c.LifecycleDone
 }
 
 func (opts SyncExportOptions) EffectiveCursor() SyncCursor {
@@ -60,8 +84,10 @@ type SyncVulnerability struct {
 	Severity         string
 	CVSSScore        *float64
 	EPSSScore        *float64
+	EPSSPercentile   *float64
 	CISAKEV          bool
 	Summary          string
+	Source           string
 	Withdrawn        bool
 }
 
@@ -70,11 +96,13 @@ type SyncMalicious struct {
 	ID            string
 	Ecosystem     string
 	Name          string
+	VersionRanges string
 	Versions      string
 	ReferenceURLs string
 	RiskType      string
 	Severity      string
 	Summary       string
+	Source        string
 	Withdrawn     bool
 }
 

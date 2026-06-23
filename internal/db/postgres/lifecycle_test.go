@@ -1,3 +1,5 @@
+//go:build integration
+
 package postgres
 
 import (
@@ -6,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/8linkz/packmon/internal/db"
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 func TestPostgresLifecycleDockerUpsertAndFindings(t *testing.T) {
@@ -89,12 +91,28 @@ func TestPostgresLifecycleDockerUpsertAndFindings(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("UpsertLifecycleProducts(oldlib) error = %v", err)
 	}
+	var beforeLifecycleDelete time.Time
+	if err := store.pool.QueryRow(ctx, `SELECT NOW()`).Scan(&beforeLifecycleDelete); err != nil {
+		t.Fatalf("read database time before lifecycle delete: %v", err)
+	}
+	time.Sleep(10 * time.Millisecond)
 	deleted, err := store.DeleteLifecycleProductsNotIn(ctx, []string{"django"})
 	if err != nil {
 		t.Fatalf("DeleteLifecycleProductsNotIn() error = %v", err)
 	}
 	if deleted != 1 {
 		t.Fatalf("DeleteLifecycleProductsNotIn() = %d, want 1 stale product", deleted)
+	}
+	tombstoneExport, err := store.ExportSync(ctx, db.SyncExportOptions{
+		Since:      &beforeLifecycleDelete,
+		SnapshotAt: time.Now().UTC().Add(time.Minute),
+		Limit:      100,
+	})
+	if err != nil {
+		t.Fatalf("ExportSync(after lifecycle delete) error = %v", err)
+	}
+	if !syncLifecycleExportContains(tombstoneExport.Lifecycle, "endoflife:npm:oldlib:oldlib:1", true) {
+		t.Fatalf("ExportSync(after lifecycle delete) missing oldlib tombstone: %+v", tombstoneExport.Lifecycle)
 	}
 	findings, err = store.FindLifecycleFindingsBatch(ctx, []db.PackageQuery{
 		{Ecosystem: "npm", Name: "oldlib", Version: "1.0.0"},
@@ -105,6 +123,15 @@ func TestPostgresLifecycleDockerUpsertAndFindings(t *testing.T) {
 	if len(findings) != 0 {
 		t.Fatalf("oldlib findings after reconcile = %+v, want none", findings)
 	}
+}
+
+func syncLifecycleExportContains(items []db.SyncLifecycleRelease, id string, withdrawn bool) bool {
+	for _, item := range items {
+		if item.ID == id && item.Withdrawn == withdrawn {
+			return true
+		}
+	}
+	return false
 }
 
 func assertLifecycleFinding(t *testing.T, finding domain.Finding, typ domain.FindingType, severity domain.Severity, riskType string) {

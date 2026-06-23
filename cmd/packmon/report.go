@@ -6,7 +6,8 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/8linkz/packmon/internal/db/sqlite"
+	"github.com/8linkz-sec/packmon/internal/db/sqlite"
+	"github.com/8linkz-sec/packmon/internal/termtext"
 	"github.com/spf13/cobra"
 )
 
@@ -42,7 +43,7 @@ SQLite scan history.`,
 			if len(entries) == 0 {
 				fmt.Println("No scan history found.")
 				if flagRepo != "" {
-					fmt.Printf("  (filtered by repo: %s)\n", flagRepo)
+					fmt.Printf("  (filtered by repo: %s)\n", termtext.Sanitize(flagRepo))
 				}
 				fmt.Println("Run 'packmon scan' to generate scan data.")
 				return nil
@@ -51,7 +52,7 @@ SQLite scan history.`,
 			// Print header.
 			fmt.Printf("\nPackmon Security Report")
 			if flagRepo != "" {
-				fmt.Printf(" -- %s", flagRepo)
+				fmt.Printf(" -- %s", termtext.Sanitize(flagRepo))
 			}
 			fmt.Printf("\n%s\n\n", strings.Repeat("=", 60))
 
@@ -101,11 +102,12 @@ SQLite scan history.`,
 			}
 
 			for i, e := range entries {
-				dateStr := e.ScannedAt.Format("2006-01-02 15:04")
+				dateStr := formatReportTimestamp(e.ScannedAt)
 				repo := e.RepoName
 				if repo == "" {
 					repo = "(local)"
 				}
+				repo = termtext.Sanitize(repo)
 
 				// Compute simple trend indicator vs. next older scan.
 				trend := " "

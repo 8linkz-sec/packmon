@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,8 +13,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/8linkz/packmon/internal/db"
-	"github.com/8linkz/packmon/internal/telemetry"
+	"github.com/8linkz-sec/packmon/internal/db"
+	feedqueue "github.com/8linkz-sec/packmon/internal/feed"
+	"github.com/8linkz-sec/packmon/internal/feed/packagefilter"
+	"github.com/8linkz-sec/packmon/internal/telemetry"
 )
 
 const (
@@ -24,11 +27,60 @@ const (
 	defaultPollInterval     = 10 * time.Second
 	defaultRateLimitPerHour = 300
 	defaultLookupTTL        = 24 * time.Hour
+	defaultCacheRetention   = 7 * 24 * time.Hour
+	defaultPruneInterval    = time.Hour
 	defaultBatchSize        = 5
 	maxBatchSize            = 5
 	maxResponseSize         = 2 << 20
 	stuckThreshold          = 5 * time.Minute
+	completeTimeout         = 2 * time.Second
+	resetStuckJobsTimeout   = 2 * time.Second
 )
+
+var (
+	errRateLimited                       = errors.New("rate limited")
+	errInvalidReversingLabsResponseShape = errors.New("invalid ReversingLabs response schema")
+)
+
+// RateLimiter holds ReversingLabs token-bucket state. It can be shared by
+// successive workers so runtime reconfiguration does not reset upstream
+// capacity.
+type RateLimiter struct {
+	tokensMu         sync.Mutex
+	tokens           int
+	maxTokens        int
+	lastRefill       time.Time
+	fractionalTokens float64
+}
+
+// NewRateLimiter creates a token bucket for ReversingLabs calls per hour.
+func NewRateLimiter(callsPerHour int) *RateLimiter {
+	if callsPerHour <= 0 {
+		callsPerHour = defaultRateLimitPerHour
+	}
+	return &RateLimiter{
+		tokens:     callsPerHour,
+		maxTokens:  callsPerHour,
+		lastRefill: time.Now(),
+	}
+}
+
+func (l *RateLimiter) SetLimit(callsPerHour int) {
+	if l == nil || callsPerHour <= 0 {
+		return
+	}
+	l.tokensMu.Lock()
+	defer l.tokensMu.Unlock()
+
+	wasFull := l.tokens >= l.maxTokens
+	l.maxTokens = callsPerHour
+	switch {
+	case wasFull:
+		l.tokens = callsPerHour
+	case l.tokens > callsPerHour:
+		l.tokens = callsPerHour
+	}
+}
 
 type reputationStore interface {
 	DequeueRefresh(context.Context, string) (*db.RefreshJob, error)
@@ -38,21 +90,28 @@ type reputationStore interface {
 	UpsertPackageReputation(context.Context, *db.PackageReputation) error
 }
 
-type Worker struct {
-	store        reputationStore
-	logger       *slog.Logger
-	httpClient   *http.Client
-	baseURL      string
-	apiKey       string
-	pollInterval time.Duration
-	lookupTTL    time.Duration
-	batchSize    int
+type reputationPruner interface {
+	PrunePackageReputation(context.Context, string, time.Duration) (int, error)
+}
 
-	tokensMu         sync.Mutex
-	tokens           int
-	maxTokens        int
-	lastRefill       time.Time
-	fractionalTokens float64
+type Worker struct {
+	store          reputationStore
+	logger         *slog.Logger
+	httpClient     *http.Client
+	baseURL        string
+	apiKey         string
+	pollInterval   time.Duration
+	lookupTTL      time.Duration
+	batchSize      int
+	jobTimeout     time.Duration
+	cacheRetention time.Duration
+	pruneInterval  time.Duration
+	lastPrune      time.Time
+	excluded       []string
+	dequeueLogs    *feedqueue.RepeatedErrorLogger
+	resetLogs      *feedqueue.RepeatedErrorLogger
+
+	*RateLimiter
 }
 
 type Option func(*Worker)
@@ -90,6 +149,14 @@ func WithLookupTTL(d time.Duration) Option {
 	}
 }
 
+func WithCacheRetention(d time.Duration) Option {
+	return func(w *Worker) {
+		if d > 0 {
+			w.cacheRetention = d
+		}
+	}
+}
+
 func WithBatchSize(size int) Option {
 	return func(w *Worker) {
 		if size <= 0 {
@@ -107,9 +174,47 @@ func WithRateLimit(callsPerHour int) Option {
 		if callsPerHour <= 0 {
 			return
 		}
-		w.maxTokens = callsPerHour
-		w.tokens = callsPerHour
+		w.SetLimit(callsPerHour)
 	}
+}
+
+func WithRateLimiter(limiter *RateLimiter) Option {
+	return func(w *Worker) {
+		if limiter != nil {
+			w.RateLimiter = limiter
+		}
+	}
+}
+
+func WithJobTimeout(d time.Duration) Option {
+	return func(w *Worker) {
+		if d > 0 {
+			w.jobTimeout = d
+		}
+	}
+}
+
+func WithExcludedNamespaces(prefixes []string) Option {
+	return func(w *Worker) {
+		w.excluded = normalizeNamespacePrefixes(prefixes)
+	}
+}
+
+func normalizeNamespacePrefixes(prefixes []string) []string {
+	out := make([]string, 0, len(prefixes))
+	seen := make(map[string]struct{}, len(prefixes))
+	for _, prefix := range prefixes {
+		prefix = strings.ToLower(strings.TrimSpace(prefix))
+		if prefix == "" {
+			continue
+		}
+		if _, ok := seen[prefix]; ok {
+			continue
+		}
+		seen[prefix] = struct{}{}
+		out = append(out, prefix)
+	}
+	return out
 }
 
 func NewWorker(store db.Store, apiKey string, logger *slog.Logger, opts ...Option) *Worker {
@@ -126,14 +231,17 @@ func newWorker(store reputationStore, apiKey string, logger *slog.Logger, opts .
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-		baseURL:      DefaultBaseURL,
-		apiKey:       apiKey,
-		pollInterval: defaultPollInterval,
-		lookupTTL:    defaultLookupTTL,
-		batchSize:    defaultBatchSize,
-		tokens:       defaultRateLimitPerHour,
-		maxTokens:    defaultRateLimitPerHour,
-		lastRefill:   time.Now(),
+		baseURL:        DefaultBaseURL,
+		apiKey:         apiKey,
+		pollInterval:   defaultPollInterval,
+		lookupTTL:      defaultLookupTTL,
+		batchSize:      defaultBatchSize,
+		jobTimeout:     30 * time.Second,
+		cacheRetention: defaultCacheRetention,
+		pruneInterval:  defaultPruneInterval,
+		dequeueLogs:    feedqueue.NewRepeatedErrorLogger(feedqueue.DefaultRepeatedErrorLogWindow),
+		resetLogs:      feedqueue.NewRepeatedErrorLogger(feedqueue.DefaultRepeatedErrorLogWindow),
+		RateLimiter:    NewRateLimiter(defaultRateLimitPerHour),
 	}
 	for _, opt := range opts {
 		opt(w)
@@ -158,7 +266,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	ticker := time.NewTicker(w.pollInterval)
 	defer ticker.Stop()
 
-	w.resetStuckJobs(ctx)
+	w.pruneCache(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -171,6 +279,7 @@ func (w *Worker) Run(ctx context.Context) error {
 }
 
 func (w *Worker) processNextJob(ctx context.Context) {
+	w.pruneCache(ctx)
 	w.resetStuckJobs(ctx)
 
 	if !w.acquireToken() {
@@ -179,7 +288,8 @@ func (w *Worker) processNextJob(ctx context.Context) {
 
 	job, err := w.store.DequeueRefresh(ctx, FeedName)
 	if err != nil {
-		w.logger.Error("failed to dequeue job", slog.String("error", err.Error()))
+		w.returnToken()
+		w.dequeueLogs.Error(w.logger, "failed to dequeue job", err)
 		return
 	}
 	if job == nil {
@@ -187,8 +297,21 @@ func (w *Worker) processNextJob(ctx context.Context) {
 		return
 	}
 
-	checkErr := w.processJob(ctx, job)
-	if completeErr := w.store.CompleteRefresh(ctx, job.ID, checkErr); completeErr != nil {
+	jobCtx, cancel := context.WithTimeout(ctx, w.jobTimeout)
+	checkErr := w.processJob(jobCtx, job)
+	cancel()
+	if errors.Is(checkErr, errRateLimited) {
+		telemetry.Default().IncQueueError(FeedName)
+		w.logger.Warn("ReversingLabs check rate limited; leaving job processing for retry",
+			slog.String("ecosystem", job.Ecosystem),
+			slog.String("name", job.Name),
+			slog.String("error", checkErr.Error()),
+		)
+		return
+	}
+	completeCtx, cancel := context.WithTimeout(context.Background(), completeTimeout)
+	defer cancel()
+	if completeErr := feedqueue.CompleteClaimedRefresh(completeCtx, w.store, job, checkErr); completeErr != nil {
 		w.logger.Error("failed to complete job",
 			slog.Int("job_id", job.ID),
 			slog.String("error", completeErr.Error()),
@@ -200,6 +323,33 @@ func (w *Worker) processNextJob(ctx context.Context) {
 			slog.String("ecosystem", job.Ecosystem),
 			slog.String("name", job.Name),
 			slog.String("error", checkErr.Error()),
+		)
+	}
+}
+
+func (w *Worker) pruneCache(ctx context.Context) {
+	if w.cacheRetention <= 0 {
+		return
+	}
+	if !w.lastPrune.IsZero() && time.Since(w.lastPrune) < w.pruneInterval {
+		return
+	}
+	w.lastPrune = time.Now()
+	pruner, ok := w.store.(reputationPruner)
+	if !ok {
+		return
+	}
+	pruneCtx, cancel := context.WithTimeout(ctx, completeTimeout)
+	defer cancel()
+	count, err := pruner.PrunePackageReputation(pruneCtx, FeedName, w.cacheRetention)
+	if err != nil {
+		w.logger.Warn("failed to prune ReversingLabs cache", slog.String("error", err.Error()))
+		return
+	}
+	if count > 0 {
+		w.logger.Info("pruned ReversingLabs cache",
+			slog.Int("count", count),
+			slog.Duration("older_than", w.cacheRetention),
 		)
 	}
 }
@@ -216,6 +366,19 @@ func (w *Worker) processJob(ctx context.Context, job *db.RefreshJob) error {
 	var mappable []db.PackageReputation
 	for i := range due {
 		rep := due[i]
+		if packagefilter.ExcludedByNamespace(w.excluded, rep.Ecosystem, rep.Name) {
+			now := time.Now().UTC()
+			rep.Status = "unsupported"
+			rep.Severity = "CRITICAL"
+			rep.Summary = "ReversingLabs: package excluded by private namespace policy"
+			rep.LastCheckedAt = &now
+			rep.NextCheckAt = nil
+			rep.LastError = ""
+			if err := w.store.UpsertPackageReputation(ctx, &rep); err != nil {
+				return err
+			}
+			continue
+		}
 		if _, ok := BuildPURL(rep.Ecosystem, rep.Name, rep.Version); !ok {
 			now := time.Now().UTC()
 			rep.Status = "unsupported"
@@ -237,6 +400,9 @@ func (w *Worker) processJob(ctx context.Context, job *db.RefreshJob) error {
 
 	results, lookupErr := w.lookupBatch(ctx, mappable)
 	if lookupErr != nil {
+		if errors.Is(lookupErr, errRateLimited) {
+			return lookupErr
+		}
 		results = w.errorResults(mappable, lookupErr)
 	}
 	for i := range results {
@@ -335,7 +501,7 @@ func (i *searchIncidents) UnmarshalJSON(data []byte) error {
 		*i = nil
 		return nil
 	}
-	return fmt.Errorf("unexpected incidents value %q", string(data))
+	return errInvalidReversingLabsResponseShape
 }
 
 func (i *searchIncident) UnmarshalJSON(data []byte) error {
@@ -374,21 +540,48 @@ func (w *Worker) lookupBatch(ctx context.Context, reps []db.PackageReputation) (
 		return nil, nil
 	}
 	if len(reps) > w.batchSize {
-		results := make([]db.PackageReputation, 0, len(reps))
-		for start := 0; start < len(reps); start += w.batchSize {
-			end := start + w.batchSize
-			if end > len(reps) {
-				end = len(reps)
-			}
-			chunk, err := w.lookupBatch(ctx, reps[start:end])
-			if err != nil {
-				return nil, err
-			}
-			results = append(results, chunk...)
-		}
-		return results, nil
+		return w.lookupBatchChunks(ctx, reps)
 	}
 
+	requests, byUUID := buildLookupRequests(reps)
+	if len(requests) == 0 {
+		return nil, nil
+	}
+
+	statusCode, body, err := w.postLookupRequest(ctx, requests)
+	if err != nil {
+		return nil, err
+	}
+	if statusCode == http.StatusRequestEntityTooLarge {
+		return w.lookupBatch413Fallback(ctx, reps)
+	}
+	if err := reversingLabsLookupStatusError(statusCode); err != nil {
+		if errors.Is(err, errRateLimited) {
+			w.drainTokens()
+		}
+		return nil, err
+	}
+
+	return w.mapLookupResponse(body, reps, byUUID)
+}
+
+func (w *Worker) lookupBatchChunks(ctx context.Context, reps []db.PackageReputation) ([]db.PackageReputation, error) {
+	results := make([]db.PackageReputation, 0, len(reps))
+	for start := 0; start < len(reps); start += w.batchSize {
+		end := start + w.batchSize
+		if end > len(reps) {
+			end = len(reps)
+		}
+		chunk, err := w.lookupBatch(ctx, reps[start:end])
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, chunk...)
+	}
+	return results, nil
+}
+
+func buildLookupRequests(reps []db.PackageReputation) ([]findPackageRequest, map[string]db.PackageReputation) {
 	requests := make([]findPackageRequest, 0, len(reps))
 	byUUID := make(map[string]db.PackageReputation, len(reps))
 	for _, rep := range reps {
@@ -400,18 +593,18 @@ func (w *Worker) lookupBatch(ctx context.Context, reps []db.PackageReputation) (
 		requests = append(requests, findPackageRequest{UUID: uuid, PURL: purl})
 		byUUID[uuid] = rep
 	}
-	if len(requests) == 0 {
-		return nil, nil
-	}
+	return requests, byUUID
+}
 
+func (w *Worker) postLookupRequest(ctx context.Context, requests []findPackageRequest) (int, []byte, error) {
 	payload, err := json.Marshal(requests)
 	if err != nil {
-		return nil, fmt.Errorf("marshal request: %w", err)
+		return 0, nil, fmt.Errorf("marshal request: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(w.baseURL, "/")+"/find/packages?compact=true", bytes.NewReader(payload))
 	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
+		return 0, nil, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+w.apiKey)
 	req.Header.Set("Accept", "application/json")
@@ -420,43 +613,59 @@ func (w *Worker) lookupBatch(ctx context.Context, reps []db.PackageReputation) (
 
 	resp, err := w.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("http post: %w", err)
+		return 0, nil, fmt.Errorf("http post: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
 	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
+		return 0, nil, fmt.Errorf("read response: %w", err)
 	}
+	return resp.StatusCode, body, nil
+}
 
-	switch resp.StatusCode {
+func reversingLabsLookupStatusError(statusCode int) error {
+	switch statusCode {
 	case http.StatusOK:
+		return nil
 	case http.StatusUnauthorized, http.StatusForbidden:
-		return nil, fmt.Errorf("authentication failed (status %d): check PACKMON_REVERSINGLABS_API_KEY", resp.StatusCode)
+		return fmt.Errorf("authentication failed (status %d): check PACKMON_REVERSINGLABS_API_KEY", statusCode)
 	case http.StatusPaymentRequired:
-		return nil, fmt.Errorf("ReversingLabs capacity limit reached (402)")
-	case http.StatusRequestEntityTooLarge:
-		if len(reps) <= 1 {
-			return nil, fmt.Errorf("ReversingLabs request too large (413)")
-		}
-		results := make([]db.PackageReputation, 0, len(reps))
-		for _, rep := range reps {
-			one, oneErr := w.lookupBatch(ctx, []db.PackageReputation{rep})
-			if oneErr != nil {
-				return nil, oneErr
-			}
-			results = append(results, one...)
-		}
-		return results, nil
+		return fmt.Errorf("ReversingLabs capacity limit reached (402)")
 	case http.StatusTooManyRequests:
-		w.drainTokens()
-		return nil, fmt.Errorf("rate limited by ReversingLabs (429)")
+		return fmt.Errorf("%w by ReversingLabs (429)", errRateLimited)
 	default:
-		return nil, fmt.Errorf("unexpected ReversingLabs status %d", resp.StatusCode)
+		return fmt.Errorf("unexpected ReversingLabs status %d", statusCode)
 	}
+}
 
+func (w *Worker) lookupBatch413Fallback(ctx context.Context, reps []db.PackageReputation) ([]db.PackageReputation, error) {
+	if len(reps) <= 1 {
+		return nil, fmt.Errorf("ReversingLabs request too large (413)")
+	}
+	results := make([]db.PackageReputation, 0, len(reps))
+	for _, rep := range reps {
+		if _, ok := BuildPURL(rep.Ecosystem, rep.Name, rep.Version); !ok {
+			continue
+		}
+		if !w.acquireToken() {
+			return nil, fmt.Errorf("%w by ReversingLabs local 413 fallback budget", errRateLimited)
+		}
+		one, oneErr := w.lookupBatch(ctx, []db.PackageReputation{rep})
+		if oneErr != nil {
+			return nil, oneErr
+		}
+		results = append(results, one...)
+	}
+	return results, nil
+}
+
+func (w *Worker) mapLookupResponse(body []byte, reps []db.PackageReputation, byUUID map[string]db.PackageReputation) ([]db.PackageReputation, error) {
 	var decoded searchResponse
 	if err := json.Unmarshal(body, &decoded); err != nil {
+		if errors.Is(err, errInvalidReversingLabsResponseShape) {
+			return nil, fmt.Errorf("parse response: %w", errInvalidReversingLabsResponseShape)
+		}
 		return nil, fmt.Errorf("parse response: %w", err)
 	}
 
@@ -606,9 +815,11 @@ func reputationUUID(rep db.PackageReputation) string {
 }
 
 func (w *Worker) resetStuckJobs(ctx context.Context) {
-	count, err := w.store.ResetStuckJobs(ctx, FeedName, stuckThreshold)
+	resetCtx, cancel := context.WithTimeout(ctx, resetStuckJobsTimeout)
+	count, err := w.store.ResetStuckJobs(resetCtx, FeedName, stuckThreshold)
+	cancel()
 	if err != nil {
-		w.logger.Warn("failed to reset stuck jobs", slog.String("error", err.Error()))
+		w.resetLogs.Warn(w.logger, "failed to reset stuck jobs", err)
 		return
 	}
 	if count > 0 {

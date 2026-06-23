@@ -10,15 +10,19 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/logsafe"
 )
 
 const (
 	webhookTimeout      = 10 * time.Second
-	webhookSignatureHdr = "X-Packmon-Signature"
+	webhookHMACHeader   = "X-Packmon-Signature"
 	webhookContentType  = "application/json; charset=utf-8"
 	webhookEventScan    = "scan_completed"
 	webhookPayloadVer   = "1"
@@ -35,7 +39,7 @@ type WebhookConfig struct {
 
 // SendWebhook delivers the scan result to the configured webhook URL.
 // It wraps the result in a domain.WebhookEnvelope. If a secret is configured,
-// the request body is signed with HMAC-SHA256 and the signature is sent in the
+// the request body is authenticated with HMAC-SHA256 and the MAC is sent in the
 // X-Packmon-Signature header as described in SECURITY.md.
 //
 // Webhook delivery is best-effort: failures are logged but never cause
@@ -44,13 +48,18 @@ func SendWebhook(ctx context.Context, cfg WebhookConfig, result *domain.ScanResu
 	if cfg.URL == "" {
 		return
 	}
+	logURL := logsafe.RedactURL(cfg.URL)
+	if err := validateWebhookURL(cfg.URL); err != nil {
+		slog.Warn("webhook: refusing insecure webhook URL", slog.String("url", logURL), slog.String("error", err.Error()))
+		return
+	}
 
 	envelope := domain.WebhookEnvelope{
 		Event:      webhookEventScan,
 		Version:    webhookPayloadVer,
 		Timestamp:  time.Now().UTC(),
 		Source:     "cli",
-		Repository: repo,
+		Repository: webhookRepoInfo(repo),
 		Result:     *result,
 	}
 
@@ -66,7 +75,7 @@ func SendWebhook(ctx context.Context, cfg WebhookConfig, result *domain.ScanResu
 
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, cfg.URL, bytes.NewReader(body))
 	if err != nil {
-		slog.Warn("webhook: create request error", slog.String("error", err.Error()))
+		slog.Warn("webhook: create request error", slog.String("url", logURL), slog.String("error", "invalid webhook URL"))
 		return
 	}
 
@@ -78,10 +87,10 @@ func SendWebhook(ctx context.Context, cfg WebhookConfig, result *domain.ScanResu
 	}
 	req.Header.Set("User-Agent", userAgent)
 
-	// Sign the payload if a secret is configured (DE-21).
+	// Add HMAC authentication if a secret is configured (DE-21).
 	if cfg.Secret != "" {
 		sig := computeHMACSHA256([]byte(cfg.Secret), body)
-		req.Header.Set(webhookSignatureHdr, "sha256="+sig)
+		req.Header.Set(webhookHMACHeader, "sha256="+sig)
 	}
 
 	// Send with a dedicated client (separate from the scanner's HTTP client)
@@ -89,7 +98,7 @@ func SendWebhook(ctx context.Context, cfg WebhookConfig, result *domain.ScanResu
 	client := &http.Client{Timeout: webhookTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
-		slog.Error("webhook: POST failed", slog.String("url", cfg.URL), slog.String("error", err.Error()))
+		slog.Error("webhook: POST failed", slog.String("url", logURL), slog.String("error", logsafe.RedactURLError(err)))
 		return
 	}
 	defer closeSilently(resp.Body)
@@ -98,10 +107,51 @@ func SendWebhook(ctx context.Context, cfg WebhookConfig, result *domain.ScanResu
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, webhookMaxRespBody))
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		slog.Info("webhook: POST succeeded", slog.String("url", cfg.URL), slog.Int("status", resp.StatusCode))
+		slog.Info("webhook: POST succeeded", slog.String("url", logURL), slog.Int("status", resp.StatusCode))
 	} else {
-		slog.Warn("webhook: POST returned non-2xx", slog.String("url", cfg.URL), slog.Int("status", resp.StatusCode))
+		slog.Warn("webhook: POST returned non-2xx", slog.String("url", logURL), slog.Int("status", resp.StatusCode))
 	}
+}
+
+func validateWebhookURL(raw string) error {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return fmt.Errorf("invalid webhook URL")
+	}
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return fmt.Errorf("webhook URL must include scheme and host")
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "https":
+		return nil
+	case "http":
+		if isLoopbackWebhookHost(parsed.Hostname()) {
+			return nil
+		}
+		return fmt.Errorf("scheme must be https unless webhook host is loopback")
+	default:
+		return fmt.Errorf("scheme must be https")
+	}
+}
+
+func isLoopbackWebhookHost(host string) bool {
+	host = strings.TrimSpace(host)
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func webhookRepoInfo(repo *domain.RepoInfo) *domain.RepoInfo {
+	if repo == nil {
+		return nil
+	}
+	name := strings.TrimSpace(repo.Name)
+	if name == "" {
+		return nil
+	}
+	return &domain.RepoInfo{Name: name}
 }
 
 // computeHMACSHA256 returns the hex-encoded HMAC-SHA256 of message

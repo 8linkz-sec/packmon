@@ -6,8 +6,8 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/8linkz/packmon/internal/config"
-	"github.com/8linkz/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/config"
+	"github.com/8linkz-sec/packmon/internal/db"
 )
 
 func applyStoredSystemSettings(ctx context.Context, cfg *config.Config, store db.Store, logger *slog.Logger) error {

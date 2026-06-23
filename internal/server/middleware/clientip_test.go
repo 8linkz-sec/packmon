@@ -99,6 +99,16 @@ func TestClientIP_IgnoresXRealIP(t *testing.T) {
 	}
 }
 
+func resolvedTrustedClientIP(req *http.Request, trustedProxies []string) string {
+	var got string
+	handler := TrustedClientIP(trustedProxies)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = ClientIP(r)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+	return got
+}
+
 func TestClientIPWithTrustedProxiesUsesForwardedChain(t *testing.T) {
 	t.Parallel()
 
@@ -106,9 +116,9 @@ func TestClientIPWithTrustedProxiesUsesForwardedChain(t *testing.T) {
 	req.RemoteAddr = "10.0.0.10:443"
 	req.Header.Set("X-Forwarded-For", "203.0.113.9, 10.0.0.20")
 
-	ip := ClientIPWithTrustedProxies(req, []string{"10.0.0.0/8"})
+	ip := resolvedTrustedClientIP(req, []string{"10.0.0.0/8"})
 	if ip != "203.0.113.9" {
-		t.Fatalf("ClientIPWithTrustedProxies() = %q, want forwarded client", ip)
+		t.Fatalf("trusted ClientIP() = %q, want forwarded client", ip)
 	}
 }
 
@@ -120,9 +130,9 @@ func TestClientIPWithTrustedProxiesIgnoresUntrustedForwardedHeaders(t *testing.T
 	req.Header.Set("X-Forwarded-For", "203.0.113.9")
 	req.Header.Set("X-Real-IP", "203.0.113.10")
 
-	ip := ClientIPWithTrustedProxies(req, []string{"10.0.0.0/8"})
+	ip := resolvedTrustedClientIP(req, []string{"10.0.0.0/8"})
 	if ip != "198.51.100.1" {
-		t.Fatalf("ClientIPWithTrustedProxies() = %q, want remote address", ip)
+		t.Fatalf("trusted ClientIP() = %q, want remote address", ip)
 	}
 }
 
@@ -135,9 +145,9 @@ func TestClientIPWithTrustedProxiesHandlesMalformedForwardedFor(t *testing.T) {
 	// (walking right-to-left) is the real client.
 	req.Header.Set("X-Forwarded-For", "not-an-ip, , 203.0.113.9, 10.0.0.20")
 
-	ip := ClientIPWithTrustedProxies(req, []string{"10.0.0.0/8"})
+	ip := resolvedTrustedClientIP(req, []string{"10.0.0.0/8"})
 	if ip != "203.0.113.9" {
-		t.Fatalf("ClientIPWithTrustedProxies() = %q, want 203.0.113.9 from a malformed chain", ip)
+		t.Fatalf("trusted ClientIP() = %q, want 203.0.113.9 from a malformed chain", ip)
 	}
 }
 
@@ -150,9 +160,9 @@ func TestClientIPWithTrustedProxiesAllHopsTrustedFallsBackToRemote(t *testing.T)
 	// client IP to extract, so the resolver falls back to the direct peer.
 	req.Header.Set("X-Forwarded-For", "10.0.0.20, 10.0.0.21")
 
-	ip := ClientIPWithTrustedProxies(req, []string{"10.0.0.0/8"})
+	ip := resolvedTrustedClientIP(req, []string{"10.0.0.0/8"})
 	if ip != "10.0.0.10" {
-		t.Fatalf("ClientIPWithTrustedProxies() = %q, want the direct peer when all hops are trusted", ip)
+		t.Fatalf("trusted ClientIP() = %q, want the direct peer when all hops are trusted", ip)
 	}
 }
 
@@ -164,9 +174,9 @@ func TestClientIPWithTrustedProxiesIgnoresInvalidXRealIP(t *testing.T) {
 	// Trusted peer but the X-Real-IP value is garbage: fall back to the peer.
 	req.Header.Set("X-Real-IP", "definitely-not-an-ip")
 
-	ip := ClientIPWithTrustedProxies(req, []string{"10.0.0.0/8"})
+	ip := resolvedTrustedClientIP(req, []string{"10.0.0.0/8"})
 	if ip != "10.0.0.10" {
-		t.Fatalf("ClientIPWithTrustedProxies() = %q, want the direct peer for an invalid X-Real-IP", ip)
+		t.Fatalf("trusted ClientIP() = %q, want the direct peer for an invalid X-Real-IP", ip)
 	}
 }
 

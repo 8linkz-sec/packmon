@@ -8,12 +8,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/8linkz/packmon/internal/db"
-	postgres "github.com/8linkz/packmon/internal/db/postgres"
+	"github.com/8linkz-sec/packmon/internal/db"
+	postgres "github.com/8linkz-sec/packmon/internal/db/postgres"
 )
 
 // startPostgresStore brings up a throwaway PostgreSQL container, runs the
@@ -23,31 +22,10 @@ func startPostgresStore(t *testing.T) *postgres.Store {
 	t.Helper()
 
 	if _, err := exec.LookPath("docker"); err != nil {
-		t.Skip("docker not available")
+		t.Fatalf("docker not available; tagged integration tests require Docker: %v", err)
 	}
 
-	containerName := fmt.Sprintf("packmon-store-it-%d", time.Now().UnixNano())
-	dbPort := freePort(t)
-
-	run := exec.Command("docker", "run", "-d", "--rm",
-		"--name", containerName,
-		"-e", "POSTGRES_DB=packmon",
-		"-e", "POSTGRES_USER=packmon",
-		"-e", "POSTGRES_PASSWORD=packmon",
-		"-p", fmt.Sprintf("%d:5432", dbPort),
-		"postgres:18-alpine",
-	)
-	out, err := run.Output()
-	if err != nil {
-		t.Fatalf("docker run postgres: %v", err)
-	}
-	containerID := strings.TrimSpace(string(out))
-	t.Cleanup(func() {
-		_ = exec.Command("docker", "rm", "-f", containerName).Run()
-		_ = exec.Command("docker", "rm", "-f", containerID).Run()
-	})
-
-	waitForDockerPostgres(t, containerName)
+	_, dbPort := startIntegrationPostgres(t, "packmon-store-it")
 
 	env := []string{
 		"PACKMON_SERVER_MODE=production",
@@ -60,6 +38,7 @@ func startPostgresStore(t *testing.T) *postgres.Store {
 		"PACKMON_DB_PASSWORD=packmon",
 		"PACKMON_DB_SSLMODE=disable",
 		"PACKMON_ADMIN_INITIAL_PASSWORD=integration-admin",
+		"PACKMON_ENCRYPTION_KEY=integration-encryption-key",
 		"PATH=" + os.Getenv("PATH"),
 		"HOME=" + os.Getenv("HOME"),
 		"USERPROFILE=" + os.Getenv("USERPROFILE"),
@@ -248,10 +227,15 @@ func TestPostgresAPIKeyExpirationRevocationAndDeletion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListAPIKeys(after delete): %v", err)
 	}
-	for _, key := range keys {
-		if key.ID == keyID {
-			t.Fatalf("deleted key still listed: %+v", keys)
+	var deleted *db.APIKey
+	for i := range keys {
+		if keys[i].ID == keyID {
+			deleted = &keys[i]
+			break
 		}
+	}
+	if deleted == nil || deleted.DeletedAt == nil || deleted.Name != "ci-runner" || deleted.KeyHash != "hash-active" || deleted.LastUsedAt == nil || deleted.RevokedAt == nil || deleted.ExpiresAt == nil {
+		t.Fatalf("soft-deleted key metadata = %+v in %+v, want lifecycle metadata retained", deleted, keys)
 	}
 }
 

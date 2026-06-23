@@ -15,11 +15,16 @@ require_command() {
 mkdir -p "$PREFIX" "$BUILD_DIR"
 require_command go
 
+VERSION="${PACKMON_VERSION:-dev}"
+COMMIT="${PACKMON_COMMIT:-$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || echo "none")}"
+DATE="${PACKMON_BUILD_DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+LDFLAGS="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${DATE}"
+
 echo "Building packmon binaries..."
 (
   cd "$ROOT_DIR"
-  go build -o "$BUILD_DIR/packmon" ./cmd/packmon
-  go build -o "$BUILD_DIR/packmon-server" ./cmd/packmon-server
+  go build -ldflags "$LDFLAGS" -o "$BUILD_DIR/packmon" ./cmd/packmon
+  go build -ldflags "$LDFLAGS" -o "$BUILD_DIR/packmon-server" ./cmd/packmon-server
 )
 
 install -m 0755 "$BUILD_DIR/packmon" "$PREFIX/packmon"

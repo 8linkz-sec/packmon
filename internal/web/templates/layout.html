@@ -5,40 +5,52 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{block "title" .}}Packmon{{end}}</title>
-  <script src="/static/htmx.min.js"></script>
+  <meta name="htmx-config" content='{"includeIndicatorStyles":false,"allowEval":false,"allowScriptTags":false,"historyEnabled":false}'>
   <link rel="stylesheet" href="/static/tailwind.css">
   <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/htmx.min.js" defer></script>
+  <script src="/static/auto-refresh.js" defer></script>
 </head>
 <body class="bg-gray-50 text-gray-900 min-h-screen flex flex-col">
+  <a href="#main-content" class="skip-link">Skip to main content</a>
 
   {{block "nav" .}}
-  <nav class="bg-black text-white shadow">
+  <nav aria-label="Primary" class="bg-black text-white shadow">
     <div class="max-w-[1700px] mx-auto px-4 sm:px-6 lg:px-8">
-      <div class="flex items-center justify-between h-14">
-        <div class="flex items-center space-x-8">
-          <a href="/" class="text-lg font-bold tracking-tight hover:text-gray-300">Packmon</a>
-          <div class="hidden sm:flex space-x-4 text-sm">
-            <a href="/" class="hover:text-gray-300 px-2 py-1 rounded {{if eq .ActiveNav "dashboard"}}bg-gray-700{{end}}">Dashboard</a>
-            <a href="/search" class="hover:text-gray-300 px-2 py-1 rounded {{if eq .ActiveNav "search"}}bg-gray-700{{end}}">Search</a>
-            <a href="/scans" class="hover:text-gray-300 px-2 py-1 rounded {{if eq .ActiveNav "scans"}}bg-gray-700{{end}}">Scans</a>
-            <a href="/feeds" class="hover:text-gray-300 px-2 py-1 rounded {{if eq .ActiveNav "feeds"}}bg-gray-700{{end}}">Feed Status</a>
-          </div>
+      <div class="flex min-h-14 flex-wrap items-center gap-x-4 gap-y-2 py-2">
+        <a href="/" class="flex min-h-11 items-center text-lg font-bold tracking-tight hover:text-gray-300">Packmon</a>
+        <div class="flex flex-wrap items-center gap-2 text-sm">
+          <a href="/" {{if eq .ActiveNav "dashboard"}}aria-current="page"{{end}} class="flex min-h-11 items-center rounded px-3 py-2 hover:text-gray-300 {{if eq .ActiveNav "dashboard"}}bg-gray-700{{end}}">Dashboard</a>
+          <a href="/search" {{if eq .ActiveNav "search"}}aria-current="page"{{end}} class="flex min-h-11 items-center rounded px-3 py-2 hover:text-gray-300 {{if eq .ActiveNav "search"}}bg-gray-700{{end}}">Search</a>
+          <a href="/feeds" {{if eq .ActiveNav "feeds"}}aria-current="page"{{end}} class="flex min-h-11 items-center rounded px-3 py-2 hover:text-gray-300 {{if eq .ActiveNav "feeds"}}bg-gray-700{{end}}">Feed Status</a>
         </div>
-        <div class="flex items-center space-x-4 text-sm">
-          <a href="/admin/" class="hover:text-gray-300 px-2 py-1 rounded {{if eq .ActiveNav "admin"}}bg-gray-700{{end}}">Admin</a>
+        {{if adminNavEnabled}}
+        <div class="ml-auto flex flex-wrap items-center gap-2 text-sm">
+          <a href="/admin/" {{if eq .ActiveNav "admin"}}aria-current="page"{{end}} class="flex min-h-11 items-center rounded px-3 py-2 hover:text-gray-300 {{if eq .ActiveNav "admin"}}bg-gray-700{{end}}">Admin</a>
         </div>
+        {{end}}
       </div>
     </div>
   </nav>
   {{end}}
 
-  <main class="flex-1 max-w-[1700px] mx-auto px-4 sm:px-6 lg:px-8 py-6 w-full">
+  <main id="main-content" tabindex="-1" class="flex-1 max-w-[1700px] mx-auto px-4 sm:px-6 lg:px-8 py-6 w-full">
     {{block "content" .}}{{end}}
   </main>
 
   <footer class="bg-gray-100 border-t border-gray-200 mt-auto">
-    <div class="max-w-[1700px] mx-auto px-4 sm:px-6 lg:px-8 py-3 text-center text-xs text-gray-500">
-      Packmon Dependency Scanner
+    <div class="max-w-[1700px] mx-auto px-4 sm:px-6 lg:px-8 py-3 text-center text-xs text-gray-600">
+      <div class="flex flex-wrap items-center justify-center gap-x-3 gap-y-1">
+        <span>Packmon Dependency Scanner</span>
+        {{if privacyURL}}
+        <span aria-hidden="true">·</span>
+        <a href="{{privacyURL}}" class="underline hover:text-gray-900">Privacy</a>
+        {{end}}
+        {{if legalURL}}
+        <span aria-hidden="true">·</span>
+        <a href="{{legalURL}}" class="underline hover:text-gray-900">Legal Notice</a>
+        {{end}}
+      </div>
     </div>
   </footer>
 

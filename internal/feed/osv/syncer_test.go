@@ -10,13 +10,15 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/8linkz/packmon/internal/db"
-	"github.com/8linkz/packmon/internal/feed"
+	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/feed"
 )
 
 // -- Store stub ---------------------------------------------------------------
@@ -33,6 +35,7 @@ type osvStoreStub struct {
 	statusErr        error
 	upsertErr        error
 	vulnUpsertErrIDs map[string]error
+	rejectCanceled   bool
 }
 
 func (s *osvStoreStub) UpsertVulnerability(_ context.Context, vuln *db.Vulnerability) error {
@@ -70,9 +73,12 @@ func (s *osvStoreStub) GetFeedSyncStatus(_ context.Context, _ string) (*db.FeedS
 	return s.status, nil
 }
 
-func (s *osvStoreStub) UpsertFeedSyncStatus(_ context.Context, status *db.FeedSyncStatus) error {
+func (s *osvStoreStub) UpsertFeedSyncStatus(ctx context.Context, status *db.FeedSyncStatus) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.rejectCanceled && ctx.Err() != nil {
+		return ctx.Err()
+	}
 	if s.upsertErr != nil {
 		return s.upsertErr
 	}
@@ -121,7 +127,10 @@ func TestSync_ETagNotModified(t *testing.T) {
 	store := &osvStoreStub{
 		// Pre-load an existing feed status with ETags for all ecosystems.
 		status: &db.FeedSyncStatus{
-			FeedName: FeedName,
+			FeedName:       FeedName,
+			LastSyncStatus: "success",
+			EntriesSynced:  17,
+			EntriesTotal:   23,
 			Metadata: func() json.RawMessage {
 				etags := make(map[string]string)
 				for _, eco := range feed.OSVBucketEcosystems() {
@@ -160,12 +169,18 @@ func TestSync_ETagNotModified(t *testing.T) {
 		t.Fatal("Sync() result = nil")
 	}
 	// When all ecosystems respond 304, nothing should be synced.
-	if result.EntriesSynced != 0 {
-		t.Errorf("EntriesSynced = %d, want 0", result.EntriesSynced)
+	if result.EntriesSynced != 17 {
+		t.Errorf("EntriesSynced = %d, want preserved 17", result.EntriesSynced)
+	}
+	if result.EntriesTotal != 23 {
+		t.Errorf("EntriesTotal = %d, want preserved 23", result.EntriesTotal)
 	}
 	// No vulnerabilities should have been upserted.
 	if len(store.vulns) != 0 {
 		t.Errorf("UpsertVulnerability called %d times, want 0", len(store.vulns))
+	}
+	if store.status == nil || store.status.EntriesSynced != 17 || store.status.EntriesTotal != 23 {
+		t.Fatalf("status after 304 = %+v, want preserved counts", store.status)
 	}
 }
 
@@ -199,6 +214,33 @@ func TestSync_HTTPRateLimitRecordsFailure(t *testing.T) {
 	}
 	if !strings.Contains(store.status.LastError, "429") {
 		t.Fatalf("LastError = %q, want HTTP 429 context", store.status.LastError)
+	}
+}
+
+func TestDownloadLogsTempFilenameWithoutFullPath(t *testing.T) {
+	t.Parallel()
+
+	zipData := createZIP(t, map[string][]byte{"GHSA-test.json": []byte(`{"id":"GHSA-test"}`)})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(zipData)
+	}))
+	defer srv.Close()
+
+	var logs bytes.Buffer
+	syncer := NewSyncer(&osvStoreStub{}, slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})), WithHTTPClient(srv.Client()))
+	tmpPath, _, err := syncer.download(context.Background(), srv.URL+"/npm/all.zip", "")
+	if err != nil {
+		t.Fatalf("download() error = %v", err)
+	}
+	defer func() { _ = os.Remove(tmpPath) }()
+
+	logLine := logs.String()
+	if strings.Contains(logLine, tmpPath) || strings.Contains(logLine, filepath.Dir(tmpPath)) || strings.Contains(logLine, `"path"`) {
+		t.Fatalf("download log leaked temp path %q: %s", tmpPath, logLine)
+	}
+	if !strings.Contains(logLine, `"file":"`+filepath.Base(tmpPath)+`"`) {
+		t.Fatalf("download log missing temp filename %q: %s", filepath.Base(tmpPath), logLine)
 	}
 }
 
@@ -674,17 +716,28 @@ func TestRecordSyncStatusBranches(t *testing.T) {
 	syncer := NewSyncer(store, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	start := time.Now().Add(-time.Second)
 
-	syncer.recordSyncSuccess(context.Background(), start, time.Second, 7, 5)
+	syncer.recordSyncSuccess(context.Background(), time.Second, 7, 5)
 	if store.status == nil || store.status.LastSyncStatus != "success" || store.status.EntriesSynced != 5 {
 		t.Fatalf("success status = %+v", store.status)
 	}
+	lastSuccessfulSync := *store.status.LastSyncAt
 	syncer.recordSyncFailure(context.Background(), start, io.ErrUnexpectedEOF)
 	if store.status == nil || store.status.LastSyncStatus != "error" || !strings.Contains(store.status.LastError, "unexpected EOF") {
 		t.Fatalf("failure status = %+v", store.status)
 	}
+	if store.status.LastSyncAt == nil || !store.status.LastSyncAt.Equal(lastSuccessfulSync) || store.status.EntriesTotal != 7 {
+		t.Fatalf("failure status did not preserve data freshness/counts: %+v", store.status)
+	}
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	store.rejectCanceled = true
+	syncer.recordSyncFailure(canceledCtx, start, context.Canceled)
+	if got := len(store.statusHistory); got != 3 {
+		t.Fatalf("status history after canceled context = %d, want 3", got)
+	}
 
 	store.upsertErr = io.ErrClosedPipe
-	syncer.recordSyncSuccess(context.Background(), start, time.Second, 1, 1)
+	syncer.recordSyncSuccess(context.Background(), time.Second, 1, 1)
 	syncer.recordSyncFailure(context.Background(), start, io.ErrUnexpectedEOF)
 }
 

@@ -4,12 +4,23 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/8linkz/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/logsafe"
+	"github.com/8linkz-sec/packmon/internal/requestctx"
+)
+
+const (
+	apiKeyLastUsedQueueSize = 128
+	apiKeyLastUsedWorkers   = 1
+	apiKeyLastUsedTimeout   = 2 * time.Second
+	apiKeyLastUsedInterval  = 5 * time.Minute
 )
 
 // skipAuth lists API path prefixes that never require an API key. Public web,
@@ -17,12 +28,51 @@ import (
 // handled before API-key auth reaches this middleware.
 var skipAuth []string
 
-// requireAuthEvenInDev lists path prefixes that are data-mutating and must not
-// be exposed unauthenticated to a network. In development mode they remain
+// devAuthRule describes a data-mutating API route shape that must not be
+// exposed unauthenticated to a network even in development mode.
+type devAuthRule struct {
+	method string
+	prefix string
+	suffix string
+}
+
+// requireAuthEvenInDev lists API paths that are data-mutating and must not be
+// exposed unauthenticated to a network. In development mode they remain
 // reachable without an API key, but only from a loopback peer (local
 // integration tests); a non-loopback caller still needs a valid key.
-var requireAuthEvenInDev = []string{
-	"/api/v1/feeds/",
+var requireAuthEvenInDev = []devAuthRule{
+	{prefix: "/api/v1/feeds/"},
+	{method: http.MethodPost, prefix: "/api/v1/packages/", suffix: "/refresh"},
+}
+
+// APIKeyIdentity is the non-sensitive authenticated API-key metadata exposed
+// to handlers for audit attribution.
+type APIKeyIdentity = requestctx.APIKeyIdentity
+
+// ContextWithAPIKeyIdentity stores non-sensitive API-key metadata in ctx.
+var ContextWithAPIKeyIdentity = requestctx.ContextWithAPIKeyIdentity
+
+// APIKeyIdentityFromContext returns authenticated API-key metadata when the
+// request passed through API-key authentication.
+var APIKeyIdentityFromContext = requestctx.APIKeyIdentityFromContext
+
+// APIKeyLookupStore is the persistence surface needed to authenticate API
+// keys.
+type APIKeyLookupStore interface {
+	FindAPIKeyByHash(ctx context.Context, keyHash string) (*db.APIKey, error)
+}
+
+// APIKeyLastUsedStore is the persistence surface needed for best-effort
+// last-used writes after successful authentication.
+type APIKeyLastUsedStore interface {
+	TouchAPIKeyLastUsed(ctx context.Context, keyID int) error
+}
+
+// APIKeyStore is the complete middleware-owned API-key auth persistence
+// boundary.
+type APIKeyStore interface {
+	APIKeyLookupStore
+	APIKeyLastUsedStore
 }
 
 // Auth validates the Bearer token in the Authorization header against hashed
@@ -31,7 +81,18 @@ var requireAuthEvenInDev = []string{
 //
 // In development mode, auth is skipped entirely so that local testing
 // does not require key provisioning.
-func Auth(logger *slog.Logger, store db.Store, devMode bool) func(http.Handler) http.Handler {
+func Auth(ctx context.Context, logger *slog.Logger, store APIKeyStore, devMode bool) func(http.Handler) http.Handler {
+	updater := NewAPIKeyLastUsedUpdater(ctx, logger, store)
+	return AuthWithLastUsedUpdater(logger, store, devMode, updater)
+}
+
+type apiKeyLastUsedUpdater interface {
+	Enqueue(keyID int) bool
+}
+
+// AuthWithLastUsedUpdater is Auth with an injected last-used updater. Tests use
+// it to exercise auth behavior without starting background updater workers.
+func AuthWithLastUsedUpdater(logger *slog.Logger, store APIKeyLookupStore, devMode bool, updater apiKeyLastUsedUpdater) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if !strings.HasPrefix(r.URL.Path, "/api/v1/") {
@@ -54,23 +115,17 @@ func Auth(logger *slog.Logger, store db.Store, devMode bool) func(http.Handler) 
 			// so a dev-mode server accidentally exposed on a network does not
 			// offer unauthenticated writes.
 			if devMode {
-				if !requiresAuthInDev(r.URL.Path) || isLoopbackHost(r.RemoteAddr) {
+				if !requiresAuthInDev(r.Method, r.URL.Path) || isLoopbackHost(r.RemoteAddr) {
 					next.ServeHTTP(w, r)
 					return
 				}
-				logger.Warn("dev-mode write endpoint requires auth from non-loopback peer",
-					slog.String("path", r.URL.Path),
-					slog.String("remote_addr", r.RemoteAddr),
-				)
+				logger.Debug("dev-mode write endpoint requires auth from non-loopback peer", authRejectionLogAttrs(r)...)
 			}
 
 			token := extractBearerToken(r)
 			if token == "" {
-				logger.Warn("missing api key",
-					slog.String("path", r.URL.Path),
-					slog.String("remote_addr", r.RemoteAddr),
-				)
-				http.Error(w, `{"error":"missing or invalid Authorization header"}`, http.StatusUnauthorized)
+				logger.Debug("missing api key", authRejectionLogAttrs(r)...)
+				writeAuthJSONError(w, http.StatusUnauthorized, "missing or invalid Authorization header")
 				return
 			}
 
@@ -81,44 +136,174 @@ func Auth(logger *slog.Logger, store db.Store, devMode bool) func(http.Handler) 
 					slog.String("error", err.Error()),
 					slog.String("correlation_id", CorrelationIDFromContext(r.Context())),
 				)
-				http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+				writeJSONError(w, http.StatusInternalServerError, "internal server error")
 				return
 			}
 			if apiKey == nil {
-				logger.Warn("invalid api key",
-					slog.String("path", r.URL.Path),
-					slog.String("remote_addr", r.RemoteAddr),
-				)
-				http.Error(w, `{"error":"invalid api key"}`, http.StatusUnauthorized)
+				logger.Debug("invalid api key", authRejectionLogAttrs(r)...)
+				writeAuthJSONError(w, http.StatusUnauthorized, "invalid api key")
 				return
 			}
 			if apiKey.IsExpired(time.Now().UTC()) {
-				logger.Warn("expired api key",
-					slog.String("path", r.URL.Path),
-					slog.String("remote_addr", r.RemoteAddr),
-				)
-				http.Error(w, `{"error":"invalid api key"}`, http.StatusUnauthorized)
+				logger.Debug("expired api key", authRejectionLogAttrs(r)...)
+				writeAuthJSONError(w, http.StatusUnauthorized, "invalid api key")
 				return
 			}
 
-			// Fire-and-forget: update last_used_at using a detached context
-			// so the write completes even after the request handler returns.
-			go func() {
-				detached := context.WithoutCancel(r.Context())
-				_ = store.TouchAPIKeyLastUsed(detached, apiKey.ID)
-			}()
+			if updater != nil {
+				updater.Enqueue(apiKey.ID)
+			}
 
-			next.ServeHTTP(w, r)
+			ctx := ContextWithAPIKeyIdentity(r.Context(), APIKeyIdentity{
+				ID:   apiKey.ID,
+				Name: apiKey.Name,
+			})
+			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+func writeAuthJSONError(w http.ResponseWriter, status int, message string) {
+	if status == http.StatusUnauthorized {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="packmon-api"`)
+	}
+	writeJSONError(w, status, message)
+}
+
+func authRejectionLogAttrs(r *http.Request) []any {
+	return []any{
+		slog.String("path", logsafe.RequestPathLabel(r.URL.Path)),
+		slog.String("client_ip", ClientIP(r)),
+		slog.String("correlation_id", CorrelationIDFromContext(r.Context())),
+	}
+}
+
+// APIKeyLastUsedUpdater performs best-effort API-key last-used writes through
+// a bounded worker queue. It prevents authenticated request volume from
+// spawning unbounded detached goroutines when the database stalls.
+type APIKeyLastUsedUpdater struct {
+	logger      *slog.Logger
+	store       APIKeyLastUsedStore
+	queue       chan int
+	mu          sync.Mutex
+	lastQueued  map[int]time.Time
+	minInterval time.Duration
+	now         func() time.Time
+}
+
+// NewAPIKeyLastUsedUpdater starts the bounded updater workers.
+func NewAPIKeyLastUsedUpdater(ctx context.Context, logger *slog.Logger, store APIKeyLastUsedStore) *APIKeyLastUsedUpdater {
+	return newAPIKeyLastUsedUpdater(ctx, logger, store, apiKeyLastUsedQueueSize, apiKeyLastUsedWorkers, apiKeyLastUsedTimeout)
+}
+
+func newAPIKeyLastUsedUpdater(ctx context.Context, logger *slog.Logger, store APIKeyLastUsedStore, queueSize, workers int, timeout time.Duration) *APIKeyLastUsedUpdater {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if queueSize <= 0 {
+		queueSize = 1
+	}
+	if workers <= 0 {
+		workers = 1
+	}
+	if timeout <= 0 {
+		timeout = apiKeyLastUsedTimeout
+	}
+	u := &APIKeyLastUsedUpdater{
+		logger:      logger,
+		store:       store,
+		queue:       make(chan int, queueSize),
+		lastQueued:  make(map[int]time.Time),
+		minInterval: apiKeyLastUsedInterval,
+		now:         time.Now,
+	}
+	for range workers {
+		go u.run(ctx, timeout)
+	}
+	return u
+}
+
+// Enqueue schedules a best-effort last-used write. It returns false when the
+// bounded queue is full and the update was dropped.
+func (u *APIKeyLastUsedUpdater) Enqueue(keyID int) bool {
+	if u == nil || u.store == nil || keyID <= 0 {
+		return false
+	}
+	now := u.currentTime()
+	u.mu.Lock()
+	if u.lastQueued == nil {
+		u.lastQueued = make(map[int]time.Time)
+	}
+	if u.minInterval > 0 {
+		if last, ok := u.lastQueued[keyID]; ok && now.Sub(last) < u.minInterval {
+			u.mu.Unlock()
+			return false
+		}
+	}
+	select {
+	case u.queue <- keyID:
+		if u.minInterval > 0 {
+			u.lastQueued[keyID] = now
+		}
+		u.mu.Unlock()
+		return true
+	default:
+		u.mu.Unlock()
+		u.logger.Warn("api key last-used update queue full; dropping update",
+			slog.Int("api_key_id", keyID),
+		)
+		return false
+	}
+}
+
+func (u *APIKeyLastUsedUpdater) currentTime() time.Time {
+	if u.now == nil {
+		return time.Now()
+	}
+	return u.now()
+}
+
+func (u *APIKeyLastUsedUpdater) run(ctx context.Context, timeout time.Duration) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case keyID := <-u.queue:
+			updateCtx, cancel := context.WithTimeout(ctx, timeout)
+			err := u.store.TouchAPIKeyLastUsed(updateCtx, keyID)
+			cancel()
+			if err != nil && !errorsIsContextDone(err) {
+				u.logger.Warn("api key last-used update failed",
+					slog.Int("api_key_id", keyID),
+					slog.String("error", err.Error()),
+				)
+			}
+		}
+	}
+}
+
+func errorsIsContextDone(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // requiresAuthInDev reports whether the given path is a sensitive write
 // endpoint that must not be served unauthenticated to a non-loopback peer
 // even in development mode.
-func requiresAuthInDev(path string) bool {
-	for _, prefix := range requireAuthEvenInDev {
-		if strings.HasPrefix(path, prefix) {
+func requiresAuthInDev(method, path string) bool {
+	for _, rule := range requireAuthEvenInDev {
+		if rule.method != "" && method != rule.method {
+			continue
+		}
+		if !strings.HasPrefix(path, rule.prefix) {
+			continue
+		}
+		if rule.suffix != "" && !strings.HasSuffix(path, rule.suffix) {
+			continue
+		}
+		if rule.prefix != "" {
 			return true
 		}
 	}

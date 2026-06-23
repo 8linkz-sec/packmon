@@ -10,10 +10,15 @@ Read `AGENTS.md` (root) first.
 ## Invariants (do not break)
 
 - Tech stack is Go templates + htmx + Tailwind, all embedded via `embed` into the
-  binary. There is no separate frontend build step.
+  binary. Runtime serving has no external frontend service, but generated assets
+  are refreshed through the root npm build.
 - Web UI assets are served LOCALLY from the repo/binary. Do not add CDN runtime
   dependencies (a recent change vendored Tailwind/htmx locally and added a CSP
   scoped to self-hosted assets -- keep it that way).
+- After changing templates, Tailwind class strings, `tailwind.input.css`,
+  `tailwind.config.js`, `package.json`, `package-lock.json`, or htmx assets, run
+  `npm ci --ignore-scripts && npm run build:web` from the repository root with
+  Node.js 20+ and commit the resulting files under `internal/web/static`.
 - The admin login form must stay Bitwarden/Vaultwarden compatible: clean HTML
   semantics, `autocomplete="username"` / `autocomplete="current-password"`, no
   JS tricks that block autofill, and a stable `/admin/login` URL.
@@ -26,8 +31,8 @@ Read `AGENTS.md` (root) first.
 
 - New admin pages added recently: `queue.html`, `settings.html`, expanded
   `advisories.html`. Keep the handler/template contract in sync when editing.
-- The HTML `<select>` only constrains the browser; the server must validate too
-  (see Audit.md M4). Do not rely on the template as the validation boundary.
+- The HTML `<select>` only constrains the browser; the server must validate too.
+  Do not rely on the template as the validation boundary.
 
 ## Tests
 

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 func TestParseSPDXJSONPackages(t *testing.T) {
@@ -31,9 +31,9 @@ func TestParseSPDXJSONPackages(t *testing.T) {
 		]
 	}`)
 
-	got, err := ParseSPDXJSON(bytes.NewReader(input))
+	got, err := Parse(bytes.NewReader(input))
 	if err != nil {
-		t.Fatalf("ParseSPDXJSON() error = %v", err)
+		t.Fatalf("Parse() error = %v", err)
 	}
 
 	want := []domain.Package{
@@ -57,18 +57,18 @@ func TestParseSPDXJSONSkipsNoAssertion(t *testing.T) {
 		]
 	}`)
 
-	got, err := ParseSPDXJSON(bytes.NewReader(input))
+	got, err := Parse(bytes.NewReader(input))
 	if err != nil {
-		t.Fatalf("ParseSPDXJSON() error = %v", err)
+		t.Fatalf("Parse() error = %v", err)
 	}
 	if len(got.Packages) != 0 || len(got.Skipped) != 2 {
 		t.Fatalf("packages=%d skipped=%d, want 0/2", len(got.Packages), len(got.Skipped))
 	}
 }
 
-func TestParseSPDXJSONRejectsUnknownFormat(t *testing.T) {
-	_, err := ParseSPDXJSON(strings.NewReader(`{"bomFormat":"CycloneDX"}`))
+func TestParseRejectsUnknownSPDXFormat(t *testing.T) {
+	_, err := Parse(strings.NewReader(`{"spdxVersion":"not-spdx"}`))
 	if err == nil {
-		t.Fatal("ParseSPDXJSON(unknown) error = nil")
+		t.Fatal("Parse(unknown) error = nil")
 	}
 }

@@ -5,11 +5,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 func TestTableWriterWriteShowsLocalStaleWarning(t *testing.T) {
-	days := 34
+	days := 1
 	result := &domain.ScanResult{
 		Mode:            "local",
 		PackagesScanned: 1,
@@ -25,9 +25,9 @@ func TestTableWriterWriteShowsLocalStaleWarning(t *testing.T) {
 
 	output := out.String()
 	for _, expected := range []string{
-		"Local database last synced 34 days ago",
+		"Local database last synced 1 day ago",
 		"Update with: packmon db sync",
-		"No findings in 1 packages.",
+		"No findings in 1 package.",
 	} {
 		if !strings.Contains(output, expected) {
 			t.Fatalf("table output missing %q\n%s", expected, output)
@@ -75,6 +75,86 @@ func TestTableWriterOperationalStatusIsNotCleanReport(t *testing.T) {
 	}
 }
 
+func TestTableWriterOperationalStatusUsesSingularPackage(t *testing.T) {
+	result := &domain.ScanResult{
+		Mode:            "local",
+		FeedStatus:      "local advisory data unavailable",
+		PackagesScanned: 1,
+		FindingsCount:   0,
+	}
+
+	var out bytes.Buffer
+	if err := NewTableWriter(true).Write(&out, result); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	output := out.String()
+	if !strings.Contains(output, "findings were not evaluated for 1 package") {
+		t.Fatalf("expected singular package in operational status:\n%s", output)
+	}
+	if strings.Contains(output, "1 packages") {
+		t.Fatalf("operational status still uses plural package for 1:\n%s", output)
+	}
+}
+
+func TestTableWriterZeroPackagesIsNotAllClear(t *testing.T) {
+	result := &domain.ScanResult{
+		Mode:            "local",
+		PackagesScanned: 0,
+		FindingsCount:   0,
+	}
+
+	var out bytes.Buffer
+	if err := NewTableWriter(true).Write(&out, result); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	output := out.String()
+	if strings.Contains(output, "No findings in 0 packages") {
+		t.Fatalf("zero-package table must not render a clean all-clear message:\n%s", output)
+	}
+	if !strings.Contains(output, "No packages were evaluated") {
+		t.Fatalf("zero-package table missing distinct warning:\n%s", output)
+	}
+}
+
+func TestTableWriterSanitizesTerminalControlText(t *testing.T) {
+	result := &domain.ScanResult{
+		Mode:            "remote",
+		FeedStatus:      "provider\x1b[2J\n::warning::feed",
+		PackagesScanned: 1,
+		FindingsCount:   1,
+		Findings: []domain.Finding{{
+			Name:         "pkg\x1b]8;;https://evil.example\a\n::warning::pkg",
+			Version:      "1.0.0\rspoof",
+			Ecosystem:    domain.EcosystemNPM,
+			Type:         domain.FindingTypeVulnerability,
+			Severity:     domain.SeverityHigh,
+			AdvisoryID:   "GHSA-test\n::error::spoof",
+			FixedVersion: "2.0.0\tmasked",
+			Source:       "source\x1b[31m",
+			URL:          "https://example.test/advisory\x1b[0m",
+		}},
+	}
+
+	var out bytes.Buffer
+	if err := NewTableWriter(true).Write(&out, result); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	output := out.String()
+	for _, blocked := range []string{"\x1b", "\a", "\r", "\t", "\n::warning::", "\n::error::"} {
+		if strings.Contains(output, blocked) {
+			t.Fatalf("table output contains raw terminal control %q:\n%s", blocked, output)
+		}
+	}
+	for _, want := range []string{`\x1B`, `\n::warning::pkg`, `\rspoof`, `\tmasked`} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("table output missing sanitized text %q:\n%s", want, output)
+		}
+	}
+}
+
 func TestTableWriterShowsSupplyChainRiskDistinctly(t *testing.T) {
 	result := &domain.ScanResult{
 		Mode:             "remote",
@@ -101,10 +181,13 @@ func TestTableWriterShowsSupplyChainRiskDistinctly(t *testing.T) {
 	}
 
 	output := out.String()
-	for _, expected := range []string{"SUPPLY-CHAIN", "Review pkg", "reversinglabs", "(1 blocking)"} {
+	for _, expected := range []string{"SUPPLY-CHAIN", "Review pkg", "reversinglabs", "Found 1 finding (1 blocking) in 1 package"} {
 		if !strings.Contains(output, expected) {
 			t.Fatalf("table output missing %q\n%s", expected, output)
 		}
+	}
+	if strings.Contains(output, "finding(s)") || strings.Contains(output, "1 packages") {
+		t.Fatalf("table output still uses placeholder plural labels:\n%s", output)
 	}
 	if strings.Contains(output, "MALWARE") {
 		t.Fatalf("supply-chain risk must not be labeled as malware\n%s", output)
@@ -243,6 +326,31 @@ func TestTableWriterCountsConfiguredBlockingSeverity(t *testing.T) {
 	output := out.String()
 	if !strings.Contains(output, "(2 blocking)") {
 		t.Fatalf("table output should count CRITICAL and HIGH findings as blocking\n%s", output)
+	}
+}
+
+func TestTableWriterDoesNotReportZeroBlockingForRemotePolicyBlock(t *testing.T) {
+	result := &domain.ScanResult{
+		Mode:             "remote",
+		PackagesScanned:  1,
+		FindingsCount:    1,
+		FindingsBlocking: true,
+		Findings: []domain.Finding{
+			{Type: domain.FindingTypeVulnerability, Severity: domain.SeverityLow, Name: "low", Version: "1.0.0", Ecosystem: domain.EcosystemNPM, Source: "osv"},
+		},
+	}
+
+	var out bytes.Buffer
+	if err := NewTableWriter(true, domain.SeverityCritical).Write(&out, result); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	output := out.String()
+	if strings.Contains(output, "(0 blocking)") {
+		t.Fatalf("table output contradicted remote blocking decision\n%s", output)
+	}
+	if !strings.Contains(output, "(1 blocking)") {
+		t.Fatalf("table output should show at least one blocking finding for a remote policy block\n%s", output)
 	}
 }
 

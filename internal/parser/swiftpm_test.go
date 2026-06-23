@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 func TestSwiftPMParser_CanParse(t *testing.T) {
@@ -169,6 +169,36 @@ func TestSwiftPMParser_Parse(t *testing.T) {
 			wantPkgs:  map[string]string{"github.com/apple/swift-nio": "2.65.0"},
 		},
 		{
+			name: "url userinfo is discarded from canonical identity",
+			input: `{
+				"version": 2,
+				"pins": [
+					{
+						"identity": "private-lib",
+						"location": "https://user:token@example.com/org/private-lib.git",
+						"state": {"version": "1.2.3", "revision": "abc"}
+					}
+				]
+			}`,
+			wantCount: 1,
+			wantPkgs:  map[string]string{"example.com/org/private-lib": "1.2.3"},
+		},
+		{
+			name: "non-http URL scheme falls back to identity",
+			input: `{
+				"version": 2,
+				"pins": [
+					{
+						"identity": "private-lib",
+						"location": "ssh://internal-host/org/private-lib.git",
+						"state": {"version": "1.2.3", "revision": "abc"}
+					}
+				]
+			}`,
+			wantCount: 1,
+			wantPkgs:  map[string]string{"private-lib": "1.2.3"},
+		},
+		{
 			name: "v2 pin with empty identity and location",
 			input: `{
 				"version": 2,
@@ -224,5 +254,33 @@ func TestSwiftPMParser_Parse(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestSwiftPMParserRedactsRepositoryURLsInErrors(t *testing.T) {
+	//nolint:gosec // fake credential-bearing URL verifies redaction.
+	input := `{
+		"version": 2,
+		"pins": [
+			{
+				"identity": "",
+				"location": "ssh://user:token@internal-host/org/private-lib.git",
+				"state": {"version": "1.2.3", "revision": "abc"}
+			}
+		]
+	}`
+
+	_, err := NewSwiftPMParser().Parse(strings.NewReader(input))
+	if err == nil {
+		t.Fatal("Parse() error = nil, want redacted skipped-entry error")
+	}
+	msg := err.Error()
+	for _, leaked := range []string{"user:token", "internal-host/org/private-lib", "private-lib.git"} {
+		if strings.Contains(msg, leaked) {
+			t.Fatalf("SwiftPM parse error leaked %q in %q", leaked, msg)
+		}
+	}
+	if !strings.Contains(msg, "ssh://internal-host/...") {
+		t.Fatalf("SwiftPM parse error = %q, want redacted URL host", msg)
 	}
 }

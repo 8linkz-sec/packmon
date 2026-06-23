@@ -22,6 +22,10 @@ context (`ClientIP(r)`), not `r.RemoteAddr`. Verify the wrap order in
   forwarded headers from an untrusted peer (`clientip.go`).
 - Production `/api/v1/*` requires a Bearer API key (SHA-256 hashed lookup).
   Health/version/metrics are the only API-namespace exemptions.
+- Production `POST /api/v1/feeds/{feed}/import` also requires the dedicated
+  `X-Packmon-Feed-Import-Secret` header configured by
+  `PACKMON_FEED_IMPORT_SECRET`; a scan/sync API key alone must not mutate feed
+  data.
 - Transport is fail-closed in production (`Config.ValidateTransportSecurity`,
   called from `cmd/packmon-server/main.go`): the server refuses to start unless
   in-app TLS (`PACKMON_TLS_CERT_FILE` + `PACKMON_TLS_KEY_FILE`),
@@ -35,23 +39,23 @@ context (`ClientIP(r)`), not `r.RemoteAddr`. Verify the wrap order in
   compared with `crypto/subtle.ConstantTimeCompare`.
 - Never log API keys, tokens, passwords, or full file paths.
 
-## Current open landmines (see Audit.md)
+## Current Guardrails
 
-> Status (2026-05-29): the items in this section were addressed across the
-> Audit.md "Fix-Runde" passes. Audit.md is authoritative; project-wide only the
-> external GitLab-runner test remains open. Keep the notes below as guardrails
-> so the fixes are not regressed.
+These notes are guardrails for behavior that has regressed before. Keep them in
+sync with `DESIGN.md` and `SECURITY.md` when the behavior intentionally changes.
 
-- **H3:** dev mode currently skips auth for ALL `/api/v1/*`, including the
-  data-mutating `feeds/import`. If you touch `auth.go`, restore a
-  write-endpoint guard rather than widening the bypass.
-- **M8:** `GET /admin/login` mints a stored 8h session per visit and mutates the
-  `Admin` flag without a lock. Do not copy this pattern; prefer a stateless
-  signed CSRF token for pre-auth forms.
-- **L3:** Bearer key compare is not constant-time. Use `subtle` for new secret
-  comparisons.
-- **L4:** `X-Forwarded-Proto` (HTTPS redirect) is not gated by the trusted-proxy
-  check. Gate it the same way as XFF if you rework SecurityHeaders.
+- **H3:** dev mode skips most `/api/v1/*` API-key checks for local integration
+  tests, but package refresh and feed imports are unauthenticated only from a
+  loopback peer; non-loopback callers still need API-key auth, and production
+  feed imports also require the feed-import secret. If you touch auth or
+  routes, keep `requiresAuthInDev` and its loopback exception intact.
+- **M8:** the pre-auth login form may create only the minimum session state
+  needed for CSRF. Do not mark a session admin-authenticated until credentials
+  have been verified, and keep session mutation concurrency-safe.
+- **L3:** API-key authentication uses hashed lookup; any direct secret
+  comparison must stay constant-time via `crypto/subtle`.
+- **L4:** `X-Forwarded-Proto` HTTPS redirects must remain trusted-proxy-gated in
+  the same boundary as XFF/X-Real-IP handling.
 
 ## Tests
 

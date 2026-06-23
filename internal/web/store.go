@@ -3,8 +3,8 @@ package web
 import (
 	"context"
 
-	"github.com/8linkz/packmon/internal/db"
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 // Store is the subset of persistence required by the public web UI.

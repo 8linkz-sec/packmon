@@ -20,8 +20,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/8linkz/packmon/internal/db"
-	"github.com/8linkz/packmon/internal/telemetry"
+	"github.com/8linkz-sec/packmon/internal/telemetry"
 )
 
 const (
@@ -36,6 +35,8 @@ const (
 	// before giving up.
 	maxWorkerRestarts = 3
 )
+
+var resetStuckJobsTimeout = 2 * time.Second
 
 // workerBackoffs defines the exponential backoff delays for worker restarts.
 // Index maps to restart attempt (0-based).
@@ -57,6 +58,13 @@ type AsyncWorker interface {
 	Run(ctx context.Context) error
 }
 
+// QueueMaintenanceStore is the narrow persistence contract used by the
+// QueueProcessor itself. Async workers keep their own store dependencies for
+// dequeue and source-specific writes.
+type QueueMaintenanceStore interface {
+	ResetStuckJobs(ctx context.Context, source string, stuckThreshold time.Duration) (int, error)
+}
+
 // QueueProcessor polls the refresh_queue table and dispatches jobs to the
 // appropriate async workers. It handles stuck-job detection and graceful
 // shutdown. Each registered worker runs in its own goroutine via Run.
@@ -66,7 +74,7 @@ type AsyncWorker interface {
 // their own jobs from the store. The processor provides a supervisory
 // layer: starting workers, resetting stuck jobs, and coordinating shutdown.
 type QueueProcessor struct {
-	store          db.Store
+	store          QueueMaintenanceStore
 	logger         *slog.Logger
 	workers        []AsyncWorker
 	pollInterval   time.Duration
@@ -88,7 +96,7 @@ func WithQueueStuckThreshold(d time.Duration) QueueOption {
 
 // NewQueueProcessor creates a queue processor that supervises the given
 // async workers.
-func NewQueueProcessor(store db.Store, logger *slog.Logger, workers []AsyncWorker, opts ...QueueOption) *QueueProcessor {
+func NewQueueProcessor(store QueueMaintenanceStore, logger *slog.Logger, workers []AsyncWorker, opts ...QueueOption) *QueueProcessor {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -169,11 +177,14 @@ func (q *QueueProcessor) Run(ctx context.Context) error {
 			// Determine whether this is a clean exit or a crash.
 			isCanceled := errors.Is(result.err, context.Canceled) || ctx.Err() != nil
 
-			if isCanceled || result.err == nil {
-				// Clean exit (context cancelled or nil error): count as done.
+			if isCanceled {
+				// Clean exit during shutdown: count as done.
 				exited++
 				q.logger.Info("worker exited", "worker", result.name)
 			} else {
+				if result.err == nil {
+					result.err = errors.New("worker exited unexpectedly without error")
+				}
 				// Unexpected error: attempt restart with backoff.
 				attempt := restartCounts[result.name]
 				if attempt >= maxWorkerRestarts {
@@ -251,7 +262,9 @@ func (q *QueueProcessor) findWorker(name string) AsyncWorker {
 // resetAllStuckJobs resets stuck jobs for every registered worker source.
 func (q *QueueProcessor) resetAllStuckJobs(ctx context.Context) {
 	for _, w := range q.workers {
-		count, err := q.store.ResetStuckJobs(ctx, w.Name(), q.stuckThreshold)
+		resetCtx, cancel := context.WithTimeout(ctx, resetStuckJobsTimeout)
+		count, err := q.store.ResetStuckJobs(resetCtx, w.Name(), q.stuckThreshold)
+		cancel()
 		if err != nil {
 			q.logger.Warn("failed to reset stuck jobs",
 				"source", w.Name(),

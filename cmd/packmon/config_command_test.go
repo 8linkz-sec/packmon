@@ -96,9 +96,10 @@ func TestConfigInitTemplateUsesSecretFreeDefaults(t *testing.T) {
 	}
 	text := string(data)
 	for _, want := range []string{
-		`api_key_env: "PACKMON_API_KEY"`,
-		"require_remote: true",
 		"sync_source: server",
+		"fail_on: CRITICAL",
+		"mode: auto",
+		"NONE disables vulnerability blocking only; malicious and supply-chain risk findings still block.",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("generated config missing %q:\n%s", want, text)
@@ -106,6 +107,11 @@ func TestConfigInitTemplateUsesSecretFreeDefaults(t *testing.T) {
 	}
 	if strings.Contains(text, "api_key:") {
 		t.Fatalf("generated config contains plaintext api_key field:\n%s", text)
+	}
+	for _, blocked := range []string{"server:", "api_key_env:", "require_remote:", "cacert:", "insecure_allow_http:"} {
+		if strings.Contains(text, blocked) {
+			t.Fatalf("generated project config contains trusted routing field %q:\n%s", blocked, text)
+		}
 	}
 }
 
@@ -191,7 +197,7 @@ repos:
 	if strings.Contains(output, "supersecret") {
 		t.Fatalf("config show leaked plaintext api key:\n%s", output)
 	}
-	if !strings.Contains(output, "repos:        1") || !strings.Contains(output, "log_level:    INFO") {
+	if !strings.Contains(output, "repos:        1") || !strings.Contains(output, "log_level:    INFO") || !strings.Contains(output, "send_repo_metadata: true") {
 		t.Fatalf("config show output missing repo/default values:\n%s", output)
 	}
 }
@@ -232,6 +238,156 @@ api_key_env: "PACKMON_CUSTOM_API_KEY"
 	}
 }
 
+func TestConfigShowMasksConfiguredAPIKeyEnvRegardlessOfName(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	configPath := filepath.Join(t.TempDir(), "packmon.yaml")
+	if err := os.WriteFile(configPath, []byte(`
+server: "https://packmon.internal"
+api_key_env: "PACKMON_CI_KEY"
+`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("PACKMON_CI_KEY", "ci-secret-key")
+
+	cmd := newConfigShowCmd()
+	cmd.SetArgs([]string{"--file", configPath})
+	output := captureStdout(t, func() {
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("config show: %v", err)
+		}
+	})
+
+	if strings.Contains(output, "ci-secret-key") {
+		t.Fatalf("config show leaked configured api_key_env value:\n%s", output)
+	}
+	if !strings.Contains(output, "PACKMON_CI_KEY:") || !strings.Contains(output, maskSecret("ci-secret-key")) {
+		t.Fatalf("config show did not mask configured api_key_env value:\n%s", output)
+	}
+}
+
+func TestConfigShowPrintsEffectiveEnvironmentOverrides(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	configPath := filepath.Join(t.TempDir(), "packmon.yaml")
+	if err := os.WriteFile(configPath, []byte(`
+server: "https://config.packmon.internal"
+mode: local
+fail_on: LOW
+timeout: 5
+ecosystems:
+  - npm
+cacert: "config-ca.pem"
+insecure_allow_http: false
+require_remote: false
+db:
+  path: "./config-db"
+webhook:
+  url: "https://hooks.example/config-token?sig=config-secret"
+  secret: "config-webhook-secret"
+`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	dbDir := t.TempDir()
+	t.Setenv("PACKMON_SERVER", "https://env.packmon.internal")
+	t.Setenv("PACKMON_MODE", "remote")
+	t.Setenv("PACKMON_FAIL_ON", "HIGH")
+	t.Setenv("PACKMON_TIMEOUT", "45s")
+	t.Setenv("PACKMON_ECOSYSTEMS", "go,pypi")
+	t.Setenv("PACKMON_CA_CERT", "env-ca.pem")
+	t.Setenv("PACKMON_INSECURE_ALLOW_HTTP", "true")
+	t.Setenv("PACKMON_REQUIRE_REMOTE", "true")
+	t.Setenv("PACKMON_NO_REPO_METADATA", "true")
+	t.Setenv("PACKMON_DB_PATH", dbDir)
+	t.Setenv("PACKMON_WEBHOOK_URL", "https://hooks.example/env-token?sig=env-secret")
+	t.Setenv("PACKMON_WEBHOOK_SECRET", "env-webhook-secret")
+
+	cmd := newConfigShowCmd()
+	cmd.SetArgs([]string{"--file", configPath})
+	output := captureStdout(t, func() {
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("config show: %v", err)
+		}
+	})
+
+	for _, want := range []string{
+		"server:       https://env.packmon.internal",
+		"mode:         remote",
+		"fail_on:      HIGH",
+		"timeout:      45s",
+		"ecosystems:   go,pypi",
+		"cacert:       env-ca.pem",
+		"insecure_allow_http: true",
+		"require_remote: true",
+		"send_repo_metadata: false",
+		"db_path:      " + filepath.Join(dbDir, "packmon.db"),
+		"webhook_url:  https://hooks.example/...",
+		"webhook_secret: en**************et",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("config show output missing effective setting %q:\n%s", want, output)
+		}
+	}
+	for _, leaked := range []string{"config.packmon.internal", "config-token", "config-secret", "env-token", "env-secret", "env-webhook-secret"} {
+		if strings.Contains(output, leaked) {
+			t.Fatalf("config show leaked stale or secret value %q:\n%s", leaked, output)
+		}
+	}
+}
+
+func TestConfigShowEnvironmentListMatchesSupportedInputs(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	configPath := filepath.Join(t.TempDir(), "packmon.yaml")
+	if err := os.WriteFile(configPath, []byte(`mode: local`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("PACKMON_OUTPUT", "json")
+	t.Setenv("PACKMON_IGNORE", "package-a")
+
+	cmd := newConfigShowCmd()
+	cmd.SetArgs([]string{"--file", configPath})
+	output := captureStdout(t, func() {
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("config show: %v", err)
+		}
+	})
+
+	for _, want := range []string{"PACKMON_CA_CERT:", "PACKMON_INSECURE_ALLOW_HTTP:", "PACKMON_REQUIRE_REMOTE:", "PACKMON_NO_REPO_METADATA:"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("config show environment list missing supported input %q:\n%s", want, output)
+		}
+	}
+	for _, inert := range []string{"PACKMON_OUTPUT:", "PACKMON_IGNORE:"} {
+		if strings.Contains(output, inert) {
+			t.Fatalf("config show environment list includes inert input %q:\n%s", inert, output)
+		}
+	}
+}
+
+func TestConfigShowRedactsWebhookURL(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	configPath := filepath.Join(t.TempDir(), "packmon.yaml")
+	if err := os.WriteFile(configPath, []byte(`mode: local`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("PACKMON_WEBHOOK_URL", "https://user-secret:pass-secret@hooks.example/services/path-token?sig=query-secret#frag-secret")
+
+	cmd := newConfigShowCmd()
+	cmd.SetArgs([]string{"--file", configPath})
+	output := captureStdout(t, func() {
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("config show: %v", err)
+		}
+	})
+
+	for _, leaked := range []string{"user-secret", "pass-secret", "path-token", "query-secret", "frag-secret"} {
+		if strings.Contains(output, leaked) {
+			t.Fatalf("config show leaked webhook URL component %q:\n%s", leaked, output)
+		}
+	}
+	if !strings.Contains(output, "PACKMON_WEBHOOK_URL:") || !strings.Contains(output, "https://hooks.example/...") {
+		t.Fatalf("config show missing redacted webhook URL:\n%s", output)
+	}
+}
+
 func TestConfigCommandHelpers(t *testing.T) {
 	if got := valueOrDefault("", "fallback"); got != "fallback" {
 		t.Fatalf("valueOrDefault(empty) = %q", got)
@@ -256,6 +412,17 @@ func TestConfigCommandHelpers(t *testing.T) {
 	}
 	if !strings.Contains(output, "PACKMON_PRINT_ENV_MISSING:") || !strings.Contains(output, "(not set)") {
 		t.Fatalf("printEnvVar missing output = %q", output)
+	}
+
+	t.Setenv("PACKMON_PRINT_ENV_CONTROL", "visible\x1b\n::warning::spoof")
+	output = captureStdout(t, func() {
+		printEnvVar("PACKMON_PRINT_ENV_CONTROL")
+	})
+	if strings.Contains(output, "\x1b") || strings.Contains(output, "\n::warning::") {
+		t.Fatalf("printEnvVar output contains raw terminal controls:\n%s", output)
+	}
+	if !strings.Contains(output, `visible\x1B\n::warning::spoof`) {
+		t.Fatalf("printEnvVar output missing sanitized value:\n%s", output)
 	}
 }
 

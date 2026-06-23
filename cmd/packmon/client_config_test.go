@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 func TestLoadCLIConfigNormalizesRepoPaths(t *testing.T) {
@@ -58,6 +58,53 @@ repos:
 	}
 }
 
+func TestLoadCLIConfigValidatesEcosystemFilters(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+	}{
+		{
+			name: "top level",
+			yaml: "ecosystems: [npm, nmp]\n",
+		},
+		{
+			name: "repo",
+			yaml: "repos:\n  - name: app\n    path: .\n    ecosystems: [pypi, nmp]\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), ".packmon.yaml")
+			if err := os.WriteFile(configPath, []byte(tt.yaml), 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+
+			_, _, err := loadCLIConfig(configPath)
+			if err == nil {
+				t.Fatal("loadCLIConfig() error = nil, want unknown ecosystem rejection")
+			}
+			if !strings.Contains(err.Error(), `unknown ecosystem filter "nmp"`) {
+				t.Fatalf("loadCLIConfig() error = %v, want unknown ecosystem", err)
+			}
+			if !strings.Contains(err.Error(), "valid values") {
+				t.Fatalf("loadCLIConfig() error = %v, want valid values list", err)
+			}
+		})
+	}
+
+	configPath := filepath.Join(t.TempDir(), ".packmon.yaml")
+	if err := os.WriteFile(configPath, []byte("ecosystems: [Docker, NPM]\n"), 0o600); err != nil {
+		t.Fatalf("write docker config: %v", err)
+	}
+	cfg, _, err := loadCLIConfig(configPath)
+	if err != nil {
+		t.Fatalf("loadCLIConfig(docker config) error = %v", err)
+	}
+	if got := strings.Join(cfg.Ecosystems, ","); got != "docker,npm" {
+		t.Fatalf("ecosystems = %q, want docker,npm", got)
+	}
+}
+
 func TestLoadCLIConfigLayersUserGlobalUnderProject(t *testing.T) {
 	// Uses t.Chdir/t.Setenv, so it cannot run in parallel.
 	home := t.TempDir()
@@ -99,6 +146,212 @@ func TestLoadCLIConfigLayersUserGlobalUnderProject(t *testing.T) {
 	}
 }
 
+func TestLoadCLIConfigCanSkipAutoDiscoveredProjectConfig(t *testing.T) {
+	// Uses t.Chdir/t.Setenv, so it cannot run in parallel.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	userCfgDir := filepath.Join(home, ".packmon", "config")
+	if err := os.MkdirAll(userCfgDir, 0o750); err != nil {
+		t.Fatalf("mkdir user config dir: %v", err)
+	}
+	userPath := filepath.Join(userCfgDir, "packmon.yaml")
+	if err := os.WriteFile(userPath, []byte("fail_on: HIGH\n"), 0o600); err != nil {
+		t.Fatalf("write user config: %v", err)
+	}
+
+	project := t.TempDir()
+	projectCfg := "fail_on: LOW\necosystems:\n  - npm\n"
+	if err := os.WriteFile(filepath.Join(project, ".packmon.yaml"), []byte(projectCfg), 0o600); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+	t.Chdir(project)
+
+	cfg, sourcePath, err := loadCLIConfigWithOptions("", cliConfigLoadOptions{SkipProjectConfig: true})
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if sourcePath != userPath {
+		t.Fatalf("sourcePath = %q, want user-global config %q", sourcePath, userPath)
+	}
+	if cfg.FailOn != "HIGH" {
+		t.Fatalf("fail_on = %q, want user-global value when project config is skipped", cfg.FailOn)
+	}
+	if len(cfg.Ecosystems) != 0 {
+		t.Fatalf("ecosystems = %v, want project ecosystem filter skipped", cfg.Ecosystems)
+	}
+}
+
+func TestLoadCLIConfigAutoProjectCannotOverrideSensitiveUserConfig(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("home: %v", err)
+	}
+	userCfgDir := filepath.Join(home, ".packmon", "config")
+	if err := os.MkdirAll(userCfgDir, 0o750); err != nil {
+		t.Fatalf("mkdir user config dir: %v", err)
+	}
+	trustedDB := filepath.Join(home, "trusted-db")
+	userCfg := "server: \"https://trusted.example\"\n" +
+		"api_key_env: PACKMON_TRUSTED_KEY\n" +
+		"api_key: trusted-inline\n" +
+		"cacert: trusted-ca.pem\n" +
+		"insecure_allow_http: true\n" +
+		"db:\n  path: " + strconvQuoteForYAML(trustedDB) + "\n" +
+		"webhook:\n  url: \"https://trusted.example/hook\"\n  secret: trusted-hook-secret\n" +
+		"output:\n  format: json\n  file: trusted-result.json\n" +
+		"send_repo_metadata: false\n" +
+		"fail_on: HIGH\n"
+	if err := os.WriteFile(filepath.Join(userCfgDir, "packmon.yaml"), []byte(userCfg), 0o600); err != nil {
+		t.Fatalf("write user config: %v", err)
+	}
+
+	projectCfg := `server: "https://evil.example"
+api_key_env: EVIL_ENV
+api_key: evil-inline
+cacert: evil-ca.pem
+insecure_allow_http: false
+db:
+  path: ./evil-db
+webhook:
+  url: "https://evil.example/hook"
+  secret: evil-hook-secret
+output:
+  format: html
+  file: ../evil-result.html
+send_repo_metadata: true
+fail_on: LOW
+repos:
+  - name: app
+    path: .
+    server: "https://repo-evil.example"
+    api_key_env: REPO_EVIL_ENV
+    api_key: repo-evil-inline
+    webhook:
+      url: "https://repo-evil.example/hook"
+      secret: repo-evil-hook-secret
+    send_repo_metadata: true
+    fail_on: MEDIUM
+`
+	if err := os.WriteFile(defaultCLIConfigFile, []byte(projectCfg), 0o600); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+
+	cfg, _, err := loadCLIConfig("")
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.Server != "https://trusted.example" || cfg.APIKeyEnv != "PACKMON_TRUSTED_KEY" || cfg.APIKey != "trusted-inline" {
+		t.Fatalf("trusted credential routing was overwritten: %+v", cfg)
+	}
+	if cfg.CACert != "trusted-ca.pem" || cfg.InsecureAllowHTTP == nil || !*cfg.InsecureAllowHTTP {
+		t.Fatalf("trusted TLS/server trust fields were overwritten: %+v", cfg)
+	}
+	if cfg.DB.Path != trustedDB {
+		t.Fatalf("db.path = %q, want trusted user path %q", cfg.DB.Path, trustedDB)
+	}
+	if cfg.Webhook.URL != "https://trusted.example/hook" || cfg.Webhook.Secret != "trusted-hook-secret" {
+		t.Fatalf("trusted webhook config was overwritten: %+v", cfg.Webhook)
+	}
+	if cfg.Output.Format != "json" || cfg.Output.File != "trusted-result.json" {
+		t.Fatalf("trusted output config was overwritten: %+v", cfg.Output)
+	}
+	if cfg.SendRepoMetadata == nil || *cfg.SendRepoMetadata {
+		t.Fatalf("trusted repo-metadata privacy opt-out was overwritten: %+v", cfg.SendRepoMetadata)
+	}
+	if cfg.FailOn != "LOW" {
+		t.Fatalf("non-sensitive project fail_on did not override user config: %q", cfg.FailOn)
+	}
+	if len(cfg.Repos) != 1 {
+		t.Fatalf("repos = %+v, want project repo preserved", cfg.Repos)
+	}
+	repo := cfg.Repos[0]
+	if repo.Server != "" || repo.APIKeyEnv != "" || repo.APIKey != "" {
+		t.Fatalf("project repo credential routing fields were not stripped: %+v", repo)
+	}
+	if repo.Webhook.URL != "" || repo.Webhook.Secret != "" {
+		t.Fatalf("project repo webhook fields were not stripped: %+v", repo.Webhook)
+	}
+	if repo.SendRepoMetadata != nil {
+		t.Fatalf("project repo cannot re-enable repo metadata: %+v", repo.SendRepoMetadata)
+	}
+	if repo.FailOn != "MEDIUM" {
+		t.Fatalf("repo non-sensitive policy not preserved: %+v", repo)
+	}
+}
+
+func TestLoadCLIConfigAutoProjectIgnoresSensitiveFieldsWithoutUserConfig(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+
+	projectCfg := `server: "https://evil.example"
+api_key_env: EVIL_ENV
+api_key: evil-inline
+cacert: evil-ca.pem
+insecure_allow_http: true
+db:
+  path: ./evil-db
+webhook:
+  url: "https://evil.example/hook"
+  secret: evil-hook-secret
+output:
+  format: html
+  file: ../evil-result.html
+send_repo_metadata: false
+mode: remote
+repos:
+  - name: app
+    path: .
+    server: "https://repo-evil.example"
+    api_key_env: REPO_EVIL_ENV
+    api_key: repo-evil-inline
+    webhook:
+      url: "https://repo-evil.example/hook"
+      secret: repo-evil-hook-secret
+    send_repo_metadata: false
+`
+	if err := os.WriteFile(defaultCLIConfigFile, []byte(projectCfg), 0o600); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+
+	cfg, _, err := loadCLIConfig("")
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.Server != "" || cfg.APIKeyEnv != "" || cfg.APIKey != "" || cfg.CACert != "" || cfg.InsecureAllowHTTP != nil {
+		t.Fatalf("auto project sensitive top-level fields were trusted: %+v", cfg)
+	}
+	if cfg.DB.Path != "" {
+		t.Fatalf("auto project db.path = %q, want ignored", cfg.DB.Path)
+	}
+	if cfg.Webhook.URL != "" || cfg.Webhook.Secret != "" {
+		t.Fatalf("auto project webhook fields were trusted: %+v", cfg.Webhook)
+	}
+	if cfg.Output.File != "" {
+		t.Fatalf("auto project output.file = %q, want ignored", cfg.Output.File)
+	}
+	if cfg.SendRepoMetadata == nil || *cfg.SendRepoMetadata {
+		t.Fatalf("auto project send_repo_metadata=false should be preserved: %+v", cfg.SendRepoMetadata)
+	}
+	if cfg.Mode != "remote" {
+		t.Fatalf("non-routing project mode should still load: %q", cfg.Mode)
+	}
+	if len(cfg.Repos) != 1 {
+		t.Fatalf("repos = %+v, want project repo preserved", cfg.Repos)
+	}
+	if cfg.Repos[0].Server != "" || cfg.Repos[0].APIKeyEnv != "" || cfg.Repos[0].APIKey != "" {
+		t.Fatalf("auto project repo sensitive fields were trusted: %+v", cfg.Repos[0])
+	}
+	if cfg.Repos[0].SendRepoMetadata == nil || *cfg.Repos[0].SendRepoMetadata {
+		t.Fatalf("auto project repo send_repo_metadata=false should be preserved: %+v", cfg.Repos[0].SendRepoMetadata)
+	}
+	if cfg.Repos[0].Webhook.URL != "" || cfg.Repos[0].Webhook.Secret != "" {
+		t.Fatalf("auto project repo webhook fields were trusted: %+v", cfg.Repos[0].Webhook)
+	}
+}
+
 func TestLoadCLIConfigNoFilesAndExplicitMissing(t *testing.T) {
 	isolateCLIConfigDiscovery(t)
 
@@ -116,10 +369,18 @@ func TestLoadCLIConfigNoFilesAndExplicitMissing(t *testing.T) {
 	}
 }
 
-func TestResolveLocalDBPathUsesConfigAndReportsConfigErrors(t *testing.T) {
+func TestResolveLocalDBPathUsesTrustedUserConfigAndReportsProjectConfigErrors(t *testing.T) {
 	isolateCLIConfigDiscovery(t)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("home: %v", err)
+	}
+	userCfgDir := filepath.Join(home, ".packmon", "config")
+	if err := os.MkdirAll(userCfgDir, 0o750); err != nil {
+		t.Fatalf("mkdir user config dir: %v", err)
+	}
 	dbDir := filepath.Join(t.TempDir(), "state")
-	if err := os.WriteFile(".packmon.yaml", []byte("db:\n  path: "+strconvQuoteForYAML(dbDir)+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(userCfgDir, "packmon.yaml"), []byte("db:\n  path: "+strconvQuoteForYAML(dbDir)+"\n"), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 
@@ -131,11 +392,28 @@ func TestResolveLocalDBPathUsesConfigAndReportsConfigErrors(t *testing.T) {
 		t.Fatalf("resolveLocalDBPath(config) = %q, want configured DB file", path)
 	}
 
-	if err := os.WriteFile(".packmon.yaml", []byte("server: ["), 0o600); err != nil {
+	if err := os.WriteFile(defaultCLIConfigFile, []byte("server: ["), 0o600); err != nil {
 		t.Fatalf("write invalid config: %v", err)
 	}
 	if _, err := resolveLocalDBPath(); err == nil || !strings.Contains(err.Error(), "parse") {
 		t.Fatalf("resolveLocalDBPath(invalid config) error = %v", err)
+	}
+}
+
+func TestResolveLocalDBPathEnvOverridesAutoProjectDBPath(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	envDBDir := filepath.Join(t.TempDir(), "env-db")
+	t.Setenv("PACKMON_DB_PATH", envDBDir)
+	if err := os.WriteFile(defaultCLIConfigFile, []byte("db:\n  path: ./repo-db\n"), 0o600); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+
+	path, err := resolveLocalDBPath()
+	if err != nil {
+		t.Fatalf("resolveLocalDBPath() error = %v", err)
+	}
+	if path != filepath.Join(envDBDir, "packmon.db") {
+		t.Fatalf("resolveLocalDBPath() = %q, want env-controlled DB path", path)
 	}
 }
 

@@ -3,15 +3,15 @@
 package integration
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -29,34 +29,19 @@ func serverBinaryPath(t *testing.T) string {
 	return ""
 }
 
-// freePort returns an available TCP port on localhost.
-func freePort(t *testing.T) int {
-	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("failed to find free port: %v", err)
-	}
-	port := listener.Addr().(*net.TCPAddr).Port
-	closeSilently(listener)
-	return port
-}
-
 // startServerWithMetrics starts the packmon-server binary in development mode
 // on random ports and returns both base URLs plus a cleanup function.
 func startServerWithMetrics(t *testing.T) (baseURL, metricsURL string, cleanup func()) {
 	t.Helper()
 
-	serverPort := freePort(t)
-	metricsPort := freePort(t)
-
 	bin := serverBinaryPath(t)
-	cmd := exec.Command(bin)
+	cmd, cancel := integrationLongRunningCommand(t, bin)
 	cmd.Env = []string{
 		"PACKMON_SERVER_MODE=development",
-		fmt.Sprintf("PACKMON_SERVER_PORT=%d", serverPort),
-		fmt.Sprintf("PACKMON_METRICS_PORT=%d", metricsPort),
-		"PACKMON_LOG_LEVEL=warn",
-		"PACKMON_LOG_FORMAT=console",
+		"PACKMON_SERVER_PORT=0",
+		"PACKMON_METRICS_PORT=0",
+		"PACKMON_LOG_LEVEL=info",
+		"PACKMON_LOG_FORMAT=json",
 		// DB settings are irrelevant since the noop store is used in dev mode.
 		"PACKMON_DB_HOST=localhost",
 		"PACKMON_DB_PASSWORD=unused",
@@ -67,21 +52,34 @@ func startServerWithMetrics(t *testing.T) (baseURL, metricsURL string, cleanup f
 		"TMP=" + os.Getenv("TMP"),
 	}
 
-	// Capture stderr for debugging.
-	var stderrBuf strings.Builder
-	cmd.Stderr = &stderrBuf
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		t.Fatalf("stderr pipe: %v", err)
+	}
+
+	logs := &serverProcessLogs{}
+	addrCh := make(chan serverBoundAddr, 4)
 
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("failed to start packmon-server: %v", err)
 	}
 
-	base := fmt.Sprintf("http://127.0.0.1:%d", serverPort)
+	go scanServerStdout(stdout, logs, addrCh)
+	go scanServerStderr(stderr, logs)
+
+	addrs := waitForServerBoundAddrs(t, addrCh, logs, 10*time.Second)
+	base := loopbackHTTPURL(t, addrs.main)
+	metrics := loopbackHTTPURL(t, addrs.metrics)
 
 	// Wait for the server to become ready (up to 10 seconds).
 	deadline := time.Now().Add(10 * time.Second)
 	ready := false
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(base + "/healthz")
+		resp, err := integrationHTTPGet(base + "/healthz")
 		if err == nil {
 			closeSilently(resp.Body)
 			if resp.StatusCode == http.StatusOK {
@@ -95,15 +93,109 @@ func startServerWithMetrics(t *testing.T) (baseURL, metricsURL string, cleanup f
 	if !ready {
 		cmd.Process.Kill()
 		cmd.Wait()
-		t.Fatalf("server did not become ready within 10 seconds; stderr: %s", stderrBuf.String())
+		t.Fatalf("server did not become ready within 10 seconds; logs: %s", logs.String())
 	}
 
 	cleanup = func() {
-		cmd.Process.Kill()
-		cmd.Wait()
+		cancel()
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
 	}
 
-	return base, fmt.Sprintf("http://127.0.0.1:%d", metricsPort), cleanup
+	return base, metrics, cleanup
+}
+
+type serverProcessLogs struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (l *serverProcessLogs) appendLine(line string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.buf.WriteString(line)
+	l.buf.WriteByte('\n')
+}
+
+func (l *serverProcessLogs) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.String()
+}
+
+type serverBoundAddr struct {
+	kind string
+	addr string
+}
+
+type serverBoundAddrs struct {
+	main    string
+	metrics string
+}
+
+func scanServerStdout(r io.Reader, logs *serverProcessLogs, addrCh chan<- serverBoundAddr) {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 4096), 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		logs.appendLine(line)
+		var entry map[string]any
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			continue
+		}
+		msg, _ := entry["msg"].(string)
+		addr, _ := entry["addr"].(string)
+		if addr == "" {
+			continue
+		}
+		switch msg {
+		case "main server listening":
+			addrCh <- serverBoundAddr{kind: "main", addr: addr}
+		case "metrics server listening":
+			addrCh <- serverBoundAddr{kind: "metrics", addr: addr}
+		}
+	}
+}
+
+func scanServerStderr(r io.Reader, logs *serverProcessLogs) {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 4096), 1024*1024)
+	for scanner.Scan() {
+		logs.appendLine(scanner.Text())
+	}
+}
+
+func waitForServerBoundAddrs(t *testing.T, addrCh <-chan serverBoundAddr, logs *serverProcessLogs, timeout time.Duration) serverBoundAddrs {
+	t.Helper()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	var addrs serverBoundAddrs
+	for addrs.main == "" || addrs.metrics == "" {
+		select {
+		case addr := <-addrCh:
+			switch addr.kind {
+			case "main":
+				addrs.main = addr.addr
+			case "metrics":
+				addrs.metrics = addr.addr
+			}
+		case <-timer.C:
+			t.Fatalf("server did not report bound main and metrics addresses within %s; logs: %s", timeout, logs.String())
+		}
+	}
+	return addrs
+}
+
+func loopbackHTTPURL(t *testing.T, boundAddr string) string {
+	t.Helper()
+
+	_, port, err := net.SplitHostPort(boundAddr)
+	if err != nil {
+		t.Fatalf("split bound address %q: %v", boundAddr, err)
+	}
+	return "http://127.0.0.1:" + port
 }
 
 // startServer is a convenience wrapper for tests that only need the main URL.
@@ -120,7 +212,7 @@ func TestServerHealthz(t *testing.T) {
 	baseURL, cleanup := startServer(t)
 	defer cleanup()
 
-	resp, err := http.Get(baseURL + "/healthz")
+	resp, err := integrationHTTPGet(baseURL + "/healthz")
 	if err != nil {
 		t.Fatalf("GET /healthz failed: %v", err)
 	}
@@ -147,7 +239,7 @@ func TestServerReadyz(t *testing.T) {
 	baseURL, cleanup := startServer(t)
 	defer cleanup()
 
-	resp, err := http.Get(baseURL + "/readyz")
+	resp, err := integrationHTTPGet(baseURL + "/readyz")
 	if err != nil {
 		t.Fatalf("GET /readyz failed: %v", err)
 	}
@@ -174,7 +266,7 @@ func TestServerVersion(t *testing.T) {
 	baseURL, cleanup := startServer(t)
 	defer cleanup()
 
-	resp, err := http.Get(baseURL + "/version")
+	resp, err := integrationHTTPGet(baseURL + "/version")
 	if err != nil {
 		t.Fatalf("GET /version failed: %v", err)
 	}
@@ -221,7 +313,7 @@ func TestServerCheckValid(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resp, err := http.Post(baseURL+"/api/v1/check", "application/json", bytes.NewReader(body))
+	resp, err := integrationHTTPPost(baseURL+"/api/v1/check", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("POST /api/v1/check failed: %v", err)
 	}
@@ -247,8 +339,10 @@ func TestServerCheckValid(t *testing.T) {
 	}
 
 	requiredFields := []string{
-		"scan_id", "mode", "scanned_at", "packages_scanned",
-		"findings_count", "findings", "feed_versions",
+		"scan_id", "mode", "scanned_at", "duration_ms", "packages_scanned",
+		"findings_count", "findings_blocking", "block_threshold", "feed_status",
+		"db_age_days", "db_stale", "summary", "findings", "feed_versions",
+		"manual_advisories_count",
 	}
 	for _, field := range requiredFields {
 		if _, ok := result[field]; !ok {
@@ -270,17 +364,59 @@ func TestServerCheckValid(t *testing.T) {
 		t.Errorf("expected mode=remote, got %v", result["mode"])
 	}
 
-	// Verify findings is an array (possibly null/empty from noop store).
-	switch f := result["findings"].(type) {
-	case []any:
-		if len(f) != 0 {
-			t.Errorf("expected 0 findings, got %d", len(f))
+	if threshold, ok := result["block_threshold"].(string); !ok || threshold != "CRITICAL" {
+		t.Errorf("expected block_threshold=CRITICAL, got %v", result["block_threshold"])
+	}
+
+	if feedStatus, ok := result["feed_status"].(string); !ok || !allowedScanFeedStatus(feedStatus) {
+		t.Errorf("expected machine-readable feed_status, got %v", result["feed_status"])
+	}
+
+	if blocking, ok := result["findings_blocking"].(bool); !ok || blocking {
+		t.Errorf("expected findings_blocking=false, got %v", result["findings_blocking"])
+	}
+
+	if stale, ok := result["db_stale"].(bool); !ok || stale {
+		t.Errorf("expected db_stale=false, got %v", result["db_stale"])
+	}
+
+	if manual, ok := result["manual_advisories_count"].(float64); !ok || manual != 0 {
+		t.Errorf("expected manual_advisories_count=0, got %v", result["manual_advisories_count"])
+	}
+
+	summary, ok := result["summary"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected summary object, got %T", result["summary"])
+	}
+	for _, field := range []string{"by_severity", "by_type", "by_source"} {
+		if m, ok := summary[field].(map[string]any); !ok || len(m) != 0 {
+			t.Errorf("expected summary.%s to be empty object, got %v", field, summary[field])
 		}
-	case nil:
-		// The noop store returns nil slices, which marshal as JSON null.
-		// This is acceptable for integration testing.
+	}
+
+	findings, ok := result["findings"].([]any)
+	if !ok {
+		t.Fatalf("expected findings to be an array, got %T", result["findings"])
+	}
+	if len(findings) != 0 {
+		t.Errorf("expected 0 findings, got %d", len(findings))
+	}
+
+	feedVersions, ok := result["feed_versions"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected feed_versions to be an object, got %T", result["feed_versions"])
+	}
+	if len(feedVersions) != 0 {
+		t.Errorf("expected empty feed_versions, got %v", feedVersions)
+	}
+}
+
+func allowedScanFeedStatus(status string) bool {
+	switch status {
+	case "healthy", "degraded", "error":
+		return true
 	default:
-		t.Errorf("expected findings to be an array or null, got %T", result["findings"])
+		return false
 	}
 }
 
@@ -301,7 +437,7 @@ func TestServerCheckEmptyPackages(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resp, err := http.Post(baseURL+"/api/v1/check", "application/json", bytes.NewReader(body))
+	resp, err := integrationHTTPPost(baseURL+"/api/v1/check", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("POST /api/v1/check failed: %v", err)
 	}
@@ -328,7 +464,7 @@ func TestServerCheckNoBody(t *testing.T) {
 	baseURL, cleanup := startServer(t)
 	defer cleanup()
 
-	resp, err := http.Post(baseURL+"/api/v1/check", "application/json", nil)
+	resp, err := integrationHTTPPost(baseURL+"/api/v1/check", "application/json", nil)
 	if err != nil {
 		t.Fatalf("POST /api/v1/check failed: %v", err)
 	}
@@ -347,7 +483,7 @@ func TestServerFeedStatus(t *testing.T) {
 	baseURL, cleanup := startServer(t)
 	defer cleanup()
 
-	resp, err := http.Get(baseURL + "/api/v1/feeds/status")
+	resp, err := integrationHTTPGet(baseURL + "/api/v1/feeds/status")
 	if err != nil {
 		t.Fatalf("GET /api/v1/feeds/status failed: %v", err)
 	}
@@ -376,7 +512,7 @@ func TestServerMetrics(t *testing.T) {
 	_, metricsURL, cleanup := startServerWithMetrics(t)
 	defer cleanup()
 
-	resp, err := http.Get(metricsURL + "/metrics")
+	resp, err := integrationHTTPGet(metricsURL + "/metrics")
 	if err != nil {
 		t.Fatalf("GET /metrics failed: %v", err)
 	}
@@ -410,12 +546,14 @@ func TestServerVersionCommand(t *testing.T) {
 	t.Parallel()
 
 	bin := serverBinaryPath(t)
-	cmd := exec.Command(bin, "version")
+	cmd, ctx, cancel := integrationCommandWithTimeout(t, 10*time.Second, bin, "version")
+	defer cancel()
 	cmd.Env = []string{
 		"PATH=" + os.Getenv("PATH"),
 	}
 
 	out, err := cmd.Output()
+	failIfIntegrationCommandTimedOut(t, ctx, 10*time.Second, "packmon-server version", out)
 	if err != nil {
 		t.Fatalf("packmon-server version failed: %v", err)
 	}

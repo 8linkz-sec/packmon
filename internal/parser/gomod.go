@@ -5,7 +5,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 // ---------------------------------------------------------------------------
@@ -194,7 +194,7 @@ func parseGoRequireLine(line string, lineNo int) (domain.Package, error) {
 
 	fields := strings.Fields(line)
 	if len(fields) < 2 {
-		return domain.Package{}, fmt.Errorf("go.mod:%d: malformed require line: %q", lineNo, line)
+		return domain.Package{}, fmt.Errorf("go.mod:%d: malformed require line", lineNo)
 	}
 
 	module := fields[0]

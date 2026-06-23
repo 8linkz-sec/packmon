@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 func TestHistoryEnabledEnvParsing(t *testing.T) {
@@ -142,10 +142,44 @@ func TestScanRepoMetadataHandlesGitRepoWithoutCommit(t *testing.T) {
 	}
 }
 
+func TestScanRepoMetadataTimesOutGitProbe(t *testing.T) {
+	repoDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(repoDir, 0o750); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+
+	originalGitCommandOutput := gitCommandOutput
+	originalGitMetadataTimeout := gitMetadataTimeout
+	t.Cleanup(func() {
+		gitCommandOutput = originalGitCommandOutput
+		gitMetadataTimeout = originalGitMetadataTimeout
+	})
+
+	gitMetadataTimeout = 20 * time.Millisecond
+	calls := 0
+	gitCommandOutput = func(ctx context.Context, args ...string) ([]byte, error) {
+		calls++
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+
+	start := time.Now()
+	repoName, branch, commit := scanRepoMetadata(repoDir)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("scanRepoMetadata took %s, want bounded git metadata probe", elapsed)
+	}
+	if repoName != "repo" || branch != "" || commit != "" {
+		t.Fatalf("scanRepoMetadata(timeout) = %q, %q, %q; want fallback repo name only", repoName, branch, commit)
+	}
+	if calls != 1 {
+		t.Fatalf("git command calls = %d, want only root probe after timeout", calls)
+	}
+}
+
 func runLocalHistoryGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 
-	cmd := exec.Command("git", args...)
+	cmd := exec.Command("git", args...) // #nosec G204 -- test helper invokes fixed git binary with test-controlled arguments.
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(),
 		"GIT_AUTHOR_NAME=Packmon Test",
@@ -160,11 +194,7 @@ func runLocalHistoryGit(t *testing.T, dir string, args ...string) {
 
 func TestRecordScanHistoryStoresFindingIDsAndSeverities(t *testing.T) {
 	store, _ := newTestSQLiteStore(t, t.TempDir())
-	scanDir := filepath.Join(t.TempDir(), "app")
-	if err := os.MkdirAll(scanDir, 0o750); err != nil {
-		t.Fatalf("mkdir scan dir: %v", err)
-	}
-	t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(scanDir))
+	commit := "0123456789abcdef0123456789abcdef01234567"
 	scannedAt := time.Date(2026, 5, 30, 10, 0, 0, 0, time.UTC)
 	result := &domain.ScanResult{
 		ScannedAt:       scannedAt,
@@ -176,19 +206,22 @@ func TestRecordScanHistoryStoresFindingIDsAndSeverities(t *testing.T) {
 		},
 	}
 
-	if err := recordScanHistory(context.Background(), store, scanDir, result); err != nil {
+	if err := recordScanHistoryWithRepo(context.Background(), store, &domain.RepoInfo{Name: "app", Branch: "main", Commit: commit}, result); err != nil {
 		t.Fatalf("record scan history: %v", err)
 	}
 
-	var repoName, idsJSON, severitiesJSON string
+	var repoName, branch, storedCommit, idsJSON, severitiesJSON string
 	var packagesCount, findingsCount int
 	if err := store.DB().QueryRowContext(context.Background(), `
-		SELECT repo_name, packages_count, findings_count, finding_ids, finding_severities
-		FROM scan_history`).Scan(&repoName, &packagesCount, &findingsCount, &idsJSON, &severitiesJSON); err != nil {
+		SELECT repo_name, branch, "commit", packages_count, findings_count, finding_ids, finding_severities
+		FROM scan_history`).Scan(&repoName, &branch, &storedCommit, &packagesCount, &findingsCount, &idsJSON, &severitiesJSON); err != nil {
 		t.Fatalf("read scan history: %v", err)
 	}
 	if repoName != "app" || packagesCount != 2 || findingsCount != 2 {
 		t.Fatalf("history row = repo %q packages %d findings %d", repoName, packagesCount, findingsCount)
+	}
+	if branch != "main" || storedCommit != commit {
+		t.Fatalf("history row branch/commit = %q/%q, want main/%s", branch, storedCommit, commit)
 	}
 
 	var ids []string

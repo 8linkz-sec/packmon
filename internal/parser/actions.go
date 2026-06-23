@@ -5,7 +5,8 @@ import (
 	"io"
 	"strings"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/packageid"
 )
 
 // ActionsParser parses GitHub Actions workflow files under .github/workflows.
@@ -99,5 +100,5 @@ func parseActionUses(uses string) (name, version string, ok bool) {
 	if len(parts) < 2 || parts[0] == "" || parts[1] == "" || version == "" {
 		return "", "", false
 	}
-	return parts[0] + "/" + parts[1], version, true
+	return packageid.NormalizeName(string(domain.EcosystemGitHubActions), parts[0]+"/"+parts[1]), version, true
 }

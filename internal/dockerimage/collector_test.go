@@ -1,8 +1,11 @@
 package dockerimage
 
 import (
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -48,6 +51,52 @@ func TestCollectRecordsParseErrorsAndContinues(t *testing.T) {
 	}
 	if len(collection.ParseErrors) != 1 {
 		t.Fatalf("ParseErrors = %#v, want one compose parse error", collection.ParseErrors)
+	}
+}
+
+func TestParseFileRejectsOversizedInventoryBeforeParsing(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "compose.yaml")
+	writeDockerImageTestFile(t, path, "services: {}\n")
+	if err := os.Truncate(path, maxDockerInventoryFileSize+1); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := parseFile(File{Path: path, RelPath: "compose.yaml", Kind: KindCompose})
+	if err == nil || !strings.Contains(err.Error(), "exceeds maximum docker inventory size") {
+		t.Fatalf("parseFile() error = %v, want size-limit error", err)
+	}
+}
+
+func TestLimitedDockerInventoryReaderAllowsExactLimit(t *testing.T) {
+	reader := &limitedDockerInventoryReader{
+		r:    strings.NewReader("a"),
+		read: maxDockerInventoryFileSize - 1,
+	}
+	buf := make([]byte, 2)
+	n, err := reader.Read(buf)
+	if n != 1 || err != nil {
+		t.Fatalf("first Read() = %d, %v; want 1, nil", n, err)
+	}
+	n, err = reader.Read(buf)
+	if n != 0 || !errors.Is(err, io.EOF) {
+		t.Fatalf("second Read() = %d, %v; want 0, EOF", n, err)
+	}
+}
+
+func TestLimitedDockerInventoryReaderRejectsBytePastLimit(t *testing.T) {
+	reader := &limitedDockerInventoryReader{
+		r:    strings.NewReader("ab"),
+		read: maxDockerInventoryFileSize - 1,
+	}
+	buf := make([]byte, 2)
+	n, err := reader.Read(buf)
+	if n != 1 || err != nil {
+		t.Fatalf("first Read() = %d, %v; want 1, nil", n, err)
+	}
+	n, err = reader.Read(buf)
+	if n != 0 || err == nil || !strings.Contains(err.Error(), "exceeds maximum docker inventory size") {
+		t.Fatalf("second Read() = %d, %v; want size-limit error", n, err)
 	}
 }
 

@@ -7,14 +7,11 @@ to decide whether a change is complete.
 ## Canonical Context
 
 - `DESIGN.md` is the product, architecture, and requirements baseline.
+- `ARCHITECTURE.md` is a concise runtime and deployment architecture map.
 - `SECURITY.md` is the security model and audit checklist.
 - `README.md` is the developer quick-start.
-- `Audit.md` records the latest local audit/fix pass and open validation gaps.
-- `docs/superpowers/plans/` holds task-by-task implementation plans for in-flight
-  features. Use them to understand intended changes, but prefer `DESIGN.md` and
-  `SECURITY.md` as the current reference once a feature lands.
-- `CLAUDE.md` is older broad concept context. Do not treat it as more canonical
-  than `AGENTS.md`, `DESIGN.md`, or `SECURITY.md` when there is drift.
+- Ignored local working notes may exist, but they are not canonical unless their
+  content is promoted into tracked documentation.
 
 When auditing, compare implementation against `DESIGN.md` and `SECURITY.md`.
 When implementing, keep changes consistent with these files or update the
@@ -39,10 +36,9 @@ Packmon is not intended to be a public internet service.
 
 ## Subsystem Guides
 
-Each major subsystem has its own `AGENTS.md` with scope, invariants, current
-open landmines (cross-referenced to `Audit.md`), and scoped test commands. When
-working in or dispatching an agent to a subsystem, read the nearest-ancestor
-`AGENTS.md` in addition to this root file.
+Each major subsystem has its own `AGENTS.md` with scope, invariants, guardrails,
+and scoped test commands. When working in or dispatching an agent to a
+subsystem, read the nearest-ancestor `AGENTS.md` in addition to this root file.
 
 | Path | Subsystem | Owner agent |
 |---|---|---|
@@ -87,6 +83,20 @@ working in or dispatching an agent to a subsystem, read the nearest-ancestor
 - Web UI assets must be served locally from the repo/binary. Do not add CDN
   runtime dependencies.
 
+## Agent Secret Boundaries
+
+- Do not read, summarize, paste, or otherwise ingest ignored secret files such
+  as `.env`, `.env.*`, local credential stores, generated keys, or private
+  runtime configuration.
+- Git ignore rules only keep files out of source control; ignored files are still visible to local agents unless tool permissions explicitly deny them.
+- If a task appears to require a secret-bearing local file, ask the operator to
+  provide the specific non-secret value or use a documented secret-management
+  path instead of opening the file.
+- Treat local agent configuration as security-sensitive even when it is ignored:
+  do not persist bearer tokens, API keys, broad shell allowlists, or write/shell
+  subagent tools there. Project subagents should stay read-only by default unless
+  their mutation scope is reviewed and versioned.
+
 ## Implementation Guidelines
 
 - Prefer existing patterns and package boundaries over new abstractions.
@@ -109,13 +119,17 @@ Use these from the repository root.
 ```bash
 mkdir -p .gotmp
 export GOTMPDIR="$PWD/.gotmp"
+PACKAGES="$(go list ./...)"
+GOSEC_DIRS="$(go list -f '{{.Dir}}' ./...)"
+GOFMT_FILES="$(git ls-files '*.go')"
 go test -count=1 ./...
-go test -race -count=1 ./...
+go test -race -count=1 -coverprofile=coverage.out ${PACKAGES}
+go run ./tools/checkcoverage -profile=coverage.out -min=79.5
 go vet ./...
-gofumpt -extra -l .
+gofumpt -extra -l ${GOFMT_FILES}
 golangci-lint run ./...
-govulncheck ./...
-gosec ./...
+govulncheck ${PACKAGES}
+gosec -nosec-require-rules -nosec-require-justification ${GOSEC_DIRS}
 ```
 
 Build both binaries:
@@ -165,13 +179,17 @@ claim. For broad or release-facing changes, run the full local gate:
 ```bash
 mkdir -p .gotmp
 export GOTMPDIR="$PWD/.gotmp"
-gofumpt -extra -l .
+PACKAGES="$(go list ./...)"
+GOSEC_DIRS="$(go list -f '{{.Dir}}' ./...)"
+GOFMT_FILES="$(git ls-files '*.go')"
+gofumpt -extra -l ${GOFMT_FILES}
 go test -count=1 ./...
-go test -race -count=1 ./...
+go test -race -count=1 -coverprofile=coverage.out ${PACKAGES}
+go run ./tools/checkcoverage -profile=coverage.out -min=79.5
 go vet ./...
 golangci-lint run ./...
-govulncheck ./...
-gosec ./...
+govulncheck ${PACKAGES}
+gosec -nosec-require-rules -nosec-require-justification ${GOSEC_DIRS}
 ```
 
 For changes touching CLI/server binaries, also build both binaries and run the

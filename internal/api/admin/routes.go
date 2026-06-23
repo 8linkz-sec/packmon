@@ -5,10 +5,9 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/8linkz/packmon/internal/auth"
-	"github.com/8linkz/packmon/internal/config"
-	"github.com/8linkz/packmon/internal/db"
-	"github.com/8linkz/packmon/internal/web"
+	"github.com/8linkz-sec/packmon/internal/auth"
+	"github.com/8linkz-sec/packmon/internal/config"
+	"github.com/8linkz-sec/packmon/internal/web"
 )
 
 // RegisterRoutes registers all admin routes on the given mux. The
@@ -19,8 +18,8 @@ import (
 //
 // The wellKnownChangePassword handler implements the .well-known
 // redirect for password managers (Bitwarden compatibility).
-func RegisterRoutes(ctx context.Context, mux *http.ServeMux, store db.Store, sm *auth.SessionManager, logger *slog.Logger, cfg *config.Config, runtime *config.RuntimeSettings, syncFeed FeedSyncFunc, applyFeedConfig FeedConfigApplyFunc, resetFeedConfig FeedConfigResetFunc) {
-	renderer := web.NewRenderer(web.TemplateFS(), false)
+func RegisterRoutes(ctx context.Context, mux *http.ServeMux, store Store, sm *auth.SessionManager, logger *slog.Logger, cfg *config.Config, runtime *config.RuntimeSettings, syncFeed FeedSyncFunc, applyFeedConfig FeedConfigApplyFunc, resetFeedConfig FeedConfigResetFunc) {
+	renderer := web.NewRendererWithLayoutLinks(web.TemplateFS(), false, adminLayoutLinks(cfg))
 	h := NewAdminHandler(ctx, store, sm, renderer, logger, cfg, runtime, syncFeed)
 	h.SetFeedConfigApplyFunc(applyFeedConfig)
 	h.SetFeedConfigResetFunc(resetFeedConfig)
@@ -36,7 +35,10 @@ func RegisterRoutes(ctx context.Context, mux *http.ServeMux, store db.Store, sm 
 	// All other admin routes require an active session.
 	// The session middleware is applied in the server package; here we
 	// only register the route handlers.
-	mux.HandleFunc("GET /admin/", h.HandleDashboard)
+	mux.HandleFunc("GET /admin", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/admin/", http.StatusSeeOther)
+	})
+	mux.HandleFunc("GET /admin/{$}", h.HandleDashboard)
 	mux.HandleFunc("GET /admin/feeds", h.HandleAdminFeeds)
 	mux.HandleFunc("POST /admin/feeds/save", h.HandleFeedConfigSave)
 	mux.HandleFunc("POST /admin/feeds/reset", h.HandleFeedConfigReset)
@@ -64,4 +66,14 @@ func RegisterRoutes(ctx context.Context, mux *http.ServeMux, store db.Store, sm 
 	mux.HandleFunc("GET /.well-known/change-password", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/settings", http.StatusSeeOther)
 	})
+}
+
+func adminLayoutLinks(cfg *config.Config) web.LayoutLinks {
+	if cfg == nil {
+		return web.LayoutLinks{}
+	}
+	return web.LayoutLinks{
+		PrivacyURL: cfg.Web.PrivacyURL,
+		LegalURL:   cfg.Web.LegalURL,
+	}
 }

@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/8linkz/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/db"
 	"github.com/jackc/pgx/v5"
 )
 

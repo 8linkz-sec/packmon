@@ -3,11 +3,7 @@
 .superpowers/
 CLAUDE.md
 Phase *.md
-Audit.md
-CONTRIBUTING.md
-
-# Docs
-docs/
+Todo.txt
 
 # Docker
 node_modules/
@@ -15,6 +11,7 @@ node_modules/
 
 # Secrets
 .env
+.env.*
 
 # Binaries (root only, not cmd/ directories)
 /packmon

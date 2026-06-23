@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 // ---------------------------------------------------------------------------
@@ -102,6 +102,11 @@ func TestNPMParser_Parse(t *testing.T) {
 		{
 			name:    "malformed json",
 			input:   `{not valid json`,
+			wantErr: true,
+		},
+		{
+			name:    "trailing json document",
+			input:   `{"lockfileVersion":3,"packages":{}}{"ignored":true}`,
 			wantErr: true,
 		},
 		{
@@ -261,6 +266,9 @@ func TestNPMParser_ParsePackageLockV3Metadata(t *testing.T) {
 	if len(postcss.Via) != 1 || postcss.Via[0] != "tailwindcss" {
 		t.Fatalf("postcss Via = %#v, want tailwindcss", postcss.Via)
 	}
+	if len(postcss.Parents) != 1 || postcss.Parents[0] != (domain.PackageParent{Name: "tailwindcss", Version: "3.4.17", Ecosystem: domain.EcosystemNPM}) {
+		t.Fatalf("postcss Parents = %#v, want tailwindcss@3.4.17", postcss.Parents)
+	}
 
 	optionalRoot := byName["optional-root"]
 	if !optionalRoot.Direct || !optionalRoot.Optional {
@@ -311,6 +319,9 @@ func TestNPMParser_DoesNotMarkNestedDuplicateNameAsDirect(t *testing.T) {
 	if len(nested.Via) != 1 || nested.Via[0] != "other" {
 		t.Fatalf("nested left-pad Via = %#v, want other", nested.Via)
 	}
+	if len(nested.Parents) != 1 || nested.Parents[0] != (domain.PackageParent{Name: "other", Version: "1.0.0", Ecosystem: domain.EcosystemNPM}) {
+		t.Fatalf("nested left-pad Parents = %#v, want other@1.0.0", nested.Parents)
+	}
 }
 
 func TestNPMParserNameHelperRejectsNonNodeModulePath(t *testing.T) {
@@ -318,6 +329,40 @@ func TestNPMParserNameHelperRejectsNonNodeModulePath(t *testing.T) {
 
 	if got := npmNameFromKey("packages/lodash"); got != "" {
 		t.Fatalf("npmNameFromKey(non-node_modules) = %q, want empty", got)
+	}
+}
+
+func TestNPMPackageResolverUsesIndexedDependencyKeys(t *testing.T) {
+	t.Parallel()
+
+	packages := map[string]packageLockPkg{
+		"": {
+			Dependencies: map[string]string{"app": "^1.0.0"},
+		},
+		"node_modules/app": {
+			Version:      "1.0.0",
+			Dependencies: map[string]string{"left-pad": "^2.0.0"},
+		},
+		"node_modules/app/node_modules/left-pad": {
+			Version: "2.0.0",
+		},
+		"node_modules/left-pad": {
+			Version: "1.0.0",
+		},
+	}
+
+	resolver := newNPMPackageResolver(packages)
+	if got := resolver.rootPackageKey("app"); got != "node_modules/app" {
+		t.Fatalf("rootPackageKey(app) = %q", got)
+	}
+	if got := resolver.dependencyKey("node_modules/app", "left-pad"); got != "node_modules/app/node_modules/left-pad" {
+		t.Fatalf("dependencyKey(nested left-pad) = %q", got)
+	}
+	if got := resolver.dependencyKey("", "left-pad"); got != "node_modules/left-pad" {
+		t.Fatalf("dependencyKey(fallback left-pad) = %q", got)
+	}
+	if got := strings.Join(resolver.resolvedDependencyKeys("node_modules/app"), ","); got != "node_modules/app/node_modules/left-pad" {
+		t.Fatalf("resolvedDependencyKeys(app) = %q", got)
 	}
 }
 

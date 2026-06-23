@@ -1,10 +1,12 @@
 package postgres
 
 import (
+	"os"
+	"strings"
 	"testing"
 
-	"github.com/8linkz/packmon/internal/db"
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 func TestReputationToFindingMapsRemoved(t *testing.T) {
@@ -33,6 +35,39 @@ func TestReputationToFindingMapsRemoved(t *testing.T) {
 	}
 }
 
+func TestListDuePackageReputationsUsesPartialIndexPredicate(t *testing.T) {
+	t.Parallel()
+
+	source, err := os.ReadFile("reputation.go")
+	if err != nil {
+		t.Fatalf("read reputation.go: %v", err)
+	}
+	text := string(source)
+	const duePredicate = "status IN ('pending', 'error', 'malicious', 'removed', 'risk', 'clean', 'not_found')"
+	if !strings.Contains(text, duePredicate) {
+		t.Fatalf("ListDuePackageReputations must use idx_reputation_due predicate %q", duePredicate)
+	}
+	if strings.Contains(text, "AND status <> 'unsupported'") {
+		t.Fatal("ListDuePackageReputations must not use status <> 'unsupported'; it bypasses the partial due index predicate")
+	}
+}
+
+func TestUpsertPackageReputationSkipsIdenticalConflictUpdates(t *testing.T) {
+	required := []string{
+		"ON CONFLICT (ecosystem, name, version, source) DO UPDATE SET",
+		"updated_at = NOW()",
+		"WHERE package_reputation_cache.status IS DISTINCT FROM EXCLUDED.status",
+		"package_reputation_cache.severity IS DISTINCT FROM EXCLUDED.severity",
+		"package_reputation_cache.next_check_at IS DISTINCT FROM EXCLUDED.next_check_at",
+		"package_reputation_cache.last_error IS DISTINCT FROM EXCLUDED.last_error",
+	}
+	for _, want := range required {
+		if !strings.Contains(upsertPackageReputationSQL, want) {
+			t.Fatalf("upsertPackageReputationSQL missing %q", want)
+		}
+	}
+}
+
 func TestReputationToFindingMapsMalicious(t *testing.T) {
 	rep := db.PackageReputation{
 		Ecosystem: "pypi",
@@ -56,7 +91,7 @@ func TestReputationToFindingMapsMalicious(t *testing.T) {
 	}
 }
 
-func TestReputationToFindingSkipsHistoricalRisk(t *testing.T) {
+func TestReputationToFindingMapsHistoricalRisk(t *testing.T) {
 	rep := db.PackageReputation{
 		Ecosystem: "pypi",
 		Name:      "polars-runtime-32",
@@ -67,8 +102,15 @@ func TestReputationToFindingSkipsHistoricalRisk(t *testing.T) {
 		Summary:   "ReversingLabs: malware incident history",
 	}
 
-	if finding, ok := reputationToFinding(rep); ok {
-		t.Fatalf("reputationToFinding(%+v) = %+v, true; want skipped historical risk", rep, finding)
+	finding, ok := reputationToFinding(rep)
+	if !ok {
+		t.Fatal("reputationToFinding returned !ok for historical risk reputation")
+	}
+	if finding.Type != domain.FindingTypeSupplyChainRisk {
+		t.Fatalf("Type = %q, want supply_chain_risk", finding.Type)
+	}
+	if finding.RiskType != "malware_history" {
+		t.Fatalf("RiskType = %q, want malware_history", finding.RiskType)
 	}
 }
 
@@ -113,11 +155,8 @@ func TestReputationSyncFindingMapsRowsAndTombstones(t *testing.T) {
 	risk.Severity = "HIGH"
 	risk.Summary = "ReversingLabs: malware incident history"
 	got = reputationSyncFinding(risk)
-	if !got.Withdrawn {
-		t.Fatalf("historical risk sync row = %+v, want withdrawn tombstone", got)
-	}
-	if got.Type != "" || got.RiskType != "" {
-		t.Fatalf("historical risk tombstone should not carry finding fields: %+v", got)
+	if got.Withdrawn || got.Type != "supply_chain_risk" || got.RiskType != "malware_history" || got.Severity != "HIGH" {
+		t.Fatalf("historical risk sync row = %+v, want active malware_history supply-chain risk", got)
 	}
 
 	clean := removed

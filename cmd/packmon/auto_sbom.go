@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
-	"github.com/8linkz/packmon/internal/sbomgen"
+	"github.com/8linkz-sec/packmon/internal/sbomgen"
 	"github.com/spf13/cobra"
 )
 
@@ -86,6 +88,10 @@ func buildAutoSBOMConfig(settings scanSettings, auto autoSBOMFlags) sbomgen.Conf
 	if auto.SBOMOnly && keepDir == "" {
 		keepDir = "."
 	}
+	logger := scanLogger(settings.Quiet, settings.LogLevel, settings.LogFormat)
+	if auto.InstallTools {
+		logger = newScanLogger(os.Stderr, false, "INFO", settings.LogFormat)
+	}
 	return sbomgen.Config{
 		Target:       settings.Path,
 		Ecosystems:   append([]string(nil), settings.Ecosystems...),
@@ -93,7 +99,8 @@ func buildAutoSBOMConfig(settings scanSettings, auto autoSBOMFlags) sbomgen.Conf
 		KeepSBOMDir:  keepDir,
 		IncludeDev:   settings.IncludeDev,
 		MaxDepth:     settings.MaxDepth,
-		Logger:       scanLogger(settings.Quiet, settings.LogLevel),
+		Timeout:      time.Duration(settings.Timeout) * time.Second,
+		Logger:       logger,
 	}
 }
 
@@ -128,13 +135,16 @@ func runAutoSBOMCommandWithDeps(cmd *cobra.Command, args []string, flags scanFla
 	if err != nil {
 		return withExitCode(ExitOperational, err)
 	}
-	cleanup := func() {
+	cleanup := func() error {
 		if res.Cleanup != nil {
-			_ = res.Cleanup()
+			err := res.Cleanup()
 			res.Cleanup = nil
+			if err != nil {
+				return fmt.Errorf("cleanup generated SBOMs: %w", err)
+			}
 		}
+		return nil
 	}
-	defer cleanup()
 
 	if auto.SBOMOnly {
 		if !settings.Quiet {
@@ -152,10 +162,15 @@ func runAutoSBOMCommandWithDeps(cmd *cobra.Command, args []string, flags scanFla
 	}
 	exitCode, err := run(cmd.Context(), settings)
 	if err != nil {
+		if cleanupErr := cleanup(); cleanupErr != nil {
+			return withExitCode(exitCode, errors.Join(err, cleanupErr))
+		}
 		return withExitCode(exitCode, err)
 	}
+	if cleanupErr := cleanup(); cleanupErr != nil {
+		return withExitCode(ExitOperational, cleanupErr)
+	}
 	if exitCode != ExitOK {
-		cleanup()
 		os.Exit(exitCode)
 	}
 	return nil

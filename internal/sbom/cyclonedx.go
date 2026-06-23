@@ -9,10 +9,12 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
-const maxSBOMSize = 100 << 20
+const MaxSizeBytes = 100 << 20
+
+const maxSBOMSize = MaxSizeBytes
 
 type cyclonedxJSON struct {
 	BOMFormat    string                `json:"bomFormat"`
@@ -39,25 +41,31 @@ type cyclonedxDependency struct {
 }
 
 type cyclonedxXML struct {
-	XMLName    xml.Name                `xml:"bom"`
-	Components []cyclonedxXMLComponent `xml:"components>component"`
+	XMLName      xml.Name                 `xml:"bom"`
+	Metadata     cyclonedxXMLMetadata     `xml:"metadata"`
+	Components   []cyclonedxXMLComponent  `xml:"components>component"`
+	Dependencies []cyclonedxXMLDependency `xml:"dependencies>dependency"`
+}
+
+type cyclonedxXMLMetadata struct {
+	Component cyclonedxXMLComponent `xml:"component"`
 }
 
 type cyclonedxXMLComponent struct {
 	Type    string `xml:"type,attr"`
+	BOMRef  string `xml:"bom-ref,attr"`
 	Name    string `xml:"name"`
 	Version string `xml:"version"`
 	PURL    string `xml:"purl"`
 }
 
-// ParseCycloneDX parses CycloneDX JSON or XML and imports supported components
-// with usable package-url identities.
-func ParseCycloneDX(r io.Reader) (*ParseResult, error) {
-	data, err := readSBOM(r)
-	if err != nil {
-		return nil, err
-	}
-	return parseCycloneDX(data)
+type cyclonedxXMLDependency struct {
+	Ref       string                      `xml:"ref,attr"`
+	DependsOn []cyclonedxXMLDependencyRef `xml:"dependency"`
+}
+
+type cyclonedxXMLDependencyRef struct {
+	Ref string `xml:"ref,attr"`
 }
 
 func parseCycloneDX(data []byte) (*ParseResult, error) {
@@ -80,13 +88,31 @@ func parseCycloneDX(data []byte) (*ParseResult, error) {
 				Type:    c.Type,
 				Name:    c.Name,
 				Version: c.Version,
+				BOMRef:  c.BOMRef,
 				PURL:    c.PURL,
 			})
 		}
-		return importCycloneDXComponents(components), nil
+		result := importCycloneDXComponents(components)
+		applyCycloneDXDependencyMetadata(result.Packages, doc.Metadata.Component.BOMRef, cyclonedxXMLDependencies(doc.Dependencies))
+		return result, nil
 	}
 
 	return nil, fmt.Errorf("unsupported CycloneDX format")
+}
+
+func cyclonedxXMLDependencies(items []cyclonedxXMLDependency) []cyclonedxDependency {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]cyclonedxDependency, 0, len(items))
+	for _, item := range items {
+		dep := cyclonedxDependency{Ref: item.Ref}
+		for _, child := range item.DependsOn {
+			dep.DependsOn = append(dep.DependsOn, child.Ref)
+		}
+		out = append(out, dep)
+	}
+	return out
 }
 
 func importCycloneDXJSON(doc cyclonedxJSON) *ParseResult {
@@ -182,11 +208,8 @@ func applyCycloneDXDependencyMetadata(packages []Package, rootRef string, depend
 			if idx, ok := refToIndex[directRef]; ok {
 				packages[idx].Package.Direct = true
 			}
-			if idx, ok := refToIndex[directRef]; ok {
-				rootName := packages[idx].Package.Name
-				applyCycloneDXRootVia(packages, refToIndex, edges, directRef, rootName)
-			}
 		}
+		applyCycloneDXRootVia(packages, refToIndex, edges, rootRef)
 	}
 
 	for parentRef, childRefs := range edges {
@@ -214,27 +237,95 @@ func applyCycloneDXDependencyMetadata(packages []Package, rootRef string, depend
 	}
 }
 
-func applyCycloneDXRootVia(packages []Package, refToIndex map[string]int, edges map[string][]string, rootChildRef, rootName string) {
-	rootName = strings.TrimSpace(rootName)
-	if rootName == "" {
-		return
+type cycloneDXViaRoot struct {
+	name      string
+	directRef string
+}
+
+func applyCycloneDXRootVia(packages []Package, refToIndex map[string]int, edges map[string][]string, rootRef string) {
+	viaByRef := make(map[string]map[cycloneDXViaRoot]struct{})
+	queue := make([]string, 0)
+
+	for _, directRef := range edges[rootRef] {
+		idx, ok := refToIndex[directRef]
+		if !ok {
+			continue
+		}
+		rootName := strings.TrimSpace(packages[idx].Package.Name)
+		if rootName == "" {
+			continue
+		}
+		root := cycloneDXViaRoot{name: rootName, directRef: directRef}
+		for _, childRef := range edges[directRef] {
+			if addCycloneDXViaRoot(viaByRef, childRef, root) {
+				queue = append(queue, childRef)
+			}
+		}
 	}
-	seen := map[string]struct{}{rootChildRef: {}}
-	queue := append([]string(nil), edges[rootChildRef]...)
+
 	for len(queue) > 0 {
 		ref := queue[0]
 		queue = queue[1:]
-		if _, ok := seen[ref]; ok {
+		roots := viaByRef[ref]
+		for _, childRef := range edges[ref] {
+			if mergeCycloneDXViaRoots(viaByRef, childRef, roots) {
+				queue = append(queue, childRef)
+			}
+		}
+	}
+
+	for ref, roots := range viaByRef {
+		idx, ok := refToIndex[ref]
+		if !ok {
 			continue
 		}
-		seen[ref] = struct{}{}
-		if idx, ok := refToIndex[ref]; ok {
-			pkg := &packages[idx].Package
-			pkg.Indirect = true
-			pkg.Via = mergeSBOMStringSet(pkg.Via, []string{rootName})
-		}
-		queue = append(queue, edges[ref]...)
+		pkg := &packages[idx].Package
+		pkg.Indirect = true
+		pkg.Via = mergeSBOMStringSet(pkg.Via, cycloneDXViaRootValues(roots))
 	}
+}
+
+func addCycloneDXViaRoot(viaByRef map[string]map[cycloneDXViaRoot]struct{}, ref string, root cycloneDXViaRoot) bool {
+	ref = strings.TrimSpace(ref)
+	root.name = strings.TrimSpace(root.name)
+	root.directRef = strings.TrimSpace(root.directRef)
+	if ref == "" || root.name == "" || root.directRef == "" || ref == root.directRef {
+		return false
+	}
+	roots := viaByRef[ref]
+	if roots == nil {
+		roots = make(map[cycloneDXViaRoot]struct{}, 1)
+		viaByRef[ref] = roots
+	}
+	if _, ok := roots[root]; ok {
+		return false
+	}
+	roots[root] = struct{}{}
+	return true
+}
+
+func mergeCycloneDXViaRoots(viaByRef map[string]map[cycloneDXViaRoot]struct{}, ref string, roots map[cycloneDXViaRoot]struct{}) bool {
+	changed := false
+	for root := range roots {
+		if addCycloneDXViaRoot(viaByRef, ref, root) {
+			changed = true
+		}
+	}
+	return changed
+}
+
+func cycloneDXViaRootValues(roots map[cycloneDXViaRoot]struct{}) []string {
+	names := make(map[string]struct{}, len(roots))
+	for root := range roots {
+		if root.name != "" {
+			names[root.name] = struct{}{}
+		}
+	}
+	values := make([]string, 0, len(names))
+	for name := range names {
+		values = append(values, name)
+	}
+	return values
 }
 
 func mergeSBOMStringSet(left, right []string) []string {

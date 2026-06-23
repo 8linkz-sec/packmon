@@ -12,6 +12,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/8linkz-sec/packmon/internal/findinglinks"
+	"github.com/8linkz-sec/packmon/internal/plural"
 )
 
 // Renderer loads, caches, and executes HTML templates from an embedded FS.
@@ -23,14 +26,28 @@ type Renderer struct {
 	dev   bool // when true, templates are reloaded on every render
 }
 
+// LayoutLinks are optional operator-facing links rendered by the shared layout.
+type LayoutLinks struct {
+	PrivacyURL string
+	LegalURL   string
+	HideAdmin  bool
+}
+
 // NewRenderer creates a Renderer backed by the given filesystem.
 // If dev is true, templates are re-parsed on every call (useful during
 // development but slower).
 func NewRenderer(fsys fs.FS, dev bool) *Renderer {
+	return NewRendererWithLayoutLinks(fsys, dev, LayoutLinks{})
+}
+
+// NewRendererWithLayoutLinks creates a Renderer with shared footer notice links.
+func NewRendererWithLayoutLinks(fsys fs.FS, dev bool, links LayoutLinks) *Renderer {
+	links.PrivacyURL = strings.TrimSpace(links.PrivacyURL)
+	links.LegalURL = strings.TrimSpace(links.LegalURL)
 	return &Renderer{
 		fs:    fsys,
 		cache: make(map[string]*template.Template),
-		funcs: defaultFuncMap(),
+		funcs: defaultFuncMap(links),
 		dev:   dev,
 	}
 }
@@ -120,21 +137,54 @@ func (r *Renderer) parse(name string) (*template.Template, error) {
 }
 
 // defaultFuncMap returns the template functions available to every template.
-func defaultFuncMap() template.FuncMap {
+func defaultFuncMap(links LayoutLinks) template.FuncMap {
 	return template.FuncMap{
 		"formatTime":    formatTime,
 		"formatTimeAgo": formatTimeAgo,
+		"formatTimeISO": formatTimeISO,
 		"formatFixedIn": formatFixedIn,
 		"severityClass": severityClass,
 		"statusClass":   statusClass,
 		"truncate":      truncate,
+		"findingLabels": findingTypeLabels,
 		"lower":         strings.ToLower,
 		"upper":         strings.ToUpper,
 		"hasPrefix":     strings.HasPrefix,
+		"advisoryURL":   advisoryURL,
+		"dict":          dict,
+		"count":         plural.Count,
 		"add":           func(a, b int) int { return a + b },
 		"sub":           func(a, b int) int { return a - b },
 		"seq":           seq,
+		"privacyURL":    func() string { return links.PrivacyURL },
+		"legalURL":      func() string { return links.LegalURL },
+		"adminNavEnabled": func() bool {
+			return !links.HideAdmin
+		},
 	}
+}
+
+func dict(values ...any) (map[string]any, error) {
+	if len(values)%2 != 0 {
+		return nil, fmt.Errorf("dict requires an even number of arguments")
+	}
+	out := make(map[string]any, len(values)/2)
+	for i := 0; i < len(values); i += 2 {
+		key, ok := values[i].(string)
+		if !ok {
+			return nil, fmt.Errorf("dict keys must be strings")
+		}
+		out[key] = values[i+1]
+	}
+	return out, nil
+}
+
+func advisoryURL(id string) string {
+	link, _, ok := findinglinks.CanonicalVulnerabilityResource(strings.TrimSpace(id))
+	if !ok {
+		return ""
+	}
+	return link.URL
 }
 
 // formatTime renders a time.Time as a human-readable string.
@@ -144,6 +194,13 @@ func formatTime(t time.Time) string {
 		return "-"
 	}
 	return t.UTC().Format("2006-01-02 15:04 UTC")
+}
+
+func formatTimeISO(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
 }
 
 // formatTimeAgo renders a time.Time as a relative "X ago" string.
@@ -260,13 +317,41 @@ func statusClass(status string) string {
 
 // truncate shortens a string to max characters, appending "..." if truncated.
 func truncate(s string, max int) string {
-	if len(s) <= max {
+	if max <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= max {
 		return s
 	}
 	if max < 4 {
-		return s[:max]
+		return string(runes[:max])
 	}
-	return s[:max-3] + "..."
+	return string(runes[:max-3]) + "..."
+}
+
+func findingTypeLabels(csv string) []string {
+	parts := strings.Split(csv, ",")
+	labels := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		switch part {
+		case "vulnerability":
+			labels = append(labels, "Vulnerability")
+		case "malicious":
+			labels = append(labels, "Malicious package")
+		case "supply_chain_risk":
+			labels = append(labels, "Supply-chain risk")
+		case "lifecycle":
+			labels = append(labels, "Lifecycle")
+		default:
+			labels = append(labels, part)
+		}
+	}
+	return labels
 }
 
 // seq returns a slice of ints from 0 to n-1 for range iteration in templates.

@@ -2,7 +2,9 @@ package admin
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/8linkz/packmon/internal/auth"
-	"github.com/8linkz/packmon/internal/config"
-	"github.com/8linkz/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/auth"
+	"github.com/8linkz-sec/packmon/internal/config"
+	"github.com/8linkz-sec/packmon/internal/db"
 )
 
 func TestAdminHandlerNilFeedConfigSetters(t *testing.T) {
@@ -39,11 +41,11 @@ func TestHandleLoginInvalidCSRFAndMissingAdminBranches(t *testing.T) {
 	}
 	req := httptest.NewRequest(http.MethodPost, "/admin/login", strings.NewReader(badForm.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: badSess.ID})
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: badSess.ID}) //nolint:gosec // test injects an in-memory pre-auth session cookie.
 	rec := httptest.NewRecorder()
 	handler.HandleLogin(rec, req)
-	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/admin/" {
-		t.Fatalf("invalid CSRF login response = %d %q", rec.Code, rec.Header().Get("Location"))
+	if rec.Code != http.StatusOK || rec.Header().Get("Location") != "" || !strings.Contains(rec.Body.String(), "Invalid request") {
+		t.Fatalf("invalid CSRF login response = %d location=%q body=%q", rec.Code, rec.Header().Get("Location"), rec.Body.String())
 	}
 
 	sess, err := sm.CreatePreAuth(httptest.NewRecorder())
@@ -61,7 +63,7 @@ func TestHandleLoginInvalidCSRFAndMissingAdminBranches(t *testing.T) {
 	}
 	req = httptest.NewRequest(http.MethodPost, "/admin/login", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: sess.ID})
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: sess.ID}) //nolint:gosec // test injects an in-memory pre-auth session cookie.
 	rec = httptest.NewRecorder()
 	handler.HandleLogin(rec, req)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Admin account has not been configured") {
@@ -85,6 +87,16 @@ func TestHandleLogoutSuccessAuditsAndRedirects(t *testing.T) {
 	}
 	if len(audit) != 1 || audit[0].Action != "logout" {
 		t.Fatalf("audit = %+v, want logout", audit)
+	}
+	if audit[0].IP == "" {
+		t.Fatalf("logout audit IP = %q, want source IP column populated", audit[0].IP)
+	}
+	var details map[string]string
+	if err := json.Unmarshal(audit[0].Details, &details); err != nil {
+		t.Fatalf("logout audit details JSON = %q: %v", string(audit[0].Details), err)
+	}
+	if _, ok := details["ip"]; ok {
+		t.Fatalf("logout audit details duplicate IP: %v", details)
 	}
 }
 
@@ -193,6 +205,132 @@ func TestAdminPagesRenderOptionalDataBranches(t *testing.T) {
 	}
 }
 
+func TestAdminAuditPaginationRendersReachableHistory(t *testing.T) {
+	store := newAdminStoreStub()
+	for i := 1; i <= 105; i++ {
+		action := fmt.Sprintf("audit_%03d", i)
+		if err := store.InsertAdminAuditLog(context.Background(), &db.AdminAuditEntry{Action: action}); err != nil {
+			t.Fatalf("InsertAdminAuditLog(%s) error = %v", action, err)
+		}
+	}
+	handler, sm, _ := newAdminFlowHandler(t, store, adminFlowConfig())
+
+	req, _ := authenticatedAdminRequest(t, sm, http.MethodGet, "/admin/audit")
+	rec := httptest.NewRecorder()
+	handler.HandleAdminAudit(rec, req)
+	body := rec.Body.String()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, body)
+	}
+	if !strings.Contains(body, "audit_105") || strings.Contains(body, "audit_005") {
+		t.Fatalf("first audit page did not show newest 100 only\nbody=%s", body)
+	}
+	if !strings.Contains(body, `/admin/audit?offset=100`) {
+		t.Fatalf("first audit page missing next-page link\nbody=%s", body)
+	}
+
+	req, _ = authenticatedAdminRequest(t, sm, http.MethodGet, "/admin/audit?offset=100")
+	rec = httptest.NewRecorder()
+	handler.HandleAdminAudit(rec, req)
+	body = rec.Body.String()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("page 2 status = %d body=%s", rec.Code, body)
+	}
+	if !strings.Contains(body, "audit_005") || strings.Contains(body, "audit_105") {
+		t.Fatalf("second audit page did not show older entries\nbody=%s", body)
+	}
+	if !strings.Contains(body, `/admin/audit?offset=0`) {
+		t.Fatalf("second audit page missing previous-page link\nbody=%s", body)
+	}
+}
+
+func TestAdminQueuePaginationAndStatusFilterRenderReachableJobs(t *testing.T) {
+	store := newAdminStoreStub()
+	now := time.Now().UTC()
+	for i := 1; i <= 55; i++ {
+		store.queueJobs = append(store.queueJobs, db.RefreshJob{
+			ID:          i,
+			Ecosystem:   "npm",
+			Name:        fmt.Sprintf("pkg-%03d", i),
+			Source:      "socket",
+			Priority:    3,
+			Status:      "pending",
+			RequestedAt: now.Add(time.Duration(i) * time.Second),
+		})
+	}
+	store.queueJobs = append(store.queueJobs, db.RefreshJob{
+		ID:          56,
+		Ecosystem:   "npm",
+		Name:        "error-only",
+		Source:      "socket",
+		Priority:    3,
+		Status:      "error",
+		RequestedAt: now.Add(56 * time.Second),
+	})
+	handler, sm, _ := newAdminFlowHandler(t, store, adminFlowConfig())
+
+	req, _ := authenticatedAdminRequest(t, sm, http.MethodGet, "/admin/queue?status=pending")
+	rec := httptest.NewRecorder()
+	handler.HandleAdminQueue(rec, req)
+	body := rec.Body.String()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, body)
+	}
+	if !strings.Contains(body, "pkg-055") || strings.Contains(body, "pkg-005") || strings.Contains(body, "error-only") {
+		t.Fatalf("first pending queue page did not show newest pending jobs only\nbody=%s", body)
+	}
+	if !strings.Contains(body, `/admin/queue?status=pending&amp;offset=50`) {
+		t.Fatalf("first pending queue page missing next-page link\nbody=%s", body)
+	}
+	if !strings.Contains(body, `/admin/queue?status=error`) {
+		t.Fatalf("queue status filter missing error link\nbody=%s", body)
+	}
+
+	req, _ = authenticatedAdminRequest(t, sm, http.MethodGet, "/admin/queue?status=pending&offset=50")
+	rec = httptest.NewRecorder()
+	handler.HandleAdminQueue(rec, req)
+	body = rec.Body.String()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("page 2 status = %d body=%s", rec.Code, body)
+	}
+	if !strings.Contains(body, "pkg-005") || strings.Contains(body, "pkg-055") {
+		t.Fatalf("second pending queue page did not show older pending jobs\nbody=%s", body)
+	}
+	if !strings.Contains(body, `/admin/queue?status=pending&amp;offset=0`) {
+		t.Fatalf("second pending queue page missing previous-page link\nbody=%s", body)
+	}
+}
+
+func TestAdminAuditHighlightsLockoutAndExposesFullDetails(t *testing.T) {
+	store := newAdminStoreStub()
+	longDetails := `{"event":"lockout","note":"` + strings.Repeat("a", 100) + `unique-tail-marker"}`
+	if err := store.InsertAdminAuditLog(context.Background(), &db.AdminAuditEntry{
+		Action:  "login_lockout",
+		Details: json.RawMessage(longDetails),
+		IP:      "127.0.0.1",
+	}); err != nil {
+		t.Fatalf("InsertAdminAuditLog() error = %v", err)
+	}
+	handler, sm, _ := newAdminFlowHandler(t, store, adminFlowConfig())
+
+	req, _ := authenticatedAdminRequest(t, sm, http.MethodGet, "/admin/audit")
+	rec := httptest.NewRecorder()
+	handler.HandleAdminAudit(rec, req)
+	body := rec.Body.String()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, body)
+	}
+	if !strings.Contains(body, "bg-amber-100 text-amber-800") {
+		t.Fatalf("lockout audit action was not highlighted as warning\nbody=%s", body)
+	}
+	if !strings.Contains(body, "unique-tail-marker") {
+		t.Fatalf("full audit details tail was not reachable in rendered page\nbody=%s", body)
+	}
+	if !strings.Contains(body, "Verified") {
+		t.Fatalf("audit integrity status was not rendered\nbody=%s", body)
+	}
+}
+
 func TestAdminFeedHealthBranches(t *testing.T) {
 	old := time.Now().Add(-72 * time.Hour)
 	recent := time.Now().Add(-time.Hour)
@@ -202,11 +340,16 @@ func TestAdminFeedHealthBranches(t *testing.T) {
 		status *db.FeedSyncStatus
 		want   string
 	}{
+		{name: "feed disabled", feed: config.FeedSettings{Enabled: false, SupportsSyncInterval: true}, want: "disabled"},
+		{name: "status disabled without timestamp", feed: config.FeedSettings{Enabled: true, SupportsSyncInterval: true}, status: &db.FeedSyncStatus{LastSyncStatus: "disabled"}, want: "disabled"},
 		{name: "external no sync", feed: config.FeedSettings{Enabled: true, Mode: config.FeedModeExternal}, want: "configured"},
 		{name: "no interval support", feed: config.FeedSettings{Enabled: true}, want: "configured"},
+		{name: "error without timestamp", feed: config.FeedSettings{Enabled: true, SupportsSyncInterval: true}, status: &db.FeedSyncStatus{LastSyncStatus: "error", LastError: "boom"}, want: "error"},
+		{name: "permanent error", feed: config.FeedSettings{Enabled: true, SupportsSyncInterval: true}, status: &db.FeedSyncStatus{LastSyncAt: &recent, LastSyncStatus: "permanent_error", EntriesTotal: 1}, want: "error"},
 		{name: "error", feed: config.FeedSettings{Enabled: true, SupportsSyncInterval: true}, status: &db.FeedSyncStatus{LastSyncAt: &recent, LastSyncStatus: "error", EntriesTotal: 1}, want: "error"},
 		{name: "running", feed: config.FeedSettings{Enabled: true, SupportsSyncInterval: true}, status: &db.FeedSyncStatus{LastSyncAt: &recent, LastSyncStatus: "running", EntriesTotal: 1}, want: "running"},
 		{name: "skipped", feed: config.FeedSettings{Enabled: true, SupportsSyncInterval: true}, status: &db.FeedSyncStatus{LastSyncAt: &recent, LastSyncStatus: "skipped", EntriesTotal: 1}, want: "warning"},
+		{name: "unknown status", feed: config.FeedSettings{Enabled: true, SupportsSyncInterval: true}, status: &db.FeedSyncStatus{LastSyncAt: &recent, LastSyncStatus: "failed", EntriesTotal: 1}, want: "error"},
 		{name: "stale", feed: config.FeedSettings{Enabled: true, SupportsSyncInterval: true}, status: &db.FeedSyncStatus{LastSyncAt: &old, LastSyncStatus: "success", EntriesTotal: 1}, want: "warning"},
 		{name: "zero entries", feed: config.FeedSettings{Enabled: true, SupportsSyncInterval: true}, status: &db.FeedSyncStatus{LastSyncAt: &recent, LastSyncStatus: "success"}, want: "warning"},
 	}
@@ -227,9 +370,74 @@ func (s failingAuditStore) InsertAdminAuditLog(context.Context, *db.AdminAuditEn
 	return errors.New("audit down")
 }
 
-func TestAuditLogIgnoresStoreFailure(t *testing.T) {
+func (s failingAuditStore) CreateAPIKeyWithAudit(context.Context, string, string, *time.Time, *db.AdminAuditEntry) (int, error) {
+	return 0, errors.Join(db.ErrAdminAuditLog, errors.New("audit down"))
+}
+
+func (s failingAuditStore) RevokeAPIKeyWithAudit(context.Context, int, *db.AdminAuditEntry) error {
+	return errors.Join(db.ErrAdminAuditLog, errors.New("audit down"))
+}
+
+func (s failingAuditStore) DeleteAPIKeyWithAudit(context.Context, int, *db.AdminAuditEntry) error {
+	return errors.Join(db.ErrAdminAuditLog, errors.New("audit down"))
+}
+
+func (s failingAuditStore) UpsertAdminAuthWithAudit(context.Context, string, bool, *db.AdminAuditEntry) error {
+	return errors.Join(db.ErrAdminAuditLog, errors.New("audit down"))
+}
+
+func (s failingAuditStore) PurgeQueueWithAudit(context.Context, *db.AdminAuditEntry) (int, error) {
+	return 0, errors.Join(db.ErrAdminAuditLog, errors.New("audit down"))
+}
+
+func (s failingAuditStore) UpdateQueueJobPriorityWithAudit(context.Context, int, int, *db.AdminAuditEntry) error {
+	return errors.Join(db.ErrAdminAuditLog, errors.New("audit down"))
+}
+
+func (s failingAuditStore) PauseQueueJobWithAudit(context.Context, int, *db.AdminAuditEntry) error {
+	return errors.Join(db.ErrAdminAuditLog, errors.New("audit down"))
+}
+
+func (s failingAuditStore) ResumeQueueJobWithAudit(context.Context, int, *db.AdminAuditEntry) error {
+	return errors.Join(db.ErrAdminAuditLog, errors.New("audit down"))
+}
+
+func (s failingAuditStore) RetryQueueJobWithAudit(context.Context, int, *db.AdminAuditEntry) error {
+	return errors.Join(db.ErrAdminAuditLog, errors.New("audit down"))
+}
+
+func (s failingAuditStore) ClearQueueWithAudit(context.Context, []string, *db.AdminAuditEntry) (int, error) {
+	return 0, errors.Join(db.ErrAdminAuditLog, errors.New("audit down"))
+}
+
+func TestAuditLogReturnsStoreFailure(t *testing.T) {
 	handler, sm := newAdminHandlerForStore(t, failingAuditStore{adminFlowStoreStub: newAdminStoreStub()}, adminFlowConfig())
 	req, _ := authenticatedAdminRequest(t, sm, http.MethodGet, "/admin/")
 
-	handler.auditLog(req, "test_action", map[string]string{"ok": "true"})
+	if err := handler.auditLog(req, "test_action", map[string]string{"ok": "true"}); err == nil {
+		t.Fatal("auditLog() error = nil, want store failure")
+	}
+}
+
+type cancelAwareAuditStore struct {
+	*adminFlowStoreStub
+}
+
+func (s cancelAwareAuditStore) InsertAdminAuditLog(ctx context.Context, entry *db.AdminAuditEntry) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return s.adminFlowStoreStub.InsertAdminAuditLog(ctx, entry)
+}
+
+func TestAuditLogUsesIndependentContext(t *testing.T) {
+	handler, sm := newAdminHandlerForStore(t, cancelAwareAuditStore{adminFlowStoreStub: newAdminStoreStub()}, adminFlowConfig())
+	req, _ := authenticatedAdminRequest(t, sm, http.MethodGet, "/admin/")
+	ctx, cancel := context.WithCancel(req.Context())
+	cancel()
+	req = req.WithContext(ctx)
+
+	if err := handler.auditLog(req, "test_action", map[string]string{"ok": "true"}); err != nil {
+		t.Fatalf("auditLog() error = %v, want independent context", err)
+	}
 }

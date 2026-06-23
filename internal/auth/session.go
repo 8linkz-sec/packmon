@@ -15,6 +15,10 @@ const (
 	// session ID.
 	SessionCookieName = "packmon_session"
 
+	// SessionCookiePath scopes browser delivery of the admin session cookie
+	// to admin routes.
+	SessionCookiePath = "/admin"
+
 	// sessionIDBytes is the number of random bytes used for session IDs.
 	// 32 bytes = 256 bits of entropy, hex-encoded to 64 characters.
 	sessionIDBytes = 32
@@ -25,25 +29,38 @@ const (
 	preAuthSessionTTL = 15 * time.Minute
 )
 
+// DefaultAdminIdleTimeout is the server-side inactivity timeout for admin
+// sessions when no explicit value is configured.
+const DefaultAdminIdleTimeout = 15 * time.Minute
+
 // Session holds the data associated with an authenticated admin session.
 type Session struct {
-	ID           string
-	Admin        bool
-	CreatedAt    time.Time
-	LastAccessed time.Time
+	ID    string
+	Admin bool
+	// AuthenticatedWithBootstrap records that this session was created by
+	// logging in with the bootstrap admin password. Such sessions remain
+	// limited to password rotation even after another session clears the
+	// global bootstrap flag.
+	AuthenticatedWithBootstrap bool
+	CreatedAt                  time.Time
+	LastAccessed               time.Time
 	// expiresAt is when the session becomes invalid. Most sessions expire
 	// maxAge after creation; pre-auth login-form sessions expire sooner.
 	expiresAt time.Time
 
 	// CSRFToken is the per-session CSRF token, generated lazily on first
 	// access via CSRFToken().
-	csrfMu    sync.Mutex
-	csrfToken string
+	csrf *sessionCSRFState
 
 	// flash holds one-time key/value pairs that are deleted on first read.
 	// Used to pass sensitive data (like newly created API keys) between
 	// requests without exposing them in the URL.
 	flash map[string]string
+}
+
+type sessionCSRFState struct {
+	mu    sync.Mutex
+	token string
 }
 
 // SessionManager manages in-memory admin sessions. It is safe for
@@ -53,7 +70,8 @@ type SessionManager struct {
 	sessions map[string]*Session
 
 	// maxAge is how long a session remains valid after creation.
-	maxAge time.Duration
+	maxAge      time.Duration
+	idleTimeout time.Duration
 	// secure controls the Secure flag on the session cookie. It must
 	// be true in production (HTTPS only) and may be false in development.
 	secure bool
@@ -65,13 +83,23 @@ type SessionManager struct {
 // background cleanup goroutine; when the context is cancelled the
 // goroutine exits.
 func NewSessionManager(ctx context.Context, maxAge time.Duration, secure bool) *SessionManager {
+	return NewSessionManagerWithIdleTimeout(ctx, maxAge, DefaultAdminIdleTimeout, secure)
+}
+
+// NewSessionManagerWithIdleTimeout creates a SessionManager with separate
+// absolute and inactivity timeouts for admin sessions.
+func NewSessionManagerWithIdleTimeout(ctx context.Context, maxAge, idleTimeout time.Duration, secure bool) *SessionManager {
 	if maxAge <= 0 {
 		maxAge = 8 * time.Hour
 	}
+	if idleTimeout <= 0 {
+		idleTimeout = DefaultAdminIdleTimeout
+	}
 	sm := &SessionManager{
-		sessions: make(map[string]*Session),
-		maxAge:   maxAge,
-		secure:   secure,
+		sessions:    make(map[string]*Session),
+		maxAge:      maxAge,
+		idleTimeout: idleTimeout,
+		secure:      secure,
 	}
 	// Background goroutine to evict expired sessions every 5 minutes.
 	go sm.cleanup(ctx)
@@ -81,6 +109,23 @@ func NewSessionManager(ctx context.Context, maxAge time.Duration, secure bool) *
 // Create generates a new session, stores it, and writes the session
 // cookie to the response.
 func (sm *SessionManager) Create(w http.ResponseWriter) (*Session, error) {
+	return sm.createAdmin(w, false, false)
+}
+
+// CreateAdmin creates an authenticated admin session, optionally recording
+// that the login used the bootstrap password.
+func (sm *SessionManager) CreateAdmin(w http.ResponseWriter, authenticatedWithBootstrap bool) (*Session, error) {
+	return sm.createAdmin(w, authenticatedWithBootstrap, false)
+}
+
+// CreateExclusiveAdmin creates a fresh admin session, removes all previous
+// admin sessions, and writes the new session cookie. Non-admin pre-auth
+// sessions are left intact because they only carry login CSRF tokens.
+func (sm *SessionManager) CreateExclusiveAdmin(w http.ResponseWriter) (*Session, error) {
+	return sm.createAdmin(w, false, true)
+}
+
+func (sm *SessionManager) createAdmin(w http.ResponseWriter, authenticatedWithBootstrap, exclusive bool) (*Session, error) {
 	id, err := generateSessionID()
 	if err != nil {
 		return nil, fmt.Errorf("auth: generate session id: %w", err)
@@ -88,19 +133,28 @@ func (sm *SessionManager) Create(w http.ResponseWriter) (*Session, error) {
 
 	now := time.Now()
 	sess := &Session{
-		ID:           id,
-		Admin:        true,
-		CreatedAt:    now,
-		LastAccessed: now,
-		expiresAt:    now.Add(sm.maxAge),
+		ID:                         id,
+		Admin:                      true,
+		AuthenticatedWithBootstrap: authenticatedWithBootstrap,
+		CreatedAt:                  now,
+		LastAccessed:               now,
+		expiresAt:                  now.Add(sm.maxAge),
+		csrf:                       &sessionCSRFState{},
 	}
 
 	sm.mu.Lock()
+	if exclusive {
+		for existingID, existing := range sm.sessions {
+			if existing.Admin {
+				delete(sm.sessions, existingID)
+			}
+		}
+	}
 	sm.sessions[id] = sess
 	sm.mu.Unlock()
 
 	sm.setCookie(w, id, sm.maxAge)
-	return sess, nil
+	return cloneSession(sess), nil
 }
 
 // CreatePreAuth creates a short-lived, non-admin session used only to carry a
@@ -123,6 +177,7 @@ func (sm *SessionManager) CreatePreAuth(w http.ResponseWriter) (*Session, error)
 		CreatedAt:    now,
 		LastAccessed: now,
 		expiresAt:    now.Add(ttl),
+		csrf:         &sessionCSRFState{},
 	}
 
 	sm.mu.Lock()
@@ -130,7 +185,7 @@ func (sm *SessionManager) CreatePreAuth(w http.ResponseWriter) (*Session, error)
 	sm.mu.Unlock()
 
 	sm.setCookie(w, id, ttl)
-	return sess, nil
+	return cloneSession(sess), nil
 }
 
 // Get retrieves the session associated with the request's session
@@ -150,14 +205,20 @@ func (sm *SessionManager) Get(r *http.Request) *Session {
 		return nil
 	}
 
+	now := time.Now()
+
 	// Check expiration.
-	if !sess.expiresAt.IsZero() && time.Now().After(sess.expiresAt) {
+	if !sess.expiresAt.IsZero() && now.After(sess.expiresAt) {
+		delete(sm.sessions, cookie.Value)
+		return nil
+	}
+	if sess.Admin && sm.idleTimeout > 0 && now.Sub(sess.LastAccessed) > sm.idleTimeout {
 		delete(sm.sessions, cookie.Value)
 		return nil
 	}
 
-	sess.LastAccessed = time.Now()
-	return sess
+	sess.LastAccessed = now
+	return cloneSession(sess)
 }
 
 // Delete destroys the session and clears the session cookie.
@@ -171,12 +232,17 @@ func (sm *SessionManager) Delete(w http.ResponseWriter, r *http.Request) {
 	delete(sm.sessions, cookie.Value)
 	sm.mu.Unlock()
 
-	// Overwrite the cookie with an expired value.
+	sm.clearCookie(w, SessionCookiePath)
+	// Also clear the legacy root-scoped cookie used by older Packmon builds.
+	sm.clearCookie(w, "/")
+}
+
+func (sm *SessionManager) clearCookie(w http.ResponseWriter, path string) {
 	// #nosec G124 -- Secure is intentionally configurable so local HTTP development remains usable; production enables it.
 	http.SetCookie(w, &http.Cookie{
 		Name:     SessionCookieName,
 		Value:    "",
-		Path:     "/",
+		Path:     path,
 		MaxAge:   -1,
 		HttpOnly: true,
 		Secure:   sm.secure,
@@ -190,7 +256,7 @@ func (sm *SessionManager) setCookie(w http.ResponseWriter, sessionID string, ttl
 	http.SetCookie(w, &http.Cookie{
 		Name:     SessionCookieName,
 		Value:    sessionID,
-		Path:     "/",
+		Path:     SessionCookiePath,
 		MaxAge:   int(ttl.Seconds()),
 		HttpOnly: true,
 		Secure:   sm.secure,
@@ -235,6 +301,23 @@ func (sm *SessionManager) GetFlash(sessionID, key string) string {
 	return val
 }
 
+func cloneSession(sess *Session) *Session {
+	if sess == nil {
+		return nil
+	}
+	clone := *sess
+	if clone.csrf == nil {
+		clone.csrf = &sessionCSRFState{}
+	}
+	if sess.flash != nil {
+		clone.flash = make(map[string]string, len(sess.flash))
+		for key, value := range sess.flash {
+			clone.flash[key] = value
+		}
+	}
+	return &clone
+}
+
 // cleanup periodically evicts expired sessions. It runs in its own
 // goroutine, started by NewSessionManager. It exits when ctx is cancelled.
 func (sm *SessionManager) cleanup(ctx context.Context) {
@@ -245,14 +328,22 @@ func (sm *SessionManager) cleanup(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			sm.mu.Lock()
-			now := time.Now()
-			for id, sess := range sm.sessions {
-				if !sess.expiresAt.IsZero() && now.After(sess.expiresAt) {
-					delete(sm.sessions, id)
-				}
-			}
-			sm.mu.Unlock()
+			sm.cleanupExpiredSessions(time.Now())
+		}
+	}
+}
+
+func (sm *SessionManager) cleanupExpiredSessions(now time.Time) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	for id, sess := range sm.sessions {
+		if !sess.expiresAt.IsZero() && now.After(sess.expiresAt) {
+			delete(sm.sessions, id)
+			continue
+		}
+		if sess.Admin && sm.idleTimeout > 0 && now.Sub(sess.LastAccessed) > sm.idleTimeout {
+			delete(sm.sessions, id)
 		}
 	}
 }

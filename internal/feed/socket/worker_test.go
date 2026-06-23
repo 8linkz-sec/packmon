@@ -1,6 +1,7 @@
 package socket
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,26 +14,27 @@ import (
 	"testing"
 	"time"
 
-	"github.com/8linkz/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/db"
 )
 
 type socketTestStore struct {
-	db.Store
-
-	job           *db.RefreshJob
-	dequeueErr    error
-	completeErr   error
-	resetErr      error
-	resetCount    int
-	upsertErr     error
-	statusErr     error
-	dequeueSource string
-	findings      []db.MaliciousFinding
-	statuses      []db.PackageCheckStatus
-	completed     []socketCompletion
-	resetSource   string
-	resetCh       chan struct{}
-	resetOnce     sync.Once
+	job            *db.RefreshJob
+	jobs           []*db.RefreshJob
+	dequeueErr     error
+	completeErr    error
+	resetErr       error
+	resetCount     int
+	upsertErr      error
+	statusErr      error
+	dequeueSource  string
+	findings       []db.MaliciousFinding
+	statuses       []db.PackageCheckStatus
+	completed      []socketCompletion
+	completeCtxErr error
+	resetSource    string
+	resetCh        chan struct{}
+	statusBlock    chan struct{}
+	resetOnce      sync.Once
 }
 
 type socketCompletion struct {
@@ -48,7 +50,14 @@ func (s *socketTestStore) UpsertMaliciousFinding(_ context.Context, finding *db.
 	return nil
 }
 
-func (s *socketTestStore) UpsertPackageCheckStatus(_ context.Context, status *db.PackageCheckStatus) error {
+func (s *socketTestStore) UpsertPackageCheckStatus(ctx context.Context, status *db.PackageCheckStatus) error {
+	if s.statusBlock != nil {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-s.statusBlock:
+		}
+	}
 	if s.statusErr != nil {
 		return s.statusErr
 	}
@@ -61,10 +70,16 @@ func (s *socketTestStore) DequeueRefresh(_ context.Context, source string) (*db.
 	if s.dequeueErr != nil {
 		return nil, s.dequeueErr
 	}
+	if len(s.jobs) > 0 {
+		job := s.jobs[0]
+		s.jobs = s.jobs[1:]
+		return job, nil
+	}
 	return s.job, nil
 }
 
-func (s *socketTestStore) CompleteRefresh(_ context.Context, id int, err error) error {
+func (s *socketTestStore) CompleteRefresh(ctx context.Context, id int, err error) error {
+	s.completeCtxErr = ctx.Err()
 	s.completed = append(s.completed, socketCompletion{id: id, err: err})
 	return s.completeErr
 }
@@ -87,6 +102,7 @@ func TestNewWorkerOptionsAndName(t *testing.T) {
 		WithHTTPClient(client),
 		WithBaseURL("https://socket.example/api/"),
 		WithPollInterval(25*time.Millisecond),
+		WithJobTimeout(15*time.Second),
 		WithRateLimit(7),
 	)
 	if worker.Name() != FeedName {
@@ -97,6 +113,28 @@ func TestNewWorkerOptionsAndName(t *testing.T) {
 	}
 	if worker.tokens != 7 || worker.maxTokens != 7 {
 		t.Fatalf("rate limit tokens = %d/%d, want 7/7", worker.tokens, worker.maxTokens)
+	}
+	if worker.jobTimeout != 15*time.Second {
+		t.Fatalf("jobTimeout = %v, want 15s", worker.jobTimeout)
+	}
+}
+
+func TestWorkersShareRateLimitState(t *testing.T) {
+	t.Parallel()
+
+	limiter := NewRateLimiter(1)
+	first := NewWorker(&socketTestStore{}, "secret", nil, WithRateLimiter(limiter))
+	second := NewWorker(&socketTestStore{}, "secret", nil, WithRateLimiter(limiter))
+
+	if !first.acquireToken() {
+		t.Fatal("first worker could not acquire initial shared token")
+	}
+	if second.acquireToken() {
+		t.Fatal("second worker acquired a fresh token from a shared exhausted bucket")
+	}
+	first.returnToken()
+	if !second.acquireToken() {
+		t.Fatal("second worker could not acquire token returned by first worker")
 	}
 }
 
@@ -113,9 +151,10 @@ func TestCheckPackageStoresSecurityIssuesAndStatus(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
 			"package":{"name":"left-pad","version":"1.0.1"},
+			"score":{"overall":0.42,"supplyChain":0.25},
 			"issues":[
-				{"type":"malware","severity":"high","title":"Malware detected","description":"exfiltrates tokens","version":"1.0.0","affectedVersions":["1.0.1"]},
-				{"type":"maintenance","severity":"low","title":"not security relevant"}
+				{"type":"malware","severity":"high","title":"Malware detected","description":"raw provider incident detail","version":"1.0.0","affectedVersions":["1.0.1"]},
+				{"type":"maintenance","severity":"low","title":"raw maintenance title"}
 			]
 		}`))
 	}))
@@ -158,8 +197,82 @@ func TestCheckPackageStoresSecurityIssuesAndStatus(t *testing.T) {
 	if store.statuses[0].LastCheckedAt == nil || store.statuses[0].NextCheckAt == nil {
 		t.Fatalf("check status timestamps missing: %+v", store.statuses[0])
 	}
-	if len(store.statuses[0].LastResult) == 0 {
-		t.Fatal("LastResult is empty, want raw Socket.dev response")
+	statusResult := string(store.statuses[0].LastResult)
+	for _, want := range []string{`"status":"ok"`, `"package_version":"1.0.1"`, `"issue_count":2`, `"security_issue_count":1`, `"overall":0.42`} {
+		if !strings.Contains(statusResult, want) {
+			t.Fatalf("LastResult = %s, want normalized field %s", statusResult, want)
+		}
+	}
+	for _, leaked := range []string{"raw provider incident detail", "raw maintenance title", "Malware detected"} {
+		if strings.Contains(statusResult, leaked) {
+			t.Fatalf("LastResult leaked raw Socket.dev response detail %q in %s", leaked, statusResult)
+		}
+	}
+}
+
+func TestCheckPackageStoresNormalizedNotFoundStatus(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"provider_detail":"raw-404-body"}`))
+	}))
+	t.Cleanup(server.Close)
+
+	store := &socketTestStore{}
+	worker := NewWorker(store, "socket-secret", nil, WithBaseURL(server.URL))
+
+	err := worker.checkPackage(context.Background(), &db.RefreshJob{
+		ID: 7, Ecosystem: "npm", Name: "missing", Source: FeedName,
+	})
+	if err != nil {
+		t.Fatalf("checkPackage() error = %v", err)
+	}
+
+	if len(store.statuses) != 1 {
+		t.Fatalf("check statuses = %d, want 1", len(store.statuses))
+	}
+	statusResult := string(store.statuses[0].LastResult)
+	if !strings.Contains(statusResult, `"status":"not_found"`) {
+		t.Fatalf("LastResult = %s, want normalized not_found status", statusResult)
+	}
+	if strings.Contains(statusResult, "raw-404-body") {
+		t.Fatalf("LastResult leaked raw Socket.dev 404 body: %s", statusResult)
+	}
+}
+
+func TestProcessNextJobCompletesWithErrorWhenFindingWriteFails(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"package":{"name":"left-pad","version":"1.0.1"},
+			"issues":[{"type":"malware","severity":"critical","title":"Malware detected"}]
+		}`))
+	}))
+	t.Cleanup(server.Close)
+
+	store := &socketTestStore{
+		job:       &db.RefreshJob{ID: 91, Ecosystem: "npm", Name: "left-pad", Source: FeedName},
+		upsertErr: errors.New("store unavailable"),
+	}
+	worker := NewWorker(store, "socket-secret", nil,
+		WithBaseURL(server.URL),
+		WithRateLimit(1),
+	)
+
+	worker.processNextJob(context.Background())
+
+	if len(store.completed) != 1 || store.completed[0].id != 91 {
+		t.Fatalf("completed jobs = %+v, want job 91", store.completed)
+	}
+	if store.completed[0].err == nil || !strings.Contains(store.completed[0].err.Error(), "store unavailable") {
+		t.Fatalf("completion error = %v, want finding write failure", store.completed[0].err)
+	}
+	if len(store.statuses) != 0 {
+		t.Fatalf("statuses = %+v, want no success status after finding write failure", store.statuses)
 	}
 }
 
@@ -184,6 +297,59 @@ func TestCheckPackageRateLimitDrainsTokens(t *testing.T) {
 	}
 	if len(store.statuses) != 0 {
 		t.Fatalf("statuses = %d, want 0 after upstream 429", len(store.statuses))
+	}
+}
+
+func TestProcessNextJobUsesPerJobDeadline(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"missing":true}`))
+	}))
+	t.Cleanup(server.Close)
+
+	store := &socketTestStore{
+		job:         &db.RefreshJob{ID: 88, Ecosystem: "npm", Name: "left-pad", Source: FeedName},
+		statusBlock: make(chan struct{}),
+	}
+	worker := NewWorker(store, "socket-secret", nil,
+		WithBaseURL(server.URL),
+		WithJobTimeout(10*time.Millisecond),
+		WithRateLimit(1),
+	)
+	worker.processNextJob(context.Background())
+
+	if len(store.completed) != 1 || store.completed[0].id != 88 {
+		t.Fatalf("completed jobs = %+v, want job 88", store.completed)
+	}
+	if !errors.Is(store.completed[0].err, context.DeadlineExceeded) {
+		t.Fatalf("completion error = %v, want context deadline exceeded", store.completed[0].err)
+	}
+}
+
+func TestProcessNextJobLeavesRateLimitedJobForRetry(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	t.Cleanup(server.Close)
+
+	store := &socketTestStore{
+		job: &db.RefreshJob{ID: 89, Ecosystem: "npm", Name: "left-pad", Source: FeedName},
+	}
+	worker := NewWorker(store, "socket-secret", nil,
+		WithBaseURL(server.URL),
+		WithRateLimit(1),
+	)
+	worker.processNextJob(context.Background())
+
+	if len(store.completed) != 0 {
+		t.Fatalf("completed jobs = %+v, want rate-limited job left processing for retry", store.completed)
+	}
+	if len(store.statuses) != 0 {
+		t.Fatalf("statuses = %+v, want no status write for transient rate limit", store.statuses)
 	}
 }
 
@@ -248,6 +414,20 @@ func TestProcessNextJobHandlesStoreErrors(t *testing.T) {
 		t.Fatalf("completed jobs = %+v, want job 3 despite completion error", store.completed)
 	}
 
+	store = &socketTestStore{
+		job: &db.RefreshJob{ID: 4, Ecosystem: "hex", Name: "plug"},
+	}
+	worker = NewWorker(store, "socket-secret", nil, WithRateLimit(1))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	worker.processNextJob(ctx)
+	if len(store.completed) != 1 || store.completed[0].id != 4 {
+		t.Fatalf("completed jobs after canceled worker context = %+v, want job 4", store.completed)
+	}
+	if store.completeCtxErr != nil {
+		t.Fatalf("CompleteRefresh context error = %v, want independent live context", store.completeCtxErr)
+	}
+
 	store = &socketTestStore{resetErr: errors.New("reset failed")}
 	worker = NewWorker(store, "socket-secret", nil)
 	worker.resetStuckJobs(context.Background())
@@ -263,6 +443,7 @@ func TestProcessNextJobCompletesUnsupportedEcosystemAsError(t *testing.T) {
 		job: &db.RefreshJob{ID: 42, Ecosystem: "hex", Name: "plug", Source: FeedName, Priority: 1},
 	}
 	worker := NewWorker(store, "socket-secret", nil, WithRateLimit(1))
+	worker.tokens = 1
 
 	worker.processNextJob(context.Background())
 
@@ -280,6 +461,9 @@ func TestProcessNextJobCompletesUnsupportedEcosystemAsError(t *testing.T) {
 	}
 	if !strings.Contains(store.completed[0].err.Error(), "unsupported ecosystem") {
 		t.Fatalf("completion error = %v", store.completed[0].err)
+	}
+	if worker.tokens != 1 {
+		t.Fatalf("tokens = %d, want returned token for unsupported ecosystem", worker.tokens)
 	}
 }
 
@@ -300,6 +484,77 @@ func TestProcessNextJobReturnsTokenWhenQueueEmpty(t *testing.T) {
 	}
 }
 
+func TestProcessNextJobReturnsTokenWhenDequeueFails(t *testing.T) {
+	t.Parallel()
+
+	store := &socketTestStore{dequeueErr: errors.New("queue down")}
+	worker := NewWorker(store, "socket-secret", nil, WithRateLimit(1))
+	worker.tokens = 1
+
+	worker.processNextJob(context.Background())
+
+	if store.dequeueSource != FeedName {
+		t.Fatalf("dequeue source = %q, want %q", store.dequeueSource, FeedName)
+	}
+	if worker.tokens != 1 {
+		t.Fatalf("tokens = %d, want returned token when dequeue fails", worker.tokens)
+	}
+	if len(store.completed) != 0 {
+		t.Fatalf("completed jobs = %d, want 0", len(store.completed))
+	}
+}
+
+func TestProcessAvailableJobsDrainsAvailableTokens(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"missing":true}`))
+	}))
+	t.Cleanup(server.Close)
+
+	store := &socketTestStore{
+		jobs: []*db.RefreshJob{
+			{ID: 1, Ecosystem: "npm", Name: "pkg-a", Source: FeedName},
+			{ID: 2, Ecosystem: "npm", Name: "pkg-b", Source: FeedName},
+			{ID: 3, Ecosystem: "npm", Name: "pkg-c", Source: FeedName},
+		},
+	}
+	worker := NewWorker(store, "socket-secret", nil, WithBaseURL(server.URL), WithRateLimit(3))
+	worker.tokens = 3
+	worker.lastRefill = time.Now()
+
+	worker.processAvailableJobs(context.Background())
+
+	if len(store.completed) != 3 {
+		t.Fatalf("completed jobs = %+v, want all 3 available-token jobs", store.completed)
+	}
+	if worker.tokens != 0 {
+		t.Fatalf("tokens = %d, want drained available tokens", worker.tokens)
+	}
+}
+
+func TestProcessNextJobSuppressesRepeatedDequeueErrorLogs(t *testing.T) {
+	t.Parallel()
+
+	store := &socketTestStore{dequeueErr: errors.New("queue down")}
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	worker := NewWorker(store, "socket-secret", logger, WithRateLimit(2))
+	worker.tokens = 2
+
+	worker.processNextJob(context.Background())
+	worker.processNextJob(context.Background())
+
+	output := logs.String()
+	if got := strings.Count(output, `"level":"ERROR"`); got != 1 {
+		t.Fatalf("ERROR dequeue logs = %d, want 1; logs=%s", got, output)
+	}
+	if !strings.Contains(output, `"suppressed":true`) {
+		t.Fatalf("repeated dequeue log missing suppressed marker: %s", output)
+	}
+}
+
 func TestProcessNextJobSkipsWhenNoToken(t *testing.T) {
 	t.Parallel()
 
@@ -312,6 +567,35 @@ func TestProcessNextJobSkipsWhenNoToken(t *testing.T) {
 
 	if store.dequeueSource != "" {
 		t.Fatalf("dequeue source = %q, want no dequeue without token", store.dequeueSource)
+	}
+}
+
+func TestRunDoesNotResetStuckJobsBeforeFirstPoll(t *testing.T) {
+	t.Parallel()
+
+	resetCh := make(chan struct{})
+	store := &socketTestStore{resetCh: resetCh}
+	worker := NewWorker(store, "socket-secret", nil, WithPollInterval(time.Hour), WithRateLimit(1))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- worker.Run(ctx) }()
+
+	select {
+	case <-resetCh:
+		cancel()
+		t.Fatal("Run reset stuck jobs before the first poll")
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run() did not exit after cancellation")
 	}
 }
 
@@ -351,7 +635,9 @@ func TestUpdateCheckStatusLogsStoreError(t *testing.T) {
 	store := &socketTestStore{statusErr: errors.New("status failed")}
 	worker := NewWorker(store, "socket-secret", nil)
 
-	worker.updateCheckStatus(context.Background(), &db.RefreshJob{Ecosystem: "npm", Name: "left-pad"}, []byte(`{}`))
+	if err := worker.updateCheckStatus(context.Background(), &db.RefreshJob{Ecosystem: "npm", Name: "left-pad"}, []byte(`{}`)); err == nil {
+		t.Fatal("updateCheckStatus() error = nil, want store error")
+	}
 
 	if len(store.statuses) != 0 {
 		t.Fatalf("statuses = %d, want none after status error", len(store.statuses))
@@ -416,7 +702,7 @@ func TestRunReturnsImmediatelyWithoutAPIKey(t *testing.T) {
 	}
 }
 
-func TestProcessIssuesContinuesAfterStoreError(t *testing.T) {
+func TestProcessIssuesReturnsStoreError(t *testing.T) {
 	t.Parallel()
 
 	store := &socketErrorStore{}
@@ -424,8 +710,8 @@ func TestProcessIssuesContinuesAfterStoreError(t *testing.T) {
 	err := worker.processIssues(context.Background(), &db.RefreshJob{Ecosystem: "npm", Name: "left-pad"}, &scoreResponse{
 		Issues: []issueEntry{{Type: "malware", Severity: "critical"}},
 	})
-	if err != nil {
-		t.Fatalf("processIssues() error = %v", err)
+	if err == nil || !strings.Contains(err.Error(), "insert failed") {
+		t.Fatalf("processIssues() error = %v, want store failure", err)
 	}
 	if store.calls != 1 {
 		t.Fatalf("upsert calls = %d, want 1", store.calls)

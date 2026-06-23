@@ -3,7 +3,6 @@ package sbom
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"strings"
 )
 
@@ -22,15 +21,6 @@ type spdxExternalRef struct {
 	ReferenceCategory string `json:"referenceCategory"`
 	ReferenceType     string `json:"referenceType"`
 	ReferenceLocator  string `json:"referenceLocator"`
-}
-
-// ParseSPDXJSON parses SPDX JSON package entries with package-url external refs.
-func ParseSPDXJSON(r io.Reader) (*ParseResult, error) {
-	data, err := readSBOM(r)
-	if err != nil {
-		return nil, err
-	}
-	return parseSPDXJSON(data)
 }
 
 func parseSPDXJSON(data []byte) (*ParseResult, error) {

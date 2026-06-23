@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -9,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/8linkz/packmon/internal/auth"
-	"github.com/8linkz/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/auth"
+	"github.com/8linkz-sec/packmon/internal/db"
 )
 
 func TestAdminSystemSettingsValidationBranches(t *testing.T) {
@@ -41,6 +42,11 @@ func TestAdminSystemSettingsValidationBranches(t *testing.T) {
 			want:   "Invalid+block+threshold",
 		},
 		{
+			name:   "none without acknowledgement",
+			values: url.Values{"block_threshold": {"NONE"}, "rate_limit_per_minute": {"60"}, "rate_limit_burst": {"10"}},
+			want:   "Block+threshold+NONE+requires+explicit+acknowledgement",
+		},
+		{
 			name:   "invalid rate per minute",
 			values: url.Values{"block_threshold": {"HIGH"}, "rate_limit_per_minute": {"0"}, "rate_limit_burst": {"10"}},
 			want:   "Invalid+rate+limit+per+minute",
@@ -63,6 +69,25 @@ func TestAdminSystemSettingsValidationBranches(t *testing.T) {
 				t.Fatalf("Location = %q, want containing %q", got, tt.want)
 			}
 		})
+	}
+
+	req, _ = authenticatedAdminFormRequest(t, sm, "/admin/settings/system", url.Values{
+		"block_threshold":          {"NONE"},
+		"ack_block_threshold_none": {"true"},
+		"rate_limit_per_minute":    {"60"},
+		"rate_limit_burst":         {"10"},
+	})
+	rec = httptest.NewRecorder()
+	handler.HandleSystemSettingsSave(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("acknowledged NONE status = %d, want 303", rec.Code)
+	}
+	settings, err := store.GetSystemSettings(context.Background())
+	if err != nil {
+		t.Fatalf("GetSystemSettings() error = %v", err)
+	}
+	if settings == nil || settings.BlockThreshold != "NONE" || handler.runtime.BlockThreshold() != "NONE" {
+		t.Fatalf("acknowledged NONE settings = %+v runtime=%q, want NONE", settings, handler.runtime.BlockThreshold())
 	}
 }
 

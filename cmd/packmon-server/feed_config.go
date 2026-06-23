@@ -6,8 +6,8 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/8linkz/packmon/internal/config"
-	"github.com/8linkz/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/config"
+	"github.com/8linkz-sec/packmon/internal/db"
 )
 
 func applyStoredFeedConfigOverrides(ctx context.Context, cfg *config.Config, store db.Store, logger *slog.Logger) error {
@@ -44,7 +44,7 @@ func applyStoredFeedConfigOverrides(ctx context.Context, cfg *config.Config, sto
 		} else {
 			current.SyncInterval = 0
 		}
-		if current.RequiresAPIKey || strings.TrimSpace(override.APIKey) != "" {
+		if current.SupportsAPIKey || strings.TrimSpace(override.APIKey) != "" {
 			current.APIKey = strings.TrimSpace(override.APIKey)
 		}
 

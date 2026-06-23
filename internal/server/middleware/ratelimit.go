@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/8linkz-sec/packmon/internal/logsafe"
 )
 
 // RateLimitConfig defines the token bucket parameters.
@@ -108,30 +110,27 @@ func (rl *rateLimiter) cleanup(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			rl.mu.Lock()
-			cutoff := time.Now().Add(-10 * time.Minute)
-			for ip, b := range rl.buckets {
-				if b.lastSeen.Before(cutoff) {
-					delete(rl.buckets, ip)
-				}
-			}
-			rl.mu.Unlock()
+			rl.cleanupStaleBuckets(time.Now())
 		}
 	}
 }
 
-// RateLimit applies a per-IP token-bucket rate limiter. When a client
-// exceeds the allowed rate, subsequent requests receive 429 Too Many
-// Requests until tokens are replenished. The context controls the
-// lifetime of the background cleanup goroutine.
-func RateLimit(ctx context.Context, logger *slog.Logger, cfg RateLimitConfig) func(http.Handler) http.Handler {
-	return rateLimitMiddleware(newRateLimiter(ctx, cfg.Rate, cfg.Burst), logger)
+func (rl *rateLimiter) cleanupStaleBuckets(now time.Time) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	cutoff := now.Add(-10 * time.Minute)
+	for ip, b := range rl.buckets {
+		if b.lastSeen.Before(cutoff) {
+			delete(rl.buckets, ip)
+		}
+	}
 }
 
-// RateLimitWithSource is like RateLimit but reads the current limit from source
-// on every request, so admin changes take effect without a restart. cfg
-// provides the initial fallback values used until/unless the source returns
-// valid limits.
+// RateLimitWithSource applies a per-IP token-bucket rate limiter. It reads the
+// current limit from source on every request, so admin changes take effect
+// without a restart. cfg provides the initial fallback values used until/unless
+// the source returns valid limits.
 func RateLimitWithSource(ctx context.Context, logger *slog.Logger, cfg RateLimitConfig, source RateLimitSource) func(http.Handler) http.Handler {
 	rl := newRateLimiter(ctx, cfg.Rate, cfg.Burst)
 	rl.source = source
@@ -143,12 +142,12 @@ func rateLimitMiddleware(rl *rateLimiter, logger *slog.Logger) func(http.Handler
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ip := clientIP(r)
 			if !rl.allow(ip) {
-				logger.Warn("rate limit exceeded",
-					slog.String("ip", ip),
-					slog.String("path", r.URL.Path),
+				logger.Debug("rate limit exceeded",
+					slog.String("client_ip", ip),
+					slog.String("path", logsafe.RequestPathLabel(r.URL.Path)),
 					slog.String("correlation_id", CorrelationIDFromContext(r.Context())),
 				)
-				http.Error(w, `{"error":"rate limit exceeded"}`, http.StatusTooManyRequests)
+				writeJSONError(w, http.StatusTooManyRequests, "rate limit exceeded")
 				return
 			}
 			next.ServeHTTP(w, r)

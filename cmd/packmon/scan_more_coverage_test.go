@@ -1,15 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNewScanCmdRunEBranches(t *testing.T) {
@@ -117,12 +121,44 @@ func TestRunListPackagesIncludesSPDXSBOM(t *testing.T) {
 	}
 
 	output := captureStdout(t, func() {
-		if err := runListPackages([]string{projectDir}, "", 2, true, []string{sbomPath}); err != nil {
+		if err := runListPackages([]string{projectDir}, "", 2, []string{sbomPath}); err != nil {
 			t.Fatalf("runListPackages(SBOM) error = %v", err)
 		}
 	})
 	if !strings.Contains(output, "django") || !strings.Contains(output, "4.2.11") || !strings.Contains(output, "sbom.spdx.json") {
 		t.Fatalf("list-packages SBOM output = %q", output)
+	}
+}
+
+func TestRunListPackagesSanitizesTerminalControlText(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	projectDir := t.TempDir()
+	sbomPath := filepath.Join(projectDir, "sbom.cdx.json")
+	if err := os.WriteFile(sbomPath, []byte(`{
+		"bomFormat":"CycloneDX",
+		"components":[{
+			"type":"library",
+			"name":"fallback",
+			"version":"1.0.0",
+			"purl":"pkg:npm/pkg%1B%5D8%3B%3Bhttps%3A%2F%2Fevil.example%07%0A%3A%3Awarning%3A%3Apkg@1.0.0%0Dspoof"
+		}]
+	}`), 0o600); err != nil {
+		t.Fatalf("write CycloneDX SBOM: %v", err)
+	}
+
+	output := captureStdout(t, func() {
+		if err := runListPackages([]string{projectDir}, "", 2, []string{sbomPath}); err != nil {
+			t.Fatalf("runListPackages(SBOM) error = %v", err)
+		}
+	})
+
+	for _, blocked := range []string{"\x1b", "\a", "\r", "\n::warning::"} {
+		if strings.Contains(output, blocked) {
+			t.Fatalf("list-packages output contains raw terminal control %q:\n%s", blocked, output)
+		}
+	}
+	if !strings.Contains(output, `\x1B`) || !strings.Contains(output, `\n::warning::pkg`) {
+		t.Fatalf("list-packages output missing sanitized controls:\n%s", output)
 	}
 }
 
@@ -151,12 +187,54 @@ func TestRunOutdatedIncludesCycloneDXSBOM(t *testing.T) {
 	}
 
 	output := captureStdout(t, func() {
-		if err := runOutdated([]string{projectDir}, "npm", 2, []string{sbomPath}); err != nil {
+		if err := runOutdatedForTest([]string{projectDir}, "npm", 2, []string{sbomPath}); err != nil {
 			t.Fatalf("runOutdated(SBOM) error = %v", err)
 		}
 	})
 	if !strings.Contains(output, "outdated") || !strings.Contains(output, "1.0.0") || !strings.Contains(output, "2.0.0") {
 		t.Fatalf("outdated SBOM output = %q", output)
+	}
+}
+
+func TestRunOutdatedKeepsPackageVersionsDistinct(t *testing.T) {
+	originalClient := registryClient
+	t.Cleanup(func() { registryClient = originalClient })
+	registryClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Host+req.URL.EscapedPath() != "registry.npmjs.org/dupe/latest" {
+			t.Fatalf("unexpected registry request: %s", req.URL.String())
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"version":"2.0.0"}`)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})}
+
+	projectDir := t.TempDir()
+	sbomPath := filepath.Join(projectDir, "bom.cdx.json")
+	if err := os.WriteFile(sbomPath, []byte(`{
+		"bomFormat":"CycloneDX",
+		"components":[
+			{"type":"library","name":"dupe","version":"2.0.0","purl":"pkg:npm/dupe@2.0.0"},
+			{"type":"library","name":"dupe","version":"1.0.0","purl":"pkg:npm/dupe@1.0.0"}
+		]
+	}`), 0o600); err != nil {
+		t.Fatalf("write CycloneDX SBOM: %v", err)
+	}
+
+	output := captureStdout(t, func() {
+		if err := runOutdatedForTest([]string{projectDir}, "npm", 2, []string{sbomPath}); err != nil {
+			t.Fatalf("runOutdated(SBOM duplicate versions) error = %v", err)
+		}
+	})
+	for _, want := range []string{"dupe", "1.0.0", "2.0.0", "1 outdated, 1 up to date (2 total)"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("outdated duplicate-version output missing %q:\n%s", want, output)
+		}
+	}
+	if strings.Contains(output, "All 1 packages are up to date") {
+		t.Fatalf("outdated duplicate-version output collapsed versions:\n%s", output)
 	}
 }
 
@@ -215,7 +293,7 @@ func TestRunListPackagesMalformedSBOMReturnsParserExit(t *testing.T) {
 		t.Fatalf("write malformed SBOM: %v", err)
 	}
 
-	err := runListPackages([]string{projectDir}, "", 2, true, []string{badPath})
+	err := runListPackages([]string{projectDir}, "", 2, []string{badPath})
 	if err == nil {
 		t.Fatal("runListPackages(malformed SBOM) error = nil")
 	}
@@ -276,6 +354,7 @@ func TestResolveScanSettingsAPIKeyEnvAndValidationBranches(t *testing.T) {
 		{name: "invalid mode", flags: scanFlagValues{Mode: "sideways", FailOn: "CRITICAL", Timeout: 1, APIKey: "flag"}, want: "invalid mode"},
 		{name: "invalid fail on", flags: scanFlagValues{Mode: "local", FailOn: "SEVERE", Timeout: 1, APIKey: "flag"}, want: "invalid severity"},
 		{name: "invalid timeout", flags: scanFlagValues{Mode: "local", FailOn: "CRITICAL", Timeout: 0, APIKey: "flag"}, want: "timeout must be greater than zero"},
+		{name: "negative max depth", flags: scanFlagValues{Mode: "local", FailOn: "CRITICAL", MaxDepth: -1, Timeout: 1, APIKey: "flag"}, want: "max-depth must be zero or greater"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			cmd := newScanCmd()
@@ -302,7 +381,7 @@ func TestResolveScanSettingsAPIKeyEnvAndValidationBranches(t *testing.T) {
 func TestResolveScanSettingsUsesOutputAndLogConfig(t *testing.T) {
 	cfg := &cliConfig{
 		Output: cliOutputConfig{Format: "json", File: "configured.json"},
-		Log:    cliLogConfig{Level: "WARN"},
+		Log:    cliLogConfig{Level: "WARN", Format: "json"},
 	}
 	cmd := newScanCmd()
 	settings, err := resolveScanSettings(cmd, cfg, scanTarget{Path: "."}, scanFlagValues{
@@ -313,8 +392,8 @@ func TestResolveScanSettingsUsesOutputAndLogConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveScanSettings(config output) error = %v", err)
 	}
-	if settings.OutputJSON != "configured.json" || settings.LogLevel != "WARN" {
-		t.Fatalf("settings = %+v, want configured JSON output and WARN log level", settings)
+	if settings.OutputJSON != "configured.json" || settings.LogLevel != "WARN" || settings.LogFormat != "json" {
+		t.Fatalf("settings = %+v, want configured JSON output, WARN log level, and JSON log format", settings)
 	}
 
 	mustSetFlag(t, cmd, "output-json", "flag.json")
@@ -329,6 +408,35 @@ func TestResolveScanSettingsUsesOutputAndLogConfig(t *testing.T) {
 	}
 	if settings.OutputJSON != "flag.json" {
 		t.Fatalf("OutputJSON = %q, want flag.json", settings.OutputJSON)
+	}
+}
+
+func TestResolveScanSettingsLogLevelOverridesConfig(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	cfg := &cliConfig{Log: cliLogConfig{Level: "WARN"}}
+	target := scanTarget{Path: "."}
+	flags := scanFlagValues{Mode: "local", FailOn: "CRITICAL", Timeout: 1}
+
+	t.Setenv("PACKMON_LOG_LEVEL", "debug")
+	flagLogLevel = "debug"
+	settings, err := resolveScanSettings(newScanCmd(), cfg, target, flags)
+	if err != nil {
+		t.Fatalf("resolveScanSettings(env log level) error = %v", err)
+	}
+	if settings.LogLevel != "DEBUG" {
+		t.Fatalf("LogLevel = %q, want env DEBUG over config WARN", settings.LogLevel)
+	}
+
+	cmd := newScanCmd()
+	cmd.Flags().String("log-level", "INFO", "")
+	mustSetFlag(t, cmd, "log-level", "ERROR")
+	flagLogLevel = "ERROR"
+	settings, err = resolveScanSettings(cmd, cfg, target, flags)
+	if err != nil {
+		t.Fatalf("resolveScanSettings(flag log level) error = %v", err)
+	}
+	if settings.LogLevel != "ERROR" {
+		t.Fatalf("LogLevel = %q, want flag ERROR over env/config", settings.LogLevel)
 	}
 }
 
@@ -462,7 +570,7 @@ func TestScanSmallHelpersAndLogLevels(t *testing.T) {
 	} {
 		t.Run(tt.level, func(t *testing.T) {
 			flagLogLevel = tt.level
-			logger := scanLogger(false, tt.level)
+			logger := scanLogger(false, tt.level, "text")
 			if !logger.Enabled(ctx, tt.enabledLevel) {
 				t.Fatalf("scanLogger(%s) disabled %s level", tt.level, tt.wantEnabledName)
 			}
@@ -473,9 +581,23 @@ func TestScanSmallHelpersAndLogLevels(t *testing.T) {
 	}
 
 	flagLogLevel = "DEBUG"
-	quietLogger := scanLogger(true, "DEBUG")
+	quietLogger := scanLogger(true, "DEBUG", "text")
 	if !quietLogger.Enabled(ctx, slog.LevelError) || quietLogger.Enabled(ctx, slog.LevelWarn) {
 		t.Fatal("quiet scanLogger did not raise threshold to error")
+	}
+
+	var jsonLogs bytes.Buffer
+	jsonLogger := newScanLogger(&jsonLogs, false, "INFO", "json")
+	jsonLogger.Info("hello", slog.String("component", "scan"))
+	if !strings.Contains(jsonLogs.String(), `"msg":"hello"`) || !strings.Contains(jsonLogs.String(), `"component":"scan"`) {
+		t.Fatalf("json scan logger output = %s", jsonLogs.String())
+	}
+
+	var textLogs bytes.Buffer
+	textLogger := newScanLogger(&textLogs, false, "INFO", "text")
+	textLogger.Info("hello", slog.String("component", "scan"))
+	if strings.Contains(textLogs.String(), `"msg":"hello"`) || !strings.Contains(textLogs.String(), "msg=hello") {
+		t.Fatalf("text scan logger output = %s", textLogs.String())
 	}
 }
 
@@ -589,8 +711,8 @@ func TestRunSingleScanWarnsAboutPartialParseErrors(t *testing.T) {
 		if err != nil {
 			t.Fatalf("runSingleScan() error = %v", err)
 		}
-		if exitCode != ExitOK {
-			t.Fatalf("exitCode = %d, want %d", exitCode, ExitOK)
+		if exitCode != ExitParser {
+			t.Fatalf("exitCode = %d, want %d", exitCode, ExitParser)
 		}
 	})
 	if !strings.Contains(stderr, "warning: parse error in pnpm-lock.yaml") {
@@ -609,11 +731,192 @@ func TestRunSingleScanWarnsAboutPartialParseErrors(t *testing.T) {
 		if err != nil {
 			t.Fatalf("quiet runSingleScan() error = %v", err)
 		}
-		if exitCode != ExitOK {
-			t.Fatalf("quiet exitCode = %d, want %d", exitCode, ExitOK)
+		if exitCode != ExitParser {
+			t.Fatalf("quiet exitCode = %d, want %d", exitCode, ExitParser)
 		}
 	})
-	if strings.Contains(quietStderr, "parse error") {
-		t.Fatalf("quiet stderr contains parse warning:\n%s", quietStderr)
+	if !strings.Contains(quietStderr, "warning: parse error in pnpm-lock.yaml") {
+		t.Fatalf("quiet stderr missing parse warning:\n%s", quietStderr)
+	}
+}
+
+func TestRunSingleScanQuietWarnsAboutAutoFallback(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	dbDir := t.TempDir()
+	t.Setenv("PACKMON_DB_PATH", dbDir)
+	store, _ := newTestSQLiteStore(t, dbDir)
+	if _, err := store.DB().ExecContext(context.Background(), `
+		INSERT INTO vulnerabilities_local(row_key, id, ecosystem, name, severity, summary)
+		VALUES('GHSA-auto-fallback-seed|npm|unrelated', 'GHSA-auto-fallback-seed', 'npm', 'unrelated', 'LOW', 'unrelated advisory')`); err != nil {
+		t.Fatalf("seed local advisory: %v", err)
+	}
+	if err := store.SetSyncMeta(context.Background(), "last_sync_at", time.Now().UTC().Add(-48*time.Hour).Format(time.RFC3339)); err != nil {
+		t.Fatalf("set sync meta: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	projectDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(projectDir, "package-lock.json"), []byte(`{
+		"lockfileVersion": 3,
+		"packages": {"": {"version":"1.0.0"}, "node_modules/prod": {"version":"1.0.0"}}
+	}`), 0o600); err != nil {
+		t.Fatalf("write package-lock: %v", err)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	serverURL := "http://" + ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatalf("close listener: %v", err)
+	}
+
+	stderr := captureStderr(t, func() {
+		exitCode, err := runSingleScan(context.Background(), scanSettings{
+			Path:         projectDir,
+			Mode:         "auto",
+			ServerURL:    serverURL,
+			InsecureHTTP: true,
+			FailOn:       "CRITICAL",
+			MaxDepth:     2,
+			Timeout:      1,
+			Quiet:        true,
+		})
+		if err != nil {
+			t.Fatalf("runSingleScan() error = %v", err)
+		}
+		if exitCode != ExitOK {
+			t.Fatalf("exitCode = %d, want %d", exitCode, ExitOK)
+		}
+	})
+	if !strings.Contains(stderr, "warning: remote server unreachable, scanned against local database") {
+		t.Fatalf("quiet stderr missing auto-fallback warning:\n%s", stderr)
+	}
+}
+
+func TestRunScanPipelineRemoteSkipsLocalSQLiteWhenHistoryDisabled(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+
+	projectDir := t.TempDir()
+	writePackageLockForScanCommand(t, projectDir, "prod", "1.0.0")
+
+	badDBRoot := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(badDBRoot, []byte("file, not directory"), 0o600); err != nil {
+		t.Fatalf("write bad db root: %v", err)
+	}
+	t.Setenv("PACKMON_DB_PATH", badDBRoot)
+	t.Setenv("PACKMON_HISTORY_ENABLED", "false")
+
+	requests := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests <- struct{}{}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"scan_id":"remote-scan",
+			"mode":"remote",
+			"scanned_at":"2026-06-22T12:00:00Z",
+			"duration_ms":1,
+			"packages_scanned":1,
+			"findings_count":0,
+			"findings_blocking":false,
+			"feed_status":"healthy",
+			"summary":{"by_severity":{},"by_type":{},"by_source":{}},
+			"findings":[],
+			"feed_versions":{},
+			"manual_advisories_count":0
+		}`))
+	}))
+	defer server.Close()
+
+	var resultMode string
+	stderr := captureStderr(t, func() {
+		result, _, exitCode, _, _, err := runScanPipeline(context.Background(), scanSettings{
+			Path:         projectDir,
+			Mode:         "remote",
+			ServerURL:    server.URL,
+			FailOn:       "CRITICAL",
+			MaxDepth:     3,
+			Timeout:      2,
+			InsecureHTTP: true,
+			Quiet:        true,
+		})
+		if err != nil {
+			t.Fatalf("runScanPipeline(remote) error = %v", err)
+		}
+		if exitCode != ExitOK {
+			t.Fatalf("exitCode = %d, want %d; result=%+v", exitCode, ExitOK, result)
+		}
+		resultMode = result.Mode
+	})
+
+	if strings.Contains(stderr, "unable to open local database") {
+		t.Fatalf("remote scan opened local SQLite despite disabled history:\n%s", stderr)
+	}
+	if resultMode != "remote" {
+		t.Fatalf("result mode = %q, want remote", resultMode)
+	}
+	select {
+	case <-requests:
+	default:
+		t.Fatal("remote check server was not called")
+	}
+}
+
+func TestRunScanPipelineWarnsWhenFailOnNoneIsEffective(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+
+	projectDir := t.TempDir()
+	writePackageLockForScanCommand(t, projectDir, "prod", "1.0.0")
+
+	t.Setenv("PACKMON_HISTORY_ENABLED", "false")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"scan_id":"remote-scan",
+			"mode":"remote",
+			"scanned_at":"2026-06-22T12:00:00Z",
+			"duration_ms":1,
+			"packages_scanned":1,
+			"findings_count":0,
+			"findings_blocking":false,
+			"feed_status":"healthy",
+			"summary":{"by_severity":{},"by_type":{},"by_source":{}},
+			"findings":[],
+			"feed_versions":{},
+			"manual_advisories_count":0
+		}`))
+	}))
+	defer server.Close()
+
+	stderr := captureStderr(t, func() {
+		_, _, exitCode, _, _, err := runScanPipeline(context.Background(), scanSettings{
+			Path:         projectDir,
+			Mode:         "remote",
+			ServerURL:    server.URL,
+			FailOn:       "NONE",
+			MaxDepth:     3,
+			Timeout:      2,
+			InsecureHTTP: true,
+			Quiet:        true,
+		})
+		if err != nil {
+			t.Fatalf("runScanPipeline(remote NONE) error = %v", err)
+		}
+		if exitCode != ExitOK {
+			t.Fatalf("exitCode = %d, want %d", exitCode, ExitOK)
+		}
+	})
+
+	for _, want := range []string{
+		"warning: fail_on NONE disables vulnerability blocking only",
+		"malicious and supply-chain risk findings still block",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("stderr missing %q:\n%s", want, stderr)
+		}
 	}
 }

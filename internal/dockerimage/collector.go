@@ -2,23 +2,27 @@ package dockerimage
 
 import (
 	"fmt"
+	"io"
 	"os"
 
-	"github.com/8linkz/packmon/internal/ioutils"
+	"github.com/8linkz-sec/packmon/internal/ioutils"
 )
 
+const maxDockerInventoryFileSize = 16 << 20
+
 type Collection struct {
-	Images      []Image
-	ParseErrors []string
-	Files       int
+	Images            []Image
+	ParseErrors       []string
+	DiscoveryWarnings []string
+	Files             int
 }
 
 func Collect(root string, maxDepth int) (*Collection, error) {
-	files, err := DiscoverFiles(root, maxDepth)
+	files, warnings, err := DiscoverFilesWithWarnings(root, maxDepth)
 	if err != nil {
 		return nil, err
 	}
-	result := &Collection{Files: len(files)}
+	result := &Collection{Files: len(files), DiscoveryWarnings: warnings}
 	for _, file := range files {
 		images, parseErr := parseFile(file)
 		if parseErr != nil {
@@ -37,14 +41,59 @@ func parseFile(file File) ([]Image, error) {
 		return nil, err
 	}
 	defer ioutils.CloseSilently(f)
+	if info, err := f.Stat(); err != nil {
+		return nil, err
+	} else if info.Mode().IsRegular() && info.Size() > maxDockerInventoryFileSize {
+		return nil, dockerInventorySizeLimitError()
+	}
+	r := &limitedDockerInventoryReader{r: f}
 	switch file.Kind {
 	case KindDockerfile:
-		return ParseDockerfileImages(f, file.RelPath)
+		return ParseDockerfileImages(r, file.RelPath)
 	case KindCompose:
-		return ParseComposeImages(f, file.RelPath)
+		return ParseComposeImages(r, file.RelPath)
 	default:
 		return nil, fmt.Errorf("%s: unsupported docker inventory file kind %q", file.RelPath, file.Kind)
 	}
+}
+
+type limitedDockerInventoryReader struct {
+	r        io.Reader
+	read     int64
+	overflow bool
+}
+
+func (r *limitedDockerInventoryReader) Read(p []byte) (int, error) {
+	if r.overflow {
+		return 0, dockerInventorySizeLimitError()
+	}
+	remainingWithSentinel := maxDockerInventoryFileSize + 1 - r.read
+	if remainingWithSentinel <= 0 {
+		r.overflow = true
+		return 0, dockerInventorySizeLimitError()
+	}
+	if int64(len(p)) > remainingWithSentinel {
+		p = p[:int(remainingWithSentinel)]
+	}
+	n, err := r.r.Read(p)
+	if n == 0 {
+		return n, err
+	}
+	previous := r.read
+	r.read += int64(n)
+	if r.read > maxDockerInventoryFileSize {
+		r.overflow = true
+		allowed := int(maxDockerInventoryFileSize - previous)
+		if allowed > 0 {
+			return allowed, nil
+		}
+		return 0, dockerInventorySizeLimitError()
+	}
+	return n, err
+}
+
+func dockerInventorySizeLimitError() error {
+	return fmt.Errorf("docker inventory file exceeds maximum docker inventory size of %d bytes", maxDockerInventoryFileSize)
 }
 
 func dedupImages(images []Image) []Image {

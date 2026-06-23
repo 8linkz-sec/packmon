@@ -9,25 +9,37 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/8linkz/packmon/internal/db"
 )
 
 type queueStoreStub struct {
-	db.Store
 	mu             sync.Mutex
 	resetCalls     []string
 	resetThreshold time.Duration
 	resetCount     int
 	resetErr       error
+	resetBlock     chan struct{}
+	resetCtxErr    error
 }
 
-func (s *queueStoreStub) ResetStuckJobs(_ context.Context, source string, threshold time.Duration) (int, error) {
+func (s *queueStoreStub) ResetStuckJobs(ctx context.Context, source string, threshold time.Duration) (int, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	s.resetCalls = append(s.resetCalls, source)
 	s.resetThreshold = threshold
+	s.mu.Unlock()
+
+	if s.resetBlock != nil {
+		select {
+		case <-ctx.Done():
+			s.mu.Lock()
+			s.resetCtxErr = ctx.Err()
+			s.mu.Unlock()
+			return 0, ctx.Err()
+		case <-s.resetBlock:
+		}
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.resetErr != nil {
 		return 0, s.resetErr
 	}
@@ -163,6 +175,28 @@ func TestQueueProcessorHandlesResetErrors(t *testing.T) {
 	}
 }
 
+func TestQueueProcessorBoundsStuckJobReset(t *testing.T) {
+	saved := resetStuckJobsTimeout
+	resetStuckJobsTimeout = 10 * time.Millisecond
+	defer func() { resetStuckJobsTimeout = saved }()
+
+	store := &queueStoreStub{resetBlock: make(chan struct{})}
+	worker := &queueWorkerStub{name: "socket"}
+	q := NewQueueProcessor(store, slog.New(slog.NewTextHandler(io.Discard, nil)), []AsyncWorker{worker})
+
+	started := time.Now()
+	q.resetAllStuckJobs(context.Background())
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("resetAllStuckJobs elapsed = %v, want bounded timeout", elapsed)
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if !errors.Is(store.resetCtxErr, context.DeadlineExceeded) {
+		t.Fatalf("reset context error = %v, want deadline exceeded", store.resetCtxErr)
+	}
+}
+
 func TestQueueProcessorRestartsCrashedWorkerUntilLimit(t *testing.T) {
 	// Not parallel: mutates package-level workerBackoffs.
 	saved := workerBackoffs
@@ -231,5 +265,49 @@ func TestQueueProcessorHandlesCleanWorkerExit(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("Run() did not exit after clean worker exit and cancellation")
+	}
+}
+
+func TestQueueProcessorRestartsUnexpectedNilWorkerExit(t *testing.T) {
+	// Not parallel: mutates package-level workerBackoffs.
+	saved := workerBackoffs
+	workerBackoffs = [maxWorkerRestarts]time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	defer func() { workerBackoffs = saved }()
+
+	var runCount int32
+	worker := &queueWorkerStub{
+		name: "socket",
+		run: func(context.Context) error {
+			atomic.AddInt32(&runCount, 1)
+			return nil
+		},
+	}
+	q := NewQueueProcessor(&queueStoreStub{}, slog.New(slog.NewTextHandler(io.Discard, nil)), []AsyncWorker{worker},
+		WithQueuePollInterval(time.Hour),
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- q.Run(ctx) }()
+
+	deadline := time.After(time.Second)
+	for atomic.LoadInt32(&runCount) < 2 {
+		select {
+		case <-deadline:
+			cancel()
+			t.Fatalf("worker run count = %d, want restart after nil exit", atomic.LoadInt32(&runCount))
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Run() did not exit after cancellation")
 	}
 }

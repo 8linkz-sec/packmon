@@ -41,9 +41,9 @@ func (mavenGenerator) Generate(ctx context.Context, d Detection, outPath string,
 	}
 	out, err := run(ctx, RunOptions{Name: "mvn", Args: args})
 	if err != nil {
-		return fmt.Errorf("mvn: %w: %s", err, string(out))
+		return fmt.Errorf("mvn: %w: %s", err, commandOutputSummary(out))
 	}
-	data, err := os.ReadFile(filepath.Join(stage, "bom.json")) // #nosec G304 -- path is generated in a private staging dir.
+	data, err := readGeneratedSBOMFile(filepath.Join(stage, "bom.json"))
 	if err != nil {
 		return fmt.Errorf("read Maven generated bom.json: %w", err)
 	}
@@ -67,7 +67,7 @@ func mavenProjectDeclaresDependencies(dir string, opts GenerateOptions, visited 
 	}
 	visited[abs] = struct{}{}
 
-	data, err := os.ReadFile(filepath.Join(dir, "pom.xml")) // #nosec G304 -- path comes from a bounded local manifest walk.
+	data, err := readAutoSBOMManifest(filepath.Join(dir, "pom.xml"))
 	if err != nil {
 		return false, err
 	}

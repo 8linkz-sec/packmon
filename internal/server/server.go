@@ -13,13 +13,13 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/8linkz/packmon/internal/api/admin"
-	"github.com/8linkz/packmon/internal/auth"
-	"github.com/8linkz/packmon/internal/config"
-	"github.com/8linkz/packmon/internal/db"
-	"github.com/8linkz/packmon/internal/health"
-	"github.com/8linkz/packmon/internal/server/middleware"
-	"github.com/8linkz/packmon/internal/telemetry"
+	"github.com/8linkz-sec/packmon/internal/api/admin"
+	"github.com/8linkz-sec/packmon/internal/auth"
+	"github.com/8linkz-sec/packmon/internal/config"
+	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/health"
+	"github.com/8linkz-sec/packmon/internal/server/middleware"
+	"github.com/8linkz-sec/packmon/internal/telemetry"
 )
 
 // Server is the top-level HTTP server for Packmon. It manages two
@@ -49,21 +49,22 @@ func New(ctx context.Context, cfg *config.Config, store db.Store, pinger health.
 
 	// Session manager for admin authentication. The context controls the
 	// lifetime of the session cleanup goroutine.
-	sm := auth.NewSessionManager(ctx, cfg.Admin.SessionTimeout, sessionCookieSecure(cfg))
+	sm := auth.NewSessionManagerWithIdleTimeout(ctx, cfg.Admin.SessionTimeout, cfg.Admin.IdleTimeout, sessionCookieSecure(cfg))
 
 	// -- Build middleware chain ------------------------------------------------
 	// Order matters: outermost middleware runs first.
 	// TrustedClientIP -> Telemetry -> SecurityHeaders -> Correlation -> Recovery -> Logging -> RateLimit -> UserAgent -> Auth -> Session -> Handler
+	registry := telemetry.Default()
 	chain := func(h http.Handler) http.Handler {
 		h = middleware.RequireAdminSession(sm, logger)(h)
-		h = middleware.Auth(logger, store, devMode)(h)
+		h = middleware.Auth(ctx, logger, store, devMode)(h)
 		h = middleware.UserAgent(logger, devMode)(h)
 		h = middleware.RateLimitWithSource(ctx, logger, rateLimitConfig(cfg), runtime)(h)
 		h = middleware.Logging(logger)(h)
 		h = middleware.Recovery(logger)(h)
 		h = middleware.Correlation(h)
 		h = middleware.SecurityHeaders(!devMode, cfg.Server.PublicHost, cfg.Server.TrustedProxies)(h)
-		h = telemetry.HTTPMiddleware(telemetry.Default())(h)
+		h = telemetry.HTTPMiddleware(registry)(h)
 		h = middleware.TrustedClientIP(cfg.Server.TrustedProxies)(h)
 		return h
 	}
@@ -73,7 +74,7 @@ func New(ctx context.Context, cfg *config.Config, store db.Store, pinger health.
 	hc := health.NewChecker(pinger)
 	registerRoutes(ctx, mux, hc, cfg, runtime, store, sm, logger, build, syncFeed, applyFeedConfig, resetFeedConfig)
 
-	mainAddr := fmt.Sprintf(":%d", cfg.Server.Port)
+	mainAddr := cfg.Server.Addr()
 	mainServer := &http.Server{
 		Addr:         mainAddr,
 		Handler:      chain(mux),
@@ -83,11 +84,14 @@ func New(ctx context.Context, cfg *config.Config, store db.Store, pinger health.
 
 	// -- Metrics server (plain, no middleware chain) ---------------------------
 	metricsMux := http.NewServeMux()
-	metricsMux.HandleFunc("GET /metrics", telemetry.MetricsHandler(store, build.SchemaVersion, logger))
+	metricsMux.HandleFunc("GET /metrics", telemetry.MetricsHandlerWithRegistry(registry, store, build.SchemaVersion, logger))
 	metricsAddr := cfg.Metrics.Addr()
 	metricsServer := &http.Server{
 		Addr:              metricsAddr,
-		Handler:           metricsMux,
+		Handler:           middleware.SecurityHeaders(false, "", nil)(metricsMux),
+		ReadTimeout:       cfg.Server.ReadTimeout,
+		WriteTimeout:      cfg.Server.WriteTimeout,
+		IdleTimeout:       cfg.Server.ReadTimeout,
 		ReadHeaderTimeout: cfg.Server.ReadTimeout,
 	}
 
@@ -162,8 +166,14 @@ func (s *Server) Run(ctx context.Context) error {
 
 	// Start metrics server.
 	go func() {
-		s.logger.Info("metrics server starting", slog.String("addr", s.metrics.Addr))
-		if err := s.metrics.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		listener, err := net.Listen("tcp", s.metrics.Addr)
+		if err != nil {
+			errCh <- fmt.Errorf("metrics server listen: %w", err)
+			return
+		}
+		boundAddr := listener.Addr().String()
+		s.logger.Info("metrics server listening", slog.String("addr", boundAddr))
+		if err := s.metrics.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- fmt.Errorf("metrics server: %w", err)
 		}
 	}()
@@ -211,7 +221,8 @@ func (s *Server) Run(ctx context.Context) error {
 	select {
 	case err := <-errCh:
 		s.logger.Error("server error, shutting down", slog.String("error", err.Error()))
-		return err
+		s.SetShuttingDown()
+		return errors.Join(err, s.shutdown())
 	case <-ctx.Done():
 		s.logger.Info("context cancelled, shutting down")
 	}
@@ -234,15 +245,24 @@ func (s *Server) shutdown() error {
 	s.logger.Info("shutdown: stopping main HTTP server",
 		slog.String("timeout", s.cfg.Server.ShutdownTimeout.String()))
 	mainErr = s.main.Shutdown(ctx)
-	s.logger.Info("shutdown: main HTTP server stopped",
-		slog.String("elapsed", time.Since(start).String()),
-		slog.Bool("error", mainErr != nil))
+	logHTTPServerStopped(s.logger, "main HTTP server", start, mainErr)
 
 	s.logger.Info("shutdown: stopping metrics server")
 	metricsErr = s.metrics.Shutdown(ctx)
-	s.logger.Info("shutdown: metrics server stopped",
-		slog.String("elapsed", time.Since(start).String()),
-		slog.Bool("error", metricsErr != nil))
+	logHTTPServerStopped(s.logger, "metrics server", start, metricsErr)
 
 	return errors.Join(mainErr, metricsErr)
+}
+
+func logHTTPServerStopped(logger *slog.Logger, name string, start time.Time, err error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	attrs := []slog.Attr{
+		slog.String("elapsed", time.Since(start).String()),
+	}
+	if err != nil {
+		attrs = append(attrs, slog.String("error", err.Error()))
+	}
+	logger.LogAttrs(context.Background(), slog.LevelInfo, "shutdown: "+name+" stopped", attrs...)
 }

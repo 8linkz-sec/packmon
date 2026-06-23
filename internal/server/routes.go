@@ -6,21 +6,24 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/8linkz/packmon/internal/api/admin"
-	v1 "github.com/8linkz/packmon/internal/api/v1"
-	"github.com/8linkz/packmon/internal/auth"
-	"github.com/8linkz/packmon/internal/config"
-	"github.com/8linkz/packmon/internal/db"
-	"github.com/8linkz/packmon/internal/health"
-	"github.com/8linkz/packmon/internal/web"
+	"github.com/8linkz-sec/packmon/internal/api/admin"
+	v1 "github.com/8linkz-sec/packmon/internal/api/v1"
+	"github.com/8linkz-sec/packmon/internal/auth"
+	"github.com/8linkz-sec/packmon/internal/config"
+	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/health"
+	"github.com/8linkz-sec/packmon/internal/web"
 )
 
 // registerRoutes wires all HTTP routes on the given mux. The context is
 // forwarded to subsystems that start background goroutines.
 func registerRoutes(ctx context.Context, mux *http.ServeMux, hc *health.Checker, cfg *config.Config, runtime *config.RuntimeSettings, store db.Store, sm *auth.SessionManager, logger *slog.Logger, buildInfo BuildInfo, syncFeed admin.FeedSyncFunc, applyFeedConfig admin.FeedConfigApplyFunc, resetFeedConfig admin.FeedConfigResetFunc) {
 	api := v1.NewHandlerWithRuntime(store, logger, runtime)
+	api.ConfigureBackgroundContext(ctx)
+	feedImport := v1.NewFeedImportHandlerWithConfig(store, logger, cfg)
 	if cfg != nil {
-		api.ConfigureReversingLabs(cfg.Feeds)
+		feeds := cfg.FeedsSnapshot()
+		api.ConfigureReversingLabs(feeds)
 	}
 	applyAndRefreshAPI := applyFeedConfig
 	if applyFeedConfig != nil {
@@ -29,7 +32,7 @@ func registerRoutes(ctx context.Context, mux *http.ServeMux, hc *health.Checker,
 				return err
 			}
 			if cfg != nil {
-				api.ConfigureReversingLabs(cfg.Feeds)
+				api.ConfigureReversingLabs(cfg.FeedsSnapshot())
 			}
 			return nil
 		}
@@ -41,7 +44,7 @@ func registerRoutes(ctx context.Context, mux *http.ServeMux, hc *health.Checker,
 				return err
 			}
 			if cfg != nil {
-				api.ConfigureReversingLabs(cfg.Feeds)
+				api.ConfigureReversingLabs(cfg.FeedsSnapshot())
 			}
 			return nil
 		}
@@ -55,7 +58,7 @@ func registerRoutes(ctx context.Context, mux *http.ServeMux, hc *health.Checker,
 	// -- API v1 ---------------------------------------------------------------
 	mux.HandleFunc("POST /api/v1/check", api.HandleCheck)
 	mux.HandleFunc("GET /api/v1/feeds/status", api.HandleFeedStatus)
-	mux.HandleFunc("POST /api/v1/feeds/{feed}/import", api.HandleFeedImport)
+	mux.HandleFunc("POST /api/v1/feeds/{feed}/import", feedImport.HandleImport)
 	// The {name...} wildcard must be at the end of the pattern in Go's
 	// ServeMux. We register a single catch-all and dispatch to the detail
 	// or refresh handler based on the HTTP method and whether the trailing
@@ -68,8 +71,18 @@ func registerRoutes(ctx context.Context, mux *http.ServeMux, hc *health.Checker,
 	admin.RegisterRoutes(ctx, mux, store, sm, logger, cfg, runtime, syncFeed, applyAndRefreshAPI, resetAndRefreshAPI)
 
 	// -- Web GUI (public pages: dashboard, search, package, feeds) -----------
-	renderer := web.NewRenderer(web.TemplateFS(), false)
+	renderer := web.NewRendererWithLayoutLinks(web.TemplateFS(), false, serverLayoutLinks(cfg))
 	web.RegisterRoutes(mux, store, renderer, logger)
+}
+
+func serverLayoutLinks(cfg *config.Config) web.LayoutLinks {
+	if cfg == nil {
+		return web.LayoutLinks{}
+	}
+	return web.LayoutLinks{
+		PrivacyURL: cfg.Web.PrivacyURL,
+		LegalURL:   cfg.Web.LegalURL,
+	}
 }
 
 // BuildInfo is injected at build time via ldflags.

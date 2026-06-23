@@ -1,22 +1,25 @@
 package middleware
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestRateLimiter_AllowsUnderLimit(t *testing.T) {
 	t.Parallel()
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	handler := RateLimit(context.Background(), logger, RateLimitConfig{
+	handler := RateLimitWithSource(context.Background(), logger, RateLimitConfig{
 		Rate:  10, // 10 tokens/sec
 		Burst: 5,  // bucket capacity 5
-	})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	}, nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -77,10 +80,10 @@ func TestRateLimiter_BlocksOverLimit(t *testing.T) {
 	t.Parallel()
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	handler := RateLimit(context.Background(), logger, RateLimitConfig{
+	handler := RateLimitWithSource(context.Background(), logger, RateLimitConfig{
 		Rate:  0.001, // extremely slow refill: practically 0 tokens
 		Burst: 3,     // only 3 tokens
-	})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	}, nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -111,10 +114,10 @@ func TestRateLimiter_DifferentIPsAreIndependent(t *testing.T) {
 	t.Parallel()
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	handler := RateLimit(context.Background(), logger, RateLimitConfig{
+	handler := RateLimitWithSource(context.Background(), logger, RateLimitConfig{
 		Rate:  0.001,
 		Burst: 1,
-	})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	}, nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -150,10 +153,10 @@ func TestRateLimiter_ResponseBody(t *testing.T) {
 	t.Parallel()
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	handler := RateLimit(context.Background(), logger, RateLimitConfig{
+	handler := RateLimitWithSource(context.Background(), logger, RateLimitConfig{
 		Rate:  0.001,
 		Burst: 1,
-	})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	}, nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -169,8 +172,81 @@ func TestRateLimiter_ResponseBody(t *testing.T) {
 	rec2 := httptest.NewRecorder()
 	handler.ServeHTTP(rec2, req2)
 
-	body := rec2.Body.String()
-	if body == "" {
-		t.Error("rate limited response body is empty, expected error message")
+	assertJSONErrorResponse(t, rec2, http.StatusTooManyRequests, "rate limit exceeded")
+}
+
+func TestRateLimiterCleanupStaleBuckets(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+	rl := &rateLimiter{buckets: map[string]*bucket{
+		"stale": {
+			tokens:   1,
+			lastSeen: now.Add(-11 * time.Minute),
+		},
+		"at-cutoff": {
+			tokens:   1,
+			lastSeen: now.Add(-10 * time.Minute),
+		},
+		"fresh": {
+			tokens:   1,
+			lastSeen: now.Add(-9 * time.Minute),
+		},
+	}}
+
+	rl.cleanupStaleBuckets(now)
+
+	if _, ok := rl.buckets["stale"]; ok {
+		t.Fatal("cleanup retained stale bucket")
+	}
+	for _, ip := range []string{"at-cutoff", "fresh"} {
+		if _, ok := rl.buckets[ip]; !ok {
+			t.Fatalf("cleanup removed %s bucket", ip)
+		}
+	}
+}
+
+func TestRateLimitLogUsesTrustedClientIPAndRoutePathLabel(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	rawPath := "/api/v1/packages/npm/C:%5CUsers%5CAdmin%5Csecret-token/refresh"
+	handler := TrustedClientIP([]string{"10.0.0.1"})(Correlation(RateLimitWithSource(ctx, logger, RateLimitConfig{
+		Rate:  0.001,
+		Burst: 1,
+	}, nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))))
+
+	send := func() int {
+		req := httptest.NewRequest(http.MethodGet, rawPath, nil)
+		req.RemoteAddr = "10.0.0.1:12345"
+		req.Header.Set("X-Forwarded-For", "203.0.113.90, 10.0.0.1")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	if code := send(); code != http.StatusOK {
+		t.Fatalf("first request status = %d, want 200", code)
+	}
+	if code := send(); code != http.StatusTooManyRequests {
+		t.Fatalf("second request status = %d, want 429", code)
+	}
+
+	logLine := logs.String()
+	for _, want := range []string{`"client_ip":"203.0.113.90"`, `"correlation_id":`, `"path":"/api/v1/packages/{ecosystem}/{name...}/refresh"`} {
+		if !strings.Contains(logLine, want) {
+			t.Fatalf("rate-limit log missing %s: %s", want, logLine)
+		}
+	}
+	for _, leaked := range []string{`"ip"`, "10.0.0.1:12345", "secret-token", "Users", "Admin"} {
+		if strings.Contains(logLine, leaked) {
+			t.Fatalf("rate-limit log leaked %q: %s", leaked, logLine)
+		}
 	}
 }

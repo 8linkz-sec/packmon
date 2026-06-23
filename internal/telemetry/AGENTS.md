@@ -5,13 +5,12 @@ HTTP metrics middleware, and the `/metrics` handler. Primary owner agent:
 **platform-ci-engineer**; coordinate with backend-engineer for store-derived
 series.
 
-Read `AGENTS.md` (root) and `docs/adr/ADR-0030-observability-metrics.md` and
-`docs/runbook.md` (metric names) first.
+Read `AGENTS.md` (root), `DESIGN.md`, and `SECURITY.md` first.
 
 ## Invariants (do not break)
 
-- The metric names in DESIGN.md sec 3.9 / runbook are a contract (dashboards and
-  alerts depend on them). Keep the 17 spec'd series and their label sets stable.
+- The metric names in DESIGN.md are a contract (dashboards and alerts depend on
+  them). Keep the documented series and their label sets stable.
 - This is a hand-rolled registry, not `prometheus.MustRegister` -- map writes are
   guarded by a mutex and per-key counters use `atomic`. Keep new series
   thread-safe (RLock fast path, Lock + re-check).
@@ -20,12 +19,10 @@ Read `AGENTS.md` (root) and `docs/adr/ADR-0030-observability-metrics.md` and
 - LABEL CARDINALITY IS A SECURITY CONCERN. Never put unbounded, attacker-
   controlled values (raw request paths, package names, IPs) into a label.
 
-## Current open landmines (see Audit.md)
+## Current Guardrails
 
-> Status (2026-05-29): the items in this section were addressed across the
-> Audit.md "Fix-Runde" passes. Audit.md is authoritative; project-wide only the
-> external GitLab-runner test remains open. Keep the notes below as guardrails
-> so the fixes are not regressed.
+These notes are guardrails for behavior that has regressed before. Keep them in
+sync with `DESIGN.md` and `SECURITY.md` when the behavior intentionally changes.
 
 - **H2:** `HTTPMiddleware` falls back to the raw `r.URL.Path` as the `route`
   label when `r.Pattern` is empty (i.e. on 404s). An unauthenticated scanner can

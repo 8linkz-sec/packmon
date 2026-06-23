@@ -21,7 +21,9 @@ var fs embed.FS
 
 // ExpectedVersion is the schema version that this binary expects.
 // It must match the highest migration number embedded in the binary.
-const ExpectedVersion = 9
+const ExpectedVersion = 26
+
+const migrationAdvisoryLockKey int64 = 0x7061636b6d6f6e // ASCII "packmon"
 
 type migrationFile struct {
 	version int
@@ -29,13 +31,19 @@ type migrationFile struct {
 	sql     string
 }
 
+type migrationConn interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+	BeginTx(context.Context, *sql.TxOptions) (*sql.Tx, error)
+}
+
 // Run applies all pending migrations to the database at the given DSN.
 // The DSN must be a valid PostgreSQL connection string
 // (e.g. "postgres://user:pass@host:5432/dbname?sslmode=prefer").
 //
-// Run is safe to call on every application start: if the database is
+// Run is safe to call as an explicit migration step: if the database is
 // already at the latest version, it returns nil without changes.
-func Run(dsn string) error {
+func Run(dsn string) (err error) {
 	ctx := context.Background()
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
@@ -43,16 +51,34 @@ func Run(dsn string) error {
 	}
 	defer closeSilently(db)
 
-	if err := ensureVersionTable(ctx, db); err != nil {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("migrations: connect db: %w", err)
+	}
+	defer closeSilently(conn)
+
+	if err := acquireMigrationLock(ctx, conn); err != nil {
+		return err
+	}
+	defer func() {
+		if unlockErr := releaseMigrationLock(ctx, conn); unlockErr != nil && err == nil {
+			err = unlockErr
+		}
+	}()
+
+	if err := ensureVersionTable(ctx, conn); err != nil {
 		return err
 	}
 
-	current, dirty, hasVersion, err := currentVersion(ctx, db)
+	current, dirty, hasVersion, err := currentVersion(ctx, conn)
 	if err != nil {
 		return err
 	}
 	if dirty {
 		return fmt.Errorf("migrations: database is dirty at version %d", current)
+	}
+	if hasVersion && current > ExpectedVersion {
+		return fmt.Errorf("migrations: database schema version %d is newer than binary expected version %d", current, ExpectedVersion)
 	}
 
 	migrations, err := embeddedUpMigrations()
@@ -63,7 +89,7 @@ func Run(dsn string) error {
 		if hasVersion && migration.version <= current {
 			continue
 		}
-		if err := applyMigration(ctx, db, migration); err != nil {
+		if err := applyMigration(ctx, conn, migration); err != nil {
 			return err
 		}
 	}
@@ -76,17 +102,27 @@ func Run(dsn string) error {
 // database is in a partially-applied migration state and should not
 // be used.
 func Version(dsn string) (version uint, dirty bool, err error) {
-	ctx := context.Background()
+	return VersionContext(context.Background(), dsn)
+}
+
+// VersionContext is Version with caller-controlled cancellation.
+func VersionContext(ctx context.Context, dsn string) (version uint, dirty bool, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		return 0, false, fmt.Errorf("migrations: open db: %w", err)
 	}
 	defer closeSilently(db)
 
-	if err := ensureVersionTable(ctx, db); err != nil {
+	hasTable, err := versionTableExists(ctx, db)
+	if err != nil {
 		return 0, false, err
 	}
-
+	if !hasTable {
+		return 0, false, fmt.Errorf("migrations: no schema version found (database has not been migrated)")
+	}
 	current, dirty, hasVersion, err := currentVersion(ctx, db)
 	if err != nil {
 		return 0, false, err
@@ -101,7 +137,7 @@ func Version(dsn string) (version uint, dirty bool, err error) {
 	return uint(current), dirty, nil
 }
 
-func ensureVersionTable(ctx context.Context, db *sql.DB) error {
+func ensureVersionTable(ctx context.Context, db migrationConn) error {
 	_, err := db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS schema_migrations (
 			version bigint not null primary key,
@@ -113,7 +149,34 @@ func ensureVersionTable(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-func currentVersion(ctx context.Context, db *sql.DB) (version int, dirty, ok bool, err error) {
+func acquireMigrationLock(ctx context.Context, conn *sql.Conn) error {
+	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, migrationAdvisoryLockKey); err != nil {
+		return fmt.Errorf("migrations: acquire advisory lock: %w", err)
+	}
+	return nil
+}
+
+func releaseMigrationLock(ctx context.Context, conn *sql.Conn) error {
+	var unlocked bool
+	if err := conn.QueryRowContext(ctx, `SELECT pg_advisory_unlock($1)`, migrationAdvisoryLockKey).Scan(&unlocked); err != nil {
+		return fmt.Errorf("migrations: release advisory lock: %w", err)
+	}
+	if !unlocked {
+		return fmt.Errorf("migrations: release advisory lock: lock was not held")
+	}
+	return nil
+}
+
+func versionTableExists(ctx context.Context, db *sql.DB) (bool, error) {
+	var exists bool
+	err := db.QueryRowContext(ctx, `SELECT to_regclass('schema_migrations') IS NOT NULL`).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("migrations: check version table: %w", err)
+	}
+	return exists, nil
+}
+
+func currentVersion(ctx context.Context, db migrationConn) (version int, dirty, ok bool, err error) {
 	err = db.QueryRowContext(ctx, `
 		SELECT version, dirty
 		FROM schema_migrations
@@ -176,7 +239,7 @@ func parseMigrationVersion(name string) (int, error) {
 	return version, nil
 }
 
-func applyMigration(ctx context.Context, db *sql.DB, migration migrationFile) error {
+func applyMigration(ctx context.Context, db migrationConn, migration migrationFile) error {
 	if err := markDirty(ctx, db, migration.version, migration.name); err != nil {
 		return err
 	}
@@ -199,7 +262,7 @@ func applyMigration(ctx context.Context, db *sql.DB, migration migrationFile) er
 	return nil
 }
 
-func markDirty(ctx context.Context, db *sql.DB, version int, name string) error {
+func markDirty(ctx context.Context, db migrationConn, version int, name string) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("migrations: mark %s dirty: %w", name, err)

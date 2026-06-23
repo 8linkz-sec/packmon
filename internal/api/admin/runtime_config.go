@@ -5,8 +5,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/8linkz/packmon/internal/config"
-	"github.com/8linkz/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/config"
+	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/logsafe"
 )
 
 type adminFeedFormRow struct {
@@ -20,6 +21,7 @@ type adminFeedFormRow struct {
 	SupportsSyncInterval    bool
 	SupportsExternalMode    bool
 	RequiresAPIKey          bool
+	SupportsAPIKey          bool
 	APIKeyConfigured        bool
 	CanSyncNow              bool
 	OverrideActive          bool
@@ -96,7 +98,7 @@ func buildAdminFeedRow(cfg *config.Config, feedCfg config.FeedSettings, hasStatu
 		row.LastSyncStatus = status.LastSyncStatus
 		row.EntriesSynced = status.EntriesSynced
 		row.EntriesTotal = status.EntriesTotal
-		row.LastError = status.LastError
+		row.LastError = logsafe.RedactDiagnosticMessage(status.LastError)
 		if status.LastSyncAt != nil {
 			row.LastSyncAt = status.LastSyncAt
 			row.LastSyncAtTime = *status.LastSyncAt
@@ -104,12 +106,18 @@ func buildAdminFeedRow(cfg *config.Config, feedCfg config.FeedSettings, hasStatu
 		if status.LastSyncDuration != nil {
 			row.DurationStr = status.LastSyncDuration.Round(time.Millisecond).String()
 		}
-		if strings.EqualFold(status.LastSyncStatus, "running") && status.LastSyncAt != nil {
-			elapsed := time.Since(*status.LastSyncAt)
-			if elapsed < 0 {
-				elapsed = 0
+		if strings.EqualFold(status.LastSyncStatus, "running") {
+			startedAt := status.UpdatedAt
+			if startedAt.IsZero() && status.LastSyncAt != nil {
+				startedAt = *status.LastSyncAt
 			}
-			row.DurationStr = "running for " + elapsed.Round(time.Second).String()
+			if !startedAt.IsZero() {
+				elapsed := time.Since(startedAt)
+				if elapsed < 0 {
+					elapsed = 0
+				}
+				row.DurationStr = "running for " + elapsed.Round(time.Second).String()
+			}
 		}
 	}
 
@@ -129,9 +137,10 @@ func buildAdminFeedFormRow(cfg *config.Config, runtimeFeed config.FeedSettings, 
 		FeedName:                runtimeFeed.DisplayName,
 		FeedKey:                 runtimeFeed.Name,
 		SupportsSyncInterval:    runtimeFeed.SupportsSyncInterval,
-		SupportsExternalMode:    config.NormalizeFeedName(runtimeFeed.Name) != "reversinglabs",
+		SupportsExternalMode:    config.FeedSupportsExternalMode(runtimeFeed.Name),
 		RequiresAPIKey:          runtimeFeed.RequiresAPIKey,
-		CanSyncNow:              supportsManualFeedSync(runtimeFeed.Name),
+		SupportsAPIKey:          runtimeFeed.SupportsAPIKey,
+		CanSyncNow:              runtimeFeed.SupportsManualSync,
 		RuntimeMode:             string(runtimeFeed.Mode),
 		RuntimeEnabled:          runtimeFeed.Enabled,
 		RuntimeSyncInterval:     formRuntimeIntervalLabel(cfg, runtimeFeed),
@@ -149,7 +158,7 @@ func buildAdminFeedFormRow(cfg *config.Config, runtimeFeed config.FeedSettings, 
 		} else {
 			desired.SyncInterval = 0
 		}
-		if desired.RequiresAPIKey || strings.TrimSpace(override.APIKey) != "" {
+		if desired.SupportsAPIKey || strings.TrimSpace(override.APIKey) != "" {
 			desired.APIKey = override.APIKey
 		}
 
@@ -160,6 +169,7 @@ func buildAdminFeedFormRow(cfg *config.Config, runtimeFeed config.FeedSettings, 
 
 	row.Enabled = desired.Enabled
 	row.Mode = string(desired.Mode)
+	row.CanSyncNow = desired.SupportsManualSync && desired.Enabled && desired.Mode == config.FeedModeSelf
 	row.APIKeyConfigured = strings.TrimSpace(desired.APIKey) != ""
 	if desired.SupportsSyncInterval {
 		row.SyncInterval = formatOptionalDuration(desired.SyncInterval)
@@ -255,13 +265,4 @@ func formatOptionalDuration(d time.Duration) string {
 		return ""
 	}
 	return formatRuntimeDuration(d)
-}
-
-func supportsManualFeedSync(feedName string) bool {
-	switch config.NormalizeFeedName(feedName) {
-	case "osv", "ghsa", "openssf", "vulncheck", "cisakev", "epss":
-		return true
-	default:
-		return false
-	}
 }

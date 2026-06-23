@@ -10,8 +10,9 @@ import (
 	"testing"
 	"testing/fstest"
 	"time"
+	"unicode/utf8"
 
-	"github.com/8linkz/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/db"
 )
 
 func TestRenderHelperFunctions(t *testing.T) {
@@ -89,21 +90,50 @@ func TestRenderHelperFunctions(t *testing.T) {
 	if got := truncate("abcdef", 10); got != truncateTests["abcdef|10"] {
 		t.Fatalf("truncate max 10 = %q", got)
 	}
+	if got := truncate("ääääää", 4); got != "ä..." || !utf8.ValidString(got) {
+		t.Fatalf("truncate UTF-8 = %q valid=%v, want %q", got, utf8.ValidString(got), "ä...")
+	}
 	if got := seq(4); !reflect.DeepEqual(got, []int{0, 1, 2, 3}) {
 		t.Fatalf("seq(4) = %#v", got)
+	}
+	if got := findingTypeLabels("supply_chain_risk, malicious, vulnerability, lifecycle, unknown"); !reflect.DeepEqual(got, []string{"Supply-chain risk", "Malicious package", "Vulnerability", "Lifecycle", "unknown"}) {
+		t.Fatalf("findingTypeLabels() = %#v", got)
 	}
 }
 
 func TestDefaultFuncMapIncludesTemplateHelpers(t *testing.T) {
-	funcs := defaultFuncMap()
-	if funcs["formatTime"] == nil || funcs["formatTimeAgo"] == nil || funcs["statusClass"] == nil {
+	funcs := defaultFuncMap(LayoutLinks{PrivacyURL: "/privacy", LegalURL: "/legal"})
+	if funcs["formatTime"] == nil || funcs["formatTimeAgo"] == nil || funcs["statusClass"] == nil || funcs["findingLabels"] == nil || funcs["dict"] == nil {
 		t.Fatalf("defaultFuncMap missing expected helper: %#v", funcs)
+	}
+	dictFn, ok := funcs["dict"].(func(...any) (map[string]any, error))
+	if !ok {
+		t.Fatalf("dict helper has unexpected type %T", funcs["dict"])
+	}
+	dict, err := dictFn("Variant", "warning", "Icon", true)
+	if err != nil {
+		t.Fatalf("dict helper error = %v", err)
+	}
+	if dict["Variant"] != "warning" || dict["Icon"] != true {
+		t.Fatalf("dict helper = %#v, want populated map", dict)
+	}
+	if _, err := dictFn("odd"); err == nil {
+		t.Fatal("dict helper odd argument count error = nil, want error")
+	}
+	if _, err := dictFn(3, "bad"); err == nil {
+		t.Fatal("dict helper non-string key error = nil, want error")
 	}
 	if got := funcs["add"].(func(int, int) int)(2, 3); got != 5 {
 		t.Fatalf("add helper = %d, want 5", got)
 	}
 	if got := funcs["sub"].(func(int, int) int)(7, 4); got != 3 {
 		t.Fatalf("sub helper = %d, want 3", got)
+	}
+	if got := funcs["privacyURL"].(func() string)(); got != "/privacy" {
+		t.Fatalf("privacyURL helper = %q, want /privacy", got)
+	}
+	if got := funcs["legalURL"].(func() string)(); got != "/legal" {
+		t.Fatalf("legalURL helper = %q, want /legal", got)
 	}
 }
 
@@ -218,6 +248,7 @@ func (s scansStore) ListRecentScans(_ context.Context, limit int) ([]db.ScanLogE
 
 func TestHandleScansRendersTrendsAndRecentScans(t *testing.T) {
 	now := time.Now().UTC()
+	fullScanID := "scan-1234567890abcdef1234567890abcdef"
 	store := scansStore{
 		mockStore: &mockStore{},
 		daily: []db.DailyScanStats{
@@ -226,7 +257,7 @@ func TestHandleScansRendersTrendsAndRecentScans(t *testing.T) {
 			{Date: now.AddDate(0, 0, -2), ScanCount: 1, FindingsCount: 1},
 		},
 		scans: []db.ScanLogEntry{
-			{ScanID: "scan-1", RepoName: "repo", Branch: "main", ScannedAt: now, PackagesCount: 4, FindingsCount: 2, DurationMs: 123},
+			{ScanID: fullScanID, RepoName: "student-repo-secret", Branch: "main", ScannedAt: now, PackagesCount: 4, FindingsCount: 2, DurationMs: 123},
 		},
 	}
 	handler := HandleScans(store, testRenderer(), discardLogger())
@@ -239,14 +270,33 @@ func TestHandleScansRendersTrendsAndRecentScans(t *testing.T) {
 		t.Fatalf("HandleScans status = %d, want 200", rec.Code)
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"Scan Activity", "Recent Scans", "repo", "scan-1"} {
+	for _, want := range []string{
+		"Scan Activity",
+		"Recent Scans",
+		"Date (UTC)",
+		"Relative findings",
+		`<progress value="100" max="100"`,
+		`class="scan-findings-meter scan-findings-meter--risk"`,
+		`aria-label="10 findings; relative bar 100% of the highest finding day in this table"`,
+		fullScanID,
+		`title="` + fullScanID + `"`,
+		"break-all",
+	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("HandleScans response missing %q:\n%s", want, body)
 		}
 	}
+	for _, notWant := range []string{"student-repo-secret", ">Repo<", `<th class="pb-2"></th>`} {
+		if strings.Contains(body, notWant) {
+			t.Fatalf("HandleScans response contains %q:\n%s", notWant, body)
+		}
+	}
+	if strings.Contains(body, "scan-1234...") {
+		t.Fatalf("HandleScans response contains truncated scan ID:\n%s", body)
+	}
 }
 
-func TestHandleScansStoreErrorsRenderEmptyPage(t *testing.T) {
+func TestHandleScansStoreErrorsRenderLoadErrors(t *testing.T) {
 	handler := HandleScans(&mockStore{
 		dailyErr: errors.New("daily unavailable"),
 		scansErr: errors.New("scans unavailable"),
@@ -259,7 +309,21 @@ func TestHandleScansStoreErrorsRenderEmptyPage(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("HandleScans error status = %d, want 200", rec.Code)
 	}
-	if body := rec.Body.String(); !strings.Contains(body, "No scan activity yet.") || !strings.Contains(body, "No scans recorded yet.") {
-		t.Fatalf("HandleScans error response missing expected sections:\n%s", body)
+	body := rec.Body.String()
+	for _, want := range []string{
+		"Scan activity could not be loaded",
+		"Recent scans could not be loaded",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("HandleScans error response missing %q:\n%s", want, body)
+		}
+	}
+	for _, notWant := range []string{
+		"No scan activity yet.",
+		"No scans recorded yet.",
+	} {
+		if strings.Contains(body, notWant) {
+			t.Fatalf("HandleScans error response rendered empty state %q:\n%s", notWant, body)
+		}
 	}
 }

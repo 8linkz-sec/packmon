@@ -3,25 +3,51 @@
 {{define "content"}}
 <div class="space-y-6">
 
+  <h1 class="text-2xl font-bold">Dashboard</h1>
+
+  {{if .StatsLoadError}}
+  {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .StatsLoadError}}
+  {{end}}
+  {{if .ScanCountLoadError}}
+  {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .ScanCountLoadError}}
+  {{end}}
+  {{if .RecentVulnerabilitiesLoadError}}
+  {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .RecentVulnerabilitiesLoadError}}
+  {{end}}
+
   <!-- Stats cards -->
+  {{if not .StatsLoadError}}
   <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
     <div class="bg-white rounded-lg shadow p-5 border border-gray-200 text-center">
       <div class="text-sm text-gray-500 uppercase tracking-wide">Packages Tracked</div>
       <div class="mt-1 text-3xl font-semibold">{{.Stats.TotalPackages}}</div>
     </div>
-    <div class="bg-white rounded-lg shadow p-5 border border-gray-200 text-center">
+    <a href="/search?finding=vulnerability" class="bg-white rounded-lg shadow p-5 border border-gray-200 text-center block hover:shadow-md transition">
       <div class="text-sm text-gray-500 uppercase tracking-wide">Vulnerabilities</div>
       <div class="mt-1 text-3xl font-semibold">{{.Stats.TotalVulnerabilities}}</div>
-    </div>
-    <a href="/search?finding=malicious" class="bg-white rounded-lg shadow p-5 border border-gray-200 text-center block hover:border-red-200 hover:shadow-md transition">
-      <div class="text-sm text-gray-500 uppercase tracking-wide">Malicious Packages</div>
-      <div class="mt-1 text-3xl font-semibold">{{.Stats.TotalMalicious}}</div>
+    </a>
+    <a href="/search?finding=malicious" class="bg-red-50 rounded-lg shadow p-5 border border-red-200 text-center block hover:shadow-md transition">
+      <div class="text-sm text-red-700 uppercase tracking-wide">Malicious Packages</div>
+      <div class="mt-1 text-3xl font-semibold text-red-900">{{.Stats.TotalMalicious}}</div>
+    </a>
+    <a href="/search?finding=supply_chain_risk" class="bg-amber-50 rounded-lg shadow p-5 border border-amber-200 text-center block hover:shadow-md transition">
+      <div class="text-sm text-amber-800 uppercase tracking-wide">Supply-chain Risks</div>
+      <div class="mt-1 text-3xl font-semibold text-amber-900">{{.Stats.TotalSupplyChainRisk}}</div>
+    </a>
+    <a href="/search?finding=lifecycle" class="bg-blue-50 rounded-lg shadow p-5 border border-blue-200 text-center block hover:shadow-md transition">
+      <div class="text-sm text-blue-800 uppercase tracking-wide">Lifecycle Findings</div>
+      <div class="mt-1 text-3xl font-semibold text-blue-900">{{.Stats.TotalLifecycle}}</div>
     </a>
     <div class="bg-white rounded-lg shadow p-5 border border-gray-200 text-center">
       <div class="text-sm text-gray-500 uppercase tracking-wide">Total Scans (7d)</div>
+      {{if .ScanCountLoadError}}
+      <div class="mt-1 text-base font-semibold text-red-700">unavailable</div>
+      {{else}}
       <div class="mt-1 text-3xl font-semibold">{{.TotalScans7d}}</div>
+      {{end}}
     </div>
   </div>
+  {{end}}
 
   <!-- Severity breakdown -->
   {{if .Stats.BySeverity}}
@@ -33,7 +59,6 @@
       {{if index . "HIGH"}}<a href="/search?severity=HIGH" class="inline-flex items-center px-3 py-1.5 rounded-full text-sm font-medium border hover:brightness-95 transition {{severityClass "HIGH"}}">HIGH: {{index . "HIGH"}}</a>{{end}}
       {{if index . "MEDIUM"}}<a href="/search?severity=MEDIUM" class="inline-flex items-center px-3 py-1.5 rounded-full text-sm font-medium border hover:brightness-95 transition {{severityClass "MEDIUM"}}">MEDIUM: {{index . "MEDIUM"}}</a>{{end}}
       {{if index . "LOW"}}<a href="/search?severity=LOW" class="inline-flex items-center px-3 py-1.5 rounded-full text-sm font-medium border hover:brightness-95 transition {{severityClass "LOW"}}">LOW: {{index . "LOW"}}</a>{{end}}
-      {{if index . "UNKNOWN"}}<a href="/search?severity=UNKNOWN" class="inline-flex items-center px-3 py-1.5 rounded-full text-sm font-medium border hover:brightness-95 transition {{severityClass "UNKNOWN"}}">UNKNOWN: {{index . "UNKNOWN"}}</a>{{end}}
       {{end}}
     </div>
   </div>
@@ -43,22 +68,22 @@
   {{if .RecentVulnerabilities}}
   <div class="bg-white rounded-lg shadow p-5 border border-gray-200">
     <h2 class="text-lg font-semibold mb-3">Recently Published Vulnerabilities (7 Days)</h2>
-    <div class="overflow-x-auto">
+    <div class="overflow-x-auto focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2" tabindex="0" role="region" aria-label="Recently published vulnerabilities table">
       <table class="min-w-full text-sm">
         <thead>
           <tr class="text-left text-gray-500 border-b">
-            <th class="pb-2 pr-4">Advisory</th>
-            <th class="pb-2 pr-4">Package</th>
-            <th class="pb-2 pr-4">Severity</th>
-            <th class="pb-2 pr-4">Summary</th>
-            <th class="pb-2">Published</th>
+            <th scope="col" class="pb-2 pr-4">Advisory</th>
+            <th scope="col" class="pb-2 pr-4">Package</th>
+            <th scope="col" class="pb-2 pr-4">Severity</th>
+            <th scope="col" class="pb-2 pr-4">Summary</th>
+            <th scope="col" class="pb-2">Published</th>
           </tr>
         </thead>
         <tbody>
           {{range .RecentVulnerabilities}}
           <tr class="border-b border-gray-100 hover:bg-gray-50">
             <td class="py-2 pr-4 font-mono text-xs">
-              {{if and .Ecosystem .Name}}<a href="/package/{{.Ecosystem}}/{{.Name}}" class="text-blue-600 hover:underline">{{.ID}}</a>{{else if hasPrefix .ID "GHSA-"}}<a href="https://github.com/advisories/{{.ID}}" target="_blank" rel="noopener" class="text-blue-600 hover:underline">{{.ID}}</a>{{else}}{{.ID}}{{end}}
+              {{$advisoryURL := advisoryURL .ID}}{{if $advisoryURL}}<a href="{{$advisoryURL}}" target="_blank" rel="noopener" aria-label="{{.ID}} advisory opens in a new tab" class="text-blue-600 hover:underline">{{.ID}}<span aria-hidden="true"> &#8599;</span><span class="sr-only"> (opens in a new tab)</span></a>{{else}}{{.ID}}{{end}}
             </td>
             <td class="py-2 pr-4">
               {{if .Name}}
@@ -69,14 +94,14 @@
                 {{end}}
               </div>
               {{else}}
-              <span class="text-gray-400">-</span>
+              <span class="text-gray-600">-</span>
               {{end}}
             </td>
             <td class="py-2 pr-4">
-              <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium {{severityClass .Severity}}">{{.Severity}}</span>
+              <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium border {{severityClass .Severity}}">{{.Severity}}</span>
             </td>
             <td class="py-2 pr-4 text-gray-600 max-w-md truncate">{{truncate .Summary 80}}</td>
-            <td class="py-2 text-gray-500 whitespace-nowrap" title="{{formatTime .PublishedAt}}">{{formatTimeAgo .PublishedAt}}</td>
+            <td class="py-2 text-gray-500 whitespace-nowrap"><time datetime="{{formatTimeISO .PublishedAt}}" aria-label="{{formatTime .PublishedAt}}">{{formatTimeAgo .PublishedAt}}</time></td>
           </tr>
           {{end}}
         </tbody>

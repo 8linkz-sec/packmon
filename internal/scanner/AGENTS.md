@@ -23,10 +23,9 @@ Read `AGENTS.md` (root) and `DESIGN.md` first.
 - Dev dependencies are filtered out by default; `--include-dev` keeps them.
 - Correlation-ID is generated client-side and sent as `X-Correlation-ID`.
 
-## Current open landmines (see Audit.md)
+## Current Guardrails
 
-Audit.md is authoritative; project-wide only the external GitLab-runner test is
-documented as an external validation gap. Keep these guardrails in mind:
+Keep these tracked guardrails in mind:
 
 - Exit code 3 is part of the CI contract for non-blocking findings; do not fold
   it back into exit code 0.

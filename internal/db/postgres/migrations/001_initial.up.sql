@@ -22,6 +22,11 @@ CREATE TABLE vulnerabilities (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE INDEX idx_vulnerabilities_nvd_candidate ON vulnerabilities(id)
+    WHERE severity = 'UNKNOWN' OR (severity = 'LOW' AND cvss_score IS NULL);
+CREATE INDEX idx_vulnerabilities_cisa_kev ON vulnerabilities(id)
+    WHERE cisa_kev = TRUE;
+
 -- =============================================================================
 -- 2. vulnerability_aliases -- All IDs for a vulnerability (DE-7)
 --    Many-to-many: same alias can link to multiple vulnerabilities.
@@ -35,6 +40,8 @@ CREATE TABLE vulnerability_aliases (
 
 CREATE INDEX idx_vuln_aliases_vuln_id ON vulnerability_aliases(vulnerability_id);
 CREATE INDEX idx_vuln_aliases_alias_id ON vulnerability_aliases(alias_id);
+CREATE INDEX idx_vuln_aliases_cve_alias ON vulnerability_aliases(alias_id text_pattern_ops, vulnerability_id)
+    WHERE alias_id LIKE 'CVE-%';
 
 -- =============================================================================
 -- 3. vulnerability_sources -- Provenance and freshness per feed (DE-7)
@@ -51,6 +58,7 @@ CREATE TABLE vulnerability_sources (
 );
 
 CREATE INDEX idx_vuln_sources_vuln_id ON vulnerability_sources(vulnerability_id);
+CREATE INDEX idx_vuln_sources_source_vuln_id ON vulnerability_sources(source, vulnerability_id) WHERE raw_json IS NOT NULL;
 
 -- =============================================================================
 -- 4. vulnerability_references -- Read links (DE-7)
@@ -88,6 +96,7 @@ CREATE TABLE malicious_findings (
     id             TEXT        PRIMARY KEY,
     ecosystem      TEXT        NOT NULL,
     name           TEXT        NOT NULL,
+    version_ranges JSONB,
     versions       JSONB,
     source         TEXT        NOT NULL,
     risk_type      TEXT        NOT NULL,
@@ -176,7 +185,9 @@ CREATE TABLE scan_log (
     findings_count  INTEGER     NOT NULL,
     duration_ms     INTEGER     NOT NULL,
     client_ip       INET,
-    user_agent      TEXT
+    user_agent      TEXT,
+    api_key_id      INTEGER,
+    api_key_name    TEXT
 );
 
 CREATE INDEX idx_scan_log_time ON scan_log(scanned_at);

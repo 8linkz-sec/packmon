@@ -27,7 +27,7 @@
       "typeVersion": 1,
       "position": [540, 260],
       "parameters": {
-        "command": "packmon db sync --server {{$env.PACKMON_SERVER}} --api-key {{$env.PACKMON_API_KEY}}"
+        "command": "packmon db sync"
       }
     },
     {

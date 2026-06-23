@@ -4,9 +4,11 @@ import (
 	"net"
 	"net/http"
 	"strings"
+
+	"github.com/8linkz-sec/packmon/internal/netutil"
 )
 
-const contentSecurityPolicy = "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'"
+const contentSecurityPolicy = "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'"
 
 // SecurityHeaders returns a middleware that sets essential security
 // response headers on every response. In production mode it also
@@ -22,50 +24,52 @@ const contentSecurityPolicy = "default-src 'self'; base-uri 'self'; form-action 
 // trust model). With no trusted proxies configured the proxy-driven HTTPS
 // redirect is disabled.
 func SecurityHeaders(productionMode bool, redirectHost string, trustedProxies []string) func(http.Handler) http.Handler {
-	proxies := parseTrustedProxies(trustedProxies)
+	proxies, _ := netutil.ParseTrustedProxies(trustedProxies)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			setSecurityHeaders(w.Header(), productionMode)
+
 			// In production, redirect HTTP to HTTPS when behind a trusted
 			// reverse proxy that sets X-Forwarded-Proto. The header is trusted
 			// only from a configured trusted-proxy peer.
-			if productionMode && proxies.contains(stripPort(r.RemoteAddr)) {
+			if productionMode && proxies.Contains(stripPort(r.RemoteAddr)) {
 				proto := r.Header.Get("X-Forwarded-Proto")
 				if strings.EqualFold(proto, "http") {
 					if host := redirectTargetHost(redirectHost, r.Host); host != "" {
 						target := "https://" + host + r.URL.RequestURI()
-						http.Redirect(w, r, target, http.StatusMovedPermanently)
+						http.Redirect(w, r, target, http.StatusMovedPermanently) // #nosec G710 -- host is configured or loopback-only after sanitizeHost; untrusted external Host headers are not redirected.
 						return
 					}
 				}
 			}
 
-			h := w.Header()
-
-			// Prevent MIME-sniffing.
-			h.Set("X-Content-Type-Options", "nosniff")
-
-			// Prevent framing (clickjacking).
-			h.Set("X-Frame-Options", "DENY")
-
-			// Control referrer leakage.
-			h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
-
-			// Disable legacy XSS filter.
-			h.Set("X-XSS-Protection", "0")
-
-			// Restrict browser features.
-			h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
-
-			// Serve the UI with local-only assets and deny external origins by default.
-			h.Set("Content-Security-Policy", contentSecurityPolicy)
-
-			// HSTS only in production (do not lock dev environments into HTTPS).
-			if productionMode {
-				h.Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
-			}
-
 			next.ServeHTTP(w, r)
 		})
+	}
+}
+
+func setSecurityHeaders(h http.Header, productionMode bool) {
+	// Prevent MIME-sniffing.
+	h.Set("X-Content-Type-Options", "nosniff")
+
+	// Prevent framing (clickjacking).
+	h.Set("X-Frame-Options", "DENY")
+
+	// Control referrer leakage.
+	h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
+
+	// Disable legacy XSS filter.
+	h.Set("X-XSS-Protection", "0")
+
+	// Restrict browser features.
+	h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+
+	// Serve the UI with local-only assets and deny external origins by default.
+	h.Set("Content-Security-Policy", contentSecurityPolicy)
+
+	// HSTS only in production (do not lock dev environments into HTTPS).
+	if productionMode {
+		h.Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
 	}
 }
 

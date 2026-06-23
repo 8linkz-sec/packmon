@@ -3,15 +3,17 @@ package scanner
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
-	"github.com/8linkz/packmon/internal/domain"
-	"github.com/8linkz/packmon/internal/parser"
-	"github.com/8linkz/packmon/internal/sbom"
+	"github.com/8linkz-sec/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/parser"
+	"github.com/8linkz-sec/packmon/internal/sbom"
 )
+
+const maxLockfileSize = 100 << 20
 
 // CollectConfig controls lockfile and SBOM package collection.
 type CollectConfig struct {
@@ -137,7 +139,53 @@ func parseCollectedLockFile(lf LockFile) ([]domain.Package, error) {
 		return nil, err
 	}
 	defer closeSilently(f)
-	return lf.Parser.Parse(f)
+	if info, err := f.Stat(); err != nil {
+		return nil, err
+	} else if info.Mode().IsRegular() && info.Size() > maxLockfileSize {
+		return nil, lockfileSizeLimitError()
+	}
+	return lf.Parser.Parse(&limitedLockfileReader{
+		r: f,
+	})
+}
+
+type limitedLockfileReader struct {
+	r        io.Reader
+	read     int64
+	overflow bool
+}
+
+func (r *limitedLockfileReader) Read(p []byte) (int, error) {
+	if r.overflow {
+		return 0, lockfileSizeLimitError()
+	}
+	remainingWithSentinel := maxLockfileSize + 1 - r.read
+	if remainingWithSentinel <= 0 {
+		r.overflow = true
+		return 0, lockfileSizeLimitError()
+	}
+	if int64(len(p)) > remainingWithSentinel {
+		p = p[:int(remainingWithSentinel)]
+	}
+	n, err := r.r.Read(p)
+	if n == 0 {
+		return n, err
+	}
+	previous := r.read
+	r.read += int64(n)
+	if r.read > maxLockfileSize {
+		r.overflow = true
+		allowed := int(maxLockfileSize - previous)
+		if allowed > 0 {
+			return allowed, nil
+		}
+		return 0, lockfileSizeLimitError()
+	}
+	return n, err
+}
+
+func lockfileSizeLimitError() error {
+	return fmt.Errorf("lockfile exceeds maximum lockfile size of %d bytes", maxLockfileSize)
 }
 
 func parseCollectedSBOM(root, path string) (string, []domain.Package, []sbom.SkippedComponent, error) {
@@ -193,9 +241,17 @@ func formatSBOMSkippedComponent(path string, item sbom.SkippedComponent) string 
 func displayRelativePath(root, path string) string {
 	rel, err := filepath.Rel(root, path)
 	if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." {
-		return path
+		return safeExternalDisplayPath(path)
 	}
 	return rel
+}
+
+func safeExternalDisplayPath(path string) string {
+	base := filepath.Base(filepath.Clean(path))
+	if strings.TrimSpace(base) == "" || base == "." || base == string(filepath.Separator) {
+		return "external-sbom"
+	}
+	return base
 }
 
 type packageCollectionKey struct {
@@ -208,7 +264,7 @@ func (c *PackageCollection) add(pkg domain.Package, sourceFile, sourceType strin
 	c.ensureIndex()
 	k := packageCollectionKey{pkg.Name, pkg.Version, pkg.Ecosystem}
 	if i, ok := c.index[k]; ok {
-		mergeCollectedPackageMetadata(&c.Entries[i].Package, pkg)
+		domain.MergePackageMetadata(&c.Entries[i].Package, pkg)
 		return
 	}
 	c.index[k] = len(c.Entries)
@@ -286,82 +342,6 @@ func (c *PackageCollection) rebuildIndex() {
 		pkg := entry.Package
 		c.index[packageCollectionKey{pkg.Name, pkg.Version, pkg.Ecosystem}] = i
 	}
-}
-
-func mergeCollectedPackageMetadata(dst *domain.Package, src domain.Package) {
-	if dst.Dev && !src.Dev {
-		dst.Dev = false
-	}
-	dst.Direct = dst.Direct || src.Direct
-	dst.Indirect = dst.Indirect || src.Indirect
-	dst.Optional = dst.Optional || src.Optional
-	dst.Peer = dst.Peer || src.Peer
-	dst.Via = mergeCollectedStringSet(dst.Via, src.Via)
-	dst.Parents = mergeCollectedPackageParents(dst.Parents, src.Parents)
-}
-
-func mergeCollectedStringSet(left, right []string) []string {
-	if len(left) == 0 && len(right) == 0 {
-		return nil
-	}
-	seen := make(map[string]struct{}, len(left)+len(right))
-	for _, value := range left {
-		value = strings.TrimSpace(value)
-		if value != "" {
-			seen[value] = struct{}{}
-		}
-	}
-	for _, value := range right {
-		value = strings.TrimSpace(value)
-		if value != "" {
-			seen[value] = struct{}{}
-		}
-	}
-	out := make([]string, 0, len(seen))
-	for value := range seen {
-		out = append(out, value)
-	}
-	sort.Strings(out)
-	return out
-}
-
-func mergeCollectedPackageParents(left, right []domain.PackageParent) []domain.PackageParent {
-	if len(left) == 0 && len(right) == 0 {
-		return nil
-	}
-	type parentKey struct {
-		name, version string
-		ecosystem     domain.Ecosystem
-	}
-	seen := make(map[parentKey]domain.PackageParent, len(left)+len(right))
-	add := func(parent domain.PackageParent) {
-		parent.Name = strings.TrimSpace(parent.Name)
-		parent.Version = strings.TrimSpace(parent.Version)
-		if parent.Name == "" {
-			return
-		}
-		seen[parentKey{parent.Name, parent.Version, parent.Ecosystem}] = parent
-	}
-	for _, parent := range left {
-		add(parent)
-	}
-	for _, parent := range right {
-		add(parent)
-	}
-	out := make([]domain.PackageParent, 0, len(seen))
-	for _, parent := range seen {
-		out = append(out, parent)
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Ecosystem != out[j].Ecosystem {
-			return out[i].Ecosystem < out[j].Ecosystem
-		}
-		if out[i].Name != out[j].Name {
-			return out[i].Name < out[j].Name
-		}
-		return out[i].Version < out[j].Version
-	})
-	return out
 }
 
 type ecosystemNameFilter map[string]struct{}

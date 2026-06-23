@@ -4,7 +4,7 @@ import (
 	"crypto/tls"
 	"testing"
 
-	"github.com/8linkz/packmon/internal/config"
+	"github.com/8linkz-sec/packmon/internal/config"
 )
 
 // TestBuildServerTLSConfig_MinVersion verifies that the in-app TLS config

@@ -11,13 +11,14 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/8linkz/packmon/internal/auth"
-	"github.com/8linkz/packmon/internal/config"
-	"github.com/8linkz/packmon/internal/db"
-	pgstore "github.com/8linkz/packmon/internal/db/postgres"
-	migrations "github.com/8linkz/packmon/internal/db/postgres/migrations"
-	"github.com/8linkz/packmon/internal/health"
-	"github.com/8linkz/packmon/internal/server"
+	"github.com/8linkz-sec/packmon/internal/auth"
+	"github.com/8linkz-sec/packmon/internal/config"
+	"github.com/8linkz-sec/packmon/internal/db"
+	pgstore "github.com/8linkz-sec/packmon/internal/db/postgres"
+	migrations "github.com/8linkz-sec/packmon/internal/db/postgres/migrations"
+	"github.com/8linkz-sec/packmon/internal/health"
+	"github.com/8linkz-sec/packmon/internal/secret"
+	"github.com/8linkz-sec/packmon/internal/server"
 )
 
 var (
@@ -28,8 +29,12 @@ var (
 	serverSignalContext = func(parent context.Context) (context.Context, context.CancelFunc) {
 		return signal.NotifyContext(parent, syscall.SIGTERM, syscall.SIGINT)
 	}
-	hardExit      = os.Exit
-	hardExitDelay = 8 * time.Second
+	hardExit = os.Exit
+
+	defaultHardExitDelay = 8 * time.Second
+	hardExitDelay        = defaultHardExitDelay
+
+	defaultDatabaseStartupTimeout = 10 * time.Second
 )
 
 func main() {
@@ -54,6 +59,11 @@ func main() {
 	}
 }
 
+var (
+	runDatabaseMigrations        = migrations.Run
+	readDatabaseMigrationVersion = migrations.Version
+)
+
 // runMigrate loads config, runs all pending migrations, and exits.
 func runMigrate() error {
 	cfg, err := config.Load()
@@ -68,11 +78,11 @@ func runMigrate() error {
 		slog.Uint64("expected_version", uint64(migrations.ExpectedVersion)),
 	)
 
-	if err := migrations.Run(dsn); err != nil {
+	if err := runDatabaseMigrations(dsn); err != nil {
 		return fmt.Errorf("migrations failed: %w", err)
 	}
 
-	ver, dirty, err := migrations.Version(dsn)
+	ver, dirty, err := readDatabaseMigrationVersion(dsn)
 	if err != nil {
 		return fmt.Errorf("failed to read schema version after migration: %w", err)
 	}
@@ -120,7 +130,9 @@ func run() error {
 		// Verify database schema version before starting the server.
 		// Migrations must be run separately via "packmon-server migrate" (DE-27).
 		dsn := cfg.DB.DSN()
-		ver, dirty, err := migrations.Version(dsn)
+		dbCtx, cancel := databaseStartupContext(context.Background(), cfg)
+		ver, dirty, err := migrations.VersionContext(dbCtx, dsn)
+		cancel()
 		if err != nil {
 			logger.Error("failed to read database schema version -- run 'packmon-server migrate' first",
 				slog.String("error", err.Error()),
@@ -165,22 +177,28 @@ func run() error {
 	)
 
 	// Create field encryptor for sensitive at-rest data (feed API keys).
-	encryptor, err := auth.NewFieldEncryptor(cfg.Admin.EncryptionKey)
+	encryptor, err := secret.NewFieldEncryptor(cfg.Admin.EncryptionKey)
 	if err != nil {
 		return fmt.Errorf("create field encryptor: %w", err)
 	}
-	if !encryptor.Active() {
-		logger.Warn("PACKMON_ENCRYPTION_KEY is not set -- feed API keys will be stored in plaintext")
+	if err := requireProductionFieldEncryption(cfg, encryptor); err != nil {
+		logger.Error("feed API-key encryption is required in production")
+		return err
+	}
+	if devMode && !encryptor.Active() {
+		logger.Warn("PACKMON_ENCRYPTION_KEY is not set -- development feed API keys use plaintext in-memory storage")
 	}
 
 	if devMode {
 		store = newNoopStore()
 		pinger = &noopPinger{}
 	} else {
-		pg, err := pgstore.New(context.Background(), cfg.DB.DSN(), encryptor, &pgstore.PoolConfig{
+		dbCtx, cancel := databaseStartupContext(context.Background(), cfg)
+		pg, err := pgstore.New(dbCtx, cfg.DB.DSN(), encryptor, &pgstore.PoolConfig{
 			MaxConns: cfg.DB.MaxConns,
 			MinConns: cfg.DB.MinConns,
 		})
+		cancel()
 		if err != nil {
 			return fmt.Errorf("open postgres store: %w", err)
 		}
@@ -221,10 +239,11 @@ func run() error {
 	// ignores context cancellation (e.g. stuck git clone, blocked DB write).
 	go func() {
 		<-rootCtx.Done()
-		logger.Info("shutdown: hard exit deadline set", slog.String("timeout", hardExitDelay.String()))
-		time.Sleep(hardExitDelay)
-		logger.Error("shutdown: hard exit deadline exceeded, forcing os.Exit(0)")
-		hardExit(0) //nolint:revive // intentional hard exit
+		delay := effectiveHardExitDelay(cfg)
+		logger.Info("shutdown: hard exit deadline set", slog.String("timeout", delay.String()))
+		time.Sleep(delay)
+		logger.Error("shutdown: hard exit deadline exceeded, forcing os.Exit(1)")
+		hardExit(1) //nolint:revive // intentional hard exit
 	}()
 
 	background := startBackgroundServices(rootCtx, cfg, defaultFeeds, store, logger)
@@ -241,8 +260,11 @@ func run() error {
 	stop() // ensure context is cancelled if Run returned due to error
 
 	logger.Info("shutdown: waiting for background services")
-	background.Wait()
-	logger.Info("shutdown: background services done")
+	if background.Wait() {
+		logger.Info("shutdown: background services done")
+	} else {
+		logger.Warn("shutdown: background services abandoned")
+	}
 
 	logger.Info("shutdown: closing database pool")
 	// pool.Close() does not accept a context, so there is no way to
@@ -252,6 +274,43 @@ func run() error {
 	logger.Info("shutdown: complete")
 
 	return err
+}
+
+func requireProductionFieldEncryption(cfg *config.Config, encryptor *secret.FieldEncryptor) error {
+	if cfg == nil || cfg.IsDevelopment() {
+		return nil
+	}
+	if encryptor == nil || !encryptor.Active() {
+		return fmt.Errorf("PACKMON_ENCRYPTION_KEY is required in production to protect feed API keys at rest")
+	}
+	return nil
+}
+
+func databaseStartupContext(parent context.Context, cfg *config.Config) (context.Context, context.CancelFunc) {
+	timeout := defaultDatabaseStartupTimeout
+	if cfg != nil && cfg.DB.ConnectTimeout > 0 {
+		timeout = cfg.DB.ConnectTimeout
+	}
+	if parent == nil {
+		parent = context.Background()
+	}
+	return context.WithTimeout(parent, timeout)
+}
+
+func effectiveHardExitDelay(cfg *config.Config) time.Duration {
+	// Tests may override hardExitDelay to a short duration. Preserve explicit
+	// overrides while making the production default exceed graceful shutdown.
+	if hardExitDelay != defaultHardExitDelay {
+		return hardExitDelay
+	}
+	if cfg == nil || cfg.Server.ShutdownTimeout <= 0 {
+		return defaultHardExitDelay
+	}
+	minimum := cfg.Server.ShutdownTimeout + 5*time.Second
+	if minimum > defaultHardExitDelay {
+		return minimum
+	}
+	return defaultHardExitDelay
 }
 
 // newLogger creates an slog.Logger based on the log configuration.

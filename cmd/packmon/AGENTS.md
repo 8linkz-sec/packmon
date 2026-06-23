@@ -9,8 +9,10 @@ config precedence) first.
 
 ## Invariants (do not break)
 
-- Config precedence (DESIGN.md sec 2.7): CLI flags > env (`PACKMON_*`) > project
-  `.packmon.yaml` > user `~/.packmon/config/packmon.yaml` > binary defaults.
+- Config precedence (DESIGN.md sec 2.7): CLI flags > env (`PACKMON_*`) >
+  project `.packmon.yaml` > user `~/.packmon/config/packmon.yaml` > binary
+  defaults for non-sensitive scan policy. Auto-discovered project config is
+  untrusted for credential/server/DB routing fields.
 - The CLI talks only to the Packmon server for sync, never directly to upstream
   feeds. `db sync` advertises only `--source server`.
 - Exit codes are a contract (see `internal/scanner` AGENTS.md). The CLI maps
@@ -23,13 +25,13 @@ config precedence) first.
 - Cross-platform: dev/CI runs on Windows too. Use `filepath`, handle `~`/`~\`,
   and `GOEXE`.
 
-## Current open landmines (see Audit.md)
+## Current Guardrails
 
-Audit.md is authoritative; project-wide only the external GitLab-runner test is
-documented as an external validation gap. Keep these guardrails in mind:
+Keep these tracked guardrails in mind:
 
-- Preserve config precedence: flags > environment > project config >
-  user-global config > defaults.
+- Preserve config precedence for non-sensitive scan policy: flags > environment
+  > project config > user-global config > defaults. Keep credential/server/DB
+  routing under flags, environment, user-global config, or explicit `--config`.
 - `db sync` must keep using the Packmon server as its only source. Config
   `db.sync_source` is read, but values other than `server` must stay rejected.
 - The git-metadata path (`local_history.go`) has cmd-layer tests for no-git,

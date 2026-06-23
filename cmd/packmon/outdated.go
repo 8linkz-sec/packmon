@@ -10,17 +10,19 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/8linkz/packmon/internal/domain"
-	"github.com/8linkz/packmon/internal/parser"
-	"github.com/8linkz/packmon/internal/scanner"
-	versioncmp "github.com/8linkz/packmon/internal/version"
+	"github.com/8linkz-sec/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/ioutils"
+	"github.com/8linkz-sec/packmon/internal/parser"
+	"github.com/8linkz-sec/packmon/internal/plural"
+	"github.com/8linkz-sec/packmon/internal/scanner"
+	"github.com/8linkz-sec/packmon/internal/termtext"
+	versioncmp "github.com/8linkz-sec/packmon/internal/version"
 	semver "github.com/Masterminds/semver/v3"
 	"golang.org/x/mod/module"
 )
@@ -28,16 +30,20 @@ import (
 const (
 	maxConcurrentRegistryRequests = 10
 	maxRegistryResponseSize       = 512 * 1024
+	maxRegistryErrorBodyDrain     = 64 * 1024
 	maxPyPIRegistryResponseSize   = 16 * 1024 * 1024
 )
 
 type outdatedOptions struct {
+	Context    context.Context
 	Ecosystems string
 	MaxDepth   int
 	IncludeDev bool
 	OutputHTML string
 	Quiet      bool
+	resolver   packageUpdateResolver
 	SBOMFiles  []string
+	Timeout    int
 }
 
 type outdatedPackage struct {
@@ -53,6 +59,7 @@ type outdatedPackage struct {
 	Peer       bool
 	Via        []string
 	Parents    []domain.PackageParent
+	SourceRefs []string
 }
 
 type outdatedRow struct {
@@ -79,29 +86,18 @@ type outdatedReport struct {
 	PackageWord string
 }
 
-// runOutdated walks the target, parses lock files, queries package
-// registries for the latest version, and prints a comparison table.
-func runOutdated(args []string, ecosystems string, maxDepth int, sbomFilesOpt ...[]string) error {
-	var sbomFiles []string
-	if len(sbomFilesOpt) > 0 {
-		sbomFiles = sbomFilesOpt[0]
-	}
-	return runOutdatedWithOptions(args, outdatedOptions{
-		Ecosystems: ecosystems,
-		MaxDepth:   maxDepth,
-		IncludeDev: true,
-		SBOMFiles:  sbomFiles,
-	})
-}
-
 func runOutdatedWithOptions(args []string, opts outdatedOptions) error {
+	if opts.Quiet && strings.TrimSpace(opts.OutputHTML) == "" {
+		return nil
+	}
+
 	scanPath := "."
 	if len(args) > 0 {
 		scanPath = args[0]
 	}
 	absPath, err := filepath.Abs(scanPath)
 	if err != nil {
-		return fmt.Errorf("resolve path: %w", err)
+		return withExitCode(ExitOperational, fmt.Errorf("resolve path: %w", err))
 	}
 
 	reg := parser.NewRegistry()
@@ -114,14 +110,14 @@ func runOutdatedWithOptions(args []string, opts outdatedOptions) error {
 		IncludeDev: opts.IncludeDev,
 	})
 	if err != nil {
-		return err
+		return withDefaultExitCode(ExitOperational, err)
 	}
 	if err := fatalCollectionParseError(collection); err != nil {
 		return err
 	}
 	report := outdatedReport{
 		Target:      scanPath,
-		ScannedAt:   time.Now().UTC().Format("2006-01-02 15:04"),
+		ScannedAt:   formatReportTimestamp(time.Now().UTC()),
 		LockFiles:   collection.LockFiles,
 		SBOMFiles:   collection.SBOMFiles,
 		PackageWord: "packages",
@@ -130,23 +126,23 @@ func runOutdatedWithOptions(args []string, opts outdatedOptions) error {
 		if !opts.Quiet {
 			fmt.Println("No lock files found.")
 		}
-		return finishOutdatedReport(opts, report)
+		return withDefaultExitCode(ExitOperational, finishOutdatedReport(opts, report))
 	}
 
 	// Parse and deduplicate packages.
 	type pkgKey struct {
-		eco, name string
+		eco, name, version string
 	}
 
 	seen := make(map[pkgKey]struct{})
 	var packages []outdatedPackage
 
 	for _, parseErr := range collection.ParseErrors {
-		fmt.Fprintf(os.Stderr, "warning: parse error in %s\n", parseErr)
+		fmt.Fprintf(os.Stderr, "warning: parse error in %s\n", termtext.Sanitize(parseErr))
 	}
 	for _, entry := range collection.Entries {
 		p := entry.Package
-		key := pkgKey{string(p.Ecosystem), p.Name}
+		key := pkgKey{string(p.Ecosystem), p.Name, p.Version}
 		if _, ok := seen[key]; ok {
 			continue
 		}
@@ -164,6 +160,7 @@ func runOutdatedWithOptions(args []string, opts outdatedOptions) error {
 			Peer:       p.Peer,
 			Via:        append([]string(nil), p.Via...),
 			Parents:    append([]domain.PackageParent(nil), p.Parents...),
+			SourceRefs: append([]string(nil), p.SourceRefs...),
 		})
 	}
 
@@ -171,34 +168,23 @@ func runOutdatedWithOptions(args []string, opts outdatedOptions) error {
 		if !opts.Quiet {
 			fmt.Println("No packages found.")
 		}
-		return finishOutdatedReport(opts, report)
+		return withDefaultExitCode(ExitOperational, finishOutdatedReport(opts, report))
 	}
 	report.Total = len(packages)
 	if report.Total == 1 {
 		report.PackageWord = "package"
 	}
 
-	fmt.Fprintf(os.Stderr, "Checking %d packages for updates...\n", len(packages))
+	fmt.Fprintf(os.Stderr, "Checking %s for updates...\n", plural.Count(len(packages), "package", "packages"))
 
 	// Look up latest versions in parallel with a bounded request fan-out.
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := registryLookupContext(opts.Context, opts.Timeout)
 	defer cancel()
 
-	results := make([]listAllLatest, len(packages))
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, maxConcurrentRegistryRequests)
-
-	for i, pkg := range packages {
-		wg.Add(1)
-		go func(idx int, p outdatedPackage) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-
-			results[idx] = resolvePackageUpdateStatus(ctx, p.Name, p.Version, p.Ecosystem, p.Direct, p.Parents)
-		}(i, pkg)
-	}
-	wg.Wait()
+	lookup := newCachedPackageUpdateLookupWithResolver(packageUpdateResolverFromContext(ctx, opts.resolver))
+	results := resolveLatestWithWorkerPool(ctx, packages, func(ctx context.Context, p outdatedPackage) packageLatestStatus {
+		return resolveOutdatedLatestWithLookup(ctx, p, lookup)
+	})
 
 	for i, pkg := range packages {
 		status := results[i]
@@ -234,17 +220,81 @@ func runOutdatedWithOptions(args []string, opts outdatedOptions) error {
 	if !opts.Quiet {
 		printOutdatedReport(report)
 	}
-	return finishOutdatedReport(opts, report)
+	return withDefaultExitCode(ExitOperational, finishOutdatedReport(opts, report))
+}
+
+func registryLookupContext(parent context.Context, timeoutSeconds int) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	timeout := 60 * time.Second
+	if timeoutSeconds > 0 {
+		timeout = time.Duration(timeoutSeconds) * time.Second
+	}
+	return context.WithTimeout(parent, timeout)
+}
+
+func resolveLatestWithWorkerPool[T any](ctx context.Context, items []T, resolve func(context.Context, T) packageLatestStatus) []packageLatestStatus {
+	results := make([]packageLatestStatus, len(items))
+	for i := range results {
+		results[i] = unknownLatestStatus()
+	}
+	workerCount := latestLookupWorkerCount(len(items))
+	if workerCount == 0 {
+		return results
+	}
+
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for worker := 0; worker < workerCount; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for idx := range jobs {
+				if ctx.Err() != nil {
+					continue
+				}
+				results[idx] = resolve(ctx, items[idx])
+			}
+		}()
+	}
+
+sendJobs:
+	for idx := range items {
+		select {
+		case jobs <- idx:
+		case <-ctx.Done():
+			break sendJobs
+		}
+	}
+	close(jobs)
+	wg.Wait()
+	return results
+}
+
+func latestLookupWorkerCount(itemCount int) int {
+	if itemCount <= 0 {
+		return 0
+	}
+	if itemCount < maxConcurrentRegistryRequests {
+		return itemCount
+	}
+	return maxConcurrentRegistryRequests
 }
 
 func printOutdatedReport(report outdatedReport) {
 	if len(report.Outdated) == 0 {
-		fmt.Printf("\nAll %d packages are up to date.\n", report.UpToDate)
+		fmt.Printf("\n%s\n", report.EmptyStateMessage())
 		return
 	}
+	rows := make([]outdatedRow, 0, len(report.Outdated))
+	for _, r := range report.Outdated {
+		rows = append(rows, sanitizeOutdatedTerminalRow(r))
+	}
+
 	// Compute column widths.
 	maxName, maxInst, maxLat, maxEco, maxScope, maxRel, maxVia, maxFlags := 7, 9, 6, 9, 5, 8, 3, 5
-	for _, r := range report.Outdated {
+	for _, r := range rows {
 		if len(r.Name) > maxName {
 			maxName = len(r.Name)
 		}
@@ -277,15 +327,50 @@ func printOutdatedReport(report outdatedReport) {
 
 	fmt.Println()
 	fmt.Printf(fmtStr, "PACKAGE", "INSTALLED", "LATEST", "ECOSYSTEM", "SCOPE", "RELATION", "VIA", "FLAGS", "LOCK FILE")
-	for _, r := range report.Outdated {
+	for _, r := range rows {
 		fmt.Printf(fmtStr, r.Name, r.Installed, r.Latest, r.Ecosystem, r.Scope, r.Relation, r.Via, r.Flags, r.LockFile)
 	}
 
-	fmt.Printf("\n%d outdated, %d up to date", len(report.Outdated), report.UpToDate)
+	fmt.Printf("\n%d outdated, %d up to date", len(rows), report.UpToDate)
 	if report.Unknown > 0 {
 		fmt.Printf(", %d unknown", report.Unknown)
 	}
 	fmt.Printf(" (%d total)\n", report.Total)
+}
+
+func sanitizeOutdatedTerminalRow(r outdatedRow) outdatedRow {
+	return outdatedRow{
+		Name:      termtext.Sanitize(r.Name),
+		Installed: termtext.Sanitize(r.Installed),
+		Latest:    termtext.Sanitize(r.Latest),
+		Ecosystem: termtext.Sanitize(r.Ecosystem),
+		Scope:     termtext.Sanitize(r.Scope),
+		Relation:  termtext.Sanitize(r.Relation),
+		Via:       termtext.Sanitize(r.Via),
+		Flags:     termtext.Sanitize(r.Flags),
+		LockFile:  termtext.Sanitize(r.LockFile),
+	}
+}
+
+func (r outdatedReport) EmptyStateMessage() string {
+	if r.Unknown > 0 {
+		if r.UpToDate > 0 {
+			return fmt.Sprintf("No outdated packages found; %d up to date, latest status is unknown for %s (%d total).", r.UpToDate, plural.Count(r.Unknown, "package", "packages"), r.Total)
+		}
+		return fmt.Sprintf("No outdated packages found; latest status is unknown for %s (%d total).", plural.Count(r.Unknown, "package", "packages"), r.Total)
+	}
+	verb := "are"
+	if r.UpToDate == 1 {
+		verb = "is"
+	}
+	return fmt.Sprintf("All %s %s up to date.", plural.Count(r.UpToDate, "package", "packages"), verb)
+}
+
+func (r outdatedReport) EmptyStateClass() string {
+	if r.Unknown > 0 {
+		return "empty empty-unknown"
+	}
+	return "empty"
 }
 
 func finishOutdatedReport(opts outdatedOptions, report outdatedReport) error {
@@ -305,47 +390,44 @@ func finishOutdatedReport(opts outdatedOptions, report outdatedReport) error {
 }
 
 func outdatedPackageScope(p outdatedPackage) string {
-	return listAllPackageScope(outdatedAsListAllPackage(p))
+	return packageStatusScope(packageStatusFromOutdatedPackage(p))
 }
 
 func outdatedPackageRelation(p outdatedPackage) string {
-	return listAllPackageRelation(outdatedAsListAllPackage(p))
+	return packageStatusRelation(packageStatusFromOutdatedPackage(p))
 }
 
 func outdatedPackageFlags(p outdatedPackage) string {
-	return listAllPackageFlags(outdatedAsListAllPackage(p))
+	return packageStatusFlags(packageStatusFromOutdatedPackage(p))
 }
 
-func outdatedAsListAllPackage(p outdatedPackage) listAllPackage {
-	return listAllPackage{
-		Name:       p.Name,
-		Version:    p.Version,
-		Ecosystem:  p.Ecosystem,
-		LockFile:   p.LockFile,
-		SourceType: p.SourceType,
-		Dev:        p.Dev,
-		Direct:     p.Direct,
-		Indirect:   p.Indirect,
-		Optional:   p.Optional,
-		Peer:       p.Peer,
-		Via:        append([]string(nil), p.Via...),
-		Parents:    append([]domain.PackageParent(nil), p.Parents...),
-	}
-}
-
-var outdatedHTMLTemplate = template.Must(template.New("outdated").Parse(outdatedHTML))
+var outdatedHTMLTemplate = sync.OnceValue(func() *template.Template {
+	return template.Must(template.New("outdated").Parse(outdatedHTML))
+})
 
 func writeOutdatedHTML(path string, report outdatedReport) error {
-	// #nosec G304 -- CLI output path is provided intentionally by the local user.
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	report = htmlOutdatedReport(report)
+	f, err := ioutils.OpenPrivateFile(path)
 	if err != nil {
 		return fmt.Errorf("html: create file %s: %w", path, err)
 	}
-	if err := outdatedHTMLTemplate.Execute(f, report); err != nil {
+	if err := outdatedHTMLTemplate().Execute(f, report); err != nil {
 		closeSilently(f)
 		return fmt.Errorf("html: render outdated report: %w", err)
 	}
 	return f.Close()
+}
+
+func htmlOutdatedReport(report outdatedReport) outdatedReport {
+	root := report.Target
+	report.Target = htmlReportDisplayTarget(root)
+	rows := make([]outdatedRow, 0, len(report.Outdated))
+	for _, row := range report.Outdated {
+		row.LockFile = htmlReportDisplaySourcePath(root, row.LockFile)
+		rows = append(rows, row)
+	}
+	report.Outdated = rows
+	return report
 }
 
 func updateAvailable(installed, latest string, ecosystem domain.Ecosystem) bool {
@@ -359,27 +441,34 @@ const outdatedHTML = `<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Outdated Packages - Packmon Report</title>
 <style>
-body{margin:0;background:#0d1117;color:#c9d1d9;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:14px;line-height:1.5;}
+:root{--bg:#0d1117;--panel:#161b22;--border:#30363d;--fg:#c9d1d9;--heading:#e6edf3;--dim:#8b949e;--warning:#ffa657;--warning-bg:#2d1f0f;--success:#7ee787;--success-bg:#0f2d2a;--success-border:#238636;--unknown:#8b949e;}
+*{box-sizing:border-box;}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:14px;line-height:1.5;}
 .wrap{max-width:1600px;margin:0 auto;padding:28px 20px 48px;}
-h1{font-size:22px;margin:0;color:#e6edf3;}
-.meta{color:#8b949e;font-size:13px;margin:4px 0 18px;}
+h1{font-size:22px;margin:0;color:var(--heading);overflow-wrap:anywhere;word-break:break-word;}
+.meta{color:var(--dim);font-size:13px;margin:4px 0 18px;}
 .summary{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 22px;}
-.badge{border:1px solid #30363d;border-radius:6px;padding:3px 11px;font-size:13px;color:#8b949e;}
-.warn{color:#ffa657;border-color:#ffa657;}
-.ok{color:#56d4c4;border-color:#56d4c4;}
-.unknown{color:#8b949e;border-color:#8b949e;}
-.table-scroll{overflow-x:auto;border:1px solid #30363d;border-radius:6px;background:#161b22;}
-table{width:100%;min-width:1600px;border-collapse:collapse;background:#161b22;}
-th,td{padding:8px 10px;border-bottom:1px solid #30363d;text-align:left;vertical-align:top;}
-th{color:#e6edf3;font-size:12px;text-transform:uppercase;}
-td{word-break:normal;}
-.name{min-width:260px;word-break:break-word;}
-.version{white-space:nowrap;min-width:260px;}
+.badge{border:1px solid var(--border);border-radius:6px;padding:3px 11px;font-size:13px;color:var(--dim);}
+.warn{color:var(--warning);border-color:var(--warning);}
+.ok{color:var(--success);border-color:var(--success);}
+.unknown{color:var(--unknown);border-color:var(--unknown);}
+.table-scroll{overflow-x:auto;border:1px solid var(--border);border-radius:6px;background:var(--panel);}
+.table-scroll:focus{outline:3px solid var(--warning);outline-offset:3px;}
+table{width:100%;min-width:1600px;border-collapse:collapse;background:var(--panel);}
+th,td{padding:8px 10px;border-bottom:1px solid var(--border);text-align:left;vertical-align:top;}
+th{color:var(--heading);font-size:12px;text-transform:uppercase;}
+td{overflow-wrap:anywhere;word-break:break-word;}
+.name{min-width:260px;overflow-wrap:anywhere;word-break:break-word;}
+.version{min-width:260px;overflow-wrap:anywhere;word-break:break-word;}
 .ecosystem{white-space:nowrap;min-width:96px;}
 .short{white-space:nowrap;min-width:90px;}
-.lockfile{min-width:260px;word-break:break-word;}
-.empty{margin:24px 0;padding:14px 16px;background:#0f2d2a;border:1px solid #56d4c4;border-radius:6px;color:#56d4c4;font-size:15px;}
-.footer{border-top:1px solid #30363d;margin-top:28px;padding-top:10px;color:#8b949e;font-size:12px;}
+.lockfile{min-width:260px;overflow-wrap:anywhere;word-break:break-word;}
+.empty{margin:24px 0;padding:14px 16px;background:var(--success-bg);border:1px solid var(--success-border);border-radius:6px;color:var(--success);font-size:15px;}
+.empty-unknown{background:var(--warning-bg);border-color:var(--warning);color:var(--warning);}
+.meta,.footer{overflow-wrap:anywhere;word-break:break-word;}
+.footer{border-top:1px solid var(--border);margin-top:28px;padding-top:10px;color:var(--dim);font-size:12px;}
+@media (prefers-color-scheme: light){:root{--bg:#ffffff;--panel:#f6f8fa;--border:#d0d7de;--fg:#24292f;--heading:#111827;--dim:#57606a;--warning:#9a6700;--warning-bg:#fff8c5;--success:#116329;--success-bg:#dafbe1;--success-border:#2da44e;--unknown:#57606a;}}
+@media print{:root{--bg:#ffffff;--panel:#ffffff;--border:#8c959f;--fg:#111827;--heading:#000000;--dim:#424a53;--warning:#8a4600;--warning-bg:#ffffff;--success:#116329;--success-bg:#ffffff;--success-border:#116329;--unknown:#424a53;}body{background:#fff;color:#111827;}.wrap{max-width:none;padding:0;}.table-scroll{overflow:visible;border-color:var(--border);}table{min-width:0;}.empty{break-inside:avoid;page-break-inside:avoid;background:#fff;}}
 </style>
 </head>
 <body>
@@ -392,7 +481,7 @@ td{word-break:normal;}
 <span class="badge unknown">{{.Unknown}} unknown</span>
 </div>
 {{if .Outdated}}
-<div class="table-scroll">
+<div class="table-scroll" tabindex="0" role="region" aria-label="Outdated packages table">
 <table>
 <thead><tr><th class="name">Package</th><th class="version">Installed</th><th class="version">Latest</th><th class="ecosystem">Ecosystem</th><th class="short">Scope</th><th class="short">Relation</th><th>Via</th><th class="short">Flags</th><th class="lockfile">Lock File</th></tr></thead>
 <tbody>
@@ -401,20 +490,12 @@ td{word-break:normal;}
 </table>
 </div>
 {{else}}
-<div class="empty">All {{.UpToDate}} packages are up to date.</div>
+<div class="{{.EmptyStateClass}}">{{.EmptyStateMessage}}</div>
 {{end}}
 <div class="footer">{{.LockFiles}} lock files &middot; {{.SBOMFiles}} SBOM files</div>
 </div>
 </body>
 </html>`
-
-// fetchLatestVersionFn is the indirection point for latest-version lookups so
-// tests can stub registry access without hitting the network. Production code
-// points it at fetchLatestVersion.
-var (
-	fetchLatestVersionFn = fetchLatestVersion
-	fetchNPMMetadataFn   = fetchNPMMetadata
-)
 
 type npmRegistryMetadata struct {
 	DistTags map[string]string             `json:"dist-tags"`
@@ -428,35 +509,363 @@ type npmVersionManifest struct {
 	PeerDependencies     map[string]string `json:"peerDependencies"`
 }
 
-func resolvePackageUpdateStatus(ctx context.Context, name, installed string, eco domain.Ecosystem, direct bool, parents []domain.PackageParent) listAllLatest {
-	latest := fetchLatestVersionFn(ctx, eco, name)
+type packageUpdateResolver struct {
+	fetchLatest        func(context.Context, domain.Ecosystem, string) string
+	fetchNPMMetadata   func(context.Context, string) (npmRegistryMetadata, bool)
+	gitRemoteTags      func(context.Context, string) ([]string, error)
+	gitRemoteTagCommit func(context.Context, string, string) (string, bool)
+}
+
+type packageUpdateResolverContextKey struct{}
+
+func contextWithPackageUpdateResolver(ctx context.Context, resolver packageUpdateResolver) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, packageUpdateResolverContextKey{}, resolver)
+}
+
+func packageUpdateResolverFromContext(ctx context.Context, fallback packageUpdateResolver) packageUpdateResolver {
+	if ctx != nil {
+		if resolver, ok := ctx.Value(packageUpdateResolverContextKey{}).(packageUpdateResolver); ok {
+			return resolver.withDefaults()
+		}
+	}
+	return fallback.withDefaults()
+}
+
+func (r packageUpdateResolver) withDefaults() packageUpdateResolver {
+	if r.fetchNPMMetadata == nil {
+		r.fetchNPMMetadata = fetchNPMMetadata
+	}
+	if r.gitRemoteTags == nil {
+		r.gitRemoteTags = gitRemoteTags
+	}
+	if r.gitRemoteTagCommit == nil {
+		r.gitRemoteTagCommit = gitRemoteTagCommit
+	}
+	return r
+}
+
+func (r packageUpdateResolver) latestVersion(ctx context.Context, eco domain.Ecosystem, name string) string {
+	r = r.withDefaults()
+	if r.fetchLatest != nil {
+		return r.fetchLatest(ctx, eco, name)
+	}
+	return r.fetchLatestVersionFromRegistry(ctx, eco, name)
+}
+
+func (r packageUpdateResolver) npmMetadata(ctx context.Context, name string) (npmRegistryMetadata, bool) {
+	r = r.withDefaults()
+	return r.fetchNPMMetadata(ctx, name)
+}
+
+type packageUpdateLookup struct {
+	fetchLatest        func(context.Context, domain.Ecosystem, string) string
+	fetchNPMMetadata   func(context.Context, string) (npmRegistryMetadata, bool)
+	gitRemoteTagCommit func(context.Context, string, string) (string, bool)
+}
+
+func directPackageUpdateLookup() packageUpdateLookup {
+	return directPackageUpdateLookupWithResolver(packageUpdateResolver{})
+}
+
+func directPackageUpdateLookupWithResolver(resolver packageUpdateResolver) packageUpdateLookup {
+	resolver = resolver.withDefaults()
+	return packageUpdateLookup{
+		fetchLatest:        resolver.latestVersion,
+		fetchNPMMetadata:   resolver.npmMetadata,
+		gitRemoteTagCommit: resolver.gitRemoteTagCommit,
+	}
+}
+
+func newCachedPackageUpdateLookupWithResolver(resolver packageUpdateResolver) packageUpdateLookup {
+	resolver = resolver.withDefaults()
+	cache := &packageUpdateCache{
+		latest:              make(map[latestVersionCacheKey]string),
+		latestInflight:      make(map[latestVersionCacheKey]*latestVersionCacheCall),
+		npmMetadata:         make(map[string]npmMetadataCacheEntry),
+		npmMetadataInflight: make(map[string]*npmMetadataCacheCall),
+		resolver:            resolver,
+	}
+	return packageUpdateLookup{
+		fetchLatest:        cache.fetchLatestVersion,
+		fetchNPMMetadata:   cache.fetchNPMMetadata,
+		gitRemoteTagCommit: resolver.gitRemoteTagCommit,
+	}
+}
+
+type latestVersionCacheKey struct {
+	ecosystem domain.Ecosystem
+	name      string
+}
+
+type latestVersionCacheCall struct {
+	done  chan struct{}
+	value string
+}
+
+type npmMetadataCacheEntry struct {
+	value npmRegistryMetadata
+	ok    bool
+}
+
+type npmMetadataCacheCall struct {
+	done  chan struct{}
+	value npmRegistryMetadata
+	ok    bool
+}
+
+type packageUpdateCache struct {
+	mu                  sync.Mutex
+	latest              map[latestVersionCacheKey]string
+	latestInflight      map[latestVersionCacheKey]*latestVersionCacheCall
+	npmMetadata         map[string]npmMetadataCacheEntry
+	npmMetadataInflight map[string]*npmMetadataCacheCall
+	resolver            packageUpdateResolver
+}
+
+func (c *packageUpdateCache) fetchLatestVersion(ctx context.Context, eco domain.Ecosystem, name string) string {
+	key := latestVersionCacheKey{ecosystem: eco, name: name}
+
+	c.mu.Lock()
+	if value, ok := c.latest[key]; ok {
+		c.mu.Unlock()
+		return value
+	}
+	if call, ok := c.latestInflight[key]; ok {
+		c.mu.Unlock()
+		select {
+		case <-call.done:
+			return call.value
+		case <-ctx.Done():
+			return ""
+		}
+	}
+	call := &latestVersionCacheCall{done: make(chan struct{})}
+	c.latestInflight[key] = call
+	c.mu.Unlock()
+
+	value := c.resolver.latestVersion(ctx, eco, name)
+
+	c.mu.Lock()
+	call.value = value
+	c.latest[key] = value
+	delete(c.latestInflight, key)
+	close(call.done)
+	c.mu.Unlock()
+	return value
+}
+
+func (c *packageUpdateCache) fetchNPMMetadata(ctx context.Context, name string) (npmRegistryMetadata, bool) {
+	key := strings.TrimSpace(name)
+
+	c.mu.Lock()
+	if entry, ok := c.npmMetadata[key]; ok {
+		c.mu.Unlock()
+		return entry.value, entry.ok
+	}
+	if call, ok := c.npmMetadataInflight[key]; ok {
+		c.mu.Unlock()
+		select {
+		case <-call.done:
+			return call.value, call.ok
+		case <-ctx.Done():
+			return npmRegistryMetadata{}, false
+		}
+	}
+	call := &npmMetadataCacheCall{done: make(chan struct{})}
+	c.npmMetadataInflight[key] = call
+	c.mu.Unlock()
+
+	value, ok := c.resolver.npmMetadata(ctx, name)
+
+	c.mu.Lock()
+	call.value = value
+	call.ok = ok
+	c.npmMetadata[key] = npmMetadataCacheEntry{value: value, ok: ok}
+	delete(c.npmMetadataInflight, key)
+	close(call.done)
+	c.mu.Unlock()
+	return value, ok
+}
+
+func resolveOutdatedLatestWithLookup(ctx context.Context, p outdatedPackage, lookup packageUpdateLookup) packageLatestStatus {
+	if !publicLatestLookupAllowed(p.Ecosystem, p.SourceRefs) {
+		return unknownLatestStatus()
+	}
+	return resolvePackageUpdateStatusWithLookup(ctx, p.Name, p.Version, p.Ecosystem, p.Direct, p.Parents, lookup)
+}
+
+func resolvePackageUpdateStatusWithLookup(ctx context.Context, name, installed string, eco domain.Ecosystem, direct bool, parents []domain.PackageParent, lookup packageUpdateLookup) packageLatestStatus {
+	latest := lookup.fetchLatest(ctx, eco, name)
 	if latest == "" {
-		return listAllLatest{Latest: "unknown", Update: "-", Unknown: true}
+		return unknownLatestStatus()
 	}
 	target := latest
 	if eco == domain.EcosystemNPM && !direct && len(parents) > 0 {
-		if wanted := resolveNPMWantedVersion(ctx, name, installed, latest, parents); wanted != "" {
+		if wanted := resolveNPMWantedVersionWithLookup(ctx, name, installed, latest, parents, lookup); wanted != "" {
 			target = wanted
 		}
 	}
 	if updateAvailable(installed, target, eco) {
-		if eco == domain.EcosystemGitHubActions && githubActionSHAAtTag(ctx, name, installed, target) {
-			return listAllLatest{Latest: target, Update: "-"}
+		if eco == domain.EcosystemGitHubActions && githubActionSHAAtTag(ctx, name, installed, target, lookup.gitRemoteTagCommit) {
+			return packageLatestStatus{Latest: target, Update: "-"}
 		}
-		return listAllLatest{Latest: target, Update: "yes"}
+		return packageLatestStatus{Latest: target, Update: "yes"}
 	}
-	return listAllLatest{Latest: target, Update: "-"}
+	return packageLatestStatus{Latest: target, Update: "-"}
 }
 
-func githubActionSHAAtTag(ctx context.Context, name, installed, tag string) bool {
+func unknownLatestStatus() packageLatestStatus {
+	return packageLatestStatus{Latest: "unknown", Update: "-", Unknown: true}
+}
+
+func publicLatestLookupAllowed(eco domain.Ecosystem, refs []string) bool {
+	refs = normalizedSourceRefs(refs)
+	if len(refs) == 0 {
+		return true
+	}
+	switch eco {
+	case domain.EcosystemNPM:
+		return allSourceRefsMatch(refs, func(ref string) bool {
+			return sourceRefHost(ref) == "registry.npmjs.org"
+		})
+	case domain.EcosystemPyPI:
+		return allSourceRefsMatch(refs, func(ref string) bool {
+			host := sourceRefHost(ref)
+			return host == "pypi.org" || host == "files.pythonhosted.org"
+		})
+	case domain.EcosystemCargo:
+		return allSourceRefsMatch(refs, func(ref string) bool {
+			ref = strings.TrimPrefix(strings.TrimPrefix(ref, "registry+"), "sparse+")
+			return ref == "https://github.com/rust-lang/crates.io-index" || ref == "https://index.crates.io/"
+		})
+	case domain.EcosystemGem:
+		return allSourceRefsMatch(refs, func(ref string) bool {
+			return sourceRefHost(ref) == "rubygems.org"
+		})
+	case domain.EcosystemCocoaPods:
+		return allSourceRefsMatch(refs, func(ref string) bool {
+			ref = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(ref)), "/")
+			return ref == "trunk" ||
+				ref == "https://github.com/cocoapods/specs.git" ||
+				ref == "https://github.com/cocoapods/specs"
+		})
+	case domain.EcosystemComposer:
+		return allSourceRefsMatch(refs, func(ref string) bool {
+			switch sourceRefHost(ref) {
+			case "repo.packagist.org", "packagist.org", "api.github.com", "github.com", "gitlab.com", "bitbucket.org":
+				return true
+			default:
+				return false
+			}
+		})
+	case domain.EcosystemCRAN:
+		return cranSourceRefsAllowPublicLookup(refs)
+	case domain.EcosystemPub:
+		return pubSourceRefsAllowPublicLookup(refs)
+	case domain.EcosystemMaven:
+		return allSourceRefsMatch(refs, func(ref string) bool {
+			switch sourceRefHost(ref) {
+			case "repo.maven.apache.org", "repo1.maven.org", "search.maven.org":
+				return true
+			default:
+				return false
+			}
+		})
+	default:
+		return true
+	}
+}
+
+func normalizedSourceRefs(refs []string) []string {
+	out := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		ref = strings.TrimSpace(ref)
+		if ref != "" {
+			out = append(out, ref)
+		}
+	}
+	return out
+}
+
+func allSourceRefsMatch(refs []string, allow func(string) bool) bool {
+	for _, ref := range refs {
+		if !allow(ref) {
+			return false
+		}
+	}
+	return true
+}
+
+func sourceRefHost(ref string) string {
+	ref = strings.TrimSpace(ref)
+	for _, prefix := range []string{"url=", "registry+", "sparse+", "git+"} {
+		ref = strings.TrimPrefix(ref, prefix)
+	}
+	parsed, err := url.Parse(ref)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(parsed.Hostname())
+}
+
+func cranSourceRefsAllowPublicLookup(refs []string) bool {
+	sourceOK := false
+	repositoryOK := false
+	for _, ref := range refs {
+		normalized := strings.ToLower(strings.TrimSpace(ref))
+		switch {
+		case strings.HasPrefix(normalized, "source="):
+			if normalized != "source=repository" {
+				return false
+			}
+			sourceOK = true
+		case strings.HasPrefix(normalized, "repository="):
+			if normalized != "repository=cran" {
+				return false
+			}
+			repositoryOK = true
+		default:
+			return false
+		}
+	}
+	return sourceOK && repositoryOK
+}
+
+func pubSourceRefsAllowPublicLookup(refs []string) bool {
+	for _, ref := range refs {
+		normalized := strings.ToLower(strings.TrimSpace(ref))
+		switch {
+		case strings.HasPrefix(normalized, "source="):
+			if normalized != "source=hosted" {
+				return false
+			}
+		case strings.HasPrefix(normalized, "url="):
+			host := sourceRefHost(ref)
+			if host != "pub.dev" && host != "pub.dartlang.org" {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func githubActionSHAAtTag(ctx context.Context, name, installed, tag string, resolveTagCommit func(context.Context, string, string) (string, bool)) bool {
 	if !isLikelyGitSHA(installed) {
 		return false
+	}
+	if resolveTagCommit == nil {
+		resolveTagCommit = gitRemoteTagCommit
 	}
 	remote := githubActionRemote(name)
 	if remote == "" {
 		return false
 	}
-	commit, ok := gitRemoteTagCommitFn(ctx, remote, tag)
+	commit, ok := resolveTagCommit(ctx, remote, tag)
 	return ok && gitSHAMatches(installed, commit)
 }
 
@@ -488,13 +897,13 @@ func gitSHAMatches(installed, commit string) bool {
 	return isLikelyGitSHA(installed) && isLikelyGitSHA(commit) && strings.HasPrefix(commit, installed)
 }
 
-func resolveNPMWantedVersion(ctx context.Context, name, installed, latest string, parents []domain.PackageParent) string {
-	ranges := npmParentDependencyRanges(ctx, name, parents)
+func resolveNPMWantedVersionWithLookup(ctx context.Context, name, installed, latest string, parents []domain.PackageParent, lookup packageUpdateLookup) string {
+	ranges := npmParentDependencyRangesWithLookup(ctx, name, parents, lookup)
 	if len(ranges) == 0 {
 		return latest
 	}
 
-	meta, ok := fetchNPMMetadataFn(ctx, name)
+	meta, ok := lookup.fetchNPMMetadata(ctx, name)
 	if !ok || len(meta.Versions) == 0 {
 		return latest
 	}
@@ -509,7 +918,7 @@ func resolveNPMWantedVersion(ctx context.Context, name, installed, latest string
 	return wanted
 }
 
-func npmParentDependencyRanges(ctx context.Context, childName string, parents []domain.PackageParent) []string {
+func npmParentDependencyRangesWithLookup(ctx context.Context, childName string, parents []domain.PackageParent, lookup packageUpdateLookup) []string {
 	seen := make(map[string]struct{})
 	out := make([]string, 0, len(parents))
 	for _, parent := range parents {
@@ -521,7 +930,7 @@ func npmParentDependencyRanges(ctx context.Context, childName string, parents []
 		if parentName == "" || parentVersion == "" {
 			continue
 		}
-		meta, ok := fetchNPMMetadataFn(ctx, parentName)
+		meta, ok := lookup.fetchNPMMetadata(ctx, parentName)
 		if !ok {
 			continue
 		}
@@ -587,6 +996,10 @@ func npmVersionSatisfiesAll(version string, ranges []string) bool {
 // fetchLatestVersion queries the package registry for the latest version.
 // Returns "" if the lookup fails or the ecosystem is unsupported.
 func fetchLatestVersion(ctx context.Context, eco domain.Ecosystem, name string) string {
+	return packageUpdateResolver{}.latestVersion(ctx, eco, name)
+}
+
+func (r packageUpdateResolver) fetchLatestVersionFromRegistry(ctx context.Context, eco domain.Ecosystem, name string) string {
 	switch eco {
 	case domain.EcosystemNPM:
 		return fetchNPMLatest(ctx, name)
@@ -613,37 +1026,124 @@ func fetchLatestVersion(ctx context.Context, eco domain.Ecosystem, name string) 
 	case domain.EcosystemCocoaPods:
 		return fetchCocoaPodsLatest(ctx, name)
 	case domain.EcosystemSwiftPM:
-		return fetchSwiftPMLatest(ctx, name)
+		return r.fetchSwiftPMLatest(ctx, name)
 	case domain.EcosystemGitHubActions:
-		return fetchGitHubActionLatest(ctx, name)
+		return r.fetchGitHubActionLatest(ctx, name)
 	default:
 		return ""
 	}
 }
 
-var registryClient = &http.Client{Timeout: 10 * time.Second}
+var registryClient = &http.Client{}
 
 func registryGet(ctx context.Context, url string) ([]byte, error) {
 	return registryGetLimited(ctx, url, maxRegistryResponseSize)
 }
 
 func registryGetLimited(ctx context.Context, url string, limit int64) ([]byte, error) {
+	return registryGetLimitedWithHeaders(ctx, url, limit, nil)
+}
+
+func registryGetLimitedWithHeaders(ctx context.Context, url string, limit int64, headers http.Header) ([]byte, error) {
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
+	for name, values := range headers {
+		for _, value := range values {
+			req.Header.Add(name, value)
+		}
+	}
 
 	resp, err := registryClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
-	defer closeSilently(resp.Body)
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
+		drainRegistryErrorBody(resp.Body)
 		return nil, fmt.Errorf("status %d", resp.StatusCode)
 	}
 	return io.ReadAll(io.LimitReader(resp.Body, limit))
+}
+
+func drainRegistryErrorBody(r io.Reader) {
+	_, _ = io.Copy(io.Discard, io.LimitReader(r, maxRegistryErrorBodyDrain))
+}
+
+type registryThrottle struct {
+	mu       sync.Mutex
+	interval time.Duration
+	last     time.Time
+	now      func() time.Time
+	sleep    func(context.Context, time.Duration) bool
+}
+
+var cratesIOThrottle = newRegistryThrottle(time.Second)
+
+func newRegistryThrottle(interval time.Duration) *registryThrottle {
+	return &registryThrottle{
+		interval: interval,
+		now:      time.Now,
+		sleep:    sleepWithContext,
+	}
+}
+
+func (t *registryThrottle) wait(ctx context.Context) bool {
+	if t == nil || t.interval <= 0 {
+		return true
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	now := t.currentTime()
+	if !t.last.IsZero() {
+		if wait := t.last.Add(t.interval).Sub(now); wait > 0 {
+			if !t.sleepWithContext(ctx, wait) {
+				return false
+			}
+			now = t.currentTime()
+		}
+	}
+	t.last = now
+	return true
+}
+
+func (t *registryThrottle) currentTime() time.Time {
+	if t.now != nil {
+		return t.now()
+	}
+	return time.Now()
+}
+
+func (t *registryThrottle) sleepWithContext(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return true
+	}
+	if t.sleep != nil {
+		return t.sleep(ctx, d)
+	}
+	return sleepWithContext(ctx, d)
+}
+
+func sleepWithContext(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 // npm: GET https://registry.npmjs.org/{name}/latest
@@ -714,7 +1214,12 @@ func fetchGoLatest(ctx context.Context, name string) string {
 
 // crates: GET https://crates.io/api/v1/crates/{name}
 func fetchCratesLatest(ctx context.Context, name string) string {
-	data, err := registryGet(ctx, "https://crates.io/api/v1/crates/"+name)
+	if !cratesIOThrottle.wait(ctx) {
+		return ""
+	}
+	headers := http.Header{}
+	headers.Set("User-Agent", cratesIOUserAgent())
+	data, err := registryGetLimitedWithHeaders(ctx, "https://crates.io/api/v1/crates/"+name, maxRegistryResponseSize, headers)
 	if err != nil {
 		return ""
 	}
@@ -727,6 +1232,14 @@ func fetchCratesLatest(ctx context.Context, name string) string {
 		return ""
 	}
 	return res.Crate.MaxStableVersion
+}
+
+func cratesIOUserAgent() string {
+	v := strings.TrimSpace(version)
+	if v == "" {
+		v = "dev"
+	}
+	return "packmon/" + v + " (+https://github.com/8linkz-sec/packmon)"
 }
 
 // nuget: GET https://api.nuget.org/v3-flatcontainer/{name}/index.json
@@ -904,26 +1417,24 @@ func fetchCocoaPodsLatest(ctx context.Context, name string) string {
 }
 
 func fetchGitHubActionLatest(ctx context.Context, name string) string {
-	return fetchGitLatest(ctx, githubActionRemote(name), domain.EcosystemGitHubActions)
+	return packageUpdateResolver{}.fetchGitHubActionLatest(ctx, name)
 }
 
-func fetchSwiftPMLatest(ctx context.Context, name string) string {
+func (r packageUpdateResolver) fetchGitHubActionLatest(ctx context.Context, name string) string {
+	return r.fetchGitLatest(ctx, githubActionRemote(name), domain.EcosystemGitHubActions)
+}
+
+func (r packageUpdateResolver) fetchSwiftPMLatest(ctx context.Context, name string) string {
 	remote := swiftPMGitRemote(name)
 	if remote == "" {
 		return ""
 	}
-	return fetchGitLatest(ctx, remote, domain.EcosystemSwiftPM)
+	return r.fetchGitLatest(ctx, remote, domain.EcosystemSwiftPM)
 }
 
 func swiftPMGitRemote(name string) string {
 	name = strings.TrimSpace(name)
-	if name == "" {
-		return ""
-	}
-	if strings.Contains(name, "://") {
-		return name
-	}
-	if !strings.Contains(name, "/") {
+	if !isCanonicalSwiftPMLookupIdentity(name) {
 		return ""
 	}
 	if strings.HasSuffix(strings.ToLower(name), ".git") {
@@ -932,26 +1443,87 @@ func swiftPMGitRemote(name string) string {
 	return "https://" + name + ".git"
 }
 
+func isCanonicalSwiftPMLookupIdentity(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" ||
+		strings.Contains(name, "://") ||
+		strings.ContainsAny(name, " \t\r\n\x00\\@:") ||
+		strings.HasPrefix(name, "-") ||
+		strings.HasPrefix(name, "/") ||
+		strings.Contains(name, "//") {
+		return false
+	}
+	if strings.HasSuffix(strings.ToLower(name), ".git") {
+		name = name[:len(name)-len(".git")]
+	}
+
+	parts := strings.Split(name, "/")
+	if len(parts) < 3 {
+		return false
+	}
+	host := strings.ToLower(strings.TrimSpace(parts[0]))
+	if !isAllowedSwiftPMGitHost(host) {
+		return false
+	}
+	for _, part := range parts[1:] {
+		if part == "" || part == "." || part == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+func isAllowedSwiftPMGitHost(host string) bool {
+	switch strings.ToLower(strings.TrimSpace(host)) {
+	case "github.com", "gitlab.com", "bitbucket.org":
+		return true
+	default:
+		return false
+	}
+}
+
 func fetchGitLatest(ctx context.Context, remote string, eco domain.Ecosystem) string {
+	return packageUpdateResolver{}.fetchGitLatest(ctx, remote, eco)
+}
+
+func (r packageUpdateResolver) fetchGitLatest(ctx context.Context, remote string, eco domain.Ecosystem) string {
+	r = r.withDefaults()
 	remote = strings.TrimSpace(remote)
-	if remote == "" || !strings.Contains(remote, "://") {
+	if !isSafeGitRemote(remote) {
 		return ""
 	}
-	tags, err := gitRemoteTagsFn(ctx, remote)
+	tags, err := r.gitRemoteTags(ctx, remote)
 	if err != nil {
 		return ""
 	}
 	return selectLatestVersion(tags, eco)
 }
 
-var (
-	gitRemoteTagsFn      = gitRemoteTags
-	gitRemoteTagCommitFn = gitRemoteTagCommit
-)
+func isSafeGitRemote(remote string) bool {
+	remote = strings.TrimSpace(remote)
+	if remote == "" || strings.HasPrefix(remote, "-") || strings.ContainsAny(remote, " \t\r\n\x00") {
+		return false
+	}
+	parsed, err := url.Parse(remote)
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "http", "https":
+	default:
+		return false
+	}
+	if parsed.Host == "" || strings.HasPrefix(parsed.Host, "-") {
+		return false
+	}
+	return true
+}
 
 func gitRemoteTags(ctx context.Context, remote string) ([]string, error) {
-	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--tags", remote) // #nosec G204 -- fixed argv; remote is passed as one git URL argument without a shell.
-	out, err := cmd.Output()
+	if !isSafeGitRemote(remote) {
+		return nil, fmt.Errorf("unsafe git remote")
+	}
+	out, err := gitCommandOutput(ctx, "ls-remote", "--tags", "--", remote)
 	if err != nil {
 		return nil, err
 	}
@@ -980,13 +1552,12 @@ func gitRemoteTags(ctx context.Context, remote string) ([]string, error) {
 func gitRemoteTagCommit(ctx context.Context, remote, tag string) (string, bool) {
 	remote = strings.TrimSpace(remote)
 	tag = strings.TrimSpace(tag)
-	if remote == "" || tag == "" || !strings.Contains(remote, "://") || strings.ContainsAny(tag, " \t\r\n") {
+	if tag == "" || !isSafeGitRemote(remote) || strings.ContainsAny(tag, " \t\r\n") {
 		return "", false
 	}
 
 	tagRef := "refs/tags/" + tag
-	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--tags", remote, tagRef, tagRef+"^{}") // #nosec G204 -- fixed argv; remote and tag refs are passed as single git arguments without a shell.
-	out, err := cmd.Output()
+	out, err := gitCommandOutput(ctx, "ls-remote", "--tags", "--", remote, tagRef, tagRef+"^{}")
 	if err != nil {
 		return "", false
 	}

@@ -3,6 +3,8 @@ package middleware
 import (
 	"log/slog"
 	"net/http"
+
+	"github.com/8linkz-sec/packmon/internal/logsafe"
 )
 
 // Recovery catches panics in downstream handlers and returns a 500 Internal
@@ -18,12 +20,11 @@ func Recovery(logger *slog.Logger) func(http.Handler) http.Handler {
 					logger.Error("panic recovered",
 						slog.Any("panic", v),
 						slog.String("method", r.Method),
-						slog.String("path", r.URL.Path),
-						slog.String("client_ip", ClientIP(r)),
+						slog.String("path", logsafe.RequestPathLabel(r.URL.Path)),
 						slog.String("correlation_id", correlationID),
 					)
 
-					http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+					writeJSONError(w, http.StatusInternalServerError, "internal server error")
 				}
 			}()
 
