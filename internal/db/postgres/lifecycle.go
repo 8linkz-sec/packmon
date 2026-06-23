@@ -6,30 +6,71 @@ import (
 	"strings"
 	"time"
 
-	"github.com/8linkz/packmon/internal/db"
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/domain"
+	lifecyclepolicy "github.com/8linkz-sec/packmon/internal/lifecycle"
 	"github.com/jackc/pgx/v5"
 )
 
 const lifecycleSource = "endoflife.date"
 
 func (s *Store) UpsertLifecycleProducts(ctx context.Context, products []db.LifecycleProduct) error {
+	return withTx(ctx, s.pool, func(tx pgx.Tx) error {
+		return upsertLifecycleProductsTx(ctx, tx, products)
+	})
+}
+
+func (s *Store) ReplaceLifecycleProducts(ctx context.Context, products []db.LifecycleProduct) (int, error) {
+	slugs := lifecycleProductSlugs(products)
+	if len(slugs) == 0 {
+		return 0, nil
+	}
+
+	var deleted int
+	err := withTx(ctx, s.pool, func(tx pgx.Tx) error {
+		if err := upsertLifecycleProductsTx(ctx, tx, products); err != nil {
+			return err
+		}
+		var err error
+		deleted, err = deleteLifecycleProductsNotInTx(ctx, tx, slugs)
+		return err
+	})
+	return deleted, err
+}
+
+func lifecycleProductSlugs(products []db.LifecycleProduct) []string {
+	slugs := make([]string, 0, len(products))
+	seen := make(map[string]struct{}, len(products))
+	for _, product := range products {
+		slug := strings.TrimSpace(product.ProductSlug)
+		if slug == "" {
+			continue
+		}
+		if _, ok := seen[slug]; ok {
+			continue
+		}
+		seen[slug] = struct{}{}
+		slugs = append(slugs, slug)
+	}
+	return slugs
+}
+
+func upsertLifecycleProductsTx(ctx context.Context, tx pgx.Tx, products []db.LifecycleProduct) error {
 	if len(products) == 0 {
 		return nil
 	}
 
-	return withTx(ctx, s.pool, func(tx pgx.Tx) error {
-		for _, product := range products {
-			productSlug := strings.TrimSpace(product.ProductSlug)
-			if productSlug == "" {
-				continue
-			}
-			name := strings.TrimSpace(product.Name)
-			if name == "" {
-				name = productSlug
-			}
+	for _, product := range products {
+		productSlug := strings.TrimSpace(product.ProductSlug)
+		if productSlug == "" {
+			continue
+		}
+		name := strings.TrimSpace(product.Name)
+		if name == "" {
+			name = productSlug
+		}
 
-			if _, err := tx.Exec(ctx, `
+		if _, err := tx.Exec(ctx, `
 				INSERT INTO lifecycle_products (
 					product_slug, name, category, source, identifiers, raw, updated_at
 				) VALUES (
@@ -42,33 +83,36 @@ func (s *Store) UpsertLifecycleProducts(ctx context.Context, products []db.Lifec
 					identifiers = EXCLUDED.identifiers,
 					raw = EXCLUDED.raw,
 					updated_at = now()`,
-				productSlug,
-				name,
-				product.Category,
-				lifecycleSource,
-				normalizeJSON(product.Identifiers, []byte("[]")),
-				normalizeJSON(product.Raw, []byte("{}")),
-			); err != nil {
-				return fmt.Errorf("postgres: upsert lifecycle product %s: %w", productSlug, err)
-			}
+			productSlug,
+			name,
+			product.Category,
+			lifecycleSource,
+			normalizeJSON(product.Identifiers, []byte("[]")),
+			normalizeJSON(product.Raw, []byte("{}")),
+		); err != nil {
+			return fmt.Errorf("postgres: upsert lifecycle product %s: %w", productSlug, err)
+		}
 
-			if _, err := tx.Exec(ctx, `DELETE FROM lifecycle_releases WHERE product_slug = $1`, productSlug); err != nil {
-				return fmt.Errorf("postgres: delete lifecycle releases for %s: %w", productSlug, err)
-			}
-			if _, err := tx.Exec(ctx, `DELETE FROM lifecycle_package_map WHERE product_slug = $1`, productSlug); err != nil {
-				return fmt.Errorf("postgres: delete lifecycle package maps for %s: %w", productSlug, err)
-			}
+		if err := recordLifecycleTombstonesForProduct(ctx, tx, productSlug); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM lifecycle_releases WHERE product_slug = $1`, productSlug); err != nil {
+			return fmt.Errorf("postgres: delete lifecycle releases for %s: %w", productSlug, err)
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM lifecycle_package_map WHERE product_slug = $1`, productSlug); err != nil {
+			return fmt.Errorf("postgres: delete lifecycle package maps for %s: %w", productSlug, err)
+		}
 
-			for _, release := range product.Releases {
-				cycle := strings.TrimSpace(release.Cycle)
-				if cycle == "" {
-					continue
-				}
-				releaseProductSlug := strings.TrimSpace(release.ProductSlug)
-				if releaseProductSlug == "" {
-					releaseProductSlug = productSlug
-				}
-				if _, err := tx.Exec(ctx, `
+		for _, release := range product.Releases {
+			cycle := strings.TrimSpace(release.Cycle)
+			if cycle == "" {
+				continue
+			}
+			releaseProductSlug := strings.TrimSpace(release.ProductSlug)
+			if releaseProductSlug == "" {
+				releaseProductSlug = productSlug
+			}
+			if _, err := tx.Exec(ctx, `
 					INSERT INTO lifecycle_releases (
 						product_slug, cycle, latest, release_date, is_lts, lts_from,
 						is_eoas, eoas_from, is_eol, eol_from, is_discontinued,
@@ -94,42 +138,42 @@ func (s *Store) UpsertLifecycleProducts(ctx context.Context, products []db.Lifec
 						is_maintained = EXCLUDED.is_maintained,
 						raw = EXCLUDED.raw,
 						updated_at = now()`,
-					releaseProductSlug,
-					cycle,
-					release.Latest,
-					release.ReleaseDate,
-					release.IsLTS,
-					release.LTSFrom,
-					release.IsEOAS,
-					release.EOASFrom,
-					release.IsEOL,
-					release.EOLFrom,
-					release.IsDiscontinued,
-					release.DiscontinuedFrom,
-					release.IsEOES,
-					release.EOESFrom,
-					release.IsMaintained,
-					normalizeJSON(release.Raw, []byte("{}")),
-				); err != nil {
-					return fmt.Errorf("postgres: upsert lifecycle release %s/%s: %w", releaseProductSlug, cycle, err)
-				}
+				releaseProductSlug,
+				cycle,
+				release.Latest,
+				release.ReleaseDate,
+				release.IsLTS,
+				release.LTSFrom,
+				release.IsEOAS,
+				release.EOASFrom,
+				release.IsEOL,
+				release.EOLFrom,
+				release.IsDiscontinued,
+				release.DiscontinuedFrom,
+				release.IsEOES,
+				release.EOESFrom,
+				release.IsMaintained,
+				normalizeJSON(release.Raw, []byte("{}")),
+			); err != nil {
+				return fmt.Errorf("postgres: upsert lifecycle release %s/%s: %w", releaseProductSlug, cycle, err)
 			}
+		}
 
-			for _, packageMap := range product.PackageMaps {
-				ecosystem := strings.TrimSpace(packageMap.Ecosystem)
-				name := normalizePackageName(ecosystem, strings.TrimSpace(packageMap.Name))
-				if ecosystem == "" || name == "" {
-					continue
-				}
-				mapProductSlug := strings.TrimSpace(packageMap.ProductSlug)
-				if mapProductSlug == "" {
-					mapProductSlug = productSlug
-				}
-				source := strings.TrimSpace(packageMap.Source)
-				if source == "" {
-					source = lifecycleSource
-				}
-				if _, err := tx.Exec(ctx, `
+		for _, packageMap := range product.PackageMaps {
+			ecosystem := strings.TrimSpace(packageMap.Ecosystem)
+			name := normalizePackageName(ecosystem, strings.TrimSpace(packageMap.Name))
+			if ecosystem == "" || name == "" {
+				continue
+			}
+			mapProductSlug := strings.TrimSpace(packageMap.ProductSlug)
+			if mapProductSlug == "" {
+				mapProductSlug = productSlug
+			}
+			source := strings.TrimSpace(packageMap.Source)
+			if source == "" {
+				source = lifecycleSource
+			}
+			if _, err := tx.Exec(ctx, `
 					INSERT INTO lifecycle_package_map (
 						ecosystem, name, product_slug, purl_type, purl_namespace,
 						purl_name, source, updated_at
@@ -142,30 +186,77 @@ func (s *Store) UpsertLifecycleProducts(ctx context.Context, products []db.Lifec
 						purl_name = EXCLUDED.purl_name,
 						source = EXCLUDED.source,
 						updated_at = now()`,
-					ecosystem,
-					name,
-					mapProductSlug,
-					packageMap.PURLType,
-					packageMap.PURLNamespace,
-					packageMap.PURLName,
-					source,
-				); err != nil {
-					return fmt.Errorf("postgres: upsert lifecycle package map %s/%s: %w", ecosystem, name, err)
-				}
+				ecosystem,
+				name,
+				mapProductSlug,
+				packageMap.PURLType,
+				packageMap.PURLNamespace,
+				packageMap.PURLName,
+				source,
+			); err != nil {
+				return fmt.Errorf("postgres: upsert lifecycle package map %s/%s: %w", ecosystem, name, err)
 			}
 		}
-		return nil
-	})
+
+		if err := clearCurrentLifecycleTombstonesForProduct(ctx, tx, productSlug); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) DeleteLifecycleProductsNotIn(ctx context.Context, productSlugs []string) (int, error) {
 	if len(productSlugs) == 0 {
 		return 0, nil
 	}
-	result, err := s.pool.Exec(ctx, `
-		DELETE FROM lifecycle_products
-		WHERE source = $1
-		  AND NOT (product_slug = ANY($2))`,
+	var deleted int
+	err := withTx(ctx, s.pool, func(tx pgx.Tx) error {
+		var err error
+		deleted, err = deleteLifecycleProductsNotInTx(ctx, tx, productSlugs)
+		return err
+	})
+	if err != nil {
+		return 0, err
+	}
+	return deleted, nil
+}
+
+func deleteLifecycleProductsNotInTx(ctx context.Context, tx pgx.Tx, productSlugs []string) (int, error) {
+	rows, err := tx.Query(ctx, `
+			SELECT product_slug
+			FROM lifecycle_products
+			WHERE source = $1
+			  AND NOT (product_slug = ANY($2))`,
+		lifecycleSource,
+		productSlugs,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("postgres: select stale lifecycle products: %w", err)
+	}
+	defer closeSilently(rows)
+
+	staleSlugs := make([]string, 0)
+	for rows.Next() {
+		var productSlug string
+		if err := rows.Scan(&productSlug); err != nil {
+			return 0, fmt.Errorf("postgres: scan stale lifecycle product: %w", err)
+		}
+		staleSlugs = append(staleSlugs, productSlug)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("postgres: iterate stale lifecycle products: %w", err)
+	}
+
+	for _, productSlug := range staleSlugs {
+		if err := recordLifecycleTombstonesForProduct(ctx, tx, productSlug); err != nil {
+			return 0, err
+		}
+	}
+
+	result, err := tx.Exec(ctx, `
+			DELETE FROM lifecycle_products
+			WHERE source = $1
+			  AND NOT (product_slug = ANY($2))`,
 		lifecycleSource,
 		productSlugs,
 	)
@@ -173,6 +264,48 @@ func (s *Store) DeleteLifecycleProductsNotIn(ctx context.Context, productSlugs [
 		return 0, fmt.Errorf("postgres: delete stale lifecycle products: %w", err)
 	}
 	return int(result.RowsAffected()), nil
+}
+
+func recordLifecycleTombstonesForProduct(ctx context.Context, tx pgx.Tx, productSlug string) error {
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO lifecycle_sync_tombstones (id, ecosystem, name, product_slug, cycle, updated_at)
+		SELECT
+			'endoflife:' || m.ecosystem || ':' || m.name || ':' || p.product_slug || ':' || r.cycle,
+			m.ecosystem,
+			m.name,
+			p.product_slug,
+			r.cycle,
+			NOW()
+		FROM lifecycle_package_map m
+		INNER JOIN lifecycle_products p ON p.product_slug = m.product_slug
+		INNER JOIN lifecycle_releases r ON r.product_slug = p.product_slug
+		WHERE p.product_slug = $1
+		ON CONFLICT (id) DO UPDATE SET
+			ecosystem = EXCLUDED.ecosystem,
+			name = EXCLUDED.name,
+			product_slug = EXCLUDED.product_slug,
+			cycle = EXCLUDED.cycle,
+			updated_at = EXCLUDED.updated_at`,
+		productSlug,
+	); err != nil {
+		return fmt.Errorf("postgres: record lifecycle tombstones for %s: %w", productSlug, err)
+	}
+	return nil
+}
+
+func clearCurrentLifecycleTombstonesForProduct(ctx context.Context, tx pgx.Tx, productSlug string) error {
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM lifecycle_sync_tombstones t
+		USING lifecycle_package_map m
+		INNER JOIN lifecycle_products p ON p.product_slug = m.product_slug
+		INNER JOIN lifecycle_releases r ON r.product_slug = p.product_slug
+		WHERE p.product_slug = $1
+		  AND t.id = 'endoflife:' || m.ecosystem || ':' || m.name || ':' || p.product_slug || ':' || r.cycle`,
+		productSlug,
+	); err != nil {
+		return fmt.Errorf("postgres: clear current lifecycle tombstones for %s: %w", productSlug, err)
+	}
+	return nil
 }
 
 func (s *Store) FindLifecycleFindingsBatch(ctx context.Context, packages []db.PackageQuery, now time.Time) ([]domain.Finding, error) {
@@ -246,9 +379,9 @@ func (s *Store) FindLifecycleFindingsBatch(ctx context.Context, packages []db.Pa
 	}
 	defer closeSilently(rows)
 
-	rowsByPackage := make(map[ecoName][]lifecycleReleaseRow)
+	rowsByPackage := make(map[ecoName][]lifecyclepolicy.ReleaseRow)
 	for rows.Next() {
-		var row lifecycleReleaseRow
+		var row lifecyclepolicy.ReleaseRow
 		if err := rows.Scan(
 			&row.Ecosystem,
 			&row.PackageName,
@@ -271,7 +404,6 @@ func (s *Store) FindLifecycleFindingsBatch(ctx context.Context, packages []db.Pa
 		); err != nil {
 			return nil, fmt.Errorf("postgres: scan lifecycle row: %w", err)
 		}
-		row.Release.ProductSlug = row.ProductSlug
 		key := ecoName{ecosystem: row.Ecosystem, name: row.PackageName}
 		rowsByPackage[key] = append(rowsByPackage[key], row)
 	}
@@ -283,9 +415,9 @@ func (s *Store) FindLifecycleFindingsBatch(ctx context.Context, packages []db.Pa
 	for key, packageVersions := range versionMap {
 		rows := rowsByPackage[key]
 		for _, pkg := range packageVersions {
-			matchesByProduct := longestLifecycleMatches(rows, pkg.Version)
+			matchesByProduct := lifecyclepolicy.LongestMatchingReleases(rows, pkg.Version)
 			for _, row := range matchesByProduct {
-				finding, ok := lifecycleFindingForRelease(pkg, row, now)
+				finding, ok := lifecyclepolicy.FindingForRelease(lifecyclePackageQuery(pkg), row, now)
 				if ok {
 					findings = append(findings, finding)
 				}
@@ -295,89 +427,10 @@ func (s *Store) FindLifecycleFindingsBatch(ctx context.Context, packages []db.Pa
 	return findings, nil
 }
 
-type lifecycleReleaseRow struct {
-	Ecosystem   string
-	PackageName string
-	ProductSlug string
-	ProductName string
-	Release     db.LifecycleRelease
-}
-
-func longestLifecycleMatches(rows []lifecycleReleaseRow, version string) []lifecycleReleaseRow {
-	if strings.TrimSpace(version) == "" {
-		return nil
+func lifecyclePackageQuery(pkg db.PackageQuery) lifecyclepolicy.PackageQuery {
+	return lifecyclepolicy.PackageQuery{
+		Ecosystem: pkg.Ecosystem,
+		Name:      pkg.Name,
+		Version:   pkg.Version,
 	}
-
-	best := make(map[string]lifecycleReleaseRow)
-	for _, row := range rows {
-		if !lifecycleCycleMatches(version, row.Release.Cycle) {
-			continue
-		}
-		current, ok := best[row.ProductSlug]
-		if !ok || len(row.Release.Cycle) > len(current.Release.Cycle) {
-			best[row.ProductSlug] = row
-		}
-	}
-
-	matches := make([]lifecycleReleaseRow, 0, len(best))
-	for _, row := range best {
-		matches = append(matches, row)
-	}
-	return matches
-}
-
-func lifecycleCycleMatches(version, cycle string) bool {
-	version = strings.TrimSpace(version)
-	cycle = strings.TrimSpace(cycle)
-	if version == "" || cycle == "" {
-		return false
-	}
-	return version == cycle || strings.HasPrefix(version, cycle+".")
-}
-
-func lifecycleFindingForRelease(pkg db.PackageQuery, row lifecycleReleaseRow, now time.Time) (domain.Finding, bool) {
-	release := row.Release
-	if release.IsEOL || dateOnOrBefore(release.EOLFrom, now) {
-		return buildLifecycleFinding(pkg, row, domain.FindingTypeSupplyChainRisk, domain.SeverityCritical, "eol", "is end-of-life"), true
-	}
-	if dateWithin(release.EOLFrom, now, 90*24*time.Hour) {
-		return buildLifecycleFinding(pkg, row, domain.FindingTypeLifecycle, domain.SeverityMedium, "eol_soon", "reaches end-of-life soon"), true
-	}
-	if release.IsEOAS || dateOnOrBefore(release.EOASFrom, now) {
-		return buildLifecycleFinding(pkg, row, domain.FindingTypeLifecycle, domain.SeverityLow, "security_support_only", "is in security support only"), true
-	}
-	return domain.Finding{}, false
-}
-
-func buildLifecycleFinding(pkg db.PackageQuery, row lifecycleReleaseRow, typ domain.FindingType, severity domain.Severity, riskType, phrase string) domain.Finding {
-	productName := strings.TrimSpace(row.ProductName)
-	if productName == "" {
-		productName = row.ProductSlug
-	}
-	url := fmt.Sprintf("https://endoflife.date/%s", row.ProductSlug)
-	title := fmt.Sprintf("%s %s %s", productName, row.Release.Cycle, phrase)
-
-	return domain.Finding{
-		Name:       pkg.Name,
-		Version:    pkg.Version,
-		Ecosystem:  domain.Ecosystem(pkg.Ecosystem),
-		Type:       typ,
-		Severity:   severity,
-		AdvisoryID: fmt.Sprintf("endoflife:%s:%s:%s", row.ProductSlug, row.Release.Cycle, riskType),
-		Title:      title,
-		URL:        url,
-		Resources: []domain.ResourceLink{
-			{Label: lifecycleSource, URL: url},
-		},
-		RiskType: riskType,
-		Source:   lifecycleSource,
-	}
-}
-
-func dateOnOrBefore(date *time.Time, now time.Time) bool {
-	return date != nil && !date.After(now)
-}
-
-func dateWithin(date *time.Time, now time.Time, window time.Duration) bool {
-	return date != nil && date.After(now) && !date.After(now.Add(window))
 }

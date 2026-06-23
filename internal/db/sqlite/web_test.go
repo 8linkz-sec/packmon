@@ -2,15 +2,15 @@ package sqlite
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/8linkz/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/db"
 )
 
 func TestHistoryQueriesAndClear(t *testing.T) {
-	t.Parallel()
-
 	store, err := New(t.TempDir() + "/packmon.db")
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -18,12 +18,17 @@ func TestHistoryQueriesAndClear(t *testing.T) {
 	defer closeSilently(store)
 
 	ctx := context.Background()
-	baseDay := time.Now().UTC().Truncate(24 * time.Hour)
+	fixedNow := time.Date(2026, 5, 30, 12, 0, 0, 0, time.UTC)
+	originalNowUTC := nowUTC
+	nowUTC = func() time.Time { return fixedNow }
+	t.Cleanup(func() { nowUTC = originalNowUTC })
+	baseDay := fixedNow.Truncate(24 * time.Hour)
 
 	entries := []ScanEntry{
 		{
 			RepoName:          "repo-a",
 			Branch:            "main",
+			Commit:            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			ScannedAt:         baseDay.Add(-48 * time.Hour),
 			PackagesCount:     10,
 			FindingsCount:     3,
@@ -66,6 +71,13 @@ func TestHistoryQueriesAndClear(t *testing.T) {
 	if recent[0].RepoName != "repo-b" || recent[1].RepoName != "repo-a" {
 		t.Fatalf("ListRecentScans() order = [%s, %s], want [repo-b, repo-a]", recent[0].RepoName, recent[1].RepoName)
 	}
+	stored, err := store.GetRecentScans(ctx, "repo-a", 10)
+	if err != nil {
+		t.Fatalf("GetRecentScans(repo-a) error = %v", err)
+	}
+	if stored[1].Commit != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Fatalf("stored commit = %q, want commit SHA", stored[1].Commit)
+	}
 
 	daily, err := store.CountScansByDay(ctx, 3)
 	if err != nil {
@@ -102,6 +114,102 @@ func TestHistoryQueriesAndClear(t *testing.T) {
 	}
 }
 
+func TestGetRecentScansReturnsDecodeErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		column      string
+		value       string
+		wantSnippet string
+	}{
+		{name: "scanned_at", column: "scanned_at", value: "not-a-time", wantSnippet: "scan history row 1 scanned_at"},
+		{name: "finding_ids", column: "finding_ids", value: "{", wantSnippet: "scan history row 1 finding_ids"},
+		{name: "finding_severities", column: "finding_severities", value: "{", wantSnippet: "scan history row 1 finding_severities"},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			store, err := New(t.TempDir() + "/packmon.db")
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			defer closeSilently(store)
+
+			scannedAt := "2026-05-30T12:00:00Z"
+			findingIDs := `["GHSA-test"]`
+			findingSeverities := `["HIGH"]`
+			switch tt.column {
+			case "scanned_at":
+				scannedAt = tt.value
+			case "finding_ids":
+				findingIDs = tt.value
+			case "finding_severities":
+				findingSeverities = tt.value
+			}
+
+			_, err = store.DB().ExecContext(context.Background(), `
+				INSERT INTO scan_history(repo_name, branch, scanned_at, packages_count, findings_count, finding_ids, finding_severities)
+				VALUES('repo', 'main', ?, 1, 1, ?, ?)`, scannedAt, findingIDs, findingSeverities)
+			if err != nil {
+				t.Fatalf("seed corrupt history: %v", err)
+			}
+
+			_, err = store.GetRecentScans(context.Background(), "", 10)
+			if err == nil {
+				t.Fatal("GetRecentScans() error = nil, want decode error")
+			}
+			if !strings.Contains(err.Error(), tt.wantSnippet) {
+				t.Fatalf("GetRecentScans() error = %v, want %q", err, tt.wantSnippet)
+			}
+		})
+	}
+}
+
+func TestScanHistorySchemaIncludesCommitAndIndexes(t *testing.T) {
+	t.Parallel()
+
+	store, err := New(t.TempDir() + "/packmon.db")
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer closeSilently(store)
+
+	if ok, err := tableHasColumn(store.DB(), "scan_history", "commit"); err != nil {
+		t.Fatalf("inspect scan_history commit column: %v", err)
+	} else if !ok {
+		t.Fatal("scan_history.commit column missing")
+	}
+
+	rows, err := store.DB().QueryContext(context.Background(), `
+		SELECT name FROM sqlite_master
+		WHERE type = 'index' AND tbl_name = 'scan_history'`)
+	if err != nil {
+		t.Fatalf("query scan_history indexes: %v", err)
+	}
+	defer closeSilently(rows)
+
+	indexes := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatalf("scan index name: %v", err)
+		}
+		indexes[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate indexes: %v", err)
+	}
+	for _, want := range []string{"idx_scan_history_scanned_at", "idx_scan_history_repo_scanned_at"} {
+		if !indexes[want] {
+			t.Fatalf("scan_history index %q missing; have %#v", want, indexes)
+		}
+	}
+}
+
 func TestDashboardStatsAndSearchPackages(t *testing.T) {
 	t.Parallel()
 
@@ -131,15 +239,17 @@ func TestDashboardStatsAndSearchPackages(t *testing.T) {
 	}
 	if _, err := store.DB().ExecContext(ctx, `
 		INSERT INTO reputation_findings_local(id, ecosystem, name, version, type, risk_type, severity, summary)
-		VALUES ('REP-1', 'npm', 'supply-only', '1.0.0', 'supply_chain_risk', 'removed_package', 'MEDIUM', 'removed package')`); err != nil {
+		VALUES
+			('REP-1', 'npm', 'supply-only', '1.0.0', 'supply_chain_risk', 'removed_package', 'MEDIUM', 'removed package'),
+			('REP-2', 'npm', 'rep-malware', '1.0.0', 'malicious', 'malware', 'CRITICAL', 'reputation malware')`); err != nil {
 		t.Fatalf("insert reputation rows: %v", err)
 	}
 	if _, err := store.DB().ExecContext(ctx, `
 		INSERT INTO lifecycle_releases_local(
-			id, ecosystem, name, product_slug, product_label, cycle, is_eoas, eoas_from
-		) VALUES (
-			'LIFE-1', 'pypi', 'django', 'django', 'Django', '3.2', 1, '2020-01-01'
-		)`); err != nil {
+			id, ecosystem, name, product_slug, product_label, cycle, latest, is_eoas, eoas_from, is_eol, eol_from
+		) VALUES
+			('LIFE-1', 'pypi', 'django', 'django', 'Django', '4.2', '4.2.11', 1, '2020-01-01', 0, NULL),
+			('LIFE-2', 'pypi', 'django-eol', 'django', 'Django', '3.2', '3.2.25', 0, NULL, 1, '2020-01-01')`); err != nil {
 		t.Fatalf("insert lifecycle rows: %v", err)
 	}
 
@@ -164,6 +274,9 @@ func TestDashboardStatsAndSearchPackages(t *testing.T) {
 	if results[0].VulnerabilityCount != 2 || results[0].VulnerabilityIDs != "V-1, V-2" {
 		t.Fatalf("SearchPackages() vulnerabilities = (%d, %q), want (2, %q)", results[0].VulnerabilityCount, results[0].VulnerabilityIDs, "V-1, V-2")
 	}
+	if results[0].FindingTypes != "malicious, vulnerability" {
+		t.Fatalf("SearchPackages() finding types = %q, want malicious and vulnerability", results[0].FindingTypes)
+	}
 
 	highResults, err := store.SearchPackages(ctx, db.PackageSearchParams{Severity: "HIGH", Limit: 10})
 	if err != nil {
@@ -177,27 +290,63 @@ func TestDashboardStatsAndSearchPackages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SearchPackages() with malicious finding filter error = %v", err)
 	}
-	if len(maliciousResults) != 2 {
-		t.Fatalf("SearchPackages() with malicious finding filter len = %d, want 2", len(maliciousResults))
+	if len(maliciousResults) != 3 {
+		t.Fatalf("SearchPackages() with malicious finding filter len = %d, want 3", len(maliciousResults))
 	}
+	sawReputationMalicious := false
 	for _, result := range maliciousResults {
 		if result.Name == "requests-evil" && result.VulnerabilityCount != 0 {
 			t.Fatalf("SearchPackages() malicious-only result has vulnerability count %d, want 0", result.VulnerabilityCount)
 		}
+		if result.FindingTypes != "malicious" {
+			t.Fatalf("SearchPackages() malicious-only finding types = %q, want malicious", result.FindingTypes)
+		}
+		if result.Name == "rep-malware" && result.FindingsCount == 1 {
+			sawReputationMalicious = true
+		}
+	}
+	if !sawReputationMalicious {
+		t.Fatalf("SearchPackages() malicious-only results = %+v, want reputation-backed malware", maliciousResults)
 	}
 	supplyResults, err := store.SearchPackages(ctx, db.PackageSearchParams{FindingType: "supply_chain_risk", Limit: 10})
 	if err != nil {
 		t.Fatalf("SearchPackages() with supply-chain finding filter error = %v", err)
 	}
-	if len(supplyResults) != 1 || supplyResults[0].Name != "supply-only" || supplyResults[0].FindingsCount != 1 {
-		t.Fatalf("SearchPackages() supply-chain results = %+v, want supply-only", supplyResults)
+	sawSupplyOnly := false
+	sawEOLEntry := false
+	for _, result := range supplyResults {
+		if result.Name == "supply-only" && result.FindingsCount == 1 {
+			if result.FindingTypes != "supply_chain_risk" {
+				t.Fatalf("SearchPackages() supply-only finding types = %q, want supply_chain_risk", result.FindingTypes)
+			}
+			sawSupplyOnly = true
+		}
+		if result.Name == "django-eol" && result.Version == "3.2.25" && result.FindingsCount == 1 {
+			if result.FindingTypes != "supply_chain_risk" {
+				t.Fatalf("SearchPackages() EOL supply-chain finding types = %q, want supply_chain_risk", result.FindingTypes)
+			}
+			sawEOLEntry = true
+		}
+	}
+	if !sawSupplyOnly || !sawEOLEntry {
+		t.Fatalf("SearchPackages() supply-chain results = %+v, want reputation risk and EOL lifecycle risk", supplyResults)
+	}
+	eolResults, err := store.SearchPackages(ctx, db.PackageSearchParams{FindingType: "supply_chain_risk", Query: "django-eol", Limit: 10})
+	if err != nil {
+		t.Fatalf("SearchPackages() with supply-chain EOL finding filter error = %v", err)
+	}
+	if len(eolResults) != 1 || eolResults[0].Name != "django-eol" || eolResults[0].Version != "3.2.25" {
+		t.Fatalf("SearchPackages() supply-chain EOL results = %+v, want django-eol with version 3.2.25", eolResults)
 	}
 	lifecycleResults, err := store.SearchPackages(ctx, db.PackageSearchParams{FindingType: "lifecycle", Limit: 10})
 	if err != nil {
 		t.Fatalf("SearchPackages() with lifecycle finding filter error = %v", err)
 	}
-	if len(lifecycleResults) != 1 || lifecycleResults[0].Name != "django" || lifecycleResults[0].FindingsCount != 1 {
-		t.Fatalf("SearchPackages() lifecycle results = %+v, want django", lifecycleResults)
+	if len(lifecycleResults) != 1 || lifecycleResults[0].Name != "django" || lifecycleResults[0].Version != "4.2.11" || lifecycleResults[0].FindingsCount != 1 {
+		t.Fatalf("SearchPackages() lifecycle results = %+v, want django with version 4.2.11", lifecycleResults)
+	}
+	if lifecycleResults[0].FindingTypes != "lifecycle" {
+		t.Fatalf("SearchPackages() lifecycle finding types = %q, want lifecycle", lifecycleResults[0].FindingTypes)
 	}
 
 	stats, err := store.DashboardStats(ctx)
@@ -210,11 +359,101 @@ func TestDashboardStatsAndSearchPackages(t *testing.T) {
 	if stats.TotalVulnerabilities != 3 {
 		t.Fatalf("TotalVulnerabilities = %d, want 3", stats.TotalVulnerabilities)
 	}
-	if stats.TotalMalicious != 2 {
-		t.Fatalf("TotalMalicious = %d, want 2", stats.TotalMalicious)
+	if stats.TotalMalicious != 3 {
+		t.Fatalf("TotalMalicious = %d, want 3 including reputation-backed malware", stats.TotalMalicious)
 	}
-	if len(stats.BySeverity) != 3 || stats.BySeverity["HIGH"] != 1 || stats.BySeverity["MEDIUM"] != 1 || stats.BySeverity["LOW"] != 1 {
-		t.Fatalf("BySeverity = %#v, want HIGH=1 MEDIUM=1 LOW=1 (vulnerabilities only)", stats.BySeverity)
+	if stats.TotalSupplyChainRisk != 2 {
+		t.Fatalf("TotalSupplyChainRisk = %d, want 2", stats.TotalSupplyChainRisk)
+	}
+	if stats.TotalLifecycle != 1 {
+		t.Fatalf("TotalLifecycle = %d, want 1", stats.TotalLifecycle)
+	}
+	if stats.BySeverity["CRITICAL"] != 2 || stats.BySeverity["HIGH"] != 2 || stats.BySeverity["MEDIUM"] != 2 || stats.BySeverity["LOW"] != 1 {
+		t.Fatalf("BySeverity = %#v, want vulnerability plus malicious/reputation severities", stats.BySeverity)
+	}
+}
+
+func TestHasAdvisoryDataIncludesReputationAndLifecycle(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		sql  string
+	}{
+		{
+			name: "reputation only",
+			sql: `INSERT INTO reputation_findings_local(id, ecosystem, name, version, type, risk_type, severity, summary)
+				VALUES ('REP-only', 'npm', 'removed-pkg', '1.0.0', 'supply_chain_risk', 'removed_package', 'MEDIUM', 'removed package')`,
+		},
+		{
+			name: "lifecycle only",
+			sql: `INSERT INTO lifecycle_releases_local(id, ecosystem, name, product_slug, product_label, cycle, is_eol, eol_from)
+				VALUES ('LIFE-only', 'pypi', 'django', 'django', 'Django', '3.2', 1, '2020-01-01')`,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			store, err := New(t.TempDir() + "/packmon.db")
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			defer closeSilently(store)
+
+			ctx := context.Background()
+			if _, err := store.DB().ExecContext(ctx, tt.sql); err != nil {
+				t.Fatalf("seed %s: %v", tt.name, err)
+			}
+
+			hasData, err := store.HasAdvisoryData(ctx)
+			if err != nil {
+				t.Fatalf("HasAdvisoryData() error = %v", err)
+			}
+			if !hasData {
+				t.Fatal("HasAdvisoryData() = false, want true")
+			}
+		})
+	}
+}
+
+func TestSearchPackagesCapsVulnerabilityIDPreview(t *testing.T) {
+	t.Parallel()
+
+	store, err := New(t.TempDir() + "/packmon.db")
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer closeSilently(store)
+
+	ctx := context.Background()
+	for i := 1; i <= 7; i++ {
+		id := fmt.Sprintf("ADV-%03d", i)
+		if _, err := store.DB().ExecContext(ctx, `
+			INSERT INTO vulnerabilities_local(row_key, id, ecosystem, name, version_ranges, severity, summary)
+			VALUES(?, ?, 'npm', 'wide-advisory-package', '[]', 'HIGH', 'preview cap')`, id+"|npm|wide-advisory-package", id); err != nil {
+			t.Fatalf("insert vulnerability %s: %v", id, err)
+		}
+	}
+
+	results, err := store.SearchPackages(ctx, db.PackageSearchParams{Query: "wide-advisory", Limit: 10})
+	if err != nil {
+		t.Fatalf("SearchPackages() error = %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("SearchPackages() len = %d, want 1", len(results))
+	}
+	if results[0].VulnerabilityCount != 7 {
+		t.Fatalf("SearchPackages() vulnerability count = %d, want 7", results[0].VulnerabilityCount)
+	}
+	wantIDs := "ADV-001, ADV-002, ADV-003, ADV-004, ADV-005, +2 more"
+	if results[0].VulnerabilityIDs != wantIDs {
+		t.Fatalf("SearchPackages() vulnerability IDs = %q, want %q", results[0].VulnerabilityIDs, wantIDs)
+	}
+	if strings.Contains(results[0].VulnerabilityIDs, "ADV-006") || strings.Contains(results[0].VulnerabilityIDs, "ADV-007") {
+		t.Fatalf("SearchPackages() included IDs beyond cap: %q", results[0].VulnerabilityIDs)
 	}
 }
 
@@ -235,6 +474,31 @@ func TestSearchPackagesWithoutFiltersReturnsEmptyWithoutQuerying(t *testing.T) {
 	}
 	if len(results) != 0 {
 		t.Fatalf("SearchPackages() len = %d, want 0", len(results))
+	}
+}
+
+func TestSearchPackagesUsesUnicodeAwareQueryMatching(t *testing.T) {
+	t.Parallel()
+
+	store, err := New(t.TempDir() + "/packmon.db")
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer closeSilently(store)
+
+	ctx := context.Background()
+	if _, err := store.DB().ExecContext(ctx, `
+		INSERT INTO vulnerabilities_local(row_key, id, ecosystem, name, version_ranges, severity, summary)
+		VALUES ('V-unicode|npm|ÜberPkg', 'V-unicode', 'npm', 'ÜberPkg', '[]', 'HIGH', 'unicode package')`); err != nil {
+		t.Fatalf("insert unicode package: %v", err)
+	}
+
+	results, err := store.SearchPackages(ctx, db.PackageSearchParams{Query: "über", Limit: 10})
+	if err != nil {
+		t.Fatalf("SearchPackages() error = %v", err)
+	}
+	if len(results) != 1 || results[0].Name != "ÜberPkg" {
+		t.Fatalf("SearchPackages() results = %+v, want Unicode case-insensitive match", results)
 	}
 }
 

@@ -3,12 +3,17 @@ package middleware
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/8linkz-sec/packmon/internal/correlation"
+	"github.com/8linkz-sec/packmon/internal/requestctx"
 )
 
 func TestCorrelationPreservesValidIDAndStoresItInContext(t *testing.T) {
@@ -41,7 +46,7 @@ func TestCorrelationGeneratesIDForMissingOrInvalidHeader(t *testing.T) {
 	t.Parallel()
 
 	handler := Correlation(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := CorrelationIDFromContext(r.Context()); !uuidPattern.MatchString(got) {
+		if got := CorrelationIDFromContext(r.Context()); !correlation.Valid(got) {
 			t.Fatalf("generated context correlation id = %q, want UUID-like value", got)
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -52,13 +57,44 @@ func TestCorrelationGeneratesIDForMissingOrInvalidHeader(t *testing.T) {
 		req.Header.Set(HeaderCorrelationID, header)
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
-		if got := rec.Header().Get(HeaderCorrelationID); !uuidPattern.MatchString(got) {
+		if got := rec.Header().Get(HeaderCorrelationID); !correlation.Valid(got) {
 			t.Fatalf("response correlation id for header %q = %q, want UUID-like value", header, got)
 		}
 	}
 
 	if got := CorrelationIDFromContext(context.Background()); got != "" {
 		t.Fatalf("CorrelationIDFromContext(empty) = %q, want empty", got)
+	}
+}
+
+func TestCorrelationLogsEntropyFailureAndUsesFallbackID(t *testing.T) {
+	oldGenerator := newCorrelationID
+	newCorrelationID = func() (string, error) {
+		return "", errors.New("entropy down")
+	}
+	t.Cleanup(func() { newCorrelationID = oldGenerator })
+
+	oldDefault := slog.Default()
+	var logs bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(oldDefault) })
+
+	handler := Correlation(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := CorrelationIDFromContext(r.Context()); !correlation.Valid(got) {
+			t.Fatalf("fallback context correlation id = %q, want UUID-like value", got)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/check", nil))
+
+	if got := rec.Header().Get(HeaderCorrelationID); !correlation.Valid(got) {
+		t.Fatalf("fallback response correlation id = %q, want UUID-like value", got)
+	}
+	for _, want := range []string{"failed to generate correlation id", "entropy down"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("entropy failure log missing %q: %s", want, logs.String())
+		}
 	}
 }
 
@@ -94,6 +130,9 @@ func TestUserAgentMiddlewareProductionRules(t *testing.T) {
 			if rec.Code != tt.want {
 				t.Fatalf("status = %d, want %d", rec.Code, tt.want)
 			}
+			if tt.want == http.StatusForbidden {
+				assertJSONErrorResponse(t, rec, http.StatusForbidden, "unknown user agent")
+			}
 		})
 	}
 
@@ -111,7 +150,7 @@ func TestUserAgentMiddlewareProductionRules(t *testing.T) {
 	}
 }
 
-func TestLoggingCapturesStatusAndCorrelationID(t *testing.T) {
+func TestLoggingCapturesStatusAndCorrelationIDWithoutClientIdentifiers(t *testing.T) {
 	t.Parallel()
 
 	var logs bytes.Buffer
@@ -120,7 +159,7 @@ func TestLoggingCapturesStatusAndCorrelationID(t *testing.T) {
 	req.RemoteAddr = "10.0.0.1:12345"
 	req.Header.Set("X-Forwarded-For", "203.0.113.12, 10.0.0.1")
 	req.Header.Set("User-Agent", "packmon-cli/test")
-	req = req.WithContext(context.WithValue(req.Context(), correlationKey{}, "corr-1"))
+	req = req.WithContext(requestctx.ContextWithCorrelationID(req.Context(), "corr-1"))
 
 	handler := TrustedClientIP([]string{"10.0.0.1"})(Logging(logger)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "missing", http.StatusNotFound)
@@ -132,13 +171,79 @@ func TestLoggingCapturesStatusAndCorrelationID(t *testing.T) {
 		t.Fatalf("status = %d, want 404", rec.Code)
 	}
 	logLine := logs.String()
-	for _, want := range []string{`"level":"WARN"`, `"status":404`, `"correlation_id":"corr-1"`, `"path":"/missing"`, `"remote_addr":"203.0.113.12"`} {
+	for _, want := range []string{`"level":"WARN"`, `"status":404`, `"correlation_id":"corr-1"`, `"path":"(unmatched-route)"`} {
 		if !strings.Contains(logLine, want) {
 			t.Fatalf("log line missing %s: %s", want, logLine)
 		}
 	}
-	if strings.Contains(logLine, "10.0.0.1:12345") {
-		t.Fatalf("log line contains unnormalized direct peer address: %s", logLine)
+	for _, forbidden := range []string{`"remote_addr"`, `"client_ip"`, `"user_agent"`, "203.0.113.12", "10.0.0.1:12345", "packmon-cli/test"} {
+		if strings.Contains(logLine, forbidden) {
+			t.Fatalf("request completion log contains client identifier %q: %s", forbidden, logLine)
+		}
+	}
+}
+
+func TestLoggingUsesRoutePathLabelAndOmitsUserAgent(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	rawPath := "/api/v1/packages/npm/C:%5CUsers%5CAdmin%5Csecret-token/refresh"
+	rawUA := "packmon-cli/test\nAuthorization: Bearer super-secret-token " + strings.Repeat("b", 400)
+	req := httptest.NewRequest(http.MethodGet, rawPath, nil)
+	req.Header.Set("User-Agent", rawUA)
+
+	handler := Logging(logger)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	logLine := logs.String()
+	for _, leaked := range []string{`"user_agent"`, "super-secret-token", "\nAuthorization", "secret-token", "Users", "Admin", strings.Repeat("b", 300)} {
+		if strings.Contains(logLine, leaked) {
+			t.Fatalf("request log leaked %q in %s", leaked, logLine)
+		}
+	}
+	for _, want := range []string{`"path":"/api/v1/packages/{ecosystem}/{name...}/refresh"`} {
+		if !strings.Contains(logLine, want) {
+			t.Fatalf("request log missing %q: %s", want, logLine)
+		}
+	}
+}
+
+func TestUserAgentRejectionLogUsesTrustedClientIPAndBoundedValues(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	handler := TrustedClientIP([]string{"10.0.0.1"})(Correlation(UserAgent(logger, false)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/packages/npm/secret-token/refresh", nil)
+	req.RemoteAddr = "10.0.0.1:12345"
+	req.Header.Set("X-Forwarded-For", "203.0.113.77, 10.0.0.1")
+	req.Header.Set("User-Agent", "curl/8.0 Authorization: Bearer super-secret-token "+strings.Repeat("x", 400))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+	logLine := logs.String()
+	for _, want := range []string{`"client_ip":"203.0.113.77"`, `"correlation_id":`, `Bearer [redacted]`, `[truncated]`} {
+		if !strings.Contains(logLine, want) {
+			t.Fatalf("user-agent rejection log missing %s: %s", want, logLine)
+		}
+	}
+	if !strings.Contains(logLine, `"path":"/api/v1/packages/{ecosystem}/{name...}/refresh"`) {
+		t.Fatalf("user-agent rejection log missing route path label: %s", logLine)
+	}
+	for _, leaked := range []string{"10.0.0.1:12345", "super-secret-token", "secret-token", strings.Repeat("x", 300)} {
+		if strings.Contains(logLine, leaked) {
+			t.Fatalf("user-agent rejection log leaked %q in %s", leaked, logLine)
+		}
 	}
 }
 
@@ -159,7 +264,7 @@ func TestLoggingDefaultsStatusToOKAndDebugsStaticAssets(t *testing.T) {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 	logLine := logs.String()
-	for _, want := range []string{`"level":"DEBUG"`, `"status":200`, `"path":"/static/style.css"`} {
+	for _, want := range []string{`"level":"DEBUG"`, `"status":200`, `"path":"/static/..."`} {
 		if !strings.Contains(logLine, want) {
 			t.Fatalf("log line missing %s: %s", want, logLine)
 		}
@@ -171,30 +276,51 @@ func TestRecoveryReturnsInternalServerErrorOnPanic(t *testing.T) {
 
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logs, nil))
-	req := httptest.NewRequest(http.MethodGet, "/boom", nil)
-	req = req.WithContext(context.WithValue(req.Context(), correlationKey{}, "corr-2"))
+	longPath := "/boom/" + strings.Repeat("a", 700)
+	req := httptest.NewRequest(http.MethodGet, longPath, nil)
+	req.RemoteAddr = "10.0.0.1:12345"
+	req.Header.Set("X-Forwarded-For", "203.0.113.88, 10.0.0.1")
+	req.Header.Set("User-Agent", "packmon-cli/test")
+	req = req.WithContext(requestctx.ContextWithCorrelationID(req.Context(), "corr-2"))
 
-	handler := Recovery(logger)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+	handler := TrustedClientIP([]string{"10.0.0.1"})(Recovery(logger)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		panic("boom")
-	}))
+	})))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), "internal server error") {
-		t.Fatalf("body = %q, want internal server error", rec.Body.String())
-	}
+	assertJSONErrorResponse(t, rec, http.StatusInternalServerError, "internal server error")
 	logLine := logs.String()
-	for _, want := range []string{`"level":"ERROR"`, `"msg":"panic recovered"`, `"correlation_id":"corr-2"`} {
+	for _, want := range []string{`"level":"ERROR"`, `"msg":"panic recovered"`, `"correlation_id":"corr-2"`, `"path":"(unmatched-route)"`} {
 		if !strings.Contains(logLine, want) {
 			t.Fatalf("log line missing %s: %s", want, logLine)
 		}
 	}
-	for _, forbidden := range []string{`"stack"`, "request_middlewares_test.go"} {
+	for _, forbidden := range []string{`"stack"`, `"client_ip"`, `"remote_addr"`, `"user_agent"`, "request_middlewares_test.go", "203.0.113.88", "10.0.0.1:12345", "packmon-cli/test", strings.Repeat("a", 600)} {
 		if strings.Contains(logLine, forbidden) {
 			t.Fatalf("log line contains %s: %s", forbidden, logLine)
 		}
+	}
+}
+
+func assertJSONErrorResponse(t *testing.T, rec *httptest.ResponseRecorder, status int, message string) {
+	t.Helper()
+	if rec.Code != status {
+		t.Fatalf("status = %d, want %d", rec.Code, status)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/json; charset=utf-8" {
+		t.Fatalf("Content-Type = %q, want application/json; charset=utf-8", got)
+	}
+	var body struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("error response body is not JSON: %v; body=%q", err, rec.Body.String())
+	}
+	if body.Error != message {
+		t.Fatalf("error response message = %q, want %q", body.Error, message)
 	}
 }

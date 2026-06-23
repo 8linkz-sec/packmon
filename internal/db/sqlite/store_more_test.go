@@ -3,13 +3,16 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/8linkz/packmon/internal/db"
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 func newSQLiteTestStore(t *testing.T) *Store {
@@ -66,6 +69,55 @@ func TestNewReturnsDirectoryCreationError(t *testing.T) {
 	}
 }
 
+func TestNewRestrictsSQLiteDatabaseFilePermissions(t *testing.T) {
+	requirePOSIXFileModeSupport(t)
+
+	dbPath := filepath.Join(t.TempDir(), "packmon.db")
+	store, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer closeSilently(store)
+
+	if _, err := store.DB().ExecContext(context.Background(), `
+		INSERT INTO sync_meta(key, value) VALUES('permission-probe', '1')
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value`); err != nil {
+		t.Fatalf("force sqlite write: %v", err)
+	}
+
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		path := dbPath + suffix
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat %s: %v", path, err)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Fatalf("%s permissions = %o, want 0600", path, got)
+		}
+	}
+}
+
+func requirePOSIXFileModeSupport(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not expose POSIX file permission bits reliably")
+	}
+	probe := filepath.Join(t.TempDir(), "probe")
+	if err := os.WriteFile(probe, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write permission probe: %v", err)
+	}
+	if err := os.Chmod(probe, 0o600); err != nil {
+		t.Fatalf("chmod permission probe: %v", err)
+	}
+	info, err := os.Stat(probe)
+	if err != nil {
+		t.Fatalf("stat permission probe: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Skipf("filesystem does not preserve POSIX file mode bits: got %o after chmod 0600", got)
+	}
+}
+
 func TestMigrateSchemaAddsRowKeyToOldVulnerabilityTable(t *testing.T) {
 	t.Parallel()
 
@@ -90,6 +142,17 @@ func TestMigrateSchemaAddsRowKeyToOldVulnerabilityTable(t *testing.T) {
 		);
 		INSERT INTO vulnerabilities_local(id, ecosystem, name, version_ranges, severity)
 		VALUES('GHSA-old', 'npm', 'left-pad', '[]', 'LOW');
+		CREATE TABLE malicious_local (
+			id TEXT PRIMARY KEY,
+			ecosystem TEXT NOT NULL,
+			name TEXT NOT NULL,
+			versions TEXT,
+			risk_type TEXT NOT NULL,
+			severity TEXT NOT NULL DEFAULT 'CRITICAL',
+			summary TEXT
+		);
+		INSERT INTO malicious_local(id, ecosystem, name, versions, risk_type, severity)
+		VALUES('MAL-old', 'npm', 'evil', '["1.0.0"]', 'malware', 'CRITICAL');
 	`); err != nil {
 		t.Fatalf("create old schema: %v", err)
 	}
@@ -109,9 +172,15 @@ func TestMigrateSchemaAddsRowKeyToOldVulnerabilityTable(t *testing.T) {
 	if hasReferences, err := tableHasColumn(rawDB, "vulnerabilities_local", "references_json"); err != nil || !hasReferences {
 		t.Fatalf("tableHasColumn(references_json) = %v, %v; want true nil", hasReferences, err)
 	}
+	if hasVulnSource, err := tableHasColumn(rawDB, "vulnerabilities_local", "source"); err != nil || !hasVulnSource {
+		t.Fatalf("tableHasColumn(vulnerability source) = %v, %v; want true nil", hasVulnSource, err)
+	}
+	if hasMaliciousSource, err := tableHasColumn(rawDB, "malicious_local", "source"); err != nil || !hasMaliciousSource {
+		t.Fatalf("tableHasColumn(malicious source) = %v, %v; want true nil", hasMaliciousSource, err)
+	}
 
-	var rowKey, versionsAffected, referencesJSON string
-	if err := rawDB.QueryRow(`SELECT row_key, versions_affected, references_json FROM vulnerabilities_local WHERE id = 'GHSA-old'`).Scan(&rowKey, &versionsAffected, &referencesJSON); err != nil {
+	var rowKey, versionsAffected, referencesJSON, source string
+	if err := rawDB.QueryRow(`SELECT row_key, versions_affected, references_json, source FROM vulnerabilities_local WHERE id = 'GHSA-old'`).Scan(&rowKey, &versionsAffected, &referencesJSON, &source); err != nil {
 		t.Fatalf("read migrated row key: %v", err)
 	}
 	if rowKey != "GHSA-old|npm|left-pad" {
@@ -123,9 +192,121 @@ func TestMigrateSchemaAddsRowKeyToOldVulnerabilityTable(t *testing.T) {
 	if referencesJSON != "[]" {
 		t.Fatalf("references_json = %q, want []", referencesJSON)
 	}
+	if source != "local" {
+		t.Fatalf("vulnerability source = %q, want local", source)
+	}
+	if err := rawDB.QueryRow(`SELECT source FROM malicious_local WHERE id = 'MAL-old'`).Scan(&source); err != nil {
+		t.Fatalf("read migrated malicious source: %v", err)
+	}
+	if source != "local" {
+		t.Fatalf("malicious source = %q, want local", source)
+	}
 
 	if err := migrateSchema(rawDB); err != nil {
 		t.Fatalf("migrateSchema(idempotent) error = %v", err)
+	}
+}
+
+func TestAcquireSQLiteMigrationLockSerializesLocalMigrations(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "packmon.db")
+	unlock, err := acquireSQLiteMigrationLock(dbPath)
+	if err != nil {
+		t.Fatalf("acquire first migration lock: %v", err)
+	}
+	defer func() {
+		if unlock != nil {
+			unlock()
+		}
+	}()
+
+	originalTimeout := sqliteMigrationLockTimeout
+	originalPoll := sqliteMigrationLockPollInterval
+	sqliteMigrationLockTimeout = 50 * time.Millisecond
+	sqliteMigrationLockPollInterval = 5 * time.Millisecond
+	t.Cleanup(func() {
+		sqliteMigrationLockTimeout = originalTimeout
+		sqliteMigrationLockPollInterval = originalPoll
+	})
+
+	_, err = acquireSQLiteMigrationLock(dbPath)
+	if err == nil {
+		t.Fatal("second migration lock error = nil, want timeout while first lock is held")
+	}
+	if !strings.Contains(err.Error(), "migration lock") {
+		t.Fatalf("second migration lock error = %v, want migration lock context", err)
+	}
+
+	unlock()
+	unlock = nil
+	unlockAgain, err := acquireSQLiteMigrationLock(dbPath)
+	if err != nil {
+		t.Fatalf("acquire after unlock: %v", err)
+	}
+	unlockAgain()
+}
+
+func TestMigrateSchemaNormalizesExistingCaseInsensitivePackageNames(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "mixed-case.db")
+	store, err := New(path)
+	if err != nil {
+		t.Fatalf("New(initial) error = %v", err)
+	}
+	ctx := context.Background()
+	if _, err := store.DB().ExecContext(ctx, `
+		INSERT INTO vulnerabilities_local(row_key, id, ecosystem, name, version_ranges, versions_affected, severity)
+		VALUES('PYSEC-old|pypi|My.Pkg_Name', 'PYSEC-old', 'pypi', 'My.Pkg_Name', '[]', '["1.0.0"]', 'HIGH');
+		INSERT INTO malicious_local(id, ecosystem, name, versions, risk_type, severity)
+		VALUES('MAL-old', 'pypi', 'Django', '["4.2.11"]', 'malware', 'CRITICAL');
+		INSERT INTO reputation_findings_local(id, ecosystem, name, version, type, risk_type, severity)
+		VALUES('REP-old', 'pypi', 'Other_Pkg', '1.0.0', 'malicious', 'malware', 'CRITICAL');
+		INSERT INTO lifecycle_releases_local(id, ecosystem, name, product_slug, product_label, cycle)
+		VALUES('LIFE-old', 'nuget', 'Newtonsoft.Json', 'newtonsoft-json', 'Newtonsoft.Json', '13');
+	`); err != nil {
+		t.Fatalf("insert mixed case rows: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close(initial) error = %v", err)
+	}
+
+	store, err = New(path)
+	if err != nil {
+		t.Fatalf("New(reopen) error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Fatalf("Close(reopen) error = %v", err)
+		}
+	})
+
+	vulns, err := store.FindVulnerabilities(ctx, "pypi", "my-pkg-name", "1.0.0")
+	if err != nil {
+		t.Fatalf("FindVulnerabilities(normalized existing) error = %v", err)
+	}
+	if len(vulns) != 1 || vulns[0].Name != "my-pkg-name" {
+		t.Fatalf("vulnerabilities after migration = %+v, want normalized local row", vulns)
+	}
+	malicious, err := store.FindMalicious(ctx, "pypi", "django", "4.2.11")
+	if err != nil {
+		t.Fatalf("FindMalicious(normalized existing) error = %v", err)
+	}
+	if len(malicious) != 1 || malicious[0].Name != "django" {
+		t.Fatalf("malicious after migration = %+v, want normalized local row", malicious)
+	}
+	reputation, err := store.FindReputationFindings(ctx, "pypi", "other-pkg", "reversinglabs")
+	if err != nil {
+		t.Fatalf("FindReputationFindings(normalized existing) error = %v", err)
+	}
+	if len(reputation) != 1 || reputation[0].Name != "other-pkg" {
+		t.Fatalf("reputation after migration = %+v, want normalized local row", reputation)
+	}
+	var storedLifecycleName string
+	if err := store.DB().QueryRowContext(ctx, `SELECT name FROM lifecycle_releases_local WHERE id = 'LIFE-old'`).Scan(&storedLifecycleName); err != nil {
+		t.Fatalf("read lifecycle name: %v", err)
+	}
+	if storedLifecycleName != "newtonsoft.json" {
+		t.Fatalf("stored lifecycle name = %q, want normalized name", storedLifecycleName)
 	}
 }
 
@@ -210,8 +391,8 @@ func TestFindLocalSecurityRowsNormalizeNuGetNames(t *testing.T) {
 	if !sawMalicious {
 		t.Fatalf("FindMalicious() = %+v, want normalized malicious hit", malicious)
 	}
-	if byID["R-NUGET"].Name != "newtonsoft.json" {
-		t.Fatalf("FindMalicious() = %+v, want normalized reputation hit", malicious)
+	if _, ok := byID["R-NUGET"]; ok {
+		t.Fatalf("FindMalicious() included reputation hit: %+v", malicious)
 	}
 
 	reputation, err := store.FindReputationFindings(ctx, "nuget", "Newtonsoft.Json", "reversinglabs")
@@ -263,8 +444,8 @@ func TestFindMaliciousFiltersVersionsAndIncludesReputation(t *testing.T) {
 			t.Fatalf("FindMalicious() included non-matching version row: %+v", findings)
 		}
 	}
-	if byID["R-1"].Type != domain.FindingTypeSupplyChainRisk {
-		t.Fatalf("reputation finding = %+v, want supply_chain_risk", byID["R-1"])
+	if _, ok := byID["R-1"]; ok {
+		t.Fatalf("FindMalicious() included reputation finding: %+v", findings)
 	}
 
 	allReputation, err := store.FindReputationFindings(ctx, "npm", "evil", "reversinglabs")
@@ -280,6 +461,35 @@ func TestFindMaliciousFiltersVersionsAndIncludesReputation(t *testing.T) {
 	}
 	if len(otherSource) != 0 {
 		t.Fatalf("FindReputationFindings(other source) len = %d, want 0", len(otherSource))
+	}
+}
+
+func TestFindMaliciousErrorsOnMalformedStoredVersions(t *testing.T) {
+	t.Parallel()
+
+	store := newSQLiteTestStore(t)
+	ctx := context.Background()
+
+	if _, err := store.DB().ExecContext(ctx, `
+		INSERT INTO malicious_local(id, ecosystem, name, versions, risk_type, severity, summary)
+		VALUES ('M-BAD', 'npm', 'evil', '{"introduced":"1.0.0"}', 'malware', 'CRITICAL', 'bad versions')`); err != nil {
+		t.Fatalf("insert malicious: %v", err)
+	}
+
+	_, err := store.FindMalicious(ctx, "npm", "evil", "2.0.0")
+	if err == nil {
+		t.Fatal("FindMalicious() error = nil, want malformed versions error")
+	}
+	if !strings.Contains(err.Error(), "M-BAD") {
+		t.Fatalf("FindMalicious() error = %q, want finding ID", err)
+	}
+
+	_, err = store.FindMaliciousBatch(ctx, []db.PackageQuery{{Ecosystem: "npm", Name: "evil", Version: "2.0.0"}})
+	if err == nil {
+		t.Fatal("FindMaliciousBatch() error = nil, want malformed versions error")
+	}
+	if !strings.Contains(err.Error(), "M-BAD") {
+		t.Fatalf("FindMaliciousBatch() error = %q, want finding ID", err)
 	}
 }
 
@@ -319,11 +529,82 @@ func TestFindLocalSecurityRowsBatchMatchesVersionsAndReputation(t *testing.T) {
 	for _, finding := range malicious {
 		byID[finding.AdvisoryID] = finding
 	}
-	if byID["M-B1"].Type != domain.FindingTypeMalicious || byID["R-B1"].Type != domain.FindingTypeSupplyChainRisk {
-		t.Fatalf("FindMaliciousBatch() = %+v, want malicious and reputation hits", malicious)
+	if byID["M-B1"].Type != domain.FindingTypeMalicious {
+		t.Fatalf("FindMaliciousBatch() = %+v, want malicious hit", malicious)
 	}
 	if _, ok := byID["M-B2"]; ok {
 		t.Fatalf("FindMaliciousBatch() included non-matching version row: %+v", malicious)
+	}
+	reputation, err := store.FindReputationFindingsBatch(ctx, []db.PackageQuery{{Ecosystem: "npm", Name: "evil", Version: "1.0.0"}}, db.ReputationSourceReversingLabs)
+	if err != nil {
+		t.Fatalf("FindReputationFindingsBatch() error = %v", err)
+	}
+	if len(reputation) != 1 || reputation[0].AdvisoryID != "R-B1" || reputation[0].Type != domain.FindingTypeSupplyChainRisk {
+		t.Fatalf("FindReputationFindingsBatch() = %+v, want reputation hit", reputation)
+	}
+}
+
+func TestBatchLookupsChunkLargePackageSets(t *testing.T) {
+	store := newSQLiteTestStore(t)
+	ctx := context.Background()
+
+	const packageCount = 1200
+	packages := make([]db.PackageQuery, 0, packageCount)
+	for i := 0; i < packageCount; i++ {
+		packages = append(packages, db.PackageQuery{
+			Ecosystem: "npm",
+			Name:      fmt.Sprintf("pkg-%04d", i),
+			Version:   "1.0.0",
+		})
+	}
+
+	if _, err := store.DB().ExecContext(ctx, `
+		INSERT INTO vulnerabilities_local(row_key, id, ecosystem, name, version_ranges, severity, summary)
+		VALUES('GHSA-large|npm|pkg-1199', 'GHSA-large', 'npm', 'pkg-1199', '[{"events":[{"introduced":"0"}]}]', 'HIGH', 'large vuln');
+		INSERT INTO malicious_local(id, ecosystem, name, risk_type, severity, summary)
+		VALUES('MAL-large', 'npm', 'pkg-1198', 'malware', 'CRITICAL', 'large malicious');
+		INSERT INTO reputation_findings_local(id, ecosystem, name, version, type, risk_type, severity, summary)
+		VALUES('REP-large', 'npm', 'pkg-1196', '1.0.0', 'supply_chain_risk', 'removed_package', 'LOW', 'large reputation');
+		INSERT INTO lifecycle_releases_local(id, ecosystem, name, product_slug, product_label, cycle, is_eol, eol_from)
+		VALUES('LIFE-large', 'npm', 'pkg-1197', 'pkg-1197', 'pkg-1197', '1.0', 1, '2025-01-01T00:00:00Z');
+	`); err != nil {
+		t.Fatalf("seed local db: %v", err)
+	}
+
+	vulnerabilities, err := store.FindVulnerabilitiesBatch(ctx, packages)
+	if err != nil {
+		t.Fatalf("FindVulnerabilitiesBatch() error = %v", err)
+	}
+	if len(vulnerabilities) != 1 || vulnerabilities[0].AdvisoryID != "GHSA-large" {
+		t.Fatalf("FindVulnerabilitiesBatch() = %+v, want GHSA-large", vulnerabilities)
+	}
+
+	malicious, err := store.FindMaliciousBatch(ctx, packages)
+	if err != nil {
+		t.Fatalf("FindMaliciousBatch() error = %v", err)
+	}
+	ids := map[string]bool{}
+	for _, finding := range malicious {
+		ids[finding.AdvisoryID] = true
+	}
+	if !ids["MAL-large"] || ids["REP-large"] {
+		t.Fatalf("FindMaliciousBatch() = %+v, want only malicious findings", malicious)
+	}
+
+	reputation, err := store.FindReputationFindingsBatch(ctx, packages, db.ReputationSourceReversingLabs)
+	if err != nil {
+		t.Fatalf("FindReputationFindingsBatch() error = %v", err)
+	}
+	if len(reputation) != 1 || reputation[0].AdvisoryID != "REP-large" {
+		t.Fatalf("FindReputationFindingsBatch() = %+v, want reputation finding", reputation)
+	}
+
+	lifecycle, err := store.FindLifecycleFindingsBatch(ctx, packages, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("FindLifecycleFindingsBatch() error = %v", err)
+	}
+	if len(lifecycle) != 1 || lifecycle[0].AdvisoryID != "endoflife:pkg-1197:1.0:eol" {
+		t.Fatalf("FindLifecycleFindingsBatch() = %+v, want lifecycle finding", lifecycle)
 	}
 }
 

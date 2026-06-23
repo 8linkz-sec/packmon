@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/8linkz/packmon/internal/auth"
-	"github.com/8linkz/packmon/internal/config"
-	"github.com/8linkz/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/auth"
+	"github.com/8linkz-sec/packmon/internal/config"
+	"github.com/8linkz-sec/packmon/internal/db"
 )
 
 type adminFeedFlashData struct {
@@ -61,6 +61,12 @@ func (h *AdminHandler) HandleFeedConfigSave(w http.ResponseWriter, r *http.Reque
 		http.Redirect(w, r, "/admin/feeds?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
 		return
 	}
+	previous, err := h.store.GetFeedConfig(r.Context(), feed.Name)
+	if err != nil {
+		h.logger.Error("admin feeds: failed to load previous config", "feed", feed.Name, "error", err)
+		http.Redirect(w, r, "/admin/feeds?err="+url.QueryEscape("Failed to load feed configuration"), http.StatusSeeOther)
+		return
+	}
 
 	mode, err := config.ParseFeedMode(r.PostForm.Get("mode"))
 	if err != nil {
@@ -84,13 +90,25 @@ func (h *AdminHandler) HandleFeedConfigSave(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
-	if feed.RequiresAPIKey {
+	if feed.SupportsAPIKey {
+		rawAPIKey := strings.TrimSpace(r.PostForm.Get("api_key"))
+		clearAPIKey := r.PostForm.Get("clear_api_key") == "on"
 		switch {
-		case r.PostForm.Get("clear_api_key") == "on":
+		case clearAPIKey && rawAPIKey != "":
+			http.Redirect(w, r, "/admin/feeds?err="+url.QueryEscape("Choose either a new API key or clear the stored key"), http.StatusSeeOther)
+			return
+		case clearAPIKey && r.PostForm.Get("confirm_clear_api_key") != "on":
+			http.Redirect(w, r, "/admin/feeds?err="+url.QueryEscape("Confirm API key removal"), http.StatusSeeOther)
+			return
+		case clearAPIKey:
 			feed.APIKey = ""
-		case strings.TrimSpace(r.PostForm.Get("api_key")) != "":
-			feed.APIKey = strings.TrimSpace(r.PostForm.Get("api_key"))
+		case rawAPIKey != "":
+			feed.APIKey = rawAPIKey
 		}
+	}
+	if err := config.ValidateFeedSettings(feed); err != nil {
+		http.Redirect(w, r, "/admin/feeds?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+		return
 	}
 
 	record := &db.FeedConfig{
@@ -104,6 +122,11 @@ func (h *AdminHandler) HandleFeedConfigSave(w http.ResponseWriter, r *http.Reque
 		record.SyncInterval = &interval
 	}
 
+	if err := h.auditLog(r, "feed_config_save", feedConfigAuditDetails(feed.Name, previous, record)); err != nil {
+		http.Redirect(w, r, "/admin/feeds?err="+url.QueryEscape("Failed to record audit log"), http.StatusSeeOther)
+		return
+	}
+
 	if err := h.store.UpsertFeedConfig(r.Context(), record); err != nil {
 		h.logger.Error("admin feeds: failed to save config", "feed", feed.Name, "error", err)
 		http.Redirect(w, r, "/admin/feeds?err="+url.QueryEscape("Failed to save feed configuration"), http.StatusSeeOther)
@@ -113,18 +136,11 @@ func (h *AdminHandler) HandleFeedConfigSave(w http.ResponseWriter, r *http.Reque
 	if h.applyFeedConfig != nil {
 		if err := h.applyFeedConfig(r.Context(), feed); err != nil {
 			h.logger.Error("admin feeds: failed to apply config", "feed", feed.Name, "error", err)
+			h.restoreFeedConfigAfterFailedApply(r.Context(), feed.Name, previous)
 			http.Redirect(w, r, "/admin/feeds?err="+url.QueryEscape("Feed configuration saved, but applying it failed"), http.StatusSeeOther)
 			return
 		}
 	}
-
-	h.auditLog(r, "feed_config_save", map[string]string{
-		"feed":               feed.Name,
-		"enabled":            strconv.FormatBool(feed.Enabled),
-		"mode":               string(feed.Mode),
-		"sync_interval":      formatOptionalDuration(feed.SyncInterval),
-		"api_key_configured": strconv.FormatBool(strings.TrimSpace(feed.APIKey) != ""),
-	})
 
 	http.Redirect(w, r, "/admin/feeds?msg="+url.QueryEscape("Feed configuration saved and applied."), http.StatusSeeOther)
 }
@@ -152,22 +168,35 @@ func (h *AdminHandler) HandleFeedConfigReset(w http.ResponseWriter, r *http.Requ
 		http.Redirect(w, r, "/admin/feeds?err="+url.QueryEscape("Unknown feed"), http.StatusSeeOther)
 		return
 	}
+	if r.PostForm.Get("confirm_reset") != "on" {
+		http.Redirect(w, r, "/admin/feeds?err="+url.QueryEscape("Confirm feed configuration reset"), http.StatusSeeOther)
+		return
+	}
 
+	previous, err := h.store.GetFeedConfig(r.Context(), feedName)
+	if err != nil {
+		h.logger.Error("admin feeds: failed to load previous config", "feed", feedName, "error", err)
+		http.Redirect(w, r, "/admin/feeds?err="+url.QueryEscape("Failed to load feed configuration"), http.StatusSeeOther)
+		return
+	}
+
+	if err := h.auditLog(r, "feed_config_reset", feedConfigAuditDetails(feedName, previous, nil)); err != nil {
+		http.Redirect(w, r, "/admin/feeds?err="+url.QueryEscape("Failed to record audit log"), http.StatusSeeOther)
+		return
+	}
 	if err := h.store.DeleteFeedConfig(r.Context(), feedName); err != nil {
 		h.logger.Error("admin feeds: failed to reset config", "feed", feedName, "error", err)
 		http.Redirect(w, r, "/admin/feeds?err="+url.QueryEscape("Failed to reset feed configuration"), http.StatusSeeOther)
 		return
 	}
-
 	if h.resetFeedConfig != nil {
 		if err := h.resetFeedConfig(r.Context(), feedName); err != nil {
 			h.logger.Error("admin feeds: failed to apply reset config", "feed", feedName, "error", err)
+			h.restoreFeedConfigAfterFailedApply(r.Context(), feedName, previous)
 			http.Redirect(w, r, "/admin/feeds?err="+url.QueryEscape("Feed configuration reset, but applying it failed"), http.StatusSeeOther)
 			return
 		}
 	}
-
-	h.auditLog(r, "feed_config_reset", map[string]string{"feed": feedName})
 	http.Redirect(w, r, "/admin/feeds?msg="+url.QueryEscape("Feed configuration reset and applied."), http.StatusSeeOther)
 }
 
@@ -195,19 +224,33 @@ func (h *AdminHandler) HandleFeedSyncNow(w http.ResponseWriter, r *http.Request)
 		h.respondFeedSyncResult(w, r, "", "Unknown feed", http.StatusBadRequest, false)
 		return
 	}
-	if !supportsManualFeedSync(feedName) {
+	if !feed.SupportsManualSync {
 		h.respondFeedSyncResult(w, r, "", "Manual sync is not available for this feed", http.StatusBadRequest, false)
+		return
+	}
+	if !feed.Enabled || feed.Mode != config.FeedModeSelf {
+		h.respondFeedSyncResult(w, r, "", "Manual sync is available only for enabled self-managed feeds.", http.StatusBadRequest, false)
 		return
 	}
 	if h.syncFeed == nil {
 		h.respondFeedSyncResult(w, r, "", "Manual sync is not available in this server mode", http.StatusBadRequest, false)
 		return
 	}
+	if !h.beginManualFeedSync(feed.Name) {
+		h.respondFeedSyncResult(w, r, "", feed.DisplayName+" sync is already running.", http.StatusConflict, false)
+		return
+	}
 
 	h.markFeedSyncRunning(r.Context(), feed.Name)
 
-	go func(feed config.FeedSettings) {
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 30*time.Minute)
+	go func(feed config.FeedSettings) { // #nosec G118 -- manual sync intentionally outlives the request and is bounded by root context plus timeout.
+		defer h.endManualFeedSync(feed.Name)
+
+		rootCtx := h.rootCtx
+		if rootCtx == nil {
+			rootCtx = context.Background()
+		}
+		ctx, cancel := context.WithTimeout(rootCtx, 30*time.Minute)
 		defer cancel()
 
 		if err := h.syncFeed(ctx, feed.Name); err != nil {
@@ -217,12 +260,42 @@ func (h *AdminHandler) HandleFeedSyncNow(w http.ResponseWriter, r *http.Request)
 		h.logger.Info("admin feeds: manual sync finished", "feed", feed.Name)
 	}(feed)
 
-	h.auditLog(r, "feed_sync_trigger", map[string]string{
+	if err := h.auditLog(r, "feed_sync_trigger", map[string]string{
 		"feed": feed.Name,
 		"mode": string(feed.Mode),
-	})
+	}); err != nil {
+		h.respondFeedSyncResult(w, r, "", "Failed to record audit log", http.StatusInternalServerError, false)
+		return
+	}
 
 	h.respondFeedSyncResult(w, r, feed.DisplayName+" sync started with current runtime settings.", "", http.StatusOK, true)
+}
+
+func (h *AdminHandler) beginManualFeedSync(feedName string) bool {
+	if h == nil {
+		return false
+	}
+	name := config.NormalizeFeedName(feedName)
+	h.manualSyncMu.Lock()
+	defer h.manualSyncMu.Unlock()
+	if h.manualSyncs == nil {
+		h.manualSyncs = make(map[string]struct{})
+	}
+	if _, exists := h.manualSyncs[name]; exists {
+		return false
+	}
+	h.manualSyncs[name] = struct{}{}
+	return true
+}
+
+func (h *AdminHandler) endManualFeedSync(feedName string) {
+	if h == nil {
+		return
+	}
+	name := config.NormalizeFeedName(feedName)
+	h.manualSyncMu.Lock()
+	defer h.manualSyncMu.Unlock()
+	delete(h.manualSyncs, name)
 }
 
 func (h *AdminHandler) markFeedSyncRunning(ctx context.Context, feedName string) {
@@ -258,10 +331,6 @@ func (h *AdminHandler) respondFeedSyncResult(w http.ResponseWriter, r *http.Requ
 			if err == nil {
 				w.Header().Set("HX-Trigger", string(payload))
 			}
-		}
-		if errMsg == "" {
-			w.WriteHeader(statusCode)
-			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(statusCode)
@@ -313,8 +382,45 @@ func (h *AdminHandler) desiredFeedSettings(ctx context.Context, feedName string)
 	} else {
 		current.SyncInterval = 0
 	}
-	if current.RequiresAPIKey || strings.TrimSpace(stored.APIKey) != "" {
+	if current.SupportsAPIKey || strings.TrimSpace(stored.APIKey) != "" {
 		current.APIKey = strings.TrimSpace(stored.APIKey)
 	}
 	return current, nil
+}
+
+func (h *AdminHandler) restoreFeedConfigAfterFailedApply(ctx context.Context, feedName string, previous *db.FeedConfig) {
+	var err error
+	if previous == nil {
+		err = h.store.DeleteFeedConfig(ctx, feedName)
+	} else {
+		err = h.store.UpsertFeedConfig(ctx, previous)
+	}
+	if err != nil {
+		h.logger.Error("admin feeds: failed to roll back persisted config after apply failure", "feed", feedName, "error", err)
+	}
+}
+
+func feedConfigAuditDetails(feedName string, previous, next *db.FeedConfig) map[string]string {
+	details := map[string]string{"feed": feedName}
+	addFeedConfigAuditDetails(details, "previous_", previous)
+	addFeedConfigAuditDetails(details, "new_", next)
+	return details
+}
+
+func addFeedConfigAuditDetails(details map[string]string, prefix string, cfg *db.FeedConfig) {
+	if cfg == nil {
+		details[prefix+"enabled"] = "unset"
+		details[prefix+"mode"] = "unset"
+		details[prefix+"sync_interval"] = "unset"
+		details[prefix+"api_key_configured"] = "unset"
+		return
+	}
+	details[prefix+"enabled"] = strconv.FormatBool(cfg.Enabled)
+	details[prefix+"mode"] = cfg.Mode
+	details[prefix+"api_key_configured"] = strconv.FormatBool(strings.TrimSpace(cfg.APIKey) != "")
+	if cfg.SyncInterval == nil {
+		details[prefix+"sync_interval"] = ""
+		return
+	}
+	details[prefix+"sync_interval"] = cfg.SyncInterval.String()
 }

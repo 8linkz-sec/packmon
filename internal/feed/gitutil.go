@@ -3,6 +3,7 @@ package feed
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -10,6 +11,13 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+)
+
+const defaultGitCommandTimeout = 5 * time.Minute
+
+var (
+	gitExecutable     = "git"
+	gitExecutableArgs []string
 )
 
 // GitRepo manages a shallow clone of a git repository on disk. It
@@ -22,6 +30,9 @@ type GitRepo struct {
 	Dir string
 	// Logger for git operations.
 	Logger *slog.Logger
+	// CommandTimeout bounds each individual git command. When zero, a
+	// conservative default is used.
+	CommandTimeout time.Duration
 }
 
 // EnsureCloned clones the repo if it does not exist locally, or pulls
@@ -62,7 +73,7 @@ func (g *GitRepo) clone(ctx context.Context) error {
 	// Ensure parent directory exists.
 	parent := filepath.Dir(g.Dir)
 	if err := os.MkdirAll(parent, 0o750); err != nil {
-		return fmt.Errorf("creating parent directory: %w", err)
+		return pathOperationError("creating parent directory", parent, err)
 	}
 
 	return g.run(ctx, parent,
@@ -86,14 +97,20 @@ func (g *GitRepo) headHash(ctx context.Context) (string, error) {
 	}
 
 	var stdout bytes.Buffer
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
+	cmdCtx, cancel := g.commandContext(ctx)
+	defer cancel()
+	cmd := gitCommand(cmdCtx, "rev-parse", "HEAD")
 	cmd.Dir = g.Dir
 	cmd.Stdout = &stdout
-	cmd.Stderr = os.Stderr
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	cmd.WaitDelay = 2 * time.Second
 
 	if err := cmd.Run(); err != nil {
-		return "", err
+		if cmdCtx.Err() != nil {
+			return "", gitCommandError([]string{"rev-parse", "HEAD"}, cmdCtx.Err(), stdout.String(), stderr.String())
+		}
+		return "", gitCommandError([]string{"rev-parse", "HEAD"}, err, stdout.String(), stderr.String())
 	}
 
 	return strings.TrimSpace(stdout.String()), nil
@@ -140,16 +157,23 @@ func (g *GitRepo) PullWithChangedFiles(ctx context.Context) (newHash string, cha
 	// Both commits are still reachable at this point (before reset).
 	var diffFiles []string
 	var stdout bytes.Buffer
+	cmdCtx, cancel := g.commandContext(ctx)
+	defer cancel()
 	// #nosec G204 -- command is fixed to git; oldHash is read from git itself and origin/HEAD is fixed.
-	cmd := exec.CommandContext(ctx, "git", "diff", "--name-only", oldHash, "origin/HEAD")
+	cmd := gitCommand(cmdCtx, "diff", "--name-only", oldHash, "origin/HEAD")
 	cmd.Dir = g.Dir
 	cmd.Stdout = &stdout
-	cmd.Stderr = os.Stderr
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	cmd.WaitDelay = 2 * time.Second
 
 	if diffErr := cmd.Run(); diffErr != nil {
+		if cmdCtx.Err() != nil {
+			diffErr = cmdCtx.Err()
+		}
+		diffErr = gitCommandError([]string{"diff", "--name-only", oldHash, "origin/HEAD"}, diffErr, stdout.String(), stderr.String())
 		log.Warn("git diff failed, delta sync not available",
-			slog.String("error", diffErr.Error()),
+			slog.String("error", SafeDiagnosticError(diffErr)),
 		)
 		// diffFiles stays nil -> caller does full walk.
 	} else {
@@ -189,8 +213,11 @@ func (g *GitRepo) PullWithChangedFiles(ctx context.Context) (newHash string, cha
 
 // run executes a git command in the given directory and returns any error.
 func (g *GitRepo) run(ctx context.Context, dir string, args ...string) error {
+	cmdCtx, cancel := g.commandContext(ctx)
+	defer cancel()
+
 	// #nosec G204 -- command is fixed to git; arguments are internal git subcommands and repo values.
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := gitCommand(cmdCtx, args...)
 	cmd.Dir = dir
 	// WaitDelay prevents cmd.Wait() from blocking indefinitely draining
 	// stdout/stderr pipes after the process has been killed via context
@@ -198,12 +225,52 @@ func (g *GitRepo) run(ctx context.Context, dir string, args ...string) error {
 	// goroutine stuck in Wait() for 30+ seconds.
 	cmd.WaitDelay = 2 * time.Second
 
-	var stderr bytes.Buffer
-	cmd.Stdout = os.Stderr // git clone/fetch progress goes to stderr anyway
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("git %s: %w\nstderr: %s", strings.Join(args, " "), err, stderr.String())
+		if cmdCtx.Err() != nil {
+			return gitCommandError(args, cmdCtx.Err(), stdout.String(), stderr.String())
+		}
+		return gitCommandError(args, err, stdout.String(), stderr.String())
 	}
 	return nil
+}
+
+func gitCommand(ctx context.Context, args ...string) *exec.Cmd {
+	cmdArgs := append([]string(nil), gitExecutableArgs...)
+	cmdArgs = append(cmdArgs, args...)
+	// #nosec G204 -- gitExecutable is fixed in production; tests override it with the test binary.
+	return exec.CommandContext(ctx, gitExecutable, cmdArgs...)
+}
+
+func (g *GitRepo) commandContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	timeout := g.CommandTimeout
+	if timeout <= 0 {
+		timeout = defaultGitCommandTimeout
+	}
+	return context.WithTimeout(ctx, timeout)
+}
+
+func gitCommandError(args []string, cause error, stdout, stderr string) error {
+	detail := strings.TrimSpace(stderr)
+	if detail == "" {
+		detail = strings.TrimSpace(stdout)
+	}
+	if detail == "" {
+		return fmt.Errorf("git %s: %w", strings.Join(args, " "), cause)
+	}
+	return fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), cause, SafeDiagnosticMessage(detail))
+}
+
+func pathOperationError(action, path string, err error) error {
+	var pathErr *os.PathError
+	if errors.As(err, &pathErr) && pathErr.Err != nil {
+		return fmt.Errorf("%s %q: %w", action, filepath.Base(path), pathErr.Err)
+	}
+	return fmt.Errorf("%s %q: %s", action, filepath.Base(path), SafeDiagnosticError(err))
 }

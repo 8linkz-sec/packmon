@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
+	"path/filepath"
+	"strings"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/ioutils"
 )
 
 // SARIF 2.1.0 types.
@@ -60,9 +62,22 @@ type sarifRuleProperties struct {
 }
 
 type sarifResult struct {
-	RuleID  string       `json:"ruleId"`
-	Level   string       `json:"level"`
-	Message sarifMessage `json:"message"`
+	RuleID    string          `json:"ruleId"`
+	Level     string          `json:"level"`
+	Message   sarifMessage    `json:"message"`
+	Locations []sarifLocation `json:"locations,omitempty"`
+}
+
+type sarifLocation struct {
+	PhysicalLocation sarifPhysicalLocation `json:"physicalLocation"`
+}
+
+type sarifPhysicalLocation struct {
+	ArtifactLocation sarifArtifactLocation `json:"artifactLocation"`
+}
+
+type sarifArtifactLocation struct {
+	URI string `json:"uri"`
 }
 
 type sarifMessage struct {
@@ -97,8 +112,7 @@ func (sw *SARIFWriter) Write(w io.Writer, result *domain.ScanResult) error {
 
 // WriteFile writes the SARIF output to the given file path.
 func (sw *SARIFWriter) WriteFile(path string, result *domain.ScanResult) error {
-	// #nosec G304 -- CLI output path is provided intentionally by the local user.
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	f, err := ioutils.OpenPrivateFile(path)
 	if err != nil {
 		return fmt.Errorf("sarif: create file %s: %w", path, err)
 	}
@@ -130,20 +144,32 @@ func (sw *SARIFWriter) buildSARIF(result *domain.ScanResult) sarifLog {
 		results = append(results, sw.buildResult(f))
 	}
 
-	// Surface partial parse errors as tool-execution notifications so consumers
-	// reading only the SARIF artifact still see that part of the dependency
-	// graph was skipped.
+	// Surface scan diagnostics and partial parse errors as tool-execution
+	// notifications so consumers reading only the SARIF artifact still see that
+	// coverage was degraded.
 	var invocations []sarifInvocation
-	if len(result.ParseErrors) > 0 {
-		notes := make([]sarifNotification, 0, len(result.ParseErrors))
-		for _, pe := range result.ParseErrors {
+	diagnostics := scanArtifactDiagnostics(result)
+	if len(diagnostics) > 0 || len(result.ParseErrors) > 0 {
+		executionSuccessful := true
+		notes := make([]sarifNotification, 0, len(diagnostics)+len(result.ParseErrors))
+		for _, diagnostic := range diagnostics {
+			if diagnostic.Level == "error" {
+				executionSuccessful = false
+			}
 			notes = append(notes, sarifNotification{
-				Level:   "warning",
+				Level:   diagnostic.Level,
+				Message: sarifMessage{Text: diagnostic.Message},
+			})
+		}
+		for _, pe := range result.ParseErrors {
+			executionSuccessful = false
+			notes = append(notes, sarifNotification{
+				Level:   "error",
 				Message: sarifMessage{Text: pe},
 			})
 		}
 		invocations = []sarifInvocation{{
-			ExecutionSuccessful:        true,
+			ExecutionSuccessful:        executionSuccessful,
 			ToolExecutionNotifications: notes,
 		}}
 	}
@@ -157,7 +183,7 @@ func (sw *SARIFWriter) buildSARIF(result *domain.ScanResult) sarifLog {
 					Driver: sarifDriver{
 						Name:           "packmon",
 						Version:        sw.toolVersion,
-						InformationURI: "https://github.com/8linkz/packmon",
+						InformationURI: "https://github.com/8linkz-sec/packmon",
 						Rules:          rules,
 					},
 				},
@@ -210,17 +236,42 @@ func (sw *SARIFWriter) buildResult(f domain.Finding) sarifResult {
 	}
 
 	return sarifResult{
-		RuleID:  ruleID,
-		Level:   level,
-		Message: sarifMessage{Text: msg},
+		RuleID:    ruleID,
+		Level:     level,
+		Message:   sarifMessage{Text: msg},
+		Locations: sw.buildLocations(f),
 	}
+}
+
+func (sw *SARIFWriter) buildLocations(f domain.Finding) []sarifLocation {
+	if len(f.Locations) == 0 {
+		return nil
+	}
+	locations := make([]sarifLocation, 0, len(f.Locations))
+	seen := make(map[string]struct{}, len(f.Locations))
+	for _, location := range f.Locations {
+		uri := strings.TrimSpace(filepath.ToSlash(location.URI))
+		if uri == "" {
+			continue
+		}
+		if _, ok := seen[uri]; ok {
+			continue
+		}
+		seen[uri] = struct{}{}
+		locations = append(locations, sarifLocation{
+			PhysicalLocation: sarifPhysicalLocation{
+				ArtifactLocation: sarifArtifactLocation{URI: uri},
+			},
+		})
+	}
+	return locations
 }
 
 // sarifLevel maps packmon severity to SARIF level.
 // SARIF levels: "error", "warning", "note", "none".
 // Malicious and supply-chain risk findings are always "error".
 func (sw *SARIFWriter) sarifLevel(f domain.Finding) string {
-	if isAlwaysBlockingFinding(f) {
+	if domain.FindingAlwaysBlocks(f) {
 		return "error"
 	}
 	switch f.Severity {

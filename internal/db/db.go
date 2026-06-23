@@ -5,15 +5,21 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/logsafe"
 )
 
-// Store is the central persistence interface. Both the PostgreSQL
-// server-side implementation and the SQLite client-side implementation
-// satisfy this interface (the client subset may leave some methods as
-// no-ops).
+// ErrAdminAuditLog marks failures that prevented a required admin audit row
+// from being persisted.
+var ErrAdminAuditLog = errors.New("admin audit log write failed")
+
+// Store is the central server-side persistence interface. It is implemented by
+// the PostgreSQL store and the in-memory development noop store. The local
+// SQLite client database intentionally uses smaller scanner/sync/history
+// interfaces instead of satisfying this broad server boundary.
 type Store interface {
 	// -- Vulnerability queries --------------------------------------------------
 
@@ -110,6 +116,10 @@ type Store interface {
 	// CVEs. Each entry in the slice maps a CVE ID to its scores. IDs not
 	// present in the vulnerabilities table are silently ignored.
 	SetEPSSScores(ctx context.Context, scores []EPSSEntry) (updated int, err error)
+
+	// ReplaceEPSSScores atomically applies a complete EPSS score snapshot and
+	// clears EPSS values for vulnerabilities not present in the snapshot.
+	ReplaceEPSSScores(ctx context.Context, scores []EPSSEntry) (updated, cleared int, err error)
 
 	// EnrichVulnCheck applies VulnCheck-sourced enrichment data to existing
 	// vulnerabilities: CVSS scores, exploit-exists flags, and source records.
@@ -227,7 +237,7 @@ type Store interface {
 	// TouchAPIKeyLastUsed updates the last_used_at timestamp for a key.
 	TouchAPIKeyLastUsed(ctx context.Context, keyID int) error
 
-	// ListAPIKeys returns all API keys, including revoked ones.
+	// ListAPIKeys returns all API keys, including revoked and soft-deleted ones.
 	ListAPIKeys(ctx context.Context) ([]APIKey, error)
 
 	// CreateAPIKey inserts a new API key and returns the assigned ID.
@@ -236,7 +246,7 @@ type Store interface {
 	// RevokeAPIKey marks an API key as revoked.
 	RevokeAPIKey(ctx context.Context, keyID int) error
 
-	// DeleteAPIKey permanently removes a revoked API key.
+	// DeleteAPIKey marks a revoked API key as deleted while retaining lifecycle metadata.
 	DeleteAPIKey(ctx context.Context, keyID int) error
 
 	// -- Admin auth -------------------------------------------------------------
@@ -295,6 +305,39 @@ type Store interface {
 
 	// Close releases all resources held by the store.
 	Close() error
+}
+
+// SourceVulnerabilityDeleter is implemented by stores that can withdraw one
+// feed source without withdrawing the whole canonical advisory while another
+// source still backs it.
+type SourceVulnerabilityDeleter interface {
+	DeleteVulnerabilityForSource(ctx context.Context, id, source string) error
+}
+
+// SourceMaliciousFindingDeleter is implemented by stores that can withdraw one
+// feed source without touching malicious findings owned by another source.
+type SourceMaliciousFindingDeleter interface {
+	DeleteMaliciousFindingForSource(ctx context.Context, id, source string) error
+}
+
+// DeleteVulnerabilityForSource uses source-scoped delete semantics when the
+// store supports them. Test/noop stores that only implement the legacy Store
+// contract fall back to whole-advisory withdrawal.
+func DeleteVulnerabilityForSource(ctx context.Context, store Store, id, source string) error {
+	if scoped, ok := store.(SourceVulnerabilityDeleter); ok {
+		return scoped.DeleteVulnerabilityForSource(ctx, id, source)
+	}
+	return store.DeleteVulnerability(ctx, id)
+}
+
+// DeleteMaliciousFindingForSource uses source-scoped delete semantics when the
+// store supports them. Test/noop stores that only implement the legacy Store
+// contract fall back to whole-finding withdrawal.
+func DeleteMaliciousFindingForSource(ctx context.Context, store Store, id, source string) error {
+	if scoped, ok := store.(SourceMaliciousFindingDeleter); ok {
+		return scoped.DeleteMaliciousFindingForSource(ctx, id, source)
+	}
+	return store.DeleteMaliciousFinding(ctx, id)
 }
 
 // ---------------------------------------------------------------------------
@@ -372,7 +415,8 @@ type MaliciousFinding struct {
 	ID            string          `json:"id"`
 	Ecosystem     string          `json:"ecosystem"`
 	Name          string          `json:"name"`
-	Versions      json.RawMessage `json:"versions,omitempty"` // JSONB, nil = all versions
+	VersionRanges json.RawMessage `json:"version_ranges,omitempty"` // JSONB OSV ranges, nil = all versions when Versions is nil
+	Versions      json.RawMessage `json:"versions,omitempty"`       // JSONB exact versions, nil = all versions when VersionRanges is nil
 	Source        string          `json:"source"`
 	RiskType      string          `json:"risk_type"`
 	Severity      string          `json:"severity"`
@@ -469,6 +513,7 @@ type FeedSyncStatus struct {
 	LastEtag         string          `json:"last_etag"`
 	LastCommitHash   string          `json:"last_commit_hash"`
 	Metadata         json.RawMessage `json:"metadata,omitempty"`
+	UpdatedAt        time.Time       `json:"updated_at,omitempty"`
 }
 
 // FeedConfig is one persisted admin override for a feed.
@@ -516,16 +561,29 @@ type PackageCheckStatus struct {
 
 // ScanLogEntry records metadata about a completed scan.
 type ScanLogEntry struct {
-	ScanID        string
-	RepoName      string
-	Branch        string
-	Commit        string
-	ScannedAt     time.Time
-	PackagesCount int
-	FindingsCount int
-	DurationMs    int
-	ClientIP      string
-	UserAgent     string
+	ScanID                string
+	RepoName              string
+	Branch                string
+	Commit                string
+	ScannedAt             time.Time
+	PackagesCount         int
+	FindingsCount         int
+	DurationMs            int
+	ClientIP              string
+	UserAgent             string
+	APIKeyID              int
+	APIKeyName            string
+	CorrelationID         string
+	IdempotencyKey        string
+	RequestDigest         string
+	ResultDigest          string
+	FindingsBlocking      bool
+	BlockThreshold        string
+	FeedStatus            string
+	FeedVersions          map[string]string
+	FindingIDs            []string
+	FindingSeverities     []string
+	ManualAdvisoriesCount int
 }
 
 // RecentVulnerability is a summary row for recently published vulnerabilities.
@@ -548,6 +606,7 @@ type APIKey struct {
 	RevokedAt  *time.Time
 	LastUsedAt *time.Time
 	ExpiresAt  *time.Time
+	DeletedAt  *time.Time
 }
 
 // IsExpired reports whether the API key has an expiry timestamp at or before now.
@@ -569,6 +628,71 @@ type AdminAuditEntry struct {
 	Action  string
 	Details json.RawMessage
 	IP      string
+}
+
+// SetAdminAuditDetail updates one string field in an admin audit entry's JSON
+// details map.
+func SetAdminAuditDetail(entry *AdminAuditEntry, key, value string) error {
+	if entry == nil {
+		return nil
+	}
+	details := map[string]string{}
+	if len(entry.Details) > 0 {
+		if err := json.Unmarshal(entry.Details, &details); err != nil {
+			return err
+		}
+	}
+	if details == nil {
+		details = map[string]string{}
+	}
+	details[key] = value
+	raw, err := json.Marshal(details)
+	if err != nil {
+		return err
+	}
+	entry.Details = raw
+	return nil
+}
+
+type adminAuditQueueJob struct {
+	ID          int    `json:"id"`
+	Ecosystem   string `json:"ecosystem"`
+	Name        string `json:"name"`
+	Source      string `json:"source"`
+	Priority    int    `json:"priority"`
+	Status      string `json:"status"`
+	RequestedAt string `json:"requested_at"`
+	ProcessedAt string `json:"processed_at"`
+	Error       string `json:"error"`
+}
+
+// SetAdminAuditQueueJobsDetail stores refresh queue job identities in a string
+// audit detail value so destructive queue actions keep reviewable evidence.
+func SetAdminAuditQueueJobsDetail(entry *AdminAuditEntry, key string, jobs []RefreshJob) error {
+	rows := make([]adminAuditQueueJob, 0, len(jobs))
+	for _, job := range jobs {
+		row := adminAuditQueueJob{
+			ID:        job.ID,
+			Ecosystem: job.Ecosystem,
+			Name:      job.Name,
+			Source:    job.Source,
+			Priority:  job.Priority,
+			Status:    job.Status,
+			Error:     logsafe.BoundedDiagnosticValue(job.Error, 512),
+		}
+		if !job.RequestedAt.IsZero() {
+			row.RequestedAt = job.RequestedAt.UTC().Format(time.RFC3339Nano)
+		}
+		if job.ProcessedAt != nil && !job.ProcessedAt.IsZero() {
+			row.ProcessedAt = job.ProcessedAt.UTC().Format(time.RFC3339Nano)
+		}
+		rows = append(rows, row)
+	}
+	raw, err := json.Marshal(rows)
+	if err != nil {
+		return err
+	}
+	return SetAdminAuditDetail(entry, key, string(raw))
 }
 
 // EPSSEntry holds EPSS score data for a single CVE, used by SetEPSSScores.
@@ -598,9 +722,11 @@ type DailyScanStats struct {
 type PackageSearchResult struct {
 	Ecosystem          string
 	Name               string
+	Version            string
 	FindingsCount      int
 	VulnerabilityCount int
 	VulnerabilityIDs   string // comma-separated advisory IDs
+	FindingTypes       string // comma-separated finding type labels/keys
 	Sources            string // comma-separated list of feed sources
 }
 
@@ -615,11 +741,14 @@ type PackageSearchParams struct {
 // AdminAuditLogEntry is a read-model for audit log entries, including the
 // auto-generated ID and timestamp.
 type AdminAuditLogEntry struct {
-	ID        int
-	Action    string
-	Details   json.RawMessage
-	IP        string
-	CreatedAt time.Time
+	ID              int
+	Action          string
+	Details         json.RawMessage
+	IP              string
+	CreatedAt       time.Time
+	PreviousDigest  string
+	RowDigest       string
+	IntegrityStatus string
 }
 
 // QueueStatsResult holds aggregate counts for the refresh queue.
@@ -636,6 +765,8 @@ type DashboardStatsResult struct {
 	TotalPackages        int
 	TotalVulnerabilities int
 	TotalMalicious       int
+	TotalSupplyChainRisk int
+	TotalLifecycle       int
 	BySeverity           map[string]int
 }
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -24,6 +25,7 @@ func newTestScanCmdForTLS() *cobra.Command {
 	f.String("cacert", "", "")
 	f.Bool("insecure-allow-http", false, "")
 	f.Bool("require-remote", false, "")
+	f.Bool("no-repo-metadata", false, "")
 	return cmd
 }
 
@@ -85,6 +87,68 @@ func TestResolveScanSettings_TLSEnvApplied(t *testing.T) {
 	}
 	if !settings.RequireRemote {
 		t.Fatal("RequireRemote should be true from env")
+	}
+}
+
+func TestResolveScanSettingsRejectsInvalidBooleanEnv(t *testing.T) {
+	t.Setenv("PACKMON_REQUIRE_REMOTE", "ture")
+
+	cmd := newTestScanCmdForTLS()
+	target := scanTarget{Name: "local", Path: "."}
+	_, err := resolveScanSettings(cmd, nil, target, scanFlagValues{})
+	if err == nil || !strings.Contains(err.Error(), "PACKMON_REQUIRE_REMOTE") {
+		t.Fatalf("resolveScanSettings() error = %v, want invalid PACKMON_REQUIRE_REMOTE rejection", err)
+	}
+}
+
+func TestResolveScanSettingsRepoMetadataPrivacyPrecedence(t *testing.T) {
+	t.Setenv("PACKMON_NO_REPO_METADATA", "true")
+
+	sendRepoMetadata := true
+	cfg := &cliConfig{SendRepoMetadata: &sendRepoMetadata}
+	cmd := newTestScanCmdForTLS()
+	if err := cmd.Flags().Set("no-repo-metadata", "false"); err != nil {
+		t.Fatal(err)
+	}
+	target := scanTarget{Name: "local", Path: "."}
+
+	settings, err := resolveScanSettings(cmd, cfg, target, scanFlagValues{OmitRepoMetadata: false})
+	if err != nil {
+		t.Fatalf("resolveScanSettings: %v", err)
+	}
+	if settings.OmitRepoMetadata {
+		t.Fatal("OmitRepoMetadata should be false because explicit flag overrides env")
+	}
+
+	cmd = newTestScanCmdForTLS()
+	settings, err = resolveScanSettings(cmd, cfg, target, scanFlagValues{})
+	if err != nil {
+		t.Fatalf("resolveScanSettings env: %v", err)
+	}
+	if !settings.OmitRepoMetadata {
+		t.Fatal("OmitRepoMetadata should be true from PACKMON_NO_REPO_METADATA")
+	}
+}
+
+func TestResolveScanSettingsRejectsInvalidRepoMetadataBooleanEnv(t *testing.T) {
+	t.Setenv("PACKMON_NO_REPO_METADATA", "sometimes")
+
+	cmd := newTestScanCmdForTLS()
+	target := scanTarget{Name: "local", Path: "."}
+	_, err := resolveScanSettings(cmd, nil, target, scanFlagValues{})
+	if err == nil || !strings.Contains(err.Error(), "PACKMON_NO_REPO_METADATA") {
+		t.Fatalf("resolveScanSettings() error = %v, want invalid PACKMON_NO_REPO_METADATA rejection", err)
+	}
+}
+
+func TestResolveScanSettingsRejectsInvalidTimeoutEnv(t *testing.T) {
+	t.Setenv("PACKMON_TIMEOUT", "later")
+
+	cmd := newTestScanCmdForTLS()
+	target := scanTarget{Name: "local", Path: "."}
+	_, err := resolveScanSettings(cmd, nil, target, scanFlagValues{})
+	if err == nil || !strings.Contains(err.Error(), "PACKMON_TIMEOUT") {
+		t.Fatalf("resolveScanSettings() error = %v, want invalid PACKMON_TIMEOUT rejection", err)
 	}
 }
 

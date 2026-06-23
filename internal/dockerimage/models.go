@@ -1,6 +1,6 @@
 package dockerimage
 
-import "github.com/8linkz/packmon/internal/domain"
+import "github.com/8linkz-sec/packmon/internal/domain"
 
 type SourceType string
 

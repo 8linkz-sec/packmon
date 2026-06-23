@@ -6,7 +6,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 // CocoaPodsParser parses Podfile.lock files.
@@ -37,61 +37,78 @@ func (p *CocoaPodsParser) CanParse(filename string) bool {
 func (p *CocoaPodsParser) Parse(r io.Reader) ([]domain.Package, error) {
 	scanner := newLineScanner(r)
 
-	// Find the PODS: section first.
+	// Find the PODS: section first and keep SPEC REPOS provenance when present.
 	inPods := false
+	inSpecRepos := false
+	currentSpecRepo := ""
 	var (
-		packages []domain.Package
-		errs     []string
-		seen     = make(map[string]bool)
+		packages           []domain.Package
+		errs               []string
+		seen               = make(map[string]bool)
+		packageIndexes     = make(map[string][]int)
+		specRepoSourceRefs = make(map[string][]string)
 	)
 
 	for scanner.Scan() {
 		line := scanner.Text()
+		trimmed := strings.TrimSpace(line)
 
-		if !inPods {
-			if strings.TrimSpace(line) == "PODS:" {
-				inPods = true
+		if !strings.HasPrefix(line, " ") && strings.HasSuffix(trimmed, ":") {
+			inPods = trimmed == "PODS:"
+			inSpecRepos = trimmed == "SPEC REPOS:"
+			currentSpecRepo = ""
+			if inPods {
+				continue
+			}
+			if inSpecRepos {
+				continue
+			}
+		}
+
+		if inSpecRepos {
+			if strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "    ") && strings.HasSuffix(trimmed, ":") {
+				currentSpecRepo = strings.TrimSuffix(trimmed, ":")
+				continue
+			}
+			if currentSpecRepo != "" && strings.HasPrefix(line, "    - ") {
+				podName := strings.TrimSpace(strings.TrimPrefix(trimmed, "- "))
+				if idx := strings.Index(podName, "/"); idx > 0 {
+					podName = podName[:idx]
+				}
+				specRepoSourceRefs[podName] = append(specRepoSourceRefs[podName], currentSpecRepo)
 			}
 			continue
 		}
 
-		// An empty line or a new top-level section header ends the PODS block.
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			break
-		}
-		// A new section starts with a non-indented, non-dash line ending with ":"
-		// (e.g., "DEPENDENCIES:", "SPEC REPOS:", etc.).
-		if !strings.HasPrefix(line, " ") && strings.HasSuffix(trimmed, ":") {
-			break
-		}
+		if inPods {
+			matches := podLineRe.FindStringSubmatch(line)
+			if matches == nil {
+				// This is either a sub-dependency line or a malformed line; skip it.
+				continue
+			}
 
-		matches := podLineRe.FindStringSubmatch(line)
-		if matches == nil {
-			// This is either a sub-dependency line or a malformed line; skip it.
-			continue
+			name := matches[1]
+			version := matches[2]
+
+			// For subspecs like "Firebase/Core", use the root pod name.
+			rootName := name
+			if idx := strings.Index(name, "/"); idx > 0 {
+				rootName = name[:idx]
+			}
+
+			key := rootName + "@" + version
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+
+			packages = append(packages, domain.Package{
+				Name:      rootName,
+				Version:   version,
+				Ecosystem: domain.EcosystemCocoaPods,
+			})
+			packageIndexes[rootName] = append(packageIndexes[rootName], len(packages)-1)
 		}
-
-		name := matches[1]
-		version := matches[2]
-
-		// For subspecs like "Firebase/Core", use the root pod name.
-		rootName := name
-		if idx := strings.Index(name, "/"); idx > 0 {
-			rootName = name[:idx]
-		}
-
-		key := rootName + "@" + version
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-
-		packages = append(packages, domain.Package{
-			Name:      rootName,
-			Version:   version,
-			Ecosystem: domain.EcosystemCocoaPods,
-		})
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -100,6 +117,12 @@ func (p *CocoaPodsParser) Parse(r io.Reader) ([]domain.Package, error) {
 
 	if !inPods && len(packages) == 0 {
 		errs = append(errs, "no PODS section found")
+	}
+
+	for podName, refs := range specRepoSourceRefs {
+		for _, idx := range packageIndexes[podName] {
+			packages[idx].SourceRefs = cleanSourceRefs(refs...)
+		}
 	}
 
 	var retErr error

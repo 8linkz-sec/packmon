@@ -84,7 +84,7 @@ func VersionAffected(version, versionRangesJSON, versionsJSON, ecosystem string)
 			return true, err
 		}
 		for _, candidate := range versions {
-			if candidate == version {
+			if versionsEqual(version, candidate, ecosystem) {
 				return true, nil
 			}
 		}
@@ -319,11 +319,20 @@ func compareEcosystem(a, b, ecosystem string) int {
 		return comparePEP440(a, b)
 	case "maven":
 		return compareMaven(a, b)
+	case "nuget":
+		return compareNuGet(a, b)
 	default:
-		// Most ecosystems (npm, Go, Cargo, NuGet, Composer, Gem, etc.)
+		// Most ecosystems (npm, Go, Cargo, Composer, Gem, etc.)
 		// use semver or semver-like versioning.
 		return compareSemver(a, b)
 	}
+}
+
+func versionsEqual(a, b, ecosystem string) bool {
+	if strings.EqualFold(ecosystem, "nuget") {
+		return compareNuGet(a, b) == 0
+	}
+	return a == b
 }
 
 // ---------------------------------------------------------------------------
@@ -351,6 +360,19 @@ func compareSemver(a, b string) int {
 	}
 
 	return comparePrereleaseStrings(preA, preB)
+}
+
+func compareNuGet(a, b string) int {
+	return compareSemver(normalizeNuGetVersionInput(a), normalizeNuGetVersionInput(b))
+}
+
+func normalizeNuGetVersionInput(v string) string {
+	v = normalizeSemverInput(v)
+	release, pre := splitPrerelease(v)
+	if pre == "" {
+		return release
+	}
+	return release + "-" + strings.ToLower(pre)
 }
 
 func normalizeSemverInput(v string) string {
@@ -783,39 +805,6 @@ func parseMavenQualifier(q string) (phase, num int) {
 
 	return phase, num
 }
-
-// ---------------------------------------------------------------------------
-// Exported helpers (used by the postgres and sqlite packages for backward
-// compatibility with their existing test suites)
-// ---------------------------------------------------------------------------
-
-// SplitPrerelease splits a version string into release and pre-release
-// parts. Exported for use by dependent packages.
-func SplitPrerelease(v string) (string, string) {
-	return splitPrerelease(v)
-}
-
-// ComparePrerelease compares two pre-release strings per semver 2.0 rules.
-// Exported for use by dependent packages.
-func ComparePrerelease(a, b string) int {
-	return comparePrereleaseIdentifiers(a, b)
-}
-
-// IsNumeric returns true and the parsed integer value if s is composed
-// entirely of ASCII digits. Exported for use by dependent packages.
-func IsNumeric(s string) (bool, int) {
-	return isNumeric(s)
-}
-
-// ParseLeadingInt extracts the leading integer from a string.
-// Exported for use by dependent packages.
-func ParseLeadingInt(s string) int {
-	return parseLeadingInt(s)
-}
-
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
 
 func isNumeric(s string) (bool, int) {
 	if s == "" {

@@ -1,11 +1,14 @@
 package scanner
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
-	"github.com/8linkz/packmon/internal/parser"
+	"github.com/8linkz-sec/packmon/internal/parser"
 )
 
 // ---------------------------------------------------------------------------
@@ -240,5 +243,41 @@ func TestWalk_NonExistentPath(t *testing.T) {
 	_, err := w.Walk(filepath.Join(t.TempDir(), "nonexistent"))
 	if err == nil {
 		t.Fatal("Walk() on non-existent path should return an error")
+	}
+}
+
+func TestWalkInputErrorUsesRelativePath(t *testing.T) {
+	t.Parallel()
+
+	root := filepath.Join("repo")
+	path := filepath.Join(root, "service", "package-lock.json")
+	err := walkInputError(root, path, errors.New("permission denied"))
+	if err == nil {
+		t.Fatal("walkInputError() = nil")
+	}
+	got := err.Error()
+	if !strings.Contains(got, "service/package-lock.json") || !strings.Contains(got, "permission denied") {
+		t.Fatalf("walkInputError() = %q, want relative path and cause", got)
+	}
+	if strings.Contains(got, filepath.Clean(root)+string(filepath.Separator)) {
+		t.Fatalf("walkInputError() leaked root prefix: %q", got)
+	}
+}
+
+func TestWalkReportsUnexpectedWalkDirError(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	reg := parser.NewRegistry()
+	w := NewWalker(reg, 10, nil)
+	_, err := w.walk(root, func(root string, fn fs.WalkDirFunc) error {
+		return fn(filepath.Join(root, "service", "package-lock.json"), nil, errors.New("permission denied"))
+	})
+	if err == nil {
+		t.Fatal("Walk() error = nil, want propagated walk error")
+	}
+	got := err.Error()
+	if !strings.Contains(got, "service/package-lock.json") || !strings.Contains(got, "permission denied") {
+		t.Fatalf("Walk() error = %q, want relative path and cause", got)
 	}
 }

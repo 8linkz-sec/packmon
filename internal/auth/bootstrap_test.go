@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/8linkz/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/db"
 )
 
 type bootstrapStoreStub struct {
@@ -16,6 +16,7 @@ type bootstrapStoreStub struct {
 	auth      *db.AdminAuth
 	getErr    error
 	upsertErr error
+	auditErr  error
 	upserts   int
 	audits    int
 	lastAudit *db.AdminAuditEntry
@@ -38,6 +39,9 @@ func (s *bootstrapStoreStub) UpsertAdminAuth(_ context.Context, passwordHash str
 }
 
 func (s *bootstrapStoreStub) InsertAdminAuditLog(_ context.Context, entry *db.AdminAuditEntry) error {
+	if s.auditErr != nil {
+		return s.auditErr
+	}
 	s.audits++
 	if entry != nil {
 		copyEntry := *entry
@@ -74,11 +78,19 @@ func TestBootstrapAdminBranches(t *testing.T) {
 	if created.upserts != 1 || created.audits != 1 || created.auth == nil || !created.auth.PasswordIsBootstrap {
 		t.Fatalf("created store = %+v", created)
 	}
-	if created.lastAudit == nil || created.lastAudit.IP != "system" {
-		t.Fatalf("bootstrap audit = %+v, want system IP marker", created.lastAudit)
+	if created.lastAudit == nil || created.lastAudit.IP != "" || !strings.Contains(string(created.lastAudit.Details), `"actor":"system"`) {
+		t.Fatalf("bootstrap audit = %+v, want null IP with system actor details", created.lastAudit)
 	}
 	if !CheckPassword(created.auth.PasswordHash, "initial-password") {
 		t.Fatal("created password hash does not validate")
+	}
+
+	weakPassword := &bootstrapStoreStub{}
+	if err := BootstrapAdmin(context.Background(), weakPassword, "short", logger); err == nil || !strings.Contains(err.Error(), "at least 12") {
+		t.Fatalf("BootstrapAdmin(weak password) error = %v", err)
+	}
+	if weakPassword.upserts != 0 || weakPassword.audits != 0 {
+		t.Fatalf("weak password store = %+v, want no writes", weakPassword)
 	}
 
 	getErr := &bootstrapStoreStub{getErr: errors.New("db down")}
@@ -87,7 +99,12 @@ func TestBootstrapAdminBranches(t *testing.T) {
 	}
 
 	upsertErr := &bootstrapStoreStub{upsertErr: errors.New("write failed")}
-	if err := BootstrapAdmin(context.Background(), upsertErr, "password", logger); err == nil || !strings.Contains(err.Error(), "bootstrap admin") {
+	if err := BootstrapAdmin(context.Background(), upsertErr, "valid-password-123", logger); err == nil || !strings.Contains(err.Error(), "bootstrap admin") {
 		t.Fatalf("BootstrapAdmin(upsert error) error = %v", err)
+	}
+
+	auditErr := &bootstrapStoreStub{auditErr: errors.New("audit failed")}
+	if err := BootstrapAdmin(context.Background(), auditErr, "valid-password-123", logger); err == nil || !strings.Contains(err.Error(), "audit bootstrap admin") {
+		t.Fatalf("BootstrapAdmin(audit error) error = %v", err)
 	}
 }

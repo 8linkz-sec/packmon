@@ -7,10 +7,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -19,11 +22,34 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
 
+type countingReadCloser struct {
+	remaining int64
+	read      int64
+}
+
+func (r *countingReadCloser) Read(p []byte) (int, error) {
+	if r.remaining <= 0 {
+		return 0, io.EOF
+	}
+	if int64(len(p)) > r.remaining {
+		p = p[:r.remaining]
+	}
+	for i := range p {
+		p[i] = 'x'
+	}
+	n := len(p)
+	r.remaining -= int64(n)
+	r.read += int64(n)
+	return n, nil
+}
+
+func (r *countingReadCloser) Close() error {
+	return nil
+}
+
 func TestFetchLatestVersionParsesSupportedRegistryResponses(t *testing.T) {
 	originalClient := registryClient
-	originalGitRemoteTags := gitRemoteTagsFn
 	t.Cleanup(func() { registryClient = originalClient })
-	t.Cleanup(func() { gitRemoteTagsFn = originalGitRemoteTags })
 
 	responses := map[string]string{
 		"registry.npmjs.org/pkg/latest":                             `{"version":"1.2.3"}`,
@@ -59,16 +85,18 @@ func TestFetchLatestVersionParsesSupportedRegistryResponses(t *testing.T) {
 			Request:    req,
 		}, nil
 	})}
-	gitRemoteTagsFn = func(_ context.Context, remote string) ([]string, error) {
-		switch remote {
-		case "https://github.com/Alamofire/Alamofire.git":
-			return []string{"5.9.0", "5.11.2", "5.10.0"}, nil
-		case "https://github.com/actions/checkout.git":
-			return []string{"v3", "v4", "v4.2.2"}, nil
-		default:
-			t.Fatalf("unexpected git remote: %s", remote)
-			return nil, nil
-		}
+	resolver := packageUpdateResolver{
+		gitRemoteTags: func(_ context.Context, remote string) ([]string, error) {
+			switch remote {
+			case "https://github.com/Alamofire/Alamofire.git":
+				return []string{"5.9.0", "5.11.2", "5.10.0"}, nil
+			case "https://github.com/actions/checkout.git":
+				return []string{"v3", "v4", "v4.2.2"}, nil
+			default:
+				t.Fatalf("unexpected git remote: %s", remote)
+				return nil, nil
+			}
+		},
 	}
 
 	tests := []struct {
@@ -95,13 +123,13 @@ func TestFetchLatestVersionParsesSupportedRegistryResponses(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(string(tt.ecosystem), func(t *testing.T) {
-			if got := fetchLatestVersion(context.Background(), tt.ecosystem, tt.name); got != tt.want {
+			if got := resolver.latestVersion(context.Background(), tt.ecosystem, tt.name); got != tt.want {
 				t.Fatalf("fetchLatestVersion(%s, %q) = %q, want %q", tt.ecosystem, tt.name, got, tt.want)
 			}
 		})
 	}
 
-	if got := fetchLatestVersion(context.Background(), domain.Ecosystem("unknown"), "pkg"); got != "" {
+	if got := resolver.latestVersion(context.Background(), domain.Ecosystem("unknown"), "pkg"); got != "" {
 		t.Fatalf("fetchLatestVersion(unsupported) = %q, want empty", got)
 	}
 }
@@ -142,6 +170,350 @@ func TestRegistryGetHandlesTransportAndStatusErrors(t *testing.T) {
 	}
 }
 
+func TestRegistryGetDrainsBoundedErrorBodies(t *testing.T) {
+	originalClient := registryClient
+	t.Cleanup(func() { registryClient = originalClient })
+
+	body := &countingReadCloser{remaining: 1 << 20}
+	registryClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Body:       body,
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})}
+
+	if _, err := registryGet(context.Background(), "https://registry.example/pkg"); err == nil || !strings.Contains(err.Error(), "status 429") {
+		t.Fatalf("registryGet() error = %v, want status 429", err)
+	}
+	if body.read == 0 {
+		t.Fatal("registryGet() did not drain any bytes from non-OK response")
+	}
+	if body.read > 64<<10 {
+		t.Fatalf("drained %d bytes, want at most 64 KiB", body.read)
+	}
+}
+
+func TestFetchCratesLatestUsesPolicyUserAgentAndThrottle(t *testing.T) {
+	originalClient := registryClient
+	originalThrottle := cratesIOThrottle
+	t.Cleanup(func() {
+		registryClient = originalClient
+		cratesIOThrottle = originalThrottle
+	})
+
+	now := time.Unix(1000, 0)
+	var slept []time.Duration
+	cratesIOThrottle = &registryThrottle{
+		interval: time.Second,
+		now: func() time.Time {
+			return now
+		},
+		sleep: func(_ context.Context, d time.Duration) bool {
+			slept = append(slept, d)
+			now = now.Add(d)
+			return true
+		},
+	}
+
+	var userAgents []string
+	registryClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Host != "crates.io" {
+			t.Fatalf("unexpected registry host: %s", req.URL.Host)
+		}
+		userAgents = append(userAgents, req.Header.Get("User-Agent"))
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"crate":{"max_stable_version":"1.2.3"}}`)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})}
+
+	if got := fetchCratesLatest(context.Background(), "crate-one"); got != "1.2.3" {
+		t.Fatalf("fetchCratesLatest(first) = %q", got)
+	}
+	if got := fetchCratesLatest(context.Background(), "crate-two"); got != "1.2.3" {
+		t.Fatalf("fetchCratesLatest(second) = %q", got)
+	}
+	if len(slept) != 1 || slept[0] != time.Second {
+		t.Fatalf("crates.io throttle sleeps = %v, want one 1s sleep before second request", slept)
+	}
+	for _, ua := range userAgents {
+		if !strings.Contains(ua, "packmon/") || !strings.Contains(ua, "github.com/8linkz-sec/packmon") {
+			t.Fatalf("crates.io User-Agent = %q, want identifiable Packmon UA", ua)
+		}
+	}
+}
+
+func TestResolveLatestWithWorkerPoolDoesNotSpawnPerItemGoroutine(t *testing.T) {
+	items := make([]int, maxConcurrentRegistryRequests*8)
+	for i := range items {
+		items[i] = i
+	}
+	started := make(chan struct{}, len(items))
+	release := make(chan struct{})
+	done := make(chan []packageLatestStatus, 1)
+
+	before := runtime.NumGoroutine()
+	go func() {
+		done <- resolveLatestWithWorkerPool(context.Background(), items, func(context.Context, int) packageLatestStatus {
+			started <- struct{}{}
+			<-release
+			return packageLatestStatus{Latest: "1.0.0", Update: "-"}
+		})
+	}()
+
+	for i := 0; i < maxConcurrentRegistryRequests; i++ {
+		<-started
+	}
+	time.Sleep(25 * time.Millisecond)
+	during := runtime.NumGoroutine()
+	close(release)
+	results := <-done
+
+	if len(results) != len(items) {
+		t.Fatalf("results = %d, want %d", len(results), len(items))
+	}
+	if extra := during - before; extra > maxConcurrentRegistryRequests+8 {
+		t.Fatalf("worker pool spawned %d extra goroutines for %d items; want bounded workers", extra, len(items))
+	}
+}
+
+func TestLatestVersionResolversSkipPrivateSourceRefs(t *testing.T) {
+	var called atomic.Bool
+	lookup := directPackageUpdateLookupWithResolver(packageUpdateResolver{
+		fetchLatest: func(context.Context, domain.Ecosystem, string) string {
+			called.Store(true)
+			return "9.9.9"
+		},
+	})
+
+	cases := []struct {
+		name      string
+		ecosystem domain.Ecosystem
+		sourceRef string
+	}{
+		{"npm", domain.EcosystemNPM, "https://npm.internal.example/@acme/private/-/private-1.0.0.tgz"},
+		{"pypi", domain.EcosystemPyPI, "https://pypi.internal.example/simple"},
+		{"cargo", domain.EcosystemCargo, "registry+https://cargo.internal.example/index"},
+		{"gem", domain.EcosystemGem, "https://gems.internal.example/"},
+		{"cocoapods", domain.EcosystemCocoaPods, "https://pods.internal.example/specs.git"},
+		{"composer", domain.EcosystemComposer, "https://composer.internal.example/dist/acme/payroll-sdk.zip"},
+		{"cran", domain.EcosystemCRAN, "source=GitHub"},
+		{"pub", domain.EcosystemPub, "url=https://pub.internal.example"},
+		{"maven", domain.EcosystemMaven, "https://maven.internal.example/repository/releases"},
+	}
+
+	for _, tt := range cases {
+		t.Run("list-all "+tt.name, func(t *testing.T) {
+			called.Store(false)
+			status := resolveListAllLatestWithLookup(context.Background(), listAllPackage{
+				Name:       "private",
+				Version:    "1.0.0",
+				Ecosystem:  tt.ecosystem,
+				SourceRefs: []string{tt.sourceRef},
+			}, lookup, nil)
+			if !status.Unknown || status.Latest != "unknown" || status.Update != "-" {
+				t.Fatalf("private source status = %+v, want unknown", status)
+			}
+			if called.Load() {
+				t.Fatal("private source triggered a public latest-version lookup")
+			}
+		})
+		t.Run("outdated "+tt.name, func(t *testing.T) {
+			called.Store(false)
+			status := resolveOutdatedLatestWithLookup(context.Background(), outdatedPackage{
+				Name:       "private",
+				Version:    "1.0.0",
+				Ecosystem:  tt.ecosystem,
+				SourceRefs: []string{tt.sourceRef},
+			}, lookup)
+			if !status.Unknown || status.Latest != "unknown" || status.Update != "-" {
+				t.Fatalf("private source status = %+v, want unknown", status)
+			}
+			if called.Load() {
+				t.Fatal("private source triggered a public latest-version lookup")
+			}
+		})
+	}
+}
+
+func TestRunOutdatedSkipsPrivatePackageLockRegistrySource(t *testing.T) {
+	var called atomic.Bool
+	resolver := packageUpdateResolver{
+		fetchLatest: func(context.Context, domain.Ecosystem, string) string {
+			called.Store(true)
+			return "9.9.9"
+		},
+	}
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "package-lock.json"), []byte(`{
+  "lockfileVersion": 3,
+  "packages": {
+    "": {"version": "1.0.0"},
+    "node_modules/@acme/payroll-sdk": {
+      "version": "1.0.0",
+      "resolved": "https://npm.internal.example/@acme/payroll-sdk/-/payroll-sdk-1.0.0.tgz"
+    }
+  }
+}`), 0o600); err != nil {
+		t.Fatalf("write package-lock: %v", err)
+	}
+
+	captureStdout(t, func() {
+		if err := runOutdatedWithOptions([]string{dir}, outdatedOptions{Ecosystems: "npm", MaxDepth: 2, IncludeDev: true, resolver: resolver}); err != nil {
+			t.Fatalf("run outdated: %v", err)
+		}
+	})
+
+	if called.Load() {
+		t.Fatal("private package-lock source triggered public latest-version lookup")
+	}
+}
+
+func TestRunOutdatedWithOptionsSkipsLookupsAfterCallerCancel(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "package-lock.json"), `{
+		"lockfileVersion": 3,
+		"packages": {
+			"": {"version": "1.0.0"},
+			"node_modules/outdated": {"version": "1.0.0"}
+		}
+	}`)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var called atomic.Bool
+	resolver := packageUpdateResolver{
+		fetchLatest: func(context.Context, domain.Ecosystem, string) string {
+			called.Store(true)
+			return ""
+		},
+	}
+
+	err := runOutdatedWithOptions([]string{dir}, outdatedOptions{
+		Context:    ctx,
+		Ecosystems: "npm",
+		MaxDepth:   2,
+		IncludeDev: true,
+		OutputHTML: filepath.Join(t.TempDir(), "outdated.html"),
+		Quiet:      true,
+		resolver:   resolver,
+		Timeout:    1,
+	})
+	if err != nil {
+		t.Fatalf("runOutdatedWithOptions: %v", err)
+	}
+	if called.Load() {
+		t.Fatal("outdated latest-version lookup ran after caller context was canceled")
+	}
+}
+
+func TestRunOutdatedWithOptionsUsesConfiguredLookupTimeout(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "package-lock.json"), `{
+		"lockfileVersion": 3,
+		"packages": {
+			"": {"version": "1.0.0"},
+			"node_modules/outdated": {"version": "1.0.0"}
+		}
+	}`)
+
+	var sawDeadline atomic.Bool
+	resolver := packageUpdateResolver{
+		fetchLatest: func(ctx context.Context, _ domain.Ecosystem, _ string) string {
+			if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) <= 2*time.Second {
+				sawDeadline.Store(true)
+			}
+			return "2.0.0"
+		},
+	}
+
+	err := runOutdatedWithOptions([]string{dir}, outdatedOptions{
+		Context:    context.Background(),
+		Ecosystems: "npm",
+		MaxDepth:   2,
+		IncludeDev: true,
+		OutputHTML: filepath.Join(t.TempDir(), "outdated.html"),
+		Quiet:      true,
+		resolver:   resolver,
+		Timeout:    1,
+	})
+	if err != nil {
+		t.Fatalf("runOutdatedWithOptions: %v", err)
+	}
+	if !sawDeadline.Load() {
+		t.Fatal("outdated latest-version lookup did not receive configured lookup deadline")
+	}
+}
+
+func TestRunOutdatedCachesLatestVersionLookups(t *testing.T) {
+	dir := t.TempDir()
+	sbomPath := filepath.Join(dir, "bom.cdx.json")
+	if err := os.WriteFile(sbomPath, []byte(`{
+		"bomFormat":"CycloneDX",
+		"components":[
+			{"type":"library","name":"dupe","version":"2.0.0","purl":"pkg:npm/dupe@2.0.0"},
+			{"type":"library","name":"dupe","version":"1.0.0","purl":"pkg:npm/dupe@1.0.0"}
+		]
+	}`), 0o600); err != nil {
+		t.Fatalf("write SBOM: %v", err)
+	}
+
+	var calls atomic.Int32
+	resolver := packageUpdateResolver{
+		fetchLatest: func(_ context.Context, eco domain.Ecosystem, name string) string {
+			if eco != domain.EcosystemNPM || name != "dupe" {
+				t.Fatalf("fetchLatest(%s, %q)", eco, name)
+			}
+			calls.Add(1)
+			return "2.0.0"
+		},
+	}
+
+	output := captureStdout(t, func() {
+		if err := runOutdatedWithOptions([]string{dir}, outdatedOptions{Ecosystems: "npm", MaxDepth: 2, IncludeDev: true, SBOMFiles: []string{sbomPath}, resolver: resolver}); err != nil {
+			t.Fatalf("runOutdated: %v", err)
+		}
+	})
+	if !strings.Contains(output, "1 outdated, 1 up to date (2 total)") {
+		t.Fatalf("runOutdated output = %q, want duplicate versions counted", output)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("latest-version lookups = %d, want 1 cached lookup", got)
+	}
+}
+
+func TestRunOutdatedQuietWithoutHTMLSkipsRegistryLookups(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "package-lock.json"), `{
+		"lockfileVersion": 3,
+		"packages": {
+			"": {"version": "1.0.0"},
+			"node_modules/outdated": {"version": "1.0.0"}
+		}
+	}`)
+
+	var called atomic.Bool
+	resolver := packageUpdateResolver{
+		fetchLatest: func(context.Context, domain.Ecosystem, string) string {
+			called.Store(true)
+			return "2.0.0"
+		},
+	}
+
+	if err := runOutdatedWithOptions([]string{dir}, outdatedOptions{Ecosystems: "npm", MaxDepth: 2, IncludeDev: true, Quiet: true, resolver: resolver}); err != nil {
+		t.Fatalf("runOutdatedWithOptions: %v", err)
+	}
+	if called.Load() {
+		t.Fatal("quiet outdated run without HTML performed a registry lookup")
+	}
+}
+
 func TestFetchPyPILatestHandlesLargeMetadataResponses(t *testing.T) {
 	originalClient := registryClient
 	t.Cleanup(func() { registryClient = originalClient })
@@ -163,13 +535,26 @@ func TestFetchPyPILatestHandlesLargeMetadataResponses(t *testing.T) {
 
 func TestRunOutdatedReportsNoLockFiles(t *testing.T) {
 	output := captureStdout(t, func() {
-		if err := runOutdated([]string{t.TempDir()}, "", 2); err != nil {
+		if err := runOutdatedForTest([]string{t.TempDir()}, "", 2); err != nil {
 			t.Fatalf("run outdated: %v", err)
 		}
 	})
 	if !strings.Contains(output, "No lock files found.") {
 		t.Fatalf("run outdated output = %q", output)
 	}
+}
+
+func runOutdatedForTest(args []string, ecosystems string, maxDepth int, sbomFilesOpt ...[]string) error {
+	var sbomFiles []string
+	if len(sbomFilesOpt) > 0 {
+		sbomFiles = sbomFilesOpt[0]
+	}
+	return runOutdatedWithOptions(args, outdatedOptions{
+		Ecosystems: ecosystems,
+		MaxDepth:   maxDepth,
+		IncludeDev: true,
+		SBOMFiles:  sbomFiles,
+	})
 }
 
 func TestRunOutdatedPrintsOnlyOutdatedPackages(t *testing.T) {
@@ -214,7 +599,7 @@ func TestRunOutdatedPrintsOnlyOutdatedPackages(t *testing.T) {
 	}
 
 	output := captureStdout(t, func() {
-		if err := runOutdated([]string{dir}, "npm", 2); err != nil {
+		if err := runOutdatedForTest([]string{dir}, "npm", 2); err != nil {
 			t.Fatalf("run outdated: %v", err)
 		}
 	})
@@ -229,9 +614,184 @@ func TestRunOutdatedPrintsOnlyOutdatedPackages(t *testing.T) {
 	}
 }
 
+func TestPrintOutdatedReportSanitizesTerminalControlText(t *testing.T) {
+	report := outdatedReport{
+		Total: 1,
+		Outdated: []outdatedRow{{
+			Name:      "pkg\x1b]8;;https://evil.example\a\n::warning::pkg",
+			Installed: "1.0.0\rspoof",
+			Latest:    "2.0.0\tmasked",
+			Ecosystem: "npm",
+			Scope:     "runtime",
+			Relation:  "direct",
+			Via:       "parent\x1b[31m",
+			Flags:     "optional\n::error::flag",
+			LockFile:  "package-lock.json\x1b[0m",
+		}},
+	}
+
+	output := captureStdout(t, func() {
+		printOutdatedReport(report)
+	})
+
+	for _, blocked := range []string{"\x1b", "\a", "\r", "\t", "\n::warning::", "\n::error::"} {
+		if strings.Contains(output, blocked) {
+			t.Fatalf("outdated output contains raw terminal control %q:\n%s", blocked, output)
+		}
+	}
+	for _, want := range []string{`\x1B`, `\n::warning::pkg`, `\rspoof`, `\tmasked`, `\n::error::flag`} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("outdated output missing sanitized text %q:\n%s", want, output)
+		}
+	}
+}
+
+func TestPrintOutdatedReportUnknownOnlyDoesNotClaimUpToDate(t *testing.T) {
+	report := outdatedReport{Total: 2, Unknown: 2, PackageWord: "packages"}
+
+	output := captureStdout(t, func() {
+		printOutdatedReport(report)
+	})
+
+	if strings.Contains(output, "All 0 packages are up to date") {
+		t.Fatalf("unknown-only report claimed all-clear:\n%s", output)
+	}
+	if !strings.Contains(output, "latest status is unknown for 2 packages") {
+		t.Fatalf("unknown-only report missing unknown empty state:\n%s", output)
+	}
+}
+
+func TestOutdatedHTMLUnknownOnlyDoesNotRenderAllClear(t *testing.T) {
+	htmlPath := filepath.Join(t.TempDir(), "outdated.html")
+	report := outdatedReport{Total: 2, Unknown: 2, PackageWord: "packages"}
+
+	if err := writeOutdatedHTML(htmlPath, report); err != nil {
+		t.Fatalf("write outdated HTML: %v", err)
+	}
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read outdated HTML: %v", err)
+	}
+	html := string(data)
+	if strings.Contains(html, "All 0 packages are up to date") {
+		t.Fatalf("unknown-only HTML claimed all-clear:\n%s", html)
+	}
+	if !strings.Contains(html, "latest status is unknown for 2 packages") {
+		t.Fatalf("unknown-only HTML missing unknown empty state:\n%s", html)
+	}
+}
+
+func TestOutdatedHTMLIncludesResponsivePrintAndLightThemePolicy(t *testing.T) {
+	htmlPath := filepath.Join(t.TempDir(), "outdated.html")
+	report := outdatedReport{
+		Total:       1,
+		PackageWord: "package",
+		Outdated: []outdatedRow{{
+			Name:      "github.com/acme/" + strings.Repeat("very-long-module-name-", 6),
+			Installed: strings.Repeat("abcdef0123456789", 4),
+			Latest:    strings.Repeat("fedcba9876543210", 4),
+			Ecosystem: string(domain.EcosystemGo),
+			Scope:     "runtime",
+			Relation:  "direct",
+			LockFile:  "go.sum",
+		}},
+	}
+
+	if err := writeOutdatedHTML(htmlPath, report); err != nil {
+		t.Fatalf("write outdated HTML: %v", err)
+	}
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read outdated HTML: %v", err)
+	}
+	html := string(data)
+	for _, want := range []string{
+		"--success:",
+		"--warning:",
+		"--warning-bg:",
+		"background:var(--warning-bg)",
+		"overflow-wrap:anywhere",
+		"word-break:break-word",
+		"@media (prefers-color-scheme: light)",
+		"@media print",
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("outdated HTML CSS missing %q:\n%s", want, html)
+		}
+	}
+	if strings.Contains(html, "background:#2d1f0f") {
+		t.Fatalf("outdated HTML CSS still hard-codes the unknown empty-state background:\n%s", html)
+	}
+}
+
+func TestOutdatedHTMLMinimizesAbsoluteReportPaths(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "student-123", "course-assignment")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("mkdir root: %v", err)
+	}
+	lockPath := filepath.Join(root, "package-lock.json")
+	htmlPath := filepath.Join(t.TempDir(), "outdated.html")
+	report := outdatedReport{
+		Target:      root,
+		Total:       1,
+		PackageWord: "package",
+		Outdated: []outdatedRow{{
+			Name:      "left-pad",
+			Installed: "1.0.0",
+			Latest:    "1.3.0",
+			Ecosystem: string(domain.EcosystemNPM),
+			Scope:     "runtime",
+			Relation:  "direct",
+			LockFile:  lockPath,
+		}},
+		LockFiles: 1,
+	}
+
+	if err := writeOutdatedHTML(htmlPath, report); err != nil {
+		t.Fatalf("write outdated HTML: %v", err)
+	}
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read outdated HTML: %v", err)
+	}
+	html := string(data)
+	for _, leaked := range []string{
+		root,
+		filepath.ToSlash(root),
+		filepath.Dir(root),
+		filepath.ToSlash(filepath.Dir(root)),
+		lockPath,
+		filepath.ToSlash(lockPath),
+		"student-123",
+	} {
+		if strings.Contains(html, leaked) {
+			t.Fatalf("outdated HTML leaked local path fragment %q:\n%s", leaked, html)
+		}
+	}
+	for _, want := range []string{
+		"course-assignment",
+		`<td class="lockfile">package-lock.json</td>`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("outdated HTML missing minimized path %q:\n%s", want, html)
+		}
+	}
+}
+
+func TestOutdatedHTMLTableScrollRegionIsKeyboardFocusable(t *testing.T) {
+	for _, want := range []string{
+		".table-scroll:focus{",
+		`<div class="table-scroll" tabindex="0" role="region" aria-label="Outdated packages table">`,
+	} {
+		if !strings.Contains(outdatedHTML, want) {
+			t.Fatalf("outdated HTML template missing keyboard-scroll contract %q", want)
+		}
+	}
+}
+
 func TestScanCommandOutdatedHTMLFlagWritesReport(t *testing.T) {
 	isolateCLIConfigDiscovery(t)
-	stubLatestVersion(t, func(_ context.Context, _ domain.Ecosystem, name string) string {
+	ctx := stubLatestVersionContext(t, func(_ context.Context, _ domain.Ecosystem, name string) string {
 		if name == "outdated" {
 			return "2.0.0"
 		}
@@ -250,6 +810,7 @@ func TestScanCommandOutdatedHTMLFlagWritesReport(t *testing.T) {
 	htmlPath := filepath.Join(t.TempDir(), "outdated.html")
 
 	cmd := newScanCmd()
+	cmd.SetContext(ctx)
 	cmd.SetArgs([]string{"--outdated", "--html", htmlPath, dir})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("scan command execute: %v", err)
@@ -267,7 +828,7 @@ func TestScanCommandOutdatedHTMLFlagWritesReport(t *testing.T) {
 		"1.0.0",
 		"2.0.0",
 		".wrap{max-width:1600px",
-		".version{white-space:nowrap",
+		".version{min-width:260px;overflow-wrap:anywhere;word-break:break-word;}",
 		"<th class=\"version\">Installed</th>",
 		"<td class=\"version\">1.0.0</td>",
 	} {
@@ -279,7 +840,7 @@ func TestScanCommandOutdatedHTMLFlagWritesReport(t *testing.T) {
 
 func TestScanCommandOutdatedIncludesDevByDefault(t *testing.T) {
 	isolateCLIConfigDiscovery(t)
-	stubLatestVersion(t, func(_ context.Context, _ domain.Ecosystem, name string) string {
+	ctx := stubLatestVersionContext(t, func(_ context.Context, _ domain.Ecosystem, name string) string {
 		switch name {
 		case "prod", "dev-only":
 			return "2.0.0"
@@ -301,6 +862,7 @@ func TestScanCommandOutdatedIncludesDevByDefault(t *testing.T) {
 
 	output := captureStdout(t, func() {
 		cmd := newScanCmd()
+		cmd.SetContext(ctx)
 		cmd.SetArgs([]string{"--outdated", dir})
 		if err := cmd.Execute(); err != nil {
 			t.Fatalf("scan command execute: %v", err)
@@ -317,7 +879,7 @@ func TestScanCommandOutdatedIncludesDevByDefault(t *testing.T) {
 
 func TestScanCommandOutdatedRendersScopeRelationViaAndFlags(t *testing.T) {
 	isolateCLIConfigDiscovery(t)
-	stubLatestVersion(t, func(_ context.Context, _ domain.Ecosystem, name string) string {
+	ctx := stubLatestVersionContext(t, func(_ context.Context, _ domain.Ecosystem, name string) string {
 		switch name {
 		case "tailwindcss":
 			return "4.3.0"
@@ -355,6 +917,7 @@ func TestScanCommandOutdatedRendersScopeRelationViaAndFlags(t *testing.T) {
 
 	output := captureStdout(t, func() {
 		cmd := newScanCmd()
+		cmd.SetContext(ctx)
 		cmd.SetArgs([]string{"--outdated", "--html", htmlPath, dir})
 		if err := cmd.Execute(); err != nil {
 			t.Fatalf("scan command execute: %v", err)
@@ -379,7 +942,7 @@ func TestScanCommandOutdatedRendersScopeRelationViaAndFlags(t *testing.T) {
 }
 
 func TestRunOutdatedDoesNotReportNewerGoPseudoVersionAsOutdated(t *testing.T) {
-	stubLatestVersion(t, func(_ context.Context, _ domain.Ecosystem, name string) string {
+	resolver := stubLatestVersion(t, func(_ context.Context, _ domain.Ecosystem, name string) string {
 		if name == "github.com/davecgh/go-spew" {
 			return "v1.1.1"
 		}
@@ -397,7 +960,7 @@ require github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc
 	}
 
 	output := captureStdout(t, func() {
-		if err := runOutdated([]string{dir}, "go", 2); err != nil {
+		if err := runOutdatedWithOptions([]string{dir}, outdatedOptions{Ecosystems: "go", MaxDepth: 2, IncludeDev: true, resolver: resolver}); err != nil {
 			t.Fatalf("run outdated: %v", err)
 		}
 	})
@@ -405,7 +968,7 @@ require github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc
 	if strings.Contains(output, "github.com/davecgh/go-spew") {
 		t.Fatalf("newer Go pseudo-version should not be reported as outdated:\n%s", output)
 	}
-	if !strings.Contains(output, "All 1 packages are up to date.") {
+	if !strings.Contains(output, "All 1 package is up to date.") {
 		t.Fatalf("run outdated output = %q, want up-to-date summary", output)
 	}
 }
@@ -417,7 +980,7 @@ func TestRunOutdatedReportsNoPackagesAfterParseErrors(t *testing.T) {
 	}
 
 	output := captureStdout(t, func() {
-		if err := runOutdated([]string{dir}, "npm", 2); err != nil {
+		if err := runOutdatedForTest([]string{dir}, "npm", 2); err != nil {
 			t.Fatalf("run outdated: %v", err)
 		}
 	})
@@ -433,7 +996,7 @@ func TestRunOutdatedMalformedSBOMReturnsParserExit(t *testing.T) {
 		t.Fatalf("write malformed SBOM: %v", err)
 	}
 
-	err := runOutdated([]string{dir}, "", 2, []string{badPath})
+	err := runOutdatedForTest([]string{dir}, "", 2, []string{badPath})
 	if err == nil {
 		t.Fatal("runOutdated(malformed SBOM) error = nil")
 	}

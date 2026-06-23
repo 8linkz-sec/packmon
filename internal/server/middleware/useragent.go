@@ -4,6 +4,8 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+
+	"github.com/8linkz-sec/packmon/internal/logsafe"
 )
 
 // knownAgentPrefixes lists User-Agent prefixes that the server accepts.
@@ -43,13 +45,13 @@ func UserAgent(logger *slog.Logger, devMode bool) func(http.Handler) http.Handle
 
 			ua := r.UserAgent()
 			if !isKnownAgent(ua) {
-				logger.Warn("unknown user agent rejected",
-					slog.String("user_agent", ua),
-					slog.String("path", r.URL.Path),
-					slog.String("remote_addr", r.RemoteAddr),
+				logger.Debug("unknown user agent rejected",
+					slog.String("user_agent", logsafe.BoundedDiagnosticValue(ua, 256)),
+					slog.String("path", logsafe.RequestPathLabel(r.URL.Path)),
+					slog.String("client_ip", ClientIP(r)),
 					slog.String("correlation_id", CorrelationIDFromContext(r.Context())),
 				)
-				http.Error(w, `{"error":"unknown user agent"}`, http.StatusForbidden)
+				writeJSONError(w, http.StatusForbidden, "unknown user agent")
 				return
 			}
 

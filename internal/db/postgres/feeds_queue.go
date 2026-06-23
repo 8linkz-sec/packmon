@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/8linkz/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/db"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -22,7 +22,8 @@ func (s *Store) GetFeedSyncStatus(ctx context.Context, feedName string) (*db.Fee
 			entries_total,
 			last_etag,
 			last_commit_hash,
-			metadata::text
+			metadata::text,
+			updated_at
 		FROM feed_sync_status
 		WHERE feed_name = $1`
 
@@ -47,6 +48,7 @@ func (s *Store) GetFeedSyncStatus(ctx context.Context, feedName string) (*db.Fee
 		&lastETag,
 		&lastCommit,
 		&metadataRaw,
+		&status.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -77,6 +79,10 @@ func (s *Store) GetFeedSyncStatus(ctx context.Context, feedName string) (*db.Fee
 }
 
 func (s *Store) UpsertFeedSyncStatus(ctx context.Context, status *db.FeedSyncStatus) error {
+	return upsertFeedSyncStatusTx(ctx, s.pool, status)
+}
+
+func upsertFeedSyncStatusTx(ctx context.Context, execer postgresExecer, status *db.FeedSyncStatus) error {
 	const query = `
 		INSERT INTO feed_sync_status (
 			feed_name, last_sync_at, last_sync_duration, last_sync_status, last_error,
@@ -90,20 +96,8 @@ func (s *Store) UpsertFeedSyncStatus(ctx context.Context, status *db.FeedSyncSta
 			last_sync_duration = COALESCE(EXCLUDED.last_sync_duration, feed_sync_status.last_sync_duration),
 			last_sync_status = EXCLUDED.last_sync_status,
 			last_error = EXCLUDED.last_error,
-			entries_synced = CASE
-				WHEN EXCLUDED.last_sync_status = 'success'
-					AND EXCLUDED.entries_synced = 0
-					AND EXCLUDED.entries_total = 0
-					THEN feed_sync_status.entries_synced
-				ELSE EXCLUDED.entries_synced
-			END,
-			entries_total = CASE
-				WHEN EXCLUDED.last_sync_status = 'success'
-					AND EXCLUDED.entries_synced = 0
-					AND EXCLUDED.entries_total = 0
-					THEN feed_sync_status.entries_total
-				ELSE EXCLUDED.entries_total
-			END,
+			entries_synced = EXCLUDED.entries_synced,
+			entries_total = EXCLUDED.entries_total,
 			last_etag = COALESCE(NULLIF(EXCLUDED.last_etag, ''), feed_sync_status.last_etag),
 			last_commit_hash = COALESCE(NULLIF(EXCLUDED.last_commit_hash, ''), feed_sync_status.last_commit_hash),
 			metadata = CASE
@@ -117,7 +111,7 @@ func (s *Store) UpsertFeedSyncStatus(ctx context.Context, status *db.FeedSyncSta
 		durationMicros = status.LastSyncDuration.Microseconds()
 	}
 
-	_, err := s.pool.Exec(ctx, query,
+	_, err := execer.Exec(ctx, query,
 		status.FeedName,
 		status.LastSyncAt,
 		durationMicros,
@@ -147,7 +141,8 @@ func (s *Store) ListFeedSyncStatuses(ctx context.Context) ([]db.FeedSyncStatus, 
 			entries_total,
 			last_etag,
 			last_commit_hash,
-			metadata::text
+			metadata::text,
+			updated_at
 		FROM feed_sync_status
 		ORDER BY feed_name`
 
@@ -180,6 +175,7 @@ func (s *Store) ListFeedSyncStatuses(ctx context.Context) ([]db.FeedSyncStatus, 
 			&lastETag,
 			&lastCommit,
 			&metadataRaw,
+			&status.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("postgres: scan feed sync status row: %w", err)
 		}
@@ -224,13 +220,11 @@ func (s *Store) EnqueueRefresh(ctx context.Context, job *db.RefreshJob) (bool, i
 		ON CONFLICT DO NOTHING
 		RETURNING id`
 
-	// Raise the priority of an already-active (pending/processing) job.
+	// Raise the priority of an already-active job without changing its state.
 	const updateQuery = `
 		UPDATE refresh_queue
 		SET priority = LEAST(priority, $4),
-		    status = 'pending',
-		    processed_at = NULL,
-		    error = NULL
+		    error = CASE WHEN status = 'pending' THEN NULL ELSE error END
 		WHERE ecosystem = $1 AND name = $2 AND source = $3
 		  AND status IN ('pending', 'processing')
 		RETURNING id`
@@ -360,6 +354,32 @@ func (s *Store) CompleteRefresh(ctx context.Context, jobID int, jobErr error) er
 	)
 	if err != nil {
 		return fmt.Errorf("postgres: complete refresh job %d: %w", jobID, err)
+	}
+	return nil
+}
+
+func (s *Store) CompleteClaimedRefresh(ctx context.Context, jobID int, claimedAt *time.Time, jobErr error) error {
+	if claimedAt == nil {
+		return s.CompleteRefresh(ctx, jobID, jobErr)
+	}
+
+	status := "done"
+	var errorText any
+	if jobErr != nil {
+		status = "error"
+		errorText = jobErr.Error()
+	}
+
+	_, err := s.pool.Exec(ctx,
+		`UPDATE refresh_queue
+		 SET status = $2, processed_at = NOW(), error = $3
+		 WHERE id = $1
+		   AND status = 'processing'
+		   AND processed_at = $4`,
+		jobID, status, errorText, *claimedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("postgres: complete claimed refresh job %d: %w", jobID, err)
 	}
 	return nil
 }

@@ -12,21 +12,23 @@ import (
 	"testing"
 	"time"
 
-	"github.com/8linkz/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/feed"
 )
 
 type maliciousTestStore struct {
 	db.Store
-	findings     []db.MaliciousFinding
-	deletedIDs   []string
-	statuses     []db.FeedSyncStatus
-	status       *db.FeedSyncStatus
-	upsertErr    error
-	statusErr    error
-	getStatusErr error
-	prunedSource string
-	prunedIDs    []string
-	pruneErr     error
+	findings       []db.MaliciousFinding
+	deletedIDs     []string
+	statuses       []db.FeedSyncStatus
+	status         *db.FeedSyncStatus
+	upsertErr      error
+	statusErr      error
+	getStatusErr   error
+	prunedSource   string
+	prunedIDs      []string
+	pruneErr       error
+	rejectCanceled bool
 }
 
 func (s *maliciousTestStore) UpsertMaliciousFinding(_ context.Context, finding *db.MaliciousFinding) error {
@@ -42,7 +44,10 @@ func (s *maliciousTestStore) DeleteMaliciousFinding(_ context.Context, id string
 	return nil
 }
 
-func (s *maliciousTestStore) UpsertFeedSyncStatus(_ context.Context, status *db.FeedSyncStatus) error {
+func (s *maliciousTestStore) UpsertFeedSyncStatus(ctx context.Context, status *db.FeedSyncStatus) error {
+	if s.rejectCanceled && ctx.Err() != nil {
+		return ctx.Err()
+	}
 	if s.statusErr != nil {
 		return s.statusErr
 	}
@@ -85,7 +90,7 @@ func TestSyncerNameDefaultsAndStatusRecording(t *testing.T) {
 	}
 
 	start := time.Now().Add(-time.Second)
-	syncer.recordSyncSuccessWithCommit(context.Background(), start, 250*time.Millisecond, 10, 7, "abc123")
+	syncer.recordSyncSuccessWithCommit(context.Background(), 250*time.Millisecond, 10, 7, "abc123")
 	syncer.recordSyncFailure(context.Background(), start, context.Canceled)
 
 	if len(store.statuses) != 2 {
@@ -97,10 +102,17 @@ func TestSyncerNameDefaultsAndStatusRecording(t *testing.T) {
 	if got := store.statuses[1]; got.LastSyncStatus != "error" || got.LastError == "" {
 		t.Fatalf("failure status = %+v", got)
 	}
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	store.rejectCanceled = true
+	syncer.recordSyncFailure(canceledCtx, start, context.Canceled)
+	if len(store.statuses) != 3 {
+		t.Fatalf("statuses after canceled context = %d, want 3", len(store.statuses))
+	}
 
 	erroringStore := &maliciousTestStore{statusErr: errors.New("status write failed")}
 	erroringSyncer := NewSyncer(erroringStore, nil, t.TempDir())
-	erroringSyncer.recordSyncSuccessWithCommit(context.Background(), start, time.Millisecond, 1, 1, "def456")
+	erroringSyncer.recordSyncSuccessWithCommit(context.Background(), time.Millisecond, 1, 1, "def456")
 	erroringSyncer.recordSyncFailure(context.Background(), start, context.Canceled)
 	if len(erroringStore.statuses) != 0 {
 		t.Fatalf("erroring store recorded statuses = %+v, want none", erroringStore.statuses)
@@ -124,9 +136,9 @@ func TestMapToMaliciousFindingsMapsEverySupportedAffectedPackage(t *testing.T) {
 			{
 				Package:  malPackage{Ecosystem: "npm", Name: "leftpad"},
 				Versions: []string{"1.0.0"},
-				Ranges: []malRange{{Events: []malEvent{
+				Ranges: []malRange{{Type: "SEMVER", Events: []malEvent{
 					{Introduced: "0"},
-					{Introduced: "1.1.0"},
+					{Fixed: "1.2.0"},
 				}}},
 			},
 			{
@@ -154,8 +166,16 @@ func TestMapToMaliciousFindingsMapsEverySupportedAffectedPackage(t *testing.T) {
 	if err := json.Unmarshal(first.Versions, &versions); err != nil {
 		t.Fatalf("versions JSON: %v", err)
 	}
-	if got, want := versions, []string{"1.0.0", "1.1.0"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
-		t.Fatalf("versions = %#v, want %#v", got, want)
+	if got, want := versions, []string{"1.0.0"}; len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("versions = %#v, want explicit versions only %#v", got, want)
+	}
+	var ranges []malRange
+	if err := json.Unmarshal(first.VersionRanges, &ranges); err != nil {
+		t.Fatalf("version ranges JSON: %v", err)
+	}
+	if len(ranges) != 1 || ranges[0].Type != "SEMVER" || len(ranges[0].Events) != 2 ||
+		ranges[0].Events[0].Introduced != "0" || ranges[0].Events[1].Fixed != "1.2.0" {
+		t.Fatalf("version ranges = %#v, want introduced/fixed OSV range preserved", ranges)
 	}
 	var refs []string
 	if err := json.Unmarshal(first.ReferenceURLs, &refs); err != nil {
@@ -356,6 +376,30 @@ func TestWalkEntriesErrorBranches(t *testing.T) {
 	}
 }
 
+func TestWalkEntriesRejectsOversizedEntryJSON(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	entryPath := filepath.Join(root, "npm", "leftpad", "MAL-huge.json")
+	writeFile(t, entryPath, `{"id":"MAL-huge"}`)
+	if err := os.Truncate(entryPath, feed.MaxGitAdvisoryJSONSize+1); err != nil {
+		t.Fatalf("truncate entry: %v", err)
+	}
+
+	store := &maliciousTestStore{}
+	syncer := NewSyncer(store, nil, "")
+	synced, total, err := syncer.walkEntries(context.Background(), store, root, map[string]struct{}{})
+	if err == nil || !strings.Contains(err.Error(), "exceeds maximum advisory JSON size") {
+		t.Fatalf("walkEntries() error = %v, want size-limit error", err)
+	}
+	if synced != 0 || total != 1 {
+		t.Fatalf("synced=%d total=%d, want 0/1", synced, total)
+	}
+	if len(store.findings) != 0 || len(store.deletedIDs) != 0 {
+		t.Fatalf("findings=%+v deleted=%+v, want no writes", store.findings, store.deletedIDs)
+	}
+}
+
 func TestSyncUsesExistingGitCheckoutAndWalksEntries(t *testing.T) {
 	t.Parallel()
 
@@ -403,6 +447,66 @@ func TestSyncUsesExistingGitCheckoutAndWalksEntries(t *testing.T) {
 	}
 	if len(store.findings) != 0 {
 		t.Fatalf("unchanged sync upserted findings = %+v", store.findings)
+	}
+}
+
+func TestSyncFailsClosedWhenFeedRootsAreMissing(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	dataDir := t.TempDir()
+	repoDir := filepath.Join(dataDir, "malicious-packages")
+	initGitRepo(t, repoDir)
+	writeFile(t, filepath.Join(repoDir, "README.md"), "not the OpenSSF feed layout")
+	gitCommitAll(t, repoDir)
+
+	store := &maliciousTestStore{}
+	syncer := NewSyncer(store, slog.New(slog.NewTextHandler(os.Stdout, nil)), dataDir)
+	result, err := syncer.Sync(context.Background(), store)
+	if err == nil || !strings.Contains(err.Error(), "feed roots") {
+		t.Fatalf("Sync() error = %v, want feed root error", err)
+	}
+	if result != nil {
+		t.Fatalf("Sync() result = %+v, want nil on failed feed validation", result)
+	}
+	if store.prunedSource != "" || len(store.prunedIDs) != 0 {
+		t.Fatalf("prune source/ids = %q/%v, want no prune on invalid feed", store.prunedSource, store.prunedIDs)
+	}
+	if len(store.statuses) == 0 || store.statuses[len(store.statuses)-1].LastSyncStatus != "error" {
+		t.Fatalf("statuses = %+v, want error status", store.statuses)
+	}
+}
+
+func TestSyncFailsClosedWhenFeedRootsHaveNoEntries(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	dataDir := t.TempDir()
+	repoDir := filepath.Join(dataDir, "malicious-packages")
+	initGitRepo(t, repoDir)
+	writeFile(t, filepath.Join(repoDir, maliciousDir, "npm", "leftpad", "README.txt"), "not json")
+	gitCommitAll(t, repoDir)
+
+	store := &maliciousTestStore{}
+	syncer := NewSyncer(store, slog.New(slog.NewTextHandler(os.Stdout, nil)), dataDir)
+	result, err := syncer.Sync(context.Background(), store)
+	if err == nil || !strings.Contains(err.Error(), "no entries") {
+		t.Fatalf("Sync() error = %v, want no entries error", err)
+	}
+	if result != nil {
+		t.Fatalf("Sync() result = %+v, want nil on failed feed validation", result)
+	}
+	if store.prunedSource != "" || len(store.prunedIDs) != 0 {
+		t.Fatalf("prune source/ids = %q/%v, want no prune on empty feed", store.prunedSource, store.prunedIDs)
+	}
+	if len(store.statuses) == 0 || store.statuses[len(store.statuses)-1].LastSyncStatus != "error" {
+		t.Fatalf("statuses = %+v, want error status", store.statuses)
 	}
 }
 

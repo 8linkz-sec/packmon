@@ -18,8 +18,10 @@ CREATE TABLE IF NOT EXISTS vulnerabilities_local (
 	severity       TEXT NOT NULL,
 	cvss_score     REAL,
 	epss_score     REAL,
+	epss_percentile REAL,
 	cisa_kev       INTEGER DEFAULT 0,
-	summary        TEXT
+	summary        TEXT,
+	source         TEXT NOT NULL DEFAULT 'local'
 );
 
 CREATE INDEX IF NOT EXISTS idx_vuln_eco_name
@@ -32,11 +34,13 @@ CREATE TABLE IF NOT EXISTS malicious_local (
 	id        TEXT PRIMARY KEY,
 	ecosystem TEXT NOT NULL,
 	name      TEXT NOT NULL,
+	version_ranges TEXT,                  -- JSON string, NULL = all versions when versions is NULL
 	versions  TEXT,                        -- JSON string, NULL = all versions
 	reference_urls TEXT,                   -- JSON string
 	risk_type TEXT NOT NULL,
 	severity  TEXT NOT NULL DEFAULT 'CRITICAL',
-	summary   TEXT
+	summary   TEXT,
+	source    TEXT NOT NULL DEFAULT 'local'
 );
 
 CREATE INDEX IF NOT EXISTS idx_mal_eco_name
@@ -90,10 +94,17 @@ CREATE TABLE IF NOT EXISTS scan_history (
 	id                 INTEGER PRIMARY KEY AUTOINCREMENT,
 	repo_name          TEXT,
 	branch             TEXT,
+	"commit"           TEXT,
 	scanned_at         TEXT NOT NULL,      -- ISO 8601
 	packages_count     INTEGER,
 	findings_count     INTEGER,
 	finding_ids        TEXT,               -- JSON array of finding IDs
 	finding_severities TEXT                -- JSON array of severity strings
 );
+
+CREATE INDEX IF NOT EXISTS idx_scan_history_scanned_at
+	ON scan_history(scanned_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_scan_history_repo_scanned_at
+	ON scan_history(repo_name, scanned_at DESC);
 `

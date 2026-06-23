@@ -6,8 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 func sampleFindings() []domain.Finding {
@@ -78,6 +79,103 @@ func TestBuildReportCleanWhenNoFindings(t *testing.T) {
 	}
 	if len(r.Sections) != 0 {
 		t.Fatalf("sections = %d, want 0", len(r.Sections))
+	}
+}
+
+func TestBuildReportZeroPackagesIsNotClean(t *testing.T) {
+	r := buildReport("my-service", "v0.4.0", domain.SeverityCritical, &domain.ScanResult{
+		Mode: "local", PackagesScanned: 0,
+	})
+	if r.Clean {
+		t.Fatal("Clean = true, want false when zero packages were evaluated")
+	}
+	if len(r.Warnings) != 1 || !strings.Contains(r.Warnings[0], "No packages were evaluated") {
+		t.Fatalf("Warnings = %#v, want zero-package warning", r.Warnings)
+	}
+}
+
+func TestBuildReportScannedAtIncludesUTC(t *testing.T) {
+	r := buildReport("my-service", "v0.4.0", domain.SeverityCritical, &domain.ScanResult{
+		Mode:            "local",
+		PackagesScanned: 50,
+		ScannedAt:       time.Date(2026, 5, 30, 12, 0, 0, 0, time.FixedZone("CEST", 2*60*60)),
+	})
+
+	if r.ScannedAt != "2026-05-30 10:00 UTC" {
+		t.Fatalf("ScannedAt = %q, want explicit UTC timestamp", r.ScannedAt)
+	}
+}
+
+func TestHTMLWriteZeroPackagesIsWarningNotClean(t *testing.T) {
+	var buf bytes.Buffer
+	if err := NewHTMLWriter("dev").Write(&buf, "svc", domain.SeverityCritical, &domain.ScanResult{
+		Mode:            "local",
+		PackagesScanned: 0,
+	}); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	out := buf.String()
+	if strings.Contains(out, "No findings in 0 packages") {
+		t.Fatal("zero-package report must not render a clean all-clear message")
+	}
+	if !strings.Contains(out, "No packages were evaluated") {
+		t.Fatalf("zero-package warning missing from report:\n%s", out)
+	}
+}
+
+func TestHTMLWriteDegradedFeedStatusIsWarningNotClean(t *testing.T) {
+	var buf bytes.Buffer
+	if err := NewHTMLWriter("dev").Write(&buf, "svc", domain.SeverityCritical, &domain.ScanResult{
+		Mode:            "remote",
+		PackagesScanned: 23,
+		FeedStatus:      "degraded",
+	}); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	out := buf.String()
+	if strings.Contains(out, "No findings in 23 packages") {
+		t.Fatal("degraded feed report must not render a clean all-clear message")
+	}
+	if !strings.Contains(out, "Server reports degraded feed status") {
+		t.Fatalf("degraded warning missing from report:\n%s", out)
+	}
+}
+
+func TestHTMLWriteParseErrorsAreWarningNotClean(t *testing.T) {
+	var buf bytes.Buffer
+	if err := NewHTMLWriter("dev").Write(&buf, "svc", domain.SeverityCritical, &domain.ScanResult{
+		Mode:            "local",
+		PackagesScanned: 12,
+		ParseErrors:     []string{"pnpm-lock.yaml: invalid lockfile"},
+	}); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	out := buf.String()
+	if strings.Contains(out, "No findings in 12 packages") {
+		t.Fatal("partial-parse report must not render a clean all-clear message")
+	}
+	if !strings.Contains(out, "Some dependency inventory could not be evaluated") || !strings.Contains(out, "pnpm-lock.yaml: invalid lockfile") {
+		t.Fatalf("parse warning missing from report:\n%s", out)
+	}
+}
+
+func TestHTMLWriteStaleLocalDBIsWarningNotClean(t *testing.T) {
+	age := 1
+	var buf bytes.Buffer
+	if err := NewHTMLWriter("dev").Write(&buf, "svc", domain.SeverityCritical, &domain.ScanResult{
+		Mode:            "local",
+		PackagesScanned: 7,
+		DBAgeDays:       &age,
+		DBStale:         true,
+	}); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	out := buf.String()
+	if strings.Contains(out, "No findings in 7 packages") {
+		t.Fatal("stale local DB report must not render a clean all-clear message")
+	}
+	if !strings.Contains(out, "Local database last synced 1 day ago") {
+		t.Fatalf("stale local DB warning missing from report:\n%s", out)
 	}
 }
 
@@ -205,16 +303,62 @@ func TestHTMLWriteNonHTTPURLNotLinked(t *testing.T) {
 	}
 }
 
+func TestHTMLWriteResponsivePrintAndColorTokenPolicy(t *testing.T) {
+	var buf bytes.Buffer
+	err := NewHTMLWriter("dev").Write(&buf, "svc", domain.SeverityCritical, &domain.ScanResult{
+		Mode: "local", PackagesScanned: 1,
+		Findings: []domain.Finding{{
+			Name:       "github.com/acme/" + strings.Repeat("very-long-module-name-", 6),
+			Version:    strings.Repeat("abcdef0123456789", 4),
+			Ecosystem:  domain.EcosystemGo,
+			Type:       domain.FindingTypeVulnerability,
+			Severity:   domain.SeverityLow,
+			AdvisoryID: "CVE-2026-0001",
+			Title:      "long value wrapping policy",
+			Source:     "osv",
+			Resources:  []domain.ResourceLink{{Label: "long", URL: "https://example.test/" + strings.Repeat("path-segment-", 10)}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{
+		"--sev-low:",
+		"--success:",
+		".pkg{color:",
+		"overflow-wrap:anywhere",
+		".links a{color:",
+		"word-break:break-word",
+		".footer{",
+		"@media (prefers-color-scheme: light)",
+		"@media print",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("HTML CSS missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, ".clean{margin:24px 0;padding:14px 16px;background:#0f2d2a;border:1px solid var(--low);") {
+		t.Fatalf("clean state still uses LOW severity token:\n%s", out)
+	}
+}
+
 func TestHTMLWriteCleanReport(t *testing.T) {
 	var buf bytes.Buffer
 	if err := NewHTMLWriter("dev").Write(&buf, "empty", domain.SeverityCritical, &domain.ScanResult{
-		Mode: "local", PackagesScanned: 12,
+		Mode: "local", PackagesScanned: 1,
 	}); err != nil {
 		t.Fatalf("Write() error = %v", err)
 	}
 	out := buf.String()
-	if !strings.Contains(out, "No findings in 12 packages") {
+	if !strings.Contains(out, "No findings in 1 package") {
 		t.Fatal("clean report missing all-clear message")
+	}
+	if strings.Contains(out, "No findings in 1 packages") {
+		t.Fatalf("clean report still uses plural package for 1:\n%s", out)
+	}
+	if strings.Contains(out, "&#10003;") {
+		t.Fatalf("clean report should not render a standalone checkmark icon:\n%s", out)
 	}
 }
 
@@ -318,8 +462,14 @@ func TestHTMLWriteEmptyModeAndUnknownRendering(t *testing.T) {
 
 	// Empty mode: the meta line must not render a " mode" segment or a doubled
 	// separator; "Report" should be directly followed by the package count.
-	if !strings.Contains(out, "Packmon Security Report &middot; 1 packages") {
+	if !strings.Contains(out, "Packmon Security Report &middot; 1 package") {
 		t.Fatal("empty mode should omit the mode segment from the meta line")
+	}
+	if !strings.Contains(out, "1 finding &middot; 0 blocking") {
+		t.Fatalf("summary badge should use singular finding/blocking labels:\n%s", out)
+	}
+	if strings.Contains(out, "1 findings") || strings.Contains(out, "1 packages") {
+		t.Fatalf("HTML report still uses plural label for singular counts:\n%s", out)
 	}
 	// Unknown-severity finding uses the f-none card class, which must be styled.
 	if !strings.Contains(out, "finding f-none") {
@@ -346,7 +496,7 @@ func TestHTMLHelperRemainingBranches(t *testing.T) {
 		t.Fatalf("formatDurationMs(1500) = %q, want 1.5s", got)
 	}
 
-	age := 3
+	age := 1
 	parts := footerParts("v1.2.3", &domain.ScanResult{
 		DurationMs:  1500,
 		Mode:        "local",
@@ -354,9 +504,9 @@ func TestHTMLHelperRemainingBranches(t *testing.T) {
 		DBStale:     true,
 		FeedStatus:  "healthy",
 		ScanID:      "scan-123",
-		ManualCount: 2,
+		ManualCount: 1,
 	})
-	for _, want := range []string{"Scan 1.5s", "DB synced 3 days ago (stale)", "feeds: healthy", "packmon v1.2.3", "scan_id scan-123", "2 manual advisories"} {
+	for _, want := range []string{"Scan 1.5s", "DB synced 1 day ago (stale)", "feeds: healthy", "packmon v1.2.3", "scan_id scan-123", "1 manual advisory"} {
 		if !containsString(parts, want) {
 			t.Fatalf("footerParts() = %+v, missing %q", parts, want)
 		}

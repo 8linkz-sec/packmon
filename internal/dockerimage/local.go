@@ -5,21 +5,26 @@ import (
 	"encoding/json"
 	"os/exec"
 	"strings"
+	"time"
 )
 
-type CommandRunner interface {
-	Run(ctx context.Context, name string, args ...string) ([]byte, error)
+type ImageInspectRunner interface {
+	Inspect(ctx context.Context, refs []string) ([]byte, error)
 }
 
-type execRunner struct{}
+type execInspectRunner struct{}
 
-func (execRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, name, args...) // #nosec G204 -- production calls this runner with fixed "docker" argv; tests inject alternatives.
+func (execInspectRunner) Inspect(ctx context.Context, refs []string) ([]byte, error) {
+	args := make([]string, 0, len(refs)+2)
+	args = append(args, "image", "inspect")
+	args = append(args, refs...)
+	cmd := exec.CommandContext(ctx, "docker", args...) // #nosec G204 -- fixed docker executable and subcommand; refs are argv-only, no shell is used.
+	cmd.WaitDelay = 2 * time.Second
 	return cmd.Output()
 }
 
 type LocalInspector struct {
-	Runner CommandRunner
+	Runner ImageInspectRunner
 }
 
 func (i LocalInspector) Digests(ctx context.Context, refs []Ref) map[string]string {
@@ -28,9 +33,9 @@ func (i LocalInspector) Digests(ctx context.Context, refs []Ref) map[string]stri
 	}
 	runner := i.Runner
 	if runner == nil {
-		runner = execRunner{}
+		runner = execInspectRunner{}
 	}
-	args := []string{"image", "inspect"}
+	inspectRefs := make([]string, 0, len(refs))
 	refByTag := make(map[string]Ref, len(refs))
 	for _, ref := range refs {
 		if ref.Registry == "" || strings.HasPrefix(ref.Name, "local/") {
@@ -38,12 +43,12 @@ func (i LocalInspector) Digests(ctx context.Context, refs []Ref) map[string]stri
 		}
 		displayRef := ref.Name + ":" + ref.Reference
 		refByTag[displayRef] = ref
-		args = append(args, displayRef)
+		inspectRefs = append(inspectRefs, displayRef)
 	}
-	if len(args) == 2 {
+	if len(inspectRefs) == 0 {
 		return nil
 	}
-	out, err := runner.Run(ctx, "docker", args...)
+	out, err := runner.Inspect(ctx, inspectRefs)
 	if err != nil {
 		return nil
 	}

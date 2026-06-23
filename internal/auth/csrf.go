@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"sync"
 )
 
 const (
@@ -17,6 +18,8 @@ const (
 	csrfTokenBytes = 32
 )
 
+var sessionCSRFInitMu sync.Mutex
+
 // CSRFToken returns the CSRF token for the given session. If no token
 // exists yet, one is generated and stored in the session. The token is
 // stable for the lifetime of the session so that forms rendered at
@@ -25,19 +28,20 @@ func CSRFToken(sess *Session) (string, error) {
 	if sess == nil {
 		return "", fmt.Errorf("auth: csrf: nil session")
 	}
-	sess.csrfMu.Lock()
-	defer sess.csrfMu.Unlock()
+	state := sess.csrfState()
+	state.mu.Lock()
+	defer state.mu.Unlock()
 
-	if sess.csrfToken != "" {
-		return sess.csrfToken, nil
+	if state.token != "" {
+		return state.token, nil
 	}
 
 	b := make([]byte, csrfTokenBytes)
 	if _, err := rand.Read(b); err != nil {
 		return "", fmt.Errorf("auth: csrf: generate token: %w", err)
 	}
-	sess.csrfToken = hex.EncodeToString(b)
-	return sess.csrfToken, nil
+	state.token = hex.EncodeToString(b)
+	return state.token, nil
 }
 
 // ValidateCSRF checks that the form value of _csrf matches the token
@@ -46,9 +50,10 @@ func ValidateCSRF(r *http.Request, sess *Session) bool {
 	if sess == nil {
 		return false
 	}
-	sess.csrfMu.Lock()
-	token := sess.csrfToken
-	sess.csrfMu.Unlock()
+	state := sess.csrfState()
+	state.mu.Lock()
+	token := state.token
+	state.mu.Unlock()
 
 	if token == "" {
 		return false
@@ -58,4 +63,14 @@ func ValidateCSRF(r *http.Request, sess *Session) bool {
 		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(formToken), []byte(token)) == 1
+}
+
+func (s *Session) csrfState() *sessionCSRFState {
+	sessionCSRFInitMu.Lock()
+	defer sessionCSRFInitMu.Unlock()
+
+	if s.csrf == nil {
+		s.csrf = &sessionCSRFState{}
+	}
+	return s.csrf
 }

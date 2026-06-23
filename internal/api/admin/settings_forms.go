@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/8linkz/packmon/internal/auth"
-	"github.com/8linkz/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/auth"
+	"github.com/8linkz-sec/packmon/internal/db"
 )
 
 const maxAdminRateLimit = 100000
@@ -35,6 +35,10 @@ func (h *AdminHandler) HandleSystemSettingsSave(w http.ResponseWriter, r *http.R
 		redirectSettings(w, r, "Invalid block threshold", true)
 		return
 	}
+	if blockThreshold == "NONE" && !acknowledgedSetting(r.PostForm.Get("ack_block_threshold_none")) {
+		redirectSettings(w, r, "Block threshold NONE requires explicit acknowledgement", true)
+		return
+	}
 
 	rateLimitPerMinute, ok := parsePositiveSettingInt(r.PostForm.Get("rate_limit_per_minute"))
 	if !ok {
@@ -48,11 +52,24 @@ func (h *AdminHandler) HandleSystemSettingsSave(w http.ResponseWriter, r *http.R
 		return
 	}
 
+	previous, err := h.store.GetSystemSettings(r.Context())
+	if err != nil {
+		h.logger.Error("admin settings: failed to load previous system settings", "error", err)
+		redirectSettings(w, r, "Failed to load system settings", true)
+		return
+	}
+
 	settings := &db.SystemSettings{
 		BlockThreshold:     blockThreshold,
 		RateLimitPerMinute: rateLimitPerMinute,
 		RateLimitBurst:     rateLimitBurst,
 	}
+
+	if err := h.auditLog(r, "system_settings_save", systemSettingsAuditDetails(previous, settings)); err != nil {
+		redirectSettings(w, r, "Failed to record audit log", true)
+		return
+	}
+
 	if err := h.store.UpsertSystemSettings(r.Context(), settings); err != nil {
 		h.logger.Error("admin settings: failed to save system settings", "error", err)
 		redirectSettings(w, r, "Failed to save system settings", true)
@@ -65,13 +82,26 @@ func (h *AdminHandler) HandleSystemSettingsSave(w http.ResponseWriter, r *http.R
 		h.runtime.Update(blockThreshold, rateLimitPerMinute, rateLimitBurst)
 	}
 
-	h.auditLog(r, "system_settings_save", map[string]string{
-		"block_threshold":       blockThreshold,
-		"rate_limit_per_minute": strconv.Itoa(rateLimitPerMinute),
-		"rate_limit_burst":      strconv.Itoa(rateLimitBurst),
-	})
-
 	redirectSettings(w, r, "System settings saved and applied.", false)
+}
+
+func systemSettingsAuditDetails(previous, next *db.SystemSettings) map[string]string {
+	details := map[string]string{}
+	addSystemSettingsAuditDetails(details, "previous_", previous)
+	addSystemSettingsAuditDetails(details, "new_", next)
+	return details
+}
+
+func addSystemSettingsAuditDetails(details map[string]string, prefix string, settings *db.SystemSettings) {
+	if settings == nil {
+		details[prefix+"block_threshold"] = "unset"
+		details[prefix+"rate_limit_per_minute"] = "unset"
+		details[prefix+"rate_limit_burst"] = "unset"
+		return
+	}
+	details[prefix+"block_threshold"] = settings.BlockThreshold
+	details[prefix+"rate_limit_per_minute"] = strconv.Itoa(settings.RateLimitPerMinute)
+	details[prefix+"rate_limit_burst"] = strconv.Itoa(settings.RateLimitBurst)
 }
 
 func normalizeSystemBlockThreshold(raw string) (string, bool) {
@@ -80,6 +110,15 @@ func normalizeSystemBlockThreshold(raw string) (string, bool) {
 		return normalized, true
 	default:
 		return "", false
+	}
+}
+
+func acknowledgedSetting(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
 	}
 }
 

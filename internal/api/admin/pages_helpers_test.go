@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/8linkz/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/db"
 )
 
 func TestAPIKeyViewAccessorsAndExpiry(t *testing.T) {
@@ -15,9 +15,11 @@ func TestAPIKeyViewAccessorsAndExpiry(t *testing.T) {
 
 	lastUsed := time.Date(2026, 5, 29, 10, 0, 0, 0, time.UTC)
 	expires := time.Now().UTC().Add(-time.Hour)
+	deleted := time.Now().UTC()
 	view := apiKeyView{APIKey: db.APIKey{
 		LastUsedAt: &lastUsed,
 		ExpiresAt:  &expires,
+		DeletedAt:  &deleted,
 	}}
 
 	if !view.DerefLastUsedAt().Equal(lastUsed) {
@@ -28,6 +30,9 @@ func TestAPIKeyViewAccessorsAndExpiry(t *testing.T) {
 	}
 	if !view.IsExpired() {
 		t.Fatal("IsExpired() = false for past expiry")
+	}
+	if !view.IsDeleted() {
+		t.Fatal("IsDeleted() = false for deleted key")
 	}
 
 	empty := apiKeyView{}
@@ -40,25 +45,51 @@ func TestParseAPIKeyExpiresAt(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 5, 30, 12, 0, 0, 0, time.UTC)
-	if got, err := parseAPIKeyExpiresAt("", now); err != nil || got != nil {
-		t.Fatalf("blank expiry = %v, %v", got, err)
+	if got, err := parseAPIKeyExpiresAt("", now); err == nil || !strings.Contains(err.Error(), "required") || got != nil {
+		t.Fatalf("blank expiry = %v, %v; want required error", got, err)
 	}
 
-	for _, raw := range []string{"2026-06-01", "2026-06-01T13:45", "2026-06-01T13:45:00Z"} {
-		got, err := parseAPIKeyExpiresAt(raw, now)
-		if err != nil {
-			t.Fatalf("parseAPIKeyExpiresAt(%q): %v", raw, err)
-		}
-		if got == nil || !got.After(now) {
-			t.Fatalf("parseAPIKeyExpiresAt(%q) = %v, want future time", raw, got)
+	got, err := parseAPIKeyExpiresAt("2026-06-01T13:45:00Z", now)
+	if err != nil {
+		t.Fatalf("parseAPIKeyExpiresAt(RFC3339 UTC): %v", err)
+	}
+	if got == nil || !got.After(now) || got.Location() != time.UTC {
+		t.Fatalf("parseAPIKeyExpiresAt(RFC3339 UTC) = %v, want future UTC time", got)
+	}
+
+	for _, raw := range []string{"2026-06-01", "2026-06-01T13:45", "2026-06-01T13:45:00+02:00"} {
+		if _, err := parseAPIKeyExpiresAt(raw, now); err == nil || !strings.Contains(err.Error(), "RFC3339 UTC") {
+			t.Fatalf("parseAPIKeyExpiresAt(%q) error = %v, want RFC3339 UTC error", raw, err)
 		}
 	}
 
-	if _, err := parseAPIKeyExpiresAt("2026-05-01", now); err == nil || !strings.Contains(err.Error(), "future") {
+	if _, err := parseAPIKeyExpiresAt("2026-05-01T00:00:00Z", now); err == nil || !strings.Contains(err.Error(), "future") {
 		t.Fatalf("past expiry error = %v", err)
+	}
+	if _, err := parseAPIKeyExpiresAt("2026-09-15T00:00:00Z", now); err == nil || !strings.Contains(err.Error(), "90 days") {
+		t.Fatalf("too-far expiry error = %v", err)
 	}
 	if _, err := parseAPIKeyExpiresAt("tomorrow", now); err == nil || !strings.Contains(err.Error(), "invalid") {
 		t.Fatalf("invalid expiry error = %v", err)
+	}
+}
+
+func TestNormalizeAPIKeyName(t *testing.T) {
+	t.Parallel()
+
+	got, err := normalizeAPIKeyName("  ci-pipeline  ")
+	if err != nil {
+		t.Fatalf("normalizeAPIKeyName(valid) error = %v", err)
+	}
+	if got != "ci-pipeline" {
+		t.Fatalf("normalizeAPIKeyName(valid) = %q, want trimmed name", got)
+	}
+
+	if _, err := normalizeAPIKeyName(""); err == nil || !strings.Contains(err.Error(), "required") {
+		t.Fatalf("blank name error = %v, want required error", err)
+	}
+	if _, err := normalizeAPIKeyName(strings.Repeat("a", maxAPIKeyNameLength+1)); err == nil || !strings.Contains(err.Error(), "128 characters") {
+		t.Fatalf("long name error = %v, want max length error", err)
 	}
 }
 
@@ -68,7 +99,7 @@ func TestManualAdvisoryHelpers(t *testing.T) {
 	if got, ok := normalizeAdvisoryFindingType(" vulnerability "); !ok || got != "vulnerability" {
 		t.Fatalf("normalizeAdvisoryFindingType(vulnerability) = %q, %v", got, ok)
 	}
-	if got, ok := normalizeAdvisoryFindingType(""); !ok || got != "malicious" {
+	if got, ok := normalizeAdvisoryFindingType(""); !ok || got != "vulnerability" {
 		t.Fatalf("normalizeAdvisoryFindingType(blank) = %q, %v", got, ok)
 	}
 	if got, ok := normalizeAdvisoryFindingType("malicious"); !ok || got != "malicious" {

@@ -7,7 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 func TestApplySyncReputationRowsAndTombstones(t *testing.T) {
@@ -34,13 +35,20 @@ func TestApplySyncReputationRowsAndTombstones(t *testing.T) {
 			},
 		},
 	}
-	if err := applySync(ctx, store, false, resp); err != nil {
+	if _, err := applySync(ctx, store, false, resp); err != nil {
 		t.Fatalf("applySync() error = %v", err)
 	}
 
 	findings, err := store.FindMalicious(ctx, "npm", "left-pad", "1.3.0")
 	if err != nil {
 		t.Fatalf("FindMalicious() error = %v", err)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("FindMalicious() = %+v, want no reputation findings on malicious path", findings)
+	}
+	findings, err = store.FindReputationFindings(ctx, "npm", "left-pad", db.ReputationSourceReversingLabs)
+	if err != nil {
+		t.Fatalf("FindReputationFindings() error = %v", err)
 	}
 	if len(findings) != 1 {
 		t.Fatalf("findings = %d, want 1", len(findings))
@@ -66,20 +74,20 @@ func TestApplySyncReputationRowsAndTombstones(t *testing.T) {
 			},
 		},
 	}
-	if err := applySync(ctx, store, false, tombstone); err != nil {
+	if _, err := applySync(ctx, store, false, tombstone); err != nil {
 		t.Fatalf("applySync(tombstone) error = %v", err)
 	}
 
-	findings, err = store.FindMalicious(ctx, "npm", "left-pad", "1.3.0")
+	findings, err = store.FindReputationFindings(ctx, "npm", "left-pad", db.ReputationSourceReversingLabs)
 	if err != nil {
-		t.Fatalf("FindMalicious() after tombstone error = %v", err)
+		t.Fatalf("FindReputationFindings() after tombstone error = %v", err)
 	}
 	if len(findings) != 0 {
 		t.Fatalf("findings after tombstone = %d, want 0", len(findings))
 	}
 }
 
-func TestFindReputationSkipsHistoricalRiskRows(t *testing.T) {
+func TestFindReputationIncludesHistoricalRiskRows(t *testing.T) {
 	t.Parallel()
 
 	store, err := New(t.TempDir() + "/packmon.db")
@@ -100,7 +108,17 @@ func TestFindReputationSkipsHistoricalRiskRows(t *testing.T) {
 		t.Fatalf("FindMalicious() error = %v", err)
 	}
 	if len(findings) != 0 {
-		t.Fatalf("historical risk findings = %+v, want none", findings)
+		t.Fatalf("FindMalicious() = %+v, want no reputation findings on malicious path", findings)
+	}
+	findings, err = store.FindReputationFindings(ctx, "pypi", "pillow", db.ReputationSourceReversingLabs)
+	if err != nil {
+		t.Fatalf("FindReputationFindings() error = %v", err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("historical risk findings = %+v, want one finding", findings)
+	}
+	if findings[0].Type != domain.FindingTypeSupplyChainRisk || findings[0].RiskType != "malware_history" {
+		t.Fatalf("historical risk finding = %+v, want malware_history supply-chain risk", findings[0])
 	}
 }
 
@@ -116,11 +134,18 @@ func TestSyncPaginatesWithOffsetAndStableSnapshot(t *testing.T) {
 	type requestState struct {
 		offset                string
 		vulnerabilitiesOffset string
+		vulnerabilitiesCursor string
+		vulnerabilitiesDone   string
 		maliciousOffset       string
+		maliciousDone         string
 		reputationOffset      string
+		reputationCursor      string
+		reputationDone        string
 		lifecycleOffset       string
+		lifecycleDone         string
 		limit                 string
 		snapshot              string
+		snapshotXID           string
 		since                 string
 	}
 
@@ -130,16 +155,24 @@ func TestSyncPaginatesWithOffsetAndStableSnapshot(t *testing.T) {
 		requests = append(requests, requestState{
 			offset:                q.Get("offset"),
 			vulnerabilitiesOffset: q.Get("vulnerabilities_offset"),
+			vulnerabilitiesCursor: q.Get("vulnerabilities_cursor"),
+			vulnerabilitiesDone:   q.Get("vulnerabilities_done"),
 			maliciousOffset:       q.Get("malicious_offset"),
+			maliciousDone:         q.Get("malicious_done"),
 			reputationOffset:      q.Get("reputation_offset"),
+			reputationCursor:      q.Get("reputation_cursor"),
+			reputationDone:        q.Get("reputation_done"),
 			lifecycleOffset:       q.Get("lifecycle_offset"),
+			lifecycleDone:         q.Get("lifecycle_done"),
 			limit:                 q.Get("limit"),
 			snapshot:              q.Get("snapshot"),
+			snapshotXID:           q.Get("snapshot_xid"),
 			since:                 q.Get("since"),
 		})
 
 		resp := syncResponse{
-			SyncedAt: "2026-05-30T10:00:00Z",
+			SyncedAt:  "2026-05-30T10:00:00Z",
+			SyncedXID: 700,
 			Reputation: []syncReputation{
 				{
 					ID:        "reversinglabs:npm/left-pad@1.3.0",
@@ -156,7 +189,10 @@ func TestSyncPaginatesWithOffsetAndStableSnapshot(t *testing.T) {
 		}
 		if len(requests) == 1 {
 			resp.NextCursor = &syncCursor{
-				Reputation: 1,
+				VulnerabilitiesDone: true,
+				MaliciousDone:       true,
+				ReputationCursor:    "after-left-pad",
+				LifecycleDone:       true,
 			}
 		}
 		if len(requests) == 2 {
@@ -189,20 +225,33 @@ func TestSyncPaginatesWithOffsetAndStableSnapshot(t *testing.T) {
 	if requests[0].limit != "1000" || requests[0].offset != "" || requests[0].snapshot != "" || requests[0].since != "" {
 		t.Fatalf("first request = %+v, want limit only", requests[0])
 	}
-	if requests[1].limit != "1000" || requests[1].offset != "" || requests[1].reputationOffset != "1" || requests[1].snapshot != "2026-05-30T10:00:00Z" || requests[1].since != "" {
-		t.Fatalf("second request = %+v, want reputation cursor and stable snapshot", requests[1])
+	if requests[1].limit != "1000" ||
+		requests[1].offset != "" ||
+		requests[1].reputationOffset != "" ||
+		requests[1].reputationCursor != "after-left-pad" ||
+		requests[1].vulnerabilitiesDone != "true" ||
+		requests[1].maliciousDone != "true" ||
+		requests[1].lifecycleDone != "true" ||
+		requests[1].snapshot != "2026-05-30T10:00:00Z" ||
+		requests[1].snapshotXID != "700" ||
+		requests[1].since != "" {
+		t.Fatalf("second request = %+v, want reputation keyset cursor, done markers, stable snapshot/xid", requests[1])
 	}
 
 	for _, pkg := range []string{"left-pad", "other"} {
-		findings, err := store.FindMalicious(context.Background(), "npm", pkg, map[string]string{
-			"left-pad": "1.3.0",
-			"other":    "2.0.0",
-		}[pkg])
+		findings, err := store.FindReputationFindingsBatch(context.Background(), []db.PackageQuery{{
+			Ecosystem: "npm",
+			Name:      pkg,
+			Version: map[string]string{
+				"left-pad": "1.3.0",
+				"other":    "2.0.0",
+			}[pkg],
+		}}, db.ReputationSourceReversingLabs)
 		if err != nil {
-			t.Fatalf("FindMalicious(%s) error = %v", pkg, err)
+			t.Fatalf("FindReputationFindingsBatch(%s) error = %v", pkg, err)
 		}
 		if len(findings) != 1 {
-			t.Fatalf("FindMalicious(%s) findings = %d, want 1", pkg, len(findings))
+			t.Fatalf("FindReputationFindingsBatch(%s) findings = %d, want 1", pkg, len(findings))
 		}
 	}
 

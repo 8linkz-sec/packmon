@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 func TestMavenParser_CanParse(t *testing.T) {
@@ -236,6 +236,28 @@ func TestMavenParser_Parse(t *testing.T) {
 </project>`,
 			wantCount: 1,
 			wantPkgs:  map[string]string{"com.google.guava:guava": "33.0.0-jre"},
+		},
+		{
+			name: "case-distinct coordinates are preserved",
+			input: `<project>
+  <dependencies>
+    <dependency>
+      <groupId>com.Example</groupId>
+      <artifactId>Widget</artifactId>
+      <version>1.2.3</version>
+    </dependency>
+    <dependency>
+      <groupId>com.example</groupId>
+      <artifactId>widget</artifactId>
+      <version>1.2.3</version>
+    </dependency>
+  </dependencies>
+</project>`,
+			wantCount: 2,
+			wantPkgs: map[string]string{
+				"com.Example:Widget": "1.2.3",
+				"com.example:widget": "1.2.3",
+			},
 		},
 	}
 

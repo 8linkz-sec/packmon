@@ -35,16 +35,17 @@ func (e Ecosystem) Valid() bool {
 
 // Package represents a dependency found in a lock file.
 type Package struct {
-	Name      string          `json:"name"`
-	Version   string          `json:"version"`
-	Ecosystem Ecosystem       `json:"ecosystem"`
-	Dev       bool            `json:"dev,omitempty"`
-	Direct    bool            `json:"direct,omitempty"`
-	Indirect  bool            `json:"indirect,omitempty"`
-	Optional  bool            `json:"optional,omitempty"`
-	Peer      bool            `json:"peer,omitempty"`
-	Via       []string        `json:"via,omitempty"`
-	Parents   []PackageParent `json:"parents,omitempty"`
+	Name       string          `json:"name"`
+	Version    string          `json:"version"`
+	Ecosystem  Ecosystem       `json:"ecosystem"`
+	Dev        bool            `json:"dev,omitempty"`
+	Direct     bool            `json:"direct,omitempty"`
+	Indirect   bool            `json:"indirect,omitempty"`
+	Optional   bool            `json:"optional,omitempty"`
+	Peer       bool            `json:"peer,omitempty"`
+	Via        []string        `json:"via,omitempty"`
+	Parents    []PackageParent `json:"parents,omitempty"`
+	SourceRefs []string        `json:"-"`
 }
 
 // PackageParent identifies an immediate dependency parent for graph-aware
@@ -71,18 +72,25 @@ type ResourceLink struct {
 	URL   string `json:"url"`
 }
 
+// FindingLocation identifies a local input artifact that produced a finding.
+// It is intentionally not serialized in the public scan-result JSON contract.
+type FindingLocation struct {
+	URI string
+}
+
 // Finding represents a security finding for a package.
 type Finding struct {
-	Name         string         `json:"name"`
-	Version      string         `json:"version"`
-	Ecosystem    Ecosystem      `json:"ecosystem"`
-	Type         FindingType    `json:"type"`
-	Severity     Severity       `json:"severity"`
-	AdvisoryID   string         `json:"advisory_id,omitempty"`
-	Title        string         `json:"title"`
-	URL          string         `json:"url,omitempty"`
-	Resources    []ResourceLink `json:"resources,omitempty"`
-	FixedVersion string         `json:"fixed_version,omitempty"`
-	RiskType     string         `json:"risk_type,omitempty"`
-	Source       string         `json:"source"`
+	Name         string            `json:"name"`
+	Version      string            `json:"version"`
+	Ecosystem    Ecosystem         `json:"ecosystem"`
+	Type         FindingType       `json:"type"`
+	Severity     Severity          `json:"severity"`
+	AdvisoryID   string            `json:"advisory_id,omitempty"`
+	Title        string            `json:"title"`
+	URL          string            `json:"url,omitempty"`
+	Resources    []ResourceLink    `json:"resources,omitempty"`
+	FixedVersion string            `json:"fixed_version,omitempty"`
+	RiskType     string            `json:"risk_type,omitempty"`
+	Source       string            `json:"source"`
+	Locations    []FindingLocation `json:"-"`
 }

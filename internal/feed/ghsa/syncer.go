@@ -7,7 +7,9 @@ package ghsa
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path"
@@ -15,8 +17,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/8linkz/packmon/internal/db"
-	"github.com/8linkz/packmon/internal/feed"
+	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/feed"
 )
 
 const (
@@ -98,7 +100,7 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 	status, err := store.GetFeedSyncStatus(ctx, FeedName)
 	if err != nil {
 		s.logger.Warn("failed to get feed sync status, proceeding with full sync",
-			slog.String("error", err.Error()),
+			slog.String("error", feed.SafeDiagnosticError(err)),
 		)
 	}
 	if status != nil && status.LastCommitHash == commitHash && status.LastSyncStatus == "success" {
@@ -108,7 +110,7 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 		s.repairAffectedPackages(ctx, store)
 		// Still record a successful status to update the timestamp.
 		dur := time.Since(start)
-		s.recordSyncSuccessWithCommit(ctx, start, dur, status.EntriesTotal, 0, commitHash)
+		s.recordSyncSuccessWithCommit(ctx, dur, status.EntriesTotal, 0, commitHash)
 		return &feed.SyncResult{
 			EntriesSynced: 0,
 			EntriesTotal:  status.EntriesTotal,
@@ -149,7 +151,7 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 		slog.String("duration", duration.String()),
 	)
 
-	s.recordSyncSuccessWithCommit(ctx, start, duration, total, synced, commitHash)
+	s.recordSyncSuccessWithCommit(ctx, duration, total, synced, commitHash)
 	return &feed.SyncResult{
 		EntriesSynced: synced,
 		EntriesTotal:  total,
@@ -168,6 +170,7 @@ func (s *Syncer) processChangedFiles(ctx context.Context, store db.Store, repoDi
 		_ = repoRoot.Close()
 	}()
 
+	entryErrors := 0
 	for _, relPath := range changedFiles {
 		if ctx.Err() != nil {
 			return synced, total, ctx.Err()
@@ -183,17 +186,25 @@ func (s *Syncer) processChangedFiles(ctx context.Context, store db.Store, repoDi
 		}
 		total++
 
-		data, readErr := repoRoot.ReadFile(cleanRelPath)
+		data, readErr := feed.ReadRootFileLimited(repoRoot, cleanRelPath, feed.MaxGitAdvisoryJSONSize)
 		if readErr != nil {
+			if !errors.Is(readErr, fs.ErrNotExist) {
+				s.logger.Warn("failed to read changed advisory file",
+					slog.String("file", cleanRelPath),
+					slog.String("error", feed.SafeDiagnosticError(readErr)),
+				)
+				entryErrors++
+				continue
+			}
 			advisoryID := strings.TrimSuffix(path.Base(cleanRelPath), ".json")
 			if advisoryID == "" {
 				return synced, total, fmt.Errorf("derive deleted advisory ID from %s", cleanRelPath)
 			}
-			if deleteErr := store.DeleteVulnerability(ctx, advisoryID); deleteErr != nil {
+			if deleteErr := db.DeleteVulnerabilityForSource(ctx, store, advisoryID, "ghsa"); deleteErr != nil {
 				s.logger.Warn("failed to delete removed advisory",
 					slog.String("id", advisoryID),
 					slog.String("file", cleanRelPath),
-					slog.String("error", deleteErr.Error()),
+					slog.String("error", feed.SafeDiagnosticError(deleteErr)),
 				)
 				return synced, total, fmt.Errorf("delete removed advisory %s: %w", advisoryID, deleteErr)
 			}
@@ -209,13 +220,15 @@ func (s *Syncer) processChangedFiles(ctx context.Context, store db.Store, repoDi
 		if parseErr := json.Unmarshal(data, &advisory); parseErr != nil {
 			s.logger.Warn("failed to parse advisory JSON",
 				slog.String("file", cleanRelPath),
-				slog.String("error", parseErr.Error()),
+				slog.String("error", feed.SafeDiagnosticError(parseErr)),
 			)
+			entryErrors++
 			continue
 		}
 
 		if advisory.ID == "" {
 			s.logger.Warn("advisory has no ID, skipping", slog.String("file", cleanRelPath))
+			entryErrors++
 			continue
 		}
 
@@ -223,13 +236,17 @@ func (s *Syncer) processChangedFiles(ctx context.Context, store db.Store, repoDi
 		if upsertErr := store.UpsertVulnerability(ctx, vuln); upsertErr != nil {
 			s.logger.Warn("failed to upsert advisory",
 				slog.String("id", advisory.ID),
-				slog.String("error", upsertErr.Error()),
+				slog.String("error", feed.SafeDiagnosticError(upsertErr)),
 			)
+			entryErrors++
 			continue
 		}
 		synced++
 	}
 
+	if entryErrors > 0 {
+		return synced, total, fmt.Errorf("%d GHSA advisory import errors", entryErrors)
+	}
 	return synced, total, nil
 }
 
@@ -244,10 +261,12 @@ func (s *Syncer) walkAdvisories(ctx context.Context, store db.Store, root string
 		_ = rootDir.Close()
 	}()
 
+	entryErrors := 0
 	err = filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
-			s.logger.Warn("walk error", slog.String("file", filepath.Base(path)), slog.String("error", walkErr.Error()))
-			return nil // continue walking
+			s.logger.Warn("walk error", slog.String("file", filepath.Base(path)), slog.String("error", feed.SafeDiagnosticError(walkErr)))
+			entryErrors++
+			return nil
 		}
 
 		if ctx.Err() != nil {
@@ -268,17 +287,19 @@ func (s *Syncer) walkAdvisories(ctx context.Context, store db.Store, root string
 		if relErr != nil {
 			s.logger.Warn("failed to resolve advisory path",
 				slog.String("file", d.Name()),
-				slog.String("error", relErr.Error()),
+				slog.String("error", feed.SafeDiagnosticError(relErr)),
 			)
+			entryErrors++
 			return nil
 		}
 
-		data, readErr := rootDir.ReadFile(relativePath)
+		data, readErr := feed.ReadRootFileLimited(rootDir, relativePath, feed.MaxGitAdvisoryJSONSize)
 		if readErr != nil {
 			s.logger.Warn("failed to read advisory file",
 				slog.String("file", d.Name()),
-				slog.String("error", readErr.Error()),
+				slog.String("error", feed.SafeDiagnosticError(readErr)),
 			)
+			entryErrors++
 			return nil
 		}
 
@@ -286,13 +307,15 @@ func (s *Syncer) walkAdvisories(ctx context.Context, store db.Store, root string
 		if parseErr := json.Unmarshal(data, &advisory); parseErr != nil {
 			s.logger.Warn("failed to parse advisory JSON",
 				slog.String("file", d.Name()),
-				slog.String("error", parseErr.Error()),
+				slog.String("error", feed.SafeDiagnosticError(parseErr)),
 			)
+			entryErrors++
 			return nil
 		}
 
 		if advisory.ID == "" {
 			s.logger.Warn("advisory has no ID, skipping", slog.String("file", d.Name()))
+			entryErrors++
 			return nil
 		}
 
@@ -300,23 +323,29 @@ func (s *Syncer) walkAdvisories(ctx context.Context, store db.Store, root string
 		if upsertErr := store.UpsertVulnerability(ctx, vuln); upsertErr != nil {
 			s.logger.Warn("failed to upsert advisory",
 				slog.String("id", advisory.ID),
-				slog.String("error", upsertErr.Error()),
+				slog.String("error", feed.SafeDiagnosticError(upsertErr)),
 			)
+			entryErrors++
 			return nil
 		}
 		synced++
 
 		return nil
 	})
-
-	return synced, total, err
+	if err != nil {
+		return synced, total, err
+	}
+	if entryErrors > 0 {
+		return synced, total, fmt.Errorf("%d GHSA advisory import errors", entryErrors)
+	}
+	return synced, total, nil
 }
 
 // recordSyncSuccessWithCommit persists a successful sync status including
 // the git commit hash for delta detection.
-func (s *Syncer) recordSyncSuccessWithCommit(ctx context.Context, start time.Time, dur time.Duration, total, synced int, commitHash string) {
+func (s *Syncer) recordSyncSuccessWithCommit(ctx context.Context, dur time.Duration, total, synced int, commitHash string) {
 	now := time.Now()
-	err := s.store.UpsertFeedSyncStatus(ctx, &db.FeedSyncStatus{
+	err := feed.UpsertFeedSyncStatusBounded(s.store, &db.FeedSyncStatus{
 		FeedName:         FeedName,
 		LastSyncAt:       &now,
 		LastSyncDuration: &dur,
@@ -328,22 +357,24 @@ func (s *Syncer) recordSyncSuccessWithCommit(ctx context.Context, start time.Tim
 	if err != nil {
 		s.logger.Warn("failed to record sync status", "error", err)
 	}
+	_ = ctx
 }
 
 // recordSyncFailure persists a failed sync status.
 func (s *Syncer) recordSyncFailure(ctx context.Context, start time.Time, syncErr error) {
 	dur := time.Since(start)
 	now := time.Now()
-	err := s.store.UpsertFeedSyncStatus(ctx, &db.FeedSyncStatus{
+	err := feed.UpsertFeedSyncStatusBounded(s.store, &db.FeedSyncStatus{
 		FeedName:         FeedName,
 		LastSyncAt:       &now,
 		LastSyncDuration: &dur,
 		LastSyncStatus:   "error",
-		LastError:        syncErr.Error(),
+		LastError:        feed.SafeDiagnosticError(syncErr),
 	})
 	if err != nil {
 		s.logger.Warn("failed to record sync failure", "error", err)
 	}
+	_ = ctx
 }
 
 func (s *Syncer) repairAffectedPackages(ctx context.Context, store db.Store) int {
@@ -355,7 +386,7 @@ func (s *Syncer) repairAffectedPackages(ctx context.Context, store db.Store) int
 	repaired, err := repairer.RepairGHSAAffectedPackages(ctx)
 	if err != nil {
 		s.logger.Warn("failed to repair GHSA affected packages from stored raw JSON",
-			slog.String("error", err.Error()),
+			slog.String("error", feed.SafeDiagnosticError(err)),
 		)
 		return 0
 	}

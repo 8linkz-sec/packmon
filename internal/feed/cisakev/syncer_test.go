@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/8linkz/packmon/internal/db"
-	"github.com/8linkz/packmon/internal/feed"
+	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/feed"
 )
 
 // -- Store stub ---------------------------------------------------------------
@@ -21,13 +21,37 @@ type kevStoreStub struct {
 	db.Store
 	setCISAKEVIDs    []string
 	clearCISAKEVKeep []string
+	setCalled        bool
+	clearCalled      bool
 	setUpdated       int
 	clearCleared     int
 	setErr           error
 	clearErr         error
 }
 
+type kevReplaceStoreStub struct {
+	kevStoreStub
+	replaceCalled  bool
+	replaceCVEIDs  []string
+	replaceUpdated int
+	replaceCleared int
+	replaceErr     error
+}
+
+func (s *kevReplaceStoreStub) ReplaceCISAKEV(_ context.Context, cveIDs []string) (int, int, error) {
+	s.replaceCalled = true
+	s.replaceCVEIDs = cveIDs
+	if s.replaceErr != nil {
+		return 0, 0, s.replaceErr
+	}
+	if s.replaceUpdated == 0 {
+		s.replaceUpdated = len(cveIDs)
+	}
+	return s.replaceUpdated, s.replaceCleared, nil
+}
+
 func (s *kevStoreStub) SetCISAKEV(_ context.Context, cveIDs []string) (int, error) {
+	s.setCalled = true
 	s.setCISAKEVIDs = cveIDs
 	if s.setErr != nil {
 		return 0, s.setErr
@@ -37,6 +61,7 @@ func (s *kevStoreStub) SetCISAKEV(_ context.Context, cveIDs []string) (int, erro
 }
 
 func (s *kevStoreStub) ClearCISAKEV(_ context.Context, keepIDs []string) (int, error) {
+	s.clearCalled = true
 	s.clearCISAKEVKeep = keepIDs
 	if s.clearErr != nil {
 		return 0, s.clearErr
@@ -125,50 +150,107 @@ func TestSync_ParsesKEVCatalog(t *testing.T) {
 	}
 }
 
-func TestSync_HandlesEmptyCatalog(t *testing.T) {
+func TestSync_UsesAtomicReplacementWhenAvailable(t *testing.T) {
 	t.Parallel()
 
-	catalogPayload := catalog{
-		Title:           "CISA KEV",
-		CatalogVersion:  "2026.04.03",
-		Count:           0,
-		Vulnerabilities: []catalogVulnEntry{},
-	}
-	catalogJSON, err := json.Marshal(catalogPayload)
+	catalogJSON, err := json.Marshal(catalog{
+		CatalogVersion: "2026.04.03",
+		Count:          1,
+		Vulnerabilities: []catalogVulnEntry{
+			{CVEID: "CVE-2026-0001"},
+		},
+	})
 	if err != nil {
 		t.Fatalf("marshal catalog: %v", err)
 	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(catalogJSON)
 	}))
 	defer srv.Close()
 
-	store := &kevStoreStub{}
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-
-	syncer := NewSyncer(logger,
+	store := &kevReplaceStoreStub{replaceCleared: 2}
+	syncer := NewSyncer(discardLogger(),
 		WithCatalogURL(srv.URL),
 		WithHTTPClient(srv.Client()),
 	)
 
 	result, err := syncer.Sync(context.Background(), store)
 	if err != nil {
-		t.Fatalf("Sync() error = %v, want nil", err)
+		t.Fatalf("Sync() error = %v", err)
 	}
-	if result == nil {
-		t.Fatal("Sync() result = nil, want non-nil")
+	if result.EntriesSynced != 1 || result.EntriesTotal != 1 {
+		t.Fatalf("Sync() result = %+v, want one updated of one total", result)
 	}
-	if result.EntriesTotal != 0 {
-		t.Errorf("EntriesTotal = %d, want 0", result.EntriesTotal)
+	if !store.replaceCalled || len(store.replaceCVEIDs) != 1 || store.replaceCVEIDs[0] != "CVE-2026-0001" {
+		t.Fatalf("ReplaceCISAKEV calls = called %v ids %+v", store.replaceCalled, store.replaceCVEIDs)
 	}
-	if result.EntriesSynced != 0 {
-		t.Errorf("EntriesSynced = %d, want 0", result.EntriesSynced)
+	if store.setCalled || store.clearCalled {
+		t.Fatalf("separate KEV mutations called despite replacement path: set=%v clear=%v", store.setCalled, store.clearCalled)
 	}
-	if len(store.setCISAKEVIDs) != 0 {
-		t.Errorf("SetCISAKEV called with %d IDs, want 0", len(store.setCISAKEVIDs))
+}
+
+func TestSync_RejectsInvalidOrEmptyCatalogWithoutMutating(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "missing vulnerabilities",
+			body: `{"error":"rate limited"}`,
+		},
+		{
+			name: "empty vulnerabilities",
+			body: `{"title":"CISA KEV","catalogVersion":"2026.04.03","dateReleased":"2026-04-03","count":0,"vulnerabilities":[]}`,
+		},
+		{
+			name: "count mismatch",
+			body: `{"title":"CISA KEV","catalogVersion":"2026.04.03","dateReleased":"2026-04-03","count":2,"vulnerabilities":[{"cveID":"CVE-2026-0001"}]}`,
+		},
+		{
+			name: "invalid CVE ID",
+			body: `{"title":"CISA KEV","catalogVersion":"2026.04.03","dateReleased":"2026-04-03","count":1,"vulnerabilities":[{"cveID":"not-a-cve"}]}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer srv.Close()
+
+			store := &kevStoreStub{}
+			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+			syncer := NewSyncer(logger,
+				WithCatalogURL(srv.URL),
+				WithHTTPClient(srv.Client()),
+			)
+
+			result, err := syncer.Sync(context.Background(), store)
+			if err == nil {
+				t.Fatal("Sync() error = nil, want invalid catalog error")
+			}
+			if result != nil {
+				t.Fatalf("Sync() result = %+v, want nil", result)
+			}
+			if store.setCalled || store.clearCalled {
+				t.Fatalf("store mutated for invalid catalog: set=%v clear=%v setIDs=%+v clearKeep=%+v",
+					store.setCalled,
+					store.clearCalled,
+					store.setCISAKEVIDs,
+					store.clearCISAKEVKeep,
+				)
+			}
+		})
 	}
 }
 
@@ -202,6 +284,7 @@ func TestSync_PropagatesStoreErrors(t *testing.T) {
 
 	catalogJSON, err := json.Marshal(catalog{
 		CatalogVersion: "2026.04.03",
+		Count:          1,
 		Vulnerabilities: []catalogVulnEntry{
 			{CVEID: "CVE-2026-0001"},
 		},
@@ -278,7 +361,7 @@ func TestDownloadCatalog_ErrorBranches(t *testing.T) {
 	}
 }
 
-func TestSync_SkipsEmptyCVEIDs(t *testing.T) {
+func TestSync_RejectsEmptyCVEIDsWithoutMutating(t *testing.T) {
 	t.Parallel()
 
 	catalogPayload := catalog{
@@ -308,15 +391,14 @@ func TestSync_SkipsEmptyCVEIDs(t *testing.T) {
 	)
 
 	result, err := syncer.Sync(context.Background(), store)
-	if err != nil {
-		t.Fatalf("Sync() error = %v", err)
+	if err == nil {
+		t.Fatal("Sync() error = nil, want invalid catalog error")
 	}
-	// Only 2 non-empty CVE IDs should be passed to the store.
-	if result.EntriesTotal != 2 {
-		t.Errorf("EntriesTotal = %d, want 2", result.EntriesTotal)
+	if result != nil {
+		t.Fatalf("Sync() result = %+v, want nil", result)
 	}
-	if len(store.setCISAKEVIDs) != 2 {
-		t.Errorf("SetCISAKEV called with %d IDs, want 2", len(store.setCISAKEVIDs))
+	if store.setCalled || store.clearCalled {
+		t.Fatalf("store mutated for invalid catalog: set=%v clear=%v", store.setCalled, store.clearCalled)
 	}
 }
 

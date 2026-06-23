@@ -3,43 +3,40 @@ package main
 import (
 	"context"
 	"log/slog"
+	"time"
 )
 
-type ghsaAffectedPackageRepairer interface {
-	RepairGHSAAffectedPackages(ctx context.Context) (int, error)
+type caseInsensitivePackageNameRepairer interface {
+	RepairCaseInsensitivePackageNames(ctx context.Context) (int, error)
 }
 
-type packetStormReferenceCleaner interface {
-	RemovePacketStormReferences(ctx context.Context) (int, error)
-}
+var startupRepairTimeout = 30 * time.Second
 
 func runStartupRepairs(ctx context.Context, store any, logger *slog.Logger) {
-	if repairer, ok := store.(ghsaAffectedPackageRepairer); ok {
-		repaired, err := repairer.RepairGHSAAffectedPackages(ctx)
+	runStartupRepairsWithTimeout(ctx, store, logger, startupRepairTimeout)
+}
+
+func runStartupRepairsWithTimeout(ctx context.Context, store any, logger *slog.Logger, timeout time.Duration) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if timeout <= 0 {
+		timeout = startupRepairTimeout
+	}
+
+	if repairer, ok := store.(caseInsensitivePackageNameRepairer); ok {
+		repairCtx, cancel := context.WithTimeout(ctx, timeout)
+		repaired, err := repairer.RepairCaseInsensitivePackageNames(repairCtx)
+		cancel()
 		if err != nil {
 			if logger != nil {
-				logger.Warn("startup repair: failed to backfill GHSA affected packages",
+				logger.Warn("startup repair: failed to normalize package names",
 					slog.String("error", err.Error()),
 				)
 			}
 		} else if repaired > 0 && logger != nil {
-			logger.Info("startup repair: backfilled GHSA affected packages",
+			logger.Info("startup repair: normalized package names",
 				slog.Int("repaired", repaired),
-			)
-		}
-	}
-
-	if cleaner, ok := store.(packetStormReferenceCleaner); ok {
-		removed, err := cleaner.RemovePacketStormReferences(ctx)
-		if err != nil {
-			if logger != nil {
-				logger.Warn("startup cleanup: failed to remove Packet Storm references",
-					slog.String("error", err.Error()),
-				)
-			}
-		} else if removed > 0 && logger != nil {
-			logger.Info("startup cleanup: removed Packet Storm references",
-				slog.Int("removed", removed),
 			)
 		}
 	}

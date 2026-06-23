@@ -1,3 +1,5 @@
+//go:build integration
+
 package postgres
 
 import (
@@ -6,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/8linkz/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/db"
 )
 
 func TestPostgresStoreClosedPoolReturnsErrors(t *testing.T) {
@@ -97,6 +99,8 @@ func TestPostgresStoreClosedPoolReturnsErrors(t *testing.T) {
 	expectErr("PropagateSeverityViaAliases", err)
 	_, err = store.SetEPSSScores(ctx, []db.EPSSEntry{{CVEID: "CVE-2026-0001", Score: 0.1, Percentile: 0.2}})
 	expectErr("SetEPSSScores", err)
+	_, _, err = store.ReplaceEPSSScores(ctx, []db.EPSSEntry{{CVEID: "CVE-2026-0001", Score: 0.1, Percentile: 0.2}})
+	expectErr("ReplaceEPSSScores", err)
 	score := 5.5
 	_, err = store.EnrichVulnCheck(ctx, []db.VulnCheckEntry{{CVEID: "CVE-2026-0001", CVSSScore: &score}})
 	expectErr("EnrichVulnCheck", err)
@@ -126,9 +130,9 @@ func TestPostgresStoreClosedPoolReturnsErrors(t *testing.T) {
 
 	_, err = store.ExportSync(ctx, db.SyncExportOptions{})
 	expectErr("ExportSync", err)
-	_, err = store.exportSyncReputation(ctx, db.SyncExportOptions{}, time.Now().UTC())
+	_, err = store.exportSyncReputation(ctx, db.SyncExportOptions{}, time.Now().UTC(), 0)
 	expectErr("exportSyncReputation", err)
-	_, err = store.exportSyncMalicious(ctx, db.SyncExportOptions{}, time.Now().UTC())
+	_, err = store.exportSyncMalicious(ctx, db.SyncExportOptions{}, time.Now().UTC(), 0)
 	expectErr("exportSyncMalicious", err)
 
 	expectErr("UpsertManualAdvisory", store.UpsertManualAdvisory(ctx, &db.ManualAdvisory{

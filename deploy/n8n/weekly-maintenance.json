@@ -21,40 +21,19 @@
       }
     },
     {
-      "id": "export-db",
-      "name": "Export Local DB",
-      "type": "n8n-nodes-base.executeCommand",
-      "typeVersion": 1,
-      "position": [520, 260],
-      "parameters": {
-        "command": "packmon db export --output /tmp/packmon-weekly-export.json"
-      }
-    },
-    {
       "id": "fetch-metrics",
       "name": "Fetch Metrics",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4,
-      "position": [780, 260],
+      "position": [540, 260],
       "parameters": {
-        "url": "http://127.0.0.1:9090/metrics",
+        "url": "={{$env.PACKMON_METRICS_URL}}",
         "options": {}
       }
     }
   ],
   "connections": {
     "Weekly Trigger": {
-      "main": [
-        [
-          {
-            "node": "Export Local DB",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Export Local DB": {
       "main": [
         [
           {

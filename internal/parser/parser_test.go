@@ -4,20 +4,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
-
-func TestNewRegistry_AllParsersRegistered(t *testing.T) {
-	t.Parallel()
-	r := NewRegistry()
-	parsers := r.AllParsers()
-
-	// There are 21 built-in parsers according to the Registry constructor.
-	const expectedCount = 21
-	if len(parsers) != expectedCount {
-		t.Fatalf("AllParsers() returned %d parsers, want %d", len(parsers), expectedCount)
-	}
-}
 
 func TestRegistry_ParserFor(t *testing.T) {
 	t.Parallel()
@@ -100,68 +88,6 @@ func TestRegistry_ParserFor_WithSubdirectory(t *testing.T) {
 		if got := p.Ecosystem(); got != tt.wantEcosystem {
 			t.Errorf("ParserFor(%q).Ecosystem() = %q, want %q", tt.path, got, tt.wantEcosystem)
 		}
-	}
-}
-
-func TestRegistry_SupportedFiles(t *testing.T) {
-	t.Parallel()
-	r := NewRegistry()
-	files := r.SupportedFiles()
-
-	if len(files) == 0 {
-		t.Fatal("SupportedFiles() returned empty slice")
-	}
-
-	// Verify all expected file names are present.
-	expected := map[string]bool{
-		"package-lock.json":        false,
-		"yarn.lock":                false,
-		"pnpm-lock.yaml":           false,
-		"Pipfile.lock":             false,
-		"poetry.lock":              false,
-		"uv.lock":                  false,
-		"requirements.txt":         false,
-		"go.sum":                   false,
-		"go.mod":                   false,
-		"Cargo.lock":               false,
-		"packages.lock.json":       false,
-		"composer.lock":            false,
-		"Gemfile.lock":             false,
-		"pubspec.lock":             false,
-		"Podfile.lock":             false,
-		"Package.resolved":         false,
-		"mix.lock":                 false,
-		"renv.lock":                false,
-		"pom.xml":                  false,
-		"gradle.lockfile":          false,
-		".github/workflows/*.yml":  false,
-		".github/workflows/*.yaml": false,
-	}
-
-	for _, f := range files {
-		if _, ok := expected[f]; ok {
-			expected[f] = true
-		}
-	}
-
-	for name, found := range expected {
-		if !found {
-			t.Errorf("SupportedFiles() missing %q", name)
-		}
-	}
-}
-
-func TestRegistry_Register_CustomParser(t *testing.T) {
-	t.Parallel()
-	r := NewRegistry()
-	before := len(r.AllParsers())
-
-	// Register a dummy parser; use an existing type for convenience.
-	r.Register(NewNPMParser())
-
-	after := len(r.AllParsers())
-	if after != before+1 {
-		t.Errorf("after Register, AllParsers() returned %d, want %d", after, before+1)
 	}
 }
 

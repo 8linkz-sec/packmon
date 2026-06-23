@@ -6,7 +6,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 // ComposerParser parses composer.lock files (PHP/Composer ecosystem).
@@ -20,8 +20,14 @@ type composerLockFile struct {
 
 // composerPackageEntry represents a single entry in the packages array.
 type composerPackageEntry struct {
-	Name    string `json:"name"`
-	Version string `json:"version"`
+	Name    string                 `json:"name"`
+	Version string                 `json:"version"`
+	Source  composerPackageArchive `json:"source"`
+	Dist    composerPackageArchive `json:"dist"`
+}
+
+type composerPackageArchive struct {
+	URL string `json:"url"`
 }
 
 func NewComposerParser() *ComposerParser {
@@ -75,7 +81,7 @@ func (p *ComposerParser) Parse(r io.Reader) ([]domain.Package, error) {
 			continue
 		}
 		if entry.Version == "" {
-			errs = append(errs, fmt.Sprintf("entry %d (%s): missing version", i, entry.Name))
+			errs = append(errs, fmt.Sprintf("entry %d: missing version", i))
 			continue
 		}
 
@@ -91,10 +97,11 @@ func (p *ComposerParser) Parse(r io.Reader) ([]domain.Package, error) {
 		seen[key] = struct{}{}
 
 		packages = append(packages, domain.Package{
-			Name:      entry.Name,
-			Version:   version,
-			Ecosystem: domain.EcosystemComposer,
-			Dev:       entry.dev,
+			Name:       entry.Name,
+			Version:    version,
+			Ecosystem:  domain.EcosystemComposer,
+			Dev:        entry.dev,
+			SourceRefs: cleanSourceRefs(entry.Source.URL, entry.Dist.URL),
 		})
 	}
 

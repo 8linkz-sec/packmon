@@ -4,10 +4,9 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
-	"sort"
 	"strings"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 // Parser is the interface for lock-file parsers. Each implementation handles
@@ -61,12 +60,6 @@ func NewRegistry() *Registry {
 	}
 }
 
-// Register adds a custom parser to the registry. It is appended after the
-// built-in parsers, so built-in parsers take precedence.
-func (r *Registry) Register(p Parser) {
-	r.parsers = append(r.parsers, p)
-}
-
 // ParserFor returns the first parser whose CanParse returns true for the
 // given path. Path-aware parsers can inspect directories; legacy filename
 // parsers still receive the base name as a fallback.
@@ -79,43 +72,6 @@ func (r *Registry) ParserFor(path string) Parser {
 		}
 	}
 	return nil
-}
-
-// AllParsers returns a copy of the registered parsers slice.
-func (r *Registry) AllParsers() []Parser {
-	out := make([]Parser, len(r.parsers))
-	copy(out, r.parsers)
-	return out
-}
-
-// SupportedFiles returns a deduplicated list of file names that the registry
-// can parse. Useful for FileWalker configuration.
-func (r *Registry) SupportedFiles() []string {
-	known := []string{
-		"package-lock.json",
-		"yarn.lock",
-		"pnpm-lock.yaml",
-		"Pipfile.lock",
-		"poetry.lock",
-		"uv.lock",
-		"requirements.txt",
-		"go.sum",
-		"go.mod",
-		"Cargo.lock",
-		"packages.lock.json",
-		"composer.lock",
-		"Gemfile.lock",
-		"pubspec.lock",
-		"Podfile.lock",
-		"Package.resolved",
-		"mix.lock",
-		"renv.lock",
-		"pom.xml",
-		"gradle.lockfile",
-		".github/workflows/*.yml",
-		".github/workflows/*.yaml",
-	}
-	return known
 }
 
 // dedup returns a new slice with duplicate packages removed. Two packages are
@@ -133,88 +89,12 @@ func dedup(pkgs []domain.Package) []domain.Package {
 	for _, p := range pkgs {
 		k := key{p.Name, p.Version, p.Ecosystem}
 		if idx, ok := seen[k]; ok {
-			mergePackageMetadata(&out[idx], p)
+			domain.MergePackageMetadata(&out[idx], p)
 			continue
 		}
 		seen[k] = len(out)
 		out = append(out, p)
 	}
-	return out
-}
-
-func mergePackageMetadata(dst *domain.Package, src domain.Package) {
-	if dst.Dev && !src.Dev {
-		dst.Dev = false
-	}
-	dst.Direct = dst.Direct || src.Direct
-	dst.Indirect = dst.Indirect || src.Indirect
-	dst.Optional = dst.Optional || src.Optional
-	dst.Peer = dst.Peer || src.Peer
-	dst.Via = mergeStringSet(dst.Via, src.Via)
-	dst.Parents = mergePackageParents(dst.Parents, src.Parents)
-}
-
-func mergeStringSet(left, right []string) []string {
-	if len(left) == 0 && len(right) == 0 {
-		return nil
-	}
-	seen := make(map[string]struct{}, len(left)+len(right))
-	for _, value := range left {
-		value = strings.TrimSpace(value)
-		if value != "" {
-			seen[value] = struct{}{}
-		}
-	}
-	for _, value := range right {
-		value = strings.TrimSpace(value)
-		if value != "" {
-			seen[value] = struct{}{}
-		}
-	}
-	out := make([]string, 0, len(seen))
-	for value := range seen {
-		out = append(out, value)
-	}
-	sort.Strings(out)
-	return out
-}
-
-func mergePackageParents(left, right []domain.PackageParent) []domain.PackageParent {
-	if len(left) == 0 && len(right) == 0 {
-		return nil
-	}
-	type parentKey struct {
-		name, version string
-		ecosystem     domain.Ecosystem
-	}
-	seen := make(map[parentKey]domain.PackageParent, len(left)+len(right))
-	add := func(parent domain.PackageParent) {
-		parent.Name = strings.TrimSpace(parent.Name)
-		parent.Version = strings.TrimSpace(parent.Version)
-		if parent.Name == "" {
-			return
-		}
-		seen[parentKey{parent.Name, parent.Version, parent.Ecosystem}] = parent
-	}
-	for _, parent := range left {
-		add(parent)
-	}
-	for _, parent := range right {
-		add(parent)
-	}
-	out := make([]domain.PackageParent, 0, len(seen))
-	for _, parent := range seen {
-		out = append(out, parent)
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Ecosystem != out[j].Ecosystem {
-			return out[i].Ecosystem < out[j].Ecosystem
-		}
-		if out[i].Name != out[j].Name {
-			return out[i].Name < out[j].Name
-		}
-		return out[i].Version < out[j].Version
-	})
 	return out
 }
 

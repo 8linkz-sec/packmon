@@ -11,19 +11,41 @@ import (
 	"testing"
 	"time"
 
-	"github.com/8linkz/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/db"
 )
 
 type lifecycleStoreStub struct {
 	db.Store
-	status          *db.FeedSyncStatus
-	statuses        []db.FeedSyncStatus
-	products        []db.LifecycleProduct
-	reconciledSlugs []string
-	reconcileErr    error
-	statusErr       error
-	upsertErr       error
-	statusWriteErr  error
+	status           *db.FeedSyncStatus
+	statuses         []db.FeedSyncStatus
+	products         []db.LifecycleProduct
+	reconciledSlugs  []string
+	reconcileErr     error
+	statusErr        error
+	upsertErr        error
+	statusWriteErr   error
+	rejectCanceled   bool
+	reconcileDeleted int
+}
+
+type lifecycleReplaceStoreStub struct {
+	lifecycleStoreStub
+	replaceErr     error
+	replaceCalls   int
+	replaceDeleted int
+}
+
+func (s *lifecycleReplaceStoreStub) ReplaceLifecycleProducts(_ context.Context, products []db.LifecycleProduct) (int, error) {
+	s.replaceCalls++
+	if s.replaceErr != nil {
+		return 0, s.replaceErr
+	}
+	s.products = append(s.products, products...)
+	s.reconciledSlugs = make([]string, 0, len(products))
+	for _, product := range products {
+		s.reconciledSlugs = append(s.reconciledSlugs, product.ProductSlug)
+	}
+	return s.replaceDeleted, nil
 }
 
 func (s *lifecycleStoreStub) GetFeedSyncStatus(context.Context, string) (*db.FeedSyncStatus, error) {
@@ -37,7 +59,10 @@ func (s *lifecycleStoreStub) GetFeedSyncStatus(context.Context, string) (*db.Fee
 	return &copied, nil
 }
 
-func (s *lifecycleStoreStub) UpsertFeedSyncStatus(_ context.Context, status *db.FeedSyncStatus) error {
+func (s *lifecycleStoreStub) UpsertFeedSyncStatus(ctx context.Context, status *db.FeedSyncStatus) error {
+	if s.rejectCanceled && ctx.Err() != nil {
+		return ctx.Err()
+	}
 	if s.statusWriteErr != nil {
 		return s.statusWriteErr
 	}
@@ -57,7 +82,7 @@ func (s *lifecycleStoreStub) UpsertLifecycleProducts(_ context.Context, products
 
 func (s *lifecycleStoreStub) DeleteLifecycleProductsNotIn(_ context.Context, productSlugs []string) (int, error) {
 	s.reconciledSlugs = append([]string(nil), productSlugs...)
-	return 0, s.reconcileErr
+	return s.reconcileDeleted, s.reconcileErr
 }
 
 func TestFetchProductsFullSendsHeadersAndParsesResponse(t *testing.T) {
@@ -192,6 +217,79 @@ func TestSyncerUpsertsProductsAndPackageMapsFromPURLs(t *testing.T) {
 	}
 }
 
+func TestSyncerUsesAtomicLifecycleReplacementWhenAvailable(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("ETag", "fresh-etag")
+		_, _ = w.Write([]byte(sampleProductsResponse()))
+	}))
+	defer server.Close()
+
+	store := &lifecycleReplaceStoreStub{}
+	syncer := NewSyncer(nil, WithBaseURL(server.URL), WithHTTPClient(server.Client()))
+	result, err := syncer.Sync(context.Background(), store)
+	if err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	if result.EntriesSynced != 1 {
+		t.Fatalf("Sync() result = %+v, want one synced product", result)
+	}
+	if store.replaceCalls != 1 {
+		t.Fatalf("ReplaceLifecycleProducts calls = %d, want 1", store.replaceCalls)
+	}
+	if len(store.products) != 1 || store.products[0].ProductSlug != "django" {
+		t.Fatalf("replaced products = %+v, want django", store.products)
+	}
+	if len(store.statuses) != 1 || store.statuses[0].LastSyncStatus != "success" {
+		t.Fatalf("status = %+v, want success after replace", store.statuses)
+	}
+}
+
+func TestSyncerRecordsLifecycleReplacementDeletedCount(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("ETag", "fresh-etag")
+		_, _ = w.Write([]byte(sampleProductsResponse()))
+	}))
+	defer server.Close()
+
+	store := &lifecycleReplaceStoreStub{replaceDeleted: 3}
+	syncer := NewSyncer(nil, WithBaseURL(server.URL), WithHTTPClient(server.Client()))
+	if _, err := syncer.Sync(context.Background(), store); err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	if len(store.statuses) != 1 {
+		t.Fatalf("statuses = %d, want 1", len(store.statuses))
+	}
+	if !strings.Contains(string(store.statuses[0].Metadata), `"deleted_products":3`) {
+		t.Fatalf("metadata = %s, want deleted_products count", store.statuses[0].Metadata)
+	}
+}
+
+func TestSyncerRecordsLifecycleReconciliationDeletedCount(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("ETag", "fresh-etag")
+		_, _ = w.Write([]byte(sampleProductsResponse()))
+	}))
+	defer server.Close()
+
+	store := &lifecycleStoreStub{reconcileDeleted: 2}
+	syncer := NewSyncer(nil, WithBaseURL(server.URL), WithHTTPClient(server.Client()))
+	if _, err := syncer.Sync(context.Background(), store); err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	if len(store.statuses) != 1 {
+		t.Fatalf("statuses = %d, want 1", len(store.statuses))
+	}
+	if !strings.Contains(string(store.statuses[0].Metadata), `"deleted_products":2`) {
+		t.Fatalf("metadata = %s, want deleted_products count", store.statuses[0].Metadata)
+	}
+}
+
 func TestSyncerNotModifiedRecordsSuccessWithoutUpsert(t *testing.T) {
 	t.Parallel()
 
@@ -201,20 +299,79 @@ func TestSyncerNotModifiedRecordsSuccessWithoutUpsert(t *testing.T) {
 	}))
 	defer server.Close()
 
-	store := &lifecycleStoreStub{status: &db.FeedSyncStatus{FeedName: FeedName, LastEtag: "cached-etag"}}
+	lastSync := time.Now().UTC().Add(-2 * time.Hour)
+	store := &lifecycleStoreStub{status: &db.FeedSyncStatus{
+		FeedName:       FeedName,
+		LastSyncAt:     &lastSync,
+		LastEtag:       "cached-etag",
+		EntriesSynced:  5,
+		EntriesTotal:   9,
+		LastSyncStatus: "success",
+	}}
 	syncer := NewSyncer(nil, WithBaseURL(server.URL), WithHTTPClient(server.Client()))
 	result, err := syncer.Sync(context.Background(), store)
 	if err != nil {
 		t.Fatalf("Sync(304) error = %v", err)
 	}
-	if result.EntriesSynced != 0 || result.EntriesTotal != 0 {
-		t.Fatalf("Sync(304) result = %+v, want 0/0", result)
+	if result.EntriesSynced != 5 || result.EntriesTotal != 9 {
+		t.Fatalf("Sync(304) result = %+v, want preserved 5/9", result)
 	}
 	if len(store.products) != 0 {
 		t.Fatalf("Sync(304) upserted products = %+v, want none", store.products)
 	}
-	if len(store.statuses) != 1 || store.statuses[0].LastSyncStatus != "success" || store.statuses[0].LastEtag != "cached-etag" {
+	if len(store.statuses) != 1 || store.statuses[0].LastSyncStatus != "success" || store.statuses[0].LastEtag != "cached-etag" || store.statuses[0].EntriesTotal != 9 {
 		t.Fatalf("Sync(304) status = %+v", store.statuses)
+	}
+}
+
+func TestSyncerRejectsMalformedLifecyclePayload(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "invalid release date",
+			body: `{"total":1,"result":[{"name":"django","label":"Django","identifiers":[{"type":"purl","id":"pkg:pypi/django"}],"releases":[{"name":"4.2","eolFrom":"not-a-date"}]}]}`,
+			want: "eolFrom",
+		},
+		{
+			name: "blank product",
+			body: `{"total":1,"result":[{"name":" ","label":"Blank","releases":[]}]}`,
+			want: "product name is required",
+		},
+		{
+			name: "invalid purl",
+			body: `{"total":1,"result":[{"name":"django","label":"Django","identifiers":[{"type":"purl","id":"pkg:pypi/%zz"}],"releases":[]}]}`,
+			want: "invalid purl",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer server.Close()
+
+			store := &lifecycleStoreStub{}
+			syncer := NewSyncer(nil, WithBaseURL(server.URL), WithHTTPClient(server.Client()))
+			result, err := syncer.Sync(context.Background(), store)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Sync() error = %v, want containing %q", err, tt.want)
+			}
+			if result != nil {
+				t.Fatalf("Sync() result = %+v, want nil", result)
+			}
+			if len(store.products) != 0 {
+				t.Fatalf("upserted products = %+v, want none", store.products)
+			}
+			if len(store.statuses) != 1 || store.statuses[0].LastSyncStatus != "error" {
+				t.Fatalf("status = %+v, want one error status", store.statuses)
+			}
+		})
 	}
 }
 
@@ -293,6 +450,14 @@ func TestSyncerOptionsNameStatusAndFailureBranches(t *testing.T) {
 	store = &lifecycleStoreStub{statusWriteErr: errors.New("status write down")}
 	syncer.recordSyncSuccess(context.Background(), store, time.Now(), 1, 1, "etag", syncMetadata{})
 	syncer.recordSyncFailure(context.Background(), store, time.Now(), errors.New("sync down"))
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	store = &lifecycleStoreStub{rejectCanceled: true}
+	syncer.recordSyncFailure(canceledCtx, store, time.Now(), context.Canceled)
+	if len(store.statuses) != 1 {
+		t.Fatalf("statuses after canceled context = %d, want 1", len(store.statuses))
+	}
 }
 
 func sampleProductsResponse() string {

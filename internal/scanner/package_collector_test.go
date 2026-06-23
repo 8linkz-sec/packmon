@@ -2,14 +2,15 @@ package scanner
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/8linkz/packmon/internal/domain"
-	"github.com/8linkz/packmon/internal/parser"
-	"github.com/8linkz/packmon/internal/sbom"
+	"github.com/8linkz-sec/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/parser"
+	"github.com/8linkz-sec/packmon/internal/sbom"
 )
 
 func TestCollectPackagesIncludesExplicitSBOM(t *testing.T) {
@@ -53,6 +54,79 @@ func TestCollectPackagesIncludesExplicitSBOM(t *testing.T) {
 			t.Fatalf("package %+v not in expected set %#v", pkg, want)
 		}
 	}
+}
+
+func TestParseCollectedLockFileRejectsOversizedRegularFileBeforeParser(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "package-lock.json")
+	if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(path, maxLockfileSize+1); err != nil {
+		t.Fatal(err)
+	}
+
+	parser := &rejectCalledParser{}
+	_, err := parseCollectedLockFile(LockFile{
+		Path:    path,
+		RelPath: "package-lock.json",
+		Parser:  parser,
+	})
+	if err == nil || !strings.Contains(err.Error(), "exceeds maximum lockfile size") {
+		t.Fatalf("parseCollectedLockFile() error = %v, want size-limit error", err)
+	}
+	if parser.called {
+		t.Fatal("parser was called for an oversized regular lockfile")
+	}
+}
+
+func TestLimitedLockfileReaderAllowsExactLimit(t *testing.T) {
+	reader := &limitedLockfileReader{
+		r:    strings.NewReader("a"),
+		read: maxLockfileSize - 1,
+	}
+	buf := make([]byte, 2)
+	n, err := reader.Read(buf)
+	if n != 1 || err != nil {
+		t.Fatalf("first Read() = %d, %v; want 1, nil", n, err)
+	}
+	n, err = reader.Read(buf)
+	if n != 0 || !errors.Is(err, io.EOF) {
+		t.Fatalf("second Read() = %d, %v; want 0, EOF", n, err)
+	}
+}
+
+func TestLimitedLockfileReaderRejectsBytePastLimit(t *testing.T) {
+	reader := &limitedLockfileReader{
+		r:    strings.NewReader("ab"),
+		read: maxLockfileSize - 1,
+	}
+	buf := make([]byte, 2)
+	n, err := reader.Read(buf)
+	if n != 1 || err != nil {
+		t.Fatalf("first Read() = %d, %v; want 1, nil", n, err)
+	}
+	n, err = reader.Read(buf)
+	if n != 0 || err == nil || !strings.Contains(err.Error(), "exceeds maximum lockfile size") {
+		t.Fatalf("second Read() = %d, %v; want size-limit error", n, err)
+	}
+}
+
+type rejectCalledParser struct {
+	called bool
+}
+
+func (p *rejectCalledParser) CanParse(string) bool {
+	return true
+}
+
+func (p *rejectCalledParser) Parse(io.Reader) ([]domain.Package, error) {
+	p.called = true
+	return nil, errors.New("parser should not be called")
+}
+
+func (p *rejectCalledParser) Ecosystem() domain.Ecosystem {
+	return domain.EcosystemNPM
 }
 
 func TestCollectPackagesDropsStaleGoSumVersionWhenGoModSelectsModule(t *testing.T) {
@@ -114,6 +188,37 @@ func TestCollectPackagesReportsSBOMParseErrors(t *testing.T) {
 	}
 }
 
+func TestCollectPackagesRedactsExternalSBOMPathInParseErrors(t *testing.T) {
+	root := t.TempDir()
+	externalDir := t.TempDir()
+	sbomPath := filepath.Join(externalDir, "student-project-bom.cdx.json")
+	if err := os.WriteFile(sbomPath, []byte(`{"bomFormat":"CycloneDX",`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := CollectPackages(CollectConfig{
+		Registry:  parser.NewRegistry(),
+		Root:      root,
+		MaxDepth:  2,
+		SBOMFiles: []string{sbomPath},
+	})
+	if err != nil {
+		t.Fatalf("CollectPackages() error = %v", err)
+	}
+	if len(got.ParseErrors) != 1 {
+		t.Fatalf("parse errors = %#v, want one external SBOM parse error", got.ParseErrors)
+	}
+	parseErr := got.ParseErrors[0]
+	if !strings.Contains(parseErr, "student-project-bom.cdx.json") {
+		t.Fatalf("parse error = %q, want SBOM basename", parseErr)
+	}
+	for _, leaked := range []string{externalDir, filepath.Dir(sbomPath), sbomPath} {
+		if strings.Contains(parseErr, leaked) {
+			t.Fatalf("parse error leaked external path %q: %q", leaked, parseErr)
+		}
+	}
+}
+
 func TestCollectPackagesReportsSkippedSBOMComponents(t *testing.T) {
 	dir := t.TempDir()
 	sbomPath := filepath.Join(dir, "bom.cdx.json")
@@ -154,6 +259,10 @@ func TestPackageCollectionAddMergesPackageMetadata(t *testing.T) {
 		Indirect:  true,
 		Peer:      true,
 		Via:       []string{"tailwindcss"},
+		Parents: []domain.PackageParent{
+			{Name: " tailwindcss ", Version: "3.4.17", Ecosystem: domain.EcosystemNPM},
+			{Name: "", Version: "ignored", Ecosystem: domain.EcosystemNPM},
+		},
 	}, "package-lock.json", "lockfile")
 	c.add(domain.Package{
 		Name:      "postcss",
@@ -162,6 +271,10 @@ func TestPackageCollectionAddMergesPackageMetadata(t *testing.T) {
 		Direct:    true,
 		Optional:  true,
 		Via:       []string{"other"},
+		Parents: []domain.PackageParent{
+			{Name: "other", Version: "1.0.0", Ecosystem: domain.EcosystemNPM},
+			{Name: "tailwindcss", Version: "3.4.17", Ecosystem: domain.EcosystemNPM},
+		},
 	}, "bom.json", "sbom")
 
 	if len(c.Entries) != 1 {
@@ -173,6 +286,18 @@ func TestPackageCollectionAddMergesPackageMetadata(t *testing.T) {
 	}
 	if len(pkg.Via) != 2 || pkg.Via[0] != "other" || pkg.Via[1] != "tailwindcss" {
 		t.Fatalf("Via = %#v, want sorted merged roots", pkg.Via)
+	}
+	wantParents := []domain.PackageParent{
+		{Name: "other", Version: "1.0.0", Ecosystem: domain.EcosystemNPM},
+		{Name: "tailwindcss", Version: "3.4.17", Ecosystem: domain.EcosystemNPM},
+	}
+	if len(pkg.Parents) != len(wantParents) {
+		t.Fatalf("Parents = %#v, want %#v", pkg.Parents, wantParents)
+	}
+	for i := range wantParents {
+		if pkg.Parents[i] != wantParents[i] {
+			t.Fatalf("Parents = %#v, want %#v", pkg.Parents, wantParents)
+		}
 	}
 }
 
@@ -226,10 +351,10 @@ func TestPackageCollectorHelperBranches(t *testing.T) {
 	if !ecosystemFilter(nil).allows(domain.EcosystemPyPI) {
 		t.Fatal("empty filter should allow all ecosystems")
 	}
-	if got := mergeCollectedStringSet([]string{" b ", "", "a"}, []string{"a", "c"}); strings.Join(got, ",") != "a,b,c" {
-		t.Fatalf("mergeCollectedStringSet() = %#v", got)
+	if got := domain.MergePackageStringSet([]string{" b ", "", "a"}, []string{"a", "c"}); strings.Join(got, ",") != "a,b,c" {
+		t.Fatalf("MergePackageStringSet() = %#v", got)
 	}
-	if got := mergeCollectedStringSet(nil, nil); got != nil {
-		t.Fatalf("mergeCollectedStringSet(nil,nil) = %#v, want nil", got)
+	if got := domain.MergePackageStringSet(nil, nil); got != nil {
+		t.Fatalf("MergePackageStringSet(nil,nil) = %#v, want nil", got)
 	}
 }

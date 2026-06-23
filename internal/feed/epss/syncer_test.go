@@ -8,19 +8,22 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
-	"github.com/8linkz/packmon/internal/db"
-	"github.com/8linkz/packmon/internal/feed"
+	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/feed"
 )
 
 // -- Store stub ---------------------------------------------------------------
 
 type epssStoreStub struct {
 	db.Store
-	entries      []db.EPSSEntry
-	totalUpdated int
-	callCount    int
+	entries          []db.EPSSEntry
+	totalUpdated     int
+	callCount        int
+	replaceCallCount int
+	cleared          int
 }
 
 func (s *epssStoreStub) SetEPSSScores(_ context.Context, scores []db.EPSSEntry) (int, error) {
@@ -28,6 +31,35 @@ func (s *epssStoreStub) SetEPSSScores(_ context.Context, scores []db.EPSSEntry) 
 	s.callCount++
 	s.totalUpdated += len(scores)
 	return len(scores), nil
+}
+
+func (s *epssStoreStub) ReplaceEPSSScores(_ context.Context, scores []db.EPSSEntry) (int, int, error) {
+	s.entries = append(s.entries, scores...)
+	s.replaceCallCount++
+	s.totalUpdated += len(scores)
+	return len(scores), s.cleared, nil
+}
+
+type epssStreamingStoreStub struct {
+	epssStoreStub
+	streamReplaceCallCount int
+	streamBatchSizes       []int
+}
+
+func (s *epssStreamingStoreStub) ReplaceEPSSScoresStream(_ context.Context, stream func(func([]db.EPSSEntry) error) error) (int, int, int, error) {
+	s.streamReplaceCallCount++
+	total := 0
+	err := stream(func(batch []db.EPSSEntry) error {
+		s.streamBatchSizes = append(s.streamBatchSizes, len(batch))
+		s.entries = append(s.entries, batch...)
+		total += len(batch)
+		return nil
+	})
+	if err != nil {
+		return 0, 0, total, err
+	}
+	s.totalUpdated += total
+	return total, s.cleared, total, nil
 }
 
 // -- Helper: gzip compress a string -------------------------------------------
@@ -87,6 +119,16 @@ CVE-2024-9999,0.00010,0.12300
 	if result.EntriesSynced != 3 {
 		t.Errorf("EntriesSynced = %d, want 3", result.EntriesSynced)
 	}
+	if !strings.Contains(string(result.Metadata), `"model_version":"v2024.01.01"`) ||
+		!strings.Contains(string(result.Metadata), `"score_date":"2026-04-03"`) {
+		t.Fatalf("Sync() metadata = %s, want model version and score date", result.Metadata)
+	}
+	if store.replaceCallCount != 1 {
+		t.Fatalf("ReplaceEPSSScores called %d times, want 1", store.replaceCallCount)
+	}
+	if store.callCount != 0 {
+		t.Fatalf("SetEPSSScores called %d times, want 0", store.callCount)
+	}
 
 	// Verify the store received the correct entries.
 	if len(store.entries) != 3 {
@@ -111,7 +153,84 @@ CVE-2024-9999,0.00010,0.12300
 	}
 }
 
-func TestSync_HandlesEmptyCSV(t *testing.T) {
+func TestSync_StreamsEPSSCSVWhenStoreSupportsStreaming(t *testing.T) {
+	t.Parallel()
+
+	csvData := `#model_version:v2024.01.01,score_date:2026-04-03
+cve,epss,percentile
+CVE-2021-44228,0.97560,0.99990
+CVE-2023-0001,0.01234,0.87654
+CVE-2024-9999,0.00010,0.12300
+`
+	compressed := gzipCompress(t, csvData)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Encoding", "gzip")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(compressed)
+	}))
+	defer srv.Close()
+
+	store := &epssStreamingStoreStub{}
+	syncer := NewSyncer(slog.New(slog.NewTextHandler(io.Discard, nil)),
+		WithScoresURL(srv.URL),
+		WithHTTPClient(srv.Client()),
+	)
+
+	result, err := syncer.Sync(context.Background(), store)
+	if err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	if store.streamReplaceCallCount != 1 {
+		t.Fatalf("ReplaceEPSSScoresStream called %d times, want 1", store.streamReplaceCallCount)
+	}
+	if store.replaceCallCount != 0 {
+		t.Fatalf("ReplaceEPSSScores fallback called %d times, want 0", store.replaceCallCount)
+	}
+	if result.EntriesTotal != 3 || result.EntriesSynced != 3 {
+		t.Fatalf("Sync() result = %+v, want 3/3", result)
+	}
+	if len(store.entries) != 3 {
+		t.Fatalf("streamed entries = %d, want 3", len(store.entries))
+	}
+}
+
+func TestStreamCSVFlushesBoundedBatchesAndMetadata(t *testing.T) {
+	t.Parallel()
+
+	csvData := `#model_version:v2024.01.01,score_date:2026-04-03
+cve,epss,percentile
+CVE-2021-44228,0.97560,0.99990
+CVE-2023-0001,0.01234,0.87654
+CVE-2024-9999,0.00010,0.12300
+`
+	var batches []int
+	var ids []string
+	total, metadata, err := streamCSV(strings.NewReader(csvData), 2, func(batch []db.EPSSEntry) error {
+		batches = append(batches, len(batch))
+		for _, entry := range batch {
+			ids = append(ids, entry.CVEID)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("streamCSV() error = %v", err)
+	}
+	if total != 3 {
+		t.Fatalf("streamCSV() total = %d, want 3", total)
+	}
+	if metadata.ModelVersion != "v2024.01.01" || metadata.ScoreDate != "2026-04-03" {
+		t.Fatalf("metadata = %+v, want model version and score date", metadata)
+	}
+	if len(batches) != 2 || batches[0] != 2 || batches[1] != 1 {
+		t.Fatalf("batches = %+v, want [2 1]", batches)
+	}
+	if strings.Join(ids, ",") != "CVE-2021-44228,CVE-2023-0001,CVE-2024-9999" {
+		t.Fatalf("ids = %+v", ids)
+	}
+}
+
+func TestSync_RejectsEmptyCSV(t *testing.T) {
 	t.Parallel()
 
 	// Only comment and header, no data rows.
@@ -136,21 +255,21 @@ cve,epss,percentile
 	)
 
 	result, err := syncer.Sync(context.Background(), store)
-	if err != nil {
-		t.Fatalf("Sync() error = %v, want nil", err)
+	if err == nil {
+		t.Fatal("Sync() error = nil, want empty feed error")
 	}
-	if result == nil {
-		t.Fatal("Sync() result = nil, want non-nil")
+	if !strings.Contains(err.Error(), "no EPSS score rows") {
+		t.Fatalf("Sync() error = %v, want no rows", err)
 	}
-	if result.EntriesTotal != 0 {
-		t.Errorf("EntriesTotal = %d, want 0", result.EntriesTotal)
+	if result != nil {
+		t.Fatalf("Sync() result = %+v, want nil", result)
 	}
-	if result.EntriesSynced != 0 {
-		t.Errorf("EntriesSynced = %d, want 0", result.EntriesSynced)
+	if store.callCount != 0 {
+		t.Fatalf("SetEPSSScores called %d times, want 0", store.callCount)
 	}
 }
 
-func TestSync_SkipsInvalidCVERows(t *testing.T) {
+func TestSync_RejectsInvalidCVERows(t *testing.T) {
 	t.Parallel()
 
 	csvData := `#model_version:v2024.01.01
@@ -178,12 +297,17 @@ CVE-2024-2222,0.02000,0.30000
 	)
 
 	result, err := syncer.Sync(context.Background(), store)
-	if err != nil {
-		t.Fatalf("Sync() error = %v", err)
+	if err == nil {
+		t.Fatal("Sync() error = nil, want malformed row error")
 	}
-	// Only CVE-2021-44228 and CVE-2024-2222 should parse successfully.
-	if result.EntriesTotal != 2 {
-		t.Errorf("EntriesTotal = %d, want 2", result.EntriesTotal)
+	if !strings.Contains(err.Error(), "row 4") || !strings.Contains(err.Error(), "invalid CVE") {
+		t.Fatalf("Sync() error = %v, want row-numbered invalid CVE", err)
+	}
+	if result != nil {
+		t.Fatalf("Sync() result = %+v, want nil", result)
+	}
+	if store.callCount != 0 {
+		t.Fatalf("SetEPSSScores called %d times, want 0", store.callCount)
 	}
 }
 
@@ -212,18 +336,47 @@ func TestSync_HandlesHTTPError(t *testing.T) {
 func TestParseCSV_NoHeader(t *testing.T) {
 	t.Parallel()
 
-	// No header row -- the first non-comment line that does not look like
-	// a header should be treated as data (defensive).
 	csv := "CVE-2021-44228,0.97560,0.99990\n"
 	entries, err := parseCSV(bytes.NewReader([]byte(csv)))
-	if err != nil {
-		t.Fatalf("parseCSV() error = %v", err)
+	if err == nil {
+		t.Fatal("parseCSV() error = nil, want missing header error")
 	}
-	if len(entries) != 1 {
-		t.Fatalf("parseCSV() returned %d entries, want 1", len(entries))
+	if !strings.Contains(err.Error(), "expected header") {
+		t.Fatalf("parseCSV() error = %v, want expected header", err)
 	}
-	if entries[0].CVEID != "CVE-2021-44228" {
-		t.Errorf("CVEID = %q, want CVE-2021-44228", entries[0].CVEID)
+	if len(entries) != 0 {
+		t.Fatalf("parseCSV() returned %d entries, want 0", len(entries))
+	}
+}
+
+func TestParseCSV_RejectsWrongHeader(t *testing.T) {
+	t.Parallel()
+
+	entries, err := parseCSV(strings.NewReader("html,error,page\nnot,csv,data\n"))
+	if err == nil {
+		t.Fatal("parseCSV() error = nil, want wrong header error")
+	}
+	if !strings.Contains(err.Error(), "expected header") {
+		t.Fatalf("parseCSV() error = %v, want expected header", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("parseCSV() returned %d entries, want 0", len(entries))
+	}
+}
+
+func TestParseLimitedCSVRejectsOversizedPayload(t *testing.T) {
+	t.Parallel()
+
+	csv := "cve,epss,percentile\nCVE-2026-0001,0.1,0.2\n"
+	entries, _, err := parseLimitedCSV(strings.NewReader(csv), int64(len(csv)-1))
+	if err == nil {
+		t.Fatal("parseLimitedCSV() error = nil, want oversized payload error")
+	}
+	if !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("parseLimitedCSV() error = %v, want exceeds", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("parseLimitedCSV() returned %d entries, want 0", len(entries))
 	}
 }
 

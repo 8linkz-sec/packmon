@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 func TestParseCycloneDXJSONPackages(t *testing.T) {
@@ -21,9 +21,9 @@ func TestParseCycloneDXJSONPackages(t *testing.T) {
 		]
 	}`)
 
-	got, err := ParseCycloneDX(bytes.NewReader(input))
+	got, err := Parse(bytes.NewReader(input))
 	if err != nil {
-		t.Fatalf("ParseCycloneDX() error = %v", err)
+		t.Fatalf("Parse() error = %v", err)
 	}
 
 	want := []domain.Package{
@@ -56,9 +56,9 @@ func TestParseCycloneDXJSONDependencyGraphMetadata(t *testing.T) {
 		]
 	}`)
 
-	got, err := ParseCycloneDX(bytes.NewReader(input))
+	got, err := Parse(bytes.NewReader(input))
 	if err != nil {
-		t.Fatalf("ParseCycloneDX() error = %v", err)
+		t.Fatalf("Parse() error = %v", err)
 	}
 
 	byName := make(map[string]domain.Package)
@@ -88,6 +88,46 @@ func TestParseCycloneDXJSONDependencyGraphMetadata(t *testing.T) {
 	}
 }
 
+func TestParseCycloneDXJSONDependencyGraphPropagatesSharedVia(t *testing.T) {
+	input := []byte(`{
+		"bomFormat":"CycloneDX",
+		"metadata":{
+			"component":{"type":"application","name":"app","bom-ref":"app","purl":"pkg:npm/app@1.0.0"}
+		},
+		"components":[
+			{"type":"library","name":"cli","version":"4.3.0","bom-ref":"cli","purl":"pkg:npm/%40tailwindcss/cli@4.3.0"},
+			{"type":"library","name":"plugin","version":"1.0.0","bom-ref":"plugin","purl":"pkg:npm/plugin@1.0.0"},
+			{"type":"library","name":"shared","version":"2.0.0","bom-ref":"shared","purl":"pkg:npm/shared@2.0.0"},
+			{"type":"library","name":"leaf","version":"3.0.0","bom-ref":"leaf","purl":"pkg:npm/leaf@3.0.0"}
+		],
+		"dependencies":[
+			{"ref":"app","dependsOn":["cli","plugin"]},
+			{"ref":"cli","dependsOn":["shared"]},
+			{"ref":"plugin","dependsOn":["shared"]},
+			{"ref":"shared","dependsOn":["leaf"]}
+		]
+	}`)
+
+	got, err := Parse(bytes.NewReader(input))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	byName := make(map[string]domain.Package)
+	for _, item := range got.Packages {
+		byName[item.Package.Name] = item.Package
+	}
+
+	shared := byName["shared"]
+	if shared.Direct || !shared.Indirect || !reflect.DeepEqual(shared.Via, []string{"@tailwindcss/cli", "plugin"}) {
+		t.Fatalf("shared metadata = %+v, want indirect via cli and plugin", shared)
+	}
+	leaf := byName["leaf"]
+	if leaf.Direct || !leaf.Indirect || !reflect.DeepEqual(leaf.Via, []string{"@tailwindcss/cli", "plugin"}) {
+		t.Fatalf("leaf metadata = %+v, want indirect via cli and plugin", leaf)
+	}
+}
+
 func TestParseCycloneDXXMLPackages(t *testing.T) {
 	input := []byte(`<?xml version="1.0" encoding="UTF-8"?>
 <bom xmlns="http://cyclonedx.org/schema/bom/1.5">
@@ -105,9 +145,9 @@ func TestParseCycloneDXXMLPackages(t *testing.T) {
   </components>
 </bom>`)
 
-	got, err := ParseCycloneDX(bytes.NewReader(input))
+	got, err := Parse(bytes.NewReader(input))
 	if err != nil {
-		t.Fatalf("ParseCycloneDX(xml) error = %v", err)
+		t.Fatalf("Parse(xml) error = %v", err)
 	}
 
 	want := []domain.Package{
@@ -119,10 +159,82 @@ func TestParseCycloneDXXMLPackages(t *testing.T) {
 	}
 }
 
-func TestParseCycloneDXRejectsUnknownFormat(t *testing.T) {
-	_, err := ParseCycloneDX(strings.NewReader(`{"spdxVersion":"SPDX-2.3"}`))
+func TestParseCycloneDXXMLDependencyGraphMetadata(t *testing.T) {
+	input := []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<bom xmlns="http://cyclonedx.org/schema/bom/1.5">
+  <metadata>
+    <component type="application" bom-ref="app">
+      <name>app</name>
+      <version>1.0.0</version>
+      <purl>pkg:npm/app@1.0.0</purl>
+    </component>
+  </metadata>
+  <components>
+    <component type="library" bom-ref="app|@tailwindcss/cli@4.3.0">
+      <name>cli</name>
+      <version>4.3.0</version>
+      <purl>pkg:npm/%40tailwindcss/cli@4.3.0</purl>
+    </component>
+    <component type="library" bom-ref="app|@parcel/watcher@2.5.6">
+      <name>watcher</name>
+      <version>2.5.6</version>
+      <purl>pkg:npm/%40parcel/watcher@2.5.6</purl>
+    </component>
+    <component type="library" bom-ref="app|node-addon-api@7.1.1">
+      <name>node-addon-api</name>
+      <version>7.1.1</version>
+      <purl>pkg:npm/node-addon-api@7.1.1</purl>
+    </component>
+  </components>
+  <dependencies>
+    <dependency ref="app">
+      <dependency ref="app|@tailwindcss/cli@4.3.0"/>
+    </dependency>
+    <dependency ref="app|@tailwindcss/cli@4.3.0">
+      <dependency ref="app|@parcel/watcher@2.5.6"/>
+    </dependency>
+    <dependency ref="app|@parcel/watcher@2.5.6">
+      <dependency ref="app|node-addon-api@7.1.1"/>
+    </dependency>
+  </dependencies>
+</bom>`)
+
+	got, err := Parse(bytes.NewReader(input))
+	if err != nil {
+		t.Fatalf("Parse(xml) error = %v", err)
+	}
+
+	byName := make(map[string]domain.Package)
+	for _, item := range got.Packages {
+		byName[item.Package.Name] = item.Package
+	}
+
+	cli := byName["@tailwindcss/cli"]
+	if !cli.Direct || cli.Indirect {
+		t.Fatalf("cli direct=%v indirect=%v, want direct root dependency", cli.Direct, cli.Indirect)
+	}
+
+	watcher := byName["@parcel/watcher"]
+	if watcher.Direct || !watcher.Indirect || len(watcher.Via) != 1 || watcher.Via[0] != "@tailwindcss/cli" {
+		t.Fatalf("watcher metadata = %+v, want indirect via @tailwindcss/cli", watcher)
+	}
+	if len(watcher.Parents) != 1 || watcher.Parents[0].Name != "@tailwindcss/cli" || watcher.Parents[0].Version != "4.3.0" {
+		t.Fatalf("watcher parents = %+v, want @tailwindcss/cli@4.3.0", watcher.Parents)
+	}
+
+	nodeAddon := byName["node-addon-api"]
+	if nodeAddon.Direct || !nodeAddon.Indirect || len(nodeAddon.Via) != 1 || nodeAddon.Via[0] != "@tailwindcss/cli" {
+		t.Fatalf("node-addon-api metadata = %+v, want indirect via @tailwindcss/cli", nodeAddon)
+	}
+	if len(nodeAddon.Parents) != 1 || nodeAddon.Parents[0].Name != "@parcel/watcher" || nodeAddon.Parents[0].Version != "2.5.6" {
+		t.Fatalf("node-addon-api parents = %+v, want @parcel/watcher@2.5.6", nodeAddon.Parents)
+	}
+}
+
+func TestParseRejectsUnknownJSONFormat(t *testing.T) {
+	_, err := Parse(strings.NewReader(`{"format":"unknown"}`))
 	if err == nil {
-		t.Fatal("ParseCycloneDX(unknown) error = nil")
+		t.Fatal("Parse(unknown) error = nil")
 	}
 }
 

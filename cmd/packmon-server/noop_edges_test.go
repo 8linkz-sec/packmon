@@ -4,10 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/8linkz/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/db"
 )
 
 func TestNoopStoreEdgeBranches(t *testing.T) {
@@ -356,6 +357,41 @@ func TestNoopStoreAuthAndSearchEdgeBranches(t *testing.T) {
 	if len(audit) != 1 || string(audit[0].Details) != `{"ok":true}` {
 		t.Fatalf("ListAdminAuditLog() = %+v, want copied audit entry", audit)
 	}
+	if audit[0].IntegrityStatus != "verified" || !strings.HasPrefix(audit[0].RowDigest, "sha256:") {
+		t.Fatalf("audit integrity = status %q digest %q, want verified sha256 digest", audit[0].IntegrityStatus, audit[0].RowDigest)
+	}
+	if err := store.InsertAdminAuditLog(ctx, &db.AdminAuditEntry{
+		Action:  "feed_save",
+		Details: json.RawMessage(`{"feed":"osv"}`),
+		IP:      "127.0.0.1",
+	}); err != nil {
+		t.Fatalf("InsertAdminAuditLog(second) error = %v", err)
+	}
+	audit, err = store.ListAdminAuditLog(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListAdminAuditLog(chain) error = %v", err)
+	}
+	if len(audit) < 2 || audit[0].PreviousDigest != audit[1].RowDigest {
+		t.Fatalf("audit digest chain = %+v, want newest previous digest to match older row digest", audit)
+	}
+	store.mu.Lock()
+	store.auditLog[0].CreatedAt = time.Now().UTC().Add(-2 * time.Hour)
+	store.auditLog[1].CreatedAt = time.Now().UTC().Add(-30 * time.Minute)
+	store.mu.Unlock()
+	prunedAudit, err := store.PruneAdminAuditLogs(ctx, time.Hour)
+	if err != nil {
+		t.Fatalf("PruneAdminAuditLogs() error = %v", err)
+	}
+	if prunedAudit != 1 {
+		t.Fatalf("PruneAdminAuditLogs() = %d, want oldest audit row pruned", prunedAudit)
+	}
+	audit, err = store.ListAdminAuditLog(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListAdminAuditLog(after prune) error = %v", err)
+	}
+	if len(audit) != 1 || audit[0].Action != "feed_save" {
+		t.Fatalf("ListAdminAuditLog(after prune) = %+v, want only recent audit row", audit)
+	}
 
 	expired := time.Now().UTC().Add(-time.Hour)
 	if _, err := store.CreateAPIKey(ctx, "expired", "expired-hash", &expired); err != nil {
@@ -367,8 +403,8 @@ func TestNoopStoreAuthAndSearchEdgeBranches(t *testing.T) {
 	if err := store.TouchAPIKeyLastUsed(ctx, 404); err != nil {
 		t.Fatalf("TouchAPIKeyLastUsed(missing) error = %v", err)
 	}
-	if err := store.RevokeAPIKey(ctx, 404); err != nil {
-		t.Fatalf("RevokeAPIKey(missing) error = %v", err)
+	if err := store.RevokeAPIKey(ctx, 404); err == nil {
+		t.Fatal("RevokeAPIKey(missing) error = nil, want not found")
 	}
 	if err := store.DeleteAPIKey(ctx, 404); err == nil {
 		t.Fatal("DeleteAPIKey(missing) error = nil, want not found")

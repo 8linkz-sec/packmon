@@ -3,8 +3,6 @@ package dockerimage
 import (
 	"context"
 	"errors"
-	"os"
-	"strings"
 	"testing"
 )
 
@@ -21,8 +19,8 @@ func TestLocalInspectorExtractsRepoDigest(t *testing.T) {
 	if got[ref.Name] != "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" {
 		t.Fatalf("digests = %#v", got)
 	}
-	if !strings.Contains(strings.Join(runner.args, " "), "image inspect") {
-		t.Fatalf("runner args = %#v, want docker image inspect", runner.args)
+	if len(runner.refs) != 1 || runner.refs[0] != "docker.io/library/postgres:18-alpine" {
+		t.Fatalf("runner refs = %#v, want docker.io/library/postgres:18-alpine", runner.refs)
 	}
 }
 
@@ -36,25 +34,13 @@ func TestLocalInspectorDegradesWhenDockerUnavailable(t *testing.T) {
 	}
 }
 
-func TestExecRunnerRunUsesProvidedExecutable(t *testing.T) {
-	t.Parallel()
-
-	out, err := (execRunner{}).Run(context.Background(), os.Args[0], "-test.run=^$")
-	if err != nil {
-		t.Fatalf("execRunner.Run(test binary) error = %v", err)
-	}
-	if strings.Contains(string(out), "FAIL") {
-		t.Fatalf("execRunner.Run(test binary) output contains FAIL: %s", out)
-	}
-}
-
 type fakeRunner struct {
 	out  string
 	err  error
-	args []string
+	refs []string
 }
 
-func (f *fakeRunner) Run(_ context.Context, name string, args ...string) ([]byte, error) {
-	f.args = append([]string{name}, args...)
+func (f *fakeRunner) Inspect(_ context.Context, refs []string) ([]byte, error) {
+	f.refs = append([]string(nil), refs...)
 	return []byte(f.out), f.err
 }

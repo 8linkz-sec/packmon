@@ -2,6 +2,7 @@ package config
 
 import (
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -78,22 +79,24 @@ func TestFeedSettingsListAndEffectiveIntervals(t *testing.T) {
 	}
 
 	tests := []struct {
-		name     string
-		wantName string
-		wantKey  string
-		wantAPI  bool
-		wantSync bool
+		name            string
+		wantName        string
+		wantKey         string
+		wantAPI         bool
+		wantSupportsAPI bool
+		wantSync        bool
+		wantManualSync  bool
 	}{
-		{" OSV ", "osv", "", false, true},
-		{"ghsa", "ghsa", "", false, true},
-		{"openssf", "openssf", "", false, true},
-		{"vulncheck", "vulncheck", "vc-token", true, true},
-		{"cisakev", "cisakev", "", false, true},
-		{"epss", "epss", "", false, true},
-		{"nvd", "nvd", "nvd-token", false, true},
-		{"endoflife", "endoflife", "", false, true},
-		{"socket", "socket", "socket-token", true, false},
-		{"reversinglabs", "reversinglabs", "rl-token", true, false},
+		{" OSV ", "osv", "", false, false, true, true},
+		{"ghsa", "ghsa", "", false, false, true, true},
+		{"openssf", "openssf", "", false, false, true, true},
+		{"vulncheck", "vulncheck", "vc-token", true, true, true, true},
+		{"cisakev", "cisakev", "", false, false, true, true},
+		{"epss", "epss", "", false, false, true, true},
+		{"nvd", "nvd", "nvd-token", false, true, true, true},
+		{"endoflife", "endoflife", "", false, false, true, true},
+		{"socket", "socket", "socket-token", true, true, false, false},
+		{"reversinglabs", "reversinglabs", "rl-token", true, true, false, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.wantName, func(t *testing.T) {
@@ -110,8 +113,14 @@ func TestFeedSettingsListAndEffectiveIntervals(t *testing.T) {
 			if feed.RequiresAPIKey != tt.wantAPI {
 				t.Fatalf("FeedSettings(%q).RequiresAPIKey = %v, want %v", tt.name, feed.RequiresAPIKey, tt.wantAPI)
 			}
+			if feed.SupportsAPIKey != tt.wantSupportsAPI {
+				t.Fatalf("FeedSettings(%q).SupportsAPIKey = %v, want %v", tt.name, feed.SupportsAPIKey, tt.wantSupportsAPI)
+			}
 			if feed.SupportsSyncInterval != tt.wantSync {
 				t.Fatalf("FeedSettings(%q).SupportsSyncInterval = %v, want %v", tt.name, feed.SupportsSyncInterval, tt.wantSync)
+			}
+			if feed.SupportsManualSync != tt.wantManualSync {
+				t.Fatalf("FeedSettings(%q).SupportsManualSync = %v, want %v", tt.name, feed.SupportsManualSync, tt.wantManualSync)
 			}
 		})
 	}
@@ -176,8 +185,8 @@ func TestSetFeedSettingsUpdatesEveryFeed(t *testing.T) {
 				t.Fatalf("EPSS settings not applied: %#v", cfg.Feeds)
 			}
 		}},
-		{FeedSettings{Name: "nvd", Enabled: true, Mode: FeedModeExternal, SyncInterval: 6 * time.Hour, APIKey: " nvd "}, func(t *testing.T) {
-			if !cfg.Feeds.NVDEnabled || cfg.Feeds.NVDMode != FeedModeExternal || cfg.Feeds.NVDInterval != 6*time.Hour || cfg.Feeds.NVDAPIKey != "nvd" {
+		{FeedSettings{Name: "nvd", Enabled: true, Mode: FeedModeSelf, SyncInterval: 6 * time.Hour, APIKey: " nvd "}, func(t *testing.T) {
+			if !cfg.Feeds.NVDEnabled || cfg.Feeds.NVDMode != FeedModeSelf || cfg.Feeds.NVDInterval != 6*time.Hour || cfg.Feeds.NVDAPIKey != "nvd" {
 				t.Fatalf("NVD settings not applied: %#v", cfg.Feeds)
 			}
 		}},
@@ -208,11 +217,65 @@ func TestSetFeedSettingsUpdatesEveryFeed(t *testing.T) {
 	if err := cfg.SetFeedSettings(FeedSettings{Name: "reversinglabs", Mode: FeedModeExternal}); err == nil {
 		t.Fatal("SetFeedSettings(reversinglabs external) error = nil, want error")
 	}
+	if err := cfg.SetFeedSettings(FeedSettings{Name: "nvd", Mode: FeedModeExternal}); err == nil {
+		t.Fatal("SetFeedSettings(nvd external) error = nil, want error")
+	}
 	if err := cfg.SetFeedSettings(FeedSettings{Name: "unknown", Mode: FeedModeSelf}); err == nil {
 		t.Fatal("SetFeedSettings(unknown) error = nil, want error")
 	}
 	if err := cfg.SetFeedSettings(FeedSettings{Name: "osv", Mode: FeedMode("bad")}); err == nil {
 		t.Fatal("SetFeedSettings(invalid mode) error = nil, want error")
+	}
+}
+
+func TestValidateFeedSettingsRejectsUnsupportedModesWithoutMutation(t *testing.T) {
+	cfg := &Config{Feeds: FeedsConfig{EndOfLifeMode: FeedModeSelf}}
+	before := cfg.Feeds
+
+	if err := ValidateFeedSettings(FeedSettings{Name: "endoflife", Mode: FeedModeExternal}); err == nil {
+		t.Fatal("ValidateFeedSettings(endoflife external) error = nil, want error")
+	}
+	if err := ValidateFeedSettings(FeedSettings{Name: "nvd", Mode: FeedModeExternal}); err == nil {
+		t.Fatal("ValidateFeedSettings(nvd external) error = nil, want error")
+	}
+	if FeedSupportsExternalMode("nvd") {
+		t.Fatal("FeedSupportsExternalMode(nvd) = true, want false")
+	}
+	if !reflect.DeepEqual(cfg.Feeds, before) {
+		t.Fatalf("ValidateFeedSettings mutated config: before=%+v after=%+v", before, cfg.Feeds)
+	}
+	if err := ValidateFeedSettings(FeedSettings{Name: "osv", Mode: FeedModeExternal}); err != nil {
+		t.Fatalf("ValidateFeedSettings(osv external) error = %v", err)
+	}
+}
+
+func TestValidateFeedSettingsRejectsUnsafeSelfSyncIntervals(t *testing.T) {
+	minInterval := 15 * time.Minute
+
+	if err := ValidateFeedSettings(FeedSettings{
+		Name:         "vulncheck",
+		Mode:         FeedModeSelf,
+		SyncInterval: minInterval - time.Nanosecond,
+	}); err == nil || !strings.Contains(err.Error(), "at least 15m0s") {
+		t.Fatalf("ValidateFeedSettings(short interval) error = %v, want minimum interval error", err)
+	}
+
+	for _, interval := range []time.Duration{minInterval, minInterval + time.Minute} {
+		if err := ValidateFeedSettings(FeedSettings{
+			Name:         "vulncheck",
+			Mode:         FeedModeSelf,
+			SyncInterval: interval,
+		}); err != nil {
+			t.Fatalf("ValidateFeedSettings(%s) error = %v", interval, err)
+		}
+	}
+
+	if err := ValidateFeedSettings(FeedSettings{
+		Name:         "vulncheck",
+		Mode:         FeedModeSelf,
+		SyncInterval: 0,
+	}); err != nil {
+		t.Fatalf("ValidateFeedSettings(default interval) error = %v", err)
 	}
 }
 
@@ -239,7 +302,7 @@ func TestFeedSettingsConcurrentReadWriteRaceFree(t *testing.T) {
 					Name:         "vulncheck",
 					Enabled:      n%2 == 0,
 					Mode:         FeedModeSelf,
-					SyncInterval: time.Duration(n+1) * time.Minute,
+					SyncInterval: 15*time.Minute + time.Duration(n)*time.Minute,
 					APIKey:       "key",
 				}); err != nil {
 					t.Errorf("SetFeedSettings writer %d: %v", id, err)

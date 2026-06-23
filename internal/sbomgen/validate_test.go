@@ -18,6 +18,25 @@ func TestValidateGeneratedSBOMRequiresCycloneDXJSON(t *testing.T) {
 	}
 }
 
+func TestValidateGeneratedSBOMRejectsOversizedFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "huge.cdx.json")
+	file, err := os.Create(path) //nolint:gosec // test creates a file in t.TempDir to exercise size validation.
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(path, int64(maxGeneratedSBOMBytes)+1); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := validateGeneratedSBOM(path); err == nil || !strings.Contains(err.Error(), "exceeds maximum SBOM size") {
+		t.Fatalf("validate oversized err = %v, want size cap", err)
+	}
+}
+
 func TestValidateGeneratedSBOMCountsPackagesAndSkippedComponents(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "bom.cdx.json")

@@ -167,7 +167,8 @@ func (s *Store) RepairGHSAAffectedPackages(ctx context.Context) (int, error) {
 			FROM deduped
 			ON CONFLICT (vulnerability_id, ecosystem, name) DO UPDATE SET
 				version_ranges = EXCLUDED.version_ranges,
-				versions_affected = EXCLUDED.versions_affected
+				versions_affected = EXCLUDED.versions_affected,
+				updated_at = NOW()
 			WHERE affected_packages.version_ranges IS DISTINCT FROM EXCLUDED.version_ranges
 			   OR affected_packages.versions_affected IS DISTINCT FROM EXCLUDED.versions_affected
 			RETURNING 1

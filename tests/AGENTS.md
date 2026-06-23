@@ -24,12 +24,15 @@ Read `AGENTS.md` (root) first for the full command list and verification gate.
 
 - Coverage targets: overall >= 90%, parsers >= 90%, API handlers >= 90%, DB layer
   >= 80%, new code per PR >= 80%.
+- The CI and `make test` coverage gate currently enforce an overall ratchet of
+  >= 79.5%; raise that floor as coverage improves until it reaches the 90%
+  target.
 - For every security-sensitive or bug fix, add a regression test that FAILS
   before the fix.
 - Prefer negative tests: malformed input, spoofed headers, oversize bodies,
   unauthenticated writes, invalid enum values.
 
-## Known coverage gaps to close (see Audit.md M9 + test-gap notes)
+## Known Coverage Gaps
 
 - DB-backed tests for manual advisories, system settings, queue management.
 - Negative trust tests in `internal/server/middleware`.

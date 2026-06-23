@@ -1,13 +1,16 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
 
-	"github.com/8linkz/packmon/internal/db/sqlite"
+	"github.com/8linkz-sec/packmon/internal/db/sqlite"
+	"github.com/8linkz-sec/packmon/internal/plural"
 	"github.com/spf13/cobra"
 )
 
@@ -35,6 +38,7 @@ func newDBSyncCmd() *cobra.Command {
 		flagServer       string
 		flagAPIKey       string
 		flagTimeout      int
+		flagCACert       string
 		flagInsecureHTTP bool
 	)
 
@@ -69,7 +73,7 @@ func newDBSyncCmd() *cobra.Command {
 				serverURL = strings.TrimSpace(flagServer)
 			}
 			if serverURL == "" {
-				return fmt.Errorf("missing server URL (use --server, PACKMON_SERVER, or .packmon.yaml)")
+				return fmt.Errorf("missing server URL (use --server, PACKMON_SERVER, user-global config, or explicit --config)")
 			}
 
 			apiKey := ""
@@ -92,12 +96,27 @@ func newDBSyncCmd() *cobra.Command {
 				apiKey = strings.TrimSpace(flagAPIKey)
 			}
 
+			caCertFile := ""
+			if cfg != nil && cfg.CACert != "" {
+				caCertFile = cfg.CACert
+			}
+			if envCACert := strings.TrimSpace(os.Getenv("PACKMON_CA_CERT")); envCACert != "" {
+				caCertFile = envCACert
+			}
+			if cmd.Flags().Changed("cacert") {
+				caCertFile = strings.TrimSpace(flagCACert)
+			}
+
 			insecureHTTP := false
 			if cfg != nil {
 				insecureHTTP = boolValue(cfg.InsecureAllowHTTP, false)
 			}
 			if strings.TrimSpace(os.Getenv("PACKMON_INSECURE_ALLOW_HTTP")) != "" {
-				insecureHTTP = envBool("PACKMON_INSECURE_ALLOW_HTTP")
+				parsed, _, parseErr := strictEnvBool("PACKMON_INSECURE_ALLOW_HTTP")
+				if parseErr != nil {
+					return parseErr
+				}
+				insecureHTTP = parsed
 			}
 			if cmd.Flags().Changed("insecure-allow-http") {
 				insecureHTTP = flagInsecureHTTP
@@ -119,12 +138,20 @@ func newDBSyncCmd() *cobra.Command {
 				timeoutSeconds = cfg.Timeout
 			}
 			if envTimeout := strings.TrimSpace(os.Getenv("PACKMON_TIMEOUT")); envTimeout != "" {
-				if parsed, parseErr := parseTimeoutSeconds(envTimeout); parseErr == nil && parsed > 0 {
-					timeoutSeconds = parsed
+				parsed, parseErr := parseTimeoutSeconds(envTimeout)
+				if parseErr != nil {
+					return fmt.Errorf("PACKMON_TIMEOUT: %w", parseErr)
 				}
+				if parsed <= 0 {
+					return fmt.Errorf("PACKMON_TIMEOUT must be greater than zero")
+				}
+				timeoutSeconds = parsed
 			}
 			if cmd.Flags().Changed("timeout") {
 				timeoutSeconds = flagTimeout
+			}
+			if timeoutSeconds <= 0 {
+				return fmt.Errorf("timeout must be greater than zero")
 			}
 
 			dbPath, err := resolveLocalDBPath()
@@ -138,13 +165,16 @@ func newDBSyncCmd() *cobra.Command {
 			}
 			defer closeSilently(store)
 
+			var syncStats sqlite.SyncStats
 			if err := sqlite.Sync(cmd.Context(), store, sqlite.SyncConfig{
 				ServerURL:         serverURL,
 				APIKey:            apiKey,
 				Ecosystems:        ecosystems,
 				Full:              flagFull,
 				Timeout:           time.Duration(timeoutSeconds) * time.Second,
+				CACertFile:        caCertFile,
 				AllowInsecureHTTP: insecureHTTP,
+				Stats:             &syncStats,
 			}); err != nil {
 				return err
 			}
@@ -160,6 +190,9 @@ func newDBSyncCmd() *cobra.Command {
 			}
 			fmt.Printf("Vulnerabilities: %d\n", info.Vulnerabilities)
 			fmt.Printf("Malicious:       %d\n", info.Malicious)
+			fmt.Printf("Reputation:      %d\n", info.Reputation)
+			fmt.Printf("Lifecycle:       %d\n", info.Lifecycle)
+			printSyncRemovalStats(syncStats)
 			return nil
 		},
 	}
@@ -171,6 +204,7 @@ func newDBSyncCmd() *cobra.Command {
 	f.StringVar(&flagServer, "server", "", "feed server URL")
 	f.StringVar(&flagAPIKey, "api-key", "", "API key for authenticated sync requests")
 	f.IntVar(&flagTimeout, "timeout", 60, "sync timeout in seconds")
+	f.StringVar(&flagCACert, "cacert", "", "path to a PEM CA bundle used to verify the server's TLS certificate")
 	f.BoolVar(&flagInsecureHTTP, "insecure-allow-http", false, "allow plain http:// server URLs (sends bearer token in cleartext; opt-in)")
 
 	return cmd
@@ -209,6 +243,8 @@ func newDBInfoCmd() *cobra.Command {
 			fmt.Printf("File size:       %d bytes\n", info.FileSizeBytes)
 			fmt.Printf("Vulnerabilities: %d\n", info.Vulnerabilities)
 			fmt.Printf("Malicious:       %d\n", info.Malicious)
+			fmt.Printf("Reputation:      %d\n", info.Reputation)
+			fmt.Printf("Lifecycle:       %d\n", info.Lifecycle)
 			fmt.Printf("History entries: %d\n", info.HistoryEntries)
 			if info.LastSyncAt != nil {
 				fmt.Printf("Last sync:       %s\n", info.LastSyncAt.Format(time.RFC3339))
@@ -216,7 +252,7 @@ func newDBInfoCmd() *cobra.Command {
 				fmt.Println("Last sync:       never")
 			}
 			if info.DBAgeDays != nil {
-				fmt.Printf("DB age:          %d days\n", *info.DBAgeDays)
+				fmt.Printf("DB age:          %s\n", plural.Count(*info.DBAgeDays, "day", "days"))
 			}
 			fmt.Printf("DB stale:        %t\n", info.DBStale)
 			return nil
@@ -252,23 +288,66 @@ func newDBExportCmd() *cobra.Command {
 			}
 			defer closeSilently(store)
 
-			output := os.Stdout
-			if strings.TrimSpace(flagOutput) != "" {
-				// #nosec G304 -- CLI export path is supplied intentionally by the local user.
-				file, err := os.Create(flagOutput)
-				if err != nil {
-					return fmt.Errorf("create export file: %w", err)
-				}
-				defer closeSilently(file)
-				output = file
+			if strings.TrimSpace(flagOutput) == "" {
+				return exportLocalDB(cmd.Context(), store, os.Stdout)
 			}
 
-			return exportLocalDB(cmd.Context(), store, output)
+			// #nosec G304 -- CLI export path is supplied intentionally by the local user.
+			file, err := openPrivateExportFile(flagOutput)
+			if err != nil {
+				return fmt.Errorf("create export file: %w", err)
+			}
+			return writeLocalDBExport(cmd.Context(), store, file, file)
 		},
 	}
 
 	cmd.Flags().StringVar(&flagOutput, "output", "", "write export JSON to file instead of stdout")
 	return cmd
+}
+
+func writeLocalDBExport(ctx context.Context, store *sqlite.Store, writer io.Writer, closer io.Closer) error {
+	exportErr := exportLocalDB(ctx, store, writer)
+	if closer == nil {
+		return exportErr
+	}
+	closeErr := closer.Close()
+	if exportErr != nil {
+		return exportErr
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close export file: %w", closeErr)
+	}
+	return nil
+}
+
+func openPrivateExportFile(path string) (*os.File, error) {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600) // #nosec G304 -- CLI export path is supplied intentionally by the local user.
+	if err != nil {
+		return nil, err
+	}
+	if err := file.Chmod(0o600); err != nil {
+		closeSilently(file)
+		return nil, err
+	}
+	return file, nil
+}
+
+func printSyncRemovalStats(stats sqlite.SyncStats) {
+	if !stats.AnyRemoved() {
+		return
+	}
+	fmt.Println("Removed cached rows:")
+	if stats.FullCleared.Any() {
+		printSyncRemovalLine("Full sync clear", stats.FullCleared)
+	}
+	if stats.TombstoneDeleted.Any() {
+		printSyncRemovalLine("Tombstones", stats.TombstoneDeleted)
+	}
+}
+
+func printSyncRemovalLine(label string, stats sqlite.SyncRemovalStats) {
+	fmt.Printf("  %s: vulnerabilities=%d malicious=%d reputation=%d lifecycle=%d\n",
+		label, stats.Vulnerabilities, stats.Malicious, stats.Reputation, stats.Lifecycle)
 }
 
 func splitCSV(raw string) []string {

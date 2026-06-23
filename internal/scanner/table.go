@@ -5,7 +5,9 @@ import (
 	"io"
 	"strings"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/plural"
+	"github.com/8linkz-sec/packmon/internal/termtext"
 )
 
 // ANSI color codes for severity levels.
@@ -18,10 +20,37 @@ const (
 	colorBold   = "\033[1m"
 )
 
+const (
+	severityColumnWidth = 10 // "CRITICAL" = 8, padded to 10
+	tableColumnGap      = "  "
+)
+
 // TableWriter writes scan results as a human-readable table.
 type TableWriter struct {
 	noColor bool
 	failOn  domain.Severity
+}
+
+type tableRow struct {
+	severity string
+	colored  string
+	pkg      string
+	eco      string
+	advisory string
+	fixVer   string
+	source   string
+}
+
+type tableLayout struct {
+	maxPkg int
+	maxEco int
+	maxAdv int
+	maxFix int
+}
+
+type tableReference struct {
+	advisory string
+	url      string
 }
 
 // NewTableWriter creates a TableWriter. When noColor is true, ANSI escape
@@ -38,8 +67,35 @@ func NewTableWriter(noColor bool, failOn ...domain.Severity) *TableWriter {
 
 // Write formats the scan result as a table and writes it to w.
 func (tw *TableWriter) Write(w io.Writer, result *domain.ScanResult) error {
+	if statusMessage := scanOperationalStatusMessage(result); statusMessage != "" {
+		if err := tw.writeStatusMessages(w, result, statusMessage); err != nil {
+			return err
+		}
+		if handled, err := writeNoFindingResult(w, result, statusMessage); handled {
+			return err
+		}
+	} else {
+		if err := tw.writeStatusMessages(w, result, ""); err != nil {
+			return err
+		}
+		if handled, err := writeNoFindingResult(w, result, ""); handled {
+			return err
+		}
+	}
+
+	rows, layout := tw.buildTableRows(result.Findings)
+	if err := writeFindingTable(w, rows, layout); err != nil {
+		return err
+	}
+	if err := writeTableReferences(w, buildTableReferences(rows, result.Findings), layout); err != nil {
+		return err
+	}
+	return tw.writeSummary(w, result)
+}
+
+func (tw *TableWriter) writeStatusMessages(w io.Writer, result *domain.ScanResult, statusMessage string) error {
 	if result.Mode == "local" && result.DBAgeDays != nil && result.DBStale {
-		if _, err := fmt.Fprintf(w, "\n!! ATTENTION: Local database last synced %d days ago.\n", *result.DBAgeDays); err != nil {
+		if _, err := fmt.Fprintf(w, "\n!! ATTENTION: Local database last synced %s ago.\n", plural.Count(*result.DBAgeDays, "day", "days")); err != nil {
 			return err
 		}
 		if _, err := fmt.Fprintln(w, "!! Results may be incomplete. Update with: packmon db sync"); err != nil {
@@ -47,133 +103,135 @@ func (tw *TableWriter) Write(w io.Writer, result *domain.ScanResult) error {
 		}
 	}
 
-	switch result.FeedStatus {
-	case "", "healthy":
-	case "degraded":
-		if _, err := fmt.Fprintln(w, "\nWARN  Server reports degraded feed status. Some feeds may be outdated."); err != nil {
-			return err
+	if statusMessage != "" {
+		_, err := fmt.Fprintf(w, "\n%s\n", termtext.Sanitize(statusMessage))
+		return err
+	}
+	if result.FeedStatus == "degraded" {
+		_, err := fmt.Fprintln(w, "\nWARN  Server reports degraded feed status. Some feeds may be outdated.")
+		return err
+	}
+	return nil
+}
+
+func writeNoFindingResult(w io.Writer, result *domain.ScanResult, statusMessage string) (bool, error) {
+	if len(result.Findings) > 0 {
+		return false, nil
+	}
+	if statusMessage != "" {
+		_, err := fmt.Fprintf(w, "\nScan did not complete; findings were not evaluated for %s.\n", plural.Count(result.PackagesScanned, "package", "packages"))
+		return true, err
+	}
+	if message := zeroPackageScanDiagnostic(result); message != "" {
+		_, err := fmt.Fprintf(w, "\n%s\n", message)
+		return true, err
+	}
+	_, err := fmt.Fprintf(w, "\nNo findings in %s.\n", plural.Count(result.PackagesScanned, "package", "packages"))
+	return true, err
+}
+
+func (tw *TableWriter) buildTableRows(findings []domain.Finding) ([]tableRow, tableLayout) {
+	layout := tableLayout{maxPkg: 7, maxEco: 9, maxAdv: 8, maxFix: 11}
+	rows := make([]tableRow, 0, len(findings))
+	for _, finding := range findings {
+		row := tw.buildTableRow(finding)
+		rows = append(rows, row)
+		layout.include(row)
+	}
+	return rows, layout
+}
+
+func (tw *TableWriter) buildTableRow(finding domain.Finding) tableRow {
+	advisory := finding.AdvisoryID
+	if advisory == "" {
+		advisory = advisoryLabel(finding)
+	}
+	return tableRow{
+		severity: string(finding.Severity),
+		colored:  tw.colorSeverity(finding.Severity),
+		pkg:      fmt.Sprintf("%s@%s", termtext.Sanitize(finding.Name), termtext.Sanitize(finding.Version)),
+		eco:      termtext.Sanitize(string(finding.Ecosystem)),
+		advisory: termtext.Sanitize(advisory),
+		fixVer:   termtext.Sanitize(tableFixVersion(finding)),
+		source:   termtext.Sanitize(finding.Source),
+	}
+}
+
+func (layout *tableLayout) include(row tableRow) {
+	if len(row.pkg) > layout.maxPkg {
+		layout.maxPkg = len(row.pkg)
+	}
+	if len(row.eco) > layout.maxEco {
+		layout.maxEco = len(row.eco)
+	}
+	if len(row.advisory) > layout.maxAdv {
+		layout.maxAdv = len(row.advisory)
+	}
+	if len(row.fixVer) > layout.maxFix {
+		layout.maxFix = len(row.fixVer)
+	}
+}
+
+func tableFixVersion(finding domain.Finding) string {
+	if finding.FixedVersion != "" {
+		return finding.FixedVersion
+	}
+	switch finding.Type {
+	case domain.FindingTypeMalicious:
+		return "Remove pkg"
+	case domain.FindingTypeSupplyChainRisk:
+		if strings.EqualFold(strings.TrimSpace(finding.RiskType), "malware_history") {
+			return "Review history"
 		}
+		return "Review pkg"
+	case domain.FindingTypeLifecycle:
+		return "Review lifecycle"
 	default:
-		if _, err := fmt.Fprintf(w, "\n%s\n", result.FeedStatus); err != nil {
-			return err
-		}
+		return "n/a"
 	}
+}
 
-	if len(result.Findings) == 0 && hasOperationalStatus(result.FeedStatus) {
-		_, err := fmt.Fprintf(w, "\nScan did not complete; findings were not evaluated for %d packages.\n", result.PackagesScanned)
+func writeFindingTable(w io.Writer, rows []tableRow, layout tableLayout) error {
+	headerFormat := fmt.Sprintf("%%-%ds%s%%-%ds%s%%-%ds%s%%-%ds%s%%-%ds%s%%s\n",
+		severityColumnWidth, tableColumnGap,
+		layout.maxPkg, tableColumnGap,
+		layout.maxEco, tableColumnGap,
+		layout.maxAdv, tableColumnGap,
+		layout.maxFix, tableColumnGap)
+	if _, err := fmt.Fprintf(w, headerFormat, "SEVERITY", "PACKAGE", "ECOSYSTEM", "ADVISORY", "FIX VERSION", "SOURCE"); err != nil {
 		return err
 	}
 
-	if len(result.Findings) == 0 {
-		_, err := fmt.Fprintf(w, "\nNo findings in %d packages.\n", result.PackagesScanned)
-		return err
-	}
-
-	// We avoid tabwriter for the table because ANSI escape codes break
-	// its width calculation. Instead we compute column widths manually
-	// and pad with spaces.
-	const sevWidth = 10 // "CRITICAL" = 8, padded to 10
-
-	type row struct {
-		severity string // plain text for width, colored for output
-		colored  string
-		pkg      string
-		eco      string
-		advisory string
-		fixVer   string
-		source   string
-	}
-
-	rows := make([]row, 0, len(result.Findings))
-	maxPkg, maxEco, maxAdv, maxFix, maxSrc := 7, 9, 8, 11, 6 // header widths
-
-	for _, f := range result.Findings {
-		pkg := fmt.Sprintf("%s@%s", f.Name, f.Version)
-		advisory := f.AdvisoryID
-		if advisory == "" {
-			advisory = advisoryLabel(f)
-		}
-		fixVer := f.FixedVersion
-		if fixVer == "" {
-			switch f.Type {
-			case domain.FindingTypeMalicious:
-				fixVer = "Remove pkg"
-			case domain.FindingTypeSupplyChainRisk:
-				if strings.EqualFold(strings.TrimSpace(f.RiskType), "malware_history") {
-					fixVer = "Review history"
-				} else {
-					fixVer = "Review pkg"
-				}
-			case domain.FindingTypeLifecycle:
-				fixVer = "Review lifecycle"
-			default:
-				fixVer = "n/a"
-			}
-		}
-
-		r := row{
-			severity: string(f.Severity),
-			colored:  tw.colorSeverity(f.Severity),
-			pkg:      pkg,
-			eco:      string(f.Ecosystem),
-			advisory: advisory,
-			fixVer:   fixVer,
-			source:   f.Source,
-		}
-		rows = append(rows, r)
-
-		if len(r.pkg) > maxPkg {
-			maxPkg = len(r.pkg)
-		}
-		if len(r.eco) > maxEco {
-			maxEco = len(r.eco)
-		}
-		if len(r.advisory) > maxAdv {
-			maxAdv = len(r.advisory)
-		}
-		if len(r.fixVer) > maxFix {
-			maxFix = len(r.fixVer)
-		}
-		if len(r.source) > maxSrc {
-			maxSrc = len(r.source)
-		}
-	}
-
-	gap := "  " // column gap
-	fmtPlain := fmt.Sprintf("%%-%ds%s%%-%ds%s%%-%ds%s%%-%ds%s%%-%ds%s%%s\n",
-		sevWidth, gap, maxPkg, gap, maxEco, gap, maxAdv, gap, maxFix, gap)
-
-	// Header.
-	if _, err := fmt.Fprintf(w, fmtPlain,
-		"SEVERITY", "PACKAGE", "ECOSYSTEM", "ADVISORY", "FIX VERSION", "SOURCE"); err != nil {
-		return err
-	}
-
-	// Rows -- severity uses colored string but is padded to sevWidth based
-	// on the plain-text length so ANSI codes don't shift the columns.
-	for _, r := range rows {
-		pad := ""
-		if diff := sevWidth - len(r.severity); diff > 0 {
-			pad = strings.Repeat(" ", diff)
-		}
-		if _, err := fmt.Fprintf(w, "%s%s%s", r.colored, pad, gap); err != nil {
-			return err
-		}
-		if _, err := fmt.Fprintf(w, fmt.Sprintf("%%-%ds%s%%-%ds%s%%-%ds%s%%-%ds%s%%s\n",
-			maxPkg, gap, maxEco, gap, maxAdv, gap, maxFix, gap),
-			r.pkg, r.eco, r.advisory, r.fixVer, r.source); err != nil {
+	rowFormat := fmt.Sprintf("%%-%ds%s%%-%ds%s%%-%ds%s%%-%ds%s%%s\n",
+		layout.maxPkg, tableColumnGap,
+		layout.maxEco, tableColumnGap,
+		layout.maxAdv, tableColumnGap,
+		layout.maxFix, tableColumnGap)
+	for _, row := range rows {
+		if err := writeFindingRow(w, row, rowFormat); err != nil {
 			return err
 		}
 	}
+	return nil
+}
 
-	// References -- show a resolvable link per finding so terminal users do not
-	// have to look advisory IDs up manually (parity with the SARIF/JUnit/HTML
-	// writers, which already render f.URL / f.Resources).
-	type ref struct{ advisory, url string }
-	refs := make([]ref, 0, len(result.Findings))
+func writeFindingRow(w io.Writer, row tableRow, rowFormat string) error {
+	pad := ""
+	if diff := severityColumnWidth - len(row.severity); diff > 0 {
+		pad = strings.Repeat(" ", diff)
+	}
+	if _, err := fmt.Fprintf(w, "%s%s%s", row.colored, pad, tableColumnGap); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintf(w, rowFormat, row.pkg, row.eco, row.advisory, row.fixVer, row.source)
+	return err
+}
+
+func buildTableReferences(rows []tableRow, findings []domain.Finding) []tableReference {
+	refs := make([]tableReference, 0, len(findings))
 	seen := make(map[string]bool)
-	for i, f := range result.Findings {
-		url := referenceURL(f)
+	for i, finding := range findings {
+		url := termtext.Sanitize(referenceURL(finding))
 		if url == "" {
 			continue
 		}
@@ -182,23 +240,32 @@ func (tw *TableWriter) Write(w io.Writer, result *domain.ScanResult) error {
 			continue
 		}
 		seen[key] = true
-		refs = append(refs, ref{advisory: rows[i].advisory, url: url})
+		refs = append(refs, tableReference{advisory: rows[i].advisory, url: url})
 	}
-	if len(refs) > 0 {
-		if _, err := fmt.Fprintln(w, "\nReferences:"); err != nil {
+	return refs
+}
+
+func writeTableReferences(w io.Writer, refs []tableReference, layout tableLayout) error {
+	if len(refs) == 0 {
+		return nil
+	}
+	if _, err := fmt.Fprintln(w, "\nReferences:"); err != nil {
+		return err
+	}
+	for _, ref := range refs {
+		if _, err := fmt.Fprintf(w, "  %-*s  %s\n", layout.maxAdv, ref.advisory, ref.url); err != nil {
 			return err
 		}
-		for _, r := range refs {
-			if _, err := fmt.Fprintf(w, "  %-*s  %s\n", maxAdv, r.advisory, r.url); err != nil {
-				return err
-			}
-		}
 	}
+	return nil
+}
 
-	// Summary line.
+func (tw *TableWriter) writeSummary(w io.Writer, result *domain.ScanResult) error {
 	blocking := tw.countBlocking(result)
-	_, err := fmt.Fprintf(w, "\nFound %d finding(s) (%d blocking) in %d packages\n",
-		result.FindingsCount, blocking, result.PackagesScanned)
+	_, err := fmt.Fprintf(w, "\nFound %s (%s) in %s\n",
+		plural.Count(result.FindingsCount, "finding", "findings"),
+		plural.Count(blocking, "blocking", "blocking"),
+		plural.Count(result.PackagesScanned, "package", "packages"))
 	return err
 }
 
@@ -238,13 +305,12 @@ func referenceURL(f domain.Finding) string {
 func (tw *TableWriter) countBlocking(result *domain.ScanResult) int {
 	count := 0
 	for _, f := range result.Findings {
-		if isAlwaysBlockingFinding(f) {
-			count++
-			continue
-		}
-		if tw.failOn != domain.SeverityNone && f.Severity.Blocks(tw.failOn) {
+		if domain.FindingBlocks(f, tw.failOn) {
 			count++
 		}
+	}
+	if count == 0 && result.FindingsBlocking && len(result.Findings) > 0 {
+		return 1
 	}
 	return count
 }

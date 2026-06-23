@@ -6,17 +6,19 @@
   <h1 class="text-2xl font-bold">Scans</h1>
 
   <!-- Scan trend (last 7 days) -->
-  {{if gt .TotalScans7d 0}}
+  {{if .DailyStatsLoadError}}
+  {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .DailyStatsLoadError}}
+  {{else if gt .TotalScans7d 0}}
   <div class="bg-white rounded-lg shadow p-5 border border-gray-200">
     <h2 class="text-lg font-semibold mb-3">Scan Activity (Last 7 Days)</h2>
-    <div class="overflow-x-auto">
+    <div class="overflow-x-auto focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2" tabindex="0" role="region" aria-label="Scan activity table">
       <table class="min-w-full text-sm">
         <thead>
           <tr class="text-left text-gray-500 border-b">
-            <th class="pb-2 pr-4">Date</th>
+            <th class="pb-2 pr-4">Date (UTC)</th>
             <th class="pb-2 pr-4 text-right">Scans</th>
             <th class="pb-2 pr-4 text-right">Findings</th>
-            <th class="pb-2"></th>
+            <th class="pb-2">Relative findings</th>
           </tr>
         </thead>
         <tbody>
@@ -27,9 +29,9 @@
             <td class="py-2 pr-4 text-right">{{.FindingsCount}}</td>
             <td class="py-2">
               {{if gt .FindingsCount 0}}
-              <div class="bg-red-200 rounded h-2" style="width: {{.BarWidth}}%"></div>
+              <progress value="{{.BarWidth}}" max="100" aria-label="{{.FindingsCount}} {{if eq .FindingsCount 1}}finding{{else}}findings{{end}}; relative bar {{.BarWidth}}% of the highest finding day in this table" class="scan-findings-meter scan-findings-meter--risk">{{.BarWidth}}%</progress>
               {{else}}
-              <div class="bg-green-200 rounded h-2" style="width: 2%"></div>
+              <progress value="0" max="100" aria-label="0 findings; no relative findings bar" class="scan-findings-meter scan-findings-meter--clean">0%</progress>
               {{end}}
             </td>
           </tr>
@@ -39,22 +41,23 @@
     </div>
   </div>
   {{else}}
-  <div class="bg-white rounded-lg shadow p-5 border border-gray-200 text-center text-gray-400 py-10">
+  <div class="bg-white rounded-lg shadow p-5 border border-gray-200 text-center text-gray-600 py-10">
     No scan activity yet.
   </div>
   {{end}}
 
   <!-- Recent scans -->
-  {{if .RecentScans}}
+  {{if .RecentScansLoadError}}
+  {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .RecentScansLoadError}}
+  {{else if .RecentScans}}
   <div class="bg-white rounded-lg shadow p-5 border border-gray-200">
     <h2 class="text-lg font-semibold mb-3">Recent Scans</h2>
-    <div class="overflow-x-auto">
+    <div class="overflow-x-auto focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2" tabindex="0" role="region" aria-label="Recent scans table">
       <table class="min-w-full text-sm">
         <thead>
           <tr class="text-left text-gray-500 border-b">
             <th class="pb-2 pr-4">Scan ID</th>
             <th class="pb-2 pr-4">Time</th>
-            <th class="pb-2 pr-4">Repo</th>
             <th class="pb-2 pr-4 text-right">Packages</th>
             <th class="pb-2 pr-4 text-right">Findings</th>
             <th class="pb-2 pr-4 text-right">Duration</th>
@@ -63,9 +66,8 @@
         <tbody>
           {{range .RecentScans}}
           <tr class="border-b border-gray-100 hover:bg-gray-50">
-            <td class="py-2 pr-4 font-mono text-xs">{{truncate .ScanID 12}}</td>
-            <td class="py-2 pr-4 text-gray-500" title="{{formatTime .ScannedAt}}">{{formatTimeAgo .ScannedAt}}</td>
-            <td class="py-2 pr-4">{{if .RepoName}}{{.RepoName}}{{else}}<span class="text-gray-400">-</span>{{end}}</td>
+            <td class="py-2 pr-4 font-mono text-xs break-all" title="{{.ScanID}}">{{.ScanID}}</td>
+            <td class="py-2 pr-4 text-gray-500"><time datetime="{{formatTimeISO .ScannedAt}}" aria-label="{{formatTime .ScannedAt}}">{{formatTimeAgo .ScannedAt}}</time></td>
             <td class="py-2 pr-4 text-right">{{.PackagesCount}}</td>
             <td class="py-2 pr-4 text-right {{if gt .FindingsCount 0}}text-red-600 font-medium{{end}}">{{.FindingsCount}}</td>
             <td class="py-2 pr-4 text-right text-gray-500">{{if gt .DurationMs 0}}{{.DurationMs}}ms{{else}}-{{end}}</td>
@@ -76,7 +78,7 @@
     </div>
   </div>
   {{else}}
-  <div class="bg-white rounded-lg shadow p-5 border border-gray-200 text-center text-gray-400 py-10">
+  <div class="bg-white rounded-lg shadow p-5 border border-gray-200 text-center text-gray-600 py-10">
     No scans recorded yet. Run <code class="bg-gray-100 px-1 rounded">packmon scan</code> to get started.
   </div>
   {{end}}

@@ -6,7 +6,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 // GemParser parses Gemfile.lock files (Ruby/Gem ecosystem).
@@ -55,6 +55,7 @@ func (p *GemParser) Parse(r io.Reader) ([]domain.Package, error) {
 		errs       []string
 		inGEM      bool
 		inSpecs    bool
+		remotes    []string
 		lineNumber int
 	)
 
@@ -77,6 +78,11 @@ func (p *GemParser) Parse(r io.Reader) ([]domain.Package, error) {
 		if len(line) > 0 && line[0] != ' ' && line[0] != '\t' {
 			inGEM = strings.TrimSpace(line) == "GEM"
 			inSpecs = false
+			continue
+		}
+
+		if inGEM && strings.HasPrefix(trimmed, "remote:") {
+			remotes = append(remotes, strings.TrimSpace(strings.TrimPrefix(trimmed, "remote:")))
 			continue
 		}
 
@@ -105,14 +111,15 @@ func (p *GemParser) Parse(r io.Reader) ([]domain.Package, error) {
 			continue
 		}
 		if version == "" {
-			errs = append(errs, fmt.Sprintf("line %d (%s): empty version", lineNumber, name))
+			errs = append(errs, fmt.Sprintf("line %d: empty version", lineNumber))
 			continue
 		}
 
 		packages = append(packages, domain.Package{
-			Name:      name,
-			Version:   version,
-			Ecosystem: domain.EcosystemGem,
+			Name:       name,
+			Version:    version,
+			Ecosystem:  domain.EcosystemGem,
+			SourceRefs: cleanSourceRefs(remotes...),
 		})
 	}
 

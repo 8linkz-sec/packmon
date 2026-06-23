@@ -11,10 +11,12 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
+	"strings"
 	"time"
 
-	"github.com/8linkz/packmon/internal/db"
-	"github.com/8linkz/packmon/internal/feed"
+	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/feed"
 )
 
 const (
@@ -27,6 +29,8 @@ const (
 	// maxBodySize limits the response body to 10 MB (catalog is ~300 KB).
 	maxBodySize = 10 << 20
 )
+
+var cveIDPattern = regexp.MustCompile(`^CVE-\d{4}-\d{4,}$`)
 
 // catalog is the top-level structure of the CISA KEV JSON file.
 type catalog struct {
@@ -56,6 +60,10 @@ type Syncer struct {
 	logger     *slog.Logger
 	httpClient *http.Client
 	catalogURL string
+}
+
+type cisaKEVReplacer interface {
+	ReplaceCISAKEV(ctx context.Context, cveIDs []string) (updated, cleared int, err error)
 }
 
 // Option configures a Syncer.
@@ -109,16 +117,24 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 		slog.String("catalog_version", catalogVersion),
 	)
 
-	// Set cisa_kev = true for all CVEs in the catalog.
-	updated, err := store.SetCISAKEV(ctx, cveIDs)
-	if err != nil {
-		return nil, fmt.Errorf("cisakev: set flags: %w", err)
-	}
+	var updated, cleared int
+	if replacer, ok := store.(cisaKEVReplacer); ok {
+		updated, cleared, err = replacer.ReplaceCISAKEV(ctx, cveIDs)
+		if err != nil {
+			return nil, fmt.Errorf("cisakev: replace flags: %w", err)
+		}
+	} else {
+		// Set cisa_kev = true for all CVEs in the catalog.
+		updated, err = store.SetCISAKEV(ctx, cveIDs)
+		if err != nil {
+			return nil, fmt.Errorf("cisakev: set flags: %w", err)
+		}
 
-	// Clear cisa_kev for CVEs no longer in the catalog.
-	cleared, err := store.ClearCISAKEV(ctx, cveIDs)
-	if err != nil {
-		return nil, fmt.Errorf("cisakev: clear stale flags: %w", err)
+		// Clear cisa_kev for CVEs no longer in the catalog.
+		cleared, err = store.ClearCISAKEV(ctx, cveIDs)
+		if err != nil {
+			return nil, fmt.Errorf("cisakev: clear stale flags: %w", err)
+		}
 	}
 
 	s.logger.Info("CISA KEV sync completed",
@@ -162,12 +178,35 @@ func (s *Syncer) downloadCatalog(ctx context.Context) (cveIDs []string, version 
 		return nil, "", fmt.Errorf("parse json: %w", err)
 	}
 
-	ids := make([]string, 0, len(cat.Vulnerabilities))
-	for _, v := range cat.Vulnerabilities {
-		if v.CVEID != "" {
-			ids = append(ids, v.CVEID)
-		}
+	ids, err := validateCatalog(cat)
+	if err != nil {
+		return nil, "", err
 	}
 
 	return ids, cat.CatalogVersion, nil
+}
+
+func validateCatalog(cat catalog) ([]string, error) {
+	if strings.TrimSpace(cat.CatalogVersion) == "" {
+		return nil, fmt.Errorf("invalid catalog: missing catalogVersion")
+	}
+	if cat.Count <= 0 {
+		return nil, fmt.Errorf("invalid catalog: count must be greater than zero")
+	}
+	if len(cat.Vulnerabilities) == 0 {
+		return nil, fmt.Errorf("invalid catalog: vulnerabilities must not be empty")
+	}
+	if cat.Count != len(cat.Vulnerabilities) {
+		return nil, fmt.Errorf("invalid catalog: count %d does not match vulnerabilities length %d", cat.Count, len(cat.Vulnerabilities))
+	}
+
+	ids := make([]string, 0, len(cat.Vulnerabilities))
+	for i, v := range cat.Vulnerabilities {
+		id := strings.ToUpper(strings.TrimSpace(v.CVEID))
+		if !cveIDPattern.MatchString(id) {
+			return nil, fmt.Errorf("invalid catalog: vulnerabilities[%d].cveID is invalid", i)
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
 }

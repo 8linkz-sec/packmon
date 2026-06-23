@@ -4,7 +4,8 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
+	pkgid "github.com/8linkz-sec/packmon/internal/packageid"
 )
 
 // PackageFromPURL maps a package-url string into Packmon's canonical package
@@ -54,7 +55,11 @@ func packageFromPURL(raw string, requireVersion bool) (domain.Package, bool) {
 	beforeVersion := identity[:versionIdx]
 	version := ""
 	if versionIdx < len(identity) {
-		version = stripPURLSuffix(identity[versionIdx+1:])
+		decodedVersion, ok := decodePURLVersion(identity[versionIdx+1:])
+		if !ok {
+			return domain.Package{}, false
+		}
+		version = decodedVersion
 	}
 	if requireVersion && strings.TrimSpace(version) == "" {
 		return domain.Package{}, false
@@ -77,7 +82,7 @@ func packageFromPURL(raw string, requireVersion bool) (domain.Package, bool) {
 	}
 
 	return domain.Package{
-		Name:      name,
+		Name:      pkgid.NormalizeName(string(ecosystem), name),
 		Version:   version,
 		Ecosystem: ecosystem,
 	}, true
@@ -89,6 +94,19 @@ func stripPURLSuffix(version string) string {
 		version = version[:idx]
 	}
 	return strings.TrimSpace(version)
+}
+
+func decodePURLVersion(version string) (string, bool) {
+	version = stripPURLSuffix(version)
+	decoded, err := url.PathUnescape(version)
+	if err != nil {
+		return "", false
+	}
+	decoded = strings.TrimSpace(decoded)
+	if decoded == "" {
+		return "", false
+	}
+	return decoded, true
 }
 
 func decodePURLPath(path string) ([]string, bool) {
@@ -136,7 +154,8 @@ func packageNameFromPURLPath(purlType string, segments []string) (string, domain
 	case "cocoapods":
 		return lastSegment(segments), domain.EcosystemCocoaPods, len(segments) == 1
 	case "swift":
-		return joinSegments(segments), domain.EcosystemSwiftPM, true
+		name, ok := swiftPURLPackageName(segments)
+		return name, domain.EcosystemSwiftPM, ok
 	case "hex":
 		return lastSegment(segments), domain.EcosystemHex, len(segments) == 1
 	case "cran":
@@ -144,6 +163,36 @@ func packageNameFromPURLPath(purlType string, segments []string) (string, domain
 	default:
 		return "", "", false
 	}
+}
+
+func swiftPURLPackageName(segments []string) (string, bool) {
+	if len(segments) < 3 {
+		return "", false
+	}
+	clean := make([]string, 0, len(segments))
+	for i, segment := range segments {
+		segment = strings.TrimSpace(segment)
+		if segment == "" ||
+			segment == "." ||
+			segment == ".." ||
+			strings.Contains(segment, "://") ||
+			strings.ContainsAny(segment, " \t\r\n\x00\\@:") {
+			return "", false
+		}
+		if i == 0 {
+			segment = strings.ToLower(segment)
+		}
+		clean = append(clean, segment)
+	}
+	last := clean[len(clean)-1]
+	if strings.HasSuffix(strings.ToLower(last), ".git") {
+		last = last[:len(last)-len(".git")]
+		if last == "" {
+			return "", false
+		}
+		clean[len(clean)-1] = last
+	}
+	return strings.Join(clean, "/"), true
 }
 
 func joinSegments(segments []string) string {

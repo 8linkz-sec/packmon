@@ -5,7 +5,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 // PubParser parses Dart/Flutter pubspec.lock files.
@@ -18,7 +18,9 @@ type pubspecLock struct {
 
 // pubspecPackage represents a single package entry in pubspec.lock.
 type pubspecPackage struct {
-	Version string `yaml:"version"`
+	Version     string `yaml:"version"`
+	Source      string `yaml:"source"`
+	Description any    `yaml:"description"`
 }
 
 // NewPubParser creates a new PubParser.
@@ -53,14 +55,15 @@ func (p *PubParser) Parse(r io.Reader) ([]domain.Package, error) {
 	for name, pkg := range lock.Packages {
 		version := strings.TrimSpace(pkg.Version)
 		if version == "" {
-			errs = append(errs, fmt.Sprintf("package %q: empty version", name))
+			errs = append(errs, "package entry: empty version")
 			continue
 		}
 
 		packages = append(packages, domain.Package{
-			Name:      name,
-			Version:   version,
-			Ecosystem: domain.EcosystemPub,
+			Name:       name,
+			Version:    version,
+			Ecosystem:  domain.EcosystemPub,
+			SourceRefs: pubSourceRefs(pkg),
 		})
 	}
 
@@ -74,4 +77,22 @@ func (p *PubParser) Parse(r io.Reader) ([]domain.Package, error) {
 
 func (p *PubParser) Ecosystem() domain.Ecosystem {
 	return domain.EcosystemPub
+}
+
+func pubSourceRefs(pkg pubspecPackage) []string {
+	refs := []string{}
+	if source := strings.TrimSpace(pkg.Source); source != "" {
+		refs = append(refs, "source="+source)
+	}
+	switch description := pkg.Description.(type) {
+	case map[string]any:
+		if rawURL, _ := description["url"].(string); strings.TrimSpace(rawURL) != "" {
+			refs = append(refs, "url="+rawURL)
+		}
+	case map[any]any:
+		if rawURL, _ := description["url"].(string); strings.TrimSpace(rawURL) != "" {
+			refs = append(refs, "url="+rawURL)
+		}
+	}
+	return cleanSourceRefs(refs...)
 }

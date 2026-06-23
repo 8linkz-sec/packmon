@@ -3,7 +3,7 @@ package feed
 import (
 	"strings"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 // MapOSVEcosystem maps an OSV ecosystem string to our canonical Ecosystem

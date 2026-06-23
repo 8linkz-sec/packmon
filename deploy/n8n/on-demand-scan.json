@@ -12,7 +12,14 @@
       "parameters": {
         "httpMethod": "POST",
         "path": "packmon/scan",
+        "authentication": "headerAuth",
         "responseMode": "responseNode"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "replace-with-packmon-webhook-header-auth",
+          "name": "Packmon On-Demand Webhook Header Auth"
+        }
       }
     },
     {
@@ -22,7 +29,7 @@
       "typeVersion": 1,
       "position": [540, 260],
       "parameters": {
-        "command": "packmon scan {{$env.PACKMON_SCAN_PATH}} --output-json /tmp/packmon-scan.json"
+        "command": "case \"${PACKMON_API_KEY:-}\" in \"\") echo \"PACKMON_API_KEY must be set in the n8n environment\" >&2; exit 1 ;; esac\ncase \"$PACKMON_SERVER\" in \"\") echo \"PACKMON_SERVER must be set in the n8n environment\" >&2; exit 1 ;; esac\ncase \"$PACKMON_SCAN_PATH\" in \"\"|/*|-*|*..*) echo \"PACKMON_SCAN_PATH must be a non-empty relative path without parent traversal or leading dash\" >&2; exit 1 ;; esac\npackmon scan \"$PACKMON_SCAN_PATH\" --mode remote --require-remote --server \"$PACKMON_SERVER\""
       }
     },
     {
@@ -33,7 +40,7 @@
       "position": [820, 260],
       "parameters": {
         "respondWith": "json",
-        "responseBody": "={\"workflow\":\"on-demand-scan\",\"status\":\"queued\",\"path\":$env.PACKMON_SCAN_PATH}"
+        "responseBody": "={\"workflow\":\"on-demand-scan\",\"status\":\"completed\"}"
       }
     }
   ],

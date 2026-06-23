@@ -4,27 +4,33 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/url"
-	"regexp"
-	"sort"
 	"strings"
 	"time"
 
-	"github.com/8linkz/packmon/internal/db"
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/findinglinks"
+	"github.com/8linkz-sec/packmon/internal/packageid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
-var ghsaIDPattern = regexp.MustCompile(`GHSA-[A-Za-z0-9-]+`)
-
-// normalizePackageName lowercases the package name for ecosystems where
-// names are case-insensitive (NuGet). For all other ecosystems the name
-// is returned unchanged.
+// normalizePackageName canonicalizes package names for ecosystems whose
+// registry identity is case-insensitive.
 func normalizePackageName(ecosystem, name string) string {
-	if strings.EqualFold(ecosystem, "nuget") {
-		return strings.ToLower(name)
+	return packageid.NormalizeName(ecosystem, name)
+}
+
+func validateMaliciousFindingVersions(id string, raw json.RawMessage) error {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return nil
 	}
-	return name
+	var values []string
+	if err := json.Unmarshal(raw, &values); err != nil {
+		return fmt.Errorf("malicious finding %s versions must be null or an array of strings: %w", id, err)
+	}
+	return nil
 }
 
 func (s *Store) FindVulnerabilities(ctx context.Context, ecosystem, name, version string) ([]domain.Finding, error) {
@@ -44,21 +50,30 @@ func (s *Store) FindVulnerabilities(ctx context.Context, ecosystem, name, versio
 			SELECT COALESCE(
 				json_agg(
 					json_build_object(
-						'type', COALESCE(type, ''),
+						'type', COALESCE(ref_type, ''),
 						'url', url
 					)
-					ORDER BY id
+					ORDER BY sort_order, id
 				)::text,
 				'[]'
 			) AS refs_json
-			FROM vulnerability_references
-			WHERE vulnerability_id = v.id
+			FROM (
+				SELECT 0 AS sort_order, id, type AS ref_type, url
+				FROM vulnerability_references
+				WHERE vulnerability_id = v.id
+				UNION ALL
+				SELECT 1 AS sort_order, id, 'VULNCHECK' AS ref_type,
+					COALESCE(NULLIF(TRIM(url), ''), 'https://vulncheck.com/') AS url
+				FROM vulnerability_sources
+				WHERE vulnerability_id = v.id AND source = 'vulncheck'
+			) refs
 		) vr ON true
 		LEFT JOIN LATERAL (
 			SELECT source FROM vulnerability_sources
 			WHERE vulnerability_id = v.id ORDER BY id LIMIT 1
 		) vs ON true
 		WHERE ap.ecosystem = $1 AND ap.name = $2
+		  AND v.withdrawn IS NULL
 		ORDER BY v.modified DESC, v.id`
 
 	rows, err := s.pool.Query(ctx, query, ecosystem, name)
@@ -127,19 +142,17 @@ func (s *Store) FindVulnerabilities(ctx context.Context, ecosystem, name, versio
 
 func (s *Store) FindMalicious(ctx context.Context, ecosystem, name, version string) ([]domain.Finding, error) {
 	name = normalizePackageName(ecosystem, name)
-	// versions is a JSONB array of affected versions. NULL means all
-	// versions are affected. When a specific version is requested, only
-	// return findings where versions IS NULL or the array contains
-	// that version.
 	const query = `
-		SELECT id, severity, summary, risk_type, source, reference_urls::text
+		SELECT id, severity, summary, risk_type, source,
+			COALESCE(version_ranges::text, ''),
+			COALESCE(versions::text, ''),
+			reference_urls::text
 		FROM malicious_findings
 		WHERE ecosystem = $1 AND name = $2
 		  AND removed_at IS NULL
-		  AND (versions IS NULL OR versions = 'null'::jsonb OR $3 = '' OR versions @> to_jsonb($3::text))
 		ORDER BY updated_at DESC, id DESC`
 
-	rows, err := s.pool.Query(ctx, query, ecosystem, name, version)
+	rows, err := s.pool.Query(ctx, query, ecosystem, name)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: find malicious findings: %w", err)
 	}
@@ -153,11 +166,16 @@ func (s *Store) FindMalicious(ctx context.Context, ecosystem, name, version stri
 			summary          string
 			riskType         string
 			source           string
+			versionRangesRaw string
+			versionsRaw      string
 			referenceURLsRaw string
 		)
 
-		if err := rows.Scan(&id, &severity, &summary, &riskType, &source, &referenceURLsRaw); err != nil {
+		if err := rows.Scan(&id, &severity, &summary, &riskType, &source, &versionRangesRaw, &versionsRaw, &referenceURLsRaw); err != nil {
 			return nil, fmt.Errorf("postgres: scan malicious row: %w", err)
+		}
+		if !maliciousFindingAffectsVersion(ecosystem, version, versionRangesRaw, versionsRaw) {
+			continue
 		}
 
 		title := summary
@@ -171,7 +189,7 @@ func (s *Store) FindMalicious(ctx context.Context, ecosystem, name, version stri
 		findings = append(findings, domain.Finding{
 			Name:       name,
 			Ecosystem:  domain.Ecosystem(ecosystem),
-			Type:       domain.FindingTypeMalicious,
+			Type:       db.FindingTypeForMaliciousRiskType(riskType),
 			Severity:   domain.Severity(normalizeSeverity(severity)),
 			AdvisoryID: id,
 			Title:      title,
@@ -185,6 +203,25 @@ func (s *Store) FindMalicious(ctx context.Context, ecosystem, name, version stri
 		return nil, fmt.Errorf("postgres: iterate malicious findings: %w", err)
 	}
 	return findings, nil
+}
+
+func maliciousFindingAffectsVersion(ecosystem, version, rangesJSON, versionsJSON string) bool {
+	if strings.TrimSpace(version) == "" {
+		return true
+	}
+	rangesJSON = strings.TrimSpace(rangesJSON)
+	if rangesJSON == "" || rangesJSON == "null" {
+		rangesJSON = "[]"
+	}
+	versionsJSON = strings.TrimSpace(versionsJSON)
+	if versionsJSON == "" || versionsJSON == "null" {
+		versionsJSON = "[]"
+	}
+	affected, err := versionAffectedWithEcosystem(version, rangesJSON, versionsJSON, ecosystem)
+	if err != nil {
+		return true
+	}
+	return affected
 }
 
 func (s *Store) FindVulnerabilitiesBatch(ctx context.Context, packages []db.PackageQuery) ([]domain.Finding, error) {
@@ -212,31 +249,50 @@ func (s *Store) FindVulnerabilitiesBatch(ctx context.Context, packages []db.Pack
 	query := `
 		SELECT
 			v.id, v.summary, v.severity,
-			COALESCE(vr.url, '') AS ref_url,
+			COALESCE(vr.refs_json, '[]') AS refs_json,
 			COALESCE(vs.source, '') AS source,
 			ap.ecosystem, ap.name, ap.version_ranges::text, ap.versions_affected::text
 		FROM vulnerabilities v
 		INNER JOIN affected_packages ap ON ap.vulnerability_id = v.id
 		LEFT JOIN LATERAL (
-			SELECT url FROM vulnerability_references
-			WHERE vulnerability_id = v.id
-			ORDER BY
-				CASE UPPER(COALESCE(type, ''))
-					WHEN 'ADVISORY' THEN 0
-					WHEN 'REPORT' THEN 1
-					WHEN 'ARTICLE' THEN 2
-					WHEN 'WEB' THEN 3
-					WHEN 'PACKAGE' THEN 8
-					ELSE 9
-				END,
-				id
-			LIMIT 1
+			SELECT COALESCE(
+				json_agg(
+					json_build_object(
+						'type', COALESCE(ref_type, ''),
+						'url', url
+					)
+					ORDER BY sort_order, id
+				)::text,
+				'[]'
+			) AS refs_json
+			FROM (
+				SELECT
+					CASE UPPER(COALESCE(type, ''))
+						WHEN 'ADVISORY' THEN 0
+						WHEN 'REPORT' THEN 1
+						WHEN 'ARTICLE' THEN 2
+						WHEN 'WEB' THEN 3
+						WHEN 'PACKAGE' THEN 8
+						ELSE 9
+					END AS sort_order,
+					id,
+					type AS ref_type,
+					url
+				FROM vulnerability_references
+				WHERE vulnerability_id = v.id
+				UNION ALL
+				SELECT 50 AS sort_order, id, 'VULNCHECK' AS ref_type,
+					COALESCE(NULLIF(TRIM(url), ''), 'https://vulncheck.com/') AS url
+				FROM vulnerability_sources
+				WHERE vulnerability_id = v.id AND source = 'vulncheck'
+			) refs
 		) vr ON true
 		LEFT JOIN LATERAL (
 			SELECT source FROM vulnerability_sources
 			WHERE vulnerability_id = v.id ORDER BY id LIMIT 1
 		) vs ON true
 		WHERE (ap.ecosystem, ap.name) IN (VALUES ` + strings.Join(placeholders, ", ") + `)
+		  AND v.withdrawn IS NULL
 		ORDER BY v.modified DESC, v.id`
 
 	rows, err := s.pool.Query(ctx, query, args...)
@@ -261,8 +317,8 @@ func (s *Store) FindVulnerabilitiesBatch(ctx context.Context, packages []db.Pack
 
 	var findings []domain.Finding
 	for rows.Next() {
-		var advisoryID, summary, severity, url, source, ecosystem, name, versionRangesRaw, versionsRaw string
-		if err := rows.Scan(&advisoryID, &summary, &severity, &url, &source, &ecosystem, &name, &versionRangesRaw, &versionsRaw); err != nil {
+		var advisoryID, summary, severity, refsJSON, source, ecosystem, name, versionRangesRaw, versionsRaw string
+		if err := rows.Scan(&advisoryID, &summary, &severity, &refsJSON, &source, &ecosystem, &name, &versionRangesRaw, &versionsRaw); err != nil {
 			return nil, fmt.Errorf("postgres: scan vulnerability batch row: %w", err)
 		}
 		fixedVersion := extractFixedVersion(versionRangesRaw)
@@ -272,6 +328,11 @@ func (s *Store) FindVulnerabilitiesBatch(ctx context.Context, packages []db.Pack
 		}
 		if source == "" {
 			source = "unknown"
+		}
+		resources := buildFindingResources(advisoryID, refsJSON)
+		primaryURL := ""
+		if len(resources) > 0 {
+			primaryURL = resources[0].URL
 		}
 		key := ecoName{ecosystem: ecosystem, name: normalizePackageName(ecosystem, name)}
 		entry := versionMap[key]
@@ -284,14 +345,14 @@ func (s *Store) FindVulnerabilitiesBatch(ctx context.Context, packages []db.Pack
 				findings = append(findings, domain.Finding{
 					Name: name, Version: version, Ecosystem: domain.Ecosystem(ecosystem),
 					Type: domain.FindingTypeVulnerability, Severity: domain.Severity(normalizeSeverity(severity)),
-					AdvisoryID: advisoryID, Title: title, URL: url, FixedVersion: fixedVersion, Source: source,
+					AdvisoryID: advisoryID, Title: title, URL: primaryURL, Resources: resources, FixedVersion: fixedVersion, Source: source,
 				})
 			}
 		} else {
 			findings = append(findings, domain.Finding{
 				Name: name, Ecosystem: domain.Ecosystem(ecosystem),
 				Type: domain.FindingTypeVulnerability, Severity: domain.Severity(normalizeSeverity(severity)),
-				AdvisoryID: advisoryID, Title: title, URL: url, FixedVersion: fixedVersion, Source: source,
+				AdvisoryID: advisoryID, Title: title, URL: primaryURL, Resources: resources, FixedVersion: fixedVersion, Source: source,
 			})
 		}
 	}
@@ -325,6 +386,7 @@ func (s *Store) FindMaliciousBatch(ctx context.Context, packages []db.PackageQue
 
 	query := `
 		SELECT id, ecosystem, name, severity, summary, risk_type, source,
+			COALESCE(version_ranges::text, ''),
 			COALESCE(versions::text, ''),
 			COALESCE(reference_urls::text, '[]')
 		FROM malicious_findings
@@ -354,8 +416,8 @@ func (s *Store) FindMaliciousBatch(ctx context.Context, packages []db.PackageQue
 
 	var findings []domain.Finding
 	for rows.Next() {
-		var id, ecosystem, name, severity, summary, riskType, source, versionsRaw, referenceURLsRaw string
-		if err := rows.Scan(&id, &ecosystem, &name, &severity, &summary, &riskType, &source, &versionsRaw, &referenceURLsRaw); err != nil {
+		var id, ecosystem, name, severity, summary, riskType, source, versionRangesRaw, versionsRaw, referenceURLsRaw string
+		if err := rows.Scan(&id, &ecosystem, &name, &severity, &summary, &riskType, &source, &versionRangesRaw, &versionsRaw, &referenceURLsRaw); err != nil {
 			return nil, fmt.Errorf("postgres: scan malicious batch row: %w", err)
 		}
 		title := summary
@@ -366,41 +428,23 @@ func (s *Store) FindMaliciousBatch(ctx context.Context, packages []db.PackageQue
 			source = "unknown"
 		}
 
-		var findingVersions []string
-		hasVersionList := false
-		trimmed := strings.TrimSpace(versionsRaw)
-		if trimmed != "" && trimmed != "null" {
-			if err := json.Unmarshal([]byte(trimmed), &findingVersions); err == nil && len(findingVersions) > 0 {
-				hasVersionList = true
-			}
-		}
-
 		key := ecoName{ecosystem: ecosystem, name: normalizePackageName(ecosystem, name)}
 		entry := versionMap[key]
 		if entry != nil && len(entry.versions) > 0 {
 			for _, version := range entry.versions {
-				if hasVersionList {
-					found := false
-					for _, v := range findingVersions {
-						if v == version {
-							found = true
-							break
-						}
-					}
-					if !found {
-						continue
-					}
+				if !maliciousFindingAffectsVersion(ecosystem, version, versionRangesRaw, versionsRaw) {
+					continue
 				}
 				findings = append(findings, domain.Finding{
 					Name: name, Version: version, Ecosystem: domain.Ecosystem(ecosystem),
-					Type: domain.FindingTypeMalicious, Severity: domain.Severity(normalizeSeverity(severity)),
+					Type: db.FindingTypeForMaliciousRiskType(riskType), Severity: domain.Severity(normalizeSeverity(severity)),
 					AdvisoryID: id, Title: title, URL: extractFirstURL(referenceURLsRaw), RiskType: riskType, Source: source,
 				})
 			}
 		} else {
 			findings = append(findings, domain.Finding{
 				Name: name, Ecosystem: domain.Ecosystem(ecosystem),
-				Type: domain.FindingTypeMalicious, Severity: domain.Severity(normalizeSeverity(severity)),
+				Type: db.FindingTypeForMaliciousRiskType(riskType), Severity: domain.Severity(normalizeSeverity(severity)),
 				AdvisoryID: id, Title: title, URL: extractFirstURL(referenceURLsRaw), RiskType: riskType, Source: source,
 			})
 		}
@@ -413,7 +457,12 @@ func (s *Store) FindMaliciousBatch(ctx context.Context, packages []db.PackageQue
 
 func (s *Store) UpsertVulnerability(ctx context.Context, vuln *db.Vulnerability) error {
 	return withTx(ctx, s.pool, func(tx pgx.Tx) error {
-		const upsertVulnerability = `
+		return upsertVulnerabilityTx(ctx, tx, vuln)
+	})
+}
+
+func upsertVulnerabilityTx(ctx context.Context, tx pgx.Tx, vuln *db.Vulnerability) error {
+	const upsertVulnerability = `
 			INSERT INTO vulnerabilities (
 				id, summary, details, severity, cvss_score, epss_score, epss_percentile,
 				cisa_kev, exploit_exists, published, modified, withdrawn
@@ -424,135 +473,244 @@ func (s *Store) UpsertVulnerability(ctx context.Context, vuln *db.Vulnerability)
 				summary = CASE WHEN EXCLUDED.summary != '' THEN EXCLUDED.summary ELSE vulnerabilities.summary END,
 				details = CASE WHEN EXCLUDED.details IS NOT NULL AND EXCLUDED.details != '' THEN EXCLUDED.details ELSE vulnerabilities.details END,
 				severity = CASE
-					WHEN vulnerabilities.severity = 'UNKNOWN' THEN EXCLUDED.severity
-					WHEN EXCLUDED.severity = 'UNKNOWN' THEN vulnerabilities.severity
-					ELSE EXCLUDED.severity
+					WHEN (
+						CASE EXCLUDED.severity
+							WHEN 'CRITICAL' THEN 4
+							WHEN 'HIGH' THEN 3
+							WHEN 'MEDIUM' THEN 2
+							WHEN 'LOW' THEN 1
+							ELSE 0
+						END
+					) > (
+						CASE vulnerabilities.severity
+							WHEN 'CRITICAL' THEN 4
+							WHEN 'HIGH' THEN 3
+							WHEN 'MEDIUM' THEN 2
+							WHEN 'LOW' THEN 1
+							ELSE 0
+						END
+					) THEN EXCLUDED.severity
+					ELSE vulnerabilities.severity
 				END,
 				cvss_score = COALESCE(EXCLUDED.cvss_score, vulnerabilities.cvss_score),
 				published = EXCLUDED.published,
 				modified = EXCLUDED.modified,
 				withdrawn = EXCLUDED.withdrawn,
-				updated_at = NOW()`
+				updated_at = NOW()
+			WHERE vulnerabilities.summary IS DISTINCT FROM (CASE WHEN EXCLUDED.summary != '' THEN EXCLUDED.summary ELSE vulnerabilities.summary END)
+			   OR vulnerabilities.details IS DISTINCT FROM (CASE WHEN EXCLUDED.details IS NOT NULL AND EXCLUDED.details != '' THEN EXCLUDED.details ELSE vulnerabilities.details END)
+			   OR vulnerabilities.severity IS DISTINCT FROM (
+					CASE
+						WHEN (
+							CASE EXCLUDED.severity
+								WHEN 'CRITICAL' THEN 4
+								WHEN 'HIGH' THEN 3
+								WHEN 'MEDIUM' THEN 2
+								WHEN 'LOW' THEN 1
+								ELSE 0
+							END
+						) > (
+							CASE vulnerabilities.severity
+								WHEN 'CRITICAL' THEN 4
+								WHEN 'HIGH' THEN 3
+								WHEN 'MEDIUM' THEN 2
+								WHEN 'LOW' THEN 1
+								ELSE 0
+							END
+						) THEN EXCLUDED.severity
+						ELSE vulnerabilities.severity
+					END
+			   )
+			   OR vulnerabilities.cvss_score IS DISTINCT FROM COALESCE(EXCLUDED.cvss_score, vulnerabilities.cvss_score)
+			   OR vulnerabilities.published IS DISTINCT FROM EXCLUDED.published
+			   OR vulnerabilities.modified IS DISTINCT FROM EXCLUDED.modified
+			   OR vulnerabilities.withdrawn IS DISTINCT FROM EXCLUDED.withdrawn`
 
-		if _, err := tx.Exec(ctx, upsertVulnerability,
-			vuln.ID,
-			vuln.Summary,
-			nullableString(vuln.Details),
-			normalizeVulnerabilitySeverity(vuln.Severity),
-			vuln.CVSSScore,
-			vuln.EPSSScore,
-			vuln.EPSSPercentile,
-			vuln.CISAKEV,
-			vuln.ExploitExists,
-			vuln.Published,
-			vuln.Modified,
-			vuln.Withdrawn,
-		); err != nil {
-			return fmt.Errorf("upsert vulnerability core: %w", err)
-		}
+	if _, err := tx.Exec(ctx, upsertVulnerability,
+		vuln.ID,
+		vuln.Summary,
+		nullableString(vuln.Details),
+		normalizeVulnerabilitySeverity(vuln.Severity),
+		vuln.CVSSScore,
+		vuln.EPSSScore,
+		vuln.EPSSPercentile,
+		vuln.CISAKEV,
+		vuln.ExploitExists,
+		vuln.Published,
+		vuln.Modified,
+		vuln.Withdrawn,
+	); err != nil {
+		return fmt.Errorf("upsert vulnerability core: %w", err)
+	}
 
-		for _, source := range vuln.Sources {
-			const upsertSource = `
+	for _, source := range vuln.Sources {
+		const upsertSource = `
 				INSERT INTO vulnerability_sources (vulnerability_id, source, source_id, url, raw_json)
 				VALUES ($1, $2, $3, $4, $5)
 				ON CONFLICT (vulnerability_id, source) DO UPDATE SET
 					source_id = EXCLUDED.source_id,
 					url = EXCLUDED.url,
 					raw_json = EXCLUDED.raw_json,
-					updated_at = NOW()`
+					updated_at = NOW()
+				WHERE vulnerability_sources.source_id IS DISTINCT FROM EXCLUDED.source_id
+				   OR vulnerability_sources.url IS DISTINCT FROM EXCLUDED.url
+				   OR vulnerability_sources.raw_json IS DISTINCT FROM EXCLUDED.raw_json`
 
-			if _, err := tx.Exec(ctx, upsertSource,
-				vuln.ID,
-				source.Source,
-				source.SourceID,
-				nullableString(source.URL),
-				normalizeJSON(source.RawJSON, nil),
-			); err != nil {
-				return fmt.Errorf("upsert vulnerability source %s: %w", source.Source, err)
-			}
+		if _, err := tx.Exec(ctx, upsertSource,
+			vuln.ID,
+			source.Source,
+			source.SourceID,
+			nullableString(source.URL),
+			normalizeJSON(source.RawJSON, nil),
+		); err != nil {
+			return fmt.Errorf("upsert vulnerability source %s: %w", source.Source, err)
 		}
+	}
 
-		if _, err := tx.Exec(ctx, `DELETE FROM vulnerability_aliases WHERE vulnerability_id = $1`, vuln.ID); err != nil {
-			return fmt.Errorf("delete vulnerability aliases: %w", err)
+	if _, err := tx.Exec(ctx, `DELETE FROM vulnerability_aliases WHERE vulnerability_id = $1`, vuln.ID); err != nil {
+		return fmt.Errorf("delete vulnerability aliases: %w", err)
+	}
+	for _, alias := range vuln.Aliases {
+		if alias.AliasID == "" {
+			continue
 		}
-		for _, alias := range vuln.Aliases {
-			if alias.AliasID == "" {
-				continue
-			}
-			// Use composite unique constraint (vulnerability_id, alias_id)
-			// so the same alias can be linked to multiple vulnerabilities
-			// without silently moving it (ARCH-H3 fix).
-			const insertAlias = `
+		// Use composite unique constraint (vulnerability_id, alias_id)
+		// so the same alias can be linked to multiple vulnerabilities
+		// without silently moving it (ARCH-H3 fix).
+		const insertAlias = `
 				INSERT INTO vulnerability_aliases (vulnerability_id, alias_id)
 				VALUES ($1, $2)
 				ON CONFLICT (vulnerability_id, alias_id) DO NOTHING`
-			if _, err := tx.Exec(ctx, insertAlias, vuln.ID, alias.AliasID); err != nil {
-				return fmt.Errorf("insert alias %s: %w", alias.AliasID, err)
-			}
+		if _, err := tx.Exec(ctx, insertAlias, vuln.ID, alias.AliasID); err != nil {
+			return fmt.Errorf("insert alias %s: %w", alias.AliasID, err)
 		}
+	}
 
-		if _, err := tx.Exec(ctx, `DELETE FROM vulnerability_references WHERE vulnerability_id = $1`, vuln.ID); err != nil {
-			return fmt.Errorf("delete vulnerability references: %w", err)
+	if _, err := tx.Exec(ctx, `DELETE FROM vulnerability_references WHERE vulnerability_id = $1`, vuln.ID); err != nil {
+		return fmt.Errorf("delete vulnerability references: %w", err)
+	}
+	for _, ref := range vuln.References {
+		if !shouldStoreVulnerabilityReference(ref.URL) {
+			continue
 		}
-		for _, ref := range vuln.References {
-			if !shouldStoreVulnerabilityReference(ref.URL) {
-				continue
-			}
-			const insertReference = `
+		const insertReference = `
 				INSERT INTO vulnerability_references (vulnerability_id, type, url, source)
 				VALUES ($1, $2, $3, $4)
 				ON CONFLICT (vulnerability_id, url) DO UPDATE SET
 					type = EXCLUDED.type,
 					source = EXCLUDED.source`
-			if _, err := tx.Exec(ctx, insertReference,
-				vuln.ID,
-				nullableString(ref.Type),
-				ref.URL,
-				nullableString(ref.Source),
-			); err != nil {
-				return fmt.Errorf("insert reference %s: %w", ref.URL, err)
-			}
+		if _, err := tx.Exec(ctx, insertReference,
+			vuln.ID,
+			nullableString(ref.Type),
+			ref.URL,
+			nullableString(ref.Source),
+		); err != nil {
+			return fmt.Errorf("insert reference %s: %w", ref.URL, err)
 		}
+	}
 
-		if _, err := tx.Exec(ctx, `DELETE FROM affected_packages WHERE vulnerability_id = $1`, vuln.ID); err != nil {
-			return fmt.Errorf("delete affected packages: %w", err)
-		}
-		for _, pkg := range vuln.AffectedPackages {
-			const insertPackage = `
+	for _, pkg := range vuln.AffectedPackages {
+		name := normalizePackageName(pkg.Ecosystem, pkg.Name)
+		const insertPackage = `
 				INSERT INTO affected_packages (
 					vulnerability_id, ecosystem, name, version_ranges, versions_affected
 				) VALUES ($1, $2, $3, $4, $5)
 				ON CONFLICT (vulnerability_id, ecosystem, name) DO UPDATE SET
 					version_ranges = EXCLUDED.version_ranges,
-					versions_affected = EXCLUDED.versions_affected`
+					versions_affected = EXCLUDED.versions_affected,
+					updated_at = NOW()
+				WHERE affected_packages.version_ranges IS DISTINCT FROM EXCLUDED.version_ranges
+				   OR affected_packages.versions_affected IS DISTINCT FROM EXCLUDED.versions_affected`
 
-			if _, err := tx.Exec(ctx, insertPackage,
-				vuln.ID,
-				pkg.Ecosystem,
-				pkg.Name,
-				normalizeJSON(pkg.VersionRanges, []byte("[]")),
-				normalizeJSON(pkg.VersionsAffected, []byte("[]")),
-			); err != nil {
-				return fmt.Errorf("insert affected package %s/%s: %w", pkg.Ecosystem, pkg.Name, err)
-			}
+		if _, err := tx.Exec(ctx, insertPackage,
+			vuln.ID,
+			pkg.Ecosystem,
+			name,
+			normalizeJSON(pkg.VersionRanges, []byte("[]")),
+			normalizeJSON(pkg.VersionsAffected, []byte("[]")),
+		); err != nil {
+			return fmt.Errorf("insert affected package %s/%s: %w", pkg.Ecosystem, name, err)
 		}
+	}
 
-		return nil
-	})
+	return nil
 }
 
 func (s *Store) UpsertMaliciousFinding(ctx context.Context, mf *db.MaliciousFinding) error {
+	return withTx(ctx, s.pool, func(tx pgx.Tx) error {
+		return upsertMaliciousFindingTx(ctx, tx, mf)
+	})
+}
+
+func (s *Store) ImportVulnerabilityFeed(ctx context.Context, feed string, items []db.Vulnerability, deleteIDs []string, status *db.FeedSyncStatus) (int, int, error) {
+	imported := 0
+	deleted := 0
+	err := withTx(ctx, s.pool, func(tx pgx.Tx) error {
+		for i := range items {
+			if err := upsertVulnerabilityTx(ctx, tx, &items[i]); err != nil {
+				return fmt.Errorf("import vulnerability %s: %w", items[i].ID, err)
+			}
+			imported++
+		}
+		for _, id := range deleteIDs {
+			if err := deleteVulnerabilityForSourceTx(ctx, tx, id, feed); err != nil {
+				return fmt.Errorf("delete imported vulnerability %s: %w", id, err)
+			}
+			deleted++
+		}
+		if status != nil {
+			if err := upsertFeedSyncStatusTx(ctx, tx, status); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return imported, deleted, err
+}
+
+func (s *Store) ImportMaliciousFeed(ctx context.Context, feed string, items []db.MaliciousFinding, deleteIDs []string, status *db.FeedSyncStatus) (int, int, error) {
+	imported := 0
+	deleted := 0
+	err := withTx(ctx, s.pool, func(tx pgx.Tx) error {
+		for i := range items {
+			if err := upsertMaliciousFindingTx(ctx, tx, &items[i]); err != nil {
+				return fmt.Errorf("import malicious finding %s: %w", items[i].ID, err)
+			}
+			imported++
+		}
+		for _, id := range deleteIDs {
+			if err := deleteMaliciousFindingForSourceTx(ctx, tx, id, feed); err != nil {
+				return fmt.Errorf("delete imported malicious finding %s: %w", id, err)
+			}
+			deleted++
+		}
+		if status != nil {
+			if err := upsertFeedSyncStatusTx(ctx, tx, status); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return imported, deleted, err
+}
+
+func upsertMaliciousFindingTx(ctx context.Context, tx pgx.Tx, mf *db.MaliciousFinding) error {
+	if err := validateMaliciousFindingVersions(mf.ID, mf.Versions); err != nil {
+		return err
+	}
+
 	const query = `
 		INSERT INTO malicious_findings (
-			id, ecosystem, name, versions, source, risk_type, severity,
+			id, ecosystem, name, version_ranges, versions, source, risk_type, severity,
 			summary, description, reference_urls, origin_ref, published, created_by
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7,
-			$8, $9, $10, $11, $12, $13
+			$1, $2, $3, $4, $5, $6, $7, $8,
+			$9, $10, $11, $12, $13, $14
 		)
 		ON CONFLICT (id) DO UPDATE SET
 			ecosystem = EXCLUDED.ecosystem,
 			name = EXCLUDED.name,
+			version_ranges = EXCLUDED.version_ranges,
 			versions = EXCLUDED.versions,
 			source = EXCLUDED.source,
 			risk_type = EXCLUDED.risk_type,
@@ -566,10 +724,11 @@ func (s *Store) UpsertMaliciousFinding(ctx context.Context, mf *db.MaliciousFind
 			removed_at = NULL,
 			updated_at = NOW()`
 
-	_, err := s.pool.Exec(ctx, query,
+	_, err := tx.Exec(ctx, query,
 		mf.ID,
 		mf.Ecosystem,
-		mf.Name,
+		normalizePackageName(mf.Ecosystem, mf.Name),
+		normalizeJSON(mf.VersionRanges, nil),
 		normalizeJSON(mf.Versions, nil),
 		mf.Source,
 		mf.RiskType,
@@ -588,9 +747,64 @@ func (s *Store) UpsertMaliciousFinding(ctx context.Context, mf *db.MaliciousFind
 }
 
 func (s *Store) DeleteVulnerability(ctx context.Context, id string) error {
-	_, err := s.pool.Exec(ctx, `DELETE FROM vulnerabilities WHERE id = $1`, id)
+	_, err := s.pool.Exec(ctx, `
+		UPDATE vulnerabilities
+		SET withdrawn = COALESCE(withdrawn, NOW()),
+		    updated_at = NOW()
+		WHERE id = $1`, id)
 	if err != nil {
 		return fmt.Errorf("postgres: delete vulnerability %s: %w", id, err)
+	}
+	return nil
+}
+
+func (s *Store) DeleteVulnerabilityForSource(ctx context.Context, id, source string) error {
+	source = strings.TrimSpace(source)
+	if source == "" {
+		return s.DeleteVulnerability(ctx, id)
+	}
+
+	return withTx(ctx, s.pool, func(tx pgx.Tx) error {
+		return deleteVulnerabilityForSourceTx(ctx, tx, id, source)
+	})
+}
+
+func deleteVulnerabilityForSourceTx(ctx context.Context, tx pgx.Tx, id, source string) error {
+	source = strings.TrimSpace(source)
+	if source == "" {
+		if _, err := tx.Exec(ctx, `
+			UPDATE vulnerabilities
+			SET withdrawn = COALESCE(withdrawn, NOW()),
+			    updated_at = NOW()
+			WHERE id = $1`, id); err != nil {
+			return fmt.Errorf("withdraw vulnerability %s: %w", id, err)
+		}
+		return nil
+	}
+
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM vulnerability_sources
+		WHERE vulnerability_id = $1 AND source = $2`, id, source); err != nil {
+		return fmt.Errorf("delete vulnerability source %s/%s: %w", id, source, err)
+	}
+
+	var remaining int
+	if err := tx.QueryRow(ctx, `
+		SELECT COUNT(*)::int
+		FROM vulnerability_sources
+		WHERE vulnerability_id = $1`, id).Scan(&remaining); err != nil {
+		return fmt.Errorf("count vulnerability sources %s: %w", id, err)
+	}
+	if remaining > 0 {
+		return nil
+	}
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE vulnerabilities
+		SET withdrawn = COALESCE(withdrawn, NOW()),
+		    updated_at = NOW()
+		WHERE id = $1`, id); err != nil {
+		return fmt.Errorf("withdraw vulnerability %s after source delete: %w", id, err)
 	}
 	return nil
 }
@@ -603,6 +817,35 @@ func (s *Store) DeleteMaliciousFinding(ctx context.Context, id string) error {
 		WHERE id = $1`, id)
 	if err != nil {
 		return fmt.Errorf("postgres: delete malicious finding %s: %w", id, err)
+	}
+	return nil
+}
+
+func (s *Store) DeleteMaliciousFindingForSource(ctx context.Context, id, source string) error {
+	source = strings.TrimSpace(source)
+	if source == "" {
+		return s.DeleteMaliciousFinding(ctx, id)
+	}
+
+	return withTx(ctx, s.pool, func(tx pgx.Tx) error {
+		return deleteMaliciousFindingForSourceTx(ctx, tx, id, source)
+	})
+}
+
+func deleteMaliciousFindingForSourceTx(ctx context.Context, execer postgresExecer, id, source string) error {
+	source = strings.TrimSpace(source)
+	query := `
+		UPDATE malicious_findings
+		SET removed_at = COALESCE(removed_at, NOW()),
+		    updated_at = NOW()
+		WHERE id = $1`
+	args := []any{id}
+	if source != "" {
+		query += ` AND source = $2`
+		args = append(args, source)
+	}
+	if _, err := execer.Exec(ctx, query, args...); err != nil {
+		return fmt.Errorf("postgres: delete malicious finding %s for source %s: %w", id, source, err)
 	}
 	return nil
 }
@@ -626,7 +869,7 @@ func (s *Store) ListMaliciousFindings(ctx context.Context, source string, limit 
 
 	query := `
 		SELECT
-			id, ecosystem, name, COALESCE(versions::text, ''), source, risk_type, severity,
+			id, ecosystem, name, COALESCE(version_ranges::text, ''), COALESCE(versions::text, ''), source, risk_type, severity,
 			summary, description, COALESCE(reference_urls::text, '[]'), origin_ref, published, created_by
 		FROM malicious_findings`
 	args := []any{}
@@ -649,6 +892,7 @@ func (s *Store) ListMaliciousFindings(ctx context.Context, source string, limit 
 	for rows.Next() {
 		var (
 			item             db.MaliciousFinding
+			versionRangesRaw *string
 			versionsRaw      *string
 			referenceURLsRaw *string
 			description      *string
@@ -661,6 +905,7 @@ func (s *Store) ListMaliciousFindings(ctx context.Context, source string, limit 
 			&item.ID,
 			&item.Ecosystem,
 			&item.Name,
+			&versionRangesRaw,
 			&versionsRaw,
 			&item.Source,
 			&item.RiskType,
@@ -675,6 +920,9 @@ func (s *Store) ListMaliciousFindings(ctx context.Context, source string, limit 
 			return nil, fmt.Errorf("postgres: scan malicious finding row: %w", err)
 		}
 
+		if versionRangesRaw != nil {
+			item.VersionRanges = json.RawMessage(*versionRangesRaw)
+		}
 		if versionsRaw != nil {
 			item.Versions = json.RawMessage(*versionsRaw)
 		}
@@ -704,6 +952,35 @@ func (s *Store) ListMaliciousFindings(ctx context.Context, source string, limit 
 }
 
 func (s *Store) SetCISAKEV(ctx context.Context, cveIDs []string) (int, error) {
+	return setCISAKEV(ctx, s.pool, cveIDs)
+}
+
+func (s *Store) ClearCISAKEV(ctx context.Context, keepIDs []string) (int, error) {
+	return clearCISAKEV(ctx, s.pool, keepIDs)
+}
+
+func (s *Store) ReplaceCISAKEV(ctx context.Context, cveIDs []string) (int, int, error) {
+	var updated, cleared int
+	err := withTx(ctx, s.pool, func(tx pgx.Tx) error {
+		var err error
+		updated, err = setCISAKEV(ctx, tx, cveIDs)
+		if err != nil {
+			return err
+		}
+		cleared, err = clearCISAKEV(ctx, tx, cveIDs)
+		return err
+	})
+	if err != nil {
+		return 0, 0, fmt.Errorf("postgres: replace CISA KEV: %w", err)
+	}
+	return updated, cleared, nil
+}
+
+type cisaKEVExecutor interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+}
+
+func setCISAKEV(ctx context.Context, exec cisaKEVExecutor, cveIDs []string) (int, error) {
 	const query = `
 		WITH targets AS (
 			SELECT id
@@ -719,14 +996,14 @@ func (s *Store) SetCISAKEV(ctx context.Context, cveIDs []string) (int, error) {
 		FROM targets t
 		WHERE v.id = t.id AND v.cisa_kev = FALSE`
 
-	tag, err := s.pool.Exec(ctx, query, cveIDs)
+	tag, err := exec.Exec(ctx, query, cveIDs)
 	if err != nil {
 		return 0, fmt.Errorf("postgres: set CISA KEV: %w", err)
 	}
 	return int(tag.RowsAffected()), nil
 }
 
-func (s *Store) ClearCISAKEV(ctx context.Context, keepIDs []string) (int, error) {
+func clearCISAKEV(ctx context.Context, exec cisaKEVExecutor, keepIDs []string) (int, error) {
 	const query = `
 		WITH keep AS (
 			SELECT id
@@ -742,7 +1019,7 @@ func (s *Store) ClearCISAKEV(ctx context.Context, keepIDs []string) (int, error)
 		WHERE v.cisa_kev = TRUE
 		  AND NOT EXISTS (SELECT 1 FROM keep WHERE keep.id = v.id)`
 
-	tag, err := s.pool.Exec(ctx, query, keepIDs)
+	tag, err := exec.Exec(ctx, query, keepIDs)
 	if err != nil {
 		return 0, fmt.Errorf("postgres: clear CISA KEV: %w", err)
 	}
@@ -785,6 +1062,14 @@ func (s *Store) PropagateSeverityViaAliases(ctx context.Context) (int, error) {
 }
 
 func (s *Store) SetEPSSScores(ctx context.Context, scores []db.EPSSEntry) (int, error) {
+	return setEPSSScores(ctx, s.pool, scores)
+}
+
+type epssScoreExecer interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}
+
+func setEPSSScores(ctx context.Context, exec epssScoreExecer, scores []db.EPSSEntry) (int, error) {
 	if len(scores) == 0 {
 		return 0, nil
 	}
@@ -812,10 +1097,10 @@ func (s *Store) SetEPSSScores(ctx context.Context, scores []db.EPSSEntry) (int, 
 			WITH data AS (
 				SELECT
 					unnest($1::text[]) AS cve_id,
-					unnest($2::float8[]) AS score,
-					unnest($3::float8[]) AS percentile
+					unnest($2::float8[])::real AS score,
+					unnest($3::float8[])::real AS percentile
 			),
-			targets AS (
+			raw_targets AS (
 				SELECT v.id, d.score, d.percentile
 				FROM data d
 				INNER JOIN vulnerabilities v ON v.id = d.cve_id
@@ -823,13 +1108,20 @@ func (s *Store) SetEPSSScores(ctx context.Context, scores []db.EPSSEntry) (int, 
 				SELECT va.vulnerability_id, d.score, d.percentile
 				FROM data d
 				INNER JOIN vulnerability_aliases va ON va.alias_id = d.cve_id
+			),
+			targets AS (
+				SELECT DISTINCT ON (id) id, score, percentile
+				FROM raw_targets
+				ORDER BY id
 			)
 			UPDATE vulnerabilities v
 			SET epss_score = t.score, epss_percentile = t.percentile, updated_at = NOW()
 			FROM targets t
-			WHERE v.id = t.id`
+			WHERE v.id = t.id
+			  AND (v.epss_score IS DISTINCT FROM t.score
+			       OR v.epss_percentile IS DISTINCT FROM t.percentile)`
 
-		tag, err := s.pool.Exec(ctx, query, cveIDs, epssScores, percentiles)
+		tag, err := exec.Exec(ctx, query, cveIDs, epssScores, percentiles)
 		if err != nil {
 			return updated, fmt.Errorf("postgres: set EPSS scores batch: %w", err)
 		}
@@ -837,6 +1129,81 @@ func (s *Store) SetEPSSScores(ctx context.Context, scores []db.EPSSEntry) (int, 
 	}
 
 	return updated, nil
+}
+
+func (s *Store) ReplaceEPSSScores(ctx context.Context, scores []db.EPSSEntry) (updated, cleared int, err error) {
+	updated, cleared, _, err = s.ReplaceEPSSScoresStream(ctx, func(yield func([]db.EPSSEntry) error) error {
+		return yield(scores)
+	})
+	return updated, cleared, err
+}
+
+func (s *Store) ReplaceEPSSScoresStream(ctx context.Context, stream func(func([]db.EPSSEntry) error) error) (updated, cleared, total int, err error) {
+	err = withTx(ctx, s.pool, func(tx pgx.Tx) error {
+		if _, execErr := tx.Exec(ctx, `CREATE TEMP TABLE packmon_epss_keep (cve_id text PRIMARY KEY) ON COMMIT DROP`); execErr != nil {
+			return fmt.Errorf("postgres: create EPSS keep table: %w", execErr)
+		}
+
+		err = stream(func(batch []db.EPSSEntry) error {
+			batchUpdated, setErr := setEPSSScores(ctx, tx, batch)
+			if setErr != nil {
+				return setErr
+			}
+			if insertErr := insertEPSSKeepIDs(ctx, tx, batch); insertErr != nil {
+				return insertErr
+			}
+			updated += batchUpdated
+			total += len(batch)
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+
+		const clearQuery = `
+			WITH keep AS (
+				SELECT v.id
+				FROM vulnerabilities v
+				INNER JOIN packmon_epss_keep k ON k.cve_id = v.id
+				UNION
+				SELECT va.vulnerability_id
+				FROM vulnerability_aliases va
+				INNER JOIN packmon_epss_keep k ON k.cve_id = va.alias_id
+			)
+			UPDATE vulnerabilities v
+			SET epss_score = NULL, epss_percentile = NULL, updated_at = NOW()
+			WHERE (v.epss_score IS NOT NULL OR v.epss_percentile IS NOT NULL)
+			  AND NOT EXISTS (SELECT 1 FROM keep WHERE keep.id = v.id)`
+
+		tag, execErr := tx.Exec(ctx, clearQuery)
+		if execErr != nil {
+			return fmt.Errorf("postgres: clear stale EPSS scores: %w", execErr)
+		}
+		cleared = int(tag.RowsAffected())
+		return nil
+	})
+	if err != nil {
+		return updated, cleared, total, err
+	}
+	return updated, cleared, total, nil
+}
+
+func insertEPSSKeepIDs(ctx context.Context, exec epssScoreExecer, scores []db.EPSSEntry) error {
+	if len(scores) == 0 {
+		return nil
+	}
+	cveIDs := make([]string, len(scores))
+	for i, score := range scores {
+		cveIDs[i] = score.CVEID
+	}
+	const query = `
+		INSERT INTO packmon_epss_keep (cve_id)
+		SELECT DISTINCT unnest($1::text[])
+		ON CONFLICT (cve_id) DO NOTHING`
+	if _, err := exec.Exec(ctx, query, cveIDs); err != nil {
+		return fmt.Errorf("postgres: record EPSS keep IDs: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) EnrichVulnCheck(ctx context.Context, entries []db.VulnCheckEntry) (int, error) {
@@ -868,10 +1235,10 @@ func (s *Store) EnrichVulnCheck(ctx context.Context, entries []db.VulnCheckEntry
 			WITH data AS (
 				SELECT
 					unnest($1::text[]) AS cve_id,
-					unnest($2::float8[]) AS cvss_score,
+					unnest($2::float8[])::real AS cvss_score,
 					unnest($3::bool[]) AS exploit_exists
 			),
-			targets AS (
+			raw_targets AS (
 				SELECT v.id, d.cvss_score, d.exploit_exists
 				FROM data d
 				INNER JOIN vulnerabilities v ON v.id = d.cve_id
@@ -879,6 +1246,11 @@ func (s *Store) EnrichVulnCheck(ctx context.Context, entries []db.VulnCheckEntry
 				SELECT va.vulnerability_id, d.cvss_score, d.exploit_exists
 				FROM data d
 				INNER JOIN vulnerability_aliases va ON va.alias_id = d.cve_id
+			),
+			targets AS (
+				SELECT DISTINCT ON (id) id, cvss_score, exploit_exists
+				FROM raw_targets
+				ORDER BY id
 			)
 			UPDATE vulnerabilities v
 			SET
@@ -886,17 +1258,20 @@ func (s *Store) EnrichVulnCheck(ctx context.Context, entries []db.VulnCheckEntry
 				exploit_exists = v.exploit_exists OR t.exploit_exists,
 				updated_at = NOW()
 			FROM targets t
-			WHERE v.id = t.id`
-
-		tag, err := s.pool.Exec(ctx, batchUpdate, cveIDs, cvssScores, exploitFlags)
-		if err != nil {
-			return updated, fmt.Errorf("postgres: enrich VulnCheck batch update: %w", err)
-		}
-		updated += int(tag.RowsAffected())
+			WHERE v.id = t.id
+			  AND ((t.cvss_score IS NOT NULL AND v.cvss_score IS DISTINCT FROM t.cvss_score)
+			       OR (t.exploit_exists = TRUE AND v.exploit_exists = FALSE))`
 
 		// Source upserts still require per-entry execution because each
 		// carries its own raw_json blob that cannot be efficiently unnested.
-		err = withTx(ctx, s.pool, func(tx pgx.Tx) error {
+		batchUpdated := 0
+		err := withTx(ctx, s.pool, func(tx pgx.Tx) error {
+			tag, err := tx.Exec(ctx, batchUpdate, cveIDs, cvssScores, exploitFlags)
+			if err != nil {
+				return fmt.Errorf("batch update: %w", err)
+			}
+			batchUpdated = int(tag.RowsAffected())
+
 			const upsertSource = `
 				WITH targets AS (
 					SELECT id
@@ -914,7 +1289,10 @@ func (s *Store) EnrichVulnCheck(ctx context.Context, entries []db.VulnCheckEntry
 					source_id = EXCLUDED.source_id,
 					url = EXCLUDED.url,
 					raw_json = EXCLUDED.raw_json,
-					updated_at = NOW()`
+					updated_at = NOW()
+				WHERE vulnerability_sources.source_id IS DISTINCT FROM EXCLUDED.source_id
+				   OR vulnerability_sources.url IS DISTINCT FROM EXCLUDED.url
+				   OR vulnerability_sources.raw_json IS DISTINCT FROM EXCLUDED.raw_json`
 
 			for _, entry := range batch {
 				if _, err := tx.Exec(ctx, upsertSource,
@@ -928,8 +1306,9 @@ func (s *Store) EnrichVulnCheck(ctx context.Context, entries []db.VulnCheckEntry
 			return nil
 		})
 		if err != nil {
-			return updated, fmt.Errorf("postgres: enrich VulnCheck sources: %w", err)
+			return updated, fmt.Errorf("postgres: enrich VulnCheck batch: %w", err)
 		}
+		updated += batchUpdated
 	}
 
 	return updated, nil
@@ -992,223 +1371,28 @@ func extractFirstURL(raw string) string {
 	return urls[0]
 }
 
-type findingReference struct {
-	Type string `json:"type"`
-	URL  string `json:"url"`
-}
-
-type resourceCandidate struct {
-	link  domain.ResourceLink
-	score int
-}
-
 func buildFindingResources(advisoryID, raw string) []domain.ResourceLink {
-	selected := make(map[string]resourceCandidate)
-	if link, score, ok := canonicalFindingResource(advisoryID); ok {
-		selected[link.Label] = resourceCandidate{link: link, score: score}
-	}
-
-	if strings.TrimSpace(raw) == "" {
-		return sortedResourceCandidates(selected)
-	}
-
-	var refs []findingReference
-	if err := json.Unmarshal([]byte(raw), &refs); err != nil {
-		return sortedResourceCandidates(selected)
-	}
-
-	for _, ref := range refs {
-		link, score, ok := classifyFindingResource(advisoryID, ref)
-		if !ok {
-			continue
-		}
-		existing, exists := selected[link.Label]
-		if !exists || score < existing.score {
-			selected[link.Label] = resourceCandidate{link: link, score: score}
-		}
-	}
-
-	return sortedResourceCandidates(selected)
+	return findinglinks.ResourceLinksFromVulnerabilityReferences(advisoryID, raw)
 }
 
-func sortedResourceCandidates(selected map[string]resourceCandidate) []domain.ResourceLink {
-	if len(selected) == 0 {
-		return nil
-	}
-	labels := make([]string, 0, len(selected))
-	for label := range selected {
-		labels = append(labels, label)
-	}
-
-	sort.Slice(labels, func(i, j int) bool {
-		left := selected[labels[i]]
-		right := selected[labels[j]]
-		if left.score != right.score {
-			return left.score < right.score
-		}
-		return labels[i] < labels[j]
-	})
-
-	out := make([]domain.ResourceLink, 0, len(labels))
-	for _, label := range labels {
-		out = append(out, selected[label].link)
-	}
-	return out
-}
+type findingReference = findinglinks.VulnerabilityReference
 
 func canonicalFindingResource(advisoryID string) (domain.ResourceLink, int, bool) {
-	switch {
-	case strings.HasPrefix(advisoryID, "GHSA-"):
-		return domain.ResourceLink{
-			Label: "GHSA",
-			URL:   "https://github.com/advisories/" + advisoryID,
-		}, 5, true
-	case strings.HasPrefix(advisoryID, "RUSTSEC-"):
-		return domain.ResourceLink{
-			Label: "RustSec",
-			URL:   "https://rustsec.org/advisories/" + advisoryID + ".html",
-		}, 5, true
-	case strings.HasPrefix(advisoryID, "CVE-"):
-		return domain.ResourceLink{
-			Label: "NVD",
-			URL:   "https://nvd.nist.gov/vuln/detail/" + advisoryID,
-		}, 5, true
-	default:
-		return domain.ResourceLink{}, 0, false
-	}
+	return findinglinks.CanonicalVulnerabilityResource(advisoryID)
 }
 
 func classifyFindingResource(advisoryID string, ref findingReference) (domain.ResourceLink, int, bool) {
-	if strings.TrimSpace(ref.URL) == "" {
-		return domain.ResourceLink{}, 0, false
-	}
-	if !shouldStoreVulnerabilityReference(ref.URL) {
-		return domain.ResourceLink{}, 0, false
-	}
-	if strings.EqualFold(strings.TrimSpace(ref.Type), "PACKAGE") {
-		return domain.ResourceLink{}, 0, false
-	}
-
-	parsed, err := url.Parse(ref.URL)
-	if err != nil {
-		return domain.ResourceLink{}, 0, false
-	}
-
-	host := strings.TrimPrefix(strings.ToLower(parsed.Hostname()), "www.")
-	if isGenericReferenceLandingPage(host, parsed) {
-		return domain.ResourceLink{}, 0, false
-	}
-	path := strings.ToLower(parsed.EscapedPath())
-	link := domain.ResourceLink{URL: ref.URL}
-
-	switch {
-	case isBlockedReferenceHost(host):
-		return domain.ResourceLink{}, 0, false
-	case host == "github.com" && strings.Contains(path, "/security/advisories/"):
-		link.Label = "GHSA"
-		score := 10
-		if ghsaID := ghsaIDPattern.FindString(ref.URL); strings.EqualFold(ghsaID, advisoryID) {
-			score = 0
-		}
-		return link, score, true
-	case host == "nvd.nist.gov":
-		return domain.ResourceLink{Label: "NVD", URL: ref.URL}, resourceScore(advisoryID, "NVD"), true
-	case host == "rustsec.org" && strings.Contains(path, "/advisories/"):
-		return domain.ResourceLink{Label: "RustSec", URL: ref.URL}, resourceScore(advisoryID, "RustSec"), true
-	case host == "osv.dev":
-		return domain.ResourceLink{Label: "OSV", URL: ref.URL}, resourceScore(advisoryID, "OSV"), true
-	case host == "huntr.com" || host == "huntr.dev":
-		return domain.ResourceLink{Label: "Huntr", URL: ref.URL}, resourceScore(advisoryID, "Huntr"), true
-	case host == "cve.org" || host == "cve.mitre.org":
-		return domain.ResourceLink{Label: "CVE", URL: ref.URL}, resourceScore(advisoryID, "CVE"), true
-	case host == "github.com":
-		return domain.ResourceLink{Label: "GitHub", URL: ref.URL}, resourceScore(advisoryID, "GitHub"), true
-	case host != "":
-		return domain.ResourceLink{Label: host, URL: ref.URL}, resourceScore(advisoryID, host), true
-	default:
-		return domain.ResourceLink{}, 0, false
-	}
+	return findinglinks.ClassifyVulnerabilityResource(advisoryID, ref)
 }
 
 func shouldStoreVulnerabilityReference(rawURL string) bool {
-	rawURL = strings.TrimSpace(rawURL)
-	if rawURL == "" {
-		return false
-	}
-	if containsBlockedReferenceValue(rawURL) {
-		return false
-	}
-
-	parsed, err := url.Parse(rawURL)
-	if err != nil {
-		// Keep unknown-but-non-empty URLs; we only want to block known-bad hosts.
-		return true
-	}
-
-	return !isBlockedReferenceHost(strings.TrimPrefix(strings.ToLower(parsed.Hostname()), "www."))
-}
-
-func containsBlockedReferenceValue(rawURL string) bool {
-	lower := strings.ToLower(rawURL)
-	return strings.Contains(lower, "packetstormsecurity.com") || strings.Contains(lower, "packetstorm.news")
-}
-
-func isGenericReferenceLandingPage(host string, parsed *url.URL) bool {
-	path := strings.Trim(strings.ToLower(parsed.EscapedPath()), "/")
-	if path == "" && parsed.RawQuery == "" && parsed.Fragment == "" {
-		return true
-	}
-
-	if host == "github.com" && parsed.RawQuery == "" && parsed.Fragment == "" {
-		segments := strings.Split(path, "/")
-		if len(segments) == 2 && segments[0] != "" && segments[1] != "" && segments[0] != "advisories" {
-			return true
-		}
-	}
-
-	return false
+	return findinglinks.ShouldStoreVulnerabilityReference(rawURL)
 }
 
 func isBlockedReferenceHost(host string) bool {
-	switch host {
-	case "packetstormsecurity.com", "packetstorm.news":
-		return true
-	default:
-		return false
-	}
+	return findinglinks.IsBlockedReferenceHost(host)
 }
 
 func resourceScore(advisoryID, label string) int {
-	preferred := ""
-	switch {
-	case strings.HasPrefix(advisoryID, "GHSA-"):
-		preferred = "GHSA"
-	case strings.HasPrefix(advisoryID, "RUSTSEC-"):
-		preferred = "RustSec"
-	case strings.HasPrefix(advisoryID, "CVE-"):
-		preferred = "NVD"
-	}
-
-	if label == preferred {
-		return 0
-	}
-
-	switch label {
-	case "GHSA":
-		return 10
-	case "NVD":
-		return 20
-	case "RustSec":
-		return 30
-	case "OSV":
-		return 40
-	case "Huntr":
-		return 50
-	case "CVE":
-		return 60
-	case "GitHub":
-		return 70
-	default:
-		return 100
-	}
+	return findinglinks.ResourceScore(advisoryID, label)
 }

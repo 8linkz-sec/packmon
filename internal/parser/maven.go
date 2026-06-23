@@ -6,7 +6,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 // MavenParser parses pom.xml files (Maven/Java ecosystem).
@@ -17,6 +17,7 @@ type mavenProject struct {
 	XMLName              xml.Name           `xml:"project"`
 	Dependencies         []mavenDependency  `xml:"dependencies>dependency"`
 	DependencyManagement mavenDepManagement `xml:"dependencyManagement"`
+	Repositories         []mavenRepository  `xml:"repositories>repository"`
 }
 
 // mavenDepManagement represents the <dependencyManagement> element.
@@ -30,6 +31,10 @@ type mavenDependency struct {
 	ArtifactID string `xml:"artifactId"`
 	Version    string `xml:"version"`
 	Scope      string `xml:"scope"`
+}
+
+type mavenRepository struct {
+	URL string `xml:"url"`
 }
 
 func NewMavenParser() *MavenParser {
@@ -70,10 +75,14 @@ func (p *MavenParser) Parse(r io.Reader) ([]domain.Package, error) {
 		packages []domain.Package
 		errs     []string
 	)
+	repositoryRefs := make([]string, 0, len(project.Repositories))
+	for _, repository := range project.Repositories {
+		repositoryRefs = append(repositoryRefs, repository.URL)
+	}
 
-	for _, dep := range allDeps {
+	for i, dep := range allDeps {
 		if dep.GroupID == "" || dep.ArtifactID == "" {
-			errs = append(errs, fmt.Sprintf("dependency missing groupId or artifactId (group=%q, artifact=%q)", dep.GroupID, dep.ArtifactID))
+			errs = append(errs, fmt.Sprintf("dependency %d: missing groupId or artifactId", i))
 			continue
 		}
 
@@ -83,7 +92,7 @@ func (p *MavenParser) Parse(r io.Reader) ([]domain.Package, error) {
 
 		// Skip dependencies with no version at all.
 		if version == "" {
-			errs = append(errs, fmt.Sprintf("dependency %s:%s: missing version", dep.GroupID, dep.ArtifactID))
+			errs = append(errs, fmt.Sprintf("dependency %d: missing version", i))
 			continue
 		}
 
@@ -95,17 +104,18 @@ func (p *MavenParser) Parse(r io.Reader) ([]domain.Package, error) {
 		}
 
 		name := dep.GroupID + ":" + dep.ArtifactID
-		key := pkgKey{name: strings.ToLower(name), version: version}
+		key := pkgKey{name: name, version: version}
 		if _, exists := seen[key]; exists {
 			continue
 		}
 		seen[key] = struct{}{}
 
 		packages = append(packages, domain.Package{
-			Name:      name,
-			Version:   version,
-			Ecosystem: domain.EcosystemMaven,
-			Dev:       isDev,
+			Name:       name,
+			Version:    version,
+			Ecosystem:  domain.EcosystemMaven,
+			Dev:        isDev,
+			SourceRefs: cleanSourceRefs(repositoryRefs...),
 		})
 	}
 

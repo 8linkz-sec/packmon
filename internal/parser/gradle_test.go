@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 func TestGradleParser_CanParse(t *testing.T) {
@@ -107,6 +107,17 @@ com.google.guava:guava:33.0.0-jre=runtimeClasspath
 `,
 			wantCount: 1,
 			wantPkgs:  map[string]string{"com.google.guava:guava": "33.0.0-jre"},
+		},
+		{
+			name: "case-distinct coordinates are preserved",
+			input: `com.Example:Widget:1.2.3=compileClasspath
+com.example:widget:1.2.3=runtimeClasspath
+`,
+			wantCount: 2,
+			wantPkgs: map[string]string{
+				"com.Example:Widget": "1.2.3",
+				"com.example:widget": "1.2.3",
+			},
 		},
 		{
 			name: "entry without equals sign",

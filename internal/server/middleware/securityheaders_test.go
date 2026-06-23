@@ -3,6 +3,7 @@ package middleware
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -33,6 +34,19 @@ func TestSecurityHeaders_SetsAllHeaders(t *testing.T) {
 		got := resp.Header.Get(header)
 		if got != want {
 			t.Errorf("%s = %q, want %q", header, got, want)
+		}
+	}
+
+	csp := resp.Header.Get("Content-Security-Policy")
+	if strings.Contains(csp, "unsafe-inline") {
+		t.Fatalf("Content-Security-Policy permits inline script/style execution: %q", csp)
+	}
+	for _, want := range []string{
+		"script-src 'self'",
+		"style-src 'self'",
+	} {
+		if !strings.Contains(csp, want) {
+			t.Fatalf("Content-Security-Policy missing %q: %q", want, csp)
 		}
 	}
 }
@@ -106,6 +120,21 @@ func TestSecurityHeaders_RedirectsHTTP(t *testing.T) {
 	want := "https://packmon.example.com/dashboard"
 	if location != want {
 		t.Errorf("Location = %q, want %q", location, want)
+	}
+
+	expectedHeaders := map[string]string{
+		"X-Content-Type-Options":    "nosniff",
+		"X-Frame-Options":           "DENY",
+		"Referrer-Policy":           "strict-origin-when-cross-origin",
+		"X-XSS-Protection":          "0",
+		"Permissions-Policy":        "camera=(), microphone=(), geolocation=()",
+		"Content-Security-Policy":   contentSecurityPolicy,
+		"Strict-Transport-Security": "max-age=63072000; includeSubDomains",
+	}
+	for header, want := range expectedHeaders {
+		if got := resp.Header.Get(header); got != want {
+			t.Errorf("redirect %s = %q, want %q", header, got, want)
+		}
 	}
 }
 

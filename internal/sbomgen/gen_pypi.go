@@ -17,10 +17,12 @@ func (pypiGenerator) Ecosystem() string { return "pypi" }
 func (pypiGenerator) Tool() string      { return "cyclonedx-py" }
 func (pypiGenerator) InstallSpec() InstallSpec {
 	return InstallSpec{
-		Package:        "cyclonedx-bom",
-		Source:         "PyPI",
-		Args:           []string{"python", "-m", "pip", "install", "--user", "cyclonedx-bom==" + pypiGeneratorVersion},
-		CanAutoInstall: true,
+		Package:         "cyclonedx-bom",
+		Source:          "PyPI",
+		Args:            []string{"python", "-m", "pip", "install", "--user", "cyclonedx-bom==" + pypiGeneratorVersion},
+		ExpectedVersion: pypiGeneratorVersion,
+		VersionArgs:     []string{"--version"},
+		CanAutoInstall:  true,
 	}
 }
 
@@ -40,7 +42,7 @@ func (pypiGenerator) Generate(ctx context.Context, d Detection, outPath string, 
 	}
 	out, err := run(ctx, opts)
 	if err != nil {
-		return fmt.Errorf("cyclonedx-py: %w: %s", err, string(out))
+		return fmt.Errorf("cyclonedx-py: %w: %s", err, commandOutputSummary(out))
 	}
 	return nil
 }
@@ -140,7 +142,7 @@ func firstRequirementArg(value string) (string, bool) {
 }
 
 func poetryDeclaresDependencies(d Detection, opts GenerateOptions) (bool, error) {
-	data, err := os.ReadFile(d.ManifestPath) // #nosec G304 -- path comes from a bounded local manifest walk.
+	data, err := readAutoSBOMManifest(d.ManifestPath)
 	if err != nil {
 		return false, err
 	}
@@ -172,7 +174,7 @@ func poetryDeclaresDependencies(d Detection, opts GenerateOptions) (bool, error)
 		}
 	}
 	lockPath := filepath.Join(d.ProjectDir, "poetry.lock")
-	lockData, err := os.ReadFile(lockPath) // #nosec G304 -- lock path is derived from the detected project dir.
+	lockData, err := readAutoSBOMManifest(lockPath)
 	if err == nil {
 		return poetryLockDeclaresDependencies(lockData, opts.IncludeDev), nil
 	}

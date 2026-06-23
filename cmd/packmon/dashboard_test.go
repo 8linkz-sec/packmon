@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -55,31 +56,40 @@ func TestOpenBrowserRejectsNonLocalURLBeforeLaunching(t *testing.T) {
 	}
 }
 
-func TestLocalDashboardRoutesRedirectAdminAndEscapeRefreshNotice(t *testing.T) {
+func TestLocalDashboardRoutesExplainUnavailableAdminAndDoNotExposeStaleRefreshAPI(t *testing.T) {
 	t.Parallel()
 
 	mux := http.NewServeMux()
 	registerLocalDashboardRoutes(mux)
 
-	redirectRecorder := httptest.NewRecorder()
-	mux.ServeHTTP(redirectRecorder, httptest.NewRequest(http.MethodGet, "/admin/login", nil))
-	if redirectRecorder.Code != http.StatusSeeOther {
-		t.Fatalf("admin redirect status = %d, want %d", redirectRecorder.Code, http.StatusSeeOther)
+	adminRecorder := httptest.NewRecorder()
+	mux.ServeHTTP(adminRecorder, httptest.NewRequest(http.MethodGet, "/admin/login", nil))
+	if adminRecorder.Code != http.StatusNotFound {
+		t.Fatalf("admin unavailable status = %d, want %d", adminRecorder.Code, http.StatusNotFound)
 	}
-	if got := redirectRecorder.Header().Get("Location"); got != "/" {
-		t.Fatalf("admin redirect location = %q, want /", got)
+	adminBody := adminRecorder.Body.String()
+	if !strings.Contains(adminBody, "Local dashboard is read-only") || !strings.Contains(adminBody, "packmon-server") {
+		t.Fatalf("admin unavailable body = %q", adminBody)
 	}
 
 	noticeRecorder := httptest.NewRecorder()
 	mux.ServeHTTP(noticeRecorder, httptest.NewRequest(http.MethodPost, "/api/v1/packages/npm/pkg%3Cscript%3E", nil))
-	if noticeRecorder.Code != http.StatusAccepted {
-		t.Fatalf("refresh notice status = %d, want %d", noticeRecorder.Code, http.StatusAccepted)
+	if noticeRecorder.Code != http.StatusNotFound {
+		t.Fatalf("stale refresh API status = %d, want %d", noticeRecorder.Code, http.StatusNotFound)
 	}
-	body := noticeRecorder.Body.String()
-	if !strings.Contains(body, "Local dashboard is read-only") {
-		t.Fatalf("refresh notice body = %q", body)
+	if strings.Contains(noticeRecorder.Body.String(), "<script>") {
+		t.Fatalf("stale refresh API reflected package name: %q", noticeRecorder.Body.String())
 	}
-	if strings.Contains(body, "<script>") || !strings.Contains(body, "pkg&lt;script&gt;") {
-		t.Fatalf("refresh notice did not escape package name: %q", body)
+}
+
+func TestOpenBrowserSourceReapsStartedProcess(t *testing.T) {
+	t.Parallel()
+
+	source, err := os.ReadFile("dashboard.go")
+	if err != nil {
+		t.Fatalf("read dashboard.go: %v", err)
+	}
+	if !strings.Contains(string(source), ".Wait()") {
+		t.Fatal("dashboard browser launcher should reap started helper processes with Wait")
 	}
 }

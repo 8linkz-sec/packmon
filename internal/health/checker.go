@@ -43,8 +43,8 @@ func (c *Checker) LiveHandler() http.HandlerFunc {
 }
 
 // ReadyHandler returns 200 when the database is reachable, or 503
-// otherwise. Kubernetes/Rancher uses this to decide whether to route
-// traffic to the pod.
+// otherwise. Orchestrators and load balancers can use this to decide
+// whether to route traffic to the server.
 func (c *Checker) ReadyHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if c.shuttingDown.Load() {

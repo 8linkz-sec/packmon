@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/8linkz/packmon/internal/config"
+	"github.com/8linkz-sec/packmon/internal/config"
 )
 
 func dashboardURL(cfg *config.Config, listenerAddr string) string {

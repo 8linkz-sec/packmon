@@ -3,8 +3,12 @@
   "private": true,
   "scripts": {
     "build:web": "npm run build:web:css && npm run build:web:js",
-    "build:web:css": "npx @tailwindcss/cli -c ./tailwind.config.js -i ./internal/web/static/tailwind.input.css -o ./internal/web/static/tailwind.css --minify",
+    "build:web:css": "tailwindcss -c ./tailwind.config.js -i ./internal/web/static/tailwind.input.css -o ./internal/web/static/tailwind.css --minify",
     "build:web:js": "node ./scripts/build-web-assets.mjs"
+  },
+  "engines": {
+    "node": ">=20",
+    "npm": ">=10"
   },
   "devDependencies": {
     "@tailwindcss/cli": "4.3.1",

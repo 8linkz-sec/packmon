@@ -4,9 +4,10 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
-	"github.com/8linkz/packmon/internal/db"
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 const (
@@ -16,6 +17,34 @@ const (
 	reputationStatusRisk        = "risk"
 	reputationStatusUnsupported = "unsupported"
 )
+
+const upsertPackageReputationSQL = `
+	INSERT INTO package_reputation_cache (
+		ecosystem, name, version, source, status, severity, summary, description,
+		reference_urls, evidence, last_checked_at, next_check_at, last_error
+	) VALUES (
+		$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
+	)
+	ON CONFLICT (ecosystem, name, version, source) DO UPDATE SET
+		status = EXCLUDED.status,
+		severity = EXCLUDED.severity,
+		summary = EXCLUDED.summary,
+		description = EXCLUDED.description,
+		reference_urls = EXCLUDED.reference_urls,
+		evidence = EXCLUDED.evidence,
+		last_checked_at = EXCLUDED.last_checked_at,
+		next_check_at = EXCLUDED.next_check_at,
+		last_error = EXCLUDED.last_error,
+		updated_at = NOW()
+	WHERE package_reputation_cache.status IS DISTINCT FROM EXCLUDED.status
+	   OR package_reputation_cache.severity IS DISTINCT FROM EXCLUDED.severity
+	   OR package_reputation_cache.summary IS DISTINCT FROM EXCLUDED.summary
+	   OR package_reputation_cache.description IS DISTINCT FROM EXCLUDED.description
+	   OR package_reputation_cache.reference_urls IS DISTINCT FROM EXCLUDED.reference_urls
+	   OR package_reputation_cache.evidence IS DISTINCT FROM EXCLUDED.evidence
+	   OR package_reputation_cache.last_checked_at IS DISTINCT FROM EXCLUDED.last_checked_at
+	   OR package_reputation_cache.next_check_at IS DISTINCT FROM EXCLUDED.next_check_at
+	   OR package_reputation_cache.last_error IS DISTINCT FROM EXCLUDED.last_error`
 
 func (s *Store) FindReputationFindingsBatch(ctx context.Context, packages []db.PackageQuery, source string) ([]domain.Finding, error) {
 	if len(packages) == 0 {
@@ -144,7 +173,7 @@ func (s *Store) MarkPackageReputationDue(ctx context.Context, rep *db.PackageRep
 			ON CONFLICT (ecosystem, name, version, source) DO UPDATE SET
 				next_check_at = NOW(),
 				updated_at = NOW()
-			WHERE package_reputation_cache.status <> 'unsupported'
+			WHERE package_reputation_cache.status IN ('pending', 'error', 'malicious', 'removed', 'risk', 'clean', 'not_found')
 			  AND (
 				package_reputation_cache.next_check_at IS NULL
 				OR package_reputation_cache.next_check_at <= NOW()
@@ -172,7 +201,7 @@ func (s *Store) ListDuePackageReputations(ctx context.Context, ecosystem, name, 
 		WHERE ecosystem = $1
 		  AND name = $2
 		  AND source = $3
-		  AND status <> 'unsupported'
+		  AND status IN ('pending', 'error', 'malicious', 'removed', 'risk', 'clean', 'not_found')
 		  AND next_check_at IS NOT NULL
 		  AND next_check_at <= NOW()
 		ORDER BY next_check_at ASC, version ASC
@@ -211,26 +240,7 @@ func (s *Store) UpsertPackageReputation(ctx context.Context, rep *db.PackageRepu
 	summary := strings.TrimSpace(rep.Summary)
 	description := strings.TrimSpace(rep.Description)
 
-	const query = `
-		INSERT INTO package_reputation_cache (
-			ecosystem, name, version, source, status, severity, summary, description,
-			reference_urls, evidence, last_checked_at, next_check_at, last_error
-		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
-		)
-		ON CONFLICT (ecosystem, name, version, source) DO UPDATE SET
-			status = EXCLUDED.status,
-			severity = EXCLUDED.severity,
-			summary = EXCLUDED.summary,
-			description = EXCLUDED.description,
-			reference_urls = EXCLUDED.reference_urls,
-			evidence = EXCLUDED.evidence,
-			last_checked_at = EXCLUDED.last_checked_at,
-			next_check_at = EXCLUDED.next_check_at,
-			last_error = EXCLUDED.last_error,
-			updated_at = NOW()`
-
-	if _, err := s.pool.Exec(ctx, query,
+	if _, err := s.pool.Exec(ctx, upsertPackageReputationSQL,
 		rep.Ecosystem,
 		name,
 		rep.Version,
@@ -250,6 +260,26 @@ func (s *Store) UpsertPackageReputation(ctx context.Context, rep *db.PackageRepu
 	return nil
 }
 
+func (s *Store) PrunePackageReputation(ctx context.Context, source string, olderThan time.Duration) (int, error) {
+	source = strings.TrimSpace(source)
+	if source == "" || olderThan <= 0 {
+		return 0, nil
+	}
+
+	tag, err := s.pool.Exec(ctx, `
+		DELETE FROM package_reputation_cache
+		WHERE source = $1
+		  AND status IN ('clean', 'not_found', 'unsupported', 'error')
+		  AND updated_at < NOW() - ($2 * interval '1 microsecond')`,
+		source,
+		olderThan.Microseconds(),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("postgres: prune package reputation cache for %s: %w", source, err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
 func reputationToFinding(rep db.PackageReputation) (domain.Finding, bool) {
 	var (
 		findingType domain.FindingType
@@ -267,7 +297,9 @@ func reputationToFinding(rep db.PackageReputation) (domain.Finding, bool) {
 		riskType = "removed_package"
 		title = "ReversingLabs: package version was removed"
 	case reputationStatusRisk:
-		return domain.Finding{}, false
+		findingType = domain.FindingTypeSupplyChainRisk
+		riskType = "malware_history"
+		title = "ReversingLabs: malware incident history"
 	default:
 		return domain.Finding{}, false
 	}

@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/8linkz-sec/packmon/internal/logsafe"
+	"github.com/8linkz-sec/packmon/internal/termtext"
 	"github.com/spf13/cobra"
 )
 
@@ -41,14 +43,23 @@ func newConfigShowCmd() *cobra.Command {
 			fmt.Println("# Effective packmon configuration")
 			fmt.Println()
 			fmt.Printf("config_file:  %s\n", valueOrDefault(configPath, "(none)"))
+			effective := effectiveConfigShowSettings(cfg)
 			if cfg != nil {
-				fmt.Printf("server:       %s\n", valueOrDefault(cfg.Server, "(not set)"))
-				fmt.Printf("api_key:      %s\n", maskSecret(cfg.APIKey))
-				fmt.Printf("api_key_env:  %s\n", valueOrDefault(cfg.APIKeyEnv, "(not set)"))
-				fmt.Printf("mode:         %s\n", valueOrDefault(cfg.Mode, "auto"))
-				fmt.Printf("fail_on:      %s\n", valueOrDefault(cfg.FailOn, "CRITICAL"))
-				fmt.Printf("timeout:      %ds\n", defaultConfigTimeout(cfg.Timeout))
-				fmt.Printf("db_path:      %s\n", valueOrDefault(cfg.DB.Path, defaultDBPath()))
+				fmt.Printf("server:       %s\n", valueOrDefault(logsafe.RedactURL(effective.Server), "(not set)"))
+				fmt.Printf("api_key:      %s\n", maskSecret(effective.APIKey))
+				fmt.Printf("api_key_env:  %s\n", valueOrDefault(effective.APIKeyEnv, "(not set)"))
+				fmt.Printf("mode:         %s\n", effective.Mode)
+				fmt.Printf("fail_on:      %s\n", effective.FailOn)
+				fmt.Printf("timeout:      %ds\n", effective.Timeout)
+				fmt.Printf("ecosystems:   %s\n", valueOrDefault(strings.Join(effective.Ecosystems, ","), "(all)"))
+				fmt.Printf("include_dev:  %v\n", effective.IncludeDev)
+				fmt.Printf("cacert:       %s\n", valueOrDefault(effective.CACertFile, "(not set)"))
+				fmt.Printf("insecure_allow_http: %v\n", effective.InsecureHTTP)
+				fmt.Printf("require_remote: %v\n", effective.RequireRemote)
+				fmt.Printf("send_repo_metadata: %v\n", effective.SendRepoMetadata)
+				fmt.Printf("webhook_url:  %s\n", valueOrDefault(logsafe.RedactURL(effective.WebhookURL), "(not set)"))
+				fmt.Printf("webhook_secret: %s\n", maskSecret(effective.WebhookSecret))
+				fmt.Printf("db_path:      %s\n", effective.DBPath)
 				fmt.Printf("repos:        %d\n", len(cfg.Repos))
 				if len(cfg.Repos) > 0 {
 					for _, repo := range cfg.Repos {
@@ -63,8 +74,8 @@ func newConfigShowCmd() *cobra.Command {
 			fmt.Println("# Environment")
 			printEnvVar("PACKMON_SERVER")
 			printEnvVar("PACKMON_API_KEY")
-			if cfg != nil && cfg.APIKeyEnv != "" && cfg.APIKeyEnv != "PACKMON_API_KEY" {
-				printEnvVar(cfg.APIKeyEnv)
+			for _, key := range configuredAPIKeyEnvVars(cfg) {
+				printEnvVarMasked(key)
 			}
 			printEnvVar("PACKMON_MODE")
 			printEnvVar("PACKMON_FAIL_ON")
@@ -73,11 +84,13 @@ func newConfigShowCmd() *cobra.Command {
 			printEnvVar("PACKMON_TIMEOUT")
 			printEnvVar("PACKMON_DB_PATH")
 			printEnvVar("PACKMON_ECOSYSTEMS")
+			printEnvVar("PACKMON_CA_CERT")
+			printEnvVar("PACKMON_INSECURE_ALLOW_HTTP")
+			printEnvVar("PACKMON_REQUIRE_REMOTE")
+			printEnvVar("PACKMON_NO_REPO_METADATA")
 			printEnvVar("PACKMON_WEBHOOK_URL")
 			printEnvVar("PACKMON_WEBHOOK_SECRET")
-			printEnvVar("PACKMON_OUTPUT")
 			printEnvVar("PACKMON_NO_COLOR")
-			printEnvVar("PACKMON_IGNORE")
 			return nil
 		},
 	}
@@ -101,30 +114,26 @@ func newConfigInitCmd() *cobra.Command {
 				return fmt.Errorf("%s already exists", target)
 			}
 
-			template := `# packmon configuration
-# See https://github.com/8linkz/packmon for documentation.
+			template := `# packmon project configuration
+# See https://github.com/8linkz-sec/packmon for documentation.
+# Keep server URL, API key, CA, insecure HTTP, require-remote, webhook URL/secret,
+# report output settings, and local DB path in flags, environment variables, the
+# user-global config, or an explicit --config file. Auto-discovered project config
+# is intentionally ignored for those trusted routing settings.
 
-server: "https://packmon.internal:8080"
-api_key_env: "PACKMON_API_KEY"
 mode: auto
+# NONE disables vulnerability blocking only; malicious and supply-chain risk findings still block.
 fail_on: CRITICAL
 timeout: 30
-require_remote: true
 include_dev: false
+# Set to false to omit the optional repository name from remote scan requests and webhooks.
+# send_repo_metadata: false
 
 ecosystems:
   # Uncomment ecosystems to limit scanning:
   # - npm
   # - go
   # - pypi
-
-output:
-  format: table
-  file: ""
-
-webhook:
-  url: ""
-  secret: ""
 
 log:
   level: INFO
@@ -133,16 +142,17 @@ log:
 
 hook:
   type: pre-push
+  # Same NONE behavior applies to hook scans.
   fail_on: CRITICAL
 
 db:
-  path: "~/.packmon/db/"
   sync_source: server
 
 repos:
   - name: packmon
     path: "."
     mode: auto
+    # Same NONE behavior applies to repo overrides.
     fail_on: CRITICAL
     include_dev: false
 
@@ -151,8 +161,6 @@ repos:
   #   mode: remote
   #   ecosystems:
   #     - npm
-  #   webhook:
-  #     url: "http://localhost:9000/hooks/packmon"
 `
 			dir := filepath.Dir(target)
 			if err := os.MkdirAll(dir, 0o750); err != nil {
@@ -198,14 +206,165 @@ func newConfigValidateCmd() *cobra.Command {
 	return cmd
 }
 
+type configShowSettings struct {
+	Server           string
+	APIKey           string
+	APIKeyEnv        string
+	Mode             string
+	FailOn           string
+	Timeout          int
+	Ecosystems       []string
+	IncludeDev       bool
+	CACertFile       string
+	InsecureHTTP     bool
+	RequireRemote    bool
+	SendRepoMetadata bool
+	WebhookURL       string
+	WebhookSecret    string
+	DBPath           string
+}
+
+func effectiveConfigShowSettings(cfg *cliConfig) configShowSettings { // #nosec G101 -- this reads a user-provided API key from env/config; no credential is hardcoded.
+	settings := configShowSettings{
+		Mode:             "auto",
+		FailOn:           string(defaultFailSeverity()),
+		Timeout:          30,
+		DBPath:           defaultDBPath(),
+		APIKey:           strings.TrimSpace(os.Getenv("PACKMON_API_KEY")),
+		APIKeyEnv:        "PACKMON_API_KEY",
+		SendRepoMetadata: true,
+	}
+	if cfg != nil {
+		settings.Server = cfg.Server
+		settings.APIKey = cfg.APIKey
+		settings.APIKeyEnv = cfg.APIKeyEnv
+		if cfg.APIKeyEnv != "" && strings.TrimSpace(os.Getenv("PACKMON_API_KEY")) == "" {
+			settings.APIKey = strings.TrimSpace(os.Getenv(cfg.APIKeyEnv))
+		}
+		if cfg.Mode != "" {
+			settings.Mode = cfg.Mode
+		}
+		if cfg.FailOn != "" {
+			settings.FailOn = cfg.FailOn
+		}
+		if cfg.Timeout > 0 {
+			settings.Timeout = cfg.Timeout
+		}
+		settings.Ecosystems = append([]string(nil), cfg.Ecosystems...)
+		settings.IncludeDev = boolValue(cfg.IncludeDev, false)
+		settings.CACertFile = cfg.CACert
+		settings.InsecureHTTP = boolValue(cfg.InsecureAllowHTTP, false)
+		settings.RequireRemote = boolValue(cfg.RequireRemote, false)
+		settings.SendRepoMetadata = boolValue(cfg.SendRepoMetadata, true)
+		settings.WebhookURL = cfg.Webhook.URL
+		settings.WebhookSecret = cfg.Webhook.Secret
+		if cfg.DB.Path != "" {
+			settings.DBPath = filepath.Join(cfg.DB.Path, "packmon.db")
+		}
+	}
+	if envServer := strings.TrimSpace(os.Getenv("PACKMON_SERVER")); envServer != "" {
+		settings.Server = envServer
+	}
+	if envAPIKey := strings.TrimSpace(os.Getenv("PACKMON_API_KEY")); envAPIKey != "" {
+		settings.APIKey = envAPIKey
+		settings.APIKeyEnv = "PACKMON_API_KEY"
+	}
+	if envMode := normalizeModeString(os.Getenv("PACKMON_MODE")); envMode != "" {
+		settings.Mode = envMode
+	}
+	if envFailOn := normalizeSeverityString(os.Getenv("PACKMON_FAIL_ON")); envFailOn != "" {
+		settings.FailOn = envFailOn
+	}
+	if envTimeout := strings.TrimSpace(os.Getenv("PACKMON_TIMEOUT")); envTimeout != "" {
+		if parsed, parseErr := parseTimeoutSeconds(envTimeout); parseErr == nil && parsed > 0 {
+			settings.Timeout = parsed
+		}
+	}
+	if envEcosystems := strings.TrimSpace(os.Getenv("PACKMON_ECOSYSTEMS")); envEcosystems != "" {
+		settings.Ecosystems = splitCSV(envEcosystems)
+	}
+	if envCACert := strings.TrimSpace(os.Getenv("PACKMON_CA_CERT")); envCACert != "" {
+		settings.CACertFile = envCACert
+	}
+	if envInsecure := strings.TrimSpace(os.Getenv("PACKMON_INSECURE_ALLOW_HTTP")); envInsecure != "" {
+		settings.InsecureHTTP = envBoolValue(envInsecure)
+	}
+	if envRequireRemote := strings.TrimSpace(os.Getenv("PACKMON_REQUIRE_REMOTE")); envRequireRemote != "" {
+		settings.RequireRemote = envBoolValue(envRequireRemote)
+	}
+	if envNoRepoMetadata := strings.TrimSpace(os.Getenv("PACKMON_NO_REPO_METADATA")); envNoRepoMetadata != "" {
+		settings.SendRepoMetadata = !envBoolValue(envNoRepoMetadata)
+	}
+	if envWebhookURL := strings.TrimSpace(os.Getenv("PACKMON_WEBHOOK_URL")); envWebhookURL != "" {
+		settings.WebhookURL = envWebhookURL
+	}
+	if envWebhookSecret := strings.TrimSpace(os.Getenv("PACKMON_WEBHOOK_SECRET")); envWebhookSecret != "" {
+		settings.WebhookSecret = envWebhookSecret
+	}
+	if envDBPath := strings.TrimSpace(os.Getenv("PACKMON_DB_PATH")); envDBPath != "" {
+		settings.DBPath = filepath.Join(envDBPath, "packmon.db")
+	}
+	return settings
+}
+
+func envBoolValue(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes":
+		return true
+	default:
+		return false
+	}
+}
+
 func printEnvVar(key string) {
+	printEnvVarWithMask(key, false)
+}
+
+func printEnvVarMasked(key string) {
+	printEnvVarWithMask(key, true)
+}
+
+func printEnvVarWithMask(key string, forceSecret bool) {
 	v := os.Getenv(key)
 	if v == "" {
 		v = "(not set)"
-	} else if isSecretEnvVar(key) {
+	} else if isURLSecretEnvVar(key) {
+		v = logsafe.RedactURL(v)
+	} else if forceSecret || isSecretEnvVar(key) {
 		v = maskSecret(v)
 	}
-	fmt.Printf("  %-25s %s\n", key+":", v)
+	fmt.Printf("  %-25s %s\n", termtext.Sanitize(key)+":", termtext.Sanitize(v))
+}
+
+func configuredAPIKeyEnvVars(cfg *cliConfig) []string {
+	if cfg == nil {
+		return nil
+	}
+	seen := map[string]struct{}{
+		"PACKMON_API_KEY": {},
+	}
+	keys := make([]string, 0, 1+len(cfg.Repos))
+	add := func(key string) {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			return
+		}
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	add(cfg.APIKeyEnv)
+	for _, repo := range cfg.Repos {
+		add(repo.APIKeyEnv)
+	}
+	return keys
+}
+
+func isURLSecretEnvVar(key string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(key))
+	return upper == "PACKMON_WEBHOOK_URL" || upper == "PACKMON_SERVER"
 }
 
 func isSecretEnvVar(key string) bool {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -132,6 +133,39 @@ func TestHookInstallStatusAndUninstallManagedHook(t *testing.T) {
 	}
 }
 
+func TestHookInstallUsesGitResolvedHooksDirForWorktree(t *testing.T) {
+	git := requireGit(t)
+	repo := t.TempDir()
+	runGit(t, git, repo, "init", "--quiet")
+	if err := os.WriteFile(filepath.Join(repo, "go.mod"), []byte("module example.test/repo\n"), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	runGit(t, git, repo, "add", "go.mod")
+	runGit(t, git, repo, "-c", "user.name=Packmon Test", "-c", "user.email=packmon@example.invalid", "commit", "--quiet", "-m", "init")
+
+	worktree := filepath.Join(t.TempDir(), "linked")
+	runGit(t, git, repo, "worktree", "add", "--quiet", "-b", "packmon-hook-test", worktree, "HEAD")
+	t.Chdir(worktree)
+
+	output := captureStdout(t, func() {
+		if err := newHookInstallCmd().Execute(); err != nil {
+			t.Fatalf("hook install in worktree: %v", err)
+		}
+	})
+	if !strings.Contains(output, "Installed packmon pre-push hook") {
+		t.Fatalf("hook install output = %q", output)
+	}
+
+	hooksDir := testGitOutput(t, git, worktree, "rev-parse", "--git-path", "hooks")
+	if !filepath.IsAbs(hooksDir) {
+		hooksDir = filepath.Join(worktree, hooksDir)
+	}
+	hookPath := filepath.Join(filepath.Clean(hooksDir), "pre-push")
+	if !isPackmonHook(hookPath) {
+		t.Fatalf("worktree hook was not installed in git-resolved hooks dir %s", hookPath)
+	}
+}
+
 func TestHookInstallUsesConfigDefaults(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o750); err != nil {
@@ -160,6 +194,39 @@ func TestHookInstallUsesConfigDefaults(t *testing.T) {
 	if !strings.Contains(string(data), "--fail-on HIGH") {
 		t.Fatalf("hook script = %s, want HIGH threshold", data)
 	}
+}
+
+func requireGit(t *testing.T) string {
+	t.Helper()
+
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git executable not available")
+	}
+	return git
+}
+
+func runGit(t *testing.T, git, dir string, args ...string) {
+	t.Helper()
+
+	cmd := exec.Command(git, args...) // #nosec G204 -- test helper invokes the resolved git binary with fixed test-controlled arguments and no shell.
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, out)
+	}
+}
+
+func testGitOutput(t *testing.T, git, dir string, args ...string) string {
+	t.Helper()
+
+	cmd := exec.Command(git, args...) // #nosec G204 -- test helper invokes the resolved git binary with fixed test-controlled arguments and no shell.
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git %s failed: %v", strings.Join(args, " "), err)
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func TestHookInstallUpdatesExistingPackmonHook(t *testing.T) {
@@ -235,5 +302,27 @@ func TestHookStatusAndUninstallCustomHooks(t *testing.T) {
 	})
 	if !strings.Contains(uninstallOutput, "Skipping pre-push") || !strings.Contains(uninstallOutput, "No packmon-managed hooks found.") {
 		t.Fatalf("hook uninstall output = %q", uninstallOutput)
+	}
+}
+
+func TestHookStatusSanitizesRepositoryPath(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "repo\u202e")
+	hooksDir := filepath.Join(root, ".git", "hooks")
+	if err := os.MkdirAll(hooksDir, 0o750); err != nil {
+		t.Fatalf("mkdir hooks: %v", err)
+	}
+	t.Chdir(root)
+
+	output := captureStdout(t, func() {
+		if err := newHookStatusCmd().Execute(); err != nil {
+			t.Fatalf("hook status: %v", err)
+		}
+	})
+
+	if strings.Contains(output, "\u202e") {
+		t.Fatalf("hook status output contains raw format control:\n%s", output)
+	}
+	if !strings.Contains(output, `\u202E`) {
+		t.Fatalf("hook status output missing sanitized path:\n%s", output)
 	}
 }

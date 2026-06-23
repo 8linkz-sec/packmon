@@ -201,3 +201,14 @@ func FuzzGradleParser(f *testing.F) {
 		_, _ = p.Parse(bytes.NewReader(data))
 	})
 }
+
+func FuzzActionsParser(f *testing.F) {
+	f.Add([]byte("name: CI\non: [push]\njobs:\n  build:\n    steps:\n      - uses: actions/checkout@v4\n"))
+	f.Add([]byte("jobs:\n  reuse:\n    uses: octo-org/reusable/.github/workflows/build.yml@v2\n"))
+	f.Add([]byte("jobs:\n  build:\n    steps:\n      - uses: docker://alpine:3\n      - uses: ./local-action\n"))
+	f.Add([]byte(``))
+	f.Fuzz(func(t *testing.T, data []byte) {
+		p := NewActionsParser()
+		_, _ = p.Parse(bytes.NewReader(data))
+	})
+}

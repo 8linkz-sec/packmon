@@ -3,7 +3,7 @@ package sqlite
 import (
 	"context"
 
-	"github.com/8linkz/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/db"
 )
 
 func (*Store) GetFeedConfig(context.Context, string) (*db.FeedConfig, error) {

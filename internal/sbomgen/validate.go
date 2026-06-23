@@ -3,13 +3,12 @@ package sbomgen
 import (
 	"bytes"
 	"fmt"
-	"os"
 
-	"github.com/8linkz/packmon/internal/sbom"
+	"github.com/8linkz-sec/packmon/internal/sbom"
 )
 
 func validateGeneratedSBOM(path string) (int, int, error) {
-	data, err := os.ReadFile(path) // #nosec G304 -- path is the generator output reserved by this package.
+	data, err := readGeneratedSBOMFile(path)
 	if err != nil {
 		return 0, 0, fmt.Errorf("read generated SBOM %s: %w", path, err)
 	}

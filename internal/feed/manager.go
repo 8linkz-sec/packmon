@@ -2,14 +2,15 @@ package feed
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/8linkz/packmon/internal/db"
-	"github.com/8linkz/packmon/internal/telemetry"
+	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/telemetry"
 )
 
 // backoffSchedule defines the delays between retry attempts.
@@ -21,6 +22,12 @@ var backoffSchedule = [3]time.Duration{
 }
 
 const interruptedFeedSyncError = "previous feed sync was interrupted before completion"
+
+const aliasSeverityPropagationStatusName = "alias-severity-propagation"
+
+// ErrSyncAlreadyRunning is returned by manual sync triggers when the same feed
+// is already syncing. Background loops still serialize normally.
+var ErrSyncAlreadyRunning = errors.New("feed sync already running")
 
 // Manager orchestrates all registered feed syncers. It runs background
 // goroutines that invoke each syncer on a configurable interval, records
@@ -40,6 +47,12 @@ type Manager struct {
 	started    bool
 	phase1Done chan struct{}
 	wg         sync.WaitGroup
+	// feedStatusReadTimeout bounds pre-sync freshness reads so a slow store
+	// cannot stall feed-loop startup behind the long-lived manager context.
+	feedStatusReadTimeout time.Duration
+	// syncOnStartup controls only loops launched by Start. Runtime ApplyConfig
+	// starts keep their immediate first sync so admin changes take effect.
+	syncOnStartup bool
 }
 
 // registeredFeed pairs a FeedConfig with optional per-feed overrides.
@@ -62,12 +75,29 @@ func NewManager(store db.Store, logger *slog.Logger, defaultInterval time.Durati
 		logger = slog.Default()
 	}
 	return &Manager{
-		feeds:     make(map[string]*registeredFeed),
-		feedLocks: make(map[string]*sync.Mutex),
-		store:     store,
-		logger:    logger,
-		interval:  defaultInterval,
+		feeds:                 make(map[string]*registeredFeed),
+		feedLocks:             make(map[string]*sync.Mutex),
+		store:                 store,
+		logger:                logger,
+		interval:              defaultInterval,
+		feedStatusReadTimeout: FeedStatusReadTimeout,
+		syncOnStartup:         true,
 	}
+}
+
+// SetSyncOnStartup controls whether Start performs an immediate sync before
+// waiting for the first interval tick. It should be configured before Start.
+func (m *Manager) SetSyncOnStartup(enabled bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.syncOnStartup = enabled
+}
+
+// SyncOnStartup reports the manager's startup-sync policy.
+func (m *Manager) SyncOnStartup() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.syncOnStartup
 }
 
 // Register adds a feed to the manager. If the feed is disabled or in
@@ -121,16 +151,24 @@ func (m *Manager) Start(ctx context.Context) {
 	m.ctx = ctx
 	m.phase1Done = make(chan struct{})
 	phase1Done := m.phase1Done
+	syncOnStartup := m.syncOnStartup
 
 	// Collect Phase 1 initial-done signals so Phase 2 can wait for them.
-	var phase1Signals []<-chan struct{}
+	var phase1Signals []<-chan bool
+	type skippedStatus struct {
+		name   string
+		status string
+	}
+	var skippedStatuses []skippedStatus
 
 	for name, rf := range m.feeds {
 		if !managerFeedShouldRun(rf) {
 			if !rf.config.Enabled {
 				m.logger.Info("feed disabled, skipping", slog.String("feed", name))
+				skippedStatuses = append(skippedStatuses, skippedStatus{name: name, status: "disabled"})
 			} else if rf.config.Mode == FeedModeExternal {
 				m.logger.Info("feed in external mode, skipping self-sync", slog.String("feed", name))
+				skippedStatuses = append(skippedStatuses, skippedStatus{name: name, status: "external"})
 			}
 			continue
 		}
@@ -139,29 +177,49 @@ func (m *Manager) Start(ctx context.Context) {
 		phase := feedPhase(rf.config)
 
 		if phase == FeedPhaseVulnerability {
-			done := make(chan struct{}, 1)
+			done := make(chan bool, 1)
 			phase1Signals = append(phase1Signals, done)
-			m.startFeedLocked(rf, interval, done, false)
+			m.startFeedLockedWithInitialSync(rf, interval, done, false, syncOnStartup)
 		}
 	}
 	m.mu.Unlock()
 
+	for _, skipped := range skippedStatuses {
+		m.recordStatus(ctx, skipped.name, skipped.status, "", 0, nil)
+	}
+
 	// phase1Done is closed once ALL Phase 1 feeds finish their initial sync.
+	m.wg.Add(1)
 	go func() {
+		defer m.wg.Done()
+		defer close(phase1Done)
+
+		phaseOneAttemptedSync := false
 		for _, ch := range phase1Signals {
-			<-ch
+			if <-ch {
+				phaseOneAttemptedSync = true
+			}
+		}
+
+		if !phaseOneAttemptedSync {
+			m.logger.Debug("skipping alias severity propagation; no phase 1 startup sync attempted")
+			return
 		}
 
 		// Propagate severity from known entries to UNKNOWN aliases.
 		// E.g. GO-2026-4856 (UNKNOWN) shares alias CVE-2026-33726 with
 		// GHSA-hxv8-4j4r-cqgv (MEDIUM) -- copy MEDIUM to GO-2026-4856.
 		if updated, err := m.store.PropagateSeverityViaAliases(ctx); err != nil {
-			m.logger.Warn("failed to propagate severity via aliases", "error", err)
+			m.logger.Warn("failed to propagate severity via aliases", "error", SafeDiagnosticError(err))
+			if ctx.Err() == nil {
+				m.recordStatus(ctx, aliasSeverityPropagationStatusName, "error", SafeDiagnosticError(err), 0, nil)
+			}
 		} else if updated > 0 {
+			m.recordStatus(ctx, aliasSeverityPropagationStatusName, "success", "", 0, &SyncResult{EntriesSynced: 1, EntriesTotal: 1})
 			m.logger.Info("propagated severity via aliases", slog.Int("updated", updated))
+		} else {
+			m.recordStatus(ctx, aliasSeverityPropagationStatusName, "success", "", 0, &SyncResult{EntriesSynced: 1, EntriesTotal: 1})
 		}
-
-		close(phase1Done)
 	}()
 
 	// Start Phase 2 (enrichment) feeds after Phase 1 completes.
@@ -174,7 +232,7 @@ func (m *Manager) Start(ctx context.Context) {
 			continue
 		}
 
-		m.startFeedLocked(rf, m.effectiveInterval(rf), nil, true)
+		m.startFeedLockedWithInitialSync(rf, m.effectiveInterval(rf), nil, true, syncOnStartup)
 		m.logger.Debug("enrichment feed queued behind phase 1", slog.String("feed", name))
 	}
 	m.mu.Unlock()
@@ -220,7 +278,11 @@ func (m *Manager) feedLockForNameLocked(name string) *sync.Mutex {
 	return lock
 }
 
-func (m *Manager) startFeedLocked(rf *registeredFeed, interval time.Duration, initialDone chan<- struct{}, waitForPhase1 bool) {
+func (m *Manager) startFeedLocked(rf *registeredFeed, interval time.Duration, initialDone chan<- bool, waitForPhase1 bool) {
+	m.startFeedLockedWithInitialSync(rf, interval, initialDone, waitForPhase1, true)
+}
+
+func (m *Manager) startFeedLockedWithInitialSync(rf *registeredFeed, interval time.Duration, initialDone chan<- bool, waitForPhase1, syncOnLoopStart bool) {
 	if rf.cancel != nil || m.ctx == nil || m.ctx.Err() != nil {
 		return
 	}
@@ -243,13 +305,13 @@ func (m *Manager) startFeedLocked(rf *registeredFeed, interval time.Duration, in
 				m.wg.Done()
 				return
 			}
-			m.loop(feedCtx, rf, interval, nil)
+			m.loop(feedCtx, rf, interval, nil, syncOnLoopStart)
 		}()
 		return
 	}
 
 	m.wg.Add(1)
-	go m.loop(feedCtx, rf, interval, initialDone)
+	go m.loop(feedCtx, rf, interval, initialDone, syncOnLoopStart)
 }
 
 func (m *Manager) markFeedStopped(rf *registeredFeed) {
@@ -297,14 +359,14 @@ func (m *Manager) SyncOne(ctx context.Context, feedName string) error {
 	if !ok {
 		return fmt.Errorf("feed %q is not registered", feedName)
 	}
-	_, err := m.syncWithRetry(ctx, rf)
+	_, err := m.syncWithRetry(ctx, rf, false)
 	return err
 }
 
 // loop runs the sync-sleep cycle for a single feed until the context
 // is cancelled. If initialDone is non-nil, it is closed after the
 // initial sync attempt (success or skip) to signal Phase 2 feeds.
-func (m *Manager) loop(ctx context.Context, rf *registeredFeed, interval time.Duration, initialDone chan<- struct{}) {
+func (m *Manager) loop(ctx context.Context, rf *registeredFeed, interval time.Duration, initialDone chan<- bool, syncOnLoopStart bool) {
 	defer func() {
 		m.markFeedStopped(rf)
 		m.wg.Done()
@@ -322,15 +384,20 @@ func (m *Manager) loop(ctx context.Context, rf *registeredFeed, interval time.Du
 	// Check whether the last successful sync is still fresh. If it is,
 	// skip the immediate sync and just wait for the next tick. This
 	// prevents hammering upstream APIs on every container restart.
-	if m.lastSyncFresh(ctx, name, interval) {
+	attemptedInitialSync := false
+	if !syncOnLoopStart {
+		log.Info("startup feed sync disabled, waiting for next interval")
+		m.recordPendingStatusIfMissing(ctx, name)
+	} else if m.lastSyncFresh(ctx, name, interval) {
 		log.Info("last sync still within interval, skipping initial sync")
 	} else {
+		attemptedInitialSync = true
 		m.runSync(ctx, rf, log)
 	}
 
 	// Signal that the initial sync is done (used by phase-based scheduling).
 	if initialDone != nil {
-		initialDone <- struct{}{}
+		initialDone <- attemptedInitialSync
 	}
 
 	ticker := time.NewTicker(interval)
@@ -354,19 +421,19 @@ func (m *Manager) runSync(ctx context.Context, rf *registeredFeed, log *slog.Log
 		return
 	}
 
-	result, err := m.syncWithRetry(ctx, rf)
+	result, err := m.syncWithRetry(ctx, rf, true)
 	if err != nil {
 		if IsPermanentError(err) {
 			log.Warn("feed sync skipped (permanent error)",
-				slog.String("error", err.Error()),
+				slog.String("error", SafeDiagnosticError(err)),
 			)
 			// Record the permanent failure so it surfaces in /admin/feeds
 			// and /readyz instead of being hidden in logs only (C-3).
-			m.recordStatus(ctx, rf.config.Syncer.Name(), "permanent_error", err.Error(), 0, nil)
+			m.recordStatusForFeed(ctx, rf, "permanent_error", SafeDiagnosticError(err), 0, nil)
 			return
 		}
 		log.Error("feed sync failed after all retries",
-			slog.String("error", err.Error()),
+			slog.String("error", SafeDiagnosticError(err)),
 		)
 	} else {
 		log.Info("feed sync completed",
@@ -379,30 +446,39 @@ func (m *Manager) runSync(ctx context.Context, rf *registeredFeed, log *slog.Log
 // syncWithRetry runs the syncer up to len(backoffSchedule)+1 times.
 // On the first call there is no delay; subsequent retries use the
 // exponential backoff schedule. It records the outcome in feed_sync_status.
-func (m *Manager) syncWithRetry(ctx context.Context, rf *registeredFeed) (*SyncResult, error) {
+func (m *Manager) syncWithRetry(ctx context.Context, rf *registeredFeed, waitForLock bool) (*SyncResult, error) {
 	// Prevent concurrent syncs of the same feed (e.g. manual trigger
 	// via admin panel while the background loop is already syncing).
 	syncMu := rf.syncMu
 	if syncMu == nil {
 		syncMu = &rf.mu
 	}
-	syncMu.Lock()
+	name := rf.config.Syncer.Name()
+	locked, lockErr := acquireSyncLock(ctx, syncMu, waitForLock)
+	if lockErr != nil {
+		return nil, lockErr
+	}
+	if !locked {
+		return nil, fmt.Errorf("feed %s: %w", name, ErrSyncAlreadyRunning)
+	}
 	defer syncMu.Unlock()
 
-	name := rf.config.Syncer.Name()
 	log := m.logger.With(slog.String("feed", name))
 
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
-	m.recordRunningStatus(ctx, name)
+	m.recordRunningStatusForFeed(ctx, rf)
+	started := time.Now()
 
 	maxAttempts := len(backoffSchedule) + 1
 	var lastErr error
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			err := ctx.Err()
+			m.recordStatusForFeed(ctx, rf, "error", SafeDiagnosticError(err), time.Since(started), nil)
+			return nil, err
 		}
 
 		// Wait before retry (skip for the first attempt).
@@ -411,11 +487,13 @@ func (m *Manager) syncWithRetry(ctx context.Context, rf *registeredFeed) (*SyncR
 			log.Warn("retrying feed sync",
 				slog.Int("attempt", attempt+1),
 				slog.String("delay", delay.String()),
-				slog.String("last_error", lastErr.Error()),
+				slog.String("last_error", SafeDiagnosticError(lastErr)),
 			)
 			select {
 			case <-ctx.Done():
-				return nil, ctx.Err()
+				err := ctx.Err()
+				m.recordStatusForFeed(ctx, rf, "error", SafeDiagnosticError(err), time.Since(started), nil)
+				return nil, err
 			case <-time.After(delay):
 			}
 		}
@@ -426,13 +504,19 @@ func (m *Manager) syncWithRetry(ctx context.Context, rf *registeredFeed) (*SyncR
 
 		if err == nil {
 			// Success -- record in DB and return.
-			m.recordStatus(ctx, name, "success", "", duration, result)
+			m.recordStatusForFeed(ctx, rf, "success", "", duration, result)
 			return result, nil
+		}
+
+		if ctx.Err() != nil {
+			err = ctx.Err()
+			m.recordStatusForFeed(ctx, rf, "error", SafeDiagnosticError(err), time.Since(started), nil)
+			return nil, err
 		}
 
 		lastErr = err
 		if IsPermanentError(err) {
-			m.recordStatus(ctx, name, "skipped", err.Error(), duration, nil)
+			m.recordStatusForFeed(ctx, rf, "skipped", SafeDiagnosticError(err), duration, nil)
 			return nil, err
 		}
 		if isTimeoutError(err) {
@@ -441,13 +525,36 @@ func (m *Manager) syncWithRetry(ctx context.Context, rf *registeredFeed) (*SyncR
 		log.Warn("feed sync attempt failed",
 			slog.Int("attempt", attempt+1),
 			slog.String("duration", duration.String()),
-			slog.String("error", err.Error()),
+			slog.String("error", SafeDiagnosticError(err)),
 		)
 	}
 
 	// All retries exhausted. Record failure.
-	m.recordStatus(ctx, name, "error", lastErr.Error(), 0, nil)
+	m.recordStatusForFeed(ctx, rf, "error", SafeDiagnosticError(lastErr), 0, nil)
 	return nil, fmt.Errorf("feed %s: all %d attempts failed: %w", name, maxAttempts, lastErr)
+}
+
+func acquireSyncLock(ctx context.Context, syncMu *sync.Mutex, waitForLock bool) (bool, error) {
+	if !waitForLock {
+		return syncMu.TryLock(), nil
+	}
+	if syncMu.TryLock() {
+		return true, nil
+	}
+
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-ticker.C:
+			if syncMu.TryLock() {
+				return true, nil
+			}
+		}
+	}
 }
 
 // recordStatus persists the feed_sync_status row. This is the manager's
@@ -455,18 +562,33 @@ func (m *Manager) syncWithRetry(ctx context.Context, rf *registeredFeed) (*SyncR
 // status records with additional details (commit hashes, etc.).
 func (m *Manager) recordStatus(ctx context.Context, feedName, status, errMsg string, duration time.Duration, result *SyncResult) {
 	// Use a separate timeout so a slow/stuck DB doesn't block the sync loop.
-	recordCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	recordCtx, cancel := context.WithTimeout(context.Background(), FeedStatusWriteTimeout)
 	defer cancel()
 	_ = ctx // original context is only used for logging context, not for the DB call
 
 	now := time.Now().UTC()
 	fss := &db.FeedSyncStatus{
 		FeedName:       feedName,
-		LastSyncAt:     &now,
 		LastSyncStatus: status,
 		LastError:      errMsg,
+		UpdatedAt:      now,
 	}
 
+	if result == nil && status != "success" {
+		current, err := m.store.GetFeedSyncStatus(recordCtx, feedName)
+		if err != nil {
+			m.logger.Warn("failed to load current feed sync status for data preservation",
+				slog.String("feed", feedName),
+				slog.String("error", SafeDiagnosticError(err)),
+			)
+		} else {
+			PreserveFeedStatusData(fss, current)
+		}
+	}
+
+	if status == "success" {
+		fss.LastSyncAt = &now
+	}
 	if duration > 0 {
 		fss.LastSyncDuration = &duration
 	}
@@ -474,25 +596,62 @@ func (m *Manager) recordStatus(ctx context.Context, feedName, status, errMsg str
 	if result != nil {
 		fss.EntriesSynced = result.EntriesSynced
 		fss.EntriesTotal = result.EntriesTotal
+		if len(result.Metadata) > 0 {
+			fss.Metadata = append([]byte(nil), result.Metadata...)
+		}
 	}
 
 	if err := m.store.UpsertFeedSyncStatus(recordCtx, fss); err != nil {
 		m.logger.Error("failed to record feed sync status",
 			slog.String("feed", feedName),
-			slog.String("error", err.Error()),
+			slog.String("error", SafeDiagnosticError(err)),
 		)
 	}
 }
 
+func (m *Manager) recordStatusForFeed(ctx context.Context, rf *registeredFeed, status, errMsg string, duration time.Duration, result *SyncResult) {
+	if rf == nil || rf.config.Syncer == nil {
+		return
+	}
+	feedName := rf.config.Syncer.Name()
+	if !m.isCurrentRegisteredFeed(rf) {
+		m.logger.Debug("skipping stale feed sync status",
+			slog.String("feed", feedName),
+			slog.String("status", status),
+		)
+		return
+	}
+	m.recordStatus(ctx, feedName, status, errMsg, duration, result)
+}
+
+func (m *Manager) recordPendingStatusIfMissing(ctx context.Context, feedName string) {
+	recordCtx, cancel := context.WithTimeout(context.Background(), FeedStatusWriteTimeout)
+	defer cancel()
+	_ = ctx
+
+	current, err := m.store.GetFeedSyncStatus(recordCtx, feedName)
+	if err != nil {
+		m.logger.Warn("failed to load current feed sync status before pending marker",
+			slog.String("feed", feedName),
+			slog.String("error", SafeDiagnosticError(err)),
+		)
+		return
+	}
+	if current != nil {
+		return
+	}
+	m.recordStatus(ctx, feedName, "pending", "", 0, nil)
+}
+
 func (m *Manager) recoverInterruptedRunningStatus(feedName string) {
-	recordCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	recordCtx, cancel := context.WithTimeout(context.Background(), FeedStatusWriteTimeout)
 	defer cancel()
 
 	status, err := m.store.GetFeedSyncStatus(recordCtx, feedName)
 	if err != nil {
 		m.logger.Warn("failed to load feed sync status for interrupted sync recovery",
 			slog.String("feed", feedName),
-			slog.String("error", err.Error()),
+			slog.String("error", SafeDiagnosticError(err)),
 		)
 		return
 	}
@@ -502,8 +661,12 @@ func (m *Manager) recoverInterruptedRunningStatus(feedName string) {
 
 	status.LastSyncStatus = "error"
 	status.LastError = interruptedFeedSyncError
-	if status.LastSyncAt != nil {
-		duration := time.Since(*status.LastSyncAt)
+	startedAt := status.UpdatedAt
+	if startedAt.IsZero() && status.LastSyncAt != nil {
+		startedAt = *status.LastSyncAt
+	}
+	if !startedAt.IsZero() {
+		duration := time.Since(startedAt)
 		if duration < 0 {
 			duration = 0
 		}
@@ -513,7 +676,7 @@ func (m *Manager) recoverInterruptedRunningStatus(feedName string) {
 	if err := m.store.UpsertFeedSyncStatus(recordCtx, status); err != nil {
 		m.logger.Warn("failed to recover interrupted feed sync status",
 			slog.String("feed", feedName),
-			slog.String("error", err.Error()),
+			slog.String("error", SafeDiagnosticError(err)),
 		)
 		return
 	}
@@ -524,7 +687,7 @@ func (m *Manager) recoverInterruptedRunningStatus(feedName string) {
 }
 
 func (m *Manager) recordRunningStatus(ctx context.Context, feedName string) {
-	recordCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	recordCtx, cancel := context.WithTimeout(context.Background(), FeedStatusWriteTimeout)
 	defer cancel()
 	_ = ctx
 
@@ -533,44 +696,88 @@ func (m *Manager) recordRunningStatus(ctx context.Context, feedName string) {
 		FeedName:       feedName,
 		LastSyncAt:     &now,
 		LastSyncStatus: "running",
+		UpdatedAt:      now,
 	}
 
 	current, err := m.store.GetFeedSyncStatus(recordCtx, feedName)
 	if err != nil {
 		m.logger.Warn("failed to load current feed sync status",
 			slog.String("feed", feedName),
-			slog.String("error", err.Error()),
+			slog.String("error", SafeDiagnosticError(err)),
 		)
 	} else if current != nil {
-		status.EntriesSynced = current.EntriesSynced
-		status.EntriesTotal = current.EntriesTotal
-		status.LastEtag = current.LastEtag
-		status.LastCommitHash = current.LastCommitHash
-		if current.Metadata != nil {
-			status.Metadata = append([]byte(nil), current.Metadata...)
-		}
+		PreserveFeedStatusData(status, current)
 	}
 
 	if err := m.store.UpsertFeedSyncStatus(recordCtx, status); err != nil {
 		m.logger.Error("failed to record feed sync running status",
 			slog.String("feed", feedName),
-			slog.String("error", err.Error()),
+			slog.String("error", SafeDiagnosticError(err)),
 		)
 	}
+}
+
+func (m *Manager) recordRunningStatusForFeed(ctx context.Context, rf *registeredFeed) {
+	if rf == nil || rf.config.Syncer == nil {
+		return
+	}
+	feedName := rf.config.Syncer.Name()
+	if !m.isCurrentRegisteredFeed(rf) {
+		m.logger.Debug("skipping stale feed running status",
+			slog.String("feed", feedName),
+		)
+		return
+	}
+	m.recordRunningStatus(ctx, feedName)
+}
+
+func (m *Manager) isCurrentRegisteredFeed(rf *registeredFeed) bool {
+	if rf == nil || rf.config.Syncer == nil {
+		return true
+	}
+	feedName := rf.config.Syncer.Name()
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	current, ok := m.feeds[feedName]
+	return !ok || current == rf
 }
 
 // lastSyncFresh returns true if the named feed was successfully synced
 // within the given interval. On any error (e.g. first run, DB
 // unreachable) it returns false so the sync proceeds.
 func (m *Manager) lastSyncFresh(ctx context.Context, feedName string, interval time.Duration) bool {
-	status, err := m.store.GetFeedSyncStatus(ctx, feedName)
+	timeout := m.feedStatusReadTimeout
+	if timeout <= 0 {
+		timeout = FeedStatusReadTimeout
+	}
+	readCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	status, err := m.store.GetFeedSyncStatus(readCtx, feedName)
 	if err != nil || status == nil || status.LastSyncAt == nil {
+		if err != nil {
+			m.logger.Warn("failed to read feed sync freshness status",
+				slog.String("feed", feedName),
+				slog.String("operation", "last_sync_fresh"),
+				slog.String("error", SafeDiagnosticError(err)),
+			)
+		}
 		return false
 	}
 	if status.LastSyncStatus != "success" {
 		return false
 	}
-	return time.Since(*status.LastSyncAt) < interval
+	if status.EntriesTotal <= 0 {
+		return false
+	}
+	lastSyncAt := status.LastSyncAt.UTC()
+	now := time.Now().UTC()
+	if lastSyncAt.After(now) {
+		return false
+	}
+	return now.Sub(lastSyncAt) < interval
 }
 
 func isTimeoutError(err error) bool {

@@ -1,12 +1,12 @@
 package parser
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/packageid"
 	"github.com/BurntSushi/toml"
 )
 
@@ -38,7 +38,7 @@ type pipfilePkg struct {
 
 func (p *PipfileParser) Parse(r io.Reader) ([]domain.Package, error) {
 	var lock pipfileLock
-	if err := json.NewDecoder(r).Decode(&lock); err != nil {
+	if err := decodeStrictJSON(r, &lock); err != nil {
 		return nil, fmt.Errorf("pipfile: invalid JSON: %w", err)
 	}
 
@@ -201,8 +201,9 @@ func (p *RequirementsParser) Ecosystem() domain.Ecosystem { return domain.Ecosys
 
 func (p *RequirementsParser) Parse(r io.Reader) ([]domain.Package, error) {
 	var (
-		pkgs []domain.Package
-		errs []error
+		pkgs             []domain.Package
+		errs             []error
+		activeSourceRefs []string
 	)
 
 	lines, scanErr := readRequirementLogicalLines(r)
@@ -213,6 +214,7 @@ func (p *RequirementsParser) Parse(r io.Reader) ([]domain.Package, error) {
 		// Skip blank lines, comments, include/constraint directives, and pip
 		// options (-i, --index-url, etc.).
 		if shouldSkipRequirementLine(line) {
+			activeSourceRefs = updateRequirementSourceRefs(line, activeSourceRefs)
 			continue
 		}
 		if editable := parseEditableRequirement(line); editable != "" {
@@ -243,14 +245,15 @@ func (p *RequirementsParser) Parse(r io.Reader) ([]domain.Package, error) {
 		}
 
 		if !pinned {
-			errs = append(errs, fmt.Errorf("requirements.txt:%d: unpinned dependency %q", lineNo, name))
+			errs = append(errs, fmt.Errorf("requirements.txt:%d: unpinned dependency", lineNo))
 			continue
 		}
 
 		pkgs = append(pkgs, domain.Package{
-			Name:      normalizePyName(name),
-			Version:   version,
-			Ecosystem: domain.EcosystemPyPI,
+			Name:       normalizePyName(name),
+			Version:    version,
+			Ecosystem:  domain.EcosystemPyPI,
+			SourceRefs: cleanSourceRefs(activeSourceRefs...),
 		})
 	}
 
@@ -315,6 +318,38 @@ func shouldSkipRequirementLine(line string) bool {
 		return true
 	}
 	return strings.HasPrefix(fields[0], "--") && fields[0] != "--editable"
+}
+
+func updateRequirementSourceRefs(line string, current []string) []string {
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return current
+	}
+	switch fields[0] {
+	case "-i", "--index-url":
+		if len(fields) > 1 {
+			return cleanSourceRefs(fields[1])
+		}
+	case "--extra-index-url", "-f", "--find-links":
+		if len(fields) > 1 {
+			return cleanSourceRefs(append(append([]string(nil), current...), fields[1])...)
+		}
+	case "--no-index":
+		return []string{"no-index"}
+	}
+	for _, prefix := range []string{"--index-url=", "-i=", "--extra-index-url=", "--find-links=", "-f="} {
+		if strings.HasPrefix(fields[0], prefix) {
+			value := strings.TrimSpace(strings.TrimPrefix(fields[0], prefix))
+			if value == "" {
+				return current
+			}
+			if strings.HasPrefix(prefix, "--index-url") || strings.HasPrefix(prefix, "-i") {
+				return cleanSourceRefs(value)
+			}
+			return cleanSourceRefs(append(append([]string(nil), current...), value)...)
+		}
+	}
+	return current
 }
 
 func parseEditableRequirement(line string) string {
@@ -384,12 +419,9 @@ func normalizePyVersion(v string) string {
 }
 
 // normalizePyName normalizes a Python package name to lowercase with hyphens
-// replaced by dashes, following PEP 503.
+// replacing . _ - runs, following PEP 503.
 func normalizePyName(name string) string {
-	name = strings.ToLower(name)
-	name = strings.ReplaceAll(name, "_", "-")
-	name = strings.ReplaceAll(name, ".", "-")
-	return name
+	return packageid.NormalizeName(string(domain.EcosystemPyPI), name)
 }
 
 func pythonLockEntryDev(category string, groups []string, explicitDev bool) bool {

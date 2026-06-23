@@ -14,10 +14,12 @@ func (npmGenerator) Ecosystem() string { return "npm" }
 func (npmGenerator) Tool() string      { return "cyclonedx-npm" }
 func (npmGenerator) InstallSpec() InstallSpec {
 	return InstallSpec{
-		Package:        "@cyclonedx/cyclonedx-npm",
-		Source:         "npm registry",
-		Args:           []string{"npm", "install", "--global", "@cyclonedx/cyclonedx-npm@" + npmGeneratorVersion},
-		CanAutoInstall: true,
+		Package:         "@cyclonedx/cyclonedx-npm",
+		Source:          "npm registry",
+		Args:            []string{"npm", "install", "--global", "@cyclonedx/cyclonedx-npm@" + npmGeneratorVersion},
+		ExpectedVersion: npmGeneratorVersion,
+		VersionArgs:     []string{"--version"},
+		CanAutoInstall:  true,
 	}
 }
 
@@ -29,7 +31,7 @@ func (npmGenerator) Generate(ctx context.Context, d Detection, outPath string, o
 	args = append(args, "--", d.ManifestPath)
 	out, err := run(ctx, RunOptions{Name: "cyclonedx-npm", Args: args})
 	if err != nil {
-		return fmt.Errorf("cyclonedx-npm: %w: %s", err, string(out))
+		return fmt.Errorf("cyclonedx-npm: %w: %s", err, commandOutputSummary(out))
 	}
 	return nil
 }
@@ -39,7 +41,11 @@ func (npmGenerator) DeclaresDependencies(d Detection, opts GenerateOptions) (boo
 	if err != nil || declares {
 		return declares, err
 	}
-	for _, child := range npmWorkspaceChildren(d) {
+	children, err := npmWorkspaceChildren(d)
+	if err != nil {
+		return false, err
+	}
+	for _, child := range children {
 		childManifest := filepath.Join(child, "package.json")
 		if _, err := os.Stat(childManifest); err != nil {
 			continue
@@ -53,7 +59,7 @@ func (npmGenerator) DeclaresDependencies(d Detection, opts GenerateOptions) (boo
 }
 
 func packageJSONDeclaresDependencies(path string, opts GenerateOptions) (bool, error) {
-	data, err := os.ReadFile(path) // #nosec G304 -- path comes from a bounded local manifest walk.
+	data, err := readAutoSBOMManifest(path)
 	if err != nil {
 		return false, err
 	}

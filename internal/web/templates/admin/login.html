@@ -1,7 +1,7 @@
 {{define "title"}}Packmon - Admin Login{{end}}
 
 {{define "nav"}}
-<nav class="bg-gray-900 text-white shadow">
+<nav aria-label="Primary" class="bg-gray-900 text-white shadow">
   <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
     <div class="flex items-center justify-between h-14">
       <a href="/" class="text-lg font-bold tracking-tight hover:text-gray-300">Packmon</a>
@@ -16,13 +16,19 @@
     <h1 class="text-xl font-bold text-center mb-6">Admin Login</h1>
 
     {{if .Error}}
-    <div class="bg-red-50 border border-red-200 text-red-700 rounded-md px-4 py-3 mb-4 text-sm">
-      {{.Error}}
+    <div class="mb-4">
+      {{template "admin-alert" dict "Variant" "error" "Icon" true "Live" true "Message" .Error}}
+      {{if .AdminUnconfigured}}
+      <p class="mt-3 text-sm leading-6 text-red-700">
+        Set <code class="font-mono text-xs">PACKMON_ADMIN_INITIAL_PASSWORD</code> in the server environment, restart the server, then sign in as <span class="font-medium">admin</span> and change the bootstrap password.
+      </p>
+      {{end}}
     </div>
     {{end}}
 
-    <form action="/admin/login" method="POST" class="space-y-4">
+    <form action="/admin/login" method="POST" class="space-y-4" data-submit-lock data-submit-lock-label="Signing in">
       <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+      {{if .NextPath}}<input type="hidden" name="next" value="{{.NextPath}}">{{end}}
 
       <div>
         <label for="username" class="block text-sm font-medium text-gray-700 mb-1">Username</label>
@@ -33,7 +39,7 @@
           autocomplete="username"
           required
           value="admin"
-          class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+          class="w-full border border-gray-500 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
         >
       </div>
 
@@ -45,13 +51,14 @@
           id="password"
           autocomplete="current-password"
           required
-          class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+          class="w-full border border-gray-500 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
         >
       </div>
 
       <button
         type="submit"
-        class="w-full bg-blue-600 text-white rounded-md px-4 py-2 text-sm font-medium hover:bg-blue-700 focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
+        data-submit-lock-button
+        class="w-full bg-blue-600 text-white rounded-md px-4 py-2 text-sm font-medium hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
       >
         Login
       </button>

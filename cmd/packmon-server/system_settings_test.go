@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/8linkz/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/db"
 )
 
 func TestApplyStoredSystemSettingsOverridesRuntimeConfig(t *testing.T) {

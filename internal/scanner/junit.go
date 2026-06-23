@@ -4,10 +4,11 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/ioutils"
+	"github.com/8linkz-sec/packmon/internal/plural"
 )
 
 // JUnit XML types for CI/CD integration (GitLab Test Reports, Jenkins, etc.).
@@ -80,8 +81,7 @@ func (jw *JUnitWriter) Write(w io.Writer, result *domain.ScanResult) error {
 
 // WriteFile writes the JUnit output to the given file path.
 func (jw *JUnitWriter) WriteFile(path string, result *domain.ScanResult) error {
-	// #nosec G304 -- CLI output path is provided intentionally by the local user.
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	f, err := ioutils.OpenPrivateFile(path)
 	if err != nil {
 		return fmt.Errorf("junit: create file %s: %w", path, err)
 	}
@@ -104,7 +104,8 @@ func (jw *JUnitWriter) buildJUnit(result *domain.ScanResult) junitTestsuites {
 	)
 
 	// Findings suite. With no findings, emit a single passing case so CI shows a
-	// green scan; otherwise one failing case per finding for fine granularity.
+	// green scan; otherwise one case per finding for fine granularity. Only
+	// findings that block the Packmon gate are emitted as JUnit failures.
 	if len(result.Findings) == 0 {
 		suites = append(suites, junitTestsuite{
 			Name:     "packmon",
@@ -113,7 +114,7 @@ func (jw *JUnitWriter) buildJUnit(result *domain.ScanResult) junitTestsuites {
 			Time:     durationStr,
 			Cases: []junitTestcase{
 				{
-					Name:      fmt.Sprintf("scan (%d packages)", result.PackagesScanned),
+					Name:      fmt.Sprintf("scan (%s)", plural.Count(result.PackagesScanned, "package", "packages")),
 					Classname: "packmon",
 					Time:      durationStr,
 				},
@@ -122,18 +123,27 @@ func (jw *JUnitWriter) buildJUnit(result *domain.ScanResult) junitTestsuites {
 		totalTests++
 	} else {
 		cases := make([]junitTestcase, 0, len(result.Findings))
+		failures := 0
 		for _, f := range result.Findings {
-			cases = append(cases, jw.buildTestcase(f))
+			failing := result.FindingsBlocking && domain.FindingBlocks(f, result.BlockThreshold)
+			if failing {
+				failures++
+			}
+			cases = append(cases, jw.buildTestcase(f, failing))
+		}
+		if result.FindingsBlocking && failures == 0 && len(cases) > 0 {
+			cases[0] = jw.buildTestcase(result.Findings[0], true)
+			failures = 1
 		}
 		suites = append(suites, junitTestsuite{
 			Name:     "packmon",
 			Tests:    len(cases),
-			Failures: len(cases),
+			Failures: failures,
 			Time:     durationStr,
 			Cases:    cases,
 		})
 		totalTests += len(cases)
-		totalFailures += len(cases)
+		totalFailures += failures
 	}
 
 	// Surface partial parse errors as a dedicated errored suite so consumers
@@ -164,6 +174,35 @@ func (jw *JUnitWriter) buildJUnit(result *domain.ScanResult) junitTestsuites {
 		totalErrors += len(cases)
 	}
 
+	// JUnit has no portable warning element. Use an errored diagnostic suite so
+	// artifact-only consumers do not mistake degraded scan coverage for a clean
+	// result.
+	warnings := scanArtifactWarnings(result)
+	if len(warnings) > 0 {
+		cases := make([]junitTestcase, 0, len(warnings))
+		for i, warning := range warnings {
+			cases = append(cases, junitTestcase{
+				Name:      fmt.Sprintf("scan warning %d", i+1),
+				Classname: "packmon.scan-warnings",
+				Time:      "0.000",
+				Error: &junitError{
+					Message: warning,
+					Type:    "scan_warning",
+					Body:    warning,
+				},
+			})
+		}
+		suites = append(suites, junitTestsuite{
+			Name:   "packmon.scan-warnings",
+			Tests:  len(cases),
+			Errors: len(cases),
+			Time:   "0.000",
+			Cases:  cases,
+		})
+		totalTests += len(cases)
+		totalErrors += len(cases)
+	}
+
 	return junitTestsuites{
 		Tests:      totalTests,
 		Failures:   totalFailures,
@@ -173,7 +212,7 @@ func (jw *JUnitWriter) buildJUnit(result *domain.ScanResult) junitTestsuites {
 	}
 }
 
-func (jw *JUnitWriter) buildTestcase(f domain.Finding) junitTestcase {
+func (jw *JUnitWriter) buildTestcase(f domain.Finding, failing bool) junitTestcase {
 	pkg := fmt.Sprintf("%s@%s", f.Name, f.Version)
 	name := fmt.Sprintf("[%s] %s (%s)", f.Severity, pkg, f.Ecosystem)
 	classname := fmt.Sprintf("packmon.%s", f.Ecosystem)
@@ -213,14 +252,17 @@ func (jw *JUnitWriter) buildTestcase(f domain.Finding) junitTestcase {
 		message = fmt.Sprintf("%s (%s)", f.AdvisoryID, f.Title)
 	}
 
-	return junitTestcase{
+	testcase := junitTestcase{
 		Name:      name,
 		Classname: classname,
 		Time:      "0.000",
-		Failure: &junitFailure{
+	}
+	if failing {
+		testcase.Failure = &junitFailure{
 			Message: message,
 			Type:    failType,
 			Body:    body.String(),
-		},
+		}
 	}
+	return testcase
 }

@@ -64,24 +64,24 @@ func TestCompare_Semver_Prerelease(t *testing.T) {
 	}
 }
 
-func TestExportedHelperFunctions(t *testing.T) {
+func TestInternalHelperFunctions(t *testing.T) {
 	t.Parallel()
 
-	base, prerelease := SplitPrerelease("1.2.3-alpha.1+build")
+	base, prerelease := splitPrerelease("1.2.3-alpha.1+build")
 	if base != "1.2.3" || prerelease != "alpha.1+build" {
-		t.Fatalf("SplitPrerelease() = %q, %q", base, prerelease)
+		t.Fatalf("splitPrerelease() = %q, %q", base, prerelease)
 	}
-	if got := ComparePrerelease("alpha.1", "alpha.2"); got != -1 {
-		t.Fatalf("ComparePrerelease() = %d, want -1", got)
+	if got := comparePrereleaseIdentifiers("alpha.1", "alpha.2"); got != -1 {
+		t.Fatalf("comparePrereleaseIdentifiers() = %d, want -1", got)
 	}
-	if ok, n := IsNumeric("42"); !ok || n != 42 {
-		t.Fatalf("IsNumeric(42) = %v, %d", ok, n)
+	if ok, n := isNumeric("42"); !ok || n != 42 {
+		t.Fatalf("isNumeric(42) = %v, %d", ok, n)
 	}
-	if ok, n := IsNumeric(""); ok || n != 0 {
-		t.Fatalf("IsNumeric(empty) = %v, %d", ok, n)
+	if ok, n := isNumeric(""); ok || n != 0 {
+		t.Fatalf("isNumeric(empty) = %v, %d", ok, n)
 	}
-	if got := ParseLeadingInt("123abc"); got != 123 {
-		t.Fatalf("ParseLeadingInt() = %d, want 123", got)
+	if got := parseLeadingInt("123abc"); got != 123 {
+		t.Fatalf("parseLeadingInt() = %d, want 123", got)
 	}
 }
 
@@ -314,12 +314,23 @@ func TestCompare_Ecosystem_DefaultSemver(t *testing.T) {
 	t.Parallel()
 
 	// npm, go, cargo, etc. should fall back to semver.
-	ecosystems := []string{"npm", "Go", "crates.io", "NuGet", "Packagist"}
+	ecosystems := []string{"npm", "Go", "crates.io", "Packagist"}
 	for _, eco := range ecosystems {
 		got := Compare("1.0.0-rc1", "1.0.0", "ECOSYSTEM", eco)
 		if got != -1 {
 			t.Errorf("Compare(1.0.0-rc1, 1.0.0, ECOSYSTEM, %s) = %d, want -1", eco, got)
 		}
+	}
+}
+
+func TestCompare_Ecosystem_NuGetPrereleaseCaseInsensitive(t *testing.T) {
+	t.Parallel()
+
+	if got := Compare("1.0.0-alpha", "1.0.0-Alpha", "ECOSYSTEM", "nuget"); got != 0 {
+		t.Fatalf("Compare(nuget prerelease case) = %d, want 0", got)
+	}
+	if got := Compare("1.0.0-beta", "1.0.0-RC", "ECOSYSTEM", "NuGet"); got >= 0 {
+		t.Fatalf("Compare(nuget beta, RC) = %d, want beta before rc", got)
 	}
 }
 
@@ -575,6 +586,35 @@ func TestVersionAffected_ExplicitVersionsList(t *testing.T) {
 	}
 	if got {
 		t.Fatal("expected false for version not in explicit list")
+	}
+}
+
+func TestVersionAffected_NuGetPrereleaseCaseInsensitive(t *testing.T) {
+	t.Parallel()
+
+	got, err := VersionAffected("1.0.0-alpha", `[]`, `["1.0.0-Alpha"]`, "nuget")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got {
+		t.Fatal("expected NuGet explicit prerelease case-insensitive match")
+	}
+
+	got, err = VersionAffected("1.0.0-alpha", `[]`, `["1.0.0-Alpha"]`, "npm")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got {
+		t.Fatal("expected npm explicit prerelease match to remain case-sensitive")
+	}
+
+	ranges := `[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"last_affected":"1.0.0-Alpha"}]}]`
+	got, err = VersionAffected("1.0.0-alpha", ranges, `[]`, "nuget")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got {
+		t.Fatal("expected NuGet range prerelease case-insensitive match")
 	}
 }
 

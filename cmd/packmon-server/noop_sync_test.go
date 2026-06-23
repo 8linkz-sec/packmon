@@ -7,14 +7,15 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	v1 "github.com/8linkz/packmon/internal/api/v1"
+	v1 "github.com/8linkz-sec/packmon/internal/api/v1"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 func TestNoopStoreFeedImportAndSync(t *testing.T) {
 	t.Parallel()
 
 	store := newNoopStore()
-	handler := v1.NewHandler(store, nil)
+	handler := v1.NewHandlerWithBlockThreshold(store, nil, domain.SeverityCritical)
 
 	importBody := map[string]any{
 		"malicious": []map[string]any{
@@ -60,6 +61,7 @@ func TestNoopStoreFeedImportAndSync(t *testing.T) {
 			ID        string `json:"id"`
 			Ecosystem string `json:"ecosystem"`
 			Name      string `json:"name"`
+			Source    string `json:"source"`
 		} `json:"malicious"`
 	}
 	if err := json.NewDecoder(syncRec.Body).Decode(&resp); err != nil {
@@ -74,5 +76,8 @@ func TestNoopStoreFeedImportAndSync(t *testing.T) {
 	}
 	if resp.Malicious[0].Name != "left-pad-evil" {
 		t.Fatalf("resp.Malicious[0].Name = %q, want %q", resp.Malicious[0].Name, "left-pad-evil")
+	}
+	if resp.Malicious[0].Source != "openssf" {
+		t.Fatalf("resp.Malicious[0].Source = %q, want openssf", resp.Malicious[0].Source)
 	}
 }

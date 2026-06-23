@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/8linkz/packmon/internal/db"
-	"github.com/8linkz/packmon/internal/feed"
+	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/feed"
 )
 
 // -- Store stub ---------------------------------------------------------------
@@ -30,6 +30,37 @@ type nvdStoreStub struct {
 type updateRecord struct {
 	severity  string
 	cvssScore float64
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type countingReadCloser struct {
+	remaining int64
+	read      int64
+}
+
+func (r *countingReadCloser) Read(p []byte) (int, error) {
+	if r.remaining <= 0 {
+		return 0, io.EOF
+	}
+	if int64(len(p)) > r.remaining {
+		p = p[:r.remaining]
+	}
+	for i := range p {
+		p[i] = 'x'
+	}
+	n := len(p)
+	r.remaining -= int64(n)
+	r.read += int64(n)
+	return n, nil
+}
+
+func (r *countingReadCloser) Close() error {
+	return nil
 }
 
 func (s *nvdStoreStub) FindUnknownSeverityCVEAliases(_ context.Context) ([]db.UnknownCVEAlias, error) {
@@ -441,7 +472,7 @@ func TestSync_RetriesRateLimitedCVE(t *testing.T) {
 	}
 }
 
-func TestSyncSkipsFetchAndUpdateFailures(t *testing.T) {
+func TestSyncFailsOnOperationalFetchAndUpdateFailures(t *testing.T) {
 	t.Parallel()
 
 	if _, err := NewSyncer(nil).Sync(context.Background(), &nvdStoreStub{findErr: errors.New("db down")}); err == nil || !strings.Contains(err.Error(), "find unknown") {
@@ -473,11 +504,11 @@ func TestSyncSkipsFetchAndUpdateFailures(t *testing.T) {
 	}
 	syncer := NewSyncer(slog.New(slog.NewTextHandler(io.Discard, nil)), WithAPIURL(srv.URL), WithHTTPClient(srv.Client()))
 	result, err := syncer.Sync(context.Background(), store)
-	if err != nil {
-		t.Fatalf("Sync() error = %v", err)
+	if err == nil || !strings.Contains(err.Error(), "2 CVE enrichment error") {
+		t.Fatalf("Sync() error = %v, want aggregated enrichment failure", err)
 	}
-	if result.EntriesSynced != 0 || result.EntriesTotal != 3 {
-		t.Fatalf("Sync() result = %+v, want 0 synced / 3 total", result)
+	if result != nil {
+		t.Fatalf("Sync() result = %+v, want nil on operational failures", result)
 	}
 }
 
@@ -531,6 +562,43 @@ func TestFetchCVSSErrorBranchesAndRetryHelpers(t *testing.T) {
 	cancel()
 	if err := waitForRetry(ctx, time.Hour); !errors.Is(err, context.Canceled) {
 		t.Fatalf("waitForRetry(canceled) error = %v", err)
+	}
+}
+
+func TestFetchCVSSBoundsErrorBodyDrain(t *testing.T) {
+	t.Parallel()
+
+	for _, status := range []int{http.StatusInternalServerError, http.StatusTooManyRequests} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			t.Parallel()
+
+			body := &countingReadCloser{remaining: 1 << 20}
+			client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: status,
+					Header:     make(http.Header),
+					Body:       body,
+					Request:    req,
+				}, nil
+			})}
+			syncer := NewSyncer(nil,
+				WithHTTPClient(client),
+				WithAPIURL("https://nvd.example.test/rest/json/cves/2.0"),
+			)
+
+			_, _, err := syncer.fetchCVSS(context.Background(), "CVE-2026-0001")
+			if status == http.StatusTooManyRequests {
+				var rl *rateLimitError
+				if !errors.As(err, &rl) {
+					t.Fatalf("fetchCVSS() error = %v, want rate-limit error", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), "unexpected status") {
+				t.Fatalf("fetchCVSS() error = %v, want unexpected-status error", err)
+			}
+			if body.read > 64<<10 {
+				t.Fatalf("drained %d bytes, want at most 64 KiB", body.read)
+			}
+		})
 	}
 }
 

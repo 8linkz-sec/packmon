@@ -7,18 +7,58 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
+
+func skipIfPOSIXModesAreNotPreserved(t *testing.T, baseDir string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX mode bits are not reliable on Windows")
+	}
+
+	probeDir := filepath.Join(baseDir, "mode-probe")
+	if err := os.Mkdir(probeDir, 0o750); err != nil {
+		t.Fatalf("create mode probe directory: %v", err)
+	}
+	if err := os.Chmod(probeDir, 0o750); err != nil { // #nosec G302 -- test intentionally verifies POSIX directory mode preservation.
+		t.Fatalf("chmod mode probe directory: %v", err)
+	}
+	probeInfo, err := os.Stat(probeDir)
+	if err != nil {
+		t.Fatalf("stat mode probe directory: %v", err)
+	}
+	if got := probeInfo.Mode().Perm(); got != 0o750 {
+		t.Skipf("filesystem does not preserve POSIX directory mode bits: got %o after chmod 0750", got)
+	}
+
+	probeFile := filepath.Join(baseDir, "mode-probe.json")
+	if err := os.WriteFile(probeFile, []byte("{}"), 0o600); err != nil {
+		t.Fatalf("create mode probe file: %v", err)
+	}
+	if err := os.Chmod(probeFile, 0o600); err != nil {
+		t.Fatalf("chmod mode probe file: %v", err)
+	}
+	fileInfo, err := os.Stat(probeFile)
+	if err != nil {
+		t.Fatalf("stat mode probe file: %v", err)
+	}
+	if got := fileInfo.Mode().Perm(); got != 0o600 {
+		t.Skipf("filesystem does not preserve POSIX file mode bits: got %o after chmod 0600", got)
+	}
+}
 
 func sampleReportResult() *domain.ScanResult {
 	return &domain.ScanResult{
-		ScanID:          "scan-1",
-		PackagesScanned: 2,
-		FindingsCount:   3,
-		DurationMs:      1234,
+		ScanID:           "scan-1",
+		PackagesScanned:  2,
+		FindingsCount:    3,
+		FindingsBlocking: true,
+		BlockThreshold:   domain.SeverityHigh,
+		DurationMs:       1234,
 		Findings: []domain.Finding{
 			{
 				Name:         "lodash",
@@ -109,6 +149,48 @@ func TestSARIFWriterSerializesFindingsAndRules(t *testing.T) {
 	}
 }
 
+func TestSARIFWriterEmitsResultLocations(t *testing.T) {
+	t.Parallel()
+
+	result := &domain.ScanResult{
+		FindingsBlocking: true,
+		BlockThreshold:   domain.SeverityMedium,
+		Findings: []domain.Finding{
+			{
+				Name:      "lodash",
+				Version:   "1.0.0",
+				Ecosystem: domain.EcosystemNPM,
+				Type:      domain.FindingTypeVulnerability,
+				Severity:  domain.SeverityHigh,
+				Title:     "Prototype pollution",
+				Source:    "osv",
+				Locations: []domain.FindingLocation{{URI: "package-lock.json"}},
+			},
+		},
+	}
+
+	var out bytes.Buffer
+	if err := NewSARIFWriter("1.2.3").Write(&out, result); err != nil {
+		t.Fatalf("SARIF Write() error = %v", err)
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(out.Bytes(), &raw); err != nil {
+		t.Fatalf("unmarshal SARIF: %v\n%s", err, out.String())
+	}
+	runs := raw["runs"].([]any)
+	results := runs[0].(map[string]any)["results"].([]any)
+	locations, ok := results[0].(map[string]any)["locations"].([]any)
+	if !ok || len(locations) == 0 {
+		t.Fatalf("SARIF result missing locations:\n%s", out.String())
+	}
+	physical := locations[0].(map[string]any)["physicalLocation"].(map[string]any)
+	artifact := physical["artifactLocation"].(map[string]any)
+	if got := artifact["uri"]; got != "package-lock.json" {
+		t.Fatalf("artifactLocation.uri = %#v, want package-lock.json\nSARIF:\n%s", got, out.String())
+	}
+}
+
 func TestSARIFWriterDefaultsVersionAndWritesFile(t *testing.T) {
 	t.Parallel()
 
@@ -125,6 +207,64 @@ func TestSARIFWriterDefaultsVersionAndWritesFile(t *testing.T) {
 	}
 	if err := NewSARIFWriter("dev").WriteFile(filepath.Join(t.TempDir(), "missing", "out.sarif"), sampleReportResult()); err == nil {
 		t.Fatal("WriteFile to missing directory error = nil, want error")
+	}
+}
+
+func TestReportWritersTightenExistingFilePermissions(t *testing.T) {
+	t.Parallel()
+
+	baseDir := t.TempDir()
+	skipIfPOSIXModesAreNotPreserved(t, baseDir)
+
+	cases := []struct {
+		name  string
+		path  string
+		write func(string) error
+	}{
+		{
+			name: "sarif",
+			path: filepath.Join(baseDir, "result.sarif"),
+			write: func(path string) error {
+				return NewSARIFWriter("dev").WriteFile(path, sampleReportResult())
+			},
+		},
+		{
+			name: "junit",
+			path: filepath.Join(baseDir, "result.xml"),
+			write: func(path string) error {
+				return NewJUnitWriter().WriteFile(path, sampleReportResult())
+			},
+		},
+		{
+			name: "html",
+			path: filepath.Join(baseDir, "result.html"),
+			write: func(path string) error {
+				return NewHTMLWriter("dev").WriteFile(path, "svc", domain.SeverityCritical, sampleReportResult())
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(tc.path, []byte("old report"), 0o644); err != nil { // #nosec G306 -- test seeds broad permissions to verify the report writer tightens them.
+				t.Fatalf("seed broad report file: %v", err)
+			}
+			if err := os.Chmod(tc.path, 0o644); err != nil { // #nosec G302 -- test intentionally prepares a too-broad existing file.
+				t.Fatalf("chmod broad report file: %v", err)
+			}
+
+			if err := tc.write(tc.path); err != nil {
+				t.Fatalf("WriteFile() error = %v", err)
+			}
+
+			info, err := os.Stat(tc.path)
+			if err != nil {
+				t.Fatalf("stat report file: %v", err)
+			}
+			if got := info.Mode().Perm(); got != 0o600 {
+				t.Fatalf("report permissions = %o, want 0600", got)
+			}
+		})
 	}
 }
 
@@ -219,6 +359,8 @@ func TestJUnitWriterLabelsLifecycleFindings(t *testing.T) {
 	t.Parallel()
 
 	result := &domain.ScanResult{
+		FindingsBlocking: true,
+		BlockThreshold:   domain.SeverityMedium,
 		Findings: []domain.Finding{
 			{
 				Name:      "django",

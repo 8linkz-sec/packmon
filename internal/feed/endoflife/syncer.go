@@ -10,10 +10,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/8linkz/packmon/internal/db"
-	"github.com/8linkz/packmon/internal/feed"
-	lifecyclemaps "github.com/8linkz/packmon/internal/lifecycle"
-	"github.com/8linkz/packmon/internal/sbom"
+	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/feed"
+	lifecyclemaps "github.com/8linkz-sec/packmon/internal/lifecycle"
+	"github.com/8linkz-sec/packmon/internal/sbom"
 )
 
 const (
@@ -30,6 +30,10 @@ type Syncer struct {
 
 type lifecycleReconciler interface {
 	DeleteLifecycleProductsNotIn(ctx context.Context, productSlugs []string) (int, error)
+}
+
+type lifecycleReplacer interface {
+	ReplaceLifecycleProducts(ctx context.Context, products []db.LifecycleProduct) (int, error)
 }
 
 type Option func(*Syncer)
@@ -82,31 +86,46 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 		if etag == "" {
 			etag = storedETag
 		}
-		s.recordSyncSuccess(ctx, store, start, 0, 0, etag, syncMetadata{ETag: etag})
-		return &feed.SyncResult{}, nil
+		synced, total := statusCounts(status)
+		s.recordSyncSuccess(ctx, store, start, total, synced, etag, syncMetadata{ETag: etag})
+		return &feed.SyncResult{EntriesSynced: synced, EntriesTotal: total}, nil
 	}
 
 	products := make([]db.LifecycleProduct, 0, len(resp.Result))
 	for _, product := range resp.Result {
-		mapped := mapProduct(product)
-		if mapped.ProductSlug == "" {
-			continue
+		mapped, err := mapProduct(product)
+		if err != nil {
+			syncErr := fmt.Errorf("map lifecycle product: %w", err)
+			s.recordSyncFailure(ctx, store, start, syncErr)
+			return nil, syncErr
 		}
 		products = append(products, mapped)
 	}
 
-	if err := store.UpsertLifecycleProducts(ctx, products); err != nil {
-		s.recordSyncFailure(ctx, store, start, err)
-		return nil, fmt.Errorf("upsert lifecycle products: %w", err)
-	}
-	if reconciler, ok := store.(lifecycleReconciler); ok && len(products) > 0 {
-		slugs := make([]string, 0, len(products))
-		for _, product := range products {
-			slugs = append(slugs, product.ProductSlug)
-		}
-		if _, err := reconciler.DeleteLifecycleProductsNotIn(ctx, slugs); err != nil {
+	deletedProducts := 0
+	if replacer, ok := store.(lifecycleReplacer); ok {
+		deleted, err := replacer.ReplaceLifecycleProducts(ctx, products)
+		if err != nil {
 			s.recordSyncFailure(ctx, store, start, err)
-			return nil, fmt.Errorf("reconcile lifecycle products: %w", err)
+			return nil, fmt.Errorf("replace lifecycle products: %w", err)
+		}
+		deletedProducts = deleted
+	} else {
+		if err := store.UpsertLifecycleProducts(ctx, products); err != nil {
+			s.recordSyncFailure(ctx, store, start, err)
+			return nil, fmt.Errorf("upsert lifecycle products: %w", err)
+		}
+		if reconciler, ok := store.(lifecycleReconciler); ok && len(products) > 0 {
+			slugs := make([]string, 0, len(products))
+			for _, product := range products {
+				slugs = append(slugs, product.ProductSlug)
+			}
+			deleted, err := reconciler.DeleteLifecycleProductsNotIn(ctx, slugs)
+			if err != nil {
+				s.recordSyncFailure(ctx, store, start, err)
+				return nil, fmt.Errorf("reconcile lifecycle products: %w", err)
+			}
+			deletedProducts = deleted
 		}
 	}
 
@@ -115,18 +134,23 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 		total = len(resp.Result)
 	}
 	metadata := syncMetadata{
-		ETag:          etag,
-		SchemaVersion: resp.SchemaVersion,
-		GeneratedAt:   resp.GeneratedAt,
+		ETag:            etag,
+		SchemaVersion:   resp.SchemaVersion,
+		GeneratedAt:     resp.GeneratedAt,
+		DeletedProducts: deletedProducts,
 	}
+	s.logger.Info("completed endoflife lifecycle product reconciliation",
+		slog.Int("products", len(products)),
+		slog.Int("deleted_products", deletedProducts))
 	s.recordSyncSuccess(ctx, store, start, total, len(products), etag, metadata)
 	return &feed.SyncResult{EntriesSynced: len(products), EntriesTotal: total}, nil
 }
 
 type syncMetadata struct {
-	ETag          string `json:"etag,omitempty"`
-	SchemaVersion string `json:"schema_version,omitempty"`
-	GeneratedAt   string `json:"generated_at,omitempty"`
+	ETag            string `json:"etag,omitempty"`
+	SchemaVersion   string `json:"schema_version,omitempty"`
+	GeneratedAt     string `json:"generated_at,omitempty"`
+	DeletedProducts int    `json:"deleted_products,omitempty"`
 }
 
 func (s *Syncer) loadStatus(ctx context.Context, store db.Store) *db.FeedSyncStatus {
@@ -155,6 +179,13 @@ func statusETag(status *db.FeedSyncStatus) string {
 	return strings.TrimSpace(metadata.ETag)
 }
 
+func statusCounts(status *db.FeedSyncStatus) (synced, total int) {
+	if status == nil {
+		return 0, 0
+	}
+	return status.EntriesSynced, status.EntriesTotal
+}
+
 func (s *Syncer) recordSyncSuccess(ctx context.Context, store db.Store, start time.Time, total, synced int, etag string, metadata syncMetadata) {
 	duration := time.Since(start)
 	now := time.Now().UTC()
@@ -162,7 +193,7 @@ func (s *Syncer) recordSyncSuccess(ctx context.Context, store db.Store, start ti
 		metadata.ETag = etag
 	}
 	metadataJSON, _ := json.Marshal(metadata)
-	if err := store.UpsertFeedSyncStatus(ctx, &db.FeedSyncStatus{
+	if err := feed.UpsertFeedSyncStatusBounded(store, &db.FeedSyncStatus{
 		FeedName:         FeedName,
 		LastSyncAt:       &now,
 		LastSyncDuration: &duration,
@@ -174,26 +205,32 @@ func (s *Syncer) recordSyncSuccess(ctx context.Context, store db.Store, start ti
 	}); err != nil {
 		s.logger.Warn("failed to record endoflife sync success", "error", err)
 	}
+	_ = ctx
 }
 
 func (s *Syncer) recordSyncFailure(ctx context.Context, store db.Store, start time.Time, syncErr error) {
 	duration := time.Since(start)
 	now := time.Now().UTC()
-	if err := store.UpsertFeedSyncStatus(ctx, &db.FeedSyncStatus{
+	status := &db.FeedSyncStatus{
 		FeedName:         FeedName,
-		LastSyncAt:       &now,
 		LastSyncDuration: &duration,
 		LastSyncStatus:   "error",
 		LastError:        syncErr.Error(),
-	}); err != nil {
+		UpdatedAt:        now,
+	}
+	if current, err := feed.GetFeedSyncStatusBounded(store, FeedName); err == nil {
+		feed.PreserveFeedStatusData(status, current)
+	}
+	if err := feed.UpsertFeedSyncStatusBounded(store, status); err != nil {
 		s.logger.Warn("failed to record endoflife sync failure", "error", err)
 	}
+	_ = ctx
 }
 
-func mapProduct(product Product) db.LifecycleProduct {
+func mapProduct(product Product) (db.LifecycleProduct, error) {
 	productSlug := strings.TrimSpace(product.Name)
 	if productSlug == "" {
-		return db.LifecycleProduct{}
+		return db.LifecycleProduct{}, fmt.Errorf("product name is required")
 	}
 	name := strings.TrimSpace(product.Label)
 	if name == "" {
@@ -215,22 +252,46 @@ func mapProduct(product Product) db.LifecycleProduct {
 		if release.Latest != nil {
 			latest = strings.TrimSpace(release.Latest.Name)
 		}
+		releaseDate, err := parseLifecycleDateStrict(productSlug, release.Name, "releaseDate", release.ReleaseDate)
+		if err != nil {
+			return db.LifecycleProduct{}, err
+		}
+		ltsFrom, err := parseLifecycleDateStrict(productSlug, release.Name, "ltsFrom", release.LTSFrom)
+		if err != nil {
+			return db.LifecycleProduct{}, err
+		}
+		eoasFrom, err := parseLifecycleDateStrict(productSlug, release.Name, "eoasFrom", release.EOASFrom)
+		if err != nil {
+			return db.LifecycleProduct{}, err
+		}
+		eolFrom, err := parseLifecycleDateStrict(productSlug, release.Name, "eolFrom", release.EOLFrom)
+		if err != nil {
+			return db.LifecycleProduct{}, err
+		}
+		discontinuedFrom, err := parseLifecycleDateStrict(productSlug, release.Name, "discontinuedFrom", release.DiscontinuedFrom)
+		if err != nil {
+			return db.LifecycleProduct{}, err
+		}
+		eoesFrom, err := parseLifecycleDateStrict(productSlug, release.Name, "eoesFrom", release.EOESFrom)
+		if err != nil {
+			return db.LifecycleProduct{}, err
+		}
 		releaseRaw, _ := json.Marshal(release)
 		mapped.Releases = append(mapped.Releases, db.LifecycleRelease{
 			ProductSlug:      productSlug,
 			Cycle:            strings.TrimSpace(release.Name),
 			Latest:           latest,
-			ReleaseDate:      parseLifecycleDate(release.ReleaseDate),
+			ReleaseDate:      releaseDate,
 			IsLTS:            release.IsLTS,
-			LTSFrom:          parseLifecycleDate(release.LTSFrom),
+			LTSFrom:          ltsFrom,
 			IsEOAS:           release.IsEOAS,
-			EOASFrom:         parseLifecycleDate(release.EOASFrom),
+			EOASFrom:         eoasFrom,
 			IsEOL:            release.IsEOL,
-			EOLFrom:          parseLifecycleDate(release.EOLFrom),
+			EOLFrom:          eolFrom,
 			IsDiscontinued:   release.IsDiscontinued,
-			DiscontinuedFrom: parseLifecycleDate(release.DiscontinuedFrom),
+			DiscontinuedFrom: discontinuedFrom,
 			IsEOES:           release.IsEOES,
-			EOESFrom:         parseLifecycleDate(release.EOESFrom),
+			EOESFrom:         eoesFrom,
 			IsMaintained:     release.IsMaintained,
 			Raw:              releaseRaw,
 		})
@@ -243,9 +304,12 @@ func mapProduct(product Product) db.LifecycleProduct {
 		}
 		pkg, ok := sbom.PackageIdentityFromPURL(identifier.ID)
 		if !ok {
-			continue
+			return db.LifecycleProduct{}, fmt.Errorf("product %q invalid purl identifier %q", productSlug, identifier.ID)
 		}
 		purlType, purlNamespace, purlName := purlParts(identifier.ID)
+		if purlType == "" || purlName == "" {
+			return db.LifecycleProduct{}, fmt.Errorf("product %q invalid purl identifier %q", productSlug, identifier.ID)
+		}
 		addPackageMap(&mapped, mapSet, db.LifecyclePackageMap{
 			Ecosystem:     string(pkg.Ecosystem),
 			Name:          pkg.Name,
@@ -257,9 +321,21 @@ func mapProduct(product Product) db.LifecycleProduct {
 		})
 	}
 	for _, packageMap := range lifecyclemaps.CuratedPackageMaps(productSlug) {
-		addPackageMap(&mapped, mapSet, packageMap)
+		addPackageMap(&mapped, mapSet, lifecyclePackageMap(packageMap))
 	}
-	return mapped
+	return mapped, nil
+}
+
+func lifecyclePackageMap(packageMap lifecyclemaps.PackageMap) db.LifecyclePackageMap {
+	return db.LifecyclePackageMap{
+		Ecosystem:     packageMap.Ecosystem,
+		Name:          packageMap.Name,
+		ProductSlug:   packageMap.ProductSlug,
+		PURLType:      packageMap.PURLType,
+		PURLNamespace: packageMap.PURLNamespace,
+		PURLName:      packageMap.PURLName,
+		Source:        packageMap.Source,
+	}
 }
 
 func addPackageMap(product *db.LifecycleProduct, set map[string]struct{}, packageMap db.LifecyclePackageMap) {
@@ -290,6 +366,18 @@ func parseLifecycleDate(raw string) *time.Time {
 		return nil
 	}
 	return &date
+}
+
+func parseLifecycleDateStrict(productSlug, cycle, field, raw string) (*time.Time, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	date, err := time.Parse(time.DateOnly, raw)
+	if err != nil {
+		return nil, fmt.Errorf("product %q release %q field %s has invalid date %q", productSlug, strings.TrimSpace(cycle), field, raw)
+	}
+	return &date, nil
 }
 
 func purlParts(raw string) (purlType, purlNamespace, purlName string) {

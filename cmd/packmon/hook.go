@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/8linkz-sec/packmon/internal/termtext"
 	"github.com/spf13/cobra"
 )
 
@@ -28,7 +30,7 @@ packmon scan . --fail-on %s --quiet
 `, failOn)
 }
 
-// findGitRoot walks up from dir looking for a .git directory.
+// findGitRoot walks up from dir looking for a .git directory or gitdir file.
 // Returns the repository root (the parent of .git) or empty string if not found.
 func findGitRoot(dir string) string {
 	dir, err := filepath.Abs(dir)
@@ -38,8 +40,10 @@ func findGitRoot(dir string) string {
 	for {
 		gitDir := filepath.Join(dir, ".git")
 		info, err := os.Stat(gitDir)
-		if err == nil && info.IsDir() {
-			return dir
+		if err == nil {
+			if info.IsDir() || gitDirFileTarget(dir) != "" {
+				return dir
+			}
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
@@ -48,6 +52,54 @@ func findGitRoot(dir string) string {
 		}
 		dir = parent
 	}
+}
+
+func findGitHooksDir(root string) string {
+	if hooksDir := gitResolvedHooksDir(root); hooksDir != "" {
+		return hooksDir
+	}
+	if gitDir := gitDirFileTarget(root); gitDir != "" {
+		return filepath.Join(gitDir, "hooks")
+	}
+	return filepath.Join(root, ".git", "hooks")
+}
+
+func gitResolvedHooksDir(root string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), gitMetadataTimeout)
+	defer cancel()
+
+	out, err := gitCommandOutput(ctx, "-C", root, "rev-parse", "--git-path", "hooks")
+	if err != nil {
+		return ""
+	}
+	hooksDir := strings.TrimSpace(string(out))
+	if hooksDir == "" {
+		return ""
+	}
+	if !filepath.IsAbs(hooksDir) {
+		hooksDir = filepath.Join(root, hooksDir)
+	}
+	return filepath.Clean(hooksDir)
+}
+
+func gitDirFileTarget(root string) string {
+	data, err := os.ReadFile(filepath.Join(root, ".git")) // #nosec G304 -- path is derived from the discovered repository root.
+	if err != nil {
+		return ""
+	}
+	line, _, _ := strings.Cut(string(data), "\n")
+	key, value, ok := strings.Cut(strings.TrimSpace(line), ":")
+	if !ok || !strings.EqualFold(strings.TrimSpace(key), "gitdir") {
+		return ""
+	}
+	gitDir := strings.TrimSpace(value)
+	if gitDir == "" {
+		return ""
+	}
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(root, gitDir)
+	}
+	return filepath.Clean(gitDir)
 }
 
 // isPackmonHook returns true if the file at path contains the packmon marker.
@@ -109,7 +161,7 @@ func newHookInstallCmd() *cobra.Command {
 				return nil
 			}
 
-			hooksDir := filepath.Join(root, ".git", "hooks")
+			hooksDir := findGitHooksDir(root)
 			hookPath := filepath.Join(hooksDir, hookType)
 
 			// Check if hook already exists.
@@ -117,26 +169,25 @@ func newHookInstallCmd() *cobra.Command {
 				if !isPackmonHook(hookPath) {
 					fmt.Fprintf(os.Stderr, "Warning: %s hook already exists and is not managed by packmon.\n", hookType)
 					fmt.Fprintf(os.Stderr, "Remove it manually or back it up before installing the packmon hook.\n")
-					fmt.Fprintf(os.Stderr, "Path: %s\n", hookPath)
+					fmt.Fprintf(os.Stderr, "Path: %s\n", termtext.Sanitize(hookPath))
 					os.Exit(ExitOperational)
 				}
 				// Existing packmon hook -- overwrite (update).
 			}
 
 			// Ensure hooks directory exists (some bare clones may lack it).
-			if err := os.MkdirAll(hooksDir, 0o750); err != nil { // #nosec G301
+			if err := os.MkdirAll(hooksDir, 0o750); err != nil { // #nosec G301 -- Git hooks directory must be traversable by the local repository owner.
 				fmt.Fprintf(os.Stderr, "Error: cannot create hooks directory: %v\n", err)
 				os.Exit(ExitOperational)
 			}
 
-			//nolint:gosec // hooks must be executable for Git to run them.
 			// #nosec G306 -- hooks must be executable for Git to run them.
 			if err := os.WriteFile(hookPath, []byte(hookScript(failOn)), 0o755); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: cannot write hook file: %v\n", err)
 				os.Exit(ExitOperational)
 			}
 
-			fmt.Printf("Installed packmon %s hook in %s\n", hookType, hookPath)
+			fmt.Printf("Installed packmon %s hook in %s\n", hookType, termtext.Sanitize(hookPath))
 			return nil
 		},
 	}
@@ -186,7 +237,7 @@ func newHookUninstallCmd() *cobra.Command {
 
 			removed := 0
 			for _, hookType := range hookTypes {
-				hookPath := filepath.Join(root, ".git", "hooks", hookType)
+				hookPath := filepath.Join(findGitHooksDir(root), hookType)
 				if _, err := os.Stat(hookPath); os.IsNotExist(err) {
 					continue
 				}
@@ -227,9 +278,10 @@ func newHookStatusCmd() *cobra.Command {
 				return nil
 			}
 
-			fmt.Printf("Repository: %s\n", root)
+			fmt.Printf("Repository: %s\n", termtext.Sanitize(root))
+			hooksDir := findGitHooksDir(root)
 			for _, hookType := range hookTypes {
-				hookPath := filepath.Join(root, ".git", "hooks", hookType)
+				hookPath := filepath.Join(hooksDir, hookType)
 				info, err := os.Stat(hookPath)
 				if os.IsNotExist(err) {
 					fmt.Printf("  %-12s not installed\n", hookType+":")

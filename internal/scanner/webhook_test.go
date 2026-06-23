@@ -1,21 +1,24 @@
 package scanner
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 // ---------------------------------------------------------------------------
@@ -162,7 +165,7 @@ func TestSendWebhook_Success(t *testing.T) {
 		t.Fatalf("User-Agent = %q, expected to contain version 1.0.0", ua)
 	}
 
-	// Verify HMAC signature.
+	// Verify HMAC authentication header.
 	sigHeader := gotHeaders.Get("X-Packmon-Signature")
 	if sigHeader == "" {
 		t.Fatal("X-Packmon-Signature header must be set when secret is configured")
@@ -173,7 +176,7 @@ func TestSendWebhook_Success(t *testing.T) {
 
 	expectedSig := computeHMACSHA256([]byte(secret), gotBody)
 	if sigHeader != "sha256="+expectedSig {
-		t.Fatalf("HMAC signature mismatch: got %q, want sha256=%s", sigHeader, expectedSig)
+		t.Fatalf("HMAC authentication header mismatch: got %q, want sha256=%s", sigHeader, expectedSig)
 	}
 
 	// Verify the body deserializes to a WebhookEnvelope.
@@ -197,12 +200,15 @@ func TestSendWebhook_Success(t *testing.T) {
 	if envelope.Repository.Name != "org/repo" {
 		t.Fatalf("envelope.Repository.Name = %q, want %q", envelope.Repository.Name, "org/repo")
 	}
+	if envelope.Repository.Branch != "" || envelope.Repository.Commit != "" {
+		t.Fatalf("envelope.Repository includes branch/commit metadata: %+v", envelope.Repository)
+	}
 	if envelope.Result.ScanID != "test-scan-1" {
 		t.Fatalf("envelope.Result.ScanID = %q, want %q", envelope.Result.ScanID, "test-scan-1")
 	}
 }
 
-func TestSendWebhook_NoSecret_NoSignature(t *testing.T) {
+func TestSendWebhook_NoSecret_NoAuthenticationHeader(t *testing.T) {
 	t.Parallel()
 
 	var gotHeaders http.Header
@@ -222,6 +228,43 @@ func TestSendWebhook_NoSecret_NoSignature(t *testing.T) {
 
 	if sig := gotHeaders.Get("X-Packmon-Signature"); sig != "" {
 		t.Fatalf("X-Packmon-Signature should be empty when no secret, got %q", sig)
+	}
+}
+
+func TestSendWebhookRejectsPlainHTTPToNonLoopback(t *testing.T) {
+	var logs strings.Builder
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	oldLogger := slog.Default()
+	slog.SetDefault(logger)
+	defer slog.SetDefault(oldLogger)
+
+	SendWebhook(context.Background(), WebhookConfig{URL: "http://user:hook-secret@example.test/private?token=query-secret", Version: "1.0.0"}, testScanResult(), nil) //nolint:gosec // fake secret-bearing URL verifies redaction.
+
+	output := logs.String()
+	if !strings.Contains(output, "refusing insecure webhook URL") {
+		t.Fatalf("webhook insecure URL log = %q, want refusal", output)
+	}
+	for _, leaked := range []string{"hook-secret", "query-secret", "/private"} {
+		if strings.Contains(output, leaked) {
+			t.Fatalf("webhook insecure URL log leaked %q:\n%s", leaked, output)
+		}
+	}
+}
+
+func TestSendWebhookAllowsPlainHTTPToLoopback(t *testing.T) {
+	t.Parallel()
+
+	called := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	SendWebhook(context.Background(), WebhookConfig{URL: server.URL, Version: "1.0.0"}, testScanResult(), nil)
+
+	if !called {
+		t.Fatal("loopback HTTP webhook server was not called")
 	}
 }
 
@@ -300,6 +343,88 @@ func TestSendWebhook_ServerError(t *testing.T) {
 
 	// Should not panic; webhook errors are logged but swallowed.
 	SendWebhook(context.Background(), cfg, testScanResult(), nil)
+}
+
+func TestSendWebhookLogsRedactedURL(t *testing.T) {
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(previousLogger)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	webhookURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+	webhookURL.User = url.UserPassword("user-secret", "pass-secret")
+	webhookURL.Path = "/services/path-token"
+	webhookURL.RawQuery = "sig=query-secret"
+	webhookURL.Fragment = "frag-secret"
+
+	SendWebhook(context.Background(), WebhookConfig{URL: webhookURL.String(), Version: "1.0.0"}, testScanResult(), nil)
+
+	output := logs.String()
+	for _, leaked := range []string{"user-secret", "pass-secret", "path-token", "query-secret", "frag-secret"} {
+		if strings.Contains(output, leaked) {
+			t.Fatalf("webhook log leaked %q:\n%s", leaked, output)
+		}
+	}
+	if !strings.Contains(output, "url="+webhookURL.Scheme+"://"+webhookURL.Host+"/...") {
+		t.Fatalf("webhook log missing redacted URL:\n%s", output)
+	}
+}
+
+func TestSendWebhookPostFailureLogsRedactedURLAndError(t *testing.T) {
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(previousLogger)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatalf("close listener: %v", err)
+	}
+
+	rawURL := "http://user-secret:pass-secret@" + addr + "/services/path-token?sig=query-secret#frag-secret"
+	SendWebhook(context.Background(), WebhookConfig{URL: rawURL, Version: "1.0.0"}, testScanResult(), nil)
+
+	output := logs.String()
+	for _, leaked := range []string{"user-secret", "pass-secret", "path-token", "query-secret", "frag-secret"} {
+		if strings.Contains(output, leaked) {
+			t.Fatalf("webhook POST failure log leaked %q:\n%s", leaked, output)
+		}
+	}
+	if !strings.Contains(output, "url=http://"+addr+"/...") {
+		t.Fatalf("webhook POST failure log missing redacted URL:\n%s", output)
+	}
+}
+
+func TestSendWebhookCreateRequestLogsRedactedURL(t *testing.T) {
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(previousLogger)
+
+	rawURL := "://user-secret/path-token?sig=query-secret#frag-secret"
+	SendWebhook(context.Background(), WebhookConfig{URL: rawURL, Version: "1.0.0"}, testScanResult(), nil)
+
+	output := logs.String()
+	for _, leaked := range []string{"user-secret", "path-token", "query-secret", "frag-secret"} {
+		if strings.Contains(output, leaked) {
+			t.Fatalf("webhook create-request log leaked %q:\n%s", leaked, output)
+		}
+	}
+	if !strings.Contains(output, "url=(redacted-url)") {
+		t.Fatalf("webhook create-request log missing redacted URL:\n%s", output)
+	}
 }
 
 func TestSendWebhook_DefaultUserAgent(t *testing.T) {

@@ -1,10 +1,10 @@
 services:
   postgres:
-    image: postgres:18-alpine@sha256:1b1689b20d16a014a3d195653381cf2caa75a41a92d93b255a9d6ea29fd353aa
+    image: cgr.dev/chainguard/postgres:latest@sha256:891139a6d9036632791857fb7585425f1bf0c64516fc52bc39da94305ee92461
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       # Keep the actual PostgreSQL cluster inside the named compose volume.
       # Postgres 18 images default to a versioned path under /var/lib/postgresql,
       # which can otherwise fall back to an anonymous Docker volume.
@@ -27,29 +27,26 @@ services:
           memory: 128M
     restart: unless-stopped
 
-  migrate:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: server
-    command: ["migrate"]
-    env_file: .env
-    depends_on:
-      postgres:
-        condition: service_healthy
-
   packmon-server:
     build:
       context: .
       dockerfile: Dockerfile
       target: server
+      args:
+        VERSION: ${PACKMON_VERSION:-dev}
+        COMMIT: ${PACKMON_COMMIT:-none}
+        DATE: ${PACKMON_BUILD_DATE:-unknown}
     ports:
       - "127.0.0.1:8080:8080"
       - "127.0.0.1:9090:9090"
     env_file: .env
+    environment:
+      PACKMON_DB_PASSWORD: ${PACKMON_DB_PASSWORD:?PACKMON_DB_PASSWORD is required}
+      PACKMON_ADMIN_INITIAL_PASSWORD: ${PACKMON_ADMIN_INITIAL_PASSWORD:?PACKMON_ADMIN_INITIAL_PASSWORD is required}
+      PACKMON_ENCRYPTION_KEY: ${PACKMON_ENCRYPTION_KEY:?PACKMON_ENCRYPTION_KEY is required}
     depends_on:
-      migrate:
-        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
     deploy:
       resources:
         limits:
@@ -59,6 +56,32 @@ services:
           memory: 256M
     stop_grace_period: 10s
     restart: unless-stopped
+
+  packmon-migrate:
+    profiles: ["manual"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: server
+      args:
+        VERSION: ${PACKMON_VERSION:-dev}
+        COMMIT: ${PACKMON_COMMIT:-none}
+        DATE: ${PACKMON_BUILD_DATE:-unknown}
+    command: ["migrate"]
+    environment:
+      PACKMON_DB_HOST: ${PACKMON_DB_HOST:-postgres}
+      PACKMON_DB_PORT: ${PACKMON_DB_PORT:-5432}
+      PACKMON_DB_NAME: ${PACKMON_DB_NAME:-packmon}
+      PACKMON_DB_USER: ${PACKMON_DB_USER:-packmon}
+      PACKMON_DB_PASSWORD: ${PACKMON_DB_PASSWORD:?PACKMON_DB_PASSWORD is required}
+      PACKMON_DB_SSLMODE: ${PACKMON_DB_SSLMODE:-disable}
+      PACKMON_DB_CONNECT_TIMEOUT: ${PACKMON_DB_CONNECT_TIMEOUT:-10s}
+      PACKMON_LOG_LEVEL: ${PACKMON_LOG_LEVEL:-info}
+      PACKMON_LOG_FORMAT: ${PACKMON_LOG_FORMAT:-json}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
 
 volumes:
   postgres-data:

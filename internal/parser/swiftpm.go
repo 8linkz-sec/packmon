@@ -7,7 +7,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 // SwiftPMParser parses Swift Package Manager Package.resolved files (v1 and v2 formats).
@@ -105,7 +105,7 @@ func parseSwiftV2(data []byte) ([]domain.Package, error) {
 	for _, pin := range resolved.Pins {
 		name := swiftPackageName(pin.Location, pin.Identity)
 		if name == "" {
-			errs = append(errs, fmt.Sprintf("pin with empty identity (location: %s)", pin.Location))
+			errs = append(errs, fmt.Sprintf("pin with empty identity (location: %s)", swiftLocationForError(pin.Location)))
 			continue
 		}
 
@@ -144,7 +144,7 @@ func parseSwiftV1(data []byte) ([]domain.Package, error) {
 	for _, pin := range resolved.Object.Pins {
 		name := swiftPackageName(pin.RepositoryURL, pin.Package)
 		if name == "" {
-			errs = append(errs, fmt.Sprintf("pin with empty package name (repo: %s)", pin.RepositoryURL))
+			errs = append(errs, fmt.Sprintf("pin with empty package name (repo: %s)", swiftLocationForError(pin.RepositoryURL)))
 			continue
 		}
 
@@ -187,9 +187,10 @@ func canonicalSwiftPackageLocation(raw string) string {
 
 	if strings.Contains(raw, "://") {
 		parsed, err := url.Parse(raw)
-		if err == nil && parsed.Host != "" {
-			return canonicalSwiftHostPath(parsed.Host, parsed.Path)
+		if err == nil && parsed.Host != "" && isSwiftHTTPURLScheme(parsed.Scheme) {
+			return canonicalSwiftHostPath(parsed.Hostname(), parsed.Path)
 		}
+		return ""
 	}
 
 	if _, rest, ok := strings.Cut(raw, "@"); ok {
@@ -203,6 +204,15 @@ func canonicalSwiftPackageLocation(raw string) string {
 	}
 
 	return raw
+}
+
+func isSwiftHTTPURLScheme(scheme string) bool {
+	switch strings.ToLower(strings.TrimSpace(scheme)) {
+	case "http", "https":
+		return true
+	default:
+		return false
+	}
 }
 
 func canonicalSwiftHostPath(host, path string) string {
@@ -219,4 +229,27 @@ func canonicalSwiftHostPath(host, path string) string {
 		return ""
 	}
 	return host + "/" + path
+}
+
+func swiftLocationForError(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "<empty>"
+	}
+	if strings.Contains(raw, "://") {
+		parsed, err := url.Parse(raw)
+		if err == nil && parsed.Scheme != "" {
+			host := strings.TrimSpace(parsed.Hostname())
+			if host == "" {
+				return strings.ToLower(parsed.Scheme) + "://..."
+			}
+			return strings.ToLower(parsed.Scheme) + "://" + strings.ToLower(host) + "/..."
+		}
+	}
+	if _, rest, ok := strings.Cut(raw, "@"); ok {
+		if host, _, ok := strings.Cut(rest, ":"); ok && strings.TrimSpace(host) != "" {
+			return strings.ToLower(strings.TrimSpace(host)) + ":..."
+		}
+	}
+	return "<redacted>"
 }

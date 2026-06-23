@@ -17,12 +17,13 @@
           value="{{.Query}}"
           placeholder="e.g. lodash, requests, express..."
           autocomplete="off"
-          class="w-full border border-gray-300 rounded-md px-4 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+          class="w-full border border-gray-500 rounded-md px-4 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
           hx-get="/search"
           hx-trigger="keyup changed delay:300ms, search"
           hx-target="#search-results"
-          hx-push-url="true"
+          hx-replace-url="true"
           hx-include="#search-form"
+          hx-sync="#search-form:replace"
         >
       </div>
       <div>
@@ -30,19 +31,19 @@
         <select
           id="severity-filter"
           name="severity"
-          class="w-full border border-gray-300 rounded-md px-4 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none bg-white"
+          class="w-full border border-gray-500 rounded-md px-4 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none bg-white"
           hx-get="/search"
           hx-trigger="change"
           hx-target="#search-results"
-          hx-push-url="true"
+          hx-replace-url="true"
           hx-include="#search-form"
+          hx-sync="#search-form:replace"
         >
           <option value="" {{if eq .Severity ""}}selected{{end}}>All severities</option>
           <option value="CRITICAL" {{if eq .Severity "CRITICAL"}}selected{{end}}>CRITICAL</option>
           <option value="HIGH" {{if eq .Severity "HIGH"}}selected{{end}}>HIGH</option>
           <option value="MEDIUM" {{if eq .Severity "MEDIUM"}}selected{{end}}>MEDIUM</option>
           <option value="LOW" {{if eq .Severity "LOW"}}selected{{end}}>LOW</option>
-          <option value="UNKNOWN" {{if eq .Severity "UNKNOWN"}}selected{{end}}>UNKNOWN</option>
         </select>
       </div>
       <div>
@@ -50,12 +51,13 @@
         <select
           id="finding-filter"
           name="finding"
-          class="w-full border border-gray-300 rounded-md px-4 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none bg-white"
+          class="w-full border border-gray-500 rounded-md px-4 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none bg-white"
           hx-get="/search"
           hx-trigger="change"
           hx-target="#search-results"
-          hx-push-url="true"
+          hx-replace-url="true"
           hx-include="#search-form"
+          hx-sync="#search-form:replace"
         >
           <option value="" {{if eq .Finding ""}}selected{{end}}>All findings</option>
           <option value="vulnerability" {{if eq .Finding "vulnerability"}}selected{{end}}>Vulnerabilities</option>
@@ -69,7 +71,7 @@
   </div>
 
   <!-- Results -->
-  <div id="search-results">
+  <div id="search-results" aria-live="polite" aria-busy="false">
     {{template "search-results" .}}
   </div>
 
@@ -77,31 +79,47 @@
 {{end}}
 
 {{define "search-results"}}
-{{if or .Query .Severity .Finding}}
+<div id="search-status" class="sr-only" {{if .Error}}role="alert" aria-live="assertive"{{else}}role="status" aria-live="polite"{{end}} aria-atomic="true">
+  {{if or .Query .Severity .Finding .Error}}
+    {{if .Error}}
+      Search failed.
+    {{else if .Results}}
+      {{len .Results}} package search {{if eq (len .Results) 1}}result{{else}}results{{end}} updated.
+    {{else}}
+      No packages found for the current search and filters.
+    {{end}}
+  {{else}}
+    Search ready. Enter a package name or choose filters.
+  {{end}}
+</div>
+{{if or .Query .Severity .Finding .Error}}
   {{if .Error}}
-  <div class="bg-red-50 border border-red-200 text-red-800 rounded-md px-4 py-3 text-sm">
-    {{.Error}}
-  </div>
+  {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .Error}}
   {{else}}
   {{if .Results}}
   <div class="bg-white rounded-lg shadow border border-gray-200">
-    <div class="px-5 py-3 border-b border-gray-200 text-sm text-gray-500">
-      {{len .Results}} result(s)
-      {{if .Query}} for "{{.Query}}"{{end}}
-      {{if .Severity}}{{if .Query}} with{{else}} for{{end}} severity {{.Severity}}{{end}}
-      {{if eq .Finding "vulnerability"}}{{if or .Query .Severity}} in{{else}} for{{end}} vulnerabilities{{end}}
-      {{if eq .Finding "malicious"}}{{if or .Query .Severity}} in{{else}} for{{end}} malicious packages{{end}}
-      {{if eq .Finding "supply_chain_risk"}}{{if or .Query .Severity}} in{{else}} for{{end}} supply-chain risks{{end}}
-      {{if eq .Finding "lifecycle"}}{{if or .Query .Severity}} in{{else}} for{{end}} lifecycle findings{{end}}
+    <div class="px-5 py-3 border-b border-gray-200 text-sm text-gray-500 break-words">
+      {{if .HasMore}}
+      Showing first {{.ResultLimit}} matches
+      {{else}}
+      {{count (len .Results) "result" "results"}}
+      {{end}}
+      {{if .AppliedQuery}} for <bdi dir="auto" class="font-medium text-gray-700 break-all">"{{.AppliedQuery}}"</bdi>{{end}}
+      {{if .Severity}}{{if .AppliedQuery}} with{{else}} for{{end}} severity {{.Severity}}{{end}}
+      {{if eq .Finding "vulnerability"}}{{if or .AppliedQuery .Severity}} in{{else}} for{{end}} vulnerabilities{{end}}
+      {{if eq .Finding "malicious"}}{{if or .AppliedQuery .Severity}} in{{else}} for{{end}} malicious packages{{end}}
+      {{if eq .Finding "supply_chain_risk"}}{{if or .AppliedQuery .Severity}} in{{else}} for{{end}} supply-chain risks{{end}}
+      {{if eq .Finding "lifecycle"}}{{if or .AppliedQuery .Severity}} in{{else}} for{{end}} lifecycle findings{{end}}
     </div>
-    <div class="overflow-x-auto">
+    {{$finding := .Finding}}
+    <div class="overflow-x-auto focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2" tabindex="0" role="region" aria-label="Package search results table">
       <table class="min-w-full text-sm">
         <thead>
           <tr class="text-left text-gray-500 border-b bg-gray-50">
             <th class="px-5 py-2">Package</th>
             <th class="px-5 py-2">Ecosystem</th>
             <th class="px-5 py-2 text-right">Findings</th>
-            <th class="px-5 py-2">Vulnerabilities</th>
+            <th class="px-5 py-2">Finding details</th>
             <th class="px-5 py-2">Sources</th>
           </tr>
         </thead>
@@ -109,18 +127,34 @@
           {{range .Results}}
           <tr class="border-b border-gray-100 hover:bg-gray-50">
             <td class="px-5 py-2">
-              <a href="/package/{{.Ecosystem}}/{{.Name}}" class="text-blue-600 hover:underline font-medium">{{.Name}}</a>
+              <a href="/package/{{.Ecosystem}}/{{.Name}}{{if .Version}}?version={{.Version}}{{end}}" class="inline-flex min-h-11 items-center rounded-md px-2 py-1 text-blue-600 hover:bg-blue-50 hover:underline font-medium">{{.Name}}</a>
+              {{if .Version}}<div class="text-xs text-gray-500 mt-0.5">Version: {{.Version}}</div>{{end}}
             </td>
             <td class="px-5 py-2">
               <span class="inline-block bg-gray-100 text-gray-700 px-2 py-0.5 rounded text-xs font-medium">{{.Ecosystem}}</span>
             </td>
             <td class="px-5 py-2 text-right {{if gt .FindingsCount 0}}text-red-600 font-medium{{end}}">{{.FindingsCount}}</td>
-            <td class="px-5 py-2">
-              {{if gt .VulnerabilityCount 0}}
+            <td class="px-5 py-2 align-top">
+              {{if eq $finding "malicious"}}
+              <div class="text-sm font-medium text-gray-900">{{.FindingsCount}} malicious package {{if eq .FindingsCount 1}}finding{{else}}findings{{end}}</div>
+              {{else if eq $finding "supply_chain_risk"}}
+              <div class="text-sm font-medium text-gray-900">{{.FindingsCount}} supply-chain risk {{if eq .FindingsCount 1}}finding{{else}}findings{{end}}</div>
+              {{else if eq $finding "lifecycle"}}
+              <div class="text-sm font-medium text-gray-900">{{.FindingsCount}} lifecycle {{if eq .FindingsCount 1}}finding{{else}}findings{{end}}</div>
+              {{else if gt .VulnerabilityCount 0}}
               <div class="text-sm font-medium text-gray-900">{{if eq .VulnerabilityCount 1}}1 advisory{{else}}{{.VulnerabilityCount}} advisories{{end}}</div>
               {{if .VulnerabilityIDs}}<div class="text-xs text-gray-500 mt-0.5">{{.VulnerabilityIDs}}</div>{{end}}
+              {{else if gt .FindingsCount 0}}
+              <div class="text-sm font-medium text-gray-900">{{.FindingsCount}} non-vulnerability {{if eq .FindingsCount 1}}finding{{else}}findings{{end}}</div>
               {{else}}
-              <span class="text-gray-400 text-sm">No known vulnerabilities</span>
+              <span class="text-gray-600 text-sm">No matching findings</span>
+              {{end}}
+              {{if .FindingTypes}}
+              <div class="mt-1 flex flex-wrap gap-2">
+                {{range findingLabels .FindingTypes}}
+                <span class="inline-flex items-center rounded-full border border-gray-200 bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-700">{{.}}</span>
+                {{end}}
+              </div>
               {{end}}
             </td>
             <td class="px-5 py-2 text-xs text-gray-500">{{.Sources}}</td>
@@ -131,14 +165,14 @@
     </div>
   </div>
   {{else}}
-  <div class="bg-white rounded-lg shadow p-10 border border-gray-200 text-center text-gray-400">
+  <div class="bg-white rounded-lg shadow p-10 border border-gray-200 text-center text-gray-600">
     No packages found for the current search and filter.
   </div>
   {{end}}
   {{end}}
 {{else}}
-  <div class="bg-white rounded-lg shadow p-10 border border-gray-200 text-center text-gray-400">
-    Enter a package name above or choose filters to search the vulnerability database.
+  <div class="bg-white rounded-lg shadow p-10 border border-gray-200 text-center text-gray-600">
+    Enter a package name above or choose filters to search package security data.
   </div>
 {{end}}
 {{end}}

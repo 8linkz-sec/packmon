@@ -1,11 +1,17 @@
 openapi: "3.2.0"
 info:
   title: Packmon API
-  description: Dependency Security Scanner API
+  description: |
+    Dependency Security Scanner API.
+
+    Prometheus metrics are served on the separate
+    PACKMON_METRICS_HOST:PACKMON_METRICS_PORT listener and are intentionally not
+    published as paths on this API server.
   version: "1.0.0"
   license:
     name: Private
     identifier: LicenseRef-Private
+    url: https://github.com/8linkz-sec/packmon/blob/main/LICENSES/LicenseRef-Private.txt
 
 servers:
   - url: http://localhost:8080
@@ -14,12 +20,41 @@ servers:
 security:
   - bearerAuth: []
 
+webhooks:
+  scanCompleted:
+    post:
+      summary: Scan completed webhook delivery
+      operationId: receiveScanCompletedWebhook
+      tags: [webhooks]
+      parameters:
+        - name: X-Packmon-Signature
+          in: header
+          required: false
+          description: "Optional HMAC-SHA256 authentication header in sha256=<hex> format when a shared secret is configured."
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 512
+            pattern: "^sha256=[0-9a-f]{64}$"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WebhookEnvelope"
+      responses:
+        "2XX":
+          description: Receiver accepted the webhook delivery
+
 paths:
   /api/v1/check:
     post:
       summary: Check packages for vulnerability, malicious, supply-chain, and lifecycle findings
       operationId: checkPackages
       tags: [scan]
+      parameters:
+        - $ref: "#/components/parameters/PackmonUserAgent"
+        - $ref: "#/components/parameters/IdempotencyKey"
       requestBody:
         required: true
         content:
@@ -36,22 +71,58 @@ paths:
             X-Scan-Duration-Ms:
               schema:
                 type: integer
+            Idempotency-Key:
+              description: Echoed when the request supplied a valid idempotency key.
+              schema:
+                type: string
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ScanResult"
         "400":
           description: Invalid request (malformed JSON, too many packages)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "401":
           description: Missing or invalid API key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Unknown or disallowed User-Agent
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Idempotency key was already used for a different check request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "429":
           description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /api/v1/feeds/status:
     get:
       summary: Get status of all feed sources
       operationId: getFeedStatus
       tags: [feeds]
+      parameters: &feedStatusParameters
+        - $ref: "#/components/parameters/PackmonUserAgent"
       responses:
         "200":
           description: Feed status
@@ -59,6 +130,46 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/FeedStatusResponse"
+        "401":
+          description: Missing or invalid API key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Unknown or disallowed User-Agent
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    head:
+      summary: Get feed status response metadata
+      operationId: headFeedStatus
+      tags: [feeds]
+      parameters: *feedStatusParameters
+      responses:
+        "200":
+          description: Feed status metadata
+        "401":
+          description: Missing or invalid API key
+        "403":
+          description: Unknown or disallowed User-Agent
+        "429":
+          description: Rate limit exceeded
+        "500":
+          description: Internal server error
 
   /api/v1/feeds/{feed}/import:
     post:
@@ -66,61 +177,180 @@ paths:
       operationId: importFeed
       tags: [feeds]
       parameters:
+        - $ref: "#/components/parameters/PackmonUserAgent"
         - name: feed
           in: path
           required: true
           schema:
             type: string
+            minLength: 1
+            maxLength: 512
             enum: [osv, ghsa, openssf, malicious, vulncheck, cisakev, epss, socket]
+        - name: X-Packmon-Feed-Import-Secret
+          in: header
+          required: false
+          description: Required in production and whenever a feed import secret is configured.
+          schema:
+            type: string
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              type: object
+              oneOf:
+                - $ref: "#/components/schemas/VulnerabilityImportRequest"
+                - $ref: "#/components/schemas/MaliciousImportRequest"
+                - $ref: "#/components/schemas/VulnCheckImportRequest"
+                - $ref: "#/components/schemas/CISAKEVImportRequest"
+                - $ref: "#/components/schemas/EPSSImportRequest"
       responses:
         "200":
           description: Import accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportResponse"
+        "400":
+          description: Invalid import payload or semantic validation failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "401":
           description: Missing or invalid API key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Missing or invalid feed import secret
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
-  /api/v1/packages/{ecosystem}/{name}:
+  /api/v1/packages/{ecosystem}/{rest}:
     get:
       summary: Get package details and findings
       operationId: getPackage
       tags: [packages]
-      parameters:
+      parameters: &packageDetailParameters
+        - $ref: "#/components/parameters/PackmonUserAgent"
         - name: ecosystem
           in: path
           required: true
           schema:
             $ref: "#/components/schemas/Ecosystem"
-        - name: name
+        - name: rest
           in: path
           required: true
-          description: "Package name (catch-all, supports scoped names like @types/node)"
+          description: "Package name as the remaining path segments. Supports slash-bearing names such as @scope/pkg and golang.org/x/text; package separator slashes are part of this value."
+          allowReserved: true
+          example: "@scope/pkg"
+          x-packmon-catch-all: true
+          schema:
+            type: string
+        - name: version
+          in: query
+          required: false
+          description: "Optional exact package version. When supplied, lifecycle findings are included for that package coordinate."
           schema:
             type: string
       responses:
         "200":
           description: Package details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PackageDetailResponse"
         "404":
           description: Package not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "400":
+          description: Invalid package path or query
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Missing or invalid API key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Unknown or disallowed User-Agent
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    head:
+      summary: Get package response metadata
+      operationId: headPackage
+      tags: [packages]
+      parameters: *packageDetailParameters
+      responses:
+        "200":
+          description: Package details metadata
+        "404":
+          description: Package not found
+        "400":
+          description: Invalid package path or query
+        "401":
+          description: Missing or invalid API key
+        "403":
+          description: Unknown or disallowed User-Agent
+        "429":
+          description: Rate limit exceeded
+        "500":
+          description: Internal server error
 
-  /api/v1/packages/{ecosystem}/{name}/refresh:
+  /api/v1/packages/{ecosystem}/{rest}/refresh:
     post:
       summary: Trigger async re-check for a package
       operationId: refreshPackage
       tags: [packages]
       parameters:
+        - $ref: "#/components/parameters/PackmonUserAgent"
         - name: ecosystem
           in: path
           required: true
           schema:
             $ref: "#/components/schemas/Ecosystem"
-        - name: name
+        - name: rest
           in: path
           required: true
+          description: "Package name as the remaining path segments before the trailing /refresh suffix. Supports slash-bearing names such as @scope/pkg and golang.org/x/text."
+          allowReserved: true
+          example: "@scope/pkg"
+          x-packmon-catch-all: true
           schema:
             type: string
       responses:
@@ -132,25 +362,72 @@ paths:
                 $ref: "#/components/schemas/RefreshResponse"
         "429":
           description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "400":
+          description: Invalid package path or request body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Missing or invalid API key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Unknown or disallowed User-Agent
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Refresh worker is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /api/v1/sync:
     get:
       summary: Sync endpoint for local client database
       operationId: syncDatabase
       tags: [sync]
-      parameters:
+      parameters: &syncParameters
+        - $ref: "#/components/parameters/PackmonUserAgent"
         - name: since
           in: query
           description: "ISO 8601 timestamp for delta sync"
           schema:
             type: string
             format: date-time
+        - name: since_xid
+          in: query
+          description: "PostgreSQL transaction watermark returned by a previous sync page"
+          schema:
+            type: integer
+            minimum: 0
         - name: snapshot
           in: query
           description: "Stable snapshot timestamp returned by the first page of a paginated sync"
           schema:
             type: string
             format: date-time
+        - name: snapshot_xid
+          in: query
+          description: "Stable transaction watermark returned by the first page of a paginated sync"
+          schema:
+            type: integer
+            minimum: 0
         - name: limit
           in: query
           description: "Rows per source category"
@@ -161,15 +438,83 @@ paths:
             default: 1000
         - name: offset
           in: query
-          description: "Page offset used with the same since and snapshot values"
+          description: "Legacy page offset used with the same since and snapshot values"
           schema:
             type: integer
             minimum: 0
+        - name: vulnerabilities_offset
+          in: query
+          description: "Legacy vulnerability dataset offset"
+          schema:
+            type: integer
+            minimum: 0
+        - name: malicious_offset
+          in: query
+          description: "Legacy malicious dataset offset"
+          schema:
+            type: integer
+            minimum: 0
+        - name: reputation_offset
+          in: query
+          description: "Legacy reputation dataset offset"
+          schema:
+            type: integer
+            minimum: 0
+        - name: lifecycle_offset
+          in: query
+          description: "Legacy lifecycle dataset offset"
+          schema:
+            type: integer
+            minimum: 0
+        - name: vulnerabilities_cursor
+          in: query
+          description: "Opaque keyset cursor for the vulnerability dataset"
+          schema:
+            type: string
+        - name: malicious_cursor
+          in: query
+          description: "Opaque keyset cursor for the malicious dataset"
+          schema:
+            type: string
+        - name: reputation_cursor
+          in: query
+          description: "Opaque keyset cursor for the reputation dataset"
+          schema:
+            type: string
+        - name: lifecycle_cursor
+          in: query
+          description: "Opaque keyset cursor for the lifecycle dataset"
+          schema:
+            type: string
+        - name: vulnerabilities_done
+          in: query
+          description: "Whether the vulnerability dataset is exhausted for this paginated sync"
+          schema:
+            type: boolean
+        - name: malicious_done
+          in: query
+          description: "Whether the malicious dataset is exhausted for this paginated sync"
+          schema:
+            type: boolean
+        - name: reputation_done
+          in: query
+          description: "Whether the reputation dataset is exhausted for this paginated sync"
+          schema:
+            type: boolean
+        - name: lifecycle_done
+          in: query
+          description: "Whether the lifecycle dataset is exhausted for this paginated sync"
+          schema:
+            type: boolean
         - name: ecosystem
           in: query
-          description: "Filter by ecosystem"
+          description: "Filter by one or more ecosystems, serialized as a comma-separated list"
+          style: form
+          explode: false
           schema:
-            $ref: "#/components/schemas/Ecosystem"
+            type: array
+            items:
+              $ref: "#/components/schemas/Ecosystem"
       responses:
         "200":
           description: Sync data stream
@@ -177,6 +522,62 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SyncResponse"
+        "400":
+          description: Invalid sync parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Missing or invalid API key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Unknown or disallowed User-Agent
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "501":
+          description: Sync endpoint is not supported by this store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    head:
+      summary: Get sync response metadata
+      operationId: headSyncDatabase
+      tags: [sync]
+      parameters: *syncParameters
+      responses:
+        "200":
+          description: Sync response metadata
+        "400":
+          description: Invalid sync parameters
+        "401":
+          description: Missing or invalid API key
+        "403":
+          description: Unknown or disallowed User-Agent
+        "429":
+          description: Rate limit exceeded
+        "500":
+          description: Internal server error
+        "501":
+          description: Sync endpoint is not supported by this store
 
   /healthz:
     get:
@@ -187,6 +588,10 @@ paths:
       responses:
         "200":
           description: Alive
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
 
   /readyz:
     get:
@@ -197,8 +602,16 @@ paths:
       responses:
         "200":
           description: Ready
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadyResponse"
         "503":
           description: Not ready
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadyResponse"
 
   /version:
     get:
@@ -209,25 +622,97 @@ paths:
       responses:
         "200":
           description: Version info
-
-  /metrics:
-    get:
-      summary: Prometheus metrics
-      operationId: metrics
-      tags: [operations]
-      security: []
-      responses:
-        "200":
-          description: Prometheus metrics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VersionResponse"
 
 components:
+  parameters:
+    PackmonUserAgent:
+      name: User-Agent
+      in: header
+      required: true
+      description: "Production /api/v1 requests require a recognized Packmon client User-Agent prefix: packmon-cli/ for CLI and CI clients, or packmon-n8n/ for N8N and controlled automation. Development mode may relax this hygiene check."
+      schema:
+        type: string
+        pattern: "^(packmon-cli|packmon-n8n)/.+$"
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: "Optional retry key for POST /api/v1/check. Reusing the same key with the same normalized package list and repo metadata returns the same scan_id and does not create another scan_log row. Reusing the key for a different check request is rejected with 409."
+      schema:
+        type: string
+        maxLength: 128
+        pattern: "^[A-Za-z0-9_.:-]+$"
+
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
 
   schemas:
+    HealthResponse:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+
+    ReadyResponse:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ready, unavailable]
+        reason:
+          type: string
+
+    VersionResponse:
+      type: object
+      additionalProperties: false
+      required: [version, commit, date]
+      properties:
+        version:
+          type: string
+        commit:
+          type: string
+        date:
+          type: string
+
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: string
+
     Ecosystem:
+      type: string
+      enum:
+        - npm
+        - pypi
+        - go
+        - maven
+        - cargo
+        - nuget
+        - composer
+        - gem
+        - pub
+        - actions
+        - cocoapods
+        - swiftpm
+        - hex
+        - cran
+        - docker
+
+    ScanEcosystem:
       type: string
       enum:
         - npm
@@ -247,19 +732,70 @@ components:
 
     ScanRequest:
       type: object
+      additionalProperties: false
       required: [packages]
       properties:
         packages:
           type: array
           items:
-            $ref: "#/components/schemas/Package"
+            $ref: "#/components/schemas/ScanPackage"
+          minItems: 1
           maxItems: 5000
         repo:
           $ref: "#/components/schemas/RepoInfo"
 
+    ScanPackage:
+      allOf:
+        - $ref: "#/components/schemas/Package"
+        - type: object
+          properties:
+            ecosystem:
+              $ref: "#/components/schemas/ScanEcosystem"
+
     Package:
       type: object
+      additionalProperties: false
       required: [name, version, ecosystem]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 512
+          pattern: '.*\S.*'
+        version:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '^\s*\S+\s*$'
+        ecosystem:
+          $ref: "#/components/schemas/Ecosystem"
+        dev:
+          type: boolean
+          default: false
+        direct:
+          type: boolean
+          default: false
+        indirect:
+          type: boolean
+          default: false
+        optional:
+          type: boolean
+          default: false
+        peer:
+          type: boolean
+          default: false
+        via:
+          type: array
+          items:
+            type: string
+        parents:
+          type: array
+          items:
+            $ref: "#/components/schemas/PackageParent"
+
+    PackageParent:
+      type: object
+      additionalProperties: false
       properties:
         name:
           type: string
@@ -267,12 +803,10 @@ components:
           type: string
         ecosystem:
           $ref: "#/components/schemas/Ecosystem"
-        dev:
-          type: boolean
-          default: false
 
     RepoInfo:
       type: object
+      additionalProperties: false
       properties:
         name:
           type: string
@@ -280,6 +814,344 @@ components:
           type: string
         commit:
           type: string
+
+    JSONValue:
+      description: Arbitrary JSON value accepted by raw feed import fields.
+
+    ImportResponse:
+      type: object
+      required: [feed, imported]
+      properties:
+        feed:
+          type: string
+          enum: [osv, ghsa, openssf, vulncheck, cisakev, epss, socket]
+          description: Normalized feed name; the legacy malicious alias returns openssf.
+        imported:
+          type: integer
+          minimum: 0
+        deleted:
+          type: integer
+          minimum: 0
+        entries_total:
+          type: integer
+          minimum: 0
+
+    FeedImportStatus:
+      type: object
+      additionalProperties: false
+      properties:
+        last_sync_at:
+          type: [string, "null"]
+          format: date-time
+        last_sync_duration_ms:
+          type: integer
+          format: int64
+          minimum: 0
+        last_sync_status:
+          type: string
+          enum: [success, error, running, skipped, disabled, pending]
+        last_error:
+          type: string
+          maxLength: 2048
+        entries_synced:
+          type: integer
+          minimum: 0
+        entries_total:
+          type: integer
+          minimum: 0
+        last_etag:
+          type: string
+          maxLength: 512
+        last_commit_hash:
+          type: string
+          maxLength: 128
+        metadata:
+          $ref: "#/components/schemas/JSONValue"
+          description: Maximum serialized size is 4096 bytes.
+
+    VulnerabilityImportRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        vulnerabilities:
+          type: array
+          items:
+            $ref: "#/components/schemas/VulnerabilityImport"
+        delete_vulnerability_ids:
+          type: array
+          items:
+            type: string
+        status:
+          $ref: "#/components/schemas/FeedImportStatus"
+
+    VulnerabilityImport:
+      type: object
+      additionalProperties: false
+      required: [id]
+      properties:
+        id:
+          type: string
+          description: "Feed-owned advisory ID; manual: IDs are reserved and rejected."
+        summary:
+          type: string
+        details:
+          type: string
+        severity:
+          type: string
+          enum: [CRITICAL, HIGH, MEDIUM, LOW, UNKNOWN]
+        cvss_score:
+          type: [number, "null"]
+          minimum: 0
+          maximum: 10
+        epss_score:
+          type: [number, "null"]
+          minimum: 0
+          maximum: 1
+          description: "FIRST EPSS third-party ML/data-driven probability estimate for exploitation in the next 30 days. Packmon exposes it for triage context and does not use it for default findings_blocking decisions."
+        epss_percentile:
+          type: [number, "null"]
+          minimum: 0
+          maximum: 1
+          description: "FIRST EPSS percentile ranking for the prediction score, in the 0..1 range. It is synchronized as context and is not used for default findings_blocking decisions."
+        cisa_kev:
+          type: boolean
+        exploit_exists:
+          type: boolean
+        published:
+          type: string
+          format: date-time
+        modified:
+          type: string
+          format: date-time
+        withdrawn:
+          type: [string, "null"]
+          format: date-time
+        aliases:
+          type: array
+          items:
+            $ref: "#/components/schemas/VulnerabilityAlias"
+        sources:
+          type: array
+          description: Accepted for compatibility; persisted source identity is forced to the route feed.
+          items:
+            $ref: "#/components/schemas/VulnerabilitySource"
+        references:
+          type: array
+          items:
+            $ref: "#/components/schemas/VulnerabilityReference"
+        affected_packages:
+          type: array
+          items:
+            $ref: "#/components/schemas/AffectedPackage"
+
+    VulnerabilityAlias:
+      type: object
+      additionalProperties: false
+      properties:
+        alias_id:
+          type: string
+
+    VulnerabilitySource:
+      type: object
+      additionalProperties: false
+      properties:
+        source:
+          type: string
+        source_id:
+          type: string
+        url:
+          type: string
+          format: uri
+        raw_json:
+          $ref: "#/components/schemas/JSONValue"
+
+    VulnerabilityReference:
+      type: object
+      additionalProperties: false
+      properties:
+        type:
+          type: string
+        url:
+          type: string
+          format: uri
+        source:
+          type: string
+
+    AffectedPackage:
+      type: object
+      additionalProperties: false
+      required: [ecosystem, name]
+      properties:
+        ecosystem:
+          $ref: "#/components/schemas/Ecosystem"
+        name:
+          type: string
+        version_ranges:
+          type: array
+          items:
+            $ref: "#/components/schemas/VersionRange"
+        versions_affected:
+          type: array
+          items:
+            type: string
+
+    VersionRange:
+      type: object
+      required: [events]
+      properties:
+        type:
+          type: string
+        repo:
+          type: string
+        events:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/VersionRangeEvent"
+
+    VersionRangeEvent:
+      type: object
+      properties:
+        introduced:
+          type: string
+        fixed:
+          type: string
+        last_affected:
+          type: string
+        limit:
+          type: string
+      anyOf:
+        - required: [introduced]
+        - required: [fixed]
+        - required: [last_affected]
+        - required: [limit]
+
+    MaliciousImportRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        malicious:
+          type: array
+          items:
+            $ref: "#/components/schemas/MaliciousImport"
+        delete_malicious_ids:
+          type: array
+          items:
+            type: string
+        status:
+          $ref: "#/components/schemas/FeedImportStatus"
+
+    MaliciousImport:
+      type: object
+      additionalProperties: false
+      required: [id]
+      properties:
+        id:
+          type: string
+          description: "Feed-owned finding ID; manual: IDs are reserved and rejected."
+        ecosystem:
+          $ref: "#/components/schemas/Ecosystem"
+        name:
+          type: string
+        version_ranges:
+          $ref: "#/components/schemas/JSONValue"
+        versions:
+          type: array
+          items:
+            type: string
+        source:
+          type: string
+          description: Accepted for compatibility; persisted source identity is forced to the route feed.
+        risk_type:
+          type: string
+        severity:
+          type: string
+          enum: [CRITICAL, HIGH, MEDIUM, LOW, UNKNOWN]
+        summary:
+          type: string
+        description:
+          type: string
+        reference_urls:
+          $ref: "#/components/schemas/JSONValue"
+        origin_ref:
+          type: string
+        published:
+          type: [string, "null"]
+          format: date-time
+        created_by:
+          type: string
+
+    VulnCheckImportRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/VulnCheckImportEntry"
+        status:
+          $ref: "#/components/schemas/FeedImportStatus"
+
+    VulnCheckImportEntry:
+      type: object
+      additionalProperties: false
+      required: [cve_id]
+      properties:
+        cve_id:
+          type: string
+        cvss_score:
+          type: [number, "null"]
+          minimum: 0
+          maximum: 10
+        exploit_exists:
+          type: boolean
+        source_url:
+          type: string
+          format: uri
+        raw_json:
+          $ref: "#/components/schemas/JSONValue"
+
+    CISAKEVImportRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        cve_ids:
+          type: array
+          items:
+            type: string
+        clear_missing:
+          type: boolean
+        status:
+          $ref: "#/components/schemas/FeedImportStatus"
+
+    EPSSImportRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/EPSSImportEntry"
+        status:
+          $ref: "#/components/schemas/FeedImportStatus"
+
+    EPSSImportEntry:
+      type: object
+      additionalProperties: false
+      required: [cve_id, score, percentile]
+      properties:
+        cve_id:
+          type: string
+        score:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: "FIRST EPSS third-party ML/data-driven probability estimate for exploitation in the next 30 days."
+        percentile:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: "FIRST EPSS percentile ranking for the prediction score."
 
     ScanResult:
       type: object
@@ -291,6 +1163,7 @@ components:
         - packages_scanned
         - findings_count
         - findings_blocking
+        - block_threshold
         - feed_status
         - db_stale
         - summary
@@ -302,7 +1175,8 @@ components:
           type: string
         mode:
           type: string
-          enum: [remote, local]
+          enum: [remote, local, auto]
+          description: "Requested or effective scan mode. CLI and webhook results can contain auto for auto-mode scans."
         scanned_at:
           type: string
           format: date-time
@@ -314,9 +1188,17 @@ components:
           type: integer
         findings_blocking:
           type: boolean
+        block_threshold:
+          type: string
+          enum: [CRITICAL, HIGH, MEDIUM, LOW, NONE]
+          description: "Effective vulnerability/lifecycle severity threshold used to compute findings_blocking. Malicious and supply-chain risk findings still block independently of this value."
         feed_status:
           type: string
-          enum: [healthy, degraded, warning, error, disabled, pending]
+          enum: [healthy, degraded, error]
+          description: "Machine-readable feed or scan status. Human-readable scanner failure details are carried in scan_error."
+        scan_error:
+          type: string
+          description: "Optional human-readable parser or operational failure detail for CLI/webhook artifacts."
         parse_errors:
           type: array
           items:
@@ -324,8 +1206,7 @@ components:
         findings_truncated:
           type: boolean
         db_age_days:
-          type: integer
-          nullable: true
+          type: [integer, "null"]
         db_stale:
           type: boolean
         summary:
@@ -357,6 +1238,19 @@ components:
           type: object
           additionalProperties:
             type: integer
+
+    PackageDetailResponse:
+      type: object
+      required: [ecosystem, name, findings]
+      properties:
+        ecosystem:
+          $ref: "#/components/schemas/Ecosystem"
+        name:
+          type: string
+        findings:
+          type: array
+          items:
+            $ref: "#/components/schemas/Finding"
 
     Finding:
       type: object
@@ -391,7 +1285,7 @@ components:
           description: "Inclusive fix constraint for the vulnerability, for example >= 1.2.3 (vulnerability only)"
         risk_type:
           type: string
-          enum: [malware, typosquatting, supply_chain, removed_package, malware_history, eol, eol_soon, security_support_only]
+          enum: [malware, typosquatting, supply_chain, removed_package, malware_history, eol, eol_soon, security_support_only, other]
           description: "Threat or supply-chain risk category"
         source:
           type: string
@@ -414,6 +1308,9 @@ components:
         synced_at:
           type: string
           format: date-time
+        synced_xid:
+          type: integer
+          description: "Database transaction watermark to send as since_xid on later delta syncs"
         vulnerabilities:
           type: array
           items:
@@ -433,6 +1330,40 @@ components:
         truncated:
           type: boolean
         has_more:
+          type: boolean
+        next_cursor:
+          $ref: "#/components/schemas/SyncCursor"
+
+    SyncCursor:
+      type: object
+      properties:
+        vulnerabilities:
+          type: integer
+          description: "Legacy vulnerability offset for older clients"
+        malicious:
+          type: integer
+          description: "Legacy malicious offset for older clients"
+        reputation:
+          type: integer
+          description: "Legacy reputation offset for older clients"
+        lifecycle:
+          type: integer
+          description: "Legacy lifecycle offset for older clients"
+        vulnerabilities_cursor:
+          type: string
+        malicious_cursor:
+          type: string
+        reputation_cursor:
+          type: string
+        lifecycle_cursor:
+          type: string
+        vulnerabilities_done:
+          type: boolean
+        malicious_done:
+          type: boolean
+        reputation_done:
+          type: boolean
+        lifecycle_done:
           type: boolean
 
     SyncVulnerability:
@@ -454,15 +1385,24 @@ components:
         severity:
           type: string
         cvss_score:
-          type: number
-          nullable: true
+          type: [number, "null"]
         epss_score:
-          type: number
-          nullable: true
+          type: [number, "null"]
+          minimum: 0
+          maximum: 1
+          description: "FIRST EPSS third-party ML/data-driven probability estimate for exploitation in the next 30 days. Packmon exposes it for triage context and does not use it for default findings_blocking decisions."
+        epss_percentile:
+          type: [number, "null"]
+          minimum: 0
+          maximum: 1
+          description: "FIRST EPSS percentile ranking for the prediction score, in the 0..1 range. It is synchronized as context and is not used for default findings_blocking decisions."
         cisa_kev:
           type: boolean
         summary:
           type: string
+        source:
+          type: string
+          description: Original advisory/feed source for user-facing attribution.
         withdrawn:
           type: boolean
 
@@ -475,8 +1415,12 @@ components:
           $ref: "#/components/schemas/Ecosystem"
         name:
           type: string
+        version_ranges:
+          type: string
+          description: "JSON array of OSV version ranges"
         versions:
           type: string
+          description: "JSON array of exact affected versions"
         reference_urls:
           type: string
           description: "JSON array of reference URLs"
@@ -486,6 +1430,9 @@ components:
           type: string
         summary:
           type: string
+        source:
+          type: string
+          description: Original finding/feed source for user-facing attribution.
         withdrawn:
           type: boolean
 
@@ -531,40 +1478,33 @@ components:
         latest:
           type: string
         release_date:
-          type: string
-          format: date-time
-          nullable: true
+          type: [string, "null"]
+          format: date
         is_lts:
           type: boolean
         lts_from:
-          type: string
-          format: date-time
-          nullable: true
+          type: [string, "null"]
+          format: date
         is_eoas:
           type: boolean
         eoas_from:
-          type: string
-          format: date-time
-          nullable: true
+          type: [string, "null"]
+          format: date
         is_eol:
           type: boolean
         eol_from:
-          type: string
-          format: date-time
-          nullable: true
+          type: [string, "null"]
+          format: date
         is_discontinued:
           type: boolean
         discontinued_from:
-          type: string
-          format: date-time
-          nullable: true
+          type: [string, "null"]
+          format: date
         is_eoes:
-          type: boolean
-          nullable: true
+          type: [boolean, "null"]
         eoes_from:
-          type: string
-          format: date-time
-          nullable: true
+          type: [string, "null"]
+          format: date
         is_maintained:
           type: boolean
         withdrawn:
@@ -585,6 +1525,11 @@ components:
     FeedStatusResponse:
       type: object
       properties:
+        status:
+          type: string
+          enum: [healthy, degraded]
+        message:
+          type: string
         feeds:
           type: array
           items:
@@ -597,11 +1542,10 @@ components:
           type: string
         status:
           type: string
-          enum: [healthy, warning, error, disabled, pending]
+          enum: [healthy, warning, error, disabled, pending, configured]
         last_sync_at:
-          type: string
+          type: [string, "null"]
           format: date-time
-          nullable: true
         entries_count:
           type: integer
         message:

@@ -3,7 +3,7 @@ package dockerimage
 import (
 	"testing"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 func TestImagePackageConvertsToDockerDomainPackage(t *testing.T) {

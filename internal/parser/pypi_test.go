@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 // ---------------------------------------------------------------------------
@@ -76,6 +76,11 @@ func TestPipfileParser_Parse(t *testing.T) {
 		{
 			name:    "invalid json",
 			input:   `not json`,
+			wantErr: true,
+		},
+		{
+			name:    "trailing json document",
+			input:   `{"default": {}, "develop": {}}{"ignored": true}`,
 			wantErr: true,
 		},
 		{

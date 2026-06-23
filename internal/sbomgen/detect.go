@@ -3,6 +3,7 @@ package sbomgen
 import (
 	"encoding/json"
 	"encoding/xml"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -27,6 +28,8 @@ var skipDirs = map[string]struct{}{
 	"__pycache__":  {},
 }
 
+var walkDir = filepath.WalkDir
+
 // Detect walks root up to maxDepth and returns supported generation targets.
 func Detect(root string, maxDepth int) ([]Detection, error) {
 	absRoot, err := filepath.Abs(root)
@@ -35,9 +38,9 @@ func Detect(root string, maxDepth int) ([]Detection, error) {
 	}
 
 	var manifests []string
-	err = filepath.WalkDir(absRoot, func(p string, d fs.DirEntry, walkErr error) error {
+	err = walkDir(absRoot, func(p string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
-			return nil
+			return fmt.Errorf("walk %s: %w", relDisplay(absRoot, p), walkErr)
 		}
 		if d.IsDir() {
 			if p == absRoot {
@@ -65,11 +68,15 @@ func Detect(root string, maxDepth int) ([]Detection, error) {
 
 	detections := make([]Detection, 0, len(manifests))
 	for _, manifest := range manifests {
-		if det, ok := classifyManifest(absRoot, manifest); ok {
+		det, ok, err := classifyManifest(absRoot, manifest)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
 			detections = append(detections, det)
 		}
 	}
-	return suppressCovered(detections), nil
+	return suppressCovered(detections)
 }
 
 func depthExceeded(root, dir string, maxDepth int) bool {
@@ -84,24 +91,28 @@ func depthExceeded(root, dir string, maxDepth int) bool {
 	return len(parts) > maxDepth
 }
 
-func classifyManifest(root, manifest string) (Detection, bool) {
+func classifyManifest(root, manifest string) (Detection, bool, error) {
 	dir := filepath.Dir(manifest)
 	display := relDisplay(root, manifest)
 	switch filepath.Base(manifest) {
 	case "go.mod":
-		return Detection{Ecosystem: "go", ProjectDir: dir, ManifestPath: manifest, InputKind: "go.mod", DisplayPath: display}, true
+		return Detection{Ecosystem: "go", ProjectDir: dir, ManifestPath: manifest, InputKind: "go.mod", DisplayPath: display}, true, nil
 	case "package.json":
-		return Detection{Ecosystem: "npm", ProjectDir: dir, ManifestPath: manifest, InputKind: "npm-package", DisplayPath: display}, true
+		return Detection{Ecosystem: "npm", ProjectDir: dir, ManifestPath: manifest, InputKind: "npm-package", DisplayPath: display}, true, nil
 	case "requirements.txt":
-		return Detection{Ecosystem: "pypi", ProjectDir: dir, ManifestPath: manifest, InputKind: "requirements", DisplayPath: display}, true
+		return Detection{Ecosystem: "pypi", ProjectDir: dir, ManifestPath: manifest, InputKind: "requirements", DisplayPath: display}, true, nil
 	case "pom.xml":
-		return Detection{Ecosystem: "maven", ProjectDir: dir, ManifestPath: manifest, InputKind: "maven-pom", DisplayPath: display}, true
+		return Detection{Ecosystem: "maven", ProjectDir: dir, ManifestPath: manifest, InputKind: "maven-pom", DisplayPath: display}, true, nil
 	case "pyproject.toml":
-		if isPoetryProject(manifest) {
-			return Detection{Ecosystem: "pypi", ProjectDir: dir, ManifestPath: manifest, InputKind: "poetry", DisplayPath: display}, true
+		ok, err := isPoetryProject(manifest)
+		if err != nil {
+			return Detection{}, false, err
+		}
+		if ok {
+			return Detection{Ecosystem: "pypi", ProjectDir: dir, ManifestPath: manifest, InputKind: "poetry", DisplayPath: display}, true, nil
 		}
 	}
-	return Detection{}, false
+	return Detection{}, false, nil
 }
 
 func relDisplay(root, p string) string {
@@ -112,10 +123,10 @@ func relDisplay(root, p string) string {
 	return rel
 }
 
-func isPoetryProject(pyproject string) bool {
-	data, err := os.ReadFile(pyproject) // #nosec G304 -- path comes from a bounded local manifest walk.
+func isPoetryProject(pyproject string) (bool, error) {
+	data, err := readAutoSBOMManifest(pyproject)
 	if err != nil {
-		return false
+		return false, err
 	}
 	var doc struct {
 		Tool struct {
@@ -126,12 +137,12 @@ func isPoetryProject(pyproject string) bool {
 		} `toml:"tool"`
 	}
 	if err := toml.Unmarshal(data, &doc); err != nil {
-		return false
+		return false, nil
 	}
-	return strings.TrimSpace(doc.Tool.Poetry.Name) != "" || len(doc.Tool.Poetry.Dependencies) > 0
+	return strings.TrimSpace(doc.Tool.Poetry.Name) != "" || len(doc.Tool.Poetry.Dependencies) > 0, nil
 }
 
-func suppressCovered(ds []Detection) []Detection {
+func suppressCovered(ds []Detection) ([]Detection, error) {
 	suppressed := map[string]struct{}{}
 	key := func(ecosystem, dir string) string {
 		return ecosystem + "\x00" + filepath.Clean(dir)
@@ -140,13 +151,21 @@ func suppressCovered(ds []Detection) []Detection {
 	for _, d := range ds {
 		switch d.Ecosystem {
 		case "npm":
-			for _, child := range npmWorkspaceChildren(d) {
+			children, err := npmWorkspaceChildren(d)
+			if err != nil {
+				return nil, err
+			}
+			for _, child := range children {
 				if filepath.Clean(child) != filepath.Clean(d.ProjectDir) {
 					suppressed[key("npm", child)] = struct{}{}
 				}
 			}
 		case "maven":
-			for _, child := range mavenModuleChildren(d) {
+			children, err := mavenModuleChildren(d)
+			if err != nil {
+				return nil, err
+			}
+			for _, child := range children {
 				if filepath.Clean(child) != filepath.Clean(d.ProjectDir) {
 					suppressed[key("maven", child)] = struct{}{}
 				}
@@ -161,13 +180,13 @@ func suppressCovered(ds []Detection) []Detection {
 		}
 		out = append(out, d)
 	}
-	return out
+	return out, nil
 }
 
-func npmWorkspaceChildren(d Detection) []string {
+func npmWorkspaceChildren(d Detection) ([]string, error) {
 	globs, err := npmWorkspaceGlobs(d.ManifestPath)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	children := make([]string, 0, len(globs))
 	for _, pattern := range globs {
@@ -183,11 +202,11 @@ func npmWorkspaceChildren(d Detection) []string {
 			}
 		}
 	}
-	return children
+	return children, nil
 }
 
 func npmWorkspaceGlobs(packageJSON string) ([]string, error) {
-	data, err := os.ReadFile(packageJSON) // #nosec G304 -- path comes from a bounded local manifest walk.
+	data, err := readAutoSBOMManifest(packageJSON)
 	if err != nil {
 		return nil, err
 	}
@@ -210,29 +229,29 @@ func npmWorkspaceGlobs(packageJSON string) ([]string, error) {
 	return obj.Packages, nil
 }
 
-func mavenModuleChildren(d Detection) []string {
+func mavenModuleChildren(d Detection) ([]string, error) {
 	return mavenModulesWalk(d.ProjectDir, map[string]struct{}{})
 }
 
-func mavenModulesWalk(dir string, visited map[string]struct{}) []string {
+func mavenModulesWalk(dir string, visited map[string]struct{}) ([]string, error) {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		abs = filepath.Clean(dir)
 	}
 	if _, ok := visited[abs]; ok {
-		return nil
+		return nil, nil
 	}
 	visited[abs] = struct{}{}
 
-	data, err := os.ReadFile(filepath.Join(dir, "pom.xml")) // #nosec G304 -- path comes from a bounded local manifest walk.
+	data, err := readAutoSBOMManifest(filepath.Join(dir, "pom.xml"))
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	var project struct {
 		Modules []string `xml:"modules>module"`
 	}
 	if err := xml.Unmarshal(data, &project); err != nil {
-		return nil
+		return nil, nil
 	}
 	children := make([]string, 0, len(project.Modules))
 	for _, module := range project.Modules {
@@ -242,7 +261,11 @@ func mavenModulesWalk(dir string, visited map[string]struct{}) []string {
 		}
 		child := filepath.Clean(filepath.Join(dir, filepath.FromSlash(module)))
 		children = append(children, child)
-		children = append(children, mavenModulesWalk(child, visited)...)
+		grandchildren, err := mavenModulesWalk(child, visited)
+		if err != nil {
+			return nil, err
+		}
+		children = append(children, grandchildren...)
 	}
-	return children
+	return children, nil
 }

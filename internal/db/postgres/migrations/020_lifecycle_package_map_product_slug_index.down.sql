@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS idx_lifecycle_package_map_product_slug;

@@ -4,7 +4,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/8linkz/packmon/internal/db/sqlite"
+	"github.com/8linkz-sec/packmon/internal/db/sqlite"
+	"github.com/8linkz-sec/packmon/internal/termtext"
 	"github.com/spf13/cobra"
 )
 
@@ -26,6 +27,7 @@ func newHistoryClearCmd() *cobra.Command {
 	var (
 		flagBefore string
 		flagRepo   string
+		flagForce  bool
 	)
 
 	cmd := &cobra.Command{
@@ -50,6 +52,9 @@ func newHistoryClearCmd() *cobra.Command {
 				}
 				before = &parsed
 			}
+			if before == nil && flagRepo == "" && !flagForce {
+				return fmt.Errorf("refusing to clear all scan history without --force; pass --repo or --before to scope deletion")
+			}
 
 			deleted, err := store.ClearHistory(cmd.Context(), before, flagRepo)
 			if err != nil {
@@ -63,10 +68,10 @@ func newHistoryClearCmd() *cobra.Command {
 				fmt.Print("ies")
 			}
 			if flagRepo != "" {
-				fmt.Printf(" for repo %q", flagRepo)
+				fmt.Printf(" for repo %q", termtext.Sanitize(flagRepo))
 			}
 			if before != nil {
-				fmt.Printf(" before %s", before.Format("2006-01-02"))
+				fmt.Printf(" before %s", before.Format("2006-01-02 UTC"))
 			}
 			fmt.Println(".")
 			return nil
@@ -74,8 +79,9 @@ func newHistoryClearCmd() *cobra.Command {
 	}
 
 	f := cmd.Flags()
-	f.StringVar(&flagBefore, "before", "", "clear entries before this date (YYYY-MM-DD)")
+	f.StringVar(&flagBefore, "before", "", "clear entries before this UTC date (YYYY-MM-DD)")
 	f.StringVar(&flagRepo, "repo", "", "clear entries for specific repository")
+	f.BoolVar(&flagForce, "force", false, "allow clearing all scan history without --repo or --before")
 
 	return cmd
 }

@@ -4,8 +4,10 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -14,8 +16,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/8linkz/packmon/internal/db"
-	"github.com/8linkz/packmon/internal/feed"
+	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/feed"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -60,9 +62,21 @@ func TestSyncWithoutAPIKeyReturnsPermanentError(t *testing.T) {
 	}
 }
 
-func TestDownloadBulkMapsEntriesAndSkipsInvalidCVEs(t *testing.T) {
+func TestSyncStreamsEntriesAndSkipsInvalidCVEs(t *testing.T) {
 	t.Parallel()
 
+	zipBody := vulnCheckZipBytes(t, `{
+	  "data": [
+	    {
+	      "id": "CVE-2026-0001",
+	      "cvss": {"base_score": 9.8, "vector_string": "CVSS:3.1/...", "version": "3.1"},
+	      "exploits": [{"url": "https://example.test/poc", "name": "poc", "source": "xdb"}],
+	      "url": "https://vulncheck.test/CVE-2026-0001"
+	    },
+	    {"id": "VC-2026-ignored"},
+	    {"cve_id": "CVE-2026-0002", "url": "https://vulncheck.test/CVE-2026-0002"}
+	  ]
+	}`)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case nvd2Endpoint:
@@ -72,25 +86,13 @@ func TestDownloadBulkMapsEntriesAndSkipsInvalidCVEs(t *testing.T) {
 			if got := r.Header.Get("User-Agent"); got == "" {
 				t.Fatal("User-Agent header is empty")
 			}
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"data":[{"filename":"vulncheck-nvd2.zip","url":"`+absoluteTestURL(r, "/bulk/vulncheck-nvd2.zip")+`"}]}`)
+			writeBackupLinkResponse(t, w, r, "/bulk/vulncheck-nvd2.zip", zipBody, "vulncheck-nvd2.zip")
 		case "/bulk/vulncheck-nvd2.zip":
 			if got := r.Header.Get("Authorization"); got != "" {
 				t.Fatalf("backup download leaked Authorization header = %q", got)
 			}
 			w.Header().Set("Content-Type", "application/zip")
-			writeVulnCheckZip(t, w, `{
-			  "data": [
-			    {
-			      "id": "CVE-2026-0001",
-			      "cvss": {"base_score": 9.8, "vector_string": "CVSS:3.1/...", "version": "3.1"},
-			      "exploits": [{"url": "https://example.test/poc", "name": "poc", "source": "xdb"}],
-			      "url": "https://vulncheck.test/CVE-2026-0001"
-			    },
-			    {"id": "VC-2026-ignored"},
-			    {"cve_id": "CVE-2026-0002", "url": "https://vulncheck.test/CVE-2026-0002"}
-			  ]
-			}`)
+			_, _ = w.Write(zipBody)
 		default:
 			t.Fatalf("unexpected path %q", r.URL.Path)
 		}
@@ -98,10 +100,15 @@ func TestDownloadBulkMapsEntriesAndSkipsInvalidCVEs(t *testing.T) {
 	defer server.Close()
 
 	syncer := NewSyncer("test-key", slog.New(slog.NewTextHandler(io.Discard, nil)), WithBaseURL(server.URL))
-	entries, err := syncer.downloadBulk(context.Background())
+	store := &vulncheckStoreStub{}
+	result, err := syncer.Sync(context.Background(), store)
 	if err != nil {
-		t.Fatalf("downloadBulk: %v", err)
+		t.Fatalf("Sync: %v", err)
 	}
+	if result.EntriesTotal != 2 || result.EntriesSynced != 2 {
+		t.Fatalf("sync result = %+v, want 2/2", result)
+	}
+	entries := store.entries
 	if len(entries) != 2 {
 		t.Fatalf("entries length = %d, want 2: %+v", len(entries), entries)
 	}
@@ -116,7 +123,7 @@ func TestDownloadBulkMapsEntriesAndSkipsInvalidCVEs(t *testing.T) {
 	}
 }
 
-func TestDownloadBulkReportsHTTPAndParseErrors(t *testing.T) {
+func TestSyncReportsBackupLinkHTTPAndParseErrors(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -141,9 +148,9 @@ func TestDownloadBulkReportsHTTPAndParseErrors(t *testing.T) {
 			defer server.Close()
 
 			syncer := NewSyncer("test-key", slog.New(slog.NewTextHandler(io.Discard, nil)), WithBaseURL(server.URL))
-			_, err := syncer.downloadBulk(context.Background())
+			_, err := syncer.Sync(context.Background(), &vulncheckStoreStub{})
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
-				t.Fatalf("downloadBulk error = %v, want %q", err, tt.want)
+				t.Fatalf("Sync error = %v, want %q", err, tt.want)
 			}
 		})
 	}
@@ -152,7 +159,9 @@ func TestDownloadBulkReportsHTTPAndParseErrors(t *testing.T) {
 func TestSyncDownloadsAndEnrichesInBatches(t *testing.T) {
 	t.Parallel()
 
-	payload := backupResponse{Data: make([]backupCVE, 0, batchSize+1)}
+	payload := struct {
+		Data []backupCVE `json:"data"`
+	}{Data: make([]backupCVE, 0, batchSize+1)}
 	for i := 0; i < batchSize+1; i++ {
 		payload.Data = append(payload.Data, backupCVE{ID: "CVE-2026-" + strconv.FormatInt(int64(1000+i), 10)})
 	}
@@ -164,7 +173,7 @@ func TestSyncDownloadsAndEnrichesInBatches(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case nvd2Endpoint:
-			_, _ = io.WriteString(w, `{"data":[{"url":"`+absoluteTestURL(r, "/bulk.json")+`"}]}`)
+			writeBackupLinkResponse(t, w, r, "/bulk.json", body, "vulncheck-nvd2.json")
 		case "/bulk.json":
 			_, _ = w.Write(body)
 		default:
@@ -190,13 +199,14 @@ func TestSyncDownloadsAndEnrichesInBatches(t *testing.T) {
 func TestSyncStreamsZipBackup(t *testing.T) {
 	t.Parallel()
 
+	zipBody := vulnCheckZipBytes(t, `{"data":[{"id":"CVE-2026-4242"}]}`)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case nvd2Endpoint:
-			_, _ = io.WriteString(w, `{"data":[{"url":"`+absoluteTestURL(r, "/bulk.zip")+`"}]}`)
+			writeBackupLinkResponse(t, w, r, "/bulk.zip", zipBody, "vulncheck-nvd2.zip")
 		case "/bulk.zip":
 			w.Header().Set("Content-Type", "application/zip")
-			writeVulnCheckZip(t, w, `{"data":[{"id":"CVE-2026-4242"}]}`)
+			_, _ = w.Write(zipBody)
 		default:
 			t.Fatalf("unexpected path %q", r.URL.Path)
 		}
@@ -217,10 +227,61 @@ func TestSyncStreamsZipBackup(t *testing.T) {
 	}
 }
 
+func TestSyncRejectsMissingOrMismatchedBackupSHA256BeforeEnrich(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{"data":[{"id":"CVE-2026-5150"}]}`)
+	tests := []struct {
+		name   string
+		sha256 string
+		want   string
+	}{
+		{name: "missing", sha256: "", want: "sha256"},
+		{name: "mismatch", sha256: strings.Repeat("0", 64), want: "sha256 mismatch"},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case nvd2Endpoint:
+					link := map[string]string{"url": absoluteTestURL(r, "/bulk.json")}
+					if tt.sha256 != "" {
+						link["sha256"] = tt.sha256
+					}
+					resp := map[string][]map[string]string{"data": {link}}
+					if err := json.NewEncoder(w).Encode(resp); err != nil {
+						t.Fatalf("encode backup link response: %v", err)
+					}
+				case "/bulk.json":
+					_, _ = w.Write(body)
+				default:
+					t.Fatalf("unexpected path %q", r.URL.Path)
+				}
+			}))
+			defer server.Close()
+
+			store := &vulncheckStoreStub{}
+			syncer := NewSyncer("test-key", slog.New(slog.NewTextHandler(io.Discard, nil)), WithBaseURL(server.URL))
+			_, err := syncer.Sync(context.Background(), store)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Sync() error = %v, want %q", err, tt.want)
+			}
+			if len(store.batchSizes) != 0 {
+				t.Fatalf("EnrichVulnCheck batches = %v, want none before digest verification", store.batchSizes)
+			}
+		})
+	}
+}
+
 func TestSyncReportsContextAndEnrichErrors(t *testing.T) {
 	t.Parallel()
 
-	payload := backupResponse{Data: []backupCVE{{ID: "CVE-2026-0001"}}}
+	payload := struct {
+		Data []backupCVE `json:"data"`
+	}{Data: []backupCVE{{ID: "CVE-2026-0001"}}}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		t.Fatalf("marshal backup response: %v", err)
@@ -229,7 +290,7 @@ func TestSyncReportsContextAndEnrichErrors(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case nvd2Endpoint:
-			_, _ = io.WriteString(w, `{"data":[{"url":"`+absoluteTestURL(r, "/bulk.json")+`"}]}`)
+			writeBackupLinkResponse(t, w, r, "/bulk.json", body, "vulncheck-nvd2.json")
 		case "/bulk.json":
 			_, _ = w.Write(body)
 			cancelSync()
@@ -266,11 +327,11 @@ func TestFetchAndDownloadBackupErrorBranches(t *testing.T) {
 	defer server.Close()
 
 	syncer := NewSyncer("test-key", slog.New(slog.NewTextHandler(io.Discard, nil)), WithBaseURL(server.URL))
-	if _, err := syncer.fetchBackupURL(context.Background()); err == nil || !strings.Contains(err.Error(), "download URL") {
-		t.Fatalf("fetchBackupURL(missing url) = %v", err)
+	if _, err := syncer.fetchBackupSelection(context.Background()); err == nil || !strings.Contains(err.Error(), "download URL") {
+		t.Fatalf("fetchBackupSelection(missing url) = %v", err)
 	}
-	if _, _, err := syncer.downloadBackupFile(context.Background(), server.URL+"/backup"); err == nil || !strings.Contains(err.Error(), "status 502") {
-		t.Fatalf("downloadBackupFile(status) = %v", err)
+	if _, _, _, err := syncer.downloadBackupToTemp(context.Background(), server.URL+"/backup"); err == nil || !strings.Contains(err.Error(), "status 502") {
+		t.Fatalf("downloadBackupToTemp(status) = %v", err)
 	}
 }
 
@@ -291,22 +352,8 @@ func TestVulnCheckBackupHelperBranches(t *testing.T) {
 		t.Fatalf("resolveBackupURL(bad base) = %v", err)
 	}
 
-	if !isZipPayload([]byte("PK\x03\x04x"), "", "") {
-		t.Fatal("zip magic body should be detected")
-	}
-	if !isZipPayload([]byte("json"), "application/zip", "") {
-		t.Fatal("zip content type should be detected")
-	}
 	if !isZipPayloadHeader([]byte("json"), "", "https://example.test/bulk.zip") {
 		t.Fatal("zip URL suffix should be detected")
-	}
-
-	jsonEntries, err := decodeBackupPayload([]byte(`[{"id":"CVE-2026-0001"}]`), "application/json", "https://example.test/bulk.json")
-	if err != nil || len(jsonEntries) != 1 {
-		t.Fatalf("decodeBackupPayload(json) = %+v, %v", jsonEntries, err)
-	}
-	if _, err := decodeBackupJSON([]byte(`{"not":"an array"}`)); err == nil || !strings.Contains(err.Error(), "parse json") {
-		t.Fatalf("decodeBackupJSON(object without data) = %v", err)
 	}
 
 	_, err = io.ReadAll(newMaxBytesReader(strings.NewReader("abcd"), 3))
@@ -315,11 +362,132 @@ func TestVulnCheckBackupHelperBranches(t *testing.T) {
 	}
 }
 
+func TestResolveBackupURLRejectsUnsafeCrossOriginTargets(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		base string
+		raw  string
+	}{
+		{name: "downgrade", base: "https://api.example.test", raw: "http://downloads.example.test/backup.json"},
+		{name: "loopback", base: "https://api.example.test", raw: "https://127.0.0.1/backup.json"},
+		{name: "link local", base: "https://api.example.test", raw: "https://169.254.169.254/latest/meta-data"},
+		{name: "private", base: "https://api.example.test", raw: "https://10.0.0.1/backup.json"},
+		{name: "localhost", base: "https://api.example.test", raw: "https://localhost/backup.json"},
+		{name: "non http", base: "https://api.example.test", raw: "file:///etc/passwd"},
+		{name: "cross origin non default port", base: "https://api.example.test", raw: "https://downloads.example.test:8443/backup.json"},
+		{name: "unapproved public host", base: "https://api.example.test", raw: "https://downloads.example.test/backup.json"},
+		{name: "userinfo", base: "https://api.example.test", raw: "https://user:pass@downloads.example.test/backup.json"}, //nolint:gosec // fake credential-bearing URL verifies rejection.
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got, err := resolveBackupURL(tt.base, tt.raw); err == nil {
+				t.Fatalf("resolveBackupURL(%q) = %q, want error", tt.raw, got)
+			}
+		})
+	}
+}
+
+func TestResolveBackupURLAllowsRelativeAndPublicHTTPSDownloads(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		base string
+		raw  string
+		want string
+	}{
+		{
+			name: "relative test mirror",
+			base: "http://127.0.0.1:45721/api",
+			raw:  "/bulk.json",
+			want: "http://127.0.0.1:45721/bulk.json",
+		},
+		{
+			name: "documented s3 backup host",
+			base: "https://api.example.test",
+			raw:  "https://vulncheck-nvd2.s3.amazonaws.com/backup.json?X-Amz-Signature=test",
+			want: "https://vulncheck-nvd2.s3.amazonaws.com/backup.json?X-Amz-Signature=test",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := resolveBackupURL(tt.base, tt.raw)
+			if err != nil {
+				t.Fatalf("resolveBackupURL(%q): %v", tt.raw, err)
+			}
+			if got != tt.want {
+				t.Fatalf("resolveBackupURL(%q) = %q, want %q", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBackupDownloadRejectsUnsafeRedirectTargets(t *testing.T) {
+	t.Parallel()
+
+	redirectHits := 0
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirectHits++
+		_, _ = io.WriteString(w, `[{"id":"CVE-2026-9999"}]`)
+	}))
+	defer target.Close()
+
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/bulk.json", http.StatusFound)
+	}))
+	defer source.Close()
+
+	syncer := NewSyncer("test-key", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	_, err := syncer.streamBackupFile(context.Background(), source.URL+"/redirect", func([]db.VulnCheckEntry) error {
+		return nil
+	})
+	if err == nil {
+		t.Fatal("streamBackupFile(unsafe redirect) error = nil, want refusal")
+	}
+	if redirectHits != 0 {
+		t.Fatalf("unsafe redirect target was requested %d times, want 0", redirectHits)
+	}
+	if !strings.Contains(err.Error(), "redirect") {
+		t.Fatalf("streamBackupFile(unsafe redirect) error = %v, want redirect refusal", err)
+	}
+}
+
+func TestBackupDownloadHTTPErrorRedactsSignedURL(t *testing.T) {
+	t.Parallel()
+
+	const signedURL = "https://user-secret:pass-secret@downloads.example.test/backups/vulncheck.zip?X-Amz-Signature=query-secret&X-Amz-Security-Token=token-secret" //nolint:gosec // fake signed URL verifies redaction.
+	syncer := NewSyncer("test-key", slog.New(slog.NewTextHandler(io.Discard, nil)), WithHTTPClient(&http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return nil, errors.New("dial tcp " + r.URL.String() + ": no route to host")
+		}),
+	}))
+
+	_, _, _, err := syncer.downloadBackupToTemp(context.Background(), signedURL)
+	if err == nil {
+		t.Fatal("downloadBackupToTemp() error = nil, want redacted HTTP error")
+	}
+	assertNoSignedURLLeak(t, err.Error())
+
+	_, err = syncer.streamBackupFile(context.Background(), signedURL, func([]db.VulnCheckEntry) error { return nil })
+	if err == nil {
+		t.Fatal("streamBackupFile() error = nil, want redacted HTTP error")
+	}
+	assertNoSignedURLLeak(t, err.Error())
+}
+
 func TestStreamBackupJSONAndZipErrorBranches(t *testing.T) {
 	t.Parallel()
 
 	var emitted []db.VulnCheckEntry
-	total, err := streamBackupJSON(strings.NewReader(`{"meta":{"ignored":true},"data":[{"id":"CVE-2026-0001"}]}`), func(entries []db.VulnCheckEntry) error {
+	total, err := streamBackupJSON(strings.NewReader(`{"meta":{"ignored":true},"data":[{"id":"CVE-2026-0001"}],"after":{"ignored":true}}`), func(entries []db.VulnCheckEntry) error {
 		emitted = append(emitted, entries...)
 		return nil
 	})
@@ -335,6 +503,8 @@ func TestStreamBackupJSONAndZipErrorBranches(t *testing.T) {
 		{name: "scalar", body: `"bad"`, want: "expected object or array"},
 		{name: "data not array", body: `{"data":{}}`, want: "data is not an array"},
 		{name: "missing data", body: `{"meta":{}}`, want: "data array missing"},
+		{name: "truncated object after data", body: `{"data":[{"id":"CVE-2026-0001"}]`, want: "object close"},
+		{name: "trailing top-level data", body: `[{"id":"CVE-2026-0001"}] {"extra":true}`, want: "trailing"},
 		{name: "bad cve", body: `[{"id":`, want: "parse cve"},
 	}
 	for _, tt := range errorCases {
@@ -360,9 +530,6 @@ func TestStreamBackupJSONAndZipErrorBranches(t *testing.T) {
 	if _, err := streamBackupZip(bytes.NewReader(buf.Bytes()), func([]db.VulnCheckEntry) error { return nil }); err == nil || !strings.Contains(err.Error(), "no JSON") {
 		t.Fatalf("streamBackupZip(no json) = %v", err)
 	}
-	if _, err := decodeBackupZip(buf.Bytes()); err == nil || !strings.Contains(err.Error(), "no JSON") {
-		t.Fatalf("decodeBackupZip(no json) = %v", err)
-	}
 }
 
 func TestVulnCheckDownloadStreamAndZipFailureBranches(t *testing.T) {
@@ -383,14 +550,6 @@ func TestVulnCheckDownloadStreamAndZipFailureBranches(t *testing.T) {
 	defer server.Close()
 
 	syncer := NewSyncer("test-key", slog.New(slog.NewTextHandler(io.Discard, nil)), WithBaseURL(server.URL))
-	body, contentType, err := syncer.downloadBackupFile(context.Background(), server.URL+"/backup.json")
-	if err != nil {
-		t.Fatalf("downloadBackupFile(success) error = %v", err)
-	}
-	if contentType != "application/json" || !bytes.Contains(body, []byte("CVE-2026-0101")) {
-		t.Fatalf("downloadBackupFile() = %q %s", contentType, body)
-	}
-
 	var emitted []db.VulnCheckEntry
 	total, err := syncer.streamBackupFile(context.Background(), server.URL+"/backup.json", func(entries []db.VulnCheckEntry) error {
 		emitted = append(emitted, entries...)
@@ -402,8 +561,8 @@ func TestVulnCheckDownloadStreamAndZipFailureBranches(t *testing.T) {
 	if _, err := syncer.streamBackupFile(context.Background(), server.URL+"/bad.zip", func([]db.VulnCheckEntry) error { return nil }); err == nil || !strings.Contains(err.Error(), "parse zip") {
 		t.Fatalf("streamBackupFile(bad zip) = %v, want parse zip error", err)
 	}
-	if _, _, err := syncer.downloadBackupFile(context.Background(), "://bad"); err == nil || !strings.Contains(err.Error(), "create backup request") {
-		t.Fatalf("downloadBackupFile(bad URL) = %v", err)
+	if _, _, _, err := syncer.downloadBackupToTemp(context.Background(), "://bad"); err == nil || !strings.Contains(err.Error(), "create backup request") {
+		t.Fatalf("downloadBackupToTemp(bad URL) = %v", err)
 	}
 	if _, err := syncer.streamBackupFile(context.Background(), "://bad", func([]db.VulnCheckEntry) error { return nil }); err == nil || !strings.Contains(err.Error(), "create backup request") {
 		t.Fatalf("streamBackupFile(bad URL) = %v", err)
@@ -436,16 +595,30 @@ func TestVulnCheckDownloadStreamAndZipFailureBranches(t *testing.T) {
 	if _, err := streamBackupZip(bytes.NewReader(badJSONZip.Bytes()), func([]db.VulnCheckEntry) error { return nil }); err == nil || !strings.Contains(err.Error(), "parse zip JSON") {
 		t.Fatalf("streamBackupZip(bad json) = %v", err)
 	}
-	if _, err := decodeBackupZip(badJSONZip.Bytes()); err == nil || !strings.Contains(err.Error(), "parse zip JSON") {
-		t.Fatalf("decodeBackupZip(bad json) = %v", err)
-	}
 }
 
 func absoluteTestURL(r *http.Request, path string) string {
 	return "http://" + r.Host + path
 }
 
-func writeVulnCheckZip(t *testing.T, w io.Writer, payload string) {
+func sha256Hex(body []byte) string {
+	return fmt.Sprintf("%x", sha256.Sum256(body))
+}
+
+func writeBackupLinkResponse(t *testing.T, w http.ResponseWriter, r *http.Request, path string, body []byte, filename string) {
+	t.Helper()
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(backupLinkResponse{Data: []backupLink{{
+		Filename: filename,
+		SHA256:   sha256Hex(body),
+		URL:      absoluteTestURL(r, path),
+	}}}); err != nil {
+		t.Fatalf("encode backup link response: %v", err)
+	}
+}
+
+func vulnCheckZipBytes(t *testing.T, payload string) []byte {
 	t.Helper()
 
 	var buf bytes.Buffer
@@ -460,14 +633,26 @@ func writeVulnCheckZip(t *testing.T, w io.Writer, payload string) {
 	if err := zw.Close(); err != nil {
 		t.Fatalf("close zip: %v", err)
 	}
-	if _, err := w.Write(buf.Bytes()); err != nil {
-		t.Fatalf("write zip response: %v", err)
+	return buf.Bytes()
+}
+
+func assertNoSignedURLLeak(t *testing.T, message string) {
+	t.Helper()
+
+	for _, leaked := range []string{"user-secret", "pass-secret", "vulncheck.zip", "query-secret", "token-secret", "X-Amz-Signature", "X-Amz-Security-Token"} {
+		if strings.Contains(message, leaked) {
+			t.Fatalf("error leaked %q in %q", leaked, message)
+		}
+	}
+	if !strings.Contains(message, "https://downloads.example.test/...") {
+		t.Fatalf("error = %q, want redacted backup host", message)
 	}
 }
 
 type vulncheckStoreStub struct {
 	db.Store
 	batchSizes []int
+	entries    []db.VulnCheckEntry
 	err        error
 }
 
@@ -476,5 +661,6 @@ func (s *vulncheckStoreStub) EnrichVulnCheck(_ context.Context, entries []db.Vul
 		return 0, s.err
 	}
 	s.batchSizes = append(s.batchSizes, len(entries))
+	s.entries = append(s.entries, entries...)
 	return len(entries), nil
 }

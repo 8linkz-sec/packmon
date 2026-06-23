@@ -4,13 +4,12 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 
-	"github.com/8linkz/packmon/internal/db/sqlite"
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/db/sqlite"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 const defaultMaxScansPerRepo = 100
@@ -41,12 +40,22 @@ func historyMaxScansPerRepo() int {
 	return maxPerRepo
 }
 
-func recordScanHistory(ctx context.Context, store *sqlite.Store, scanPath string, result *domain.ScanResult) error {
-	repoName, branch, _ := scanRepoMetadata(scanPath)
+func recordScanHistoryWithRepo(ctx context.Context, store *sqlite.Store, repo *domain.RepoInfo, result *domain.ScanResult) error {
+	repoName := "local"
+	branch := ""
+	commit := ""
+	if repo != nil {
+		if strings.TrimSpace(repo.Name) != "" {
+			repoName = repo.Name
+		}
+		branch = repo.Branch
+		commit = repo.Commit
+	}
 
 	entry := sqlite.ScanEntry{
 		RepoName:          repoName,
 		Branch:            branch,
+		Commit:            commit,
 		ScannedAt:         result.ScannedAt,
 		PackagesCount:     result.PackagesScanned,
 		FindingsCount:     result.FindingsCount,
@@ -115,13 +124,10 @@ func scanRepoMetadata(scanPath string) (repoName, branch, commit string) {
 }
 
 func gitOutput(dir string, args ...string) (string, error) {
-	if _, err := exec.LookPath("git"); err != nil {
-		return "", err
-	}
-
+	ctx, cancel := context.WithTimeout(context.Background(), gitMetadataTimeout)
+	defer cancel()
 	cmdArgs := append([]string{"-C", dir}, args...)
-	// #nosec G204 -- command is fixed to git; arguments are internally constructed.
-	out, err := exec.Command("git", cmdArgs...).Output()
+	out, err := gitCommandOutput(ctx, cmdArgs...)
 	if err != nil {
 		return "", err
 	}

@@ -3,6 +3,7 @@ package feed
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestGitRepoClonePullHeadHashAndChangedFiles(t *testing.T) {
@@ -168,7 +170,151 @@ func TestGitRepoRunAndCloneErrorBranches(t *testing.T) {
 	}
 	if err := repo.clone(context.Background()); err == nil {
 		t.Fatal("clone(parent file) error = nil")
+	} else if strings.Contains(err.Error(), parentFile) || strings.Contains(err.Error(), filepath.Dir(parentFile)) {
+		t.Fatalf("clone(parent file) error leaked full path: %v", err)
 	}
+}
+
+func TestGitRepoRunSanitizesGitOutputAndKeepsProcessStderrQuiet(t *testing.T) {
+	oldGitExecutable := gitExecutable
+	oldGitExecutableArgs := gitExecutableArgs
+	gitExecutable = os.Args[0]
+	gitExecutableArgs = []string{"-test.run=^TestGitRepoFakeGitOutput$", "--"}
+	t.Cleanup(func() {
+		gitExecutable = oldGitExecutable
+		gitExecutableArgs = oldGitExecutableArgs
+	})
+	t.Setenv("PACKMON_FAKE_GIT_OUTPUT", "1")
+
+	var processStderr bytes.Buffer
+	err := withCapturedStderr(&processStderr, func() error {
+		repo := &GitRepo{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+		return repo.run(context.Background(), t.TempDir(), "status")
+	})
+	if err == nil {
+		t.Fatal("run(fake git output) error = nil")
+	}
+
+	for _, leaked := range []string{
+		`C:\Users\Admin\feed-data\repo`,
+		"/var/lib/packmon/feed-data/repo",
+		"secret-token",
+		"token=super-secret",
+	} {
+		if strings.Contains(err.Error(), leaked) {
+			t.Fatalf("sanitized git error leaked %q: %v", leaked, err)
+		}
+		if strings.Contains(processStderr.String(), leaked) {
+			t.Fatalf("process stderr leaked %q: %s", leaked, processStderr.String())
+		}
+	}
+	if processStderr.Len() != 0 {
+		t.Fatalf("git helper wrote to process stderr: %s", processStderr.String())
+	}
+	if !strings.Contains(err.Error(), "(redacted-path)") || !strings.Contains(err.Error(), "token=[redacted]") {
+		t.Fatalf("git error missing redacted diagnostics: %v", err)
+	}
+}
+
+func TestGitRepoHeadHashSanitizesSubprocessStderr(t *testing.T) {
+	oldGitExecutable := gitExecutable
+	oldGitExecutableArgs := gitExecutableArgs
+	gitExecutable = os.Args[0]
+	gitExecutableArgs = []string{"-test.run=^TestGitRepoFakeGitOutput$", "--"}
+	t.Cleanup(func() {
+		gitExecutable = oldGitExecutable
+		gitExecutableArgs = oldGitExecutableArgs
+	})
+	t.Setenv("PACKMON_FAKE_GIT_OUTPUT", "1")
+
+	repoDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(repoDir, ".git"), 0o750); err != nil {
+		t.Fatalf("mkdir .git: %v", err)
+	}
+	repo := &GitRepo{Dir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	var processStderr bytes.Buffer
+	err := withCapturedStderr(&processStderr, func() error {
+		_, err := repo.headHash(context.Background())
+		return err
+	})
+	if err == nil {
+		t.Fatal("headHash(fake git output) error = nil")
+	}
+	for _, leaked := range []string{`C:\Users\Admin\feed-data\repo`, "/var/lib/packmon/feed-data/repo", "secret-token"} {
+		if strings.Contains(err.Error(), leaked) {
+			t.Fatalf("headHash error leaked %q: %v", leaked, err)
+		}
+		if strings.Contains(processStderr.String(), leaked) {
+			t.Fatalf("headHash process stderr leaked %q: %s", leaked, processStderr.String())
+		}
+	}
+	if processStderr.Len() != 0 {
+		t.Fatalf("headHash wrote to process stderr: %s", processStderr.String())
+	}
+}
+
+func TestGitRepoRunUsesCommandTimeout(t *testing.T) {
+	oldGitExecutable := gitExecutable
+	oldGitExecutableArgs := gitExecutableArgs
+	gitExecutable = os.Args[0]
+	gitExecutableArgs = []string{"-test.run=^TestGitRepoFakeGitSleep$", "--"}
+	t.Cleanup(func() {
+		gitExecutable = oldGitExecutable
+		gitExecutableArgs = oldGitExecutableArgs
+	})
+	t.Setenv("PACKMON_FAKE_GIT_SLEEP", "1")
+
+	repo := &GitRepo{
+		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		CommandTimeout: 20 * time.Millisecond,
+	}
+	err := repo.run(context.Background(), t.TempDir(), "status")
+	if err == nil {
+		t.Fatal("run(fake slow git) error = nil, want deadline")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) && !strings.Contains(err.Error(), "deadline") {
+		t.Fatalf("run(fake slow git) error = %v, want deadline", err)
+	}
+}
+
+func TestGitRepoFakeGitSleep(t *testing.T) {
+	if os.Getenv("PACKMON_FAKE_GIT_SLEEP") != "1" {
+		t.Skip("helper process only")
+	}
+	time.Sleep(2 * time.Second)
+}
+
+func TestGitRepoFakeGitOutput(t *testing.T) {
+	if os.Getenv("PACKMON_FAKE_GIT_OUTPUT") != "1" {
+		t.Skip("helper process only")
+	}
+	_, _ = os.Stdout.WriteString("stdout includes /var/lib/packmon/feed-data/repo and secret-token\n")
+	_, _ = os.Stderr.WriteString(`fatal: cannot access C:\Users\Admin\feed-data\repo: token=super-secret` + "\n")
+	os.Exit(2)
+}
+
+func withCapturedStderr(dst *bytes.Buffer, fn func() error) error {
+	readPipe, writePipe, err := os.Pipe()
+	if err != nil {
+		return err
+	}
+	oldStderr := os.Stderr
+	os.Stderr = writePipe
+	defer func() {
+		os.Stderr = oldStderr
+		_ = readPipe.Close()
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(dst, readPipe)
+		close(done)
+	}()
+	runErr := fn()
+	_ = writePipe.Close()
+	<-done
+	return runErr
 }
 
 func runGit(t *testing.T, dir string, args ...string) {

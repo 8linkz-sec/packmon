@@ -44,3 +44,6 @@ CREATE TABLE lifecycle_package_map (
 
 CREATE INDEX lifecycle_package_map_lookup_idx
     ON lifecycle_package_map(ecosystem, name);
+
+CREATE INDEX idx_lifecycle_package_map_product_slug
+    ON lifecycle_package_map(product_slug);

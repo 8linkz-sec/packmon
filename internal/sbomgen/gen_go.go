@@ -32,13 +32,13 @@ func (goGenerator) Generate(ctx context.Context, d Detection, outPath string, op
 		Env:  []string{"GOWORK=off"},
 	})
 	if err != nil {
-		return fmt.Errorf("go list modules: %w: %s", err, string(out))
+		return fmt.Errorf("go list modules: %w: %s", err, commandOutputSummary(out))
 	}
 	return writeGoListCycloneDX(outPath, out)
 }
 
 func (goGenerator) DeclaresDependencies(d Detection, _ GenerateOptions) (bool, error) {
-	data, err := os.ReadFile(d.ManifestPath) // #nosec G304 -- path comes from a bounded local manifest walk.
+	data, err := readAutoSBOMManifest(d.ManifestPath)
 	if err != nil {
 		return false, err
 	}
@@ -54,6 +54,10 @@ type goListModule struct {
 	Version  string `json:"Version"`
 	Main     bool   `json:"Main"`
 	Indirect bool   `json:"Indirect"`
+	Replace  *struct {
+		Path    string `json:"Path"`
+		Version string `json:"Version"`
+	} `json:"Replace,omitempty"`
 }
 
 type goCycloneDXBOM struct {
@@ -77,11 +81,17 @@ type goCycloneDXTool struct {
 }
 
 type goCycloneDXComponent struct {
-	Type    string `json:"type"`
-	Name    string `json:"name"`
-	Version string `json:"version,omitempty"`
-	BOMRef  string `json:"bom-ref"`
-	PURL    string `json:"purl,omitempty"`
+	Type       string                `json:"type"`
+	Name       string                `json:"name"`
+	Version    string                `json:"version,omitempty"`
+	BOMRef     string                `json:"bom-ref"`
+	PURL       string                `json:"purl,omitempty"`
+	Properties []goCycloneDXProperty `json:"properties,omitempty"`
+}
+
+type goCycloneDXProperty struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
 }
 
 type goCycloneDXDependencyRef struct {
@@ -151,8 +161,7 @@ func buildGoListCycloneDX(modules []goListModule) (goCycloneDXBOM, error) {
 		if module.Main {
 			continue
 		}
-		path := strings.TrimSpace(module.Path)
-		version := strings.TrimSpace(module.Version)
+		path, version, properties := goModuleCycloneDXIdentity(module)
 		if path == "" || version == "" {
 			continue
 		}
@@ -162,17 +171,61 @@ func buildGoListCycloneDX(modules []goListModule) (goCycloneDXBOM, error) {
 		}
 		seen[purl] = struct{}{}
 		bom.Components = append(bom.Components, goCycloneDXComponent{
-			Type:    "library",
-			Name:    path,
-			Version: version,
-			BOMRef:  purl,
-			PURL:    purl,
+			Type:       "library",
+			Name:       path,
+			Version:    version,
+			BOMRef:     purl,
+			PURL:       purl,
+			Properties: properties,
 		})
 		if !module.Indirect {
 			bom.Dependencies[0].DependsOn = append(bom.Dependencies[0].DependsOn, purl)
 		}
 	}
 	return bom, nil
+}
+
+func goModuleCycloneDXIdentity(module goListModule) (path, version string, properties []goCycloneDXProperty) {
+	path = strings.TrimSpace(module.Path)
+	version = strings.TrimSpace(module.Version)
+	if module.Replace == nil {
+		return path, version, nil
+	}
+
+	replacePath := strings.TrimSpace(module.Replace.Path)
+	replaceVersion := strings.TrimSpace(module.Replace.Version)
+	if replacePath == "" {
+		return path, version, nil
+	}
+
+	properties = append(properties,
+		goCycloneDXProperty{Name: "packmon:go:original_path", Value: path},
+		goCycloneDXProperty{Name: "packmon:go:replace_path", Value: replacePath},
+	)
+	if version != "" {
+		properties = append(properties, goCycloneDXProperty{Name: "packmon:go:original_version", Value: version})
+	}
+	if replaceVersion != "" {
+		properties = append(properties, goCycloneDXProperty{Name: "packmon:go:replace_version", Value: replaceVersion})
+	}
+
+	if replaceVersion == "" || isLocalGoReplacementPath(replacePath) {
+		properties = append(properties, goCycloneDXProperty{Name: "packmon:go:replacement_kind", Value: "local"})
+		return path, version, properties
+	}
+
+	properties = append(properties, goCycloneDXProperty{Name: "packmon:go:replacement_kind", Value: "module"})
+	return replacePath, replaceVersion, properties
+}
+
+func isLocalGoReplacementPath(path string) bool {
+	path = strings.TrimSpace(path)
+	return strings.HasPrefix(path, "./") ||
+		strings.HasPrefix(path, "../") ||
+		strings.HasPrefix(path, "/") ||
+		strings.HasPrefix(path, `.\`) ||
+		strings.HasPrefix(path, `..\`) ||
+		strings.Contains(path, `:\`)
 }
 
 func purlPath(path string) string {

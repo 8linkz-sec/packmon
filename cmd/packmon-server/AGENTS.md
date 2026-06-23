@@ -17,22 +17,22 @@ Read `AGENTS.md` (root), `DESIGN.md`, and `SECURITY.md` first.
   the context (stops feed sync + queue worker), drain in-flight HTTP requests,
   close the DB pool, exit 0.
 - Dev mode (`PACKMON_SERVER_MODE=development`) selects the in-memory `noopStore`
-  and is intentionally unauthenticated for local integration tests. It is a
-  strict enum (default `production`); a typo fails startup, so it cannot silently
-  default-on. Keep it that way.
+  and is intentionally unauthenticated for local integration tests. Sensitive
+  write endpoints such as package refresh and feed imports are unauthenticated
+  only from a loopback peer; non-loopback callers still need API-key auth. It is
+  a strict enum (default `production`); a typo fails startup, so it cannot
+  silently default-on. Keep it that way.
 - System settings (block threshold, rate limits) are loaded from the DB at
   startup via `applyStoredSystemSettings` before the server starts serving.
 
-## Current open landmines (see Audit.md)
+## Current Guardrails
 
-> Status (2026-05-29): the items in this section were addressed across the
-> Audit.md "Fix-Runde" passes. Audit.md is authoritative; project-wide only the
-> external GitLab-runner test remains open. Keep the notes below as guardrails
-> so the fixes are not regressed.
+These notes are guardrails for behavior that has regressed before. Keep them in
+sync with `DESIGN.md` and `SECURITY.md` when the behavior intentionally changes.
 
-- **H3:** in dev mode the unauthenticated path now also covers
-  `POST /api/v1/feeds/import` (a data-mutating write). Re-introduce a guard for
-  write endpoints; do not let dev mode expose writes.
+- **H3:** dev mode keeps local integration tests keyless, but package refresh
+  and feed imports must remain guarded for non-loopback peers. If you touch
+  auth or routing, preserve `requiresAuthInDev` and its loopback exception.
 - **L5:** `noop.go` has no `//go:build dev` tag, so the in-memory unauthenticated
   store compiles into every release binary. Consider gating it behind a build tag
   and/or logging a loud WARN at startup when dev mode is active.

@@ -1,0 +1,33 @@
+{{define "title"}}Packmon - Privacy Notice{{end}}
+
+{{define "content"}}
+<div class="max-w-3xl space-y-6">
+  <h1 class="text-2xl font-bold">Privacy Notice</h1>
+
+  <section class="space-y-3 text-sm text-gray-700">
+    <h2 class="text-lg font-semibold text-gray-900">Session cookie</h2>
+    <p>
+      Packmon uses the first-party <code class="font-mono">packmon_session</code> cookie for admin login sessions, login-form CSRF protection, and logout. The cookie is scoped to <code class="font-mono">/admin</code>, is HttpOnly, SameSite=Strict, and expires with the configured admin session lifetime.
+    </p>
+  </section>
+
+  <section class="space-y-3 text-sm text-gray-700">
+    <h2 class="text-lg font-semibold text-gray-900">Operational metadata</h2>
+    <p>
+      The server can store admin audit log entries for security-sensitive actions, including action names, timestamps, client address metadata, and user-agent metadata. Scan history and scan metadata can contain package names, versions, ecosystems, repository metadata supplied by clients, result counts, and operational errors needed to troubleshoot dependency-security decisions.
+    </p>
+  </section>
+
+  <section class="space-y-3 text-sm text-gray-700">
+    <h2 class="text-lg font-semibold text-gray-900">Operator notice</h2>
+    <p>
+      Packmon is intended for internal deployment. Your organization controls retention, access, and any additional privacy or legal notices for its environment.
+    </p>
+    {{if legalURL}}
+    <p>
+      See the configured <a href="{{legalURL}}" class="text-blue-700 underline hover:text-blue-900">Legal Notice</a> for operator-specific information.
+    </p>
+    {{end}}
+  </section>
+</div>
+{{end}}

@@ -2,17 +2,17 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/8linkz/packmon/internal/db/sqlite"
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/db/sqlite"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 const defaultDBWarnAfterDays = 7
@@ -23,6 +23,8 @@ type localDBInfo struct {
 	FileSizeBytes   int64      `json:"file_size_bytes"`
 	Vulnerabilities int        `json:"vulnerabilities"`
 	Malicious       int        `json:"malicious"`
+	Reputation      int        `json:"reputation"`
+	Lifecycle       int        `json:"lifecycle"`
 	HistoryEntries  int        `json:"history_entries"`
 	LastSyncAt      *time.Time `json:"last_sync_at,omitempty"`
 	DBAgeDays       *int       `json:"db_age_days,omitempty"`
@@ -30,32 +32,13 @@ type localDBInfo struct {
 }
 
 type localDBExport struct {
-	GeneratedAt     time.Time                 `json:"generated_at"`
-	Info            *localDBInfo              `json:"info"`
-	Vulnerabilities []localVulnerabilityEntry `json:"vulnerabilities"`
-	Malicious       []localMaliciousEntry     `json:"malicious"`
-}
-
-type localVulnerabilityEntry struct {
-	ID            string          `json:"id"`
-	Ecosystem     string          `json:"ecosystem"`
-	Name          string          `json:"name"`
-	VersionRanges json.RawMessage `json:"version_ranges"`
-	Severity      string          `json:"severity"`
-	CVSSScore     *float64        `json:"cvss_score,omitempty"`
-	EPSSScore     *float64        `json:"epss_score,omitempty"`
-	CISAKEV       bool            `json:"cisa_kev"`
-	Summary       string          `json:"summary"`
-}
-
-type localMaliciousEntry struct {
-	ID        string          `json:"id"`
-	Ecosystem string          `json:"ecosystem"`
-	Name      string          `json:"name"`
-	Versions  json.RawMessage `json:"versions,omitempty"`
-	RiskType  string          `json:"risk_type"`
-	Severity  string          `json:"severity"`
-	Summary   string          `json:"summary"`
+	GeneratedAt     time.Time                        `json:"generated_at"`
+	Info            *localDBInfo                     `json:"info"`
+	Vulnerabilities []sqlite.LocalVulnerabilityEntry `json:"vulnerabilities"`
+	Malicious       []sqlite.LocalMaliciousEntry     `json:"malicious"`
+	Reputation      []sqlite.LocalReputationEntry    `json:"reputation"`
+	Lifecycle       []sqlite.LocalLifecycleEntry     `json:"lifecycle"`
+	ScanHistory     []sqlite.ScanEntry               `json:"scan_history"`
 }
 
 func dbWarnAfterDays() int {
@@ -106,14 +89,15 @@ func loadLocalDBInfo(ctx context.Context, store *sqlite.Store) (*localDBInfo, er
 		Exists: true,
 	}
 
-	if err := store.DB().QueryRowContext(ctx, `
-		SELECT
-			(SELECT COUNT(DISTINCT id) FROM vulnerabilities_local),
-			(SELECT COUNT(*) FROM malicious_local),
-			(SELECT COUNT(*) FROM scan_history)`,
-	).Scan(&info.Vulnerabilities, &info.Malicious, &info.HistoryEntries); err != nil {
-		return nil, fmt.Errorf("read local database counts: %w", err)
+	counts, err := store.LocalDatabaseCounts(ctx)
+	if err != nil {
+		return nil, err
 	}
+	info.Vulnerabilities = counts.Vulnerabilities
+	info.Malicious = counts.Malicious
+	info.Reputation = counts.Reputation
+	info.Lifecycle = counts.Lifecycle
+	info.HistoryEntries = counts.HistoryEntries
 
 	lastSyncAt, dbAgeDays, err := readLocalSyncAge(ctx, store)
 	if err != nil {
@@ -177,90 +161,19 @@ func exportLocalDB(ctx context.Context, store *sqlite.Store, writer io.Writer) e
 		return err
 	}
 
+	exportData, err := store.ExportLocalDatabase(ctx)
+	if err != nil {
+		return err
+	}
+
 	payload := &localDBExport{
 		GeneratedAt:     time.Now().UTC(),
-		Info:            info,
-		Vulnerabilities: make([]localVulnerabilityEntry, 0),
-		Malicious:       make([]localMaliciousEntry, 0),
-	}
-
-	vulnRows, err := store.DB().QueryContext(ctx, `
-		SELECT id, ecosystem, name, version_ranges, severity, cvss_score, epss_score, cisa_kev, summary
-		FROM vulnerabilities_local
-		ORDER BY ecosystem, name, id`)
-	if err != nil {
-		return fmt.Errorf("query local vulnerabilities: %w", err)
-	}
-	defer closeSilently(vulnRows)
-
-	for vulnRows.Next() {
-		var (
-			item          localVulnerabilityEntry
-			versionRanges sql.NullString
-			severity      sql.NullString
-			cvss          sql.NullFloat64
-			epss          sql.NullFloat64
-			cisaKEV       int
-			summary       sql.NullString
-		)
-
-		if err := vulnRows.Scan(&item.ID, &item.Ecosystem, &item.Name, &versionRanges, &severity, &cvss, &epss, &cisaKEV, &summary); err != nil {
-			return fmt.Errorf("scan local vulnerability row: %w", err)
-		}
-
-		item.VersionRanges = json.RawMessage("[]")
-		if versionRanges.Valid && strings.TrimSpace(versionRanges.String) != "" {
-			item.VersionRanges = json.RawMessage(versionRanges.String)
-		}
-		item.Severity = strings.TrimSpace(severity.String)
-		item.Summary = summary.String
-		item.CISAKEV = cisaKEV > 0
-		if cvss.Valid {
-			value := cvss.Float64
-			item.CVSSScore = &value
-		}
-		if epss.Valid {
-			value := epss.Float64
-			item.EPSSScore = &value
-		}
-
-		payload.Vulnerabilities = append(payload.Vulnerabilities, item)
-	}
-	if err := vulnRows.Err(); err != nil {
-		return fmt.Errorf("iterate local vulnerabilities: %w", err)
-	}
-
-	malRows, err := store.DB().QueryContext(ctx, `
-		SELECT id, ecosystem, name, versions, risk_type, severity, summary
-		FROM malicious_local
-		ORDER BY ecosystem, name, id`)
-	if err != nil {
-		return fmt.Errorf("query local malicious findings: %w", err)
-	}
-	defer closeSilently(malRows)
-
-	for malRows.Next() {
-		var (
-			item     localMaliciousEntry
-			versions sql.NullString
-			severity sql.NullString
-			summary  sql.NullString
-		)
-
-		if err := malRows.Scan(&item.ID, &item.Ecosystem, &item.Name, &versions, &item.RiskType, &severity, &summary); err != nil {
-			return fmt.Errorf("scan local malicious row: %w", err)
-		}
-
-		item.Severity = strings.TrimSpace(severity.String)
-		item.Summary = summary.String
-		if versions.Valid && strings.TrimSpace(versions.String) != "" {
-			item.Versions = json.RawMessage(versions.String)
-		}
-
-		payload.Malicious = append(payload.Malicious, item)
-	}
-	if err := malRows.Err(); err != nil {
-		return fmt.Errorf("iterate local malicious findings: %w", err)
+		Info:            exportLocalDBInfo(info),
+		Vulnerabilities: exportData.Vulnerabilities,
+		Malicious:       exportData.Malicious,
+		Reputation:      exportData.Reputation,
+		Lifecycle:       exportData.Lifecycle,
+		ScanHistory:     exportData.ScanHistory,
 	}
 
 	encoder := json.NewEncoder(writer)
@@ -271,4 +184,15 @@ func exportLocalDB(ctx context.Context, store *sqlite.Store, writer io.Writer) e
 	}
 
 	return nil
+}
+
+func exportLocalDBInfo(info *localDBInfo) *localDBInfo {
+	if info == nil {
+		return nil
+	}
+	copyValue := *info
+	if strings.TrimSpace(copyValue.Path) != "" {
+		copyValue.Path = filepath.Base(copyValue.Path)
+	}
+	return &copyValue
 }

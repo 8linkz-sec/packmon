@@ -7,11 +7,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/8linkz/packmon/internal/db"
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/domain"
+	lifecyclepolicy "github.com/8linkz-sec/packmon/internal/lifecycle"
 )
-
-const lifecycleSource = "endoflife.date"
 
 func (s *Store) FindLifecycleFindingsBatch(ctx context.Context, packages []db.PackageQuery, now time.Time) ([]domain.Finding, error) {
 	if len(packages) == 0 {
@@ -22,18 +21,32 @@ func (s *Store) FindLifecycleFindingsBatch(ctx context.Context, packages []db.Pa
 		now = time.Now().UTC()
 	}
 
-	allFindings := make([]domain.Finding, 0)
+	chunks := localPackagePredicateChunks(packages, localPackagePredicateChunkSize)
+	if len(chunks) == 0 {
+		return nil, nil
+	}
+
+	normalizedPackages := make([]db.PackageQuery, 0, len(packages))
 	for _, pkg := range packages {
 		queryPkg, ok := normalizeLifecyclePackageQuery(pkg)
 		if !ok {
 			continue
 		}
-		rows, err := s.lifecycleRows(ctx, queryPkg.Ecosystem, queryPkg.Name)
-		if err != nil {
-			return nil, err
+		normalizedPackages = append(normalizedPackages, queryPkg)
+	}
+
+	rowsByPackage := make(map[localPackageKey][]lifecyclepolicy.ReleaseRow, len(normalizedPackages))
+	for _, chunk := range chunks {
+		if err := s.collectLifecycleReleaseRows(ctx, chunk, rowsByPackage); err != nil {
+			return nil, fmt.Errorf("sqlite: lifecycle releases for %s: %w", localPackageChunkContext(chunk), err)
 		}
-		for _, row := range longestLifecycleMatches(rows, queryPkg.Version) {
-			finding, ok := lifecycleFindingForRelease(queryPkg, row, now)
+	}
+
+	allFindings := make([]domain.Finding, 0)
+	for _, queryPkg := range normalizedPackages {
+		key := localPackageKey{ecosystem: queryPkg.Ecosystem, name: queryPkg.Name}
+		for _, row := range lifecyclepolicy.LongestMatchingReleases(rowsByPackage[key], queryPkg.Version) {
+			finding, ok := lifecyclepolicy.FindingForRelease(lifecyclePackageQuery(queryPkg), row, now)
 			if ok {
 				allFindings = append(allFindings, finding)
 			}
@@ -42,26 +55,26 @@ func (s *Store) FindLifecycleFindingsBatch(ctx context.Context, packages []db.Pa
 	return allFindings, nil
 }
 
-func (s *Store) lifecycleRows(ctx context.Context, ecosystem, name string) ([]lifecycleReleaseRow, error) {
-	const query = `
+func (s *Store) collectLifecycleReleaseRows(ctx context.Context, chunk localPackagePredicateChunk, rowsByPackage map[localPackageKey][]lifecyclepolicy.ReleaseRow) error {
+	query := `
+		WITH requested(ecosystem, name) AS (VALUES ` + chunk.values + `)
 		SELECT
-			id, ecosystem, name, product_slug, product_label, cycle, latest,
-			release_date, is_lts, lts_from, is_eoas, eoas_from, is_eol, eol_from,
-			is_discontinued, discontinued_from, is_eoes, eoes_from, is_maintained
-		FROM lifecycle_releases_local
-		WHERE ecosystem = ? AND name = ?
-		ORDER BY product_slug ASC, length(cycle) DESC, cycle DESC`
+			l.id, l.ecosystem, l.name, l.product_slug, l.product_label, l.cycle, l.latest,
+			l.release_date, l.is_lts, l.lts_from, l.is_eoas, l.eoas_from, l.is_eol, l.eol_from,
+			l.is_discontinued, l.discontinued_from, l.is_eoes, l.eoes_from, l.is_maintained
+		FROM lifecycle_releases_local AS l
+		JOIN requested AS r ON r.ecosystem = l.ecosystem AND r.name = l.name
+		ORDER BY l.ecosystem ASC, l.name ASC, l.product_slug ASC, length(l.cycle) DESC, l.cycle DESC` // #nosec G202 -- localPackagePredicateChunks uses fixed SQL fragments and bound args.
 
-	rows, err := s.db.QueryContext(ctx, query, ecosystem, name)
+	rows, err := s.db.QueryContext(ctx, query, chunk.args...)
 	if err != nil {
-		return nil, fmt.Errorf("sqlite: query lifecycle releases: %w", err)
+		return fmt.Errorf("sqlite: query lifecycle releases batch: %w", err)
 	}
 	defer closeSilently(rows)
 
-	out := make([]lifecycleReleaseRow, 0)
 	for rows.Next() {
 		var (
-			row                        lifecycleReleaseRow
+			row                        lifecyclepolicy.ReleaseRow
 			releaseDate, ltsFrom       sql.NullString
 			eoasFrom, eolFrom          sql.NullString
 			discontinuedFrom           sql.NullString
@@ -75,9 +88,9 @@ func (s *Store) lifecycleRows(ctx context.Context, ecosystem, name string) ([]li
 			&row.Ecosystem,
 			&row.PackageName,
 			&row.ProductSlug,
-			&row.ProductLabel,
-			&row.Cycle,
-			&row.Latest,
+			&row.ProductName,
+			&row.Release.Cycle,
+			&row.Release.Latest,
 			&releaseDate,
 			&isLTS,
 			&ltsFrom,
@@ -91,29 +104,62 @@ func (s *Store) lifecycleRows(ctx context.Context, ecosystem, name string) ([]li
 			&eoesFrom,
 			&maintained,
 		); err != nil {
-			return nil, fmt.Errorf("sqlite: scan lifecycle release: %w", err)
+			return fmt.Errorf("sqlite: scan lifecycle release batch row: %w", err)
 		}
-		row.ReleaseDate = parseSQLiteDate(releaseDate)
-		row.IsLTS = isLTS != 0
-		row.LTSFrom = parseSQLiteDate(ltsFrom)
-		row.IsEOAS = isEOAS != 0
-		row.EOASFrom = parseSQLiteDate(eoasFrom)
-		row.IsEOL = isEOL != 0
-		row.EOLFrom = parseSQLiteDate(eolFrom)
-		row.IsDiscontinued = isDiscontinued != 0
-		row.DiscontinuedFrom = parseSQLiteDate(discontinuedFrom)
+		row.Release.ReleaseDate = parseSQLiteDate(releaseDate)
+		row.Release.IsLTS = isLTS != 0
+		row.Release.LTSFrom = parseSQLiteDate(ltsFrom)
+		row.Release.IsEOAS = isEOAS != 0
+		row.Release.EOASFrom = parseSQLiteDate(eoasFrom)
+		row.Release.IsEOL = isEOL != 0
+		row.Release.EOLFrom = parseSQLiteDate(eolFrom)
+		row.Release.IsDiscontinued = isDiscontinued != 0
+		row.Release.DiscontinuedFrom = parseSQLiteDate(discontinuedFrom)
 		if isEOES.Valid {
 			value := isEOES.Int64 != 0
-			row.IsEOES = &value
+			row.Release.IsEOES = &value
 		}
-		row.EOESFrom = parseSQLiteDate(eoesFrom)
-		row.IsMaintained = maintained != 0
-		out = append(out, row)
+		row.Release.EOESFrom = parseSQLiteDate(eoesFrom)
+		row.Release.IsMaintained = maintained != 0
+
+		key := localPackageKey{ecosystem: row.Ecosystem, name: row.PackageName}
+		rowsByPackage[key] = append(rowsByPackage[key], row)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("sqlite: iterate lifecycle releases: %w", err)
+		return fmt.Errorf("sqlite: iterate lifecycle release batch rows: %w", err)
 	}
-	return out, nil
+	return nil
+}
+
+func lifecyclePackageQuery(pkg db.PackageQuery) lifecyclepolicy.PackageQuery {
+	return lifecyclepolicy.PackageQuery{
+		Ecosystem: pkg.Ecosystem,
+		Name:      pkg.Name,
+		Version:   pkg.Version,
+	}
+}
+
+func localPackageChunkContext(chunk localPackagePredicateChunk) string {
+	total := len(chunk.args) / 2
+	if total == 0 {
+		return "requested packages"
+	}
+	parts := make([]string, 0, min(total, 3))
+	for i := 0; i+1 < len(chunk.args) && len(parts) < 3; i += 2 {
+		ecosystem, _ := chunk.args[i].(string)
+		name, _ := chunk.args[i+1].(string)
+		if ecosystem == "" && name == "" {
+			continue
+		}
+		parts = append(parts, ecosystem+"/"+name)
+	}
+	if len(parts) == 0 {
+		return "requested packages"
+	}
+	if total > len(parts) {
+		parts = append(parts, fmt.Sprintf("+%d more", total-len(parts)))
+	}
+	return strings.Join(parts, ", ")
 }
 
 func normalizeLifecyclePackageQuery(pkg db.PackageQuery) (db.PackageQuery, bool) {
@@ -127,102 +173,6 @@ func normalizeLifecyclePackageQuery(pkg db.PackageQuery) (db.PackageQuery, bool)
 		Name:      name,
 		Version:   strings.TrimSpace(pkg.Version),
 	}, true
-}
-
-type lifecycleReleaseRow struct {
-	ID               string
-	Ecosystem        string
-	PackageName      string
-	ProductSlug      string
-	ProductLabel     string
-	Cycle            string
-	Latest           string
-	ReleaseDate      *time.Time
-	IsLTS            bool
-	LTSFrom          *time.Time
-	IsEOAS           bool
-	EOASFrom         *time.Time
-	IsEOL            bool
-	EOLFrom          *time.Time
-	IsDiscontinued   bool
-	DiscontinuedFrom *time.Time
-	IsEOES           *bool
-	EOESFrom         *time.Time
-	IsMaintained     bool
-}
-
-func longestLifecycleMatches(rows []lifecycleReleaseRow, version string) []lifecycleReleaseRow {
-	if strings.TrimSpace(version) == "" {
-		return nil
-	}
-	best := make(map[string]lifecycleReleaseRow)
-	for _, row := range rows {
-		if !lifecycleCycleMatches(version, row.Cycle) {
-			continue
-		}
-		current, ok := best[row.ProductSlug]
-		if !ok || len(row.Cycle) > len(current.Cycle) {
-			best[row.ProductSlug] = row
-		}
-	}
-	matches := make([]lifecycleReleaseRow, 0, len(best))
-	for _, row := range best {
-		matches = append(matches, row)
-	}
-	return matches
-}
-
-func lifecycleCycleMatches(version, cycle string) bool {
-	version = strings.TrimSpace(version)
-	cycle = strings.TrimSpace(cycle)
-	if version == "" || cycle == "" {
-		return false
-	}
-	return version == cycle || strings.HasPrefix(version, cycle+".")
-}
-
-func lifecycleFindingForRelease(pkg db.PackageQuery, row lifecycleReleaseRow, now time.Time) (domain.Finding, bool) {
-	if row.IsEOL || dateOnOrBefore(row.EOLFrom, now) {
-		return buildLifecycleFinding(pkg, row, domain.FindingTypeSupplyChainRisk, domain.SeverityCritical, "eol", "is end-of-life"), true
-	}
-	if dateWithin(row.EOLFrom, now, 90*24*time.Hour) {
-		return buildLifecycleFinding(pkg, row, domain.FindingTypeLifecycle, domain.SeverityMedium, "eol_soon", "reaches end-of-life soon"), true
-	}
-	if row.IsEOAS || dateOnOrBefore(row.EOASFrom, now) {
-		return buildLifecycleFinding(pkg, row, domain.FindingTypeLifecycle, domain.SeverityLow, "security_support_only", "is in security support only"), true
-	}
-	return domain.Finding{}, false
-}
-
-func buildLifecycleFinding(pkg db.PackageQuery, row lifecycleReleaseRow, typ domain.FindingType, severity domain.Severity, riskType, phrase string) domain.Finding {
-	productName := strings.TrimSpace(row.ProductLabel)
-	if productName == "" {
-		productName = row.ProductSlug
-	}
-	url := fmt.Sprintf("https://endoflife.date/%s", row.ProductSlug)
-	return domain.Finding{
-		Name:       pkg.Name,
-		Version:    pkg.Version,
-		Ecosystem:  domain.Ecosystem(pkg.Ecosystem),
-		Type:       typ,
-		Severity:   severity,
-		AdvisoryID: fmt.Sprintf("endoflife:%s:%s:%s", row.ProductSlug, row.Cycle, riskType),
-		Title:      fmt.Sprintf("%s %s %s", productName, row.Cycle, phrase),
-		URL:        url,
-		Resources: []domain.ResourceLink{
-			{Label: lifecycleSource, URL: url},
-		},
-		RiskType: riskType,
-		Source:   lifecycleSource,
-	}
-}
-
-func dateOnOrBefore(date *time.Time, now time.Time) bool {
-	return date != nil && !date.After(now)
-}
-
-func dateWithin(date *time.Time, now time.Time, window time.Duration) bool {
-	return date != nil && date.After(now) && !date.After(now.Add(window))
 }
 
 func parseSQLiteDate(value sql.NullString) *time.Time {

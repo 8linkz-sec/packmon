@@ -13,6 +13,7 @@ type ScanEntry struct {
 	ID                int       `json:"id,omitempty"`
 	RepoName          string    `json:"repo_name,omitempty"`
 	Branch            string    `json:"branch,omitempty"`
+	Commit            string    `json:"commit,omitempty"`
 	ScannedAt         time.Time `json:"scanned_at"`
 	PackagesCount     int       `json:"packages_count"`
 	FindingsCount     int       `json:"findings_count"`
@@ -32,12 +33,13 @@ func (s *Store) InsertScan(ctx context.Context, entry ScanEntry) error {
 	}
 
 	const insert = `
-		INSERT INTO scan_history(repo_name, branch, scanned_at, packages_count, findings_count, finding_ids, finding_severities)
-		VALUES(?, ?, ?, ?, ?, ?, ?)`
+		INSERT INTO scan_history(repo_name, branch, "commit", scanned_at, packages_count, findings_count, finding_ids, finding_severities)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?)`
 
 	_, err = s.db.ExecContext(ctx, insert,
 		entry.RepoName,
 		entry.Branch,
+		entry.Commit,
 		entry.ScannedAt.UTC().Format(time.RFC3339),
 		entry.PackagesCount,
 		entry.FindingsCount,
@@ -106,7 +108,9 @@ func (s *Store) EnforceRetention(ctx context.Context, maxPerRepo int) error {
 	if err != nil {
 		return fmt.Errorf("sqlite: list repos for retention: %w", err)
 	}
-	defer closeSilently(rows)
+	defer func() {
+		_ = rows.Close()
+	}()
 
 	var repos []string
 	for rows.Next() {
@@ -141,9 +145,10 @@ func (s *Store) EnforceRetention(ctx context.Context, maxPerRepo int) error {
 
 // GetRecentScans returns the most recent scan entries, newest first. If
 // repo is non-empty, only entries for that repository are returned.
-// limit <= 0 defaults to 50.
+// limit == 0 defaults to 50. limit < 0 returns all rows.
 func (s *Store) GetRecentScans(ctx context.Context, repo string, limit int) ([]ScanEntry, error) {
-	if limit <= 0 {
+	noLimit := limit < 0
+	if limit == 0 {
 		limit = 50
 	}
 
@@ -152,26 +157,30 @@ func (s *Store) GetRecentScans(ctx context.Context, repo string, limit int) ([]S
 
 	if repo != "" {
 		query = `
-			SELECT id, repo_name, branch, scanned_at, packages_count, findings_count, finding_ids, finding_severities
+			SELECT id, repo_name, branch, "commit", scanned_at, packages_count, findings_count, finding_ids, finding_severities
 			FROM scan_history
 			WHERE repo_name = ?
-			ORDER BY scanned_at DESC
-			LIMIT ?`
-		args = []interface{}{repo, limit}
+			ORDER BY scanned_at DESC`
+		args = []interface{}{repo}
 	} else {
 		query = `
-			SELECT id, repo_name, branch, scanned_at, packages_count, findings_count, finding_ids, finding_severities
+			SELECT id, repo_name, branch, "commit", scanned_at, packages_count, findings_count, finding_ids, finding_severities
 			FROM scan_history
-			ORDER BY scanned_at DESC
+			ORDER BY scanned_at DESC`
+	}
+	if !noLimit {
+		query += `
 			LIMIT ?`
-		args = []interface{}{limit}
+		args = append(args, limit)
 	}
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: query scan history: %w", err)
 	}
-	defer closeSilently(rows)
+	defer func() {
+		_ = rows.Close()
+	}()
 
 	var entries []ScanEntry
 	for rows.Next() {
@@ -179,13 +188,14 @@ func (s *Store) GetRecentScans(ctx context.Context, repo string, limit int) ([]S
 			entry        ScanEntry
 			repoName     *string
 			branch       *string
+			commit       *string
 			scannedAtStr string
 			idsJSON      *string
 			sevsJSON     *string
 		)
 
 		if err := rows.Scan(
-			&entry.ID, &repoName, &branch, &scannedAtStr,
+			&entry.ID, &repoName, &branch, &commit, &scannedAtStr,
 			&entry.PackagesCount, &entry.FindingsCount,
 			&idsJSON, &sevsJSON,
 		); err != nil {
@@ -198,14 +208,25 @@ func (s *Store) GetRecentScans(ctx context.Context, repo string, limit int) ([]S
 		if branch != nil {
 			entry.Branch = *branch
 		}
+		if commit != nil {
+			entry.Commit = *commit
+		}
 
-		entry.ScannedAt, _ = time.Parse(time.RFC3339, scannedAtStr)
+		parsedAt, err := time.Parse(time.RFC3339, scannedAtStr)
+		if err != nil {
+			return nil, fmt.Errorf("sqlite: decode scan history row %d scanned_at: %w", entry.ID, err)
+		}
+		entry.ScannedAt = parsedAt
 
 		if idsJSON != nil && *idsJSON != "" {
-			_ = json.Unmarshal([]byte(*idsJSON), &entry.FindingIDs)
+			if err := json.Unmarshal([]byte(*idsJSON), &entry.FindingIDs); err != nil {
+				return nil, fmt.Errorf("sqlite: decode scan history row %d finding_ids: %w", entry.ID, err)
+			}
 		}
 		if sevsJSON != nil && *sevsJSON != "" {
-			_ = json.Unmarshal([]byte(*sevsJSON), &entry.FindingSeverities)
+			if err := json.Unmarshal([]byte(*sevsJSON), &entry.FindingSeverities); err != nil {
+				return nil, fmt.Errorf("sqlite: decode scan history row %d finding_severities: %w", entry.ID, err)
+			}
 		}
 
 		entries = append(entries, entry)

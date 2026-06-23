@@ -6,8 +6,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestFilterDetectionsByEcosystem(t *testing.T) {
@@ -88,6 +90,58 @@ func TestEnsureToolInstallFailureBranches(t *testing.T) {
 	}
 }
 
+func TestEnsureToolRejectsMismatchedPathVersion(t *testing.T) {
+	gen := &fakeGenerator{
+		ecosystem: "npm",
+		tool:      "cyclonedx-npm",
+		install: InstallSpec{
+			Package:         "@cyclonedx/cyclonedx-npm",
+			ExpectedVersion: "4.2.1",
+			VersionArgs:     []string{"--version"},
+		},
+	}
+	var versionRun RunOptions
+	err := ensureTool(context.Background(), Config{
+		LookPath: func(name string) (string, error) {
+			return filepath.Join("tools", name), nil
+		},
+		Runner: func(_ context.Context, opts RunOptions) ([]byte, error) {
+			versionRun = opts
+			return []byte("cyclonedx-npm 9.9.9\n"), nil
+		},
+		Timeout: time.Second,
+	}, gen)
+	if err == nil || !strings.Contains(err.Error(), "4.2.1") || !strings.Contains(err.Error(), "9.9.9") {
+		t.Fatalf("ensureTool err = %v, want version mismatch", err)
+	}
+	if versionRun.Name == "" || strings.Join(versionRun.Args, " ") != "--version" {
+		t.Fatalf("version check run = %+v", versionRun)
+	}
+}
+
+func TestBoundedCommandOutputTruncates(t *testing.T) {
+	got := boundedCommandOutput([]byte(strings.Repeat("x", maxCommandOutputBytes+1024)))
+	if len(got) > maxCommandOutputBytes+len(commandOutputTruncatedMarker) {
+		t.Fatalf("bounded output length = %d, cap = %d", len(got), maxCommandOutputBytes)
+	}
+	if !strings.Contains(string(got), commandOutputTruncatedMarker) {
+		t.Fatalf("bounded output missing truncation marker")
+	}
+}
+
+func TestCommandOutputSummaryRedactsSecretsControlsAndPaths(t *testing.T) {
+	raw := []byte("Authorization: Bearer abcdefghijklmnop\r\napi_key=secret-value\nC:\\Users\\alice\\repo\\package.json\x1b[31m")
+	got := commandOutputSummary(raw)
+	for _, forbidden := range []string{"abcdefghijklmnop", "secret-value", "C:\\Users\\alice\\repo", "\x1b"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("commandOutputSummary leaked %q in %q", forbidden, got)
+		}
+	}
+	if !strings.Contains(got, "[redacted]") && !strings.Contains(got, "(redacted-path)") {
+		t.Fatalf("commandOutputSummary did not preserve redaction markers: %q", got)
+	}
+}
+
 func TestDefaultRunnerRunsCommand(t *testing.T) {
 	if _, err := exec.LookPath("go"); err != nil {
 		t.Skip("go command not on PATH")
@@ -139,6 +193,50 @@ func TestRunKeepModeFailureRemovesCreatedSBOM(t *testing.T) {
 	}
 	if len(leftovers) != 0 {
 		t.Fatalf("created SBOM should be removed on failure, leftovers = %v", leftovers)
+	}
+}
+
+func TestRunReportsKeepModeCleanupFailure(t *testing.T) {
+	root := t.TempDir()
+	keep := t.TempDir()
+	writeFile(t, root, "package.json", `{"dependencies":{"left-pad":"1.3.0"}}`)
+	gen := &cleanupFailureGenerator{fakeGenerator: fakeGenerator{ecosystem: "npm", tool: "cyclonedx-npm"}}
+
+	_, err := Run(context.Background(), Config{
+		Target:      root,
+		KeepSBOMDir: keep,
+		Registry:    map[string]Generator{"npm": gen},
+		LookPath:    func(string) (string, error) { return "found", nil },
+	})
+	if err == nil || !strings.Contains(err.Error(), "generate boom") || !strings.Contains(err.Error(), "cleanup") {
+		t.Fatalf("Run err = %v, want generation and cleanup failures", err)
+	}
+}
+
+func TestRunNormalizesGeneratedSBOMFileMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX file modes are not enforced on Windows")
+	}
+	root := t.TempDir()
+	keep := t.TempDir()
+	writeFile(t, root, "package.json", `{"dependencies":{"left-pad":"1.3.0"}}`)
+	gen := &looseModeGenerator{fakeGenerator: fakeGenerator{ecosystem: "npm", tool: "cyclonedx-npm"}}
+
+	result, err := Run(context.Background(), Config{
+		Target:      root,
+		KeepSBOMDir: keep,
+		Registry:    map[string]Generator{"npm": gen},
+		LookPath:    func(string) (string, error) { return "found", nil },
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	info, err := os.Stat(result.SBOMPaths[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("generated SBOM mode = %v, want 0600", got)
 	}
 }
 
@@ -350,7 +448,7 @@ func TestDetectorHelperEdgeBranches(t *testing.T) {
 		t.Fatalf("nested dir should exceed maxDepth=1")
 	}
 	writeFile(t, root, "bad-pyproject.toml", "[tool.poetry\n")
-	if isPoetryProject(filepath.Join(root, "bad-pyproject.toml")) {
+	if ok, err := isPoetryProject(filepath.Join(root, "bad-pyproject.toml")); err != nil || ok {
 		t.Fatalf("malformed pyproject should not classify as poetry")
 	}
 	writeFile(t, root, "bad-workspaces.json", `{"workspaces": 123}`)
@@ -358,7 +456,7 @@ func TestDetectorHelperEdgeBranches(t *testing.T) {
 		t.Fatalf("bad workspaces globs = %v, err = %v", globs, err)
 	}
 	writeFile(t, root, "pom.xml", `<project><modules><module>.</module></modules></project>`)
-	if children := mavenModulesWalk(root, map[string]struct{}{}); len(children) != 1 || filepath.Clean(children[0]) != filepath.Clean(root) {
+	if children, err := mavenModulesWalk(root, map[string]struct{}{}); err != nil || len(children) != 1 || filepath.Clean(children[0]) != filepath.Clean(root) {
 		t.Fatalf("cyclic module children = %v", children)
 	}
 }

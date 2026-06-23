@@ -27,19 +27,19 @@ not drift -- update both in the same change.
 - Every admin write handler must be: auth-checked (`requireAdmin` +
   `RequireAdminSession`), CSRF-validated, form-size-capped, and audit-logged.
 
-## Current open landmines (see Audit.md)
+## Current Guardrails
 
-> Status (2026-05-29): the items in this section were addressed across the
-> Audit.md "Fix-Runde" passes. Audit.md is authoritative; project-wide only the
-> external GitLab-runner test remains open. Keep the notes below as guardrails
-> so the fixes are not regressed.
+These notes are guardrails for behavior that has regressed before. Keep them in
+sync with `DESIGN.md`, `SECURITY.md`, and the OpenAPI contract when the behavior
+intentionally changes.
 
-- **M2:** block threshold and rate limits are captured once at construction;
-  saved system settings do NOT take effect until restart. If you make them
-  hot-reloadable, do it atomically and update the admin UI message.
-- **M4:** advisory create/edit does not validate `severity`/`ecosystem`/
-  `finding_type` server-side. Add allow-list validation; an invalid severity
-  ranks 0 and silently never blocks.
+- **M2:** saved system settings apply immediately through the runtime config for
+  block threshold and rate limits, and are persisted for startup reload. Keep
+  the in-memory update atomic with the database write, and keep the admin UI
+  message aligned with that behavior.
+- **M4:** manual advisory create/update must keep server-side allow-list
+  validation for `finding_type`, `severity`, `ecosystem`, bounded field lengths,
+  and the `manual:` ID namespace. Do not rely on HTML form controls alone.
 - **L10:** the handler correlation-ID fallback accepts arbitrary header values
   while the middleware enforces UUIDv4. Prefer the middleware context value.
 

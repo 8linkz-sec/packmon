@@ -26,10 +26,12 @@ type GenerateOptions struct {
 
 // InstallSpec describes how to obtain a missing generator.
 type InstallSpec struct {
-	Package        string
-	Source         string
-	Args           []string
-	CanAutoInstall bool
+	Package         string
+	Source          string
+	Args            []string
+	ExpectedVersion string
+	VersionArgs     []string
+	CanAutoInstall  bool
 }
 
 // Generator builds a CycloneDX SBOM for one ecosystem.

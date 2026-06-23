@@ -1,17 +1,7 @@
 {{define "title"}}Packmon - Admin Feeds{{end}}
 
 {{define "admin-feed-flash"}}
-  {{if .Message}}
-  <div class="bg-green-50 border border-green-200 text-green-800 rounded-md px-4 py-3 text-sm">
-    {{.Message}}
-  </div>
-  {{else if .Error}}
-  <div class="bg-red-50 border border-red-200 text-red-700 rounded-md px-4 py-3 text-sm">
-    {{.Error}}
-  </div>
-  {{else}}
-  <div></div>
-  {{end}}
+  {{template "admin-flash-alerts" .}}
 {{end}}
 
 {{define "admin-feed-runtime"}}
@@ -19,8 +9,12 @@
     <div class="px-5 py-3 border-b border-gray-200">
       <h2 class="text-lg font-semibold">Current Runtime</h2>
     </div>
-    {{if .Feeds}}
-    <div class="overflow-x-auto">
+    {{if .FeedStatusLoadError}}
+    <div class="px-5 py-4 border-b border-red-100">
+      {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .FeedStatusLoadError}}
+    </div>
+    {{else if .Feeds}}
+    <div class="overflow-x-auto focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2" tabindex="0" role="region" aria-label="Admin feed runtime table" data-preserve-scroll="admin-feed-runtime-table">
       <table class="min-w-full text-sm">
         <thead>
           <tr class="text-center text-gray-500 border-b bg-gray-50">
@@ -51,7 +45,7 @@
               {{if .ConfigEnabled}}
                 <span class="inline-block bg-green-50 text-green-700 px-2 py-0.5 rounded">enabled</span>
               {{else}}
-                <span class="inline-block bg-gray-100 text-gray-500 px-2 py-0.5 rounded">disabled</span>
+                <span class="inline-block bg-gray-100 text-gray-700 px-2 py-0.5 rounded">disabled</span>
               {{end}}
             </td>
             <td class="px-5 py-2 text-xs text-gray-600">{{.SyncIntervalStr}}</td>
@@ -61,39 +55,42 @@
               {{else if eq .APIKeyState "missing"}}
                 <span class="inline-block bg-yellow-100 text-yellow-800 px-2 py-0.5 rounded">missing</span>
               {{else if eq .APIKeyState "not configured"}}
-                <span class="inline-block bg-gray-100 text-gray-500 px-2 py-0.5 rounded">not configured</span>
+                <span class="inline-block bg-gray-100 text-gray-700 px-2 py-0.5 rounded">not configured</span>
               {{else}}
-                <span class="text-gray-400">not required</span>
+                <span class="text-gray-600">not required</span>
               {{end}}
             </td>
             <td class="px-5 py-2 text-xs">
               {{if .LastSyncStatus}}
                 <span class="inline-block bg-gray-100 text-gray-700 px-2 py-0.5 rounded">{{.LastSyncStatus}}</span>
               {{else}}
-                <span class="text-gray-400">never</span>
+                <span class="text-gray-600">never</span>
               {{end}}
             </td>
             <td class="px-5 py-2 text-gray-500">
               {{if .LastSyncAt}}
-                <span title="{{formatTime .LastSyncAtTime}}">{{formatTimeAgo .LastSyncAtTime}}</span>
+                <time datetime="{{formatTimeISO .LastSyncAtTime}}" aria-label="{{formatTime .LastSyncAtTime}}">{{formatTimeAgo .LastSyncAtTime}}</time>
               {{else}}
-                <span class="text-gray-400">never</span>
+                <span class="text-gray-600">never</span>
               {{end}}
             </td>
             <td class="px-5 py-2 text-xs text-gray-500">
               {{if .DurationStr}}
                 {{.DurationStr}}
               {{else}}
-                <span class="text-gray-400">-</span>
+                <span class="text-gray-600">-</span>
               {{end}}
             </td>
             <td class="px-5 py-2 text-right">{{.EntriesSynced}}</td>
             <td class="px-5 py-2 text-right">{{.EntriesTotal}}</td>
             <td class="px-5 py-2 text-xs text-center">
               {{if .LastError}}
-                <span class="text-red-600" title="{{.LastError}}">{{truncate .LastError 40}}</span>
+                <details class="text-left text-red-700">
+                  <summary aria-label="Show full feed error for {{.FeedName}}" class="cursor-pointer text-red-600">{{truncate .LastError 40}}</summary>
+                  <pre class="mt-2 whitespace-pre-wrap break-words rounded bg-red-50 p-2 text-xs text-red-800">{{.LastError}}</pre>
+                </details>
               {{else}}
-                <span class="text-gray-400">-</span>
+                <span class="text-gray-600">-</span>
               {{end}}
             </td>
           </tr>
@@ -102,7 +99,7 @@
       </table>
     </div>
     {{else}}
-    <div class="px-5 py-10 text-center text-gray-400">
+    <div class="px-5 py-10 text-center text-gray-600">
       No feeds configured. Check server environment variables.
     </div>
     {{end}}
@@ -112,66 +109,68 @@
 {{define "content"}}
 <div class="space-y-6">
 
-  <div class="flex items-center justify-between">
-    <h1 class="text-2xl font-bold">Feed Configuration</h1>
-    <form action="/admin/logout" method="POST" class="inline">
-      <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
-      <button type="submit" class="text-sm text-gray-500 hover:text-gray-700 underline">Logout</button>
-    </form>
-  </div>
+  {{template "admin-page-header" dict "Title" "Feed Configuration" "Section" "feeds" "CSRFToken" .CSRFToken}}
 
-  <!-- Admin nav tabs -->
-  <div class="border-b border-gray-200">
-    <nav class="flex space-x-6 text-sm">
-      <a href="/admin/" class="text-gray-500 hover:text-gray-700 pb-2 px-1">Overview</a>
-      <a href="/admin/feeds" class="border-b-2 border-blue-500 text-blue-600 pb-2 px-1 font-medium">Feeds</a>
-      <a href="/admin/queue" class="text-gray-500 hover:text-gray-700 pb-2 px-1">Queue</a>
-      <a href="/admin/keys" class="text-gray-500 hover:text-gray-700 pb-2 px-1">API Keys</a>
-      <a href="/admin/audit" class="text-gray-500 hover:text-gray-700 pb-2 px-1">Audit Log</a>
-      <a href="/admin/advisories" class="text-gray-500 hover:text-gray-700 pb-2 px-1">Advisories</a>
-      <a href="/admin/settings" class="text-gray-500 hover:text-gray-700 pb-2 px-1">Settings</a>
-    </nav>
-  </div>
+  {{template "admin-bootstrap-warning" .}}
 
-  <div id="admin-feed-flash">
+  <div id="admin-feed-flash" aria-live="polite" aria-atomic="true">
     {{template "admin-feed-flash" .}}
   </div>
 
-  <div class="bg-blue-50 border border-blue-200 rounded-md p-4 text-sm text-blue-900">
-    The table below shows the current runtime state. Saved configuration changes are stored in the database and applied immediately.
-  </div>
+  {{template "admin-alert-start" dict "Variant" "info" "Icon" true}}
+  <p>The table below shows the current runtime state. Saved configuration changes are stored in the database and applied immediately.</p>
+  {{template "admin-alert-end" .}}
 
   {{if and .UnknownSeverityCount (gt .UnknownSeverityCount 0)}}
-  <div class="bg-amber-50 border border-amber-200 rounded-md p-4 text-sm text-amber-900">
+  {{template "admin-alert-start" dict "Variant" "warning" "Icon" true}}
+  <p>
     <span class="font-medium">{{.UnknownSeverityCount}} vulnerabilities have unknown severity.</span>
     The NVD feed syncer resolves CVSS scores automatically during each sync cycle.
-    Configure an NVD API key (<code class="bg-amber-100 px-1 rounded">PACKMON_NVD_API_KEY</code>) for faster resolution (50 req/30s instead of 5 req/30s).
-  </div>
+    Configure an NVD API key (<code class="bg-yellow-100 px-1 rounded">PACKMON_NVD_API_KEY</code>) for faster resolution (50 req/30s instead of 5 req/30s).
+  </p>
+  {{template "admin-alert-end" .}}
   {{end}}
 
-  <!-- Runtime status table -->
   <div
-    id="admin-feed-runtime"
-    hx-get="/admin/feeds?partial=runtime"
-    hx-trigger="load, every 10s, feed-runtime-refresh from:body"
-    hx-swap="innerHTML"
+    class="flex flex-wrap items-center justify-end gap-3 text-sm"
+    data-auto-refresh-control
+    data-auto-refresh-event="admin-feed-runtime-refresh"
+    data-auto-refresh-interval-ms="10000"
+    data-auto-refresh-running-label="Auto-refresh on (10s)"
+    data-auto-refresh-paused-label="Auto-refresh paused"
   >
+    <span id="admin-feed-runtime-refresh-state" data-auto-refresh-status role="status" aria-live="polite" aria-atomic="true" class="text-gray-500">Auto-refresh on (10s)</span>
+    <button
+      type="button"
+      data-auto-refresh-toggle
+      aria-controls="admin-feed-runtime"
+      aria-pressed="false"
+      class="border border-gray-500 bg-white rounded-md px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
+    >Pause auto-refresh</button>
+  </div>
+
+  <!-- Runtime status table -->
+  <div id="admin-feed-runtime" aria-live="polite" aria-busy="false" hx-get="/admin/feeds?partial=runtime" hx-trigger="admin-feed-runtime-refresh from:body, feed-runtime-refresh from:body" hx-swap="innerHTML" data-preserve-scroll-container>
     {{template "admin-feed-runtime" .}}
   </div>
 
-  <div class="bg-yellow-50 border border-yellow-200 rounded-md p-4 text-sm text-yellow-800">
-    Runtime values are derived from the currently running process. Feed sync intervals fall back to the global default of {{.DefaultSyncInterval}} when no per-feed override is configured.
-  </div>
+  {{template "admin-alert-start" dict "Variant" "warning" "Icon" true}}
+  <p>Runtime values are derived from the currently running process. Feed sync intervals fall back to the global default of {{.DefaultSyncInterval}} when no per-feed override is configured.</p>
+  {{template "admin-alert-end" .}}
 
+  {{if not .BootstrapWarning}}
   <div class="bg-white rounded-lg shadow border border-gray-200">
     <div class="px-5 py-3 border-b border-gray-200">
       <h2 class="text-lg font-semibold">Saved Configuration</h2>
       <p class="mt-1 text-sm text-gray-500">These values are persisted in the database and applied to the running server when saved.</p>
     </div>
     <div class="p-5 space-y-4">
+      {{if .FeedConfigLoadError}}
+      {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .FeedConfigLoadError}}
+      {{else}}
       {{range .EditableFeeds}}
-      <div class="border border-gray-200 rounded-lg p-4" data-feed-key="{{.FeedKey}}">
-        <div class="space-y-4">
+      <details class="border border-gray-200 rounded-lg" data-feed-key="{{.FeedKey}}">
+        <summary class="flex cursor-pointer list-none flex-col gap-2 p-4 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 sm:flex-row sm:items-start sm:justify-between">
           <div class="space-y-2">
             <div>
               <div class="font-semibold">{{.FeedName}}</div>
@@ -195,108 +194,137 @@
               Runtime: {{.RuntimeMode}}, {{if .RuntimeEnabled}}enabled{{else}}disabled{{end}}, {{if .RuntimeSupportsInterval}}self-sync {{.RuntimeSyncInterval}}{{else}}queue-driven{{end}}, api key {{if .RuntimeAPIKeyConfigured}}configured{{else}}not configured{{end}}.
             </div>
           </div>
+          <span class="text-sm font-medium text-blue-700">Edit</span>
+        </summary>
 
+        <div class="border-t border-gray-200 p-4">
+          <div class="space-y-4">
           <form action="/admin/feeds/save" method="POST" class="space-y-4">
             <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
             <input type="hidden" name="feed_name" value="{{.FeedKey}}">
+            <fieldset class="space-y-4">
+              <legend class="sr-only">{{.FeedName}} feed settings</legend>
 
-            <div class="grid gap-4 md:grid-cols-2 xl:grid-cols-4 xl:items-start">
-              <label class="flex items-center gap-2 pt-8 text-sm text-gray-700">
-                <input type="checkbox" name="enabled" {{if .Enabled}}checked{{end}} class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
-                enabled
-              </label>
-
-              <label class="text-sm text-gray-700">
-                <span class="block mb-1">Mode</span>
-                <select name="mode" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm bg-white">
-                  <option value="self" {{if eq .Mode "self"}}selected{{end}}>self</option>
-                  {{if .SupportsExternalMode}}
-                  <option value="external" {{if eq .Mode "external"}}selected{{end}}>external</option>
-                  {{end}}
-                </select>
-              </label>
-
-              <label class="text-sm text-gray-700">
-                <span class="block mb-1">{{.SyncIntervalLabel}}</span>
-                {{if .SupportsSyncInterval}}
-                  <input
-                    type="text"
-                    name="sync_interval"
-                    value="{{.SyncInterval}}"
-                    placeholder="blank = global default"
-                    class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm"
-                  >
-                {{else}}
-                  <input
-                    type="text"
-                    value="queue-driven"
-                    disabled
-                    class="w-full border border-gray-200 rounded-md px-3 py-2 text-sm bg-gray-50 text-gray-500"
-                  >
-                {{end}}
-                <span class="mt-1 block text-xs text-gray-500">{{.SyncIntervalHelp}}</span>
-              </label>
-
-              {{if .RequiresAPIKey}}
-              <div class="text-sm text-gray-700">
-                <span class="block mb-1">API Key</span>
-                <input
-                  type="password"
-                  name="api_key"
-                  placeholder="{{if .APIKeyConfigured}}leave blank to keep stored key{{else}}paste new key{{end}}"
-                  class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm"
-                >
-                <label class="mt-2 flex items-center gap-2 text-xs text-gray-500">
-                  <input type="checkbox" name="clear_api_key" class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
-                  clear stored key
+              <div class="grid gap-4 md:grid-cols-2 xl:grid-cols-4 xl:items-start">
+                <label class="flex items-center gap-2 pt-8 text-sm text-gray-700">
+                  <input type="checkbox" name="enabled" {{if .Enabled}}checked{{end}} class="rounded border-gray-500 text-blue-600 focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">
+                  enabled
                 </label>
-              </div>
-              {{end}}
-            </div>
 
-            <div class="flex flex-wrap items-center gap-2">
-              <button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-700">
-                Save
-              </button>
-              {{if .CanSyncNow}}
-              <button
-                type="submit"
-                formaction="/admin/feeds/sync"
-                formmethod="POST"
-                hx-post="/admin/feeds/sync"
-                hx-target="#admin-feed-flash"
-                hx-swap="innerHTML"
-                hx-disabled-elt="this"
-                hx-on::before-request="this.dataset.originalText = this.textContent; this.textContent = 'Syncing...'"
-                hx-on::after-request="if (event.detail.successful) { const btn = this; clearTimeout(btn._syncFlashTimer); btn.classList.remove('border-blue-300','text-blue-700','hover:bg-blue-50'); btn.classList.add('border-green-600','bg-green-600','text-white'); btn.textContent = 'Started'; btn._syncFlashTimer = setTimeout(() => { btn.classList.remove('border-green-600','bg-green-600','text-white'); btn.classList.add('border-blue-300','text-blue-700','hover:bg-blue-50'); btn.textContent = btn.dataset.originalText || 'Sync now'; }, 1200); } else { this.textContent = this.dataset.originalText || 'Sync now'; }"
-                hx-on::response-error="document.querySelector('#admin-feed-flash').innerHTML = event.detail.xhr.responseText; this.textContent = this.dataset.originalText || 'Sync now';"
-                class="border border-blue-300 text-blue-700 px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-50"
-              >
-                Sync now
-              </button>
-              {{end}}
-              <span class="text-xs text-gray-500">Sync now uses the current runtime settings.</span>
-            </div>
+                <label class="text-sm text-gray-700">
+                  <span class="block mb-1">Mode</span>
+                  <select name="mode" class="w-full border border-gray-500 rounded-md px-3 py-2 text-sm bg-white focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <option value="self" {{if eq .Mode "self"}}selected{{end}}>self</option>
+                    {{if .SupportsExternalMode}}
+                    <option value="external" {{if eq .Mode "external"}}selected{{end}}>external</option>
+                    {{end}}
+                  </select>
+                </label>
+
+                <label class="text-sm text-gray-700">
+                  <span class="block mb-1">{{.SyncIntervalLabel}}</span>
+                  {{if .SupportsSyncInterval}}
+                    <input
+                      type="text"
+                      name="sync_interval"
+                      value="{{.SyncInterval}}"
+                      placeholder="blank = global default"
+                      class="w-full border border-gray-500 rounded-md px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                  {{else}}
+                    <input
+                      type="text"
+                      value="queue-driven"
+                      disabled
+                      class="w-full border border-gray-200 rounded-md px-3 py-2 text-sm bg-gray-50 text-gray-500"
+                    >
+                  {{end}}
+                  <span class="mt-1 block text-xs text-gray-500">{{.SyncIntervalHelp}}</span>
+                </label>
+
+                {{if .SupportsAPIKey}}
+                <div class="text-sm text-gray-700">
+                  <label for="feed-{{.FeedKey}}-api-key" class="block mb-1">API Key</label>
+                  <input
+                    id="feed-{{.FeedKey}}-api-key"
+                    type="password"
+                    name="api_key"
+                    autocomplete="off"
+                    autocapitalize="none"
+                    spellcheck="false"
+                    aria-describedby="feed-{{.FeedKey}}-api-key-help"
+                    placeholder="{{if .APIKeyConfigured}}leave blank to keep stored key{{else}}paste new key{{end}}"
+                    class="w-full border border-gray-500 rounded-md px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                  <span id="feed-{{.FeedKey}}-api-key-help" class="mt-1 block text-xs text-gray-500">
+                    Blank keeps the effective key. Saving an environment-provided key stores it with this database override. Vendor API usage may be billed or rate limited by the provider.
+                  </span>
+                  <label class="mt-2 flex min-h-11 items-center gap-2 rounded-md px-2 py-2 text-sm text-gray-700 hover:bg-gray-50">
+                    <input type="checkbox" name="clear_api_key" aria-describedby="feed-{{.FeedKey}}-clear-key-help" class="h-4 w-4 rounded border-gray-500 text-blue-600 focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">
+                    clear stored key
+                  </label>
+                  <label class="mt-1 flex min-h-11 items-center gap-2 rounded-md px-2 py-2 text-sm text-red-700 hover:bg-red-50">
+                    <input type="checkbox" name="confirm_clear_api_key" class="h-4 w-4 rounded border-red-300 text-red-600 focus:ring-2 focus:ring-red-500 focus:ring-offset-2">
+                    confirm key removal
+                  </label>
+                  <span id="feed-{{.FeedKey}}-clear-key-help" class="sr-only">Clearing requires confirmation and removes the saved credential for this feed.</span>
+                </div>
+                {{end}}
+              </div>
+
+              <div class="flex flex-wrap items-center gap-2">
+                <button type="submit" aria-label="Save {{.FeedName}} feed settings" class="bg-blue-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">
+                  Save
+                </button>
+                {{if .CanSyncNow}}
+                <button
+                  type="submit"
+                  aria-label="Sync {{.FeedName}} now"
+                  formaction="/admin/feeds/sync"
+                  formmethod="POST"
+                  hx-post="/admin/feeds/sync"
+                  hx-target="#admin-feed-flash"
+                  hx-swap="innerHTML"
+                  hx-disabled-elt="this"
+                  data-feed-sync-now
+                  data-feed-sync-label="Sync now"
+                  data-feed-sync-busy-label="Syncing..."
+                  data-feed-sync-flash-target="#admin-feed-flash"
+                  class="border border-blue-300 text-blue-700 px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-50 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
+                >
+                  Sync now
+                </button>
+                {{end}}
+                <span class="text-xs text-gray-500">Sync now uses the current runtime settings.</span>
+              </div>
+            </fieldset>
           </form>
 
           {{if .OverrideActive}}
           <form action="/admin/feeds/reset" method="POST" class="flex justify-start">
             <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
             <input type="hidden" name="feed_name" value="{{.FeedKey}}">
-            <button type="submit" class="border border-gray-300 text-gray-700 px-4 py-2 rounded-md text-sm font-medium hover:bg-gray-50">
+            <label class="mr-3 flex items-center gap-2 text-xs text-red-700">
+              <input type="checkbox" name="confirm_reset" class="rounded border-red-300 text-red-600 focus:ring-2 focus:ring-red-500 focus:ring-offset-2">
+              confirm reset
+            </label>
+            <button type="submit" aria-label="Reset {{.FeedName}} feed settings" class="border border-gray-500 text-gray-700 px-4 py-2 rounded-md text-sm font-medium hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">
               Reset
             </button>
           </form>
           {{end}}
+          </div>
         </div>
-      </div>
+      </details>
+      {{end}}
       {{end}}
     </div>
   </div>
 
-  <div class="bg-yellow-50 border border-yellow-200 rounded-md p-4 text-sm text-yellow-800">
-    Saved feed settings override the built-in PACKMON_FEED_* defaults immediately and are reloaded on restart. Use Reset to remove the DB override and fall back to environment defaults again.
-  </div>
+  {{template "admin-alert-start" dict "Variant" "warning" "Icon" true}}
+  <p>Saved feed settings override the built-in PACKMON_FEED_* defaults immediately and are reloaded on restart. Use Reset to remove the DB override and fall back to environment defaults again.</p>
+  {{template "admin-alert-end" .}}
+  {{end}}
 
 </div>
 {{end}}

@@ -3,43 +3,17 @@
 {{define "content"}}
 <div class="space-y-6">
 
-  <div class="flex items-center justify-between">
-    <h1 class="text-2xl font-bold">Manual Advisories</h1>
-    <form action="/admin/logout" method="POST" class="inline">
-      <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
-      <button type="submit" class="text-sm text-gray-500 hover:text-gray-700 underline">Logout</button>
-    </form>
-  </div>
+  {{template "admin-page-header" dict "Title" "Manual Advisories" "Section" "advisories" "CSRFToken" .CSRFToken}}
 
-  <!-- Admin nav tabs -->
-  <div class="border-b border-gray-200">
-    <nav class="flex space-x-6 text-sm">
-      <a href="/admin/" class="text-gray-500 hover:text-gray-700 pb-2 px-1">Overview</a>
-      <a href="/admin/feeds" class="text-gray-500 hover:text-gray-700 pb-2 px-1">Feeds</a>
-      <a href="/admin/queue" class="text-gray-500 hover:text-gray-700 pb-2 px-1">Queue</a>
-      <a href="/admin/keys" class="text-gray-500 hover:text-gray-700 pb-2 px-1">API Keys</a>
-      <a href="/admin/audit" class="text-gray-500 hover:text-gray-700 pb-2 px-1">Audit Log</a>
-      <a href="/admin/advisories" class="border-b-2 border-blue-500 text-blue-600 pb-2 px-1 font-medium">Advisories</a>
-      <a href="/admin/settings" class="text-gray-500 hover:text-gray-700 pb-2 px-1">Settings</a>
-    </nav>
-  </div>
+  {{template "admin-bootstrap-warning" .}}
 
-  {{if .Message}}
-  <div class="bg-green-50 border border-green-200 text-green-800 rounded-md px-4 py-3 text-sm">
-    {{.Message}}
-  </div>
-  {{end}}
-
-  {{if .Error}}
-  <div class="bg-red-50 border border-red-200 text-red-700 rounded-md px-4 py-3 text-sm">
-    {{.Error}}
-  </div>
-  {{end}}
+  {{template "admin-flash-alerts" .}}
 
   <!-- Create new advisory -->
+  {{if not .BootstrapWarning}}
   <div class="bg-white rounded-lg shadow p-5 border border-gray-200">
     <h2 class="text-lg font-semibold mb-3">{{if .IsEditing}}Edit Manual Advisory{{else}}Create Manual Advisory{{end}}</h2>
-    <form action="/admin/advisories/create" method="POST" class="space-y-4">
+    <form action="/admin/advisories/create" method="POST" class="space-y-4" data-submit-lock data-submit-lock-label="Saving advisory">
       <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
       {{with .EditAdvisory}}
       <input type="hidden" name="id" value="{{.ID}}">
@@ -48,9 +22,9 @@
       <div>
         <label for="adv-finding-type" class="block text-sm font-medium text-gray-700 mb-1">Finding Type</label>
         <select name="finding_type" id="adv-finding-type" required
-          class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none">
-          <option value="vulnerability" {{with .EditAdvisory}}{{if eq .FindingType "vulnerability"}}selected{{end}}{{end}}>vulnerability</option>
-          <option value="malicious" {{if .IsEditing}}{{with .EditAdvisory}}{{if eq .FindingType "malicious"}}selected{{end}}{{end}}{{else}}selected{{end}}>malicious</option>
+          class="w-full border border-gray-500 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none">
+          <option value="vulnerability" {{if .IsEditing}}{{with .EditAdvisory}}{{if eq .FindingType "vulnerability"}}selected{{end}}{{end}}{{else}}selected{{end}}>vulnerability</option>
+          <option value="malicious" {{with .EditAdvisory}}{{if eq .FindingType "malicious"}}selected{{end}}{{end}}>malicious</option>
         </select>
       </div>
 
@@ -58,7 +32,7 @@
         <div>
           <label for="adv-ecosystem" class="block text-sm font-medium text-gray-700 mb-1">Ecosystem</label>
           <select name="ecosystem" id="adv-ecosystem" required
-            class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none">
+            class="w-full border border-gray-500 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none">
             <option value="">-- select --</option>
             <option value="npm" {{with .EditAdvisory}}{{if eq .Ecosystem "npm"}}selected{{end}}{{end}}>npm</option>
             <option value="pypi" {{with .EditAdvisory}}{{if eq .Ecosystem "pypi"}}selected{{end}}{{end}}>pypi</option>
@@ -79,94 +53,148 @@
         </div>
         <div>
           <label for="adv-name" class="block text-sm font-medium text-gray-700 mb-1">Package Name</label>
-          <input type="text" name="name" id="adv-name" required value="{{with .EditAdvisory}}{{.Name}}{{end}}"
-            class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none">
+          <input type="text" name="name" id="adv-name" required maxlength="256" dir="auto" value="{{with .EditAdvisory}}{{.Name}}{{end}}"
+            class="w-full border border-gray-500 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none">
         </div>
       </div>
 
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div>
-          <label for="adv-severity" class="block text-sm font-medium text-gray-700 mb-1">Severity</label>
+          <label for="adv-severity" class="block text-sm font-medium text-gray-700 mb-1">Severity Classification</label>
           <select name="severity" id="adv-severity" required
-            class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none">
+            class="w-full border border-gray-500 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none">
             <option value="CRITICAL" {{with .EditAdvisory}}{{if eq .Severity "CRITICAL"}}selected{{end}}{{end}}>CRITICAL</option>
             <option value="HIGH" {{with .EditAdvisory}}{{if eq .Severity "HIGH"}}selected{{end}}{{end}}>HIGH</option>
             <option value="MEDIUM" {{if .IsEditing}}{{with .EditAdvisory}}{{if eq .Severity "MEDIUM"}}selected{{end}}{{end}}{{else}}selected{{end}}>MEDIUM</option>
             <option value="LOW" {{with .EditAdvisory}}{{if eq .Severity "LOW"}}selected{{end}}{{end}}>LOW</option>
           </select>
         </div>
+        {{if .ShowRiskTypeControl}}
         <div>
           <label for="adv-risk-type" class="block text-sm font-medium text-gray-700 mb-1">Risk Type</label>
           <select name="risk_type" id="adv-risk-type"
-            class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none">
+            class="w-full border border-gray-500 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none">
             <option value="malware" {{if .IsEditing}}{{with .EditAdvisory}}{{if eq .RiskType "malware"}}selected{{end}}{{end}}{{else}}selected{{end}}>malware</option>
             <option value="typosquatting" {{with .EditAdvisory}}{{if eq .RiskType "typosquatting"}}selected{{end}}{{end}}>typosquatting</option>
             <option value="supply_chain" {{with .EditAdvisory}}{{if eq .RiskType "supply_chain"}}selected{{end}}{{end}}>supply_chain</option>
             <option value="other" {{with .EditAdvisory}}{{if eq .RiskType "other"}}selected{{end}}{{end}}>other</option>
           </select>
         </div>
+        {{end}}
       </div>
 
       <div>
         <label for="adv-summary" class="block text-sm font-medium text-gray-700 mb-1">Summary</label>
-        <input type="text" name="summary" id="adv-summary" required value="{{with .EditAdvisory}}{{.Summary}}{{end}}"
-          class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none">
+        <input type="text" name="summary" id="adv-summary" required maxlength="1000" dir="auto" value="{{with .EditAdvisory}}{{.Summary}}{{end}}"
+          class="w-full border border-gray-500 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none">
       </div>
 
-      <div class="bg-amber-50 border border-amber-200 text-amber-800 rounded-md px-3 py-2 text-sm">
-        Vulnerability advisories created here apply to all versions of the package.
-      </div>
+      {{template "admin-alert-start" dict "Variant" "warning" "Icon" true}}
+      <p>Manual advisories created here apply to all versions of the selected package and appear alongside feed-sourced vulnerability or malicious findings.</p>
+      {{template "admin-alert-end" .}}
 
       <div>
         <label for="adv-description" class="block text-sm font-medium text-gray-700 mb-1">Description (optional)</label>
-        <textarea name="description" id="adv-description" rows="3"
-          class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none">{{with .EditAdvisory}}{{.Description}}{{end}}</textarea>
+        <textarea name="description" id="adv-description" rows="3" maxlength="8000" dir="auto"
+          class="w-full border border-gray-500 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none">{{with .EditAdvisory}}{{.Description}}{{end}}</textarea>
       </div>
 
-      <button type="submit"
-        class="bg-blue-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-700">
+      <button type="submit" data-submit-lock-button
+        class="bg-blue-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">
         {{if .IsEditing}}Save Advisory{{else}}Create Advisory{{end}}
       </button>
       {{if .IsEditing}}
-      <a href="/admin/advisories" class="inline-block text-sm text-gray-500 hover:text-gray-700 ml-3">Cancel</a>
+      <a href="/admin/advisories" class="inline-flex min-h-11 items-center rounded-md border border-gray-500 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 ml-3">Cancel</a>
       {{end}}
     </form>
   </div>
+  {{end}}
 
   <div class="bg-white rounded-lg shadow p-5 border border-gray-200">
     <h2 class="text-lg font-semibold mb-3">Existing Manual Advisories</h2>
-    {{if .Advisories}}
-    <div class="overflow-x-auto">
+    {{if .AdvisoriesLoadError}}
+    {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .AdvisoriesLoadError}}
+    {{else if .Advisories}}
+    <div class="md:hidden divide-y divide-gray-100" data-admin-mobile-actions="advisories">
+      {{range .Advisories}}
+      <div class="py-4 space-y-4">
+        <div class="flex items-start justify-between gap-3">
+          <div class="min-w-0">
+            <div class="font-medium break-words"><bdi dir="auto">{{.Ecosystem}}</bdi> / <bdi dir="auto">{{.Name}}</bdi></div>
+            <div class="mt-1 font-mono text-xs text-gray-500 break-all"><bdi dir="auto">{{.ID}}</bdi></div>
+          </div>
+          <span class="shrink-0 inline-block px-2 py-0.5 rounded text-xs font-medium border {{severityClass .Severity}}">{{.Severity}}</span>
+        </div>
+        {{if not $.BootstrapWarning}}
+        <div class="flex flex-wrap gap-2">
+          <a href="/admin/advisories?edit={{.ID}}" aria-label="Edit manual advisory {{.ID}} for {{.Ecosystem}}/{{.Name}}" class="inline-flex min-h-11 items-center rounded-md px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-50">Edit</a>
+          <details class="inline-flex">
+            <summary aria-label="Delete manual advisory {{.ID}} for {{.Ecosystem}}/{{.Name}}" class="inline-flex min-h-11 cursor-pointer list-none items-center rounded-md px-3 py-2 text-sm font-medium text-red-700 hover:bg-red-50">Delete</summary>
+            <form action="/admin/advisories/delete" method="POST" class="mt-2 inline-flex" data-submit-lock data-submit-lock-label="Deleting advisory">
+              <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
+              <input type="hidden" name="id" value="{{.ID}}">
+              <input type="hidden" name="confirm_id" value="{{.ID}}">
+              <button type="submit" data-submit-lock-button aria-label="Confirm delete manual advisory {{.ID}} for {{.Ecosystem}}/{{.Name}}" class="inline-flex min-h-11 items-center rounded-md bg-red-700 px-3 py-2 text-sm font-medium text-white hover:bg-red-800 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2">Confirm delete</button>
+            </form>
+          </details>
+        </div>
+        {{end}}
+        <dl class="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+          <div>
+            <dt class="text-xs uppercase text-gray-500">Type</dt>
+            <dd class="mt-0.5 break-words"><bdi dir="auto">{{.FindingType}}</bdi></dd>
+          </div>
+          <div>
+            <dt class="text-xs uppercase text-gray-500">Risk Type</dt>
+            <dd class="mt-0.5 break-words"><bdi dir="auto">{{.RiskType}}</bdi></dd>
+          </div>
+          <div class="col-span-2 min-w-0">
+            <dt class="text-xs uppercase text-gray-500">Summary</dt>
+            <dd class="mt-0.5 break-words"><bdi dir="auto">{{truncate .Summary 120}}</bdi></dd>
+          </div>
+        </dl>
+      </div>
+      {{end}}
+    </div>
+    <div class="hidden md:block overflow-x-auto focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2" tabindex="0" role="region" aria-label="Manual advisories table" data-admin-desktop-table="advisories">
       <table class="min-w-full text-sm">
         <thead>
           <tr class="text-left text-gray-500 border-b bg-gray-50">
-            <th class="px-4 py-2">ID</th>
-            <th class="px-4 py-2">Type</th>
-            <th class="px-4 py-2">Package</th>
-            <th class="px-4 py-2">Severity</th>
-            <th class="px-4 py-2">Risk Type</th>
-            <th class="px-4 py-2">Summary</th>
-            <th class="px-4 py-2 text-right">Actions</th>
+            <th scope="col" class="px-4 py-2">ID</th>
+            <th scope="col" class="px-4 py-2">Type</th>
+            <th scope="col" class="px-4 py-2">Package</th>
+            <th scope="col" class="px-4 py-2">Severity</th>
+            <th scope="col" class="px-4 py-2">Risk Type</th>
+            <th scope="col" class="px-4 py-2">Summary</th>
+            <th scope="col" class="px-4 py-2 text-right">Actions</th>
           </tr>
         </thead>
         <tbody>
           {{range .Advisories}}
           <tr class="border-b border-gray-100">
-            <td class="px-4 py-2 font-mono text-xs">{{.ID}}</td>
-            <td class="px-4 py-2">{{.FindingType}}</td>
-            <td class="px-4 py-2">{{.Ecosystem}} / {{.Name}}</td>
+            <td class="px-4 py-2 font-mono text-xs"><bdi dir="auto">{{.ID}}</bdi></td>
+            <td class="px-4 py-2"><bdi dir="auto">{{.FindingType}}</bdi></td>
+            <td class="px-4 py-2"><bdi dir="auto">{{.Ecosystem}}</bdi> / <bdi dir="auto">{{.Name}}</bdi></td>
             <td class="px-4 py-2">
               <span class="inline-block px-2 py-0.5 rounded text-xs font-medium border {{severityClass .Severity}}">{{.Severity}}</span>
             </td>
-            <td class="px-4 py-2">{{.RiskType}}</td>
-            <td class="px-4 py-2">{{truncate .Summary 80}}</td>
-            <td class="px-4 py-2 text-right whitespace-nowrap">
-              <a href="/admin/advisories?edit={{.ID}}" class="text-blue-600 hover:underline mr-3">Edit</a>
-              <form action="/admin/advisories/delete" method="POST" class="inline">
-                <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
-                <input type="hidden" name="id" value="{{.ID}}">
-                <button type="submit" class="text-red-600 hover:underline">Delete</button>
-              </form>
+            <td class="px-4 py-2"><bdi dir="auto">{{.RiskType}}</bdi></td>
+            <td class="px-4 py-2"><bdi dir="auto">{{truncate .Summary 80}}</bdi></td>
+            <td class="px-4 py-2">
+              {{if not $.BootstrapWarning}}
+              <div class="flex flex-wrap justify-end gap-2">
+              <a href="/admin/advisories?edit={{.ID}}" aria-label="Edit manual advisory {{.ID}} for {{.Ecosystem}}/{{.Name}}" class="inline-flex min-h-11 items-center rounded-md px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-50">Edit</a>
+              <details class="inline-flex">
+                <summary aria-label="Delete manual advisory {{.ID}} for {{.Ecosystem}}/{{.Name}}" class="inline-flex min-h-11 cursor-pointer list-none items-center rounded-md px-3 py-2 text-sm font-medium text-red-700 hover:bg-red-50">Delete</summary>
+                <form action="/admin/advisories/delete" method="POST" class="mt-2 inline-flex" data-submit-lock data-submit-lock-label="Deleting advisory">
+                  <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
+                  <input type="hidden" name="id" value="{{.ID}}">
+                  <input type="hidden" name="confirm_id" value="{{.ID}}">
+                  <button type="submit" data-submit-lock-button aria-label="Confirm delete manual advisory {{.ID}} for {{.Ecosystem}}/{{.Name}}" class="inline-flex min-h-11 items-center rounded-md bg-red-700 px-3 py-2 text-sm font-medium text-white hover:bg-red-800 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2">Confirm delete</button>
+                </form>
+              </details>
+              </div>
+              {{end}}
             </td>
           </tr>
           {{end}}
@@ -174,15 +202,28 @@
       </table>
     </div>
     {{else}}
-    <div class="text-sm text-gray-400">
+    <div class="text-sm text-gray-600">
       No manual advisories yet.
     </div>
     {{end}}
+    {{if or .AdvisoryHasPrevious .AdvisoryHasNext}}
+    <nav class="mt-4 flex flex-wrap items-center justify-between gap-3 text-sm" aria-label="Manual advisory pages">
+      <div class="text-gray-600">Showing {{.AdvisoryPageStart}}-{{.AdvisoryPageEnd}}</div>
+      <div class="flex flex-wrap gap-2">
+        {{if .AdvisoryHasPrevious}}
+        <a href="/admin/advisories?offset={{.AdvisoryPreviousOffset}}" class="inline-flex min-h-11 items-center rounded-md border border-gray-500 px-3 py-2 font-medium text-gray-700 hover:bg-gray-50">Previous</a>
+        {{end}}
+        {{if .AdvisoryHasNext}}
+        <a href="/admin/advisories?offset={{.AdvisoryNextOffset}}" class="inline-flex min-h-11 items-center rounded-md border border-gray-500 px-3 py-2 font-medium text-gray-700 hover:bg-gray-50">Next</a>
+        {{end}}
+      </div>
+    </nav>
+    {{end}}
   </div>
 
-  <div class="bg-yellow-50 border border-yellow-200 rounded-md p-4 text-sm text-yellow-800">
-    Manual advisories are stored with source "manual", get a stable manual:&lt;uuid&gt; ID when no ID is provided, and appear alongside feed-sourced vulnerability or malicious findings.
-  </div>
+  {{template "admin-alert-start" dict "Variant" "info" "Icon" true}}
+  <p>Manual advisories are stored with source "manual", get a stable manual:&lt;uuid&gt; ID when no ID is provided, and appear alongside feed-sourced vulnerability or malicious findings.</p>
+  {{template "admin-alert-end" .}}
 
 </div>
 {{end}}

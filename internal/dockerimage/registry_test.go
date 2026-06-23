@@ -2,11 +2,19 @@ package dockerimage
 
 import (
 	"context"
+	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+type registryRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn registryRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
+}
 
 func TestRegistryClientResolvesDigestHeader(t *testing.T) {
 	const digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -91,5 +99,90 @@ func TestRegistryClientReturnsEmptyDigestOnRateLimit(t *testing.T) {
 	}
 	if got != "" {
 		t.Fatalf("digest = %q, want empty on 429", got)
+	}
+}
+
+func TestRegistryClientRejectsPrivateRegistryTargetsBeforeRequest(t *testing.T) {
+	t.Parallel()
+
+	client := NewRegistryClient(&http.Client{Transport: registryRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("unexpected HTTP request for private registry target")
+		return nil, nil
+	})})
+	client.LookupIP = func(context.Context, string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("10.0.0.5")}, nil
+	}
+
+	ref := Ref{Registry: "registry.example.test", Repository: "library/alpine", Reference: "3.23"}
+	if digest, err := client.ResolveDigest(context.Background(), ref); !errors.Is(err, ErrDigestUnavailable) || digest != "" {
+		t.Fatalf("ResolveDigest(private registry) = %q, %v; want ErrDigestUnavailable", digest, err)
+	}
+}
+
+func TestRegistryClientRejectsUnsupportedPublicRegistryBeforeRequest(t *testing.T) {
+	t.Parallel()
+
+	client := NewRegistryClient(&http.Client{Transport: registryRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("unexpected HTTP request for unsupported public registry")
+		return nil, nil
+	})})
+	client.LookupIP = func(context.Context, string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("93.184.216.34")}, nil
+	}
+
+	ref := Ref{Registry: "attacker.example.test", Repository: "library/alpine", Reference: "3.23"}
+	if digest, err := client.ResolveDigest(context.Background(), ref); !errors.Is(err, ErrDigestUnavailable) || digest != "" {
+		t.Fatalf("ResolveDigest(unsupported registry) = %q, %v; want ErrDigestUnavailable", digest, err)
+	}
+}
+
+func TestRegistryClientRejectsPrivateBearerRealmBeforeRequest(t *testing.T) {
+	t.Parallel()
+
+	client := NewRegistryClient(&http.Client{Transport: registryRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("unexpected HTTP request for private bearer realm")
+		return nil, nil
+	})})
+	client.LookupIP = func(_ context.Context, host string) ([]net.IP, error) {
+		if host != "metadata.example.test" {
+			t.Fatalf("lookup host = %q, want metadata.example.test", host)
+		}
+		return []net.IP{net.ParseIP("169.254.169.254")}, nil
+	}
+
+	if _, err := client.fetchBearerToken(context.Background(), `Bearer realm="https://metadata.example.test/token"`, "registry-1.docker.io"); !errors.Is(err, ErrDigestUnavailable) {
+		t.Fatalf("fetchBearerToken(private realm) = %v, want ErrDigestUnavailable", err)
+	}
+}
+
+func TestRegistryClientRejectsUnexpectedPublicBearerRealmBeforeRequest(t *testing.T) {
+	t.Parallel()
+
+	client := NewRegistryClient(&http.Client{Transport: registryRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("unexpected HTTP request for unsupported bearer realm")
+		return nil, nil
+	})})
+	client.LookupIP = func(context.Context, string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("93.184.216.34")}, nil
+	}
+
+	if _, err := client.fetchBearerToken(context.Background(), `Bearer realm="https://attacker.example.test/token"`, "registry-1.docker.io"); !errors.Is(err, ErrDigestUnavailable) {
+		t.Fatalf("fetchBearerToken(unexpected public realm) = %v, want ErrDigestUnavailable", err)
+	}
+}
+
+func TestRegistryClientRejectsOversizedBearerTokenResponse(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"token":"` + strings.Repeat("a", dockerBearerTokenResponseLimit+1) + `"}`))
+	}))
+	defer srv.Close()
+
+	client := NewRegistryClient(srv.Client())
+	client.InsecureHTTP = true
+	if _, err := client.fetchBearerToken(context.Background(), `Bearer realm="`+srv.URL+`/token"`, strings.TrimPrefix(srv.URL, "http://")); !errors.Is(err, ErrDigestUnavailable) {
+		t.Fatalf("fetchBearerToken(oversized response) = %v, want ErrDigestUnavailable", err)
 	}
 }

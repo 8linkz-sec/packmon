@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 // Package is one dependency extracted from an SBOM.

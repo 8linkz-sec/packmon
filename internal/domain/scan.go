@@ -25,7 +25,9 @@ type ScanResult struct {
 	PackagesScanned   int               `json:"packages_scanned"`
 	FindingsCount     int               `json:"findings_count"`
 	FindingsBlocking  bool              `json:"findings_blocking"`
+	BlockThreshold    Severity          `json:"block_threshold"`
 	FeedStatus        string            `json:"feed_status"`
+	ScanError         string            `json:"scan_error,omitempty"`
 	DBAgeDays         *int              `json:"db_age_days"`
 	DBStale           bool              `json:"db_stale"`
 	Summary           ScanSummary       `json:"summary"`
@@ -41,6 +43,67 @@ type ScanSummary struct {
 	BySeverity map[string]int `json:"by_severity"`
 	ByType     map[string]int `json:"by_type"`
 	BySource   map[string]int `json:"by_source"`
+}
+
+// EmptyScanSummary returns an initialized empty summary suitable for JSON output.
+func EmptyScanSummary() ScanSummary {
+	return ScanSummary{
+		BySeverity: map[string]int{},
+		ByType:     map[string]int{},
+		BySource:   map[string]int{},
+	}
+}
+
+// BuildScanSummary aggregates findings by severity, type, and source.
+func BuildScanSummary(findings []Finding) ScanSummary {
+	summary := EmptyScanSummary()
+	for _, finding := range findings {
+		summary.BySeverity[string(finding.Severity)]++
+		summary.ByType[string(finding.Type)]++
+		summary.BySource[finding.Source]++
+	}
+	return summary
+}
+
+// FindingAlwaysBlocks reports whether a finding blocks independently of the
+// vulnerability severity threshold.
+func FindingAlwaysBlocks(finding Finding) bool {
+	return finding.Type == FindingTypeMalicious || finding.Type == FindingTypeSupplyChainRisk
+}
+
+// FindingBlocks reports whether one finding blocks under Packmon's scan policy.
+// SeverityNone disables vulnerability blocking only; malicious and supply-chain
+// risk findings still block.
+func FindingBlocks(finding Finding, threshold Severity) bool {
+	if FindingAlwaysBlocks(finding) {
+		return true
+	}
+	if threshold == SeverityNone {
+		return false
+	}
+	return finding.Severity.Blocks(threshold)
+}
+
+// FindingsBlock reports whether any finding blocks under Packmon's scan policy.
+func FindingsBlock(findings []Finding, threshold Severity) bool {
+	for _, finding := range findings {
+		if FindingBlocks(finding, threshold) {
+			return true
+		}
+	}
+	return false
+}
+
+// CountManualAdvisoryFindings counts findings sourced from operator-managed
+// manual advisories.
+func CountManualAdvisoryFindings(findings []Finding) int {
+	count := 0
+	for _, finding := range findings {
+		if finding.Source == "manual" {
+			count++
+		}
+	}
+	return count
 }
 
 // WebhookEnvelope wraps a ScanResult for webhook delivery.

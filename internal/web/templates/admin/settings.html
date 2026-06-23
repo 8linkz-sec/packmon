@@ -3,47 +3,22 @@
 {{define "content"}}
 <div class="space-y-6">
 
-  <div class="flex items-center justify-between">
-    <h1 class="text-2xl font-bold">System Settings</h1>
-    <form action="/admin/logout" method="POST" class="inline">
-      <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
-      <button type="submit" class="text-sm text-gray-500 hover:text-gray-700 underline">Logout</button>
-    </form>
-  </div>
+  {{template "admin-page-header" dict "Title" "System Settings" "Section" "settings" "CSRFToken" .CSRFToken}}
 
-  <!-- Admin nav tabs -->
-  <div class="border-b border-gray-200">
-    <nav class="flex space-x-6 text-sm">
-      <a href="/admin/" class="text-gray-500 hover:text-gray-700 pb-2 px-1">Overview</a>
-      <a href="/admin/feeds" class="text-gray-500 hover:text-gray-700 pb-2 px-1">Feeds</a>
-      <a href="/admin/queue" class="text-gray-500 hover:text-gray-700 pb-2 px-1">Queue</a>
-      <a href="/admin/keys" class="text-gray-500 hover:text-gray-700 pb-2 px-1">API Keys</a>
-      <a href="/admin/audit" class="text-gray-500 hover:text-gray-700 pb-2 px-1">Audit Log</a>
-      <a href="/admin/advisories" class="text-gray-500 hover:text-gray-700 pb-2 px-1">Advisories</a>
-      <a href="/admin/settings" class="border-b-2 border-blue-500 text-blue-600 pb-2 px-1 font-medium">Settings</a>
-    </nav>
-  </div>
+  {{template "admin-bootstrap-warning" .}}
 
-  {{if .Message}}
-  <div class="bg-green-50 border border-green-200 text-green-800 rounded-md px-4 py-3 text-sm">
-    {{.Message}}
-  </div>
-  {{end}}
-
-  {{if .Error}}
-  <div class="bg-red-50 border border-red-200 text-red-700 rounded-md px-4 py-3 text-sm">
-    {{.Error}}
-  </div>
-  {{end}}
+  {{template "admin-flash-alerts" .}}
 
   <!-- System settings -->
   <div class="bg-white rounded-lg shadow p-5 border border-gray-200">
     <div class="flex flex-wrap items-start justify-between gap-3 mb-4">
       <div>
         <h2 class="text-lg font-semibold">Runtime Policy</h2>
-        <p class="text-sm text-gray-500 mt-1">Saved values are loaded on server start.</p>
+        <p class="text-sm text-gray-500 mt-1">Saved values apply immediately and are persisted for future server starts.</p>
       </div>
-      {{if .HasSystemSettings}}
+      {{if .SystemSettingsLoadError}}
+      <span class="inline-block bg-red-50 text-red-700 px-2 py-0.5 rounded text-xs font-medium">settings unavailable</span>
+      {{else if .HasSystemSettings}}
         {{if .HasSystemSettingsUpdatedAt}}
         <span class="inline-block bg-blue-50 text-blue-700 px-2 py-0.5 rounded text-xs font-medium">updated {{formatTimeAgo .SystemSettingsUpdatedAt}}</span>
         {{else}}
@@ -54,24 +29,36 @@
       {{end}}
     </div>
 
-    <form action="/admin/settings/system" method="POST" class="space-y-4 max-w-3xl">
+    {{if .SystemSettingsLoadError}}
+    <div class="mb-4">
+      {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .SystemSettingsLoadError}}
+    </div>
+    {{end}}
+
+    {{if .BootstrapWarning}}
+    {{template "admin-alert" dict "Variant" "warning" "Icon" true "Message" "Runtime policy changes are locked until the bootstrap password is changed below."}}
+    {{else}}
+    <form action="/admin/settings/system" method="POST" class="max-w-3xl">
       <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
 
+      <fieldset {{if .SystemSettingsLoadError}}disabled{{end}} class="space-y-4">
       <div class="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_220px_220px] gap-4">
         <div>
-          <label for="block-threshold" class="block text-sm font-medium text-gray-700 mb-1">Block Threshold</label>
+          <label for="block-threshold" class="block text-sm font-medium text-gray-700 mb-1">Vulnerability Block Threshold</label>
           <select
             name="block_threshold"
             id="block-threshold"
-            class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+            aria-describedby="block-threshold-help block-threshold-runtime"
+            class="w-full border border-gray-500 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
           >
             <option value="CRITICAL" {{if eq .SystemBlockThreshold "CRITICAL"}}selected{{end}}>CRITICAL</option>
             <option value="HIGH" {{if eq .SystemBlockThreshold "HIGH"}}selected{{end}}>HIGH</option>
             <option value="MEDIUM" {{if eq .SystemBlockThreshold "MEDIUM"}}selected{{end}}>MEDIUM</option>
             <option value="LOW" {{if eq .SystemBlockThreshold "LOW"}}selected{{end}}>LOW</option>
-            <option value="NONE" {{if eq .SystemBlockThreshold "NONE"}}selected{{end}}>NONE</option>
+            <option value="NONE" {{if eq .SystemBlockThreshold "NONE"}}selected{{end}}>NONE - do not block vulnerabilities</option>
           </select>
-          <p class="mt-1 text-xs text-gray-500">Runtime: {{.RuntimeBlockThreshold}}</p>
+          <p id="block-threshold-help" class="mt-1 text-xs text-gray-500">Malicious and supply-chain risk findings always block regardless of this threshold.</p>
+          <p id="block-threshold-runtime" class="mt-1 text-xs text-gray-500">Runtime: {{.RuntimeBlockThreshold}}</p>
         </div>
 
         <div>
@@ -84,7 +71,7 @@
             max="100000"
             required
             value="{{.SystemRateLimitPerMinute}}"
-            class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+            class="w-full border border-gray-500 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
           >
           <p class="mt-1 text-xs text-gray-500">Runtime: {{.RuntimeRateLimitPerMinute}}</p>
         </div>
@@ -99,29 +86,45 @@
             max="100000"
             required
             value="{{.SystemRateLimitBurst}}"
-            class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+            class="w-full border border-gray-500 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
           >
           <p class="mt-1 text-xs text-gray-500">Runtime: {{.RuntimeRateLimitBurst}}</p>
         </div>
       </div>
 
+      <label class="flex items-start gap-3 rounded-md border border-yellow-300 bg-yellow-50 px-3 py-2 text-sm text-yellow-900">
+        <input
+          type="checkbox"
+          name="ack_block_threshold_none"
+          value="true"
+          class="mt-0.5 h-4 w-4 rounded border-yellow-500 text-yellow-700 focus:ring-yellow-600"
+        >
+        <span>
+          NONE disables vulnerability blocking. Malware and supply-chain risk findings still block. This acknowledgement is required before saving NONE.
+        </span>
+      </label>
+
       <button
         type="submit"
-        class="bg-blue-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-700"
+        class="bg-blue-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
       >
         Save System Settings
       </button>
+      </fieldset>
     </form>
+    {{end}}
   </div>
 
   <!-- Change password -->
   <div class="bg-white rounded-lg shadow p-5 border border-gray-200">
     <h2 class="text-lg font-semibold mb-3">Change Admin Password</h2>
-    <form action="/admin/settings/password" method="POST" class="space-y-4 max-w-md">
+    <form action="/admin/settings/password" method="POST" class="space-y-4 max-w-md" data-submit-lock data-submit-lock-label="Changing password">
       <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
 
       <!-- Hidden username for Bitwarden/password-manager compatibility -->
       <input type="hidden" name="username" value="admin" autocomplete="username">
+
+      <p id="password-length-help" class="text-xs text-gray-500">Use at least {{.MinPasswordLength}} characters.</p>
 
       <div>
         <label for="current-password" class="block text-sm font-medium text-gray-700 mb-1">Current Password</label>
@@ -131,7 +134,7 @@
           id="current-password"
           required
           autocomplete="current-password"
-          class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+          class="w-full border border-gray-500 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
         >
       </div>
 
@@ -143,8 +146,9 @@
           id="new-password"
           required
           minlength="{{.MinPasswordLength}}"
+          aria-describedby="password-length-help"
           autocomplete="new-password"
-          class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+          class="w-full border border-gray-500 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
         >
       </div>
 
@@ -156,14 +160,16 @@
           id="confirm-password"
           required
           minlength="{{.MinPasswordLength}}"
+          aria-describedby="password-length-help"
           autocomplete="new-password"
-          class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+          class="w-full border border-gray-500 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
         >
       </div>
 
       <button
         type="submit"
-        class="bg-blue-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-700"
+        data-submit-lock-button
+        class="bg-blue-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
       >
         Change Password
       </button>
@@ -173,54 +179,61 @@
   <!-- Server info -->
   <div class="bg-white rounded-lg shadow p-5 border border-gray-200">
     <h2 class="text-lg font-semibold mb-3">Server Information</h2>
+    {{if .AdminAuthLoadError}}
+    <div class="mb-4">
+      {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .AdminAuthLoadError}}
+    </div>
+    {{end}}
     <dl class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2 text-sm">
-      <div class="flex justify-between sm:block">
+      <div class="flex justify-between gap-3 sm:block">
         <dt class="text-gray-500">Server Mode</dt>
-        <dd class="font-medium">{{.ServerMode}}</dd>
+        <dd class="min-w-0 break-words text-right font-medium sm:text-left">{{.ServerMode}}</dd>
       </div>
-      <div class="flex justify-between sm:block">
+      <div class="flex justify-between gap-3 sm:block">
         <dt class="text-gray-500">Feed Sync Interval</dt>
-        <dd class="font-medium">{{.SyncInterval}}</dd>
+        <dd class="min-w-0 break-words text-right font-medium sm:text-left">{{.SyncInterval}}</dd>
       </div>
-      <div class="flex justify-between sm:block">
+      <div class="flex justify-between gap-3 sm:block">
         <dt class="text-gray-500">Feed Sync On Startup</dt>
-        <dd class="font-medium">{{.FeedSyncOnStartup}}</dd>
+        <dd class="min-w-0 break-words text-right font-medium sm:text-left">{{.FeedSyncOnStartup}}</dd>
       </div>
-      <div class="flex justify-between sm:block">
+      <div class="flex justify-between gap-3 sm:block">
         <dt class="text-gray-500">Admin Session Timeout</dt>
-        <dd class="font-medium">{{.AdminSessionTimeout}}</dd>
+        <dd class="min-w-0 break-words text-right font-medium sm:text-left">{{.AdminSessionTimeout}}</dd>
       </div>
-      <div class="flex justify-between sm:block">
+      <div class="flex justify-between gap-3 sm:block">
         <dt class="text-gray-500">Metrics Address</dt>
-        <dd class="font-medium">{{.MetricsAddr}}</dd>
+        <dd class="min-w-0 break-words text-right font-medium sm:text-left">{{.MetricsAddr}}</dd>
       </div>
-      <div class="flex justify-between sm:block">
+      <div class="flex justify-between gap-3 sm:block">
         <dt class="text-gray-500">Database Host</dt>
-        <dd class="font-medium">{{.DatabaseHost}}</dd>
+        <dd class="min-w-0 break-words text-right font-medium sm:text-left">{{.DatabaseHost}}</dd>
       </div>
-      <div class="flex justify-between sm:block">
+      <div class="flex justify-between gap-3 sm:block">
         <dt class="text-gray-500">Database Name</dt>
-        <dd class="font-medium">{{.DatabaseName}}</dd>
+        <dd class="min-w-0 break-words text-right font-medium sm:text-left">{{.DatabaseName}}</dd>
       </div>
-      <div class="flex justify-between sm:block">
+      <div class="flex justify-between gap-3 sm:block">
         <dt class="text-gray-500">Database SSL Mode</dt>
-        <dd class="font-medium">{{.DatabaseSSLMode}}</dd>
+        <dd class="min-w-0 break-words text-right font-medium sm:text-left">{{.DatabaseSSLMode}}</dd>
       </div>
-      <div class="flex justify-between sm:block">
+      <div class="flex justify-between gap-3 sm:block">
         <dt class="text-gray-500">Admin Last Login</dt>
-        <dd class="font-medium">{{if .HasLastLoginAt}}{{formatTime .LastLoginAt}}{{else}}never{{end}}</dd>
+        <dd class="min-w-0 break-words text-right font-medium sm:text-left">{{if .AdminAuthLoadError}}unavailable{{else if .HasLastLoginAt}}{{formatTime .LastLoginAt}}{{else}}never{{end}}</dd>
       </div>
-      <div class="flex justify-between sm:block">
+      <div class="flex justify-between gap-3 sm:block">
         <dt class="text-gray-500">Password Changed</dt>
-        <dd class="font-medium">{{if .HasPasswordChangedAt}}{{formatTime .PasswordChangedAt}}{{else}}never{{end}}</dd>
+        <dd class="min-w-0 break-words text-right font-medium sm:text-left">{{if .AdminAuthLoadError}}unavailable{{else if .HasPasswordChangedAt}}{{formatTime .PasswordChangedAt}}{{else}}never{{end}}</dd>
       </div>
     </dl>
   </div>
 
-  <div class="bg-yellow-50 border border-yellow-200 rounded-md p-4 text-sm text-yellow-800">
+  {{template "admin-alert-start" dict "Variant" "warning" "Icon" true}}
+  <p>
     Most server settings are configured via environment variables (PACKMON_*) and require a restart to take effect.
     See the deployment documentation for the full list.
-  </div>
+  </p>
+  {{template "admin-alert-end" .}}
 
 </div>
 {{end}}

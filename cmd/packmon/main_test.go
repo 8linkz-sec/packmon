@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"io"
 	"testing"
 )
 
@@ -38,10 +39,38 @@ func TestExitCodeErrorHelpers(t *testing.T) {
 	if got := empty.Error(); got != "" {
 		t.Fatalf("empty Error() = %q, want empty", got)
 	}
-	if got := exitCodeForError(errors.New("plain")); got != ExitInternal {
-		t.Fatalf("plain exitCodeForError() = %d, want internal", got)
+	if got := exitCodeForError(errors.New("plain")); got != ExitOperational {
+		t.Fatalf("plain exitCodeForError() = %d, want operational", got)
 	}
 	if err := withExitCode(ExitOperational, nil); err != nil {
 		t.Fatalf("withExitCode(nil) = %v, want nil", err)
+	}
+}
+
+func TestUsageErrorsUseOperationalExitCode(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "unknown command", args: []string{"no-such-command"}},
+		{name: "unknown scan flag", args: []string{"scan", "--no-such-flag"}},
+		{name: "too many scan args", args: []string{"scan", "one", "two"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := newRootCmd()
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+			cmd.SetArgs(tt.args)
+
+			err := cmd.Execute()
+			if err == nil {
+				t.Fatal("Execute() error = nil, want usage error")
+			}
+			if got := exitCodeForError(err); got != ExitOperational {
+				t.Fatalf("exitCodeForError(%v) = %d, want operational", tt.args, got)
+			}
+		})
 	}
 }

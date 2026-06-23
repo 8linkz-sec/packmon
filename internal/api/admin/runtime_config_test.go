@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/8linkz/packmon/internal/config"
-	"github.com/8linkz/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/config"
+	"github.com/8linkz-sec/packmon/internal/db"
 )
 
 func TestAdminFeedRowsMergeRuntimeConfigAndStoreStatus(t *testing.T) {
@@ -14,6 +14,7 @@ func TestAdminFeedRowsMergeRuntimeConfigAndStoreStatus(t *testing.T) {
 
 	lastSync := time.Now().Add(-time.Hour)
 	duration := 1500 * time.Millisecond
+	lastError := `GET https://user-secret:pass-secret@downloads.example.test/backups/feed.tar.gz?X-Amz-Signature=query-secret failed with Authorization: Bearer bearer-secret-token from C:\Users\Admin\Packmon\feed.json` //nolint:gosec // fake secret-bearing diagnostic verifies redaction.
 	cfg := &config.Config{
 		FeedSync: config.FeedSyncConfig{Interval: 6 * time.Hour},
 		Feeds: config.FeedsConfig{
@@ -45,6 +46,7 @@ func TestAdminFeedRowsMergeRuntimeConfigAndStoreStatus(t *testing.T) {
 		{
 			FeedName:       "custom-feed",
 			LastSyncStatus: "skipped",
+			LastError:      lastError,
 		},
 	})
 
@@ -62,8 +64,16 @@ func TestAdminFeedRowsMergeRuntimeConfigAndStoreStatus(t *testing.T) {
 	}
 
 	custom := findAdminFeedRow(t, rows, "custom-feed")
-	if custom.FeedName != "CUSTOM-FEED" || custom.Status != "pending" {
+	if custom.FeedName != "CUSTOM-FEED" || custom.Status != "warning" {
 		t.Fatalf("custom status row = %+v", custom)
+	}
+	for _, leaked := range []string{"user-secret", "pass-secret", "feed.tar.gz", "query-secret", "bearer-secret-token", `C:\Users\Admin\Packmon\feed.json`} {
+		if strings.Contains(custom.LastError, leaked) {
+			t.Fatalf("custom LastError leaked %q in %q", leaked, custom.LastError)
+		}
+	}
+	if !strings.Contains(custom.LastError, "https://downloads.example.test/...") || !strings.Contains(custom.LastError, "Bearer [redacted]") {
+		t.Fatalf("custom LastError missing redacted context: %q", custom.LastError)
 	}
 }
 
@@ -75,11 +85,14 @@ func TestAdminFeedFormRowsReflectOverridesAndRestartState(t *testing.T) {
 	cfg := &config.Config{
 		FeedSync: config.FeedSyncConfig{Interval: 6 * time.Hour},
 		Feeds: config.FeedsConfig{
-			VulnCheckEnabled: true,
-			VulnCheckMode:    config.FeedModeSelf,
-			VulnCheckAPIKey:  "runtime-key",
-			OSVEnabled:       true,
-			OSVMode:          config.FeedModeSelf,
+			VulnCheckEnabled:  true,
+			VulnCheckMode:     config.FeedModeSelf,
+			VulnCheckAPIKey:   "runtime-key",
+			OSVEnabled:        true,
+			OSVMode:           config.FeedModeSelf,
+			NVDMode:           config.FeedModeSelf,
+			EndOfLifeMode:     config.FeedModeSelf,
+			ReversingLabsMode: config.FeedModeSelf,
 		},
 	}
 	handler := &AdminHandler{cfg: cfg}
@@ -105,6 +118,9 @@ func TestAdminFeedFormRowsReflectOverridesAndRestartState(t *testing.T) {
 	if !vulncheck.APIKeyConfigured || !vulncheck.RuntimeAPIKeyConfigured {
 		t.Fatalf("api key state not reflected: %+v", vulncheck)
 	}
+	if vulncheck.CanSyncNow {
+		t.Fatalf("vulncheck CanSyncNow = true, want false for disabled external override")
+	}
 	if !strings.Contains(vulncheck.SyncIntervalHelp, "Ignored while mode is external") {
 		t.Fatalf("sync interval help = %q", vulncheck.SyncIntervalHelp)
 	}
@@ -112,6 +128,20 @@ func TestAdminFeedFormRowsReflectOverridesAndRestartState(t *testing.T) {
 	osv := findAdminFeedFormRow(t, rows, "osv")
 	if osv.OverrideActive || osv.PendingRestart {
 		t.Fatalf("osv should have no override: %+v", osv)
+	}
+	if !osv.CanSyncNow {
+		t.Fatalf("osv CanSyncNow = false, want true for enabled self-mode feed")
+	}
+
+	for _, key := range []string{"nvd", "endoflife", "reversinglabs"} {
+		row := findAdminFeedFormRow(t, rows, key)
+		if row.SupportsExternalMode {
+			t.Fatalf("%s SupportsExternalMode = true, want false", key)
+		}
+	}
+	nvd := findAdminFeedFormRow(t, rows, "nvd")
+	if !nvd.SupportsAPIKey || nvd.RequiresAPIKey || nvd.APIKeyConfigured {
+		t.Fatalf("nvd API-key state = supports:%v requires:%v configured:%v, want optional unconfigured key", nvd.SupportsAPIKey, nvd.RequiresAPIKey, nvd.APIKeyConfigured)
 	}
 }
 
@@ -146,12 +176,6 @@ func TestRuntimeConfigFormattingHelpers(t *testing.T) {
 	}
 	if got := formatOptionalDuration(0); got != "" {
 		t.Fatalf("formatOptionalDuration(0) = %q", got)
-	}
-	if supportsManualFeedSync("socket") {
-		t.Fatal("supportsManualFeedSync(socket) = true")
-	}
-	if !supportsManualFeedSync("osv") {
-		t.Fatal("supportsManualFeedSync(osv) = false")
 	}
 	if got := statusOrNil(false, db.FeedSyncStatus{}); got != nil {
 		t.Fatalf("statusOrNil(false) = %+v", got)

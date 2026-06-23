@@ -30,7 +30,7 @@ func createSession(t *testing.T, sm *SessionManager) (*Session, string) {
 
 	// Extract the session ID from the Set-Cookie header.
 	resp := rec.Result()
-	defer resp.Body.Close() //nolint:errcheck // test helper //nolint:errcheck // test helper
+	defer resp.Body.Close() //nolint:errcheck // test helper
 	var cookieValue string
 	for _, c := range resp.Cookies() {
 		if c.Name == SessionCookieName {
@@ -48,7 +48,7 @@ func createSession(t *testing.T, sm *SessionManager) (*Session, string) {
 // requestWithSession builds an *http.Request carrying the session cookie.
 func requestWithSession(sessionID string) *http.Request {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.AddCookie(&http.Cookie{
+	req.AddCookie(&http.Cookie{ //nolint:gosec // test injects a minimal session cookie into httptest request.
 		Name:  SessionCookieName,
 		Value: sessionID,
 	})
@@ -84,6 +84,9 @@ func TestCreateSetsSessionFields(t *testing.T) {
 	if !sess.Admin {
 		t.Fatal("session Admin = false, want true")
 	}
+	if sess.AuthenticatedWithBootstrap {
+		t.Fatal("session AuthenticatedWithBootstrap = true, want false by default")
+	}
 	if sess.CreatedAt.IsZero() {
 		t.Fatal("session CreatedAt is zero")
 	}
@@ -92,6 +95,65 @@ func TestCreateSetsSessionFields(t *testing.T) {
 	}
 	if len(sess.ID) != 64 {
 		t.Fatalf("session ID length = %d, want 64 (32 bytes hex)", len(sess.ID))
+	}
+}
+
+func TestCreateAdminCanMarkBootstrapAuthenticatedSession(t *testing.T) {
+	t.Parallel()
+
+	sm := newTestSessionManager(time.Hour)
+	rec := httptest.NewRecorder()
+	sess, err := sm.CreateAdmin(rec, true)
+	if err != nil {
+		t.Fatalf("CreateAdmin returned error: %v", err)
+	}
+	if sess == nil || !sess.Admin || !sess.AuthenticatedWithBootstrap {
+		t.Fatalf("CreateAdmin session = %+v, want bootstrap-authenticated admin session", sess)
+	}
+}
+
+func TestCreateExclusiveAdminReplacesOnlyAdminSessions(t *testing.T) {
+	t.Parallel()
+
+	sm := newTestSessionManager(time.Hour)
+	_, oldAdminID := createSession(t, sm)
+
+	preAuthRec := httptest.NewRecorder()
+	preAuth, err := sm.CreatePreAuth(preAuthRec)
+	if err != nil {
+		t.Fatalf("CreatePreAuth returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	newAdmin, err := sm.CreateExclusiveAdmin(rec)
+	if err != nil {
+		t.Fatalf("CreateExclusiveAdmin returned error: %v", err)
+	}
+	if newAdmin == nil || !newAdmin.Admin {
+		t.Fatalf("CreateExclusiveAdmin session = %+v, want admin session", newAdmin)
+	}
+
+	if got := sm.Get(requestWithSession(oldAdminID)); got != nil {
+		t.Fatalf("old admin session still exists: %+v", got)
+	}
+	if got := sm.Get(requestWithSession(preAuth.ID)); got == nil || got.Admin {
+		t.Fatalf("pre-auth session after exclusive admin create = %+v, want retained non-admin session", got)
+	}
+	if got := sm.Get(requestWithSession(newAdmin.ID)); got == nil || !got.Admin {
+		t.Fatalf("new admin session lookup = %+v, want admin session", got)
+	}
+
+	foundCookie := false
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == SessionCookieName {
+			foundCookie = true
+			if c.Value != newAdmin.ID {
+				t.Fatalf("session cookie value = %q, want %q", c.Value, newAdmin.ID)
+			}
+		}
+	}
+	if !foundCookie {
+		t.Fatal("CreateExclusiveAdmin did not set session cookie")
 	}
 }
 
@@ -111,6 +173,82 @@ func TestGetRetrievesCreatedSession(t *testing.T) {
 	}
 	if !got.Admin {
 		t.Fatal("retrieved session Admin = false")
+	}
+}
+
+func TestReturnedSessionsDoNotExposeManagerState(t *testing.T) {
+	t.Parallel()
+
+	sm := newTestSessionManager(time.Hour)
+	created, cookieID := createSession(t, sm)
+	created.Admin = false
+	created.AuthenticatedWithBootstrap = true
+	created.LastAccessed = time.Time{}
+
+	got := sm.Get(requestWithSession(cookieID))
+	if got == nil {
+		t.Fatal("Get returned nil for valid session")
+	}
+	if !got.Admin {
+		t.Fatal("mutating Create return changed stored Admin flag")
+	}
+	if got.AuthenticatedWithBootstrap {
+		t.Fatal("mutating Create return changed stored bootstrap flag")
+	}
+	if got.LastAccessed.IsZero() {
+		t.Fatal("mutating Create return changed stored LastAccessed")
+	}
+
+	got.Admin = false
+	got.AuthenticatedWithBootstrap = true
+	got.LastAccessed = time.Time{}
+
+	next := sm.Get(requestWithSession(cookieID))
+	if next == nil {
+		t.Fatal("second Get returned nil for valid session")
+	}
+	if !next.Admin {
+		t.Fatal("mutating Get return changed stored Admin flag")
+	}
+	if next.AuthenticatedWithBootstrap {
+		t.Fatal("mutating Get return changed stored bootstrap flag")
+	}
+	if next.LastAccessed.IsZero() {
+		t.Fatal("mutating Get return changed stored LastAccessed")
+	}
+}
+
+func TestSessionCopiesShareManagerOwnedCSRFState(t *testing.T) {
+	t.Parallel()
+
+	sm := newTestSessionManager(time.Hour)
+	sess, cookieID := createSession(t, sm)
+	token, err := CSRFToken(sess)
+	if err != nil {
+		t.Fatalf("CSRFToken(create return) error = %v", err)
+	}
+
+	req := requestWithSession(cookieID)
+	req.Method = http.MethodPost
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Form = map[string][]string{CSRFFieldName: {token}}
+	req.PostForm = req.Form
+
+	got := sm.Get(req)
+	if got == nil {
+		t.Fatal("Get returned nil for valid session")
+	}
+	if !ValidateCSRF(req, got) {
+		t.Fatal("CSRF token generated on Create return was not valid on later Get copy")
+	}
+
+	secondReq := requestWithSession(cookieID)
+	secondReq.Method = http.MethodPost
+	secondReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	secondReq.Form = map[string][]string{CSRFFieldName: {token}}
+	secondReq.PostForm = secondReq.Form
+	if !ValidateCSRF(secondReq, sm.Get(secondReq)) {
+		t.Fatal("CSRF token was not stable across repeated Get copies")
 	}
 }
 
@@ -163,6 +301,7 @@ func TestDeleteRemovesSession(t *testing.T) {
 	// Verify the response clears the cookie (MaxAge = -1).
 	resp := rec.Result()
 	defer resp.Body.Close() //nolint:errcheck // test helper //nolint:errcheck // test helper
+	clearPaths := map[string]bool{}
 	for _, c := range resp.Cookies() {
 		if c.Name == SessionCookieName {
 			if c.MaxAge != -1 {
@@ -171,10 +310,14 @@ func TestDeleteRemovesSession(t *testing.T) {
 			if c.Value != "" {
 				t.Fatalf("cleared cookie Value = %q, want empty", c.Value)
 			}
-			return
+			clearPaths[c.Path] = true
 		}
 	}
-	t.Fatal("no Set-Cookie header found after Delete")
+	for _, want := range []string{"/admin", "/"} {
+		if !clearPaths[want] {
+			t.Fatalf("cleared cookie paths = %v, missing %s", clearPaths, want)
+		}
+	}
 }
 
 func TestDeleteWithoutCookieIsNoop(t *testing.T) {
@@ -234,6 +377,90 @@ func TestGetUpdatesLastAccessed(t *testing.T) {
 
 	if !got.LastAccessed.After(initialAccess) {
 		t.Fatalf("LastAccessed was not updated: initial=%v, got=%v", initialAccess, got.LastAccessed)
+	}
+}
+
+func TestGetExpiresIdleAdminSession(t *testing.T) {
+	t.Parallel()
+
+	sm := NewSessionManagerWithIdleTimeout(context.Background(), time.Hour, 100*time.Millisecond, false)
+	_, cookieID := createSession(t, sm)
+
+	time.Sleep(200 * time.Millisecond)
+
+	if got := sm.Get(requestWithSession(cookieID)); got != nil {
+		t.Fatalf("Get returned idle session %+v, want nil", got)
+	}
+}
+
+func TestGetRefreshesIdleWindow(t *testing.T) {
+	t.Parallel()
+
+	sm := NewSessionManagerWithIdleTimeout(context.Background(), time.Hour, 500*time.Millisecond, false)
+	_, cookieID := createSession(t, sm)
+
+	time.Sleep(100 * time.Millisecond)
+	if got := sm.Get(requestWithSession(cookieID)); got == nil {
+		t.Fatal("Get returned nil before idle timeout")
+	}
+
+	time.Sleep(150 * time.Millisecond)
+	if got := sm.Get(requestWithSession(cookieID)); got == nil {
+		t.Fatal("Get returned nil after activity refreshed the idle window")
+	}
+}
+
+func TestCleanupExpiredSessionsRemovesExpiredAndIdleSessions(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+	sm := &SessionManager{
+		sessions: map[string]*Session{
+			"expired-admin": {
+				ID:           "expired-admin",
+				Admin:        true,
+				LastAccessed: now,
+				expiresAt:    now.Add(-time.Second),
+			},
+			"idle-admin": {
+				ID:           "idle-admin",
+				Admin:        true,
+				LastAccessed: now.Add(-16 * time.Minute),
+				expiresAt:    now.Add(time.Hour),
+			},
+			"active-admin": {
+				ID:           "active-admin",
+				Admin:        true,
+				LastAccessed: now.Add(-15 * time.Minute),
+				expiresAt:    now.Add(time.Hour),
+			},
+			"expired-pre-auth": {
+				ID:           "expired-pre-auth",
+				Admin:        false,
+				LastAccessed: now,
+				expiresAt:    now.Add(-time.Second),
+			},
+			"old-pre-auth-with-future-expiry": {
+				ID:           "old-pre-auth-with-future-expiry",
+				Admin:        false,
+				LastAccessed: now.Add(-time.Hour),
+				expiresAt:    now.Add(time.Minute),
+			},
+		},
+		idleTimeout: 15 * time.Minute,
+	}
+
+	sm.cleanupExpiredSessions(now)
+
+	for _, id := range []string{"expired-admin", "idle-admin", "expired-pre-auth"} {
+		if _, ok := sm.sessions[id]; ok {
+			t.Fatalf("cleanup retained %s", id)
+		}
+	}
+	for _, id := range []string{"active-admin", "old-pre-auth-with-future-expiry"} {
+		if _, ok := sm.sessions[id]; !ok {
+			t.Fatalf("cleanup removed %s", id)
+		}
 	}
 }
 
@@ -341,8 +568,8 @@ func TestCookieAttributes(t *testing.T) {
 			if c.SameSite != http.SameSiteStrictMode {
 				t.Fatalf("cookie SameSite = %d, want SameSiteStrictMode", c.SameSite)
 			}
-			if c.Path != "/" {
-				t.Fatalf("cookie Path = %q, want /", c.Path)
+			if c.Path != "/admin" {
+				t.Fatalf("cookie Path = %q, want /admin", c.Path)
 			}
 			return
 		}

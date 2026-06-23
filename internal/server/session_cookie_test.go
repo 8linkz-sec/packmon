@@ -3,7 +3,7 @@ package server
 import (
 	"testing"
 
-	"github.com/8linkz/packmon/internal/config"
+	"github.com/8linkz-sec/packmon/internal/config"
 )
 
 func TestSessionCookieSecureFlag(t *testing.T) {

@@ -3,8 +3,9 @@ package scanner
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 func TestTableWriterColorSeverityAndSeverityParsing(t *testing.T) {
@@ -56,5 +57,8 @@ func TestScannerTruncate(t *testing.T) {
 	}
 	if got := truncate("abcdef", 3); got != "abc..." {
 		t.Fatalf("truncate(long) = %q", got)
+	}
+	if got := truncate("ääääää", 3); got != "äää..." || !utf8.ValidString(got) {
+		t.Fatalf("truncate(utf8) = %q, valid=%v; want %q", got, utf8.ValidString(got), "äää...")
 	}
 }

@@ -6,7 +6,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 // HexParser parses Elixir/Erlang mix.lock files.
@@ -40,7 +40,9 @@ func (p *HexParser) Parse(r io.Reader) ([]domain.Package, error) {
 		errs     []string
 	)
 
+	lineNum := 0
 	for scanner.Scan() {
+		lineNum++
 		line := scanner.Text()
 
 		matches := mixLockLineRe.FindStringSubmatch(line)
@@ -52,7 +54,7 @@ func (p *HexParser) Parse(r io.Reader) ([]domain.Package, error) {
 		version := matches[2]
 
 		if name == "" || version == "" {
-			errs = append(errs, fmt.Sprintf("empty name or version in line: %.80s", line))
+			errs = append(errs, fmt.Sprintf("line %d: empty name or version", lineNum))
 			continue
 		}
 

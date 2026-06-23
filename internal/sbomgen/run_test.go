@@ -44,6 +44,30 @@ func (g *fakeGenerator) DeclaresDependencies(Detection, GenerateOptions) (bool, 
 	return g.declares, g.declaresErr
 }
 
+type cleanupFailureGenerator struct {
+	fakeGenerator
+}
+
+func (g *cleanupFailureGenerator) Generate(_ context.Context, _ Detection, outPath string, _ GenerateOptions, _ RunnerFunc) error {
+	g.generateCalls++
+	if err := os.Mkdir(outPath, 0o700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(outPath, "child.txt"), []byte("left behind"), 0o600); err != nil {
+		return err
+	}
+	return errors.New("generate boom")
+}
+
+type looseModeGenerator struct {
+	fakeGenerator
+}
+
+func (g *looseModeGenerator) Generate(_ context.Context, _ Detection, outPath string, _ GenerateOptions, _ RunnerFunc) error {
+	g.generateCalls++
+	return os.WriteFile(outPath, []byte(validCycloneDXWithPackage()), 0o644) //nolint:gosec // test generator intentionally writes loose permissions for validation.
+}
+
 func validCycloneDXWithPackage() string {
 	return `{"bomFormat":"CycloneDX","specVersion":"1.6","version":1,"components":[{"type":"library","name":"left-pad","version":"1.3.0","purl":"pkg:npm/left-pad@1.3.0"}]}`
 }
@@ -120,6 +144,32 @@ func TestRunInstallsMissingToolThenGenerates(t *testing.T) {
 	}
 }
 
+func TestSanitizedCommandEnvDropsSecretsAndKeepsToolOverrides(t *testing.T) {
+	t.Setenv("PACKMON_API_KEY", "packmon-secret")
+	t.Setenv("GITHUB_TOKEN", "github-secret")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "aws-secret")
+	t.Setenv("HTTP_PROXY", "http://user:pass@proxy.example")
+	t.Setenv("SAFE_TOOL_ENV", "visible")
+
+	env := sanitizedCommandEnv([]string{
+		"GOWORK=off",
+		"PACKMON_WEBHOOK_SECRET=bad",
+		"CUSTOM_TOKEN=bad",
+	})
+
+	for _, key := range []string{"PACKMON_API_KEY", "GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY", "HTTP_PROXY", "PACKMON_WEBHOOK_SECRET", "CUSTOM_TOKEN"} {
+		if envHasKey(env, key) {
+			t.Fatalf("sanitized env kept sensitive key %s in %v", key, env)
+		}
+	}
+	if !envHasPair(env, "SAFE_TOOL_ENV=visible") {
+		t.Fatalf("sanitized env dropped safe inherited value: %v", env)
+	}
+	if !envHasPair(env, "GOWORK=off") {
+		t.Fatalf("sanitized env dropped safe override: %v", env)
+	}
+}
+
 func TestRunZeroPackagesCrossCheck(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "package.json", `{"dependencies":{"left-pad":"1.3.0"}}`)
@@ -138,6 +188,25 @@ func TestRunZeroPackagesCrossCheck(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "declares dependencies but generated SBOM imported 0 packages") {
 		t.Fatalf("Run err = %v, want zero-package cross-check", err)
 	}
+}
+
+func envHasKey(env []string, key string) bool {
+	for _, kv := range env {
+		got, _, ok := strings.Cut(kv, "=")
+		if ok && got == key {
+			return true
+		}
+	}
+	return false
+}
+
+func envHasPair(env []string, pair string) bool {
+	for _, kv := range env {
+		if kv == pair {
+			return true
+		}
+	}
+	return false
 }
 
 func TestRunKeepCollisionDoesNotDeleteExistingFile(t *testing.T) {
@@ -198,7 +267,7 @@ func TestRunKeepTimestampCollisionUsesCounterSuffix(t *testing.T) {
 	if got := filepath.Base(result.SBOMPaths[0]); got != "package-20260607T150405Z-2.cdx.json" {
 		t.Fatalf("SBOM path = %q, want collision suffix", got)
 	}
-	if got, err := os.ReadFile(existing); err != nil || string(got) != "do-not-delete" {
+	if got, err := os.ReadFile(existing); err != nil || string(got) != "do-not-delete" { //nolint:gosec // test reads a file it created in t.TempDir.
 		t.Fatalf("existing timestamped file changed, got %q err %v", got, err)
 	}
 }

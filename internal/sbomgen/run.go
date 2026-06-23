@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 )
 
 const defaultGenerationTimeout = 2 * time.Minute
@@ -36,7 +37,7 @@ type Result struct {
 	Cleanup   func() error
 }
 
-func Run(ctx context.Context, cfg Config) (Result, error) {
+func Run(ctx context.Context, cfg Config) (result Result, err error) {
 	cfg = normalizeConfig(cfg)
 
 	detections, err := Detect(cfg.Target, cfg.MaxDepth)
@@ -56,10 +57,14 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 	success := false
 	defer func() {
 		if !success {
+			var cleanupErr error
 			if cfg.KeepSBOMDir != "" {
-				_ = removeFiles(created)
+				cleanupErr = errors.Join(cleanupErr, removeFiles(created))
 			}
-			_ = failureCleanup()
+			cleanupErr = errors.Join(cleanupErr, failureCleanup())
+			if cleanupErr != nil {
+				err = errors.Join(err, fmt.Errorf("cleanup generated SBOMs: %w", cleanupErr))
+			}
 		}
 	}()
 
@@ -92,6 +97,9 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 		cancel()
 		if err != nil {
 			return Result{}, fmt.Errorf("generate SBOM for %s: %w", d.DisplayPath, err)
+		}
+		if err := normalizeGeneratedSBOMFile(outPath); err != nil {
+			return Result{}, err
 		}
 		packages, skipped, err := validateGeneratedSBOM(outPath)
 		if err != nil {
@@ -257,10 +265,18 @@ func reserveOutputPath(path string) error {
 }
 
 func ensureTool(ctx context.Context, cfg Config, gen Generator) error {
-	if _, err := cfg.LookPath(gen.Tool()); err == nil {
-		return nil
-	}
+	cfg = normalizeConfig(cfg)
 	spec := gen.InstallSpec()
+	toolPath, pathErr := cfg.LookPath(gen.Tool())
+	var versionErr error
+	if pathErr == nil {
+		if versionErr = verifyToolVersion(ctx, cfg, gen, toolPath); versionErr == nil {
+			return nil
+		}
+		if !spec.CanAutoInstall || !cfg.InstallTools {
+			return versionErr
+		}
+	}
 	if !spec.CanAutoInstall {
 		return fmt.Errorf("required SBOM generator %q is not on PATH; install %s manually", gen.Tool(), spec.Package)
 	}
@@ -282,12 +298,47 @@ func ensureTool(ctx context.Context, cfg Config, gen Generator) error {
 	defer cancel()
 	output, err := cfg.Runner(installCtx, RunOptions{Name: installer, Args: spec.Args[1:]})
 	if err != nil {
-		return fmt.Errorf("install %s: %w: %s", spec.Package, err, strings.TrimSpace(string(output)))
+		return fmt.Errorf("install %s: %w: %s", spec.Package, err, strings.TrimSpace(commandOutputSummary(output)))
 	}
-	if _, err := cfg.LookPath(gen.Tool()); err != nil {
+	toolPath, err = cfg.LookPath(gen.Tool())
+	if err != nil {
 		return fmt.Errorf("installed %s but %q is still not on PATH: %w", spec.Package, gen.Tool(), err)
 	}
+	if err := verifyToolVersion(ctx, cfg, gen, toolPath); err != nil {
+		return err
+	}
 	return nil
+}
+
+func verifyToolVersion(ctx context.Context, cfg Config, gen Generator, toolPath string) error {
+	spec := gen.InstallSpec()
+	expected := strings.TrimSpace(spec.ExpectedVersion)
+	if expected == "" || len(spec.VersionArgs) == 0 {
+		return nil
+	}
+	versionCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
+	defer cancel()
+	output, err := cfg.Runner(versionCtx, RunOptions{Name: toolPath, Args: append([]string(nil), spec.VersionArgs...)})
+	if err != nil {
+		return fmt.Errorf("check %q version: %w: %s", gen.Tool(), err, strings.TrimSpace(commandOutputSummary(output)))
+	}
+	actual := strings.TrimSpace(commandOutputSummary(output))
+	if !versionOutputContainsVersion(actual, expected) {
+		return fmt.Errorf("required SBOM generator %q version %s, found %s", gen.Tool(), expected, actual)
+	}
+	return nil
+}
+
+func versionOutputContainsVersion(output, expected string) bool {
+	expected = strings.TrimPrefix(strings.TrimSpace(expected), "v")
+	for _, field := range strings.FieldsFunc(output, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '.' && r != '-' && r != '_'
+	}) {
+		if strings.TrimPrefix(strings.TrimSpace(field), "v") == expected {
+			return true
+		}
+	}
+	return false
 }
 
 func removeFiles(paths []string) error {
@@ -300,14 +351,68 @@ func removeFiles(paths []string) error {
 	return joined
 }
 
+func normalizeGeneratedSBOMFile(path string) error {
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("set generated SBOM permissions for %s: %w", path, err)
+	}
+	return nil
+}
+
 func defaultRunner(ctx context.Context, opts RunOptions) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, opts.Name, opts.Args...) // #nosec G204 -- names come from pinned generators or explicit injected test seams; no shell is used.
 	if opts.Dir != "" {
 		cmd.Dir = opts.Dir
 	}
-	if len(opts.Env) > 0 {
-		cmd.Env = append(os.Environ(), opts.Env...)
-	}
+	cmd.Env = sanitizedCommandEnv(opts.Env)
 	cmd.WaitDelay = 2 * time.Second
-	return cmd.CombinedOutput()
+	var output boundedOutputWriter
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	err := cmd.Run()
+	return output.Bytes(), err
+}
+
+func sanitizedCommandEnv(extra []string) []string {
+	out := make([]string, 0, len(os.Environ())+len(extra))
+	seen := make(map[string]int)
+	add := func(kv string) {
+		key, _, ok := strings.Cut(kv, "=")
+		if !ok || !allowToolEnvKey(key) {
+			return
+		}
+		normalized := strings.ToUpper(strings.TrimSpace(key))
+		if idx, exists := seen[normalized]; exists {
+			out[idx] = kv
+			return
+		}
+		seen[normalized] = len(out)
+		out = append(out, kv)
+	}
+	for _, kv := range os.Environ() {
+		add(kv)
+	}
+	for _, kv := range extra {
+		add(kv)
+	}
+	return out
+}
+
+func allowToolEnvKey(key string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(key))
+	if upper == "" {
+		return false
+	}
+	if strings.HasPrefix(upper, "PACKMON_") {
+		return false
+	}
+	switch upper {
+	case "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE":
+		return false
+	}
+	for _, marker := range []string{"TOKEN", "SECRET", "PASSWORD", "PASSWD", "API_KEY", "ACCESS_KEY", "PRIVATE_KEY", "CREDENTIAL", "AUTH", "COOKIE", "SESSION"} {
+		if strings.Contains(upper, marker) {
+			return false
+		}
+	}
+	return true
 }

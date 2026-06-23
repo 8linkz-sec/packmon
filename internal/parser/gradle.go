@@ -5,7 +5,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 // GradleParser parses gradle.lockfile files. Gradle uses Maven repositories,
@@ -65,7 +65,7 @@ func (p *GradleParser) Parse(r io.Reader) ([]domain.Package, error) {
 		// Split coordinate into group:artifact:version.
 		parts := strings.SplitN(coordinate, ":", 3)
 		if len(parts) != 3 {
-			errs = append(errs, fmt.Sprintf("line %d: expected group:artifact:version, got %q", lineNum, coordinate))
+			errs = append(errs, fmt.Sprintf("line %d: expected group:artifact:version", lineNum))
 			continue
 		}
 
@@ -74,16 +74,16 @@ func (p *GradleParser) Parse(r io.Reader) ([]domain.Package, error) {
 		version := strings.TrimSpace(parts[2])
 
 		if group == "" || artifact == "" {
-			errs = append(errs, fmt.Sprintf("line %d: empty group or artifact in %q", lineNum, coordinate))
+			errs = append(errs, fmt.Sprintf("line %d: empty group or artifact", lineNum))
 			continue
 		}
 		if version == "" {
-			errs = append(errs, fmt.Sprintf("line %d: missing version for %s:%s", lineNum, group, artifact))
+			errs = append(errs, fmt.Sprintf("line %d: missing version", lineNum))
 			continue
 		}
 
 		name := group + ":" + artifact
-		key := pkgKey{name: strings.ToLower(name), version: version}
+		key := pkgKey{name: name, version: version}
 		dev := gradleConfigurationsDev(configurations)
 		if idx, exists := seen[key]; exists {
 			if packages[idx].Dev && !dev {

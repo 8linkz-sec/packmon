@@ -1,9 +1,13 @@
 package sbomgen
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -27,18 +31,6 @@ func detectionKeys(ds []Detection) []string {
 	return out
 }
 
-func equalStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
 func TestDetectSingleEcosystems(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "go.mod", "module x\n\ngo 1.26\n")
@@ -49,7 +41,7 @@ func TestDetectSingleEcosystems(t *testing.T) {
 		t.Fatalf("detect: %v", err)
 	}
 	want := []string{"go:go.mod", "maven:svc/pom.xml"}
-	if g := detectionKeys(got); !equalStrings(g, want) {
+	if g := detectionKeys(got); !slices.Equal(g, want) {
 		t.Fatalf("keys = %v, want %v", g, want)
 	}
 }
@@ -64,7 +56,7 @@ func TestDetectSkipsVendorAndNodeModules(t *testing.T) {
 	if err != nil {
 		t.Fatalf("detect: %v", err)
 	}
-	if g := detectionKeys(got); !equalStrings(g, []string{"npm:package.json"}) {
+	if g := detectionKeys(got); !slices.Equal(g, []string{"npm:package.json"}) {
 		t.Fatalf("keys = %v, want [npm:package.json]", g)
 	}
 }
@@ -80,7 +72,7 @@ func TestDetectNpmWorkspaceSuppressesChild(t *testing.T) {
 		t.Fatalf("detect: %v", err)
 	}
 	want := []string{"npm:package.json", "npm:tools/standalone/package.json"}
-	if g := detectionKeys(got); !equalStrings(g, want) {
+	if g := detectionKeys(got); !slices.Equal(g, want) {
 		t.Fatalf("keys = %v, want %v", g, want)
 	}
 }
@@ -96,7 +88,7 @@ func TestDetectSuppressionIsEcosystemScoped(t *testing.T) {
 		t.Fatalf("detect: %v", err)
 	}
 	want := []string{"go:packages/a/go.mod", "npm:package.json"}
-	if g := detectionKeys(got); !equalStrings(g, want) {
+	if g := detectionKeys(got); !slices.Equal(g, want) {
 		t.Fatalf("keys = %v, want %v", g, want)
 	}
 }
@@ -112,7 +104,7 @@ func TestDetectMavenModulesSuppressChildren(t *testing.T) {
 		t.Fatalf("detect: %v", err)
 	}
 	want := []string{"maven:pom.xml", "maven:standalone/pom.xml"}
-	if g := detectionKeys(got); !equalStrings(g, want) {
+	if g := detectionKeys(got); !slices.Equal(g, want) {
 		t.Fatalf("keys = %v, want %v", g, want)
 	}
 }
@@ -126,7 +118,46 @@ func TestDetectOnlyPoetryPyproject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("detect: %v", err)
 	}
-	if g := detectionKeys(got); !equalStrings(g, []string{"pypi:poetry/pyproject.toml"}) {
+	if g := detectionKeys(got); !slices.Equal(g, []string{"pypi:poetry/pyproject.toml"}) {
 		t.Fatalf("keys = %v", g)
 	}
 }
+
+func TestDetectReportsWalkErrors(t *testing.T) {
+	root := t.TempDir()
+	originalWalkDir := walkDir
+	t.Cleanup(func() { walkDir = originalWalkDir })
+
+	denied := filepath.Join(root, "private")
+	walkDir = func(_ string, fn fs.WalkDirFunc) error {
+		return fn(denied, fakeDirEntry{name: "private", dir: true}, fs.ErrPermission)
+	}
+
+	_, err := Detect(root, 10)
+	if err == nil {
+		t.Fatalf("Detect should report walk errors")
+	}
+	if !errors.Is(err, fs.ErrPermission) || !strings.Contains(err.Error(), "private") {
+		t.Fatalf("Detect err = %v, want path and permission error", err)
+	}
+}
+
+func TestDetectRejectsOversizedManifestReads(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "package.json", strings.Repeat("x", maxAutoSBOMManifestBytes+1))
+
+	_, err := Detect(root, 10)
+	if err == nil || !strings.Contains(err.Error(), "exceeds maximum auto-SBOM manifest size") {
+		t.Fatalf("Detect err = %v, want manifest size cap", err)
+	}
+}
+
+type fakeDirEntry struct {
+	name string
+	dir  bool
+}
+
+func (d fakeDirEntry) Name() string               { return d.name }
+func (d fakeDirEntry) IsDir() bool                { return d.dir }
+func (d fakeDirEntry) Type() fs.FileMode          { return 0 }
+func (d fakeDirEntry) Info() (fs.FileInfo, error) { return nil, nil }

@@ -10,8 +10,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/8linkz/packmon/internal/domain"
-	"github.com/8linkz/packmon/internal/scanner"
+	"github.com/8linkz-sec/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/scanner"
 	"gopkg.in/yaml.v3"
 )
 
@@ -29,6 +29,7 @@ type cliConfig struct {
 	CACert            string           `yaml:"cacert"`
 	InsecureAllowHTTP *bool            `yaml:"insecure_allow_http"`
 	RequireRemote     *bool            `yaml:"require_remote"`
+	SendRepoMetadata  *bool            `yaml:"send_repo_metadata"`
 	Webhook           cliWebhookConfig `yaml:"webhook"`
 	Output            cliOutputConfig  `yaml:"output"`
 	Log               cliLogConfig     `yaml:"log"`
@@ -64,24 +65,33 @@ type cliDBConfig struct {
 }
 
 type cliRepoConfig struct {
-	Name       string           `yaml:"name"`
-	Path       string           `yaml:"path"`
-	Server     string           `yaml:"server"`
-	APIKey     string           `yaml:"api_key"`
-	APIKeyEnv  string           `yaml:"api_key_env"`
-	Mode       string           `yaml:"mode"`
-	FailOn     string           `yaml:"fail_on"`
-	Timeout    int              `yaml:"timeout"`
-	Ecosystems []string         `yaml:"ecosystems"`
-	IncludeDev *bool            `yaml:"include_dev"`
-	Webhook    cliWebhookConfig `yaml:"webhook"`
+	Name             string           `yaml:"name"`
+	Path             string           `yaml:"path"`
+	Server           string           `yaml:"server"`
+	APIKey           string           `yaml:"api_key"`
+	APIKeyEnv        string           `yaml:"api_key_env"`
+	Mode             string           `yaml:"mode"`
+	FailOn           string           `yaml:"fail_on"`
+	Timeout          int              `yaml:"timeout"`
+	Ecosystems       []string         `yaml:"ecosystems"`
+	IncludeDev       *bool            `yaml:"include_dev"`
+	SendRepoMetadata *bool            `yaml:"send_repo_metadata"`
+	Webhook          cliWebhookConfig `yaml:"webhook"`
 }
 
 func loadCurrentCLIConfig() (*cliConfig, string, error) {
-	return loadCLIConfig(flagConfig)
+	return loadCLIConfigWithOptions(flagConfig, cliConfigLoadOptions{SkipProjectConfig: flagNoProjectConfig})
 }
 
 func loadCLIConfig(path string) (*cliConfig, string, error) {
+	return loadCLIConfigWithOptions(path, cliConfigLoadOptions{})
+}
+
+type cliConfigLoadOptions struct {
+	SkipProjectConfig bool
+}
+
+func loadCLIConfigWithOptions(path string, opts cliConfigLoadOptions) (*cliConfig, string, error) {
 	configPath := strings.TrimSpace(path)
 	if configPath != "" {
 		// An explicit --config path is loaded as a single file.
@@ -89,56 +99,62 @@ func loadCLIConfig(path string) (*cliConfig, string, error) {
 	}
 
 	// Layered precedence (DESIGN.md CLI behavior): the user-global config
-	// (~/.packmon/config/packmon.yaml) is the base, with the project
-	// ./.packmon.yaml overlaid on top. Decoding both documents into the same
-	// struct overlays only the fields present in each file, so the project
-	// config overrides the user-global one field by field.
+	// (~/.packmon/config/packmon.yaml) is the trusted base. The auto-discovered
+	// project ./.packmon.yaml is overlaid only after credential/server/DB
+	// routing fields have been removed from that untrusted repository layer.
 	var (
 		cfg        cliConfig
 		loaded     bool
 		sourcePath string
-		baseDir    string
 	)
 
 	if userPath, ok := userGlobalConfigPath(); ok {
 		data, err := os.ReadFile(userPath) // #nosec G304 -- user-owned config path.
 		switch {
 		case err == nil:
-			if derr := decodeCLIConfig(data, &cfg); derr != nil {
+			var userCfg cliConfig
+			if derr := decodeCLIConfig(data, &userCfg); derr != nil {
 				return nil, "", fmt.Errorf("parse %s: %w", userPath, derr)
 			}
+			if err := userCfg.normalize(filepath.Dir(userPath)); err != nil {
+				return nil, "", fmt.Errorf("validate %s: %w", userPath, err)
+			}
+			cfg = userCfg
 			loaded = true
 			sourcePath = userPath
-			baseDir = filepath.Dir(userPath)
 		case !os.IsNotExist(err):
 			return nil, "", fmt.Errorf("read %s: %w", userPath, err)
 		}
 	}
 
-	projectData, err := os.ReadFile(defaultCLIConfigFile) // #nosec G304 -- repo-local config.
-	switch {
-	case err == nil:
-		if derr := decodeCLIConfig(projectData, &cfg); derr != nil {
-			return nil, "", fmt.Errorf("parse %s: %w", defaultCLIConfigFile, derr)
+	if !opts.SkipProjectConfig {
+		projectData, err := os.ReadFile(defaultCLIConfigFile) // #nosec G304 -- repo-local config.
+		switch {
+		case err == nil:
+			var projectCfg cliConfig
+			if derr := decodeCLIConfig(projectData, &projectCfg); derr != nil {
+				return nil, "", fmt.Errorf("parse %s: %w", defaultCLIConfigFile, derr)
+			}
+			abs, aerr := filepath.Abs(defaultCLIConfigFile)
+			if aerr != nil {
+				abs = defaultCLIConfigFile
+			}
+			projectCfg.stripUntrustedAutoProjectFields()
+			if err := projectCfg.normalize(filepath.Dir(abs)); err != nil {
+				return nil, "", fmt.Errorf("validate %s: %w", abs, err)
+			}
+			overlayCLIConfig(&cfg, projectCfg)
+			loaded = true
+			sourcePath = abs
+		case !os.IsNotExist(err):
+			return nil, "", fmt.Errorf("read %s: %w", defaultCLIConfigFile, err)
 		}
-		loaded = true
-		abs, aerr := filepath.Abs(defaultCLIConfigFile)
-		if aerr != nil {
-			abs = defaultCLIConfigFile
-		}
-		sourcePath = abs
-		baseDir = filepath.Dir(abs)
-	case !os.IsNotExist(err):
-		return nil, "", fmt.Errorf("read %s: %w", defaultCLIConfigFile, err)
 	}
 
 	if !loaded {
 		return nil, "", nil
 	}
 
-	if err := cfg.normalize(baseDir); err != nil {
-		return nil, "", fmt.Errorf("validate %s: %w", sourcePath, err)
-	}
 	return &cfg, sourcePath, nil
 }
 
@@ -184,6 +200,105 @@ func decodeCLIConfig(data []byte, cfg *cliConfig) error {
 	return nil
 }
 
+func (c *cliConfig) stripUntrustedAutoProjectFields() {
+	c.Server = ""
+	c.APIKey = ""
+	c.APIKeyEnv = ""
+	c.CACert = ""
+	c.InsecureAllowHTTP = nil
+	c.RequireRemote = nil
+	if c.SendRepoMetadata != nil && *c.SendRepoMetadata {
+		c.SendRepoMetadata = nil
+	}
+	c.Webhook = cliWebhookConfig{}
+	c.Output = cliOutputConfig{}
+	c.DB.Path = ""
+	for i := range c.Repos {
+		c.Repos[i].Server = ""
+		c.Repos[i].APIKey = ""
+		c.Repos[i].APIKeyEnv = ""
+		if c.Repos[i].SendRepoMetadata != nil && *c.Repos[i].SendRepoMetadata {
+			c.Repos[i].SendRepoMetadata = nil
+		}
+		c.Repos[i].Webhook = cliWebhookConfig{}
+	}
+}
+
+func overlayCLIConfig(dst *cliConfig, src cliConfig) {
+	if src.Server != "" {
+		dst.Server = src.Server
+	}
+	if src.APIKey != "" {
+		dst.APIKey = src.APIKey
+	}
+	if src.APIKeyEnv != "" {
+		dst.APIKeyEnv = src.APIKeyEnv
+	}
+	if src.Mode != "" {
+		dst.Mode = src.Mode
+	}
+	if src.FailOn != "" {
+		dst.FailOn = src.FailOn
+	}
+	if src.Timeout != 0 {
+		dst.Timeout = src.Timeout
+	}
+	if len(src.Ecosystems) > 0 {
+		dst.Ecosystems = append([]string(nil), src.Ecosystems...)
+	}
+	if src.IncludeDev != nil {
+		dst.IncludeDev = src.IncludeDev
+	}
+	if src.CACert != "" {
+		dst.CACert = src.CACert
+	}
+	if src.InsecureAllowHTTP != nil {
+		dst.InsecureAllowHTTP = src.InsecureAllowHTTP
+	}
+	if src.RequireRemote != nil {
+		dst.RequireRemote = src.RequireRemote
+	}
+	if src.SendRepoMetadata != nil {
+		dst.SendRepoMetadata = src.SendRepoMetadata
+	}
+	if src.Webhook.URL != "" {
+		dst.Webhook.URL = src.Webhook.URL
+	}
+	if src.Webhook.Secret != "" {
+		dst.Webhook.Secret = src.Webhook.Secret
+	}
+	if src.Output.Format != "" {
+		dst.Output.Format = src.Output.Format
+	}
+	if src.Output.File != "" {
+		dst.Output.File = src.Output.File
+	}
+	if src.Log.Level != "" {
+		dst.Log.Level = src.Log.Level
+	}
+	if src.Log.Format != "" {
+		dst.Log.Format = src.Log.Format
+	}
+	if src.Log.File != "" {
+		dst.Log.File = src.Log.File
+	}
+	if src.Hook.Type != "" {
+		dst.Hook.Type = src.Hook.Type
+	}
+	if src.Hook.FailOn != "" {
+		dst.Hook.FailOn = src.Hook.FailOn
+	}
+	if src.DB.Path != "" {
+		dst.DB.Path = src.DB.Path
+	}
+	if src.DB.SyncSource != "" {
+		dst.DB.SyncSource = src.DB.SyncSource
+	}
+	if len(src.Repos) > 0 {
+		dst.Repos = append([]cliRepoConfig(nil), src.Repos...)
+	}
+}
+
 // userGlobalConfigPath returns the path to the user-global CLI config
 // (~/.packmon/config/packmon.yaml) and whether the home directory is known.
 func userGlobalConfigPath() (string, bool) {
@@ -201,6 +316,9 @@ func (c *cliConfig) normalize(baseDir string) error {
 	c.Mode = normalizeModeString(c.Mode)
 	c.FailOn = normalizeSeverityString(c.FailOn)
 	c.Ecosystems = normalizeStringList(c.Ecosystems)
+	if err := validateCanonicalEcosystemFilters("ecosystems", c.Ecosystems); err != nil {
+		return err
+	}
 	c.CACert = strings.TrimSpace(c.CACert)
 	c.Webhook.URL = strings.TrimSpace(c.Webhook.URL)
 	c.Webhook.Secret = strings.TrimSpace(c.Webhook.Secret)
@@ -255,6 +373,9 @@ func (c *cliConfig) normalize(baseDir string) error {
 		repo.Mode = normalizeModeString(repo.Mode)
 		repo.FailOn = normalizeSeverityString(repo.FailOn)
 		repo.Ecosystems = normalizeStringList(repo.Ecosystems)
+		if err := validateCanonicalEcosystemFilters(fmt.Sprintf("repos[%d].ecosystems", i), repo.Ecosystems); err != nil {
+			return err
+		}
 		repo.Webhook.URL = strings.TrimSpace(repo.Webhook.URL)
 		repo.Webhook.Secret = strings.TrimSpace(repo.Webhook.Secret)
 
@@ -366,6 +487,21 @@ func normalizeStringList(values []string) []string {
 	return out
 }
 
+func validateCanonicalEcosystemFilters(field string, ecosystems []string) error {
+	valid := validScanEcosystemFilterValues(true)
+	for i, raw := range ecosystems {
+		ecosystem := strings.ToLower(strings.TrimSpace(raw))
+		if ecosystem == "" {
+			continue
+		}
+		if !domain.Ecosystem(ecosystem).Valid() {
+			return fmt.Errorf("%s[%d]: unknown ecosystem filter %q (valid values: %s)", field, i, ecosystem, strings.Join(valid, ", "))
+		}
+		ecosystems[i] = ecosystem
+	}
+	return nil
+}
+
 func normalizeModeString(value string) string {
 	return strings.ToLower(strings.TrimSpace(value))
 }
@@ -394,6 +530,9 @@ func validateSeverityString(value string) error {
 }
 
 func resolveLocalDBPath() (string, error) {
+	if p := strings.TrimSpace(os.Getenv("PACKMON_DB_PATH")); p != "" {
+		return filepath.Join(p, "packmon.db"), nil
+	}
 	cfg, _, err := loadCurrentCLIConfig()
 	if err != nil {
 		return "", err

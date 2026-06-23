@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"html"
 	"log/slog"
 	"net"
 	"net/http"
@@ -16,14 +15,16 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/8linkz/packmon/internal/db/sqlite"
-	"github.com/8linkz/packmon/internal/web"
+	"github.com/8linkz-sec/packmon/internal/db/sqlite"
+	"github.com/8linkz-sec/packmon/internal/server/middleware"
+	"github.com/8linkz-sec/packmon/internal/web"
 	"github.com/spf13/cobra"
 )
 
 type dashboardOptions struct {
 	shutdownTimeout time.Duration
 	onReady         func(string)
+	openBrowser     func(string) error
 }
 
 func newDashboardCmd() *cobra.Command {
@@ -33,6 +34,9 @@ func newDashboardCmd() *cobra.Command {
 func newDashboardCmdWithOptions(options dashboardOptions) *cobra.Command {
 	if options.shutdownTimeout <= 0 {
 		options.shutdownTimeout = 5 * time.Second
+	}
+	if options.openBrowser == nil {
+		options.openBrowser = openBrowser
 	}
 
 	var (
@@ -60,7 +64,7 @@ func newDashboardCmdWithOptions(options dashboardOptions) *cobra.Command {
 			defer closeSilently(store)
 
 			logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
-			renderer := web.NewRenderer(web.TemplateFS(), false)
+			renderer := web.NewRendererWithLayoutLinks(web.TemplateFS(), false, web.LayoutLinks{HideAdmin: true})
 
 			mux := http.NewServeMux()
 			web.RegisterRoutes(mux, store, renderer, logger)
@@ -72,10 +76,7 @@ func newDashboardCmdWithOptions(options dashboardOptions) *cobra.Command {
 			}
 			defer closeSilently(listener)
 
-			srv := &http.Server{
-				Handler:           mux,
-				ReadHeaderTimeout: 5 * time.Second,
-			}
+			srv := newLocalDashboardServer(middleware.SecurityHeaders(false, "", nil)(mux))
 
 			serveErr := make(chan error, 1)
 			go func() {
@@ -93,7 +94,9 @@ func newDashboardCmdWithOptions(options dashboardOptions) *cobra.Command {
 			if flagOpen {
 				go func() {
 					time.Sleep(200 * time.Millisecond)
-					_ = openBrowser(url)
+					if err := options.openBrowser(url); err != nil {
+						fmt.Fprintf(os.Stderr, "warning: unable to open dashboard browser: %v\n", err)
+					}
 				}()
 			}
 
@@ -122,31 +125,30 @@ func newDashboardCmdWithOptions(options dashboardOptions) *cobra.Command {
 
 	f := cmd.Flags()
 	f.IntVar(&flagPort, "port", 0, "localhost port to bind to (default: random free port)")
-	f.BoolVar(&flagOpen, "open", true, "open the dashboard in the default browser")
+	f.BoolVar(&flagOpen, "open", false, "open the dashboard in the default browser")
 
 	return cmd
 }
 
+func newLocalDashboardServer(handler http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+}
+
 func registerLocalDashboardRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /admin", redirectHome)
-	mux.HandleFunc("GET /admin/", redirectHome)
-	mux.HandleFunc("GET /admin/login", redirectHome)
-	mux.HandleFunc("GET /.well-known/change-password", redirectHome)
-	mux.HandleFunc("POST /api/v1/packages/{ecosystem}/{rest...}", localRefreshNotice)
+	mux.HandleFunc("GET /admin", localAdminUnavailable)
+	mux.HandleFunc("GET /admin/", localAdminUnavailable)
+	mux.HandleFunc("GET /admin/login", localAdminUnavailable)
+	mux.HandleFunc("GET /.well-known/change-password", localAdminUnavailable)
 }
 
-func redirectHome(w http.ResponseWriter, r *http.Request) {
-	http.Redirect(w, r, "/", http.StatusSeeOther)
-}
-
-func localRefreshNotice(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(http.StatusAccepted)
-
-	ecosystem := html.EscapeString(r.PathValue("ecosystem"))
-	name := html.EscapeString(r.PathValue("rest"))
-
-	_, _ = fmt.Fprintf(w, `<div id="refresh-status" class="rounded-md border border-yellow-200 bg-yellow-50 px-4 py-3 text-sm text-yellow-800">Local dashboard is read-only. Refresh requests for <strong>%s/%s</strong> need a running packmon server.</div>`, ecosystem, name)
+func localAdminUnavailable(w http.ResponseWriter, _ *http.Request) {
+	http.Error(w, "Local dashboard is read-only. Admin functions require packmon-server.", http.StatusNotFound)
 }
 
 func signalContext(parent context.Context) (context.Context, context.CancelFunc) {
@@ -161,14 +163,24 @@ func openBrowser(url string) error {
 	switch runtime.GOOS {
 	case "windows":
 		// #nosec G204 -- URL is validated and only opened in the user's default browser.
-		return exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+		return startBrowserCommand(exec.Command("rundll32", "url.dll,FileProtocolHandler", url))
 	case "darwin":
 		// #nosec G204 -- URL is validated and only opened in the user's default browser.
-		return exec.Command("open", url).Start()
+		return startBrowserCommand(exec.Command("open", url))
 	default:
 		// #nosec G204 -- URL is validated and only opened in the user's default browser.
-		return exec.Command("xdg-open", url).Start()
+		return startBrowserCommand(exec.Command("xdg-open", url))
 	}
+}
+
+func startBrowserCommand(cmd *exec.Cmd) error {
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	go func() {
+		_ = cmd.Wait()
+	}()
+	return nil
 }
 
 func validateBrowserURL(rawURL string) error {

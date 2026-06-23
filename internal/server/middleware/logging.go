@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/8linkz-sec/packmon/internal/logsafe"
 )
 
 // statusCapture wraps http.ResponseWriter to capture the status code.
@@ -18,9 +20,9 @@ func (s *statusCapture) WriteHeader(code int) {
 	s.ResponseWriter.WriteHeader(code)
 }
 
-// Logging logs every request with method, path, status, duration, and
-// correlation ID. Uses slog at INFO level for 2xx/3xx and WARN for
-// 4xx/5xx.
+// Logging logs every request with method, route path label, status, duration, and
+// correlation ID. Routine completion logs intentionally omit client identifiers
+// such as IP address and User-Agent.
 func Logging(logger *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -34,12 +36,10 @@ func Logging(logger *slog.Logger) func(http.Handler) http.Handler {
 
 			attrs := []slog.Attr{
 				slog.String("method", r.Method),
-				slog.String("path", r.URL.Path),
+				slog.String("path", logsafe.RequestPathLabel(r.URL.Path)),
 				slog.Int("status", sc.code),
 				slog.Int64("duration_ms", duration.Milliseconds()),
 				slog.String("correlation_id", correlationID),
-				slog.String("remote_addr", ClientIP(r)),
-				slog.String("user_agent", r.UserAgent()),
 			}
 
 			level := slog.LevelInfo

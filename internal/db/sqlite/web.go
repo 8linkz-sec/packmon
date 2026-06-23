@@ -7,22 +7,30 @@ import (
 	"strings"
 	"time"
 
-	"github.com/8linkz/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/db"
+	lifecyclepolicy "github.com/8linkz-sec/packmon/internal/lifecycle"
 )
 
 type searchKey struct {
 	ecosystem string
 	name      string
+	version   string
 }
 
-// HasAdvisoryData reports whether the local database contains synced
-// vulnerability or malicious-package data. This is used to decide
-// whether local scan fallback is safe.
+var nowUTC = func() time.Time {
+	return time.Now().UTC()
+}
+
+// HasAdvisoryData reports whether the local database contains synced finding
+// data that the local scanner can query. This is used to decide whether local
+// scan fallback is safe.
 func (s *Store) HasAdvisoryData(ctx context.Context) (bool, error) {
 	const query = `
 		SELECT
 			(SELECT COUNT(*) FROM vulnerabilities_local) +
-			(SELECT COUNT(*) FROM malicious_local)`
+			(SELECT COUNT(*) FROM malicious_local) +
+			(SELECT COUNT(*) FROM reputation_findings_local) +
+			(SELECT COUNT(*) FROM lifecycle_releases_local)`
 
 	var count int
 	if err := s.db.QueryRowContext(ctx, query).Scan(&count); err != nil {
@@ -44,6 +52,7 @@ func (s *Store) ListRecentScans(ctx context.Context, limit int) ([]db.ScanLogEnt
 			ScanID:        fmt.Sprintf("local-%d", entry.ID),
 			RepoName:      entry.RepoName,
 			Branch:        entry.Branch,
+			Commit:        entry.Commit,
 			ScannedAt:     entry.ScannedAt,
 			PackagesCount: entry.PackagesCount,
 			FindingsCount: entry.FindingsCount,
@@ -60,7 +69,7 @@ func (s *Store) CountScansByDay(ctx context.Context, days int) ([]db.DailyScanSt
 		days = 7
 	}
 
-	startDay := time.Now().UTC().Truncate(24*time.Hour).AddDate(0, 0, -(days - 1))
+	startDay := nowUTC().UTC().Truncate(24*time.Hour).AddDate(0, 0, -(days - 1))
 	const query = `
 		SELECT substr(scanned_at, 1, 10) AS day, COUNT(*), COALESCE(SUM(findings_count), 0)
 		FROM scan_history
@@ -125,71 +134,121 @@ func (s *Store) SearchPackages(ctx context.Context, params db.PackageSearchParam
 	}
 
 	results := make(map[searchKey]*db.PackageSearchResult)
-	like := ""
-	if query != "" {
-		like = "%" + strings.ToLower(query) + "%"
-	}
+	nameQuery := strings.ToLower(query)
+	like, sqlLimit := localSearchSQLNameFilter(query, limit)
 
 	if findingType == "" || findingType == "vulnerability" {
-		if err := s.collectSearchResults(ctx, results, `
-			SELECT ecosystem, name, COUNT(*) AS findings_count, COUNT(*) AS vulnerability_count, COALESCE(GROUP_CONCAT(DISTINCT id), '')
+		if err := s.collectSearchResults(ctx, results, nameQuery, `
+			SELECT ecosystem, name, '' AS version, COUNT(*) AS findings_count, COUNT(*) AS vulnerability_count,
+				COALESCE((
+					SELECT GROUP_CONCAT(id, ', ')
+					FROM (
+						SELECT DISTINCT preview.id AS id
+						FROM vulnerabilities_local preview
+						WHERE preview.ecosystem = vulnerabilities_local.ecosystem
+						  AND preview.name = vulnerabilities_local.name
+						  AND (? = '' OR lower(preview.name) LIKE ?)
+						  AND (? = '' OR upper(coalesce(preview.severity, 'UNKNOWN')) = ?)
+						ORDER BY preview.id
+						LIMIT ?
+					)
+				), ''),
+				'vulnerability' AS finding_types
 			FROM vulnerabilities_local
 			WHERE (? = '' OR lower(name) LIKE ?)
 			  AND (? = '' OR upper(coalesce(severity, 'UNKNOWN')) = ?)
 			GROUP BY ecosystem, name
 			ORDER BY name ASC
-			LIMIT ?`, like, like, severity, severity, limit); err != nil {
+			LIMIT ?`,
+			like, like, severity, severity, db.SearchVulnerabilityIDPreviewLimit,
+			like, like, severity, severity, sqlLimit); err != nil {
 			return nil, err
 		}
 	}
 
 	if findingType == "" || findingType == "malicious" {
-		if err := s.collectSearchResults(ctx, results, `
-			SELECT ecosystem, name, COUNT(*) AS findings_count, 0 AS vulnerability_count, '' AS vulnerability_ids
+		if err := s.collectSearchResults(ctx, results, nameQuery, `
+			SELECT ecosystem, name, '' AS version, COUNT(*) AS findings_count, 0 AS vulnerability_count, '' AS vulnerability_ids, 'malicious' AS finding_types
 			FROM malicious_local
 			WHERE (? = '' OR lower(name) LIKE ?)
 			  AND (? = '' OR upper(coalesce(severity, 'UNKNOWN')) = ?)
 			GROUP BY ecosystem, name
 			ORDER BY name ASC
-			LIMIT ?`, like, like, severity, severity, limit); err != nil {
+			LIMIT ?`, like, like, severity, severity, sqlLimit); err != nil {
+			return nil, err
+		}
+	}
+
+	if findingType == "" || findingType == "malicious" {
+		if err := s.collectSearchResults(ctx, results, nameQuery, `
+			SELECT ecosystem, name, version, COUNT(*) AS findings_count, 0 AS vulnerability_count, '' AS vulnerability_ids, 'malicious' AS finding_types
+			FROM reputation_findings_local
+			WHERE type = 'malicious'
+			  AND (? = '' OR lower(name) LIKE ?)
+			  AND (? = '' OR upper(coalesce(severity, 'UNKNOWN')) = ?)
+			GROUP BY ecosystem, name, version
+			ORDER BY name ASC
+			LIMIT ?`, like, like, severity, severity, sqlLimit); err != nil {
 			return nil, err
 		}
 	}
 
 	if findingType == "" || findingType == "supply_chain_risk" {
-		if err := s.collectSearchResults(ctx, results, `
-			SELECT ecosystem, name, COUNT(*) AS findings_count, 0 AS vulnerability_count, '' AS vulnerability_ids
+		if err := s.collectSearchResults(ctx, results, nameQuery, `
+			SELECT ecosystem, name, version, COUNT(*) AS findings_count, 0 AS vulnerability_count, '' AS vulnerability_ids, 'supply_chain_risk' AS finding_types
 			FROM reputation_findings_local
 			WHERE type = 'supply_chain_risk'
 			  AND (? = '' OR lower(name) LIKE ?)
 			  AND (? = '' OR upper(coalesce(severity, 'UNKNOWN')) = ?)
-			GROUP BY ecosystem, name
+			GROUP BY ecosystem, name, version
 			ORDER BY name ASC
-			LIMIT ?`, like, like, severity, severity, limit); err != nil {
+			LIMIT ?`, like, like, severity, severity, sqlLimit); err != nil {
+			return nil, err
+		}
+	}
+
+	if findingType == "" || findingType == "supply_chain_risk" {
+		if err := s.collectSearchResults(ctx, results, nameQuery, `
+			WITH lifecycle_findings AS (
+				SELECT ecosystem, name, COALESCE(NULLIF(latest, ''), cycle) AS version, ? AS severity
+				FROM lifecycle_releases_local
+				WHERE is_eol = 1 OR (eol_from IS NOT NULL AND eol_from <= date('now'))
+			)
+			SELECT ecosystem, name, version, COUNT(*) AS findings_count, 0 AS vulnerability_count, '' AS vulnerability_ids, 'supply_chain_risk' AS finding_types
+			FROM lifecycle_findings
+			WHERE (? = '' OR lower(name) LIKE ?)
+			  AND (? = '' OR severity = ?)
+			GROUP BY ecosystem, name, version
+			ORDER BY name ASC
+			LIMIT ?`, string(lifecyclepolicy.SeverityEOL), like, like, severity, severity, sqlLimit); err != nil {
 			return nil, err
 		}
 	}
 
 	if findingType == "" || findingType == "lifecycle" {
-		if err := s.collectSearchResults(ctx, results, `
+		if err := s.collectSearchResults(ctx, results, nameQuery, `
 			WITH lifecycle_findings AS (
-				SELECT ecosystem, name,
+				SELECT ecosystem, name, COALESCE(NULLIF(latest, ''), cycle) AS version,
 					CASE
-						WHEN is_eol = 1 OR (eol_from IS NOT NULL AND eol_from <= date('now')) THEN 'CRITICAL'
-						WHEN eol_from IS NOT NULL AND eol_from <= date('now', '+90 days') THEN 'MEDIUM'
-						WHEN is_eoas = 1 OR (eoas_from IS NOT NULL AND eoas_from <= date('now')) THEN 'LOW'
+						WHEN eol_from IS NOT NULL AND eol_from > date('now') AND eol_from <= date('now', '+' || ? || ' days') THEN ?
+						WHEN is_eoas = 1 OR (eoas_from IS NOT NULL AND eoas_from <= date('now')) THEN ?
 						ELSE ''
 					END AS severity
 				FROM lifecycle_releases_local
+				WHERE NOT (is_eol = 1 OR (eol_from IS NOT NULL AND eol_from <= date('now')))
 			)
-			SELECT ecosystem, name, COUNT(*) AS findings_count, 0 AS vulnerability_count, '' AS vulnerability_ids
+			SELECT ecosystem, name, version, COUNT(*) AS findings_count, 0 AS vulnerability_count, '' AS vulnerability_ids, 'lifecycle' AS finding_types
 			FROM lifecycle_findings
 			WHERE severity <> ''
 			  AND (? = '' OR lower(name) LIKE ?)
 			  AND (? = '' OR severity = ?)
-			GROUP BY ecosystem, name
+			GROUP BY ecosystem, name, version
 			ORDER BY name ASC
-			LIMIT ?`, like, like, severity, severity, limit); err != nil {
+			LIMIT ?`,
+			lifecyclepolicy.EOLSoonDays,
+			string(lifecyclepolicy.SeverityEOLSoon),
+			string(lifecyclepolicy.SeveritySecuritySupportOnly),
+			like, like, severity, severity, sqlLimit); err != nil {
 			return nil, err
 		}
 	}
@@ -197,6 +256,8 @@ func (s *Store) SearchPackages(ctx context.Context, params db.PackageSearchParam
 	out := make([]db.PackageSearchResult, 0, len(results))
 	for _, result := range results {
 		result.VulnerabilityIDs = joinLocalCSV(result.VulnerabilityIDs)
+		result.VulnerabilityIDs = db.FormatSearchVulnerabilityIDPreview(result.VulnerabilityIDs, result.VulnerabilityCount)
+		result.FindingTypes = joinLocalCSV(result.FindingTypes)
 		result.Sources = "local"
 		out = append(out, *result)
 	}
@@ -204,7 +265,9 @@ func (s *Store) SearchPackages(ctx context.Context, params db.PackageSearchParam
 	for i := 1; i < len(out); i++ {
 		current := out[i]
 		j := i - 1
-		for j >= 0 && (out[j].Name > current.Name || (out[j].Name == current.Name && out[j].Ecosystem > current.Ecosystem)) {
+		for j >= 0 && (out[j].Name > current.Name ||
+			(out[j].Name == current.Name && out[j].Ecosystem > current.Ecosystem) ||
+			(out[j].Name == current.Name && out[j].Ecosystem == current.Ecosystem && out[j].Version > current.Version)) {
 			out[j+1] = out[j]
 			j--
 		}
@@ -218,7 +281,19 @@ func (s *Store) SearchPackages(ctx context.Context, params db.PackageSearchParam
 	return out, nil
 }
 
-func (s *Store) collectSearchResults(ctx context.Context, acc map[searchKey]*db.PackageSearchResult, query string, args ...any) error {
+func localSearchSQLNameFilter(query string, limit int) (string, int) {
+	if query == "" {
+		return "", limit
+	}
+	for _, r := range query {
+		if r > 0x7f {
+			return "", -1
+		}
+	}
+	return "%" + strings.ToLower(query) + "%", limit
+}
+
+func (s *Store) collectSearchResults(ctx context.Context, acc map[searchKey]*db.PackageSearchResult, nameQuery, query string, args ...any) error {
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("sqlite: search packages: %w", err)
@@ -229,27 +304,35 @@ func (s *Store) collectSearchResults(ctx context.Context, acc map[searchKey]*db.
 		var (
 			ecosystem          string
 			name               string
+			version            string
 			findingsCount      int
 			vulnerabilityCount int
 			vulnerabilityIDs   string
+			findingTypes       string
 		)
-		if err := rows.Scan(&ecosystem, &name, &findingsCount, &vulnerabilityCount, &vulnerabilityIDs); err != nil {
+		if err := rows.Scan(&ecosystem, &name, &version, &findingsCount, &vulnerabilityCount, &vulnerabilityIDs, &findingTypes); err != nil {
 			return fmt.Errorf("sqlite: scan package search row: %w", err)
 		}
+		if nameQuery != "" && !strings.Contains(strings.ToLower(name), nameQuery) {
+			continue
+		}
 
-		k := searchKey{ecosystem: ecosystem, name: name}
+		k := searchKey{ecosystem: ecosystem, name: name, version: version}
 		if existing, ok := acc[k]; ok {
 			existing.FindingsCount += findingsCount
 			existing.VulnerabilityCount += vulnerabilityCount
 			existing.VulnerabilityIDs = mergeLocalCSV(existing.VulnerabilityIDs, vulnerabilityIDs)
+			existing.FindingTypes = mergeLocalCSV(existing.FindingTypes, findingTypes)
 			continue
 		}
 		acc[k] = &db.PackageSearchResult{
 			Ecosystem:          ecosystem,
 			Name:               name,
+			Version:            version,
 			FindingsCount:      findingsCount,
 			VulnerabilityCount: vulnerabilityCount,
 			VulnerabilityIDs:   vulnerabilityIDs,
+			FindingTypes:       findingTypes,
 		}
 	}
 
@@ -321,8 +404,42 @@ func (s *Store) DashboardStats(ctx context.Context) (*db.DashboardStatsResult, e
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM malicious_local`).Scan(&stats.TotalMalicious); err != nil {
 		return nil, fmt.Errorf("sqlite: dashboard total malicious: %w", err)
 	}
+	var reputationMalicious int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM reputation_findings_local WHERE type = 'malicious'`).Scan(&reputationMalicious); err != nil {
+		return nil, fmt.Errorf("sqlite: dashboard reputation malicious: %w", err)
+	}
+	stats.TotalMalicious += reputationMalicious
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT
+			(SELECT COUNT(*) FROM reputation_findings_local WHERE type = 'supply_chain_risk')
+			+
+			(SELECT COUNT(*) FROM lifecycle_releases_local
+			 WHERE is_eol != 0
+			    OR (eol_from IS NOT NULL AND date(eol_from) <= date('now')))`).Scan(&stats.TotalSupplyChainRisk); err != nil {
+		return nil, fmt.Errorf("sqlite: dashboard total supply-chain risk: %w", err)
+	}
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM lifecycle_releases_local
+		WHERE NOT (
+			is_eol != 0
+			OR (eol_from IS NOT NULL AND date(eol_from) <= date('now'))
+		)
+		AND (
+			(eol_from IS NOT NULL AND date(eol_from) > date('now') AND date(eol_from) <= date('now', '+90 day'))
+			OR is_eoas != 0
+			OR (eoas_from IS NOT NULL AND date(eoas_from) <= date('now'))
+		)`).Scan(&stats.TotalLifecycle); err != nil {
+		return nil, fmt.Errorf("sqlite: dashboard total lifecycle: %w", err)
+	}
 
 	if err := s.collectSeverityCounts(ctx, stats.BySeverity, `SELECT severity, COUNT(*) FROM (SELECT DISTINCT id, severity FROM vulnerabilities_local) GROUP BY severity`); err != nil {
+		return nil, err
+	}
+	if err := s.collectSeverityCounts(ctx, stats.BySeverity, `SELECT severity, COUNT(*) FROM malicious_local GROUP BY severity`); err != nil {
+		return nil, err
+	}
+	if err := s.collectSeverityCounts(ctx, stats.BySeverity, `SELECT severity, COUNT(*) FROM reputation_findings_local GROUP BY severity`); err != nil {
 		return nil, err
 	}
 

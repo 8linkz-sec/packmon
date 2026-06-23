@@ -5,7 +5,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/8linkz/packmon/internal/auth"
+	"github.com/8linkz-sec/packmon/internal/auth"
+	"github.com/8linkz-sec/packmon/internal/logsafe"
 )
 
 // RequireAdminSession returns a middleware that protects /admin/* routes.
@@ -15,8 +16,8 @@ import (
 func RequireAdminSession(sm *auth.SessionManager, logger *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Only apply to /admin/* paths.
-			if !strings.HasPrefix(r.URL.Path, "/admin") {
+			// Only apply to the registered admin namespace.
+			if !isAdminSessionPath(r.URL.Path) {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -31,8 +32,9 @@ func RequireAdminSession(sm *auth.SessionManager, logger *slog.Logger) func(http
 			sess := sm.Get(r)
 			if sess == nil || !sess.Admin {
 				logger.Debug("admin session required but not found, redirecting to login",
-					slog.String("path", r.URL.Path),
-					slog.String("remote_addr", r.RemoteAddr),
+					slog.String("path", logsafe.RequestPathLabel(r.URL.Path)),
+					slog.String("client_ip", ClientIP(r)),
+					slog.String("correlation_id", CorrelationIDFromContext(r.Context())),
 				)
 				redirectToAdminLogin(w, r, sm)
 				return
@@ -43,13 +45,18 @@ func RequireAdminSession(sm *auth.SessionManager, logger *slog.Logger) func(http
 	}
 }
 
+func isAdminSessionPath(path string) bool {
+	return path == "/admin" || strings.HasPrefix(path, "/admin/")
+}
+
 func redirectToAdminLogin(w http.ResponseWriter, r *http.Request, sm *auth.SessionManager) {
 	sm.Delete(w, r)
 	w.Header().Set("Cache-Control", "no-store")
+	target := auth.AdminLoginRedirectTarget(r)
 	if strings.EqualFold(strings.TrimSpace(r.Header.Get("HX-Request")), "true") {
-		w.Header().Set("HX-Redirect", "/admin/login")
+		w.Header().Set("HX-Redirect", target)
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
+	auth.RedirectSameOrigin(w, r, target, http.StatusSeeOther)
 }

@@ -6,7 +6,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/8linkz/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 // NuGetParser parses packages.lock.json files (NuGet/.NET ecosystem).
@@ -71,7 +71,7 @@ func (p *NuGetParser) Parse(r io.Reader) ([]domain.Package, error) {
 				continue
 			}
 			if entry.Resolved == "" {
-				errs = append(errs, fmt.Sprintf("framework %s, package %s: missing resolved version", framework, name))
+				errs = append(errs, fmt.Sprintf("framework %s: missing resolved version", framework))
 				continue
 			}
 

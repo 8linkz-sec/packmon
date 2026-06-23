@@ -12,6 +12,7 @@ package socket
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -20,8 +21,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/8linkz/packmon/internal/db"
-	"github.com/8linkz/packmon/internal/telemetry"
+	"github.com/8linkz-sec/packmon/internal/db"
+	feedqueue "github.com/8linkz-sec/packmon/internal/feed"
+	"github.com/8linkz-sec/packmon/internal/telemetry"
 )
 
 const (
@@ -44,7 +46,55 @@ const (
 	// stuckThreshold is the time after which a 'processing' job is
 	// considered stuck and reset to 'pending'.
 	stuckThreshold = 5 * time.Minute
+
+	// completeTimeout bounds queue-row finalization after a worker context is
+	// cancelled during runtime reconfiguration or shutdown.
+	completeTimeout = 2 * time.Second
+
+	resetStuckJobsTimeout = 2 * time.Second
 )
+
+var errRateLimited = errors.New("rate limited")
+
+// RateLimiter holds Socket.dev token-bucket state. It can be shared by
+// successive workers so runtime reconfiguration does not reset upstream
+// capacity.
+type RateLimiter struct {
+	tokensMu         sync.Mutex
+	tokens           int
+	maxTokens        int
+	lastRefill       time.Time
+	fractionalTokens float64 // accumulates sub-integer token fractions between refills
+}
+
+// NewRateLimiter creates a token bucket for Socket.dev calls per hour.
+func NewRateLimiter(callsPerHour int) *RateLimiter {
+	if callsPerHour <= 0 {
+		callsPerHour = defaultRateLimit
+	}
+	return &RateLimiter{
+		tokens:     callsPerHour,
+		maxTokens:  callsPerHour,
+		lastRefill: time.Now(),
+	}
+}
+
+func (l *RateLimiter) SetLimit(callsPerHour int) {
+	if l == nil || callsPerHour <= 0 {
+		return
+	}
+	l.tokensMu.Lock()
+	defer l.tokensMu.Unlock()
+
+	wasFull := l.tokens >= l.maxTokens
+	l.maxTokens = callsPerHour
+	switch {
+	case wasFull:
+		l.tokens = callsPerHour
+	case l.tokens > callsPerHour:
+		l.tokens = callsPerHour
+	}
+}
 
 // ecosystemMap translates canonical Packmon ecosystem names to Socket.dev
 // API path segments. Socket.dev only supports certain ecosystems.
@@ -57,6 +107,11 @@ var ecosystemMap = map[string]string{
 	"nuget":    "nuget",
 	"composer": "packagist",
 	"gem":      "rubygems",
+}
+
+func SupportsEcosystem(ecosystem string) bool {
+	_, ok := ecosystemMap[strings.ToLower(strings.TrimSpace(ecosystem))]
+	return ok
 }
 
 // scoreResponse is the top-level Socket.dev package score response.
@@ -94,22 +149,62 @@ type packageInfo struct {
 	Version string `json:"version"`
 }
 
+type socketCheckStatusResult struct {
+	Source             string             `json:"source"`
+	Status             string             `json:"status"`
+	PackageVersion     string             `json:"package_version,omitempty"`
+	IssueCount         int                `json:"issue_count,omitempty"`
+	SecurityIssueCount int                `json:"security_issue_count,omitempty"`
+	Score              *socketStatusScore `json:"score,omitempty"`
+}
+
+type socketStatusScore struct {
+	Overall       float64 `json:"overall"`
+	SupplyChain   float64 `json:"supply_chain"`
+	Quality       float64 `json:"quality"`
+	Maintenance   float64 `json:"maintenance"`
+	Vulnerability float64 `json:"vulnerability"`
+	License       float64 `json:"license"`
+}
+
+var socketIssueRiskTypes = map[string]string{
+	"malware":            "malware",
+	"installScripts":     "supply_chain",
+	"networkAccess":      "supply_chain",
+	"shellAccess":        "supply_chain",
+	"filesystemAccess":   "supply_chain",
+	"envVars":            "supply_chain",
+	"obfuscatedCode":     "supply_chain",
+	"typosquat":          "typosquatting",
+	"protestware":        "malware",
+	"criticalCVE":        "supply_chain",
+	"highEntropyStrings": "supply_chain",
+	"telemetry":          "supply_chain",
+}
+
+type socketStore interface {
+	DequeueRefresh(context.Context, string) (*db.RefreshJob, error)
+	CompleteRefresh(context.Context, int, error) error
+	ResetStuckJobs(context.Context, string, time.Duration) (int, error)
+	UpsertMaliciousFinding(context.Context, *db.MaliciousFinding) error
+	UpsertPackageCheckStatus(context.Context, *db.PackageCheckStatus) error
+}
+
 // Worker processes the refresh_queue for Socket.dev checks.
 // It implements feed.AsyncWorker.
 type Worker struct {
-	store        db.Store
+	store        socketStore
 	logger       *slog.Logger
 	httpClient   *http.Client
 	baseURL      string
 	apiKey       string
 	pollInterval time.Duration
+	jobTimeout   time.Duration
+	dequeueLogs  *feedqueue.RepeatedErrorLogger
+	resetLogs    *feedqueue.RepeatedErrorLogger
 
 	// Token bucket for rate limiting.
-	tokensMu         sync.Mutex
-	tokens           int
-	maxTokens        int
-	lastRefill       time.Time
-	fractionalTokens float64 // accumulates sub-integer token fractions between refills
+	*RateLimiter
 }
 
 // Option configures a Worker.
@@ -133,14 +228,30 @@ func WithPollInterval(d time.Duration) Option {
 // WithRateLimit overrides the default calls-per-hour limit.
 func WithRateLimit(callsPerHour int) Option {
 	return func(w *Worker) {
-		w.maxTokens = callsPerHour
-		w.tokens = callsPerHour
+		w.SetLimit(callsPerHour)
+	}
+}
+
+// WithRateLimiter shares token-bucket state with another worker generation.
+func WithRateLimiter(limiter *RateLimiter) Option {
+	return func(w *Worker) {
+		if limiter != nil {
+			w.RateLimiter = limiter
+		}
+	}
+}
+
+func WithJobTimeout(d time.Duration) Option {
+	return func(w *Worker) {
+		if d > 0 {
+			w.jobTimeout = d
+		}
 	}
 }
 
 // NewWorker creates a Socket.dev worker. If apiKey is empty, Run will
 // return immediately (the worker is a no-op without a key).
-func NewWorker(store db.Store, apiKey string, logger *slog.Logger, opts ...Option) *Worker {
+func NewWorker(store socketStore, apiKey string, logger *slog.Logger, opts ...Option) *Worker {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -153,9 +264,10 @@ func NewWorker(store db.Store, apiKey string, logger *slog.Logger, opts ...Optio
 		baseURL:      DefaultBaseURL,
 		apiKey:       apiKey,
 		pollInterval: defaultPollInterval,
-		tokens:       defaultRateLimit,
-		maxTokens:    defaultRateLimit,
-		lastRefill:   time.Now(),
+		jobTimeout:   30 * time.Second,
+		dequeueLogs:  feedqueue.NewRepeatedErrorLogger(feedqueue.DefaultRepeatedErrorLogWindow),
+		resetLogs:    feedqueue.NewRepeatedErrorLogger(feedqueue.DefaultRepeatedErrorLogWindow),
+		RateLimiter:  NewRateLimiter(defaultRateLimit),
 	}
 	for _, opt := range opts {
 		opt(w)
@@ -184,39 +296,69 @@ func (w *Worker) Run(ctx context.Context) error {
 	ticker := time.NewTicker(w.pollInterval)
 	defer ticker.Stop()
 
-	// Reset stuck jobs on startup.
-	w.resetStuckJobs(ctx)
-
 	for {
 		select {
 		case <-ctx.Done():
 			w.logger.Info("Socket.dev worker shutting down")
 			return ctx.Err()
 		case <-ticker.C:
-			w.processNextJob(ctx)
+			w.processAvailableJobs(ctx)
 		}
 	}
 }
 
-// processNextJob dequeues and processes a single job if a rate-limit
-// token is available.
-func (w *Worker) processNextJob(ctx context.Context) {
-	// Reset stuck jobs periodically (cheap query).
+func (w *Worker) processAvailableJobs(ctx context.Context) {
 	w.resetStuckJobs(ctx)
+	for w.processNextJobWithoutReset(ctx) {
+		if ctx.Err() != nil {
+			return
+		}
+	}
+}
 
+// processNextJob dequeues and processes a single job if a rate-limit token is
+// available. It returns whether it made queue progress.
+func (w *Worker) processNextJob(ctx context.Context) bool {
+	w.resetStuckJobs(ctx)
+	return w.processNextJobWithoutReset(ctx)
+}
+
+func (w *Worker) processNextJobWithoutReset(ctx context.Context) bool {
 	if !w.acquireToken() {
-		return
+		return false
 	}
 
 	job, err := w.store.DequeueRefresh(ctx, FeedName)
 	if err != nil {
-		w.logger.Error("failed to dequeue job", slog.String("error", err.Error()))
-		return
+		w.returnToken()
+		w.dequeueLogs.Error(w.logger, "failed to dequeue job", err)
+		return false
 	}
 	if job == nil {
 		// No pending jobs. Return the token since we did not make an API call.
 		w.returnToken()
-		return
+		return false
+	}
+	if !SupportsEcosystem(job.Ecosystem) {
+		// The job cannot result in an upstream Socket.dev request, so it must
+		// not consume a worker rate-limit token.
+		w.returnToken()
+		checkErr := unsupportedEcosystemError(job.Ecosystem)
+		completeCtx, cancel := context.WithTimeout(context.Background(), completeTimeout)
+		defer cancel()
+		if completeErr := feedqueue.CompleteClaimedRefresh(completeCtx, w.store, job, checkErr); completeErr != nil {
+			w.logger.Error("failed to complete job",
+				slog.Int("job_id", job.ID),
+				slog.String("error", completeErr.Error()),
+			)
+		}
+		telemetry.Default().IncQueueError(FeedName)
+		w.logger.Warn("socket check failed",
+			slog.String("ecosystem", job.Ecosystem),
+			slog.String("name", job.Name),
+			slog.String("error", checkErr.Error()),
+		)
+		return true
 	}
 
 	w.logger.Info("processing socket check",
@@ -226,8 +368,21 @@ func (w *Worker) processNextJob(ctx context.Context) {
 		slog.Int("job_id", job.ID),
 	)
 
-	checkErr := w.checkPackage(ctx, job)
-	if completeErr := w.store.CompleteRefresh(ctx, job.ID, checkErr); completeErr != nil {
+	jobCtx, cancel := context.WithTimeout(ctx, w.jobTimeout)
+	checkErr := w.checkPackage(jobCtx, job)
+	cancel()
+	if errors.Is(checkErr, errRateLimited) {
+		telemetry.Default().IncQueueError(FeedName)
+		w.logger.Warn("socket check rate limited; leaving job processing for retry",
+			slog.String("ecosystem", job.Ecosystem),
+			slog.String("name", job.Name),
+			slog.String("error", checkErr.Error()),
+		)
+		return false
+	}
+	completeCtx, cancel := context.WithTimeout(context.Background(), completeTimeout)
+	defer cancel()
+	if completeErr := feedqueue.CompleteClaimedRefresh(completeCtx, w.store, job, checkErr); completeErr != nil {
 		w.logger.Error("failed to complete job",
 			slog.Int("job_id", job.ID),
 			slog.String("error", completeErr.Error()),
@@ -242,6 +397,7 @@ func (w *Worker) processNextJob(ctx context.Context) {
 			slog.String("error", checkErr.Error()),
 		)
 	}
+	return true
 }
 
 // checkPackage calls the Socket.dev API for a single package and stores
@@ -249,7 +405,7 @@ func (w *Worker) processNextJob(ctx context.Context) {
 func (w *Worker) checkPackage(ctx context.Context, job *db.RefreshJob) error {
 	socketEco, ok := ecosystemMap[job.Ecosystem]
 	if !ok {
-		return fmt.Errorf("unsupported ecosystem for Socket.dev: %s", job.Ecosystem)
+		return unsupportedEcosystemError(job.Ecosystem)
 	}
 
 	url := fmt.Sprintf("%s/%s/%s/score",
@@ -279,14 +435,13 @@ func (w *Worker) checkPackage(ctx context.Context, job *db.RefreshJob) error {
 
 	if resp.StatusCode == http.StatusNotFound {
 		// Package not known to Socket.dev. Record the check but do not error.
-		w.updateCheckStatus(ctx, job, body)
-		return nil
+		return w.updateCheckStatus(ctx, job, normalizedSocketStatus("not_found", nil))
 	}
 
 	if resp.StatusCode == http.StatusTooManyRequests {
 		// Rate limited. Drain tokens and let the job retry later.
 		w.drainTokens()
-		return fmt.Errorf("rate limited by Socket.dev (429)")
+		return fmt.Errorf("%w by Socket.dev (429)", errRateLimited)
 	}
 
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
@@ -308,31 +463,19 @@ func (w *Worker) checkPackage(ctx context.Context, job *db.RefreshJob) error {
 	}
 
 	// Update check status regardless of findings.
-	w.updateCheckStatus(ctx, job, body)
-	return nil
+	return w.updateCheckStatus(ctx, job, normalizedSocketStatus("ok", &scoreResp))
+}
+
+func unsupportedEcosystemError(ecosystem string) error {
+	return fmt.Errorf("unsupported ecosystem for Socket.dev: %s", ecosystem)
 }
 
 // processIssues examines Socket.dev issues and creates malicious_findings
 // entries for security-relevant issues.
 func (w *Worker) processIssues(ctx context.Context, job *db.RefreshJob, resp *scoreResponse) error {
-	// Map of Socket.dev issue types to Packmon risk_type values.
-	maliciousTypes := map[string]string{
-		"malware":            "malware",
-		"installScripts":     "supply_chain",
-		"networkAccess":      "supply_chain",
-		"shellAccess":        "supply_chain",
-		"filesystemAccess":   "supply_chain",
-		"envVars":            "supply_chain",
-		"obfuscatedCode":     "supply_chain",
-		"typosquat":          "typosquatting",
-		"protestware":        "malware",
-		"criticalCVE":        "supply_chain",
-		"highEntropyStrings": "supply_chain",
-		"telemetry":          "supply_chain",
-	}
-
+	var writeErrs []error
 	for _, issue := range resp.Issues {
-		riskType, isMalicious := maliciousTypes[issue.Type]
+		riskType, isMalicious := socketIssueRiskTypes[issue.Type]
 		if !isMalicious {
 			continue
 		}
@@ -370,11 +513,44 @@ func (w *Worker) processIssues(ctx context.Context, job *db.RefreshJob, resp *sc
 				slog.String("finding_id", findingID),
 				slog.String("error", err.Error()),
 			)
-			// Continue processing other issues.
+			writeErrs = append(writeErrs, fmt.Errorf("upsert malicious finding %s: %w", findingID, err))
 		}
 	}
 
-	return nil
+	return errors.Join(writeErrs...)
+}
+
+func normalizedSocketStatus(status string, resp *scoreResponse) json.RawMessage {
+	result := socketCheckStatusResult{
+		Source: FeedName,
+		Status: status,
+	}
+	if resp != nil {
+		result.IssueCount = len(resp.Issues)
+		for _, issue := range resp.Issues {
+			if _, ok := socketIssueRiskTypes[issue.Type]; ok {
+				result.SecurityIssueCount++
+			}
+		}
+		if resp.Package != nil {
+			result.PackageVersion = strings.TrimSpace(resp.Package.Version)
+		}
+		if resp.Score != nil {
+			result.Score = &socketStatusScore{
+				Overall:       resp.Score.Overall,
+				SupplyChain:   resp.Score.Supply,
+				Quality:       resp.Score.Quality,
+				Maintenance:   resp.Score.Maintenance,
+				Vulnerability: resp.Score.Vulnerability,
+				License:       resp.Score.License,
+			}
+		}
+	}
+	raw, err := json.Marshal(result)
+	if err != nil {
+		return []byte(`{"source":"socket","status":"error"}`)
+	}
+	return raw
 }
 
 func socketIssueVersions(issue issueEntry, pkg *packageInfo) json.RawMessage {
@@ -407,7 +583,7 @@ func socketIssueVersions(issue issueEntry, pkg *packageInfo) json.RawMessage {
 }
 
 // updateCheckStatus records that a package was checked, regardless of outcome.
-func (w *Worker) updateCheckStatus(ctx context.Context, job *db.RefreshJob, rawResult []byte) {
+func (w *Worker) updateCheckStatus(ctx context.Context, job *db.RefreshJob, rawResult []byte) error {
 	now := time.Now()
 	// Re-check after 7 days by default.
 	nextCheck := now.Add(7 * 24 * time.Hour)
@@ -427,14 +603,18 @@ func (w *Worker) updateCheckStatus(ctx context.Context, job *db.RefreshJob, rawR
 			slog.String("name", job.Name),
 			slog.String("error", err.Error()),
 		)
+		return err
 	}
+	return nil
 }
 
 // resetStuckJobs resets jobs that have been processing for too long.
 func (w *Worker) resetStuckJobs(ctx context.Context) {
-	count, err := w.store.ResetStuckJobs(ctx, FeedName, stuckThreshold)
+	resetCtx, cancel := context.WithTimeout(ctx, resetStuckJobsTimeout)
+	count, err := w.store.ResetStuckJobs(resetCtx, FeedName, stuckThreshold)
+	cancel()
 	if err != nil {
-		w.logger.Warn("failed to reset stuck jobs", slog.String("error", err.Error()))
+		w.resetLogs.Warn(w.logger, "failed to reset stuck jobs", err)
 		return
 	}
 	if count > 0 {

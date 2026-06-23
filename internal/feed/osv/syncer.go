@@ -14,11 +14,12 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/8linkz/packmon/internal/db"
-	"github.com/8linkz/packmon/internal/feed"
+	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/feed"
 )
 
 const (
@@ -102,7 +103,8 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 	s.logger.Info("starting OSV sync")
 
 	// Load stored per-ecosystem ETags from feed_sync_status.metadata.
-	etags := s.loadEcosystemETags(ctx)
+	status := s.loadFeedStatus(ctx)
+	etags := ecosystemETags(status)
 
 	ecosystems := feed.OSVBucketEcosystems()
 	var totalSynced, totalEntries int
@@ -151,7 +153,7 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 			totalEntries += entries
 			s.logger.Error("ecosystem sync failed, continuing with next",
 				slog.String("ecosystem", eco),
-				slog.String("error", err.Error()),
+				slog.String("error", feed.SafeDiagnosticError(err)),
 			)
 			// Continue with other ecosystems rather than aborting.
 			continue
@@ -186,8 +188,11 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 		s.recordSyncFailure(ctx, start, syncErr)
 		return nil, syncErr
 	}
+	if totalEntries == 0 && totalSynced == 0 && skippedByETag > 0 {
+		totalSynced, totalEntries = statusCounts(status)
+	}
 
-	s.recordSyncSuccess(ctx, start, duration, totalEntries, totalSynced)
+	s.recordSyncSuccess(ctx, duration, totalEntries, totalSynced)
 	s.saveEcosystemETags(ctx, etags)
 	return &feed.SyncResult{
 		EntriesSynced: totalSynced,
@@ -202,9 +207,20 @@ var errNotModified = errors.New("not modified (HTTP 304)")
 
 // loadEcosystemETags reads the per-ecosystem ETag map from the
 // feed_sync_status metadata JSONB column.
-func (s *Syncer) loadEcosystemETags(ctx context.Context) map[string]string {
+func (s *Syncer) loadFeedStatus(ctx context.Context) *db.FeedSyncStatus {
 	status, err := s.store.GetFeedSyncStatus(ctx, FeedName)
-	if err != nil || status == nil || len(status.Metadata) == 0 {
+	if err != nil {
+		return nil
+	}
+	return status
+}
+
+func (s *Syncer) loadEcosystemETags(ctx context.Context) map[string]string {
+	return ecosystemETags(s.loadFeedStatus(ctx))
+}
+
+func ecosystemETags(status *db.FeedSyncStatus) map[string]string {
+	if status == nil || len(status.Metadata) == 0 {
 		return make(map[string]string)
 	}
 
@@ -217,6 +233,13 @@ func (s *Syncer) loadEcosystemETags(ctx context.Context) map[string]string {
 	return meta.ETags
 }
 
+func statusCounts(status *db.FeedSyncStatus) (synced, total int) {
+	if status == nil {
+		return 0, 0
+	}
+	return status.EntriesSynced, status.EntriesTotal
+}
+
 // saveEcosystemETags persists the per-ecosystem ETag map into the
 // feed_sync_status metadata JSONB column.
 func (s *Syncer) saveEcosystemETags(ctx context.Context, etags map[string]string) {
@@ -226,22 +249,23 @@ func (s *Syncer) saveEcosystemETags(ctx context.Context, etags map[string]string
 
 	metaJSON, err := json.Marshal(meta)
 	if err != nil {
-		s.logger.Warn("failed to marshal ecosystem ETags", "error", err)
+		s.logger.Warn("failed to marshal ecosystem ETags", "error", feed.SafeDiagnosticError(err))
 		return
 	}
 
-	status, err := s.store.GetFeedSyncStatus(ctx, FeedName)
+	status, err := feed.GetFeedSyncStatusBounded(s.store, FeedName)
 	if err != nil || status == nil {
 		// The status row should already exist from recordSyncSuccess.
 		// If not, we just skip saving ETags this time.
-		s.logger.Warn("failed to load feed status for ETag save", "error", err)
+		s.logger.Warn("failed to load feed status for ETag save", "error", feed.SafeDiagnosticError(err))
 		return
 	}
 
 	status.Metadata = metaJSON
-	if err := s.store.UpsertFeedSyncStatus(ctx, status); err != nil {
-		s.logger.Warn("failed to save ecosystem ETags", "error", err)
+	if err := feed.UpsertFeedSyncStatusBounded(s.store, status); err != nil {
+		s.logger.Warn("failed to save ecosystem ETags", "error", feed.SafeDiagnosticError(err))
 	}
+	_ = ctx
 }
 
 // syncEcosystem downloads and processes a single ecosystem's all.zip.
@@ -284,7 +308,7 @@ func (s *Syncer) syncEcosystem(ctx context.Context, store db.Store, ecosystem, s
 			entryErrors++
 			s.logger.Warn("failed to open zip entry",
 				slog.String("file", f.Name),
-				slog.String("error", err.Error()),
+				slog.String("error", feed.SafeDiagnosticError(err)),
 			)
 			continue
 		}
@@ -295,7 +319,7 @@ func (s *Syncer) syncEcosystem(ctx context.Context, store db.Store, ecosystem, s
 			entryErrors++
 			s.logger.Warn("failed to read zip entry",
 				slog.String("file", f.Name),
-				slog.String("error", err.Error()),
+				slog.String("error", feed.SafeDiagnosticError(err)),
 			)
 			continue
 		}
@@ -305,7 +329,7 @@ func (s *Syncer) syncEcosystem(ctx context.Context, store db.Store, ecosystem, s
 			entryErrors++
 			s.logger.Warn("failed to parse OSV entry",
 				slog.String("file", f.Name),
-				slog.String("error", err.Error()),
+				slog.String("error", feed.SafeDiagnosticError(err)),
 			)
 			continue
 		}
@@ -318,11 +342,11 @@ func (s *Syncer) syncEcosystem(ctx context.Context, store db.Store, ecosystem, s
 		}
 
 		if entry.Withdrawn != nil && strings.TrimSpace(*entry.Withdrawn) != "" {
-			if err := store.DeleteVulnerability(ctx, entry.ID); err != nil {
+			if err := db.DeleteVulnerabilityForSource(ctx, store, entry.ID, "osv"); err != nil {
 				entryErrors++
 				s.logger.Warn("failed to delete withdrawn vulnerability",
 					slog.String("id", entry.ID),
-					slog.String("error", err.Error()),
+					slog.String("error", feed.SafeDiagnosticError(err)),
 				)
 				continue
 			}
@@ -331,11 +355,11 @@ func (s *Syncer) syncEcosystem(ctx context.Context, store db.Store, ecosystem, s
 		}
 
 		if findings := mapToMaliciousFindings(&entry); len(findings) > 0 {
-			if err := store.DeleteVulnerability(ctx, entry.ID); err != nil {
+			if err := db.DeleteVulnerabilityForSource(ctx, store, entry.ID, "osv"); err != nil {
 				entryErrors++
 				s.logger.Warn("failed to delete vulnerability superseded by malicious OSV category",
 					slog.String("id", entry.ID),
-					slog.String("error", err.Error()),
+					slog.String("error", feed.SafeDiagnosticError(err)),
 				)
 			}
 			for _, finding := range findings {
@@ -343,7 +367,7 @@ func (s *Syncer) syncEcosystem(ctx context.Context, store db.Store, ecosystem, s
 					entryErrors++
 					s.logger.Warn("failed to upsert malicious finding",
 						slog.String("id", finding.ID),
-						slog.String("error", err.Error()),
+						slog.String("error", feed.SafeDiagnosticError(err)),
 					)
 					continue
 				}
@@ -357,7 +381,7 @@ func (s *Syncer) syncEcosystem(ctx context.Context, store db.Store, ecosystem, s
 			entryErrors++
 			s.logger.Warn("failed to upsert vulnerability",
 				slog.String("id", entry.ID),
-				slog.String("error", err.Error()),
+				slog.String("error", feed.SafeDiagnosticError(err)),
 			)
 			continue
 		}
@@ -426,7 +450,7 @@ func (s *Syncer) download(ctx context.Context, url, storedETag string) (tmpPath,
 	}
 
 	s.logger.Debug("downloaded archive to temp file",
-		slog.String("path", tmpPath),
+		slog.String("file", filepath.Base(tmpPath)),
 		slog.Int64("bytes", written),
 	)
 
@@ -435,9 +459,9 @@ func (s *Syncer) download(ctx context.Context, url, storedETag string) (tmpPath,
 }
 
 // recordSyncSuccess persists a successful sync status.
-func (s *Syncer) recordSyncSuccess(ctx context.Context, start time.Time, dur time.Duration, total, synced int) {
+func (s *Syncer) recordSyncSuccess(ctx context.Context, dur time.Duration, total, synced int) {
 	now := time.Now()
-	err := s.store.UpsertFeedSyncStatus(ctx, &db.FeedSyncStatus{
+	err := feed.UpsertFeedSyncStatusBounded(s.store, &db.FeedSyncStatus{
 		FeedName:         FeedName,
 		LastSyncAt:       &now,
 		LastSyncDuration: &dur,
@@ -448,22 +472,28 @@ func (s *Syncer) recordSyncSuccess(ctx context.Context, start time.Time, dur tim
 	if err != nil {
 		s.logger.Warn("failed to record sync status", "error", err)
 	}
+	_ = ctx
 }
 
 // recordSyncFailure persists a failed sync status.
 func (s *Syncer) recordSyncFailure(ctx context.Context, start time.Time, syncErr error) {
 	dur := time.Since(start)
 	now := time.Now()
-	err := s.store.UpsertFeedSyncStatus(ctx, &db.FeedSyncStatus{
+	status := &db.FeedSyncStatus{
 		FeedName:         FeedName,
-		LastSyncAt:       &now,
 		LastSyncDuration: &dur,
 		LastSyncStatus:   "error",
-		LastError:        syncErr.Error(),
-	})
+		LastError:        feed.SafeDiagnosticError(syncErr),
+		UpdatedAt:        now,
+	}
+	if current, err := feed.GetFeedSyncStatusBounded(s.store, FeedName); err == nil {
+		feed.PreserveFeedStatusData(status, current)
+	}
+	err := feed.UpsertFeedSyncStatusBounded(s.store, status)
 	if err != nil {
 		s.logger.Warn("failed to record sync failure", "error", err)
 	}
+	_ = ctx
 }
 
 // ---------------------------------------------------------------------------

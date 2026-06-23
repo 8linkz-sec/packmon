@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -49,6 +50,97 @@ func TestRunMigrateReturnsConfigError(t *testing.T) {
 	}
 }
 
+func TestRunMigrateBranches(t *testing.T) {
+	originalRun := runDatabaseMigrations
+	originalVersion := readDatabaseMigrationVersion
+	t.Cleanup(func() {
+		runDatabaseMigrations = originalRun
+		readDatabaseMigrationVersion = originalVersion
+	})
+
+	for _, key := range []string{
+		"PACKMON_DB_HOST",
+		"PACKMON_DB_PORT",
+		"PACKMON_DB_USER",
+		"PACKMON_DB_PASSWORD",
+		"PACKMON_DB_NAME",
+	} {
+		t.Setenv(key, "")
+	}
+
+	runErr := errors.New("run failed")
+	versionErr := errors.New("version failed")
+
+	tests := []struct {
+		name        string
+		runErr      error
+		version     uint
+		dirty       bool
+		versionErr  error
+		wantErrPart string
+		wantVersion bool
+	}{
+		{
+			name:        "migration run error",
+			runErr:      runErr,
+			wantErrPart: "migrations failed: run failed",
+		},
+		{
+			name:        "version read error",
+			versionErr:  versionErr,
+			wantErrPart: "failed to read schema version after migration: version failed",
+			wantVersion: true,
+		},
+		{
+			name:        "dirty schema",
+			version:     42,
+			dirty:       true,
+			wantErrPart: "schema is in dirty state after migration (version 42)",
+			wantVersion: true,
+		},
+		{
+			name:        "success",
+			version:     42,
+			wantVersion: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var (
+				runDSN     string
+				versionDSN string
+			)
+			runDatabaseMigrations = func(dsn string) error {
+				runDSN = dsn
+				return tt.runErr
+			}
+			readDatabaseMigrationVersion = func(dsn string) (uint, bool, error) {
+				versionDSN = dsn
+				return tt.version, tt.dirty, tt.versionErr
+			}
+
+			err := runMigrate()
+			if tt.wantErrPart == "" {
+				if err != nil {
+					t.Fatalf("runMigrate() error = %v", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tt.wantErrPart) {
+				t.Fatalf("runMigrate() error = %v, want containing %q", err, tt.wantErrPart)
+			}
+			if runDSN == "" {
+				t.Fatal("runDatabaseMigrations was not called")
+			}
+			if tt.wantVersion && versionDSN != runDSN {
+				t.Fatalf("version DSN = %q, want run DSN %q", versionDSN, runDSN)
+			}
+			if !tt.wantVersion && versionDSN != "" {
+				t.Fatalf("readDatabaseMigrationVersion called after run failure with DSN %q", versionDSN)
+			}
+		})
+	}
+}
+
 func TestRunDevelopmentServerStartsAndStops(t *testing.T) {
 	serverPort := freeTCPPort(t)
 	metricsPort := freeTCPPort(t)
@@ -66,13 +158,14 @@ func TestRunDevelopmentServerStartsAndStops(t *testing.T) {
 	originalSignalContext := serverSignalContext
 	originalHardExit := hardExit
 	originalHardExitDelay := hardExitDelay
-	hardExitCalled := make(chan struct{})
+	hardExitCalled := make(chan int, 1)
 	var hardExitOnce sync.Once
 	serverSignalContext = func(context.Context) (context.Context, context.CancelFunc) {
 		return rootCtx, func() {}
 	}
-	hardExit = func(int) {
+	hardExit = func(code int) {
 		hardExitOnce.Do(func() {
+			hardExitCalled <- code
 			close(hardExitCalled)
 		})
 	}
@@ -101,7 +194,10 @@ func TestRunDevelopmentServerStartsAndStops(t *testing.T) {
 	}
 
 	select {
-	case <-hardExitCalled:
+	case code := <-hardExitCalled:
+		if code != 1 {
+			t.Fatalf("hard exit code = %d, want 1 for forced-shutdown failure", code)
+		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("hard exit hook was not called after context cancellation")
 	}
