@@ -28,10 +28,11 @@ import (
 )
 
 const (
-	maxConcurrentRegistryRequests = 10
-	maxRegistryResponseSize       = 512 * 1024
-	maxRegistryErrorBodyDrain     = 64 * 1024
-	maxPyPIRegistryResponseSize   = 16 * 1024 * 1024
+	maxConcurrentRegistryRequests    = 10
+	maxRegistryResponseSize          = 512 * 1024
+	maxRegistryErrorBodyDrain        = 64 * 1024
+	maxPackagistRegistryResponseSize = 4 * 1024 * 1024
+	maxPyPIRegistryResponseSize      = 16 * 1024 * 1024
 )
 
 type outdatedOptions struct {
@@ -1289,7 +1290,7 @@ func fetchRubyGemsLatest(ctx context.Context, name string) string {
 
 // packagist: GET https://repo.packagist.org/p2/{name}.json
 func fetchPackagistLatest(ctx context.Context, name string) string {
-	data, err := registryGet(ctx, "https://repo.packagist.org/p2/"+name+".json")
+	data, err := registryGetLimited(ctx, "https://repo.packagist.org/p2/"+name+".json", maxPackagistRegistryResponseSize)
 	if err != nil {
 		return ""
 	}

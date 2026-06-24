@@ -94,8 +94,28 @@ func TestListAllPackageTechnologies(t *testing.T) {
 			want: "-",
 		},
 		{
+			name: "openai npm package has no gpt technology tag",
+			pkg:  listAllPackage{Name: "openai", Version: "4.0.0", Ecosystem: domain.EcosystemNPM},
+			want: "-",
+		},
+		{
+			name: "gpt named npm package has no gpt technology tag",
+			pkg:  listAllPackage{Name: "gpt-3-encoder", Version: "1.1.4", Ecosystem: domain.EcosystemNPM},
+			want: "-",
+		},
+		{
+			name: "openai pypi package has no gpt technology tag",
+			pkg:  listAllPackage{Name: "openai", Version: "1.3.0", Ecosystem: domain.EcosystemPyPI},
+			want: "-",
+		},
+		{
 			name: "maven package is java",
 			pkg:  listAllPackage{Name: "org.springframework:spring-core", Version: "6.2.0", Ecosystem: domain.EcosystemMaven},
+			want: "java",
+		},
+		{
+			name: "tomcat maven package is java",
+			pkg:  listAllPackage{Name: "org.apache.tomcat.embed:tomcat-embed-core", Version: "9.0.80", Ecosystem: domain.EcosystemMaven},
 			want: "java",
 		},
 	}
@@ -2705,6 +2725,85 @@ func TestListAllHelperBranches(t *testing.T) {
 	err := writeListAllHTML(filepath.Join(parentFile, "report.html"), "", domain.SeverityCritical, &domain.ScanResult{}, listAllPackageReport{})
 	if err == nil || !strings.Contains(err.Error(), "prepare HTML output") {
 		t.Fatalf("writeListAllHTML(parent file) = %v", err)
+	}
+}
+
+func TestListAllFindingLabelsAndWarnings(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "blank", raw: "", want: "-"},
+		{name: "known", raw: "malware_history", want: "Malware history"},
+		{name: "hyphen unknown", raw: "custom-risk_type", want: "Custom risk type"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := listAllRiskTypeLabel(tt.raw); got != tt.want {
+				t.Fatalf("listAllRiskTypeLabel(%q) = %q, want %q", tt.raw, got, tt.want)
+			}
+		})
+	}
+
+	for _, tt := range []struct {
+		f    domain.Finding
+		want string
+	}{
+		{f: domain.Finding{Name: "left-pad", Version: "1.0.0"}, want: "left-pad"},
+		{f: domain.Finding{Version: "1.0.0"}, want: "1.0.0"},
+		{f: domain.Finding{}, want: "-"},
+	} {
+		if got := listAllFindingPackageLabel(tt.f); got != tt.want {
+			t.Fatalf("listAllFindingPackageLabel(%+v) = %q, want %q", tt.f, got, tt.want)
+		}
+	}
+
+	for _, tt := range []struct {
+		f    domain.Finding
+		want string
+	}{
+		{f: domain.Finding{RiskType: "removed_package"}, want: "Removed package"},
+		{f: domain.Finding{Type: domain.FindingTypeMalicious}, want: "Malware"},
+		{f: domain.Finding{Type: domain.FindingTypeVulnerability}, want: "Known vulnerability"},
+		{f: domain.Finding{Type: domain.FindingTypeLifecycle}, want: "Lifecycle"},
+		{f: domain.Finding{Type: domain.FindingTypeSupplyChainRisk}, want: "Supply-chain risk"},
+		{f: domain.Finding{}, want: "-"},
+	} {
+		if got := listAllFindingRiskType(tt.f); got != tt.want {
+			t.Fatalf("listAllFindingRiskType(%+v) = %q, want %q", tt.f, got, tt.want)
+		}
+	}
+
+	if got := listAllFindingTitle(domain.Finding{Title: "original", RiskType: "malware_history"}); got != "ReversingLabs: malware incident history" {
+		t.Fatalf("listAllFindingTitle(malware_history) = %q", got)
+	}
+	if got := listAllFindingTitle(domain.Finding{Title: "original"}); got != "original" {
+		t.Fatalf("listAllFindingTitle(default) = %q", got)
+	}
+
+	staleDays := 9
+	warnings := listAllHTMLWarnings(&domain.ScanResult{
+		Mode:        "local",
+		FeedStatus:  "degraded",
+		DBStale:     true,
+		DBAgeDays:   &staleDays,
+		ParseErrors: []string{" ", "bad lockfile"},
+	}, []string{" ", "missing SBOM"})
+	joined := strings.Join(warnings, "\n")
+	for _, want := range []string{
+		"Local database last synced 9 days ago",
+		"bad lockfile",
+		"missing SBOM",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("warnings missing %q: %+v", want, warnings)
+		}
+	}
+	if got := listAllHTMLWarnings(nil, []string{"missing inventory"}); len(got) != 1 || !strings.Contains(got[0], "missing inventory") {
+		t.Fatalf("listAllHTMLWarnings(nil) = %+v", got)
 	}
 }
 

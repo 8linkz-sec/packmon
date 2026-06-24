@@ -40,6 +40,51 @@ func TestOpenPrivateFileTightensExistingPermissions(t *testing.T) {
 	}
 }
 
+func TestOpenPrivateFileCreatesAndTruncatesFile(t *testing.T) {
+	baseDir := t.TempDir()
+	path := filepath.Join(baseDir, "report.json")
+
+	file, err := OpenPrivateFile(path)
+	if err != nil {
+		t.Fatalf("OpenPrivateFile(create): %v", err)
+	}
+	if _, err := file.Write([]byte("old-data")); err != nil {
+		CloseSilently(file)
+		t.Fatalf("write initial file: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close initial file: %v", err)
+	}
+
+	file, err = OpenPrivateFile(path)
+	if err != nil {
+		t.Fatalf("OpenPrivateFile(truncate): %v", err)
+	}
+	if _, err := file.Write([]byte("new")); err != nil {
+		CloseSilently(file)
+		t.Fatalf("write truncated file: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close truncated file: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read private file: %v", err)
+	}
+	if string(data) != "new" {
+		t.Fatalf("file content = %q, want truncated new content", data)
+	}
+}
+
+func TestOpenPrivateFileReturnsCreateError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing", "report.json")
+	if file, err := OpenPrivateFile(path); err == nil {
+		CloseSilently(file)
+		t.Fatal("OpenPrivateFile(missing parent) error = nil")
+	}
+}
+
 func skipIfPOSIXModesAreNotPreserved(t *testing.T, baseDir string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {

@@ -36,6 +36,34 @@ func TestRedactURLInvalidDoesNotEchoInput(t *testing.T) {
 	}
 }
 
+func TestRedactURLHandlesBlankRootAndNoPath(t *testing.T) {
+	t.Parallel()
+
+	if got := RedactURL(" "); got != "" {
+		t.Fatalf("RedactURL(blank) = %q, want empty", got)
+	}
+	if got := RedactURL("https://api.example.test"); got != "https://api.example.test" {
+		t.Fatalf("RedactURL(no path) = %q", got)
+	}
+	if got := RedactURL("https://api.example.test/"); got != "https://api.example.test/" {
+		t.Fatalf("RedactURL(root path) = %q", got)
+	}
+}
+
+func TestRedactURLErrorAndRequestErrorEdgeCases(t *testing.T) {
+	t.Parallel()
+
+	if got := RedactURLError(nil); got != "" {
+		t.Fatalf("RedactURLError(nil) = %q, want empty", got)
+	}
+	if got := RedactURLRequestError(errors.New("Bearer secret-token-123456"), ""); got != "Bearer [redacted]" {
+		t.Fatalf("RedactURLRequestError(non-url) = %q", got)
+	}
+	if got := RedactURLRequestError(&url.Error{Op: " ", Err: nil}, " "); got != "request URL failed" {
+		t.Fatalf("RedactURLRequestError(no inner err) = %q", got)
+	}
+}
+
 func TestRedactURLRequestErrorDropsEmbeddedRequestURL(t *testing.T) {
 	t.Parallel()
 
@@ -108,6 +136,37 @@ func TestBoundedDiagnosticValueRedactsControlsAndTruncates(t *testing.T) {
 	}
 	if len(got) > 96 {
 		t.Fatalf("BoundedDiagnosticValue length = %d, want <= 96", len(got))
+	}
+}
+
+func TestBoundedValueLimitsAndUTF8(t *testing.T) {
+	t.Parallel()
+
+	if got := BoundedValue("anything", 0); got != "" {
+		t.Fatalf("BoundedValue(max 0) = %q, want empty", got)
+	}
+	if got := BoundedValue("a\n\tb", 20); got != "a b" {
+		t.Fatalf("BoundedValue(control whitespace) = %q, want collapsed text", got)
+	}
+	if got := BoundedValue("abcdef", 3); got != "... "[:3] && got != "..." {
+		t.Fatalf("BoundedValue(short max) = %q, want truncation marker prefix", got)
+	}
+	got := BoundedValue("alpha βeta gamma", 14)
+	if strings.Contains(got, "\uFFFD") || len(got) > 14 || !strings.Contains(got, "[truncated]") {
+		t.Fatalf("BoundedValue(utf8 truncate) = %q", got)
+	}
+}
+
+func TestSplitTrailingURLPunctuation(t *testing.T) {
+	t.Parallel()
+
+	core, suffix := splitTrailingURLPunctuation("https://example.test/path).")
+	if core != "https://example.test/path" || suffix != ")." {
+		t.Fatalf("splitTrailingURLPunctuation() = %q %q", core, suffix)
+	}
+	core, suffix = splitTrailingURLPunctuation("https://example.test/path")
+	if core != "https://example.test/path" || suffix != "" {
+		t.Fatalf("splitTrailingURLPunctuation(no suffix) = %q %q", core, suffix)
 	}
 }
 

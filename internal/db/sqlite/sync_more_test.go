@@ -42,6 +42,22 @@ func TestSyncHTTPClientRejectsHTTPSDowngradeRedirect(t *testing.T) {
 	}
 }
 
+func TestSyncStatsAnyRemoved(t *testing.T) {
+	t.Parallel()
+
+	if (SyncStats{}).AnyRemoved() {
+		t.Fatal("zero SyncStats reported removed rows")
+	}
+	stats := SyncStats{TombstoneDeleted: SyncRemovalStats{Reputation: 1}}
+	if !stats.AnyRemoved() || !stats.TombstoneDeleted.Any() {
+		t.Fatalf("SyncStats.AnyRemoved() = %v, TombstoneDeleted.Any() = %v; want true true", stats.AnyRemoved(), stats.TombstoneDeleted.Any())
+	}
+	stats = SyncStats{FullCleared: SyncRemovalStats{Lifecycle: 1}}
+	if !stats.AnyRemoved() || !stats.FullCleared.Any() {
+		t.Fatalf("SyncStats full clear removed = %+v, want true", stats)
+	}
+}
+
 func TestSyncHTTPClientStripsAuthorizationOnCrossOriginRedirect(t *testing.T) {
 	client := newSyncHTTPClient(time.Second)
 	req, err := http.NewRequest(http.MethodGet, "https://other.example/api/v1/sync", nil)

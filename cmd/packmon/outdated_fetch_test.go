@@ -195,6 +195,108 @@ func TestRegistryGetDrainsBoundedErrorBodies(t *testing.T) {
 	}
 }
 
+func TestFetchPackagistLatestHandlesLargePublicMetadata(t *testing.T) {
+	stubPackagistLatestResponse(t, "laravel/framework", largePackagistMetadata("laravel/framework", "v13.17.0", maxRegistryResponseSize))
+
+	if got := fetchPackagistLatest(context.Background(), "laravel/framework"); got != "v13.17.0" {
+		t.Fatalf("fetchPackagistLatest(large metadata) = %q, want v13.17.0", got)
+	}
+}
+
+func TestListAllReportUsesLargePackagistMetadata(t *testing.T) {
+	stubPackagistLatestResponse(t, "laravel/framework", largePackagistMetadata("laravel/framework", "v13.17.0", maxRegistryResponseSize))
+
+	report := buildListAllPackageReport(context.Background(), []listAllPackage{{
+		Name:       "laravel/framework",
+		Version:    "v10.48.0",
+		Ecosystem:  domain.EcosystemComposer,
+		LockFile:   "composer.lock",
+		SourceRefs: []string{"https://github.com/laravel/framework.git", "https://api.github.com/repos/laravel/framework/zipball/v10.48.0"},
+	}}, nil, "repo", 30)
+
+	if len(report.Rows) != 1 {
+		t.Fatalf("Rows = %d, want 1", len(report.Rows))
+	}
+	if got := report.Rows[0].Latest; got != "v13.17.0" {
+		t.Fatalf("list-all Latest = %q, want v13.17.0", got)
+	}
+	if got := report.Rows[0].Update; got != "yes" {
+		t.Fatalf("list-all Update = %q, want yes", got)
+	}
+	if report.Unknown != 0 {
+		t.Fatalf("Unknown = %d, want 0", report.Unknown)
+	}
+}
+
+func TestOutdatedReportUsesLargePackagistMetadata(t *testing.T) {
+	stubPackagistLatestResponse(t, "laravel/framework", largePackagistMetadata("laravel/framework", "v13.17.0", maxRegistryResponseSize))
+
+	dir := t.TempDir()
+	composerLock := `{
+  "packages": [
+    {
+      "name": "laravel/framework",
+      "version": "v10.48.0",
+      "source": {"type": "git", "url": "https://github.com/laravel/framework.git"},
+      "dist": {"type": "zip", "url": "https://api.github.com/repos/laravel/framework/zipball/v10.48.0"}
+    }
+  ]
+}`
+	if err := os.WriteFile(filepath.Join(dir, "composer.lock"), []byte(composerLock), 0o600); err != nil {
+		t.Fatalf("write composer.lock: %v", err)
+	}
+	htmlPath := filepath.Join(dir, "outdated.html")
+	if err := runOutdatedWithOptions([]string{dir}, outdatedOptions{
+		Context:    context.Background(),
+		MaxDepth:   10,
+		OutputHTML: htmlPath,
+		Quiet:      true,
+	}); err != nil {
+		t.Fatalf("runOutdatedWithOptions() error = %v", err)
+	}
+
+	html, err := os.ReadFile(htmlPath)
+	if err != nil {
+		t.Fatalf("read outdated HTML: %v", err)
+	}
+	for _, want := range []string{"laravel/framework", "v10.48.0", "v13.17.0"} {
+		if !strings.Contains(string(html), want) {
+			t.Fatalf("outdated HTML missing %q:\n%s", want, string(html))
+		}
+	}
+}
+
+func TestFetchPackagistLatestKeepsVeryLargeMetadataBounded(t *testing.T) {
+	stubPackagistLatestResponse(t, "laravel/framework", largePackagistMetadata("laravel/framework", "v13.17.0", maxPackagistRegistryResponseSize))
+
+	if got := fetchPackagistLatest(context.Background(), "laravel/framework"); got != "" {
+		t.Fatalf("fetchPackagistLatest(oversized metadata) = %q, want empty", got)
+	}
+}
+
+func largePackagistMetadata(name, latest string, fillerBytes int) string {
+	return `{"packages":{"` + name + `":[{"version":"` + latest + `"},{"version":"` + strings.Repeat("x", fillerBytes) + `"}]}}`
+}
+
+func stubPackagistLatestResponse(t *testing.T, name, body string) {
+	t.Helper()
+	originalClient := registryClient
+	t.Cleanup(func() { registryClient = originalClient })
+
+	wantURL := "https://repo.packagist.org/p2/" + name + ".json"
+	registryClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.String() != wantURL {
+			t.Fatalf("unexpected registry request: %s", req.URL.String())
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})}
+}
+
 func TestFetchCratesLatestUsesPolicyUserAgentAndThrottle(t *testing.T) {
 	originalClient := registryClient
 	originalThrottle := cratesIOThrottle
