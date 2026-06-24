@@ -913,7 +913,7 @@ func TestRunScanPipelineWarnsWhenFailOnNoneIsEffective(t *testing.T) {
 
 	for _, want := range []string{
 		"warning: fail_on NONE disables vulnerability blocking only",
-		"malicious and supply-chain risk findings still block",
+		"malicious and active supply-chain risk findings still block",
 	} {
 		if !strings.Contains(stderr, want) {
 			t.Fatalf("stderr missing %q:\n%s", want, stderr)

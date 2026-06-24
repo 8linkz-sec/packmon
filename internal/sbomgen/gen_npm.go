@@ -25,6 +25,9 @@ func (npmGenerator) InstallSpec() InstallSpec {
 
 func (npmGenerator) Generate(ctx context.Context, d Detection, outPath string, opts GenerateOptions, run RunnerFunc) error {
 	args := []string{"--output-format", "JSON", "--output-file", outPath}
+	if npmHasLockfile(d.ProjectDir) {
+		args = append(args, "--package-lock-only")
+	}
 	if !opts.IncludeDev {
 		args = append(args, "--omit", "dev")
 	}
@@ -34,6 +37,15 @@ func (npmGenerator) Generate(ctx context.Context, d Detection, outPath string, o
 		return fmt.Errorf("cyclonedx-npm: %w: %s", err, commandOutputSummary(out))
 	}
 	return nil
+}
+
+func npmHasLockfile(projectDir string) bool {
+	for _, name := range []string{"package-lock.json", "npm-shrinkwrap.json"} {
+		if info, err := os.Stat(filepath.Join(projectDir, name)); err == nil && !info.IsDir() {
+			return true
+		}
+	}
+	return false
 }
 
 func (npmGenerator) DeclaresDependencies(d Detection, opts GenerateOptions) (bool, error) {

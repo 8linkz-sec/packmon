@@ -112,6 +112,9 @@ func TestReputationToFindingMapsHistoricalRisk(t *testing.T) {
 	if finding.RiskType != "malware_history" {
 		t.Fatalf("RiskType = %q, want malware_history", finding.RiskType)
 	}
+	if finding.Severity != domain.SeverityLow {
+		t.Fatalf("Severity = %q, want LOW for historical reputation context", finding.Severity)
+	}
 }
 
 func TestReputationToFindingSkipsClean(t *testing.T) {
@@ -155,8 +158,8 @@ func TestReputationSyncFindingMapsRowsAndTombstones(t *testing.T) {
 	risk.Severity = "HIGH"
 	risk.Summary = "ReversingLabs: malware incident history"
 	got = reputationSyncFinding(risk)
-	if got.Withdrawn || got.Type != "supply_chain_risk" || got.RiskType != "malware_history" || got.Severity != "HIGH" {
-		t.Fatalf("historical risk sync row = %+v, want active malware_history supply-chain risk", got)
+	if got.Withdrawn || got.Type != "supply_chain_risk" || got.RiskType != "malware_history" || got.Severity != "LOW" {
+		t.Fatalf("historical risk sync row = %+v, want non-withdrawn LOW malware_history reputation row", got)
 	}
 
 	clean := removed

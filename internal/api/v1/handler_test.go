@@ -3057,6 +3057,51 @@ func TestHandleSyncEmitsReputationRows(t *testing.T) {
 	}
 }
 
+func TestHandleSyncIncludesFeedState(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	store := &syncExportStore{
+		stubStore: stubStore{
+			feedStatuses: []db.FeedSyncStatus{
+				{
+					FeedName:       "osv",
+					LastSyncAt:     ptrFeedTime(now.Add(-time.Hour)),
+					LastSyncStatus: "success",
+					EntriesTotal:   10,
+				},
+				{
+					FeedName:       "nvd",
+					LastSyncStatus: "pending",
+				},
+			},
+		},
+		export: &db.SyncExport{SyncedAt: now},
+	}
+	h := newTestHandler(&store.stubStore)
+	h.store = store
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sync", nil)
+	rr := httptest.NewRecorder()
+
+	h.HandleSync(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp syncResponsePayload
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.FeedStatus != "degraded" {
+		t.Fatalf("feed status = %q, want degraded", resp.FeedStatus)
+	}
+	if got := resp.FeedVersions["osv"]; got != now.Add(-time.Hour).UTC().Format(time.RFC3339) {
+		t.Fatalf("feed versions[osv] = %q", got)
+	}
+}
+
 func TestHandleSyncEmitsLifecycleDatesAsDateOnly(t *testing.T) {
 	t.Parallel()
 

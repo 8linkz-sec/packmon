@@ -162,7 +162,7 @@ func TestGitHubReusableScanWorkflowExplainsFailOnNoneScope(t *testing.T) {
 	text := string(data)
 	for _, want := range []string{
 		"NONE disables vulnerability blocking only",
-		"malicious and supply-chain risk findings still block",
+		"malicious and active supply-chain risk findings still block",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("packmon-scan.yml missing fail_on NONE scope text %q", want)

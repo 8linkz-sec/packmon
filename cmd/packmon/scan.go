@@ -156,7 +156,7 @@ packages, supply-chain risk findings, and lifecycle risks.`,
 	f.StringVar(&flagMode, "mode", "auto", "scan mode (local|remote|auto)")
 	f.StringVar(&flagServer, "server", "", "feed server URL")
 	f.StringVar(&flagAPIKey, "api-key", "", "API key for authenticated remote scans")
-	f.StringVar(&flagFailOn, "fail-on", "CRITICAL", "block on vulnerability severity (CRITICAL|HIGH|MEDIUM|LOW|NONE); NONE disables vulnerability blocking only; malicious and supply-chain risk findings still block")
+	f.StringVar(&flagFailOn, "fail-on", "CRITICAL", "block on vulnerability severity (CRITICAL|HIGH|MEDIUM|LOW|NONE); NONE disables vulnerability blocking only; malicious and active supply-chain risk findings still block")
 	f.StringVar(&flagEcosystems, "ecosystems", "", "comma-separated ecosystem filter")
 	f.IntVar(&flagMaxDepth, "max-depth", 10, "directory walk depth")
 	f.IntVar(&flagTimeout, "timeout", 30, "HTTP timeout in seconds")
@@ -852,7 +852,7 @@ func autoFallbackWarning(mode scanner.Mode, result *domain.ScanResult) string {
 	return "warning: remote server unreachable, scanned against local database"
 }
 
-const failOnNoneWarning = "warning: fail_on NONE disables vulnerability blocking only; malicious and supply-chain risk findings still block."
+const failOnNoneWarning = "warning: fail_on NONE disables vulnerability blocking only; malicious and active supply-chain risk findings still block."
 
 // runScanPipeline builds the scanner.Config from settings, opens local SQLite
 // only when local checking or history needs it, runs the scan, applies DB
@@ -999,52 +999,8 @@ func runSingleScan(ctx context.Context, settings scanSettings) (int, error) {
 		}
 	}
 
-	if settings.OutputJSON != "" {
-		if err := writeJSONFile(settings.OutputJSON, result); err != nil {
-			fmt.Fprintf(os.Stderr, "error writing JSON output: %v\n", err)
-			exitCode = ExitOperational
-		}
-	}
-
-	if settings.OutputSARIF != "" {
-		if err := ensureOutputDir(settings.OutputSARIF); err != nil {
-			fmt.Fprintf(os.Stderr, "error preparing SARIF output: %v\n", err)
-			exitCode = ExitOperational
-		} else {
-			sw := scanner.NewSARIFWriter(version)
-			if err := sw.WriteFile(settings.OutputSARIF, result); err != nil {
-				fmt.Fprintf(os.Stderr, "error writing SARIF output: %v\n", err)
-				exitCode = ExitOperational
-			}
-		}
-	}
-
-	if settings.OutputJUnit != "" {
-		if err := ensureOutputDir(settings.OutputJUnit); err != nil {
-			fmt.Fprintf(os.Stderr, "error preparing JUnit output: %v\n", err)
-			exitCode = ExitOperational
-		} else {
-			jw := scanner.NewJUnitWriter()
-			if err := jw.WriteFile(settings.OutputJUnit, result); err != nil {
-				fmt.Fprintf(os.Stderr, "error writing JUnit output: %v\n", err)
-				exitCode = ExitOperational
-			}
-		}
-	}
-
-	if settings.OutputHTML != "" {
-		if err := ensureOutputDir(settings.OutputHTML); err != nil {
-			fmt.Fprintf(os.Stderr, "error preparing HTML output: %v\n", err)
-			exitCode = ExitOperational
-		} else {
-			hw := scanner.NewHTMLWriter(version)
-			if err := hw.WriteFile(settings.OutputHTML, settings.TargetName, failOn, result); err != nil {
-				fmt.Fprintf(os.Stderr, "error writing HTML output: %v\n", err)
-				exitCode = ExitOperational
-			} else if !settings.Quiet {
-				_, _ = fmt.Fprintf(os.Stdout, "HTML report written to: %s\n", settings.OutputHTML)
-			}
-		}
+	if writeScanOutputArtifacts(settings, result, failOn, true) {
+		exitCode = ExitOperational
 	}
 
 	if settings.WebhookURL != "" {
@@ -1061,6 +1017,58 @@ func runSingleScan(ctx context.Context, settings scanSettings) (int, error) {
 	}
 
 	return exitCode, nil
+}
+
+func writeScanOutputArtifacts(settings scanSettings, result *domain.ScanResult, failOn domain.Severity, includeHTML bool) bool {
+	hadError := false
+	if settings.OutputJSON != "" {
+		if err := writeJSONFile(settings.OutputJSON, result); err != nil {
+			fmt.Fprintf(os.Stderr, "error writing JSON output: %v\n", err)
+			hadError = true
+		}
+	}
+
+	if settings.OutputSARIF != "" {
+		if err := ensureOutputDir(settings.OutputSARIF); err != nil {
+			fmt.Fprintf(os.Stderr, "error preparing SARIF output: %v\n", err)
+			hadError = true
+		} else {
+			sw := scanner.NewSARIFWriter(version)
+			if err := sw.WriteFile(settings.OutputSARIF, result); err != nil {
+				fmt.Fprintf(os.Stderr, "error writing SARIF output: %v\n", err)
+				hadError = true
+			}
+		}
+	}
+
+	if settings.OutputJUnit != "" {
+		if err := ensureOutputDir(settings.OutputJUnit); err != nil {
+			fmt.Fprintf(os.Stderr, "error preparing JUnit output: %v\n", err)
+			hadError = true
+		} else {
+			jw := scanner.NewJUnitWriter()
+			if err := jw.WriteFile(settings.OutputJUnit, result); err != nil {
+				fmt.Fprintf(os.Stderr, "error writing JUnit output: %v\n", err)
+				hadError = true
+			}
+		}
+	}
+
+	if includeHTML && settings.OutputHTML != "" {
+		if err := ensureOutputDir(settings.OutputHTML); err != nil {
+			fmt.Fprintf(os.Stderr, "error preparing HTML output: %v\n", err)
+			hadError = true
+		} else {
+			hw := scanner.NewHTMLWriter(version)
+			if err := hw.WriteFile(settings.OutputHTML, settings.TargetName, failOn, result); err != nil {
+				fmt.Fprintf(os.Stderr, "error writing HTML output: %v\n", err)
+				hadError = true
+			} else if !settings.Quiet {
+				_, _ = fmt.Fprintf(os.Stdout, "HTML report written to: %s\n", settings.OutputHTML)
+			}
+		}
+	}
+	return hadError
 }
 
 func reportScanParseErrors(result *domain.ScanResult) {

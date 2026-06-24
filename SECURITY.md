@@ -324,9 +324,9 @@ deleting existing data.
 ReversingLabs API tokens are sensitive feed API keys and follow the same
 handling rules as VulnCheck, NVD, and Socket.dev keys. Packmon stores only
 normalized ReversingLabs status and minimal evidence, not full raw reports.
-Historical ReversingLabs incident evidence is exposed as supply-chain
-reputation risk, not as an active malicious-package finding unless active
-malware signals are present.
+Historical ReversingLabs incident evidence is exposed as non-blocking
+`LOW` reputation info, not as an active malicious-package finding unless
+active malware signals are present.
 Demand-driven ReversingLabs scheduling requires a configured API key, applies
 per-request admission limits, deduplicates package coordinates, and supports
 operator-configured private namespace exclusions before package coordinates are
@@ -432,12 +432,14 @@ Downstream tools should trust `findings_blocking`, `block_threshold`, exit code,
 and finding type semantics only if the result was produced by a verified
 Packmon binary/server.
 
-Malicious and supply-chain risk findings always block. Vulnerability and
-`lifecycle` findings block according to the configured threshold. Exact EOL
-matches from lifecycle data are represented as blocking `supply_chain_risk`
-findings, while upcoming EOL and security-support-only states remain
-severity-gated `lifecycle` findings. `NONE` disables vulnerability blocking
-only; admin UI saves of `NONE` require explicit acknowledgement.
+Malicious and active supply-chain risk findings always block. Historical
+ReversingLabs malware-incident evidence is `LOW` reputation info and does not
+block by itself. Vulnerability and `lifecycle` findings block according to the
+configured threshold. Exact EOL matches from lifecycle data are represented as
+blocking `supply_chain_risk` findings, while upcoming EOL and
+security-support-only states remain severity-gated `lifecycle` findings.
+`NONE` disables vulnerability blocking only; admin UI saves of `NONE` require
+explicit acknowledgement.
 
 `ScanResult.feed_status` is machine-readable (`healthy`, `degraded`, or
 `error`). Parser and operational failure details belong in optional
@@ -625,8 +627,9 @@ Local SQLite sync:
 - rejects synced malicious exact-version data unless it is empty, `null`, or a
   JSON array of strings, and fails local lookup on malformed stored malicious
   version constraints instead of treating them as global findings;
-- limits ReversingLabs reputation sync to active `malicious`, `removed`, and
-  `risk` finding rows needed for local scan decisions;
+- limits ReversingLabs reputation sync to active `malicious` and `removed`
+  rows needed for local scan decisions plus non-blocking `risk` rows needed for
+  local `LOW` reputation context;
 - resolves synced reputation rows through explicit reputation lookup methods,
   not through malicious-package lookup methods;
 - refuses to mark the local database fresh from a server `synced_at` timestamp

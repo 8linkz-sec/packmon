@@ -214,7 +214,7 @@ func (jw *JUnitWriter) buildJUnit(result *domain.ScanResult) junitTestsuites {
 
 func (jw *JUnitWriter) buildTestcase(f domain.Finding, failing bool) junitTestcase {
 	pkg := fmt.Sprintf("%s@%s", f.Name, f.Version)
-	name := fmt.Sprintf("[%s] %s (%s)", f.Severity, pkg, f.Ecosystem)
+	name := fmt.Sprintf("[%s] %s (%s)", domain.NormalizeFindingSeverity(f), pkg, f.Ecosystem)
 	classname := fmt.Sprintf("packmon.%s", f.Ecosystem)
 
 	var failType string

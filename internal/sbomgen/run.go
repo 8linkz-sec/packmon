@@ -29,6 +29,7 @@ type Config struct {
 	LookPath     func(string) (string, error)
 	Runner       RunnerFunc
 	Now          func() time.Time
+	ToolCacheDir string
 }
 
 // Result contains generated SBOM paths and the cleanup action for temporary mode.
@@ -267,6 +268,11 @@ func reserveOutputPath(path string) error {
 func ensureTool(ctx context.Context, cfg Config, gen Generator) error {
 	cfg = normalizeConfig(cfg)
 	spec := gen.InstallSpec()
+	if spec.PythonPackage {
+		if err := prependPythonToolPath(cfg, spec); err != nil {
+			return err
+		}
+	}
 	toolPath, pathErr := cfg.LookPath(gen.Tool())
 	var versionErr error
 	if pathErr == nil {
@@ -286,17 +292,32 @@ func ensureTool(ctx context.Context, cfg Config, gen Generator) error {
 	if len(spec.Args) == 0 {
 		return fmt.Errorf("generator %q has no install command", gen.Tool())
 	}
-	installer := spec.Args[0]
-	if _, err := cfg.LookPath(installer); err != nil {
-		return fmt.Errorf("installer %q for %s is not on PATH: %w", installer, spec.Package, err)
+	installer, installerErr := resolveInstaller(cfg, spec)
+	if installerErr != nil {
+		return installerErr
 	}
+	if spec.PythonPackage {
+		if err := installPythonPackageTool(ctx, cfg, spec, installer); err != nil {
+			return err
+		}
+		toolPath, err := cfg.LookPath(gen.Tool())
+		if err != nil {
+			return fmt.Errorf("installed %s but %q is still not on PATH: %w", spec.Package, gen.Tool(), err)
+		}
+		if err := verifyToolVersion(ctx, cfg, gen, toolPath); err != nil {
+			return err
+		}
+		return nil
+	}
+	installArgs := append([]string(nil), spec.Args[1:]...)
+	displayArgs := append([]string{installer}, installArgs...)
 
 	if cfg.Logger != nil {
-		cfg.Logger.Info("installing SBOM generator", "package", spec.Package, "source", spec.Source, "command", strings.Join(spec.Args, " "))
+		cfg.Logger.Info("installing SBOM generator", "package", spec.Package, "source", spec.Source, "command", strings.Join(displayArgs, " "))
 	}
 	installCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
 	defer cancel()
-	output, err := cfg.Runner(installCtx, RunOptions{Name: installer, Args: spec.Args[1:]})
+	output, err := cfg.Runner(installCtx, RunOptions{Name: installer, Args: installArgs})
 	if err != nil {
 		return fmt.Errorf("install %s: %w: %s", spec.Package, err, strings.TrimSpace(commandOutputSummary(output)))
 	}
@@ -308,6 +329,128 @@ func ensureTool(ctx context.Context, cfg Config, gen Generator) error {
 		return err
 	}
 	return nil
+}
+
+func installPythonPackageTool(ctx context.Context, cfg Config, spec InstallSpec, python string) error {
+	venvDir, err := pythonToolVenvDir(cfg, spec)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(venvDir), 0o750); err != nil {
+		return fmt.Errorf("create Python tool cache: %w", err)
+	}
+	if cfg.Logger != nil {
+		cfg.Logger.Info("installing SBOM generator", "package", spec.Package, "source", spec.Source, "command", strings.Join([]string{python, "-m", "venv", venvDir}, " "))
+	}
+	installCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
+	defer cancel()
+	output, err := cfg.Runner(installCtx, RunOptions{Name: python, Args: []string{"-m", "venv", venvDir}})
+	if err != nil {
+		return fmt.Errorf("create venv for %s: %w: %s", spec.Package, err, strings.TrimSpace(commandOutputSummary(output)))
+	}
+
+	venvPython := pythonToolVenvPython(venvDir)
+	pkg := pythonPackagePin(spec)
+	if cfg.Logger != nil {
+		cfg.Logger.Info("installing SBOM generator", "package", spec.Package, "source", spec.Source, "command", strings.Join([]string{venvPython, "-m", "pip", "install", pkg}, " "))
+	}
+	output, err = cfg.Runner(installCtx, RunOptions{Name: venvPython, Args: []string{"-m", "pip", "install", pkg}})
+	if err != nil {
+		return fmt.Errorf("install %s: %w: %s", spec.Package, err, strings.TrimSpace(commandOutputSummary(output)))
+	}
+	if err := prependPythonToolPath(cfg, spec); err != nil {
+		return err
+	}
+	return nil
+}
+
+func pythonPackagePin(spec InstallSpec) string {
+	if strings.TrimSpace(spec.ExpectedVersion) == "" {
+		return spec.Package
+	}
+	return spec.Package + "==" + strings.TrimSpace(spec.ExpectedVersion)
+}
+
+func prependPythonToolPath(cfg Config, spec InstallSpec) error {
+	venvDir, err := pythonToolVenvDir(cfg, spec)
+	if err != nil {
+		return err
+	}
+	binDir := pythonToolBinDir(venvDir)
+	path := os.Getenv("PATH")
+	for _, part := range filepath.SplitList(path) {
+		if filepath.Clean(part) == filepath.Clean(binDir) {
+			return nil
+		}
+	}
+	if path == "" {
+		return os.Setenv("PATH", binDir)
+	}
+	return os.Setenv("PATH", binDir+string(os.PathListSeparator)+path)
+}
+
+func pythonToolVenvDir(cfg Config, spec InstallSpec) (string, error) {
+	root := strings.TrimSpace(cfg.ToolCacheDir)
+	if root == "" {
+		cacheDir, err := os.UserCacheDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve user cache dir: %w", err)
+		}
+		root = filepath.Join(cacheDir, "packmon", "tools")
+	}
+	version := strings.TrimSpace(spec.ExpectedVersion)
+	if version == "" {
+		version = "default"
+	}
+	return filepath.Join(root, "python", safeToolCachePart(spec.Package), safeToolCachePart(version)), nil
+}
+
+func safeToolCachePart(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" {
+		return "unknown"
+	}
+	var b strings.Builder
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '.', r == '-', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+func pythonToolBinDir(venvDir string) string {
+	if os.PathSeparator == '\\' {
+		return filepath.Join(venvDir, "Scripts")
+	}
+	return filepath.Join(venvDir, "bin")
+}
+
+func pythonToolVenvPython(venvDir string) string {
+	if os.PathSeparator == '\\' {
+		return filepath.Join(pythonToolBinDir(venvDir), "python.exe")
+	}
+	return filepath.Join(pythonToolBinDir(venvDir), "python")
+}
+
+func resolveInstaller(cfg Config, spec InstallSpec) (string, error) {
+	installer := spec.Args[0]
+	if _, err := cfg.LookPath(installer); err == nil {
+		return installer, nil
+	} else if installer != "python" {
+		return "", fmt.Errorf("installer %q for %s is not on PATH: %w", installer, spec.Package, err)
+	}
+	if _, err := cfg.LookPath("python3"); err != nil {
+		return "", fmt.Errorf("installer %q for %s is not on PATH: %w", installer, spec.Package, err)
+	}
+	return "python3", nil
 }
 
 func verifyToolVersion(ctx context.Context, cfg Config, gen Generator, toolPath string) error {

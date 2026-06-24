@@ -258,6 +258,9 @@ func matchRanges(version, rangesJSON, ecosystem string) (affected bool, evaluate
 		}
 
 		evaluated++
+		if skipRangeComparisonForVersion(version, rangeType, ecosystem) {
+			continue
+		}
 
 		cmp := func(a, b string) int {
 			return Compare(a, b, rangeType, ecosystem)
@@ -287,6 +290,30 @@ func matchRanges(version, rangesJSON, ecosystem string) (affected bool, evaluate
 	}
 
 	return false, evaluated, nil
+}
+
+func skipRangeComparisonForVersion(version, rangeType, ecosystem string) bool {
+	if !strings.EqualFold(ecosystem, "actions") {
+		return false
+	}
+	if strings.EqualFold(rangeType, "GIT") {
+		return false
+	}
+	return isFullGitCommitSHA(version)
+}
+
+func isFullGitCommitSHA(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) != 40 && len(value) != 64 {
+		return false
+	}
+	for _, ch := range value {
+		if (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func versionInRange(version, introduced, fixed, lastAffected string, cmp func(a, b string) int) bool {

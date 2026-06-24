@@ -269,8 +269,11 @@ func (sw *SARIFWriter) buildLocations(f domain.Finding) []sarifLocation {
 
 // sarifLevel maps packmon severity to SARIF level.
 // SARIF levels: "error", "warning", "note", "none".
-// Malicious and supply-chain risk findings are always "error".
+// Malicious and active supply-chain risk findings are always "error".
 func (sw *SARIFWriter) sarifLevel(f domain.Finding) string {
+	if domain.FindingIsInformational(f) {
+		return "note"
+	}
 	if domain.FindingAlwaysBlocks(f) {
 		return "error"
 	}

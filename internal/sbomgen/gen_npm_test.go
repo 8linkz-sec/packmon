@@ -45,6 +45,24 @@ func TestNpmGeneratorGenerateArgsIncludeDevDoesNotOmitDev(t *testing.T) {
 	}
 }
 
+func TestNpmGeneratorGenerateArgsUsePackageLockOnlyWhenLockfileExists(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "package.json", `{"dependencies":{"left-pad":"1.3.0"}}`)
+	writeFile(t, root, "package-lock.json", `{"lockfileVersion":3,"packages":{}}`)
+	d := Detection{ManifestPath: filepath.Join(root, "package.json"), ProjectDir: root}
+	var got RunOptions
+	err := (npmGenerator{}).Generate(context.Background(), d, filepath.Join(root, "bom.json"), GenerateOptions{}, func(_ context.Context, opts RunOptions) ([]byte, error) {
+		got = opts
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if !strings.Contains(strings.Join(got.Args, " "), "--package-lock-only") {
+		t.Fatalf("RunOptions = %+v, want --package-lock-only for package-lock.json", got)
+	}
+}
+
 func TestNpmGeneratorDeclaresWorkspaceChildDependencies(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "package.json", `{"workspaces":{"packages":["packages/*"]}}`)

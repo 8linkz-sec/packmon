@@ -99,7 +99,7 @@ func TestConfigInitTemplateUsesSecretFreeDefaults(t *testing.T) {
 		"sync_source: server",
 		"fail_on: CRITICAL",
 		"mode: auto",
-		"NONE disables vulnerability blocking only; malicious and supply-chain risk findings still block.",
+		"NONE disables vulnerability blocking only; malicious and active supply-chain risk findings still block.",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("generated config missing %q:\n%s", want, text)

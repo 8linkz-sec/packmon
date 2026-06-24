@@ -608,7 +608,7 @@ func (s *Store) queryReputationFindings(ctx context.Context, ecosystem, name, ve
 			title = id
 		}
 
-		findings = append(findings, domain.Finding{
+		finding := domain.Finding{
 			Name:       pkg,
 			Version:    ver,
 			Ecosystem:  domain.Ecosystem(eco),
@@ -618,7 +618,9 @@ func (s *Store) queryReputationFindings(ctx context.Context, ecosystem, name, ve
 			Title:      title,
 			RiskType:   riskType,
 			Source:     "reversinglabs",
-		})
+		}
+		finding.Severity = domain.NormalizeFindingSeverity(finding)
+		findings = append(findings, finding)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("sqlite: iterate reputation finding rows: %w", err)
@@ -662,7 +664,7 @@ func (s *Store) findReputationFindingsBatch(ctx context.Context, chunk localPack
 		if title == "" {
 			title = id
 		}
-		findings = append(findings, domain.Finding{
+		finding := domain.Finding{
 			Name:       pkg,
 			Version:    ver,
 			Ecosystem:  domain.Ecosystem(eco),
@@ -672,7 +674,9 @@ func (s *Store) findReputationFindingsBatch(ctx context.Context, chunk localPack
 			Title:      title,
 			RiskType:   riskType,
 			Source:     "reversinglabs",
-		})
+		}
+		finding.Severity = domain.NormalizeFindingSeverity(finding)
+		findings = append(findings, finding)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("sqlite: iterate reputation batch rows: %w", err)

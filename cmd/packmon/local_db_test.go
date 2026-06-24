@@ -129,6 +129,35 @@ func TestApplyLocalDBFreshnessOnlyAnnotatesLocalResults(t *testing.T) {
 	}
 }
 
+func TestApplyLocalDBFreshnessAppliesSyncedFeedState(t *testing.T) {
+	store, _ := newTestSQLiteStore(t, t.TempDir())
+
+	if err := store.SetSyncMeta(context.Background(), "last_sync_at", time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatalf("set sync timestamp: %v", err)
+	}
+	if err := store.SetSyncMeta(context.Background(), "feed_status", "degraded"); err != nil {
+		t.Fatalf("set feed status: %v", err)
+	}
+	if err := store.SetSyncMeta(context.Background(), "feed_versions", `{"osv":"2026-05-30T10:00:00Z"}`); err != nil {
+		t.Fatalf("set feed versions: %v", err)
+	}
+
+	localResult := &domain.ScanResult{
+		Mode:         "local",
+		FeedStatus:   "healthy",
+		FeedVersions: map[string]string{},
+	}
+	if err := applyLocalDBFreshness(context.Background(), store, localResult); err != nil {
+		t.Fatalf("apply local freshness: %v", err)
+	}
+	if localResult.FeedStatus != "degraded" {
+		t.Fatalf("feed status = %q, want degraded", localResult.FeedStatus)
+	}
+	if got := localResult.FeedVersions["osv"]; got != "2026-05-30T10:00:00Z" {
+		t.Fatalf("feed versions[osv] = %q", got)
+	}
+}
+
 func TestExportLocalDBIncludesVulnerabilityAndMaliciousEntries(t *testing.T) {
 	store, _ := newTestSQLiteStore(t, t.TempDir())
 
@@ -182,7 +211,7 @@ func TestLocalDBInfoAndExportIncludeReputationAndLifecycle(t *testing.T) {
 
 	_, err := store.DB().ExecContext(context.Background(), `
 		INSERT INTO reputation_findings_local(id, ecosystem, name, version, type, risk_type, severity, summary)
-		VALUES('REP-test', 'npm', 'left-pad', '1.0.0', 'supply_chain_risk', 'removed_package', 'LOW', 'reputation issue');
+		VALUES('REP-test', 'npm', 'left-pad', '1.0.0', 'supply_chain_risk', 'malware_history', 'HIGH', 'reputation issue');
 		INSERT INTO lifecycle_releases_local(
 			id, ecosystem, name, product_slug, product_label, cycle, latest,
 			release_date, is_lts, lts_from, is_eoas, eoas_from, is_eol, eol_from,
@@ -227,7 +256,7 @@ func TestLocalDBInfoAndExportIncludeReputationAndLifecycle(t *testing.T) {
 	if err := json.Unmarshal(exportPayload["reputation"], &reputation); err != nil {
 		t.Fatalf("decode reputation export: %v\n%s", err, buf.String())
 	}
-	if len(reputation) != 1 || reputation[0]["id"] != "REP-test" || reputation[0]["risk_type"] != "removed_package" {
+	if len(reputation) != 1 || reputation[0]["id"] != "REP-test" || reputation[0]["risk_type"] != "malware_history" || reputation[0]["severity"] != "LOW" {
 		t.Fatalf("reputation export = %+v", reputation)
 	}
 

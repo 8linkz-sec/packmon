@@ -57,7 +57,7 @@
             <option value="LOW" {{if eq .SystemBlockThreshold "LOW"}}selected{{end}}>LOW</option>
             <option value="NONE" {{if eq .SystemBlockThreshold "NONE"}}selected{{end}}>NONE - do not block vulnerabilities</option>
           </select>
-          <p id="block-threshold-help" class="mt-1 text-xs text-gray-500">Malicious and supply-chain risk findings always block regardless of this threshold.</p>
+          <p id="block-threshold-help" class="mt-1 text-xs text-gray-500">Malicious and active supply-chain risk findings always block regardless of this threshold.</p>
           <p id="block-threshold-runtime" class="mt-1 text-xs text-gray-500">Runtime: {{.RuntimeBlockThreshold}}</p>
         </div>
 
@@ -100,7 +100,7 @@
           class="mt-0.5 h-4 w-4 rounded border-yellow-500 text-yellow-700 focus:ring-yellow-600"
         >
         <span>
-          NONE disables vulnerability blocking. Malware and supply-chain risk findings still block. This acknowledgement is required before saving NONE.
+          NONE disables vulnerability blocking. Malware and active supply-chain risk findings still block. This acknowledgement is required before saving NONE.
         </span>
       </label>
 

@@ -72,6 +72,14 @@ func TestOpenAPIIncludesCanonicalScanAndSyncFields(t *testing.T) {
 	if got := syncedXID["type"]; got != "integer" {
 		t.Fatalf("SyncResponse.synced_xid type = %#v, want integer", got)
 	}
+	feedStatus := requireMap(t, syncResponseProperties, "feed_status")
+	if got := feedStatus["type"]; got != "string" {
+		t.Fatalf("SyncResponse.feed_status type = %#v, want string", got)
+	}
+	feedVersions := requireMap(t, syncResponseProperties, "feed_versions")
+	if got := feedVersions["type"]; got != "object" {
+		t.Fatalf("SyncResponse.feed_versions type = %#v, want object", got)
+	}
 	nextCursor := requireMap(t, syncResponseProperties, "next_cursor")
 	if got := nextCursor["$ref"]; got != "#/components/schemas/SyncCursor" {
 		t.Fatalf("SyncResponse.next_cursor ref = %#v, want SyncCursor", got)

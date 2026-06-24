@@ -32,6 +32,7 @@ type InstallSpec struct {
 	ExpectedVersion string
 	VersionArgs     []string
 	CanAutoInstall  bool
+	PythonPackage   bool
 }
 
 // Generator builds a CycloneDX SBOM for one ecosystem.

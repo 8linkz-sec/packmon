@@ -286,6 +286,8 @@ type syncLifecycleResponse struct {
 type syncResponsePayload struct {
 	SyncedAt        string                      `json:"synced_at"`
 	SyncedXID       uint64                      `json:"synced_xid,omitempty"`
+	FeedStatus      string                      `json:"feed_status"`
+	FeedVersions    map[string]string           `json:"feed_versions"`
 	Vulnerabilities []syncVulnerabilityResponse `json:"vulnerabilities"`
 	Malicious       []syncMaliciousResponse     `json:"malicious"`
 	Reputation      []syncReputationResponse    `json:"reputation"`
@@ -1402,9 +1404,12 @@ func (h *Handler) HandleSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	feedStatus, feedVersions := h.feedState(r.Context())
 	resp := syncResponsePayload{
 		SyncedAt:        exported.SyncedAt.UTC().Format(time.RFC3339Nano),
 		SyncedXID:       exported.SyncedXID,
+		FeedStatus:      feedStatus,
+		FeedVersions:    feedVersions,
 		Vulnerabilities: make([]syncVulnerabilityResponse, 0, len(exported.Vulnerabilities)),
 		Malicious:       make([]syncMaliciousResponse, 0, len(exported.Malicious)),
 		Reputation:      make([]syncReputationResponse, 0, len(exported.Reputation)),

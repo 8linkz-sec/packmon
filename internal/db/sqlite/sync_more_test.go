@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -611,6 +613,31 @@ func TestSyncErrorBranches(t *testing.T) {
 	}
 }
 
+func TestSyncRetriesRateLimitedPage(t *testing.T) {
+	t.Parallel()
+
+	store := newSQLiteTestStore(t)
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		if requests == 1 {
+			w.Header().Set("Retry-After", "0")
+			http.Error(w, `{"error":"rate limit exceeded"}`, http.StatusTooManyRequests)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"synced_at":"2026-05-30T11:00:00Z","synced_xid":600}`))
+	}))
+	defer server.Close()
+
+	if err := Sync(context.Background(), store, SyncConfig{ServerURL: server.URL, Full: true, AllowInsecureHTTP: true}); err != nil {
+		t.Fatalf("Sync(rate limited once) error = %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want retry after one 429", requests)
+	}
+}
+
 func TestSyncRejectsPlainHTTPWithoutExplicitOptIn(t *testing.T) {
 	t.Parallel()
 
@@ -711,6 +738,51 @@ func TestSyncIncrementalUsesSinceAuthorizationAndEcosystems(t *testing.T) {
 	}
 	if lastXID != "600" {
 		t.Fatalf("last sync xid = %q, want 600", lastXID)
+	}
+}
+
+func TestSyncStoresFeedStateMetadata(t *testing.T) {
+	t.Parallel()
+
+	store := newSQLiteTestStore(t)
+	ctx := context.Background()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"synced_at":"2026-05-30T11:00:00Z",
+			"synced_xid":600,
+			"feed_status":"degraded",
+			"feed_versions":{"osv":"2026-05-30T10:00:00Z","ghsa":"2026-05-30T10:30:00Z"}
+		}`))
+	}))
+	defer server.Close()
+
+	if err := Sync(ctx, store, SyncConfig{
+		ServerURL:         server.URL,
+		Full:              true,
+		AllowInsecureHTTP: true,
+	}); err != nil {
+		t.Fatalf("Sync(full) error = %v", err)
+	}
+
+	status, err := store.GetSyncMeta(ctx, syncMetaKeyFeedStatus)
+	if err != nil {
+		t.Fatalf("GetSyncMeta(feed status) error = %v", err)
+	}
+	if status != "degraded" {
+		t.Fatalf("feed status meta = %q, want degraded", status)
+	}
+
+	rawVersions, err := store.GetSyncMeta(ctx, syncMetaKeyFeedVersions)
+	if err != nil {
+		t.Fatalf("GetSyncMeta(feed versions) error = %v", err)
+	}
+	var versions map[string]string
+	if err := json.Unmarshal([]byte(rawVersions), &versions); err != nil {
+		t.Fatalf("decode feed versions meta: %v", err)
+	}
+	if versions["osv"] != "2026-05-30T10:00:00Z" || versions["ghsa"] != "2026-05-30T10:30:00Z" {
+		t.Fatalf("feed versions meta = %+v", versions)
 	}
 }
 
@@ -957,7 +1029,7 @@ func TestFetchSyncPageReadErrorIncludesContext(t *testing.T) {
 	t.Parallel()
 
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		if r.Header.Get("Authorization") != "Bearer read-key" || r.URL.Query().Get("offset") != "1000" || r.URL.Query().Get("snapshot") != "snap" {
+		if r.Header.Get("Authorization") != "Bearer read-key" || r.URL.Query().Get("offset") != strconv.Itoa(syncPageLimit) || r.URL.Query().Get("snapshot") != "snap" {
 			t.Fatalf("request headers/query = auth %q raw %q", r.Header.Get("Authorization"), r.URL.RawQuery)
 		}
 		return &http.Response{

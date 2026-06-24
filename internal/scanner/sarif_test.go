@@ -114,6 +114,46 @@ func TestSARIFSurfacesScanWarningsAsNotifications(t *testing.T) {
 	}
 }
 
+func TestSARIFRendersMalwareHistoryAsNote(t *testing.T) {
+	result := &domain.ScanResult{
+		Mode:           "remote",
+		BlockThreshold: domain.SeverityCritical,
+		Findings: []domain.Finding{{
+			Name:       "debug",
+			Version:    "4.4.3",
+			Ecosystem:  domain.EcosystemNPM,
+			Type:       domain.FindingTypeSupplyChainRisk,
+			Severity:   domain.SeverityHigh,
+			AdvisoryID: "reversinglabs:npm/debug@4.4.3",
+			Title:      "ReversingLabs: malware incident history",
+			RiskType:   "malware_history",
+			Source:     "reversinglabs",
+		}},
+	}
+
+	var out bytes.Buffer
+	if err := NewSARIFWriter("1.2.3").Write(&out, result); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	var log struct {
+		Runs []struct {
+			Results []struct {
+				Level string `json:"level"`
+			} `json:"results"`
+		} `json:"runs"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &log); err != nil {
+		t.Fatalf("invalid SARIF JSON: %v\n%s", err, out.String())
+	}
+	if len(log.Runs) != 1 || len(log.Runs[0].Results) != 1 {
+		t.Fatalf("expected one result, got %+v", log.Runs)
+	}
+	if log.Runs[0].Results[0].Level != "note" {
+		t.Fatalf("malware history SARIF level = %q, want note", log.Runs[0].Results[0].Level)
+	}
+}
+
 func TestSARIFSurfacesOperationalFailureAsFailedInvocation(t *testing.T) {
 	result := &domain.ScanResult{
 		Mode:            "remote",

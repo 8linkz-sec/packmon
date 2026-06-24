@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/8linkz-sec/packmon/internal/termtext"
@@ -68,11 +69,18 @@ func gitResolvedHooksDir(root string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), gitMetadataTimeout)
 	defer cancel()
 
-	out, err := gitCommandOutput(ctx, "-C", root, "rev-parse", "--git-path", "hooks")
+	out, err := gitCommandOutput(ctx, "-C", root, "rev-parse", "--show-toplevel", "--git-path", "hooks")
 	if err != nil {
 		return ""
 	}
-	hooksDir := strings.TrimSpace(string(out))
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) < 2 {
+		return ""
+	}
+	if !sameCleanPath(lines[0], root) {
+		return ""
+	}
+	hooksDir := strings.TrimSpace(lines[1])
 	if hooksDir == "" {
 		return ""
 	}
@@ -80,6 +88,15 @@ func gitResolvedHooksDir(root string) string {
 		hooksDir = filepath.Join(root, hooksDir)
 	}
 	return filepath.Clean(hooksDir)
+}
+
+func sameCleanPath(a, b string) bool {
+	a = filepath.Clean(strings.TrimSpace(a))
+	b = filepath.Clean(strings.TrimSpace(b))
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
 }
 
 func gitDirFileTarget(root string) string {

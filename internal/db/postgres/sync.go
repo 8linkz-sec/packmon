@@ -392,6 +392,13 @@ func reputationSyncFinding(rep db.PackageReputation) db.SyncReputationFinding {
 	default:
 		item.Withdrawn = true
 	}
+	if !item.Withdrawn {
+		item.Severity = string(domain.NormalizeFindingSeverity(domain.Finding{
+			Type:     domain.FindingType(item.Type),
+			RiskType: item.RiskType,
+			Severity: domain.Severity(item.Severity),
+		}))
+	}
 	return item
 }
 

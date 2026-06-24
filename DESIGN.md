@@ -46,7 +46,9 @@ unrelated persistence capabilities do not leak across subsystem boundaries.
   - `4`: parser error, including partial lockfile/SBOM parse errors when no
     blocking finding has already failed the scan;
   - `10`: internal bug.
-- Treat malicious and supply-chain risk findings as always blocking.
+- Treat malicious and active supply-chain risk findings as always blocking.
+  Historical ReversingLabs malware-incident evidence is `LOW` reputation info
+  and does not block by itself.
 - Let teams configure vulnerability blocking thresholds. `NONE` disables
   vulnerability blocking only and requires explicit acknowledgement when saved
   from the admin settings UI.
@@ -227,8 +229,9 @@ Important behavior:
   `parse_errors`.
 - Canonical `ScanResult.block_threshold` records the effective
   vulnerability/lifecycle severity threshold used for `findings_blocking`.
-  Malicious and supply-chain risk findings still block independently of that
-  threshold.
+  Malicious and active supply-chain risk findings still block independently of
+  that threshold; historical ReversingLabs malware-incident evidence is `LOW`
+  reputation info and does not block by itself.
 - Auto mode reports the actual execution path in `ScanResult.mode`: successful
   server-backed checks report `remote`, while local fallback reports `local`.
 - Discovery failures for in-scope files or directories are operational errors;
@@ -240,18 +243,19 @@ Important behavior:
   are tightened back to `0600` when overwritten. `--html <path>` writes a
   single self-contained report with no external assets or external JavaScript.
   Findings are grouped by type (Malicious ->
-  Supply-Chain/EOL -> Vulnerabilities -> Lifecycle), severity-sorted within
-  each group, and each vulnerability/EOL finding links to its source. A scan
-  with zero findings still produces a clean "all clear" report only when scan
-  coverage is healthy. SARIF, JUnit, and HTML artifacts include diagnostics
-  for degraded feed status, local database staleness, and partial parse errors
-  so artifact-only CI consumers can distinguish clean results from incomplete
-  coverage. SARIF marks parser and operational scan failures as unsuccessful
-  invocations with error-level notifications; JUnit reports them through
-  errored diagnostic suites. SARIF finding results include a source artifact
-  location pointing at the lockfile or explicit SBOM path that produced the
-  package so GitHub Code Scanning can display the alert. Like the other file
-  outputs, `--html` only works when scanning a single target.
+  Supply-Chain/EOL -> Vulnerabilities -> Lifecycle -> Reputation info when
+  present), severity-sorted within each group, and each vulnerability/EOL
+  finding links to its source. A scan with zero findings still produces a clean
+  "all clear" report only when scan coverage is healthy. SARIF, JUnit, and HTML
+  artifacts include diagnostics for degraded feed status, local database
+  staleness, and partial parse errors so artifact-only CI consumers can
+  distinguish clean results from incomplete coverage. SARIF marks parser and
+  operational scan failures as unsuccessful invocations with error-level
+  notifications; JUnit reports them through errored diagnostic suites. SARIF
+  finding results include a source artifact location pointing at the lockfile
+  or explicit SBOM path that produced the package so GitHub Code Scanning can
+  display the alert. Like the other file outputs, `--html` only works when
+  scanning a single target.
 - `--include-dev` includes dependencies marked as dev/test scope.
 - `--no-repo-metadata` omits the optional repository name from remote
   `/api/v1/check` requests and webhooks. `PACKMON_NO_REPO_METADATA=true` and
@@ -273,18 +277,20 @@ Important behavior:
   package rows, and render a deduplicated "Checked Inventory Sources" section
   at the bottom for lockfiles, SBOMs, and Docker inventory files. The HTML
   "Packages Needing Attention" section lists actionable updates, current
-  ReversingLabs malware/removed-package findings, lifecycle findings, and
-  vulnerability findings; unknown latest-status rows remain visible only in
-  "All Packages". Historical ReversingLabs incident context is not treated as
-  an active package status. Finding-derived states such as `Malicious`,
-  `Removed`, `Supply-chain risk`, and `Lifecycle` override general
+  ReversingLabs malware/removed-package findings, lifecycle findings,
+  vulnerability findings, and non-blocking historical ReversingLabs incident
+  context as `LOW` `Reputation info`; unknown latest-status rows remain visible
+  only in "All Packages". Finding-derived states such as `Malicious`, `Removed`,
+  `Supply-chain risk`, `Lifecycle`, and `Reputation info` override general
   latest-version status. Vulnerability findings with a known fix or update path
   render as `Update available`; only vulnerability findings without a known
   update path render as `Vulnerable`, and a package with a security finding is
   never shown as merely `Up-to-Date`. Security finding advisories link to
   canonical external reports when available. Long digest values are shortened
   with `..` in the visible table and exposed through a local copy-to-clipboard
-  control containing the full value. `--list-all-offline` preserves the
+  control containing the full value. JSON, SARIF, and JUnit output flags still
+  write the standard scan result when used with `--list-all`; `--html` writes
+  the combined list-all HTML report. `--list-all-offline` preserves the
   findings scan and full package inventory but disables the external
   latest-version and Docker registry digest lookups for the inventory section;
   those rows are reported with unknown latest status.
@@ -473,9 +479,10 @@ timestamps, and refresh scheduling data. `malicious` status produces a
 malicious finding. `removed` status produces a blocking `supply_chain_risk`
 finding with `risk_type=removed_package`. `risk` status represents
 non-active supply-chain reputation evidence, such as ReversingLabs malware
-incident history, and produces a blocking `supply_chain_risk` finding with
-`risk_type=malware_history`. `clean`, `not_found`, `unsupported`, and transient
-`error` statuses do not produce findings. Package detail views that are scoped
+incident history, and produces a non-blocking reputation-info finding with
+`LOW` severity and `risk_type=malware_history`. `clean`, `not_found`,
+`unsupported`, and transient `error` statuses do not produce findings. Package
+detail views that are scoped
 to an exact version must query these rows by exact package version; unversioned
 package detail views may show all finding-producing reputation rows for the
 package.
@@ -543,7 +550,7 @@ part of the required free core coverage:
   and no non-ReversingLabs feed already covers it. Non-finding cache rows are
   pruned by retention policy; active malware signals are reported as malicious
   findings, and historical malware incident evidence is reported separately as
-  supply-chain reputation risk.
+  non-blocking `LOW` reputation info.
 
 OSV/RustSec affected-package records with `database_specific.categories`
 containing `malicious` are normalized as malicious package findings, not as
@@ -643,9 +650,12 @@ JSON array of strings; invalid local rows fail sync or lookup instead of being
 treated as all-version malicious findings. It stores raw lifecycle status
 booleans and dates, then computes current lifecycle findings at scan time.
 Differences are allowed only in detail level and freshness.
-Reputation sync includes active ReversingLabs `malicious`, `removed`, and
-`risk` findings needed for local scan decisions, but not benign `clean`,
-`not_found`, `unsupported`, or transient `error` observations.
+Reputation sync includes active ReversingLabs `malicious` and `removed` rows
+needed for local scan decisions plus non-blocking `risk` rows needed for local
+reputation context. Synced `risk` rows are exposed as `LOW`
+`malware_history` reputation info, not as their upstream severity, and benign
+`clean`, `not_found`, `unsupported`, or transient `error` observations are not
+synced.
 Local scans query those reputation rows through explicit reputation lookup
 methods; `FindMalicious` and `FindMaliciousBatch` remain malicious-package-only
 boundaries so package detail views and scanner output do not double-count or

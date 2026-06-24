@@ -108,16 +108,17 @@ type htmlLink struct {
 
 // sectionDef declares the fixed order and styling of report sections.
 type sectionDef struct {
-	typ   domain.FindingType
+	key   string
 	title string
 	class string
 }
 
 var sectionDefs = []sectionDef{
-	{domain.FindingTypeMalicious, "Malicious", "s-mal"},
-	{domain.FindingTypeSupplyChainRisk, "Supply-Chain / EOL", "s-sce"},
-	{domain.FindingTypeVulnerability, "Vulnerabilities", "s-vuln"},
-	{domain.FindingTypeLifecycle, "Lifecycle warnings", "s-life"},
+	{string(domain.FindingTypeMalicious), "Malicious", "s-mal"},
+	{string(domain.FindingTypeSupplyChainRisk), "Supply-Chain / EOL", "s-sce"},
+	{string(domain.FindingTypeVulnerability), "Vulnerabilities", "s-vuln"},
+	{string(domain.FindingTypeLifecycle), "Lifecycle warnings", "s-life"},
+	{"reputation_info", "Reputation info", "s-life"},
 }
 
 func buildReport(title, toolVersion string, failOn domain.Severity, result *domain.ScanResult) htmlReport {
@@ -152,7 +153,7 @@ func buildReport(title, toolVersion string, failOn domain.Severity, result *doma
 	for _, s := range sevOrder {
 		n := 0
 		for _, f := range result.Findings {
-			if f.Severity == s.sev {
+			if domain.NormalizeFindingSeverity(f) == s.sev {
 				n++
 			}
 		}
@@ -166,7 +167,7 @@ func buildReport(title, toolVersion string, failOn domain.Severity, result *doma
 	// severity badges always sum to FindingsTotal.
 	unknown := 0
 	for _, f := range result.Findings {
-		if sevSlug(f.Severity) == "none" {
+		if sevSlug(domain.NormalizeFindingSeverity(f)) == "none" {
 			unknown++
 		}
 	}
@@ -177,12 +178,12 @@ func buildReport(title, toolVersion string, failOn domain.Severity, result *doma
 	for _, def := range sectionDefs {
 		n := 0
 		for _, f := range result.Findings {
-			if f.Type == def.typ {
+			if htmlFindingSectionKey(f) == def.key {
 				n++
 			}
 		}
 		if n > 0 {
-			rep.TypeCounts = append(rep.TypeCounts, htmlBadge{Label: htmlTypeBadgeLabel(def.typ, n), Class: "b-dim", Count: n})
+			rep.TypeCounts = append(rep.TypeCounts, htmlBadge{Label: htmlTypeBadgeLabel(def.key, n), Class: "b-dim", Count: n})
 		}
 	}
 
@@ -195,13 +196,14 @@ func buildReport(title, toolVersion string, failOn domain.Severity, result *doma
 	for _, def := range sectionDefs {
 		var fs []htmlFinding
 		for _, f := range result.Findings {
-			if f.Type != def.typ {
+			if htmlFindingSectionKey(f) != def.key {
 				continue
 			}
 			links, plain := makeLinks(f)
+			severity := domain.NormalizeFindingSeverity(f)
 			fs = append(fs, htmlFinding{
-				Severity:     string(f.Severity),
-				SevSlug:      sevSlug(f.Severity),
+				Severity:     string(severity),
+				SevSlug:      sevSlug(severity),
 				Package:      fmt.Sprintf("%s@%s", f.Name, f.Version),
 				Ecosystem:    string(f.Ecosystem),
 				Advisory:     advisoryLabel(f),
@@ -228,6 +230,13 @@ func buildReport(title, toolVersion string, failOn domain.Severity, result *doma
 	return rep
 }
 
+func htmlFindingSectionKey(f domain.Finding) string {
+	if domain.FindingIsInformational(f) {
+		return "reputation_info"
+	}
+	return string(f.Type)
+}
+
 func operationalStatusMessage(status string) string {
 	status = strings.TrimSpace(status)
 	switch status {
@@ -244,7 +253,7 @@ func htmlReportWarnings(result *domain.ScanResult) []string {
 	}
 	var warnings []string
 	if strings.TrimSpace(result.FeedStatus) == "degraded" {
-		warnings = append(warnings, "Server reports degraded feed status. Some feeds may be outdated.")
+		warnings = append(warnings, DegradedFeedStatusWarning(result.Mode))
 	}
 	if message := zeroPackageScanDiagnostic(result); message != "" {
 		warnings = append(warnings, message)
@@ -341,16 +350,18 @@ func footerParts(toolVersion string, result *domain.ScanResult) []string {
 	return parts
 }
 
-func htmlTypeBadgeLabel(typ domain.FindingType, count int) string {
-	switch typ {
-	case domain.FindingTypeMalicious:
+func htmlTypeBadgeLabel(key string, count int) string {
+	switch key {
+	case string(domain.FindingTypeMalicious):
 		return plural.Word(count, "Malicious package", "Malicious packages")
-	case domain.FindingTypeSupplyChainRisk:
+	case string(domain.FindingTypeSupplyChainRisk):
 		return plural.Word(count, "Supply-chain / EOL finding", "Supply-chain / EOL findings")
-	case domain.FindingTypeVulnerability:
+	case string(domain.FindingTypeVulnerability):
 		return plural.Word(count, "Vulnerability", "Vulnerabilities")
-	case domain.FindingTypeLifecycle:
+	case string(domain.FindingTypeLifecycle):
 		return plural.Word(count, "Lifecycle warning", "Lifecycle warnings")
+	case "reputation_info":
+		return plural.Word(count, "Reputation info", "Reputation info")
 	default:
 		return plural.Word(count, "Finding", "Findings")
 	}

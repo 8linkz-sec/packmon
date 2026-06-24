@@ -20,7 +20,7 @@ func TestScanFailOnFlagHelpExplainsNoneScope(t *testing.T) {
 	}
 	for _, want := range []string{
 		"NONE disables vulnerability blocking only",
-		"malicious and supply-chain risk findings still block",
+		"malicious and active supply-chain risk findings still block",
 	} {
 		if !strings.Contains(flag.Usage, want) {
 			t.Fatalf("--fail-on usage missing %q:\n%s", want, flag.Usage)

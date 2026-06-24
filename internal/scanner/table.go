@@ -108,7 +108,7 @@ func (tw *TableWriter) writeStatusMessages(w io.Writer, result *domain.ScanResul
 		return err
 	}
 	if result.FeedStatus == "degraded" {
-		_, err := fmt.Fprintln(w, "\nWARN  Server reports degraded feed status. Some feeds may be outdated.")
+		_, err := fmt.Fprintln(w, "\nWARN  "+DegradedFeedStatusWarning(result.Mode))
 		return err
 	}
 	return nil
@@ -146,9 +146,10 @@ func (tw *TableWriter) buildTableRow(finding domain.Finding) tableRow {
 	if advisory == "" {
 		advisory = advisoryLabel(finding)
 	}
+	severity := domain.NormalizeFindingSeverity(finding)
 	return tableRow{
-		severity: string(finding.Severity),
-		colored:  tw.colorSeverity(finding.Severity),
+		severity: string(severity),
+		colored:  tw.colorSeverity(severity),
 		pkg:      fmt.Sprintf("%s@%s", termtext.Sanitize(finding.Name), termtext.Sanitize(finding.Version)),
 		eco:      termtext.Sanitize(string(finding.Ecosystem)),
 		advisory: termtext.Sanitize(advisory),

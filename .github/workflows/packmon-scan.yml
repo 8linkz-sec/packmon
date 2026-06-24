@@ -11,7 +11,7 @@ on:
   workflow_call:
     inputs:
       fail_on:
-        description: "Minimum vulnerability severity that blocks the pipeline (CRITICAL|HIGH|MEDIUM|LOW|NONE). NONE disables vulnerability blocking only; malicious and supply-chain risk findings still block."
+        description: "Minimum vulnerability severity that blocks the pipeline (CRITICAL|HIGH|MEDIUM|LOW|NONE). NONE disables vulnerability blocking only; malicious and active supply-chain risk findings still block."
         required: false
         default: "CRITICAL"
         type: string
@@ -227,7 +227,7 @@ jobs:
           path: /tmp/packmon-results
 
       - name: Upload SARIF
-        uses: github/codeql-action/upload-sarif@1a818fd5f97ed0ee9a823421bd5b171add01227f # v4.36.2
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
         with:
           sarif_file: /tmp/packmon-results/results.sarif
           category: packmon

@@ -165,7 +165,7 @@ func TestAdminSettingsPageShowsRuntimeValues(t *testing.T) {
 		`aria-describedby="block-threshold-help block-threshold-runtime"`,
 		"NONE disables vulnerability blocking",
 		"NONE - do not block vulnerabilities",
-		"Malicious and supply-chain risk findings always block regardless of this threshold.",
+		"Malicious and active supply-chain risk findings always block regardless of this threshold.",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("GET /admin/settings body missing %q\nbody=%s", want, body)

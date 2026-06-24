@@ -42,6 +42,22 @@ func TestFindGitRootAndIsPackmonHook(t *testing.T) {
 	}
 }
 
+func TestFindGitHooksDirDoesNotEscapeDiscoveredRoot(t *testing.T) {
+	git := requireGit(t)
+
+	parent := t.TempDir()
+	runGit(t, git, parent, "init", "--quiet")
+	root := filepath.Join(parent, "nested")
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o750); err != nil {
+		t.Fatalf("mkdir nested .git: %v", err)
+	}
+
+	want := filepath.Clean(filepath.Join(root, ".git", "hooks"))
+	if got := findGitHooksDir(root); got != want {
+		t.Fatalf("findGitHooksDir() = %q, want %q", got, want)
+	}
+}
+
 func tempDirOutsideGit(t *testing.T) string {
 	t.Helper()
 

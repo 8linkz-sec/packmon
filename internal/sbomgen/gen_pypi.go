@@ -23,6 +23,7 @@ func (pypiGenerator) InstallSpec() InstallSpec {
 		ExpectedVersion: pypiGeneratorVersion,
 		VersionArgs:     []string{"--version"},
 		CanAutoInstall:  true,
+		PythonPackage:   true,
 	}
 }
 

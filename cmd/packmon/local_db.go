@@ -17,6 +17,10 @@ import (
 
 const defaultDBWarnAfterDays = 7
 
+const localDBSyncMetaFeedStatus = "feed_status"
+
+const localDBSyncMetaFeedVersions = "feed_versions"
+
 type localDBInfo struct {
 	Path            string     `json:"path"`
 	Exists          bool       `json:"exists"`
@@ -152,7 +156,45 @@ func applyLocalDBFreshness(ctx context.Context, store *sqlite.Store, result *dom
 
 	result.DBAgeDays = info.DBAgeDays
 	result.DBStale = info.DBStale
+	if result.ScanError != "" {
+		return nil
+	}
+
+	feedStatus, feedVersions, err := readLocalFeedState(ctx, store)
+	if err != nil {
+		return err
+	}
+	if feedStatus != "" {
+		result.FeedStatus = feedStatus
+		result.FeedVersions = feedVersions
+	}
 	return nil
+}
+
+func readLocalFeedState(ctx context.Context, store *sqlite.Store) (string, map[string]string, error) {
+	status, err := store.GetSyncMeta(ctx, localDBSyncMetaFeedStatus)
+	if err != nil {
+		return "", nil, fmt.Errorf("read local feed status: %w", err)
+	}
+	status = strings.TrimSpace(status)
+	if status == "" {
+		return "", nil, nil
+	}
+
+	rawVersions, err := store.GetSyncMeta(ctx, localDBSyncMetaFeedVersions)
+	if err != nil {
+		return "", nil, fmt.Errorf("read local feed versions: %w", err)
+	}
+	versions := map[string]string{}
+	if strings.TrimSpace(rawVersions) != "" {
+		if err := json.Unmarshal([]byte(rawVersions), &versions); err != nil {
+			return "", nil, fmt.Errorf("parse local feed versions: %w", err)
+		}
+	}
+	if versions == nil {
+		versions = map[string]string{}
+	}
+	return status, versions, nil
 }
 
 func exportLocalDB(ctx context.Context, store *sqlite.Store, writer io.Writer) error {

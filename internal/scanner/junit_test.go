@@ -213,6 +213,45 @@ func TestJUnitNonBlockingFindingsDoNotCreateFailures(t *testing.T) {
 	}
 }
 
+func TestJUnitNormalizesMalwareHistorySeverity(t *testing.T) {
+	result := &domain.ScanResult{
+		Mode:             "remote",
+		PackagesScanned:  1,
+		FindingsCount:    1,
+		FindingsBlocking: false,
+		BlockThreshold:   domain.SeverityCritical,
+		Findings: []domain.Finding{
+			{
+				Name:      "debug",
+				Version:   "4.4.3",
+				Ecosystem: domain.EcosystemNPM,
+				Type:      domain.FindingTypeSupplyChainRisk,
+				Severity:  domain.SeverityHigh,
+				Title:     "ReversingLabs: malware incident history",
+				RiskType:  "malware_history",
+				Source:    "reversinglabs",
+			},
+		},
+	}
+
+	var out bytes.Buffer
+	if err := NewJUnitWriter().Write(&out, result); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	var suites junitTestsuites
+	if err := xml.Unmarshal(out.Bytes(), &suites); err != nil {
+		t.Fatalf("invalid JUnit XML: %v\n%s", err, out.String())
+	}
+	if len(suites.Testsuites) != 1 || len(suites.Testsuites[0].Cases) != 1 {
+		t.Fatalf("cases = %+v, want one finding testcase", suites.Testsuites)
+	}
+	name := suites.Testsuites[0].Cases[0].Name
+	if !strings.Contains(name, "[LOW]") || strings.Contains(name, "[HIGH]") {
+		t.Fatalf("testcase name = %q, want normalized LOW severity", name)
+	}
+}
+
 func TestJUnitNoParseErrorSuiteWhenNone(t *testing.T) {
 	result := &domain.ScanResult{Mode: "local", PackagesScanned: 1}
 	var out bytes.Buffer

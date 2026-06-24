@@ -1303,7 +1303,7 @@ components:
 
     SyncResponse:
       type: object
-      required: [synced_at, vulnerabilities, malicious, reputation, lifecycle, truncated, has_more]
+      required: [synced_at, feed_status, feed_versions, vulnerabilities, malicious, reputation, lifecycle, truncated, has_more]
       properties:
         synced_at:
           type: string
@@ -1311,6 +1311,13 @@ components:
         synced_xid:
           type: integer
           description: "Database transaction watermark to send as since_xid on later delta syncs"
+        feed_status:
+          type: string
+          enum: [healthy, degraded, error]
+        feed_versions:
+          type: object
+          additionalProperties:
+            type: string
         vulnerabilities:
           type: array
           items:

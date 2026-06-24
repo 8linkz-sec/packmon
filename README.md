@@ -229,11 +229,14 @@ and adds a full package inventory. The package table includes each package's
 input source (`lockfile`, `sbom`, `dockerfile`, or `compose`), scope, relation,
 and vulnerability marker. The HTML report intentionally omits noisy `Via` and
 `Flags` columns. Its `Packages Needing Attention` section shows actionable
-updates, removed packages, and packages with security findings; unknown
+updates, removed packages, packages with security findings, and non-blocking
+historical ReversingLabs incident context as `LOW` `Reputation info`; unknown
 latest-status rows stay in `All Packages`. Finding-derived states such as
-`Malicious`, `Removed`, `Malware history`, `Supply-chain risk`, and `Lifecycle`
-override general latest-version status. Vulnerability findings with a known fix
-or update path
+`Malicious`, `Removed`, `Reputation info`, `Supply-chain risk`, and `Lifecycle`
+override general latest-version status. Standard scan artifact flags such as
+`--output-json`, `--output-sarif`, and `--output-junit` still write the normal
+scan result alongside the combined list-all report. Vulnerability findings with
+a known fix or update path
 render as `Update available`; only vulnerability findings without a known update
 path render as `Vulnerable`, and vulnerable packages are not shown as
 `Up-to-Date`. Full source paths are deduplicated at the bottom under `Checked
@@ -275,8 +278,10 @@ packmon hook status                    # show hook status for this repo
 
 The installed hook runs `packmon scan . --fail-on CRITICAL --quiet`, so a push
 (or commit) is blocked when a CRITICAL vulnerability or lifecycle finding,
-malicious package, or supply-chain-risk finding is present, or when parser or
-operational errors prevent complete scan coverage. Quiet mode still prints
+malicious package, or active supply-chain-risk finding is present, or when
+parser or operational errors prevent complete scan coverage. Historical
+ReversingLabs malware-incident evidence is shown as `LOW` reputation info and
+does not block by itself. Quiet mode still prints
 trust-changing warnings such as remote fallback and partial parse errors to
 stderr. `install` refuses to overwrite an existing hook that packmon did not
 create; `uninstall` only removes packmon-managed hooks. Supported types:
@@ -352,7 +357,7 @@ Lifecycle/EOL findings are available only where package coordinates map to an
 endoflife.date product and release cycle. Library packages without official
 lifecycle metadata may still be vulnerable or outdated without being reported
 as EOL.
-ReversingLabs lookups are disabled by default. When enabled with an API key, the server performs bounded demand-driven lookups only for supported, length-bounded packages that are not already covered by other feeds, percent-encodes outbound PURLs, deduplicates and caps scheduled work per check request, stores normalized cache rows internally, and refreshes each package version at most once per day. Use `PACKMON_REVERSINGLABS_EXCLUDED_NAMESPACES` to suppress private package prefixes before external lookup. Non-finding cache rows are pruned by `PACKMON_REVERSINGLABS_CACHE_RETENTION`. Active malware signals are reported as malicious findings; historical malware incident evidence is reported separately as supply-chain reputation risk.
+ReversingLabs lookups are disabled by default. When enabled with an API key, the server performs bounded demand-driven lookups only for supported, length-bounded packages that are not already covered by other feeds, percent-encodes outbound PURLs, deduplicates and caps scheduled work per check request, stores normalized cache rows internally, and refreshes each package version at most once per day. Use `PACKMON_REVERSINGLABS_EXCLUDED_NAMESPACES` to suppress private package prefixes before external lookup. Non-finding cache rows are pruned by `PACKMON_REVERSINGLABS_CACHE_RETENTION`. Active malware signals are reported as malicious findings; historical malware incident evidence is reported separately as non-blocking `LOW` reputation info.
 
 ## Client Profiles
 

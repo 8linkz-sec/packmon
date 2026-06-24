@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 
 	"github.com/8linkz-sec/packmon/internal/db"
@@ -120,6 +121,49 @@ func TestFindReputationIncludesHistoricalRiskRows(t *testing.T) {
 	if findings[0].Type != domain.FindingTypeSupplyChainRisk || findings[0].RiskType != "malware_history" {
 		t.Fatalf("historical risk finding = %+v, want malware_history supply-chain risk", findings[0])
 	}
+	if findings[0].Severity != domain.SeverityLow {
+		t.Fatalf("historical risk severity = %q, want LOW", findings[0].Severity)
+	}
+}
+
+func TestApplySyncReputationNormalizesHistoricalRiskSeverity(t *testing.T) {
+	t.Parallel()
+
+	store, err := New(t.TempDir() + "/packmon.db")
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer closeSilently(store)
+
+	ctx := context.Background()
+	resp := &syncResponse{
+		Reputation: []syncReputation{
+			{
+				ID:        "reversinglabs:npm/debug@4.4.3",
+				Ecosystem: "npm",
+				Name:      "debug",
+				Version:   "4.4.3",
+				Type:      "supply_chain_risk",
+				RiskType:  "malware_history",
+				Severity:  "HIGH",
+				Summary:   "ReversingLabs: malware incident history",
+			},
+		},
+	}
+	if _, err := applySync(ctx, store, false, resp); err != nil {
+		t.Fatalf("applySync() error = %v", err)
+	}
+
+	findings, err := store.FindReputationFindings(ctx, "npm", "debug", db.ReputationSourceReversingLabs)
+	if err != nil {
+		t.Fatalf("FindReputationFindings() error = %v", err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("historical risk findings = %+v, want one finding", findings)
+	}
+	if findings[0].RiskType != "malware_history" || findings[0].Severity != domain.SeverityLow {
+		t.Fatalf("historical risk finding = %+v, want LOW malware_history", findings[0])
+	}
 }
 
 func TestSyncPaginatesWithOffsetAndStableSnapshot(t *testing.T) {
@@ -222,10 +266,10 @@ func TestSyncPaginatesWithOffsetAndStableSnapshot(t *testing.T) {
 	if len(requests) != 2 {
 		t.Fatalf("requests = %d, want 2", len(requests))
 	}
-	if requests[0].limit != "1000" || requests[0].offset != "" || requests[0].snapshot != "" || requests[0].since != "" {
+	if requests[0].limit != strconv.Itoa(syncPageLimit) || requests[0].offset != "" || requests[0].snapshot != "" || requests[0].since != "" {
 		t.Fatalf("first request = %+v, want limit only", requests[0])
 	}
-	if requests[1].limit != "1000" ||
+	if requests[1].limit != strconv.Itoa(syncPageLimit) ||
 		requests[1].offset != "" ||
 		requests[1].reputationOffset != "" ||
 		requests[1].reputationCursor != "after-left-pad" ||

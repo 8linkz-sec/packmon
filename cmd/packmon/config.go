@@ -122,7 +122,7 @@ func newConfigInitCmd() *cobra.Command {
 # is intentionally ignored for those trusted routing settings.
 
 mode: auto
-# NONE disables vulnerability blocking only; malicious and supply-chain risk findings still block.
+# NONE disables vulnerability blocking only; malicious and active supply-chain risk findings still block.
 fail_on: CRITICAL
 timeout: 30
 include_dev: false

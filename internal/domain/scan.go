@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // ScanRequest is the input for a scan via API or CLI.
 type ScanRequest struct {
@@ -58,7 +61,7 @@ func EmptyScanSummary() ScanSummary {
 func BuildScanSummary(findings []Finding) ScanSummary {
 	summary := EmptyScanSummary()
 	for _, finding := range findings {
-		summary.BySeverity[string(finding.Severity)]++
+		summary.BySeverity[string(NormalizeFindingSeverity(finding))]++
 		summary.ByType[string(finding.Type)]++
 		summary.BySource[finding.Source]++
 	}
@@ -68,13 +71,37 @@ func BuildScanSummary(findings []Finding) ScanSummary {
 // FindingAlwaysBlocks reports whether a finding blocks independently of the
 // vulnerability severity threshold.
 func FindingAlwaysBlocks(finding Finding) bool {
+	if FindingIsInformational(finding) {
+		return false
+	}
 	return finding.Type == FindingTypeMalicious || finding.Type == FindingTypeSupplyChainRisk
 }
 
+// FindingIsInformational reports whether a finding should be shown for operator
+// context but must not fail a scan gate.
+func FindingIsInformational(finding Finding) bool {
+	return finding.Type == FindingTypeSupplyChainRisk &&
+		strings.EqualFold(strings.TrimSpace(finding.RiskType), "malware_history")
+}
+
+// NormalizeFindingSeverity returns the policy severity that should be exposed
+// for a finding. Historical reputation context is informational and is
+// classified as LOW even when an upstream source reports a higher label.
+func NormalizeFindingSeverity(finding Finding) Severity {
+	if FindingIsInformational(finding) {
+		return SeverityLow
+	}
+	return finding.Severity
+}
+
 // FindingBlocks reports whether one finding blocks under Packmon's scan policy.
-// SeverityNone disables vulnerability blocking only; malicious and supply-chain
-// risk findings still block.
+// SeverityNone disables vulnerability blocking only; malicious and active
+// supply-chain risk findings still block. Informational reputation findings do
+// not block.
 func FindingBlocks(finding Finding, threshold Severity) bool {
+	if FindingIsInformational(finding) {
+		return false
+	}
 	if FindingAlwaysBlocks(finding) {
 		return true
 	}

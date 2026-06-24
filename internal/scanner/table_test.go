@@ -53,6 +53,28 @@ func TestTableWriterWriteShowsDegradedFeedWarning(t *testing.T) {
 	}
 }
 
+func TestTableWriterWriteShowsLocalSyncedFeedWarning(t *testing.T) {
+	result := &domain.ScanResult{
+		Mode:            "local",
+		FeedStatus:      "degraded",
+		PackagesScanned: 2,
+		FindingsCount:   0,
+	}
+
+	var out bytes.Buffer
+	if err := NewTableWriter(true).Write(&out, result); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	output := out.String()
+	if !strings.Contains(output, "local database was last synced from a server reporting degraded feed status") {
+		t.Fatalf("expected local synced feed warning in table output\n%s", output)
+	}
+	if strings.Contains(output, "Server reports degraded feed status") {
+		t.Fatalf("local warning should not read like a live remote check\n%s", output)
+	}
+}
+
 func TestTableWriterOperationalStatusIsNotCleanReport(t *testing.T) {
 	result := &domain.ScanResult{
 		Mode:            "local",
@@ -160,7 +182,7 @@ func TestTableWriterShowsSupplyChainRiskDistinctly(t *testing.T) {
 		Mode:             "remote",
 		PackagesScanned:  1,
 		FindingsCount:    1,
-		FindingsBlocking: true,
+		FindingsBlocking: false,
 		Findings: []domain.Finding{
 			{
 				Name:      "left-pad",
@@ -199,7 +221,7 @@ func TestTableWriterShowsMalwareHistoryRiskDistinctly(t *testing.T) {
 		Mode:             "remote",
 		PackagesScanned:  1,
 		FindingsCount:    1,
-		FindingsBlocking: true,
+		FindingsBlocking: false,
 		Findings: []domain.Finding{
 			{
 				Name:      "polars-runtime-32",
@@ -220,10 +242,16 @@ func TestTableWriterShowsMalwareHistoryRiskDistinctly(t *testing.T) {
 	}
 
 	output := out.String()
-	for _, expected := range []string{"MALWARE-HISTORY", "Review history", "reversinglabs", "(1 blocking)"} {
+	for _, expected := range []string{"LOW", "MALWARE-HISTORY", "Review history", "reversinglabs", "(0 blocking)"} {
 		if !strings.Contains(output, expected) {
 			t.Fatalf("table output missing %q\n%s", expected, output)
 		}
+	}
+	if strings.Contains(output, "HIGH") {
+		t.Fatalf("malware history should render as LOW, not HIGH:\n%s", output)
+	}
+	if strings.Contains(output, "(1 blocking)") {
+		t.Fatalf("malware history should not be rendered as blocking:\n%s", output)
 	}
 }
 

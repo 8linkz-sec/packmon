@@ -90,6 +90,104 @@ func TestEnsureToolInstallFailureBranches(t *testing.T) {
 	}
 }
 
+func TestEnsureToolUsesPython3WhenPythonInstallerIsMissing(t *testing.T) {
+	gen := &fakeGenerator{
+		ecosystem: "pypi",
+		tool:      "cyclonedx-py",
+		install: InstallSpec{
+			Package:        "cyclonedx-bom",
+			Args:           []string{"python", "-m", "pip", "install", "--user", "cyclonedx-bom==7.3.0"},
+			CanAutoInstall: true,
+		},
+	}
+	installed := false
+	var installRun RunOptions
+
+	err := ensureTool(context.Background(), Config{
+		InstallTools: true,
+		LookPath: func(name string) (string, error) {
+			switch name {
+			case "python3":
+				return "/usr/bin/python3", nil
+			case "cyclonedx-py":
+				if installed {
+					return "/home/user/.local/bin/cyclonedx-py", nil
+				}
+			}
+			return "", errors.New("missing")
+		},
+		Runner: func(_ context.Context, opts RunOptions) ([]byte, error) {
+			installRun = opts
+			installed = true
+			return []byte("installed"), nil
+		},
+		Timeout: time.Second,
+	}, gen)
+	if err != nil {
+		t.Fatalf("ensureTool() error = %v", err)
+	}
+	if installRun.Name != "python3" || strings.Join(installRun.Args, " ") != "-m pip install --user cyclonedx-bom==7.3.0" {
+		t.Fatalf("install run = %+v, want python3 pip install", installRun)
+	}
+}
+
+func TestEnsurePythonPackageInstallsIntoManagedVenv(t *testing.T) {
+	cacheDir := t.TempDir()
+	gen := &fakeGenerator{
+		ecosystem: "pypi",
+		tool:      "cyclonedx-py",
+		install: InstallSpec{
+			Package:         "cyclonedx-bom",
+			Args:            []string{"python", "-m", "pip", "install", "--user", "cyclonedx-bom==7.3.0"},
+			ExpectedVersion: "7.3.0",
+			CanAutoInstall:  true,
+			PythonPackage:   true,
+		},
+	}
+	installed := false
+	var runs []RunOptions
+
+	err := ensureTool(context.Background(), Config{
+		InstallTools: true,
+		ToolCacheDir: cacheDir,
+		LookPath: func(name string) (string, error) {
+			switch name {
+			case "python3":
+				return "/usr/bin/python3", nil
+			case "cyclonedx-py":
+				if installed {
+					return filepath.Join(cacheDir, "python", "cyclonedx-bom", "7.3.0", "bin", "cyclonedx-py"), nil
+				}
+			}
+			return "", errors.New("missing")
+		},
+		Runner: func(_ context.Context, opts RunOptions) ([]byte, error) {
+			runs = append(runs, opts)
+			if len(runs) == 2 {
+				installed = true
+			}
+			return []byte("ok"), nil
+		},
+		Timeout: time.Second,
+	}, gen)
+	if err != nil {
+		t.Fatalf("ensureTool() error = %v", err)
+	}
+	if len(runs) < 2 {
+		t.Fatalf("runs = %+v, want venv creation and pip install", runs)
+	}
+	if runs[0].Name != "python3" || strings.Join(runs[0].Args[:2], " ") != "-m venv" {
+		t.Fatalf("venv run = %+v", runs[0])
+	}
+	if !strings.Contains(runs[0].Args[len(runs[0].Args)-1], filepath.Join("python", "cyclonedx-bom", "7.3.0")) {
+		t.Fatalf("venv dir arg = %+v, want managed cache under %s", runs[0].Args, cacheDir)
+	}
+	if !strings.Contains(runs[1].Name, filepath.Join("python", "cyclonedx-bom", "7.3.0")) ||
+		strings.Join(runs[1].Args, " ") != "-m pip install cyclonedx-bom==7.3.0" {
+		t.Fatalf("pip run = %+v", runs[1])
+	}
+}
+
 func TestEnsureToolRejectsMismatchedPathVersion(t *testing.T) {
 	gen := &fakeGenerator{
 		ecosystem: "npm",

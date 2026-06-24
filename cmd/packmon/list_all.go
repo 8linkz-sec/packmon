@@ -159,6 +159,9 @@ func runListAll(ctx context.Context, settings scanSettings) (int, error) {
 			fmt.Fprintf(os.Stderr, "error writing table output: %v\n", err)
 		}
 	}
+	if writeScanOutputArtifacts(settings, result, failOn, false) {
+		exitCode = ExitOperational
+	}
 	if settings.Quiet && strings.TrimSpace(settings.OutputHTML) == "" {
 		return exitCode, nil
 	}
@@ -706,12 +709,13 @@ func writeListAllHTML(path, title string, failOn domain.Severity, result *domain
 	findingRows := make([]listAllFindingRow, 0, len(result.Findings))
 	for _, f := range result.Findings {
 		meta := packageMetadata[listAllFindingKey(f)]
+		severity := domain.NormalizeFindingSeverity(f)
 		findingRows = append(findingRows, listAllFindingRow{
-			Severity:      string(f.Severity),
-			SeverityClass: listAllSeverityClass(f.Severity),
-			Type:          listAllFindingTypeLabel(f.Type),
+			Severity:      string(severity),
+			SeverityClass: listAllSeverityClass(severity),
+			Type:          listAllFindingTypeLabel(f),
 			RiskType:      listAllFindingRiskType(f),
-			Package:       fmt.Sprintf("%s@%s", f.Name, f.Version),
+			Package:       listAllFindingPackageLabel(f),
 			Ecosystem:     string(f.Ecosystem),
 			Advisory:      listAllAdvisoryLabel(f),
 			AdvisoryURL:   listAllAdvisoryURL(f),
@@ -832,6 +836,9 @@ func listAllHTMLFindingStatuses(findings []domain.Finding) map[string]listAllHTM
 }
 
 func listAllHTMLFindingStatus(finding domain.Finding) (string, int) {
+	if domain.FindingIsInformational(finding) {
+		return "Reputation info", 5
+	}
 	if finding.Type == domain.FindingTypeMalicious {
 		return "Malicious", 50
 	}
@@ -860,6 +867,7 @@ func listAllHTMLAttentionRows(rows []listAllHTMLPackageRow) []listAllHTMLPackage
 			row.Status == "Removed" ||
 			row.Status == "Supply-chain risk" ||
 			row.Status == "Lifecycle" ||
+			row.Status == "Reputation info" ||
 			row.Status == "Vulnerable" ||
 			strings.EqualFold(strings.TrimSpace(row.Vuln), "yes") {
 			out = append(out, row)
@@ -1191,34 +1199,35 @@ func listAllOperationalStatusForResult(result *domain.ScanResult) string {
 }
 
 var listAllFindingSectionDefs = []struct {
-	typ   domain.FindingType
+	label string
 	title string
 	class string
 }{
-	{domain.FindingTypeMalicious, "Malicious", "s-mal"},
-	{domain.FindingTypeSupplyChainRisk, "Supply-Chain / EOL", "s-sce"},
-	{domain.FindingTypeVulnerability, "Vulnerabilities", "s-vuln"},
-	{domain.FindingTypeLifecycle, "Lifecycle warnings", "s-life"},
+	{"Malicious", "Malicious", "s-mal"},
+	{"Supply-chain", "Supply-Chain / EOL", "s-sce"},
+	{"Vulnerability", "Vulnerabilities", "s-vuln"},
+	{"Lifecycle", "Lifecycle warnings", "s-life"},
+	{"Reputation info", "Reputation info", "s-life"},
 }
 
 func listAllHTMLFindingSections(rows []listAllFindingRow) []listAllFindingSection {
 	if len(rows) == 0 {
 		return nil
 	}
-	byType := make(map[domain.FindingType][]listAllFindingRow)
+	byType := make(map[string][]listAllFindingRow)
 	var other []listAllFindingRow
 	for _, row := range rows {
-		typ := listAllFindingTypeFromLabel(row.Type)
-		if typ == "" {
+		label := strings.TrimSpace(row.Type)
+		if label == "" {
 			other = append(other, row)
 			continue
 		}
-		byType[typ] = append(byType[typ], row)
+		byType[label] = append(byType[label], row)
 	}
 
 	sections := make([]listAllFindingSection, 0, len(listAllFindingSectionDefs)+1)
 	for _, def := range listAllFindingSectionDefs {
-		findings := byType[def.typ]
+		findings := byType[def.label]
 		if len(findings) == 0 {
 			continue
 		}
@@ -1232,21 +1241,6 @@ func listAllHTMLFindingSections(rows []listAllFindingRow) []listAllFindingSectio
 	return sections
 }
 
-func listAllFindingTypeFromLabel(label string) domain.FindingType {
-	switch strings.TrimSpace(label) {
-	case "Malicious":
-		return domain.FindingTypeMalicious
-	case "Supply-chain":
-		return domain.FindingTypeSupplyChainRisk
-	case "Vulnerability":
-		return domain.FindingTypeVulnerability
-	case "Lifecycle":
-		return domain.FindingTypeLifecycle
-	default:
-		return ""
-	}
-}
-
 func sortListAllFindingRows(rows []listAllFindingRow) {
 	sort.SliceStable(rows, func(i, j int) bool {
 		left := domain.Severity(rows[i].Severity).Rank()
@@ -1258,8 +1252,11 @@ func sortListAllFindingRows(rows []listAllFindingRow) {
 	})
 }
 
-func listAllFindingTypeLabel(typ domain.FindingType) string {
-	switch typ {
+func listAllFindingTypeLabel(f domain.Finding) string {
+	if domain.FindingIsInformational(f) {
+		return "Reputation info"
+	}
+	switch f.Type {
 	case domain.FindingTypeMalicious:
 		return "Malicious"
 	case domain.FindingTypeSupplyChainRisk:
@@ -1269,26 +1266,97 @@ func listAllFindingTypeLabel(typ domain.FindingType) string {
 	case domain.FindingTypeLifecycle:
 		return "Lifecycle"
 	default:
-		return strings.TrimSpace(string(typ))
+		return strings.TrimSpace(string(f.Type))
 	}
+}
+
+func listAllFindingPackageLabel(f domain.Finding) string {
+	name := strings.TrimSpace(f.Name)
+	if name != "" {
+		return name
+	}
+	version := strings.TrimSpace(f.Version)
+	if version != "" {
+		return version
+	}
+	return "-"
 }
 
 func listAllFindingRiskType(f domain.Finding) string {
 	if risk := strings.TrimSpace(f.RiskType); risk != "" {
-		return risk
+		return listAllRiskTypeLabel(risk)
 	}
 	switch f.Type {
 	case domain.FindingTypeMalicious:
-		return "malware"
+		return listAllRiskTypeLabel("malware")
 	case domain.FindingTypeVulnerability:
-		return "known_vulnerability"
+		return listAllRiskTypeLabel("known_vulnerability")
 	case domain.FindingTypeLifecycle:
-		return "lifecycle"
+		return listAllRiskTypeLabel("lifecycle")
 	case domain.FindingTypeSupplyChainRisk:
-		return "supply_chain"
+		return listAllRiskTypeLabel("supply_chain")
 	default:
 		return "-"
 	}
+}
+
+func listAllRiskTypeLabel(risk string) string {
+	switch strings.ToLower(strings.TrimSpace(risk)) {
+	case "":
+		return "-"
+	case "known_vulnerability":
+		return "Known vulnerability"
+	case "malware":
+		return "Malware"
+	case "malware_history":
+		return "Malware history"
+	case "removed_package":
+		return "Removed package"
+	case "supply_chain":
+		return "Supply-chain risk"
+	case "lifecycle":
+		return "Lifecycle"
+	case "eol":
+		return "End-of-life"
+	case "eol_soon":
+		return "End-of-life soon"
+	case "security_support_only":
+		return "Security support only"
+	case "security_support_ended":
+		return "Security support ended"
+	case "protestware":
+		return "Protestware"
+	case "typosquatting":
+		return "Typosquatting"
+	case "other":
+		return "Other"
+	default:
+		return humanizeListAllToken(risk)
+	}
+}
+
+func humanizeListAllToken(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "-"
+	}
+	parts := strings.FieldsFunc(value, func(r rune) bool {
+		return r == '_' || r == '-'
+	})
+	if len(parts) == 0 {
+		return value
+	}
+	for i, part := range parts {
+		part = strings.ToLower(part)
+		if part == "" {
+			continue
+		}
+		if i == 0 {
+			part = strings.ToUpper(part[:1]) + part[1:]
+		}
+		parts[i] = part
+	}
+	return strings.Join(parts, " ")
 }
 
 func listAllHTMLWarnings(result *domain.ScanResult, inventoryWarnings []string) []string {
@@ -1297,7 +1365,7 @@ func listAllHTMLWarnings(result *domain.ScanResult, inventoryWarnings []string) 
 	}
 	var warnings []string
 	if strings.TrimSpace(result.FeedStatus) == "degraded" {
-		warnings = append(warnings, "Server reports degraded feed status. Some feeds may be outdated.")
+		warnings = append(warnings, scanner.DegradedFeedStatusWarning(result.Mode))
 	}
 	if result.Mode == "local" && result.DBStale {
 		if result.DBAgeDays != nil {
@@ -1329,7 +1397,7 @@ func appendListAllInventoryWarnings(warnings, inventoryWarnings []string) []stri
 
 func listAllFindingTitle(f domain.Finding) string {
 	if strings.EqualFold(strings.TrimSpace(f.RiskType), "malware_history") {
-		return "ReversingLabs: supply-chain incident history"
+		return "ReversingLabs: malware incident history"
 	}
 	return f.Title
 }
@@ -1365,7 +1433,7 @@ h2{font-size:16px;margin:26px 0 10px;color:var(--heading);border-bottom:1px soli
 .table-scroll:focus{outline:3px solid var(--link);outline-offset:3px;}
 table{width:100%;border-collapse:collapse;background:var(--panel);}
 .package-table{min-width:1500px;table-layout:auto;}
-.findings-table{table-layout:auto;min-width:0;}
+.findings-table{table-layout:auto;min-width:1180px;}
 th,td{padding:8px 10px;border-bottom:1px solid var(--border);text-align:left;vertical-align:top;}
 th{color:var(--heading);font-size:12px;text-transform:uppercase;}
 td{word-break:break-word;overflow-wrap:anywhere;}
@@ -1384,10 +1452,11 @@ td{word-break:break-word;overflow-wrap:anywhere;}
 .sev-medium{color:var(--warning);border-color:var(--warning);}
 .sev-low{color:var(--sev-low);border-color:var(--sev-low);}
 .sev-unknown{color:var(--dim);}
-.findings-table .finding-package{width:1%;min-width:0;overflow-wrap:anywhere;word-break:break-word;}
-.findings-table .finding-advisory{width:1%;min-width:0;overflow-wrap:anywhere;word-break:break-word;}
-.finding-title{white-space:normal;overflow-wrap:anywhere;}
-.finding-fixed{overflow-wrap:anywhere;word-break:break-word;}
+.findings-table .finding-package{min-width:220px;white-space:nowrap;overflow-wrap:normal;word-break:normal;}
+.findings-table .finding-advisory{min-width:190px;white-space:nowrap;overflow-wrap:normal;word-break:normal;}
+.findings-table .finding-advisory a{white-space:nowrap;overflow-wrap:normal;word-break:normal;}
+.finding-title{min-width:320px;white-space:normal;overflow-wrap:break-word;word-break:normal;}
+.finding-fixed{min-width:120px;white-space:nowrap;overflow-wrap:normal;word-break:normal;}
 .finding-section{margin:0 0 18px;}
 .finding-section h3{font-size:14px;margin:14px 0 8px;color:var(--heading);}
 .finding-section h3.s-mal{color:var(--crit);}

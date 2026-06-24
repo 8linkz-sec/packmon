@@ -796,6 +796,29 @@ func TestVersionAffected_GitRange_UsesExplicitList(t *testing.T) {
 	}
 }
 
+func TestVersionAffected_GitHubActionsCommitSHADoesNotMatchTagRange(t *testing.T) {
+	t.Parallel()
+
+	ranges := `[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"0.35.0"}]}]`
+	commit := "ed142fd0673e97e23eac54620cfb913e5ce36c25"
+
+	got, err := VersionAffected(commit, ranges, `null`, "actions")
+	if err != nil {
+		t.Fatalf("VersionAffected(actions commit SHA) error = %v", err)
+	}
+	if got {
+		t.Fatal("VersionAffected(actions commit SHA) = true, want false without explicit affected version")
+	}
+
+	got, err = VersionAffected(commit, ranges, `["ed142fd0673e97e23eac54620cfb913e5ce36c25"]`, "actions")
+	if err != nil {
+		t.Fatalf("VersionAffected(actions explicit commit SHA) error = %v", err)
+	}
+	if !got {
+		t.Fatal("VersionAffected(actions explicit commit SHA) = false, want true")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // VersionAffected -- ECOSYSTEM type with Python versions
 // ---------------------------------------------------------------------------

@@ -141,6 +141,24 @@ func TestHTMLWriteDegradedFeedStatusIsWarningNotClean(t *testing.T) {
 	}
 }
 
+func TestHTMLWriteLocalDegradedFeedStatusMentionsSyncedDatabase(t *testing.T) {
+	var buf bytes.Buffer
+	if err := NewHTMLWriter("dev").Write(&buf, "svc", domain.SeverityCritical, &domain.ScanResult{
+		Mode:            "local",
+		PackagesScanned: 23,
+		FeedStatus:      "degraded",
+	}); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "local database was last synced from a server reporting degraded feed status") {
+		t.Fatalf("local degraded warning should explain synced feed status:\n%s", out)
+	}
+	if strings.Contains(out, "Server reports degraded feed status") {
+		t.Fatalf("local degraded warning should not read like a live remote check:\n%s", out)
+	}
+}
+
 func TestHTMLWriteParseErrorsAreWarningNotClean(t *testing.T) {
 	var buf bytes.Buffer
 	if err := NewHTMLWriter("dev").Write(&buf, "svc", domain.SeverityCritical, &domain.ScanResult{
@@ -217,9 +235,15 @@ func TestBuildReportLabelsMalwareHistoryRiskClearly(t *testing.T) {
 	if len(r.Sections) != 1 || len(r.Sections[0].Findings) != 1 {
 		t.Fatalf("sections = %+v, want one malware history finding", r.Sections)
 	}
+	if r.Sections[0].Title != "Reputation info" {
+		t.Fatalf("section title = %q, want Reputation info", r.Sections[0].Title)
+	}
 	f := r.Sections[0].Findings[0]
 	if f.Advisory != "MALWARE-HISTORY" {
 		t.Fatalf("Advisory = %q, want MALWARE-HISTORY", f.Advisory)
+	}
+	if f.Severity != string(domain.SeverityLow) || f.SevSlug != "low" {
+		t.Fatalf("Severity = %q/%q, want LOW/low", f.Severity, f.SevSlug)
 	}
 	if f.RiskType != "malware_history" || f.Title != "ReversingLabs: malware incident history" {
 		t.Fatalf("finding = %+v, want explicit malware history risk", f)
@@ -232,6 +256,7 @@ func TestBuildReportBlockingCount(t *testing.T) {
 			{Type: domain.FindingTypeMalicious, Severity: domain.SeverityLow},      // always blocks
 			{Type: domain.FindingTypeVulnerability, Severity: domain.SeverityHigh}, // >= HIGH blocks
 			{Type: domain.FindingTypeVulnerability, Severity: domain.SeverityLow},  // does not block
+			{Type: domain.FindingTypeSupplyChainRisk, RiskType: "malware_history", Severity: domain.SeverityHigh},
 		},
 	})
 	if r.Blocking != 2 {

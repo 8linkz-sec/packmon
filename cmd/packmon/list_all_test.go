@@ -421,6 +421,56 @@ func TestRunListAll_WritesHTMLReportWithFullPackageList(t *testing.T) {
 	}
 }
 
+func TestRunListAllWritesRequestedScanArtifacts(t *testing.T) {
+	isolatedListAllEnv(t)
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "package-lock.json"), `{
+  "name": "test",
+  "lockfileVersion": 3,
+  "packages": {
+    "node_modules/prod": { "version": "1.0.0" }
+  }
+}`)
+	outDir := t.TempDir()
+	jsonPath := filepath.Join(outDir, "result.json")
+	sarifPath := filepath.Join(outDir, "result.sarif")
+	junitPath := filepath.Join(outDir, "result.xml")
+	htmlPath := filepath.Join(outDir, "list-all.html")
+
+	ctx := stubLatestVersionContext(t, func(_ context.Context, _ domain.Ecosystem, name string) string {
+		if name == "prod" {
+			return "1.0.0"
+		}
+		return ""
+	})
+
+	settings := listAllSettings(dir, true)
+	settings.OutputJSON = jsonPath
+	settings.OutputSARIF = sarifPath
+	settings.OutputJUnit = junitPath
+	settings.OutputHTML = htmlPath
+	if _, err := runListAll(ctx, settings); err != nil {
+		t.Fatalf("runListAll: %v", err)
+	}
+
+	for _, path := range []string{jsonPath, sarifPath, junitPath, htmlPath} {
+		data, err := os.ReadFile(path) // #nosec G304 -- test reads generated reports.
+		if err != nil {
+			t.Fatalf("read generated report %s: %v", path, err)
+		}
+		if len(data) == 0 {
+			t.Fatalf("generated report %s is empty", path)
+		}
+	}
+	html, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read list-all HTML: %v", err)
+	}
+	if !contains(string(html), "Packmon List-All Report") || !contains(string(html), "All Packages") {
+		t.Fatalf("list-all HTML artifact should stay the combined report:\n%s", html)
+	}
+}
+
 func TestScanCommandListAllHTMLFlagWritesFullReport(t *testing.T) {
 	isolateCLIConfigDiscovery(t)
 	dir := t.TempDir()
@@ -1243,7 +1293,7 @@ func TestListAllHTMLRendersScopeSummaryAndFindingMetadata(t *testing.T) {
 			t.Fatalf("HTML missing scope summary %q:\n%s", want, out)
 		}
 	}
-	wantFinding := `<td class="finding-package">postcss@8.5.8</td><td class="short">npm</td><td class="finding-advisory"><a href="https://github.com/advisories/GHSA-postcss-test" target="_blank" rel="noopener" aria-label="GHSA-postcss-test opens in a new tab">GHSA-postcss-test<span aria-hidden="true"> &#8599;</span><span class="sr-only"> (opens in a new tab)</span></a></td><td class="finding-title">PostCSS test advisory</td><td class="finding-fixed">8.5.10</td><td class="short">osv</td><td class="short">dev</td><td class="short">transitive</td>`
+	wantFinding := `<td class="finding-package">postcss</td><td class="short">npm</td><td class="finding-advisory"><a href="https://github.com/advisories/GHSA-postcss-test" target="_blank" rel="noopener" aria-label="GHSA-postcss-test opens in a new tab">GHSA-postcss-test<span aria-hidden="true"> &#8599;</span><span class="sr-only"> (opens in a new tab)</span></a></td><td class="finding-title">PostCSS test advisory</td><td class="finding-fixed">8.5.10</td><td class="short">osv</td><td class="short">dev</td><td class="short">transitive</td>`
 	if !strings.Contains(out, wantFinding) {
 		t.Fatalf("HTML finding row missing package provenance:\n%s", out)
 	}
@@ -1299,6 +1349,12 @@ func TestListAllHTMLLinksSecurityFindingAdvisoryWithoutWrapping(t *testing.T) {
 	if !strings.Contains(out, want) {
 		t.Fatalf("HTML finding advisory missing nowrap external link:\n%s", out)
 	}
+	if !strings.Contains(out, `<td class="finding-package">github/codeql-action</td>`) {
+		t.Fatalf("HTML finding package should omit the long @version suffix:\n%s", out)
+	}
+	if strings.Contains(out, `github/codeql-action@7211b7c8077ea37d8641b6271f6a365a22a5fbfa`) {
+		t.Fatalf("HTML finding package still contains the long @version suffix:\n%s", out)
+	}
 }
 
 func TestListAllHTMLGroupsSecurityFindingsByOperationalPriority(t *testing.T) {
@@ -1330,12 +1386,24 @@ func TestListAllHTMLGroupsSecurityFindingsByOperationalPriority(t *testing.T) {
 		t.Fatalf("read HTML: %v", err)
 	}
 	out := string(data)
-	for _, want := range []string{"Malicious", "Supply-Chain / EOL", "Vulnerabilities", "Lifecycle warnings", "<th class=\"short\">Type</th>", "<th class=\"short\">Risk</th>", "malware_history", "known_vulnerability"} {
+	for _, want := range []string{"Malicious", "Vulnerabilities", "Lifecycle warnings", "Reputation info", "<th class=\"short\">Type</th>", "<th class=\"short\">Risk</th>", "Malware history", "Known vulnerability", "Security support ended"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("grouped finding HTML missing %q:\n%s", want, out)
 		}
 	}
-	assertInOrder(t, out, "Malicious", "Supply-Chain / EOL", "Vulnerabilities", "Lifecycle warnings")
+	if strings.Contains(out, "Supply-Chain / EOL") {
+		t.Fatalf("malware history should not create a Supply-Chain / EOL section:\n%s", out)
+	}
+	for _, raw := range []string{"malware_history", "known_vulnerability", "security_support_ended"} {
+		if strings.Contains(out, raw) {
+			t.Fatalf("grouped finding HTML still contains raw risk token %q:\n%s", raw, out)
+		}
+	}
+	securityStart := strings.Index(out, "<h2>Security Findings</h2>")
+	if securityStart < 0 {
+		t.Fatalf("HTML missing Security Findings section:\n%s", out)
+	}
+	assertInOrder(t, out[securityStart:], "Malicious", "Vulnerabilities", "Lifecycle warnings", "Reputation info")
 }
 
 func TestListAllHTMLDoesNotLinkUnsafeFindingURLs(t *testing.T) {
@@ -1661,11 +1729,20 @@ func TestListAllHTMLSurfacesHistoricalReputationRisk(t *testing.T) {
 		t.Fatalf("HTML missing expected sections:\n%s", out)
 	}
 	attention := out[attentionStart:securityStart]
-	if !strings.Contains(attention, "polars-runtime-32") || !strings.Contains(attention, "Supply-chain risk") {
+	if !strings.Contains(attention, "polars-runtime-32") || !strings.Contains(attention, "Reputation info") {
 		t.Fatalf("historical reputation risk should appear as package attention:\n%s", attention)
 	}
-	if !strings.Contains(strings.ToLower(out), "supply-chain incident history") {
+	if !strings.Contains(strings.ToLower(out), "malware incident history") {
 		t.Fatalf("HTML should render historical reputation risk finding:\n%s", out)
+	}
+	if !strings.Contains(out, `<span class="sev sev-low">LOW</span>`) {
+		t.Fatalf("historical reputation risk should render as LOW severity:\n%s", out)
+	}
+	if strings.Contains(out, `<span class="sev sev-high">HIGH</span>`) {
+		t.Fatalf("historical reputation risk should not render as HIGH severity:\n%s", out)
+	}
+	if strings.Contains(out, "Supply-Chain / EOL") {
+		t.Fatalf("historical reputation risk should not be grouped as active supply-chain risk:\n%s", out)
 	}
 	if strings.Contains(out, "No security findings in 1 packages.") {
 		t.Fatalf("historical reputation risk should create security finding rows:\n%s", out)
@@ -1711,6 +1788,43 @@ func TestListAllHTMLDegradedFeedStatusIsWarningNotClean(t *testing.T) {
 		if strings.Contains(out, blocked) {
 			t.Fatalf("HTML rendered all-clear %q despite degraded feed:\n%s", blocked, out)
 		}
+	}
+}
+
+func TestListAllHTMLLocalDegradedFeedStatusMentionsSyncedDatabase(t *testing.T) {
+	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+	report := listAllPackageReport{
+		Rows: []listAllRow{{
+			Name:      "safe",
+			Installed: "1.0.0",
+			Latest:    "1.0.0",
+			Update:    "-",
+			Ecosystem: "npm",
+			Source:    "lockfile",
+			Scope:     "runtime",
+			Relation:  "direct",
+			Vuln:      "-",
+		}},
+	}
+	result := &domain.ScanResult{
+		Mode:            "local",
+		PackagesScanned: 1,
+		FeedStatus:      "degraded",
+	}
+
+	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+		t.Fatalf("writeListAllHTML: %v", err)
+	}
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read HTML: %v", err)
+	}
+	out := string(data)
+	if !strings.Contains(out, "local database was last synced from a server reporting degraded feed status") {
+		t.Fatalf("HTML missing local degraded warning:\n%s", out)
+	}
+	if strings.Contains(out, "Server reports degraded feed status") {
+		t.Fatalf("local warning should not read like a live remote check:\n%s", out)
 	}
 }
 
@@ -2052,11 +2166,12 @@ func TestListAllHTMLAppliesTableLayoutAndAttentionClasses(t *testing.T) {
 		`.sev-high{color:var(--high);border-color:var(--high);}`,
 		`.copy-btn{margin-left:8px;border:1px solid var(--border);border-radius:4px;background:#21262d;color:var(--fg);font:inherit;font-size:12px;min-width:44px;min-height:32px;padding:5px 10px;cursor:pointer;}`,
 		`.vuln-col{text-align:center;`,
-		`.findings-table{table-layout:auto;min-width:0;}`,
-		`.findings-table .finding-package{width:1%;min-width:0;overflow-wrap:anywhere;word-break:break-word;}`,
-		`.findings-table .finding-advisory{width:1%;min-width:0;overflow-wrap:anywhere;word-break:break-word;}`,
-		`.finding-title{white-space:normal;overflow-wrap:anywhere;}`,
-		`.finding-fixed{overflow-wrap:anywhere;word-break:break-word;}`,
+		`.findings-table{table-layout:auto;min-width:1180px;}`,
+		`.findings-table .finding-package{min-width:220px;white-space:nowrap;overflow-wrap:normal;word-break:normal;}`,
+		`.findings-table .finding-advisory{min-width:190px;white-space:nowrap;overflow-wrap:normal;word-break:normal;}`,
+		`.findings-table .finding-advisory a{white-space:nowrap;overflow-wrap:normal;word-break:normal;}`,
+		`.finding-title{min-width:320px;white-space:normal;overflow-wrap:break-word;word-break:normal;}`,
+		`.finding-fixed{min-width:120px;white-space:nowrap;overflow-wrap:normal;word-break:normal;}`,
 		`<td class="package-status status-update">Update available</td>`,
 		`<td class="vuln-col vuln-yes">yes</td>`,
 		`<span class="sev sev-high">HIGH</span>`,
@@ -2070,6 +2185,16 @@ func TestListAllHTMLAppliesTableLayoutAndAttentionClasses(t *testing.T) {
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("HTML missing layout requirement %q:\n%s", want, out)
+		}
+	}
+	for _, bad := range []string{
+		`.findings-table{table-layout:auto;min-width:0;}`,
+		`.findings-table .finding-package{width:1%;`,
+		`.findings-table .finding-advisory{width:1%;`,
+		`.finding-fixed{overflow-wrap:anywhere;word-break:break-word;}`,
+	} {
+		if strings.Contains(out, bad) {
+			t.Fatalf("HTML still contains cramped finding table layout %q:\n%s", bad, out)
 		}
 	}
 }

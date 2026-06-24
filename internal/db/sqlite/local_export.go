@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 // LocalDatabaseCounts contains aggregate local database counts for CLI info
@@ -252,7 +254,11 @@ func (s *Store) exportLocalReputation(ctx context.Context, payload *LocalDatabas
 			return fmt.Errorf("scan local reputation row: %w", err)
 		}
 
-		item.Severity = strings.TrimSpace(severity.String)
+		item.Severity = string(domain.NormalizeFindingSeverity(domain.Finding{
+			Type:     domain.FindingType(item.Type),
+			RiskType: item.RiskType,
+			Severity: domain.Severity(strings.TrimSpace(severity.String)),
+		}))
 		item.Summary = summary.String
 		payload.Reputation = append(payload.Reputation, item)
 	}

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/8linkz-sec/packmon/internal/domain"
 	"github.com/8linkz-sec/packmon/internal/httpclient"
 	"github.com/8linkz-sec/packmon/internal/logsafe"
 )
@@ -25,10 +26,16 @@ const syncMetaKeyLastSync = "last_sync_at"
 
 const syncMetaKeyLastSyncXID = "last_sync_xid"
 
+const syncMetaKeyFeedStatus = "feed_status"
+
+const syncMetaKeyFeedVersions = "feed_versions"
+
 const (
-	syncPageLimit       = 1000
+	syncPageLimit       = 10000
 	maxSyncResponseSize = 32 * 1024 * 1024
 	maxSyncFutureSkew   = 5 * time.Minute
+	syncMax429Retries   = 5
+	syncDefault429Delay = time.Second
 )
 
 // SyncConfig holds parameters for a client-to-server sync operation.
@@ -141,6 +148,8 @@ type syncLifecycleRelease struct {
 type syncResponse struct {
 	SyncedAt        string                 `json:"synced_at"`
 	SyncedXID       uint64                 `json:"synced_xid"`
+	FeedStatus      string                 `json:"feed_status"`
+	FeedVersions    map[string]string      `json:"feed_versions"`
 	Vulnerabilities []syncVulnerability    `json:"vulnerabilities"`
 	Malicious       []syncMalicious        `json:"malicious"`
 	Reputation      []syncReputation       `json:"reputation"`
@@ -300,6 +309,11 @@ func Sync(ctx context.Context, store *Store, cfg SyncConfig) error {
 			return fmt.Errorf("sync: store sync xid: %w", err)
 		}
 	}
+	if storeSnapshot != "" {
+		if err := storeSyncedFeedState(ctx, store, merged); err != nil {
+			return err
+		}
+	}
 
 	return nil
 }
@@ -319,10 +333,55 @@ func mergeSyncResponse(dst, src *syncResponse) {
 	if dst.SyncedXID == 0 {
 		dst.SyncedXID = src.SyncedXID
 	}
+	if dst.FeedStatus == "" {
+		dst.FeedStatus = src.FeedStatus
+	}
+	if src.FeedVersions != nil {
+		if dst.FeedVersions == nil {
+			dst.FeedVersions = make(map[string]string, len(src.FeedVersions))
+		}
+		for feedName, version := range src.FeedVersions {
+			dst.FeedVersions[feedName] = version
+		}
+	}
 	dst.Vulnerabilities = append(dst.Vulnerabilities, src.Vulnerabilities...)
 	dst.Malicious = append(dst.Malicious, src.Malicious...)
 	dst.Reputation = append(dst.Reputation, src.Reputation...)
 	dst.Lifecycle = append(dst.Lifecycle, src.Lifecycle...)
+}
+
+func storeSyncedFeedState(ctx context.Context, store *Store, resp *syncResponse) error {
+	if resp == nil {
+		return nil
+	}
+	status := strings.TrimSpace(resp.FeedStatus)
+	if status == "" && resp.FeedVersions == nil {
+		return nil
+	}
+	if status != "" {
+		if err := store.SetSyncMeta(ctx, syncMetaKeyFeedStatus, status); err != nil {
+			return fmt.Errorf("sync: store feed status: %w", err)
+		}
+	}
+	if resp.FeedVersions != nil || status != "" {
+		versions := make(map[string]string, len(resp.FeedVersions))
+		for feedName, version := range resp.FeedVersions {
+			feedName = strings.TrimSpace(feedName)
+			version = strings.TrimSpace(version)
+			if feedName == "" || version == "" {
+				continue
+			}
+			versions[feedName] = version
+		}
+		payload, err := json.Marshal(versions)
+		if err != nil {
+			return fmt.Errorf("sync: encode feed versions: %w", err)
+		}
+		if err := store.SetSyncMeta(ctx, syncMetaKeyFeedVersions, string(payload)); err != nil {
+			return fmt.Errorf("sync: store feed versions: %w", err)
+		}
+	}
+	return nil
 }
 
 func validateSyncServerURL(serverURL string, allowInsecureHTTP bool) error {
@@ -378,12 +437,27 @@ func loadSyncCAPool(path string) (*x509.CertPool, error) {
 	return pool, nil
 }
 
-// fetchSyncPage makes a single HTTP request to the server sync endpoint.
 func fetchSyncPage(ctx context.Context, client *http.Client, cfg SyncConfig, since, sinceXID string, cursor syncCursor, legacyOffset int, snapshot, snapshotXID string) (*syncResponse, error) {
+	for attempt := 0; ; attempt++ {
+		resp, retryAfter, err := fetchSyncPageOnce(ctx, client, cfg, since, sinceXID, cursor, legacyOffset, snapshot, snapshotXID)
+		if err == nil {
+			return resp, nil
+		}
+		if retryAfter <= 0 || attempt >= syncMax429Retries {
+			return nil, err
+		}
+		if waitErr := waitForSyncRetry(ctx, retryAfter); waitErr != nil {
+			return nil, waitErr
+		}
+	}
+}
+
+// fetchSyncPageOnce makes a single HTTP request to the server sync endpoint.
+func fetchSyncPageOnce(ctx context.Context, client *http.Client, cfg SyncConfig, since, sinceXID string, cursor syncCursor, legacyOffset int, snapshot, snapshotXID string) (*syncResponse, time.Duration, error) {
 	displayServerURL := logsafe.RedactURL(cfg.ServerURL)
 	u, err := url.Parse(strings.TrimRight(cfg.ServerURL, "/") + "/api/v1/sync")
 	if err != nil {
-		return nil, fmt.Errorf("sync: parse server URL %q: %w", displayServerURL, err)
+		return nil, 0, fmt.Errorf("sync: parse server URL %q: %w", displayServerURL, err)
 	}
 
 	q := u.Query()
@@ -412,7 +486,7 @@ func fetchSyncPage(ctx context.Context, client *http.Client, cfg SyncConfig, sin
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return nil, fmt.Errorf("sync: create request for server URL %q: %s", displayServerURL, logsafe.RedactDiagnosticMessage(err.Error()))
+		return nil, 0, fmt.Errorf("sync: create request for server URL %q: %s", displayServerURL, logsafe.RedactDiagnosticMessage(err.Error()))
 	}
 	req.Header.Set("User-Agent", "packmon-cli/dev")
 	if cfg.APIKey != "" {
@@ -421,7 +495,7 @@ func fetchSyncPage(ctx context.Context, client *http.Client, cfg SyncConfig, sin
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("sync: server request: %s", logsafe.RedactURLRequestError(err, "server URL"))
+		return nil, 0, fmt.Errorf("sync: server request: %s", logsafe.RedactURLRequestError(err, "server URL"))
 	}
 	defer func() {
 		_ = resp.Body.Close()
@@ -429,19 +503,61 @@ func fetchSyncPage(ctx context.Context, client *http.Client, cfg SyncConfig, sin
 
 	body, err := readLimitedSyncResponse(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("sync: read response: %w", err)
+		return nil, 0, fmt.Errorf("sync: read response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("sync: server returned %d: %s", resp.StatusCode, truncate(string(body), 200))
+		retryAfter := time.Duration(0)
+		if resp.StatusCode == http.StatusTooManyRequests {
+			retryAfter = parseSyncRetryAfter(resp.Header.Get("Retry-After"))
+			if retryAfter <= 0 {
+				retryAfter = syncDefault429Delay
+			}
+		}
+		return nil, retryAfter, fmt.Errorf("sync: server returned %d: %s", resp.StatusCode, truncate(string(body), 200))
 	}
 
 	var syncResp syncResponse
 	if err := json.Unmarshal(body, &syncResp); err != nil {
-		return nil, fmt.Errorf("sync: decode response: %w", err)
+		return nil, 0, fmt.Errorf("sync: decode response: %w", err)
 	}
 
-	return &syncResp, nil
+	return &syncResp, 0, nil
+}
+
+func parseSyncRetryAfter(raw string) time.Duration {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(raw); err == nil {
+		if seconds < 0 {
+			return 0
+		}
+		return time.Duration(seconds) * time.Second
+	}
+	if retryAt, err := http.ParseTime(raw); err == nil {
+		delay := time.Until(retryAt)
+		if delay < 0 {
+			return 0
+		}
+		return delay
+	}
+	return 0
+}
+
+func waitForSyncRetry(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("sync: context cancelled during rate limit wait: %w", ctx.Err())
+	case <-timer.C:
+		return nil
+	}
 }
 
 func setSyncCursorQuery(q url.Values, cursor syncCursor) {
@@ -738,9 +854,14 @@ func applySyncReputation(ctx context.Context, tx *sql.Tx, reputation []syncReput
 		}
 
 		name := normalizePackageName(rep.Ecosystem, rep.Name)
+		severity := string(domain.NormalizeFindingSeverity(domain.Finding{
+			Type:     domain.FindingType(rep.Type),
+			RiskType: rep.RiskType,
+			Severity: domain.Severity(rep.Severity),
+		}))
 		if _, err := repStmt.ExecContext(ctx,
 			rep.ID, rep.Ecosystem, name, rep.Version,
-			rep.Type, rep.RiskType, rep.Severity, rep.Summary,
+			rep.Type, rep.RiskType, severity, rep.Summary,
 		); err != nil {
 			return 0, fmt.Errorf("sync: upsert reputation %s: %w", rep.ID, err)
 		}

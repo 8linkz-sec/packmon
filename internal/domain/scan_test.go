@@ -10,6 +10,7 @@ func TestBuildScanSummary(t *testing.T) {
 		{Severity: SeverityHigh, Type: FindingTypeVulnerability, Source: "osv"},
 		{Severity: SeverityHigh, Type: FindingTypeVulnerability, Source: "ghsa"},
 		{Severity: SeverityCritical, Type: FindingTypeMalicious, Source: "openssf"},
+		{Severity: SeverityHigh, Type: FindingTypeSupplyChainRisk, RiskType: "malware_history", Source: "reversinglabs"},
 	}
 
 	summary := BuildScanSummary(findings)
@@ -20,11 +21,17 @@ func TestBuildScanSummary(t *testing.T) {
 	if summary.BySeverity["HIGH"] != 2 {
 		t.Fatalf("BySeverity[HIGH] = %d, want 2", summary.BySeverity["HIGH"])
 	}
+	if summary.BySeverity["LOW"] != 1 {
+		t.Fatalf("BySeverity[LOW] = %d, want 1", summary.BySeverity["LOW"])
+	}
 	if summary.ByType["vulnerability"] != 3 {
 		t.Fatalf("ByType[vulnerability] = %d, want 3", summary.ByType["vulnerability"])
 	}
 	if summary.ByType["malicious"] != 1 {
 		t.Fatalf("ByType[malicious] = %d, want 1", summary.ByType["malicious"])
+	}
+	if summary.ByType["supply_chain_risk"] != 1 {
+		t.Fatalf("ByType[supply_chain_risk] = %d, want 1", summary.ByType["supply_chain_risk"])
 	}
 	if summary.BySource["osv"] != 2 {
 		t.Fatalf("BySource[osv] = %d, want 2", summary.BySource["osv"])
@@ -34,6 +41,9 @@ func TestBuildScanSummary(t *testing.T) {
 	}
 	if summary.BySource["openssf"] != 1 {
 		t.Fatalf("BySource[openssf] = %d, want 1", summary.BySource["openssf"])
+	}
+	if summary.BySource["reversinglabs"] != 1 {
+		t.Fatalf("BySource[reversinglabs] = %d, want 1", summary.BySource["reversinglabs"])
 	}
 }
 
@@ -73,6 +83,18 @@ func TestFindingBlocksPolicy(t *testing.T) {
 			finding:   Finding{Type: FindingTypeSupplyChainRisk, Severity: SeverityLow},
 			threshold: SeverityNone,
 			want:      true,
+		},
+		{
+			name:      "malware history is informational",
+			finding:   Finding{Type: FindingTypeSupplyChainRisk, RiskType: "malware_history", Severity: SeverityHigh},
+			threshold: SeverityNone,
+			want:      false,
+		},
+		{
+			name:      "malware history stays informational even at severity threshold",
+			finding:   Finding{Type: FindingTypeSupplyChainRisk, RiskType: " malware_history ", Severity: SeverityHigh},
+			threshold: SeverityHigh,
+			want:      false,
 		},
 		{
 			name:      "none disables vulnerability blocking",

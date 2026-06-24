@@ -312,13 +312,18 @@ func reputationToFinding(rep db.PackageReputation) (domain.Finding, bool) {
 		source = db.ReputationSourceReversingLabs
 	}
 	referenceURLs := string(rep.ReferenceURLs)
+	severity := domain.NormalizeFindingSeverity(domain.Finding{
+		Type:     findingType,
+		RiskType: riskType,
+		Severity: domain.Severity(normalizeReputationSeverity(rep.Severity)),
+	})
 
 	return domain.Finding{
 		Name:       rep.Name,
 		Version:    rep.Version,
 		Ecosystem:  domain.Ecosystem(rep.Ecosystem),
 		Type:       findingType,
-		Severity:   domain.Severity(normalizeReputationSeverity(rep.Severity)),
+		Severity:   severity,
 		AdvisoryID: reputationFindingID(rep.Ecosystem, rep.Name, rep.Version),
 		Title:      title,
 		URL:        extractFirstURL(referenceURLs),

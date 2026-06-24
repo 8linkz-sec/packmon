@@ -735,8 +735,9 @@ func packageQueries(pkgs []domain.Package) []db.PackageQuery {
 }
 
 // hasBlockingFindings checks if any finding is blocking per DE-2 rules:
-// - Malware and supply-chain risk always block (regardless of fail-on threshold)
+// - Malware and active supply-chain risk always block regardless of threshold
 // - Vulnerabilities block if severity >= fail-on threshold
+// - Informational reputation findings never block
 func (s *Scanner) hasBlockingFindings(findings []domain.Finding) bool {
 	return domain.FindingsBlock(findings, s.cfg.FailOn)
 }
