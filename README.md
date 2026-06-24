@@ -227,7 +227,8 @@ metadata as CycloneDX properties.
 `packmon scan --list-all --html <file> <target>` runs the normal findings scan
 and adds a full package inventory. The package table includes each package's
 input source (`lockfile`, `sbom`, `dockerfile`, or `compose`), scope, relation,
-and vulnerability marker. The HTML report intentionally omits noisy `Via` and
+report-only technology tags (`angular` for Angular npm packages and `java` for
+Maven/Gradle rows), and vulnerability marker. The HTML report intentionally omits noisy `Via` and
 `Flags` columns. Its `Packages Needing Attention` section shows actionable
 updates, removed packages, packages with security findings, and non-blocking
 historical ReversingLabs incident context as `LOW` `Reputation info`; unknown

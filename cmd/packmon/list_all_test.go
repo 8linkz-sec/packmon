@@ -67,6 +67,140 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
+func TestListAllPackageTechnologies(t *testing.T) {
+	tests := []struct {
+		name string
+		pkg  listAllPackage
+		want string
+	}{
+		{
+			name: "angular scoped package",
+			pkg:  listAllPackage{Name: "@angular/core", Version: "18.2.0", Ecosystem: domain.EcosystemNPM},
+			want: "angular",
+		},
+		{
+			name: "legacy angular package",
+			pkg:  listAllPackage{Name: "angular", Version: "1.8.3", Ecosystem: domain.EcosystemNPM},
+			want: "angular",
+		},
+		{
+			name: "angular dash package",
+			pkg:  listAllPackage{Name: "angular-material", Version: "1.2.5", Ecosystem: domain.EcosystemNPM},
+			want: "angular",
+		},
+		{
+			name: "non angular npm package has no generic js tag",
+			pkg:  listAllPackage{Name: "react", Version: "19.0.0", Ecosystem: domain.EcosystemNPM},
+			want: "-",
+		},
+		{
+			name: "maven package is java",
+			pkg:  listAllPackage{Name: "org.springframework:spring-core", Version: "6.2.0", Ecosystem: domain.EcosystemMaven},
+			want: "java",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := listAllPackageTechnologies(tt.pkg); got != tt.want {
+				t.Fatalf("listAllPackageTechnologies(%+v) = %q, want %q", tt.pkg, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPrintListAllPackageReportIncludesTechnologyColumn(t *testing.T) {
+	report := listAllPackageReport{
+		Rows: []listAllRow{
+			{
+				Name:       "@angular/core",
+				Installed:  "18.2.0",
+				Latest:     "18.2.0",
+				Update:     "-",
+				Ecosystem:  "npm",
+				Source:     "lockfile",
+				Scope:      "runtime",
+				Relation:   "direct",
+				Technology: "angular",
+				Vuln:       "-",
+				LockFile:   "package-lock.json",
+			},
+			{
+				Name:       "org.springframework:spring-core",
+				Installed:  "6.2.0",
+				Latest:     "6.2.0",
+				Update:     "-",
+				Ecosystem:  "maven",
+				Source:     "lockfile",
+				Scope:      "runtime",
+				Relation:   "direct",
+				Technology: "java",
+				Vuln:       "-",
+				LockFile:   "pom.xml",
+			},
+		},
+	}
+
+	output := captureStdout(t, func() {
+		printListAllPackageReport(report)
+	})
+
+	for _, want := range []string{"TECHNOLOGY", "angular", "java"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("terminal list-all output missing %q:\n%s", want, output)
+		}
+	}
+}
+
+func TestListAllHTMLIncludesTechnologyColumn(t *testing.T) {
+	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+	report := listAllPackageReport{
+		Rows: []listAllRow{
+			{
+				Name:       "@angular/core",
+				Installed:  "18.2.0",
+				Latest:     "18.2.0",
+				Update:     "-",
+				Ecosystem:  "npm",
+				Source:     "lockfile",
+				Scope:      "runtime",
+				Relation:   "direct",
+				Technology: "angular",
+				Vuln:       "-",
+				LockFile:   "package-lock.json",
+			},
+			{
+				Name:       "org.springframework:spring-core",
+				Installed:  "6.2.0",
+				Latest:     "6.2.0",
+				Update:     "-",
+				Ecosystem:  "maven",
+				Source:     "lockfile",
+				Scope:      "runtime",
+				Relation:   "direct",
+				Technology: "java",
+				Vuln:       "-",
+				LockFile:   "pom.xml",
+			},
+		},
+	}
+
+	result := &domain.ScanResult{Mode: "local"}
+	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+		t.Fatalf("writeListAllHTML: %v", err)
+	}
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read HTML: %v", err)
+	}
+	out := string(data)
+	for _, want := range []string{">Technology<", ">angular<", ">java<"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("list-all HTML missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func contains(haystack, needle string) bool {
 	return strings.Contains(haystack, needle)
 }

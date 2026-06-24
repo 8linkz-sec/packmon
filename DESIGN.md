@@ -272,7 +272,9 @@ Important behavior:
   inventory section still lists every detected package by default and annotates
   source (`lockfile`, `sbom`, `dockerfile`, `compose`), scope (`runtime`,
   `dev`, `ci`, `sbom`, `build`), relation (`direct`, `transitive`,
-  `workflow`, etc.), npm `via` roots, and optional/peer flags. HTML reports
+  `workflow`, etc.), report-only technology tags (`angular` for Angular npm
+  packages and `java` for Maven/Gradle rows), npm `via` roots, and
+  optional/peer flags. HTML reports
   omit the noisy `Via` and `Flags` columns, keep full source paths out of
   package rows, and render a deduplicated "Checked Inventory Sources" section
   at the bottom for lockfiles, SBOMs, and Docker inventory files. The HTML

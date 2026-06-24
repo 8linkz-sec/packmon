@@ -64,6 +64,7 @@ type listAllRow struct {
 	Source     string
 	Scope      string
 	Relation   string
+	Technology string
 	Via        string
 	Flags      string
 	Vuln       string
@@ -86,6 +87,7 @@ type listAllHTMLPackageRow struct {
 	Source               string
 	Scope                string
 	Relation             string
+	Technology           string
 	Via                  string
 	Flags                string
 	Vuln                 string
@@ -436,6 +438,7 @@ func buildListAllPackageReportWithOptions(parent context.Context, packages []lis
 			Source:     listAllPackageSource(p),
 			Scope:      scope,
 			Relation:   packageStatusRelation(status),
+			Technology: listAllPackageTechnologies(p),
 			Via:        strings.Join(p.Via, ", "),
 			Flags:      packageStatusFlags(status),
 			Vuln:       vuln,
@@ -596,7 +599,7 @@ func printListAllPackageReport(report listAllPackageReport) {
 	}
 
 	// Column widths (header widths as the minimum).
-	maxName, maxInst, maxLat, maxUpd, maxEco, maxSource, maxScope, maxRel, maxVia, maxFlags, maxVuln := 7, 9, 6, 6, 9, 6, 5, 8, 3, 5, 4
+	maxName, maxInst, maxLat, maxUpd, maxEco, maxSource, maxScope, maxRel, maxTech, maxVia, maxFlags, maxVuln := 7, 9, 6, 6, 9, 6, 5, 8, 10, 3, 5, 4
 	for _, r := range rows {
 		maxName = maxInt(maxName, len(r.Name))
 		maxInst = maxInt(maxInst, len(r.Installed))
@@ -606,18 +609,19 @@ func printListAllPackageReport(report listAllPackageReport) {
 		maxSource = maxInt(maxSource, len(r.Source))
 		maxScope = maxInt(maxScope, len(r.Scope))
 		maxRel = maxInt(maxRel, len(r.Relation))
+		maxTech = maxInt(maxTech, len(r.Technology))
 		maxVia = maxInt(maxVia, len(r.Via))
 		maxFlags = maxInt(maxFlags, len(r.Flags))
 		maxVuln = maxInt(maxVuln, len(r.Vuln))
 	}
 
 	gap := "  "
-	fmtStr := fmt.Sprintf("%%-%ds%s%%-%ds%s%%-%ds%s%%-%ds%s%%-%ds%s%%-%ds%s%%-%ds%s%%-%ds%s%%-%ds%s%%-%ds%s%%-%ds%s%%s\n",
-		maxName, gap, maxInst, gap, maxLat, gap, maxUpd, gap, maxEco, gap, maxSource, gap, maxScope, gap, maxRel, gap, maxVia, gap, maxFlags, gap, maxVuln, gap)
+	fmtStr := fmt.Sprintf("%%-%ds%s%%-%ds%s%%-%ds%s%%-%ds%s%%-%ds%s%%-%ds%s%%-%ds%s%%-%ds%s%%-%ds%s%%-%ds%s%%-%ds%s%%-%ds%s%%s\n",
+		maxName, gap, maxInst, gap, maxLat, gap, maxUpd, gap, maxEco, gap, maxSource, gap, maxScope, gap, maxRel, gap, maxTech, gap, maxVia, gap, maxFlags, gap, maxVuln, gap)
 
-	fmt.Printf(fmtStr, "PACKAGE", "INSTALLED", "LATEST", "UPDATE", "ECOSYSTEM", "SOURCE", "SCOPE", "RELATION", "VIA", "FLAGS", "VULNERABILITY", "SOURCE FILE")
+	fmt.Printf(fmtStr, "PACKAGE", "INSTALLED", "LATEST", "UPDATE", "ECOSYSTEM", "SOURCE", "SCOPE", "RELATION", "TECHNOLOGY", "VIA", "FLAGS", "VULNERABILITY", "SOURCE FILE")
 	for _, r := range rows {
-		fmt.Printf(fmtStr, r.Name, r.Installed, r.Latest, r.Update, r.Ecosystem, r.Source, r.Scope, r.Relation, r.Via, r.Flags, r.Vuln, r.LockFile)
+		fmt.Printf(fmtStr, r.Name, r.Installed, r.Latest, r.Update, r.Ecosystem, r.Source, r.Scope, r.Relation, r.Technology, r.Via, r.Flags, r.Vuln, r.LockFile)
 	}
 
 	fmt.Printf("\n%s (%s, %s, %s)\n",
@@ -638,11 +642,30 @@ func sanitizeListAllTerminalRow(r listAllRow) listAllRow {
 		Source:     termtext.Sanitize(r.Source),
 		Scope:      termtext.Sanitize(r.Scope),
 		Relation:   termtext.Sanitize(r.Relation),
+		Technology: termtext.Sanitize(r.Technology),
 		Via:        termtext.Sanitize(r.Via),
 		Flags:      termtext.Sanitize(r.Flags),
 		Vuln:       termtext.Sanitize(r.Vuln),
 		LockFile:   termtext.Sanitize(r.LockFile),
 	}
+}
+
+func listAllPackageTechnologies(p listAllPackage) string {
+	tags := make([]string, 0, 1)
+	name := strings.ToLower(strings.TrimSpace(p.Name))
+
+	if p.Ecosystem == domain.EcosystemMaven {
+		tags = append(tags, "java")
+	}
+	if p.Ecosystem == domain.EcosystemNPM &&
+		(name == "angular" || strings.HasPrefix(name, "angular-") || strings.HasPrefix(name, "@angular/")) {
+		tags = append(tags, "angular")
+	}
+	if len(tags) == 0 {
+		return "-"
+	}
+	sort.Strings(tags)
+	return strings.Join(tags, ", ")
 }
 
 func maxInt(a, b int) int {
@@ -772,6 +795,7 @@ func listAllHTMLPackageRows(rows []listAllRow, findings []domain.Finding) []list
 			Source:               listAllHTMLPackageSource(row),
 			Scope:                row.Scope,
 			Relation:             row.Relation,
+			Technology:           row.Technology,
 			Via:                  row.Via,
 			Flags:                row.Flags,
 			Vuln:                 vuln,
@@ -1502,9 +1526,9 @@ a:hover{text-decoration:underline;}
 {{if .Attention}}
 <div class="table-scroll" tabindex="0" role="region" aria-label="Packages needing attention table">
 <table class="package-table">
-<thead><tr><th class="name">Package</th><th class="installed">Installed</th><th class="version">Latest</th><th class="package-status">Status</th><th class="short">Ecosystem</th><th class="source">Source</th><th class="short">Scope</th><th class="short">Relation</th><th class="vuln-col">Vulnerability</th></tr></thead>
+<thead><tr><th class="name">Package</th><th class="installed">Installed</th><th class="version">Latest</th><th class="package-status">Status</th><th class="short">Ecosystem</th><th class="source">Source</th><th class="short">Scope</th><th class="short">Relation</th><th class="short">Technology</th><th class="vuln-col">Vulnerability</th></tr></thead>
 <tbody>
-{{range .Attention}}<tr><td class="name">{{.Name}}</td><td class="installed">{{if .InstalledCopy}}<span class="copy-value">{{.Installed}}</span><button type="button" class="copy-btn" data-copy="{{.InstalledCopy}}" data-copy-label="{{.InstalledCopyLabel}}" data-copy-message="{{.InstalledCopyMessage}}" aria-label="{{.InstalledCopyLabel}}">Copy</button>{{else}}{{.Installed}}{{end}}</td><td class="version">{{if .LatestCopy}}<span class="copy-value">{{.Latest}}</span><button type="button" class="copy-btn" data-copy="{{.LatestCopy}}" data-copy-label="{{.LatestCopyLabel}}" data-copy-message="{{.LatestCopyMessage}}" aria-label="{{.LatestCopyLabel}}">Copy</button>{{else}}{{.Latest}}{{end}}</td><td class="package-status{{if .StatusClass}} {{.StatusClass}}{{end}}">{{.Status}}</td><td class="short">{{.Ecosystem}}</td><td class="source">{{.Source}}</td><td class="short">{{.Scope}}</td><td class="short">{{.Relation}}</td><td class="vuln-col{{if .VulnClass}} {{.VulnClass}}{{end}}">{{.Vuln}}</td></tr>{{end}}
+{{range .Attention}}<tr><td class="name">{{.Name}}</td><td class="installed">{{if .InstalledCopy}}<span class="copy-value">{{.Installed}}</span><button type="button" class="copy-btn" data-copy="{{.InstalledCopy}}" data-copy-label="{{.InstalledCopyLabel}}" data-copy-message="{{.InstalledCopyMessage}}" aria-label="{{.InstalledCopyLabel}}">Copy</button>{{else}}{{.Installed}}{{end}}</td><td class="version">{{if .LatestCopy}}<span class="copy-value">{{.Latest}}</span><button type="button" class="copy-btn" data-copy="{{.LatestCopy}}" data-copy-label="{{.LatestCopyLabel}}" data-copy-message="{{.LatestCopyMessage}}" aria-label="{{.LatestCopyLabel}}">Copy</button>{{else}}{{.Latest}}{{end}}</td><td class="package-status{{if .StatusClass}} {{.StatusClass}}{{end}}">{{.Status}}</td><td class="short">{{.Ecosystem}}</td><td class="source">{{.Source}}</td><td class="short">{{.Scope}}</td><td class="short">{{.Relation}}</td><td class="short">{{.Technology}}</td><td class="vuln-col{{if .VulnClass}} {{.VulnClass}}{{end}}">{{.Vuln}}</td></tr>{{end}}
 </tbody>
 </table>
 </div>
@@ -1533,9 +1557,9 @@ a:hover{text-decoration:underline;}
 {{if .PackageRows}}
 <div class="table-scroll" tabindex="0" role="region" aria-label="All packages table">
 <table class="package-table">
-<thead><tr><th class="name">Package</th><th class="installed">Installed</th><th class="version">Latest</th><th class="package-status">Status</th><th class="short">Ecosystem</th><th class="source">Source</th><th class="short">Scope</th><th class="short">Relation</th><th class="vuln-col">Vulnerability</th></tr></thead>
+<thead><tr><th class="name">Package</th><th class="installed">Installed</th><th class="version">Latest</th><th class="package-status">Status</th><th class="short">Ecosystem</th><th class="source">Source</th><th class="short">Scope</th><th class="short">Relation</th><th class="short">Technology</th><th class="vuln-col">Vulnerability</th></tr></thead>
 <tbody>
-{{range .PackageRows}}<tr><td class="name">{{.Name}}</td><td class="installed">{{if .InstalledCopy}}<span class="copy-value">{{.Installed}}</span><button type="button" class="copy-btn" data-copy="{{.InstalledCopy}}" data-copy-label="{{.InstalledCopyLabel}}" data-copy-message="{{.InstalledCopyMessage}}" aria-label="{{.InstalledCopyLabel}}">Copy</button>{{else}}{{.Installed}}{{end}}</td><td class="version">{{if .LatestCopy}}<span class="copy-value">{{.Latest}}</span><button type="button" class="copy-btn" data-copy="{{.LatestCopy}}" data-copy-label="{{.LatestCopyLabel}}" data-copy-message="{{.LatestCopyMessage}}" aria-label="{{.LatestCopyLabel}}">Copy</button>{{else}}{{.Latest}}{{end}}</td><td class="package-status{{if .StatusClass}} {{.StatusClass}}{{end}}">{{.Status}}</td><td class="short">{{.Ecosystem}}</td><td class="source">{{.Source}}</td><td class="short">{{.Scope}}</td><td class="short">{{.Relation}}</td><td class="vuln-col{{if .VulnClass}} {{.VulnClass}}{{end}}">{{.Vuln}}</td></tr>{{end}}
+{{range .PackageRows}}<tr><td class="name">{{.Name}}</td><td class="installed">{{if .InstalledCopy}}<span class="copy-value">{{.Installed}}</span><button type="button" class="copy-btn" data-copy="{{.InstalledCopy}}" data-copy-label="{{.InstalledCopyLabel}}" data-copy-message="{{.InstalledCopyMessage}}" aria-label="{{.InstalledCopyLabel}}">Copy</button>{{else}}{{.Installed}}{{end}}</td><td class="version">{{if .LatestCopy}}<span class="copy-value">{{.Latest}}</span><button type="button" class="copy-btn" data-copy="{{.LatestCopy}}" data-copy-label="{{.LatestCopyLabel}}" data-copy-message="{{.LatestCopyMessage}}" aria-label="{{.LatestCopyLabel}}">Copy</button>{{else}}{{.Latest}}{{end}}</td><td class="package-status{{if .StatusClass}} {{.StatusClass}}{{end}}">{{.Status}}</td><td class="short">{{.Ecosystem}}</td><td class="source">{{.Source}}</td><td class="short">{{.Scope}}</td><td class="short">{{.Relation}}</td><td class="short">{{.Technology}}</td><td class="vuln-col{{if .VulnClass}} {{.VulnClass}}{{end}}">{{.Vuln}}</td></tr>{{end}}
 </tbody>
 </table>
 </div>
