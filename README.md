@@ -5,6 +5,78 @@ vulnerabilities, malicious packages, lifecycle risks, and configured
 supply-chain risk findings.
 It can run as a local CLI, as a central API server, or both together.
 
+## First Local Server + Agent Test
+
+After cloning Packmon, build the local agent and start the local server from the
+Packmon repository root.
+
+Windows:
+
+```powershell
+cd <path-to-cloned-packmon>
+.\scripts\check-requirements.ps1 -Profile agent
+.\scripts\check-requirements.ps1 -Profile server
+New-Item -ItemType Directory -Force .build | Out-Null
+go build -o .build\packmon.exe .\cmd\packmon
+.\scripts\start-local-stack.ps1
+```
+
+Linux/macOS, or WSL on Windows:
+
+```bash
+cd <path-to-cloned-packmon>
+bash scripts/check-requirements.sh --profile agent
+bash scripts/check-requirements.sh --profile server
+mkdir -p .build
+go build -o .build/packmon ./cmd/packmon
+bash scripts/start-local-stack.sh
+```
+
+Use the Windows block from PowerShell. Use the Linux/macOS block only from a
+real Linux/macOS shell or WSL, because Git Bash on Windows may not inherit the
+same toolchain `PATH` as PowerShell.
+
+Then open the local admin UI:
+
+```text
+http://localhost:8080/admin/login
+```
+
+- Username: `admin`
+- Password: open the generated `.env` in the Packmon repository and use the
+  value of `PACKMON_ADMIN_INITIAL_PASSWORD`
+
+Change the bootstrap password under `/admin/settings`, then create an agent API
+key under `/admin/keys`.
+
+Run the agent from the repository you want to scan:
+
+```powershell
+$env:PACKMON_API_KEY = "<copied-api-key>"
+<path-to-cloned-packmon>\.build\packmon.exe scan . `
+  --mode remote `
+  --server http://localhost:8080 `
+  --insecure-allow-http `
+  --require-remote `
+  --list-all `
+  --html packmon-report.html `
+  --output-json packmon-report.json
+```
+
+Linux/macOS:
+
+```bash
+export PACKMON_API_KEY="<copied-api-key>"
+<path-to-cloned-packmon>/.build/packmon scan . \
+  --mode remote \
+  --server http://localhost:8080 \
+  --insecure-allow-http \
+  --require-remote \
+  --list-all \
+  --html packmon-report.html \
+  --output-json packmon-report.json
+```
+
 Packmon is distributed under the private project license in `LICENSE`. The
 OpenAPI contract references `LicenseRef-Private`, whose text is also shipped in
 `LICENSES/LicenseRef-Private.txt`.
@@ -37,25 +109,100 @@ Use these files as the baseline for future audits and implementation reviews.
 
 ## Quick Start
 
-### CLI only
+### Choose Your Test Path
+
+| Goal | Use this path | Needs |
+|---|---|---|
+| Scan one repository with the agent only | Windows or Linux/macOS below | Packmon release binary only |
+| Test the server container plus an agent | `Local Docker stack` below | Source checkout, Docker, Go |
+| Build Packmon from source | `Build From Source` below | Source checkout and Go |
+
+For a first functional test, use the agent-only path. Use the Docker path when
+you specifically want remote scans, central feed sync, the admin UI, API keys,
+or local DB sync from the server.
+
+### Windows
+
+Download or copy `packmon.exe` into the repository or project directory you
+want to scan. Then run these commands from that directory:
+
+```powershell
+.\packmon.exe version
+.\packmon.exe scan --list-all --html packmon-report.html --output-json packmon-report.json .
+.\packmon.exe db info
+```
+
+This native full scan reads supported lockfiles and existing SBOMs directly. It
+does not require Go, Node.js, Python, JDK/Maven, Docker, or repository helper
+scripts.
+
+Use `--auto-sbom` only when you explicitly want Packmon to generate CycloneDX
+SBOMs before scanning:
+
+```powershell
+.\packmon.exe scan --auto-sbom --install-tools --list-all --html packmon-report.html --output-json packmon-report.json .
+```
+
+For `--auto-sbom`, Packmon only asks for tools that match the detected target
+manifests. For example, Maven is not required unless Maven SBOM generation is
+needed.
+
+### Linux And macOS
+
+Use the Packmon release binary for your platform:
+
+- Linux: Packmon ELF binary, normally named `packmon`
+- macOS: Packmon Mach-O binary, normally named `packmon`
 
 ```bash
-go build -o packmon ./cmd/packmon
-./packmon scan .
+chmod +x ./packmon
+./packmon version
+./packmon scan --list-all --html packmon-report.html --output-json packmon-report.json .
 ./packmon db info
 ```
 
-### Local install helpers
-
 ```bash
-./scripts/install.sh
+./packmon scan --auto-sbom --install-tools --list-all --html packmon-report.html --output-json packmon-report.json .
 ```
 
+If `packmon` is on `PATH`, use `packmon` instead of `.\packmon.exe` or
+`./packmon`.
+
+## Source Checkout Requirements
+
+The scripts in `scripts/` are helper tools for a source checkout of this
+repository. Release-binary users do not need them.
+
+Profiles are documented in `REQUIREMENTS.md` and listed in
+`requirements/packmon-tools.tsv`:
+
+- `full`: normal Packmon runtime, binary only.
+- `agent`: source builds.
+- `sbom`: optional target-aware CycloneDX generation preflight.
+- `web`: generated web assets.
+- `server`: Docker/PostgreSQL stack.
+- `dev`: Packmon development and CI gates.
+
+### Build From Source
+
+Source builds require Go. The install helpers build both `packmon` and
+`packmon-server` and install them under the local Packmon bin directory.
+
 ```powershell
-./scripts/install.ps1
+.\scripts\check-requirements.ps1 -Profile agent
+.\scripts\install.ps1
+packmon version
+```
+
+```bash
+bash scripts/check-requirements.sh --profile agent
+./scripts/install.sh
+packmon version
 ```
 
 ### Development server
+
+The development server requires a source checkout and the `agent` profile.
 
 ```bash
 go build -o packmon-server ./cmd/packmon-server
@@ -66,26 +213,114 @@ The development server uses the in-memory dev store, exposes the web UI, and bin
 
 ### Local Docker stack
 
-```bash
-cp .env.example .env
-```
+The local Docker/PostgreSQL stack requires the `server` profile:
 
-Before running migrations or starting the stack, edit `.env` and set the required local secrets:
-
-- `POSTGRES_PASSWORD`: strong PostgreSQL password for the Compose database.
-- `PACKMON_DB_PASSWORD`: same value as `POSTGRES_PASSWORD`, used by the Packmon server.
-- `PACKMON_ADMIN_INITIAL_PASSWORD`: initial admin login password, at least 12
-  characters.
-- `PACKMON_ENCRYPTION_KEY`: production encryption key for stored feed API keys.
-
-Then run the explicit migration step and start the stack:
+Use this path when you want to test the containerized Packmon server together
+with a CLI agent. Start the Docker stack from the Packmon source checkout, then
+run the agent commands from the repository you want to scan.
 
 ```bash
-docker compose run --build --rm packmon-migrate
-docker compose up --build
+bash scripts/check-requirements.sh --profile server
 ```
 
-The Docker stack runs PostgreSQL and `packmon-server` in production mode so synced feed data is persisted. Run `docker compose run --build --rm packmon-migrate` explicitly before first startup and after upgrades that add database migrations; normal server startup only verifies the schema version. The `packmon-migrate` service is a manual Compose profile and receives only database/logging environment values, not admin or feed-provider secrets.
+```powershell
+.\scripts\check-requirements.ps1 -Profile server
+```
+
+Start the local stack:
+
+```powershell
+.\scripts\start-local-stack.ps1
+```
+
+```bash
+bash scripts/start-local-stack.sh
+```
+
+The start helper creates or completes `.env` from `.env.example` with generated local-only secrets for `POSTGRES_PASSWORD`, `PACKMON_DB_PASSWORD`, `PACKMON_ADMIN_INITIAL_PASSWORD`, and `PACKMON_ENCRYPTION_KEY`. It keeps existing non-empty values, makes the Packmon DB password match the local PostgreSQL password when either value is missing, and runs the database migration before starting the server. Helpers do not print generated secret values.
+
+Admins can later adjust `.env`, feed-provider API keys, TLS/proxy settings, and other deployment-specific values before shared or production use.
+
+The local server is now reachable at `http://localhost:8080`. Open the admin UI
+and sign in:
+
+```text
+http://localhost:8080/admin/login
+```
+
+- Username: `admin`
+- Password: the generated `PACKMON_ADMIN_INITIAL_PASSWORD` value from `.env`
+
+After the first login, change the bootstrap admin password under
+`/admin/settings`. Runtime settings and API-key creation are locked until that
+bootstrap password has been changed.
+
+Create the API key that CLI agents need for remote scans:
+
+1. Go to `http://localhost:8080/admin/keys`.
+2. Enter a key name such as `local-agent`.
+3. Set an RFC3339 UTC expiration timestamp, for example
+   `2026-12-31T23:59:59Z`.
+4. Enter the current admin password you set under `/admin/settings`.
+5. Create the key and copy the displayed token once.
+
+Production `/api/v1/*` endpoints require this API key. A CLI agent cannot run a
+remote scan or sync its local DB from the server without it.
+
+From the target repository, run the Windows agent against the local Docker
+server:
+
+```powershell
+$env:PACKMON_API_KEY = "<copied-api-key>"
+.\packmon.exe scan . `
+  --mode remote `
+  --server http://localhost:8080 `
+  --insecure-allow-http `
+  --require-remote `
+  --list-all `
+  --html packmon-report.html `
+  --output-json packmon-report.json
+```
+
+Linux/macOS:
+
+```bash
+export PACKMON_API_KEY="<copied-api-key>"
+./packmon scan . \
+  --mode remote \
+  --server http://localhost:8080 \
+  --insecure-allow-http \
+  --require-remote \
+  --list-all \
+  --html packmon-report.html \
+  --output-json packmon-report.json
+```
+
+Sync the local agent DB from the Docker server when you want local/offline
+results to use the same server-side feed data:
+
+```powershell
+$env:PACKMON_API_KEY = "<copied-api-key>"
+.\packmon.exe db sync `
+  --server http://localhost:8080 `
+  --insecure-allow-http `
+  --full
+```
+
+```bash
+export PACKMON_API_KEY="<copied-api-key>"
+./packmon db sync \
+  --server http://localhost:8080 \
+  --insecure-allow-http \
+  --full
+```
+
+The `PACKMON_API_KEY` environment variable is reused by both `scan` and
+`db sync`; avoid passing API keys directly on the command line when possible.
+The `--insecure-allow-http` flag is only for this loopback Docker setup. For
+shared deployments, expose the server over HTTPS and remove that flag.
+
+The Docker stack runs PostgreSQL and `packmon-server` in production mode so synced feed data is persisted. The start helper prepares the database schema with `packmon-migrate` before starting the server; normal server startup only verifies the schema version. The `packmon-migrate` service is a manual Compose profile and receives only database/logging environment values, not admin or feed-provider secrets.
 The local Compose database uses a digest-pinned Chainguard PostgreSQL image instead of the official `postgres:*-alpine` image, avoiding the vulnerable Go 1.24.x `gosu` helper present in the official image line.
 Compose forwards `PACKMON_VERSION`, `PACKMON_COMMIT`, and `PACKMON_BUILD_DATE` as Docker build args so `packmon-server version`, startup logs, and `/version` report the image source. They default to `dev`, `none`, and `unknown` for local builds.
 For local-only use, `.env.example` enables `PACKMON_ALLOW_INSECURE_LOCAL_HTTP=true` with explicit container bind mode while Compose publishes the host port on `127.0.0.1`; remove those local HTTP settings and configure TLS or a TLS-terminating reverse proxy for shared deployments.
@@ -211,12 +446,15 @@ Kept SBOMs use timestamped snapshot names such as
 `go-20260607T131329Z.cdx.json` and `package-20260607T131329Z.cdx.json`, so
 repeated automated runs in the same directory do not overwrite previous SBOMs.
 
-This requires the matching local tool on `PATH`: the Go toolchain for Go
-modules, `cyclonedx-npm` for npm, `cyclonedx-py` for Python, or `mvn` for
-Maven projects. Add `--install-tools` to let Packmon install pinned CycloneDX
-generators where automatic installation is supported. Existing npm/Python
-CycloneDX tools are version-checked against Packmon's pinned versions before
-use; generated-output and cleanup failures are reported as scan errors.
+This requires only the matching local tool for the target ecosystem on `PATH`:
+the Go toolchain for Go modules, `cyclonedx-npm` for npm, `cyclonedx-py` for
+Python, or `mvn` for Maven projects. Add `--install-tools` to let Packmon
+install pinned CycloneDX generators where automatic installation is supported.
+Existing npm/Python CycloneDX tools are version-checked against Packmon's
+pinned versions before use; generated-output and cleanup failures are reported
+as scan errors. Use the target-aware `sbom` requirements profile in
+`REQUIREMENTS.md` before relying on `--auto-sbom` in CI or local full-scan
+tests.
 Generated Go SBOMs preserve `replace` semantics: versioned replacement modules
 use the replacement path/version in the CycloneDX package identity, while local
 path replacements keep the original module identity and record replacement
@@ -374,6 +612,14 @@ For CLI local freshness warnings:
 ## Testing
 
 Run the full local verification gate before release-facing changes:
+
+```bash
+bash scripts/bootstrap.sh --profile dev
+```
+
+```powershell
+.\scripts\bootstrap.ps1 -Profile dev
+```
 
 ```bash
 mkdir -p .gotmp

@@ -33,7 +33,7 @@ func TestDockerEnvExampleKeepsAccountGatedFeedsDisabled(t *testing.T) {
 	}
 }
 
-func TestReadmeDockerQuickStartRequiresSecretEditsBeforeCompose(t *testing.T) {
+func TestReadmeDockerQuickStartUsesLocalFirstStackHelper(t *testing.T) {
 	t.Parallel()
 
 	data, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
@@ -42,34 +42,94 @@ func TestReadmeDockerQuickStartRequiresSecretEditsBeforeCompose(t *testing.T) {
 	}
 	text := string(data)
 
-	copyIndex := strings.Index(text, "cp .env.example .env")
-	if copyIndex < 0 {
-		t.Fatal("README Docker quick start must copy .env.example to .env")
+	startIndex := strings.Index(text, "scripts\\start-local-stack.ps1")
+	if startIndex < 0 {
+		t.Fatal("README Docker quick start must show the Windows local stack helper")
 	}
-	migrateIndex := strings.Index(text, "docker compose run --build --rm packmon-migrate")
-	if migrateIndex < 0 {
-		t.Fatal("README Docker quick start must show the explicit migration command")
+	agentCheckIndex := strings.Index(text, `.\scripts\check-requirements.ps1 -Profile agent`)
+	if agentCheckIndex < 0 {
+		t.Fatal("README local server + agent test must check agent build requirements")
 	}
-	upIndex := strings.Index(text, "docker compose up --build")
-	if upIndex < 0 {
-		t.Fatal("README Docker quick start must show docker compose up --build")
+	agentBuildIndex := strings.Index(text, `go build -o .build\packmon.exe .\cmd\packmon`)
+	if agentBuildIndex < 0 {
+		t.Fatal("README local server + agent test must build packmon.exe from the cloned source")
 	}
-	if copyIndex >= migrateIndex || migrateIndex >= upIndex {
-		t.Fatal("README Docker quick start must copy .env, run migrations, then start compose")
+	if agentCheckIndex >= agentBuildIndex || agentBuildIndex >= startIndex {
+		t.Fatal("README local server + agent test must check agent requirements and build packmon.exe before starting the server")
+	}
+	firstLocalSectionEnd := strings.Index(text, "Packmon is distributed under the private project license")
+	if firstLocalSectionEnd < 0 {
+		t.Fatal("README.md must keep the license paragraph after the first local test")
+	}
+	if strings.Contains(text[:firstLocalSectionEnd], "If you do not already have a Packmon release binary") {
+		t.Fatal("README first local server + agent test must always build the agent from source")
+	}
+	descriptionIndex := strings.Index(text, "It can run as a local CLI, as a central API server, or both together.")
+	if descriptionIndex < 0 {
+		t.Fatal("README.md must keep the short product description")
+	}
+	capabilitiesIndex := strings.Index(text, "## Current Capabilities")
+	if capabilitiesIndex < 0 {
+		t.Fatal("README.md must keep Current Capabilities")
+	}
+	if startIndex <= descriptionIndex || startIndex >= capabilitiesIndex {
+		t.Fatal("README Docker quick start must appear near the top, directly after the short product description")
+	}
+	if !strings.Contains(text, "scripts/start-local-stack.sh") {
+		t.Fatal("README Docker quick start must show the Bash local stack helper")
+	}
+	if strings.Contains(text[:startIndex], "Copy-Item .env.example .env") || strings.Contains(text[:startIndex], "cp .env.example .env") {
+		t.Fatal("README Docker quick start must not require manually copying .env before the local stack helper")
+	}
+	if strings.Contains(text[:startIndex], "edit `.env`") {
+		t.Fatal("README Docker quick start must not require editing .env before stack startup")
+	}
+	for _, want := range []string{
+		"creates or completes `.env`",
+		"generated local-only secrets",
+		"Admins can later adjust `.env`",
+		"do not print generated secret values",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("README Docker quick start must document local-first helper behavior with %q", want)
+		}
 	}
 
-	secretEditText := text[copyIndex:migrateIndex]
-	if !strings.Contains(secretEditText, "edit `.env`") {
-		t.Fatal("README Docker quick start must require editing .env before migrations or compose startup")
-	}
-	for _, key := range []string{
-		"POSTGRES_PASSWORD",
-		"PACKMON_DB_PASSWORD",
-		"PACKMON_ADMIN_INITIAL_PASSWORD",
-		"PACKMON_ENCRYPTION_KEY",
+	for _, rel := range []string{
+		filepath.Join("scripts", "start-local-stack.ps1"),
+		filepath.Join("scripts", "start-local-stack.sh"),
 	} {
-		if !strings.Contains(secretEditText, key) {
-			t.Fatalf("README Docker quick start must name required env value %s before compose commands", key)
+		scriptData, err := os.ReadFile(filepath.Join("..", "..", rel)) //nolint:gosec // static repository script path.
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
+		}
+		script := string(scriptData)
+		if !strings.Contains(script, ".env.example") {
+			t.Fatalf("%s must use .env.example when bootstrapping local .env", rel)
+		}
+		if !strings.Contains(script, ".env") {
+			t.Fatalf("%s must write or update local .env", rel)
+		}
+		for _, key := range []string{
+			"POSTGRES_PASSWORD",
+			"PACKMON_DB_PASSWORD",
+			"PACKMON_ADMIN_INITIAL_PASSWORD",
+			"PACKMON_ENCRYPTION_KEY",
+		} {
+			if !strings.Contains(script, key) {
+				t.Fatalf("%s must ensure required env value %s", rel, key)
+			}
+		}
+		migrateIndex := strings.Index(script, "docker compose run --build --rm packmon-migrate")
+		if migrateIndex < 0 {
+			t.Fatalf("%s must prepare the database with packmon-migrate", rel)
+		}
+		upIndex := strings.Index(script, "docker compose up --build -d")
+		if upIndex < 0 {
+			t.Fatalf("%s must start the local stack detached", rel)
+		}
+		if migrateIndex >= upIndex {
+			t.Fatalf("%s must prepare the database before starting compose", rel)
 		}
 	}
 }
