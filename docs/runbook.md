@@ -133,11 +133,11 @@ change.
 3. Stop or drain `packmon-server` so clients do not write during migration.
 4. Run the explicit migration step:
    ```bash
-   docker compose run --build --rm packmon-migrate
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml run --build --rm packmon-migrate
    ```
 5. Start the new server build:
    ```bash
-   docker compose up --build -d packmon-server
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build -d packmon-server
    ```
 6. Verify `/healthz`, `/readyz`, `/version`, `/metrics`,
    `/api/v1/feeds/status`, and the admin dashboard.

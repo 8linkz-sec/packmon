@@ -100,9 +100,12 @@ These must be base64-encoded 32-byte values. Regenerate with
 
 **Production**
 Supply secrets yourself (`.env` or a secrets manager) and run migrations
-explicitly: `docker compose -f docker-compose.yml run --rm packmon-server migrate`,
-then `docker compose -f docker-compose.yml up -d`. `init-secrets` never overwrites
-values you set. See `docs/runbook.md` for operations detail.
+explicitly: `docker compose -f docker-compose.yml -f docker-compose.prod.yml run
+--rm packmon-server migrate`, then `docker compose -f docker-compose.yml -f
+docker-compose.prod.yml up -d`. `docker-compose.prod.yml` re-adds the hard `:?`
+secret guards (the base file stays permissive so `init-secrets` can run on a
+fresh clone); `init-secrets` never overwrites values you set. See
+`docs/runbook.md` for operations detail.
 
 Packmon is distributed under the private project license in `LICENSE`. The
 OpenAPI contract references it via the SPDX identifier `LicenseRef-Private`.
@@ -435,10 +438,10 @@ synced feed data is persisted. `docker-compose.override.yml` (auto-loaded by
 plain `docker compose` commands run from the repository root) clears the
 `packmon-migrate` manual profile so `docker compose up` runs the migration
 automatically before starting the server; normal server startup only verifies
-the schema version. In production (`docker compose -f docker-compose.yml`,
-which never loads the override) `packmon-migrate` stays a manual Compose
-profile and receives only database/logging environment values, not admin or
-feed-provider secrets. Its database connection, advisory-lock wait, migration
+the schema version. In production (`docker compose -f docker-compose.yml -f
+docker-compose.prod.yml`, which never loads the local override)
+`packmon-migrate` stays a manual Compose profile and receives only
+database/logging environment values, not admin or feed-provider secrets. Its database connection, advisory-lock wait, migration
 statements, and post-migration version read are bounded by
 `PACKMON_DB_CONNECT_TIMEOUT`.
 The local Compose database uses a digest-pinned Chainguard PostgreSQL image

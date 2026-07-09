@@ -101,20 +101,38 @@ func TestReadmeDockerQuickStartUsesInitSecretsFlow(t *testing.T) {
 func TestDockerComposeFailsFastOnEmptyRequiredSecrets(t *testing.T) {
 	t.Parallel()
 
-	data, err := os.ReadFile(filepath.Join("..", "..", "docker-compose.yml"))
+	// The base docker-compose.yml stays permissive (${VAR:-}) so
+	// `docker compose run --rm init-secrets` can run on a fresh clone;
+	// Compose interpolates the base file's guards before an override merges,
+	// so hard :? guards must live in the last-loaded production overlay.
+	data, err := os.ReadFile(filepath.Join("..", "..", "docker-compose.prod.yml"))
 	if err != nil {
-		t.Fatalf("read docker-compose.yml: %v", err)
+		t.Fatalf("read docker-compose.prod.yml: %v", err)
 	}
 	text := string(data)
 	for _, want := range []string{
-		`POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?missing. Local dev: run 'docker compose run --rm init-secrets' then retry. Production: set it in .env or your secrets manager. See README → Troubleshooting}"`,
-		`PACKMON_DB_PASSWORD: "${PACKMON_DB_PASSWORD:?missing. Local dev: 'docker compose run --rm init-secrets'. Production: set in .env/secrets manager. See README → Troubleshooting}"`,
-		`PACKMON_ADMIN_INITIAL_PASSWORD: "${PACKMON_ADMIN_INITIAL_PASSWORD:?missing. Local dev: 'docker compose run --rm init-secrets'. Production: set in .env/secrets manager. See README → Troubleshooting}"`,
-		`PACKMON_ENCRYPTION_KEY: "${PACKMON_ENCRYPTION_KEY:?missing (base64 32 bytes). Local dev: 'docker compose run --rm init-secrets'. Production: set in .env/secrets manager. See README → Troubleshooting}"`,
-		`PACKMON_ADMIN_AUDIT_HMAC_KEY: "${PACKMON_ADMIN_AUDIT_HMAC_KEY:?missing (base64 32 bytes). Local dev: 'docker compose run --rm init-secrets'. Production: set in .env/secrets manager. See README → Troubleshooting}"`,
+		`POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?missing. Set it in .env or your secrets manager (see README → Troubleshooting).}"`,
+		`PACKMON_DB_PASSWORD: "${PACKMON_DB_PASSWORD:?missing. Set in .env/secrets manager. See README → Troubleshooting}"`,
+		`PACKMON_ADMIN_INITIAL_PASSWORD: "${PACKMON_ADMIN_INITIAL_PASSWORD:?missing. Set in .env/secrets manager. See README → Troubleshooting}"`,
+		`PACKMON_ENCRYPTION_KEY: "${PACKMON_ENCRYPTION_KEY:?missing (base64 32 bytes). Set in .env/secrets manager. See README → Troubleshooting}"`,
+		`PACKMON_ADMIN_AUDIT_HMAC_KEY: "${PACKMON_ADMIN_AUDIT_HMAC_KEY:?missing (base64 32 bytes). Set in .env/secrets manager. See README → Troubleshooting}"`,
 	} {
 		if !strings.Contains(text, want) {
-			t.Fatalf("docker-compose.yml must fail fast on empty required secret via %q", want)
+			t.Fatalf("docker-compose.prod.yml must fail fast on empty required secret via %q", want)
+		}
+	}
+
+	baseData, err := os.ReadFile(filepath.Join("..", "..", "docker-compose.yml"))
+	if err != nil {
+		t.Fatalf("read docker-compose.yml: %v", err)
+	}
+	baseText := string(baseData)
+	for _, secret := range []string{
+		"POSTGRES_PASSWORD", "PACKMON_DB_PASSWORD", "PACKMON_ADMIN_INITIAL_PASSWORD",
+		"PACKMON_ENCRYPTION_KEY", "PACKMON_ADMIN_AUDIT_HMAC_KEY",
+	} {
+		if strings.Contains(baseText, "${"+secret+":?") {
+			t.Fatalf("docker-compose.yml (base) must stay permissive on %s so init-secrets can run before .env exists", secret)
 		}
 	}
 }
