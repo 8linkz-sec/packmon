@@ -31,6 +31,19 @@ type storedVersionEvent struct {
 	Limit        string `json:"limit"`
 }
 
+// coalesceStoredJSONArray converts an absent or JSON-null array value into an
+// empty array. affected_packages.version_ranges and .versions_affected are
+// constrained to be JSON arrays (not null), but OSV affected packages that
+// carry only version ranges leave versions_affected as JSON null. Coalescing
+// keeps those advisories storable instead of failing the whole upsert.
+func coalesceStoredJSONArray(raw json.RawMessage) json.RawMessage {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return json.RawMessage("[]")
+	}
+	return raw
+}
+
 func validateStoredStringArrayJSON(id, field string, raw json.RawMessage, allowNull bool) error {
 	trimmed := strings.TrimSpace(string(raw))
 	if trimmed == "" {
@@ -552,10 +565,12 @@ func upsertVulnerabilityTx(ctx context.Context, tx pgx.Tx, vuln *db.Vulnerabilit
 			return err
 		}
 		name := normalizePackageName(ecosystem, pkg.Name)
-		if err := validateStoredVersionRangesJSON(vuln.ID, "version_ranges", pkg.VersionRanges, false); err != nil {
+		versionRanges := coalesceStoredJSONArray(pkg.VersionRanges)
+		versionsAffected := coalesceStoredJSONArray(pkg.VersionsAffected)
+		if err := validateStoredVersionRangesJSON(vuln.ID, "version_ranges", versionRanges, false); err != nil {
 			return fmt.Errorf("insert affected package %s/%s: %w", ecosystem, name, err)
 		}
-		if err := validateStoredStringArrayJSON(vuln.ID, "versions_affected", pkg.VersionsAffected, false); err != nil {
+		if err := validateStoredStringArrayJSON(vuln.ID, "versions_affected", versionsAffected, false); err != nil {
 			return fmt.Errorf("insert affected package %s/%s: %w", ecosystem, name, err)
 		}
 		const insertPackage = `
@@ -573,8 +588,8 @@ func upsertVulnerabilityTx(ctx context.Context, tx pgx.Tx, vuln *db.Vulnerabilit
 			vuln.ID,
 			ecosystem,
 			name,
-			normalizeJSON(pkg.VersionRanges, []byte("[]")),
-			normalizeJSON(pkg.VersionsAffected, []byte("[]")),
+			normalizeJSON(versionRanges, []byte("[]")),
+			normalizeJSON(versionsAffected, []byte("[]")),
 		); err != nil {
 			return fmt.Errorf("insert affected package %s/%s: %w", ecosystem, name, err)
 		}
