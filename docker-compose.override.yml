@@ -1,7 +1,6 @@
 # Local development overlay. Compose auto-loads this file, so `docker compose up`
-# is the friendly local path. Production uses `docker compose -f docker-compose.yml
-# -f docker-compose.prod.yml` (an explicit -f list disables auto-loading of this
-# override).
+# is the friendly local path. The hardened server deployment is a separate,
+# self-contained file: `docker compose -f docker-compose.server.yml up -d`.
 services:
   # One-shot: generate/complete .env with local secrets. Run via
   # `docker compose run --rm init-secrets`. Bind-mounts the project dir to write
@@ -20,15 +19,15 @@ services:
   # Local convenience: packmon-migrate is `profiles: ["manual"]` in the base
   # file so it never runs implicitly there. Locally we want the friendly
   # auto-chain (postgres -> migrate -> server), so clear its profile here;
-  # this does not affect explicit `-f docker-compose.yml -f
-  # docker-compose.prod.yml` production runs, which never load this override.
+  # this does not affect the self-contained `-f docker-compose.server.yml`
+  # server deployment, which never loads this override.
   packmon-migrate:
     profiles: !override []
 
   # Local convenience: the base file's secret defaults are already permissive
   # (${VAR:-}), so `init-secrets` can run before .env exists and the app-level
   # validator produces the actionable message. The strict :? guards live in
-  # docker-compose.prod.yml.
+  # docker-compose.server.yml.
   #
   # Keep PRODUCTION mode locally so the server uses the real PostgreSQL store
   # (development mode swaps in an ephemeral in-memory store and ignores the

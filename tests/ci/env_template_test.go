@@ -102,12 +102,11 @@ func TestDockerComposeFailsFastOnEmptyRequiredSecrets(t *testing.T) {
 	t.Parallel()
 
 	// The base docker-compose.yml stays permissive (${VAR:-}) so
-	// `docker compose run --rm init-secrets` can run on a fresh clone;
-	// Compose interpolates the base file's guards before an override merges,
-	// so hard :? guards must live in the last-loaded production overlay.
-	data, err := os.ReadFile(filepath.Join("..", "..", "docker-compose.prod.yml"))
+	// `docker compose run --rm init-secrets` can run on a fresh clone; the hard
+	// :? guards live in the self-contained docker-compose.server.yml instead.
+	data, err := os.ReadFile(filepath.Join("..", "..", "docker-compose.server.yml"))
 	if err != nil {
-		t.Fatalf("read docker-compose.prod.yml: %v", err)
+		t.Fatalf("read docker-compose.server.yml: %v", err)
 	}
 	text := string(data)
 	for _, want := range []string{
@@ -118,7 +117,7 @@ func TestDockerComposeFailsFastOnEmptyRequiredSecrets(t *testing.T) {
 		`PACKMON_ADMIN_AUDIT_HMAC_KEY: "${PACKMON_ADMIN_AUDIT_HMAC_KEY:?missing (base64 32 bytes). Set in .env/secrets manager. See README → Troubleshooting}"`,
 	} {
 		if !strings.Contains(text, want) {
-			t.Fatalf("docker-compose.prod.yml must fail fast on empty required secret via %q", want)
+			t.Fatalf("docker-compose.server.yml must fail fast on empty required secret via %q", want)
 		}
 	}
 

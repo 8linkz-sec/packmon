@@ -54,39 +54,24 @@ func TestOverrideDefinesInitSecretsAndMigrateChain(t *testing.T) {
 	}
 }
 
-func TestProdOverlayHoldsStrictSecretGuardsAndBaseStaysPermissive(t *testing.T) {
+func TestBaseComposeStaysPermissive(t *testing.T) {
 	t.Parallel()
 	base := repoFile(t, "docker-compose.yml")
-	prod := repoFile(t, "docker-compose.prod.yml")
-
-	secrets := []string{
-		"POSTGRES_PASSWORD", "PACKMON_DB_PASSWORD", "PACKMON_ADMIN_INITIAL_PASSWORD",
-		"PACKMON_ENCRYPTION_KEY", "PACKMON_ADMIN_AUDIT_HMAC_KEY",
-	}
-	for _, key := range secrets {
-		if !strings.Contains(prod, key+":") {
-			t.Fatalf("docker-compose.prod.yml missing %q", key)
-		}
-		if !strings.Contains(prod, "${"+key+":?") {
-			t.Fatalf("docker-compose.prod.yml must keep a hard :? guard on %s", key)
-		}
+	for _, key := range []string{"POSTGRES_PASSWORD", "PACKMON_ENCRYPTION_KEY", "PACKMON_ADMIN_AUDIT_HMAC_KEY"} {
 		if strings.Contains(base, "${"+key+":?") {
-			t.Fatalf("docker-compose.yml (base) must not keep a hard :? guard on %s; strict guards now live in docker-compose.prod.yml", key)
+			t.Fatalf("docker-compose.yml must stay permissive on %s (strict guards live in docker-compose.server.yml)", key)
 		}
-	}
-	if !strings.Contains(prod, "Troubleshooting") {
-		t.Fatal("docker-compose.prod.yml :? messages must point at README Troubleshooting")
 	}
 }
 
-// TestDockerComposeConfigResolvesForLocalAndFailsClosedForProd is a real
+// TestDockerComposeConfigResolvesForLocalAndFailsClosedForServer is a real
 // `docker compose config` invocation. It is the test that would have caught
 // the original bug: Compose interpolates a base file's `:?` guard at load
 // time, before any override merges, so softening the secrets only in an
-// override never worked. The fix moves the strict guards into
-// docker-compose.prod.yml (the last-loaded file in the production
-// invocation), keeping the base + auto-loaded override permissive.
-func TestDockerComposeConfigResolvesForLocalAndFailsClosedForProd(t *testing.T) {
+// override never worked. The fix moved the strict guards into the
+// self-contained docker-compose.server.yml, keeping the base + auto-loaded
+// override permissive.
+func TestDockerComposeConfigResolvesForLocalAndFailsClosedForServer(t *testing.T) {
 	if _, err := exec.LookPath("docker"); err != nil {
 		t.Skip("docker not available")
 	}
@@ -104,7 +89,8 @@ func TestDockerComposeConfigResolvesForLocalAndFailsClosedForProd(t *testing.T) 
 		"PACKMON_DB_PASSWORD=\n" +
 		"PACKMON_ADMIN_INITIAL_PASSWORD=\n" +
 		"PACKMON_ENCRYPTION_KEY=\n" +
-		"PACKMON_ADMIN_AUDIT_HMAC_KEY=\n"
+		"PACKMON_ADMIN_AUDIT_HMAC_KEY=\n" +
+		"PACKMON_TRUSTED_PROXIES=\n"
 	if err := os.WriteFile(envPath, []byte(envContent), 0o600); err != nil {
 		t.Fatalf("write scratch env file: %v", err)
 	}
@@ -118,22 +104,22 @@ func TestDockerComposeConfigResolvesForLocalAndFailsClosedForProd(t *testing.T) 
 		t.Fatalf("local `docker compose config` (base+override) must resolve with blank secrets, got error: %v\noutput:\n%s", localErr, localOut)
 	}
 
-	// (b) production path: base + docker-compose.prod.yml must fail closed on
-	// blank secrets, since docker-compose.prod.yml is the last-loaded file and
-	// its :? guards are authoritative.
-	prodCmd := exec.Command("docker", "compose", //nolint:gosec // fixed docker/compose args, no user input.
-		"-f", "docker-compose.yml", "-f", "docker-compose.prod.yml",
+	// (b) server path: the self-contained docker-compose.server.yml must fail
+	// closed on blank secrets (and a blank PACKMON_TRUSTED_PROXIES), since its
+	// :? guards are authoritative and it loads no base/override file.
+	serverCmd := exec.Command("docker", "compose", //nolint:gosec // fixed docker/compose args, no user input.
+		"-f", "docker-compose.server.yml",
 		"--env-file", envPath, "config")
-	prodCmd.Dir = repoRoot
-	prodOut, prodErr := prodCmd.CombinedOutput()
-	if prodErr == nil {
-		t.Fatalf("production `docker compose config` (base+prod overlay) must fail closed on blank secrets, but it resolved:\n%s", prodOut)
+	serverCmd.Dir = repoRoot
+	serverOut, serverErr := serverCmd.CombinedOutput()
+	if serverErr == nil {
+		t.Fatalf("server `docker compose config` (docker-compose.server.yml) must fail closed on blank secrets, but it resolved:\n%s", serverOut)
 	}
 
-	outText := string(prodOut)
+	outText := string(serverOut)
 	guardedSecrets := []string{
 		"POSTGRES_PASSWORD", "PACKMON_DB_PASSWORD", "PACKMON_ADMIN_INITIAL_PASSWORD",
-		"PACKMON_ENCRYPTION_KEY", "PACKMON_ADMIN_AUDIT_HMAC_KEY",
+		"PACKMON_ENCRYPTION_KEY", "PACKMON_ADMIN_AUDIT_HMAC_KEY", "PACKMON_TRUSTED_PROXIES",
 	}
 	found := false
 	for _, secret := range guardedSecrets {
@@ -143,7 +129,7 @@ func TestDockerComposeConfigResolvesForLocalAndFailsClosedForProd(t *testing.T) 
 		}
 	}
 	if !found {
-		t.Fatalf("production `docker compose config` failure output should mention a guarded secret name, got:\n%s", outText)
+		t.Fatalf("server `docker compose config` failure output should mention a guarded secret name, got:\n%s", outText)
 	}
 }
 
@@ -169,6 +155,7 @@ func TestServerComposeIsSelfContainedAndHardened(t *testing.T) {
 		`PACKMON_METRICS_HOST: "127.0.0.1"`,
 		"${PACKMON_TRUSTED_PROXIES:?",
 		"env_file:",
+		"required: false",
 		"restart: unless-stopped",
 	} {
 		if !strings.Contains(server, want) {
@@ -187,7 +174,7 @@ func TestServerComposeIsSelfContainedAndHardened(t *testing.T) {
 		}
 	}
 	// Migrate stays a manual, explicit step.
-	if !strings.Contains(server, `profiles: ["manual"]`) {
+	if !strings.Contains(server, "packmon-migrate:") || !strings.Contains(server, `profiles: ["manual"]`) {
 		t.Fatal("docker-compose.server.yml packmon-migrate must stay behind profiles: [\"manual\"]")
 	}
 }

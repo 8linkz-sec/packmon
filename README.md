@@ -100,12 +100,43 @@ These must be base64-encoded 32-byte values. Regenerate with
 
 **Production**
 Supply secrets yourself (`.env` or a secrets manager) and run migrations
-explicitly: `docker compose -f docker-compose.yml -f docker-compose.prod.yml run
---rm packmon-server migrate`, then `docker compose -f docker-compose.yml -f
-docker-compose.prod.yml up -d`. `docker-compose.prod.yml` re-adds the hard `:?`
-secret guards (the base file stays permissive so `init-secrets` can run on a
-fresh clone); `init-secrets` never overwrites values you set. See
-`docs/runbook.md` for operations detail.
+explicitly using the self-contained server file:
+
+```bash
+# Production server (behind your own TLS reverse proxy):
+docker compose -f docker-compose.server.yml run --rm packmon-migrate
+docker compose -f docker-compose.server.yml up -d
+```
+
+`docker-compose.server.yml` needs no base file: it holds the hard `:?` secret
+guards (the local `docker-compose.yml` stays permissive so `init-secrets` can
+run on a fresh clone); `init-secrets` never overwrites values you set. The
+server serves plain HTTP in-container -- terminate TLS at your own reverse
+proxy (nginx/Traefik/Caddy) and set `PACKMON_TRUSTED_PROXIES` to the proxy's
+IP/CIDR so the server trusts its `X-Forwarded-*` headers. The server port is
+published only on `127.0.0.1`, so only a host-local proxy can reach it.
+
+Example nginx front (TLS terminated at the proxy, forwarding to the
+loopback-published server):
+
+```nginx
+server {
+  listen 443 ssl;
+  server_name packmon.example.com;
+  ssl_certificate     /etc/ssl/packmon/fullchain.pem;
+  ssl_certificate_key /etc/ssl/packmon/privkey.pem;
+  location / {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_set_header Host              $host;
+    proxy_set_header X-Forwarded-For   $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+  }
+}
+```
+
+Set `PACKMON_TRUSTED_PROXIES` to the proxy's source address as seen by the
+container (e.g. the Docker gateway CIDR). See `docs/runbook.md` for
+operations detail.
 
 Packmon is distributed under the private project license in `LICENSE`. The
 OpenAPI contract references it via the SPDX identifier `LicenseRef-Private`.
@@ -438,9 +469,9 @@ synced feed data is persisted. `docker-compose.override.yml` (auto-loaded by
 plain `docker compose` commands run from the repository root) clears the
 `packmon-migrate` manual profile so `docker compose up` runs the migration
 automatically before starting the server; normal server startup only verifies
-the schema version. In production (`docker compose -f docker-compose.yml -f
-docker-compose.prod.yml`, which never loads the local override)
-`packmon-migrate` stays a manual Compose profile and receives only
+the schema version. On the self-contained server file
+(`docker compose -f docker-compose.server.yml`, which never loads the local
+override) `packmon-migrate` stays a manual Compose profile and receives only
 database/logging environment values, not admin or feed-provider secrets. Its database connection, advisory-lock wait, migration
 statements, and post-migration version read are bounded by
 `PACKMON_DB_CONNECT_TIMEOUT`.

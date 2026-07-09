@@ -233,7 +233,7 @@ func TestDockerComposePublishesPackmonServerPortFromEnvironment(t *testing.T) {
 	}
 }
 
-func TestDockerComposeBaseIsProdStrictAndOverrideRelaxesForLocalDev(t *testing.T) {
+func TestDockerComposeLocalIsRelaxedAndServerFileIsStrict(t *testing.T) {
 	t.Parallel()
 
 	type composeDoc struct {
@@ -262,7 +262,7 @@ func TestDockerComposeBaseIsProdStrictAndOverrideRelaxesForLocalDev(t *testing.T
 	}
 	const wantBaseInsecureHTTP = "${PACKMON_ALLOW_INSECURE_LOCAL_HTTP:-false}"
 	if got := baseServer.Environment["PACKMON_ALLOW_INSECURE_LOCAL_HTTP"]; got != wantBaseInsecureHTTP {
-		t.Fatalf("docker-compose.yml packmon-server PACKMON_ALLOW_INSECURE_LOCAL_HTTP = %q, want prod-strict default %q", got, wantBaseInsecureHTTP)
+		t.Fatalf("docker-compose.yml packmon-server PACKMON_ALLOW_INSECURE_LOCAL_HTTP = %q, want permissive default %q", got, wantBaseInsecureHTTP)
 	}
 	baseSecrets := []string{
 		"POSTGRES_PASSWORD", "PACKMON_DB_PASSWORD", "PACKMON_ADMIN_INITIAL_PASSWORD",
@@ -320,34 +320,17 @@ func TestDockerComposeBaseIsProdStrictAndOverrideRelaxesForLocalDev(t *testing.T
 		t.Fatalf("docker-compose.override.yml packmon-migrate profiles = %#v, want cleared for the local auto-chain", overrideMigrate.Profiles)
 	}
 
-	prodPath := filepath.Join("..", "..", "docker-compose.prod.yml")
-	prodData, err := os.ReadFile(prodPath) //nolint:gosec // static repository fixture path
+	// The strict, fail-closed secret guards live in the self-contained
+	// docker-compose.server.yml (fully covered by
+	// TestServerComposeIsSelfContainedAndHardened in bootstrap_flow_test.go);
+	// this is just a cross-check that the server file, not the base, holds them.
+	serverPath := filepath.Join("..", "..", "docker-compose.server.yml")
+	serverData, err := os.ReadFile(serverPath) //nolint:gosec // static repository fixture path
 	if err != nil {
-		t.Fatalf("read docker-compose.prod.yml: %v", err)
+		t.Fatalf("read docker-compose.server.yml: %v", err)
 	}
-
-	var prod composeDoc
-	if err := yaml.Unmarshal(prodData, &prod); err != nil {
-		t.Fatalf("parse docker-compose.prod.yml: %v", err)
-	}
-	prodServer, ok := prod.Services["packmon-server"]
-	if !ok {
-		t.Fatal("docker-compose.prod.yml has no packmon-server service")
-	}
-	if got := prodServer.Environment["PACKMON_ALLOW_INSECURE_LOCAL_HTTP"]; got != wantBaseInsecureHTTP {
-		t.Fatalf("docker-compose.prod.yml packmon-server PACKMON_ALLOW_INSECURE_LOCAL_HTTP = %q, want explicit prod-strict default %q", got, wantBaseInsecureHTTP)
-	}
-	prodText := string(prodData)
-	for _, secret := range baseSecrets {
-		if !strings.Contains(prodText, "${"+secret+":?") {
-			t.Fatalf("docker-compose.prod.yml must keep a hard :? guard on %s", secret)
-		}
-	}
-	if _, ok := prod.Services["packmon-migrate"].Environment["PACKMON_DB_PASSWORD"]; !ok {
-		t.Fatal("docker-compose.prod.yml packmon-migrate must guard PACKMON_DB_PASSWORD")
-	}
-	if len(prod.Services["packmon-migrate"].Profiles) != 0 {
-		t.Fatalf("docker-compose.prod.yml must not touch packmon-migrate profiles, got %#v; it should stay manual naturally since production never loads the local override", prod.Services["packmon-migrate"].Profiles)
+	if !strings.Contains(string(serverData), "${PACKMON_ENCRYPTION_KEY:?") {
+		t.Fatal("docker-compose.server.yml must keep the strict :? guard on PACKMON_ENCRYPTION_KEY")
 	}
 }
 

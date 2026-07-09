@@ -22,6 +22,38 @@ one of these:
    loopback `PACKMON_SERVER_PUBLIC_HOST` (e.g. `localhost:8080`). Plain HTTP,
    only safe when the port is bound to `127.0.0.1`.
 
+The repository-provided `docker-compose.server.yml` deployment uses option 2:
+the server serves plain HTTP in-container, the server port is published only
+on `127.0.0.1`, and the operator must terminate TLS at their own reverse proxy
+and set `PACKMON_TRUSTED_PROXIES` to the proxy's IP/CIDR:
+
+```bash
+# Production server (behind your own TLS reverse proxy):
+docker compose -f docker-compose.server.yml run --rm packmon-migrate
+docker compose -f docker-compose.server.yml up -d
+```
+
+Example nginx front (TLS terminated at the proxy, forwarding to the
+loopback-published server):
+
+```nginx
+server {
+  listen 443 ssl;
+  server_name packmon.example.com;
+  ssl_certificate     /etc/ssl/packmon/fullchain.pem;
+  ssl_certificate_key /etc/ssl/packmon/privkey.pem;
+  location / {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_set_header Host              $host;
+    proxy_set_header X-Forwarded-For   $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+  }
+}
+```
+
+Set `PACKMON_TRUSTED_PROXIES` to the proxy's source address as seen by the
+container (e.g. the Docker gateway CIDR).
+
 When none is configured the server exits with:
 
 ```text
@@ -68,7 +100,7 @@ For the repository-provided Compose model, run the same policy as an explicit
 operator action:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml run --rm packmon-backup
+docker compose -f docker-compose.server.yml run --rm packmon-backup
 ```
 
 For Docker Compose deployments, run the same command from a host or job
@@ -133,11 +165,11 @@ change.
 3. Stop or drain `packmon-server` so clients do not write during migration.
 4. Run the explicit migration step:
    ```bash
-   docker compose -f docker-compose.yml -f docker-compose.prod.yml run --build --rm packmon-migrate
+   docker compose -f docker-compose.server.yml run --build --rm packmon-migrate
    ```
 5. Start the new server build:
    ```bash
-   docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build -d packmon-server
+   docker compose -f docker-compose.server.yml up --build -d packmon-server
    ```
 6. Verify `/healthz`, `/readyz`, `/version`, `/metrics`,
    `/api/v1/feeds/status`, and the admin dashboard.
