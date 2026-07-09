@@ -323,6 +323,37 @@ func TestSyncerNotModifiedRecordsSuccessWithoutStoreWrite(t *testing.T) {
 	}
 }
 
+func TestMapProductSkipsUnmappablePURLIdentifiers(t *testing.T) {
+	t.Parallel()
+
+	// endoflife products carry supplementary identifiers Packmon cannot map to a
+	// package ecosystem (a pkg:github source-repo purl, or a syntactically broken
+	// purl). A single one of these must not abort the whole feed sync -- it is
+	// skipped like the non-purl identifiers already are, and the product's valid
+	// identifiers still map.
+	product := Product{
+		Name:  "eol-skip-fixture",
+		Label: "EOL Skip Fixture",
+		Identifiers: []Identifier{
+			{Type: "purl", ID: "pkg:github/adonisjs/core"},               // well-formed, unsupported purl type
+			{Type: "purl", ID: "pkg:pypi/%zz"},                           // malformed percent-encoding
+			{Type: "purl", ID: "pkg:npm/lodash"},                         // valid -> must still map
+			{Type: "repository", ID: "https://github.com/adonisjs/core"}, // non-purl, already skipped
+		},
+	}
+
+	mapped, err := mapProduct(product)
+	if err != nil {
+		t.Fatalf("mapProduct() must skip unmappable identifiers, not fail the feed: %v", err)
+	}
+	if len(mapped.PackageMaps) != 1 {
+		t.Fatalf("mapProduct() PackageMaps = %d (%+v), want 1 (only the valid npm identifier)", len(mapped.PackageMaps), mapped.PackageMaps)
+	}
+	if got := mapped.PackageMaps[0]; got.Ecosystem != "npm" || got.Name != "lodash" {
+		t.Fatalf("mapped package = %s/%s, want npm/lodash", got.Ecosystem, got.Name)
+	}
+}
+
 func TestSyncerRejectsMalformedLifecyclePayload(t *testing.T) {
 	t.Parallel()
 
@@ -340,11 +371,6 @@ func TestSyncerRejectsMalformedLifecyclePayload(t *testing.T) {
 			name: "blank product",
 			body: `{"total":1,"result":[{"name":" ","label":"Blank","releases":[]}]}`,
 			want: "product name is required",
-		},
-		{
-			name: "invalid purl",
-			body: `{"total":1,"result":[{"name":"django","label":"Django","identifiers":[{"type":"purl","id":"pkg:pypi/%zz"}],"releases":[]}]}`,
-			want: "invalid purl",
 		},
 		{
 			name: "invalid response json",

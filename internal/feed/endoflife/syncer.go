@@ -273,13 +273,19 @@ func mapProduct(product Product) (db.LifecycleProduct, error) {
 		if !strings.EqualFold(strings.TrimSpace(identifier.Type), "purl") {
 			continue
 		}
+		// Skip purl identifiers Packmon cannot map to a package ecosystem
+		// (e.g. a pkg:github source-repo purl) or that are syntactically broken.
+		// endoflife is an upstream feed we do not control; a single unmappable
+		// identifier must not abort the whole sync. Non-purl identifiers are
+		// already skipped above; unmappable purls are handled the same way, and
+		// curated package maps still cover products that need explicit mapping.
 		pkg, ok := sbom.PackageIdentityFromPURL(identifier.ID)
 		if !ok {
-			return db.LifecycleProduct{}, fmt.Errorf("product %q invalid purl identifier %q", productSlug, identifier.ID)
+			continue
 		}
 		purlType, purlNamespace, purlName := purlParts(identifier.ID)
 		if purlType == "" || purlName == "" {
-			return db.LifecycleProduct{}, fmt.Errorf("product %q invalid purl identifier %q", productSlug, identifier.ID)
+			continue
 		}
 		addPackageMap(&mapped, mapSet, db.LifecyclePackageMap{
 			Ecosystem:     string(pkg.Ecosystem),
