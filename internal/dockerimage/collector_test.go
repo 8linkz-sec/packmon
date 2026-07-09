@@ -1,8 +1,6 @@
 package dockerimage
 
 import (
-	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,6 +52,55 @@ func TestCollectRecordsParseErrorsAndContinues(t *testing.T) {
 	}
 }
 
+func TestCollectRejectsDockerfileSymlinkOutsideRoot(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "repo")
+	outside := filepath.Join(parent, "outside")
+	if err := os.MkdirAll(root, 0o750); err != nil {
+		t.Fatalf("mkdir root: %v", err)
+	}
+	if err := os.MkdirAll(outside, 0o750); err != nil {
+		t.Fatalf("mkdir outside: %v", err)
+	}
+	outsideDockerfile := filepath.Join(outside, "Dockerfile")
+	writeDockerImageTestFile(t, outsideDockerfile, "FROM ghcr.io/acme/escaped:9.9.9\n")
+	symlinkOrSkip(t, outsideDockerfile, filepath.Join(root, "Dockerfile"))
+
+	collection, err := Collect(root, 5)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if len(collection.Images) != 0 {
+		t.Fatalf("Images = %#v, want no images from external symlink target", collection.Images)
+	}
+	if len(collection.ParseErrors) != 1 || !strings.Contains(collection.ParseErrors[0], "Dockerfile") {
+		t.Fatalf("ParseErrors = %#v, want symlinked Dockerfile rejection", collection.ParseErrors)
+	}
+}
+
+func TestParseFileRejectsRelativeEscape(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "repo")
+	outside := filepath.Join(parent, "outside")
+	if err := os.MkdirAll(root, 0o750); err != nil {
+		t.Fatalf("mkdir root: %v", err)
+	}
+	if err := os.MkdirAll(outside, 0o750); err != nil {
+		t.Fatalf("mkdir outside: %v", err)
+	}
+	outsideDockerfile := filepath.Join(outside, "Dockerfile")
+	writeDockerImageTestFile(t, outsideDockerfile, "FROM ghcr.io/acme/escaped:9.9.9\n")
+
+	_, err := parseFile(File{
+		Path:    outsideDockerfile,
+		RelPath: filepath.ToSlash(filepath.Join("..", "outside", "Dockerfile")),
+		Kind:    KindDockerfile,
+	})
+	if err == nil || !strings.Contains(err.Error(), "escapes scan root") {
+		t.Fatalf("parseFile() error = %v, want root escape rejection", err)
+	}
+}
+
 func TestParseFileRejectsOversizedInventoryBeforeParsing(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "compose.yaml")
@@ -68,38 +115,6 @@ func TestParseFileRejectsOversizedInventoryBeforeParsing(t *testing.T) {
 	}
 }
 
-func TestLimitedDockerInventoryReaderAllowsExactLimit(t *testing.T) {
-	reader := &limitedDockerInventoryReader{
-		r:    strings.NewReader("a"),
-		read: maxDockerInventoryFileSize - 1,
-	}
-	buf := make([]byte, 2)
-	n, err := reader.Read(buf)
-	if n != 1 || err != nil {
-		t.Fatalf("first Read() = %d, %v; want 1, nil", n, err)
-	}
-	n, err = reader.Read(buf)
-	if n != 0 || !errors.Is(err, io.EOF) {
-		t.Fatalf("second Read() = %d, %v; want 0, EOF", n, err)
-	}
-}
-
-func TestLimitedDockerInventoryReaderRejectsBytePastLimit(t *testing.T) {
-	reader := &limitedDockerInventoryReader{
-		r:    strings.NewReader("ab"),
-		read: maxDockerInventoryFileSize - 1,
-	}
-	buf := make([]byte, 2)
-	n, err := reader.Read(buf)
-	if n != 1 || err != nil {
-		t.Fatalf("first Read() = %d, %v; want 1, nil", n, err)
-	}
-	n, err = reader.Read(buf)
-	if n != 0 || err == nil || !strings.Contains(err.Error(), "exceeds maximum docker inventory size") {
-		t.Fatalf("second Read() = %d, %v; want size-limit error", n, err)
-	}
-}
-
 func writeDockerImageTestFile(t *testing.T, path, data string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
@@ -107,5 +122,12 @@ func writeDockerImageTestFile(t *testing.T, path, data string) {
 	}
 	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+func symlinkOrSkip(t *testing.T, oldname, newname string) {
+	t.Helper()
+	if err := os.Symlink(oldname, newname); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
 	}
 }

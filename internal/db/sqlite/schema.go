@@ -4,8 +4,9 @@
 package sqlite
 
 // schemaSQL is the DDL executed on first open (IF NOT EXISTS is safe for
-// repeated calls). The schema is a compact subset of the server-side
-// PostgreSQL schema -- see Phase 1, DE-17 for the parity matrix.
+// repeated calls). The schema is the local scan/sync subset of the server-side
+// PostgreSQL schema, covering vulnerability, malicious, reputation, lifecycle,
+// feed-state, and scan-history data needed by the CLI.
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS vulnerabilities_local (
 	row_key        TEXT PRIMARY KEY,
@@ -60,6 +61,9 @@ CREATE TABLE IF NOT EXISTS reputation_findings_local (
 CREATE INDEX IF NOT EXISTS idx_rep_eco_name
 	ON reputation_findings_local(ecosystem, name);
 
+CREATE INDEX IF NOT EXISTS idx_rep_eco_name_version
+	ON reputation_findings_local(ecosystem, name, version);
+
 CREATE TABLE IF NOT EXISTS lifecycle_releases_local (
 	id                TEXT PRIMARY KEY,
 	ecosystem         TEXT NOT NULL,
@@ -107,4 +111,7 @@ CREATE INDEX IF NOT EXISTS idx_scan_history_scanned_at
 
 CREATE INDEX IF NOT EXISTS idx_scan_history_repo_scanned_at
 	ON scan_history(repo_name, scanned_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_scan_history_repo_retention
+	ON scan_history(COALESCE(repo_name, ''), scanned_at DESC, id DESC);
 `

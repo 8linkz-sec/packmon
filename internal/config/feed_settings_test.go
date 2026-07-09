@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"reflect"
 	"strings"
 	"sync"
@@ -31,6 +32,60 @@ func TestNormalizeAndParseFeedMode(t *testing.T) {
 
 	if _, err := ParseFeedMode("invalid"); err == nil {
 		t.Fatal("ParseFeedMode(invalid) error = nil, want error")
+	}
+}
+
+func TestFeedModeOptions(t *testing.T) {
+	selfOnly := FeedModeOptions(false)
+	if len(selfOnly) != 1 || selfOnly[0].Value != FeedModeSelf || selfOnly[0].Label != string(FeedModeSelf) {
+		t.Fatalf("FeedModeOptions(false) = %+v, want self option only", selfOnly)
+	}
+
+	external := FeedModeOptions(true)
+	want := []FeedMode{FeedModeSelf, FeedModeExternal}
+	if len(external) != len(want) {
+		t.Fatalf("FeedModeOptions(true) = %+v, want %v", external, want)
+	}
+	for i, mode := range want {
+		if external[i].Value != mode || external[i].Label != string(mode) {
+			t.Fatalf("FeedModeOptions(true)[%d] = %+v, want value/label %q", i, external[i], mode)
+		}
+	}
+}
+
+func TestFeedSettingsMetadataComesFromDescriptorTable(t *testing.T) {
+	src, err := os.ReadFile("feed_settings.go")
+	if err != nil {
+		t.Fatalf("read feed_settings.go: %v", err)
+	}
+	text := string(src)
+	if !strings.Contains(text, "var feedDescriptors = []feedDescriptor") {
+		t.Fatal("feed metadata should be centralized in feedDescriptors")
+	}
+	for _, forbidden := range []string{
+		"switch NormalizeFeedName(name)",
+		"names := []string{",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("feed metadata still uses duplicated pattern %q", forbidden)
+		}
+	}
+}
+
+func TestFeedExternalModeNamesComeFromDescriptorTable(t *testing.T) {
+	want := []string{"osv", "ghsa", "openssf", "vulncheck", "cisakev", "epss", "socket"}
+	if got := FeedExternalModeNames(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("FeedExternalModeNames() = %#v, want %#v", got, want)
+	}
+	for _, name := range want {
+		if !FeedSupportsExternalMode(name) {
+			t.Fatalf("FeedSupportsExternalMode(%q) = false, want true", name)
+		}
+	}
+	for _, name := range []string{"nvd", "endoflife", "reversinglabs", "malicious"} {
+		if FeedSupportsExternalMode(name) {
+			t.Fatalf("FeedSupportsExternalMode(%q) = true, want false", name)
+		}
 	}
 }
 
@@ -225,6 +280,25 @@ func TestSetFeedSettingsUpdatesEveryFeed(t *testing.T) {
 	}
 	if err := cfg.SetFeedSettings(FeedSettings{Name: "osv", Mode: FeedMode("bad")}); err == nil {
 		t.Fatal("SetFeedSettings(invalid mode) error = nil, want error")
+	}
+}
+
+func TestSetFeedSettingsRejectsNonHTTPSReversingLabsBaseURLWithStoredAPIKey(t *testing.T) {
+	cfg := &Config{
+		Feeds: FeedsConfig{
+			ReversingLabsBaseURL: "http://downloads.example.test/community",
+		},
+	}
+
+	err := cfg.SetFeedSettings(FeedSettings{Name: "reversinglabs", Enabled: true, Mode: FeedModeSelf, APIKey: "persisted-rl-key"})
+	if err == nil {
+		t.Fatal("SetFeedSettings(reversinglabs stored key over http) error = nil, want HTTPS validation error")
+	}
+	if !strings.Contains(err.Error(), "PACKMON_REVERSINGLABS_API_BASE_URL") || !strings.Contains(err.Error(), "https") {
+		t.Fatalf("SetFeedSettings(reversinglabs stored key over http) error = %v, want HTTPS validation message", err)
+	}
+	if cfg.Feeds.ReversingLabsAPIKey != "" {
+		t.Fatalf("ReversingLabsAPIKey = %q, want unchanged empty key after rejected settings", cfg.Feeds.ReversingLabsAPIKey)
 	}
 }
 

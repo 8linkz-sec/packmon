@@ -25,6 +25,19 @@ type CocoaPodsParser struct{}
 // The name may contain slashes (subspecs) such as "Firebase/Core".
 var podLineRe = regexp.MustCompile(`^  - ([^\s(]+)\s+\(([^)]+)\):?$`)
 
+type cocoaPodsSection int
+
+const (
+	cocoaPodsSectionOther cocoaPodsSection = iota
+	cocoaPodsSectionPods
+	cocoaPodsSectionSpecRepos
+)
+
+type cocoaPodsParseState struct {
+	section         cocoaPodsSection
+	currentSpecRepo string
+}
+
 // NewCocoaPodsParser creates a new CocoaPodsParser.
 func NewCocoaPodsParser() *CocoaPodsParser {
 	return &CocoaPodsParser{}
@@ -38,9 +51,7 @@ func (p *CocoaPodsParser) Parse(r io.Reader) ([]domain.Package, error) {
 	scanner := newLineScanner(r)
 
 	// Find the PODS: section first and keep SPEC REPOS provenance when present.
-	inPods := false
-	inSpecRepos := false
-	currentSpecRepo := ""
+	state := cocoaPodsParseState{}
 	var (
 		packages           []domain.Package
 		errs               []string
@@ -51,63 +62,39 @@ func (p *CocoaPodsParser) Parse(r io.Reader) ([]domain.Package, error) {
 
 	for scanner.Scan() {
 		line := scanner.Text()
-		trimmed := strings.TrimSpace(line)
 
-		if !strings.HasPrefix(line, " ") && strings.HasSuffix(trimmed, ":") {
-			inPods = trimmed == "PODS:"
-			inSpecRepos = trimmed == "SPEC REPOS:"
-			currentSpecRepo = ""
-			if inPods {
-				continue
-			}
-			if inSpecRepos {
-				continue
-			}
+		var handled bool
+		state, handled = advanceCocoaPodsParseState(state, line)
+		if handled {
+			continue
 		}
 
-		if inSpecRepos {
-			if strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "    ") && strings.HasSuffix(trimmed, ":") {
-				currentSpecRepo = strings.TrimSuffix(trimmed, ":")
-				continue
-			}
-			if currentSpecRepo != "" && strings.HasPrefix(line, "    - ") {
-				podName := strings.TrimSpace(strings.TrimPrefix(trimmed, "- "))
-				if idx := strings.Index(podName, "/"); idx > 0 {
-					podName = podName[:idx]
-				}
-				specRepoSourceRefs[podName] = append(specRepoSourceRefs[podName], currentSpecRepo)
+		if state.section == cocoaPodsSectionSpecRepos {
+			if podName, ok := parseCocoaPodsSpecRepoPackageLine(state.currentSpecRepo, line); ok {
+				specRepoSourceRefs[podName] = append(specRepoSourceRefs[podName], state.currentSpecRepo)
 			}
 			continue
 		}
 
-		if inPods {
-			matches := podLineRe.FindStringSubmatch(line)
-			if matches == nil {
+		if state.section == cocoaPodsSectionPods {
+			name, version, ok := parseCocoaPodsPodLine(line)
+			if !ok {
 				// This is either a sub-dependency line or a malformed line; skip it.
 				continue
 			}
 
-			name := matches[1]
-			version := matches[2]
-
-			// For subspecs like "Firebase/Core", use the root pod name.
-			rootName := name
-			if idx := strings.Index(name, "/"); idx > 0 {
-				rootName = name[:idx]
-			}
-
-			key := rootName + "@" + version
+			key := name + "@" + version
 			if seen[key] {
 				continue
 			}
 			seen[key] = true
 
 			packages = append(packages, domain.Package{
-				Name:      rootName,
+				Name:      name,
 				Version:   version,
 				Ecosystem: domain.EcosystemCocoaPods,
 			})
-			packageIndexes[rootName] = append(packageIndexes[rootName], len(packages)-1)
+			packageIndexes[name] = append(packageIndexes[name], len(packages)-1)
 		}
 	}
 
@@ -115,7 +102,7 @@ func (p *CocoaPodsParser) Parse(r io.Reader) ([]domain.Package, error) {
 		errs = append(errs, fmt.Sprintf("reading input: %v", err))
 	}
 
-	if !inPods && len(packages) == 0 {
+	if state.section != cocoaPodsSectionPods && len(packages) == 0 {
 		errs = append(errs, "no PODS section found")
 	}
 
@@ -131,6 +118,66 @@ func (p *CocoaPodsParser) Parse(r io.Reader) ([]domain.Package, error) {
 	}
 
 	return packages, retErr
+}
+
+func advanceCocoaPodsParseState(state cocoaPodsParseState, line string) (cocoaPodsParseState, bool) {
+	trimmed := strings.TrimSpace(line)
+	if isCocoaPodsTopLevelSection(line, trimmed) {
+		state.currentSpecRepo = ""
+		switch trimmed {
+		case "PODS:":
+			state.section = cocoaPodsSectionPods
+		case "SPEC REPOS:":
+			state.section = cocoaPodsSectionSpecRepos
+		default:
+			state.section = cocoaPodsSectionOther
+		}
+		return state, true
+	}
+
+	if state.section == cocoaPodsSectionSpecRepos {
+		if repo, ok := parseCocoaPodsSpecRepoHeader(line, trimmed); ok {
+			state.currentSpecRepo = repo
+			return state, true
+		}
+	}
+
+	return state, false
+}
+
+func isCocoaPodsTopLevelSection(line, trimmed string) bool {
+	return !strings.HasPrefix(line, " ") && strings.HasSuffix(trimmed, ":")
+}
+
+func parseCocoaPodsSpecRepoHeader(line, trimmed string) (string, bool) {
+	if strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "    ") && strings.HasSuffix(trimmed, ":") {
+		return strings.TrimSuffix(trimmed, ":"), true
+	}
+	return "", false
+}
+
+func parseCocoaPodsPodLine(line string) (string, string, bool) {
+	matches := podLineRe.FindStringSubmatch(line)
+	if matches == nil {
+		return "", "", false
+	}
+	return cocoaPodsRootName(matches[1]), matches[2], true
+}
+
+func parseCocoaPodsSpecRepoPackageLine(currentSpecRepo, line string) (string, bool) {
+	if currentSpecRepo == "" || !strings.HasPrefix(line, "    - ") {
+		return "", false
+	}
+
+	podName := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "- "))
+	return cocoaPodsRootName(podName), true
+}
+
+func cocoaPodsRootName(name string) string {
+	if idx := strings.Index(name, "/"); idx > 0 {
+		return name[:idx]
+	}
+	return name
 }
 
 func (p *CocoaPodsParser) Ecosystem() domain.Ecosystem {

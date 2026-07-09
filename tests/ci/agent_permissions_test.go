@@ -33,7 +33,22 @@ func TestAgentGuideWarnsIgnoredSecretsAreNotSafeForAgentContext(t *testing.T) {
 			t.Fatalf("AGENTS.md missing ignored-secret agent warning %q", want)
 		}
 	}
-	for _, want := range []string{".env", ".env.*"} {
+	for _, want := range []string{
+		".env",
+		".env.*",
+		"!.env.example",
+		"*.pem",
+		"*.key",
+		"*.p12",
+		"*.pfx",
+		"*.jks",
+		"*.kdbx",
+		"*credentials*.json",
+		"*service-account*.json",
+		"terraform.tfstate*",
+		"*.tfvars",
+		"*.tfvars.json",
+	} {
 		if !ignorePatternContains(string(gitignoreData), want) {
 			t.Fatalf(".gitignore missing ignored secret pattern %q", want)
 		}

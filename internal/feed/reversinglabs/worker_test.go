@@ -9,48 +9,157 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/8linkz-sec/packmon/internal/db"
+	feedqueue "github.com/8linkz-sec/packmon/internal/feed"
 )
 
 type fakeStore struct {
-	due            []db.PackageReputation
-	upserts        []db.PackageReputation
-	dequeued       *db.RefreshJob
-	dequeueErr     error
-	listDueBlock   chan struct{}
-	completeErr    error
-	completedJob   int
-	completedErr   error
-	completeCtxErr error
-	resetCount     int
-	resetErr       error
-	resetSource    string
-	resetCh        chan struct{}
-	dequeueCalled  int
-	prunedSource   string
-	prunedOlder    time.Duration
-	prunedCount    int
-	pruneErr       error
+	due                 []db.PackageReputation
+	upserts             []db.PackageReputation
+	dequeued            *db.RefreshJob
+	dequeueErr          error
+	listDueBlock        chan struct{}
+	completeErr         error
+	completedJob        int
+	completedClaim      *time.Time
+	completedErr        error
+	completeCtxErr      error
+	dequeueDeadlineSet  bool
+	dequeueDeadline     time.Time
+	completeDeadlineSet bool
+	completeDeadline    time.Time
+	resetDeadlineSet    bool
+	resetDeadline       time.Time
+	resetCount          int
+	resetErr            error
+	resetSource         string
+	resetCh             chan struct{}
+	dequeueCalled       int
+	prunedSource        string
+	prunedOlder         time.Duration
+	prunedCount         int
+	pruneErr            error
 }
 
-func (s *fakeStore) DequeueRefresh(context.Context, string) (*db.RefreshJob, error) {
+type reversingLabsRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f reversingLabsRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type reversingLabsRecordingMetricsRecorder struct {
+	queueErrors    map[string]int
+	stuckRecovered int
+	jobsCompleted  map[string]int
+}
+
+func newReversingLabsRecordingMetricsRecorder() *reversingLabsRecordingMetricsRecorder {
+	return &reversingLabsRecordingMetricsRecorder{
+		queueErrors:   make(map[string]int),
+		jobsCompleted: make(map[string]int),
+	}
+}
+
+func (r *reversingLabsRecordingMetricsRecorder) IncFeedSyncTimeout(string) {}
+
+func (r *reversingLabsRecordingMetricsRecorder) IncQueueError(source string) {
+	r.queueErrors[source]++
+}
+
+func (r *reversingLabsRecordingMetricsRecorder) AddQueueStuckRecovered(count int) {
+	r.stuckRecovered += count
+}
+
+func (r *reversingLabsRecordingMetricsRecorder) IncQueueJobCompleted(source, result string) {
+	r.jobsCompleted[source+":"+result]++
+}
+
+func assertReversingLabsJSONLogIntField(t *testing.T, output, msg, field string, want int) {
+	t.Helper()
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		if line == "" {
+			continue
+		}
+		var entry map[string]any
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("parse log line %q: %v", line, err)
+		}
+		if entry["msg"] != msg {
+			continue
+		}
+		got, ok := entry[field].(float64)
+		if !ok {
+			t.Fatalf("log %q missing numeric %q field in:\n%s", msg, field, output)
+		}
+		if int(got) != want {
+			t.Fatalf("log %q %s = %v, want %d; logs:\n%s", msg, field, got, want, output)
+		}
+		return
+	}
+	t.Fatalf("log message %q not found in:\n%s", msg, output)
+}
+
+func assertReversingLabsRateLimit(t *testing.T, worker *Worker, wantTokens, wantLimit int) {
+	t.Helper()
+	state := worker.Snapshot()
+	if state.Tokens != wantTokens || state.Limit != wantLimit {
+		t.Fatalf("rate limit tokens = %d/%d, want %d/%d", state.Tokens, state.Limit, wantTokens, wantLimit)
+	}
+}
+
+func assertReversingLabsTokens(t *testing.T, worker *Worker, want int) {
+	t.Helper()
+	state := worker.Snapshot()
+	if state.Tokens != want {
+		t.Fatalf("tokens = %d, want %d", state.Tokens, want)
+	}
+}
+
+func (s *fakeStore) DequeueRefresh(ctx context.Context, _ string) (*db.RefreshJob, error) {
 	s.dequeueCalled++
-	return s.dequeued, s.dequeueErr
+	if deadline, ok := ctx.Deadline(); ok {
+		s.dequeueDeadlineSet = true
+		s.dequeueDeadline = deadline
+	}
+	return claimReversingLabsTestJob(s.dequeued), s.dequeueErr
 }
 
-func (s *fakeStore) CompleteRefresh(ctx context.Context, id int, err error) error {
+func claimReversingLabsTestJob(job *db.RefreshJob) *db.RefreshJob {
+	if job == nil {
+		return nil
+	}
+	if job.ProcessedAt == nil {
+		now := time.Now().UTC()
+		job.ProcessedAt = &now
+	}
+	job.Status = "processing"
+	return job
+}
+
+func (s *fakeStore) CompleteClaimedRefresh(ctx context.Context, id int, claimedAt *time.Time, err error) error {
 	s.completeCtxErr = ctx.Err()
+	if deadline, ok := ctx.Deadline(); ok {
+		s.completeDeadlineSet = true
+		s.completeDeadline = deadline
+	}
 	s.completedJob = id
+	s.completedClaim = claimedAt
 	s.completedErr = err
 	return s.completeErr
 }
 
-func (s *fakeStore) ResetStuckJobs(_ context.Context, source string, _ time.Duration) (int, error) {
+func (s *fakeStore) ResetStuckJobs(ctx context.Context, source string, _ time.Duration) (int, error) {
 	s.resetSource = source
+	if deadline, ok := ctx.Deadline(); ok {
+		s.resetDeadlineSet = true
+		s.resetDeadline = deadline
+	}
 	if s.resetCh != nil {
 		select {
 		case <-s.resetCh:
@@ -83,6 +192,140 @@ func (s *fakeStore) PrunePackageReputation(_ context.Context, source string, old
 	return s.prunedCount, s.pruneErr
 }
 
+func TestProcessNextJobUpdatesCompletedThroughputTelemetry(t *testing.T) {
+	recorder := newReversingLabsRecordingMetricsRecorder()
+	successStore := &fakeStore{
+		dequeued: &db.RefreshJob{ID: 1179, Ecosystem: "npm", Name: "left-pad", Source: FeedName},
+	}
+	successWorker := newWorker(successStore, "token", nil, WithRateLimit(1), WithMetricsRecorder(recorder))
+
+	successWorker.processNextJob(context.Background())
+
+	if got := recorder.jobsCompleted[FeedName+":"+feedqueue.QueueJobResultSuccess]; got != 1 {
+		t.Fatalf("completed success counter = %d, want 1", got)
+	}
+
+	errorStore := &fakeStore{
+		dequeued: &db.RefreshJob{ID: 1180, Ecosystem: "npm", Name: "left-pad", Source: FeedName},
+		due: []db.PackageReputation{{
+			Ecosystem: "npm",
+			Name:      "left-pad",
+			Version:   "1.0.0",
+			Source:    FeedName,
+		}},
+	}
+	errorWorker := newWorker(errorStore, "token", nil,
+		WithRateLimit(1),
+		WithMetricsRecorder(recorder),
+		WithHTTPClient(&http.Client{Transport: reversingLabsRoundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("lookup down")
+		})}),
+	)
+
+	errorWorker.processNextJob(context.Background())
+
+	if got := recorder.jobsCompleted[FeedName+":"+feedqueue.QueueJobResultError]; got != 1 {
+		t.Fatalf("completed error counter = %d, want 1", got)
+	}
+
+	rateSuccessBefore := recorder.jobsCompleted[FeedName+":"+feedqueue.QueueJobResultSuccess]
+	rateErrorBefore := recorder.jobsCompleted[FeedName+":"+feedqueue.QueueJobResultError]
+	rateStore := &fakeStore{
+		dequeued: &db.RefreshJob{ID: 1181, Ecosystem: "npm", Name: "rate-limited", Source: FeedName},
+		due: []db.PackageReputation{{
+			Ecosystem: "npm",
+			Name:      "rate-limited",
+			Version:   "1.0.0",
+			Source:    FeedName,
+		}},
+	}
+	rateWorker := newWorker(rateStore, "token", nil,
+		WithRateLimit(1),
+		WithMetricsRecorder(recorder),
+		WithHTTPClient(&http.Client{Transport: reversingLabsRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusTooManyRequests,
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		})}),
+	)
+
+	rateWorker.processNextJob(context.Background())
+
+	if rateStore.completedJob != 0 {
+		t.Fatalf("completedJob = %d, want rate-limited job left processing", rateStore.completedJob)
+	}
+	if got := recorder.jobsCompleted[FeedName+":"+feedqueue.QueueJobResultSuccess]; got != rateSuccessBefore {
+		t.Fatalf("completed success counter changed after rate limit: got %d, want %d", got, rateSuccessBefore)
+	}
+	if got := recorder.jobsCompleted[FeedName+":"+feedqueue.QueueJobResultError]; got != rateErrorBefore {
+		t.Fatalf("completed error counter changed after rate limit: got %d, want %d", got, rateErrorBefore)
+	}
+}
+
+func TestLookupBatchRejectsHTTPSDowngradeRedirect(t *testing.T) {
+	t.Parallel()
+
+	var targetReached atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		targetReached.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"community":{"packages":[]}}`))
+	}))
+	defer target.Close()
+
+	source := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/find/packages?compact=true", http.StatusFound)
+	}))
+	defer source.Close()
+
+	worker := newWorker(&fakeStore{}, "token", slog.Default(),
+		WithBaseURL(source.URL),
+		WithHTTPClient(source.Client()),
+	)
+
+	_, err := worker.lookupBatch(context.Background(), []db.PackageReputation{{
+		Ecosystem: "npm",
+		Name:      "left-pad",
+		Version:   "1.0.0",
+		Source:    FeedName,
+	}})
+	if err == nil || !strings.Contains(err.Error(), "refusing redirect from https to http") {
+		t.Fatalf("lookupBatch() error = %v, want HTTPS downgrade redirect refusal", err)
+	}
+	if got := targetReached.Load(); got != 0 {
+		t.Fatalf("downgrade redirect target reached %d time(s), want 0", got)
+	}
+}
+
+func TestProcessNextJobUsesQueueOperationDeadlines(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeStore{
+		dequeued: &db.RefreshJob{ID: 44, Ecosystem: "npm", Name: "left-pad", Source: FeedName},
+	}
+	worker := newWorker(store, "token", slog.Default(), WithRateLimit(1))
+
+	worker.processNextJob(context.Background())
+
+	assertReversingLabsDeadlineSoon(t, "reset stuck jobs", store.resetDeadlineSet, store.resetDeadline)
+	assertReversingLabsDeadlineSoon(t, "dequeue refresh", store.dequeueDeadlineSet, store.dequeueDeadline)
+	assertReversingLabsDeadlineSoon(t, "complete refresh", store.completeDeadlineSet, store.completeDeadline)
+}
+
+func assertReversingLabsDeadlineSoon(t *testing.T, operation string, ok bool, deadline time.Time) {
+	t.Helper()
+	if !ok {
+		t.Fatalf("%s context has no deadline", operation)
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 || remaining > 3*time.Second {
+		t.Fatalf("%s deadline remaining = %v, want bounded positive deadline within 3s", operation, remaining)
+	}
+}
+
 func TestWorkerOptionsAndName(t *testing.T) {
 	t.Parallel()
 
@@ -101,8 +344,14 @@ func TestWorkerOptionsAndName(t *testing.T) {
 	if w.Name() != FeedName {
 		t.Fatalf("Name() = %q, want %q", w.Name(), FeedName)
 	}
-	if w.httpClient != httpClient {
-		t.Fatal("WithHTTPClient did not install provided client")
+	if w.httpClient == httpClient || w.httpClient.Timeout != httpClient.Timeout {
+		t.Fatalf("WithHTTPClient did not preserve provided client settings: %+v", w.httpClient)
+	}
+	if err := w.httpClient.CheckRedirect(
+		&http.Request{URL: mustReversingLabsTestURL(t, "http://example.test/next")},
+		[]*http.Request{{URL: mustReversingLabsTestURL(t, "https://example.test/start")}},
+	); err == nil || !strings.Contains(err.Error(), "https to http") {
+		t.Fatalf("worker redirect policy error = %v, want HTTPS downgrade refusal", err)
 	}
 	if w.baseURL != "https://example.test/base" {
 		t.Fatalf("baseURL = %q, want trimmed URL", w.baseURL)
@@ -119,9 +368,16 @@ func TestWorkerOptionsAndName(t *testing.T) {
 	if w.cacheRetention != 48*time.Hour {
 		t.Fatalf("cacheRetention = %v, want 48h", w.cacheRetention)
 	}
-	if w.tokens != 12 || w.maxTokens != 12 {
-		t.Fatalf("tokens = %d/%d, want 12/12", w.tokens, w.maxTokens)
+	assertReversingLabsRateLimit(t, w, 12, 12)
+}
+
+func mustReversingLabsTestURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse URL %q: %v", raw, err)
 	}
+	return u
 }
 
 func TestWorkersShareRateLimitState(t *testing.T) {
@@ -131,14 +387,14 @@ func TestWorkersShareRateLimitState(t *testing.T) {
 	first := newWorker(&fakeStore{}, "token", nil, WithRateLimiter(limiter))
 	second := newWorker(&fakeStore{}, "token", nil, WithRateLimiter(limiter))
 
-	if !first.acquireToken() {
+	if !first.RateLimiter.Acquire() {
 		t.Fatal("first worker could not acquire initial shared token")
 	}
-	if second.acquireToken() {
+	if second.RateLimiter.Acquire() {
 		t.Fatal("second worker acquired a fresh token from a shared exhausted bucket")
 	}
-	first.returnToken()
-	if !second.acquireToken() {
+	first.RateLimiter.Return()
+	if !second.RateLimiter.Acquire() {
 		t.Fatal("second worker could not acquire token returned by first worker")
 	}
 }
@@ -151,7 +407,7 @@ func (*dbStoreFake) DequeueRefresh(context.Context, string) (*db.RefreshJob, err
 	return nil, nil
 }
 
-func (*dbStoreFake) CompleteRefresh(context.Context, int, error) error {
+func (*dbStoreFake) CompleteClaimedRefresh(context.Context, int, *time.Time, error) error {
 	return nil
 }
 
@@ -191,13 +447,15 @@ func TestNewWorkerWrapperAndOptionGuardBranches(t *testing.T) {
 	if w.pollInterval != defaultPollInterval || w.lookupTTL != defaultLookupTTL {
 		t.Fatalf("defaults = %v/%v, want %v/%v", w.pollInterval, w.lookupTTL, defaultPollInterval, defaultLookupTTL)
 	}
-	if w.batchSize != defaultBatchSize || w.tokens != defaultRateLimitPerHour || w.maxTokens != defaultRateLimitPerHour {
-		t.Fatalf("batch/tokens = %d/%d/%d, want defaults", w.batchSize, w.tokens, w.maxTokens)
+	state := w.Snapshot()
+	if w.batchSize != defaultBatchSize || state.Tokens != defaultRateLimitPerHour || state.Limit != defaultRateLimitPerHour {
+		t.Fatalf("batch/tokens = %d/%d/%d, want defaults", w.batchSize, state.Tokens, state.Limit)
 	}
 
 	w = NewWorker(store, "token", nil, WithBatchSize(3), WithRateLimit(7))
-	if w.batchSize != 3 || w.tokens != 7 || w.maxTokens != 7 {
-		t.Fatalf("valid option values = batch %d tokens %d/%d", w.batchSize, w.tokens, w.maxTokens)
+	state = w.Snapshot()
+	if w.batchSize != 3 || state.Tokens != 7 || state.Limit != 7 {
+		t.Fatalf("valid option values = batch %d tokens %d/%d", w.batchSize, state.Tokens, state.Limit)
 	}
 }
 
@@ -229,6 +487,9 @@ func TestProcessNextJobUsesPerJobDeadline(t *testing.T) {
 	if store.completedJob != 99 {
 		t.Fatalf("completedJob = %d, want 99", store.completedJob)
 	}
+	if store.completedClaim == nil {
+		t.Fatal("completedClaim = nil, want dequeued processed_at claim")
+	}
 	if !errors.Is(store.completedErr, context.DeadlineExceeded) {
 		t.Fatalf("completedErr = %v, want context deadline exceeded", store.completedErr)
 	}
@@ -257,6 +518,56 @@ func TestProcessNextJobLeavesRateLimitedJobForRetry(t *testing.T) {
 	if len(store.upserts) != 0 {
 		t.Fatalf("upserts = %+v, want none for transient rate limit", store.upserts)
 	}
+}
+
+func TestProcessNextJobLogsJobIDOnRateLimitAndFailureWarnings(t *testing.T) {
+	t.Parallel()
+
+	t.Run("rate limited", func(t *testing.T) {
+		t.Parallel()
+
+		store := &fakeStore{
+			dequeued: &db.RefreshJob{ID: 100, Ecosystem: "npm", Name: "left-pad", Source: FeedName},
+			due: []db.PackageReputation{
+				{Ecosystem: "npm", Name: "left-pad", Version: "1.3.0", Source: FeedName, Status: "pending"},
+			},
+		}
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusTooManyRequests)
+		}))
+		t.Cleanup(server.Close)
+
+		var logs bytes.Buffer
+		logger := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		worker := newWorker(store, "token", logger, WithBaseURL(server.URL), WithRateLimit(1))
+
+		worker.processNextJob(context.Background())
+
+		assertReversingLabsJSONLogIntField(t, logs.String(), "ReversingLabs check rate limited; leaving job processing for retry", "job_id", 100)
+	})
+
+	t.Run("failed", func(t *testing.T) {
+		t.Parallel()
+
+		store := &fakeStore{
+			dequeued: &db.RefreshJob{ID: 101, Ecosystem: "npm", Name: "left-pad", Source: FeedName},
+			due: []db.PackageReputation{
+				{Ecosystem: "npm", Name: "left-pad", Version: "1.3.0", Source: FeedName, Status: "pending"},
+			},
+		}
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		t.Cleanup(server.Close)
+
+		var logs bytes.Buffer
+		logger := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		worker := newWorker(store, "token", logger, WithBaseURL(server.URL), WithRateLimit(1))
+
+		worker.processNextJob(context.Background())
+
+		assertReversingLabsJSONLogIntField(t, logs.String(), "ReversingLabs check failed", "job_id", 101)
+	})
 }
 
 func TestSearchIncidentJSONBranches(t *testing.T) {
@@ -307,7 +618,11 @@ func TestRunDoesNotResetStuckJobsBeforeFirstPoll(t *testing.T) {
 
 	resetCh := make(chan struct{})
 	store := &fakeStore{resetCh: resetCh}
+	poller := newManualPollTicker()
 	worker := newWorker(store, "token", slog.Default(), WithPollInterval(time.Hour), WithRateLimit(1))
+	worker.newPollTicker = func(time.Duration) pollTicker {
+		return poller
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -317,7 +632,25 @@ func TestRunDoesNotResetStuckJobsBeforeFirstPoll(t *testing.T) {
 	case <-resetCh:
 		cancel()
 		t.Fatal("Run reset stuck jobs before the first poll")
-	case <-time.After(25 * time.Millisecond):
+	case <-poller.ready:
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("Run did not start waiting for the first poll")
+	}
+
+	select {
+	case <-resetCh:
+		cancel()
+		t.Fatal("Run reset stuck jobs before the first poll")
+	default:
+	}
+
+	poller.tick()
+	select {
+	case <-resetCh:
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("Run did not reset stuck jobs after the first poll")
 	}
 
 	cancel()
@@ -329,52 +662,70 @@ func TestRunDoesNotResetStuckJobsBeforeFirstPoll(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run() did not exit after cancellation")
 	}
-	if store.resetSource != "" {
-		t.Fatalf("reset source = %q, want no reset before first poll", store.resetSource)
+	if store.resetSource != FeedName {
+		t.Fatalf("reset source = %q, want %q after first poll", store.resetSource, FeedName)
 	}
+}
+
+type manualPollTicker struct {
+	ticks chan time.Time
+	ready chan struct{}
+}
+
+func newManualPollTicker() *manualPollTicker {
+	return &manualPollTicker{
+		ticks: make(chan time.Time, 1),
+		ready: make(chan struct{}),
+	}
+}
+
+func (t *manualPollTicker) C() <-chan time.Time {
+	select {
+	case <-t.ready:
+	default:
+		close(t.ready)
+	}
+	return t.ticks
+}
+
+func (t *manualPollTicker) Stop() {}
+
+func (t *manualPollTicker) tick() {
+	t.ticks <- time.Now()
 }
 
 func TestProcessNextJobTokenAndCompletionBranches(t *testing.T) {
 	t.Parallel()
 
 	noTokenStore := &fakeStore{}
-	noTokenWorker := newWorker(noTokenStore, "token", slog.Default())
-	noTokenWorker.tokens = 0
-	noTokenWorker.maxTokens = 1
-	noTokenWorker.lastRefill = time.Now()
+	noTokenWorker := newWorker(noTokenStore, "token", slog.Default(), WithRateLimit(1))
+	noTokenWorker.RateLimiter.Drain()
 	noTokenWorker.processNextJob(context.Background())
 	if noTokenStore.dequeueCalled != 0 {
 		t.Fatalf("dequeueCalled = %d, want 0 without token", noTokenStore.dequeueCalled)
 	}
 
 	noJobStore := &fakeStore{}
-	noJobWorker := newWorker(noJobStore, "token", slog.Default())
-	noJobWorker.tokens = 1
+	noJobWorker := newWorker(noJobStore, "token", slog.Default(), WithRateLimit(1))
 	noJobWorker.processNextJob(context.Background())
 	if noJobStore.dequeueCalled != 1 {
 		t.Fatalf("dequeueCalled = %d, want 1", noJobStore.dequeueCalled)
 	}
-	if noJobWorker.tokens != 1 {
-		t.Fatalf("token after empty dequeue = %d, want returned token", noJobWorker.tokens)
-	}
+	assertReversingLabsTokens(t, noJobWorker, 1)
 
 	dequeueErrStore := &fakeStore{dequeueErr: errors.New("queue down")}
 	dequeueErrWorker := newWorker(dequeueErrStore, "token", slog.Default(), WithRateLimit(1))
-	dequeueErrWorker.tokens = 1
 	dequeueErrWorker.processNextJob(context.Background())
 	if dequeueErrStore.completedJob != 0 {
 		t.Fatalf("completedJob = %d, want no completion on dequeue error", dequeueErrStore.completedJob)
 	}
-	if dequeueErrWorker.tokens != 1 {
-		t.Fatalf("token after dequeue error = %d, want returned token", dequeueErrWorker.tokens)
-	}
+	assertReversingLabsTokens(t, dequeueErrWorker, 1)
 
 	t.Run("dequeue error logs are suppressed", func(t *testing.T) {
 		store := &fakeStore{dequeueErr: errors.New("queue down")}
 		var logs bytes.Buffer
 		logger := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 		worker := newWorker(store, "token", logger, WithRateLimit(2))
-		worker.tokens = 2
 
 		worker.processNextJob(context.Background())
 		worker.processNextJob(context.Background())
@@ -408,8 +759,7 @@ func TestProcessNextJobTokenAndCompletionBranches(t *testing.T) {
 	}
 
 	canceledStore := &fakeStore{dequeued: &db.RefreshJob{ID: 43, Ecosystem: "npm", Name: "left-pad", Source: FeedName}}
-	canceledWorker := newWorker(canceledStore, "token", slog.Default())
-	canceledWorker.tokens = 1
+	canceledWorker := newWorker(canceledStore, "token", slog.Default(), WithRateLimit(1))
 	canceledCtx, cancel := context.WithCancel(context.Background())
 	cancel()
 	canceledWorker.processNextJob(canceledCtx)
@@ -417,7 +767,47 @@ func TestProcessNextJobTokenAndCompletionBranches(t *testing.T) {
 		t.Fatalf("completedJob after canceled worker context = %d, want 43", canceledStore.completedJob)
 	}
 	if canceledStore.completeCtxErr != nil {
-		t.Fatalf("CompleteRefresh context error = %v, want independent live context", canceledStore.completeCtxErr)
+		t.Fatalf("CompleteClaimedRefresh context error = %v, want independent live context", canceledStore.completeCtxErr)
+	}
+}
+
+func TestProcessNextJobReturnsTokenWhenNoUpstreamRequestWasMade(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name string
+		due  []db.PackageReputation
+	}{
+		{name: "no due reputations"},
+		{
+			name: "all due reputations unsupported",
+			due: []db.PackageReputation{
+				{Ecosystem: "go", Name: "github.com/acme/lib", Version: "1.0.0", Source: FeedName, Status: "pending"},
+			},
+		},
+		{
+			name: "all due reputations excluded",
+			due: []db.PackageReputation{
+				{Ecosystem: "npm", Name: "@internal/pkg", Version: "1.0.0", Source: FeedName, Status: "pending"},
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := &fakeStore{
+				dequeued: &db.RefreshJob{ID: 44, Ecosystem: "npm", Name: "left-pad", Source: FeedName},
+				due:      tt.due,
+			}
+			worker := newWorker(store, "token", slog.Default(), WithRateLimit(1), WithExcludedNamespaces([]string{"npm/@internal/"}))
+
+			worker.processNextJob(context.Background())
+
+			assertReversingLabsTokens(t, worker, 1)
+			if store.completedJob != 44 || store.completedErr != nil {
+				t.Fatalf("completed = (%d, %v), want no-op job completed without error", store.completedJob, store.completedErr)
+			}
+		})
 	}
 }
 
@@ -617,8 +1007,7 @@ func TestLookupBatchDrainsTokensOnRateLimit(t *testing.T) {
 	}))
 	defer server.Close()
 
-	w := newWorker(&fakeStore{}, "token", slog.Default(), WithBaseURL(server.URL), WithLookupTTL(24*time.Hour))
-	w.tokens = 3
+	w := newWorker(&fakeStore{}, "token", slog.Default(), WithBaseURL(server.URL), WithLookupTTL(24*time.Hour), WithRateLimit(3))
 
 	results, err := w.lookupBatch(context.Background(), []db.PackageReputation{
 		{Ecosystem: "npm", Name: "left-pad", Version: "1.3.0", Source: FeedName, Status: "pending"},
@@ -629,11 +1018,9 @@ func TestLookupBatchDrainsTokensOnRateLimit(t *testing.T) {
 	if results != nil {
 		t.Fatalf("results = %+v, want nil on rate limit", results)
 	}
-	if w.tokens != 0 {
-		t.Fatalf("tokens = %d, want drained tokens after 429", w.tokens)
-	}
-	if w.fractionalTokens != 0 {
-		t.Fatalf("fractionalTokens = %.2f, want drained fractional tokens after 429", w.fractionalTokens)
+	state := w.Snapshot()
+	if state.Tokens != 0 || state.FractionalTokens != 0 {
+		t.Fatalf("drained tokens/fractional = %d/%.2f, want 0/0", state.Tokens, state.FractionalTokens)
 	}
 }
 
@@ -654,14 +1041,63 @@ func TestProcessJobMarksUnsupportedWithoutCallingAPI(t *testing.T) {
 	}
 	w := newWorker(store, "token", slog.Default(), WithBaseURL(server.URL))
 
-	if err := w.processJob(context.Background(), store.dequeued); err != nil {
+	madeUpstreamRequest, err := w.processJob(context.Background(), store.dequeued)
+	if err != nil {
 		t.Fatalf("processJob() error = %v", err)
+	}
+	if madeUpstreamRequest {
+		t.Fatal("processJob() made upstream request for unsupported package")
 	}
 	if called {
 		t.Fatal("API was called for unsupported package")
 	}
 	if len(store.upserts) != 1 || store.upserts[0].Status != "unsupported" || store.upserts[0].NextCheckAt != nil {
 		t.Fatalf("upserts = %+v, want terminal unsupported row", store.upserts)
+	}
+}
+
+func TestProcessJobMarksPrivateNamespaceExcludedWithoutCallingAPI(t *testing.T) {
+	t.Parallel()
+
+	called := false
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		called = true
+	}))
+	defer server.Close()
+
+	store := &fakeStore{
+		due: []db.PackageReputation{
+			{Ecosystem: "npm", Name: "@school/internal", Version: "1.0.0", Source: FeedName, Status: "pending"},
+		},
+		dequeued: &db.RefreshJob{ID: 1, Ecosystem: "npm", Name: "@school/internal", Source: FeedName},
+	}
+	w := newWorker(store, "token", slog.Default(),
+		WithBaseURL(server.URL),
+		WithExcludedNamespaces([]string{" npm/@school/ "}),
+	)
+
+	madeUpstreamRequest, err := w.processJob(context.Background(), store.dequeued)
+	if err != nil {
+		t.Fatalf("processJob() error = %v", err)
+	}
+	if madeUpstreamRequest {
+		t.Fatal("processJob() made upstream request for excluded private namespace")
+	}
+	if called {
+		t.Fatal("API was called for excluded private namespace")
+	}
+	if len(store.upserts) != 1 {
+		t.Fatalf("upserts = %+v, want one terminal unsupported row", store.upserts)
+	}
+	got := store.upserts[0]
+	if got.Ecosystem != "npm" || got.Name != "@school/internal" || got.Version != "1.0.0" {
+		t.Fatalf("upserted package = %s/%s@%s, want npm/@school/internal@1.0.0", got.Ecosystem, got.Name, got.Version)
+	}
+	if got.Status != "unsupported" || got.Summary != "ReversingLabs: package excluded by private namespace policy" {
+		t.Fatalf("upsert = %+v, want unsupported private namespace exclusion", got)
+	}
+	if got.LastCheckedAt == nil || got.NextCheckAt != nil || got.LastError != "" {
+		t.Fatalf("upsert = %+v, want terminal checked unsupported row without retry/error", got)
 	}
 }
 
@@ -682,9 +1118,12 @@ func TestProcessJobStoresErrorResultsWhenLookupFails(t *testing.T) {
 	}
 	w := newWorker(store, "token", slog.Default(), WithBaseURL(server.URL))
 
-	err := w.processJob(context.Background(), store.dequeued)
+	madeUpstreamRequest, err := w.processJob(context.Background(), store.dequeued)
 	if err == nil {
 		t.Fatal("processJob() error = nil, want lookup error")
+	}
+	if !madeUpstreamRequest {
+		t.Fatal("processJob() madeUpstreamRequest = false, want true for lookup failure")
 	}
 	if len(store.upserts) != 2 {
 		t.Fatalf("upserts = %d, want 2", len(store.upserts))
@@ -694,6 +1133,107 @@ func TestProcessJobStoresErrorResultsWhenLookupFails(t *testing.T) {
 	}
 	if store.upserts[1].Status != "clean" || store.upserts[1].LastError == "" {
 		t.Fatalf("definitive status should be retained with error detail: %+v", store.upserts[1])
+	}
+}
+
+func TestProcessNextJobStoresTransientErrorOnTransportFailure(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeStore{
+		due: []db.PackageReputation{
+			{Ecosystem: "npm", Name: "left-pad", Version: "1.3.0", Source: FeedName, Status: "pending"},
+		},
+		dequeued: &db.RefreshJob{ID: 13, Ecosystem: "npm", Name: "left-pad", Source: FeedName},
+	}
+	client := &http.Client{
+		Transport: reversingLabsRoundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("lookup data.reversinglabs.invalid: no such host")
+		}),
+	}
+	worker := newWorker(store, "token", slog.Default(),
+		WithBaseURL("https://data.reversinglabs.invalid"),
+		WithHTTPClient(client),
+		WithRateLimit(1),
+	)
+
+	worker.processNextJob(context.Background())
+
+	if store.completedJob != 13 {
+		t.Fatalf("completedJob = %d, want failed transport job completed", store.completedJob)
+	}
+	if store.completedClaim == nil {
+		t.Fatal("completedClaim = nil, want dequeued processed_at claim")
+	}
+	if store.completedErr == nil || !strings.Contains(store.completedErr.Error(), "no such host") {
+		t.Fatalf("completedErr = %v, want DNS-style transport error", store.completedErr)
+	}
+	if len(store.upserts) != 1 {
+		t.Fatalf("upserts = %d, want one transient reputation error row", len(store.upserts))
+	}
+	got := store.upserts[0]
+	if got.Status != "error" || got.Summary != "ReversingLabs: lookup failed" || got.LastError == "" {
+		t.Fatalf("upsert = %+v, want transient error result", got)
+	}
+	if got.LastCheckedAt == nil || got.NextCheckAt == nil {
+		t.Fatalf("upsert timestamps = checked %v next %v, want retry scheduling", got.LastCheckedAt, got.NextCheckAt)
+	}
+	assertReversingLabsTokens(t, worker, 0)
+}
+
+func TestProcessNextJobRedactsLookupTransportErrors(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeStore{
+		due: []db.PackageReputation{
+			{Ecosystem: "npm", Name: "left-pad", Version: "1.3.0", Source: FeedName, Status: "pending"},
+		},
+		dequeued: &db.RefreshJob{ID: 12, Ecosystem: "npm", Name: "left-pad", Source: FeedName},
+	}
+	secretBaseURL := "https://user-secret:pass-secret@data.example.test/private/path?client_secret=query-secret#frag-secret" //nolint:gosec // fake secret-bearing URL verifies redaction.
+	client := &http.Client{
+		Transport: reversingLabsRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return nil, &url.Error{
+				Op:  "Post",
+				URL: req.URL.String(),
+				Err: errors.New(`dial tcp password=transport-secret C:\Users\Admin\packmon\private.key`),
+			}
+		}),
+	}
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	worker := newWorker(store, "token", logger, WithBaseURL(secretBaseURL), WithHTTPClient(client), WithRateLimit(1))
+
+	worker.processNextJob(context.Background())
+
+	if len(store.upserts) != 1 {
+		t.Fatalf("upserts = %d, want transient error result", len(store.upserts))
+	}
+	if store.completedErr == nil {
+		t.Fatal("completedErr = nil, want sanitized lookup error")
+	}
+	userVisible := store.upserts[0].LastError + "\n" + store.completedErr.Error() + "\n" + logs.String()
+	for _, leaked := range []string{
+		"user-secret",
+		"pass-secret",
+		"private/path",
+		"query-secret",
+		"frag-secret",
+		"transport-secret",
+		`C:\Users\Admin\packmon\private.key`,
+	} {
+		if strings.Contains(userVisible, leaked) {
+			t.Fatalf("ReversingLabs transport diagnostics leaked %q in:\n%s", leaked, userVisible)
+		}
+	}
+	for _, want := range []string{
+		"https://data.example.test/...",
+		"password=[redacted]",
+		"(redacted-path)",
+		"ReversingLabs check failed",
+	} {
+		if !strings.Contains(userVisible, want) {
+			t.Fatalf("ReversingLabs transport diagnostics missing %q in:\n%s", want, userVisible)
+		}
 	}
 }
 
@@ -721,9 +1261,12 @@ func TestProcessJobSanitizesMalformedIncidentParseErrors(t *testing.T) {
 	}
 	w := newWorker(store, "token", slog.Default(), WithBaseURL(server.URL))
 
-	err := w.processJob(context.Background(), store.dequeued)
+	madeUpstreamRequest, err := w.processJob(context.Background(), store.dequeued)
 	if err == nil || !strings.Contains(err.Error(), "invalid ReversingLabs response schema") {
 		t.Fatalf("processJob() error = %v, want sanitized schema error", err)
+	}
+	if !madeUpstreamRequest {
+		t.Fatal("processJob() madeUpstreamRequest = false, want true for parse failure after HTTP")
 	}
 	if strings.Contains(err.Error(), leaked) {
 		t.Fatalf("processJob() error leaked raw upstream data: %q", err.Error())
@@ -838,8 +1381,6 @@ func TestProcessNextJobLeaves413FallbackForRetryWhenNoExtraTokens(t *testing.T) 
 		dequeued: &db.RefreshJob{ID: 77, Ecosystem: "npm", Name: "left-pad", Source: FeedName},
 	}
 	w := newWorker(store, "token", slog.Default(), WithBaseURL(server.URL), WithRateLimit(1))
-	w.tokens = 1
-	w.lastRefill = time.Now()
 
 	w.processNextJob(context.Background())
 
@@ -891,23 +1432,6 @@ func TestWorkerHelperBranches(t *testing.T) {
 	}
 	if isDefinitiveStatus(" pending ") {
 		t.Fatal("isDefinitiveStatus(pending) = true, want false")
-	}
-
-	w := newWorker(&fakeStore{}, "token", slog.Default(), WithRateLimit(2))
-	w.tokens = 0
-	w.lastRefill = time.Now().Add(-2 * time.Hour)
-	if !w.acquireToken() {
-		t.Fatal("acquireToken() = false, want refilled token")
-	}
-	w.returnToken()
-	w.returnToken()
-	if w.tokens != w.maxTokens {
-		t.Fatalf("tokens after capped return = %d, want %d", w.tokens, w.maxTokens)
-	}
-	w.fractionalTokens = 0.75
-	w.drainTokens()
-	if w.tokens != 0 || w.fractionalTokens != 0 {
-		t.Fatalf("drained tokens = %d fractional %.2f, want 0/0", w.tokens, w.fractionalTokens)
 	}
 
 	store := &fakeStore{resetCount: 2}

@@ -4,12 +4,22 @@ DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 GOEXE   ?= $(shell go env GOEXE)
 GOTMPDIR ?= $(CURDIR)/.gotmp
 COVERAGE_MIN ?= 79.5
+override GOFLAGS := -mod=readonly
+export GOFLAGS
 GO_PACKAGES ?= $(shell go list ./...)
 GOSEC_DIRS ?= $(shell go list -f '{{.Dir}}' ./...)
 GOFMT_FILES ?= $(shell git ls-files '*.go')
+GOLANGCI_LINT_VERSION ?= v2.11.0
+GOFUMPT_VERSION ?= v0.9.2
+GOLANGCI_LINT_VERSION_NUMBER := $(patsubst v%,%,$(GOLANGCI_LINT_VERSION))
+SHELLCHECK_IMAGE ?= koalaman/shellcheck-alpine:v0.10.0
+HADOLINT_IMAGE ?= hadolint/hadolint:v2.12.0-alpine
+ACTIONLINT_VERSION ?= v1.7.7
+PSSCRIPTANALYZER_VERSION ?= 1.24.0
+TRIVY ?= trivy
 LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 
-.PHONY: build build-server test test-ci test-integration test-e2e vet lint fmt security clean
+.PHONY: build build-server test test-ci test-integration test-e2e vet lint fmt security clean check-go-lint-tools check-gofumpt-tool check-golangci-lint-tool lint-nongo lint-web lint-openapi lint-shell lint-docker lint-actions lint-powershell
 
 build:
 	CGO_ENABLED=0 go build -ldflags="$(LDFLAGS)" -o packmon$(GOEXE) ./cmd/packmon
@@ -38,16 +48,51 @@ vet:
 	mkdir -p "$(GOTMPDIR)"
 	GOTMPDIR="$(GOTMPDIR)" go vet $(GO_PACKAGES)
 
-lint:
+lint: check-go-lint-tools lint-nongo lint-web lint-openapi lint-shell lint-docker lint-actions lint-powershell
 	golangci-lint run ./...
 	@test -z "$$(gofumpt -extra -l $(GOFMT_FILES))" || (echo "gofumpt needed on:"; gofumpt -extra -l $(GOFMT_FILES); exit 1)
 
-fmt:
+fmt: check-gofumpt-tool
 	gofumpt -extra -w $(GOFMT_FILES)
 
+check-go-lint-tools: check-gofumpt-tool check-golangci-lint-tool
+
+check-gofumpt-tool:
+	@actual="$$(gofumpt -version 2>/dev/null || true)"; case "$$actual" in *"$(GOFUMPT_VERSION)"*) ;; *) echo "gofumpt $$actual does not match $(GOFUMPT_VERSION)"; exit 1;; esac
+
+check-golangci-lint-tool:
+	@actual="$$(golangci-lint version 2>/dev/null || true)"; case "$$actual" in *"$(GOLANGCI_LINT_VERSION_NUMBER)"*) ;; *) echo "golangci-lint $$actual does not match $(GOLANGCI_LINT_VERSION)"; exit 1;; esac
+
+lint-nongo:
+	bash scripts/check-non-go-format.sh
+
+lint-web:
+	npm ci --ignore-scripts
+	npm run lint:web
+
+lint-openapi:
+	npm ci --ignore-scripts
+	npm run lint:openapi
+
+lint-shell:
+	docker run --rm -v "$(CURDIR):/mnt" -w /mnt $(SHELLCHECK_IMAGE) scripts/*.sh scripts/lib/*.sh deploy/n8n/*.sh
+
+lint-docker:
+	docker run --rm -i $(HADOLINT_IMAGE) < Dockerfile
+
+lint-actions:
+	go install github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION)
+	actionlint
+
+lint-powershell:
+	pwsh -NoLogo -NoProfile -Command 'Install-Module -Name PSScriptAnalyzer -RequiredVersion $(PSSCRIPTANALYZER_VERSION) -Scope CurrentUser -Force; Invoke-ScriptAnalyzer -Path scripts -Recurse -Severity Error'
+
 security:
+	npm ci --ignore-scripts
+	npm audit --audit-level=high
 	govulncheck $(GO_PACKAGES)
 	gosec -nosec-require-rules -nosec-require-justification $(GOSEC_DIRS)
+	$(TRIVY) fs --scanners vuln --vuln-type library --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 .
 
 clean:
 	rm -f packmon packmon-server packmon.exe packmon-server.exe coverage.out

@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	dbpkg "github.com/8linkz-sec/packmon/internal/db"
 	"github.com/8linkz-sec/packmon/internal/version"
 )
 
@@ -12,6 +13,7 @@ import (
 // The ecosystem parameter is extracted from the affected_packages row and
 // used when the range type is ECOSYSTEM.
 func versionAffectedWithEcosystem(ver, versionRangesJSON, versionsJSON, ecosystem string) (bool, error) {
+	versionRangesJSON, versionsJSON = dbpkg.NormalizeVersionConstraintJSON(versionRangesJSON, versionsJSON)
 	return version.VersionAffected(ver, versionRangesJSON, versionsJSON, ecosystem)
 }
 

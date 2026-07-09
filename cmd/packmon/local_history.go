@@ -7,37 +7,64 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/8linkz-sec/packmon/internal/db/sqlite"
 	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
-const defaultMaxScansPerRepo = 100
+const (
+	defaultMaxScansPerRepo = 100
+	defaultHistoryMaxAge   = 90 * 24 * time.Hour
+)
 
-func historyEnabled() bool {
+func historyEnabled() (bool, error) {
 	value := strings.TrimSpace(strings.ToLower(os.Getenv("PACKMON_HISTORY_ENABLED")))
 	switch value {
 	case "", "1", "true", "yes", "on":
-		return true
+		return true, nil
 	case "0", "false", "no", "off":
-		return false
+		return false, nil
 	default:
-		return true
+		return false, fmt.Errorf("invalid PACKMON_HISTORY_ENABLED: expected boolean (true/false, 1/0, yes/no, on/off)")
 	}
 }
 
-func historyMaxScansPerRepo() int {
+func historyMaxScansPerRepo() (int, error) {
 	value := strings.TrimSpace(os.Getenv("PACKMON_HISTORY_MAX_SCANS_PER_REPO"))
 	if value == "" {
-		return defaultMaxScansPerRepo
+		return defaultMaxScansPerRepo, nil
 	}
 
 	maxPerRepo, err := strconv.Atoi(value)
-	if err != nil || maxPerRepo < 0 {
-		return defaultMaxScansPerRepo
+	if err != nil {
+		return 0, fmt.Errorf("invalid PACKMON_HISTORY_MAX_SCANS_PER_REPO: expected a non-negative integer")
+	}
+	if maxPerRepo < 0 {
+		return 0, fmt.Errorf("invalid PACKMON_HISTORY_MAX_SCANS_PER_REPO: must be zero or greater")
 	}
 
-	return maxPerRepo
+	return maxPerRepo, nil
+}
+
+func historyMaxAge() (time.Duration, error) {
+	value := strings.TrimSpace(os.Getenv("PACKMON_HISTORY_MAX_AGE"))
+	if value == "" {
+		return defaultHistoryMaxAge, nil
+	}
+	if value == "0" {
+		return 0, nil
+	}
+
+	maxAge, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("invalid PACKMON_HISTORY_MAX_AGE: expected a non-negative duration such as 720h or 0")
+	}
+	if maxAge < 0 {
+		return 0, fmt.Errorf("invalid PACKMON_HISTORY_MAX_AGE: must be zero or greater")
+	}
+
+	return maxAge, nil
 }
 
 func recordScanHistoryWithRepo(ctx context.Context, store *sqlite.Store, repo *domain.RepoInfo, result *domain.ScanResult) error {

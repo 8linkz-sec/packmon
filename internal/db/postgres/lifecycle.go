@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"github.com/8linkz-sec/packmon/internal/ioutils"
 	"strings"
 	"time"
 
@@ -14,17 +15,8 @@ import (
 
 const lifecycleSource = "endoflife.date"
 
-func (s *Store) UpsertLifecycleProducts(ctx context.Context, products []db.LifecycleProduct) error {
-	return withTx(ctx, s.pool, func(tx pgx.Tx) error {
-		return upsertLifecycleProductsTx(ctx, tx, products)
-	})
-}
-
 func (s *Store) ReplaceLifecycleProducts(ctx context.Context, products []db.LifecycleProduct) (int, error) {
 	slugs := lifecycleProductSlugs(products)
-	if len(slugs) == 0 {
-		return 0, nil
-	}
 
 	var deleted int
 	err := withTx(ctx, s.pool, func(tx pgx.Tx) error {
@@ -61,141 +53,25 @@ func upsertLifecycleProductsTx(ctx context.Context, tx pgx.Tx, products []db.Lif
 	}
 
 	for _, product := range products {
-		productSlug := strings.TrimSpace(product.ProductSlug)
-		if productSlug == "" {
+		productSlug, ok, err := upsertLifecycleProductPhaseTx(ctx, tx, product)
+		if err != nil {
+			return err
+		}
+		if !ok {
 			continue
-		}
-		name := strings.TrimSpace(product.Name)
-		if name == "" {
-			name = productSlug
-		}
-
-		if _, err := tx.Exec(ctx, `
-				INSERT INTO lifecycle_products (
-					product_slug, name, category, source, identifiers, raw, updated_at
-				) VALUES (
-					$1, $2, $3, $4, $5, $6, now()
-				)
-				ON CONFLICT (product_slug) DO UPDATE SET
-					name = EXCLUDED.name,
-					category = EXCLUDED.category,
-					source = EXCLUDED.source,
-					identifiers = EXCLUDED.identifiers,
-					raw = EXCLUDED.raw,
-					updated_at = now()`,
-			productSlug,
-			name,
-			product.Category,
-			lifecycleSource,
-			normalizeJSON(product.Identifiers, []byte("[]")),
-			normalizeJSON(product.Raw, []byte("{}")),
-		); err != nil {
-			return fmt.Errorf("postgres: upsert lifecycle product %s: %w", productSlug, err)
 		}
 
 		if err := recordLifecycleTombstonesForProduct(ctx, tx, productSlug); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `DELETE FROM lifecycle_releases WHERE product_slug = $1`, productSlug); err != nil {
-			return fmt.Errorf("postgres: delete lifecycle releases for %s: %w", productSlug, err)
+		if err := deleteLifecycleProductChildrenTx(ctx, tx, productSlug); err != nil {
+			return err
 		}
-		if _, err := tx.Exec(ctx, `DELETE FROM lifecycle_package_map WHERE product_slug = $1`, productSlug); err != nil {
-			return fmt.Errorf("postgres: delete lifecycle package maps for %s: %w", productSlug, err)
+		if err := upsertLifecycleReleasePhaseTx(ctx, tx, productSlug, product.Releases); err != nil {
+			return err
 		}
-
-		for _, release := range product.Releases {
-			cycle := strings.TrimSpace(release.Cycle)
-			if cycle == "" {
-				continue
-			}
-			releaseProductSlug := strings.TrimSpace(release.ProductSlug)
-			if releaseProductSlug == "" {
-				releaseProductSlug = productSlug
-			}
-			if _, err := tx.Exec(ctx, `
-					INSERT INTO lifecycle_releases (
-						product_slug, cycle, latest, release_date, is_lts, lts_from,
-						is_eoas, eoas_from, is_eol, eol_from, is_discontinued,
-						discontinued_from, is_eoes, eoes_from, is_maintained, raw, updated_at
-					) VALUES (
-						$1, $2, $3, $4, $5, $6,
-						$7, $8, $9, $10, $11,
-						$12, $13, $14, $15, $16, now()
-					)
-					ON CONFLICT (product_slug, cycle) DO UPDATE SET
-						latest = EXCLUDED.latest,
-						release_date = EXCLUDED.release_date,
-						is_lts = EXCLUDED.is_lts,
-						lts_from = EXCLUDED.lts_from,
-						is_eoas = EXCLUDED.is_eoas,
-						eoas_from = EXCLUDED.eoas_from,
-						is_eol = EXCLUDED.is_eol,
-						eol_from = EXCLUDED.eol_from,
-						is_discontinued = EXCLUDED.is_discontinued,
-						discontinued_from = EXCLUDED.discontinued_from,
-						is_eoes = EXCLUDED.is_eoes,
-						eoes_from = EXCLUDED.eoes_from,
-						is_maintained = EXCLUDED.is_maintained,
-						raw = EXCLUDED.raw,
-						updated_at = now()`,
-				releaseProductSlug,
-				cycle,
-				release.Latest,
-				release.ReleaseDate,
-				release.IsLTS,
-				release.LTSFrom,
-				release.IsEOAS,
-				release.EOASFrom,
-				release.IsEOL,
-				release.EOLFrom,
-				release.IsDiscontinued,
-				release.DiscontinuedFrom,
-				release.IsEOES,
-				release.EOESFrom,
-				release.IsMaintained,
-				normalizeJSON(release.Raw, []byte("{}")),
-			); err != nil {
-				return fmt.Errorf("postgres: upsert lifecycle release %s/%s: %w", releaseProductSlug, cycle, err)
-			}
-		}
-
-		for _, packageMap := range product.PackageMaps {
-			ecosystem := strings.TrimSpace(packageMap.Ecosystem)
-			name := normalizePackageName(ecosystem, strings.TrimSpace(packageMap.Name))
-			if ecosystem == "" || name == "" {
-				continue
-			}
-			mapProductSlug := strings.TrimSpace(packageMap.ProductSlug)
-			if mapProductSlug == "" {
-				mapProductSlug = productSlug
-			}
-			source := strings.TrimSpace(packageMap.Source)
-			if source == "" {
-				source = lifecycleSource
-			}
-			if _, err := tx.Exec(ctx, `
-					INSERT INTO lifecycle_package_map (
-						ecosystem, name, product_slug, purl_type, purl_namespace,
-						purl_name, source, updated_at
-					) VALUES (
-						$1, $2, $3, $4, $5, $6, $7, now()
-					)
-					ON CONFLICT (ecosystem, name, product_slug) DO UPDATE SET
-						purl_type = EXCLUDED.purl_type,
-						purl_namespace = EXCLUDED.purl_namespace,
-						purl_name = EXCLUDED.purl_name,
-						source = EXCLUDED.source,
-						updated_at = now()`,
-				ecosystem,
-				name,
-				mapProductSlug,
-				packageMap.PURLType,
-				packageMap.PURLNamespace,
-				packageMap.PURLName,
-				source,
-			); err != nil {
-				return fmt.Errorf("postgres: upsert lifecycle package map %s/%s: %w", ecosystem, name, err)
-			}
+		if err := upsertLifecyclePackageMapPhaseTx(ctx, tx, productSlug, product.PackageMaps); err != nil {
+			return err
 		}
 
 		if err := clearCurrentLifecycleTombstonesForProduct(ctx, tx, productSlug); err != nil {
@@ -205,20 +81,150 @@ func upsertLifecycleProductsTx(ctx context.Context, tx pgx.Tx, products []db.Lif
 	return nil
 }
 
-func (s *Store) DeleteLifecycleProductsNotIn(ctx context.Context, productSlugs []string) (int, error) {
-	if len(productSlugs) == 0 {
-		return 0, nil
+func upsertLifecycleProductPhaseTx(ctx context.Context, tx pgx.Tx, product db.LifecycleProduct) (string, bool, error) {
+	productSlug := strings.TrimSpace(product.ProductSlug)
+	if productSlug == "" {
+		return "", false, nil
 	}
-	var deleted int
-	err := withTx(ctx, s.pool, func(tx pgx.Tx) error {
-		var err error
-		deleted, err = deleteLifecycleProductsNotInTx(ctx, tx, productSlugs)
-		return err
-	})
-	if err != nil {
-		return 0, err
+	name := strings.TrimSpace(product.Name)
+	if name == "" {
+		name = productSlug
 	}
-	return deleted, nil
+
+	if _, err := tx.Exec(ctx, `
+			INSERT INTO lifecycle_products (
+				product_slug, name, category, source, identifiers, raw, updated_at
+			) VALUES (
+				$1, $2, $3, $4, $5, $6, now()
+			)
+			ON CONFLICT (product_slug) DO UPDATE SET
+				name = EXCLUDED.name,
+				category = EXCLUDED.category,
+				source = EXCLUDED.source,
+				identifiers = EXCLUDED.identifiers,
+				raw = EXCLUDED.raw,
+				updated_at = now()`,
+		productSlug,
+		name,
+		product.Category,
+		lifecycleSource,
+		normalizeJSON(product.Identifiers, []byte("[]")),
+		normalizeJSON(product.Raw, []byte("{}")),
+	); err != nil {
+		return "", false, fmt.Errorf("postgres: upsert lifecycle product %s: %w", productSlug, err)
+	}
+	return productSlug, true, nil
+}
+
+func deleteLifecycleProductChildrenTx(ctx context.Context, tx pgx.Tx, productSlug string) error {
+	if _, err := tx.Exec(ctx, `DELETE FROM lifecycle_releases WHERE product_slug = $1`, productSlug); err != nil {
+		return fmt.Errorf("postgres: delete lifecycle releases for %s: %w", productSlug, err)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM lifecycle_package_map WHERE product_slug = $1`, productSlug); err != nil {
+		return fmt.Errorf("postgres: delete lifecycle package maps for %s: %w", productSlug, err)
+	}
+	return nil
+}
+
+func upsertLifecycleReleasePhaseTx(ctx context.Context, tx pgx.Tx, productSlug string, releases []db.LifecycleRelease) error {
+	for _, release := range releases {
+		cycle := strings.TrimSpace(release.Cycle)
+		if cycle == "" {
+			continue
+		}
+		releaseProductSlug := strings.TrimSpace(release.ProductSlug)
+		if releaseProductSlug == "" {
+			releaseProductSlug = productSlug
+		}
+		if _, err := tx.Exec(ctx, `
+				INSERT INTO lifecycle_releases (
+					product_slug, cycle, latest, release_date, is_lts, lts_from,
+					is_eoas, eoas_from, is_eol, eol_from, is_discontinued,
+					discontinued_from, is_eoes, eoes_from, is_maintained, raw, updated_at
+				) VALUES (
+					$1, $2, $3, $4, $5, $6,
+					$7, $8, $9, $10, $11,
+					$12, $13, $14, $15, $16, now()
+				)
+				ON CONFLICT (product_slug, cycle) DO UPDATE SET
+					latest = EXCLUDED.latest,
+					release_date = EXCLUDED.release_date,
+					is_lts = EXCLUDED.is_lts,
+					lts_from = EXCLUDED.lts_from,
+					is_eoas = EXCLUDED.is_eoas,
+					eoas_from = EXCLUDED.eoas_from,
+					is_eol = EXCLUDED.is_eol,
+					eol_from = EXCLUDED.eol_from,
+					is_discontinued = EXCLUDED.is_discontinued,
+					discontinued_from = EXCLUDED.discontinued_from,
+					is_eoes = EXCLUDED.is_eoes,
+					eoes_from = EXCLUDED.eoes_from,
+					is_maintained = EXCLUDED.is_maintained,
+					raw = EXCLUDED.raw,
+					updated_at = now()`,
+			releaseProductSlug,
+			cycle,
+			release.Latest,
+			release.ReleaseDate,
+			release.IsLTS,
+			release.LTSFrom,
+			release.IsEOAS,
+			release.EOASFrom,
+			release.IsEOL,
+			release.EOLFrom,
+			release.IsDiscontinued,
+			release.DiscontinuedFrom,
+			release.IsEOES,
+			release.EOESFrom,
+			release.IsMaintained,
+			normalizeJSON(release.Raw, []byte("{}")),
+		); err != nil {
+			return fmt.Errorf("postgres: upsert lifecycle release %s/%s: %w", releaseProductSlug, cycle, err)
+		}
+	}
+	return nil
+}
+
+func upsertLifecyclePackageMapPhaseTx(ctx context.Context, tx pgx.Tx, productSlug string, packageMaps []db.LifecyclePackageMap) error {
+	for _, packageMap := range packageMaps {
+		ecosystem := strings.TrimSpace(packageMap.Ecosystem)
+		name := normalizePackageName(ecosystem, strings.TrimSpace(packageMap.Name))
+		if ecosystem == "" || name == "" {
+			continue
+		}
+		mapProductSlug := strings.TrimSpace(packageMap.ProductSlug)
+		if mapProductSlug == "" {
+			mapProductSlug = productSlug
+		}
+		source := strings.TrimSpace(packageMap.Source)
+		if source == "" {
+			source = lifecycleSource
+		}
+		if _, err := tx.Exec(ctx, `
+				INSERT INTO lifecycle_package_map (
+					ecosystem, name, product_slug, purl_type, purl_namespace,
+					purl_name, source, updated_at
+				) VALUES (
+					$1, $2, $3, $4, $5, $6, $7, now()
+				)
+				ON CONFLICT (ecosystem, name, product_slug) DO UPDATE SET
+					purl_type = EXCLUDED.purl_type,
+					purl_namespace = EXCLUDED.purl_namespace,
+					purl_name = EXCLUDED.purl_name,
+					source = EXCLUDED.source,
+					updated_at = now()`,
+			ecosystem,
+			name,
+			mapProductSlug,
+			packageMap.PURLType,
+			packageMap.PURLNamespace,
+			packageMap.PURLName,
+			source,
+		); err != nil {
+			return fmt.Errorf("postgres: upsert lifecycle package map %s/%s: %w", ecosystem, name, err)
+		}
+	}
+	return nil
 }
 
 func deleteLifecycleProductsNotInTx(ctx context.Context, tx pgx.Tx, productSlugs []string) (int, error) {
@@ -233,7 +239,7 @@ func deleteLifecycleProductsNotInTx(ctx context.Context, tx pgx.Tx, productSlugs
 	if err != nil {
 		return 0, fmt.Errorf("postgres: select stale lifecycle products: %w", err)
 	}
-	defer closeSilently(rows)
+	defer ioutils.CloseSilently(rows)
 
 	staleSlugs := make([]string, 0)
 	for rows.Next() {
@@ -377,7 +383,7 @@ func (s *Store) FindLifecycleFindingsBatch(ctx context.Context, packages []db.Pa
 	if err != nil {
 		return nil, fmt.Errorf("postgres: find lifecycle findings batch: %w", err)
 	}
-	defer closeSilently(rows)
+	defer ioutils.CloseSilently(rows)
 
 	rowsByPackage := make(map[ecoName][]lifecyclepolicy.ReleaseRow)
 	for rows.Next() {

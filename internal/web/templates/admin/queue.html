@@ -1,9 +1,93 @@
-{{define "title"}}Packmon - Admin Queue{{end}}
+{{define "title"}}{{t "page.admin.queue.title"}}{{end}}
+
+{{define "admin-queue-return-state"}}
+<input type="hidden" name="return_status" value="{{.QueueStatus}}">
+<input type="hidden" name="return_offset" value="{{.QueueCurrentOffset}}">
+{{end}}
+
+{{define "admin-queue-row-actions"}}
+{{$root := .Root}}
+{{$job := .Job}}
+<details class="no-print w-full sm:w-auto" data-admin-queue-row-actions data-no-print>
+  <summary
+    aria-label="{{t "admin.queue.row.actions_aria" $job.ID $job.Ecosystem $job.Name}}"
+    class="inline-flex min-h-11 w-full cursor-pointer items-center justify-center gap-2 rounded-md border
+      border-gray-500 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 active:bg-gray-100 pm-focus-ring sm:w-auto"
+  >
+    <span>{{t "admin.queue.row.actions"}}</span>
+    <span aria-hidden="true" data-admin-expand-affordance class="rounded border border-gray-500 px-1.5 py-0.5 text-xs font-semibold leading-none">{{t "admin.queue.row.manage"}}</span>
+  </summary>
+  <div class="no-print mt-2 flex flex-wrap gap-2 rounded-md border border-gray-200 bg-white p-3 shadow-sm" data-no-print>
+    <form action="/admin/queue/priority" method="POST" class="inline-flex items-center gap-2" data-submit-lock data-submit-lock-label="{{t "admin.queue.row.priority.saving"}}">
+      <input type="hidden" name="_csrf" value="{{$root.CSRFToken}}">
+      <input type="hidden" name="job_id" value="{{$job.ID}}">
+      {{template "admin-queue-return-state" $root}}
+      <select
+        name="priority"
+        aria-label="{{t "admin.queue.row.priority.aria" $job.ID $job.Ecosystem $job.Name}}"
+        aria-describedby="queue-priority-help"
+        class="pm-form-control w-auto"
+      >
+        {{range $root.QueuePriorityOptions}}
+        <option value="{{.Value}}" {{if eq $job.Priority .Value}}selected{{end}}>{{.Label}}</option>
+        {{end}}
+      </select>
+      <button
+        type="submit"
+        data-submit-lock-button
+        aria-label="{{t "admin.queue.row.priority.save_aria" $job.ID $job.Ecosystem $job.Name}}"
+        class="inline-flex min-h-11 items-center rounded-md px-3 py-2 text-sm font-medium
+          text-blue-700 hover:bg-blue-50 active:bg-blue-100 pm-focus-ring"
+      >{{t "admin.queue.row.priority.save"}}</button>
+    </form>
+    {{if $job.CanPause}}
+    <form action="/admin/queue/pause" method="POST" class="inline-flex" data-submit-lock data-submit-lock-label="{{t "admin.queue.row.pause.saving"}}">
+      <input type="hidden" name="_csrf" value="{{$root.CSRFToken}}">
+      <input type="hidden" name="job_id" value="{{$job.ID}}">
+      {{template "admin-queue-return-state" $root}}
+      <button
+        type="submit"
+        data-submit-lock-button
+        aria-label="{{t "admin.queue.row.pause_aria" $job.ID $job.Ecosystem $job.Name}}"
+        class="inline-flex min-h-11 items-center rounded-md px-3 py-2 text-sm font-medium
+          text-gray-700 hover:bg-gray-100 active:bg-gray-200 pm-focus-ring"
+      >{{t "admin.queue.row.pause"}}</button>
+    </form>
+    {{else if $job.CanResume}}
+    <form action="/admin/queue/resume" method="POST" class="inline-flex" data-submit-lock data-submit-lock-label="{{t "admin.queue.row.resume.saving"}}">
+      <input type="hidden" name="_csrf" value="{{$root.CSRFToken}}">
+      <input type="hidden" name="job_id" value="{{$job.ID}}">
+      {{template "admin-queue-return-state" $root}}
+      <button
+        type="submit"
+        data-submit-lock-button
+        aria-label="{{t "admin.queue.row.resume_aria" $job.ID $job.Ecosystem $job.Name}}"
+        class="inline-flex min-h-11 items-center rounded-md px-3 py-2 text-sm font-medium
+          text-blue-700 hover:bg-blue-50 active:bg-blue-100 pm-focus-ring"
+      >{{t "admin.queue.row.resume"}}</button>
+    </form>
+    {{else if $job.CanRetry}}
+    <form action="/admin/queue/retry" method="POST" class="inline-flex" data-submit-lock data-submit-lock-label="{{t "admin.queue.row.retry.saving"}}">
+      <input type="hidden" name="_csrf" value="{{$root.CSRFToken}}">
+      <input type="hidden" name="job_id" value="{{$job.ID}}">
+      {{template "admin-queue-return-state" $root}}
+      <button
+        type="submit"
+        data-submit-lock-button
+        aria-label="{{t "admin.queue.row.retry_aria" $job.ID $job.Ecosystem $job.Name}}"
+        class="inline-flex min-h-11 items-center rounded-md px-3 py-2 text-sm font-medium
+          text-blue-700 hover:bg-blue-50 active:bg-blue-100 pm-focus-ring"
+      >{{t "admin.queue.row.retry"}}</button>
+    </form>
+    {{end}}
+  </div>
+</details>
+{{end}}
 
 {{define "content"}}
 <div class="space-y-6">
 
-  {{template "admin-page-header" dict "Title" "Queue Management" "Section" "queue" "CSRFToken" .CSRFToken}}
+  {{template "admin-page-header" dict "Title" (t "admin.queue.heading") "Section" "queue" "CSRFToken" .CSRFToken}}
 
   {{template "admin-bootstrap-warning" .}}
 
@@ -11,101 +95,126 @@
   {{if .QueueStatsLoadError}}
   {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .QueueStatsLoadError}}
   {{else}}
-  <div class="grid grid-cols-2 sm:grid-cols-4 gap-4">
-    <div class="bg-white rounded-lg shadow p-5 border border-gray-200 text-center">
-      <div class="text-2xl font-semibold text-yellow-700">{{.QueueStats.Pending}}</div>
-      <div class="text-xs text-gray-500 uppercase mt-1">Pending</div>
-    </div>
-    <div class="bg-white rounded-lg shadow p-5 border border-gray-200 text-center">
-      <div class="text-2xl font-semibold text-blue-600">{{.QueueStats.Processing}}</div>
-      <div class="text-xs text-gray-500 uppercase mt-1">Processing</div>
-    </div>
-    <div class="bg-white rounded-lg shadow p-5 border border-gray-200 text-center">
-      <div class="text-2xl font-semibold text-green-600">{{.QueueStats.Done}}</div>
-      <div class="text-xs text-gray-500 uppercase mt-1">Done</div>
-    </div>
-    <div class="bg-white rounded-lg shadow p-5 border border-gray-200 text-center">
-      <div class="text-2xl font-semibold text-red-600">{{.QueueStats.Error}}</div>
-      <div class="text-xs text-gray-500 uppercase mt-1">Error</div>
-    </div>
-    <div class="bg-white rounded-lg shadow p-5 border border-gray-200 text-center">
-      <div class="text-2xl font-semibold text-gray-600">{{.QueueStats.Paused}}</div>
-      <div class="text-xs text-gray-500 uppercase mt-1">Paused</div>
-    </div>
+  <div class="grid grid-cols-2 sm:grid-cols-5 gap-4">
+    {{range .QueueStatCards}}
+    <a
+      href="{{.URL}}"
+      aria-label="{{.AriaLabel}}"
+      {{if .Active}}aria-current="page"{{end}}
+      class="block bg-white rounded-lg shadow p-5 border {{if .Active}}border-blue-300 bg-blue-50{{else}}border-gray-200{{end}}
+        text-center hover:shadow-md transition"
+    >
+      <dl class="grid grid-cols-1 gap-1">
+        <dt class="text-xs font-semibold uppercase tracking-wide text-gray-500">{{.Label}}</dt>
+        <dd class="text-2xl font-semibold {{.CountClass}}">{{.Count}}</dd>
+      </dl>
+    </a>
+    {{end}}
   </div>
   {{end}}
 
   <!-- Actions -->
   {{if not .BootstrapWarning}}
-  <div class="flex flex-wrap gap-3" data-admin-queue-bulk-actions>
+  <div class="no-print flex flex-wrap gap-3" data-admin-queue-bulk-actions data-no-print>
+    {{if gt .QueuePurgeCount 0}}
     <details class="w-full sm:w-auto">
-      <summary aria-label="Purge completed and errored queue jobs" class="inline-flex min-h-11 w-full cursor-pointer list-none items-center justify-center rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 sm:w-auto">
-        Purge Completed/Errored
+      <summary
+        aria-label="{{t "admin.queue.bulk.purge_aria"}}"
+        class="inline-flex min-h-11 w-full cursor-pointer items-center justify-center gap-2 rounded-md bg-red-600
+          px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-red-700 active:bg-red-800 pm-focus-ring pm-focus-ring-danger sm:w-auto"
+      >
+        <span>{{t "admin.queue.bulk.purge"}}</span>
+        <span aria-hidden="true" data-admin-expand-affordance class="rounded border border-white px-1.5 py-0.5 text-xs font-semibold leading-none">{{t "admin.queue.bulk.review"}}</span>
       </summary>
       <div class="mt-2 rounded-md border border-red-200 bg-white p-3 text-sm text-red-900 shadow-sm">
-        <p class="mb-2">Purge all completed and errored jobs?</p>
-        <form action="/admin/queue/purge" method="POST" class="inline-flex w-full sm:w-auto">
+        <p class="mb-2">{{t "admin.queue.bulk.purge_question" .QueuePurgePhrase}}</p>
+        <p class="mb-3">{{t "admin.queue.bulk.purge_impact"}}</p>
+        <form action="/admin/queue/purge" method="POST" class="inline-flex w-full sm:w-auto" data-submit-lock data-submit-lock-label="{{t "admin.queue.bulk.purging"}}">
           <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+          {{template "admin-queue-return-state" .}}
           <button
             type="submit"
-            aria-label="Confirm purge completed and errored queue jobs"
-            class="inline-flex min-h-11 w-full items-center justify-center rounded-md bg-red-700 px-3 py-2 text-sm font-medium text-white hover:bg-red-800 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 sm:w-auto"
+            data-submit-lock-button
+            aria-label="{{t "admin.queue.bulk.confirm_purge_aria" .QueuePurgeCount}}"
+            class="inline-flex min-h-11 w-full items-center justify-center rounded-md bg-red-700 px-3 py-2
+              text-sm font-medium text-white hover:bg-red-800 active:bg-red-900 pm-focus-ring pm-focus-ring-danger sm:w-auto"
           >
-            Confirm purge
+            {{t "admin.queue.bulk.confirm_purge"}}
           </button>
         </form>
       </div>
     </details>
+    {{else}}
+    <div
+      aria-disabled="true"
+      role="status"
+      class="inline-flex min-h-11 w-full items-center justify-center rounded-md border border-gray-500
+        bg-gray-100 px-4 py-2 text-sm font-medium text-gray-700 sm:w-auto"
+    >
+      {{t "admin.queue.bulk.no_purge"}}
+    </div>
+    {{end}}
+    {{range .QueueClearActions}}
+    {{if gt .Count 0}}
     <details class="w-full sm:w-auto">
-      <summary aria-label="Clear pending queue jobs" class="inline-flex min-h-11 w-full cursor-pointer list-none items-center justify-center rounded-md bg-gray-700 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 sm:w-auto">
-        Clear Pending
+      <summary
+        aria-label="{{t "admin.queue.bulk.clear_aria" .Status}}"
+        class="inline-flex min-h-11 w-full cursor-pointer items-center justify-center gap-2 rounded-md bg-red-600
+          px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-red-700 active:bg-red-800 pm-focus-ring pm-focus-ring-danger sm:w-auto"
+      >
+        <span>{{t "admin.queue.bulk.clear" .Label}}</span>
+        <span aria-hidden="true" data-admin-expand-affordance class="rounded border border-white px-1.5 py-0.5 text-xs font-semibold leading-none">{{t "admin.queue.bulk.review"}}</span>
       </summary>
-      <div class="mt-2 rounded-md border border-gray-200 bg-white p-3 text-sm text-gray-900 shadow-sm">
-        <p class="mb-2">Clear all pending jobs?</p>
-        <form action="/admin/queue/clear" method="POST" class="inline-flex w-full sm:w-auto">
-          <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
-          <input type="hidden" name="status" value="pending">
+      <div class="mt-2 rounded-md border border-red-200 bg-white p-3 text-sm text-red-900 shadow-sm">
+        <p class="mb-2">{{t "admin.queue.bulk.clear_question" .CountPhrase}}</p>
+        <p class="mb-3">{{t "admin.queue.bulk.clear_impact" .Label}}</p>
+        <form action="/admin/queue/clear" method="POST" class="inline-flex w-full sm:w-auto" data-submit-lock data-submit-lock-label="{{t "admin.queue.bulk.clearing"}}">
+          <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
+          <input type="hidden" name="status" value="{{.Status}}">
+          {{template "admin-queue-return-state" $}}
           <button
             type="submit"
-            aria-label="Confirm clear pending queue jobs"
-            class="inline-flex min-h-11 w-full items-center justify-center rounded-md bg-gray-800 px-3 py-2 text-sm font-medium text-white hover:bg-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 sm:w-auto"
+            data-submit-lock-button
+            aria-label="{{t "admin.queue.bulk.confirm_clear_aria" .Count .Status (word .Count "job" "jobs")}}"
+            class="inline-flex min-h-11 w-full items-center justify-center rounded-md bg-red-700 px-3 py-2
+              text-sm font-medium text-white hover:bg-red-800 active:bg-red-900 pm-focus-ring pm-focus-ring-danger sm:w-auto"
           >
-            Confirm clear pending
+            {{t "admin.queue.bulk.confirm_clear" .Status}}
           </button>
         </form>
       </div>
     </details>
-    <details class="w-full sm:w-auto">
-      <summary aria-label="Clear paused queue jobs" class="inline-flex min-h-11 w-full cursor-pointer list-none items-center justify-center rounded-md bg-gray-700 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 sm:w-auto">
-        Clear Paused
-      </summary>
-      <div class="mt-2 rounded-md border border-gray-200 bg-white p-3 text-sm text-gray-900 shadow-sm">
-        <p class="mb-2">Clear all paused jobs?</p>
-        <form action="/admin/queue/clear" method="POST" class="inline-flex w-full sm:w-auto">
-          <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
-          <input type="hidden" name="status" value="paused">
-          <button
-            type="submit"
-            aria-label="Confirm clear paused queue jobs"
-            class="inline-flex min-h-11 w-full items-center justify-center rounded-md bg-gray-800 px-3 py-2 text-sm font-medium text-white hover:bg-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 sm:w-auto"
-          >
-            Confirm clear paused
-          </button>
-        </form>
-      </div>
-    </details>
+    {{else}}
+    <div
+      aria-disabled="true"
+      role="status"
+      class="inline-flex min-h-11 w-full items-center justify-center rounded-md border border-gray-500
+        bg-gray-100 px-4 py-2 text-sm font-medium text-gray-700 sm:w-auto"
+    >
+      {{t "admin.queue.bulk.no_clear" .Status}}
+    </div>
+    {{end}}
+    {{end}}
   </div>
   {{end}}
 
   {{template "admin-flash-alerts" .}}
+  {{if .QueueStatusWarning}}
+  {{template "admin-alert" dict "Variant" "warning" "Icon" true "Message" .QueueStatusWarning}}
+  {{end}}
 
   <!-- Queue jobs table -->
-  <div class="bg-white rounded-lg shadow border border-gray-200">
+  <div class="pm-surface">
     <div class="px-5 py-3 border-b border-gray-200 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
       <h2 class="text-lg font-semibold">Recent Queue Jobs</h2>
       <div class="flex flex-wrap gap-2 text-xs">
         {{range .QueueFilters}}
-        <a href="{{.URL}}" class="inline-flex items-center rounded border px-2 py-1 font-medium {{if .Active}}border-blue-300 bg-blue-50 text-blue-700{{else}}border-gray-500 text-gray-700 hover:bg-gray-50{{end}}">{{.Label}}</a>
+        <a
+          href="{{.URL}}"
+          {{if .Active}}aria-current="page"{{end}}
+          class="inline-flex min-h-11 items-center justify-center rounded-md border px-3 py-2 font-medium pm-focus-ring
+            {{if .Active}}border-blue-300 bg-blue-50 text-blue-700{{else}}border-gray-500 text-gray-700 hover:bg-gray-50{{end}}"
+        >{{.Label}}</a>
         {{end}}
       </div>
     </div>
@@ -114,52 +223,72 @@
       {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .QueueJobsLoadError}}
     </div>
     {{else if .Jobs}}
-    <div class="flex items-center justify-between gap-3 px-5 py-3 text-xs text-gray-600 border-b border-gray-100">
+    <nav class="flex flex-wrap items-center justify-between gap-3 px-5 py-3 text-xs text-gray-600 border-b border-gray-100" aria-label="Queue job pages">
       <span>Showing queue jobs {{.QueuePageStart}}-{{.QueuePageEnd}}</span>
-      <div class="flex items-center gap-2">
+      <div class="flex flex-wrap items-center gap-2">
         {{if .QueueHasPrevious}}
-        <a href="{{.QueuePreviousURL}}" class="inline-flex items-center rounded border border-gray-500 px-2 py-1 text-gray-700 hover:bg-gray-50">Newer</a>
+        <a
+          href="{{.QueuePreviousURL}}"
+          class="inline-flex min-h-11 items-center justify-center rounded-md border border-gray-500 px-3 py-2
+            font-medium text-gray-700 hover:bg-gray-50 pm-focus-ring"
+        >Newer</a>
         {{end}}
         {{if .QueueHasNext}}
-        <a href="{{.QueueNextURL}}" class="inline-flex items-center rounded border border-gray-500 px-2 py-1 text-gray-700 hover:bg-gray-50">Older</a>
+        <a
+          href="{{.QueueNextURL}}"
+          class="inline-flex min-h-11 items-center justify-center rounded-md border border-gray-500 px-3 py-2
+            font-medium text-gray-700 hover:bg-gray-50 pm-focus-ring"
+        >Older</a>
         {{end}}
       </div>
+    </nav>
+    <div id="queue-priority-help" class="px-5 py-3 text-xs text-gray-700 border-b border-gray-100 bg-gray-50">
+      <span class="font-medium text-gray-900">Priority levels:</span>
+      {{range .QueuePriorityOptions}}
+      <span>{{.Label}}</span>
+      {{end}}
     </div>
     <div class="md:hidden divide-y divide-gray-100" data-admin-mobile-actions="queue">
       {{range .Jobs}}
+      {{$job := .}}
       <div class="p-5 space-y-4">
         <div class="flex items-start justify-between gap-3">
           <div class="min-w-0">
-            <a href="/package/{{.Ecosystem}}/{{.Name}}" class="font-medium text-blue-700 hover:underline break-words">{{.Ecosystem}}/{{.Name}}</a>
+            <a
+              href="/package/{{.Ecosystem}}/{{.Name}}"
+              aria-label="View package details for {{.Ecosystem}}/{{.Name}}"
+              class="inline-flex min-h-11 max-w-full items-center rounded-md px-3 py-2 font-medium
+                text-blue-700 hover:bg-blue-50 hover:underline pm-focus-ring"
+            ><span class="min-w-0 break-words"><bdi dir="auto">{{.Ecosystem}}</bdi>/<bdi dir="auto">{{.Name}}</bdi></span></a>
             <div class="mt-1 font-mono text-xs text-gray-500">Job {{.ID}}</div>
           </div>
-          <span class="shrink-0 inline-block px-2 py-0.5 rounded text-xs font-medium
-            {{if eq .Status "pending"}}bg-yellow-100 text-yellow-800
-            {{else if eq .Status "processing"}}bg-blue-100 text-blue-800
-            {{else if eq .Status "done"}}bg-green-100 text-green-800
-            {{else if eq .Status "paused"}}bg-gray-100 text-gray-700
-            {{else}}bg-red-100 text-red-800{{end}}
-          ">{{.Status}}</span>
+          <span class="shrink-0 inline-block px-2 py-0.5 rounded text-xs font-medium {{.StatusClass}}">{{.StatusLabel}}</span>
         </div>
         <dl class="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
           <div>
-            <dt class="text-xs uppercase text-gray-500">Source</dt>
+            <dt class="text-xs font-semibold uppercase tracking-wide text-gray-500">Source</dt>
             <dd class="mt-0.5 break-words">{{.Source}}</dd>
           </div>
           <div>
-            <dt class="text-xs uppercase text-gray-500">Priority</dt>
+            <dt class="text-xs font-semibold uppercase tracking-wide text-gray-500">Priority</dt>
             <dd class="mt-0.5">{{.Priority}}</dd>
           </div>
           <div>
-            <dt class="text-xs uppercase text-gray-500">Requested</dt>
-            <dd class="mt-0.5 text-gray-700"><time datetime="{{formatTimeISO .RequestedAt}}" aria-label="{{formatTime .RequestedAt}}">{{formatTimeAgo .RequestedAt}}</time></dd>
+            <dt class="text-xs font-semibold uppercase tracking-wide text-gray-500">Requested</dt>
+            <dd class="mt-0.5 text-gray-700">
+              <time data-local-time="relative" datetime="{{formatTimeISO .RequestedAt}}" aria-label="{{formatTime .RequestedAt}}">{{formatTimeAgo .RequestedAt}}</time>
+            </dd>
           </div>
           <div class="min-w-0">
-            <dt class="text-xs uppercase text-gray-500">Error</dt>
+            <dt class="text-xs font-semibold uppercase tracking-wide text-gray-500">Error</dt>
             <dd class="mt-0.5 break-words">
               {{if .Error}}
-              <details class="text-red-700">
-                <summary aria-label="Show full queue error for job {{.ID}}" class="cursor-pointer text-red-600">{{truncate .Error 80}}</summary>
+              <details class="text-red-700" data-print-open>
+                <summary
+                  aria-label="Show full queue error for job {{.ID}}"
+                  class="inline-flex min-h-11 cursor-pointer items-center rounded px-2 py-1 text-red-600
+                    hover:bg-red-50 active:bg-red-100 pm-focus-ring pm-focus-ring-danger"
+                >{{truncate .Error 80}}</summary>
                 <pre class="mt-2 whitespace-pre-wrap break-words rounded bg-red-50 p-2 text-xs text-red-800">{{.Error}}</pre>
               </details>
               {{else}}-{{end}}
@@ -167,46 +296,21 @@
           </div>
         </dl>
         {{if not $.BootstrapWarning}}
-        <div class="flex flex-wrap gap-2">
-          <form action="/admin/queue/priority" method="POST" class="inline-flex items-center gap-2" data-submit-lock data-submit-lock-label="Saving priority">
-            <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
-            <input type="hidden" name="job_id" value="{{.ID}}">
-            <select name="priority" aria-label="Priority for queue job {{.ID}} {{.Ecosystem}}/{{.Name}}" class="min-h-11 border border-gray-500 rounded-md px-3 py-2 text-sm">
-              <option value="0" {{if eq .Priority 0}}selected{{end}}>0</option>
-              <option value="1" {{if eq .Priority 1}}selected{{end}}>1</option>
-              <option value="2" {{if eq .Priority 2}}selected{{end}}>2</option>
-              <option value="3" {{if eq .Priority 3}}selected{{end}}>3</option>
-            </select>
-            <button type="submit" data-submit-lock-button aria-label="Save priority for queue job {{.ID}} {{.Ecosystem}}/{{.Name}}" class="inline-flex min-h-11 items-center rounded-md px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-50">Save</button>
-          </form>
-          {{if eq .Status "pending"}}
-          <form action="/admin/queue/pause" method="POST" class="inline-flex" data-submit-lock data-submit-lock-label="Pausing job">
-            <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
-            <input type="hidden" name="job_id" value="{{.ID}}">
-            <button type="submit" data-submit-lock-button aria-label="Pause queue job {{.ID}} {{.Ecosystem}}/{{.Name}}" class="inline-flex min-h-11 items-center rounded-md px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100">Pause</button>
-          </form>
-          {{else if eq .Status "paused"}}
-          <form action="/admin/queue/resume" method="POST" class="inline-flex" data-submit-lock data-submit-lock-label="Resuming job">
-            <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
-            <input type="hidden" name="job_id" value="{{.ID}}">
-            <button type="submit" data-submit-lock-button aria-label="Resume queue job {{.ID}} {{.Ecosystem}}/{{.Name}}" class="inline-flex min-h-11 items-center rounded-md px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-50">Resume</button>
-          </form>
-          {{else if or (eq .Status "done") (eq .Status "error")}}
-          <form action="/admin/queue/retry" method="POST" class="inline-flex" data-submit-lock data-submit-lock-label="Retrying job">
-            <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
-            <input type="hidden" name="job_id" value="{{.ID}}">
-            <button type="submit" data-submit-lock-button aria-label="Retry queue job {{.ID}} {{.Ecosystem}}/{{.Name}}" class="inline-flex min-h-11 items-center rounded-md px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-50">Retry</button>
-          </form>
-          {{end}}
-        </div>
+        {{template "admin-queue-row-actions" dict "Root" $ "Job" .}}
         {{end}}
       </div>
       {{end}}
     </div>
-    <div class="hidden md:block overflow-x-auto focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2" tabindex="0" role="region" aria-label="Refresh queue jobs table" data-admin-desktop-table="queue">
+    <div
+      class="hidden md:block pm-scroll-region"
+      tabindex="0"
+      role="region"
+      aria-label="Refresh queue jobs table"
+      data-admin-desktop-table="queue"
+    >
       <table class="min-w-full text-sm">
         <thead>
-          <tr class="text-left text-gray-500 border-b bg-gray-50">
+          <tr class="text-start text-gray-500 border-b bg-gray-50">
             <th class="px-5 py-2">ID</th>
             <th class="px-5 py-2">Package</th>
             <th class="px-5 py-2">Source</th>
@@ -214,69 +318,46 @@
             <th class="px-5 py-2">Status</th>
             <th class="px-5 py-2">Requested</th>
             <th class="px-5 py-2">Error</th>
-            <th class="px-5 py-2 text-right">Actions</th>
+            <th class="no-print px-5 py-2 text-end" data-no-print>Actions</th>
           </tr>
         </thead>
         <tbody>
           {{range .Jobs}}
+          {{$job := .}}
           <tr class="border-b border-gray-100 hover:bg-gray-50">
             <td class="px-5 py-2 font-mono text-xs">{{.ID}}</td>
             <td class="px-5 py-2">
-              <a href="/package/{{.Ecosystem}}/{{.Name}}" class="text-blue-600 hover:underline">{{.Ecosystem}}/{{.Name}}</a>
+              <a
+                href="/package/{{.Ecosystem}}/{{.Name}}"
+                aria-label="View package details for {{.Ecosystem}}/{{.Name}}"
+                class="inline-flex min-h-11 max-w-full items-center rounded-md px-3 py-2 font-medium
+                  text-blue-700 hover:bg-blue-50 hover:underline pm-focus-ring"
+              ><span class="min-w-0 break-words"><bdi dir="auto">{{.Ecosystem}}</bdi>/<bdi dir="auto">{{.Name}}</bdi></span></a>
             </td>
             <td class="px-5 py-2 text-xs">{{.Source}}</td>
             <td class="px-5 py-2 text-xs">{{.Priority}}</td>
             <td class="px-5 py-2">
-              <span class="inline-block px-2 py-0.5 rounded text-xs font-medium
-                {{if eq .Status "pending"}}bg-yellow-100 text-yellow-800
-                {{else if eq .Status "processing"}}bg-blue-100 text-blue-800
-                {{else if eq .Status "done"}}bg-green-100 text-green-800
-                {{else if eq .Status "paused"}}bg-gray-100 text-gray-700
-                {{else}}bg-red-100 text-red-800{{end}}
-              ">{{.Status}}</span>
+              <span class="inline-block px-2 py-0.5 rounded text-xs font-medium {{.StatusClass}}">{{.StatusLabel}}</span>
             </td>
-            <td class="px-5 py-2 text-gray-500"><time datetime="{{formatTimeISO .RequestedAt}}" aria-label="{{formatTime .RequestedAt}}">{{formatTimeAgo .RequestedAt}}</time></td>
+            <td class="px-5 py-2 text-gray-500">
+              <time data-local-time="relative" datetime="{{formatTimeISO .RequestedAt}}" aria-label="{{formatTime .RequestedAt}}">{{formatTimeAgo .RequestedAt}}</time>
+            </td>
             <td class="px-5 py-2 text-xs">
               {{if .Error}}
-              <details class="text-left text-red-700">
-                <summary aria-label="Show full queue error for job {{.ID}}" class="cursor-pointer text-red-600">{{truncate .Error 40}}</summary>
+              <details class="text-start text-red-700" data-print-open>
+                <summary
+                  aria-label="Show full queue error for job {{.ID}}"
+                  class="inline-flex min-h-11 cursor-pointer items-center rounded px-2 py-1 text-red-600
+                    hover:bg-red-50 active:bg-red-100 pm-focus-ring pm-focus-ring-danger"
+                >{{truncate .Error 40}}</summary>
                 <pre class="mt-2 whitespace-pre-wrap break-words rounded bg-red-50 p-2 text-xs text-red-800">{{.Error}}</pre>
               </details>
               {{else}}-{{end}}
             </td>
-            <td class="px-5 py-2">
+            <td class="no-print px-5 py-2" data-no-print>
               {{if not $.BootstrapWarning}}
-              <div class="flex flex-wrap justify-end gap-2">
-              <form action="/admin/queue/priority" method="POST" class="inline-flex items-center gap-2" data-submit-lock data-submit-lock-label="Saving priority">
-                <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
-                <input type="hidden" name="job_id" value="{{.ID}}">
-                <select name="priority" aria-label="Priority for queue job {{.ID}} {{.Ecosystem}}/{{.Name}}" class="min-h-11 border border-gray-500 rounded-md px-3 py-2 text-sm">
-                  <option value="0" {{if eq .Priority 0}}selected{{end}}>0</option>
-                  <option value="1" {{if eq .Priority 1}}selected{{end}}>1</option>
-                  <option value="2" {{if eq .Priority 2}}selected{{end}}>2</option>
-                  <option value="3" {{if eq .Priority 3}}selected{{end}}>3</option>
-                </select>
-                <button type="submit" data-submit-lock-button aria-label="Save priority for queue job {{.ID}} {{.Ecosystem}}/{{.Name}}" class="inline-flex min-h-11 items-center rounded-md px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-50">Save</button>
-              </form>
-              {{if eq .Status "pending"}}
-              <form action="/admin/queue/pause" method="POST" class="inline-flex" data-submit-lock data-submit-lock-label="Pausing job">
-                <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
-                <input type="hidden" name="job_id" value="{{.ID}}">
-                <button type="submit" data-submit-lock-button aria-label="Pause queue job {{.ID}} {{.Ecosystem}}/{{.Name}}" class="inline-flex min-h-11 items-center rounded-md px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100">Pause</button>
-              </form>
-              {{else if eq .Status "paused"}}
-              <form action="/admin/queue/resume" method="POST" class="inline-flex" data-submit-lock data-submit-lock-label="Resuming job">
-                <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
-                <input type="hidden" name="job_id" value="{{.ID}}">
-                <button type="submit" data-submit-lock-button aria-label="Resume queue job {{.ID}} {{.Ecosystem}}/{{.Name}}" class="inline-flex min-h-11 items-center rounded-md px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-50">Resume</button>
-              </form>
-              {{else if or (eq .Status "done") (eq .Status "error")}}
-              <form action="/admin/queue/retry" method="POST" class="inline-flex" data-submit-lock data-submit-lock-label="Retrying job">
-                <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
-                <input type="hidden" name="job_id" value="{{.ID}}">
-                <button type="submit" data-submit-lock-button aria-label="Retry queue job {{.ID}} {{.Ecosystem}}/{{.Name}}" class="inline-flex min-h-11 items-center rounded-md px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-50">Retry</button>
-              </form>
-              {{end}}
+              <div class="flex justify-end">
+                {{template "admin-queue-row-actions" dict "Root" $ "Job" .}}
               </div>
               {{end}}
             </td>
@@ -286,8 +367,26 @@
       </table>
     </div>
     {{else}}
-    <div class="px-5 py-8 text-center text-gray-600">
-      Queue is empty.
+    <div class="pm-empty-state">
+      {{$empty := .QueueEmptyState}}
+      <p class="text-sm font-medium text-gray-900">{{$empty.Title}}</p>
+      {{if $empty.Message}}<p class="mt-1 text-sm">{{$empty.Message}}</p>{{end}}
+      <div class="mt-4 flex flex-wrap justify-center gap-2">
+        {{if $empty.PrimaryURL}}
+        <a
+          href="{{$empty.PrimaryURL}}"
+          class="inline-flex min-h-11 items-center rounded-md border border-gray-500 px-3 py-2 text-sm font-medium
+            text-gray-700 hover:bg-gray-50"
+        >{{$empty.PrimaryLabel}}</a>
+        {{end}}
+        {{if $empty.SecondaryURL}}
+        <a
+          href="{{$empty.SecondaryURL}}"
+          class="inline-flex min-h-11 items-center rounded-md border border-gray-500 px-3 py-2 text-sm font-medium
+            text-gray-700 hover:bg-gray-50"
+        >{{$empty.SecondaryLabel}}</a>
+        {{end}}
+      </div>
     </div>
     {{end}}
   </div>

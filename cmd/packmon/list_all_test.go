@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -12,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -19,45 +21,81 @@ import (
 
 	"github.com/8linkz-sec/packmon/internal/dockerimage"
 	"github.com/8linkz-sec/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/scanner"
 )
 
-func TestRunListAllReusesScanPipelinePackageCollection(t *testing.T) {
-	t.Parallel()
+func TestRunListAllUsesScanPipelineInventorySemantics(t *testing.T) {
+	t.Setenv("PACKMON_HISTORY_ENABLED", "false")
+	dir := t.TempDir()
+	writeListAllPackageLock(t, dir,
+		listAllLockPackage{Name: "prod", Version: "1.0.0"},
+		listAllLockPackage{Name: "dev-only", Version: "1.0.0", Dev: true},
+	)
 
-	file, err := parser.ParseFile(token.NewFileSet(), "list_all.go", nil, 0)
-	if err != nil {
-		t.Fatalf("parse list_all.go: %v", err)
-	}
-	var runListAll *ast.FuncDecl
-	for _, decl := range file.Decls {
-		fn, ok := decl.(*ast.FuncDecl)
-		if ok && fn.Name.Name == "runListAll" {
-			runListAll = fn
-			break
+	checkRequests := make(chan domain.ScanRequest, 1)
+	checkServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/check" {
+			http.NotFound(w, r)
+			return
 		}
-	}
-	if runListAll == nil {
-		t.Fatal("runListAll not found")
-	}
+		if got := r.Header.Get("Authorization"); got != "Bearer remote-key" {
+			http.Error(w, "bad auth", http.StatusUnauthorized)
+			return
+		}
+		var req domain.ScanRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		checkRequests <- req
+		if err := writeJSONResponseForTest(w, domain.ScanResult{
+			ScanID:          "list-all-pipeline",
+			Mode:            "remote",
+			ScannedAt:       time.Now().UTC(),
+			PackagesScanned: len(req.Packages),
+			Findings:        []domain.Finding{},
+			FeedStatus:      "healthy",
+			FeedVersions:    map[string]string{"test": time.Now().UTC().Format(time.RFC3339)},
+		}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	}))
+	defer checkServer.Close()
 
-	ast.Inspect(runListAll.Body, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
+	settings := listAllSettings(dir, false)
+	settings.Mode = "remote"
+	settings.ServerURL = checkServer.URL
+	settings.APIKey = "remote-key"
+	settings.InsecureHTTP = true
+	settings.ListAllOffline = true
+	settings.Timeout = 2
+
+	var exitCode int
+	output := captureStdout(t, func() {
+		var err error
+		exitCode, err = runListAll(context.Background(), settings)
+		if err != nil {
+			t.Fatalf("runListAll: %v", err)
 		}
-		switch fun := call.Fun.(type) {
-		case *ast.SelectorExpr:
-			if ident, ok := fun.X.(*ast.Ident); ok && ident.Name == "scanner" && fun.Sel.Name == "CollectPackages" {
-				t.Fatalf("runListAll calls scanner.CollectPackages directly; reuse runScanPipeline collection instead")
-			}
-		case *ast.Ident:
-			switch fun.Name {
-			case "collectAllPackages", "collectAllPackagesWithWarnings":
-				t.Fatalf("runListAll calls %s; reuse runScanPipeline collection instead", fun.Name)
-			}
-		}
-		return true
 	})
+	if exitCode != ExitOK {
+		t.Fatalf("exitCode = %d, want %d", exitCode, ExitOK)
+	}
+
+	select {
+	case req := <-checkRequests:
+		if len(req.Packages) != 1 || req.Packages[0].Name != "prod" {
+			t.Fatalf("remote list-all check packages = %#v, want only prod by default", req.Packages)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("remote list-all check request was not received")
+	}
+
+	for _, want := range []string{"No findings in 1 package.", "prod", "dev-only", "2 packages ("} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("list-all output missing %q:\n%s", want, output)
+		}
+	}
 }
 
 func writeFile(t *testing.T, path, content string) {
@@ -65,6 +103,41 @@ func writeFile(t *testing.T, path, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatalf("write %s: %v", path, err)
 	}
+}
+
+type listAllLockPackage struct {
+	Name    string
+	Version string
+	Dev     bool
+}
+
+func writeListAllPackageLock(t *testing.T, dir string, packages ...listAllLockPackage) {
+	t.Helper()
+
+	type lockPackage struct {
+		Version string `json:"version"`
+		Dev     bool   `json:"dev,omitempty"`
+	}
+	lock := struct {
+		Name            string                 `json:"name"`
+		LockfileVersion int                    `json:"lockfileVersion"`
+		Packages        map[string]lockPackage `json:"packages"`
+	}{
+		Name:            "test",
+		LockfileVersion: 3,
+		Packages:        make(map[string]lockPackage, len(packages)),
+	}
+	for _, pkg := range packages {
+		lock.Packages["node_modules/"+pkg.Name] = lockPackage{
+			Version: pkg.Version,
+			Dev:     pkg.Dev,
+		}
+	}
+	out, err := json.MarshalIndent(lock, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal package-lock fixture: %v", err)
+	}
+	writeFile(t, filepath.Join(dir, "package-lock.json"), string(out))
 }
 
 func TestListAllPackageTechnologies(t *testing.T) {
@@ -221,8 +294,463 @@ func TestListAllHTMLIncludesTechnologyColumn(t *testing.T) {
 	}
 }
 
+func TestListAllHTMLExposesMachineReadableReportTimeAndLanguage(t *testing.T) {
+	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+	report := listAllPackageReport{
+		ScannedAt: "2026-05-30 10:00 UTC",
+		Rows: []listAllRow{{
+			Name:       "left-pad",
+			Installed:  "1.3.0",
+			Latest:     "1.3.0",
+			Update:     "-",
+			Ecosystem:  "npm",
+			Source:     "lockfile",
+			Scope:      "runtime",
+			Relation:   "direct",
+			Technology: "-",
+			Vuln:       "-",
+			LockFile:   "package-lock.json",
+		}},
+	}
+	result := &domain.ScanResult{Mode: "remote"}
+
+	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+		t.Fatalf("writeListAllHTML: %v", err)
+	}
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read HTML: %v", err)
+	}
+	out := string(data)
+	for _, want := range []string{
+		`<html lang="en" dir="auto">`,
+		`<time datetime="2026-05-30T10:00:00Z" data-report-time="scanned-at">2026-05-30 10:00 UTC</time>`,
+		`Intl.DateTimeFormat`,
+		`Intl.NumberFormat`,
+		`querySelectorAll('time[data-report-time][datetime]')`,
+		`querySelectorAll('[data-report-duration][data-duration-ms]')`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("list-all HTML timing/language hook missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestListAllHTMLTemplateUsesMessageDataForStaticReportLabels(t *testing.T) {
+	for _, want := range []string{
+		`{{.Messages.ReportType}}`,
+		`{{.Messages.ModeSuffix}}`,
+		`{{.Messages.PackagesNeedingAttentionHeading}}`,
+		`{{.Messages.SecurityFindingsHeading}}`,
+		`{{.Messages.AllPackagesHeading}}`,
+		`{{.Messages.CheckedInventorySourcesHeading}}`,
+		`{{.Messages.CopyButton}}`,
+		`{{printf $.Messages.OpenInNewTabAriaLabel .Advisory}}`,
+		`{{$.Messages.OpenInNewTabScreenReader}}`,
+	} {
+		if !strings.Contains(listAllHTML, want) {
+			t.Fatalf("list-all template missing message field %q", want)
+		}
+	}
+	for _, scattered := range []string{
+		"<h2>Packages Needing Attention</h2>",
+		"<h2>Security Findings</h2>",
+		"<summary>All Packages",
+		"<h2>Checked Inventory Sources</h2>",
+		">Copy</button>",
+		"opens in a new tab",
+		"<div class=\"footer\">fail-on",
+	} {
+		if strings.Contains(listAllHTML, scattered) {
+			t.Fatalf("list-all template still has scattered label %q", scattered)
+		}
+	}
+}
+
+func TestListAllHTMLCollapsesFullPackageInventoryByDefault(t *testing.T) {
+	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+	report := listAllPackageReport{
+		Rows: []listAllRow{
+			{
+				Name:       "left-pad",
+				Installed:  "1.3.0",
+				Latest:     "1.3.0",
+				Update:     "-",
+				Ecosystem:  "npm",
+				Source:     "lockfile",
+				Scope:      "runtime",
+				Relation:   "direct",
+				Technology: "-",
+				Vuln:       "-",
+				LockFile:   "package-lock.json",
+			},
+			{
+				Name:       "lodash",
+				Installed:  "4.17.21",
+				Latest:     "4.17.21",
+				Update:     "-",
+				Ecosystem:  "npm",
+				Source:     "lockfile",
+				Scope:      "runtime",
+				Relation:   "direct",
+				Technology: "-",
+				Vuln:       "-",
+				LockFile:   "package-lock.json",
+			},
+		},
+	}
+
+	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, &domain.ScanResult{Mode: "local"}, report); err != nil {
+		t.Fatalf("writeListAllHTML: %v", err)
+	}
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read HTML: %v", err)
+	}
+	out := string(data)
+	if !strings.Contains(out, `<details class="inventory-details">`) {
+		t.Fatalf("full package inventory should be in a closed details element:\n%s", out)
+	}
+	if strings.Contains(out, `<details class="inventory-details" open>`) {
+		t.Fatalf("full package inventory details should not be open by default:\n%s", out)
+	}
+	if !strings.Contains(out, `<summary>All Packages <span class="count">(2 packages)</span></summary>`) {
+		t.Fatalf("full package inventory summary should show package count:\n%s", out)
+	}
+	if strings.Index(out, `<details class="inventory-details">`) > strings.Index(out, `aria-label="All packages table"`) {
+		t.Fatalf("all packages table should be nested inside the collapsed details element:\n%s", out)
+	}
+}
+
+func TestListAllHTMLReportDoesNotRetainDuplicatePackageInventory(t *testing.T) {
+	htmlSourceBytes, err := os.ReadFile("list_all_html.go") // #nosec G304 -- test inspects package source.
+	if err != nil {
+		t.Fatalf("read list_all_html.go: %v", err)
+	}
+	htmlSource := string(htmlSourceBytes)
+
+	writeBody := goFunctionBodyForTest(t, htmlSource, "writeListAllHTML")
+	for _, forbidden := range []string{
+		"PackageRows   []listAllHTMLPackageRow",
+		"listAllHTMLPackageRows(packages.Rows",
+	} {
+		if strings.Contains(writeBody, forbidden) {
+			t.Fatalf("writeListAllHTML retains duplicate package inventory via %q:\n%s", forbidden, writeBody)
+		}
+	}
+
+	listAllSourceBytes, err := os.ReadFile("list_all.go") // #nosec G304 -- test inspects package source.
+	if err != nil {
+		t.Fatalf("read list_all.go: %v", err)
+	}
+	findingRowsBody := goFunctionBodyForTest(t, string(listAllSourceBytes), "listAllFindingRows")
+	if strings.Contains(findingRowsBody, "listAllRowsByPackage(") {
+		t.Fatalf("listAllFindingRows builds a full package metadata map for HTML reports:\n%s", findingRowsBody)
+	}
+}
+
+func TestListAllHTMLRendererDefinitionsStayInHTMLFile(t *testing.T) {
+	listAllDecls := goTopLevelDeclarationNamesForTest(t, "list_all.go")
+	htmlDecls := goTopLevelDeclarationNamesForTest(t, "list_all_html.go")
+
+	var buried []string
+	for name := range listAllDecls {
+		if name == "writeListAllHTML" ||
+			strings.HasPrefix(name, "listAllHTML") ||
+			strings.HasPrefix(name, "maxListAllHTML") {
+			buried = append(buried, name)
+		}
+	}
+	if len(buried) > 0 {
+		sort.Strings(buried)
+		t.Fatalf("list-all HTML renderer declarations are buried in list_all.go: %v", buried)
+	}
+
+	for _, name := range []string{
+		"writeListAllHTML",
+		"listAllHTML",
+		"listAllHTMLTemplate",
+		"listAllHTMLMessages",
+		"defaultListAllHTMLMessages",
+		"listAllHTMLPackageRow",
+		"listAllHTMLFindingState",
+		"listAllHTMLPackageView",
+		"listAllHTMLWarnings",
+	} {
+		if _, ok := htmlDecls[name]; !ok {
+			t.Fatalf("list_all_html.go is missing list-all HTML renderer declaration %q", name)
+		}
+	}
+}
+
+func goFunctionBodyForTest(t *testing.T, source, name string) string {
+	t.Helper()
+
+	start := strings.Index(source, "func "+name+"(")
+	if start == -1 {
+		t.Fatalf("source missing function %s", name)
+	}
+	open := strings.Index(source[start:], "{")
+	if open == -1 {
+		t.Fatalf("source function %s missing opening brace", name)
+	}
+	open += start
+	depth := 0
+	for i := open; i < len(source); i++ {
+		switch source[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return source[open+1 : i]
+			}
+		}
+	}
+	t.Fatalf("source function %s missing closing brace", name)
+	return ""
+}
+
+func goTopLevelDeclarationNamesForTest(t *testing.T, path string) map[string]struct{} {
+	t.Helper()
+
+	file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	names := make(map[string]struct{})
+	for _, decl := range file.Decls {
+		switch decl := decl.(type) {
+		case *ast.FuncDecl:
+			names[decl.Name.Name] = struct{}{}
+		case *ast.GenDecl:
+			for _, spec := range decl.Specs {
+				switch spec := spec.(type) {
+				case *ast.TypeSpec:
+					names[spec.Name.Name] = struct{}{}
+				case *ast.ValueSpec:
+					for _, name := range spec.Names {
+						names[name.Name] = struct{}{}
+					}
+				}
+			}
+		}
+	}
+	return names
+}
+
+func TestListAllHTMLIncludesStandaloneCSPMeta(t *testing.T) {
+	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+	report := listAllPackageReport{
+		Rows: []listAllRow{{
+			Name:      "left-pad",
+			Installed: "1.3.0",
+			Latest:    "1.3.0",
+			Update:    "-",
+			Ecosystem: "npm",
+			Source:    "lockfile",
+			Scope:     "runtime",
+			Relation:  "direct",
+			Vuln:      "-",
+			LockFile:  "package-lock.json",
+		}},
+	}
+
+	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, &domain.ScanResult{Mode: "local"}, report); err != nil {
+		t.Fatalf("writeListAllHTML: %v", err)
+	}
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read HTML: %v", err)
+	}
+	out := string(data)
+	want := `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">`
+	if !strings.Contains(out, want) {
+		t.Fatalf("list-all HTML missing CSP meta %q:\n%s", want, out)
+	}
+	if strings.Index(out, want) > strings.Index(out, "<style>") {
+		t.Fatalf("CSP meta should appear before inline styles:\n%s", out)
+	}
+}
+
+func TestListAllHTMLUsesMainLandmark(t *testing.T) {
+	out := renderListAllAccessibilityHTML(t)
+
+	assertCLIHTMLUsesMainWrapLandmark(t, out)
+}
+
+func TestListAllHTMLTableHeadersUseColumnScope(t *testing.T) {
+	out := renderListAllAccessibilityHTML(t)
+
+	assertHTMLTableHeadersHaveColumnScope(t, out)
+}
+
+func TestListAllHTMLFindingSectionClassesHaveCSSRules(t *testing.T) {
+	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+	report := listAllPackageReport{
+		Rows: []listAllRow{{
+			Name:      "left-pad",
+			Installed: "1.0.0",
+			Latest:    "1.0.0",
+			Update:    "-",
+			Ecosystem: "npm",
+			Source:    "lockfile",
+			Scope:     "runtime",
+			Relation:  "direct",
+			Vuln:      "yes",
+			LockFile:  "package-lock.json",
+		}},
+	}
+	result := &domain.ScanResult{
+		Mode: "local",
+		Findings: []domain.Finding{
+			{Name: "badpkg", Version: "1.0.0", Ecosystem: domain.EcosystemNPM, Type: domain.FindingTypeMalicious, Severity: domain.SeverityCritical, Title: "malicious package"},
+			{Name: "riskpkg", Version: "1.0.0", Ecosystem: domain.EcosystemNPM, Type: domain.FindingTypeSupplyChainRisk, Severity: domain.SeverityHigh, Title: "supply-chain risk"},
+			{Name: "left-pad", Version: "1.0.0", Ecosystem: domain.EcosystemNPM, Type: domain.FindingTypeVulnerability, Severity: domain.SeverityHigh, AdvisoryID: "GHSA-test", Title: "known vulnerability"},
+			{Name: "oldpkg", Version: "1.0.0", Ecosystem: domain.EcosystemNPM, Type: domain.FindingTypeLifecycle, Severity: domain.SeverityLow, Title: "lifecycle warning"},
+			{Name: "unknownpkg", Version: "1.0.0", Ecosystem: domain.EcosystemNPM, Type: domain.FindingType("experimental"), Severity: domain.SeverityMedium, Title: "unknown finding type"},
+		},
+	}
+
+	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+		t.Fatalf("writeListAllHTML: %v", err)
+	}
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read HTML: %v", err)
+	}
+	out := string(data)
+	classes := emittedListAllFindingSectionClasses(out)
+	if len(classes) == 0 {
+		t.Fatalf("list-all HTML emitted no finding section classes:\n%s", out)
+	}
+	for class := range classes {
+		if !strings.Contains(out, ".finding-section h3."+class+"{") {
+			t.Errorf("finding section class %q was emitted without a matching CSS rule", class)
+		}
+	}
+	if !classes["s-other"] {
+		t.Errorf("unknown finding type did not emit fallback s-other section; classes=%v", classes)
+	}
+	if strings.Contains(out, ".ok{") {
+		t.Errorf("list-all HTML still defines stale .ok CSS without emitting a success badge")
+	}
+	if strings.Contains(out, `class="badge ok"`) {
+		t.Errorf("list-all HTML unexpectedly emits a success badge; update the .ok assertion if this becomes intentional")
+	}
+}
+
+func renderListAllAccessibilityHTML(t *testing.T) string {
+	t.Helper()
+
+	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+	report := listAllPackageReport{
+		Rows: []listAllRow{{
+			Name:       "left-pad",
+			Installed:  "1.0.0",
+			Latest:     "1.3.0",
+			Update:     "yes",
+			Ecosystem:  "npm",
+			Source:     "lockfile",
+			Scope:      "runtime",
+			Relation:   "direct",
+			Technology: "-",
+			Vuln:       "yes",
+			LockFile:   "package-lock.json",
+		}},
+		WithUpdates: 1,
+		Vulnerable:  1,
+	}
+	result := &domain.ScanResult{
+		Mode:            "remote",
+		PackagesScanned: 1,
+		Findings: []domain.Finding{{
+			Name:         "left-pad",
+			Version:      "1.0.0",
+			Ecosystem:    domain.EcosystemNPM,
+			Type:         domain.FindingTypeVulnerability,
+			Severity:     domain.SeverityHigh,
+			AdvisoryID:   "GHSA-test",
+			Title:        "test advisory",
+			FixedVersion: "1.3.0",
+			Source:       "osv",
+			URL:          "https://osv.dev/vuln/GHSA-test",
+		}},
+	}
+	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+		t.Fatalf("writeListAllHTML: %v", err)
+	}
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read HTML: %v", err)
+	}
+	return string(data)
+}
+
 func contains(haystack, needle string) bool {
 	return strings.Contains(haystack, needle)
+}
+
+func assertCLIHTMLUsesMainWrapLandmark(t *testing.T, out string) {
+	t.Helper()
+
+	if strings.Count(out, `<main class="wrap">`) != 1 {
+		t.Fatalf("HTML report should render one main wrap landmark:\n%s", out)
+	}
+	if !strings.Contains(out, "</main>") {
+		t.Fatalf("HTML report should close the main landmark:\n%s", out)
+	}
+	if strings.Contains(out, `<div class="wrap">`) {
+		t.Fatalf("HTML report still uses a top-level div wrapper:\n%s", out)
+	}
+}
+
+func assertHTMLTableHeadersHaveColumnScope(t *testing.T, out string) {
+	t.Helper()
+
+	remaining := out
+	for {
+		idx := strings.Index(remaining, "<th")
+		if idx == -1 {
+			return
+		}
+		remaining = remaining[idx:]
+		if len(remaining) > len("<th") && remaining[len("<th")] != ' ' && remaining[len("<th")] != '>' {
+			remaining = remaining[len("<th"):]
+			continue
+		}
+		end := strings.Index(remaining, ">")
+		if end == -1 {
+			t.Fatalf("HTML report contains an unterminated table header:\n%s", remaining)
+		}
+		tag := remaining[:end+1]
+		if !strings.Contains(tag, `scope="col"`) {
+			t.Fatalf("HTML table header missing scope=\"col\": %s\nFull HTML:\n%s", tag, out)
+		}
+		remaining = remaining[end+1:]
+	}
+}
+
+func emittedListAllFindingSectionClasses(out string) map[string]bool {
+	classes := make(map[string]bool)
+	remaining := out
+	for {
+		idx := strings.Index(remaining, `<h3 class="`)
+		if idx == -1 {
+			return classes
+		}
+		remaining = remaining[idx+len(`<h3 class="`):]
+		end := strings.Index(remaining, `"`)
+		if end == -1 {
+			return classes
+		}
+		for _, class := range strings.Fields(remaining[:end]) {
+			if strings.HasPrefix(class, "s-") {
+				classes[class] = true
+			}
+		}
+		remaining = remaining[end+1:]
+	}
 }
 
 // stubLatestVersion returns a resolver that keeps package table tests off the
@@ -230,11 +758,6 @@ func contains(haystack, needle string) bool {
 func stubLatestVersion(t *testing.T, fn func(ctx context.Context, eco domain.Ecosystem, name string) string) packageUpdateResolver {
 	t.Helper()
 	return packageUpdateResolver{fetchLatest: fn}
-}
-
-func stubLatestVersionContext(t *testing.T, fn func(ctx context.Context, eco domain.Ecosystem, name string) string) context.Context {
-	t.Helper()
-	return contextWithPackageUpdateResolver(context.Background(), stubLatestVersion(t, fn))
 }
 
 // isolatedListAllEnv isolates config discovery and points the local DB at a
@@ -251,18 +774,30 @@ func isolatedListAllEnv(t *testing.T) {
 	}
 }
 
-func TestCollectAllPackagesMalformedSBOMReturnsParserExit(t *testing.T) {
+func TestRunListAllMalformedSBOMReturnsParserExit(t *testing.T) {
+	isolatedListAllEnv(t)
 	dir := t.TempDir()
 	badPath := filepath.Join(dir, "bad.cdx.json")
 	writeFile(t, badPath, `{"bomFormat":"CycloneDX",`)
 
-	_, err := collectAllPackages(scanSettings{
-		Path:      dir,
-		MaxDepth:  2,
-		SBOMFiles: []string{badPath},
+	var exitCode int
+	var err error
+	captureStdout(t, func() {
+		exitCode, err = runListAll(context.Background(), scanSettings{
+			Path:      dir,
+			Mode:      "local",
+			FailOn:    "CRITICAL",
+			MaxDepth:  2,
+			Timeout:   1,
+			NoColor:   true,
+			SBOMFiles: []string{badPath},
+		})
 	})
 	if err == nil {
-		t.Fatal("collectAllPackages(malformed SBOM) error = nil")
+		t.Fatal("runListAll(malformed SBOM) error = nil")
+	}
+	if exitCode != ExitParser {
+		t.Fatalf("exitCode = %d, want %d; err=%v", exitCode, ExitParser, err)
 	}
 	if code := exitCodeForError(err); code != ExitParser {
 		t.Fatalf("exitCodeForError = %d, want %d; err=%v", code, ExitParser, err)
@@ -296,20 +831,22 @@ func listAllSettings(dir string, quiet bool) scanSettings {
 	}
 }
 
+func listAllSettingsWithResolver(dir string, quiet bool, resolver packageUpdateResolver) scanSettings {
+	settings := listAllSettings(dir, quiet)
+	settings.resolver = resolver
+	return settings
+}
+
 func TestRunListAll_ListsAllPackagesWithUpdateInfo(t *testing.T) {
 	isolatedListAllEnv(t)
 	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, "package-lock.json"), `{
-  "name": "test",
-  "lockfileVersion": 3,
-  "packages": {
-    "node_modules/leftpad": { "version": "1.0.0" },
-    "node_modules/lodash": { "version": "4.17.15" }
-  }
-}`)
+	writeListAllPackageLock(t, dir,
+		listAllLockPackage{Name: "leftpad", Version: "1.0.0"},
+		listAllLockPackage{Name: "lodash", Version: "4.17.15"},
+	)
 
 	// leftpad has a newer version, lodash is up to date.
-	ctx := stubLatestVersionContext(t, func(_ context.Context, _ domain.Ecosystem, name string) string {
+	resolver := stubLatestVersion(t, func(_ context.Context, _ domain.Ecosystem, name string) string {
 		switch name {
 		case "leftpad":
 			return "2.0.0"
@@ -321,7 +858,7 @@ func TestRunListAll_ListsAllPackagesWithUpdateInfo(t *testing.T) {
 	})
 
 	out := captureStdout(t, func() {
-		if _, err := runListAll(ctx, listAllSettings(dir, false)); err != nil {
+		if _, err := runListAll(context.Background(), listAllSettingsWithResolver(dir, false, resolver)); err != nil {
 			t.Fatalf("runListAll: %v", err)
 		}
 	})
@@ -349,30 +886,24 @@ func TestRunListAll_ListsAllPackagesWithUpdateInfo(t *testing.T) {
 func TestRunListAllOfflineSkipsExternalLookups(t *testing.T) {
 	isolatedListAllEnv(t)
 	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, "package-lock.json"), `{
-  "name": "test",
-  "lockfileVersion": 3,
-  "packages": {
-    "node_modules/private-name": { "version": "1.0.0" }
-  }
-}`)
+	writeListAllPackageLock(t, dir, listAllLockPackage{Name: "private-name", Version: "1.0.0"})
 	writeFile(t, filepath.Join(dir, "Dockerfile"), "FROM docker.io/library/nginx:1.25\n")
 
 	var called atomic.Bool
-	ctx := stubLatestVersionContext(t, func(_ context.Context, _ domain.Ecosystem, _ string) string {
+	resolver := stubLatestVersion(t, func(_ context.Context, _ domain.Ecosystem, _ string) string {
 		called.Store(true)
 		return "2.0.0"
 	})
 	oldDockerResolver := resolveDockerImageStatusFn
 	var dockerCalled atomic.Bool
-	resolveDockerImageStatusFn = func(context.Context, listAllPackage, map[string]string) packageLatestStatus {
+	resolveDockerImageStatusFn = func(context.Context, listAllPackage, map[string]string, dockerDigestResolver) packageLatestStatus {
 		dockerCalled.Store(true)
 		return packageLatestStatus{Latest: "sha256:remote", Update: "yes"}
 	}
 	t.Cleanup(func() { resolveDockerImageStatusFn = oldDockerResolver })
 
 	out := captureStdout(t, func() {
-		if _, err := runListAll(ctx, scanSettings{
+		if _, err := runListAll(context.Background(), scanSettings{
 			TargetName:     "x",
 			Path:           dir,
 			Mode:           "local",
@@ -382,6 +913,7 @@ func TestRunListAllOfflineSkipsExternalLookups(t *testing.T) {
 			Quiet:          false,
 			NoColor:        true,
 			ListAllOffline: true,
+			resolver:       resolver,
 		}); err != nil {
 			t.Fatalf("runListAll offline: %v", err)
 		}
@@ -406,22 +938,18 @@ func TestScanCommandListAllOfflineFlagSkipsExternalLookups(t *testing.T) {
 	t.Setenv("PACKMON_DB_PATH", dbDir)
 	seedListAllAdvisory(t, dbDir)
 	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, "package-lock.json"), `{
-  "name": "test",
-  "lockfileVersion": 3,
-  "packages": {
-    "node_modules/private-name": { "version": "1.0.0" }
-  }
-}`)
+	writeListAllPackageLock(t, dir, listAllLockPackage{Name: "private-name", Version: "1.0.0"})
+	writeFile(t, filepath.Join(dir, "Dockerfile"), "FROM docker.io/library/nginx:1.25\n")
 
-	var called atomic.Bool
-	ctx := stubLatestVersionContext(t, func(_ context.Context, _ domain.Ecosystem, _ string) string {
-		called.Store(true)
-		return "2.0.0"
-	})
+	oldDockerResolver := resolveDockerImageStatusFn
+	var dockerCalled atomic.Bool
+	resolveDockerImageStatusFn = func(context.Context, listAllPackage, map[string]string, dockerDigestResolver) packageLatestStatus {
+		dockerCalled.Store(true)
+		return packageLatestStatus{Latest: "sha256:remote", Update: "yes"}
+	}
+	t.Cleanup(func() { resolveDockerImageStatusFn = oldDockerResolver })
 
 	cmd := newScanCmd()
-	cmd.SetContext(ctx)
 	cmd.SetArgs([]string{"--mode", "local", "--list-all", "--list-all-offline", dir})
 	out := captureStdout(t, func() {
 		if err := cmd.Execute(); err != nil {
@@ -429,8 +957,8 @@ func TestScanCommandListAllOfflineFlagSkipsExternalLookups(t *testing.T) {
 		}
 	})
 
-	if called.Load() {
-		t.Fatal("offline list-all flag performed a latest-version lookup")
+	if dockerCalled.Load() {
+		t.Fatal("offline list-all flag performed a Docker digest lookup")
 	}
 	if !strings.Contains(out, "private-name") || !strings.Contains(out, "unknown") {
 		t.Fatalf("offline list-all flag output missing inventory/unknown latest:\n%s", out)
@@ -488,16 +1016,12 @@ func TestPrintListAllPackageReportSanitizesTerminalControlText(t *testing.T) {
 func TestRunListAll_IncludesDevPackagesByDefault(t *testing.T) {
 	isolatedListAllEnv(t)
 	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, "package-lock.json"), `{
-  "name": "test",
-  "lockfileVersion": 3,
-  "packages": {
-    "node_modules/prod": { "version": "1.0.0" },
-    "node_modules/dev-only": { "version": "1.0.0", "dev": true }
-  }
-}`)
+	writeListAllPackageLock(t, dir,
+		listAllLockPackage{Name: "prod", Version: "1.0.0"},
+		listAllLockPackage{Name: "dev-only", Version: "1.0.0", Dev: true},
+	)
 
-	ctx := stubLatestVersionContext(t, func(_ context.Context, _ domain.Ecosystem, name string) string {
+	resolver := stubLatestVersion(t, func(_ context.Context, _ domain.Ecosystem, name string) string {
 		switch name {
 		case "prod", "dev-only":
 			return "1.0.0"
@@ -507,7 +1031,7 @@ func TestRunListAll_IncludesDevPackagesByDefault(t *testing.T) {
 	})
 
 	out := captureStdout(t, func() {
-		if _, err := runListAll(ctx, listAllSettings(dir, false)); err != nil {
+		if _, err := runListAll(context.Background(), listAllSettingsWithResolver(dir, false, resolver)); err != nil {
 			t.Fatalf("runListAll: %v", err)
 		}
 	})
@@ -526,17 +1050,13 @@ func TestRunListAll_IncludesDevPackagesByDefault(t *testing.T) {
 func TestRunListAll_WritesHTMLReportWithFullPackageList(t *testing.T) {
 	isolatedListAllEnv(t)
 	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, "package-lock.json"), `{
-  "name": "test",
-  "lockfileVersion": 3,
-  "packages": {
-    "node_modules/leftpad": { "version": "1.0.0" },
-    "node_modules/dev-only": { "version": "1.0.0", "dev": true }
-  }
-}`)
+	writeListAllPackageLock(t, dir,
+		listAllLockPackage{Name: "leftpad", Version: "1.0.0"},
+		listAllLockPackage{Name: "dev-only", Version: "1.0.0", Dev: true},
+	)
 	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
 
-	ctx := stubLatestVersionContext(t, func(_ context.Context, _ domain.Ecosystem, name string) string {
+	resolver := stubLatestVersion(t, func(_ context.Context, _ domain.Ecosystem, name string) string {
 		switch name {
 		case "leftpad":
 			return "2.0.0"
@@ -549,7 +1069,8 @@ func TestRunListAll_WritesHTMLReportWithFullPackageList(t *testing.T) {
 
 	settings := listAllSettings(dir, false)
 	settings.OutputHTML = htmlPath
-	if _, err := runListAll(ctx, settings); err != nil {
+	settings.resolver = resolver
+	if _, err := runListAll(context.Background(), settings); err != nil {
 		t.Fatalf("runListAll: %v", err)
 	}
 
@@ -567,7 +1088,7 @@ func TestRunListAll_WritesHTMLReportWithFullPackageList(t *testing.T) {
 		"dev-only",
 		"1.0.0",
 		"2.0.0",
-		"<th class=\"installed\">Installed</th>",
+		"<th scope=\"col\" class=\"installed\">Installed</th>",
 	} {
 		if !contains(out, want) {
 			t.Fatalf("list-all HTML missing %q:\n%s", want, out)
@@ -578,20 +1099,14 @@ func TestRunListAll_WritesHTMLReportWithFullPackageList(t *testing.T) {
 func TestRunListAllWritesRequestedScanArtifacts(t *testing.T) {
 	isolatedListAllEnv(t)
 	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, "package-lock.json"), `{
-  "name": "test",
-  "lockfileVersion": 3,
-  "packages": {
-    "node_modules/prod": { "version": "1.0.0" }
-  }
-}`)
+	writeListAllPackageLock(t, dir, listAllLockPackage{Name: "prod", Version: "1.0.0"})
 	outDir := t.TempDir()
 	jsonPath := filepath.Join(outDir, "result.json")
 	sarifPath := filepath.Join(outDir, "result.sarif")
 	junitPath := filepath.Join(outDir, "result.xml")
 	htmlPath := filepath.Join(outDir, "list-all.html")
 
-	ctx := stubLatestVersionContext(t, func(_ context.Context, _ domain.Ecosystem, name string) string {
+	resolver := stubLatestVersion(t, func(_ context.Context, _ domain.Ecosystem, name string) string {
 		if name == "prod" {
 			return "1.0.0"
 		}
@@ -603,7 +1118,8 @@ func TestRunListAllWritesRequestedScanArtifacts(t *testing.T) {
 	settings.OutputSARIF = sarifPath
 	settings.OutputJUnit = junitPath
 	settings.OutputHTML = htmlPath
-	if _, err := runListAll(ctx, settings); err != nil {
+	settings.resolver = resolver
+	if _, err := runListAll(context.Background(), settings); err != nil {
 		t.Fatalf("runListAll: %v", err)
 	}
 
@@ -625,27 +1141,170 @@ func TestRunListAllWritesRequestedScanArtifacts(t *testing.T) {
 	}
 }
 
-func TestScanCommandListAllHTMLFlagWritesFullReport(t *testing.T) {
-	isolateCLIConfigDiscovery(t)
-	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, "package-lock.json"), `{
-  "name": "test",
-  "lockfileVersion": 3,
-  "packages": {
-    "node_modules/prod": { "version": "1.0.0" },
-    "node_modules/dev-only": { "version": "1.0.0", "dev": true }
-  }
-}`)
+func TestWriteListAllOutputPhasePreservesExitCodeForEmptyInventory(t *testing.T) {
 	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+	settings := listAllSettings(t.TempDir(), false)
+	settings.OutputHTML = htmlPath
+	scan := listAllScanPhaseResult{
+		result:   &domain.ScanResult{Mode: "local"},
+		failOn:   domain.SeverityCritical,
+		exitCode: ExitBlocking,
+	}
 
-	ctx := stubLatestVersionContext(t, func(_ context.Context, _ domain.Ecosystem, name string) string {
-		switch name {
-		case "prod", "dev-only":
-			return "2.0.0"
-		default:
-			return ""
+	var exitCode int
+	out := captureStdout(t, func() {
+		var err error
+		exitCode, err = writeListAllOutputPhase(context.Background(), settings, scan, listAllInventoryPhaseResult{})
+		if err != nil {
+			t.Fatalf("writeListAllOutputPhase: %v", err)
 		}
 	})
+
+	if exitCode != ExitBlocking {
+		t.Fatalf("exitCode = %d, want preserved scan exit %d", exitCode, ExitBlocking)
+	}
+	for _, want := range []string{"\n\n\n", "No packages found.", "HTML report written to: " + htmlPath} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("empty list-all output missing %q:\n%s", want, out)
+		}
+	}
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read list-all HTML report: %v", err)
+	}
+	if !strings.Contains(string(data), "No packages found.") {
+		t.Fatalf("empty list-all HTML missing empty inventory message:\n%s", data)
+	}
+}
+
+func TestWriteListAllOutputPhaseWritesHTMLBeforeReturningHistoryFailure(t *testing.T) {
+	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+	settings := listAllSettings(t.TempDir(), true)
+	settings.OutputHTML = htmlPath
+	settings.ListAllOffline = true
+	historyErr := &scanHistoryRecordError{err: fmt.Errorf("store scan history for repo app: closed database")}
+	scan := listAllScanPhaseResult{
+		result: &domain.ScanResult{
+			Mode:            "local",
+			PackagesScanned: 1,
+		},
+		failOn:     domain.SeverityCritical,
+		exitCode:   ExitOperational,
+		collection: &scanner.PackageCollection{},
+		historyErr: historyErr,
+	}
+	inventory := listAllInventoryPhaseResult{
+		packages: []listAllPackage{{
+			Name:       "prod",
+			Version:    "1.0.0",
+			Ecosystem:  domain.EcosystemNPM,
+			LockFile:   "package-lock.json",
+			SourceType: "lockfile",
+			Scope:      "runtime",
+			Relation:   "direct",
+		}},
+	}
+
+	var exitCode int
+	var err error
+	captureStdout(t, func() {
+		exitCode, err = writeListAllOutputPhase(context.Background(), settings, scan, inventory)
+	})
+	if err == nil {
+		t.Fatal("writeListAllOutputPhase() error = nil, want scan history failure")
+	}
+	if !strings.Contains(err.Error(), "store scan history for repo app") {
+		t.Fatalf("writeListAllOutputPhase() error = %v, want history failure", err)
+	}
+	if exitCode != ExitOperational {
+		t.Fatalf("exitCode = %d, want %d", exitCode, ExitOperational)
+	}
+	data, readErr := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if readErr != nil {
+		t.Fatalf("read list-all HTML after history failure: %v", readErr)
+	}
+	if !strings.Contains(string(data), "Packmon List-All Report") || !strings.Contains(string(data), "prod") {
+		t.Fatalf("list-all HTML was not written before returning history failure:\n%s", string(data))
+	}
+}
+
+func TestWriteListAllOutputPhaseRendersCompactSecurityFindingDetails(t *testing.T) {
+	settings := listAllSettings(t.TempDir(), false)
+	settings.ListAllOffline = true
+	scan := listAllScanPhaseResult{
+		result: &domain.ScanResult{
+			Mode:            "remote",
+			PackagesScanned: 1,
+			FindingsCount:   1,
+			Findings: []domain.Finding{{
+				Name:         "postcss",
+				Version:      "8.5.8",
+				Ecosystem:    domain.EcosystemNPM,
+				Type:         domain.FindingTypeVulnerability,
+				RiskType:     "known_vulnerability",
+				Severity:     domain.SeverityHigh,
+				AdvisoryID:   "GHSA-postcss-test",
+				Title:        "PostCSS test advisory",
+				FixedVersion: "8.5.10",
+				Source:       "osv",
+			}},
+		},
+		failOn:   domain.SeverityCritical,
+		exitCode: ExitBlocking,
+	}
+	inventory := listAllInventoryPhaseResult{packages: []listAllPackage{{
+		Name:       "postcss",
+		Version:    "8.5.8",
+		Ecosystem:  domain.EcosystemNPM,
+		SourceType: "sbom",
+		Scope:      "dev",
+		Relation:   "transitive",
+	}}}
+
+	out := captureStdout(t, func() {
+		if _, err := writeListAllOutputPhase(context.Background(), settings, scan, inventory); err != nil {
+			t.Fatalf("writeListAllOutputPhase: %v", err)
+		}
+	})
+
+	security := listAllTerminalSection(t, out, "Security Findings", "\n\n\nPACKAGE")
+	header := firstLineContaining(t, security, "SEVERITY")
+	if got := len(strings.Fields(header)); got >= 11 {
+		t.Fatalf("security findings terminal header exposes %d visible columns, want fewer than 11: %q", got, header)
+	}
+	for _, noisyColumn := range []string{"TYPE", "RISK", "ECOSYSTEM", "SOURCE", "SCOPE", "RELATION", "FIXED VERSION"} {
+		if strings.Contains(header, noisyColumn) {
+			t.Fatalf("security findings primary header still exposes %q as a column: %q", noisyColumn, header)
+		}
+	}
+	for _, want := range []string{
+		"postcss",
+		"GHSA-postcss-test",
+		"PostCSS test advisory",
+		"Action: Fix 8.5.10",
+		"Type: Vulnerability",
+		"Risk: Known vulnerability",
+		"Ecosystem: npm",
+		"Source: osv",
+		"Scope: dev",
+		"Relation: transitive",
+		"Fixed Version: 8.5.10",
+	} {
+		if !strings.Contains(security, want) {
+			t.Fatalf("compact security findings section missing %q:\n%s", want, security)
+		}
+	}
+}
+
+func TestScanCommandListAllHTMLFlagWritesFullReport(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	t.Setenv("PACKMON_API_KEY", "remote-key")
+	dir := t.TempDir()
+	writeListAllPackageLock(t, dir,
+		listAllLockPackage{Name: "prod", Version: "1.0.0"},
+		listAllLockPackage{Name: "dev-only", Version: "1.0.0", Dev: true},
+	)
+	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
 
 	checkRequests := make(chan domain.ScanRequest, 1)
 	checkServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -678,14 +1337,13 @@ func TestScanCommandListAllHTMLFlagWritesFullReport(t *testing.T) {
 	defer checkServer.Close()
 
 	cmd := newScanCmd()
-	cmd.SetContext(ctx)
 	cmd.SetArgs([]string{
 		"--mode", "remote",
 		"--server", checkServer.URL,
-		"--api-key", "remote-key",
 		"--insecure-allow-http",
 		"--html", htmlPath,
 		"--list-all",
+		"--list-all-offline",
 		dir,
 	})
 	if err := cmd.Execute(); err != nil {
@@ -715,24 +1373,12 @@ func TestScanCommandListAllHTMLFlagWritesFullReport(t *testing.T) {
 
 func TestScanCommandListAllIncludeDevScansDevPackages(t *testing.T) {
 	isolateCLIConfigDiscovery(t)
+	t.Setenv("PACKMON_API_KEY", "remote-key")
 	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, "package-lock.json"), `{
-  "name": "test",
-  "lockfileVersion": 3,
-  "packages": {
-    "node_modules/prod": { "version": "1.0.0" },
-    "node_modules/dev-only": { "version": "1.0.0", "dev": true }
-  }
-}`)
-
-	ctx := stubLatestVersionContext(t, func(_ context.Context, _ domain.Ecosystem, name string) string {
-		switch name {
-		case "prod", "dev-only":
-			return "1.0.0"
-		default:
-			return ""
-		}
-	})
+	writeListAllPackageLock(t, dir,
+		listAllLockPackage{Name: "prod", Version: "1.0.0"},
+		listAllLockPackage{Name: "dev-only", Version: "1.0.0", Dev: true},
+	)
 
 	checkRequests := make(chan domain.ScanRequest, 1)
 	checkServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -749,13 +1395,12 @@ func TestScanCommandListAllIncludeDevScansDevPackages(t *testing.T) {
 	defer checkServer.Close()
 
 	cmd := newScanCmd()
-	cmd.SetContext(ctx)
 	cmd.SetArgs([]string{
 		"--mode", "remote",
 		"--server", checkServer.URL,
-		"--api-key", "remote-key",
 		"--insecure-allow-http",
 		"--list-all",
+		"--list-all-offline",
 		"--include-dev",
 		dir,
 	})
@@ -792,13 +1437,13 @@ sdks:
 `)
 
 	called := false
-	ctx := stubLatestVersionContext(t, func(_ context.Context, _ domain.Ecosystem, _ string) string {
+	resolver := stubLatestVersion(t, func(_ context.Context, _ domain.Ecosystem, _ string) string {
 		called = true
 		return ""
 	})
 
 	out := captureStdout(t, func() {
-		if _, err := runListAll(ctx, listAllSettings(dir, false)); err != nil {
+		if _, err := runListAll(context.Background(), listAllSettingsWithResolver(dir, false, resolver)); err != nil {
 			t.Fatalf("runListAll: %v", err)
 		}
 	})
@@ -817,16 +1462,12 @@ sdks:
 func TestRunListAll_UpdateColumnLogic(t *testing.T) {
 	isolatedListAllEnv(t)
 	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, "package-lock.json"), `{
-  "name": "test",
-  "lockfileVersion": 3,
-  "packages": {
-    "node_modules/old": { "version": "1.0.0" },
-    "node_modules/current": { "version": "2.0.0" }
-  }
-}`)
+	writeListAllPackageLock(t, dir,
+		listAllLockPackage{Name: "old", Version: "1.0.0"},
+		listAllLockPackage{Name: "current", Version: "2.0.0"},
+	)
 
-	ctx := stubLatestVersionContext(t, func(_ context.Context, _ domain.Ecosystem, name string) string {
+	resolver := stubLatestVersion(t, func(_ context.Context, _ domain.Ecosystem, name string) string {
 		switch name {
 		case "old":
 			return "9.9.9"
@@ -838,7 +1479,7 @@ func TestRunListAll_UpdateColumnLogic(t *testing.T) {
 	})
 
 	out := captureStdout(t, func() {
-		if _, err := runListAll(ctx, listAllSettings(dir, false)); err != nil {
+		if _, err := runListAll(context.Background(), listAllSettingsWithResolver(dir, false, resolver)); err != nil {
 			t.Fatalf("runListAll: %v", err)
 		}
 	})
@@ -1017,7 +1658,7 @@ go 1.26
 require github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc
 `)
 
-	ctx := stubLatestVersionContext(t, func(_ context.Context, _ domain.Ecosystem, name string) string {
+	resolver := stubLatestVersion(t, func(_ context.Context, _ domain.Ecosystem, name string) string {
 		if name == "github.com/davecgh/go-spew" {
 			return "v1.1.1"
 		}
@@ -1025,7 +1666,7 @@ require github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc
 	})
 
 	out := captureStdout(t, func() {
-		if _, err := runListAll(ctx, listAllSettings(dir, false)); err != nil {
+		if _, err := runListAll(context.Background(), listAllSettingsWithResolver(dir, false, resolver)); err != nil {
 			t.Fatalf("runListAll: %v", err)
 		}
 	})
@@ -1059,16 +1700,12 @@ func TestRunListAll_VulnerablePackageAppearsInBothSections(t *testing.T) {
 	seedListAllAdvisory(t, dbDir)
 
 	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, "package-lock.json"), `{
-  "name": "test",
-  "lockfileVersion": 3,
-  "packages": {
-    "node_modules/vulnpkg": { "version": "1.0.0" },
-    "node_modules/safe": { "version": "2.0.0" }
-  }
-}`)
+	writeListAllPackageLock(t, dir,
+		listAllLockPackage{Name: "vulnpkg", Version: "1.0.0"},
+		listAllLockPackage{Name: "safe", Version: "2.0.0"},
+	)
 
-	ctx := stubLatestVersionContext(t, func(_ context.Context, _ domain.Ecosystem, name string) string {
+	resolver := stubLatestVersion(t, func(_ context.Context, _ domain.Ecosystem, name string) string {
 		switch name {
 		case "vulnpkg":
 			return "1.0.1"
@@ -1080,7 +1717,7 @@ func TestRunListAll_VulnerablePackageAppearsInBothSections(t *testing.T) {
 	})
 
 	out := captureStdout(t, func() {
-		if _, err := runListAll(ctx, listAllSettings(dir, false)); err != nil {
+		if _, err := runListAll(context.Background(), listAllSettingsWithResolver(dir, false, resolver)); err != nil {
 			t.Fatalf("runListAll: %v", err)
 		}
 	})
@@ -1123,19 +1760,13 @@ func TestRunListAll_VulnerablePackageAppearsInBothSections(t *testing.T) {
 func TestRunListAll_FindingsSectionRendersTable(t *testing.T) {
 	isolatedListAllEnv(t)
 	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, "package-lock.json"), `{
-  "name": "test",
-  "lockfileVersion": 3,
-  "packages": {
-    "node_modules/leftpad": { "version": "1.0.0" }
-  }
-}`)
-	ctx := stubLatestVersionContext(t, func(_ context.Context, _ domain.Ecosystem, _ string) string {
+	writeListAllPackageLock(t, dir, listAllLockPackage{Name: "leftpad", Version: "1.0.0"})
+	resolver := stubLatestVersion(t, func(_ context.Context, _ domain.Ecosystem, _ string) string {
 		return ""
 	})
 
 	out := captureStdout(t, func() {
-		if _, err := runListAll(ctx, listAllSettings(dir, false)); err != nil {
+		if _, err := runListAll(context.Background(), listAllSettingsWithResolver(dir, false, resolver)); err != nil {
 			t.Fatalf("runListAll: %v", err)
 		}
 	})
@@ -1153,19 +1784,13 @@ func TestRunListAll_FindingsSectionRendersTable(t *testing.T) {
 func TestRunListAll_QuietSuppressesHumanOutput(t *testing.T) {
 	isolatedListAllEnv(t)
 	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, "package-lock.json"), `{
-  "name": "test",
-  "lockfileVersion": 3,
-  "packages": {
-    "node_modules/leftpad": { "version": "1.0.0" }
-  }
-}`)
-	ctx := stubLatestVersionContext(t, func(_ context.Context, _ domain.Ecosystem, _ string) string {
+	writeListAllPackageLock(t, dir, listAllLockPackage{Name: "leftpad", Version: "1.0.0"})
+	resolver := stubLatestVersion(t, func(_ context.Context, _ domain.Ecosystem, _ string) string {
 		return "2.0.0"
 	})
 
 	out := captureStdout(t, func() {
-		if _, err := runListAll(ctx, listAllSettings(dir, true)); err != nil {
+		if _, err := runListAll(context.Background(), listAllSettingsWithResolver(dir, true, resolver)); err != nil {
 			t.Fatalf("runListAll: %v", err)
 		}
 	})
@@ -1178,19 +1803,19 @@ func TestRunListAll_QuietSuppressesHumanOutput(t *testing.T) {
 func TestBuildListAllPackageReportDockerUpdateStatus(t *testing.T) {
 	old := resolveDockerImageStatusFn
 	t.Cleanup(func() { resolveDockerImageStatusFn = old })
-	resolveDockerImageStatusFn = func(_ context.Context, p listAllPackage, _ map[string]string) packageLatestStatus {
+	resolveDockerImageStatusFn = func(_ context.Context, p listAllPackage, _ map[string]string, _ dockerDigestResolver) packageLatestStatus {
 		if p.Name != "docker.io/library/postgres" || p.Version != "18-alpine" {
 			t.Fatalf("docker status package = %#v", p)
 		}
 		return packageLatestStatus{Latest: "sha256:remote", Update: "unknown", Unknown: true}
 	}
 
-	report := buildListAllPackageReport(context.Background(), []listAllPackage{{
+	report := buildListAllPackageReportWithOptions(context.Background(), []listAllPackage{{
 		Name:      "docker.io/library/postgres",
 		Version:   "18-alpine",
 		Ecosystem: domain.EcosystemDocker,
 		LockFile:  "docker-compose.yml",
-	}}, &domain.ScanResult{}, ".", 30)
+	}}, &domain.ScanResult{}, ".", 30, listAllPackageReportOptions{})
 
 	if len(report.Rows) != 1 {
 		t.Fatalf("Rows = %#v", report.Rows)
@@ -1222,7 +1847,7 @@ func TestBuildListAllPackageReportBatchesDockerLocalDigests(t *testing.T) {
 	}
 
 	var dockerResolveCalls atomic.Int32
-	resolveDockerImageStatusFn = func(_ context.Context, p listAllPackage, localDigests map[string]string) packageLatestStatus {
+	resolveDockerImageStatusFn = func(_ context.Context, p listAllPackage, localDigests map[string]string, _ dockerDigestResolver) packageLatestStatus {
 		dockerResolveCalls.Add(1)
 		if localDigests == nil {
 			t.Fatal("local Docker digest map was not passed to Docker resolver")
@@ -1233,11 +1858,11 @@ func TestBuildListAllPackageReportBatchesDockerLocalDigests(t *testing.T) {
 		return packageLatestStatus{Latest: "sha256:remote", Update: "unknown", Unknown: true}
 	}
 
-	report := buildListAllPackageReport(context.Background(), []listAllPackage{
+	report := buildListAllPackageReportWithOptions(context.Background(), []listAllPackage{
 		{Name: "docker.io/library/postgres", Version: "18-alpine", Ecosystem: domain.EcosystemDocker, LockFile: "docker-compose.yml"},
 		{Name: "leftpad", Version: "1.0.0", Ecosystem: domain.EcosystemNPM, LockFile: "package-lock.json"},
 		{Name: "docker.io/library/nginx", Version: "1.25", Ecosystem: domain.EcosystemDocker, LockFile: "Dockerfile"},
-	}, &domain.ScanResult{}, ".", 30)
+	}, &domain.ScanResult{}, ".", 30, listAllPackageReportOptions{})
 
 	if got := inspectCalls.Load(); got != 1 {
 		t.Fatalf("local Docker inspect calls = %d, want one batched call", got)
@@ -1247,6 +1872,108 @@ func TestBuildListAllPackageReportBatchesDockerLocalDigests(t *testing.T) {
 	}
 	if len(report.Rows) != 3 {
 		t.Fatalf("Rows = %d, want 3", len(report.Rows))
+	}
+}
+
+func TestBuildListAllPackageReportCachesDuplicateDockerDigestLookups(t *testing.T) {
+	oldInspect := inspectLocalDockerDigestsFn
+	oldRegistryClient := newDockerRegistryClientFunc
+	t.Cleanup(func() {
+		inspectLocalDockerDigestsFn = oldInspect
+		newDockerRegistryClientFunc = oldRegistryClient
+	})
+
+	const digest = "sha256:92cf5e2f488744c90d3df4378dfa3f0842704950cfa1353975d5510c945b072f"
+	inspectLocalDockerDigestsFn = func(context.Context, []listAllPackage) map[string]string {
+		return map[string]string{"docker.io/library/postgres": digest}
+	}
+
+	var headRequests atomic.Int32
+	newDockerRegistryClientFunc = func(*http.Client) *dockerimage.RegistryClient {
+		registryClient := dockerimage.NewRegistryClient(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			headRequests.Add(1)
+			if req.Method != http.MethodHead {
+				t.Fatalf("registry request method = %s, want HEAD", req.Method)
+			}
+			if req.URL.Host != "registry-1.docker.io" || !strings.Contains(req.URL.Path, "/v2/library/postgres/manifests/18-alpine") {
+				t.Fatalf("registry request URL = %s", req.URL.String())
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Docker-Content-Digest": []string{digest}},
+				Body:       io.NopCloser(strings.NewReader("")),
+				Request:    req,
+			}, nil
+		})})
+		registryClient.LookupIP = func(context.Context, string) ([]net.IP, error) {
+			return []net.IP{net.ParseIP("93.184.216.34")}, nil
+		}
+		return registryClient
+	}
+
+	report := buildListAllPackageReportWithOptions(context.Background(), []listAllPackage{
+		{Name: "docker.io/library/postgres", Version: "18-alpine", Ecosystem: domain.EcosystemDocker, LockFile: "Dockerfile", SourceType: "dockerfile"},
+		{Name: "docker.io/library/postgres", Version: "18-alpine", Ecosystem: domain.EcosystemDocker, LockFile: "docker-compose.yml", SourceType: "compose"},
+	}, nil, "repo", 30, listAllPackageReportOptions{})
+
+	if got := headRequests.Load(); got != 1 {
+		t.Fatalf("registry HEAD requests = %d, want 1 cached lookup for duplicate Docker refs", got)
+	}
+	if len(report.Rows) != 2 {
+		t.Fatalf("rows = %d, want duplicate inventory rows preserved", len(report.Rows))
+	}
+	for _, row := range report.Rows {
+		if row.LatestCopy != digest || row.Update != "-" {
+			t.Fatalf("row = %+v, want shared resolved digest without update", row)
+		}
+	}
+}
+
+func TestBuildListAllPackageReportUsesConfiguredDockerRegistryMirror(t *testing.T) {
+	oldInspect := inspectLocalDockerDigestsFn
+	oldRegistryClient := newDockerRegistryClientFunc
+	t.Cleanup(func() {
+		inspectLocalDockerDigestsFn = oldInspect
+		newDockerRegistryClientFunc = oldRegistryClient
+	})
+
+	const digest = "sha256:92cf5e2f488744c90d3df4378dfa3f0842704950cfa1353975d5510c945b072f"
+	inspectLocalDockerDigestsFn = func(context.Context, []listAllPackage) map[string]string {
+		return map[string]string{"docker.io/library/postgres": digest}
+	}
+
+	var sawMirrorRequest atomic.Bool
+	mirror := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawMirrorRequest.Store(true)
+		if r.Method != http.MethodHead {
+			t.Fatalf("registry request method = %s, want HEAD", r.Method)
+		}
+		if r.URL.Path != "/dockerhub/v2/library/postgres/manifests/18-alpine" {
+			t.Fatalf("registry mirror path = %s", r.URL.Path)
+		}
+		w.Header().Set("Docker-Content-Digest", digest)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mirror.Close()
+
+	newDockerRegistryClientFunc = func(client *http.Client) *dockerimage.RegistryClient {
+		if client != nil {
+			t.Fatalf("registry client argument = %#v, want nil", client)
+		}
+		return dockerimage.NewRegistryClient(mirror.Client())
+	}
+
+	report := buildListAllPackageReportWithOptions(context.Background(), []listAllPackage{
+		{Name: "docker.io/library/postgres", Version: "18-alpine", Ecosystem: domain.EcosystemDocker, LockFile: "Dockerfile", SourceType: "dockerfile"},
+	}, nil, "repo", 30, listAllPackageReportOptions{resolver: packageUpdateResolver{latestRegistry: latestRegistryConfig{
+		DockerRegistryMirrors: map[string]string{"registry-1.docker.io": mirror.URL + "/dockerhub"},
+	}}})
+
+	if !sawMirrorRequest.Load() {
+		t.Fatal("configured Docker registry mirror was not used")
+	}
+	if len(report.Rows) != 1 || report.Rows[0].LatestCopy != digest || report.Rows[0].Update != "-" {
+		t.Fatalf("rows = %+v, want digest resolved through mirror", report.Rows)
 	}
 }
 
@@ -1264,13 +1991,13 @@ func TestRunListAllIncludesDockerImages(t *testing.T) {
 	t.Cleanup(func() {
 		resolveDockerImageStatusFn = oldDocker
 	})
-	ctx := stubLatestVersionContext(t, func(context.Context, domain.Ecosystem, string) string { return "" })
-	resolveDockerImageStatusFn = func(context.Context, listAllPackage, map[string]string) packageLatestStatus {
+	resolver := stubLatestVersion(t, func(context.Context, domain.Ecosystem, string) string { return "" })
+	resolveDockerImageStatusFn = func(context.Context, listAllPackage, map[string]string, dockerDigestResolver) packageLatestStatus {
 		return packageLatestStatus{Latest: "sha256:remote", Update: "unknown", Unknown: true}
 	}
 
 	output := captureStdout(t, func() {
-		if _, err := runListAll(ctx, listAllSettings(dir, false)); err != nil {
+		if _, err := runListAll(context.Background(), listAllSettingsWithResolver(dir, false, resolver)); err != nil {
 			t.Fatalf("runListAll: %v", err)
 		}
 	})
@@ -1299,7 +2026,7 @@ func TestRunListAllHTMLIncludesDockerImages(t *testing.T) {
 
 	oldDocker := resolveDockerImageStatusFn
 	t.Cleanup(func() { resolveDockerImageStatusFn = oldDocker })
-	resolveDockerImageStatusFn = func(context.Context, listAllPackage, map[string]string) packageLatestStatus {
+	resolveDockerImageStatusFn = func(context.Context, listAllPackage, map[string]string, dockerDigestResolver) packageLatestStatus {
 		return packageLatestStatus{Latest: "sha256:remote", Update: "unknown", Unknown: true}
 	}
 
@@ -1321,18 +2048,12 @@ func TestRunListAllHTMLIncludesDockerImages(t *testing.T) {
 }
 
 func TestPlainScanDoesNotSendDockerInventoryPackages(t *testing.T) {
+	t.Setenv("PACKMON_API_KEY", "test")
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte("FROM alpine:3.23\n"), 0o600); err != nil {
 		t.Fatalf("write Dockerfile: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "package-lock.json"), []byte(`{
-		"lockfileVersion": 3,
-		"packages": {
-			"node_modules/left-pad": {"version": "1.3.0"}
-		}
-	}`), 0o600); err != nil {
-		t.Fatalf("write package-lock.json: %v", err)
-	}
+	writeListAllPackageLock(t, dir, listAllLockPackage{Name: "left-pad", Version: "1.3.0"})
 	handlerErrors := make(chan string, 1)
 	requests := make(chan struct{}, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1373,7 +2094,7 @@ func TestPlainScanDoesNotSendDockerInventoryPackages(t *testing.T) {
 	defer server.Close()
 
 	cmd := newScanCmd()
-	cmd.SetArgs([]string{"--mode", "remote", "--server", server.URL, "--api-key", "test", "--insecure-allow-http", dir})
+	cmd.SetArgs([]string{"--mode", "remote", "--server", server.URL, "--insecure-allow-http", dir})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -1442,14 +2163,33 @@ func TestListAllHTMLRendersScopeSummaryAndFindingMetadata(t *testing.T) {
 		t.Fatalf("read HTML: %v", err)
 	}
 	out := string(data)
+	securityTable := listAllHTMLSecurityFindingTable(t, out)
+	if got := strings.Count(securityTable, "<th "); got >= 11 {
+		t.Fatalf("security findings HTML table exposes %d visible columns, want fewer than 11:\n%s", got, securityTable)
+	}
+	for _, noisyColumn := range []string{"<th class=\"short\">Type</th>", "<th class=\"short\">Risk</th>", "<th class=\"short\">Ecosystem</th>", "<th class=\"short\">Source</th>", "<th class=\"short\">Scope</th>", "<th class=\"short\">Relation</th>", "<th class=\"finding-fixed\">Fixed Version</th>"} {
+		if strings.Contains(securityTable, noisyColumn) {
+			t.Fatalf("security findings HTML still exposes noisy primary column %q:\n%s", noisyColumn, securityTable)
+		}
+	}
 	for _, want := range []string{"runtime 1", "dev 1", "ci 1"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("HTML missing scope summary %q:\n%s", want, out)
 		}
 	}
-	wantFinding := `<td class="finding-package">postcss</td><td class="short">npm</td><td class="finding-advisory"><a href="https://github.com/advisories/GHSA-postcss-test" target="_blank" rel="noopener" aria-label="GHSA-postcss-test opens in a new tab">GHSA-postcss-test<span aria-hidden="true"> &#8599;</span><span class="sr-only"> (opens in a new tab)</span></a></td><td class="finding-title">PostCSS test advisory</td><td class="finding-fixed">8.5.10</td><td class="short">osv</td><td class="short">dev</td><td class="short">transitive</td>`
-	if !strings.Contains(out, wantFinding) {
-		t.Fatalf("HTML finding row missing package provenance:\n%s", out)
+	for _, want := range []string{
+		`<td class="finding-package"><bdi dir="auto">postcss</bdi></td><td class="finding-advisory"><a class="external-link" href="https://github.com/advisories/GHSA-postcss-test" target="_blank" rel="noopener" aria-label="GHSA-postcss-test opens in a new tab"><bdi dir="auto">GHSA-postcss-test</bdi><span class="sr-only"> (opens in a new tab)</span></a></td><td class="finding-title"><bdi dir="auto">PostCSS test advisory</bdi></td><td class="finding-action"><bdi dir="auto">Fix 8.5.10</bdi></td>`,
+		`<tr class="finding-details-row"><td colspan="5"><dl class="finding-details-list">`,
+		`<dt>Installed</dt><dd><bdi dir="auto">8.5.8</bdi></dd>`,
+		`<dt>Ecosystem</dt><dd>npm</dd>`,
+		`<dt>Source</dt><dd><bdi dir="auto">osv</bdi></dd>`,
+		`<dt>Scope</dt><dd>dev</dd>`,
+		`<dt>Relation</dt><dd>transitive</dd>`,
+		`<dt>Fixed Version</dt><dd><bdi dir="auto">8.5.10</bdi></dd>`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("HTML finding row missing compact/detail data %q:\n%s", want, out)
+		}
 	}
 	for _, removed := range []string{
 		`<th class="text via">Via</th>`,
@@ -1499,15 +2239,37 @@ func TestListAllHTMLLinksSecurityFindingAdvisoryWithoutWrapping(t *testing.T) {
 		t.Fatalf("read HTML: %v", err)
 	}
 	out := string(data)
-	want := `<td class="finding-advisory"><a href="https://github.com/advisories/GHSA-vqf5-2xx6-9wfm" target="_blank" rel="noopener" aria-label="GHSA-vqf5-2xx6-9wfm opens in a new tab">GHSA-vqf5-2xx6-9wfm<span aria-hidden="true"> &#8599;</span><span class="sr-only"> (opens in a new tab)</span></a></td>`
+	want := `<td class="finding-advisory"><a class="external-link" href="https://github.com/advisories/GHSA-vqf5-2xx6-9wfm" target="_blank" rel="noopener" aria-label="GHSA-vqf5-2xx6-9wfm opens in a new tab"><bdi dir="auto">GHSA-vqf5-2xx6-9wfm</bdi><span class="sr-only"> (opens in a new tab)</span></a></td>`
 	if !strings.Contains(out, want) {
 		t.Fatalf("HTML finding advisory missing nowrap external link:\n%s", out)
 	}
-	if !strings.Contains(out, `<td class="finding-package">github/codeql-action</td>`) {
+	if !strings.Contains(out, `<td class="finding-package"><bdi dir="auto">github/codeql-action</bdi></td>`) {
 		t.Fatalf("HTML finding package should omit the long @version suffix:\n%s", out)
 	}
 	if strings.Contains(out, `github/codeql-action@7211b7c8077ea37d8641b6271f6a365a22a5fbfa`) {
 		t.Fatalf("HTML finding package still contains the long @version suffix:\n%s", out)
+	}
+}
+
+func TestListAllHTMLNewTabTextUsesReorderableMessages(t *testing.T) {
+	t.Parallel()
+
+	source, err := os.ReadFile("list_all_html.go") // #nosec G304 -- test reads package source.
+	if err != nil {
+		t.Fatalf("read list_all_html.go: %v", err)
+	}
+	body := string(source)
+	for _, want := range []string{
+		`OpenInNewTabAriaLabel`,
+		`OpenInNewTabScreenReader`,
+		`printf $.Messages.OpenInNewTabAriaLabel .Advisory`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("list_all_html.go missing reorderable new-tab marker %q", want)
+		}
+	}
+	if strings.Contains(body, `aria-label="{{.Advisory}} `) {
+		t.Fatalf("list_all_html.go still concatenates advisory before new-tab suffix:\n%s", body)
 	}
 }
 
@@ -1527,7 +2289,7 @@ func TestListAllHTMLGroupsSecurityFindingsByOperationalPriority(t *testing.T) {
 		Findings: []domain.Finding{
 			{Name: "vulnpkg", Version: "3.0.0", Ecosystem: domain.EcosystemGo, Type: domain.FindingTypeVulnerability, Severity: domain.SeverityHigh, AdvisoryID: "CVE-2026-0001", Title: "reachable vulnerability", RiskType: "known_vulnerability", Source: "osv"},
 			{Name: "oldpkg", Version: "4.0.0", Ecosystem: domain.EcosystemNPM, Type: domain.FindingTypeLifecycle, Severity: domain.SeverityMedium, AdvisoryID: "endoflife:oldpkg", Title: "security support ended", RiskType: "security_support_ended", Source: "endoflife.date"},
-			{Name: "risky", Version: "2.0.0", Ecosystem: domain.EcosystemPyPI, Type: domain.FindingTypeSupplyChainRisk, Severity: domain.SeverityHigh, AdvisoryID: "reversinglabs:pypi/risky@2.0.0", Title: "incident history", RiskType: "malware_history", Source: "reversinglabs"},
+			{Name: "risky", Version: "2.0.0", Ecosystem: domain.EcosystemPyPI, Type: domain.FindingTypeSupplyChainRisk, Severity: domain.SeverityHigh, AdvisoryID: "reversinglabs:pypi/risky@2.0.0", Title: "incident history", RiskType: domain.RiskTypeMalwareHistory, Source: "reversinglabs"},
 			{Name: "evilpkg", Version: "1.0.0", Ecosystem: domain.EcosystemNPM, Type: domain.FindingTypeMalicious, Severity: domain.SeverityCritical, AdvisoryID: "MAL-evilpkg", Title: "malware detected", RiskType: "malware", Source: "openssf"},
 		},
 	}
@@ -1540,7 +2302,7 @@ func TestListAllHTMLGroupsSecurityFindingsByOperationalPriority(t *testing.T) {
 		t.Fatalf("read HTML: %v", err)
 	}
 	out := string(data)
-	for _, want := range []string{"Malicious", "Vulnerabilities", "Lifecycle warnings", "Reputation info", "<th class=\"short\">Type</th>", "<th class=\"short\">Risk</th>", "Malware history", "Known vulnerability", "Security support ended"} {
+	for _, want := range []string{"Malicious", "Vulnerabilities", "Lifecycle Findings", "Reputation info", "<th scope=\"col\" class=\"finding-action\">Action</th>", "<dt>Type</dt><dd>", "<dt>Risk</dt><dd>", "Malware history", "Known vulnerability", "Security support ended"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("grouped finding HTML missing %q:\n%s", want, out)
 		}
@@ -1548,7 +2310,7 @@ func TestListAllHTMLGroupsSecurityFindingsByOperationalPriority(t *testing.T) {
 	if strings.Contains(out, "Supply-Chain / EOL") {
 		t.Fatalf("malware history should not create a Supply-Chain / EOL section:\n%s", out)
 	}
-	for _, raw := range []string{"malware_history", "known_vulnerability", "security_support_ended"} {
+	for _, raw := range []string{domain.RiskTypeMalwareHistory, "known_vulnerability", "security_support_ended"} {
 		if strings.Contains(out, raw) {
 			t.Fatalf("grouped finding HTML still contains raw risk token %q:\n%s", raw, out)
 		}
@@ -1557,7 +2319,7 @@ func TestListAllHTMLGroupsSecurityFindingsByOperationalPriority(t *testing.T) {
 	if securityStart < 0 {
 		t.Fatalf("HTML missing Security Findings section:\n%s", out)
 	}
-	assertInOrder(t, out[securityStart:], "Malicious", "Vulnerabilities", "Lifecycle warnings", "Reputation info")
+	assertInOrder(t, out[securityStart:], "Malicious", "Vulnerabilities", "Lifecycle Findings", "Reputation info")
 }
 
 func TestListAllHTMLDoesNotLinkUnsafeFindingURLs(t *testing.T) {
@@ -1593,6 +2355,32 @@ func TestListAllHTMLDoesNotLinkUnsafeFindingURLs(t *testing.T) {
 	}
 }
 
+func TestListAllHTMLWarningOnlyReportExplainsEmptySections(t *testing.T) {
+	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+	report := listAllPackageReport{
+		Warnings: []string{"parse error in broken/package-lock.json"},
+	}
+	result := &domain.ScanResult{Mode: "local"}
+
+	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+		t.Fatalf("writeListAllHTML: %v", err)
+	}
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read HTML: %v", err)
+	}
+	out := string(data)
+	for _, want := range []string{
+		`<div class="empty warning-empty">Package attention could not be fully evaluated because report warnings require review.</div>`,
+		`<div class="empty warning-empty">Security findings could not be confirmed clean because report warnings require review.</div>`,
+		`<div class="empty warning-empty">No package inventory rows were available; review the warnings above for coverage gaps.</div>`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("warning-only HTML missing warning-aware empty state %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestListAllHTMLSuppressesCleanEmptyStatesWhenInventoryWarningsExist(t *testing.T) {
 	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
 	report := listAllPackageReport{
@@ -1622,6 +2410,93 @@ func TestListAllHTMLSuppressesCleanEmptyStatesWhenInventoryWarningsExist(t *test
 	}
 }
 
+func TestListAllHTMLFindingAdvisoryLinksAreTouchFriendly(t *testing.T) {
+	out := renderListAllAccessibilityHTML(t)
+
+	for _, want := range []string{
+		`.finding-advisory a{display:inline-flex;align-items:center;min-height:var(--report-touch-target);padding:var(--report-space-1-5) var(--report-space-2);margin:calc(-1 * var(--report-space-1-5)) calc(-1 * var(--report-space-2));`,
+		`.external-link::after{content:"";display:inline-block;inline-size:0.65em;block-size:0.65em;margin-inline-start:0.25em;border-block-start:1.5px solid currentColor;border-inline-end:1.5px solid currentColor;`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("list-all HTML missing touch-friendly advisory link style %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "&#8599;") {
+		t.Fatalf("list-all HTML still renders raw external-link glyph:\n%s", out)
+	}
+}
+
+func TestListAllHTMLSecurityFindingRegionsUseGroupSpecificLabels(t *testing.T) {
+	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+	report := listAllPackageReport{
+		Rows: []listAllRow{
+			{Name: "evilpkg", Installed: "1.0.0", Ecosystem: "npm", Scope: "runtime", Relation: "direct", Vuln: "-"},
+			{Name: "vulnpkg", Installed: "3.0.0", Ecosystem: "go", Scope: "runtime", Relation: "direct", Vuln: "yes"},
+		},
+	}
+	result := &domain.ScanResult{
+		Mode: "remote",
+		Findings: []domain.Finding{
+			{Name: "evilpkg", Version: "1.0.0", Ecosystem: domain.EcosystemNPM, Type: domain.FindingTypeMalicious, Severity: domain.SeverityCritical, AdvisoryID: "MAL-evilpkg", Title: "malware detected", RiskType: "malware", Source: "openssf"},
+			{Name: "vulnpkg", Version: "3.0.0", Ecosystem: domain.EcosystemGo, Type: domain.FindingTypeVulnerability, Severity: domain.SeverityHigh, AdvisoryID: "CVE-2026-0001", Title: "reachable vulnerability", RiskType: "known_vulnerability", Source: "osv"},
+		},
+	}
+
+	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+		t.Fatalf("writeListAllHTML: %v", err)
+	}
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read HTML: %v", err)
+	}
+	out := string(data)
+	for _, want := range []string{
+		`aria-label="Malicious security findings table"`,
+		`aria-label="Vulnerabilities security findings table"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("list-all HTML missing group-specific region label %q:\n%s", want, out)
+		}
+	}
+	if strings.Count(out, `aria-label="Security findings table"`) != 0 {
+		t.Fatalf("list-all HTML still uses generic security findings region labels:\n%s", out)
+	}
+}
+
+func TestCollectDockerPackagesWithWarningsRedactsInvalidImageRefs(t *testing.T) {
+	const raw = "https://user:token@example.internal/private/app"
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "Dockerfile"), "FROM "+raw+"\n")
+	writeFile(t, filepath.Join(dir, "docker-compose.yml"), `
+services:
+  app:
+    image: https://user:token@example.internal/private/app
+`)
+
+	rows, warnings, err := collectDockerPackagesWithWarnings(dir, scanSettings{MaxDepth: 1})
+	if err != nil {
+		t.Fatalf("collectDockerPackagesWithWarnings: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("rows = %#v, want no rows from invalid Docker inventory", rows)
+	}
+	joined := strings.Join(warnings, "\n")
+	for _, leaked := range []string{"user", "token", "example.internal", "/private/app", raw} {
+		if strings.Contains(joined, leaked) {
+			t.Fatalf("Docker inventory warning leaked %q: %s", leaked, joined)
+		}
+	}
+	for _, want := range []string{
+		"docker parse error in Dockerfile:1: invalid FROM image",
+		"docker parse error in docker-compose.yml:4",
+		"invalid image for compose service",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("Docker inventory warning missing %q: %s", want, joined)
+		}
+	}
+}
+
 func TestListAllHTMLIncludesResponsivePrintAndLightThemePolicy(t *testing.T) {
 	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
 	report := listAllPackageReport{
@@ -1647,13 +2522,29 @@ func TestListAllHTMLIncludesResponsivePrintAndLightThemePolicy(t *testing.T) {
 		t.Fatalf("read HTML: %v", err)
 	}
 	out := string(data)
+	assertStandaloneHTMLUsesRemTypography(t, out)
 	for _, want := range []string{
+		`<html lang="en" dir="auto">`,
+		`<meta name="color-scheme" content="dark light">`,
+		":root{color-scheme:dark;",
 		"--success:",
 		"--sev-low:",
 		"overflow-wrap:anywhere",
 		"word-break:break-word",
+		"--button-bg:",
+		"--button-fg:",
+		"--status-bg:",
+		".copy-btn{margin-inline-start:var(--report-space-2);border:1px solid var(--border);border-radius:var(--report-radius-sm);background:var(--button-bg);color:var(--button-fg);",
+		".status{margin:var(--report-space-5) 0;padding:var(--report-space-3) var(--report-space-4);background:var(--status-bg);",
 		"@media (prefers-color-scheme: light)",
+		"@media (prefers-color-scheme: light){:root{color-scheme:light;",
+		"--warning:#8a4600;--warning-bg:#ffffff;--status-bg:#ffffff;--button-bg:#ffffff;",
+		"--button-fg:#111827;--link:#0645ad;",
+		"@media (prefers-contrast: more)",
+		"@media (forced-colors: active)",
 		"@media print",
+		".package-table,.findings-table{min-width:0;}",
+		".name,.installed,.version,.short,.source,.package-status,.vuln-col,.findings-table .finding-package,.findings-table .finding-advisory,.finding-action{min-width:0;white-space:normal;}",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("list-all HTML CSS missing %q:\n%s", want, out)
@@ -1661,17 +2552,141 @@ func TestListAllHTMLIncludesResponsivePrintAndLightThemePolicy(t *testing.T) {
 	}
 }
 
+func TestListAllHTMLUsesReportTypeAndSpacingScales(t *testing.T) {
+	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+	report := listAllPackageReport{
+		Rows: []listAllRow{{
+			Name:      "github.com/acme/pkg",
+			Installed: "sha256:" + strings.Repeat("a", 64),
+			Latest:    "sha256:" + strings.Repeat("b", 64),
+			Ecosystem: "docker",
+			Source:    "dockerfile",
+			Scope:     "runtime",
+			Relation:  "base",
+			Vuln:      "-",
+			LockFile:  "Dockerfile",
+		}},
+	}
+	result := &domain.ScanResult{Mode: "local"}
+
+	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+		t.Fatalf("writeListAllHTML: %v", err)
+	}
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read HTML: %v", err)
+	}
+	out := string(data)
+
+	assertGeneratedReportHTMLDefinesScales(t, out)
+	for _, want := range []string{
+		`body{margin:0;background:var(--bg);color:var(--fg);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:var(--report-type-base);`,
+		`h1{font-size:var(--report-type-xl);margin:0;color:var(--heading);`,
+		`h2{font-size:var(--report-type-lg);margin:var(--report-space-6) 0 var(--report-space-2);`,
+		`.badge{border:1px solid var(--border);border-radius:var(--report-radius-md);padding:var(--report-space-1) var(--report-space-3);font-size:var(--report-type-sm);`,
+		`.sev{display:inline-block;border:1px solid var(--border);border-radius:var(--report-radius-sm);padding:var(--report-space-0-5) var(--report-space-2);`,
+		`.copy-btn{margin-inline-start:var(--report-space-2);border:1px solid var(--border);border-radius:var(--report-radius-sm);background:var(--button-bg);color:var(--button-fg);font:inherit;font-size:var(--report-type-xs);min-width:var(--report-touch-target);min-height:var(--report-touch-target);padding:var(--report-space-1) var(--report-space-3);cursor:pointer;}`,
+		`.finding-details-list{display:flex;flex-wrap:wrap;gap:var(--report-space-1-5) var(--report-space-3);margin:0;padding:0;}`,
+		`.footer{border-top:1px solid var(--border);margin-top:var(--report-space-7);padding-top:var(--report-space-3);color:var(--dim);font-size:var(--report-type-xs);}`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("list-all HTML missing scaled CSS contract %q:\n%s", want, out)
+		}
+	}
+	assertGeneratedReportHTMLAvoidsOffScaleMicroSpacing(t, out)
+}
+
+func assertGeneratedReportHTMLDefinesScales(t *testing.T, out string) {
+	t.Helper()
+
+	for _, want := range []string{
+		`--report-type-2xs:0.6875rem;--report-type-xs:0.75rem;--report-type-sm:0.8125rem;--report-type-base:0.875rem;--report-type-md:0.9375rem;--report-type-lg:1rem;--report-type-xl:1.375rem;`,
+		`--report-space-0-5:0.125rem;--report-space-1:0.25rem;--report-space-1-5:0.375rem;--report-space-2:0.5rem;--report-space-3:0.75rem;--report-space-4:1rem;--report-space-5:1.25rem;--report-space-6:1.5rem;--report-space-7:1.75rem;--report-space-8:3rem;`,
+		`--report-radius-sm:0.25rem;--report-radius-md:0.375rem;--report-radius-pill:999px;--report-focus-ring:0.1875rem;--report-focus-offset:0.1875rem;--report-touch-target:2.75rem;`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("HTML report missing local CSS scale %q:\n%s", want, out)
+		}
+	}
+}
+
+func assertGeneratedReportHTMLAvoidsOffScaleMicroSpacing(t *testing.T, out string) {
+	t.Helper()
+
+	for _, bad := range []string{
+		`padding:3px 11px`,
+		`padding:1px 7px`,
+		`padding:5px 10px`,
+		`padding:5px 8px`,
+		`padding-bottom:5px`,
+		`padding-top:10px`,
+		`margin-top:10px`,
+		`padding:10px 12px`,
+		`gap:5px`,
+		`outline:3px solid`,
+	} {
+		if strings.Contains(out, bad) {
+			t.Fatalf("HTML report still uses off-scale micro-spacing %q:\n%s", bad, out)
+		}
+	}
+}
+
 func TestListAllHTMLTableScrollRegionsAreKeyboardFocusable(t *testing.T) {
 	for _, want := range []string{
 		".table-scroll:focus{",
-		`<div class="table-scroll" tabindex="0" role="region" aria-label="Packages needing attention table">`,
-		`<div class="table-scroll" tabindex="0" role="region" aria-label="Security findings table">`,
-		`<div class="table-scroll" tabindex="0" role="region" aria-label="All packages table">`,
+		`<div class="table-scroll" tabindex="0" role="region" aria-label="{{.Messages.PackagesNeedingAttentionTableLabel}}">`,
+		`<div class="table-scroll" tabindex="0" role="region" aria-label="{{.AriaLabel}}">`,
+		`<div class="table-scroll" tabindex="0" role="region" aria-label="{{.Messages.AllPackagesTableLabel}}">`,
 	} {
 		if !strings.Contains(listAllHTML, want) {
 			t.Fatalf("list-all HTML template missing keyboard-scroll contract %q", want)
 		}
 	}
+}
+
+func listAllTerminalSection(t *testing.T, out, startMarker, endMarker string) string {
+	t.Helper()
+
+	start := strings.Index(out, startMarker)
+	if start < 0 {
+		t.Fatalf("output missing %q:\n%s", startMarker, out)
+	}
+	section := out[start:]
+	if end := strings.Index(section[len(startMarker):], endMarker); end >= 0 {
+		section = section[:len(startMarker)+end]
+	}
+	return section
+}
+
+func firstLineContaining(t *testing.T, out, needle string) string {
+	t.Helper()
+
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, needle) {
+			return line
+		}
+	}
+	t.Fatalf("output missing line containing %q:\n%s", needle, out)
+	return ""
+}
+
+func listAllHTMLSecurityFindingTable(t *testing.T, out string) string {
+	t.Helper()
+
+	securityStart := strings.Index(out, "<h2>Security Findings</h2>")
+	if securityStart < 0 {
+		t.Fatalf("HTML missing Security Findings section:\n%s", out)
+	}
+	tableStart := strings.Index(out[securityStart:], `<table class="findings-table">`)
+	if tableStart < 0 {
+		t.Fatalf("HTML missing security findings table:\n%s", out[securityStart:])
+	}
+	table := out[securityStart+tableStart:]
+	tableEnd := strings.Index(table, "</table>")
+	if tableEnd < 0 {
+		t.Fatalf("HTML security findings table is not closed:\n%s", table)
+	}
+	return table[:tableEnd+len("</table>")]
 }
 
 func assertInOrder(t *testing.T, text string, values ...string) {
@@ -1767,18 +2782,18 @@ func TestListAllHTMLKeepsUnknownOnlyPackagesOutOfAttention(t *testing.T) {
 		t.Fatalf("HTML missing expected sections:\n%s", out)
 	}
 	attention := out[attentionStart:securityStart]
-	if strings.Contains(attention, `<td class="name">docker.io/library/alpine</td>`) {
+	if strings.Contains(attention, `<td class="name"><bdi dir="auto">docker.io/library/alpine</bdi></td>`) {
 		t.Fatalf("unknown-only docker package should not be in attention section:\n%s", attention)
 	}
 	if !strings.Contains(attention, "No package status issues requiring attention.") {
 		t.Fatalf("attention section should explain there are no actionable package issues:\n%s", attention)
 	}
-	allPackagesStart := strings.Index(out, "<h2>All Packages</h2>")
+	allPackagesStart := strings.Index(out, `<details class="inventory-details">`)
 	if allPackagesStart < 0 {
 		t.Fatalf("HTML missing All Packages section:\n%s", out)
 	}
 	allPackages := out[allPackagesStart:]
-	if !strings.Contains(allPackages, `<td class="name">docker.io/library/alpine</td>`) ||
+	if !strings.Contains(allPackages, `<td class="name"><bdi dir="auto">docker.io/library/alpine</bdi></td>`) ||
 		!strings.Contains(allPackages, `<td class="package-status">Unknown</td>`) {
 		t.Fatalf("unknown docker package should still be visible in All Packages:\n%s", allPackages)
 	}
@@ -1829,11 +2844,11 @@ func TestListAllHTMLMarksMaliciousPackagesAsAttention(t *testing.T) {
 		t.Fatalf("HTML missing expected sections:\n%s", out)
 	}
 	attention := out[attentionStart:securityStart]
-	wantRow := `<td class="name">evilpkg</td><td class="installed">2.0.0</td><td class="version">2.0.0</td><td class="package-status">Malicious</td>`
+	wantRow := `<td class="name"><bdi dir="auto">evilpkg</bdi></td><td class="installed"><bdi dir="auto">2.0.0</bdi></td><td class="version"><bdi dir="auto">2.0.0</bdi></td><td class="package-status">Malicious</td>`
 	if !strings.Contains(attention, wantRow) {
 		t.Fatalf("malicious package should be explicit in attention section:\n%s", attention)
 	}
-	if !strings.Contains(out, `<td class="finding-advisory"><a href="https://secure.software/pypi/packages/evilpkg" target="_blank" rel="noopener" aria-label="reversinglabs:pypi/evilpkg@2.0.0 opens in a new tab">reversinglabs:pypi/evilpkg@2.0.0<span aria-hidden="true"> &#8599;</span><span class="sr-only"> (opens in a new tab)</span></a></td>`) {
+	if !strings.Contains(out, `<td class="finding-advisory"><a class="external-link" href="https://secure.software/pypi/packages/evilpkg" target="_blank" rel="noopener" aria-label="reversinglabs:pypi/evilpkg@2.0.0 opens in a new tab"><bdi dir="auto">reversinglabs:pypi/evilpkg@2.0.0</bdi><span class="sr-only"> (opens in a new tab)</span></a></td>`) {
 		t.Fatalf("HTML missing ReversingLabs advisory link:\n%s", out)
 	}
 }
@@ -1864,7 +2879,7 @@ func TestListAllHTMLSurfacesHistoricalReputationRisk(t *testing.T) {
 			Severity:   domain.SeverityHigh,
 			AdvisoryID: "reversinglabs:pypi/polars-runtime-32@1.40.1",
 			Title:      "ReversingLabs: malware incident history",
-			RiskType:   "malware_history",
+			RiskType:   domain.RiskTypeMalwareHistory,
 			Source:     "reversinglabs",
 		}},
 	}
@@ -1997,7 +3012,7 @@ func TestBuildListAllPackageReportOnlyVulnerabilityFindingsSetVuln(t *testing.T)
 		Version:   "12.2.0",
 		Ecosystem: domain.EcosystemPyPI,
 		Type:      domain.FindingTypeSupplyChainRisk,
-		RiskType:  "malware_history",
+		RiskType:  domain.RiskTypeMalwareHistory,
 		Source:    "reversinglabs",
 	}}}, "repo", 30, listAllPackageReportOptions{resolver: resolver})
 
@@ -2017,16 +3032,16 @@ func TestBuildListAllPackageReportSkipsLookupsAfterCallerCancel(t *testing.T) {
 	cancel()
 
 	var called atomic.Bool
-	ctx = contextWithPackageUpdateResolver(ctx, packageUpdateResolver{fetchLatest: func(context.Context, domain.Ecosystem, string) string {
+	resolver := packageUpdateResolver{fetchLatest: func(context.Context, domain.Ecosystem, string) string {
 		called.Store(true)
 		return "2.0.0"
-	}})
+	}}
 
-	report := buildListAllPackageReport(ctx, []listAllPackage{{
+	report := buildListAllPackageReportWithOptions(ctx, []listAllPackage{{
 		Name:      "leftpad",
 		Version:   "1.0.0",
 		Ecosystem: domain.EcosystemNPM,
-	}}, nil, ".", 1)
+	}}, nil, ".", 1, listAllPackageReportOptions{resolver: resolver})
 	if len(report.Rows) != 1 || report.Rows[0].Latest != "unknown" || report.Unknown != 1 {
 		t.Fatalf("report rows = %+v, want one unknown row after canceled lookup", report.Rows)
 	}
@@ -2037,18 +3052,18 @@ func TestBuildListAllPackageReportSkipsLookupsAfterCallerCancel(t *testing.T) {
 
 func TestBuildListAllPackageReportUsesConfiguredTimeout(t *testing.T) {
 	var sawDeadline atomic.Bool
-	ctx := stubLatestVersionContext(t, func(ctx context.Context, _ domain.Ecosystem, _ string) string {
+	resolver := stubLatestVersion(t, func(ctx context.Context, _ domain.Ecosystem, _ string) string {
 		if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) <= 2*time.Second {
 			sawDeadline.Store(true)
 		}
 		return "2.0.0"
 	})
 
-	report := buildListAllPackageReport(ctx, []listAllPackage{{
+	report := buildListAllPackageReportWithOptions(context.Background(), []listAllPackage{{
 		Name:      "leftpad",
 		Version:   "1.0.0",
 		Ecosystem: domain.EcosystemNPM,
-	}}, nil, ".", 1)
+	}}, nil, ".", 1, listAllPackageReportOptions{resolver: resolver})
 	if len(report.Rows) != 1 || report.Rows[0].Latest != "2.0.0" {
 		t.Fatalf("report rows = %+v, want resolved latest version", report.Rows)
 	}
@@ -2162,11 +3177,11 @@ func TestListAllHTMLDoesNotMarkVulnerablePackageUpToDate(t *testing.T) {
 		if pkg.status == "Update available" {
 			statusClass = " status-update"
 		}
-		want := `<td class="name">` + pkg.name + `</td><td class="installed">` + pkg.installed + `</td><td class="version">` + pkg.latest + `</td><td class="package-status` + statusClass + `">` + pkg.status + `</td>`
+		want := `<td class="name"><bdi dir="auto">` + pkg.name + `</bdi></td><td class="installed"><bdi dir="auto">` + pkg.installed + `</bdi></td><td class="version"><bdi dir="auto">` + pkg.latest + `</bdi></td><td class="package-status` + statusClass + `">` + pkg.status + `</td>`
 		if !strings.Contains(out, want) {
 			t.Fatalf("vulnerable package should be marked %s, not Up-to-Date:\n%s", pkg.status, out)
 		}
-		bad := `<td class="name">` + pkg.name + `</td><td class="installed">` + pkg.installed + `</td><td class="version">` + pkg.latest + `</td><td class="package-status">Up-to-Date</td>`
+		bad := `<td class="name"><bdi dir="auto">` + pkg.name + `</bdi></td><td class="installed"><bdi dir="auto">` + pkg.installed + `</bdi></td><td class="version"><bdi dir="auto">` + pkg.latest + `</bdi></td><td class="package-status">Up-to-Date</td>`
 		if strings.Contains(out, bad) {
 			t.Fatalf("vulnerable package is still marked Up-to-Date:\n%s", out)
 		}
@@ -2204,9 +3219,9 @@ func TestListAllHTMLOmitsViaAndFlagsColumns(t *testing.T) {
 	}
 	out := string(data)
 	for _, want := range []string{
-		`<th class="short">Relation</th>`,
-		`<th class="vuln-col">Vulnerability</th>`,
-		`<td class="short">transitive</td>`,
+		`<th scope="col" class="meta-cell">Inventory Details</th>`,
+		`<th scope="col" class="vuln-col">Vulnerability</th>`,
+		`<dt>Relation</dt><dd>transitive</dd>`,
 		`<td class="vuln-col">-</td>`,
 	} {
 		if !strings.Contains(out, want) {
@@ -2225,6 +3240,73 @@ func TestListAllHTMLOmitsViaAndFlagsColumns(t *testing.T) {
 	} {
 		if strings.Contains(out, removed) {
 			t.Fatalf("HTML still contains noisy Via/Flags content %q:\n%s", removed, out)
+		}
+	}
+}
+
+func TestListAllHTMLUsesCompactActionAndInventoryLayouts(t *testing.T) {
+	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+	report := listAllPackageReport{
+		Rows: []listAllRow{
+			{
+				Name:       "@angular/core",
+				Installed:  "18.2.0",
+				Latest:     "18.2.1",
+				Update:     "yes",
+				Ecosystem:  "npm",
+				Source:     "lockfile",
+				Scope:      "runtime",
+				Relation:   "transitive",
+				Technology: "angular",
+				Vuln:       "yes",
+				LockFile:   "package-lock.json",
+			},
+			{
+				Name:       "docker.io/library/postgres",
+				Installed:  "16",
+				Latest:     "16",
+				Update:     "-",
+				Ecosystem:  "docker",
+				Source:     "compose",
+				Scope:      "runtime",
+				Relation:   "service-image",
+				Technology: "-",
+				Vuln:       "-",
+				LockFile:   "docker-compose.yml",
+			},
+		},
+	}
+	result := &domain.ScanResult{Mode: "remote"}
+
+	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+		t.Fatalf("writeListAllHTML: %v", err)
+	}
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read HTML: %v", err)
+	}
+	out := string(data)
+
+	for _, want := range []string{
+		`<table class="package-table attention-table">`,
+		`<th scope="col" class="package-status">Action</th>`,
+		`<th scope="col" class="meta-cell">Triage</th>`,
+		`<table class="package-table inventory-table">`,
+		`<th scope="col" class="meta-cell">Inventory Details</th>`,
+		`<dl class="package-meta-list"><div><dt>Ecosystem</dt><dd>npm</dd></div><div><dt>Source</dt><dd><bdi dir="auto">lockfile</bdi></dd></div><div><dt>Scope</dt><dd>runtime</dd></div><div><dt>Relation</dt><dd>transitive</dd></div><div><dt>Technology</dt><dd>angular</dd></div></dl>`,
+		`<td class="vuln-col vuln-yes">yes</td>`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("list-all HTML missing compact layout contract %q:\n%s", want, out)
+		}
+	}
+
+	for _, old := range []string{
+		`.package-table{min-width:1500px;`,
+		`<th scope="col" class="installed">Installed</th><th scope="col" class="version">Latest</th><th scope="col" class="package-status">Status</th><th scope="col" class="short">Ecosystem</th><th scope="col" class="source">Source</th><th scope="col" class="short">Scope</th><th scope="col" class="short">Relation</th><th scope="col" class="short">Technology</th><th scope="col" class="vuln-col">Vulnerability</th>`,
+	} {
+		if strings.Contains(out, old) {
+			t.Fatalf("list-all HTML still renders old 10-column inventory layout %q:\n%s", old, out)
 		}
 	}
 }
@@ -2260,25 +3342,100 @@ func TestListAllHTMLShortensDigestAndRendersCopyButton(t *testing.T) {
 	}
 	out := string(data)
 	for _, want := range []string{
-		`<span class="copy-value">sha256:5b10f432ef3d..</span>`,
+		`<span class="copy-value"><bdi dir="auto">sha256:5b10f432ef3d..</bdi></span>`,
+		`<span class="print-copy-value"><bdi dir="auto">` + digest + `</bdi></span>`,
 		`data-copy="` + digest + `"`,
 		`data-copy-label="Copy full latest value for docker.io/library/alpine 3.23"`,
 		`data-copy-message="Copied full latest value for docker.io/library/alpine"`,
 		`aria-label="Copy full latest value for docker.io/library/alpine 3.23"`,
 		`id="copy-status" class="sr-only" role="status" aria-live="polite"`,
-		`function fallbackCopy(value,button)`,
-		`return document.execCommand('copy') === true`,
-		`restoreFocus(button,previous)`,
+		`function showManualCopy(value,button)`,
+		`className='copy-fallback'`,
+		`input.select()`,
+		`Full value is selected for manual copy`,
 		`Copy failed`,
 		`copy-failed`,
 		`navigator.clipboard.writeText`,
+		`var copyConfirmationVisibleMs=5000;`,
+		`window.setTimeout(function(){resetButton(button);},copyConfirmationVisibleMs);`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("HTML missing %q:\n%s", want, out)
 		}
 	}
+	if strings.Contains(out, "execCommand") {
+		t.Fatalf("HTML keeps deprecated execCommand copy fallback:\n%s", out)
+	}
 	if strings.Contains(out, `<td class="version">`+digest+`</td>`) {
 		t.Fatalf("HTML renders full digest inline instead of shortened copy UI:\n%s", out)
+	}
+}
+
+func TestListAllHTMLPrintsExternalHrefsFullDigestsAndIsolatesBidi(t *testing.T) {
+	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+	const digest = "sha256:5b10f432ef3d1234567890abcdef1234567890abcdef1234567890abcdef12"
+	report := listAllPackageReport{
+		Target: "repo-\u05d0",
+		Rows: []listAllRow{{
+			Name:       "docker.io/library/alpine-\u05d1",
+			Installed:  "3.23-\u05d2",
+			Latest:     shortDigest(digest),
+			LatestCopy: digest,
+			Update:     "yes",
+			Ecosystem:  "docker",
+			Source:     "dockerfile",
+			Scope:      "runtime",
+			Relation:   "base",
+			Vuln:       "-",
+			LockFile:   "Dockerfile-\u05d3",
+		}},
+		Sources: []listAllSourceRow{{Kind: "docker", Path: "Dockerfile-\u05d3"}},
+	}
+	result := &domain.ScanResult{
+		Mode: "remote",
+		Findings: []domain.Finding{{
+			Name:       "docker.io/library/alpine-\u05d1",
+			Version:    "3.23-\u05d2",
+			Ecosystem:  domain.EcosystemDocker,
+			Type:       domain.FindingTypeVulnerability,
+			Severity:   domain.SeverityHigh,
+			AdvisoryID: "GHSA-test",
+			Title:      "mixed bidi finding \u05d5",
+			Source:     "ghsa-\u05d6",
+			URL:        "https://github.com/advisories/GHSA-test",
+		}},
+	}
+
+	if err := writeListAllHTML(htmlPath, "test-\u05d7", domain.SeverityCritical, result, report); err != nil {
+		t.Fatalf("writeListAllHTML: %v", err)
+	}
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read HTML: %v", err)
+	}
+	out := string(data)
+	for _, want := range []string{
+		`<h1><bdi dir="auto">test-` + "\u05d7" + `</bdi></h1>`,
+		`<bdi dir="auto">repo-` + "\u05d0" + `</bdi>`,
+		`<td class="name"><bdi dir="auto">docker.io/library/alpine-` + "\u05d1" + `</bdi></td>`,
+		`<span class="copy-value"><bdi dir="auto">sha256:5b10f432ef3d..</bdi></span>`,
+		`<span class="print-copy-value"><bdi dir="auto">` + digest + `</bdi></span>`,
+		`<td class="finding-advisory"><a class="external-link" href="https://github.com/advisories/GHSA-test" target="_blank" rel="noopener" aria-label="GHSA-test opens in a new tab"><bdi dir="auto">GHSA-test</bdi><span class="sr-only"> (opens in a new tab)</span></a></td>`,
+		`<td class="finding-title"><bdi dir="auto">mixed bidi finding ` + "\u05d5" + `</bdi></td>`,
+		`<dt>Source</dt><dd><bdi dir="auto">ghsa-` + "\u05d6" + `</bdi></dd>`,
+		`<span class="source-path"><bdi dir="auto">Dockerfile-` + "\u05d3" + `</bdi></span>`,
+		`a[href]::after{content:" (" attr(href) ")";`,
+		`.copy-btn{display:none;}`,
+		`.print-copy-value{display:inline;`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("list-all HTML missing print/bidi contract %q:\n%s", want, out)
+		}
+	}
+	for _, bad := range []string{`<html lang="en" dir="ltr">`, "&#8599;", "text-align:left", "margin-left"} {
+		if strings.Contains(out, bad) {
+			t.Fatalf("list-all HTML still uses hardcoded direction-sensitive output %q:\n%s", bad, out)
+		}
 	}
 }
 
@@ -2318,24 +3475,29 @@ func TestListAllHTMLAppliesTableLayoutAndAttentionClasses(t *testing.T) {
 		`.status-update{color:var(--high);font-weight:700;}`,
 		`.vuln-yes{color:var(--crit);font-weight:700;}`,
 		`.sev-high{color:var(--high);border-color:var(--high);}`,
-		`.copy-btn{margin-left:8px;border:1px solid var(--border);border-radius:4px;background:#21262d;color:var(--fg);font:inherit;font-size:12px;min-width:44px;min-height:32px;padding:5px 10px;cursor:pointer;}`,
+		`.copy-btn{margin-inline-start:var(--report-space-2);border:1px solid var(--border);border-radius:var(--report-radius-sm);background:var(--button-bg);color:var(--button-fg);font:inherit;font-size:var(--report-type-xs);min-width:var(--report-touch-target);min-height:var(--report-touch-target);padding:var(--report-space-1) var(--report-space-3);cursor:pointer;}`,
+		`.copy-btn:focus-visible{outline:var(--report-focus-ring) solid var(--link);outline-offset:var(--report-space-0-5);border-color:var(--link);}`,
+		`.copy-btn:active{background:var(--link);border-color:var(--link);color:var(--bg);}`,
 		`.vuln-col{text-align:center;`,
-		`.findings-table{table-layout:auto;min-width:1180px;}`,
+		`.findings-table{table-layout:auto;min-width:980px;}`,
 		`.findings-table .finding-package{min-width:220px;white-space:nowrap;overflow-wrap:normal;word-break:normal;}`,
 		`.findings-table .finding-advisory{min-width:190px;white-space:nowrap;overflow-wrap:normal;word-break:normal;}`,
-		`.findings-table .finding-advisory a{white-space:nowrap;overflow-wrap:normal;word-break:normal;}`,
+		`.finding-advisory a{display:inline-flex;align-items:center;min-height:var(--report-touch-target);padding:var(--report-space-1-5) var(--report-space-2);margin:calc(-1 * var(--report-space-1-5)) calc(-1 * var(--report-space-2));white-space:nowrap;overflow-wrap:normal;word-break:normal;}`,
 		`.finding-title{min-width:320px;white-space:normal;overflow-wrap:break-word;word-break:normal;}`,
-		`.finding-fixed{min-width:120px;white-space:nowrap;overflow-wrap:normal;word-break:normal;}`,
+		`.finding-action{min-width:150px;white-space:nowrap;overflow-wrap:normal;word-break:normal;}`,
+		`.finding-details-row td{padding-top:0;color:var(--dim);font-size:var(--report-type-sm);}`,
+		`.finding-details-list{display:flex;flex-wrap:wrap;gap:var(--report-space-1-5) var(--report-space-3);margin:0;padding:0;}`,
 		`<td class="package-status status-update">Update available</td>`,
 		`<td class="vuln-col vuln-yes">yes</td>`,
 		`<span class="sev sev-high">HIGH</span>`,
 		`<table class="findings-table">`,
-		`<th class="finding-package">Package</th>`,
-		`<th class="finding-advisory">Advisory</th>`,
-		`<th class="finding-title">Finding</th>`,
-		`<th class="finding-fixed">Fix Version</th>`,
-		`<td class="finding-fixed">&gt;= 8.5.10</td>`,
-		`<td class="installed"><span class="copy-value">sha256:aaaaaaaaaaaa..</span><button type="button" class="copy-btn" data-copy="` + installedDigest + `" data-copy-label="Copy full installed value for docker.io/library/nginx ` + installedDigest + `" data-copy-message="Copied full installed value for docker.io/library/nginx" aria-label="Copy full installed value for docker.io/library/nginx ` + installedDigest + `">Copy</button></td>`,
+		`<th scope="col" class="finding-package">Package</th>`,
+		`<th scope="col" class="finding-advisory">Advisory</th>`,
+		`<th scope="col" class="finding-title">Finding</th>`,
+		`<th scope="col" class="finding-action">Action</th>`,
+		`<td class="finding-action"><bdi dir="auto">Fix &gt;= 8.5.10</bdi></td>`,
+		`<dt>Fixed Version</dt><dd><bdi dir="auto">&gt;= 8.5.10</bdi></dd>`,
+		`<td class="installed"><span class="copy-value"><bdi dir="auto">sha256:aaaaaaaaaaaa..</bdi></span><button type="button" class="copy-btn" data-copy="` + installedDigest + `" data-copy-label="Copy full installed value for docker.io/library/nginx ` + installedDigest + `" data-copy-message="Copied full installed value for docker.io/library/nginx" aria-label="Copy full installed value for docker.io/library/nginx ` + installedDigest + `">Copy</button><span class="print-copy-value"><bdi dir="auto">` + installedDigest + `</bdi></span></td>`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("HTML missing layout requirement %q:\n%s", want, out)
@@ -2345,7 +3507,9 @@ func TestListAllHTMLAppliesTableLayoutAndAttentionClasses(t *testing.T) {
 		`.findings-table{table-layout:auto;min-width:0;}`,
 		`.findings-table .finding-package{width:1%;`,
 		`.findings-table .finding-advisory{width:1%;`,
-		`.finding-fixed{overflow-wrap:anywhere;word-break:break-word;}`,
+		`.finding-fixed{`,
+		`.finding-action{overflow-wrap:anywhere;word-break:break-word;}`,
+		`min-height:32px`,
 	} {
 		if strings.Contains(out, bad) {
 			t.Fatalf("HTML still contains cramped finding table layout %q:\n%s", bad, out)
@@ -2389,12 +3553,12 @@ func TestListAllHTMLRendersStatusAndCheckedLockFiles(t *testing.T) {
 	for _, want := range []string{
 		"<h2>Packages Needing Attention</h2>",
 		"<h2>Checked Inventory Sources</h2>",
-		`<th class="package-status">Status</th>`,
+		`<th scope="col" class="package-status">Status</th>`,
 		`<td class="package-status">Removed</td>`,
 		`<td class="package-status status-update">Update available</td>`,
 		`<td class="package-status">Up-to-Date</td>`,
 		`<td class="package-status">Local build</td>`,
-		`<td class="name">postcss</td><td class="installed">8.5.8</td><td class="version">8.5.10</td><td class="package-status status-update">Update available</td>`,
+		`<td class="name"><bdi dir="auto">postcss</bdi></td><td class="installed"><bdi dir="auto">8.5.8</bdi></td><td class="version"><bdi dir="auto">8.5.10</bdi></td><td class="package-status status-update">Update available</td>`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("HTML missing %q:\n%s", want, out)
@@ -2402,7 +3566,7 @@ func TestListAllHTMLRendersStatusAndCheckedLockFiles(t *testing.T) {
 	}
 	for _, removed := range []string{
 		`<th class="short">Update</th>`,
-		`<th class="lockfile">Lock File</th>`,
+		`<th class="lockfile">Lockfile</th>`,
 		`<td class="lockfile">`,
 	} {
 		if strings.Contains(out, removed) {
@@ -2441,9 +3605,9 @@ func TestListAllHTMLOmitsLongFlagsAndListsInventorySources(t *testing.T) {
 	out := string(data)
 	for _, want := range []string{
 		"<h2>Checked Inventory Sources</h2>",
-		`<span class="source-kind">docker</span><span class="source-path">Dockerfile</span>`,
-		`<span class="source-kind">docker</span><span class="source-path">docker-compose.yml</span>`,
-		`<span class="source-kind">lockfile</span><span class="source-path">package-lock.json</span>`,
+		`<span class="source-kind">docker</span><span class="source-path"><bdi dir="auto">Dockerfile</bdi></span>`,
+		`<span class="source-kind">docker</span><span class="source-path"><bdi dir="auto">docker-compose.yml</bdi></span>`,
+		`<span class="source-kind">lockfile</span><span class="source-path"><bdi dir="auto">package-lock.json</bdi></span>`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("HTML missing %q:\n%s", want, out)
@@ -2492,8 +3656,8 @@ func TestListAllHTMLUsesReportInventorySources(t *testing.T) {
 	}
 	out := string(data)
 	for _, want := range []string{
-		`<span class="source-kind">lockfile</span><span class="source-path">package-lock.json</span>`,
-		`<span class="source-kind">sbom</span><span class="source-path">sbom/package.cdx.json</span>`,
+		`<span class="source-kind">lockfile</span><span class="source-path"><bdi dir="auto">package-lock.json</bdi></span>`,
+		`<span class="source-kind">sbom</span><span class="source-path"><bdi dir="auto">sbom/package.cdx.json</bdi></span>`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("HTML missing source %q:\n%s", want, out)
@@ -2597,8 +3761,8 @@ func TestListAllHTMLMinimizesAbsoluteReportPaths(t *testing.T) {
 	}
 	for _, want := range []string{
 		"course-assignment",
-		`<span class="source-kind">lockfile</span><span class="source-path">package-lock.json</span>`,
-		`<span class="source-kind">sbom</span><span class="source-path">student-bom.cdx.json</span>`,
+		`<span class="source-kind">lockfile</span><span class="source-path"><bdi dir="auto">package-lock.json</bdi></span>`,
+		`<span class="source-kind">sbom</span><span class="source-path"><bdi dir="auto">student-bom.cdx.json</bdi></span>`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("list-all HTML missing minimized path %q:\n%s", want, out)
@@ -2634,7 +3798,7 @@ func TestListAllHTMLSurfacesUpdatesWithoutSecurityFindings(t *testing.T) {
 		"No security findings in 1 package.",
 		"<h2>Packages Needing Attention</h2>",
 		"<h2>Security Findings</h2>",
-		`<td class="name">node-addon-api</td><td class="installed">7.1.1</td><td class="version">8.8.0</td><td class="package-status status-update">Update available</td>`,
+		`<td class="name"><bdi dir="auto">node-addon-api</bdi></td><td class="installed"><bdi dir="auto">7.1.1</bdi></td><td class="version"><bdi dir="auto">8.8.0</bdi></td><td class="package-status status-update">Update available</td>`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("HTML missing %q:\n%s", want, out)
@@ -2653,19 +3817,19 @@ func TestListAllHelperBranches(t *testing.T) {
 		t.Fatal("npm-only filter should not allow docker")
 	}
 
-	local := resolveListAllLatest(context.Background(), listAllPackage{
+	local := resolveListAllLatestWithLookup(context.Background(), listAllPackage{
 		Ecosystem: domain.EcosystemDocker,
 		Name:      "local/image",
 		Version:   "latest",
-	})
+	}, directPackageUpdateLookup(), nil)
 	if local.Unknown || local.Latest != "-" || local.Update != "local" {
 		t.Fatalf("local docker status = %+v, want local non-unknown", local)
 	}
-	invalidDocker := resolveListAllLatest(context.Background(), listAllPackage{
+	invalidDocker := resolveListAllLatestWithLookup(context.Background(), listAllPackage{
 		Ecosystem: domain.EcosystemDocker,
 		Name:      "bad ref",
 		Version:   "latest",
-	})
+	}, directPackageUpdateLookup(), nil)
 	if !invalidDocker.Unknown {
 		t.Fatalf("invalid docker status = %+v, want unknown", invalidDocker)
 	}
@@ -2737,7 +3901,7 @@ func TestListAllFindingLabelsAndWarnings(t *testing.T) {
 		want string
 	}{
 		{name: "blank", raw: "", want: "-"},
-		{name: "known", raw: "malware_history", want: "Malware history"},
+		{name: "known", raw: domain.RiskTypeMalwareHistory, want: "Malware history"},
 		{name: "hyphen unknown", raw: "custom-risk_type", want: "Custom risk type"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2777,7 +3941,7 @@ func TestListAllFindingLabelsAndWarnings(t *testing.T) {
 		}
 	}
 
-	if got := listAllFindingTitle(domain.Finding{Title: "original", RiskType: "malware_history"}); got != "ReversingLabs: malware incident history" {
+	if got := listAllFindingTitle(domain.Finding{Title: "original", RiskType: domain.RiskTypeMalwareHistory}); got != "ReversingLabs: malware incident history" {
 		t.Fatalf("listAllFindingTitle(malware_history) = %q", got)
 	}
 	if got := listAllFindingTitle(domain.Finding{Title: "original"}); got != "original" {
@@ -2804,6 +3968,50 @@ func TestListAllFindingLabelsAndWarnings(t *testing.T) {
 	}
 	if got := listAllHTMLWarnings(nil, []string{"missing inventory"}); len(got) != 1 || !strings.Contains(got[0], "missing inventory") {
 		t.Fatalf("listAllHTMLWarnings(nil) = %+v", got)
+	}
+}
+
+func TestListAllHTMLWarningsUseSharedReportWarningsAndAppendInventoryWarnings(t *testing.T) {
+	t.Parallel()
+
+	result := &domain.ScanResult{
+		Mode:        domain.ScanModeLocal,
+		FeedStatus:  "degraded",
+		DBStale:     true,
+		ParseErrors: []string{" ", "bad lockfile"},
+	}
+	got := listAllHTMLWarnings(result, []string{" ", "missing SBOM"})
+	common := scanner.ReportWarnings(result)
+	if len(got) != len(common)+1 {
+		t.Fatalf("warnings = %#v, want shared warnings %#v plus one inventory warning", got, common)
+	}
+	for i := range common {
+		if got[i] != common[i] {
+			t.Fatalf("warnings[%d] = %q, want shared warning %q\nall warnings: %#v", i, got[i], common[i], got)
+		}
+	}
+	if want := "Some requested package inventory could not be listed: missing SBOM"; got[len(got)-1] != want {
+		t.Fatalf("last warning = %q, want %q\nall warnings: %#v", got[len(got)-1], want, got)
+	}
+}
+
+func TestListAllHTMLWarningsCollapseLargeWarningStacks(t *testing.T) {
+	t.Parallel()
+
+	var inventoryWarnings []string
+	for i := 0; i < maxListAllHTMLReportWarnings+2; i++ {
+		inventoryWarnings = append(inventoryWarnings, fmt.Sprintf("inventory-%d", i))
+	}
+	got := listAllHTMLWarnings(nil, inventoryWarnings)
+	if len(got) != maxListAllHTMLReportWarnings+1 {
+		t.Fatalf("warnings = %#v, want %d visible warnings plus summary", got, maxListAllHTMLReportWarnings)
+	}
+	joined := strings.Join(got, "\n")
+	if !strings.Contains(joined, "inventory-0") || strings.Contains(joined, "inventory-6") {
+		t.Fatalf("warnings should keep first entries and omit overflow:\n%#v", got)
+	}
+	if !strings.Contains(got[len(got)-1], "additional warnings were omitted") {
+		t.Fatalf("last warning = %q, want overflow summary", got[len(got)-1])
 	}
 }
 
@@ -2838,12 +4046,12 @@ func TestResolveDockerImageStatusLabelsMatchingPinnedTagDigestAsPinned(t *testin
 		}, nil
 	})
 
-	got := resolveDockerImageStatus(context.Background(), listAllPackage{
+	got := resolveDockerImageStatusWithLocalDigests(context.Background(), listAllPackage{
 		Ecosystem: domain.EcosystemDocker,
 		Name:      "docker.io/acme/app",
 		Version:   digest,
 		DockerRef: "registry-1.docker.io/acme/app:stable@" + digest,
-	})
+	}, nil)
 	if got.Unknown || got.Update != "pinned" || got.Latest != shortDigest(digest) || got.LatestCopy != digest {
 		t.Fatalf("resolveDockerImageStatus() = %+v, want pinned digest status", got)
 	}
@@ -2872,12 +4080,12 @@ func TestResolveDockerImageStatusUsesRegistryDefaultHTTPTimeout(t *testing.T) {
 		return registryClient
 	}
 
-	got := resolveDockerImageStatus(context.Background(), listAllPackage{
+	got := resolveDockerImageStatusWithLocalDigests(context.Background(), listAllPackage{
 		Ecosystem: domain.EcosystemDocker,
 		Name:      "docker.io/acme/app",
 		Version:   "stable",
 		DockerRef: "registry-1.docker.io/acme/app:stable",
-	})
+	}, nil)
 	if got.Latest != shortDigest(digest) || got.LatestCopy != digest {
 		t.Fatalf("resolveDockerImageStatus() = %+v, want digest from default-timeout client", got)
 	}
@@ -2915,12 +4123,12 @@ func TestResolveDockerImageStatusMarksMovedPinnedTagAsUpdateAvailable(t *testing
 		}, nil
 	})
 
-	got := resolveDockerImageStatus(context.Background(), listAllPackage{
+	got := resolveDockerImageStatusWithLocalDigests(context.Background(), listAllPackage{
 		Ecosystem: domain.EcosystemDocker,
 		Name:      "docker.io/acme/app",
 		Version:   pinned,
 		DockerRef: "registry-1.docker.io/acme/app:stable@" + pinned,
-	})
+	}, nil)
 	if got.Unknown || got.Update != "yes" || got.Latest != shortDigest(current) || got.LatestCopy != current {
 		t.Fatalf("resolveDockerImageStatus() = %+v, want update to current tag digest", got)
 	}

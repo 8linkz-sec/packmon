@@ -17,10 +17,9 @@ package feed
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
-
-	"github.com/8linkz-sec/packmon/internal/telemetry"
 )
 
 const (
@@ -79,19 +78,28 @@ type QueueProcessor struct {
 	workers        []AsyncWorker
 	pollInterval   time.Duration
 	stuckThreshold time.Duration
+	metrics        MetricsRecorder
 }
 
 // QueueOption configures a QueueProcessor.
-type QueueOption func(*QueueProcessor)
+type QueueOption interface {
+	applyQueueOption(*QueueProcessor)
+}
+
+type queueOptionFunc func(*QueueProcessor)
+
+func (f queueOptionFunc) applyQueueOption(q *QueueProcessor) {
+	f(q)
+}
 
 // WithQueuePollInterval overrides the default poll interval.
 func WithQueuePollInterval(d time.Duration) QueueOption {
-	return func(q *QueueProcessor) { q.pollInterval = d }
+	return queueOptionFunc(func(q *QueueProcessor) { q.pollInterval = d })
 }
 
 // WithQueueStuckThreshold overrides the default stuck-job threshold.
 func WithQueueStuckThreshold(d time.Duration) QueueOption {
-	return func(q *QueueProcessor) { q.stuckThreshold = d }
+	return queueOptionFunc(func(q *QueueProcessor) { q.stuckThreshold = d })
 }
 
 // NewQueueProcessor creates a queue processor that supervises the given
@@ -106,9 +114,12 @@ func NewQueueProcessor(store QueueMaintenanceStore, logger *slog.Logger, workers
 		workers:        workers,
 		pollInterval:   defaultPollInterval,
 		stuckThreshold: defaultStuckThreshold,
+		metrics:        NoopMetricsRecorder(),
 	}
 	for _, opt := range opts {
-		opt(q)
+		if opt != nil {
+			opt.applyQueueOption(q)
+		}
 	}
 	return q
 }
@@ -136,108 +147,27 @@ func (q *QueueProcessor) Run(ctx context.Context) error {
 	// Reset any stuck jobs left from a previous crash before starting workers.
 	q.resetAllStuckJobs(ctx)
 
-	// Track restart counts per worker name.
-	restartCounts := make(map[string]int, len(q.workers))
-
-	// Start each worker in its own goroutine.
+	lifecycle := newWorkerLifecycleState(len(q.workers))
 	done := make(chan workerResult, len(q.workers))
-	for _, w := range q.workers {
-		go func() {
-			err := w.Run(ctx)
-			done <- workerResult{name: w.Name(), err: err}
-		}()
-		q.logger.Info("started async worker", "worker", w.Name())
-	}
+	q.startWorkers(ctx, done)
 
 	// Periodic stuck-job scanner runs alongside the workers.
 	stuckTicker := time.NewTicker(q.pollInterval)
 	defer stuckTicker.Stop()
 
-	exited := 0
 	for {
 		select {
 		case <-ctx.Done():
 			q.logger.Info("queue processor shutting down, waiting for workers")
-			// Workers will observe the cancelled context and exit.
-			// Drain remaining results.
-			for exited < len(q.workers) {
-				result := <-done
-				exited++
-				if result.err != nil && !errors.Is(result.err, context.Canceled) {
-					q.logger.Warn("worker exited with error during shutdown",
-						"worker", result.name,
-						"error", result.err,
-					)
-				}
-			}
+			q.drainWorkersOnShutdown(done, lifecycle.exited)
 			q.logger.Info("all workers stopped")
 			return ctx.Err()
 
 		case result := <-done:
-			// Determine whether this is a clean exit or a crash.
-			isCanceled := errors.Is(result.err, context.Canceled) || ctx.Err() != nil
-
-			if isCanceled {
-				// Clean exit during shutdown: count as done.
-				exited++
-				q.logger.Info("worker exited", "worker", result.name)
-			} else {
-				if result.err == nil {
-					result.err = errors.New("worker exited unexpectedly without error")
-				}
-				// Unexpected error: attempt restart with backoff.
-				attempt := restartCounts[result.name]
-				if attempt >= maxWorkerRestarts {
-					// Exhausted restart attempts; give up on this worker.
-					exited++
-					q.logger.Error("worker permanently failed after max restarts",
-						"worker", result.name,
-						"error", result.err,
-						"restarts_attempted", attempt,
-					)
-				} else {
-					backoff := workerBackoffs[attempt]
-					restartCounts[result.name] = attempt + 1
-					q.logger.Warn("worker crashed, scheduling restart",
-						"worker", result.name,
-						"error", result.err,
-						"restart_attempt", attempt+1,
-						"max_restarts", maxWorkerRestarts,
-						"backoff", backoff,
-					)
-
-					// Find the worker to restart.
-					w := q.findWorker(result.name)
-					if w == nil {
-						// Should not happen, but be defensive.
-						exited++
-						q.logger.Error("cannot restart worker: not found in registry",
-							"worker", result.name,
-						)
-					} else {
-						// Restart in a background goroutine that waits for the
-						// backoff period (or context cancellation) before relaunching.
-						attemptNum := attempt + 1
-						go func(worker AsyncWorker, delay time.Duration, restartNum int) {
-							select {
-							case <-ctx.Done():
-								done <- workerResult{name: worker.Name(), err: ctx.Err()}
-								return
-							case <-time.After(delay):
-							}
-							q.logger.Info("restarting worker after backoff",
-								"worker", worker.Name(),
-								"restart_attempt", restartNum,
-							)
-							err := worker.Run(ctx)
-							done <- workerResult{name: worker.Name(), err: err}
-						}(w, backoff, attemptNum)
-					}
-				}
-			}
+			q.handleWorkerResult(ctx, result, done, lifecycle)
 
 			// If all workers have permanently exited, wait for context cancellation.
-			if exited >= len(q.workers) {
+			if lifecycle.allWorkersExited() {
 				q.logger.Info("all workers have exited, waiting for shutdown signal")
 				<-ctx.Done()
 				return ctx.Err()
@@ -247,6 +177,100 @@ func (q *QueueProcessor) Run(ctx context.Context) error {
 			q.resetAllStuckJobs(ctx)
 		}
 	}
+}
+
+// startWorkers starts each registered worker in its own goroutine.
+func (q *QueueProcessor) startWorkers(ctx context.Context, done chan<- workerResult) {
+	for _, w := range q.workers {
+		q.startWorker(ctx, w, done)
+		q.logger.Info("started async worker", "worker", w.Name())
+	}
+}
+
+func (q *QueueProcessor) startWorker(ctx context.Context, worker AsyncWorker, done chan<- workerResult) {
+	go func() {
+		err := worker.Run(ctx)
+		done <- workerResult{name: worker.Name(), err: err}
+	}()
+}
+
+// drainWorkersOnShutdown waits for active workers or pending restarts to report
+// their final result after the processor context has been cancelled.
+func (q *QueueProcessor) drainWorkersOnShutdown(done <-chan workerResult, exited int) {
+	for exited < len(q.workers) {
+		result := <-done
+		exited++
+		if result.err != nil && !errors.Is(result.err, context.Canceled) {
+			q.logger.Warn("worker exited with error during shutdown",
+				"worker", result.name,
+				"error", result.err,
+			)
+		}
+	}
+}
+
+func (q *QueueProcessor) handleWorkerResult(ctx context.Context, result workerResult, done chan<- workerResult, lifecycle *workerLifecycleState) {
+	if result.isCanceled(ctx) {
+		lifecycle.markExited()
+		q.logger.Info("worker exited", "worker", result.name)
+		return
+	}
+
+	if result.err == nil {
+		result.err = errors.New("worker exited unexpectedly without error")
+	}
+	if q.restartWorker(ctx, result, done, lifecycle) {
+		return
+	}
+	lifecycle.markExited()
+}
+
+func (q *QueueProcessor) restartWorker(ctx context.Context, result workerResult, done chan<- workerResult, lifecycle *workerLifecycleState) bool {
+	restart, ok := lifecycle.claimRestart(result.name)
+	if !ok {
+		q.logger.Error("worker permanently failed after max restarts",
+			"worker", result.name,
+			"error", result.err,
+			"restarts_attempted", restart.attempts,
+		)
+		return false
+	}
+
+	q.logger.Warn("worker crashed, scheduling restart",
+		"worker", result.name,
+		"error", result.err,
+		"restart_attempt", restart.attempts,
+		"max_restarts", maxWorkerRestarts,
+		"backoff", restart.backoff,
+	)
+
+	w := q.findWorker(result.name)
+	if w == nil {
+		q.logger.Error("cannot restart worker: not found in registry",
+			"worker", result.name,
+		)
+		return false
+	}
+
+	q.restartWorkerAfterBackoff(ctx, w, restart, done)
+	return true
+}
+
+func (q *QueueProcessor) restartWorkerAfterBackoff(ctx context.Context, worker AsyncWorker, restart workerRestart, done chan<- workerResult) {
+	go func() {
+		select {
+		case <-ctx.Done():
+			done <- workerResult{name: worker.Name(), err: ctx.Err()}
+			return
+		case <-time.After(restart.backoff):
+		}
+		q.logger.Info("restarting worker after backoff",
+			"worker", worker.Name(),
+			"restart_attempt", restart.attempts,
+		)
+		err := worker.Run(ctx)
+		done <- workerResult{name: worker.Name(), err: err}
+	}()
 }
 
 // findWorker returns the registered AsyncWorker with the given name, or nil.
@@ -262,23 +286,37 @@ func (q *QueueProcessor) findWorker(name string) AsyncWorker {
 // resetAllStuckJobs resets stuck jobs for every registered worker source.
 func (q *QueueProcessor) resetAllStuckJobs(ctx context.Context) {
 	for _, w := range q.workers {
-		resetCtx, cancel := context.WithTimeout(ctx, resetStuckJobsTimeout)
-		count, err := q.store.ResetStuckJobs(resetCtx, w.Name(), q.stuckThreshold)
-		cancel()
-		if err != nil {
-			q.logger.Warn("failed to reset stuck jobs",
-				"source", w.Name(),
-				"error", err,
-			)
-			continue
-		}
-		if count > 0 {
-			telemetry.Default().AddQueueStuckRecovered(count)
-			q.logger.Info("reset stuck jobs",
-				"source", w.Name(),
-				"count", count,
+		q.resetStuckJobsForSource(ctx, w.Name())
+	}
+}
+
+func (q *QueueProcessor) resetStuckJobsForSource(ctx context.Context, source string) {
+	resetCtx, cancel := context.WithTimeout(ctx, resetStuckJobsTimeout)
+	defer cancel()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			q.metrics.IncQueueError(source)
+			q.logger.Error("stuck job reset panic recovered",
+				"source", source,
+				"panic", SafeDiagnosticMessage(fmt.Sprint(recovered)),
 			)
 		}
+	}()
+
+	count, err := q.store.ResetStuckJobs(resetCtx, source, q.stuckThreshold)
+	if err != nil {
+		q.logger.Warn("failed to reset stuck jobs",
+			"source", source,
+			"error", err,
+		)
+		return
+	}
+	if count > 0 {
+		q.metrics.AddQueueStuckRecovered(count)
+		q.logger.Info("reset stuck jobs",
+			"source", source,
+			"count", count,
+		)
 	}
 }
 
@@ -286,4 +324,46 @@ func (q *QueueProcessor) resetAllStuckJobs(ctx context.Context) {
 type workerResult struct {
 	name string
 	err  error
+}
+
+func (r workerResult) isCanceled(ctx context.Context) bool {
+	return errors.Is(r.err, context.Canceled) || ctx.Err() != nil
+}
+
+type workerLifecycleState struct {
+	restartCounts map[string]int
+	exited        int
+	total         int
+}
+
+func newWorkerLifecycleState(workerCount int) *workerLifecycleState {
+	return &workerLifecycleState{
+		restartCounts: make(map[string]int, workerCount),
+		total:         workerCount,
+	}
+}
+
+func (s *workerLifecycleState) markExited() {
+	s.exited++
+}
+
+func (s *workerLifecycleState) allWorkersExited() bool {
+	return s.exited >= s.total
+}
+
+func (s *workerLifecycleState) claimRestart(workerName string) (workerRestart, bool) {
+	attempts := s.restartCounts[workerName]
+	if attempts >= maxWorkerRestarts {
+		return workerRestart{attempts: attempts}, false
+	}
+	s.restartCounts[workerName] = attempts + 1
+	return workerRestart{
+		attempts: attempts + 1,
+		backoff:  workerBackoffs[attempts],
+	}, true
+}
+
+type workerRestart struct {
+	attempts int
+	backoff  time.Duration
 }

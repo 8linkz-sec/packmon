@@ -13,5 +13,6 @@ DROP TABLE IF EXISTS malicious_findings;
 DROP TABLE IF EXISTS affected_packages;
 DROP TABLE IF EXISTS vulnerability_references;
 DROP TABLE IF EXISTS vulnerability_sources;
+DROP TABLE IF EXISTS nvd_cvss_negative_cache;
 DROP TABLE IF EXISTS vulnerability_aliases;
 DROP TABLE IF EXISTS vulnerabilities;

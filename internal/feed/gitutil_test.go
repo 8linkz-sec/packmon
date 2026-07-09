@@ -138,6 +138,48 @@ func TestGitRepoPullWithChangedFilesFreshClone(t *testing.T) {
 	}
 }
 
+func TestGitRepoPullWithChangedFilesWaitsForPackmonSyncLockBeforeRemovingIndexLock(t *testing.T) {
+	oldGitExecutable := gitExecutable
+	oldGitExecutableArgs := gitExecutableArgs
+	gitExecutable = os.Args[0]
+	gitExecutableArgs = []string{"-test.run=^TestGitRepoFakeGitSuccessfulPull$", "--"}
+	t.Cleanup(func() {
+		gitExecutable = oldGitExecutable
+		gitExecutableArgs = oldGitExecutableArgs
+	})
+	t.Setenv("PACKMON_FAKE_GIT_SUCCESSFUL_PULL", "1")
+
+	repoDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(repoDir, ".git"), 0o750); err != nil {
+		t.Fatalf("mkdir .git: %v", err)
+	}
+	indexLock := filepath.Join(repoDir, ".git", "index.lock")
+	if err := os.WriteFile(indexLock, []byte("active git process"), 0o600); err != nil {
+		t.Fatalf("write active index lock: %v", err)
+	}
+	packmonLock := filepath.Join(repoDir, ".packmon-sync.lock")
+	if err := os.WriteFile(packmonLock, []byte("held by another process"), 0o600); err != nil {
+		t.Fatalf("write packmon lock: %v", err)
+	}
+
+	repo := &GitRepo{
+		URL:            "https://example.invalid/repo.git",
+		Dir:            repoDir,
+		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		CommandTimeout: time.Second,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+
+	_, _, err := repo.PullWithChangedFiles(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("PullWithChangedFiles() error = %v, want context deadline exceeded", err)
+	}
+	if _, err := os.Stat(indexLock); err != nil {
+		t.Fatalf("index.lock was touched while packmon lock was held: %v", err)
+	}
+}
+
 func TestGitRepoHeadHashFailsOutsideRepo(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
@@ -292,6 +334,31 @@ func TestGitRepoFakeGitOutput(t *testing.T) {
 	_, _ = os.Stdout.WriteString("stdout includes /var/lib/packmon/feed-data/repo and secret-token\n")
 	_, _ = os.Stderr.WriteString(`fatal: cannot access C:\Users\Admin\feed-data\repo: token=super-secret` + "\n")
 	os.Exit(2)
+}
+
+func TestGitRepoFakeGitSuccessfulPull(t *testing.T) {
+	if os.Getenv("PACKMON_FAKE_GIT_SUCCESSFUL_PULL") != "1" {
+		t.Skip("helper process only")
+	}
+	var gitArgs []string
+	for i, arg := range os.Args {
+		if arg == "--" {
+			gitArgs = os.Args[i+1:]
+			break
+		}
+	}
+	if len(gitArgs) == 0 {
+		_, _ = os.Stderr.WriteString("missing fake git args\n")
+		os.Exit(2)
+	}
+	switch gitArgs[0] {
+	case "rev-parse":
+		_, _ = os.Stdout.WriteString("1111111111111111111111111111111111111111\n")
+	case "fetch", "reset", "diff":
+	default:
+		_, _ = os.Stderr.WriteString("unexpected fake git arg: " + gitArgs[0] + "\n")
+		os.Exit(2)
+	}
 }
 
 func withCapturedStderr(dst *bytes.Buffer, fn func() error) error {

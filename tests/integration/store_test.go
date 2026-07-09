@@ -150,9 +150,11 @@ func TestPostgresSystemSettingsRoundTrip(t *testing.T) {
 	ctx := context.Background()
 
 	want := &db.SystemSettings{
-		BlockThreshold:     "HIGH",
-		RateLimitPerMinute: 120,
-		RateLimitBurst:     30,
+		BlockThreshold:      "HIGH",
+		RateLimitPerMinute:  120,
+		RateLimitBurst:      30,
+		ScanLogRetention:    45 * 24 * time.Hour,
+		AdminAuditRetention: 14 * 24 * time.Hour,
 	}
 	if err := store.UpsertSystemSettings(ctx, want); err != nil {
 		t.Fatalf("UpsertSystemSettings: %v", err)
@@ -167,6 +169,9 @@ func TestPostgresSystemSettingsRoundTrip(t *testing.T) {
 	}
 	if got.BlockThreshold != "HIGH" || got.RateLimitPerMinute != 120 || got.RateLimitBurst != 30 {
 		t.Fatalf("round-trip mismatch: got %+v", got)
+	}
+	if got.ScanLogRetention != 45*24*time.Hour || got.AdminAuditRetention != 14*24*time.Hour {
+		t.Fatalf("round-trip retention mismatch: got scan %s admin %s", got.ScanLogRetention, got.AdminAuditRetention)
 	}
 }
 
@@ -234,8 +239,8 @@ func TestPostgresAPIKeyExpirationRevocationAndDeletion(t *testing.T) {
 			break
 		}
 	}
-	if deleted == nil || deleted.DeletedAt == nil || deleted.Name != "ci-runner" || deleted.KeyHash != "hash-active" || deleted.LastUsedAt == nil || deleted.RevokedAt == nil || deleted.ExpiresAt == nil {
-		t.Fatalf("soft-deleted key metadata = %+v in %+v, want lifecycle metadata retained", deleted, keys)
+	if deleted == nil || deleted.DeletedAt == nil || deleted.Name != "" || deleted.KeyHash != fmt.Sprintf("deleted:%d", keyID) || deleted.LastUsedAt == nil || deleted.RevokedAt == nil || deleted.ExpiresAt == nil {
+		t.Fatalf("soft-deleted key metadata = %+v in %+v, want scrubbed identity and lifecycle metadata retained", deleted, keys)
 	}
 }
 
@@ -379,20 +384,19 @@ func TestPostgresStoreSearchSyncReputationAndAdminStats(t *testing.T) {
 	}
 
 	if err := store.InsertScanLog(ctx, &db.ScanLogEntry{
-		ScanID:        "scan-store-1",
-		RepoName:      "packmon",
-		Branch:        "main",
-		Commit:        "abc123",
-		ScannedAt:     now,
-		PackagesCount: 3,
-		FindingsCount: 3,
-		DurationMs:    12,
-		ClientIP:      "127.0.0.1",
-		UserAgent:     "packmon/test",
+		ScanID:         "scan-store-1",
+		RepoName:       "packmon",
+		ScannedAt:      now,
+		PackagesCount:  3,
+		FindingsCount:  3,
+		DurationMs:     12,
+		ClientIP:       "127.0.0.1",
+		BlockThreshold: "CRITICAL",
+		FeedStatus:     "healthy",
 	}); err != nil {
 		t.Fatalf("InsertScanLog: %v", err)
 	}
-	recentScans, err := store.ListRecentScans(ctx, 5)
+	recentScans, err := store.ListRecentScans(ctx, 5, 0)
 	if err != nil {
 		t.Fatalf("ListRecentScans: %v", err)
 	}
@@ -461,13 +465,13 @@ func TestPostgresUnknownSeverityAliasUpdate(t *testing.T) {
 		t.Fatalf("UpsertVulnerability: %v", err)
 	}
 
-	unknown, err := store.FindUnknownSeverityCVEAliases(ctx)
+	unknown, err := store.FindUnknownSeverityCVEIDs(ctx, "", 100)
 	if err != nil {
-		t.Fatalf("FindUnknownSeverityCVEAliases: %v", err)
+		t.Fatalf("FindUnknownSeverityCVEIDs: %v", err)
 	}
 	found := false
 	for _, item := range unknown {
-		if item.CVEID == "CVE-2026-0999" {
+		if item == "CVE-2026-0999" {
 			found = true
 			break
 		}

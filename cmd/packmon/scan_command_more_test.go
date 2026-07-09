@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"github.com/8linkz-sec/packmon/internal/ioutils"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,6 +41,7 @@ func TestResolveScanSettingsPrecedenceAndValidation(t *testing.T) {
 	t.Setenv("PACKMON_CA_CERT", "env-ca.pem")
 	t.Setenv("PACKMON_INSECURE_ALLOW_HTTP", "true")
 	t.Setenv("PACKMON_REQUIRE_REMOTE", "true")
+	t.Setenv("PACKMON_ALLOW_SECRET_FLAGS", "true")
 
 	includeDev := true
 	repoIncludeDev := false
@@ -137,6 +139,257 @@ func TestResolveScanSettingsPrecedenceAndValidation(t *testing.T) {
 	}
 	if got := strings.Join(settings.SBOMFiles, ","); got != "bom-one.cdx.json,bom-two.spdx.json" {
 		t.Fatalf("SBOMFiles = %q", got)
+	}
+}
+
+func TestApplyScanSharedSettingsMatchesConfigAndRepoCommonFields(t *testing.T) {
+	t.Setenv("PACKMON_SHARED_SCAN_API_KEY", "shared-env-key")
+
+	includeDev := true
+	sendRepoMetadata := false
+	shared := scanSharedSettings{
+		ServerURL:        "https://shared.example",
+		APIKeyEnv:        "PACKMON_SHARED_SCAN_API_KEY",
+		Mode:             "remote",
+		FailOn:           "LOW",
+		Timeout:          17,
+		Ecosystems:       []string{"npm"},
+		IncludeDev:       &includeDev,
+		SendRepoMetadata: &sendRepoMetadata,
+		WebhookURL:       "https://shared.example/hook",
+		WebhookSecret:    "shared-secret",
+	}
+
+	want := defaultScanSettings(scanTarget{Name: "helper", Path: "."}, scanFlagValues{})
+	if err := applyScanSharedSettings(&want, shared, false); err != nil {
+		t.Fatalf("applyScanSharedSettings() error = %v", err)
+	}
+
+	configSettings := defaultScanSettings(scanTarget{Name: "config", Path: "."}, scanFlagValues{})
+	if err := applyScanConfigSettings(&configSettings, &cliConfig{
+		Server:           shared.ServerURL,
+		APIKeyEnv:        shared.APIKeyEnv,
+		Mode:             shared.Mode,
+		FailOn:           shared.FailOn,
+		Timeout:          shared.Timeout,
+		Ecosystems:       append([]string(nil), shared.Ecosystems...),
+		IncludeDev:       shared.IncludeDev,
+		SendRepoMetadata: shared.SendRepoMetadata,
+		Webhook:          cliWebhookConfig{URL: shared.WebhookURL, Secret: shared.WebhookSecret},
+	}, false); err != nil {
+		t.Fatalf("applyScanConfigSettings() error = %v", err)
+	}
+	assertScanCommonSettingsEqual(t, "config", configSettings, want)
+
+	repoSettings := defaultScanSettings(scanTarget{Name: "repo", Path: "."}, scanFlagValues{})
+	if err := applyScanRepoSettings(&repoSettings, &cliRepoConfig{
+		Server:           shared.ServerURL,
+		APIKeyEnv:        shared.APIKeyEnv,
+		Mode:             shared.Mode,
+		FailOn:           shared.FailOn,
+		Timeout:          shared.Timeout,
+		Ecosystems:       append([]string(nil), shared.Ecosystems...),
+		IncludeDev:       shared.IncludeDev,
+		SendRepoMetadata: shared.SendRepoMetadata,
+		Webhook:          cliWebhookConfig{URL: shared.WebhookURL, Secret: shared.WebhookSecret},
+	}, false); err != nil {
+		t.Fatalf("applyScanRepoSettings() error = %v", err)
+	}
+	assertScanCommonSettingsEqual(t, "repo", repoSettings, want)
+}
+
+func assertScanCommonSettingsEqual(t *testing.T, label string, got, want scanSettings) {
+	t.Helper()
+
+	if got.ServerURL != want.ServerURL || got.APIKey != want.APIKey ||
+		got.Mode != want.Mode || got.FailOn != want.FailOn ||
+		got.Timeout != want.Timeout || got.IncludeDev != want.IncludeDev ||
+		got.OmitRepoMetadata != want.OmitRepoMetadata ||
+		got.WebhookURL != want.WebhookURL || got.WebhookSecret != want.WebhookSecret {
+		t.Fatalf("%s shared settings = %+v, want common fields from %+v", label, got, want)
+	}
+	if strings.Join(got.Ecosystems, ",") != strings.Join(want.Ecosystems, ",") {
+		t.Fatalf("%s ecosystems = %q, want %q", label, strings.Join(got.Ecosystems, ","), strings.Join(want.Ecosystems, ","))
+	}
+}
+
+func TestResolveScanSettingsRejectsSecretFlagsByDefault(t *testing.T) {
+	tests := []struct {
+		name       string
+		flagName   string
+		flagValue  string
+		flags      scanFlagValues
+		leaked     string
+		wantPieces []string
+	}{
+		{
+			name:      "api key",
+			flagName:  "api-key",
+			flagValue: "argv-api-secret",
+			flags: scanFlagValues{
+				APIKey: "argv-api-secret",
+			},
+			leaked: "argv-api-secret",
+			wantPieces: []string{
+				"--api-key",
+				"PACKMON_API_KEY",
+				"PACKMON_ALLOW_SECRET_FLAGS",
+			},
+		},
+		{
+			name:      "webhook secret",
+			flagName:  "webhook-secret",
+			flagValue: "argv-webhook-secret",
+			flags: scanFlagValues{
+				WebhookSecret: "argv-webhook-secret",
+			},
+			leaked: "argv-webhook-secret",
+			wantPieces: []string{
+				"--webhook-secret",
+				"PACKMON_WEBHOOK_SECRET",
+				"PACKMON_ALLOW_SECRET_FLAGS",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := newScanCmd()
+			mustSetFlag(t, cmd, tt.flagName, tt.flagValue)
+
+			_, err := resolveScanSettings(cmd, nil, scanTarget{Name: "repo", Path: "."}, tt.flags)
+			if err == nil {
+				t.Fatalf("resolveScanSettings() error = nil, want %s rejection", tt.flagName)
+			}
+			for _, want := range tt.wantPieces {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("resolveScanSettings() error = %v, want %q", err, want)
+				}
+			}
+			if strings.Contains(err.Error(), tt.leaked) {
+				t.Fatalf("resolveScanSettings() error leaked secret %q: %v", tt.leaked, err)
+			}
+		})
+	}
+}
+
+func TestResolveScanSettingsAppliesLatestRegistryMirrors(t *testing.T) {
+	t.Setenv("PACKMON_NPM_REGISTRY_BASE_URL", "https://npm-env.example/registry")
+	t.Setenv("PACKMON_PYPI_API_BASE_URL", "https://pypi-env.example/pypi")
+	t.Setenv("PACKMON_RUBYGEMS_API_BASE_URL", "https://rubygems-env.example/api/v1/gems")
+	t.Setenv("PACKMON_CARGO_REGISTRY_API_BASE_URL", "https://cargo-env.example/api/v1/crates")
+	t.Setenv("PACKMON_COCOAPODS_TRUNK_API_BASE_URL", "https://cocoapods-env.example/api/v1/pods")
+	t.Setenv("PACKMON_COMPOSER_REPOSITORY_BASE_URL", "https://composer-env.example/p2")
+	t.Setenv("PACKMON_GO_PROXY_URL", "https://go-env.example")
+	t.Setenv("PACKMON_MAVEN_REPOSITORY_BASE_URL", "https://maven-env.example/repository/maven-public")
+	t.Setenv("PACKMON_DOCKER_REGISTRY_MIRRORS", "docker.io=https://docker-env.example/dockerhub,ghcr.io=https://ghcr-env.example")
+	t.Setenv("PACKMON_SWIFTPM_GIT_ALLOWED_HOSTS", "git-env.example,gitlab-env.example")
+	t.Setenv("PACKMON_CRAN_MIRROR_URL", "https://cran-env.example")
+	t.Setenv("PACKMON_PUB_HOSTED_URL", "https://pub-env.example")
+	t.Setenv("PACKMON_HEX_API_BASE_URL", "https://hex-env.example/api")
+	t.Setenv("PACKMON_NUGET_V3_BASE_URL", "https://nuget-env.example/v3-flatcontainer")
+
+	cfg := &cliConfig{
+		Registries: cliRegistryConfig{
+			NPMRegistryBaseURL:        "https://npm-config.example/registry",
+			PyPIAPIBaseURL:            "https://pypi-config.example/pypi",
+			RubyGemsAPIBaseURL:        "https://rubygems-config.example/api/v1/gems",
+			CargoRegistryAPIBaseURL:   "https://cargo-config.example/api/v1/crates",
+			CocoaPodsTrunkAPIBaseURL:  "https://cocoapods-config.example/api/v1/pods",
+			ComposerRepositoryBaseURL: "https://composer-config.example/p2",
+			GoModuleProxyURL:          "https://go-config.example",
+			MavenRepositoryBaseURL:    "https://maven-config.example/repository/maven-public",
+			DockerRegistryMirrors:     map[string]string{"docker.io": "https://docker-config.example/dockerhub"},
+			SwiftPMGitAllowedHosts:    []string{"git-config.example"},
+			CRANMirrorURL:             "https://cran-config.example",
+			PubHostedURL:              "https://pub-config.example",
+			HexAPIBaseURL:             "https://hex-config.example/api",
+			NuGetV3BaseURL:            "https://nuget-config.example/v3-flatcontainer",
+		},
+	}
+
+	settings, err := resolveScanSettings(newScanCmd(), cfg, scanTarget{Name: "repo", Path: "."}, scanFlagValues{
+		Mode:    "local",
+		FailOn:  "CRITICAL",
+		Timeout: 1,
+	})
+	if err != nil {
+		t.Fatalf("resolve scan settings: %v", err)
+	}
+	if got := settings.LatestRegistry.NPMRegistryBaseURL; got != "https://npm-env.example/registry" {
+		t.Fatalf("NPMRegistryBaseURL = %q, want env mirror", got)
+	}
+	if got := settings.LatestRegistry.PyPIAPIBaseURL; got != "https://pypi-env.example/pypi" {
+		t.Fatalf("PyPIAPIBaseURL = %q, want env mirror", got)
+	}
+	if got := settings.LatestRegistry.RubyGemsAPIBaseURL; got != "https://rubygems-env.example/api/v1/gems" {
+		t.Fatalf("RubyGemsAPIBaseURL = %q, want env mirror", got)
+	}
+	if got := settings.LatestRegistry.CargoRegistryAPIBaseURL; got != "https://cargo-env.example/api/v1/crates" {
+		t.Fatalf("CargoRegistryAPIBaseURL = %q, want env mirror", got)
+	}
+	if got := settings.LatestRegistry.CocoaPodsTrunkAPIBaseURL; got != "https://cocoapods-env.example/api/v1/pods" {
+		t.Fatalf("CocoaPodsTrunkAPIBaseURL = %q, want env mirror", got)
+	}
+	if got := settings.LatestRegistry.ComposerRepositoryBaseURL; got != "https://composer-env.example/p2" {
+		t.Fatalf("ComposerRepositoryBaseURL = %q, want env mirror", got)
+	}
+	if got := settings.LatestRegistry.GoModuleProxyURL; got != "https://go-env.example" {
+		t.Fatalf("GoModuleProxyURL = %q, want env mirror", got)
+	}
+	if got := settings.LatestRegistry.MavenRepositoryBaseURL; got != "https://maven-env.example/repository/maven-public" {
+		t.Fatalf("MavenRepositoryBaseURL = %q, want env mirror", got)
+	}
+	if got := settings.LatestRegistry.DockerRegistryMirrors["registry-1.docker.io"]; got != "https://docker-env.example/dockerhub" {
+		t.Fatalf("DockerRegistryMirrors[docker] = %q, want env mirror", got)
+	}
+	if got := settings.LatestRegistry.DockerRegistryMirrors["ghcr.io"]; got != "https://ghcr-env.example" {
+		t.Fatalf("DockerRegistryMirrors[ghcr] = %q, want env mirror", got)
+	}
+	if got := strings.Join(settings.LatestRegistry.SwiftPMGitAllowedHosts, ","); got != "git-env.example,gitlab-env.example" {
+		t.Fatalf("SwiftPMGitAllowedHosts = %q, want env hosts", got)
+	}
+	if got := settings.LatestRegistry.CRANMirrorURL; got != "https://cran-env.example" {
+		t.Fatalf("CRANMirrorURL = %q, want env mirror", got)
+	}
+	if got := settings.LatestRegistry.PubHostedURL; got != "https://pub-env.example" {
+		t.Fatalf("PubHostedURL = %q, want env mirror", got)
+	}
+	if got := settings.LatestRegistry.HexAPIBaseURL; got != "https://hex-env.example/api" {
+		t.Fatalf("HexAPIBaseURL = %q, want env mirror", got)
+	}
+	if got := settings.LatestRegistry.NuGetV3BaseURL; got != "https://nuget-env.example/v3-flatcontainer" {
+		t.Fatalf("NuGetV3BaseURL = %q, want env mirror", got)
+	}
+	if !settings.LatestRegistry.NPMRegistryBaseURLConfigured ||
+		!settings.LatestRegistry.PyPIAPIBaseURLConfigured ||
+		!settings.LatestRegistry.RubyGemsAPIBaseURLConfigured ||
+		!settings.LatestRegistry.CargoRegistryAPIBaseURLConfigured ||
+		!settings.LatestRegistry.CocoaPodsTrunkAPIBaseURLConfigured ||
+		!settings.LatestRegistry.ComposerRepositoryBaseURLConfigured ||
+		!settings.LatestRegistry.GoModuleProxyURLConfigured ||
+		!settings.LatestRegistry.MavenRepositoryBaseURLConfigured ||
+		!settings.LatestRegistry.CRANMirrorURLConfigured ||
+		!settings.LatestRegistry.SwiftPMGitAllowedHostsConfigured ||
+		!settings.LatestRegistry.PubHostedURLConfigured ||
+		!settings.LatestRegistry.HexAPIBaseURLConfigured ||
+		!settings.LatestRegistry.NuGetV3BaseURLConfigured {
+		t.Fatalf("LatestRegistry configured flags = %+v, want all mirrors true", settings.LatestRegistry)
+	}
+}
+
+func TestResolveScanSettingsRejectsUnsafeLatestRegistryMirrorEnv(t *testing.T) {
+	t.Setenv("PACKMON_HEX_API_BASE_URL", "http://hex-mirror.example/api")
+
+	_, err := resolveScanSettings(newScanCmd(), nil, scanTarget{Name: "repo", Path: "."}, scanFlagValues{
+		Mode:    "local",
+		FailOn:  "CRITICAL",
+		Timeout: 1,
+	})
+	if err == nil {
+		t.Fatal("resolveScanSettings() error = nil, want unsafe mirror rejection")
+	}
+	if !strings.Contains(err.Error(), "PACKMON_HEX_API_BASE_URL") || !strings.Contains(err.Error(), "https") {
+		t.Fatalf("resolveScanSettings() error = %v, want explicit HTTPS mirror error", err)
 	}
 }
 
@@ -296,7 +549,7 @@ func TestOpenLocalSQLiteStoreReportsAdvisoryAvailability(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open seeded local store: %v", err)
 	}
-	defer closeSilently(seededStore)
+	defer ioutils.CloseSilently(seededStore)
 	if !advisoryDataAvailable {
 		t.Fatal("advisoryDataAvailable(seeded) = false")
 	}
@@ -327,7 +580,12 @@ func TestRunListPackagesPrintsDetectedPackages(t *testing.T) {
 	}
 
 	output := captureStdout(t, func() {
-		if err := runListPackages([]string{projectDir}, "npm", 10); err != nil {
+		if err := runListPackagesWithSettings(scanSettings{
+			Path:       projectDir,
+			Ecosystems: []string{"npm"},
+			MaxDepth:   10,
+			IncludeDev: true,
+		}); err != nil {
 			t.Fatalf("run list packages: %v", err)
 		}
 	})
@@ -378,6 +636,125 @@ func TestRunSingleScanRecordsHistoryForCleanLocalScan(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("scan history rows = %d, want 1", count)
+	}
+}
+
+func TestRunSingleScanPrunesHistoryOlderThanMaxAgeAfterRecording(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	dbDir := t.TempDir()
+	t.Setenv("PACKMON_DB_PATH", dbDir)
+	t.Setenv("PACKMON_HISTORY_MAX_AGE", "24h")
+
+	store, _ := newTestSQLiteStore(t, dbDir)
+	if err := store.SetSyncMeta(context.Background(), "last_sync_at", time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatalf("set sync meta: %v", err)
+	}
+	seeded := []sqlite.ScanEntry{
+		{RepoName: "old-repo", ScannedAt: time.Now().Add(-48 * time.Hour), PackagesCount: 1},
+		{RepoName: "recent-repo", ScannedAt: time.Now().Add(-1 * time.Hour), PackagesCount: 1},
+	}
+	for _, entry := range seeded {
+		if err := store.InsertScan(context.Background(), entry); err != nil {
+			t.Fatalf("insert seeded scan history: %v", err)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close seed store: %v", err)
+	}
+
+	scanDir := filepath.Join(t.TempDir(), "empty-project")
+	if err := os.MkdirAll(scanDir, 0o750); err != nil {
+		t.Fatalf("mkdir scan dir: %v", err)
+	}
+
+	exitCode, err := runSingleScan(context.Background(), scanSettings{
+		Path:     scanDir,
+		Mode:     "local",
+		FailOn:   "CRITICAL",
+		MaxDepth: 2,
+		Timeout:  1,
+		Quiet:    true,
+	})
+	if err != nil {
+		t.Fatalf("run single scan: %v", err)
+	}
+	if exitCode != ExitOK {
+		t.Fatalf("exitCode = %d, want %d", exitCode, ExitOK)
+	}
+
+	verifyStore, _ := newTestSQLiteStore(t, dbDir)
+	var total, oldRows int
+	if err := verifyStore.DB().QueryRowContext(context.Background(), `SELECT COUNT(*) FROM scan_history`).Scan(&total); err != nil {
+		t.Fatalf("count scan history: %v", err)
+	}
+	if err := verifyStore.DB().QueryRowContext(context.Background(), `SELECT COUNT(*) FROM scan_history WHERE repo_name = 'old-repo'`).Scan(&oldRows); err != nil {
+		t.Fatalf("count old scan history: %v", err)
+	}
+	if total != 2 || oldRows != 0 {
+		t.Fatalf("scan history total=%d oldRows=%d, want total 2 with old rows pruned", total, oldRows)
+	}
+}
+
+func TestRunSingleScanHistoryEnvErrorsBeforeRecording(t *testing.T) {
+	tests := []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{name: "unknown boolean", key: "PACKMON_HISTORY_ENABLED", value: "maybe"},
+		{name: "malformed retention", key: "PACKMON_HISTORY_MAX_SCANS_PER_REPO", value: "many"},
+		{name: "negative retention", key: "PACKMON_HISTORY_MAX_SCANS_PER_REPO", value: "-1"},
+		{name: "malformed age retention", key: "PACKMON_HISTORY_MAX_AGE", value: "many"},
+		{name: "negative age retention", key: "PACKMON_HISTORY_MAX_AGE", value: "-1h"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			isolateCLIConfigDiscovery(t)
+			dbDir := t.TempDir()
+			t.Setenv("PACKMON_DB_PATH", dbDir)
+			t.Setenv(tt.key, tt.value)
+
+			store, _ := newTestSQLiteStore(t, dbDir)
+			if err := store.SetSyncMeta(context.Background(), "last_sync_at", time.Now().UTC().Format(time.RFC3339)); err != nil {
+				t.Fatalf("set sync meta: %v", err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatalf("close seed store: %v", err)
+			}
+
+			scanDir := filepath.Join(t.TempDir(), "empty-project")
+			if err := os.MkdirAll(scanDir, 0o750); err != nil {
+				t.Fatalf("mkdir scan dir: %v", err)
+			}
+
+			exitCode, err := runSingleScan(context.Background(), scanSettings{
+				Path:     scanDir,
+				Mode:     "local",
+				FailOn:   "CRITICAL",
+				MaxDepth: 2,
+				Timeout:  1,
+				Quiet:    true,
+			})
+			if err == nil {
+				t.Fatal("runSingleScan() error = nil, want history env parse error")
+			}
+			if exitCode != ExitOperational {
+				t.Fatalf("exitCode = %d, want %d", exitCode, ExitOperational)
+			}
+			if !strings.Contains(err.Error(), tt.key) {
+				t.Fatalf("runSingleScan() error = %v, want %s", err, tt.key)
+			}
+
+			verifyStore, _ := newTestSQLiteStore(t, dbDir)
+			var count int
+			if err := verifyStore.DB().QueryRowContext(context.Background(), `SELECT COUNT(*) FROM scan_history`).Scan(&count); err != nil {
+				t.Fatalf("count scan history: %v", err)
+			}
+			if count != 0 {
+				t.Fatalf("scan history rows = %d, want 0", count)
+			}
+		})
 	}
 }
 

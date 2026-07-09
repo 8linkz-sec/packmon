@@ -90,6 +90,22 @@ func TestResolveScanSettings_TLSEnvApplied(t *testing.T) {
 	}
 }
 
+func TestResolveScanSettingsCACertFileEnvWinsOverLegacyAlias(t *testing.T) {
+	t.Setenv("PACKMON_CA_CERT", "/env/legacy-ca.pem")
+	t.Setenv("PACKMON_CA_CERT_FILE", "/env/preferred-ca.pem")
+
+	cmd := newTestScanCmdForTLS()
+	target := scanTarget{Name: "local", Path: "."}
+
+	settings, err := resolveScanSettings(cmd, nil, target, scanFlagValues{})
+	if err != nil {
+		t.Fatalf("resolveScanSettings: %v", err)
+	}
+	if settings.CACertFile != "/env/preferred-ca.pem" {
+		t.Fatalf("CACertFile = %q, want preferred PACKMON_CA_CERT_FILE value", settings.CACertFile)
+	}
+}
+
 func TestResolveScanSettingsRejectsInvalidBooleanEnv(t *testing.T) {
 	t.Setenv("PACKMON_REQUIRE_REMOTE", "ture")
 
@@ -203,6 +219,7 @@ func TestResolveScanSettings_APIKeyEnvFromCLIConfig(t *testing.T) {
 func TestResolveScanSettings_APIKeyFlagOverridesMissingAPIKeyEnv(t *testing.T) {
 	t.Setenv("PACKMON_API_KEY", "")
 	t.Setenv("PACKMON_MISSING_KEY", "")
+	t.Setenv("PACKMON_ALLOW_SECRET_FLAGS", "true")
 
 	cfg := &cliConfig{APIKeyEnv: "PACKMON_MISSING_KEY"}
 	cmd := newTestScanCmdForTLS()

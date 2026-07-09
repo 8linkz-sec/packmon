@@ -3,56 +3,25 @@
 {{define "content"}}
 <div class="space-y-6">
 
-  {{template "admin-bootstrap-warning" .}}
-
   {{template "admin-page-header" dict "Title" "Admin Dashboard" "Section" "overview" "CSRFToken" .CSRFToken}}
+
+  {{template "admin-bootstrap-warning" .}}
 
   <!-- DB stats -->
   {{if .DashboardStatsLoadError}}
   {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .DashboardStatsLoadError}}
   {{else}}
   <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-    <div class="bg-white rounded-lg shadow p-5 border border-gray-200">
-      <div class="text-sm text-gray-500 uppercase tracking-wide">Packages Tracked</div>
-      <div class="mt-1 text-3xl font-semibold">{{.Stats.TotalPackages}}</div>
-    </div>
-    <a href="/search?finding=vulnerability" class="bg-white rounded-lg shadow p-5 border border-gray-200 block hover:shadow-md transition">
-      <div class="text-sm text-gray-500 uppercase tracking-wide">Vulnerabilities</div>
-      <div class="mt-1 text-3xl font-semibold">{{.Stats.TotalVulnerabilities}}</div>
-    </a>
-    <a href="/search?finding=malicious" class="bg-red-50 rounded-lg shadow p-5 border border-red-200 block hover:shadow-md transition">
-      <div class="text-sm text-red-700 uppercase tracking-wide">Malicious Packages</div>
-      <div class="mt-1 text-3xl font-semibold text-red-900">{{.Stats.TotalMalicious}}</div>
-    </a>
-    <a href="/search?finding=supply_chain_risk" class="bg-amber-50 rounded-lg shadow p-5 border border-amber-200 block hover:shadow-md transition">
-      <div class="text-sm text-amber-800 uppercase tracking-wide">Supply-chain Risks</div>
-      <div class="mt-1 text-3xl font-semibold text-amber-900">{{.Stats.TotalSupplyChainRisk}}</div>
-    </a>
-    <a href="/search?finding=lifecycle" class="bg-blue-50 rounded-lg shadow p-5 border border-blue-200 block hover:shadow-md transition">
-      <div class="text-sm text-blue-800 uppercase tracking-wide">Lifecycle Findings</div>
-      <div class="mt-1 text-3xl font-semibold text-blue-900">{{.Stats.TotalLifecycle}}</div>
-    </a>
-    <div class="bg-white rounded-lg shadow p-5 border border-gray-200">
-      <div class="text-sm text-gray-500 uppercase tracking-wide">Queue Pending</div>
-      {{if .QueueStatsLoadError}}
-      <div class="mt-1 text-base font-semibold text-red-700">unavailable</div>
-      {{else}}
-      <div class="mt-1 text-3xl font-semibold">{{.QueueStats.Pending}}</div>
-      {{end}}
-    </div>
-    <div class="bg-white rounded-lg shadow p-5 border border-gray-200">
-      <div class="text-sm text-gray-500 uppercase tracking-wide">Queue Paused</div>
-      {{if .QueueStatsLoadError}}
-      <div class="mt-1 text-base font-semibold text-red-700">unavailable</div>
-      {{else}}
-      <div class="mt-1 text-3xl font-semibold">{{.QueueStats.Paused}}</div>
-      {{end}}
-    </div>
+    {{template "dashboard-stat-card" dict "Kind" "packages" "Stats" .Stats "SearchPath" "/search"}}
+    {{template "dashboard-stat-card" dict "Kind" "vulnerabilities" "Stats" .Stats "SearchPath" "/search"}}
+    {{template "dashboard-stat-card" dict "Kind" "malicious" "Stats" .Stats "SearchPath" "/search"}}
+    {{template "dashboard-stat-card" dict "Kind" "supply-chain" "Stats" .Stats "SearchPath" "/search"}}
+    {{template "dashboard-stat-card" dict "Kind" "lifecycle" "Stats" .Stats "SearchPath" "/search"}}
   </div>
   {{end}}
 
   <!-- Feed status summary -->
-  <div class="bg-white rounded-lg shadow border border-gray-200">
+  <div class="pm-surface">
     <div class="px-5 py-3 border-b border-gray-200">
       <h2 class="text-lg font-semibold">Feed Sync Status</h2>
     </div>
@@ -61,15 +30,15 @@
       {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .FeedStatusLoadError}}
     </div>
     {{else if .Feeds}}
-    <div class="overflow-x-auto focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2" tabindex="0" role="region" aria-label="Admin feed sync status table">
+    <div class="pm-scroll-region" tabindex="0" role="region" aria-label="Admin feed sync status table">
       <table class="min-w-full text-sm">
         <thead>
-          <tr class="text-left text-gray-500 border-b bg-gray-50">
+          <tr class="text-start text-gray-500 border-b bg-gray-50">
             <th class="px-5 py-2">Feed</th>
             <th class="px-5 py-2">Status</th>
             <th class="px-5 py-2">Reason</th>
             <th class="px-5 py-2">Last Sync</th>
-            <th class="px-5 py-2 text-right">Entries</th>
+            <th class="px-5 py-2 text-end">Entries</th>
           </tr>
         </thead>
         <tbody>
@@ -77,14 +46,12 @@
           <tr class="border-b border-gray-100 hover:bg-gray-50">
             <td class="px-5 py-2 font-medium">{{.FeedName}}</td>
             <td class="px-5 py-2">
-              <span class="inline-block px-2 py-0.5 rounded text-xs font-medium {{statusClass .Status}}">{{.Status}}</span>
+              {{template "feed-status-badge" .}}
             </td>
             <td class="px-5 py-2 text-xs text-gray-600">
+              {{template "feed-admin-rejection-details" .}}
               {{if .LastError}}
-                <details class="text-left text-red-700">
-                  <summary aria-label="Show full feed error for {{.FeedName}}" class="cursor-pointer text-red-600">{{truncate .LastError 60}}</summary>
-                  <pre class="mt-2 whitespace-pre-wrap break-words rounded bg-red-50 p-2 text-xs text-red-800">{{.LastError}}</pre>
-                </details>
+                {{template "feed-error-details" dict "Feed" . "Max" 60}}
               {{else if .LastSyncStatus}}
                 <span>{{.LastSyncStatus}}</span>
               {{else}}
@@ -92,25 +59,21 @@
               {{end}}
             </td>
             <td class="px-5 py-2 text-gray-500">
-              {{if .LastSyncAt}}
-                <time datetime="{{formatTimeISO .LastSyncAtTime}}" aria-label="{{formatTime .LastSyncAtTime}}">{{formatTimeAgo .LastSyncAtTime}}</time>
-              {{else}}
-                <span class="text-gray-600">never</span>
-              {{end}}
+              {{template "feed-last-sync-cell" .}}
             </td>
-            <td class="px-5 py-2 text-right">{{.EntriesTotal}}</td>
+            <td class="px-5 py-2 text-end">{{.EntriesTotal}}</td>
           </tr>
           {{end}}
         </tbody>
       </table>
     </div>
     {{else}}
-    <div class="px-5 py-8 text-center text-gray-600">No feed data available.</div>
+    <div class="pm-empty-state">No feed data available.</div>
     {{end}}
   </div>
 
   <!-- Queue summary -->
-  <div class="bg-white rounded-lg shadow p-5 border border-gray-200">
+  <div class="pm-surface p-5">
     <h2 class="text-lg font-semibold mb-3">Queue Summary</h2>
     {{if .QueueStatsLoadError}}
     {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .QueueStatsLoadError}}

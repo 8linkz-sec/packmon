@@ -21,8 +21,18 @@ if (Get-Command git -ErrorAction SilentlyContinue) {
         $GitCommit = $GitCommit.Trim()
     }
 }
-$Commit = if ($env:PACKMON_COMMIT) { $env:PACKMON_COMMIT } elseif ($GitCommit) { $GitCommit } else { "none" }
-$Date = if ($env:PACKMON_BUILD_DATE) { $env:PACKMON_BUILD_DATE } else { (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ") }
+$Commit = if ($env:PACKMON_COMMIT) {
+    $env:PACKMON_COMMIT
+} elseif ($GitCommit) {
+    $GitCommit
+} else {
+    "none"
+}
+$Date = if ($env:PACKMON_BUILD_DATE) {
+    $env:PACKMON_BUILD_DATE
+} else {
+    (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+}
 $Ldflags = "-s -w -X main.version=$Version -X main.commit=$Commit -X main.date=$Date"
 
 Write-Host "Building packmon binaries..."

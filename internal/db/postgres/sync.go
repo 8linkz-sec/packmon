@@ -7,14 +7,15 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/8linkz-sec/packmon/internal/db"
-	"github.com/8linkz-sec/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/ioutils"
 )
 
-// ExportSync returns the flattened vulnerability and malicious data consumed by
-// the local SQLite sync endpoint.
+// ExportSync returns the flattened vulnerability, malicious, reputation, and
+// lifecycle data consumed by the local SQLite sync endpoint.
 func (s *Store) ExportSync(ctx context.Context, opts db.SyncExportOptions) (*db.SyncExport, error) {
 	snapshot, snapshotXID, err := s.resolveSyncSnapshot(ctx, opts)
 	if err != nil {
@@ -22,37 +23,19 @@ func (s *Store) ExportSync(ctx context.Context, opts db.SyncExportOptions) (*db.
 	}
 	cursor := opts.EffectiveCursor()
 
-	var vulns []db.SyncVulnerability
-	if !cursor.VulnerabilitiesDone {
-		vulns, err = s.exportSyncVulnerabilities(ctx, syncOptionsWithOffset(opts, cursor.Vulnerabilities), snapshot, snapshotXID)
-		if err != nil {
-			return nil, err
-		}
+	datasets, err := exportSyncDatasets(ctx, opts, cursor, snapshot, snapshotXID, syncDatasetExporters{
+		vulnerabilities: s.exportSyncVulnerabilities,
+		malicious:       s.exportSyncMalicious,
+		reputation:      s.exportSyncReputation,
+		lifecycle:       s.exportSyncLifecycle,
+	})
+	if err != nil {
+		return nil, err
 	}
-
-	var malicious []db.SyncMalicious
-	if !cursor.MaliciousDone {
-		malicious, err = s.exportSyncMalicious(ctx, syncOptionsWithOffset(opts, cursor.Malicious), snapshot, snapshotXID)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	var reputation []db.SyncReputationFinding
-	if !cursor.ReputationDone {
-		reputation, err = s.exportSyncReputation(ctx, syncOptionsWithOffset(opts, cursor.Reputation), snapshot, snapshotXID)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	var lifecycle []db.SyncLifecycleRelease
-	if !cursor.LifecycleDone {
-		lifecycle, err = s.exportSyncLifecycle(ctx, syncOptionsWithOffset(opts, cursor.Lifecycle), snapshot, snapshotXID)
-		if err != nil {
-			return nil, err
-		}
-	}
+	vulns := datasets.vulnerabilities
+	malicious := datasets.malicious
+	reputation := datasets.reputation
+	lifecycle := datasets.lifecycle
 
 	// When pagination is active, signal that more data may follow if
 	// any result set filled the limit exactly.
@@ -102,6 +85,94 @@ func (s *Store) ExportSync(ctx context.Context, opts db.SyncExportOptions) (*db.
 		Truncated:       truncated,
 		NextCursor:      nextCursor,
 	}, nil
+}
+
+type syncDatasetExporters struct {
+	vulnerabilities func(context.Context, db.SyncExportOptions, time.Time, uint64) ([]db.SyncVulnerability, error)
+	malicious       func(context.Context, db.SyncExportOptions, time.Time, uint64) ([]db.SyncMalicious, error)
+	reputation      func(context.Context, db.SyncExportOptions, time.Time, uint64) ([]db.SyncReputationFinding, error)
+	lifecycle       func(context.Context, db.SyncExportOptions, time.Time, uint64) ([]db.SyncLifecycleRelease, error)
+}
+
+type syncDatasets struct {
+	vulnerabilities []db.SyncVulnerability
+	malicious       []db.SyncMalicious
+	reputation      []db.SyncReputationFinding
+	lifecycle       []db.SyncLifecycleRelease
+}
+
+type syncDatasetExportError struct {
+	order int
+	err   error
+}
+
+func exportSyncDatasets(ctx context.Context, opts db.SyncExportOptions, cursor db.SyncCursor, snapshot time.Time, snapshotXID uint64, exporters syncDatasetExporters) (syncDatasets, error) {
+	var (
+		wg       sync.WaitGroup
+		errCh    = make(chan syncDatasetExportError, 4)
+		datasets syncDatasets
+	)
+
+	if !cursor.VulnerabilitiesDone {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var err error
+			datasets.vulnerabilities, err = exporters.vulnerabilities(ctx, syncOptionsWithOffset(opts, cursor.Vulnerabilities), snapshot, snapshotXID)
+			if err != nil {
+				errCh <- syncDatasetExportError{order: 0, err: err}
+			}
+		}()
+	}
+	if !cursor.MaliciousDone {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var err error
+			datasets.malicious, err = exporters.malicious(ctx, syncOptionsWithOffset(opts, cursor.Malicious), snapshot, snapshotXID)
+			if err != nil {
+				errCh <- syncDatasetExportError{order: 1, err: err}
+			}
+		}()
+	}
+	if !cursor.ReputationDone {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var err error
+			datasets.reputation, err = exporters.reputation(ctx, syncOptionsWithOffset(opts, cursor.Reputation), snapshot, snapshotXID)
+			if err != nil {
+				errCh <- syncDatasetExportError{order: 2, err: err}
+			}
+		}()
+	}
+	if !cursor.LifecycleDone {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var err error
+			datasets.lifecycle, err = exporters.lifecycle(ctx, syncOptionsWithOffset(opts, cursor.Lifecycle), snapshot, snapshotXID)
+			if err != nil {
+				errCh <- syncDatasetExportError{order: 3, err: err}
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	firstErrOrder := 4
+	var firstErr error
+	for datasetErr := range errCh {
+		if datasetErr.order < firstErrOrder {
+			firstErrOrder = datasetErr.order
+			firstErr = datasetErr.err
+		}
+	}
+	if firstErr != nil {
+		return syncDatasets{}, firstErr
+	}
+	return datasets, nil
 }
 
 func (s *Store) resolveSyncSnapshot(ctx context.Context, opts db.SyncExportOptions) (time.Time, uint64, error) {
@@ -198,85 +269,157 @@ func addSyncWindowFilters(query *string, args *[]any, opts db.SyncExportOptions,
 	*args = append(*args, since)
 }
 
-func (s *Store) exportSyncVulnerabilities(ctx context.Context, opts db.SyncExportOptions, snapshot time.Time, snapshotXID uint64) ([]db.SyncVulnerability, error) {
-	query := `
-		SELECT
-			v.id,
-			ap.ecosystem,
-			ap.name,
-			ap.version_ranges::text,
-			ap.versions_affected::text,
-			COALESCE(vr.refs_json, '[]') AS refs_json,
-			v.severity,
-			v.cvss_score,
-			v.epss_score,
-			v.epss_percentile,
-			v.cisa_kev,
-			v.summary,
-			COALESCE(NULLIF(TRIM(vs.source), ''), 'unknown') AS source,
-			(v.withdrawn IS NOT NULL) AS withdrawn
-		FROM vulnerabilities v
-		INNER JOIN affected_packages ap ON ap.vulnerability_id = v.id
-		LEFT JOIN LATERAL (
-			SELECT COALESCE(
-				json_agg(
-					json_build_object(
-						'type', COALESCE(ref_type, ''),
-						'url', url
-					)
-					ORDER BY sort_order, id
-				)::text,
-				'[]'
-			) AS refs_json
-			FROM (
-				SELECT 0 AS sort_order, id, type AS ref_type, url
-				FROM vulnerability_references
-				WHERE vulnerability_id = v.id
-				UNION ALL
-				SELECT 1 AS sort_order, id, 'VULNCHECK' AS ref_type,
-					COALESCE(NULLIF(TRIM(url), ''), 'https://vulncheck.com/') AS url
-				FROM vulnerability_sources
-				WHERE vulnerability_id = v.id AND source = 'vulncheck'
-			) refs
-		) vr ON true
-		LEFT JOIN LATERAL (
-			SELECT source FROM vulnerability_sources
-			WHERE vulnerability_id = v.id ORDER BY id LIMIT 1
-		) vs ON true
-		WHERE GREATEST(v.updated_at, ap.updated_at) <= $1`
+type syncVulnerabilityQueryArgs struct {
+	args           []any
+	sinceArg       int
+	sinceXIDArg    int
+	snapshotXIDArg int
+}
 
-	args := []any{snapshot}
-	addSyncWindowFilters(&query, &args, opts, snapshotXID,
-		`GREATEST(v.updated_at, ap.updated_at)`,
-		`GREATEST((v.xmin::text)::bigint, (ap.xmin::text)::bigint)`,
-	)
+func newSyncVulnerabilityQueryArgs(opts db.SyncExportOptions, snapshot time.Time, snapshotXID uint64) syncVulnerabilityQueryArgs {
+	queryArgs := syncVulnerabilityQueryArgs{
+		args: []any{snapshot},
+	}
+	if opts.Since != nil {
+		queryArgs.sinceArg = queryArgs.appendArg(opts.Since.UTC())
+		if opts.SinceXID > 0 {
+			queryArgs.sinceXIDArg = queryArgs.appendArg(strconv.FormatUint(opts.SinceXID, 10))
+		}
+	}
+	if snapshotXID > 0 {
+		queryArgs.snapshotXIDArg = queryArgs.appendArg(strconv.FormatUint(snapshotXID, 10))
+	}
+	return queryArgs
+}
+
+func (q *syncVulnerabilityQueryArgs) appendArg(value any) int {
+	q.args = append(q.args, value)
+	return len(q.args)
+}
+
+func (q syncVulnerabilityQueryArgs) changedIDsCTE() string {
+	if q.sinceArg == 0 {
+		return ""
+	}
+
+	vulnerabilityUpperFilter := q.vulnerabilityChangedIDUpperFilter("v")
+	affectedUpperFilter := q.vulnerabilityChangedIDUpperFilter("ap")
+	query := fmt.Sprintf(`
+	WITH changed_vulnerability_ids AS (
+		SELECT v.id
+		FROM vulnerabilities v
+		WHERE v.updated_at >= $%[1]d
+		  AND v.updated_at <= $1%[2]s
+		UNION
+		SELECT ap.vulnerability_id AS id
+		FROM affected_packages ap
+		WHERE ap.updated_at >= $%[1]d
+		  AND ap.updated_at <= $1%[3]s`, q.sinceArg, vulnerabilityUpperFilter, affectedUpperFilter)
+	if q.sinceXIDArg > 0 {
+		query += fmt.Sprintf(`
+		UNION
+		SELECT v.id
+		FROM vulnerabilities v
+		WHERE (v.xmin::text)::bigint >= $%[1]d::bigint
+		  AND v.updated_at <= $1%[2]s
+		UNION
+		SELECT ap.vulnerability_id AS id
+		FROM affected_packages ap
+		WHERE (ap.xmin::text)::bigint >= $%[1]d::bigint
+		  AND ap.updated_at <= $1%[3]s`, q.sinceXIDArg, vulnerabilityUpperFilter, affectedUpperFilter)
+	}
+	query += `
+	)`
+	return query
+}
+
+func (q syncVulnerabilityQueryArgs) vulnerabilityChangedIDUpperFilter(alias string) string {
+	if q.snapshotXIDArg == 0 {
+		return ""
+	}
+	return fmt.Sprintf(`
+		  AND (%s.xmin::text)::bigint < $%d::bigint`, alias, q.snapshotXIDArg)
+}
+
+func (q syncVulnerabilityQueryArgs) addSnapshotXIDFilters(query *string) {
+	if q.snapshotXIDArg == 0 {
+		return
+	}
+	*query += fmt.Sprintf(` AND (v.xmin::text)::bigint < $%[1]d::bigint AND (ap.xmin::text)::bigint < $%[1]d::bigint`, q.snapshotXIDArg)
+}
+
+func exportSyncVulnerabilitiesBaseSQL(delta bool) string {
+	fromSQL := `FROM vulnerabilities v`
+	if delta {
+		fromSQL = `FROM vulnerabilities v
+	INNER JOIN changed_vulnerability_ids changed ON changed.id = v.id`
+	}
+	return `
+	SELECT
+		v.id,
+		ap.ecosystem,
+		ap.name,
+		ap.version_ranges::text,
+		ap.versions_affected::text,
+		COALESCE(vr.refs_json, '[]') AS refs_json,
+		v.severity,
+		v.cvss_score,
+		v.epss_score,
+		v.epss_percentile,
+		v.cisa_kev,
+		v.summary,
+		COALESCE(NULLIF(TRIM(vs.source), ''), 'unknown') AS source,
+		(v.withdrawn IS NOT NULL) AS withdrawn
+	` + fromSQL + `
+	INNER JOIN affected_packages ap ON ap.vulnerability_id = v.id
+	` + vulnerabilityReferencesLateralSQL("v.id") + `
+	LEFT JOIN LATERAL (
+		SELECT source FROM vulnerability_sources
+		WHERE vulnerability_id = v.id ORDER BY id LIMIT 1
+	) vs ON true
+	WHERE v.updated_at <= $1
+	  AND ap.updated_at <= $1`
+}
+
+func buildExportSyncVulnerabilitiesQuery(opts db.SyncExportOptions, snapshot time.Time, snapshotXID uint64) (string, []any, error) {
+	queryArgs := newSyncVulnerabilityQueryArgs(opts, snapshot, snapshotXID)
+	query := queryArgs.changedIDsCTE() + exportSyncVulnerabilitiesBaseSQL(opts.Since != nil)
+	queryArgs.addSnapshotXIDFilters(&query)
 	if len(opts.Ecosystems) > 0 {
-		query += fmt.Sprintf(` AND ap.ecosystem = ANY($%d)`, len(args)+1)
-		args = append(args, opts.Ecosystems)
+		query += fmt.Sprintf(` AND ap.ecosystem = ANY($%d)`, len(queryArgs.args)+1)
+		queryArgs.args = append(queryArgs.args, opts.Ecosystems)
 	}
 	if opts.Cursor.VulnerabilitiesCursor != "" {
 		cursor, err := decodeSyncCursorKey(opts.Cursor.VulnerabilitiesCursor, 3)
 		if err != nil {
-			return nil, fmt.Errorf("postgres: invalid vulnerability sync cursor: %w", err)
+			return "", nil, fmt.Errorf("postgres: invalid vulnerability sync cursor: %w", err)
 		}
-		query += fmt.Sprintf(` AND (ap.ecosystem, ap.name, v.id) > ($%d, $%d, $%d)`, len(args)+1, len(args)+2, len(args)+3)
-		args = append(args, cursor[0], cursor[1], cursor[2])
+		query += fmt.Sprintf(` AND (ap.ecosystem, ap.name, v.id) > ($%d, $%d, $%d)`, len(queryArgs.args)+1, len(queryArgs.args)+2, len(queryArgs.args)+3)
+		queryArgs.args = append(queryArgs.args, cursor[0], cursor[1], cursor[2])
 	}
 	query += ` ORDER BY ap.ecosystem ASC, ap.name ASC, v.id ASC`
 	if opts.Limit > 0 {
-		query += fmt.Sprintf(` LIMIT $%d`, len(args)+1)
-		args = append(args, opts.Limit)
+		query += fmt.Sprintf(` LIMIT $%d`, len(queryArgs.args)+1)
+		queryArgs.args = append(queryArgs.args, opts.Limit)
 		if opts.Offset > 0 && opts.Cursor.VulnerabilitiesCursor == "" {
-			query += fmt.Sprintf(` OFFSET $%d`, len(args)+1)
-			args = append(args, opts.Offset)
+			query += fmt.Sprintf(` OFFSET $%d`, len(queryArgs.args)+1)
+			queryArgs.args = append(queryArgs.args, opts.Offset)
 		}
+	}
+	return query, queryArgs.args, nil
+}
+
+func (s *Store) exportSyncVulnerabilities(ctx context.Context, opts db.SyncExportOptions, snapshot time.Time, snapshotXID uint64) ([]db.SyncVulnerability, error) {
+	query, args, err := buildExportSyncVulnerabilitiesQuery(opts, snapshot, snapshotXID)
+	if err != nil {
+		return nil, err
 	}
 
 	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: export sync vulnerabilities: %w", err)
 	}
-	defer closeSilently(rows)
+	defer ioutils.CloseSilently(rows)
 
 	out := make([]db.SyncVulnerability, 0)
 	for rows.Next() {
@@ -350,7 +493,7 @@ func (s *Store) exportSyncReputation(ctx context.Context, opts db.SyncExportOpti
 	if err != nil {
 		return nil, fmt.Errorf("postgres: export sync reputation findings: %w", err)
 	}
-	defer closeSilently(rows)
+	defer ioutils.CloseSilently(rows)
 
 	out := make([]db.SyncReputationFinding, 0)
 	for rows.Next() {
@@ -376,29 +519,14 @@ func reputationSyncFinding(rep db.PackageReputation) db.SyncReputationFinding {
 		Summary:   rep.Summary,
 	}
 
-	switch rep.Status {
-	case "malicious":
-		item.Type = string(domain.FindingTypeMalicious)
-		item.RiskType = "malware"
-		item.Severity = normalizeReputationSeverity(rep.Severity)
-	case "removed":
-		item.Type = string(domain.FindingTypeSupplyChainRisk)
-		item.RiskType = "removed_package"
-		item.Severity = normalizeReputationSeverity(rep.Severity)
-	case "risk":
-		item.Type = string(domain.FindingTypeSupplyChainRisk)
-		item.RiskType = "malware_history"
-		item.Severity = normalizeReputationSeverity(rep.Severity)
-	default:
+	mapping, ok := reversingLabsReputationStatusMapping(rep.Status, rep.Severity)
+	if !ok {
 		item.Withdrawn = true
+		return item
 	}
-	if !item.Withdrawn {
-		item.Severity = string(domain.NormalizeFindingSeverity(domain.Finding{
-			Type:     domain.FindingType(item.Type),
-			RiskType: item.RiskType,
-			Severity: domain.Severity(item.Severity),
-		}))
-	}
+	item.Type = string(mapping.findingType)
+	item.RiskType = mapping.riskType
+	item.Severity = string(mapping.severity)
 	return item
 }
 
@@ -453,7 +581,7 @@ func (s *Store) exportSyncMalicious(ctx context.Context, opts db.SyncExportOptio
 	if err != nil {
 		return nil, fmt.Errorf("postgres: export sync malicious findings: %w", err)
 	}
-	defer closeSilently(rows)
+	defer ioutils.CloseSilently(rows)
 
 	out := make([]db.SyncMalicious, 0)
 	for rows.Next() {
@@ -483,35 +611,59 @@ func (s *Store) exportSyncMalicious(ctx context.Context, opts db.SyncExportOptio
 	return out, nil
 }
 
-func (s *Store) exportSyncLifecycle(ctx context.Context, opts db.SyncExportOptions, snapshot time.Time, snapshotXID uint64) ([]db.SyncLifecycleRelease, error) {
-	args := []any{snapshot}
-	activeFilters := []string{
-		"m.updated_at <= $1",
-		"p.updated_at <= $1",
-		"r.updated_at <= $1",
+type syncLifecycleQueryArgs struct {
+	args             []any
+	activeFilters    []string
+	tombstoneFilters []string
+}
+
+func newSyncLifecycleQueryArgs(opts db.SyncExportOptions, snapshot time.Time, snapshotXID uint64) syncLifecycleQueryArgs {
+	queryArgs := syncLifecycleQueryArgs{
+		args: []any{snapshot},
+		activeFilters: []string{
+			"m.updated_at <= $1",
+			"p.updated_at <= $1",
+			"r.updated_at <= $1",
+		},
+		tombstoneFilters: []string{
+			"t.updated_at <= $1",
+		},
 	}
-	tombstoneFilters := []string{
-		"t.updated_at <= $1",
+	queryArgs.addSnapshotXID(snapshotXID)
+	queryArgs.addDeltaWindow(opts)
+	return queryArgs
+}
+
+func (q *syncLifecycleQueryArgs) appendArg(value any) int {
+	q.args = append(q.args, value)
+	return len(q.args)
+}
+
+func (q *syncLifecycleQueryArgs) addSnapshotXID(snapshotXID uint64) {
+	if snapshotXID == 0 {
+		return
 	}
-	if snapshotXID > 0 {
-		args = append(args, strconv.FormatUint(snapshotXID, 10))
-		activeFilters = append(activeFilters,
-			fmt.Sprintf("(m.xmin::text)::bigint < $%d::bigint", len(args)),
-			fmt.Sprintf("(p.xmin::text)::bigint < $%d::bigint", len(args)),
-			fmt.Sprintf("(r.xmin::text)::bigint < $%d::bigint", len(args)),
-		)
-		tombstoneFilters = append(tombstoneFilters,
-			fmt.Sprintf("(t.xmin::text)::bigint < $%d::bigint", len(args)),
-		)
+
+	xidArg := q.appendArg(strconv.FormatUint(snapshotXID, 10))
+	q.activeFilters = append(q.activeFilters,
+		fmt.Sprintf("(m.xmin::text)::bigint < $%d::bigint", xidArg),
+		fmt.Sprintf("(p.xmin::text)::bigint < $%d::bigint", xidArg),
+		fmt.Sprintf("(r.xmin::text)::bigint < $%d::bigint", xidArg),
+	)
+	q.tombstoneFilters = append(q.tombstoneFilters,
+		fmt.Sprintf("(t.xmin::text)::bigint < $%d::bigint", xidArg),
+	)
+}
+
+func (q *syncLifecycleQueryArgs) addDeltaWindow(opts db.SyncExportOptions) {
+	if opts.Since == nil {
+		return
 	}
-	if opts.Since != nil {
-		since := opts.Since.UTC()
-		args = append(args, since)
-		sinceArg := len(args)
-		if opts.SinceXID > 0 {
-			args = append(args, strconv.FormatUint(opts.SinceXID, 10))
-			sinceXIDArg := len(args)
-			activeFilters = append(activeFilters, fmt.Sprintf(`(
+
+	sinceArg := q.appendArg(opts.Since.UTC())
+	if opts.SinceXID > 0 {
+		sinceXIDArg := q.appendArg(strconv.FormatUint(opts.SinceXID, 10))
+		q.activeFilters = append(q.activeFilters, fmt.Sprintf(`(
 				m.updated_at >= $%[1]d OR
 				p.updated_at >= $%[1]d OR
 				r.updated_at >= $%[1]d OR
@@ -519,22 +671,47 @@ func (s *Store) exportSyncLifecycle(ctx context.Context, opts db.SyncExportOptio
 				(p.xmin::text)::bigint >= $%[2]d::bigint OR
 				(r.xmin::text)::bigint >= $%[2]d::bigint
 			)`, sinceArg, sinceXIDArg))
-			tombstoneFilters = append(tombstoneFilters, fmt.Sprintf(`(
+		q.tombstoneFilters = append(q.tombstoneFilters, fmt.Sprintf(`(
 				t.updated_at >= $%[1]d OR
 				(t.xmin::text)::bigint >= $%[2]d::bigint
 			)`, sinceArg, sinceXIDArg))
-		} else {
-			activeFilters = append(activeFilters, fmt.Sprintf(`(
+		return
+	}
+
+	q.activeFilters = append(q.activeFilters, fmt.Sprintf(`(
 				m.updated_at >= $%[1]d OR
 				p.updated_at >= $%[1]d OR
 				r.updated_at >= $%[1]d
 			)`, sinceArg))
-			tombstoneFilters = append(tombstoneFilters, fmt.Sprintf("t.updated_at >= $%d", sinceArg))
-		}
-	}
+	q.tombstoneFilters = append(q.tombstoneFilters, fmt.Sprintf("t.updated_at >= $%d", sinceArg))
+}
 
+func buildExportSyncLifecycleQuery(opts db.SyncExportOptions, snapshot time.Time, snapshotXID uint64) (string, []any, error) {
+	queryArgs := newSyncLifecycleQueryArgs(opts, snapshot, snapshotXID)
+	query := buildSyncLifecycleRowsQuery(queryArgs.activeFilters, queryArgs.tombstoneFilters, opts.Since != nil)
+
+	if err := addSyncLifecycleResultFilters(&query, &queryArgs.args, opts); err != nil {
+		return "", nil, err
+	}
+	addSyncLifecyclePagination(&query, &queryArgs.args, opts)
+	return query, queryArgs.args, nil
+}
+
+func buildSyncLifecycleRowsQuery(activeFilters, tombstoneFilters []string, includeTombstones bool) string {
 	query := `
-		WITH lifecycle_rows AS (
+		WITH lifecycle_rows AS (` + syncLifecycleActiveRowsSQL(activeFilters)
+	if includeTombstones {
+		query += `
+		UNION ALL` + syncLifecycleTombstoneRowsSQL(tombstoneFilters)
+	}
+	query += `
+		)
+` + syncLifecycleOuterSelectSQL()
+	return query
+}
+
+func syncLifecycleActiveRowsSQL(filters []string) string {
+	return `
 		SELECT
 			'endoflife:' || m.ecosystem || ':' || m.name || ':' || p.product_slug || ':' || r.cycle AS id,
 			m.ecosystem,
@@ -559,11 +736,11 @@ func (s *Store) exportSyncLifecycle(ctx context.Context, opts db.SyncExportOptio
 		FROM lifecycle_package_map m
 		INNER JOIN lifecycle_products p ON p.product_slug = m.product_slug
 		INNER JOIN lifecycle_releases r ON r.product_slug = p.product_slug
-		WHERE ` + strings.Join(activeFilters, " AND ")
+		WHERE ` + strings.Join(filters, " AND ")
+}
 
-	if opts.Since != nil {
-		query += `
-		UNION ALL
+func syncLifecycleTombstoneRowsSQL(filters []string) string {
+	return `
 		SELECT
 			t.id,
 			t.ecosystem,
@@ -586,12 +763,11 @@ func (s *Store) exportSyncLifecycle(ctx context.Context, opts db.SyncExportOptio
 			false AS is_maintained,
 			true AS withdrawn
 		FROM lifecycle_sync_tombstones t
-		WHERE ` + strings.Join(tombstoneFilters, " AND ")
-	}
+		WHERE ` + strings.Join(filters, " AND ")
+}
 
-	query += `
-		)
-		SELECT
+func syncLifecycleOuterSelectSQL() string {
+	return `		SELECT
 			id,
 			ecosystem,
 			name,
@@ -614,59 +790,62 @@ func (s *Store) exportSyncLifecycle(ctx context.Context, opts db.SyncExportOptio
 			withdrawn
 		FROM lifecycle_rows
 		WHERE TRUE`
+}
+
+func addSyncLifecycleResultFilters(query *string, args *[]any, opts db.SyncExportOptions) error {
 	if len(opts.Ecosystems) > 0 {
-		query += fmt.Sprintf(` AND ecosystem = ANY($%d)`, len(args)+1)
-		args = append(args, opts.Ecosystems)
+		*query += fmt.Sprintf(` AND ecosystem = ANY($%d)`, len(*args)+1)
+		*args = append(*args, opts.Ecosystems)
 	}
-	if opts.Cursor.LifecycleCursor != "" {
-		cursor, err := decodeSyncCursorKey(opts.Cursor.LifecycleCursor, 4)
-		if err != nil {
-			return nil, fmt.Errorf("postgres: invalid lifecycle sync cursor: %w", err)
-		}
-		query += fmt.Sprintf(` AND (ecosystem, name, product_slug, cycle) > ($%d, $%d, $%d, $%d)`, len(args)+1, len(args)+2, len(args)+3, len(args)+4)
-		args = append(args, cursor[0], cursor[1], cursor[2], cursor[3])
-	}
-	query += ` ORDER BY ecosystem ASC, name ASC, product_slug ASC, cycle ASC`
-	if opts.Limit > 0 {
-		query += fmt.Sprintf(` LIMIT $%d`, len(args)+1)
-		args = append(args, opts.Limit)
-		if opts.Offset > 0 && opts.Cursor.LifecycleCursor == "" {
-			query += fmt.Sprintf(` OFFSET $%d`, len(args)+1)
-			args = append(args, opts.Offset)
-		}
+	return addSyncLifecycleCursorFilter(query, args, opts.Cursor.LifecycleCursor)
+}
+
+func addSyncLifecycleCursorFilter(query *string, args *[]any, rawCursor string) error {
+	if rawCursor == "" {
+		return nil
 	}
 
+	cursor, err := decodeSyncCursorKey(rawCursor, 4)
+	if err != nil {
+		return fmt.Errorf("postgres: invalid lifecycle sync cursor: %w", err)
+	}
+	*query += fmt.Sprintf(` AND (ecosystem, name, product_slug, cycle) > ($%d, $%d, $%d, $%d)`, len(*args)+1, len(*args)+2, len(*args)+3, len(*args)+4)
+	*args = append(*args, cursor[0], cursor[1], cursor[2], cursor[3])
+	return nil
+}
+
+func addSyncLifecyclePagination(query *string, args *[]any, opts db.SyncExportOptions) {
+	*query += ` ORDER BY ecosystem ASC, name ASC, product_slug ASC, cycle ASC`
+	if opts.Limit <= 0 {
+		return
+	}
+	*query += fmt.Sprintf(` LIMIT $%d`, len(*args)+1)
+	*args = append(*args, opts.Limit)
+	if opts.Offset > 0 && opts.Cursor.LifecycleCursor == "" {
+		*query += fmt.Sprintf(` OFFSET $%d`, len(*args)+1)
+		*args = append(*args, opts.Offset)
+	}
+}
+
+func (s *Store) exportSyncLifecycle(ctx context.Context, opts db.SyncExportOptions, snapshot time.Time, snapshotXID uint64) ([]db.SyncLifecycleRelease, error) {
+	query, args, err := buildExportSyncLifecycleQuery(opts, snapshot, snapshotXID)
+	if err != nil {
+		return nil, err
+	}
+	return s.querySyncLifecycleRows(ctx, query, args)
+}
+
+func (s *Store) querySyncLifecycleRows(ctx context.Context, query string, args []any) ([]db.SyncLifecycleRelease, error) {
 	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: export sync lifecycle releases: %w", err)
 	}
-	defer closeSilently(rows)
+	defer ioutils.CloseSilently(rows)
 
 	out := make([]db.SyncLifecycleRelease, 0)
 	for rows.Next() {
-		var item db.SyncLifecycleRelease
-		if err := rows.Scan(
-			&item.ID,
-			&item.Ecosystem,
-			&item.Name,
-			&item.ProductSlug,
-			&item.ProductLabel,
-			&item.Cycle,
-			&item.Latest,
-			&item.ReleaseDate,
-			&item.IsLTS,
-			&item.LTSFrom,
-			&item.IsEOAS,
-			&item.EOASFrom,
-			&item.IsEOL,
-			&item.EOLFrom,
-			&item.IsDiscontinued,
-			&item.DiscontinuedFrom,
-			&item.IsEOES,
-			&item.EOESFrom,
-			&item.IsMaintained,
-			&item.Withdrawn,
-		); err != nil {
+		item, err := scanSyncLifecycleRelease(rows)
+		if err != nil {
 			return nil, fmt.Errorf("postgres: scan sync lifecycle row: %w", err)
 		}
 		out = append(out, item)
@@ -676,4 +855,37 @@ func (s *Store) exportSyncLifecycle(ctx context.Context, opts db.SyncExportOptio
 	}
 
 	return out, nil
+}
+
+type syncLifecycleRowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanSyncLifecycleRelease(row syncLifecycleRowScanner) (db.SyncLifecycleRelease, error) {
+	var item db.SyncLifecycleRelease
+	if err := row.Scan(
+		&item.ID,
+		&item.Ecosystem,
+		&item.Name,
+		&item.ProductSlug,
+		&item.ProductLabel,
+		&item.Cycle,
+		&item.Latest,
+		&item.ReleaseDate,
+		&item.IsLTS,
+		&item.LTSFrom,
+		&item.IsEOAS,
+		&item.EOASFrom,
+		&item.IsEOL,
+		&item.EOLFrom,
+		&item.IsDiscontinued,
+		&item.DiscontinuedFrom,
+		&item.IsEOES,
+		&item.EOESFrom,
+		&item.IsMaintained,
+		&item.Withdrawn,
+	); err != nil {
+		return db.SyncLifecycleRelease{}, err
+	}
+	return item, nil
 }

@@ -95,6 +95,23 @@ func (s *Store) ClearHistory(ctx context.Context, before *time.Time, repo string
 	return int(rowsAffected), nil
 }
 
+const scanHistoryRetentionVictimIDsQuery = `
+	SELECT id
+	FROM (
+		SELECT id,
+		       ROW_NUMBER() OVER (
+			       PARTITION BY COALESCE(repo_name, '')
+			       ORDER BY scanned_at DESC, id DESC
+		       ) AS retained_rank
+		FROM scan_history
+	)
+	WHERE retained_rank > ?`
+
+const scanHistoryRetentionDeleteQuery = `
+	DELETE FROM scan_history
+	WHERE id IN (` + scanHistoryRetentionVictimIDsQuery + `
+	)`
+
 // EnforceRetention keeps at most maxPerRepo entries per repository,
 // deleting the oldest entries beyond that limit. If maxPerRepo <= 0 the
 // call is a no-op.
@@ -103,41 +120,8 @@ func (s *Store) EnforceRetention(ctx context.Context, maxPerRepo int) error {
 		return nil
 	}
 
-	// Find distinct repo names (including empty string for anonymous scans).
-	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT COALESCE(repo_name, '') FROM scan_history`)
-	if err != nil {
-		return fmt.Errorf("sqlite: list repos for retention: %w", err)
-	}
-	defer func() {
-		_ = rows.Close()
-	}()
-
-	var repos []string
-	for rows.Next() {
-		var repo string
-		if err := rows.Scan(&repo); err != nil {
-			return fmt.Errorf("sqlite: scan repo name: %w", err)
-		}
-		repos = append(repos, repo)
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("sqlite: iterate repo names: %w", err)
-	}
-
-	// For each repo, delete excess rows beyond the retention limit.
-	const deleteExcess = `
-		DELETE FROM scan_history
-		WHERE id NOT IN (
-			SELECT id FROM scan_history
-			WHERE COALESCE(repo_name, '') = ?
-			ORDER BY scanned_at DESC
-			LIMIT ?
-		) AND COALESCE(repo_name, '') = ?`
-
-	for _, repo := range repos {
-		if _, err := s.db.ExecContext(ctx, deleteExcess, repo, maxPerRepo, repo); err != nil {
-			return fmt.Errorf("sqlite: enforce retention for repo %q: %w", repo, err)
-		}
+	if _, err := s.db.ExecContext(ctx, scanHistoryRetentionDeleteQuery, maxPerRepo); err != nil {
+		return fmt.Errorf("sqlite: enforce history retention: %w", err)
 	}
 
 	return nil
@@ -147,9 +131,16 @@ func (s *Store) EnforceRetention(ctx context.Context, maxPerRepo int) error {
 // repo is non-empty, only entries for that repository are returned.
 // limit == 0 defaults to 50. limit < 0 returns all rows.
 func (s *Store) GetRecentScans(ctx context.Context, repo string, limit int) ([]ScanEntry, error) {
+	return s.getRecentScansPage(ctx, repo, limit, 0)
+}
+
+func (s *Store) getRecentScansPage(ctx context.Context, repo string, limit, offset int) ([]ScanEntry, error) {
 	noLimit := limit < 0
 	if limit == 0 {
 		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
 	}
 
 	var query string
@@ -170,8 +161,8 @@ func (s *Store) GetRecentScans(ctx context.Context, repo string, limit int) ([]S
 	}
 	if !noLimit {
 		query += `
-			LIMIT ?`
-		args = append(args, limit)
+			LIMIT ? OFFSET ?`
+		args = append(args, limit, offset)
 	}
 
 	rows, err := s.db.QueryContext(ctx, query, args...)

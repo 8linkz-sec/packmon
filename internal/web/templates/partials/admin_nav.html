@@ -3,7 +3,11 @@
     <h1 class="text-2xl font-bold">{{.Title}}</h1>
     <form action="/admin/logout" method="POST" class="inline">
       <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
-      <button type="submit" class="inline-flex min-h-11 items-center rounded-md px-3 py-2 text-sm font-medium text-gray-600 hover:bg-gray-100 hover:text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">Logout</button>
+      <button
+        type="submit"
+        class="inline-flex min-h-11 items-center rounded-md px-3 py-2 text-sm font-medium text-gray-600 hover:bg-gray-100
+          hover:text-gray-900 pm-focus-ring"
+      >Log out</button>
     </form>
   </div>
   {{template "admin-nav" dict "Active" .Section}}
@@ -15,6 +19,7 @@
       {{template "admin-nav-link" dict "Href" "/admin/" "Section" "overview" "Active" .Active "Label" "Overview"}}
       {{template "admin-nav-link" dict "Href" "/admin/feeds" "Section" "feeds" "Active" .Active "Label" "Feeds"}}
       {{template "admin-nav-link" dict "Href" "/admin/queue" "Section" "queue" "Active" .Active "Label" "Queue"}}
+      {{template "admin-nav-link" dict "Href" "/admin/scans" "Section" "scans" "Active" .Active "Label" "Scans"}}
       {{template "admin-nav-link" dict "Href" "/admin/keys" "Section" "keys" "Active" .Active "Label" "API Keys"}}
       {{template "admin-nav-link" dict "Href" "/admin/audit" "Section" "audit" "Active" .Active "Label" "Audit Log"}}
       {{template "admin-nav-link" dict "Href" "/admin/advisories" "Section" "advisories" "Active" .Active "Label" "Advisories"}}
@@ -24,5 +29,10 @@
 {{end}}
 
 {{define "admin-nav-link"}}
-      <a href="{{.Href}}" {{if eq .Section .Active}}aria-current="page"{{end}} class="shrink-0 inline-flex min-h-11 items-center rounded-md px-3 py-2 {{if eq .Section .Active}}border-b-2 border-blue-500 font-medium text-blue-600{{else}}text-gray-600 hover:bg-gray-50 hover:text-gray-900{{end}}">{{.Label}}</a>
+      <a
+        href="{{.Href}}"
+        {{if eq .Section .Active}}aria-current="page"{{end}}
+        class="shrink-0 inline-flex min-h-11 items-center rounded-md px-3 py-2 {{if eq .Section .Active}}
+          border-b-2 border-blue-500 font-medium text-blue-600{{else}}text-gray-600 hover:bg-gray-50 hover:text-gray-900{{end}}"
+      >{{.Label}}</a>
 {{end}}

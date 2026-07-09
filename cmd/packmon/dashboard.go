@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -16,7 +17,9 @@ import (
 	"time"
 
 	"github.com/8linkz-sec/packmon/internal/db/sqlite"
-	"github.com/8linkz-sec/packmon/internal/server/middleware"
+	"github.com/8linkz-sec/packmon/internal/httpsecurity"
+	"github.com/8linkz-sec/packmon/internal/ioutils"
+	"github.com/8linkz-sec/packmon/internal/plural"
 	"github.com/8linkz-sec/packmon/internal/web"
 	"github.com/spf13/cobra"
 )
@@ -61,22 +64,28 @@ func newDashboardCmdWithOptions(options dashboardOptions) *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("open local database: %w", err)
 			}
-			defer closeSilently(store)
+			defer ioutils.CloseSilently(store)
 
 			logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 			renderer := web.NewRendererWithLayoutLinks(web.TemplateFS(), false, web.LayoutLinks{HideAdmin: true})
 
 			mux := http.NewServeMux()
-			web.RegisterRoutes(mux, store, renderer, logger)
+			web.RegisterRoutesWithOptions(mux, web.NewDBStoreAdapter(store), renderer, logger, web.RouteOptions{
+				Dashboard: web.DashboardOptions{
+					LocalDBWarning: func(ctx context.Context) string {
+						return localDashboardDBWarning(ctx, store, logger)
+					},
+				},
+			})
 			registerLocalDashboardRoutes(mux)
 
 			listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", flagPort))
 			if err != nil {
 				return fmt.Errorf("listen on localhost:%d: %w", flagPort, err)
 			}
-			defer closeSilently(listener)
+			defer ioutils.CloseSilently(listener)
 
-			srv := newLocalDashboardServer(middleware.SecurityHeaders(false, "", nil)(mux))
+			srv := newLocalDashboardServer(httpsecurity.SecurityHeaders(false, "", nil)(mux))
 
 			serveErr := make(chan error, 1)
 			go func() {
@@ -84,12 +93,7 @@ func newDashboardCmdWithOptions(options dashboardOptions) *cobra.Command {
 			}()
 
 			url := "http://" + listener.Addr().String()
-			fmt.Printf("Local dashboard available at %s\n", url)
-			fmt.Println("Press Ctrl+C to stop.")
-
-			if options.onReady != nil {
-				options.onReady(url)
-			}
+			announceLocalDashboardReady(cmd.OutOrStdout(), url, options.onReady)
 
 			if flagOpen {
 				go func() {
@@ -110,7 +114,7 @@ func newDashboardCmdWithOptions(options dashboardOptions) *cobra.Command {
 				err := srv.Shutdown(shutdownCtx)
 				cancel()
 				if err != nil {
-					closeSilently(srv)
+					ioutils.CloseSilently(srv)
 				}
 
 				err = <-serveErr
@@ -128,6 +132,32 @@ func newDashboardCmdWithOptions(options dashboardOptions) *cobra.Command {
 	f.BoolVar(&flagOpen, "open", false, "open the dashboard in the default browser")
 
 	return cmd
+}
+
+func announceLocalDashboardReady(stdout io.Writer, url string, onReady func(string)) {
+	if onReady != nil {
+		onReady(url)
+	}
+
+	fmt.Fprintf(stdout, "Local dashboard available at %s\n", url)
+	fmt.Fprintln(stdout, "Press Ctrl+C to stop.")
+}
+
+func localDashboardDBWarning(ctx context.Context, store *sqlite.Store, logger *slog.Logger) string {
+	info, err := loadLocalDBInfo(ctx, store)
+	if err != nil {
+		if logger != nil {
+			logger.Warn("dashboard: failed to verify local database freshness", "error", err)
+		}
+		return "Local database freshness could not be verified. Results may be incomplete. Update with: packmon db sync."
+	}
+	if info == nil || !info.DBStale {
+		return ""
+	}
+	if info.DBAgeDays != nil {
+		return fmt.Sprintf("Local database last synced %s ago. Results may be incomplete. Update with: packmon db sync.", plural.Count(*info.DBAgeDays, "day", "days"))
+	}
+	return "Local database is stale. Results may be incomplete. Update with: packmon db sync."
 }
 
 func newLocalDashboardServer(handler http.Handler) *http.Server {
@@ -148,7 +178,36 @@ func registerLocalDashboardRoutes(mux *http.ServeMux) {
 }
 
 func localAdminUnavailable(w http.ResponseWriter, _ *http.Request) {
-	http.Error(w, "Local dashboard is read-only. Admin functions require packmon-server.", http.StatusNotFound)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusNotFound)
+	_, _ = fmt.Fprint(w, `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Packmon - Admin unavailable</title>
+  <style>
+    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, sans-serif; color: #111827; background: #f9fafb; }
+    main { max-width: 42rem; margin: 12vh auto; padding: 2rem; }
+    h1 { margin: 0 0 0.75rem; font-size: 1.75rem; line-height: 1.2; }
+    p { margin: 0 0 1.25rem; color: #4b5563; line-height: 1.6; }
+    nav { display: flex; flex-wrap: wrap; gap: 0.75rem; }
+    a { display: inline-flex; min-height: 2.75rem; align-items: center; border-radius: 0.375rem; padding: 0 1rem; font-weight: 600; color: #1d4ed8; background: #fff; border: 1px solid #9ca3af; text-decoration: none; }
+    a:first-child { color: #fff; background: #2563eb; border-color: #2563eb; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Admin unavailable in the local dashboard</h1>
+    <p>Local dashboard is read-only. Admin functions require packmon-server.</p>
+    <nav aria-label="Local dashboard destinations">
+      <a href="/">Dashboard</a>
+      <a href="/search">Search</a>
+      <a href="/feeds">Feed status</a>
+    </nav>
+  </main>
+</body>
+</html>`)
 }
 
 func signalContext(parent context.Context) (context.Context, context.CancelFunc) {
@@ -173,13 +232,34 @@ func openBrowser(url string) error {
 	}
 }
 
+var (
+	browserProcessStartupWait = 500 * time.Millisecond
+	waitBrowserCommand        = func(cmd *exec.Cmd) error {
+		return cmd.Wait()
+	}
+)
+
 func startBrowserCommand(cmd *exec.Cmd) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+
+	waitErr := make(chan error, 1)
 	go func() {
-		_ = cmd.Wait()
+		waitErr <- waitBrowserCommand(cmd)
 	}()
+
+	if browserProcessStartupWait <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(browserProcessStartupWait)
+	defer timer.Stop()
+
+	select {
+	case err := <-waitErr:
+		return err
+	case <-timer.C:
+	}
 	return nil
 }
 

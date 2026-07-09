@@ -128,10 +128,18 @@ type npmPackageMeta struct {
 }
 
 func npmPackageMetadata(packages map[string]packageLockPkg) map[string]npmPackageMeta {
-	metadata := make(map[string]npmPackageMeta, len(packages))
 	resolver := newNPMPackageResolver(packages)
-	root := packages[""]
-	directDeps := npmRootDependencies(root)
+	directDeps := npmRootDependencies(packages[""])
+
+	metadata := npmDirectDependencyMetadata(packages, resolver, directDeps)
+	npmPropagateViaRoots(metadata, resolver, directDeps)
+	npmCollectParentEdges(metadata, packages, resolver)
+
+	return metadata
+}
+
+func npmDirectDependencyMetadata(packages map[string]packageLockPkg, resolver *npmPackageResolver, directDeps map[string]npmRootDependency) map[string]npmPackageMeta {
+	metadata := make(map[string]npmPackageMeta, len(packages))
 	directByKey := make(map[string]npmRootDependency, len(directDeps))
 	for name, info := range directDeps {
 		if key := resolver.rootPackageKey(name); key != "" {
@@ -157,24 +165,121 @@ func npmPackageMetadata(packages map[string]packageLockPkg) map[string]npmPackag
 		}
 	}
 
+	return metadata
+}
+
+func npmPropagateViaRoots(metadata map[string]npmPackageMeta, resolver *npmPackageResolver, directDeps map[string]npmRootDependency) {
+	viaRoots := make(map[string]map[string]struct{}, len(metadata))
+	propagatedRoots := make(map[string]map[string]struct{}, len(metadata))
+	queued := make(map[string]struct{}, len(directDeps))
+	queue := make([]string, 0, len(directDeps))
+
+	enqueue := func(key string) {
+		if _, ok := queued[key]; ok {
+			return
+		}
+		queued[key] = struct{}{}
+		queue = append(queue, key)
+	}
+	addRoot := func(key, rootName string) bool {
+		roots := viaRoots[key]
+		if roots == nil {
+			roots = make(map[string]struct{})
+			viaRoots[key] = roots
+		}
+		if _, ok := roots[rootName]; ok {
+			return false
+		}
+		roots[rootName] = struct{}{}
+		return true
+	}
+
+	rootNames := make([]string, 0, len(directDeps))
 	for rootName := range directDeps {
+		rootNames = append(rootNames, rootName)
+	}
+	sort.Strings(rootNames)
+	for _, rootName := range rootNames {
 		rootKey := resolver.rootPackageKey(rootName)
 		if rootKey == "" {
 			continue
 		}
-		for _, depKey := range resolver.reachableDependencyKeys(rootKey) {
-			if depKey == rootKey {
-				continue
-			}
-			meta := metadata[depKey]
-			if meta.direct {
-				continue
-			}
-			meta.via = domain.MergePackageStringSet(meta.via, []string{rootName})
-			metadata[depKey] = meta
+		if addRoot(rootKey, rootName) {
+			enqueue(rootKey)
 		}
 	}
 
+	for len(queue) > 0 {
+		key := queue[0]
+		queue = queue[1:]
+		delete(queued, key)
+
+		pending := npmPendingViaRoots(viaRoots[key], propagatedRoots[key])
+		if len(pending) == 0 {
+			continue
+		}
+		propagated := propagatedRoots[key]
+		if propagated == nil {
+			propagated = make(map[string]struct{}, len(pending))
+			propagatedRoots[key] = propagated
+		}
+		for _, rootName := range pending {
+			propagated[rootName] = struct{}{}
+		}
+
+		for _, depKey := range resolver.resolvedDependencyKeys(key) {
+			if depKey == key {
+				continue
+			}
+			added := false
+			for _, rootName := range pending {
+				added = addRoot(depKey, rootName) || added
+			}
+			if added {
+				enqueue(depKey)
+			}
+		}
+	}
+
+	for key, roots := range viaRoots {
+		meta := metadata[key]
+		if meta.direct {
+			continue
+		}
+		meta.via = npmSortedStringSet(roots)
+		metadata[key] = meta
+	}
+}
+
+func npmPendingViaRoots(roots, propagated map[string]struct{}) []string {
+	if len(roots) == 0 {
+		return nil
+	}
+	pending := make([]string, 0, len(roots))
+	for rootName := range roots {
+		if _, ok := propagated[rootName]; !ok {
+			pending = append(pending, rootName)
+		}
+	}
+	sort.Strings(pending)
+	return pending
+}
+
+func npmSortedStringSet(values map[string]struct{}) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	for value := range values {
+		if strings.TrimSpace(value) != "" {
+			out = append(out, value)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func npmCollectParentEdges(metadata map[string]npmPackageMeta, packages map[string]packageLockPkg, resolver *npmPackageResolver) {
 	for parentKey, parentEntry := range packages {
 		if parentKey == "" {
 			continue
@@ -198,8 +303,6 @@ func npmPackageMetadata(packages map[string]packageLockPkg) map[string]npmPackag
 			metadata[depKey] = meta
 		}
 	}
-
-	return metadata
 }
 
 type npmRootDependency struct {
@@ -294,42 +397,30 @@ func (r *npmPackageResolver) resolvedDependencyKeys(packageKey string) []string 
 	return append([]string(nil), out...)
 }
 
-func (r *npmPackageResolver) reachableDependencyKeys(rootKey string) []string {
-	var out []string
-	seen := map[string]struct{}{rootKey: {}}
-	queue := r.resolvedDependencyKeys(rootKey)
-	for len(queue) > 0 {
-		key := queue[0]
-		queue = queue[1:]
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		out = append(out, key)
-		queue = append(queue, r.resolvedDependencyKeys(key)...)
-	}
-	sort.Strings(out)
-	return out
-}
-
 func npmRootDependencies(root packageLockPkg) map[string]npmRootDependency {
+	type rootDependencyScope struct {
+		dev      bool
+		optional bool
+		peer     bool
+	}
+
 	out := make(map[string]npmRootDependency)
-	add := func(deps map[string]string, dev, optional, peer bool) {
+	add := func(deps map[string]string, scope rootDependencyScope) {
 		for name := range deps {
 			if strings.TrimSpace(name) == "" {
 				continue
 			}
 			info := out[name]
-			info.dev = info.dev || dev
-			info.optional = info.optional || optional
-			info.peer = info.peer || peer
+			info.dev = info.dev || scope.dev
+			info.optional = info.optional || scope.optional
+			info.peer = info.peer || scope.peer
 			out[name] = info
 		}
 	}
-	add(root.Dependencies, false, false, false)
-	add(root.DevDependencies, true, false, false)
-	add(root.OptionalDependencies, false, true, false)
-	add(root.PeerDependencies, false, false, true)
+	add(root.Dependencies, rootDependencyScope{})
+	add(root.DevDependencies, rootDependencyScope{dev: true})
+	add(root.OptionalDependencies, rootDependencyScope{optional: true})
+	add(root.PeerDependencies, rootDependencyScope{peer: true})
 	return out
 }
 

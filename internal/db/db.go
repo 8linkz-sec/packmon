@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/8linkz-sec/packmon/internal/domain"
@@ -15,6 +16,22 @@ import (
 // ErrAdminAuditLog marks failures that prevented a required admin audit row
 // from being persisted.
 var ErrAdminAuditLog = errors.New("admin audit log write failed")
+
+// ErrAdminAuthConflict marks an admin password change whose checked password
+// hash no longer matches the stored credential row.
+var ErrAdminAuthConflict = errors.New("admin auth conflict")
+
+// ErrConflict marks an optimistic-concurrency conflict where a write was based
+// on an older row revision than the one currently stored.
+var ErrConflict = errors.New("write conflict")
+
+// ErrSourceScopedDeleteUnsupported marks stores that cannot safely delete one
+// source's evidence without deleting another source's canonical finding.
+var ErrSourceScopedDeleteUnsupported = errors.New("source-scoped delete unsupported")
+
+// ErrSourceScopedDeleteSourceRequired marks source-scoped delete requests that
+// omit the source and therefore cannot be safely scoped.
+var ErrSourceScopedDeleteSourceRequired = errors.New("source-scoped delete requires source")
 
 // Store is the central server-side persistence interface. It is implemented by
 // the PostgreSQL store and the in-memory development noop store. The local
@@ -59,6 +76,14 @@ type Store interface {
 	// UpsertMaliciousFinding inserts or updates a malicious finding.
 	UpsertMaliciousFinding(ctx context.Context, mf *MaliciousFinding) error
 
+	// ImportVulnerabilityFeedWithAudit atomically applies a vulnerability feed
+	// import and writes the required admin audit row.
+	ImportVulnerabilityFeedWithAudit(ctx context.Context, feed string, items []Vulnerability, deleteIDs []string, status *FeedSyncStatus, audit func(imported, deleted int) *AdminAuditEntry) (imported, deleted int, err error)
+
+	// ImportMaliciousFeedWithAudit atomically applies a malicious-package feed
+	// import and writes the required admin audit row.
+	ImportMaliciousFeedWithAudit(ctx context.Context, feed string, items []MaliciousFinding, deleteIDs []string, status *FeedSyncStatus, audit func(imported, deleted int) *AdminAuditEntry) (imported, deleted int, err error)
+
 	// MarkPackageReputationDue ensures a package version has a due reputation
 	// cache row. It returns true when a worker should be queued.
 	MarkPackageReputationDue(ctx context.Context, rep *PackageReputation) (queued bool, err error)
@@ -69,9 +94,9 @@ type Store interface {
 	// UpsertPackageReputation inserts or updates a package reputation cache row.
 	UpsertPackageReputation(ctx context.Context, rep *PackageReputation) error
 
-	// UpsertLifecycleProducts inserts or replaces cached lifecycle products,
-	// releases, and package mappings from the lifecycle feed.
-	UpsertLifecycleProducts(ctx context.Context, products []LifecycleProduct) error
+	// ReplaceLifecycleProducts atomically applies a complete lifecycle product
+	// snapshot and removes cached lifecycle products absent from that snapshot.
+	ReplaceLifecycleProducts(ctx context.Context, products []LifecycleProduct) (deleted int, err error)
 
 	// PropagateSeverityViaAliases updates UNKNOWN-severity vulnerabilities
 	// by copying the severity from a linked vulnerability (via shared alias)
@@ -94,9 +119,17 @@ type Store interface {
 	// malicious advisories are stored in malicious_findings.
 	UpsertManualAdvisory(ctx context.Context, advisory *ManualAdvisory) error
 
+	// UpsertManualAdvisoryWithAudit creates or updates an operator-managed
+	// advisory atomically with its admin audit entry.
+	UpsertManualAdvisoryWithAudit(ctx context.Context, advisory *ManualAdvisory, audit *AdminAuditEntry) error
+
 	// DeleteManualAdvisory removes an operator-managed advisory from whichever
 	// backing table owns it. Feed-sourced advisories must not be removed.
 	DeleteManualAdvisory(ctx context.Context, id string) error
+
+	// DeleteManualAdvisoryWithAudit removes an operator-managed advisory
+	// atomically with its admin audit entry.
+	DeleteManualAdvisoryWithAudit(ctx context.Context, id string, audit *AdminAuditEntry) error
 
 	// ListManualAdvisories returns operator-managed advisories across all
 	// supported finding types, newest first.
@@ -112,6 +145,10 @@ type Store interface {
 	// not in the provided set. Used during full-sync to remove stale flags.
 	ClearCISAKEV(ctx context.Context, keepIDs []string) (cleared int, err error)
 
+	// ReplaceCISAKEV atomically applies a complete CISA KEV snapshot and clears
+	// flags for vulnerabilities not present in the snapshot.
+	ReplaceCISAKEV(ctx context.Context, cveIDs []string) (updated, cleared int, err error)
+
 	// SetEPSSScores updates the epss_score and epss_percentile for the given
 	// CVEs. Each entry in the slice maps a CVE ID to its scores. IDs not
 	// present in the vulnerabilities table are silently ignored.
@@ -125,11 +162,26 @@ type Store interface {
 	// vulnerabilities: CVSS scores, exploit-exists flags, and source records.
 	EnrichVulnCheck(ctx context.Context, entries []VulnCheckEntry) (updated int, err error)
 
-	// FindUnknownSeverityCVEAliases returns CVE aliases linked to
-	// vulnerabilities whose severity still needs CVSS enrichment. Used by the
-	// NVD syncer to fetch CVSS scores for entries that lack severity
-	// information from their primary source.
-	FindUnknownSeverityCVEAliases(ctx context.Context) ([]UnknownCVEAlias, error)
+	// ImportVulnCheckWithAudit applies VulnCheck enrichment data atomically
+	// with feed status and the required admin audit row.
+	ImportVulnCheckWithAudit(ctx context.Context, feed string, entries []VulnCheckEntry, status *FeedSyncStatus, audit func(imported, deleted int) *AdminAuditEntry) (updated int, err error)
+
+	// ImportCISAKEVWithAudit applies incremental CISA KEV enrichment data
+	// atomically with feed status and the required admin audit row.
+	ImportCISAKEVWithAudit(ctx context.Context, feed string, cveIDs []string, status *FeedSyncStatus, audit func(imported, deleted int) *AdminAuditEntry) (updated int, err error)
+
+	// ReplaceCISAKEVWithAudit applies a complete CISA KEV snapshot atomically
+	// with feed status and the required admin audit row.
+	ReplaceCISAKEVWithAudit(ctx context.Context, feed string, cveIDs []string, status *FeedSyncStatus, audit func(imported, deleted int) *AdminAuditEntry) (updated, cleared int, err error)
+
+	// ImportEPSSWithAudit applies an EPSS score snapshot atomically with feed
+	// status and the required admin audit row.
+	ImportEPSSWithAudit(ctx context.Context, feed string, scores []EPSSEntry, status *FeedSyncStatus, audit func(imported, deleted int) *AdminAuditEntry) (updated, cleared int, err error)
+
+	// FindUnknownSeverityCVEIDs returns a bounded page of distinct CVE IDs
+	// linked to vulnerabilities whose severity still needs CVSS enrichment.
+	// Results are ordered by CVE ID and use afterCVE as a keyset cursor.
+	FindUnknownSeverityCVEIDs(ctx context.Context, afterCVE string, limit int) ([]string, error)
 
 	// UpdateSeverityByCVE updates the severity and CVSS score for a
 	// vulnerability identified by its CVE alias. Only unresolved rows are
@@ -155,9 +207,18 @@ type Store interface {
 	// override.
 	UpsertFeedConfig(ctx context.Context, cfg *FeedConfig) error
 
+	// UpsertFeedConfigWithAudit creates or updates a persisted feed
+	// configuration override atomically with its admin audit entry.
+	UpsertFeedConfigWithAudit(ctx context.Context, cfg *FeedConfig, audit *AdminAuditEntry) error
+
 	// DeleteFeedConfig removes a persisted feed configuration override so the
 	// server falls back to runtime defaults again.
 	DeleteFeedConfig(ctx context.Context, feedName string) error
+
+	// DeleteFeedConfigWithAudit removes a persisted feed configuration
+	// override atomically with its admin audit entry. When expectedUpdatedAt is
+	// non-nil, the delete is rejected if the stored row revision differs.
+	DeleteFeedConfigWithAudit(ctx context.Context, feedName string, expectedUpdatedAt *time.Time, audit *AdminAuditEntry) error
 
 	// ListFeedConfigs returns all persisted feed configuration overrides.
 	ListFeedConfigs(ctx context.Context) ([]FeedConfig, error)
@@ -172,6 +233,10 @@ type Store interface {
 	// settings.
 	UpsertSystemSettings(ctx context.Context, settings *SystemSettings) error
 
+	// UpsertSystemSettingsWithAudit creates or updates persisted server-level
+	// admin settings atomically with its admin audit entry.
+	UpsertSystemSettingsWithAudit(ctx context.Context, settings *SystemSettings, audit *AdminAuditEntry) error
+
 	// -- Refresh queue ----------------------------------------------------------
 
 	// EnqueueRefresh adds a job to the refresh queue. If an identical
@@ -180,13 +245,22 @@ type Store interface {
 	// created and the current queue position.
 	EnqueueRefresh(ctx context.Context, job *RefreshJob) (created bool, position int, err error)
 
+	// EnqueueRefreshWithAudit adds or reprioritizes a refresh job and writes
+	// the required admin audit row in the same store operation.
+	EnqueueRefreshWithAudit(ctx context.Context, job *RefreshJob, audit func(created bool, position int) *AdminAuditEntry) (created bool, position int, err error)
+
 	// DequeueRefresh claims the next pending job for the given source,
 	// ordered by priority (ascending) then requested_at (ascending).
 	// Returns nil if the queue is empty.
 	DequeueRefresh(ctx context.Context, source string) (*RefreshJob, error)
 
-	// CompleteRefresh marks a queued job as done or errored.
+	// CompleteRefresh marks a queued job as done or errored without validating
+	// a processing claim. Async workers must use CompleteClaimedRefresh.
 	CompleteRefresh(ctx context.Context, jobID int, jobErr error) error
+
+	// CompleteClaimedRefresh marks a queued job as done or errored only when
+	// the row is still processing under the dequeued processed_at claim.
+	CompleteClaimedRefresh(ctx context.Context, jobID int, claimedAt *time.Time, jobErr error) error
 
 	// ResetStuckJobs sets any job that has been in 'processing' state for
 	// longer than the given duration back to 'pending'. Returns the number
@@ -202,14 +276,41 @@ type Store interface {
 	// UpsertPackageCheckStatus creates or updates a check status entry.
 	UpsertPackageCheckStatus(ctx context.Context, status *PackageCheckStatus) error
 
+	// -- Retention pruning -----------------------------------------------------
+
+	// PruneScanLogs removes scan_log rows older than the retention duration.
+	PruneScanLogs(ctx context.Context, retention time.Duration) (int, error)
+
+	// PruneAdminAuditLogs removes admin_audit_log rows older than the retention duration.
+	PruneAdminAuditLogs(ctx context.Context, retention time.Duration) (int, error)
+
+	// PruneRefreshQueue removes terminal refresh_queue rows older than the retention duration.
+	PruneRefreshQueue(ctx context.Context, retention time.Duration) (int, error)
+
+	// PrunePackageCheckStatus removes package_check_status rows older than the retention duration.
+	PrunePackageCheckStatus(ctx context.Context, retention time.Duration) (int, error)
+
+	// PruneDeletedAPIKeys hard-deletes soft-deleted API key rows older than the retention duration.
+	PruneDeletedAPIKeys(ctx context.Context, retention time.Duration) (int, error)
+
+	// PrunePackageReputation removes non-finding package reputation cache rows older than the retention duration.
+	PrunePackageReputation(ctx context.Context, source string, retention time.Duration) (int, error)
+
 	// -- Scan log ---------------------------------------------------------------
 
 	// InsertScanLog records a completed scan.
 	InsertScanLog(ctx context.Context, entry *ScanLogEntry) error
 
-	// ListRecentScans returns the most recent scan log entries, newest first.
-	// limit controls how many entries to return (max 100).
-	ListRecentScans(ctx context.Context, limit int) ([]ScanLogEntry, error)
+	// GetScanLogByIdempotencyKey returns the scan log entry for a previously
+	// used API idempotency key, or nil when the key has not been seen.
+	GetScanLogByIdempotencyKey(ctx context.Context, key string) (*ScanLogEntry, error)
+
+	// ExportSync returns a flattened server snapshot for local CLI sync.
+	ExportSync(ctx context.Context, opts SyncExportOptions) (*SyncExport, error)
+
+	// ListRecentScans returns scan log entries newest first. Limit controls how
+	// many entries to return (max 100); offset skips newer entries.
+	ListRecentScans(ctx context.Context, limit, offset int) ([]ScanLogEntry, error)
 
 	// CountScansByDay returns the number of scans and total findings per day
 	// for the last N days (including today). Results are ordered oldest to newest.
@@ -243,11 +344,24 @@ type Store interface {
 	// CreateAPIKey inserts a new API key and returns the assigned ID.
 	CreateAPIKey(ctx context.Context, name, keyHash string, expiresAt *time.Time) (int, error)
 
+	// CreateAPIKeyWithAudit inserts a new API key atomically with its admin
+	// audit entry and returns the assigned ID.
+	CreateAPIKeyWithAudit(ctx context.Context, name, keyHash string, expiresAt *time.Time, audit *AdminAuditEntry) (int, error)
+
 	// RevokeAPIKey marks an API key as revoked.
 	RevokeAPIKey(ctx context.Context, keyID int) error
 
-	// DeleteAPIKey marks a revoked API key as deleted while retaining lifecycle metadata.
+	// RevokeAPIKeyWithAudit marks an API key as revoked atomically with its
+	// admin audit entry.
+	RevokeAPIKeyWithAudit(ctx context.Context, keyID int, audit *AdminAuditEntry) error
+
+	// DeleteAPIKey marks a revoked API key as deleted while retaining lifecycle metadata
+	// and scrubbing the operator label and authenticator hash.
 	DeleteAPIKey(ctx context.Context, keyID int) error
+
+	// DeleteAPIKeyWithAudit marks a revoked API key as deleted atomically with
+	// its admin audit entry while scrubbing the operator label and authenticator hash.
+	DeleteAPIKeyWithAudit(ctx context.Context, keyID int, audit *AdminAuditEntry) error
 
 	// -- Admin auth -------------------------------------------------------------
 
@@ -260,6 +374,15 @@ type Store interface {
 	// indicating that the initial environment-variable password is still
 	// active. A manual password change should pass false to clear the flag.
 	UpsertAdminAuth(ctx context.Context, passwordHash string, isBootstrap bool) error
+
+	// UpsertAdminAuthWithAudit creates or updates the admin password hash
+	// atomically with its admin audit entry.
+	UpsertAdminAuthWithAudit(ctx context.Context, passwordHash string, isBootstrap bool, audit *AdminAuditEntry) error
+
+	// ChangeAdminPasswordWithAudit changes the admin password only when the
+	// stored hash still equals expectedOldHash, and writes the audit entry in
+	// the same transaction.
+	ChangeAdminPasswordWithAudit(ctx context.Context, newHash, expectedOldHash string, audit *AdminAuditEntry) error
 
 	// InsertAdminAuditLog appends an entry to the admin audit log.
 	InsertAdminAuditLog(ctx context.Context, entry *AdminAuditEntry) error
@@ -280,20 +403,44 @@ type Store interface {
 	// PurgeQueue removes all completed or errored jobs from the queue.
 	PurgeQueue(ctx context.Context) (int, error)
 
+	// PurgeQueueWithAudit removes all completed or errored jobs atomically with
+	// its admin audit entry.
+	PurgeQueueWithAudit(ctx context.Context, audit *AdminAuditEntry) (int, error)
+
 	// UpdateQueueJobPriority changes the priority of a queued job.
 	UpdateQueueJobPriority(ctx context.Context, jobID, priority int) error
+
+	// UpdateQueueJobPriorityWithAudit changes the priority of a queued job
+	// atomically with its admin audit entry.
+	UpdateQueueJobPriorityWithAudit(ctx context.Context, jobID, priority int, audit *AdminAuditEntry) error
 
 	// RetryQueueJob moves a terminal or paused job back to pending.
 	RetryQueueJob(ctx context.Context, jobID int) error
 
+	// RetryQueueJobWithAudit moves a terminal or paused job back to pending
+	// atomically with its admin audit entry.
+	RetryQueueJobWithAudit(ctx context.Context, jobID int, audit *AdminAuditEntry) error
+
 	// PauseQueueJob prevents a pending job from being dequeued.
 	PauseQueueJob(ctx context.Context, jobID int) error
+
+	// PauseQueueJobWithAudit prevents a pending job from being dequeued
+	// atomically with its admin audit entry.
+	PauseQueueJobWithAudit(ctx context.Context, jobID int, audit *AdminAuditEntry) error
 
 	// ResumeQueueJob moves a paused job back to pending.
 	ResumeQueueJob(ctx context.Context, jobID int) error
 
+	// ResumeQueueJobWithAudit moves a paused job back to pending atomically
+	// with its admin audit entry.
+	ResumeQueueJobWithAudit(ctx context.Context, jobID int, audit *AdminAuditEntry) error
+
 	// ClearQueue removes queued jobs matching the given statuses.
 	ClearQueue(ctx context.Context, statuses []string) (int, error)
+
+	// ClearQueueWithAudit removes queued jobs matching the given statuses
+	// atomically with its admin audit entry.
+	ClearQueueWithAudit(ctx context.Context, statuses []string, audit *AdminAuditEntry) (int, error)
 
 	// -- Dashboard stats --------------------------------------------------------
 
@@ -320,24 +467,11 @@ type SourceMaliciousFindingDeleter interface {
 	DeleteMaliciousFindingForSource(ctx context.Context, id, source string) error
 }
 
-// DeleteVulnerabilityForSource uses source-scoped delete semantics when the
-// store supports them. Test/noop stores that only implement the legacy Store
-// contract fall back to whole-advisory withdrawal.
-func DeleteVulnerabilityForSource(ctx context.Context, store Store, id, source string) error {
-	if scoped, ok := store.(SourceVulnerabilityDeleter); ok {
-		return scoped.DeleteVulnerabilityForSource(ctx, id, source)
-	}
-	return store.DeleteVulnerability(ctx, id)
-}
-
-// DeleteMaliciousFindingForSource uses source-scoped delete semantics when the
-// store supports them. Test/noop stores that only implement the legacy Store
-// contract fall back to whole-finding withdrawal.
-func DeleteMaliciousFindingForSource(ctx context.Context, store Store, id, source string) error {
-	if scoped, ok := store.(SourceMaliciousFindingDeleter); ok {
-		return scoped.DeleteMaliciousFindingForSource(ctx, id, source)
-	}
-	return store.DeleteMaliciousFinding(ctx, id)
+// SourceMaliciousFindingStalePruner is implemented by stores that can withdraw
+// active malicious findings for one source when they were not refreshed during
+// a successful feed sync.
+type SourceMaliciousFindingStalePruner interface {
+	PruneMaliciousFindingsForSourceUpdatedBefore(ctx context.Context, source string, updatedBefore time.Time) (int, error)
 }
 
 // ---------------------------------------------------------------------------
@@ -358,6 +492,37 @@ const (
 	// reputation rows.
 	ReputationSourceReversingLabs = "reversinglabs"
 )
+
+// ReputationReadSource describes a package reputation source included in
+// stable API and web read paths.
+type ReputationReadSource struct {
+	Source string
+	Label  string
+}
+
+var reputationReadSources = []ReputationReadSource{
+	{Source: ReputationSourceReversingLabs, Label: "ReversingLabs"},
+}
+
+// ReputationReadSources returns the package reputation sources exposed by API
+// and web read paths.
+func ReputationReadSources() []ReputationReadSource {
+	out := make([]ReputationReadSource, len(reputationReadSources))
+	copy(out, reputationReadSources)
+	return out
+}
+
+// ReputationReadSourceLabel returns the display label for a configured
+// reputation read source.
+func ReputationReadSourceLabel(source string) (string, bool) {
+	source = strings.ToLower(strings.TrimSpace(source))
+	for _, descriptor := range reputationReadSources {
+		if source == strings.ToLower(descriptor.Source) {
+			return descriptor.Label, true
+		}
+	}
+	return "", false
+}
 
 // Vulnerability represents a full vulnerability record including related
 // aliases, sources, references, and affected packages.
@@ -510,7 +675,7 @@ type FeedSyncStatus struct {
 	LastError        string          `json:"last_error"`
 	EntriesSynced    int             `json:"entries_synced"`
 	EntriesTotal     int             `json:"entries_total"`
-	LastEtag         string          `json:"last_etag"`
+	LastETag         string          `json:"last_etag"`
 	LastCommitHash   string          `json:"last_commit_hash"`
 	Metadata         json.RawMessage `json:"metadata,omitempty"`
 	UpdatedAt        time.Time       `json:"updated_at,omitempty"`
@@ -518,20 +683,25 @@ type FeedSyncStatus struct {
 
 // FeedConfig is one persisted admin override for a feed.
 type FeedConfig struct {
-	FeedName     string
-	Enabled      bool
-	Mode         string
-	SyncInterval *time.Duration
-	APIKey       string
-	UpdatedAt    time.Time
+	FeedName          string
+	Enabled           bool
+	Mode              string
+	SyncInterval      *time.Duration
+	APIKey            string
+	APIKeyEncrypted   bool
+	UpdatedAt         time.Time
+	ExpectedUpdatedAt *time.Time
 }
 
 // SystemSettings stores admin-managed server-level settings.
 type SystemSettings struct {
-	BlockThreshold     string
-	RateLimitPerMinute int
-	RateLimitBurst     int
-	UpdatedAt          time.Time
+	BlockThreshold      string
+	RateLimitPerMinute  int
+	RateLimitBurst      int
+	ScanLogRetention    time.Duration
+	AdminAuditRetention time.Duration
+	UpdatedAt           time.Time
+	ExpectedUpdatedAt   *time.Time
 }
 
 // RefreshJob is one entry in the refresh queue.
@@ -545,6 +715,41 @@ type RefreshJob struct {
 	RequestedAt time.Time
 	ProcessedAt *time.Time
 	Error       string
+}
+
+const (
+	RefreshPriorityManual         = 0
+	RefreshPriorityUnknownPackage = 1
+	RefreshPriorityKnownFinding   = 2
+	RefreshPriorityNormal         = 3
+)
+
+// RefreshPriorityOption is one supported refresh queue priority value.
+type RefreshPriorityOption struct {
+	Value int
+	Label string
+}
+
+// RefreshPriorityOptions returns the supported refresh priority scale ordered
+// from highest priority to lowest priority.
+func RefreshPriorityOptions() []RefreshPriorityOption {
+	return []RefreshPriorityOption{
+		{Value: RefreshPriorityManual, Label: "0 - manual trigger/highest"},
+		{Value: RefreshPriorityUnknownPackage, Label: "1 - unknown packages"},
+		{Value: RefreshPriorityKnownFinding, Label: "2 - known findings"},
+		{Value: RefreshPriorityNormal, Label: "3 - normal re-check/lowest"},
+	}
+}
+
+// ValidRefreshPriority reports whether priority is in the supported queue
+// priority range.
+func ValidRefreshPriority(priority int) bool {
+	for _, option := range RefreshPriorityOptions() {
+		if priority == option.Value {
+			return true
+		}
+	}
+	return false
 }
 
 // PackageCheckStatus tracks the last check for a package from an async
@@ -563,14 +768,12 @@ type PackageCheckStatus struct {
 type ScanLogEntry struct {
 	ScanID                string
 	RepoName              string
-	Branch                string
-	Commit                string
 	ScannedAt             time.Time
 	PackagesCount         int
 	FindingsCount         int
 	DurationMs            int
 	ClientIP              string
-	UserAgent             string
+	ClientVersion         string
 	APIKeyID              int
 	APIKeyName            string
 	CorrelationID         string
@@ -625,9 +828,10 @@ type AdminAuth struct {
 
 // AdminAuditEntry is one row in the admin audit log.
 type AdminAuditEntry struct {
-	Action  string
-	Details json.RawMessage
-	IP      string
+	Action        string
+	Details       json.RawMessage
+	IP            string
+	CorrelationID string
 }
 
 // SetAdminAuditDetail updates one string field in an admin audit entry's JSON
@@ -736,6 +940,7 @@ type PackageSearchParams struct {
 	Severity    string
 	FindingType string
 	Limit       int
+	Offset      int
 }
 
 // AdminAuditLogEntry is a read-model for audit log entries, including the
@@ -745,6 +950,7 @@ type AdminAuditLogEntry struct {
 	Action          string
 	Details         json.RawMessage
 	IP              string
+	CorrelationID   string
 	CreatedAt       time.Time
 	PreviousDigest  string
 	RowDigest       string
@@ -782,12 +988,9 @@ type DBPoolStats struct {
 	AcquiredConns     int32
 	IdleConns         int32
 	ConstructingConns int32
-}
-
-// UnknownCVEAlias pairs a vulnerability ID with one of its CVE aliases.
-// Used by the NVD syncer to look up CVSS scores for vulnerabilities that
-// have UNKNOWN severity.
-type UnknownCVEAlias struct {
-	VulnerabilityID string
-	CVEID           string
+	AcquireCount      int64
+	AcquireDuration   time.Duration
+	CanceledAcquires  int64
+	EmptyAcquires     int64
+	EmptyAcquireWait  time.Duration
 }

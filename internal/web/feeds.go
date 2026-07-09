@@ -3,6 +3,7 @@ package web
 import (
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/8linkz-sec/packmon/internal/db"
@@ -27,22 +28,27 @@ type FeedRow struct {
 	LastSyncStatus string
 	EntriesSynced  int
 	EntriesTotal   int
+	RejectedCount  int
 	LastError      string
 	DurationStr    string
 }
 
-// HandleFeeds serves GET /feeds. When the query parameter partial=status
-// is present, only the feed status table fragment is returned (for HTMX
-// polling from the dashboard and feeds page).
+// HandleFeeds serves GET /feeds. When the query parameter partial=status is
+// present on an HTMX request, only the feed status table fragment is returned
+// (for HTMX polling from the dashboard and feeds page).
 func HandleFeeds(store Store, renderer *Renderer, logger *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
+		partial := r.URL.Query().Get("partial")
+		if partial == "status" {
+			w.Header().Add("Vary", "HX-Request")
+		}
 
 		statuses, err := store.ListFeedSyncStatuses(ctx)
 		loadError := ""
 		if err != nil {
-			logger.Error("feeds: failed to list statuses", "error", err)
-			loadError = "Feed status could not be loaded. Check the server logs and database connection before relying on feed health."
+			logger.Error("feeds: failed to list statuses", requestLogAttrs(r, "error", err)...)
+			loadError = webMessage(webMessageKey("feeds.error.load_status"))
 		}
 
 		rows := make([]FeedRow, 0, len(statuses))
@@ -56,6 +62,7 @@ func HandleFeeds(store Store, renderer *Renderer, logger *slog.Logger) http.Hand
 				LastSyncStatus: s.LastSyncStatus,
 				EntriesSynced:  s.EntriesSynced,
 				EntriesTotal:   s.EntriesTotal,
+				RejectedCount:  feedhealth.RejectedRecordCount(s),
 				LastError:      logsafe.RedactDiagnosticMessage(s.LastError),
 			}
 			if s.LastSyncAt != nil {
@@ -74,20 +81,24 @@ func HandleFeeds(store Store, renderer *Renderer, logger *slog.Logger) http.Hand
 		}
 
 		// Partial response for HTMX polling.
-		if r.URL.Query().Get("partial") == "status" {
+		if partial == "status" && isHTMXRequest(r) {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			if err := renderer.RenderPartial(w, "feeds.html", "feed-status-partial", data); err != nil {
-				logger.Error("feeds: partial render failed", "error", err)
+				logger.Error("feeds: partial render failed", requestLogAttrs(r, "error", err)...)
 				http.Error(w, "internal server error", http.StatusInternalServerError)
 			}
 			return
 		}
 
 		if err := renderer.Render(w, "feeds.html", data); err != nil {
-			logger.Error("feeds: render failed", "error", err)
+			logger.Error("feeds: render failed", requestLogAttrs(r, "error", err)...)
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 		}
 	}
+}
+
+func isHTMXRequest(r *http.Request) bool {
+	return strings.EqualFold(strings.TrimSpace(r.Header.Get("HX-Request")), "true")
 }
 
 // feedHealthStatus derives a health string from sync status.

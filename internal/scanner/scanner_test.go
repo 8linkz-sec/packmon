@@ -6,11 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/8linkz-sec/packmon/internal/ioutils"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -18,11 +21,27 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/8linkz-sec/packmon/internal/checkcontract"
 	"github.com/8linkz-sec/packmon/internal/correlation"
-	"github.com/8linkz-sec/packmon/internal/db"
 	"github.com/8linkz-sec/packmon/internal/domain"
 	"github.com/8linkz-sec/packmon/internal/parser"
 )
+
+func TestLocalCheckerRequiresCompleteFindingCoverage(t *testing.T) {
+	t.Parallel()
+
+	checkerType := reflect.TypeOf((*LocalChecker)(nil)).Elem()
+	for _, method := range []string{
+		"FindVulnerabilities",
+		"FindMalicious",
+		"FindReputationFindingsBatch",
+		"FindLifecycleFindingsBatch",
+	} {
+		if _, ok := checkerType.MethodByName(method); !ok {
+			t.Fatalf("LocalChecker missing required local scan capability %s", method)
+		}
+	}
+}
 
 func TestGenerateScanIDUses128BitHex(t *testing.T) {
 	t.Parallel()
@@ -41,6 +60,68 @@ func writeJSONForScannerTest(t *testing.T, w http.ResponseWriter, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(value); err != nil {
 		t.Fatalf("encode response: %v", err)
+	}
+}
+
+type scannerRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f scannerRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestDecodeRemoteCheckResponseRejectsTrailingData(t *testing.T) {
+	t.Parallel()
+
+	resultJSON := `{"scan_id":"scan-1","mode":"remote","scanned_at":"2026-01-01T00:00:00Z","findings":[],"feed_versions":{}}`
+	tests := []struct {
+		name    string
+		body    string
+		wantErr bool
+	}{
+		{
+			name: "no trailing data",
+			body: resultJSON,
+		},
+		{
+			name: "trailing whitespace",
+			body: resultJSON + " \n\t\r",
+		},
+		{
+			name:    "trailing object",
+			body:    resultJSON + `{}`,
+			wantErr: true,
+		},
+		{
+			name:    "trailing value",
+			body:    resultJSON + `true`,
+			wantErr: true,
+		},
+		{
+			name:    "trailing garbage",
+			body:    resultJSON + ` garbage`,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var result domain.ScanResult
+			err := decodeRemoteCheckResponse(strings.NewReader(tt.body), &result)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("decodeRemoteCheckResponse() error = nil, want trailing-data error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("decodeRemoteCheckResponse() error = %v", err)
+			}
+			if result.ScanID != "scan-1" {
+				t.Fatalf("ScanID = %q, want scan-1", result.ScanID)
+			}
+		})
 	}
 }
 
@@ -65,7 +146,7 @@ func TestCheckRemoteSendsAPIKey(t *testing.T) {
 			FeedVersions: map[string]string{},
 		})
 	}))
-	defer closeSilently(server)
+	defer ioutils.CloseSilently(server)
 
 	sc := New(nil, Config{
 		ServerURL:         server.URL,
@@ -104,7 +185,7 @@ func TestCheckRemoteSendsVersionedUserAgent(t *testing.T) {
 			FeedVersions: map[string]string{},
 		})
 	}))
-	defer closeSilently(server)
+	defer ioutils.CloseSilently(server)
 
 	sc := New(nil, Config{
 		ServerURL:         server.URL,
@@ -136,19 +217,25 @@ func TestCheckRemoteSendsCorrelationIDAndMinimizedRepoMetadata(t *testing.T) {
 			http.Error(w, "missing correlation", http.StatusBadRequest)
 			return
 		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			requestErrCh <- "read request: " + err.Error()
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if strings.Contains(string(body), `"branch"`) || strings.Contains(string(body), `"commit"`) {
+			requestErrCh <- "branch or commit metadata was sent"
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
 		var req domain.ScanRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := json.Unmarshal(body, &req); err != nil {
 			requestErrCh <- "decode request: " + err.Error()
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
 		if req.Repo == nil || req.Repo.Name != "packmon" {
 			requestErrCh <- "repo name not sent"
-			http.Error(w, "missing repo", http.StatusBadRequest)
-			return
-		}
-		if req.Repo.Branch != "" || req.Repo.Commit != "" {
-			requestErrCh <- "branch or commit metadata was sent"
 			http.Error(w, "missing repo", http.StatusBadRequest)
 			return
 		}
@@ -163,7 +250,7 @@ func TestCheckRemoteSendsCorrelationIDAndMinimizedRepoMetadata(t *testing.T) {
 			FeedVersions: map[string]string{},
 		})
 	}))
-	defer closeSilently(server)
+	defer ioutils.CloseSilently(server)
 
 	sc := New(nil, Config{
 		ServerURL:         server.URL,
@@ -213,7 +300,7 @@ func TestCheckRemoteOmitsRepoMetadataWhenDisabled(t *testing.T) {
 			FeedVersions: map[string]string{},
 		})
 	}))
-	defer closeSilently(server)
+	defer ioutils.CloseSilently(server)
 
 	sc := New(nil, Config{
 		ServerURL:         server.URL,
@@ -255,7 +342,7 @@ func TestCheckRemoteOmitsClientOnlyPackageMetadata(t *testing.T) {
 			FeedVersions: map[string]string{},
 		})
 	}))
-	defer closeSilently(server)
+	defer ioutils.CloseSilently(server)
 
 	sc := New(nil, Config{
 		ServerURL:         server.URL,
@@ -295,7 +382,7 @@ func TestCheckRemoteOmitsClientOnlyPackageMetadata(t *testing.T) {
 func TestCheckRemoteChunksRequestsAtServerLimit(t *testing.T) {
 	t.Parallel()
 
-	const totalPackages = 5001
+	const totalPackages = checkcontract.MaxPackagesPerCheck + 1
 	pkgs := make([]domain.Package, totalPackages)
 	for i := range pkgs {
 		pkgs[i] = domain.Package{
@@ -319,8 +406,8 @@ func TestCheckRemoteChunksRequestsAtServerLimit(t *testing.T) {
 		call := calls.Add(1)
 		switch call {
 		case 1:
-			if len(req.Packages) != 5000 {
-				requestErrCh <- fmt.Sprintf("first chunk packages = %d, want 5000", len(req.Packages))
+			if len(req.Packages) != checkcontract.MaxPackagesPerCheck {
+				requestErrCh <- fmt.Sprintf("first chunk packages = %d, want %d", len(req.Packages), checkcontract.MaxPackagesPerCheck)
 				http.Error(w, "bad chunk", http.StatusBadRequest)
 				return
 			}
@@ -353,7 +440,7 @@ func TestCheckRemoteChunksRequestsAtServerLimit(t *testing.T) {
 				FindingsCount:    1,
 				FindingsBlocking: true,
 				Findings: []domain.Finding{{
-					Name:       "pkg-5000",
+					Name:       "pkg-" + strconv.Itoa(checkcontract.MaxPackagesPerCheck),
 					Version:    "1.0.0",
 					Ecosystem:  domain.EcosystemNPM,
 					Type:       domain.FindingTypeVulnerability,
@@ -368,7 +455,7 @@ func TestCheckRemoteChunksRequestsAtServerLimit(t *testing.T) {
 			http.Error(w, "unexpected request", http.StatusBadRequest)
 		}
 	}))
-	defer closeSilently(server)
+	defer ioutils.CloseSilently(server)
 
 	sc := New(nil, Config{
 		ServerURL:         server.URL,
@@ -382,8 +469,8 @@ func TestCheckRemoteChunksRequestsAtServerLimit(t *testing.T) {
 	if got := calls.Load(); got != 2 {
 		t.Fatalf("remote requests = %d, want 2", got)
 	}
-	if first, second := <-requestSizes, <-requestSizes; first != 5000 || second != 1 {
-		t.Fatalf("request sizes = %d,%d; want 5000,1", first, second)
+	if first, second := <-requestSizes, <-requestSizes; first != checkcontract.MaxPackagesPerCheck || second != 1 {
+		t.Fatalf("request sizes = %d,%d; want %d,1", first, second, checkcontract.MaxPackagesPerCheck)
 	}
 	select {
 	case msg := <-requestErrCh:
@@ -401,6 +488,91 @@ func TestCheckRemoteChunksRequestsAtServerLimit(t *testing.T) {
 	}
 	if !remoteBlocking {
 		t.Fatal("remoteBlocking = false, want true when any chunk reports blocking")
+	}
+}
+
+func TestMergeRemoteFeedStatusPreservesWorstStatus(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		current string
+		next    string
+		want    string
+	}{
+		{
+			name:    "healthy current takes degraded next",
+			current: "healthy",
+			next:    "degraded",
+			want:    "degraded",
+		},
+		{
+			name:    "degraded current ignores healthy next",
+			current: "degraded",
+			next:    "healthy",
+			want:    "degraded",
+		},
+		{
+			name:    "error next wins over degraded",
+			current: "degraded",
+			next:    "error",
+			want:    "error",
+		},
+		{
+			name:    "error current wins over healthy",
+			current: "error",
+			next:    "healthy",
+			want:    "error",
+		},
+		{
+			name:    "unknown next normalizes to degraded",
+			current: "healthy",
+			next:    "feed lagging",
+			want:    "degraded",
+		},
+		{
+			name:    "blank current starts healthy",
+			current: "",
+			next:    "error",
+			want:    "error",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := mergeRemoteFeedStatus(tt.current, tt.next); got != tt.want {
+				t.Fatalf("mergeRemoteFeedStatus(%q, %q) = %q, want %q", tt.current, tt.next, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeScanFeedStatusBoundsRemoteValues(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		status string
+		want   string
+	}{
+		{status: "", want: "healthy"},
+		{status: " healthy ", want: "healthy"},
+		{status: "degraded", want: "degraded"},
+		{status: "error", want: "error"},
+		{status: "remote warning: stale feed", want: "degraded"},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.status, func(t *testing.T) {
+			t.Parallel()
+
+			if got := normalizeScanFeedStatus(tt.status); got != tt.want {
+				t.Fatalf("normalizeScanFeedStatus(%q) = %q, want %q", tt.status, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -426,7 +598,7 @@ func TestCheckRemoteValidationAndResponseErrors(t *testing.T) {
 	badStatus := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, strings.Repeat("x", 300), http.StatusTeapot)
 	}))
-	defer closeSilently(badStatus)
+	defer ioutils.CloseSilently(badStatus)
 	sc = New(nil, Config{ServerURL: badStatus.URL, AllowInsecureHTTP: true, Timeout: time.Second})
 	if _, _, _, _, err := sc.checkRemote(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "server returned 418") {
 		t.Fatalf("checkRemote(status) error = %v", err)
@@ -435,19 +607,106 @@ func TestCheckRemoteValidationAndResponseErrors(t *testing.T) {
 	unauthorized := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "invalid api key", http.StatusUnauthorized)
 	}))
-	defer closeSilently(unauthorized)
+	defer ioutils.CloseSilently(unauthorized)
 	sc = New(nil, Config{ServerURL: unauthorized.URL, AllowInsecureHTTP: true, Timeout: time.Second})
 	if _, _, _, _, err := sc.checkRemote(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "check PACKMON_API_KEY") {
 		t.Fatalf("checkRemote(unauthorized) error = %v, want api-key hint", err)
 	}
 
+	forbidden := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "unknown user agent", http.StatusForbidden)
+	}))
+	defer ioutils.CloseSilently(forbidden)
+	sc = New(nil, Config{ServerURL: forbidden.URL, AllowInsecureHTTP: true, Timeout: time.Second})
+	if _, _, _, _, err := sc.checkRemote(context.Background(), nil); err == nil {
+		t.Fatal("checkRemote(forbidden) error = nil")
+	} else if !strings.Contains(err.Error(), "User-Agent policy") {
+		t.Fatalf("checkRemote(forbidden) error = %v, want request-policy hint", err)
+	} else if strings.Contains(err.Error(), "PACKMON_API_KEY") || strings.Contains(err.Error(), "--api-key") || strings.Contains(err.Error(), "api_key_env") {
+		t.Fatalf("checkRemote(forbidden) error = %v, want no api-key hint", err)
+	}
+
 	invalidJSON := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("not json"))
 	}))
-	defer closeSilently(invalidJSON)
+	defer ioutils.CloseSilently(invalidJSON)
 	sc = New(nil, Config{ServerURL: invalidJSON.URL, AllowInsecureHTTP: true, Timeout: time.Second})
 	if _, _, _, _, err := sc.checkRemote(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "decode response") {
 		t.Fatalf("checkRemote(json) error = %v", err)
+	}
+}
+
+func TestCheckRemoteServerErrorsRedactBodySecretsAndIncludeCorrelationID(t *testing.T) {
+	t.Parallel()
+
+	const responseCorrelationID = "123e4567-e89b-42d3-a456-426614174000"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(correlation.Header, responseCorrelationID)
+		http.Error(w, "failed Authorization: Bearer leaked-remote-token api_key=leaked-query-token", http.StatusInternalServerError)
+	}))
+	defer ioutils.CloseSilently(server)
+
+	sc := New(nil, Config{
+		ServerURL:         server.URL,
+		AllowInsecureHTTP: true,
+		Timeout:           time.Second,
+	})
+	_, _, _, _, err := sc.checkRemote(context.Background(), []domain.Package{{
+		Name:      "lodash",
+		Version:   "1.0.0",
+		Ecosystem: domain.EcosystemNPM,
+	}})
+	if err == nil {
+		t.Fatal("checkRemote() error = nil, want server error")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"server returned 500",
+		"correlation_id=" + responseCorrelationID,
+		"Bearer [redacted]",
+		"api_key=[redacted]",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("checkRemote() error missing %q: %s", want, msg)
+		}
+	}
+	for _, leaked := range []string{"leaked-remote-token", "leaked-query-token"} {
+		if strings.Contains(msg, leaked) {
+			t.Fatalf("checkRemote() error leaked %q: %s", leaked, msg)
+		}
+	}
+}
+
+func TestCheckRemoteServerErrorUsesRequestCorrelationIDFallback(t *testing.T) {
+	t.Parallel()
+
+	requestCorrelationIDs := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCorrelationIDs <- r.Header.Get(correlation.Header)
+		w.Header().Set(correlation.Header, "not-a-valid-correlation-id")
+		http.Error(w, "server unavailable", http.StatusBadGateway)
+	}))
+	defer ioutils.CloseSilently(server)
+
+	sc := New(nil, Config{
+		ServerURL:         server.URL,
+		AllowInsecureHTTP: true,
+		Timeout:           time.Second,
+	})
+	_, _, _, _, err := sc.checkRemote(context.Background(), []domain.Package{{
+		Name:      "lodash",
+		Version:   "1.0.0",
+		Ecosystem: domain.EcosystemNPM,
+	}})
+	if err == nil {
+		t.Fatal("checkRemote() error = nil, want server error")
+	}
+	requestCorrelationID := <-requestCorrelationIDs
+	if !correlation.Valid(requestCorrelationID) {
+		t.Fatalf("request correlation ID = %q, want valid ID", requestCorrelationID)
+	}
+	if want := "correlation_id=" + requestCorrelationID; !strings.Contains(err.Error(), want) {
+		t.Fatalf("checkRemote() error missing %q: %s", want, err.Error())
 	}
 }
 
@@ -458,7 +717,7 @@ func TestCheckRemoteServerErrorTruncatesUTF8Safely(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, body, http.StatusInternalServerError)
 	}))
-	defer closeSilently(server)
+	defer ioutils.CloseSilently(server)
 
 	sc := New(nil, Config{
 		ServerURL:         server.URL,
@@ -493,7 +752,7 @@ func TestCheckRemoteRejectsOversizedResponseBody(t *testing.T) {
 			_, _ = w.Write([]byte(chunk))
 		}
 	}))
-	defer closeSilently(oversized)
+	defer ioutils.CloseSilently(oversized)
 
 	sc := New(nil, Config{
 		ServerURL:         oversized.URL,
@@ -506,6 +765,61 @@ func TestCheckRemoteRejectsOversizedResponseBody(t *testing.T) {
 		Ecosystem: domain.EcosystemNPM,
 	}}); err == nil || !strings.Contains(err.Error(), "response body exceeds") {
 		t.Fatalf("checkRemote(oversized response) error = %v", err)
+	}
+}
+
+func TestScannerRunRemoteTransportErrorRedactsSecretServerURL(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "package-lock.json"), []byte(`{
+		"lockfileVersion": 3,
+		"packages": {
+			"node_modules/lodash": {"version":"1.0.0"}
+		}
+	}`), 0o600); err != nil {
+		t.Fatalf("write package-lock: %v", err)
+	}
+
+	rawURL := "https://user-secret:pass-secret@packmon.example.test/org/private/path-secret?token=query-secret#frag-secret" //nolint:gosec // fake secret-bearing URL verifies transport error redaction.
+	sc := New(parser.NewRegistry(), Config{
+		Path:      dir,
+		Mode:      ModeRemote,
+		ServerURL: rawURL,
+		FailOn:    domain.SeverityCritical,
+		Timeout:   time.Second,
+	})
+	sc.client.Transport = scannerRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return nil, &url.Error{
+			Op:  "Post",
+			URL: req.URL.String(),
+			Err: errors.New("dial tcp: token=query-secret"),
+		}
+	})
+
+	result, exitCode := sc.Run(context.Background())
+	if exitCode != ExitOperational {
+		t.Fatalf("exit = %d, want operational; result=%+v", exitCode, result)
+	}
+	if result.FeedStatus != "error" {
+		t.Fatalf("FeedStatus = %q, want error", result.FeedStatus)
+	}
+	if !strings.Contains(result.ScanError, "remote check failed") {
+		t.Fatalf("ScanError = %q, want remote failure detail", result.ScanError)
+	}
+
+	userVisible := result.ScanError + "\n" + result.FeedStatus
+	for _, leaked := range []string{
+		"user-secret",
+		"pass-secret",
+		"query-secret",
+		"frag-secret",
+		"/org/private/path-secret",
+		"token=query-secret",
+	} {
+		if strings.Contains(userVisible, leaked) {
+			t.Fatalf("remote transport error leaked %q in %q", leaked, userVisible)
+		}
 	}
 }
 
@@ -546,7 +860,7 @@ func TestScannerRunComputesRemoteBlockingWithClientThreshold(t *testing.T) {
 			FeedVersions: map[string]string{},
 		})
 	}))
-	defer closeSilently(server)
+	defer ioutils.CloseSilently(server)
 
 	sc := New(parser.NewRegistry(), Config{
 		Path:              dir,
@@ -703,7 +1017,7 @@ func TestScannerRunSkipsRemoteWhenFiltersRemoveAllPackages(t *testing.T) {
 		called.Store(true)
 		http.Error(w, "remote should not be called for an empty package set", http.StatusInternalServerError)
 	}))
-	defer closeSilently(server)
+	defer ioutils.CloseSilently(server)
 
 	sc := New(parser.NewRegistry(), Config{
 		Path:              dir,
@@ -802,6 +1116,43 @@ func TestScannerRunFailsOnPartialParseErrors(t *testing.T) {
 	}
 }
 
+func TestScannerRunListAllDevOnlyPartialParseError(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "package-lock.json"), []byte(`{
+		"lockfileVersion": 3,
+		"packages": {"": {"version":"1.0.0"}, "node_modules/dev-only": {"version":"1.0.0","dev":true}}
+	}`), 0o600); err != nil {
+		t.Fatalf("write package-lock: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pnpm-lock.yaml"), []byte(`{{{not yaml`), 0o600); err != nil {
+		t.Fatalf("write pnpm-lock: %v", err)
+	}
+
+	sc := New(parser.NewRegistry(), Config{
+		Path:                 dir,
+		Mode:                 ModeLocal,
+		FailOn:               domain.SeverityCritical,
+		MaxDepth:             2,
+		Timeout:              5 * time.Second,
+		InventoryAllPackages: true,
+	})
+	checker := &captureLocalChecker{}
+	sc.SetLocalChecker(checker)
+
+	result, exitCode := sc.Run(context.Background())
+	if exitCode != ExitParser {
+		t.Fatalf("exit = %d, result = %+v, want parser error", exitCode, result)
+	}
+	if len(result.ParseErrors) != 1 || !strings.Contains(result.ParseErrors[0], "pnpm-lock.yaml") {
+		t.Fatalf("ParseErrors = %#v, want pnpm parse error", result.ParseErrors)
+	}
+	if result.PackagesScanned != 0 || len(checker.packages) != 0 {
+		t.Fatalf("packages scanned=%d checked=%d, want no checkable prod packages", result.PackagesScanned, len(checker.packages))
+	}
+}
+
 func TestScannerRunPartialParseErrorOverridesUnderThresholdFindings(t *testing.T) {
 	t.Parallel()
 
@@ -891,7 +1242,7 @@ func TestScannerEmptyScanHasHealthyFeedStatus(t *testing.T) {
 	}
 }
 
-func TestCheckLocalIncludesOptionalLifecycleFindings(t *testing.T) {
+func TestCheckLocalIncludesRequiredLifecycleFindings(t *testing.T) {
 	t.Parallel()
 
 	checker := &lifecycleLocalChecker{
@@ -944,7 +1295,18 @@ func TestAlwaysBlockingFindingKeepsLifecycleSeverityGated(t *testing.T) {
 	}
 }
 
+type noopLocalCoverage struct{}
+
+func (noopLocalCoverage) FindReputationFindingsBatch(context.Context, []PackageLookup, string) ([]domain.Finding, error) {
+	return nil, nil
+}
+
+func (noopLocalCoverage) FindLifecycleFindingsBatch(context.Context, []PackageLookup, time.Time) ([]domain.Finding, error) {
+	return nil, nil
+}
+
 type captureLocalChecker struct {
+	noopLocalCoverage
 	packages []domain.Package
 }
 
@@ -958,6 +1320,7 @@ func (c *captureLocalChecker) FindMalicious(context.Context, string, string, str
 }
 
 type fixedFindingLocalChecker struct {
+	noopLocalCoverage
 	findings []domain.Finding
 }
 
@@ -970,9 +1333,10 @@ func (c *fixedFindingLocalChecker) FindMalicious(context.Context, string, string
 }
 
 type captureBatchLocalChecker struct {
-	vulnQueries        []db.PackageQuery
-	maliciousQueries   []db.PackageQuery
-	reputationQueries  []db.PackageQuery
+	noopLocalCoverage
+	vulnQueries        []PackageLookup
+	maliciousQueries   []PackageLookup
+	reputationQueries  []PackageLookup
 	reputationFindings []domain.Finding
 }
 
@@ -984,19 +1348,19 @@ func (c *captureBatchLocalChecker) FindMalicious(context.Context, string, string
 	panic("single malicious lookup should not be used when batch is available")
 }
 
-func (c *captureBatchLocalChecker) FindVulnerabilitiesBatch(_ context.Context, packages []db.PackageQuery) ([]domain.Finding, error) {
+func (c *captureBatchLocalChecker) FindVulnerabilitiesBatch(_ context.Context, packages []PackageLookup) ([]domain.Finding, error) {
 	c.vulnQueries = append(c.vulnQueries, packages...)
 	return []domain.Finding{{Name: packages[0].Name, Version: packages[0].Version, Ecosystem: domain.Ecosystem(packages[0].Ecosystem), Type: domain.FindingTypeVulnerability, Severity: domain.SeverityHigh}}, nil
 }
 
-func (c *captureBatchLocalChecker) FindMaliciousBatch(_ context.Context, packages []db.PackageQuery) ([]domain.Finding, error) {
+func (c *captureBatchLocalChecker) FindMaliciousBatch(_ context.Context, packages []PackageLookup) ([]domain.Finding, error) {
 	c.maliciousQueries = append(c.maliciousQueries, packages...)
 	return []domain.Finding{{Name: packages[1].Name, Version: packages[1].Version, Ecosystem: domain.Ecosystem(packages[1].Ecosystem), Type: domain.FindingTypeMalicious, Severity: domain.SeverityCritical}}, nil
 }
 
-func (c *captureBatchLocalChecker) FindReputationFindingsBatch(_ context.Context, packages []db.PackageQuery, source string) ([]domain.Finding, error) {
-	if source != db.ReputationSourceReversingLabs {
-		return nil, fmt.Errorf("source = %q, want %q", source, db.ReputationSourceReversingLabs)
+func (c *captureBatchLocalChecker) FindReputationFindingsBatch(_ context.Context, packages []PackageLookup, source string) ([]domain.Finding, error) {
+	if source != reversingLabsReputationSource {
+		return nil, fmt.Errorf("source = %q, want %q", source, reversingLabsReputationSource)
 	}
 	c.reputationQueries = append(c.reputationQueries, packages...)
 	return c.reputationFindings, nil
@@ -1036,7 +1400,7 @@ func TestCheckLocalUsesExplicitReputationBatchChecker(t *testing.T) {
 			RiskType:   "removed_package",
 			Severity:   domain.SeverityCritical,
 			AdvisoryID: "reversinglabs:npm/left-pad@1.0.0",
-			Source:     db.ReputationSourceReversingLabs,
+			Source:     reversingLabsReputationSource,
 		}},
 	}
 	sc := New(nil, Config{})
@@ -1055,14 +1419,15 @@ func TestCheckLocalUsesExplicitReputationBatchChecker(t *testing.T) {
 	if len(findings) != 3 {
 		t.Fatalf("findings = %+v, want vulnerability, malicious, and reputation findings", findings)
 	}
-	if findings[2].Type != domain.FindingTypeSupplyChainRisk || findings[2].Source != db.ReputationSourceReversingLabs {
+	if findings[2].Type != domain.FindingTypeSupplyChainRisk || findings[2].Source != reversingLabsReputationSource {
 		t.Fatalf("reputation finding = %+v, want explicit ReversingLabs supply-chain risk", findings[2])
 	}
 }
 
 type lifecycleLocalChecker struct {
+	noopLocalCoverage
 	lifecycleFindings []domain.Finding
-	lifecycleQueries  []db.PackageQuery
+	lifecycleQueries  []PackageLookup
 }
 
 func (c *lifecycleLocalChecker) FindVulnerabilities(context.Context, string, string, string) ([]domain.Finding, error) {
@@ -1073,12 +1438,13 @@ func (c *lifecycleLocalChecker) FindMalicious(context.Context, string, string, s
 	return nil, nil
 }
 
-func (c *lifecycleLocalChecker) FindLifecycleFindingsBatch(_ context.Context, packages []db.PackageQuery, _ time.Time) ([]domain.Finding, error) {
+func (c *lifecycleLocalChecker) FindLifecycleFindingsBatch(_ context.Context, packages []PackageLookup, _ time.Time) ([]domain.Finding, error) {
 	c.lifecycleQueries = append(c.lifecycleQueries, packages...)
 	return c.lifecycleFindings, nil
 }
 
 type errorLocalChecker struct {
+	noopLocalCoverage
 	vulnErr      error
 	maliciousErr error
 }
@@ -1127,6 +1493,7 @@ func TestCheckLocalErrorsAndMaliciousVersion(t *testing.T) {
 // severity for every package, used to exercise the blocking/non-blocking
 // exit-code logic.
 type severityLocalChecker struct {
+	noopLocalCoverage
 	severity domain.Severity
 }
 
@@ -1261,7 +1628,7 @@ func TestScannerRunAutoRemoteSuccessReportsRemoteMode(t *testing.T) {
 			FeedVersions: map[string]string{},
 		})
 	}))
-	defer closeSilently(server)
+	defer ioutils.CloseSilently(server)
 
 	sc := New(parser.NewRegistry(), Config{
 		Path:              dir,
@@ -1276,7 +1643,7 @@ func TestScannerRunAutoRemoteSuccessReportsRemoteMode(t *testing.T) {
 	if exitCode != ExitOK {
 		t.Fatalf("exit = %d, result = %+v", exitCode, result)
 	}
-	if result.Mode != string(ModeRemote) {
+	if result.Mode != ModeRemote {
 		t.Fatalf("Mode = %q, want %q for successful auto remote scan", result.Mode, ModeRemote)
 	}
 }
@@ -1357,7 +1724,9 @@ func TestScannerRunParserAndLocalModeErrors(t *testing.T) {
 	}
 }
 
-type sortingLocalChecker struct{}
+type sortingLocalChecker struct {
+	noopLocalCoverage
+}
 
 func (sortingLocalChecker) FindVulnerabilities(_ context.Context, ecosystem, name, version string) ([]domain.Finding, error) {
 	return []domain.Finding{{
@@ -1410,7 +1779,9 @@ func TestScannerRunSortsFindingsAndReturnsBlockingExit(t *testing.T) {
 	}
 }
 
-type manualCountLocalChecker struct{}
+type manualCountLocalChecker struct {
+	noopLocalCoverage
+}
 
 func (manualCountLocalChecker) FindVulnerabilities(_ context.Context, ecosystem, name, version string) ([]domain.Finding, error) {
 	return []domain.Finding{
@@ -1470,8 +1841,8 @@ func TestScannerRunCountsManualAdvisoryFindings(t *testing.T) {
 	if exitCode != ExitBlocking {
 		t.Fatalf("exit = %d, want blocking: %+v", exitCode, result)
 	}
-	if result.ManualCount != 2 {
-		t.Fatalf("manual_advisories_count = %d, want 2", result.ManualCount)
+	if result.ManualAdvisoriesCount != 2 {
+		t.Fatalf("manual_advisories_count = %d, want 2", result.ManualAdvisoriesCount)
 	}
 }
 
@@ -1604,6 +1975,40 @@ func TestResolveMode(t *testing.T) {
 			sc := New(nil, Config{Mode: tt.cfgMode})
 			if got := sc.resolveMode(); got != tt.want {
 				t.Fatalf("resolveMode() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseModeNormalizesAndValidatesScanModes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		raw     string
+		want    Mode
+		wantErr bool
+	}{
+		{raw: "", want: ModeAuto},
+		{raw: " AUTO ", want: ModeAuto},
+		{raw: "remote", want: ModeRemote},
+		{raw: " Local ", want: ModeLocal},
+		{raw: "sideways", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.raw, func(t *testing.T) {
+			got, err := ParseMode(tt.raw)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("ParseMode() error = nil, want invalid mode error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseMode() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("ParseMode(%q) = %q, want %q", tt.raw, got, tt.want)
 			}
 		})
 	}

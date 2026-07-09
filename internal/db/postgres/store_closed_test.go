@@ -26,7 +26,7 @@ func TestPostgresStoreClosedPoolReturnsErrors(t *testing.T) {
 	}
 
 	expectErr("InsertScanLog", store.InsertScanLog(ctx, &db.ScanLogEntry{ScanID: "closed"}))
-	_, err := store.ListRecentScans(ctx, 1)
+	_, err := store.ListRecentScans(ctx, 1, 0)
 	expectErr("ListRecentScans", err)
 	_, err = store.ListRecentVulnerabilities(ctx, 1, 1)
 	expectErr("ListRecentVulnerabilities", err)
@@ -104,8 +104,8 @@ func TestPostgresStoreClosedPoolReturnsErrors(t *testing.T) {
 	score := 5.5
 	_, err = store.EnrichVulnCheck(ctx, []db.VulnCheckEntry{{CVEID: "CVE-2026-0001", CVSSScore: &score}})
 	expectErr("EnrichVulnCheck", err)
-	_, err = store.FindUnknownSeverityCVEAliases(ctx)
-	expectErr("FindUnknownSeverityCVEAliases", err)
+	_, err = store.FindUnknownSeverityCVEIDs(ctx, "", 100)
+	expectErr("FindUnknownSeverityCVEIDs", err)
 	expectErr("UpdateSeverityByCVE", store.UpdateSeverityByCVE(ctx, "CVE-2026-0001", "HIGH", 7.5))
 
 	_, err = store.GetFeedSyncStatus(ctx, "osv")
@@ -127,6 +127,8 @@ func TestPostgresStoreClosedPoolReturnsErrors(t *testing.T) {
 		Name:      "pkg",
 		Source:    "socket",
 	}))
+	_, err = store.PrunePackageCheckStatus(ctx, time.Hour)
+	expectErr("PrunePackageCheckStatus", err)
 
 	_, err = store.ExportSync(ctx, db.SyncExportOptions{})
 	expectErr("ExportSync", err)
@@ -164,8 +166,9 @@ func TestPostgresStoreClosedPoolReturnsErrors(t *testing.T) {
 		Evidence:      json.RawMessage(`{}`),
 		ReferenceURLs: json.RawMessage(`[]`),
 	}))
-	expectErr("UpsertLifecycleProducts", store.UpsertLifecycleProducts(ctx, []db.LifecycleProduct{{
+	_, err = store.ReplaceLifecycleProducts(ctx, []db.LifecycleProduct{{
 		ProductSlug: "nodejs",
 		Name:        "Node.js",
-	}}))
+	}})
+	expectErr("ReplaceLifecycleProducts", err)
 }

@@ -45,7 +45,7 @@ func binaryCandidates(dir, name string) []string {
 }
 
 // testBinDir returns the directory where test binaries are stored.
-// It builds the binary once per test run into a temporary directory.
+// The caller must provide freshly built binaries through PACKMON_TEST_BIN_DIR.
 func testBinDir(t *testing.T) string {
 	t.Helper()
 	dir := os.Getenv("PACKMON_TEST_BIN_DIR")
@@ -55,9 +55,8 @@ func testBinDir(t *testing.T) string {
 		}
 		return dir
 	}
-	// Fallback: look in the project root.
-	root := projectRoot(t)
-	return root
+	t.Fatal("PACKMON_TEST_BIN_DIR is required for integration tests; build first with: go build -o .build\\packmon.exe .\\cmd\\packmon; go build -o .build\\packmon-server.exe .\\cmd\\packmon-server and set PACKMON_TEST_BIN_DIR=.build")
+	return ""
 }
 
 // projectRoot walks up from the test file location to find go.mod.

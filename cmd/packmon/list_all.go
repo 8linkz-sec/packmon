@@ -2,8 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"html/template"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -14,8 +15,6 @@ import (
 	"github.com/8linkz-sec/packmon/internal/dockerimage"
 	"github.com/8linkz-sec/packmon/internal/domain"
 	"github.com/8linkz-sec/packmon/internal/findinglinks"
-	"github.com/8linkz-sec/packmon/internal/ioutils"
-	"github.com/8linkz-sec/packmon/internal/parser"
 	"github.com/8linkz-sec/packmon/internal/plural"
 	"github.com/8linkz-sec/packmon/internal/scanner"
 	"github.com/8linkz-sec/packmon/internal/termtext"
@@ -43,15 +42,16 @@ type listAllPackage struct {
 }
 
 type listAllPackageReport struct {
-	Target      string
-	ScannedAt   string
-	Rows        []listAllRow
-	Sources     []listAllSourceRow
-	ScopeCounts map[string]int
-	WithUpdates int
-	Vulnerable  int
-	Unknown     int
-	Warnings    []string
+	Target            string
+	ScannedAt         string
+	ScannedAtDateTime string
+	Rows              []listAllRow
+	Sources           []listAllSourceRow
+	ScopeCounts       map[string]int
+	WithUpdates       int
+	Vulnerable        int
+	Unknown           int
+	Warnings          []string
 }
 
 type listAllRow struct {
@@ -71,46 +71,19 @@ type listAllRow struct {
 	LockFile   string
 }
 
-type listAllHTMLPackageRow struct {
-	Name                 string
-	Installed            string
-	InstalledCopy        string
-	InstalledCopyLabel   string
-	InstalledCopyMessage string
-	Latest               string
-	LatestCopy           string
-	LatestCopyLabel      string
-	LatestCopyMessage    string
-	Status               string
-	StatusClass          string
-	Ecosystem            string
-	Source               string
-	Scope                string
-	Relation             string
-	Technology           string
-	Via                  string
-	Flags                string
-	Vuln                 string
-	VulnClass            string
-}
-
-type listAllHTMLFindingState struct {
-	Status          string
-	Rank            int
-	HasFixedVersion bool
-}
-
 type listAllFindingRow struct {
 	Severity      string
 	SeverityClass string
 	Type          string
 	RiskType      string
 	Package       string
+	Version       string
 	Ecosystem     string
 	Advisory      string
 	AdvisoryURL   string
 	Title         string
 	FixedVersion  string
+	Action        string
 	Source        string
 	Scope         string
 	Relation      string
@@ -119,9 +92,10 @@ type listAllFindingRow struct {
 }
 
 type listAllFindingSection struct {
-	Title    string
-	Class    string
-	Findings []listAllFindingRow
+	Title     string
+	Class     string
+	AriaLabel string
+	Findings  []listAllFindingRow
 }
 
 type listAllSourceRow struct {
@@ -135,46 +109,80 @@ type listAllScopeSummary struct {
 }
 
 var (
-	resolveDockerImageStatusFn  = resolveDockerImageStatusWithLocalDigests
+	resolveDockerImageStatusFn  = resolveDockerImageStatusWithDigestResolver
 	inspectLocalDockerDigestsFn = inspectListAllLocalDockerDigests
 	newDockerRegistryClientFunc = dockerimage.NewRegistryClient
 )
 
+type listAllScanPhaseResult struct {
+	result     *domain.ScanResult
+	failOn     domain.Severity
+	exitCode   int
+	collection *scanner.PackageCollection
+	historyErr *scanHistoryRecordError
+}
+
+type listAllInventoryPhaseResult struct {
+	packages []listAllPackage
+	warnings []string
+}
+
 // runListAll runs the scanner pipeline once for findings and package
 // collection, then reuses that collection to produce the full package list with
-// available-update info (section 2). The findings table is byte-identical to a
-// normal scan; the full list is printed after a few blank lines. The scanner's
-// exit code is returned unchanged: --list-all is a reporting view and must not
-// suppress a blocking exit code.
+// available-update info. The terminal report keeps findings readable with a
+// compact list-all layout while JSON, SARIF, and JUnit artifacts retain the
+// standard scan result shape. The scanner's exit code is returned unchanged:
+// --list-all is a reporting view and must not suppress a blocking exit code.
 func runListAll(ctx context.Context, settings scanSettings) (int, error) {
+	scan, err := runListAllScanOutputPhase(ctx, settings)
+	if err != nil {
+		return scan.exitCode, err
+	}
+	if settings.Quiet && strings.TrimSpace(settings.OutputHTML) == "" {
+		return scan.exitCode, listAllScanHistoryError(scan)
+	}
+
+	inventory, err := collectListAllInventoryPhase(settings, scan.collection)
+	if err != nil {
+		return scan.exitCode, withDefaultExitCode(ExitOperational, err)
+	}
+
+	return writeListAllOutputPhase(ctx, settings, scan, inventory)
+}
+
+func runListAllScanOutputPhase(ctx context.Context, settings scanSettings) (listAllScanPhaseResult, error) {
 	scanSettings := settings
 	scanSettings.InventoryAll = true
 	result, failOn, exitCode, _, collection, err := runScanPipeline(ctx, scanSettings)
+	scan := listAllScanPhaseResult{
+		result:     result,
+		failOn:     failOn,
+		exitCode:   exitCode,
+		collection: collection,
+	}
 	if err != nil {
-		return exitCode, withDefaultExitCode(exitCode, err)
-	}
-
-	// Section 1: findings table (identical to a normal scan).
-	if !settings.Quiet {
-		tw := scanner.NewTableWriter(settings.NoColor, failOn)
-		if err := tw.Write(os.Stdout, result); err != nil {
-			fmt.Fprintf(os.Stderr, "error writing table output: %v\n", err)
+		var historyErr *scanHistoryRecordError
+		if errors.As(err, &historyErr) {
+			scan.historyErr = historyErr
+			return scan, nil
 		}
-	}
-	if writeScanOutputArtifacts(settings, result, failOn, false) {
-		exitCode = ExitOperational
-	}
-	if settings.Quiet && strings.TrimSpace(settings.OutputHTML) == "" {
-		return exitCode, nil
+		return scan, withDefaultExitCode(exitCode, err)
 	}
 
+	if writeScanOutputArtifacts(settings, result, failOn, false) {
+		scan.exitCode = ExitOperational
+	}
+	return scan, nil
+}
+
+func collectListAllInventoryPhase(settings scanSettings, collection *scanner.PackageCollection) (listAllInventoryPhaseResult, error) {
 	packages, inventoryWarnings, err := listAllPackagesFromCollection(collection)
 	if err != nil {
-		return exitCode, withDefaultExitCode(ExitOperational, err)
+		return listAllInventoryPhaseResult{}, err
 	}
 	absPath, err := filepath.Abs(settings.Path)
 	if err != nil {
-		return exitCode, withExitCode(ExitOperational, fmt.Errorf("resolve path: %w", err))
+		return listAllInventoryPhaseResult{}, withExitCode(ExitOperational, fmt.Errorf("resolve path: %w", err))
 	}
 	dockerRows, dockerWarnings, dockerErr := collectDockerPackagesWithWarnings(absPath, settings)
 	if dockerErr != nil {
@@ -185,84 +193,57 @@ func runListAll(ctx context.Context, settings scanSettings) (int, error) {
 		inventoryWarnings = append(inventoryWarnings, dockerWarnings...)
 		packages = append(packages, dockerRows...)
 	}
+	return listAllInventoryPhaseResult{packages: packages, warnings: inventoryWarnings}, nil
+}
 
-	packageReport := buildListAllPackageReportWithOptions(ctx, packages, result, settings.Path, settings.Timeout, listAllPackageReportOptions{
-		Offline: settings.ListAllOffline,
+func writeListAllOutputPhase(ctx context.Context, settings scanSettings, scan listAllScanPhaseResult, inventory listAllInventoryPhaseResult) (int, error) {
+	resolver := settings.resolver
+	resolver.latestRegistry = resolver.latestRegistry.inheritFallback(settings.LatestRegistry)
+	packageReport := buildListAllPackageReportWithOptions(ctx, inventory.packages, scan.result, settings.Path, settings.Timeout, listAllPackageReportOptions{
+		Offline:  settings.ListAllOffline,
+		resolver: resolver,
 	})
-	packageReport.Warnings = append(packageReport.Warnings, inventoryWarnings...)
+	packageReport.Warnings = append(packageReport.Warnings, inventory.warnings...)
 	packageReport.Sources = mergeListAllSourceRows(packageReport.Sources, listAllExplicitSBOMSources(settings))
 	htmlWritten := false
 	if settings.OutputHTML != "" {
-		if err := writeListAllHTML(settings.OutputHTML, settings.TargetName, failOn, result, packageReport); err != nil {
-			return exitCode, withDefaultExitCode(ExitOperational, err)
+		if err := writeListAllHTML(settings.OutputHTML, settings.TargetName, scan.failOn, scan.result, packageReport); err != nil {
+			return scan.exitCode, withDefaultExitCode(ExitOperational, err)
 		}
 		htmlWritten = true
 	}
 
 	if settings.Quiet {
-		return exitCode, nil
+		return scan.exitCode, listAllScanHistoryError(scan)
 	}
 
-	// A few blank lines separate the two sections.
+	if err := writeListAllSecurityFindings(os.Stdout, scan.result, scan.failOn, packageReport, settings.NoColor); err != nil {
+		fmt.Fprintf(os.Stderr, "error writing list-all findings output: %v\n", err)
+	}
+
+	// A few blank lines separate the findings and inventory sections.
 	fmt.Print("\n\n\n")
 
-	if len(packages) == 0 {
+	if len(inventory.packages) == 0 {
 		fmt.Println("No packages found.")
 		if htmlWritten {
 			fmt.Printf("HTML report written to: %s\n", settings.OutputHTML)
 		}
-		return exitCode, nil
+		return scan.exitCode, listAllScanHistoryError(scan)
 	}
 
 	printListAllPackageReport(packageReport)
 	if htmlWritten {
 		fmt.Printf("HTML report written to: %s\n", settings.OutputHTML)
 	}
-	return exitCode, nil
+	return scan.exitCode, listAllScanHistoryError(scan)
 }
 
-// collectAllPackages walks and parses every lock file under the scan path and
-// returns deduplicated packages keyed by ecosystem+name+version (a package at
-// two versions is two rows).
-func collectAllPackages(settings scanSettings) ([]listAllPackage, error) {
-	packages, _, err := collectAllPackagesWithWarnings(settings)
-	return packages, err
-}
-
-func collectAllPackagesWithWarnings(settings scanSettings) ([]listAllPackage, []string, error) {
-	absPath, err := filepath.Abs(settings.Path)
-	if err != nil {
-		return nil, nil, withExitCode(ExitOperational, fmt.Errorf("resolve path: %w", err))
+func listAllScanHistoryError(scan listAllScanPhaseResult) error {
+	if scan.historyErr == nil {
+		return nil
 	}
-
-	reg := parser.NewRegistry()
-	collection, err := scanner.CollectPackages(scanner.CollectConfig{
-		Registry:   reg,
-		Root:       absPath,
-		MaxDepth:   settings.MaxDepth,
-		Ecosystems: settings.Ecosystems,
-		SBOMFiles:  settings.SBOMFiles,
-		IncludeDev: settings.IncludeDev,
-	})
-	if err != nil {
-		return nil, nil, withDefaultExitCode(ExitOperational, err)
-	}
-	packages, warnings, err := listAllPackagesFromCollection(collection)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	dockerRows, dockerWarnings, dockerErr := collectDockerPackagesWithWarnings(absPath, settings)
-	if dockerErr != nil {
-		warning := "docker inventory error: " + dockerErr.Error()
-		warnings = append(warnings, warning)
-		fmt.Fprintf(os.Stderr, "warning: %s\n", termtext.Sanitize(warning))
-	} else {
-		warnings = append(warnings, dockerWarnings...)
-		packages = append(packages, dockerRows...)
-	}
-
-	return packages, warnings, nil
+	return scan.historyErr
 }
 
 func listAllPackagesFromCollection(collection *scanner.PackageCollection) ([]listAllPackage, []string, error) {
@@ -363,10 +344,6 @@ type listAllPackageReportOptions struct {
 	resolver packageUpdateResolver
 }
 
-func buildListAllPackageReport(parent context.Context, packages []listAllPackage, result *domain.ScanResult, scanPath string, timeoutSeconds int) listAllPackageReport {
-	return buildListAllPackageReportWithOptions(parent, packages, result, scanPath, timeoutSeconds, listAllPackageReportOptions{})
-}
-
 func buildListAllPackageReportWithOptions(parent context.Context, packages []listAllPackage, result *domain.ScanResult, scanPath string, timeoutSeconds int, options listAllPackageReportOptions) listAllPackageReport {
 	// Look up latest versions in parallel with a bounded request fan-out using
 	// the scan command's context and timeout.
@@ -379,10 +356,14 @@ func buildListAllPackageReportWithOptions(parent context.Context, packages []lis
 			latest[i] = packageLatestStatus{Latest: "unknown", Update: "-", Unknown: true}
 		}
 	} else {
-		lookup := newCachedPackageUpdateLookupWithResolver(packageUpdateResolverFromContext(ctx, options.resolver))
+		lookup := newCachedPackageUpdateLookupWithResolver(options.resolver)
 		localDockerDigests := inspectLocalDockerDigestsFn(ctx, packages)
+		var dockerDigestLookup dockerDigestResolver
+		if listAllContainsDockerPackage(packages) {
+			dockerDigestLookup = newCachedDockerDigestLookup(newDockerRegistryClientWithMirrors(options.resolver.latestRegistry))
+		}
 		latest = resolveLatestWithWorkerPool(ctx, packages, func(ctx context.Context, p listAllPackage) packageLatestStatus {
-			return resolveListAllLatestWithLookup(ctx, p, lookup, localDockerDigests)
+			return resolveListAllLatestWithCachedDockerLookup(ctx, p, lookup, localDockerDigests, dockerDigestLookup)
 		})
 	}
 
@@ -396,11 +377,13 @@ func buildListAllPackageReportWithOptions(parent context.Context, packages []lis
 		}
 	}
 
+	scannedAt := time.Now().UTC()
 	report := listAllPackageReport{
-		Target:      scanPath,
-		ScannedAt:   formatReportTimestamp(time.Now().UTC()),
-		Rows:        make([]listAllRow, 0, len(packages)),
-		ScopeCounts: make(map[string]int),
+		Target:            scanPath,
+		ScannedAt:         formatReportTimestamp(scannedAt),
+		ScannedAtDateTime: formatReportTimestampDateTime(scannedAt),
+		Rows:              make([]listAllRow, 0, len(packages)),
+		ScopeCounts:       make(map[string]int),
 	}
 	for i, p := range packages {
 		lat := latest[i]
@@ -461,15 +444,32 @@ func buildListAllPackageReportWithOptions(parent context.Context, packages []lis
 	return report
 }
 
-func resolveListAllLatest(ctx context.Context, p listAllPackage) packageLatestStatus {
-	return resolveListAllLatestWithLookup(ctx, p, directPackageUpdateLookup(), nil)
+func listAllContainsDockerPackage(packages []listAllPackage) bool {
+	for _, p := range packages {
+		if p.Ecosystem == domain.EcosystemDocker {
+			return true
+		}
+	}
+	return false
+}
+
+func newDockerRegistryClientWithMirrors(registry latestRegistryConfig) *dockerimage.RegistryClient {
+	client := newDockerRegistryClientFunc(nil)
+	if client != nil {
+		client.Mirrors = registry.withDefaults().DockerRegistryMirrors
+	}
+	return client
 }
 
 func resolveListAllLatestWithLookup(ctx context.Context, p listAllPackage, lookup packageUpdateLookup, localDockerDigests map[string]string) packageLatestStatus {
+	return resolveListAllLatestWithCachedDockerLookup(ctx, p, lookup, localDockerDigests, nil)
+}
+
+func resolveListAllLatestWithCachedDockerLookup(ctx context.Context, p listAllPackage, lookup packageUpdateLookup, localDockerDigests map[string]string, dockerDigests dockerDigestResolver) packageLatestStatus {
 	if p.Ecosystem == domain.EcosystemDocker {
-		return resolveDockerImageStatusFn(ctx, p, localDockerDigests)
+		return resolveDockerImageStatusFn(ctx, p, localDockerDigests, dockerDigests)
 	}
-	if !publicLatestLookupAllowed(p.Ecosystem, p.SourceRefs) {
+	if !latestLookupAllowed(p.Ecosystem, p.SourceRefs, lookup) {
 		return unknownLatestStatus()
 	}
 	return resolvePackageUpdateStatusWithLookup(ctx, p.Name, p.Version, p.Ecosystem, p.Direct, p.Parents, lookup)
@@ -513,11 +513,100 @@ func listAllPackageSource(p listAllPackage) string {
 	return "-"
 }
 
-func resolveDockerImageStatus(ctx context.Context, p listAllPackage) packageLatestStatus {
-	return resolveDockerImageStatusWithLocalDigests(ctx, p, nil)
+func resolveDockerImageStatusWithLocalDigests(ctx context.Context, p listAllPackage, localDigests map[string]string) packageLatestStatus {
+	return resolveDockerImageStatusWithDigestResolver(ctx, p, localDigests, nil)
 }
 
-func resolveDockerImageStatusWithLocalDigests(ctx context.Context, p listAllPackage, localDigests map[string]string) packageLatestStatus {
+type dockerDigestResolver interface {
+	ResolveDigest(context.Context, dockerimage.Ref) (string, error)
+}
+
+type cachedDockerDigestLookup struct {
+	resolver dockerDigestResolver
+	mu       sync.Mutex
+	digests  map[dockerDigestCacheKey]dockerDigestCacheEntry
+	inflight map[dockerDigestCacheKey]*dockerDigestCacheCall
+}
+
+type dockerDigestCacheKey struct {
+	registry   string
+	repository string
+	reference  string
+}
+
+type dockerDigestCacheEntry struct {
+	digest string
+	err    error
+}
+
+type dockerDigestCacheCall struct {
+	done   chan struct{}
+	digest string
+	err    error
+}
+
+func newCachedDockerDigestLookup(resolver dockerDigestResolver) *cachedDockerDigestLookup {
+	if resolver == nil {
+		resolver = newDockerRegistryClientFunc(nil)
+	}
+	return &cachedDockerDigestLookup{
+		resolver: resolver,
+		digests:  make(map[dockerDigestCacheKey]dockerDigestCacheEntry),
+		inflight: make(map[dockerDigestCacheKey]*dockerDigestCacheCall),
+	}
+}
+
+func (l *cachedDockerDigestLookup) ResolveDigest(ctx context.Context, ref dockerimage.Ref) (string, error) {
+	if l == nil || l.resolver == nil {
+		return newDockerRegistryClientFunc(nil).ResolveDigest(ctx, ref)
+	}
+	key, ok := dockerDigestLookupCacheKey(ref)
+	if !ok {
+		return l.resolver.ResolveDigest(ctx, ref)
+	}
+
+	l.mu.Lock()
+	if entry, ok := l.digests[key]; ok {
+		l.mu.Unlock()
+		return entry.digest, entry.err
+	}
+	if call, ok := l.inflight[key]; ok {
+		l.mu.Unlock()
+		select {
+		case <-call.done:
+			return call.digest, call.err
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+	call := &dockerDigestCacheCall{done: make(chan struct{})}
+	l.inflight[key] = call
+	l.mu.Unlock()
+
+	digest, err := l.resolver.ResolveDigest(ctx, ref)
+
+	l.mu.Lock()
+	call.digest = digest
+	call.err = err
+	l.digests[key] = dockerDigestCacheEntry{digest: digest, err: err}
+	delete(l.inflight, key)
+	close(call.done)
+	l.mu.Unlock()
+	return digest, err
+}
+
+func dockerDigestLookupCacheKey(ref dockerimage.Ref) (dockerDigestCacheKey, bool) {
+	if ref.Registry == "" || ref.Repository == "" || ref.Reference == "" {
+		return dockerDigestCacheKey{}, false
+	}
+	return dockerDigestCacheKey{
+		registry:   ref.Registry,
+		repository: ref.Repository,
+		reference:  ref.Reference,
+	}, true
+}
+
+func resolveDockerImageStatusWithDigestResolver(ctx context.Context, p listAllPackage, localDigests map[string]string, registryClient dockerDigestResolver) packageLatestStatus {
 	ref, ok := dockerRefFromListAllPackage(p)
 	if !ok {
 		return packageLatestStatus{Latest: "unknown", Update: "unknown", Unknown: true}
@@ -525,7 +614,9 @@ func resolveDockerImageStatusWithLocalDigests(ctx context.Context, p listAllPack
 	if strings.HasPrefix(p.Name, "local/") {
 		return packageLatestStatus{Latest: "-", Update: "local"}
 	}
-	registryClient := newDockerRegistryClientFunc(nil)
+	if registryClient == nil {
+		registryClient = newDockerRegistryClientFunc(nil)
+	}
 	if ref.Digest {
 		tagRef, ok := dockerTagRefFromPinnedRef(ref)
 		if !ok {
@@ -631,6 +722,186 @@ func printListAllPackageReport(report listAllPackageReport) {
 		plural.Count(report.Unknown, "unknown", "unknown"))
 }
 
+func writeListAllSecurityFindings(w io.Writer, result *domain.ScanResult, failOn domain.Severity, report listAllPackageReport, noColor bool) error {
+	if _, err := fmt.Fprintln(w, "Security Findings"); err != nil {
+		return err
+	}
+	if result == nil {
+		_, err := fmt.Fprintln(w, "\nScan did not complete; findings were not evaluated.")
+		return err
+	}
+	if len(result.Findings) == 0 {
+		tw := scanner.NewTableWriter(noColor, failOn)
+		return tw.Write(w, result)
+	}
+	if err := writeListAllTerminalFindingStatusMessages(w, result); err != nil {
+		return err
+	}
+
+	sections := listAllFindingSections(listAllFindingRows(result.Findings, report.Rows))
+	for _, section := range sections {
+		if _, err := fmt.Fprintf(w, "\n%s (%d)\n", termtext.Sanitize(section.Title), len(section.Findings)); err != nil {
+			return err
+		}
+		if err := writeListAllTerminalFindingTable(w, section.Findings, noColor); err != nil {
+			return err
+		}
+	}
+	return writeListAllTerminalFindingSummary(w, result, failOn)
+}
+
+func writeListAllTerminalFindingStatusMessages(w io.Writer, result *domain.ScanResult) error {
+	if result == nil {
+		return nil
+	}
+	if message := scanner.LocalDBStaleWarning(result); message != "" {
+		if _, err := fmt.Fprintf(w, "\n!! ATTENTION: %s\n", message); err != nil {
+			return err
+		}
+	}
+
+	if statusMessage := listAllOperationalStatusForResult(result); statusMessage != "" {
+		_, err := fmt.Fprintf(w, "\n%s\n", termtext.Sanitize(statusMessage))
+		return err
+	}
+	if result.FeedStatus == string(domain.ScanFeedStatusDegraded) {
+		_, err := fmt.Fprintln(w, "\nWARN  "+scanner.DegradedFeedStatusWarning(result.Mode))
+		return err
+	}
+	return nil
+}
+
+func writeListAllTerminalFindingTable(w io.Writer, rows []listAllFindingRow, noColor bool) error {
+	terminalRows := make([]listAllFindingRow, 0, len(rows))
+	maxSeverity, maxPackage, maxAdvisory, maxFinding := 8, 7, 8, 7
+	for _, row := range rows {
+		row = sanitizeListAllTerminalFindingRow(row)
+		terminalRows = append(terminalRows, row)
+		maxSeverity = maxInt(maxSeverity, len(row.Severity))
+		maxPackage = maxInt(maxPackage, len(row.Package))
+		maxAdvisory = maxInt(maxAdvisory, len(row.Advisory))
+		maxFinding = maxInt(maxFinding, len(row.Title))
+	}
+
+	gap := "  "
+	headerFormat := fmt.Sprintf("%%-%ds%s%%-%ds%s%%-%ds%s%%-%ds%s%%s\n",
+		maxSeverity, gap, maxPackage, gap, maxAdvisory, gap, maxFinding, gap)
+	if _, err := fmt.Fprintf(w, headerFormat, "SEVERITY", "PACKAGE", "ADVISORY", "FINDING", "ACTION"); err != nil {
+		return err
+	}
+
+	rowFormat := fmt.Sprintf("%%-%ds%s%%-%ds%s%%-%ds%s%%s\n",
+		maxPackage, gap, maxAdvisory, gap, maxFinding, gap)
+	for _, row := range terminalRows {
+		if err := writeListAllTerminalFindingRow(w, row, rowFormat, maxSeverity, noColor); err != nil {
+			return err
+		}
+		if details := listAllTerminalFindingDetails(row); details != "" {
+			if _, err := fmt.Fprintf(w, "  Details: %s\n", details); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func writeListAllTerminalFindingRow(w io.Writer, row listAllFindingRow, rowFormat string, severityWidth int, noColor bool) error {
+	severity := listAllTerminalSeverity(domain.Severity(row.Severity), noColor)
+	pad := ""
+	if diff := severityWidth - len(row.Severity); diff > 0 {
+		pad = strings.Repeat(" ", diff)
+	}
+	if _, err := fmt.Fprintf(w, "%s%s  ", severity, pad); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintf(w, rowFormat, row.Package, row.Advisory, row.Title, row.Action)
+	return err
+}
+
+func listAllTerminalSeverity(severity domain.Severity, noColor bool) string {
+	text := string(severity)
+	if noColor {
+		return text
+	}
+	switch severity {
+	case domain.SeverityCritical:
+		return "\033[1m\033[31m" + text + "\033[0m"
+	case domain.SeverityHigh:
+		return "\033[31m" + text + "\033[0m"
+	case domain.SeverityMedium:
+		return "\033[33m" + text + "\033[0m"
+	case domain.SeverityLow:
+		return "\033[36m" + text + "\033[0m"
+	default:
+		return "\033[37m" + text + "\033[0m"
+	}
+}
+
+func writeListAllTerminalFindingSummary(w io.Writer, result *domain.ScanResult, failOn domain.Severity) error {
+	blocking := 0
+	for _, finding := range result.Findings {
+		if domain.FindingBlocks(finding, failOn) {
+			blocking++
+		}
+	}
+	if blocking == 0 && result.FindingsBlocking && len(result.Findings) > 0 {
+		blocking = 1
+	}
+	_, err := fmt.Fprintf(w, "\nFound %s (%s) in %s\n",
+		plural.Count(result.FindingsCount, "finding", "findings"),
+		plural.Count(blocking, "blocking", "blocking"),
+		plural.Count(result.PackagesScanned, "package", "packages"))
+	return err
+}
+
+func sanitizeListAllTerminalFindingRow(row listAllFindingRow) listAllFindingRow {
+	return listAllFindingRow{
+		Severity:      termtext.Sanitize(row.Severity),
+		SeverityClass: row.SeverityClass,
+		Type:          termtext.Sanitize(row.Type),
+		RiskType:      termtext.Sanitize(row.RiskType),
+		Package:       termtext.Sanitize(row.Package),
+		Version:       termtext.Sanitize(row.Version),
+		Ecosystem:     termtext.Sanitize(row.Ecosystem),
+		Advisory:      termtext.Sanitize(row.Advisory),
+		AdvisoryURL:   row.AdvisoryURL,
+		Title:         termtext.Sanitize(row.Title),
+		FixedVersion:  termtext.Sanitize(row.FixedVersion),
+		Action:        termtext.Sanitize(row.Action),
+		Source:        termtext.Sanitize(row.Source),
+		Scope:         termtext.Sanitize(row.Scope),
+		Relation:      termtext.Sanitize(row.Relation),
+		Via:           termtext.Sanitize(row.Via),
+		Flags:         termtext.Sanitize(row.Flags),
+	}
+}
+
+func listAllTerminalFindingDetails(row listAllFindingRow) string {
+	pairs := []struct {
+		label string
+		value string
+	}{
+		{"Action", row.Action},
+		{"Type", row.Type},
+		{"Risk", row.RiskType},
+		{"Installed", row.Version},
+		{"Ecosystem", row.Ecosystem},
+		{"Source", row.Source},
+		{"Scope", row.Scope},
+		{"Relation", row.Relation},
+		{"Fixed Version", row.FixedVersion},
+	}
+	parts := make([]string, 0, len(pairs))
+	for _, pair := range pairs {
+		value := strings.TrimSpace(pair.value)
+		if value == "" {
+			value = "-"
+		}
+		parts = append(parts, pair.label+": "+value)
+	}
+	return strings.Join(parts, "; ")
+}
+
 func sanitizeListAllTerminalRow(r listAllRow) listAllRow {
 	return listAllRow{
 		Name:       termtext.Sanitize(r.Name),
@@ -675,70 +946,18 @@ func maxInt(a, b int) int {
 	return b
 }
 
-var listAllHTMLTemplate = sync.OnceValue(func() *template.Template {
-	return template.Must(template.New("list-all").Funcs(template.FuncMap{
-		"count": plural.Count,
-	}).Parse(listAllHTML))
-})
-
-func writeListAllHTML(path, title string, failOn domain.Severity, result *domain.ScanResult, packages listAllPackageReport) error {
-	if err := ensureOutputDir(path); err != nil {
-		return fmt.Errorf("prepare HTML output: %w", err)
-	}
-	if strings.TrimSpace(title) == "" {
-		title = "Packmon List-All Report"
-	}
-	sourceRoot := packages.Target
-	reportType := "Packmon List-All Report"
-	documentTitle := title
-	if title != reportType {
-		documentTitle = title + " - " + reportType
-	}
-	rep := struct {
-		DocumentTitle string
-		Title         string
-		ReportType    string
-		Mode          string
-		PackageRows   []listAllHTMLPackageRow
-		Attention     []listAllHTMLPackageRow
-		PackageInfo   listAllPackageReport
-		ScopeSummary  []listAllScopeSummary
-		Findings      []listAllFindingSection
-		Sources       []listAllSourceRow
-		Status        string
-		Warnings      []string
-		FailOn        string
-	}{
-		DocumentTitle: documentTitle,
-		Title:         title,
-		ReportType:    reportType,
-		Mode:          result.Mode,
-		PackageInfo:   packages,
-		ScopeSummary:  listAllScopeSummaries(packages),
-		Sources:       packages.Sources,
-		Status:        listAllOperationalStatusForResult(result),
-		Warnings:      listAllHTMLWarnings(result, packages.Warnings),
-		FailOn:        string(failOn),
-	}
-	rep.PackageRows = listAllHTMLPackageRows(packages.Rows, result.Findings)
-	rep.Attention = listAllHTMLAttentionRows(rep.PackageRows)
-	rep.PackageInfo = listAllHTMLPackageInfo(rep.PackageInfo, rep.PackageRows)
-	if len(rep.Sources) == 0 {
-		rep.Sources = listAllCheckedInventorySources(packages.Rows)
-	}
-	rep.PackageInfo.Target = htmlReportDisplayTarget(sourceRoot)
-	rep.Sources = listAllHTMLDisplaySources(sourceRoot, rep.Sources)
-	packageMetadata := listAllRowsByPackage(packages.Rows)
-	findingRows := make([]listAllFindingRow, 0, len(result.Findings))
-	for _, f := range result.Findings {
-		meta := packageMetadata[listAllFindingKey(f)]
+func listAllFindingRows(findings []domain.Finding, packageRows []listAllRow) []listAllFindingRow {
+	rows := make([]listAllFindingRow, 0, len(findings))
+	for _, f := range findings {
+		meta := listAllFindingMetadata(packageRows, f)
 		severity := domain.NormalizeFindingSeverity(f)
-		findingRows = append(findingRows, listAllFindingRow{
+		row := listAllFindingRow{
 			Severity:      string(severity),
 			SeverityClass: listAllSeverityClass(severity),
 			Type:          listAllFindingTypeLabel(f),
 			RiskType:      listAllFindingRiskType(f),
 			Package:       listAllFindingPackageLabel(f),
+			Version:       f.Version,
 			Ecosystem:     string(f.Ecosystem),
 			Advisory:      listAllAdvisoryLabel(f),
 			AdvisoryURL:   listAllAdvisoryURL(f),
@@ -749,214 +968,44 @@ func writeListAllHTML(path, title string, failOn domain.Severity, result *domain
 			Relation:      meta.Relation,
 			Via:           meta.Via,
 			Flags:         meta.Flags,
-		})
+		}
+		row.Action = listAllFindingAction(row)
+		rows = append(rows, row)
 	}
-	rep.Findings = listAllHTMLFindingSections(findingRows)
-
-	file, err := ioutils.OpenPrivateFile(path)
-	if err != nil {
-		return fmt.Errorf("html: create file %s: %w", path, err)
-	}
-	if err := listAllHTMLTemplate().Execute(file, rep); err != nil {
-		closeSilently(file)
-		return fmt.Errorf("html: render list-all report: %w", err)
-	}
-	return file.Close()
+	return rows
 }
 
-func listAllHTMLPackageRows(rows []listAllRow, findings []domain.Finding) []listAllHTMLPackageRow {
-	findingStatuses := listAllHTMLFindingStatuses(findings)
-	vulnSet := listAllVulnerabilityFindingKeys(findings)
-
-	out := make([]listAllHTMLPackageRow, 0, len(rows))
+func listAllFindingMetadata(rows []listAllRow, finding domain.Finding) listAllRow {
+	key := listAllFindingKey(finding)
+	var match listAllRow
 	for _, row := range rows {
-		_, hasVulnerability := vulnSet[row.Ecosystem+"/"+row.Name+"@"+row.Installed]
-		vuln := row.Vuln
-		if hasVulnerability {
-			vuln = "yes"
+		if listAllRowFindingKey(row) == key {
+			match = row
 		}
-		status := listAllHTMLPackageStatus(row, findingStatuses)
-		installedCopy := listAllHTMLCopyValue(row.Installed)
-		installedLabel, installedMessage := listAllHTMLCopyContext("installed", row)
-		latestLabel, latestMessage := listAllHTMLCopyContext("latest", row)
-		out = append(out, listAllHTMLPackageRow{
-			Name:                 row.Name,
-			Installed:            listAllHTMLCopyDisplay(row.Installed, installedCopy),
-			InstalledCopy:        installedCopy,
-			InstalledCopyLabel:   installedLabel,
-			InstalledCopyMessage: installedMessage,
-			Latest:               listAllHTMLCopyDisplay(row.Latest, row.LatestCopy),
-			LatestCopy:           strings.TrimSpace(row.LatestCopy),
-			LatestCopyLabel:      latestLabel,
-			LatestCopyMessage:    latestMessage,
-			Status:               status,
-			StatusClass:          listAllHTMLStatusClass(status),
-			Ecosystem:            row.Ecosystem,
-			Source:               listAllHTMLPackageSource(row),
-			Scope:                row.Scope,
-			Relation:             row.Relation,
-			Technology:           row.Technology,
-			Via:                  row.Via,
-			Flags:                row.Flags,
-			Vuln:                 vuln,
-			VulnClass:            listAllHTMLVulnClass(vuln),
-		})
 	}
-	return out
+	return match
 }
 
-func listAllVulnerabilityFindingKeys(findings []domain.Finding) map[string]struct{} {
-	keys := make(map[string]struct{})
-	for _, finding := range findings {
-		if finding.Type == domain.FindingTypeVulnerability {
-			keys[listAllFindingKey(finding)] = struct{}{}
+func listAllFindingAction(row listAllFindingRow) string {
+	if fixed := strings.TrimSpace(row.FixedVersion); fixed != "" {
+		return "Fix " + fixed
+	}
+	switch row.Type {
+	case "Malicious":
+		return "Remove package"
+	case "Supply-chain":
+		if strings.EqualFold(strings.TrimSpace(row.RiskType), "Malware history") {
+			return "Review history"
 		}
-	}
-	return keys
-}
-
-func listAllHTMLPackageInfo(info listAllPackageReport, rows []listAllHTMLPackageRow) listAllPackageReport {
-	info.WithUpdates = 0
-	info.Vulnerable = 0
-	info.Unknown = 0
-	for _, row := range rows {
-		if row.Status == "Update available" {
-			info.WithUpdates++
-		}
-		if strings.EqualFold(strings.TrimSpace(row.Vuln), "yes") {
-			info.Vulnerable++
-		}
-		if row.Status == "Unknown" {
-			info.Unknown++
-		}
-	}
-	return info
-}
-
-func listAllHTMLFindingStatuses(findings []domain.Finding) map[string]listAllHTMLFindingState {
-	statuses := make(map[string]listAllHTMLFindingState)
-	for _, finding := range findings {
-		status, rank := listAllHTMLFindingStatus(finding)
-		if status == "" {
-			continue
-		}
-		key := listAllFindingKey(finding)
-		state := listAllHTMLFindingState{
-			Status:          status,
-			Rank:            rank,
-			HasFixedVersion: strings.TrimSpace(finding.FixedVersion) != "",
-		}
-		existing, ok := statuses[key]
-		if !ok || rank > existing.Rank {
-			statuses[key] = state
-			continue
-		}
-		if rank == existing.Rank && state.HasFixedVersion {
-			existing.HasFixedVersion = true
-			statuses[key] = existing
-		}
-	}
-	return statuses
-}
-
-func listAllHTMLFindingStatus(finding domain.Finding) (string, int) {
-	if domain.FindingIsInformational(finding) {
-		return "Reputation info", 5
-	}
-	if finding.Type == domain.FindingTypeMalicious {
-		return "Malicious", 50
-	}
-	if strings.EqualFold(strings.TrimSpace(finding.RiskType), "removed_package") {
-		return "Removed", 40
-	}
-	switch finding.Type {
-	case domain.FindingTypeSupplyChainRisk:
-		return "Supply-chain risk", 30
-	case domain.FindingTypeLifecycle:
-		return "Lifecycle", 20
-	case domain.FindingTypeVulnerability:
-		return "Vulnerable", 10
-	}
-	if strings.TrimSpace(finding.AdvisoryID) != "" || strings.TrimSpace(finding.Source) != "" {
-		return "Vulnerable", 10
-	}
-	return "", 0
-}
-
-func listAllHTMLAttentionRows(rows []listAllHTMLPackageRow) []listAllHTMLPackageRow {
-	out := make([]listAllHTMLPackageRow, 0)
-	for _, row := range rows {
-		if row.Status == "Update available" ||
-			row.Status == "Malicious" ||
-			row.Status == "Removed" ||
-			row.Status == "Supply-chain risk" ||
-			row.Status == "Lifecycle" ||
-			row.Status == "Reputation info" ||
-			row.Status == "Vulnerable" ||
-			strings.EqualFold(strings.TrimSpace(row.Vuln), "yes") {
-			out = append(out, row)
-		}
-	}
-	return out
-}
-
-func listAllHTMLPackageStatus(row listAllRow, findingStatuses map[string]listAllHTMLFindingState) string {
-	if state := findingStatuses[row.Ecosystem+"/"+row.Name+"@"+row.Installed]; state.Status != "" {
-		if state.Status == "Vulnerable" && listAllHTMLVulnerabilityHasUpdatePath(row, state) {
-			return "Update available"
-		}
-		return state.Status
-	}
-	if strings.EqualFold(strings.TrimSpace(row.Update), "yes") {
-		return "Update available"
-	}
-	if strings.EqualFold(strings.TrimSpace(row.Update), "local") {
-		return "Local build"
-	}
-	if strings.EqualFold(strings.TrimSpace(row.Update), "pinned") {
-		return "Digest pinned"
-	}
-	if strings.EqualFold(strings.TrimSpace(row.Update), "unknown") ||
-		strings.EqualFold(strings.TrimSpace(row.Latest), "unknown") {
-		return "Unknown"
-	}
-	return "Up-to-Date"
-}
-
-func listAllHTMLVulnerabilityHasUpdatePath(row listAllRow, state listAllHTMLFindingState) bool {
-	if strings.EqualFold(strings.TrimSpace(row.Update), "yes") || state.HasFixedVersion {
-		return true
-	}
-	if !strings.EqualFold(strings.TrimSpace(row.Ecosystem), string(domain.EcosystemGitHubActions)) {
-		return false
-	}
-	return listAllHTMLKnownLatestDiffers(row)
-}
-
-func listAllHTMLKnownLatestDiffers(row listAllRow) bool {
-	latest := strings.TrimSpace(row.Latest)
-	installed := strings.TrimSpace(row.Installed)
-	if latest == "" || installed == "" || latest == "-" || installed == "-" ||
-		strings.EqualFold(latest, "unknown") {
-		return false
-	}
-	return !strings.EqualFold(latest, installed)
-}
-
-func listAllHTMLPackageSource(row listAllRow) string {
-	source := strings.TrimSpace(row.Source)
-	if source != "" {
-		return source
-	}
-	switch {
-	case strings.EqualFold(strings.TrimSpace(row.Ecosystem), string(domain.EcosystemDocker)):
-		return "docker"
-	case listAllRowLooksLikeSBOM(row):
-		return "sbom"
-	case strings.TrimSpace(row.LockFile) != "":
-		return "lockfile"
+		return "Review package"
+	case "Lifecycle":
+		return "Review lifecycle"
+	case "Reputation info":
+		return "Review history"
+	case "Vulnerability":
+		return "Review advisory"
 	default:
-		return "-"
+		return "Review finding"
 	}
 }
 
@@ -982,15 +1031,6 @@ func listAllCheckedInventorySources(rows []listAllRow) []listAllSourceRow {
 		return out[i].Path < out[j].Path
 	})
 	return out
-}
-
-func listAllHTMLDisplaySources(root string, sources []listAllSourceRow) []listAllSourceRow {
-	out := make([]listAllSourceRow, 0, len(sources))
-	for _, source := range sources {
-		source.Path = htmlReportDisplaySourcePath(root, source.Path)
-		out = append(out, source)
-	}
-	return listAllSortAndDedupSources(out)
 }
 
 func listAllExplicitSBOMSources(settings scanSettings) []listAllSourceRow {
@@ -1086,65 +1126,6 @@ func listAllRowLooksLikeSBOM(row listAllRow) bool {
 		strings.HasSuffix(path, ".spdx")
 }
 
-func listAllRowsByPackage(rows []listAllRow) map[string]listAllRow {
-	out := make(map[string]listAllRow, len(rows))
-	for _, row := range rows {
-		out[row.Ecosystem+"/"+row.Name+"@"+row.Installed] = row
-	}
-	return out
-}
-
-func listAllHTMLCopyDisplay(display, copyValue string) string {
-	copyValue = strings.TrimSpace(copyValue)
-	if copyValue == "" {
-		return display
-	}
-	if strings.TrimSpace(display) == "" || strings.EqualFold(strings.TrimSpace(display), copyValue) {
-		return shortDigest(copyValue)
-	}
-	return display
-}
-
-func listAllHTMLCopyValue(value string) string {
-	value = strings.TrimSpace(value)
-	if strings.HasPrefix(value, "sha256:") && len(value) > len("sha256:")+12 {
-		return value
-	}
-	return ""
-}
-
-func listAllHTMLCopyContext(field string, row listAllRow) (string, string) {
-	field = strings.TrimSpace(field)
-	if field == "" {
-		field = "value"
-	}
-	packageName := strings.TrimSpace(row.Name)
-	if packageName == "" {
-		packageName = "package"
-	}
-	installed := strings.TrimSpace(row.Installed)
-	if installed == "" {
-		installed = "unknown version"
-	}
-	label := fmt.Sprintf("Copy full %s value for %s %s", field, packageName, installed)
-	message := fmt.Sprintf("Copied full %s value for %s", field, packageName)
-	return label, message
-}
-
-func listAllHTMLStatusClass(status string) string {
-	if status == "Update available" {
-		return "status-update"
-	}
-	return ""
-}
-
-func listAllHTMLVulnClass(vuln string) string {
-	if strings.EqualFold(strings.TrimSpace(vuln), "yes") {
-		return "vuln-yes"
-	}
-	return ""
-}
-
 func listAllSeverityClass(severity domain.Severity) string {
 	switch severity {
 	case domain.SeverityCritical:
@@ -1162,6 +1143,10 @@ func listAllSeverityClass(severity domain.Severity) string {
 
 func listAllFindingKey(f domain.Finding) string {
 	return string(f.Ecosystem) + "/" + f.Name + "@" + f.Version
+}
+
+func listAllRowFindingKey(row listAllRow) string {
+	return row.Ecosystem + "/" + row.Name + "@" + row.Installed
 }
 
 func listAllScopeSummaries(report listAllPackageReport) []listAllScopeSummary {
@@ -1205,7 +1190,7 @@ func listAllScopeSummaries(report listAllPackageReport) []listAllScopeSummary {
 func listAllOperationalStatus(status string) string {
 	status = strings.TrimSpace(status)
 	switch status {
-	case "", "healthy", "degraded":
+	case "", string(domain.ScanFeedStatusHealthy), string(domain.ScanFeedStatusDegraded):
 		return ""
 	default:
 		return status
@@ -1230,19 +1215,27 @@ var listAllFindingSectionDefs = []struct {
 	{"Malicious", "Malicious", "s-mal"},
 	{"Supply-chain", "Supply-Chain / EOL", "s-sce"},
 	{"Vulnerability", "Vulnerabilities", "s-vuln"},
-	{"Lifecycle", "Lifecycle warnings", "s-life"},
+	{"Lifecycle", "Lifecycle Findings", "s-life"},
 	{"Reputation info", "Reputation info", "s-life"},
 }
 
-func listAllHTMLFindingSections(rows []listAllFindingRow) []listAllFindingSection {
+func listAllFindingSections(rows []listAllFindingRow) []listAllFindingSection {
 	if len(rows) == 0 {
 		return nil
 	}
 	byType := make(map[string][]listAllFindingRow)
+	knownTypes := make(map[string]struct{}, len(listAllFindingSectionDefs))
+	for _, def := range listAllFindingSectionDefs {
+		knownTypes[def.label] = struct{}{}
+	}
 	var other []listAllFindingRow
 	for _, row := range rows {
 		label := strings.TrimSpace(row.Type)
 		if label == "" {
+			other = append(other, row)
+			continue
+		}
+		if _, ok := knownTypes[label]; !ok {
 			other = append(other, row)
 			continue
 		}
@@ -1256,11 +1249,21 @@ func listAllHTMLFindingSections(rows []listAllFindingRow) []listAllFindingSectio
 			continue
 		}
 		sortListAllFindingRows(findings)
-		sections = append(sections, listAllFindingSection{Title: def.title, Class: def.class, Findings: findings})
+		sections = append(sections, listAllFindingSection{
+			Title:     def.title,
+			Class:     def.class,
+			AriaLabel: def.title + " security findings table",
+			Findings:  findings,
+		})
 	}
 	if len(other) > 0 {
 		sortListAllFindingRows(other)
-		sections = append(sections, listAllFindingSection{Title: "Other findings", Class: "s-other", Findings: other})
+		sections = append(sections, listAllFindingSection{
+			Title:     "Other findings",
+			Class:     "s-other",
+			AriaLabel: "Other findings security findings table",
+			Findings:  other,
+		})
 	}
 	return sections
 }
@@ -1332,7 +1335,7 @@ func listAllRiskTypeLabel(risk string) string {
 		return "Known vulnerability"
 	case "malware":
 		return "Malware"
-	case "malware_history":
+	case domain.RiskTypeMalwareHistory:
 		return "Malware history"
 	case "removed_package":
 		return "Removed package"
@@ -1383,44 +1386,8 @@ func humanizeListAllToken(value string) string {
 	return strings.Join(parts, " ")
 }
 
-func listAllHTMLWarnings(result *domain.ScanResult, inventoryWarnings []string) []string {
-	if result == nil {
-		return appendListAllInventoryWarnings(nil, inventoryWarnings)
-	}
-	var warnings []string
-	if strings.TrimSpace(result.FeedStatus) == "degraded" {
-		warnings = append(warnings, scanner.DegradedFeedStatusWarning(result.Mode))
-	}
-	if result.Mode == "local" && result.DBStale {
-		if result.DBAgeDays != nil {
-			warnings = append(warnings, fmt.Sprintf("Local database last synced %s ago. Results may be incomplete. Update with: packmon db sync.", plural.Count(*result.DBAgeDays, "day", "days")))
-		} else {
-			warnings = append(warnings, "Local database is stale. Results may be incomplete. Update with: packmon db sync.")
-		}
-	}
-	for _, parseErr := range result.ParseErrors {
-		parseErr = strings.TrimSpace(parseErr)
-		if parseErr == "" {
-			continue
-		}
-		warnings = append(warnings, "Some dependency inventory could not be evaluated: "+parseErr)
-	}
-	return appendListAllInventoryWarnings(warnings, inventoryWarnings)
-}
-
-func appendListAllInventoryWarnings(warnings, inventoryWarnings []string) []string {
-	for _, warning := range inventoryWarnings {
-		warning = strings.TrimSpace(warning)
-		if warning == "" {
-			continue
-		}
-		warnings = append(warnings, "Some requested package inventory could not be listed: "+warning)
-	}
-	return warnings
-}
-
 func listAllFindingTitle(f domain.Finding) string {
-	if strings.EqualFold(strings.TrimSpace(f.RiskType), "malware_history") {
+	if strings.EqualFold(strings.TrimSpace(f.RiskType), domain.RiskTypeMalwareHistory) {
 		return "ReversingLabs: malware incident history"
 	}
 	return f.Title
@@ -1433,209 +1400,3 @@ func listAllAdvisoryLabel(f domain.Finding) string {
 func listAllAdvisoryURL(f domain.Finding) string {
 	return findinglinks.AdvisoryURL(f)
 }
-
-const listAllHTML = `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{.DocumentTitle}}</title>
-<style>
-:root{--bg:#0d1117;--panel:#161b22;--border:#30363d;--fg:#c9d1d9;--heading:#e6edf3;--dim:#8b949e;--crit:#ff7b72;--high:#ffa657;--sev-low:#56d4c4;--success:#7ee787;--success-bg:#0f2d2a;--success-border:#238636;--warning:#ffa657;--warning-bg:#322717;--link:#58a6ff;}
-*{box-sizing:border-box;}
-body{margin:0;background:var(--bg);color:var(--fg);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:14px;line-height:1.5;}
-.wrap{max-width:1600px;margin:0 auto;padding:28px 20px 48px;}
-h1{font-size:22px;margin:0;color:var(--heading);overflow-wrap:anywhere;word-break:break-word;}
-h2{font-size:16px;margin:26px 0 10px;color:var(--heading);border-bottom:1px solid var(--border);padding-bottom:5px;}
-.meta{color:var(--dim);font-size:13px;margin:4px 0 18px;}
-.summary{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 22px;}
-.badge{border:1px solid var(--border);border-radius:6px;padding:3px 11px;font-size:13px;color:var(--dim);}
-.warn{color:var(--warning);border-color:var(--warning);}
-.ok{color:var(--success);border-color:var(--success);}
-.bad{color:var(--crit);border-color:var(--crit);}
-.table-scroll{overflow-x:auto;border:1px solid var(--border);border-radius:6px;background:var(--panel);}
-.table-scroll:focus{outline:3px solid var(--link);outline-offset:3px;}
-table{width:100%;border-collapse:collapse;background:var(--panel);}
-.package-table{min-width:1500px;table-layout:auto;}
-.findings-table{table-layout:auto;min-width:1180px;}
-th,td{padding:8px 10px;border-bottom:1px solid var(--border);text-align:left;vertical-align:top;}
-th{color:var(--heading);font-size:12px;text-transform:uppercase;}
-td{word-break:break-word;overflow-wrap:anywhere;}
-.name{min-width:260px;word-break:break-word;overflow-wrap:anywhere;}
-.installed,.version{width:260px;min-width:260px;overflow-wrap:anywhere;word-break:break-word;}
-.short{white-space:nowrap;min-width:90px;}
-.nowrap{white-space:nowrap;}
-.source{white-space:nowrap;min-width:105px;}
-.package-status{white-space:nowrap;min-width:110px;}
-.status-update{color:var(--high);font-weight:700;}
-.vuln-col{text-align:center;white-space:nowrap;min-width:64px;}
-.vuln-yes{color:var(--crit);font-weight:700;}
-.sev{display:inline-block;border:1px solid var(--border);border-radius:4px;padding:1px 7px;font-weight:700;line-height:1.4;}
-.sev-critical{color:var(--crit);border-color:var(--crit);}
-.sev-high{color:var(--high);border-color:var(--high);}
-.sev-medium{color:var(--warning);border-color:var(--warning);}
-.sev-low{color:var(--sev-low);border-color:var(--sev-low);}
-.sev-unknown{color:var(--dim);}
-.findings-table .finding-package{min-width:220px;white-space:nowrap;overflow-wrap:normal;word-break:normal;}
-.findings-table .finding-advisory{min-width:190px;white-space:nowrap;overflow-wrap:normal;word-break:normal;}
-.findings-table .finding-advisory a{white-space:nowrap;overflow-wrap:normal;word-break:normal;}
-.finding-title{min-width:320px;white-space:normal;overflow-wrap:break-word;word-break:normal;}
-.finding-fixed{min-width:120px;white-space:nowrap;overflow-wrap:normal;word-break:normal;}
-.finding-section{margin:0 0 18px;}
-.finding-section h3{font-size:14px;margin:14px 0 8px;color:var(--heading);}
-.finding-section h3.s-mal{color:var(--crit);}
-.finding-section h3.s-sce{color:var(--warning);}
-.finding-section h3.s-vuln{color:var(--heading);}
-.finding-section h3.s-life{color:var(--link);}
-.finding-section .count{color:var(--dim);font-weight:400;}
-a{color:var(--link);text-decoration:none;overflow-wrap:anywhere;word-break:break-word;}
-a:hover{text-decoration:underline;}
-.copy-value{white-space:nowrap;}
-.copy-btn{margin-left:8px;border:1px solid var(--border);border-radius:4px;background:#21262d;color:var(--fg);font:inherit;font-size:12px;min-width:44px;min-height:32px;padding:5px 10px;cursor:pointer;}
-.copy-btn:hover{border-color:var(--link);color:var(--link);}
-.copy-btn.copy-failed{border-color:var(--crit);color:var(--crit);}
-.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;}
-.status{margin:18px 0;padding:14px 16px;background:#321820;border:1px solid var(--crit);border-radius:6px;color:var(--crit);font-size:15px;}
-.warning{margin:18px 0;padding:14px 16px;background:var(--warning-bg);border:1px solid var(--warning);border-radius:6px;color:var(--warning);font-size:15px;}
-.empty{margin:16px 0;padding:14px 16px;background:var(--success-bg);border:1px solid var(--success-border);border-radius:6px;color:var(--success);font-size:15px;}
-.source-list{margin:0;padding:0;list-style:none;border:1px solid var(--border);border-radius:6px;background:var(--panel);}
-.source-list li{display:flex;gap:10px;align-items:flex-start;padding:8px 10px;border-bottom:1px solid var(--border);}
-.source-list li:last-child{border-bottom:0;}
-.source-kind{flex:0 0 90px;color:var(--dim);text-transform:uppercase;font-size:12px;}
-.source-path{min-width:0;overflow-wrap:anywhere;word-break:break-word;}
-.meta,.footer{overflow-wrap:anywhere;word-break:break-word;}
-.footer{border-top:1px solid var(--border);margin-top:28px;padding-top:10px;color:var(--dim);font-size:12px;}
-@media (prefers-color-scheme: light){:root{--bg:#ffffff;--panel:#f6f8fa;--border:#d0d7de;--fg:#24292f;--heading:#111827;--dim:#57606a;--crit:#cf222e;--high:#9a6700;--sev-low:#0a7f74;--success:#116329;--success-bg:#dafbe1;--success-border:#2da44e;--warning:#9a6700;--warning-bg:#fff8c5;--link:#0969da;}}
-@media print{:root{--bg:#ffffff;--panel:#ffffff;--border:#8c959f;--fg:#111827;--heading:#000000;--dim:#424a53;--crit:#b42318;--high:#8a4600;--sev-low:#006d75;--success:#116329;--success-bg:#ffffff;--success-border:#116329;--warning:#8a4600;--warning-bg:#ffffff;--link:#0645ad;}body{background:#fff;color:#111827;}.wrap{max-width:none;padding:0;}.table-scroll{overflow:visible;border-color:var(--border);}table{min-width:0;}.status,.warning,.empty,.finding-section{break-inside:avoid;page-break-inside:avoid;background:#fff;}a{color:var(--link);}}
-</style>
-</head>
-<body>
-<div class="wrap">
-<h1>{{.Title}}</h1>
-<div class="meta">{{.ReportType}}{{if .Mode}} &middot; {{.Mode}} mode{{end}}{{if .PackageInfo.Target}} &middot; {{.PackageInfo.Target}}{{end}}{{if .PackageInfo.ScannedAt}} &middot; {{.PackageInfo.ScannedAt}}{{end}}</div>
-<div class="summary">
-<span class="badge">{{count (len .PackageRows) "package" "packages"}}</span>
-<span class="badge warn">{{count .PackageInfo.WithUpdates "with update" "with updates"}}</span>
-<span class="badge bad">{{count .PackageInfo.Vulnerable "vulnerability" "vulnerabilities"}}</span>
-<span class="badge">{{count .PackageInfo.Unknown "unknown" "unknown"}}</span>
-{{range .ScopeSummary}}<span class="badge">{{.Scope}} {{.Count}}</span>{{end}}
-</div>
-{{if .Status}}<div class="status">Scan did not complete: {{.Status}}</div>{{end}}
-{{range .Warnings}}<div class="warning">{{.}}</div>{{end}}
-<h2>Packages Needing Attention</h2>
-{{if .Attention}}
-<div class="table-scroll" tabindex="0" role="region" aria-label="Packages needing attention table">
-<table class="package-table">
-<thead><tr><th class="name">Package</th><th class="installed">Installed</th><th class="version">Latest</th><th class="package-status">Status</th><th class="short">Ecosystem</th><th class="source">Source</th><th class="short">Scope</th><th class="short">Relation</th><th class="short">Technology</th><th class="vuln-col">Vulnerability</th></tr></thead>
-<tbody>
-{{range .Attention}}<tr><td class="name">{{.Name}}</td><td class="installed">{{if .InstalledCopy}}<span class="copy-value">{{.Installed}}</span><button type="button" class="copy-btn" data-copy="{{.InstalledCopy}}" data-copy-label="{{.InstalledCopyLabel}}" data-copy-message="{{.InstalledCopyMessage}}" aria-label="{{.InstalledCopyLabel}}">Copy</button>{{else}}{{.Installed}}{{end}}</td><td class="version">{{if .LatestCopy}}<span class="copy-value">{{.Latest}}</span><button type="button" class="copy-btn" data-copy="{{.LatestCopy}}" data-copy-label="{{.LatestCopyLabel}}" data-copy-message="{{.LatestCopyMessage}}" aria-label="{{.LatestCopyLabel}}">Copy</button>{{else}}{{.Latest}}{{end}}</td><td class="package-status{{if .StatusClass}} {{.StatusClass}}{{end}}">{{.Status}}</td><td class="short">{{.Ecosystem}}</td><td class="source">{{.Source}}</td><td class="short">{{.Scope}}</td><td class="short">{{.Relation}}</td><td class="short">{{.Technology}}</td><td class="vuln-col{{if .VulnClass}} {{.VulnClass}}{{end}}">{{.Vuln}}</td></tr>{{end}}
-</tbody>
-</table>
-</div>
-{{else if and (not .Status) (not .Warnings)}}
-<div class="empty">No package status issues requiring attention.</div>
-{{end}}
-<h2>Security Findings</h2>
-{{if .Findings}}
-{{range .Findings}}
-<div class="finding-section">
-<h3 class="{{.Class}}">{{.Title}} <span class="count">({{len .Findings}})</span></h3>
-<div class="table-scroll" tabindex="0" role="region" aria-label="Security findings table">
-<table class="findings-table">
-<thead><tr><th class="short">Severity</th><th class="short">Type</th><th class="short">Risk</th><th class="finding-package">Package</th><th class="short">Ecosystem</th><th class="finding-advisory">Advisory</th><th class="finding-title">Finding</th><th class="finding-fixed">Fix Version</th><th class="short">Source</th><th class="short">Scope</th><th class="short">Relation</th></tr></thead>
-<tbody>
-{{range .Findings}}<tr><td class="short"><span class="sev {{.SeverityClass}}">{{.Severity}}</span></td><td class="short">{{.Type}}</td><td class="short">{{.RiskType}}</td><td class="finding-package">{{.Package}}</td><td class="short">{{.Ecosystem}}</td><td class="finding-advisory">{{if .AdvisoryURL}}<a href="{{.AdvisoryURL}}" target="_blank" rel="noopener" aria-label="{{.Advisory}} opens in a new tab">{{.Advisory}}<span aria-hidden="true"> &#8599;</span><span class="sr-only"> (opens in a new tab)</span></a>{{else}}{{.Advisory}}{{end}}</td><td class="finding-title">{{.Title}}</td><td class="finding-fixed">{{.FixedVersion}}</td><td class="short">{{.Source}}</td><td class="short">{{.Scope}}</td><td class="short">{{.Relation}}</td></tr>{{end}}
-</tbody>
-</table>
-</div>
-</div>
-{{end}}
-{{else if and (not .Status) (not .Warnings)}}
-<div class="empty">No security findings in {{count (len .PackageRows) "package" "packages"}}.</div>
-{{end}}
-<h2>All Packages</h2>
-{{if .PackageRows}}
-<div class="table-scroll" tabindex="0" role="region" aria-label="All packages table">
-<table class="package-table">
-<thead><tr><th class="name">Package</th><th class="installed">Installed</th><th class="version">Latest</th><th class="package-status">Status</th><th class="short">Ecosystem</th><th class="source">Source</th><th class="short">Scope</th><th class="short">Relation</th><th class="short">Technology</th><th class="vuln-col">Vulnerability</th></tr></thead>
-<tbody>
-{{range .PackageRows}}<tr><td class="name">{{.Name}}</td><td class="installed">{{if .InstalledCopy}}<span class="copy-value">{{.Installed}}</span><button type="button" class="copy-btn" data-copy="{{.InstalledCopy}}" data-copy-label="{{.InstalledCopyLabel}}" data-copy-message="{{.InstalledCopyMessage}}" aria-label="{{.InstalledCopyLabel}}">Copy</button>{{else}}{{.Installed}}{{end}}</td><td class="version">{{if .LatestCopy}}<span class="copy-value">{{.Latest}}</span><button type="button" class="copy-btn" data-copy="{{.LatestCopy}}" data-copy-label="{{.LatestCopyLabel}}" data-copy-message="{{.LatestCopyMessage}}" aria-label="{{.LatestCopyLabel}}">Copy</button>{{else}}{{.Latest}}{{end}}</td><td class="package-status{{if .StatusClass}} {{.StatusClass}}{{end}}">{{.Status}}</td><td class="short">{{.Ecosystem}}</td><td class="source">{{.Source}}</td><td class="short">{{.Scope}}</td><td class="short">{{.Relation}}</td><td class="short">{{.Technology}}</td><td class="vuln-col{{if .VulnClass}} {{.VulnClass}}{{end}}">{{.Vuln}}</td></tr>{{end}}
-</tbody>
-</table>
-</div>
-{{else}}
-{{if not .Warnings}}
-<div class="empty">No packages found.</div>
-{{end}}
-{{end}}
-{{if .Sources}}
-<h2>Checked Inventory Sources</h2>
-<ul class="source-list">
-{{range .Sources}}<li><span class="source-kind">{{.Kind}}</span><span class="source-path">{{.Path}}</span></li>{{end}}
-</ul>
-{{end}}
-<div class="footer">fail-on {{.FailOn}}</div>
-<div id="copy-status" class="sr-only" role="status" aria-live="polite"></div>
-</div>
-<script>
-(function(){
-  var status=document.getElementById('copy-status');
-  function announce(message){
-    if(status){status.textContent=message;}
-  }
-  function resetButton(button){
-    var label=button.getAttribute('data-copy-label') || 'Copy full value';
-    button.textContent='Copy';
-    button.classList.remove('copy-failed');
-    button.setAttribute('aria-label',label);
-  }
-  function showResult(button, ok){
-    var label=button.getAttribute('data-copy-label') || 'Copy full value';
-    var message=button.getAttribute('data-copy-message') || 'Copied full value';
-    if(ok){
-      button.textContent='Copied';
-      button.setAttribute('aria-label',message);
-      announce(message);
-    }else{
-      button.textContent='Copy failed';
-      button.classList.add('copy-failed');
-      button.setAttribute('aria-label','Copy failed. '+label);
-      announce('Copy failed. Use the visible value or try again.');
-    }
-    window.setTimeout(function(){resetButton(button);},1600);
-  }
-  function restoreFocus(button, previous){
-    if(button && button.isConnected && button.focus){
-      try{button.focus({preventScroll:true});}catch(_){button.focus();}
-      return;
-    }
-    if(previous && previous.focus){
-      try{previous.focus({preventScroll:true});}catch(_){previous.focus();}
-    }
-  }
-  function fallbackCopy(value,button){
-    var previous=document.activeElement;
-    var text=document.createElement('textarea');
-    text.value=value;
-    text.setAttribute('readonly','');
-    text.style.position='fixed';
-    text.style.opacity='0';
-    document.body.appendChild(text);
-    text.select();
-    try{return document.execCommand('copy') === true;}catch(_){return false;}finally{document.body.removeChild(text);restoreFocus(button,previous);}
-  }
-  document.addEventListener('click',function(event){
-    var button=event.target.closest ? event.target.closest('[data-copy]') : null;
-    if(!button){return;}
-    var value=button.getAttribute('data-copy') || '';
-    if(!value){return;}
-    if(navigator.clipboard && navigator.clipboard.writeText){
-      navigator.clipboard.writeText(value).then(function(){showResult(button,true);},function(){showResult(button,fallbackCopy(value,button));});
-      return;
-    }
-    showResult(button,fallbackCopy(value,button));
-  });
-})();
-</script>
-</body>
-</html>`

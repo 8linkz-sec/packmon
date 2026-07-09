@@ -27,8 +27,11 @@ func TestAdminSystemSettingsValidationBranches(t *testing.T) {
 	req.Body = http.NoBody
 	rec := httptest.NewRecorder()
 	handler.HandleSystemSettingsSave(rec, req)
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("bad CSRF status = %d, want 403", rec.Code)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("bad CSRF status = %d, want 303", rec.Code)
+	}
+	if got := rec.Header().Get("Location"); !strings.HasPrefix(got, "/admin/settings?") || !strings.Contains(got, "err=") {
+		t.Fatalf("bad CSRF Location = %q, want settings error redirect", got)
 	}
 
 	cases := []struct {

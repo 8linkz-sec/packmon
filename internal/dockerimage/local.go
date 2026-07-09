@@ -15,10 +15,13 @@ type ImageInspectRunner interface {
 type execInspectRunner struct{}
 
 func (execInspectRunner) Inspect(ctx context.Context, refs []string) ([]byte, error) {
-	args := make([]string, 0, len(refs)+2)
+	args := make([]string, 0, len(refs)+3)
 	args = append(args, "image", "inspect")
+	if len(refs) > 0 {
+		args = append(args, "--")
+	}
 	args = append(args, refs...)
-	cmd := exec.CommandContext(ctx, "docker", args...) // #nosec G204 -- fixed docker executable and subcommand; refs are argv-only, no shell is used.
+	cmd := exec.CommandContext(ctx, "docker", args...) // #nosec G204 -- fixed docker executable and subcommand; refs are argv-only after an option terminator, no shell is used.
 	cmd.WaitDelay = 2 * time.Second
 	return cmd.Output()
 }

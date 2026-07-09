@@ -120,27 +120,13 @@ version = "1.0.197"
 				if err == nil {
 					t.Fatal("expected error, got nil")
 				}
-				if len(pkgs) != tt.wantCount {
-					t.Fatalf("got %d packages, want %d (with error)", len(pkgs), tt.wantCount)
-				}
-				return
-			}
-			if err != nil {
+			} else if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			if len(pkgs) != tt.wantCount {
 				t.Fatalf("got %d packages, want %d", len(pkgs), tt.wantCount)
 			}
-			for _, pkg := range pkgs {
-				if pkg.Ecosystem != domain.EcosystemCargo {
-					t.Errorf("package %q ecosystem = %q, want %q", pkg.Name, pkg.Ecosystem, domain.EcosystemCargo)
-				}
-				if wantVer, ok := tt.wantPkgs[pkg.Name]; ok {
-					if pkg.Version != wantVer {
-						t.Errorf("package %q version = %q, want %q", pkg.Name, pkg.Version, wantVer)
-					}
-				}
-			}
+			assertPackages(t, pkgs, tt.wantPkgs, domain.EcosystemCargo)
 		})
 	}
 }

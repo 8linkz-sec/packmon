@@ -51,6 +51,7 @@ func (s *Store) RepairGHSAAffectedPackages(ctx context.Context) (int, error) {
 			CROSS JOIN LATERAL jsonb_array_elements(COALESCE(vs.raw_json->'affected', '[]'::jsonb))
 				WITH ORDINALITY AS aff(item, ordinality)
 			WHERE vs.source = 'ghsa'
+			  AND vs.raw_json IS NOT NULL
 		),
 		normalized AS (
 			SELECT

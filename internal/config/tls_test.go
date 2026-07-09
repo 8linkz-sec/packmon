@@ -177,6 +177,58 @@ func TestValidateTransportSecurity(t *testing.T) {
 	}
 }
 
+func TestValidateTransportSecurityRejectsInvalidTrustedProxiesWithTLS(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{
+			Mode:           ModeProduction,
+			TrustedProxies: []string{"nginx"},
+			TLS:            TLSConfig{CertFile: "server.crt", KeyFile: "server.key", MinVersion: "1.2"},
+		},
+	}
+
+	err := cfg.ValidateTransportSecurity()
+	if err == nil {
+		t.Fatal("ValidateTransportSecurity() error = nil, want trusted proxy validation error")
+	}
+	want := "config: invalid PACKMON_TRUSTED_PROXIES: invalid trusted proxy entry (want IP address or CIDR prefix)"
+	if err.Error() != want {
+		t.Fatalf("ValidateTransportSecurity() error = %q, want %q", err.Error(), want)
+	}
+}
+
+func TestValidateMetricsExposure(t *testing.T) {
+	tests := []struct {
+		name    string
+		mode    ServerMode
+		host    string
+		wantErr bool
+	}{
+		{name: "production default empty host ok", mode: ModeProduction, host: ""},
+		{name: "production localhost ok", mode: ModeProduction, host: "localhost"},
+		{name: "production ipv4 loopback ok", mode: ModeProduction, host: "127.0.0.1"},
+		{name: "production ipv6 loopback ok", mode: ModeProduction, host: "::1"},
+		{name: "production ipv4 wildcard errors", mode: ModeProduction, host: "0.0.0.0", wantErr: true},
+		{name: "production ipv6 wildcard errors", mode: ModeProduction, host: "::", wantErr: true},
+		{name: "production non-loopback hostname errors", mode: ModeProduction, host: "metrics.internal.example", wantErr: true},
+		{name: "development wildcard ok", mode: ModeDevelopment, host: "0.0.0.0"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{
+				Server:  ServerConfig{Mode: tt.mode},
+				Metrics: MetricsConfig{Host: tt.host, Port: 9090},
+			}
+			err := cfg.ValidateMetricsExposure()
+			if tt.wantErr && err == nil {
+				t.Fatal("ValidateMetricsExposure() error = nil, want error")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("ValidateMetricsExposure() error = %v", err)
+			}
+		})
+	}
+}
+
 func TestLoadReadsInsecureLocalHTTPOverride(t *testing.T) {
 	clearPackmonEnv(t)
 	t.Setenv("PACKMON_DB_PASSWORD", "secret")
@@ -196,6 +248,14 @@ func TestLoadReadsInsecureLocalHTTPOverride(t *testing.T) {
 }
 
 func TestServerConfigAddrBindsLocalHTTPOverrideToLoopback(t *testing.T) {
+	dev := ServerConfig{
+		Mode: ModeDevelopment,
+		Port: 8080,
+	}
+	if got := dev.Addr(); got != "127.0.0.1:8080" {
+		t.Fatalf("Addr() in development = %q, want loopback bind", got)
+	}
+
 	cfg := ServerConfig{
 		Mode:                   ModeProduction,
 		Port:                   8080,

@@ -11,16 +11,19 @@ import (
 	"sync"
 	"time"
 
-	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/auth"
 	"github.com/8linkz-sec/packmon/internal/logsafe"
+	"github.com/8linkz-sec/packmon/internal/netutil"
 	"github.com/8linkz-sec/packmon/internal/requestctx"
 )
 
 const (
-	apiKeyLastUsedQueueSize = 128
-	apiKeyLastUsedWorkers   = 1
-	apiKeyLastUsedTimeout   = 2 * time.Second
-	apiKeyLastUsedInterval  = 5 * time.Minute
+	apiKeyLastUsedQueueSize    = 128
+	apiKeyLastUsedWorkers      = 1
+	apiKeyLastUsedTimeout      = 2 * time.Second
+	apiKeyLastUsedInterval     = 5 * time.Minute
+	apiKeyLastUsedBackoff      = time.Second
+	apiKeyLastUsedPendingLimit = apiKeyLastUsedQueueSize * 8
 )
 
 // skipAuth lists API path prefixes that never require an API key. Public web,
@@ -59,7 +62,7 @@ var APIKeyIdentityFromContext = requestctx.APIKeyIdentityFromContext
 // APIKeyLookupStore is the persistence surface needed to authenticate API
 // keys.
 type APIKeyLookupStore interface {
-	FindAPIKeyByHash(ctx context.Context, keyHash string) (*db.APIKey, error)
+	FindAPIKeyCredentialByHash(ctx context.Context, keyHash string) (*auth.APIKeyCredential, error)
 }
 
 // APIKeyLastUsedStore is the persistence surface needed for best-effort
@@ -79,8 +82,10 @@ type APIKeyStore interface {
 // API keys stored in the database. Only /api/v1/* endpoints are protected.
 // Public web pages and admin routes remain reachable without an API key.
 //
-// In development mode, auth is skipped entirely so that local testing
-// does not require key provisioning.
+// In development mode, auth is skipped for most /api/v1/* routes so local
+// testing does not require key provisioning. Feed import and package refresh
+// writes remain unauthenticated only from loopback peers; non-loopback callers
+// still need a valid API key.
 func Auth(ctx context.Context, logger *slog.Logger, store APIKeyStore, devMode bool) func(http.Handler) http.Handler {
 	updater := NewAPIKeyLastUsedUpdater(ctx, logger, store)
 	return AuthWithLastUsedUpdater(logger, store, devMode, updater)
@@ -108,44 +113,42 @@ func AuthWithLastUsedUpdater(logger *slog.Logger, store APIKeyLookupStore, devMo
 				}
 			}
 
-			// Development mode is intentionally unauthenticated so local
-			// integration tests can run without provisioning API keys. Data-
-			// mutating write endpoints (feed import) are an exception: in dev
-			// mode they are allowed without a key only from a loopback peer,
-			// so a dev-mode server accidentally exposed on a network does not
-			// offer unauthenticated writes.
+			// Development mode is intentionally unauthenticated for most API
+			// routes so local integration tests can run without provisioning
+			// keys. Data-mutating feed import and package refresh endpoints are
+			// allowed without a key only from a loopback peer, so a dev-mode
+			// server accidentally exposed on a network does not offer
+			// unauthenticated writes.
 			if devMode {
-				if !requiresAuthInDev(r.Method, r.URL.Path) || isLoopbackHost(r.RemoteAddr) {
+				if !requiresAuthInDev(r.Method, r.URL.Path) || netutil.IsLoopbackHost(ClientIP(r)) {
 					next.ServeHTTP(w, r)
 					return
 				}
-				logger.Debug("dev-mode write endpoint requires auth from non-loopback peer", authRejectionLogAttrs(r)...)
 			}
 
 			token := extractBearerToken(r)
 			if token == "" {
-				logger.Debug("missing api key", authRejectionLogAttrs(r)...)
+				logAPIKeyAuthFailure(logger, r, "missing")
 				writeAuthJSONError(w, http.StatusUnauthorized, "missing or invalid Authorization header")
 				return
 			}
 
 			keyHash := hashToken(token)
-			apiKey, err := store.FindAPIKeyByHash(r.Context(), keyHash)
+			apiKey, err := store.FindAPIKeyCredentialByHash(r.Context(), keyHash)
 			if err != nil {
 				logger.Error("api key lookup failed",
-					slog.String("error", err.Error()),
-					slog.String("correlation_id", CorrelationIDFromContext(r.Context())),
+					append(authRejectionLogAttrs(r), slog.String("error", err.Error()))...,
 				)
 				writeJSONError(w, http.StatusInternalServerError, "internal server error")
 				return
 			}
 			if apiKey == nil {
-				logger.Debug("invalid api key", authRejectionLogAttrs(r)...)
+				logAPIKeyAuthFailure(logger, r, "invalid")
 				writeAuthJSONError(w, http.StatusUnauthorized, "invalid api key")
 				return
 			}
 			if apiKey.IsExpired(time.Now().UTC()) {
-				logger.Debug("expired api key", authRejectionLogAttrs(r)...)
+				logAPIKeyAuthFailure(logger, r, "expired")
 				writeAuthJSONError(w, http.StatusUnauthorized, "invalid api key")
 				return
 			}
@@ -161,6 +164,12 @@ func AuthWithLastUsedUpdater(logger *slog.Logger, store APIKeyLookupStore, devMo
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+func logAPIKeyAuthFailure(logger *slog.Logger, r *http.Request, reason string) {
+	logger.Warn("api key authentication failed",
+		append(authRejectionLogAttrs(r), slog.String("reason", reason))...,
+	)
 }
 
 func writeAuthJSONError(w http.ResponseWriter, status int, message string) {
@@ -179,16 +188,28 @@ func authRejectionLogAttrs(r *http.Request) []any {
 }
 
 // APIKeyLastUsedUpdater performs best-effort API-key last-used writes through
-// a bounded worker queue. It prevents authenticated request volume from
-// spawning unbounded detached goroutines when the database stalls.
+// a bounded worker queue and coalesced per-key pending state. It prevents
+// authenticated request volume from spawning unbounded detached goroutines when
+// the database stalls while keeping queue-saturated or transiently failed
+// updates retryable.
 type APIKeyLastUsedUpdater struct {
-	logger      *slog.Logger
-	store       APIKeyLastUsedStore
-	queue       chan int
-	mu          sync.Mutex
-	lastQueued  map[int]time.Time
-	minInterval time.Duration
-	now         func() time.Time
+	logger       *slog.Logger
+	store        APIKeyLastUsedStore
+	queue        chan int
+	mu           sync.Mutex
+	lastQueued   map[int]time.Time
+	pending      map[int]*apiKeyLastUsedPending
+	minInterval  time.Duration
+	retryBackoff time.Duration
+	pendingLimit int
+	now          func() time.Time
+}
+
+type apiKeyLastUsedPending struct {
+	queued         bool
+	inFlight       bool
+	retryAfter     time.Time
+	retryScheduled bool
 }
 
 // NewAPIKeyLastUsedUpdater starts the bounded updater workers.
@@ -213,12 +234,15 @@ func newAPIKeyLastUsedUpdater(ctx context.Context, logger *slog.Logger, store AP
 		timeout = apiKeyLastUsedTimeout
 	}
 	u := &APIKeyLastUsedUpdater{
-		logger:      logger,
-		store:       store,
-		queue:       make(chan int, queueSize),
-		lastQueued:  make(map[int]time.Time),
-		minInterval: apiKeyLastUsedInterval,
-		now:         time.Now,
+		logger:       logger,
+		store:        store,
+		queue:        make(chan int, queueSize),
+		lastQueued:   make(map[int]time.Time),
+		pending:      make(map[int]*apiKeyLastUsedPending),
+		minInterval:  apiKeyLastUsedInterval,
+		retryBackoff: apiKeyLastUsedBackoff,
+		pendingLimit: apiKeyLastUsedPendingLimit,
+		now:          time.Now,
 	}
 	for range workers {
 		go u.run(ctx, timeout)
@@ -226,34 +250,89 @@ func newAPIKeyLastUsedUpdater(ctx context.Context, logger *slog.Logger, store AP
 	return u
 }
 
-// Enqueue schedules a best-effort last-used write. It returns false when the
-// bounded queue is full and the update was dropped.
+// Enqueue schedules or coalesces a best-effort last-used write. It returns
+// false only when the update is invalid, throttled by the debounce window, or
+// cannot be retained in bounded pending state.
 func (u *APIKeyLastUsedUpdater) Enqueue(keyID int) bool {
 	if u == nil || u.store == nil || keyID <= 0 {
 		return false
 	}
 	now := u.currentTime()
 	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.ensureStateLocked()
 	if u.lastQueued == nil {
 		u.lastQueued = make(map[int]time.Time)
 	}
 	if u.minInterval > 0 {
+		for queuedKeyID, queuedAt := range u.lastQueued {
+			if now.Sub(queuedAt) >= u.minInterval {
+				delete(u.lastQueued, queuedKeyID)
+			}
+		}
 		if last, ok := u.lastQueued[keyID]; ok && now.Sub(last) < u.minInterval {
-			u.mu.Unlock()
 			return false
 		}
 	}
+	pending, ok := u.pending[keyID]
+	if !ok {
+		if u.pendingLimit > 0 && len(u.pending) >= u.pendingLimit {
+			u.logger.Warn("api key last-used pending buffer full; update not retained",
+				slog.Int("api_key_id", keyID),
+				slog.Int("pending_count", len(u.pending)),
+				slog.Int("pending_limit", u.pendingLimit),
+			)
+			return false
+		}
+		pending = &apiKeyLastUsedPending{}
+		u.pending[keyID] = pending
+	}
+	if u.minInterval > 0 {
+		u.lastQueued[keyID] = now
+	}
+	u.schedulePendingLocked(keyID, pending, now)
+	return true
+}
+
+func (u *APIKeyLastUsedUpdater) ensureStateLocked() {
+	if u.queue == nil {
+		u.queue = make(chan int, 1)
+	}
+	if u.lastQueued == nil {
+		u.lastQueued = make(map[int]time.Time)
+	}
+	if u.pending == nil {
+		u.pending = make(map[int]*apiKeyLastUsedPending)
+	}
+	if u.retryBackoff <= 0 {
+		u.retryBackoff = apiKeyLastUsedBackoff
+	}
+	if u.pendingLimit <= 0 {
+		u.pendingLimit = apiKeyLastUsedPendingLimit
+	}
+}
+
+func (u *APIKeyLastUsedUpdater) schedulePendingLocked(keyID int, pending *apiKeyLastUsedPending, now time.Time) bool {
+	if pending == nil || pending.queued || pending.inFlight {
+		return true
+	}
+	if !pending.retryAfter.IsZero() {
+		if now.Before(pending.retryAfter) {
+			return false
+		}
+		pending.retryAfter = time.Time{}
+	}
 	select {
 	case u.queue <- keyID:
-		if u.minInterval > 0 {
-			u.lastQueued[keyID] = now
-		}
-		u.mu.Unlock()
+		pending.queued = true
+		pending.retryScheduled = false
 		return true
 	default:
-		u.mu.Unlock()
-		u.logger.Warn("api key last-used update queue full; dropping update",
+		u.logger.Warn("api key last-used update queue saturated; retaining pending update",
 			slog.Int("api_key_id", keyID),
+			slog.Int("queue_depth", len(u.queue)),
+			slog.Int("queue_capacity", cap(u.queue)),
+			slog.Int("pending_count", len(u.pending)),
 		)
 		return false
 	}
@@ -272,21 +351,121 @@ func (u *APIKeyLastUsedUpdater) run(ctx context.Context, timeout time.Duration) 
 		case <-ctx.Done():
 			return
 		case keyID := <-u.queue:
+			if !u.markDequeued(keyID) {
+				continue
+			}
 			updateCtx, cancel := context.WithTimeout(ctx, timeout)
 			err := u.store.TouchAPIKeyLastUsed(updateCtx, keyID)
 			cancel()
-			if err != nil && !errorsIsContextDone(err) {
-				u.logger.Warn("api key last-used update failed",
-					slog.Int("api_key_id", keyID),
-					slog.String("error", err.Error()),
-				)
+			if err != nil {
+				if errors.Is(err, context.Canceled) && ctx.Err() != nil {
+					u.markSucceeded(ctx, keyID)
+					continue
+				}
+				u.markFailed(ctx, keyID, err)
+				continue
 			}
+			u.markSucceeded(ctx, keyID)
 		}
 	}
 }
 
-func errorsIsContextDone(err error) bool {
-	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+func (u *APIKeyLastUsedUpdater) markDequeued(keyID int) bool {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.ensureStateLocked()
+	pending := u.pending[keyID]
+	if pending == nil {
+		return false
+	}
+	pending.queued = false
+	pending.inFlight = true
+	return true
+}
+
+func (u *APIKeyLastUsedUpdater) markSucceeded(ctx context.Context, keyID int) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.ensureStateLocked()
+	delete(u.pending, keyID)
+	u.scheduleReadyPendingLocked(ctx, u.currentTime())
+}
+
+func (u *APIKeyLastUsedUpdater) markFailed(ctx context.Context, keyID int, err error) {
+	now := u.currentTime()
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.ensureStateLocked()
+	pending := u.pending[keyID]
+	if pending == nil {
+		if u.pendingLimit > 0 && len(u.pending) >= u.pendingLimit {
+			u.logger.Warn("api key last-used retry state full; update not retained",
+				slog.Int("api_key_id", keyID),
+				slog.String("error", err.Error()),
+				slog.Int("pending_count", len(u.pending)),
+				slog.Int("pending_limit", u.pendingLimit),
+			)
+			return
+		}
+		pending = &apiKeyLastUsedPending{}
+		u.pending[keyID] = pending
+	}
+	pending.retryAfter = now.Add(u.retryBackoff)
+	pending.inFlight = false
+	u.logger.Warn("api key last-used update failed; scheduled retry",
+		slog.Int("api_key_id", keyID),
+		slog.String("error", err.Error()),
+		slog.Duration("retry_backoff", u.retryBackoff),
+		slog.Int("pending_count", len(u.pending)),
+	)
+	u.scheduleRetryLocked(ctx, keyID, pending, u.retryBackoff)
+	u.scheduleReadyPendingLocked(ctx, now)
+}
+
+func (u *APIKeyLastUsedUpdater) scheduleReadyPendingLocked(ctx context.Context, now time.Time) {
+	for keyID, pending := range u.pending {
+		if pending == nil || pending.queued {
+			continue
+		}
+		if !pending.retryAfter.IsZero() && now.Before(pending.retryAfter) {
+			u.scheduleRetryLocked(ctx, keyID, pending, pending.retryAfter.Sub(now))
+			continue
+		}
+		if !u.schedulePendingLocked(keyID, pending, now) {
+			return
+		}
+	}
+}
+
+func (u *APIKeyLastUsedUpdater) scheduleRetryLocked(ctx context.Context, keyID int, pending *apiKeyLastUsedPending, delay time.Duration) {
+	if pending == nil || pending.retryScheduled {
+		return
+	}
+	if delay < 0 {
+		delay = 0
+	}
+	pending.retryScheduled = true
+	time.AfterFunc(delay, func() {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		now := u.currentTime()
+		u.mu.Lock()
+		defer u.mu.Unlock()
+		u.ensureStateLocked()
+		pending := u.pending[keyID]
+		if pending == nil {
+			return
+		}
+		pending.retryScheduled = false
+		if !pending.retryAfter.IsZero() && now.Before(pending.retryAfter) {
+			u.scheduleRetryLocked(ctx, keyID, pending, pending.retryAfter.Sub(now))
+			return
+		}
+		u.schedulePendingLocked(keyID, pending, now)
+	})
 }
 
 // requiresAuthInDev reports whether the given path is a sensitive write

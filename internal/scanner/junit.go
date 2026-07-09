@@ -87,7 +87,7 @@ func (jw *JUnitWriter) WriteFile(path string, result *domain.ScanResult) error {
 	}
 
 	if err := jw.Write(f, result); err != nil {
-		closeSilently(f)
+		ioutils.CloseSilently(f)
 		return err
 	}
 	return f.Close()
@@ -149,9 +149,10 @@ func (jw *JUnitWriter) buildJUnit(result *domain.ScanResult) junitTestsuites {
 	// Surface partial parse errors as a dedicated errored suite so consumers
 	// reading only the JUnit artifact still see that part of the dependency
 	// graph was skipped.
-	if len(result.ParseErrors) > 0 {
-		cases := make([]junitTestcase, 0, len(result.ParseErrors))
-		for i, pe := range result.ParseErrors {
+	parseErrors, omittedParseErrors := BoundedParseDiagnostics(result.ParseErrors)
+	if len(parseErrors) > 0 || omittedParseErrors > 0 {
+		cases := make([]junitTestcase, 0, len(parseErrors)+1)
+		for i, pe := range parseErrors {
 			cases = append(cases, junitTestcase{
 				Name:      fmt.Sprintf("parse error %d", i+1),
 				Classname: "packmon.parse-errors",
@@ -160,6 +161,18 @@ func (jw *JUnitWriter) buildJUnit(result *domain.ScanResult) junitTestsuites {
 					Message: pe,
 					Type:    "parse_error",
 					Body:    pe,
+				},
+			})
+		}
+		if summary := ParseDiagnosticsOmittedSummary(omittedParseErrors); summary != "" {
+			cases = append(cases, junitTestcase{
+				Name:      "parse diagnostics omitted",
+				Classname: "packmon.parse-errors",
+				Time:      "0.000",
+				Error: &junitError{
+					Message: summary,
+					Type:    "parse_error",
+					Body:    summary,
 				},
 			})
 		}

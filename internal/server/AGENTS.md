@@ -64,5 +64,5 @@ matter most: malformed/spoofed XFF from an untrusted peer, all-trusted chains,
 IPv6, missing port in `RemoteAddr`.
 
 ```bash
-go test -race ./internal/server/...
+go test -count=1 -race ./internal/server/...
 ```

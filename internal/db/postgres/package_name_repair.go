@@ -3,23 +3,55 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"strconv"
+
+	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/jackc/pgx/v5"
 )
 
 // RepairCaseInsensitivePackageNames reconciles legacy rows written before
 // package names were canonicalized at write boundaries.
 func (s *Store) RepairCaseInsensitivePackageNames(ctx context.Context) (int, error) {
-	affected, err := s.repairAffectedPackageNames(ctx)
+	affected, err := repairAffectedPackageNames(ctx, s.pool)
 	if err != nil {
 		return 0, err
 	}
-	malicious, err := s.repairMaliciousPackageNames(ctx)
+	malicious, err := repairMaliciousPackageNames(ctx, s.pool)
 	if err != nil {
 		return 0, err
 	}
 	return affected + malicious, nil
 }
 
-func (s *Store) repairAffectedPackageNames(ctx context.Context) (int, error) {
+// RepairCaseInsensitivePackageNamesWithAudit reconciles legacy package-name
+// rows and writes the required startup repair audit row in the same transaction.
+func (s *Store) RepairCaseInsensitivePackageNamesWithAudit(ctx context.Context, audit *db.AdminAuditEntry) (int, error) {
+	var repaired int
+	err := withTx(ctx, s.pool, func(tx pgx.Tx) error {
+		affected, err := repairAffectedPackageNames(ctx, tx)
+		if err != nil {
+			return err
+		}
+		malicious, err := repairMaliciousPackageNames(ctx, tx)
+		if err != nil {
+			return err
+		}
+		repaired = affected + malicious
+		if err := db.SetAdminAuditDetail(audit, "repaired", strconv.Itoa(repaired)); err != nil {
+			return fmt.Errorf("postgres: prepare package name repair audit: %w", err)
+		}
+		if err := insertAdminAuditLogTx(ctx, tx, audit); err != nil {
+			return fmt.Errorf("%w: %v", db.ErrAdminAuditLog, err)
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return repaired, nil
+}
+
+func repairAffectedPackageNames(ctx context.Context, querier postgresQueryRower) (int, error) {
 	const query = `
 	WITH normalized AS (
 		SELECT
@@ -124,13 +156,13 @@ func (s *Store) repairAffectedPackageNames(ctx context.Context) (int, error) {
 		(SELECT count(*) FROM deleted)`
 
 	var repaired int
-	if err := s.pool.QueryRow(ctx, query).Scan(&repaired); err != nil {
+	if err := querier.QueryRow(ctx, query).Scan(&repaired); err != nil {
 		return 0, fmt.Errorf("postgres: repair affected package names: %w", err)
 	}
 	return repaired, nil
 }
 
-func (s *Store) repairMaliciousPackageNames(ctx context.Context) (int, error) {
+func repairMaliciousPackageNames(ctx context.Context, querier postgresQueryRower) (int, error) {
 	const query = `
 	WITH normalized AS (
 		SELECT
@@ -155,7 +187,7 @@ func (s *Store) repairMaliciousPackageNames(ctx context.Context) (int, error) {
 	SELECT count(*) FROM repaired`
 
 	var repaired int
-	if err := s.pool.QueryRow(ctx, query).Scan(&repaired); err != nil {
+	if err := querier.QueryRow(ctx, query).Scan(&repaired); err != nil {
 		return 0, fmt.Errorf("postgres: repair malicious package names: %w", err)
 	}
 	return repaired, nil

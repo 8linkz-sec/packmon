@@ -11,6 +11,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const (
+	clientCACertFileEnv       = "PACKMON_CA_CERT_FILE"
+	clientCACertLegacyFileEnv = "PACKMON_CA_CERT"
+)
+
 func newConfigCmd() *cobra.Command {
 	configCmd := &cobra.Command{
 		Use:   "config",
@@ -40,10 +45,14 @@ func newConfigShowCmd() *cobra.Command {
 				return err
 			}
 
+			effective, err := effectiveConfigShowSettings(cfg)
+			if err != nil {
+				return err
+			}
+
 			fmt.Println("# Effective packmon configuration")
 			fmt.Println()
 			fmt.Printf("config_file:  %s\n", valueOrDefault(configPath, "(none)"))
-			effective := effectiveConfigShowSettings(cfg)
 			if cfg != nil {
 				fmt.Printf("server:       %s\n", valueOrDefault(logsafe.RedactURL(effective.Server), "(not set)"))
 				fmt.Printf("api_key:      %s\n", maskSecret(effective.APIKey))
@@ -84,7 +93,22 @@ func newConfigShowCmd() *cobra.Command {
 			printEnvVar("PACKMON_TIMEOUT")
 			printEnvVar("PACKMON_DB_PATH")
 			printEnvVar("PACKMON_ECOSYSTEMS")
-			printEnvVar("PACKMON_CA_CERT")
+			printEnvVar("PACKMON_NPM_REGISTRY_BASE_URL")
+			printEnvVar("PACKMON_PYPI_API_BASE_URL")
+			printEnvVar("PACKMON_RUBYGEMS_API_BASE_URL")
+			printEnvVar("PACKMON_CARGO_REGISTRY_API_BASE_URL")
+			printEnvVar("PACKMON_COCOAPODS_TRUNK_API_BASE_URL")
+			printEnvVar("PACKMON_COMPOSER_REPOSITORY_BASE_URL")
+			printEnvVar("PACKMON_GO_PROXY_URL")
+			printEnvVar("PACKMON_MAVEN_REPOSITORY_BASE_URL")
+			printEnvVar("PACKMON_DOCKER_REGISTRY_MIRRORS")
+			printEnvVar("PACKMON_SWIFTPM_GIT_ALLOWED_HOSTS")
+			printEnvVar("PACKMON_CRAN_MIRROR_URL")
+			printEnvVar("PACKMON_PUB_HOSTED_URL")
+			printEnvVar("PACKMON_HEX_API_BASE_URL")
+			printEnvVar("PACKMON_NUGET_V3_BASE_URL")
+			printEnvVar(clientCACertFileEnv)
+			printEnvVar(clientCACertLegacyFileEnv)
 			printEnvVar("PACKMON_INSECURE_ALLOW_HTTP")
 			printEnvVar("PACKMON_REQUIRE_REMOTE")
 			printEnvVar("PACKMON_NO_REPO_METADATA")
@@ -117,9 +141,10 @@ func newConfigInitCmd() *cobra.Command {
 			template := `# packmon project configuration
 # See https://github.com/8linkz-sec/packmon for documentation.
 # Keep server URL, API key, CA, insecure HTTP, require-remote, webhook URL/secret,
-# report output settings, and local DB path in flags, environment variables, the
-# user-global config, or an explicit --config file. Auto-discovered project config
-# is intentionally ignored for those trusted routing settings.
+# report output settings, latest-version registry mirrors, and local DB path in
+# flags, environment variables, the user-global config, or an explicit --config
+# file. Auto-discovered project config is intentionally ignored for those
+# trusted routing settings.
 
 mode: auto
 # NONE disables vulnerability blocking only; malicious and active supply-chain risk findings still block.
@@ -147,6 +172,28 @@ hook:
 
 db:
   sync_source: server
+
+# Trusted latest-version mirrors belong in user-global config, an explicit
+# --config file, or PACKMON_* environment variables, not auto-discovered
+# project config:
+# registries:
+#   npm_registry_base_url: "https://npm-mirror.example/registry"
+#   pypi_api_base_url: "https://pypi-mirror.example/pypi"
+#   rubygems_api_base_url: "https://rubygems-mirror.example/api/v1/gems"
+#   cargo_registry_api_base_url: "https://cargo-mirror.example/api/v1/crates"
+#   cocoapods_trunk_api_base_url: "https://cocoapods-mirror.example/api/v1/pods"
+#   composer_repository_base_url: "https://composer-mirror.example/p2"
+#   go_proxy_url: "https://go-proxy.example"
+#   maven_repository_base_url: "https://maven-mirror.example/repository/maven-public"
+#   docker_registry_mirrors:
+#     docker.io: "https://docker-mirror.example/dockerhub"
+#     ghcr.io: "https://ghcr-mirror.example"
+#   swiftpm_git_allowed_hosts:
+#     - git.example.com
+#   cran_mirror_url: "https://cran-mirror.example"
+#   pub_hosted_url: "https://pub-mirror.example"
+#   hex_api_base_url: "https://hex-mirror.example/api"
+#   nuget_v3_base_url: "https://nuget-mirror.example/v3-flatcontainer"
 
 repos:
   - name: packmon
@@ -224,96 +271,183 @@ type configShowSettings struct {
 	DBPath           string
 }
 
-func effectiveConfigShowSettings(cfg *cliConfig) configShowSettings { // #nosec G101 -- this reads a user-provided API key from env/config; no credential is hardcoded.
-	settings := configShowSettings{
+func effectiveConfigShowSettings(cfg *cliConfig) (configShowSettings, error) { // #nosec G101 -- this reads a user-provided API key from env/config; no credential is hardcoded.
+	settings := defaultConfigShowSettings()
+	applyConfigShowFileSettings(&settings, cfg)
+	if err := applyConfigShowEnvironmentSettings(&settings); err != nil {
+		return configShowSettings{}, err
+	}
+	return settings, nil
+}
+
+func defaultConfigShowSettings() configShowSettings { // #nosec G101 -- this reads a user-provided API key from env/config; no credential is hardcoded.
+	return configShowSettings{
 		Mode:             "auto",
 		FailOn:           string(defaultFailSeverity()),
 		Timeout:          30,
 		DBPath:           defaultDBPath(),
-		APIKey:           strings.TrimSpace(os.Getenv("PACKMON_API_KEY")),
+		APIKey:           configShowEnvValue("PACKMON_API_KEY"),
 		APIKeyEnv:        "PACKMON_API_KEY",
 		SendRepoMetadata: true,
 	}
-	if cfg != nil {
-		settings.Server = cfg.Server
-		settings.APIKey = cfg.APIKey
-		settings.APIKeyEnv = cfg.APIKeyEnv
-		if cfg.APIKeyEnv != "" && strings.TrimSpace(os.Getenv("PACKMON_API_KEY")) == "" {
-			settings.APIKey = strings.TrimSpace(os.Getenv(cfg.APIKeyEnv))
-		}
-		if cfg.Mode != "" {
-			settings.Mode = cfg.Mode
-		}
-		if cfg.FailOn != "" {
-			settings.FailOn = cfg.FailOn
-		}
-		if cfg.Timeout > 0 {
-			settings.Timeout = cfg.Timeout
-		}
-		settings.Ecosystems = append([]string(nil), cfg.Ecosystems...)
-		settings.IncludeDev = boolValue(cfg.IncludeDev, false)
-		settings.CACertFile = cfg.CACert
-		settings.InsecureHTTP = boolValue(cfg.InsecureAllowHTTP, false)
-		settings.RequireRemote = boolValue(cfg.RequireRemote, false)
-		settings.SendRepoMetadata = boolValue(cfg.SendRepoMetadata, true)
-		settings.WebhookURL = cfg.Webhook.URL
-		settings.WebhookSecret = cfg.Webhook.Secret
-		if cfg.DB.Path != "" {
-			settings.DBPath = filepath.Join(cfg.DB.Path, "packmon.db")
-		}
+}
+
+func applyConfigShowFileSettings(settings *configShowSettings, cfg *cliConfig) {
+	if cfg == nil {
+		return
 	}
-	if envServer := strings.TrimSpace(os.Getenv("PACKMON_SERVER")); envServer != "" {
+
+	settings.Server = cfg.Server
+	applyConfigShowFileAPIKey(settings, cfg)
+	applyConfigShowFileScanPolicy(settings, cfg)
+	applyConfigShowFileConnection(settings, cfg)
+	applyConfigShowFileWebhook(settings, cfg)
+	applyConfigShowFileDB(settings, cfg)
+}
+
+func applyConfigShowFileAPIKey(settings *configShowSettings, cfg *cliConfig) { // #nosec G101 -- this reads user-provided API key env names/values.
+	settings.APIKey = cfg.APIKey
+	settings.APIKeyEnv = cfg.APIKeyEnv
+	if cfg.APIKeyEnv != "" && configShowEnvValue("PACKMON_API_KEY") == "" {
+		settings.APIKey = configShowEnvValue(cfg.APIKeyEnv)
+	}
+}
+
+func applyConfigShowFileScanPolicy(settings *configShowSettings, cfg *cliConfig) {
+	if cfg.Mode != "" {
+		settings.Mode = cfg.Mode
+	}
+	if cfg.FailOn != "" {
+		settings.FailOn = cfg.FailOn
+	}
+	if cfg.Timeout > 0 {
+		settings.Timeout = cfg.Timeout
+	}
+	settings.Ecosystems = append([]string(nil), cfg.Ecosystems...)
+	settings.IncludeDev = boolValue(cfg.IncludeDev, false)
+	settings.SendRepoMetadata = boolValue(cfg.SendRepoMetadata, true)
+}
+
+func applyConfigShowFileConnection(settings *configShowSettings, cfg *cliConfig) {
+	settings.CACertFile = cfg.CACert
+	settings.InsecureHTTP = boolValue(cfg.InsecureAllowHTTP, false)
+	settings.RequireRemote = boolValue(cfg.RequireRemote, false)
+}
+
+func applyConfigShowFileWebhook(settings *configShowSettings, cfg *cliConfig) {
+	settings.WebhookURL = cfg.Webhook.URL
+	settings.WebhookSecret = cfg.Webhook.Secret
+}
+
+func applyConfigShowFileDB(settings *configShowSettings, cfg *cliConfig) {
+	if cfg.DB.Path != "" {
+		settings.DBPath = filepath.Join(cfg.DB.Path, "packmon.db")
+	}
+}
+
+func applyConfigShowEnvironmentSettings(settings *configShowSettings) error {
+	applyConfigShowEnvironmentIdentity(settings)
+	if err := applyConfigShowEnvironmentScanPolicy(settings); err != nil {
+		return err
+	}
+	if err := applyConfigShowEnvironmentConnection(settings); err != nil {
+		return err
+	}
+	applyConfigShowEnvironmentWebhook(settings)
+	applyConfigShowEnvironmentDB(settings)
+	return nil
+}
+
+func applyConfigShowEnvironmentIdentity(settings *configShowSettings) { // #nosec G101 -- this reads user-provided API key env values.
+	if envServer := configShowEnvValue("PACKMON_SERVER"); envServer != "" {
 		settings.Server = envServer
 	}
-	if envAPIKey := strings.TrimSpace(os.Getenv("PACKMON_API_KEY")); envAPIKey != "" {
+	if envAPIKey := configShowEnvValue("PACKMON_API_KEY"); envAPIKey != "" {
 		settings.APIKey = envAPIKey
 		settings.APIKeyEnv = "PACKMON_API_KEY"
 	}
+}
+
+func applyConfigShowEnvironmentScanPolicy(settings *configShowSettings) error {
 	if envMode := normalizeModeString(os.Getenv("PACKMON_MODE")); envMode != "" {
 		settings.Mode = envMode
 	}
 	if envFailOn := normalizeSeverityString(os.Getenv("PACKMON_FAIL_ON")); envFailOn != "" {
 		settings.FailOn = envFailOn
 	}
-	if envTimeout := strings.TrimSpace(os.Getenv("PACKMON_TIMEOUT")); envTimeout != "" {
-		if parsed, parseErr := parseTimeoutSeconds(envTimeout); parseErr == nil && parsed > 0 {
-			settings.Timeout = parsed
+	if envTimeout := configShowEnvValue("PACKMON_TIMEOUT"); envTimeout != "" {
+		parsed, parseErr := parseTimeoutSeconds(envTimeout)
+		if parseErr != nil {
+			return fmt.Errorf("PACKMON_TIMEOUT: %w", parseErr)
 		}
+		if parsed <= 0 {
+			return fmt.Errorf("PACKMON_TIMEOUT must be greater than zero")
+		}
+		settings.Timeout = parsed
 	}
-	if envEcosystems := strings.TrimSpace(os.Getenv("PACKMON_ECOSYSTEMS")); envEcosystems != "" {
+	if envEcosystems := configShowEnvValue("PACKMON_ECOSYSTEMS"); envEcosystems != "" {
 		settings.Ecosystems = splitCSV(envEcosystems)
 	}
-	if envCACert := strings.TrimSpace(os.Getenv("PACKMON_CA_CERT")); envCACert != "" {
-		settings.CACertFile = envCACert
+	if envNoRepoMetadata := configShowEnvValue("PACKMON_NO_REPO_METADATA"); envNoRepoMetadata != "" {
+		noRepoMetadata, err := configShowBoolEnv("PACKMON_NO_REPO_METADATA")
+		if err != nil {
+			return err
+		}
+		settings.SendRepoMetadata = !noRepoMetadata
 	}
-	if envInsecure := strings.TrimSpace(os.Getenv("PACKMON_INSECURE_ALLOW_HTTP")); envInsecure != "" {
-		settings.InsecureHTTP = envBoolValue(envInsecure)
-	}
-	if envRequireRemote := strings.TrimSpace(os.Getenv("PACKMON_REQUIRE_REMOTE")); envRequireRemote != "" {
-		settings.RequireRemote = envBoolValue(envRequireRemote)
-	}
-	if envNoRepoMetadata := strings.TrimSpace(os.Getenv("PACKMON_NO_REPO_METADATA")); envNoRepoMetadata != "" {
-		settings.SendRepoMetadata = !envBoolValue(envNoRepoMetadata)
-	}
-	if envWebhookURL := strings.TrimSpace(os.Getenv("PACKMON_WEBHOOK_URL")); envWebhookURL != "" {
-		settings.WebhookURL = envWebhookURL
-	}
-	if envWebhookSecret := strings.TrimSpace(os.Getenv("PACKMON_WEBHOOK_SECRET")); envWebhookSecret != "" {
-		settings.WebhookSecret = envWebhookSecret
-	}
-	if envDBPath := strings.TrimSpace(os.Getenv("PACKMON_DB_PATH")); envDBPath != "" {
-		settings.DBPath = filepath.Join(envDBPath, "packmon.db")
-	}
-	return settings
+	return nil
 }
 
-func envBoolValue(value string) bool {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "1", "true", "yes":
-		return true
-	default:
-		return false
+func applyConfigShowEnvironmentConnection(settings *configShowSettings) error {
+	if envCACert := clientCACertEnvValue(); envCACert != "" {
+		settings.CACertFile = envCACert
 	}
+	if envInsecure := configShowEnvValue("PACKMON_INSECURE_ALLOW_HTTP"); envInsecure != "" {
+		insecureHTTP, err := configShowBoolEnv("PACKMON_INSECURE_ALLOW_HTTP")
+		if err != nil {
+			return err
+		}
+		settings.InsecureHTTP = insecureHTTP
+	}
+	if envRequireRemote := configShowEnvValue("PACKMON_REQUIRE_REMOTE"); envRequireRemote != "" {
+		requireRemote, err := configShowBoolEnv("PACKMON_REQUIRE_REMOTE")
+		if err != nil {
+			return err
+		}
+		settings.RequireRemote = requireRemote
+	}
+	return nil
+}
+
+func applyConfigShowEnvironmentWebhook(settings *configShowSettings) {
+	if envWebhookURL := configShowEnvValue("PACKMON_WEBHOOK_URL"); envWebhookURL != "" {
+		settings.WebhookURL = envWebhookURL
+	}
+	if envWebhookSecret := configShowEnvValue("PACKMON_WEBHOOK_SECRET"); envWebhookSecret != "" {
+		settings.WebhookSecret = envWebhookSecret
+	}
+}
+
+func applyConfigShowEnvironmentDB(settings *configShowSettings) {
+	if envDBPath := configShowEnvValue("PACKMON_DB_PATH"); envDBPath != "" {
+		settings.DBPath = filepath.Join(envDBPath, "packmon.db")
+	}
+}
+
+func configShowEnvValue(key string) string {
+	return strings.TrimSpace(os.Getenv(key))
+}
+
+func clientCACertEnvValue() string {
+	if value := configShowEnvValue(clientCACertFileEnv); value != "" {
+		return value
+	}
+	return configShowEnvValue(clientCACertLegacyFileEnv)
+}
+
+func configShowBoolEnv(key string) (bool, error) {
+	value, _, err := strictEnvBool(key)
+	return value, err
 }
 
 func printEnvVar(key string) {
@@ -380,13 +514,6 @@ func valueOrDefault(v, fallback string) string {
 		return fallback
 	}
 	return v
-}
-
-func defaultConfigTimeout(timeout int) int {
-	if timeout > 0 {
-		return timeout
-	}
-	return 30
 }
 
 func selectCLIConfigPath(localPath string) string {

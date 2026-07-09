@@ -3,9 +3,11 @@ package sqlite
 import (
 	"context"
 	"encoding/json"
+	"github.com/8linkz-sec/packmon/internal/ioutils"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/8linkz-sec/packmon/internal/db"
@@ -19,7 +21,7 @@ func TestApplySyncReputationRowsAndTombstones(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	defer closeSilently(store)
+	defer ioutils.CloseSilently(store)
 
 	ctx := context.Background()
 	resp := &syncResponse{
@@ -95,7 +97,7 @@ func TestFindReputationIncludesHistoricalRiskRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	defer closeSilently(store)
+	defer ioutils.CloseSilently(store)
 
 	ctx := context.Background()
 	if _, err := store.db.ExecContext(ctx, `
@@ -133,7 +135,7 @@ func TestApplySyncReputationNormalizesHistoricalRiskSeverity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	defer closeSilently(store)
+	defer ioutils.CloseSilently(store)
 
 	ctx := context.Background()
 	resp := &syncResponse{
@@ -173,7 +175,7 @@ func TestSyncPaginatesWithOffsetAndStableSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	defer closeSilently(store)
+	defer ioutils.CloseSilently(store)
 
 	type requestState struct {
 		offset                string
@@ -305,5 +307,44 @@ func TestSyncPaginatesWithOffsetAndStableSnapshot(t *testing.T) {
 	}
 	if lastSync != "2026-05-30T10:00:00Z" {
 		t.Fatalf("last sync = %q, want first page snapshot", lastSync)
+	}
+}
+
+func TestSyncRejectsTruncatedResponseWithoutNextCursor(t *testing.T) {
+	t.Parallel()
+
+	store, err := New(t.TempDir() + "/packmon.db")
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer ioutils.CloseSilently(store)
+
+	requests := 0
+	var offsets []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		offsets = append(offsets, r.URL.Query().Get("offset"))
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(syncResponse{
+			SyncedAt:   "2026-05-30T10:00:00Z",
+			SyncedXID:  700,
+			FeedStatus: "fresh",
+			Truncated:  requests == 1,
+		}); err != nil {
+			t.Fatalf("encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	err = Sync(context.Background(), store, SyncConfig{
+		ServerURL:         server.URL,
+		Full:              true,
+		AllowInsecureHTTP: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "truncated response missing next_cursor") {
+		t.Fatalf("Sync() error = %v, want missing next_cursor contract error", err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d with offsets %+v, want one failed page without legacy offset retry", requests, offsets)
 	}
 }

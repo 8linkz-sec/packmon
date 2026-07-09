@@ -35,6 +35,192 @@ func TestCocoaPodsParser_Ecosystem(t *testing.T) {
 	}
 }
 
+func TestCocoaPodsParseStateAdvance(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		state     cocoaPodsParseState
+		line      string
+		wantState cocoaPodsParseState
+		wantOK    bool
+	}{
+		{
+			name:      "enter pods section",
+			line:      "PODS:",
+			wantState: cocoaPodsParseState{section: cocoaPodsSectionPods},
+			wantOK:    true,
+		},
+		{
+			name:      "dependency section exits pods",
+			state:     cocoaPodsParseState{section: cocoaPodsSectionPods},
+			line:      "DEPENDENCIES:",
+			wantState: cocoaPodsParseState{section: cocoaPodsSectionOther},
+			wantOK:    true,
+		},
+		{
+			name:      "spec checksums section exits pods",
+			state:     cocoaPodsParseState{section: cocoaPodsSectionPods},
+			line:      "SPEC CHECKSUMS:",
+			wantState: cocoaPodsParseState{section: cocoaPodsSectionOther},
+			wantOK:    true,
+		},
+		{
+			name:      "external sources section exits pods",
+			state:     cocoaPodsParseState{section: cocoaPodsSectionPods},
+			line:      "EXTERNAL SOURCES:",
+			wantState: cocoaPodsParseState{section: cocoaPodsSectionOther},
+			wantOK:    true,
+		},
+		{
+			name:      "enter spec repos section",
+			line:      "SPEC REPOS:",
+			wantState: cocoaPodsParseState{section: cocoaPodsSectionSpecRepos},
+			wantOK:    true,
+		},
+		{
+			name:      "record current spec repo",
+			state:     cocoaPodsParseState{section: cocoaPodsSectionSpecRepos},
+			line:      "  https://pods.internal.example/specs.git:",
+			wantState: cocoaPodsParseState{section: cocoaPodsSectionSpecRepos, currentSpecRepo: "https://pods.internal.example/specs.git"},
+			wantOK:    true,
+		},
+		{
+			name:      "spec repo package line is left to parser",
+			state:     cocoaPodsParseState{section: cocoaPodsSectionSpecRepos, currentSpecRepo: "trunk"},
+			line:      "    - Firebase/Core",
+			wantState: cocoaPodsParseState{section: cocoaPodsSectionSpecRepos, currentSpecRepo: "trunk"},
+			wantOK:    false,
+		},
+		{
+			name:      "pod line is left to parser",
+			state:     cocoaPodsParseState{section: cocoaPodsSectionPods},
+			line:      "  - Alamofire (5.9.0)",
+			wantState: cocoaPodsParseState{section: cocoaPodsSectionPods},
+			wantOK:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			gotState, gotOK := advanceCocoaPodsParseState(tt.state, tt.line)
+			if gotOK != tt.wantOK {
+				t.Fatalf("advanceCocoaPodsParseState() handled = %v, want %v", gotOK, tt.wantOK)
+			}
+			if gotState != tt.wantState {
+				t.Fatalf("advanceCocoaPodsParseState() state = %+v, want %+v", gotState, tt.wantState)
+			}
+		})
+	}
+}
+
+func TestParseCocoaPodsPodLine(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		line        string
+		wantName    string
+		wantVersion string
+		wantOK      bool
+	}{
+		{
+			name:        "top level pod",
+			line:        "  - Alamofire (5.9.0)",
+			wantName:    "Alamofire",
+			wantVersion: "5.9.0",
+			wantOK:      true,
+		},
+		{
+			name:        "top level subspec collapses to root",
+			line:        "  - Firebase/Core (10.22.0):",
+			wantName:    "Firebase",
+			wantVersion: "10.22.0",
+			wantOK:      true,
+		},
+		{
+			name:   "sub dependency is ignored",
+			line:   "    - FirebaseAnalytics (~> 10.22.0)",
+			wantOK: false,
+		},
+		{
+			name:   "dependency section entry without version is ignored",
+			line:   "  - Firebase/Core",
+			wantOK: false,
+		},
+		{
+			name:   "unindented pod is ignored",
+			line:   "- Alamofire (5.9.0)",
+			wantOK: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			gotName, gotVersion, gotOK := parseCocoaPodsPodLine(tt.line)
+			if gotOK != tt.wantOK {
+				t.Fatalf("parseCocoaPodsPodLine() ok = %v, want %v", gotOK, tt.wantOK)
+			}
+			if gotName != tt.wantName || gotVersion != tt.wantVersion {
+				t.Fatalf("parseCocoaPodsPodLine() = (%q, %q), want (%q, %q)", gotName, gotVersion, tt.wantName, tt.wantVersion)
+			}
+		})
+	}
+}
+
+func TestParseCocoaPodsSpecRepoPackageLine(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		repo     string
+		line     string
+		wantName string
+		wantOK   bool
+	}{
+		{
+			name:     "spec repo pod",
+			repo:     "trunk",
+			line:     "    - Alamofire",
+			wantName: "Alamofire",
+			wantOK:   true,
+		},
+		{
+			name:     "spec repo subspec collapses to root",
+			repo:     "https://pods.internal.example/specs.git",
+			line:     "    - Firebase/Core",
+			wantName: "Firebase",
+			wantOK:   true,
+		},
+		{
+			name:   "missing current repo is ignored",
+			line:   "    - Alamofire",
+			wantOK: false,
+		},
+		{
+			name:   "repo header is ignored",
+			repo:   "trunk",
+			line:   "  trunk:",
+			wantOK: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			gotName, gotOK := parseCocoaPodsSpecRepoPackageLine(tt.repo, tt.line)
+			if gotOK != tt.wantOK {
+				t.Fatalf("parseCocoaPodsSpecRepoPackageLine() ok = %v, want %v", gotOK, tt.wantOK)
+			}
+			if gotName != tt.wantName {
+				t.Fatalf("parseCocoaPodsSpecRepoPackageLine() name = %q, want %q", gotName, tt.wantName)
+			}
+		})
+	}
+}
+
 func TestCocoaPodsParser_Parse(t *testing.T) {
 	t.Parallel()
 
@@ -101,6 +287,27 @@ SPEC REPOS:
 			wantCount: 1,
 			wantPkgs:  map[string]string{"Alamofire": "5.9.0"},
 		},
+		{
+			name: "dependency checksums and external source sections not extracted",
+			input: `PODS:
+  - Alamofire (5.9.0)
+
+DEPENDENCIES:
+  - DependencyOnly (1.0.0)
+
+SPEC CHECKSUMS:
+  ChecksumOnly: 42
+
+EXTERNAL SOURCES:
+  - ExternalOnly (2.0.0)
+
+SPEC REPOS:
+  trunk:
+    - Alamofire
+`,
+			wantCount: 1,
+			wantPkgs:  map[string]string{"Alamofire": "5.9.0"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -111,27 +318,16 @@ SPEC REPOS:
 				if err == nil {
 					t.Fatal("expected error, got nil")
 				}
-				if len(pkgs) != tt.wantCount {
-					t.Fatalf("got %d packages, want %d (with error)", len(pkgs), tt.wantCount)
-				}
-				return
-			}
-			if err != nil {
+			} else if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			if len(pkgs) != tt.wantCount {
+				if tt.wantErr {
+					t.Fatalf("got %d packages, want %d (with error)", len(pkgs), tt.wantCount)
+				}
 				t.Fatalf("got %d packages, want %d", len(pkgs), tt.wantCount)
 			}
-			for _, pkg := range pkgs {
-				if pkg.Ecosystem != domain.EcosystemCocoaPods {
-					t.Errorf("package %q ecosystem = %q, want %q", pkg.Name, pkg.Ecosystem, domain.EcosystemCocoaPods)
-				}
-				if wantVer, ok := tt.wantPkgs[pkg.Name]; ok {
-					if pkg.Version != wantVer {
-						t.Errorf("package %q version = %q, want %q", pkg.Name, pkg.Version, wantVer)
-					}
-				}
-			}
+			assertParsedPackages(t, pkgs, tt.wantPkgs, domain.EcosystemCocoaPods)
 		})
 	}
 }

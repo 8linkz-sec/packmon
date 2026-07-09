@@ -40,3 +40,61 @@ func TestParseRefRejectsInvalidReferences(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateRawRefRejectsUnsupportedForms(t *testing.T) {
+	tests := []string{"", " scratch ", "http://example.com/image:tag", "$EMPTY"}
+	for _, raw := range tests {
+		t.Run(raw, func(t *testing.T) {
+			if got, ok := validateRawRef(raw); ok {
+				t.Fatalf("validateRawRef(%q) = %q, true; want false", raw, got)
+			}
+		})
+	}
+}
+
+func TestSplitNameReferencePrioritizesDigestOverTag(t *testing.T) {
+	name, reference, digest, ok := splitNameReference("python:3.14.5-slim@sha256:aaaaaaaa")
+	if !ok {
+		t.Fatal("splitNameReference returned ok=false")
+	}
+	if name != "python" || reference != "sha256:aaaaaaaa" || !digest {
+		t.Fatalf("splitNameReference returned name=%q reference=%q digest=%v", name, reference, digest)
+	}
+}
+
+func TestSplitNameReferenceUsesLatestWhenNoTagOrDigest(t *testing.T) {
+	name, reference, digest, ok := splitNameReference("registry.example.test/acme/app")
+	if !ok {
+		t.Fatal("splitNameReference returned ok=false")
+	}
+	if name != "registry.example.test/acme/app" || reference != "latest" || digest {
+		t.Fatalf("splitNameReference returned name=%q reference=%q digest=%v", name, reference, digest)
+	}
+}
+
+func TestNormalizeRegistryAndRepository(t *testing.T) {
+	tests := []struct {
+		namePart        string
+		registry        string
+		displayRegistry string
+		repository      string
+	}{
+		{"alpine", "registry-1.docker.io", "docker.io", "library/alpine"},
+		{"library/postgres", "registry-1.docker.io", "docker.io", "library/postgres"},
+		{"docker.io/library/alpine", "registry-1.docker.io", "docker.io", "library/alpine"},
+		{"ghcr.io/acme/app", "ghcr.io", "ghcr.io", "acme/app"},
+		{"localhost:5000/acme/app", "localhost:5000", "localhost:5000", "acme/app"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.namePart, func(t *testing.T) {
+			registry, displayRegistry, repository, ok := normalizeRegistryAndRepository(tt.namePart)
+			if !ok {
+				t.Fatalf("normalizeRegistryAndRepository(%q) returned ok=false", tt.namePart)
+			}
+			if registry != tt.registry || displayRegistry != tt.displayRegistry || repository != tt.repository {
+				t.Fatalf("normalizeRegistryAndRepository(%q) = registry %q, displayRegistry %q, repository %q", tt.namePart, registry, displayRegistry, repository)
+			}
+		})
+	}
+}

@@ -10,13 +10,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/8linkz-sec/packmon/internal/domain"
 	"golang.org/x/mod/modfile"
 )
 
 type goGenerator struct{}
 
-func (goGenerator) Ecosystem() string { return "go" }
-func (goGenerator) Tool() string      { return "go" }
+func (goGenerator) Ecosystem() domain.Ecosystem { return domain.EcosystemGo }
+func (goGenerator) Tool() string                { return "go" }
 func (goGenerator) InstallSpec() InstallSpec {
 	return InstallSpec{
 		Package: "go",
@@ -38,7 +39,7 @@ func (goGenerator) Generate(ctx context.Context, d Detection, outPath string, op
 }
 
 func (goGenerator) DeclaresDependencies(d Detection, _ GenerateOptions) (bool, error) {
-	data, err := readAutoSBOMManifest(d.ManifestPath)
+	data, err := readAutoSBOMManifestScoped(d.ScanRoot, d.ManifestPath)
 	if err != nil {
 		return false, err
 	}

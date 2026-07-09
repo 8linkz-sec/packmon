@@ -3,8 +3,13 @@ package feed
 import (
 	"context"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"log/slog"
+	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -12,20 +17,31 @@ import (
 )
 
 type queueStoreStub struct {
-	mu             sync.Mutex
-	resetCalls     []string
-	resetThreshold time.Duration
-	resetCount     int
-	resetErr       error
-	resetBlock     chan struct{}
-	resetCtxErr    error
+	mu               sync.Mutex
+	resetCalls       []string
+	resetThreshold   time.Duration
+	resetCount       int
+	resetErr         error
+	resetBlock       chan struct{}
+	resetCtxErr      error
+	resetCtxDeadline bool
+	resetPanicSource string
+	resetPanicValue  any
 }
 
 func (s *queueStoreStub) ResetStuckJobs(ctx context.Context, source string, threshold time.Duration) (int, error) {
 	s.mu.Lock()
 	s.resetCalls = append(s.resetCalls, source)
 	s.resetThreshold = threshold
+	_, s.resetCtxDeadline = ctx.Deadline()
 	s.mu.Unlock()
+
+	if source == s.resetPanicSource {
+		if s.resetPanicValue != nil {
+			panic(s.resetPanicValue)
+		}
+		panic("reset panic")
+	}
 
 	if s.resetBlock != nil {
 		select {
@@ -184,16 +200,121 @@ func TestQueueProcessorBoundsStuckJobReset(t *testing.T) {
 	worker := &queueWorkerStub{name: "socket"}
 	q := NewQueueProcessor(store, slog.New(slog.NewTextHandler(io.Discard, nil)), []AsyncWorker{worker})
 
-	started := time.Now()
 	q.resetAllStuckJobs(context.Background())
-	if elapsed := time.Since(started); elapsed > time.Second {
-		t.Fatalf("resetAllStuckJobs elapsed = %v, want bounded timeout", elapsed)
-	}
 
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	if !store.resetCtxDeadline {
+		t.Fatal("reset context had no deadline")
+	}
 	if !errors.Is(store.resetCtxErr, context.DeadlineExceeded) {
 		t.Fatalf("reset context error = %v, want deadline exceeded", store.resetCtxErr)
+	}
+}
+
+func TestQueueProcessorContainsResetPanicPerSource(t *testing.T) {
+	store := &queueStoreStub{
+		resetCount:       1,
+		resetPanicSource: "socket",
+		resetPanicValue:  "reset boom",
+	}
+	workers := []AsyncWorker{
+		&queueWorkerStub{name: "socket"},
+		&queueWorkerStub{name: "reversinglabs"},
+	}
+	var logs strings.Builder
+	recorder := newRecordingMetricsRecorder()
+	q := NewQueueProcessor(store, slog.New(slog.NewJSONHandler(&logs, nil)), workers, WithMetricsRecorder(recorder))
+
+	q.resetAllStuckJobs(context.Background())
+
+	store.mu.Lock()
+	resetCalls := append([]string(nil), store.resetCalls...)
+	store.mu.Unlock()
+	if len(resetCalls) != 2 || resetCalls[0] != "socket" || resetCalls[1] != "reversinglabs" {
+		t.Fatalf("reset calls = %#v, want panic source followed by next source", resetCalls)
+	}
+	logLine := logs.String()
+	for _, want := range []string{"stuck job reset panic recovered", "socket", "reset boom"} {
+		if !strings.Contains(logLine, want) {
+			t.Fatalf("logs missing %q in %s", want, logLine)
+		}
+	}
+	if got := recorder.queueErrors["socket"]; got != 1 {
+		t.Fatalf("queue errors for socket = %d, want 1", got)
+	}
+}
+
+func TestQueueProcessorRunKeepsRestartFlowInHelpers(t *testing.T) {
+	t.Parallel()
+
+	src, err := os.ReadFile("queue.go")
+	if err != nil {
+		t.Fatalf("read queue.go: %v", err)
+	}
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "queue.go", src, 0)
+	if err != nil {
+		t.Fatalf("parse queue.go: %v", err)
+	}
+
+	runBody := queueProcessorMethodBody(t, fset, file, src, "Run")
+	for _, marker := range []string{
+		"restartCounts",
+		"workerBackoffs",
+		"worker crashed, scheduling restart",
+		"worker permanently failed after max restarts",
+		"time.After",
+	} {
+		if strings.Contains(runBody, marker) {
+			t.Fatalf("QueueProcessor.Run contains restart-flow marker %q; keep this flow in named helpers", marker)
+		}
+	}
+	for _, helper := range []string{
+		"newWorkerLifecycleState",
+		"startWorkers",
+		"handleWorkerResult",
+		"drainWorkersOnShutdown",
+	} {
+		if !strings.Contains(runBody, helper) {
+			t.Fatalf("QueueProcessor.Run does not call helper %q", helper)
+		}
+	}
+	for _, helper := range []string{"startWorker", "restartWorkerAfterBackoff"} {
+		body := queueProcessorMethodBody(t, fset, file, src, helper)
+		if strings.Contains(body, "recover()") {
+			t.Fatalf("QueueProcessor worker helper %s must not recover worker panics; this refactor must preserve prior worker behavior", helper)
+		}
+	}
+}
+
+func queueProcessorMethodBody(t *testing.T, fset *token.FileSet, file *ast.File, src []byte, name string) string {
+	t.Helper()
+
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != name || fn.Recv == nil || len(fn.Recv.List) != 1 || fn.Body == nil {
+			continue
+		}
+		if exprString(fn.Recv.List[0].Type) != "*QueueProcessor" {
+			continue
+		}
+		start := fset.Position(fn.Body.Pos()).Offset
+		end := fset.Position(fn.Body.End()).Offset
+		return string(src[start:end])
+	}
+	t.Fatalf("QueueProcessor.%s not found", name)
+	return ""
+}
+
+func exprString(expr ast.Expr) string {
+	switch e := expr.(type) {
+	case *ast.Ident:
+		return e.Name
+	case *ast.StarExpr:
+		return "*" + exprString(e.X)
+	default:
+		return ""
 	}
 }
 

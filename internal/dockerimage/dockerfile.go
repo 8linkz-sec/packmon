@@ -7,6 +7,9 @@ import (
 	"strings"
 )
 
+// ParseDockerfileImages parses FROM image references from a Dockerfile reader.
+// It returns list-all/report-only inventory rows with source metadata and line
+// flags; parser errors are meant to be surfaced as inventory coverage warnings.
 func ParseDockerfileImages(r io.Reader, sourceFile string) ([]Image, error) {
 	scanner := bufio.NewScanner(r)
 	args := make(map[string]string)
@@ -26,56 +29,72 @@ func ParseDockerfileImages(r io.Reader, sourceFile string) ([]Image, error) {
 		}
 		switch strings.ToUpper(fields[0]) {
 		case "ARG":
-			name, value, ok := parseDockerArg(strings.TrimSpace(strings.TrimPrefix(line, fields[0])))
-			if ok && value != "" {
-				args[name] = value
-			}
+			handleDockerfileArg(strings.TrimSpace(strings.TrimPrefix(line, fields[0])), args)
 		case "FROM":
-			fromFields := dockerfileFromFields(fields[1:])
-			if len(fromFields) == 0 {
-				return nil, fmt.Errorf("%s:%d: FROM without image", sourceFile, lineNo)
+			image, ok, err := handleDockerfileFrom(fields[1:], args, stages, sourceFile, lineNo)
+			if err != nil {
+				return nil, err
 			}
-			raw := substituteDockerArgs(fromFields[0], args)
-			alias := dockerfileStageAlias(fromFields)
-			if _, ok := stages[strings.ToLower(raw)]; ok {
-				if alias != "" {
-					stages[strings.ToLower(alias)] = struct{}{}
-				}
-				continue
+			if ok {
+				images = append(images, image)
 			}
-			ref, ok := ParseRef(raw)
-			if !ok {
-				if strings.EqualFold(raw, "scratch") {
-					if alias != "" {
-						stages[strings.ToLower(alias)] = struct{}{}
-					}
-					continue
-				}
-				return nil, fmt.Errorf("%s:%d: invalid FROM image %q", sourceFile, lineNo, raw)
-			}
-			if alias != "" {
-				stages[strings.ToLower(alias)] = struct{}{}
-			}
-			images = append(images, Image{
-				Ref:        ref,
-				SourceFile: sourceFile,
-				SourceType: SourceDockerfile,
-				Scope:      "runtime",
-				Relation:   "base",
-				Direct:     true,
-				Flags:      dockerfileFlags(fromFields),
-			})
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("%s: read Dockerfile: %w", sourceFile, err)
 	}
-	for i := range images {
-		if i == 0 && len(images) > 1 {
-			images[i].Scope = "build"
-		}
-	}
+	markDockerfileBuildStages(images)
 	return images, nil
+}
+
+func handleDockerfileArg(raw string, args map[string]string) {
+	name, value, ok := parseDockerArg(raw)
+	if ok && value != "" {
+		args[name] = value
+	}
+}
+
+func handleDockerfileFrom(fields []string, args map[string]string, stages map[string]struct{}, sourceFile string, lineNo int) (Image, bool, error) {
+	fromFields := dockerfileFromFields(fields)
+	if len(fromFields) == 0 {
+		return Image{}, false, fmt.Errorf("%s:%d: FROM without image", sourceFile, lineNo)
+	}
+	raw := substituteDockerArgs(fromFields[0], args)
+	alias := dockerfileStageAlias(fromFields)
+	if _, ok := stages[strings.ToLower(raw)]; ok {
+		markDockerfileStageAlias(stages, alias)
+		return Image{}, false, nil
+	}
+	ref, ok := ParseRef(raw)
+	if !ok {
+		if strings.EqualFold(raw, "scratch") {
+			markDockerfileStageAlias(stages, alias)
+			return Image{}, false, nil
+		}
+		return Image{}, false, fmt.Errorf("%s:%d: invalid FROM image", sourceFile, lineNo)
+	}
+	markDockerfileStageAlias(stages, alias)
+	return Image{
+		Ref:        ref,
+		SourceFile: sourceFile,
+		SourceType: SourceDockerfile,
+		Scope:      "runtime",
+		Relation:   "base",
+		Direct:     true,
+		Flags:      dockerfileFlags(fromFields),
+	}, true, nil
+}
+
+func markDockerfileStageAlias(stages map[string]struct{}, alias string) {
+	if alias != "" {
+		stages[strings.ToLower(alias)] = struct{}{}
+	}
+}
+
+func markDockerfileBuildStages(images []Image) {
+	if len(images) > 1 {
+		images[0].Scope = "build"
+	}
 }
 
 func stripDockerfileComment(line string) string {

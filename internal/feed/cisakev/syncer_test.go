@@ -19,26 +19,39 @@ import (
 
 type kevStoreStub struct {
 	db.Store
+	status           *db.FeedSyncStatus
 	setCISAKEVIDs    []string
 	clearCISAKEVKeep []string
+	replaceCVEIDs    []string
+	getStatusCalled  bool
 	setCalled        bool
 	clearCalled      bool
+	replaceCalled    bool
 	setUpdated       int
 	clearCleared     int
+	replaceUpdated   int
+	replaceCleared   int
 	setErr           error
 	clearErr         error
+	replaceErr       error
 }
 
-type kevReplaceStoreStub struct {
-	kevStoreStub
-	replaceCalled  bool
-	replaceCVEIDs  []string
-	replaceUpdated int
-	replaceCleared int
-	replaceErr     error
+func (s *kevStoreStub) GetFeedSyncStatus(_ context.Context, name string) (*db.FeedSyncStatus, error) {
+	s.getStatusCalled = true
+	if name != feedName {
+		return nil, nil
+	}
+	if s.status == nil {
+		return nil, nil
+	}
+	status := *s.status
+	if s.status.Metadata != nil {
+		status.Metadata = append([]byte(nil), s.status.Metadata...)
+	}
+	return &status, nil
 }
 
-func (s *kevReplaceStoreStub) ReplaceCISAKEV(_ context.Context, cveIDs []string) (int, int, error) {
+func (s *kevStoreStub) ReplaceCISAKEV(_ context.Context, cveIDs []string) (int, int, error) {
 	s.replaceCalled = true
 	s.replaceCVEIDs = cveIDs
 	if s.replaceErr != nil {
@@ -134,18 +147,21 @@ func TestSync_ParsesKEVCatalog(t *testing.T) {
 		t.Errorf("EntriesSynced = %d, want 2", result.EntriesSynced)
 	}
 
-	// Verify the store received the correct CVE IDs.
-	if len(store.setCISAKEVIDs) != 2 {
-		t.Fatalf("SetCISAKEV called with %d IDs, want 2", len(store.setCISAKEVIDs))
+	// Verify the store received the complete snapshot.
+	if !store.replaceCalled || len(store.replaceCVEIDs) != 2 {
+		t.Fatalf("ReplaceCISAKEV called = %v with %d IDs, want 2", store.replaceCalled, len(store.replaceCVEIDs))
+	}
+	if store.setCalled || store.clearCalled {
+		t.Fatalf("separate KEV mutations called despite replacement contract: set=%v clear=%v", store.setCalled, store.clearCalled)
 	}
 
 	expected := map[string]bool{
 		"CVE-2021-44228": true,
 		"CVE-2023-0001":  true,
 	}
-	for _, id := range store.setCISAKEVIDs {
+	for _, id := range store.replaceCVEIDs {
 		if !expected[id] {
-			t.Errorf("unexpected CVE ID %q in SetCISAKEV call", id)
+			t.Errorf("unexpected CVE ID %q in ReplaceCISAKEV call", id)
 		}
 	}
 }
@@ -170,7 +186,7 @@ func TestSync_UsesAtomicReplacementWhenAvailable(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	store := &kevReplaceStoreStub{replaceCleared: 2}
+	store := &kevStoreStub{replaceCleared: 2}
 	syncer := NewSyncer(discardLogger(),
 		WithCatalogURL(srv.URL),
 		WithHTTPClient(srv.Client()),
@@ -191,6 +207,117 @@ func TestSync_UsesAtomicReplacementWhenAvailable(t *testing.T) {
 	}
 }
 
+func TestSync_SendsStoredHTTPValidatorsAndPersistsUpdatedMetadata(t *testing.T) {
+	t.Parallel()
+
+	catalogJSON, err := json.Marshal(catalog{
+		CatalogVersion: "2026.04.04",
+		Count:          1,
+		Vulnerabilities: []catalogVulnEntry{
+			{CVEID: "CVE-2026-0001"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal catalog: %v", err)
+	}
+
+	store := &kevStoreStub{
+		status: &db.FeedSyncStatus{
+			FeedName:       feedName,
+			LastSyncStatus: db.FeedSyncStatusSuccess,
+			LastETag:       `"stored-etag"`,
+			Metadata:       []byte(`{"last_modified":"Mon, 01 Jun 2026 12:00:00 GMT"}`),
+			EntriesSynced:  4,
+			EntriesTotal:   4,
+		},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("If-None-Match"); got != `"stored-etag"` {
+			t.Fatalf("If-None-Match = %q, want stored ETag", got)
+		}
+		if got := r.Header.Get("If-Modified-Since"); got != "Mon, 01 Jun 2026 12:00:00 GMT" {
+			t.Fatalf("If-Modified-Since = %q, want stored Last-Modified", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("ETag", `"new-etag"`)
+		w.Header().Set("Last-Modified", "Tue, 02 Jun 2026 12:00:00 GMT")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(catalogJSON)
+	}))
+	defer srv.Close()
+
+	syncer := NewSyncer(discardLogger(),
+		WithCatalogURL(srv.URL),
+		WithHTTPClient(srv.Client()),
+	)
+
+	result, err := syncer.Sync(context.Background(), store)
+	if err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	if !store.getStatusCalled {
+		t.Fatal("GetFeedSyncStatus was not called")
+	}
+	if !store.replaceCalled {
+		t.Fatal("ReplaceCISAKEV was not called for modified catalog")
+	}
+	assertCISAKEVMetadata(t, result.Metadata, map[string]string{
+		"etag":            `"new-etag"`,
+		"last_modified":   "Tue, 02 Jun 2026 12:00:00 GMT",
+		"catalog_version": "2026.04.04",
+	})
+}
+
+func TestSync_TreatsNotModifiedAsSuccessfulUnchangedSync(t *testing.T) {
+	t.Parallel()
+
+	store := &kevStoreStub{
+		status: &db.FeedSyncStatus{
+			FeedName:       feedName,
+			LastSyncStatus: db.FeedSyncStatusSuccess,
+			LastETag:       `"stored-etag"`,
+			Metadata:       []byte(`{"last_modified":"Mon, 01 Jun 2026 12:00:00 GMT"}`),
+			EntriesSynced:  7,
+			EntriesTotal:   9,
+		},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("If-None-Match"); got != `"stored-etag"` {
+			t.Fatalf("If-None-Match = %q, want stored ETag", got)
+		}
+		if got := r.Header.Get("If-Modified-Since"); got != "Mon, 01 Jun 2026 12:00:00 GMT" {
+			t.Fatalf("If-Modified-Since = %q, want stored Last-Modified", got)
+		}
+		w.Header().Set("ETag", `"stored-etag"`)
+		w.Header().Set("Last-Modified", "Mon, 01 Jun 2026 12:00:00 GMT")
+		w.WriteHeader(http.StatusNotModified)
+	}))
+	defer srv.Close()
+
+	syncer := NewSyncer(discardLogger(),
+		WithCatalogURL(srv.URL),
+		WithHTTPClient(srv.Client()),
+	)
+
+	result, err := syncer.Sync(context.Background(), store)
+	if err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	if result == nil {
+		t.Fatal("Sync() result = nil, want unchanged success result")
+	}
+	if result.EntriesSynced != 7 || result.EntriesTotal != 9 {
+		t.Fatalf("Sync() result = %+v, want preserved counts 7/9", result)
+	}
+	if store.replaceCalled || store.setCalled || store.clearCalled {
+		t.Fatalf("store mutated on 304: replace=%v set=%v clear=%v", store.replaceCalled, store.setCalled, store.clearCalled)
+	}
+	assertCISAKEVMetadata(t, result.Metadata, map[string]string{
+		"etag":          `"stored-etag"`,
+		"last_modified": "Mon, 01 Jun 2026 12:00:00 GMT",
+	})
+}
+
 func TestSync_RejectsInvalidOrEmptyCatalogWithoutMutating(t *testing.T) {
 	t.Parallel()
 
@@ -198,6 +325,10 @@ func TestSync_RejectsInvalidOrEmptyCatalogWithoutMutating(t *testing.T) {
 		name string
 		body string
 	}{
+		{
+			name: "malformed json",
+			body: `{`,
+		},
 		{
 			name: "missing vulnerabilities",
 			body: `{"error":"rate limited"}`,
@@ -239,18 +370,87 @@ func TestSync_RejectsInvalidOrEmptyCatalogWithoutMutating(t *testing.T) {
 			if err == nil {
 				t.Fatal("Sync() error = nil, want invalid catalog error")
 			}
+			if !feed.IsNonRetryableError(err) {
+				t.Fatalf("Sync() error = %v, want non-retryable invalid catalog error", err)
+			}
 			if result != nil {
 				t.Fatalf("Sync() result = %+v, want nil", result)
 			}
-			if store.setCalled || store.clearCalled {
-				t.Fatalf("store mutated for invalid catalog: set=%v clear=%v setIDs=%+v clearKeep=%+v",
+			if store.setCalled || store.clearCalled || store.replaceCalled {
+				t.Fatalf("store mutated for invalid catalog: set=%v clear=%v replace=%v setIDs=%+v clearKeep=%+v replaceIDs=%+v",
 					store.setCalled,
 					store.clearCalled,
+					store.replaceCalled,
 					store.setCISAKEVIDs,
 					store.clearCISAKEVKeep,
+					store.replaceCVEIDs,
 				)
 			}
 		})
+	}
+}
+
+func TestSync_RejectsOversizedCatalogWithValidJSONPrefixWithoutMutating(t *testing.T) {
+	t.Parallel()
+
+	type paddedCatalog struct {
+		Title           string             `json:"title"`
+		CatalogVersion  string             `json:"catalogVersion"`
+		DateReleased    string             `json:"dateReleased"`
+		Count           int                `json:"count"`
+		Vulnerabilities []catalogVulnEntry `json:"vulnerabilities"`
+		Padding         string             `json:"padding"`
+	}
+
+	payload := paddedCatalog{
+		Title:          "CISA KEV",
+		CatalogVersion: "2026.04.03",
+		DateReleased:   "2026-04-03",
+		Count:          1,
+		Vulnerabilities: []catalogVulnEntry{
+			{CVEID: "CVE-2026-0001"},
+		},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal catalog: %v", err)
+	}
+	paddingLen := maxBodySize - len(body)
+	if paddingLen <= 0 {
+		t.Fatalf("test catalog length = %d, want less than max body size %d", len(body), maxBodySize)
+	}
+	payload.Padding = strings.Repeat("a", paddingLen)
+	body, err = json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal padded catalog: %v", err)
+	}
+	if len(body) != maxBodySize {
+		t.Fatalf("padded catalog length = %d, want %d", len(body), maxBodySize)
+	}
+	body = append(body, 'x')
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	store := &kevStoreStub{}
+	syncer := NewSyncer(discardLogger(),
+		WithCatalogURL(srv.URL),
+		WithHTTPClient(srv.Client()),
+	)
+
+	result, err := syncer.Sync(context.Background(), store)
+	if err == nil {
+		t.Fatal("Sync() error = nil, want oversized body error")
+	}
+	if result != nil {
+		t.Fatalf("Sync() result = %+v, want nil", result)
+	}
+	if store.setCalled || store.clearCalled || store.replaceCalled {
+		t.Fatalf("store mutated for oversized catalog: set=%v clear=%v replace=%v", store.setCalled, store.clearCalled, store.replaceCalled)
 	}
 }
 
@@ -279,6 +479,37 @@ func TestSync_HandlesHTTPError(t *testing.T) {
 	}
 }
 
+func TestSync_ReturnsTransportErrorWithoutMutatingCISAKEV(t *testing.T) {
+	t.Parallel()
+
+	transportErr := errors.New("dial tcp: lookup cisa.example.test: no such host")
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, transportErr
+	})}
+	store := &kevStoreStub{}
+	syncer := NewSyncer(discardLogger(),
+		WithCatalogURL("https://cisa.example.test/known_exploited_vulnerabilities.json"),
+		WithHTTPClient(client),
+	)
+
+	result, err := syncer.Sync(context.Background(), store)
+	if err == nil {
+		t.Fatal("Sync() error = nil, want transport error")
+	}
+	if !errors.Is(err, transportErr) {
+		t.Fatalf("Sync() error = %v, want wrapped transport error", err)
+	}
+	if !strings.Contains(err.Error(), "cisakev: download catalog") || !strings.Contains(err.Error(), "http get") {
+		t.Fatalf("Sync() error = %v, want download and HTTP context", err)
+	}
+	if result != nil {
+		t.Fatalf("Sync() result = %+v, want nil", result)
+	}
+	if store.setCalled || store.clearCalled || store.replaceCalled {
+		t.Fatalf("store mutated: set=%v clear=%v replace=%v", store.setCalled, store.clearCalled, store.replaceCalled)
+	}
+}
+
 func TestSync_PropagatesStoreErrors(t *testing.T) {
 	t.Parallel()
 
@@ -304,8 +535,7 @@ func TestSync_PropagatesStoreErrors(t *testing.T) {
 		store *kevStoreStub
 		want  string
 	}{
-		{name: "set", store: &kevStoreStub{setErr: errors.New("set failed")}, want: "set flags"},
-		{name: "clear", store: &kevStoreStub{clearErr: errors.New("clear failed")}, want: "clear stale flags"},
+		{name: "replace", store: &kevStoreStub{replaceErr: errors.New("replace failed")}, want: "replace flags"},
 	}
 
 	for _, tt := range tests {
@@ -394,11 +624,14 @@ func TestSync_RejectsEmptyCVEIDsWithoutMutating(t *testing.T) {
 	if err == nil {
 		t.Fatal("Sync() error = nil, want invalid catalog error")
 	}
+	if !feed.IsNonRetryableError(err) {
+		t.Fatalf("Sync() error = %v, want non-retryable invalid catalog error", err)
+	}
 	if result != nil {
 		t.Fatalf("Sync() result = %+v, want nil", result)
 	}
-	if store.setCalled || store.clearCalled {
-		t.Fatalf("store mutated for invalid catalog: set=%v clear=%v", store.setCalled, store.clearCalled)
+	if store.setCalled || store.clearCalled || store.replaceCalled {
+		t.Fatalf("store mutated for invalid catalog: set=%v clear=%v replace=%v", store.setCalled, store.clearCalled, store.replaceCalled)
 	}
 }
 
@@ -413,6 +646,23 @@ func TestSyncerName(t *testing.T) {
 
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func assertCISAKEVMetadata(t *testing.T, raw json.RawMessage, want map[string]string) {
+	t.Helper()
+
+	if len(raw) == 0 {
+		t.Fatal("metadata is empty")
+	}
+	var got map[string]string
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal metadata: %v", err)
+	}
+	for key, wantValue := range want {
+		if got[key] != wantValue {
+			t.Fatalf("metadata[%q] = %q, want %q in %s", key, got[key], wantValue, raw)
+		}
+	}
 }
 
 // Verify compile-time interface compliance.

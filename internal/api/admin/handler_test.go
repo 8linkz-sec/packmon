@@ -1,8 +1,10 @@
 package admin
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -26,6 +28,7 @@ type adminStoreStub struct {
 	db.Store
 	adminAuth *db.AdminAuth
 	auditLogs []*db.AdminAuditEntry
+	auditErr  error
 
 	feedStatuses []db.FeedSyncStatus
 	queueStats   *db.QueueStatsResult
@@ -41,6 +44,9 @@ func (s *adminStoreStub) UpsertAdminAuth(_ context.Context, _ string, _ bool) er
 }
 
 func (s *adminStoreStub) InsertAdminAuditLog(_ context.Context, entry *db.AdminAuditEntry) error {
+	if s.auditErr != nil {
+		return s.auditErr
+	}
 	s.auditLogs = append(s.auditLogs, entry)
 	return nil
 }
@@ -83,7 +89,7 @@ func minimalTemplateFS() fstest.MapFS {
 
 // testRenderer creates a web.Renderer backed by the minimal template FS.
 func testRenderer() *web.Renderer {
-	return web.NewRenderer(minimalTemplateFS(), true)
+	return web.NewRendererWithLayoutLinks(minimalTemplateFS(), true, web.LayoutLinks{})
 }
 
 // -- Helper: create handler for tests -----------------------------------------
@@ -91,14 +97,14 @@ func testRenderer() *web.Renderer {
 func testHandler(t *testing.T, store *adminStoreStub) (*AdminHandler, *auth.SessionManager) {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	sm := auth.NewSessionManager(context.Background(), 8*time.Hour, false)
+	sm := auth.NewSessionManagerWithIdleTimeout(context.Background(), 8*time.Hour, auth.DefaultAdminIdleTimeout, false)
 	cfg := &config.Config{
 		Server: config.ServerConfig{Mode: config.ModeDevelopment},
 	}
 	// Create the handler directly, bypassing NewAdminHandler to avoid
 	// the background cleanup goroutine leaking in tests.
 	h := &AdminHandler{
-		store:         store,
+		store:         adaptAdminStore(store),
 		sm:            sm,
 		renderer:      testRenderer(),
 		logger:        logger,
@@ -170,6 +176,9 @@ func TestHandleLogin_Success(t *testing.T) {
 	foundNewSession := false
 	for _, c := range resp.Cookies() {
 		if c.Name == auth.SessionCookieName && c.Value != "" {
+			if c.Value == sess.ID {
+				t.Fatal("successful login reused the pre-auth session ID for the admin session")
+			}
 			foundNewSession = true
 			break
 		}
@@ -191,6 +200,56 @@ func TestHandleLogin_Success(t *testing.T) {
 	}
 }
 
+func TestHandleLoginSuccessFailsClosedWhenAuditFails(t *testing.T) {
+	t.Parallel()
+
+	passwordHash, err := auth.HashPassword("correct-password")
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	store := &adminStoreStub{
+		adminAuth: &db.AdminAuth{
+			PasswordHash: passwordHash,
+			CreatedAt:    time.Now(),
+		},
+		auditErr: errors.New("audit down"),
+	}
+	h, sm := testHandler(t, store)
+
+	sess, err := sm.CreatePreAuth(httptest.NewRecorder())
+	if err != nil {
+		t.Fatalf("CreatePreAuth session: %v", err)
+	}
+	csrfToken, err := auth.CSRFToken(sess)
+	if err != nil {
+		t.Fatalf("CSRFToken: %v", err)
+	}
+
+	form := url.Values{
+		"username": {"admin"},
+		"password": {"correct-password"},
+		"_csrf":    {csrfToken},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/admin/login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.RemoteAddr = "127.0.0.1:12345"
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: sess.ID}) //nolint:gosec // test injects an in-memory session cookie.
+	rec := httptest.NewRecorder()
+
+	h.HandleLogin(rec, req)
+
+	resp := rec.Result()
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 when login audit fails", resp.StatusCode)
+	}
+	for _, c := range resp.Cookies() {
+		if c.Name == auth.SessionCookieName && c.Value != "" && c.MaxAge >= 0 {
+			t.Fatalf("new admin session cookie set despite audit failure: %+v", c)
+		}
+	}
+}
+
 func TestHandleLoginSuccessRedirectsToSafeNextTarget(t *testing.T) {
 	t.Parallel()
 
@@ -201,9 +260,9 @@ func TestHandleLoginSuccessRedirectsToSafeNextTarget(t *testing.T) {
 	store := &adminStoreStub{adminAuth: &db.AdminAuth{PasswordHash: passwordHash, CreatedAt: time.Now()}}
 	h, sm := testHandler(t, store)
 
-	sess, err := sm.Create(httptest.NewRecorder())
+	sess, err := sm.CreateAdmin(httptest.NewRecorder(), false)
 	if err != nil {
-		t.Fatalf("Create session: %v", err)
+		t.Fatalf("CreateAdmin session: %v", err)
 	}
 	csrfToken, err := auth.CSRFToken(sess)
 	if err != nil {
@@ -242,9 +301,9 @@ func TestHandleLoginSuccessRejectsUnsafeNextTarget(t *testing.T) {
 	store := &adminStoreStub{adminAuth: &db.AdminAuth{PasswordHash: passwordHash, CreatedAt: time.Now()}}
 	h, sm := testHandler(t, store)
 
-	sess, err := sm.Create(httptest.NewRecorder())
+	sess, err := sm.CreateAdmin(httptest.NewRecorder(), false)
 	if err != nil {
-		t.Fatalf("Create session: %v", err)
+		t.Fatalf("CreateAdmin session: %v", err)
 	}
 	csrfToken, err := auth.CSRFToken(sess)
 	if err != nil {
@@ -451,6 +510,62 @@ func TestAdminLoginAuditDetailsUseIPColumnOnly(t *testing.T) {
 	assertAdminAuditUsesIPColumnOnly(t, loginLockout, ip)
 }
 
+func TestAdminLoginLogoutSuccessLogsOmitIPAndAuditKeepsIP(t *testing.T) {
+	t.Parallel()
+
+	passwordHash, err := auth.HashPassword("correct-password")
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	store := &adminStoreStub{
+		adminAuth: &db.AdminAuth{
+			PasswordHash: passwordHash,
+			CreatedAt:    time.Now(),
+		},
+	}
+	h, sm := testHandler(t, store)
+	var logBuffer bytes.Buffer
+	h.logger = slog.New(slog.NewJSONHandler(&logBuffer, nil))
+
+	loginIP := "198.51.100.77"
+	rec := postAdminLogin(t, h, sm, loginIP, "admin", "correct-password")
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("login status = %d, want %d", rec.Code, http.StatusSeeOther)
+	}
+	loginSuccess := adminTestAuditEntry(t, store.auditLogs, "login_success")
+	assertAdminAuditUsesIPColumnOnly(t, loginSuccess, loginIP)
+
+	logoutIP := "203.0.113.88"
+	sessRec := httptest.NewRecorder()
+	sess, err := sm.CreateAdmin(sessRec, false)
+	if err != nil {
+		t.Fatalf("CreateAdmin session: %v", err)
+	}
+	csrfToken, err := auth.CSRFToken(sess)
+	if err != nil {
+		t.Fatalf("CSRFToken: %v", err)
+	}
+	form := url.Values{"_csrf": {csrfToken}}
+	req := httptest.NewRequest(http.MethodPost, "/admin/logout", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.RemoteAddr = logoutIP + ":12345"
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: sess.ID}) //nolint:gosec // test injects an in-memory session cookie.
+	rec = httptest.NewRecorder()
+	h.HandleLogout(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("logout status = %d, want %d", rec.Code, http.StatusSeeOther)
+	}
+	logout := adminTestAuditEntry(t, store.auditLogs, "logout")
+	assertAdminAuditUsesIPColumnOnly(t, logout, logoutIP)
+
+	logOutput := logBuffer.String()
+	if strings.Contains(logOutput, loginIP) || strings.Contains(logOutput, logoutIP) {
+		t.Fatalf("success operational logs contain client IP: %s", logOutput)
+	}
+	assertAdminOperationalLogOmitsIPAttr(t, logOutput, "admin login successful")
+	assertAdminOperationalLogOmitsIPAttr(t, logOutput, "admin logout")
+}
+
 func TestLockedOutLoginIncrementsFailureMetric(t *testing.T) {
 	store := &adminStoreStub{}
 	h, sm := testHandler(t, store)
@@ -469,6 +584,22 @@ func TestLockedOutLoginIncrementsFailureMetric(t *testing.T) {
 	}
 }
 
+func TestLockedOutLoginSecurityLogUsesClientIPField(t *testing.T) {
+	store := &adminStoreStub{}
+	h, sm := testHandler(t, store)
+	var logBuffer bytes.Buffer
+	h.logger = slog.New(slog.NewJSONHandler(&logBuffer, nil))
+
+	ip := "192.0.2.93"
+	h.loginMu.Lock()
+	h.loginAttempts[ip] = &loginAttempt{count: loginMaxAttempts, lockedAt: time.Now()}
+	h.loginMu.Unlock()
+
+	postAdminLogin(t, h, sm, ip, "admin", "anything")
+
+	assertAdminOperationalLogUsesClientIPAttr(t, logBuffer.String(), "login attempt from locked out principal", ip)
+}
+
 func TestHandleLogout_RequiresCSRF(t *testing.T) {
 	t.Parallel()
 
@@ -477,7 +608,7 @@ func TestHandleLogout_RequiresCSRF(t *testing.T) {
 
 	// Create a valid admin session.
 	sessRec := httptest.NewRecorder()
-	sess, _ := sm.Create(sessRec)
+	sess, _ := sm.CreateAdmin(sessRec, false)
 	_, _ = auth.CSRFToken(sess)
 
 	// POST with an invalid CSRF token.
@@ -512,6 +643,39 @@ func TestHandleLogout_RequiresCSRF(t *testing.T) {
 		if entry.Action == "logout" {
 			t.Error("logout audit log entry should NOT be written when CSRF fails")
 		}
+	}
+}
+
+func TestHandleLogoutFailsClosedWhenAuditFails(t *testing.T) {
+	t.Parallel()
+
+	store := &adminStoreStub{auditErr: errors.New("audit down")}
+	h, sm := testHandler(t, store)
+
+	sessRec := httptest.NewRecorder()
+	sess, err := sm.CreateAdmin(sessRec, false)
+	if err != nil {
+		t.Fatalf("CreateAdmin session: %v", err)
+	}
+	csrfToken, err := auth.CSRFToken(sess)
+	if err != nil {
+		t.Fatalf("CSRFToken: %v", err)
+	}
+
+	form := url.Values{"_csrf": {csrfToken}}
+	req := httptest.NewRequest(http.MethodPost, "/admin/logout", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.RemoteAddr = "127.0.0.1:12345"
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: sess.ID}) //nolint:gosec // test injects an in-memory session cookie.
+	rec := httptest.NewRecorder()
+
+	h.HandleLogout(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 when logout audit fails", rec.Code)
+	}
+	if got := sm.Get(req); got == nil || got.ID != sess.ID {
+		t.Fatalf("session was deleted despite logout audit failure: %+v", got)
 	}
 }
 
@@ -627,6 +791,47 @@ func TestHandleLogin_GET_RendersForm(t *testing.T) {
 	}
 	if !foundSession {
 		t.Error("GET /admin/login should set a session cookie for CSRF")
+	}
+}
+
+func TestHandleLoginGETReusesExistingPreAuthSession(t *testing.T) {
+	t.Parallel()
+
+	store := &adminStoreStub{}
+	h, sm := testHandler(t, store)
+
+	firstReq := httptest.NewRequest(http.MethodGet, "/admin/login", nil)
+	firstReq.RemoteAddr = "127.0.0.1:12345"
+	firstRec := httptest.NewRecorder()
+	h.HandleLogin(firstRec, firstReq)
+
+	firstResp := firstRec.Result()
+	defer func() { _ = firstResp.Body.Close() }()
+	if firstResp.StatusCode != http.StatusOK {
+		t.Fatalf("first status = %d, want %d", firstResp.StatusCode, http.StatusOK)
+	}
+	firstCookie := adminLoginSessionCookie(t, firstResp)
+
+	secondReq := httptest.NewRequest(http.MethodGet, "/admin/login", nil)
+	secondReq.RemoteAddr = "127.0.0.1:12345"
+	secondReq.AddCookie(firstCookie)
+	secondRec := httptest.NewRecorder()
+	h.HandleLogin(secondRec, secondReq)
+
+	secondResp := secondRec.Result()
+	defer func() { _ = secondResp.Body.Close() }()
+	if secondResp.StatusCode != http.StatusOK {
+		t.Fatalf("second status = %d, want %d", secondResp.StatusCode, http.StatusOK)
+	}
+	secondCookie := adminLoginSessionCookie(t, secondResp)
+	if secondCookie.Value != firstCookie.Value {
+		t.Fatalf("second login GET session cookie = %q, want reused pre-auth session %q", secondCookie.Value, firstCookie.Value)
+	}
+
+	sessionReq := httptest.NewRequest(http.MethodGet, "/admin/login", nil)
+	sessionReq.AddCookie(secondCookie)
+	if sess := sm.Get(sessionReq); sess == nil || sess.Admin {
+		t.Fatalf("reused login session = %+v, want valid non-admin pre-auth session", sess)
 	}
 }
 
@@ -900,6 +1105,18 @@ func adminTestAuditCount(entries []*db.AdminAuditEntry, action string) int {
 	return count
 }
 
+func adminLoginSessionCookie(t *testing.T, resp *http.Response) *http.Cookie {
+	t.Helper()
+
+	for _, c := range resp.Cookies() {
+		if c.Name == auth.SessionCookieName {
+			return c
+		}
+	}
+	t.Fatal("response did not set login session cookie")
+	return nil
+}
+
 func adminTestAuditEntry(t *testing.T, entries []*db.AdminAuditEntry, action string) *db.AdminAuditEntry {
 	t.Helper()
 	for i := len(entries) - 1; i >= 0; i-- {
@@ -926,4 +1143,47 @@ func assertAdminAuditUsesIPColumnOnly(t *testing.T, entry *db.AdminAuditEntry, w
 	if _, ok := details["ip"]; ok {
 		t.Fatalf("audit details duplicate IP: %v", details)
 	}
+}
+
+func assertAdminOperationalLogOmitsIPAttr(t *testing.T, logOutput, wantMsg string) {
+	t.Helper()
+
+	decoder := json.NewDecoder(strings.NewReader(logOutput))
+	for decoder.More() {
+		var record map[string]any
+		if err := decoder.Decode(&record); err != nil {
+			t.Fatalf("decode slog JSON %q: %v", logOutput, err)
+		}
+		if record["msg"] != wantMsg {
+			continue
+		}
+		if _, ok := record["ip"]; ok {
+			t.Fatalf("%q log duplicated IP attribute: %v", wantMsg, record)
+		}
+		return
+	}
+	t.Fatalf("missing operational log message %q in %s", wantMsg, logOutput)
+}
+
+func assertAdminOperationalLogUsesClientIPAttr(t *testing.T, logOutput, wantMsg, wantIP string) {
+	t.Helper()
+
+	decoder := json.NewDecoder(strings.NewReader(logOutput))
+	for decoder.More() {
+		var record map[string]any
+		if err := decoder.Decode(&record); err != nil {
+			t.Fatalf("decode slog JSON %q: %v", logOutput, err)
+		}
+		if record["msg"] != wantMsg {
+			continue
+		}
+		if _, ok := record["ip"]; ok {
+			t.Fatalf("%q log used legacy ip attribute: %v", wantMsg, record)
+		}
+		if got := record["client_ip"]; got != wantIP {
+			t.Fatalf("%q log client_ip = %v, want %q in %v", wantMsg, got, wantIP, record)
+		}
+		return
+	}
+	t.Fatalf("missing operational log message %q in %s", wantMsg, logOutput)
 }

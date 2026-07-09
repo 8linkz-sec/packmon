@@ -1,5 +1,7 @@
 package domain
 
+import "strings"
+
 // Severity represents the severity level of a finding.
 type Severity string
 
@@ -19,6 +21,17 @@ func (s Severity) Valid() bool {
 		return true
 	}
 	return false
+}
+
+// ParseBlockThreshold normalizes and validates the vulnerability blocking
+// threshold accepted by configuration, admin settings, and API runtime policy.
+func ParseBlockThreshold(raw string) (Severity, bool) {
+	switch threshold := Severity(strings.ToUpper(strings.TrimSpace(raw))); threshold {
+	case SeverityCritical, SeverityHigh, SeverityMedium, SeverityLow, SeverityNone:
+		return threshold, true
+	default:
+		return "", false
+	}
 }
 
 // Blocks returns true if this severity is at or above the given threshold.

@@ -1,6 +1,6 @@
 package reversinglabs
 
-import reputationpurl "github.com/8linkz-sec/packmon/internal/feed/reputation/purl"
+import "github.com/8linkz-sec/packmon/internal/feed/reputationpurl"
 
 // BuildPURL maps a Packmon package coordinate to the ReversingLabs-supported
 // package URL syntax. It returns false when the package cannot be represented.

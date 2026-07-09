@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -14,14 +15,15 @@ import (
 
 func TestDBWarnAfterDays(t *testing.T) {
 	tests := []struct {
-		name string
-		env  string
-		want int
+		name    string
+		env     string
+		want    int
+		wantErr bool
 	}{
 		{name: "default", want: defaultDBWarnAfterDays},
 		{name: "valid", env: "14", want: 14},
-		{name: "negative falls back", env: "-1", want: defaultDBWarnAfterDays},
-		{name: "invalid falls back", env: "soon", want: defaultDBWarnAfterDays},
+		{name: "negative rejected", env: "-1", wantErr: true},
+		{name: "invalid rejected", env: "soon", wantErr: true},
 	}
 
 	for _, tt := range tests {
@@ -29,7 +31,17 @@ func TestDBWarnAfterDays(t *testing.T) {
 			if tt.env != "" {
 				t.Setenv("PACKMON_DB_WARN_AFTER_DAYS", tt.env)
 			}
-			if got := dbWarnAfterDays(); got != tt.want {
+			got, err := dbWarnAfterDays()
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "PACKMON_DB_WARN_AFTER_DAYS") {
+					t.Fatalf("dbWarnAfterDays() error = %v, want PACKMON_DB_WARN_AFTER_DAYS rejection", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("dbWarnAfterDays() error = %v", err)
+			}
+			if got != tt.want {
 				t.Fatalf("dbWarnAfterDays() = %d, want %d", got, tt.want)
 			}
 		})
@@ -126,6 +138,47 @@ func TestApplyLocalDBFreshnessOnlyAnnotatesLocalResults(t *testing.T) {
 	}
 	if err := applyLocalDBFreshness(context.Background(), store, nil); err != nil {
 		t.Fatalf("apply nil result freshness: %v", err)
+	}
+}
+
+func TestApplyLocalDBFreshnessMarksUnknownFreshnessAsStale(t *testing.T) {
+	store, _ := newTestSQLiteStore(t, t.TempDir())
+
+	if err := store.SetSyncMeta(context.Background(), "last_sync_at", "not-a-timestamp"); err != nil {
+		t.Fatalf("set sync meta: %v", err)
+	}
+
+	result := &domain.ScanResult{Mode: "local"}
+	err := applyLocalDBFreshness(context.Background(), store, result)
+	if err == nil {
+		t.Fatal("applyLocalDBFreshness() error = nil, want timestamp parse error")
+	}
+	if !result.DBStale {
+		t.Fatal("DBStale = false, want stale when freshness cannot be verified")
+	}
+	if result.DBAgeDays != nil {
+		t.Fatalf("DBAgeDays = %v, want nil for unknown freshness", result.DBAgeDays)
+	}
+}
+
+func TestApplyLocalDBFreshnessRejectsInvalidWarnAfterEnv(t *testing.T) {
+	t.Setenv("PACKMON_DB_WARN_AFTER_DAYS", "soon")
+	store, _ := newTestSQLiteStore(t, t.TempDir())
+
+	if err := store.SetSyncMeta(context.Background(), "last_sync_at", time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatalf("set sync meta: %v", err)
+	}
+
+	result := &domain.ScanResult{Mode: "local"}
+	err := applyLocalDBFreshness(context.Background(), store, result)
+	if err == nil || !strings.Contains(err.Error(), "PACKMON_DB_WARN_AFTER_DAYS") {
+		t.Fatalf("applyLocalDBFreshness() error = %v, want PACKMON_DB_WARN_AFTER_DAYS rejection", err)
+	}
+	if !result.DBStale {
+		t.Fatal("DBStale = false, want stale when warn-after config is invalid")
+	}
+	if result.DBAgeDays != nil {
+		t.Fatalf("DBAgeDays = %v, want nil for invalid warn-after config", result.DBAgeDays)
 	}
 }
 
@@ -306,5 +359,17 @@ func TestExportLocalDBIncludesCompleteScanHistory(t *testing.T) {
 	}
 	if len(got.FindingIDs) != 2 || got.FindingIDs[0] != "GHSA-one" || got.FindingSeverities[1] != "CRITICAL" {
 		t.Fatalf("scan_history findings = %+v", got)
+	}
+}
+
+func TestExportLocalDBStreamsRowsInsteadOfMaterializingStorePayload(t *testing.T) {
+	t.Parallel()
+
+	source, err := os.ReadFile("local_db.go")
+	if err != nil {
+		t.Fatalf("read local_db.go: %v", err)
+	}
+	if strings.Contains(string(source), "ExportLocalDatabase(ctx)") {
+		t.Fatal("exportLocalDB still calls ExportLocalDatabase(ctx); want streaming row export")
 	}
 }

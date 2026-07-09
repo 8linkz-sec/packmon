@@ -3,21 +3,22 @@ package sqlite
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/8linkz-sec/packmon/internal/correlation"
 	"github.com/8linkz-sec/packmon/internal/domain"
 	"github.com/8linkz-sec/packmon/internal/httpclient"
+	"github.com/8linkz-sec/packmon/internal/ioutils"
 	"github.com/8linkz-sec/packmon/internal/logsafe"
+	"github.com/8linkz-sec/packmon/internal/synccontract"
 )
 
 // syncMetaKeyLastSync is the sync_meta key storing the ISO 8601 timestamp
@@ -31,7 +32,7 @@ const syncMetaKeyFeedStatus = "feed_status"
 const syncMetaKeyFeedVersions = "feed_versions"
 
 const (
-	syncPageLimit       = 10000
+	syncPageLimit       = synccontract.MaxLimit
 	maxSyncResponseSize = 32 * 1024 * 1024
 	maxSyncFutureSkew   = 5 * time.Minute
 	syncMax429Retries   = 5
@@ -62,6 +63,22 @@ type SyncRemovalStats struct {
 	Lifecycle       int64
 }
 
+type syncApplyMetadata struct {
+	LastSyncAt  string
+	LastSyncXID string
+	FeedState   *syncResponse
+}
+
+type syncCursorState struct {
+	Since    string
+	SinceXID string
+}
+
+type syncPageSnapshot struct {
+	SyncedAt  string
+	SyncedXID string
+}
+
 func (s SyncRemovalStats) Any() bool {
 	return s.Vulnerabilities > 0 || s.Malicious > 0 || s.Reputation > 0 || s.Lifecycle > 0
 }
@@ -70,215 +87,54 @@ func (s SyncStats) AnyRemoved() bool {
 	return s.FullCleared.Any() || s.TombstoneDeleted.Any()
 }
 
-// syncVulnerability is the wire format for a single vulnerability
-// delivered by the server's GET /api/v1/sync endpoint.
-type syncVulnerability struct {
-	ID               string   `json:"id"`
-	Ecosystem        string   `json:"ecosystem"`
-	Name             string   `json:"name"`
-	VersionRanges    string   `json:"version_ranges"`    // JSON string
-	VersionsAffected string   `json:"versions_affected"` // JSON string
-	References       string   `json:"references"`        // JSON string
-	Severity         string   `json:"severity"`
-	CVSSScore        *float64 `json:"cvss_score"`
-	EPSSScore        *float64 `json:"epss_score"`
-	EPSSPercentile   *float64 `json:"epss_percentile"`
-	CISAKEV          bool     `json:"cisa_kev"`
-	Summary          string   `json:"summary"`
-	Source           string   `json:"source"`
-	Withdrawn        bool     `json:"withdrawn"`
-}
+type syncVulnerability = synccontract.Vulnerability
+type syncMalicious = synccontract.Malicious
+type syncReputation = synccontract.Reputation
+type syncLifecycleRelease = synccontract.Lifecycle
+type syncResponse = synccontract.Response
+type syncCursor = synccontract.Cursor
 
-// syncMalicious is the wire format for a single malicious finding
-// delivered by the server's GET /api/v1/sync endpoint.
-type syncMalicious struct {
-	ID            string `json:"id"`
-	Ecosystem     string `json:"ecosystem"`
-	Name          string `json:"name"`
-	VersionRanges string `json:"version_ranges"` // JSON string, empty = all when Versions is empty
-	Versions      string `json:"versions"`       // JSON string, empty = all
-	ReferenceURLs string `json:"reference_urls"`
-	RiskType      string `json:"risk_type"`
-	Severity      string `json:"severity"`
-	Summary       string `json:"summary"`
-	Source        string `json:"source"`
-	Withdrawn     bool   `json:"withdrawn"`
-}
-
-// syncReputation is the wire format for a cached reputation finding or
-// tombstone delivered by the server's GET /api/v1/sync endpoint.
-type syncReputation struct {
-	ID        string `json:"id"`
-	Ecosystem string `json:"ecosystem"`
-	Name      string `json:"name"`
-	Version   string `json:"version"`
-	Type      string `json:"type"`
-	RiskType  string `json:"risk_type"`
-	Severity  string `json:"severity"`
-	Summary   string `json:"summary"`
-	Withdrawn bool   `json:"withdrawn"`
-}
-
-// syncLifecycleRelease is the wire format for one lifecycle cache row
-// delivered by the server's GET /api/v1/sync endpoint.
-type syncLifecycleRelease struct {
-	ID               string  `json:"id"`
-	Ecosystem        string  `json:"ecosystem"`
-	Name             string  `json:"name"`
-	ProductSlug      string  `json:"product_slug"`
-	ProductLabel     string  `json:"product_label"`
-	Cycle            string  `json:"cycle"`
-	Latest           string  `json:"latest"`
-	ReleaseDate      *string `json:"release_date"`
-	IsLTS            bool    `json:"is_lts"`
-	LTSFrom          *string `json:"lts_from"`
-	IsEOAS           bool    `json:"is_eoas"`
-	EOASFrom         *string `json:"eoas_from"`
-	IsEOL            bool    `json:"is_eol"`
-	EOLFrom          *string `json:"eol_from"`
-	IsDiscontinued   bool    `json:"is_discontinued"`
-	DiscontinuedFrom *string `json:"discontinued_from"`
-	IsEOES           *bool   `json:"is_eoes"`
-	EOESFrom         *string `json:"eoes_from"`
-	IsMaintained     bool    `json:"is_maintained"`
-	Withdrawn        bool    `json:"withdrawn"`
-}
-
-// syncResponse is the JSON envelope returned by the server sync endpoint.
-type syncResponse struct {
-	SyncedAt        string                 `json:"synced_at"`
-	SyncedXID       uint64                 `json:"synced_xid"`
-	FeedStatus      string                 `json:"feed_status"`
-	FeedVersions    map[string]string      `json:"feed_versions"`
-	Vulnerabilities []syncVulnerability    `json:"vulnerabilities"`
-	Malicious       []syncMalicious        `json:"malicious"`
-	Reputation      []syncReputation       `json:"reputation"`
-	Lifecycle       []syncLifecycleRelease `json:"lifecycle"`
-	// Truncated is true when more data is available and the client should call
-	// again with the same since/snapshot parameters and the next cursor.
-	Truncated  bool        `json:"truncated"`
-	NextCursor *syncCursor `json:"next_cursor"`
-}
-
-type syncCursor struct {
-	Vulnerabilities int `json:"vulnerabilities"`
-	Malicious       int `json:"malicious"`
-	Reputation      int `json:"reputation"`
-	Lifecycle       int `json:"lifecycle"`
-
-	VulnerabilitiesCursor string `json:"vulnerabilities_cursor"`
-	MaliciousCursor       string `json:"malicious_cursor"`
-	ReputationCursor      string `json:"reputation_cursor"`
-	LifecycleCursor       string `json:"lifecycle_cursor"`
-
-	VulnerabilitiesDone bool `json:"vulnerabilities_done"`
-	MaliciousDone       bool `json:"malicious_done"`
-	ReputationDone      bool `json:"reputation_done"`
-	LifecycleDone       bool `json:"lifecycle_done"`
-}
-
-func (c syncCursor) isZero() bool {
-	return c.Vulnerabilities == 0 &&
-		c.Malicious == 0 &&
-		c.Reputation == 0 &&
-		c.Lifecycle == 0 &&
-		c.VulnerabilitiesCursor == "" &&
-		c.MaliciousCursor == "" &&
-		c.ReputationCursor == "" &&
-		c.LifecycleCursor == "" &&
-		!c.VulnerabilitiesDone &&
-		!c.MaliciousDone &&
-		!c.ReputationDone &&
-		!c.LifecycleDone
-}
-
-// Sync fetches vulnerability and malicious data from the packmon server
-// and writes it into the local SQLite database. The entire write is
-// wrapped in a transaction so a crash or interrupt leaves the DB in the
-// previous consistent state.
+// Sync fetches server-side vulnerability, malicious, reputation, and lifecycle
+// data plus feed-state metadata from the Packmon server and writes them into
+// the local SQLite database page by page. Freshness and feed-state metadata are
+// persisted only with the final successful page so a failed paginated sequence
+// never advances the durable sync cursor.
 //
 // Protocol (DE-13):
 //
-//	GET /api/v1/sync?since=<timestamp>&ecosystem=<eco>
+//	GET /api/v1/sync
 //
-// The server returns a page of changes since the given timestamp. If
-// "full" is true the since parameter is omitted and the server sends
-// all data (the client drops existing rows first).
+// Delta sync sends the last durable since timestamp plus an optional since_xid,
+// while full sync omits both and clears local tables before applying the
+// result. Paginated responses pin snapshot/snapshot_xid and advance
+// per-dataset next_cursor fields; see the OpenAPI sync contract for the full
+// query and response shape. Feed status/version metadata is persisted only
+// when the returned synced_at value is safe to use as local freshness.
 func Sync(ctx context.Context, store *Store, cfg SyncConfig) error {
-	if cfg.ServerURL == "" {
-		return fmt.Errorf("sync: no server URL configured")
-	}
-	if cfg.Timeout == 0 {
-		cfg.Timeout = 60 * time.Second
-	}
-	if cfg.Full && len(cfg.Ecosystems) > 0 {
-		return fmt.Errorf("sync: filtered full sync is not supported because local freshness is global; run an unfiltered full sync or an incremental filtered sync")
-	}
-	if err := validateSyncServerURL(cfg.ServerURL, cfg.AllowInsecureHTTP); err != nil {
+	cfg, err := validateSyncConfig(cfg)
+	if err != nil {
 		return err
 	}
+	ctx, cancel := context.WithTimeout(ctx, cfg.Timeout)
+	defer cancel()
 
 	client, err := newSyncHTTPClientWithCA(cfg.Timeout, cfg.CACertFile)
 	if err != nil {
 		return fmt.Errorf("sync: %w", err)
 	}
 
-	// Determine the since timestamp for delta sync.
-	var since string
-	var sinceXID string
-	if !cfg.Full {
-		since, err = store.GetSyncMeta(ctx, syncMetaKeyLastSync)
-		if err != nil {
-			return fmt.Errorf("sync: read last sync timestamp: %w", err)
-		}
-		sinceXID, err = store.GetSyncMeta(ctx, syncMetaKeyLastSyncXID)
-		if err != nil {
-			return fmt.Errorf("sync: read last sync xid: %w", err)
-		}
+	unlockSync, err := acquireSQLiteSyncLock(ctx, store.Path())
+	if err != nil {
+		return err
+	}
+	defer unlockSync()
+
+	cursorState, err := loadSyncCursorState(ctx, store, cfg.Full)
+	if err != nil {
+		return err
 	}
 
-	legacyOffset := 0
-	cursor := syncCursor{}
-	snapshot := ""
-	snapshotXID := ""
-	merged := &syncResponse{}
-
-	// Loop to handle paginated responses.
-	for {
-		resp, err := fetchSyncPage(ctx, client, cfg, since, sinceXID, cursor, legacyOffset, snapshot, snapshotXID)
-		if err != nil {
-			return err
-		}
-
-		if resp.SyncedAt != "" && snapshot == "" {
-			snapshot = resp.SyncedAt
-		}
-		if resp.SyncedXID > 0 && snapshotXID == "" {
-			snapshotXID = strconv.FormatUint(resp.SyncedXID, 10)
-		}
-
-		mergeSyncResponse(merged, resp)
-
-		if !resp.Truncated {
-			break
-		}
-
-		if snapshot == "" {
-			return fmt.Errorf("sync: truncated response missing synced_at")
-		}
-		if resp.NextCursor != nil {
-			nextCursor := *resp.NextCursor
-			if nextCursor == cursor {
-				return fmt.Errorf("sync: truncated response did not advance next_cursor")
-			}
-			cursor = nextCursor
-			legacyOffset = 0
-		} else {
-			legacyOffset += syncPageLimit
-		}
-	}
-
-	stats, err := applySync(ctx, store, cfg.Full, merged)
+	stats, err := syncPaginatedResponses(ctx, store, client, cfg, cursorState, time.Now().UTC())
 	if err != nil {
 		return err
 	}
@@ -286,36 +142,147 @@ func Sync(ctx context.Context, store *Store, cfg SyncConfig) error {
 		*cfg.Stats = stats
 	}
 
-	storeSnapshot := snapshot
-	storeSnapshotXID := snapshotXID
-	if snapshot != "" {
-		freshnessSafe, err := syncTimestampSafeForFreshness(snapshot, time.Now().UTC())
-		if err != nil {
-			return fmt.Errorf("sync: parse synced_at %q: %w", snapshot, err)
-		}
-		if !freshnessSafe {
-			storeSnapshot = ""
-			storeSnapshotXID = ""
-		}
-	}
-
-	if storeSnapshot != "" {
-		if err := store.SetSyncMeta(ctx, syncMetaKeyLastSync, storeSnapshot); err != nil {
-			return fmt.Errorf("sync: store sync timestamp: %w", err)
-		}
-	}
-	if storeSnapshotXID != "" {
-		if err := store.SetSyncMeta(ctx, syncMetaKeyLastSyncXID, storeSnapshotXID); err != nil {
-			return fmt.Errorf("sync: store sync xid: %w", err)
-		}
-	}
-	if storeSnapshot != "" {
-		if err := storeSyncedFeedState(ctx, store, merged); err != nil {
-			return err
-		}
-	}
-
 	return nil
+}
+
+func validateSyncConfig(cfg SyncConfig) (SyncConfig, error) {
+	if cfg.ServerURL == "" {
+		return SyncConfig{}, fmt.Errorf("sync: no server URL configured")
+	}
+	if cfg.Timeout == 0 {
+		cfg.Timeout = 60 * time.Second
+	}
+	if cfg.Full && len(cfg.Ecosystems) > 0 {
+		return SyncConfig{}, fmt.Errorf("sync: filtered full sync is not supported because local freshness is global; run an unfiltered full sync or an incremental filtered sync")
+	}
+	if err := validateSyncServerURL(cfg.ServerURL, cfg.AllowInsecureHTTP); err != nil {
+		return SyncConfig{}, err
+	}
+
+	return cfg, nil
+}
+
+func loadSyncCursorState(ctx context.Context, store *Store, full bool) (syncCursorState, error) {
+	if full {
+		return syncCursorState{}, nil
+	}
+
+	since, err := store.GetSyncMeta(ctx, syncMetaKeyLastSync)
+	if err != nil {
+		return syncCursorState{}, fmt.Errorf("sync: read last sync timestamp: %w", err)
+	}
+	sinceXID, err := store.GetSyncMeta(ctx, syncMetaKeyLastSyncXID)
+	if err != nil {
+		return syncCursorState{}, fmt.Errorf("sync: read last sync xid: %w", err)
+	}
+	return syncCursorState{Since: since, SinceXID: sinceXID}, nil
+}
+
+func syncPaginatedResponses(ctx context.Context, store *Store, client *http.Client, cfg SyncConfig, cursorState syncCursorState, now time.Time) (SyncStats, error) {
+	cursor := syncCursor{}
+	snapshot := syncPageSnapshot{}
+	feedState := &syncResponse{}
+	correlationID := newSyncCorrelationID()
+	fullPage := cfg.Full
+	var stats SyncStats
+
+	// Loop to handle paginated responses.
+	for {
+		resp, err := fetchSyncPageWithCorrelationID(ctx, client, cfg, cursorState.Since, cursorState.SinceXID, cursor, snapshot.SyncedAt, snapshot.SyncedXID, correlationID)
+		if err != nil {
+			return SyncStats{}, err
+		}
+
+		if resp.SyncedAt != "" && snapshot.SyncedAt == "" {
+			snapshot.SyncedAt = resp.SyncedAt
+		}
+		if resp.SyncedXID > 0 && snapshot.SyncedXID == "" {
+			snapshot.SyncedXID = strconv.FormatUint(resp.SyncedXID, 10)
+		}
+
+		if resp.Truncated && snapshot.SyncedAt == "" {
+			return SyncStats{}, fmt.Errorf("sync: truncated response missing synced_at")
+		}
+
+		mergeSyncFeedState(feedState, resp)
+
+		if err := validateSyncResponseBeforeApply(fullPage, resp); err != nil {
+			return SyncStats{}, err
+		}
+
+		metadata := syncApplyMetadata{}
+		if !resp.Truncated {
+			metadata, err = freshSyncApplyMetadata(snapshot, feedState, now)
+			if err != nil {
+				return SyncStats{}, err
+			}
+		}
+
+		pageStats, err := applySyncWithMetadata(ctx, store, fullPage, resp, metadata)
+		if err != nil {
+			return SyncStats{}, err
+		}
+		addSyncStats(&stats, pageStats)
+		fullPage = false
+
+		if !resp.Truncated {
+			break
+		}
+
+		if resp.NextCursor != nil {
+			nextCursor := *resp.NextCursor
+			if nextCursor == cursor {
+				return SyncStats{}, fmt.Errorf("sync: truncated response did not advance next_cursor")
+			}
+			cursor = nextCursor
+		} else {
+			return SyncStats{}, fmt.Errorf("sync: truncated response missing next_cursor")
+		}
+	}
+
+	return stats, nil
+}
+
+func freshSyncApplyMetadata(snapshot syncPageSnapshot, feedState *syncResponse, now time.Time) (syncApplyMetadata, error) {
+	if snapshot.SyncedAt == "" {
+		return syncApplyMetadata{}, nil
+	}
+	freshnessSafe, err := syncTimestampSafeForFreshness(snapshot.SyncedAt, now)
+	if err != nil {
+		return syncApplyMetadata{}, fmt.Errorf("sync: parse synced_at %q: %w", snapshot.SyncedAt, err)
+	}
+	if !freshnessSafe {
+		return syncApplyMetadata{}, nil
+	}
+	return syncApplyMetadata{
+		LastSyncAt:  snapshot.SyncedAt,
+		LastSyncXID: snapshot.SyncedXID,
+		FeedState:   syncFeedStateForMetadata(feedState),
+	}, nil
+}
+
+func validateSyncResponseBeforeApply(full bool, resp *syncResponse) error {
+	if resp == nil {
+		return fmt.Errorf("sync: missing response")
+	}
+	if strings.TrimSpace(resp.SyncedAt) == "" {
+		return fmt.Errorf("sync: response missing synced_at")
+	}
+	if _, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(resp.SyncedAt)); err != nil {
+		return fmt.Errorf("sync: parse synced_at %q: %w", resp.SyncedAt, err)
+	}
+	if full && syncResponseEmpty(resp) && strings.TrimSpace(resp.FeedStatus) == "" && len(resp.FeedVersions) == 0 {
+		return fmt.Errorf("sync: full response missing feed_status or data")
+	}
+	return nil
+}
+
+func syncResponseEmpty(resp *syncResponse) bool {
+	return resp == nil ||
+		(len(resp.Vulnerabilities) == 0 &&
+			len(resp.Malicious) == 0 &&
+			len(resp.Reputation) == 0 &&
+			len(resp.Lifecycle) == 0)
 }
 
 func syncTimestampSafeForFreshness(raw string, now time.Time) (bool, error) {
@@ -326,12 +293,9 @@ func syncTimestampSafeForFreshness(raw string, now time.Time) (bool, error) {
 	return !ts.UTC().After(now.UTC().Add(maxSyncFutureSkew)), nil
 }
 
-func mergeSyncResponse(dst, src *syncResponse) {
-	if dst.SyncedAt == "" {
-		dst.SyncedAt = src.SyncedAt
-	}
-	if dst.SyncedXID == 0 {
-		dst.SyncedXID = src.SyncedXID
+func mergeSyncFeedState(dst, src *syncResponse) {
+	if dst == nil || src == nil {
+		return
 	}
 	if dst.FeedStatus == "" {
 		dst.FeedStatus = src.FeedStatus
@@ -344,13 +308,27 @@ func mergeSyncResponse(dst, src *syncResponse) {
 			dst.FeedVersions[feedName] = version
 		}
 	}
-	dst.Vulnerabilities = append(dst.Vulnerabilities, src.Vulnerabilities...)
-	dst.Malicious = append(dst.Malicious, src.Malicious...)
-	dst.Reputation = append(dst.Reputation, src.Reputation...)
-	dst.Lifecycle = append(dst.Lifecycle, src.Lifecycle...)
 }
 
-func storeSyncedFeedState(ctx context.Context, store *Store, resp *syncResponse) error {
+func syncFeedStateForMetadata(feedState *syncResponse) *syncResponse {
+	if feedState == nil || (strings.TrimSpace(feedState.FeedStatus) == "" && feedState.FeedVersions == nil) {
+		return nil
+	}
+	return feedState
+}
+
+func addSyncStats(dst *SyncStats, src SyncStats) {
+	dst.FullCleared.Vulnerabilities += src.FullCleared.Vulnerabilities
+	dst.FullCleared.Malicious += src.FullCleared.Malicious
+	dst.FullCleared.Reputation += src.FullCleared.Reputation
+	dst.FullCleared.Lifecycle += src.FullCleared.Lifecycle
+	dst.TombstoneDeleted.Vulnerabilities += src.TombstoneDeleted.Vulnerabilities
+	dst.TombstoneDeleted.Malicious += src.TombstoneDeleted.Malicious
+	dst.TombstoneDeleted.Reputation += src.TombstoneDeleted.Reputation
+	dst.TombstoneDeleted.Lifecycle += src.TombstoneDeleted.Lifecycle
+}
+
+func storeSyncedFeedState(ctx context.Context, tx *sql.Tx, resp *syncResponse) error {
 	if resp == nil {
 		return nil
 	}
@@ -359,7 +337,7 @@ func storeSyncedFeedState(ctx context.Context, store *Store, resp *syncResponse)
 		return nil
 	}
 	if status != "" {
-		if err := store.SetSyncMeta(ctx, syncMetaKeyFeedStatus, status); err != nil {
+		if err := setSyncMetaTx(ctx, tx, syncMetaKeyFeedStatus, status); err != nil {
 			return fmt.Errorf("sync: store feed status: %w", err)
 		}
 	}
@@ -377,9 +355,38 @@ func storeSyncedFeedState(ctx context.Context, store *Store, resp *syncResponse)
 		if err != nil {
 			return fmt.Errorf("sync: encode feed versions: %w", err)
 		}
-		if err := store.SetSyncMeta(ctx, syncMetaKeyFeedVersions, string(payload)); err != nil {
+		if err := setSyncMetaTx(ctx, tx, syncMetaKeyFeedVersions, string(payload)); err != nil {
 			return fmt.Errorf("sync: store feed versions: %w", err)
 		}
+	}
+	return nil
+}
+
+func storeFreshSyncMetadata(ctx context.Context, tx *sql.Tx, metadata syncApplyMetadata) error {
+	if metadata.LastSyncAt != "" {
+		if err := setSyncMetaTx(ctx, tx, syncMetaKeyLastSync, metadata.LastSyncAt); err != nil {
+			return fmt.Errorf("sync: store sync timestamp: %w", err)
+		}
+	}
+	if metadata.LastSyncXID != "" {
+		if err := setSyncMetaTx(ctx, tx, syncMetaKeyLastSyncXID, metadata.LastSyncXID); err != nil {
+			return fmt.Errorf("sync: store sync xid: %w", err)
+		}
+	}
+	if metadata.FeedState != nil {
+		if err := storeSyncedFeedState(ctx, tx, metadata.FeedState); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func setSyncMetaTx(ctx context.Context, tx *sql.Tx, key, value string) error {
+	const upsert = `INSERT INTO sync_meta(key, value) VALUES(?, ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+	_, err := tx.ExecContext(ctx, upsert, key, value)
+	if err != nil {
+		return fmt.Errorf("sqlite: set sync meta %q: %w", key, err)
 	}
 	return nil
 }
@@ -403,7 +410,7 @@ func newSyncHTTPClient(timeout time.Duration) *http.Client {
 }
 
 func newSyncHTTPClientWithCA(timeout time.Duration, caCertFile string) (*http.Client, error) {
-	pool, err := loadSyncCAPool(caCertFile)
+	pool, err := httpclient.LoadCAPool(caCertFile)
 	if err != nil {
 		return nil, err
 	}
@@ -422,24 +429,16 @@ func newSyncHTTPClientWithCA(timeout time.Duration, caCertFile string) (*http.Cl
 	}, nil
 }
 
-func loadSyncCAPool(path string) (*x509.CertPool, error) {
-	if strings.TrimSpace(path) == "" {
-		return nil, nil
-	}
-	pem, err := os.ReadFile(path) // #nosec G304 -- user-specified CA bundle path
-	if err != nil {
-		return nil, fmt.Errorf("read CA bundle %s: %w", path, err)
-	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(pem) {
-		return nil, fmt.Errorf("CA bundle %s contains no valid certificate", path)
-	}
-	return pool, nil
+func fetchSyncPage(ctx context.Context, client *http.Client, cfg SyncConfig, since, sinceXID string, cursor syncCursor, snapshot, snapshotXID string) (*syncResponse, error) {
+	return fetchSyncPageWithCorrelationID(ctx, client, cfg, since, sinceXID, cursor, snapshot, snapshotXID, newSyncCorrelationID())
 }
 
-func fetchSyncPage(ctx context.Context, client *http.Client, cfg SyncConfig, since, sinceXID string, cursor syncCursor, legacyOffset int, snapshot, snapshotXID string) (*syncResponse, error) {
+func fetchSyncPageWithCorrelationID(ctx context.Context, client *http.Client, cfg SyncConfig, since, sinceXID string, cursor syncCursor, snapshot, snapshotXID, correlationID string) (*syncResponse, error) {
+	if !correlation.Valid(correlationID) {
+		correlationID = newSyncCorrelationID()
+	}
 	for attempt := 0; ; attempt++ {
-		resp, retryAfter, err := fetchSyncPageOnce(ctx, client, cfg, since, sinceXID, cursor, legacyOffset, snapshot, snapshotXID)
+		resp, retryAfter, err := fetchSyncPageOnce(ctx, client, cfg, since, sinceXID, cursor, snapshot, snapshotXID, correlationID)
 		if err == nil {
 			return resp, nil
 		}
@@ -452,8 +451,16 @@ func fetchSyncPage(ctx context.Context, client *http.Client, cfg SyncConfig, sin
 	}
 }
 
+func newSyncCorrelationID() string {
+	id, err := correlation.NewID()
+	if err != nil {
+		return correlation.FallbackID()
+	}
+	return id
+}
+
 // fetchSyncPageOnce makes a single HTTP request to the server sync endpoint.
-func fetchSyncPageOnce(ctx context.Context, client *http.Client, cfg SyncConfig, since, sinceXID string, cursor syncCursor, legacyOffset int, snapshot, snapshotXID string) (*syncResponse, time.Duration, error) {
+func fetchSyncPageOnce(ctx context.Context, client *http.Client, cfg SyncConfig, since, sinceXID string, cursor syncCursor, snapshot, snapshotXID, correlationID string) (*syncResponse, time.Duration, error) {
 	displayServerURL := logsafe.RedactURL(cfg.ServerURL)
 	u, err := url.Parse(strings.TrimRight(cfg.ServerURL, "/") + "/api/v1/sync")
 	if err != nil {
@@ -474,10 +481,8 @@ func fetchSyncPageOnce(ctx context.Context, client *http.Client, cfg SyncConfig,
 		q.Set("snapshot_xid", snapshotXID)
 	}
 	q.Set("limit", strconv.Itoa(syncPageLimit))
-	if !cursor.isZero() {
+	if !cursor.IsZero() {
 		setSyncCursorQuery(q, cursor)
-	} else if legacyOffset > 0 {
-		q.Set("offset", strconv.Itoa(legacyOffset))
 	}
 	if len(cfg.Ecosystems) > 0 {
 		q.Set("ecosystem", strings.Join(cfg.Ecosystems, ","))
@@ -489,6 +494,7 @@ func fetchSyncPageOnce(ctx context.Context, client *http.Client, cfg SyncConfig,
 		return nil, 0, fmt.Errorf("sync: create request for server URL %q: %s", displayServerURL, logsafe.RedactDiagnosticMessage(err.Error()))
 	}
 	req.Header.Set("User-Agent", "packmon-cli/dev")
+	req.Header.Set(correlation.Header, correlationID)
 	if cfg.APIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
 	}
@@ -514,7 +520,7 @@ func fetchSyncPageOnce(ctx context.Context, client *http.Client, cfg SyncConfig,
 				retryAfter = syncDefault429Delay
 			}
 		}
-		return nil, retryAfter, fmt.Errorf("sync: server returned %d: %s", resp.StatusCode, truncate(string(body), 200))
+		return nil, retryAfter, fmt.Errorf("sync: server returned %d: %s", resp.StatusCode, safeSyncErrorSnippet(body))
 	}
 
 	var syncResp syncResponse
@@ -611,10 +617,18 @@ func readLimitedSyncResponse(r io.Reader) ([]byte, error) {
 	return body, nil
 }
 
-// applySync writes one page of sync data into the local database inside
-// a single transaction. On full sync the first page drops all existing
-// rows before inserting.
+func safeSyncErrorSnippet(body []byte) string {
+	return logsafe.RemoteErrorSnippet(body, 200)
+}
+
 func applySync(ctx context.Context, store *Store, full bool, resp *syncResponse) (SyncStats, error) {
+	return applySyncWithMetadata(ctx, store, full, resp, syncApplyMetadata{})
+}
+
+// applySyncWithMetadata writes one sync page and optional freshness metadata
+// into the local database inside a single transaction. On the first full-sync
+// page it drops existing rows before inserting.
+func applySyncWithMetadata(ctx context.Context, store *Store, full bool, resp *syncResponse, metadata syncApplyMetadata) (SyncStats, error) {
 	var stats SyncStats
 	tx, err := store.DB().BeginTx(ctx, nil)
 	if err != nil {
@@ -653,6 +667,10 @@ func applySync(ctx context.Context, store *Store, full bool, resp *syncResponse)
 		return SyncStats{}, err
 	}
 	stats.TombstoneDeleted.Lifecycle += deleted
+
+	if err := storeFreshSyncMetadata(ctx, tx, metadata); err != nil {
+		return SyncStats{}, err
+	}
 
 	if err := tx.Commit(); err != nil {
 		return SyncStats{}, fmt.Errorf("sync: commit transaction: %w", err)
@@ -712,13 +730,13 @@ func applySyncVulnerabilities(ctx context.Context, tx *sql.Tx, vulnerabilities [
 	if err != nil {
 		return 0, fmt.Errorf("sync: prepare vuln upsert: %w", err)
 	}
-	defer closeSilently(vulnStmt)
+	defer ioutils.CloseSilently(vulnStmt)
 
 	vulnDelStmt, err := tx.PrepareContext(ctx, `DELETE FROM vulnerabilities_local WHERE id = ?`)
 	if err != nil {
 		return 0, fmt.Errorf("sync: prepare vuln delete: %w", err)
 	}
-	defer closeSilently(vulnDelStmt)
+	defer ioutils.CloseSilently(vulnDelStmt)
 
 	var deleted int64
 	for _, v := range vulnerabilities {
@@ -729,6 +747,12 @@ func applySyncVulnerabilities(ctx context.Context, tx *sql.Tx, vulnerabilities [
 			}
 			deleted += rowsAffected(result)
 			continue
+		}
+		if err := validateLocalVersionRanges(v.ID, "version_ranges", v.VersionRanges, false); err != nil {
+			return 0, fmt.Errorf("sync: invalid vulnerability version_ranges %s: %w", v.ID, err)
+		}
+		if err := validateLocalStringArray(v.ID, "versions_affected", v.VersionsAffected, false); err != nil {
+			return 0, fmt.Errorf("sync: invalid vulnerability versions_affected %s: %w", v.ID, err)
 		}
 
 		var cvss, epss, epssPercentile interface{}
@@ -775,13 +799,13 @@ func applySyncMalicious(ctx context.Context, tx *sql.Tx, malicious []syncMalicio
 	if err != nil {
 		return 0, fmt.Errorf("sync: prepare malicious upsert: %w", err)
 	}
-	defer closeSilently(malStmt)
+	defer ioutils.CloseSilently(malStmt)
 
 	malDelStmt, err := tx.PrepareContext(ctx, `DELETE FROM malicious_local WHERE id = ?`)
 	if err != nil {
 		return 0, fmt.Errorf("sync: prepare malicious delete: %w", err)
 	}
-	defer closeSilently(malDelStmt)
+	defer ioutils.CloseSilently(malDelStmt)
 
 	var deleted int64
 	for _, m := range malicious {
@@ -794,6 +818,9 @@ func applySyncMalicious(ctx context.Context, tx *sql.Tx, malicious []syncMalicio
 			continue
 		}
 
+		if err := validateLocalVersionRanges(m.ID, "version_ranges", m.VersionRanges, true); err != nil {
+			return 0, fmt.Errorf("sync: invalid malicious version_ranges %s: %w", m.ID, err)
+		}
 		if err := validateLocalMaliciousVersions(m.ID, m.Versions); err != nil {
 			return 0, fmt.Errorf("sync: invalid malicious versions %s: %w", m.ID, err)
 		}
@@ -834,13 +861,13 @@ func applySyncReputation(ctx context.Context, tx *sql.Tx, reputation []syncReput
 	if err != nil {
 		return 0, fmt.Errorf("sync: prepare reputation upsert: %w", err)
 	}
-	defer closeSilently(repStmt)
+	defer ioutils.CloseSilently(repStmt)
 
 	repDelStmt, err := tx.PrepareContext(ctx, `DELETE FROM reputation_findings_local WHERE id = ?`)
 	if err != nil {
 		return 0, fmt.Errorf("sync: prepare reputation delete: %w", err)
 	}
-	defer closeSilently(repDelStmt)
+	defer ioutils.CloseSilently(repDelStmt)
 
 	var deleted int64
 	for _, rep := range reputation {
@@ -900,13 +927,13 @@ func applySyncLifecycle(ctx context.Context, tx *sql.Tx, lifecycleReleases []syn
 	if err != nil {
 		return 0, fmt.Errorf("sync: prepare lifecycle upsert: %w", err)
 	}
-	defer closeSilently(lifecycleStmt)
+	defer ioutils.CloseSilently(lifecycleStmt)
 
 	lifecycleDelStmt, err := tx.PrepareContext(ctx, `DELETE FROM lifecycle_releases_local WHERE id = ?`)
 	if err != nil {
 		return 0, fmt.Errorf("sync: prepare lifecycle delete: %w", err)
 	}
-	defer closeSilently(lifecycleDelStmt)
+	defer ioutils.CloseSilently(lifecycleDelStmt)
 
 	var deleted int64
 	for _, lifecycle := range lifecycleReleases {
@@ -995,7 +1022,14 @@ func truncate(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
 	}
-	return s[:maxLen] + "..."
+	if maxLen < 0 {
+		maxLen = 0
+	}
+	runes := []rune(s)
+	if len(runes) <= maxLen {
+		return s
+	}
+	return string(runes[:maxLen]) + "..."
 }
 
 func syncVulnerabilityRowKey(id, ecosystem, name string) string {

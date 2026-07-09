@@ -28,6 +28,9 @@ type SkippedComponent struct {
 }
 
 // Parse detects a supported SBOM format and parses package inventory from it.
+// CycloneDX JSON, CycloneDX XML, and SPDX JSON inputs are capped at 100 MiB
+// before parsing. Components that cannot be imported are reported in the
+// returned ParseResult's Skipped field.
 func Parse(r io.Reader) (*ParseResult, error) {
 	data, err := readSBOM(r)
 	if err != nil {

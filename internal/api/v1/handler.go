@@ -6,28 +6,25 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
+	"mime"
 	"net/http"
-	"regexp"
-	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/8linkz-sec/packmon/internal/checkcontract"
 	"github.com/8linkz-sec/packmon/internal/config"
 	"github.com/8linkz-sec/packmon/internal/correlation"
 	"github.com/8linkz-sec/packmon/internal/db"
 	"github.com/8linkz-sec/packmon/internal/domain"
 	feedhealth "github.com/8linkz-sec/packmon/internal/feed"
-	"github.com/8linkz-sec/packmon/internal/feed/reputation"
-	"github.com/8linkz-sec/packmon/internal/feed/socket"
 	"github.com/8linkz-sec/packmon/internal/logsafe"
 	"github.com/8linkz-sec/packmon/internal/packageid"
 	"github.com/8linkz-sec/packmon/internal/requestctx"
@@ -35,101 +32,158 @@ import (
 )
 
 const (
-	// maxPackagesPerCheck is the maximum number of packages in a single /check request.
-	maxPackagesPerCheck = 5000
-
-	// maxCheckPackageNameLength and maxCheckPackageVersionLength bound the
-	// package coordinates accepted by /check and documented in OpenAPI.
-	maxCheckPackageNameLength    = 512
-	maxCheckPackageVersionLength = 256
-
 	// maxRequestBody is derived from the /check contract so a valid
-	// maxPackagesPerCheck request with maximum-size coordinates is not rejected
+	// MaxPackagesPerCheck request with maximum-size coordinates is not rejected
 	// before package validation runs.
-	maxRequestBody int64 = maxPackagesPerCheck*(maxCheckPackageNameLength+maxCheckPackageVersionLength+128) + 1024
+	maxRequestBody int64 = checkcontract.MaxPackagesPerCheck*(checkcontract.MaxPackageNameLength+checkcontract.MaxPackageVersionLength+128) + 1024
 
 	// scanLogInsertTimeout bounds audit logging in the response critical path
 	// when the backing database is slow or locked.
 	scanLogInsertTimeout = 500 * time.Millisecond
 
-	idempotencyKeyHeader    = "Idempotency-Key"
-	maxIdempotencyKeyLength = 128
-)
+	// checkLookupTimeout bounds the database lookup phase for /check so a
+	// stalled store cannot consume the whole HTTP request lifetime.
+	checkLookupTimeout = 10 * time.Second
 
-// HeaderFeedImportSecret carries the dedicated feed-import secret required for
-// mutating feed import requests in production.
-const HeaderFeedImportSecret = "X-Packmon-Feed-Import-Secret" // #nosec G101 -- this is an HTTP header name, not a credential value.
-
-// maxImportBody is the maximum allowed size for external feed import payloads.
-const maxImportBody = 100 << 20
-
-// maxImportStatusLastErrorLength bounds feed-import diagnostics persisted into
-// the feed status row and reflected through status APIs.
-const maxImportStatusLastErrorLength = 2048
-
-const (
-	maxImportStatusLastEtagLength       = 512
-	maxImportStatusLastCommitHashLength = 128
-	maxImportStatusMetadataLength       = 4096
+	idempotencyKeyHeader          = "Idempotency-Key"
+	maxIdempotencyKeyLength       = 128
+	maxScanLogClientVersionLength = 64
 )
 
 // defaultBlockThreshold is the severity threshold above which findings block.
 var defaultBlockThreshold = domain.SeverityCritical
 
-var cveIDPattern = regexp.MustCompile(`^CVE-\d{4}-\d{4,}$`)
-
-type feedImportValidationError struct {
-	message string
-}
-
-func (e *feedImportValidationError) Error() string {
-	return e.message
-}
-
-func feedImportValidationErrorf(format string, args ...any) error {
-	return &feedImportValidationError{message: fmt.Sprintf(format, args...)}
+// PackageLookup identifies a package version for API-owned batch lookup ports.
+type PackageLookup struct {
+	Ecosystem string
+	Name      string
+	Version   string
 }
 
 // Store is the API v1 persistence surface consumed by Handler.
 type Store interface {
+	// FindVulnerabilities looks up active vulnerability findings for one package
+	// coordinate. Read/Write: read. Atomicity: no write transaction is required.
+	// Side Effects: none.
 	FindVulnerabilities(ctx context.Context, ecosystem, name, version string) ([]domain.Finding, error)
+
+	// FindMalicious looks up active malicious-package findings for one package
+	// coordinate. Read/Write: read. Atomicity: no write transaction is required.
+	// Side Effects: none.
 	FindMalicious(ctx context.Context, ecosystem, name, version string) ([]domain.Finding, error)
-	FindVulnerabilitiesBatch(ctx context.Context, packages []db.PackageQuery) ([]domain.Finding, error)
-	FindMaliciousBatch(ctx context.Context, packages []db.PackageQuery) ([]domain.Finding, error)
-	FindReputationFindingsBatch(ctx context.Context, packages []db.PackageQuery, source string) ([]domain.Finding, error)
-	FindLifecycleFindingsBatch(ctx context.Context, packages []db.PackageQuery, now time.Time) ([]domain.Finding, error)
-	MarkPackageReputationDue(ctx context.Context, rep *db.PackageReputation) (bool, error)
-	UpsertPackageReputation(ctx context.Context, rep *db.PackageReputation) error
+
+	// FindVulnerabilitiesBatch looks up active vulnerability findings for a
+	// package batch. Read/Write: read. Atomicity: no write transaction is
+	// required. Side Effects: none.
+	FindVulnerabilitiesBatch(ctx context.Context, packages []PackageLookup) ([]domain.Finding, error)
+
+	// FindMaliciousBatch looks up active malicious-package findings for a
+	// package batch. Read/Write: read. Atomicity: no write transaction is
+	// required. Side Effects: none.
+	FindMaliciousBatch(ctx context.Context, packages []PackageLookup) ([]domain.Finding, error)
+
+	// FindReputationFindingsBatch looks up cached reputation findings for one
+	// source. Read/Write: read. Atomicity: no write transaction is required.
+	// Side Effects: none.
+	FindReputationFindingsBatch(ctx context.Context, packages []PackageLookup, source string) ([]domain.Finding, error)
+
+	// FindLifecycleFindingsBatch looks up cached lifecycle findings evaluated at
+	// now. Read/Write: read. Atomicity: no write transaction is required.
+	// Side Effects: none.
+	FindLifecycleFindingsBatch(ctx context.Context, packages []PackageLookup, now time.Time) ([]domain.Finding, error)
+
+	// ListFeedSyncStatuses lists feed status rows used for API feed health and
+	// version metadata. Read/Write: read. Atomicity: no write transaction is
+	// required. Side Effects: none.
 	ListFeedSyncStatuses(ctx context.Context) ([]db.FeedSyncStatus, error)
+
+	// EnqueueRefresh stores a package refresh queue request. Read/Write: write.
+	// Atomicity: job creation/reprioritization and returned position describe
+	// the same store operation. Side Effects: refresh queue only; no audit row.
 	EnqueueRefresh(ctx context.Context, job *db.RefreshJob) (bool, int, error)
+
+	// EnqueueRefreshWithAudit stores a refresh queue request and its audit row.
+	// Read/Write: write. Atomicity: queue mutation and admin audit insert commit
+	// or fail together. Side Effects: refresh queue plus admin audit log.
+	EnqueueRefreshWithAudit(ctx context.Context, job *db.RefreshJob, audit func(created bool, position int) *db.AdminAuditEntry) (bool, int, error)
+
+	// InsertScanLog stores the completed /check scan-log record. Read/Write:
+	// write. Atomicity: scan log/idempotency state is persisted as one store
+	// operation. Scan-Log Semantics: no admin audit row is implied.
 	InsertScanLog(ctx context.Context, entry *db.ScanLogEntry) error
+
+	// InsertAdminAuditLog appends one admin audit record. Read/Write: write.
+	// Atomicity: one audit entry is written or the call fails. Side Effects:
+	// admin audit log only.
+	InsertAdminAuditLog(ctx context.Context, entry *db.AdminAuditEntry) error
+
+	// GetScanLogByIdempotencyKey looks up prior /check scan-log/idempotency
+	// state. Read/Write: read. Scan-Log Semantics: return nil when the key is
+	// unknown. Side Effects: none.
+	GetScanLogByIdempotencyKey(ctx context.Context, key string) (*db.ScanLogEntry, error)
+
+	// ExportSync returns an export snapshot for CLI sync. Read/Write: read.
+	// Atomicity: callers expect a consistent export cursor/snapshot from one
+	// store call. Side Effects: none; sync export audit is recorded separately.
+	ExportSync(ctx context.Context, opts db.SyncExportOptions) (*db.SyncExport, error)
 }
 
-type vulnerabilityFeedImporter interface {
-	ImportVulnerabilityFeed(ctx context.Context, feed string, items []db.Vulnerability, deleteIDs []string, status *db.FeedSyncStatus) (imported, deleted int, err error)
+// ReputationSchedulerConfig is the API-owned scheduling configuration consumed
+// by an injected reputation scheduler.
+type ReputationSchedulerConfig struct {
+	ReversingLabsActive              bool
+	ReversingLabsMaxSchedulePerCheck int
+	ReversingLabsExcludedNamespaces  []string
 }
 
-type maliciousFeedImporter interface {
-	ImportMaliciousFeed(ctx context.Context, feed string, items []db.MaliciousFinding, deleteIDs []string, status *db.FeedSyncStatus) (imported, deleted int, err error)
+// ReputationScheduler is the optional API boundary for demand-driven package
+// reputation scheduling.
+type ReputationScheduler interface {
+	Configure(ReputationSchedulerConfig)
+	ScheduleReversingLabsAsync(ctx context.Context, packages []domain.Package, findings []domain.Finding)
 }
+
+// PackageRefreshProviderConfig is the API-owned runtime configuration for an
+// injected package refresh provider.
+type PackageRefreshProviderConfig struct {
+	Active             bool
+	ExcludedNamespaces []string
+}
+
+// PackageRefreshProvider describes the optional worker backing manual package
+// refresh requests.
+type PackageRefreshProvider interface {
+	Configure(PackageRefreshProviderConfig)
+	Active() bool
+	Source() string
+	SupportsEcosystem(ecosystem string) bool
+}
+
+type packageRefreshPolicyExcluder interface {
+	ExcludedByPolicy(ecosystem, name string) bool
+}
+
+type packageRefreshAuditEnqueuer interface {
+	EnqueueRefreshWithAudit(ctx context.Context, job *db.RefreshJob, audit func(created bool, position int) *db.AdminAuditEntry) (bool, int, error)
+}
+
+type apiRequestLoggerKey struct{}
 
 // Handler holds the dependencies for all API v1 HTTP handlers.
 type Handler struct {
 	store                Store
 	logger               *slog.Logger
 	blockThreshold       domain.Severity
-	feedImportHandler    *FeedImportHandler
 	reversingLabsEnabled atomic.Bool
-	socketRefreshEnabled atomic.Bool
-	reputationScheduler  *reputation.Scheduler
+	reputationScheduler  ReputationScheduler
+	packageRefresh       PackageRefreshProvider
 	backgroundCtx        context.Context
+	checkLookupTimeout   time.Duration
+	checkResponseCache   *checkResponseCache
+	scanLogIdentityMode  config.ScanLogIdentityMode
 	// runtime, when set, supplies the block threshold dynamically so admin
 	// changes take effect without a restart. It overrides blockThreshold.
 	runtime *config.RuntimeSettings
-}
-
-type syncExporter interface {
-	ExportSync(ctx context.Context, opts db.SyncExportOptions) (*db.SyncExport, error)
 }
 
 type reputationPackageFinder interface {
@@ -138,163 +192,6 @@ type reputationPackageFinder interface {
 
 type packageCheckStatusGetter interface {
 	GetPackageCheckStatus(ctx context.Context, ecosystem, name, source string) (*db.PackageCheckStatus, error)
-}
-
-type scanLogIdempotencyLookup interface {
-	GetScanLogByIdempotencyKey(ctx context.Context, key string) (*db.ScanLogEntry, error)
-}
-
-func deleteVulnerabilityForSource(ctx context.Context, store FeedImportStore, id, source string) error {
-	if scoped, ok := store.(db.SourceVulnerabilityDeleter); ok {
-		return scoped.DeleteVulnerabilityForSource(ctx, id, source)
-	}
-	return store.DeleteVulnerability(ctx, id)
-}
-
-func deleteMaliciousFindingForSource(ctx context.Context, store FeedImportStore, id, source string) error {
-	if scoped, ok := store.(db.SourceMaliciousFindingDeleter); ok {
-		return scoped.DeleteMaliciousFindingForSource(ctx, id, source)
-	}
-	return store.DeleteMaliciousFinding(ctx, id)
-}
-
-type feedSyncStatusInput struct {
-	LastSyncAt         *time.Time      `json:"last_sync_at"`
-	LastSyncDurationMs *int64          `json:"last_sync_duration_ms"`
-	LastSyncStatus     string          `json:"last_sync_status"`
-	LastError          string          `json:"last_error"`
-	EntriesSynced      int             `json:"entries_synced"`
-	EntriesTotal       int             `json:"entries_total"`
-	LastEtag           string          `json:"last_etag"`
-	LastCommitHash     string          `json:"last_commit_hash"`
-	Metadata           json.RawMessage `json:"metadata"`
-}
-
-type vulnerabilityImportRequest struct {
-	Vulnerabilities        []db.Vulnerability   `json:"vulnerabilities"`
-	DeleteVulnerabilityIDs []string             `json:"delete_vulnerability_ids"`
-	Status                 *feedSyncStatusInput `json:"status"`
-}
-
-type maliciousImportRequest struct {
-	Malicious          []db.MaliciousFinding `json:"malicious"`
-	DeleteMaliciousIDs []string              `json:"delete_malicious_ids"`
-	Status             *feedSyncStatusInput  `json:"status"`
-}
-
-type epssImportRequest struct {
-	Entries []db.EPSSEntry       `json:"entries"`
-	Status  *feedSyncStatusInput `json:"status"`
-}
-
-type vulnCheckImportRequest struct {
-	Entries []db.VulnCheckEntry  `json:"entries"`
-	Status  *feedSyncStatusInput `json:"status"`
-}
-
-type cisaKEVImportRequest struct {
-	CVEIDs       []string             `json:"cve_ids"`
-	ClearMissing bool                 `json:"clear_missing"`
-	Status       *feedSyncStatusInput `json:"status"`
-}
-
-type vulnerabilityImportVersionRange struct {
-	Type   string                          `json:"type"`
-	Events []vulnerabilityImportRangeEvent `json:"events"`
-}
-
-type vulnerabilityImportRangeEvent struct {
-	Introduced   string `json:"introduced,omitempty"`
-	Fixed        string `json:"fixed,omitempty"`
-	LastAffected string `json:"last_affected,omitempty"`
-	Limit        string `json:"limit,omitempty"`
-}
-
-type importResponse struct {
-	Feed         string `json:"feed"`
-	Imported     int    `json:"imported"`
-	Deleted      int    `json:"deleted,omitempty"`
-	EntriesTotal int    `json:"entries_total,omitempty"`
-}
-
-type syncVulnerabilityResponse struct {
-	ID               string   `json:"id"`
-	Ecosystem        string   `json:"ecosystem"`
-	Name             string   `json:"name"`
-	VersionRanges    string   `json:"version_ranges"`
-	VersionsAffected string   `json:"versions_affected"`
-	References       string   `json:"references"`
-	Severity         string   `json:"severity"`
-	CVSSScore        *float64 `json:"cvss_score"`
-	EPSSScore        *float64 `json:"epss_score"`
-	EPSSPercentile   *float64 `json:"epss_percentile"`
-	CISAKEV          bool     `json:"cisa_kev"`
-	Summary          string   `json:"summary"`
-	Source           string   `json:"source"`
-	Withdrawn        bool     `json:"withdrawn"`
-}
-
-type syncMaliciousResponse struct {
-	ID            string `json:"id"`
-	Ecosystem     string `json:"ecosystem"`
-	Name          string `json:"name"`
-	VersionRanges string `json:"version_ranges"`
-	Versions      string `json:"versions"`
-	ReferenceURLs string `json:"reference_urls"`
-	RiskType      string `json:"risk_type"`
-	Severity      string `json:"severity"`
-	Summary       string `json:"summary"`
-	Source        string `json:"source"`
-	Withdrawn     bool   `json:"withdrawn"`
-}
-
-type syncReputationResponse struct {
-	ID        string `json:"id"`
-	Ecosystem string `json:"ecosystem"`
-	Name      string `json:"name"`
-	Version   string `json:"version"`
-	Type      string `json:"type"`
-	RiskType  string `json:"risk_type"`
-	Severity  string `json:"severity"`
-	Summary   string `json:"summary"`
-	Withdrawn bool   `json:"withdrawn"`
-}
-
-type syncLifecycleResponse struct {
-	ID               string  `json:"id"`
-	Ecosystem        string  `json:"ecosystem"`
-	Name             string  `json:"name"`
-	ProductSlug      string  `json:"product_slug"`
-	ProductLabel     string  `json:"product_label"`
-	Cycle            string  `json:"cycle"`
-	Latest           string  `json:"latest"`
-	ReleaseDate      *string `json:"release_date"`
-	IsLTS            bool    `json:"is_lts"`
-	LTSFrom          *string `json:"lts_from"`
-	IsEOAS           bool    `json:"is_eoas"`
-	EOASFrom         *string `json:"eoas_from"`
-	IsEOL            bool    `json:"is_eol"`
-	EOLFrom          *string `json:"eol_from"`
-	IsDiscontinued   bool    `json:"is_discontinued"`
-	DiscontinuedFrom *string `json:"discontinued_from"`
-	IsEOES           *bool   `json:"is_eoes"`
-	EOESFrom         *string `json:"eoes_from"`
-	IsMaintained     bool    `json:"is_maintained"`
-	Withdrawn        bool    `json:"withdrawn"`
-}
-
-type syncResponsePayload struct {
-	SyncedAt        string                      `json:"synced_at"`
-	SyncedXID       uint64                      `json:"synced_xid,omitempty"`
-	FeedStatus      string                      `json:"feed_status"`
-	FeedVersions    map[string]string           `json:"feed_versions"`
-	Vulnerabilities []syncVulnerabilityResponse `json:"vulnerabilities"`
-	Malicious       []syncMaliciousResponse     `json:"malicious"`
-	Reputation      []syncReputationResponse    `json:"reputation"`
-	Lifecycle       []syncLifecycleResponse     `json:"lifecycle"`
-	Truncated       bool                        `json:"truncated"`
-	HasMore         bool                        `json:"has_more"`
-	NextCursor      *db.SyncCursor              `json:"next_cursor,omitempty"`
 }
 
 // NewHandlerWithRuntime creates a Handler whose block threshold is read from
@@ -334,13 +231,51 @@ func NewHandlerWithBlockThreshold(store Store, logger *slog.Logger, threshold do
 		store:               store,
 		logger:              logger,
 		blockThreshold:      threshold,
-		reputationScheduler: reputation.NewScheduler(store, logger, reputation.Config{}),
 		backgroundCtx:       context.Background(),
-	}
-	if feedStore, ok := store.(FeedImportStore); ok {
-		h.feedImportHandler = NewFeedImportHandler(feedStore, logger)
+		checkLookupTimeout:  checkLookupTimeout,
+		checkResponseCache:  newCheckResponseCache(defaultCheckResponseCacheTTL, defaultCheckResponseCacheMaxEntries),
+		scanLogIdentityMode: scanLogIdentityModeFromEnv(),
 	}
 	return h
+}
+
+// ConfigureScanLogIdentityMode sets which identity-adjacent fields are
+// retained in server-side scan_log rows. Invalid values fail closed to full
+// compatibility mode.
+func (h *Handler) ConfigureScanLogIdentityMode(mode config.ScanLogIdentityMode) {
+	if h == nil {
+		return
+	}
+	if _, err := config.ParseScanLogIdentityMode(string(mode)); err != nil {
+		mode = config.ScanLogIdentityModeFull
+	}
+	h.scanLogIdentityMode = mode
+}
+
+func scanLogIdentityModeFromEnv() config.ScanLogIdentityMode {
+	mode, err := config.ScanLogIdentityModeFromEnv()
+	if err != nil {
+		return config.ScanLogIdentityModeFull
+	}
+	return mode
+}
+
+// ConfigureReputationScheduler injects the optional demand-driven reputation
+// scheduling capability. Passing nil disables request-triggered scheduling.
+func (h *Handler) ConfigureReputationScheduler(scheduler ReputationScheduler) {
+	if h == nil {
+		return
+	}
+	h.reputationScheduler = scheduler
+}
+
+// ConfigurePackageRefreshProvider injects the optional manual package refresh
+// capability. Passing nil disables manual refresh.
+func (h *Handler) ConfigurePackageRefreshProvider(provider PackageRefreshProvider) {
+	if h == nil {
+		return
+	}
+	h.packageRefresh = provider
 }
 
 // ConfigureBackgroundContext sets the server lifecycle context used for
@@ -365,9 +300,8 @@ func (h *Handler) ConfigureReversingLabs(feeds config.FeedsConfig) {
 	cacheEnabled := feeds.ReversingLabsEnabled && feeds.ReversingLabsMode == config.FeedModeSelf
 	schedulingEnabled := cacheEnabled && strings.TrimSpace(feeds.ReversingLabsAPIKey) != ""
 	h.reversingLabsEnabled.Store(cacheEnabled)
-	h.socketRefreshEnabled.Store(feeds.SocketEnabled && feeds.SocketMode == config.FeedModeSelf && strings.TrimSpace(feeds.SocketAPIKey) != "")
 	if h.reputationScheduler != nil {
-		h.reputationScheduler.Configure(reputation.Config{
+		h.reputationScheduler.Configure(ReputationSchedulerConfig{
 			ReversingLabsActive:              schedulingEnabled,
 			ReversingLabsMaxSchedulePerCheck: feeds.ReversingLabsMaxSchedulePerCheck,
 			ReversingLabsExcludedNamespaces:  feeds.ReversingLabsExcludedNamespaces,
@@ -375,107 +309,230 @@ func (h *Handler) ConfigureReversingLabs(feeds config.FeedsConfig) {
 	}
 }
 
-// ConfigureFeedImportSecret configures the additional authorization required
-// for feed imports. When required is true and no secret is configured, imports
-// fail closed.
-func (h *Handler) ConfigureFeedImportSecret(secret string, required bool) {
-	if h == nil {
+func (h *Handler) reputationReadSources() []db.ReputationReadSource {
+	if h == nil || !h.reversingLabsEnabled.Load() {
+		return nil
+	}
+	return db.ReputationReadSources()
+}
+
+// ConfigureSocketRefresh enables optional manual Socket.dev package refresh
+// queueing. The handler enqueues work only; the async worker performs external
+// calls and persists the normalized check status.
+func (h *Handler) ConfigureSocketRefresh(feeds config.FeedsConfig) {
+	if h == nil || h.packageRefresh == nil {
 		return
 	}
-	if h.feedImportHandler != nil {
-		h.feedImportHandler.ConfigureFeedImportSecret(secret, required)
-	}
+	h.packageRefresh.Configure(PackageRefreshProviderConfig{
+		Active:             feeds.SocketEnabled && feeds.SocketMode == config.FeedModeSelf && strings.TrimSpace(feeds.SocketAPIKey) != "",
+		ExcludedNamespaces: feeds.SocketExcludedNamespaces,
+	})
 }
 
 func parseBlockThreshold(raw string) domain.Severity {
-	threshold := domain.Severity(strings.ToUpper(strings.TrimSpace(raw)))
-	if validBlockThreshold(threshold) {
+	if threshold, ok := domain.ParseBlockThreshold(raw); ok {
 		return threshold
 	}
 	return defaultBlockThreshold
 }
 
 func validBlockThreshold(threshold domain.Severity) bool {
-	switch threshold {
-	case domain.SeverityCritical, domain.SeverityHigh, domain.SeverityMedium, domain.SeverityLow, domain.SeverityNone:
-		return true
-	default:
-		return false
-	}
+	_, ok := domain.ParseBlockThreshold(string(threshold))
+	return ok
 }
 
 // ----------------------------------------------------------------------------
 // POST /api/v1/check
 // ----------------------------------------------------------------------------
 
-// HandleCheck processes a scan request, looks up vulnerabilities and malicious
-// findings for every package, and returns a ScanResult.
+// HandleCheck processes a scan request, looks up vulnerability, malicious,
+// reputation, and lifecycle findings for every package, and returns a
+// ScanResult using domain.FindingsBlock as the blocking-policy source of truth.
 func (h *Handler) HandleCheck(w http.ResponseWriter, r *http.Request) {
+	r = requestWithLogger(r, h.logger)
 	if r.Method != http.MethodPost {
-		errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+		methodNotAllowedForRequest(w, r, http.MethodPost)
 		return
 	}
 
 	start := time.Now()
 	correlationID := requestCorrelationID(r)
 
-	var req domain.ScanRequest
-	if err := readJSON(r, &req); err != nil {
-		h.logger.Warn("invalid check request body", "error", err, "correlation_id", correlationID)
-		errorResponse(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+	checkRequest, ok := h.parseCheckRequest(w, r, correlationID)
+	if !ok {
 		return
+	}
+	lookupCtx, cancelLookup := context.WithTimeout(r.Context(), h.effectiveCheckLookupTimeout())
+	defer cancelLookup()
+
+	idempotency, ok := h.resolveCheckIdempotency(w, r, lookupCtx, checkRequest.idempotencyKey, checkRequest.requestDigest, correlationID)
+	if !ok {
+		return
+	}
+	if idempotency.replay {
+		if cached, ok := h.cachedCheckResponse(idempotency.storedKey, checkRequest.requestDigest); ok {
+			writeCheckResponseHeaders(w, correlationID, cached.durationMs, checkRequest.idempotencyKey)
+			writeJSONBytesForRequest(w, r, cached.statusCode, cached.body)
+			return
+		}
+	}
+	result, resultBody, ok := h.buildCheckResult(w, r, lookupCtx, start, idempotency.scanID, checkRequest.request.Packages, !idempotency.replay, correlationID)
+	if !ok {
+		return
+	}
+	if !h.persistCheckScanLog(w, r, lookupCtx, &checkRequest.request, &result, checkRequest.idempotencyKey, idempotency.storedKey, checkRequest.requestDigest, resultBody, idempotency.replay, correlationID) {
+		return
+	}
+	h.cacheCheckResponse(idempotency.storedKey, checkRequest.requestDigest, http.StatusOK, result.DurationMs, resultBody)
+
+	writeCheckResponseHeaders(w, correlationID, result.DurationMs, checkRequest.idempotencyKey)
+	writeJSONBytesForRequest(w, r, http.StatusOK, resultBody)
+}
+
+func (h *Handler) cachedCheckResponse(storedIdempotencyKey, requestDigest string) (cachedCheckResponse, bool) {
+	if h == nil || h.checkResponseCache == nil {
+		return cachedCheckResponse{}, false
+	}
+	return h.checkResponseCache.Get(checkResponseCacheKey(storedIdempotencyKey, requestDigest))
+}
+
+func (h *Handler) cacheCheckResponse(storedIdempotencyKey, requestDigest string, statusCode int, durationMs int64, body []byte) {
+	if h == nil || h.checkResponseCache == nil {
+		return
+	}
+	h.checkResponseCache.Set(checkResponseCacheKey(storedIdempotencyKey, requestDigest), cachedCheckResponse{
+		statusCode: statusCode,
+		durationMs: durationMs,
+		body:       body,
+	})
+}
+
+func (h *Handler) effectiveCheckLookupTimeout() time.Duration {
+	if h == nil || h.checkLookupTimeout <= 0 {
+		return checkLookupTimeout
+	}
+	return h.checkLookupTimeout
+}
+
+type checkRequestParts struct {
+	request        domain.ScanRequest
+	idempotencyKey string
+	requestDigest  string
+}
+
+type checkIdempotencyResolution struct {
+	scanID    string
+	replay    bool
+	storedKey string
+}
+
+type checkRequest struct {
+	Packages []checkPackage         `json:"packages"`
+	Repo     *domain.RemoteRepoInfo `json:"repo,omitempty"`
+}
+
+type checkPackage struct {
+	Name      string           `json:"name"`
+	Version   string           `json:"version"`
+	Ecosystem domain.Ecosystem `json:"ecosystem"`
+}
+
+func (h *Handler) parseCheckRequest(w http.ResponseWriter, r *http.Request, correlationID string) (checkRequestParts, bool) {
+	var wireReq checkRequest
+	if err := requireJSONContentType(r); err != nil {
+		h.logger.Warn("invalid check request content type", "error", err, "correlation_id", correlationID)
+		errorResponseForRequest(w, r, http.StatusUnsupportedMediaType, err.Error())
+		return checkRequestParts{}, false
+	}
+	if err := readJSON(r, &wireReq); err != nil {
+		h.logger.Warn("invalid check request body", "error", err, "correlation_id", correlationID)
+		errorResponseForRequest(w, r, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return checkRequestParts{}, false
 	}
 
-	if len(req.Packages) == 0 {
-		errorResponse(w, http.StatusBadRequest, "packages array is required and must not be empty")
-		return
+	req := domain.ScanRequest{
+		Packages: checkPackagesToDomain(wireReq.Packages),
+		Repo:     wireReq.Repo,
 	}
-	if len(req.Packages) > maxPackagesPerCheck {
-		errorResponse(w, http.StatusBadRequest, fmt.Sprintf("too many packages: %d (max %d)", len(req.Packages), maxPackagesPerCheck))
-		return
+	if len(req.Packages) == 0 {
+		errorResponseForRequest(w, r, http.StatusBadRequest, "packages array is required and must not be empty")
+		return checkRequestParts{}, false
+	}
+	if len(req.Packages) > checkcontract.MaxPackagesPerCheck {
+		errorResponseForRequest(w, r, http.StatusBadRequest, fmt.Sprintf("too many packages: %d (max %d)", len(req.Packages), checkcontract.MaxPackagesPerCheck))
+		return checkRequestParts{}, false
 	}
 	if err := validateCheckPackages(req.Packages); err != nil {
-		errorResponse(w, http.StatusBadRequest, err.Error())
-		return
+		errorResponseForRequest(w, r, http.StatusBadRequest, err.Error())
+		return checkRequestParts{}, false
 	}
 	req.Packages = deduplicateCheckPackages(req.Packages)
 
-	ctx := r.Context()
 	idempotencyKey, err := checkIdempotencyKey(r)
 	if err != nil {
-		errorResponse(w, http.StatusBadRequest, err.Error())
-		return
+		errorResponseForRequest(w, r, http.StatusBadRequest, err.Error())
+		return checkRequestParts{}, false
 	}
 	requestDigest, err := checkRequestDigest(&req)
 	if err != nil {
 		h.logger.Error("failed to digest check request", "error", err, "correlation_id", correlationID)
-		errorResponse(w, http.StatusInternalServerError, "internal error while checking packages")
-		return
-	}
-	scanID := generateID()
-	if idempotencyKey != "" {
-		scanID = scanIDForIdempotencyKey(idempotencyKey, requestDigest)
-		if existing, ok, err := h.existingIdempotentScan(ctx, idempotencyKey); err != nil {
-			h.logger.Error("failed to check idempotency key", "error", err, "correlation_id", correlationID)
-			errorResponse(w, http.StatusInternalServerError, "internal error while checking packages")
-			return
-		} else if ok {
-			if existing.RequestDigest != "" && existing.RequestDigest != requestDigest {
-				errorResponse(w, http.StatusConflict, "idempotency key was already used for a different check request")
-				return
-			}
-			if existing.ScanID != "" {
-				scanID = existing.ScanID
-			}
-		}
+		errorResponseForRequest(w, r, http.StatusInternalServerError, "internal error while checking packages")
+		return checkRequestParts{}, false
 	}
 
-	findings, err := h.collectFindings(ctx, req.Packages)
+	return checkRequestParts{
+		request:        req,
+		idempotencyKey: idempotencyKey,
+		requestDigest:  requestDigest,
+	}, true
+}
+
+func checkPackagesToDomain(packages []checkPackage) []domain.Package {
+	out := make([]domain.Package, len(packages))
+	for i, pkg := range packages {
+		out[i] = domain.Package{
+			Name:      pkg.Name,
+			Version:   pkg.Version,
+			Ecosystem: pkg.Ecosystem,
+		}
+	}
+	return out
+}
+
+func (h *Handler) resolveCheckIdempotency(w http.ResponseWriter, r *http.Request, ctx context.Context, idempotencyKey, requestDigest, correlationID string) (checkIdempotencyResolution, bool) {
+	resolution := checkIdempotencyResolution{scanID: generateID()}
+	if idempotencyKey != "" {
+		resolution.storedKey = scanLogIdempotencyKey(idempotencyKey)
+		resolution.scanID = scanIDForIdempotencyKey(resolution.storedKey, requestDigest)
+		if existing, ok, err := h.existingIdempotentScan(ctx, resolution.storedKey, idempotencyKey); err != nil {
+			h.logger.Error("failed to check idempotency key", "error", err, "correlation_id", correlationID)
+			checkStoreErrorResponse(w, r, err)
+			return checkIdempotencyResolution{}, false
+		} else if ok {
+			if existing.RequestDigest != "" && existing.RequestDigest != requestDigest {
+				errorResponseForRequest(w, r, http.StatusConflict, "idempotency key was already used for a different check request")
+				return checkIdempotencyResolution{}, false
+			}
+			if existing.ScanID != "" {
+				resolution.scanID = existing.ScanID
+			}
+			resolution.replay = true
+		}
+	}
+	return resolution, true
+}
+
+func (h *Handler) buildCheckResult(w http.ResponseWriter, r *http.Request, ctx context.Context, start time.Time, scanID string, packages []domain.Package, scheduleReversingLabs bool, correlationID string) (domain.ScanResult, []byte, bool) {
+	collection, err := h.collectFindingsForCheck(ctx, packages, scheduleReversingLabs)
 	if err != nil {
 		h.logger.Error("failed to collect findings", "error", err, "correlation_id", correlationID)
-		errorResponse(w, http.StatusInternalServerError, "internal error while checking packages")
-		return
+		checkStoreErrorResponse(w, r, err)
+		return domain.ScanResult{}, nil, false
 	}
+	for _, failure := range collection.optionalLookupFailures {
+		h.logger.Warn("optional finding lookup failed", "lookup", failure.lookup, "error", failure.err, "correlation_id", correlationID)
+	}
+	findings := collection.findings
 	if findings == nil {
 		findings = []domain.Finding{}
 	}
@@ -483,66 +540,94 @@ func (h *Handler) HandleCheck(w http.ResponseWriter, r *http.Request) {
 	// Build summary maps.
 	summary := domain.BuildScanSummary(findings)
 
-	// Determine blocking status. Malicious findings always block.
-	// Vulnerability findings block when their severity meets the threshold.
+	// Determine blocking status through the shared scan policy:
+	// malicious/active supply-chain risk always block, vulnerability and
+	// lifecycle findings are severity-gated, and informational reputation
+	// findings never block.
 	blockThreshold := h.effectiveBlockThreshold()
 	blocking := domain.FindingsBlock(findings, blockThreshold)
 
 	// Assemble feed status and versions from sync state.
-	feedStatus, feedVersions := h.feedState(ctx)
-	if feedStatus == "degraded" {
+	feedStatus, feedVersions := h.feedState(ctx, correlationID)
+	if collection.degraded {
+		feedStatus = string(domain.ScanFeedStatusDegraded)
+	}
+	if feedStatus == string(domain.ScanFeedStatusDegraded) {
 		telemetry.Default().IncDegradedResponses()
 	}
 
 	durationMs := time.Since(start).Milliseconds()
 
 	result := domain.ScanResult{
-		ScanID:           scanID,
-		Mode:             "remote",
-		ScannedAt:        start.UTC(),
-		DurationMs:       durationMs,
-		PackagesScanned:  len(req.Packages),
-		FindingsCount:    len(findings),
-		FindingsBlocking: blocking,
-		BlockThreshold:   blockThreshold,
-		FeedStatus:       feedStatus,
-		Summary:          summary,
-		Findings:         findings,
-		FeedVersions:     feedVersions,
-		ManualCount:      domain.CountManualAdvisoryFindings(findings),
+		ScanID:                scanID,
+		Mode:                  domain.ScanModeRemote,
+		ScannedAt:             start.UTC(),
+		DurationMs:            durationMs,
+		PackagesScanned:       len(packages),
+		FindingsCount:         len(findings),
+		FindingsBlocking:      blocking,
+		BlockThreshold:        blockThreshold,
+		FeedStatus:            feedStatus,
+		Summary:               summary,
+		Findings:              findings,
+		FeedVersions:          feedVersions,
+		ManualAdvisoriesCount: domain.CountManualAdvisoryFindings(findings),
 	}
 	resultBody, err := encodeJSONResponse(result)
 	if err != nil {
 		h.logger.Error("failed to encode check response", "error", err, "correlation_id", correlationID)
-		errorResponse(w, http.StatusInternalServerError, "internal error while encoding scan result")
-		return
+		errorResponseForRequest(w, r, http.StatusInternalServerError, "internal error while encoding scan result")
+		return domain.ScanResult{}, nil, false
 	}
+	return result, resultBody, true
+}
 
-	logCtx, cancelLog := context.WithTimeout(context.WithoutCancel(ctx), scanLogInsertTimeout)
-	if err := h.logScan(logCtx, &result, r, &req, correlationID, idempotencyKey, requestDigest, scanResultDigest(resultBody)); err != nil {
-		cancelLog()
-		h.logger.Error("failed to insert scan log", "error", err, "correlation_id", correlationID)
-		errorResponse(w, http.StatusInternalServerError, "internal error while recording scan")
-		return
+func (h *Handler) persistCheckScanLog(w http.ResponseWriter, r *http.Request, ctx context.Context, req *domain.ScanRequest, result *domain.ScanResult, rawIdempotencyKey, storedIdempotencyKey, requestDigest string, resultBody []byte, idempotencyReplay bool, correlationID string) bool {
+	if idempotencyReplay {
+		return true
 	}
-	cancelLog()
-	if idempotencyKey != "" {
-		if existing, ok, err := h.existingIdempotentScan(ctx, idempotencyKey); err != nil {
-			h.logger.Error("failed to verify idempotency key", "error", err, "correlation_id", correlationID)
-			errorResponse(w, http.StatusInternalServerError, "internal error while checking packages")
-			return
-		} else if ok && existing.RequestDigest != "" && existing.RequestDigest != requestDigest {
-			errorResponse(w, http.StatusConflict, "idempotency key was already used for a different check request")
-			return
+	logCtx, cancelLog := context.WithTimeout(context.WithoutCancel(r.Context()), scanLogInsertTimeout)
+	defer cancelLog()
+	if err := h.logScan(logCtx, result, r, req, correlationID, storedIdempotencyKey, requestDigest, scanResultDigest(resultBody)); err != nil {
+		h.logger.Error("failed to insert scan log", "error", err, "correlation_id", correlationID, "idempotency_key_present", rawIdempotencyKey != "")
+		if rawIdempotencyKey != "" {
+			errorResponseForRequest(w, r, http.StatusInternalServerError, "internal error while recording idempotency state")
+			return false
 		}
+		return true
 	}
+	return h.verifyCheckIdempotencyAfterLog(w, r, ctx, storedIdempotencyKey, rawIdempotencyKey, requestDigest, correlationID)
+}
 
+func (h *Handler) verifyCheckIdempotencyAfterLog(w http.ResponseWriter, r *http.Request, ctx context.Context, storedIdempotencyKey, rawIdempotencyKey, requestDigest, correlationID string) bool {
+	if storedIdempotencyKey == "" {
+		return true
+	}
+	if existing, ok, err := h.existingIdempotentScan(ctx, storedIdempotencyKey, rawIdempotencyKey); err != nil {
+		h.logger.Error("failed to verify idempotency key", "error", err, "correlation_id", correlationID)
+		checkStoreErrorResponse(w, r, err)
+		return false
+	} else if ok && existing.RequestDigest != "" && existing.RequestDigest != requestDigest {
+		errorResponseForRequest(w, r, http.StatusConflict, "idempotency key was already used for a different check request")
+		return false
+	}
+	return true
+}
+
+func checkStoreErrorResponse(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, context.DeadlineExceeded) && r.Context().Err() == nil {
+		errorResponseForRequest(w, r, http.StatusServiceUnavailable, "check service temporarily unavailable")
+		return
+	}
+	errorResponseForRequest(w, r, http.StatusInternalServerError, "internal error while checking packages")
+}
+
+func writeCheckResponseHeaders(w http.ResponseWriter, correlationID string, durationMs int64, idempotencyKey string) {
 	w.Header().Set(correlation.Header, correlationID)
 	w.Header().Set("X-Scan-Duration-Ms", fmt.Sprintf("%d", durationMs))
 	if idempotencyKey != "" {
 		w.Header().Set(idempotencyKeyHeader, idempotencyKey)
 	}
-	writeJSONBytes(w, http.StatusOK, resultBody)
 }
 
 func validateCheckPackages(packages []domain.Package) error {
@@ -557,14 +642,14 @@ func validateCheckPackages(packages []domain.Package) error {
 		if pkg.Name == "" {
 			return fmt.Errorf("packages[%d].name is required", position)
 		}
-		if len(pkg.Name) > maxCheckPackageNameLength {
-			return fmt.Errorf("packages[%d].name exceeds %d characters", position, maxCheckPackageNameLength)
+		if len(pkg.Name) > checkcontract.MaxPackageNameLength {
+			return fmt.Errorf("packages[%d].name exceeds %d characters", position, checkcontract.MaxPackageNameLength)
 		}
 		if pkg.Version == "" {
 			return fmt.Errorf("packages[%d].version is required", position)
 		}
-		if len(pkg.Version) > maxCheckPackageVersionLength {
-			return fmt.Errorf("packages[%d].version exceeds %d characters", position, maxCheckPackageVersionLength)
+		if len(pkg.Version) > checkcontract.MaxPackageVersionLength {
+			return fmt.Errorf("packages[%d].version exceeds %d characters", position, checkcontract.MaxPackageVersionLength)
 		}
 		if len(strings.Fields(pkg.Version)) != 1 {
 			return fmt.Errorf("packages[%d].version is invalid", position)
@@ -607,42 +692,114 @@ func deduplicateCheckPackages(packages []domain.Package) []domain.Package {
 	return unique
 }
 
-// collectFindings queries the store for vulnerabilities and malicious packages
-// using batch queries to avoid the N+1 pattern. All findings are returned
-// without truncation -- vulnerability data must never be silently discarded.
+// collectFindings queries the store for all check-path finding classes using
+// batch queries to avoid the N+1 pattern. Required vulnerability and malicious
+// lookup failures abort the check; optional reputation and lifecycle lookup
+// failures return the core findings with degraded coverage metadata.
 func (h *Handler) collectFindings(ctx context.Context, packages []domain.Package) ([]domain.Finding, error) {
+	collection, err := h.collectFindingsForCheck(ctx, packages, true)
+	return collection.findings, err
+}
+
+type findingCollection struct {
+	findings               []domain.Finding
+	degraded               bool
+	optionalLookupFailures []optionalLookupFailure
+}
+
+type optionalLookupFailure struct {
+	lookup string
+	err    error
+}
+
+func (h *Handler) collectFindingsForCheck(ctx context.Context, packages []domain.Package, scheduleReversingLabs bool) (findingCollection, error) {
 	packages = deduplicateCheckPackages(packages)
 
-	queries := make([]db.PackageQuery, len(packages))
+	queries := make([]PackageLookup, len(packages))
 	for i, pkg := range packages {
-		queries[i] = db.PackageQuery{
+		queries[i] = PackageLookup{
 			Ecosystem: string(pkg.Ecosystem),
 			Name:      pkg.Name,
 			Version:   pkg.Version,
 		}
 	}
 
-	vulns, err := h.store.FindVulnerabilitiesBatch(ctx, queries)
-	if err != nil {
-		return nil, fmt.Errorf("FindVulnerabilitiesBatch: %w", err)
-	}
+	lookupCtx, cancelLookup := context.WithCancel(ctx)
+	defer cancelLookup()
 
-	mal, err := h.store.FindMaliciousBatch(ctx, queries)
-	if err != nil {
-		return nil, fmt.Errorf("FindMaliciousBatch: %w", err)
-	}
+	var wg sync.WaitGroup
+	var vulns, mal, reputation, lifecycle []domain.Finding
+	var vulnErr, malErr, reputationErr, lifecycleErr error
+	reputationSources := h.reputationReadSources()
+	lifecycleNow := time.Now().UTC()
 
-	var reputation []domain.Finding
-	if h.reversingLabsEnabled.Load() {
-		reputation, err = h.store.FindReputationFindingsBatch(ctx, queries, db.ReputationSourceReversingLabs)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		var err error
+		vulns, err = h.store.FindVulnerabilitiesBatch(lookupCtx, queries)
 		if err != nil {
-			return nil, fmt.Errorf("FindReputationFindingsBatch: %w", err)
+			vulnErr = fmt.Errorf("FindVulnerabilitiesBatch: %w", err)
+			cancelLookup()
 		}
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		var err error
+		mal, err = h.store.FindMaliciousBatch(lookupCtx, queries)
+		if err != nil {
+			malErr = fmt.Errorf("FindMaliciousBatch: %w", err)
+			cancelLookup()
+		}
+	}()
+
+	if len(reputationSources) > 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for _, source := range reputationSources {
+				findings, err := h.store.FindReputationFindingsBatch(lookupCtx, queries, source.Source)
+				if err != nil {
+					reputationErr = fmt.Errorf("FindReputationFindingsBatch(%s): %w", source.Source, err)
+					return
+				}
+				reputation = append(reputation, findings...)
+			}
+		}()
 	}
 
-	lifecycle, err := h.store.FindLifecycleFindingsBatch(ctx, queries, time.Now().UTC())
-	if err != nil {
-		return nil, fmt.Errorf("FindLifecycleFindingsBatch: %w", err)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		lifecycle, lifecycleErr = h.store.FindLifecycleFindingsBatch(lookupCtx, queries, lifecycleNow)
+	}()
+
+	wg.Wait()
+	if vulnErr != nil {
+		return findingCollection{}, vulnErr
+	}
+	if malErr != nil {
+		return findingCollection{}, malErr
+	}
+
+	var collection findingCollection
+	if reputationErr != nil {
+		collection.degraded = true
+		collection.optionalLookupFailures = append(collection.optionalLookupFailures, optionalLookupFailure{
+			lookup: "reputation",
+			err:    reputationErr,
+		})
+		reputation = nil
+	}
+	if lifecycleErr != nil {
+		collection.degraded = true
+		collection.optionalLookupFailures = append(collection.optionalLookupFailures, optionalLookupFailure{
+			lookup: "lifecycle",
+			err:    lifecycleErr,
+		})
+		lifecycle = nil
 	}
 
 	all := make([]domain.Finding, 0, len(vulns)+len(mal)+len(reputation)+len(lifecycle))
@@ -651,11 +808,12 @@ func (h *Handler) collectFindings(ctx context.Context, packages []domain.Package
 	all = append(all, reputation...)
 	all = append(all, lifecycle...)
 
-	if h.reversingLabsEnabled.Load() {
+	if scheduleReversingLabs && h.reversingLabsEnabled.Load() && h.reputationScheduler != nil {
 		h.reputationScheduler.ScheduleReversingLabsAsync(h.backgroundContext(), packages, all)
 	}
 
-	return all, nil
+	collection.findings = all
+	return collection, nil
 }
 
 func (h *Handler) backgroundContext() context.Context {
@@ -666,11 +824,18 @@ func (h *Handler) backgroundContext() context.Context {
 }
 
 // feedState builds both the overall remote feed status and the per-feed versions.
-func (h *Handler) feedState(ctx context.Context) (string, map[string]string) {
+func (h *Handler) feedState(ctx context.Context, correlationID string) (string, map[string]string) {
 	statuses, err := h.store.ListFeedSyncStatuses(ctx)
 	if err != nil {
-		h.logger.Warn("failed to list feed sync statuses", "error", err)
-		return "degraded", map[string]string{}
+		if correlationID == "" {
+			correlationID = requestctx.CorrelationIDFromContext(ctx)
+		}
+		attrs := []any{"error", err}
+		if correlationID != "" {
+			attrs = append(attrs, "correlation_id", correlationID)
+		}
+		h.logger.Warn("failed to list feed sync statuses", attrs...)
+		return string(domain.ScanFeedStatusDegraded), map[string]string{}
 	}
 
 	return overallFeedStatus(statuses), feedVersionsFromStatuses(statuses)
@@ -680,7 +845,7 @@ func feedVersionsFromStatuses(statuses []db.FeedSyncStatus) map[string]string {
 	m := make(map[string]string, len(statuses))
 	for _, s := range statuses {
 		if s.LastSyncAt != nil {
-			m[s.FeedName] = s.LastSyncAt.UTC().Format(time.RFC3339)
+			m[s.FeedName] = formatAPIDateTime(*s.LastSyncAt)
 		}
 	}
 	return m
@@ -690,19 +855,21 @@ func overallFeedStatus(statuses []db.FeedSyncStatus) string {
 	return feedhealth.OverallFeedStatus(statuses, feedhealth.HealthOptions{})
 }
 
-func feedHasFreshEntries(s db.FeedSyncStatus) bool {
-	return feedhealth.HasFreshFeedEntries(s, feedhealth.HealthOptions{})
-}
-
 // logScan persists a scan log entry for a completed scan.
 func (h *Handler) logScan(ctx context.Context, result *domain.ScanResult, r *http.Request, req *domain.ScanRequest, correlationID, idempotencyKey, requestDigest, resultDigest string) error {
+	identityMode := h.scanLogIdentityMode
+	if identityMode == "" {
+		identityMode = config.ScanLogIdentityModeFull
+	}
 	entry := &db.ScanLogEntry{
 		ScanID:        result.ScanID,
 		ScannedAt:     result.ScannedAt,
 		PackagesCount: result.PackagesScanned,
 		FindingsCount: result.FindingsCount,
 		DurationMs:    int(result.DurationMs),
-		ClientIP:      clientIP(r),
+	}
+	if identityMode == config.ScanLogIdentityModeFull {
+		entry.ClientIP = clientIP(r)
 	}
 	entry.CorrelationID = correlationID
 	entry.IdempotencyKey = idempotencyKey
@@ -714,13 +881,18 @@ func (h *Handler) logScan(ctx context.Context, result *domain.ScanResult, r *htt
 	entry.FeedVersions = cloneStringMap(result.FeedVersions)
 	entry.FindingIDs = scanLogFindingIDs(result.Findings)
 	entry.FindingSeverities = scanLogFindingSeverities(result.Findings)
-	entry.ManualAdvisoriesCount = result.ManualCount
-	if req != nil && req.Repo != nil {
+	entry.ManualAdvisoriesCount = result.ManualAdvisoriesCount
+	if identityMode != config.ScanLogIdentityModeNone && req != nil && req.Repo != nil {
 		entry.RepoName = scanLogRepoName(req.Repo.Name)
 	}
 	if identity, ok := requestctx.APIKeyIdentityFromContext(r.Context()); ok {
-		entry.APIKeyID = identity.ID
-		entry.APIKeyName = identity.Name
+		if identityMode == config.ScanLogIdentityModeFull {
+			entry.APIKeyID = identity.ID
+			entry.APIKeyName = identity.Name
+		}
+		if identityMode != config.ScanLogIdentityModeNone {
+			entry.ClientVersion = scanLogClientVersion(r.Header.Get("User-Agent"))
+		}
 	}
 	if err := h.store.InsertScanLog(ctx, entry); err != nil {
 		return fmt.Errorf("insert scan log: %w", err)
@@ -728,19 +900,103 @@ func (h *Handler) logScan(ctx context.Context, result *domain.ScanResult, r *htt
 	return nil
 }
 
-func (h *Handler) existingIdempotentScan(ctx context.Context, key string) (*db.ScanLogEntry, bool, error) {
-	lookup, ok := h.store.(scanLogIdempotencyLookup)
-	if !ok {
-		return nil, false, nil
+func scanLogClientVersion(userAgent string) string {
+	for _, field := range strings.Fields(userAgent) {
+		for _, prefix := range []string{"packmon-cli/", "packmon/"} {
+			if strings.HasPrefix(field, prefix) {
+				version := strings.TrimSpace(strings.TrimPrefix(field, prefix))
+				if validScanLogClientVersion(version) {
+					return version
+				}
+				return ""
+			}
+		}
 	}
-	entry, err := lookup.GetScanLogByIdempotencyKey(ctx, key)
-	if err != nil {
-		return nil, false, err
+	return ""
+}
+
+func validScanLogClientVersion(version string) bool {
+	if version == "" || len(version) > maxScanLogClientVersionLength {
+		return false
 	}
-	if entry == nil {
-		return nil, false, nil
+	parts := strings.SplitN(version, "+", 2)
+	core := parts[0]
+	if len(parts) == 2 && !validSemVerIdentifierList(parts[1]) {
+		return false
 	}
-	return entry, true, nil
+	coreParts := strings.SplitN(core, "-", 2)
+	if len(coreParts) == 2 && !validSemVerIdentifierList(coreParts[1]) {
+		return false
+	}
+	nums := strings.Split(coreParts[0], ".")
+	if len(nums) != 3 {
+		return false
+	}
+	for _, n := range nums {
+		if !validSemVerNumber(n) {
+			return false
+		}
+	}
+	return true
+}
+
+func validSemVerNumber(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, ch := range value {
+		if ch < '0' || ch > '9' {
+			return false
+		}
+	}
+	return len(value) == 1 || value[0] != '0'
+}
+
+func validSemVerIdentifierList(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, part := range strings.Split(value, ".") {
+		if part == "" {
+			return false
+		}
+		for _, ch := range part {
+			switch {
+			case ch >= 'a' && ch <= 'z':
+			case ch >= 'A' && ch <= 'Z':
+			case ch >= '0' && ch <= '9':
+			case ch == '-':
+			default:
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func (h *Handler) existingIdempotentScan(ctx context.Context, storedKey, rawKey string) (*db.ScanLogEntry, bool, error) {
+	for _, key := range scanLogIdempotencyLookupKeys(storedKey, rawKey) {
+		entry, err := h.store.GetScanLogByIdempotencyKey(ctx, key)
+		if err != nil {
+			return nil, false, err
+		}
+		if entry != nil {
+			return entry, true, nil
+		}
+	}
+	return nil, false, nil
+}
+
+func scanLogIdempotencyLookupKeys(storedKey, rawKey string) []string {
+	storedKey = strings.TrimSpace(storedKey)
+	rawKey = strings.TrimSpace(rawKey)
+	if storedKey == "" {
+		return nil
+	}
+	if rawKey == "" || rawKey == storedKey {
+		return []string{storedKey}
+	}
+	return []string{storedKey, rawKey}
 }
 
 func checkIdempotencyKey(r *http.Request) (string, error) {
@@ -764,10 +1020,19 @@ func checkIdempotencyKey(r *http.Request) (string, error) {
 	return key, nil
 }
 
+func scanLogIdempotencyKey(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte("packmon scan-log idempotency key v1\x00" + raw))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
 func checkRequestDigest(req *domain.ScanRequest) (string, error) {
 	body, err := json.Marshal(struct {
-		Packages []domain.Package `json:"packages"`
-		Repo     *domain.RepoInfo `json:"repo,omitempty"`
+		Packages []domain.Package       `json:"packages"`
+		Repo     *domain.RemoteRepoInfo `json:"repo,omitempty"`
 	}{
 		Packages: req.Packages,
 		Repo:     req.Repo,
@@ -861,8 +1126,13 @@ type FeedStatusResponse struct {
 
 // HandleFeedStatus returns the sync status of all known feed sources.
 func (h *Handler) HandleFeedStatus(w http.ResponseWriter, r *http.Request) {
+	r = requestWithLogger(r, h.logger)
 	if !isGetOrHead(r.Method) {
-		errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+		methodNotAllowedForRequest(w, r, http.MethodGet, http.MethodHead)
+		return
+	}
+	if r.Method == http.MethodHead {
+		writeJSONHead(w, http.StatusOK)
 		return
 	}
 
@@ -870,7 +1140,11 @@ func (h *Handler) HandleFeedStatus(w http.ResponseWriter, r *http.Request) {
 	statuses, err := h.store.ListFeedSyncStatuses(r.Context())
 	if err != nil {
 		h.logger.Error("failed to list feed sync statuses", "error", err, "correlation_id", correlationID)
-		errorResponseForRequest(w, r, http.StatusInternalServerError, "failed to retrieve feed statuses")
+		writeJSONForRequest(w, r, http.StatusOK, FeedStatusResponse{
+			Status:  string(domain.ScanFeedStatusDegraded),
+			Message: "feed status unavailable: feed sync status rows could not be read",
+			Feeds:   []FeedStatusItem{},
+		})
 		return
 	}
 
@@ -883,7 +1157,7 @@ func (h *Handler) HandleFeedStatus(w http.ResponseWriter, r *http.Request) {
 			EntriesCount: s.EntriesTotal,
 		}
 		if s.LastSyncAt != nil {
-			ts := s.LastSyncAt.UTC().Format(time.RFC3339)
+			ts := formatAPIDateTime(*s.LastSyncAt)
 			item.LastSyncAt = &ts
 		}
 		if message := feedStatusMessage(status, s.LastError); message != "" {
@@ -896,16 +1170,15 @@ func (h *Handler) HandleFeedStatus(w http.ResponseWriter, r *http.Request) {
 	message := ""
 	if len(statuses) == 0 {
 		message = "feed status unavailable: no feed sync rows have been recorded"
-	} else if status != "healthy" {
+	} else if status != string(domain.ScanFeedStatusHealthy) {
 		message = "one or more feeds are degraded"
 	}
 	writeJSONForRequest(w, r, http.StatusOK, FeedStatusResponse{Status: status, Message: message, Feeds: items})
 }
 
-// feedHealthStatus derives a health string from sync status.
-// A feed is "error" if its last sync failed, "warning" if the last run was
-// skipped, the last successful sync is more than 48 hours ago, or the feed
-// holds zero entries, and "healthy" otherwise.
+// feedHealthStatus delegates to feed.FeedStatusHealth, the shared source of
+// truth for API, web, admin, and startup feed health labels. The returned value
+// may be healthy, warning, error, disabled, configured, or pending.
 func feedHealthStatus(s db.FeedSyncStatus) string {
 	return feedhealth.FeedStatusHealth(s, feedhealth.HealthOptions{}).Status
 }
@@ -923,81 +1196,6 @@ func feedStatusMessage(health, lastError string) string {
 }
 
 // ----------------------------------------------------------------------------
-// POST /api/v1/feeds/{feed}/import
-// ----------------------------------------------------------------------------
-
-func (h *Handler) HandleFeedImport(w http.ResponseWriter, r *http.Request) {
-	if h == nil || h.feedImportHandler == nil {
-		errorResponse(w, http.StatusNotImplemented, "feed import endpoint is not supported by this store")
-		return
-	}
-	h.feedImportHandler.HandleImport(w, r)
-}
-
-func (h *FeedImportHandler) authorizeFeedImport(r *http.Request) bool {
-	expected := strings.TrimSpace(h.feedImportSecret)
-	if expected == "" && !h.feedImportRequired {
-		return true
-	}
-	if expected == "" {
-		h.logger.Warn("feed import authorization failed",
-			"reason", "secret_not_configured",
-			"correlation_id", requestCorrelationID(r),
-		)
-		return false
-	}
-	provided := strings.TrimSpace(r.Header.Get(HeaderFeedImportSecret))
-	if provided == "" || !constantTimeStringEqual(provided, expected) {
-		h.logger.Warn("feed import authorization failed",
-			"reason", "missing_or_invalid_secret",
-			"correlation_id", requestCorrelationID(r),
-		)
-		return false
-	}
-	return true
-}
-
-func constantTimeStringEqual(a, b string) bool {
-	aHash := sha256.Sum256([]byte(a))
-	bHash := sha256.Sum256([]byte(b))
-	return subtle.ConstantTimeCompare(aHash[:], bHash[:]) == 1
-}
-
-func (h *FeedImportHandler) recordFeedImportAudit(r *http.Request, resp *importResponse) error {
-	client := clientIP(r)
-	details := struct {
-		Feed          string `json:"feed"`
-		Imported      int    `json:"imported"`
-		Deleted       int    `json:"deleted"`
-		EntriesTotal  int    `json:"entries_total"`
-		ClientIP      string `json:"client_ip"`
-		CorrelationID string `json:"correlation_id"`
-		APIKeyID      int    `json:"api_key_id,omitempty"`
-		APIKeyName    string `json:"api_key_name,omitempty"`
-	}{
-		Feed:          resp.Feed,
-		Imported:      resp.Imported,
-		Deleted:       resp.Deleted,
-		EntriesTotal:  resp.EntriesTotal,
-		ClientIP:      client,
-		CorrelationID: requestCorrelationID(r),
-	}
-	if identity, ok := requestctx.APIKeyIdentityFromContext(r.Context()); ok {
-		details.APIKeyID = identity.ID
-		details.APIKeyName = identity.Name
-	}
-	raw, err := json.Marshal(details)
-	if err != nil {
-		return err
-	}
-	return h.store.InsertAdminAuditLog(r.Context(), &db.AdminAuditEntry{
-		Action:  "feed_import",
-		Details: raw,
-		IP:      client,
-	})
-}
-
-// ----------------------------------------------------------------------------
 // GET /api/v1/packages/{ecosystem}/{rest...}
 // ----------------------------------------------------------------------------
 
@@ -1011,20 +1209,15 @@ type PackageDetailResponse struct {
 // HandlePackageDetail returns all known findings for a package.
 // The package name is extracted from the {rest...} wildcard.
 func (h *Handler) HandlePackageDetail(w http.ResponseWriter, r *http.Request) {
+	r = requestWithLogger(r, h.logger)
 	if !isGetOrHead(r.Method) {
-		w.Header().Set("Allow", "GET, HEAD")
-		errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+		methodNotAllowedForRequest(w, r, http.MethodGet, http.MethodHead)
 		return
 	}
 
 	correlationID := requestCorrelationID(r)
 	ecosystem := r.PathValue("ecosystem")
 	name := r.PathValue("rest")
-	if strings.HasSuffix(name, "/refresh") {
-		w.Header().Set("Allow", http.MethodPost)
-		errorResponseForRequest(w, r, http.StatusMethodNotAllowed, "method not allowed; use POST .../refresh")
-		return
-	}
 	var err error
 	ecosystem, name, err = normalizePackagePath(ecosystem, name)
 	if err != nil {
@@ -1033,7 +1226,15 @@ func (h *Handler) HandlePackageDetail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	version := strings.TrimSpace(r.URL.Query().Get("version"))
+	version, err := normalizePackageVersionQuery(r.URL.Query().Get("version"))
+	if err != nil {
+		errorResponseForRequest(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	if r.Method == http.MethodHead {
+		writeJSONHead(w, http.StatusOK)
+		return
+	}
 
 	// FindVulnerabilities with empty version returns all versions.
 	vulns, err := h.store.FindVulnerabilities(ctx, ecosystem, name, version)
@@ -1051,39 +1252,38 @@ func (h *Handler) HandlePackageDetail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var reputation []domain.Finding
-	if h.reversingLabsEnabled.Load() {
+	for _, source := range h.reputationReadSources() {
 		if version != "" {
-			reputation, err = h.store.FindReputationFindingsBatch(ctx, []db.PackageQuery{{
+			findings, err := h.store.FindReputationFindingsBatch(ctx, []PackageLookup{{
 				Ecosystem: ecosystem,
 				Name:      name,
 				Version:   version,
-			}}, db.ReputationSourceReversingLabs)
+			}}, source.Source)
 			if err != nil {
-				h.logger.Error("failed to find reputation findings", "ecosystem", ecosystem, "name", name, "version", version, "error", err, "correlation_id", correlationID)
-				errorResponseForRequest(w, r, http.StatusInternalServerError, "failed to query reputation findings")
-				return
+				h.logger.Warn("optional reputation lookup failed", "ecosystem", ecosystem, "name", name, "version", version, "error", err, "correlation_id", correlationID)
+				continue
 			}
+			reputation = append(reputation, findings...)
 		} else if finder, ok := h.store.(reputationPackageFinder); ok {
-			reputation, err = finder.FindReputationFindings(ctx, ecosystem, name, db.ReputationSourceReversingLabs)
+			findings, err := finder.FindReputationFindings(ctx, ecosystem, name, source.Source)
 			if err != nil {
-				h.logger.Error("failed to find reputation findings", "ecosystem", ecosystem, "name", name, "error", err, "correlation_id", correlationID)
-				errorResponseForRequest(w, r, http.StatusInternalServerError, "failed to query reputation findings")
-				return
+				h.logger.Warn("optional reputation lookup failed", "ecosystem", ecosystem, "name", name, "error", err, "correlation_id", correlationID)
+				continue
 			}
+			reputation = append(reputation, findings...)
 		}
 	}
 
 	var lifecycle []domain.Finding
 	if version != "" {
-		lifecycle, err = h.store.FindLifecycleFindingsBatch(ctx, []db.PackageQuery{{
+		lifecycle, err = h.store.FindLifecycleFindingsBatch(ctx, []PackageLookup{{
 			Ecosystem: ecosystem,
 			Name:      name,
 			Version:   version,
 		}}, time.Now().UTC())
 		if err != nil {
-			h.logger.Error("failed to find lifecycle findings", "ecosystem", ecosystem, "name", name, "version", version, "error", err, "correlation_id", correlationID)
-			errorResponseForRequest(w, r, http.StatusInternalServerError, "failed to query lifecycle findings")
-			return
+			h.logger.Warn("optional lifecycle lookup failed", "ecosystem", ecosystem, "name", name, "version", version, "error", err, "correlation_id", correlationID)
+			lifecycle = nil
 		}
 	}
 
@@ -1116,19 +1316,33 @@ func (h *Handler) HandlePackageDetail(w http.ResponseWriter, r *http.Request) {
 // for POST and split here: if {rest} ends with "/refresh", we strip
 // the suffix and delegate to handleRefresh; otherwise we return 405.
 func (h *Handler) HandlePackageOrRefresh(w http.ResponseWriter, r *http.Request) {
+	r = requestWithLogger(r, h.logger)
 	rest := r.PathValue("rest")
 	if strings.HasSuffix(rest, "/refresh") {
 		// Inject the trimmed name back so HandleRefresh can read it.
 		name := strings.TrimSuffix(rest, "/refresh")
 		if name == "" {
-			errorResponse(w, http.StatusBadRequest, "package name is required")
+			errorResponseForRequest(w, r, http.StatusBadRequest, "package name is required")
 			return
 		}
 		h.handleRefresh(w, r, r.PathValue("ecosystem"), name)
 		return
 	}
-	w.Header().Set("Allow", http.MethodGet)
-	errorResponse(w, http.StatusMethodNotAllowed, "method not allowed; did you mean POST .../refresh?")
+	methodNotAllowedWithMessageForRequest(w, r, "method not allowed; did you mean POST .../refresh?", http.MethodGet, http.MethodHead)
+}
+
+// HandlePackage dispatches all methods for package API paths so router
+// fallbacks can keep the API JSON error envelope for unsupported methods.
+func (h *Handler) HandlePackage(w http.ResponseWriter, r *http.Request) {
+	r = requestWithLogger(r, h.logger)
+	switch r.Method {
+	case http.MethodGet, http.MethodHead:
+		h.HandlePackageDetail(w, r)
+	case http.MethodPost:
+		h.HandlePackageOrRefresh(w, r)
+	default:
+		methodNotAllowedForRequest(w, r, http.MethodGet, http.MethodHead, http.MethodPost)
+	}
 }
 
 // RefreshResponse is the JSON response for HandleRefresh.
@@ -1143,40 +1357,55 @@ type RefreshResponse struct {
 func (h *Handler) handleRefresh(w http.ResponseWriter, r *http.Request, ecosystem, name string) {
 	ecosystem, name, err := normalizePackagePath(ecosystem, name)
 	if err != nil {
-		errorResponse(w, http.StatusBadRequest, err.Error())
+		errorResponseForRequest(w, r, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	correlationID := requestCorrelationID(r)
 	// Body is optional. If present, it must be an empty JSON object.
 	if r.Body != nil && r.ContentLength != 0 {
+		if err := requireJSONContentType(r); err != nil {
+			h.logger.Warn("invalid refresh request content type", "error", err, "correlation_id", correlationID)
+			errorResponseForRequest(w, r, http.StatusUnsupportedMediaType, err.Error())
+			return
+		}
 		var req struct{}
 		if err := readJSON(r, &req); err != nil {
 			h.logger.Warn("invalid refresh request body", "error", err, "correlation_id", correlationID)
-			errorResponse(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+			errorResponseForRequest(w, r, http.StatusBadRequest, "invalid request body: "+err.Error())
 			return
 		}
 	}
-	if !h.socketRefreshEnabled.Load() {
-		errorResponse(w, http.StatusConflict, "no active refresh worker is configured")
+	refreshProvider := h.packageRefresh
+	if refreshProvider == nil || !refreshProvider.Active() {
+		errorResponseForRequest(w, r, http.StatusConflict, "no active refresh worker is configured")
 		return
 	}
-	if !socket.SupportsEcosystem(ecosystem) {
-		errorResponse(w, http.StatusConflict, fmt.Sprintf("no active refresh worker supports ecosystem: %s", ecosystem))
+	if !refreshProvider.SupportsEcosystem(ecosystem) {
+		errorResponseForRequest(w, r, http.StatusConflict, fmt.Sprintf("no active refresh worker supports ecosystem: %s", ecosystem))
+		return
+	}
+	if excluder, ok := refreshProvider.(packageRefreshPolicyExcluder); ok && excluder.ExcludedByPolicy(ecosystem, name) {
+		errorResponseForRequest(w, r, http.StatusConflict, fmt.Sprintf("refresh skipped for %s/%s; package excluded by private namespace policy", ecosystem, name))
+		return
+	}
+	source := refreshProvider.Source()
+	if strings.TrimSpace(source) == "" {
+		errorResponseForRequest(w, r, http.StatusConflict, "no active refresh worker is configured")
 		return
 	}
 	if getter, ok := h.store.(packageCheckStatusGetter); ok {
-		status, err := getter.GetPackageCheckStatus(r.Context(), ecosystem, name, socket.FeedName)
+		status, err := getter.GetPackageCheckStatus(r.Context(), ecosystem, name, source)
 		if err != nil {
 			h.logger.Error("failed to check package refresh budget", "ecosystem", ecosystem, "name", name, "error", err, "correlation_id", correlationID)
-			errorResponse(w, http.StatusInternalServerError, "failed to check refresh budget")
+			errorResponseForRequest(w, r, http.StatusInternalServerError, "failed to check refresh budget")
 			return
 		}
 		if status != nil && status.NextCheckAt != nil && status.NextCheckAt.After(time.Now().UTC()) {
-			writeJSON(w, http.StatusOK, RefreshResponse{
+			writeJSONForRequest(w, r, http.StatusAccepted, RefreshResponse{
 				Queued:  false,
 				New:     false,
-				Message: fmt.Sprintf("refresh skipped for %s/%s; next check after %s", ecosystem, name, status.NextCheckAt.UTC().Format(time.RFC3339)),
+				Message: fmt.Sprintf("refresh skipped for %s/%s; next check after %s", ecosystem, name, formatAPIDateTime(*status.NextCheckAt)),
 			})
 			return
 		}
@@ -1185,15 +1414,19 @@ func (h *Handler) handleRefresh(w http.ResponseWriter, r *http.Request, ecosyste
 	job := &db.RefreshJob{
 		Ecosystem: ecosystem,
 		Name:      name,
-		Source:    socket.FeedName,
-		Priority:  0, // manual trigger = highest priority
+		Source:    source,
+		Priority:  db.RefreshPriorityManual,
 		Status:    "pending",
 	}
 
-	created, position, err := h.store.EnqueueRefresh(r.Context(), job)
+	created, position, err := h.enqueuePackageRefreshWithAudit(r.Context(), job, h.packageRefreshAuditBuilder(r, ecosystem, name, source))
 	if err != nil {
 		h.logger.Error("failed to enqueue refresh", "ecosystem", ecosystem, "name", name, "error", err, "correlation_id", correlationID)
-		errorResponse(w, http.StatusInternalServerError, "failed to enqueue refresh")
+		if errors.Is(err, db.ErrAdminAuditLog) {
+			errorResponseForRequest(w, r, http.StatusInternalServerError, "failed to record audit log")
+			return
+		}
+		errorResponseForRequest(w, r, http.StatusInternalServerError, "failed to enqueue refresh")
 		return
 	}
 
@@ -1202,7 +1435,7 @@ func (h *Handler) handleRefresh(w http.ResponseWriter, r *http.Request, ecosyste
 		msg = fmt.Sprintf("refresh for %s/%s already queued at position %d", ecosystem, name, position)
 	}
 
-	writeJSON(w, http.StatusOK, RefreshResponse{
+	writeJSONForRequest(w, r, http.StatusAccepted, RefreshResponse{
 		Queued:   true,
 		New:      created,
 		Position: position,
@@ -1210,14 +1443,58 @@ func (h *Handler) handleRefresh(w http.ResponseWriter, r *http.Request, ecosyste
 	})
 }
 
+func (h *Handler) enqueuePackageRefreshWithAudit(ctx context.Context, job *db.RefreshJob, audit func(created bool, position int) *db.AdminAuditEntry) (bool, int, error) {
+	enqueuer, ok := h.store.(packageRefreshAuditEnqueuer)
+	if !ok {
+		return false, 0, fmt.Errorf("%w: package refresh audit store does not support audited enqueue", db.ErrAdminAuditLog)
+	}
+	return enqueuer.EnqueueRefreshWithAudit(ctx, job, audit)
+}
+
+func (h *Handler) packageRefreshAuditBuilder(r *http.Request, ecosystem, name, source string) func(created bool, position int) *db.AdminAuditEntry {
+	return func(created bool, position int) *db.AdminAuditEntry {
+		client := clientIP(r)
+		details := struct {
+			Ecosystem     string `json:"ecosystem"`
+			Name          string `json:"name"`
+			Source        string `json:"source"`
+			New           bool   `json:"new"`
+			Position      int    `json:"position"`
+			CorrelationID string `json:"correlation_id"`
+			APIKeyID      int    `json:"api_key_id,omitempty"`
+			APIKeyName    string `json:"api_key_name,omitempty"`
+		}{
+			Ecosystem:     ecosystem,
+			Name:          name,
+			Source:        source,
+			New:           created,
+			Position:      position,
+			CorrelationID: requestCorrelationID(r),
+		}
+		if identity, ok := requestctx.APIKeyIdentityFromContext(r.Context()); ok {
+			details.APIKeyID = identity.ID
+			details.APIKeyName = identity.Name
+		}
+		raw, err := json.Marshal(details)
+		if err != nil {
+			raw = json.RawMessage(`{}`)
+		}
+		return &db.AdminAuditEntry{
+			Action:  "package_refresh_enqueue",
+			Details: raw,
+			IP:      client,
+		}
+	}
+}
+
 func normalizePackagePath(ecosystem, name string) (string, string, error) {
 	ecosystem = strings.ToLower(strings.TrimSpace(ecosystem))
-	name = strings.TrimSpace(name)
+	name = packageid.NormalizeName(ecosystem, name)
 	if ecosystem == "" || name == "" {
 		return "", "", fmt.Errorf("ecosystem and package name are required")
 	}
-	if len(name) > maxCheckPackageNameLength {
-		return "", "", fmt.Errorf("package name exceeds %d characters", maxCheckPackageNameLength)
+	if len(name) > checkcontract.MaxPackageNameLength {
+		return "", "", fmt.Errorf("package name exceeds %d characters", checkcontract.MaxPackageNameLength)
 	}
 	if !domain.Ecosystem(ecosystem).Valid() {
 		return "", "", fmt.Errorf("unsupported ecosystem: %s", ecosystem)
@@ -1225,889 +1502,20 @@ func normalizePackagePath(ecosystem, name string) (string, string, error) {
 	return ecosystem, name, nil
 }
 
-// ----------------------------------------------------------------------------
-// GET /api/v1/sync
-// ----------------------------------------------------------------------------
-
-// syncDefaultLimit is the default number of rows per page for /api/v1/sync.
-const syncDefaultLimit = 1000
-
-// syncMaxLimit is the maximum allowed limit for /api/v1/sync pagination.
-const syncMaxLimit = 10000
-
-// syncMaxOffset bounds legacy offset pagination. Modern clients should use the
-// keyset cursor fields returned in next_cursor.
-const syncMaxOffset = 1000000
-
-func parseSyncCursor(r *http.Request) (db.SyncCursor, error) {
-	var cursor db.SyncCursor
-	query := r.URL.Query()
-	params := []struct {
-		name   string
-		target *int
-	}{
-		{name: "vulnerabilities_offset", target: &cursor.Vulnerabilities},
-		{name: "malicious_offset", target: &cursor.Malicious},
-		{name: "reputation_offset", target: &cursor.Reputation},
-		{name: "lifecycle_offset", target: &cursor.Lifecycle},
+func normalizePackageVersionQuery(version string) (string, error) {
+	version = strings.TrimSpace(version)
+	if len(version) > checkcontract.MaxPackageVersionLength {
+		return "", fmt.Errorf("package version exceeds %d characters", checkcontract.MaxPackageVersionLength)
 	}
-	for _, param := range params {
-		raw := strings.TrimSpace(query.Get(param.name))
-		if raw == "" {
-			continue
-		}
-		parsed, err := strconv.Atoi(raw)
-		if err != nil || parsed < 0 || parsed > syncMaxOffset {
-			return db.SyncCursor{}, fmt.Errorf("invalid %s parameter", param.name)
-		}
-		*param.target = parsed
-	}
-
-	cursorParams := []struct {
-		name   string
-		target *string
-	}{
-		{name: "vulnerabilities_cursor", target: &cursor.VulnerabilitiesCursor},
-		{name: "malicious_cursor", target: &cursor.MaliciousCursor},
-		{name: "reputation_cursor", target: &cursor.ReputationCursor},
-		{name: "lifecycle_cursor", target: &cursor.LifecycleCursor},
-	}
-	for _, param := range cursorParams {
-		*param.target = strings.TrimSpace(query.Get(param.name))
-	}
-
-	doneParams := []struct {
-		name   string
-		target *bool
-	}{
-		{name: "vulnerabilities_done", target: &cursor.VulnerabilitiesDone},
-		{name: "malicious_done", target: &cursor.MaliciousDone},
-		{name: "reputation_done", target: &cursor.ReputationDone},
-		{name: "lifecycle_done", target: &cursor.LifecycleDone},
-	}
-	for _, param := range doneParams {
-		raw := strings.TrimSpace(query.Get(param.name))
-		if raw == "" {
-			continue
-		}
-		parsed, err := strconv.ParseBool(raw)
-		if err != nil {
-			return db.SyncCursor{}, fmt.Errorf("invalid %s parameter", param.name)
-		}
-		*param.target = parsed
-	}
-	return cursor, nil
-}
-
-func parseOptionalUintQuery(r *http.Request, name string) (uint64, error) {
-	raw := strings.TrimSpace(r.URL.Query().Get(name))
-	if raw == "" {
-		return 0, nil
-	}
-	parsed, err := strconv.ParseUint(raw, 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("invalid %s parameter", name)
-	}
-	return parsed, nil
-}
-
-func (h *Handler) HandleSync(w http.ResponseWriter, r *http.Request) {
-	if !isGetOrHead(r.Method) {
-		errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
-	correlationID := requestCorrelationID(r)
-	exporter, ok := h.store.(syncExporter)
-	if !ok {
-		errorResponseForRequest(w, r, http.StatusNotImplemented, "sync endpoint is not supported by this store")
-		return
-	}
-
-	var sincePtr *time.Time
-	sinceRaw := strings.TrimSpace(r.URL.Query().Get("since"))
-	if sinceRaw != "" {
-		since, err := parseRFC3339Timestamp(sinceRaw)
-		if err != nil {
-			errorResponseForRequest(w, r, http.StatusBadRequest, "invalid since timestamp")
-			return
-		}
-		sincePtr = &since
-	}
-
-	var snapshot time.Time
-	if raw := strings.TrimSpace(r.URL.Query().Get("snapshot")); raw != "" {
-		parsed, err := parseRFC3339Timestamp(raw)
-		if err != nil {
-			errorResponseForRequest(w, r, http.StatusBadRequest, "invalid snapshot parameter")
-			return
-		}
-		snapshot = parsed.UTC()
-	}
-	sinceXID, err := parseOptionalUintQuery(r, "since_xid")
-	if err != nil {
-		errorResponseForRequest(w, r, http.StatusBadRequest, err.Error())
-		return
-	}
-	snapshotXID, err := parseOptionalUintQuery(r, "snapshot_xid")
-	if err != nil {
-		errorResponseForRequest(w, r, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	limit := syncDefaultLimit
-	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
-		parsed, err := strconv.Atoi(raw)
-		if err != nil || parsed < 1 {
-			errorResponseForRequest(w, r, http.StatusBadRequest, "invalid limit parameter")
-			return
-		}
-		limit = parsed
-		if limit > syncMaxLimit {
-			limit = syncMaxLimit
-		}
-	}
-
-	offset := 0
-	if raw := strings.TrimSpace(r.URL.Query().Get("offset")); raw != "" {
-		parsed, err := strconv.Atoi(raw)
-		if err != nil || parsed < 0 || parsed > syncMaxOffset {
-			errorResponseForRequest(w, r, http.StatusBadRequest, "invalid offset parameter")
-			return
-		}
-		offset = parsed
-	}
-	cursor, err := parseSyncCursor(r)
-	if err != nil {
-		errorResponseForRequest(w, r, http.StatusBadRequest, err.Error())
-		return
-	}
-	ecosystems, err := parseSyncEcosystems(r.URL.Query().Get("ecosystem"))
-	if err != nil {
-		errorResponseForRequest(w, r, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	exported, err := exporter.ExportSync(r.Context(), db.SyncExportOptions{
-		Since:       sincePtr,
-		SinceXID:    sinceXID,
-		SnapshotAt:  snapshot,
-		SnapshotXID: snapshotXID,
-		Ecosystems:  ecosystems,
-		Limit:       limit,
-		Offset:      offset,
-		Cursor:      cursor,
-	})
-	if err != nil {
-		h.logger.Error("sync export failed", "error", err, "correlation_id", correlationID)
-		errorResponseForRequest(w, r, http.StatusInternalServerError, "failed to export sync data")
-		return
-	}
-
-	feedStatus, feedVersions := h.feedState(r.Context())
-	resp := syncResponsePayload{
-		SyncedAt:        exported.SyncedAt.UTC().Format(time.RFC3339Nano),
-		SyncedXID:       exported.SyncedXID,
-		FeedStatus:      feedStatus,
-		FeedVersions:    feedVersions,
-		Vulnerabilities: make([]syncVulnerabilityResponse, 0, len(exported.Vulnerabilities)),
-		Malicious:       make([]syncMaliciousResponse, 0, len(exported.Malicious)),
-		Reputation:      make([]syncReputationResponse, 0, len(exported.Reputation)),
-		Lifecycle:       make([]syncLifecycleResponse, 0, len(exported.Lifecycle)),
-		Truncated:       exported.Truncated,
-		HasMore:         exported.Truncated,
-		NextCursor:      exported.NextCursor,
-	}
-
-	for _, vuln := range exported.Vulnerabilities {
-		resp.Vulnerabilities = append(resp.Vulnerabilities, syncVulnerabilityResponse{
-			ID:               vuln.ID,
-			Ecosystem:        vuln.Ecosystem,
-			Name:             vuln.Name,
-			VersionRanges:    vuln.VersionRanges,
-			VersionsAffected: vuln.VersionsAffected,
-			References:       vuln.References,
-			Severity:         vuln.Severity,
-			CVSSScore:        vuln.CVSSScore,
-			EPSSScore:        vuln.EPSSScore,
-			EPSSPercentile:   vuln.EPSSPercentile,
-			CISAKEV:          vuln.CISAKEV,
-			Summary:          vuln.Summary,
-			Source:           vuln.Source,
-			Withdrawn:        vuln.Withdrawn,
-		})
-	}
-
-	for _, finding := range exported.Malicious {
-		resp.Malicious = append(resp.Malicious, syncMaliciousResponse{
-			ID:            finding.ID,
-			Ecosystem:     finding.Ecosystem,
-			Name:          finding.Name,
-			VersionRanges: finding.VersionRanges,
-			Versions:      finding.Versions,
-			ReferenceURLs: finding.ReferenceURLs,
-			RiskType:      finding.RiskType,
-			Severity:      finding.Severity,
-			Summary:       finding.Summary,
-			Source:        finding.Source,
-			Withdrawn:     finding.Withdrawn,
-		})
-	}
-
-	for _, finding := range exported.Reputation {
-		resp.Reputation = append(resp.Reputation, syncReputationResponse{
-			ID:        finding.ID,
-			Ecosystem: finding.Ecosystem,
-			Name:      finding.Name,
-			Version:   finding.Version,
-			Type:      finding.Type,
-			RiskType:  finding.RiskType,
-			Severity:  finding.Severity,
-			Summary:   finding.Summary,
-			Withdrawn: finding.Withdrawn,
-		})
-	}
-
-	for _, release := range exported.Lifecycle {
-		resp.Lifecycle = append(resp.Lifecycle, syncLifecycleResponse{
-			ID:               release.ID,
-			Ecosystem:        release.Ecosystem,
-			Name:             release.Name,
-			ProductSlug:      release.ProductSlug,
-			ProductLabel:     release.ProductLabel,
-			Cycle:            release.Cycle,
-			Latest:           release.Latest,
-			ReleaseDate:      syncDateOnly(release.ReleaseDate),
-			IsLTS:            release.IsLTS,
-			LTSFrom:          syncDateOnly(release.LTSFrom),
-			IsEOAS:           release.IsEOAS,
-			EOASFrom:         syncDateOnly(release.EOASFrom),
-			IsEOL:            release.IsEOL,
-			EOLFrom:          syncDateOnly(release.EOLFrom),
-			IsDiscontinued:   release.IsDiscontinued,
-			DiscontinuedFrom: syncDateOnly(release.DiscontinuedFrom),
-			IsEOES:           release.IsEOES,
-			EOESFrom:         syncDateOnly(release.EOESFrom),
-			IsMaintained:     release.IsMaintained,
-			Withdrawn:        release.Withdrawn,
-		})
-	}
-
-	resp.HasMore = exported.Truncated
-
-	writeJSONForRequest(w, r, http.StatusOK, resp)
-}
-
-func syncDateOnly(value *time.Time) *string {
-	if value == nil {
-		return nil
-	}
-	formatted := value.UTC().Format(time.DateOnly)
-	return &formatted
+	return version, nil
 }
 
 // ----------------------------------------------------------------------------
 // Helper functions
 // ----------------------------------------------------------------------------
 
-func isKnownFeed(feed string) bool {
-	switch feed {
-	case "osv", "ghsa", "openssf", "vulncheck", "cisakev", "epss", "socket":
-		return true
-	default:
-		return false
-	}
-}
-
-func normalizeFeedName(feed string) string {
-	feed = strings.TrimSpace(strings.ToLower(feed))
-	if feed == "malicious" {
-		return "openssf"
-	}
-	return feed
-}
-
-type feedImportRecordOptions[T any] struct {
-	deleteField   string
-	normalize     func(feed string, index int, item T) (T, error)
-	recordContext func(index int, item T) string
-	upsert        func(context.Context, *T) error
-	delete        func(context.Context, string) error
-	atomicImport  func(context.Context, string, []T, []string, *db.FeedSyncStatus) (int, int, error)
-}
-
-func importFeedRecords[T any](ctx context.Context, h *FeedImportHandler, feed string, statusInput *feedSyncStatusInput, rawItems []T, rawDeleteIDs []string, opts feedImportRecordOptions[T]) (*importResponse, error) {
-	if err := validateImportStatusInput(statusInput); err != nil {
-		return nil, err
-	}
-
-	items := make([]T, 0, len(rawItems))
-	for i := range rawItems {
-		item, err := opts.normalize(feed, i, rawItems[i])
-		if err != nil {
-			return nil, err
-		}
-		items = append(items, item)
-	}
-
-	deleteIDs, err := normalizeImportDeleteIDs(opts.deleteField, rawDeleteIDs)
-	if err != nil {
-		return nil, err
-	}
-
-	if opts.atomicImport != nil {
-		status, err := importStatusFromInput(feed, statusInput, len(items), len(items)+len(deleteIDs))
-		if err != nil {
-			return nil, err
-		}
-		imported, deleted, err := opts.atomicImport(ctx, feed, items, importDeleteIDValues(deleteIDs), status)
-		if err != nil {
-			return nil, err
-		}
-		return feedImportResponse(feed, imported, deleted), nil
-	}
-
-	imported := 0
-	for i := range items {
-		if err := opts.upsert(ctx, &items[i]); err != nil {
-			return nil, contextualizeFeedImportError(opts.recordContext(i, items[i]), err)
-		}
-		imported++
-	}
-
-	deleted := 0
-	for _, item := range deleteIDs {
-		if err := opts.delete(ctx, item.ID); err != nil {
-			return nil, contextualizeFeedImportError(importRecordContext(opts.deleteField, item.Index, importRecordValue("id", item.ID)), err)
-		}
-		deleted++
-	}
-
-	if err := h.applyImportStatus(ctx, feed, statusInput, imported, imported+deleted); err != nil {
-		return nil, err
-	}
-
-	return feedImportResponse(feed, imported, deleted), nil
-}
-
-func feedImportResponse(feed string, imported, deleted int) *importResponse {
-	return &importResponse{
-		Feed:         feed,
-		Imported:     imported,
-		Deleted:      deleted,
-		EntriesTotal: imported + deleted,
-	}
-}
-
-func (h *FeedImportHandler) importVulnerabilities(ctx context.Context, feed string, req *vulnerabilityImportRequest) (*importResponse, error) {
-	var atomicImport func(context.Context, string, []db.Vulnerability, []string, *db.FeedSyncStatus) (int, int, error)
-	if importer, ok := h.store.(vulnerabilityFeedImporter); ok {
-		atomicImport = importer.ImportVulnerabilityFeed
-	}
-	return importFeedRecords(ctx, h, feed, req.Status, req.Vulnerabilities, req.DeleteVulnerabilityIDs, feedImportRecordOptions[db.Vulnerability]{
-		deleteField: "delete_vulnerability_ids",
-		normalize: func(feed string, index int, item db.Vulnerability) (db.Vulnerability, error) {
-			recordContext := vulnerabilityImportRecordContext(index, item)
-			if isManualAdvisoryID(item.ID) {
-				return item, feedImportValidationErrorf("%s: feed import cannot mutate manual advisory id %q", recordContext, strings.TrimSpace(item.ID))
-			}
-			if err := normalizeImportedVulnerability(feed, &item); err != nil {
-				return item, contextualizeFeedImportError(recordContext, err)
-			}
-			return item, nil
-		},
-		recordContext: vulnerabilityImportRecordContext,
-		upsert: func(ctx context.Context, item *db.Vulnerability) error {
-			return h.store.UpsertVulnerability(ctx, item)
-		},
-		delete: func(ctx context.Context, id string) error {
-			return deleteVulnerabilityForSource(ctx, h.store, id, feed)
-		},
-		atomicImport: atomicImport,
-	})
-}
-
-func (h *FeedImportHandler) importMalicious(ctx context.Context, feed string, req *maliciousImportRequest) (*importResponse, error) {
-	var atomicImport func(context.Context, string, []db.MaliciousFinding, []string, *db.FeedSyncStatus) (int, int, error)
-	if importer, ok := h.store.(maliciousFeedImporter); ok {
-		atomicImport = importer.ImportMaliciousFeed
-	}
-	return importFeedRecords(ctx, h, feed, req.Status, req.Malicious, req.DeleteMaliciousIDs, feedImportRecordOptions[db.MaliciousFinding]{
-		deleteField: "delete_malicious_ids",
-		normalize: func(feed string, index int, item db.MaliciousFinding) (db.MaliciousFinding, error) {
-			recordContext := maliciousImportRecordContext(index, item)
-			if isManualAdvisoryID(item.ID) {
-				return item, feedImportValidationErrorf("%s: feed import cannot mutate manual advisory id %q", recordContext, strings.TrimSpace(item.ID))
-			}
-			if err := normalizeImportedMalicious(feed, &item); err != nil {
-				return item, contextualizeFeedImportError(recordContext, err)
-			}
-			return item, nil
-		},
-		recordContext: maliciousImportRecordContext,
-		upsert: func(ctx context.Context, item *db.MaliciousFinding) error {
-			return h.store.UpsertMaliciousFinding(ctx, item)
-		},
-		delete: func(ctx context.Context, id string) error {
-			return deleteMaliciousFindingForSource(ctx, h.store, id, feed)
-		},
-		atomicImport: atomicImport,
-	})
-}
-
-func (h *FeedImportHandler) importVulnCheck(ctx context.Context, feed string, req *vulnCheckImportRequest) (*importResponse, error) {
-	if err := validateImportStatusInput(req.Status); err != nil {
-		return nil, err
-	}
-	if err := validateVulnCheckImportEntries(req.Entries); err != nil {
-		return nil, err
-	}
-
-	updated, err := h.store.EnrichVulnCheck(ctx, req.Entries)
-	if err != nil {
-		return nil, err
-	}
-	if err := h.applyImportStatus(ctx, feed, req.Status, updated, len(req.Entries)); err != nil {
-		return nil, err
-	}
-	return &importResponse{
-		Feed:         feed,
-		Imported:     updated,
-		EntriesTotal: len(req.Entries),
-	}, nil
-}
-
-func (h *FeedImportHandler) importCISAKEV(ctx context.Context, feed string, req *cisaKEVImportRequest) (*importResponse, error) {
-	if err := validateImportStatusInput(req.Status); err != nil {
-		return nil, err
-	}
-	cveIDs, err := normalizeCISAKEVImportIDs(req.CVEIDs, req.ClearMissing)
-	if err != nil {
-		return nil, err
-	}
-
-	updated, err := h.store.SetCISAKEV(ctx, cveIDs)
-	if err != nil {
-		return nil, err
-	}
-
-	cleared := 0
-	if req.ClearMissing {
-		cleared, err = h.store.ClearCISAKEV(ctx, cveIDs)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	if err := h.applyImportStatus(ctx, feed, req.Status, updated, len(cveIDs)); err != nil {
-		return nil, err
-	}
-
-	return &importResponse{
-		Feed:         feed,
-		Imported:     updated,
-		Deleted:      cleared,
-		EntriesTotal: len(cveIDs),
-	}, nil
-}
-
-func (h *FeedImportHandler) importEPSS(ctx context.Context, feed string, req *epssImportRequest) (*importResponse, error) {
-	if err := validateImportStatusInput(req.Status); err != nil {
-		return nil, err
-	}
-	if err := validateEPSSImportEntries(req.Entries); err != nil {
-		return nil, err
-	}
-
-	updated, cleared, err := h.store.ReplaceEPSSScores(ctx, req.Entries)
-	if err != nil {
-		return nil, err
-	}
-	if err := h.applyImportStatus(ctx, feed, req.Status, updated, len(req.Entries)); err != nil {
-		return nil, err
-	}
-	return &importResponse{
-		Feed:         feed,
-		Imported:     updated,
-		Deleted:      cleared,
-		EntriesTotal: len(req.Entries),
-	}, nil
-}
-
-func (h *FeedImportHandler) applyImportStatus(ctx context.Context, feed string, input *feedSyncStatusInput, entriesSynced, entriesTotal int) error {
-	status, err := importStatusFromInput(feed, input, entriesSynced, entriesTotal)
-	if err != nil {
-		return err
-	}
-	if status == nil {
-		return nil
-	}
-	return h.store.UpsertFeedSyncStatus(ctx, status)
-}
-
-func importStatusFromInput(feed string, input *feedSyncStatusInput, entriesSynced, entriesTotal int) (*db.FeedSyncStatus, error) {
-	if input == nil {
-		return nil, nil
-	}
-	if err := validateImportStatusInput(input); err != nil {
-		return nil, err
-	}
-
-	status := &db.FeedSyncStatus{
-		FeedName:       feed,
-		LastSyncAt:     input.LastSyncAt,
-		LastSyncStatus: strings.TrimSpace(input.LastSyncStatus),
-		LastError:      logsafe.BoundedDiagnosticValue(input.LastError, maxImportStatusLastErrorLength),
-		EntriesSynced:  input.EntriesSynced,
-		EntriesTotal:   input.EntriesTotal,
-		LastEtag:       truncateString(strings.TrimSpace(input.LastEtag), maxImportStatusLastEtagLength),
-		LastCommitHash: truncateString(strings.TrimSpace(input.LastCommitHash), maxImportStatusLastCommitHashLength),
-		Metadata:       append(json.RawMessage(nil), input.Metadata...),
-	}
-
-	if status.LastSyncAt == nil {
-		now := time.Now().UTC()
-		status.LastSyncAt = &now
-	}
-	if status.LastSyncStatus == "" {
-		status.LastSyncStatus = "success"
-	}
-	if status.EntriesTotal == 0 {
-		status.EntriesTotal = entriesTotal
-	}
-	if status.EntriesSynced == 0 {
-		status.EntriesSynced = entriesSynced
-	}
-	if input.LastSyncDurationMs != nil {
-		duration := time.Duration(*input.LastSyncDurationMs) * time.Millisecond
-		status.LastSyncDuration = &duration
-	}
-
-	return status, nil
-}
-
-func normalizeImportedVulnerability(feed string, vuln *db.Vulnerability) error {
-	if strings.TrimSpace(vuln.ID) == "" {
-		return feedImportValidationErrorf("vulnerability import requires id")
-	}
-
-	now := time.Now().UTC()
-	if vuln.Published.IsZero() {
-		vuln.Published = now
-	}
-	if vuln.Modified.IsZero() {
-		vuln.Modified = now
-	}
-	if strings.TrimSpace(vuln.Severity) == "" {
-		vuln.Severity = "UNKNOWN"
-	}
-	vuln.Severity = strings.ToUpper(strings.TrimSpace(vuln.Severity))
-	if !isImportVulnerabilitySeverity(vuln.Severity) {
-		return feedImportValidationErrorf("vulnerability import severity %q is not supported", vuln.Severity)
-	}
-	for i := range vuln.AffectedPackages {
-		pkg := &vuln.AffectedPackages[i]
-		pkg.Ecosystem = strings.ToLower(strings.TrimSpace(pkg.Ecosystem))
-		if !domain.Ecosystem(pkg.Ecosystem).Valid() {
-			return feedImportValidationErrorf("vulnerability import affected_packages[%d].ecosystem is not supported", i)
-		}
-		pkg.Name = packageid.NormalizeName(pkg.Ecosystem, pkg.Name)
-		if strings.TrimSpace(pkg.Name) == "" {
-			return feedImportValidationErrorf("vulnerability import affected_packages[%d].name is required", i)
-		}
-		if err := validateVersionRangesJSON(pkg.VersionRanges, fmt.Sprintf("vulnerability import affected_packages[%d].version_ranges", i)); err != nil {
-			return err
-		}
-		if err := validateStringArrayJSON(pkg.VersionsAffected, fmt.Sprintf("vulnerability import affected_packages[%d].versions_affected", i)); err != nil {
-			return err
-		}
-	}
-
-	vuln.Sources = []db.VulnerabilitySource{{
-		Source:   feed,
-		SourceID: vuln.ID,
-	}}
-
-	return nil
-}
-
-func isImportVulnerabilitySeverity(severity string) bool {
-	switch domain.Severity(severity) {
-	case domain.SeverityCritical, domain.SeverityHigh, domain.SeverityMedium, domain.SeverityLow, domain.SeverityUnknown:
-		return true
-	default:
-		return false
-	}
-}
-
-func normalizeImportedMalicious(feed string, finding *db.MaliciousFinding) error {
-	if strings.TrimSpace(finding.ID) == "" {
-		return feedImportValidationErrorf("malicious import requires id")
-	}
-	finding.Ecosystem = strings.ToLower(strings.TrimSpace(finding.Ecosystem))
-	if !domain.Ecosystem(finding.Ecosystem).Valid() {
-		return feedImportValidationErrorf("malicious import ecosystem is not supported")
-	}
-	finding.Name = packageid.NormalizeName(finding.Ecosystem, finding.Name)
-	if strings.TrimSpace(finding.Name) == "" {
-		return feedImportValidationErrorf("malicious import name is required")
-	}
-	finding.Source = feed
-	if strings.TrimSpace(finding.Severity) == "" {
-		finding.Severity = "CRITICAL"
-	}
-	finding.Severity = strings.ToUpper(strings.TrimSpace(finding.Severity))
-	if !isImportVulnerabilitySeverity(finding.Severity) {
-		return feedImportValidationErrorf("malicious import severity %q is not supported", finding.Severity)
-	}
-	if err := validateStringArrayJSON(finding.Versions, "malicious import versions"); err != nil {
-		return err
-	}
-	return nil
-}
-
-func validateStringArrayJSON(raw json.RawMessage, field string) error {
-	trimmed := strings.TrimSpace(string(raw))
-	if trimmed == "" || trimmed == "null" {
-		return nil
-	}
-	var values []string
-	if err := json.Unmarshal(raw, &values); err != nil {
-		return feedImportValidationErrorf("%s must be an array of strings", field)
-	}
-	for i, value := range values {
-		if strings.TrimSpace(value) == "" {
-			return feedImportValidationErrorf("%s[%d] must not be empty", field, i)
-		}
-	}
-	return nil
-}
-
-func validateVersionRangesJSON(raw json.RawMessage, field string) error {
-	trimmed := strings.TrimSpace(string(raw))
-	if trimmed == "" || trimmed == "null" {
-		return nil
-	}
-	var ranges []vulnerabilityImportVersionRange
-	if err := json.Unmarshal(raw, &ranges); err != nil {
-		return feedImportValidationErrorf("%s must be an array of range objects", field)
-	}
-	for i, versionRange := range ranges {
-		if len(versionRange.Events) == 0 {
-			return feedImportValidationErrorf("%s[%d].events must not be empty", field, i)
-		}
-		for j, event := range versionRange.Events {
-			if strings.TrimSpace(event.Introduced) == "" &&
-				strings.TrimSpace(event.Fixed) == "" &&
-				strings.TrimSpace(event.LastAffected) == "" &&
-				strings.TrimSpace(event.Limit) == "" {
-				return feedImportValidationErrorf("%s[%d].events[%d] must set introduced, fixed, last_affected, or limit", field, i, j)
-			}
-		}
-	}
-	return nil
-}
-
-func isManualAdvisoryID(id string) bool {
-	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(id)), "manual:")
-}
-
-type importDeleteID struct {
-	Index int
-	ID    string
-}
-
-func contextualizeFeedImportError(recordContext string, err error) error {
-	if err == nil {
-		return nil
-	}
-	var validationErr *feedImportValidationError
-	if errors.As(err, &validationErr) {
-		return feedImportValidationErrorf("%s: %s", recordContext, validationErr.Error())
-	}
-	return fmt.Errorf("%s: %w", recordContext, err)
-}
-
-func vulnerabilityImportRecordContext(index int, item db.Vulnerability) string {
-	return importRecordContext("vulnerabilities", index, importRecordValue("id", item.ID))
-}
-
-func maliciousImportRecordContext(index int, item db.MaliciousFinding) string {
-	return importRecordContext(
-		"malicious",
-		index,
-		importRecordValue("id", item.ID),
-		importPackageValue(item.Ecosystem, item.Name),
-	)
-}
-
-func importRecordContext(field string, index int, values ...string) string {
-	parts := []string{fmt.Sprintf("%s[%d]", field, index)}
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value != "" {
-			parts = append(parts, value)
-		}
-	}
-	return strings.Join(parts, " ")
-}
-
-func importRecordValue(label, raw string) string {
-	value := strings.TrimSpace(raw)
-	if value == "" {
-		return ""
-	}
-	return fmt.Sprintf("%s=%s", label, value)
-}
-
-func importPackageValue(ecosystem, name string) string {
-	ecosystem = strings.TrimSpace(ecosystem)
-	name = strings.TrimSpace(name)
-	if ecosystem == "" || name == "" {
-		return ""
-	}
-	return fmt.Sprintf("package=%s/%s", ecosystem, name)
-}
-
-func normalizeImportDeleteIDs(field string, ids []string) ([]importDeleteID, error) {
-	normalized := make([]importDeleteID, 0, len(ids))
-	for i, id := range ids {
-		id = strings.TrimSpace(id)
-		if id == "" {
-			continue
-		}
-		if isManualAdvisoryID(id) {
-			return nil, feedImportValidationErrorf("%s: feed import cannot delete manual advisory id %q", importRecordContext(field, i, importRecordValue("id", id)), id)
-		}
-		normalized = append(normalized, importDeleteID{Index: i, ID: id})
-	}
-	return normalized, nil
-}
-
-func importDeleteIDValues(items []importDeleteID) []string {
-	out := make([]string, 0, len(items))
-	for _, item := range items {
-		out = append(out, item.ID)
-	}
-	return out
-}
-
-func normalizeCISAKEVImportIDs(ids []string, clearMissing bool) ([]string, error) {
-	normalized := make([]string, 0, len(ids))
-	for i, id := range ids {
-		id = strings.ToUpper(strings.TrimSpace(id))
-		if !cveIDPattern.MatchString(id) {
-			return nil, feedImportValidationErrorf("cisa kev import cve_ids[%d] is invalid", i)
-		}
-		normalized = append(normalized, id)
-	}
-	if clearMissing && len(normalized) == 0 {
-		return nil, feedImportValidationErrorf("cisa kev clear_missing requires at least one CVE ID")
-	}
-	return normalized, nil
-}
-
-func validateEPSSImportEntries(entries []db.EPSSEntry) error {
-	for i, entry := range entries {
-		if !validUnitInterval(entry.Score) {
-			return feedImportValidationErrorf("epss import entries[%d].score must be between 0 and 1", i)
-		}
-		if !validUnitInterval(entry.Percentile) {
-			return feedImportValidationErrorf("epss import entries[%d].percentile must be between 0 and 1", i)
-		}
-	}
-	return nil
-}
-
-func validateVulnCheckImportEntries(entries []db.VulnCheckEntry) error {
-	for i, entry := range entries {
-		if entry.CVSSScore == nil {
-			continue
-		}
-		if math.IsNaN(*entry.CVSSScore) || math.IsInf(*entry.CVSSScore, 0) || *entry.CVSSScore < 0 || *entry.CVSSScore > 10 {
-			return feedImportValidationErrorf("vulncheck import entries[%d].cvss_score must be between 0 and 10", i)
-		}
-	}
-	return nil
-}
-
-func validUnitInterval(value float64) bool {
-	return !math.IsNaN(value) && !math.IsInf(value, 0) && value >= 0 && value <= 1
-}
-
-func validateImportStatusInput(input *feedSyncStatusInput) error {
-	if input == nil {
-		return nil
-	}
-	if input.LastSyncDurationMs != nil && *input.LastSyncDurationMs < 0 {
-		return feedImportValidationErrorf("feed import status last_sync_duration_ms must not be negative")
-	}
-	if input.EntriesSynced < 0 {
-		return feedImportValidationErrorf("feed import status entries_synced must not be negative")
-	}
-	if input.EntriesTotal < 0 {
-		return feedImportValidationErrorf("feed import status entries_total must not be negative")
-	}
-	if input.EntriesTotal > 0 && input.EntriesSynced > input.EntriesTotal {
-		return feedImportValidationErrorf("feed import status entries_synced must not exceed entries_total")
-	}
-	if len(input.Metadata) > maxImportStatusMetadataLength {
-		return feedImportValidationErrorf("feed import status metadata exceeds %d bytes", maxImportStatusMetadataLength)
-	}
-	status := strings.TrimSpace(input.LastSyncStatus)
-	if status == "" {
-		return nil
-	}
-	switch status {
-	case "success", "error", "running", "skipped", "disabled", "pending":
-		return nil
-	default:
-		return feedImportValidationErrorf("feed import status %q is not supported", status)
-	}
-}
-
-func truncateString(value string, max int) string {
-	if max <= 0 || len(value) <= max {
-		return value
-	}
-	return value[:max]
-}
-
-func splitCSV(raw string) []string {
-	if strings.TrimSpace(raw) == "" {
-		return nil
-	}
-
-	parts := strings.Split(raw, ",")
-	out := make([]string, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part != "" {
-			out = append(out, part)
-		}
-	}
-	return out
-}
-
-func parseSyncEcosystems(raw string) ([]string, error) {
-	ecosystems := splitCSV(raw)
-	for i, ecosystem := range ecosystems {
-		normalized := strings.ToLower(ecosystem)
-		if !domain.Ecosystem(normalized).Valid() {
-			return nil, fmt.Errorf("invalid ecosystem filter: %s", ecosystem)
-		}
-		ecosystems[i] = normalized
-	}
-	return ecosystems, nil
-}
-
-func parseRFC3339Timestamp(raw string) (time.Time, error) {
-	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
-		if ts, err := time.Parse(layout, raw); err == nil {
-			return ts.UTC(), nil
-		}
-	}
-	return time.Time{}, fmt.Errorf("invalid RFC3339 timestamp")
+func formatAPIDateTime(value time.Time) string {
+	return value.UTC().Format(time.RFC3339Nano)
 }
 
 func requestCorrelationID(r *http.Request) string {
@@ -2126,6 +1534,22 @@ func requestCorrelationID(r *http.Request) string {
 	return id
 }
 
+func requestWithLogger(r *http.Request, logger *slog.Logger) *http.Request {
+	if r == nil || logger == nil {
+		return r
+	}
+	return r.WithContext(context.WithValue(r.Context(), apiRequestLoggerKey{}, logger))
+}
+
+func requestLogger(r *http.Request) *slog.Logger {
+	if r != nil {
+		if logger, ok := r.Context().Value(apiRequestLoggerKey{}).(*slog.Logger); ok && logger != nil {
+			return logger
+		}
+	}
+	return slog.Default()
+}
+
 func isGetOrHead(method string) bool {
 	return method == http.MethodGet || method == http.MethodHead
 }
@@ -2135,11 +1559,35 @@ func writeJSONForRequest(w http.ResponseWriter, r *http.Request, status int, v a
 		writeJSONHead(w, status)
 		return
 	}
-	writeJSON(w, status, v)
+	writeJSONWithRequest(w, r, status, v)
+}
+
+func writeStreamingJSONForRequest(w http.ResponseWriter, r *http.Request, status int, v any) {
+	if r.Method == http.MethodHead {
+		writeJSONHead(w, status)
+		return
+	}
+	setJSONResponseHeaders(w)
+	w.WriteHeader(status)
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(true)
+	if err := enc.Encode(v); err != nil {
+		logJSONResponseFailure(r, "failed to stream JSON response", err)
+	}
 }
 
 func errorResponseForRequest(w http.ResponseWriter, r *http.Request, status int, message string) {
-	writeJSONForRequest(w, r, status, errorJSON{Error: message})
+	writeJSONForRequest(w, r, status, errorJSON{Error: message, Code: errorCodeForStatus(status)})
+}
+
+func writeJSONWithRequest(w http.ResponseWriter, r *http.Request, status int, v any) {
+	body, err := encodeJSONResponse(v)
+	if err != nil {
+		logJSONResponseFailure(r, "failed to encode JSON response", err)
+		writeJSONBytesForRequest(w, r, http.StatusInternalServerError, []byte(`{"error":"internal server error","code":"internal_error"}`+"\n"))
+		return
+	}
+	writeJSONBytesForRequest(w, r, status, body)
 }
 
 // writeJSON encodes v as JSON and writes it with the given HTTP status code.
@@ -2147,7 +1595,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	body, err := encodeJSONResponse(v)
 	if err != nil {
 		slog.Warn("failed to encode JSON response", "error", err)
-		writeJSONBytes(w, http.StatusInternalServerError, []byte(`{"error":"internal server error"}`+"\n"))
+		writeJSONBytes(w, http.StatusInternalServerError, []byte(`{"error":"internal server error","code":"internal_error"}`+"\n"))
 		return
 	}
 	writeJSONBytes(w, status, body)
@@ -2180,17 +1628,55 @@ func generateID() string {
 }
 
 func writeJSONHead(w http.ResponseWriter, status int) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	setJSONResponseHeaders(w)
 	w.WriteHeader(status)
 }
 
 func writeJSONBytes(w http.ResponseWriter, status int, body []byte) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	setJSONResponseHeaders(w)
 	w.WriteHeader(status)
 	if _, err := w.Write(body); err != nil { // #nosec G705 -- body is produced by encodeJSONResponse with HTML escaping before reaching this writer.
 		// At this point headers are already sent; we can only log.
 		slog.Warn("failed to write JSON response", "error", err)
 	}
+}
+
+func writeJSONBytesForRequest(w http.ResponseWriter, r *http.Request, status int, body []byte) {
+	setJSONResponseHeaders(w)
+	w.WriteHeader(status)
+	if _, err := w.Write(body); err != nil { // #nosec G705 -- body is produced by encodeJSONResponse with HTML escaping before reaching this writer.
+		// At this point headers are already sent; we can only log.
+		logJSONResponseFailure(r, "failed to write JSON response", err)
+	}
+}
+
+func logJSONResponseFailure(r *http.Request, message string, err error) {
+	attrs := []any{"error", err}
+	if r != nil {
+		attrs = append(attrs,
+			"correlation_id", requestCorrelationID(r),
+			"path", logsafe.RequestPathLabel(r.URL.Path),
+		)
+	}
+	requestLogger(r).Warn(message, attrs...)
+}
+
+func setJSONResponseHeaders(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+}
+
+func requireJSONContentType(r *http.Request) error {
+	raw := strings.TrimSpace(r.Header.Get("Content-Type"))
+	if raw == "" {
+		return fmt.Errorf("Content-Type must be application/json")
+	}
+	mediaType, _, err := mime.ParseMediaType(raw)
+	if err != nil || !strings.EqualFold(mediaType, "application/json") {
+		return fmt.Errorf("Content-Type must be application/json")
+	}
+	return nil
 }
 
 // readJSON decodes the request body into v with the standard API size limit.
@@ -2246,11 +1732,63 @@ func sanitizedJSONDecodeError(err error, limit int64) error {
 // errorJSON is the standard JSON error envelope.
 type errorJSON struct {
 	Error string `json:"error"`
+	Code  string `json:"code"`
 }
 
 // errorResponse sends a JSON error response with the given status and message.
 func errorResponse(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, errorJSON{Error: message})
+	writeJSON(w, status, errorJSON{Error: message, Code: errorCodeForStatus(status)})
+}
+
+func methodNotAllowed(w http.ResponseWriter, allowed ...string) {
+	methodNotAllowedWithMessage(w, "method not allowed", allowed...)
+}
+
+func methodNotAllowedForRequest(w http.ResponseWriter, r *http.Request, allowed ...string) {
+	methodNotAllowedWithMessageForRequest(w, r, "method not allowed", allowed...)
+}
+
+func methodNotAllowedWithMessage(w http.ResponseWriter, message string, allowed ...string) {
+	if len(allowed) > 0 {
+		w.Header().Set("Allow", strings.Join(allowed, ", "))
+	}
+	errorResponse(w, http.StatusMethodNotAllowed, message)
+}
+
+func methodNotAllowedWithMessageForRequest(w http.ResponseWriter, r *http.Request, message string, allowed ...string) {
+	if len(allowed) > 0 {
+		w.Header().Set("Allow", strings.Join(allowed, ", "))
+	}
+	errorResponseForRequest(w, r, http.StatusMethodNotAllowed, message)
+}
+
+// HandleNotFound writes the standard API JSON error envelope for API router
+// fallbacks.
+func HandleNotFound(w http.ResponseWriter, r *http.Request) {
+	errorResponseForRequest(w, r, http.StatusNotFound, "not found")
+}
+
+func errorCodeForStatus(status int) string {
+	switch status {
+	case http.StatusBadRequest:
+		return "invalid_request"
+	case http.StatusUnauthorized:
+		return "auth_failed"
+	case http.StatusForbidden:
+		return "forbidden"
+	case http.StatusConflict:
+		return "conflict"
+	case http.StatusTooManyRequests:
+		return "rate_limited"
+	case http.StatusServiceUnavailable:
+		return "service_unavailable"
+	case http.StatusNotFound:
+		return "not_found"
+	case http.StatusMethodNotAllowed, http.StatusUnsupportedMediaType, http.StatusNotImplemented:
+		return "unsupported"
+	default:
+		return "internal_error"
+	}
 }
 
 // clientIP delegates to the shared request-context helper.

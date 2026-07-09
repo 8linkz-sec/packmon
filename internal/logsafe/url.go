@@ -17,7 +17,7 @@ const (
 var (
 	httpURLPattern          = regexp.MustCompile(`https?://[^\s<>"']+`)
 	bearerTokenPattern      = regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}`)
-	secretAssignmentPattern = regexp.MustCompile(`(?i)\b(api[_-]?key|access[_-]?token|token|secret|sig|signature|x-amz-signature)(\s*[:=]\s*)([^\s;&]+)`)
+	secretAssignmentPattern = regexp.MustCompile(`(?i)\b(api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|password|passwd|pwd|credential|token|secret|sig|signature|x-amz-signature)(\s*[:=]\s*)([^\s;&]+)`)
 	windowsPathPattern      = regexp.MustCompile(`(?i)\b[A-Z]:\\(?:[^\\\s]+\\){2,}[^\\\s]+`)
 	unixPathPattern         = regexp.MustCompile(`(^|[\s=:])/(?:[^/\s]+/){2,}[^/\s]+`)
 )
@@ -119,6 +119,28 @@ func BoundedValue(raw string, max int) string {
 // before applying the generic log-value bound.
 func BoundedDiagnosticValue(raw string, max int) string {
 	return BoundedValue(RedactDiagnosticMessage(raw), max)
+}
+
+// RemoteErrorSnippet returns a bounded, user-visible HTTP error-body snippet.
+// It redacts secret-bearing diagnostic text before truncating on rune
+// boundaries and keeps the historical CLI ellipsis marker.
+func RemoteErrorSnippet(body []byte, maxRunes int) string {
+	return diagnosticSnippet(string(body), maxRunes)
+}
+
+func diagnosticSnippet(raw string, maxRunes int) string {
+	value := RedactDiagnosticMessage(raw)
+	if len(value) <= maxRunes {
+		return value
+	}
+	if maxRunes < 0 {
+		maxRunes = 0
+	}
+	runes := []rune(value)
+	if len(runes) <= maxRunes {
+		return value
+	}
+	return string(runes[:maxRunes]) + "..."
 }
 
 // RequestPathLabel returns a stable, low-cardinality request path label for

@@ -16,7 +16,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -38,13 +40,55 @@ const (
 	epssBatchSize = 5000
 )
 
+var cveIDPattern = regexp.MustCompile(`^CVE-\d{4}-\d{4,}$`)
+
 type epssScoreStreamReplacer interface {
 	ReplaceEPSSScoresStream(ctx context.Context, stream func(func([]db.EPSSEntry) error) error) (updated, cleared, total int, err error)
 }
 
 type epssMetadata struct {
+	ETag         string `json:"etag,omitempty"`
+	LastModified string `json:"last_modified,omitempty"`
 	ModelVersion string `json:"model_version,omitempty"`
 	ScoreDate    string `json:"score_date,omitempty"`
+}
+
+type epssCSVRecordKind uint8
+
+const (
+	epssCSVRecordBlank epssCSVRecordKind = iota
+	epssCSVRecordComment
+	epssCSVRecordHeader
+	epssCSVRecordData
+)
+
+type epssCSVRecord struct {
+	kind     epssCSVRecordKind
+	metadata epssMetadata
+}
+
+type epssScoreSnapshot struct {
+	batches [][]db.EPSSEntry
+	total   int
+}
+
+func (s *epssScoreSnapshot) addBatch(batch []db.EPSSEntry) error {
+	if len(batch) == 0 {
+		return nil
+	}
+	copied := append([]db.EPSSEntry(nil), batch...)
+	s.batches = append(s.batches, copied)
+	s.total += len(copied)
+	return nil
+}
+
+func (s epssScoreSnapshot) stream(yield func([]db.EPSSEntry) error) error {
+	for _, batch := range s.batches {
+		if err := yield(batch); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Syncer downloads and applies EPSS scores to known vulnerabilities.
@@ -96,10 +140,20 @@ func (s *Syncer) Name() string { return feedName }
 func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, error) {
 	s.logger.Info("starting EPSS sync")
 
+	status := s.loadFeedStatus(store)
+	storedMetadata := epssMetadataFromStatus(status)
 	if replacer, ok := store.(epssScoreStreamReplacer); ok {
-		totalUpdated, cleared, totalEntries, metadata, err := s.replaceScoresStream(ctx, replacer)
+		totalUpdated, cleared, totalEntries, metadata, notModified, err := s.replaceScoresStream(ctx, replacer, storedMetadata)
 		if err != nil {
 			return nil, fmt.Errorf("epss: stream replace scores: %w", err)
+		}
+		if notModified {
+			synced, total := statusCounts(status)
+			s.logger.Info("EPSS scores unchanged",
+				slog.Int("entries_synced", synced),
+				slog.Int("entries_total", total),
+			)
+			return syncResult(synced, total, metadata), nil
 		}
 		s.logger.Info("EPSS sync completed",
 			slog.Int("total_entries", totalEntries),
@@ -109,9 +163,17 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 		return syncResult(totalUpdated, totalEntries, metadata), nil
 	}
 
-	entries, metadata, err := s.downloadScores(ctx)
+	entries, metadata, notModified, err := s.downloadScores(ctx, storedMetadata)
 	if err != nil {
 		return nil, fmt.Errorf("epss: download scores: %w", err)
+	}
+	if notModified {
+		synced, total := statusCounts(status)
+		s.logger.Info("EPSS scores unchanged",
+			slog.Int("entries_synced", synced),
+			slog.Int("entries_total", total),
+		)
+		return syncResult(synced, total, metadata), nil
 	}
 
 	s.logger.Info("downloaded EPSS scores", slog.Int("entry_count", len(entries)))
@@ -137,37 +199,39 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 	}, nil
 }
 
-// downloadScores fetches and parses the gzipped EPSS CSV.
+// replaceScoresStream fetches and parses the gzipped EPSS CSV.
 // The CSV format (after a comment header line) is:
 //
 //	cve,epss,percentile
 //	CVE-2021-23337,0.01234,0.87654
-func (s *Syncer) replaceScoresStream(ctx context.Context, replacer epssScoreStreamReplacer) (int, int, int, epssMetadata, error) {
-	bodyReader, closeBody, err := s.openScores(ctx)
+func (s *Syncer) replaceScoresStream(ctx context.Context, replacer epssScoreStreamReplacer, validators epssMetadata) (int, int, int, epssMetadata, bool, error) {
+	bodyReader, closeBody, metadata, notModified, err := s.openScores(ctx, validators)
 	if err != nil {
-		return 0, 0, 0, epssMetadata{}, err
+		return 0, 0, 0, epssMetadata{}, false, err
 	}
-	defer closeBody()
+	if notModified {
+		return 0, 0, 0, metadata, true, nil
+	}
 
-	var metadata epssMetadata
-	parsedTotal := 0
-	updated, cleared, total, err := replacer.ReplaceEPSSScoresStream(ctx, func(yield func([]db.EPSSEntry) error) error {
-		var parsedMetadata epssMetadata
-		var parseErr error
-		parsedTotal, parsedMetadata, parseErr = streamLimitedCSV(bodyReader, maxBodySize, epssBatchSize, yield)
-		if parseErr != nil {
-			return parseErr
-		}
-		metadata = parsedMetadata
-		return nil
-	})
+	var snapshot epssScoreSnapshot
+	parsedTotal, parsedMetadata, parseErr := streamLimitedCSV(bodyReader, maxBodySize, epssBatchSize, snapshot.addBatch)
+	closeBody()
+	if parseErr != nil {
+		return 0, 0, parsedTotal, metadata, false, parseErr
+	}
+	metadata.merge(parsedMetadata)
+
+	if err := ctx.Err(); err != nil {
+		return 0, 0, parsedTotal, metadata, false, fmt.Errorf("context cancelled: %w", err)
+	}
+	updated, cleared, total, err := replacer.ReplaceEPSSScoresStream(ctx, snapshot.stream)
 	if err != nil {
-		return updated, cleared, total, metadata, err
+		return updated, cleared, total, metadata, false, err
 	}
 	if total == 0 {
-		total = parsedTotal
+		total = snapshot.total
 	}
-	return updated, cleared, total, metadata, nil
+	return updated, cleared, total, metadata, false, nil
 }
 
 func syncResult(entriesSynced, entriesTotal int, metadata epssMetadata) *feed.SyncResult {
@@ -179,41 +243,62 @@ func syncResult(entriesSynced, entriesTotal int, metadata epssMetadata) *feed.Sy
 }
 
 func metadataJSON(metadata epssMetadata) json.RawMessage {
-	if metadata.ModelVersion == "" && metadata.ScoreDate == "" {
+	if metadata.ETag == "" && metadata.LastModified == "" && metadata.ModelVersion == "" && metadata.ScoreDate == "" {
 		return nil
 	}
 	raw, _ := json.Marshal(metadata)
 	return raw
 }
 
-func (s *Syncer) downloadScores(ctx context.Context) ([]db.EPSSEntry, epssMetadata, error) {
-	bodyReader, closeBody, err := s.openScores(ctx)
+func (s *Syncer) downloadScores(ctx context.Context, validators epssMetadata) ([]db.EPSSEntry, epssMetadata, bool, error) {
+	bodyReader, closeBody, metadata, notModified, err := s.openScores(ctx, validators)
 	if err != nil {
-		return nil, epssMetadata{}, err
+		return nil, epssMetadata{}, false, err
+	}
+	if notModified {
+		return nil, metadata, true, nil
 	}
 	defer closeBody()
 
-	return parseLimitedCSV(bodyReader, maxBodySize)
+	entries, parsedMetadata, err := parseLimitedCSV(bodyReader, maxBodySize)
+	if err != nil {
+		return nil, metadata, false, err
+	}
+	metadata.merge(parsedMetadata)
+	return entries, metadata, false, nil
 }
 
-func (s *Syncer) openScores(ctx context.Context) (io.Reader, func(), error) {
+func (s *Syncer) openScores(ctx context.Context, validators epssMetadata) (io.Reader, func(), epssMetadata, bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.scoresURL, nil)
 	if err != nil {
-		return nil, nil, fmt.Errorf("create request: %w", err)
+		return nil, nil, epssMetadata{}, false, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Accept-Encoding", "gzip")
-	req.Header.Set("User-Agent", "packmon-feedsync/1.0")
+	req.Header.Set("User-Agent", feed.FeedSyncUserAgent)
+	if validators.ETag != "" {
+		req.Header.Set("If-None-Match", validators.ETag)
+	}
+	if validators.LastModified != "" {
+		req.Header.Set("If-Modified-Since", validators.LastModified)
+	}
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		return nil, nil, fmt.Errorf("http get: %w", err)
+		return nil, nil, epssMetadata{}, false, fmt.Errorf("http get: %w", err)
 	}
 	closeBody := func() { _ = resp.Body.Close() }
+	metadata := validators.mergeResponseValidators(resp)
+
+	if resp.StatusCode == http.StatusNotModified {
+		closeBody()
+		return nil, func() {}, metadata, true, nil
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		closeBody()
-		return nil, nil, fmt.Errorf("unexpected status %d", resp.StatusCode)
+		return nil, nil, epssMetadata{}, false, fmt.Errorf("unexpected status %d", resp.StatusCode)
 	}
+	metadata = epssMetadata{}.mergeResponseValidators(resp)
 
 	// Determine whether the response body is gzip-compressed. The
 	// Content-Encoding header is the primary signal. As a fallback we
@@ -225,7 +310,7 @@ func (s *Syncer) openScores(ctx context.Context) (io.Reader, func(), error) {
 		gz, gzErr := gzip.NewReader(resp.Body)
 		if gzErr != nil {
 			closeBody()
-			return nil, nil, fmt.Errorf("gzip reader: %w", gzErr)
+			return nil, nil, epssMetadata{}, false, fmt.Errorf("gzip reader: %w", gzErr)
 		}
 		closeBody = func() {
 			_ = gz.Close()
@@ -239,7 +324,7 @@ func (s *Syncer) openScores(ctx context.Context) (io.Reader, func(), error) {
 		n, peekErr := io.ReadFull(resp.Body, peek)
 		if peekErr != nil && peekErr != io.ErrUnexpectedEOF {
 			closeBody()
-			return nil, nil, fmt.Errorf("peek response: %w", peekErr)
+			return nil, nil, epssMetadata{}, false, fmt.Errorf("peek response: %w", peekErr)
 		}
 		// Reassemble the stream: prepend the peeked bytes.
 		bodyReader = io.MultiReader(
@@ -250,7 +335,7 @@ func (s *Syncer) openScores(ctx context.Context) (io.Reader, func(), error) {
 			gz, gzErr := gzip.NewReader(bodyReader)
 			if gzErr != nil {
 				closeBody()
-				return nil, nil, fmt.Errorf("gzip reader (detected from magic bytes): %w", gzErr)
+				return nil, nil, epssMetadata{}, false, fmt.Errorf("gzip reader (detected from magic bytes): %w", gzErr)
 			}
 			closeBody = func() {
 				_ = gz.Close()
@@ -260,7 +345,7 @@ func (s *Syncer) openScores(ctx context.Context) (io.Reader, func(), error) {
 		}
 	}
 
-	return bodyReader, closeBody, nil
+	return bodyReader, closeBody, metadata, false, nil
 }
 
 func parseLimitedCSV(r io.Reader, maxBytes int64) ([]db.EPSSEntry, epssMetadata, error) {
@@ -270,7 +355,7 @@ func parseLimitedCSV(r io.Reader, maxBytes int64) ([]db.EPSSEntry, epssMetadata,
 		return nil, metadata, err
 	}
 	if limitedReader.N == 0 {
-		return nil, metadata, fmt.Errorf("decompressed EPSS CSV exceeds %d bytes", maxBytes)
+		return nil, metadata, feed.NonRetryableError(fmt.Errorf("decompressed EPSS CSV exceeds %d bytes", maxBytes))
 	}
 	return entries, metadata, nil
 }
@@ -282,7 +367,7 @@ func streamLimitedCSV(r io.Reader, maxBytes int64, batchSize int, yield func([]d
 		return total, metadata, err
 	}
 	if limitedReader.N == 0 {
-		return total, metadata, fmt.Errorf("decompressed EPSS CSV exceeds %d bytes", maxBytes)
+		return total, metadata, feed.NonRetryableError(fmt.Errorf("decompressed EPSS CSV exceeds %d bytes", maxBytes))
 	}
 	return total, metadata, nil
 }
@@ -305,7 +390,7 @@ func parseCSVWithMetadata(r io.Reader) ([]db.EPSSEntry, epssMetadata, error) {
 		return nil, metadata, err
 	}
 	if total == 0 {
-		return nil, metadata, fmt.Errorf("no EPSS score rows found")
+		return nil, metadata, feed.NonRetryableError(fmt.Errorf("no EPSS score rows found"))
 	}
 	return entries, metadata, nil
 }
@@ -342,57 +427,32 @@ func streamCSV(r io.Reader, batchSize int, yield func([]db.EPSSEntry) error) (in
 		}
 		row++
 		if err != nil {
-			return total, metadata, fmt.Errorf("row %d: csv read: %w", row, err)
+			return total, metadata, feed.NonRetryableError(fmt.Errorf("row %d: csv read: %w", row, err))
 		}
 
-		if isBlankCSVRecord(record) {
+		parsedRecord := parseEPSSCSVRecord(row, record)
+		switch parsedRecord.kind {
+		case epssCSVRecordBlank:
 			continue
-		}
-
-		// Skip comment lines (model version metadata).
-		if len(record) > 0 && strings.HasPrefix(strings.TrimSpace(record[0]), "#") {
-			metadata.merge(parseCommentMetadata(record))
+		case epssCSVRecordComment:
+			metadata.merge(parsedRecord.metadata)
 			continue
-		}
-
-		if !headerFound {
-			if !isEPSSHeader(record) {
-				return total, metadata, fmt.Errorf("row %d: expected header cve,epss,percentile", row)
+		case epssCSVRecordHeader:
+			if !headerFound {
+				headerFound = true
+				continue
 			}
-			headerFound = true
-			continue
+			fallthrough
+		case epssCSVRecordData:
+			if !headerFound {
+				return total, metadata, feed.NonRetryableError(fmt.Errorf("row %d: expected header cve,epss,percentile", row))
+			}
+			entry, err := parseEPSSEntry(row, record)
+			if err != nil {
+				return total, metadata, err
+			}
+			batch = append(batch, entry)
 		}
-
-		if len(record) != 3 {
-			return total, metadata, fmt.Errorf("row %d: expected 3 fields, got %d", row, len(record))
-		}
-
-		cveID := strings.TrimSpace(record[0])
-		if !strings.HasPrefix(cveID, "CVE-") {
-			return total, metadata, fmt.Errorf("row %d: invalid CVE ID %q", row, cveID)
-		}
-
-		score, err := strconv.ParseFloat(strings.TrimSpace(record[1]), 64)
-		if err != nil {
-			return total, metadata, fmt.Errorf("row %d: invalid EPSS score: %w", row, err)
-		}
-		if score < 0 || score > 1 {
-			return total, metadata, fmt.Errorf("row %d: EPSS score %v outside range 0..1", row, score)
-		}
-
-		percentile, err := strconv.ParseFloat(strings.TrimSpace(record[2]), 64)
-		if err != nil {
-			return total, metadata, fmt.Errorf("row %d: invalid EPSS percentile: %w", row, err)
-		}
-		if percentile < 0 || percentile > 1 {
-			return total, metadata, fmt.Errorf("row %d: EPSS percentile %v outside range 0..1", row, percentile)
-		}
-
-		batch = append(batch, db.EPSSEntry{
-			CVEID:      cveID,
-			Score:      score,
-			Percentile: percentile,
-		})
 		if len(batch) >= batchSize {
 			if err := flush(); err != nil {
 				return total, metadata, err
@@ -401,18 +461,126 @@ func streamCSV(r io.Reader, batchSize int, yield func([]db.EPSSEntry) error) (in
 	}
 
 	if !headerFound {
-		return total, metadata, fmt.Errorf("expected header cve,epss,percentile")
+		return total, metadata, feed.NonRetryableError(fmt.Errorf("expected header cve,epss,percentile"))
 	}
 	if err := flush(); err != nil {
 		return total, metadata, err
 	}
 	if total == 0 {
-		return total, metadata, fmt.Errorf("no EPSS score rows found")
+		return total, metadata, feed.NonRetryableError(fmt.Errorf("no EPSS score rows found"))
 	}
 	return total, metadata, nil
 }
 
+func parseEPSSCSVRecord(_ int, record []string) epssCSVRecord {
+	if isBlankCSVRecord(record) {
+		return epssCSVRecord{kind: epssCSVRecordBlank}
+	}
+	if len(record) > 0 && strings.HasPrefix(strings.TrimSpace(record[0]), "#") {
+		return epssCSVRecord{
+			kind:     epssCSVRecordComment,
+			metadata: parseCommentMetadata(record),
+		}
+	}
+	if isEPSSHeader(record) {
+		return epssCSVRecord{kind: epssCSVRecordHeader}
+	}
+	return epssCSVRecord{kind: epssCSVRecordData}
+}
+
+func parseEPSSEntry(row int, record []string) (db.EPSSEntry, error) {
+	if len(record) != 3 {
+		return db.EPSSEntry{}, feed.NonRetryableError(fmt.Errorf("row %d: expected 3 fields, got %d", row, len(record)))
+	}
+
+	cveID := strings.TrimSpace(record[0])
+	if !cveIDPattern.MatchString(cveID) {
+		return db.EPSSEntry{}, feed.NonRetryableError(fmt.Errorf("row %d: invalid CVE ID %q", row, cveID))
+	}
+
+	score, err := strconv.ParseFloat(strings.TrimSpace(record[1]), 64)
+	if err != nil {
+		return db.EPSSEntry{}, feed.NonRetryableError(fmt.Errorf("row %d: invalid EPSS score: %w", row, err))
+	}
+	if !validUnitInterval(score) {
+		return db.EPSSEntry{}, feed.NonRetryableError(fmt.Errorf("row %d: EPSS score %v outside range 0..1", row, score))
+	}
+
+	percentile, err := strconv.ParseFloat(strings.TrimSpace(record[2]), 64)
+	if err != nil {
+		return db.EPSSEntry{}, feed.NonRetryableError(fmt.Errorf("row %d: invalid EPSS percentile: %w", row, err))
+	}
+	if !validUnitInterval(percentile) {
+		return db.EPSSEntry{}, feed.NonRetryableError(fmt.Errorf("row %d: EPSS percentile %v outside range 0..1", row, percentile))
+	}
+
+	return db.EPSSEntry{
+		CVEID:      cveID,
+		Score:      score,
+		Percentile: percentile,
+	}, nil
+}
+
+func validUnitInterval(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0) && value >= 0 && value <= 1
+}
+
+func (s *Syncer) loadFeedStatus(store db.Store) *db.FeedSyncStatus {
+	status, err := feed.GetFeedSyncStatusBounded(store, feedName)
+	if err != nil {
+		s.logger.Warn("failed to get EPSS feed sync status, proceeding with full sync",
+			slog.String("error", feed.SafeDiagnosticError(err)),
+		)
+		return nil
+	}
+	return status
+}
+
+func epssMetadataFromStatus(status *db.FeedSyncStatus) epssMetadata {
+	if status == nil {
+		return epssMetadata{}
+	}
+	var metadata epssMetadata
+	if len(status.Metadata) > 0 {
+		_ = json.Unmarshal(status.Metadata, &metadata)
+	}
+	if etag := strings.TrimSpace(status.LastETag); etag != "" {
+		metadata.ETag = etag
+	}
+	metadata.ETag = strings.TrimSpace(metadata.ETag)
+	metadata.LastModified = strings.TrimSpace(metadata.LastModified)
+	metadata.ModelVersion = strings.TrimSpace(metadata.ModelVersion)
+	metadata.ScoreDate = strings.TrimSpace(metadata.ScoreDate)
+	return metadata
+}
+
+func (m epssMetadata) mergeResponseValidators(resp *http.Response) epssMetadata {
+	if resp == nil {
+		return m
+	}
+	if etag := strings.TrimSpace(resp.Header.Get("ETag")); etag != "" {
+		m.ETag = etag
+	}
+	if lastModified := strings.TrimSpace(resp.Header.Get("Last-Modified")); lastModified != "" {
+		m.LastModified = lastModified
+	}
+	return m
+}
+
+func statusCounts(status *db.FeedSyncStatus) (synced, total int) {
+	if status == nil {
+		return 0, 0
+	}
+	return status.EntriesSynced, status.EntriesTotal
+}
+
 func (m *epssMetadata) merge(other epssMetadata) {
+	if m.ETag == "" {
+		m.ETag = other.ETag
+	}
+	if m.LastModified == "" {
+		m.LastModified = other.LastModified
+	}
 	if m.ModelVersion == "" {
 		m.ModelVersion = other.ModelVersion
 	}

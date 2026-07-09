@@ -1,3 +1,2 @@
-ALTER TABLE scan_log
-    DROP COLUMN IF EXISTS api_key_name,
-    DROP COLUMN IF EXISTS api_key_id;
+-- No-op: scan_log.api_key_id and scan_log.api_key_name are owned by 001_initial.
+SELECT 1;

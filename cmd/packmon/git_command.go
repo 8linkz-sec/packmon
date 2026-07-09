@@ -12,7 +12,7 @@ const maxGitCommandOutputBytes = 4 << 20
 var (
 	errGitCommandOutputTooLarge = errors.New("git command output exceeds maximum size")
 	gitCommandOutput            = defaultGitCommandOutput
-	gitMetadataTimeout          = 2 * time.Second
+	gitMetadataTimeout          = 10 * time.Second
 )
 
 type gitOutputBuffer struct {

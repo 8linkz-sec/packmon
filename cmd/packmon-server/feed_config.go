@@ -28,6 +28,9 @@ func applyStoredFeedConfigOverrides(ctx context.Context, cfg *config.Config, sto
 			}
 			continue
 		}
+		if err := rejectProductionPlaintextFeedAPIKey(cfg, override); err != nil {
+			return err
+		}
 
 		mode, err := config.ParseFeedMode(override.Mode)
 		if err != nil {
@@ -58,4 +61,14 @@ func applyStoredFeedConfigOverrides(ctx context.Context, cfg *config.Config, sto
 		logger.Info("applied persisted feed configuration overrides", "count", applied)
 	}
 	return nil
+}
+
+func rejectProductionPlaintextFeedAPIKey(cfg *config.Config, override db.FeedConfig) error {
+	if cfg == nil || cfg.IsDevelopment() {
+		return nil
+	}
+	if strings.TrimSpace(cfg.Admin.EncryptionKey) == "" || strings.TrimSpace(override.APIKey) == "" || override.APIKeyEncrypted {
+		return nil
+	}
+	return fmt.Errorf("plaintext feed API key stored for feed %q; re-save or clear this feed API key through the admin feed settings so it is encrypted at rest before production startup", override.FeedName)
 }

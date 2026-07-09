@@ -6,7 +6,8 @@ Accepted
 
 ## Decision
 
-Packmon uses daily `pg_dump` backups with 7-day local retention.
+Packmon uses daily `pg_dump --format=custom` archive backups with 7-day local
+retention.
 
 ## Rationale
 
@@ -18,4 +19,7 @@ Packmon uses daily `pg_dump` backups with 7-day local retention.
 
 - restore is file-based via `pg_restore` into a clean recreated database
 - RPO is roughly 24 hours
+- RTO (Recovery Time Objective) is operator-defined per deployment; the
+  repository-provided Compose model has no built-in standby or automated
+  failover target
 - external long-term backup remains the operator's responsibility

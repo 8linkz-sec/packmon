@@ -5,6 +5,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 // FeedSettings describes one feed's runtime configuration.
@@ -21,9 +23,148 @@ type FeedSettings struct {
 	SupportsManualSync   bool
 }
 
+// FeedModeOption is one selectable feed mode for admin/UI rendering.
+type FeedModeOption struct {
+	Value FeedMode
+	Label string
+}
+
+type feedDescriptor struct {
+	Name                 string
+	DisplayName          string
+	RequiresAPIKey       bool
+	SupportsAPIKey       bool
+	SupportsExternalMode bool
+	SupportsSyncInterval bool
+	SupportsManualSync   bool
+	Enabled              func(FeedsConfig) bool
+	Mode                 func(FeedsConfig) FeedMode
+	SyncInterval         func(FeedsConfig) time.Duration
+	APIKey               func(FeedsConfig) string
+}
+
 // FeedSyncMinInterval is the minimum persisted self-managed provider sync
 // interval accepted for feed-specific overrides.
 const FeedSyncMinInterval = 15 * time.Minute
+
+const (
+	reversingLabsDefaultBaseURL = "https://data.reversinglabs.com/api/oss/community/v2/free"
+	socketDefaultBaseURL        = "https://socket.dev/api/v1"
+	vulnCheckDefaultBaseURL     = "https://api.vulncheck.com"
+)
+
+var feedDescriptors = []feedDescriptor{
+	{
+		Name:                 "osv",
+		DisplayName:          "OSV",
+		SupportsExternalMode: true,
+		SupportsSyncInterval: true,
+		SupportsManualSync:   true,
+		Enabled:              func(feeds FeedsConfig) bool { return feeds.OSVEnabled },
+		Mode:                 func(feeds FeedsConfig) FeedMode { return feeds.OSVMode },
+		SyncInterval:         func(feeds FeedsConfig) time.Duration { return feeds.OSVInterval },
+	},
+	{
+		Name:                 "ghsa",
+		DisplayName:          "GHSA",
+		SupportsExternalMode: true,
+		SupportsSyncInterval: true,
+		SupportsManualSync:   true,
+		Enabled:              func(feeds FeedsConfig) bool { return feeds.GHSAEnabled },
+		Mode:                 func(feeds FeedsConfig) FeedMode { return feeds.GHSAMode },
+		SyncInterval:         func(feeds FeedsConfig) time.Duration { return feeds.GHSAInterval },
+	},
+	{
+		Name:                 "openssf",
+		DisplayName:          "OpenSSF Malicious",
+		SupportsExternalMode: true,
+		SupportsSyncInterval: true,
+		SupportsManualSync:   true,
+		Enabled:              func(feeds FeedsConfig) bool { return feeds.OpenSSFEnabled },
+		Mode:                 func(feeds FeedsConfig) FeedMode { return feeds.OpenSSFMode },
+		SyncInterval:         func(feeds FeedsConfig) time.Duration { return feeds.OpenSSFInterval },
+	},
+	{
+		Name:                 "vulncheck",
+		DisplayName:          "VulnCheck",
+		RequiresAPIKey:       true,
+		SupportsAPIKey:       true,
+		SupportsExternalMode: true,
+		SupportsSyncInterval: true,
+		SupportsManualSync:   true,
+		Enabled:              func(feeds FeedsConfig) bool { return feeds.VulnCheckEnabled },
+		Mode:                 func(feeds FeedsConfig) FeedMode { return feeds.VulnCheckMode },
+		SyncInterval:         func(feeds FeedsConfig) time.Duration { return feeds.VulnCheckInterval },
+		APIKey:               func(feeds FeedsConfig) string { return feeds.VulnCheckAPIKey },
+	},
+	{
+		Name:                 "cisakev",
+		DisplayName:          "CISA KEV",
+		SupportsExternalMode: true,
+		SupportsSyncInterval: true,
+		SupportsManualSync:   true,
+		Enabled:              func(feeds FeedsConfig) bool { return feeds.CISAKEVEnabled },
+		Mode:                 func(feeds FeedsConfig) FeedMode { return feeds.CISAKEVMode },
+		SyncInterval:         func(feeds FeedsConfig) time.Duration { return feeds.CISAKEVInterval },
+	},
+	{
+		Name:                 "epss",
+		DisplayName:          "EPSS",
+		SupportsExternalMode: true,
+		SupportsSyncInterval: true,
+		SupportsManualSync:   true,
+		Enabled:              func(feeds FeedsConfig) bool { return feeds.EPSSEnabled },
+		Mode:                 func(feeds FeedsConfig) FeedMode { return feeds.EPSSMode },
+		SyncInterval:         func(feeds FeedsConfig) time.Duration { return feeds.EPSSInterval },
+	},
+	{
+		Name:                 "nvd",
+		DisplayName:          "NVD",
+		SupportsAPIKey:       true,
+		SupportsSyncInterval: true,
+		SupportsManualSync:   true,
+		Enabled:              func(feeds FeedsConfig) bool { return feeds.NVDEnabled },
+		Mode:                 func(feeds FeedsConfig) FeedMode { return feeds.NVDMode },
+		SyncInterval:         func(feeds FeedsConfig) time.Duration { return feeds.NVDInterval },
+		APIKey:               func(feeds FeedsConfig) string { return feeds.NVDAPIKey },
+	},
+	{
+		Name:                 "endoflife",
+		DisplayName:          "endoflife.date",
+		SupportsSyncInterval: true,
+		SupportsManualSync:   true,
+		Enabled:              func(feeds FeedsConfig) bool { return feeds.EndOfLifeEnabled },
+		Mode:                 func(feeds FeedsConfig) FeedMode { return feeds.EndOfLifeMode },
+		SyncInterval:         func(feeds FeedsConfig) time.Duration { return feeds.EndOfLifeInterval },
+	},
+	{
+		Name:                 "socket",
+		DisplayName:          "Socket.dev",
+		RequiresAPIKey:       true,
+		SupportsAPIKey:       true,
+		SupportsExternalMode: true,
+		Enabled:              func(feeds FeedsConfig) bool { return feeds.SocketEnabled },
+		Mode:                 func(feeds FeedsConfig) FeedMode { return feeds.SocketMode },
+		APIKey:               func(feeds FeedsConfig) string { return feeds.SocketAPIKey },
+	},
+	{
+		Name:           "reversinglabs",
+		DisplayName:    "ReversingLabs",
+		RequiresAPIKey: true,
+		SupportsAPIKey: true,
+		Enabled:        func(feeds FeedsConfig) bool { return feeds.ReversingLabsEnabled },
+		Mode:           func(feeds FeedsConfig) FeedMode { return feeds.ReversingLabsMode },
+		APIKey:         func(feeds FeedsConfig) string { return feeds.ReversingLabsAPIKey },
+	},
+}
+
+var feedDescriptorsByName = func() map[string]feedDescriptor {
+	out := make(map[string]feedDescriptor, len(feedDescriptors))
+	for _, descriptor := range feedDescriptors {
+		out[descriptor.Name] = descriptor
+	}
+	return out
+}()
 
 var configFeedLockInit sync.Mutex
 
@@ -43,40 +184,79 @@ func NormalizeFeedName(name string) string {
 
 // ParseFeedMode validates and normalizes a feed mode.
 func ParseFeedMode(raw string) (FeedMode, error) {
-	switch FeedMode(strings.ToLower(strings.TrimSpace(raw))) {
-	case FeedModeSelf:
-		return FeedModeSelf, nil
-	case FeedModeExternal:
-		return FeedModeExternal, nil
-	default:
-		return "", fmt.Errorf("invalid feed mode %q", raw)
+	if mode, ok := domain.ParseFeedMode(raw); ok {
+		return mode, nil
 	}
+	return "", fmt.Errorf("invalid feed mode %q", raw)
+}
+
+// FeedModeOptions returns selectable feed modes for a feed capability set.
+func FeedModeOptions(supportsExternal bool) []FeedModeOption {
+	modes := []FeedMode{FeedModeSelf}
+	if supportsExternal {
+		modes = domain.FeedModeValues()
+	}
+	options := make([]FeedModeOption, 0, len(modes))
+	for _, mode := range modes {
+		options = append(options, FeedModeOption{
+			Value: mode,
+			Label: string(mode),
+		})
+	}
+	return options
+}
+
+func lookupFeedDescriptor(name string) (feedDescriptor, bool) {
+	descriptor, ok := feedDescriptorsByName[NormalizeFeedName(name)]
+	return descriptor, ok
+}
+
+func (d feedDescriptor) settings(feeds FeedsConfig) FeedSettings {
+	settings := FeedSettings{
+		Name:                 d.Name,
+		DisplayName:          d.DisplayName,
+		RequiresAPIKey:       d.RequiresAPIKey,
+		SupportsAPIKey:       d.SupportsAPIKey,
+		SupportsSyncInterval: d.SupportsSyncInterval,
+		SupportsManualSync:   d.SupportsManualSync,
+	}
+	if d.Enabled != nil {
+		settings.Enabled = d.Enabled(feeds)
+	}
+	if d.Mode != nil {
+		settings.Mode = d.Mode(feeds)
+	}
+	if d.SyncInterval != nil {
+		settings.SyncInterval = d.SyncInterval(feeds)
+	}
+	if d.APIKey != nil {
+		settings.APIKey = d.APIKey(feeds)
+	}
+	return settings
 }
 
 // FeedSupportsExternalMode reports whether Packmon has an import/API path for
 // externally managed data for the named feed.
 func FeedSupportsExternalMode(name string) bool {
-	switch NormalizeFeedName(name) {
-	case "osv", "ghsa", "openssf", "vulncheck", "cisakev", "epss", "socket":
-		return true
-	default:
-		return false
+	descriptor, ok := lookupFeedDescriptor(name)
+	return ok && descriptor.SupportsExternalMode
+}
+
+// FeedExternalModeNames returns the canonical feed names that can be supplied
+// by an external importer.
+func FeedExternalModeNames() []string {
+	out := make([]string, 0, len(feedDescriptors))
+	for _, descriptor := range feedDescriptors {
+		if descriptor.SupportsExternalMode {
+			out = append(out, descriptor.Name)
+		}
 	}
+	return out
 }
 
 func feedSupportsSyncInterval(name string) bool {
-	switch NormalizeFeedName(name) {
-	case "osv", "ghsa", "openssf", "vulncheck", "cisakev", "epss", "nvd", "endoflife":
-		return true
-	default:
-		return false
-	}
-}
-
-// FeedSupportsManualSync reports whether the feed manager registers a syncer
-// that can be triggered on demand from the admin UI.
-func FeedSupportsManualSync(name string) bool {
-	return feedSupportsSyncInterval(name)
+	descriptor, ok := lookupFeedDescriptor(name)
+	return ok && descriptor.SupportsSyncInterval
 }
 
 // FeedsSnapshot returns a consistent copy of the mutable feed configuration.
@@ -89,6 +269,7 @@ func (c *Config) FeedsSnapshot() FeedsConfig {
 	defer mu.RUnlock()
 	feeds := c.Feeds
 	feeds.ReversingLabsExcludedNamespaces = append([]string(nil), c.Feeds.ReversingLabsExcludedNamespaces...)
+	feeds.SocketExcludedNamespaces = append([]string(nil), c.Feeds.SocketExcludedNamespaces...)
 	return feeds
 }
 
@@ -99,118 +280,11 @@ func (c *Config) FeedSettings(name string) (FeedSettings, bool) {
 	}
 	feeds := c.FeedsSnapshot()
 
-	switch NormalizeFeedName(name) {
-	case "osv":
-		return FeedSettings{
-			Name:                 "osv",
-			DisplayName:          "OSV",
-			Enabled:              feeds.OSVEnabled,
-			Mode:                 feeds.OSVMode,
-			SyncInterval:         feeds.OSVInterval,
-			SupportsSyncInterval: true,
-			SupportsManualSync:   true,
-		}, true
-	case "ghsa":
-		return FeedSettings{
-			Name:                 "ghsa",
-			DisplayName:          "GHSA",
-			Enabled:              feeds.GHSAEnabled,
-			Mode:                 feeds.GHSAMode,
-			SyncInterval:         feeds.GHSAInterval,
-			SupportsSyncInterval: true,
-			SupportsManualSync:   true,
-		}, true
-	case "openssf":
-		return FeedSettings{
-			Name:                 "openssf",
-			DisplayName:          "OpenSSF Malicious",
-			Enabled:              feeds.OpenSSFEnabled,
-			Mode:                 feeds.OpenSSFMode,
-			SyncInterval:         feeds.OpenSSFInterval,
-			SupportsSyncInterval: true,
-			SupportsManualSync:   true,
-		}, true
-	case "vulncheck":
-		return FeedSettings{
-			Name:                 "vulncheck",
-			DisplayName:          "VulnCheck",
-			Enabled:              feeds.VulnCheckEnabled,
-			Mode:                 feeds.VulnCheckMode,
-			SyncInterval:         feeds.VulnCheckInterval,
-			APIKey:               feeds.VulnCheckAPIKey,
-			RequiresAPIKey:       true,
-			SupportsAPIKey:       true,
-			SupportsSyncInterval: true,
-			SupportsManualSync:   true,
-		}, true
-	case "cisakev":
-		return FeedSettings{
-			Name:                 "cisakev",
-			DisplayName:          "CISA KEV",
-			Enabled:              feeds.CISAKEVEnabled,
-			Mode:                 feeds.CISAKEVMode,
-			SyncInterval:         feeds.CISAKEVInterval,
-			SupportsSyncInterval: true,
-			SupportsManualSync:   true,
-		}, true
-	case "epss":
-		return FeedSettings{
-			Name:                 "epss",
-			DisplayName:          "EPSS",
-			Enabled:              feeds.EPSSEnabled,
-			Mode:                 feeds.EPSSMode,
-			SyncInterval:         feeds.EPSSInterval,
-			SupportsSyncInterval: true,
-			SupportsManualSync:   true,
-		}, true
-	case "nvd":
-		return FeedSettings{
-			Name:                 "nvd",
-			DisplayName:          "NVD",
-			Enabled:              feeds.NVDEnabled,
-			Mode:                 feeds.NVDMode,
-			SyncInterval:         feeds.NVDInterval,
-			APIKey:               feeds.NVDAPIKey,
-			RequiresAPIKey:       false,
-			SupportsAPIKey:       true,
-			SupportsSyncInterval: true,
-			SupportsManualSync:   true,
-		}, true
-	case "endoflife":
-		return FeedSettings{
-			Name:                 "endoflife",
-			DisplayName:          "endoflife.date",
-			Enabled:              feeds.EndOfLifeEnabled,
-			Mode:                 feeds.EndOfLifeMode,
-			SyncInterval:         feeds.EndOfLifeInterval,
-			SupportsSyncInterval: true,
-			SupportsManualSync:   true,
-		}, true
-	case "socket":
-		return FeedSettings{
-			Name:                 "socket",
-			DisplayName:          "Socket.dev",
-			Enabled:              feeds.SocketEnabled,
-			Mode:                 feeds.SocketMode,
-			APIKey:               feeds.SocketAPIKey,
-			RequiresAPIKey:       true,
-			SupportsAPIKey:       true,
-			SupportsSyncInterval: false,
-		}, true
-	case "reversinglabs":
-		return FeedSettings{
-			Name:                 "reversinglabs",
-			DisplayName:          "ReversingLabs",
-			Enabled:              feeds.ReversingLabsEnabled,
-			Mode:                 feeds.ReversingLabsMode,
-			APIKey:               feeds.ReversingLabsAPIKey,
-			RequiresAPIKey:       true,
-			SupportsAPIKey:       true,
-			SupportsSyncInterval: false,
-		}, true
-	default:
+	descriptor, ok := lookupFeedDescriptor(name)
+	if !ok {
 		return FeedSettings{}, false
 	}
+	return descriptor.settings(feeds), true
 }
 
 // FeedSettingsList returns all known feeds in UI/runtime order.
@@ -219,13 +293,10 @@ func (c *Config) FeedSettingsList() []FeedSettings {
 		return nil
 	}
 
-	names := []string{"osv", "ghsa", "openssf", "vulncheck", "cisakev", "epss", "nvd", "endoflife", "socket", "reversinglabs"}
-	out := make([]FeedSettings, 0, len(names))
-	for _, name := range names {
-		feed, ok := c.FeedSettings(name)
-		if ok {
-			out = append(out, feed)
-		}
+	feeds := c.FeedsSnapshot()
+	out := make([]FeedSettings, 0, len(feedDescriptors))
+	for _, descriptor := range feedDescriptors {
+		out = append(out, descriptor.settings(feeds))
 	}
 	return out
 }
@@ -254,18 +325,17 @@ func validateFeedSettings(feed FeedSettings) (FeedMode, error) {
 		return "", err
 	}
 	name := NormalizeFeedName(feed.Name)
-	switch name {
-	case "osv", "ghsa", "openssf", "vulncheck", "cisakev", "epss", "nvd", "endoflife", "socket", "reversinglabs":
-		if mode == FeedModeExternal && !FeedSupportsExternalMode(name) {
-			return "", fmt.Errorf("%s does not support external mode", name)
-		}
-		if mode == FeedModeSelf && feedSupportsSyncInterval(name) && feed.SyncInterval > 0 && feed.SyncInterval < FeedSyncMinInterval {
-			return "", fmt.Errorf("%s sync interval must be at least %s", name, FeedSyncMinInterval)
-		}
-		return mode, nil
-	default:
+	descriptor, ok := lookupFeedDescriptor(name)
+	if !ok {
 		return "", fmt.Errorf("unknown feed %q", feed.Name)
 	}
+	if mode == FeedModeExternal && !descriptor.SupportsExternalMode {
+		return "", fmt.Errorf("%s does not support external mode", name)
+	}
+	if mode == FeedModeSelf && descriptor.SupportsSyncInterval && feed.SyncInterval > 0 && feed.SyncInterval < FeedSyncMinInterval {
+		return "", fmt.Errorf("%s sync interval must be at least %s", name, FeedSyncMinInterval)
+	}
+	return mode, nil
 }
 
 // SetFeedSettings mutates the config for one feed.
@@ -322,9 +392,18 @@ func (c *Config) SetFeedSettings(feed FeedSettings) error {
 		c.Feeds.SocketMode = mode
 		c.Feeds.SocketAPIKey = strings.TrimSpace(feed.APIKey)
 	case "reversinglabs":
+		apiKey := strings.TrimSpace(feed.APIKey)
+		baseURL := strings.TrimSpace(c.Feeds.ReversingLabsBaseURL)
+		if baseURL == "" {
+			baseURL = reversingLabsDefaultBaseURL
+		}
+		if err := validateReversingLabsBaseURL(apiKey, baseURL); err != nil {
+			return err
+		}
 		c.Feeds.ReversingLabsEnabled = feed.Enabled
 		c.Feeds.ReversingLabsMode = FeedModeSelf
-		c.Feeds.ReversingLabsAPIKey = strings.TrimSpace(feed.APIKey)
+		c.Feeds.ReversingLabsAPIKey = apiKey
+		c.Feeds.ReversingLabsBaseURL = baseURL
 	default:
 		return fmt.Errorf("unknown feed %q", feed.Name)
 	}

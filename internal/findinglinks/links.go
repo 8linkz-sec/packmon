@@ -10,11 +10,15 @@ import (
 	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
+// Link is a clickable advisory or resource link prepared for CLI and web
+// rendering.
 type Link struct {
 	Label string
 	URL   string
 }
 
+// VulnerabilityReference is one raw advisory reference entry as stored from
+// vulnerability feed metadata.
 type VulnerabilityReference struct {
 	Type string `json:"type"`
 	URL  string `json:"url"`
@@ -25,8 +29,86 @@ type resourceCandidate struct {
 	score int
 }
 
+type vulnerabilityResourceContext struct {
+	advisoryID     string
+	ref            VulnerabilityReference
+	safeURL        string
+	host           string
+	path           string
+	parsed         *url.URL
+	genericLanding bool
+}
+
+type vulnerabilityResourceRule struct {
+	label               string
+	allowGenericLanding bool
+	matches             func(vulnerabilityResourceContext) bool
+	score               func(vulnerabilityResourceContext) int
+}
+
 var ghsaIDPattern = regexp.MustCompile(`GHSA-[A-Za-z0-9-]+`)
 
+var vulnerabilityResourceRules = []vulnerabilityResourceRule{
+	{
+		label:               "VulnCheck",
+		allowGenericLanding: true,
+		matches: func(ctx vulnerabilityResourceContext) bool {
+			return strings.EqualFold(strings.TrimSpace(ctx.ref.Type), "VULNCHECK")
+		},
+	},
+	{
+		label: "GHSA",
+		matches: func(ctx vulnerabilityResourceContext) bool {
+			return ctx.host == "github.com" && strings.Contains(ctx.path, "/security/advisories/")
+		},
+		score: func(ctx vulnerabilityResourceContext) int {
+			if ghsaID := ghsaIDPattern.FindString(ctx.safeURL); strings.EqualFold(ghsaID, ctx.advisoryID) {
+				return 0
+			}
+			return 10
+		},
+	},
+	{
+		label: "NVD",
+		matches: func(ctx vulnerabilityResourceContext) bool {
+			return ctx.host == "nvd.nist.gov"
+		},
+	},
+	{
+		label: "RustSec",
+		matches: func(ctx vulnerabilityResourceContext) bool {
+			return ctx.host == "rustsec.org" && strings.Contains(ctx.path, "/advisories/")
+		},
+	},
+	{
+		label: "OSV",
+		matches: func(ctx vulnerabilityResourceContext) bool {
+			return ctx.host == "osv.dev"
+		},
+	},
+	{
+		label: "Huntr",
+		matches: func(ctx vulnerabilityResourceContext) bool {
+			return ctx.host == "huntr.com" || ctx.host == "huntr.dev"
+		},
+	},
+	{
+		label: "CVE",
+		matches: func(ctx vulnerabilityResourceContext) bool {
+			return ctx.host == "cve.org" || ctx.host == "cve.mitre.org"
+		},
+	},
+	{
+		label: "GitHub",
+		matches: func(ctx vulnerabilityResourceContext) bool {
+			return ctx.host == "github.com"
+		},
+	},
+}
+
+// AdvisoryLabel returns the concise label shown for a finding's primary
+// advisory. It prefers the advisory ID and falls back to stable type labels for
+// malware, supply-chain risk, and lifecycle findings.
 func AdvisoryLabel(f domain.Finding) string {
 	if strings.TrimSpace(f.AdvisoryID) != "" {
 		return f.AdvisoryID
@@ -35,7 +117,7 @@ func AdvisoryLabel(f domain.Finding) string {
 	case domain.FindingTypeMalicious:
 		return "MALWARE"
 	case domain.FindingTypeSupplyChainRisk:
-		if strings.EqualFold(strings.TrimSpace(f.RiskType), "malware_history") {
+		if strings.EqualFold(strings.TrimSpace(f.RiskType), domain.RiskTypeMalwareHistory) {
 			return "MALWARE-HISTORY"
 		}
 		return "SUPPLY-CHAIN"
@@ -46,6 +128,9 @@ func AdvisoryLabel(f domain.Finding) string {
 	}
 }
 
+// AdvisoryURL returns the preferred safe advisory URL for a finding.
+// Canonical GHSA, CVE/NVD, and RustSec links outrank stored feed URLs; package
+// reputation findings prefer the secure.software package page when available.
 func AdvisoryURL(f domain.Finding) string {
 	advisoryID := strings.TrimSpace(f.AdvisoryID)
 	advisoryIDUpper := strings.ToUpper(advisoryID)
@@ -76,6 +161,8 @@ func AdvisoryURL(f domain.Finding) string {
 	return ""
 }
 
+// FindingLinks splits a finding's stored URLs into clickable safe HTTP(S) links
+// and plain-text values that should be displayed but not linked.
 func FindingLinks(f domain.Finding) (links []Link, plain []string) {
 	add := func(label, raw string) {
 		raw = strings.TrimSpace(raw)
@@ -101,6 +188,8 @@ func FindingLinks(f domain.Finding) (links []Link, plain []string) {
 	return links, plain
 }
 
+// SafeHTTPURL returns raw when it is an absolute HTTP(S) URL with a host.
+// Non-HTTP(S), relative, malformed, or hostless values are rejected.
 func SafeHTTPURL(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -119,6 +208,8 @@ func SafeHTTPURL(raw string) string {
 	return raw
 }
 
+// SecureSoftwarePackageURL returns the ReversingLabs secure.software package
+// page for an ecosystem/name pair, or empty when either value is missing.
 func SecureSoftwarePackageURL(ecosystem domain.Ecosystem, name string) string {
 	ecosystemValue := strings.TrimSpace(string(ecosystem))
 	name = strings.TrimSpace(name)
@@ -128,6 +219,10 @@ func SecureSoftwarePackageURL(ecosystem domain.Ecosystem, name string) string {
 	return "https://secure.software/" + url.PathEscape(ecosystemValue) + "/packages/" + url.PathEscape(name)
 }
 
+// ResourceLinksFromVulnerabilityReferences parses feed reference JSON and
+// returns ranked, deduplicated resource links. Canonical advisory links are
+// seeded first, blocked hosts and generic landing pages are dropped, and lower
+// scores win when multiple URLs map to the same label.
 func ResourceLinksFromVulnerabilityReferences(advisoryID, raw string) []domain.ResourceLink {
 	selected := make(map[string]resourceCandidate)
 	if link, score, ok := CanonicalVulnerabilityResource(advisoryID); ok {
@@ -182,6 +277,8 @@ func sortedResourceCandidates(selected map[string]resourceCandidate) []domain.Re
 	return out
 }
 
+// CanonicalVulnerabilityResource returns the canonical GHSA, RustSec, or NVD
+// resource link for known advisory ID prefixes.
 func CanonicalVulnerabilityResource(advisoryID string) (domain.ResourceLink, int, bool) {
 	switch {
 	case strings.HasPrefix(advisoryID, "GHSA-"):
@@ -195,21 +292,27 @@ func CanonicalVulnerabilityResource(advisoryID string) (domain.ResourceLink, int
 	}
 }
 
+// ClassifyVulnerabilityResource converts one feed reference into a display
+// resource link and ranking score. It accepts only safe HTTP(S) URLs, rejects
+// blocked hosts, package-only references, and generic landing pages, and assigns
+// provider labels such as GHSA, NVD, RustSec, OSV, Huntr, CVE, or GitHub.
 func ClassifyVulnerabilityResource(advisoryID string, ref VulnerabilityReference) (domain.ResourceLink, int, bool) {
-	if strings.TrimSpace(ref.URL) == "" {
+	return classifyVulnerabilityResourceWithRules(advisoryID, ref, vulnerabilityResourceRules)
+}
+
+func classifyVulnerabilityResourceWithRules(advisoryID string, ref VulnerabilityReference, rules []vulnerabilityResourceRule) (domain.ResourceLink, int, bool) {
+	safeURL := SafeHTTPURL(ref.URL)
+	if safeURL == "" {
 		return domain.ResourceLink{}, 0, false
 	}
-	if !ShouldStoreVulnerabilityReference(ref.URL) {
+	if !ShouldStoreVulnerabilityReference(safeURL) {
 		return domain.ResourceLink{}, 0, false
 	}
 	if strings.EqualFold(strings.TrimSpace(ref.Type), "PACKAGE") {
 		return domain.ResourceLink{}, 0, false
 	}
-	if strings.EqualFold(strings.TrimSpace(ref.Type), "VULNCHECK") {
-		return domain.ResourceLink{Label: "VulnCheck", URL: ref.URL}, ResourceScore(advisoryID, "VulnCheck"), true
-	}
 
-	parsed, err := url.Parse(ref.URL)
+	parsed, err := url.Parse(safeURL)
 	if err != nil {
 		return domain.ResourceLink{}, 0, false
 	}
@@ -218,37 +321,52 @@ func ClassifyVulnerabilityResource(advisoryID string, ref VulnerabilityReference
 	if host == "" {
 		return domain.ResourceLink{}, 0, false
 	}
-	if isGenericReferenceLandingPage(host, parsed) {
+	if IsBlockedReferenceHost(host) {
 		return domain.ResourceLink{}, 0, false
 	}
-	path := strings.ToLower(parsed.EscapedPath())
 
-	switch {
-	case IsBlockedReferenceHost(host):
-		return domain.ResourceLink{}, 0, false
-	case host == "github.com" && strings.Contains(path, "/security/advisories/"):
-		score := 10
-		if ghsaID := ghsaIDPattern.FindString(ref.URL); strings.EqualFold(ghsaID, advisoryID) {
-			score = 0
-		}
-		return domain.ResourceLink{Label: "GHSA", URL: ref.URL}, score, true
-	case host == "nvd.nist.gov":
-		return domain.ResourceLink{Label: "NVD", URL: ref.URL}, ResourceScore(advisoryID, "NVD"), true
-	case host == "rustsec.org" && strings.Contains(path, "/advisories/"):
-		return domain.ResourceLink{Label: "RustSec", URL: ref.URL}, ResourceScore(advisoryID, "RustSec"), true
-	case host == "osv.dev":
-		return domain.ResourceLink{Label: "OSV", URL: ref.URL}, ResourceScore(advisoryID, "OSV"), true
-	case host == "huntr.com" || host == "huntr.dev":
-		return domain.ResourceLink{Label: "Huntr", URL: ref.URL}, ResourceScore(advisoryID, "Huntr"), true
-	case host == "cve.org" || host == "cve.mitre.org":
-		return domain.ResourceLink{Label: "CVE", URL: ref.URL}, ResourceScore(advisoryID, "CVE"), true
-	case host == "github.com":
-		return domain.ResourceLink{Label: "GitHub", URL: ref.URL}, ResourceScore(advisoryID, "GitHub"), true
-	default:
-		return domain.ResourceLink{Label: host, URL: ref.URL}, ResourceScore(advisoryID, host), true
+	ctx := vulnerabilityResourceContext{
+		advisoryID:     advisoryID,
+		ref:            ref,
+		safeURL:        safeURL,
+		host:           host,
+		path:           strings.ToLower(parsed.EscapedPath()),
+		parsed:         parsed,
+		genericLanding: isGenericReferenceLandingPage(host, parsed),
 	}
+	if link, score, ok := matchVulnerabilityResourceRule(ctx, rules); ok {
+		return link, score, true
+	}
+	if ctx.genericLanding {
+		return domain.ResourceLink{}, 0, false
+	}
+
+	return domain.ResourceLink{Label: host, URL: safeURL}, ResourceScore(advisoryID, host), true
 }
 
+func matchVulnerabilityResourceRule(ctx vulnerabilityResourceContext, rules []vulnerabilityResourceRule) (domain.ResourceLink, int, bool) {
+	for _, rule := range rules {
+		if rule.matches == nil {
+			continue
+		}
+		if ctx.genericLanding && !rule.allowGenericLanding {
+			continue
+		}
+		if !rule.matches(ctx) {
+			continue
+		}
+
+		score := ResourceScore(ctx.advisoryID, rule.label)
+		if rule.score != nil {
+			score = rule.score(ctx)
+		}
+		return domain.ResourceLink{Label: rule.label, URL: ctx.safeURL}, score, true
+	}
+
+	return domain.ResourceLink{}, 0, false
+}
+
+// ResourceLinkFromURL classifies a single URL without an advisory preference.
 func ResourceLinkFromURL(raw string) domain.ResourceLink {
 	link, _, ok := ClassifyVulnerabilityResource("", VulnerabilityReference{URL: raw})
 	if !ok {
@@ -257,6 +375,8 @@ func ResourceLinkFromURL(raw string) domain.ResourceLink {
 	return link
 }
 
+// FirstSafeHTTPURLFromJSON returns the first safe HTTP(S) URL in a JSON string
+// array, or empty for invalid JSON or unsupported URL values.
 func FirstSafeHTTPURLFromJSON(raw string) string {
 	if strings.TrimSpace(raw) == "" {
 		return ""
@@ -273,6 +393,10 @@ func FirstSafeHTTPURLFromJSON(raw string) string {
 	return ""
 }
 
+// ShouldStoreVulnerabilityReference reports whether a raw vulnerability
+// reference should be persisted for later display. It blocks known noisy or
+// unsafe reference hosts while leaving unparsable values available for
+// conservative caller handling.
 func ShouldStoreVulnerabilityReference(rawURL string) bool {
 	rawURL = strings.TrimSpace(rawURL)
 	if rawURL == "" {
@@ -311,6 +435,8 @@ func isGenericReferenceLandingPage(host string, parsed *url.URL) bool {
 	return false
 }
 
+// IsBlockedReferenceHost reports whether host is excluded from stored or
+// clickable vulnerability resource links.
 func IsBlockedReferenceHost(host string) bool {
 	switch host {
 	case "packetstormsecurity.com", "packetstorm.news":
@@ -320,6 +446,9 @@ func IsBlockedReferenceHost(host string) bool {
 	}
 }
 
+// ResourceScore ranks resource labels for a given advisory ID. Lower scores are
+// better; the canonical provider for the advisory prefix receives the strongest
+// preference, followed by common vulnerability databases and source links.
 func ResourceScore(advisoryID, label string) int {
 	preferred := ""
 	switch {

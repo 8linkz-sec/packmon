@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/8linkz-sec/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/packageid"
 )
 
 // NuGetParser parses packages.lock.json files (NuGet/.NET ecosystem).
@@ -63,7 +64,8 @@ func (p *NuGetParser) Parse(r io.Reader) ([]domain.Package, error) {
 
 	for framework, deps := range lockFile.Dependencies {
 		for name, entry := range deps {
-			if name == "" {
+			canonicalName := packageid.NormalizeName(string(domain.EcosystemNuGet), name)
+			if canonicalName == "" {
 				errs = append(errs, fmt.Sprintf("framework %s: empty package name", framework))
 				continue
 			}
@@ -75,14 +77,14 @@ func (p *NuGetParser) Parse(r io.Reader) ([]domain.Package, error) {
 				continue
 			}
 
-			key := pkgKey{name: strings.ToLower(name), version: entry.Resolved}
+			key := pkgKey{name: canonicalName, version: entry.Resolved}
 			if _, exists := seen[key]; exists {
 				continue
 			}
 			seen[key] = struct{}{}
 
 			packages = append(packages, domain.Package{
-				Name:      name,
+				Name:      canonicalName,
 				Version:   entry.Resolved,
 				Ecosystem: domain.EcosystemNuGet,
 			})

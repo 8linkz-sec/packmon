@@ -94,6 +94,50 @@ func TestSwiftPMParser_Parse(t *testing.T) {
 			},
 		},
 		{
+			name: "v1 branch-only pin skipped",
+			input: `{
+				"version": 1,
+				"object": {
+					"pins": [
+						{
+							"package": "BranchDep",
+							"repositoryURL": "https://example.com/branch-dep.git",
+							"state": {"revision": "abc123", "branch": "main"}
+						},
+						{
+							"package": "VersionedDep",
+							"repositoryURL": "https://example.com/versioned-dep.git",
+							"state": {"version": "1.2.3", "revision": "def456", "branch": null}
+						}
+					]
+				}
+			}`,
+			wantCount: 1,
+			wantPkgs:  map[string]string{"example.com/versioned-dep": "1.2.3"},
+		},
+		{
+			name: "v1 revision-only pin skipped",
+			input: `{
+				"version": 1,
+				"object": {
+					"pins": [
+						{
+							"package": "RevisionDep",
+							"repositoryURL": "https://example.com/revision-dep.git",
+							"state": {"revision": "abc123"}
+						},
+						{
+							"package": "VersionedDep",
+							"repositoryURL": "https://example.com/versioned-dep.git",
+							"state": {"version": "1.2.3", "revision": "def456", "branch": null}
+						}
+					]
+				}
+			}`,
+			wantCount: 1,
+			wantPkgs:  map[string]string{"example.com/versioned-dep": "1.2.3"},
+		},
+		{
 			name: "v3 format (same as v2)",
 			input: `{
 				"version": 3,
@@ -282,5 +326,186 @@ func TestSwiftPMParserRedactsRepositoryURLsInErrors(t *testing.T) {
 	}
 	if !strings.Contains(msg, "ssh://internal-host/...") {
 		t.Fatalf("SwiftPM parse error = %q, want redacted URL host", msg)
+	}
+}
+
+func TestSwiftPMParserV1RedactsRepositoryURLsInErrors(t *testing.T) {
+	//nolint:gosec // fake credential-bearing URL verifies redaction.
+	input := `{
+		"version": 1,
+		"object": {
+			"pins": [
+				{
+					"package": "",
+					"repositoryURL": "ssh://user:token@internal-host/org/private-lib.git",
+					"state": {"version": "1.2.3", "revision": "abc", "branch": null}
+				}
+			]
+		}
+	}`
+
+	pkgs, err := NewSwiftPMParser().Parse(strings.NewReader(input))
+	if err == nil {
+		t.Fatal("Parse() error = nil, want redacted skipped-entry error")
+	}
+	if len(pkgs) != 0 {
+		t.Fatalf("Parse() returned %d packages, want 0", len(pkgs))
+	}
+	msg := err.Error()
+	for _, want := range []string{"swiftpm v1", "empty package name", "ssh://internal-host/..."} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("SwiftPM parse error = %q, want %q", msg, want)
+		}
+	}
+	for _, leaked := range []string{"user:token", "internal-host/org/private-lib", "private-lib.git"} {
+		if strings.Contains(msg, leaked) {
+			t.Fatalf("SwiftPM parse error leaked %q in %q", leaked, msg)
+		}
+	}
+}
+
+func TestSwiftPMParserLocalPathsUseFallbackIdentity(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    string
+		wantName string
+		wantVer  string
+	}{
+		{
+			name: "v2 relative local path",
+			input: `{
+				"version": 2,
+				"pins": [
+					{
+						"identity": "local-helper",
+						"location": "../Private/LocalHelper",
+						"state": {"version": "1.2.3", "revision": "abc"}
+					}
+				]
+			}`,
+			wantName: "local-helper",
+			wantVer:  "1.2.3",
+		},
+		{
+			name: "v1 absolute local path",
+			input: `{
+				"version": 1,
+				"object": {
+					"pins": [
+						{
+							"package": "LocalHelper",
+							"repositoryURL": "/Users/alice/Private/LocalHelper",
+							"state": {"version": "2.3.4", "revision": "def", "branch": null}
+						}
+					]
+				}
+			}`,
+			wantName: "LocalHelper",
+			wantVer:  "2.3.4",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			pkgs, err := NewSwiftPMParser().Parse(strings.NewReader(tt.input))
+			if err != nil {
+				t.Fatalf("Parse() error = %v, want nil", err)
+			}
+			if len(pkgs) != 1 {
+				t.Fatalf("Parse() returned %d packages, want 1", len(pkgs))
+			}
+			if pkgs[0].Name != tt.wantName {
+				t.Fatalf("Parse() package name = %q, want %q", pkgs[0].Name, tt.wantName)
+			}
+			if pkgs[0].Version != tt.wantVer {
+				t.Fatalf("Parse() package version = %q, want %q", pkgs[0].Version, tt.wantVer)
+			}
+		})
+	}
+}
+
+func TestSwiftPMParserLocalPathsRedactedInErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    string
+		leaked   []string
+		wantHint string
+	}{
+		{
+			name: "v2 relative local path",
+			input: `{
+				"version": 2,
+				"pins": [
+					{
+						"identity": "",
+						"location": "../Private/LocalHelper",
+						"state": {"version": "1.2.3", "revision": "abc"}
+					}
+				]
+			}`,
+			leaked:   []string{"../Private/LocalHelper", "Private", "LocalHelper"},
+			wantHint: "<redacted>",
+		},
+		{
+			name: "v1 absolute local path",
+			input: `{
+				"version": 1,
+				"object": {
+					"pins": [
+						{
+							"package": "",
+							"repositoryURL": "/Users/alice/Private/LocalHelper",
+							"state": {"version": "2.3.4", "revision": "def", "branch": null}
+						}
+					]
+				}
+			}`,
+			leaked:   []string{"/Users/alice/Private/LocalHelper", "alice", "Private", "LocalHelper"},
+			wantHint: "<redacted>",
+		},
+		{
+			name: "v2 file URL with path-like identity",
+			input: `{
+				"version": 2,
+				"pins": [
+					{
+						"identity": "../Private/LocalHelper",
+						"location": "file:///Users/alice/Private/LocalHelper",
+						"state": {"version": "3.4.5", "revision": "ghi"}
+					}
+				]
+			}`,
+			leaked:   []string{"/Users/alice/Private/LocalHelper", "alice", "Private", "LocalHelper"},
+			wantHint: "file://...",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			pkgs, err := NewSwiftPMParser().Parse(strings.NewReader(tt.input))
+			if err == nil {
+				t.Fatal("Parse() error = nil, want redacted skipped-entry error")
+			}
+			if len(pkgs) != 0 {
+				t.Fatalf("Parse() returned %d packages, want 0", len(pkgs))
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, tt.wantHint) {
+				t.Fatalf("SwiftPM parse error = %q, want %q", msg, tt.wantHint)
+			}
+			for _, leaked := range tt.leaked {
+				if strings.Contains(msg, leaked) {
+					t.Fatalf("SwiftPM parse error leaked %q in %q", leaked, msg)
+				}
+			}
+		})
 	}
 }

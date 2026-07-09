@@ -2,13 +2,16 @@ package postgres
 
 import (
 	"context"
-	"encoding/json"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"github.com/8linkz-sec/packmon/internal/ioutils"
 	"strings"
 	"time"
 
 	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/domain"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -16,7 +19,16 @@ func (s *Store) UpsertManualAdvisory(ctx context.Context, advisory *db.ManualAdv
 	if advisory == nil {
 		return nil
 	}
+	if _, err := normalizeManualAdvisoryID(advisory.ID); err != nil {
+		return err
+	}
+	if _, ok := domain.ParseManualAdvisoryFindingType(advisory.FindingType); !ok {
+		return fmt.Errorf("postgres: unsupported manual advisory finding type %q", advisory.FindingType)
+	}
 	return withTx(ctx, s.pool, func(tx pgx.Tx) error {
+		if err := acquireManualAdvisoryLockTx(ctx, tx, advisory.ID); err != nil {
+			return err
+		}
 		return upsertManualAdvisoryTx(ctx, tx, advisory)
 	})
 }
@@ -25,43 +37,79 @@ func (s *Store) UpsertManualAdvisoryWithAudit(ctx context.Context, advisory *db.
 	if advisory == nil {
 		return nil
 	}
+	if _, err := normalizeManualAdvisoryID(advisory.ID); err != nil {
+		return err
+	}
+	if _, ok := domain.ParseManualAdvisoryFindingType(advisory.FindingType); !ok {
+		return fmt.Errorf("postgres: unsupported manual advisory finding type %q", advisory.FindingType)
+	}
 	return withTx(ctx, s.pool, func(tx pgx.Tx) error {
+		if err := acquireManualAdvisoryLockTx(ctx, tx, advisory.ID); err != nil {
+			return err
+		}
+		if err := checkManualAdvisoryRevisionTx(ctx, tx, advisory); err != nil {
+			return err
+		}
 		if err := upsertManualAdvisoryTx(ctx, tx, advisory); err != nil {
 			return err
 		}
-		return insertAdminAuditLogTx(ctx, tx, audit)
+		if err := insertAdminAuditLogTx(ctx, tx, audit); err != nil {
+			return fmt.Errorf("%w: %v", db.ErrAdminAuditLog, err)
+		}
+		return nil
 	})
 }
 
 func upsertManualAdvisoryTx(ctx context.Context, tx pgx.Tx, advisory *db.ManualAdvisory) error {
-	switch normalizeManualAdvisoryType(advisory.FindingType) {
-	case "vulnerability":
-		if err := upsertVulnerabilityTx(ctx, tx, manualAdvisoryToVulnerability(advisory)); err != nil {
+	findingType, ok := domain.ParseManualAdvisoryFindingType(advisory.FindingType)
+	if !ok {
+		return fmt.Errorf("postgres: unsupported manual advisory finding type %q", advisory.FindingType)
+	}
+	switch findingType {
+	case domain.FindingTypeVulnerability:
+		if err := upsertVulnerabilityTx(ctx, tx, db.ManualAdvisoryToVulnerability(advisory)); err != nil {
 			return err
 		}
 		_, err := deleteManualMaliciousFindingTx(ctx, tx, advisory.ID)
 		return err
-	default:
-		if err := upsertMaliciousFindingTx(ctx, tx, manualAdvisoryToMaliciousFinding(advisory)); err != nil {
+	case domain.FindingTypeMalicious:
+		if err := upsertMaliciousFindingTx(ctx, tx, db.ManualAdvisoryToMaliciousFinding(advisory)); err != nil {
 			return err
 		}
 		_, err := deleteManualVulnerabilityTx(ctx, tx, advisory.ID)
 		return err
+	default:
+		return fmt.Errorf("postgres: unsupported manual advisory finding type %q", advisory.FindingType)
 	}
 }
 
 func (s *Store) DeleteManualAdvisory(ctx context.Context, id string) error {
+	if _, err := normalizeManualAdvisoryID(id); err != nil {
+		return err
+	}
 	return withTx(ctx, s.pool, func(tx pgx.Tx) error {
+		if err := acquireManualAdvisoryLockTx(ctx, tx, id); err != nil {
+			return err
+		}
 		return deleteManualAdvisoryTx(ctx, tx, id)
 	})
 }
 
 func (s *Store) DeleteManualAdvisoryWithAudit(ctx context.Context, id string, audit *db.AdminAuditEntry) error {
+	if _, err := normalizeManualAdvisoryID(id); err != nil {
+		return err
+	}
 	return withTx(ctx, s.pool, func(tx pgx.Tx) error {
+		if err := acquireManualAdvisoryLockTx(ctx, tx, id); err != nil {
+			return err
+		}
 		if err := deleteManualAdvisoryTx(ctx, tx, id); err != nil {
 			return err
 		}
-		return insertAdminAuditLogTx(ctx, tx, audit)
+		if err := insertAdminAuditLogTx(ctx, tx, audit); err != nil {
+			return fmt.Errorf("%w: %v", db.ErrAdminAuditLog, err)
+		}
+		return nil
 	})
 }
 
@@ -104,7 +152,7 @@ func (s *Store) ListManualAdvisoriesPage(ctx context.Context, limit, offset int)
 				COALESCE(description, '') AS description,
 				updated_at
 			FROM malicious_findings
-			WHERE source = 'manual' AND removed_at IS NULL
+			WHERE source = $3 AND removed_at IS NULL
 
 			UNION ALL
 
@@ -118,22 +166,21 @@ func (s *Store) ListManualAdvisoriesPage(ctx context.Context, limit, offset int)
 				v.summary,
 				COALESCE(v.details, '') AS description,
 				v.updated_at
-			FROM vulnerabilities v
+			FROM vulnerability_sources vs
+			INNER JOIN vulnerabilities v ON v.id = vs.vulnerability_id
 			INNER JOIN affected_packages ap ON ap.vulnerability_id = v.id
-			WHERE v.withdrawn IS NULL
-			  AND EXISTS (
-				SELECT 1 FROM vulnerability_sources vs
-				WHERE vs.vulnerability_id = v.id AND vs.source = 'manual'
-			)
+			WHERE vs.source = $3
+			  AND vs.raw_json IS NOT NULL
+			  AND v.withdrawn IS NULL
 		) manual
 		ORDER BY updated_at DESC, id DESC
 		LIMIT $1 OFFSET $2`
 
-	rows, err := s.pool.Query(ctx, query, limit, offset)
+	rows, err := s.pool.Query(ctx, query, limit, offset, domain.ManualAdvisorySource)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list manual advisories: %w", err)
 	}
-	defer closeSilently(rows)
+	defer ioutils.CloseSilently(rows)
 
 	out := make([]db.ManualAdvisory, 0)
 	for rows.Next() {
@@ -175,7 +222,7 @@ func (s *Store) GetManualAdvisory(ctx context.Context, id string) (*db.ManualAdv
 				COALESCE(description, '') AS description,
 				updated_at
 			FROM malicious_findings
-			WHERE source = 'manual' AND removed_at IS NULL
+			WHERE source = $2 AND removed_at IS NULL
 
 			UNION ALL
 
@@ -189,20 +236,19 @@ func (s *Store) GetManualAdvisory(ctx context.Context, id string) (*db.ManualAdv
 				v.summary,
 				COALESCE(v.details, '') AS description,
 				v.updated_at
-			FROM vulnerabilities v
+			FROM vulnerability_sources vs
+			INNER JOIN vulnerabilities v ON v.id = vs.vulnerability_id
 			INNER JOIN affected_packages ap ON ap.vulnerability_id = v.id
-			WHERE v.withdrawn IS NULL
-			  AND EXISTS (
-				SELECT 1 FROM vulnerability_sources vs
-				WHERE vs.vulnerability_id = v.id AND vs.source = 'manual'
-			)
+			WHERE vs.source = $2
+			  AND vs.raw_json IS NOT NULL
+			  AND v.withdrawn IS NULL
 		) manual
 		WHERE id = $1
 		ORDER BY updated_at DESC, id DESC
 		LIMIT 1`
 
 	var item db.ManualAdvisory
-	err := s.pool.QueryRow(ctx, query, id).Scan(
+	err := s.pool.QueryRow(ctx, query, id, domain.ManualAdvisorySource).Scan(
 		&item.FindingType,
 		&item.ID,
 		&item.Ecosystem,
@@ -228,7 +274,7 @@ func deleteManualMaliciousFindingTx(ctx context.Context, tx pgx.Tx, id string) (
 		UPDATE malicious_findings
 		SET removed_at = COALESCE(removed_at, NOW()),
 		    updated_at = NOW()
-		WHERE id = $1 AND source = 'manual' AND removed_at IS NULL`, id)
+		WHERE id = $1 AND source = $2 AND removed_at IS NULL`, id, domain.ManualAdvisorySource)
 	if err != nil {
 		return 0, fmt.Errorf("postgres: delete manual malicious finding %s: %w", id, err)
 	}
@@ -244,81 +290,73 @@ func deleteManualVulnerabilityTx(ctx context.Context, tx pgx.Tx, id string) (int
 		  AND v.withdrawn IS NULL
 		  AND EXISTS (
 			SELECT 1 FROM vulnerability_sources vs
-			WHERE vs.vulnerability_id = v.id AND vs.source = 'manual'
-		  )`, id)
+			WHERE vs.vulnerability_id = v.id
+			  AND vs.source = $2
+			  AND vs.raw_json IS NOT NULL
+		  )`, id, domain.ManualAdvisorySource)
 	if err != nil {
 		return 0, fmt.Errorf("postgres: delete manual vulnerability %s: %w", id, err)
 	}
 	return int(tag.RowsAffected()), nil
 }
 
-func normalizeManualAdvisoryType(raw string) string {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "vulnerability":
-		return "vulnerability"
-	default:
-		return "malicious"
+func acquireManualAdvisoryLockTx(ctx context.Context, tx pgx.Tx, id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil
 	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, manualAdvisoryLockKey(id)); err != nil {
+		return fmt.Errorf("postgres: acquire manual advisory lock %s: %w", id, err)
+	}
+	return nil
 }
 
-func manualAdvisoryToVulnerability(advisory *db.ManualAdvisory) *db.Vulnerability {
-	now := time.Now().UTC()
-	severity := strings.ToUpper(strings.TrimSpace(advisory.Severity))
-	if severity == "" {
-		severity = "UNKNOWN"
-	}
-	raw, _ := json.Marshal(map[string]string{
-		"finding_type": "vulnerability",
-		"created_by":   "admin",
-	})
-
-	id := strings.TrimSpace(advisory.ID)
-	return &db.Vulnerability{
-		ID:        id,
-		Summary:   strings.TrimSpace(advisory.Summary),
-		Details:   strings.TrimSpace(advisory.Description),
-		Severity:  severity,
-		Published: now,
-		Modified:  now,
-		Aliases: []db.VulnerabilityAlias{
-			{AliasID: id},
-		},
-		Sources: []db.VulnerabilitySource{
-			{
-				Source:   "manual",
-				SourceID: id,
-				RawJSON:  raw,
-			},
-		},
-		AffectedPackages: []db.AffectedPackage{
-			{
-				Ecosystem:        strings.TrimSpace(advisory.Ecosystem),
-				Name:             strings.TrimSpace(advisory.Name),
-				VersionRanges:    json.RawMessage("[]"),
-				VersionsAffected: json.RawMessage("[]"),
-			},
-		},
-	}
+func manualAdvisoryLockKey(id string) int64 {
+	sum := sha256.Sum256([]byte("packmon:manual_advisory:" + strings.TrimSpace(id)))
+	return int64(binary.BigEndian.Uint64(sum[:8]))
 }
 
-func manualAdvisoryToMaliciousFinding(advisory *db.ManualAdvisory) *db.MaliciousFinding {
-	riskType := strings.TrimSpace(advisory.RiskType)
-	if riskType == "" {
-		riskType = "other"
+func checkManualAdvisoryRevisionTx(ctx context.Context, tx pgx.Tx, advisory *db.ManualAdvisory) error {
+	if advisory == nil || advisory.UpdatedAt.IsZero() {
+		return nil
 	}
-	severity := strings.ToUpper(strings.TrimSpace(advisory.Severity))
-	if severity == "" {
-		severity = "CRITICAL"
+	current, found, err := getManualAdvisoryUpdatedAtTx(ctx, tx, advisory.ID)
+	if err != nil {
+		return err
 	}
-	return &db.MaliciousFinding{
-		ID:          strings.TrimSpace(advisory.ID),
-		Ecosystem:   strings.TrimSpace(advisory.Ecosystem),
-		Name:        strings.TrimSpace(advisory.Name),
-		Source:      "manual",
-		RiskType:    riskType,
-		Severity:    severity,
-		Summary:     strings.TrimSpace(advisory.Summary),
-		Description: strings.TrimSpace(advisory.Description),
-		CreatedBy:   "admin",
+	if !found || !current.Equal(advisory.UpdatedAt) {
+		return db.ErrConflict
 	}
+	return nil
+}
+
+func getManualAdvisoryUpdatedAtTx(ctx context.Context, tx pgx.Tx, id string) (time.Time, bool, error) {
+	const query = `
+		SELECT updated_at
+		FROM (
+			SELECT id, updated_at
+			FROM malicious_findings
+			WHERE source = $2 AND removed_at IS NULL
+
+			UNION ALL
+
+			SELECT v.id, v.updated_at
+			FROM vulnerability_sources vs
+			INNER JOIN vulnerabilities v ON v.id = vs.vulnerability_id
+			WHERE vs.source = $2
+			  AND vs.raw_json IS NOT NULL
+			  AND v.withdrawn IS NULL
+		) manual
+		WHERE id = $1
+		ORDER BY updated_at DESC, id DESC
+		LIMIT 1`
+	var updatedAt time.Time
+	err := tx.QueryRow(ctx, query, strings.TrimSpace(id), domain.ManualAdvisorySource).Scan(&updatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("postgres: get manual advisory revision %s: %w", id, err)
+	}
+	return updatedAt, true, nil
 }

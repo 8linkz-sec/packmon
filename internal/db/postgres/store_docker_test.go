@@ -8,8 +8,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/8linkz-sec/packmon/internal/ioutils"
 	"net"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -20,7 +22,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const postgresDockerTestImage = "cgr.dev/chainguard/postgres:latest@sha256:891139a6d9036632791857fb7585425f1bf0c64516fc52bc39da94305ee92461"
+const postgresDockerTestImage = "cgr.dev/chainguard/postgres:18@sha256:891139a6d9036632791857fb7585425f1bf0c64516fc52bc39da94305ee92461"
 
 func startDockerPostgresStore(t *testing.T) (*Store, string) {
 	t.Helper()
@@ -30,13 +32,12 @@ func startDockerPostgresStore(t *testing.T) (*Store, string) {
 	}
 
 	containerName := fmt.Sprintf("packmon-pg-unit-%d", time.Now().UnixNano())
-	port := freePostgresTestPort(t)
 	run := exec.Command("docker", "run", "-d", "--rm", // #nosec G204 -- test launches a fixed docker image with generated container name/port.
 		"--name", containerName,
 		"-e", "POSTGRES_DB=packmon",
 		"-e", "POSTGRES_USER=packmon",
 		"-e", "POSTGRES_PASSWORD=packmon",
-		"-p", fmt.Sprintf("%d:5432", port),
+		"-p", "127.0.0.1::5432",
 		postgresDockerTestImage,
 	)
 	out, err := run.Output()
@@ -51,6 +52,7 @@ func startDockerPostgresStore(t *testing.T) (*Store, string) {
 
 	waitForPostgresContainer(t, containerName)
 
+	port := dockerPostgresPublishedPort(t, containerName, "5432/tcp")
 	dsn := fmt.Sprintf("postgres://packmon:packmon@127.0.0.1:%d/packmon?sslmode=disable", port)
 	waitForPostgresDSN(t, dsn)
 	if err := migrations.Run(dsn); err != nil {
@@ -76,15 +78,26 @@ func startDockerPostgresStore(t *testing.T) (*Store, string) {
 	return store, dsn
 }
 
-func freePostgresTestPort(t *testing.T) int {
+func dockerPostgresPublishedPort(t *testing.T, containerName, containerPort string) int {
 	t.Helper()
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	out, err := exec.Command("docker", "port", containerName, containerPort).Output() // #nosec G204 -- test helper executes docker with fixed test-provided container name.
 	if err != nil {
-		t.Fatalf("listen free port: %v", err)
+		t.Fatalf("docker port %s %s: %v", containerName, containerPort, err)
 	}
-	defer func() { _ = listener.Close() }()
-	return listener.Addr().(*net.TCPAddr).Port
+	lines := strings.Fields(strings.TrimSpace(string(out)))
+	if len(lines) == 0 {
+		t.Fatalf("docker port %s %s returned no mapping", containerName, containerPort)
+	}
+	_, port, err := net.SplitHostPort(lines[len(lines)-1])
+	if err != nil {
+		t.Fatalf("parse docker port mapping %q: %v", lines[len(lines)-1], err)
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil {
+		t.Fatalf("parse docker host port %q: %v", port, err)
+	}
+	return n
 }
 
 func waitForPostgresContainer(t *testing.T, containerName string) {
@@ -122,6 +135,234 @@ func waitForPostgresDSN(t *testing.T, dsn string) {
 	t.Fatalf("postgres DSN did not become reachable")
 }
 
+func failingAdminAuditEntry(action string) *db.AdminAuditEntry {
+	return &db.AdminAuditEntry{
+		Action:  action,
+		Details: json.RawMessage(`{"forced":"audit_failure"}`),
+		IP:      "not-an-ip",
+	}
+}
+
+func requireAdminAuditFailure(t *testing.T, err error) {
+	t.Helper()
+	if !errors.Is(err, db.ErrAdminAuditLog) {
+		t.Fatalf("audited mutation error = %v, want ErrAdminAuditLog", err)
+	}
+}
+
+func requireNoAdminAuditRows(t *testing.T, store *Store, ctx context.Context) {
+	t.Helper()
+	audit, err := store.ListAdminAuditLog(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListAdminAuditLog() error = %v", err)
+	}
+	if len(audit) != 0 {
+		t.Fatalf("admin audit rows = %+v, want none after failed audited mutation", audit)
+	}
+}
+
+func apiKeyByID(t *testing.T, store *Store, ctx context.Context, keyID int) db.APIKey {
+	t.Helper()
+	keys, err := store.ListAPIKeys(ctx)
+	if err != nil {
+		t.Fatalf("ListAPIKeys() error = %v", err)
+	}
+	for _, key := range keys {
+		if key.ID == keyID {
+			return key
+		}
+	}
+	t.Fatalf("ListAPIKeys() missing key %d: %+v", keyID, keys)
+	return db.APIKey{}
+}
+
+func queueJobByID(t *testing.T, store *Store, ctx context.Context, jobID int) db.RefreshJob {
+	t.Helper()
+	jobs, err := store.ListQueueJobs(ctx, "", 200)
+	if err != nil {
+		t.Fatalf("ListQueueJobs() error = %v", err)
+	}
+	for _, job := range jobs {
+		if job.ID == jobID {
+			return job
+		}
+	}
+	t.Fatalf("ListQueueJobs() missing job %d: %+v", jobID, jobs)
+	return db.RefreshJob{}
+}
+
+func TestPostgresStoreAPIKeyDeleteScrubsLabelAndHashAgainstDocker(t *testing.T) {
+	store, _ := startDockerPostgresStore(t)
+	ctx := context.Background()
+
+	expiresAt := time.Now().UTC().Add(time.Hour)
+	keyID, err := store.CreateAPIKey(ctx, "operator-ci", "hash-operator-ci", &expiresAt)
+	if err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+	if err := store.RevokeAPIKey(ctx, keyID); err != nil {
+		t.Fatalf("RevokeAPIKey() error = %v", err)
+	}
+	if err := store.DeleteAPIKey(ctx, keyID); err != nil {
+		t.Fatalf("DeleteAPIKey() error = %v", err)
+	}
+
+	keys, err := store.ListAPIKeys(ctx)
+	if err != nil {
+		t.Fatalf("ListAPIKeys() error = %v", err)
+	}
+	if len(keys) != 1 {
+		t.Fatalf("ListAPIKeys() = %+v, want one deleted key", keys)
+	}
+	key := keys[0]
+	if key.Name != "" || key.KeyHash != fmt.Sprintf("deleted:%d", keyID) {
+		t.Fatalf("deleted API key = %+v, want label scrubbed and tombstone hash", key)
+	}
+	if key.CreatedAt.IsZero() || key.ExpiresAt == nil || key.RevokedAt == nil || key.DeletedAt == nil {
+		t.Fatalf("deleted API key = %+v, want lifecycle timestamps retained", key)
+	}
+	if found, err := store.FindAPIKeyByHash(ctx, "hash-operator-ci"); err != nil || found != nil {
+		t.Fatalf("FindAPIKeyByHash(old hash) = %+v, %v; want nil, nil", found, err)
+	}
+}
+
+func TestAdminAuditedAPIKeyAndPasswordWritesRollBackOnAuditFailure(t *testing.T) {
+	store, _ := startDockerPostgresStore(t)
+	ctx := context.Background()
+	expiresAt := time.Now().UTC().Add(time.Hour)
+
+	if _, err := store.CreateAPIKeyWithAudit(ctx, "create-rollback", "hash-create-rollback", &expiresAt, failingAdminAuditEntry("api_key_create")); err == nil {
+		t.Fatal("CreateAPIKeyWithAudit() error = nil, want audit failure")
+	} else {
+		requireAdminAuditFailure(t, err)
+	}
+	if key, err := store.FindAPIKeyByHash(ctx, "hash-create-rollback"); err != nil || key != nil {
+		t.Fatalf("FindAPIKeyByHash(after failed create) = %+v, %v; want nil, nil", key, err)
+	}
+	if keys, err := store.ListAPIKeys(ctx); err != nil || len(keys) != 0 {
+		t.Fatalf("ListAPIKeys(after failed create) = %+v, %v; want no keys", keys, err)
+	}
+
+	keyID, err := store.CreateAPIKey(ctx, "rollback-key", "hash-rollback-key", &expiresAt)
+	if err != nil {
+		t.Fatalf("CreateAPIKey(base) error = %v", err)
+	}
+	err = store.RevokeAPIKeyWithAudit(ctx, keyID, failingAdminAuditEntry("api_key_revoke"))
+	requireAdminAuditFailure(t, err)
+	key := apiKeyByID(t, store, ctx, keyID)
+	if key.RevokedAt != nil || key.DeletedAt != nil || key.Name != "rollback-key" || key.KeyHash != "hash-rollback-key" {
+		t.Fatalf("API key after failed audited revoke = %+v, want active original key", key)
+	}
+
+	if err := store.RevokeAPIKey(ctx, keyID); err != nil {
+		t.Fatalf("RevokeAPIKey(base) error = %v", err)
+	}
+	err = store.DeleteAPIKeyWithAudit(ctx, keyID, failingAdminAuditEntry("api_key_delete"))
+	requireAdminAuditFailure(t, err)
+	key = apiKeyByID(t, store, ctx, keyID)
+	if key.RevokedAt == nil || key.DeletedAt != nil || key.Name != "rollback-key" || key.KeyHash != "hash-rollback-key" {
+		t.Fatalf("API key after failed audited delete = %+v, want revoked unscrubbed key", key)
+	}
+
+	if err := store.UpsertAdminAuth(ctx, "hash-original", true); err != nil {
+		t.Fatalf("UpsertAdminAuth(base) error = %v", err)
+	}
+	err = store.UpsertAdminAuthWithAudit(ctx, "hash-upserted", false, failingAdminAuditEntry("admin_password_bootstrap"))
+	requireAdminAuditFailure(t, err)
+	auth, err := store.GetAdminAuth(ctx)
+	if err != nil {
+		t.Fatalf("GetAdminAuth(after failed audited upsert) error = %v", err)
+	}
+	if auth == nil || auth.PasswordHash != "hash-original" || !auth.PasswordIsBootstrap {
+		t.Fatalf("admin auth after failed audited upsert = %+v, want original bootstrap hash", auth)
+	}
+
+	err = store.ChangeAdminPasswordWithAudit(ctx, "hash-changed", "hash-original", failingAdminAuditEntry("admin_password_change"))
+	requireAdminAuditFailure(t, err)
+	auth, err = store.GetAdminAuth(ctx)
+	if err != nil {
+		t.Fatalf("GetAdminAuth(after failed audited change) error = %v", err)
+	}
+	if auth == nil || auth.PasswordHash != "hash-original" || !auth.PasswordIsBootstrap {
+		t.Fatalf("admin auth after failed audited password change = %+v, want original bootstrap hash", auth)
+	}
+	requireNoAdminAuditRows(t, store, ctx)
+}
+
+func TestPostgresStorePrunesDeletedAPIKeysAgainstDocker(t *testing.T) {
+	store, _ := startDockerPostgresStore(t)
+	ctx := context.Background()
+
+	activeID, err := store.CreateAPIKey(ctx, "active", "hash-active", nil)
+	if err != nil {
+		t.Fatalf("CreateAPIKey(active) error = %v", err)
+	}
+	revokedID, err := store.CreateAPIKey(ctx, "revoked", "hash-revoked", nil)
+	if err != nil {
+		t.Fatalf("CreateAPIKey(revoked) error = %v", err)
+	}
+	oldDeletedID, err := store.CreateAPIKey(ctx, "old-deleted", "hash-old", nil)
+	if err != nil {
+		t.Fatalf("CreateAPIKey(old-deleted) error = %v", err)
+	}
+	recentDeletedID, err := store.CreateAPIKey(ctx, "recent-deleted", "hash-recent", nil)
+	if err != nil {
+		t.Fatalf("CreateAPIKey(recent-deleted) error = %v", err)
+	}
+	for _, keyID := range []int{revokedID, oldDeletedID, recentDeletedID} {
+		if err := store.RevokeAPIKey(ctx, keyID); err != nil {
+			t.Fatalf("RevokeAPIKey(%d) error = %v", keyID, err)
+		}
+	}
+	for _, keyID := range []int{oldDeletedID, recentDeletedID} {
+		if err := store.DeleteAPIKey(ctx, keyID); err != nil {
+			t.Fatalf("DeleteAPIKey(%d) error = %v", keyID, err)
+		}
+	}
+
+	oldDeletedAt := time.Now().UTC().Add(-48 * time.Hour)
+	recentDeletedAt := time.Now().UTC().Add(-time.Hour)
+	if _, err := store.pool.Exec(ctx, `
+		UPDATE api_keys
+		SET deleted_at = CASE id
+			WHEN $1 THEN $3
+			WHEN $2 THEN $4
+			ELSE deleted_at
+		END
+		WHERE id IN ($1, $2)`,
+		oldDeletedID, recentDeletedID, oldDeletedAt, recentDeletedAt); err != nil {
+		t.Fatalf("age deleted API keys: %v", err)
+	}
+
+	pruned, err := store.PruneDeletedAPIKeys(ctx, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("PruneDeletedAPIKeys() error = %v", err)
+	}
+	if pruned != 1 {
+		t.Fatalf("PruneDeletedAPIKeys() = %d, want only old soft-deleted key", pruned)
+	}
+
+	keys, err := store.ListAPIKeys(ctx)
+	if err != nil {
+		t.Fatalf("ListAPIKeys() error = %v", err)
+	}
+	seen := map[int]db.APIKey{}
+	for _, key := range keys {
+		seen[key.ID] = key
+	}
+	if _, ok := seen[oldDeletedID]; ok {
+		t.Fatalf("ListAPIKeys() retained old soft-deleted key %d: %+v", oldDeletedID, keys)
+	}
+	for _, keyID := range []int{activeID, revokedID, recentDeletedID} {
+		if _, ok := seen[keyID]; !ok {
+			t.Fatalf("ListAPIKeys() missing retained key %d after prune: %+v", keyID, keys)
+		}
+	}
+	if seen[recentDeletedID].DeletedAt == nil {
+		t.Fatalf("recent deleted key = %+v, want retained soft-delete metadata", seen[recentDeletedID])
+	}
+}
+
 func TestUpsertMaliciousFindingRejectsNonArrayVersions(t *testing.T) {
 	store, _ := startDockerPostgresStore(t)
 	ctx := context.Background()
@@ -152,6 +393,181 @@ func TestUpsertMaliciousFindingRejectsNonArrayVersions(t *testing.T) {
 	}
 	if len(findings) != 0 {
 		t.Fatalf("FindMaliciousBatch() = %+v, want rejected finding absent", findings)
+	}
+}
+
+func TestUpsertVulnerabilityRejectsNonArrayAffectedVersionJSON(t *testing.T) {
+	store, _ := startDockerPostgresStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	err := store.UpsertVulnerability(ctx, &db.Vulnerability{
+		ID:        "GHSA-invalid-version-json",
+		Summary:   "invalid affected package version JSON",
+		Severity:  "HIGH",
+		Published: now,
+		Modified:  now,
+		AffectedPackages: []db.AffectedPackage{{
+			Ecosystem:        "npm",
+			Name:             "bad-vuln-range",
+			VersionRanges:    json.RawMessage(`{"introduced":"1.0.0"}`),
+			VersionsAffected: json.RawMessage(`[]`),
+		}},
+	})
+	if err == nil {
+		t.Fatal("UpsertVulnerability(non-array version_ranges) error = nil, want rejection")
+	}
+	if !strings.Contains(err.Error(), "GHSA-invalid-version-json") || !strings.Contains(err.Error(), "version_ranges") {
+		t.Fatalf("UpsertVulnerability(non-array version_ranges) error = %q, want ID and field", err)
+	}
+
+	err = store.UpsertVulnerability(ctx, &db.Vulnerability{
+		ID:        "GHSA-invalid-versions-affected",
+		Summary:   "invalid affected versions JSON",
+		Severity:  "HIGH",
+		Published: now,
+		Modified:  now,
+		AffectedPackages: []db.AffectedPackage{{
+			Ecosystem:        "npm",
+			Name:             "bad-vuln-versions",
+			VersionRanges:    json.RawMessage(`[]`),
+			VersionsAffected: json.RawMessage(`{"all":true}`),
+		}},
+	})
+	if err == nil {
+		t.Fatal("UpsertVulnerability(non-array versions_affected) error = nil, want rejection")
+	}
+	if !strings.Contains(err.Error(), "GHSA-invalid-versions-affected") || !strings.Contains(err.Error(), "versions_affected") {
+		t.Fatalf("UpsertVulnerability(non-array versions_affected) error = %q, want ID and field", err)
+	}
+}
+
+func TestUpsertMaliciousFindingRejectsMalformedVersionRanges(t *testing.T) {
+	store, _ := startDockerPostgresStore(t)
+	ctx := context.Background()
+
+	err := store.UpsertMaliciousFinding(ctx, &db.MaliciousFinding{
+		ID:            "MAL-invalid-version-ranges",
+		Ecosystem:     "npm",
+		Name:          "bad-ranges",
+		VersionRanges: json.RawMessage(`{"introduced":"1.0.0"}`),
+		Source:        "openssf",
+		RiskType:      "malware",
+		Severity:      "CRITICAL",
+		Summary:       "invalid version ranges shape",
+		CreatedBy:     "feed",
+	})
+	if err == nil {
+		t.Fatal("UpsertMaliciousFinding() error = nil, want invalid version_ranges error")
+	}
+	if !strings.Contains(err.Error(), "MAL-invalid-version-ranges") || !strings.Contains(err.Error(), "version_ranges") {
+		t.Fatalf("UpsertMaliciousFinding() error = %q, want finding ID and field", err)
+	}
+
+	findings, err := store.FindMaliciousBatch(ctx, []db.PackageQuery{
+		{Ecosystem: "npm", Name: "bad-ranges", Version: "2.0.0"},
+	})
+	if err != nil {
+		t.Fatalf("FindMaliciousBatch() error = %v", err)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("FindMaliciousBatch() = %+v, want rejected finding absent", findings)
+	}
+}
+
+func TestPostgresDomainConstraintsRejectInvalidFindingAndQueueValues(t *testing.T) {
+	store, _ := startDockerPostgresStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	if err := store.UpsertVulnerability(ctx, &db.Vulnerability{
+		ID:        "GHSA-invalid-ecosystem",
+		Summary:   "invalid ecosystem",
+		Severity:  "HIGH",
+		Published: now,
+		Modified:  now,
+		AffectedPackages: []db.AffectedPackage{{
+			Ecosystem: "npmm",
+			Name:      "left-pad",
+		}},
+	}); err == nil {
+		t.Fatal("UpsertVulnerability(invalid ecosystem) error = nil, want rejection")
+	}
+
+	if err := store.UpsertMaliciousFinding(ctx, &db.MaliciousFinding{
+		ID:        "MAL-invalid-risk",
+		Ecosystem: "npm",
+		Name:      "evil-risk",
+		Source:    "openssf",
+		RiskType:  "other",
+		Severity:  "CRITICAL",
+		Summary:   "invalid risk type",
+	}); err == nil {
+		t.Fatal("UpsertMaliciousFinding(invalid risk_type) error = nil, want rejection")
+	}
+
+	if err := store.UpsertManualAdvisory(ctx, &db.ManualAdvisory{
+		ID:          "CVE-2026-0001",
+		FindingType: "vulnerability",
+		Ecosystem:   "npm",
+		Name:        "manual-id",
+		Severity:    "HIGH",
+		Summary:     "invalid manual ID",
+	}); err == nil {
+		t.Fatal("UpsertManualAdvisory(feed-owned id) error = nil, want rejection")
+	}
+
+	if _, _, err := store.EnqueueRefresh(ctx, &db.RefreshJob{
+		Ecosystem: "npm",
+		Name:      "bad-priority",
+		Source:    "socket",
+		Priority:  4,
+	}); err == nil {
+		t.Fatal("EnqueueRefresh(priority 4) error = nil, want rejection")
+	}
+
+	if _, err := store.pool.Exec(ctx, `
+		INSERT INTO refresh_queue (ecosystem, name, source, priority, status)
+		VALUES ('npm', 'bad-status', 'socket', 1, 'waiting')`); err == nil {
+		t.Fatal("direct refresh_queue insert with invalid status error = nil, want check constraint")
+	}
+
+	if err := store.UpsertFeedSyncStatus(ctx, &db.FeedSyncStatus{
+		FeedName:       "bad-feed-counts",
+		LastSyncStatus: "success",
+		EntriesSynced:  2,
+		EntriesTotal:   1,
+	}); err == nil {
+		t.Fatal("UpsertFeedSyncStatus(entries_synced > entries_total) error = nil, want rejection")
+	}
+
+	if _, err := store.pool.Exec(ctx, `
+		INSERT INTO feed_sync_status (feed_name, last_sync_status, entries_synced, entries_total)
+		VALUES ('bad-feed-status', 'failed', 0, 0)`); err == nil {
+		t.Fatal("direct feed_sync_status insert with invalid status error = nil, want check constraint")
+	}
+
+	if _, err := store.pool.Exec(ctx, `
+		INSERT INTO feed_sync_status (feed_name, last_sync_status, entries_synced, entries_total, last_sync_duration)
+		VALUES ('bad-feed-counts', 'success', -1, -2, '-1 second'::interval)`); err == nil {
+		t.Fatal("direct feed_sync_status insert with invalid counts/duration error = nil, want check constraint")
+	}
+}
+
+func TestPostgresSeverityConstraintRejectsInvalidDirectWrites(t *testing.T) {
+	store, _ := startDockerPostgresStore(t)
+	ctx := context.Background()
+
+	if _, err := store.pool.Exec(ctx, `
+		INSERT INTO vulnerabilities (id, summary, severity, published, modified)
+		VALUES ('GHSA-invalid-severity', 'bad severity', 'INFO', NOW(), NOW())`); err == nil {
+		t.Fatal("direct vulnerability insert with INFO severity error = nil, want check constraint")
+	}
+
+	if _, err := store.pool.Exec(ctx, `
+		INSERT INTO malicious_findings (id, ecosystem, name, source, risk_type, severity, summary)
+		VALUES ('MAL-invalid-severity', 'npm', 'evil-severity', 'openssf', 'malware', 'INFO', 'bad severity')`); err == nil {
+		t.Fatal("direct malicious insert with INFO severity error = nil, want check constraint")
 	}
 }
 
@@ -214,6 +630,42 @@ func TestDeleteMaliciousFindingForSourcePreservesOtherSources(t *testing.T) {
 	}
 	if len(findings) != 0 {
 		t.Fatalf("FindMalicious(after matching source delete) = %+v, want removed", findings)
+	}
+}
+
+func TestFindMaliciousSinglePackageIncludesRequestedVersion(t *testing.T) {
+	store, _ := startDockerPostgresStore(t)
+	ctx := context.Background()
+
+	if err := store.UpsertMaliciousFinding(ctx, &db.MaliciousFinding{
+		ID:            "MAL-requested-version",
+		Ecosystem:     "npm",
+		Name:          "versioned-evil",
+		VersionRanges: json.RawMessage(`[{"type":"SEMVER","events":[{"introduced":"1.0.0"},{"fixed":"2.0.0"}]}]`),
+		Versions:      json.RawMessage(`["2.1.5-bad"]`),
+		Source:        "openssf",
+		RiskType:      "malware",
+		Severity:      "CRITICAL",
+		Summary:       "versioned malicious package",
+		CreatedBy:     "feed",
+	}); err != nil {
+		t.Fatalf("UpsertMaliciousFinding() error = %v", err)
+	}
+
+	rangeHit, err := store.FindMalicious(ctx, "npm", "versioned-evil", "1.5.0")
+	if err != nil {
+		t.Fatalf("FindMalicious(range hit) error = %v", err)
+	}
+	if len(rangeHit) != 1 || rangeHit[0].Version != "1.5.0" {
+		t.Fatalf("FindMalicious(range hit) = %+v, want requested version", rangeHit)
+	}
+
+	explicitHit, err := store.FindMalicious(ctx, "npm", "versioned-evil", "2.1.5-bad")
+	if err != nil {
+		t.Fatalf("FindMalicious(explicit hit) error = %v", err)
+	}
+	if len(explicitHit) != 1 || explicitHit[0].Version != "2.1.5-bad" {
+		t.Fatalf("FindMalicious(explicit hit) = %+v, want requested version", explicitHit)
 	}
 }
 
@@ -280,7 +732,7 @@ func TestDashboardStatsAndVulnerabilityUpsertsPreserveCurrentFindingState(t *tes
 	if err != nil {
 		t.Fatalf("read affected packages after source merge: %v", err)
 	}
-	defer closeSilently(rows)
+	defer ioutils.CloseSilently(rows)
 	var affected []string
 	for rows.Next() {
 		var ecosystem, name string
@@ -294,6 +746,49 @@ func TestDashboardStatsAndVulnerabilityUpsertsPreserveCurrentFindingState(t *tes
 	}
 	if strings.Join(affected, ",") != "npm/stable-left-pad,pypi/stable-pkg" {
 		t.Fatalf("affected packages after source merge = %v, want npm and pypi rows preserved", affected)
+	}
+
+	sourceA := *vuln
+	sourceA.ID = "GHSA-source-aware-upsert"
+	sourceA.Summary = "source-aware upsert"
+	sourceA.Sources = []db.VulnerabilitySource{{Source: "osv", SourceID: "GHSA-source-aware-upsert"}}
+	sourceA.Aliases = []db.VulnerabilityAlias{{AliasID: "CVE-2026-2050"}}
+	sourceA.References = []db.VulnerabilityReference{
+		{Type: "ADVISORY", URL: "https://osv.dev/vulnerability/GHSA-source-aware-upsert", Source: "osv"},
+		{Type: "WEB", URL: "https://vendor.example/osv-old", Source: "osv"},
+	}
+	if err := store.UpsertVulnerability(ctx, &sourceA); err != nil {
+		t.Fatalf("UpsertVulnerability(sourceA) error = %v", err)
+	}
+
+	sourceB := sourceA
+	sourceB.Sources = []db.VulnerabilitySource{{Source: "ghsa", SourceID: "GHSA-source-aware-upsert"}}
+	sourceB.Aliases = []db.VulnerabilityAlias{{AliasID: "CVE-2026-2051"}}
+	sourceB.References = []db.VulnerabilityReference{
+		{Type: "ADVISORY", URL: "https://github.com/advisories/GHSA-source-aware-upsert", Source: "ghsa"},
+	}
+	if err := store.UpsertVulnerability(ctx, &sourceB); err != nil {
+		t.Fatalf("UpsertVulnerability(sourceB) error = %v", err)
+	}
+
+	sourceA.References = []db.VulnerabilityReference{
+		{Type: "ADVISORY", URL: "https://osv.dev/vulnerability/GHSA-source-aware-upsert", Source: "osv"},
+	}
+	if err := store.UpsertVulnerability(ctx, &sourceA); err != nil {
+		t.Fatalf("UpsertVulnerability(sourceA refresh) error = %v", err)
+	}
+
+	aliases := readVulnerabilityAliases(t, store, ctx, sourceA.ID)
+	if strings.Join(aliases, ",") != "CVE-2026-2050,CVE-2026-2051" {
+		t.Fatalf("aliases after multi-source upserts = %v, want both source aliases preserved", aliases)
+	}
+	refs := readVulnerabilityReferences(t, store, ctx, sourceA.ID)
+	wantRefs := strings.Join([]string{
+		"ghsa https://github.com/advisories/GHSA-source-aware-upsert",
+		"osv https://osv.dev/vulnerability/GHSA-source-aware-upsert",
+	}, ",")
+	if strings.Join(refs, ",") != wantRefs {
+		t.Fatalf("references after source refresh = %v, want %s", refs, wantRefs)
 	}
 
 	if err := store.UpsertPackageReputation(ctx, &db.PackageReputation{
@@ -323,8 +818,183 @@ func TestDashboardStatsAndVulnerabilityUpsertsPreserveCurrentFindingState(t *tes
 	if err != nil {
 		t.Fatalf("DashboardStats() error = %v", err)
 	}
-	if stats.BySeverity["HIGH"] != 1 || stats.BySeverity["MEDIUM"] != 1 || stats.BySeverity["CRITICAL"] != 1 {
-		t.Fatalf("DashboardStats().BySeverity = %#v, want HIGH vuln plus MEDIUM/CRITICAL reputation findings", stats.BySeverity)
+	if stats.BySeverity["HIGH"] != 2 || stats.BySeverity["MEDIUM"] != 1 || stats.BySeverity["CRITICAL"] != 1 {
+		t.Fatalf("DashboardStats().BySeverity = %#v, want two HIGH vulns plus MEDIUM/CRITICAL reputation findings", stats.BySeverity)
+	}
+}
+
+func TestDashboardStatsTotalPackagesIncludesReputationAndLifecyclePackages(t *testing.T) {
+	store, _ := startDockerPostgresStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	past := now.AddDate(0, 0, -1)
+	soon := now.AddDate(0, 0, 1)
+
+	if err := store.UpsertVulnerability(ctx, &db.Vulnerability{
+		ID:        "GHSA-dashboard-total-packages",
+		Summary:   "dashboard package total fixture",
+		Severity:  "HIGH",
+		Published: now,
+		Modified:  now,
+		AffectedPackages: []db.AffectedPackage{{
+			Ecosystem:        "npm",
+			Name:             "dashboard-shared",
+			VersionRanges:    json.RawMessage(`[]`),
+			VersionsAffected: json.RawMessage(`[]`),
+		}, {
+			Ecosystem:        "pypi",
+			Name:             "dashboard-vulnerability-only",
+			VersionRanges:    json.RawMessage(`[]`),
+			VersionsAffected: json.RawMessage(`[]`),
+		}},
+	}); err != nil {
+		t.Fatalf("UpsertVulnerability() error = %v", err)
+	}
+	if err := store.UpsertMaliciousFinding(ctx, &db.MaliciousFinding{
+		ID:        "MAL-dashboard-shared",
+		Ecosystem: "npm",
+		Name:      "dashboard-shared",
+		Source:    "openssf",
+		RiskType:  "malware",
+		Severity:  "CRITICAL",
+		Summary:   "overlaps vulnerability package",
+		CreatedBy: "feed",
+	}); err != nil {
+		t.Fatalf("UpsertMaliciousFinding() error = %v", err)
+	}
+
+	for _, rep := range []db.PackageReputation{
+		{
+			Ecosystem: "npm",
+			Name:      "dashboard-reputation-only",
+			Version:   "1.0.0",
+			Source:    db.ReputationSourceReversingLabs,
+			Status:    "removed",
+			Severity:  "MEDIUM",
+			Summary:   "removed package version",
+		},
+		{
+			Ecosystem: "npm",
+			Name:      "dashboard-reputation-only",
+			Version:   "2.0.0",
+			Source:    db.ReputationSourceReversingLabs,
+			Status:    "risk",
+			Severity:  "LOW",
+			Summary:   "historical risk package version",
+		},
+		{
+			Ecosystem: "pypi",
+			Name:      "dashboard-reputation-malicious-only",
+			Version:   "1.0.0",
+			Source:    db.ReputationSourceReversingLabs,
+			Status:    "malicious",
+			Severity:  "CRITICAL",
+			Summary:   "malicious reputation package",
+		},
+		{
+			Ecosystem: "npm",
+			Name:      "dashboard-benign-reputation",
+			Version:   "1.0.0",
+			Source:    db.ReputationSourceReversingLabs,
+			Status:    "clean",
+			Severity:  "LOW",
+			Summary:   "clean reputation row",
+		},
+	} {
+		rep := rep
+		if err := store.UpsertPackageReputation(ctx, &rep); err != nil {
+			t.Fatalf("UpsertPackageReputation(%s/%s@%s) error = %v", rep.Ecosystem, rep.Name, rep.Version, err)
+		}
+	}
+
+	if _, err := store.ReplaceLifecycleProducts(ctx, []db.LifecycleProduct{
+		{
+			ProductSlug: "dashboard-eol-only",
+			Name:        "Dashboard EOL Only",
+			Releases: []db.LifecycleRelease{{
+				ProductSlug: "dashboard-eol-only",
+				Cycle:       "1",
+				Latest:      "1.0.0",
+				IsEOL:       true,
+				EOLFrom:     &past,
+			}},
+			PackageMaps: []db.LifecyclePackageMap{{
+				Ecosystem:   "gem",
+				Name:        "dashboard-lifecycle-eol-only",
+				ProductSlug: "dashboard-eol-only",
+				PURLType:    "gem",
+				PURLName:    "dashboard-lifecycle-eol-only",
+				Source:      "endoflife.date",
+			}},
+		},
+		{
+			ProductSlug: "dashboard-eol-soon-only",
+			Name:        "Dashboard EOL Soon Only",
+			Releases: []db.LifecycleRelease{{
+				ProductSlug: "dashboard-eol-soon-only",
+				Cycle:       "2",
+				Latest:      "2.0.0",
+				EOLFrom:     &soon,
+			}},
+			PackageMaps: []db.LifecyclePackageMap{{
+				Ecosystem:   "cargo",
+				Name:        "dashboard-lifecycle-soon-only",
+				ProductSlug: "dashboard-eol-soon-only",
+				PURLType:    "cargo",
+				PURLName:    "dashboard-lifecycle-soon-only",
+				Source:      "endoflife.date",
+			}},
+		},
+		{
+			ProductSlug: "dashboard-lifecycle-overlap",
+			Name:        "Dashboard Lifecycle Overlap",
+			Releases: []db.LifecycleRelease{{
+				ProductSlug: "dashboard-lifecycle-overlap",
+				Cycle:       "1",
+				Latest:      "1.0.0",
+				IsEOL:       true,
+				EOLFrom:     &past,
+			}},
+			PackageMaps: []db.LifecyclePackageMap{{
+				Ecosystem:   "npm",
+				Name:        "dashboard-reputation-only",
+				ProductSlug: "dashboard-lifecycle-overlap",
+				PURLType:    "npm",
+				PURLName:    "dashboard-reputation-only",
+				Source:      "endoflife.date",
+			}},
+		},
+		{
+			ProductSlug: "dashboard-healthy-lifecycle",
+			Name:        "Dashboard Healthy Lifecycle",
+			Releases: []db.LifecycleRelease{{
+				ProductSlug:    "dashboard-healthy-lifecycle",
+				Cycle:          "3",
+				Latest:         "3.0.0",
+				IsMaintained:   true,
+				IsEOAS:         false,
+				IsEOL:          false,
+				IsDiscontinued: false,
+			}},
+			PackageMaps: []db.LifecyclePackageMap{{
+				Ecosystem:   "go",
+				Name:        "dashboard-healthy-lifecycle",
+				ProductSlug: "dashboard-healthy-lifecycle",
+				PURLType:    "golang",
+				PURLName:    "dashboard-healthy-lifecycle",
+				Source:      "endoflife.date",
+			}},
+		},
+	}); err != nil {
+		t.Fatalf("ReplaceLifecycleProducts() error = %v", err)
+	}
+
+	stats, err := store.DashboardStats(ctx)
+	if err != nil {
+		t.Fatalf("DashboardStats() error = %v", err)
+	}
+	if stats.TotalPackages != 6 {
+		t.Fatalf("DashboardStats().TotalPackages = %d, want 6 unique active finding packages", stats.TotalPackages)
 	}
 }
 
@@ -479,12 +1149,35 @@ func TestRepairCaseInsensitivePackageNamesAgainstDocker(t *testing.T) {
 		t.Fatalf("insert mixed-case legacy rows: %v", err)
 	}
 
-	repaired, err := store.RepairCaseInsensitivePackageNames(ctx)
+	repaired, err := store.RepairCaseInsensitivePackageNamesWithAudit(ctx, &db.AdminAuditEntry{
+		Action:  "startup_package_name_repair",
+		Details: json.RawMessage(`{"repair":"case_insensitive_package_names"}`),
+	})
 	if err != nil {
-		t.Fatalf("RepairCaseInsensitivePackageNames() error = %v", err)
+		t.Fatalf("RepairCaseInsensitivePackageNamesWithAudit() error = %v", err)
 	}
 	if repaired < 3 {
-		t.Fatalf("RepairCaseInsensitivePackageNames() = %d, want at least affected, nuget, malicious repairs", repaired)
+		t.Fatalf("RepairCaseInsensitivePackageNamesWithAudit() = %d, want at least affected, nuget, malicious repairs", repaired)
+	}
+	audit, err := store.ListAdminAuditLog(ctx, 1)
+	if err != nil {
+		t.Fatalf("ListAdminAuditLog() error = %v", err)
+	}
+	if len(audit) != 1 || audit[0].Action != "startup_package_name_repair" {
+		t.Fatalf("ListAdminAuditLog() = %+v, want startup_package_name_repair entry", audit)
+	}
+	if audit[0].IntegrityStatus != db.AdminAuditIntegrityVerified {
+		t.Fatalf("startup repair audit integrity = %q, want verified", audit[0].IntegrityStatus)
+	}
+	details := map[string]string{}
+	if err := json.Unmarshal(audit[0].Details, &details); err != nil {
+		t.Fatalf("startup repair audit details are invalid JSON: %v", err)
+	}
+	if details["repair"] != "case_insensitive_package_names" {
+		t.Fatalf("startup repair audit repair detail = %q, want case_insensitive_package_names", details["repair"])
+	}
+	if details["repaired"] != strconv.Itoa(repaired) {
+		t.Fatalf("startup repair audit repaired detail = %q, want %d", details["repaired"], repaired)
 	}
 
 	for _, version := range []string{"1.0.0", "1.0.1"} {
@@ -509,6 +1202,103 @@ func TestRepairCaseInsensitivePackageNamesAgainstDocker(t *testing.T) {
 	}
 	if len(malicious) != 1 || malicious[0].AdvisoryID != "MAL-repair-normalized" || malicious[0].Name != "django" {
 		t.Fatalf("FindMalicious(pypi) = %+v, want normalized malicious finding", malicious)
+	}
+}
+
+func TestPostgresPrivacyExportByClientIPAuditsWithoutRawSelector(t *testing.T) {
+	store, _ := startDockerPostgresStore(t)
+	ctx := context.Background()
+
+	if err := store.InsertScanLog(ctx, &db.ScanLogEntry{
+		ScanID:                "privacy-scan-match",
+		RepoName:              "org/private",
+		ScannedAt:             time.Now().UTC(),
+		PackagesCount:         2,
+		FindingsCount:         1,
+		DurationMs:            12,
+		ClientIP:              "203.0.113.10",
+		ClientVersion:         "packmon/1.2.3",
+		CorrelationID:         "privacy-corr-match",
+		ResultDigest:          "sha256:result",
+		FindingsBlocking:      true,
+		BlockThreshold:        "HIGH",
+		FeedStatus:            "healthy",
+		FeedVersions:          map[string]string{"osv": "2026-06-28"},
+		FindingIDs:            []string{"OSV-TEST"},
+		FindingSeverities:     []string{"HIGH"},
+		ManualAdvisoriesCount: 0,
+	}); err != nil {
+		t.Fatalf("InsertScanLog(match) error = %v", err)
+	}
+	if err := store.InsertScanLog(ctx, &db.ScanLogEntry{
+		ScanID:            "privacy-scan-other",
+		ScannedAt:         time.Now().UTC(),
+		ClientIP:          "203.0.113.20",
+		BlockThreshold:    "HIGH",
+		FeedStatus:        "healthy",
+		FeedVersions:      map[string]string{},
+		FindingIDs:        []string{},
+		FindingSeverities: []string{},
+	}); err != nil {
+		t.Fatalf("InsertScanLog(other) error = %v", err)
+	}
+	if err := store.InsertAdminAuditLog(ctx, &db.AdminAuditEntry{
+		Action:  "privacy_seed_match",
+		Details: json.RawMessage(`{"event":"match"}`),
+		IP:      "203.0.113.10",
+	}); err != nil {
+		t.Fatalf("InsertAdminAuditLog(match) error = %v", err)
+	}
+	if err := store.InsertAdminAuditLog(ctx, &db.AdminAuditEntry{
+		Action:  "privacy_seed_other",
+		Details: json.RawMessage(`{"event":"other","client_ip":"203.0.113.20"}`),
+		IP:      "203.0.113.20",
+	}); err != nil {
+		t.Fatalf("InsertAdminAuditLog(other) error = %v", err)
+	}
+
+	selector := db.PrivacyExportSelector{Type: db.PrivacySelectorClientIP, Value: "203.0.113.10"}
+	export, err := store.ExportPrivacyMetadata(ctx, selector, &db.AdminAuditEntry{
+		Action:  "privacy_export",
+		Details: json.RawMessage(`{"operator":"cli"}`),
+	})
+	if err != nil {
+		t.Fatalf("ExportPrivacyMetadata() error = %v", err)
+	}
+	if export.ScanLogCount != 1 || len(export.ScanLogs) != 1 || export.ScanLogs[0].ScanID != "privacy-scan-match" {
+		t.Fatalf("export scan logs = %+v, want only matching scan", export.ScanLogs)
+	}
+	if export.AdminAuditCount != 1 || len(export.AdminAuditLogs) != 1 || export.AdminAuditLogs[0].Action != "privacy_seed_match" {
+		t.Fatalf("export audit logs = %+v, want only matching seed audit", export.AdminAuditLogs)
+	}
+
+	audit, err := store.ListAdminAuditLog(ctx, 1)
+	if err != nil {
+		t.Fatalf("ListAdminAuditLog() error = %v", err)
+	}
+	if len(audit) != 1 || audit[0].Action != "privacy_export" {
+		t.Fatalf("latest audit = %+v, want privacy_export", audit)
+	}
+	if audit[0].IntegrityStatus != db.AdminAuditIntegrityVerified {
+		t.Fatalf("privacy export audit integrity = %q, want verified", audit[0].IntegrityStatus)
+	}
+	if strings.Contains(string(audit[0].Details), selector.Value) {
+		t.Fatalf("privacy export audit leaked raw selector value: %s", audit[0].Details)
+	}
+	details := map[string]string{}
+	if err := json.Unmarshal(audit[0].Details, &details); err != nil {
+		t.Fatalf("privacy export audit details JSON error = %v", err)
+	}
+	for key, want := range map[string]string{
+		"operator":          "cli",
+		"selector_type":     selector.Type,
+		"selector_digest":   selector.Digest(),
+		"scan_log_count":    "1",
+		"admin_audit_count": "1",
+	} {
+		if details[key] != want {
+			t.Fatalf("privacy export audit detail %s = %q, want %q; details=%v", key, details[key], want, details)
+		}
 	}
 }
 
@@ -676,7 +1466,7 @@ func syncExportReferencesContain(vulns []db.SyncVulnerability, advisoryID, refTy
 		if vuln.ID != advisoryID {
 			continue
 		}
-		var refs []findingReference
+		var refs []db.VulnerabilityReference
 		if err := json.Unmarshal([]byte(vuln.References), &refs); err != nil {
 			return false
 		}
@@ -895,6 +1685,151 @@ func TestUpsertManualAdvisoryTypeChangeRollsBackWhenCounterpartDeleteFails(t *te
 	}
 }
 
+func TestUpsertManualAdvisoryWithAuditRejectsStaleRevision(t *testing.T) {
+	store, _ := startDockerPostgresStore(t)
+	ctx := context.Background()
+
+	if err := store.UpsertManualAdvisory(ctx, &db.ManualAdvisory{
+		ID:          "manual:stale",
+		FindingType: "vulnerability",
+		Ecosystem:   "npm",
+		Name:        "left-pad",
+		Severity:    "MEDIUM",
+		Summary:     "original",
+	}); err != nil {
+		t.Fatalf("UpsertManualAdvisory(create) error = %v", err)
+	}
+	loaded, err := store.GetManualAdvisory(ctx, "manual:stale")
+	if err != nil {
+		t.Fatalf("GetManualAdvisory() error = %v", err)
+	}
+	if loaded == nil || loaded.UpdatedAt.IsZero() {
+		t.Fatalf("GetManualAdvisory() = %+v, want revision", loaded)
+	}
+
+	if err := store.UpsertManualAdvisory(ctx, &db.ManualAdvisory{
+		ID:          "manual:stale",
+		FindingType: "vulnerability",
+		Ecosystem:   "npm",
+		Name:        "left-pad",
+		Severity:    "HIGH",
+		Summary:     "concurrent",
+	}); err != nil {
+		t.Fatalf("UpsertManualAdvisory(concurrent) error = %v", err)
+	}
+
+	err = store.UpsertManualAdvisoryWithAudit(ctx, &db.ManualAdvisory{
+		ID:          "manual:stale",
+		FindingType: "vulnerability",
+		Ecosystem:   "npm",
+		Name:        "left-pad",
+		Severity:    "LOW",
+		Summary:     "stale submit",
+		UpdatedAt:   loaded.UpdatedAt,
+	}, &db.AdminAuditEntry{Action: "advisory_update"})
+	if !errors.Is(err, db.ErrConflict) {
+		t.Fatalf("UpsertManualAdvisoryWithAudit(stale) error = %v, want ErrConflict", err)
+	}
+
+	current, err := store.GetManualAdvisory(ctx, "manual:stale")
+	if err != nil {
+		t.Fatalf("GetManualAdvisory(after stale) error = %v", err)
+	}
+	if current == nil || current.Summary != "concurrent" || current.Severity != "HIGH" {
+		t.Fatalf("manual advisory after stale update = %+v, want concurrent edit preserved", current)
+	}
+	audit, err := store.ListAdminAuditLog(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListAdminAuditLog() error = %v", err)
+	}
+	if len(audit) != 0 {
+		t.Fatalf("audit after stale update = %+v, want none", audit)
+	}
+}
+
+func TestManualAdvisoryWithAuditRollsBackOnAuditFailure(t *testing.T) {
+	store, _ := startDockerPostgresStore(t)
+	ctx := context.Background()
+
+	err := store.UpsertManualAdvisoryWithAudit(ctx, &db.ManualAdvisory{
+		ID:          "manual:audit-upsert-rollback",
+		FindingType: "vulnerability",
+		Ecosystem:   "npm",
+		Name:        "left-pad",
+		Severity:    "HIGH",
+		Summary:     "should roll back when audit insert fails",
+	}, failingAdminAuditEntry("advisory_update"))
+	requireAdminAuditFailure(t, err)
+	advisory, err := store.GetManualAdvisory(ctx, "manual:audit-upsert-rollback")
+	if err != nil {
+		t.Fatalf("GetManualAdvisory(after failed audited upsert) error = %v", err)
+	}
+	if advisory != nil {
+		t.Fatalf("manual advisory after failed audited upsert = %+v, want nil", advisory)
+	}
+
+	if err := store.UpsertManualAdvisory(ctx, &db.ManualAdvisory{
+		ID:          "manual:audit-delete-rollback",
+		FindingType: "malicious",
+		Ecosystem:   "npm",
+		Name:        "left-pad",
+		Severity:    "CRITICAL",
+		RiskType:    "malware",
+		Summary:     "should survive failed audited delete",
+	}); err != nil {
+		t.Fatalf("UpsertManualAdvisory(base malicious) error = %v", err)
+	}
+	err = store.DeleteManualAdvisoryWithAudit(ctx, "manual:audit-delete-rollback", failingAdminAuditEntry("advisory_delete"))
+	requireAdminAuditFailure(t, err)
+	advisory, err = store.GetManualAdvisory(ctx, "manual:audit-delete-rollback")
+	if err != nil {
+		t.Fatalf("GetManualAdvisory(after failed audited delete) error = %v", err)
+	}
+	if advisory == nil || advisory.FindingType != "malicious" || advisory.Summary != "should survive failed audited delete" {
+		t.Fatalf("manual advisory after failed audited delete = %+v, want original malicious advisory", advisory)
+	}
+	requireNoAdminAuditRows(t, store, ctx)
+}
+
+func TestUpsertManualAdvisoryWaitsForPerIDAdvisoryLock(t *testing.T) {
+	store, _ := startDockerPostgresStore(t)
+	ctx := context.Background()
+
+	conn, err := store.pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("Acquire() error = %v", err)
+	}
+	defer conn.Release()
+
+	lockKey := manualAdvisoryLockKey("manual:locked")
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, lockKey); err != nil {
+		t.Fatalf("acquire manual advisory lock: %v", err)
+	}
+	defer func() {
+		var unlocked bool
+		if err := conn.QueryRow(ctx, `SELECT pg_advisory_unlock($1)`, lockKey).Scan(&unlocked); err != nil {
+			t.Fatalf("release manual advisory lock: %v", err)
+		}
+		if !unlocked {
+			t.Fatal("manual advisory lock was not held")
+		}
+	}()
+
+	blockedCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	defer cancel()
+	err = store.UpsertManualAdvisory(blockedCtx, &db.ManualAdvisory{
+		ID:          "manual:locked",
+		FindingType: "vulnerability",
+		Ecosystem:   "npm",
+		Name:        "left-pad",
+		Severity:    "HIGH",
+		Summary:     "blocked by per-id advisory lock",
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("UpsertManualAdvisory while per-id lock held error = %v, want context deadline", err)
+	}
+}
+
 func TestReplaceEPSSScoresStreamIsAtomicAndClearsStaleScores(t *testing.T) {
 	store, _ := startDockerPostgresStore(t)
 	ctx := context.Background()
@@ -966,6 +1901,82 @@ func TestReplaceEPSSScoresStreamIsAtomicAndClearsStaleScores(t *testing.T) {
 	}
 }
 
+func TestReplaceEPSSScoresRejectsEmptyOrMalformedSnapshotWithoutClearing(t *testing.T) {
+	store, _ := startDockerPostgresStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	if err := store.UpsertVulnerability(ctx, &db.Vulnerability{
+		ID:        "CVE-2026-9201",
+		Summary:   "EPSS validation guard test",
+		Severity:  "HIGH",
+		Published: now,
+		Modified:  now,
+		Sources:   []db.VulnerabilitySource{{Source: "osv", SourceID: "CVE-2026-9201"}},
+		AffectedPackages: []db.AffectedPackage{{
+			Ecosystem:        "npm",
+			Name:             "epss-validation-test",
+			VersionRanges:    json.RawMessage(`[{"type":"SEMVER","events":[{"introduced":"0"}]}]`),
+			VersionsAffected: json.RawMessage(`[]`),
+		}},
+	}); err != nil {
+		t.Fatalf("UpsertVulnerability() error = %v", err)
+	}
+
+	tests := []struct {
+		name string
+		run  func() (updated, cleared int, err error)
+	}{
+		{
+			name: "empty slice",
+			run: func() (int, int, error) {
+				return store.ReplaceEPSSScores(ctx, nil)
+			},
+		},
+		{
+			name: "empty stream",
+			run: func() (int, int, error) {
+				updated, cleared, _, err := store.ReplaceEPSSScoresStream(ctx, func(func([]db.EPSSEntry) error) error {
+					return nil
+				})
+				return updated, cleared, err
+			},
+		},
+		{
+			name: "empty cve id",
+			run: func() (int, int, error) {
+				return store.ReplaceEPSSScores(ctx, []db.EPSSEntry{{CVEID: "", Score: 0.11, Percentile: 0.22}})
+			},
+		},
+		{
+			name: "malformed cve id",
+			run: func() (int, int, error) {
+				return store.ReplaceEPSSScores(ctx, []db.EPSSEntry{{CVEID: "not-a-cve", Score: 0.11, Percentile: 0.22}})
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if updated, err := store.SetEPSSScores(ctx, []db.EPSSEntry{{CVEID: "CVE-2026-9201", Score: 0.61, Percentile: 0.71}}); err != nil || updated > 1 {
+				t.Fatalf("SetEPSSScores(reset) = %d, %v; want <=1 nil", updated, err)
+			}
+
+			updated, cleared, err := tt.run()
+			if err == nil {
+				t.Fatal("ReplaceEPSSScores() error = nil, want validation error")
+			}
+			if updated != 0 || cleared != 0 {
+				t.Fatalf("ReplaceEPSSScores() = updated %d cleared %d, want 0/0 on rejected snapshot", updated, cleared)
+			}
+			score, percentile := readEPSSScore(t, store, ctx, "CVE-2026-9201")
+			if !score.Valid || !percentile.Valid || score.Float64 < 0.60 || score.Float64 > 0.62 || percentile.Float64 < 0.70 || percentile.Float64 > 0.72 {
+				t.Fatalf("EPSS score after rejected snapshot = %v/%v, want preserved 0.61/0.71", score, percentile)
+			}
+		})
+	}
+}
+
 func readEPSSScore(t *testing.T, store *Store, ctx context.Context, id string) (sql.NullFloat64, sql.NullFloat64) {
 	t.Helper()
 	var score, percentile sql.NullFloat64
@@ -982,6 +1993,60 @@ func syncVulnerabilityExportEPSS(items []db.SyncVulnerability, id string) (*floa
 		}
 	}
 	return nil, nil, false
+}
+
+func readVulnerabilityAliases(t *testing.T, store *Store, ctx context.Context, advisoryID string) []string {
+	t.Helper()
+
+	rows, err := store.pool.Query(ctx, `
+		SELECT alias_id
+		FROM vulnerability_aliases
+		WHERE vulnerability_id = $1
+		ORDER BY alias_id`, advisoryID)
+	if err != nil {
+		t.Fatalf("read vulnerability aliases: %v", err)
+	}
+	defer ioutils.CloseSilently(rows)
+
+	var aliases []string
+	for rows.Next() {
+		var alias string
+		if err := rows.Scan(&alias); err != nil {
+			t.Fatalf("scan vulnerability alias: %v", err)
+		}
+		aliases = append(aliases, alias)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate vulnerability aliases: %v", err)
+	}
+	return aliases
+}
+
+func readVulnerabilityReferences(t *testing.T, store *Store, ctx context.Context, advisoryID string) []string {
+	t.Helper()
+
+	rows, err := store.pool.Query(ctx, `
+		SELECT COALESCE(source, ''), url
+		FROM vulnerability_references
+		WHERE vulnerability_id = $1
+		ORDER BY source, url`, advisoryID)
+	if err != nil {
+		t.Fatalf("read vulnerability references: %v", err)
+	}
+	defer ioutils.CloseSilently(rows)
+
+	var refs []string
+	for rows.Next() {
+		var source, url string
+		if err := rows.Scan(&source, &url); err != nil {
+			t.Fatalf("scan vulnerability reference: %v", err)
+		}
+		refs = append(refs, source+" "+url)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate vulnerability references: %v", err)
+	}
+	return refs
 }
 
 func TestPostgresStoreDockerEndToEnd(t *testing.T) {
@@ -1160,12 +2225,12 @@ func TestPostgresStoreDockerEndToEnd(t *testing.T) {
 	if err := store.UpsertVulnerability(ctx, &unknown); err != nil {
 		t.Fatalf("UpsertVulnerability(unknown) error = %v", err)
 	}
-	unknownAliases, err := store.FindUnknownSeverityCVEAliases(ctx)
+	unknownAliases, err := store.FindUnknownSeverityCVEIDs(ctx, "", 100)
 	if err != nil {
-		t.Fatalf("FindUnknownSeverityCVEAliases() error = %v", err)
+		t.Fatalf("FindUnknownSeverityCVEIDs() error = %v", err)
 	}
 	if len(unknownAliases) == 0 {
-		t.Fatal("FindUnknownSeverityCVEAliases() returned no rows")
+		t.Fatal("FindUnknownSeverityCVEIDs() returned no rows")
 	}
 	if err := store.UpdateSeverityByCVE(ctx, "CVE-2026-9002", "CRITICAL", 9.9); err != nil {
 		t.Fatalf("UpdateSeverityByCVE() error = %v", err)
@@ -1318,6 +2383,9 @@ func TestPostgresStoreDockerEndToEnd(t *testing.T) {
 	if len(malicious) != 1 || malicious[0].AdvisoryID != "MAL-docker-1" {
 		t.Fatalf("FindMalicious(range hit) = %+v, want malicious row", malicious)
 	}
+	if malicious[0].Version != "9.9.9" {
+		t.Fatalf("FindMalicious(range hit) version = %q, want requested version", malicious[0].Version)
+	}
 	malicious, err = store.FindMalicious(ctx, "npm", "evil-pad", "10.0.0")
 	if err != nil {
 		t.Fatalf("FindMalicious(range miss) error = %v", err)
@@ -1331,6 +2399,9 @@ func TestPostgresStoreDockerEndToEnd(t *testing.T) {
 	}
 	if len(malicious) != 1 || malicious[0].AdvisoryID != "MAL-docker-1" {
 		t.Fatalf("FindMalicious(explicit hit) = %+v, want malicious row", malicious)
+	}
+	if malicious[0].Version != "10.1.0-bad" {
+		t.Fatalf("FindMalicious(explicit hit) version = %q, want requested version", malicious[0].Version)
 	}
 	maliciousBatch, err := store.FindMaliciousBatch(ctx, []db.PackageQuery{
 		{Ecosystem: "npm", Name: "evil-pad", Version: "9.9.9"},
@@ -1414,6 +2485,15 @@ func TestPostgresStoreDockerEndToEnd(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("UpsertManualAdvisory(malicious) error = %v", err)
 	}
+	if err := store.UpsertManualAdvisory(ctx, &db.ManualAdvisory{
+		ID:          "manual:docker-bad-type",
+		FindingType: "typo",
+		Ecosystem:   "npm",
+		Name:        "bad-type",
+		Summary:     "bad type",
+	}); err == nil {
+		t.Fatal("UpsertManualAdvisory(unsupported finding type) error = nil")
+	}
 	manual, err := store.ListManualAdvisories(ctx, 10)
 	if err != nil {
 		t.Fatalf("ListManualAdvisories() error = %v", err)
@@ -1431,7 +2511,7 @@ func TestPostgresStoreDockerEndToEnd(t *testing.T) {
 		EntriesSynced:    5,
 		EntriesTotal:     6,
 		LastError:        "previous warning",
-		LastEtag:         "etag",
+		LastETag:         "etag",
 		LastCommitHash:   "commit",
 		LastSyncAt:       &now,
 		LastSyncDuration: ptrDuration(time.Second),
@@ -1448,6 +2528,26 @@ func TestPostgresStoreDockerEndToEnd(t *testing.T) {
 	}
 	if status.LastError != "previous warning" {
 		t.Fatalf("GetFeedSyncStatus().LastError = %q", status.LastError)
+	}
+	if err := store.UpsertFeedSyncStatus(ctx, &db.FeedSyncStatus{
+		FeedName:       "osv",
+		LastSyncStatus: "rejected",
+		LastError:      "validation failed",
+		EntriesSynced:  0,
+		EntriesTotal:   2,
+		Metadata:       json.RawMessage(`{"rejected_count":2}`),
+	}); err != nil {
+		t.Fatalf("UpsertFeedSyncStatus(rejected) error = %v", err)
+	}
+	status, err = store.GetFeedSyncStatus(ctx, "osv")
+	if err != nil {
+		t.Fatalf("GetFeedSyncStatus(after rejected) error = %v", err)
+	}
+	if status.LastSyncStatus != "rejected" || status.LastError != "validation failed" || status.EntriesSynced != 0 || status.EntriesTotal != 2 {
+		t.Fatalf("rejected status = %+v", status)
+	}
+	if status.LastSyncAt == nil || !status.LastSyncAt.Equal(now) {
+		t.Fatalf("rejected status LastSyncAt = %v, want preserved successful sync %v", status.LastSyncAt, now)
 	}
 	if err := store.UpsertFeedSyncStatus(ctx, &db.FeedSyncStatus{
 		FeedName:       "osv",
@@ -1502,6 +2602,47 @@ func TestPostgresStoreDockerEndToEnd(t *testing.T) {
 		t.Fatalf("DeleteFeedConfig() error = %v", err)
 	}
 
+	{
+		auditedInterval := 15 * time.Minute
+		if err := store.UpsertFeedConfigWithAudit(ctx,
+			&db.FeedConfig{FeedName: "socket", Enabled: true, Mode: "self", SyncInterval: &auditedInterval, APIKey: "socket-secret"},
+			&db.AdminAuditEntry{Action: "feed_config_save", Details: json.RawMessage(`{"feed":"socket"}`), IP: "127.0.0.1"},
+		); err != nil {
+			t.Fatalf("UpsertFeedConfigWithAudit() error = %v", err)
+		}
+		feedCfg, err = store.GetFeedConfig(ctx, "socket")
+		if err != nil {
+			t.Fatalf("GetFeedConfig(socket) error = %v", err)
+		}
+		if feedCfg == nil || feedCfg.APIKey != "socket-secret" || feedCfg.SyncInterval == nil || *feedCfg.SyncInterval != auditedInterval {
+			t.Fatalf("GetFeedConfig(socket) = %+v, want audited saved config", feedCfg)
+		}
+		auditLog, err := store.ListAdminAuditLog(ctx, 10)
+		if err != nil {
+			t.Fatalf("ListAdminAuditLog(after audited feed save) error = %v", err)
+		}
+		if len(auditLog) == 0 || auditLog[0].Action != "feed_config_save" {
+			t.Fatalf("latest audit after feed save = %+v, want feed_config_save", auditLog)
+		}
+		if err := store.DeleteFeedConfigWithAudit(ctx, "socket", nil, &db.AdminAuditEntry{Action: "feed_config_reset", Details: json.RawMessage(`{"feed":"socket"}`), IP: "127.0.0.1"}); err != nil {
+			t.Fatalf("DeleteFeedConfigWithAudit() error = %v", err)
+		}
+		feedCfg, err = store.GetFeedConfig(ctx, "socket")
+		if err != nil {
+			t.Fatalf("GetFeedConfig(socket after reset) error = %v", err)
+		}
+		if feedCfg != nil {
+			t.Fatalf("GetFeedConfig(socket after reset) = %+v, want nil", feedCfg)
+		}
+		auditLog, err = store.ListAdminAuditLog(ctx, 10)
+		if err != nil {
+			t.Fatalf("ListAdminAuditLog(after audited feed reset) error = %v", err)
+		}
+		if len(auditLog) == 0 || auditLog[0].Action != "feed_config_reset" {
+			t.Fatalf("latest audit after feed reset = %+v, want feed_config_reset", auditLog)
+		}
+	}
+
 	if err := store.UpsertSystemSettings(ctx, &db.SystemSettings{BlockThreshold: "HIGH", RateLimitPerMinute: 120, RateLimitBurst: 30}); err != nil {
 		t.Fatalf("UpsertSystemSettings() error = %v", err)
 	}
@@ -1511,6 +2652,26 @@ func TestPostgresStoreDockerEndToEnd(t *testing.T) {
 	}
 	if settings == nil || settings.BlockThreshold != "HIGH" {
 		t.Fatalf("GetSystemSettings() = %+v, want HIGH", settings)
+	}
+
+	loadedSettings := *settings
+	time.Sleep(10 * time.Millisecond)
+	if err := store.UpsertSystemSettings(ctx, &db.SystemSettings{BlockThreshold: "LOW", RateLimitPerMinute: 240, RateLimitBurst: 40}); err != nil {
+		t.Fatalf("UpsertSystemSettings(concurrent) error = %v", err)
+	}
+	loadedSettings.BlockThreshold = "CRITICAL"
+	loadedSettings.RateLimitPerMinute = 300
+	loadedSettings.RateLimitBurst = 50
+	err = store.UpsertSystemSettingsWithAudit(ctx, &loadedSettings, &db.AdminAuditEntry{Action: "system_settings_save", Details: json.RawMessage(`{}`), IP: "127.0.0.1"})
+	if !errors.Is(err, db.ErrConflict) {
+		t.Fatalf("UpsertSystemSettingsWithAudit(stale) error = %v, want ErrConflict", err)
+	}
+	settings, err = store.GetSystemSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetSystemSettings(after stale) error = %v", err)
+	}
+	if settings == nil || settings.BlockThreshold != "LOW" || settings.RateLimitPerMinute != 240 || settings.RateLimitBurst != 40 {
+		t.Fatalf("settings after stale save = %+v, want concurrent LOW settings preserved", settings)
 	}
 
 	activeExpiry := time.Now().UTC().Add(time.Hour)
@@ -1555,8 +2716,8 @@ func TestPostgresStoreDockerEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListAPIKeys(after delete) error = %v", err)
 	}
-	if len(keys) != 1 || keys[0].ID != keyID || keys[0].DeletedAt == nil || keys[0].Name != "ci" || keys[0].KeyHash != "hash-ci" || keys[0].LastUsedAt == nil || keys[0].RevokedAt == nil || keys[0].ExpiresAt == nil {
-		t.Fatalf("ListAPIKeys(after delete) = %+v, want soft-deleted lifecycle metadata retained", keys)
+	if len(keys) != 1 || keys[0].ID != keyID || keys[0].DeletedAt == nil || keys[0].Name != "" || keys[0].KeyHash == "" || keys[0].KeyHash == "hash-ci" || keys[0].LastUsedAt == nil || keys[0].RevokedAt == nil || keys[0].ExpiresAt == nil {
+		t.Fatalf("ListAPIKeys(after delete) = %+v, want soft-deleted lifecycle metadata retained with label/hash scrubbed", keys)
 	}
 	deletedKey, err := store.FindAPIKeyByHash(ctx, "hash-ci")
 	if err != nil {
@@ -1754,7 +2915,7 @@ func TestPostgresStoreDockerEndToEnd(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("UpsertPackageReputation(malicious reputation) error = %v", err)
 	}
-	if err := store.UpsertLifecycleProducts(ctx, []db.LifecycleProduct{{
+	if _, err := store.ReplaceLifecycleProducts(ctx, []db.LifecycleProduct{{
 		ProductSlug: "django",
 		Name:        "Django",
 		Releases: []db.LifecycleRelease{{
@@ -1779,25 +2940,25 @@ func TestPostgresStoreDockerEndToEnd(t *testing.T) {
 			Source:      "endoflife.date",
 		}},
 	}}); err != nil {
-		t.Fatalf("UpsertLifecycleProducts() error = %v", err)
+		t.Fatalf("ReplaceLifecycleProducts() error = %v", err)
 	}
 
 	if err := store.InsertScanLog(ctx, &db.ScanLogEntry{
 		ScanID:        "scan-1",
 		RepoName:      "repo",
-		Branch:        "main",
 		ScannedAt:     now,
 		PackagesCount: 4,
 		FindingsCount: 2,
 		DurationMs:    10,
 		ClientIP:      "127.0.0.1",
+		ClientVersion: "1.2.3",
 		APIKeyID:      77,
 		APIKeyName:    "n8n-import",
 		ResultDigest:  "sha256:abc123",
 	}); err != nil {
 		t.Fatalf("InsertScanLog() error = %v", err)
 	}
-	recentScans, err := store.ListRecentScans(ctx, 10)
+	recentScans, err := store.ListRecentScans(ctx, 10, 0)
 	if err != nil {
 		t.Fatalf("ListRecentScans() error = %v", err)
 	}
@@ -1806,6 +2967,9 @@ func TestPostgresStoreDockerEndToEnd(t *testing.T) {
 	}
 	if recentScans[0].APIKeyID != 77 || recentScans[0].APIKeyName != "n8n-import" {
 		t.Fatalf("ListRecentScans() API key identity = (%d,%q), want (77,n8n-import)", recentScans[0].APIKeyID, recentScans[0].APIKeyName)
+	}
+	if recentScans[0].ClientVersion != "1.2.3" {
+		t.Fatalf("ListRecentScans() client version = %q, want retained normalized version", recentScans[0].ClientVersion)
 	}
 	if recentScans[0].ResultDigest != "sha256:abc123" {
 		t.Fatalf("ListRecentScans() result digest = %q, want sha256:abc123", recentScans[0].ResultDigest)
@@ -1817,15 +2981,15 @@ func TestPostgresStoreDockerEndToEnd(t *testing.T) {
 	if scanTotals.PackagesScanned != 4 || scanTotals.Findings != 2 {
 		t.Fatalf("ScanTotals() = %+v, want 4/2", scanTotals)
 	}
-	if _, err := store.pool.Exec(ctx, `UPDATE scan_log_totals SET packages_scanned = 41, findings = 7`); err != nil {
-		t.Fatalf("override scan_log_totals: %v", err)
+	if _, err := store.pool.Exec(ctx, `UPDATE scan_log_totals SET packages_scanned = 41, findings = 7`); err == nil {
+		t.Fatal("direct scan_log_totals update succeeded; totals must be derived from scan_log")
 	}
 	scanTotals, err = store.ScanTotals(ctx)
 	if err != nil {
 		t.Fatalf("ScanTotals(after rollup override) error = %v", err)
 	}
-	if scanTotals.PackagesScanned != 41 || scanTotals.Findings != 7 {
-		t.Fatalf("ScanTotals(after rollup override) = %+v, want rollup totals 41/7", scanTotals)
+	if scanTotals.PackagesScanned != 4 || scanTotals.Findings != 2 {
+		t.Fatalf("ScanTotals(after rejected rollup override) = %+v, want derived totals 4/2", scanTotals)
 	}
 	byDay, err := store.CountScansByDay(ctx, 7)
 	if err != nil {
@@ -1984,6 +3148,16 @@ func TestPostgresStoreDockerEndToEnd(t *testing.T) {
 	if len(sourceScopedFindings) != 1 {
 		t.Fatalf("FindVulnerabilities(after one source delete) = %+v, want still active via ghsa", sourceScopedFindings)
 	}
+	var sourceScopedWithdrawn sql.NullTime
+	if err := store.pool.QueryRow(ctx, `
+		SELECT withdrawn
+		FROM vulnerabilities
+		WHERE id = $1`, "GHSA-source-0001").Scan(&sourceScopedWithdrawn); err != nil {
+		t.Fatalf("read source-scoped vulnerability withdrawn timestamp: %v", err)
+	}
+	if sourceScopedWithdrawn.Valid {
+		t.Fatalf("source-scoped vulnerability withdrawn = %s, want NULL while ghsa source remains", sourceScopedWithdrawn.Time)
+	}
 
 	beforeSourceDelete := time.Now().UTC().Add(-time.Second)
 	if err := store.DeleteVulnerabilityForSource(ctx, "GHSA-source-0001", "ghsa"); err != nil {
@@ -2120,7 +3294,7 @@ func TestStorePrunesScanAndAdminAuditLogs(t *testing.T) {
 		t.Fatalf("PruneAdminAuditLogs() = %d, want 1", prunedAudit)
 	}
 
-	scans, err := store.ListRecentScans(ctx, 10)
+	scans, err := store.ListRecentScans(ctx, 10, 0)
 	if err != nil {
 		t.Fatalf("ListRecentScans() error = %v", err)
 	}
@@ -2175,7 +3349,7 @@ func TestStoreScanLogIdempotencyKeyDeduplicatesTotals(t *testing.T) {
 		t.Fatalf("GetScanLogByIdempotencyKey() = %+v, want original scan metadata", existing)
 	}
 
-	recent, err := store.ListRecentScans(ctx, 10)
+	recent, err := store.ListRecentScans(ctx, 10, 0)
 	if err != nil {
 		t.Fatalf("ListRecentScans() error = %v", err)
 	}
@@ -2271,6 +3445,84 @@ func TestStorePrunesOldTerminalRefreshQueueJobs(t *testing.T) {
 	}
 }
 
+func TestStorePrunesOldPackageCheckStatusRows(t *testing.T) {
+	store, _ := startDockerPostgresStore(t)
+	ctx := context.Background()
+	oldTime := time.Now().UTC().Add(-48 * time.Hour)
+	recentTime := time.Now().UTC().Add(-time.Hour)
+
+	for _, status := range []db.PackageCheckStatus{
+		{
+			Ecosystem:     "npm",
+			Name:          "old-socket",
+			Source:        "socket",
+			LastCheckedAt: &oldTime,
+			NextCheckAt:   &oldTime,
+			LastResult:    json.RawMessage(`{"status":"clean"}`),
+		},
+		{
+			Ecosystem:     "npm",
+			Name:          "recent-socket",
+			Source:        "socket",
+			LastCheckedAt: &recentTime,
+			NextCheckAt:   &recentTime,
+			LastResult:    json.RawMessage(`{"status":"clean"}`),
+		},
+		{
+			Ecosystem:     "npm",
+			Name:          "old-other",
+			Source:        "other",
+			LastCheckedAt: &oldTime,
+			NextCheckAt:   &oldTime,
+			LastResult:    json.RawMessage(`{"status":"clean"}`),
+		},
+	} {
+		status := status
+		if err := store.UpsertPackageCheckStatus(ctx, &status); err != nil {
+			t.Fatalf("UpsertPackageCheckStatus(%s) error = %v", status.Name, err)
+		}
+	}
+	if _, err := store.pool.Exec(ctx, `
+		UPDATE package_check_status
+		SET updated_at = CASE name
+			WHEN 'old-socket' THEN $1::timestamptz
+			WHEN 'old-other' THEN $1::timestamptz
+			ELSE $2::timestamptz
+		END`, oldTime, recentTime); err != nil {
+		t.Fatalf("age package check status rows: %v", err)
+	}
+
+	pruned, err := store.PrunePackageCheckStatus(ctx, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("PrunePackageCheckStatus() error = %v", err)
+	}
+	if pruned != 1 {
+		t.Fatalf("PrunePackageCheckStatus() = %d, want only old Socket.dev row", pruned)
+	}
+
+	oldSocket, err := store.GetPackageCheckStatus(ctx, "npm", "old-socket", "socket")
+	if err != nil {
+		t.Fatalf("GetPackageCheckStatus(old socket) error = %v", err)
+	}
+	if oldSocket != nil {
+		t.Fatalf("GetPackageCheckStatus(old socket) = %+v, want pruned", oldSocket)
+	}
+	recentSocket, err := store.GetPackageCheckStatus(ctx, "npm", "recent-socket", "socket")
+	if err != nil {
+		t.Fatalf("GetPackageCheckStatus(recent socket) error = %v", err)
+	}
+	if recentSocket == nil {
+		t.Fatal("GetPackageCheckStatus(recent socket) = nil, want retained")
+	}
+	oldOther, err := store.GetPackageCheckStatus(ctx, "npm", "old-other", "other")
+	if err != nil {
+		t.Fatalf("GetPackageCheckStatus(old other) error = %v", err)
+	}
+	if oldOther == nil {
+		t.Fatal("GetPackageCheckStatus(old other) = nil, want non-Socket row retained")
+	}
+}
+
 func TestQueueClearAndPurgeAuditPreserveJobIdentities(t *testing.T) {
 	store, _ := startDockerPostgresStore(t)
 	ctx := context.Background()
@@ -2332,6 +3584,236 @@ func TestQueueClearAndPurgeAuditPreserveJobIdentities(t *testing.T) {
 	}
 }
 
+func TestSingleQueueJobAuditIncludesTransitionSnapshots(t *testing.T) {
+	store, _ := startDockerPostgresStore(t)
+	ctx := context.Background()
+
+	if _, _, err := store.EnqueueRefresh(ctx, &db.RefreshJob{Ecosystem: "npm", Name: "priority-transition", Source: "socket", Priority: 3}); err != nil {
+		t.Fatalf("EnqueueRefresh(priority target) error = %v", err)
+	}
+	priorityID := mustQueueJobID(t, store, ctx, "priority-transition")
+	if err := store.UpdateQueueJobPriorityWithAudit(ctx, priorityID, 0, queueAuditEntry("queue_priority_update", priorityID)); err != nil {
+		t.Fatalf("UpdateQueueJobPriorityWithAudit() error = %v", err)
+	}
+	assertQueueTransitionAudit(t, store, ctx, queueTransitionAuditExpectation{
+		action:           "queue_priority_update",
+		jobID:            priorityID,
+		name:             "priority-transition",
+		previousStatus:   db.RefreshStatusPending,
+		newStatus:        db.RefreshStatusPending,
+		previousPriority: 3,
+		newPriority:      0,
+	})
+
+	if _, _, err := store.EnqueueRefresh(ctx, &db.RefreshJob{Ecosystem: "npm", Name: "pause-transition", Source: "socket", Priority: 1}); err != nil {
+		t.Fatalf("EnqueueRefresh(pause target) error = %v", err)
+	}
+	pauseID := mustQueueJobID(t, store, ctx, "pause-transition")
+	if err := store.PauseQueueJobWithAudit(ctx, pauseID, queueAuditEntry("queue_pause", pauseID)); err != nil {
+		t.Fatalf("PauseQueueJobWithAudit() error = %v", err)
+	}
+	assertQueueTransitionAudit(t, store, ctx, queueTransitionAuditExpectation{
+		action:           "queue_pause",
+		jobID:            pauseID,
+		name:             "pause-transition",
+		previousStatus:   db.RefreshStatusPending,
+		newStatus:        db.RefreshStatusPaused,
+		previousPriority: 1,
+		newPriority:      1,
+	})
+
+	if _, _, err := store.EnqueueRefresh(ctx, &db.RefreshJob{Ecosystem: "npm", Name: "resume-transition", Source: "socket", Priority: 1}); err != nil {
+		t.Fatalf("EnqueueRefresh(resume target) error = %v", err)
+	}
+	resumeID := mustQueueJobID(t, store, ctx, "resume-transition")
+	if err := store.PauseQueueJob(ctx, resumeID); err != nil {
+		t.Fatalf("PauseQueueJob(resume target) error = %v", err)
+	}
+	if err := store.ResumeQueueJobWithAudit(ctx, resumeID, queueAuditEntry("queue_resume", resumeID)); err != nil {
+		t.Fatalf("ResumeQueueJobWithAudit() error = %v", err)
+	}
+	assertQueueTransitionAudit(t, store, ctx, queueTransitionAuditExpectation{
+		action:           "queue_resume",
+		jobID:            resumeID,
+		name:             "resume-transition",
+		previousStatus:   db.RefreshStatusPaused,
+		newStatus:        db.RefreshStatusPending,
+		previousPriority: 1,
+		newPriority:      1,
+	})
+
+	if _, _, err := store.EnqueueRefresh(ctx, &db.RefreshJob{Ecosystem: "npm", Name: "retry-transition", Source: "socket", Priority: 1}); err != nil {
+		t.Fatalf("EnqueueRefresh(retry target) error = %v", err)
+	}
+	retryID := mustQueueJobID(t, store, ctx, "retry-transition")
+	if err := store.CompleteRefresh(ctx, retryID, errors.New("upstream token=query-secret failed")); err != nil {
+		t.Fatalf("CompleteRefresh(retry target) error = %v", err)
+	}
+	if err := store.RetryQueueJobWithAudit(ctx, retryID, queueAuditEntry("queue_retry", retryID)); err != nil {
+		t.Fatalf("RetryQueueJobWithAudit() error = %v", err)
+	}
+	assertQueueTransitionAudit(t, store, ctx, queueTransitionAuditExpectation{
+		action:            "queue_retry",
+		jobID:             retryID,
+		name:              "retry-transition",
+		previousStatus:    db.RefreshStatusError,
+		newStatus:         db.RefreshStatusPending,
+		previousPriority:  1,
+		newPriority:       1,
+		wantRedactedError: true,
+	})
+}
+
+func TestQueueClearAndPurgeAuditSamplesDeletedJobs(t *testing.T) {
+	store, _ := startDockerPostgresStore(t)
+	ctx := context.Background()
+	const wantSampleLimit = 100
+	totalJobs := wantSampleLimit + 3
+
+	if _, err := store.pool.Exec(ctx, `
+		INSERT INTO refresh_queue (ecosystem, name, source, priority, status, requested_at)
+		SELECT 'npm', 'clear-sample-' || g::text, 'socket', 1, 'pending', NOW()
+		FROM generate_series(1, $1) AS g`, totalJobs); err != nil {
+		t.Fatalf("insert clear sample jobs: %v", err)
+	}
+
+	cleared, err := store.ClearQueueWithAudit(ctx, []string{"pending"}, &db.AdminAuditEntry{Action: "queue_clear", IP: "127.0.0.1"})
+	if err != nil {
+		t.Fatalf("ClearQueueWithAudit() error = %v", err)
+	}
+	if cleared != totalJobs {
+		t.Fatalf("ClearQueueWithAudit() = %d, want %d", cleared, totalJobs)
+	}
+	assertQueueAuditSample(t, store, ctx, "cleared_jobs", totalJobs, wantSampleLimit)
+	pendingJobs, err := store.ListQueueJobs(ctx, "pending", totalJobs+1)
+	if err != nil {
+		t.Fatalf("ListQueueJobs(pending) error = %v", err)
+	}
+	if len(pendingJobs) != 0 {
+		t.Fatalf("pending jobs after clear = %d, want 0", len(pendingJobs))
+	}
+
+	if _, err := store.pool.Exec(ctx, `
+		INSERT INTO refresh_queue (ecosystem, name, source, priority, status, requested_at, processed_at, error)
+		SELECT 'npm',
+		       'purge-sample-' || g::text,
+		       'socket',
+		       1,
+		       CASE WHEN g % 2 = 0 THEN 'done' ELSE 'error' END,
+		       NOW(),
+		       NOW(),
+		       'upstream token=query-secret failed'
+		FROM generate_series(1, $1) AS g`, totalJobs); err != nil {
+		t.Fatalf("insert purge sample jobs: %v", err)
+	}
+
+	purged, err := store.PurgeQueueWithAudit(ctx, &db.AdminAuditEntry{Action: "queue_purge", IP: "127.0.0.1"})
+	if err != nil {
+		t.Fatalf("PurgeQueueWithAudit() error = %v", err)
+	}
+	if purged != totalJobs {
+		t.Fatalf("PurgeQueueWithAudit() = %d, want %d", purged, totalJobs)
+	}
+	assertQueueAuditSample(t, store, ctx, "purged_jobs", totalJobs, wantSampleLimit)
+	terminalJobs, err := store.ListQueueJobs(ctx, "done", totalJobs+1)
+	if err != nil {
+		t.Fatalf("ListQueueJobs(done) error = %v", err)
+	}
+	if len(terminalJobs) != 0 {
+		t.Fatalf("done jobs after purge = %d, want 0", len(terminalJobs))
+	}
+	terminalJobs, err = store.ListQueueJobs(ctx, "error", totalJobs+1)
+	if err != nil {
+		t.Fatalf("ListQueueJobs(error) error = %v", err)
+	}
+	if len(terminalJobs) != 0 {
+		t.Fatalf("error jobs after purge = %d, want 0", len(terminalJobs))
+	}
+}
+
+func TestQueueClearAndPurgeWithAuditRollBackOnAuditFailure(t *testing.T) {
+	store, _ := startDockerPostgresStore(t)
+	ctx := context.Background()
+
+	if _, _, err := store.EnqueueRefresh(ctx, &db.RefreshJob{Ecosystem: "npm", Name: "clear-audit-rollback", Source: "socket", Priority: 2}); err != nil {
+		t.Fatalf("EnqueueRefresh(clear target) error = %v", err)
+	}
+	clearID := mustQueueJobID(t, store, ctx, "clear-audit-rollback")
+	_, err := store.ClearQueueWithAudit(ctx, []string{"pending"}, failingAdminAuditEntry("queue_clear"))
+	requireAdminAuditFailure(t, err)
+	clearJob := queueJobByID(t, store, ctx, clearID)
+	if clearJob.Status != db.RefreshStatusPending || clearJob.Name != "clear-audit-rollback" || clearJob.Priority != 2 {
+		t.Fatalf("queue job after failed audited clear = %+v, want original pending job", clearJob)
+	}
+
+	if err := store.CompleteRefresh(ctx, clearID, nil); err != nil {
+		t.Fatalf("CompleteRefresh(purge target) error = %v", err)
+	}
+	_, err = store.PurgeQueueWithAudit(ctx, failingAdminAuditEntry("queue_purge"))
+	requireAdminAuditFailure(t, err)
+	purgeJob := queueJobByID(t, store, ctx, clearID)
+	if purgeJob.Status != db.RefreshStatusDone || purgeJob.Name != "clear-audit-rollback" || purgeJob.ProcessedAt == nil {
+		t.Fatalf("queue job after failed audited purge = %+v, want original done job", purgeJob)
+	}
+	requireNoAdminAuditRows(t, store, ctx)
+}
+
+func TestSingleQueueJobWithAuditRollsBackOnAuditFailure(t *testing.T) {
+	store, _ := startDockerPostgresStore(t)
+	ctx := context.Background()
+
+	if _, _, err := store.EnqueueRefresh(ctx, &db.RefreshJob{Ecosystem: "npm", Name: "priority-audit-rollback", Source: "socket", Priority: 3}); err != nil {
+		t.Fatalf("EnqueueRefresh(priority target) error = %v", err)
+	}
+	priorityID := mustQueueJobID(t, store, ctx, "priority-audit-rollback")
+	err := store.UpdateQueueJobPriorityWithAudit(ctx, priorityID, 0, failingAdminAuditEntry("queue_priority"))
+	requireAdminAuditFailure(t, err)
+	priorityJob := queueJobByID(t, store, ctx, priorityID)
+	if priorityJob.Priority != 3 || priorityJob.Status != db.RefreshStatusPending {
+		t.Fatalf("queue job after failed audited priority update = %+v, want original priority 3 pending job", priorityJob)
+	}
+
+	if _, _, err := store.EnqueueRefresh(ctx, &db.RefreshJob{Ecosystem: "npm", Name: "pause-audit-rollback", Source: "socket", Priority: 1}); err != nil {
+		t.Fatalf("EnqueueRefresh(pause target) error = %v", err)
+	}
+	pauseID := mustQueueJobID(t, store, ctx, "pause-audit-rollback")
+	err = store.PauseQueueJobWithAudit(ctx, pauseID, failingAdminAuditEntry("queue_pause"))
+	requireAdminAuditFailure(t, err)
+	pauseJob := queueJobByID(t, store, ctx, pauseID)
+	if pauseJob.Status != db.RefreshStatusPending {
+		t.Fatalf("queue job after failed audited pause = %+v, want pending job", pauseJob)
+	}
+
+	if _, _, err := store.EnqueueRefresh(ctx, &db.RefreshJob{Ecosystem: "npm", Name: "resume-audit-rollback", Source: "socket", Priority: 1}); err != nil {
+		t.Fatalf("EnqueueRefresh(resume target) error = %v", err)
+	}
+	resumeID := mustQueueJobID(t, store, ctx, "resume-audit-rollback")
+	if err := store.PauseQueueJob(ctx, resumeID); err != nil {
+		t.Fatalf("PauseQueueJob(resume target) error = %v", err)
+	}
+	err = store.ResumeQueueJobWithAudit(ctx, resumeID, failingAdminAuditEntry("queue_resume"))
+	requireAdminAuditFailure(t, err)
+	resumeJob := queueJobByID(t, store, ctx, resumeID)
+	if resumeJob.Status != db.RefreshStatusPaused {
+		t.Fatalf("queue job after failed audited resume = %+v, want paused job", resumeJob)
+	}
+
+	if _, _, err := store.EnqueueRefresh(ctx, &db.RefreshJob{Ecosystem: "npm", Name: "retry-audit-rollback", Source: "socket", Priority: 1}); err != nil {
+		t.Fatalf("EnqueueRefresh(retry target) error = %v", err)
+	}
+	retryID := mustQueueJobID(t, store, ctx, "retry-audit-rollback")
+	if err := store.CompleteRefresh(ctx, retryID, errors.New("upstream failed")); err != nil {
+		t.Fatalf("CompleteRefresh(retry target) error = %v", err)
+	}
+	err = store.RetryQueueJobWithAudit(ctx, retryID, failingAdminAuditEntry("queue_retry"))
+	requireAdminAuditFailure(t, err)
+	retryJob := queueJobByID(t, store, ctx, retryID)
+	if retryJob.Status != db.RefreshStatusError || retryJob.Error == "" || retryJob.ProcessedAt == nil {
+		t.Fatalf("queue job after failed audited retry = %+v, want original error job", retryJob)
+	}
+	requireNoAdminAuditRows(t, store, ctx)
+}
+
 type queueAuditJobFixture struct {
 	ID          int    `json:"id"`
 	Ecosystem   string `json:"ecosystem"`
@@ -2342,6 +3824,87 @@ type queueAuditJobFixture struct {
 	RequestedAt string `json:"requested_at"`
 	ProcessedAt string `json:"processed_at"`
 	Error       string `json:"error"`
+}
+
+type queueTransitionAuditExpectation struct {
+	action            string
+	jobID             int
+	name              string
+	previousStatus    string
+	newStatus         string
+	previousPriority  int
+	newPriority       int
+	wantRedactedError bool
+}
+
+func queueAuditEntry(action string, jobID int) *db.AdminAuditEntry {
+	return &db.AdminAuditEntry{
+		Action:  action,
+		Details: json.RawMessage(fmt.Sprintf(`{"job_id":"%d"}`, jobID)),
+		IP:      "127.0.0.1",
+	}
+}
+
+func assertQueueTransitionAudit(t *testing.T, store *Store, ctx context.Context, want queueTransitionAuditExpectation) {
+	t.Helper()
+
+	audit, err := store.ListAdminAuditLog(ctx, 1)
+	if err != nil {
+		t.Fatalf("ListAdminAuditLog(%s) error = %v", want.action, err)
+	}
+	if len(audit) != 1 {
+		t.Fatalf("ListAdminAuditLog(%s) = %d rows, want 1", want.action, len(audit))
+	}
+	entry := audit[0]
+	if entry.Action != want.action {
+		t.Fatalf("latest audit action = %q, want %q", entry.Action, want.action)
+	}
+	details := queueAuditDetailsFromEntry(t, entry)
+	for key, value := range map[string]string{
+		"job_id":            strconv.Itoa(want.jobID),
+		"previous_status":   want.previousStatus,
+		"new_status":        want.newStatus,
+		"previous_priority": strconv.Itoa(want.previousPriority),
+		"new_priority":      strconv.Itoa(want.newPriority),
+	} {
+		if details[key] != value {
+			t.Fatalf("%s detail %s = %q, want %q; details=%v", want.action, key, details[key], value, details)
+		}
+	}
+
+	previous := queueAuditJobsFromEntry(t, entry, "previous_job")
+	next := queueAuditJobsFromEntry(t, entry, "new_job")
+	if len(previous) != 1 || len(next) != 1 {
+		t.Fatalf("%s audit snapshots previous/new = %d/%d, want 1/1", want.action, len(previous), len(next))
+	}
+	before := previous[0]
+	after := next[0]
+	if before.ID != want.jobID || after.ID != want.jobID || before.Name != want.name || after.Name != want.name {
+		t.Fatalf("%s snapshots = %+v -> %+v, want job %d %q", want.action, before, after, want.jobID, want.name)
+	}
+	if before.Ecosystem != "npm" || after.Ecosystem != "npm" || before.Source != "socket" || after.Source != "socket" {
+		t.Fatalf("%s snapshots missing package identity: %+v -> %+v", want.action, before, after)
+	}
+	if before.Status != want.previousStatus || after.Status != want.newStatus || before.Priority != want.previousPriority || after.Priority != want.newPriority {
+		t.Fatalf("%s snapshots state = %+v -> %+v, want status %s->%s priority %d->%d", want.action, before, after, want.previousStatus, want.newStatus, want.previousPriority, want.newPriority)
+	}
+	if before.RequestedAt == "" || after.RequestedAt == "" {
+		t.Fatalf("%s snapshots missing requested_at: %+v -> %+v", want.action, before, after)
+	}
+	if want.wantRedactedError {
+		if strings.Contains(before.Error, "query-secret") {
+			t.Fatalf("%s previous error leaked secret: %q", want.action, before.Error)
+		}
+		if !strings.Contains(before.Error, "token=[redacted]") {
+			t.Fatalf("%s previous error = %q, want redacted token marker", want.action, before.Error)
+		}
+		if before.ProcessedAt == "" {
+			t.Fatalf("%s previous retry snapshot missing processed_at: %+v", want.action, before)
+		}
+		if after.Error != "" || after.ProcessedAt != "" {
+			t.Fatalf("%s retry new snapshot = %+v, want cleared error and processed_at", want.action, after)
+		}
+	}
 }
 
 func queueAuditJobsFromEntry(t *testing.T, entry db.AdminAuditLogEntry, key string) []queueAuditJobFixture {
@@ -2360,6 +3923,45 @@ func queueAuditJobsFromEntry(t *testing.T, entry db.AdminAuditLogEntry, key stri
 		t.Fatalf("audit detail %q unmarshal error = %v; raw=%s", key, err, raw)
 	}
 	return jobs
+}
+
+func queueAuditDetailsFromEntry(t *testing.T, entry db.AdminAuditLogEntry) map[string]string {
+	t.Helper()
+
+	details := map[string]string{}
+	if err := json.Unmarshal(entry.Details, &details); err != nil {
+		t.Fatalf("audit details unmarshal error = %v; raw=%s", err, entry.Details)
+	}
+	return details
+}
+
+func assertQueueAuditSample(t *testing.T, store *Store, ctx context.Context, jobsKey string, totalJobs, wantSampleLimit int) {
+	t.Helper()
+
+	audit, err := store.ListAdminAuditLog(ctx, 1)
+	if err != nil {
+		t.Fatalf("ListAdminAuditLog(%s) error = %v", jobsKey, err)
+	}
+	details := queueAuditDetailsFromEntry(t, audit[0])
+	if details["total_deleted"] != strconv.Itoa(totalJobs) {
+		t.Fatalf("total_deleted = %q, want %d; details=%v", details["total_deleted"], totalJobs, details)
+	}
+	if details["sample_count"] != strconv.Itoa(wantSampleLimit) {
+		t.Fatalf("sample_count = %q, want %d; details=%v", details["sample_count"], wantSampleLimit, details)
+	}
+	if details["truncated"] != "true" {
+		t.Fatalf("truncated = %q, want true; details=%v", details["truncated"], details)
+	}
+
+	jobs := queueAuditJobsFromEntry(t, audit[0], jobsKey)
+	if len(jobs) != wantSampleLimit {
+		t.Fatalf("%s len = %d, want %d", jobsKey, len(jobs), wantSampleLimit)
+	}
+	for _, job := range jobs {
+		if strings.Contains(job.Error, "query-secret") {
+			t.Fatalf("%s leaked secret in sampled error: %+v", jobsKey, job)
+		}
+	}
 }
 
 func mustQueueJobID(t *testing.T, store *Store, ctx context.Context, name string) int {

@@ -105,3 +105,31 @@ name = "private-cargo-token"
 		})
 	}
 }
+
+func TestDecodeStrictJSONReportsSyntaxLocationWithoutEchoingContent(t *testing.T) {
+	t.Parallel()
+
+	input := `{
+  "lockfileVersion": 3,
+  "packages": {
+    "node_modules/private-json-location-token": {"version": "1.0.0"}
+  },
+  !
+}
+`
+
+	_, err := NewNPMParser().Parse(strings.NewReader(input))
+	if err == nil {
+		t.Fatal("Parse() error = nil, want syntax error with location")
+	}
+
+	msg := err.Error()
+	for _, want := range []string{"line 6", "column 3"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("Parse() error = %q, want %q", msg, want)
+		}
+	}
+	if strings.Contains(msg, "private-json-location-token") {
+		t.Fatalf("Parse() error leaked dependency content: %q", msg)
+	}
+}

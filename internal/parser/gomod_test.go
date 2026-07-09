@@ -300,17 +300,55 @@ require (
 	}
 }
 
-// assertPackagesEco verifies ecosystem and version for each package.
+func TestGoModParserReportsMalformedInlineRequireBlockEntry(t *testing.T) {
+	t.Parallel()
+
+	input := `module example.com/mymodule
+
+go 1.26
+
+require (github.com/bad/inline
+	github.com/good/pkg v1.2.3
+)
+`
+	pkgs, err := NewGoModParser().Parse(strings.NewReader(input))
+	if err == nil {
+		t.Fatal("Parse() error = nil, want malformed inline require error")
+	}
+	if !strings.Contains(err.Error(), "go.mod:5: malformed require line") {
+		t.Fatalf("Parse() error = %v, want line 5 malformed require diagnostic", err)
+	}
+	if len(pkgs) != 1 {
+		t.Fatalf("got %d packages, want valid package after malformed inline require", len(pkgs))
+	}
+	if pkgs[0].Name != "github.com/good/pkg" || pkgs[0].Version != "v1.2.3" {
+		t.Fatalf("valid package = %+v, want github.com/good/pkg v1.2.3", pkgs[0])
+	}
+}
+
+// assertPackagesEco verifies ecosystem and exact expected names/versions.
 func assertPackagesEco(t *testing.T, pkgs []domain.Package, wantPkgs map[string]string, eco domain.Ecosystem) {
 	t.Helper()
+	seen := make(map[string]struct{}, len(pkgs))
 	for _, pkg := range pkgs {
 		if pkg.Ecosystem != eco {
 			t.Errorf("package %q has ecosystem %q, want %q", pkg.Name, pkg.Ecosystem, eco)
+		}
+		if wantPkgs == nil {
+			continue
 		}
 		if wantVer, ok := wantPkgs[pkg.Name]; ok {
 			if pkg.Version != wantVer {
 				t.Errorf("package %q version = %q, want %q", pkg.Name, pkg.Version, wantVer)
 			}
+			seen[pkg.Name] = struct{}{}
+		} else {
+			t.Errorf("unexpected package %q version %q", pkg.Name, pkg.Version)
+		}
+	}
+	for name, version := range wantPkgs {
+		if _, ok := seen[name]; !ok {
+			t.Errorf("missing package %q version %q", name, version)
 		}
 	}
 }

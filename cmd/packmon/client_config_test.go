@@ -183,6 +183,78 @@ func TestLoadCLIConfigCanSkipAutoDiscoveredProjectConfig(t *testing.T) {
 	}
 }
 
+func TestLoadCLIConfigRejectsOversizedAutoProjectConfig(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+
+	if err := os.WriteFile(defaultCLIConfigFile, oversizedAutoProjectConfigYAML(), 0o600); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+
+	_, _, err := loadCLIConfig("")
+	if err == nil {
+		t.Fatal("loadCLIConfig() error = nil, want oversized project config rejection")
+	}
+	if !strings.Contains(err.Error(), "project config") || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("loadCLIConfig() error = %v, want clear project config size error", err)
+	}
+}
+
+func TestLoadCLIConfigSkipProjectConfigIgnoresOversizedAutoProjectConfig(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("home: %v", err)
+	}
+	userCfgDir := filepath.Join(home, ".packmon", "config")
+	if err := os.MkdirAll(userCfgDir, 0o750); err != nil {
+		t.Fatalf("mkdir user config dir: %v", err)
+	}
+	userPath := filepath.Join(userCfgDir, "packmon.yaml")
+	if err := os.WriteFile(userPath, []byte("fail_on: HIGH\n"), 0o600); err != nil {
+		t.Fatalf("write user config: %v", err)
+	}
+	if err := os.WriteFile(defaultCLIConfigFile, oversizedAutoProjectConfigYAML(), 0o600); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+
+	cfg, sourcePath, err := loadCLIConfigWithOptions("", cliConfigLoadOptions{SkipProjectConfig: true})
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if sourcePath != userPath {
+		t.Fatalf("sourcePath = %q, want user-global config %q", sourcePath, userPath)
+	}
+	if cfg.FailOn != "HIGH" {
+		t.Fatalf("fail_on = %q, want user-global value when oversized project config is skipped", cfg.FailOn)
+	}
+}
+
+func TestLoadCLIConfigLoadsSmallAutoProjectConfig(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+
+	if err := os.WriteFile(defaultCLIConfigFile, []byte("fail_on: LOW\necosystems: [npm]\n"), 0o600); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+
+	cfg, sourcePath, err := loadCLIConfig("")
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("expected project config, got nil")
+	}
+	if cfg.FailOn != "LOW" {
+		t.Fatalf("fail_on = %q, want LOW", cfg.FailOn)
+	}
+	if got := strings.Join(cfg.Ecosystems, ","); got != "npm" {
+		t.Fatalf("ecosystems = %q, want npm", got)
+	}
+	if !filepath.IsAbs(sourcePath) || filepath.Base(sourcePath) != defaultCLIConfigFile {
+		t.Fatalf("sourcePath = %q, want absolute project config path", sourcePath)
+	}
+}
+
 func TestLoadCLIConfigAutoProjectCannotOverrideSensitiveUserConfig(t *testing.T) {
 	isolateCLIConfigDiscovery(t)
 
@@ -203,6 +275,7 @@ func TestLoadCLIConfigAutoProjectCannotOverrideSensitiveUserConfig(t *testing.T)
 		"db:\n  path: " + strconvQuoteForYAML(trustedDB) + "\n" +
 		"webhook:\n  url: \"https://trusted.example/hook\"\n  secret: trusted-hook-secret\n" +
 		"output:\n  format: json\n  file: trusted-result.json\n" +
+		"registries:\n  npm_registry_base_url: \"https://npm-trusted.example/registry\"\n  pypi_api_base_url: \"https://pypi-trusted.example/pypi\"\n  rubygems_api_base_url: \"https://rubygems-trusted.example/api/v1/gems\"\n  cargo_registry_api_base_url: \"https://cargo-trusted.example/api/v1/crates\"\n  cocoapods_trunk_api_base_url: \"https://cocoapods-trusted.example/api/v1/pods\"\n  composer_repository_base_url: \"https://composer-trusted.example/p2\"\n  go_proxy_url: \"https://go-trusted.example\"\n  maven_repository_base_url: \"https://maven-trusted.example/repository/maven-public\"\n  docker_registry_mirrors:\n    docker.io: \"https://docker-trusted.example/dockerhub\"\n    ghcr.io: \"https://ghcr-trusted.example\"\n  swiftpm_git_allowed_hosts:\n    - git-trusted.example\n    - gitlab-trusted.example\n  cran_mirror_url: \"https://cran-trusted.example\"\n  pub_hosted_url: \"https://pub-trusted.example\"\n  hex_api_base_url: \"https://hex-trusted.example/api\"\n  nuget_v3_base_url: \"https://nuget-trusted.example/v3-flatcontainer\"\n" +
 		"send_repo_metadata: false\n" +
 		"fail_on: HIGH\n"
 	if err := os.WriteFile(filepath.Join(userCfgDir, "packmon.yaml"), []byte(userCfg), 0o600); err != nil {
@@ -222,6 +295,23 @@ webhook:
 output:
   format: html
   file: ../evil-result.html
+registries:
+  npm_registry_base_url: "https://npm-evil.example/registry"
+  pypi_api_base_url: "https://pypi-evil.example/pypi"
+  rubygems_api_base_url: "https://rubygems-evil.example/api/v1/gems"
+  cargo_registry_api_base_url: "https://cargo-evil.example/api/v1/crates"
+  cocoapods_trunk_api_base_url: "https://cocoapods-evil.example/api/v1/pods"
+  composer_repository_base_url: "https://composer-evil.example/p2"
+  go_proxy_url: "https://go-evil.example"
+  maven_repository_base_url: "https://maven-evil.example/repository/maven-public"
+  docker_registry_mirrors:
+    docker.io: "https://docker-evil.example/dockerhub"
+  swiftpm_git_allowed_hosts:
+    - git-evil.example
+  cran_mirror_url: "https://cran-evil.example"
+  pub_hosted_url: "https://pub-evil.example"
+  hex_api_base_url: "https://hex-evil.example/api"
+  nuget_v3_base_url: "https://nuget-evil.example/v3-flatcontainer"
 send_repo_metadata: true
 fail_on: LOW
 repos:
@@ -258,6 +348,23 @@ repos:
 	}
 	if cfg.Output.Format != "json" || cfg.Output.File != "trusted-result.json" {
 		t.Fatalf("trusted output config was overwritten: %+v", cfg.Output)
+	}
+	if cfg.Registries.NPMRegistryBaseURL != "https://npm-trusted.example/registry" ||
+		cfg.Registries.PyPIAPIBaseURL != "https://pypi-trusted.example/pypi" ||
+		cfg.Registries.RubyGemsAPIBaseURL != "https://rubygems-trusted.example/api/v1/gems" ||
+		cfg.Registries.CargoRegistryAPIBaseURL != "https://cargo-trusted.example/api/v1/crates" ||
+		cfg.Registries.CocoaPodsTrunkAPIBaseURL != "https://cocoapods-trusted.example/api/v1/pods" ||
+		cfg.Registries.ComposerRepositoryBaseURL != "https://composer-trusted.example/p2" ||
+		cfg.Registries.GoModuleProxyURL != "https://go-trusted.example" ||
+		cfg.Registries.MavenRepositoryBaseURL != "https://maven-trusted.example/repository/maven-public" ||
+		cfg.Registries.DockerRegistryMirrors["registry-1.docker.io"] != "https://docker-trusted.example/dockerhub" ||
+		cfg.Registries.DockerRegistryMirrors["ghcr.io"] != "https://ghcr-trusted.example" ||
+		strings.Join(cfg.Registries.SwiftPMGitAllowedHosts, ",") != "git-trusted.example,gitlab-trusted.example" ||
+		cfg.Registries.CRANMirrorURL != "https://cran-trusted.example" ||
+		cfg.Registries.PubHostedURL != "https://pub-trusted.example" ||
+		cfg.Registries.HexAPIBaseURL != "https://hex-trusted.example/api" ||
+		cfg.Registries.NuGetV3BaseURL != "https://nuget-trusted.example/v3-flatcontainer" {
+		t.Fatalf("trusted registry mirror config was overwritten: %+v", cfg.Registries)
 	}
 	if cfg.SendRepoMetadata == nil || *cfg.SendRepoMetadata {
 		t.Fatalf("trusted repo-metadata privacy opt-out was overwritten: %+v", cfg.SendRepoMetadata)
@@ -299,6 +406,23 @@ webhook:
 output:
   format: html
   file: ../evil-result.html
+registries:
+  npm_registry_base_url: "https://npm-evil.example/registry"
+  pypi_api_base_url: "https://pypi-evil.example/pypi"
+  rubygems_api_base_url: "https://rubygems-evil.example/api/v1/gems"
+  cargo_registry_api_base_url: "https://cargo-evil.example/api/v1/crates"
+  cocoapods_trunk_api_base_url: "https://cocoapods-evil.example/api/v1/pods"
+  composer_repository_base_url: "https://composer-evil.example/p2"
+  go_proxy_url: "https://go-evil.example"
+  maven_repository_base_url: "https://maven-evil.example/repository/maven-public"
+  docker_registry_mirrors:
+    docker.io: "https://docker-evil.example/dockerhub"
+  swiftpm_git_allowed_hosts:
+    - git-evil.example
+  cran_mirror_url: "https://cran-evil.example"
+  pub_hosted_url: "https://pub-evil.example"
+  hex_api_base_url: "https://hex-evil.example/api"
+  nuget_v3_base_url: "https://nuget-evil.example/v3-flatcontainer"
 send_repo_metadata: false
 mode: remote
 repos:
@@ -329,8 +453,19 @@ repos:
 	if cfg.Webhook.URL != "" || cfg.Webhook.Secret != "" {
 		t.Fatalf("auto project webhook fields were trusted: %+v", cfg.Webhook)
 	}
-	if cfg.Output.File != "" {
-		t.Fatalf("auto project output.file = %q, want ignored", cfg.Output.File)
+	if cfg.Output.Format != "" || cfg.Output.File != "" {
+		t.Fatalf("auto project output config was trusted: %+v", cfg.Output)
+	}
+	if cfg.Registries.NPMRegistryBaseURL != "" || cfg.Registries.PyPIAPIBaseURL != "" ||
+		cfg.Registries.RubyGemsAPIBaseURL != "" || cfg.Registries.CargoRegistryAPIBaseURL != "" ||
+		cfg.Registries.CocoaPodsTrunkAPIBaseURL != "" || cfg.Registries.ComposerRepositoryBaseURL != "" ||
+		cfg.Registries.GoModuleProxyURL != "" || cfg.Registries.MavenRepositoryBaseURL != "" ||
+		len(cfg.Registries.DockerRegistryMirrors) != 0 ||
+		len(cfg.Registries.SwiftPMGitAllowedHosts) != 0 ||
+		cfg.Registries.CRANMirrorURL != "" || cfg.Registries.PubHostedURL != "" ||
+		cfg.Registries.HexAPIBaseURL != "" ||
+		cfg.Registries.NuGetV3BaseURL != "" {
+		t.Fatalf("auto project registry mirror config was trusted: %+v", cfg.Registries)
 	}
 	if cfg.SendRepoMetadata == nil || *cfg.SendRepoMetadata {
 		t.Fatalf("auto project send_repo_metadata=false should be preserved: %+v", cfg.SendRepoMetadata)
@@ -469,6 +604,301 @@ func TestLoadCLIConfigValidationErrors(t *testing.T) {
 	}
 }
 
+func TestOverlayCLIConnectionConfigPreservesUnsetFields(t *testing.T) {
+	t.Parallel()
+
+	allowHTTP := true
+	dst := &cliConfig{
+		Server:            "https://base.example",
+		APIKey:            "base-key",
+		APIKeyEnv:         "PACKMON_BASE_KEY",
+		CACert:            "base-ca.pem",
+		InsecureAllowHTTP: boolPtr(false),
+		RequireRemote:     boolPtr(false),
+	}
+	src := cliConfig{
+		Server:            "https://override.example",
+		APIKeyEnv:         "PACKMON_OVERRIDE_KEY",
+		InsecureAllowHTTP: &allowHTTP,
+	}
+
+	overlayCLIConnectionConfig(dst, src)
+
+	if dst.Server != "https://override.example" {
+		t.Fatalf("server = %q, want override", dst.Server)
+	}
+	if dst.APIKey != "base-key" {
+		t.Fatalf("api_key = %q, want base retained", dst.APIKey)
+	}
+	if dst.APIKeyEnv != "PACKMON_OVERRIDE_KEY" {
+		t.Fatalf("api_key_env = %q, want override", dst.APIKeyEnv)
+	}
+	if dst.CACert != "base-ca.pem" {
+		t.Fatalf("cacert = %q, want base retained", dst.CACert)
+	}
+	if dst.InsecureAllowHTTP == nil || !*dst.InsecureAllowHTTP {
+		t.Fatalf("insecure_allow_http = %+v, want true override", dst.InsecureAllowHTTP)
+	}
+	if dst.RequireRemote == nil || *dst.RequireRemote {
+		t.Fatalf("require_remote = %+v, want base false retained", dst.RequireRemote)
+	}
+}
+
+func TestOverlayCLIScanPolicyConfigCopiesConfiguredFields(t *testing.T) {
+	t.Parallel()
+
+	dst := &cliConfig{
+		Mode:       "local",
+		FailOn:     "HIGH",
+		Timeout:    45,
+		Ecosystems: []string{"npm"},
+		IncludeDev: boolPtr(false),
+	}
+	src := cliConfig{
+		Mode:       "remote",
+		FailOn:     "LOW",
+		Ecosystems: []string{"pypi", "go"},
+		IncludeDev: boolPtr(true),
+	}
+
+	overlayCLIScanPolicyConfig(dst, src)
+	src.Ecosystems[0] = "mutated"
+
+	if dst.Mode != "remote" || dst.FailOn != "LOW" {
+		t.Fatalf("scan policy strings = mode %q fail_on %q, want remote/LOW", dst.Mode, dst.FailOn)
+	}
+	if dst.Timeout != 45 {
+		t.Fatalf("timeout = %d, want base retained for zero source timeout", dst.Timeout)
+	}
+	if got := strings.Join(dst.Ecosystems, ","); got != "pypi,go" {
+		t.Fatalf("ecosystems = %q, want copied pypi,go", got)
+	}
+	if dst.IncludeDev == nil || !*dst.IncludeDev {
+		t.Fatalf("include_dev = %+v, want true override", dst.IncludeDev)
+	}
+}
+
+func TestOverlayCLISectionHelpersPreserveSparseSemantics(t *testing.T) {
+	t.Parallel()
+
+	dst := &cliConfig{
+		SendRepoMetadata: boolPtr(false),
+		Webhook:          cliWebhookConfig{URL: "https://base.example/hook", Secret: "base-secret"},
+		Output:           cliOutputConfig{Format: "json", File: "base.json"},
+		Log:              cliLogConfig{Level: "INFO", Format: "text", File: "base.log"},
+		Hook:             cliHookConfig{Type: "pre-push", FailOn: "HIGH"},
+		DB:               cliDBConfig{Path: "base-db", SyncSource: "server"},
+		Registries: cliRegistryConfig{
+			NPMRegistryBaseURL:        "https://npm-base.example/registry",
+			PyPIAPIBaseURL:            "https://pypi-base.example/pypi",
+			RubyGemsAPIBaseURL:        "https://rubygems-base.example/api/v1/gems",
+			CargoRegistryAPIBaseURL:   "https://cargo-base.example/api/v1/crates",
+			CocoaPodsTrunkAPIBaseURL:  "https://cocoapods-base.example/api/v1/pods",
+			ComposerRepositoryBaseURL: "https://composer-base.example/p2",
+			GoModuleProxyURL:          "https://go-base.example",
+			MavenRepositoryBaseURL:    "https://maven-base.example/repository/maven-public",
+			DockerRegistryMirrors:     map[string]string{"docker.io": "https://docker-base.example/dockerhub"},
+			SwiftPMGitAllowedHosts:    []string{"git-base.example"},
+			CRANMirrorURL:             "https://cran-base.example",
+			PubHostedURL:              "https://pub-base.example",
+			HexAPIBaseURL:             "https://hex-base.example/api",
+			NuGetV3BaseURL:            "https://nuget-base.example/v3",
+		},
+		Repos: []cliRepoConfig{{Name: "base", Path: "base-path"}},
+	}
+	src := cliConfig{
+		SendRepoMetadata: boolPtr(true),
+		Webhook:          cliWebhookConfig{Secret: "override-secret"},
+		Output:           cliOutputConfig{File: "override.json"},
+		Log:              cliLogConfig{Format: "json"},
+		Hook:             cliHookConfig{FailOn: "LOW"},
+		DB:               cliDBConfig{SyncSource: "server"},
+		Registries: cliRegistryConfig{
+			PyPIAPIBaseURL:            "https://pypi-override.example/pypi",
+			CocoaPodsTrunkAPIBaseURL:  "https://cocoapods-override.example/api/v1/pods",
+			ComposerRepositoryBaseURL: "https://composer-override.example/p2",
+			MavenRepositoryBaseURL:    "https://maven-override.example/repository/maven-public",
+			DockerRegistryMirrors:     map[string]string{"ghcr.io": "https://ghcr-override.example"},
+			SwiftPMGitAllowedHosts:    []string{"git-override.example"},
+			PubHostedURL:              "https://pub-override.example",
+			NuGetV3BaseURL:            "https://nuget-override.example/v3",
+		},
+		Repos: []cliRepoConfig{{Name: "override", Path: "override-path"}},
+	}
+
+	overlayCLIRepoMetadataConfig(dst, src)
+	overlayCLIWebhookConfig(&dst.Webhook, src.Webhook)
+	overlayCLIOutputConfig(&dst.Output, src.Output)
+	overlayCLILogConfig(&dst.Log, src.Log)
+	overlayCLIHookConfig(&dst.Hook, src.Hook)
+	overlayCLIDBConfig(&dst.DB, src.DB)
+	overlayCLIRegistryConfig(&dst.Registries, src.Registries)
+	overlayCLIReposConfig(dst, src)
+	src.Repos[0].Name = "mutated"
+
+	if dst.SendRepoMetadata == nil || !*dst.SendRepoMetadata {
+		t.Fatalf("send_repo_metadata = %+v, want true override", dst.SendRepoMetadata)
+	}
+	if dst.Webhook.URL != "https://base.example/hook" || dst.Webhook.Secret != "override-secret" {
+		t.Fatalf("webhook = %+v, want base URL and override secret", dst.Webhook)
+	}
+	if dst.Output.Format != "json" || dst.Output.File != "override.json" {
+		t.Fatalf("output = %+v, want base format and override file", dst.Output)
+	}
+	if dst.Log.Level != "INFO" || dst.Log.Format != "json" || dst.Log.File != "base.log" {
+		t.Fatalf("log = %+v, want sparse overlay", dst.Log)
+	}
+	if dst.Hook.Type != "pre-push" || dst.Hook.FailOn != "LOW" {
+		t.Fatalf("hook = %+v, want base type and override fail_on", dst.Hook)
+	}
+	if dst.DB.Path != "base-db" || dst.DB.SyncSource != "server" {
+		t.Fatalf("db = %+v, want base path and override sync source", dst.DB)
+	}
+	if dst.Registries.NPMRegistryBaseURL != "https://npm-base.example/registry" ||
+		dst.Registries.PyPIAPIBaseURL != "https://pypi-override.example/pypi" ||
+		dst.Registries.RubyGemsAPIBaseURL != "https://rubygems-base.example/api/v1/gems" ||
+		dst.Registries.CargoRegistryAPIBaseURL != "https://cargo-base.example/api/v1/crates" ||
+		dst.Registries.CocoaPodsTrunkAPIBaseURL != "https://cocoapods-override.example/api/v1/pods" ||
+		dst.Registries.ComposerRepositoryBaseURL != "https://composer-override.example/p2" ||
+		dst.Registries.GoModuleProxyURL != "https://go-base.example" ||
+		dst.Registries.MavenRepositoryBaseURL != "https://maven-override.example/repository/maven-public" ||
+		dst.Registries.DockerRegistryMirrors["docker.io"] != "https://docker-base.example/dockerhub" ||
+		dst.Registries.DockerRegistryMirrors["ghcr.io"] != "https://ghcr-override.example" ||
+		strings.Join(dst.Registries.SwiftPMGitAllowedHosts, ",") != "git-base.example,git-override.example" ||
+		dst.Registries.CRANMirrorURL != "https://cran-base.example" ||
+		dst.Registries.PubHostedURL != "https://pub-override.example" ||
+		dst.Registries.HexAPIBaseURL != "https://hex-base.example/api" ||
+		dst.Registries.NuGetV3BaseURL != "https://nuget-override.example/v3" {
+		t.Fatalf("registries = %+v, want sparse overlay", dst.Registries)
+	}
+	if len(dst.Repos) != 1 || dst.Repos[0].Name != "override" || dst.Repos[0].Path != "override-path" {
+		t.Fatalf("repos = %+v, want copied override repos", dst.Repos)
+	}
+}
+
+func TestNormalizeTopLevelCLIConfigOnlyHandlesTopLevelScope(t *testing.T) {
+	t.Parallel()
+
+	baseDir := t.TempDir()
+	cfg := &cliConfig{
+		Server:    " https://packmon.example ",
+		APIKey:    " inline-key ",
+		APIKeyEnv: " PACKMON_API_KEY ",
+		Mode:      " Remote ",
+		FailOn:    " high ",
+		Ecosystems: []string{
+			" NPM ",
+			"",
+			"Docker",
+		},
+		CACert: " ca.pem ",
+		Webhook: cliWebhookConfig{
+			URL:    " https://hooks.example/packmon ",
+			Secret: " webhook-secret ",
+		},
+		Output: cliOutputConfig{
+			Format: " JSON ",
+			File:   " result.json ",
+		},
+		Log: cliLogConfig{
+			Level:  " warn ",
+			Format: " JSON ",
+		},
+		Hook: cliHookConfig{
+			Type:   " pre-push ",
+			FailOn: " low ",
+		},
+		DB: cliDBConfig{
+			Path:       " ./state ",
+			SyncSource: " server ",
+		},
+		Repos: []cliRepoConfig{{Name: " app "}},
+	}
+
+	if err := normalizeTopLevelCLIConfig(cfg, baseDir); err != nil {
+		t.Fatalf("normalizeTopLevelCLIConfig() error = %v", err)
+	}
+
+	if cfg.Server != "https://packmon.example" || cfg.APIKey != "inline-key" || cfg.APIKeyEnv != "PACKMON_API_KEY" {
+		t.Fatalf("top-level connection fields were not normalized: %+v", cfg)
+	}
+	if cfg.Mode != "remote" || cfg.FailOn != "HIGH" {
+		t.Fatalf("top-level scan policy = mode %q fail_on %q, want remote/HIGH", cfg.Mode, cfg.FailOn)
+	}
+	if got := strings.Join(cfg.Ecosystems, ","); got != "npm,docker" {
+		t.Fatalf("ecosystems = %q, want npm,docker", got)
+	}
+	if cfg.Webhook.URL != "https://hooks.example/packmon" || cfg.Webhook.Secret != "webhook-secret" {
+		t.Fatalf("webhook fields were not normalized: %+v", cfg.Webhook)
+	}
+	if cfg.Output.Format != "json" || cfg.Output.File != "result.json" {
+		t.Fatalf("output fields were not normalized: %+v", cfg.Output)
+	}
+	if cfg.Log.Level != "WARN" || cfg.Log.Format != "json" {
+		t.Fatalf("log fields were not normalized: %+v", cfg.Log)
+	}
+	if cfg.Hook.Type != "pre-push" || cfg.Hook.FailOn != "LOW" {
+		t.Fatalf("hook fields were not normalized: %+v", cfg.Hook)
+	}
+	if cfg.DB.Path != filepath.Join(baseDir, "state") || cfg.DB.SyncSource != "server" {
+		t.Fatalf("db fields were not normalized: %+v", cfg.DB)
+	}
+	if cfg.Repos[0].Name != " app " {
+		t.Fatalf("repo scope was normalized by top-level helper: %+v", cfg.Repos[0])
+	}
+}
+
+func TestNormalizeCLIRepoConfigHandlesRepoScope(t *testing.T) {
+	t.Parallel()
+
+	baseDir := t.TempDir()
+	repo := &cliRepoConfig{
+		Path:      " ./service ",
+		Server:    " https://repo.example ",
+		APIKey:    " repo-key ",
+		APIKeyEnv: " PACKMON_REPO_KEY ",
+		Mode:      " Local ",
+		FailOn:    " medium ",
+		Ecosystems: []string{
+			" PyPI ",
+			"",
+		},
+		Timeout: 30,
+		Webhook: cliWebhookConfig{
+			URL:    " https://repo.example/hook ",
+			Secret: " repo-secret ",
+		},
+	}
+
+	if err := normalizeCLIRepoConfig(repo, baseDir, 2); err != nil {
+		t.Fatalf("normalizeCLIRepoConfig() error = %v", err)
+	}
+
+	if repo.Name != "service" {
+		t.Fatalf("repo.name = %q, want service derived from path", repo.Name)
+	}
+	if repo.Path != filepath.Join(baseDir, "service") {
+		t.Fatalf("repo.path = %q, want resolved path", repo.Path)
+	}
+	if repo.Server != "https://repo.example" || repo.APIKey != "repo-key" || repo.APIKeyEnv != "PACKMON_REPO_KEY" {
+		t.Fatalf("repo connection fields were not normalized: %+v", repo)
+	}
+	if repo.Mode != "local" || repo.FailOn != "MEDIUM" || repo.Timeout != 30 {
+		t.Fatalf("repo scan policy was not normalized: %+v", repo)
+	}
+	if got := strings.Join(repo.Ecosystems, ","); got != "pypi" {
+		t.Fatalf("repo ecosystems = %q, want pypi", got)
+	}
+	if repo.Webhook.URL != "https://repo.example/hook" || repo.Webhook.Secret != "repo-secret" {
+		t.Fatalf("repo webhook fields were not normalized: %+v", repo.Webhook)
+	}
+
+	missingPath := &cliRepoConfig{Name: "app"}
+	if err := normalizeCLIRepoConfig(missingPath, baseDir, 2); err == nil || !strings.Contains(err.Error(), "repos[2].path is required") {
+		t.Fatalf("normalizeCLIRepoConfig(missing path) error = %v, want repos[2].path is required", err)
+	}
+}
+
 func TestDecodeCLIConfigEmptyDocumentAndFindRepoBranches(t *testing.T) {
 	t.Parallel()
 
@@ -582,9 +1012,6 @@ func TestCLIConfigHelperBranches(t *testing.T) {
 			t.Fatalf("validateOutputConfig(%s) = %v, want %q", tt.name, err, tt.want)
 		}
 	}
-	if err := validateOutputConfig(cliOutputConfig{Format: "html", File: "scan.html"}); err != nil {
-		t.Fatalf("validateOutputConfig(html file) error = %v", err)
-	}
 
 	logCases := []struct {
 		name string
@@ -629,4 +1056,25 @@ func TestCLIConfigHelperBranches(t *testing.T) {
 	if _, err := parseTimeoutSeconds("bad"); err == nil || !strings.Contains(err.Error(), "invalid timeout") {
 		t.Fatalf("parseTimeoutSeconds(bad) error = %v", err)
 	}
+}
+
+func TestOutputConfigUsesScanOutputArtifactRegistry(t *testing.T) {
+	t.Parallel()
+
+	if got := scanOutputConfigFormatList(); got != "table|json|sarif|junit|html" {
+		t.Fatalf("scanOutputConfigFormatList() = %q", got)
+	}
+	for _, format := range scanOutputArtifactFormats() {
+		if err := validateOutputConfig(cliOutputConfig{Format: format, File: "scan." + format}); err != nil {
+			t.Fatalf("validateOutputConfig(%s file) error = %v", format, err)
+		}
+	}
+}
+
+func boolPtr(value bool) *bool {
+	return &value
+}
+
+func oversizedAutoProjectConfigYAML() []byte {
+	return []byte("fail_on: LOW\n" + strings.Repeat("# padding\n", 8*1024))
 }

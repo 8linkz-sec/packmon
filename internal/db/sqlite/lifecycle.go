@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"github.com/8linkz-sec/packmon/internal/ioutils"
 	"strings"
 	"time"
 
@@ -70,7 +71,7 @@ func (s *Store) collectLifecycleReleaseRows(ctx context.Context, chunk localPack
 	if err != nil {
 		return fmt.Errorf("sqlite: query lifecycle releases batch: %w", err)
 	}
-	defer closeSilently(rows)
+	defer ioutils.CloseSilently(rows)
 
 	for rows.Next() {
 		var (

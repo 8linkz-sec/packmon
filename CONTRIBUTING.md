@@ -2,25 +2,33 @@
 
 ## Local Setup
 
-1. Install Go 1.26 or newer.
-2. Build the binaries:
+Install the pinned toolchain from `requirements/packmon-tools.tsv`. The current
+Go toolchain is Go 1.26.4, matching `go.mod` and CI. Run the requirement check
+for the profile you need before building.
 
-```bash
-go build -o packmon ./cmd/packmon
-go build -o packmon-server ./cmd/packmon-server
-```
+Windows PowerShell:
 
-3. Run tests:
-
-```bash
+```powershell
+.\scripts\check-requirements.ps1 -Profile agent
+New-Item -ItemType Directory -Force .build | Out-Null
+go build -o .build\packmon.exe .\cmd\packmon
+go build -o .build\packmon-server.exe .\cmd\packmon-server
 go test -count=1 ./...
 ```
 
-4. Optional integration run:
+Linux/macOS, or WSL on Windows:
 
 ```bash
-make test-integration
+bash scripts/check-requirements.sh --profile agent
+mkdir -p .build
+go build -o .build/packmon ./cmd/packmon
+go build -o .build/packmon-server ./cmd/packmon-server
+go test -count=1 ./...
 ```
+
+`make` is convenient on systems that have it, but it is not required on
+Windows. Use the direct PowerShell commands from `README.md` when `make` is not
+available.
 
 ## Workflow
 
@@ -32,16 +40,105 @@ make test-integration
 - Run `make lint` for `golangci-lint` plus the same tracked-file formatter
   gate.
 - Add or update tests for behavior changes.
-- Do not commit secrets, API keys, or environment dumps.
+- Do not commit secrets, API keys, `.env` values, or environment dumps.
+- Review `docs/secure-coding.md` during onboarding and before
+  security-sensitive changes.
+
+## Testing Conventions
+
+- Put narrow unit tests next to the package that owns the behavior.
+- Use `tests/ci` for repository contracts, release hardening, generated asset
+  checks, and CI-template behavior.
+- Use tagged `tests/integration` tests for Packmon binary plus server/database
+  behavior.
+- Use tagged `tests/e2e` tests for complete CLI workflows.
+- Use `-count=1` in documented verification commands so local results are not
+  satisfied from the Go test cache.
+
+## Documentation Updates
+
+Keep implementation and canonical documentation in the same change:
+
+- Update `DESIGN.md` when requirements, architecture, data flow, operational
+  model, or non-goals change.
+- Update `SECURITY.md` when auth, trust boundaries, logging, crypto,
+  dependency handling, admin behavior, or deployment exposure changes.
+- Update `ARCHITECTURE.md` when runtime surfaces, persistence, deployment
+  boundaries, trust boundaries, or extension points change.
+- Update `README.md` only for user-facing quick-start and common commands.
+- Update `docs/runbook.md` when operator procedures, backup/restore, alerting,
+  upgrade, rotation, or incident response behavior changes.
 
 ## Validation Checklist
 
-- `make fmt`
-- `make lint`
-- `go test -count=1 ./...`
-- `make build`
-- `make build-server`
-- `make test-integration` for server and CLI path changes
+For a small change, run the narrow package tests plus any touched contract
+tests. If you touch web templates, Tailwind classes, or asset inputs, also run
+the generated web asset gate used by CI.
+
+On systems with `make`, the existing wrappers for the Go gates are `make test`,
+`make test-ci`, `make test-integration`, `make test-e2e`, `make lint`, and
+`make security`. For release-facing changes, use the full local gate:
+
+```bash
+bash scripts/bootstrap.sh --profile dev
+npm ci --ignore-scripts
+npm run build:web
+git diff --exit-code -- internal/web/static/tailwind.css internal/web/static/htmx.min.js
+mkdir -p .gotmp
+export GOTMPDIR="$PWD/.gotmp"
+PACKAGES="$(go list ./...)"
+GOSEC_DIRS="$(go list -f '{{.Dir}}' ./...)"
+GOFMT_FILES="$(git ls-files '*.go')"
+gofumpt -extra -l ${GOFMT_FILES}
+go test -count=1 ./...
+go test -count=1 -race -coverprofile=coverage.out ${PACKAGES}
+go run ./tools/checkcoverage -profile=coverage.out -min=79.5
+go vet ./...
+golangci-lint run ./...
+govulncheck ${PACKAGES}
+gosec -nosec-require-rules -nosec-require-justification ${GOSEC_DIRS}
+go build -o .build/packmon ./cmd/packmon
+go build -o .build/packmon-server ./cmd/packmon-server
+PACKMON_TEST_BIN_DIR=.build go test -count=1 -tags integration ./tests/integration
+PACKMON_TEST_BIN_DIR=.build go test -count=1 -tags e2e ./tests/e2e
+```
+
+Windows PowerShell equivalent:
+
+```powershell
+.\scripts\bootstrap.ps1 -Profile dev
+npm ci --ignore-scripts
+npm run build:web
+git diff --exit-code -- internal/web/static/tailwind.css internal/web/static/htmx.min.js
+New-Item -ItemType Directory -Force .gotmp | Out-Null
+$env:GOTMPDIR = (Resolve-Path .\.gotmp).Path
+$packages = go list ./...
+$gosecDirs = go list -f '{{.Dir}}' ./...
+$gofmtFiles = git ls-files '*.go'
+gofumpt -extra -l $gofmtFiles
+go test -count=1 $packages
+go test -count=1 -race '-coverprofile=coverage.out' $packages
+go run ./tools/checkcoverage '-profile=coverage.out' '-min=79.5'
+go vet ./...
+golangci-lint run ./...
+govulncheck $packages
+gosec -nosec-require-rules -nosec-require-justification $gosecDirs
+go build -o .build\packmon.exe .\cmd\packmon
+go build -o .build\packmon-server.exe .\cmd\packmon-server
+$env:PACKMON_TEST_BIN_DIR = ".build"
+go test -count=1 -tags integration .\tests\integration
+go test -count=1 -tags e2e .\tests\e2e
+```
+
+## Pull Requests
+
+- Use a branch name that describes the change area.
+- Keep the PR description focused on behavior, risk, tests run, and required
+  documentation updates.
+- Include generated web assets only when template or Tailwind source changes
+  require them.
+- Wait for required CI before merge and address review comments with follow-up
+  commits instead of rewriting unrelated history.
 
 ## Deployment Files
 
@@ -52,4 +149,5 @@ make test-integration
 
 - Metrics stay on localhost by default.
 - Backup and restore procedures must remain documented in `docs/runbook.md`.
-- Avoid logging filesystem paths, secrets, or raw file content in persistent server logs.
+- Avoid logging filesystem paths, secrets, or raw file content in persistent
+  server logs.

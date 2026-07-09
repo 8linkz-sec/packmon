@@ -75,11 +75,13 @@ func TestAdminFeedsPageShowsRuntimeConfig(t *testing.T) {
 		"disabled",
 		"not configured",
 		"PACKMON_FEED_*",
-		`src="/static/auto-refresh.js"`,
+		`src="/static/auto-refresh.js?v=`,
 		`data-auto-refresh-control`,
 		`data-auto-refresh-event="admin-feed-runtime-refresh"`,
 		`aria-controls="admin-feed-runtime"`,
-		`Pause auto-refresh`,
+		`aria-describedby="admin-feed-runtime-refresh-state"`,
+		`aria-pressed="true"`,
+		`>Auto-refresh</button>`,
 		`hx-trigger="admin-feed-runtime-refresh from:body, feed-runtime-refresh from:body"`,
 		`id="admin-feed-flash"`,
 		`aria-live="polite"`,
@@ -125,16 +127,193 @@ func TestAdminFeedsPageShowsQueueDrivenFeedConfiguredWithoutSyncStatus(t *testin
 	}
 
 	body := rec.Body.String()
-	rlRow := tableRowContaining(body, "ReversingLabs")
+	desktopStart := strings.Index(body, `data-admin-desktop-table="feed-runtime"`)
+	if desktopStart < 0 {
+		t.Fatalf("GET /admin/feeds runtime body missing desktop runtime table\nbody=%s", body)
+	}
+	rlRow := tableRowContaining(body[desktopStart:], "ReversingLabs")
 	if rlRow == "" {
 		t.Fatalf("GET /admin/feeds runtime body missing ReversingLabs row\nbody=%s", body)
 	}
 	if strings.Contains(rlRow, ">pending</span>") {
 		t.Fatalf("ReversingLabs runtime row status = pending, want configured\nrow=%s", rlRow)
 	}
-	configuredStatus := regexp.MustCompile(`(?s)<td class="px-5 py-2">\s*<span[^>]*>configured</span>\s*</td>`)
+	configuredStatus := regexp.MustCompile(`(?s)<td class="px-5 py-2">\s*<span[^>]*>configured</span>.*?</td>`)
 	if !configuredStatus.MatchString(rlRow) {
 		t.Fatalf("ReversingLabs runtime row missing configured status\nrow=%s", rlRow)
+	}
+}
+
+func TestAdminFeedsSaveAndResetFormsUseSubmitLocks(t *testing.T) {
+	store := newNoopStore()
+	if err := store.UpsertFeedConfig(context.Background(), &db.FeedConfig{
+		FeedName: "vulncheck",
+		Enabled:  true,
+		Mode:     "self",
+		APIKey:   testFeedToken(),
+	}); err != nil {
+		t.Fatalf("UpsertFeedConfig() error = %v", err)
+	}
+	handler, sm := newAdminTestHandler(t, store, testAdminConfig())
+	req := newAuthenticatedAdminRequest(t, sm, http.MethodGet, "/admin/feeds")
+	rec := httptest.NewRecorder()
+
+	handler.HandleAdminFeeds(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /admin/feeds status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	feedStart := strings.Index(body, `data-feed-key="vulncheck"`)
+	if feedStart < 0 {
+		t.Fatalf("GET /admin/feeds body missing VulnCheck feed section\nbody=%s", body)
+	}
+	feedEnd := strings.Index(body[feedStart+1:], `data-feed-key="`)
+	if feedEnd < 0 {
+		feedEnd = len(body) - feedStart
+	} else {
+		feedEnd++
+	}
+	feedSection := body[feedStart : feedStart+feedEnd]
+	for _, tc := range []struct {
+		name   string
+		action string
+		wants  []string
+	}{
+		{
+			name:   "save",
+			action: `action="/admin/feeds/save"`,
+			wants: []string{
+				`data-submit-lock`,
+				`data-submit-lock-label="Saving feed settings"`,
+				`data-submit-lock-button`,
+				`aria-label="Save VulnCheck feed settings"`,
+			},
+		},
+		{
+			name:   "reset",
+			action: `action="/admin/feeds/reset"`,
+			wants: []string{
+				`data-submit-lock`,
+				`data-submit-lock-label="Resetting feed settings"`,
+				`data-submit-lock-button`,
+				`aria-label="Reset VulnCheck feed settings"`,
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			formStart := strings.Index(feedSection, tc.action)
+			if formStart < 0 {
+				t.Fatalf("GET /admin/feeds body missing %s form\nsection=%s", tc.name, feedSection)
+			}
+			formEnd := strings.Index(feedSection[formStart:], `</form>`)
+			if formEnd < 0 {
+				t.Fatalf("GET /admin/feeds %s form is not closed\nsection=%s", tc.name, feedSection)
+			}
+			form := feedSection[formStart : formStart+formEnd]
+			for _, want := range tc.wants {
+				if !strings.Contains(form, want) {
+					t.Fatalf("GET /admin/feeds %s form missing %q\nform=%s", tc.name, want, form)
+				}
+			}
+		})
+	}
+}
+
+func TestAdminFeedsPageShowsProviderSpecificAPIKeyGuidance(t *testing.T) {
+	store := newNoopStore()
+	handler, sm := newAdminTestHandler(t, store, testAdminConfig())
+	req := newAuthenticatedAdminRequest(t, sm, http.MethodGet, "/admin/feeds")
+	rec := httptest.NewRecorder()
+
+	handler.HandleAdminFeeds(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /admin/feeds status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, tc := range []struct {
+		feedKey string
+		wants   []string
+	}{
+		{
+			feedKey: "vulncheck",
+			wants: []string{
+				"Required when VulnCheck is enabled",
+				"VulnCheck API token",
+			},
+		},
+		{
+			feedKey: "nvd",
+			wants: []string{
+				"Optional",
+				"NVD API key",
+				"higher rate limits",
+			},
+		},
+		{
+			feedKey: "socket",
+			wants: []string{
+				"Required when Socket.dev is enabled",
+				"Socket.dev API token",
+			},
+		},
+		{
+			feedKey: "reversinglabs",
+			wants: []string{
+				"Required when ReversingLabs is enabled",
+				"ReversingLabs Spectra Assure Community API token",
+			},
+		},
+	} {
+		t.Run(tc.feedKey, func(t *testing.T) {
+			section := adminFeedSection(body, tc.feedKey)
+			if section == "" {
+				t.Fatalf("GET /admin/feeds body missing %s feed section\nbody=%s", tc.feedKey, body)
+			}
+			if !strings.Contains(section, fmt.Sprintf(`aria-describedby="feed-%s-api-key-help"`, tc.feedKey)) {
+				t.Fatalf("%s API key input is not associated with provider help\nsection=%s", tc.feedKey, section)
+			}
+			for _, want := range tc.wants {
+				if !strings.Contains(section, want) {
+					t.Fatalf("%s API key help missing %q\nsection=%s", tc.feedKey, want, section)
+				}
+			}
+		})
+	}
+}
+
+func TestAdminFeedsPageShowsSelfSyncIntervalSyntaxAndMinimum(t *testing.T) {
+	store := newNoopStore()
+	handler, sm := newAdminTestHandler(t, store, testAdminConfig())
+	req := newAuthenticatedAdminRequest(t, sm, http.MethodGet, "/admin/feeds")
+	rec := httptest.NewRecorder()
+
+	handler.HandleAdminFeeds(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /admin/feeds status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, feedKey := range []string{"osv", "vulncheck", "nvd"} {
+		t.Run(feedKey, func(t *testing.T) {
+			section := adminFeedSection(body, feedKey)
+			if section == "" {
+				t.Fatalf("GET /admin/feeds body missing %s feed section\nbody=%s", feedKey, body)
+			}
+			for _, want := range []string{
+				"Go duration syntax",
+				"30m",
+				"2h",
+				"1h30m",
+				"Minimum self-sync interval is 15m",
+				"Blank uses the global default",
+			} {
+				if !strings.Contains(section, want) {
+					t.Fatalf("%s sync interval help missing %q\nsection=%s", feedKey, want, section)
+				}
+			}
+		})
 	}
 }
 
@@ -165,7 +344,7 @@ func TestAdminSettingsPageShowsRuntimeValues(t *testing.T) {
 		`aria-describedby="block-threshold-help block-threshold-runtime"`,
 		"NONE disables vulnerability blocking",
 		"NONE - do not block vulnerabilities",
-		"Malicious and active supply-chain risk findings always block regardless of this threshold.",
+		"Malicious package findings always block regardless of this threshold.",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("GET /admin/settings body missing %q\nbody=%s", want, body)
@@ -173,6 +352,55 @@ func TestAdminSettingsPageShowsRuntimeValues(t *testing.T) {
 	}
 	if strings.Contains(body, "0001-01-01") {
 		t.Fatalf("GET /admin/settings body contains zero timestamp: %s", body)
+	}
+}
+
+func TestAdminSettingsRateLimitInputsDescribeRangeAndSemantics(t *testing.T) {
+	store := newNoopStore()
+	handler, sm := newAdminTestHandler(t, store, testAdminConfig())
+	req := newAuthenticatedAdminRequest(t, sm, http.MethodGet, "/admin/settings")
+	rec := httptest.NewRecorder()
+
+	handler.HandleAdminSettings(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /admin/settings status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+
+	perMinuteInput := inputElementByID(t, body, "rate-limit-per-minute")
+	for _, want := range []string{
+		`min="1"`,
+		fmt.Sprintf(`max="%d"`, admin.MaxAdminRateLimit),
+		`aria-describedby="rate-limit-per-minute-help rate-limit-per-minute-runtime"`,
+	} {
+		if !strings.Contains(perMinuteInput, want) {
+			t.Fatalf("rate limit per-minute input missing %q\ninput=%s\nbody=%s", want, perMinuteInput, body)
+		}
+	}
+
+	burstInput := inputElementByID(t, body, "rate-limit-burst")
+	for _, want := range []string{
+		`min="1"`,
+		fmt.Sprintf(`max="%d"`, admin.MaxAdminRateLimit),
+		`aria-describedby="rate-limit-burst-help rate-limit-burst-runtime"`,
+	} {
+		if !strings.Contains(burstInput, want) {
+			t.Fatalf("rate limit burst input missing %q\ninput=%s\nbody=%s", want, burstInput, body)
+		}
+	}
+
+	for _, want := range []string{
+		`id="rate-limit-per-minute-help"`,
+		fmt.Sprintf(`1-%d requests per minute`, admin.MaxAdminRateLimit),
+		`id="rate-limit-per-minute-runtime"`,
+		`id="rate-limit-burst-help"`,
+		fmt.Sprintf(`1-%d short-spike allowance`, admin.MaxAdminRateLimit),
+		`id="rate-limit-burst-runtime"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("GET /admin/settings body missing rate-limit help %q\nbody=%s", want, body)
+		}
 	}
 }
 
@@ -192,16 +420,19 @@ func TestAdminSettingsServerInfoValuesWrapOnNarrowViewports(t *testing.T) {
 		t.Fatalf("GET /admin/settings status = %d, want 200", rec.Code)
 	}
 	body := rec.Body.String()
-	for _, want := range []string{
-		`class="flex justify-between gap-3 sm:block"`,
-		`class="min-w-0 break-words text-right font-medium sm:text-left"`,
-		cfg.Metrics.Addr(),
-		cfg.DB.Host,
-		cfg.DB.Name,
+	serverInfo := htmlSection(body, "Server Information", "Most server settings")
+	if serverInfo == "" {
+		t.Fatalf("GET /admin/settings body missing server information section\nbody=%s", body)
+	}
+	for _, tc := range []struct {
+		label string
+		value string
+	}{
+		{label: "Metrics Address", value: cfg.Metrics.Addr()},
+		{label: "Database Host", value: cfg.DB.Host},
+		{label: "Database Name", value: cfg.DB.Name},
 	} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("GET /admin/settings body missing responsive server-info marker %q\nbody=%s", want, body)
-		}
+		assertDefinitionValue(t, serverInfo, tc.label, tc.value)
 	}
 }
 
@@ -235,7 +466,7 @@ func TestAdminSettingsPasswordFormUsesServerMinimumLength(t *testing.T) {
 		if !strings.Contains(input, `minlength="12"`) {
 			t.Fatalf("GET /admin/settings input %s = %s, want minlength 12", field, input)
 		}
-		if !strings.Contains(input, `aria-describedby="password-length-help"`) {
+		if !strings.Contains(input, `aria-describedby="`) || !strings.Contains(input, `password-length-help`) {
 			t.Fatalf("GET /admin/settings input %s = %s, want password help association", field, input)
 		}
 	}
@@ -246,6 +477,7 @@ func TestAdminKeysExpiryHelpIsProgrammaticallyAssociated(t *testing.T) {
 	handler, sm := newAdminTestHandler(t, store, testAdminConfig())
 	req := newAuthenticatedAdminRequest(t, sm, http.MethodGet, "/admin/keys")
 	rec := httptest.NewRecorder()
+	renderedAt := time.Now().UTC()
 
 	handler.HandleAdminKeys(rec, req)
 
@@ -277,11 +509,24 @@ func TestAdminKeysExpiryHelpIsProgrammaticallyAssociated(t *testing.T) {
 	}
 	for _, want := range []string{
 		`type="text"`,
-		`placeholder="2026-06-19T15:00:00Z"`,
 	} {
 		if !strings.Contains(input, want) {
 			t.Fatalf("GET /admin/keys expiry input = %s, want %s", input, want)
 		}
+	}
+	example := htmlAttributeValue(t, input, "placeholder")
+	if !strings.HasSuffix(example, "Z") {
+		t.Fatalf("GET /admin/keys expiry placeholder = %q, want RFC3339 UTC ending in Z", example)
+	}
+	exampleAt, err := time.Parse(time.RFC3339, example)
+	if err != nil {
+		t.Fatalf("GET /admin/keys expiry placeholder = %q, want RFC3339 UTC: %v", example, err)
+	}
+	if !exampleAt.After(renderedAt) {
+		t.Fatalf("GET /admin/keys expiry placeholder = %q, want future example after %s", example, renderedAt.Format(time.RFC3339))
+	}
+	if !strings.Contains(body, "for example "+example) {
+		t.Fatalf("GET /admin/keys expiry help does not reuse placeholder example %q\nbody=%s", example, body)
 	}
 	if strings.Contains(input, `type="datetime-local"`) {
 		t.Fatalf("GET /admin/keys expiry input still uses datetime-local: %s", input)
@@ -338,6 +583,44 @@ func TestAdminSettingsPasswordFormHasDuplicateSubmitGuard(t *testing.T) {
 	}
 }
 
+func TestAdminSettingsSystemFormHasDuplicateSubmitGuard(t *testing.T) {
+	store := newNoopStore()
+	handler, sm := newAdminTestHandler(t, store, testAdminConfig())
+	req := newAuthenticatedAdminRequest(t, sm, http.MethodGet, "/admin/settings")
+	rec := httptest.NewRecorder()
+
+	handler.HandleAdminSettings(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /admin/settings status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	formStart := strings.Index(body, `action="/admin/settings/system"`)
+	if formStart < 0 {
+		t.Fatalf("GET /admin/settings body missing system settings form\nbody=%s", body)
+	}
+	formEnd := strings.Index(body[formStart:], `</form>`)
+	if formEnd < 0 {
+		t.Fatalf("GET /admin/settings system settings form is not closed\nbody=%s", body)
+	}
+	form := body[formStart : formStart+formEnd]
+	for _, want := range []string{
+		`data-submit-lock`,
+		`data-submit-lock-button`,
+		`data-submit-lock-label="Saving system settings"`,
+		`name="scan_log_retention_days"`,
+		`id="scan-log-retention-days"`,
+		`value="30"`,
+		`name="admin_audit_retention_days"`,
+		`id="admin-audit-retention-days"`,
+		`Save System Settings`,
+	} {
+		if !strings.Contains(form, want) {
+			t.Fatalf("GET /admin/settings system form missing %q\nform=%s", want, form)
+		}
+	}
+}
+
 func TestAdminLoginExposesPrivacyNoticeLinks(t *testing.T) {
 	store := newNoopStore()
 	cfg := testAdminConfig()
@@ -361,6 +644,29 @@ func TestAdminLoginExposesPrivacyNoticeLinks(t *testing.T) {
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("GET /admin/login body missing %q\nbody=%s", want, body)
+		}
+	}
+}
+
+func TestAdminLoginKeepsPrimaryAdminNavigationCurrent(t *testing.T) {
+	store := newNoopStore()
+	handler, _ := newAdminTestHandler(t, store, testAdminConfig())
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/login", nil)
+	rec := httptest.NewRecorder()
+	handler.HandleLogin(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /admin/login status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		`<nav aria-label="Primary"`,
+		`href="/admin/" aria-current="page"`,
+		`>Admin</a>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("GET /admin/login body missing primary admin nav fragment %q\nbody=%s", want, body)
 		}
 	}
 }
@@ -426,7 +732,7 @@ func TestAdminWritePagesShowBootstrapRecoveryAndSuppressWriteControls(t *testing
 		Ecosystem: "npm",
 		Name:      "left-pad",
 		Source:    "socket",
-		Priority:  3,
+		Priority:  db.RefreshPriorityNormal,
 		Status:    "pending",
 	})
 	if err != nil {
@@ -533,6 +839,40 @@ func TestAdminWritePagesShowBootstrapRecoveryAndSuppressWriteControls(t *testing
 	}
 }
 
+func TestAdminDashboardHeadingPrecedesBootstrapWarning(t *testing.T) {
+	store := newNoopStore()
+	setNoopAdminPassword(t, store, "bootstrap-password", true)
+	handler, sm := newAdminTestHandler(t, store, testAdminConfig())
+	req := newAuthenticatedAdminRequest(t, sm, http.MethodGet, "/admin/")
+	rec := httptest.NewRecorder()
+
+	handler.HandleDashboard(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /admin/ status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	firstH1 := strings.Index(body, "<h1")
+	firstH3 := strings.Index(body, "<h3")
+	if firstH1 < 0 {
+		t.Fatalf("admin dashboard missing h1\nbody=%s", body)
+	}
+	if firstH3 >= 0 && firstH3 < firstH1 {
+		t.Fatalf("admin dashboard renders h3 before h1\nbody=%s", body)
+	}
+
+	adminHeading := `<h1 class="text-2xl font-bold">Admin Dashboard</h1>`
+	bootstrapHeading := `<p class="text-sm font-semibold text-amber-950">Bootstrap password still active</p>`
+	adminHeadingIndex := strings.Index(body, adminHeading)
+	bootstrapHeadingIndex := strings.Index(body, bootstrapHeading)
+	if adminHeadingIndex < 0 || bootstrapHeadingIndex < 0 {
+		t.Fatalf("admin dashboard missing heading markers h1=%d bootstrap=%d\nbody=%s", adminHeadingIndex, bootstrapHeadingIndex, body)
+	}
+	if bootstrapHeadingIndex < adminHeadingIndex {
+		t.Fatalf("admin dashboard bootstrap warning precedes page heading\nbody=%s", body)
+	}
+}
+
 func TestHandlePasswordChangeAcceptsExactlyMinimumLength(t *testing.T) {
 	store := newNoopStore()
 	currentPassword := "current-password"
@@ -577,9 +917,11 @@ func TestHandleSystemSettingsSavePersistsSettings(t *testing.T) {
 	store := newNoopStore()
 	handler, sm := newAdminTestHandler(t, store, testAdminConfig())
 	req := newAuthenticatedAdminFormRequest(t, sm, "/admin/settings/system", url.Values{
-		"block_threshold":       {"HIGH"},
-		"rate_limit_per_minute": {"120"},
-		"rate_limit_burst":      {"25"},
+		"block_threshold":            {"HIGH"},
+		"rate_limit_per_minute":      {"120"},
+		"rate_limit_burst":           {"25"},
+		"scan_log_retention_days":    {"45"},
+		"admin_audit_retention_days": {"14"},
 	})
 	rec := httptest.NewRecorder()
 
@@ -605,6 +947,9 @@ func TestHandleSystemSettingsSavePersistsSettings(t *testing.T) {
 	if settings.RateLimitBurst != 25 {
 		t.Fatalf("RateLimitBurst = %d, want 25", settings.RateLimitBurst)
 	}
+	if settings.ScanLogRetention != 45*24*time.Hour || settings.AdminAuditRetention != 14*24*time.Hour {
+		t.Fatalf("retention = scan %s admin %s, want 1080h/336h", settings.ScanLogRetention, settings.AdminAuditRetention)
+	}
 
 	audit, err := store.ListAdminAuditLog(context.Background(), 1)
 	if err != nil {
@@ -619,9 +964,11 @@ func TestAdminSettingsPageShowsUpdatedRuntimePolicyAfterSave(t *testing.T) {
 	store := newNoopStore()
 	handler, sm := newAdminTestHandler(t, store, testAdminConfig())
 	saveReq := newAuthenticatedAdminFormRequest(t, sm, "/admin/settings/system", url.Values{
-		"block_threshold":       {"HIGH"},
-		"rate_limit_per_minute": {"120"},
-		"rate_limit_burst":      {"25"},
+		"block_threshold":            {"HIGH"},
+		"rate_limit_per_minute":      {"120"},
+		"rate_limit_burst":           {"25"},
+		"scan_log_retention_days":    {"45"},
+		"admin_audit_retention_days": {"14"},
 	})
 	saveRec := httptest.NewRecorder()
 
@@ -644,6 +991,8 @@ func TestAdminSettingsPageShowsUpdatedRuntimePolicyAfterSave(t *testing.T) {
 		"Runtime: HIGH",
 		"Runtime: 120",
 		"Runtime: 25",
+		"Runtime: 45 days",
+		"Runtime: 14 days",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("GET /admin/settings body missing %q\nbody=%s", want, body)
@@ -787,7 +1136,7 @@ func TestAdminKeysPageConfirmationsIncludeKeyIdentity(t *testing.T) {
 		"Confirm mark deleted",
 		`data-submit-lock`,
 		`data-submit-lock-button`,
-		`data-submit-lock-label="Generating key"`,
+		`data-submit-lock-label="Creating API key"`,
 		`data-submit-lock-label="Revoking key"`,
 		`data-submit-lock-label="Deleting key"`,
 		`<bdi dir="auto">ci-pipeline</bdi>`,
@@ -892,8 +1241,8 @@ func TestAdminFeedAndQueueControlsHaveProgrammaticLabels(t *testing.T) {
 	}
 
 	for _, job := range []*db.RefreshJob{
-		{Ecosystem: "npm", Name: "left-pad", Source: "socket", Priority: 3},
-		{Ecosystem: "npm", Name: "express", Source: "socket", Priority: 2, Status: "paused"},
+		{Ecosystem: "npm", Name: "left-pad", Source: "socket", Priority: db.RefreshPriorityNormal},
+		{Ecosystem: "npm", Name: "express", Source: "socket", Priority: db.RefreshPriorityKnownFinding, Status: "paused"},
 		{Ecosystem: "npm", Name: "broken", Source: "socket", Priority: 4, Status: "error", Error: "upstream timeout"},
 	} {
 		created, _, err := store.EnqueueRefresh(context.Background(), job)
@@ -975,6 +1324,224 @@ func TestAdminFeedAndQueueControlsHaveProgrammaticLabels(t *testing.T) {
 	}
 }
 
+func TestAdminPrintSnapshotsSuppressMutationControls(t *testing.T) {
+	store := newNoopStore()
+	activeID, err := store.CreateAPIKey(context.Background(), "ci-pipeline", "hash-active", nil)
+	if err != nil {
+		t.Fatalf("CreateAPIKey(active) error = %v", err)
+	}
+	revokedID, err := store.CreateAPIKey(context.Background(), "n8n-scanner", "hash-revoked", nil)
+	if err != nil {
+		t.Fatalf("CreateAPIKey(revoked) error = %v", err)
+	}
+	if err := store.RevokeAPIKey(context.Background(), revokedID); err != nil {
+		t.Fatalf("RevokeAPIKey() error = %v", err)
+	}
+	if err := store.UpsertFeedConfig(context.Background(), &db.FeedConfig{
+		FeedName: "vulncheck",
+		Enabled:  true,
+		Mode:     "self",
+		APIKey:   testFeedToken(),
+	}); err != nil {
+		t.Fatalf("UpsertFeedConfig() error = %v", err)
+	}
+	for _, job := range []*db.RefreshJob{
+		{Ecosystem: "npm", Name: "left-pad", Source: "socket", Priority: db.RefreshPriorityNormal, Status: db.RefreshStatusPending},
+		{Ecosystem: "npm", Name: "express", Source: "socket", Priority: db.RefreshPriorityKnownFinding, Status: db.RefreshStatusPaused},
+		{Ecosystem: "npm", Name: "broken", Source: "socket", Priority: db.RefreshPriorityUnknownPackage, Status: db.RefreshStatusError, Error: "upstream timeout"},
+		{Ecosystem: "npm", Name: "done", Source: "socket", Priority: db.RefreshPriorityNormal, Status: db.RefreshStatusDone},
+	} {
+		if _, _, err := store.EnqueueRefresh(context.Background(), job); err != nil {
+			t.Fatalf("EnqueueRefresh(%s) error = %v", job.Name, err)
+		}
+	}
+	if err := store.UpsertManualAdvisory(context.Background(), &db.ManualAdvisory{
+		ID:          "manual:vuln",
+		FindingType: "vulnerability",
+		Ecosystem:   "npm",
+		Name:        "left-pad",
+		Severity:    "HIGH",
+		Summary:     "manual vulnerability",
+	}); err != nil {
+		t.Fatalf("UpsertManualAdvisory() error = %v", err)
+	}
+
+	handler, sm := newAdminTestHandler(t, store, testAdminConfig())
+	for _, tc := range []struct {
+		name   string
+		target string
+		call   func(http.ResponseWriter, *http.Request)
+		checks []struct {
+			tag    string
+			marker string
+		}
+	}{
+		{
+			name:   "keys",
+			target: "/admin/keys",
+			call:   handler.HandleAdminKeys,
+			checks: []struct {
+				tag    string
+				marker string
+			}{
+				{tag: "div", marker: `class="no-print pm-surface p-5" data-no-print`},
+				{tag: "th", marker: ">Actions</th>"},
+				{tag: "details", marker: fmt.Sprintf(`aria-label="Revoke API key ci-pipeline (ID %d)"`, activeID)},
+				{tag: "details", marker: fmt.Sprintf(`aria-label="Mark revoked API key n8n-scanner (ID %d) deleted"`, revokedID)},
+			},
+		},
+		{
+			name:   "feeds",
+			target: "/admin/feeds",
+			call:   handler.HandleAdminFeeds,
+			checks: []struct {
+				tag    string
+				marker string
+			}{
+				{tag: "div", marker: "Saved Configuration"},
+			},
+		},
+		{
+			name:   "queue",
+			target: "/admin/queue",
+			call:   handler.HandleAdminQueue,
+			checks: []struct {
+				tag    string
+				marker string
+			}{
+				{tag: "div", marker: `data-admin-queue-bulk-actions`},
+				{tag: "th", marker: ">Actions</th>"},
+				{tag: "div", marker: `aria-label="Pause queue job`},
+				{tag: "div", marker: `aria-label="Resume queue job`},
+				{tag: "div", marker: `aria-label="Retry queue job`},
+			},
+		},
+		{
+			name:   "settings",
+			target: "/admin/settings",
+			call:   handler.HandleAdminSettings,
+			checks: []struct {
+				tag    string
+				marker string
+			}{
+				{tag: "div", marker: "Change Admin Password"},
+			},
+		},
+		{
+			name:   "advisories",
+			target: "/admin/advisories",
+			call:   handler.HandleAdminAdvisories,
+			checks: []struct {
+				tag    string
+				marker string
+			}{
+				{tag: "div", marker: `class="no-print pm-surface p-5" data-no-print`},
+				{tag: "th", marker: ">Actions</th>"},
+				{tag: "a", marker: `aria-label="Edit manual advisory manual:vuln for npm/left-pad"`},
+				{tag: "details", marker: `aria-label="Delete manual advisory manual:vuln for npm/left-pad"`},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := newAuthenticatedAdminRequest(t, sm, http.MethodGet, tc.target)
+			rec := httptest.NewRecorder()
+			tc.call(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("GET %s status = %d, want 200; body=%s", tc.target, rec.Code, rec.Body.String())
+			}
+			body := rec.Body.String()
+			for _, check := range tc.checks {
+				assertAllElementsMarkedNoPrint(t, body, check.tag, check.marker)
+			}
+		})
+	}
+}
+
+func TestAdminQueueActiveFilterExposesCurrentState(t *testing.T) {
+	store := newNoopStore()
+	if _, _, err := store.EnqueueRefresh(context.Background(), &db.RefreshJob{
+		Ecosystem: "npm",
+		Name:      "left-pad",
+		Source:    "socket",
+		Priority:  db.RefreshPriorityNormal,
+	}); err != nil {
+		t.Fatalf("EnqueueRefresh() error = %v", err)
+	}
+	handler, sm := newAdminTestHandler(t, store, testAdminConfig())
+	req := newAuthenticatedAdminRequest(t, sm, http.MethodGet, "/admin/queue?status=pending")
+	rec := httptest.NewRecorder()
+	handler.HandleAdminQueue(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /admin/queue?status=pending status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	activePendingFilter := regexp.MustCompile(`(?s)<a\b[^>]*href="/admin/queue\?status=pending"[^>]*aria-current="page"`)
+	if !activePendingFilter.MatchString(rec.Body.String()) {
+		t.Fatalf("active queue filter missing aria-current marker\nbody=%s", rec.Body.String())
+	}
+}
+
+func TestAdminAuditAndQueuePaginationUseNavigationLandmarks(t *testing.T) {
+	t.Run("audit", func(t *testing.T) {
+		store := newNoopStore()
+		for i := 1; i <= 105; i++ {
+			action := fmt.Sprintf("audit_%03d", i)
+			if err := store.InsertAdminAuditLog(context.Background(), &db.AdminAuditEntry{Action: action}); err != nil {
+				t.Fatalf("InsertAdminAuditLog(%s) error = %v", action, err)
+			}
+		}
+		handler, sm := newAdminTestHandler(t, store, testAdminConfig())
+		req := newAuthenticatedAdminRequest(t, sm, http.MethodGet, "/admin/audit")
+		rec := httptest.NewRecorder()
+
+		handler.HandleAdminAudit(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /admin/audit status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		body := rec.Body.String()
+		wantNav := `<nav class="flex flex-wrap items-center justify-between gap-3 px-5 py-3 text-xs text-gray-600 border-b border-gray-100" aria-label="Audit log pages">`
+		if !strings.Contains(body, wantNav) {
+			t.Fatalf("GET /admin/audit body missing pagination landmark fragment %q\nbody=%s", wantNav, body)
+		}
+		auditOlderLink := regexp.MustCompile(`(?s)<a\b[^>]*href="/admin/audit\?offset=100"[^>]*class="[^"]*\binline-flex min-h-11\b`)
+		if !auditOlderLink.MatchString(body) {
+			t.Fatalf("GET /admin/audit body missing older-page link\nbody=%s", body)
+		}
+	})
+
+	t.Run("queue", func(t *testing.T) {
+		store := newNoopStore()
+		for i := 1; i <= 55; i++ {
+			if _, _, err := store.EnqueueRefresh(context.Background(), &db.RefreshJob{
+				Ecosystem: "npm",
+				Name:      fmt.Sprintf("pkg-%03d", i),
+				Source:    "socket",
+				Status:    db.RefreshStatusPending,
+			}); err != nil {
+				t.Fatalf("EnqueueRefresh(%d) error = %v", i, err)
+			}
+		}
+		handler, sm := newAdminTestHandler(t, store, testAdminConfig())
+		req := newAuthenticatedAdminRequest(t, sm, http.MethodGet, "/admin/queue?status=pending")
+		rec := httptest.NewRecorder()
+
+		handler.HandleAdminQueue(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /admin/queue?status=pending status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		body := rec.Body.String()
+		wantNav := `<nav class="flex flex-wrap items-center justify-between gap-3 px-5 py-3 text-xs text-gray-600 border-b border-gray-100" aria-label="Queue job pages">`
+		if !strings.Contains(body, wantNav) {
+			t.Fatalf("GET /admin/queue?status=pending body missing pagination landmark fragment %q\nbody=%s", wantNav, body)
+		}
+		queueOlderLink := regexp.MustCompile(`(?s)<a\b[^>]*href="/admin/queue\?status=pending&amp;offset=50"[^>]*class="[^"]*\binline-flex min-h-11\b`)
+		if !queueOlderLink.MatchString(body) {
+			t.Fatalf("GET /admin/queue?status=pending body missing older-page link\nbody=%s", body)
+		}
+	})
+}
+
 func TestAdminOperationalDiagnosticsExposeFullTextWithoutTitleOnly(t *testing.T) {
 	store := newNoopStore()
 	feedError := "feed failed while parsing upstream response for ecosystem npm package very-long-feed-diagnostic-context with retry hint and operator remediation detail"
@@ -990,7 +1557,7 @@ func TestAdminOperationalDiagnosticsExposeFullTextWithoutTitleOnly(t *testing.T)
 		Ecosystem: "npm",
 		Name:      "very-long-package-name",
 		Source:    "socket",
-		Priority:  1,
+		Priority:  db.RefreshPriorityUnknownPackage,
 		Status:    "error",
 		Error:     queueError,
 	}); err != nil {
@@ -1033,7 +1600,14 @@ func TestAdminOperationalDiagnosticsExposeFullTextWithoutTitleOnly(t *testing.T)
 				t.Fatalf("GET %s status = %d, want 200; body=%s", tc.target, rec.Code, rec.Body.String())
 			}
 			body := rec.Body.String()
-			for _, want := range []string{`<details`, `<summary`, `<pre`, tc.disclosure, tc.fullText} {
+			for _, want := range []string{
+				`<details`,
+				`<summary`,
+				`<pre`,
+				`inline-flex min-h-11 cursor-pointer items-center rounded px-2 py-1`,
+				tc.disclosure,
+				tc.fullText,
+			} {
 				if !strings.Contains(body, want) {
 					t.Fatalf("GET %s missing accessible diagnostic fragment %q\nbody=%s", tc.target, want, body)
 				}
@@ -1047,6 +1621,16 @@ func TestAdminOperationalDiagnosticsExposeFullTextWithoutTitleOnly(t *testing.T)
 
 func TestAdminQueueBulkActionsWrapAndUseInlineConfirmations(t *testing.T) {
 	store := newNoopStore()
+	for _, job := range []*db.RefreshJob{
+		{Ecosystem: "npm", Name: "left-pad", Source: "socket", Status: db.RefreshStatusPending},
+		{Ecosystem: "npm", Name: "express", Source: "socket", Status: db.RefreshStatusPaused},
+		{Ecosystem: "npm", Name: "done", Source: "socket", Status: db.RefreshStatusDone},
+		{Ecosystem: "npm", Name: "broken", Source: "socket", Status: db.RefreshStatusError},
+	} {
+		if _, _, err := store.EnqueueRefresh(context.Background(), job); err != nil {
+			t.Fatalf("EnqueueRefresh(%s) error = %v", job.Name, err)
+		}
+	}
 	handler, sm := newAdminTestHandler(t, store, testAdminConfig())
 	req := newAuthenticatedAdminRequest(t, sm, http.MethodGet, "/admin/queue")
 	rec := httptest.NewRecorder()
@@ -1059,17 +1643,21 @@ func TestAdminQueueBulkActionsWrapAndUseInlineConfirmations(t *testing.T) {
 	body := rec.Body.String()
 	for _, want := range []string{
 		`data-admin-queue-bulk-actions`,
-		`class="flex flex-wrap gap-3"`,
+		`class="no-print flex flex-wrap gap-3"`,
+		`data-no-print`,
 		`class="w-full sm:w-auto"`,
 		`aria-label="Purge completed and errored queue jobs"`,
-		`aria-label="Confirm purge completed and errored queue jobs"`,
+		`aria-label="Confirm purge 2 completed and errored queue jobs"`,
 		`Purge Completed/Errored`,
 		`Confirm purge`,
 		`Confirm clear pending`,
 		`Confirm clear paused`,
-		`Purge all completed and errored jobs?`,
-		`Clear all pending jobs?`,
-		`Clear all paused jobs?`,
+		`Purge 2 completed/errored jobs?`,
+		`Clear 1 pending queue job?`,
+		`Clear 1 paused queue job?`,
+		`data-submit-lock-label="Purging queue jobs"`,
+		`data-submit-lock-label="Clearing queue jobs"`,
+		`data-submit-lock-button`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("GET /admin/queue body missing %q\nbody=%s", want, body)
@@ -1086,13 +1674,316 @@ func TestAdminQueueBulkActionsWrapAndUseInlineConfirmations(t *testing.T) {
 	}
 }
 
+func TestAdminQueueBulkActionsShowCountsAndDisableEmptyDestructiveActions(t *testing.T) {
+	store := newNoopStore()
+	for _, job := range []*db.RefreshJob{
+		{Ecosystem: "npm", Name: "left-pad", Source: "socket", Status: db.RefreshStatusPending},
+		{Ecosystem: "npm", Name: "react", Source: "socket", Status: db.RefreshStatusPending},
+		{Ecosystem: "npm", Name: "express", Source: "socket", Status: db.RefreshStatusPaused},
+		{Ecosystem: "npm", Name: "done", Source: "socket", Status: db.RefreshStatusDone},
+		{Ecosystem: "npm", Name: "broken", Source: "socket", Status: db.RefreshStatusError},
+	} {
+		if _, _, err := store.EnqueueRefresh(context.Background(), job); err != nil {
+			t.Fatalf("EnqueueRefresh(%s) error = %v", job.Name, err)
+		}
+	}
+
+	handler, sm := newAdminTestHandler(t, store, testAdminConfig())
+	req := newAuthenticatedAdminRequest(t, sm, http.MethodGet, "/admin/queue")
+	rec := httptest.NewRecorder()
+	handler.HandleAdminQueue(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /admin/queue status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		`Purge 2 completed/errored jobs?`,
+		`aria-label="Confirm purge 2 completed and errored queue jobs"`,
+		`Clear 2 pending queue jobs?`,
+		`aria-label="Confirm clear 2 pending queue jobs"`,
+		`Clear 1 paused queue job?`,
+		`aria-label="Confirm clear 1 paused queue job"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("GET /admin/queue body missing %q\nbody=%s", want, body)
+		}
+	}
+	for _, ariaLabel := range []string{
+		"Clear pending queue jobs",
+		"Clear paused queue jobs",
+	} {
+		pattern := regexp.MustCompile(`(?s)<summary\b[^>]*aria-label="` + regexp.QuoteMeta(ariaLabel) + `"[^>]*class="[^"]*\bmin-h-11\b[^"]*\bbg-red-600\b[^"]*"`)
+		if !pattern.MatchString(body) {
+			t.Fatalf("GET /admin/queue body missing destructive summary for %q\nbody=%s", ariaLabel, body)
+		}
+	}
+
+	emptyStore := newNoopStore()
+	emptyHandler, emptySM := newAdminTestHandler(t, emptyStore, testAdminConfig())
+	emptyReq := newAuthenticatedAdminRequest(t, emptySM, http.MethodGet, "/admin/queue")
+	emptyRec := httptest.NewRecorder()
+	emptyHandler.HandleAdminQueue(emptyRec, emptyReq)
+	if emptyRec.Code != http.StatusOK {
+		t.Fatalf("GET /admin/queue empty status = %d, want 200; body=%s", emptyRec.Code, emptyRec.Body.String())
+	}
+	emptyBody := emptyRec.Body.String()
+	for _, want := range []string{
+		`aria-disabled="true"`,
+		`No completed or errored jobs to purge.`,
+		`No pending queue jobs to clear.`,
+		`No paused queue jobs to clear.`,
+	} {
+		if !strings.Contains(emptyBody, want) {
+			t.Fatalf("GET /admin/queue empty body missing %q\nbody=%s", want, emptyBody)
+		}
+	}
+	for _, notWant := range []string{
+		`action="/admin/queue/purge"`,
+		`action="/admin/queue/clear"`,
+		`Confirm purge`,
+		`Confirm clear`,
+	} {
+		if strings.Contains(emptyBody, notWant) {
+			t.Fatalf("GET /admin/queue empty body contains %q\nbody=%s", notWant, emptyBody)
+		}
+	}
+}
+
+func TestAdminQueueStatsCardsLinkToStatusFiltersAndUseEvenGrid(t *testing.T) {
+	store := newNoopStore()
+	for _, job := range []*db.RefreshJob{
+		{Ecosystem: "npm", Name: "left-pad", Source: "socket", Status: db.RefreshStatusPending},
+		{Ecosystem: "npm", Name: "worker", Source: "socket", Status: db.RefreshStatusProcessing},
+		{Ecosystem: "npm", Name: "done", Source: "socket", Status: db.RefreshStatusDone},
+		{Ecosystem: "npm", Name: "broken", Source: "socket", Status: db.RefreshStatusError},
+		{Ecosystem: "npm", Name: "paused", Source: "socket", Status: db.RefreshStatusPaused},
+	} {
+		if _, _, err := store.EnqueueRefresh(context.Background(), job); err != nil {
+			t.Fatalf("EnqueueRefresh(%s) error = %v", job.Name, err)
+		}
+	}
+	handler, sm := newAdminTestHandler(t, store, testAdminConfig())
+	req := newAuthenticatedAdminRequest(t, sm, http.MethodGet, "/admin/queue")
+	rec := httptest.NewRecorder()
+
+	handler.HandleAdminQueue(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /admin/queue status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `class="grid grid-cols-2 sm:grid-cols-5 gap-4"`) {
+		t.Fatalf("GET /admin/queue body missing stats grid class\nbody=%s", body)
+	}
+	for status, label := range map[string]string{
+		"pending":    "Show Pending queue jobs (1)",
+		"processing": "Show Processing queue jobs (1)",
+		"done":       "Show Done queue jobs (1)",
+		"error":      "Show Error queue jobs (1)",
+		"paused":     "Show Paused queue jobs (1)",
+	} {
+		want := `href="/admin/queue?status=` + status + `" with aria-label "` + label + `"`
+		pattern := regexp.MustCompile(`(?s)<a\b[^>]*href="/admin/queue\?status=` + regexp.QuoteMeta(status) + `"[^>]*aria-label="` + regexp.QuoteMeta(label) + `"`)
+		if !pattern.MatchString(body) {
+			t.Fatalf("GET /admin/queue body missing %q\nbody=%s", want, body)
+		}
+	}
+	if strings.Contains(body, `sm:grid-cols-4`) {
+		t.Fatalf("GET /admin/queue stats grid still uses 4-column orphan layout\nbody=%s", body)
+	}
+}
+
+func TestAdminQueueEmptyStatesExplainFilterAndOffsetRecovery(t *testing.T) {
+	t.Run("status filter empty", func(t *testing.T) {
+		store := newNoopStore()
+		handler, sm := newAdminTestHandler(t, store, testAdminConfig())
+		req := newAuthenticatedAdminRequest(t, sm, http.MethodGet, "/admin/queue?status=paused")
+		rec := httptest.NewRecorder()
+
+		handler.HandleAdminQueue(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /admin/queue?status=paused status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		body := rec.Body.String()
+		for _, want := range []string{
+			`No Paused queue jobs match this filter.`,
+			`href="/admin/queue"`,
+			`View all queue jobs`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Fatalf("filtered empty queue body missing %q\nbody=%s", want, body)
+			}
+		}
+	})
+
+	t.Run("out of range offset", func(t *testing.T) {
+		store := newNoopStore()
+		if _, _, err := store.EnqueueRefresh(context.Background(), &db.RefreshJob{
+			Ecosystem: "npm",
+			Name:      "left-pad",
+			Source:    "socket",
+			Status:    db.RefreshStatusPending,
+		}); err != nil {
+			t.Fatalf("EnqueueRefresh() error = %v", err)
+		}
+		handler, sm := newAdminTestHandler(t, store, testAdminConfig())
+		req := newAuthenticatedAdminRequest(t, sm, http.MethodGet, "/admin/queue?status=pending&offset=50")
+		rec := httptest.NewRecorder()
+
+		handler.HandleAdminQueue(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /admin/queue?status=pending&offset=50 status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		body := rec.Body.String()
+		for _, want := range []string{
+			`No queue jobs on this page.`,
+			`href="/admin/queue?status=pending"`,
+			`Back to first page`,
+			`href="/admin/queue"`,
+			`View all queue jobs`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Fatalf("offset empty queue body missing %q\nbody=%s", want, body)
+			}
+		}
+	})
+}
+
+func TestAdminQueueDestructiveSummariesExposePersistentStateStyling(t *testing.T) {
+	store := newNoopStore()
+	for _, job := range []*db.RefreshJob{
+		{Ecosystem: "npm", Name: "left-pad", Source: "socket", Status: db.RefreshStatusPending},
+		{Ecosystem: "npm", Name: "express", Source: "socket", Status: db.RefreshStatusPaused},
+		{Ecosystem: "npm", Name: "done", Source: "socket", Status: db.RefreshStatusDone},
+	} {
+		if _, _, err := store.EnqueueRefresh(context.Background(), job); err != nil {
+			t.Fatalf("EnqueueRefresh(%s) error = %v", job.Name, err)
+		}
+	}
+	handler, sm := newAdminTestHandler(t, store, testAdminConfig())
+	req := newAuthenticatedAdminRequest(t, sm, http.MethodGet, "/admin/queue")
+	rec := httptest.NewRecorder()
+
+	handler.HandleAdminQueue(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /admin/queue status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, label := range []string{
+		"Purge completed and errored queue jobs",
+		"Clear pending queue jobs",
+		"Clear paused queue jobs",
+	} {
+		for _, summary := range summariesWithAriaLabel(body, label) {
+			for _, want := range []string{
+				`data-admin-expand-affordance`,
+				`shadow-sm`,
+				`active:bg-red-800`,
+				`pm-focus-ring`,
+				`pm-focus-ring-danger`,
+			} {
+				if !strings.Contains(summary, want) {
+					t.Fatalf("summary %q missing %q\nsummary=%s\nbody=%s", label, want, summary, body)
+				}
+			}
+		}
+		if len(summariesWithAriaLabel(body, label)) == 0 {
+			t.Fatalf("body missing summary with aria-label %q\nbody=%s", label, body)
+		}
+	}
+}
+
+func TestAdminDestructiveDisclosureSummariesExposeExpandAffordance(t *testing.T) {
+	store := newNoopStore()
+	for _, job := range []*db.RefreshJob{
+		{Ecosystem: "npm", Name: "queue-pending", Source: "socket", Status: db.RefreshStatusPending},
+		{Ecosystem: "npm", Name: "queue-done", Source: "socket", Status: db.RefreshStatusDone},
+	} {
+		if _, _, err := store.EnqueueRefresh(context.Background(), job); err != nil {
+			t.Fatalf("EnqueueRefresh(%s) error = %v", job.Name, err)
+		}
+	}
+	activeID, err := store.CreateAPIKey(context.Background(), "ci-pipeline", "hash-active", nil)
+	if err != nil {
+		t.Fatalf("CreateAPIKey(active) error = %v", err)
+	}
+	revokedID, err := store.CreateAPIKey(context.Background(), "n8n-scanner", "hash-revoked", nil)
+	if err != nil {
+		t.Fatalf("CreateAPIKey(revoked) error = %v", err)
+	}
+	if err := store.RevokeAPIKey(context.Background(), revokedID); err != nil {
+		t.Fatalf("RevokeAPIKey() error = %v", err)
+	}
+	if err := store.UpsertManualAdvisory(context.Background(), &db.ManualAdvisory{
+		ID:          "manual:vuln",
+		FindingType: "vulnerability",
+		Ecosystem:   "npm",
+		Name:        "left-pad",
+		Severity:    "HIGH",
+		Summary:     "manual vulnerability",
+	}); err != nil {
+		t.Fatalf("UpsertManualAdvisory() error = %v", err)
+	}
+
+	handler, sm := newAdminTestHandler(t, store, testAdminConfig())
+	for _, tc := range []struct {
+		name      string
+		target    string
+		call      func(http.ResponseWriter, *http.Request)
+		summaries []string
+	}{
+		{
+			name:   "queue bulk",
+			target: "/admin/queue",
+			call:   handler.HandleAdminQueue,
+			summaries: []string{
+				"Purge completed and errored queue jobs",
+				"Clear pending queue jobs",
+			},
+		},
+		{
+			name:   "api keys",
+			target: "/admin/keys",
+			call:   handler.HandleAdminKeys,
+			summaries: []string{
+				fmt.Sprintf("Revoke API key ci-pipeline (ID %d)", activeID),
+				fmt.Sprintf("Mark revoked API key n8n-scanner (ID %d) deleted", revokedID),
+			},
+		},
+		{
+			name:   "manual advisories",
+			target: "/admin/advisories",
+			call:   handler.HandleAdminAdvisories,
+			summaries: []string{
+				"Delete manual advisory manual:vuln for npm/left-pad",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := newAuthenticatedAdminRequest(t, sm, http.MethodGet, tc.target)
+			rec := httptest.NewRecorder()
+			tc.call(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("GET %s status = %d, want 200; body=%s", tc.target, rec.Code, rec.Body.String())
+			}
+			body := rec.Body.String()
+			for _, summary := range tc.summaries {
+				assertSummaryExpandAffordance(t, body, summary)
+			}
+		})
+	}
+}
+
 func TestAdminQueuePriorityControlsMatchDocumentedLevels(t *testing.T) {
 	store := newNoopStore()
 	created, _, err := store.EnqueueRefresh(context.Background(), &db.RefreshJob{
 		Ecosystem: "npm",
 		Name:      "left-pad",
 		Source:    "socket",
-		Priority:  3,
+		Priority:  db.RefreshPriorityNormal,
 		Status:    "pending",
 	})
 	if err != nil {
@@ -1111,14 +2002,20 @@ func TestAdminQueuePriorityControlsMatchDocumentedLevels(t *testing.T) {
 		t.Fatalf("GET /admin/queue status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	for _, want := range []string{
-		`<option value="0"`,
-		`<option value="1"`,
-		`<option value="2"`,
-		`<option value="3"`,
-	} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("GET /admin/queue body missing %q\nbody=%s", want, body)
+	if !strings.Contains(body, `id="queue-priority-help"`) {
+		t.Fatalf("GET /admin/queue body missing priority help legend\nbody=%s", body)
+	}
+	if got := strings.Count(body, `aria-describedby="queue-priority-help"`); got < 2 {
+		t.Fatalf("GET /admin/queue priority selects described by help = %d, want at least 2\nbody=%s", got, body)
+	}
+	for _, option := range db.RefreshPriorityOptions() {
+		for _, want := range []string{
+			fmt.Sprintf(`<option value="%d"`, option.Value),
+			">" + option.Label + "</option>",
+		} {
+			if !strings.Contains(body, want) {
+				t.Fatalf("GET /admin/queue body missing %q\nbody=%s", want, body)
+			}
 		}
 	}
 	for _, notWant := range []string{
@@ -1138,9 +2035,9 @@ func TestAdminQueuePriorityControlsMatchDocumentedLevels(t *testing.T) {
 func TestAdminQueueRowActionsUseSubmitLocks(t *testing.T) {
 	store := newNoopStore()
 	for _, job := range []*db.RefreshJob{
-		{Ecosystem: "npm", Name: "left-pad", Source: "socket", Priority: 3, Status: "pending"},
-		{Ecosystem: "npm", Name: "express", Source: "socket", Priority: 2, Status: "paused"},
-		{Ecosystem: "npm", Name: "broken", Source: "socket", Priority: 1, Status: "error", Error: "upstream timeout"},
+		{Ecosystem: "npm", Name: "left-pad", Source: "socket", Priority: db.RefreshPriorityNormal, Status: "pending"},
+		{Ecosystem: "npm", Name: "express", Source: "socket", Priority: db.RefreshPriorityKnownFinding, Status: "paused"},
+		{Ecosystem: "npm", Name: "broken", Source: "socket", Priority: db.RefreshPriorityUnknownPackage, Status: "error", Error: "upstream timeout"},
 	} {
 		created, _, err := store.EnqueueRefresh(context.Background(), job)
 		if err != nil {
@@ -1185,7 +2082,7 @@ func TestAdminRowActionsHaveMobileReachableLists(t *testing.T) {
 		Ecosystem: "npm",
 		Name:      "left-pad",
 		Source:    "socket",
-		Priority:  3,
+		Priority:  db.RefreshPriorityNormal,
 		Status:    "pending",
 	})
 	if err != nil {
@@ -1354,7 +2251,7 @@ func TestQueueAdminActionsManagePriorityPauseResumeRetryAndClear(t *testing.T) {
 		Ecosystem: "npm",
 		Name:      "lodash",
 		Source:    "socket",
-		Priority:  3,
+		Priority:  db.RefreshPriorityNormal,
 	})
 	if err != nil {
 		t.Fatalf("EnqueueRefresh() error = %v", err)
@@ -1549,8 +2446,9 @@ func TestHandleAdvisoryCreatePersistsVulnerabilityAdvisory(t *testing.T) {
 
 func TestHandleAdvisoryCreateRejectsInvalidInput(t *testing.T) {
 	cases := []struct {
-		name string
-		form url.Values
+		name    string
+		form    url.Values
+		wantErr string
 	}{
 		{
 			name: "invalid severity",
@@ -1558,6 +2456,7 @@ func TestHandleAdvisoryCreateRejectsInvalidInput(t *testing.T) {
 				"finding_type": {"vulnerability"}, "ecosystem": {"npm"},
 				"name": {"left-pad"}, "severity": {"BOGUS"}, "summary": {"s"},
 			},
+			wantErr: "Invalid severity",
 		},
 		{
 			name: "unknown ecosystem",
@@ -1565,6 +2464,7 @@ func TestHandleAdvisoryCreateRejectsInvalidInput(t *testing.T) {
 				"finding_type": {"vulnerability"}, "ecosystem": {"rubygemsX"},
 				"name": {"left-pad"}, "severity": {"HIGH"}, "summary": {"s"},
 			},
+			wantErr: "Unknown ecosystem",
 		},
 		{
 			name: "operator id outside manual namespace",
@@ -1572,6 +2472,7 @@ func TestHandleAdvisoryCreateRejectsInvalidInput(t *testing.T) {
 				"id": {"CVE-2021-23337"}, "finding_type": {"vulnerability"},
 				"ecosystem": {"npm"}, "name": {"left-pad"}, "severity": {"HIGH"}, "summary": {"s"},
 			},
+			wantErr: "Advisory ID must start with manual:",
 		},
 		{
 			name: "invalid finding type",
@@ -1579,6 +2480,31 @@ func TestHandleAdvisoryCreateRejectsInvalidInput(t *testing.T) {
 				"finding_type": {"other"}, "ecosystem": {"npm"},
 				"name": {"left-pad"}, "severity": {"HIGH"}, "summary": {"s"},
 			},
+			wantErr: "Invalid finding type",
+		},
+		{
+			name: "name too long",
+			form: url.Values{
+				"finding_type": {"vulnerability"}, "ecosystem": {"npm"},
+				"name": {strings.Repeat("n", admin.ManualAdvisoryNameMaxLength+1)}, "severity": {"HIGH"}, "summary": {"s"},
+			},
+			wantErr: "Field exceeds maximum length",
+		},
+		{
+			name: "summary too long",
+			form: url.Values{
+				"finding_type": {"vulnerability"}, "ecosystem": {"npm"},
+				"name": {"left-pad"}, "severity": {"HIGH"}, "summary": {strings.Repeat("s", admin.ManualAdvisorySummaryMaxLength+1)},
+			},
+			wantErr: "Field exceeds maximum length",
+		},
+		{
+			name: "description too long",
+			form: url.Values{
+				"finding_type": {"vulnerability"}, "ecosystem": {"npm"},
+				"name": {"left-pad"}, "severity": {"HIGH"}, "summary": {"s"}, "description": {strings.Repeat("d", admin.ManualAdvisoryDescriptionMaxLength+1)},
+			},
+			wantErr: "Field exceeds maximum length",
 		},
 	}
 
@@ -1590,6 +2516,16 @@ func TestHandleAdvisoryCreateRejectsInvalidInput(t *testing.T) {
 			rec := httptest.NewRecorder()
 
 			handler.HandleAdvisoryCreate(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("POST /admin/advisories/create status = %d, want 400; location=%q body=%s", rec.Code, rec.Header().Get("Location"), rec.Body.String())
+			}
+			if location := rec.Header().Get("Location"); location != "" {
+				t.Fatalf("POST /admin/advisories/create redirected on validation error: %q", location)
+			}
+			if body := rec.Body.String(); !strings.Contains(body, tc.wantErr) {
+				t.Fatalf("POST /admin/advisories/create body missing validation error %q\nbody=%s", tc.wantErr, body)
+			}
 
 			// Invalid input must not be persisted in either backing table.
 			vulns, err := store.ListManualAdvisories(context.Background(), 10)
@@ -1604,6 +2540,69 @@ func TestHandleAdvisoryCreateRejectsInvalidInput(t *testing.T) {
 				t.Fatalf("invalid advisory was persisted: manual=%d malicious=%d", len(vulns), len(mal))
 			}
 		})
+	}
+}
+
+func TestHandleAdvisoryCreateValidationErrorRerendersSubmittedForm(t *testing.T) {
+	store := newNoopStore()
+	handler, sm := newAdminTestHandler(t, store, testAdminConfig())
+	form := url.Values{
+		"id":           {"manual:keep-input"},
+		"finding_type": {"malicious"},
+		"ecosystem":    {"npm"},
+		"name":         {"left-pad"},
+		"risk_type":    {"typosquatting"},
+		"severity":     {"BOGUS"},
+		"summary":      {"operator summary that should survive validation"},
+		"description":  {"operator description that should survive validation"},
+	}
+	req := newAuthenticatedAdminFormRequest(t, sm, "/admin/advisories/create", form)
+	rec := httptest.NewRecorder()
+
+	handler.HandleAdvisoryCreate(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("POST /admin/advisories/create status = %d, want 400; location=%q body=%s", rec.Code, rec.Header().Get("Location"), rec.Body.String())
+	}
+	if rec.Header().Get("Location") != "" {
+		t.Fatalf("POST /admin/advisories/create redirected on recoverable validation error: %q", rec.Header().Get("Location"))
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		`value="manual:keep-input"`,
+		`value="left-pad"`,
+		`operator summary that should survive validation`,
+		`operator description that should survive validation`,
+		`value="malicious" selected`,
+		`value="npm" selected`,
+		`value="typosquatting" selected`,
+		`value="BOGUS" selected`,
+		`id="adv-severity-error"`,
+		`aria-invalid="true"`,
+		`aria-describedby="adv-severity-help adv-severity-error"`,
+		`Select CRITICAL, HIGH, MEDIUM, or LOW.`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("re-rendered advisory form missing %q\nbody=%s", want, body)
+		}
+	}
+	if strings.Contains(body, `id="adv-name-error"`) {
+		t.Fatalf("re-rendered advisory form marked valid package name as invalid\nbody=%s", body)
+	}
+	if strings.Contains(body, `Advisory created`) {
+		t.Fatalf("validation error response exposed success message\nbody=%s", body)
+	}
+
+	vulns, err := store.ListManualAdvisories(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("ListManualAdvisories() error = %v", err)
+	}
+	mal, err := store.ListMaliciousFindings(context.Background(), "manual", 10)
+	if err != nil {
+		t.Fatalf("ListMaliciousFindings() error = %v", err)
+	}
+	if len(vulns)+len(mal) != 0 {
+		t.Fatalf("invalid advisory was persisted: manual=%d malicious=%d", len(vulns), len(mal))
 	}
 }
 
@@ -1670,11 +2669,7 @@ func TestAdminAdvisoriesCreateFormDefaultsToVulnerabilityAndLocksSubmit(t *testi
 	}
 	body := rec.Body.String()
 	for _, want := range []string{
-		`<form action="/admin/advisories/create" method="POST" class="space-y-4" data-submit-lock data-submit-lock-label="Saving advisory">`,
-		`<option value="vulnerability" selected>vulnerability</option>`,
-		`name="name" id="adv-name" required maxlength="256" dir="auto"`,
-		`name="summary" id="adv-summary" required maxlength="1000" dir="auto"`,
-		`name="description" id="adv-description" rows="3" maxlength="8000" dir="auto"`,
+		`<form action="/admin/advisories/create" method="POST" class="space-y-4" data-unsaved-guard data-submit-lock data-submit-lock-label="Saving advisory">`,
 		`Manual advisories created here apply to all versions of the selected package`,
 		`data-submit-lock-button`,
 	} {
@@ -1682,18 +2677,24 @@ func TestAdminAdvisoriesCreateFormDefaultsToVulnerabilityAndLocksSubmit(t *testi
 			t.Fatalf("GET /admin/advisories body missing %q\nbody=%s", want, body)
 		}
 	}
-	if strings.Contains(body, `<option value="malicious" selected>malicious</option>`) {
-		t.Fatalf("GET /admin/advisories defaults to malicious\nbody=%s", body)
+	assertAdminAdvisoryTextInput(t, body, "adv-name", "name", admin.ManualAdvisoryNameMaxLength)
+	assertAdminAdvisoryTextInput(t, body, "adv-summary", "summary", admin.ManualAdvisorySummaryMaxLength)
+	assertAdminAdvisoryDescription(t, body)
+	assertAdminAdvisoryRiskTypeSelect(t, body, true)
+	selectedVulnerability := regexp.MustCompile(`(?is)<option\b[^>]*value="vulnerability"[^>]*selected[^>]*>\s*vulnerability\s*</option>`)
+	if !selectedVulnerability.MatchString(body) {
+		t.Fatalf("GET /admin/advisories body missing selected vulnerability option\nbody=%s", body)
 	}
-	if strings.Contains(body, `name="risk_type"`) {
-		t.Fatalf("vulnerability create form rendered malicious risk-type control\nbody=%s", body)
+	selectedMalicious := regexp.MustCompile(`(?s)<option\b[^>]*value="malicious"[^>]*selected[^>]*>\s*malicious\s*</option>`)
+	if selectedMalicious.MatchString(body) {
+		t.Fatalf("GET /admin/advisories defaults to malicious\nbody=%s", body)
 	}
 	if strings.Contains(body, "Vulnerability advisories created here") {
 		t.Fatalf("GET /admin/advisories still renders vulnerability-only guidance\nbody=%s", body)
 	}
 }
 
-func TestAdminAdvisoriesEditVulnerabilityFormOmitsRiskTypeControl(t *testing.T) {
+func TestAdminAdvisoriesEditVulnerabilityFormKeepsScopedRiskTypeControl(t *testing.T) {
 	store := newNoopStore()
 	if err := store.UpsertManualAdvisory(context.Background(), &db.ManualAdvisory{
 		ID:          "manual:vuln",
@@ -1715,19 +2716,14 @@ func TestAdminAdvisoriesEditVulnerabilityFormOmitsRiskTypeControl(t *testing.T) 
 		t.Fatalf("GET /admin/advisories edit status = %d, want 200", rec.Code)
 	}
 	body := rec.Body.String()
-	if strings.Contains(body, `name="risk_type"`) {
-		t.Fatalf("vulnerability edit form rendered malicious risk-type control\nbody=%s", body)
+	assertAdminAdvisoryRiskTypeSelect(t, body, false)
+	cancelLink := regexp.MustCompile(`(?s)<a\b[^>]*href="/admin/advisories"[^>]*class="[^"]*\bmin-h-11\b[^"]*\bms-3\b[^"]*"`)
+	if !cancelLink.MatchString(body) {
+		t.Fatalf("GET /admin/advisories edit body missing cancel link\nbody=%s", body)
 	}
-	for _, want := range []string{
-		`href="/admin/advisories" class="inline-flex min-h-11 items-center rounded-md border border-gray-500 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 ml-3"`,
-		`name="name" id="adv-name" required maxlength="256" dir="auto"`,
-		`name="summary" id="adv-summary" required maxlength="1000" dir="auto"`,
-		`name="description" id="adv-description" rows="3" maxlength="8000" dir="auto"`,
-	} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("GET /admin/advisories edit body missing %q\nbody=%s", want, body)
-		}
-	}
+	assertAdminAdvisoryTextInput(t, body, "adv-name", "name", admin.ManualAdvisoryNameMaxLength)
+	assertAdminAdvisoryTextInput(t, body, "adv-summary", "summary", admin.ManualAdvisorySummaryMaxLength)
+	assertAdminAdvisoryDescription(t, body)
 }
 
 func TestAdminAdvisoriesDeleteUsesConfirmationAndSubmitLock(t *testing.T) {
@@ -1752,14 +2748,34 @@ func TestAdminAdvisoriesDeleteUsesConfirmationAndSubmitLock(t *testing.T) {
 		t.Fatalf("GET /admin/advisories status = %d, want 200", rec.Code)
 	}
 	body := rec.Body.String()
-	for _, want := range []string{
-		`name="confirm_id" value="manual:vuln"`,
-		`data-submit-lock data-submit-lock-label="Deleting advisory"`,
-		`data-submit-lock-button`,
-		`Confirm delete`,
-	} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("GET /admin/advisories body missing %q\nbody=%s", want, body)
+	forms := advisoryDeleteForms(body)
+	if len(forms) != 2 {
+		t.Fatalf("GET /admin/advisories rendered %d delete forms, want mobile and desktop forms\nbody=%s", len(forms), body)
+	}
+	for _, form := range forms {
+		for _, want := range []string{
+			`data-submit-lock`,
+			`data-submit-lock-label="Deleting advisory"`,
+			`<input type="hidden" name="id" value="manual:vuln">`,
+			`required`,
+			`autocomplete="off"`,
+			`data-submit-lock-button`,
+			`Confirm delete`,
+		} {
+			if !strings.Contains(form, want) {
+				t.Fatalf("GET /admin/advisories delete form missing %q\nform=%s", want, form)
+			}
+		}
+		if !regexp.MustCompile(`(?s)<input\b[^>]*type="text"[^>]*name="confirm_id"`).MatchString(form) {
+			t.Fatalf("GET /admin/advisories delete form missing text confirmation input\nform=%s", form)
+		}
+		for _, notWant := range []string{
+			`<input type="hidden" name="confirm_id"`,
+			`name="confirm_id" value="manual:vuln"`,
+		} {
+			if strings.Contains(form, notWant) {
+				t.Fatalf("GET /admin/advisories delete form still auto-fills confirmation %q\nform=%s", notWant, form)
+			}
 		}
 	}
 }
@@ -1923,8 +2939,8 @@ func TestHandleAdminFeedsHTMXWithoutSessionRedirectsToLogin(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /admin/feeds?partial=runtime status = %d, want 200", rec.Code)
 	}
-	if redirect := rec.Header().Get("HX-Redirect"); redirect != "/admin/login?next=%2Fadmin%2Ffeeds%3Fpartial%3Druntime" {
-		t.Fatalf("HX-Redirect = %q, want login redirect with admin target", redirect)
+	if redirect := rec.Header().Get("HX-Redirect"); redirect != "/admin/login?next=%2Fadmin%2Ffeeds" {
+		t.Fatalf("HX-Redirect = %q, want login redirect with full admin target", redirect)
 	}
 	if location := rec.Header().Get("Location"); location != "" {
 		t.Fatalf("Location = %q, want empty for HTMX redirect", location)
@@ -2092,22 +3108,30 @@ func newAdminTestHandler(t *testing.T, store *noopStore, cfg *config.Config, syn
 		LegalURL:   cfg.Web.LegalURL,
 	})
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	sm := auth.NewSessionManager(context.Background(), time.Hour, false)
+	sm := auth.NewSessionManagerWithIdleTimeout(context.Background(), time.Hour, auth.DefaultAdminIdleTimeout, false)
 	var trigger admin.FeedSyncFunc
 	if len(syncFeed) > 0 {
 		trigger = syncFeed[0]
 	}
-	runtime := config.NewRuntimeSettings(cfg.Server.BlockThreshold, cfg.Server.RateLimitPerMinute, cfg.Server.RateLimitBurst)
-	return admin.NewAdminHandler(context.Background(), store, sm, renderer, logger, cfg, runtime, trigger), sm
+	runtime := config.NewRuntimeSettingsFromConfig(cfg)
+	handler := admin.NewAdminHandler(context.Background(), store, sm, renderer, logger, cfg, runtime, trigger)
+	handler.SetFeedConfigApplyFunc(func(context.Context, config.FeedSettings) error {
+		return nil
+	})
+	handler.SetFeedConfigResetFunc(func(_ context.Context, feedName string) (config.FeedSettings, bool, error) {
+		feed, ok := cfg.FeedSettings(feedName)
+		return feed, ok, nil
+	})
+	return handler, sm
 }
 
 func newAuthenticatedAdminRequest(t *testing.T, sm *auth.SessionManager, method, target string) *http.Request {
 	t.Helper()
 
 	cookieRec := httptest.NewRecorder()
-	_, err := sm.Create(cookieRec)
+	_, err := sm.CreateAdmin(cookieRec, false)
 	if err != nil {
-		t.Fatalf("create session: %v", err)
+		t.Fatalf("create admin session: %v", err)
 	}
 
 	req := httptest.NewRequest(method, target, nil)
@@ -2121,9 +3145,9 @@ func newAuthenticatedAdminFormRequest(t *testing.T, sm *auth.SessionManager, tar
 	t.Helper()
 
 	cookieRec := httptest.NewRecorder()
-	sess, err := sm.Create(cookieRec)
+	sess, err := sm.CreateAdmin(cookieRec, false)
 	if err != nil {
-		t.Fatalf("create session: %v", err)
+		t.Fatalf("create admin session: %v", err)
 	}
 
 	csrfToken, err := auth.CSRFToken(sess)
@@ -2169,6 +3193,206 @@ func htmlSection(body, startMarker, endMarker string) string {
 	return body[start : index+end]
 }
 
+func adminFeedSection(body, feedKey string) string {
+	marker := `data-feed-key="` + feedKey + `"`
+	index := strings.Index(body, marker)
+	if index < 0 {
+		return ""
+	}
+	start := strings.LastIndex(body[:index], "<details")
+	if start < 0 {
+		start = index
+	}
+	next := strings.Index(body[index+len(marker):], `data-feed-key="`)
+	if next < 0 {
+		return body[start:]
+	}
+	return body[start : index+len(marker)+next]
+}
+
+func inputElementByID(t *testing.T, body, id string) string {
+	t.Helper()
+
+	return elementByID(t, body, "input", id)
+}
+
+func elementByID(t *testing.T, body, tagName, id string) string {
+	t.Helper()
+
+	idStart := strings.Index(body, `id="`+id+`"`)
+	if idStart < 0 {
+		t.Fatalf("body missing %s id %q\nbody=%s", tagName, id, body)
+	}
+	start := strings.LastIndex(body[:idStart], "<"+tagName)
+	if start < 0 {
+		t.Fatalf("id %q is not inside a %s\nbody=%s", id, tagName, body)
+	}
+	end := strings.Index(body[start:], ">")
+	if end < 0 {
+		t.Fatalf("%s id %q is not closed\nbody=%s", tagName, id, body)
+	}
+	return body[start : start+end]
+}
+
+func assertAdminAdvisoryTextInput(t *testing.T, body, id, name string, maxLength int) {
+	t.Helper()
+
+	tag := inputElementByID(t, body, id)
+	for attr, want := range map[string]string{
+		"type":      "text",
+		"name":      name,
+		"maxlength": strconv.Itoa(maxLength),
+		"dir":       "auto",
+	} {
+		if got := htmlAttributeValue(t, tag, attr); got != want {
+			t.Fatalf("advisory input %q attribute %s = %q, want %q\ntag=%s", id, attr, got, want, tag)
+		}
+	}
+	if !strings.Contains(tag, " required") {
+		t.Fatalf("advisory input %q is not required\ntag=%s", id, tag)
+	}
+}
+
+func assertAdminAdvisoryDescription(t *testing.T, body string) {
+	t.Helper()
+
+	tag := elementByID(t, body, "textarea", "adv-description")
+	for attr, want := range map[string]string{
+		"name":      "description",
+		"rows":      "3",
+		"maxlength": strconv.Itoa(admin.ManualAdvisoryDescriptionMaxLength),
+		"dir":       "auto",
+	} {
+		if got := htmlAttributeValue(t, tag, attr); got != want {
+			t.Fatalf("advisory description attribute %s = %q, want %q\ntag=%s", attr, got, want, tag)
+		}
+	}
+}
+
+func assertAdminAdvisoryRiskTypeSelect(t *testing.T, body string, wantDefaultMalware bool) {
+	t.Helper()
+
+	tag := elementByID(t, body, "select", "adv-risk-type")
+	if got := htmlAttributeValue(t, tag, "name"); got != "risk_type" {
+		t.Fatalf("advisory risk-type select name = %q, want risk_type\ntag=%s", got, tag)
+	}
+	if got := htmlAttributeValue(t, tag, "aria-describedby"); got != "adv-risk-type-help" {
+		t.Fatalf("advisory risk-type select aria-describedby = %q, want adv-risk-type-help\ntag=%s", got, tag)
+	}
+	if !strings.Contains(body, "Risk type classifies malicious manual advisories") {
+		t.Fatalf("advisory risk-type helper text missing\nbody=%s", body)
+	}
+	selectedMalware := regexp.MustCompile(`(?is)<option\b[^>]*value="malware"[^>]*selected[^>]*>\s*malware\s*</option>`)
+	if wantDefaultMalware && !selectedMalware.MatchString(body) {
+		t.Fatalf("advisory create form does not default risk type to malware\nbody=%s", body)
+	}
+}
+
+func htmlAttributeValue(t *testing.T, tag, attr string) string {
+	t.Helper()
+
+	pattern := regexp.MustCompile(`\b` + regexp.QuoteMeta(attr) + `="([^"]*)"`)
+	matches := pattern.FindStringSubmatch(tag)
+	if len(matches) != 2 {
+		t.Fatalf("tag missing attribute %q\ntag=%s", attr, tag)
+	}
+	return matches[1]
+}
+
+func assertSummaryExpandAffordance(t *testing.T, body, ariaLabel string) {
+	t.Helper()
+
+	summaries := summariesWithAriaLabel(body, ariaLabel)
+	if len(summaries) == 0 {
+		t.Fatalf("body missing summary with aria-label %q\nbody=%s", ariaLabel, body)
+	}
+	for _, summary := range summaries {
+		if strings.Contains(summary, "list-none") {
+			t.Fatalf("summary %q still hides its native marker with list-none\nsummary=%s", ariaLabel, summary)
+		}
+		if !strings.Contains(summary, `data-admin-expand-affordance`) || !strings.Contains(summary, `>Review</span>`) {
+			t.Fatalf("summary %q missing visible expand affordance\nsummary=%s", ariaLabel, summary)
+		}
+	}
+}
+
+func assertAllElementsMarkedNoPrint(t *testing.T, body, tagName, marker string) {
+	t.Helper()
+
+	matches := 0
+	for offset := 0; ; {
+		index := strings.Index(body[offset:], marker)
+		if index < 0 {
+			break
+		}
+		index += offset
+		start := strings.LastIndex(body[:index], "<"+tagName)
+		if start < 0 {
+			t.Fatalf("body missing <%s> before marker %q\nbody=%s", tagName, marker, body)
+		}
+		end := strings.Index(body[start:], ">")
+		if end < 0 {
+			t.Fatalf("<%s> before marker %q is not closed\nbody=%s", tagName, marker, body)
+		}
+		element := body[start : start+end+1]
+		for _, want := range []string{`data-no-print`, `no-print`} {
+			if !strings.Contains(element, want) {
+				t.Fatalf("<%s> before marker %q missing %q\nelement=%s\nbody=%s", tagName, marker, want, element, body)
+			}
+		}
+		matches++
+		offset = index + len(marker)
+	}
+	if matches == 0 {
+		t.Fatalf("body missing marker %q\nbody=%s", marker, body)
+	}
+}
+
+func summariesWithAriaLabel(body, ariaLabel string) []string {
+	needle := `aria-label="` + ariaLabel + `"`
+	var summaries []string
+	for offset := 0; ; {
+		index := strings.Index(body[offset:], needle)
+		if index < 0 {
+			return summaries
+		}
+		index += offset
+		start := strings.LastIndex(body[:index], "<summary")
+		end := strings.Index(body[index:], "</summary>")
+		if start >= 0 && end >= 0 {
+			summaries = append(summaries, body[start:index+end+len("</summary>")])
+		}
+		offset = index + len(needle)
+	}
+}
+
+func advisoryDeleteForms(body string) []string {
+	const marker = `action="/admin/advisories/delete"`
+	var forms []string
+	for offset := 0; ; {
+		index := strings.Index(body[offset:], marker)
+		if index < 0 {
+			return forms
+		}
+		index += offset
+		start := strings.LastIndex(body[:index], "<form")
+		end := strings.Index(body[index:], "</form>")
+		if start >= 0 && end >= 0 {
+			forms = append(forms, body[start:index+end+len("</form>")])
+		}
+		offset = index + len(marker)
+	}
+}
+
+func assertDefinitionValue(t *testing.T, body, label, value string) {
+	t.Helper()
+
+	pattern := regexp.MustCompile(`(?s)<dt\b[^>]*>\s*` + regexp.QuoteMeta(label) + `\s*</dt>\s*<dd\b[^>]*>\s*` + regexp.QuoteMeta(value) + `\s*</dd>`)
+	if !pattern.MatchString(body) {
+		t.Fatalf("definition value %q=%q missing from HTML\nbody=%s", label, value, body)
+	}
+}
+
 func testAdminConfig() *config.Config {
 	return &config.Config{
 		Server: config.ServerConfig{
@@ -2185,6 +3409,10 @@ func testAdminConfig() *config.Config {
 		},
 		Admin: config.AdminConfig{
 			SessionTimeout: 45 * time.Minute,
+		},
+		Retention: config.RetentionConfig{
+			ScanLog:       30 * 24 * time.Hour,
+			AdminAuditLog: 30 * 24 * time.Hour,
 		},
 		FeedSync: config.FeedSyncConfig{
 			Interval:  15 * time.Minute,

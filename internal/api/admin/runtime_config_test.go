@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -24,6 +25,7 @@ func TestAdminFeedRowsMergeRuntimeConfigAndStoreStatus(t *testing.T) {
 			VulnCheckEnabled:  true,
 			VulnCheckMode:     config.FeedModeSelf,
 			OpenSSFMode:       config.FeedModeSelf,
+			GHSAEnabled:       true,
 			GHSAMode:          config.FeedModeSelf,
 			CISAKEVMode:       config.FeedModeSelf,
 			EPSSMode:          config.FeedModeSelf,
@@ -48,6 +50,14 @@ func TestAdminFeedRowsMergeRuntimeConfigAndStoreStatus(t *testing.T) {
 			LastSyncStatus: "skipped",
 			LastError:      lastError,
 		},
+		{
+			FeedName:       "ghsa",
+			LastSyncStatus: "rejected",
+			LastError:      "vulnerability import cvss_score must be between 0 and 10",
+			EntriesSynced:  0,
+			EntriesTotal:   2,
+			Metadata:       json.RawMessage(`{"rejected_count":2,"client_ip":"192.0.2.10","api_key_id":77,"api_key_name":"n8n-import","correlation_id":"corr-reject"}`),
+		},
 	})
 
 	osv := findAdminFeedRow(t, rows, "osv")
@@ -59,7 +69,7 @@ func TestAdminFeedRowsMergeRuntimeConfigAndStoreStatus(t *testing.T) {
 	}
 
 	vulncheck := findAdminFeedRow(t, rows, "vulncheck")
-	if vulncheck.APIKeyState != "missing" || vulncheck.Status != "warning" {
+	if vulncheck.APIKeyState != "missing" || vulncheck.Status != "warning" || vulncheck.StatusReason() != "required API key not configured" {
 		t.Fatalf("vulncheck row = %+v", vulncheck)
 	}
 
@@ -74,6 +84,14 @@ func TestAdminFeedRowsMergeRuntimeConfigAndStoreStatus(t *testing.T) {
 	}
 	if !strings.Contains(custom.LastError, "https://downloads.example.test/...") || !strings.Contains(custom.LastError, "Bearer [redacted]") {
 		t.Fatalf("custom LastError missing redacted context: %q", custom.LastError)
+	}
+
+	ghsa := findAdminFeedRow(t, rows, "ghsa")
+	if ghsa.Status != "error" || ghsa.RejectedCount != 2 || ghsa.LastSyncStatus != "rejected" {
+		t.Fatalf("ghsa rejected row = %+v", ghsa)
+	}
+	if ghsa.RejectedClientIP != "192.0.2.10" || ghsa.RejectedAPIKeyID != 77 || ghsa.RejectedAPIKeyName != "n8n-import" || ghsa.RejectedCorrelationID != "corr-reject" {
+		t.Fatalf("ghsa rejected attribution = %+v", ghsa)
 	}
 }
 
@@ -124,6 +142,7 @@ func TestAdminFeedFormRowsReflectOverridesAndRestartState(t *testing.T) {
 	if !strings.Contains(vulncheck.SyncIntervalHelp, "Ignored while mode is external") {
 		t.Fatalf("sync interval help = %q", vulncheck.SyncIntervalHelp)
 	}
+	requireFeedModeOptions(t, vulncheck.ModeOptions, config.FeedModeSelf, config.FeedModeExternal)
 
 	osv := findAdminFeedFormRow(t, rows, "osv")
 	if osv.OverrideActive || osv.PendingRestart {
@@ -143,6 +162,7 @@ func TestAdminFeedFormRowsReflectOverridesAndRestartState(t *testing.T) {
 	if !nvd.SupportsAPIKey || nvd.RequiresAPIKey || nvd.APIKeyConfigured {
 		t.Fatalf("nvd API-key state = supports:%v requires:%v configured:%v, want optional unconfigured key", nvd.SupportsAPIKey, nvd.RequiresAPIKey, nvd.APIKeyConfigured)
 	}
+	requireFeedModeOptions(t, nvd.ModeOptions, config.FeedModeSelf)
 }
 
 func TestRuntimeConfigFormattingHelpers(t *testing.T) {
@@ -202,4 +222,16 @@ func findAdminFeedFormRow(t *testing.T, rows []adminFeedFormRow, key string) adm
 	}
 	t.Fatalf("feed form row %q not found in %+v", key, rows)
 	return adminFeedFormRow{}
+}
+
+func requireFeedModeOptions(t *testing.T, got []config.FeedModeOption, want ...config.FeedMode) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("ModeOptions = %+v, want %v", got, want)
+	}
+	for i, mode := range want {
+		if got[i].Value != mode || got[i].Label != string(mode) {
+			t.Fatalf("ModeOptions[%d] = %+v, want value/label %q", i, got[i], mode)
+		}
+	}
 }

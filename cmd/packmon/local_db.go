@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/8linkz-sec/packmon/internal/db/sqlite"
 	"github.com/8linkz-sec/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/ioutils"
 )
 
 const defaultDBWarnAfterDays = 7
@@ -45,20 +47,25 @@ type localDBExport struct {
 	ScanHistory     []sqlite.ScanEntry               `json:"scan_history"`
 }
 
-func dbWarnAfterDays() int {
+func dbWarnAfterDays() (int, error) {
 	raw := strings.TrimSpace(os.Getenv("PACKMON_DB_WARN_AFTER_DAYS"))
 	if raw == "" {
-		return defaultDBWarnAfterDays
+		return defaultDBWarnAfterDays, nil
 	}
 
 	value, err := strconv.Atoi(raw)
 	if err != nil || value < 0 {
-		return defaultDBWarnAfterDays
+		return 0, fmt.Errorf("PACKMON_DB_WARN_AFTER_DAYS must be a non-negative integer")
 	}
-	return value
+	return value, nil
 }
 
 func inspectLocalDB(ctx context.Context, path string) (*localDBInfo, error) {
+	warnAfterDays, err := dbWarnAfterDays()
+	if err != nil {
+		return nil, err
+	}
+
 	info := &localDBInfo{Path: path}
 
 	fileInfo, err := os.Stat(path)
@@ -73,12 +80,12 @@ func inspectLocalDB(ctx context.Context, path string) (*localDBInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open local database: %w", err)
 	}
-	defer closeSilently(store)
+	defer ioutils.CloseSilently(store)
 
 	info.Exists = true
 	info.FileSizeBytes = fileInfo.Size()
 
-	loaded, err := loadLocalDBInfo(ctx, store)
+	loaded, err := loadLocalDBInfoWithWarnAfterDays(ctx, store, warnAfterDays)
 	if err != nil {
 		return nil, err
 	}
@@ -88,6 +95,14 @@ func inspectLocalDB(ctx context.Context, path string) (*localDBInfo, error) {
 }
 
 func loadLocalDBInfo(ctx context.Context, store *sqlite.Store) (*localDBInfo, error) {
+	warnAfterDays, err := dbWarnAfterDays()
+	if err != nil {
+		return nil, err
+	}
+	return loadLocalDBInfoWithWarnAfterDays(ctx, store, warnAfterDays)
+}
+
+func loadLocalDBInfoWithWarnAfterDays(ctx context.Context, store *sqlite.Store, warnAfterDays int) (*localDBInfo, error) {
 	info := &localDBInfo{
 		Path:   store.Path(),
 		Exists: true,
@@ -109,7 +124,7 @@ func loadLocalDBInfo(ctx context.Context, store *sqlite.Store) (*localDBInfo, er
 	}
 	info.LastSyncAt = lastSyncAt
 	info.DBAgeDays = dbAgeDays
-	info.DBStale = dbAgeDays != nil && *dbAgeDays >= dbWarnAfterDays()
+	info.DBStale = dbAgeDays != nil && *dbAgeDays >= warnAfterDays
 
 	return info, nil
 }
@@ -145,12 +160,13 @@ func parseTimestamp(raw string) (time.Time, error) {
 }
 
 func applyLocalDBFreshness(ctx context.Context, store *sqlite.Store, result *domain.ScanResult) error {
-	if store == nil || result == nil || result.Mode != "local" {
+	if store == nil || result == nil || result.Mode != domain.ScanModeLocal {
 		return nil
 	}
 
 	info, err := loadLocalDBInfo(ctx, store)
 	if err != nil {
+		markLocalDBFreshnessUnknown(result)
 		return err
 	}
 
@@ -169,6 +185,14 @@ func applyLocalDBFreshness(ctx context.Context, store *sqlite.Store, result *dom
 		result.FeedVersions = feedVersions
 	}
 	return nil
+}
+
+func markLocalDBFreshnessUnknown(result *domain.ScanResult) {
+	if result == nil || result.Mode != domain.ScanModeLocal {
+		return
+	}
+	result.DBAgeDays = nil
+	result.DBStale = true
 }
 
 func readLocalFeedState(ctx context.Context, store *sqlite.Store) (string, map[string]string, error) {
@@ -203,28 +227,48 @@ func exportLocalDB(ctx context.Context, store *sqlite.Store, writer io.Writer) e
 		return err
 	}
 
-	exportData, err := store.ExportLocalDatabase(ctx)
-	if err != nil {
-		return err
-	}
-
-	payload := &localDBExport{
-		GeneratedAt:     time.Now().UTC(),
-		Info:            exportLocalDBInfo(info),
-		Vulnerabilities: exportData.Vulnerabilities,
-		Malicious:       exportData.Malicious,
-		Reputation:      exportData.Reputation,
-		Lifecycle:       exportData.Lifecycle,
-		ScanHistory:     exportData.ScanHistory,
-	}
-
-	encoder := json.NewEncoder(writer)
-	encoder.SetEscapeHTML(false)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(payload); err != nil {
+	stream := newLocalDBExportJSONStream(writer)
+	if err := stream.begin(time.Now().UTC(), exportLocalDBInfo(info)); err != nil {
 		return fmt.Errorf("encode local database export: %w", err)
 	}
-
+	if err := stream.writeArrayField("vulnerabilities", func(emit func(any) error) error {
+		return store.StreamLocalVulnerabilities(ctx, func(item sqlite.LocalVulnerabilityEntry) error {
+			return emit(item)
+		})
+	}); err != nil {
+		return fmt.Errorf("encode local database export: %w", err)
+	}
+	if err := stream.writeArrayField("malicious", func(emit func(any) error) error {
+		return store.StreamLocalMalicious(ctx, func(item sqlite.LocalMaliciousEntry) error {
+			return emit(item)
+		})
+	}); err != nil {
+		return fmt.Errorf("encode local database export: %w", err)
+	}
+	if err := stream.writeArrayField("reputation", func(emit func(any) error) error {
+		return store.StreamLocalReputation(ctx, func(item sqlite.LocalReputationEntry) error {
+			return emit(item)
+		})
+	}); err != nil {
+		return fmt.Errorf("encode local database export: %w", err)
+	}
+	if err := stream.writeArrayField("lifecycle", func(emit func(any) error) error {
+		return store.StreamLocalLifecycle(ctx, func(item sqlite.LocalLifecycleEntry) error {
+			return emit(item)
+		})
+	}); err != nil {
+		return fmt.Errorf("encode local database export: %w", err)
+	}
+	if err := stream.writeArrayField("scan_history", func(emit func(any) error) error {
+		return store.StreamLocalScanHistory(ctx, func(item sqlite.ScanEntry) error {
+			return emit(item)
+		})
+	}); err != nil {
+		return fmt.Errorf("encode local database export: %w", err)
+	}
+	if err := stream.end(); err != nil {
+		return fmt.Errorf("encode local database export: %w", err)
+	}
 	return nil
 }
 
@@ -237,4 +281,124 @@ func exportLocalDBInfo(info *localDBInfo) *localDBInfo {
 		copyValue.Path = filepath.Base(copyValue.Path)
 	}
 	return &copyValue
+}
+
+type localDBExportJSONStream struct {
+	writer     io.Writer
+	fieldCount int
+}
+
+func newLocalDBExportJSONStream(writer io.Writer) *localDBExportJSONStream {
+	return &localDBExportJSONStream{writer: writer}
+}
+
+func (s *localDBExportJSONStream) begin(generatedAt time.Time, info *localDBInfo) error {
+	if _, err := io.WriteString(s.writer, "{\n"); err != nil {
+		return err
+	}
+	if err := s.writeValueField("generated_at", generatedAt); err != nil {
+		return err
+	}
+	if err := s.writeValueField("info", info); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *localDBExportJSONStream) writeValueField(name string, value any) error {
+	if err := s.writeFieldPrefix(name); err != nil {
+		return err
+	}
+	return writeLocalDBExportJSONValue(s.writer, value, "  ")
+}
+
+func (s *localDBExportJSONStream) writeArrayField(name string, stream func(func(any) error) error) error {
+	if stream == nil {
+		return fmt.Errorf("stream function for %s is nil", name)
+	}
+	if err := s.writeFieldPrefix(name); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(s.writer, "["); err != nil {
+		return err
+	}
+
+	count := 0
+	if err := stream(func(item any) error {
+		if count == 0 {
+			if _, err := io.WriteString(s.writer, "\n"); err != nil {
+				return err
+			}
+		} else if _, err := io.WriteString(s.writer, ",\n"); err != nil {
+			return err
+		}
+		if _, err := io.WriteString(s.writer, "    "); err != nil {
+			return err
+		}
+		if err := writeLocalDBExportJSONValue(s.writer, item, "    "); err != nil {
+			return err
+		}
+		count++
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	if count > 0 {
+		_, err := io.WriteString(s.writer, "\n  ]")
+		return err
+	}
+	_, err := io.WriteString(s.writer, "]")
+	return err
+}
+
+func (s *localDBExportJSONStream) writeFieldPrefix(name string) error {
+	if s.fieldCount > 0 {
+		if _, err := io.WriteString(s.writer, ",\n"); err != nil {
+			return err
+		}
+	}
+	fieldName, err := json.Marshal(name)
+	if err != nil {
+		return err
+	}
+	if _, err := io.WriteString(s.writer, "  "); err != nil {
+		return err
+	}
+	if _, err := s.writer.Write(fieldName); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(s.writer, ": "); err != nil {
+		return err
+	}
+	s.fieldCount++
+	return nil
+}
+
+func (s *localDBExportJSONStream) end() error {
+	_, err := io.WriteString(s.writer, "\n}\n")
+	return err
+}
+
+func writeLocalDBExportJSONValue(writer io.Writer, value any, continuationPrefix string) error {
+	data, err := marshalLocalDBExportJSON(value)
+	if err != nil {
+		return err
+	}
+	if continuationPrefix != "" {
+		data = bytes.ReplaceAll(data, []byte("\n"), []byte("\n"+continuationPrefix))
+	}
+	_, err = writer.Write(data)
+	return err
+}
+
+func marshalLocalDBExportJSON(value any) ([]byte, error) {
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(value); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }

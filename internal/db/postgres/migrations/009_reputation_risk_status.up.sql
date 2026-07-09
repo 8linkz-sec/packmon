@@ -11,7 +11,22 @@ UPDATE package_reputation_cache
 SET status = 'risk',
     severity = 'HIGH',
     summary = 'ReversingLabs: malware incident history',
-    evidence = jsonb_set(COALESCE(evidence, '{}'::jsonb), '{assessment}', '"risk"'::jsonb, true),
+    evidence = jsonb_set(
+        COALESCE(evidence, '{}'::jsonb) ||
+        jsonb_build_object(
+            'packmon_migration_009',
+            jsonb_build_object(
+                'previous_status', status,
+                'previous_severity', severity,
+                'previous_summary', summary,
+                'previous_description', description,
+                'previous_assessment', COALESCE(evidence->'assessment', 'null'::jsonb)
+            )
+        ),
+        '{assessment}',
+        '"risk"'::jsonb,
+        true
+    ),
     updated_at = NOW()
 WHERE source = 'reversinglabs'
   AND status = 'malicious'

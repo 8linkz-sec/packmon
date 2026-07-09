@@ -1,3 +1,5 @@
+// Package lifecycle centralizes Packmon lifecycle policy for endoflife.date
+// release metadata, version matching, and scan finding creation.
 package lifecycle
 
 import (
@@ -8,22 +10,35 @@ import (
 	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
+// Source identifies lifecycle metadata and findings derived from endoflife.date.
 const Source = "endoflife.date"
 
 const (
-	EOLSoonDays   = 90
+	// EOLSoonDays is the number of days before EOL that Packmon reports a
+	// lifecycle warning.
+	EOLSoonDays = 90
+	// EOLSoonWindow is the duration before EOL covered by the lifecycle warning.
 	EOLSoonWindow = time.Duration(EOLSoonDays) * 24 * time.Hour
 )
 
 const (
-	SeverityEOL                 = domain.SeverityCritical
-	SeverityEOLSoon             = domain.SeverityMedium
+	// SeverityEOL is used for packages whose matched release is already EOL.
+	SeverityEOL = domain.SeverityCritical
+	// SeverityEOLSoon is used for packages whose matched release reaches EOL
+	// within EOLSoonWindow.
+	SeverityEOLSoon = domain.SeverityMedium
+	// SeveritySecuritySupportOnly is used for packages whose matched release is
+	// outside active support but still in security support.
 	SeveritySecuritySupportOnly = domain.SeverityLow
 )
 
 const (
-	RiskTypeEOL                 = "eol"
-	RiskTypeEOLSoon             = "eol_soon"
+	// RiskTypeEOL labels lifecycle findings for releases that are already EOL.
+	RiskTypeEOL = "eol"
+	// RiskTypeEOLSoon labels lifecycle findings for releases approaching EOL.
+	RiskTypeEOLSoon = "eol_soon"
+	// RiskTypeSecuritySupportOnly labels lifecycle findings for releases that
+	// receive security support only.
 	RiskTypeSecuritySupportOnly = "security_support_only"
 )
 
@@ -52,6 +67,8 @@ type Release struct {
 	IsMaintained     bool
 }
 
+// ReleaseRow carries the lifecycle release metadata Packmon needs for one
+// package-to-product mapping row.
 type ReleaseRow struct {
 	ID          string
 	Ecosystem   string
@@ -61,6 +78,11 @@ type ReleaseRow struct {
 	Release     Release
 }
 
+// LongestMatchingReleases returns the most specific release row matching
+// version for each product slug. A release cycle matches when the version is
+// exactly the cycle or starts with the cycle followed by a dot; when multiple
+// rows for the same product match, the longest cycle string wins. Result order
+// is unspecified.
 func LongestMatchingReleases(rows []ReleaseRow, version string) []ReleaseRow {
 	if strings.TrimSpace(version) == "" {
 		return nil
@@ -84,6 +106,13 @@ func LongestMatchingReleases(rows []ReleaseRow, version string) []ReleaseRow {
 	return matches
 }
 
+// FindingForRelease maps one matched release row to Packmon's canonical
+// lifecycle finding policy. EOL releases produce a critical supply-chain-risk
+// finding with RiskTypeEOL; releases entering EOL within EOLSoonWindow produce
+// a medium lifecycle finding with RiskTypeEOLSoon; releases in security support
+// only produce a low lifecycle finding with RiskTypeSecuritySupportOnly. The
+// checks run in that priority order and the boolean return is false when the
+// release does not create a finding.
 func FindingForRelease(pkg PackageQuery, row ReleaseRow, now time.Time) (domain.Finding, bool) {
 	release := row.Release
 	if release.IsEOL || dateOnOrBefore(release.EOLFrom, now) {

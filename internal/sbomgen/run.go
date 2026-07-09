@@ -11,33 +11,60 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 const defaultGenerationTimeout = 2 * time.Minute
 
-// Config controls auto-SBOM detection, generation, and validation.
+// Config controls auto-SBOM detection, generation, validation, and optional
+// tool installation.
 type Config struct {
-	Target       string
-	Ecosystems   []string
+	// Target is the repository path or subdirectory where manifest detection starts.
+	Target string
+	// Ecosystems limits generation to selected ecosystems; an empty slice allows all supported generators.
+	Ecosystems []domain.Ecosystem
+	// InstallTools allows generators to install missing package-manager or SBOM tools into the tool cache.
 	InstallTools bool
-	KeepSBOMDir  string
-	IncludeDev   bool
-	MaxDepth     int
-	Timeout      time.Duration
-	Logger       *slog.Logger
-	Registry     map[string]Generator
-	LookPath     func(string) (string, error)
-	Runner       RunnerFunc
-	Now          func() time.Time
+	// KeepSBOMDir keeps generated SBOM files in this directory; when empty, Run returns a cleanup callback for temporary files.
+	KeepSBOMDir string
+	// IncludeDev tells generators to include development dependencies when the ecosystem supports that distinction.
+	IncludeDev bool
+	// MaxDepth bounds manifest discovery below Target.
+	MaxDepth int
+	// Timeout bounds each external SBOM generator invocation.
+	Timeout time.Duration
+	// Logger receives generator diagnostics; nil is normalized to a discard logger.
+	Logger *slog.Logger
+	// Registry maps ecosystem names to generators. Callers normally leave this nil to use the built-in registry.
+	Registry map[domain.Ecosystem]Generator
+	// LookPath resolves tool executables and is primarily an injection seam for tests.
+	LookPath func(string) (string, error)
+	// Runner executes external commands and is primarily an injection seam for tests.
+	Runner RunnerFunc
+	// Now supplies timestamps for kept SBOM filenames and is primarily an injection seam for tests.
+	Now func() time.Time
+	// ToolCacheDir stores installed helper tools when InstallTools is enabled.
 	ToolCacheDir string
 }
 
-// Result contains generated SBOM paths and the cleanup action for temporary mode.
+// Result contains generated SBOM paths and the cleanup action for temporary
+// mode.
 type Result struct {
+	// SBOMPaths lists the generated CycloneDX JSON files ready for import.
 	SBOMPaths []string
-	Cleanup   func() error
+	// Cleanup removes temporary output when KeepSBOMDir was not configured.
+	// Callers own invoking it after they are done reading SBOMPaths.
+	Cleanup func() error
 }
 
+// Run detects supported manifests below Config.Target, generates CycloneDX SBOM
+// files with the matching ecosystem generators, validates that generated files
+// contain packages when dependencies are declared, and returns their paths. When
+// Config.KeepSBOMDir is empty, generated files are temporary and callers own the
+// returned cleanup callback; when generation fails, Run removes any files it
+// created before returning the wrapped detection, tool, generation, validation,
+// or cleanup error.
 func Run(ctx context.Context, cfg Config) (result Result, err error) {
 	cfg = normalizeConfig(cfg)
 
@@ -147,15 +174,15 @@ func normalizeConfig(cfg Config) Config {
 	return cfg
 }
 
-func filterDetections(ds []Detection, ecosystems []string) []Detection {
+func filterDetections(ds []Detection, ecosystems []domain.Ecosystem) []Detection {
 	if len(ecosystems) == 0 {
 		return ds
 	}
-	allow := map[string]struct{}{}
+	allow := map[domain.Ecosystem]struct{}{}
 	for _, eco := range ecosystems {
-		eco = strings.ToLower(strings.TrimSpace(eco))
-		if eco != "" {
-			allow[eco] = struct{}{}
+		normalized := domain.Ecosystem(strings.ToLower(strings.TrimSpace(string(eco))))
+		if normalized != "" {
+			allow[normalized] = struct{}{}
 		}
 	}
 	if len(allow) == 0 {
@@ -198,7 +225,7 @@ func outputFileName(d Detection) string {
 	}
 	name = strings.NewReplacer("/", "_", "\\", "_", ":", "_").Replace(name)
 	if strings.TrimSpace(name) == "" {
-		name = d.Ecosystem
+		name = string(d.Ecosystem)
 	}
 	return name + ".cdx.json"
 }

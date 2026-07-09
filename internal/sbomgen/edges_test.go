@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 func TestFilterDetectionsByEcosystem(t *testing.T) {
@@ -17,11 +19,11 @@ func TestFilterDetectionsByEcosystem(t *testing.T) {
 		{Ecosystem: "go", DisplayPath: "go.mod"},
 		{Ecosystem: "npm", DisplayPath: "package.json"},
 	}
-	got := filterDetections(ds, []string{" NPM "})
+	got := filterDetections(ds, []domain.Ecosystem{" NPM "})
 	if len(got) != 1 || got[0].Ecosystem != "npm" {
 		t.Fatalf("filterDetections = %+v, want npm only", got)
 	}
-	if got = filterDetections(ds, []string{" "}); len(got) != 2 {
+	if got = filterDetections(ds, []domain.Ecosystem{" "}); len(got) != 2 {
 		t.Fatalf("blank ecosystem filter should leave detections unchanged: %+v", got)
 	}
 }
@@ -33,8 +35,8 @@ func TestRunAppliesEcosystemFilter(t *testing.T) {
 	gen := &fakeGenerator{ecosystem: "npm", tool: "cyclonedx-npm", declares: true}
 	result, err := Run(context.Background(), Config{
 		Target:     root,
-		Ecosystems: []string{"npm"},
-		Registry:   map[string]Generator{"npm": gen},
+		Ecosystems: []domain.Ecosystem{domain.EcosystemNPM},
+		Registry:   map[domain.Ecosystem]Generator{"npm": gen},
 		LookPath:   func(string) (string, error) { return "found", nil },
 	})
 	if err != nil {
@@ -194,7 +196,7 @@ func TestEnsureToolRejectsMismatchedPathVersion(t *testing.T) {
 		tool:      "cyclonedx-npm",
 		install: InstallSpec{
 			Package:         "@cyclonedx/cyclonedx-npm",
-			ExpectedVersion: "4.2.1",
+			ExpectedVersion: "5.0.0",
 			VersionArgs:     []string{"--version"},
 		},
 	}
@@ -209,7 +211,7 @@ func TestEnsureToolRejectsMismatchedPathVersion(t *testing.T) {
 		},
 		Timeout: time.Second,
 	}, gen)
-	if err == nil || !strings.Contains(err.Error(), "4.2.1") || !strings.Contains(err.Error(), "9.9.9") {
+	if err == nil || !strings.Contains(err.Error(), "5.0.0") || !strings.Contains(err.Error(), "9.9.9") {
 		t.Fatalf("ensureTool err = %v, want version mismatch", err)
 	}
 	if versionRun.Name == "" || strings.Join(versionRun.Args, " ") != "--version" {
@@ -224,6 +226,74 @@ func TestBoundedCommandOutputTruncates(t *testing.T) {
 	}
 	if !strings.Contains(string(got), commandOutputTruncatedMarker) {
 		t.Fatalf("bounded output missing truncation marker")
+	}
+}
+
+func TestBoundedOutputWriterKeepsExactLimitWithoutMarker(t *testing.T) {
+	var w boundedOutputWriter
+	raw := []byte(strings.Repeat("x", maxCommandOutputBytes))
+	n, err := w.Write(raw)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if n != len(raw) {
+		t.Fatalf("Write returned %d, want %d", n, len(raw))
+	}
+
+	got := w.Bytes()
+	if len(got) != maxCommandOutputBytes {
+		t.Fatalf("Bytes length = %d, want %d", len(got), maxCommandOutputBytes)
+	}
+	if strings.Contains(string(got), commandOutputTruncatedMarker) {
+		t.Fatalf("Bytes unexpectedly includes truncation marker")
+	}
+}
+
+func TestBoundedOutputWriterTruncatesOversizedWrite(t *testing.T) {
+	var w boundedOutputWriter
+	raw := []byte(strings.Repeat("x", maxCommandOutputBytes) + "tail")
+	n, err := w.Write(raw)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if n != len(raw) {
+		t.Fatalf("Write returned %d, want %d", n, len(raw))
+	}
+
+	got := string(w.Bytes())
+	if len(got) != maxCommandOutputBytes+len(commandOutputTruncatedMarker) {
+		t.Fatalf("Bytes length = %d, want %d", len(got), maxCommandOutputBytes+len(commandOutputTruncatedMarker))
+	}
+	if !strings.HasSuffix(got, commandOutputTruncatedMarker) {
+		t.Fatalf("Bytes missing truncation marker suffix")
+	}
+	if strings.Contains(got, "tail") {
+		t.Fatalf("Bytes included content past the limit")
+	}
+}
+
+func TestBoundedOutputWriterMarksTruncatedAfterLimitReached(t *testing.T) {
+	var w boundedOutputWriter
+	if _, err := w.Write([]byte(strings.Repeat("x", maxCommandOutputBytes))); err != nil {
+		t.Fatalf("initial Write: %v", err)
+	}
+	n, err := w.Write([]byte("tail"))
+	if err != nil {
+		t.Fatalf("overflow Write: %v", err)
+	}
+	if n != len("tail") {
+		t.Fatalf("overflow Write returned %d, want %d", n, len("tail"))
+	}
+
+	got := string(w.Bytes())
+	if len(got) != maxCommandOutputBytes+len(commandOutputTruncatedMarker) {
+		t.Fatalf("Bytes length = %d, want %d", len(got), maxCommandOutputBytes+len(commandOutputTruncatedMarker))
+	}
+	if !strings.HasSuffix(got, commandOutputTruncatedMarker) {
+		t.Fatalf("Bytes missing truncation marker suffix")
+	}
+	if strings.Contains(got[:maxCommandOutputBytes], "tail") {
+		t.Fatalf("Bytes included overflow content")
 	}
 }
 
@@ -279,7 +349,7 @@ func TestRunKeepModeFailureRemovesCreatedSBOM(t *testing.T) {
 	_, err := Run(context.Background(), Config{
 		Target:      root,
 		KeepSBOMDir: keep,
-		Registry:    map[string]Generator{"npm": gen},
+		Registry:    map[domain.Ecosystem]Generator{"npm": gen},
 		LookPath:    func(string) (string, error) { return "found", nil },
 	})
 	if err == nil {
@@ -303,7 +373,7 @@ func TestRunReportsKeepModeCleanupFailure(t *testing.T) {
 	_, err := Run(context.Background(), Config{
 		Target:      root,
 		KeepSBOMDir: keep,
-		Registry:    map[string]Generator{"npm": gen},
+		Registry:    map[domain.Ecosystem]Generator{"npm": gen},
 		LookPath:    func(string) (string, error) { return "found", nil },
 	})
 	if err == nil || !strings.Contains(err.Error(), "generate boom") || !strings.Contains(err.Error(), "cleanup") {
@@ -323,7 +393,7 @@ func TestRunNormalizesGeneratedSBOMFileMode(t *testing.T) {
 	result, err := Run(context.Background(), Config{
 		Target:      root,
 		KeepSBOMDir: keep,
-		Registry:    map[string]Generator{"npm": gen},
+		Registry:    map[domain.Ecosystem]Generator{"npm": gen},
 		LookPath:    func(string) (string, error) { return "found", nil },
 	})
 	if err != nil {
@@ -407,7 +477,7 @@ func TestRunAdditionalErrorBranches(t *testing.T) {
 
 	_, err := Run(context.Background(), Config{
 		Target:   root,
-		Registry: map[string]Generator{},
+		Registry: map[domain.Ecosystem]Generator{},
 		LookPath: func(string) (string, error) { return "found", nil },
 	})
 	if err == nil || !strings.Contains(err.Error(), "no SBOM generator") {
@@ -417,7 +487,7 @@ func TestRunAdditionalErrorBranches(t *testing.T) {
 	genErr := &fakeGenerator{ecosystem: "npm", tool: "cyclonedx-npm", generateErr: errors.New("generate boom")}
 	_, err = Run(context.Background(), Config{
 		Target:   root,
-		Registry: map[string]Generator{"npm": genErr},
+		Registry: map[domain.Ecosystem]Generator{"npm": genErr},
 		LookPath: func(string) (string, error) { return "found", nil },
 	})
 	if err == nil || !strings.Contains(err.Error(), "generate boom") {
@@ -432,7 +502,7 @@ func TestRunAdditionalErrorBranches(t *testing.T) {
 	}
 	_, err = Run(context.Background(), Config{
 		Target:   root,
-		Registry: map[string]Generator{"npm": declaresErr},
+		Registry: map[domain.Ecosystem]Generator{"npm": declaresErr},
 		LookPath: func(string) (string, error) { return "found", nil },
 	})
 	if err == nil || !strings.Contains(err.Error(), "declares boom") {
@@ -442,7 +512,7 @@ func TestRunAdditionalErrorBranches(t *testing.T) {
 	noDeps := &fakeGenerator{ecosystem: "npm", tool: "cyclonedx-npm", generateOutput: validCycloneDXNoPackages()}
 	result, err := Run(context.Background(), Config{
 		Target:   root,
-		Registry: map[string]Generator{"npm": noDeps},
+		Registry: map[domain.Ecosystem]Generator{"npm": noDeps},
 		LookPath: func(string) (string, error) { return "found", nil },
 	})
 	if err != nil {
@@ -550,11 +620,11 @@ func TestDetectorHelperEdgeBranches(t *testing.T) {
 		t.Fatalf("malformed pyproject should not classify as poetry")
 	}
 	writeFile(t, root, "bad-workspaces.json", `{"workspaces": 123}`)
-	if globs, err := npmWorkspaceGlobs(filepath.Join(root, "bad-workspaces.json")); err == nil || globs != nil {
+	if globs, err := npmWorkspaceGlobs("", filepath.Join(root, "bad-workspaces.json")); err == nil || globs != nil {
 		t.Fatalf("bad workspaces globs = %v, err = %v", globs, err)
 	}
 	writeFile(t, root, "pom.xml", `<project><modules><module>.</module></modules></project>`)
-	if children, err := mavenModulesWalk(root, map[string]struct{}{}); err != nil || len(children) != 1 || filepath.Clean(children[0]) != filepath.Clean(root) {
+	if children, err := mavenModulesWalk("", root, map[string]struct{}{}); err != nil || len(children) != 1 || filepath.Clean(children[0]) != filepath.Clean(root) {
 		t.Fatalf("cyclic module children = %v", children)
 	}
 }

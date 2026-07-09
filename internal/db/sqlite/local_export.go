@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/8linkz-sec/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/ioutils"
 )
 
 // LocalDatabaseCounts contains aggregate local database counts for CLI info
@@ -20,20 +22,14 @@ type LocalDatabaseCounts struct {
 	HistoryEntries  int
 }
 
-// LocalDatabaseExport contains the local database rows exposed by
-// `packmon db export`.
-type LocalDatabaseExport struct {
-	Vulnerabilities []LocalVulnerabilityEntry
-	Malicious       []LocalMaliciousEntry
-	Reputation      []LocalReputationEntry
-	Lifecycle       []LocalLifecycleEntry
-	ScanHistory     []ScanEntry
-}
-
+// LocalVulnerabilityEntry is one vulnerability row from the local SQLite
+// read-model export.
 type LocalVulnerabilityEntry struct {
-	ID             string          `json:"id"`
-	Ecosystem      string          `json:"ecosystem"`
-	Name           string          `json:"name"`
+	ID        string `json:"id"`
+	Ecosystem string `json:"ecosystem"`
+	Name      string `json:"name"`
+	// VersionRanges contains the version constraint JSON synced from the
+	// server's vulnerability affected-package data.
 	VersionRanges  json.RawMessage `json:"version_ranges"`
 	Severity       string          `json:"severity"`
 	CVSSScore      *float64        `json:"cvss_score,omitempty"`
@@ -44,49 +40,76 @@ type LocalVulnerabilityEntry struct {
 	Source         string          `json:"source"`
 }
 
+// LocalMaliciousEntry is one malicious-package finding row from the local
+// SQLite read-model export.
 type LocalMaliciousEntry struct {
-	ID            string          `json:"id"`
-	Ecosystem     string          `json:"ecosystem"`
-	Name          string          `json:"name"`
+	ID        string `json:"id"`
+	Ecosystem string `json:"ecosystem"`
+	Name      string `json:"name"`
+	// VersionRanges contains optional version constraint JSON for the malicious
+	// finding.
 	VersionRanges json.RawMessage `json:"version_ranges,omitempty"`
-	Versions      json.RawMessage `json:"versions,omitempty"`
-	RiskType      string          `json:"risk_type"`
-	Severity      string          `json:"severity"`
-	Summary       string          `json:"summary"`
-	Source        string          `json:"source"`
+	// Versions contains optional exact affected-version JSON, encoded as an
+	// array of version strings.
+	Versions json.RawMessage `json:"versions,omitempty"`
+	// RiskType is the machine-readable malicious risk category.
+	RiskType string `json:"risk_type"`
+	Severity string `json:"severity"`
+	Summary  string `json:"summary"`
+	Source   string `json:"source"`
 }
 
+// LocalReputationEntry is one synced package reputation finding row from the
+// local SQLite read-model export.
 type LocalReputationEntry struct {
 	ID        string `json:"id"`
 	Ecosystem string `json:"ecosystem"`
 	Name      string `json:"name"`
 	Version   string `json:"version"`
-	Type      string `json:"type"`
-	RiskType  string `json:"risk_type"`
-	Severity  string `json:"severity"`
-	Summary   string `json:"summary"`
+	// Type is the canonical finding type string derived from reputation status.
+	Type string `json:"type"`
+	// RiskType is the machine-readable reputation risk category.
+	RiskType string `json:"risk_type"`
+	Severity string `json:"severity"`
+	Summary  string `json:"summary"`
 }
 
+// LocalLifecycleEntry is one synced lifecycle release row from the local SQLite
+// read-model export.
 type LocalLifecycleEntry struct {
-	ID               string  `json:"id"`
-	Ecosystem        string  `json:"ecosystem"`
-	Name             string  `json:"name"`
-	ProductSlug      string  `json:"product_slug"`
-	ProductLabel     string  `json:"product_label"`
-	Cycle            string  `json:"cycle"`
-	Latest           string  `json:"latest"`
-	ReleaseDate      *string `json:"release_date,omitempty"`
-	IsLTS            bool    `json:"is_lts"`
-	LTSFrom          *string `json:"lts_from,omitempty"`
-	IsEOAS           bool    `json:"is_eoas"`
-	EOASFrom         *string `json:"eoas_from,omitempty"`
-	IsEOL            bool    `json:"is_eol"`
-	EOLFrom          *string `json:"eol_from,omitempty"`
+	ID        string `json:"id"`
+	Ecosystem string `json:"ecosystem"`
+	Name      string `json:"name"`
+	// ProductSlug is the lifecycle product identifier used by the upstream
+	// lifecycle feed.
+	ProductSlug string `json:"product_slug"`
+	// ProductLabel is the lifecycle product display label.
+	ProductLabel string `json:"product_label"`
+	// Cycle is the lifecycle release cycle identifier for the product.
+	Cycle  string `json:"cycle"`
+	Latest string `json:"latest"`
+	// ReleaseDate is the lifecycle release date, when known, as YYYY-MM-DD.
+	ReleaseDate *string `json:"release_date,omitempty"`
+	// IsLTS and LTSFrom describe long-term-support state and its start date.
+	IsLTS   bool    `json:"is_lts"`
+	LTSFrom *string `json:"lts_from,omitempty"`
+	// IsEOAS and EOASFrom describe end-of-active-support state and its date.
+	IsEOAS   bool    `json:"is_eoas"`
+	EOASFrom *string `json:"eoas_from,omitempty"`
+	// IsEOL and EOLFrom describe end-of-life state and its date.
+	IsEOL   bool    `json:"is_eol"`
+	EOLFrom *string `json:"eol_from,omitempty"`
+	// IsDiscontinued and DiscontinuedFrom describe discontinued state and its
+	// date.
 	IsDiscontinued   bool    `json:"is_discontinued"`
 	DiscontinuedFrom *string `json:"discontinued_from,omitempty"`
-	IsEOES           *bool   `json:"is_eoes,omitempty"`
-	EOESFrom         *string `json:"eoes_from,omitempty"`
-	IsMaintained     bool    `json:"is_maintained"`
+	// IsEOES and EOESFrom describe optional end-of-extended-support state and
+	// its date.
+	IsEOES   *bool   `json:"is_eoes,omitempty"`
+	EOESFrom *string `json:"eoes_from,omitempty"`
+	// IsMaintained reports whether the lifecycle feed currently marks the cycle
+	// as maintained.
+	IsMaintained bool `json:"is_maintained"`
 }
 
 func (s *Store) LocalDatabaseCounts(ctx context.Context) (*LocalDatabaseCounts, error) {
@@ -104,38 +127,11 @@ func (s *Store) LocalDatabaseCounts(ctx context.Context) (*LocalDatabaseCounts, 
 	return counts, nil
 }
 
-func (s *Store) ExportLocalDatabase(ctx context.Context) (*LocalDatabaseExport, error) {
-	payload := &LocalDatabaseExport{
-		Vulnerabilities: make([]LocalVulnerabilityEntry, 0),
-		Malicious:       make([]LocalMaliciousEntry, 0),
-		Reputation:      make([]LocalReputationEntry, 0),
-		Lifecycle:       make([]LocalLifecycleEntry, 0),
-		ScanHistory:     make([]ScanEntry, 0),
+func (s *Store) StreamLocalVulnerabilities(ctx context.Context, emit func(LocalVulnerabilityEntry) error) error {
+	if emit == nil {
+		return fmt.Errorf("local vulnerability export emitter is nil")
 	}
 
-	scanHistory, err := s.GetRecentScans(ctx, "", -1)
-	if err != nil {
-		return nil, fmt.Errorf("query local scan history: %w", err)
-	}
-	payload.ScanHistory = scanHistory
-
-	if err := s.exportLocalVulnerabilities(ctx, payload); err != nil {
-		return nil, err
-	}
-	if err := s.exportLocalMalicious(ctx, payload); err != nil {
-		return nil, err
-	}
-	if err := s.exportLocalReputation(ctx, payload); err != nil {
-		return nil, err
-	}
-	if err := s.exportLocalLifecycle(ctx, payload); err != nil {
-		return nil, err
-	}
-
-	return payload, nil
-}
-
-func (s *Store) exportLocalVulnerabilities(ctx context.Context, payload *LocalDatabaseExport) error {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, ecosystem, name, version_ranges, severity, cvss_score, epss_score, epss_percentile, cisa_kev, summary, source
 		FROM vulnerabilities_local
@@ -143,7 +139,7 @@ func (s *Store) exportLocalVulnerabilities(ctx context.Context, payload *LocalDa
 	if err != nil {
 		return fmt.Errorf("query local vulnerabilities: %w", err)
 	}
-	defer closeSilently(rows)
+	defer ioutils.CloseSilently(rows)
 
 	for rows.Next() {
 		var (
@@ -183,7 +179,9 @@ func (s *Store) exportLocalVulnerabilities(ctx context.Context, payload *LocalDa
 			item.EPSSPercentile = &value
 		}
 
-		payload.Vulnerabilities = append(payload.Vulnerabilities, item)
+		if err := emit(item); err != nil {
+			return fmt.Errorf("write local vulnerability row: %w", err)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iterate local vulnerabilities: %w", err)
@@ -191,7 +189,11 @@ func (s *Store) exportLocalVulnerabilities(ctx context.Context, payload *LocalDa
 	return nil
 }
 
-func (s *Store) exportLocalMalicious(ctx context.Context, payload *LocalDatabaseExport) error {
+func (s *Store) StreamLocalMalicious(ctx context.Context, emit func(LocalMaliciousEntry) error) error {
+	if emit == nil {
+		return fmt.Errorf("local malicious export emitter is nil")
+	}
+
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, ecosystem, name, version_ranges, versions, risk_type, severity, summary, source
 		FROM malicious_local
@@ -199,7 +201,7 @@ func (s *Store) exportLocalMalicious(ctx context.Context, payload *LocalDatabase
 	if err != nil {
 		return fmt.Errorf("query local malicious findings: %w", err)
 	}
-	defer closeSilently(rows)
+	defer ioutils.CloseSilently(rows)
 
 	for rows.Next() {
 		var (
@@ -225,7 +227,9 @@ func (s *Store) exportLocalMalicious(ctx context.Context, payload *LocalDatabase
 			item.Versions = json.RawMessage(versions.String)
 		}
 
-		payload.Malicious = append(payload.Malicious, item)
+		if err := emit(item); err != nil {
+			return fmt.Errorf("write local malicious row: %w", err)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iterate local malicious findings: %w", err)
@@ -233,7 +237,11 @@ func (s *Store) exportLocalMalicious(ctx context.Context, payload *LocalDatabase
 	return nil
 }
 
-func (s *Store) exportLocalReputation(ctx context.Context, payload *LocalDatabaseExport) error {
+func (s *Store) StreamLocalReputation(ctx context.Context, emit func(LocalReputationEntry) error) error {
+	if emit == nil {
+		return fmt.Errorf("local reputation export emitter is nil")
+	}
+
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, ecosystem, name, version, type, risk_type, severity, summary
 		FROM reputation_findings_local
@@ -241,7 +249,7 @@ func (s *Store) exportLocalReputation(ctx context.Context, payload *LocalDatabas
 	if err != nil {
 		return fmt.Errorf("query local reputation findings: %w", err)
 	}
-	defer closeSilently(rows)
+	defer ioutils.CloseSilently(rows)
 
 	for rows.Next() {
 		var (
@@ -260,7 +268,9 @@ func (s *Store) exportLocalReputation(ctx context.Context, payload *LocalDatabas
 			Severity: domain.Severity(strings.TrimSpace(severity.String)),
 		}))
 		item.Summary = summary.String
-		payload.Reputation = append(payload.Reputation, item)
+		if err := emit(item); err != nil {
+			return fmt.Errorf("write local reputation row: %w", err)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iterate local reputation findings: %w", err)
@@ -268,7 +278,11 @@ func (s *Store) exportLocalReputation(ctx context.Context, payload *LocalDatabas
 	return nil
 }
 
-func (s *Store) exportLocalLifecycle(ctx context.Context, payload *LocalDatabaseExport) error {
+func (s *Store) StreamLocalLifecycle(ctx context.Context, emit func(LocalLifecycleEntry) error) error {
+	if emit == nil {
+		return fmt.Errorf("local lifecycle export emitter is nil")
+	}
+
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT
 			id, ecosystem, name, product_slug, product_label, cycle, latest,
@@ -279,7 +293,7 @@ func (s *Store) exportLocalLifecycle(ctx context.Context, payload *LocalDatabase
 	if err != nil {
 		return fmt.Errorf("query local lifecycle releases: %w", err)
 	}
-	defer closeSilently(rows)
+	defer ioutils.CloseSilently(rows)
 
 	for rows.Next() {
 		var (
@@ -319,10 +333,82 @@ func (s *Store) exportLocalLifecycle(ctx context.Context, payload *LocalDatabase
 		item.EOESFrom = localDBStringPtr(eoesFrom)
 		item.IsMaintained = isMaintained > 0
 
-		payload.Lifecycle = append(payload.Lifecycle, item)
+		if err := emit(item); err != nil {
+			return fmt.Errorf("write local lifecycle row: %w", err)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iterate local lifecycle releases: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) StreamLocalScanHistory(ctx context.Context, emit func(ScanEntry) error) error {
+	if emit == nil {
+		return fmt.Errorf("local scan-history export emitter is nil")
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, repo_name, branch, "commit", scanned_at, packages_count, findings_count, finding_ids, finding_severities
+		FROM scan_history
+		ORDER BY scanned_at DESC`)
+	if err != nil {
+		return fmt.Errorf("query local scan history: %w", err)
+	}
+	defer ioutils.CloseSilently(rows)
+
+	for rows.Next() {
+		var (
+			entry        ScanEntry
+			repoName     *string
+			branch       *string
+			commit       *string
+			scannedAtStr string
+			idsJSON      *string
+			sevsJSON     *string
+		)
+
+		if err := rows.Scan(
+			&entry.ID, &repoName, &branch, &commit, &scannedAtStr,
+			&entry.PackagesCount, &entry.FindingsCount,
+			&idsJSON, &sevsJSON,
+		); err != nil {
+			return fmt.Errorf("scan local scan-history row: %w", err)
+		}
+
+		if repoName != nil {
+			entry.RepoName = *repoName
+		}
+		if branch != nil {
+			entry.Branch = *branch
+		}
+		if commit != nil {
+			entry.Commit = *commit
+		}
+
+		parsedAt, err := time.Parse(time.RFC3339, scannedAtStr)
+		if err != nil {
+			return fmt.Errorf("decode local scan-history row %d scanned_at: %w", entry.ID, err)
+		}
+		entry.ScannedAt = parsedAt
+
+		if idsJSON != nil && *idsJSON != "" {
+			if err := json.Unmarshal([]byte(*idsJSON), &entry.FindingIDs); err != nil {
+				return fmt.Errorf("decode local scan-history row %d finding_ids: %w", entry.ID, err)
+			}
+		}
+		if sevsJSON != nil && *sevsJSON != "" {
+			if err := json.Unmarshal([]byte(*sevsJSON), &entry.FindingSeverities); err != nil {
+				return fmt.Errorf("decode local scan-history row %d finding_severities: %w", entry.ID, err)
+			}
+		}
+
+		if err := emit(entry); err != nil {
+			return fmt.Errorf("write local scan-history row: %w", err)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate local scan history: %w", err)
 	}
 	return nil
 }

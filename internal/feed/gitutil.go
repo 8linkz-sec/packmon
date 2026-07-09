@@ -13,7 +13,11 @@ import (
 	"time"
 )
 
-const defaultGitCommandTimeout = 5 * time.Minute
+const (
+	defaultGitCommandTimeout = 5 * time.Minute
+	gitSyncLockFileName      = ".packmon-sync.lock"
+	gitSyncLockPollInterval  = 25 * time.Millisecond
+)
 
 var (
 	gitExecutable     = "git"
@@ -142,6 +146,12 @@ func (g *GitRepo) PullWithChangedFiles(ctx context.Context) (newHash string, cha
 
 	log.Debug("repository already cloned, fetching updates")
 
+	releaseSyncLock, err := g.acquireSyncLock(ctx)
+	if err != nil {
+		return "", nil, fmt.Errorf("acquire git sync lock: %w", err)
+	}
+	defer releaseSyncLock()
+
 	// Step 1: record current HEAD before fetch.
 	oldHash, err := g.headHash(ctx)
 	if err != nil {
@@ -209,6 +219,47 @@ func (g *GitRepo) PullWithChangedFiles(ctx context.Context) (newHash string, cha
 	}
 
 	return hash, diffFiles, nil
+}
+
+func (g *GitRepo) acquireSyncLock(ctx context.Context) (func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	lockFile := filepath.Join(g.Dir, gitSyncLockFileName)
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		file, err := os.OpenFile(lockFile, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil {
+			_ = file.Close()
+			return func() {
+				if err := os.Remove(lockFile); err != nil && !os.IsNotExist(err) && g.Logger != nil {
+					g.Logger.Warn("removing git sync lock failed",
+						slog.String("file", filepath.Base(lockFile)),
+						slog.String("error", SafeDiagnosticError(err)),
+					)
+				}
+			}, nil
+		}
+		if !os.IsExist(err) {
+			return nil, pathOperationError("creating sync lock", lockFile, err)
+		}
+
+		timer := time.NewTimer(gitSyncLockPollInterval)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 // run executes a git command in the given directory and returns any error.

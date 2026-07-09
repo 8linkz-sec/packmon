@@ -17,9 +17,9 @@ func TestDiscoverFilesFindsDockerfilesAndComposeFiles(t *testing.T) {
 	writeTestFile(t, filepath.Join(root, "node_modules", "pkg", "Dockerfile"), "FROM ignored:latest\n")
 	writeTestFile(t, filepath.Join(root, "deep", "too", "far", "Dockerfile"), "FROM ignored:latest\n")
 
-	files, err := DiscoverFiles(root, 2)
+	files, _, err := DiscoverFilesWithWarnings(root, 2)
 	if err != nil {
-		t.Fatalf("DiscoverFiles: %v", err)
+		t.Fatalf("DiscoverFilesWithWarnings: %v", err)
 	}
 	got := make(map[string]Kind)
 	for _, file := range files {
@@ -79,6 +79,35 @@ func TestDiscoverFilesWithWarningsReportsWalkErrorsAndContinues(t *testing.T) {
 	}
 	if strings.Contains(warnings[0], filepath.ToSlash(root)) {
 		t.Fatalf("warning leaks absolute root path: %q", warnings[0])
+	}
+}
+
+func TestDiscoverFilesWithWarningsRejectsWalkerPathOutsideRoot(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(filepath.Dir(root), "outside", "Dockerfile")
+	writeTestFile(t, outside, "FROM ghcr.io/acme/escaped:9.9.9\n")
+
+	originalWalkDir := walkDockerInventoryDir
+	t.Cleanup(func() { walkDockerInventoryDir = originalWalkDir })
+	walkDockerInventoryDir = func(_ string, fn fs.WalkDirFunc) error {
+		if err := fn(root, fakeDockerDirEntry{name: filepath.Base(root), dir: true}, nil); err != nil {
+			return err
+		}
+		return fn(outside, fakeDockerDirEntry{name: "Dockerfile"}, nil)
+	}
+
+	files, warnings, err := DiscoverFilesWithWarnings(root, 5)
+	if err != nil {
+		t.Fatalf("DiscoverFilesWithWarnings: %v", err)
+	}
+	if len(files) != 0 {
+		t.Fatalf("files = %+v, want no files outside root", files)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "escapes scan root") {
+		t.Fatalf("warnings = %#v, want root escape warning", warnings)
+	}
+	if strings.Contains(warnings[0], filepath.ToSlash(filepath.Dir(outside))) {
+		t.Fatalf("warning leaks external directory: %q", warnings[0])
 	}
 }
 

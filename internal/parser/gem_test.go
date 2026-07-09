@@ -126,16 +126,45 @@ PLATFORMS
 			if len(pkgs) != tt.wantCount {
 				t.Fatalf("got %d packages, want %d", len(pkgs), tt.wantCount)
 			}
-			for _, pkg := range pkgs {
-				if pkg.Ecosystem != domain.EcosystemGem {
-					t.Errorf("package %q ecosystem = %q, want %q", pkg.Name, pkg.Ecosystem, domain.EcosystemGem)
-				}
-				if wantVer, ok := tt.wantPkgs[pkg.Name]; ok {
-					if pkg.Version != wantVer {
-						t.Errorf("package %q version = %q, want %q", pkg.Name, pkg.Version, wantVer)
-					}
-				}
-			}
+			assertParsedPackages(t, pkgs, tt.wantPkgs, domain.EcosystemGem)
 		})
+	}
+}
+
+func assertParsedPackages(t *testing.T, pkgs []domain.Package, wantPkgs map[string]string, wantEco domain.Ecosystem) {
+	t.Helper()
+
+	gotPkgs := make(map[string]string, len(pkgs))
+	for _, pkg := range pkgs {
+		if pkg.Ecosystem != wantEco {
+			t.Errorf("package %q ecosystem = %q, want %q", pkg.Name, pkg.Ecosystem, wantEco)
+		}
+		if wantPkgs == nil {
+			continue
+		}
+		if _, ok := gotPkgs[pkg.Name]; ok {
+			t.Errorf("duplicate package %q", pkg.Name)
+			continue
+		}
+		gotPkgs[pkg.Name] = pkg.Version
+	}
+	if wantPkgs == nil {
+		return
+	}
+
+	for name, version := range gotPkgs {
+		if _, ok := wantPkgs[name]; !ok {
+			t.Errorf("unexpected package %q version %q", name, version)
+		}
+	}
+	for name, wantVersion := range wantPkgs {
+		gotVersion, ok := gotPkgs[name]
+		if !ok {
+			t.Errorf("missing package %q version %q", name, wantVersion)
+			continue
+		}
+		if gotVersion != wantVersion {
+			t.Errorf("package %q version = %q, want %q", name, gotVersion, wantVersion)
+		}
 	}
 }

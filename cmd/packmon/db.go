@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/8linkz-sec/packmon/internal/db/sqlite"
+	"github.com/8linkz-sec/packmon/internal/ioutils"
 	"github.com/8linkz-sec/packmon/internal/plural"
 	"github.com/spf13/cobra"
 )
@@ -30,6 +31,21 @@ func newDBCmd() *cobra.Command {
 	return dbCmd
 }
 
+type dbSyncSettings struct {
+	serverURL         string
+	apiKey            string
+	caCertFile        string
+	allowInsecureHTTP bool
+	ecosystems        []string
+	full              bool
+	timeout           time.Duration
+}
+
+type dbSyncRun struct {
+	settings dbSyncSettings
+	dbPath   string
+}
+
 func newDBSyncCmd() *cobra.Command {
 	var (
 		flagEcosystems   string
@@ -46,154 +62,7 @@ func newDBSyncCmd() *cobra.Command {
 		Use:   "sync",
 		Short: "Synchronize local database",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, _, err := loadCurrentCLIConfig()
-			if err != nil {
-				return err
-			}
-
-			source := "server"
-			if cfg != nil && cfg.DB.SyncSource != "" {
-				source = cfg.DB.SyncSource
-			}
-			if cmd.Flags().Changed("source") {
-				source = flagSource
-			}
-			if strings.TrimSpace(strings.ToLower(source)) != "server" {
-				return fmt.Errorf("db sync source %q is not yet implemented (supported: server)", source)
-			}
-
-			serverURL := ""
-			if cfg != nil && cfg.Server != "" {
-				serverURL = cfg.Server
-			}
-			if envServer := strings.TrimSpace(os.Getenv("PACKMON_SERVER")); envServer != "" {
-				serverURL = envServer
-			}
-			if cmd.Flags().Changed("server") {
-				serverURL = strings.TrimSpace(flagServer)
-			}
-			if serverURL == "" {
-				return fmt.Errorf("missing server URL (use --server, PACKMON_SERVER, user-global config, or explicit --config)")
-			}
-
-			apiKey := ""
-			envAPIKey := strings.TrimSpace(os.Getenv("PACKMON_API_KEY"))
-			skipConfigAPIKeyEnv := envAPIKey != "" || cmd.Flags().Changed("api-key")
-			if cfg != nil && cfg.APIKey != "" {
-				apiKey = cfg.APIKey
-			}
-			if cfg != nil && cfg.APIKeyEnv != "" && !skipConfigAPIKeyEnv {
-				resolvedAPIKey, keyErr := resolveAPIKeyEnv(cfg.APIKeyEnv)
-				if keyErr != nil {
-					return keyErr
-				}
-				apiKey = resolvedAPIKey
-			}
-			if envAPIKey != "" {
-				apiKey = envAPIKey
-			}
-			if cmd.Flags().Changed("api-key") {
-				apiKey = strings.TrimSpace(flagAPIKey)
-			}
-
-			caCertFile := ""
-			if cfg != nil && cfg.CACert != "" {
-				caCertFile = cfg.CACert
-			}
-			if envCACert := strings.TrimSpace(os.Getenv("PACKMON_CA_CERT")); envCACert != "" {
-				caCertFile = envCACert
-			}
-			if cmd.Flags().Changed("cacert") {
-				caCertFile = strings.TrimSpace(flagCACert)
-			}
-
-			insecureHTTP := false
-			if cfg != nil {
-				insecureHTTP = boolValue(cfg.InsecureAllowHTTP, false)
-			}
-			if strings.TrimSpace(os.Getenv("PACKMON_INSECURE_ALLOW_HTTP")) != "" {
-				parsed, _, parseErr := strictEnvBool("PACKMON_INSECURE_ALLOW_HTTP")
-				if parseErr != nil {
-					return parseErr
-				}
-				insecureHTTP = parsed
-			}
-			if cmd.Flags().Changed("insecure-allow-http") {
-				insecureHTTP = flagInsecureHTTP
-			}
-
-			ecosystems := []string{}
-			if cfg != nil && len(cfg.Ecosystems) > 0 {
-				ecosystems = append(ecosystems, cfg.Ecosystems...)
-			}
-			if envEcosystems := strings.TrimSpace(os.Getenv("PACKMON_ECOSYSTEMS")); envEcosystems != "" {
-				ecosystems = splitCSV(envEcosystems)
-			}
-			if cmd.Flags().Changed("ecosystems") {
-				ecosystems = splitCSV(flagEcosystems)
-			}
-
-			timeoutSeconds := flagTimeout
-			if cfg != nil && cfg.Timeout > 0 {
-				timeoutSeconds = cfg.Timeout
-			}
-			if envTimeout := strings.TrimSpace(os.Getenv("PACKMON_TIMEOUT")); envTimeout != "" {
-				parsed, parseErr := parseTimeoutSeconds(envTimeout)
-				if parseErr != nil {
-					return fmt.Errorf("PACKMON_TIMEOUT: %w", parseErr)
-				}
-				if parsed <= 0 {
-					return fmt.Errorf("PACKMON_TIMEOUT must be greater than zero")
-				}
-				timeoutSeconds = parsed
-			}
-			if cmd.Flags().Changed("timeout") {
-				timeoutSeconds = flagTimeout
-			}
-			if timeoutSeconds <= 0 {
-				return fmt.Errorf("timeout must be greater than zero")
-			}
-
-			dbPath, err := resolveLocalDBPath()
-			if err != nil {
-				return err
-			}
-
-			store, err := sqlite.New(dbPath)
-			if err != nil {
-				return fmt.Errorf("open local database: %w", err)
-			}
-			defer closeSilently(store)
-
-			var syncStats sqlite.SyncStats
-			if err := sqlite.Sync(cmd.Context(), store, sqlite.SyncConfig{
-				ServerURL:         serverURL,
-				APIKey:            apiKey,
-				Ecosystems:        ecosystems,
-				Full:              flagFull,
-				Timeout:           time.Duration(timeoutSeconds) * time.Second,
-				CACertFile:        caCertFile,
-				AllowInsecureHTTP: insecureHTTP,
-				Stats:             &syncStats,
-			}); err != nil {
-				return err
-			}
-
-			info, err := loadLocalDBInfo(cmd.Context(), store)
-			if err != nil {
-				return err
-			}
-
-			fmt.Println("Local database synchronized.")
-			if info.LastSyncAt != nil {
-				fmt.Printf("Last sync:       %s\n", info.LastSyncAt.Format(time.RFC3339))
-			}
-			fmt.Printf("Vulnerabilities: %d\n", info.Vulnerabilities)
-			fmt.Printf("Malicious:       %d\n", info.Malicious)
-			fmt.Printf("Reputation:      %d\n", info.Reputation)
-			fmt.Printf("Lifecycle:       %d\n", info.Lifecycle)
-			printSyncRemovalStats(syncStats)
-			return nil
+			return runDBSync(cmd.Context(), cmd)
 		},
 	}
 
@@ -202,12 +71,269 @@ func newDBSyncCmd() *cobra.Command {
 	f.BoolVar(&flagFull, "full", false, "full sync instead of incremental")
 	f.StringVar(&flagSource, "source", "server", "sync source (server)")
 	f.StringVar(&flagServer, "server", "", "feed server URL")
-	f.StringVar(&flagAPIKey, "api-key", "", "API key for authenticated sync requests")
+	f.StringVar(&flagAPIKey, "api-key", "", "deprecated: use PACKMON_API_KEY or api_key_env; command-line secrets are rejected by default")
 	f.IntVar(&flagTimeout, "timeout", 60, "sync timeout in seconds")
 	f.StringVar(&flagCACert, "cacert", "", "path to a PEM CA bundle used to verify the server's TLS certificate")
 	f.BoolVar(&flagInsecureHTTP, "insecure-allow-http", false, "allow plain http:// server URLs (sends bearer token in cleartext; opt-in)")
 
 	return cmd
+}
+
+func runDBSync(ctx context.Context, cmd *cobra.Command) error {
+	run, err := resolveDBSyncRun(cmd)
+	if err != nil {
+		return err
+	}
+	return executeDBSync(ctx, run)
+}
+
+func resolveDBSyncRun(cmd *cobra.Command) (dbSyncRun, error) {
+	cfg, _, err := loadCurrentCLIConfig()
+	if err != nil {
+		return dbSyncRun{}, err
+	}
+	settings, err := resolveDBSyncSettings(cmd, cfg)
+	if err != nil {
+		return dbSyncRun{}, err
+	}
+
+	dbPath, err := resolveLocalDBPath()
+	if err != nil {
+		return dbSyncRun{}, err
+	}
+
+	return dbSyncRun{
+		settings: settings,
+		dbPath:   dbPath,
+	}, nil
+}
+
+func executeDBSync(ctx context.Context, run dbSyncRun) error {
+	store, err := sqlite.New(run.dbPath)
+	if err != nil {
+		return fmt.Errorf("open local database: %w", err)
+	}
+	defer ioutils.CloseSilently(store)
+
+	var syncStats sqlite.SyncStats
+	if err := sqlite.Sync(ctx, store, sqlite.SyncConfig{
+		ServerURL:         run.settings.serverURL,
+		APIKey:            run.settings.apiKey,
+		Ecosystems:        run.settings.ecosystems,
+		Full:              run.settings.full,
+		Timeout:           run.settings.timeout,
+		CACertFile:        run.settings.caCertFile,
+		AllowInsecureHTTP: run.settings.allowInsecureHTTP,
+		Stats:             &syncStats,
+	}); err != nil {
+		return err
+	}
+
+	info, err := loadLocalDBInfo(ctx, store)
+	if err != nil {
+		return err
+	}
+
+	fmt.Println("Local database synchronized.")
+	if info.LastSyncAt != nil {
+		fmt.Printf("Last sync:       %s\n", info.LastSyncAt.Format(time.RFC3339))
+	}
+	fmt.Printf("Vulnerabilities: %d\n", info.Vulnerabilities)
+	fmt.Printf("Malicious:       %d\n", info.Malicious)
+	fmt.Printf("Reputation:      %d\n", info.Reputation)
+	fmt.Printf("Lifecycle:       %d\n", info.Lifecycle)
+	printSyncRemovalStats(syncStats)
+	return nil
+}
+
+func resolveDBSyncSettings(cmd *cobra.Command, cfg *cliConfig) (dbSyncSettings, error) {
+	source, err := dbSyncStringFlag(cmd, "source", "server")
+	if err != nil {
+		return dbSyncSettings{}, err
+	}
+	if cfg != nil && cfg.DB.SyncSource != "" {
+		source = cfg.DB.SyncSource
+	}
+	if commandFlagChanged(cmd, "source") {
+		source, err = dbSyncStringFlag(cmd, "source", "server")
+		if err != nil {
+			return dbSyncSettings{}, err
+		}
+	}
+	if strings.TrimSpace(strings.ToLower(source)) != "server" {
+		return dbSyncSettings{}, fmt.Errorf("db sync source %q is not yet implemented (supported: server)", source)
+	}
+
+	settings := dbSyncSettings{}
+	if cfg != nil && cfg.Server != "" {
+		settings.serverURL = cfg.Server
+	}
+	if envServer := strings.TrimSpace(os.Getenv("PACKMON_SERVER")); envServer != "" {
+		settings.serverURL = envServer
+	}
+	if commandFlagChanged(cmd, "server") {
+		settings.serverURL, err = dbSyncTrimmedStringFlag(cmd, "server")
+		if err != nil {
+			return dbSyncSettings{}, err
+		}
+	}
+	if settings.serverURL == "" {
+		return dbSyncSettings{}, fmt.Errorf("missing server URL (use --server, PACKMON_SERVER, user-global config, or explicit --config)")
+	}
+	if err := rejectSecretFlagValue(cmd, "api-key", "PACKMON_API_KEY or config api_key_env"); err != nil {
+		return dbSyncSettings{}, err
+	}
+
+	envAPIKey := strings.TrimSpace(os.Getenv("PACKMON_API_KEY"))
+	skipConfigAPIKeyEnv := envAPIKey != "" || commandFlagChanged(cmd, "api-key")
+	if cfg != nil && cfg.APIKey != "" {
+		settings.apiKey = cfg.APIKey
+	}
+	if cfg != nil && cfg.APIKeyEnv != "" && !skipConfigAPIKeyEnv {
+		resolvedAPIKey, keyErr := resolveAPIKeyEnv(cfg.APIKeyEnv)
+		if keyErr != nil {
+			return dbSyncSettings{}, keyErr
+		}
+		settings.apiKey = resolvedAPIKey
+	}
+	if envAPIKey != "" {
+		settings.apiKey = envAPIKey
+	}
+	if commandFlagChanged(cmd, "api-key") {
+		settings.apiKey, err = dbSyncTrimmedStringFlag(cmd, "api-key")
+		if err != nil {
+			return dbSyncSettings{}, err
+		}
+	}
+
+	if cfg != nil && cfg.CACert != "" {
+		settings.caCertFile = cfg.CACert
+	}
+	if envCACert := clientCACertEnvValue(); envCACert != "" {
+		settings.caCertFile = envCACert
+	}
+	if commandFlagChanged(cmd, "cacert") {
+		settings.caCertFile, err = dbSyncTrimmedStringFlag(cmd, "cacert")
+		if err != nil {
+			return dbSyncSettings{}, err
+		}
+	}
+
+	if cfg != nil {
+		settings.allowInsecureHTTP = boolValue(cfg.InsecureAllowHTTP, false)
+	}
+	if strings.TrimSpace(os.Getenv("PACKMON_INSECURE_ALLOW_HTTP")) != "" {
+		parsed, _, parseErr := strictEnvBool("PACKMON_INSECURE_ALLOW_HTTP")
+		if parseErr != nil {
+			return dbSyncSettings{}, parseErr
+		}
+		settings.allowInsecureHTTP = parsed
+	}
+	if commandFlagChanged(cmd, "insecure-allow-http") {
+		settings.allowInsecureHTTP, err = dbSyncBoolFlag(cmd, "insecure-allow-http", false)
+		if err != nil {
+			return dbSyncSettings{}, err
+		}
+	}
+
+	if cfg != nil && len(cfg.Ecosystems) > 0 {
+		settings.ecosystems = append(settings.ecosystems, cfg.Ecosystems...)
+	}
+	if envEcosystems := strings.TrimSpace(os.Getenv("PACKMON_ECOSYSTEMS")); envEcosystems != "" {
+		settings.ecosystems = splitCSV(envEcosystems)
+	}
+	if commandFlagChanged(cmd, "ecosystems") {
+		flagEcosystems, flagErr := dbSyncStringFlag(cmd, "ecosystems", "")
+		if flagErr != nil {
+			return dbSyncSettings{}, flagErr
+		}
+		settings.ecosystems = splitCSV(flagEcosystems)
+	}
+
+	timeoutSeconds, err := dbSyncIntFlag(cmd, "timeout", 60)
+	if err != nil {
+		return dbSyncSettings{}, err
+	}
+	if cfg != nil && cfg.Timeout > 0 {
+		timeoutSeconds = cfg.Timeout
+	}
+	if envTimeout := strings.TrimSpace(os.Getenv("PACKMON_TIMEOUT")); envTimeout != "" {
+		parsed, parseErr := parseTimeoutSeconds(envTimeout)
+		if parseErr != nil {
+			return dbSyncSettings{}, fmt.Errorf("PACKMON_TIMEOUT: %w", parseErr)
+		}
+		if parsed <= 0 {
+			return dbSyncSettings{}, fmt.Errorf("PACKMON_TIMEOUT must be greater than zero")
+		}
+		timeoutSeconds = parsed
+	}
+	if commandFlagChanged(cmd, "timeout") {
+		timeoutSeconds, err = dbSyncIntFlag(cmd, "timeout", 60)
+		if err != nil {
+			return dbSyncSettings{}, err
+		}
+	}
+	if timeoutSeconds <= 0 {
+		return dbSyncSettings{}, fmt.Errorf("timeout must be greater than zero")
+	}
+	settings.timeout = time.Duration(timeoutSeconds) * time.Second
+
+	settings.full, err = dbSyncBoolFlag(cmd, "full", false)
+	if err != nil {
+		return dbSyncSettings{}, err
+	}
+
+	return settings, nil
+}
+
+func dbSyncTrimmedStringFlag(cmd *cobra.Command, name string) (string, error) {
+	value, err := dbSyncStringFlag(cmd, name, "")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(value), nil
+}
+
+func dbSyncStringFlag(cmd *cobra.Command, name string, fallback string) (string, error) {
+	if cmd == nil {
+		return fallback, nil
+	}
+	if cmd.Flags().Lookup(name) == nil {
+		return fallback, nil
+	}
+	value, err := cmd.Flags().GetString(name)
+	if err != nil {
+		return "", err
+	}
+	return value, nil
+}
+
+func dbSyncBoolFlag(cmd *cobra.Command, name string, fallback bool) (bool, error) {
+	if cmd == nil {
+		return fallback, nil
+	}
+	if cmd.Flags().Lookup(name) == nil {
+		return fallback, nil
+	}
+	value, err := cmd.Flags().GetBool(name)
+	if err != nil {
+		return false, err
+	}
+	return value, nil
+}
+
+func dbSyncIntFlag(cmd *cobra.Command, name string, fallback int) (int, error) {
+	if cmd == nil {
+		return fallback, nil
+	}
+	if cmd.Flags().Lookup(name) == nil {
+		return fallback, nil
+	}
+	value, err := cmd.Flags().GetInt(name)
+	if err != nil {
+		return 0, err
+	}
+	return value, nil
 }
 
 func newDBInfoCmd() *cobra.Command {
@@ -286,14 +412,14 @@ func newDBExportCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("open local database: %w", err)
 			}
-			defer closeSilently(store)
+			defer ioutils.CloseSilently(store)
 
 			if strings.TrimSpace(flagOutput) == "" {
 				return exportLocalDB(cmd.Context(), store, os.Stdout)
 			}
 
 			// #nosec G304 -- CLI export path is supplied intentionally by the local user.
-			file, err := openPrivateExportFile(flagOutput)
+			file, err := ioutils.OpenPrivateFile(flagOutput)
 			if err != nil {
 				return fmt.Errorf("create export file: %w", err)
 			}
@@ -318,18 +444,6 @@ func writeLocalDBExport(ctx context.Context, store *sqlite.Store, writer io.Writ
 		return fmt.Errorf("close export file: %w", closeErr)
 	}
 	return nil
-}
-
-func openPrivateExportFile(path string) (*os.File, error) {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600) // #nosec G304 -- CLI export path is supplied intentionally by the local user.
-	if err != nil {
-		return nil, err
-	}
-	if err := file.Chmod(0o600); err != nil {
-		closeSilently(file)
-		return nil, err
-	}
-	return file, nil
 }
 
 func printSyncRemovalStats(stats sqlite.SyncStats) {

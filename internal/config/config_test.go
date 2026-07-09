@@ -1,6 +1,9 @@
 package config
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -66,6 +69,9 @@ func TestLoadWithNoEnvVarsReturnsDefaults(t *testing.T) {
 	if cfg.Server.RateLimitBurst != 60 {
 		t.Errorf("Server.RateLimitBurst = %d, want 60", cfg.Server.RateLimitBurst)
 	}
+	if cfg.Server.ScanLogIdentityMode != ScanLogIdentityModeFull {
+		t.Errorf("Server.ScanLogIdentityMode = %q, want %q", cfg.Server.ScanLogIdentityMode, ScanLogIdentityModeFull)
+	}
 
 	// DB defaults.
 	if cfg.DB.Host != "localhost" {
@@ -123,14 +129,20 @@ func TestLoadWithNoEnvVarsReturnsDefaults(t *testing.T) {
 	}
 
 	// Audit retention defaults.
-	if cfg.Retention.ScanLog != 90*24*time.Hour {
-		t.Errorf("Retention.ScanLog = %v, want 2160h", cfg.Retention.ScanLog)
+	if cfg.Retention.ScanLog != 30*24*time.Hour {
+		t.Errorf("Retention.ScanLog = %v, want 720h", cfg.Retention.ScanLog)
 	}
-	if cfg.Retention.AdminAuditLog != 365*24*time.Hour {
-		t.Errorf("Retention.AdminAuditLog = %v, want 8760h", cfg.Retention.AdminAuditLog)
+	if cfg.Retention.AdminAuditLog != 30*24*time.Hour {
+		t.Errorf("Retention.AdminAuditLog = %v, want 720h", cfg.Retention.AdminAuditLog)
 	}
 	if cfg.Retention.RefreshQueue != 30*24*time.Hour {
 		t.Errorf("Retention.RefreshQueue = %v, want 720h", cfg.Retention.RefreshQueue)
+	}
+	if cfg.Retention.PackageCheckStatus != 90*24*time.Hour {
+		t.Errorf("Retention.PackageCheckStatus = %v, want 2160h", cfg.Retention.PackageCheckStatus)
+	}
+	if cfg.Retention.DeletedAPIKeys != 365*24*time.Hour {
+		t.Errorf("Retention.DeletedAPIKeys = %v, want 8760h", cfg.Retention.DeletedAPIKeys)
 	}
 	if cfg.Retention.Interval != 24*time.Hour {
 		t.Errorf("Retention.Interval = %v, want 24h", cfg.Retention.Interval)
@@ -140,8 +152,8 @@ func TestLoadWithNoEnvVarsReturnsDefaults(t *testing.T) {
 	if cfg.FeedSync.Interval != 8*time.Hour {
 		t.Errorf("FeedSync.Interval = %v, want 8h", cfg.FeedSync.Interval)
 	}
-	if !cfg.FeedSync.OnStartup {
-		t.Error("FeedSync.OnStartup = false, want true")
+	if cfg.FeedSync.OnStartup {
+		t.Error("FeedSync.OnStartup = true, want false")
 	}
 
 	// Feed enabled defaults.
@@ -185,11 +197,405 @@ func TestLoadWithNoEnvVarsReturnsDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadDelegatesToSectionLoadersSourceGuard(t *testing.T) {
+	calls := functionCalls(t, "config.go", "Load")
+	for _, want := range []string{
+		"loadServerMode",
+		"loadServerConfig",
+		"loadDBConfig",
+		"loadMetricsConfig",
+		"loadLogConfig",
+		"loadWebConfig",
+		"loadAdminConfig",
+		"loadRetentionConfig",
+		"loadFeedSyncConfig",
+		"loadFeedsConfig",
+	} {
+		if calls[want] == 0 {
+			t.Fatalf("Load() should delegate to %s", want)
+		}
+	}
+	for _, forbidden := range envParsingCalls() {
+		if calls[forbidden] > 0 {
+			t.Fatalf("Load() should not parse env directly via %s", forbidden)
+		}
+	}
+
+	feedCalls := functionCalls(t, "config.go", "loadFeedsConfig")
+	for _, want := range []string{
+		"loadFeedEnabledConfig",
+		"loadFeedModeConfig",
+		"loadFeedProviderConfig",
+	} {
+		if feedCalls[want] == 0 {
+			t.Fatalf("loadFeedsConfig() should delegate to %s", want)
+		}
+	}
+	for _, forbidden := range envParsingCalls() {
+		if feedCalls[forbidden] > 0 {
+			t.Fatalf("loadFeedsConfig() should not parse env directly via %s", forbidden)
+		}
+	}
+}
+
+func functionCalls(t *testing.T, filename, funcName string) map[string]int {
+	t.Helper()
+
+	file, err := parser.ParseFile(token.NewFileSet(), filename, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", filename, err)
+	}
+
+	var body *ast.BlockStmt
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if ok && fn.Name.Name == funcName {
+			body = fn.Body
+			break
+		}
+	}
+	if body == nil {
+		t.Fatalf("function %s not found in %s", funcName, filename)
+	}
+
+	calls := make(map[string]int)
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		switch fn := call.Fun.(type) {
+		case *ast.Ident:
+			calls[fn.Name]++
+		case *ast.SelectorExpr:
+			if ident, ok := fn.X.(*ast.Ident); ok {
+				calls[ident.Name+"."+fn.Sel.Name]++
+			}
+			calls[fn.Sel.Name]++
+		}
+		return true
+	})
+	return calls
+}
+
+func envParsingCalls() []string {
+	return []string{
+		"os.Getenv",
+		"envOrDefault",
+		"envIntOrDefault",
+		"envInt32OrDefault",
+		"envPositiveIntOrDefault",
+		"envPortOrDefault",
+		"envListenPortOrDefault",
+		"envPublicHostOrDefault",
+		"envDurationOrDefault",
+		"envNonNegativeDurationOrDefault",
+		"envPositiveDurationOrDefault",
+		"envBoolOrDefault",
+		"envFeedModeOrDefault",
+	}
+}
+
+func TestSubsystemLoadersPreserveDefaults(t *testing.T) {
+	clearPackmonEnv(t)
+
+	mode, err := loadServerMode()
+	if err != nil {
+		t.Fatalf("loadServerMode() error = %v", err)
+	}
+	if mode != ModeProduction {
+		t.Fatalf("loadServerMode() = %q, want production", mode)
+	}
+
+	tlsCfg, err := loadTLSConfig()
+	if err != nil {
+		t.Fatalf("loadTLSConfig() error = %v", err)
+	}
+	if tlsCfg.MinVersion != "1.2" {
+		t.Fatalf("TLS.MinVersion = %q, want 1.2", tlsCfg.MinVersion)
+	}
+
+	server, err := loadServerConfig(mode)
+	if err != nil {
+		t.Fatalf("loadServerConfig() error = %v", err)
+	}
+	if server.Port != 8080 || server.BlockThreshold != "CRITICAL" || server.TLS.MinVersion != "1.2" {
+		t.Fatalf("server defaults = %#v, want port 8080, CRITICAL threshold, TLS 1.2", server)
+	}
+
+	db, err := loadDBConfig(mode)
+	if err != nil {
+		t.Fatalf("loadDBConfig() error = %v", err)
+	}
+	if db.Host != "localhost" || db.SSLMode != "verify-full" || db.ConnectTimeout != 10*time.Second {
+		t.Fatalf("db defaults = %#v, want localhost, verify-full, 10s", db)
+	}
+
+	logCfg, err := loadLogConfig(mode)
+	if err != nil {
+		t.Fatalf("loadLogConfig() error = %v", err)
+	}
+	if logCfg.Level != "info" || logCfg.Format != "json" {
+		t.Fatalf("log defaults = %#v, want info/json", logCfg)
+	}
+
+	metrics, err := loadMetricsConfig()
+	if err != nil {
+		t.Fatalf("loadMetricsConfig() error = %v", err)
+	}
+	if metrics.Host != "127.0.0.1" || metrics.Port != 9090 {
+		t.Fatalf("metrics defaults = %#v, want 127.0.0.1:9090", metrics)
+	}
+
+	web, err := loadWebConfig()
+	if err != nil {
+		t.Fatalf("loadWebConfig() error = %v", err)
+	}
+	if web.PrivacyURL != "/privacy" || web.LegalURL != "" {
+		t.Fatalf("web defaults = %#v, want /privacy and empty legal URL", web)
+	}
+
+	admin, err := loadAdminConfig()
+	if err != nil {
+		t.Fatalf("loadAdminConfig() error = %v", err)
+	}
+	if admin.SessionTimeout != 8*time.Hour || admin.IdleTimeout != 15*time.Minute {
+		t.Fatalf("admin defaults = %#v, want 8h session and 15m idle timeout", admin)
+	}
+	if admin.AdminAuditHMACKey != "" {
+		t.Fatalf("admin audit HMAC key default = %q, want empty", admin.AdminAuditHMACKey)
+	}
+
+	retention, err := loadRetentionConfig()
+	if err != nil {
+		t.Fatalf("loadRetentionConfig() error = %v", err)
+	}
+	if retention.ScanLog != 30*24*time.Hour || retention.AdminAuditLog != 30*24*time.Hour {
+		t.Fatalf("retention metadata defaults = scan %s admin %s, want 720h/720h", retention.ScanLog, retention.AdminAuditLog)
+	}
+	if retention.PackageCheckStatus != 90*24*time.Hour || retention.DeletedAPIKeys != 365*24*time.Hour || retention.Interval != 24*time.Hour {
+		t.Fatalf("retention defaults = %#v, want package status 2160h, deleted API keys 8760h, and interval 24h", retention)
+	}
+
+	feedSync, err := loadFeedSyncConfig()
+	if err != nil {
+		t.Fatalf("loadFeedSyncConfig() error = %v", err)
+	}
+	if feedSync.Interval != 8*time.Hour || feedSync.OnStartup {
+		t.Fatalf("feed sync defaults = %#v, want 8h and no startup sync", feedSync)
+	}
+
+	feeds, err := loadFeedsConfig()
+	if err != nil {
+		t.Fatalf("loadFeedsConfig() error = %v", err)
+	}
+	if !feeds.OSVEnabled || feeds.OSVMode != FeedModeSelf || feeds.OSVBaseURL != "https://osv-vulnerabilities.storage.googleapis.com" {
+		t.Fatalf("OSV feed defaults = enabled %v mode %q url %q", feeds.OSVEnabled, feeds.OSVMode, feeds.OSVBaseURL)
+	}
+	if feeds.ReversingLabsBatchSize != 5 || feeds.ReversingLabsCacheRetention != 7*24*time.Hour {
+		t.Fatalf("ReversingLabs defaults = batch %d retention %v, want 5 and 168h", feeds.ReversingLabsBatchSize, feeds.ReversingLabsCacheRetention)
+	}
+}
+
+func TestLoadFeedsConfigReadsMovedFeedProviderVariable(t *testing.T) {
+	clearPackmonEnv(t)
+	t.Setenv("PACKMON_FEED_NVD_API_URL", "https://mirror.example.test/nvd/v2")
+
+	feeds, err := loadFeedsConfig()
+	if err != nil {
+		t.Fatalf("loadFeedsConfig() error = %v", err)
+	}
+	if feeds.NVDAPIURL != "https://mirror.example.test/nvd/v2" {
+		t.Fatalf("NVDAPIURL = %q, want custom mirror URL", feeds.NVDAPIURL)
+	}
+}
+
+func TestSubsystemLoadersPreserveValidationErrors(t *testing.T) {
+	tests := []struct {
+		name  string
+		key   string
+		value string
+		call  func() error
+		want  string
+	}{
+		{
+			name:  "server mode",
+			key:   "PACKMON_SERVER_MODE",
+			value: "staging",
+			call: func() error {
+				_, err := loadServerMode()
+				return err
+			},
+			want: "config: invalid PACKMON_SERVER_MODE (want production or development)",
+		},
+		{
+			name:  "server port",
+			key:   "PACKMON_SERVER_PORT",
+			value: "not-a-number",
+			call: func() error {
+				_, err := loadServerConfig(ModeProduction)
+				return err
+			},
+			want: "config: invalid PACKMON_SERVER_PORT (want integer)",
+		},
+		{
+			name:  "db port",
+			key:   "PACKMON_DB_PORT",
+			value: "abc",
+			call: func() error {
+				_, err := loadDBConfig(ModeProduction)
+				return err
+			},
+			want: "config: invalid PACKMON_DB_PORT (want integer)",
+		},
+		{
+			name:  "metrics port",
+			key:   "PACKMON_METRICS_PORT",
+			value: "xyz",
+			call: func() error {
+				_, err := loadMetricsConfig()
+				return err
+			},
+			want: "config: invalid PACKMON_METRICS_PORT (want integer)",
+		},
+		{
+			name:  "log level",
+			key:   "PACKMON_LOG_LEVEL",
+			value: "verbose",
+			call: func() error {
+				_, err := loadLogConfig(ModeProduction)
+				return err
+			},
+			want: "config: invalid PACKMON_LOG_LEVEL (want debug, info, warn, or error)",
+		},
+		{
+			name:  "log format",
+			key:   "PACKMON_LOG_FORMAT",
+			value: "xml",
+			call: func() error {
+				_, err := loadLogConfig(ModeProduction)
+				return err
+			},
+			want: "config: invalid PACKMON_LOG_FORMAT (want json or console)",
+		},
+		{
+			name:  "tls min version",
+			key:   "PACKMON_TLS_MIN_VERSION",
+			value: "1.1",
+			call: func() error {
+				_, err := loadTLSConfig()
+				return err
+			},
+			want: "config: invalid PACKMON_TLS_MIN_VERSION (want 1.2 or 1.3)",
+		},
+		{
+			name:  "admin idle timeout",
+			key:   "PACKMON_ADMIN_IDLE_TIMEOUT",
+			value: "0s",
+			call: func() error {
+				_, err := loadAdminConfig()
+				return err
+			},
+			want: "config: PACKMON_ADMIN_IDLE_TIMEOUT must be greater than zero",
+		},
+		{
+			name:  "admin audit HMAC key",
+			key:   "PACKMON_ADMIN_AUDIT_HMAC_KEY",
+			value: "not-base64!",
+			call: func() error {
+				_, err := loadAdminConfig()
+				return err
+			},
+			want: "config: PACKMON_ADMIN_AUDIT_HMAC_KEY must be base64-encoded 32 random bytes",
+		},
+		{
+			name:  "retention duration",
+			key:   "PACKMON_PACKAGE_CHECK_STATUS_RETENTION",
+			value: "-1h",
+			call: func() error {
+				_, err := loadRetentionConfig()
+				return err
+			},
+			want: "config: PACKMON_PACKAGE_CHECK_STATUS_RETENTION must be zero or greater",
+		},
+		{
+			name:  "feed sync boolean",
+			key:   "PACKMON_FEED_SYNC_ON_STARTUP",
+			value: "maybe",
+			call: func() error {
+				_, err := loadFeedSyncConfig()
+				return err
+			},
+			want: "config: invalid PACKMON_FEED_SYNC_ON_STARTUP (want true or false)",
+		},
+		{
+			name:  "web notice URL",
+			key:   "PACKMON_WEB_PRIVACY_URL",
+			value: "//example.test/privacy",
+			call: func() error {
+				_, err := loadWebConfig()
+				return err
+			},
+			want: "config: PACKMON_WEB_PRIVACY_URL must be a root-relative path or absolute http(s) URL",
+		},
+		{
+			name:  "feed mode",
+			key:   "PACKMON_FEED_GHSA_MODE",
+			value: "externl",
+			call: func() error {
+				_, err := loadFeedsConfig()
+				return err
+			},
+			want: "config: invalid PACKMON_FEED_GHSA_MODE (want self or external)",
+		},
+		{
+			name:  "feed mirror URL",
+			key:   "PACKMON_FEED_OSV_BASE_URL",
+			value: "http://mirror.example/osv",
+			call: func() error {
+				_, err := loadFeedsConfig()
+				return err
+			},
+			want: "config: PACKMON_FEED_OSV_BASE_URL must use https; http is allowed only for loopback test endpoints",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			clearPackmonEnv(t)
+			t.Setenv(tc.key, tc.value)
+
+			err := tc.call()
+			if err == nil {
+				t.Fatalf("%s loader error = nil, want %q", tc.name, tc.want)
+			}
+			if err.Error() != tc.want {
+				t.Fatalf("%s loader error = %q, want %q", tc.name, err.Error(), tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadReadsAdminAuditHMACKey(t *testing.T) {
+	clearPackmonEnv(t)
+	t.Setenv("PACKMON_ADMIN_AUDIT_HMAC_KEY", "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Admin.AdminAuditHMACKey != "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=" {
+		t.Fatalf("Admin.AdminAuditHMACKey = %q, want configured key", cfg.Admin.AdminAuditHMACKey)
+	}
+}
+
 func TestLoadAuditRetentionConfigFromEnv(t *testing.T) {
 	clearPackmonEnv(t)
 	t.Setenv("PACKMON_SCAN_LOG_RETENTION", "48h")
 	t.Setenv("PACKMON_ADMIN_AUDIT_LOG_RETENTION", "72h")
 	t.Setenv("PACKMON_REFRESH_QUEUE_RETENTION", "96h")
+	t.Setenv("PACKMON_PACKAGE_CHECK_STATUS_RETENTION", "120h")
+	t.Setenv("PACKMON_DELETED_API_KEY_RETENTION", "144h")
 	t.Setenv("PACKMON_AUDIT_RETENTION_INTERVAL", "6h")
 
 	cfg, err := Load()
@@ -205,8 +611,53 @@ func TestLoadAuditRetentionConfigFromEnv(t *testing.T) {
 	if cfg.Retention.RefreshQueue != 96*time.Hour {
 		t.Errorf("Retention.RefreshQueue = %v, want 96h", cfg.Retention.RefreshQueue)
 	}
+	if cfg.Retention.PackageCheckStatus != 120*time.Hour {
+		t.Errorf("Retention.PackageCheckStatus = %v, want 120h", cfg.Retention.PackageCheckStatus)
+	}
+	if cfg.Retention.DeletedAPIKeys != 144*time.Hour {
+		t.Errorf("Retention.DeletedAPIKeys = %v, want 144h", cfg.Retention.DeletedAPIKeys)
+	}
 	if cfg.Retention.Interval != 6*time.Hour {
 		t.Errorf("Retention.Interval = %v, want 6h", cfg.Retention.Interval)
+	}
+}
+
+func TestLoadScanLogIdentityModeFromEnv(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want ScanLogIdentityMode
+	}{
+		{name: "full", raw: "full", want: ScanLogIdentityModeFull},
+		{name: "minimal", raw: " minimal ", want: ScanLogIdentityModeMinimal},
+		{name: "none", raw: "NONE", want: ScanLogIdentityModeNone},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearPackmonEnv(t)
+			t.Setenv("PACKMON_SCAN_LOG_IDENTITY_MODE", tc.raw)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load returned error: %v", err)
+			}
+			if cfg.Server.ScanLogIdentityMode != tc.want {
+				t.Fatalf("Server.ScanLogIdentityMode = %q, want %q", cfg.Server.ScanLogIdentityMode, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsInvalidScanLogIdentityMode(t *testing.T) {
+	clearPackmonEnv(t)
+	t.Setenv("PACKMON_SCAN_LOG_IDENTITY_MODE", "employee")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() error = nil, want scan-log identity mode rejection")
+	}
+	want := "config: invalid PACKMON_SCAN_LOG_IDENTITY_MODE (want full, minimal, or none)"
+	if err.Error() != want {
+		t.Fatalf("Load() error = %q, want %q", err.Error(), want)
 	}
 }
 
@@ -223,6 +674,64 @@ func TestLoadDBConnectTimeoutFromEnv(t *testing.T) {
 	}
 }
 
+func TestLoadValidatesDBPoolConnectionBounds(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		max  string
+		min  string
+		want string
+	}{
+		{
+			name: "negative max",
+			max:  "-1",
+			want: "config: PACKMON_DB_MAX_CONNS must be zero or greater",
+		},
+		{
+			name: "negative min",
+			min:  "-1",
+			want: "config: PACKMON_DB_MIN_CONNS must be zero or greater",
+		},
+		{
+			name: "min greater than max",
+			max:  "2",
+			min:  "3",
+			want: "config: PACKMON_DB_MIN_CONNS cannot exceed PACKMON_DB_MAX_CONNS when both are greater than zero",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearPackmonEnv(t)
+			if tc.max != "" {
+				t.Setenv("PACKMON_DB_MAX_CONNS", tc.max)
+			}
+			if tc.min != "" {
+				t.Setenv("PACKMON_DB_MIN_CONNS", tc.min)
+			}
+
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("Load() error = nil, want %q", tc.want)
+			}
+			if err.Error() != tc.want {
+				t.Fatalf("Load() error = %q, want %q", err.Error(), tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadAllowsZeroDBPoolConnectionBounds(t *testing.T) {
+	clearPackmonEnv(t)
+	t.Setenv("PACKMON_DB_MAX_CONNS", "0")
+	t.Setenv("PACKMON_DB_MIN_CONNS", "0")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v, want zero pool bounds accepted", err)
+	}
+	if cfg.DB.MaxConns != 0 || cfg.DB.MinConns != 0 {
+		t.Fatalf("DB pool bounds = max %d min %d, want both zero", cfg.DB.MaxConns, cfg.DB.MinConns)
+	}
+}
+
 func TestLoadRejectsNegativeAuditRetention(t *testing.T) {
 	clearPackmonEnv(t)
 	t.Setenv("PACKMON_SCAN_LOG_RETENTION", "-1h")
@@ -236,6 +745,20 @@ func TestLoadRejectsNegativeAuditRetention(t *testing.T) {
 
 	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "PACKMON_REFRESH_QUEUE_RETENTION must be zero or greater") {
 		t.Fatalf("Load() error = %v, want refresh queue retention rejection", err)
+	}
+
+	clearPackmonEnv(t)
+	t.Setenv("PACKMON_PACKAGE_CHECK_STATUS_RETENTION", "-1h")
+
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "PACKMON_PACKAGE_CHECK_STATUS_RETENTION must be zero or greater") {
+		t.Fatalf("Load() error = %v, want package check status retention rejection", err)
+	}
+
+	clearPackmonEnv(t)
+	t.Setenv("PACKMON_DELETED_API_KEY_RETENTION", "-1h")
+
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "PACKMON_DELETED_API_KEY_RETENTION must be zero or greater") {
+		t.Fatalf("Load() error = %v, want deleted API key retention rejection", err)
 	}
 }
 
@@ -297,6 +820,52 @@ func TestLoadExplicitDBSSLModeOverridesProductionDefault(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsProductionDBSSLModeDisableForRemoteHost(t *testing.T) {
+	clearPackmonEnv(t)
+	t.Setenv("PACKMON_SERVER_MODE", "production")
+	t.Setenv("PACKMON_DB_HOST", "db.example.com")
+	t.Setenv("PACKMON_DB_SSLMODE", "disable")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() error = nil, want remote production sslmode disable rejection")
+	}
+	want := "PACKMON_DB_SSLMODE=disable is only allowed for the bundled local database"
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("Load() error = %q, want %q", err.Error(), want)
+	}
+}
+
+func TestLoadAllowsProductionDBSSLModeDisableForLocalComposeHost(t *testing.T) {
+	clearPackmonEnv(t)
+	t.Setenv("PACKMON_SERVER_MODE", "production")
+	t.Setenv("PACKMON_DB_HOST", "postgres")
+	t.Setenv("PACKMON_DB_SSLMODE", "disable")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.DB.SSLMode != "disable" || cfg.DB.Host != "postgres" {
+		t.Fatalf("DB config = %#v, want local compose host with disable sslmode", cfg.DB)
+	}
+}
+
+func TestLoadRejectsInvalidDBSSLMode(t *testing.T) {
+	clearPackmonEnv(t)
+	t.Setenv("PACKMON_SERVER_MODE", "production")
+	t.Setenv("PACKMON_DB_SSLMODE", "plain")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() error = nil, want invalid sslmode rejection")
+	}
+	want := "config: invalid PACKMON_DB_SSLMODE"
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("Load() error = %q, want %q", err.Error(), want)
+	}
+}
+
 func TestLoadWithInvalidServerModeReturnsError(t *testing.T) {
 	clearPackmonEnv(t)
 	t.Setenv("PACKMON_SERVER_MODE", "staging")
@@ -314,6 +883,7 @@ func TestLoadWithCustomServerPort(t *testing.T) {
 	t.Setenv("PACKMON_BLOCK_THRESHOLD", "HIGH")
 	t.Setenv("PACKMON_RATE_LIMIT_PER_MINUTE", "120")
 	t.Setenv("PACKMON_RATE_LIMIT_BURST", "25")
+	t.Setenv("PACKMON_SERVER_PUBLIC_HOST", "packmon.example.test:8443")
 
 	cfg, err := Load()
 	if err != nil {
@@ -335,12 +905,37 @@ func TestLoadWithCustomServerPort(t *testing.T) {
 	if cfg.Server.RateLimitBurst != 25 {
 		t.Errorf("Server.RateLimitBurst = %d, want 25", cfg.Server.RateLimitBurst)
 	}
+	if cfg.Server.PublicHost != "packmon.example.test:8443" {
+		t.Errorf("Server.PublicHost = %q, want packmon.example.test:8443", cfg.Server.PublicHost)
+	}
+}
+
+func TestLoadRejectsInvalidPublicHostForms(t *testing.T) {
+	tests := []string{
+		"https://packmon.example.test",
+		"packmon.example.test/base",
+		"user@example.test",
+		"packmon.example.test:0",
+		"packmon.example.test:70000",
+	}
+	for _, raw := range tests {
+		t.Run(raw, func(t *testing.T) {
+			clearPackmonEnv(t)
+			t.Setenv("PACKMON_SERVER_PUBLIC_HOST", raw)
+
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), "config: invalid PACKMON_SERVER_PUBLIC_HOST") {
+				t.Fatalf("Load() error = %v, want invalid public host rejection", err)
+			}
+		})
+	}
 }
 
 func TestLoadWebNoticeURLsFromEnv(t *testing.T) {
 	clearPackmonEnv(t)
 	t.Setenv("PACKMON_WEB_PRIVACY_URL", "https://privacy.example.test/packmon")
 	t.Setenv("PACKMON_WEB_LEGAL_URL", "/legal-notice")
+	t.Setenv("PACKMON_WEB_TERMS_URL", "/terms")
 
 	cfg, err := Load()
 	if err != nil {
@@ -352,6 +947,9 @@ func TestLoadWebNoticeURLsFromEnv(t *testing.T) {
 	}
 	if cfg.Web.LegalURL != "/legal-notice" {
 		t.Fatalf("Web.LegalURL = %q", cfg.Web.LegalURL)
+	}
+	if cfg.Web.TermsURL != "/terms" {
+		t.Fatalf("Web.TermsURL = %q", cfg.Web.TermsURL)
 	}
 }
 
@@ -365,6 +963,8 @@ func TestLoadRejectsUnsafeWebNoticeURLs(t *testing.T) {
 		{name: "privacy protocol-relative", key: "PACKMON_WEB_PRIVACY_URL", val: "//example.test/privacy"},
 		{name: "legal ftp", key: "PACKMON_WEB_LEGAL_URL", val: "ftp://example.test/legal"},
 		{name: "legal relative", key: "PACKMON_WEB_LEGAL_URL", val: "legal"},
+		{name: "terms javascript", key: "PACKMON_WEB_TERMS_URL", val: "javascript:alert(1)"},
+		{name: "terms relative", key: "PACKMON_WEB_TERMS_URL", val: "terms"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clearPackmonEnv(t)
@@ -491,6 +1091,96 @@ func TestDBConfigDSNEscapesCredentials(t *testing.T) {
 	}
 	if parsed.Query().Get("sslmode") != "verify-full" {
 		t.Fatalf("DSN sslmode = %q, want verify-full; dsn=%q", parsed.Query().Get("sslmode"), dsn)
+	}
+}
+
+func TestPortEnvValuesMustBeValidTCPPorts(t *testing.T) {
+	tests := []struct {
+		name  string
+		key   string
+		value string
+		call  func() error
+		want  string
+	}{
+		{
+			name:  "server negative",
+			key:   "PACKMON_SERVER_PORT",
+			value: "-1",
+			call: func() error {
+				_, err := loadServerConfig(ModeDevelopment)
+				return err
+			},
+			want: "config: PACKMON_SERVER_PORT must be between 0 and 65535",
+		},
+		{
+			name:  "metrics above max",
+			key:   "PACKMON_METRICS_PORT",
+			value: "65536",
+			call: func() error {
+				_, err := loadMetricsConfig()
+				return err
+			},
+			want: "config: PACKMON_METRICS_PORT must be between 0 and 65535",
+		},
+		{
+			name:  "db above max",
+			key:   "PACKMON_DB_PORT",
+			value: "70000",
+			call: func() error {
+				_, err := loadDBConfig(ModeDevelopment)
+				return err
+			},
+			want: "config: PACKMON_DB_PORT must be between 1 and 65535",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			clearPackmonEnv(t)
+			t.Setenv(tc.key, tc.value)
+
+			err := tc.call()
+			if err == nil {
+				t.Fatalf("%s=%s error = nil, want port range validation", tc.key, tc.value)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %q, want %q", err.Error(), tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadAcceptsEphemeralListenerPorts(t *testing.T) {
+	clearPackmonEnv(t)
+	t.Setenv("PACKMON_SERVER_MODE", "development")
+	t.Setenv("PACKMON_SERVER_PORT", "0")
+	t.Setenv("PACKMON_METRICS_PORT", "0")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() with listener port 0 error = %v", err)
+	}
+	if cfg.Server.Port != 0 {
+		t.Fatalf("Server.Port = %d, want 0", cfg.Server.Port)
+	}
+	if cfg.Metrics.Port != 0 {
+		t.Fatalf("Metrics.Port = %d, want 0", cfg.Metrics.Port)
+	}
+}
+
+func TestLoadAcceptsValidTCPPortOverrides(t *testing.T) {
+	clearPackmonEnv(t)
+	t.Setenv("PACKMON_SERVER_MODE", "development")
+	t.Setenv("PACKMON_SERVER_PORT", "8443")
+	t.Setenv("PACKMON_METRICS_PORT", "9443")
+	t.Setenv("PACKMON_DB_PORT", "15432")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Server.Port != 8443 || cfg.Metrics.Port != 9443 || cfg.DB.Port != 15432 {
+		t.Fatalf("ports = server %d metrics %d db %d, want 8443/9443/15432", cfg.Server.Port, cfg.Metrics.Port, cfg.DB.Port)
 	}
 }
 
@@ -647,6 +1337,79 @@ func TestEndOfLifeEnv(t *testing.T) {
 	}
 }
 
+func TestFeedMirrorURLEnv(t *testing.T) {
+	clearPackmonEnv(t)
+	t.Setenv("PACKMON_FEED_OSV_BASE_URL", "https://mirror.example/osv")
+	t.Setenv("PACKMON_FEED_GHSA_REPO_URL", "https://mirror.example/github/advisory-database.git")
+	t.Setenv("PACKMON_FEED_OPENSSF_REPO_URL", "https://mirror.example/ossf/malicious-packages.git")
+	t.Setenv("PACKMON_FEED_CISAKEV_CATALOG_URL", "https://mirror.example/cisa/kev.json")
+	t.Setenv("PACKMON_FEED_EPSS_SCORES_URL", "https://mirror.example/epss/current.csv.gz")
+	t.Setenv("PACKMON_FEED_NVD_API_URL", "https://mirror.example/nvd/rest/json/cves/2.0")
+	t.Setenv("PACKMON_VULNCHECK_API_BASE_URL", "https://mirror.example/vulncheck")
+	t.Setenv("PACKMON_SOCKET_API_BASE_URL", "https://mirror.example/socket/api/v1")
+	t.Setenv("PACKMON_SOCKET_EXCLUDED_NAMESPACES", "npm/@internal/,maven/com.acme:")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Feeds.OSVBaseURL != "https://mirror.example/osv" {
+		t.Fatalf("OSVBaseURL = %q", cfg.Feeds.OSVBaseURL)
+	}
+	if cfg.Feeds.GHSARepoURL != "https://mirror.example/github/advisory-database.git" {
+		t.Fatalf("GHSARepoURL = %q", cfg.Feeds.GHSARepoURL)
+	}
+	if cfg.Feeds.OpenSSFRepoURL != "https://mirror.example/ossf/malicious-packages.git" {
+		t.Fatalf("OpenSSFRepoURL = %q", cfg.Feeds.OpenSSFRepoURL)
+	}
+	if cfg.Feeds.CISAKEVCatalogURL != "https://mirror.example/cisa/kev.json" {
+		t.Fatalf("CISAKEVCatalogURL = %q", cfg.Feeds.CISAKEVCatalogURL)
+	}
+	if cfg.Feeds.EPSSScoresURL != "https://mirror.example/epss/current.csv.gz" {
+		t.Fatalf("EPSSScoresURL = %q", cfg.Feeds.EPSSScoresURL)
+	}
+	if cfg.Feeds.NVDAPIURL != "https://mirror.example/nvd/rest/json/cves/2.0" {
+		t.Fatalf("NVDAPIURL = %q", cfg.Feeds.NVDAPIURL)
+	}
+	if cfg.Feeds.VulnCheckBaseURL != "https://mirror.example/vulncheck" {
+		t.Fatalf("VulnCheckBaseURL = %q", cfg.Feeds.VulnCheckBaseURL)
+	}
+	if cfg.Feeds.SocketBaseURL != "https://mirror.example/socket/api/v1" {
+		t.Fatalf("SocketBaseURL = %q", cfg.Feeds.SocketBaseURL)
+	}
+	if got := strings.Join(cfg.Feeds.SocketExcludedNamespaces, ","); got != "npm/@internal/,maven/com.acme:" {
+		t.Fatalf("SocketExcludedNamespaces = %q", got)
+	}
+}
+
+func TestFeedMirrorURLRejectsNonHTTPS(t *testing.T) {
+	tests := []struct {
+		env   string
+		value string
+	}{
+		{"PACKMON_FEED_OSV_BASE_URL", "http://mirror.example/osv"},
+		{"PACKMON_FEED_GHSA_REPO_URL", "http://mirror.example/advisory-database.git"},
+		{"PACKMON_FEED_OPENSSF_REPO_URL", "http://mirror.example/malicious-packages.git"},
+		{"PACKMON_FEED_CISAKEV_CATALOG_URL", "http://mirror.example/kev.json"},
+		{"PACKMON_FEED_EPSS_SCORES_URL", "http://mirror.example/epss.csv.gz"},
+		{"PACKMON_FEED_NVD_API_URL", "http://mirror.example/cves/2.0"},
+		{"PACKMON_VULNCHECK_API_BASE_URL", "http://mirror.example/vulncheck"},
+		{"PACKMON_SOCKET_API_BASE_URL", "http://mirror.example/socket/api/v1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.env, func(t *testing.T) {
+			clearPackmonEnv(t)
+			t.Setenv(tt.env, tt.value)
+
+			if _, err := Load(); err == nil {
+				t.Fatalf("Load() error = nil, want error for %s", tt.env)
+			} else if !strings.Contains(err.Error(), tt.env) || !strings.Contains(err.Error(), "https") {
+				t.Fatalf("Load() error = %v, want explicit HTTPS error for %s", err, tt.env)
+			}
+		})
+	}
+}
+
 func TestEndOfLifeRejectsNonHTTPSBaseURL(t *testing.T) {
 	clearPackmonEnv(t)
 	t.Setenv("PACKMON_ENDOFLIFE_API_BASE_URL", "http://downloads.example.test/api/v1")
@@ -742,6 +1505,19 @@ func TestReversingLabsEnv(t *testing.T) {
 	}
 	if got := strings.Join(cfg.Feeds.ReversingLabsExcludedNamespaces, ","); got != "npm/@school/,maven/edu.school:" {
 		t.Fatalf("ReversingLabsExcludedNamespaces = %q", got)
+	}
+}
+
+func TestReversingLabsRejectsNegativeCacheRetention(t *testing.T) {
+	clearPackmonEnv(t)
+	t.Setenv("PACKMON_REVERSINGLABS_CACHE_RETENTION", "-1h")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() error = nil, want negative ReversingLabs cache retention rejection")
+	}
+	if !strings.Contains(err.Error(), "PACKMON_REVERSINGLABS_CACHE_RETENTION must be zero or greater") {
+		t.Fatalf("Load() error = %v, want ReversingLabs cache retention rejection", err)
 	}
 }
 
@@ -875,7 +1651,7 @@ func TestLoadReadsFeedModes(t *testing.T) {
 func TestLoadReadsFeedSyncSettings(t *testing.T) {
 	clearPackmonEnv(t)
 	t.Setenv("PACKMON_FEED_SYNC_INTERVAL", "2h")
-	t.Setenv("PACKMON_FEED_SYNC_ON_STARTUP", "false")
+	t.Setenv("PACKMON_FEED_SYNC_ON_STARTUP", "true")
 
 	cfg, err := Load()
 	if err != nil {
@@ -885,9 +1661,47 @@ func TestLoadReadsFeedSyncSettings(t *testing.T) {
 	if cfg.FeedSync.Interval != 2*time.Hour {
 		t.Errorf("FeedSync.Interval = %v, want 2h", cfg.FeedSync.Interval)
 	}
-	if cfg.FeedSync.OnStartup {
-		t.Error("FeedSync.OnStartup = true, want false")
+	if !cfg.FeedSync.OnStartup {
+		t.Error("FeedSync.OnStartup = false, want true")
 	}
+}
+
+func TestLoadValidatesFeedSyncInterval(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		value   string
+		wantErr string
+	}{
+		{name: "zero", value: "0s", wantErr: "config: PACKMON_FEED_SYNC_INTERVAL must be greater than zero"},
+		{name: "negative", value: "-1s", wantErr: "config: PACKMON_FEED_SYNC_INTERVAL must be greater than zero"},
+		{name: "below minimum", value: "14m59s", wantErr: "config: PACKMON_FEED_SYNC_INTERVAL must be at least 15m0s"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearPackmonEnv(t)
+			t.Setenv("PACKMON_FEED_SYNC_INTERVAL", tc.value)
+
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("Load() error = nil, want %q", tc.wantErr)
+			}
+			if err.Error() != tc.wantErr {
+				t.Fatalf("Load() error = %q, want %q", err.Error(), tc.wantErr)
+			}
+		})
+	}
+
+	t.Run("minimum accepted", func(t *testing.T) {
+		clearPackmonEnv(t)
+		t.Setenv("PACKMON_FEED_SYNC_INTERVAL", FeedSyncMinInterval.String())
+
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if cfg.FeedSync.Interval != FeedSyncMinInterval {
+			t.Fatalf("FeedSync.Interval = %v, want %v", cfg.FeedSync.Interval, FeedSyncMinInterval)
+		}
+	})
 }
 
 func TestLoadReadsCustomTimeouts(t *testing.T) {
@@ -917,6 +1731,59 @@ func TestLoadReadsCustomTimeouts(t *testing.T) {
 	}
 	if cfg.Admin.IdleTimeout != 10*time.Minute {
 		t.Errorf("Admin.IdleTimeout = %v, want 10m", cfg.Admin.IdleTimeout)
+	}
+}
+
+func TestLoadRejectsNonPositiveAdminSessionTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		value string
+	}{
+		{name: "zero", value: "0s"},
+		{name: "negative", value: "-1s"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearPackmonEnv(t)
+			t.Setenv("PACKMON_ADMIN_SESSION_TIMEOUT", tc.value)
+
+			_, err := Load()
+			if err == nil {
+				t.Fatal("Load() error = nil, want positive duration rejection")
+			}
+			want := "config: PACKMON_ADMIN_SESSION_TIMEOUT must be greater than zero"
+			if err.Error() != want {
+				t.Fatalf("Load() error = %q, want %q", err.Error(), want)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsNonPositiveServerTimeouts(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{name: "read zero", key: "PACKMON_SERVER_READ_TIMEOUT", value: "0s"},
+		{name: "read negative", key: "PACKMON_SERVER_READ_TIMEOUT", value: "-1s"},
+		{name: "write zero", key: "PACKMON_SERVER_WRITE_TIMEOUT", value: "0s"},
+		{name: "write negative", key: "PACKMON_SERVER_WRITE_TIMEOUT", value: "-1s"},
+		{name: "shutdown zero", key: "PACKMON_SERVER_SHUTDOWN_TIMEOUT", value: "0s"},
+		{name: "shutdown negative", key: "PACKMON_SERVER_SHUTDOWN_TIMEOUT", value: "-1s"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearPackmonEnv(t)
+			t.Setenv(tc.key, tc.value)
+
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("Load() error = nil, want %s positive duration rejection", tc.key)
+			}
+			want := "config: " + tc.key + " must be greater than zero"
+			if err.Error() != want {
+				t.Fatalf("Load() error = %q, want %q", err.Error(), want)
+			}
+		})
 	}
 }
 
@@ -956,6 +1823,40 @@ func TestLoadReadsLogConfig(t *testing.T) {
 	}
 	if cfg.Log.Format != "console" {
 		t.Errorf("Log.Format = %q, want console", cfg.Log.Format)
+	}
+}
+
+func TestLoadRejectsInvalidLogConfig(t *testing.T) {
+	tests := []struct {
+		name  string
+		key   string
+		value string
+		want  string
+	}{
+		{
+			name:  "level",
+			key:   "PACKMON_LOG_LEVEL",
+			value: "verbose",
+			want:  "config: invalid PACKMON_LOG_LEVEL",
+		},
+		{
+			name:  "format",
+			key:   "PACKMON_LOG_FORMAT",
+			value: "xml",
+			want:  "config: invalid PACKMON_LOG_FORMAT",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			clearPackmonEnv(t)
+			t.Setenv(tc.key, tc.value)
+
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Load() error = %v, want %q", err, tc.want)
+			}
+		})
 	}
 }
 

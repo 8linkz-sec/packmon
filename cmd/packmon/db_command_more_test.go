@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/8linkz-sec/packmon/internal/ioutils"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/8linkz-sec/packmon/internal/testutil"
 )
 
 func TestSplitCSVTrimsEmptyValues(t *testing.T) {
@@ -69,6 +72,21 @@ func TestDBInfoCommandTextReportsUninitializedDatabase(t *testing.T) {
 
 	if !strings.Contains(output, "local database not initialized") || !strings.Contains(output, "Initialized:     false") {
 		t.Fatalf("db info text output = %q", output)
+	}
+}
+
+func TestDBInfoCommandRejectsInvalidWarnAfterEnv(t *testing.T) {
+	for _, value := range []string{"soon", "-1"} {
+		t.Run(value, func(t *testing.T) {
+			isolateCLIConfigDiscovery(t)
+			t.Setenv("PACKMON_DB_PATH", t.TempDir())
+			t.Setenv("PACKMON_DB_WARN_AFTER_DAYS", value)
+
+			err := newDBInfoCmd().Execute()
+			if err == nil || !strings.Contains(err.Error(), "PACKMON_DB_WARN_AFTER_DAYS") {
+				t.Fatalf("db info error = %v, want invalid PACKMON_DB_WARN_AFTER_DAYS rejection", err)
+			}
+		})
 	}
 }
 
@@ -184,7 +202,7 @@ func TestDBExportCommandWritesPrivateOutputFile(t *testing.T) {
 		t.Fatalf("db export: %v", err)
 	}
 
-	skipIfPOSIXModesAreNotPreserved(t, exportDir)
+	testutil.SkipIfPOSIXModesAreNotPreserved(t, exportDir)
 	info, err := os.Stat(exportPath)
 	if err != nil {
 		t.Fatalf("stat export: %v", err)
@@ -225,7 +243,7 @@ func TestWriteLocalDBExportReturnsCloseError(t *testing.T) {
 	isolateCLIConfigDiscovery(t)
 	dbDir := t.TempDir()
 	store, _ := newTestSQLiteStore(t, dbDir)
-	defer closeSilently(store)
+	defer ioutils.CloseSilently(store)
 
 	writer := &failingCloseWriter{err: errors.New("delayed writeback failed")}
 	err := writeLocalDBExport(context.Background(), store, writer, writer)
@@ -337,6 +355,7 @@ func TestDBSyncCommandFetchesFromServerAndPrintsSummary(t *testing.T) {
 	isolateCLIConfigDiscovery(t)
 	dbDir := t.TempDir()
 	t.Setenv("PACKMON_DB_PATH", dbDir)
+	t.Setenv("PACKMON_API_KEY", "secret")
 
 	var gotAuth, gotEco, gotLimit string
 	handlerErrors := make(chan string, 1)
@@ -360,7 +379,7 @@ func TestDBSyncCommandFetchesFromServerAndPrintsSummary(t *testing.T) {
 	defer srv.Close()
 
 	cmd := newDBSyncCmd()
-	cmd.SetArgs([]string{"--server", srv.URL, "--api-key", "secret", "--ecosystems", " npm,go ", "--timeout", "3", "--insecure-allow-http"})
+	cmd.SetArgs([]string{"--server", srv.URL, "--ecosystems", " npm,go ", "--timeout", "3", "--insecure-allow-http"})
 	output := captureStdout(t, func() {
 		if err := cmd.Execute(); err != nil {
 			t.Fatalf("db sync: %v", err)
@@ -412,7 +431,7 @@ func TestDBSyncCommandPrintsRemovedRows(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"synced_at":"` + time.Now().UTC().Format(time.RFC3339) + `"}`))
+		_, _ = w.Write([]byte(`{"synced_at":"` + time.Now().UTC().Format(time.RFC3339) + `","feed_status":"healthy"}`))
 	}))
 	defer srv.Close()
 
@@ -466,7 +485,7 @@ func TestDBSyncCommandRejectsInsecureHTTPWithoutOptIn(t *testing.T) {
 	defer srv.Close()
 
 	cmd := newDBSyncCmd()
-	cmd.SetArgs([]string{"--server", srv.URL, "--api-key", "secret"})
+	cmd.SetArgs([]string{"--server", srv.URL})
 	err := cmd.Execute()
 	if err == nil || !strings.Contains(err.Error(), "refusing to use insecure server URL") {
 		t.Fatalf("db sync insecure HTTP error = %v", err)
@@ -582,9 +601,10 @@ func TestDBSyncCommandRejectsInvalidBooleanEnv(t *testing.T) {
 	isolateCLIConfigDiscovery(t)
 	t.Setenv("PACKMON_DB_PATH", t.TempDir())
 	t.Setenv("PACKMON_INSECURE_ALLOW_HTTP", "maybe")
+	t.Setenv("PACKMON_API_KEY", "secret")
 
 	cmd := newDBSyncCmd()
-	cmd.SetArgs([]string{"--server", "http://127.0.0.1:1", "--api-key", "secret"})
+	cmd.SetArgs([]string{"--server", "http://127.0.0.1:1"})
 	err := cmd.Execute()
 	if err == nil || !strings.Contains(err.Error(), "PACKMON_INSECURE_ALLOW_HTTP") {
 		t.Fatalf("db sync error = %v, want invalid PACKMON_INSECURE_ALLOW_HTTP rejection", err)
@@ -596,9 +616,10 @@ func TestDBSyncCommandRejectsInvalidTimeoutEnv(t *testing.T) {
 	t.Setenv("PACKMON_DB_PATH", t.TempDir())
 	t.Setenv("PACKMON_TIMEOUT", "later")
 	t.Setenv("PACKMON_INSECURE_ALLOW_HTTP", "true")
+	t.Setenv("PACKMON_API_KEY", "secret")
 
 	cmd := newDBSyncCmd()
-	cmd.SetArgs([]string{"--server", "http://127.0.0.1:1", "--api-key", "secret"})
+	cmd.SetArgs([]string{"--server", "http://127.0.0.1:1"})
 	err := cmd.Execute()
 	if err == nil || !strings.Contains(err.Error(), "PACKMON_TIMEOUT") {
 		t.Fatalf("db sync error = %v, want invalid PACKMON_TIMEOUT rejection", err)
@@ -616,10 +637,183 @@ func TestDBSyncCommandRejectsNonPositiveTimeout(t *testing.T) {
 	defer srv.Close()
 
 	cmd := newDBSyncCmd()
-	cmd.SetArgs([]string{"--server", srv.URL, "--api-key", "secret", "--insecure-allow-http", "--timeout=-1"})
+	cmd.SetArgs([]string{"--server", srv.URL, "--insecure-allow-http", "--timeout=-1"})
 	err := cmd.Execute()
 	if err == nil || !strings.Contains(err.Error(), "timeout must be greater than zero") {
 		t.Fatalf("db sync error = %v, want non-positive timeout rejection", err)
+	}
+}
+
+func TestResolveDBSyncSettingsAppliesFlagEnvConfigPrecedence(t *testing.T) {
+	t.Setenv("PACKMON_SERVER", "https://env.example")
+	t.Setenv("PACKMON_API_KEY", "env-secret")
+	t.Setenv("PACKMON_CA_CERT", "env-ca.pem")
+	t.Setenv("PACKMON_INSECURE_ALLOW_HTTP", "true")
+	t.Setenv("PACKMON_ECOSYSTEMS", "env-npm,env-go")
+	t.Setenv("PACKMON_TIMEOUT", "5")
+	t.Setenv("PACKMON_ALLOW_SECRET_FLAGS", "true")
+
+	falseValue := false
+	cfg := &cliConfig{
+		Server:            "https://config.example",
+		APIKey:            "config-secret",
+		APIKeyEnv:         "PACKMON_MISSING_SYNC_KEY",
+		CACert:            "config-ca.pem",
+		InsecureAllowHTTP: &falseValue,
+		Ecosystems:        []string{"config-npm"},
+		Timeout:           3,
+		DB:                cliDBConfig{SyncSource: "server"},
+	}
+
+	cmd := newDBSyncCmd()
+	if err := cmd.Flags().Set("server", "https://flag.example"); err != nil {
+		t.Fatalf("set server flag: %v", err)
+	}
+	if err := cmd.Flags().Set("api-key", "flag-secret"); err != nil {
+		t.Fatalf("set api-key flag: %v", err)
+	}
+	if err := cmd.Flags().Set("cacert", "flag-ca.pem"); err != nil {
+		t.Fatalf("set cacert flag: %v", err)
+	}
+	if err := cmd.Flags().Set("insecure-allow-http", "false"); err != nil {
+		t.Fatalf("set insecure flag: %v", err)
+	}
+	if err := cmd.Flags().Set("ecosystems", " flag-npm,flag-go "); err != nil {
+		t.Fatalf("set ecosystems flag: %v", err)
+	}
+	if err := cmd.Flags().Set("full", "true"); err != nil {
+		t.Fatalf("set full flag: %v", err)
+	}
+	if err := cmd.Flags().Set("timeout", "7"); err != nil {
+		t.Fatalf("set timeout flag: %v", err)
+	}
+
+	settings, err := resolveDBSyncSettings(cmd, cfg)
+	if err != nil {
+		t.Fatalf("resolveDBSyncSettings() error = %v", err)
+	}
+
+	if settings.serverURL != "https://flag.example" {
+		t.Fatalf("serverURL = %q, want flag value", settings.serverURL)
+	}
+	if settings.apiKey != "flag-secret" {
+		t.Fatalf("apiKey = %q, want flag value", settings.apiKey)
+	}
+	if settings.caCertFile != "flag-ca.pem" {
+		t.Fatalf("caCertFile = %q, want flag value", settings.caCertFile)
+	}
+	if settings.allowInsecureHTTP {
+		t.Fatal("allowInsecureHTTP = true, want explicit false flag to override true env")
+	}
+	wantEcosystems := []string{"flag-npm", "flag-go"}
+	if len(settings.ecosystems) != len(wantEcosystems) {
+		t.Fatalf("ecosystems = %v, want %v", settings.ecosystems, wantEcosystems)
+	}
+	for i := range wantEcosystems {
+		if settings.ecosystems[i] != wantEcosystems[i] {
+			t.Fatalf("ecosystems[%d] = %q, want %q", i, settings.ecosystems[i], wantEcosystems[i])
+		}
+	}
+	if !settings.full {
+		t.Fatal("full = false, want true")
+	}
+	if settings.timeout != 7*time.Second {
+		t.Fatalf("timeout = %s, want 7s", settings.timeout)
+	}
+}
+
+func TestResolveDBSyncSettingsRejectsAPIKeyFlagByDefault(t *testing.T) {
+	cmd := newDBSyncCmd()
+	if err := cmd.Flags().Set("server", "https://flag.example"); err != nil {
+		t.Fatalf("set server flag: %v", err)
+	}
+	if err := cmd.Flags().Set("api-key", "argv-sync-secret"); err != nil {
+		t.Fatalf("set api-key flag: %v", err)
+	}
+
+	_, err := resolveDBSyncSettings(cmd, &cliConfig{DB: cliDBConfig{SyncSource: "server"}})
+	if err == nil {
+		t.Fatal("resolveDBSyncSettings() error = nil, want api-key flag rejection")
+	}
+	for _, want := range []string{"--api-key", "PACKMON_API_KEY", "PACKMON_ALLOW_SECRET_FLAGS"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("resolveDBSyncSettings() error = %v, want %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "argv-sync-secret") {
+		t.Fatalf("resolveDBSyncSettings() error leaked secret: %v", err)
+	}
+}
+
+func TestResolveDBSyncSettingsCACertFileEnvWinsOverLegacyAlias(t *testing.T) {
+	t.Setenv("PACKMON_SERVER", "https://env.example")
+	t.Setenv("PACKMON_CA_CERT", "legacy-ca.pem")
+	t.Setenv("PACKMON_CA_CERT_FILE", "preferred-ca.pem")
+
+	settings, err := resolveDBSyncSettings(newDBSyncCmd(), &cliConfig{
+		Server: "https://config.example",
+		CACert: "config-ca.pem",
+		DB:     cliDBConfig{SyncSource: "server"},
+	})
+	if err != nil {
+		t.Fatalf("resolveDBSyncSettings() error = %v", err)
+	}
+	if settings.caCertFile != "preferred-ca.pem" {
+		t.Fatalf("caCertFile = %q, want preferred PACKMON_CA_CERT_FILE value", settings.caCertFile)
+	}
+}
+
+func TestResolveDBSyncRunLoadsConfigAndAppliesEnvPrecedence(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	dbDir := t.TempDir()
+	t.Setenv("PACKMON_DB_PATH", dbDir)
+	t.Setenv("PACKMON_SERVER", "https://env.example")
+	t.Setenv("PACKMON_API_KEY", "env-secret")
+	t.Setenv("PACKMON_CA_CERT", "legacy-ca.pem")
+	t.Setenv("PACKMON_CA_CERT_FILE", "preferred-ca.pem")
+	t.Setenv("PACKMON_ECOSYSTEMS", "npm,go")
+	t.Setenv("PACKMON_TIMEOUT", "5")
+
+	if err := os.WriteFile(defaultCLIConfigFile, []byte(`
+server: https://config.example
+api_key: config-secret
+cacert: config-ca.pem
+ecosystems: [pypi]
+timeout: 3
+db:
+  sync_source: server
+`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	run, err := resolveDBSyncRun(newDBSyncCmd())
+	if err != nil {
+		t.Fatalf("resolveDBSyncRun() error = %v", err)
+	}
+
+	if run.dbPath != filepath.Join(dbDir, "packmon.db") {
+		t.Fatalf("dbPath = %q, want db path under PACKMON_DB_PATH", run.dbPath)
+	}
+	if run.settings.serverURL != "https://env.example" {
+		t.Fatalf("serverURL = %q, want environment value", run.settings.serverURL)
+	}
+	if run.settings.apiKey != "env-secret" {
+		t.Fatalf("apiKey = %q, want environment value", run.settings.apiKey)
+	}
+	if run.settings.caCertFile != "preferred-ca.pem" {
+		t.Fatalf("caCertFile = %q, want PACKMON_CA_CERT_FILE value", run.settings.caCertFile)
+	}
+	if run.settings.timeout != 5*time.Second {
+		t.Fatalf("timeout = %s, want 5s", run.settings.timeout)
+	}
+	wantEcosystems := []string{"npm", "go"}
+	if len(run.settings.ecosystems) != len(wantEcosystems) {
+		t.Fatalf("ecosystems = %v, want %v", run.settings.ecosystems, wantEcosystems)
+	}
+	for i := range wantEcosystems {
+		if run.settings.ecosystems[i] != wantEcosystems[i] {
+			t.Fatalf("ecosystems[%d] = %q, want %q", i, run.settings.ecosystems[i], wantEcosystems[i])
+		}
 	}
 }
 

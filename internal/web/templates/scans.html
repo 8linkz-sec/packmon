@@ -1,37 +1,45 @@
-{{define "title"}}Packmon - Scans{{end}}
+{{define "title"}}{{t "page.scans.title"}}{{end}}
 
 {{define "content"}}
 <div class="space-y-6">
 
-  <h1 class="text-2xl font-bold">Scans</h1>
+  {{if .AdminPage}}
+  {{template "admin-page-header" dict "Title" (t "scans.heading") "Section" .AdminSection "CSRFToken" .CSRFToken}}
+  {{else}}
+  <h1 class="text-2xl font-bold">{{t "scans.heading"}}</h1>
+  {{end}}
 
   <!-- Scan trend (last 7 days) -->
   {{if .DailyStatsLoadError}}
   {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .DailyStatsLoadError}}
   {{else if gt .TotalScans7d 0}}
-  <div class="bg-white rounded-lg shadow p-5 border border-gray-200">
-    <h2 class="text-lg font-semibold mb-3">Scan Activity (Last 7 Days)</h2>
-    <div class="overflow-x-auto focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2" tabindex="0" role="region" aria-label="Scan activity table">
+  <div class="pm-surface p-5">
+    <h2 class="text-lg font-semibold mb-3">{{t "scans.activity.heading"}}</h2>
+    <div class="pm-scroll-region" tabindex="0" role="region" aria-label="{{t "scans.activity.table"}}">
       <table class="min-w-full text-sm">
         <thead>
-          <tr class="text-left text-gray-500 border-b">
-            <th class="pb-2 pr-4">Date (UTC)</th>
-            <th class="pb-2 pr-4 text-right">Scans</th>
-            <th class="pb-2 pr-4 text-right">Findings</th>
-            <th class="pb-2">Relative findings</th>
+          <tr class="text-start text-gray-500 border-b">
+            <th class="pb-2 pe-4">{{t "scans.table.date_utc"}}</th>
+            <th class="pb-2 pe-4 text-end">{{t "scans.table.scans"}}</th>
+            <th class="pb-2 pe-4 text-end">{{t "scans.table.findings"}}</th>
+            <th class="pb-2">{{t "scans.table.relative_findings"}}</th>
           </tr>
         </thead>
         <tbody>
           {{range .DailyStats}}
           <tr class="border-b border-gray-100 hover:bg-gray-50">
-            <td class="py-2 pr-4">{{.Date.Format "2006-01-02"}}</td>
-            <td class="py-2 pr-4 text-right">{{.ScanCount}}</td>
-            <td class="py-2 pr-4 text-right">{{.FindingsCount}}</td>
+            <td class="py-2 pe-4">{{.Date.Format "2006-01-02"}}</td>
+            <td class="py-2 pe-4 text-end" data-local-number="{{.ScanCount}}">{{.ScanCount}}</td>
+            <td class="py-2 pe-4 text-end" data-local-number="{{.FindingsCount}}">{{.FindingsCount}}</td>
             <td class="py-2">
               {{if gt .FindingsCount 0}}
-              <progress value="{{.BarWidth}}" max="100" aria-label="{{.FindingsCount}} {{if eq .FindingsCount 1}}finding{{else}}findings{{end}}; relative bar {{.BarWidth}}% of the highest finding day in this table" class="scan-findings-meter scan-findings-meter--risk">{{.BarWidth}}%</progress>
+              <progress value="{{.BarWidth}}" max="100" data-local-percent="{{.BarWidth}}"
+                data-local-percent-label="{{t "scans.relative_bar_local_label" .FindingsCount (word .FindingsCount "finding" "findings")}}"
+                aria-label="{{t "scans.relative_bar_label" .FindingsCount (word .FindingsCount "finding" "findings") .BarWidth}}"
+                class="scan-findings-meter scan-findings-meter--risk"
+              >{{.BarWidth}}%</progress>
               {{else}}
-              <progress value="0" max="100" aria-label="0 findings; no relative findings bar" class="scan-findings-meter scan-findings-meter--clean">0%</progress>
+              <progress value="0" max="100" data-local-percent="0" aria-label="{{t "scans.relative_bar_empty"}}" class="scan-findings-meter scan-findings-meter--clean">0%</progress>
               {{end}}
             </td>
           </tr>
@@ -41,8 +49,8 @@
     </div>
   </div>
   {{else}}
-  <div class="bg-white rounded-lg shadow p-5 border border-gray-200 text-center text-gray-600 py-10">
-    No scan activity yet.
+  <div class="pm-surface p-5 text-center text-gray-600 py-10">
+    {{t "scans.activity.empty"}}
   </div>
   {{end}}
 
@@ -50,27 +58,39 @@
   {{if .RecentScansLoadError}}
   {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .RecentScansLoadError}}
   {{else if .RecentScans}}
-  <div class="bg-white rounded-lg shadow p-5 border border-gray-200">
-    <h2 class="text-lg font-semibold mb-3">Recent Scans</h2>
-    <div class="overflow-x-auto focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2" tabindex="0" role="region" aria-label="Recent scans table">
+  <div class="pm-surface p-5">
+    <div class="mb-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+      <h2 class="text-lg font-semibold">{{t "scans.recent.heading"}}</h2>
+      {{if or .RecentScansHasPrev .RecentScansHasNext}}
+      <nav aria-label="{{t "scans.recent.pages_label"}}" class="flex flex-wrap gap-2 text-sm">
+        {{if .RecentScansHasPrev}}
+        <a href="{{.RecentScansPrevURL}}" class="inline-flex min-h-11 items-center rounded-md border border-gray-500 px-3 py-2 text-gray-700 hover:bg-gray-50 pm-focus-ring">{{t "scans.recent.newer"}}</a>
+        {{end}}
+        {{if .RecentScansHasNext}}
+        <a href="{{.RecentScansNextURL}}" class="inline-flex min-h-11 items-center rounded-md border border-gray-500 px-3 py-2 text-gray-700 hover:bg-gray-50 pm-focus-ring">{{t "scans.recent.older"}}</a>
+        {{end}}
+      </nav>
+      {{end}}
+    </div>
+    <div class="pm-scroll-region" tabindex="0" role="region" aria-label="{{t "scans.recent.table"}}">
       <table class="min-w-full text-sm">
         <thead>
-          <tr class="text-left text-gray-500 border-b">
-            <th class="pb-2 pr-4">Scan ID</th>
-            <th class="pb-2 pr-4">Time</th>
-            <th class="pb-2 pr-4 text-right">Packages</th>
-            <th class="pb-2 pr-4 text-right">Findings</th>
-            <th class="pb-2 pr-4 text-right">Duration</th>
+          <tr class="text-start text-gray-500 border-b">
+            <th class="pb-2 pe-4">{{t "scans.table.scan_id"}}</th>
+            <th class="pb-2 pe-4">{{t "scans.table.time"}}</th>
+            <th class="pb-2 pe-4 text-end">{{t "scans.table.packages"}}</th>
+            <th class="pb-2 pe-4 text-end">{{t "scans.table.findings"}}</th>
+            <th class="pb-2 pe-4 text-end">{{t "scans.table.duration"}}</th>
           </tr>
         </thead>
         <tbody>
           {{range .RecentScans}}
           <tr class="border-b border-gray-100 hover:bg-gray-50">
-            <td class="py-2 pr-4 font-mono text-xs break-all" title="{{.ScanID}}">{{.ScanID}}</td>
-            <td class="py-2 pr-4 text-gray-500"><time datetime="{{formatTimeISO .ScannedAt}}" aria-label="{{formatTime .ScannedAt}}">{{formatTimeAgo .ScannedAt}}</time></td>
-            <td class="py-2 pr-4 text-right">{{.PackagesCount}}</td>
-            <td class="py-2 pr-4 text-right {{if gt .FindingsCount 0}}text-red-600 font-medium{{end}}">{{.FindingsCount}}</td>
-            <td class="py-2 pr-4 text-right text-gray-500">{{if gt .DurationMs 0}}{{.DurationMs}}ms{{else}}-{{end}}</td>
+            <td class="py-2 pe-4 font-mono text-xs break-all" title="{{.ScanID}}">{{.ScanID}}</td>
+            <td class="py-2 pe-4 text-gray-500"><time data-local-time="relative" datetime="{{formatTimeISO .ScannedAt}}" aria-label="{{formatTime .ScannedAt}}">{{formatTimeAgo .ScannedAt}}</time></td>
+            <td class="py-2 pe-4 text-end" data-local-number="{{.PackagesCount}}">{{.PackagesCount}}</td>
+            <td class="py-2 pe-4 text-end {{if gt .FindingsCount 0}}text-red-600 font-medium{{end}}" data-local-number="{{.FindingsCount}}">{{.FindingsCount}}</td>
+            <td class="py-2 pe-4 text-end text-gray-500">{{if gt .DurationMs 0}}<span data-local-duration-ms="{{.DurationMs}}">{{.DurationMs}}ms</span>{{else}}-{{end}}</td>
           </tr>
           {{end}}
         </tbody>
@@ -78,8 +98,8 @@
     </div>
   </div>
   {{else}}
-  <div class="bg-white rounded-lg shadow p-5 border border-gray-200 text-center text-gray-600 py-10">
-    No scans recorded yet. Run <code class="bg-gray-100 px-1 rounded">packmon scan</code> to get started.
+  <div class="pm-surface p-5 text-center text-gray-600 py-10">
+    {{t "scans.recent.empty"}} <code class="bg-gray-100 px-1 rounded">packmon scan</code> {{t "scans.recent.empty_suffix"}}
   </div>
   {{end}}
 

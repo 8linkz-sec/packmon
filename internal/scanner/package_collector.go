@@ -3,7 +3,7 @@ package scanner
 import (
 	"errors"
 	"fmt"
-	"io"
+	"github.com/8linkz-sec/packmon/internal/ioutils"
 	"os"
 	"path/filepath"
 	"strings"
@@ -65,15 +65,32 @@ func CollectPackages(cfg CollectConfig) (*PackageCollection, error) {
 	result := &PackageCollection{}
 	ecoFilter := ecosystemFilter(cfg.Ecosystems)
 
-	walker := NewWalker(reg, cfg.MaxDepth, cfg.Ecosystems)
+	if err := collectLockfilePackages(result, reg, absRoot, cfg.MaxDepth, cfg.Ecosystems, ecoFilter); err != nil {
+		return nil, err
+	}
+	if err := collectExplicitSBOMPackages(result, absRoot, cfg.SBOMFiles, ecoFilter); err != nil {
+		return nil, err
+	}
+	finalizePackageCollection(result, cfg.IncludeDev)
+	return result, nil
+}
+
+func collectLockfilePackages(result *PackageCollection, reg *parser.Registry, absRoot string, maxDepth int, ecosystems []string, ecoFilter ecosystemNameFilter) error {
+	walker := NewWalker(reg, maxDepth, ecosystems)
 	lockFiles, err := walker.Walk(absRoot)
 	if err != nil {
-		return nil, fmt.Errorf("walk: %w", err)
+		return fmt.Errorf("walk: %w", err)
 	}
 	result.LockFiles = len(lockFiles)
 
+	rootHandle, err := os.OpenRoot(absRoot)
+	if err != nil {
+		return fmt.Errorf("open scan root: %w", err)
+	}
+	defer ioutils.CloseSilently(rootHandle)
+
 	for _, lf := range lockFiles {
-		pkgs, parseErr := parseCollectedLockFile(lf)
+		pkgs, parseErr := parseCollectedLockFileFromRoot(rootHandle, lf)
 		if parseErr != nil {
 			result.ParseErrors = append(result.ParseErrors, fmt.Sprintf("%s: %v", lf.RelPath, parseErr))
 			continue
@@ -85,8 +102,29 @@ func CollectPackages(cfg CollectConfig) (*PackageCollection, error) {
 			result.add(pkg, lf.RelPath, "lockfile")
 		}
 	}
+	return nil
+}
 
-	for _, sbomPath := range cfg.SBOMFiles {
+func parseCollectedLockFileUnderRoot(root string, lf LockFile) ([]domain.Package, error) {
+	rootHandle, err := os.OpenRoot(root)
+	if err != nil {
+		return nil, err
+	}
+	defer ioutils.CloseSilently(rootHandle)
+	return parseCollectedLockFileFromRoot(rootHandle, lf)
+}
+
+func parseCollectedLockFileFromRoot(root *os.Root, lf LockFile) ([]domain.Package, error) {
+	relPath := filepath.Clean(filepath.FromSlash(lf.RelPath))
+	f, err := root.Open(relPath)
+	if err != nil {
+		return nil, err
+	}
+	return parseCollectedLockFileReader(f, lf)
+}
+
+func collectExplicitSBOMPackages(result *PackageCollection, absRoot string, sbomFiles []string, ecoFilter ecosystemNameFilter) error {
+	for _, sbomPath := range sbomFiles {
 		if strings.TrimSpace(sbomPath) == "" {
 			continue
 		}
@@ -95,15 +133,15 @@ func CollectPackages(cfg CollectConfig) (*PackageCollection, error) {
 		if parseErr != nil {
 			var inputErr *sbomInputError
 			if errors.As(parseErr, &inputErr) {
-				return nil, fmt.Errorf("%s: %w", displayPath, inputErr)
+				return fmt.Errorf("%s: %w", displayPath, inputErr)
 			}
 			msg := fmt.Sprintf("%s: %v", displayPath, parseErr)
 			result.ParseErrors = append(result.ParseErrors, msg)
 			result.FatalParseErrors = append(result.FatalParseErrors, msg)
 			continue
 		}
-		for _, item := range skipped {
-			result.ParseErrors = append(result.ParseErrors, formatSBOMSkippedComponent(displayPath, item))
+		for i, item := range skipped {
+			result.ParseErrors = append(result.ParseErrors, formatSBOMSkippedComponent(displayPath, i+1, item))
 		}
 		for _, pkg := range packages {
 			if !ecoFilter.allows(pkg.Ecosystem) {
@@ -112,13 +150,15 @@ func CollectPackages(cfg CollectConfig) (*PackageCollection, error) {
 			result.add(pkg, displayPath, "sbom")
 		}
 	}
+	return nil
+}
 
+func finalizePackageCollection(result *PackageCollection, includeDev bool) {
 	result.filterStaleGoSumVersions()
-	if !cfg.IncludeDev {
+	if !includeDev {
 		result.filterDev()
 	}
 	result.rebuildPackages()
-	return result, nil
 }
 
 type sbomInputError struct {
@@ -138,50 +178,17 @@ func parseCollectedLockFile(lf LockFile) ([]domain.Package, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer closeSilently(f)
+	return parseCollectedLockFileReader(f, lf)
+}
+
+func parseCollectedLockFileReader(f *os.File, lf LockFile) ([]domain.Package, error) {
+	defer ioutils.CloseSilently(f)
 	if info, err := f.Stat(); err != nil {
 		return nil, err
 	} else if info.Mode().IsRegular() && info.Size() > maxLockfileSize {
 		return nil, lockfileSizeLimitError()
 	}
-	return lf.Parser.Parse(&limitedLockfileReader{
-		r: f,
-	})
-}
-
-type limitedLockfileReader struct {
-	r        io.Reader
-	read     int64
-	overflow bool
-}
-
-func (r *limitedLockfileReader) Read(p []byte) (int, error) {
-	if r.overflow {
-		return 0, lockfileSizeLimitError()
-	}
-	remainingWithSentinel := maxLockfileSize + 1 - r.read
-	if remainingWithSentinel <= 0 {
-		r.overflow = true
-		return 0, lockfileSizeLimitError()
-	}
-	if int64(len(p)) > remainingWithSentinel {
-		p = p[:int(remainingWithSentinel)]
-	}
-	n, err := r.r.Read(p)
-	if n == 0 {
-		return n, err
-	}
-	previous := r.read
-	r.read += int64(n)
-	if r.read > maxLockfileSize {
-		r.overflow = true
-		allowed := int(maxLockfileSize - previous)
-		if allowed > 0 {
-			return allowed, nil
-		}
-		return 0, lockfileSizeLimitError()
-	}
-	return n, err
+	return lf.Parser.Parse(ioutils.NewSizeLimitReader(f, maxLockfileSize, lockfileSizeLimitError))
 }
 
 func lockfileSizeLimitError() error {
@@ -203,13 +210,13 @@ func parseCollectedSBOM(root, path string) (string, []domain.Package, []sbom.Ski
 	if err != nil {
 		return displayPath, nil, nil, &sbomInputError{err: fmt.Errorf("open SBOM root: %w", err)}
 	}
-	defer closeSilently(rootHandle)
+	defer ioutils.CloseSilently(rootHandle)
 
 	f, err := rootHandle.Open(fileName)
 	if err != nil {
 		return displayPath, nil, nil, &sbomInputError{err: fmt.Errorf("open SBOM: %w", err)}
 	}
-	defer closeSilently(f)
+	defer ioutils.CloseSilently(f)
 
 	parsed, err := sbom.Parse(f)
 	if err != nil {
@@ -223,18 +230,25 @@ func parseCollectedSBOM(root, path string) (string, []domain.Package, []sbom.Ski
 	return displayPath, packages, parsed.Skipped, nil
 }
 
-func formatSBOMSkippedComponent(path string, item sbom.SkippedComponent) string {
-	name := strings.TrimSpace(item.Name)
-	reason := strings.TrimSpace(item.Reason)
-	switch {
-	case name != "" && reason != "":
-		return fmt.Sprintf("%s: skipped SBOM component %q: %s", path, name, reason)
-	case name != "":
-		return fmt.Sprintf("%s: skipped SBOM component %q", path, name)
-	case reason != "":
-		return fmt.Sprintf("%s: skipped SBOM component: %s", path, reason)
+func formatSBOMSkippedComponent(path string, ordinal int, item sbom.SkippedComponent) string {
+	if ordinal < 1 {
+		ordinal = 1
+	}
+	return fmt.Sprintf("%s: skipped SBOM component #%d: %s", path, ordinal, sbomSkippedComponentReason(item.Reason))
+}
+
+func sbomSkippedComponentReason(reason string) string {
+	switch strings.TrimSpace(reason) {
+	case "invalid package name":
+		return "invalid package name"
+	case "missing purl":
+		return "missing purl"
+	case "unsupported component type":
+		return "unsupported component type"
+	case "unsupported or versionless purl":
+		return "unsupported or versionless purl"
 	default:
-		return fmt.Sprintf("%s: skipped SBOM component", path)
+		return "component could not be imported"
 	}
 }
 

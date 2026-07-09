@@ -17,7 +17,7 @@ import (
 func TestRequireAdminSessionRedirectsBrowserRequestsToLogin(t *testing.T) {
 	t.Parallel()
 
-	sm := auth.NewSessionManager(context.Background(), time.Hour, false)
+	sm := auth.NewSessionManagerWithIdleTimeout(context.Background(), time.Hour, auth.DefaultAdminIdleTimeout, false)
 	handler := RequireAdminSession(sm, slog.New(slog.NewTextHandler(io.Discard, nil)))(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
@@ -46,7 +46,7 @@ func TestRequireAdminSessionRedirectsBrowserRequestsToLogin(t *testing.T) {
 func TestRequireAdminSessionUsesHXRedirectForHTMXRequests(t *testing.T) {
 	t.Parallel()
 
-	sm := auth.NewSessionManager(context.Background(), time.Hour, false)
+	sm := auth.NewSessionManagerWithIdleTimeout(context.Background(), time.Hour, auth.DefaultAdminIdleTimeout, false)
 	handler := RequireAdminSession(sm, slog.New(slog.NewTextHandler(io.Discard, nil)))(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
@@ -65,7 +65,7 @@ func TestRequireAdminSessionUsesHXRedirectForHTMXRequests(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
-	if redirect := rec.Header().Get("HX-Redirect"); redirect != "/admin/login?next=%2Fadmin%2Ffeeds%3Fpartial%3Druntime" {
+	if redirect := rec.Header().Get("HX-Redirect"); redirect != "/admin/login?next=%2Fadmin%2Ffeeds" {
 		t.Fatalf("HX-Redirect = %q, want login redirect with preserved target", redirect)
 	}
 	if location := rec.Header().Get("Location"); location != "" {
@@ -79,7 +79,7 @@ func TestRequireAdminSessionUsesHXRedirectForHTMXRequests(t *testing.T) {
 func TestRequireAdminSessionPassThroughBranches(t *testing.T) {
 	t.Parallel()
 
-	sm := auth.NewSessionManager(context.Background(), time.Hour, false)
+	sm := auth.NewSessionManagerWithIdleTimeout(context.Background(), time.Hour, auth.DefaultAdminIdleTimeout, false)
 	called := false
 	handler := RequireAdminSession(sm, slog.New(slog.NewTextHandler(io.Discard, nil)))(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		called = true
@@ -103,9 +103,9 @@ func TestRequireAdminSessionPassThroughBranches(t *testing.T) {
 
 	called = false
 	sessionRecorder := httptest.NewRecorder()
-	sess, err := sm.Create(sessionRecorder)
+	sess, err := sm.CreateAdmin(sessionRecorder, false)
 	if err != nil {
-		t.Fatalf("Create() error = %v", err)
+		t.Fatalf("CreateAdmin() error = %v", err)
 	}
 	req = httptest.NewRequest(http.MethodGet, "/admin/feeds", nil)
 	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: sess.ID}) //nolint:gosec // test injects an in-memory session cookie.
@@ -119,7 +119,7 @@ func TestRequireAdminSessionPassThroughBranches(t *testing.T) {
 func TestRequireAdminSessionIgnoresAdminPrefixOutsideNamespace(t *testing.T) {
 	t.Parallel()
 
-	sm := auth.NewSessionManager(context.Background(), time.Hour, false)
+	sm := auth.NewSessionManagerWithIdleTimeout(context.Background(), time.Hour, auth.DefaultAdminIdleTimeout, false)
 	for _, path := range []string{"/administer", "/admin-assets", "/adminfoo"} {
 		t.Run(path, func(t *testing.T) {
 			called := false
@@ -153,7 +153,7 @@ func TestRequireAdminSessionIgnoresAdminPrefixOutsideNamespace(t *testing.T) {
 func TestRequireAdminSessionRejectsPreAuthSession(t *testing.T) {
 	t.Parallel()
 
-	sm := auth.NewSessionManager(context.Background(), time.Hour, false)
+	sm := auth.NewSessionManagerWithIdleTimeout(context.Background(), time.Hour, auth.DefaultAdminIdleTimeout, false)
 	handler := RequireAdminSession(sm, slog.New(slog.NewTextHandler(io.Discard, nil)))(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
@@ -176,7 +176,7 @@ func TestRequireAdminSessionRejectsPreAuthSession(t *testing.T) {
 func TestRequireAdminSessionLogUsesTrustedClientIPAndRoutePathLabel(t *testing.T) {
 	t.Parallel()
 
-	sm := auth.NewSessionManager(context.Background(), time.Hour, false)
+	sm := auth.NewSessionManagerWithIdleTimeout(context.Background(), time.Hour, auth.DefaultAdminIdleTimeout, false)
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	handler := TrustedClientIP([]string{"10.0.0.1"})(Correlation(RequireAdminSession(sm, logger)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

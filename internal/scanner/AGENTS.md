@@ -36,7 +36,7 @@ Keep these tracked guardrails in mind:
 ## Tests
 
 ```bash
-go test -race ./internal/scanner/...
+go test -count=1 -race ./internal/scanner/...
 ```
 Cover: default-exclude vs `--include-dev`, each exit-code branch, and the
 auto-mode fallback warning.

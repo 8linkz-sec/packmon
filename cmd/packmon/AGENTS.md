@@ -41,5 +41,5 @@ Keep these tracked guardrails in mind:
 ## Tests
 
 ```bash
-go test ./cmd/packmon/...
+go test -count=1 ./cmd/packmon/...
 ```

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"github.com/8linkz-sec/packmon/internal/ioutils"
 	"strings"
 	"time"
 
@@ -40,8 +41,8 @@ func (s *Store) HasAdvisoryData(ctx context.Context) (bool, error) {
 }
 
 // ListRecentScans returns the most recent local scan-history entries.
-func (s *Store) ListRecentScans(ctx context.Context, limit int) ([]db.ScanLogEntry, error) {
-	entries, err := s.GetRecentScans(ctx, "", limit)
+func (s *Store) ListRecentScans(ctx context.Context, limit, offset int) ([]db.ScanLogEntry, error) {
+	entries, err := s.getRecentScansPage(ctx, "", limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -51,8 +52,6 @@ func (s *Store) ListRecentScans(ctx context.Context, limit int) ([]db.ScanLogEnt
 		out = append(out, db.ScanLogEntry{
 			ScanID:        fmt.Sprintf("local-%d", entry.ID),
 			RepoName:      entry.RepoName,
-			Branch:        entry.Branch,
-			Commit:        entry.Commit,
 			ScannedAt:     entry.ScannedAt,
 			PackagesCount: entry.PackagesCount,
 			FindingsCount: entry.FindingsCount,
@@ -81,7 +80,7 @@ func (s *Store) CountScansByDay(ctx context.Context, days int) ([]db.DailyScanSt
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: count scans by day: %w", err)
 	}
-	defer closeSilently(rows)
+	defer ioutils.CloseSilently(rows)
 
 	type aggregate struct {
 		scans    int
@@ -119,8 +118,9 @@ func (s *Store) CountScansByDay(ctx context.Context, days int) ([]db.DailyScanSt
 	return out, nil
 }
 
-// SearchPackages searches local vulnerability and malicious-package data
-// for packages matching the optional name query and/or severity filter.
+// SearchPackages searches local vulnerability, malicious-package, reputation,
+// and lifecycle data for packages matching the optional name query and/or
+// severity filter.
 func (s *Store) SearchPackages(ctx context.Context, params db.PackageSearchParams) ([]db.PackageSearchResult, error) {
 	query := strings.TrimSpace(params.Query)
 	severity := strings.ToUpper(strings.TrimSpace(params.Severity))
@@ -132,55 +132,93 @@ func (s *Store) SearchPackages(ctx context.Context, params db.PackageSearchParam
 	if limit <= 0 {
 		limit = 50
 	}
+	offset := params.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	collectorLimit := localSearchCollectorLimit(limit, offset)
 
 	results := make(map[searchKey]*db.PackageSearchResult)
-	nameQuery := strings.ToLower(query)
-	like, sqlLimit := localSearchSQLNameFilter(query, limit)
+	like, sqlLimit := localSearchSQLNameFilter(query, collectorLimit)
+	opts := localPackageSearchOptions{
+		nameQuery:   strings.ToLower(query),
+		severity:    severity,
+		findingType: findingType,
+		like:        like,
+		sqlLimit:    sqlLimit,
+	}
 
-	if findingType == "" || findingType == "vulnerability" {
-		if err := s.collectSearchResults(ctx, results, nameQuery, `
-			SELECT ecosystem, name, '' AS version, COUNT(*) AS findings_count, COUNT(*) AS vulnerability_count,
-				COALESCE((
-					SELECT GROUP_CONCAT(id, ', ')
-					FROM (
-						SELECT DISTINCT preview.id AS id
-						FROM vulnerabilities_local preview
-						WHERE preview.ecosystem = vulnerabilities_local.ecosystem
-						  AND preview.name = vulnerabilities_local.name
-						  AND (? = '' OR lower(preview.name) LIKE ?)
-						  AND (? = '' OR upper(coalesce(preview.severity, 'UNKNOWN')) = ?)
-						ORDER BY preview.id
-						LIMIT ?
-					)
-				), ''),
-				'vulnerability' AS finding_types
-			FROM vulnerabilities_local
-			WHERE (? = '' OR lower(name) LIKE ?)
-			  AND (? = '' OR upper(coalesce(severity, 'UNKNOWN')) = ?)
-			GROUP BY ecosystem, name
-			ORDER BY name ASC
-			LIMIT ?`,
-			like, like, severity, severity, db.SearchVulnerabilityIDPreviewLimit,
-			like, like, severity, severity, sqlLimit); err != nil {
+	for _, collector := range []localPackageSearchCollector{
+		s.collectVulnerabilitySearchResults,
+		s.collectMaliciousSearchResults,
+		s.collectReputationSearchResults,
+		s.collectLifecycleSearchResults,
+	} {
+		if err := collector(ctx, results, opts); err != nil {
 			return nil, err
 		}
 	}
 
-	if findingType == "" || findingType == "malicious" {
-		if err := s.collectSearchResults(ctx, results, nameQuery, `
-			SELECT ecosystem, name, '' AS version, COUNT(*) AS findings_count, 0 AS vulnerability_count, '' AS vulnerability_ids, 'malicious' AS finding_types
-			FROM malicious_local
-			WHERE (? = '' OR lower(name) LIKE ?)
-			  AND (? = '' OR upper(coalesce(severity, 'UNKNOWN')) = ?)
-			GROUP BY ecosystem, name
-			ORDER BY name ASC
-			LIMIT ?`, like, like, severity, severity, sqlLimit); err != nil {
-			return nil, err
-		}
-	}
+	return limitLocalSearchResults(localSearchResults(results), limit, offset), nil
+}
 
-	if findingType == "" || findingType == "malicious" {
-		if err := s.collectSearchResults(ctx, results, nameQuery, `
+type localPackageSearchOptions struct {
+	nameQuery   string
+	severity    string
+	findingType string
+	like        string
+	sqlLimit    int
+}
+
+type localPackageSearchCollector func(context.Context, map[searchKey]*db.PackageSearchResult, localPackageSearchOptions) error
+
+func (s *Store) collectVulnerabilitySearchResults(ctx context.Context, results map[searchKey]*db.PackageSearchResult, opts localPackageSearchOptions) error {
+	if opts.findingType != "" && opts.findingType != "vulnerability" {
+		return nil
+	}
+	return s.collectSearchResults(ctx, results, opts.nameQuery, `
+		SELECT ecosystem, name, '' AS version, COUNT(*) AS findings_count, COUNT(*) AS vulnerability_count,
+			COALESCE((
+				SELECT GROUP_CONCAT(id, ', ')
+				FROM (
+					SELECT DISTINCT preview.id AS id
+					FROM vulnerabilities_local preview
+					WHERE preview.ecosystem = vulnerabilities_local.ecosystem
+					  AND preview.name = vulnerabilities_local.name
+					  AND (? = '' OR lower(preview.name) LIKE ?)
+					  AND (? = '' OR upper(coalesce(preview.severity, 'UNKNOWN')) = ?)
+					ORDER BY preview.id
+					LIMIT ?
+				)
+			), ''),
+			'vulnerability' AS finding_types
+		FROM vulnerabilities_local
+		WHERE (? = '' OR lower(name) LIKE ?)
+		  AND (? = '' OR upper(coalesce(severity, 'UNKNOWN')) = ?)
+		GROUP BY ecosystem, name
+		ORDER BY name ASC
+		LIMIT ?`,
+		opts.like, opts.like, opts.severity, opts.severity, db.SearchVulnerabilityIDPreviewLimit,
+		opts.like, opts.like, opts.severity, opts.severity, opts.sqlLimit)
+}
+
+func (s *Store) collectMaliciousSearchResults(ctx context.Context, results map[searchKey]*db.PackageSearchResult, opts localPackageSearchOptions) error {
+	if opts.findingType != "" && opts.findingType != "malicious" {
+		return nil
+	}
+	return s.collectSearchResults(ctx, results, opts.nameQuery, `
+		SELECT ecosystem, name, '' AS version, COUNT(*) AS findings_count, 0 AS vulnerability_count, '' AS vulnerability_ids, 'malicious' AS finding_types
+		FROM malicious_local
+		WHERE (? = '' OR lower(name) LIKE ?)
+		  AND (? = '' OR upper(coalesce(severity, 'UNKNOWN')) = ?)
+		GROUP BY ecosystem, name
+		ORDER BY name ASC
+		LIMIT ?`, opts.like, opts.like, opts.severity, opts.severity, opts.sqlLimit)
+}
+
+func (s *Store) collectReputationSearchResults(ctx context.Context, results map[searchKey]*db.PackageSearchResult, opts localPackageSearchOptions) error {
+	if opts.findingType == "" || opts.findingType == "malicious" {
+		if err := s.collectSearchResults(ctx, results, opts.nameQuery, `
 			SELECT ecosystem, name, version, COUNT(*) AS findings_count, 0 AS vulnerability_count, '' AS vulnerability_ids, 'malicious' AS finding_types
 			FROM reputation_findings_local
 			WHERE type = 'malicious'
@@ -188,13 +226,13 @@ func (s *Store) SearchPackages(ctx context.Context, params db.PackageSearchParam
 			  AND (? = '' OR upper(coalesce(severity, 'UNKNOWN')) = ?)
 			GROUP BY ecosystem, name, version
 			ORDER BY name ASC
-			LIMIT ?`, like, like, severity, severity, sqlLimit); err != nil {
-			return nil, err
+			LIMIT ?`, opts.like, opts.like, opts.severity, opts.severity, opts.sqlLimit); err != nil {
+			return err
 		}
 	}
 
-	if findingType == "" || findingType == "supply_chain_risk" {
-		if err := s.collectSearchResults(ctx, results, nameQuery, `
+	if opts.findingType == "" || opts.findingType == "supply_chain_risk" {
+		if err := s.collectSearchResults(ctx, results, opts.nameQuery, `
 			SELECT ecosystem, name, version, COUNT(*) AS findings_count, 0 AS vulnerability_count, '' AS vulnerability_ids, 'supply_chain_risk' AS finding_types
 			FROM reputation_findings_local
 			WHERE type = 'supply_chain_risk'
@@ -202,13 +240,17 @@ func (s *Store) SearchPackages(ctx context.Context, params db.PackageSearchParam
 			  AND (? = '' OR upper(coalesce(severity, 'UNKNOWN')) = ?)
 			GROUP BY ecosystem, name, version
 			ORDER BY name ASC
-			LIMIT ?`, like, like, severity, severity, sqlLimit); err != nil {
-			return nil, err
+			LIMIT ?`, opts.like, opts.like, opts.severity, opts.severity, opts.sqlLimit); err != nil {
+			return err
 		}
 	}
 
-	if findingType == "" || findingType == "supply_chain_risk" {
-		if err := s.collectSearchResults(ctx, results, nameQuery, `
+	return nil
+}
+
+func (s *Store) collectLifecycleSearchResults(ctx context.Context, results map[searchKey]*db.PackageSearchResult, opts localPackageSearchOptions) error {
+	if opts.findingType == "" || opts.findingType == "supply_chain_risk" {
+		if err := s.collectSearchResults(ctx, results, opts.nameQuery, `
 			WITH lifecycle_findings AS (
 				SELECT ecosystem, name, COALESCE(NULLIF(latest, ''), cycle) AS version, ? AS severity
 				FROM lifecycle_releases_local
@@ -220,13 +262,13 @@ func (s *Store) SearchPackages(ctx context.Context, params db.PackageSearchParam
 			  AND (? = '' OR severity = ?)
 			GROUP BY ecosystem, name, version
 			ORDER BY name ASC
-			LIMIT ?`, string(lifecyclepolicy.SeverityEOL), like, like, severity, severity, sqlLimit); err != nil {
-			return nil, err
+			LIMIT ?`, string(lifecyclepolicy.SeverityEOL), opts.like, opts.like, opts.severity, opts.severity, opts.sqlLimit); err != nil {
+			return err
 		}
 	}
 
-	if findingType == "" || findingType == "lifecycle" {
-		if err := s.collectSearchResults(ctx, results, nameQuery, `
+	if opts.findingType == "" || opts.findingType == "lifecycle" {
+		if err := s.collectSearchResults(ctx, results, opts.nameQuery, `
 			WITH lifecycle_findings AS (
 				SELECT ecosystem, name, COALESCE(NULLIF(latest, ''), cycle) AS version,
 					CASE
@@ -248,11 +290,15 @@ func (s *Store) SearchPackages(ctx context.Context, params db.PackageSearchParam
 			lifecyclepolicy.EOLSoonDays,
 			string(lifecyclepolicy.SeverityEOLSoon),
 			string(lifecyclepolicy.SeveritySecuritySupportOnly),
-			like, like, severity, severity, sqlLimit); err != nil {
-			return nil, err
+			opts.like, opts.like, opts.severity, opts.severity, opts.sqlLimit); err != nil {
+			return err
 		}
 	}
 
+	return nil
+}
+
+func localSearchResults(results map[searchKey]*db.PackageSearchResult) []db.PackageSearchResult {
 	out := make([]db.PackageSearchResult, 0, len(results))
 	for _, result := range results {
 		result.VulnerabilityIDs = joinLocalCSV(result.VulnerabilityIDs)
@@ -261,7 +307,10 @@ func (s *Store) SearchPackages(ctx context.Context, params db.PackageSearchParam
 		result.Sources = "local"
 		out = append(out, *result)
 	}
+	return out
+}
 
+func limitLocalSearchResults(out []db.PackageSearchResult, limit, offset int) []db.PackageSearchResult {
 	for i := 1; i < len(out); i++ {
 		current := out[i]
 		j := i - 1
@@ -274,11 +323,30 @@ func (s *Store) SearchPackages(ctx context.Context, params db.PackageSearchParam
 		out[j+1] = current
 	}
 
-	if len(out) > limit {
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= len(out) {
+		return []db.PackageSearchResult{}
+	}
+	if offset > 0 {
+		out = out[offset:]
+	}
+	if limit > 0 && len(out) > limit {
 		out = out[:limit]
 	}
+	return out
+}
 
-	return out, nil
+func localSearchCollectorLimit(limit, offset int) int {
+	if offset <= 0 {
+		return limit
+	}
+	maxInt := int(^uint(0) >> 1)
+	if limit > maxInt-offset {
+		return maxInt
+	}
+	return limit + offset
 }
 
 func localSearchSQLNameFilter(query string, limit int) (string, int) {
@@ -298,7 +366,7 @@ func (s *Store) collectSearchResults(ctx context.Context, acc map[searchKey]*db.
 	if err != nil {
 		return fmt.Errorf("sqlite: search packages: %w", err)
 	}
-	defer closeSilently(rows)
+	defer ioutils.CloseSilently(rows)
 
 	for rows.Next() {
 		var (
@@ -451,7 +519,7 @@ func (s *Store) collectSeverityCounts(ctx context.Context, acc map[string]int, q
 	if err != nil {
 		return fmt.Errorf("sqlite: dashboard severities: %w", err)
 	}
-	defer closeSilently(rows)
+	defer ioutils.CloseSilently(rows)
 
 	for rows.Next() {
 		var (

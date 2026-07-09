@@ -1,0 +1,96 @@
+# Starter Prometheus alert rules for Packmon internal deployments.
+# Tune thresholds and route labels to match the deployment's feed cadence,
+# queue volume, and incident response policy.
+groups:
+  - name: packmon-health
+    rules:
+      - alert: PackmonMetricsScrapeDown
+        expr: up{job=~"packmon.*"} == 0
+        for: 5m
+        labels:
+          severity: critical
+          service: packmon
+        annotations:
+          summary: Packmon metrics target is down
+          description: Prometheus has not successfully scraped a Packmon metrics target for 5 minutes.
+          runbook_url: docs/runbook.md#metrics-are-unreachable-remotely
+
+      - alert: PackmonMetricsStoreReadFailure
+        expr: increase(packmon_metrics_store_read_failures_total[10m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+          service: packmon
+        annotations:
+          summary: Packmon metrics store reads are failing
+          description: Store-derived metrics are failing during scrapes, so feed, queue, scan, or dashboard gauges may be stale or missing.
+          runbook_url: docs/runbook.md#database-pool-saturation
+
+      - alert: PackmonDegradedResponses
+        expr: increase(packmon_degraded_responses_total[10m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+          service: packmon
+        annotations:
+          summary: Packmon is returning degraded scan responses
+          description: At least one scan response reported degraded coverage during the last 10 minutes.
+          runbook_url: docs/runbook.md#server-reports-degraded-feed-status
+
+      - alert: PackmonFeedSyncDegraded
+        expr: packmon_feed_sync_status{status=~"error|permanent_error|rejected"} == 1
+        for: 15m
+        labels:
+          severity: warning
+          service: packmon
+        annotations:
+          summary: Packmon feed sync is degraded
+          description: A Packmon feed has remained in an error, permanent_error, or rejected state for 15 minutes.
+          runbook_url: docs/runbook.md#server-reports-degraded-feed-status
+
+      - alert: PackmonFeedStale
+        expr: time() - packmon_feed_last_sync_timestamp > 36000
+        for: 15m
+        labels:
+          severity: warning
+          service: packmon
+        annotations:
+          summary: Packmon feed data is stale
+          description: A Packmon feed has no recent sync heartbeat within the starter 10 hour freshness window.
+          runbook_url: docs/runbook.md#feed-scheduler-controls
+
+      - alert: PackmonQueueStalled
+        expr: packmon_queue_oldest_job_seconds > 7200
+        for: 15m
+        labels:
+          severity: warning
+          service: packmon
+        annotations:
+          summary: Packmon refresh queue is stalled
+          description: The oldest Packmon refresh queue job has exceeded the starter 2 hour age threshold.
+          runbook_url: docs/runbook.md#queue-is-not-draining
+
+      - alert: PackmonQueueErrors
+        expr: increase(packmon_queue_error_total[15m]) > 0
+        for: 15m
+        labels:
+          severity: warning
+          service: packmon
+        annotations:
+          summary: Packmon refresh queue jobs are erroring
+          description: At least one Packmon refresh queue job failed during the last 15 minutes.
+          runbook_url: docs/runbook.md#queue-is-not-draining
+
+      - alert: PackmonDBPoolSaturation
+        expr: |
+          sum without (state) (packmon_db_pool_connections{state="acquired"})
+            / clamp_min(sum without (state) (packmon_db_pool_connections{state="max"}), 1)
+            > 0.8
+        for: 10m
+        labels:
+          severity: warning
+          service: packmon
+        annotations:
+          summary: Packmon PostgreSQL pool is near saturation
+          description: Acquired PostgreSQL connections have exceeded 80 percent of the configured Packmon pool maximum for 10 minutes.
+          runbook_url: docs/runbook.md#database-pool-saturation

@@ -18,6 +18,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
@@ -47,6 +48,21 @@ const (
 	// maxBodySize limits a single response to 200 MB (bulk data).
 	maxBodySize = 200 << 20
 
+	// maxVulnCheckRawJSONBytes limits raw per-CVE provenance persisted in DB.
+	maxVulnCheckRawJSONBytes = 1 << 20
+
+	// maxVulnCheckSourceURLBytes bounds user-facing VulnCheck attribution URLs.
+	maxVulnCheckSourceURLBytes = 4096
+
+	// maxVulnCheckExploitRefs bounds exploit-reference arrays in one CVE record.
+	maxVulnCheckExploitRefs = 256
+
+	// maxVulnCheckExploitURLBytes bounds exploit reference URL fields.
+	maxVulnCheckExploitURLBytes = 4096
+
+	// maxVulnCheckExploitTextBytes bounds exploit reference text fields.
+	maxVulnCheckExploitTextBytes = 1024
+
 	// batchSize controls how many entries are sent per EnrichVulnCheck call.
 	batchSize = 1000
 )
@@ -65,6 +81,27 @@ type backupLink struct {
 type backupSelection struct {
 	URL    string
 	SHA256 string
+}
+
+type backupStreamStats struct {
+	entriesTotal    int
+	rejectedRecords int
+	rejectionReason string
+}
+
+func (s *backupStreamStats) add(other backupStreamStats) {
+	s.entriesTotal += other.entriesTotal
+	s.rejectedRecords += other.rejectedRecords
+	if s.rejectionReason == "" {
+		s.rejectionReason = other.rejectionReason
+	}
+}
+
+func (s *backupStreamStats) reject(reason string) {
+	s.rejectedRecords++
+	if s.rejectionReason == "" {
+		s.rejectionReason = reason
+	}
 }
 
 // backupCVE is one CVE record from the VulnCheck backup.
@@ -144,12 +181,14 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 		return nil, feed.PermanentError(fmt.Errorf("VulnCheck API key not configured"))
 	}
 
+	start := time.Now()
 	s.logger.Info("starting VulnCheck sync")
 
-	totalUpdated, totalEntries, err := s.processBulk(ctx, store)
+	totalUpdated, totalEntries, metadata, backupDigest, err := s.processBulk(ctx, store)
 	if err != nil {
 		return nil, fmt.Errorf("vulncheck: download: %w", err)
 	}
+	s.recordSyncSuccessWithDigest(ctx, store, time.Since(start), totalEntries, totalUpdated, backupDigest, metadata)
 
 	s.logger.Info("VulnCheck sync completed",
 		slog.Int("total_entries", totalEntries),
@@ -159,15 +198,26 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 	return &feed.SyncResult{
 		EntriesSynced: totalUpdated,
 		EntriesTotal:  totalEntries,
+		Metadata:      metadata,
 	}, nil
 }
 
-func (s *Syncer) processBulk(ctx context.Context, store db.Store) (updated, total int, err error) {
+func (s *Syncer) processBulk(ctx context.Context, store db.Store) (updated, total int, metadata json.RawMessage, backupDigest string, err error) {
 	backup, err := s.fetchBackupSelection(ctx)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, nil, "", err
 	}
-	entriesTotal, err := s.streamVerifiedBackupFile(ctx, backup, func(entries []db.VulnCheckEntry) error {
+	status := s.loadFeedStatus(ctx, store)
+	if statusHasProcessedBackupDigest(status, backup.SHA256) {
+		s.logger.Info("VulnCheck backup digest unchanged, skipping download",
+			slog.String("sha256", backup.SHA256),
+		)
+		if len(status.Metadata) > 0 {
+			metadata = append(json.RawMessage(nil), status.Metadata...)
+		}
+		return 0, status.EntriesTotal, metadata, backup.SHA256, nil
+	}
+	stats, err := s.streamVerifiedBackupFileWithStats(ctx, backup, func(entries []db.VulnCheckEntry) error {
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("context cancelled: %w", err)
 		}
@@ -179,16 +229,99 @@ func (s *Syncer) processBulk(ctx context.Context, store db.Store) (updated, tota
 		updated += batchUpdated
 		return nil
 	})
-	return updated, entriesTotal, err
+	if stats.rejectedRecords > 0 {
+		s.logger.Warn("VulnCheck backup records rejected",
+			slog.Int("rejected_records", stats.rejectedRecords),
+			slog.String("reason", stats.rejectionReason),
+		)
+		metadata, _ = json.Marshal(feed.StatusMetadata{
+			RejectedCount:   stats.rejectedRecords,
+			RejectionReason: stats.rejectionReason,
+		})
+	}
+	return updated, stats.entriesTotal, metadata, backup.SHA256, err
+}
+
+func (s *Syncer) loadFeedStatus(ctx context.Context, store db.Store) *db.FeedSyncStatus {
+	status, err := store.GetFeedSyncStatus(ctx, feedName)
+	if err != nil {
+		s.logger.Warn("failed to load VulnCheck feed status, proceeding with download",
+			slog.String("error", feed.SafeDiagnosticError(err)),
+		)
+		return nil
+	}
+	return status
+}
+
+func statusHasProcessedBackupDigest(status *db.FeedSyncStatus, digest string) bool {
+	if status == nil || status.LastSyncAt == nil {
+		return false
+	}
+	storedDigest, err := normalizeBackupSHA256(status.LastETag)
+	if err != nil {
+		return false
+	}
+	return storedDigest == digest
+}
+
+func (s *Syncer) recordSyncSuccessWithDigest(ctx context.Context, store db.Store, duration time.Duration, total, updated int, digest string, metadata json.RawMessage) {
+	now := time.Now().UTC()
+	status := &db.FeedSyncStatus{
+		FeedName:         feedName,
+		LastSyncAt:       &now,
+		LastSyncDuration: &duration,
+		LastSyncStatus:   db.FeedSyncStatusSuccess,
+		EntriesSynced:    updated,
+		EntriesTotal:     total,
+		LastETag:         digest,
+	}
+	if len(metadata) > 0 {
+		status.Metadata = append(json.RawMessage(nil), metadata...)
+	}
+	if err := feed.UpsertFeedSyncStatusBounded(store, status); err != nil {
+		s.logger.Warn("failed to record VulnCheck sync status",
+			slog.String("error", feed.SafeDiagnosticError(err)),
+		)
+	}
+	_ = ctx
 }
 
 func vulnCheckEntryFromBackupCVE(cve backupCVE) (db.VulnCheckEntry, bool) {
+	entry, ok, _ := vulnCheckEntryFromBackupCVEWithRaw(cve, nil)
+	return entry, ok
+}
+
+func vulnCheckEntryFromBackupRaw(raw json.RawMessage) (db.VulnCheckEntry, bool, string) {
+	if len(raw) > maxVulnCheckRawJSONBytes {
+		return db.VulnCheckEntry{}, false, "raw_json_too_large"
+	}
+	var cve backupCVE
+	if err := json.Unmarshal(raw, &cve); err != nil {
+		return db.VulnCheckEntry{}, false, "malformed_json"
+	}
+	return vulnCheckEntryFromBackupCVEWithRaw(cve, raw)
+}
+
+func vulnCheckEntryFromBackupCVEWithRaw(cve backupCVE, raw json.RawMessage) (db.VulnCheckEntry, bool, string) {
 	cveID := cve.CVEID
 	if cveID == "" {
 		cveID = cve.ID
 	}
 	if cveID == "" || !strings.HasPrefix(cveID, "CVE-") {
-		return db.VulnCheckEntry{}, false
+		return db.VulnCheckEntry{}, false, "invalid_cve_id"
+	}
+	if len(cve.URL) > maxVulnCheckSourceURLBytes {
+		return db.VulnCheckEntry{}, false, "source_url_too_large"
+	}
+	if len(cve.Exploits) > maxVulnCheckExploitRefs {
+		return db.VulnCheckEntry{}, false, "too_many_exploit_references"
+	}
+	for _, ref := range cve.Exploits {
+		if len(ref.URL) > maxVulnCheckExploitURLBytes ||
+			len(ref.Name) > maxVulnCheckExploitTextBytes ||
+			len(ref.Source) > maxVulnCheckExploitTextBytes {
+			return db.VulnCheckEntry{}, false, "exploit_reference_too_large"
+		}
 	}
 
 	entry := db.VulnCheckEntry{
@@ -202,11 +335,12 @@ func vulnCheckEntryFromBackupCVE(cve backupCVE) (db.VulnCheckEntry, bool) {
 		entry.CVSSScore = &score
 	}
 
-	rawBytes, err := json.Marshal(cve)
-	if err == nil {
+	if len(raw) > 0 {
+		entry.RawJSON = append(json.RawMessage(nil), raw...)
+	} else if rawBytes, err := json.Marshal(cve); err == nil && len(rawBytes) <= maxVulnCheckRawJSONBytes {
 		entry.RawJSON = rawBytes
 	}
-	return entry, true
+	return entry, true, ""
 }
 
 func (s *Syncer) fetchBackupSelection(ctx context.Context) (backupSelection, error) {
@@ -218,7 +352,7 @@ func (s *Syncer) fetchBackupSelection(ctx context.Context) (backupSelection, err
 	}
 	req.Header.Set("Authorization", "Bearer "+s.apiKey)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "packmon-feedsync/1.0")
+	req.Header.Set("User-Agent", feed.FeedSyncUserAgent)
 
 	resp, err := s.doBackupRequest(req)
 	if err != nil {
@@ -227,7 +361,7 @@ func (s *Syncer) fetchBackupSelection(ctx context.Context) (backupSelection, err
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return backupSelection{}, fmt.Errorf("authentication failed (status %d): check PACKMON_VULNCHECK_API_KEY", resp.StatusCode)
+		return backupSelection{}, feed.PermanentError(fmt.Errorf("authentication failed (status %d): check PACKMON_VULNCHECK_API_KEY", resp.StatusCode))
 	}
 	if resp.StatusCode != http.StatusOK {
 		return backupSelection{}, fmt.Errorf("unexpected status %d", resp.StatusCode)
@@ -258,42 +392,26 @@ func (s *Syncer) fetchBackupSelection(ctx context.Context) (backupSelection, err
 	return backupSelection{}, fmt.Errorf("backup response did not include a download URL")
 }
 
-func (s *Syncer) streamBackupFile(ctx context.Context, downloadURL string, emit func([]db.VulnCheckEntry) error) (int, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
-	if err != nil {
-		return 0, fmt.Errorf("create backup request: %s", logsafe.RedactDiagnosticMessage(err.Error()))
-	}
-	req.Header.Set("Accept", "application/zip, application/json")
-	req.Header.Set("User-Agent", "packmon-feedsync/1.0")
-
-	resp, err := s.doBackupRequest(req)
-	if err != nil {
-		return 0, fmt.Errorf("backup http get: %s", logsafe.RedactDiagnosticMessage(err.Error()))
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("backup unexpected status %d", resp.StatusCode)
-	}
-
-	return streamBackupPayload(newMaxBytesReader(resp.Body, maxBodySize), resp.Header.Get("Content-Type"), downloadURL, emit)
+func (s *Syncer) streamVerifiedBackupFile(ctx context.Context, backup backupSelection, emit func([]db.VulnCheckEntry) error) (int, error) {
+	stats, err := s.streamVerifiedBackupFileWithStats(ctx, backup, emit)
+	return stats.entriesTotal, err
 }
 
-func (s *Syncer) streamVerifiedBackupFile(ctx context.Context, backup backupSelection, emit func([]db.VulnCheckEntry) error) (int, error) {
+func (s *Syncer) streamVerifiedBackupFileWithStats(ctx context.Context, backup backupSelection, emit func([]db.VulnCheckEntry) error) (backupStreamStats, error) {
 	path, contentType, digest, err := s.downloadBackupToTemp(ctx, backup.URL)
 	if err != nil {
-		return 0, err
+		return backupStreamStats{}, err
 	}
 	defer func() { _ = os.Remove(path) }()
 	if err := verifyBackupSHA256Digest(backup.SHA256, digest); err != nil {
-		return 0, err
+		return backupStreamStats{}, err
 	}
 	file, err := os.Open(path) // #nosec G304 -- path was created by downloadBackupToTemp via os.CreateTemp and verified by digest before opening.
 	if err != nil {
-		return 0, fmt.Errorf("open verified backup: %w", err)
+		return backupStreamStats{}, fmt.Errorf("open verified backup: %w", err)
 	}
 	defer func() { _ = file.Close() }()
-	return streamBackupPayload(file, contentType, backup.URL, emit)
+	return streamBackupPayloadWithStats(file, contentType, backup.URL, emit)
 }
 
 func (s *Syncer) downloadBackupToTemp(ctx context.Context, downloadURL string) (path, contentType, digest string, err error) {
@@ -302,7 +420,7 @@ func (s *Syncer) downloadBackupToTemp(ctx context.Context, downloadURL string) (
 		return "", "", "", fmt.Errorf("create backup request: %s", logsafe.RedactDiagnosticMessage(err.Error()))
 	}
 	req.Header.Set("Accept", "application/zip, application/json")
-	req.Header.Set("User-Agent", "packmon-feedsync/1.0")
+	req.Header.Set("User-Agent", feed.FeedSyncUserAgent)
 
 	resp, err := s.doBackupRequest(req)
 	if err != nil {
@@ -338,12 +456,17 @@ func (s *Syncer) downloadBackupToTemp(ctx context.Context, downloadURL string) (
 }
 
 func streamBackupPayload(r io.Reader, contentType, sourceURL string, emit func([]db.VulnCheckEntry) error) (int, error) {
+	stats, err := streamBackupPayloadWithStats(r, contentType, sourceURL, emit)
+	return stats.entriesTotal, err
+}
+
+func streamBackupPayloadWithStats(r io.Reader, contentType, sourceURL string, emit func([]db.VulnCheckEntry) error) (backupStreamStats, error) {
 	buffered := bufio.NewReader(r)
 	peek, _ := buffered.Peek(4)
 	if isZipPayloadHeader(peek, contentType, sourceURL) {
-		return streamBackupZip(buffered, emit)
+		return streamBackupZipWithStats(buffered, emit)
 	}
-	return streamBackupJSON(buffered, emit)
+	return streamBackupJSONWithStats(buffered, emit)
 }
 
 func normalizeBackupSHA256(raw string) (string, error) {
@@ -536,25 +659,79 @@ func isZipPayloadHeader(header []byte, contentType, sourceURL string) bool {
 }
 
 func streamBackupZip(r io.Reader, emit func([]db.VulnCheckEntry) error) (int, error) {
-	tmp, err := os.CreateTemp("", "packmon-vulncheck-*.zip")
-	if err != nil {
-		return 0, fmt.Errorf("create temp zip: %w", err)
+	stats, err := streamBackupZipWithStats(r, emit)
+	return stats.entriesTotal, err
+}
+
+type tempZipWriteFile interface {
+	io.Writer
+	io.Closer
+	Name() string
+}
+
+type tempZipReadFile interface {
+	io.ReaderAt
+	io.Closer
+}
+
+type tempZipFileHooks struct {
+	create   func() (tempZipWriteFile, error)
+	openRead func(string) (tempZipReadFile, error)
+	remove   func(string) error
+}
+
+func defaultTempZipFileHooks() tempZipFileHooks {
+	return tempZipFileHooks{
+		create: func() (tempZipWriteFile, error) {
+			return os.CreateTemp("", "packmon-vulncheck-*.zip")
+		},
+		openRead: func(path string) (tempZipReadFile, error) {
+			return os.Open(path) // #nosec G304 -- path was created by os.CreateTemp in this package and is removed after parsing.
+		},
+		remove: os.Remove,
 	}
-	defer func() {
-		_ = tmp.Close()
-		_ = os.Remove(tmp.Name())
-	}()
+}
+
+func streamBackupZipWithStats(r io.Reader, emit func([]db.VulnCheckEntry) error) (backupStreamStats, error) {
+	return streamBackupZipWithStatsWithTempFiles(r, emit, defaultTempZipFileHooks())
+}
+
+func streamBackupZipWithStatsWithTempFiles(r io.Reader, emit func([]db.VulnCheckEntry) error, hooks tempZipFileHooks) (backupStreamStats, error) {
+	tmp, err := hooks.create()
+	if err != nil {
+		return backupStreamStats{}, fmt.Errorf("create temp zip: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = hooks.remove(tmpName) }()
 
 	written, err := io.Copy(tmp, r)
+	closeErr := tmp.Close()
 	if err != nil {
-		return 0, fmt.Errorf("write temp zip: %w", err)
+		if closeErr != nil {
+			return backupStreamStats{}, errors.Join(
+				fmt.Errorf("write temp zip: %w", err),
+				fmt.Errorf("close temp zip: %w", closeErr),
+			)
+		}
+		return backupStreamStats{}, fmt.Errorf("write temp zip: %w", err)
 	}
-	reader, err := zip.NewReader(tmp, written)
+	if closeErr != nil {
+		return backupStreamStats{}, fmt.Errorf("close temp zip: %w", closeErr)
+	}
+
+	tmpReader, err := hooks.openRead(tmpName)
 	if err != nil {
-		return 0, fmt.Errorf("parse zip: %w", err)
+		return backupStreamStats{}, fmt.Errorf("open temp zip: %w", err)
+	}
+	defer func() { _ = tmpReader.Close() }()
+
+	reader, err := zip.NewReader(tmpReader, written)
+	if err != nil {
+		return backupStreamStats{}, fmt.Errorf("parse zip: %w", err)
 	}
 
 	var lastErr error
+	var lastStats backupStreamStats
 	for _, file := range reader.File {
 		if file.FileInfo().IsDir() || !strings.HasSuffix(strings.ToLower(file.Name), ".json") {
 			continue
@@ -564,11 +741,12 @@ func streamBackupZip(r io.Reader, emit func([]db.VulnCheckEntry) error) (int, er
 			lastErr = err
 			continue
 		}
-		total, parseErr := streamBackupJSON(newMaxBytesReader(rc, maxBodySize), emit)
+		stats, parseErr := streamBackupJSONWithStats(newMaxBytesReader(rc, maxBodySize), emit)
 		closeErr := rc.Close()
 		if parseErr == nil && closeErr == nil {
-			return total, nil
+			return stats, nil
 		}
+		lastStats = stats
 		if parseErr != nil {
 			lastErr = parseErr
 		} else {
@@ -576,78 +754,101 @@ func streamBackupZip(r io.Reader, emit func([]db.VulnCheckEntry) error) (int, er
 		}
 	}
 	if lastErr != nil {
-		return 0, fmt.Errorf("parse zip JSON: %w", lastErr)
+		return lastStats, fmt.Errorf("parse zip JSON: %w", lastErr)
 	}
-	return 0, fmt.Errorf("parse zip: no JSON backup file found")
+	return backupStreamStats{}, fmt.Errorf("parse zip: no JSON backup file found")
 }
 
 func streamBackupJSON(r io.Reader, emit func([]db.VulnCheckEntry) error) (int, error) {
+	stats, err := streamBackupJSONWithStats(r, emit)
+	return stats.entriesTotal, err
+}
+
+func streamBackupJSONWithStats(r io.Reader, emit func([]db.VulnCheckEntry) error) (backupStreamStats, error) {
 	dec := json.NewDecoder(r)
 	tok, err := dec.Token()
 	if err != nil {
-		return 0, fmt.Errorf("parse json: %w", err)
+		return backupStreamStats{}, fmt.Errorf("parse json: %w", err)
 	}
 	delim, ok := tok.(json.Delim)
 	if !ok {
-		return 0, fmt.Errorf("parse json: expected object or array")
+		return backupStreamStats{}, fmt.Errorf("parse json: expected object or array")
 	}
 	switch delim {
 	case '[':
-		total, err := streamBackupCVEArray(dec, emit)
-		if err != nil {
-			return total, err
-		}
-		if err := requireJSONEOF(dec); err != nil {
-			return total, err
-		}
-		return total, nil
+		return streamBackupJSONArrayWithStats(dec, emit)
 	case '{':
-		total := 0
-		foundData := false
-		for dec.More() {
-			keyTok, err := dec.Token()
-			if err != nil {
-				return 0, fmt.Errorf("parse json key: %w", err)
-			}
-			key, ok := keyTok.(string)
-			if !ok {
-				return 0, fmt.Errorf("parse json: expected object key")
-			}
-			if key != "data" {
-				var discard json.RawMessage
-				if err := dec.Decode(&discard); err != nil {
-					return 0, fmt.Errorf("parse json field %q: %w", key, err)
-				}
-				continue
-			}
-			dataTok, err := dec.Token()
-			if err != nil {
-				return 0, fmt.Errorf("parse json data: %w", err)
-			}
-			dataDelim, ok := dataTok.(json.Delim)
-			if !ok || dataDelim != '[' {
-				return 0, fmt.Errorf("parse json: data is not an array")
-			}
-			foundData = true
-			parsed, err := streamBackupCVEArray(dec, emit)
-			total += parsed
-			if err != nil {
-				return total, err
-			}
-		}
-		if !foundData {
-			return 0, fmt.Errorf("parse json: data array missing")
-		}
-		if _, err := dec.Token(); err != nil {
-			return total, fmt.Errorf("parse json object close: %w", err)
-		}
-		if err := requireJSONEOF(dec); err != nil {
-			return total, err
-		}
-		return total, nil
+		return streamBackupJSONObjectWithStats(dec, emit)
 	default:
-		return 0, fmt.Errorf("parse json: expected object or array")
+		return backupStreamStats{}, fmt.Errorf("parse json: expected object or array")
 	}
+}
+
+func streamBackupJSONArray(dec *json.Decoder, emit func([]db.VulnCheckEntry) error) (int, error) {
+	stats, err := streamBackupJSONArrayWithStats(dec, emit)
+	return stats.entriesTotal, err
+}
+
+func streamBackupJSONArrayWithStats(dec *json.Decoder, emit func([]db.VulnCheckEntry) error) (backupStreamStats, error) {
+	stats, err := streamBackupCVEArrayWithStats(dec, emit)
+	if err != nil {
+		return stats, err
+	}
+	if err := requireJSONEOF(dec); err != nil {
+		return stats, err
+	}
+	return stats, nil
+}
+
+func streamBackupJSONObject(dec *json.Decoder, emit func([]db.VulnCheckEntry) error) (int, error) {
+	stats, err := streamBackupJSONObjectWithStats(dec, emit)
+	return stats.entriesTotal, err
+}
+
+func streamBackupJSONObjectWithStats(dec *json.Decoder, emit func([]db.VulnCheckEntry) error) (backupStreamStats, error) {
+	var stats backupStreamStats
+	foundData := false
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return stats, fmt.Errorf("parse json key: %w", err)
+		}
+		key, ok := keyTok.(string)
+		if !ok {
+			return stats, fmt.Errorf("parse json: expected object key")
+		}
+		if key != "data" {
+			var discard json.RawMessage
+			if err := dec.Decode(&discard); err != nil {
+				return stats, fmt.Errorf("parse json field %q: %w", key, err)
+			}
+			continue
+		}
+		dataTok, err := dec.Token()
+		if err != nil {
+			return stats, fmt.Errorf("parse json data: %w", err)
+		}
+		dataDelim, ok := dataTok.(json.Delim)
+		if !ok || dataDelim != '[' {
+			return stats, fmt.Errorf("parse json: data is not an array")
+		}
+		foundData = true
+		parsed, err := streamBackupCVEArrayWithStats(dec, emit)
+		stats.add(parsed)
+		if err != nil {
+			return stats, err
+		}
+	}
+	if !foundData {
+		return stats, fmt.Errorf("parse json: data array missing")
+	}
+	if _, err := dec.Token(); err != nil {
+		return stats, fmt.Errorf("parse json object close: %w", err)
+	}
+	if err := requireJSONEOF(dec); err != nil {
+		return stats, err
+	}
+	return stats, nil
 }
 
 func requireJSONEOF(dec *json.Decoder) error {
@@ -662,35 +863,43 @@ func requireJSONEOF(dec *json.Decoder) error {
 }
 
 func streamBackupCVEArray(dec *json.Decoder, emit func([]db.VulnCheckEntry) error) (int, error) {
+	stats, err := streamBackupCVEArrayWithStats(dec, emit)
+	return stats.entriesTotal, err
+}
+
+func streamBackupCVEArrayWithStats(dec *json.Decoder, emit func([]db.VulnCheckEntry) error) (backupStreamStats, error) {
 	batch := make([]db.VulnCheckEntry, 0, batchSize)
-	total := 0
+	var stats backupStreamStats
 	for dec.More() {
-		var cve backupCVE
-		if err := dec.Decode(&cve); err != nil {
-			return total, fmt.Errorf("parse cve: %w", err)
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return stats, fmt.Errorf("parse cve: %w", err)
 		}
-		entry, ok := vulnCheckEntryFromBackupCVE(cve)
+		entry, ok, reason := vulnCheckEntryFromBackupRaw(raw)
 		if !ok {
+			if reason != "invalid_cve_id" {
+				stats.reject(reason)
+			}
 			continue
 		}
 		batch = append(batch, entry)
-		total++
+		stats.entriesTotal++
 		if len(batch) == batchSize {
 			if err := emit(batch); err != nil {
-				return total, err
+				return stats, err
 			}
 			batch = make([]db.VulnCheckEntry, 0, batchSize)
 		}
 	}
 	if _, err := dec.Token(); err != nil {
-		return total, fmt.Errorf("parse json array close: %w", err)
+		return stats, fmt.Errorf("parse json array close: %w", err)
 	}
 	if len(batch) > 0 {
 		if err := emit(batch); err != nil {
-			return total, err
+			return stats, err
 		}
 	}
-	return total, nil
+	return stats, nil
 }
 
 type maxBytesReader struct {

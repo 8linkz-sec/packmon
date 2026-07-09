@@ -176,7 +176,7 @@ func swiftPackageName(location, fallback string) string {
 	if canonical := canonicalSwiftPackageLocation(location); canonical != "" {
 		return canonical
 	}
-	return strings.TrimSpace(fallback)
+	return swiftPackageFallbackName(fallback)
 }
 
 func canonicalSwiftPackageLocation(raw string) string {
@@ -199,11 +199,26 @@ func canonicalSwiftPackageLocation(raw string) string {
 		}
 	}
 
-	if host, path, ok := strings.Cut(raw, "/"); ok && strings.Contains(host, ".") {
+	if host, path, ok := strings.Cut(raw, "/"); ok && isSwiftBareHost(host) {
 		return canonicalSwiftHostPath(host, path)
 	}
 
-	return raw
+	return ""
+}
+
+func swiftPackageFallbackName(fallback string) string {
+	name := strings.TrimSpace(fallback)
+	if name == "" || isSwiftPathLikePackageName(name) {
+		return ""
+	}
+	return name
+}
+
+func isSwiftPathLikePackageName(name string) bool {
+	return name == "." ||
+		name == ".." ||
+		strings.Contains(name, "://") ||
+		strings.ContainsAny(name, `/\:`)
 }
 
 func isSwiftHTTPURLScheme(scheme string) bool {
@@ -213,6 +228,14 @@ func isSwiftHTTPURLScheme(scheme string) bool {
 	default:
 		return false
 	}
+}
+
+func isSwiftBareHost(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "" || host == "." || host == ".." || strings.HasPrefix(host, ".") || strings.HasSuffix(host, ".") {
+		return false
+	}
+	return strings.Contains(host, ".")
 }
 
 func canonicalSwiftHostPath(host, path string) string {

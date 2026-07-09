@@ -1,13 +1,16 @@
 package admin
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 func TestAPIKeyViewAccessorsAndExpiry(t *testing.T) {
@@ -38,6 +41,87 @@ func TestAPIKeyViewAccessorsAndExpiry(t *testing.T) {
 	empty := apiKeyView{}
 	if !empty.DerefLastUsedAt().IsZero() || !empty.DerefExpiresAt().IsZero() {
 		t.Fatalf("empty accessors = %v / %v", empty.DerefLastUsedAt(), empty.DerefExpiresAt())
+	}
+}
+
+func TestAPIKeyViewStatusPresentation(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	past := now.Add(-time.Hour)
+	for _, tc := range []struct {
+		name      string
+		key       db.APIKey
+		wantLabel string
+		wantClass string
+	}{
+		{
+			name: "deleted",
+			key: db.APIKey{
+				DeletedAt: &now,
+				RevokedAt: &past,
+			},
+			wantLabel: "deleted",
+			wantClass: "pm-badge-status-disabled",
+		},
+		{
+			name: "revoked",
+			key: db.APIKey{
+				RevokedAt: &past,
+			},
+			wantLabel: "revoked",
+			wantClass: "pm-badge-status-error",
+		},
+		{
+			name: "expired",
+			key: db.APIKey{
+				ExpiresAt: &past,
+			},
+			wantLabel: "expired",
+			wantClass: "pm-badge-status-warning",
+		},
+		{
+			name:      "active",
+			key:       db.APIKey{},
+			wantLabel: "active",
+			wantClass: "pm-badge-status-healthy",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			view := apiKeyView{APIKey: tc.key}
+			if got := view.StatusLabel(); got != tc.wantLabel {
+				t.Fatalf("StatusLabel() = %q, want %q", got, tc.wantLabel)
+			}
+			if got := view.StatusClass(); got != tc.wantClass {
+				t.Fatalf("StatusClass() = %q, want %q", got, tc.wantClass)
+			}
+		})
+	}
+}
+
+func TestAdminQueueStatusClassUsesSemanticBadges(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		status string
+		want   string
+	}{
+		{db.RefreshStatusPending, "pm-badge-status-pending"},
+		{db.RefreshStatusProcessing, "pm-badge-status-running"},
+		{db.RefreshStatusDone, "pm-badge-status-healthy"},
+		{db.RefreshStatusPaused, "pm-badge-status-disabled"},
+		{db.RefreshStatusError, "pm-badge-status-error"},
+		{"not-a-status", "pm-badge-status-error"},
+	} {
+		t.Run(tc.status, func(t *testing.T) {
+			t.Parallel()
+
+			if got := adminQueueStatusClass(tc.status); got != tc.want {
+				t.Fatalf("adminQueueStatusClass(%q) = %q, want %q", tc.status, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -113,7 +197,7 @@ func TestManualAdvisoryHelpers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generateManualAdvisoryID: %v", err)
 	}
-	if !strings.HasPrefix(id, "manual:") || len(id) != len("manual:00000000-0000-0000-0000-000000000000") {
+	if !strings.HasPrefix(id, domain.ManualAdvisoryIDPrefix) || len(id) != len(domain.ManualAdvisoryIDPrefix+"00000000-0000-0000-0000-000000000000") {
 		t.Fatalf("manual advisory id = %q", id)
 	}
 
@@ -138,7 +222,7 @@ func TestSettingsFormHelpers(t *testing.T) {
 	if got, ok := parsePositiveSettingInt("42"); !ok || got != 42 {
 		t.Fatalf("parsePositiveSettingInt(42) = %d, %v", got, ok)
 	}
-	for _, raw := range []string{"0", "-1", "many", "100001"} {
+	for _, raw := range []string{"0", "-1", "many", strconv.Itoa(MaxAdminRateLimit + 1)} {
 		if _, ok := parsePositiveSettingInt(raw); ok {
 			t.Fatalf("parsePositiveSettingInt(%q) ok = true", raw)
 		}
@@ -155,5 +239,76 @@ func TestSettingsFormHelpers(t *testing.T) {
 	redirectSettings(rec, req, "Bad value", true)
 	if rec.Header().Get("Location") != "/admin/settings?err=Bad+value" {
 		t.Fatalf("error redirect location = %q", rec.Header().Get("Location"))
+	}
+}
+
+func TestBuildAdminSettingsPageDataPreservesTemplateContract(t *testing.T) {
+	store := newAdminStoreStub()
+	lastLoginAt := time.Date(2026, 6, 1, 8, 30, 0, 0, time.UTC)
+	passwordChangedAt := time.Date(2026, 6, 2, 9, 45, 0, 0, time.UTC)
+	systemUpdatedAt := time.Date(2026, 6, 3, 10, 15, 30, 123, time.UTC)
+	store.adminAuth = &db.AdminAuth{
+		PasswordHash:        "hash",
+		PasswordIsBootstrap: true,
+		LastLoginAt:         &lastLoginAt,
+		PasswordChangedAt:   &passwordChangedAt,
+	}
+	store.systemSettings = &db.SystemSettings{
+		BlockThreshold:      "LOW",
+		RateLimitPerMinute:  123,
+		RateLimitBurst:      45,
+		ScanLogRetention:    45 * 24 * time.Hour,
+		AdminAuditRetention: 14 * 24 * time.Hour,
+		UpdatedAt:           systemUpdatedAt,
+	}
+	handler, sm, _ := newAdminFlowHandler(t, store, adminFlowConfig())
+	req, sess := authenticatedAdminRequest(t, sm, http.MethodGet, "/admin/settings?msg=Saved&err=Bad")
+
+	data := handler.buildAdminSettingsPageData(context.Background(), req, sess, "csrf-test", req.URL.Query())
+
+	want := map[string]any{
+		"ActiveNav":                      "admin",
+		"CSRFToken":                      "csrf-test",
+		"ServerMode":                     "development",
+		"SyncInterval":                   "1h",
+		"FeedSyncOnStartup":              "true",
+		"AdminSessionTimeout":            "1h",
+		"MetricsAddr":                    "127.0.0.1:9090",
+		"DatabaseHost":                   "db.internal",
+		"DatabaseName":                   "packmon",
+		"DatabaseSSLMode":                "disable",
+		"RuntimeBlockThreshold":          "CRITICAL",
+		"RuntimeRateLimitPerMinute":      60,
+		"RuntimeRateLimitBurst":          60,
+		"RuntimeScanLogRetentionDays":    30,
+		"RuntimeAdminAuditRetentionDays": 30,
+		"SystemBlockThreshold":           "LOW",
+		"SystemRateLimitPerMinute":       123,
+		"SystemRateLimitBurst":           45,
+		"SystemScanLogRetentionDays":     45,
+		"SystemAdminAuditRetentionDays":  14,
+		"MaxAdminRateLimit":              MaxAdminRateLimit,
+		"MaxAdminRetentionDays":          MaxAdminRetentionDays,
+		"HasSystemSettings":              true,
+		"SystemSettingsUpdatedAt":        systemUpdatedAt,
+		"SystemSettingsRevision":         systemUpdatedAt.UTC().Format(time.RFC3339Nano),
+		"HasSystemSettingsUpdatedAt":     true,
+		"LastLoginAt":                    lastLoginAt,
+		"HasLastLoginAt":                 true,
+		"PasswordChangedAt":              passwordChangedAt,
+		"HasPasswordChangedAt":           true,
+		"AdminAuthLoadError":             "",
+		"BootstrapWarning":               true,
+		"MinPasswordLength":              adminPasswordMinLength,
+		"Message":                        "Saved",
+		"Error":                          "Bad",
+	}
+	for key, value := range want {
+		if got := data[key]; got != value {
+			t.Fatalf("settings data[%q] = %#v, want %#v", key, got, value)
+		}
+	}
+	if _, ok := data["SystemSettingsLoadError"]; !ok {
+		t.Fatal("settings data missing SystemSettingsLoadError")
 	}
 }

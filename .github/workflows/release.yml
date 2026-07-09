@@ -17,7 +17,7 @@ permissions:
 jobs:
   verify:
     name: Verify release gates
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -27,14 +27,51 @@ jobs:
         with:
           go-version: "1.26.4"
 
+      - name: Secret scan
+        shell: bash
+        run: |
+          go install github.com/gitleaks/gitleaks/v8@v8.30.1
+          gitleaks detect --source . --redact --no-banner --verbose
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Verify generated web assets
+        run: |
+          npm ci --ignore-scripts
+          npm audit --audit-level=high
+          npm run build:web
+          git diff --exit-code -- internal/web/static/tailwind.css internal/web/static/htmx.min.js
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@82606bf257cbaff209d206a39f5134f0cfbfd2ee # v9
+        env:
+          GOFLAGS: "-mod=readonly"
+        with:
+          version: v2.11
+
+      - name: Check formatting (gofumpt)
+        shell: bash
+        run: |
+          go install mvdan.cc/gofumpt@v0.9.2
+          mapfile -t go_files < <(git ls-files '*.go')
+          test -z "$(gofumpt -extra -l "${go_files[@]}")" || (gofumpt -extra -l "${go_files[@]}" && exit 1)
+
       - name: Run tests
         shell: bash
+        env:
+          GOFLAGS: "-mod=readonly"
         run: |
           mapfile -t packages < <(go list ./...)
           go test -count=1 "${packages[@]}"
 
       - name: Run go vet
         shell: bash
+        env:
+          GOFLAGS: "-mod=readonly"
         run: |
           mapfile -t packages < <(go list ./...)
           go vet "${packages[@]}"
@@ -42,21 +79,92 @@ jobs:
       - name: Run govulncheck
         shell: bash
         run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.5.0
+          export GOFLAGS=-mod=readonly
           mapfile -t packages < <(go list ./...)
-          go install golang.org/x/vuln/cmd/govulncheck@v1.4.0
           govulncheck "${packages[@]}"
 
       - name: Run gosec
         shell: bash
         run: |
-          mapfile -t package_dirs < <(go list -f '{{.Dir}}' ./...)
           go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
+          export GOFLAGS=-mod=readonly
+          mapfile -t package_dirs < <(go list -f '{{.Dir}}' ./...)
           gosec -nosec-require-rules -nosec-require-justification "${package_dirs[@]}"
+
+      - name: Scan dependency lockfiles
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln
+          vuln-type: library
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
+      - name: Run integration smoke tests
+        env:
+          GOFLAGS: "-mod=readonly"
+        run: make test-integration
+
+      - name: Run E2E smoke tests
+        env:
+          GOFLAGS: "-mod=readonly"
+        run: make test-e2e
+
+      - name: Verify release security disclosure notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f CHANGELOG.md
+          grep -F "## Unreleased" CHANGELOG.md
+          grep -F "### Security updates" CHANGELOG.md
+          grep -F "### Operator action" CHANGELOG.md
+
+      - name: Build deployment images
+        shell: bash
+        run: |
+          BUILD_DATE="$(git show -s --format=%cI "${GITHUB_SHA}")"
+          docker build --target server \
+            --build-arg VERSION=release-verify \
+            --build-arg COMMIT=${GITHUB_SHA::8} \
+            --build-arg DATE="${BUILD_DATE}" \
+            -t packmon-server-ci:${{ github.sha }} .
+          docker build --target cli \
+            --build-arg VERSION=release-verify \
+            --build-arg COMMIT=${GITHUB_SHA::8} \
+            --build-arg DATE="${BUILD_DATE}" \
+            -t packmon-cli-ci:${{ github.sha }} .
+
+      - name: Scan server image OS packages
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: packmon-server-ci:${{ github.sha }}
+          scanners: vuln
+          vuln-type: os
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
+      - name: Scan CLI image OS packages
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: packmon-cli-ci:${{ github.sha }}
+          scanners: vuln
+          vuln-type: os
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
 
   release:
     name: Release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: verify
+    environment: release
     permissions:
       contents: write
       attestations: write
@@ -98,11 +206,19 @@ jobs:
         with:
           go-version: "1.26.4"
 
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
       - name: Build all targets
         run: |
           VERSION="${RELEASE_VERSION}"
-          COMMIT=${GITHUB_SHA::8}
-          DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          COMMIT="${GITHUB_SHA::8}"
+          SOURCE_DATE_EPOCH="$(git show -s --format=%ct "${GITHUB_SHA}")"
+          DATE="$(git show -s --format=%cI "${GITHUB_SHA}")"
+          export SOURCE_DATE_EPOCH
           LDFLAGS="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${DATE}"
 
           declare -a TARGETS=(
@@ -121,25 +237,37 @@ jobs:
             SUFFIX=""
             if [ "$os" = "windows" ]; then SUFFIX=".exe"; fi
 
-            CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -ldflags="$LDFLAGS" \
+            GOFLAGS=-mod=readonly CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath -ldflags="$LDFLAGS" \
               -o "dist/packmon-${os}-${arch}${SUFFIX}" ./cmd/packmon
-            CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -ldflags="$LDFLAGS" \
+            GOFLAGS=-mod=readonly CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath -ldflags="$LDFLAGS" \
               -o "dist/packmon-server-${os}-${arch}${SUFFIX}" ./cmd/packmon-server
           done
 
           cp LICENSE dist/LICENSE
-          cp LICENSES/LicenseRef-Private.txt dist/LICENSES/LicenseRef-Private.txt
           cp THIRD_PARTY_NOTICES.md dist/THIRD_PARTY_NOTICES.md
+          cp SECURITY.md dist/SECURITY.md
 
-          go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.9.1
+          go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.10.0
           cyclonedx-gomod mod -licenses -json -output dist/packmon.cdx.json
+          npm ci --ignore-scripts
+          npm install --global --ignore-scripts @cyclonedx/cyclonedx-npm@5.0.0
+          cyclonedx-npm --output-format JSON --output-file dist/packmon-web-assets.cdx.json --package-lock-only -- package.json
 
           go install github.com/google/go-licenses@v1.6.0
-          go-licenses save ./cmd/packmon --save_path dist/go-license-notices
-          go-licenses save ./cmd/packmon-server --save_path dist/go-license-notices
-          tar -C dist -czf dist/go-license-notices.tar.gz go-license-notices
+          go-licenses save ./cmd/packmon ./cmd/packmon-server --save_path dist/go-license-notices --force \
+            --ignore github.com/8linkz-sec/packmon \
+            --ignore modernc.org/mathutil
+          tar --sort=name \
+            --owner=0 \
+            --group=0 \
+            --numeric-owner \
+            --mtime="@${SOURCE_DATE_EPOCH}" \
+            -C dist -cf dist/go-license-notices.tar go-license-notices
+          gzip -n -9 dist/go-license-notices.tar
           rm -rf dist/go-license-notices
 
+          # Extract release notes from the reviewed changelog section before checksums.
+          awk '/^## Unreleased/{capture=1} capture && /^## / && !/^## Unreleased/{exit} capture{print}' CHANGELOG.md > dist/release-notes.md
           cd dist && find . -type f ! -name checksums.txt -print0 | sort -z | xargs -0 sha256sum > checksums.txt
 
       - name: Attest release artifacts
@@ -149,10 +277,12 @@ jobs:
             dist/packmon-*
             dist/checksums.txt
             dist/packmon.cdx.json
+            dist/packmon-web-assets.cdx.json
             dist/go-license-notices.tar.gz
             dist/THIRD_PARTY_NOTICES.md
+            dist/SECURITY.md
+            dist/release-notes.md
             dist/LICENSE
-            dist/LICENSES/LicenseRef-Private.txt
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
@@ -160,5 +290,5 @@ jobs:
           tag_name: ${{ env.RELEASE_VERSION }}
           name: ${{ env.RELEASE_VERSION }}
           target_commitish: ${{ github.sha }}
-          generate_release_notes: true
+          body_path: dist/release-notes.md
           files: dist/**

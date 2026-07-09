@@ -1,7 +1,7 @@
 # Reusable workflow: Dependency Security Scan with Packmon.
 #
 # Called from consumer repositories via:
-#   uses: 8linkz-sec/packmon/.github/workflows/packmon-scan.yml@v0.5.0
+#   uses: 8linkz-sec/packmon/.github/workflows/packmon-scan.yml@<release-tag>
 #
 # All input and secret names use underscores (not hyphens) per DE-20.
 # GitHub Actions expressions interpret hyphens as subtraction.
@@ -11,7 +11,10 @@ on:
   workflow_call:
     inputs:
       fail_on:
-        description: "Minimum vulnerability severity that blocks the pipeline (CRITICAL|HIGH|MEDIUM|LOW|NONE). NONE disables vulnerability blocking only; malicious and active supply-chain risk findings still block."
+        description: >-
+          Minimum vulnerability severity that blocks the pipeline
+          (CRITICAL|HIGH|MEDIUM|LOW|NONE).
+          NONE disables vulnerability blocking only; malicious and active supply-chain risk findings still block.
         required: false
         default: "CRITICAL"
         type: string
@@ -21,9 +24,13 @@ on:
         default: "."
         type: string
       packmon_version:
-        description: "Immutable Packmon release tag to install (for example v0.5.0)"
+        description: "Existing immutable Packmon release tag to install"
+        required: true
+        type: string
+      binary_mirror:
+        description: "Optional base URL for an internal mirror of Packmon release assets"
         required: false
-        default: "v0.5.0"
+        default: ""
         type: string
       upload_sarif:
         description: "Upload SARIF to GitHub Security tab"
@@ -31,12 +38,16 @@ on:
         default: true
         type: boolean
       post_pr_comment:
-        description: "Post detailed findings as a PR comment (opt-in because comments can disclose dependency-security data)"
+        description: >-
+          Post detailed findings as a PR comment (opt-in because comments can
+          disclose dependency-security data)
         required: false
         default: false
         type: boolean
       artifact_retention_days:
-        description: "Retention period for JSON, SARIF, and JUnit scan evidence artifacts. Must fit the repository's GitHub Actions retention policy."
+        description: >-
+          Retention period for JSON, SARIF, and JUnit scan evidence artifacts.
+          Must fit the repository's GitHub Actions retention policy.
         required: false
         default: 90
         type: number
@@ -54,7 +65,7 @@ permissions:
 jobs:
   scan:
     name: Packmon Scan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     outputs:
@@ -71,22 +82,30 @@ jobs:
       - name: Install packmon
         env:
           PACKMON_VERSION: ${{ inputs.packmon_version }}
+          PACKMON_BINARY_MIRROR: ${{ inputs.binary_mirror }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           PACKMON_VERSION_REGEX='^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z][0-9A-Za-z.-]*)?$'
+          if [ -z "${PACKMON_VERSION}" ]; then
+            echo "PACKMON_VERSION must name an existing immutable release tag" >&2
+            exit 1
+          fi
           if [[ ! "${PACKMON_VERSION}" =~ ${PACKMON_VERSION_REGEX} ]]; then
             echo "PACKMON_VERSION must be an immutable release tag like v1.2.3" >&2
             exit 1
           fi
           ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
-          BINARY_BASE_URL="https://github.com/8linkz-sec/packmon/releases/download/${PACKMON_VERSION}"
+          DEFAULT_BINARY_BASE_URL="https://github.com/8linkz-sec/packmon/releases/download/${PACKMON_VERSION}"
+          BINARY_BASE_URL="${PACKMON_BINARY_MIRROR:-${DEFAULT_BINARY_BASE_URL}}"
+          BINARY_BASE_URL="${BINARY_BASE_URL%/}"
           BINARY_NAME="packmon-linux-${ARCH}"
           BINARY_URL="${BINARY_BASE_URL}/${BINARY_NAME}"
           CHECKSUM_URL="${BINARY_BASE_URL}/checksums.txt"
+          CURL_FLAGS="--fail --show-error --location --retry 3 --retry-delay 2 --retry-connrefused --connect-timeout 10 --max-time 120"
           echo "Downloading packmon from ${BINARY_URL}"
-          curl -sfL "${BINARY_URL}" -o "/tmp/${BINARY_NAME}"
-          curl -sfL "${CHECKSUM_URL}" -o /tmp/checksums.txt
+          curl ${CURL_FLAGS} "${BINARY_URL}" -o "/tmp/${BINARY_NAME}"
+          curl ${CURL_FLAGS} "${CHECKSUM_URL}" -o /tmp/checksums.txt
           grep -E "[[:space:]]${BINARY_NAME}$" /tmp/checksums.txt > "/tmp/${BINARY_NAME}.sha256"
           (cd /tmp && sha256sum -c "${BINARY_NAME}.sha256")
           gh attestation verify "/tmp/${BINARY_NAME}" \
@@ -138,8 +157,15 @@ jobs:
           FINDINGS=$(jq '.findings_count // 0' /tmp/results.json 2>/dev/null || echo 0)
           echo "findings_count=${FINDINGS}" >> "$GITHUB_OUTPUT"
           FEED_STATUS=$(jq -r '.feed_status // "unknown"' /tmp/results.json 2>/dev/null || echo unknown)
-          DB_STALE=$(jq -r 'if .db_stale == true then "true" else "false" end' /tmp/results.json 2>/dev/null || echo false)
-          DB_AGE_DAYS=$(jq -r 'if .db_age_days == null then "" else (.db_age_days | tostring) end' /tmp/results.json 2>/dev/null || echo "")
+          DB_STALE=$(
+            jq -r 'if .db_stale == true then "true" else "false" end' /tmp/results.json 2>/dev/null ||
+              echo false
+          )
+          DB_AGE_DAYS=$(
+            jq -r 'if .db_age_days == null then "" else (.db_age_days | tostring) end' \
+              /tmp/results.json 2>/dev/null ||
+              echo ""
+          )
           echo "feed_status=${FEED_STATUS}" >> "$GITHUB_OUTPUT"
           echo "db_stale=${DB_STALE}" >> "$GITHUB_OUTPUT"
           echo "db_age_days=${DB_AGE_DAYS}" >> "$GITHUB_OUTPUT"
@@ -150,7 +176,10 @@ jobs:
             echo "Packmon local DB age days: ${DB_AGE_DAYS}"
           fi
           if [ "${FEED_STATUS}" != "healthy" ] || [ "${DB_STALE}" = "true" ]; then
-            echo "::warning::Packmon scan coverage degraded (feed_status=${FEED_STATUS}, db_stale=${DB_STALE}, db_age_days=${DB_AGE_DAYS:-unknown})"
+            printf '%s%s%s\n' \
+              "::warning::Packmon scan coverage degraded (feed_status=${FEED_STATUS}, " \
+              "db_stale=${DB_STALE}, " \
+              "db_age_days=${DB_AGE_DAYS:-unknown})"
             {
               echo "### Packmon Coverage Warning"
               echo ""
@@ -182,7 +211,7 @@ jobs:
 
   attest-results:
     name: Attest scan results
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: scan
     if: >-
       always()
@@ -209,7 +238,7 @@ jobs:
 
   upload-sarif:
     name: Upload SARIF
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: scan
     if: >-
       always()
@@ -234,7 +263,7 @@ jobs:
 
   pr-comment:
     name: PR comment
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: scan
     if: >-
       always()
@@ -262,9 +291,13 @@ jobs:
             const fs = require('fs');
             const results = JSON.parse(fs.readFileSync('/tmp/packmon-results/results.json', 'utf8'));
             const findings = Array.isArray(results.findings) ? results.findings : [];
+            const FINDINGS_PER_CATEGORY_LIMIT = 10;
             const feedStatusRaw = results.feed_status || 'unknown';
             const dbStale = results.db_stale === true;
-            const dbAgeDays = results.db_age_days === undefined || results.db_age_days === null ? '' : String(results.db_age_days);
+            const dbAgeDays =
+              results.db_age_days === undefined || results.db_age_days === null
+                ? ''
+                : String(results.db_age_days);
 
             const mdCell = (value, fallback = 'n/a') => {
               const raw = value === undefined || value === null || value === '' ? fallback : String(value);
@@ -305,6 +338,53 @@ jobs:
               return url ? `[${id}](${url})` : id;
             };
             const row = (cells) => `| ${cells.join(' | ')} |\n`;
+            const severityRank = new Map([
+              ['CRITICAL', 4],
+              ['HIGH', 3],
+              ['MEDIUM', 2],
+              ['LOW', 1],
+              ['NONE', 0],
+            ]);
+            const severityScore = (finding) => severityRank.get(String(finding.severity || '').toUpperCase()) ?? -1;
+            const sortFindings = (entries) =>
+              entries
+                .map((finding, index) => ({ finding, index }))
+                .sort((left, right) => {
+                  const severityDelta = severityScore(right.finding) - severityScore(left.finding);
+                  if (severityDelta !== 0) {
+                    return severityDelta;
+                  }
+                  const packageDelta = packageCell(left.finding).localeCompare(packageCell(right.finding));
+                  if (packageDelta !== 0) {
+                    return packageDelta;
+                  }
+                  const advisoryDelta = mdCell(
+                    left.finding.advisory_id || left.finding.title || left.finding.risk_type || left.index
+                  ).localeCompare(mdCell(
+                    right.finding.advisory_id || right.finding.title || right.finding.risk_type || right.index
+                  ));
+                  return advisoryDelta !== 0 ? advisoryDelta : left.index - right.index;
+                })
+                .map(entry => entry.finding);
+            const renderFindingSection = (title, entries, category, headers, renderCells) => {
+              if (entries.length === 0) {
+                return '';
+              }
+              entries = sortFindings(entries);
+              const visible = entries.slice(0, FINDINGS_PER_CATEGORY_LIMIT);
+              const omitted = entries.length - visible.length;
+              let section = `### ${title}\n\n`;
+              section += row(headers);
+              section += row(headers.map(() => '---'));
+              for (const f of visible) {
+                section += row(renderCells(f));
+              }
+              if (omitted > 0) {
+                section += `\n_${omitted} more ${category} finding(s) omitted; see packmon-results artifact._\n`;
+              }
+              section += `\n`;
+              return section;
+            };
 
             const vulns = findings.filter(f => f.type === 'vulnerability');
             const malicious = findings.filter(f => f.type === 'malicious');
@@ -312,7 +392,8 @@ jobs:
             const lifecycle = findings.filter(f => f.type === 'lifecycle');
 
             let body = `## Packmon Security Scan\n\n`;
-            body += `**${mdCell(results.findings_count ?? findings.length)} finding(s)** in ${mdCell(results.packages_scanned ?? 0)} packages`;
+            body += `**${mdCell(results.findings_count ?? findings.length)} finding(s)**`;
+            body += ` in ${mdCell(results.packages_scanned ?? 0)} packages`;
             body += ` | mode: ${mdCell(results.mode || 'unknown')}`;
             body += ` | threshold: ${mdCell(process.env.PACKMON_FAIL_ON || 'CRITICAL')}`;
             body += ` | feed: ${mdCell(feedStatusRaw)}`;
@@ -325,78 +406,71 @@ jobs:
             body += `\n\n`;
 
             if (String(feedStatusRaw) !== 'healthy' || results.db_stale === true) {
-              body += `> **Coverage warning:** Packmon scan coverage degraded. feed_status=${mdCell(feedStatusRaw)}, db_stale=${mdCell(dbStale)}, db_age_days=${mdCell(dbAgeDays || 'unknown')}\n\n`;
+              body += `> **Coverage warning:** Packmon scan coverage degraded.`;
+              body += ` feed_status=${mdCell(feedStatusRaw)}`;
+              body += `, db_stale=${mdCell(dbStale)}`;
+              body += `, db_age_days=${mdCell(dbAgeDays || 'unknown')}\n\n`;
             }
 
-            // Vulnerability table -- only if there are vulnerability findings.
-            if (vulns.length > 0) {
-              body += `### Vulnerability Findings\n\n`;
-              body += `| Severity | Package | Ecosystem | Advisory | Fix Version | Source |\n`;
-              body += `|---|---|---|---|---|---|\n`;
-              for (const f of vulns) {
-                body += row([
-                  mdCell(f.severity),
-                  packageCell(f),
-                  mdCell(f.ecosystem),
-                  advisoryCell(f),
-                  mdCell(f.fixed_version),
-                  mdCell(f.source),
-                ]);
-              }
-              body += `\n`;
-            }
+            body += renderFindingSection(
+              'Vulnerability Findings',
+              vulns,
+              'vulnerability',
+              ['Severity', 'Package', 'Ecosystem', 'Advisory', 'Fix Version', 'Source'],
+              f => [
+                mdCell(f.severity),
+                packageCell(f),
+                mdCell(f.ecosystem),
+                advisoryCell(f),
+                mdCell(f.fixed_version),
+                mdCell(f.source),
+              ]
+            );
 
-            // Malicious table -- only if there are malicious findings.
-            if (malicious.length > 0) {
-              body += `### Malicious Findings\n\n`;
-              body += `| Severity | Package | Ecosystem | Threat | Action | Source |\n`;
-              body += `|---|---|---|---|---|---|\n`;
-              for (const f of malicious) {
-                body += row([
-                  mdCell(f.severity),
-                  packageCell(f),
-                  mdCell(f.ecosystem),
-                  mdCell(f.risk_type || f.title || 'unknown'),
-                  'Remove package',
-                  mdCell(f.source),
-                ]);
-              }
-              body += `\n`;
-            }
+            body += renderFindingSection(
+              'Malicious Findings',
+              malicious,
+              'malicious',
+              ['Severity', 'Package', 'Ecosystem', 'Threat', 'Action', 'Source'],
+              f => [
+                mdCell(f.severity),
+                packageCell(f),
+                mdCell(f.ecosystem),
+                mdCell(f.risk_type || f.title || 'unknown'),
+                'Remove package',
+                mdCell(f.source),
+              ]
+            );
 
-            if (supplyChain.length > 0) {
-              body += `### Supply Chain Risk Findings\n\n`;
-              body += `| Severity | Package | Ecosystem | Risk | Action | Source |\n`;
-              body += `|---|---|---|---|---|---|\n`;
-              for (const f of supplyChain) {
-                body += row([
-                  mdCell(f.severity),
-                  packageCell(f),
-                  mdCell(f.ecosystem),
-                  mdCell(f.risk_type || f.title || f.advisory_id || 'unknown'),
-                  'Review package',
-                  mdCell(f.source),
-                ]);
-              }
-              body += `\n`;
-            }
+            body += renderFindingSection(
+              'Supply Chain Risk Findings',
+              supplyChain,
+              'supply-chain risk',
+              ['Severity', 'Package', 'Ecosystem', 'Risk', 'Action', 'Source'],
+              f => [
+                mdCell(f.severity),
+                packageCell(f),
+                mdCell(f.ecosystem),
+                mdCell(f.risk_type || f.title || f.advisory_id || 'unknown'),
+                'Review package',
+                mdCell(f.source),
+              ]
+            );
 
-            if (lifecycle.length > 0) {
-              body += `### Lifecycle Findings\n\n`;
-              body += `| Severity | Package | Ecosystem | Status | Fixed Version | Source |\n`;
-              body += `|---|---|---|---|---|---|\n`;
-              for (const f of lifecycle) {
-                body += row([
-                  mdCell(f.severity),
-                  packageCell(f),
-                  mdCell(f.ecosystem),
-                  mdCell(f.title || f.advisory_id || 'unsupported'),
-                  mdCell(f.fixed_version),
-                  mdCell(f.source),
-                ]);
-              }
-              body += `\n`;
-            }
+            body += renderFindingSection(
+              'Lifecycle Findings',
+              lifecycle,
+              'lifecycle',
+              ['Severity', 'Package', 'Ecosystem', 'Status', 'Fixed Version', 'Source'],
+              f => [
+                mdCell(f.severity),
+                packageCell(f),
+                mdCell(f.ecosystem),
+                mdCell(f.title || f.advisory_id || 'unsupported'),
+                mdCell(f.fixed_version),
+                mdCell(f.source),
+              ]
+            );
 
             // Update existing comment or create a new one.
             const comments = await github.rest.issues.listComments({

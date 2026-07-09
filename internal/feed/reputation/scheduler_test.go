@@ -1,6 +1,7 @@
 package reputation
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log/slog"
@@ -17,19 +18,40 @@ type schedulerStore struct {
 	upserts       []db.PackageReputation
 	jobs          []db.RefreshJob
 	markCalled    chan struct{}
+	markCalls     int
+	enqueueCalls  int
 	markQueued    bool
 	markQueuedSet bool
 	markErr       error
+	markErrs      []error
+	markPanic     any
 	upsertErr     error
 	enqueueErr    error
+	enqueueErrs   []error
+}
+
+type positionlessSchedulerStore struct {
+	schedulerStore
+	noPositionCalls int
 }
 
 func (s *schedulerStore) MarkPackageReputationDue(_ context.Context, rep *db.PackageReputation) (bool, error) {
+	s.markCalls++
 	if s.markCalled != nil {
 		select {
 		case s.markCalled <- struct{}{}:
 		default:
 		}
+	}
+	if len(s.markErrs) > 0 {
+		err := s.markErrs[0]
+		s.markErrs = s.markErrs[1:]
+		if err != nil {
+			return false, err
+		}
+	}
+	if s.markPanic != nil {
+		panic(s.markPanic)
 	}
 	if s.markErr != nil {
 		return false, s.markErr
@@ -50,11 +72,25 @@ func (s *schedulerStore) UpsertPackageReputation(_ context.Context, rep *db.Pack
 }
 
 func (s *schedulerStore) EnqueueRefresh(_ context.Context, job *db.RefreshJob) (bool, int, error) {
+	s.enqueueCalls++
+	if len(s.enqueueErrs) > 0 {
+		err := s.enqueueErrs[0]
+		s.enqueueErrs = s.enqueueErrs[1:]
+		if err != nil {
+			return false, 0, err
+		}
+	}
 	if s.enqueueErr != nil {
 		return false, 0, s.enqueueErr
 	}
 	s.jobs = append(s.jobs, *job)
 	return true, len(s.jobs), nil
+}
+
+func (s *positionlessSchedulerStore) EnqueueRefreshNoPosition(_ context.Context, job *db.RefreshJob) (bool, error) {
+	s.noPositionCalls++
+	s.jobs = append(s.jobs, *job)
+	return true, nil
 }
 
 func TestSchedulerDeduplicatesAndCapsReversingLabsWork(t *testing.T) {
@@ -81,6 +117,60 @@ func TestSchedulerDeduplicatesAndCapsReversingLabsWork(t *testing.T) {
 	}
 	if store.jobs[0].Name != "left-pad" || store.jobs[1].Name != "lodash" {
 		t.Fatalf("jobs = %+v, want deterministic first two unique packages", store.jobs)
+	}
+}
+
+func TestSchedulerUsesPositionlessEnqueueWhenStoreSupportsIt(t *testing.T) {
+	t.Parallel()
+
+	store := &positionlessSchedulerStore{}
+	scheduler := NewScheduler(store, slog.Default(), Config{
+		ReversingLabsActive:              true,
+		ReversingLabsMaxSchedulePerCheck: 10,
+	})
+
+	scheduler.ScheduleReversingLabs(context.Background(), []domain.Package{
+		{Name: "left-pad", Version: "1.3.0", Ecosystem: domain.EcosystemNPM},
+	}, nil)
+
+	if store.noPositionCalls != 1 {
+		t.Fatalf("positionless enqueue calls = %d, want 1", store.noPositionCalls)
+	}
+	if store.enqueueCalls != 0 {
+		t.Fatalf("position-counting enqueue calls = %d, want 0", store.enqueueCalls)
+	}
+	if got := len(store.jobs); got != 1 {
+		t.Fatalf("jobs = %d, want one queued refresh", got)
+	}
+}
+
+func TestSchedulerCapsUnsupportedReversingLabsWrites(t *testing.T) {
+	t.Parallel()
+
+	store := &schedulerStore{}
+	scheduler := NewScheduler(store, slog.Default(), Config{
+		ReversingLabsActive:              true,
+		ReversingLabsMaxSchedulePerCheck: 2,
+	})
+
+	scheduler.ScheduleReversingLabs(context.Background(), []domain.Package{
+		{Name: "github.com/acme/one", Version: "v1.0.0", Ecosystem: domain.EcosystemGo},
+		{Name: "github.com/acme/two", Version: "v1.0.0", Ecosystem: domain.EcosystemGo},
+		{Name: "phoenix", Version: "1.7.0", Ecosystem: domain.EcosystemHex},
+		{Name: "ecto", Version: "3.11.0", Ecosystem: domain.EcosystemHex},
+		{Name: "github.com/acme/five", Version: "v1.0.0", Ecosystem: domain.EcosystemGo},
+	}, nil)
+
+	if got := len(store.upserts); got != 2 {
+		t.Fatalf("unsupported upserts = %d, want budget-capped 2: %+v", got, store.upserts)
+	}
+	if len(store.marked) != 0 || len(store.jobs) != 0 {
+		t.Fatalf("unsupported packages scheduled worker work: marked=%+v jobs=%+v", store.marked, store.jobs)
+	}
+	for _, rep := range store.upserts {
+		if rep.Status != "unsupported" {
+			t.Fatalf("unsupported upsert status = %q, want unsupported", rep.Status)
+		}
 	}
 }
 
@@ -230,10 +320,10 @@ func TestSchedulerAsyncRunsWhenActive(t *testing.T) {
 	}
 }
 
-func TestSchedulerAsyncSkipsWhenSaturated(t *testing.T) {
+func TestSchedulerAsyncSchedulesSynchronouslyWhenSaturated(t *testing.T) {
 	t.Parallel()
 
-	store := &schedulerStore{markCalled: make(chan struct{}, 1)}
+	store := &schedulerStore{}
 	scheduler := NewScheduler(store, slog.Default(), Config{
 		ReversingLabsActive:              true,
 		ReversingLabsMaxSchedulePerCheck: 10,
@@ -246,10 +336,88 @@ func TestSchedulerAsyncSkipsWhenSaturated(t *testing.T) {
 		{Name: "left-pad", Version: "1.3.0", Ecosystem: domain.EcosystemNPM},
 	}, nil)
 
+	if got := len(store.marked); got != 1 {
+		t.Fatalf("marked reputations = %d, want saturated async scheduler to durably mark work before returning", got)
+	}
+	if got := len(store.jobs); got != 1 {
+		t.Fatalf("jobs = %d, want saturated async scheduler to enqueue work before returning", got)
+	}
+}
+
+func TestSchedulerAsyncRecoversPanicsAndReleasesSlot(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	panicValue := "mark panic " + strings.Repeat("x", 512) + " tail-marker"
+	store := &schedulerStore{
+		markCalled: make(chan struct{}, 1),
+		markPanic:  panicValue,
+	}
+	scheduler := NewScheduler(store, slog.New(slog.NewJSONHandler(&logs, nil)), Config{
+		ReversingLabsActive:              true,
+		ReversingLabsMaxSchedulePerCheck: 10,
+	})
+
+	scheduler.ScheduleReversingLabsAsync(context.Background(), []domain.Package{
+		{Name: "left-pad", Version: "1.3.0", Ecosystem: domain.EcosystemNPM},
+	}, nil)
+
 	select {
 	case <-store.markCalled:
-		t.Fatal("saturated async scheduler started work")
-	case <-time.After(50 * time.Millisecond):
+	case <-time.After(time.Second):
+		t.Fatal("async scheduler did not start work")
+	}
+
+	deadline := time.After(time.Second)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for len(scheduler.slots) != 0 {
+		select {
+		case <-deadline:
+			t.Fatalf("scheduler slot count = %d, want panic path to release slot", len(scheduler.slots))
+		case <-ticker.C:
+		}
+	}
+
+	logText := logs.String()
+	if !strings.Contains(logText, "reversinglabs scheduler panic recovered") {
+		t.Fatalf("logs = %q, want bounded panic diagnostic", logText)
+	}
+	if !strings.Contains(logText, `"panic":"mark panic`) {
+		t.Fatalf("logs = %q, want panic value recorded", logText)
+	}
+	if strings.Contains(logText, "tail-marker") {
+		t.Fatalf("logs = %q, want panic value bounded", logText)
+	}
+}
+
+func TestSchedulerRetriesTransientStoreBackpressure(t *testing.T) {
+	t.Parallel()
+
+	store := &schedulerStore{
+		markErrs:    []error{errors.New("mark backpressure")},
+		enqueueErrs: []error{errors.New("enqueue backpressure")},
+	}
+	scheduler := NewScheduler(store, slog.Default(), Config{
+		ReversingLabsActive:              true,
+		ReversingLabsMaxSchedulePerCheck: 10,
+	})
+
+	scheduler.ScheduleReversingLabs(context.Background(), []domain.Package{
+		{Name: "left-pad", Version: "1.3.0", Ecosystem: domain.EcosystemNPM},
+	}, nil)
+
+	if store.markCalls != 2 {
+		t.Fatalf("mark attempts = %d, want retry after transient backpressure", store.markCalls)
+	}
+	if got := len(store.marked); got != 1 {
+		t.Fatalf("marked reputations = %d, want transient mark retry to preserve work", got)
+	}
+	if store.enqueueCalls != 2 {
+		t.Fatalf("enqueue attempts = %d, want retry after transient backpressure", store.enqueueCalls)
+	}
+	if got := len(store.jobs); got != 1 {
+		t.Fatalf("jobs = %d, want transient enqueue retry to preserve worker job", got)
 	}
 }
 

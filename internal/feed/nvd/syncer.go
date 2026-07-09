@@ -27,6 +27,7 @@ import (
 
 	"github.com/8linkz-sec/packmon/internal/db"
 	"github.com/8linkz-sec/packmon/internal/feed"
+	"github.com/8linkz-sec/packmon/internal/httpclient"
 )
 
 const (
@@ -57,6 +58,18 @@ const (
 	// maxRateLimitRetries limits how often one CVE lookup is retried after
 	// a typed rate-limit response from NVD.
 	maxRateLimitRetries = 2
+
+	// maxRetryAfterDelay bounds upstream Retry-After values so one malformed
+	// or hostile response cannot stall the whole feed sync for hours.
+	maxRetryAfterDelay = 5 * time.Minute
+
+	// unknownCVEIDPageSize bounds database discovery memory independently of
+	// the NVD request rate-limit batch size.
+	unknownCVEIDPageSize = 500
+
+	// maxOperationErrorSamples caps retained per-CVE errors while preserving
+	// the total failure count returned to operators.
+	maxOperationErrorSamples = 5
 )
 
 // nvdResponse is the top-level NVD API v2.0 response for a single CVE lookup.
@@ -74,15 +87,15 @@ type nvdCVE struct {
 }
 
 type nvdMetrics struct {
-	CvssMetricV31 []nvdCvssMetric `json:"cvssMetricV31"`
-	CvssMetricV30 []nvdCvssMetric `json:"cvssMetricV30"`
+	CVSSMetricV31 []nvdCVSSMetric `json:"cvssMetricV31"`
+	CVSSMetricV30 []nvdCVSSMetric `json:"cvssMetricV30"`
 }
 
-type nvdCvssMetric struct {
-	CvssData nvdCvssData `json:"cvssData"`
+type nvdCVSSMetric struct {
+	CVSSData nvdCVSSData `json:"cvssData"`
 }
 
-type nvdCvssData struct {
+type nvdCVSSData struct {
 	BaseScore    float64 `json:"baseScore"`
 	BaseSeverity string  `json:"baseSeverity"`
 	VectorString string  `json:"vectorString"`
@@ -97,13 +110,18 @@ func (e *rateLimitError) Error() string {
 	return fmt.Sprintf("rate limited (HTTP %d), retry after %s", e.status, e.retryAfter)
 }
 
+type nvdNegativeLookupRecorder interface {
+	RecordNVDCVSSNegativeLookup(context.Context, string) error
+}
+
 // Syncer fetches CVSS scores from the NVD API and updates UNKNOWN-severity
 // vulnerabilities. It implements feed.FeedSyncer.
 type Syncer struct {
-	logger     *slog.Logger
-	httpClient *http.Client
-	apiURL     string
-	apiKey     string
+	logger            *slog.Logger
+	httpClient        *http.Client
+	apiURL            string
+	apiKey            string
+	discoveryPageSize int
 }
 
 // Option configures a Syncer.
@@ -124,6 +142,12 @@ func WithAPIKey(key string) Option {
 	return func(s *Syncer) { s.apiKey = key }
 }
 
+// WithDiscoveryPageSize overrides the bounded database discovery page size.
+// It is primarily useful for tests that need to exercise multiple pages.
+func WithDiscoveryPageSize(size int) Option {
+	return func(s *Syncer) { s.discoveryPageSize = size }
+}
+
 // NewSyncer creates an NVD enrichment syncer.
 func NewSyncer(logger *slog.Logger, opts ...Option) *Syncer {
 	if logger == nil {
@@ -134,11 +158,13 @@ func NewSyncer(logger *slog.Logger, opts ...Option) *Syncer {
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-		apiURL: DefaultAPIURL,
+		apiURL:            DefaultAPIURL,
+		discoveryPageSize: unknownCVEIDPageSize,
 	}
 	for _, opt := range opts {
 		opt(s)
 	}
+	s.httpClient = httpclient.CloneWithSafeRedirectPolicy(s.httpClient)
 	return s
 }
 
@@ -151,149 +177,250 @@ func (s *Syncer) Name() string { return feedName }
 func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, error) {
 	s.logger.Info("starting NVD enrichment sync")
 
-	aliases, err := store.FindUnknownSeverityCVEAliases(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("nvd: find unknown severity CVE aliases: %w", err)
-	}
-
-	if len(aliases) == 0 {
-		s.logger.Info("NVD enrichment: no UNKNOWN-severity CVE aliases found, nothing to do")
-		return &feed.SyncResult{EntriesSynced: 0, EntriesTotal: 0}, nil
-	}
-
-	// Deduplicate CVE IDs -- multiple vulnerabilities can share the same
-	// CVE alias, and we only need to fetch each CVE once.
-	seen := make(map[string]struct{}, len(aliases))
-	var uniqueCVEs []string
-	for _, a := range aliases {
-		if _, ok := seen[a.CVEID]; ok {
-			continue
-		}
-		seen[a.CVEID] = struct{}{}
-		uniqueCVEs = append(uniqueCVEs, a.CVEID)
-	}
-
-	s.logger.Info("NVD enrichment: processing CVEs",
-		slog.Int("total_aliases", len(aliases)),
-		slog.Int("unique_cves", len(uniqueCVEs)),
-	)
-
 	batchSize := batchSizeNoKey
 	if s.apiKey != "" {
 		batchSize = batchSizeWithKey
 	}
+	pageSize := s.discoveryPageSize
+	if pageSize <= 0 {
+		pageSize = unknownCVEIDPageSize
+	}
 
-	updated := 0
-	processed := 0
-	skipped := 0
-	var operationErrors []error
+	progress := nvdSyncProgress{}
+	operationErrors := nvdOperationErrorCollector{}
+	rateLimiter := nvdRequestRateLimiter{batchSize: batchSize}
+	afterCVE := ""
 
-	for i := 0; i < len(uniqueCVEs); i += batchSize {
-		// Check context cancellation between batches.
-		if err := ctx.Err(); err != nil {
-			s.logger.Info("NVD enrichment: context cancelled, stopping",
-				slog.Int("processed", processed),
-				slog.Int("updated", updated),
-			)
-			return nil, fmt.Errorf("nvd: context cancelled: %w", err)
+	for {
+		cveIDs, err := store.FindUnknownSeverityCVEIDs(ctx, afterCVE, pageSize)
+		if err != nil {
+			return nil, fmt.Errorf("nvd: find unknown severity CVE IDs after %q: %w", afterCVE, err)
 		}
-
-		end := i + batchSize
-		if end > len(uniqueCVEs) {
-			end = len(uniqueCVEs)
-		}
-		batch := uniqueCVEs[i:end]
-
-		// Respect rate limits: sleep before each batch (except the first).
-		if i > 0 {
-			s.logger.Debug("NVD enrichment: rate limit pause",
-				slog.Duration("duration", rateLimitWindow),
-				slog.Int("processed", processed),
-				slog.Int("total", len(uniqueCVEs)),
-			)
-			select {
-			case <-ctx.Done():
-				return nil, fmt.Errorf("nvd: context cancelled during rate limit wait: %w", ctx.Err())
-			case <-time.After(rateLimitWindow):
+		if len(cveIDs) == 0 {
+			if progress.total == 0 {
+				s.logger.Info("NVD enrichment: no UNKNOWN-severity CVEs found, nothing to do")
 			}
+			break
 		}
 
-		for _, cveID := range batch {
+		progress.total += len(cveIDs)
+		s.logger.Info("NVD enrichment: processing CVE page",
+			slog.String("after_cve", afterCVE),
+			slog.Int("page_cves", len(cveIDs)),
+			slog.Int("total_discovered", progress.total),
+		)
+
+		for _, cveID := range cveIDs {
 			if err := ctx.Err(); err != nil {
 				return nil, fmt.Errorf("nvd: context cancelled: %w", err)
 			}
-
-			score, severity, fetchErr := s.fetchCVSS(ctx, cveID)
-			for retries := 0; retries < maxRateLimitRetries; retries++ {
-				var rlErr *rateLimitError
-				if !errors.As(fetchErr, &rlErr) {
-					break
-				}
-
-				s.logger.Debug("NVD enrichment: rate limited, retrying CVE lookup",
-					slog.String("cve_id", cveID),
-					slog.Int("attempt", retries+1),
-					slog.Duration("retry_after", rlErr.retryAfter),
-				)
-				if err := waitForRetry(ctx, rlErr.retryAfter); err != nil {
-					return nil, fmt.Errorf("nvd: context cancelled during rate limit retry: %w", err)
-				}
-
-				score, severity, fetchErr = s.fetchCVSS(ctx, cveID)
+			if err := rateLimiter.waitBeforeRequest(ctx, s.logger, progress); err != nil {
+				return nil, err
 			}
-			processed++
+
+			score, severity, fetchErr := s.fetchCVSSWithRateLimitRetry(ctx, cveID)
+			var retryWaitErr *rateLimitRetryWaitError
+			if errors.As(fetchErr, &retryWaitErr) {
+				return nil, fetchErr
+			}
+			progress.processed++
 
 			if fetchErr != nil {
 				s.logger.Debug("NVD enrichment: failed to fetch CVE",
 					slog.String("cve_id", cveID),
-					slog.String("error", fetchErr.Error()),
+					slog.String("error", feed.SafeDiagnosticError(fetchErr)),
 				)
-				operationErrors = append(operationErrors, fmt.Errorf("fetch %s: %w", cveID, fetchErr))
-				skipped++
+				operationErrors.add(fmt.Errorf("fetch %s: %w", cveID, fetchErr))
+				progress.skipped++
 				continue
 			}
 
-			if score <= 0 || severity == "UNKNOWN" {
-				skipped++
-				continue
-			}
-
-			if err := store.UpdateSeverityByCVE(ctx, cveID, severity, score); err != nil {
+			updated, err := applyNVDSeverityUpdate(ctx, store, cveID, score, severity)
+			if err != nil {
 				s.logger.Warn("NVD enrichment: failed to update CVE",
 					slog.String("cve_id", cveID),
-					slog.String("error", err.Error()),
+					slog.String("error", feed.SafeDiagnosticError(err)),
 				)
-				operationErrors = append(operationErrors, fmt.Errorf("update %s: %w", cveID, err))
+				operationErrors.add(fmt.Errorf("update %s: %w", cveID, err))
 				continue
 			}
-			updated++
-
-			if processed%100 == 0 || processed == len(uniqueCVEs) {
-				s.logger.Info("NVD enrichment: progress",
-					slog.Int("processed", processed),
-					slog.Int("total", len(uniqueCVEs)),
-					slog.Int("updated", updated),
-					slog.Int("skipped", skipped),
-				)
+			if !updated {
+				if err := recordNVDNegativeLookup(ctx, store, cveID); err != nil {
+					s.logger.Warn("NVD enrichment: failed to record negative CVSS lookup",
+						slog.String("cve_id", cveID),
+						slog.String("error", feed.SafeDiagnosticError(err)),
+					)
+					operationErrors.add(fmt.Errorf("record negative lookup %s: %w", cveID, err))
+				}
+				progress.skipped++
+				continue
 			}
+			progress.updated++
+
+			s.logNVDProgress(progress)
+		}
+
+		afterCVE = cveIDs[len(cveIDs)-1]
+		if len(cveIDs) < pageSize {
+			break
 		}
 	}
 
 	s.logger.Info("NVD enrichment sync completed",
-		slog.Int("total_cves", len(uniqueCVEs)),
-		slog.Int("processed", processed),
-		slog.Int("updated", updated),
-		slog.Int("skipped", skipped),
+		slog.Int("total_cves", progress.total),
+		slog.Int("processed", progress.processed),
+		slog.Int("updated", progress.updated),
+		slog.Int("skipped", progress.skipped),
 	)
 
-	if len(operationErrors) > 0 {
-		return nil, fmt.Errorf("nvd: %d CVE enrichment error(s): %w", len(operationErrors), errors.Join(operationErrors...))
+	if err := operationErrors.err(); err != nil {
+		return nil, err
 	}
 
 	return &feed.SyncResult{
-		EntriesSynced: updated,
-		EntriesTotal:  len(uniqueCVEs),
+		EntriesSynced: progress.updated,
+		EntriesTotal:  progress.total,
 	}, nil
+}
+
+type nvdSyncProgress struct {
+	total     int
+	updated   int
+	processed int
+	skipped   int
+}
+
+type nvdRequestRateLimiter struct {
+	batchSize int
+	sent      int
+}
+
+func (l *nvdRequestRateLimiter) waitBeforeRequest(ctx context.Context, logger *slog.Logger, progress nvdSyncProgress) error {
+	if l.batchSize <= 0 {
+		return nil
+	}
+	if l.sent < l.batchSize {
+		l.sent++
+		return nil
+	}
+
+	logger.Debug("NVD enrichment: rate limit pause",
+		slog.Duration("duration", rateLimitWindow),
+		slog.Int("processed", progress.processed),
+		slog.Int("total_discovered", progress.total),
+	)
+	if err := waitForRetry(ctx, rateLimitWindow); err != nil {
+		return fmt.Errorf("nvd: context cancelled during rate limit wait: %w", err)
+	}
+	l.sent = 1
+	return nil
+}
+
+type nvdOperationErrorCollector struct {
+	total   int
+	samples []error
+}
+
+func (c *nvdOperationErrorCollector) add(err error) {
+	c.total++
+	if len(c.samples) < maxOperationErrorSamples {
+		c.samples = append(c.samples, err)
+	}
+}
+
+func (c nvdOperationErrorCollector) err() error {
+	if c.total == 0 {
+		return nil
+	}
+	joined := errors.Join(c.samples...)
+	if c.total > len(c.samples) {
+		return fmt.Errorf("nvd: %d CVE enrichment error(s); showing first %d: %w", c.total, len(c.samples), joined)
+	}
+	return fmt.Errorf("nvd: %d CVE enrichment error(s): %w", c.total, joined)
+}
+
+type rateLimitRetryWaitError struct {
+	err error
+}
+
+func (e *rateLimitRetryWaitError) Error() string {
+	return fmt.Sprintf("nvd: context cancelled during rate limit retry: %v", e.err)
+}
+
+func (e *rateLimitRetryWaitError) Unwrap() error {
+	return e.err
+}
+
+func forEachNVDBatch(cves []string, batchSize int, fn func(start int, batch []string) error) error {
+	if batchSize <= 0 {
+		batchSize = len(cves)
+	}
+	if batchSize == 0 {
+		return nil
+	}
+
+	for start := 0; start < len(cves); start += batchSize {
+		end := start + batchSize
+		if end > len(cves) {
+			end = len(cves)
+		}
+		if err := fn(start, cves[start:end]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Syncer) fetchCVSSWithRateLimitRetry(ctx context.Context, cveID string) (float64, string, error) {
+	score, severity, fetchErr := s.fetchCVSS(ctx, cveID)
+	for retries := 0; retries < maxRateLimitRetries; retries++ {
+		var rlErr *rateLimitError
+		if !errors.As(fetchErr, &rlErr) {
+			break
+		}
+
+		s.logger.Debug("NVD enrichment: rate limited, retrying CVE lookup",
+			slog.String("cve_id", cveID),
+			slog.Int("attempt", retries+1),
+			slog.Duration("retry_after", rlErr.retryAfter),
+		)
+		if err := waitForRetry(ctx, rlErr.retryAfter); err != nil {
+			return 0, "UNKNOWN", &rateLimitRetryWaitError{err: err}
+		}
+
+		score, severity, fetchErr = s.fetchCVSS(ctx, cveID)
+	}
+	return score, severity, fetchErr
+}
+
+func applyNVDSeverityUpdate(ctx context.Context, store db.Store, cveID string, score float64, severity string) (bool, error) {
+	if score <= 0 || severity == "UNKNOWN" {
+		return false, nil
+	}
+	if err := store.UpdateSeverityByCVE(ctx, cveID, severity, score); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func recordNVDNegativeLookup(ctx context.Context, store db.Store, cveID string) error {
+	recorder, ok := store.(nvdNegativeLookupRecorder)
+	if !ok {
+		return nil
+	}
+	return recorder.RecordNVDCVSSNegativeLookup(ctx, cveID)
+}
+
+func (s *Syncer) logNVDProgress(progress nvdSyncProgress) {
+	if progress.processed%100 != 0 && progress.processed != progress.total {
+		return
+	}
+	s.logger.Info("NVD enrichment: progress",
+		slog.Int("processed", progress.processed),
+		slog.Int("total", progress.total),
+		slog.Int("updated", progress.updated),
+		slog.Int("skipped", progress.skipped),
+	)
 }
 
 // fetchCVSS queries the NVD API for a single CVE and returns its CVSS v3.1
@@ -310,7 +437,7 @@ func (s *Syncer) fetchCVSS(ctx context.Context, cveID string) (float64, string, 
 		return 0, "UNKNOWN", fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "packmon-feedsync/1.0")
+	req.Header.Set("User-Agent", feed.FeedSyncUserAgent)
 	if s.apiKey != "" {
 		req.Header.Set("apiKey", s.apiKey)
 	}
@@ -326,8 +453,14 @@ func (s *Syncer) fetchCVSS(ctx context.Context, cveID string) (float64, string, 
 		// continue below
 	case http.StatusNotFound:
 		// CVE not found in NVD -- skip gracefully.
+		drainErrorBody(resp.Body)
 		return 0, "UNKNOWN", nil
-	case http.StatusForbidden, http.StatusTooManyRequests:
+	case http.StatusForbidden:
+		// NVD returns 403 for access/API-key configuration failures. Retrying
+		// them as rate limits only delays surfacing the operator action needed.
+		drainErrorBody(resp.Body)
+		return 0, "UNKNOWN", feed.PermanentError(fmt.Errorf("nvd API access denied (HTTP %d) for %s; check API key or mirror permissions", resp.StatusCode, cveID))
+	case http.StatusTooManyRequests:
 		// Rate limited. Read body for diagnostics, then return a typed
 		// rate-limit error so the caller can back off and retry.
 		drainErrorBody(resp.Body)
@@ -357,15 +490,15 @@ func (s *Syncer) fetchCVSS(ctx context.Context, cveID string) (float64, string, 
 	metrics := nvdResp.Vulnerabilities[0].CVE.Metrics
 
 	// Prefer CVSS v3.1, fall back to v3.0.
-	cvssMetrics := metrics.CvssMetricV31
+	cvssMetrics := metrics.CVSSMetricV31
 	if len(cvssMetrics) == 0 {
-		cvssMetrics = metrics.CvssMetricV30
+		cvssMetrics = metrics.CVSSMetricV30
 	}
 	if len(cvssMetrics) == 0 {
 		return 0, "UNKNOWN", nil
 	}
 
-	score := cvssMetrics[0].CvssData.BaseScore
+	score := cvssMetrics[0].CVSSData.BaseScore
 	severity := feed.CVSSToSeverity(score)
 
 	return score, severity, nil
@@ -388,24 +521,35 @@ func buildRequestURL(apiURL, cveID string) (string, error) {
 }
 
 func parseRetryAfter(value string) time.Duration {
+	return parseRetryAfterAt(value, time.Now())
+}
+
+func parseRetryAfterAt(value string, now time.Time) time.Duration {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return rateLimitWindow
 	}
 
 	if seconds, err := strconv.Atoi(value); err == nil && seconds >= 0 {
-		return time.Duration(seconds) * time.Second
+		return boundRetryAfter(time.Duration(seconds) * time.Second)
 	}
 
 	if when, err := http.ParseTime(value); err == nil {
-		wait := time.Until(when)
+		wait := when.Sub(now)
 		if wait > 0 {
-			return wait
+			return boundRetryAfter(wait)
 		}
 		return 0
 	}
 
 	return rateLimitWindow
+}
+
+func boundRetryAfter(d time.Duration) time.Duration {
+	if d > maxRetryAfterDelay {
+		return maxRetryAfterDelay
+	}
+	return d
 }
 
 func waitForRetry(ctx context.Context, d time.Duration) error {

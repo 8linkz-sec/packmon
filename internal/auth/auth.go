@@ -9,8 +9,6 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/8linkz-sec/packmon/internal/db"
-
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -25,9 +23,23 @@ const MinAdminPasswordLength = 12
 // AdminBootstrapStore is the persistence surface needed to bootstrap the
 // shared admin account and audit that event.
 type AdminBootstrapStore interface {
-	GetAdminAuth(ctx context.Context) (*db.AdminAuth, error)
-	UpsertAdminAuth(ctx context.Context, passwordHash string, isBootstrap bool) error
-	InsertAdminAuditLog(ctx context.Context, entry *db.AdminAuditEntry) error
+	GetAdminBootstrapAuth(ctx context.Context) (*AdminBootstrapAuth, error)
+	UpsertAdminBootstrapAuthWithAudit(ctx context.Context, passwordHash string, isBootstrap bool, audit *AdminBootstrapAuditEntry) error
+}
+
+// AdminBootstrapAuth is the auth-owned view of the shared admin credential.
+type AdminBootstrapAuth struct {
+	PasswordHash        string
+	PasswordIsBootstrap bool
+}
+
+// AdminBootstrapAuditEntry is the auth-owned audit payload emitted during
+// bootstrap. Persistence adapters translate it to their storage record type.
+type AdminBootstrapAuditEntry struct {
+	Action        string
+	Details       json.RawMessage
+	IP            string
+	CorrelationID string
 }
 
 // ValidateAdminPassword enforces the shared admin password policy.
@@ -61,7 +73,7 @@ func CheckPassword(hash, password string) bool {
 //
 // This function must only be called once during server startup.
 func BootstrapAdmin(ctx context.Context, store AdminBootstrapStore, initialPassword string, logger *slog.Logger) error {
-	existing, err := store.GetAdminAuth(ctx)
+	existing, err := store.GetAdminBootstrapAuth(ctx)
 	if err != nil {
 		return fmt.Errorf("auth: check existing admin: %w", err)
 	}
@@ -85,21 +97,19 @@ func BootstrapAdmin(ctx context.Context, store AdminBootstrapStore, initialPassw
 		return fmt.Errorf("auth: bootstrap admin: %w", err)
 	}
 
-	if err := store.UpsertAdminAuth(ctx, hash, true); err != nil {
-		return fmt.Errorf("auth: bootstrap admin: %w", err)
-	}
-
 	// Audit the bootstrap event.
 	details, _ := json.Marshal(map[string]string{
 		"actor": "system",
 		"event": "admin_bootstrap",
 		"note":  "initial admin password set from environment variable",
 	})
-	if err := store.InsertAdminAuditLog(ctx, &db.AdminAuditEntry{
+	audit := &AdminBootstrapAuditEntry{
 		Action:  "admin_bootstrap",
 		Details: details,
-	}); err != nil {
-		return fmt.Errorf("auth: audit bootstrap admin: %w", err)
+	}
+
+	if err := store.UpsertAdminBootstrapAuthWithAudit(ctx, hash, true, audit); err != nil {
+		return fmt.Errorf("auth: bootstrap admin: %w", err)
 	}
 
 	logger.Info("initial admin password was set from environment")

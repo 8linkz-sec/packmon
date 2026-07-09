@@ -100,6 +100,9 @@ func TestConfigInitTemplateUsesSecretFreeDefaults(t *testing.T) {
 		"fail_on: CRITICAL",
 		"mode: auto",
 		"NONE disables vulnerability blocking only; malicious and active supply-chain risk findings still block.",
+		"PACKMON_* environment variables",
+		"hex_api_base_url",
+		"nuget_v3_base_url",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("generated config missing %q:\n%s", want, text)
@@ -333,6 +336,67 @@ webhook:
 	}
 }
 
+func TestConfigShowPrefersCACertFileEnvOverLegacyAlias(t *testing.T) {
+	t.Setenv("PACKMON_CA_CERT", "legacy-ca.pem")
+	t.Setenv("PACKMON_CA_CERT_FILE", "preferred-ca.pem")
+
+	settings, err := effectiveConfigShowSettings(&cliConfig{CACert: "config-ca.pem"})
+	if err != nil {
+		t.Fatalf("effectiveConfigShowSettings() error = %v", err)
+	}
+	if settings.CACertFile != "preferred-ca.pem" {
+		t.Fatalf("CACertFile = %q, want preferred PACKMON_CA_CERT_FILE value", settings.CACertFile)
+	}
+}
+
+func TestConfigShowRejectsInvalidBooleanEnvironmentOverrides(t *testing.T) {
+	for _, key := range []string{
+		"PACKMON_INSECURE_ALLOW_HTTP",
+		"PACKMON_REQUIRE_REMOTE",
+		"PACKMON_NO_REPO_METADATA",
+	} {
+		t.Run(key, func(t *testing.T) {
+			isolateCLIConfigDiscovery(t)
+			configPath := filepath.Join(t.TempDir(), "packmon.yaml")
+			if err := os.WriteFile(configPath, []byte(`mode: local`), 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			t.Setenv(key, "maybe")
+
+			cmd := newConfigShowCmd()
+			cmd.SetArgs([]string{"--file", configPath})
+			var err error
+			_ = captureStdout(t, func() {
+				err = cmd.Execute()
+			})
+
+			if err == nil || !strings.Contains(err.Error(), key) {
+				t.Fatalf("config show error = %v, want invalid %s rejection", err, key)
+			}
+		})
+	}
+}
+
+func TestConfigShowRejectsInvalidTimeoutEnvironmentOverride(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	configPath := filepath.Join(t.TempDir(), "packmon.yaml")
+	if err := os.WriteFile(configPath, []byte(`mode: local`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("PACKMON_TIMEOUT", "later")
+
+	cmd := newConfigShowCmd()
+	cmd.SetArgs([]string{"--file", configPath})
+	var err error
+	_ = captureStdout(t, func() {
+		err = cmd.Execute()
+	})
+
+	if err == nil || !strings.Contains(err.Error(), "PACKMON_TIMEOUT") {
+		t.Fatalf("config show error = %v, want invalid PACKMON_TIMEOUT rejection", err)
+	}
+}
+
 func TestConfigShowEnvironmentListMatchesSupportedInputs(t *testing.T) {
 	isolateCLIConfigDiscovery(t)
 	configPath := filepath.Join(t.TempDir(), "packmon.yaml")
@@ -350,7 +414,15 @@ func TestConfigShowEnvironmentListMatchesSupportedInputs(t *testing.T) {
 		}
 	})
 
-	for _, want := range []string{"PACKMON_CA_CERT:", "PACKMON_INSECURE_ALLOW_HTTP:", "PACKMON_REQUIRE_REMOTE:", "PACKMON_NO_REPO_METADATA:"} {
+	for _, want := range []string{
+		"PACKMON_CA_CERT_FILE:",
+		"PACKMON_CA_CERT:",
+		"PACKMON_INSECURE_ALLOW_HTTP:",
+		"PACKMON_REQUIRE_REMOTE:",
+		"PACKMON_NO_REPO_METADATA:",
+		"PACKMON_HEX_API_BASE_URL:",
+		"PACKMON_NUGET_V3_BASE_URL:",
+	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("config show environment list missing supported input %q:\n%s", want, output)
 		}
@@ -395,11 +467,8 @@ func TestConfigCommandHelpers(t *testing.T) {
 	if got := valueOrDefault("value", "fallback"); got != "value" {
 		t.Fatalf("valueOrDefault(value) = %q", got)
 	}
-	if got := defaultConfigTimeout(0); got != 30 {
-		t.Fatalf("defaultConfigTimeout(0) = %d", got)
-	}
-	if got := defaultConfigTimeout(12); got != 12 {
-		t.Fatalf("defaultConfigTimeout(12) = %d", got)
+	if got := defaultConfigShowSettings().Timeout; got != 30 {
+		t.Fatalf("defaultConfigShowSettings().Timeout = %d", got)
 	}
 
 	t.Setenv("PACKMON_PRINT_ENV_TEST", "visible")

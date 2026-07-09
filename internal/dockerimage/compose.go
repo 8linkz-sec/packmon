@@ -5,7 +5,7 @@ import (
 	"io"
 	"strings"
 
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 type composeFile struct {
@@ -38,8 +38,28 @@ func (f *composeFile) UnmarshalYAML(value *yaml.Node) error {
 }
 
 type composeService struct {
-	Image string       `yaml:"image"`
-	Build composeBuild `yaml:"build"`
+	Image     string
+	ImageLine int
+	Build     composeBuild
+}
+
+func (s *composeService) UnmarshalYAML(value *yaml.Node) error {
+	var raw struct {
+		Image string       `yaml:"image"`
+		Build composeBuild `yaml:"build"`
+	}
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+	for i := 0; i+1 < len(value.Content); i += 2 {
+		if value.Content[i].Value == "image" {
+			s.ImageLine = value.Content[i+1].Line
+			break
+		}
+	}
+	s.Image = raw.Image
+	s.Build = raw.Build
+	return nil
 }
 
 type composeBuild struct {
@@ -69,6 +89,10 @@ func (b *composeBuild) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
+// ParseComposeImages parses service image and local-build metadata from a
+// Docker Compose reader. Returned rows are Docker inventory for list-all/report
+// surfaces, including source flags such as service, build context, dockerfile,
+// and target; they are not server scan inputs.
 func ParseComposeImages(r io.Reader, sourceFile string) ([]Image, error) {
 	var doc composeFile
 	if err := yaml.NewDecoder(r).Decode(&doc); err != nil {
@@ -87,7 +111,10 @@ func ParseComposeImages(r io.Reader, sourceFile string) ([]Image, error) {
 		}
 		ref, ok := ParseRef(service.Image)
 		if !ok {
-			return nil, fmt.Errorf("%s: invalid image for service %s: %q", sourceFile, serviceName, service.Image)
+			if service.ImageLine > 0 {
+				return nil, fmt.Errorf("%s:%d: invalid image for compose service", sourceFile, service.ImageLine)
+			}
+			return nil, fmt.Errorf("%s: invalid image for compose service", sourceFile)
 		}
 		flags := []string{"service=" + serviceName}
 		if hasBuild {

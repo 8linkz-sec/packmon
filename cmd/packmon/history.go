@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"github.com/8linkz-sec/packmon/internal/ioutils"
 	"time"
 
 	"github.com/8linkz-sec/packmon/internal/db/sqlite"
@@ -42,7 +43,7 @@ func newHistoryClearCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("open local database: %w", err)
 			}
-			defer closeSilently(store)
+			defer ioutils.CloseSilently(store)
 
 			var before *time.Time
 			if flagBefore != "" {

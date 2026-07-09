@@ -28,14 +28,6 @@ type Syncer struct {
 	client *Client
 }
 
-type lifecycleReconciler interface {
-	DeleteLifecycleProductsNotIn(ctx context.Context, productSlugs []string) (int, error)
-}
-
-type lifecycleReplacer interface {
-	ReplaceLifecycleProducts(ctx context.Context, products []db.LifecycleProduct) (int, error)
-}
-
 type Option func(*Syncer)
 
 func WithBaseURL(baseURL string) Option {
@@ -95,38 +87,17 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 	for _, product := range resp.Result {
 		mapped, err := mapProduct(product)
 		if err != nil {
-			syncErr := fmt.Errorf("map lifecycle product: %w", err)
+			syncErr := feed.NonRetryableError(fmt.Errorf("map lifecycle product: %w", err))
 			s.recordSyncFailure(ctx, store, start, syncErr)
 			return nil, syncErr
 		}
 		products = append(products, mapped)
 	}
 
-	deletedProducts := 0
-	if replacer, ok := store.(lifecycleReplacer); ok {
-		deleted, err := replacer.ReplaceLifecycleProducts(ctx, products)
-		if err != nil {
-			s.recordSyncFailure(ctx, store, start, err)
-			return nil, fmt.Errorf("replace lifecycle products: %w", err)
-		}
-		deletedProducts = deleted
-	} else {
-		if err := store.UpsertLifecycleProducts(ctx, products); err != nil {
-			s.recordSyncFailure(ctx, store, start, err)
-			return nil, fmt.Errorf("upsert lifecycle products: %w", err)
-		}
-		if reconciler, ok := store.(lifecycleReconciler); ok && len(products) > 0 {
-			slugs := make([]string, 0, len(products))
-			for _, product := range products {
-				slugs = append(slugs, product.ProductSlug)
-			}
-			deleted, err := reconciler.DeleteLifecycleProductsNotIn(ctx, slugs)
-			if err != nil {
-				s.recordSyncFailure(ctx, store, start, err)
-				return nil, fmt.Errorf("reconcile lifecycle products: %w", err)
-			}
-			deletedProducts = deleted
-		}
+	deletedProducts, err := store.ReplaceLifecycleProducts(ctx, products)
+	if err != nil {
+		s.recordSyncFailure(ctx, store, start, err)
+		return nil, fmt.Errorf("replace lifecycle products: %w", err)
 	}
 
 	total := resp.Total
@@ -166,8 +137,8 @@ func statusETag(status *db.FeedSyncStatus) string {
 	if status == nil {
 		return ""
 	}
-	if strings.TrimSpace(status.LastEtag) != "" {
-		return strings.TrimSpace(status.LastEtag)
+	if strings.TrimSpace(status.LastETag) != "" {
+		return strings.TrimSpace(status.LastETag)
 	}
 	if len(status.Metadata) == 0 {
 		return ""
@@ -197,10 +168,10 @@ func (s *Syncer) recordSyncSuccess(ctx context.Context, store db.Store, start ti
 		FeedName:         FeedName,
 		LastSyncAt:       &now,
 		LastSyncDuration: &duration,
-		LastSyncStatus:   "success",
+		LastSyncStatus:   db.FeedSyncStatusSuccess,
 		EntriesSynced:    synced,
 		EntriesTotal:     total,
-		LastEtag:         etag,
+		LastETag:         etag,
 		Metadata:         metadataJSON,
 	}); err != nil {
 		s.logger.Warn("failed to record endoflife sync success", "error", err)
@@ -214,8 +185,8 @@ func (s *Syncer) recordSyncFailure(ctx context.Context, store db.Store, start ti
 	status := &db.FeedSyncStatus{
 		FeedName:         FeedName,
 		LastSyncDuration: &duration,
-		LastSyncStatus:   "error",
-		LastError:        syncErr.Error(),
+		LastSyncStatus:   db.FeedSyncStatusError,
+		LastError:        feed.SafeDiagnosticError(syncErr),
 		UpdatedAt:        now,
 	}
 	if current, err := feed.GetFeedSyncStatusBounded(store, FeedName); err == nil {
@@ -354,18 +325,6 @@ func addPackageMap(product *db.LifecycleProduct, set map[string]struct{}, packag
 	}
 	set[key] = struct{}{}
 	product.PackageMaps = append(product.PackageMaps, packageMap)
-}
-
-func parseLifecycleDate(raw string) *time.Time {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return nil
-	}
-	date, err := time.Parse(time.DateOnly, raw)
-	if err != nil {
-		return nil
-	}
-	return &date
 }
 
 func parseLifecycleDateStrict(productSlug, cycle, field, raw string) (*time.Time, error) {

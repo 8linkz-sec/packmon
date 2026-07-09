@@ -8,9 +8,12 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 )
+
+const readinessCacheTTL = 5 * time.Second
 
 // Pinger is satisfied by any database pool that supports Ping.
 type Pinger interface {
@@ -19,8 +22,16 @@ type Pinger interface {
 
 // Checker aggregates health signals.
 type Checker struct {
-	db           Pinger
-	shuttingDown atomic.Bool
+	db              Pinger
+	shuttingDown    atomic.Bool
+	readyCacheMu    sync.Mutex
+	readyCache      readinessResult
+	readyCacheUntil time.Time
+}
+
+type readinessResult struct {
+	status int
+	body   map[string]string
 }
 
 // NewChecker creates a Checker that probes the given database.
@@ -55,19 +66,40 @@ func (c *Checker) ReadyHandler() http.HandlerFunc {
 			return
 		}
 
-		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
-		defer cancel()
+		result := c.readyResult(r)
+		writeJSON(w, result.status, result.body)
+	}
+}
 
-		if err := c.db.Ping(ctx); err != nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+func (c *Checker) readyResult(r *http.Request) readinessResult {
+	now := time.Now()
+	c.readyCacheMu.Lock()
+	defer c.readyCacheMu.Unlock()
+
+	if now.Before(c.readyCacheUntil) && c.readyCache.status != 0 {
+		return c.readyCache
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+
+	result := readinessResult{
+		status: http.StatusOK,
+		body:   map[string]string{"status": "ready"},
+	}
+	if err := c.db.Ping(ctx); err != nil {
+		result = readinessResult{
+			status: http.StatusServiceUnavailable,
+			body: map[string]string{
 				"status": "unavailable",
 				"reason": "database unreachable",
-			})
-			return
+			},
 		}
-
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 	}
+
+	c.readyCache = result
+	c.readyCacheUntil = now.Add(readinessCacheTTL)
+	return result
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

@@ -20,6 +20,9 @@ const (
 	dockerHubAuthenticationRealmHost = "auth.docker.io"
 )
 
+// ErrDigestUnavailable means a registry digest lookup could not produce a
+// trusted manifest digest. Callers treat this as missing freshness metadata, not
+// as a package scan failure.
 var ErrDigestUnavailable = errors.New("docker registry digest unavailable")
 
 var allowedDockerRegistryHosts = map[string]struct{}{
@@ -43,12 +46,26 @@ var allowedDockerTokenRealmHosts = map[string]map[string]struct{}{
 	},
 }
 
+// RegistryClient performs metadata-only Docker manifest digest lookups for the
+// list-all Docker inventory path. It allowlists public registry hosts, rejects
+// private or local resolved addresses, validates supported bearer-token realms,
+// and never performs vulnerability scans.
 type RegistryClient struct {
-	HTTP         *http.Client
+	HTTP *http.Client
+	// Mirrors maps normalized public registry hosts to trusted registry mirror
+	// base URLs. Mirror values come only from trusted operator configuration;
+	// repository-controlled image references cannot add entries here.
+	Mirrors map[string]string
+	// InsecureHTTP is a test seam for local registry fixtures and must not be
+	// enabled for normal registry egress.
 	InsecureHTTP bool
-	LookupIP     func(context.Context, string) ([]net.IP, error)
+	// LookupIP resolves registry and token hosts; tests can inject it to verify
+	// private, loopback, and link-local address rejection.
+	LookupIP func(context.Context, string) ([]net.IP, error)
 }
 
+// NewRegistryClient returns a registry digest client with a bounded HTTP client
+// and the default DNS resolver used for egress trust-boundary checks.
 func NewRegistryClient(client *http.Client) *RegistryClient {
 	if client == nil {
 		client = &http.Client{Timeout: 15 * time.Second}
@@ -56,6 +73,10 @@ func NewRegistryClient(client *http.Client) *RegistryClient {
 	return &RegistryClient{HTTP: client, LookupIP: defaultLookupIP}
 }
 
+// ResolveDigest returns the remote manifest digest for a supported public image
+// reference. Unsupported registries, local images, unsafe network destinations,
+// and registry failures return ErrDigestUnavailable so Docker inventory remains
+// report-only metadata.
 func (c *RegistryClient) ResolveDigest(ctx context.Context, ref Ref) (string, error) {
 	if ref.Registry == "" || ref.Repository == "" || ref.Reference == "" || strings.HasPrefix(ref.Name, "local/") {
 		return "", ErrDigestUnavailable
@@ -72,8 +93,8 @@ func (c *RegistryClient) ResolveDigest(ctx context.Context, ref Ref) (string, er
 }
 
 func (c *RegistryClient) resolveDigestOnce(ctx context.Context, ref Ref, token string) (string, string, error) {
-	manifestURL := c.manifestURL(ref)
-	if err := c.validateRegistryURL(ctx, manifestURL); err != nil {
+	manifestURL, mirrored := c.manifestURL(ref)
+	if err := c.validateRegistryURL(ctx, manifestURL, mirrored); err != nil {
 		return "", "", err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, manifestURL, nil)
@@ -109,12 +130,24 @@ func (c *RegistryClient) resolveDigestOnceNoChallenge(ctx context.Context, ref R
 	return digest, err
 }
 
-func (c *RegistryClient) manifestURL(ref Ref) string {
+func (c *RegistryClient) manifestURL(ref Ref) (string, bool) {
+	if baseURL, ok := c.registryMirrorBaseURL(ref.Registry); ok {
+		return strings.TrimRight(baseURL, "/") + "/v2/" + strings.Trim(ref.Repository, "/") + "/manifests/" + url.PathEscape(ref.Reference), true
+	}
 	scheme := "https"
 	if c.InsecureHTTP {
 		scheme = "http"
 	}
-	return scheme + "://" + ref.Registry + "/v2/" + ref.Repository + "/manifests/" + url.PathEscape(ref.Reference)
+	return scheme + "://" + ref.Registry + "/v2/" + ref.Repository + "/manifests/" + url.PathEscape(ref.Reference), false
+}
+
+func (c *RegistryClient) registryMirrorBaseURL(registryHost string) (string, bool) {
+	if len(c.Mirrors) == 0 {
+		return "", false
+	}
+	baseURL, ok := c.Mirrors[normalizeDockerHost(registryHost)]
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	return baseURL, ok && baseURL != ""
 }
 
 func (c *RegistryClient) fetchBearerToken(ctx context.Context, challenge, registryHost string) (string, error) {
@@ -175,9 +208,13 @@ func (c *RegistryClient) fetchBearerToken(ctx context.Context, challenge, regist
 	return "", ErrDigestUnavailable
 }
 
-func (c *RegistryClient) validateRegistryURL(ctx context.Context, raw string) error {
+func (c *RegistryClient) validateRegistryURL(ctx context.Context, raw string, mirrored bool) error {
 	u, err := url.Parse(raw)
 	if err != nil {
+		return err
+	}
+	if mirrored {
+		_, err := normalizeDockerMirrorURLTarget(u)
 		return err
 	}
 	host, err := normalizeHTTPURLTarget(u, c.InsecureHTTP)
@@ -194,6 +231,24 @@ func (c *RegistryClient) validateRegistryURL(ctx context.Context, raw string) er
 }
 
 func (c *RegistryClient) validateTokenRealm(ctx context.Context, u *url.URL, registryHost string) error {
+	if mirrorBase, ok := c.registryMirrorBaseURL(registryHost); ok {
+		mirrorURL, err := url.Parse(mirrorBase)
+		if err != nil {
+			return err
+		}
+		host, err := normalizeDockerMirrorURLTarget(u)
+		if err != nil {
+			return err
+		}
+		mirrorHost, err := normalizeDockerMirrorURLTarget(mirrorURL)
+		if err != nil {
+			return err
+		}
+		if host != mirrorHost {
+			return fmt.Errorf("%w: unsupported docker registry token realm host %s", ErrDigestUnavailable, host)
+		}
+		return nil
+	}
 	host, err := normalizeHTTPURLTarget(u, c.InsecureHTTP)
 	if err != nil {
 		return err
@@ -205,6 +260,20 @@ func (c *RegistryClient) validateTokenRealm(ctx context.Context, u *url.URL, reg
 		return fmt.Errorf("%w: unsupported docker registry token realm host %s", ErrDigestUnavailable, host)
 	}
 	return c.rejectPrivateHTTPURLTarget(ctx, host)
+}
+
+func normalizeDockerMirrorURLTarget(u *url.URL) (string, error) {
+	host, err := normalizeHTTPURLTarget(u, true)
+	if err != nil {
+		return "", err
+	}
+	if strings.EqualFold(u.Scheme, "http") && !dockerMirrorHostIsLoopback(u.Hostname()) {
+		return "", fmt.Errorf("%w: insecure registry URL scheme %q", ErrDigestUnavailable, u.Scheme)
+	}
+	if ip := net.ParseIP(strings.Trim(u.Hostname(), "[]")); ip != nil && dockerMirrorIPBlocked(ip) {
+		return "", fmt.Errorf("%w: registry mirror host %s is not allowed", ErrDigestUnavailable, host)
+	}
+	return host, nil
 }
 
 func normalizeHTTPURLTarget(u *url.URL, allowHTTP bool) (string, error) {
@@ -229,6 +298,19 @@ func normalizeHTTPURLTarget(u *url.URL, allowHTTP bool) (string, error) {
 		return "", fmt.Errorf("%w: missing registry host", ErrDigestUnavailable)
 	}
 	return host, nil
+}
+
+func dockerMirrorHostIsLoopback(host string) bool {
+	host = strings.Trim(strings.ToLower(strings.TrimSpace(host)), "[]")
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func dockerMirrorIPBlocked(ip net.IP) bool {
+	return ip == nil || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified()
 }
 
 func (c *RegistryClient) rejectPrivateHTTPURLTarget(ctx context.Context, host string) error {

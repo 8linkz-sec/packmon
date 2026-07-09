@@ -37,7 +37,7 @@ Read `AGENTS.md` (root) first.
 ## Tests
 
 ```bash
-go test ./internal/web/...
+go test -count=1 ./internal/web/...
 ```
 Render tests should assert that template-offered values match the handler's
 accepted set.

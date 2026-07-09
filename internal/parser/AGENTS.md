@@ -36,8 +36,8 @@ Keep these tracked guardrails in mind:
 ## Tests
 
 ```bash
-go test ./internal/parser/...
-go test -run Fuzz -fuzz <Target> -fuzztime 30s ./internal/parser
+go test -count=1 ./internal/parser/...
+go test -count=1 -run Fuzz -fuzz <Target> -fuzztime 30s ./internal/parser
 ```
 When changing the `Dev` flag, assert the flag value in the parser test (most
 existing tests only check name->version).

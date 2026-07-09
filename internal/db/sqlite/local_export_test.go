@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -105,10 +107,7 @@ func TestLocalDatabaseCountsAndExport(t *testing.T) {
 		t.Fatalf("LocalDatabaseCounts() = %+v", counts)
 	}
 
-	exported, err := store.ExportLocalDatabase(ctx)
-	if err != nil {
-		t.Fatalf("ExportLocalDatabase() error = %v", err)
-	}
+	exported := collectLocalDatabaseExport(t, ctx, store)
 	if len(exported.Vulnerabilities) != 1 || len(exported.Malicious) != 1 ||
 		len(exported.Reputation) != 1 || len(exported.Lifecycle) != 1 || len(exported.ScanHistory) != 1 {
 		t.Fatalf("export sizes = vulns:%d mal:%d rep:%d life:%d history:%d",
@@ -158,6 +157,57 @@ func TestLocalDatabaseCountsAndExport(t *testing.T) {
 	}
 }
 
+type localDatabaseExportRows struct {
+	Vulnerabilities []LocalVulnerabilityEntry
+	Malicious       []LocalMaliciousEntry
+	Reputation      []LocalReputationEntry
+	Lifecycle       []LocalLifecycleEntry
+	ScanHistory     []ScanEntry
+}
+
+func collectLocalDatabaseExport(t *testing.T, ctx context.Context, store *Store) localDatabaseExportRows {
+	t.Helper()
+
+	exported := localDatabaseExportRows{
+		Vulnerabilities: make([]LocalVulnerabilityEntry, 0),
+		Malicious:       make([]LocalMaliciousEntry, 0),
+		Reputation:      make([]LocalReputationEntry, 0),
+		Lifecycle:       make([]LocalLifecycleEntry, 0),
+		ScanHistory:     make([]ScanEntry, 0),
+	}
+	if err := store.StreamLocalVulnerabilities(ctx, func(item LocalVulnerabilityEntry) error {
+		exported.Vulnerabilities = append(exported.Vulnerabilities, item)
+		return nil
+	}); err != nil {
+		t.Fatalf("StreamLocalVulnerabilities() error = %v", err)
+	}
+	if err := store.StreamLocalMalicious(ctx, func(item LocalMaliciousEntry) error {
+		exported.Malicious = append(exported.Malicious, item)
+		return nil
+	}); err != nil {
+		t.Fatalf("StreamLocalMalicious() error = %v", err)
+	}
+	if err := store.StreamLocalReputation(ctx, func(item LocalReputationEntry) error {
+		exported.Reputation = append(exported.Reputation, item)
+		return nil
+	}); err != nil {
+		t.Fatalf("StreamLocalReputation() error = %v", err)
+	}
+	if err := store.StreamLocalLifecycle(ctx, func(item LocalLifecycleEntry) error {
+		exported.Lifecycle = append(exported.Lifecycle, item)
+		return nil
+	}); err != nil {
+		t.Fatalf("StreamLocalLifecycle() error = %v", err)
+	}
+	if err := store.StreamLocalScanHistory(ctx, func(item ScanEntry) error {
+		exported.ScanHistory = append(exported.ScanHistory, item)
+		return nil
+	}); err != nil {
+		t.Fatalf("StreamLocalScanHistory() error = %v", err)
+	}
+	return exported
+}
+
 func TestLocalExportHelpers(t *testing.T) {
 	t.Parallel()
 
@@ -181,5 +231,17 @@ func TestLocalExportHelpers(t *testing.T) {
 	}
 	if got := localDBBoolPtr(sql.NullInt64{Int64: 1, Valid: true}); got == nil || !*got {
 		t.Fatalf("localDBBoolPtr(true) = %v, want true", got)
+	}
+}
+
+func TestLocalDatabaseExportDoesNotUseUnboundedRecentScanAggregation(t *testing.T) {
+	t.Parallel()
+
+	source, err := os.ReadFile("local_export.go")
+	if err != nil {
+		t.Fatalf("read local_export.go: %v", err)
+	}
+	if strings.Contains(string(source), `GetRecentScans(ctx, "", -1)`) {
+		t.Fatal("local export still calls GetRecentScans(ctx, \"\", -1); want streaming scan-history rows")
 	}
 }

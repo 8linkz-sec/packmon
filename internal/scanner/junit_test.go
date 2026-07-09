@@ -89,6 +89,63 @@ func TestJUnitSurfacesParseErrorsAsErroredSuite(t *testing.T) {
 	}
 }
 
+func TestJUnitCapsParseErrorCasesWithSummary(t *testing.T) {
+	result := &domain.ScanResult{
+		Mode:            "local",
+		PackagesScanned: 1,
+		ParseErrors:     numberedScannerParseDiagnostics(23),
+	}
+
+	var out bytes.Buffer
+	if err := NewJUnitWriter().Write(&out, result); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	var suites junitTestsuites
+	if err := xml.Unmarshal(out.Bytes(), &suites); err != nil {
+		t.Fatalf("invalid JUnit XML: %v\n%s", err, out.String())
+	}
+	if suites.Tests != 22 {
+		t.Fatalf("top-level tests = %d, want 22\n%s", suites.Tests, out.String())
+	}
+	if suites.Errors != 21 {
+		t.Fatalf("top-level errors = %d, want 21\n%s", suites.Errors, out.String())
+	}
+	var parseSuite *junitTestsuite
+	for i := range suites.Testsuites {
+		if suites.Testsuites[i].Name == "packmon.parse-errors" {
+			parseSuite = &suites.Testsuites[i]
+		}
+	}
+	if parseSuite == nil {
+		t.Fatalf("missing packmon.parse-errors suite\n%s", out.String())
+	}
+	if parseSuite.Tests != 21 || parseSuite.Errors != 21 || len(parseSuite.Cases) != 21 {
+		t.Fatalf("parse suite = %+v, want 21 bounded cases", parseSuite)
+	}
+	if !strings.Contains(parseSuite.Cases[19].Error.Body, "diagnostic-20") {
+		t.Fatalf("last visible parse case = %q, want diagnostic-20", parseSuite.Cases[19].Error.Body)
+	}
+	for _, tc := range parseSuite.Cases {
+		if tc.Error == nil {
+			t.Fatalf("parse testcase missing error: %+v", tc)
+		}
+		if strings.Contains(tc.Error.Body, "diagnostic-21") || strings.Contains(tc.Error.Body, "diagnostic-23") {
+			t.Fatalf("JUnit included omitted diagnostic: %+v", tc)
+		}
+	}
+	summary := parseSuite.Cases[len(parseSuite.Cases)-1]
+	if summary.Name != "parse diagnostics omitted" {
+		t.Fatalf("summary testcase name = %q, want parse diagnostics omitted", summary.Name)
+	}
+	if !strings.Contains(summary.Error.Body, "3 additional parse diagnostics omitted; see JSON parse_errors for full detail") {
+		t.Fatalf("summary testcase body = %q, want omitted summary", summary.Error.Body)
+	}
+	if len(result.ParseErrors) != 23 || result.ParseErrors[22] != "diagnostic-23" {
+		t.Fatalf("JUnit write mutated raw parse errors: %#v", result.ParseErrors)
+	}
+}
+
 func TestJUnitSurfacesScanWarningsAsErroredSuite(t *testing.T) {
 	dbAgeDays := 8
 	result := &domain.ScanResult{
@@ -228,7 +285,7 @@ func TestJUnitNormalizesMalwareHistorySeverity(t *testing.T) {
 				Type:      domain.FindingTypeSupplyChainRisk,
 				Severity:  domain.SeverityHigh,
 				Title:     "ReversingLabs: malware incident history",
-				RiskType:  "malware_history",
+				RiskType:  domain.RiskTypeMalwareHistory,
 				Source:    "reversinglabs",
 			},
 		},

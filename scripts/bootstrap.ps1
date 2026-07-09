@@ -9,121 +9,8 @@ param(
 $ErrorActionPreference = "Stop"
 
 $RootDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
-$RequirementsPath = Join-Path $RootDir "requirements\packmon-tools.tsv"
 $CheckScript = Join-Path $RootDir "scripts\check-requirements.ps1"
-
-function Read-PackmonRequirements {
-    Get-Content -Path $RequirementsPath | ForEach-Object {
-        $line = $_.Trim()
-        if (-not $line -or $line.StartsWith("#")) {
-            return
-        }
-        $fields = $line -split "\|", 8
-        if ($fields.Count -ne 8) {
-            throw "invalid requirements line: $line"
-        }
-        [pscustomobject]@{
-            Id          = $fields[0]
-            Command     = $fields[1]
-            Profiles    = $fields[2]
-            Required    = [bool]::Parse($fields[3])
-            Version     = $fields[4]
-            Installer   = $fields[5]
-            InstallHint = $fields[6]
-            Purpose     = $fields[7]
-        }
-    }
-}
-
-function Test-InProfile {
-    param([object]$Requirement)
-    return (($Requirement.Profiles -split ",") -contains $Profile)
-}
-
-function Add-RequirementId {
-    param(
-        [hashtable]$Ids,
-        [string]$Id
-    )
-    $Ids[$Id] = $true
-}
-
-function Get-SbomRequirementIds {
-    param([string]$TargetPath)
-
-    $resolved = Resolve-Path -LiteralPath $TargetPath -ErrorAction Stop
-    $rootPath = $resolved.Path
-    $ids = @{}
-    $skipDirs = @(".git", "node_modules", "vendor", "__pycache__", ".build", ".gotmp")
-
-    Get-ChildItem -LiteralPath $rootPath -Recurse -File -Force -ErrorAction SilentlyContinue | ForEach-Object {
-        $relative = $_.FullName.Substring($rootPath.Length).TrimStart("\", "/")
-        $parts = $relative -split "[\\/]"
-        foreach ($part in $parts) {
-            if ($skipDirs -contains $part) {
-                return
-            }
-        }
-
-        $name = $_.Name.ToLowerInvariant()
-        switch ($name) {
-            "go.mod" {
-                Add-RequirementId $ids "go"
-                Add-RequirementId $ids "cyclonedx-gomod"
-            }
-            "package-lock.json" {
-                Add-RequirementId $ids "node"
-                Add-RequirementId $ids "npm"
-                Add-RequirementId $ids "cyclonedx-npm"
-            }
-            "npm-shrinkwrap.json" {
-                Add-RequirementId $ids "node"
-                Add-RequirementId $ids "npm"
-                Add-RequirementId $ids "cyclonedx-npm"
-            }
-            "pnpm-lock.yaml" {
-                Add-RequirementId $ids "node"
-                Add-RequirementId $ids "npm"
-                Add-RequirementId $ids "cyclonedx-npm"
-            }
-            "yarn.lock" {
-                Add-RequirementId $ids "node"
-                Add-RequirementId $ids "npm"
-                Add-RequirementId $ids "cyclonedx-npm"
-            }
-            "package.json" {
-                Add-RequirementId $ids "node"
-                Add-RequirementId $ids "npm"
-                Add-RequirementId $ids "cyclonedx-npm"
-            }
-            "requirements.txt" {
-                Add-RequirementId $ids "python"
-                Add-RequirementId $ids "cyclonedx-py"
-            }
-            "pyproject.toml" {
-                Add-RequirementId $ids "python"
-                Add-RequirementId $ids "cyclonedx-py"
-            }
-            "poetry.lock" {
-                Add-RequirementId $ids "python"
-                Add-RequirementId $ids "cyclonedx-py"
-            }
-            "pipfile" {
-                Add-RequirementId $ids "python"
-                Add-RequirementId $ids "cyclonedx-py"
-            }
-            "pipfile.lock" {
-                Add-RequirementId $ids "python"
-                Add-RequirementId $ids "cyclonedx-py"
-            }
-            "pom.xml" {
-                Add-RequirementId $ids "mvn"
-            }
-        }
-    }
-
-    return $ids
-}
+. (Join-Path $RootDir "scripts\lib\requirements.ps1")
 
 function Require-Command {
     param(
@@ -133,36 +20,6 @@ function Require-Command {
     if (-not (Get-Command $Command -ErrorAction SilentlyContinue)) {
         throw "$ForTool requires '$Command' first. Install the base toolchain and rerun bootstrap."
     }
-}
-
-function Resolve-PackmonCommand {
-    $commandInfo = Get-Command packmon -ErrorAction SilentlyContinue
-    if ($commandInfo) {
-        return $commandInfo.Source
-    }
-    foreach ($candidate in @(
-            (Join-Path (Get-Location) "packmon.exe"),
-            (Join-Path (Get-Location) "packmon"),
-            (Join-Path $RootDir ".build\packmon.exe"),
-            (Join-Path $RootDir ".build\packmon")
-        )) {
-        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-            return $candidate
-        }
-    }
-    return $null
-}
-
-function Resolve-RequirementCommand {
-    param([object]$Requirement)
-    if ($Requirement.Command -eq "packmon") {
-        return Resolve-PackmonCommand
-    }
-    $commandInfo = Get-Command $Requirement.Command -ErrorAction SilentlyContinue
-    if ($commandInfo) {
-        return $commandInfo.Source
-    }
-    return $null
 }
 
 function Install-ManagedTool {
@@ -179,8 +36,8 @@ function Install-ManagedTool {
     if ($Requirement.Installer.StartsWith("npm-global:")) {
         Require-Command "npm" $Requirement.Command
         $package = $Requirement.Installer.Substring("npm-global:".Length)
-        Write-Host "installing $($Requirement.Command) with npm install --global $package"
-        & npm install --global $package
+        Write-Host "installing $($Requirement.Command) with npm install --global --ignore-scripts $package"
+        & npm install --global --ignore-scripts $package
         return
     }
 
@@ -193,6 +50,35 @@ function Install-ManagedTool {
     }
 
     throw "$($Requirement.Command) is a base requirement: $($Requirement.InstallHint)"
+}
+
+function Test-RequirementSatisfied {
+    param(
+        [object]$Requirement,
+        [string]$ResolvedCommand
+    )
+    if (-not $ResolvedCommand) {
+        return $false
+    }
+    if ($Requirement.Version -eq "any") {
+        return $true
+    }
+
+    $versionText = Get-ToolVersion $Requirement.Command $ResolvedCommand $Requirement.Installer
+    if ($Requirement.Installer -ne "manual") {
+        return (Test-VersionEquals $versionText $Requirement.Version)
+    }
+
+    if ($Requirement.Command -in @("go", "node", "npm", "python", "mvn")) {
+        if (-not (Test-VersionAtLeast $versionText $Requirement.Version)) {
+            return $false
+        }
+        if ($Requirement.Command -eq "mvn") {
+            return (Test-MavenJavaVersion $ResolvedCommand)
+        }
+        return $true
+    }
+    return $true
 }
 
 $requirements = @(Read-PackmonRequirements | Where-Object { Test-InProfile $_ })
@@ -211,7 +97,8 @@ if ($Profile -eq "sbom" -and $Target) {
 $manual = @()
 
 foreach ($requirement in $requirements) {
-    if (Resolve-RequirementCommand $requirement) {
+    $resolvedCommand = Resolve-RequirementCommand $requirement
+    if ($resolvedCommand -and (Test-RequirementSatisfied $requirement $resolvedCommand)) {
         Write-Host "already available: $($requirement.Command)"
         continue
     }
@@ -219,6 +106,14 @@ foreach ($requirement in $requirements) {
     if ($requirement.Installer -eq "manual") {
         $manual += $requirement
         continue
+    }
+
+    if ($resolvedCommand -and $requirement.Version -ne "any") {
+        $versionText = Get-ToolVersion $requirement.Command $resolvedCommand $requirement.Installer
+        if (-not $versionText) {
+            $versionText = "unknown"
+        }
+        Write-Host ("upgrading {0} from {1} to pinned {2}" -f $requirement.Command, $versionText, $requirement.Version)
     }
 
     Install-ManagedTool $requirement

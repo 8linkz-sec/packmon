@@ -30,6 +30,33 @@ func newAdminErrorStore() *adminErrorStore {
 	}
 }
 
+func TestHandleFeedConfigSaveRedactsPersistedLoadErrorInRedirect(t *testing.T) {
+	store := newAdminErrorStore()
+	store.fail["GetFeedConfig"] = errors.New("postgres: decrypt feed api key at C:\\private\\packmon\\feed-secret.txt")
+	handler, sm := newAdminHandlerForStore(t, store, adminFlowConfig())
+
+	req, _ := authenticatedAdminFormRequest(t, sm, "/admin/feeds/save", url.Values{
+		"feed_name": {"vulncheck"},
+		"mode":      {"self"},
+	})
+	rec := httptest.NewRecorder()
+
+	handler.HandleFeedConfigSave(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("HandleFeedConfigSave status = %d, want 303", rec.Code)
+	}
+	location := rec.Header().Get("Location")
+	if !strings.Contains(location, "Failed+to+load+feed+configuration") {
+		t.Fatalf("Location = %q, want generic feed-load error", location)
+	}
+	for _, leaked := range []string{"postgres", "decrypt", "feed-secret", "private"} {
+		if strings.Contains(location, leaked) {
+			t.Fatalf("Location leaked internal marker %q: %s", leaked, location)
+		}
+	}
+}
+
 func (s *adminErrorStore) err(name string) error {
 	if err := s.fail[name]; err != nil {
 		return err
@@ -61,6 +88,16 @@ func (s *adminErrorStore) UpsertAdminAuthWithAudit(ctx context.Context, password
 	return s.adminFlowStoreStub.UpsertAdminAuthWithAudit(ctx, passwordHash, isBootstrap, audit)
 }
 
+func (s *adminErrorStore) ChangeAdminPasswordWithAudit(ctx context.Context, newHash, expectedOldHash string, audit *db.AdminAuditEntry) error {
+	if err := s.err("UpsertAdminAuth"); err != nil {
+		return err
+	}
+	if err := s.err("InsertAdminAuditLog"); err != nil {
+		return errors.Join(db.ErrAdminAuditLog, err)
+	}
+	return s.adminFlowStoreStub.ChangeAdminPasswordWithAudit(ctx, newHash, expectedOldHash, audit)
+}
+
 func (s *adminErrorStore) InsertAdminAuditLog(ctx context.Context, entry *db.AdminAuditEntry) error {
 	if err := s.err("InsertAdminAuditLog"); err != nil {
 		return err
@@ -73,6 +110,13 @@ func (s *adminErrorStore) ListAPIKeys(ctx context.Context) ([]db.APIKey, error) 
 		return nil, err
 	}
 	return s.adminFlowStoreStub.ListAPIKeys(ctx)
+}
+
+func (s *adminErrorStore) ListAPIKeysPage(ctx context.Context, limit, offset int) ([]db.APIKey, error) {
+	if err := s.err("ListAPIKeys"); err != nil {
+		return nil, err
+	}
+	return s.adminFlowStoreStub.ListAPIKeysPage(ctx, limit, offset)
 }
 
 func (s *adminErrorStore) CreateAPIKey(ctx context.Context, name, keyHash string, expiresAt *time.Time) (int, error) {
@@ -126,6 +170,26 @@ func (s *adminErrorStore) DeleteAPIKeyWithAudit(ctx context.Context, keyID int, 
 	return s.adminFlowStoreStub.DeleteAPIKeyWithAudit(ctx, keyID, audit)
 }
 
+func (s *adminErrorStore) UpsertManualAdvisoryWithAudit(ctx context.Context, advisory *db.ManualAdvisory, audit *db.AdminAuditEntry) error {
+	if err := s.err("UpsertManualAdvisory"); err != nil {
+		return err
+	}
+	if err := s.err("InsertAdminAuditLog"); err != nil {
+		return errors.Join(db.ErrAdminAuditLog, err)
+	}
+	return s.adminFlowStoreStub.UpsertManualAdvisoryWithAudit(ctx, advisory, audit)
+}
+
+func (s *adminErrorStore) DeleteManualAdvisoryWithAudit(ctx context.Context, id string, audit *db.AdminAuditEntry) error {
+	if err := s.err("DeleteManualAdvisory"); err != nil {
+		return err
+	}
+	if err := s.err("InsertAdminAuditLog"); err != nil {
+		return errors.Join(db.ErrAdminAuditLog, err)
+	}
+	return s.adminFlowStoreStub.DeleteManualAdvisoryWithAudit(ctx, id, audit)
+}
+
 func (s *adminErrorStore) ListFeedSyncStatuses(ctx context.Context) ([]db.FeedSyncStatus, error) {
 	if err := s.err("ListFeedSyncStatuses"); err != nil {
 		return nil, err
@@ -161,11 +225,31 @@ func (s *adminErrorStore) UpsertFeedConfig(ctx context.Context, cfg *db.FeedConf
 	return s.adminFlowStoreStub.UpsertFeedConfig(ctx, cfg)
 }
 
+func (s *adminErrorStore) UpsertFeedConfigWithAudit(ctx context.Context, cfg *db.FeedConfig, audit *db.AdminAuditEntry) error {
+	if err := s.err("UpsertFeedConfig"); err != nil {
+		return err
+	}
+	if err := s.err("InsertAdminAuditLog"); err != nil {
+		return errors.Join(db.ErrAdminAuditLog, err)
+	}
+	return s.adminFlowStoreStub.UpsertFeedConfigWithAudit(ctx, cfg, audit)
+}
+
 func (s *adminErrorStore) DeleteFeedConfig(ctx context.Context, feedName string) error {
 	if err := s.err("DeleteFeedConfig"); err != nil {
 		return err
 	}
 	return s.adminFlowStoreStub.DeleteFeedConfig(ctx, feedName)
+}
+
+func (s *adminErrorStore) DeleteFeedConfigWithAudit(ctx context.Context, feedName string, expectedUpdatedAt *time.Time, audit *db.AdminAuditEntry) error {
+	if err := s.err("DeleteFeedConfig"); err != nil {
+		return err
+	}
+	if err := s.err("InsertAdminAuditLog"); err != nil {
+		return errors.Join(db.ErrAdminAuditLog, err)
+	}
+	return s.adminFlowStoreStub.DeleteFeedConfigWithAudit(ctx, feedName, expectedUpdatedAt, audit)
 }
 
 func (s *adminErrorStore) ListFeedConfigs(ctx context.Context) ([]db.FeedConfig, error) {
@@ -187,6 +271,16 @@ func (s *adminErrorStore) UpsertSystemSettings(ctx context.Context, settings *db
 		return err
 	}
 	return s.adminFlowStoreStub.UpsertSystemSettings(ctx, settings)
+}
+
+func (s *adminErrorStore) UpsertSystemSettingsWithAudit(ctx context.Context, settings *db.SystemSettings, audit *db.AdminAuditEntry) error {
+	if err := s.err("UpsertSystemSettings"); err != nil {
+		return err
+	}
+	if err := s.err("InsertAdminAuditLog"); err != nil {
+		return errors.Join(db.ErrAdminAuditLog, err)
+	}
+	return s.adminFlowStoreStub.UpsertSystemSettingsWithAudit(ctx, settings, audit)
 }
 
 func (s *adminErrorStore) DashboardStats(ctx context.Context) (*db.DashboardStatsResult, error) {
@@ -345,15 +439,26 @@ func newAdminHandlerForStore(t *testing.T, store db.Store, cfg *config.Config) (
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	sm := auth.NewSessionManager(ctx, time.Hour, false)
+	sm := auth.NewSessionManagerWithIdleTimeout(ctx, time.Hour, auth.DefaultAdminIdleTimeout, false)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	var runtime *config.RuntimeSettings
 	if cfg != nil {
-		runtime = config.NewRuntimeSettings(cfg.Server.BlockThreshold, cfg.Server.RateLimitPerMinute, cfg.Server.RateLimitBurst)
+		runtime = config.NewRuntimeSettingsFromConfig(cfg)
 	} else {
 		runtime = config.NewRuntimeSettings("CRITICAL", 60, 60)
 	}
-	return NewAdminHandler(ctx, store, sm, web.NewRenderer(web.TemplateFS(), false), logger, cfg, runtime, nil), sm
+	handler := NewAdminHandler(ctx, store, sm, web.NewRendererWithLayoutLinks(web.TemplateFS(), false, web.LayoutLinks{}), logger, cfg, runtime, nil)
+	handler.SetFeedConfigApplyFunc(func(context.Context, config.FeedSettings) error {
+		return nil
+	})
+	handler.SetFeedConfigResetFunc(func(_ context.Context, feedName string) (config.FeedSettings, bool, error) {
+		if cfg == nil {
+			return config.FeedSettings{}, false, nil
+		}
+		feed, ok := cfg.FeedSettings(feedName)
+		return feed, ok, nil
+	})
+	return handler, sm
 }
 
 func TestAdminUnauthenticatedRedirectsIncludeHTMXBranch(t *testing.T) {
@@ -415,6 +520,43 @@ func TestAdminPagesRenderFallbacksWhenStoreReadsFail(t *testing.T) {
 			tt.call(rec, req)
 			if rec.Code != http.StatusOK {
 				t.Fatalf("%s status = %d body=%s", tt.target, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestAdminPagesFailClosedWhenCSRFTokenGenerationFails(t *testing.T) {
+	store := newAdminStoreStub()
+	handler, sm, _ := newAdminFlowHandler(t, store, adminFlowConfig())
+	handler.csrfToken = func(*auth.Session) (string, error) {
+		return "", errors.New("rng unavailable")
+	}
+
+	for _, tt := range []struct {
+		name   string
+		target string
+		call   func(http.ResponseWriter, *http.Request)
+	}{
+		{name: "dashboard", target: "/admin/", call: handler.HandleDashboard},
+		{name: "feeds", target: "/admin/feeds", call: handler.HandleAdminFeeds},
+		{name: "queue", target: "/admin/queue", call: handler.HandleAdminQueue},
+		{name: "scans", target: "/admin/scans", call: handler.HandleAdminScans},
+		{name: "keys", target: "/admin/keys", call: handler.HandleAdminKeys},
+		{name: "advisories", target: "/admin/advisories", call: handler.HandleAdminAdvisories},
+		{name: "audit", target: "/admin/audit", call: handler.HandleAdminAudit},
+		{name: "settings", target: "/admin/settings", call: handler.HandleAdminSettings},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			req, _ := authenticatedAdminRequest(t, sm, http.MethodGet, tt.target)
+			rec := httptest.NewRecorder()
+
+			tt.call(rec, req)
+
+			if rec.Code != http.StatusInternalServerError {
+				t.Fatalf("%s status = %d, want %d; body=%s", tt.target, rec.Code, http.StatusInternalServerError, rec.Body.String())
+			}
+			if strings.Contains(rec.Body.String(), `name="_csrf" value=""`) {
+				t.Fatalf("%s rendered empty CSRF token\nbody=%s", tt.target, rec.Body.String())
 			}
 		})
 	}
@@ -825,12 +967,12 @@ func TestAdminAdvisoryCreateValidationBranches(t *testing.T) {
 		mutate func(url.Values)
 		want   string
 	}{
-		{name: "invalid finding type", mutate: func(v url.Values) { v.Set("finding_type", "other") }, want: "Invalid+finding+type"},
-		{name: "missing required", mutate: func(v url.Values) { v.Set("summary", "") }, want: "required+fields"},
-		{name: "invalid severity", mutate: func(v url.Values) { v.Set("severity", "INFO") }, want: "Invalid+severity"},
-		{name: "unknown ecosystem", mutate: func(v url.Values) { v.Set("ecosystem", "unknown") }, want: "Unknown+ecosystem"},
-		{name: "too long", mutate: func(v url.Values) { v.Set("name", strings.Repeat("x", 257)) }, want: "maximum+length"},
-		{name: "non manual id", mutate: func(v url.Values) { v.Set("id", "GHSA-real") }, want: "manual%3A"},
+		{name: "invalid finding type", mutate: func(v url.Values) { v.Set("finding_type", "other") }, want: "Invalid finding type"},
+		{name: "missing required", mutate: func(v url.Values) { v.Set("summary", "") }, want: "required fields"},
+		{name: "invalid severity", mutate: func(v url.Values) { v.Set("severity", "INFO") }, want: "Invalid severity"},
+		{name: "unknown ecosystem", mutate: func(v url.Values) { v.Set("ecosystem", "unknown") }, want: "Unknown ecosystem"},
+		{name: "too long", mutate: func(v url.Values) { v.Set("name", strings.Repeat("x", 257)) }, want: "maximum length"},
+		{name: "non manual id", mutate: func(v url.Values) { v.Set("id", "GHSA-real") }, want: "manual:"},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
@@ -842,11 +984,14 @@ func TestAdminAdvisoryCreateValidationBranches(t *testing.T) {
 			req, _ := authenticatedAdminFormRequest(t, sm, "/admin/advisories/create", values)
 			rec := httptest.NewRecorder()
 			handler.HandleAdvisoryCreate(rec, req)
-			if rec.Code != http.StatusSeeOther {
-				t.Fatalf("status = %d, want 303", rec.Code)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; location=%q body=%s", rec.Code, rec.Header().Get("Location"), rec.Body.String())
 			}
-			if got := rec.Header().Get("Location"); !strings.Contains(got, tt.want) {
-				t.Fatalf("Location = %q, want containing %q", got, tt.want)
+			if got := rec.Header().Get("Location"); got != "" {
+				t.Fatalf("validation error redirected to %q", got)
+			}
+			if body := rec.Body.String(); !strings.Contains(body, tt.want) {
+				t.Fatalf("body missing %q:\n%s", tt.want, body)
 			}
 		})
 	}

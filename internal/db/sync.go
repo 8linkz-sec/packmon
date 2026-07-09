@@ -26,23 +26,40 @@ type SyncExport struct {
 	NextCursor      *SyncCursor
 }
 
+// SyncCursor carries per-dataset pagination state for /api/v1/sync exports.
+//
+// The zero value means "start at the beginning" for vulnerabilities, malicious
+// findings, reputation rows, and lifecycle rows. Pagination state is split by
+// dataset because each exported dataset can exhaust at a different page while
+// the sync stays within one stable snapshot.
 type SyncCursor struct {
+	// Legacy offsets are retained for older clients and for the top-level
+	// SyncExportOptions.Offset fallback. A dataset offset is used only when the
+	// matching opaque keyset cursor string is empty.
 	Vulnerabilities int `json:"vulnerabilities"`
 	Malicious       int `json:"malicious"`
 	Reputation      int `json:"reputation"`
 	Lifecycle       int `json:"lifecycle"`
 
+	// Opaque keyset cursor strings are returned by the server in next_cursor
+	// and echoed by modern clients on the next page request. Callers must treat
+	// these strings as server-owned tokens, not as a stable public encoding.
 	VulnerabilitiesCursor string `json:"vulnerabilities_cursor,omitempty"`
 	MaliciousCursor       string `json:"malicious_cursor,omitempty"`
 	ReputationCursor      string `json:"reputation_cursor,omitempty"`
 	LifecycleCursor       string `json:"lifecycle_cursor,omitempty"`
 
+	// Done flags mark datasets that were exhausted in the current paginated
+	// sync sequence. The exporter skips a done dataset on later pages so other
+	// datasets can continue advancing independently.
 	VulnerabilitiesDone bool `json:"vulnerabilities_done,omitempty"`
 	MaliciousDone       bool `json:"malicious_done,omitempty"`
 	ReputationDone      bool `json:"reputation_done,omitempty"`
 	LifecycleDone       bool `json:"lifecycle_done,omitempty"`
 }
 
+// IsZero reports whether the cursor carries no offsets, keyset cursor strings,
+// or done flags. A zero cursor requests the first page for every dataset.
 func (c SyncCursor) IsZero() bool {
 	return c.Vulnerabilities == 0 &&
 		c.Malicious == 0 &&
@@ -58,6 +75,10 @@ func (c SyncCursor) IsZero() bool {
 		!c.LifecycleDone
 }
 
+// EffectiveCursor returns the explicit cursor when one was provided. If only a
+// legacy top-level Offset was provided, it expands that offset to all datasets
+// so older offset-only clients keep paginating through the same export path.
+// Non-positive offsets leave the cursor at its zero-value first-page state.
 func (opts SyncExportOptions) EffectiveCursor() SyncCursor {
 	if !opts.Cursor.IsZero() {
 		return opts.Cursor

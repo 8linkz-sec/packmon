@@ -47,11 +47,13 @@ func TestNewFeedSyncTriggerUsesBackgroundManagerWhenAvailable(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	store := newNoopStore()
 	manager := feed.NewManager(store, logger, time.Hour)
-	manager.Register(feed.FeedConfig{
+	if err := manager.Register(feed.FeedConfig{
 		Syncer:  triggerSyncer{name: "test-feed"},
 		Mode:    feed.FeedModeSelf,
 		Enabled: true,
-	})
+	}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
 
 	trigger := newFeedSyncTrigger(&config.Config{}, store, logger, &backgroundServices{manager: manager})
 	if err := trigger(context.Background(), "test-feed"); err != nil {
@@ -68,11 +70,13 @@ func TestBackgroundWaitTracksManualFeedSync(t *testing.T) {
 		started: make(chan struct{}),
 		release: make(chan struct{}),
 	}
-	manager.Register(feed.FeedConfig{
+	if err := manager.Register(feed.FeedConfig{
 		Syncer:  syncer,
 		Mode:    feed.FeedModeSelf,
 		Enabled: true,
-	})
+	}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
 	background := &backgroundServices{
 		manager:      manager,
 		logger:       logger,

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/8linkz-sec/packmon/internal/db"
 )
@@ -14,9 +15,11 @@ import (
 func TestApplyStoredSystemSettingsOverridesRuntimeConfig(t *testing.T) {
 	store := newNoopStore()
 	if err := store.UpsertSystemSettings(context.Background(), &db.SystemSettings{
-		BlockThreshold:     "HIGH",
-		RateLimitPerMinute: 120,
-		RateLimitBurst:     25,
+		BlockThreshold:      "HIGH",
+		RateLimitPerMinute:  120,
+		RateLimitBurst:      25,
+		ScanLogRetention:    45 * 24 * time.Hour,
+		AdminAuditRetention: 14 * 24 * time.Hour,
 	}); err != nil {
 		t.Fatalf("UpsertSystemSettings() error = %v", err)
 	}
@@ -25,6 +28,8 @@ func TestApplyStoredSystemSettingsOverridesRuntimeConfig(t *testing.T) {
 	cfg.Server.BlockThreshold = "CRITICAL"
 	cfg.Server.RateLimitPerMinute = 60
 	cfg.Server.RateLimitBurst = 60
+	cfg.Retention.ScanLog = 30 * 24 * time.Hour
+	cfg.Retention.AdminAuditLog = 30 * 24 * time.Hour
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	if err := applyStoredSystemSettings(context.Background(), cfg, store, logger); err != nil {
@@ -39,6 +44,12 @@ func TestApplyStoredSystemSettingsOverridesRuntimeConfig(t *testing.T) {
 	}
 	if cfg.Server.RateLimitBurst != 25 {
 		t.Fatalf("Server.RateLimitBurst = %d, want 25", cfg.Server.RateLimitBurst)
+	}
+	if cfg.Retention.ScanLog != 45*24*time.Hour {
+		t.Fatalf("Retention.ScanLog = %s, want 1080h", cfg.Retention.ScanLog)
+	}
+	if cfg.Retention.AdminAuditLog != 14*24*time.Hour {
+		t.Fatalf("Retention.AdminAuditLog = %s, want 336h", cfg.Retention.AdminAuditLog)
 	}
 }
 

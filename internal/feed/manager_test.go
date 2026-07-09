@@ -5,6 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"log/slog"
 	"strings"
@@ -24,16 +27,115 @@ type managerStoreStub struct {
 	getErr           error
 	getWaitForCtx    bool
 	getEntered       chan struct{}
+	getCtxErr        error
 	upsertErr        error
+	upsertErrOnCall  int
+	upsertCalls      int
 	propagated       int
 	propagateErr     error
+	propagatePanic   any
 	propagateCalled  atomic.Bool
 	propagateEntered chan struct{}
 	propagateRelease chan struct{}
 }
 
+type managerLogEvent struct {
+	message string
+	feed    string
+}
+
+type managerLogSink struct {
+	mu     sync.Mutex
+	events []managerLogEvent
+	ch     chan managerLogEvent
+}
+
+type managerLogHandler struct {
+	sink  *managerLogSink
+	attrs []slog.Attr
+}
+
+func newManagerLogHandler() (*managerLogHandler, *managerLogSink) {
+	sink := &managerLogSink{ch: make(chan managerLogEvent, 32)}
+	return &managerLogHandler{sink: sink}, sink
+}
+
+func (h *managerLogHandler) Enabled(context.Context, slog.Level) bool {
+	return true
+}
+
+func (h *managerLogHandler) Handle(_ context.Context, record slog.Record) error {
+	attrs := append([]slog.Attr(nil), h.attrs...)
+	record.Attrs(func(attr slog.Attr) bool {
+		attrs = append(attrs, attr)
+		return true
+	})
+	event := managerLogEvent{message: record.Message}
+	for _, attr := range attrs {
+		if attr.Key == "feed" {
+			event.feed = attr.Value.String()
+		}
+	}
+
+	h.sink.mu.Lock()
+	h.sink.events = append(h.sink.events, event)
+	h.sink.mu.Unlock()
+
+	select {
+	case h.sink.ch <- event:
+	default:
+	}
+	return nil
+}
+
+func (h *managerLogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	next := &managerLogHandler{
+		sink:  h.sink,
+		attrs: append([]slog.Attr(nil), h.attrs...),
+	}
+	next.attrs = append(next.attrs, attrs...)
+	return next
+}
+
+func (h *managerLogHandler) WithGroup(string) slog.Handler {
+	return h
+}
+
+func (s *managerLogSink) count(message, feed string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	count := 0
+	for _, event := range s.events {
+		if event.message == message && event.feed == feed {
+			count++
+		}
+	}
+	return count
+}
+
+func (s *managerLogSink) indexOf(message, feed string, occurrence int) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	seen := 0
+	for i, event := range s.events {
+		if event.message != message || event.feed != feed {
+			continue
+		}
+		seen++
+		if seen == occurrence {
+			return i
+		}
+	}
+	return -1
+}
+
 func (s *managerStoreStub) PropagateSeverityViaAliases(context.Context) (int, error) {
 	s.propagateCalled.Store(true)
+	if s.propagatePanic != nil {
+		panic(s.propagatePanic)
+	}
 	if s.propagateEntered != nil {
 		select {
 		case s.propagateEntered <- struct{}{}:
@@ -55,7 +157,11 @@ func (s *managerStoreStub) GetFeedSyncStatus(ctx context.Context, feedName strin
 			}
 		}
 		<-ctx.Done()
-		return nil, ctx.Err()
+		err := ctx.Err()
+		s.mu.Lock()
+		s.getCtxErr = err
+		s.mu.Unlock()
+		return nil, err
 	}
 
 	s.mu.Lock()
@@ -84,7 +190,8 @@ func (s *managerStoreStub) UpsertFeedSyncStatus(_ context.Context, status *db.Fe
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.upsertErr != nil {
+	s.upsertCalls++
+	if s.upsertErr != nil && (s.upsertErrOnCall == 0 || s.upsertCalls == s.upsertErrOnCall) {
 		return s.upsertErr
 	}
 	copyValue := *status
@@ -196,41 +303,93 @@ func TestManagerSyncOneRecordsSkippedWithoutRetry(t *testing.T) {
 	}
 }
 
-func TestManagerSyncOneRejectsOverlappingManualSync(t *testing.T) {
-	store := &managerStoreStub{}
+func TestManagerSyncOneFailsClosedWhenRunningStatusCannotBeRecorded(t *testing.T) {
+	t.Parallel()
+
+	store := &managerStoreStub{upsertErr: errors.New("db down")}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	manager := NewManager(store, logger, time.Hour)
-	syncer := &blockingSyncerStub{name: "osv", entered: make(chan struct{}, 1), release: make(chan struct{})}
+	syncer := &successSyncerStub{name: "osv", result: SyncResult{EntriesSynced: 1, EntriesTotal: 1}}
 	manager.Register(FeedConfig{
 		Syncer:  syncer,
 		Mode:    FeedModeSelf,
 		Enabled: true,
 	})
 
-	firstDone := make(chan error, 1)
-	go func() {
-		firstDone <- manager.SyncOne(context.Background(), "osv")
-	}()
-
-	select {
-	case <-syncer.entered:
-	case <-time.After(time.Second):
-		t.Fatal("first manual sync did not start")
-	}
-
-	start := time.Now()
 	err := manager.SyncOne(context.Background(), "osv")
-	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("SyncOne() error = nil, want status persistence error")
+	}
+	if !strings.Contains(err.Error(), "record running status") {
+		t.Fatalf("SyncOne() error = %v, want running-status persistence failure", err)
+	}
+	if syncer.calls != 0 {
+		t.Fatalf("syncer calls = %d, want 0 when running status cannot be recorded", syncer.calls)
+	}
+}
+
+func TestManagerSyncOneFailsClosedWhenFinalStatusCannotBeRecorded(t *testing.T) {
+	t.Parallel()
+
+	store := &managerStoreStub{
+		upsertErr:       errors.New("db down"),
+		upsertErrOnCall: 2,
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	manager := NewManager(store, logger, time.Hour)
+	syncer := &successSyncerStub{name: "ghsa", result: SyncResult{EntriesSynced: 3, EntriesTotal: 3}}
+	manager.Register(FeedConfig{
+		Syncer:  syncer,
+		Mode:    FeedModeSelf,
+		Enabled: true,
+	})
+
+	err := manager.SyncOne(context.Background(), "ghsa")
+	if err == nil {
+		t.Fatal("SyncOne() error = nil, want final status persistence error")
+	}
+	if !strings.Contains(err.Error(), "record success status") {
+		t.Fatalf("SyncOne() error = %v, want success-status persistence failure", err)
+	}
+	if syncer.calls != 1 {
+		t.Fatalf("syncer calls = %d, want feed sync to run before final status failure", syncer.calls)
+	}
+	if store.upsertCalls != 2 {
+		t.Fatalf("UpsertFeedSyncStatus calls = %d, want running and final status writes", store.upsertCalls)
+	}
+	if store.status == nil || store.status.LastSyncStatus != "running" {
+		t.Fatalf("persisted status = %+v, want running preserved after final write failure", store.status)
+	}
+}
+
+func TestManagerSyncOneRejectsOverlappingManualSync(t *testing.T) {
+	store := &managerStoreStub{}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	manager := NewManager(store, logger, time.Hour)
+	syncer := &successSyncerStub{name: "osv", result: SyncResult{EntriesSynced: 1, EntriesTotal: 1}}
+	manager.Register(FeedConfig{
+		Syncer:  syncer,
+		Mode:    FeedModeSelf,
+		Enabled: true,
+	})
+	manager.mu.Lock()
+	syncMu := manager.feedLocks["osv"]
+	manager.mu.Unlock()
+	syncMu.Lock()
+	defer syncMu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := manager.SyncOne(ctx, "osv")
 	if !errors.Is(err, ErrSyncAlreadyRunning) {
 		t.Fatalf("overlapping SyncOne error = %v, want ErrSyncAlreadyRunning", err)
 	}
-	if elapsed > 100*time.Millisecond {
-		t.Fatalf("overlapping SyncOne took %s, want fail-fast without waiting behind the feed lock", elapsed)
+	if syncer.calls != 0 {
+		t.Fatalf("syncer calls = %d, want overlapping manual sync rejected before running", syncer.calls)
 	}
-
-	close(syncer.release)
-	if err := <-firstDone; err != nil {
-		t.Fatalf("first SyncOne error = %v", err)
+	if store.upsertCalls != 0 {
+		t.Fatalf("status writes = %d, want none for rejected overlapping manual sync", store.upsertCalls)
 	}
 }
 
@@ -245,28 +404,17 @@ func TestManagerBackgroundLockWaitHonorsContextCancellation(t *testing.T) {
 		syncMu: syncMu,
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
-	defer cancel()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
 
-	done := make(chan error, 1)
-	go func() {
-		_, err := manager.syncWithRetry(ctx, rf, true)
-		done <- err
-	}()
-
-	select {
-	case err := <-done:
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("syncWithRetry() error = %v, want context deadline while waiting for feed lock", err)
-		}
-	case <-time.After(150 * time.Millisecond):
-		syncMu.Unlock()
-		err := <-done
-		t.Fatalf("syncWithRetry() ignored context while waiting for feed lock; returned after unlock with %v", err)
+	_, err := manager.syncWithRetry(ctx, rf, true)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("syncWithRetry() error = %v, want context cancellation while waiting for feed lock", err)
 	}
 	if syncer.calls != 0 {
-		t.Fatalf("syncer calls = %d, want 0 when context expires before lock acquisition", syncer.calls)
+		t.Fatalf("syncer calls = %d, want 0 when context ends before lock acquisition", syncer.calls)
 	}
+	syncMu.Unlock()
 }
 
 func TestManagerSyncOneRecordsErrorWhenContextEndsAfterRunningStatus(t *testing.T) {
@@ -374,6 +522,90 @@ func TestManagerApplyConfigSerializesOldAndNewSyncForSameFeed(t *testing.T) {
 	close(newSyncer.release)
 	cancel()
 	manager.Wait()
+}
+
+func TestManagerApplyConfigStartsReplacementLoopAfterOldLoopStops(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	store := &managerStoreStub{}
+	logHandler, logSink := newManagerLogHandler()
+	manager := NewManager(store, slog.New(logHandler), time.Hour)
+	oldSyncer := &blockingSyncerStub{name: "osv", entered: make(chan struct{}, 1), release: make(chan struct{})}
+	newRelease := make(chan struct{})
+	latestRelease := make(chan struct{})
+	releaseOld := sync.Once{}
+	releaseNew := sync.Once{}
+	releaseLatest := sync.Once{}
+	t.Cleanup(func() {
+		releaseOld.Do(func() { close(oldSyncer.release) })
+		cancel()
+		releaseNew.Do(func() { close(newRelease) })
+		releaseLatest.Do(func() { close(latestRelease) })
+		manager.Wait()
+	})
+
+	if err := manager.Register(FeedConfig{
+		Syncer:  oldSyncer,
+		Mode:    FeedModeSelf,
+		Enabled: true,
+	}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	manager.Start(ctx)
+
+	select {
+	case <-oldSyncer.entered:
+	case <-time.After(time.Second):
+		t.Fatal("old feed sync did not start")
+	}
+
+	newSyncer := &blockingSyncerStub{name: "osv", entered: make(chan struct{}, 1), release: newRelease}
+	manager.ApplyConfig(context.Background(), FeedConfig{
+		Syncer:  newSyncer,
+		Mode:    FeedModeSelf,
+		Enabled: true,
+	}, time.Hour)
+
+	latestSyncer := &blockingSyncerStub{name: "osv", entered: make(chan struct{}, 1), release: latestRelease}
+	manager.ApplyConfig(context.Background(), FeedConfig{
+		Syncer:  latestSyncer,
+		Mode:    FeedModeSelf,
+		Enabled: true,
+	}, time.Hour)
+
+	deadline := time.After(250 * time.Millisecond)
+	for logSink.count("starting feed sync loop", "osv") < 2 {
+		select {
+		case <-logSink.ch:
+		case <-deadline:
+			releaseOld.Do(func() { close(oldSyncer.release) })
+			goto oldReleased
+		}
+	}
+	t.Fatal("replacement feed loop logged its opener before the old loop reached its terminal log")
+
+oldReleased:
+	select {
+	case <-newSyncer.entered:
+		t.Fatal("stale queued replacement started after a newer config replaced it")
+	case <-latestSyncer.entered:
+	case <-time.After(time.Second):
+		t.Fatal("latest feed sync did not start after old loop stopped")
+	}
+
+	releaseLatest.Do(func() { close(latestRelease) })
+	cancel()
+	manager.Wait()
+
+	oldShutdown := logSink.indexOf("feed sync loop shutting down", "osv", 1)
+	secondStart := logSink.indexOf("starting feed sync loop", "osv", 2)
+	if oldShutdown < 0 || secondStart < 0 {
+		t.Fatalf("missing lifecycle logs: oldShutdown=%d secondStart=%d", oldShutdown, secondStart)
+	}
+	if secondStart < oldShutdown {
+		t.Fatalf("replacement opener log index %d before old shutdown log index %d", secondStart, oldShutdown)
+	}
 }
 
 func TestManagerApplyConfigPreventsStaleSyncStatusOverwrite(t *testing.T) {
@@ -515,27 +747,25 @@ func TestManagerHelpersAndLastSyncFresh(t *testing.T) {
 func TestLastSyncFreshUsesBoundedStatusRead(t *testing.T) {
 	store := &managerStoreStub{
 		getWaitForCtx: true,
-		getEntered:    make(chan struct{}, 1),
 	}
 	var logs bytes.Buffer
 	manager := NewManager(store, slog.New(slog.NewJSONHandler(&logs, nil)), time.Hour)
 	manager.feedStatusReadTimeout = 20 * time.Millisecond
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	start := time.Now()
 	if manager.lastSyncFresh(ctx, "osv", time.Hour) {
 		t.Fatal("blocked status read should not be treated as fresh")
 	}
-	elapsed := time.Since(start)
-	if elapsed > 200*time.Millisecond {
-		t.Fatalf("lastSyncFresh took %s, want local read timeout before parent context", elapsed)
-	}
 
-	select {
-	case <-store.getEntered:
-	default:
-		t.Fatal("GetFeedSyncStatus was not called")
+	store.mu.Lock()
+	getCtxErr := store.getCtxErr
+	store.mu.Unlock()
+	if !errors.Is(getCtxErr, context.DeadlineExceeded) {
+		t.Fatalf("GetFeedSyncStatus context error = %v, want local deadline exceeded", getCtxErr)
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("parent context error = %v, want local read timeout before parent context", ctx.Err())
 	}
 
 	logLine := logs.String()
@@ -568,6 +798,48 @@ func TestManagerStartHonorsDisabledStartupSync(t *testing.T) {
 	status, ok := managerStatusByName(store, "osv")
 	if !ok || status.LastSyncStatus != "pending" {
 		t.Fatalf("osv status = %+v ok=%v, want pending row while startup sync is disabled", status, ok)
+	}
+}
+
+func TestManagerStartupWiringDoesNotUseRawBooleanHelperArgs(t *testing.T) {
+	t.Parallel()
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "manager.go", nil, 0)
+	if err != nil {
+		t.Fatalf("ParseFile(manager.go) error = %v", err)
+	}
+
+	guardedHelpers := map[string]struct{}{
+		"startFeedLocked":                {},
+		"startFeedLockedWithInitialSync": {},
+	}
+	var failures []string
+	ast.Inspect(file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		selector, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		if _, ok := guardedHelpers[selector.Sel.Name]; !ok {
+			return true
+		}
+		for _, arg := range call.Args {
+			ident, ok := arg.(*ast.Ident)
+			if !ok || (ident.Name != "true" && ident.Name != "false") {
+				continue
+			}
+			pos := fset.Position(ident.Pos())
+			failures = append(failures, fmt.Sprintf("%s:%d passes raw boolean %s to %s", pos.Filename, pos.Line, ident.Name, selector.Sel.Name))
+		}
+		return true
+	})
+
+	if len(failures) > 0 {
+		t.Fatalf("manager startup helper calls must use named options instead of positional booleans:\n%s", strings.Join(failures, "\n"))
 	}
 }
 
@@ -708,6 +980,44 @@ func TestManagerStartRecordsStatusWhenAliasPropagationFails(t *testing.T) {
 	}
 }
 
+func TestManagerStartRecordsStatusWhenAliasPropagationPanics(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	store := &managerStoreStub{propagatePanic: "alias propagation panic"}
+	manager := NewManager(store, slog.New(slog.NewJSONHandler(&logs, nil)), time.Hour)
+	syncer := &successSyncerStub{name: "osv", result: SyncResult{EntriesSynced: 1, EntriesTotal: 1}}
+	manager.Register(FeedConfig{Syncer: syncer, Enabled: true, Mode: FeedModeSelf})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	manager.Start(ctx)
+
+	deadline := time.After(time.Second)
+	for {
+		if status, ok := managerStatusByName(store, aliasSeverityPropagationStatusName); ok {
+			if status.LastSyncStatus != db.FeedSyncStatusError {
+				t.Fatalf("alias propagation status = %+v, want error", status)
+			}
+			if !strings.Contains(status.LastError, "alias propagation panic") {
+				t.Fatalf("alias propagation LastError = %q, want recovered panic diagnostic", status.LastError)
+			}
+			if logLine := logs.String(); !strings.Contains(logLine, "alias severity propagation panic") {
+				t.Fatalf("logs missing recovered panic diagnostic: %s", logLine)
+			}
+			cancel()
+			manager.Wait()
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("alias propagation panic status was not recorded")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
 func TestManagerStartMarksInterruptedRunningStatusBeforeRestartingFeed(t *testing.T) {
 	t.Parallel()
 
@@ -719,7 +1029,7 @@ func TestManagerStartMarksInterruptedRunningStatusBeforeRestartingFeed(t *testin
 			LastSyncAt:     &started,
 			EntriesSynced:  70,
 			EntriesTotal:   96,
-			LastEtag:       "etag-old",
+			LastETag:       "etag-old",
 			LastCommitHash: "commit-old",
 			Metadata:       []byte(`{"cursor":"old"}`),
 		},
@@ -759,7 +1069,7 @@ func TestManagerStartMarksInterruptedRunningStatusBeforeRestartingFeed(t *testin
 	if recovered.EntriesSynced != 70 || recovered.EntriesTotal != 96 {
 		t.Fatalf("entries = %d/%d, want preserved 70/96", recovered.EntriesSynced, recovered.EntriesTotal)
 	}
-	if recovered.LastEtag != "etag-old" || recovered.LastCommitHash != "commit-old" || string(recovered.Metadata) != `{"cursor":"old"}` {
+	if recovered.LastETag != "etag-old" || recovered.LastCommitHash != "commit-old" || string(recovered.Metadata) != `{"cursor":"old"}` {
 		t.Fatalf("sync metadata was not preserved: %+v", recovered)
 	}
 }
@@ -773,30 +1083,53 @@ func TestManagerRunSyncBranches(t *testing.T) {
 	cancelledManager := NewManager(cancelledStore, logger, time.Hour)
 	cancelledCtx, cancel := context.WithCancel(context.Background())
 	cancel()
-	cancelledManager.runSync(cancelledCtx, &registeredFeed{
+	if err := cancelledManager.runSync(cancelledCtx, &registeredFeed{
 		config: FeedConfig{Syncer: &successSyncerStub{name: "cancelled"}, Enabled: true, Mode: FeedModeSelf},
-	}, logger)
+	}, logger); err != nil {
+		t.Fatalf("cancelled runSync error = %v, want nil before any sync starts", err)
+	}
 	if len(cancelledStore.statuses) != 0 {
 		t.Fatalf("cancelled runSync recorded %d statuses, want 0", len(cancelledStore.statuses))
 	}
 
 	permanentStore := &managerStoreStub{}
 	permanentManager := NewManager(permanentStore, logger, time.Hour)
-	permanentManager.runSync(context.Background(), &registeredFeed{
+	if err := permanentManager.runSync(context.Background(), &registeredFeed{
 		config: FeedConfig{Syncer: &permanentSyncerStub{name: "vulncheck"}, Enabled: true, Mode: FeedModeSelf},
-	}, logger)
+	}, logger); err == nil {
+		t.Fatal("permanent runSync error = nil, want permanent feed error")
+	}
 	if permanentStore.status == nil || permanentStore.status.LastSyncStatus != "permanent_error" {
 		t.Fatalf("permanent runSync status = %+v, want permanent_error", permanentStore.status)
 	}
 
 	upsertFailStore := &managerStoreStub{upsertErr: errors.New("db down")}
 	upsertFailManager := NewManager(upsertFailStore, logger, time.Hour)
-	upsertFailManager.recordStatus(context.Background(), "osv", "success", "", time.Millisecond, &SyncResult{EntriesSynced: 1, EntriesTotal: 1})
-	upsertFailManager.recordRunningStatus(context.Background(), "osv")
+	if err := upsertFailManager.recordStatus(context.Background(), "osv", "success", "", time.Millisecond, &SyncResult{EntriesSynced: 1, EntriesTotal: 1}); err == nil {
+		t.Fatal("recordStatus() error = nil, want upsert failure")
+	}
+	if err := upsertFailManager.recordRunningStatus(context.Background(), "osv"); err == nil {
+		t.Fatal("recordRunningStatus() error = nil, want upsert failure")
+	}
 }
 
 func TestRecordRunningStatusPreservesExistingMetadata(t *testing.T) {
 	t.Parallel()
+
+	emptyStore := &managerStoreStub{}
+	emptyManager := NewManager(emptyStore, slog.New(slog.NewTextHandler(io.Discard, nil)), time.Hour)
+	if err := emptyManager.recordRunningStatus(context.Background(), "osv"); err != nil {
+		t.Fatalf("initial recordRunningStatus() error = %v", err)
+	}
+	if emptyStore.status == nil || emptyStore.status.LastSyncStatus != "running" {
+		t.Fatalf("initial recorded status = %+v, want running", emptyStore.status)
+	}
+	if emptyStore.status.LastSyncAt != nil {
+		t.Fatalf("initial LastSyncAt = %v, want nil before usable feed data exists", emptyStore.status.LastSyncAt)
+	}
+	if emptyStore.status.UpdatedAt.IsZero() {
+		t.Fatal("initial UpdatedAt is zero, want running attempt heartbeat")
+	}
 
 	lastSuccessfulSync := time.Now().UTC().Add(-72 * time.Hour)
 	metadata := []byte(`{"etag":"old"}`)
@@ -807,7 +1140,7 @@ func TestRecordRunningStatusPreservesExistingMetadata(t *testing.T) {
 			LastSyncAt:     &lastSuccessfulSync,
 			EntriesSynced:  7,
 			EntriesTotal:   9,
-			LastEtag:       "etag-old",
+			LastETag:       "etag-old",
 			LastCommitHash: "commit-old",
 			Metadata:       metadata,
 		},
@@ -829,7 +1162,7 @@ func TestRecordRunningStatusPreservesExistingMetadata(t *testing.T) {
 	if store.status.EntriesSynced != 7 || store.status.EntriesTotal != 9 {
 		t.Fatalf("recorded entries = %d/%d, want 7/9", store.status.EntriesSynced, store.status.EntriesTotal)
 	}
-	if store.status.LastEtag != "etag-old" || store.status.LastCommitHash != "commit-old" {
+	if store.status.LastETag != "etag-old" || store.status.LastCommitHash != "commit-old" {
 		t.Fatalf("recorded status lost sync metadata: %+v", store.status)
 	}
 	if string(store.status.Metadata) != `{"etag":"old"}` {
@@ -849,7 +1182,7 @@ func TestRecordStatusPreservesExistingDataForNonSuccessStatuses(t *testing.T) {
 			LastSyncAt:     &lastSuccessfulSync,
 			EntriesSynced:  7,
 			EntriesTotal:   9,
-			LastEtag:       "etag-old",
+			LastETag:       "etag-old",
 			LastCommitHash: "commit-old",
 			Metadata:       metadata,
 		},
@@ -868,7 +1201,7 @@ func TestRecordStatusPreservesExistingDataForNonSuccessStatuses(t *testing.T) {
 	if store.status.EntriesSynced != 7 || store.status.EntriesTotal != 9 {
 		t.Fatalf("recorded entries = %d/%d, want 7/9", store.status.EntriesSynced, store.status.EntriesTotal)
 	}
-	if store.status.LastEtag != "etag-old" || store.status.LastCommitHash != "commit-old" {
+	if store.status.LastETag != "etag-old" || store.status.LastCommitHash != "commit-old" {
 		t.Fatalf("recorded status lost sync metadata: %+v", store.status)
 	}
 	if string(store.status.Metadata) != `{"cursor":"old"}` {
@@ -905,7 +1238,10 @@ func TestManagerStartFeedLockedWaitForPhaseCancellation(t *testing.T) {
 	}
 	manager.feeds["epss"] = rf
 
-	manager.startFeedLocked(rf, time.Hour, nil, true)
+	manager.startFeedLocked(rf, time.Hour, nil, feedStartOptions{
+		waitForPhase1: true,
+		syncOnStartup: true,
+	})
 	cancel()
 	manager.Wait()
 
@@ -925,6 +1261,13 @@ func TestPermanentErrorNilReturnsNil(t *testing.T) {
 	}
 }
 
+func TestNonRetryableErrorNilReturnsNil(t *testing.T) {
+	t.Parallel()
+	if got := NonRetryableError(nil); got != nil {
+		t.Fatalf("NonRetryableError(nil) = %v, want nil", got)
+	}
+}
+
 func TestPermanentErrorWrapsAndPreservesMessage(t *testing.T) {
 	t.Parallel()
 	inner := errors.New("bad config")
@@ -934,10 +1277,28 @@ func TestPermanentErrorWrapsAndPreservesMessage(t *testing.T) {
 	}
 }
 
+func TestNonRetryableErrorWrapsAndPreservesMessage(t *testing.T) {
+	t.Parallel()
+	inner := errors.New("bad payload")
+	wrapped := NonRetryableError(inner)
+	if wrapped.Error() != "bad payload" {
+		t.Fatalf("NonRetryableError message = %q, want %q", wrapped.Error(), "bad payload")
+	}
+}
+
 func TestPermanentErrorUnwrapsToOriginal(t *testing.T) {
 	t.Parallel()
 	inner := errors.New("original cause")
 	wrapped := PermanentError(inner)
+	if !errors.Is(wrapped, inner) {
+		t.Fatal("errors.Is(wrapped, inner) = false, want true")
+	}
+}
+
+func TestNonRetryableErrorUnwrapsToOriginal(t *testing.T) {
+	t.Parallel()
+	inner := errors.New("original cause")
+	wrapped := NonRetryableError(inner)
 	if !errors.Is(wrapped, inner) {
 		t.Fatal("errors.Is(wrapped, inner) = false, want true")
 	}
@@ -951,6 +1312,17 @@ func TestPermanentErrorPreservesWrappedChain(t *testing.T) {
 
 	if !errors.Is(perm, sentinel) {
 		t.Fatal("errors.Is(PermanentError(wrapping(sentinel)), sentinel) = false, want true")
+	}
+}
+
+func TestNonRetryableErrorPreservesWrappedChain(t *testing.T) {
+	t.Parallel()
+	sentinel := errors.New("sentinel")
+	wrapped := fmt.Errorf("layer: %w", sentinel)
+	nonRetryable := NonRetryableError(wrapped)
+
+	if !errors.Is(nonRetryable, sentinel) {
+		t.Fatal("errors.Is(NonRetryableError(wrapping(sentinel)), sentinel) = false, want true")
 	}
 }
 
@@ -1003,6 +1375,51 @@ func TestIsPermanentError(t *testing.T) {
 			t.Parallel()
 			if got := IsPermanentError(tt.err); got != tt.want {
 				t.Fatalf("IsPermanentError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsNonRetryableError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "nil is retryable by default",
+			err:  nil,
+			want: false,
+		},
+		{
+			name: "plain error is retryable",
+			err:  errors.New("network failure"),
+			want: false,
+		},
+		{
+			name: "NonRetryableError is non-retryable",
+			err:  NonRetryableError(errors.New("bad payload")),
+			want: true,
+		},
+		{
+			name: "wrapped NonRetryableError is non-retryable",
+			err:  fmt.Errorf("sync failed: %w", NonRetryableError(errors.New("bad payload"))),
+			want: true,
+		},
+		{
+			name: "PermanentError is not this marker",
+			err:  PermanentError(errors.New("missing key")),
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := IsNonRetryableError(tt.err); got != tt.want {
+				t.Fatalf("IsNonRetryableError(%v) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
 	}
@@ -1145,6 +1562,29 @@ func TestRegisterWithIntervalOverridesDefault(t *testing.T) {
 	if rf.interval != 5*time.Minute {
 		t.Fatalf("feed interval = %v, want 5m", rf.interval)
 	}
+}
+
+func TestRegisterAfterStartReturnsError(t *testing.T) {
+	t.Parallel()
+
+	store := &managerStoreStub{}
+	m := NewManager(store, nil, time.Hour)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m.Start(ctx)
+
+	syncer := &permanentSyncerStub{name: "late-feed"}
+	if err := m.Register(FeedConfig{Syncer: syncer, Mode: FeedModeSelf, Enabled: true}); !errors.Is(err, ErrManagerStarted) {
+		t.Fatalf("Register(after Start) error = %v, want ErrManagerStarted", err)
+	}
+	if err := m.RegisterWithInterval(FeedConfig{Syncer: syncer, Mode: FeedModeSelf, Enabled: true}, time.Minute); !errors.Is(err, ErrManagerStarted) {
+		t.Fatalf("RegisterWithInterval(after Start) error = %v, want ErrManagerStarted", err)
+	}
+	if _, ok := m.feeds["late-feed"]; ok {
+		t.Fatal("late-feed was registered after Start")
+	}
+	cancel()
+	m.Wait()
 }
 
 func TestSyncOneUnknownFeedReturnsError(t *testing.T) {
@@ -1313,6 +1753,18 @@ func (s *failingSyncerStub) Sync(_ context.Context, _ db.Store) (*SyncResult, er
 	return nil, s.err
 }
 
+type panicSyncerStub struct {
+	name  string
+	calls int
+}
+
+func (s *panicSyncerStub) Name() string { return s.name }
+
+func (s *panicSyncerStub) Sync(context.Context, db.Store) (*SyncResult, error) {
+	s.calls++
+	panic("syncer boom")
+}
+
 func TestSyncOneTransientErrorRetriesAndFails(t *testing.T) {
 	// Not parallel: mutates package-level backoffSchedule.
 	saved := backoffSchedule
@@ -1345,6 +1797,79 @@ func TestSyncOneTransientErrorRetriesAndFails(t *testing.T) {
 	}
 	if store.status.LastSyncStatus != "error" {
 		t.Fatalf("LastSyncStatus = %q, want error", store.status.LastSyncStatus)
+	}
+}
+
+func TestSyncOneNonRetryableErrorRecordsErrorWithoutRetries(t *testing.T) {
+	store := &managerStoreStub{}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	m := NewManager(store, logger, time.Hour)
+
+	syncer := &failingSyncerStub{name: "epss", err: NonRetryableError(errors.New("invalid feed payload"))}
+	m.Register(FeedConfig{
+		Syncer:  syncer,
+		Mode:    FeedModeSelf,
+		Enabled: true,
+	})
+
+	err := m.SyncOne(context.Background(), "epss")
+	if err == nil {
+		t.Fatal("SyncOne() = nil, want non-retryable error")
+	}
+	if !IsNonRetryableError(err) {
+		t.Fatalf("SyncOne() error = %v, want NonRetryableError marker", err)
+	}
+	if syncer.calls != 1 {
+		t.Fatalf("syncer calls = %d, want 1", syncer.calls)
+	}
+	if store.status == nil {
+		t.Fatal("UpsertFeedSyncStatus was not called")
+	}
+	if store.status.LastSyncStatus != db.FeedSyncStatusError {
+		t.Fatalf("LastSyncStatus = %q, want error", store.status.LastSyncStatus)
+	}
+	if !strings.Contains(store.status.LastError, "invalid feed payload") {
+		t.Fatalf("LastError = %q, want payload diagnostic", store.status.LastError)
+	}
+}
+
+func TestSyncOnePanicIsRecordedAsSyncError(t *testing.T) {
+	// Not parallel: mutates package-level backoffSchedule.
+	saved := backoffSchedule
+	backoffSchedule = [3]time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	defer func() { backoffSchedule = saved }()
+
+	store := &managerStoreStub{}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	m := NewManager(store, logger, time.Hour)
+
+	syncer := &panicSyncerStub{name: "osv"}
+	m.Register(FeedConfig{
+		Syncer:  syncer,
+		Mode:    FeedModeSelf,
+		Enabled: true,
+	})
+
+	err := m.SyncOne(context.Background(), "osv")
+	if err == nil {
+		t.Fatal("SyncOne() = nil, want recovered panic error")
+	}
+	if !strings.Contains(err.Error(), "syncer panic") {
+		t.Fatalf("SyncOne() error = %v, want syncer panic diagnostic", err)
+	}
+
+	wantCalls := len(backoffSchedule) + 1
+	if syncer.calls != wantCalls {
+		t.Fatalf("syncer calls = %d, want %d", syncer.calls, wantCalls)
+	}
+	if store.status == nil {
+		t.Fatal("UpsertFeedSyncStatus was not called")
+	}
+	if store.status.LastSyncStatus != db.FeedSyncStatusError {
+		t.Fatalf("LastSyncStatus = %q, want error", store.status.LastSyncStatus)
+	}
+	if !strings.Contains(store.status.LastError, "syncer panic") {
+		t.Fatalf("LastError = %q, want syncer panic diagnostic", store.status.LastError)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/8linkz-sec/packmon/internal/domain"
 	"github.com/8linkz-sec/packmon/internal/sbomgen"
 	"github.com/spf13/cobra"
 )
@@ -82,8 +83,8 @@ func TestBuildAutoSBOMConfigUsesResolvedSettings(t *testing.T) {
 	if cfg.Target != settings.Path {
 		t.Fatalf("Target = %q, want %q", cfg.Target, settings.Path)
 	}
-	if got := strings.Join(cfg.Ecosystems, ","); got != "go,npm" {
-		t.Fatalf("Ecosystems = %q", got)
+	if len(cfg.Ecosystems) != 2 || cfg.Ecosystems[0] != domain.EcosystemGo || cfg.Ecosystems[1] != domain.EcosystemNPM {
+		t.Fatalf("Ecosystems = %v, want [%s %s]", cfg.Ecosystems, domain.EcosystemGo, domain.EcosystemNPM)
 	}
 	if !cfg.IncludeDev || cfg.MaxDepth != 4 {
 		t.Fatalf("IncludeDev/MaxDepth not copied from resolved settings: %+v", cfg)
@@ -98,6 +99,93 @@ func TestBuildAutoSBOMConfigUsesResolvedSettings(t *testing.T) {
 	cfg = buildAutoSBOMConfig(settings, autoSBOMFlags{Enabled: true, KeepSBOM: "out"})
 	if cfg.KeepSBOMDir != "out" {
 		t.Fatalf("--keep-sbom dir = %q, want out", cfg.KeepSBOMDir)
+	}
+}
+
+func TestResolveAutoSBOMRunUsesSingleResolvedTarget(t *testing.T) {
+	root := t.TempDir()
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+
+	run, err := resolveAutoSBOMRun(cmd, []string{root}, scanFlagValues{Quiet: true}, autoSBOMFlags{Enabled: true}, autoSBOMDeps{
+		loadConfig: func() (*cliConfig, string, error) { return nil, "", nil },
+	})
+	if err != nil {
+		t.Fatalf("resolveAutoSBOMRun: %v", err)
+	}
+	if run.settings.Path != root {
+		t.Fatalf("resolved path = %q, want %q", run.settings.Path, root)
+	}
+	if !run.settings.Quiet {
+		t.Fatalf("resolved settings did not preserve quiet flag: %+v", run.settings)
+	}
+}
+
+func TestPrintAutoSBOMOnlyPathsHonorsQuiet(t *testing.T) {
+	result := sbomgen.Result{SBOMPaths: []string{"one.cdx.json", "two.cdx.json"}}
+
+	output := captureStdout(t, func() {
+		printAutoSBOMOnlyPaths(scanSettings{}, result)
+	})
+	if output != "one.cdx.json\ntwo.cdx.json\n" {
+		t.Fatalf("stdout = %q", output)
+	}
+
+	output = captureStdout(t, func() {
+		printAutoSBOMOnlyPaths(scanSettings{Quiet: true}, result)
+	})
+	if output != "" {
+		t.Fatalf("quiet stdout = %q, want empty", output)
+	}
+}
+
+func TestDispatchAutoSBOMScanUsesGeneratedSBOMsForListAll(t *testing.T) {
+	settings := scanSettings{SBOMFiles: []string{"manual.cdx.json"}}
+	result := sbomgen.Result{SBOMPaths: []string{"generated.cdx.json"}}
+	scanCalled := false
+	var listed scanSettings
+
+	exitCode, err := dispatchAutoSBOMScan(context.Background(), scanFlagValues{ListAll: true}, settings, result, autoSBOMDeps{
+		scan: func(context.Context, scanSettings) (int, error) {
+			scanCalled = true
+			return ExitOK, nil
+		},
+		listAll: func(_ context.Context, settings scanSettings) (int, error) {
+			listed = settings
+			return ExitUnderThreshold, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("dispatchAutoSBOMScan: %v", err)
+	}
+	if exitCode != ExitUnderThreshold {
+		t.Fatalf("exitCode = %d, want %d", exitCode, ExitUnderThreshold)
+	}
+	if scanCalled {
+		t.Fatalf("list-all dispatch called normal scan")
+	}
+	if got := strings.Join(listed.SBOMFiles, ","); got != "manual.cdx.json,generated.cdx.json" {
+		t.Fatalf("list-all SBOMFiles = %q", got)
+	}
+}
+
+func TestFinalizeGeneratedSBOMCleanupRunsOnceAndWrapsError(t *testing.T) {
+	cleanupErr := errors.New("cleanup failed")
+	calls := 0
+	result := sbomgen.Result{Cleanup: func() error {
+		calls++
+		return cleanupErr
+	}}
+
+	err := finalizeGeneratedSBOMCleanup(&result)
+	if !errors.Is(err, cleanupErr) || !strings.Contains(err.Error(), "cleanup generated SBOMs") {
+		t.Fatalf("cleanup error = %v, want wrapped cleanup failure", err)
+	}
+	if err := finalizeGeneratedSBOMCleanup(&result); err != nil {
+		t.Fatalf("second cleanup should be a no-op: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("cleanup calls = %d, want 1", calls)
 	}
 }
 
@@ -200,7 +288,7 @@ func TestRunAutoSBOMInstallDisclosureVisibleWhenQuiet(t *testing.T) {
 		runErr = runAutoSBOMCommandWithDeps(cmd, []string{root}, scanFlagValues{Quiet: true}, autoSBOMFlags{Enabled: true, InstallTools: true}, autoSBOMDeps{
 			loadConfig: func() (*cliConfig, string, error) { return nil, "", nil },
 			generate: func(_ context.Context, cfg sbomgen.Config) (sbomgen.Result, error) {
-				cfg.Logger.Info("installing SBOM generator", "package", "@cyclonedx/cyclonedx-npm", "source", "npm registry", "command", "npm install --global @cyclonedx/cyclonedx-npm")
+				cfg.Logger.Info("installing SBOM generator", "package", "@cyclonedx/cyclonedx-npm", "source", "npm registry", "command", "npm install --global --ignore-scripts @cyclonedx/cyclonedx-npm")
 				return sbomgen.Result{SBOMPaths: []string{"generated.cdx.json"}}, nil
 			},
 			scan: func(context.Context, scanSettings) (int, error) {
@@ -214,7 +302,7 @@ func TestRunAutoSBOMInstallDisclosureVisibleWhenQuiet(t *testing.T) {
 	for _, want := range []string{
 		"installing SBOM generator",
 		"@cyclonedx/cyclonedx-npm",
-		"npm install --global",
+		"npm install --global --ignore-scripts",
 	} {
 		if !strings.Contains(stderr, want) {
 			t.Fatalf("stderr missing install disclosure %q:\n%s", want, stderr)

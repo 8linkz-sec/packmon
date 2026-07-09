@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -8,7 +9,7 @@ import (
 	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
-func TestTableWriterColorSeverityAndSeverityParsing(t *testing.T) {
+func TestTableWriterColorSeverity(t *testing.T) {
 	t.Parallel()
 
 	noColor := NewTableWriter(true)
@@ -28,24 +29,30 @@ func TestTableWriterColorSeverityAndSeverityParsing(t *testing.T) {
 			t.Fatalf("colorSeverity(%q) = %q, want colored severity", sev, got)
 		}
 	}
+}
 
-	for _, tt := range []struct {
-		raw  string
-		want domain.Severity
-	}{
-		{" critical ", domain.SeverityCritical},
-		{"high", domain.SeverityHigh},
-		{"medium", domain.SeverityMedium},
-		{"low", domain.SeverityLow},
-		{"none", domain.SeverityNone},
+func TestTableWriterUsesDomainBlockingSeverityParser(t *testing.T) {
+	t.Parallel()
+
+	data, err := os.ReadFile("table.go") // #nosec G304 -- test inspects fixed package source file.
+	if err != nil {
+		t.Fatalf("read table.go: %v", err)
+	}
+	text := string(data)
+	for _, forbidden := range []string{
+		"func SeverityFromString(",
+		`case "CRITICAL":`,
+		`case "HIGH":`,
+		`case "MEDIUM":`,
+		`case "LOW":`,
+		`case "NONE":`,
 	} {
-		got, ok := SeverityFromString(tt.raw)
-		if !ok || got != tt.want {
-			t.Fatalf("SeverityFromString(%q) = %q, %v; want %q true", tt.raw, got, ok, tt.want)
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("table.go still owns blocking severity parsing via %q", forbidden)
 		}
 	}
-	if got, ok := SeverityFromString("unknown"); ok || got != "" {
-		t.Fatalf("SeverityFromString(unknown) = %q, %v; want empty false", got, ok)
+	if !strings.Contains(text, "domain.ParseBlockThreshold(") {
+		t.Fatal("table.go does not use the domain blocking severity parser")
 	}
 }
 

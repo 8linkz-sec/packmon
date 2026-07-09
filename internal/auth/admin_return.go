@@ -68,7 +68,11 @@ func SafeAdminReturnTarget(raw string) string {
 	if !isSafeAdminReturnPath(cleanPath) {
 		return ""
 	}
-	out := url.URL{Path: cleanPath, RawQuery: parsed.RawQuery}
+	query := parsed.Query()
+	if cleanPath == "/admin/feeds" && query.Get("partial") != "" {
+		query.Del("partial")
+	}
+	out := url.URL{Path: cleanPath, RawQuery: query.Encode()}
 	return out.String()
 }
 

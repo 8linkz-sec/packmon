@@ -78,7 +78,8 @@ func TestTableWriterWriteShowsLocalSyncedFeedWarning(t *testing.T) {
 func TestTableWriterOperationalStatusIsNotCleanReport(t *testing.T) {
 	result := &domain.ScanResult{
 		Mode:            "local",
-		FeedStatus:      "local advisory data unavailable (run 'packmon db sync' first)",
+		FeedStatus:      "error",
+		ScanError:       "local advisory data unavailable (run 'packmon db sync' first)",
 		PackagesScanned: 43,
 		FindingsCount:   0,
 	}
@@ -100,7 +101,8 @@ func TestTableWriterOperationalStatusIsNotCleanReport(t *testing.T) {
 func TestTableWriterOperationalStatusUsesSingularPackage(t *testing.T) {
 	result := &domain.ScanResult{
 		Mode:            "local",
-		FeedStatus:      "local advisory data unavailable",
+		FeedStatus:      "error",
+		ScanError:       "local advisory data unavailable",
 		PackagesScanned: 1,
 		FindingsCount:   0,
 	}
@@ -230,7 +232,7 @@ func TestTableWriterShowsMalwareHistoryRiskDistinctly(t *testing.T) {
 				Type:      domain.FindingTypeSupplyChainRisk,
 				Severity:  domain.SeverityHigh,
 				Title:     "ReversingLabs: malware incident history",
-				RiskType:  "malware_history",
+				RiskType:  domain.RiskTypeMalwareHistory,
 				Source:    "reversinglabs",
 			},
 		},
@@ -280,7 +282,7 @@ func TestTableWriterShowsLifecycleDistinctly(t *testing.T) {
 	}
 
 	output := out.String()
-	for _, expected := range []string{"LIFECYCLE", "Review lifecycle", "endoflife.date", "(1 blocking)"} {
+	for _, expected := range []string{"FIXED VERSION", "LIFECYCLE", "Review lifecycle", "endoflife.date", "(1 blocking)"} {
 		if !strings.Contains(output, expected) {
 			t.Fatalf("table output missing %q\n%s", expected, output)
 		}

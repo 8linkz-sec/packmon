@@ -3,7 +3,9 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"github.com/8linkz-sec/packmon/internal/ioutils"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -15,8 +17,25 @@ import (
 	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
+var sqliteTestStoreSlots = make(chan struct{}, sqliteTestStoreConcurrency())
+
+func sqliteTestStoreConcurrency() int {
+	procs := runtime.GOMAXPROCS(0)
+	switch {
+	case procs <= 1:
+		return 1
+	case procs > 8:
+		return 8
+	default:
+		return procs
+	}
+}
+
 func newSQLiteTestStore(t *testing.T) *Store {
 	t.Helper()
+
+	sqliteTestStoreSlots <- struct{}{}
+	t.Cleanup(func() { <-sqliteTestStoreSlots })
 
 	store, err := New(t.TempDir() + "/packmon.db")
 	if err != nil {
@@ -77,7 +96,7 @@ func TestNewRestrictsSQLiteDatabaseFilePermissions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	defer closeSilently(store)
+	defer ioutils.CloseSilently(store)
 
 	if _, err := store.DB().ExecContext(context.Background(), `
 		INSERT INTO sync_meta(key, value) VALUES('permission-probe', '1')
@@ -126,7 +145,7 @@ func TestMigrateSchemaAddsRowKeyToOldVulnerabilityTable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sql.Open() error = %v", err)
 	}
-	defer closeSilently(rawDB)
+	defer ioutils.CloseSilently(rawDB)
 
 	if _, err := rawDB.Exec(`
 		CREATE TABLE vulnerabilities_local (
@@ -215,7 +234,9 @@ func TestAcquireSQLiteMigrationLockSerializesLocalMigrations(t *testing.T) {
 	}
 	defer func() {
 		if unlock != nil {
-			unlock()
+			if err := unlock(); err != nil {
+				t.Fatalf("cleanup migration lock: %v", err)
+			}
 		}
 	}()
 
@@ -236,13 +257,52 @@ func TestAcquireSQLiteMigrationLockSerializesLocalMigrations(t *testing.T) {
 		t.Fatalf("second migration lock error = %v, want migration lock context", err)
 	}
 
-	unlock()
+	if err := unlock(); err != nil {
+		t.Fatalf("unlock migration lock: %v", err)
+	}
 	unlock = nil
 	unlockAgain, err := acquireSQLiteMigrationLock(dbPath)
 	if err != nil {
 		t.Fatalf("acquire after unlock: %v", err)
 	}
-	unlockAgain()
+	if err := unlockAgain(); err != nil {
+		t.Fatalf("unlock after reacquire: %v", err)
+	}
+}
+
+func TestAcquireSQLiteMigrationLockReportsReleaseFailures(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "packmon.db")
+	lockPath := dbPath + ".migrate.lock"
+
+	originalRemove := removeSQLiteMigrationLockFile
+	removeSQLiteMigrationLockFile = func(path string) error {
+		if path != lockPath {
+			t.Fatalf("remove path = %q, want %q", path, lockPath)
+		}
+		return errors.New("remove failed")
+	}
+	t.Cleanup(func() { removeSQLiteMigrationLockFile = originalRemove })
+
+	unlock, err := acquireSQLiteMigrationLock(dbPath)
+	if err != nil {
+		t.Fatalf("acquire migration lock: %v", err)
+	}
+
+	err = unlock()
+	if err == nil {
+		t.Fatal("unlock migration lock error = nil, want release failure")
+	}
+	if !strings.Contains(err.Error(), "remove migration lock") || !strings.Contains(err.Error(), "remove failed") {
+		t.Fatalf("unlock migration lock error = %v, want remove diagnostic", err)
+	}
+	if _, statErr := os.Stat(lockPath); statErr != nil {
+		t.Fatalf("lock file stat after failed remove = %v, want stale lock to remain", statErr)
+	}
+
+	removeSQLiteMigrationLockFile = originalRemove
+	if err := os.Remove(lockPath); err != nil {
+		t.Fatalf("cleanup lock file: %v", err)
+	}
 }
 
 func TestMigrateSchemaNormalizesExistingCaseInsensitivePackageNames(t *testing.T) {
@@ -542,6 +602,113 @@ func TestFindLocalSecurityRowsBatchMatchesVersionsAndReputation(t *testing.T) {
 	if len(reputation) != 1 || reputation[0].AdvisoryID != "R-B1" || reputation[0].Type != domain.FindingTypeSupplyChainRisk {
 		t.Fatalf("FindReputationFindingsBatch() = %+v, want reputation hit", reputation)
 	}
+}
+
+func TestFindReputationFindingsBatchUsesVersionPredicate(t *testing.T) {
+	t.Parallel()
+
+	store := newSQLiteTestStore(t)
+	ctx := context.Background()
+
+	if _, err := store.DB().ExecContext(ctx, `
+		INSERT INTO reputation_findings_local(id, ecosystem, name, version, type, risk_type, severity, summary)
+		VALUES
+			('R-BATCH-1', 'npm', 'evil', '1.0.0', 'supply_chain_risk', 'removed_package', 'LOW', 'removed v1'),
+			('R-BATCH-2', 'npm', 'evil', '2.0.0', 'supply_chain_risk', 'removed_package', 'LOW', 'removed v2'),
+			('R-BATCH-3', 'pypi', 'my-pkg', '4.0.0', 'supply_chain_risk', 'malware_history', 'HIGH', 'history')`); err != nil {
+		t.Fatalf("insert reputation rows: %v", err)
+	}
+
+	packages := []db.PackageQuery{
+		{Ecosystem: "npm", Name: "evil", Version: "1.0.0"},
+		{Ecosystem: "npm", Name: "evil", Version: " "},
+		{Ecosystem: "pypi", Name: "My_Pkg", Version: "4.0.0"},
+	}
+	chunks := localReputationPackagePredicateChunks(packages, localReputationPredicateChunkSize)
+	if len(chunks) != 1 {
+		t.Fatalf("reputation predicate chunks = %+v, want one chunk", chunks)
+	}
+	query := reputationBatchQuery(chunks[0])
+	if !strings.Contains(query, "r.version = rep.version") {
+		t.Fatalf("reputation batch query = %q, want SQL version predicate", query)
+	}
+	plan := explainSQLiteQueryPlan(t, store.DB(), query, chunks[0].args...)
+	if !strings.Contains(plan, "idx_rep_eco_name_version") {
+		t.Fatalf("reputation batch query plan = %q, want idx_rep_eco_name_version", plan)
+	}
+
+	findings, err := store.FindReputationFindingsBatch(ctx, packages, db.ReputationSourceReversingLabs)
+	if err != nil {
+		t.Fatalf("FindReputationFindingsBatch() error = %v", err)
+	}
+	byID := make(map[string]domain.Finding, len(findings))
+	for _, finding := range findings {
+		byID[finding.AdvisoryID] = finding
+	}
+	if len(byID) != 2 || byID["R-BATCH-1"].Version != "1.0.0" || byID["R-BATCH-3"].Name != "my-pkg" {
+		t.Fatalf("FindReputationFindingsBatch() = %+v, want exact requested versions only", findings)
+	}
+	if _, ok := byID["R-BATCH-2"]; ok {
+		t.Fatalf("FindReputationFindingsBatch() included non-requested version: %+v", findings)
+	}
+}
+
+func TestScanHistoryRetentionDeleteUsesRepoRetentionIndex(t *testing.T) {
+	t.Parallel()
+
+	store := newSQLiteTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	for i := 0; i < 3; i++ {
+		if err := store.InsertScan(ctx, ScanEntry{
+			RepoName:      "repo-a",
+			ScannedAt:     now.Add(time.Duration(i) * time.Minute),
+			PackagesCount: i,
+		}); err != nil {
+			t.Fatalf("InsertScan(repo-a %d) error = %v", i, err)
+		}
+		if err := store.InsertScan(ctx, ScanEntry{
+			RepoName:      "repo-b",
+			ScannedAt:     now.Add(time.Duration(i) * time.Minute),
+			PackagesCount: i,
+		}); err != nil {
+			t.Fatalf("InsertScan(repo-b %d) error = %v", i, err)
+		}
+	}
+
+	plan := explainSQLiteQueryPlan(t, store.DB(), scanHistoryRetentionDeleteQuery, 2)
+	if !strings.Contains(plan, "idx_scan_history_repo_retention") {
+		t.Fatalf("retention delete query plan = %q, want idx_scan_history_repo_retention", plan)
+	}
+}
+
+func explainSQLiteQueryPlan(t *testing.T, database *sql.DB, query string, args ...any) string {
+	t.Helper()
+
+	rows, err := database.QueryContext(context.Background(), "EXPLAIN QUERY PLAN "+query, args...)
+	if err != nil {
+		t.Fatalf("EXPLAIN QUERY PLAN error = %v", err)
+	}
+	defer ioutils.CloseSilently(rows)
+
+	var details []string
+	for rows.Next() {
+		var (
+			id      int
+			parent  int
+			notUsed int
+			detail  string
+		)
+		if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+			t.Fatalf("scan query plan: %v", err)
+		}
+		details = append(details, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate query plan: %v", err)
+	}
+	return strings.Join(details, "\n")
 }
 
 func TestBatchLookupsChunkLargePackageSets(t *testing.T) {

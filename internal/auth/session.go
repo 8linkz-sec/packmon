@@ -77,15 +77,6 @@ type SessionManager struct {
 	secure bool
 }
 
-// NewSessionManager creates a SessionManager with the given maximum
-// session age and cookie security mode. If maxAge is zero, it defaults
-// to 8 hours. The provided context controls the lifetime of the
-// background cleanup goroutine; when the context is cancelled the
-// goroutine exits.
-func NewSessionManager(ctx context.Context, maxAge time.Duration, secure bool) *SessionManager {
-	return NewSessionManagerWithIdleTimeout(ctx, maxAge, DefaultAdminIdleTimeout, secure)
-}
-
 // NewSessionManagerWithIdleTimeout creates a SessionManager with separate
 // absolute and inactivity timeouts for admin sessions.
 func NewSessionManagerWithIdleTimeout(ctx context.Context, maxAge, idleTimeout time.Duration, secure bool) *SessionManager {
@@ -104,12 +95,6 @@ func NewSessionManagerWithIdleTimeout(ctx context.Context, maxAge, idleTimeout t
 	// Background goroutine to evict expired sessions every 5 minutes.
 	go sm.cleanup(ctx)
 	return sm
-}
-
-// Create generates a new session, stores it, and writes the session
-// cookie to the response.
-func (sm *SessionManager) Create(w http.ResponseWriter) (*Session, error) {
-	return sm.createAdmin(w, false, false)
 }
 
 // CreateAdmin creates an authenticated admin session, optionally recording
@@ -153,7 +138,7 @@ func (sm *SessionManager) createAdmin(w http.ResponseWriter, authenticatedWithBo
 	sm.sessions[id] = sess
 	sm.mu.Unlock()
 
-	sm.setCookie(w, id, sm.maxAge)
+	sm.setAdminCookie(w, id)
 	return cloneSession(sess), nil
 }
 
@@ -184,8 +169,51 @@ func (sm *SessionManager) CreatePreAuth(w http.ResponseWriter) (*Session, error)
 	sm.sessions[id] = sess
 	sm.mu.Unlock()
 
-	sm.setCookie(w, id, ttl)
+	sm.setPreAuthCookie(w, id, ttl)
 	return cloneSession(sess), nil
+}
+
+// CreateOrReusePreAuth returns the existing valid non-admin login session from
+// the request when possible; otherwise it creates a new pre-auth session.
+func (sm *SessionManager) CreateOrReusePreAuth(w http.ResponseWriter, r *http.Request) (*Session, error) {
+	if sess, ttl := sm.reusablePreAuthSession(r); sess != nil {
+		sm.setPreAuthCookie(w, sess.ID, ttl)
+		return sess, nil
+	}
+	return sm.CreatePreAuth(w)
+}
+
+func (sm *SessionManager) reusablePreAuthSession(r *http.Request) (*Session, time.Duration) {
+	if r == nil {
+		return nil, 0
+	}
+	cookie, err := r.Cookie(SessionCookieName)
+	if err != nil || cookie.Value == "" {
+		return nil, 0
+	}
+
+	now := time.Now()
+
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	sess, ok := sm.sessions[cookie.Value]
+	if !ok || sess.Admin {
+		return nil, 0
+	}
+	if sess.expiresAt.IsZero() || !now.Before(sess.expiresAt) {
+		delete(sm.sessions, cookie.Value)
+		return nil, 0
+	}
+
+	ttl := sess.expiresAt.Sub(now)
+	if ttl < time.Second {
+		delete(sm.sessions, cookie.Value)
+		return nil, 0
+	}
+
+	sess.LastAccessed = now
+	return cloneSession(sess), ttl
 }
 
 // Get retrieves the session associated with the request's session
@@ -250,14 +278,29 @@ func (sm *SessionManager) clearCookie(w http.ResponseWriter, path string) {
 	})
 }
 
-// setCookie writes the session cookie to the response with the given lifetime.
-func (sm *SessionManager) setCookie(w http.ResponseWriter, sessionID string, ttl time.Duration) {
+// setAdminCookie writes an authenticated admin browser-session cookie. The
+// server-side session still carries absolute and idle expiration.
+func (sm *SessionManager) setAdminCookie(w http.ResponseWriter, sessionID string) {
 	// #nosec G124 -- Secure is intentionally configurable so local HTTP development remains usable; production enables it.
 	http.SetCookie(w, &http.Cookie{
 		Name:     SessionCookieName,
 		Value:    sessionID,
 		Path:     SessionCookiePath,
-		MaxAge:   int(ttl.Seconds()),
+		HttpOnly: true,
+		Secure:   sm.secure,
+		SameSite: http.SameSiteStrictMode,
+	})
+}
+
+// setPreAuthCookie writes the short-lived pre-auth session cookie used by login forms.
+func (sm *SessionManager) setPreAuthCookie(w http.ResponseWriter, sessionID string, ttl time.Duration) {
+	maxAge := int(ttl.Seconds())
+	// #nosec G124 -- Secure is intentionally configurable so local HTTP development remains usable; production enables it.
+	http.SetCookie(w, &http.Cookie{
+		Name:     SessionCookieName,
+		Value:    sessionID,
+		Path:     SessionCookiePath,
+		MaxAge:   maxAge,
 		HttpOnly: true,
 		Secure:   sm.secure,
 		SameSite: http.SameSiteStrictMode,
@@ -301,6 +344,19 @@ func (sm *SessionManager) GetFlash(sessionID, key string) string {
 	return val
 }
 
+// PeekFlash retrieves a flash value without deleting it. It is intended for
+// idempotent redirects that must preserve a one-time value for the next page.
+func (sm *SessionManager) PeekFlash(sessionID, key string) string {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	sess, ok := sm.sessions[sessionID]
+	if !ok || sess.flash == nil {
+		return ""
+	}
+	return sess.flash[key]
+}
+
 func cloneSession(sess *Session) *Session {
 	if sess == nil {
 		return nil
@@ -318,8 +374,8 @@ func cloneSession(sess *Session) *Session {
 	return &clone
 }
 
-// cleanup periodically evicts expired sessions. It runs in its own
-// goroutine, started by NewSessionManager. It exits when ctx is cancelled.
+// cleanup periodically evicts expired sessions. It runs in its own goroutine,
+// started by NewSessionManagerWithIdleTimeout. It exits when ctx is cancelled.
 func (sm *SessionManager) cleanup(ctx context.Context) {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()

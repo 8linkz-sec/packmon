@@ -2,18 +2,24 @@ package web
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/8linkz-sec/packmon/internal/db"
 	"github.com/8linkz-sec/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/requestctx"
 )
 
 // ---------------------------------------------------------------------------
@@ -26,6 +32,10 @@ type mockStore struct {
 	scansErr         error
 	searchErr        error
 	dashboardStats   *db.DashboardStatsResult
+	dailyStats       []db.DailyScanStats
+	recentScans      []db.ScanLogEntry
+	lastScansLimit   int
+	lastScansOffset  int
 	feedsErr         error
 	feedStatuses     []db.FeedSyncStatus
 	vulnErr          error
@@ -34,9 +44,9 @@ type mockStore struct {
 	lifecycleErr     error
 	recentVulnErr    error
 	recentVulns      []db.RecentVulnerability
-	searchResults    []db.PackageSearchResult
+	searchResults    []PackageSearchResult
 	searchCalls      int
-	lastSearch       db.PackageSearchParams
+	lastSearch       PackageSearchParams
 	vulnFindings     []domain.Finding
 	malFindings      []domain.Finding
 	repFindings      []domain.Finding
@@ -74,12 +84,30 @@ func (m *mockStore) CountScansByDay(_ context.Context, _ int) ([]db.DailyScanSta
 	if m.dailyErr != nil {
 		return nil, m.dailyErr
 	}
+	if m.dailyStats != nil {
+		return m.dailyStats, nil
+	}
 	return []db.DailyScanStats{}, nil
 }
 
-func (m *mockStore) ListRecentScans(_ context.Context, _ int) ([]db.ScanLogEntry, error) {
+func (m *mockStore) ListRecentScans(_ context.Context, limit, offset int) ([]db.ScanLogEntry, error) {
+	m.lastScansLimit = limit
+	m.lastScansOffset = offset
 	if m.scansErr != nil {
 		return nil, m.scansErr
+	}
+	if m.recentScans != nil {
+		scans := append([]db.ScanLogEntry(nil), m.recentScans...)
+		if offset > 0 {
+			if offset >= len(scans) {
+				return []db.ScanLogEntry{}, nil
+			}
+			scans = scans[offset:]
+		}
+		if limit > 0 && len(scans) > limit {
+			scans = scans[:limit]
+		}
+		return scans, nil
 	}
 	return []db.ScanLogEntry{}, nil
 }
@@ -91,14 +119,24 @@ func (m *mockStore) ListRecentVulnerabilities(_ context.Context, _, _ int) ([]db
 	return m.recentVulns, nil
 }
 
-func (m *mockStore) SearchPackages(_ context.Context, params db.PackageSearchParams) ([]db.PackageSearchResult, error) {
+func (m *mockStore) SearchPackages(_ context.Context, params PackageSearchParams) ([]PackageSearchResult, error) {
 	m.searchCalls++
 	m.lastSearch = params
 	if m.searchErr != nil {
 		return nil, m.searchErr
 	}
 	if m.searchResults != nil {
-		return append([]db.PackageSearchResult(nil), m.searchResults...), nil
+		results := append([]PackageSearchResult(nil), m.searchResults...)
+		if params.Offset > 0 {
+			if params.Offset >= len(results) {
+				return []PackageSearchResult{}, nil
+			}
+			results = results[params.Offset:]
+		}
+		if params.Limit > 0 && len(results) > params.Limit {
+			results = results[:params.Limit]
+		}
+		return results, nil
 	}
 	if params.Query == "" && params.Severity == "" && params.FindingType == "" {
 		return nil, nil
@@ -109,7 +147,7 @@ func (m *mockStore) SearchPackages(_ context.Context, params db.PackageSearchPar
 	}
 	if params.FindingType == "malicious" {
 		name = "requests-evil"
-		return []db.PackageSearchResult{
+		return []PackageSearchResult{
 			{
 				Ecosystem:          "pypi",
 				Name:               name,
@@ -121,8 +159,19 @@ func (m *mockStore) SearchPackages(_ context.Context, params db.PackageSearchPar
 			},
 		}, nil
 	}
+	if params.FindingType == "supply_chain_risk" {
+		return []PackageSearchResult{
+			{
+				Ecosystem:     "npm",
+				Name:          "risky-package",
+				FindingsCount: 1,
+				FindingTypes:  "supply_chain_risk",
+				Sources:       "socket.dev",
+			},
+		}, nil
+	}
 	if params.FindingType == "lifecycle" {
-		return []db.PackageSearchResult{
+		return []PackageSearchResult{
 			{
 				Ecosystem:     "pypi",
 				Name:          "django",
@@ -134,7 +183,7 @@ func (m *mockStore) SearchPackages(_ context.Context, params db.PackageSearchPar
 		}, nil
 	}
 	if params.Query == "logtrace" {
-		return []db.PackageSearchResult{
+		return []PackageSearchResult{
 			{
 				Ecosystem:          "cargo",
 				Name:               "logtrace",
@@ -146,7 +195,7 @@ func (m *mockStore) SearchPackages(_ context.Context, params db.PackageSearchPar
 			},
 		}, nil
 	}
-	return []db.PackageSearchResult{
+	return []PackageSearchResult{
 		{
 			Ecosystem:          "npm",
 			Name:               name,
@@ -250,7 +299,7 @@ func (m *mockStore) EnqueueRefresh(_ context.Context, job *db.RefreshJob) (bool,
 
 // testRenderer creates a Renderer from the real embedded template FS.
 func testRenderer() *Renderer {
-	return NewRenderer(TemplateFS(), false)
+	return NewRendererWithLayoutLinks(TemplateFS(), false, LayoutLinks{})
 }
 
 // discardLogger returns a logger that writes nowhere.
@@ -262,16 +311,47 @@ type nopWriter struct{}
 
 func (nopWriter) Write(p []byte) (int, error) { return len(p), nil }
 
+func versionedStaticAssetURL(t *testing.T, body, asset string) string {
+	t.Helper()
+
+	re := regexp.MustCompile(`(?:href|src)="/static/` + regexp.QuoteMeta(asset) + `\?v=([a-f0-9]{16})"`)
+	match := re.FindStringSubmatch(body)
+	if match == nil {
+		t.Fatalf("rendered layout missing versioned static asset URL for %s:\n%s", asset, body)
+	}
+	return "/static/" + asset + "?v=" + match[1]
+}
+
+func TestPublicWebStoreErrorLogsCorrelationID(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	handler := HandleFeeds(&mockStore{feedsErr: errors.New("database unavailable")}, testRenderer(), logger)
+	req := httptest.NewRequest(http.MethodGet, "/feeds?partial=status", nil)
+	req.Header.Set("HX-Request", "true")
+	req = req.WithContext(requestctx.ContextWithCorrelationID(req.Context(), "corr-web-feeds"))
+	rec := httptest.NewRecorder()
+
+	handler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Feeds status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if !strings.Contains(logs.String(), `"correlation_id":"corr-web-feeds"`) {
+		t.Fatalf("feed load error log missing correlation_id:\n%s", logs.String())
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Dashboard tests
 // ---------------------------------------------------------------------------
 
 func TestHandleDashboard_ReturnsOK(t *testing.T) {
+	longSummary := "A recently published advisory summary with enough context to exceed the compact dashboard preview and keep the full remediation detail visible in place."
 	store := &mockStore{
 		recentVulns: []db.RecentVulnerability{
 			{
 				ID:          "GHSA-test-1234",
-				Summary:     "Example advisory",
+				Summary:     longSummary,
 				Severity:    "HIGH",
 				Ecosystem:   "actions",
 				Name:        "example/action",
@@ -307,6 +387,21 @@ func TestHandleDashboard_ReturnsOK(t *testing.T) {
 	if !strings.Contains(body, "/search?severity=CRITICAL") {
 		t.Fatal("Dashboard response does not contain severity links to search")
 	}
+	for _, severity := range []string{"CRITICAL", "HIGH", "MEDIUM", "LOW"} {
+		tag := tagContaining(t, body, `<a`, `href="/search?severity=`+severity+`"`)
+		for _, want := range []string{
+			`inline-flex`,
+			`min-h-11`,
+			`items-center`,
+			`justify-center`,
+			`rounded-full`,
+			`hover:brightness-95`,
+		} {
+			if !strings.Contains(tag, want) {
+				t.Fatalf("Dashboard severity link %s missing class token %q:\n%s", severity, want, tag)
+			}
+		}
+	}
 	if !strings.Contains(body, "/search?finding=malicious") {
 		t.Fatal("Dashboard response does not contain the malicious packages link")
 	}
@@ -328,14 +423,29 @@ func TestHandleDashboard_ReturnsOK(t *testing.T) {
 	if !strings.Contains(body, `href="https://github.com/advisories/GHSA-test-1234"`) {
 		t.Fatalf("Dashboard advisory link does not point to the advisory resource:\n%s", body)
 	}
+	if !strings.Contains(body, `href="/package/actions/example/action"`) {
+		t.Fatalf("Dashboard recent vulnerability package does not link to package details:\n%s", body)
+	}
+	if !strings.Contains(body, `aria-label="View package details for actions/example/action"`) {
+		t.Fatalf("Dashboard recent vulnerability package link missing accessible label:\n%s", body)
+	}
 	if strings.Contains(body, `href="/package/actions/example/action">GHSA-test-1234</a>`) {
 		t.Fatalf("Dashboard advisory ID links to package page instead of advisory resource:\n%s", body)
 	}
+	if !strings.Contains(body, `<details class="group" data-print-open>`) || !strings.Contains(body, "Details") {
+		t.Fatalf("Dashboard recent vulnerability summary missing disclosure affordance:\n%s", body)
+	}
+	if !strings.Contains(body, longSummary) {
+		t.Fatalf("Dashboard recent vulnerability summary does not include full text:\n%s", body)
+	}
+	if !strings.Contains(body, truncate(longSummary, 80)) {
+		t.Fatalf("Dashboard recent vulnerability summary does not include compact preview:\n%s", body)
+	}
 	for _, want := range []string{
-		`<th scope="col" class="pb-2 pr-4">Advisory</th>`,
-		`<th scope="col" class="pb-2 pr-4">Package</th>`,
-		`<th scope="col" class="pb-2 pr-4">Severity</th>`,
-		`<th scope="col" class="pb-2 pr-4">Summary</th>`,
+		`<th scope="col" class="pb-2 pe-4">Advisory</th>`,
+		`<th scope="col" class="pb-2 pe-4">Package</th>`,
+		`<th scope="col" class="pb-2 pe-4">Severity</th>`,
+		`<th scope="col" class="pb-2 pe-4">Summary</th>`,
 		`<th scope="col" class="pb-2">Published</th>`,
 		`class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium border `,
 	} {
@@ -358,6 +468,27 @@ func TestHandleDashboard_ReturnsOK(t *testing.T) {
 	}
 	if strings.Index(body, skipLink) > strings.Index(body, "<nav") {
 		t.Fatal("Dashboard skip link should be rendered before repeated navigation")
+	}
+}
+
+func TestHandleDashboardShowsRecentVulnerabilityEmptyState(t *testing.T) {
+	handler := HandleDashboard(&mockStore{}, testRenderer(), discardLogger())
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+
+	handler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Dashboard status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		"Recently Published Vulnerabilities (7 Days)",
+		"No vulnerabilities were published in the last 7 days.",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("Dashboard empty recent vulnerability state missing %q:\n%s", want, body)
+		}
 	}
 }
 
@@ -385,6 +516,118 @@ func TestHandleDashboardDoesNotExposeUnknownSeverityFacet(t *testing.T) {
 	}
 	if !strings.Contains(body, "/search?severity=HIGH") {
 		t.Fatalf("Dashboard missing normal severity facet after filtering UNKNOWN:\n%s", body)
+	}
+}
+
+func TestDashboardSearchLinksLandOnFilteredSearchResults(t *testing.T) {
+	dashboardRec := httptest.NewRecorder()
+	HandleDashboard(&mockStore{}, testRenderer(), discardLogger())(dashboardRec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if dashboardRec.Code != http.StatusOK {
+		t.Fatalf("Dashboard status = %d, want %d", dashboardRec.Code, http.StatusOK)
+	}
+	dashboardBody := dashboardRec.Body.String()
+
+	tests := []struct {
+		name         string
+		href         string
+		wantSeverity string
+		wantFinding  string
+		wantResult   string
+		wantSummary  string
+	}{
+		{
+			name:        "vulnerability KPI",
+			href:        "/search?finding=vulnerability",
+			wantFinding: "vulnerability",
+			wantResult:  "lodash",
+			wantSummary: "for vulnerabilities",
+		},
+		{
+			name:        "malicious package KPI",
+			href:        "/search?finding=malicious",
+			wantFinding: "malicious",
+			wantResult:  "requests-evil",
+			wantSummary: "for malicious packages",
+		},
+		{
+			name:        "supply-chain risk KPI",
+			href:        "/search?finding=supply_chain_risk",
+			wantFinding: "supply_chain_risk",
+			wantResult:  "risky-package",
+			wantSummary: "for supply-chain risks",
+		},
+		{
+			name:        "lifecycle finding KPI",
+			href:        "/search?finding=lifecycle",
+			wantFinding: "lifecycle",
+			wantResult:  "django",
+			wantSummary: "for lifecycle findings",
+		},
+		{
+			name:         "critical severity facet",
+			href:         "/search?severity=CRITICAL",
+			wantSeverity: "CRITICAL",
+			wantResult:   "openssl",
+			wantSummary:  "for severity CRITICAL",
+		},
+		{
+			name:         "high severity facet",
+			href:         "/search?severity=HIGH",
+			wantSeverity: "HIGH",
+			wantResult:   "lodash",
+			wantSummary:  "for severity HIGH",
+		},
+		{
+			name:         "medium severity facet",
+			href:         "/search?severity=MEDIUM",
+			wantSeverity: "MEDIUM",
+			wantResult:   "lodash",
+			wantSummary:  "for severity MEDIUM",
+		},
+		{
+			name:         "low severity facet",
+			href:         "/search?severity=LOW",
+			wantSeverity: "LOW",
+			wantResult:   "lodash",
+			wantSummary:  "for severity LOW",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if !strings.Contains(dashboardBody, `href="`+tt.href+`"`) {
+				t.Fatalf("Dashboard missing drill-down link %q:\n%s", tt.href, dashboardBody)
+			}
+
+			searchStore := &mockStore{}
+			searchRec := httptest.NewRecorder()
+			HandleSearch(searchStore, testRenderer(), discardLogger())(searchRec, httptest.NewRequest(http.MethodGet, tt.href, nil))
+			if searchRec.Code != http.StatusOK {
+				t.Fatalf("Search landing status = %d, want %d", searchRec.Code, http.StatusOK)
+			}
+			if searchStore.searchCalls != 1 {
+				t.Fatalf("SearchPackages calls = %d, want 1", searchStore.searchCalls)
+			}
+			if searchStore.lastSearch.Query != "" || searchStore.lastSearch.Severity != tt.wantSeverity || searchStore.lastSearch.FindingType != tt.wantFinding {
+				t.Fatalf("SearchPackages params = %+v, want empty query, severity %q, finding %q", searchStore.lastSearch, tt.wantSeverity, tt.wantFinding)
+			}
+			if searchStore.lastSearch.Limit != searchResultLimit+1 {
+				t.Fatalf("SearchPackages limit = %d, want %d", searchStore.lastSearch.Limit, searchResultLimit+1)
+			}
+
+			body := searchRec.Body.String()
+			for _, want := range []string{`id="search-status"`, `aria-live="off"`, `1 package search result`, tt.wantResult, tt.wantSummary} {
+				if !strings.Contains(body, want) {
+					t.Fatalf("Search landing missing %q:\n%s", want, body)
+				}
+			}
+			if strings.Contains(body, `role="status" aria-live="polite"`) {
+				t.Fatalf("Search landing should not announce result counts during live search:\n%s", body)
+			}
+			if strings.Contains(body, "Enter at least 2 characters") {
+				t.Fatalf("Search landing rendered filter-only admission block:\n%s", body)
+			}
+		})
 	}
 }
 
@@ -445,6 +688,7 @@ func TestPrivacyNoticePageAndFooterLinks(t *testing.T) {
 	renderer := NewRendererWithLayoutLinks(TemplateFS(), false, LayoutLinks{
 		PrivacyURL: "/privacy",
 		LegalURL:   "https://example.test/legal",
+		TermsURL:   "/terms",
 	})
 	logger := discardLogger()
 
@@ -459,6 +703,8 @@ func TestPrivacyNoticePageAndFooterLinks(t *testing.T) {
 		`Privacy`,
 		`href="https://example.test/legal"`,
 		`Legal Notice`,
+		`href="/terms"`,
+		`Terms`,
 	} {
 		if !strings.Contains(dashboardBody, want) {
 			t.Fatalf("Dashboard body missing footer link marker %q\nbody=%s", want, dashboardBody)
@@ -477,10 +723,31 @@ func TestPrivacyNoticePageAndFooterLinks(t *testing.T) {
 		"CSRF protection",
 		"admin audit log",
 		"scan metadata",
+		"API key ID/name",
+		"Socket.dev",
+		"Webhook recipients",
 		`href="https://example.test/legal"`,
 	} {
 		if !strings.Contains(privacyBody, want) {
 			t.Fatalf("Privacy body missing %q\nbody=%s", want, privacyBody)
+		}
+	}
+
+	termsRec := httptest.NewRecorder()
+	HandleTerms(renderer, logger)(termsRec, httptest.NewRequest(http.MethodGet, "/terms", nil))
+	if termsRec.Code != http.StatusOK {
+		t.Fatalf("Terms status = %d, want 200", termsRec.Code)
+	}
+	termsBody := termsRec.Body.String()
+	for _, want := range []string{
+		"Terms of Use",
+		"acceptable use",
+		"API key responsibilities",
+		"third-party feed providers",
+		`href="https://example.test/legal"`,
+	} {
+		if !strings.Contains(termsBody, want) {
+			t.Fatalf("Terms body missing %q\nbody=%s", want, termsBody)
 		}
 	}
 }
@@ -513,6 +780,211 @@ func TestHandleDashboard_StoreErrorsRenderLoadErrors(t *testing.T) {
 	}
 	if strings.Contains(body, "Total Scans (7d)</div>\n      <div class=\"mt-1 text-3xl font-semibold\">0</div>") {
 		t.Fatalf("Dashboard rendered scan-count zero as authoritative on load failure:\n%s", body)
+	}
+}
+
+func TestHandleDashboardLoadsIndependentWidgetsConcurrently(t *testing.T) {
+	store := &blockingDashboardStore{
+		started: make(chan string, 3),
+		release: make(chan struct{}),
+	}
+	handler := HandleDashboard(store, testRenderer(), discardLogger())
+
+	rec := httptest.NewRecorder()
+	done := make(chan int, 1)
+	go func() {
+		handler(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+		done <- rec.Code
+	}()
+
+	waitForStartedDashboardReads(t, store.started, []string{"stats", "daily", "recent"}, store.release)
+	close(store.release)
+
+	select {
+	case code := <-done:
+		if code != http.StatusOK {
+			t.Fatalf("Dashboard status = %d, want %d; body=%s", code, http.StatusOK, rec.Body.String())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("dashboard handler did not finish after releasing concurrent store reads")
+	}
+}
+
+func TestHandleDashboardCachesAggregateReadsAcrossRequests(t *testing.T) {
+	store := &webAggregateCacheCountingStore{
+		mockStore: mockStore{
+			dashboardStats: &db.DashboardStatsResult{
+				TotalPackages:        8,
+				TotalVulnerabilities: 3,
+				BySeverity:           map[string]int{"HIGH": 3},
+			},
+			dailyStats: []db.DailyScanStats{{ScanCount: 4}},
+			recentVulns: []db.RecentVulnerability{{
+				ID:          "GHSA-cache-test",
+				Summary:     "cache test advisory",
+				Severity:    "HIGH",
+				Ecosystem:   "npm",
+				Name:        "cached-package",
+				PublishedAt: time.Now().UTC(),
+			}},
+		},
+	}
+	handler := HandleDashboard(store, testRenderer(), discardLogger())
+
+	for _, requestID := range []string{"first-dashboard-request", "second-dashboard-request"} {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req = req.WithContext(context.WithValue(req.Context(), webAggregateCacheRequestIDKey{}, requestID))
+		rec := httptest.NewRecorder()
+
+		handler(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("Dashboard status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "GHSA-cache-test") {
+			t.Fatalf("Dashboard response missing uncached recent vulnerability:\n%s", rec.Body.String())
+		}
+	}
+
+	calls := store.snapshot()
+	if calls.dashboardStats != 1 {
+		t.Fatalf("DashboardStats calls = %d, want 1 cached aggregate read across requests", calls.dashboardStats)
+	}
+	if calls.dailyStats != 1 {
+		t.Fatalf("CountScansByDay calls = %d, want 1 cached aggregate read across requests", calls.dailyStats)
+	}
+	if calls.recentVulnerabilities != 2 {
+		t.Fatalf("ListRecentVulnerabilities calls = %d, want 2 uncached list reads", calls.recentVulnerabilities)
+	}
+	if calls.lastDashboardStatsRequestID != "first-dashboard-request" || calls.lastDailyStatsRequestID != "first-dashboard-request" {
+		t.Fatalf("aggregate reads used request IDs stats=%q daily=%q, want first request context", calls.lastDashboardStatsRequestID, calls.lastDailyStatsRequestID)
+	}
+}
+
+type blockingDashboardStore struct {
+	mockStore
+	started chan string
+	release chan struct{}
+}
+
+func (s *blockingDashboardStore) DashboardStats(ctx context.Context) (*db.DashboardStatsResult, error) {
+	s.waitForDashboardRelease(ctx, "stats")
+	return &db.DashboardStatsResult{BySeverity: map[string]int{}}, nil
+}
+
+func (s *blockingDashboardStore) CountScansByDay(ctx context.Context, _ int) ([]db.DailyScanStats, error) {
+	s.waitForDashboardRelease(ctx, "daily")
+	return []db.DailyScanStats{{ScanCount: 1}}, nil
+}
+
+func (s *blockingDashboardStore) ListRecentVulnerabilities(ctx context.Context, _, _ int) ([]db.RecentVulnerability, error) {
+	s.waitForDashboardRelease(ctx, "recent")
+	return nil, nil
+}
+
+func (s *blockingDashboardStore) waitForDashboardRelease(ctx context.Context, name string) {
+	select {
+	case s.started <- name:
+	case <-ctx.Done():
+		return
+	}
+	select {
+	case <-s.release:
+	case <-ctx.Done():
+	}
+}
+
+func waitForStartedDashboardReads(t *testing.T, started <-chan string, want []string, release chan struct{}) {
+	t.Helper()
+
+	seen := make(map[string]bool, len(want))
+	timeout := time.After(750 * time.Millisecond)
+	for len(seen) < len(want) {
+		select {
+		case name := <-started:
+			seen[name] = true
+		case <-timeout:
+			close(release)
+			t.Fatalf("dashboard store reads did not start concurrently; saw %v, want %v", seen, want)
+		}
+	}
+}
+
+type webAggregateCacheRequestIDKey struct{}
+
+type webAggregateCacheCountingStore struct {
+	mockStore
+
+	mu                             sync.Mutex
+	dashboardStatsCalls            int
+	dailyStatsCalls                int
+	recentVulnerabilitiesCalls     int
+	recentScansCalls               int
+	lastDashboardStatsRequestID    string
+	lastDailyStatsRequestID        string
+	lastRecentVulnerabilitiesReqID string
+	lastRecentScansRequestID       string
+}
+
+type webAggregateCacheCallSnapshot struct {
+	dashboardStats                     int
+	dailyStats                         int
+	recentVulnerabilities              int
+	recentScans                        int
+	lastDashboardStatsRequestID        string
+	lastDailyStatsRequestID            string
+	lastRecentVulnerabilitiesRequestID string
+	lastRecentScansRequestID           string
+}
+
+func (s *webAggregateCacheCountingStore) DashboardStats(ctx context.Context) (*db.DashboardStatsResult, error) {
+	requestID, _ := ctx.Value(webAggregateCacheRequestIDKey{}).(string)
+	s.mu.Lock()
+	s.dashboardStatsCalls++
+	s.lastDashboardStatsRequestID = requestID
+	s.mu.Unlock()
+	return s.mockStore.DashboardStats(ctx)
+}
+
+func (s *webAggregateCacheCountingStore) CountScansByDay(ctx context.Context, days int) ([]db.DailyScanStats, error) {
+	requestID, _ := ctx.Value(webAggregateCacheRequestIDKey{}).(string)
+	s.mu.Lock()
+	s.dailyStatsCalls++
+	s.lastDailyStatsRequestID = requestID
+	s.mu.Unlock()
+	return s.mockStore.CountScansByDay(ctx, days)
+}
+
+func (s *webAggregateCacheCountingStore) ListRecentVulnerabilities(ctx context.Context, days, limit int) ([]db.RecentVulnerability, error) {
+	requestID, _ := ctx.Value(webAggregateCacheRequestIDKey{}).(string)
+	s.mu.Lock()
+	s.recentVulnerabilitiesCalls++
+	s.lastRecentVulnerabilitiesReqID = requestID
+	s.mu.Unlock()
+	return s.mockStore.ListRecentVulnerabilities(ctx, days, limit)
+}
+
+func (s *webAggregateCacheCountingStore) ListRecentScans(ctx context.Context, limit, offset int) ([]db.ScanLogEntry, error) {
+	requestID, _ := ctx.Value(webAggregateCacheRequestIDKey{}).(string)
+	s.mu.Lock()
+	s.recentScansCalls++
+	s.lastRecentScansRequestID = requestID
+	s.mu.Unlock()
+	return s.mockStore.ListRecentScans(ctx, limit, offset)
+}
+
+func (s *webAggregateCacheCountingStore) snapshot() webAggregateCacheCallSnapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return webAggregateCacheCallSnapshot{
+		dashboardStats:                     s.dashboardStatsCalls,
+		dailyStats:                         s.dailyStatsCalls,
+		recentVulnerabilities:              s.recentVulnerabilitiesCalls,
+		recentScans:                        s.recentScansCalls,
+		lastDashboardStatsRequestID:        s.lastDashboardStatsRequestID,
+		lastDailyStatsRequestID:            s.lastDailyStatsRequestID,
+		lastRecentVulnerabilitiesRequestID: s.lastRecentVulnerabilitiesReqID,
+		lastRecentScansRequestID:           s.lastRecentScansRequestID,
 	}
 }
 
@@ -601,20 +1073,22 @@ func TestHandleSearch_HTMXPartial(t *testing.T) {
 	}
 	for _, want := range []string{
 		`id="search-status"`,
-		`role="status"`,
-		`aria-live="polite"`,
+		`aria-live="off"`,
 		`aria-atomic="true"`,
 		`1 package search result`,
 	} {
 		if !strings.Contains(body, want) {
-			t.Fatalf("Search HTMX partial missing live status marker %q:\n%s", want, body)
+			t.Fatalf("Search HTMX partial missing quiet result status marker %q:\n%s", want, body)
 		}
+	}
+	if strings.Contains(body, `role="status" aria-live="polite"`) {
+		t.Fatalf("Search HTMX partial should not announce debounced result counts:\n%s", body)
 	}
 }
 
 func TestHandleSearchSummaryWrapsLongQueries(t *testing.T) {
 	query := strings.Repeat("long-segment-", 8)
-	store := &mockStore{searchResults: []db.PackageSearchResult{{
+	store := &mockStore{searchResults: []PackageSearchResult{{
 		Ecosystem:          "npm",
 		Name:               "long-query-result",
 		FindingsCount:      1,
@@ -642,6 +1116,120 @@ func TestHandleSearchSummaryWrapsLongQueries(t *testing.T) {
 	}
 }
 
+func TestHandleSearchUsesAutoDirectionForBidiQueryAndResults(t *testing.T) {
+	query := "pkg-\u05d0\u05d1"
+	resultName := "left-\u05d0\u05d1"
+	resultVersion := "1.2.3-\u05d2"
+	resultSources := "osv,\u05d2hsa"
+	store := &mockStore{searchResults: []PackageSearchResult{{
+		Ecosystem:          "npm",
+		Name:               resultName,
+		Version:            resultVersion,
+		FindingsCount:      1,
+		VulnerabilityCount: 1,
+		VulnerabilityIDs:   "GHSA-bidi",
+		FindingTypes:       "vulnerability",
+		Sources:            resultSources,
+	}}}
+	handler := HandleSearch(store, testRenderer(), discardLogger())
+
+	req := httptest.NewRequest(http.MethodGet, "/search?q=pkg-%D7%90%D7%91", nil)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Search status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	body := rec.Body.String()
+	input := tagContaining(t, body, `<input`, `id="search-input"`)
+	for _, want := range []string{
+		`dir="auto"`,
+		`value="` + query + `"`,
+	} {
+		if !strings.Contains(input, want) {
+			t.Fatalf("Search input missing bidi marker %q:\n%s", want, input)
+		}
+	}
+	for _, want := range []string{
+		`<bdi dir="auto">` + resultName + `</bdi>`,
+		`Version: <bdi dir="auto">` + resultVersion + `</bdi>`,
+		`<bdi dir="auto">` + resultSources + `</bdi>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("Search response missing bidi-isolated result marker %q:\n%s", want, body)
+		}
+	}
+}
+
+func TestHandleSearchHighlightsMatchedPackageNameSubstrings(t *testing.T) {
+	store := &mockStore{searchResults: []PackageSearchResult{{
+		Ecosystem:          "npm",
+		Name:               "LoDash-lodASH",
+		FindingsCount:      1,
+		VulnerabilityCount: 1,
+		VulnerabilityIDs:   "GHSA-highlight",
+		FindingTypes:       "vulnerability",
+		Sources:            "osv",
+	}}}
+	handler := HandleSearch(store, testRenderer(), discardLogger())
+
+	req := httptest.NewRequest(http.MethodGet, "/search?q=DASH", nil)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Search status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		`Lo<mark>Dash</mark>-lo<mark>dASH</mark>`,
+		`<bdi dir="auto">`,
+		`for <bdi dir="auto" class="font-medium text-gray-700 break-all">"DASH"</bdi>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("Search response missing package highlight marker %q:\n%s", want, body)
+		}
+	}
+	if got := strings.Count(body, "<mark>"); got != 2 {
+		t.Fatalf("Package search result highlight count = %d, want 2:\n%s", got, body)
+	}
+}
+
+func TestHandleSearchHighlightEscapesMarkupLikePackageNames(t *testing.T) {
+	store := &mockStore{searchResults: []PackageSearchResult{{
+		Ecosystem:          "npm",
+		Name:               "safe-<em>DASH</em>",
+		FindingsCount:      1,
+		VulnerabilityCount: 1,
+		VulnerabilityIDs:   "GHSA-highlight-escape",
+		FindingTypes:       "vulnerability",
+		Sources:            "osv",
+	}}}
+	handler := HandleSearch(store, testRenderer(), discardLogger())
+
+	req := httptest.NewRequest(http.MethodGet, "/search?q=%3Cem", nil)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Search status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		`safe-<mark>&lt;em</mark>&gt;DASH&lt;/em&gt;`,
+		`for <bdi dir="auto" class="font-medium text-gray-700 break-all">"&lt;em"</bdi>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("Search response missing escaped highlight marker %q:\n%s", want, body)
+		}
+	}
+	for _, blocked := range []string{`safe-<em`, `</em>`} {
+		if strings.Contains(body, blocked) {
+			t.Fatalf("Search response rendered package markup as HTML %q:\n%s", blocked, body)
+		}
+	}
+}
+
 func TestHandleSearchLiveControlsReplaceHistoryAndSyncRequests(t *testing.T) {
 	store := &mockStore{}
 	handler := HandleSearch(store, testRenderer(), discardLogger())
@@ -663,9 +1251,29 @@ func TestHandleSearchLiveControlsReplaceHistoryAndSyncRequests(t *testing.T) {
 	if got := strings.Count(body, `hx-sync="#search-form:replace"`); got != 3 {
 		t.Fatalf("Search live controls hx-sync count = %d, want 3\n%s", got, body)
 	}
+	if !strings.Contains(body, `<form id="search-form" action="/search" method="get" role="search"`) {
+		t.Fatalf("Search form is not exposed as a search landmark:\n%s", body)
+	}
+	if !strings.Contains(body, `hx-trigger="input changed delay:300ms, search"`) {
+		t.Fatalf("Search input does not listen to input events for non-keyboard edits:\n%s", body)
+	}
+	for _, want := range []string{
+		`id="search-input"` + "\n" + `          name="q"`,
+		`id="severity-filter"` + "\n" + `          name="severity"`,
+		`id="finding-filter"` + "\n" + `          name="finding"`,
+	} {
+		start := strings.Index(body, want)
+		if start == -1 {
+			t.Fatalf("Search response missing control marker %q:\n%s", want, body)
+		}
+		control := body[start:min(len(body), start+500)]
+		if !strings.Contains(control, "min-h-11") && !strings.Contains(control, "pm-form-control") {
+			t.Fatalf("Search control missing touch target min-height near %q:\n%s", want, control)
+		}
+	}
 }
 
-func TestHandleSearchRejectsSeverityOnlyBeforeStore(t *testing.T) {
+func TestHandleSearchSeverityOnlyCallsStoreAndRendersResults(t *testing.T) {
 	store := &mockStore{}
 	renderer := testRenderer()
 	logger := discardLogger()
@@ -680,49 +1288,144 @@ func TestHandleSearchRejectsSeverityOnlyBeforeStore(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("Search (severity only) status = %d, want %d", rec.Code, http.StatusOK)
 	}
-	if store.searchCalls != 0 {
-		t.Fatalf("SearchPackages calls = %d, want 0 for severity-only search", store.searchCalls)
+	if store.searchCalls != 1 {
+		t.Fatalf("SearchPackages calls = %d, want 1 for severity-only search", store.searchCalls)
+	}
+	if store.lastSearch.Query != "" || store.lastSearch.Severity != "CRITICAL" || store.lastSearch.FindingType != "" {
+		t.Fatalf("SearchPackages params = %+v, want empty query with CRITICAL severity", store.lastSearch)
 	}
 
 	body := rec.Body.String()
-	if !strings.Contains(body, "Enter at least 2 characters") {
-		t.Fatalf("Search response missing admission hint for severity-only search:\n%s", body)
+	for _, want := range []string{`id="search-status"`, `aria-live="off"`, `1 package search result`, "openssl", "for severity CRITICAL"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("Search response missing severity-only result marker %q:\n%s", want, body)
+		}
 	}
-	if strings.Contains(body, "openssl") {
-		t.Fatalf("Search response rendered broad severity-only results:\n%s", body)
+	if strings.Contains(body, `role="status" aria-live="polite"`) {
+		t.Fatalf("Search response should not announce severity-only result counts during live search:\n%s", body)
+	}
+	if strings.Contains(body, "Enter at least 2 characters") {
+		t.Fatalf("Search response rendered severity-only admission block:\n%s", body)
 	}
 }
 
-func TestHandleSearchRejectsFindingOnlyBeforeStore(t *testing.T) {
+func TestHandleSearchFindingOnlyCallsStoreAndRendersResults(t *testing.T) {
+	tests := []struct {
+		finding     string
+		wantResult  string
+		wantSummary string
+		wantDetails string
+	}{
+		{
+			finding:     "vulnerability",
+			wantResult:  "lodash",
+			wantSummary: "for vulnerabilities",
+			wantDetails: "1 vulnerability finding",
+		},
+		{
+			finding:     "malicious",
+			wantResult:  "requests-evil",
+			wantSummary: "for malicious packages",
+			wantDetails: "2 malicious package findings",
+		},
+		{
+			finding:     "supply_chain_risk",
+			wantResult:  "risky-package",
+			wantSummary: "for supply-chain risks",
+			wantDetails: "1 supply-chain risk finding",
+		},
+		{
+			finding:     "lifecycle",
+			wantResult:  "django",
+			wantSummary: "for lifecycle findings",
+			wantDetails: "1 lifecycle finding",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.finding, func(t *testing.T) {
+			store := &mockStore{}
+			handler := HandleSearch(store, testRenderer(), discardLogger())
+
+			req := httptest.NewRequest(http.MethodGet, "/search?finding="+tt.finding, nil)
+			rec := httptest.NewRecorder()
+
+			handler(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("Search (%s only) status = %d, want %d", tt.finding, rec.Code, http.StatusOK)
+			}
+			if store.searchCalls != 1 {
+				t.Fatalf("SearchPackages calls = %d, want 1 for finding-only search", store.searchCalls)
+			}
+			if store.lastSearch.Query != "" || store.lastSearch.Severity != "" || store.lastSearch.FindingType != tt.finding {
+				t.Fatalf("SearchPackages params = %+v, want empty query with finding %q", store.lastSearch, tt.finding)
+			}
+
+			body := rec.Body.String()
+			for _, want := range []string{`id="search-status"`, `aria-live="off"`, `1 package search result`, tt.wantResult, tt.wantSummary, tt.wantDetails} {
+				if !strings.Contains(body, want) {
+					t.Fatalf("Search response missing finding-only result marker %q:\n%s", want, body)
+				}
+			}
+			if strings.Contains(body, `role="status" aria-live="polite"`) {
+				t.Fatalf("Search response should not announce finding-only result counts during live search:\n%s", body)
+			}
+			if strings.Contains(body, "Enter at least 2 characters") {
+				t.Fatalf("Search response rendered finding-only admission block:\n%s", body)
+			}
+		})
+	}
+}
+
+func TestHandleSearchInvalidSeverityDoesNotQueryStore(t *testing.T) {
 	store := &mockStore{}
-	renderer := testRenderer()
-	logger := discardLogger()
+	handler := HandleSearch(store, testRenderer(), discardLogger())
 
-	handler := HandleSearch(store, renderer, logger)
-
-	req := httptest.NewRequest(http.MethodGet, "/search?finding=malicious", nil)
+	req := httptest.NewRequest(http.MethodGet, "/search?q=lodash&severity=URGENT", nil)
 	rec := httptest.NewRecorder()
 
 	handler(rec, req)
 
 	if rec.Code != http.StatusOK {
-		t.Fatalf("Search (malicious only) status = %d, want %d", rec.Code, http.StatusOK)
+		t.Fatalf("Search status = %d, want %d", rec.Code, http.StatusOK)
 	}
 	if store.searchCalls != 0 {
-		t.Fatalf("SearchPackages calls = %d, want 0 for finding-only search", store.searchCalls)
+		t.Fatalf("SearchPackages calls = %d, want 0 for invalid severity filter", store.searchCalls)
 	}
-
 	body := rec.Body.String()
-	if !strings.Contains(body, "Enter at least 2 characters") {
-		t.Fatalf("Search response missing admission hint for finding-only search:\n%s", body)
+	for _, want := range []string{"Invalid severity filter", "URGENT", `role="alert"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("Search response missing invalid severity marker %q:\n%s", want, body)
+		}
 	}
-	if strings.Contains(body, "requests-evil") || strings.Contains(body, "2 malicious package findings") {
-		t.Fatalf("Search response rendered broad finding-only results:\n%s", body)
+}
+
+func TestHandleSearchInvalidFindingDoesNotQueryStore(t *testing.T) {
+	store := &mockStore{}
+	handler := HandleSearch(store, testRenderer(), discardLogger())
+
+	req := httptest.NewRequest(http.MethodGet, "/search?q=lodash&finding=unknown", nil)
+	rec := httptest.NewRecorder()
+
+	handler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Search status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if store.searchCalls != 0 {
+		t.Fatalf("SearchPackages calls = %d, want 0 for invalid finding filter", store.searchCalls)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"Invalid finding filter", "unknown", `role="alert"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("Search response missing invalid finding marker %q:\n%s", want, body)
+		}
 	}
 }
 
 func TestHandleSearchUnfilteredShowsFindingTypes(t *testing.T) {
-	store := &mockStore{searchResults: []db.PackageSearchResult{
+	store := &mockStore{searchResults: []PackageSearchResult{
 		{
 			Ecosystem:          "npm",
 			Name:               "left-pad",
@@ -743,7 +1446,7 @@ func TestHandleSearchUnfilteredShowsFindingTypes(t *testing.T) {
 		t.Fatalf("Search status = %d, want %d", rec.Code, http.StatusOK)
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"1 result", "Finding details", "1 advisory", "GHSA-test-1234", "Malicious package", "Vulnerability"} {
+	for _, want := range []string{"1 result", "Finding details", "1 vulnerability finding", "GHSA-test-1234", "Malicious package", "Vulnerability"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("Search response missing %q:\n%s", want, body)
 		}
@@ -769,11 +1472,30 @@ func TestHandleSearchLifecycleResultsLinkToVersionedPackageDetail(t *testing.T) 
 		t.Fatalf("Search status = %d, want %d", rec.Code, http.StatusOK)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, `href="/package/pypi/django?version=3.2.25"`) {
+	if !strings.Contains(body, `href="/package/pypi/django?version=3.2.25&amp;return_to=%2Fsearch%3Ffinding%3Dlifecycle%26q%3Ddjango"`) {
 		t.Fatalf("Lifecycle search result does not link to versioned package detail:\n%s", body)
 	}
-	if !strings.Contains(body, "Version: 3.2.25") {
+	if !strings.Contains(body, `Version: <bdi dir="auto">3.2.25</bdi>`) {
 		t.Fatalf("Lifecycle search result does not show version context:\n%s", body)
+	}
+}
+
+func TestHandleSearchPackageLinksCarryFilteredReturnTo(t *testing.T) {
+	store := &mockStore{}
+	handler := HandleSearch(store, testRenderer(), discardLogger())
+
+	req := httptest.NewRequest(http.MethodGet, "/search?q=lodash&severity=HIGH&finding=vulnerability", nil)
+	rec := httptest.NewRecorder()
+
+	handler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Search status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	body := rec.Body.String()
+	want := `href="/package/npm/lodash?return_to=%2Fsearch%3Ffinding%3Dvulnerability%26q%3Dlodash%26severity%3DHIGH"`
+	if !strings.Contains(body, want) {
+		t.Fatalf("Search result package link missing filtered return_to %q:\n%s", want, body)
 	}
 }
 
@@ -794,8 +1516,11 @@ func TestHandleSearch_ShowsVulnerabilityCountAndIDs(t *testing.T) {
 	}
 
 	body := rec.Body.String()
-	if !strings.Contains(body, "1 advisory") {
-		t.Fatal("Search response does not contain the vulnerability advisory count")
+	if !strings.Contains(body, "1 vulnerability finding") {
+		t.Fatal("Search response does not contain the vulnerability finding count")
+	}
+	if strings.Contains(body, "1 advisory") {
+		t.Fatalf("Search response still uses advisory wording for vulnerability counts:\n%s", body)
 	}
 	if !strings.Contains(body, "RUSTSEC-2026-0081") {
 		t.Fatal("Search response does not contain the advisory IDs")
@@ -803,7 +1528,7 @@ func TestHandleSearch_ShowsVulnerabilityCountAndIDs(t *testing.T) {
 }
 
 func TestHandleSearchCapsVulnerabilityIDPreview(t *testing.T) {
-	store := &mockStore{searchResults: []db.PackageSearchResult{{
+	store := &mockStore{searchResults: []PackageSearchResult{{
 		Ecosystem:          "npm",
 		Name:               "wide-advisory-package",
 		FindingsCount:      7,
@@ -823,8 +1548,11 @@ func TestHandleSearchCapsVulnerabilityIDPreview(t *testing.T) {
 		t.Fatalf("Search status = %d, want %d", rec.Code, http.StatusOK)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "7 advisories") {
-		t.Fatalf("Search response missing full advisory count:\n%s", body)
+	if !strings.Contains(body, "7 vulnerability findings") {
+		t.Fatalf("Search response missing full vulnerability finding count:\n%s", body)
+	}
+	if strings.Contains(body, "7 advisories") {
+		t.Fatalf("Search response still uses advisory wording for vulnerability counts:\n%s", body)
 	}
 	if !strings.Contains(body, "GHSA-001, GHSA-002, GHSA-003, GHSA-004, GHSA-005, &#43;2 more") {
 		t.Fatalf("Search response missing capped advisory preview:\n%s", body)
@@ -874,8 +1602,15 @@ func TestHandleSearchSingleCharacterQueryDoesNotHitStore(t *testing.T) {
 	if store.searchCalls != 0 {
 		t.Fatalf("SearchPackages calls = %d, want 0 for one-character query", store.searchCalls)
 	}
-	if !strings.Contains(rec.Body.String(), `value="a"`) {
-		t.Fatalf("Search response did not retain the visible query input:\n%s", rec.Body.String())
+	body := rec.Body.String()
+	if !strings.Contains(body, `value="a"`) {
+		t.Fatalf("Search response did not retain the visible query input:\n%s", body)
+	}
+	if !strings.Contains(body, "Enter at least 2 characters to search.") {
+		t.Fatalf("Search response missing minimum query length hint:\n%s", body)
+	}
+	if strings.Contains(body, "No packages found for the current search and filter.") {
+		t.Fatalf("Search response rendered no-results state for an unqueried one-character search:\n%s", body)
 	}
 }
 
@@ -903,18 +1638,7 @@ func TestHandleSearchSingleCharacterQueryWithFilterDoesNotHitStore(t *testing.T)
 }
 
 func TestHandleSearchShowsTruncatedResultWindow(t *testing.T) {
-	results := make([]db.PackageSearchResult, 51)
-	for i := range results {
-		results[i] = db.PackageSearchResult{
-			Ecosystem:          "npm",
-			Name:               fmt.Sprintf("pkg-%03d", i),
-			FindingsCount:      1,
-			VulnerabilityCount: 1,
-			VulnerabilityIDs:   fmt.Sprintf("GHSA-test-%03d", i),
-			Sources:            "osv",
-		}
-	}
-	store := &mockStore{searchResults: results}
+	store := &mockStore{searchResults: packageSearchResults(51)}
 	handler := HandleSearch(store, testRenderer(), discardLogger())
 
 	req := httptest.NewRequest(http.MethodGet, "/search?q=pkg&severity=HIGH", nil)
@@ -932,12 +1656,61 @@ func TestHandleSearchShowsTruncatedResultWindow(t *testing.T) {
 	if !strings.Contains(body, "Showing first 50 matches") {
 		t.Fatalf("Search response missing truncation notice:\n%s", body)
 	}
+	if !strings.Contains(body, "More results are available") || !strings.Contains(body, "Next page") || !strings.Contains(body, "page=2") {
+		t.Fatalf("Search response missing next-page control for truncated results:\n%s", body)
+	}
 	if !strings.Contains(body, "pkg-049") {
 		t.Fatalf("Search response missing last rendered result:\n%s", body)
 	}
 	if strings.Contains(body, "pkg-050") {
 		t.Fatalf("Search response rendered the sentinel result beyond the visible window:\n%s", body)
 	}
+}
+
+func TestHandleSearchPaginatesSecondResultWindow(t *testing.T) {
+	store := &mockStore{searchResults: packageSearchResults(60)}
+	handler := HandleSearch(store, testRenderer(), discardLogger())
+
+	req := httptest.NewRequest(http.MethodGet, "/search?q=pkg&page=2", nil)
+	rec := httptest.NewRecorder()
+
+	handler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Search status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "Showing matches 51-60") {
+		t.Fatalf("Search response missing second-page result window message:\n%s", body)
+	}
+	if !strings.Contains(body, "Previous page") || !strings.Contains(body, `href="/search?q=pkg"`) {
+		t.Fatalf("Search response missing previous-page control:\n%s", body)
+	}
+	if !strings.Contains(body, "pkg-050") || !strings.Contains(body, "pkg-059") {
+		t.Fatalf("Search response missing second-page results:\n%s", body)
+	}
+	if strings.Contains(body, "pkg-049") {
+		t.Fatalf("Search response rendered first-page result on page 2:\n%s", body)
+	}
+	if strings.Contains(body, "Next page") {
+		t.Fatalf("Search response rendered next-page control past the end:\n%s", body)
+	}
+}
+
+func packageSearchResults(count int) []PackageSearchResult {
+	results := make([]PackageSearchResult, count)
+	for i := range results {
+		results[i] = PackageSearchResult{
+			Ecosystem:          "npm",
+			Name:               fmt.Sprintf("pkg-%03d", i),
+			FindingsCount:      1,
+			VulnerabilityCount: 1,
+			VulnerabilityIDs:   fmt.Sprintf("GHSA-test-%03d", i),
+			FindingTypes:       "vulnerability",
+			Sources:            "osv",
+		}
+	}
+	return results
 }
 
 func TestHandleSearchErrorLogDoesNotIncludeRawQuery(t *testing.T) {
@@ -967,7 +1740,7 @@ func TestHandleSearch_ErrorAndNormalizationBranches(t *testing.T) {
 	store := &mockStore{searchErr: errors.New("search unavailable")}
 	handler := HandleSearch(store, testRenderer(), discardLogger())
 
-	req := httptest.NewRequest(http.MethodGet, "/search?q=%20lodash%20&severity=invalid&finding=invalid", nil)
+	req := httptest.NewRequest(http.MethodGet, "/search?q=%20lodash%20&severity=%20high%20&finding=%20VULNERABILITY%20", nil)
 	req.Header.Set("HX-Request", "true")
 	rec := httptest.NewRecorder()
 
@@ -975,6 +1748,12 @@ func TestHandleSearch_ErrorAndNormalizationBranches(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("Search error partial status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if store.searchCalls != 1 {
+		t.Fatalf("SearchPackages calls = %d, want 1 for normalized valid filters", store.searchCalls)
+	}
+	if store.lastSearch.Query != "lodash" || store.lastSearch.Severity != "HIGH" || store.lastSearch.FindingType != "vulnerability" {
+		t.Fatalf("SearchPackages params = %+v, want trimmed query with normalized severity and finding", store.lastSearch)
 	}
 	if strings.Contains(rec.Body.String(), "<!DOCTYPE html>") {
 		t.Fatal("Search error partial should not contain full HTML layout")
@@ -1013,6 +1792,38 @@ func TestHandleSearch_ErrorAndNormalizationBranches(t *testing.T) {
 	}
 }
 
+func TestDBStoreAdapterMapsPackageSearchBoundaryTypes(t *testing.T) {
+	params := PackageSearchParams{
+		Query:       "lodash",
+		Severity:    "HIGH",
+		FindingType: "vulnerability",
+		Limit:       51,
+		Offset:      50,
+	}
+	dbParams := dbSearchParams(params)
+	if dbParams.Query != params.Query || dbParams.Severity != params.Severity || dbParams.FindingType != params.FindingType || dbParams.Limit != params.Limit || dbParams.Offset != params.Offset {
+		t.Fatalf("dbSearchParams() = %+v, want mapped %+v", dbParams, params)
+	}
+
+	results := packageSearchResultsFromDB([]db.PackageSearchResult{{
+		Ecosystem:          "npm",
+		Name:               "lodash",
+		Version:            "4.17.21",
+		FindingsCount:      2,
+		VulnerabilityCount: 1,
+		VulnerabilityIDs:   "GHSA-test",
+		FindingTypes:       "vulnerability",
+		Sources:            "osv",
+	}})
+	if len(results) != 1 {
+		t.Fatalf("packageSearchResultsFromDB() len = %d, want 1", len(results))
+	}
+	got := results[0]
+	if got.Ecosystem != "npm" || got.Name != "lodash" || got.Version != "4.17.21" || got.FindingsCount != 2 || got.VulnerabilityCount != 1 || got.VulnerabilityIDs != "GHSA-test" || got.FindingTypes != "vulnerability" || got.Sources != "osv" {
+		t.Fatalf("packageSearchResultsFromDB()[0] = %+v, want DB fields mapped", got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Feeds tests
 // ---------------------------------------------------------------------------
@@ -1038,11 +1849,15 @@ func TestHandleFeeds_ReturnsOK(t *testing.T) {
 		t.Fatal("Feeds response does not contain expected heading")
 	}
 	for _, want := range []string{
-		`src="/static/auto-refresh.js"`,
+		`src="/static/auto-refresh.js?v=`,
+		`src="/static/form-actions.js?v=`,
+		`src="/static/htmx-regions.js?v=`,
 		`data-auto-refresh-control`,
 		`data-auto-refresh-event="feed-status-refresh"`,
 		`aria-controls="feed-status-container"`,
-		`Pause auto-refresh`,
+		`aria-describedby="feed-status-refresh-state"`,
+		`aria-pressed="true"`,
+		`>Auto-refresh</button>`,
 		`hx-trigger="feed-status-refresh from:body"`,
 		`Feed status table`,
 		`osv`,
@@ -1067,6 +1882,7 @@ func TestHandleFeeds_PartialStatus(t *testing.T) {
 	handler := HandleFeeds(store, renderer, logger)
 
 	req := httptest.NewRequest(http.MethodGet, "/feeds?partial=status", nil)
+	req.Header.Set("HX-Request", "true")
 	rec := httptest.NewRecorder()
 
 	handler(rec, req)
@@ -1082,6 +1898,25 @@ func TestHandleFeeds_PartialStatus(t *testing.T) {
 	}
 	if !strings.Contains(body, "500 / 500") {
 		t.Fatalf("Feeds partial missing synced/total entries:\n%s", body)
+	}
+}
+
+func TestHandleFeeds_PartialStatusWithoutHTMXRendersFullPage(t *testing.T) {
+	handler := HandleFeeds(&mockStore{}, testRenderer(), discardLogger())
+
+	req := httptest.NewRequest(http.MethodGet, "/feeds?partial=status", nil)
+	rec := httptest.NewRecorder()
+
+	handler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Feeds partial URL status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"<!DOCTYPE html>", `href="/feeds"`, "Feed Status"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("Feeds partial URL full page missing %q:\n%s", want, body)
+		}
 	}
 }
 
@@ -1120,6 +1955,7 @@ func TestHandleFeeds_StoreErrorRendersLoadError(t *testing.T) {
 	handler := HandleFeeds(&mockStore{feedsErr: errors.New("feeds unavailable")}, testRenderer(), discardLogger())
 
 	req := httptest.NewRequest(http.MethodGet, "/feeds?partial=status", nil)
+	req.Header.Set("HX-Request", "true")
 	rec := httptest.NewRecorder()
 
 	handler(rec, req)
@@ -1151,6 +1987,7 @@ func TestHandleFeedsRedactsDiagnosticMessages(t *testing.T) {
 	handler := HandleFeeds(store, testRenderer(), discardLogger())
 
 	req := httptest.NewRequest(http.MethodGet, "/feeds?partial=status", nil)
+	req.Header.Set("HX-Request", "true")
 	rec := httptest.NewRecorder()
 	handler(rec, req)
 
@@ -1168,13 +2005,47 @@ func TestHandleFeedsRedactsDiagnosticMessages(t *testing.T) {
 			t.Fatalf("Feeds partial missing %q:\n%s", want, body)
 		}
 	}
-	for _, want := range []string{`<details`, `<summary`, `<pre`, `Show full feed error for vulncheck`} {
+	for _, want := range []string{`<details`, `<summary`, `<pre`, `Show full feed ` + `error for vulncheck`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("Feeds partial missing accessible diagnostic disclosure %q:\n%s", want, body)
 		}
 	}
 	if strings.Contains(body, `title="GET https://downloads.example.test/...`) {
 		t.Fatalf("Feeds partial exposes full diagnostic through title-only tooltip:\n%s", body)
+	}
+}
+
+func TestHandleFeedsShowsRejectedImportDetails(t *testing.T) {
+	store := &mockStore{
+		feedStatuses: []db.FeedSyncStatus{{
+			FeedName:       "osv",
+			LastSyncStatus: "rejected",
+			LastError:      "vulnerability import cvss_score must be between 0 and 10",
+			EntriesSynced:  0,
+			EntriesTotal:   2,
+			Metadata:       json.RawMessage(`{"rejected_count":2,"rejection_reason":"vulnerability import cvss_score must be between 0 and 10"}`),
+		}},
+	}
+	handler := HandleFeeds(store, testRenderer(), discardLogger())
+
+	req := httptest.NewRequest(http.MethodGet, "/feeds?partial=status", nil)
+	req.Header.Set("HX-Request", "true")
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Feeds partial status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		"rejected",
+		"Rejected records: 2",
+		"0 / 2",
+		"vulnerability import cvss_score must be between 0 and 10",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("Feeds partial missing rejected-import marker %q:\n%s", want, body)
+		}
 	}
 }
 
@@ -1258,18 +2129,34 @@ func TestHandlePackage_ReturnsOK(t *testing.T) {
 	if !strings.Contains(body, "&gt;= 1.2.3") {
 		t.Fatal("Package response does not contain the formatted fixed-in version")
 	}
-	if !strings.Contains(body, ">GHSA<span") || !strings.Contains(body, ">NVD<span") {
-		t.Fatal("Package response does not contain the expected resource link labels")
+	if !strings.Contains(body, "Fixed Version") {
+		t.Fatalf("Package response missing canonical fixed-version label:\n%s", body)
+	}
+	if strings.Contains(body, "Fixed In") {
+		t.Fatalf("Package response still uses Fixed In label:\n%s", body)
+	}
+	for _, label := range []string{`<bdi dir="auto">GHSA</bdi>`, `<bdi dir="auto">NVD</bdi>`} {
+		if !strings.Contains(body, label) {
+			t.Fatalf("Package response does not contain the expected resource link label %q", label)
+		}
 	}
 	for _, want := range []string{
 		`aria-label="GHSA opens in a new tab"`,
 		`aria-label="NVD opens in a new tab"`,
-		`<span aria-hidden="true"> &#8599;</span>`,
+		`data-external-link-icon`,
+		`aria-hidden="true"`,
+		`focusable="false"`,
+		`stroke="currentColor"`,
 		`<span class="sr-only"> (opens in a new tab)</span>`,
-		`class="inline-flex min-h-8 items-center rounded-md`,
+		`class="inline-flex min-h-11 items-center rounded-md`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("Package response missing external resource link marker %q:\n%s", want, body)
+		}
+	}
+	for _, blocked := range []string{`&#8599;`, `↗`} {
+		if strings.Contains(body, blocked) {
+			t.Fatalf("Package response still uses raw external link glyph %q:\n%s", blocked, body)
 		}
 	}
 	if !strings.Contains(body, "Example advisory title that should remain fully visible in the package table") {
@@ -1327,12 +2214,20 @@ func TestDashboardExternalAdvisoryLinksAndTimesAreAccessible(t *testing.T) {
 	body := rec.Body.String()
 	for _, want := range []string{
 		`aria-label="CVE-2026-0001 advisory opens in a new tab"`,
-		`<span aria-hidden="true"> &#8599;</span>`,
+		`data-external-link-icon`,
+		`aria-hidden="true"`,
+		`focusable="false"`,
+		`stroke="currentColor"`,
 		`<span class="sr-only"> (opens in a new tab)</span>`,
-		`<time datetime="2026-06-01T12:30:00Z" aria-label="2026-06-01 12:30 UTC">`,
+		`<time data-local-time="relative" datetime="2026-06-01T12:30:00Z" aria-label="2026-06-01 12:30 UTC">`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("Dashboard response missing accessible advisory/time marker %q:\n%s", want, body)
+		}
+	}
+	for _, blocked := range []string{`&#8599;`, `↗`} {
+		if strings.Contains(body, blocked) {
+			t.Fatalf("Dashboard response still uses raw external link glyph %q:\n%s", blocked, body)
 		}
 	}
 	if strings.Contains(body, `title="2026-06-01 12:30 UTC"`) {
@@ -1344,18 +2239,278 @@ func TestStaticAssetsExposeCacheHeaders(t *testing.T) {
 	mux := http.NewServeMux()
 	RegisterRoutes(mux, &mockStore{}, testRenderer(), discardLogger())
 
-	req := httptest.NewRequest(http.MethodGet, "/static/style.css", nil)
+	layoutRec := httptest.NewRecorder()
+	HandleDashboard(&mockStore{}, testRenderer(), discardLogger())(layoutRec, httptest.NewRequest(http.MethodGet, "/", nil))
+	versionedStyleURL := versionedStaticAssetURL(t, layoutRec.Body.String(), "style.css")
+
+	req := httptest.NewRequest(http.MethodGet, versionedStyleURL, nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("static asset status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	if got := rec.Header().Get("Cache-Control"); got != "public, max-age=3600" {
-		t.Fatalf("Cache-Control = %q, want public max-age", got)
+	if got := rec.Header().Get("Cache-Control"); got != "public, max-age=31536000, immutable" {
+		t.Fatalf("versioned Cache-Control = %q, want long-lived immutable", got)
 	}
 	if got := rec.Header().Get("Vary"); !strings.Contains(got, "Accept-Encoding") {
 		t.Fatalf("Vary = %q, want Accept-Encoding", got)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/static/style.css", nil)
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unversioned static asset status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "public, max-age=3600" {
+		t.Fatalf("unversioned Cache-Control = %q, want short fallback", got)
+	}
+}
+
+func TestStaticAssetsServeGzipWhenAccepted(t *testing.T) {
+	mux := http.NewServeMux()
+	RegisterRoutes(mux, &mockStore{}, testRenderer(), discardLogger())
+
+	layoutRec := httptest.NewRecorder()
+	HandleDashboard(&mockStore{}, testRenderer(), discardLogger())(layoutRec, httptest.NewRequest(http.MethodGet, "/", nil))
+	versionedStyleURL := versionedStaticAssetURL(t, layoutRec.Body.String(), "style.css")
+
+	req := httptest.NewRequest(http.MethodGet, versionedStyleURL, nil)
+	req.Header.Set("Accept-Encoding", "br, gzip")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("static gzip status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Encoding"); got != "gzip" {
+		t.Fatalf("Content-Encoding = %q, want gzip", got)
+	}
+	if got := rec.Header().Get("Vary"); !strings.Contains(got, "Accept-Encoding") {
+		t.Fatalf("Vary = %q, want Accept-Encoding", got)
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "public, max-age=31536000, immutable" {
+		t.Fatalf("gzip Cache-Control = %q, want versioned immutable", got)
+	}
+
+	gzipReader, err := gzip.NewReader(bytes.NewReader(rec.Body.Bytes()))
+	if err != nil {
+		t.Fatalf("open gzip response body: %v", err)
+	}
+	decompressed, err := io.ReadAll(gzipReader)
+	if closeErr := gzipReader.Close(); err == nil && closeErr != nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("read gzip response body: %v", err)
+	}
+	if !strings.Contains(string(decompressed), "Tailwind CSS is built locally") {
+		t.Fatalf("decompressed gzip body does not look like style.css:\n%s", string(decompressed))
+	}
+}
+
+func TestStaticAssetsUseIdentityWhenGzipNotAccepted(t *testing.T) {
+	mux := http.NewServeMux()
+	RegisterRoutes(mux, &mockStore{}, testRenderer(), discardLogger())
+
+	req := httptest.NewRequest(http.MethodGet, "/static/style.css", nil)
+	req.Header.Set("Accept-Encoding", "br")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("static identity status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Encoding"); got != "" {
+		t.Fatalf("Content-Encoding = %q, want identity response without header", got)
+	}
+	if got := rec.Header().Get("Vary"); !strings.Contains(got, "Accept-Encoding") {
+		t.Fatalf("Vary = %q, want Accept-Encoding", got)
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "public, max-age=3600" {
+		t.Fatalf("identity Cache-Control = %q, want short fallback", got)
+	}
+	if !strings.Contains(rec.Body.String(), "Tailwind CSS is built locally") {
+		t.Fatalf("identity body does not look like style.css:\n%s", rec.Body.String())
+	}
+}
+
+func TestSharedLayoutRendersVersionedStaticAssetURLs(t *testing.T) {
+	renderer := testRenderer()
+	var out strings.Builder
+	if err := renderer.Render(&out, "not_found.html", nil); err != nil {
+		t.Fatalf("Render(not_found) error = %v", err)
+	}
+	body := out.String()
+
+	for _, asset := range []string{"tailwind.css", "style.css"} {
+		versionedStaticAssetURL(t, body, asset)
+	}
+	for _, asset := range []string{"htmx.min.js", "auto-refresh.js", "form-actions.js", "htmx-regions.js"} {
+		if strings.Contains(body, "/static/"+asset) {
+			t.Fatalf("layout rendered %s on a page with no matching behavior:\n%s", asset, body)
+		}
+	}
+	for _, unversioned := range []string{
+		`href="/static/tailwind.css"`,
+		`href="/static/style.css"`,
+		`src="/static/htmx.min.js"`,
+		`src="/static/auto-refresh.js"`,
+		`src="/static/form-actions.js"`,
+		`src="/static/htmx-regions.js"`,
+	} {
+		if strings.Contains(body, unversioned) {
+			t.Fatalf("layout still renders unversioned asset URL %q:\n%s", unversioned, body)
+		}
+	}
+}
+
+func TestSharedLayoutLoadsScriptsOnlyForPagesWithMatchingBehavior(t *testing.T) {
+	renderer := testRenderer()
+
+	tests := []struct {
+		name              string
+		template          string
+		data              any
+		wantHTMX          bool
+		wantHelper        bool
+		wantHelperControl string
+	}{
+		{
+			name:     "privacy static page",
+			template: "privacy.html",
+			data:     nil,
+		},
+		{
+			name:     "search htmx busy target",
+			template: "search.html",
+			data: map[string]any{
+				"Query":    "",
+				"Severity": "",
+				"Finding":  "",
+				"Error":    "",
+				"Results":  nil,
+			},
+			wantHTMX:          true,
+			wantHelper:        true,
+			wantHelperControl: `aria-busy="false"`,
+		},
+		{
+			name:     "public feeds auto refresh",
+			template: "feeds.html",
+			data: map[string]any{
+				"Feeds": []db.FeedSyncStatus{},
+			},
+			wantHTMX:          true,
+			wantHelper:        true,
+			wantHelperControl: `data-auto-refresh-control`,
+		},
+		{
+			name:     "admin login submit lock",
+			template: "admin/login.html",
+			data: map[string]any{
+				"CSRFToken": "csrf-token",
+			},
+			wantHelper:        true,
+			wantHelperControl: `data-submit-lock`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out strings.Builder
+			if err := renderer.Render(&out, tt.template, tt.data); err != nil {
+				t.Fatalf("Render(%s) error = %v", tt.template, err)
+			}
+			body := out.String()
+
+			if gotHTMX := strings.Contains(body, `/static/htmx.min.js?v=`); gotHTMX != tt.wantHTMX {
+				t.Fatalf("htmx script present = %v, want %v for %s:\n%s", gotHTMX, tt.wantHTMX, tt.template, body)
+			}
+			for _, helperAsset := range []string{"auto-refresh.js", "form-actions.js", "htmx-regions.js"} {
+				if gotHelper := strings.Contains(body, `/static/`+helperAsset+`?v=`); gotHelper != tt.wantHelper {
+					t.Fatalf("%s present = %v, want %v for %s:\n%s", helperAsset, gotHelper, tt.wantHelper, tt.template, body)
+				}
+			}
+			if tt.wantHTMX {
+				versionedStaticAssetURL(t, body, "htmx.min.js")
+				if !strings.Contains(body, `<meta name="htmx-config"`) {
+					t.Fatalf("htmx page missing CSP-safe htmx config:\n%s", body)
+				}
+			} else if strings.Contains(body, `<meta name="htmx-config"`) {
+				t.Fatalf("non-htmx page rendered htmx config:\n%s", body)
+			}
+			if tt.wantHelper {
+				for _, helperAsset := range []string{"auto-refresh.js", "form-actions.js", "htmx-regions.js"} {
+					versionedStaticAssetURL(t, body, helperAsset)
+				}
+				if !strings.Contains(body, tt.wantHelperControl) {
+					t.Fatalf("test fixture did not render expected helper hook %q:\n%s", tt.wantHelperControl, body)
+				}
+			}
+		})
+	}
+}
+
+func TestAdminFlashAlertsRenderDismissControls(t *testing.T) {
+	renderer := testRenderer()
+
+	var out strings.Builder
+	if err := renderer.RenderPartial(&out, "admin/feeds.html", "admin-feed-flash", map[string]any{
+		"Message": "Feed configuration saved.",
+		"Error":   "Failed to refresh feed.",
+	}); err != nil {
+		t.Fatalf("RenderPartial(admin-feed-flash) error = %v", err)
+	}
+	body := out.String()
+
+	for _, want := range []string{
+		`data-alert-dismissible`,
+		`data-alert-dismiss`,
+		`type="button"`,
+		`aria-label="Dismiss alert"`,
+		`role="status" aria-live="polite" aria-atomic="true"`,
+		`role="alert" aria-live="assertive" aria-atomic="true"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("admin flash alert output missing %q:\n%s", want, body)
+		}
+	}
+	dismissButtonRE := regexp.MustCompile(`\sdata-alert-dismiss(?:\s|>)`)
+	if got := len(dismissButtonRE.FindAllString(body, -1)); got != 2 {
+		t.Fatalf("dismiss button count = %d, want 2 in:\n%s", got, body)
+	}
+}
+
+func TestRegisterRoutesServesSecurityTxt(t *testing.T) {
+	mux := http.NewServeMux()
+	RegisterRoutes(mux, &mockStore{}, testRenderer(), discardLogger())
+
+	req := httptest.NewRequest(http.MethodGet, "/.well-known/security.txt", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("security.txt status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Type"); !strings.HasPrefix(got, "text/plain") {
+		t.Fatalf("security.txt Content-Type = %q, want text/plain", got)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		"Contact: https://github.com/8linkz-sec/packmon/security/advisories/new",
+		"Policy: https://github.com/8linkz-sec/packmon/security/policy",
+		"Preferred-Languages: en",
+		"Expires:",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("security.txt missing %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "<html") {
+		t.Fatalf("security.txt must be plain text, got:\n%s", body)
 	}
 }
 
@@ -1440,7 +2595,7 @@ func TestHandlePackagePrioritizesBlockingFindingsAndRendersNonVulnerabilityEvide
 	}
 	body := rec.Body.String()
 	maliciousIndex := strings.Index(body, "Malicious Package Reports")
-	supplyIndex := strings.Index(body, "Supply Chain Risks")
+	supplyIndex := strings.Index(body, "Supply-chain Risks")
 	vulnerabilityIndex := strings.Index(body, "Vulnerabilities")
 	if maliciousIndex == -1 || supplyIndex == -1 || vulnerabilityIndex == -1 || maliciousIndex >= supplyIndex || supplyIndex >= vulnerabilityIndex {
 		t.Fatalf("Package sections are not ordered by blocking priority: malicious=%d supply=%d vuln=%d\n%s", maliciousIndex, supplyIndex, vulnerabilityIndex, body)
@@ -1494,6 +2649,245 @@ func TestRegisterRoutesDoesNotExposePublicScansPage(t *testing.T) {
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("public scans status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleScansEmptyRecentWindowNamesWindowScope(t *testing.T) {
+	store := &mockStore{
+		dailyStats: []db.DailyScanStats{},
+		recentScans: []db.ScanLogEntry{
+			{
+				ScanID:        "scan-older",
+				ScannedAt:     time.Now().UTC().AddDate(0, 0, -14),
+				PackagesCount: 8,
+				FindingsCount: 1,
+			},
+		},
+	}
+	handler := HandleScans(store, testRenderer(), discardLogger())
+	req := httptest.NewRequest(http.MethodGet, "/scans", nil)
+	rec := httptest.NewRecorder()
+
+	handler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("scans status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "No scan activity in the last 7 days.") {
+		t.Fatalf("scans page missing scoped empty activity message:\n%s", body)
+	}
+	if strings.Contains(body, "No scan activity yet.") {
+		t.Fatalf("scans page uses unscoped activity empty state despite older scan history:\n%s", body)
+	}
+	if !strings.Contains(body, "Recent Scans") || !strings.Contains(body, "scan-older") {
+		t.Fatalf("scans page did not render older recent scan context:\n%s", body)
+	}
+}
+
+func TestHandleScansPaginatesRecentScans(t *testing.T) {
+	now := time.Now().UTC()
+	scans := make([]db.ScanLogEntry, recentScansPageSize+1)
+	for i := range scans {
+		scans[i] = db.ScanLogEntry{
+			ScanID:        fmt.Sprintf("scan-%02d", i),
+			ScannedAt:     now.Add(-time.Duration(i) * time.Minute),
+			PackagesCount: 1,
+		}
+	}
+	store := &mockStore{
+		dailyStats:  []db.DailyScanStats{{Date: now, ScanCount: 1}},
+		recentScans: scans,
+	}
+	handler := HandleScans(store, testRenderer(), discardLogger())
+
+	req := httptest.NewRequest(http.MethodGet, "/scans", nil)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first scans page status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if store.lastScansLimit != recentScansPageSize+1 || store.lastScansOffset != 0 {
+		t.Fatalf("first scans page requested limit/offset = %d/%d, want %d/0", store.lastScansLimit, store.lastScansOffset, recentScansPageSize+1)
+	}
+	for _, want := range []string{
+		`aria-label="Recent scans pages"`,
+		`href="/scans?offset=50"`,
+		"Older scans",
+		"scan-49",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("first scans page missing %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "scan-50") || strings.Contains(body, "Newer scans") {
+		t.Fatalf("first scans page rendered outside-page row or unexpected previous link:\n%s", body)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/scans?offset=50", nil)
+	rec = httptest.NewRecorder()
+	handler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second scans page status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body = rec.Body.String()
+	if store.lastScansLimit != recentScansPageSize+1 || store.lastScansOffset != recentScansPageSize {
+		t.Fatalf("second scans page requested limit/offset = %d/%d, want %d/%d", store.lastScansLimit, store.lastScansOffset, recentScansPageSize+1, recentScansPageSize)
+	}
+	for _, want := range []string{
+		`href="/scans"`,
+		"Newer scans",
+		"scan-50",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("second scans page missing %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "Older scans") || strings.Contains(body, "scan-49") {
+		t.Fatalf("second scans page rendered unexpected older link or previous-page row:\n%s", body)
+	}
+}
+
+func TestHandleScansCachesDailyAggregateAcrossRequests(t *testing.T) {
+	store := &webAggregateCacheCountingStore{
+		mockStore: mockStore{
+			dailyStats: []db.DailyScanStats{{ScanCount: 2, FindingsCount: 1}},
+			recentScans: []db.ScanLogEntry{{
+				ScanID:        "scan-cache-test",
+				ScannedAt:     time.Now().UTC(),
+				PackagesCount: 7,
+				FindingsCount: 1,
+			}},
+		},
+	}
+	handler := HandleScans(store, testRenderer(), discardLogger())
+
+	for _, requestID := range []string{"first-scans-request", "second-scans-request"} {
+		req := httptest.NewRequest(http.MethodGet, "/scans", nil)
+		req = req.WithContext(context.WithValue(req.Context(), webAggregateCacheRequestIDKey{}, requestID))
+		rec := httptest.NewRecorder()
+
+		handler(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("Scans status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "scan-cache-test") {
+			t.Fatalf("Scans response missing uncached recent scan:\n%s", rec.Body.String())
+		}
+	}
+
+	calls := store.snapshot()
+	if calls.dailyStats != 1 {
+		t.Fatalf("CountScansByDay calls = %d, want 1 cached aggregate read across requests", calls.dailyStats)
+	}
+	if calls.recentScans != 2 {
+		t.Fatalf("ListRecentScans calls = %d, want 2 uncached list reads", calls.recentScans)
+	}
+	if calls.lastDailyStatsRequestID != "first-scans-request" {
+		t.Fatalf("CountScansByDay request ID = %q, want first request context", calls.lastDailyStatsRequestID)
+	}
+	if calls.lastRecentScansRequestID != "second-scans-request" {
+		t.Fatalf("ListRecentScans request ID = %q, want second request context for uncached reads", calls.lastRecentScansRequestID)
+	}
+}
+
+func TestRegisterRoutesPublicNotFoundRendersStyledFallback(t *testing.T) {
+	store := &mockStore{}
+	mux := http.NewServeMux()
+	RegisterRoutes(mux, store, testRenderer(), discardLogger())
+
+	req := httptest.NewRequest(http.MethodGet, "/missing-page", nil)
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("public not found status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Type"); !strings.Contains(got, "text/html") {
+		t.Fatalf("public not found Content-Type = %q, want text/html", got)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		"<!DOCTYPE html>",
+		"Page not found",
+		`href="/"`,
+		`href="/search"`,
+		`href="/feeds"`,
+		`href="/admin/"`,
+		"Open admin",
+		`id="main-content"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("public not found body missing %q:\n%s", want, body)
+		}
+	}
+}
+
+func TestRegisterRoutesStaticMissDoesNotUseWebNotFoundFallback(t *testing.T) {
+	store := &mockStore{}
+	mux := http.NewServeMux()
+	RegisterRoutes(mux, store, testRenderer(), discardLogger())
+
+	req := httptest.NewRequest(http.MethodGet, "/static/missing.css", nil)
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("static miss status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "Page not found") {
+		t.Fatalf("static miss rendered public web fallback:\n%s", rec.Body.String())
+	}
+}
+
+func TestRegisterRoutesStaticRootKeepsSubtreeRedirect(t *testing.T) {
+	store := &mockStore{}
+	mux := http.NewServeMux()
+	RegisterRoutes(mux, store, testRenderer(), discardLogger())
+
+	req := httptest.NewRequest(http.MethodGet, "/static", nil)
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMovedPermanently {
+		t.Fatalf("static root status = %d, want 301; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Location"); got != "/static/" {
+		t.Fatalf("static root Location = %q, want /static/", got)
+	}
+	if strings.Contains(rec.Body.String(), "Page not found") {
+		t.Fatalf("static root rendered public web fallback:\n%s", rec.Body.String())
+	}
+}
+
+func TestRegisterRoutesKeepsMethodSpecificAPIHandling(t *testing.T) {
+	store := &mockStore{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/check", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	RegisterRoutes(mux, store, testRenderer(), discardLogger())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/check", nil)
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("API method mismatch status = %d, want 405; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Allow"); got != http.MethodPost {
+		t.Fatalf("API method mismatch Allow = %q, want POST", got)
+	}
+	if strings.Contains(rec.Body.String(), "Page not found") {
+		t.Fatalf("API method mismatch rendered public web fallback:\n%s", rec.Body.String())
 	}
 }
 
@@ -1577,7 +2971,7 @@ func TestHandlePackageShowsReputationFindings(t *testing.T) {
 	if !strings.Contains(body, db.ReputationSourceReversingLabs) {
 		t.Fatal("Package response does not contain ReversingLabs source")
 	}
-	if !strings.Contains(body, "Supply Chain Risks (1)") {
+	if !strings.Contains(body, "Supply-chain Risks (1)") {
 		t.Fatal("Package response does not render reputation finding in supply-chain section")
 	}
 	for _, want := range []string{"reversinglabs:npm/left-pad@1.3.0", "1.3.0", ">ReversingLabs<"} {
@@ -1733,6 +3127,20 @@ func TestHandlePackage_MissingParams_Returns404(t *testing.T) {
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("Package (missing params) status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+	if got := rec.Header().Get("Content-Type"); !strings.Contains(got, "text/html") {
+		t.Fatalf("Package (missing params) Content-Type = %q, want text/html", got)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		"Page not found",
+		`href="/search" aria-current="page"`,
+		`href="/admin/"`,
+		`id="main-content"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("Package (missing params) body missing %q:\n%s", want, body)
+		}
 	}
 }
 

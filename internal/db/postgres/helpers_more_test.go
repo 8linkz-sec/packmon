@@ -1,7 +1,6 @@
 package postgres
 
 import (
-	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -9,25 +8,29 @@ import (
 	"time"
 
 	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
-type postgresBareCloser struct {
-	closed bool
-}
-
-func (c *postgresBareCloser) Close() {
-	c.closed = true
-}
-
-func TestPostgresCloseSilentlyUsesSharedHelper(t *testing.T) {
+func TestRefreshQueueErrorTextRedactsAndBoundsDiagnostics(t *testing.T) {
 	t.Parallel()
 
-	closer := &postgresBareCloser{}
-	closeSilently(closer)
-	if !closer.closed {
-		t.Fatal("closeSilently did not close bare closer")
+	got := refreshQueueErrorText(errors.New(`request failed token=query-secret C:\Users\Admin\packmon\queue.json`))
+	for _, leaked := range []string{"query-secret", `C:\Users\Admin\packmon\queue.json`} {
+		if strings.Contains(got, leaked) {
+			t.Fatalf("refreshQueueErrorText leaked %q in %q", leaked, got)
+		}
 	}
-	closeSilently(nil)
+	for _, want := range []string{"token=[redacted]", "(redacted-path)"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("refreshQueueErrorText missing %q in %q", want, got)
+		}
+	}
+	if len(got) > 512 {
+		t.Fatalf("refreshQueueErrorText length = %d, want <= 512", len(got))
+	}
+	if got := refreshQueueErrorText(nil); got != "" {
+		t.Fatalf("refreshQueueErrorText(nil) = %q, want empty", got)
+	}
 }
 
 func TestScanLogJSONAndDecodeScanLogJSON(t *testing.T) {
@@ -66,6 +69,48 @@ func TestScanLogJSONAndDecodeScanLogJSON(t *testing.T) {
 	}
 	if err := decodeScanLogJSON(`{`, &decoded); err == nil {
 		t.Fatal("decode invalid JSON error = nil")
+	}
+}
+
+func TestValidateFeedSyncStatusRejectsInvalidValues(t *testing.T) {
+	t.Parallel()
+
+	negative := -time.Second
+	tests := []struct {
+		name    string
+		status  db.FeedSyncStatus
+		wantErr string
+	}{
+		{
+			name:    "invalid status",
+			status:  db.FeedSyncStatus{FeedName: "osv", LastSyncStatus: "failed"},
+			wantErr: "unsupported feed sync status",
+		},
+		{
+			name:    "negative synced",
+			status:  db.FeedSyncStatus{FeedName: "osv", LastSyncStatus: "success", EntriesSynced: -1},
+			wantErr: "entries_synced",
+		},
+		{
+			name:    "synced exceeds total",
+			status:  db.FeedSyncStatus{FeedName: "osv", LastSyncStatus: "success", EntriesSynced: 2, EntriesTotal: 1},
+			wantErr: "entries_synced cannot exceed entries_total",
+		},
+		{
+			name:    "negative duration",
+			status:  db.FeedSyncStatus{FeedName: "osv", LastSyncStatus: "success", LastSyncDuration: &negative},
+			wantErr: "duration",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateFeedSyncStatus(&tt.status)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("validateFeedSyncStatus() error = %v, want containing %q", err, tt.wantErr)
+			}
+		})
 	}
 }
 
@@ -144,44 +189,14 @@ func TestAddSyncWindowFilters(t *testing.T) {
 	}
 }
 
-func TestManualAdvisoryHelpers(t *testing.T) {
+func TestManualAdvisoryFindingTypeHelpers(t *testing.T) {
 	t.Parallel()
 
-	if got := normalizeManualAdvisoryType(" vulnerability "); got != "vulnerability" {
-		t.Fatalf("normalizeManualAdvisoryType(vulnerability) = %q", got)
+	if got, ok := domain.ParseManualAdvisoryFindingType(" vulnerability "); !ok || got != domain.FindingTypeVulnerability {
+		t.Fatalf("ParseManualAdvisoryFindingType(vulnerability) = %q/%v", got, ok)
 	}
-	if got := normalizeManualAdvisoryType("malware"); got != "malicious" {
-		t.Fatalf("normalizeManualAdvisoryType(default) = %q", got)
-	}
-
-	advisory := &db.ManualAdvisory{
-		ID:          " manual-1 ",
-		Ecosystem:   " npm ",
-		Name:        " left-pad ",
-		Severity:    " high ",
-		RiskType:    "",
-		Summary:     " summary ",
-		Description: " details ",
-	}
-	vuln := manualAdvisoryToVulnerability(advisory)
-	if vuln.ID != "manual-1" || vuln.Severity != "HIGH" || vuln.Summary != "summary" || vuln.Details != "details" {
-		t.Fatalf("manualAdvisoryToVulnerability = %+v", vuln)
-	}
-	if len(vuln.AffectedPackages) != 1 || vuln.AffectedPackages[0].Ecosystem != "npm" || vuln.AffectedPackages[0].Name != "left-pad" {
-		t.Fatalf("affected packages = %+v", vuln.AffectedPackages)
-	}
-	var raw map[string]string
-	if err := json.Unmarshal(vuln.Sources[0].RawJSON, &raw); err != nil || raw["finding_type"] != "vulnerability" {
-		t.Fatalf("vulnerability raw JSON = %s, %v", vuln.Sources[0].RawJSON, err)
-	}
-
-	malicious := manualAdvisoryToMaliciousFinding(advisory)
-	if malicious.ID != "manual-1" || malicious.Severity != "HIGH" || malicious.RiskType != "other" || malicious.CreatedBy != "admin" {
-		t.Fatalf("manualAdvisoryToMaliciousFinding = %+v", malicious)
-	}
-	defaults := manualAdvisoryToMaliciousFinding(&db.ManualAdvisory{ID: "id"})
-	if defaults.Severity != "CRITICAL" || defaults.RiskType != "other" {
-		t.Fatalf("manual malicious defaults = %+v", defaults)
+	if got, ok := domain.ParseManualAdvisoryFindingType("malware"); ok || got != "" {
+		t.Fatalf("ParseManualAdvisoryFindingType(malware) = %q/%v; want invalid", got, ok)
 	}
 }
 
@@ -202,18 +217,4 @@ func TestLifecycleHelpers(t *testing.T) {
 	if got.Ecosystem != "maven" || got.Name != "org.apache.tomcat.embed:tomcat-embed-core" || got.Version != "9.0.80" {
 		t.Fatalf("lifecyclePackageQuery = %+v", got)
 	}
-}
-
-func TestPostgresCloseSilentlyIgnoresErrorCloser(t *testing.T) {
-	t.Parallel()
-
-	closeSilently(errorCloser{err: errors.New("ignored")})
-}
-
-type errorCloser struct {
-	err error
-}
-
-func (c errorCloser) Close() error {
-	return c.err
 }

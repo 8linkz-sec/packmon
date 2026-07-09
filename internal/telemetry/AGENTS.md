@@ -24,12 +24,12 @@ Read `AGENTS.md` (root), `DESIGN.md`, and `SECURITY.md` first.
 These notes are guardrails for behavior that has regressed before. Keep them in
 sync with `DESIGN.md` and `SECURITY.md` when the behavior intentionally changes.
 
-- **H2:** `HTTPMiddleware` falls back to the raw `r.URL.Path` as the `route`
-  label when `r.Pattern` is empty (i.e. on 404s). An unauthenticated scanner can
-  create unbounded series and exhaust memory. Bucket unmatched routes to a
-  constant (e.g. `"__unmatched__"`). This is the top fix here.
-- **L2:** `MetricsHandler` discards every store error (`_`) and has no logger, so
-  DB outages are masked. Plumb the logger and log a WARN per failed store call.
+- **H2:** `HTTPMiddleware` must keep unmatched routes bucketed under the
+  constant `"__unmatched__"` when `r.Pattern` is empty. Never reintroduce raw
+  `r.URL.Path` as a metrics label for 404s.
+- **L2:** `MetricsHandler` must keep logging bounded WARN records for failed
+  store-derived metric reads. Do not silently discard DB errors during metrics
+  scrapes.
 - **Design:** `ScanTotals`/`DBPoolStats` are obtained via type assertion on the
   concrete Postgres store, not via the `db.Store` interface -- those series
   silently vanish for any other store. Prefer promoting them to the interface.
@@ -37,7 +37,7 @@ sync with `DESIGN.md` and `SECURITY.md` when the behavior intentionally changes.
 ## Tests
 
 ```bash
-go test ./internal/telemetry/...
+go test -count=1 ./internal/telemetry/...
 ```
 Add a test asserting unmatched routes collapse to one label, plus label-escaping
 for values containing quotes/backslashes.

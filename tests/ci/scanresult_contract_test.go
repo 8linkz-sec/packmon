@@ -54,10 +54,10 @@ func canonicalScanResult() domain.ScanResult {
 				Source:       "ghsa",
 			},
 		},
-		ParseErrors:       []string{"requirements.txt: malformed line 5"},
-		FindingsTruncated: true,
-		FeedVersions:      map[string]string{"ghsa": "2026-06-01"},
-		ManualCount:       1,
+		ParseErrors:           []string{"requirements.txt: malformed line 5"},
+		FindingsTruncated:     true,
+		FeedVersions:          map[string]string{"ghsa": "2026-06-01"},
+		ManualAdvisoriesCount: 1,
 	}
 }
 

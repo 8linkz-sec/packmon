@@ -493,14 +493,23 @@ func TestServerFeedStatus(t *testing.T) {
 		t.Errorf("expected 200, got %d", resp.StatusCode)
 	}
 
-	var body map[string]any
+	var body struct {
+		Status  string `json:"status"`
+		Message string `json:"message"`
+		Feeds   []any  `json:"feeds"`
+	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
 
-	// The noop store returns empty feeds list.
-	if _, ok := body["feeds"]; !ok {
-		t.Error("missing 'feeds' field in feed status response")
+	if body.Status != "degraded" {
+		t.Errorf("expected status=degraded, got %q", body.Status)
+	}
+	if body.Message == "" {
+		t.Error("expected non-empty message")
+	}
+	if body.Feeds == nil || len(body.Feeds) != 0 {
+		t.Errorf("expected empty feeds list for noop store, got %v", body.Feeds)
 	}
 }
 

@@ -1,14 +1,16 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -50,12 +52,83 @@ func TestRunMigrateReturnsConfigError(t *testing.T) {
 	}
 }
 
+func TestMainLogsConfiguredStartupFatalWithJSONLogger(t *testing.T) {
+	stdout, stderr, exitCode := runServerMainHelperProcess(t, "configured-startup-fatal", map[string]string{
+		"PACKMON_SERVER_MODE":               "production",
+		"PACKMON_LOG_LEVEL":                 "info",
+		"PACKMON_LOG_FORMAT":                "json",
+		"PACKMON_TRUSTED_PROXIES":           "",
+		"PACKMON_TLS_CERT_FILE":             "",
+		"PACKMON_TLS_KEY_FILE":              "",
+		"PACKMON_ALLOW_INSECURE_LOCAL_HTTP": "false",
+		"PACKMON_METRICS_HOST":              "127.0.0.1",
+		"PACKMON_METRICS_PORT":              "9090",
+	})
+	if exitCode != 1 {
+		t.Fatalf("helper exit code = %d, want 1; stdout=%q stderr=%q", exitCode, stdout, stderr)
+	}
+	record := findJSONLogRecord(t, stdout, "packmon-server startup failed")
+	if record["service"] != "packmon-server" {
+		t.Fatalf("fatal log service = %#v, want packmon-server; record=%v", record["service"], record)
+	}
+	if record["level"] != "ERROR" {
+		t.Fatalf("fatal log level = %#v, want ERROR; record=%v", record["level"], record)
+	}
+	if got, _ := record["error"].(string); !strings.Contains(got, "refusing to start in production without transport security") {
+		t.Fatalf("fatal log error = %#v, want transport-security rejection; record=%v", record["error"], record)
+	}
+	if strings.Contains(stderr, "packmon-server:") {
+		t.Fatalf("configured fatal path wrote plain stderr: %q", stderr)
+	}
+}
+
+func TestMainLogsConfiguredMigrateFatalWithJSONLogger(t *testing.T) {
+	stdout, stderr, exitCode := runServerMainHelperProcess(t, "configured-migrate-fatal", map[string]string{
+		"PACKMON_LOG_LEVEL":          "info",
+		"PACKMON_LOG_FORMAT":         "json",
+		"PACKMON_DB_HOST":            "127.0.0.1",
+		"PACKMON_DB_PORT":            "1",
+		"PACKMON_DB_USER":            "packmon",
+		"PACKMON_DB_PASSWORD":        "packmon",
+		"PACKMON_DB_NAME":            "packmon",
+		"PACKMON_DB_SSLMODE":         "disable",
+		"PACKMON_DB_CONNECT_TIMEOUT": "50ms",
+	})
+	if exitCode != 1 {
+		t.Fatalf("helper exit code = %d, want 1; stdout=%q stderr=%q", exitCode, stdout, stderr)
+	}
+	record := findJSONLogRecord(t, stdout, "packmon-server migrate failed")
+	if record["service"] != "packmon-server" {
+		t.Fatalf("fatal log service = %#v, want packmon-server; record=%v", record["service"], record)
+	}
+	if record["level"] != "ERROR" {
+		t.Fatalf("fatal log level = %#v, want ERROR; record=%v", record["level"], record)
+	}
+	if got, _ := record["error"].(string); !strings.Contains(got, "migrations failed") {
+		t.Fatalf("fatal log error = %#v, want migration failure; record=%v", record["error"], record)
+	}
+	if strings.Contains(stderr, "packmon-server migrate:") {
+		t.Fatalf("configured migrate fatal path wrote plain stderr: %q", stderr)
+	}
+}
+
+func TestPackmonServerMainHelperProcess(t *testing.T) {
+	switch os.Getenv("PACKMON_TEST_MAIN_HELPER") {
+	case "configured-startup-fatal":
+		os.Args = []string{"packmon-server"}
+		main()
+	case "configured-migrate-fatal":
+		os.Args = []string{"packmon-server", "migrate"}
+		main()
+	}
+}
+
 func TestRunMigrateBranches(t *testing.T) {
-	originalRun := runDatabaseMigrations
-	originalVersion := readDatabaseMigrationVersion
+	originalRun := runDatabaseMigrationsContext
+	originalVersion := readDatabaseMigrationVersionContext
 	t.Cleanup(func() {
-		runDatabaseMigrations = originalRun
-		readDatabaseMigrationVersion = originalVersion
+		runDatabaseMigrationsContext = originalRun
+		readDatabaseMigrationVersionContext = originalVersion
 	})
 
 	for _, key := range []string{
@@ -111,11 +184,17 @@ func TestRunMigrateBranches(t *testing.T) {
 				runDSN     string
 				versionDSN string
 			)
-			runDatabaseMigrations = func(dsn string) error {
+			runDatabaseMigrationsContext = func(ctx context.Context, dsn string) error {
+				if _, ok := ctx.Deadline(); !ok {
+					t.Fatal("migration context has no deadline")
+				}
 				runDSN = dsn
 				return tt.runErr
 			}
-			readDatabaseMigrationVersion = func(dsn string) (uint, bool, error) {
+			readDatabaseMigrationVersionContext = func(ctx context.Context, dsn string) (uint, bool, error) {
+				if _, ok := ctx.Deadline(); !ok {
+					t.Fatal("version context has no deadline")
+				}
 				versionDSN = dsn
 				return tt.version, tt.dirty, tt.versionErr
 			}
@@ -142,18 +221,18 @@ func TestRunMigrateBranches(t *testing.T) {
 }
 
 func TestRunDevelopmentServerStartsAndStops(t *testing.T) {
-	serverPort := freeTCPPort(t)
-	metricsPort := freeTCPPort(t)
-
 	t.Setenv("PACKMON_SERVER_MODE", "development")
-	t.Setenv("PACKMON_SERVER_PORT", fmt.Sprintf("%d", serverPort))
+	t.Setenv("PACKMON_SERVER_PORT", "0")
 	t.Setenv("PACKMON_METRICS_HOST", "127.0.0.1")
-	t.Setenv("PACKMON_METRICS_PORT", fmt.Sprintf("%d", metricsPort))
+	t.Setenv("PACKMON_METRICS_PORT", "0")
 	t.Setenv("PACKMON_SERVER_SHUTDOWN_TIMEOUT", "1s")
-	t.Setenv("PACKMON_LOG_LEVEL", "error")
+	t.Setenv("PACKMON_LOG_LEVEL", "info")
+	t.Setenv("PACKMON_LOG_FORMAT", "json")
 
 	rootCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	mainAddrCh, stopLogCapture := captureMainServerAddrFromStdout(t)
 
 	originalSignalContext := serverSignalContext
 	originalHardExit := hardExit
@@ -181,7 +260,8 @@ func TestRunDevelopmentServerStartsAndStops(t *testing.T) {
 		done <- run()
 	}()
 
-	waitForHTTPStatus(t, fmt.Sprintf("http://127.0.0.1:%d/healthz", serverPort), http.StatusOK)
+	mainAddr := waitForMainServerAddrOrRunDone(t, mainAddrCh, done)
+	waitForHTTPStatus(t, "http://"+mainAddr+"/healthz", http.StatusOK)
 	cancel()
 
 	select {
@@ -189,6 +269,7 @@ func TestRunDevelopmentServerStartsAndStops(t *testing.T) {
 		if err != nil {
 			t.Fatalf("run() error = %v", err)
 		}
+		stopLogCapture()
 	case <-time.After(3 * time.Second):
 		t.Fatal("run() did not stop after context cancellation")
 	}
@@ -228,15 +309,94 @@ func captureServerStdout(t *testing.T, fn func()) string {
 	return output
 }
 
-func freeTCPPort(t *testing.T) int {
+func captureMainServerAddrFromStdout(t *testing.T) (<-chan string, func()) {
 	t.Helper()
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	original := os.Stdout
+	readPipe, writePipe, err := os.Pipe()
 	if err != nil {
-		t.Fatalf("listen free port: %v", err)
+		t.Fatalf("os.Pipe: %v", err)
 	}
-	defer func() { _ = listener.Close() }()
-	return listener.Addr().(*net.TCPAddr).Port
+	os.Stdout = writePipe
+
+	addrCh := make(chan string, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		scanner := bufio.NewScanner(readPipe)
+		for scanner.Scan() {
+			addr := mainServerAddrFromJSONLog(scanner.Bytes())
+			if addr == "" {
+				continue
+			}
+			select {
+			case addrCh <- addr:
+			default:
+			}
+		}
+	}()
+
+	var stopOnce sync.Once
+	stop := func() {
+		stopOnce.Do(func() {
+			os.Stdout = original
+			_ = writePipe.Close()
+			<-done
+			_ = readPipe.Close()
+		})
+	}
+	t.Cleanup(stop)
+
+	return addrCh, stop
+}
+
+func mainServerAddrFromJSONLog(line []byte) string {
+	var record struct {
+		Message string `json:"msg"`
+		Addr    string `json:"addr"`
+	}
+	if err := json.Unmarshal(line, &record); err != nil {
+		return ""
+	}
+	if record.Message != "main server listening" {
+		return ""
+	}
+	return record.Addr
+}
+
+func waitForMainServerAddr(t *testing.T, addrCh <-chan string) string {
+	t.Helper()
+
+	select {
+	case addr := <-addrCh:
+		if strings.TrimSpace(addr) == "" {
+			t.Fatal("main server listen log did not include addr")
+		}
+		return addr
+	case <-time.After(3 * time.Second):
+		t.Fatal("main server did not log a bound address")
+	}
+	return ""
+}
+
+func waitForMainServerAddrOrRunDone(t *testing.T, addrCh <-chan string, done <-chan error) string {
+	t.Helper()
+
+	select {
+	case addr := <-addrCh:
+		if strings.TrimSpace(addr) == "" {
+			t.Fatal("main server listen log did not include addr")
+		}
+		return addr
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run() exited before main server listen log: %v", err)
+		}
+		t.Fatal("run() exited before main server listen log")
+	case <-time.After(10 * time.Second):
+		t.Fatal("main server did not log a bound address")
+	}
+	return ""
 }
 
 func waitForHTTPStatus(t *testing.T, rawURL string, want int) {
@@ -259,4 +419,63 @@ func waitForHTTPStatus(t *testing.T, rawURL string, want int) {
 		time.Sleep(25 * time.Millisecond)
 	}
 	t.Fatalf("GET %s did not return %d: %v", rawURL, want, lastErr)
+}
+
+func runServerMainHelperProcess(t *testing.T, helper string, packmonEnv map[string]string) (string, string, int) {
+	t.Helper()
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestPackmonServerMainHelperProcess")
+	cmd.Env = packmonServerMainHelperEnv(helper, packmonEnv)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err == nil {
+		return stdout.String(), stderr.String(), 0
+	}
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("helper process failed to start: %v", err)
+	}
+	return stdout.String(), stderr.String(), exitErr.ExitCode()
+}
+
+func packmonServerMainHelperEnv(helper string, packmonEnv map[string]string) []string {
+	env := make([]string, 0, len(os.Environ())+len(packmonEnv)+1)
+	for _, entry := range os.Environ() {
+		if strings.HasPrefix(entry, "PACKMON_") {
+			continue
+		}
+		env = append(env, entry)
+	}
+	env = append(env, "PACKMON_TEST_MAIN_HELPER="+helper)
+	for key, value := range packmonEnv {
+		env = append(env, key+"="+value)
+	}
+	return env
+}
+
+func findJSONLogRecord(t *testing.T, output, message string) map[string]any {
+	t.Helper()
+
+	scanner := bufio.NewScanner(strings.NewReader(output))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var record map[string]any
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("log line is not valid JSON: %v; line=%q output=%q", err, line, output)
+		}
+		if record["msg"] == message {
+			return record
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("scan log output: %v", err)
+	}
+	t.Fatalf("missing JSON log message %q in stdout=%q", message, output)
+	return nil
 }

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -73,6 +74,38 @@ func TestRateLimitWithSourceUsesDynamicLimit(t *testing.T) {
 	}
 	if code := send(); code != http.StatusTooManyRequests {
 		t.Fatalf("request 3: status = %d, want 429", code)
+	}
+}
+
+func TestRateLimiterBypassesOperationalProbePaths(t *testing.T) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	handler := RateLimitWithSource(context.Background(), logger, RateLimitConfig{
+		Rate:  0.001,
+		Burst: 1,
+	}, nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	send := func(path string) int {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.RemoteAddr = "10.0.0.44:12345"
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	for _, path := range []string{"/healthz", "/readyz", "/version", "/healthz"} {
+		if code := send(path); code != http.StatusOK {
+			t.Fatalf("%s status = %d, want 200", path, code)
+		}
+	}
+	if code := send("/api/v1/check"); code != http.StatusOK {
+		t.Fatalf("first protected request status = %d, want 200", code)
+	}
+	if code := send("/api/v1/check"); code != http.StatusTooManyRequests {
+		t.Fatalf("second protected request status = %d, want 429", code)
 	}
 }
 
@@ -149,6 +182,37 @@ func TestRateLimiter_DifferentIPsAreIndependent(t *testing.T) {
 	}
 }
 
+func TestRateLimiterStoresClientBucketsInOnlyTheirShard(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	rl := newRateLimiter(ctx, 1, 2)
+	if got := len(rl.shards); got != rateLimiterShardCount {
+		t.Fatalf("shard count = %d, want %d", got, rateLimiterShardCount)
+	}
+
+	ip := "203.0.113.45"
+	shardIndex := rl.shardIndex(ip)
+	if !rl.allow(ip) {
+		t.Fatal("first request was not allowed")
+	}
+
+	for i := range rl.shards {
+		rl.shards[i].mu.Lock()
+		_, ok := rl.shards[i].buckets[ip]
+		rl.shards[i].mu.Unlock()
+
+		if i == shardIndex && !ok {
+			t.Fatalf("client bucket missing from shard %d", shardIndex)
+		}
+		if i != shardIndex && ok {
+			t.Fatalf("client bucket stored in unrelated shard %d", i)
+		}
+	}
+}
+
 func TestRateLimiter_ResponseBody(t *testing.T) {
 	t.Parallel()
 
@@ -179,31 +243,85 @@ func TestRateLimiterCleanupStaleBuckets(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
-	rl := &rateLimiter{buckets: map[string]*bucket{
-		"stale": {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	rl := newRateLimiter(ctx, 1, 1)
+	for ip, lastSeen := range map[string]time.Time{
+		"10.0.0.1": now.Add(-11 * time.Minute),
+		"10.0.0.2": now.Add(-10 * time.Minute),
+		"10.0.0.3": now.Add(-9 * time.Minute),
+	} {
+		shardIndex := rl.shardIndex(ip)
+		shard := &rl.shards[shardIndex]
+		shard.mu.Lock()
+		shard.buckets[ip] = &bucket{
 			tokens:   1,
-			lastSeen: now.Add(-11 * time.Minute),
-		},
-		"at-cutoff": {
-			tokens:   1,
-			lastSeen: now.Add(-10 * time.Minute),
-		},
-		"fresh": {
-			tokens:   1,
-			lastSeen: now.Add(-9 * time.Minute),
-		},
-	}}
+			lastSeen: lastSeen,
+		}
+		shard.mu.Unlock()
+	}
 
 	rl.cleanupStaleBuckets(now)
 
-	if _, ok := rl.buckets["stale"]; ok {
+	if rateLimiterHasBucket(rl, "10.0.0.1") {
 		t.Fatal("cleanup retained stale bucket")
 	}
-	for _, ip := range []string{"at-cutoff", "fresh"} {
-		if _, ok := rl.buckets[ip]; !ok {
+	for _, ip := range []string{"10.0.0.2", "10.0.0.3"} {
+		if !rateLimiterHasBucket(rl, ip) {
 			t.Fatalf("cleanup removed %s bucket", ip)
 		}
 	}
+}
+
+func TestRateLimiterCleanupScansAllShards(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	rl := newRateLimiter(ctx, 1, 1)
+	staleA := "10.10.0.1"
+	staleB := findIPInDifferentRateLimitShard(t, rl, staleA)
+
+	for _, ip := range []string{staleA, staleB} {
+		shard := &rl.shards[rl.shardIndex(ip)]
+		shard.mu.Lock()
+		shard.buckets[ip] = &bucket{tokens: 1, lastSeen: now.Add(-11 * time.Minute)}
+		shard.mu.Unlock()
+	}
+
+	rl.cleanupStaleBuckets(now)
+
+	for _, ip := range []string{staleA, staleB} {
+		if rateLimiterHasBucket(rl, ip) {
+			t.Fatalf("cleanup retained stale bucket for %s", ip)
+		}
+	}
+}
+
+func rateLimiterHasBucket(rl *rateLimiter, ip string) bool {
+	shard := &rl.shards[rl.shardIndex(ip)]
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+
+	_, ok := shard.buckets[ip]
+	return ok
+}
+
+func findIPInDifferentRateLimitShard(t *testing.T, rl *rateLimiter, base string) string {
+	t.Helper()
+
+	baseShard := rl.shardIndex(base)
+	for i := 2; i < 255; i++ {
+		ip := "10.10.0." + strconv.Itoa(i)
+		if rl.shardIndex(ip) != baseShard {
+			return ip
+		}
+	}
+	t.Fatal("could not find IP in different rate-limit shard")
+	return ""
 }
 
 func TestRateLimitLogUsesTrustedClientIPAndRoutePathLabel(t *testing.T) {

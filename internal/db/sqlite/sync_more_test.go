@@ -5,18 +5,22 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
+	"github.com/8linkz-sec/packmon/internal/correlation"
 	"github.com/8linkz-sec/packmon/internal/db"
 	"github.com/8linkz-sec/packmon/internal/domain"
+	lifecyclepolicy "github.com/8linkz-sec/packmon/internal/lifecycle"
 )
 
 type syncRoundTripFunc func(*http.Request) (*http.Response, error)
@@ -55,6 +59,426 @@ func TestSyncStatsAnyRemoved(t *testing.T) {
 	stats = SyncStats{FullCleared: SyncRemovalStats{Lifecycle: 1}}
 	if !stats.AnyRemoved() || !stats.FullCleared.Any() {
 		t.Fatalf("SyncStats full clear removed = %+v, want true", stats)
+	}
+}
+
+func TestValidateSyncConfig(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := validateSyncConfig(SyncConfig{ServerURL: "https://packmon.example"})
+	if err != nil {
+		t.Fatalf("validateSyncConfig(default timeout) error = %v", err)
+	}
+	if cfg.Timeout != 60*time.Second {
+		t.Fatalf("validateSyncConfig timeout = %v, want 60s", cfg.Timeout)
+	}
+
+	if _, err := validateSyncConfig(SyncConfig{}); err == nil || !strings.Contains(err.Error(), "no server URL configured") {
+		t.Fatalf("validateSyncConfig(missing server) error = %v, want missing server URL", err)
+	}
+	if _, err := validateSyncConfig(SyncConfig{ServerURL: "http://packmon.example"}); err == nil || !strings.Contains(err.Error(), "refusing to use insecure server URL") {
+		t.Fatalf("validateSyncConfig(insecure HTTP) error = %v, want insecure URL rejection", err)
+	}
+	if _, err := validateSyncConfig(SyncConfig{
+		ServerURL:         "http://packmon.example",
+		AllowInsecureHTTP: true,
+		Full:              true,
+		Ecosystems:        []string{"npm"},
+	}); err == nil || !strings.Contains(err.Error(), "filtered full sync is not supported") {
+		t.Fatalf("validateSyncConfig(filtered full) error = %v, want filtered full rejection", err)
+	}
+}
+
+func TestLoadSyncCursorStateReadsIncrementalMetadataOnly(t *testing.T) {
+	t.Parallel()
+
+	store := newSQLiteTestStore(t)
+	ctx := context.Background()
+	if err := store.SetSyncMeta(ctx, syncMetaKeyLastSync, "2026-05-30T10:00:00Z"); err != nil {
+		t.Fatalf("SetSyncMeta(last sync) error = %v", err)
+	}
+	if err := store.SetSyncMeta(ctx, syncMetaKeyLastSyncXID, "600"); err != nil {
+		t.Fatalf("SetSyncMeta(last xid) error = %v", err)
+	}
+
+	delta, err := loadSyncCursorState(ctx, store, false)
+	if err != nil {
+		t.Fatalf("loadSyncCursorState(delta) error = %v", err)
+	}
+	if delta.Since != "2026-05-30T10:00:00Z" || delta.SinceXID != "600" {
+		t.Fatalf("loadSyncCursorState(delta) = %+v, want durable sync metadata", delta)
+	}
+
+	full, err := loadSyncCursorState(ctx, store, true)
+	if err != nil {
+		t.Fatalf("loadSyncCursorState(full) error = %v", err)
+	}
+	if full.Since != "" || full.SinceXID != "" {
+		t.Fatalf("loadSyncCursorState(full) = %+v, want empty since state", full)
+	}
+}
+
+func TestSyncPaginatesWithCursorAndStableSnapshot(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := newSQLiteTestStore(t)
+	var mu sync.Mutex
+	var requests []url.Values
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		mu.Lock()
+		requests = append(requests, q)
+		requestNumber := len(requests)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		switch requestNumber {
+		case 1:
+			_, _ = w.Write([]byte(`{
+				"synced_at":"2026-05-30T10:00:00Z",
+				"synced_xid":600,
+				"truncated":true,
+				"next_cursor":{"vulnerabilities":1},
+				"vulnerabilities":[{
+					"id":"GHSA-page-1",
+					"ecosystem":"npm",
+					"name":"page-one",
+					"version_ranges":"[]",
+					"versions_affected":"[]",
+					"severity":"LOW"
+				}]
+			}`))
+		case 2:
+			_, _ = w.Write([]byte(`{
+				"synced_at":"2026-05-30T10:00:00Z",
+				"synced_xid":600,
+				"vulnerabilities":[{
+					"id":"GHSA-page-2",
+					"ecosystem":"npm",
+					"name":"page-two",
+					"version_ranges":"[]",
+					"versions_affected":"[]",
+					"severity":"LOW"
+				}]
+			}`))
+		default:
+			t.Fatalf("unexpected sync request %d", requestNumber)
+		}
+	}))
+	defer server.Close()
+
+	if err := Sync(ctx, store, SyncConfig{
+		ServerURL:         server.URL,
+		AllowInsecureHTTP: true,
+	}); err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	mu.Lock()
+	gotRequests := append([]url.Values(nil), requests...)
+	mu.Unlock()
+	if len(gotRequests) != 2 {
+		t.Fatalf("requests = %d, want 2", len(gotRequests))
+	}
+	if gotRequests[0].Get("snapshot") != "" || gotRequests[0].Get("vulnerabilities_offset") != "" {
+		t.Fatalf("first request query = %v, want no snapshot or cursor offset", gotRequests[0])
+	}
+	if gotRequests[1].Get("snapshot") != "2026-05-30T10:00:00Z" || gotRequests[1].Get("snapshot_xid") != "600" || gotRequests[1].Get("vulnerabilities_offset") != "1" {
+		t.Fatalf("second request query = %v, want pinned snapshot and advanced cursor", gotRequests[1])
+	}
+	for _, name := range []string{"page-one", "page-two"} {
+		findings, err := store.FindVulnerabilities(ctx, "npm", name, "1.0.0")
+		if err != nil {
+			t.Fatalf("FindVulnerabilities(%s) error = %v", name, err)
+		}
+		if len(findings) != 1 {
+			t.Fatalf("FindVulnerabilities(%s) findings = %+v, want one finding", name, findings)
+		}
+	}
+}
+
+func TestSyncAppliesIncrementalPageBeforeFetchingNextPageAndAccumulatesStats(t *testing.T) {
+	t.Parallel()
+
+	store := newSQLiteTestStore(t)
+	ctx := context.Background()
+	if _, err := applySync(ctx, store, true, &syncResponse{
+		Vulnerabilities: []syncVulnerability{{
+			ID:               "GHSA-delete-page-one",
+			Ecosystem:        "npm",
+			Name:             "delete-page-one",
+			VersionRanges:    `[{"type":"SEMVER","events":[{"introduced":"0"}]}]`,
+			VersionsAffected: `[]`,
+			Severity:         "HIGH",
+		}},
+		Malicious: []syncMalicious{{
+			ID:            "MAL-delete-page-two",
+			Ecosystem:     "npm",
+			Name:          "delete-page-two",
+			VersionRanges: `[{"type":"SEMVER","events":[{"introduced":"0"}]}]`,
+			Severity:      "CRITICAL",
+			RiskType:      "malware",
+		}},
+	}); err != nil {
+		t.Fatalf("applySync(seed) error = %v", err)
+	}
+
+	var handlerErr error
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		switch requests {
+		case 1:
+			_, _ = w.Write([]byte(`{
+				"synced_at":"2026-05-30T10:00:00Z",
+				"synced_xid":600,
+				"truncated":true,
+				"next_cursor":{"vulnerabilities":1,"malicious_done":true,"reputation_done":true,"lifecycle_done":true},
+				"vulnerabilities":[
+					{"id":"GHSA-delete-page-one","withdrawn":true},
+					{
+						"id":"GHSA-page-one-applied",
+						"ecosystem":"npm",
+						"name":"page-one-applied",
+						"version_ranges":"[{\"type\":\"SEMVER\",\"events\":[{\"introduced\":\"0\"}]}]",
+						"versions_affected":"[]",
+						"severity":"LOW"
+					}
+				]
+			}`))
+		case 2:
+			deleted, err := store.FindVulnerabilities(ctx, "npm", "delete-page-one", "1.0.0")
+			if err != nil {
+				handlerErr = fmt.Errorf("find deleted page-one vulnerability: %w", err)
+				http.Error(w, handlerErr.Error(), http.StatusInternalServerError)
+				return
+			}
+			if len(deleted) != 0 {
+				handlerErr = fmt.Errorf("page-one tombstone was not applied before page two: %+v", deleted)
+				http.Error(w, handlerErr.Error(), http.StatusInternalServerError)
+				return
+			}
+			inserted, err := store.FindVulnerabilities(ctx, "npm", "page-one-applied", "1.0.0")
+			if err != nil {
+				handlerErr = fmt.Errorf("find inserted page-one vulnerability: %w", err)
+				http.Error(w, handlerErr.Error(), http.StatusInternalServerError)
+				return
+			}
+			if len(inserted) != 1 || inserted[0].AdvisoryID != "GHSA-page-one-applied" {
+				handlerErr = fmt.Errorf("page-one insert was not applied before page two: %+v", inserted)
+				http.Error(w, handlerErr.Error(), http.StatusInternalServerError)
+				return
+			}
+			_, _ = w.Write([]byte(`{
+				"synced_at":"2026-05-30T10:00:00Z",
+				"synced_xid":600,
+				"malicious":[{"id":"MAL-delete-page-two","withdrawn":true}]
+			}`))
+		default:
+			handlerErr = fmt.Errorf("unexpected sync request %d", requests)
+			http.Error(w, handlerErr.Error(), http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+
+	var stats SyncStats
+	err := Sync(ctx, store, SyncConfig{
+		ServerURL:         server.URL,
+		AllowInsecureHTTP: true,
+		Stats:             &stats,
+	})
+	if handlerErr != nil {
+		t.Fatalf("server page-two observation failed: %v", handlerErr)
+	}
+	if err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2", requests)
+	}
+	if stats.TombstoneDeleted != (SyncRemovalStats{Vulnerabilities: 1, Malicious: 1}) {
+		t.Fatalf("tombstone stats = %+v, want page-one vulnerability and page-two malicious deletes", stats.TombstoneDeleted)
+	}
+}
+
+func TestSyncFullClearsAndAppliesFirstPageBeforeFetchingNextPage(t *testing.T) {
+	t.Parallel()
+
+	store := newSQLiteTestStore(t)
+	ctx := context.Background()
+	seedLocalSyncRows(t, store)
+
+	var handlerErr error
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		switch requests {
+		case 1:
+			if got := r.URL.Query().Get("since"); got != "" {
+				handlerErr = fmt.Errorf("first full-sync request since = %q, want empty", got)
+				http.Error(w, handlerErr.Error(), http.StatusInternalServerError)
+				return
+			}
+			_, _ = w.Write([]byte(`{
+				"synced_at":"2026-05-30T10:00:00Z",
+				"synced_xid":600,
+				"truncated":true,
+				"next_cursor":{"vulnerabilities":1},
+				"vulnerabilities":[{
+					"id":"GHSA-full-page-one",
+					"ecosystem":"npm",
+					"name":"full-page-one",
+					"version_ranges":"[{\"type\":\"SEMVER\",\"events\":[{\"introduced\":\"0\"}]}]",
+					"versions_affected":"[]",
+					"severity":"LOW"
+				}]
+			}`))
+		case 2:
+			oldRows, err := store.FindVulnerabilities(ctx, "npm", "left-pad", "1.0.0")
+			if err != nil {
+				handlerErr = fmt.Errorf("find preexisting vulnerability: %w", err)
+				http.Error(w, handlerErr.Error(), http.StatusInternalServerError)
+				return
+			}
+			if len(oldRows) != 0 {
+				handlerErr = fmt.Errorf("full sync did not clear before page two: %+v", oldRows)
+				http.Error(w, handlerErr.Error(), http.StatusInternalServerError)
+				return
+			}
+			firstPage, err := store.FindVulnerabilities(ctx, "npm", "full-page-one", "1.0.0")
+			if err != nil {
+				handlerErr = fmt.Errorf("find first page vulnerability: %w", err)
+				http.Error(w, handlerErr.Error(), http.StatusInternalServerError)
+				return
+			}
+			if len(firstPage) != 1 || firstPage[0].AdvisoryID != "GHSA-full-page-one" {
+				handlerErr = fmt.Errorf("full sync did not apply first page before page two: %+v", firstPage)
+				http.Error(w, handlerErr.Error(), http.StatusInternalServerError)
+				return
+			}
+			_, _ = w.Write([]byte(`{
+				"synced_at":"2026-05-30T10:00:00Z",
+				"synced_xid":600,
+				"feed_status":"healthy",
+				"vulnerabilities":[{
+					"id":"GHSA-full-page-two",
+					"ecosystem":"npm",
+					"name":"full-page-two",
+					"version_ranges":"[{\"type\":\"SEMVER\",\"events\":[{\"introduced\":\"0\"}]}]",
+					"versions_affected":"[]",
+					"severity":"LOW"
+				}]
+			}`))
+		default:
+			handlerErr = fmt.Errorf("unexpected sync request %d", requests)
+			http.Error(w, handlerErr.Error(), http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+
+	var stats SyncStats
+	err := Sync(ctx, store, SyncConfig{
+		ServerURL:         server.URL,
+		Full:              true,
+		AllowInsecureHTTP: true,
+		Stats:             &stats,
+	})
+	if handlerErr != nil {
+		t.Fatalf("server page-two observation failed: %v", handlerErr)
+	}
+	if err != nil {
+		t.Fatalf("Sync(full) error = %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2", requests)
+	}
+	if stats.FullCleared != (SyncRemovalStats{Vulnerabilities: 1, Malicious: 1, Reputation: 1, Lifecycle: 1}) {
+		t.Fatalf("full clear stats = %+v", stats.FullCleared)
+	}
+	for _, name := range []string{"full-page-one", "full-page-two"} {
+		findings, err := store.FindVulnerabilities(ctx, "npm", name, "1.0.0")
+		if err != nil {
+			t.Fatalf("FindVulnerabilities(%s) error = %v", name, err)
+		}
+		if len(findings) != 1 {
+			t.Fatalf("FindVulnerabilities(%s) findings = %+v, want one finding", name, findings)
+		}
+	}
+}
+
+func TestApplySyncPageKeepsFutureSnapshotOutOfFreshnessMetadata(t *testing.T) {
+	t.Parallel()
+
+	store := newSQLiteTestStore(t)
+	ctx := context.Background()
+	previousSync := "2026-05-30T09:00:00Z"
+	if err := store.SetSyncMeta(ctx, syncMetaKeyLastSync, previousSync); err != nil {
+		t.Fatalf("SetSyncMeta(last sync) error = %v", err)
+	}
+	if err := store.SetSyncMeta(ctx, syncMetaKeyLastSyncXID, "500"); err != nil {
+		t.Fatalf("SetSyncMeta(last xid) error = %v", err)
+	}
+	if err := store.SetSyncMeta(ctx, syncMetaKeyFeedStatus, "healthy"); err != nil {
+		t.Fatalf("SetSyncMeta(feed status) error = %v", err)
+	}
+
+	future := "2026-05-31T00:00:00Z"
+	resp := &syncResponse{
+		SyncedAt:     future,
+		SyncedXID:    700,
+		FeedStatus:   "degraded",
+		FeedVersions: map[string]string{"osv": future},
+		Vulnerabilities: []syncVulnerability{{
+			ID:               "GHSA-helper-future",
+			Ecosystem:        "npm",
+			Name:             "helper-future",
+			VersionRanges:    `[]`,
+			VersionsAffected: `[]`,
+			Severity:         "LOW",
+		}},
+	}
+	metadata, err := freshSyncApplyMetadata(syncPageSnapshot{
+		SyncedAt:  future,
+		SyncedXID: "700",
+	}, resp, time.Date(2026, 5, 30, 10, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("freshSyncApplyMetadata() error = %v", err)
+	}
+	stats, err := applySyncWithMetadata(ctx, store, false, resp, metadata)
+	if err != nil {
+		t.Fatalf("applySyncWithMetadata() error = %v", err)
+	}
+	if stats.AnyRemoved() {
+		t.Fatalf("applySyncWithMetadata() stats = %+v, want no removals", stats)
+	}
+	findings, err := store.FindVulnerabilities(ctx, "npm", "helper-future", "1.0.0")
+	if err != nil {
+		t.Fatalf("FindVulnerabilities() error = %v", err)
+	}
+	if len(findings) != 1 || findings[0].AdvisoryID != "GHSA-helper-future" {
+		t.Fatalf("future snapshot findings = %+v, want applied row", findings)
+	}
+	lastSync, err := store.GetSyncMeta(ctx, syncMetaKeyLastSync)
+	if err != nil {
+		t.Fatalf("GetSyncMeta(last sync) error = %v", err)
+	}
+	if lastSync != previousSync {
+		t.Fatalf("last sync = %q, want preserved %q", lastSync, previousSync)
+	}
+	lastXID, err := store.GetSyncMeta(ctx, syncMetaKeyLastSyncXID)
+	if err != nil {
+		t.Fatalf("GetSyncMeta(last xid) error = %v", err)
+	}
+	if lastXID != "500" {
+		t.Fatalf("last xid = %q, want preserved 500", lastXID)
+	}
+	feedStatus, err := store.GetSyncMeta(ctx, syncMetaKeyFeedStatus)
+	if err != nil {
+		t.Fatalf("GetSyncMeta(feed status) error = %v", err)
+	}
+	if feedStatus != "healthy" {
+		t.Fatalf("feed status = %q, want preserved healthy", feedStatus)
 	}
 }
 
@@ -130,8 +554,14 @@ func writeSyncServerCertPEM(t *testing.T, server *httptest.Server, path string) 
 	}
 }
 
-func TestApplySyncVulnerabilityAndMaliciousRowsAndTombstones(t *testing.T) {
-	t.Parallel()
+type syncedRowsFixture struct {
+	store          *Store
+	ctx            context.Context
+	epssPercentile float64
+}
+
+func newSyncedRowsFixture(t *testing.T) syncedRowsFixture {
+	t.Helper()
 
 	store := newSQLiteTestStore(t)
 	ctx := context.Background()
@@ -179,6 +609,20 @@ func TestApplySyncVulnerabilityAndMaliciousRowsAndTombstones(t *testing.T) {
 		t.Fatalf("applySync() error = %v", err)
 	}
 
+	return syncedRowsFixture{
+		store:          store,
+		ctx:            ctx,
+		epssPercentile: epssPercentile,
+	}
+}
+
+func TestApplySyncVulnerabilityRowsPreserveMetadataAndBatchLookup(t *testing.T) {
+	t.Parallel()
+
+	fixture := newSyncedRowsFixture(t)
+	store := fixture.store
+	ctx := fixture.ctx
+
 	vulns, err := store.FindVulnerabilities(ctx, "npm", "left-pad", "1.5.0")
 	if err != nil {
 		t.Fatalf("FindVulnerabilities() error = %v", err)
@@ -196,8 +640,8 @@ func TestApplySyncVulnerabilityAndMaliciousRowsAndTombstones(t *testing.T) {
 	if err := store.DB().QueryRowContext(ctx, `SELECT epss_percentile FROM vulnerabilities_local WHERE id = ?`, "GHSA-sync").Scan(&storedPercentile); err != nil {
 		t.Fatalf("read synced EPSS percentile: %v", err)
 	}
-	if storedPercentile != epssPercentile {
-		t.Fatalf("stored EPSS percentile = %v, want %v", storedPercentile, epssPercentile)
+	if storedPercentile != fixture.epssPercentile {
+		t.Fatalf("stored EPSS percentile = %v, want %v", storedPercentile, fixture.epssPercentile)
 	}
 	batchVulns, err := store.FindVulnerabilitiesBatch(ctx, []db.PackageQuery{{Ecosystem: "npm", Name: "left-pad", Version: "1.5.0"}})
 	if err != nil {
@@ -206,7 +650,16 @@ func TestApplySyncVulnerabilityAndMaliciousRowsAndTombstones(t *testing.T) {
 	if len(batchVulns) != 1 || batchVulns[0].Source != "manual" {
 		t.Fatalf("batch vuln source = %+v, want manual source", batchVulns)
 	}
-	vulns, err = store.FindVulnerabilities(ctx, "npm", "only-listed", "1.0.1")
+}
+
+func TestApplySyncVulnerabilityExplicitVersions(t *testing.T) {
+	t.Parallel()
+
+	fixture := newSyncedRowsFixture(t)
+	store := fixture.store
+	ctx := fixture.ctx
+
+	vulns, err := store.FindVulnerabilities(ctx, "npm", "only-listed", "1.0.1")
 	if err != nil {
 		t.Fatalf("FindVulnerabilities(versions_affected hit) error = %v", err)
 	}
@@ -220,12 +673,24 @@ func TestApplySyncVulnerabilityAndMaliciousRowsAndTombstones(t *testing.T) {
 	if len(vulns) != 0 {
 		t.Fatalf("versions_affected miss = %+v, want no findings", vulns)
 	}
+}
+
+func TestApplySyncMaliciousRowsPreserveMetadataAndBatchLookup(t *testing.T) {
+	t.Parallel()
+
+	fixture := newSyncedRowsFixture(t)
+	store := fixture.store
+	ctx := fixture.ctx
+
 	mal, err := store.FindMalicious(ctx, "npm", "evil", "1.5.0")
 	if err != nil {
 		t.Fatalf("FindMalicious() error = %v", err)
 	}
 	if len(mal) != 1 || mal[0].Type != domain.FindingTypeMalicious {
 		t.Fatalf("malicious range hit = %+v, want synced malicious finding", mal)
+	}
+	if mal[0].Version != "1.5.0" {
+		t.Fatalf("malicious range hit version = %q, want requested version", mal[0].Version)
 	}
 	if mal[0].AdvisoryID != "MAL-sync" || mal[0].URL != "https://example.test/malware/MAL-sync" {
 		t.Fatalf("malicious link fields = %+v, want advisory id and URL", mal[0])
@@ -247,22 +712,41 @@ func TestApplySyncVulnerabilityAndMaliciousRowsAndTombstones(t *testing.T) {
 	if len(mal) != 0 {
 		t.Fatalf("malicious range miss = %+v, want no finding at fixed version", mal)
 	}
-	mal, err = store.FindMalicious(ctx, "npm", "evil", "2.1.5-bad")
+}
+
+func TestApplySyncMaliciousExplicitVersions(t *testing.T) {
+	t.Parallel()
+
+	fixture := newSyncedRowsFixture(t)
+	store := fixture.store
+	ctx := fixture.ctx
+
+	mal, err := store.FindMalicious(ctx, "npm", "evil", "2.1.5-bad")
 	if err != nil {
 		t.Fatalf("FindMalicious(explicit version hit) error = %v", err)
 	}
 	if len(mal) != 1 || mal[0].AdvisoryID != "MAL-sync" {
 		t.Fatalf("malicious explicit hit = %+v, want synced malicious finding", mal)
 	}
+	if mal[0].Version != "2.1.5-bad" {
+		t.Fatalf("malicious explicit hit version = %q, want requested version", mal[0].Version)
+	}
+}
 
+func TestApplySyncTombstonesDeleteVulnerabilityAndMaliciousRows(t *testing.T) {
+	t.Parallel()
+
+	fixture := newSyncedRowsFixture(t)
+	store := fixture.store
+	ctx := fixture.ctx
 	if _, err := applySync(ctx, store, false, &syncResponse{
 		Vulnerabilities: []syncVulnerability{{ID: "GHSA-sync", Withdrawn: true}},
 		Malicious:       []syncMalicious{{ID: "MAL-sync", Withdrawn: true}},
 	}); err != nil {
 		t.Fatalf("applySync(tombstones) error = %v", err)
 	}
-	vulns, _ = store.FindVulnerabilities(ctx, "npm", "left-pad", "1.5.0")
-	mal, _ = store.FindMalicious(ctx, "npm", "evil", "1.5.0")
+	vulns, _ := store.FindVulnerabilities(ctx, "npm", "left-pad", "1.5.0")
+	mal, _ := store.FindMalicious(ctx, "npm", "evil", "1.5.0")
 	if len(vulns) != 0 || len(mal) != 0 {
 		t.Fatalf("rows after tombstones: vulns=%+v malicious=%+v", vulns, mal)
 	}
@@ -385,6 +869,95 @@ func TestApplySyncRejectsMalformedMaliciousVersions(t *testing.T) {
 	}
 	if len(findings) != 0 {
 		t.Fatalf("FindMaliciousBatch() = %+v, want rejected row absent", findings)
+	}
+}
+
+func TestApplySyncRejectsMalformedMaliciousVersionRanges(t *testing.T) {
+	t.Parallel()
+
+	store := newSQLiteTestStore(t)
+	ctx := context.Background()
+
+	_, err := applySync(ctx, store, true, &syncResponse{
+		Malicious: []syncMalicious{{
+			ID:            "MAL-sync-invalid-version-ranges",
+			Ecosystem:     "npm",
+			Name:          "evil-ranges",
+			VersionRanges: `{"introduced":"1.0.0"}`,
+			RiskType:      "malware",
+			Severity:      "CRITICAL",
+			Summary:       "invalid version ranges",
+		}},
+	})
+	if err == nil {
+		t.Fatal("applySync() error = nil, want invalid malicious version_ranges error")
+	}
+	if !strings.Contains(err.Error(), "MAL-sync-invalid-version-ranges") || !strings.Contains(err.Error(), "version_ranges") {
+		t.Fatalf("applySync() error = %q, want malicious finding ID and version_ranges", err)
+	}
+
+	findings, findErr := store.FindMaliciousBatch(ctx, []db.PackageQuery{
+		{Ecosystem: "npm", Name: "evil-ranges", Version: "2.0.0"},
+	})
+	if findErr != nil {
+		t.Fatalf("FindMaliciousBatch() error = %v", findErr)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("FindMaliciousBatch() = %+v, want rejected row absent", findings)
+	}
+}
+
+func TestApplySyncRejectsMalformedVulnerabilityVersionJSON(t *testing.T) {
+	t.Parallel()
+
+	store := newSQLiteTestStore(t)
+	ctx := context.Background()
+
+	_, err := applySync(ctx, store, true, &syncResponse{
+		Vulnerabilities: []syncVulnerability{{
+			ID:               "GHSA-sync-invalid-version-ranges",
+			Ecosystem:        "npm",
+			Name:             "bad-vuln-range",
+			VersionRanges:    `{"introduced":"1.0.0"}`,
+			VersionsAffected: `[]`,
+			Severity:         "HIGH",
+			Summary:          "invalid vulnerability ranges",
+		}},
+	})
+	if err == nil {
+		t.Fatal("applySync() error = nil, want invalid vulnerability version_ranges error")
+	}
+	if !strings.Contains(err.Error(), "GHSA-sync-invalid-version-ranges") || !strings.Contains(err.Error(), "version_ranges") {
+		t.Fatalf("applySync() error = %q, want vulnerability ID and version_ranges", err)
+	}
+
+	_, err = applySync(ctx, store, true, &syncResponse{
+		Vulnerabilities: []syncVulnerability{{
+			ID:               "GHSA-sync-invalid-versions-affected",
+			Ecosystem:        "npm",
+			Name:             "bad-vuln-versions",
+			VersionRanges:    `[]`,
+			VersionsAffected: `{"all":true}`,
+			Severity:         "HIGH",
+			Summary:          "invalid affected versions",
+		}},
+	})
+	if err == nil {
+		t.Fatal("applySync() error = nil, want invalid vulnerability versions_affected error")
+	}
+	if !strings.Contains(err.Error(), "GHSA-sync-invalid-versions-affected") || !strings.Contains(err.Error(), "versions_affected") {
+		t.Fatalf("applySync() error = %q, want vulnerability ID and versions_affected", err)
+	}
+
+	findings, findErr := store.FindVulnerabilitiesBatch(ctx, []db.PackageQuery{
+		{Ecosystem: "npm", Name: "bad-vuln-range", Version: "2.0.0"},
+		{Ecosystem: "npm", Name: "bad-vuln-versions", Version: "2.0.0"},
+	})
+	if findErr != nil {
+		t.Fatalf("FindVulnerabilitiesBatch() error = %v", findErr)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("FindVulnerabilitiesBatch() = %+v, want rejected rows absent", findings)
 	}
 }
 
@@ -535,25 +1108,69 @@ func TestFindLifecycleFindingsBatchNormalizesNuGetNames(t *testing.T) {
 	assertSQLiteLifecycleFinding(t, findings[0], domain.FindingTypeSupplyChainRisk, domain.SeverityCritical, "eol")
 }
 
-func TestFindLifecycleFindingsBatchDoesNotUsePerPackageLookup(t *testing.T) {
+func TestCollectLifecycleReleaseRowsFiltersRequestedBatch(t *testing.T) {
 	t.Parallel()
 
-	source, err := os.ReadFile("lifecycle.go")
-	if err != nil {
-		t.Fatalf("read lifecycle source: %v", err)
+	store := newSQLiteTestStore(t)
+	ctx := context.Background()
+	resp := &syncResponse{
+		Lifecycle: []syncLifecycleRelease{
+			{
+				ID:           "endoflife:pypi:django:django:4.2",
+				Ecosystem:    "pypi",
+				Name:         "django",
+				ProductSlug:  "django",
+				ProductLabel: "Django",
+				Cycle:        "4.2",
+				Latest:       "4.2.11",
+				IsEOL:        true,
+			},
+			{
+				ID:           "endoflife:npm:react:react:18",
+				Ecosystem:    "npm",
+				Name:         "react",
+				ProductSlug:  "react",
+				ProductLabel: "React",
+				Cycle:        "18",
+				Latest:       "18.3.1",
+				IsMaintained: true,
+			},
+			{
+				ID:           "endoflife:pypi:flask:flask:3",
+				Ecosystem:    "pypi",
+				Name:         "flask",
+				ProductSlug:  "flask",
+				ProductLabel: "Flask",
+				Cycle:        "3",
+				Latest:       "3.0.0",
+				IsEOL:        true,
+			},
+		},
 	}
-	text := string(source)
-	start := strings.Index(text, "func (s *Store) FindLifecycleFindingsBatch")
-	if start < 0 {
-		t.Fatal("FindLifecycleFindingsBatch not found")
+	if _, err := applySync(ctx, store, true, resp); err != nil {
+		t.Fatalf("applySync() error = %v", err)
 	}
-	next := strings.Index(text[start+1:], "\nfunc ")
-	if next < 0 {
-		t.Fatal("FindLifecycleFindingsBatch end not found")
+
+	chunks := localPackagePredicateChunks([]db.PackageQuery{
+		{Ecosystem: "pypi", Name: "django", Version: "4.2.1"},
+		{Ecosystem: "npm", Name: "react", Version: "18.2.0"},
+	}, localPackagePredicateChunkSize)
+	if len(chunks) != 1 {
+		t.Fatalf("localPackagePredicateChunks() returned %d chunks, want 1", len(chunks))
 	}
-	body := text[start : start+1+next]
-	if strings.Contains(body, "lifecycleRows(") {
-		t.Fatalf("FindLifecycleFindingsBatch still calls lifecycleRows per package")
+
+	rowsByPackage := make(map[localPackageKey][]lifecyclepolicy.ReleaseRow)
+	if err := store.collectLifecycleReleaseRows(ctx, chunks[0], rowsByPackage); err != nil {
+		t.Fatalf("collectLifecycleReleaseRows() error = %v", err)
+	}
+	if got := rowsByPackage[localPackageKey{ecosystem: "pypi", name: "django"}]; len(got) != 1 || got[0].ID != "endoflife:pypi:django:django:4.2" {
+		t.Fatalf("django rows = %+v, want requested django row", got)
+	}
+	if got := rowsByPackage[localPackageKey{ecosystem: "npm", name: "react"}]; len(got) != 1 || got[0].ID != "endoflife:npm:react:react:18" {
+		t.Fatalf("react rows = %+v, want requested react row", got)
+	}
+	if got := rowsByPackage[localPackageKey{ecosystem: "pypi", name: "flask"}]; len(got) != 0 {
+		t.Fatalf("flask rows = %+v, want unrequested package excluded", got)
 	}
 }
 
@@ -642,7 +1259,7 @@ func TestSyncRetriesRateLimitedPage(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"synced_at":"2026-05-30T11:00:00Z","synced_xid":600}`))
+		_, _ = w.Write([]byte(`{"synced_at":"2026-05-30T11:00:00Z","synced_xid":600,"feed_status":"healthy"}`))
 	}))
 	defer server.Close()
 
@@ -651,6 +1268,41 @@ func TestSyncRetriesRateLimitedPage(t *testing.T) {
 	}
 	if requests != 2 {
 		t.Fatalf("requests = %d, want retry after one 429", requests)
+	}
+}
+
+func TestSyncRetryAfterWaitHonorsConfiguredTimeout(t *testing.T) {
+	store := newSQLiteTestStore(t)
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		if requests == 1 {
+			w.Header().Set("Retry-After", "1")
+			http.Error(w, `{"error":"rate limit exceeded"}`, http.StatusTooManyRequests)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"synced_at":"2026-05-30T11:00:00Z","synced_xid":600,"feed_status":"healthy"}`))
+	}))
+	defer server.Close()
+
+	start := time.Now()
+	err := Sync(context.Background(), store, SyncConfig{
+		ServerURL:         server.URL,
+		Full:              true,
+		AllowInsecureHTTP: true,
+		Timeout:           50 * time.Millisecond,
+	})
+	elapsed := time.Since(start)
+
+	if err == nil || !strings.Contains(err.Error(), "context cancelled during rate limit wait") {
+		t.Fatalf("Sync(long Retry-After) error = %v, want rate limit wait cancelled by timeout", err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want no retry after timeout", requests)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("Sync(long Retry-After) took %s, want timeout to stop wait before Retry-After", elapsed)
 	}
 }
 
@@ -690,7 +1342,7 @@ func TestSyncServerURLErrorsRedactSecretBearingURLValues(t *testing.T) {
 	_, err = fetchSyncPage(context.Background(), client, SyncConfig{
 		ServerURL:         rawURL,
 		AllowInsecureHTTP: true,
-	}, "", "", syncCursor{}, 0, "", "")
+	}, "", "", syncCursor{}, "", "")
 	if err == nil || !strings.Contains(err.Error(), "sync: server request") {
 		t.Fatalf("fetchSyncPage(secret URL request error) = %v", err)
 	}
@@ -757,6 +1409,147 @@ func TestSyncIncrementalUsesSinceAuthorizationAndEcosystems(t *testing.T) {
 	}
 }
 
+func TestSyncSendsStableCorrelationIDAcrossPaginatedRequests(t *testing.T) {
+	t.Parallel()
+
+	store := newSQLiteTestStore(t)
+	ctx := context.Background()
+	var correlationIDs []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		correlationIDs = append(correlationIDs, r.Header.Get(correlation.Header))
+		w.Header().Set("Content-Type", "application/json")
+		if len(correlationIDs) == 1 {
+			_, _ = w.Write([]byte(`{"synced_at":"2026-05-30T11:00:00Z","synced_xid":600,"truncated":true,"next_cursor":{"vulnerabilities_done":true,"malicious_done":true,"reputation_done":true,"lifecycle_done":true}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"synced_at":"2026-05-30T11:00:00Z","synced_xid":600}`))
+	}))
+	defer server.Close()
+
+	if err := Sync(ctx, store, SyncConfig{
+		ServerURL:         server.URL,
+		AllowInsecureHTTP: true,
+	}); err != nil {
+		t.Fatalf("Sync(paginated) error = %v", err)
+	}
+
+	if len(correlationIDs) != 2 {
+		t.Fatalf("sync requests = %d, want 2", len(correlationIDs))
+	}
+	if !correlation.Valid(correlationIDs[0]) || !correlation.Valid(correlationIDs[1]) {
+		t.Fatalf("sync correlation IDs = %q, want valid UUID-shaped IDs", correlationIDs)
+	}
+	if correlationIDs[0] != correlationIDs[1] {
+		t.Fatalf("sync correlation IDs = %q, want stable ID across one sync", correlationIDs)
+	}
+}
+
+func TestSyncSerializesConcurrentCallsForSameDatabasePath(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	dbPath := filepath.Join(t.TempDir(), "packmon.db")
+	firstStore, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("New(first) error = %v", err)
+	}
+	t.Cleanup(func() { _ = firstStore.Close() })
+	secondStore, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("New(second) error = %v", err)
+	}
+	t.Cleanup(func() { _ = secondStore.Close() })
+
+	firstRequestStarted := make(chan struct{})
+	allowFirstResponse := make(chan struct{})
+	secondRequestDone := make(chan struct{})
+	var closeFirstOnce sync.Once
+	var closeSecondOnce sync.Once
+	var mu sync.Mutex
+	requests := make([]string, 0, 2)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		since := r.URL.Query().Get("since")
+		mu.Lock()
+		requests = append(requests, since)
+		requestNumber := len(requests)
+		mu.Unlock()
+
+		if requestNumber == 1 {
+			closeFirstOnce.Do(func() { close(firstRequestStarted) })
+			select {
+			case <-allowFirstResponse:
+			case <-r.Context().Done():
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"synced_at":"2026-05-30T11:00:00Z","synced_xid":600}`))
+			return
+		}
+
+		closeSecondOnce.Do(func() { close(secondRequestDone) })
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"synced_at":"2026-05-30T12:00:00Z","synced_xid":700}`))
+	}))
+	defer server.Close()
+
+	firstErr := make(chan error, 1)
+	go func() {
+		firstErr <- Sync(ctx, firstStore, SyncConfig{
+			ServerURL:         server.URL,
+			AllowInsecureHTTP: true,
+		})
+	}()
+
+	select {
+	case <-firstRequestStarted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("first sync did not reach server")
+	}
+
+	secondErr := make(chan error, 1)
+	go func() {
+		secondErr <- Sync(ctx, secondStore, SyncConfig{
+			ServerURL:         server.URL,
+			AllowInsecureHTTP: true,
+		})
+	}()
+
+	select {
+	case <-secondRequestDone:
+		close(allowFirstResponse)
+		<-firstErr
+		<-secondErr
+		t.Fatal("second sync reached server before first sync completed")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(allowFirstResponse)
+	if err := <-firstErr; err != nil {
+		t.Fatalf("first Sync() error = %v", err)
+	}
+	if err := <-secondErr; err != nil {
+		t.Fatalf("second Sync() error = %v", err)
+	}
+
+	mu.Lock()
+	gotRequests := append([]string(nil), requests...)
+	mu.Unlock()
+	if len(gotRequests) != 2 {
+		t.Fatalf("sync requests = %+v, want two requests", gotRequests)
+	}
+	if gotRequests[0] != "" || gotRequests[1] != "2026-05-30T11:00:00Z" {
+		t.Fatalf("sync request since values = %+v, want second request to observe first sync metadata", gotRequests)
+	}
+
+	lastSync, err := firstStore.GetSyncMeta(ctx, syncMetaKeyLastSync)
+	if err != nil {
+		t.Fatalf("GetSyncMeta(last sync) error = %v", err)
+	}
+	if lastSync != "2026-05-30T12:00:00Z" {
+		t.Fatalf("last sync = %q, want second sync timestamp", lastSync)
+	}
+}
+
 func TestSyncStoresFeedStateMetadata(t *testing.T) {
 	t.Parallel()
 
@@ -802,6 +1595,164 @@ func TestSyncStoresFeedStateMetadata(t *testing.T) {
 	}
 }
 
+func TestSyncRollsBackFindingWritesWhenFeedMetadataFails(t *testing.T) {
+	t.Parallel()
+
+	store := newSQLiteTestStore(t)
+	ctx := context.Background()
+	if _, err := applySync(ctx, store, true, &syncResponse{
+		Vulnerabilities: []syncVulnerability{{
+			ID:               "GHSA-existing-metadata-failure",
+			Ecosystem:        "npm",
+			Name:             "existing-metadata-failure",
+			VersionRanges:    `[{"type":"SEMVER","events":[{"introduced":"0"}]}]`,
+			VersionsAffected: `[]`,
+			Severity:         "HIGH",
+			Summary:          "existing vulnerability",
+		}},
+	}); err != nil {
+		t.Fatalf("applySync(existing) error = %v", err)
+	}
+	if err := store.SetSyncMeta(ctx, syncMetaKeyLastSync, "2026-05-30T09:00:00Z"); err != nil {
+		t.Fatalf("SetSyncMeta(last sync) error = %v", err)
+	}
+	if err := store.SetSyncMeta(ctx, syncMetaKeyLastSyncXID, "500"); err != nil {
+		t.Fatalf("SetSyncMeta(last xid) error = %v", err)
+	}
+	if err := store.SetSyncMeta(ctx, syncMetaKeyFeedStatus, "healthy"); err != nil {
+		t.Fatalf("SetSyncMeta(feed status) error = %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `
+		CREATE TRIGGER sync_meta_fail_feed_versions_insert
+		BEFORE INSERT ON sync_meta
+		WHEN NEW.key = 'feed_versions'
+		BEGIN
+			SELECT RAISE(FAIL, 'forced feed versions failure');
+		END;
+		CREATE TRIGGER sync_meta_fail_feed_versions_update
+		BEFORE UPDATE OF value ON sync_meta
+		WHEN NEW.key = 'feed_versions'
+		BEGIN
+			SELECT RAISE(FAIL, 'forced feed versions failure');
+		END;
+	`); err != nil {
+		t.Fatalf("create failing feed metadata trigger: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"synced_at":"2026-05-30T11:00:00Z",
+			"synced_xid":600,
+			"feed_status":"degraded",
+			"feed_versions":{"osv":"2026-05-30T10:00:00Z"},
+			"vulnerabilities":[{
+				"id":"GHSA-new-metadata-failure",
+				"ecosystem":"npm",
+				"name":"new-metadata-failure",
+				"version_ranges":"[{\"type\":\"SEMVER\",\"events\":[{\"introduced\":\"0\"}]}]",
+				"versions_affected":"[]",
+				"severity":"CRITICAL",
+				"summary":"new vulnerability"
+			}]
+		}`))
+	}))
+	defer server.Close()
+
+	var stats SyncStats
+	err := Sync(ctx, store, SyncConfig{
+		ServerURL:         server.URL,
+		Full:              true,
+		AllowInsecureHTTP: true,
+		Stats:             &stats,
+	})
+	if err == nil || !strings.Contains(err.Error(), "store feed versions") {
+		t.Fatalf("Sync(feed metadata failure) error = %v, want feed versions storage error", err)
+	}
+
+	existing, err := store.FindVulnerabilities(ctx, "npm", "existing-metadata-failure", "1.0.0")
+	if err != nil {
+		t.Fatalf("FindVulnerabilities(existing) error = %v", err)
+	}
+	if len(existing) != 1 || existing[0].AdvisoryID != "GHSA-existing-metadata-failure" {
+		t.Fatalf("existing findings after metadata failure = %+v, want preserved existing finding", existing)
+	}
+	newRows, err := store.FindVulnerabilities(ctx, "npm", "new-metadata-failure", "1.0.0")
+	if err != nil {
+		t.Fatalf("FindVulnerabilities(new) error = %v", err)
+	}
+	if len(newRows) != 0 {
+		t.Fatalf("new findings after metadata failure = %+v, want rollback", newRows)
+	}
+	lastSync, err := store.GetSyncMeta(ctx, syncMetaKeyLastSync)
+	if err != nil {
+		t.Fatalf("GetSyncMeta(last sync) error = %v", err)
+	}
+	if lastSync != "2026-05-30T09:00:00Z" {
+		t.Fatalf("last sync after metadata failure = %q, want previous timestamp", lastSync)
+	}
+	lastXID, err := store.GetSyncMeta(ctx, syncMetaKeyLastSyncXID)
+	if err != nil {
+		t.Fatalf("GetSyncMeta(last xid) error = %v", err)
+	}
+	if lastXID != "500" {
+		t.Fatalf("last xid after metadata failure = %q, want previous xid", lastXID)
+	}
+	feedStatus, err := store.GetSyncMeta(ctx, syncMetaKeyFeedStatus)
+	if err != nil {
+		t.Fatalf("GetSyncMeta(feed status) error = %v", err)
+	}
+	if feedStatus != "healthy" {
+		t.Fatalf("feed status after metadata failure = %q, want previous status", feedStatus)
+	}
+	if stats.AnyRemoved() {
+		t.Fatalf("stats after failed sync = %+v, want zero-value stats", stats)
+	}
+}
+
+func TestSyncFullRejectsEmptySnapshotBeforeClearingLocalData(t *testing.T) {
+	t.Parallel()
+
+	store := newSQLiteTestStore(t)
+	ctx := context.Background()
+	if _, err := applySync(ctx, store, true, &syncResponse{
+		Vulnerabilities: []syncVulnerability{{
+			ID:               "GHSA-existing-empty-full",
+			Ecosystem:        "npm",
+			Name:             "existing-empty-full",
+			VersionRanges:    `[{"type":"SEMVER","events":[{"introduced":"0"}]}]`,
+			VersionsAffected: `[]`,
+			Severity:         "HIGH",
+			Summary:          "existing vulnerability",
+		}},
+	}); err != nil {
+		t.Fatalf("applySync(existing) error = %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+
+	err := Sync(ctx, store, SyncConfig{
+		ServerURL:         server.URL,
+		Full:              true,
+		AllowInsecureHTTP: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "response missing synced_at") {
+		t.Fatalf("Sync(empty full snapshot) error = %v, want missing synced_at", err)
+	}
+
+	findings, err := store.FindVulnerabilities(ctx, "npm", "existing-empty-full", "1.0.0")
+	if err != nil {
+		t.Fatalf("FindVulnerabilities() error = %v", err)
+	}
+	if len(findings) != 1 || findings[0].AdvisoryID != "GHSA-existing-empty-full" {
+		t.Fatalf("existing findings after rejected full sync = %+v", findings)
+	}
+}
+
 func TestSyncRejectsFilteredFullSync(t *testing.T) {
 	t.Parallel()
 
@@ -829,7 +1780,7 @@ func TestSyncStatsReportFullClearAndTombstoneDeletes(t *testing.T) {
 
 	fullServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"synced_at":"2026-05-30T10:00:00Z"}`))
+		_, _ = w.Write([]byte(`{"synced_at":"2026-05-30T10:00:00Z","feed_status":"healthy"}`))
 	}))
 	defer fullServer.Close()
 
@@ -898,7 +1849,7 @@ func seedLocalSyncRows(t *testing.T, store *Store) {
 	}
 }
 
-func TestSyncFullFailureAfterFirstPagePreservesExistingLocalData(t *testing.T) {
+func TestSyncFullFailureAfterFirstPageDoesNotAdvanceFreshnessMetadata(t *testing.T) {
 	t.Parallel()
 
 	store := newSQLiteTestStore(t)
@@ -960,15 +1911,15 @@ func TestSyncFullFailureAfterFirstPagePreservesExistingLocalData(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FindVulnerabilities(existing) error = %v", err)
 	}
-	if len(existing) != 1 || existing[0].AdvisoryID != "GHSA-existing" {
-		t.Fatalf("existing findings after failed full sync = %+v, want preserved GHSA-existing", existing)
+	if len(existing) != 0 {
+		t.Fatalf("existing findings after failed full sync = %+v, want cleared by first page", existing)
 	}
 	newRows, err := store.FindVulnerabilities(ctx, "npm", "new", "1.0.0")
 	if err != nil {
 		t.Fatalf("FindVulnerabilities(new) error = %v", err)
 	}
-	if len(newRows) != 0 {
-		t.Fatalf("new findings after failed full sync = %+v, want no partial page data", newRows)
+	if len(newRows) != 1 || newRows[0].AdvisoryID != "GHSA-new" {
+		t.Fatalf("new findings after failed full sync = %+v, want first page retained", newRows)
 	}
 	lastSync, err := store.GetSyncMeta(ctx, syncMetaKeyLastSync)
 	if err != nil {
@@ -1045,7 +1996,7 @@ func TestFetchSyncPageReadErrorIncludesContext(t *testing.T) {
 	t.Parallel()
 
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		if r.Header.Get("Authorization") != "Bearer read-key" || r.URL.Query().Get("offset") != strconv.Itoa(syncPageLimit) || r.URL.Query().Get("snapshot") != "snap" {
+		if r.Header.Get("Authorization") != "Bearer read-key" || r.URL.Query().Get("vulnerabilities_cursor") != "after-vuln" || r.URL.Query().Get("snapshot") != "snap" {
 			t.Fatalf("request headers/query = auth %q raw %q", r.Header.Get("Authorization"), r.URL.RawQuery)
 		}
 		return &http.Response{
@@ -1058,7 +2009,7 @@ func TestFetchSyncPageReadErrorIncludesContext(t *testing.T) {
 	_, err := fetchSyncPage(context.Background(), client, SyncConfig{
 		ServerURL: "https://packmon.example",
 		APIKey:    "read-key",
-	}, "2026-05-30T10:00:00Z", "500", syncCursor{}, syncPageLimit, "snap", "600")
+	}, "2026-05-30T10:00:00Z", "500", syncCursor{VulnerabilitiesCursor: "after-vuln"}, "snap", "600")
 	if err == nil || !strings.Contains(err.Error(), "read response") {
 		t.Fatalf("fetchSyncPage(read error) = %v", err)
 	}
@@ -1082,11 +2033,68 @@ func TestFetchSyncPageRejectsOversizedResponses(t *testing.T) {
 			_, err := fetchSyncPage(context.Background(), server.Client(), SyncConfig{
 				ServerURL:         server.URL,
 				AllowInsecureHTTP: true,
-			}, "", "", syncCursor{}, 0, "", "")
+			}, "", "", syncCursor{}, "", "")
 			if err == nil || !strings.Contains(err.Error(), "response too large") {
 				t.Fatalf("fetchSyncPage(%s) error = %v, want response too large", name, err)
 			}
 		})
+	}
+}
+
+func TestFetchSyncPageErrorSnippetTruncatesOnUTF8Boundary(t *testing.T) {
+	t.Parallel()
+
+	body := strings.Repeat("x", 199) + "ä" + strings.Repeat("y", 20)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+
+	_, err := fetchSyncPage(context.Background(), server.Client(), SyncConfig{
+		ServerURL:         server.URL,
+		AllowInsecureHTTP: true,
+	}, "", "", syncCursor{}, "", "")
+	if err == nil || !strings.Contains(err.Error(), "server returned 502") {
+		t.Fatalf("fetchSyncPage(non-200) error = %v, want status context", err)
+	}
+	if !utf8.ValidString(err.Error()) {
+		t.Fatalf("fetchSyncPage(non-200) error is invalid UTF-8: %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "ä") {
+		t.Fatalf("fetchSyncPage(non-200) error = %q, want readable multibyte diagnostic", err.Error())
+	}
+}
+
+func TestFetchSyncPageErrorSnippetRedactsResponseBodySecrets(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "failed Authorization: Bearer leaked-sync-token api_key=leaked-sync-query", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	_, err := fetchSyncPage(context.Background(), server.Client(), SyncConfig{
+		ServerURL:         server.URL,
+		AllowInsecureHTTP: true,
+	}, "", "", syncCursor{}, "", "")
+	if err == nil {
+		t.Fatal("fetchSyncPage(non-200) error = nil, want status error")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"server returned 500",
+		"Bearer [redacted]",
+		"api_key=[redacted]",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("fetchSyncPage(non-200) error missing %q: %s", want, msg)
+		}
+	}
+	for _, leaked := range []string{"leaked-sync-token", "leaked-sync-query"} {
+		if strings.Contains(msg, leaked) {
+			t.Fatalf("fetchSyncPage(non-200) error leaked %q: %s", leaked, msg)
+		}
 	}
 }
 

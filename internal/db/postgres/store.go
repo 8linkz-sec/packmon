@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/domain"
 	"github.com/8linkz-sec/packmon/internal/secret"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -26,8 +27,9 @@ var _ db.Store = (*Store)(nil)
 // PoolConfig holds optional connection pool tuning parameters.
 // Zero values mean "use pgxpool defaults".
 type PoolConfig struct {
-	MaxConns int32
-	MinConns int32
+	MaxConns       int32
+	MinConns       int32
+	ConnectTimeout time.Duration
 }
 
 // New opens a PostgreSQL connection pool and verifies connectivity.
@@ -35,18 +37,9 @@ type PoolConfig struct {
 // at rest. Pass nil to disable encryption (plaintext fallback).
 // poolCfg may be nil to use pgxpool defaults.
 func New(ctx context.Context, dsn string, encryptor *secret.FieldEncryptor, poolCfg *PoolConfig) (*Store, error) {
-	pgCfg, err := pgxpool.ParseConfig(dsn)
+	pgCfg, err := newPgxPoolConfig(dsn, poolCfg)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: parse dsn: %w", err)
-	}
-
-	if poolCfg != nil {
-		if poolCfg.MaxConns > 0 {
-			pgCfg.MaxConns = poolCfg.MaxConns
-		}
-		if poolCfg.MinConns > 0 {
-			pgCfg.MinConns = poolCfg.MinConns
-		}
+		return nil, err
 	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, pgCfg)
@@ -65,6 +58,26 @@ func New(ctx context.Context, dsn string, encryptor *secret.FieldEncryptor, pool
 	}
 
 	return &Store{pool: pool, encryptor: encryptor}, nil
+}
+
+func newPgxPoolConfig(dsn string, poolCfg *PoolConfig) (*pgxpool.Config, error) {
+	pgCfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: parse dsn: %w", err)
+	}
+
+	if poolCfg != nil {
+		if poolCfg.MaxConns > 0 {
+			pgCfg.MaxConns = poolCfg.MaxConns
+		}
+		if poolCfg.MinConns > 0 {
+			pgCfg.MinConns = poolCfg.MinConns
+		}
+		if poolCfg.ConnectTimeout > 0 {
+			pgCfg.ConnConfig.ConnectTimeout = poolCfg.ConnectTimeout
+		}
+	}
+	return pgCfg, nil
 }
 
 // Ping satisfies health.Pinger.
@@ -86,6 +99,11 @@ func (s *Store) DBPoolStats() db.DBPoolStats {
 		AcquiredConns:     stats.AcquiredConns(),
 		IdleConns:         stats.IdleConns(),
 		ConstructingConns: stats.ConstructingConns(),
+		AcquireCount:      stats.AcquireCount(),
+		AcquireDuration:   stats.AcquireDuration(),
+		CanceledAcquires:  stats.CanceledAcquireCount(),
+		EmptyAcquires:     stats.EmptyAcquireCount(),
+		EmptyAcquireWait:  stats.EmptyAcquireWaitTime(),
 	}
 }
 
@@ -132,12 +150,72 @@ func normalizeSeverity(severity string) string {
 	return normalized
 }
 
-func normalizeVulnerabilitySeverity(severity string) string {
+func normalizeVulnerabilitySeverity(severity string) (string, error) {
 	normalized := normalizeSeverity(severity)
 	if normalized == "UNKNOWN" {
-		return "LOW"
+		return "LOW", nil
 	}
-	return normalized
+	if !storedSeverityValid(normalized, false) {
+		return "", fmt.Errorf("unsupported vulnerability severity %q", severity)
+	}
+	return normalized, nil
+}
+
+func normalizeMaliciousSeverity(severity string) (string, error) {
+	normalized := normalizeSeverity(severity)
+	if !storedSeverityValid(normalized, true) {
+		return "", fmt.Errorf("unsupported malicious severity %q", severity)
+	}
+	return normalized, nil
+}
+
+func storedSeverityValid(severity string, allowUnknown bool) bool {
+	switch severity {
+	case "CRITICAL", "HIGH", "MEDIUM", "LOW":
+		return true
+	case "UNKNOWN":
+		return allowUnknown
+	default:
+		return false
+	}
+}
+
+func normalizeStoredEcosystem(ecosystem string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(ecosystem))
+	if !domain.Ecosystem(normalized).Valid() {
+		return "", fmt.Errorf("unsupported ecosystem %q", ecosystem)
+	}
+	return normalized, nil
+}
+
+func normalizeMaliciousRiskType(riskType string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(riskType)) {
+	case "":
+		return "malware", nil
+	case "malware":
+		return "malware", nil
+	case "supply_chain", "supply-chain", "supply chain":
+		return "supply_chain", nil
+	case "typosquatting", "typosquat", "typo-squatting":
+		return "typosquatting", nil
+	default:
+		return "", fmt.Errorf("unsupported malicious risk type %q", riskType)
+	}
+}
+
+func normalizeManualAdvisoryID(id string) (string, error) {
+	normalized, ok := domain.NormalizeManualAdvisoryID(id)
+	if !ok {
+		return "", fmt.Errorf("manual advisory id must use %s namespace", domain.ManualAdvisoryIDPrefix)
+	}
+	return normalized, nil
+}
+
+func normalizeRefreshQueuePriority(priority int) (int, error) {
+	if !db.ValidRefreshPriority(priority) {
+		return 0, fmt.Errorf("unsupported refresh queue priority %d", priority)
+	}
+	return priority, nil
 }
 
 func clampLimit(limit, fallback, max int) int {

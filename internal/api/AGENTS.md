@@ -46,7 +46,7 @@ intentionally changes.
 ## Tests
 
 ```bash
-go test ./internal/api/...
+go test -count=1 ./internal/api/...
 ```
 Cover negative paths: oversize body, bad severity, missing CSRF, unauthenticated
 admin write, refresh-with-version (must 400).

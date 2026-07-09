@@ -49,7 +49,7 @@ Keep these tracked guardrails in mind:
 ## Tests
 
 ```bash
-go test ./internal/feed/...
+go test -count=1 ./internal/feed/...
 ```
 For git syncers, add a regression test that a `../../../` path in a changed-file
 list reads nothing outside the repo (see `ghsa/syncer_test.go`).

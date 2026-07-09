@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDockerEnvExampleKeepsAccountGatedFeedsDisabled(t *testing.T) {
@@ -84,13 +85,14 @@ func TestReadmeDockerQuickStartUsesLocalFirstStackHelper(t *testing.T) {
 	if strings.Contains(text[:startIndex], "edit `.env`") {
 		t.Fatal("README Docker quick start must not require editing .env before stack startup")
 	}
+	collapsedReadme := strings.Join(strings.Fields(text), " ")
 	for _, want := range []string{
 		"creates or completes `.env`",
 		"generated local-only secrets",
 		"Admins can later adjust `.env`",
 		"do not print generated secret values",
 	} {
-		if !strings.Contains(text, want) {
+		if !strings.Contains(collapsedReadme, want) {
 			t.Fatalf("README Docker quick start must document local-first helper behavior with %q", want)
 		}
 	}
@@ -115,6 +117,7 @@ func TestReadmeDockerQuickStartUsesLocalFirstStackHelper(t *testing.T) {
 			"PACKMON_DB_PASSWORD",
 			"PACKMON_ADMIN_INITIAL_PASSWORD",
 			"PACKMON_ENCRYPTION_KEY",
+			"PACKMON_ADMIN_AUDIT_HMAC_KEY",
 		} {
 			if !strings.Contains(script, key) {
 				t.Fatalf("%s must ensure required env value %s", rel, key)
@@ -134,6 +137,72 @@ func TestReadmeDockerQuickStartUsesLocalFirstStackHelper(t *testing.T) {
 	}
 }
 
+func TestLocalStackHelpersReconcileExistingEnvFromExample(t *testing.T) {
+	t.Parallel()
+
+	envExampleData, err := os.ReadFile(filepath.Join("..", "..", ".env.example")) //nolint:gosec // static repository fixture path.
+	if err != nil {
+		t.Fatalf("read .env.example: %v", err)
+	}
+	envExample := string(envExampleData)
+
+	for _, tc := range []struct {
+		rel   string
+		wants []string
+	}{
+		{
+			rel: filepath.Join("scripts", "start-local-stack.sh"),
+			wants: []string{
+				"append_missing_env_example_defaults",
+				"Added from .env.example for current local stack defaults.",
+				"secret_key(key)",
+				"POSTGRES_PASSWORD",
+				"PACKMON_DB_PASSWORD",
+				"PACKMON_ADMIN_INITIAL_PASSWORD",
+				"PACKMON_ENCRYPTION_KEY",
+				"PACKMON_ADMIN_AUDIT_HMAC_KEY",
+			},
+		},
+		{
+			rel: filepath.Join("scripts", "start-local-stack.ps1"),
+			wants: []string{
+				"Sync-EnvExampleDefaults",
+				"Added from .env.example for current local stack defaults.",
+				"$LocalEnvSecretKeys",
+				"POSTGRES_PASSWORD",
+				"PACKMON_DB_PASSWORD",
+				"PACKMON_ADMIN_INITIAL_PASSWORD",
+				"PACKMON_ENCRYPTION_KEY",
+				"PACKMON_ADMIN_AUDIT_HMAC_KEY",
+			},
+		},
+	} {
+		t.Run(tc.rel, func(t *testing.T) {
+			t.Parallel()
+
+			data, err := os.ReadFile(filepath.Join("..", "..", tc.rel)) //nolint:gosec // static repository script path.
+			if err != nil {
+				t.Fatalf("read %s: %v", tc.rel, err)
+			}
+			script := string(data)
+			for _, want := range tc.wants {
+				if !strings.Contains(script, want) {
+					t.Fatalf("%s must reconcile existing .env with .env.example; missing %q", tc.rel, want)
+				}
+			}
+			for _, key := range []string{
+				"PACKMON_ALLOW_INSECURE_LOCAL_HTTP",
+				"PACKMON_INSECURE_LOCAL_HTTP_BIND_MODE",
+				"PACKMON_METRICS_HOST",
+			} {
+				if !strings.Contains(envExample, key+"=") {
+					t.Fatalf(".env.example missing local default key %s", key)
+				}
+			}
+		})
+	}
+}
+
 func TestDockerComposeFailsFastOnEmptyRequiredSecrets(t *testing.T) {
 	t.Parallel()
 
@@ -147,11 +216,80 @@ func TestDockerComposeFailsFastOnEmptyRequiredSecrets(t *testing.T) {
 		"PACKMON_DB_PASSWORD: ${PACKMON_DB_PASSWORD:?PACKMON_DB_PASSWORD is required}",
 		"PACKMON_ADMIN_INITIAL_PASSWORD: ${PACKMON_ADMIN_INITIAL_PASSWORD:?PACKMON_ADMIN_INITIAL_PASSWORD is required}",
 		"PACKMON_ENCRYPTION_KEY: ${PACKMON_ENCRYPTION_KEY:?PACKMON_ENCRYPTION_KEY is required}",
+		"PACKMON_ADMIN_AUDIT_HMAC_KEY: ${PACKMON_ADMIN_AUDIT_HMAC_KEY:?PACKMON_ADMIN_AUDIT_HMAC_KEY is required}",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("docker-compose.yml must fail fast on empty required secret via %q", want)
 		}
 	}
+}
+
+func TestLocalStackHelpersWaitForReadinessBeforeReportingSuccess(t *testing.T) {
+	t.Parallel()
+
+	for _, rel := range []string{
+		filepath.Join("scripts", "start-local-stack.ps1"),
+		filepath.Join("scripts", "start-local-stack.sh"),
+	} {
+		rel := rel
+		t.Run(rel, func(t *testing.T) {
+			t.Parallel()
+
+			data, err := os.ReadFile(filepath.Join("..", "..", rel)) //nolint:gosec // static repository script path.
+			if err != nil {
+				t.Fatalf("read %s: %v", rel, err)
+			}
+			script := string(data)
+
+			upIndex := strings.Index(script, "docker compose up --build -d")
+			if upIndex < 0 {
+				t.Fatalf("%s must start the local stack detached", rel)
+			}
+			successIndex := strings.Index(script, "Packmon local server:")
+			if successIndex < 0 {
+				t.Fatalf("%s must print the local server URL after readiness", rel)
+			}
+			if !strings.Contains(script, "/readyz") {
+				t.Fatalf("%s must probe the Packmon /readyz endpoint before reporting success", rel)
+			}
+			waitIndex := indexAny(script[upIndex:], []string{
+				"Wait-LocalStackReady",
+				"wait_local_stack_ready",
+			})
+			if waitIndex < 0 {
+				t.Fatalf("%s must wait for readiness after compose startup", rel)
+			}
+			waitIndex += upIndex
+			if waitIndex >= successIndex {
+				t.Fatalf("%s must wait for readiness before printing the local server success URL", rel)
+			}
+			for _, want := range []string{
+				"docker compose ps",
+				"docker compose logs --tail=120 packmon-server",
+			} {
+				if !strings.Contains(script, want) {
+					t.Fatalf("%s must print diagnostics containing %q when readiness fails", rel, want)
+				}
+			}
+			if strings.HasSuffix(rel, ".ps1") && !strings.Contains(script, `throw "Packmon local stack did not become ready."`) {
+				t.Fatalf("%s must fail clearly when readiness times out", rel)
+			}
+			if strings.HasSuffix(rel, ".sh") && !strings.Contains(script, "return 1") {
+				t.Fatalf("%s must exit non-zero when readiness times out", rel)
+			}
+		})
+	}
+}
+
+func indexAny(text string, needles []string) int {
+	best := -1
+	for _, needle := range needles {
+		index := strings.Index(text, needle)
+		if index >= 0 && (best < 0 || index < best) {
+			best = index
+		}
+	}
+	return best
 }
 
 func TestRetentionControlsAreDocumentedInReadmeAndEnvExample(t *testing.T) {
@@ -211,6 +349,57 @@ func TestDatabaseTLSDefaultsAreDocumentedAndLocalComposeOverrideIsExplicit(t *te
 	}
 }
 
+func TestEnvExampleDocumentsWebAndReversingLabsOperatorSettings(t *testing.T) {
+	t.Parallel()
+
+	envData, err := os.ReadFile(filepath.Join("..", "..", ".env.example"))
+	if err != nil {
+		t.Fatalf("read .env.example: %v", err)
+	}
+	text := string(envData)
+
+	for _, tt := range []struct {
+		key  string
+		want string
+	}{
+		{key: "PACKMON_WEB_PRIVACY_URL", want: "/privacy"},
+		{key: "PACKMON_WEB_LEGAL_URL", want: ""},
+		{key: "PACKMON_WEB_TERMS_URL", want: "/terms"},
+		{key: "PACKMON_REVERSINGLABS_MAX_SCHEDULE_PER_CHECK", want: "100"},
+		{key: "PACKMON_REVERSINGLABS_CACHE_RETENTION", want: "168h"},
+		{key: "PACKMON_REVERSINGLABS_EXCLUDED_NAMESPACES", want: ""},
+	} {
+		if !envExampleContainsAssignment(text, tt.key, tt.want) {
+			t.Fatalf(".env.example must document %s=%s", tt.key, tt.want)
+		}
+	}
+}
+
+func TestEnvExampleDocumentsDBPoolZeroDefaultBehavior(t *testing.T) {
+	t.Parallel()
+
+	envData, err := os.ReadFile(filepath.Join("..", "..", ".env.example"))
+	if err != nil {
+		t.Fatalf("read .env.example: %v", err)
+	}
+	text := string(envData)
+
+	for _, tt := range []struct {
+		key  string
+		want string
+	}{
+		{key: "PACKMON_DB_MAX_CONNS", want: "20"},
+		{key: "PACKMON_DB_MIN_CONNS", want: "2"},
+	} {
+		if !envExampleContainsAssignment(text, tt.key, tt.want) {
+			t.Fatalf(".env.example must document %s=%s", tt.key, tt.want)
+		}
+	}
+	if !strings.Contains(text, "Set either value to 0 to leave that pgx pool setting at its default") {
+		t.Fatal(".env.example must explain that zero leaves DB pool settings at pgx defaults")
+	}
+}
+
 func TestDockerEnvExampleMetricsBindMatchesComposePort(t *testing.T) {
 	t.Parallel()
 
@@ -230,8 +419,39 @@ func TestDockerEnvExampleMetricsBindMatchesComposePort(t *testing.T) {
 	if got := values["PACKMON_METRICS_PORT"]; got != "9090" {
 		t.Fatalf("PACKMON_METRICS_PORT = %q in .env.example, want 9090 to match docker-compose.yml", got)
 	}
-	if !strings.Contains(string(composeData), `"127.0.0.1:9090:9090"`) {
-		t.Fatal("docker-compose.yml must keep metrics published only on host loopback")
+	const wantMetricsPort = `"127.0.0.1:${PACKMON_METRICS_PORT:-9090}:${PACKMON_METRICS_PORT:-9090}"`
+	if !strings.Contains(string(composeData), wantMetricsPort) {
+		t.Fatalf("docker-compose.yml must publish metrics on host loopback with PACKMON_METRICS_PORT via %s", wantMetricsPort)
+	}
+	if strings.Contains(string(composeData), `"127.0.0.1:9090:9090"`) {
+		t.Fatal("docker-compose.yml must not hard-code the metrics listener port to 9090")
+	}
+}
+
+func TestDockerComposeStopGraceExceedsServerShutdownTimeout(t *testing.T) {
+	t.Parallel()
+
+	envData, err := os.ReadFile(filepath.Join("..", "..", ".env.example"))
+	if err != nil {
+		t.Fatalf("read .env.example: %v", err)
+	}
+	composeData, err := os.ReadFile(filepath.Join("..", "..", "docker-compose.yml"))
+	if err != nil {
+		t.Fatalf("read docker-compose.yml: %v", err)
+	}
+
+	values := activeEnvExampleValues(string(envData))
+	shutdownTimeout, err := time.ParseDuration(values["PACKMON_SERVER_SHUTDOWN_TIMEOUT"])
+	if err != nil {
+		t.Fatalf("PACKMON_SERVER_SHUTDOWN_TIMEOUT = %q is not a duration: %v", values["PACKMON_SERVER_SHUTDOWN_TIMEOUT"], err)
+	}
+	stopGrace, err := time.ParseDuration(composeScalarValue(string(composeData), "stop_grace_period"))
+	if err != nil {
+		t.Fatalf("docker-compose.yml stop_grace_period is not a duration: %v", err)
+	}
+	minimum := shutdownTimeout + 5*time.Second
+	if stopGrace < minimum {
+		t.Fatalf("docker-compose.yml stop_grace_period = %s, want at least %s for shutdown timeout %s plus hard-exit buffer", stopGrace, minimum, shutdownTimeout)
 	}
 }
 
@@ -249,4 +469,32 @@ func activeEnvExampleValues(text string) map[string]string {
 		values[strings.TrimSpace(key)] = strings.TrimSpace(value)
 	}
 	return values
+}
+
+func envExampleContainsAssignment(text, wantKey, wantValue string) bool {
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "#"))
+		if line == "" {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		if strings.TrimSpace(key) == wantKey && strings.TrimSpace(value) == wantValue {
+			return true
+		}
+	}
+	return false
+}
+
+func composeScalarValue(text, key string) string {
+	prefix := key + ":"
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, prefix) {
+			return strings.TrimSpace(strings.TrimPrefix(line, prefix))
+		}
+	}
+	return ""
 }

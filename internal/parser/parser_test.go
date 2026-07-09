@@ -2,10 +2,28 @@ package parser
 
 import (
 	"fmt"
+	"io"
 	"testing"
 
 	"github.com/8linkz-sec/packmon/internal/domain"
 )
+
+type testParser struct {
+	filename  string
+	ecosystem domain.Ecosystem
+}
+
+func (p testParser) CanParse(filename string) bool {
+	return filename == p.filename
+}
+
+func (p testParser) Parse(io.Reader) ([]domain.Package, error) {
+	return []domain.Package{{Name: "example", Version: "1.0.0", Ecosystem: p.ecosystem}}, nil
+}
+
+func (p testParser) Ecosystem() domain.Ecosystem {
+	return p.ecosystem
+}
 
 func TestRegistry_ParserFor(t *testing.T) {
 	t.Parallel()
@@ -63,6 +81,29 @@ func TestRegistry_ParserFor(t *testing.T) {
 				t.Errorf("ParserFor(%q).Ecosystem() = %q, want %q", tt.path, got, tt.wantEcosystem)
 			}
 		})
+	}
+}
+
+func TestRegistryCanBeExtendedWithDescriptor(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry(ParserDescriptor{
+		Name: "custom-lock",
+		New: func() Parser {
+			return testParser{filename: "custom.lock", ecosystem: domain.EcosystemNPM}
+		},
+	})
+
+	p := r.ParserFor("custom.lock")
+	if p == nil {
+		t.Fatal("ParserFor(custom.lock) = nil, want custom parser")
+	}
+	if got := p.Ecosystem(); got != domain.EcosystemNPM {
+		t.Fatalf("custom parser ecosystem = %q, want %q", got, domain.EcosystemNPM)
+	}
+
+	if builtIn := r.ParserFor("package-lock.json"); builtIn == nil {
+		t.Fatal("ParserFor(package-lock.json) = nil after extension, want built-in parser")
 	}
 }
 

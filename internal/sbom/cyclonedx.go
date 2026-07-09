@@ -12,9 +12,21 @@ import (
 	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
+// MaxSizeBytes is the maximum accepted size for any supported SBOM input.
+// CycloneDX JSON, CycloneDX XML, and SPDX JSON documents are capped at 100 MiB
+// before parsing.
 const MaxSizeBytes = 100 << 20
 
 const maxSBOMSize = MaxSizeBytes
+
+const (
+	maxCycloneDXComponents           = 20000
+	maxCycloneDXDependencyEntries    = 20000
+	maxCycloneDXDependencyEdges      = 100000
+	maxCycloneDXRootDependencies     = 5000
+	maxCycloneDXViaRootsPerComponent = 32
+	maxCycloneDXViaStates            = maxCycloneDXDependencyEntries * maxCycloneDXViaRootsPerComponent
+)
 
 type cyclonedxJSON struct {
 	BOMFormat    string                `json:"bomFormat"`
@@ -74,7 +86,7 @@ func parseCycloneDX(data []byte) (*ParseResult, error) {
 		if err := json.Unmarshal(data, &doc); err != nil {
 			return nil, fmt.Errorf("parse CycloneDX JSON: %w", err)
 		}
-		return importCycloneDXJSON(doc), nil
+		return importCycloneDXJSON(doc)
 	}
 
 	if IsCycloneDXXML(data) {
@@ -92,8 +104,14 @@ func parseCycloneDX(data []byte) (*ParseResult, error) {
 				PURL:    c.PURL,
 			})
 		}
+		dependencies := cyclonedxXMLDependencies(doc.Dependencies)
+		if err := validateCycloneDXWorkLimits(len(components), doc.Metadata.Component.BOMRef, dependencies); err != nil {
+			return nil, err
+		}
 		result := importCycloneDXComponents(components)
-		applyCycloneDXDependencyMetadata(result.Packages, doc.Metadata.Component.BOMRef, cyclonedxXMLDependencies(doc.Dependencies))
+		if err := applyCycloneDXDependencyMetadata(result.Packages, doc.Metadata.Component.BOMRef, dependencies); err != nil {
+			return nil, err
+		}
 		return result, nil
 	}
 
@@ -115,10 +133,15 @@ func cyclonedxXMLDependencies(items []cyclonedxXMLDependency) []cyclonedxDepende
 	return out
 }
 
-func importCycloneDXJSON(doc cyclonedxJSON) *ParseResult {
+func importCycloneDXJSON(doc cyclonedxJSON) (*ParseResult, error) {
+	if err := validateCycloneDXWorkLimits(len(doc.Components), doc.Metadata.Component.BOMRef, doc.Dependencies); err != nil {
+		return nil, err
+	}
 	result := importCycloneDXComponents(doc.Components)
-	applyCycloneDXDependencyMetadata(result.Packages, doc.Metadata.Component.BOMRef, doc.Dependencies)
-	return result
+	if err := applyCycloneDXDependencyMetadata(result.Packages, doc.Metadata.Component.BOMRef, doc.Dependencies); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // IsCycloneDXJSON reports whether data looks like CycloneDX JSON.
@@ -174,11 +197,51 @@ func importCycloneDXComponents(components []cyclonedxComponent) *ParseResult {
 	return result
 }
 
-func applyCycloneDXDependencyMetadata(packages []Package, rootRef string, dependencies []cyclonedxDependency) {
+func applyCycloneDXDependencyMetadata(packages []Package, rootRef string, dependencies []cyclonedxDependency) error {
 	if len(packages) == 0 || len(dependencies) == 0 {
-		return
+		return nil
 	}
 
+	refToIndex := buildCycloneDXRefIndex(packages)
+	edges := buildCycloneDXDependencyEdges(dependencies)
+	rootRef = strings.TrimSpace(rootRef)
+	markCycloneDXDirectDependencies(packages, refToIndex, edges, rootRef)
+	return attachCycloneDXDependencyMetadata(packages, refToIndex, edges, rootRef)
+}
+
+func validateCycloneDXWorkLimits(componentCount int, rootRef string, dependencies []cyclonedxDependency) error {
+	if componentCount > maxCycloneDXComponents {
+		return fmt.Errorf("CycloneDX component count %d exceeds maximum of %d", componentCount, maxCycloneDXComponents)
+	}
+	if len(dependencies) > maxCycloneDXDependencyEntries {
+		return fmt.Errorf("CycloneDX dependency entry count %d exceeds maximum of %d", len(dependencies), maxCycloneDXDependencyEntries)
+	}
+
+	rootRef = strings.TrimSpace(rootRef)
+	edgeCount := 0
+	rootDependencyCount := 0
+	for _, dep := range dependencies {
+		ref := strings.TrimSpace(dep.Ref)
+		for _, childRef := range dep.DependsOn {
+			if strings.TrimSpace(childRef) == "" {
+				continue
+			}
+			edgeCount++
+			if edgeCount > maxCycloneDXDependencyEdges {
+				return fmt.Errorf("CycloneDX dependency edge count exceeds maximum of %d", maxCycloneDXDependencyEdges)
+			}
+			if rootRef != "" && ref == rootRef {
+				rootDependencyCount++
+				if rootDependencyCount > maxCycloneDXRootDependencies {
+					return fmt.Errorf("CycloneDX root dependency count exceeds maximum of %d", maxCycloneDXRootDependencies)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func buildCycloneDXRefIndex(packages []Package) map[string]int {
 	refToIndex := make(map[string]int, len(packages))
 	for i, item := range packages {
 		ref := strings.TrimSpace(item.BOMRef)
@@ -187,7 +250,10 @@ func applyCycloneDXDependencyMetadata(packages []Package, rootRef string, depend
 		}
 		refToIndex[ref] = i
 	}
+	return refToIndex
+}
 
+func buildCycloneDXDependencyEdges(dependencies []cyclonedxDependency) map[string][]string {
 	edges := make(map[string][]string, len(dependencies))
 	for _, dep := range dependencies {
 		ref := strings.TrimSpace(dep.Ref)
@@ -201,17 +267,34 @@ func applyCycloneDXDependencyMetadata(packages []Package, rootRef string, depend
 			}
 		}
 	}
+	return edges
+}
 
+func markCycloneDXDirectDependencies(packages []Package, refToIndex map[string]int, edges map[string][]string, rootRef string) {
+	rootRef = strings.TrimSpace(rootRef)
+	if rootRef == "" {
+		return
+	}
+	for _, directRef := range edges[rootRef] {
+		if idx, ok := refToIndex[directRef]; ok {
+			packages[idx].Package.Direct = true
+		}
+	}
+}
+
+func attachCycloneDXDependencyMetadata(packages []Package, refToIndex map[string]int, edges map[string][]string, rootRef string) error {
 	rootRef = strings.TrimSpace(rootRef)
 	if rootRef != "" {
-		for _, directRef := range edges[rootRef] {
-			if idx, ok := refToIndex[directRef]; ok {
-				packages[idx].Package.Direct = true
-			}
+		if err := attachCycloneDXRootVia(packages, refToIndex, edges, rootRef); err != nil {
+			return err
 		}
-		applyCycloneDXRootVia(packages, refToIndex, edges, rootRef)
 	}
+	attachCycloneDXPackageParents(packages, refToIndex, edges)
+	return nil
+}
 
+func attachCycloneDXPackageParents(packages []Package, refToIndex map[string]int, edges map[string][]string) {
+	parentsByChildRef := make(map[string][]domain.PackageParent)
 	for parentRef, childRefs := range edges {
 		parentIdx, parentIsPackage := refToIndex[parentRef]
 		if !parentIsPackage {
@@ -228,11 +311,19 @@ func applyCycloneDXDependencyMetadata(packages []Package, rootRef string, depend
 			if !childIsPackage || childIdx == parentIdx {
 				continue
 			}
-			child := &packages[childIdx].Package
-			child.Parents = mergeSBOMPackageParents(child.Parents, []domain.PackageParent{parent})
-			if !child.Direct {
-				child.Indirect = true
-			}
+			parentsByChildRef[childRef] = append(parentsByChildRef[childRef], parent)
+		}
+	}
+
+	for childRef, parents := range parentsByChildRef {
+		childIdx, childIsPackage := refToIndex[childRef]
+		if !childIsPackage {
+			continue
+		}
+		child := &packages[childIdx].Package
+		child.Parents = domain.MergePackageParents(child.Parents, parents)
+		if !child.Direct {
+			child.Indirect = true
 		}
 	}
 }
@@ -242,22 +333,28 @@ type cycloneDXViaRoot struct {
 	directRef string
 }
 
-func applyCycloneDXRootVia(packages []Package, refToIndex map[string]int, edges map[string][]string, rootRef string) {
+type cycloneDXViaBudget struct {
+	states int
+}
+
+func (b *cycloneDXViaBudget) addState() error {
+	b.states++
+	if b.states > maxCycloneDXViaStates {
+		return fmt.Errorf("CycloneDX dependency via-state count exceeds maximum of %d", maxCycloneDXViaStates)
+	}
+	return nil
+}
+
+func attachCycloneDXRootVia(packages []Package, refToIndex map[string]int, edges map[string][]string, rootRef string) error {
 	viaByRef := make(map[string]map[cycloneDXViaRoot]struct{})
 	queue := make([]string, 0)
+	budget := &cycloneDXViaBudget{}
 
-	for _, directRef := range edges[rootRef] {
-		idx, ok := refToIndex[directRef]
-		if !ok {
-			continue
-		}
-		rootName := strings.TrimSpace(packages[idx].Package.Name)
-		if rootName == "" {
-			continue
-		}
-		root := cycloneDXViaRoot{name: rootName, directRef: directRef}
-		for _, childRef := range edges[directRef] {
-			if addCycloneDXViaRoot(viaByRef, childRef, root) {
+	for _, root := range cycloneDXDirectViaRoots(packages, refToIndex, edges[rootRef]) {
+		for _, childRef := range edges[root.directRef] {
+			if changed, err := addCycloneDXViaRoot(viaByRef, childRef, root, budget); err != nil {
+				return err
+			} else if changed {
 				queue = append(queue, childRef)
 			}
 		}
@@ -268,7 +365,9 @@ func applyCycloneDXRootVia(packages []Package, refToIndex map[string]int, edges 
 		queue = queue[1:]
 		roots := viaByRef[ref]
 		for _, childRef := range edges[ref] {
-			if mergeCycloneDXViaRoots(viaByRef, childRef, roots) {
+			if changed, err := mergeCycloneDXViaRoots(viaByRef, childRef, roots, budget); err != nil {
+				return err
+			} else if changed {
 				queue = append(queue, childRef)
 			}
 		}
@@ -281,16 +380,43 @@ func applyCycloneDXRootVia(packages []Package, refToIndex map[string]int, edges 
 		}
 		pkg := &packages[idx].Package
 		pkg.Indirect = true
-		pkg.Via = mergeSBOMStringSet(pkg.Via, cycloneDXViaRootValues(roots))
+		pkg.Via = domain.MergePackageStringSet(pkg.Via, cycloneDXViaRootValues(roots))
 	}
+	return nil
 }
 
-func addCycloneDXViaRoot(viaByRef map[string]map[cycloneDXViaRoot]struct{}, ref string, root cycloneDXViaRoot) bool {
+func cycloneDXDirectViaRoots(packages []Package, refToIndex map[string]int, directRefs []string) []cycloneDXViaRoot {
+	roots := make([]cycloneDXViaRoot, 0, len(directRefs))
+	seen := make(map[cycloneDXViaRoot]struct{}, len(directRefs))
+	for _, directRef := range directRefs {
+		directRef = strings.TrimSpace(directRef)
+		idx, ok := refToIndex[directRef]
+		if !ok {
+			continue
+		}
+		rootName := strings.TrimSpace(packages[idx].Package.Name)
+		if rootName == "" {
+			continue
+		}
+		root := cycloneDXViaRoot{name: rootName, directRef: directRef}
+		if _, ok := seen[root]; ok {
+			continue
+		}
+		seen[root] = struct{}{}
+		roots = append(roots, root)
+	}
+	sort.Slice(roots, func(i, j int) bool {
+		return cycloneDXViaRootLess(roots[i], roots[j])
+	})
+	return roots
+}
+
+func addCycloneDXViaRoot(viaByRef map[string]map[cycloneDXViaRoot]struct{}, ref string, root cycloneDXViaRoot, budget *cycloneDXViaBudget) (bool, error) {
 	ref = strings.TrimSpace(ref)
 	root.name = strings.TrimSpace(root.name)
 	root.directRef = strings.TrimSpace(root.directRef)
 	if ref == "" || root.name == "" || root.directRef == "" || ref == root.directRef {
-		return false
+		return false, nil
 	}
 	roots := viaByRef[ref]
 	if roots == nil {
@@ -298,20 +424,50 @@ func addCycloneDXViaRoot(viaByRef map[string]map[cycloneDXViaRoot]struct{}, ref 
 		viaByRef[ref] = roots
 	}
 	if _, ok := roots[root]; ok {
-		return false
+		return false, nil
+	}
+	if len(roots) >= maxCycloneDXViaRootsPerComponent {
+		return false, nil
+	}
+	if budget != nil {
+		if err := budget.addState(); err != nil {
+			return false, err
+		}
 	}
 	roots[root] = struct{}{}
-	return true
+	return true, nil
 }
 
-func mergeCycloneDXViaRoots(viaByRef map[string]map[cycloneDXViaRoot]struct{}, ref string, roots map[cycloneDXViaRoot]struct{}) bool {
+func mergeCycloneDXViaRoots(viaByRef map[string]map[cycloneDXViaRoot]struct{}, ref string, roots map[cycloneDXViaRoot]struct{}, budget *cycloneDXViaBudget) (bool, error) {
 	changed := false
-	for root := range roots {
-		if addCycloneDXViaRoot(viaByRef, ref, root) {
+	for _, root := range cycloneDXSortedViaRoots(roots) {
+		added, err := addCycloneDXViaRoot(viaByRef, ref, root, budget)
+		if err != nil {
+			return false, err
+		}
+		if added {
 			changed = true
 		}
 	}
-	return changed
+	return changed, nil
+}
+
+func cycloneDXSortedViaRoots(roots map[cycloneDXViaRoot]struct{}) []cycloneDXViaRoot {
+	out := make([]cycloneDXViaRoot, 0, len(roots))
+	for root := range roots {
+		out = append(out, root)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return cycloneDXViaRootLess(out[i], out[j])
+	})
+	return out
+}
+
+func cycloneDXViaRootLess(left, right cycloneDXViaRoot) bool {
+	if left.name != right.name {
+		return left.name < right.name
+	}
+	return left.directRef < right.directRef
 }
 
 func cycloneDXViaRootValues(roots map[cycloneDXViaRoot]struct{}) []string {
@@ -326,70 +482,6 @@ func cycloneDXViaRootValues(roots map[cycloneDXViaRoot]struct{}) []string {
 		values = append(values, name)
 	}
 	return values
-}
-
-func mergeSBOMStringSet(left, right []string) []string {
-	if len(left) == 0 && len(right) == 0 {
-		return nil
-	}
-	seen := make(map[string]struct{}, len(left)+len(right))
-	for _, value := range left {
-		value = strings.TrimSpace(value)
-		if value != "" {
-			seen[value] = struct{}{}
-		}
-	}
-	for _, value := range right {
-		value = strings.TrimSpace(value)
-		if value != "" {
-			seen[value] = struct{}{}
-		}
-	}
-	out := make([]string, 0, len(seen))
-	for value := range seen {
-		out = append(out, value)
-	}
-	sort.Strings(out)
-	return out
-}
-
-func mergeSBOMPackageParents(left, right []domain.PackageParent) []domain.PackageParent {
-	if len(left) == 0 && len(right) == 0 {
-		return nil
-	}
-	type parentKey struct {
-		name, version string
-		ecosystem     domain.Ecosystem
-	}
-	seen := make(map[parentKey]domain.PackageParent, len(left)+len(right))
-	add := func(parent domain.PackageParent) {
-		parent.Name = strings.TrimSpace(parent.Name)
-		parent.Version = strings.TrimSpace(parent.Version)
-		if parent.Name == "" {
-			return
-		}
-		seen[parentKey{parent.Name, parent.Version, parent.Ecosystem}] = parent
-	}
-	for _, parent := range left {
-		add(parent)
-	}
-	for _, parent := range right {
-		add(parent)
-	}
-	out := make([]domain.PackageParent, 0, len(seen))
-	for _, parent := range seen {
-		out = append(out, parent)
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Ecosystem != out[j].Ecosystem {
-			return out[i].Ecosystem < out[j].Ecosystem
-		}
-		if out[i].Name != out[j].Name {
-			return out[i].Name < out[j].Name
-		}
-		return out[i].Version < out[j].Version
-	})
-	return out
 }
 
 func supportedCycloneDXComponentType(raw string) bool {

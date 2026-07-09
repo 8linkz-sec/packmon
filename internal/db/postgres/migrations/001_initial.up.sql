@@ -2,6 +2,68 @@
 -- Packmon consolidated schema. All tables use TIMESTAMPTZ for timestamps.
 -- Database must be created with ENCODING 'UTF8' (DE-14).
 
+CREATE OR REPLACE FUNCTION packmon_jsonb_string_array_valid(value JSONB)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+IMMUTABLE
+AS $$
+DECLARE
+    item JSONB;
+BEGIN
+    IF value IS NULL OR jsonb_typeof(value) <> 'array' THEN
+        RETURN FALSE;
+    END IF;
+
+    FOR item IN SELECT jsonb_array_elements(value)
+    LOOP
+        IF jsonb_typeof(item) <> 'string' THEN
+            RETURN FALSE;
+        END IF;
+    END LOOP;
+
+    RETURN TRUE;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION packmon_jsonb_version_ranges_valid(value JSONB)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+IMMUTABLE
+AS $$
+DECLARE
+    range_item JSONB;
+    event_item JSONB;
+BEGIN
+    IF value IS NULL OR jsonb_typeof(value) <> 'array' THEN
+        RETURN FALSE;
+    END IF;
+
+    FOR range_item IN SELECT jsonb_array_elements(value)
+    LOOP
+        IF jsonb_typeof(range_item) <> 'object'
+           OR jsonb_typeof(range_item->'events') <> 'array'
+           OR jsonb_array_length(range_item->'events') = 0 THEN
+            RETURN FALSE;
+        END IF;
+
+        FOR event_item IN SELECT jsonb_array_elements(range_item->'events')
+        LOOP
+            IF jsonb_typeof(event_item) <> 'object'
+               OR NOT (
+                    event_item ? 'introduced'
+                    OR event_item ? 'fixed'
+                    OR event_item ? 'last_affected'
+                    OR event_item ? 'limit'
+               ) THEN
+                RETURN FALSE;
+            END IF;
+        END LOOP;
+    END LOOP;
+
+    RETURN TRUE;
+END;
+$$;
+
 -- =============================================================================
 -- 1. vulnerabilities -- Core vulnerability facts (DE-7)
 -- =============================================================================
@@ -9,7 +71,7 @@ CREATE TABLE vulnerabilities (
     id              TEXT        PRIMARY KEY,
     summary         TEXT        NOT NULL,
     details         TEXT,
-    severity        TEXT        NOT NULL DEFAULT 'UNKNOWN',
+    severity        TEXT        NOT NULL DEFAULT 'LOW',
     cvss_score      REAL,
     epss_score      REAL,
     epss_percentile REAL,
@@ -19,7 +81,15 @@ CREATE TABLE vulnerabilities (
     modified        TIMESTAMPTZ NOT NULL,
     withdrawn       TIMESTAMPTZ,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT vulnerabilities_severity_check
+        CHECK (severity IN ('CRITICAL', 'HIGH', 'MEDIUM', 'LOW')),
+    CONSTRAINT vulnerabilities_cvss_score_range_check
+        CHECK (cvss_score IS NULL OR (cvss_score >= 0 AND cvss_score <= 10)),
+    CONSTRAINT vulnerabilities_epss_score_range_check
+        CHECK (epss_score IS NULL OR (epss_score >= 0 AND epss_score <= 1)),
+    CONSTRAINT vulnerabilities_epss_percentile_range_check
+        CHECK (epss_percentile IS NULL OR (epss_percentile >= 0 AND epss_percentile <= 1))
 );
 
 CREATE INDEX idx_vulnerabilities_nvd_candidate ON vulnerabilities(id)
@@ -44,6 +114,18 @@ CREATE INDEX idx_vuln_aliases_cve_alias ON vulnerability_aliases(alias_id text_p
     WHERE alias_id LIKE 'CVE-%';
 
 -- =============================================================================
+-- 2a. nvd_cvss_negative_cache -- Negative NVD CVSS lookup cache per CVE alias
+-- =============================================================================
+CREATE TABLE nvd_cvss_negative_cache (
+    cve_id                   TEXT        PRIMARY KEY,
+    checked_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    vulnerability_updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_nvd_cvss_negative_cache_checked_at
+    ON nvd_cvss_negative_cache(checked_at);
+
+-- =============================================================================
 -- 3. vulnerability_sources -- Provenance and freshness per feed (DE-7)
 -- =============================================================================
 CREATE TABLE vulnerability_sources (
@@ -54,6 +136,8 @@ CREATE TABLE vulnerability_sources (
     url              TEXT,
     raw_json         JSONB,
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT vulnerability_sources_manual_id_check
+        CHECK (source <> 'manual' OR (vulnerability_id LIKE 'manual:%' AND source_id LIKE 'manual:%')),
     UNIQUE(vulnerability_id, source)
 );
 
@@ -68,8 +152,8 @@ CREATE TABLE vulnerability_references (
     vulnerability_id TEXT        NOT NULL REFERENCES vulnerabilities(id) ON DELETE CASCADE,
     type             TEXT,
     url              TEXT        NOT NULL,
-    source           TEXT,
-    UNIQUE(vulnerability_id, url)
+    source           TEXT        NOT NULL DEFAULT '',
+    UNIQUE(vulnerability_id, source, url)
 );
 
 CREATE INDEX idx_vuln_refs_vuln_id ON vulnerability_references(vulnerability_id);
@@ -84,6 +168,15 @@ CREATE TABLE affected_packages (
     name              TEXT        NOT NULL,
     version_ranges    JSONB       NOT NULL DEFAULT '[]',
     versions_affected JSONB       NOT NULL DEFAULT '[]',
+    CONSTRAINT affected_packages_version_ranges_array_check
+        CHECK (packmon_jsonb_version_ranges_valid(version_ranges)),
+    CONSTRAINT affected_packages_versions_affected_array_check
+        CHECK (packmon_jsonb_string_array_valid(versions_affected)),
+    CONSTRAINT affected_packages_ecosystem_check
+        CHECK (ecosystem IN (
+            'npm', 'pypi', 'go', 'maven', 'cargo', 'nuget', 'composer', 'gem',
+            'pub', 'cocoapods', 'swiftpm', 'hex', 'cran', 'actions', 'docker'
+        )),
     UNIQUE(vulnerability_id, ecosystem, name)
 );
 
@@ -108,7 +201,22 @@ CREATE TABLE malicious_findings (
     published      TIMESTAMPTZ,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    created_by     TEXT
+    created_by     TEXT,
+    CONSTRAINT malicious_findings_version_ranges_array_check
+        CHECK (version_ranges IS NULL OR packmon_jsonb_version_ranges_valid(version_ranges)),
+    CONSTRAINT malicious_findings_versions_array_check
+        CHECK (versions IS NULL OR packmon_jsonb_string_array_valid(versions)),
+    CONSTRAINT malicious_findings_ecosystem_check
+        CHECK (ecosystem IN (
+            'npm', 'pypi', 'go', 'maven', 'cargo', 'nuget', 'composer', 'gem',
+            'pub', 'cocoapods', 'swiftpm', 'hex', 'cran', 'actions', 'docker'
+        )),
+    CONSTRAINT malicious_findings_risk_type_check
+        CHECK (risk_type IN ('malware', 'supply_chain', 'typosquatting')),
+    CONSTRAINT malicious_findings_severity_check
+        CHECK (severity IN ('CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN')),
+    CONSTRAINT malicious_findings_manual_id_check
+        CHECK (source <> 'manual' OR id LIKE 'manual:%')
 );
 
 CREATE INDEX idx_malicious_eco_name ON malicious_findings(ecosystem, name);
@@ -128,10 +236,17 @@ CREATE TABLE package_check_status (
     last_result     JSONB,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT package_check_status_ecosystem_check
+        CHECK (ecosystem IN (
+            'npm', 'pypi', 'go', 'maven', 'cargo', 'nuget', 'composer', 'gem',
+            'pub', 'cocoapods', 'swiftpm', 'hex', 'cran', 'actions', 'docker'
+        )),
     UNIQUE(ecosystem, name, source)
 );
 
 CREATE INDEX idx_check_status_next ON package_check_status(source, next_check_at);
+CREATE INDEX idx_package_check_status_socket_updated_at ON package_check_status(updated_at)
+    WHERE source = 'socket';
 
 -- =============================================================================
 -- 8. feed_sync_status -- Sync state per feed
@@ -147,7 +262,18 @@ CREATE TABLE feed_sync_status (
     last_etag          TEXT,
     last_commit_hash   TEXT,
     metadata           JSONB       NOT NULL DEFAULT '{}',
-    updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT feed_sync_status_status_check
+        CHECK (last_sync_status IN (
+            'pending', 'running', 'success', 'error', 'skipped',
+            'disabled', 'external', 'rejected', 'permanent_error'
+        )),
+    CONSTRAINT feed_sync_status_entries_nonnegative_check
+        CHECK (entries_synced >= 0 AND entries_total >= 0),
+    CONSTRAINT feed_sync_status_entries_order_check
+        CHECK (entries_total <= 0 OR entries_synced <= entries_total),
+    CONSTRAINT feed_sync_status_duration_nonnegative_check
+        CHECK (last_sync_duration IS NULL OR last_sync_duration >= INTERVAL '0')
 );
 
 -- =============================================================================
@@ -162,7 +288,16 @@ CREATE TABLE refresh_queue (
     status       TEXT        NOT NULL DEFAULT 'pending',
     requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     processed_at TIMESTAMPTZ,
-    error        TEXT
+    error        TEXT,
+    CONSTRAINT refresh_queue_ecosystem_check
+        CHECK (ecosystem IN (
+            'npm', 'pypi', 'go', 'maven', 'cargo', 'nuget', 'composer', 'gem',
+            'pub', 'cocoapods', 'swiftpm', 'hex', 'cran', 'actions', 'docker'
+        )),
+    CONSTRAINT refresh_queue_status_check
+        CHECK (status IN ('pending', 'processing', 'paused', 'done', 'error')),
+    CONSTRAINT refresh_queue_priority_check
+        CHECK (priority BETWEEN 0 AND 3)
 );
 
 CREATE INDEX idx_queue_priority ON refresh_queue(source, status, priority, requested_at);
@@ -178,16 +313,20 @@ CREATE TABLE scan_log (
     id              SERIAL      PRIMARY KEY,
     scan_id         TEXT        NOT NULL,
     repo_name       TEXT,
-    branch          TEXT,
-    commit          TEXT,
     scanned_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     packages_count  INTEGER     NOT NULL,
     findings_count  INTEGER     NOT NULL,
     duration_ms     INTEGER     NOT NULL,
     client_ip       INET,
-    user_agent      TEXT,
+    client_version  TEXT,
     api_key_id      INTEGER,
-    api_key_name    TEXT
+    api_key_name    TEXT,
+    CONSTRAINT scan_log_packages_count_nonnegative_check
+        CHECK (packages_count >= 0),
+    CONSTRAINT scan_log_findings_count_nonnegative_check
+        CHECK (findings_count >= 0),
+    CONSTRAINT scan_log_duration_ms_nonnegative_check
+        CHECK (duration_ms >= 0)
 );
 
 CREATE INDEX idx_scan_log_time ON scan_log(scanned_at);
@@ -214,10 +353,12 @@ CREATE TABLE admin_audit_log (
     action     TEXT        NOT NULL,
     details    JSONB,
     ip         INET,
+    correlation_id TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX idx_admin_audit_time ON admin_audit_log(created_at);
+CREATE INDEX idx_admin_audit_correlation_id ON admin_audit_log(correlation_id) WHERE correlation_id <> '';
 
 -- =============================================================================
 -- 13. api_keys -- API key management (DE-12)
@@ -228,10 +369,18 @@ CREATE TABLE api_keys (
     key_hash     TEXT        NOT NULL UNIQUE,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     revoked_at   TIMESTAMPTZ,
-    last_used_at TIMESTAMPTZ
+    last_used_at TIMESTAMPTZ,
+    CONSTRAINT api_keys_revoked_not_before_created_check
+        CHECK (revoked_at IS NULL OR revoked_at >= created_at),
+    CONSTRAINT api_keys_last_used_not_before_created_check
+        CHECK (last_used_at IS NULL OR last_used_at >= created_at)
 );
 
 CREATE INDEX idx_api_keys_hash ON api_keys(key_hash);
+
+ALTER TABLE scan_log
+    ADD CONSTRAINT scan_log_api_key_id_fkey
+        FOREIGN KEY (api_key_id) REFERENCES api_keys(id) ON DELETE SET NULL;
 
 -- =============================================================================
 -- 14. feed_configs -- Per-feed runtime configuration
@@ -242,5 +391,7 @@ CREATE TABLE feed_configs (
     mode          TEXT        NOT NULL CHECK (mode IN ('self', 'external')),
     sync_interval INTERVAL,
     api_key       TEXT,
-    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT feed_configs_sync_interval_minimum_check
+        CHECK (sync_interval IS NULL OR sync_interval >= INTERVAL '15 minutes')
 );

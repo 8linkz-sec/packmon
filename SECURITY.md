@@ -3,6 +3,10 @@
 This document is the canonical security baseline for Packmon. Use it for
 security reviews and audits. If implementation and this document drift, either
 fix the code or update this file in the same change with a clear rationale.
+Contributor secure-coding and security-awareness expectations are documented in
+`docs/secure-coding.md`.
+Risk treatment decisions are tracked in `docs/risk-register.md`; supplier and
+feed-provider security assumptions are tracked in `docs/supplier-security.md`.
 
 ## Security Goals
 
@@ -21,9 +25,22 @@ with exploit details, private package names, credentials, internal URLs, or
 personal data.
 
 Use GitHub Private Vulnerability Reporting for this repository when it is
-available. If GitHub Private Vulnerability Reporting is unavailable in the
-deployment or mirror you use, contact the repository owner or distributing
-organization through its private security contact and reference this policy.
+available.
+
+Packmon does not publish or maintain a universal fallback mailbox, form URL,
+PGP key, or encrypted reporting destination in this repository. That is an
+intentional boundary: private forks, mirrors, packaged distributions, and
+internal deployments are operated by their owning organization, and that owner
+must provide any deployment-specific confidential reporting contact through its
+own disclosure process. If GitHub Private Vulnerability Reporting is unavailable
+in the deployment or mirror you use, contact the repository owner or
+distributing organization through its own private security contact and reference
+this policy.
+
+Packmon web deployments serve `/.well-known/security.txt` with the repository
+private-reporting and policy URLs for automated discovery. Deployments that need
+a concrete fallback contact should publish that contact in their own wrapper
+documentation, hosting metadata, or organization-level security policy.
 
 Include:
 
@@ -57,6 +74,25 @@ avoids service disruption, and does not exfiltrate data will not be treated by
 the project maintainers as a reason for retaliation. This statement is not a
 license to access third-party systems or data.
 
+## Triage and Disclosure
+
+Maintainers classify confirmed vulnerabilities with CVSS when enough technical
+detail is available, plus product-specific factors such as deployment exposure,
+default configuration, authentication requirements, data sensitivity, and
+whether a supported Packmon version or release artifact is affected.
+
+Confirmed vulnerabilities that affect supported releases are tracked in a
+private advisory during remediation. Maintainers request or attach a CVE or
+GitHub Security Advisory when the issue is externally relevant, affects a
+distributed release, or downstream operators need a stable advisory ID for
+patch intake.
+
+Embargoes are used only to coordinate a fix, mitigation, or operator guidance.
+The advisory should include affected versions or image digests, severity,
+impact, fixed version, mitigation, required operator action, and reporter credit
+when the reporter wants attribution. If public attribution is not desired,
+reporter credit is omitted from the advisory and release notes.
+
 ## Supported Versions
 
 Security fixes are provided for the latest released Packmon version and the
@@ -69,6 +105,31 @@ first.
 Operators should upgrade to the latest security release before requesting
 backports. If a fix cannot be backported safely, the supported remediation is
 to upgrade.
+
+## Remediation Targets and Security Updates
+
+Maintainers assign severity during triage from exploitability, data exposure,
+integrity impact, required privileges, operational mitigations, and whether a
+supported Packmon version is affected. Remediation targets are measured from
+maintainer validation of an affected supported version.
+
+- Critical or active exploitation: fix or mitigation within 7 calendar days.
+- High severity: fix or mitigation within 14 calendar days.
+- Medium severity: fix or mitigation within 30 calendar days.
+- Low severity: fix, mitigation, or accepted-risk note within 90 calendar days.
+
+Targets are not disclosure promises. Coordinated disclosure, upstream
+dependency fixes, or unsafe backport risk may change the release date, but the
+private advisory or release notes must record the operator action and current
+remediation status.
+
+GitHub Security Advisories, private advisories during embargoed coordination,
+and release notes are the security update channel. Public release notes should
+identify affected supported versions, the fixed version or image digest,
+public CVE/GHSA IDs when available, required operator action, and any temporary
+mitigation. Operators should watch repository releases. Operators should
+subscribe to repository security advisories and route those notifications into
+their internal patch intake for Packmon deployments and mirrors.
 
 ## Trust Boundaries
 
@@ -86,6 +147,22 @@ Primary trust boundaries:
 The server must never assume arbitrary clients are trusted merely because the
 network is internal. Internal network placement is one layer, not the only
 control.
+
+## Storage Data Classes
+
+`docs/data-classification.md` maps Packmon data classes across PostgreSQL,
+local SQLite, logs, metrics, and web/admin surfaces. Treat that map as the
+operator-facing companion to this security model when adding tables, changing
+retention, exposing new fields, or answering privacy questions.
+
+High-level rules:
+
+- plaintext API keys are shown only once and are never stored;
+- feed provider API keys are encrypted at rest with
+  `PACKMON_ENCRYPTION_KEY`;
+- local SQLite stores a compact sync/history subset, not full server feed data;
+- server logs and metrics must not contain secrets, raw file contents, full
+  environment values, or full local paths.
 
 ## Public and Protected Endpoints
 
@@ -128,15 +205,32 @@ imports must commit feed-data mutations and the optional feed status row
 atomically in PostgreSQL, and successful imports must write a durable
 `feed_import` audit row containing the feed, counts, client IP, correlation ID,
 and API-key identity when available.
+Rejected imports are security-relevant events. They must preserve bounded,
+log-safe diagnostics for the feed, rejection reason class, rejected-record
+count, correlation ID, trusted client IP, and authenticated API-key identity
+when available. The admin/web UI and feed-status API must surface rejected
+imports, the last successful usable import timestamp, and source-level finding
+or blocking spikes so operators can distinguish strict validation from hidden
+coverage loss in server/agent deployments.
 
 API keys are stored hashed. Plaintext keys are shown only at creation time.
 Keys have bounded labels/names for auditability, record `last_used_at`, must
 have an RFC3339 UTC `expires_at` timestamp no more than 90 days in the future,
 may be revoked, and may be soft-deleted after revocation while retaining
-lifecycle metadata. Creating a new API key from the admin UI requires current
-admin password step-up verification; failed step-up attempts are audit logged.
+lifecycle timestamps. Soft-delete scrubs the stored operator label and
+authenticator hash from the API-key row. Creating a new API key from the admin
+UI requires current admin password step-up verification; failed step-up attempts
+are audit logged.
 Expired or soft-deleted keys must be treated the same as missing or revoked keys
 by API authentication.
+API-key authentication failures are security-relevant and must be visible at
+the default log level with a bounded reason class, trusted client IP,
+correlation ID, and log-safe route label. These logs must never include bearer
+tokens or plaintext API keys.
+Legacy rows from before API-key expiration support may have `expires_at = NULL`.
+Those keys intentionally have no expiration timestamp and therefore do not
+expire automatically. Operators must rotate or revoke them manually. New keys
+created through the admin UI remain required to have a bounded expiration.
 The API-key authentication middleware depends only on API-key lookup and
 last-used update methods, not on the full database store surface.
 
@@ -158,13 +252,25 @@ Client key handling:
   `api_key_env` rather than plaintext `api_key` values;
 - treat auto-discovered project `.packmon.yaml` as repository input; it must not
   choose API-key environment variables, Packmon server URLs, TLS trust settings,
-  webhook URLs/secrets, report output paths, or local advisory database paths;
+  webhook URLs/secrets, report output paths, local advisory database paths, or
+  latest-version registry mirror URLs;
 - rotate keys before their required expiration;
 - review `last_used_at` before revoking stale keys.
 
 ## Admin Authentication
 
 Packmon intentionally has one shared admin identity, not per-user accounts.
+
+### Privileged Admin Access Compensating Control
+
+Packmon does not implement built-in MFA, per-user admin accounts, SSO, TOTP, or
+WebAuthn. Regulated or shared production deployments that require privileged
+access assurance must place the `/admin` surface behind a trusted reverse proxy or identity provider
+that enforces multi-factor authentication or SSO before traffic reaches Packmon.
+Keep Packmon's own one shared admin identity and
+current-password step-up controls enabled behind that boundary, and restrict
+direct network access to the Packmon listener so administrators cannot bypass
+the external control.
 
 Admin properties:
 
@@ -184,7 +290,13 @@ Admin properties:
 - the shared web footer links a privacy notice by default; operators can replace
   it with `PACKMON_WEB_PRIVACY_URL` and can add an Impressum/legal notice with
   `PACKMON_WEB_LEGAL_URL`;
-- admin write forms require CSRF validation;
+- the shared web footer links terms of use by default through
+  `PACKMON_WEB_TERMS_URL=/terms`; operators can replace that URL with their own
+  AGB or internal-use terms;
+- admin write forms require CSRF validation, and invalid CSRF submissions on
+  admin mutation routes must emit a structured warning plus an
+  `admin_csrf_rejected` audit row with the target action and trusted client IP
+  but no form values or secrets;
 - failed logins are rate limited by client IP and the shared admin account,
   failed current-password checks on the password-change form use the same
   lockout window, stale partial failures expire, lockout audit events are
@@ -193,13 +305,18 @@ Admin properties:
 - security-sensitive admin writes must fail or roll back when the required
   admin audit row cannot be persisted. PostgreSQL commits API-key lifecycle
   changes, queue mutations, password changes, and manual advisory writes
-  atomically with their audit rows. Refresh-queue clear/purge audit rows must
-  preserve the affected job IDs, package coordinates, sources, priorities,
-  prior statuses, timestamps, and redacted bounded error text before rows are
-  deleted;
-- new admin audit rows carry a `sha256:` previous-row digest chain and the admin
-  audit UI surfaces local row integrity status. System and feed configuration
-  audits include previous/new values, but feed API keys are represented only as
+  atomically with their audit rows. Password changes use a compare-and-swap
+  predicate against the previously verified bcrypt hash, and admin-auth/audit
+  mutations acquire locks in `admin_auth` then `admin_audit_log` order.
+  Refresh-queue clear/purge audit rows must
+  preserve an affected-job sample with job IDs, package coordinates, sources,
+  priorities, prior statuses, timestamps, redacted bounded error text, and
+  total/sample/truncation metadata from the same delete operation;
+- new production admin audit rows carry an `hmac-sha256:` previous-row digest
+  chain keyed by `PACKMON_ADMIN_AUDIT_HMAC_KEY`; older `sha256:` rows remain
+  verifiable as legacy digest-chain rows, and the admin audit UI surfaces local
+  row integrity status. System and feed configuration audits include
+  previous/new values, but feed API keys are represented only as
   configured/not-configured booleans.
 
 Admin features must not introduce multi-user assumptions without updating this
@@ -299,8 +416,16 @@ Feed syncers and imports must:
   category metadata rather than severity data;
 - preserve malicious-package version constraints as OSV ranges and exact
   affected-version lists instead of collapsing ranges to introduced versions;
+- reject unsupported stored severity values at the database write boundary.
+  Vulnerability severities are persisted only as `CRITICAL`, `HIGH`, `MEDIUM`,
+  or `LOW`; missing or upstream-unknown vulnerability severity is normalized to
+  `LOW` until enrichment can raise it. Malicious findings may additionally keep
+  `UNKNOWN` when the source truly cannot classify severity. Unsupported
+  reputation severity is rejected or normalized to blocking-safe defaults;
 - reject malicious exact-version payloads at the PostgreSQL write boundary
   unless they are empty, `null`, or JSON arrays of strings;
+- expose strict import rejection state through UI/API diagnostics instead of
+  relying only on server logs;
 - not delete existing good data on failed sync;
 - mark feed status as skipped/error/degraded when data is unavailable;
 - handle rate limits and timeouts without corrupting stored data;
@@ -338,9 +463,21 @@ ReversingLabs rate-limit, capacity, and network failures degrade that source
 but must not fail scans or delete existing cached blocking data.
 
 Socket.dev status persistence stores normalized check summaries rather than raw
-provider response bodies. Socket.dev malware/protestware signals remain
-malicious findings; Socket.dev supply-chain and typosquatting signals are
-reported as blocking supply-chain-risk findings.
+provider response bodies. Socket.dev package-check status rows are pruned by
+retention policy so checked package coordinates do not become a permanent
+server-side package inventory. Operator-configured Socket.dev private namespace
+exclusions are enforced before manual refresh enqueue and again in the worker
+before any upstream request, so matching private package coordinates do not
+leave the deployment through Socket.dev. Socket.dev malware/protestware signals
+remain malicious findings; Socket.dev supply-chain and typosquatting signals
+are reported as blocking supply-chain-risk findings.
+
+Self-managed feed URLs and optional enrichment API URLs for OSV, GHSA,
+OpenSSF, CISA KEV, EPSS, NVD, endoflife.date, VulnCheck, and Socket.dev must
+be absolute HTTPS URLs unless they are loopback HTTP endpoints used for local
+tests. Operators may point these controls at internal mirrors or approved
+relays, but the mirrored content remains external input and must still pass the
+same parser, size, and normalization checks.
 
 VulnCheck backup-link responses are external input. Absolute backup download
 URLs returned by the feed must use the same HTTP scheme as the configured
@@ -375,12 +512,19 @@ execute `docker image inspect` with fixed argv to read local image metadata
 when Docker is installed, but it must not execute compose files, build images,
 pull images, or log full local Docker errors. Registry checks use public
 manifest metadata requests and bearer-token challenges only for the built-in
-public registry allowlist. Registry hosts, bearer-token realms, and resolved
-addresses are rejected when they target unsupported hosts, plain HTTP without an
-explicit insecure test override, loopback, link-local, private, multicast, or
-unspecified addresses. Private registry credentials are not read. Failures
-degrade to `unknown` in reports. The server scan API rejects Docker packages
-because Packmon does not provide container-layer vulnerability coverage.
+public registry allowlist by default. Trusted operator config may map supported
+public registry hosts to explicit Docker registry mirrors with
+`PACKMON_DOCKER_REGISTRY_MIRRORS` or `registries.docker_registry_mirrors`; this
+does not let repository-controlled image references add arbitrary registry
+targets. Public-registry hosts, bearer-token realms, and resolved addresses are
+rejected when they target unsupported hosts, plain HTTP without an explicit
+insecure test override, loopback, link-local, private, multicast, or
+unspecified addresses. Configured mirror URLs must not contain credentials,
+queries, or fragments; HTTPS is required except loopback HTTP test endpoints,
+and literal link-local, multicast, or unspecified mirror addresses are rejected.
+Private registry credentials are not read. Failures degrade to `unknown` in
+reports. The server scan API rejects Docker packages because Packmon does not
+provide container-layer vulnerability coverage.
 The local Docker inspector abstraction accepts only image references; the
 executable and `image inspect` subcommand remain fixed in production code.
 CLI ecosystem filters are validated before package discovery so a typo cannot
@@ -545,15 +689,39 @@ The built-in `/privacy` page is a deployment-neutral disclosure for the
 first-party admin session cookie and routine Packmon audit/scan metadata. It is
 not a substitute for an operator-specific legal notice; production deployments
 that need one should set `PACKMON_WEB_LEGAL_URL`.
+The page must carry a last-updated date, operator-controlled controller/contact
+placeholder, legal-basis guidance, data categories/sources/purposes, retention
+mapping, GDPR-style data-subject rights, supervisory-authority complaint rights,
+and CCPA/CPRA consumer-rights disclosures for covered California deployments.
+It must explicitly describe employee-identifying remote scan-log metadata such
+as client IP, API key ID/name, correlation ID, repository name when supplied,
+finding IDs/severities, feed status, and request/result digests. It must also
+identify that operators can set `PACKMON_SCAN_LOG_IDENTITY_MODE=minimal` to
+omit client IP and API-key ID/name from new scan-log rows, or `none` to also
+omit repository name and normalized client version. It must also identify
+optional outbound recipient categories: Socket.dev and ReversingLabs
+package-coordinate lookups when configured, and operator-configured webhook
+receivers that receive the canonical scan result payload. Operators are
+responsible for their controller/contact details, transfer terms, work-council
+or employee-monitoring notices, retention, and access rules.
+
+The built-in `/terms` page is an operator-facing terms hook, not legal advice.
+It must provide a stable web surface for deployment-specific acceptable use,
+API-key responsibility, third-party feed/provider and webhook disclosure,
+suspension/termination, amendment/version, governing-law, and liability/warranty
+language. Operators that need binding AGB or contractual terms should replace
+`PACKMON_WEB_TERMS_URL` with their approved document.
 
 ## Metrics Exposure
 
 Metrics are unauthenticated by design for Prometheus-style scraping, but they
 must bind to localhost by default and must not be exposed to untrusted networks.
 
-Production deployments exposing metrics beyond localhost need explicit network
-controls such as firewall rules, private service monitors, or trusted internal
-scrapers.
+Production startup rejects `PACKMON_METRICS_HOST` values that do not resolve to
+the loopback bind policy (`localhost`, `127.0.0.1`, `::1`, or the implicit
+default). Operators that need remote scraping must use node-local collectors,
+sidecars, tunnels, or orchestrator-native monitors rather than binding the
+unauthenticated plaintext metrics listener to a non-loopback interface.
 
 Metrics may reveal operational counts and feed health. They must not include
 secrets or raw package lists.
@@ -580,11 +748,17 @@ Requirements:
   development and the repository Compose example may explicitly set
   `PACKMON_DB_SSLMODE=disable` only for the bundled local database;
 - production startup requires active feed API-key encryption through
-  `PACKMON_ENCRYPTION_KEY`; only development mode may run without this at-rest
-  secret encryption;
+  `PACKMON_ENCRYPTION_KEY` configured as base64-encoded 32 random bytes and
+  admin audit digest HMAC keying through `PACKMON_ADMIN_AUDIT_HMAC_KEY`
+  configured as base64-encoded 32 random bytes; only development mode may run
+  without these secrets, using plaintext feed-key storage and legacy `sha256:`
+  admin audit digests;
 - migrations run through `packmon-server migrate`; the repository Compose
   wrapper uses a manual `packmon-migrate` service scoped to database and logging
-  environment values only;
+  environment values only, and migration database operations are bounded by
+  `PACKMON_DB_CONNECT_TIMEOUT`; the migrator writes durable
+  `schema_migration_events` rows for started, successful, and failed migration
+  attempts without storing environment values or feed secrets;
 - normal server startup verifies expected schema version with a bounded
   `PACKMON_DB_CONNECT_TIMEOUT` deadline and exits on mismatch or connectivity
   failure;
@@ -595,23 +769,45 @@ Requirements:
 - server scan-log rows may contain scan ID, optional bounded and
   path-minimized repository name, client IP, package/finding counts, duration,
   decision evidence, correlation ID, a `sha256:` digest of the canonical JSON
-  `ScanResult` response, and authenticated API-key metadata. Remote CLI
-  requests and webhooks send only the repository name by default and can omit
-  it with `--no-repo-metadata`, `PACKMON_NO_REPO_METADATA=true`, or
-  `send_repo_metadata: false`. New scan-log rows do not retain branch, commit,
-  or User-Agent values. Admin-audit rows contain action, details, source IP,
-  timestamp, previous-row digest, and row digest;
+  `ScanResult` response, authenticated API-key metadata, and a bounded
+  normalized Packmon client version extracted from authenticated scan
+  User-Agent values. Remote CLI requests and webhooks send only the repository
+  name by default and can omit it with `--no-repo-metadata`,
+  `PACKMON_NO_REPO_METADATA=true`, or `send_repo_metadata: false`. New scan-log
+  rows do not retain branch, commit, or raw User-Agent values.
+  `PACKMON_SCAN_LOG_IDENTITY_MODE` defaults to `full`; `minimal` suppresses
+  scan-log client IP and API-key ID/name, and `none` also suppresses repository
+  name and normalized client version while still retaining non-identifying
+  scan evidence. Admin-audit rows contain action, details, source IP,
+  timestamp, previous-row digest, and row digest; new production rows use
+  `hmac-sha256:` digests keyed by `PACKMON_ADMIN_AUDIT_HMAC_KEY`, while older
+  `sha256:` rows remain legacy-verifiable;
   details should not duplicate the source IP already stored in the typed column.
+  Authenticated `/api/v1/sync` export attempts write a `sync_export`
+  admin-audit row before data export with safe request scope metadata,
+  correlation ID, trusted client IP, and API-key identity when available; raw
+  sync cursors and package/finding data are not retained in that audit row.
+  The offline `packmon-server privacy export` command verifies schema state,
+  exports retained `scan_log` and `admin_audit_log` rows for exact whitelisted
+  selectors, and writes a `privacy_export` admin-audit row with selector type,
+  selector digest, and row counts before emitting JSON; the raw selector value
+  is not retained in the audit details.
   Security-sensitive admin writes require the corresponding audit row; API-key
   lifecycle changes, queue mutations, password changes, and manual advisory
-  writes are atomic with audit persistence in PostgreSQL. Queue clear/purge
-  details retain affected job identities and redacted bounded error text before
-  destructive deletion. These rows are pruned by configurable retention controls
+  writes are atomic with audit persistence in PostgreSQL. Password rotation is
+  conditional on the stored bcrypt hash still matching the hash verified for
+  the submitted current password. Queue clear/purge
+  details retain a bounded affected-job sample, redacted bounded error text, and
+  delete-count metadata from the same destructive operation. These rows are
+  pruned by configurable retention controls
   (`PACKMON_SCAN_LOG_RETENTION`, `PACKMON_ADMIN_AUDIT_LOG_RETENTION`,
-  `PACKMON_REFRESH_QUEUE_RETENTION`, `PACKMON_AUDIT_RETENTION_INTERVAL`).
-  Defaults are 90 days for scan logs, 365 days for admin audit logs, and
-  30 days for terminal refresh-queue jobs; setting a dataset retention to `0`
-  disables pruning for that table;
+  `PACKMON_DELETED_API_KEY_RETENTION`, `PACKMON_REFRESH_QUEUE_RETENTION`,
+  `PACKMON_PACKAGE_CHECK_STATUS_RETENTION`, `PACKMON_AUDIT_RETENTION_INTERVAL`).
+  Defaults are 30 days for scan logs, 30 days for admin audit logs, 365 days
+  for soft-deleted API-key rows, 30 days for terminal refresh-queue jobs, and
+  90 days for Socket.dev package-check status rows. Admins can override the
+  scan-log and admin-audit metadata retention values from `/admin/settings`;
+  setting a dataset retention to `0` disables pruning for that table;
 - backups use `pg_dump` and local retention as documented in the runbook.
 
 ## Local Mode Security
@@ -634,10 +830,18 @@ Local SQLite sync:
   not through malicious-package lookup methods;
 - refuses to mark the local database fresh from a server `synced_at` timestamp
   that is beyond the allowed future clock-skew tolerance;
+- rejects semantically empty full-sync snapshots before clearing local finding
+  tables. A full sync response must include a parseable `synced_at` and either
+  feed state metadata or synced data that proves the server returned a real
+  snapshot;
 - warns when data is stale;
 - does not block solely because data is stale.
 
-Local DB freshness is a policy input, not a hidden failure mode.
+Local DB freshness is a policy input, not a hidden failure mode. When local DB
+age exceeds `PACKMON_DB_WARN_AFTER_DAYS` (default `7` days), canonical scan
+diagnostics and the local dashboard must surface a visible stale-data warning.
+If freshness metadata cannot be read, user-visible diagnostics treat coverage as
+stale or unknown instead of silently healthy.
 
 ## CI/CD Security
 
@@ -649,8 +853,20 @@ GitHub Actions and GitLab CI templates must:
 - verify checksums where downloads occur;
 - verify GitHub artifact attestations for release binaries before executing a
   downloaded Packmon binary in reusable workflows;
-- publish release SBOM, project license, third-party notice, and Go module
-  license artifacts alongside binary checksums;
+- build the maintained Dockerfile `server` and `cli` image targets and block on
+  Trivy HIGH/CRITICAL OS package vulnerabilities in CI and release verification;
+- keep maintained Dockerfile and Compose image defaults digest-pinned; internal
+  registry mirror overrides for builder, runtime, and PostgreSQL images must
+  preserve `@sha256` pinning;
+- run Trivy filesystem dependency scans against repository lockfiles and block
+  HIGH/CRITICAL library vulnerabilities in CI and release verification;
+- publish release Go module and npm web asset SBOMs, project license,
+  third-party notice, and Go module license artifacts alongside binary
+  checksums;
+- run a pinned secret scanner on pull requests and pushes before merge;
+- require the release publishing job to target the protected `release`
+  environment so repository settings can require human approval before write
+  permissions are granted;
 - avoid embedding secrets in logs;
 - treat `PACKMON_SERVER` and API key values as CI secrets;
 - use `PACKMON_REQUIRE_REMOTE=true` for remote CI scans so server failures do
@@ -701,9 +917,12 @@ not leave the overwritten report group/world-readable on POSIX filesystems.
 SwiftPM outdated/list-all lookups must not turn repository-controlled lockfile
 or SBOM strings into arbitrary Git egress. Package identities are normalized to
 the documented `host/owner/repo` form without URL userinfo, and Git latest-tag
-lookups are limited to the built-in public Git host allowlist. Unsupported
-schemes, full URLs, SCP-like remotes, local paths, localhost/IP identities, and
-non-allowlisted hosts are reported as unknown.
+lookups are limited to the built-in public Git host allowlist plus trusted
+operator-configured bare hostnames from `PACKMON_SWIFTPM_GIT_ALLOWED_HOSTS` or
+`registries.swiftpm_git_allowed_hosts`. Unsupported schemes, full URLs,
+SCP-like remotes, local paths, localhost/IP identities, and non-allowlisted
+hosts are reported as unknown; SwiftPM remotes are still constructed as
+`https://host/path.git` rather than copied from lockfile text.
 
 `packmon scan --list-all-offline` is the privacy-preserving list-all reporting
 mode for repositories where package names, SwiftPM identities, GitHub Action
@@ -715,10 +934,24 @@ Docker digest lookups, rendering those freshness fields as unknown.
 Latest-version checks must honor lockfile source provenance when the ecosystem
 records it. Source references are local-only package metadata and are not
 serialized into API check payloads. For npm, requirements.txt, Cargo, Bundler,
-CocoaPods, Composer, renv, pub, and Maven inputs, a source outside the
+CocoaPods, Composer, renv, pub, Maven, and Hex inputs, a source outside the
 ecosystem's public default registry must make `--outdated` and `--list-all`
 freshness checks return `unknown` instead of sending the package name or
-coordinate to the public registry. crates.io requests must use an identifying
+coordinate to the public registry unless a trusted operator mirror is
+configured. Use `PACKMON_NPM_REGISTRY_BASE_URL` for an npm registry-compatible
+mirror, `PACKMON_PYPI_API_BASE_URL` for a PyPI JSON API-compatible mirror,
+`PACKMON_RUBYGEMS_API_BASE_URL` for a RubyGems gems API-compatible mirror,
+`PACKMON_CARGO_REGISTRY_API_BASE_URL` for a crates.io API-compatible mirror,
+`PACKMON_COCOAPODS_TRUNK_API_BASE_URL` for a CocoaPods trunk API-compatible
+mirror, `PACKMON_COMPOSER_REPOSITORY_BASE_URL` for a Packagist p2-compatible
+mirror, `PACKMON_CRAN_MIRROR_URL` for a CRAN mirror root,
+`PACKMON_GO_PROXY_URL` for a single Go module proxy root,
+`PACKMON_MAVEN_REPOSITORY_BASE_URL` for a Maven repository root,
+`PACKMON_PUB_HOSTED_URL` for a hosted Pub API root, `PACKMON_HEX_API_BASE_URL`
+for a Hex API-compatible mirror, and `PACKMON_NUGET_V3_BASE_URL` for a NuGet
+v3 flat-container-compatible mirror; HTTPS is required except loopback HTTP
+test endpoints. `PACKMON_GO_PROXY_URL=off` disables Go latest-version lookups
+without using direct VCS fallback. crates.io requests must use an identifying
 Packmon User-Agent and a one-request-per-second throttle.
 
 Required checks:
@@ -752,9 +985,19 @@ For each security review:
 - Confirm scan result schema and blocking semantics stay consistent.
 - Confirm stale/degraded feed states are visible to clients.
 - Confirm CI templates preserve exit codes and artifacts.
+- Confirm PRs include the security checklist and sensitive paths route through
+  CODEOWNERS.
+- Confirm release publishing remains behind the protected `release`
+  environment approval gate.
 
 ## Current Open Security-Relevant Validation
 
 The GitLab CI template still needs a real GitLab runner smoke test. Local tests
 validate the template contract, but only a real runner can prove GitLab UI
 artifact/report behavior end to end.
+
+Fork-local note: GitLab/CI/CD and release-binary distribution hardening are
+currently deferred for this fork because those delivery surfaces are not
+operated. `docs/deferred-scope.md` records the accepted scope. Re-evaluate the
+deferred findings before enabling CI/CD, publishing release binaries for other
+users, or using Packmon as a required pipeline security gate.

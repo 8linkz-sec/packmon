@@ -7,11 +7,11 @@ package malicious
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -25,7 +25,7 @@ const (
 
 	// importerVersion is bumped when the importer semantics change and an
 	// unchanged git feed commit must be reprocessed.
-	importerVersion = 3
+	importerVersion = 4
 
 	// repoURL is the OpenSSF malicious-packages repository.
 	repoURL = "https://github.com/ossf/malicious-packages.git"
@@ -42,23 +42,19 @@ const (
 // Compile-time interface assertion.
 var _ feed.FeedSyncer = (*Syncer)(nil)
 
-type sourceMaliciousPruner interface {
-	DeleteMaliciousFindingsNotInSource(ctx context.Context, source string, ids []string) (int, error)
-}
-
 // Syncer clones or pulls the OpenSSF malicious-packages repository and
 // parses all entries into the Packmon malicious_findings table. It
 // implements the FeedSyncer interface defined in feed.go.
 type Syncer struct {
-	store   db.Store
 	logger  *slog.Logger
 	dataDir string
+	repoURL string
 }
 
 // NewSyncer creates a Syncer for the OpenSSF Malicious Packages feed.
 // dataDir is the parent directory where the repo will be cloned. If
 // empty, os.TempDir() is used.
-func NewSyncer(store db.Store, logger *slog.Logger, dataDir string) *Syncer {
+func NewSyncer(logger *slog.Logger, dataDir string) *Syncer {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -66,10 +62,31 @@ func NewSyncer(store db.Store, logger *slog.Logger, dataDir string) *Syncer {
 		dataDir = os.TempDir()
 	}
 	return &Syncer{
-		store:   store,
 		logger:  logger.With(slog.String("feed", FeedName)),
 		dataDir: dataDir,
+		repoURL: repoURL,
 	}
+}
+
+// Option configures a Syncer.
+type Option func(*Syncer)
+
+// WithRepoURL overrides the Git repository URL for operator-controlled mirrors.
+func WithRepoURL(url string) Option {
+	return func(s *Syncer) {
+		if strings.TrimSpace(url) != "" {
+			s.repoURL = strings.TrimSpace(url)
+		}
+	}
+}
+
+// NewSyncerWithOptions creates an OpenSSF Syncer with optional overrides.
+func NewSyncerWithOptions(logger *slog.Logger, dataDir string, opts ...Option) *Syncer {
+	s := NewSyncer(logger, dataDir)
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // Name implements feed.FeedSyncer.
@@ -80,20 +97,20 @@ func (s *Syncer) Name() string { return FeedName }
 // parsing each JSON file and upserting malicious findings into the
 // store.
 func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, error) {
-	start := time.Now()
+	start := time.Now().UTC()
 	s.logger.Info("starting OpenSSF malicious packages sync")
 
 	repoDir := filepath.Join(s.dataDir, "malicious-packages")
 
 	repo := &feed.GitRepo{
-		URL:    repoURL,
+		URL:    s.repoURL,
 		Dir:    repoDir,
 		Logger: s.logger,
 	}
 
 	commitHash, err := repo.EnsureCloned(ctx)
 	if err != nil {
-		s.recordSyncFailure(ctx, start, err)
+		s.recordSyncFailure(ctx, store, start, err)
 		return nil, fmt.Errorf("malicious: ensure cloned: %w", err)
 	}
 	s.logger.Info("malicious-packages ready", slog.String("commit", commitHash))
@@ -105,13 +122,13 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 			slog.String("error", feed.SafeDiagnosticError(err)),
 		)
 	}
-	if status != nil && status.LastCommitHash == commitHash && status.LastSyncStatus == "success" {
+	if status != nil && status.LastCommitHash == commitHash && status.LastSyncStatus == db.FeedSyncStatusSuccess {
 		if hasCurrentImporterMetadata(status) {
 			s.logger.Info("malicious-packages unchanged, skipping sync",
 				slog.String("commit", commitHash),
 			)
 			dur := time.Since(start)
-			s.recordSyncSuccessWithCommit(ctx, dur, status.EntriesTotal, 0, commitHash)
+			s.recordSyncSuccessWithCommit(ctx, store, dur, status.EntriesTotal, 0, commitHash)
 			return &feed.SyncResult{
 				EntriesSynced: 0,
 				EntriesTotal:  status.EntriesTotal,
@@ -127,7 +144,7 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 	//   osv/{ecosystem}/{name}/...json
 	// We try both.
 	var totalSynced, totalEntries, rootsFound int
-	seenIDs := make(map[string]struct{})
+	var totalActiveFindings int
 
 	for _, dir := range []string{maliciousDir, osvDir} {
 		root := filepath.Join(repoDir, dir)
@@ -136,38 +153,44 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 			continue
 		}
 		if statErr != nil {
-			s.recordSyncFailure(ctx, start, statErr)
+			s.recordSyncFailure(ctx, store, start, statErr)
 			return nil, fmt.Errorf("malicious: inspect feed root %s: %w", dir, statErr)
 		}
 		if !info.IsDir() {
 			validationErr := fmt.Errorf("feed root %s is not a directory", dir)
-			s.recordSyncFailure(ctx, start, validationErr)
+			s.recordSyncFailure(ctx, store, start, validationErr)
 			return nil, fmt.Errorf("malicious: validate feed root: %w", validationErr)
 		}
 		rootsFound++
 
-		synced, entries, walkErr := s.walkEntries(ctx, store, root, seenIDs)
+		synced, entries, activeFindings, walkErr := s.walkEntries(ctx, store, root, nil)
 		if walkErr != nil {
-			s.recordSyncFailure(ctx, start, walkErr)
+			s.recordSyncFailure(ctx, store, start, walkErr)
 			return nil, fmt.Errorf("malicious: walk %s: %w", dir, walkErr)
 		}
 		totalSynced += synced
 		totalEntries += entries
+		totalActiveFindings += activeFindings
 	}
 	if rootsFound == 0 {
 		validationErr := fmt.Errorf("expected feed roots %q or %q not found", maliciousDir, osvDir)
-		s.recordSyncFailure(ctx, start, validationErr)
+		s.recordSyncFailure(ctx, store, start, validationErr)
 		return nil, fmt.Errorf("malicious: validate feed: %w", validationErr)
 	}
-	if totalEntries == 0 && len(seenIDs) == 0 {
+	if totalEntries == 0 && totalActiveFindings == 0 {
 		validationErr := fmt.Errorf("no entries found under expected feed roots")
-		s.recordSyncFailure(ctx, start, validationErr)
+		s.recordSyncFailure(ctx, store, start, validationErr)
+		return nil, fmt.Errorf("malicious: validate feed: %w", validationErr)
+	}
+	if totalActiveFindings == 0 {
+		validationErr := fmt.Errorf("no active supported entries found under expected feed roots")
+		s.recordSyncFailure(ctx, store, start, validationErr)
 		return nil, fmt.Errorf("malicious: validate feed: %w", validationErr)
 	}
 
-	pruned, pruneErr := s.pruneStaleFindings(ctx, store, seenIDs)
+	pruned, pruneErr := s.pruneStaleFindings(ctx, store, start)
 	if pruneErr != nil {
-		s.recordSyncFailure(ctx, start, pruneErr)
+		s.recordSyncFailure(ctx, store, start, pruneErr)
 		return nil, fmt.Errorf("malicious: prune stale findings: %w", pruneErr)
 	}
 
@@ -177,10 +200,10 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 		slog.Int("total", totalEntries),
 		slog.Int("pruned", pruned),
 		slog.String("commit", commitHash),
-		slog.String("duration", duration.String()),
+		slog.Duration("duration", duration),
 	)
 
-	s.recordSyncSuccessWithCommit(ctx, duration, totalEntries, totalSynced, commitHash)
+	s.recordSyncSuccessWithCommit(ctx, store, duration, totalEntries, totalSynced, commitHash)
 	return &feed.SyncResult{
 		EntriesSynced: totalSynced,
 		EntriesTotal:  totalEntries,
@@ -189,10 +212,10 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 
 // walkEntries traverses an entry root directory and processes each
 // JSON file.
-func (s *Syncer) walkEntries(ctx context.Context, store db.Store, root string, seenIDs map[string]struct{}) (synced, total int, err error) {
+func (s *Syncer) walkEntries(ctx context.Context, store db.Store, root string, seenIDs map[string]struct{}) (synced, total, activeFindings int, err error) {
 	rootDir, err := os.OpenRoot(root)
 	if err != nil {
-		return 0, 0, fmt.Errorf("open malicious feed root: %w", err)
+		return 0, 0, 0, fmt.Errorf("open malicious feed root: %w", err)
 	}
 	defer func() {
 		_ = rootDir.Close()
@@ -229,89 +252,100 @@ func (s *Syncer) walkEntries(ctx context.Context, store db.Store, root string, s
 			return relErr
 		}
 
-		data, readErr := feed.ReadRootFileLimited(rootDir, relativePath, feed.MaxGitAdvisoryJSONSize)
-		if readErr != nil {
-			s.logger.Warn("failed to read entry file",
-				slog.String("file", d.Name()),
-				slog.String("error", feed.SafeDiagnosticError(readErr)),
-			)
-			return fmt.Errorf("read entry %s: %w", d.Name(), readErr)
+		entrySynced, entryActive, processErr := s.processMaliciousEntry(ctx, store, rootDir, relativePath, seenIDs)
+		if processErr != nil {
+			return processErr
 		}
-
-		var entry malEntry
-		if parseErr := json.Unmarshal(data, &entry); parseErr != nil {
-			s.logger.Warn("failed to parse entry JSON",
-				slog.String("file", d.Name()),
-				slog.String("error", feed.SafeDiagnosticError(parseErr)),
-			)
-			return fmt.Errorf("parse entry %s: %w", d.Name(), parseErr)
-		}
-
-		findings := mapToMaliciousFindings(&entry, relativePath)
-		if isWithdrawnEntry(&entry, relativePath) {
-			ids := findingIDsForTombstone(&entry, relativePath, findings)
-			for _, id := range ids {
-				if deleteErr := store.DeleteMaliciousFinding(ctx, id); deleteErr != nil {
-					s.logger.Warn("failed to tombstone withdrawn malicious finding",
-						slog.String("id", id),
-						slog.String("error", feed.SafeDiagnosticError(deleteErr)),
-					)
-					return fmt.Errorf("tombstone withdrawn malicious finding %s: %w", id, deleteErr)
-				}
-				if seenIDs != nil {
-					delete(seenIDs, id)
-				}
-				synced++
-			}
-			return nil
-		}
-		if len(findings) == 0 {
-			return nil
-		}
-
-		for _, mf := range findings {
-			if upsertErr := store.UpsertMaliciousFinding(ctx, mf); upsertErr != nil {
-				s.logger.Warn("failed to upsert malicious finding",
-					slog.String("id", mf.ID),
-					slog.String("error", feed.SafeDiagnosticError(upsertErr)),
-				)
-				return fmt.Errorf("upsert malicious finding %s: %w", mf.ID, upsertErr)
-			}
-			if seenIDs != nil {
-				seenIDs[mf.ID] = struct{}{}
-			}
-			synced++
-		}
+		synced += entrySynced
+		activeFindings += entryActive
 
 		return nil
 	})
 
-	return synced, total, err
+	return synced, total, activeFindings, err
 }
 
-func (s *Syncer) pruneStaleFindings(ctx context.Context, store db.Store, seenIDs map[string]struct{}) (int, error) {
-	pruner, ok := store.(sourceMaliciousPruner)
+func (s *Syncer) processMaliciousEntry(ctx context.Context, store db.Store, rootDir *os.Root, relativePath string, seenIDs map[string]struct{}) (int, int, error) {
+	fileName := filepath.Base(relativePath)
+	data, readErr := feed.ReadRootFileLimited(rootDir, relativePath, feed.MaxGitAdvisoryJSONSize)
+	if readErr != nil {
+		s.logger.Warn("failed to read entry file",
+			slog.String("file", fileName),
+			slog.String("error", feed.SafeDiagnosticError(readErr)),
+		)
+		return 0, 0, fmt.Errorf("read entry %s: %w", fileName, readErr)
+	}
+
+	var entry malEntry
+	if parseErr := json.Unmarshal(data, &entry); parseErr != nil {
+		s.logger.Warn("failed to parse entry JSON",
+			slog.String("file", fileName),
+			slog.String("error", feed.SafeDiagnosticError(parseErr)),
+		)
+		return 0, 0, fmt.Errorf("parse entry %s: %w", fileName, parseErr)
+	}
+
+	findings := mapToMaliciousFindings(&entry, relativePath)
+	if isWithdrawnEntry(&entry, relativePath) {
+		synced := 0
+		ids := findingIDsForTombstone(&entry, relativePath, findings)
+		for _, id := range ids {
+			if deleteErr := feed.DeleteMaliciousFindingForSource(ctx, store, id, FeedName); deleteErr != nil {
+				s.logger.Warn("failed to tombstone withdrawn malicious finding",
+					slog.String("id", id),
+					slog.String("error", feed.SafeDiagnosticError(deleteErr)),
+				)
+				return synced, 0, fmt.Errorf("tombstone withdrawn malicious finding %s: %w", id, deleteErr)
+			}
+			if seenIDs != nil {
+				delete(seenIDs, id)
+			}
+			synced++
+		}
+		return synced, 0, nil
+	}
+	if len(findings) == 0 {
+		return 0, 0, nil
+	}
+
+	synced := 0
+	active := 0
+	for _, mf := range findings {
+		if upsertErr := store.UpsertMaliciousFinding(ctx, mf); upsertErr != nil {
+			s.logger.Warn("failed to upsert malicious finding",
+				slog.String("id", mf.ID),
+				slog.String("error", feed.SafeDiagnosticError(upsertErr)),
+			)
+			return synced, active, fmt.Errorf("upsert malicious finding %s: %w", mf.ID, upsertErr)
+		}
+		if seenIDs != nil {
+			seenIDs[mf.ID] = struct{}{}
+		}
+		synced++
+		active++
+	}
+
+	return synced, active, nil
+}
+
+func (s *Syncer) pruneStaleFindings(ctx context.Context, store db.Store, updatedBefore time.Time) (int, error) {
+	pruner, ok := store.(db.SourceMaliciousFindingStalePruner)
 	if !ok {
 		s.logger.Warn("store cannot prune stale OpenSSF findings")
 		return 0, nil
 	}
-	ids := make([]string, 0, len(seenIDs))
-	for id := range seenIDs {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	return pruner.DeleteMaliciousFindingsNotInSource(ctx, "openssf", ids)
+	return pruner.PruneMaliciousFindingsForSourceUpdatedBefore(ctx, FeedName, updatedBefore)
 }
 
 // recordSyncSuccessWithCommit persists a successful sync status including
 // the git commit hash for delta detection.
-func (s *Syncer) recordSyncSuccessWithCommit(ctx context.Context, dur time.Duration, total, synced int, commitHash string) {
+func (s *Syncer) recordSyncSuccessWithCommit(ctx context.Context, store db.Store, dur time.Duration, total, synced int, commitHash string) {
 	now := time.Now()
-	err := feed.UpsertFeedSyncStatusBounded(s.store, &db.FeedSyncStatus{
+	err := feed.UpsertFeedSyncStatusBounded(store, &db.FeedSyncStatus{
 		FeedName:         FeedName,
 		LastSyncAt:       &now,
 		LastSyncDuration: &dur,
-		LastSyncStatus:   "success",
+		LastSyncStatus:   db.FeedSyncStatusSuccess,
 		EntriesSynced:    synced,
 		EntriesTotal:     total,
 		LastCommitHash:   commitHash,
@@ -324,16 +358,32 @@ func (s *Syncer) recordSyncSuccessWithCommit(ctx context.Context, dur time.Durat
 }
 
 // recordSyncFailure persists a failed sync status.
-func (s *Syncer) recordSyncFailure(ctx context.Context, start time.Time, syncErr error) {
+func (s *Syncer) recordSyncFailure(ctx context.Context, store db.Store, start time.Time, syncErr error) {
 	dur := time.Since(start)
-	now := time.Now()
-	err := feed.UpsertFeedSyncStatusBounded(s.store, &db.FeedSyncStatus{
+	now := time.Now().UTC()
+	diagnostic := feed.SafeDiagnosticError(syncErr)
+	status := &db.FeedSyncStatus{
 		FeedName:         FeedName,
-		LastSyncAt:       &now,
 		LastSyncDuration: &dur,
-		LastSyncStatus:   "error",
-		LastError:        feed.SafeDiagnosticError(syncErr),
-	})
+		LastSyncStatus:   db.FeedSyncStatusError,
+		LastError:        diagnostic,
+		UpdatedAt:        now,
+	}
+	logMessage := "OpenSSF malicious packages sync failed"
+	logStatus := db.FeedSyncStatusError
+	if errors.Is(syncErr, context.Canceled) || errors.Is(syncErr, context.DeadlineExceeded) {
+		logMessage = "OpenSSF malicious packages sync cancelled"
+		logStatus = "cancelled"
+	}
+	s.logger.Warn(logMessage,
+		slog.String("status", logStatus),
+		slog.String("error", diagnostic),
+		slog.Duration("duration", dur),
+	)
+	if current, err := feed.GetFeedSyncStatusBounded(store, FeedName); err == nil {
+		feed.PreserveFeedStatusData(status, current)
+	}
+	err := feed.UpsertFeedSyncStatusBounded(store, status)
 	if err != nil {
 		s.logger.Warn("failed to record sync failure", "error", err)
 	}
@@ -532,65 +582,13 @@ func findingIDsForTombstone(entry *malEntry, filePath string, findings []*db.Mal
 	return []string{id}
 }
 
-// classifyRiskType attempts to determine whether a malicious package is
-// malware, typosquatting, or a supply-chain attack based on heuristics
-// in the entry ID and summary.
+// classifyRiskType keeps OpenSSF mapping code on the shared feed classifier.
 func classifyRiskType(entry *malEntry) string {
-	if riskType := riskTypeFromJSON(entry.DatabaseSpecific); riskType != "" {
-		return riskType
-	}
-	lower := strings.ToLower(entry.Summary + " " + entry.Details)
-
-	switch {
-	case strings.Contains(lower, "typosquat"):
-		return "typosquatting"
-	case strings.Contains(lower, "supply chain") || strings.Contains(lower, "supply-chain"):
-		return "supply_chain"
-	case strings.Contains(lower, "dependency confusion"):
-		return "supply_chain"
-	case strings.Contains(lower, "trojan") || strings.Contains(lower, "backdoor"):
-		return "malware"
-	case strings.Contains(lower, "cryptomin"):
-		return "malware"
-	case strings.Contains(lower, "exfiltrat"):
-		return "malware"
-	default:
-		return "malware"
-	}
+	return feed.ClassifyMaliciousRiskType(entry.DatabaseSpecific, entry.Summary, entry.Details)
 }
 
 func riskTypeFromJSON(raw json.RawMessage) string {
-	if len(raw) == 0 {
-		return ""
-	}
-	var spec struct {
-		RiskType       string   `json:"risk_type"`
-		Type           string   `json:"type"`
-		Classification string   `json:"classification"`
-		Categories     []string `json:"categories"`
-	}
-	if err := json.Unmarshal(raw, &spec); err != nil {
-		return ""
-	}
-	for _, candidate := range append([]string{spec.RiskType, spec.Type, spec.Classification}, spec.Categories...) {
-		if normalized := normalizeRiskType(candidate); normalized != "" {
-			return normalized
-		}
-	}
-	return ""
-}
-
-func normalizeRiskType(raw string) string {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "malware", "trojan", "backdoor", "cryptominer", "cryptomining", "exfiltration", "protestware":
-		return "malware"
-	case "typosquat", "typosquatting", "typo-squatting":
-		return "typosquatting"
-	case "supply_chain", "supply-chain", "supply chain", "dependency_confusion", "dependency confusion":
-		return "supply_chain"
-	default:
-		return ""
-	}
+	return feed.MaliciousRiskTypeFromJSON(raw)
 }
 
 // deriveIDFromPath creates a stable ID from a file path when the JSON

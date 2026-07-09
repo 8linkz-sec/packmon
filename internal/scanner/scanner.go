@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -13,55 +12,82 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/8linkz-sec/packmon/internal/checkcontract"
 	"github.com/8linkz-sec/packmon/internal/correlation"
-	"github.com/8linkz-sec/packmon/internal/db"
 	"github.com/8linkz-sec/packmon/internal/domain"
 	"github.com/8linkz-sec/packmon/internal/httpclient"
+	"github.com/8linkz-sec/packmon/internal/ioutils"
 	"github.com/8linkz-sec/packmon/internal/logsafe"
 	"github.com/8linkz-sec/packmon/internal/parser"
 )
 
-// LocalChecker is the interface required for local-mode scanning.
-// It is satisfied by the sqlite.Store type.
+// LocalChecker is the complete capability required for local-mode scanning.
 type LocalChecker interface {
 	FindVulnerabilities(ctx context.Context, ecosystem, name, version string) ([]domain.Finding, error)
 	FindMalicious(ctx context.Context, ecosystem, name, version string) ([]domain.Finding, error)
+	FindReputationFindingsBatch(ctx context.Context, packages []PackageLookup, source string) ([]domain.Finding, error)
+	FindLifecycleFindingsBatch(ctx context.Context, packages []PackageLookup, now time.Time) ([]domain.Finding, error)
+}
+
+// PackageLookup identifies one package lookup for scanner-owned local-checker
+// ports.
+type PackageLookup struct {
+	Ecosystem string
+	Name      string
+	Version   string
 }
 
 // BatchLocalChecker is an optional local checker extension that avoids per-
 // package database roundtrips for stores that can query multiple packages at
 // once.
 type BatchLocalChecker interface {
-	FindVulnerabilitiesBatch(ctx context.Context, packages []db.PackageQuery) ([]domain.Finding, error)
-	FindMaliciousBatch(ctx context.Context, packages []db.PackageQuery) ([]domain.Finding, error)
+	FindVulnerabilitiesBatch(ctx context.Context, packages []PackageLookup) ([]domain.Finding, error)
+	FindMaliciousBatch(ctx context.Context, packages []PackageLookup) ([]domain.Finding, error)
 }
 
-// ReputationBatchChecker is an optional local checker extension for cached
-// package reputation findings.
-type ReputationBatchChecker interface {
-	FindReputationFindingsBatch(ctx context.Context, packages []db.PackageQuery, source string) ([]domain.Finding, error)
-}
-
-// LifecycleChecker is an optional local checker extension for cached
-// lifecycle/EOL findings.
-type LifecycleChecker interface {
-	FindLifecycleFindingsBatch(ctx context.Context, packages []db.PackageQuery, now time.Time) ([]domain.Finding, error)
-}
-
-// Mode controls how the scanner resolves findings.
-type Mode string
+// Mode controls which checker path the scanner is allowed to use. Empty or
+// unrecognized Config.Mode values are normalized to ModeAuto before execution.
+type Mode = domain.ScanMode
 
 const (
-	ModeAuto   Mode = "auto"
-	ModeRemote Mode = "remote"
-	ModeLocal  Mode = "local"
+	// ModeAuto tries the configured remote server first and, unless
+	// Config.RequireRemote is set, can fall back to the local checker/database.
+	// Result.Mode reports the actual execution path as ModeRemote or ModeLocal.
+	ModeAuto = domain.ScanModeAuto
+	// ModeRemote checks only through the Packmon server and requires remote
+	// server configuration such as ServerURL and any required auth/TLS settings.
+	ModeRemote = domain.ScanModeRemote
+	// ModeLocal checks only through the configured local checker backed by the
+	// local advisory database.
+	ModeLocal = domain.ScanModeLocal
 )
+
+// ParseMode normalizes and validates a scan mode string. An empty value uses
+// the CLI/server default of auto mode.
+func ParseMode(raw string) (Mode, error) {
+	mode := Mode(strings.ToLower(strings.TrimSpace(raw)))
+	switch mode {
+	case "":
+		return ModeAuto, nil
+	case ModeAuto, ModeRemote, ModeLocal:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("invalid mode %q (want auto|local|remote)", mode)
+	}
+}
+
+func normalizeMode(raw string) Mode {
+	mode, err := ParseMode(raw)
+	if err != nil {
+		return ModeAuto
+	}
+	return mode
+}
 
 // Exit codes per DE-2.
 const (
@@ -73,14 +99,12 @@ const (
 	ExitInternal       = 10
 )
 
-// remoteCheckChunkSize must stay at or below the server's /api/v1/check
-// package limit.
-const remoteCheckChunkSize = 5000
-
 const (
 	maxRemoteCheckResponseSize = 32 << 20
 	maxRemoteErrorBodySize     = 8 << 10
 )
+
+const reversingLabsReputationSource = "reversinglabs"
 
 // Config holds all parameters needed for a single scan invocation.
 type Config struct {
@@ -134,49 +158,25 @@ type Scanner struct {
 //
 // It builds an explicit HTTP transport that enforces a minimum TLS version of
 // 1.2 and honors proxy environment variables. When cfg.CACertFile is set, the
-// referenced PEM bundle is loaded into the transport's RootCAs. A bad CA file
-// (unreadable, or containing no valid certificate) is recorded and surfaced as
-// an error on the remote-check path rather than panicking at construction, so
-// existing New(reg, cfg) callers keep compiling.
+// referenced PEM bundle is loaded lazily on the remote-check path so local-only
+// scans do not fail on remote TLS configuration that they never use.
 func New(reg *parser.Registry, cfg Config) *Scanner {
-	pool, err := loadCAPool(cfg.CACertFile)
-
 	tr := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		TLSClientConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
-			RootCAs:    pool,
 		},
 	}
 
 	return &Scanner{
-		registry:  reg,
-		cfg:       cfg,
-		clientErr: err,
+		registry: reg,
+		cfg:      cfg,
 		client: &http.Client{
 			Timeout:       cfg.Timeout,
 			Transport:     tr,
 			CheckRedirect: httpclient.SafeRedirectPolicy,
 		},
 	}
-}
-
-// loadCAPool builds a certificate pool from the given PEM file. When path is
-// empty it returns (nil, nil), meaning "use the system trust store". When the
-// file cannot be read or contains no valid certificate it returns an error.
-func loadCAPool(path string) (*x509.CertPool, error) {
-	if strings.TrimSpace(path) == "" {
-		return nil, nil
-	}
-	pem, err := os.ReadFile(path) // #nosec G304 -- user-specified CA bundle path
-	if err != nil {
-		return nil, fmt.Errorf("read CA bundle %s: %w", path, err)
-	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(pem) {
-		return nil, fmt.Errorf("CA bundle %s contains no valid certificate", path)
-	}
-	return pool, nil
 }
 
 // log returns the configured logger, or a discard logger when none is set.
@@ -187,8 +187,9 @@ func (s *Scanner) log() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-// SetLocalChecker assigns a local database for offline scanning.
-// When set, the scanner can resolve findings in local and auto modes.
+// SetLocalChecker assigns a local database for offline scanning. When set, the
+// checker must resolve vulnerability, malicious, reputation, and lifecycle
+// findings in local and auto modes.
 func (s *Scanner) SetLocalChecker(lc LocalChecker) {
 	s.localChecker = lc
 }
@@ -206,7 +207,34 @@ func (s *Scanner) RunWithCollection(ctx context.Context) (*domain.ScanResult, in
 	start := time.Now()
 	scanID := generateScanID()
 
-	// 1. Collect packages from lockfiles and explicit SBOM inputs.
+	collected, err := s.collectScanPackages()
+	if err != nil {
+		return s.errorResult(scanID, start, err.Error()), ExitOperational, nil
+	}
+
+	if result, exitCode, done := s.applyParseErrorPolicy(scanID, start, collected); done {
+		return result, exitCode, collected.Collection
+	}
+
+	s.logCollectedPackages(collected)
+
+	checkResult, err := s.selectAndRunChecker(ctx, collected.CheckPackages)
+	if err != nil {
+		return s.checkErrorResult(scanID, start, err), ExitOperational, collected.Collection
+	}
+
+	result := s.buildSuccessfulScanResult(scanID, start, collected, checkResult)
+	return result, scanExitCode(result.FindingsBlocking, result.Findings, result.ParseErrors), collected.Collection
+}
+
+type collectedScanPackages struct {
+	Collection    *PackageCollection
+	AllPackages   []domain.Package
+	CheckPackages []domain.Package
+	ParseErrors   []string
+}
+
+func (s *Scanner) collectScanPackages() (collectedScanPackages, error) {
 	collectIncludeDev := s.cfg.IncludeDev || s.cfg.InventoryAllPackages
 	collection, err := CollectPackages(CollectConfig{
 		Registry:   s.registry,
@@ -217,150 +245,235 @@ func (s *Scanner) RunWithCollection(ctx context.Context) (*domain.ScanResult, in
 		IncludeDev: collectIncludeDev,
 	})
 	if err != nil {
-		return s.errorResult(scanID, start, fmt.Sprintf("collect packages: %v", err)), ExitOperational, nil
-	}
-
-	if collection.LockFiles == 0 && collection.SBOMFiles == 0 {
-		return s.emptyScanResult(scanID, start, collection.ParseErrors), ExitOK, collection
+		return collectedScanPackages{}, fmt.Errorf("collect packages: %w", err)
 	}
 
 	allPackages := collection.Packages
-	checkPackages := scanCheckPackages(allPackages, s.cfg.IncludeDev)
-	parseErrors := collection.ParseErrors
-	s.log().Debug("packages collected",
-		slog.Int("total", len(allPackages)),
-		slog.Int("check_total", len(checkPackages)),
-		slog.Int("lock_files", collection.LockFiles),
-		slog.Int("sbom_files", collection.SBOMFiles),
-		slog.Bool("include_dev", s.cfg.IncludeDev),
-		slog.Bool("inventory_all_packages", s.cfg.InventoryAllPackages),
-	)
+	return collectedScanPackages{
+		Collection:    collection,
+		AllPackages:   allPackages,
+		CheckPackages: scanCheckPackages(allPackages, s.cfg.IncludeDev),
+		ParseErrors:   collection.ParseErrors,
+	}, nil
+}
+
+func (s *Scanner) applyParseErrorPolicy(scanID string, start time.Time, collected collectedScanPackages) (*domain.ScanResult, int, bool) {
+	collection := collected.Collection
+	if collection.LockFiles == 0 && collection.SBOMFiles == 0 {
+		return s.emptyScanResult(scanID, start, collection.ParseErrors), ExitOK, true
+	}
 
 	if len(collection.FatalParseErrors) > 0 {
-		result := s.errorResultWithPackages(scanID, start, strings.Join(collection.FatalParseErrors, "; "), len(checkPackages))
-		result.ParseErrors = append([]string(nil), parseErrors...)
-		return result, ExitParser, collection
+		result := s.errorResultWithPackages(scanID, start, strings.Join(collection.FatalParseErrors, "; "), len(collected.CheckPackages))
+		result.ParseErrors = append([]string(nil), collected.ParseErrors...)
+		return result, ExitParser, true
 	}
 
 	// If all files had parse errors and we got zero packages, exit 4.
-	if len(allPackages) == 0 && len(parseErrors) > 0 {
-		result := s.errorResult(scanID, start, strings.Join(parseErrors, "; "))
-		result.ParseErrors = append([]string(nil), parseErrors...)
-		return result, ExitParser, collection
+	if len(collected.AllPackages) == 0 && len(collected.ParseErrors) > 0 {
+		result := s.errorResult(scanID, start, strings.Join(collected.ParseErrors, "; "))
+		result.ParseErrors = append([]string(nil), collected.ParseErrors...)
+		return result, ExitParser, true
 	}
 
-	if len(checkPackages) == 0 {
-		return s.emptyScanResult(scanID, start, parseErrors), ExitOK, collection
+	if len(collected.CheckPackages) == 0 {
+		result := s.emptyScanResult(scanID, start, collected.ParseErrors)
+		if len(collected.ParseErrors) > 0 {
+			return result, ExitParser, true
+		}
+		return result, ExitOK, true
 	}
 
-	// 3. Check: resolve findings.
-	mode := s.resolveMode()
-	var findings []domain.Finding
-	var feedVersions map[string]string
-	var feedStatus string
-	var remoteResult remoteCheckResult
-	var checkErr error
+	return nil, 0, false
+}
 
-	switch mode {
+func (s *Scanner) logCollectedPackages(collected collectedScanPackages) {
+	s.log().Debug("packages collected",
+		slog.Int("total", len(collected.AllPackages)),
+		slog.Int("check_total", len(collected.CheckPackages)),
+		slog.Int("lock_files", collected.Collection.LockFiles),
+		slog.Int("sbom_files", collected.Collection.SBOMFiles),
+		slog.Bool("include_dev", s.cfg.IncludeDev),
+		slog.Bool("inventory_all_packages", s.cfg.InventoryAllPackages),
+	)
+}
+
+type checkModeResult struct {
+	Mode         Mode
+	Findings     []domain.Finding
+	FeedVersions map[string]string
+	FeedStatus   string
+	RemoteResult remoteCheckResult
+}
+
+type checkModeError struct {
+	Message         string
+	PackagesScanned int
+}
+
+func (e checkModeError) Error() string {
+	return e.Message
+}
+
+func (s *Scanner) selectAndRunChecker(ctx context.Context, packages []domain.Package) (checkModeResult, error) {
+	switch s.resolveMode() {
 	case ModeRemote:
-		remoteResult, checkErr = s.checkRemoteResult(ctx, checkPackages)
-		if checkErr != nil {
-			return s.errorResult(scanID, start, fmt.Sprintf("remote check failed: %v", checkErr)), ExitOperational, collection
+		remoteResult, err := s.checkRemoteResult(ctx, packages)
+		if err != nil {
+			return checkModeResult{}, checkModeError{Message: fmt.Sprintf("remote check failed: %v", err)}
 		}
-		findings = remoteResult.Result.Findings
-		feedVersions = remoteResult.Result.FeedVersions
-		feedStatus = remoteResult.Result.FeedStatus
+		return checkModeResult{
+			Mode:         ModeRemote,
+			Findings:     remoteResult.Result.Findings,
+			FeedVersions: remoteResult.Result.FeedVersions,
+			FeedStatus:   remoteResult.Result.FeedStatus,
+			RemoteResult: remoteResult,
+		}, nil
 	case ModeLocal:
-		if s.localChecker == nil {
-			return s.errorResultWithPackages(scanID, start, "local advisory data unavailable (run 'packmon db sync' first)", len(checkPackages)), ExitOperational, collection
+		findings, err := s.executeLocalCheckMode(ctx, packages)
+		if err != nil {
+			return checkModeResult{}, err
 		}
-		findings, checkErr = s.checkLocal(ctx, checkPackages)
-		if checkErr != nil {
-			return s.errorResultWithPackages(scanID, start, fmt.Sprintf("local check failed: %v", checkErr), len(checkPackages)), ExitOperational, collection
-		}
-		feedVersions = map[string]string{}
+		return checkModeResult{
+			Mode:         ModeLocal,
+			Findings:     findings,
+			FeedVersions: map[string]string{},
+		}, nil
 	case ModeAuto:
-		remoteResult, checkErr = s.checkRemoteResult(ctx, checkPackages)
-		if checkErr != nil {
-			s.log().Warn("remote check failed",
-				slog.Bool("require_remote", s.cfg.RequireRemote),
-				slog.String("error", checkErr.Error()),
-			)
-			// RequireRemote: do not mask a broken/insecure server channel by
-			// silently falling back to a (possibly stale) local database.
-			if s.cfg.RequireRemote {
-				return s.errorResult(scanID, start, fmt.Sprintf("remote check failed and --require-remote is set: %v", checkErr)), ExitOperational, collection
-			}
-			// Auto mode: fall back to local database.
-			if s.localChecker == nil {
-				return s.errorResultWithPackages(scanID, start, fmt.Sprintf("remote check failed and no local advisory data available: %v", checkErr), len(checkPackages)), ExitOperational, collection
-			}
-			findings, checkErr = s.checkLocal(ctx, checkPackages)
-			if checkErr != nil {
-				return s.errorResultWithPackages(scanID, start, fmt.Sprintf("remote and local check failed: %v", checkErr), len(checkPackages)), ExitOperational, collection
-			}
-			mode = ModeLocal
-			feedVersions = map[string]string{}
-		} else {
-			findings = remoteResult.Result.Findings
-			feedVersions = remoteResult.Result.FeedVersions
-			feedStatus = remoteResult.Result.FeedStatus
-			mode = ModeRemote
+		return s.executeAutoCheckMode(ctx, packages)
+	default:
+		return s.executeAutoCheckMode(ctx, packages)
+	}
+}
+
+func (s *Scanner) executeLocalCheckMode(ctx context.Context, packages []domain.Package) ([]domain.Finding, error) {
+	if s.localChecker == nil {
+		return nil, checkModeError{
+			Message:         "local advisory data unavailable (run 'packmon db sync' first)",
+			PackagesScanned: len(packages),
 		}
 	}
+	findings, err := s.checkLocal(ctx, packages)
+	if err != nil {
+		return nil, checkModeError{
+			Message:         fmt.Sprintf("local check failed: %v", err),
+			PackagesScanned: len(packages),
+		}
+	}
+	return findings, nil
+}
 
+func (s *Scanner) executeAutoCheckMode(ctx context.Context, packages []domain.Package) (checkModeResult, error) {
+	remoteResult, err := s.checkRemoteResult(ctx, packages)
+	if err == nil {
+		return checkModeResult{
+			Mode:         ModeRemote,
+			Findings:     remoteResult.Result.Findings,
+			FeedVersions: remoteResult.Result.FeedVersions,
+			FeedStatus:   remoteResult.Result.FeedStatus,
+			RemoteResult: remoteResult,
+		}, nil
+	}
+
+	s.log().Warn("remote check failed",
+		slog.Bool("require_remote", s.cfg.RequireRemote),
+		slog.String("error", err.Error()),
+	)
+	// RequireRemote: do not mask a broken/insecure server channel by
+	// silently falling back to a (possibly stale) local database.
+	if s.cfg.RequireRemote {
+		return checkModeResult{}, checkModeError{
+			Message: fmt.Sprintf("remote check failed and --require-remote is set: %v", err),
+		}
+	}
+	// Auto mode: fall back to local database.
+	if s.localChecker == nil {
+		return checkModeResult{}, checkModeError{
+			Message:         fmt.Sprintf("remote check failed and no local advisory data available: %v", err),
+			PackagesScanned: len(packages),
+		}
+	}
+	findings, localErr := s.checkLocal(ctx, packages)
+	if localErr != nil {
+		return checkModeResult{}, checkModeError{
+			Message:         fmt.Sprintf("remote and local check failed: %v", localErr),
+			PackagesScanned: len(packages),
+		}
+	}
+	return checkModeResult{
+		Mode:         ModeLocal,
+		Findings:     findings,
+		FeedVersions: map[string]string{},
+	}, nil
+}
+
+func (s *Scanner) checkErrorResult(scanID string, start time.Time, err error) *domain.ScanResult {
+	packagesScanned := 0
+	if modeErr, ok := err.(checkModeError); ok {
+		packagesScanned = modeErr.PackagesScanned
+	}
+	return s.errorResultWithPackages(scanID, start, err.Error(), packagesScanned)
+}
+
+func (s *Scanner) buildSuccessfulScanResult(scanID string, start time.Time, collected collectedScanPackages, checkResult checkModeResult) *domain.ScanResult {
+	findings := checkResult.Findings
 	if findings == nil {
 		findings = []domain.Finding{}
 	}
+	feedVersions := checkResult.FeedVersions
 	if feedVersions == nil {
 		feedVersions = map[string]string{}
 	}
-	feedStatus = normalizeScanFeedStatus(feedStatus)
-	annotateFindingLocations(findings, collection.Entries)
+	feedStatus := normalizeScanFeedStatus(checkResult.FeedStatus)
+	annotateFindingLocations(findings, collected.Collection.Entries)
 
-	// 4. Determine blocking status.
 	blocking := s.hasBlockingFindings(findings)
-
-	// 5. Build result.
 	resultScanID := scanID
 	resultScannedAt := start.UTC()
 	resultDurationMs := time.Since(start).Milliseconds()
-	if remoteResult.PreserveIdentity {
-		if remoteResult.Result.ScanID != "" {
-			resultScanID = remoteResult.Result.ScanID
+	if checkResult.RemoteResult.PreserveIdentity {
+		if checkResult.RemoteResult.Result.ScanID != "" {
+			resultScanID = checkResult.RemoteResult.Result.ScanID
 		}
-		if !remoteResult.Result.ScannedAt.IsZero() {
-			resultScannedAt = remoteResult.Result.ScannedAt
+		if !checkResult.RemoteResult.Result.ScannedAt.IsZero() {
+			resultScannedAt = checkResult.RemoteResult.Result.ScannedAt
 		}
-		resultDurationMs = remoteResult.Result.DurationMs
-	}
-	result := &domain.ScanResult{
-		ScanID:           resultScanID,
-		Mode:             string(mode),
-		ScannedAt:        resultScannedAt,
-		DurationMs:       resultDurationMs,
-		PackagesScanned:  len(checkPackages),
-		FindingsCount:    len(findings),
-		FindingsBlocking: blocking,
-		BlockThreshold:   s.cfg.FailOn,
-		Summary:          domain.BuildScanSummary(findings),
-		Findings:         findings,
-		ParseErrors:      append([]string(nil), parseErrors...),
-		FeedStatus:       feedStatus,
-		FeedVersions:     feedVersions,
-		ManualCount:      domain.CountManualAdvisoryFindings(findings),
+		resultDurationMs = checkResult.RemoteResult.Result.DurationMs
 	}
 
+	result := &domain.ScanResult{
+		ScanID:                resultScanID,
+		Mode:                  checkResult.Mode,
+		ScannedAt:             resultScannedAt,
+		DurationMs:            resultDurationMs,
+		PackagesScanned:       len(collected.CheckPackages),
+		FindingsCount:         len(findings),
+		FindingsBlocking:      blocking,
+		BlockThreshold:        s.cfg.FailOn,
+		Summary:               domain.BuildScanSummary(findings),
+		Findings:              findings,
+		ParseErrors:           append([]string(nil), collected.ParseErrors...),
+		FeedStatus:            feedStatus,
+		FeedVersions:          feedVersions,
+		ManualAdvisoriesCount: domain.CountManualAdvisoryFindings(findings),
+	}
+	sortScanFindings(result.Findings)
+	return result
+}
+
+func sortScanFindings(findings []domain.Finding) {
 	// Sort findings: CRITICAL first, then HIGH, MEDIUM, LOW.
-	sort.Slice(result.Findings, func(i, j int) bool {
-		ri := result.Findings[i].Severity.Rank()
-		rj := result.Findings[j].Severity.Rank()
+	sort.Slice(findings, func(i, j int) bool {
+		ri := findings[i].Severity.Rank()
+		rj := findings[j].Severity.Rank()
 		if ri != rj {
 			return ri > rj
 		}
-		return result.Findings[i].Name < result.Findings[j].Name
+		return findings[i].Name < findings[j].Name
 	})
+}
 
+func scanExitCode(blocking bool, findings []domain.Finding, parseErrors []string) int {
 	exitCode := ExitOK
 	switch {
 	case blocking:
@@ -377,7 +490,7 @@ func (s *Scanner) RunWithCollection(ctx context.Context) (*domain.ScanResult, in
 	if len(parseErrors) > 0 && exitCode != ExitBlocking {
 		exitCode = ExitParser
 	}
-	return result, exitCode, collection
+	return exitCode
 }
 
 func scanCheckPackages(packages []domain.Package, includeDev bool) []domain.Package {
@@ -394,14 +507,7 @@ func scanCheckPackages(packages []domain.Package, includeDev bool) []domain.Pack
 }
 
 func (s *Scanner) resolveMode() Mode {
-	switch s.cfg.Mode {
-	case ModeRemote:
-		return ModeRemote
-	case ModeLocal:
-		return ModeLocal
-	default:
-		return ModeAuto
-	}
+	return normalizeMode(string(s.cfg.Mode))
 }
 
 type remoteCheckResult struct {
@@ -443,7 +549,7 @@ func (s *Scanner) checkRemoteResult(ctx context.Context, pkgs []domain.Package) 
 	endpoint := strings.TrimRight(serverURL, "/") + "/api/v1/check"
 	requestPackages := remoteScanPackages(pkgs)
 
-	if len(requestPackages) <= remoteCheckChunkSize {
+	if len(requestPackages) <= checkcontract.MaxPackagesPerCheck {
 		result, err := s.postRemoteCheck(ctx, endpoint, requestPackages)
 		if err != nil {
 			return remoteCheckResult{}, err
@@ -455,8 +561,8 @@ func (s *Scanner) checkRemoteResult(ctx context.Context, pkgs []domain.Package) 
 	feedVersions := make(map[string]string)
 	var feedStatus string
 	var remoteBlocking bool
-	for start := 0; start < len(requestPackages); start += remoteCheckChunkSize {
-		end := start + remoteCheckChunkSize
+	for start := 0; start < len(requestPackages); start += checkcontract.MaxPackagesPerCheck {
+		end := start + checkcontract.MaxPackagesPerCheck
 		if end > len(requestPackages) {
 			end = len(requestPackages)
 		}
@@ -474,14 +580,14 @@ func (s *Scanner) checkRemoteResult(ctx context.Context, pkgs []domain.Package) 
 
 	return remoteCheckResult{
 		Result: domain.ScanResult{
-			Mode:             string(ModeRemote),
-			Findings:         allFindings,
-			FindingsCount:    len(allFindings),
-			FindingsBlocking: remoteBlocking,
-			Summary:          domain.BuildScanSummary(allFindings),
-			FeedStatus:       feedStatus,
-			FeedVersions:     feedVersions,
-			ManualCount:      domain.CountManualAdvisoryFindings(allFindings),
+			Mode:                  domain.ScanModeRemote,
+			Findings:              allFindings,
+			FindingsCount:         len(allFindings),
+			FindingsBlocking:      remoteBlocking,
+			Summary:               domain.BuildScanSummary(allFindings),
+			FeedStatus:            feedStatus,
+			FeedVersions:          feedVersions,
+			ManualAdvisoriesCount: domain.CountManualAdvisoryFindings(allFindings),
 		},
 	}, nil
 }
@@ -506,26 +612,35 @@ func (s *Scanner) postRemoteCheck(ctx context.Context, endpoint string, pkgs []d
 	}
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 	req.Header.Set("User-Agent", remoteUserAgent(s.cfg.Version))
-	req.Header.Set(correlation.Header, newCorrelationID())
+	requestCorrelationID := newCorrelationID()
+	req.Header.Set(correlation.Header, requestCorrelationID)
 	if strings.TrimSpace(s.cfg.APIKey) != "" {
 		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(s.cfg.APIKey))
 	}
 
+	if err := s.ensureRemoteHTTPClient(); err != nil {
+		return domain.ScanResult{}, err
+	}
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return domain.ScanResult{}, fmt.Errorf("server request: %s", logsafe.RedactURLRequestError(err, "server URL"))
 	}
-	defer closeSilently(resp.Body)
+	defer ioutils.CloseSilently(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
 		body, err := readRemoteErrorBody(resp.Body)
 		if err != nil {
 			return domain.ScanResult{}, fmt.Errorf("read response: %w", err)
 		}
-		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-			return domain.ScanResult{}, fmt.Errorf("server returned %d: %s (check PACKMON_API_KEY, --api-key, or api_key_env configuration)", resp.StatusCode, truncate(string(body), 200))
+		snippet := safeRemoteErrorSnippet(body)
+		correlationSuffix := remoteErrorCorrelationSuffix(resp, requestCorrelationID)
+		if resp.StatusCode == http.StatusUnauthorized {
+			return domain.ScanResult{}, fmt.Errorf("server returned %d: %s%s (check PACKMON_API_KEY, --api-key, or api_key_env configuration)", resp.StatusCode, snippet, correlationSuffix)
 		}
-		return domain.ScanResult{}, fmt.Errorf("server returned %d: %s", resp.StatusCode, truncate(string(body), 200))
+		if resp.StatusCode == http.StatusForbidden {
+			return domain.ScanResult{}, fmt.Errorf("server returned %d: %s%s (check Packmon CLI version, User-Agent policy, or server request policy)", resp.StatusCode, snippet, correlationSuffix)
+		}
+		return domain.ScanResult{}, fmt.Errorf("server returned %d: %s%s", resp.StatusCode, snippet, correlationSuffix)
 	}
 
 	var result domain.ScanResult
@@ -534,6 +649,29 @@ func (s *Scanner) postRemoteCheck(ctx context.Context, endpoint string, pkgs []d
 	}
 
 	return result, nil
+}
+
+func (s *Scanner) ensureRemoteHTTPClient() error {
+	if s.clientErr != nil {
+		return s.clientErr
+	}
+	tr, ok := s.client.Transport.(*http.Transport)
+	if !ok {
+		return nil
+	}
+	if tr.TLSClientConfig == nil {
+		tr.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
+	if tr.TLSClientConfig.RootCAs != nil || strings.TrimSpace(s.cfg.CACertFile) == "" {
+		return nil
+	}
+	pool, err := httpclient.LoadCAPool(s.cfg.CACertFile)
+	if err != nil {
+		s.clientErr = err
+		return err
+	}
+	tr.TLSClientConfig.RootCAs = pool
+	return nil
 }
 
 func decodeRemoteCheckResponse(r io.Reader, result *domain.ScanResult) error {
@@ -548,11 +686,41 @@ func decodeRemoteCheckResponse(r io.Reader, result *domain.ScanResult) error {
 	if limited.N <= 0 {
 		return fmt.Errorf("response body exceeds %d bytes", maxRemoteCheckResponseSize)
 	}
-	return nil
+	var trailing any
+	if err := dec.Decode(&trailing); err != nil {
+		if err == io.EOF {
+			return nil
+		}
+		if limited.N <= 0 {
+			return fmt.Errorf("response body exceeds %d bytes", maxRemoteCheckResponseSize)
+		}
+		return err
+	}
+	if limited.N <= 0 {
+		return fmt.Errorf("response body exceeds %d bytes", maxRemoteCheckResponseSize)
+	}
+	return fmt.Errorf("response body contains trailing data")
 }
 
 func readRemoteErrorBody(r io.Reader) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(r, maxRemoteErrorBodySize))
+}
+
+func safeRemoteErrorSnippet(body []byte) string {
+	return logsafe.RemoteErrorSnippet(body, 200)
+}
+
+func remoteErrorCorrelationSuffix(resp *http.Response, fallback string) string {
+	id := fallback
+	if resp != nil {
+		if headerID := strings.TrimSpace(resp.Header.Get(correlation.Header)); correlation.Valid(headerID) {
+			id = headerID
+		}
+	}
+	if !correlation.Valid(id) {
+		return ""
+	}
+	return " correlation_id=" + id
 }
 
 func remoteUserAgent(version string) string {
@@ -567,14 +735,14 @@ func mergeRemoteFeedStatus(current, next string) string {
 	current = normalizeScanFeedStatus(current)
 	next = normalizeScanFeedStatus(next)
 	switch {
-	case next == "healthy":
+	case next == string(domain.ScanFeedStatusHealthy):
 		return current
-	case current == "healthy":
+	case current == string(domain.ScanFeedStatusHealthy):
 		return next
-	case current == "error" || next == "error":
-		return "error"
-	case current == "degraded" || next == "degraded":
-		return "degraded"
+	case current == string(domain.ScanFeedStatusError) || next == string(domain.ScanFeedStatusError):
+		return string(domain.ScanFeedStatusError)
+	case current == string(domain.ScanFeedStatusDegraded) || next == string(domain.ScanFeedStatusDegraded):
+		return string(domain.ScanFeedStatusDegraded)
 	default:
 		return current
 	}
@@ -582,14 +750,14 @@ func mergeRemoteFeedStatus(current, next string) string {
 
 func normalizeScanFeedStatus(status string) string {
 	switch strings.TrimSpace(status) {
-	case "", "healthy":
-		return "healthy"
-	case "degraded":
-		return "degraded"
-	case "error":
-		return "error"
+	case "", string(domain.ScanFeedStatusHealthy):
+		return string(domain.ScanFeedStatusHealthy)
+	case string(domain.ScanFeedStatusDegraded):
+		return string(domain.ScanFeedStatusDegraded)
+	case string(domain.ScanFeedStatusError):
+		return string(domain.ScanFeedStatusError)
 	default:
-		return "degraded"
+		return string(domain.ScanFeedStatusDegraded)
 	}
 }
 
@@ -608,7 +776,7 @@ func remoteScanPackages(pkgs []domain.Package) []domain.Package {
 	return out
 }
 
-func remoteScanRepo(repo *domain.RepoInfo) *domain.RepoInfo {
+func remoteScanRepo(repo *domain.RepoInfo) *domain.RemoteRepoInfo {
 	if repo == nil {
 		return nil
 	}
@@ -616,7 +784,7 @@ func remoteScanRepo(repo *domain.RepoInfo) *domain.RepoInfo {
 	if name == "" {
 		return nil
 	}
-	return &domain.RepoInfo{Name: name}
+	return &domain.RemoteRepoInfo{Name: name}
 }
 
 func annotateFindingLocations(findings []domain.Finding, entries []CollectedPackage) {
@@ -664,7 +832,8 @@ func findingLocationsContain(locations []domain.FindingLocation, want domain.Fin
 	return false
 }
 
-// checkLocal resolves findings against the local SQLite database.
+// checkLocal resolves local vulnerability, malicious, reputation, and lifecycle
+// findings against the local SQLite database.
 func (s *Scanner) checkLocal(ctx context.Context, pkgs []domain.Package) ([]domain.Finding, error) {
 	var allFindings []domain.Finding
 	queries := packageQueries(pkgs)
@@ -703,29 +872,25 @@ func (s *Scanner) checkLocal(ctx context.Context, pkgs []domain.Package) ([]doma
 		}
 	}
 
-	if reputationChecker, ok := s.localChecker.(ReputationBatchChecker); ok {
-		reputation, err := reputationChecker.FindReputationFindingsBatch(ctx, queries, db.ReputationSourceReversingLabs)
-		if err != nil {
-			return nil, fmt.Errorf("local reputation batch check: %w", err)
-		}
-		allFindings = append(allFindings, reputation...)
+	reputation, err := s.localChecker.FindReputationFindingsBatch(ctx, queries, reversingLabsReputationSource)
+	if err != nil {
+		return nil, fmt.Errorf("local reputation batch check: %w", err)
 	}
+	allFindings = append(allFindings, reputation...)
 
-	if lifecycleChecker, ok := s.localChecker.(LifecycleChecker); ok {
-		lifecycle, err := lifecycleChecker.FindLifecycleFindingsBatch(ctx, queries, time.Now().UTC())
-		if err != nil {
-			return nil, fmt.Errorf("local lifecycle check: %w", err)
-		}
-		allFindings = append(allFindings, lifecycle...)
+	lifecycle, err := s.localChecker.FindLifecycleFindingsBatch(ctx, queries, time.Now().UTC())
+	if err != nil {
+		return nil, fmt.Errorf("local lifecycle check: %w", err)
 	}
+	allFindings = append(allFindings, lifecycle...)
 
 	return allFindings, nil
 }
 
-func packageQueries(pkgs []domain.Package) []db.PackageQuery {
-	queries := make([]db.PackageQuery, 0, len(pkgs))
+func packageQueries(pkgs []domain.Package) []PackageLookup {
+	queries := make([]PackageLookup, 0, len(pkgs))
 	for _, pkg := range pkgs {
-		queries = append(queries, db.PackageQuery{
+		queries = append(queries, PackageLookup{
 			Ecosystem: string(pkg.Ecosystem),
 			Name:      pkg.Name,
 			Version:   pkg.Version,
@@ -734,10 +899,12 @@ func packageQueries(pkgs []domain.Package) []db.PackageQuery {
 	return queries
 }
 
-// hasBlockingFindings checks if any finding is blocking per DE-2 rules:
-// - Malware and active supply-chain risk always block regardless of threshold
-// - Vulnerabilities block if severity >= fail-on threshold
-// - Informational reputation findings never block
+// hasBlockingFindings delegates to domain.FindingsBlock, the shared source of
+// truth for scan blocking policy:
+// - malware and active supply-chain risk always block regardless of threshold
+// - vulnerability and lifecycle findings block when severity meets fail-on
+// - informational reputation findings never block
+// - NONE disables severity-gated blocking only
 func (s *Scanner) hasBlockingFindings(findings []domain.Finding) bool {
 	return domain.FindingsBlock(findings, s.cfg.FailOn)
 }
@@ -749,12 +916,12 @@ func (s *Scanner) errorResult(scanID string, start time.Time, msg string) *domai
 func (s *Scanner) errorResultWithPackages(scanID string, start time.Time, msg string, packagesScanned int) *domain.ScanResult {
 	return &domain.ScanResult{
 		ScanID:          scanID,
-		Mode:            string(s.resolveMode()),
+		Mode:            s.resolveMode(),
 		ScannedAt:       start.UTC(),
 		DurationMs:      time.Since(start).Milliseconds(),
 		PackagesScanned: packagesScanned,
 		BlockThreshold:  s.cfg.FailOn,
-		FeedStatus:      "error",
+		FeedStatus:      string(domain.ScanFeedStatusError),
 		ScanError:       msg,
 		Summary:         domain.EmptyScanSummary(),
 		Findings:        []domain.Finding{},
@@ -765,13 +932,13 @@ func (s *Scanner) errorResultWithPackages(scanID string, start time.Time, msg st
 func (s *Scanner) emptyScanResult(scanID string, start time.Time, parseErrors []string) *domain.ScanResult {
 	return &domain.ScanResult{
 		ScanID:          scanID,
-		Mode:            string(s.resolveMode()),
+		Mode:            s.resolveMode(),
 		ScannedAt:       start.UTC(),
 		DurationMs:      time.Since(start).Milliseconds(),
 		PackagesScanned: 0,
 		FindingsCount:   0,
 		BlockThreshold:  s.cfg.FailOn,
-		FeedStatus:      "healthy",
+		FeedStatus:      string(domain.ScanFeedStatusHealthy),
 		Summary:         domain.EmptyScanSummary(),
 		Findings:        []domain.Finding{},
 		ParseErrors:     append([]string(nil), parseErrors...),

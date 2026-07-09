@@ -13,12 +13,13 @@ Read `AGENTS.md` (root) first for the full command list and verification gate.
   tree is for cross-cutting integration/e2e/contract tests only.
 - `tests/e2e` and `tests/integration` require built binaries; run them with
   `PACKMON_TEST_BIN_DIR` pointing at the build output. They are gated by build
-  tags, so plain `go test ./...` skips them by design.
+  tags, so `go test -count=1 ./...` skips them by design.
 - `tests/ci/gitlab_template_test.go` parses `ci/gitlab/.packmon-scan.yml` as YAML
   and asserts the contract (runtime mirror default, matching-binary download,
   SHA256 verification against `checksums.txt`, remote-scan call, JSON/SARIF/JUnit
-  artifacts). It runs in plain `go test ./...` and via `make test-ci`. Note it
-  asserts structure, not shell execution -- a runtime shell bug would still pass.
+  artifacts). It runs in `go test -count=1 ./...` and via `make test-ci`. Note
+  it asserts structure, not shell execution -- a runtime shell bug would still
+  pass.
 
 ## Test-strategy reminders (DESIGN.md sec 8)
 

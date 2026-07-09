@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/8linkz-sec/packmon/internal/domain"
@@ -52,17 +53,22 @@ func (p *HexParser) Parse(r io.Reader) ([]domain.Package, error) {
 
 		name := matches[1]
 		version := matches[2]
+		repository := hexRepositoryFromLockLine(line)
 
 		if name == "" || version == "" {
 			errs = append(errs, fmt.Sprintf("line %d: empty name or version", lineNum))
 			continue
 		}
 
-		packages = append(packages, domain.Package{
+		pkg := domain.Package{
 			Name:      name,
 			Version:   version,
 			Ecosystem: domain.EcosystemHex,
-		})
+		}
+		if repository != "" {
+			pkg.SourceRefs = []string{"repo=" + repository}
+		}
+		packages = append(packages, pkg)
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -79,4 +85,85 @@ func (p *HexParser) Parse(r io.Reader) ([]domain.Package, error) {
 
 func (p *HexParser) Ecosystem() domain.Ecosystem {
 	return domain.EcosystemHex
+}
+
+func hexRepositoryFromLockLine(line string) string {
+	fields := hexTupleFields(line)
+	if len(fields) < 6 {
+		return ""
+	}
+	return hexStringFieldValue(fields[5])
+}
+
+func hexTupleFields(line string) []string {
+	start := strings.Index(line, "{:hex,")
+	if start < 0 {
+		return nil
+	}
+	input := line[start+len("{:hex,"):]
+	var (
+		fields   []string
+		field    strings.Builder
+		depth    int
+		inString bool
+		escaped  bool
+	)
+	for _, r := range input {
+		if inString {
+			field.WriteRune(r)
+			if escaped {
+				escaped = false
+				continue
+			}
+			switch r {
+			case '\\':
+				escaped = true
+			case '"':
+				inString = false
+			}
+			continue
+		}
+
+		switch r {
+		case '"':
+			inString = true
+			field.WriteRune(r)
+		case '[', '{', '(':
+			depth++
+			field.WriteRune(r)
+		case ']', ')':
+			if depth > 0 {
+				depth--
+			}
+			field.WriteRune(r)
+		case '}':
+			if depth == 0 {
+				fields = append(fields, strings.TrimSpace(field.String()))
+				return fields
+			}
+			depth--
+			field.WriteRune(r)
+		case ',':
+			if depth == 0 {
+				fields = append(fields, strings.TrimSpace(field.String()))
+				field.Reset()
+				continue
+			}
+			field.WriteRune(r)
+		default:
+			field.WriteRune(r)
+		}
+	}
+	return fields
+}
+
+func hexStringFieldValue(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if value, err := strconv.Unquote(raw); err == nil {
+		return strings.TrimSpace(value)
+	}
+	return ""
 }

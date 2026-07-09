@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -27,32 +28,41 @@ type RateLimitSource interface {
 	RateLimit() (perMinute, burst int)
 }
 
-// bucket is a single per-IP token bucket.
+// bucket is a single token bucket keyed by client IP or authenticated API-key
+// identity.
 type bucket struct {
 	tokens   float64
 	lastSeen time.Time
 }
 
-// rateLimiter is a simple in-memory token-bucket rate limiter keyed by
-// client IP. It uses sync.Map for concurrent access without a global lock
-// on the hot path.
+const rateLimiterShardCount = 64
+
+type rateLimiterShard struct {
+	mu      sync.Mutex
+	buckets map[string]*bucket
+}
+
+// rateLimiter is a simple in-memory token-bucket rate limiter. Bucket state is
+// sharded by key hash so unrelated clients do not contend on one process-wide
+// mutex on the hot path.
 //
 // When source is non-nil the rate and burst are read from it on every request
 // so runtime configuration changes take effect immediately; otherwise the
 // static rate/burst captured at construction are used.
 type rateLimiter struct {
-	mu      sync.Mutex
-	buckets map[string]*bucket
-	rate    float64
-	burst   int
-	source  RateLimitSource
+	shards [rateLimiterShardCount]rateLimiterShard
+	rate   float64
+	burst  int
+	source RateLimitSource
 }
 
 func newRateLimiter(ctx context.Context, rate float64, burst int) *rateLimiter {
 	rl := &rateLimiter{
-		buckets: make(map[string]*bucket),
-		rate:    rate,
-		burst:   burst,
+		rate:  rate,
+		burst: burst,
+	}
+	for i := range rl.shards {
+		rl.shards[i].buckets = make(map[string]*bucket)
 	}
 	// Background goroutine to evict stale entries (older than 10 minutes).
 	// It exits when ctx is cancelled.
@@ -73,15 +83,16 @@ func (rl *rateLimiter) currentLimits() (float64, int) {
 }
 
 func (rl *rateLimiter) allow(ip string) bool {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-
 	rate, burst := rl.currentLimits()
 
 	now := time.Now()
-	b, ok := rl.buckets[ip]
+	shard := &rl.shards[rl.shardIndex(ip)]
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+
+	b, ok := shard.buckets[ip]
 	if !ok {
-		rl.buckets[ip] = &bucket{
+		shard.buckets[ip] = &bucket{
 			tokens:   float64(burst) - 1,
 			lastSeen: now,
 		}
@@ -116,15 +127,31 @@ func (rl *rateLimiter) cleanup(ctx context.Context) {
 }
 
 func (rl *rateLimiter) cleanupStaleBuckets(now time.Time) {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-
 	cutoff := now.Add(-10 * time.Minute)
-	for ip, b := range rl.buckets {
-		if b.lastSeen.Before(cutoff) {
-			delete(rl.buckets, ip)
+	for i := range rl.shards {
+		shard := &rl.shards[i]
+		shard.mu.Lock()
+		for ip, b := range shard.buckets {
+			if b.lastSeen.Before(cutoff) {
+				delete(shard.buckets, ip)
+			}
 		}
+		shard.mu.Unlock()
 	}
+}
+
+func (rl *rateLimiter) shardIndex(ip string) int {
+	const (
+		fnvOffset64 = 14695981039346656037
+		fnvPrime64  = 1099511628211
+	)
+
+	hash := uint64(fnvOffset64)
+	for i := 0; i < len(ip); i++ {
+		hash ^= uint64(ip[i])
+		hash *= fnvPrime64
+	}
+	return int(hash % rateLimiterShardCount)
 }
 
 // RateLimitWithSource applies a per-IP token-bucket rate limiter. It reads the
@@ -137,9 +164,23 @@ func RateLimitWithSource(ctx context.Context, logger *slog.Logger, cfg RateLimit
 	return rateLimitMiddleware(rl, logger)
 }
 
+// AuthenticatedAPIKeyRateLimitWithSource applies the same token-bucket policy
+// to the authenticated API-key identity set by Auth. Requests without an
+// authenticated identity pass through so the pre-auth IP limiter remains
+// responsible for unauthenticated or invalid requests.
+func AuthenticatedAPIKeyRateLimitWithSource(ctx context.Context, logger *slog.Logger, cfg RateLimitConfig, source RateLimitSource) func(http.Handler) http.Handler {
+	rl := newRateLimiter(ctx, cfg.Rate, cfg.Burst)
+	rl.source = source
+	return authenticatedAPIKeyRateLimitMiddleware(rl, logger)
+}
+
 func rateLimitMiddleware(rl *rateLimiter, logger *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if rateLimitBypassPath(r.URL.Path) {
+				next.ServeHTTP(w, r)
+				return
+			}
 			ip := clientIP(r)
 			if !rl.allow(ip) {
 				logger.Debug("rate limit exceeded",
@@ -155,8 +196,45 @@ func rateLimitMiddleware(rl *rateLimiter, logger *slog.Logger) func(http.Handler
 	}
 }
 
-// clientIP delegates to the shared ClientIP function which only trusts
-// r.RemoteAddr to prevent X-Forwarded-For spoofing.
+func authenticatedAPIKeyRateLimitMiddleware(rl *rateLimiter, logger *slog.Logger) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			identity, ok := APIKeyIdentityFromContext(r.Context())
+			if !ok || identity.ID <= 0 {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			key := "api-key:" + strconv.Itoa(identity.ID)
+			if !rl.allow(key) {
+				logger.Debug("authenticated api key rate limit exceeded",
+					slog.Int("api_key_id", identity.ID),
+					slog.String("client_ip", ClientIP(r)),
+					slog.String("path", logsafe.RequestPathLabel(r.URL.Path)),
+					slog.String("correlation_id", CorrelationIDFromContext(r.Context())),
+				)
+				writeJSONError(w, http.StatusTooManyRequests, "rate limit exceeded")
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+func rateLimitBypassPath(path string) bool {
+	switch path {
+	case "/healthz", "/readyz", "/version":
+		return true
+	default:
+		return false
+	}
+}
+
+// clientIP delegates to the shared ClientIP resolver. When TrustedClientIP ran
+// earlier in the middleware chain this is the context-populated trusted client
+// IP; otherwise it falls back to the direct peer from RemoteAddr. Forwarded IP
+// headers are honored only for requests received from configured trusted
+// proxies.
 func clientIP(r *http.Request) string {
 	return ClientIP(r)
 }

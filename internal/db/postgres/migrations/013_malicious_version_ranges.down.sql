@@ -1,2 +1,2 @@
-ALTER TABLE malicious_findings
-    DROP COLUMN IF EXISTS version_ranges;
+-- No-op: malicious_findings.version_ranges is owned by 001_initial.
+SELECT 1;

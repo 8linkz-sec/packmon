@@ -2,19 +2,22 @@ package sbomgen
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/8linkz-sec/packmon/internal/domain"
 	"github.com/BurntSushi/toml"
 )
 
 type pypiGenerator struct{}
 
-func (pypiGenerator) Ecosystem() string { return "pypi" }
-func (pypiGenerator) Tool() string      { return "cyclonedx-py" }
+func (pypiGenerator) Ecosystem() domain.Ecosystem { return domain.EcosystemPyPI }
+func (pypiGenerator) Tool() string                { return "cyclonedx-py" }
 func (pypiGenerator) InstallSpec() InstallSpec {
 	return InstallSpec{
 		Package:         "cyclonedx-bom",
@@ -51,7 +54,7 @@ func (pypiGenerator) Generate(ctx context.Context, d Detection, outPath string, 
 func (pypiGenerator) DeclaresDependencies(d Detection, opts GenerateOptions) (bool, error) {
 	switch d.InputKind {
 	case "requirements":
-		return requirementsDeclareDependencies(d.ManifestPath)
+		return requirementsDeclareDependenciesScoped(d.ScanRoot, d.ManifestPath)
 	case "poetry":
 		return poetryDeclaresDependencies(d, opts)
 	default:
@@ -60,10 +63,19 @@ func (pypiGenerator) DeclaresDependencies(d Detection, opts GenerateOptions) (bo
 }
 
 func requirementsDeclareDependencies(path string) (bool, error) {
-	return requirementsDeclareDependenciesSeen(path, map[string]struct{}{})
+	return requirementsDeclareDependenciesScoped("", path)
 }
 
-func requirementsDeclareDependenciesSeen(path string, seen map[string]struct{}) (bool, error) {
+func requirementsDeclareDependenciesScoped(root, path string) (bool, error) {
+	return requirementsDeclareDependenciesSeen(root, path, map[string]struct{}{})
+}
+
+func validateRequirementsIncludesWithinRoot(root, path string) error {
+	_, err := requirementsDeclareDependenciesScoped(root, path)
+	return err
+}
+
+func requirementsDeclareDependenciesSeen(root, path string, seen map[string]struct{}) (bool, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		abs = filepath.Clean(path)
@@ -73,13 +85,22 @@ func requirementsDeclareDependenciesSeen(path string, seen map[string]struct{}) 
 	}
 	seen[abs] = struct{}{}
 
-	file, err := os.Open(path) // #nosec G304 -- path comes from a bounded local manifest walk.
-	if err != nil {
-		return false, err
+	var scanner *bufio.Scanner
+	if strings.TrimSpace(root) != "" {
+		data, err := readAutoSBOMManifestScoped(root, path)
+		if err != nil {
+			return false, err
+		}
+		scanner = bufio.NewScanner(bytes.NewReader(data))
+	} else {
+		file, err := os.Open(path) // #nosec G304 -- path comes from a bounded local manifest walk.
+		if err != nil {
+			return false, err
+		}
+		defer func() { _ = file.Close() }()
+		scanner = bufio.NewScanner(file)
 	}
-	defer func() { _ = file.Close() }()
 
-	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -95,8 +116,11 @@ func requirementsDeclareDependenciesSeen(path string, seen map[string]struct{}) 
 			if !filepath.IsAbs(include) {
 				include = filepath.Join(filepath.Dir(path), include)
 			}
-			declares, err := requirementsDeclareDependenciesSeen(include, seen)
+			declares, err := requirementsDeclareDependenciesSeen(root, include, seen)
 			if err != nil {
+				if errors.Is(err, errScanRootEscape) {
+					return false, err
+				}
 				return true, nil
 			}
 			if declares {
@@ -143,7 +167,7 @@ func firstRequirementArg(value string) (string, bool) {
 }
 
 func poetryDeclaresDependencies(d Detection, opts GenerateOptions) (bool, error) {
-	data, err := readAutoSBOMManifest(d.ManifestPath)
+	data, err := readAutoSBOMManifestScoped(d.ScanRoot, d.ManifestPath)
 	if err != nil {
 		return false, err
 	}
@@ -175,7 +199,7 @@ func poetryDeclaresDependencies(d Detection, opts GenerateOptions) (bool, error)
 		}
 	}
 	lockPath := filepath.Join(d.ProjectDir, "poetry.lock")
-	lockData, err := readAutoSBOMManifest(lockPath)
+	lockData, err := readAutoSBOMManifestScoped(d.ScanRoot, lockPath)
 	if err == nil {
 		return poetryLockDeclaresDependencies(lockData, opts.IncludeDev), nil
 	}

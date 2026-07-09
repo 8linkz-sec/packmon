@@ -36,3 +36,29 @@ func TestParseTrustedProxiesRejectsInvalidEntries(t *testing.T) {
 		t.Fatalf("ParseTrustedProxies(invalid) error = %v", err)
 	}
 }
+
+func TestIsLoopbackHost(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		host string
+		want bool
+	}{
+		{name: "localhost", host: "localhost", want: true},
+		{name: "ipv4", host: "127.0.0.1:8080", want: true},
+		{name: "ipv6 bracketed", host: "[::1]:8080", want: true},
+		{name: "ipv6 bare", host: "::1", want: true},
+		{name: "external", host: "203.0.113.10"},
+		{name: "external host", host: "example.com"},
+		{name: "blank", host: " "},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsLoopbackHost(tt.host); got != tt.want {
+				t.Fatalf("IsLoopbackHost(%q) = %v, want %v", tt.host, got, tt.want)
+			}
+		})
+	}
+}

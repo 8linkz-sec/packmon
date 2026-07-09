@@ -1,7 +1,9 @@
 package parser
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -16,16 +18,54 @@ func baseFilename(path string) string {
 }
 
 func decodeStrictJSON(r io.Reader, v any) error {
-	dec := json.NewDecoder(r)
-	if err := dec.Decode(v); err != nil {
+	data, err := io.ReadAll(r)
+	if err != nil {
 		return err
+	}
+
+	dec := json.NewDecoder(bytes.NewReader(data))
+	if err := dec.Decode(v); err != nil {
+		return withJSONSyntaxLocation(data, err)
 	}
 
 	var extra struct{}
 	if err := dec.Decode(&extra); err == nil || err != io.EOF {
+		if err != nil {
+			return withJSONSyntaxLocation(data, err)
+		}
 		return fmt.Errorf("unexpected trailing data after JSON value")
 	}
 	return nil
+}
+
+func withJSONSyntaxLocation(data []byte, err error) error {
+	var syntaxErr *json.SyntaxError
+	if !errors.As(err, &syntaxErr) {
+		return err
+	}
+
+	line, column := jsonSyntaxLocation(data, syntaxErr.Offset)
+	return fmt.Errorf("%w (line %d, column %d)", err, line, column)
+}
+
+func jsonSyntaxLocation(data []byte, offset int64) (int, int) {
+	if offset < 1 {
+		return 1, 1
+	}
+	if offset > int64(len(data)) {
+		offset = int64(len(data))
+	}
+
+	line, column := 1, 1
+	for i := int64(0); i < offset-1; i++ {
+		if data[i] == '\n' {
+			line++
+			column = 1
+			continue
+		}
+		column++
+	}
+	return line, column
 }
 
 func cleanSourceRefs(refs ...string) []string {

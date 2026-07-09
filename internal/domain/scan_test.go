@@ -10,7 +10,7 @@ func TestBuildScanSummary(t *testing.T) {
 		{Severity: SeverityHigh, Type: FindingTypeVulnerability, Source: "osv"},
 		{Severity: SeverityHigh, Type: FindingTypeVulnerability, Source: "ghsa"},
 		{Severity: SeverityCritical, Type: FindingTypeMalicious, Source: "openssf"},
-		{Severity: SeverityHigh, Type: FindingTypeSupplyChainRisk, RiskType: "malware_history", Source: "reversinglabs"},
+		{Severity: SeverityHigh, Type: FindingTypeSupplyChainRisk, RiskType: RiskTypeMalwareHistory, Source: "reversinglabs"},
 	}
 
 	summary := BuildScanSummary(findings)
@@ -63,6 +63,72 @@ func TestBuildScanSummaryEmpty(t *testing.T) {
 	}
 }
 
+func TestScanFeedStatusValues(t *testing.T) {
+	t.Parallel()
+
+	want := []ScanFeedStatus{
+		ScanFeedStatusHealthy,
+		ScanFeedStatusDegraded,
+		ScanFeedStatusError,
+	}
+	if got := ScanFeedStatusValues(); len(got) != len(want) {
+		t.Fatalf("ScanFeedStatusValues() = %v, want %v", got, want)
+	} else {
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("ScanFeedStatusValues()[%d] = %q, want %q", i, got[i], want[i])
+			}
+		}
+	}
+
+	if string(ScanFeedStatusHealthy) != "healthy" || string(ScanFeedStatusDegraded) != "degraded" || string(ScanFeedStatusError) != "error" {
+		t.Fatalf("scan feed status constants changed: healthy=%q degraded=%q error=%q", ScanFeedStatusHealthy, ScanFeedStatusDegraded, ScanFeedStatusError)
+	}
+}
+
+func TestFeedModeValues(t *testing.T) {
+	t.Parallel()
+
+	want := []FeedMode{FeedModeSelf, FeedModeExternal}
+	if got := FeedModeValues(); len(got) != len(want) {
+		t.Fatalf("FeedModeValues() = %v, want %v", got, want)
+	} else {
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("FeedModeValues()[%d] = %q, want %q", i, got[i], want[i])
+			}
+		}
+	}
+
+	if string(FeedModeSelf) != "self" || string(FeedModeExternal) != "external" {
+		t.Fatalf("feed mode constants changed: self=%q external=%q", FeedModeSelf, FeedModeExternal)
+	}
+}
+
+func TestParseFeedMode(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		raw  string
+		want FeedMode
+		ok   bool
+	}{
+		{"self", FeedModeSelf, true},
+		{" SELF ", FeedModeSelf, true},
+		{"external", FeedModeExternal, true},
+		{"EXTERNAL", FeedModeExternal, true},
+		{"", "", false},
+		{"managed", "", false},
+	}
+
+	for _, tt := range tests {
+		got, ok := ParseFeedMode(tt.raw)
+		if got != tt.want || ok != tt.ok {
+			t.Fatalf("ParseFeedMode(%q) = %q/%v, want %q/%v", tt.raw, got, ok, tt.want, tt.ok)
+		}
+	}
+}
+
 func TestFindingBlocksPolicy(t *testing.T) {
 	t.Parallel()
 
@@ -86,13 +152,13 @@ func TestFindingBlocksPolicy(t *testing.T) {
 		},
 		{
 			name:      "malware history is informational",
-			finding:   Finding{Type: FindingTypeSupplyChainRisk, RiskType: "malware_history", Severity: SeverityHigh},
+			finding:   Finding{Type: FindingTypeSupplyChainRisk, RiskType: RiskTypeMalwareHistory, Severity: SeverityHigh},
 			threshold: SeverityNone,
 			want:      false,
 		},
 		{
 			name:      "malware history stays informational even at severity threshold",
-			finding:   Finding{Type: FindingTypeSupplyChainRisk, RiskType: " malware_history ", Severity: SeverityHigh},
+			finding:   Finding{Type: FindingTypeSupplyChainRisk, RiskType: " " + RiskTypeMalwareHistory + " ", Severity: SeverityHigh},
 			threshold: SeverityHigh,
 			want:      false,
 		},
@@ -144,9 +210,9 @@ func TestCountManualAdvisoryFindings(t *testing.T) {
 	t.Parallel()
 
 	findings := []Finding{
-		{Source: "manual"},
+		{Source: ManualAdvisorySource},
 		{Source: "osv"},
-		{Source: "manual"},
+		{Source: ManualAdvisorySource},
 		{Source: "openssf"},
 	}
 

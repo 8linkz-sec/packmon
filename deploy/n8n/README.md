@@ -18,10 +18,15 @@ Keep command inputs as quoted runtime environment variables, not raw n8n
 Feed import HTTP calls must send both `Authorization: Bearer <PACKMON_API_KEY>`
 and `X-Packmon-Feed-Import-Secret: <PACKMON_FEED_IMPORT_SECRET>` in production.
 
+Mount or install `deploy/n8n/on-demand-scan.sh` into the n8n runtime at
+`/opt/packmon/n8n/on-demand-scan.sh`. The workflow runs it with
+`sh /opt/packmon/n8n/on-demand-scan.sh`, so the file must be readable by the
+n8n process and the `packmon` binary must be on `PATH`.
+
 The on-demand scan workflow requires n8n Header Auth on the webhook before the
 Execute Command node can run. Create a Header Auth credential for the Webhook
 node, for example with header name `X-Packmon-N8N-Secret`, and keep the secret in
-n8n credentials or an external secret store. The scan command runs with
+n8n credentials or an external secret store. The helper runs `packmon scan` with
 `--mode remote --require-remote --server "$PACKMON_SERVER"` and uses
 `PACKMON_API_KEY` from the process environment, so a missing server or API key
 fails the workflow instead of falling back to local mode.

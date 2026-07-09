@@ -1,6 +1,7 @@
 package malicious
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -18,17 +21,22 @@ import (
 
 type maliciousTestStore struct {
 	db.Store
-	findings       []db.MaliciousFinding
-	deletedIDs     []string
-	statuses       []db.FeedSyncStatus
-	status         *db.FeedSyncStatus
-	upsertErr      error
-	statusErr      error
-	getStatusErr   error
-	prunedSource   string
-	prunedIDs      []string
-	pruneErr       error
-	rejectCanceled bool
+	findings          []db.MaliciousFinding
+	deletedIDs        []string
+	deletedSources    []string
+	statuses          []db.FeedSyncStatus
+	status            *db.FeedSyncStatus
+	upsertErr         error
+	statusErr         error
+	getStatusErr      error
+	prunedSource      string
+	prunedIDs         []string
+	pruneErr          error
+	stalePrunedSource string
+	stalePrunedBefore time.Time
+	stalePruneErr     error
+	maxNotInPruneIDs  int
+	rejectCanceled    bool
 }
 
 func (s *maliciousTestStore) UpsertMaliciousFinding(_ context.Context, finding *db.MaliciousFinding) error {
@@ -41,6 +49,12 @@ func (s *maliciousTestStore) UpsertMaliciousFinding(_ context.Context, finding *
 
 func (s *maliciousTestStore) DeleteMaliciousFinding(_ context.Context, id string) error {
 	s.deletedIDs = append(s.deletedIDs, id)
+	return nil
+}
+
+func (s *maliciousTestStore) DeleteMaliciousFindingForSource(_ context.Context, id, source string) error {
+	s.deletedIDs = append(s.deletedIDs, id)
+	s.deletedSources = append(s.deletedSources, source)
 	return nil
 }
 
@@ -72,8 +86,20 @@ func (s *maliciousTestStore) DeleteMaliciousFindingsNotInSource(_ context.Contex
 	if s.pruneErr != nil {
 		return 0, s.pruneErr
 	}
+	if s.maxNotInPruneIDs > 0 && len(ids) > s.maxNotInPruneIDs {
+		return 0, errors.New("legacy malicious prune received an unbounded active ID list")
+	}
 	s.prunedSource = source
 	s.prunedIDs = append([]string(nil), ids...)
+	return 0, nil
+}
+
+func (s *maliciousTestStore) PruneMaliciousFindingsForSourceUpdatedBefore(_ context.Context, source string, updatedBefore time.Time) (int, error) {
+	if s.stalePruneErr != nil {
+		return 0, s.stalePruneErr
+	}
+	s.stalePrunedSource = source
+	s.stalePrunedBefore = updatedBefore
 	return 0, nil
 }
 
@@ -81,7 +107,7 @@ func TestSyncerNameDefaultsAndStatusRecording(t *testing.T) {
 	t.Parallel()
 
 	store := &maliciousTestStore{}
-	syncer := NewSyncer(store, nil, "")
+	syncer := NewSyncer(nil, "")
 	if syncer.Name() != FeedName {
 		t.Fatalf("Name() = %q, want %q", syncer.Name(), FeedName)
 	}
@@ -90,8 +116,8 @@ func TestSyncerNameDefaultsAndStatusRecording(t *testing.T) {
 	}
 
 	start := time.Now().Add(-time.Second)
-	syncer.recordSyncSuccessWithCommit(context.Background(), 250*time.Millisecond, 10, 7, "abc123")
-	syncer.recordSyncFailure(context.Background(), start, context.Canceled)
+	syncer.recordSyncSuccessWithCommit(context.Background(), store, 250*time.Millisecond, 10, 7, "abc123")
+	syncer.recordSyncFailure(context.Background(), store, start, context.Canceled)
 
 	if len(store.statuses) != 2 {
 		t.Fatalf("statuses = %d, want 2", len(store.statuses))
@@ -105,17 +131,79 @@ func TestSyncerNameDefaultsAndStatusRecording(t *testing.T) {
 	canceledCtx, cancel := context.WithCancel(context.Background())
 	cancel()
 	store.rejectCanceled = true
-	syncer.recordSyncFailure(canceledCtx, start, context.Canceled)
+	syncer.recordSyncFailure(canceledCtx, store, start, context.Canceled)
 	if len(store.statuses) != 3 {
 		t.Fatalf("statuses after canceled context = %d, want 3", len(store.statuses))
 	}
 
 	erroringStore := &maliciousTestStore{statusErr: errors.New("status write failed")}
-	erroringSyncer := NewSyncer(erroringStore, nil, t.TempDir())
-	erroringSyncer.recordSyncSuccessWithCommit(context.Background(), time.Millisecond, 1, 1, "def456")
-	erroringSyncer.recordSyncFailure(context.Background(), start, context.Canceled)
+	erroringSyncer := NewSyncer(nil, t.TempDir())
+	erroringSyncer.recordSyncSuccessWithCommit(context.Background(), erroringStore, time.Millisecond, 1, 1, "def456")
+	erroringSyncer.recordSyncFailure(context.Background(), erroringStore, start, context.Canceled)
 	if len(erroringStore.statuses) != 0 {
 		t.Fatalf("erroring store recorded statuses = %+v, want none", erroringStore.statuses)
+	}
+}
+
+func TestSyncerDoesNotOwnStoreOutsideSyncContract(t *testing.T) {
+	t.Parallel()
+
+	syncerType := reflect.TypeOf(Syncer{})
+	storeType := reflect.TypeOf((*db.Store)(nil)).Elem()
+	for i := 0; i < syncerType.NumField(); i++ {
+		field := syncerType.Field(i)
+		if field.Type == storeType {
+			t.Fatalf("Syncer field %s stores db.Store; use Sync(ctx, store) as the only persistence input", field.Name)
+		}
+	}
+
+	source, err := os.ReadFile("syncer.go")
+	if err != nil {
+		t.Fatalf("read syncer.go: %v", err)
+	}
+	if regexp.MustCompile(`(?m)^\s*store\s+db\.Store\b`).Match(source) {
+		t.Fatal("syncer.go declares a store db.Store field; use Sync(ctx, store) as the only persistence input")
+	}
+	if strings.Contains(string(source), "s.store") {
+		t.Fatal("syncer.go references s.store; use the store passed to Sync(ctx, store)")
+	}
+}
+
+func TestRecordSyncFailurePreservesLastUsableSync(t *testing.T) {
+	t.Parallel()
+
+	lastSync := time.Date(2026, 5, 1, 12, 30, 0, 0, time.UTC)
+	metadata := importerMetadata()
+	store := &maliciousTestStore{status: &db.FeedSyncStatus{
+		FeedName:       FeedName,
+		LastSyncStatus: db.FeedSyncStatusSuccess,
+		LastSyncAt:     &lastSync,
+		EntriesSynced:  11,
+		EntriesTotal:   13,
+		LastCommitHash: "def456",
+		Metadata:       metadata,
+	}}
+	syncer := NewSyncer(nil, "")
+
+	syncer.recordSyncFailure(context.Background(), store, time.Now().Add(-time.Second), errors.New("upstream unavailable"))
+
+	if store.status == nil {
+		t.Fatal("recordSyncFailure did not write feed status")
+	}
+	if store.status.LastSyncStatus != db.FeedSyncStatusError {
+		t.Fatalf("LastSyncStatus = %q, want error", store.status.LastSyncStatus)
+	}
+	if store.status.LastSyncAt == nil || !store.status.LastSyncAt.Equal(lastSync) {
+		t.Fatalf("LastSyncAt = %v, want preserved %v", store.status.LastSyncAt, lastSync)
+	}
+	if store.status.EntriesSynced != 11 || store.status.EntriesTotal != 13 {
+		t.Fatalf("entries = %d/%d, want preserved 11/13", store.status.EntriesSynced, store.status.EntriesTotal)
+	}
+	if store.status.LastCommitHash != "def456" {
+		t.Fatalf("LastCommitHash = %q, want preserved def456", store.status.LastCommitHash)
+	}
+	if string(store.status.Metadata) != string(metadata) {
+		t.Fatalf("Metadata = %s, want preserved %s", store.status.Metadata, metadata)
 	}
 }
 
@@ -255,6 +343,98 @@ func TestClassifyRiskTypeHeuristics(t *testing.T) {
 	}
 }
 
+func TestProcessMaliciousEntryUpsertsActiveEntryAndTracksSeenID(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	relativePath := filepath.Join("npm", "leftpad", "MAL-helper.json")
+	writeFile(t, filepath.Join(root, relativePath), `{
+		"id":"MAL-helper",
+		"summary":"backdoor package",
+		"affected":[{"package":{"ecosystem":"npm","name":"leftpad"}}]
+	}`)
+
+	rootDir, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatalf("open root: %v", err)
+	}
+	defer func() {
+		_ = rootDir.Close()
+	}()
+
+	store := &maliciousTestStore{}
+	syncer := NewSyncer(nil, t.TempDir())
+	seen := map[string]struct{}{}
+	synced, active, err := syncer.processMaliciousEntry(context.Background(), store, rootDir, relativePath, seen)
+	if err != nil {
+		t.Fatalf("processMaliciousEntry() error = %v", err)
+	}
+
+	if synced != 1 {
+		t.Fatalf("synced = %d, want 1", synced)
+	}
+	if active != 1 {
+		t.Fatalf("active = %d, want 1", active)
+	}
+	if len(store.findings) != 1 {
+		t.Fatalf("findings = %d, want 1", len(store.findings))
+	}
+	if got := store.findings[0]; got.ID != "MAL-helper" || got.Ecosystem != "npm" || got.Name != "leftpad" {
+		t.Fatalf("stored finding = %+v", got)
+	}
+	if _, ok := seen["MAL-helper"]; !ok {
+		t.Fatalf("seen IDs = %#v, missing MAL-helper", seen)
+	}
+}
+
+func TestProcessMaliciousEntryTombstonesWithdrawnEntryAndRemovesSeenID(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	relativePath := filepath.Join("withdrawn", "pypi", "fastapi", "MAL-helper-withdrawn.json")
+	writeFile(t, filepath.Join(root, relativePath), `{
+		"id":"MAL-helper-withdrawn",
+		"summary":"Malicious code in fastapi (PyPI)",
+		"withdrawn":"2026-05-26T13:04:03Z",
+		"affected":[{"package":{"ecosystem":"PyPI","name":"fastapi"},"versions":["0.136.3"]}]
+	}`)
+
+	rootDir, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatalf("open root: %v", err)
+	}
+	defer func() {
+		_ = rootDir.Close()
+	}()
+
+	store := &maliciousTestStore{}
+	syncer := NewSyncer(nil, t.TempDir())
+	seen := map[string]struct{}{"MAL-helper-withdrawn": {}}
+	synced, active, err := syncer.processMaliciousEntry(context.Background(), store, rootDir, relativePath, seen)
+	if err != nil {
+		t.Fatalf("processMaliciousEntry() error = %v", err)
+	}
+
+	if synced != 1 {
+		t.Fatalf("synced = %d, want 1", synced)
+	}
+	if active != 0 {
+		t.Fatalf("active = %d, want 0", active)
+	}
+	if len(store.findings) != 0 {
+		t.Fatalf("findings = %+v, want none", store.findings)
+	}
+	if len(store.deletedIDs) != 1 || store.deletedIDs[0] != "MAL-helper-withdrawn" {
+		t.Fatalf("deleted IDs = %+v, want [MAL-helper-withdrawn]", store.deletedIDs)
+	}
+	if len(store.deletedSources) != 1 || store.deletedSources[0] != FeedName {
+		t.Fatalf("deleted sources = %+v, want [%s]", store.deletedSources, FeedName)
+	}
+	if _, ok := seen["MAL-helper-withdrawn"]; ok {
+		t.Fatalf("withdrawn ID should be removed from seen IDs: %#v", seen)
+	}
+}
+
 func TestWalkEntriesTombstonesWithdrawnReports(t *testing.T) {
 	t.Parallel()
 
@@ -267,21 +447,24 @@ func TestWalkEntriesTombstonesWithdrawnReports(t *testing.T) {
 	}`)
 
 	store := &maliciousTestStore{}
-	syncer := NewSyncer(store, slog.New(slog.NewTextHandler(os.Stdout, nil)), t.TempDir())
+	syncer := NewSyncer(slog.New(slog.NewTextHandler(os.Stdout, nil)), t.TempDir())
 	seen := map[string]struct{}{}
-	synced, total, err := syncer.walkEntries(context.Background(), store, root, seen)
+	synced, total, active, err := syncer.walkEntries(context.Background(), store, root, seen)
 	if err != nil {
 		t.Fatalf("walkEntries() error = %v", err)
 	}
 
-	if total != 1 || synced != 1 {
-		t.Fatalf("walkEntries() = synced %d total %d, want 1/1", synced, total)
+	if total != 1 || synced != 1 || active != 0 {
+		t.Fatalf("walkEntries() = synced %d total %d active %d, want 1/1/0", synced, total, active)
 	}
 	if len(store.findings) != 0 {
 		t.Fatalf("withdrawn report was upserted as active finding: %+v", store.findings)
 	}
 	if len(store.deletedIDs) != 1 || store.deletedIDs[0] != "MAL-2026-4750" {
 		t.Fatalf("deleted IDs = %+v, want [MAL-2026-4750]", store.deletedIDs)
+	}
+	if len(store.deletedSources) != 1 || store.deletedSources[0] != FeedName {
+		t.Fatalf("deleted sources = %+v, want [%s]", store.deletedSources, FeedName)
 	}
 	if _, ok := seen["MAL-2026-4750"]; ok {
 		t.Fatalf("withdrawn ID should not be included in active seen IDs: %#v", seen)
@@ -305,9 +488,9 @@ func TestWalkEntriesSkipsUnsupportedFiles(t *testing.T) {
 	writeFile(t, filepath.Join(root, "npm", "ignored", "README.txt"), `not json`)
 
 	store := &maliciousTestStore{}
-	syncer := NewSyncer(store, slog.New(slog.NewTextHandler(os.Stdout, nil)), t.TempDir())
+	syncer := NewSyncer(slog.New(slog.NewTextHandler(os.Stdout, nil)), t.TempDir())
 	seen := map[string]struct{}{}
-	synced, total, err := syncer.walkEntries(context.Background(), store, root, seen)
+	synced, total, active, err := syncer.walkEntries(context.Background(), store, root, seen)
 	if err != nil {
 		t.Fatalf("walkEntries() error = %v", err)
 	}
@@ -317,6 +500,9 @@ func TestWalkEntriesSkipsUnsupportedFiles(t *testing.T) {
 	}
 	if synced != 1 {
 		t.Fatalf("synced = %d, want 1", synced)
+	}
+	if active != 1 {
+		t.Fatalf("active = %d, want 1", active)
 	}
 	if _, ok := seen["MAL-1"]; !ok {
 		t.Fatalf("seen IDs = %#v, missing MAL-1", seen)
@@ -332,8 +518,8 @@ func TestWalkEntriesSkipsUnsupportedFiles(t *testing.T) {
 func TestWalkEntriesErrorBranches(t *testing.T) {
 	t.Parallel()
 
-	syncer := NewSyncer(&maliciousTestStore{}, nil, t.TempDir())
-	if _, _, err := syncer.walkEntries(context.Background(), &maliciousTestStore{}, filepath.Join(t.TempDir(), "missing"), nil); err == nil {
+	syncer := NewSyncer(nil, t.TempDir())
+	if _, _, _, err := syncer.walkEntries(context.Background(), &maliciousTestStore{}, filepath.Join(t.TempDir(), "missing"), nil); err == nil {
 		t.Fatal("walkEntries(missing root) error = nil, want error")
 	}
 
@@ -345,14 +531,14 @@ func TestWalkEntriesErrorBranches(t *testing.T) {
 	}`)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, _, err := syncer.walkEntries(ctx, &maliciousTestStore{}, canceledRoot, nil)
+	_, _, _, err := syncer.walkEntries(ctx, &maliciousTestStore{}, canceledRoot, nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("walkEntries(canceled) error = %v, want context.Canceled", err)
 	}
 
 	parseRoot := t.TempDir()
 	writeFile(t, filepath.Join(parseRoot, "npm", "broken", "MAL-broken.json"), `{`)
-	_, _, err = syncer.walkEntries(context.Background(), &maliciousTestStore{}, parseRoot, nil)
+	_, _, _, err = syncer.walkEntries(context.Background(), &maliciousTestStore{}, parseRoot, nil)
 	if err == nil || !strings.Contains(err.Error(), "parse") {
 		t.Fatalf("walkEntries(parse error) error = %v", err)
 	}
@@ -364,12 +550,12 @@ func TestWalkEntriesErrorBranches(t *testing.T) {
 		"affected":[{"package":{"ecosystem":"npm","name":"leftpad"}}]
 	}`)
 	erroringStore := &maliciousTestStore{upsertErr: errors.New("upsert failed")}
-	synced, total, err := syncer.walkEntries(context.Background(), erroringStore, upsertRoot, nil)
+	synced, total, active, err := syncer.walkEntries(context.Background(), erroringStore, upsertRoot, nil)
 	if err == nil || !strings.Contains(err.Error(), "upsert") {
 		t.Fatalf("walkEntries(upsert error) error = %v", err)
 	}
-	if synced != 0 || total != 1 {
-		t.Fatalf("walkEntries(upsert error) = synced %d total %d, want 0/1", synced, total)
+	if synced != 0 || total != 1 || active != 0 {
+		t.Fatalf("walkEntries(upsert error) = synced %d total %d active %d, want 0/1/0", synced, total, active)
 	}
 	if len(erroringStore.findings) != 0 {
 		t.Fatalf("erroring store findings = %+v, want none", erroringStore.findings)
@@ -387,13 +573,13 @@ func TestWalkEntriesRejectsOversizedEntryJSON(t *testing.T) {
 	}
 
 	store := &maliciousTestStore{}
-	syncer := NewSyncer(store, nil, "")
-	synced, total, err := syncer.walkEntries(context.Background(), store, root, map[string]struct{}{})
+	syncer := NewSyncer(nil, "")
+	synced, total, active, err := syncer.walkEntries(context.Background(), store, root, map[string]struct{}{})
 	if err == nil || !strings.Contains(err.Error(), "exceeds maximum advisory JSON size") {
 		t.Fatalf("walkEntries() error = %v, want size-limit error", err)
 	}
-	if synced != 0 || total != 1 {
-		t.Fatalf("synced=%d total=%d, want 0/1", synced, total)
+	if synced != 0 || total != 1 || active != 0 {
+		t.Fatalf("synced=%d total=%d active=%d, want 0/1/0", synced, total, active)
 	}
 	if len(store.findings) != 0 || len(store.deletedIDs) != 0 {
 		t.Fatalf("findings=%+v deleted=%+v, want no writes", store.findings, store.deletedIDs)
@@ -418,7 +604,7 @@ func TestSyncUsesExistingGitCheckoutAndWalksEntries(t *testing.T) {
 	gitCommitAll(t, repoDir)
 
 	store := &maliciousTestStore{}
-	syncer := NewSyncer(store, slog.New(slog.NewTextHandler(os.Stdout, nil)), dataDir)
+	syncer := NewSyncer(slog.New(slog.NewTextHandler(os.Stdout, nil)), dataDir)
 	result, err := syncer.Sync(context.Background(), store)
 	if err != nil {
 		t.Fatalf("Sync() error = %v", err)
@@ -429,8 +615,11 @@ func TestSyncUsesExistingGitCheckoutAndWalksEntries(t *testing.T) {
 	if len(store.findings) != 1 || store.findings[0].ID != "MAL-sync" {
 		t.Fatalf("findings = %+v, want MAL-sync", store.findings)
 	}
-	if store.prunedSource != "openssf" || len(store.prunedIDs) != 1 || store.prunedIDs[0] != "MAL-sync" {
-		t.Fatalf("prune source/ids = %q/%v, want openssf [MAL-sync]", store.prunedSource, store.prunedIDs)
+	if store.prunedSource != "" || len(store.prunedIDs) != 0 {
+		t.Fatalf("legacy prune source/ids = %q/%v, want no full active ID prune", store.prunedSource, store.prunedIDs)
+	}
+	if store.stalePrunedSource != FeedName || store.stalePrunedBefore.IsZero() {
+		t.Fatalf("stale prune source/cutoff = %q/%v, want %q with cutoff", store.stalePrunedSource, store.stalePrunedBefore, FeedName)
 	}
 	if len(store.statuses) == 0 || store.statuses[len(store.statuses)-1].LastSyncStatus != "success" {
 		t.Fatalf("statuses = %+v, want success", store.statuses)
@@ -450,6 +639,45 @@ func TestSyncUsesExistingGitCheckoutAndWalksEntries(t *testing.T) {
 	}
 }
 
+func TestSyncPrunesStaleOpenSSFFindingsByCutoffWithoutFullSeenIDList(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	dataDir := t.TempDir()
+	repoDir := filepath.Join(dataDir, "malicious-packages")
+	initGitRepo(t, repoDir)
+	for _, id := range []string{"MAL-prune-a", "MAL-prune-b", "MAL-prune-c"} {
+		writeFile(t, filepath.Join(repoDir, maliciousDir, "npm", strings.ToLower(id), id+".json"), `{
+			"id":"`+id+`",
+			"summary":"backdoor package",
+			"affected":[{"package":{"ecosystem":"npm","name":"`+strings.ToLower(id)+`"}}]
+		}`)
+	}
+	gitCommitAll(t, repoDir)
+
+	store := &maliciousTestStore{maxNotInPruneIDs: 1}
+	syncer := NewSyncer(slog.New(slog.NewTextHandler(os.Stdout, nil)), dataDir)
+	result, err := syncer.Sync(context.Background(), store)
+	if err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	if result.EntriesSynced != 3 || result.EntriesTotal != 3 {
+		t.Fatalf("Sync() result = %+v, want 3/3", result)
+	}
+	if store.prunedSource != "" || len(store.prunedIDs) != 0 {
+		t.Fatalf("legacy prune source/ids = %q/%v, want no full active ID prune", store.prunedSource, store.prunedIDs)
+	}
+	if store.stalePrunedSource != FeedName || store.stalePrunedBefore.IsZero() {
+		t.Fatalf("stale prune source/cutoff = %q/%v, want %q with cutoff", store.stalePrunedSource, store.stalePrunedBefore, FeedName)
+	}
+	if len(store.findings) != 3 {
+		t.Fatalf("upserted findings = %d, want 3", len(store.findings))
+	}
+}
+
 func TestSyncFailsClosedWhenFeedRootsAreMissing(t *testing.T) {
 	t.Parallel()
 
@@ -464,7 +692,7 @@ func TestSyncFailsClosedWhenFeedRootsAreMissing(t *testing.T) {
 	gitCommitAll(t, repoDir)
 
 	store := &maliciousTestStore{}
-	syncer := NewSyncer(store, slog.New(slog.NewTextHandler(os.Stdout, nil)), dataDir)
+	syncer := NewSyncer(slog.New(slog.NewTextHandler(os.Stdout, nil)), dataDir)
 	result, err := syncer.Sync(context.Background(), store)
 	if err == nil || !strings.Contains(err.Error(), "feed roots") {
 		t.Fatalf("Sync() error = %v, want feed root error", err)
@@ -472,11 +700,56 @@ func TestSyncFailsClosedWhenFeedRootsAreMissing(t *testing.T) {
 	if result != nil {
 		t.Fatalf("Sync() result = %+v, want nil on failed feed validation", result)
 	}
-	if store.prunedSource != "" || len(store.prunedIDs) != 0 {
-		t.Fatalf("prune source/ids = %q/%v, want no prune on invalid feed", store.prunedSource, store.prunedIDs)
+	if store.prunedSource != "" || len(store.prunedIDs) != 0 || store.stalePrunedSource != "" {
+		t.Fatalf("prune calls = legacy %q/%v stale %q, want no prune on invalid feed", store.prunedSource, store.prunedIDs, store.stalePrunedSource)
 	}
 	if len(store.statuses) == 0 || store.statuses[len(store.statuses)-1].LastSyncStatus != "error" {
 		t.Fatalf("statuses = %+v, want error status", store.statuses)
+	}
+}
+
+func TestSyncFailureEmitsStartAndTerminalFailureLog(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	dataDir := t.TempDir()
+	repoDir := filepath.Join(dataDir, "malicious-packages")
+	initGitRepo(t, repoDir)
+	writeFile(t, filepath.Join(repoDir, "README.md"), "not the OpenSSF feed layout")
+	gitCommitAll(t, repoDir)
+
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	store := &maliciousTestStore{}
+	syncer := NewSyncer(logger, dataDir)
+	result, err := syncer.Sync(context.Background(), store)
+	if err == nil || !strings.Contains(err.Error(), "feed roots") {
+		t.Fatalf("Sync() error = %v, want feed root error", err)
+	}
+	if result != nil {
+		t.Fatalf("Sync() result = %+v, want nil on failed sync", result)
+	}
+
+	output := logs.String()
+	startIndex := strings.Index(output, "starting OpenSSF malicious packages sync")
+	if startIndex < 0 {
+		t.Fatalf("logs missing start message:\n%s", output)
+	}
+	failureIndex := strings.Index(output, "OpenSSF malicious packages sync failed")
+	if failureIndex < 0 {
+		t.Fatalf("logs missing terminal failure message after start:\n%s", output)
+	}
+	if failureIndex <= startIndex {
+		t.Fatalf("terminal failure log appears before start log:\n%s", output)
+	}
+	if !strings.Contains(output, "status=error") || !strings.Contains(output, "error=") {
+		t.Fatalf("terminal failure log missing status/error fields:\n%s", output)
+	}
+	if strings.Contains(output, repoDir) {
+		t.Fatalf("logs include full repository path %q:\n%s", repoDir, output)
 	}
 }
 
@@ -494,7 +767,7 @@ func TestSyncFailsClosedWhenFeedRootsHaveNoEntries(t *testing.T) {
 	gitCommitAll(t, repoDir)
 
 	store := &maliciousTestStore{}
-	syncer := NewSyncer(store, slog.New(slog.NewTextHandler(os.Stdout, nil)), dataDir)
+	syncer := NewSyncer(slog.New(slog.NewTextHandler(os.Stdout, nil)), dataDir)
 	result, err := syncer.Sync(context.Background(), store)
 	if err == nil || !strings.Contains(err.Error(), "no entries") {
 		t.Fatalf("Sync() error = %v, want no entries error", err)
@@ -502,8 +775,42 @@ func TestSyncFailsClosedWhenFeedRootsHaveNoEntries(t *testing.T) {
 	if result != nil {
 		t.Fatalf("Sync() result = %+v, want nil on failed feed validation", result)
 	}
-	if store.prunedSource != "" || len(store.prunedIDs) != 0 {
-		t.Fatalf("prune source/ids = %q/%v, want no prune on empty feed", store.prunedSource, store.prunedIDs)
+	if store.prunedSource != "" || len(store.prunedIDs) != 0 || store.stalePrunedSource != "" {
+		t.Fatalf("prune calls = legacy %q/%v stale %q, want no prune on empty feed", store.prunedSource, store.prunedIDs, store.stalePrunedSource)
+	}
+	if len(store.statuses) == 0 || store.statuses[len(store.statuses)-1].LastSyncStatus != "error" {
+		t.Fatalf("statuses = %+v, want error status", store.statuses)
+	}
+}
+
+func TestSyncFailsClosedWhenFeedHasNoSupportedActiveEntries(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	dataDir := t.TempDir()
+	repoDir := filepath.Join(dataDir, "malicious-packages")
+	initGitRepo(t, repoDir)
+	writeFile(t, filepath.Join(repoDir, maliciousDir, "unknown", "ignored", "MAL-unsupported.json"), `{
+		"id":"MAL-unsupported",
+		"summary":"unsupported ecosystem should not prune all OpenSSF findings",
+		"affected":[{"package":{"ecosystem":"unsupported","name":"ignored"}}]
+	}`)
+	gitCommitAll(t, repoDir)
+
+	store := &maliciousTestStore{}
+	syncer := NewSyncer(slog.New(slog.NewTextHandler(os.Stdout, nil)), dataDir)
+	result, err := syncer.Sync(context.Background(), store)
+	if err == nil || !strings.Contains(err.Error(), "no active supported entries") {
+		t.Fatalf("Sync() error = %v, want supported-entry validation error", err)
+	}
+	if result != nil {
+		t.Fatalf("Sync() result = %+v, want nil on failed feed validation", result)
+	}
+	if store.prunedSource != "" || len(store.prunedIDs) != 0 || store.stalePrunedSource != "" {
+		t.Fatalf("prune calls = legacy %q/%v stale %q, want no prune with no active supported entries", store.prunedSource, store.prunedIDs, store.stalePrunedSource)
 	}
 	if len(store.statuses) == 0 || store.statuses[len(store.statuses)-1].LastSyncStatus != "error" {
 		t.Fatalf("statuses = %+v, want error status", store.statuses)
@@ -532,7 +839,7 @@ func TestSyncResyncsSameCommitWhenImporterMetadataMissing(t *testing.T) {
 		LastSyncStatus: "success",
 		LastCommitHash: gitRevParse(t, repoDir, "HEAD"),
 	}}
-	syncer := NewSyncer(store, slog.New(slog.NewTextHandler(os.Stdout, nil)), dataDir)
+	syncer := NewSyncer(slog.New(slog.NewTextHandler(os.Stdout, nil)), dataDir)
 	result, err := syncer.Sync(context.Background(), store)
 	if err != nil {
 		t.Fatalf("Sync() error = %v", err)
@@ -564,7 +871,7 @@ func TestSyncContinuesWhenStatusLookupFails(t *testing.T) {
 	gitCommitAll(t, repoDir)
 
 	store := &maliciousTestStore{getStatusErr: errors.New("status unavailable")}
-	syncer := NewSyncer(store, slog.New(slog.NewTextHandler(os.Stdout, nil)), dataDir)
+	syncer := NewSyncer(slog.New(slog.NewTextHandler(os.Stdout, nil)), dataDir)
 	result, err := syncer.Sync(context.Background(), store)
 	if err != nil {
 		t.Fatalf("Sync() error = %v", err)

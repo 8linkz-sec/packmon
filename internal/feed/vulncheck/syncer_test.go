@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/8linkz-sec/packmon/internal/db"
 	"github.com/8linkz-sec/packmon/internal/feed"
@@ -65,6 +66,7 @@ func TestSyncWithoutAPIKeyReturnsPermanentError(t *testing.T) {
 func TestSyncStreamsEntriesAndSkipsInvalidCVEs(t *testing.T) {
 	t.Parallel()
 
+	oversizedURL := "https://vulncheck.test/" + strings.Repeat("a", maxVulnCheckSourceURLBytes)
 	zipBody := vulnCheckZipBytes(t, `{
 	  "data": [
 	    {
@@ -74,6 +76,7 @@ func TestSyncStreamsEntriesAndSkipsInvalidCVEs(t *testing.T) {
 	      "url": "https://vulncheck.test/CVE-2026-0001"
 	    },
 	    {"id": "VC-2026-ignored"},
+	    {"id": "CVE-2026-9999", "url": `+strconv.Quote(oversizedURL)+`},
 	    {"cve_id": "CVE-2026-0002", "url": "https://vulncheck.test/CVE-2026-0002"}
 	  ]
 	}`)
@@ -108,6 +111,10 @@ func TestSyncStreamsEntriesAndSkipsInvalidCVEs(t *testing.T) {
 	if result.EntriesTotal != 2 || result.EntriesSynced != 2 {
 		t.Fatalf("sync result = %+v, want 2/2", result)
 	}
+	metadata := feed.ParseStatusMetadata(result.Metadata)
+	if metadata.RejectedCount != 1 || metadata.RejectionReason != "source_url_too_large" {
+		t.Fatalf("sync metadata = %+v, want one oversized URL rejection", metadata)
+	}
 	entries := store.entries
 	if len(entries) != 2 {
 		t.Fatalf("entries length = %d, want 2: %+v", len(entries), entries)
@@ -127,12 +134,14 @@ func TestSyncReportsBackupLinkHTTPAndParseErrors(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name       string
-		statusCode int
-		body       string
-		want       string
+		name          string
+		statusCode    int
+		body          string
+		want          string
+		wantPermanent bool
 	}{
-		{name: "auth", statusCode: http.StatusForbidden, body: `{}`, want: "authentication failed"},
+		{name: "unauthorized", statusCode: http.StatusUnauthorized, body: `{}`, want: "authentication failed", wantPermanent: true},
+		{name: "forbidden", statusCode: http.StatusForbidden, body: `{}`, want: "authentication failed", wantPermanent: true},
 		{name: "status", statusCode: http.StatusBadGateway, body: `{}`, want: "unexpected status 502"},
 		{name: "json", statusCode: http.StatusOK, body: `not json`, want: "parse json"},
 	}
@@ -151,6 +160,9 @@ func TestSyncReportsBackupLinkHTTPAndParseErrors(t *testing.T) {
 			_, err := syncer.Sync(context.Background(), &vulncheckStoreStub{})
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("Sync error = %v, want %q", err, tt.want)
+			}
+			if gotPermanent := feed.IsPermanentError(err); gotPermanent != tt.wantPermanent {
+				t.Fatalf("feed.IsPermanentError(Sync error) = %v, want %v for %v", gotPermanent, tt.wantPermanent, err)
 			}
 		})
 	}
@@ -193,6 +205,100 @@ func TestSyncDownloadsAndEnrichesInBatches(t *testing.T) {
 	}
 	if len(store.batchSizes) != 2 || store.batchSizes[0] != batchSize || store.batchSizes[1] != 1 {
 		t.Fatalf("batch sizes = %v", store.batchSizes)
+	}
+}
+
+func TestSyncSkipsBackupDownloadWhenDigestAlreadyProcessed(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{"data":[{"id":"CVE-2026-0394"}]}`)
+	digest := sha256Hex(body)
+	backupDownloads := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case nvd2Endpoint:
+			if err := json.NewEncoder(w).Encode(backupLinkResponse{Data: []backupLink{{
+				Filename: "vulncheck-nvd2.json",
+				SHA256:   digest,
+				URL:      absoluteTestURL(r, "/bulk.json"),
+			}}}); err != nil {
+				t.Fatalf("encode backup link response: %v", err)
+			}
+		case "/bulk.json":
+			backupDownloads++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(body)
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	lastSync := time.Now().UTC()
+	store := &vulncheckStoreStub{
+		status: &db.FeedSyncStatus{
+			FeedName:       feedName,
+			LastSyncAt:     &lastSync,
+			LastSyncStatus: db.FeedSyncStatusSuccess,
+			EntriesSynced:  7,
+			EntriesTotal:   9,
+			LastETag:       digest,
+		},
+	}
+	syncer := NewSyncer("test-key", slog.New(slog.NewTextHandler(io.Discard, nil)), WithBaseURL(server.URL))
+	result, err := syncer.Sync(context.Background(), store)
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if backupDownloads != 0 {
+		t.Fatalf("backup downloads = %d, want 0 for unchanged digest", backupDownloads)
+	}
+	if len(store.batchSizes) != 0 {
+		t.Fatalf("EnrichVulnCheck batches = %v, want none for unchanged digest", store.batchSizes)
+	}
+	if result.EntriesSynced != 0 || result.EntriesTotal != 9 {
+		t.Fatalf("sync result = %+v, want 0 synced and preserved total 9", result)
+	}
+}
+
+func TestSyncPersistsBackupDigestAsStatusCursor(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{"data":[{"id":"CVE-2026-3941"}]}`)
+	digest := sha256Hex(body)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case nvd2Endpoint:
+			if err := json.NewEncoder(w).Encode(backupLinkResponse{Data: []backupLink{{
+				Filename: "vulncheck-nvd2.json",
+				SHA256:   digest,
+				URL:      absoluteTestURL(r, "/bulk.json"),
+			}}}); err != nil {
+				t.Fatalf("encode backup link response: %v", err)
+			}
+		case "/bulk.json":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(body)
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	store := &vulncheckStoreStub{}
+	syncer := NewSyncer("test-key", slog.New(slog.NewTextHandler(io.Discard, nil)), WithBaseURL(server.URL))
+	result, err := syncer.Sync(context.Background(), store)
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if result.EntriesTotal != 1 || result.EntriesSynced != 1 {
+		t.Fatalf("sync result = %+v, want 1/1", result)
+	}
+	if store.status == nil {
+		t.Fatal("feed status was not written")
+	}
+	if store.status.LastSyncStatus != db.FeedSyncStatusSuccess || store.status.LastETag != digest {
+		t.Fatalf("feed status = %+v, want success with digest cursor %q", store.status, digest)
 	}
 }
 
@@ -446,17 +552,15 @@ func TestBackupDownloadRejectsUnsafeRedirectTargets(t *testing.T) {
 	defer source.Close()
 
 	syncer := NewSyncer("test-key", slog.New(slog.NewTextHandler(io.Discard, nil)))
-	_, err := syncer.streamBackupFile(context.Background(), source.URL+"/redirect", func([]db.VulnCheckEntry) error {
-		return nil
-	})
+	_, _, _, err := syncer.downloadBackupToTemp(context.Background(), source.URL+"/redirect")
 	if err == nil {
-		t.Fatal("streamBackupFile(unsafe redirect) error = nil, want refusal")
+		t.Fatal("downloadBackupToTemp(unsafe redirect) error = nil, want refusal")
 	}
 	if redirectHits != 0 {
 		t.Fatalf("unsafe redirect target was requested %d times, want 0", redirectHits)
 	}
 	if !strings.Contains(err.Error(), "redirect") {
-		t.Fatalf("streamBackupFile(unsafe redirect) error = %v, want redirect refusal", err)
+		t.Fatalf("downloadBackupToTemp(unsafe redirect) error = %v, want redirect refusal", err)
 	}
 }
 
@@ -473,12 +577,6 @@ func TestBackupDownloadHTTPErrorRedactsSignedURL(t *testing.T) {
 	_, _, _, err := syncer.downloadBackupToTemp(context.Background(), signedURL)
 	if err == nil {
 		t.Fatal("downloadBackupToTemp() error = nil, want redacted HTTP error")
-	}
-	assertNoSignedURLLeak(t, err.Error())
-
-	_, err = syncer.streamBackupFile(context.Background(), signedURL, func([]db.VulnCheckEntry) error { return nil })
-	if err == nil {
-		t.Fatal("streamBackupFile() error = nil, want redacted HTTP error")
 	}
 	assertNoSignedURLLeak(t, err.Error())
 }
@@ -504,7 +602,9 @@ func TestStreamBackupJSONAndZipErrorBranches(t *testing.T) {
 		{name: "data not array", body: `{"data":{}}`, want: "data is not an array"},
 		{name: "missing data", body: `{"meta":{}}`, want: "data array missing"},
 		{name: "truncated object after data", body: `{"data":[{"id":"CVE-2026-0001"}]`, want: "object close"},
+		{name: "truncated top-level array", body: `[{"id":"CVE-2026-0001"}`, want: "array close"},
 		{name: "trailing top-level data", body: `[{"id":"CVE-2026-0001"}] {"extra":true}`, want: "trailing"},
+		{name: "trailing top-level object data", body: `{"data":[{"id":"CVE-2026-0001"}]} []`, want: "trailing"},
 		{name: "bad cve", body: `[{"id":`, want: "parse cve"},
 	}
 	for _, tt := range errorCases {
@@ -532,17 +632,198 @@ func TestStreamBackupJSONAndZipErrorBranches(t *testing.T) {
 	}
 }
 
+func TestStreamBackupZipReportsTempCloseErrorBeforeParsing(t *testing.T) {
+	t.Parallel()
+
+	var zipBuf bytes.Buffer
+	zw := zip.NewWriter(&zipBuf)
+	file, err := zw.Create("vulncheck-nvd2.json")
+	if err != nil {
+		t.Fatalf("create json zip entry: %v", err)
+	}
+	if _, err := io.WriteString(file, `{"data":[{"id":"CVE-2026-9001"}]}`); err != nil {
+		t.Fatalf("write json zip entry: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("close json zip: %v", err)
+	}
+
+	closeErr := errors.New("forced temp close failure")
+	temp := &failingCloseTempZip{closeErr: closeErr}
+	removed := 0
+	stats, err := streamBackupZipWithStatsWithTempFiles(bytes.NewReader(zipBuf.Bytes()), func([]db.VulnCheckEntry) error {
+		t.Fatal("emit called before temp zip close error was reported")
+		return nil
+	}, tempZipFileHooks{
+		create: func() (tempZipWriteFile, error) {
+			return temp, nil
+		},
+		openRead: func(string) (tempZipReadFile, error) {
+			t.Fatal("temp zip was opened for parsing after close failed")
+			return nil, errors.New("unexpected open")
+		},
+		remove: func(string) error {
+			removed++
+			return nil
+		},
+	})
+	if err == nil {
+		t.Fatal("streamBackupZipWithStatsWithTempFiles() error = nil, want close error")
+	}
+	if !errors.Is(err, closeErr) || !strings.Contains(err.Error(), "close temp zip") {
+		t.Fatalf("streamBackupZipWithStatsWithTempFiles() error = %v, want wrapped close temp zip error", err)
+	}
+	if stats.entriesTotal != 0 {
+		t.Fatalf("streamBackupZipWithStatsWithTempFiles() entriesTotal = %d, want 0", stats.entriesTotal)
+	}
+	if temp.closeCalls != 1 {
+		t.Fatalf("temp zip Close calls = %d, want 1", temp.closeCalls)
+	}
+	if removed != 1 {
+		t.Fatalf("temp zip remove calls = %d, want 1", removed)
+	}
+}
+
+type failingCloseTempZip struct {
+	bytes.Buffer
+	closeErr   error
+	closeCalls int
+}
+
+func (f *failingCloseTempZip) Close() error {
+	f.closeCalls++
+	return f.closeErr
+}
+
+func (f *failingCloseTempZip) Name() string {
+	return "failing-temp.zip"
+}
+
+func TestStreamBackupJSONShapeHelpersPreserveArrayAndObjectBehavior(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		body     string
+		open     json.Delim
+		stream   func(*json.Decoder, func([]db.VulnCheckEntry) error) (int, error)
+		wantCVEs []string
+	}{
+		{
+			name:     "array",
+			body:     `[{"id":"CVE-2026-7001"},{"id":"VC-ignored"},{"cve_id":"CVE-2026-7002"}]`,
+			open:     '[',
+			stream:   streamBackupJSONArray,
+			wantCVEs: []string{"CVE-2026-7001", "CVE-2026-7002"},
+		},
+		{
+			name:     "object data with unknown fields",
+			body:     `{"meta":{"ignored":true},"data":[{"id":"CVE-2026-7003"}],"after":["ignored"]}`,
+			open:     '{',
+			stream:   streamBackupJSONObject,
+			wantCVEs: []string{"CVE-2026-7003"},
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			dec := json.NewDecoder(strings.NewReader(tt.body))
+			tok, err := dec.Token()
+			if err != nil {
+				t.Fatalf("decode opening token: %v", err)
+			}
+			if tok != tt.open {
+				t.Fatalf("opening token = %v, want %v", tok, tt.open)
+			}
+
+			var emitted []db.VulnCheckEntry
+			total, err := tt.stream(dec, func(entries []db.VulnCheckEntry) error {
+				emitted = append(emitted, entries...)
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("%s helper returned error: %v", tt.name, err)
+			}
+			if total != len(tt.wantCVEs) {
+				t.Fatalf("%s helper total = %d, want %d", tt.name, total, len(tt.wantCVEs))
+			}
+			if len(emitted) != len(tt.wantCVEs) {
+				t.Fatalf("%s helper emitted %d entries, want %d", tt.name, len(emitted), len(tt.wantCVEs))
+			}
+			for i, want := range tt.wantCVEs {
+				if emitted[i].CVEID != want {
+					t.Fatalf("%s helper emitted[%d].CVEID = %q, want %q", tt.name, i, emitted[i].CVEID, want)
+				}
+			}
+		})
+	}
+}
+
+func TestStreamBackupJSONSkipsOversizedVulnCheckRecords(t *testing.T) {
+	t.Parallel()
+
+	oversizedURL := "https://vulncheck.test/" + strings.Repeat("a", maxVulnCheckSourceURLBytes)
+	oversizedRaw := strings.Repeat("x", maxVulnCheckRawJSONBytes+1)
+	manyExploits := make([]exploitRef, maxVulnCheckExploitRefs+1)
+	for i := range manyExploits {
+		manyExploits[i] = exploitRef{URL: "https://example.test/poc"}
+	}
+	manyExploitsJSON, err := json.Marshal(manyExploits)
+	if err != nil {
+		t.Fatalf("marshal exploits: %v", err)
+	}
+
+	body := `{"data":[` +
+		`{"id":"CVE-2026-8001","url":` + strconv.Quote(oversizedURL) + `},` +
+		`{"id":"CVE-2026-8002","exploits":` + string(manyExploitsJSON) + `},` +
+		`{"id":"CVE-2026-8003","padding":` + strconv.Quote(oversizedRaw) + `},` +
+		`{"id":"CVE-2026-8004","url":"https://vulncheck.test/CVE-2026-8004","exploits":[{"url":"https://example.test/poc"}]}` +
+		`]}`
+
+	var emitted []db.VulnCheckEntry
+	stats, err := streamBackupJSONWithStats(strings.NewReader(body), func(entries []db.VulnCheckEntry) error {
+		emitted = append(emitted, entries...)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("streamBackupJSON() error = %v", err)
+	}
+	if stats.entriesTotal != 1 || len(emitted) != 1 {
+		t.Fatalf("streamBackupJSON() total=%d emitted=%d, want one valid entry", stats.entriesTotal, len(emitted))
+	}
+	if stats.rejectedRecords != 3 || stats.rejectionReason != "source_url_too_large" {
+		t.Fatalf("streamBackupJSON() rejected=%d reason=%q, want 3 source_url_too_large", stats.rejectedRecords, stats.rejectionReason)
+	}
+	entry := emitted[0]
+	if entry.CVEID != "CVE-2026-8004" {
+		t.Fatalf("emitted CVEID = %q, want valid trailing CVE", entry.CVEID)
+	}
+	if entry.SourceURL != "https://vulncheck.test/CVE-2026-8004" || !entry.ExploitExists || len(entry.RawJSON) == 0 {
+		t.Fatalf("valid entry lost fields: %+v", entry)
+	}
+}
+
 func TestVulnCheckDownloadStreamAndZipFailureBranches(t *testing.T) {
 	t.Parallel()
+
+	jsonBackup := []byte(`[{"id":"CVE-2026-0101"}]`)
+	badZipBackup := []byte("not a zip")
+	digest := func(body []byte) string {
+		sum := sha256.Sum256(body)
+		return fmt.Sprintf("%x", sum[:])
+	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/backup.json":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `[{"id":"CVE-2026-0101"}]`)
+			_, _ = w.Write(jsonBackup)
 		case "/bad.zip":
 			w.Header().Set("Content-Type", "application/zip")
-			_, _ = io.WriteString(w, "not a zip")
+			_, _ = w.Write(badZipBackup)
 		default:
 			t.Fatalf("unexpected path %q", r.URL.Path)
 		}
@@ -551,21 +832,18 @@ func TestVulnCheckDownloadStreamAndZipFailureBranches(t *testing.T) {
 
 	syncer := NewSyncer("test-key", slog.New(slog.NewTextHandler(io.Discard, nil)), WithBaseURL(server.URL))
 	var emitted []db.VulnCheckEntry
-	total, err := syncer.streamBackupFile(context.Background(), server.URL+"/backup.json", func(entries []db.VulnCheckEntry) error {
+	total, err := syncer.streamVerifiedBackupFile(context.Background(), backupSelection{URL: server.URL + "/backup.json", SHA256: digest(jsonBackup)}, func(entries []db.VulnCheckEntry) error {
 		emitted = append(emitted, entries...)
 		return nil
 	})
 	if err != nil || total != 1 || len(emitted) != 1 {
-		t.Fatalf("streamBackupFile(json) total=%d emitted=%+v err=%v", total, emitted, err)
+		t.Fatalf("streamVerifiedBackupFile(json) total=%d emitted=%+v err=%v", total, emitted, err)
 	}
-	if _, err := syncer.streamBackupFile(context.Background(), server.URL+"/bad.zip", func([]db.VulnCheckEntry) error { return nil }); err == nil || !strings.Contains(err.Error(), "parse zip") {
-		t.Fatalf("streamBackupFile(bad zip) = %v, want parse zip error", err)
+	if _, err := syncer.streamVerifiedBackupFile(context.Background(), backupSelection{URL: server.URL + "/bad.zip", SHA256: digest(badZipBackup)}, func([]db.VulnCheckEntry) error { return nil }); err == nil || !strings.Contains(err.Error(), "parse zip") {
+		t.Fatalf("streamVerifiedBackupFile(bad zip) = %v, want parse zip error", err)
 	}
 	if _, _, _, err := syncer.downloadBackupToTemp(context.Background(), "://bad"); err == nil || !strings.Contains(err.Error(), "create backup request") {
 		t.Fatalf("downloadBackupToTemp(bad URL) = %v", err)
-	}
-	if _, err := syncer.streamBackupFile(context.Background(), "://bad", func([]db.VulnCheckEntry) error { return nil }); err == nil || !strings.Contains(err.Error(), "create backup request") {
-		t.Fatalf("streamBackupFile(bad URL) = %v", err)
 	}
 
 	if body, err := readLimited(strings.NewReader("ok")); err != nil || string(body) != "ok" {
@@ -653,6 +931,7 @@ type vulncheckStoreStub struct {
 	db.Store
 	batchSizes []int
 	entries    []db.VulnCheckEntry
+	status     *db.FeedSyncStatus
 	err        error
 }
 
@@ -663,4 +942,44 @@ func (s *vulncheckStoreStub) EnrichVulnCheck(_ context.Context, entries []db.Vul
 	s.batchSizes = append(s.batchSizes, len(entries))
 	s.entries = append(s.entries, entries...)
 	return len(entries), nil
+}
+
+func (s *vulncheckStoreStub) GetFeedSyncStatus(_ context.Context, feedName string) (*db.FeedSyncStatus, error) {
+	if s.status == nil || s.status.FeedName != feedName {
+		return nil, nil
+	}
+	status := *s.status
+	if s.status.LastSyncAt != nil {
+		lastSyncAt := s.status.LastSyncAt.UTC()
+		status.LastSyncAt = &lastSyncAt
+	}
+	if s.status.LastSyncDuration != nil {
+		duration := *s.status.LastSyncDuration
+		status.LastSyncDuration = &duration
+	}
+	if s.status.Metadata != nil {
+		status.Metadata = append([]byte(nil), s.status.Metadata...)
+	}
+	return &status, nil
+}
+
+func (s *vulncheckStoreStub) UpsertFeedSyncStatus(_ context.Context, status *db.FeedSyncStatus) error {
+	if status == nil {
+		s.status = nil
+		return nil
+	}
+	copyStatus := *status
+	if status.LastSyncAt != nil {
+		lastSyncAt := status.LastSyncAt.UTC()
+		copyStatus.LastSyncAt = &lastSyncAt
+	}
+	if status.LastSyncDuration != nil {
+		duration := *status.LastSyncDuration
+		copyStatus.LastSyncDuration = &duration
+	}
+	if status.Metadata != nil {
+		copyStatus.Metadata = append([]byte(nil), status.Metadata...)
+	}
+	s.status = &copyStatus
+	return nil
 }

@@ -9,16 +9,24 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/8linkz-sec/packmon/internal/domain"
 	"github.com/BurntSushi/toml"
 )
 
-// Detection is one concrete SBOM generation target.
+// Detection is one concrete SBOM generation target found below a scan root.
 type Detection struct {
-	Ecosystem    string
-	ProjectDir   string
+	// Ecosystem selects the generator registry entry, such as go, npm, pypi, or maven.
+	Ecosystem domain.Ecosystem
+	// ScanRoot is the absolute root used to bound manifest discovery and path checks.
+	ScanRoot string
+	// ProjectDir is the directory where the generator should run.
+	ProjectDir string
+	// ManifestPath is the absolute path to the manifest that caused the detection.
 	ManifestPath string
-	InputKind    string
-	DisplayPath  string
+	// InputKind names the manifest style, for example go.mod, npm-package, or poetry.
+	InputKind string
+	// DisplayPath is the scan-root-relative path used in diagnostics and output names.
+	DisplayPath string
 }
 
 var skipDirs = map[string]struct{}{
@@ -31,12 +39,20 @@ var skipDirs = map[string]struct{}{
 var walkDir = filepath.WalkDir
 
 // Detect walks root up to maxDepth and returns supported generation targets.
+// Discovery stays within root, skips common dependency/cache directories, and
+// suppresses child manifests already covered by supported workspace/module
+// manifests.
 func Detect(root string, maxDepth int) ([]Detection, error) {
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		return nil, err
 	}
+	bounds, err := newScanRootBounds(absRoot)
+	if err != nil {
+		return nil, err
+	}
 
+	detectManifestNames := autoSBOMDetectManifestNames()
 	var manifests []string
 	err = walkDir(absRoot, func(p string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -56,8 +72,10 @@ func Detect(root string, maxDepth int) ([]Detection, error) {
 			return nil
 		}
 
-		switch d.Name() {
-		case "go.mod", "package.json", "requirements.txt", "pyproject.toml", "Pipfile", "pom.xml":
+		if _, ok := detectManifestNames[d.Name()]; ok {
+			if err := bounds.requireExisting(p); err != nil {
+				return err
+			}
 			manifests = append(manifests, p)
 		}
 		return nil
@@ -68,7 +86,7 @@ func Detect(root string, maxDepth int) ([]Detection, error) {
 
 	detections := make([]Detection, 0, len(manifests))
 	for _, manifest := range manifests {
-		det, ok, err := classifyManifest(absRoot, manifest)
+		det, ok, err := classifyManifest(bounds, manifest)
 		if err != nil {
 			return nil, err
 		}
@@ -91,28 +109,73 @@ func depthExceeded(root, dir string, maxDepth int) bool {
 	return len(parts) > maxDepth
 }
 
-func classifyManifest(root, manifest string) (Detection, bool, error) {
+func classifyManifest(bounds scanRootBounds, manifest string) (Detection, bool, error) {
+	descriptor, ok := autoSBOMDetectManifestDescriptor(filepath.Base(manifest))
+	if !ok {
+		return Detection{}, false, nil
+	}
 	dir := filepath.Dir(manifest)
-	display := relDisplay(root, manifest)
-	switch filepath.Base(manifest) {
-	case "go.mod":
-		return Detection{Ecosystem: "go", ProjectDir: dir, ManifestPath: manifest, InputKind: "go.mod", DisplayPath: display}, true, nil
-	case "package.json":
-		return Detection{Ecosystem: "npm", ProjectDir: dir, ManifestPath: manifest, InputKind: "npm-package", DisplayPath: display}, true, nil
-	case "requirements.txt":
-		return Detection{Ecosystem: "pypi", ProjectDir: dir, ManifestPath: manifest, InputKind: "requirements", DisplayPath: display}, true, nil
-	case "pom.xml":
-		return Detection{Ecosystem: "maven", ProjectDir: dir, ManifestPath: manifest, InputKind: "maven-pom", DisplayPath: display}, true, nil
-	case "pyproject.toml":
-		ok, err := isPoetryProject(manifest)
+	display := relDisplay(bounds.absRoot, manifest)
+	switch descriptor.Kind {
+	case autoSBOMManifestKindDetect:
+		if descriptor.Name == "package.json" {
+			hasUnsupportedLockfile, err := npmHasUnsupportedLockfileScoped(bounds.absRoot, dir)
+			if err != nil {
+				return Detection{}, false, err
+			}
+			hasNPMLockfile, err := npmHasLockfileScoped(bounds.absRoot, dir)
+			if err != nil {
+				return Detection{}, false, err
+			}
+			if hasUnsupportedLockfile && !hasNPMLockfile {
+				return Detection{}, false, nil
+			}
+		}
+		if descriptor.Name == "requirements.txt" {
+			if err := validateRequirementsIncludesWithinRoot(bounds.absRoot, manifest); err != nil {
+				return Detection{}, false, err
+			}
+		}
+		return Detection{Ecosystem: descriptor.Ecosystem, ScanRoot: bounds.absRoot, ProjectDir: dir, ManifestPath: manifest, InputKind: descriptor.InputKind, DisplayPath: display}, true, nil
+	case autoSBOMManifestKindPoetryPyproject:
+		ok, err := isPoetryProjectForDetection(bounds.absRoot, manifest)
 		if err != nil {
 			return Detection{}, false, err
 		}
 		if ok {
-			return Detection{Ecosystem: "pypi", ProjectDir: dir, ManifestPath: manifest, InputKind: "poetry", DisplayPath: display}, true, nil
+			if err := checkPoetryLockReadable(bounds.absRoot, dir); err != nil {
+				return Detection{}, false, err
+			}
+			return Detection{Ecosystem: descriptor.Ecosystem, ScanRoot: bounds.absRoot, ProjectDir: dir, ManifestPath: manifest, InputKind: descriptor.InputKind, DisplayPath: display}, true, nil
 		}
 	}
 	return Detection{}, false, nil
+}
+
+func npmHasUnsupportedLockfile(projectDir string) bool {
+	ok, _ := npmHasUnsupportedLockfileScoped("", projectDir)
+	return ok
+}
+
+func npmHasUnsupportedLockfileScoped(root, projectDir string) (bool, error) {
+	var bounds scanRootBounds
+	var err error
+	if strings.TrimSpace(root) != "" {
+		bounds, err = newScanRootBounds(root)
+		if err != nil {
+			return false, err
+		}
+	}
+	for _, name := range []string{"pnpm-lock.yaml", "yarn.lock"} {
+		path := filepath.Join(projectDir, name)
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			if err := bounds.requireExisting(path); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func relDisplay(root, p string) string {
@@ -124,7 +187,15 @@ func relDisplay(root, p string) string {
 }
 
 func isPoetryProject(pyproject string) (bool, error) {
-	data, err := readAutoSBOMManifest(pyproject)
+	return parsePoetryProject("", pyproject, false)
+}
+
+func isPoetryProjectForDetection(root, pyproject string) (bool, error) {
+	return parsePoetryProject(root, pyproject, true)
+}
+
+func parsePoetryProject(root, pyproject string, strict bool) (bool, error) {
+	data, err := readAutoSBOMManifestScoped(root, pyproject)
 	if err != nil {
 		return false, err
 	}
@@ -137,37 +208,51 @@ func isPoetryProject(pyproject string) (bool, error) {
 		} `toml:"tool"`
 	}
 	if err := toml.Unmarshal(data, &doc); err != nil {
+		if strict {
+			return false, fmt.Errorf("parse %s: %w", pyproject, err)
+		}
 		return false, nil
 	}
 	return strings.TrimSpace(doc.Tool.Poetry.Name) != "" || len(doc.Tool.Poetry.Dependencies) > 0, nil
 }
 
+func checkPoetryLockReadable(root, projectDir string) error {
+	lockPath := filepath.Join(projectDir, "poetry.lock")
+	if _, err := readAutoSBOMManifestScoped(root, lockPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read %s: %w", relDisplay(root, lockPath), err)
+	}
+	return nil
+}
+
 func suppressCovered(ds []Detection) ([]Detection, error) {
 	suppressed := map[string]struct{}{}
-	key := func(ecosystem, dir string) string {
-		return ecosystem + "\x00" + filepath.Clean(dir)
+	key := func(ecosystem domain.Ecosystem, dir string) string {
+		return string(ecosystem) + "\x00" + filepath.Clean(dir)
 	}
 
 	for _, d := range ds {
 		switch d.Ecosystem {
-		case "npm":
+		case domain.EcosystemNPM:
 			children, err := npmWorkspaceChildren(d)
 			if err != nil {
 				return nil, err
 			}
 			for _, child := range children {
 				if filepath.Clean(child) != filepath.Clean(d.ProjectDir) {
-					suppressed[key("npm", child)] = struct{}{}
+					suppressed[key(domain.EcosystemNPM, child)] = struct{}{}
 				}
 			}
-		case "maven":
+		case domain.EcosystemMaven:
 			children, err := mavenModuleChildren(d)
 			if err != nil {
 				return nil, err
 			}
 			for _, child := range children {
 				if filepath.Clean(child) != filepath.Clean(d.ProjectDir) {
-					suppressed[key("maven", child)] = struct{}{}
+					suppressed[key(domain.EcosystemMaven, child)] = struct{}{}
 				}
 			}
 		}
@@ -184,9 +269,16 @@ func suppressCovered(ds []Detection) ([]Detection, error) {
 }
 
 func npmWorkspaceChildren(d Detection) ([]string, error) {
-	globs, err := npmWorkspaceGlobs(d.ManifestPath)
+	globs, err := npmWorkspaceGlobs(d.ScanRoot, d.ManifestPath)
 	if err != nil {
 		return nil, err
+	}
+	var bounds scanRootBounds
+	if strings.TrimSpace(d.ScanRoot) != "" {
+		bounds, err = newScanRootBounds(d.ScanRoot)
+		if err != nil {
+			return nil, err
+		}
 	}
 	children := make([]string, 0, len(globs))
 	for _, pattern := range globs {
@@ -194,8 +286,14 @@ func npmWorkspaceChildren(d Detection) ([]string, error) {
 		if pattern == "" {
 			continue
 		}
+		if err := validateNPMWorkspacePattern(bounds, d.ProjectDir, pattern); err != nil {
+			return nil, err
+		}
 		matches, _ := filepath.Glob(filepath.Join(d.ProjectDir, filepath.FromSlash(pattern)))
 		for _, match := range matches {
+			if err := bounds.requireDerived(match); err != nil {
+				return nil, err
+			}
 			info, err := os.Stat(match)
 			if err == nil && info.IsDir() {
 				children = append(children, filepath.Clean(match))
@@ -205,8 +303,26 @@ func npmWorkspaceChildren(d Detection) ([]string, error) {
 	return children, nil
 }
 
-func npmWorkspaceGlobs(packageJSON string) ([]string, error) {
-	data, err := readAutoSBOMManifest(packageJSON)
+func validateNPMWorkspacePattern(bounds scanRootBounds, projectDir, pattern string) error {
+	if !bounds.enabled() {
+		return nil
+	}
+	native := filepath.FromSlash(pattern)
+	if filepath.IsAbs(native) {
+		return bounds.escapeError(native)
+	}
+	base := native
+	if idx := strings.IndexAny(base, "*?["); idx >= 0 {
+		base = base[:idx]
+	}
+	if strings.TrimSpace(base) == "" {
+		base = "."
+	}
+	return bounds.requireDerived(filepath.Join(projectDir, base))
+}
+
+func npmWorkspaceGlobs(root, packageJSON string) ([]string, error) {
+	data, err := readAutoSBOMManifestScoped(root, packageJSON)
 	if err != nil {
 		return nil, err
 	}
@@ -230,10 +346,10 @@ func npmWorkspaceGlobs(packageJSON string) ([]string, error) {
 }
 
 func mavenModuleChildren(d Detection) ([]string, error) {
-	return mavenModulesWalk(d.ProjectDir, map[string]struct{}{})
+	return mavenModulesWalk(d.ScanRoot, d.ProjectDir, map[string]struct{}{})
 }
 
-func mavenModulesWalk(dir string, visited map[string]struct{}) ([]string, error) {
+func mavenModulesWalk(root, dir string, visited map[string]struct{}) ([]string, error) {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		abs = filepath.Clean(dir)
@@ -243,7 +359,7 @@ func mavenModulesWalk(dir string, visited map[string]struct{}) ([]string, error)
 	}
 	visited[abs] = struct{}{}
 
-	data, err := readAutoSBOMManifest(filepath.Join(dir, "pom.xml"))
+	data, err := readAutoSBOMManifestScoped(root, filepath.Join(dir, "pom.xml"))
 	if err != nil {
 		return nil, err
 	}
@@ -260,8 +376,17 @@ func mavenModulesWalk(dir string, visited map[string]struct{}) ([]string, error)
 			continue
 		}
 		child := filepath.Clean(filepath.Join(dir, filepath.FromSlash(module)))
+		if strings.TrimSpace(root) != "" {
+			bounds, err := newScanRootBounds(root)
+			if err != nil {
+				return nil, err
+			}
+			if err := bounds.requireDerived(child); err != nil {
+				return nil, err
+			}
+		}
 		children = append(children, child)
-		grandchildren, err := mavenModulesWalk(child, visited)
+		grandchildren, err := mavenModulesWalk(root, child, visited)
 		if err != nil {
 			return nil, err
 		}

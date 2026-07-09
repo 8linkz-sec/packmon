@@ -248,6 +248,10 @@ func (p *RequirementsParser) Parse(r io.Reader) ([]domain.Package, error) {
 			errs = append(errs, fmt.Errorf("requirements.txt:%d: unpinned dependency", lineNo))
 			continue
 		}
+		if version == "" {
+			errs = append(errs, fmt.Errorf("requirements.txt:%d: empty pinned version", lineNo))
+			continue
+		}
 
 		pkgs = append(pkgs, domain.Package{
 			Name:       normalizePyName(name),
@@ -316,6 +320,11 @@ func shouldSkipRequirementLine(line string) bool {
 		"--extra-index-url", "--find-links", "-f", "--trusted-host",
 		"--no-index", "--pre":
 		return true
+	}
+	for _, prefix := range []string{"--index-url=", "-i=", "--extra-index-url=", "--find-links=", "-f="} {
+		if strings.HasPrefix(fields[0], prefix) {
+			return true
+		}
 	}
 	return strings.HasPrefix(fields[0], "--") && fields[0] != "--editable"
 }
@@ -393,6 +402,9 @@ func parseRequirementLine(line string) (name, version string, pinned bool) {
 		version := strings.TrimSpace(line[idx+2:])
 		if fields := strings.Fields(version); len(fields) > 0 {
 			version = fields[0]
+		}
+		if strings.HasPrefix(version, "-") {
+			version = ""
 		}
 		return strings.TrimSpace(line[:idx]), version, true
 	}

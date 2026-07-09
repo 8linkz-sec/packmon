@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"fmt"
+	"github.com/8linkz-sec/packmon/internal/ioutils"
 	"strings"
 	"testing"
 	"time"
@@ -15,7 +16,7 @@ func TestHistoryQueriesAndClear(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	defer closeSilently(store)
+	defer ioutils.CloseSilently(store)
 
 	ctx := context.Background()
 	fixedNow := time.Date(2026, 5, 30, 12, 0, 0, 0, time.UTC)
@@ -61,7 +62,7 @@ func TestHistoryQueriesAndClear(t *testing.T) {
 		}
 	}
 
-	recent, err := store.ListRecentScans(ctx, 2)
+	recent, err := store.ListRecentScans(ctx, 2, 0)
 	if err != nil {
 		t.Fatalf("ListRecentScans() error = %v", err)
 	}
@@ -137,7 +138,7 @@ func TestGetRecentScansReturnsDecodeErrors(t *testing.T) {
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
 			}
-			defer closeSilently(store)
+			defer ioutils.CloseSilently(store)
 
 			scannedAt := "2026-05-30T12:00:00Z"
 			findingIDs := `["GHSA-test"]`
@@ -176,7 +177,7 @@ func TestScanHistorySchemaIncludesCommitAndIndexes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	defer closeSilently(store)
+	defer ioutils.CloseSilently(store)
 
 	if ok, err := tableHasColumn(store.DB(), "scan_history", "commit"); err != nil {
 		t.Fatalf("inspect scan_history commit column: %v", err)
@@ -190,7 +191,7 @@ func TestScanHistorySchemaIncludesCommitAndIndexes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query scan_history indexes: %v", err)
 	}
-	defer closeSilently(rows)
+	defer ioutils.CloseSilently(rows)
 
 	indexes := map[string]bool{}
 	for rows.Next() {
@@ -203,7 +204,7 @@ func TestScanHistorySchemaIncludesCommitAndIndexes(t *testing.T) {
 	if err := rows.Err(); err != nil {
 		t.Fatalf("iterate indexes: %v", err)
 	}
-	for _, want := range []string{"idx_scan_history_scanned_at", "idx_scan_history_repo_scanned_at"} {
+	for _, want := range []string{"idx_scan_history_scanned_at", "idx_scan_history_repo_scanned_at", "idx_scan_history_repo_retention"} {
 		if !indexes[want] {
 			t.Fatalf("scan_history index %q missing; have %#v", want, indexes)
 		}
@@ -217,7 +218,7 @@ func TestDashboardStatsAndSearchPackages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	defer closeSilently(store)
+	defer ioutils.CloseSilently(store)
 
 	ctx := context.Background()
 
@@ -401,7 +402,7 @@ func TestHasAdvisoryDataIncludesReputationAndLifecycle(t *testing.T) {
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
 			}
-			defer closeSilently(store)
+			defer ioutils.CloseSilently(store)
 
 			ctx := context.Background()
 			if _, err := store.DB().ExecContext(ctx, tt.sql); err != nil {
@@ -426,7 +427,7 @@ func TestSearchPackagesCapsVulnerabilityIDPreview(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	defer closeSilently(store)
+	defer ioutils.CloseSilently(store)
 
 	ctx := context.Background()
 	for i := 1; i <= 7; i++ {
@@ -457,6 +458,47 @@ func TestSearchPackagesCapsVulnerabilityIDPreview(t *testing.T) {
 	}
 }
 
+func TestLimitLocalSearchResultsSortsByNameEcosystemVersion(t *testing.T) {
+	t.Parallel()
+
+	results := []db.PackageSearchResult{
+		{Ecosystem: "npm", Name: "zeta", Version: "1.0.0"},
+		{Ecosystem: "pypi", Name: "alpha", Version: "2.0.0"},
+		{Ecosystem: "go", Name: "alpha", Version: "1.0.0"},
+		{Ecosystem: "go", Name: "alpha", Version: "0.9.0"},
+	}
+
+	got := limitLocalSearchResults(results, 3, 0)
+
+	want := []db.PackageSearchResult{
+		{Ecosystem: "go", Name: "alpha", Version: "0.9.0"},
+		{Ecosystem: "go", Name: "alpha", Version: "1.0.0"},
+		{Ecosystem: "pypi", Name: "alpha", Version: "2.0.0"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("limitLocalSearchResults() len = %d, want %d: %+v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("limitLocalSearchResults()[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+
+	got = limitLocalSearchResults(results, 2, 1)
+	want = []db.PackageSearchResult{
+		{Ecosystem: "go", Name: "alpha", Version: "1.0.0"},
+		{Ecosystem: "pypi", Name: "alpha", Version: "2.0.0"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("limitLocalSearchResults(offset) len = %d, want %d: %+v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("limitLocalSearchResults(offset)[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
 func TestSearchPackagesWithoutFiltersReturnsEmptyWithoutQuerying(t *testing.T) {
 	t.Parallel()
 
@@ -484,7 +526,7 @@ func TestSearchPackagesUsesUnicodeAwareQueryMatching(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	defer closeSilently(store)
+	defer ioutils.CloseSilently(store)
 
 	ctx := context.Background()
 	if _, err := store.DB().ExecContext(ctx, `
@@ -509,7 +551,7 @@ func TestDashboardStatsNormalizesBlankSeverity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	defer closeSilently(store)
+	defer ioutils.CloseSilently(store)
 
 	ctx := context.Background()
 	if _, err := store.DB().ExecContext(ctx, `
@@ -553,7 +595,7 @@ func TestClosedStoreReturnsQueryErrors(t *testing.T) {
 			return err
 		}},
 		{name: "ListRecentScans", run: func() error {
-			_, err := store.ListRecentScans(ctx, 1)
+			_, err := store.ListRecentScans(ctx, 1, 0)
 			return err
 		}},
 		{name: "CountScansByDay", run: func() error {

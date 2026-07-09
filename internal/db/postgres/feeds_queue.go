@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/8linkz-sec/packmon/internal/ioutils"
 	"time"
 
 	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/logsafe"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -66,7 +68,7 @@ func (s *Store) GetFeedSyncStatus(ctx context.Context, feedName string) (*db.Fee
 		status.LastError = *lastError
 	}
 	if lastETag != nil {
-		status.LastEtag = *lastETag
+		status.LastETag = *lastETag
 	}
 	if lastCommit != nil {
 		status.LastCommitHash = *lastCommit
@@ -82,7 +84,33 @@ func (s *Store) UpsertFeedSyncStatus(ctx context.Context, status *db.FeedSyncSta
 	return upsertFeedSyncStatusTx(ctx, s.pool, status)
 }
 
+func validateFeedSyncStatus(status *db.FeedSyncStatus) error {
+	if status == nil {
+		return fmt.Errorf("feed sync status is required")
+	}
+	status.LastSyncStatus = db.NormalizeFeedSyncStatus(status.LastSyncStatus)
+	if !db.IsValidFeedSyncStatus(status.LastSyncStatus) {
+		return fmt.Errorf("unsupported feed sync status %q", status.LastSyncStatus)
+	}
+	if status.EntriesSynced < 0 {
+		return fmt.Errorf("feed sync entries_synced must be non-negative")
+	}
+	if status.EntriesTotal < 0 {
+		return fmt.Errorf("feed sync entries_total must be non-negative")
+	}
+	if status.EntriesSynced > status.EntriesTotal {
+		return fmt.Errorf("feed sync entries_synced cannot exceed entries_total")
+	}
+	if status.LastSyncDuration != nil && *status.LastSyncDuration < 0 {
+		return fmt.Errorf("feed sync duration must be non-negative")
+	}
+	return nil
+}
+
 func upsertFeedSyncStatusTx(ctx context.Context, execer postgresExecer, status *db.FeedSyncStatus) error {
+	if err := validateFeedSyncStatus(status); err != nil {
+		return err
+	}
 	const query = `
 		INSERT INTO feed_sync_status (
 			feed_name, last_sync_at, last_sync_duration, last_sync_status, last_error,
@@ -92,7 +120,7 @@ func upsertFeedSyncStatusTx(ctx context.Context, execer postgresExecer, status *
 			$6, $7, $8, $9, $10
 		)
 		ON CONFLICT (feed_name) DO UPDATE SET
-			last_sync_at = EXCLUDED.last_sync_at,
+			last_sync_at = COALESCE(EXCLUDED.last_sync_at, feed_sync_status.last_sync_at),
 			last_sync_duration = COALESCE(EXCLUDED.last_sync_duration, feed_sync_status.last_sync_duration),
 			last_sync_status = EXCLUDED.last_sync_status,
 			last_error = EXCLUDED.last_error,
@@ -119,7 +147,7 @@ func upsertFeedSyncStatusTx(ctx context.Context, execer postgresExecer, status *
 		nullableString(status.LastError),
 		status.EntriesSynced,
 		status.EntriesTotal,
-		nullableString(status.LastEtag),
+		nullableString(status.LastETag),
 		nullableString(status.LastCommitHash),
 		normalizeJSON(status.Metadata, []byte("{}")),
 	)
@@ -150,7 +178,7 @@ func (s *Store) ListFeedSyncStatuses(ctx context.Context) ([]db.FeedSyncStatus, 
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list feed sync statuses: %w", err)
 	}
-	defer closeSilently(rows)
+	defer ioutils.CloseSilently(rows)
 
 	out := make([]db.FeedSyncStatus, 0)
 	for rows.Next() {
@@ -189,7 +217,7 @@ func (s *Store) ListFeedSyncStatuses(ctx context.Context) ([]db.FeedSyncStatus, 
 			status.LastError = *lastError
 		}
 		if lastETag != nil {
-			status.LastEtag = *lastETag
+			status.LastETag = *lastETag
 		}
 		if lastCommit != nil {
 			status.LastCommitHash = *lastCommit
@@ -208,6 +236,27 @@ func (s *Store) ListFeedSyncStatuses(ctx context.Context) ([]db.FeedSyncStatus, 
 }
 
 func (s *Store) EnqueueRefresh(ctx context.Context, job *db.RefreshJob) (bool, int, error) {
+	return s.enqueueRefresh(ctx, job, nil, true)
+}
+
+func (s *Store) EnqueueRefreshWithAudit(ctx context.Context, job *db.RefreshJob, audit func(created bool, position int) *db.AdminAuditEntry) (bool, int, error) {
+	return s.enqueueRefresh(ctx, job, audit, true)
+}
+
+func (s *Store) EnqueueRefreshNoPosition(ctx context.Context, job *db.RefreshJob) (bool, error) {
+	created, _, err := s.enqueueRefresh(ctx, job, nil, false)
+	return created, err
+}
+
+func (s *Store) enqueueRefresh(ctx context.Context, job *db.RefreshJob, audit func(created bool, position int) *db.AdminAuditEntry, countPosition bool) (bool, int, error) {
+	ecosystem, err := normalizeStoredEcosystem(job.Ecosystem)
+	if err != nil {
+		return false, 0, err
+	}
+	priority, err := normalizeRefreshQueuePriority(job.Priority)
+	if err != nil {
+		return false, 0, err
+	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return false, 0, fmt.Errorf("postgres: begin enqueue refresh tx: %w", err)
@@ -216,7 +265,7 @@ func (s *Store) EnqueueRefresh(ctx context.Context, job *db.RefreshJob) (bool, i
 
 	const insertQuery = `
 		INSERT INTO refresh_queue (ecosystem, name, source, priority, status)
-		VALUES ($1, $2, $3, $4, 'pending')
+		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT DO NOTHING
 		RETURNING id`
 
@@ -224,9 +273,9 @@ func (s *Store) EnqueueRefresh(ctx context.Context, job *db.RefreshJob) (bool, i
 	const updateQuery = `
 		UPDATE refresh_queue
 		SET priority = LEAST(priority, $4),
-		    error = CASE WHEN status = 'pending' THEN NULL ELSE error END
+		    error = CASE WHEN status = $5 THEN NULL ELSE error END
 		WHERE ecosystem = $1 AND name = $2 AND source = $3
-		  AND status IN ('pending', 'processing')
+		  AND status = ANY($6::text[])
 		RETURNING id`
 
 	// A job an admin has explicitly paused must never be resurrected; locate it
@@ -235,7 +284,7 @@ func (s *Store) EnqueueRefresh(ctx context.Context, job *db.RefreshJob) (bool, i
 		SELECT id
 		FROM refresh_queue
 		WHERE ecosystem = $1 AND name = $2 AND source = $3
-		  AND status = 'paused'
+		  AND status = $4
 		ORDER BY id ASC
 		LIMIT 1`
 
@@ -252,14 +301,14 @@ func (s *Store) EnqueueRefresh(ctx context.Context, job *db.RefreshJob) (bool, i
 	// so a pathological churn cannot spin forever.
 	const maxAttempts = 3
 	for attempt := 0; attempt < maxAttempts && !settled; attempt++ {
-		switch insErr := tx.QueryRow(ctx, insertQuery, job.Ecosystem, job.Name, job.Source, job.Priority).Scan(&jobID); {
+		switch insErr := tx.QueryRow(ctx, insertQuery, ecosystem, job.Name, job.Source, priority, db.RefreshStatusPending).Scan(&jobID); {
 		case insErr == nil:
 			created, settled = true, true
 		case !errors.Is(insErr, pgx.ErrNoRows):
 			return false, 0, fmt.Errorf("postgres: insert refresh job: %w", insErr)
 		default:
 			// Conflict with an existing pending/processing/paused job.
-			switch updErr := tx.QueryRow(ctx, updateQuery, job.Ecosystem, job.Name, job.Source, job.Priority).Scan(&jobID); {
+			switch updErr := tx.QueryRow(ctx, updateQuery, ecosystem, job.Name, job.Source, priority, db.RefreshStatusPending, db.DrainableRefreshStatuses()).Scan(&jobID); {
 			case updErr == nil:
 				settled = true
 			case !errors.Is(updErr, pgx.ErrNoRows):
@@ -267,7 +316,7 @@ func (s *Store) EnqueueRefresh(ctx context.Context, job *db.RefreshJob) (bool, i
 			default:
 				// No active job to bump: it is either paused (leave it paused)
 				// or it just transitioned to done/error (retry the insert).
-				switch selErr := tx.QueryRow(ctx, selectPausedQuery, job.Ecosystem, job.Name, job.Source).Scan(&jobID); {
+				switch selErr := tx.QueryRow(ctx, selectPausedQuery, ecosystem, job.Name, job.Source, db.RefreshStatusPaused).Scan(&jobID); {
 				case selErr == nil:
 					settled = true
 				case !errors.Is(selErr, pgx.ErrNoRows):
@@ -282,9 +331,18 @@ func (s *Store) EnqueueRefresh(ctx context.Context, job *db.RefreshJob) (bool, i
 		return false, 0, fmt.Errorf("postgres: enqueue refresh job: no row settled after %d attempts", maxAttempts)
 	}
 
-	position, err := queuePosition(ctx, tx, jobID, job.Source)
-	if err != nil {
-		return false, 0, err
+	position := 0
+	if countPosition {
+		position, err = queuePosition(ctx, tx, jobID, job.Source)
+		if err != nil {
+			return false, 0, err
+		}
+	}
+
+	if audit != nil {
+		if err := insertAdminAuditLogTx(ctx, tx, audit(created, position)); err != nil {
+			return false, 0, fmt.Errorf("%w: %v", db.ErrAdminAuditLog, err)
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -298,13 +356,13 @@ func (s *Store) DequeueRefresh(ctx context.Context, source string) (*db.RefreshJ
 		WITH next_job AS (
 			SELECT id
 			FROM refresh_queue
-			WHERE source = $1 AND status = 'pending'
+			WHERE source = $1 AND status = $2
 			ORDER BY priority ASC, requested_at ASC, id ASC
 			FOR UPDATE SKIP LOCKED
 			LIMIT 1
 		)
 		UPDATE refresh_queue q
-		SET status = 'processing', processed_at = NOW(), error = NULL
+		SET status = $3, processed_at = NOW(), error = NULL
 		FROM next_job
 		WHERE q.id = next_job.id
 		RETURNING q.id, q.ecosystem, q.name, q.source, q.priority, q.status, q.requested_at, q.processed_at, q.error`
@@ -315,7 +373,7 @@ func (s *Store) DequeueRefresh(ctx context.Context, source string) (*db.RefreshJ
 		errorText   *string
 	)
 
-	err := s.pool.QueryRow(ctx, query, source).Scan(
+	err := s.pool.QueryRow(ctx, query, source, db.RefreshStatusPending, db.RefreshStatusProcessing).Scan(
 		&job.ID,
 		&job.Ecosystem,
 		&job.Name,
@@ -341,11 +399,11 @@ func (s *Store) DequeueRefresh(ctx context.Context, source string) (*db.RefreshJ
 }
 
 func (s *Store) CompleteRefresh(ctx context.Context, jobID int, jobErr error) error {
-	status := "done"
+	status := db.RefreshStatusDone
 	var errorText any
 	if jobErr != nil {
-		status = "error"
-		errorText = jobErr.Error()
+		status = db.RefreshStatusError
+		errorText = refreshQueueErrorText(jobErr)
 	}
 
 	_, err := s.pool.Exec(ctx,
@@ -360,23 +418,23 @@ func (s *Store) CompleteRefresh(ctx context.Context, jobID int, jobErr error) er
 
 func (s *Store) CompleteClaimedRefresh(ctx context.Context, jobID int, claimedAt *time.Time, jobErr error) error {
 	if claimedAt == nil {
-		return s.CompleteRefresh(ctx, jobID, jobErr)
+		return fmt.Errorf("postgres: complete claimed refresh job %d: missing claim timestamp", jobID)
 	}
 
-	status := "done"
+	status := db.RefreshStatusDone
 	var errorText any
 	if jobErr != nil {
-		status = "error"
-		errorText = jobErr.Error()
+		status = db.RefreshStatusError
+		errorText = refreshQueueErrorText(jobErr)
 	}
 
 	_, err := s.pool.Exec(ctx,
 		`UPDATE refresh_queue
 		 SET status = $2, processed_at = NOW(), error = $3
 		 WHERE id = $1
-		   AND status = 'processing'
+		   AND status = $5
 		   AND processed_at = $4`,
-		jobID, status, errorText, *claimedAt,
+		jobID, status, errorText, *claimedAt, db.RefreshStatusProcessing,
 	)
 	if err != nil {
 		return fmt.Errorf("postgres: complete claimed refresh job %d: %w", jobID, err)
@@ -384,16 +442,25 @@ func (s *Store) CompleteClaimedRefresh(ctx context.Context, jobID int, claimedAt
 	return nil
 }
 
+func refreshQueueErrorText(jobErr error) string {
+	if jobErr == nil {
+		return ""
+	}
+	return logsafe.BoundedDiagnosticValue(jobErr.Error(), 512)
+}
+
 func (s *Store) ResetStuckJobs(ctx context.Context, source string, stuckThreshold time.Duration) (int, error) {
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE refresh_queue
-		SET status = 'pending', processed_at = NULL, error = NULL
+		SET status = $3, processed_at = NULL, error = NULL
 		WHERE source = $1
-		  AND status = 'processing'
+		  AND status = $4
 		  AND processed_at IS NOT NULL
 		  AND processed_at < NOW() - ($2 * interval '1 microsecond')`,
 		source,
 		stuckThreshold.Microseconds(),
+		db.RefreshStatusPending,
+		db.RefreshStatusProcessing,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("postgres: reset stuck jobs for %s: %w", source, err)
@@ -439,6 +506,10 @@ func (s *Store) GetPackageCheckStatus(ctx context.Context, ecosystem, name, sour
 }
 
 func (s *Store) UpsertPackageCheckStatus(ctx context.Context, status *db.PackageCheckStatus) error {
+	ecosystem, err := normalizeStoredEcosystem(status.Ecosystem)
+	if err != nil {
+		return err
+	}
 	increment := status.CheckCount
 	if increment <= 0 {
 		increment = 1
@@ -455,8 +526,8 @@ func (s *Store) UpsertPackageCheckStatus(ctx context.Context, status *db.Package
 			last_result = EXCLUDED.last_result,
 			updated_at = NOW()`
 
-	_, err := s.pool.Exec(ctx, query,
-		status.Ecosystem,
+	_, err = s.pool.Exec(ctx, query,
+		ecosystem,
 		status.Name,
 		status.Source,
 		status.LastCheckedAt,
@@ -470,6 +541,21 @@ func (s *Store) UpsertPackageCheckStatus(ctx context.Context, status *db.Package
 	return nil
 }
 
+func (s *Store) PrunePackageCheckStatus(ctx context.Context, retention time.Duration) (int, error) {
+	if retention <= 0 {
+		return 0, nil
+	}
+	cutoff := time.Now().UTC().Add(-retention)
+	tag, err := s.pool.Exec(ctx, `
+		DELETE FROM package_check_status
+		WHERE source = 'socket'
+		  AND updated_at < $1`, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("postgres: prune package check status: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
 func queuePosition(ctx context.Context, tx pgx.Tx, jobID int, source string) (int, error) {
 	const query = `
 		WITH selected AS (
@@ -481,7 +567,7 @@ func queuePosition(ctx context.Context, tx pgx.Tx, jobID int, source string) (in
 		FROM refresh_queue q
 		CROSS JOIN selected s
 		WHERE q.source = $2
-		  AND q.status IN ('pending', 'processing')
+		  AND q.status = ANY($3::text[])
 		  AND (
 			q.priority < s.priority OR
 			(q.priority = s.priority AND q.requested_at < s.requested_at) OR
@@ -489,7 +575,7 @@ func queuePosition(ctx context.Context, tx pgx.Tx, jobID int, source string) (in
 		  )`
 
 	var position int
-	if err := tx.QueryRow(ctx, query, jobID, source).Scan(&position); err != nil {
+	if err := tx.QueryRow(ctx, query, jobID, source, db.DrainableRefreshStatuses()).Scan(&position); err != nil {
 		return 0, fmt.Errorf("postgres: queue position for job %d: %w", jobID, err)
 	}
 	return position, nil

@@ -3,12 +3,60 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/8linkz-sec/packmon/internal/db"
 )
+
+type startupAuditRepairStub struct {
+	auditedCalled   bool
+	unauditedCalled bool
+	audit           *db.AdminAuditEntry
+}
+
+func (s *startupAuditRepairStub) RepairCaseInsensitivePackageNames(context.Context) (int, error) {
+	s.unauditedCalled = true
+	return 0, nil
+}
+
+func (s *startupAuditRepairStub) RepairCaseInsensitivePackageNamesWithAudit(_ context.Context, audit *db.AdminAuditEntry) (int, error) {
+	s.auditedCalled = true
+	s.audit = audit
+	return 7, nil
+}
+
+func TestRunStartupRepairs_UsesAuditedPackageNameRepairWhenSupported(t *testing.T) {
+	t.Parallel()
+
+	store := &startupAuditRepairStub{}
+
+	runStartupRepairs(context.Background(), store, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+
+	if !store.auditedCalled {
+		t.Fatal("expected audited package-name normalization repair to run")
+	}
+	if store.unauditedCalled {
+		t.Fatal("unaudited package-name normalization repair should not run when audited repair is supported")
+	}
+	if store.audit == nil {
+		t.Fatal("expected startup repair audit entry")
+	}
+	if store.audit.Action != "startup_package_name_repair" {
+		t.Fatalf("audit action = %q, want startup_package_name_repair", store.audit.Action)
+	}
+	var details map[string]string
+	if err := json.Unmarshal(store.audit.Details, &details); err != nil {
+		t.Fatalf("audit details are invalid JSON: %v", err)
+	}
+	if details["repair"] != "case_insensitive_package_names" {
+		t.Fatalf("audit repair detail = %q, want case_insensitive_package_names", details["repair"])
+	}
+}
 
 type startupRepairStub struct {
 	repaired           int
@@ -135,25 +183,25 @@ func TestRunStartupRepairs_LogsWarningOnPackageNameRepairFailure(t *testing.T) {
 }
 
 type blockingStartupRepairStore struct {
-	ctxErr chan error
+	hadDeadline bool
+	ctxErr      error
 }
 
 func (s *blockingStartupRepairStore) RepairCaseInsensitivePackageNames(ctx context.Context) (int, error) {
+	_, s.hadDeadline = ctx.Deadline()
 	<-ctx.Done()
-	s.ctxErr <- ctx.Err()
+	s.ctxErr = ctx.Err()
 	return 0, ctx.Err()
 }
 
 func TestRunStartupRepairsBoundsRepairContext(t *testing.T) {
-	store := &blockingStartupRepairStore{ctxErr: make(chan error, 1)}
-	start := time.Now()
+	store := &blockingStartupRepairStore{}
 	runStartupRepairsWithTimeout(context.Background(), store, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), 25*time.Millisecond)
-	elapsed := time.Since(start)
 
-	if elapsed > 250*time.Millisecond {
-		t.Fatalf("runStartupRepairs took %s, want bounded by startupRepairTimeout", elapsed)
+	if !store.hadDeadline {
+		t.Fatal("repair context had no deadline")
 	}
-	if err := <-store.ctxErr; !errors.Is(err, context.DeadlineExceeded) {
+	if err := store.ctxErr; !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("repair context error = %v, want deadline exceeded", err)
 	}
 }

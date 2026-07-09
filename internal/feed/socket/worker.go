@@ -18,12 +18,13 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/8linkz-sec/packmon/internal/db"
 	feedqueue "github.com/8linkz-sec/packmon/internal/feed"
-	"github.com/8linkz-sec/packmon/internal/telemetry"
+	"github.com/8linkz-sec/packmon/internal/feed/packagefilter"
+	"github.com/8linkz-sec/packmon/internal/feed/ratelimit"
+	"github.com/8linkz-sec/packmon/internal/httpclient"
 )
 
 const (
@@ -51,6 +52,9 @@ const (
 	// cancelled during runtime reconfiguration or shutdown.
 	completeTimeout = 2 * time.Second
 
+	// dequeueTimeout bounds the queue claim query that marks a row processing.
+	dequeueTimeout = 2 * time.Second
+
 	resetStuckJobsTimeout = 2 * time.Second
 )
 
@@ -59,41 +63,11 @@ var errRateLimited = errors.New("rate limited")
 // RateLimiter holds Socket.dev token-bucket state. It can be shared by
 // successive workers so runtime reconfiguration does not reset upstream
 // capacity.
-type RateLimiter struct {
-	tokensMu         sync.Mutex
-	tokens           int
-	maxTokens        int
-	lastRefill       time.Time
-	fractionalTokens float64 // accumulates sub-integer token fractions between refills
-}
+type RateLimiter = ratelimit.Bucket
 
 // NewRateLimiter creates a token bucket for Socket.dev calls per hour.
 func NewRateLimiter(callsPerHour int) *RateLimiter {
-	if callsPerHour <= 0 {
-		callsPerHour = defaultRateLimit
-	}
-	return &RateLimiter{
-		tokens:     callsPerHour,
-		maxTokens:  callsPerHour,
-		lastRefill: time.Now(),
-	}
-}
-
-func (l *RateLimiter) SetLimit(callsPerHour int) {
-	if l == nil || callsPerHour <= 0 {
-		return
-	}
-	l.tokensMu.Lock()
-	defer l.tokensMu.Unlock()
-
-	wasFull := l.tokens >= l.maxTokens
-	l.maxTokens = callsPerHour
-	switch {
-	case wasFull:
-		l.tokens = callsPerHour
-	case l.tokens > callsPerHour:
-		l.tokens = callsPerHour
-	}
+	return ratelimit.New(callsPerHour, defaultRateLimit)
 }
 
 // ecosystemMap translates canonical Packmon ecosystem names to Socket.dev
@@ -184,7 +158,7 @@ var socketIssueRiskTypes = map[string]string{
 
 type socketStore interface {
 	DequeueRefresh(context.Context, string) (*db.RefreshJob, error)
-	CompleteRefresh(context.Context, int, error) error
+	CompleteClaimedRefresh(context.Context, int, *time.Time, error) error
 	ResetStuckJobs(context.Context, string, time.Duration) (int, error)
 	UpsertMaliciousFinding(context.Context, *db.MaliciousFinding) error
 	UpsertPackageCheckStatus(context.Context, *db.PackageCheckStatus) error
@@ -200,8 +174,12 @@ type Worker struct {
 	apiKey       string
 	pollInterval time.Duration
 	jobTimeout   time.Duration
+	excluded     []string
+	pollTicks    <-chan time.Time
+	runReady     chan<- struct{}
 	dequeueLogs  *feedqueue.RepeatedErrorLogger
 	resetLogs    *feedqueue.RepeatedErrorLogger
+	metrics      feedqueue.MetricsRecorder
 
 	// Token bucket for rate limiting.
 	*RateLimiter
@@ -249,6 +227,18 @@ func WithJobTimeout(d time.Duration) Option {
 	}
 }
 
+func WithExcludedNamespaces(prefixes []string) Option {
+	return func(w *Worker) {
+		w.excluded = packagefilter.NormalizeNamespacePrefixes(prefixes)
+	}
+}
+
+func WithMetricsRecorder(recorder feedqueue.MetricsRecorder) Option {
+	return func(w *Worker) {
+		w.metrics = feedqueue.MetricsRecorderOrNoop(recorder)
+	}
+}
+
 // NewWorker creates a Socket.dev worker. If apiKey is empty, Run will
 // return immediately (the worker is a no-op without a key).
 func NewWorker(store socketStore, apiKey string, logger *slog.Logger, opts ...Option) *Worker {
@@ -267,11 +257,13 @@ func NewWorker(store socketStore, apiKey string, logger *slog.Logger, opts ...Op
 		jobTimeout:   30 * time.Second,
 		dequeueLogs:  feedqueue.NewRepeatedErrorLogger(feedqueue.DefaultRepeatedErrorLogWindow),
 		resetLogs:    feedqueue.NewRepeatedErrorLogger(feedqueue.DefaultRepeatedErrorLogWindow),
+		metrics:      feedqueue.NoopMetricsRecorder(),
 		RateLimiter:  NewRateLimiter(defaultRateLimit),
 	}
 	for _, opt := range opts {
 		opt(w)
 	}
+	w.httpClient = httpclient.CloneWithSafeRedirectPolicy(w.httpClient)
 	return w
 }
 
@@ -290,18 +282,29 @@ func (w *Worker) Run(ctx context.Context) error {
 
 	w.logger.Info("Socket.dev worker started",
 		slog.Duration("poll_interval", w.pollInterval),
-		slog.Int("rate_limit", w.maxTokens),
+		slog.Int("rate_limit", w.Limit()),
 	)
 
-	ticker := time.NewTicker(w.pollInterval)
-	defer ticker.Stop()
+	pollTicks := w.pollTicks
+	if pollTicks == nil {
+		ticker := time.NewTicker(w.pollInterval)
+		defer ticker.Stop()
+		pollTicks = ticker.C
+	}
+	if w.runReady != nil {
+		close(w.runReady)
+		w.runReady = nil
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			w.logger.Info("Socket.dev worker shutting down")
 			return ctx.Err()
-		case <-ticker.C:
+		case _, ok := <-pollTicks:
+			if !ok {
+				return nil
+			}
 			w.processAvailableJobs(ctx)
 		}
 	}
@@ -324,39 +327,59 @@ func (w *Worker) processNextJob(ctx context.Context) bool {
 }
 
 func (w *Worker) processNextJobWithoutReset(ctx context.Context) bool {
-	if !w.acquireToken() {
+	if !w.RateLimiter.Acquire() {
 		return false
 	}
 
-	job, err := w.store.DequeueRefresh(ctx, FeedName)
+	dequeueCtx, cancel := context.WithTimeout(ctx, dequeueTimeout)
+	job, err := w.store.DequeueRefresh(dequeueCtx, FeedName)
+	cancel()
 	if err != nil {
-		w.returnToken()
+		w.RateLimiter.Return()
 		w.dequeueLogs.Error(w.logger, "failed to dequeue job", err)
 		return false
 	}
 	if job == nil {
 		// No pending jobs. Return the token since we did not make an API call.
-		w.returnToken()
+		w.RateLimiter.Return()
 		return false
 	}
 	if !SupportsEcosystem(job.Ecosystem) {
 		// The job cannot result in an upstream Socket.dev request, so it must
 		// not consume a worker rate-limit token.
-		w.returnToken()
+		w.RateLimiter.Return()
 		checkErr := unsupportedEcosystemError(job.Ecosystem)
 		completeCtx, cancel := context.WithTimeout(context.Background(), completeTimeout)
 		defer cancel()
-		if completeErr := feedqueue.CompleteClaimedRefresh(completeCtx, w.store, job, checkErr); completeErr != nil {
+		if completeErr := completeQueueJob(completeCtx, w.store, job, checkErr, w.metrics); completeErr != nil {
 			w.logger.Error("failed to complete job",
 				slog.Int("job_id", job.ID),
 				slog.String("error", completeErr.Error()),
 			)
 		}
-		telemetry.Default().IncQueueError(FeedName)
+		w.metrics.IncQueueError(FeedName)
 		w.logger.Warn("socket check failed",
 			slog.String("ecosystem", job.Ecosystem),
 			slog.String("name", job.Name),
-			slog.String("error", checkErr.Error()),
+			slog.Int("job_id", job.ID),
+			slog.String("error", feedqueue.SafeDiagnosticError(checkErr)),
+		)
+		return true
+	}
+	if packagefilter.ExcludedByNamespace(w.excluded, job.Ecosystem, job.Name) {
+		w.RateLimiter.Return()
+		checkErr := privateNamespaceError(job.Ecosystem, job.Name)
+		completeCtx, cancel := context.WithTimeout(context.Background(), completeTimeout)
+		defer cancel()
+		if completeErr := completeQueueJob(completeCtx, w.store, job, checkErr, w.metrics); completeErr != nil {
+			w.logger.Error("failed to complete job",
+				slog.Int("job_id", job.ID),
+				slog.String("error", completeErr.Error()),
+			)
+		}
+		w.logger.Info("socket check skipped by private namespace policy",
+			slog.String("ecosystem", job.Ecosystem),
+			slog.String("name", job.Name),
 		)
 		return true
 	}
@@ -372,17 +395,18 @@ func (w *Worker) processNextJobWithoutReset(ctx context.Context) bool {
 	checkErr := w.checkPackage(jobCtx, job)
 	cancel()
 	if errors.Is(checkErr, errRateLimited) {
-		telemetry.Default().IncQueueError(FeedName)
+		w.metrics.IncQueueError(FeedName)
 		w.logger.Warn("socket check rate limited; leaving job processing for retry",
 			slog.String("ecosystem", job.Ecosystem),
 			slog.String("name", job.Name),
-			slog.String("error", checkErr.Error()),
+			slog.Int("job_id", job.ID),
+			slog.String("error", feedqueue.SafeDiagnosticError(checkErr)),
 		)
 		return false
 	}
 	completeCtx, cancel := context.WithTimeout(context.Background(), completeTimeout)
 	defer cancel()
-	if completeErr := feedqueue.CompleteClaimedRefresh(completeCtx, w.store, job, checkErr); completeErr != nil {
+	if completeErr := completeQueueJob(completeCtx, w.store, job, checkErr, w.metrics); completeErr != nil {
 		w.logger.Error("failed to complete job",
 			slog.Int("job_id", job.ID),
 			slog.String("error", completeErr.Error()),
@@ -390,14 +414,31 @@ func (w *Worker) processNextJobWithoutReset(ctx context.Context) bool {
 	}
 
 	if checkErr != nil {
-		telemetry.Default().IncQueueError(FeedName)
+		w.metrics.IncQueueError(FeedName)
 		w.logger.Warn("socket check failed",
 			slog.String("ecosystem", job.Ecosystem),
 			slog.String("name", job.Name),
-			slog.String("error", checkErr.Error()),
+			slog.Int("job_id", job.ID),
+			slog.String("error", feedqueue.SafeDiagnosticError(checkErr)),
 		)
 	}
 	return true
+}
+
+func completeQueueJob(ctx context.Context, store socketStore, job *db.RefreshJob, jobErr error, recorder feedqueue.MetricsRecorder) error {
+	err := feedqueue.CompleteClaimedRefresh(ctx, store, job, jobErr)
+	if err != nil || job == nil {
+		return err
+	}
+	feedqueue.MetricsRecorderOrNoop(recorder).IncQueueJobCompleted(FeedName, queueJobCompletionResult(jobErr))
+	return nil
+}
+
+func queueJobCompletionResult(jobErr error) string {
+	if jobErr != nil {
+		return feedqueue.QueueJobResultError
+	}
+	return feedqueue.QueueJobResultSuccess
 }
 
 // checkPackage calls the Socket.dev API for a single package and stores
@@ -420,7 +461,7 @@ func (w *Worker) checkPackage(ctx context.Context, job *db.RefreshJob) error {
 	}
 	req.Header.Set("Authorization", "Bearer "+w.apiKey)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "packmon-feedsync/1.0")
+	req.Header.Set("User-Agent", feedqueue.FeedSyncUserAgent)
 
 	resp, err := w.httpClient.Do(req)
 	if err != nil {
@@ -440,7 +481,7 @@ func (w *Worker) checkPackage(ctx context.Context, job *db.RefreshJob) error {
 
 	if resp.StatusCode == http.StatusTooManyRequests {
 		// Rate limited. Drain tokens and let the job retry later.
-		w.drainTokens()
+		w.RateLimiter.Drain()
 		return fmt.Errorf("%w by Socket.dev (429)", errRateLimited)
 	}
 
@@ -468,6 +509,10 @@ func (w *Worker) checkPackage(ctx context.Context, job *db.RefreshJob) error {
 
 func unsupportedEcosystemError(ecosystem string) error {
 	return fmt.Errorf("unsupported ecosystem for Socket.dev: %s", ecosystem)
+}
+
+func privateNamespaceError(ecosystem, name string) error {
+	return fmt.Errorf("package %s/%s excluded by private namespace policy for Socket.dev", ecosystem, name)
 }
 
 // processIssues examines Socket.dev issues and creates malicious_findings
@@ -618,73 +663,9 @@ func (w *Worker) resetStuckJobs(ctx context.Context) {
 		return
 	}
 	if count > 0 {
-		telemetry.Default().AddQueueStuckRecovered(count)
+		w.metrics.AddQueueStuckRecovered(count)
 		w.logger.Info("reset stuck jobs", slog.Int("count", count))
 	}
-}
-
-// --- Token bucket rate limiter ---
-
-// acquireToken attempts to take one token from the bucket. Tokens refill
-// proportionally based on elapsed time since the last refill.
-func (w *Worker) acquireToken() bool {
-	w.tokensMu.Lock()
-	defer w.tokensMu.Unlock()
-
-	w.refillTokens()
-
-	if w.tokens <= 0 {
-		return false
-	}
-	w.tokens--
-	return true
-}
-
-// returnToken puts one token back (used when no API call was made).
-func (w *Worker) returnToken() {
-	w.tokensMu.Lock()
-	defer w.tokensMu.Unlock()
-	if w.tokens < w.maxTokens {
-		w.tokens++
-	}
-}
-
-// drainTokens sets tokens to zero (used when rate-limited by upstream).
-func (w *Worker) drainTokens() {
-	w.tokensMu.Lock()
-	defer w.tokensMu.Unlock()
-	w.tokens = 0
-	w.fractionalTokens = 0
-	w.lastRefill = time.Now()
-}
-
-// refillTokens adds tokens proportional to the time elapsed since the
-// last refill, up to the maximum. Must be called under tokensMu lock.
-//
-// Fractional tokens are accumulated across calls so that small elapsed
-// durations do not lose precision through int truncation (FEED-M3).
-func (w *Worker) refillTokens() {
-	now := time.Now()
-	elapsed := now.Sub(w.lastRefill)
-	if elapsed <= 0 {
-		return
-	}
-
-	// Tokens per second = maxTokens / 3600.
-	raw := elapsed.Seconds() * float64(w.maxTokens) / 3600.0
-	w.fractionalTokens += raw
-	whole := int(w.fractionalTokens)
-	w.fractionalTokens -= float64(whole)
-
-	if whole <= 0 {
-		return
-	}
-
-	w.tokens += whole
-	if w.tokens > w.maxTokens {
-		w.tokens = w.maxTokens
-	}
-	w.lastRefill = now
 }
 
 // mapSocketSeverity translates Socket.dev severity strings to canonical

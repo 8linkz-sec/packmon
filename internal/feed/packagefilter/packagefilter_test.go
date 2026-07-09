@@ -1,6 +1,24 @@
 package packagefilter
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
+
+func TestNormalizeNamespacePrefixes(t *testing.T) {
+	got := NormalizeNamespacePrefixes([]string{
+		" NPM/@Internal/ ",
+		"",
+		"npm/@internal/",
+		" @Scope/ ",
+		"@scope/",
+		"maven/com.acme:",
+	})
+	want := []string{"npm/@internal/", "@scope/", "maven/com.acme:"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("NormalizeNamespacePrefixes() = %#v, want %#v", got, want)
+	}
+}
 
 func TestExcludedByNamespace(t *testing.T) {
 	tests := []struct {

@@ -9,10 +9,12 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 type fakeGenerator struct {
-	ecosystem      string
+	ecosystem      domain.Ecosystem
 	tool           string
 	install        InstallSpec
 	declares       bool
@@ -22,8 +24,8 @@ type fakeGenerator struct {
 	generateCalls  int
 }
 
-func (g *fakeGenerator) Ecosystem() string { return g.ecosystem }
-func (g *fakeGenerator) Tool() string      { return g.tool }
+func (g *fakeGenerator) Ecosystem() domain.Ecosystem { return g.ecosystem }
+func (g *fakeGenerator) Tool() string                { return g.tool }
 func (g *fakeGenerator) InstallSpec() InstallSpec {
 	return g.install
 }
@@ -90,7 +92,7 @@ func TestRunMissingToolSuggestsInstallTools(t *testing.T) {
 	gen := &fakeGenerator{ecosystem: "npm", tool: "cyclonedx-npm", install: InstallSpec{CanAutoInstall: true}}
 	_, err := Run(context.Background(), Config{
 		Target:   root,
-		Registry: map[string]Generator{"npm": gen},
+		Registry: map[domain.Ecosystem]Generator{"npm": gen},
 		LookPath: func(string) (string, error) { return "", errors.New("missing") },
 		Logger:   slog.Default(),
 	})
@@ -108,7 +110,7 @@ func TestRunInstallsMissingToolThenGenerates(t *testing.T) {
 		install: InstallSpec{
 			Package:        "@cyclonedx/cyclonedx-npm",
 			Source:         "npm registry",
-			Args:           []string{"npm", "install", "--global", "@cyclonedx/cyclonedx-npm@" + npmGeneratorVersion},
+			Args:           []string{"npm", "install", "--global", "--ignore-scripts", "@cyclonedx/cyclonedx-npm@" + npmGeneratorVersion},
 			CanAutoInstall: true,
 		},
 		declares: true,
@@ -118,7 +120,7 @@ func TestRunInstallsMissingToolThenGenerates(t *testing.T) {
 	result, err := Run(context.Background(), Config{
 		Target:       root,
 		InstallTools: true,
-		Registry:     map[string]Generator{"npm": gen},
+		Registry:     map[domain.Ecosystem]Generator{"npm": gen},
 		LookPath: func(name string) (string, error) {
 			lookups = append(lookups, name)
 			if name == "npm" || len(lookups) > 2 {
@@ -181,7 +183,7 @@ func TestRunZeroPackagesCrossCheck(t *testing.T) {
 	}
 	_, err := Run(context.Background(), Config{
 		Target:   root,
-		Registry: map[string]Generator{"npm": gen},
+		Registry: map[domain.Ecosystem]Generator{"npm": gen},
 		LookPath: func(string) (string, error) { return "found", nil },
 		Logger:   slog.Default(),
 	})
@@ -221,7 +223,7 @@ func TestRunKeepCollisionDoesNotDeleteExistingFile(t *testing.T) {
 	result, err := Run(context.Background(), Config{
 		Target:      root,
 		KeepSBOMDir: keep,
-		Registry:    map[string]Generator{"npm": gen},
+		Registry:    map[domain.Ecosystem]Generator{"npm": gen},
 		LookPath:    func(string) (string, error) { return "found", nil },
 		Now:         fixedSBOMTestTime,
 		Logger:      slog.Default(),
@@ -256,7 +258,7 @@ func TestRunKeepTimestampCollisionUsesCounterSuffix(t *testing.T) {
 	result, err := Run(context.Background(), Config{
 		Target:      root,
 		KeepSBOMDir: keep,
-		Registry:    map[string]Generator{"npm": gen},
+		Registry:    map[domain.Ecosystem]Generator{"npm": gen},
 		LookPath:    func(string) (string, error) { return "found", nil },
 		Now:         fixedSBOMTestTime,
 		Logger:      slog.Default(),
@@ -281,7 +283,7 @@ func TestRunRespectsMaxDepthZero(t *testing.T) {
 		Target:      root,
 		MaxDepth:    0,
 		KeepSBOMDir: t.TempDir(),
-		Registry:    map[string]Generator{"npm": gen},
+		Registry:    map[domain.Ecosystem]Generator{"npm": gen},
 		LookPath:    func(string) (string, error) { return "found", nil },
 		Now:         fixedSBOMTestTime,
 		Logger:      slog.Default(),
@@ -311,7 +313,7 @@ func TestRunDisambiguatesInternalOutputNameCollisions(t *testing.T) {
 		Target:      root,
 		MaxDepth:    3,
 		KeepSBOMDir: keep,
-		Registry:    map[string]Generator{"npm": gen},
+		Registry:    map[domain.Ecosystem]Generator{"npm": gen},
 		LookPath:    func(string) (string, error) { return "found", nil },
 		Logger:      slog.Default(),
 	})
@@ -337,7 +339,7 @@ func TestRunTemporaryCleanupRemovesGeneratedDirectory(t *testing.T) {
 	gen := &fakeGenerator{ecosystem: "npm", tool: "cyclonedx-npm", declares: true}
 	result, err := Run(context.Background(), Config{
 		Target:   root,
-		Registry: map[string]Generator{"npm": gen},
+		Registry: map[domain.Ecosystem]Generator{"npm": gen},
 		LookPath: func(string) (string, error) { return "found", nil },
 		Logger:   slog.Default(),
 	})

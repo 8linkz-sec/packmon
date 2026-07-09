@@ -6,17 +6,20 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 type npmGenerator struct{}
 
-func (npmGenerator) Ecosystem() string { return "npm" }
-func (npmGenerator) Tool() string      { return "cyclonedx-npm" }
+func (npmGenerator) Ecosystem() domain.Ecosystem { return domain.EcosystemNPM }
+func (npmGenerator) Tool() string                { return "cyclonedx-npm" }
 func (npmGenerator) InstallSpec() InstallSpec {
 	return InstallSpec{
 		Package:         "@cyclonedx/cyclonedx-npm",
 		Source:          "npm registry",
-		Args:            []string{"npm", "install", "--global", "@cyclonedx/cyclonedx-npm@" + npmGeneratorVersion},
+		Args:            []string{"npm", "install", "--global", "--ignore-scripts", "@cyclonedx/cyclonedx-npm@" + npmGeneratorVersion},
 		ExpectedVersion: npmGeneratorVersion,
 		VersionArgs:     []string{"--version"},
 		CanAutoInstall:  true,
@@ -25,7 +28,11 @@ func (npmGenerator) InstallSpec() InstallSpec {
 
 func (npmGenerator) Generate(ctx context.Context, d Detection, outPath string, opts GenerateOptions, run RunnerFunc) error {
 	args := []string{"--output-format", "JSON", "--output-file", outPath}
-	if npmHasLockfile(d.ProjectDir) {
+	hasLockfile, err := npmHasLockfileScoped(d.ScanRoot, d.ProjectDir)
+	if err != nil {
+		return err
+	}
+	if hasLockfile {
 		args = append(args, "--package-lock-only")
 	}
 	if !opts.IncludeDev {
@@ -40,16 +47,33 @@ func (npmGenerator) Generate(ctx context.Context, d Detection, outPath string, o
 }
 
 func npmHasLockfile(projectDir string) bool {
-	for _, name := range []string{"package-lock.json", "npm-shrinkwrap.json"} {
-		if info, err := os.Stat(filepath.Join(projectDir, name)); err == nil && !info.IsDir() {
-			return true
+	ok, _ := npmHasLockfileScoped("", projectDir)
+	return ok
+}
+
+func npmHasLockfileScoped(root, projectDir string) (bool, error) {
+	var bounds scanRootBounds
+	var err error
+	if strings.TrimSpace(root) != "" {
+		bounds, err = newScanRootBounds(root)
+		if err != nil {
+			return false, err
 		}
 	}
-	return false
+	for _, name := range []string{"package-lock.json", "npm-shrinkwrap.json"} {
+		path := filepath.Join(projectDir, name)
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			if err := bounds.requireExisting(path); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (npmGenerator) DeclaresDependencies(d Detection, opts GenerateOptions) (bool, error) {
-	declares, err := packageJSONDeclaresDependencies(d.ManifestPath, opts)
+	declares, err := packageJSONDeclaresDependenciesScoped(d.ScanRoot, d.ManifestPath, opts)
 	if err != nil || declares {
 		return declares, err
 	}
@@ -62,7 +86,7 @@ func (npmGenerator) DeclaresDependencies(d Detection, opts GenerateOptions) (boo
 		if _, err := os.Stat(childManifest); err != nil {
 			continue
 		}
-		declares, err := packageJSONDeclaresDependencies(childManifest, opts)
+		declares, err := packageJSONDeclaresDependenciesScoped(d.ScanRoot, childManifest, opts)
 		if err != nil || declares {
 			return declares, err
 		}
@@ -71,7 +95,11 @@ func (npmGenerator) DeclaresDependencies(d Detection, opts GenerateOptions) (boo
 }
 
 func packageJSONDeclaresDependencies(path string, opts GenerateOptions) (bool, error) {
-	data, err := readAutoSBOMManifest(path)
+	return packageJSONDeclaresDependenciesScoped("", path, opts)
+}
+
+func packageJSONDeclaresDependenciesScoped(root, path string, opts GenerateOptions) (bool, error) {
+	data, err := readAutoSBOMManifestScoped(root, path)
 	if err != nil {
 		return false, err
 	}

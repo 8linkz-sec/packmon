@@ -150,6 +150,61 @@ func TestUserAgentMiddlewareProductionRules(t *testing.T) {
 	}
 }
 
+func TestMiddlewareJSONErrorIncludesMachineReadableCode(t *testing.T) {
+	t.Parallel()
+
+	handler := UserAgent(slog.New(slog.NewTextHandler(io.Discard, nil)), false)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/check", nil)
+	req.Header.Set("User-Agent", "curl/8.0")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+	var body struct {
+		Error string `json:"error"`
+		Code  string `json:"code"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("error response body is not JSON: %v; body=%q", err, rec.Body.String())
+	}
+	if body.Error != "unknown user agent" {
+		t.Fatalf("error = %q, want human message", body.Error)
+	}
+	if body.Code != "forbidden" {
+		t.Fatalf("code = %q, want forbidden", body.Code)
+	}
+}
+
+func TestMiddlewareJSONErrorCodeForStatusMapsKnownTaxonomy(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		status int
+		want   string
+	}{
+		{http.StatusBadRequest, "invalid_request"},
+		{http.StatusUnauthorized, "auth_failed"},
+		{http.StatusForbidden, "forbidden"},
+		{http.StatusConflict, "conflict"},
+		{http.StatusTooManyRequests, "rate_limited"},
+		{http.StatusNotFound, "not_found"},
+		{http.StatusMethodNotAllowed, "unsupported"},
+		{http.StatusUnsupportedMediaType, "unsupported"},
+		{http.StatusNotImplemented, "unsupported"},
+		{http.StatusInternalServerError, "internal_error"},
+	}
+	for _, tt := range tests {
+		if got := jsonErrorCodeForStatus(tt.status); got != tt.want {
+			t.Fatalf("jsonErrorCodeForStatus(%d) = %q, want %q", tt.status, got, tt.want)
+		}
+	}
+}
+
 func TestLoggingCapturesStatusAndCorrelationIDWithoutClientIdentifiers(t *testing.T) {
 	t.Parallel()
 
@@ -302,6 +357,52 @@ func TestRecoveryReturnsInternalServerErrorOnPanic(t *testing.T) {
 	for _, forbidden := range []string{`"stack"`, `"client_ip"`, `"remote_addr"`, `"user_agent"`, "request_middlewares_test.go", "203.0.113.88", "10.0.0.1:12345", "packmon-cli/test", strings.Repeat("a", 600)} {
 		if strings.Contains(logLine, forbidden) {
 			t.Fatalf("log line contains %s: %s", forbidden, logLine)
+		}
+	}
+}
+
+func TestRecoveryLogsNonStringPanicAsStableStringFields(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/packages/npm/secret-token/refresh", nil)
+	req = req.WithContext(requestctx.ContextWithCorrelationID(req.Context(), "corr-non-string"))
+
+	handler := Recovery(logger)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic(map[string]any{
+			"api_key": "api-secret-123456",
+			"headers": []string{
+				"Authorization: Bearer super-secret-token",
+			},
+		})
+	}))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assertJSONErrorResponse(t, rec, http.StatusInternalServerError, "internal server error")
+
+	var entry map[string]any
+	if err := json.Unmarshal(logs.Bytes(), &entry); err != nil {
+		t.Fatalf("panic log is not JSON: %v; log=%q", err, logs.String())
+	}
+	panicType, ok := entry["panic_type"].(string)
+	if !ok || !strings.HasPrefix(panicType, "map[") {
+		t.Fatalf("panic_type = %#v, want Go type string for map panic", entry["panic_type"])
+	}
+	panicValue, ok := entry["panic"].(string)
+	if !ok || panicValue == "" {
+		t.Fatalf("panic = %#v, want bounded string field", entry["panic"])
+	}
+	logLine := logs.String()
+	for _, want := range []string{`"path":"/api/v1/packages/{ecosystem}/{name...}/refresh"`, `"correlation_id":"corr-non-string"`} {
+		if !strings.Contains(logLine, want) {
+			t.Fatalf("panic log missing %s: %s", want, logLine)
+		}
+	}
+	for _, leaked := range []string{`"panic":{`, `"panic":[`, "api-secret-123456", "super-secret-token", "Authorization", "secret-token"} {
+		if strings.Contains(logLine, leaked) {
+			t.Fatalf("panic log leaked %q in %s", leaked, logLine)
 		}
 	}
 }

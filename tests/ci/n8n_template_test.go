@@ -35,14 +35,18 @@ func TestN8NOnDemandScanDoesNotInterpolateWebhookPathIntoShell(t *testing.T) {
 		if !ok {
 			t.Fatalf("on-demand scan command has type %T, want string", node.Parameters["command"])
 		}
+		helper := n8nOnDemandScanHelper(t)
 		for _, forbidden := range []string{"$json.body.path", "{{$env.PACKMON_SCAN_PATH}}", "packmon scan $PACKMON_SCAN_PATH"} {
 			if strings.Contains(command, forbidden) {
 				t.Fatalf("executeCommand interpolates scan path into shell unsafely via %q: %s", forbidden, command)
 			}
 		}
-		for _, want := range []string{`case "$PACKMON_SCAN_PATH"`, `packmon scan "$PACKMON_SCAN_PATH"`} {
-			if !strings.Contains(command, want) {
-				t.Fatalf("executeCommand must validate and quote PACKMON_SCAN_PATH; missing %q in %s", want, command)
+		if strings.TrimSpace(command) != "sh /opt/packmon/n8n/on-demand-scan.sh" {
+			t.Fatalf("executeCommand command = %q, want helper invocation", command)
+		}
+		for _, want := range []string{`case "${PACKMON_SCAN_PATH:-}"`, `packmon scan "$PACKMON_SCAN_PATH"`} {
+			if !strings.Contains(helper, want) {
+				t.Fatalf("helper must validate and quote PACKMON_SCAN_PATH; missing %q in %s", want, helper)
 			}
 		}
 		return
@@ -77,29 +81,44 @@ func TestN8NOnDemandScanForcesAuthenticatedRemoteMode(t *testing.T) {
 		if !ok {
 			t.Fatalf("on-demand scan command has type %T, want string", node.Parameters["command"])
 		}
+		helper := n8nOnDemandScanHelper(t)
+		if strings.TrimSpace(command) != "sh /opt/packmon/n8n/on-demand-scan.sh" {
+			t.Fatalf("executeCommand command = %q, want helper invocation", command)
+		}
 		for _, want := range []string{
 			`case "${PACKMON_API_KEY:-}"`,
-			`case "$PACKMON_SERVER"`,
+			`case "${PACKMON_SERVER:-}"`,
 			`packmon scan "$PACKMON_SCAN_PATH"`,
 			`--mode remote`,
 			`--require-remote`,
 			`--server "$PACKMON_SERVER"`,
 		} {
-			if !strings.Contains(command, want) {
-				t.Fatalf("on-demand scan command must force authenticated remote mode; missing %q in %s", want, command)
+			if !strings.Contains(helper, want) {
+				t.Fatalf("on-demand helper must force authenticated remote mode; missing %q in %s", want, helper)
 			}
 		}
 		for _, forbidden := range []string{"--output-json", "/tmp/packmon-scan", "mktemp", "PACKMON_SCAN_OUTPUT"} {
-			if strings.Contains(command, forbidden) {
-				t.Fatalf("on-demand scan command must not create runtime report artifacts via %q: %s", forbidden, command)
+			if strings.Contains(command, forbidden) || strings.Contains(helper, forbidden) {
+				t.Fatalf("on-demand scan must not create runtime report artifacts via %q", forbidden)
 			}
 		}
-		if strings.Contains(command, "--api-key") {
-			t.Fatalf("on-demand scan command must not pass PACKMON_API_KEY via argv: %s", command)
+		if strings.Contains(command, "--api-key") || strings.Contains(helper, "--api-key") {
+			t.Fatalf("on-demand scan must not pass PACKMON_API_KEY via argv")
 		}
 		return
 	}
 	t.Fatal("on-demand workflow has no executeCommand node")
+}
+
+func n8nOnDemandScanHelper(t *testing.T) string {
+	t.Helper()
+
+	path := filepath.Join("..", "..", "deploy", "n8n", "on-demand-scan.sh")
+	data, err := os.ReadFile(path) //nolint:gosec // static repository fixture path
+	if err != nil {
+		t.Fatalf("read on-demand-scan.sh: %v", err)
+	}
+	return string(data)
 }
 
 func TestN8NOnDemandWebhookRequiresHeaderAuth(t *testing.T) {

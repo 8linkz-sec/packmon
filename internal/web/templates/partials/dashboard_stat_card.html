@@ -1,0 +1,35 @@
+{{define "dashboard-stat-card"}}
+{{$kind := .Kind}}
+{{$stats := .Stats}}
+{{$alignClass := .AlignClass}}
+{{$searchPath := or .SearchPath "/search"}}
+{{if eq $kind "packages"}}
+{{template "dashboard-stat-card-frame" dict "CardClass" "pm-surface p-5" "AlignClass" $alignClass "LabelClass" "text-sm text-gray-500 uppercase tracking-wide" "Label" (t "dashboard.card.packages") "ValueClass" "mt-1 text-3xl font-semibold" "Value" $stats.TotalPackages}}
+{{else if eq $kind "vulnerabilities"}}
+{{template "dashboard-stat-card-frame" dict "Href" (printf "%s?finding=vulnerability" $searchPath) "CardClass" "pm-surface p-5" "AlignClass" $alignClass "InteractiveClass" "block hover:shadow-md active:bg-gray-50 active:shadow-sm pm-focus-ring transition-colors duration-150 ease-out" "LabelClass" "text-sm text-gray-500 uppercase tracking-wide" "Label" (t "dashboard.card.vulnerabilities") "ValueClass" "mt-1 text-3xl font-semibold" "Value" $stats.TotalVulnerabilities}}
+{{else if eq $kind "malicious"}}
+{{template "dashboard-stat-card-frame" dict "Href" (printf "%s?finding=malicious" $searchPath) "CardClass" "bg-red-50 rounded-lg shadow p-5 border border-red-200" "AlignClass" $alignClass "InteractiveClass" "block hover:shadow-md active:bg-red-100 active:shadow-sm pm-focus-ring transition-colors duration-150 ease-out" "LabelClass" "text-sm text-red-700 uppercase tracking-wide" "Label" (t "dashboard.card.malicious") "ValueClass" "mt-1 text-3xl font-semibold text-red-900" "Value" $stats.TotalMalicious}}
+{{else if eq $kind "supply-chain"}}
+{{template "dashboard-stat-card-frame" dict "Href" (printf "%s?finding=supply_chain_risk" $searchPath) "CardClass" "bg-amber-50 rounded-lg shadow p-5 border border-amber-200" "AlignClass" $alignClass "InteractiveClass" "block hover:shadow-md active:bg-amber-100 active:shadow-sm pm-focus-ring transition-colors duration-150 ease-out" "LabelClass" "text-sm text-amber-800 uppercase tracking-wide" "Label" (t "dashboard.card.supply_chain") "ValueClass" "mt-1 text-3xl font-semibold text-amber-900" "Value" $stats.TotalSupplyChainRisk}}
+{{else if eq $kind "lifecycle"}}
+{{template "dashboard-stat-card-frame" dict "Href" (printf "%s?finding=lifecycle" $searchPath) "CardClass" "bg-blue-50 rounded-lg shadow p-5 border border-blue-200" "AlignClass" $alignClass "InteractiveClass" "block hover:shadow-md active:bg-blue-100 active:shadow-sm pm-focus-ring transition-colors duration-150 ease-out" "LabelClass" "text-sm text-blue-800 uppercase tracking-wide" "Label" (t "dashboard.card.lifecycle") "ValueClass" "mt-1 text-3xl font-semibold text-blue-900" "Value" $stats.TotalLifecycle}}
+{{end}}
+{{end}}
+
+{{define "dashboard-stat-card-frame"}}
+{{if .Href}}
+<a href="{{.Href}}" class="{{.CardClass}}{{if .AlignClass}} {{.AlignClass}}{{end}}{{if .InteractiveClass}} {{.InteractiveClass}}{{end}}">
+  <dl>
+    <dt class="{{.LabelClass}}">{{.Label}}</dt>
+    <dd class="{{.ValueClass}}" data-local-number="{{.Value}}">{{.Value}}</dd>
+  </dl>
+</a>
+{{else}}
+<div class="{{.CardClass}}{{if .AlignClass}} {{.AlignClass}}{{end}}">
+  <dl>
+    <dt class="{{.LabelClass}}">{{.Label}}</dt>
+    <dd class="{{.ValueClass}}" data-local-number="{{.Value}}">{{.Value}}</dd>
+  </dl>
+</div>
+{{end}}
+{{end}}

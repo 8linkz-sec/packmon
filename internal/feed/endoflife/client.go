@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/8linkz-sec/packmon/internal/feed"
 )
 
 const (
@@ -110,9 +112,22 @@ func (c *Client) FetchProductsFull(ctx context.Context, etag string) (ProductsRe
 
 	var out ProductsResponse
 	if err := json.Unmarshal(body, &out); err != nil {
-		return ProductsResponse{}, respETag, false, err
+		return ProductsResponse{}, respETag, false, feed.NonRetryableError(fmt.Errorf("decode endoflife products response: %w", err))
+	}
+	if err := validateProductsResponse(out); err != nil {
+		return ProductsResponse{}, respETag, false, feed.NonRetryableError(err)
 	}
 	return out, respETag, false, nil
+}
+
+func validateProductsResponse(resp ProductsResponse) error {
+	if resp.Total < 0 {
+		return fmt.Errorf("endoflife response schema: total must be non-negative")
+	}
+	if resp.Result == nil {
+		return fmt.Errorf("endoflife response schema: result array is required")
+	}
+	return nil
 }
 
 func (c *Client) productsFullURL() string {

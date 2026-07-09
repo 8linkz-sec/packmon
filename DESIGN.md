@@ -100,6 +100,13 @@ unrelated persistence capabilities do not leak across subsystem boundaries.
 - `ci/gitlab`: reusable GitLab CI template.
 - `.github/workflows`: project CI, nightly, release, and Packmon scan workflow.
 - `deploy`: N8N automation assets only.
+- `docs/runbook.md`: operator backup, restore, upgrade, rotation, alerting,
+  capacity, and incident response procedures.
+- `docs/architecture`: supporting architecture diagrams.
+- `docs/adr`: accepted architecture decision records and decision index.
+- `docs/data-classification.md`: storage, sensitivity, and control map.
+- `docs/deferred-scope.md`: fork-local deferred audit scope for surfaces not
+  currently operated.
 - `docker-compose.yml`: the repository-provided container deployment entry for
   local and internal self-hosted starts.
 
@@ -135,6 +142,10 @@ Feeds
   -> /api/v1/check, /api/v1/sync, web UI, metrics
 ```
 
+The companion system-boundary diagram is
+`docs/architecture/system-context.mmd`. Accepted architecture decisions are
+indexed in `docs/adr/README.md`.
+
 ## Deployment Architecture
 
 Packmon's maintained deployment surfaces are intentionally narrow:
@@ -142,7 +153,9 @@ Packmon's maintained deployment surfaces are intentionally narrow:
 - `docker-compose.yml` starts PostgreSQL and the server for local and internal
   self-hosted deployments. Database migrations remain an explicit operator
   step with `docker compose run --build --rm packmon-migrate`; that manual
-  service receives only database and logging environment values.
+  service receives only database and logging environment values. The migrator
+  records durable per-migration events in PostgreSQL so operators can audit
+  which migrations started, finished, succeeded, or left the database dirty.
 - `deploy/n8n` contains workflow templates that call the Packmon server over
   authenticated HTTPS APIs. Command-node templates use environment variables,
   short-lived `mktemp` files with cleanup traps, and path-minimized webhook
@@ -150,9 +163,21 @@ Packmon's maintained deployment surfaces are intentionally narrow:
 - `.github/workflows/packmon-scan.yml` and `ci/gitlab/.packmon-scan.yml`
   provide CI integration templates for consumer repositories.
 - `.github/workflows/release.yml` publishes binary release artifacts only; it
-  does not publish a container image. Release assets include checksums, a
-  CycloneDX SBOM, project license files, third-party notice material, generated
-  Go module license notices, and GitHub artifact attestations.
+  does not publish a container image. Its publishing job targets the protected
+  `release` environment, which must be configured in GitHub repository settings
+  with required reviewers before release write permissions are granted. Release
+  assets include checksums, a Go module CycloneDX SBOM, an npm web asset
+  CycloneDX SBOM for assets embedded in the server binary, project license
+  files, third-party notice material, generated Go module license notices, and
+  GitHub artifact attestations.
+- CI and release verification build the maintained Dockerfile `server` and
+  `cli` image targets locally and scan them with Trivy for HIGH/CRITICAL OS
+  package vulnerabilities. These scans are blocking gates and do not publish a
+  first-party container image.
+- The maintained Dockerfile and Compose model keep digest-pinned default images
+  but expose `PACKMON_GO_BUILDER_IMAGE`, `PACKMON_ALPINE_RUNTIME_IMAGE`, and
+  `PACKMON_POSTGRES_IMAGE` so operators can substitute internal registry
+  mirrors without changing the supported deployment path.
 
 The server process still supports containerized and orchestrated operation, but
 the repository no longer maintains first-party Kubernetes deployment packaging.
@@ -204,10 +229,13 @@ SwiftPM packages are identified by OSV/PURL SwiftURL name
 provides a repository location. URL userinfo and non-HTTP(S) repository
 schemes are not used as package identity. SwiftPM latest-version lookup is
 limited to canonical public Git host identities on the built-in allowlist
-(`github.com`, `gitlab.com`, and `bitbucket.org`); full URLs, SCP-like
-remotes, local paths, IP/localhost-style identities, and non-allowlisted hosts
-are reported as unknown. Git lookup arguments are passed after Git's
-end-of-options delimiter. GitHub Actions workflow references are identified as
+(`github.com`, `gitlab.com`, and `bitbucket.org`) plus trusted operator
+hostnames configured through `PACKMON_SWIFTPM_GIT_ALLOWED_HOSTS` or
+`registries.swiftpm_git_allowed_hosts`; full URLs, SCP-like remotes, local
+paths, IP/localhost-style identities, and non-allowlisted hosts are reported as
+unknown. Git lookup arguments are passed after Git's end-of-options delimiter,
+and SwiftPM remotes are always constructed as `https://host/path.git` rather
+than copied from lockfile text. GitHub Actions workflow references are identified as
 `owner/repo` from external `uses: owner/repo@ref` entries under
 `.github/workflows/`; owner/repo casing is normalized to lowercase because
 GitHub repository paths are case-insensitive for advisory matching.
@@ -316,7 +344,7 @@ Important behavior:
   generated files as timestamped snapshots so repeated runs do not overwrite
   previous SBOMs; `--install-tools` may install missing pinned generator tools
   where automatic installation is supported. Pinned generator versions are
-  `cyclonedx-npm` 4.2.1, `cyclonedx-bom` 7.3.0, and
+  `cyclonedx-npm` 5.0.0, `cyclonedx-bom` 7.3.0, and
   `cyclonedx-maven-plugin` 2.9.1. Existing PATH tools for npm and PyPI are
   version-checked before use. Manifest reads, generator output capture, and
   generated-SBOM validation are size-bounded, and cleanup failures are returned
@@ -342,16 +370,24 @@ Important behavior:
   available, scan timestamp, package/finding counts, finding IDs, and finding
   severities. `PACKMON_HISTORY_ENABLED=false` disables recording and
   `PACKMON_HISTORY_MAX_SCANS_PER_REPO` controls per-repository retention
-  (`100` by default, `0` disables retention cleanup). `packmon history clear`
-  requires `--force` for unfiltered deletion; date-only `--before` cutoffs are
+  (`100` by default, `0` disables count-based cleanup).
+  `PACKMON_HISTORY_MAX_AGE` controls automatic age-based cleanup (`2160h`, 90
+  days by default; `0` disables age-based cleanup). Invalid history retention
+  values fail closed before recording a scan. `packmon history clear` requires
+  `--force` for unfiltered deletion; date-only `--before` cutoffs are
   interpreted as UTC dates and reported that way.
 - stale local DB data produces warnings but does not block scans by itself.
+  Once local DB age exceeds `PACKMON_DB_WARN_AFTER_DAYS` (default `7` days),
+  CLI diagnostics and the local dashboard must show a visible stale-data warning
+  to all dashboard viewers. If freshness cannot be determined, scan diagnostics
+  treat coverage as stale or unknown instead of silently healthy.
 - remote scans and webhooks send the repository name by default and never send
   branch or commit metadata. `--no-repo-metadata`,
   `PACKMON_NO_REPO_METADATA=true`, or `send_repo_metadata: false` omit even the
   repository name. Server scan logging persists only a bounded, path-minimized
-  repository name when clients send one. Branch, commit, and User-Agent values
-  are not retained in new scan-log rows.
+  repository name when clients send one. Branch, commit, and raw User-Agent
+  values are not retained in new scan-log rows; authenticated Packmon scan
+  requests may retain only the bounded normalized client version.
 - webhook envelopes include the canonical scan result and, when available, only
   the repository name. Branch and commit metadata are not forwarded to webhook
   receivers. Webhook delivery requires HTTPS except for loopback HTTP receivers
@@ -372,10 +408,40 @@ Important behavior:
   being passed to Git. Package-manager source provenance from npm
   `resolved` URLs, requirements index options, Cargo sources, Bundler remotes,
   CocoaPods spec repos, Composer `source`/`dist` URLs, renv source/repository
-  fields, pub hosted URLs, and Maven repositories is retained only inside the
-  local CLI. When that provenance points outside the ecosystem's public default
-  registry, `--outdated` and the `--list-all` freshness phase return unknown
-  latest status without querying the public registry for that package name.
+  fields, pub hosted URLs, Maven repositories, and Hex `mix.lock` repository
+  names is retained only inside the local CLI. When that provenance points
+  outside the ecosystem's public default registry, `--outdated` and the
+  `--list-all` freshness phase return unknown latest status without querying
+  the public registry for that package name. npm, PyPI, RubyGems, Cargo,
+  CocoaPods, Composer, Go, Maven, CRAN, Pub, Hex, and NuGet packages can use an
+  operator-configured trusted latest-version mirror. `PACKMON_NPM_REGISTRY_BASE_URL`
+  points npm latest and metadata checks at an npm registry-compatible base such
+  as `https://npm-mirror.example/registry`; `PACKMON_PYPI_API_BASE_URL` points
+  PyPI freshness checks at a JSON API-compatible base such as
+  `https://pypi-mirror.example/pypi`; `PACKMON_RUBYGEMS_API_BASE_URL` points
+  RubyGems checks at a gems API-compatible base such as
+  `https://rubygems-mirror.example/api/v1/gems`;
+  `PACKMON_CARGO_REGISTRY_API_BASE_URL` points Cargo checks at a crates.io
+  API-compatible base such as `https://cargo-mirror.example/api/v1/crates`;
+  `PACKMON_COCOAPODS_TRUNK_API_BASE_URL` points CocoaPods checks at a trunk
+  API-compatible base such as `https://cocoapods-mirror.example/api/v1/pods`;
+  `PACKMON_COMPOSER_REPOSITORY_BASE_URL` points Composer checks at a
+  Packagist p2-compatible base such as `https://composer-mirror.example/p2`;
+  `PACKMON_GO_PROXY_URL` points Go module freshness checks at a single module
+  proxy root such as `https://go-proxy.example`, and `off` disables Go
+  latest-version lookups without using direct VCS fallback;
+  `PACKMON_MAVEN_REPOSITORY_BASE_URL` points Maven checks at a Maven repository
+  root such as `https://maven-mirror.example/repository/maven-public`;
+  `PACKMON_SWIFTPM_GIT_ALLOWED_HOSTS` extends SwiftPM Git freshness to trusted
+  self-hosted or mirrored bare hostnames without accepting raw repository URLs;
+  `PACKMON_CRAN_MIRROR_URL` points CRAN checks at a CRAN mirror root such as
+  `https://cran-mirror.example`; `PACKMON_PUB_HOSTED_URL` points Pub checks at
+  a hosted Pub API root such as `https://pub-mirror.example`;
+  `PACKMON_HEX_API_BASE_URL` points Hex freshness checks at a Hex
+  API-compatible base such as `https://hex-mirror.example/api`;
+  `PACKMON_NUGET_V3_BASE_URL` points NuGet freshness checks at a v3
+  flat-container-compatible base such as
+  `https://nuget-mirror.example/v3-flatcontainer`.
   crates.io lookups use an identifying Packmon User-Agent and are serialized at
   one request per second.
 - `--list-all` also inventories Docker image declarations from `Dockerfile`,
@@ -383,9 +449,12 @@ Important behavior:
   and `compose.yaml`. Docker rows use ecosystem `docker`, show declared
   tags/digests, record their package source as `dockerfile` or `compose`, and
   resolve public registry manifest digests best-effort for the built-in public
-  registry allowlist. Unsupported registries, unsafe token realms, and
-  loopback/private/link-local targets degrade to `unknown` without sending a
-  registry request. `--list-all-offline` skips this registry digest phase. If
+  registry allowlist. Trusted operator config may route supported public
+  registry hosts through explicit Docker registry mirrors with
+  `PACKMON_DOCKER_REGISTRY_MIRRORS` or `registries.docker_registry_mirrors`.
+  Unsupported registries, unsafe token realms, and
+  loopback/private/link-local public-registry targets degrade to `unknown`
+  without sending a registry request. `--list-all-offline` skips this registry digest phase. If
   the local Docker CLI can inspect the declared image, Packmon compares the
   local repo digest with the current registry digest and marks `UPDATE yes`,
   `-`, or `unknown`.
@@ -412,36 +481,67 @@ Production mode uses PostgreSQL. Development mode uses a local in-memory/noop
 store to support fast local integration tests and UI development. Production
 startup bounds schema-version and pool-connect checks with
 `PACKMON_DB_CONNECT_TIMEOUT` (default `10s`) so unreachable databases fail fast
-before HTTP listeners are created.
+before HTTP listeners are created. The explicit `packmon-server migrate`
+operator step uses the same timeout to bound its database connection,
+advisory-lock wait, migration SQL execution, and post-migration version read.
+Each applied migration also writes an append-only `schema_migration_events`
+row with start/finish timestamps, success state, dirty state, name, and
+checksum metadata.
 
 Server-side operational audit metadata is bounded by retention policy and by
 input normalization at write time. Remote scan-log rows include scan ID,
 optional bounded and path-minimized repository name, client IP,
 package/finding counts, duration, decision evidence, correlation ID, a
-`sha256:` digest of the canonical JSON `ScanResult` response, and authenticated
-API key metadata when available. New scan-log rows do not retain
-branch, commit, or User-Agent values. Admin-audit rows include action, details,
-source IP, timestamp, previous-row digest, and row digest; login, lockout, and
-logout details do not duplicate the source IP because the typed IP column is the
-source of truth. New rows form a `sha256:` digest chain. The admin audit UI
-pages through stored rows, keeps full detail JSON reachable from compact table
-rows, and shows each row's local integrity status. PostgreSQL-backed privileged
-admin writes that manage API
-keys, queue state, admin passwords, and manual advisories commit the state
-change and required audit row in one transaction. Destructive refresh-queue
-clear/purge actions preserve the deleted job identities in audit details before
-deleting rows, including job ID, package coordinate, source, priority, prior
-status, timestamps, and redacted bounded error text. PostgreSQL maintains
+`sha256:` digest of the canonical JSON `ScanResult` response, authenticated
+API key metadata when available, and a bounded normalized Packmon client
+version for authenticated scan requests. New scan-log rows do not retain
+branch, commit, or raw User-Agent values. `PACKMON_SCAN_LOG_IDENTITY_MODE`
+defaults to `full` for compatibility; `minimal` still writes scan-log rows but
+omits client IP and API-key ID/name, while `none` also omits repository name and
+normalized client version. Admin-audit rows include action, details, source IP,
+timestamp, previous-row digest, and row digest; login,
+lockout, and logout details do not duplicate the source IP because the typed IP
+column is the source of truth. New production rows form an `hmac-sha256:`
+digest chain keyed by `PACKMON_ADMIN_AUDIT_HMAC_KEY`; older `sha256:` rows
+remain verifiable as legacy digest-chain rows. The admin audit UI pages through
+stored rows, keeps full detail JSON reachable from compact table rows, and
+shows each row's local integrity status.
+Authenticated `/api/v1/sync` export attempts write a `sync_export`
+admin-audit row before data export with safe request scope metadata,
+correlation ID, trusted client IP, and API-key identity when available; raw
+sync cursors and package/finding data are not retained in that audit row.
+The offline `packmon-server privacy export` operator command can export
+retained server metadata by exact client IP, repository name, API-key ID,
+API-key name, or correlation ID. It reads matching `scan_log` and
+`admin_audit_log` rows only after schema verification and records a
+`privacy_export` admin-audit row with selector type, selector digest, and row
+counts before emitting JSON.
+PostgreSQL-backed privileged admin writes that manage API keys, queue state,
+admin passwords, and manual advisories commit the state
+change and required audit row in one transaction. Password changes are
+compare-and-swap updates against the bcrypt hash that the handler just
+verified, so a concurrent rotation cannot be overwritten by a stale
+current-password check. Admin-auth mutations that also append audit rows use a
+consistent `admin_auth` then `admin_audit_log` lock order. Destructive refresh-queue
+clear/purge actions preserve a bounded sample of deleted job identities in
+audit details from the delete operation, including job ID, package coordinate,
+source, priority, prior status, timestamps, redacted bounded error text,
+`total_deleted`, `sample_count`, and `truncated`. PostgreSQL maintains
 cumulative scan package/finding totals in
 `scan_log_totals`; `InsertScanLog` increments the rollup and scan-log pruning
 subtracts deleted rows so `/metrics` does not aggregate the full `scan_log`
 table on every scrape. The production background services prune `scan_log` rows after
-`PACKMON_SCAN_LOG_RETENTION` (default `2160h`, 90 days) and `admin_audit_log`
-rows after `PACKMON_ADMIN_AUDIT_LOG_RETENTION` (default `8760h`, 365 days).
+`PACKMON_SCAN_LOG_RETENTION` (default `720h`, 30 days) and `admin_audit_log`
+rows after `PACKMON_ADMIN_AUDIT_LOG_RETENTION` (default `720h`, 30 days);
+admins can override both metadata-retention values from `/admin/settings`.
+Soft-deleted API-key rows are hard-deleted after
+`PACKMON_DELETED_API_KEY_RETENTION` (default `8760h`, 365 days).
 Terminal refresh-queue rows (`done` and `error`) are pruned after
-`PACKMON_REFRESH_QUEUE_RETENTION` (default `720h`, 30 days). The shared prune
-cadence is `PACKMON_AUDIT_RETENTION_INTERVAL` (default `24h`).
-Setting a dataset retention to `0` disables pruning for that table.
+`PACKMON_REFRESH_QUEUE_RETENTION` (default `720h`, 30 days). Socket.dev
+package-check status rows are pruned after
+`PACKMON_PACKAGE_CHECK_STATUS_RETENTION` (default `2160h`, 90 days). The shared
+prune cadence is `PACKMON_AUDIT_RETENTION_INTERVAL` (default `24h`). Setting a
+dataset retention to `0` disables pruning for that table.
 
 ## Data Model
 
@@ -509,7 +609,9 @@ operator-supplied ID use stable `manual:<uuid>` IDs. The admin advisory list is
 paginated so older manual coverage remains reachable. Manual advisory
 create/update/delete operations write admin-audit records with the affected
 record details; PostgreSQL commits the advisory mutation and audit entry in the
-same transaction.
+same transaction. Docker is not accepted for manual scan advisories because
+Docker support is inventory-only and does not imply container-layer
+vulnerability coverage.
 
 ## Feed Sources
 
@@ -533,13 +635,22 @@ include:
 - NVD CVE enrichment, optionally with an API key only for higher rate limits.
 - endoflife.date public lifecycle metadata, with no API key.
 
+Self-managed OSV, GHSA, OpenSSF, CISA KEV, EPSS, NVD, and endoflife.date feed
+clients support operator-controlled HTTPS mirrors or relays, with loopback HTTP
+allowed only for local tests. Mirror settings preserve the same parser,
+normalization, and freshness semantics as the public defaults.
+
 Optional reputation/enrichment sources can be enabled by operators but are not
 part of the required free core coverage:
 
 - VulnCheck. When VulnCheck enrichment contributes CVSS or exploit metadata,
   scan findings, package detail views, and local sync payloads carry explicit
   VulnCheck resource attribution alongside the original advisory source;
-- Socket.dev through async queue behavior;
+- Socket.dev through async queue behavior. Operators can suppress private
+  package namespaces before manual refresh queueing and before worker egress.
+  Package-check status rows store normalized summaries and are pruned by
+  retention policy so checked package coordinates do not become an unbounded
+  inventory dataset;
 - ReversingLabs Spectra Assure Community API as an optional server-side,
   demand-driven reputation source. Demand scheduling runs behind a feed-layer
   scheduler, requires a configured ReversingLabs API key, deduplicates package
@@ -553,13 +664,15 @@ part of the required free core coverage:
   pruned by retention policy; active malware signals are reported as malicious
   findings, and historical malware incident evidence is reported separately as
   non-blocking `LOW` reputation info.
-
 OSV/RustSec affected-package records with `database_specific.categories`
 containing `malicious` are normalized as malicious package findings, not as
 vulnerability findings. Vulnerabilities whose upstream source has no severity
 or CVSS data are stored with a conservative `LOW` fallback until alias or NVD
 enrichment can raise them. `UNKNOWN` vulnerability severity is not a final
-user-facing state.
+user-facing state. PostgreSQL stores vulnerability severities only as
+`CRITICAL`, `HIGH`, `MEDIUM`, or `LOW`; unsupported severity values are
+rejected before they can become non-blocking scan decisions. Malicious findings
+may additionally persist `UNKNOWN` when the source cannot classify severity.
 
 Feed sync can run inside the server or be supplied externally through N8N feed
 import endpoints. Production feed imports require both the normal Bearer API
@@ -573,6 +686,13 @@ durable `feed_import` audit row with feed name, imported/deleted counts,
 client IP, correlation ID, and API-key identity when available. Malicious feed
 imports cannot persist malformed exact-version JSON; invalid rows fail the
 transaction instead of becoming all-version blocking findings.
+Feed import strictness must be visible to operators and server/agent users.
+Rejected imports must expose bounded diagnostics for feed name, rejected record
+count, rejection reason classes, correlation ID, client/API-key attribution when
+available, and the last successful usable import timestamp. The web UI and feed
+status APIs must make import rejection and sudden finding/blocking spikes by
+feed source visible so remote agents do not lose coverage context when the
+server rejects bad feed data.
 Feed failure must not delete existing good data. Check responses must indicate
 degraded feed state when data is missing, skipped, or stale. In
 `feed_sync_status`, `last_sync_at` represents the freshness of the last usable
@@ -634,8 +754,9 @@ Queue statuses include:
 Admins can update priority, pause, resume, retry, purge, and clear matching
 statuses. The admin queue UI exposes status-filtered, paginated job lists so
 older jobs remain reachable from the management surface. Paused jobs must not be
-dequeued. Queue purge/clear audit details retain the affected job identities
-before deletion so cleanup actions remain explainable after rows are gone.
+dequeued. Queue purge/clear audit details retain a bounded affected-job sample
+and total delete count from the delete operation so cleanup actions remain
+explainable after rows are gone.
 
 ## Local SQLite Mode
 
@@ -665,6 +786,11 @@ misclassify supply-chain reputation rows.
 If a server response contains a `synced_at` timestamp beyond the allowed local
 clock-skew tolerance, the client may use it for the current paginated request
 sequence but does not persist it as the local freshness marker.
+Full local sync validates the server snapshot before clearing local finding
+tables. A full-sync response must include a parseable `synced_at` and either
+feed state metadata or synced data proving it is a real snapshot; `{}` or other
+semantically empty success responses fail closed and preserve existing local
+findings.
 
 ## Web UI
 
@@ -673,6 +799,15 @@ embedded into the binary. Tailwind v4 uses modern CSS features, so the UI
 browser baseline follows Tailwind's v4 targets: Safari 16.4+, Chrome 111+, and
 Firefox 128+. The UI should stay operational and utilitarian: dashboard,
 package search, package details, scans, admin pages, and forms.
+The scans surface is intended to show persisted scan activity and history that
+Packmon collects, not to be a placeholder. Because scan history can reveal
+repository names and operational scan metadata, shared deployments must route
+it through an access-control boundary appropriate for that metadata before
+colleagues rely on it.
+For authenticated Packmon scan requests, scan history may retain only a
+bounded normalized client version parsed from the Packmon User-Agent token so
+operators can identify vulnerable or defective client releases without storing
+the full raw User-Agent string.
 Admin pages share the same header and tab navigation partial. Client-side
 behavior is loaded from local static JavaScript and CSS assets so the server
 can keep a CSP without `unsafe-inline` for scripts or styles.
@@ -721,9 +856,15 @@ entry point.
 
 The shared web layout includes operator-facing notice links. `PACKMON_WEB_PRIVACY_URL`
 defaults to the built-in `/privacy` page, which documents the admin session
-cookie, CSRF use, admin audit metadata, and scan metadata at a high level.
+cookie, CSRF use, admin audit metadata, scan metadata, optional outbound
+recipients, GDPR-style transparency fields, and CCPA/CPRA consumer-rights
+disclosures for covered deployments.
 `PACKMON_WEB_LEGAL_URL` is optional and can point to the deployment operator's
 legal notice or Impressum.
+`PACKMON_WEB_TERMS_URL` defaults to `/terms`, a built-in operator hook for
+deployment-specific terms of use or AGB, acceptable-use rules, API-key
+responsibilities, third-party integration disclosures, and suspension/change
+notices.
 
 ## Configuration
 
@@ -744,14 +885,25 @@ Important server environment variables:
 - `PACKMON_METRICS_PORT`;
 - `PACKMON_WEB_PRIVACY_URL`;
 - `PACKMON_WEB_LEGAL_URL`;
+- `PACKMON_WEB_TERMS_URL`;
 - `PACKMON_DB_*`;
 - `PACKMON_ADMIN_INITIAL_PASSWORD`;
 - `PACKMON_ADMIN_SESSION_TIMEOUT`;
 - `PACKMON_ADMIN_IDLE_TIMEOUT`;
+- `PACKMON_ADMIN_AUDIT_HMAC_KEY`;
 - `PACKMON_FEED_IMPORT_SECRET`;
 - `PACKMON_FEED_ENDOFLIFE_ENABLED`;
 - `PACKMON_FEED_ENDOFLIFE_MODE`;
 - `PACKMON_ENDOFLIFE_API_BASE_URL`;
+- `PACKMON_FEED_OSV_BASE_URL`;
+- `PACKMON_FEED_GHSA_REPO_URL`;
+- `PACKMON_FEED_OPENSSF_REPO_URL`;
+- `PACKMON_FEED_CISAKEV_CATALOG_URL`;
+- `PACKMON_FEED_EPSS_SCORES_URL`;
+- `PACKMON_FEED_NVD_API_URL`;
+- `PACKMON_SOCKET_EXCLUDED_NAMESPACES`;
+- `PACKMON_SOCKET_API_BASE_URL`;
+- `PACKMON_VULNCHECK_API_BASE_URL`;
 - feed API keys and feed mode/enabled flags.
 
 Admin system settings can persist selected runtime values such as block
@@ -760,8 +912,12 @@ admin UI requires an explicit acknowledgement because it disables vulnerability
 blocking. System-setting audit entries record previous and new block-threshold
 and rate-limit values. Persisted values are loaded on server start.
 Admin feed settings can persist enablement, mode, cadence, and feed API keys.
-Production startup requires `PACKMON_ENCRYPTION_KEY` so persisted feed API keys
-are encrypted at rest; development mode is the only plaintext fallback. Feed
+Production startup requires `PACKMON_ENCRYPTION_KEY` as base64-encoded 32
+random bytes so persisted feed API keys are encrypted at rest, and
+`PACKMON_ADMIN_AUDIT_HMAC_KEY` as base64-encoded 32 random bytes so new admin
+audit digest-chain rows are keyed. Development mode may run without those
+secrets and then uses plaintext feed-key storage plus legacy `sha256:` admin
+audit digests. Feed
 setting audit entries record previous and new enablement, mode, cadence, and
 whether an API key is configured, but never the raw API key. Feed setting changes
 are applied to the running process immediately and are also loaded on future
@@ -778,8 +934,26 @@ deployments are expected to keep certificate-verifying database TLS.
 Trusted CLI configuration may reference API keys via `api_key_env` so config
 files do not need plaintext secrets. Auto-discovered project `.packmon.yaml`
 files cannot select API-key environment variables or override the Packmon
-server/local DB path. Environment variables and flags still take precedence over
-project and user-global config.
+server/local DB path. They also cannot set latest-version registry mirror URLs,
+because those URLs control network egress. Trusted user-global config or an
+explicit `--config` file may set `registries.npm_registry_base_url`,
+`registries.pypi_api_base_url`, `registries.rubygems_api_base_url`,
+`registries.cargo_registry_api_base_url`,
+`registries.cocoapods_trunk_api_base_url`,
+`registries.composer_repository_base_url`, `registries.go_proxy_url`,
+`registries.maven_repository_base_url`, `registries.docker_registry_mirrors`,
+`registries.swiftpm_git_allowed_hosts`, `registries.cran_mirror_url`,
+`registries.pub_hosted_url`, `registries.hex_api_base_url`, and
+`registries.nuget_v3_base_url`;
+environment variables `PACKMON_NPM_REGISTRY_BASE_URL`,
+`PACKMON_PYPI_API_BASE_URL`, `PACKMON_RUBYGEMS_API_BASE_URL`,
+`PACKMON_CARGO_REGISTRY_API_BASE_URL`,
+`PACKMON_COCOAPODS_TRUNK_API_BASE_URL`,
+`PACKMON_COMPOSER_REPOSITORY_BASE_URL`, `PACKMON_GO_PROXY_URL`,
+`PACKMON_MAVEN_REPOSITORY_BASE_URL`, `PACKMON_DOCKER_REGISTRY_MIRRORS`,
+`PACKMON_SWIFTPM_GIT_ALLOWED_HOSTS`, `PACKMON_CRAN_MIRROR_URL`,
+`PACKMON_PUB_HOSTED_URL`, `PACKMON_HEX_API_BASE_URL`, and
+`PACKMON_NUGET_V3_BASE_URL` take precedence.
 
 API keys are named with a bounded operator label, hashed at rest, track
 `last_used_at`, support revocation, soft-delete after revocation, and require an
@@ -787,7 +961,13 @@ RFC3339 UTC `expires_at` value no more than 90 days in the future. Creating a
 key in the admin UI requires current-password step-up verification before the
 secret is generated. Revoked, soft-deleted, or expired keys are not accepted by
 production `/api/v1/*` authentication. Soft-deleted rows retain created,
-expiration, last-used, revocation, and deletion timestamps for auditability.
+expiration, last-used, revocation, and deletion timestamps for auditability, but
+the stored operator label and authenticator hash are scrubbed when the key is
+soft-deleted.
+Legacy API-key rows that predate expiration support may keep `expires_at = NULL`.
+They are treated as no-expiration keys and remain valid until revoked or deleted
+by an operator; they are not automatically assigned an expiration date by later
+migrations.
 
 ## CI/CD Integration
 
@@ -802,6 +982,8 @@ Packmon supports:
   result artifacts;
 - CycloneDX SBOM and license/notice artifacts for Packmon binary releases;
 - GitLab Sigstore/Cosign bundles for retained scan-result checksum manifests;
+- pinned secret scanning on pull requests and pushes;
+- PR security checklist prompts and CODEOWNERS routing for sensitive paths;
 - optional opt-in PR comments;
 - optional webhook delivery.
 
@@ -819,16 +1001,18 @@ runner.
 
 The metrics endpoint emits Prometheus text metrics for:
 
-- HTTP request count and duration;
+- HTTP request count and duration histogram buckets for SLO/percentile
+  alerting;
 - packages scanned and scan findings from the maintained scan-log rollup;
 - current finding totals for vulnerability, malicious, supply-chain-risk, and
   lifecycle finding types plus current severity totals from vulnerability,
   malicious, and reputation-backed findings;
-- feed last sync and age;
+- feed last sync, current status, and age;
 - feed timeouts;
 - queue size, oldest job, errors, and recovered stuck jobs;
 - DB pool state;
 - migration version;
+- metrics store read failures;
 - auth login failures and degraded responses.
 
 Metrics bind to `127.0.0.1` by default.
@@ -899,3 +1083,9 @@ The only documented open validation gap is the real GitLab runner test:
 - shared template run in a real pipeline;
 - binary download and checksum verified in pipeline;
 - JSON, SARIF, JUnit, checksum, and Sigstore bundle artifacts visible in GitLab.
+
+Fork-local note: this fork currently does not operate GitLab or CI/CD release
+pipelines. GitLab/CI/CD delivery findings are deferred in
+`docs/deferred-scope.md` and are not current blockers for source-build/local
+Windows use. Re-open that scope before enabling CI/CD, publishing release
+binaries, or making Packmon a required pipeline gate.

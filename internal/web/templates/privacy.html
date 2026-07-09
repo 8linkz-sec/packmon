@@ -1,31 +1,98 @@
-{{define "title"}}Packmon - Privacy Notice{{end}}
+{{define "title"}}{{t "page.privacy.title"}}{{end}}
 
 {{define "content"}}
 <div class="max-w-3xl space-y-6">
-  <h1 class="text-2xl font-bold">Privacy Notice</h1>
+  <h1 class="text-2xl font-bold">{{t "privacy.heading"}}</h1>
+  <p class="text-sm text-gray-600">{{t "privacy.last_updated"}}</p>
 
   <section class="space-y-3 text-sm text-gray-700">
-    <h2 class="text-lg font-semibold text-gray-900">Session cookie</h2>
+    <h2 class="text-lg font-semibold text-gray-900">{{t "privacy.session.heading"}}</h2>
     <p>
-      Packmon uses the first-party <code class="font-mono">packmon_session</code> cookie for admin login sessions, login-form CSRF protection, and logout. The cookie is scoped to <code class="font-mono">/admin</code>, is HttpOnly, SameSite=Strict, and expires with the configured admin session lifetime.
+      {{t "privacy.session.body_intro"}} <code class="font-mono">packmon_session</code>
+      {{t "privacy.session.body_after_cookie"}} <code class="font-mono">/admin</code>,
+      {{t "privacy.session.body_after_scope"}}
     </p>
   </section>
 
   <section class="space-y-3 text-sm text-gray-700">
-    <h2 class="text-lg font-semibold text-gray-900">Operational metadata</h2>
+    <h2 class="text-lg font-semibold text-gray-900">{{t "privacy.controller.heading"}}</h2>
     <p>
-      The server can store admin audit log entries for security-sensitive actions, including action names, timestamps, client address metadata, and user-agent metadata. Scan history and scan metadata can contain package names, versions, ecosystems, repository metadata supplied by clients, result counts, and operational errors needed to troubleshoot dependency-security decisions.
+      {{t "privacy.controller.body_intro"}} <code class="font-mono">PACKMON_WEB_LEGAL_URL</code>.
     </p>
   </section>
 
   <section class="space-y-3 text-sm text-gray-700">
-    <h2 class="text-lg font-semibold text-gray-900">Operator notice</h2>
+    <h2 class="text-lg font-semibold text-gray-900">{{t "privacy.legal_basis.heading"}}</h2>
     <p>
-      Packmon is intended for internal deployment. Your organization controls retention, access, and any additional privacy or legal notices for its environment.
+      {{t "privacy.legal_basis.body"}}
+    </p>
+  </section>
+
+  <section class="space-y-3 text-sm text-gray-700">
+    <h2 class="text-lg font-semibold text-gray-900">{{t "privacy.operational_metadata.heading"}}</h2>
+    <p>
+      {{t "privacy.operational_metadata.audit"}}
+    </p>
+    <p>
+      {{t "privacy.operational_metadata.scan_logs"}}
+    </p>
+    <p>
+      {{t "privacy.operational_metadata.retention"}}
+    </p>
+  </section>
+
+  <section class="space-y-3 text-sm text-gray-700">
+    <h2 class="text-lg font-semibold text-gray-900">{{t "privacy.data_categories.heading"}}</h2>
+    <p>
+      {{t "privacy.data_categories.categories"}}
+    </p>
+    <p>
+      {{t "privacy.data_categories.sources"}}
+    </p>
+    <p>
+      {{t "privacy.data_categories.retention"}}
+    </p>
+  </section>
+
+  <section class="space-y-3 text-sm text-gray-700">
+    <h2 class="text-lg font-semibold text-gray-900">{{t "privacy.third_party.heading"}}</h2>
+    <p>
+      {{t "privacy.third_party.body"}}
+    </p>
+  </section>
+
+  <section class="space-y-3 text-sm text-gray-700">
+    <h2 class="text-lg font-semibold text-gray-900">{{t "privacy.webhook.heading"}}</h2>
+    <p>
+      {{t "privacy.webhook.body"}}
+    </p>
+  </section>
+
+  <section class="space-y-3 text-sm text-gray-700">
+    <h2 class="text-lg font-semibold text-gray-900">{{t "privacy.rights.heading"}}</h2>
+    <p>
+      {{t "privacy.rights.body"}}
+    </p>
+  </section>
+
+  <section class="space-y-3 text-sm text-gray-700">
+    <h2 class="text-lg font-semibold text-gray-900">{{t "privacy.california.heading"}}</h2>
+    <p>
+      {{t "privacy.california.rights"}}
+    </p>
+    <p>
+      {{t "privacy.california.gpc"}}
+    </p>
+  </section>
+
+  <section class="space-y-3 text-sm text-gray-700">
+    <h2 class="text-lg font-semibold text-gray-900">{{t "privacy.operator_notice.heading"}}</h2>
+    <p>
+      {{t "privacy.operator_notice.body"}}
     </p>
     {{if legalURL}}
     <p>
-      See the configured <a href="{{legalURL}}" class="text-blue-700 underline hover:text-blue-900">Legal Notice</a> for operator-specific information.
+      {{t "privacy.legal_notice.prefix"}} <a href="{{legalURL}}" class="text-blue-700 underline hover:text-blue-900">{{t "privacy.legal_notice.link"}}</a> {{t "privacy.legal_notice.suffix"}}
     </p>
     {{end}}
   </section>

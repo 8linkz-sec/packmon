@@ -40,7 +40,7 @@ sync with `DESIGN.md` and `SECURITY.md` when the behavior intentionally changes.
 ## Tests
 
 ```bash
-go test ./cmd/packmon-server/...
+go test -count=1 ./cmd/packmon-server/...
 ```
 Note: `admin_pages_test.go` / `system_settings_test.go` exercise the noop store,
 not real SQL. DB behavior is covered in `tests/integration`.

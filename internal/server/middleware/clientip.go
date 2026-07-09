@@ -1,9 +1,3 @@
-// Package middleware provides HTTP middleware for the Packmon server.
-//
-// ClientIP extracts the real client IP address from an HTTP request.
-// By default it only trusts r.RemoteAddr. X-Forwarded-For is ignored
-// unless a trusted proxy configuration is added in the future, because
-// any anonymous client can set that header to spoof their IP.
 package middleware
 
 import (
@@ -15,17 +9,16 @@ import (
 	"github.com/8linkz-sec/packmon/internal/requestctx"
 )
 
-// ClientIP returns the client IP address from the request. It strips
-// the port from RemoteAddr and returns only the host portion.
-//
-// X-Forwarded-For is intentionally NOT trusted. An attacker can set
-// this header to bypass IP-based rate limiting. When a reverse proxy
-// is deployed, a trusted-proxy aware implementation should be added.
+// ClientIP returns the context-resolved trusted client IP when TrustedClientIP
+// has run, otherwise it strips the port from RemoteAddr. X-Forwarded-For and
+// X-Real-IP are ignored unless the direct peer is in PACKMON_TRUSTED_PROXIES.
 var ClientIP = requestctx.ClientIP
 
 // TrustedClientIP resolves the client IP once per request using a trusted
 // proxy list and stores it in request context for downstream middleware and
-// handlers.
+// handlers. It honors X-Forwarded-For or X-Real-IP only when the direct peer is
+// configured as trusted, and X-Forwarded-For selection uses the
+// rightmost-untrusted address.
 func TrustedClientIP(trustedProxies []string) func(http.Handler) http.Handler {
 	proxies, _ := netutil.ParseTrustedProxies(trustedProxies)
 	return func(next http.Handler) http.Handler {
@@ -52,6 +45,8 @@ func clientIPWithTrustedProxyRules(r *http.Request, proxies netutil.TrustedProxy
 	return remote
 }
 
+// forwardedClientIP returns the rightmost syntactically valid X-Forwarded-For
+// address that is not in the configured trusted proxy set.
 func forwardedClientIP(raw string, proxies netutil.TrustedProxySet) string {
 	if strings.TrimSpace(raw) == "" {
 		return ""

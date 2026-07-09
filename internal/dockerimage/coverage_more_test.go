@@ -41,20 +41,20 @@ func TestCollectorAndDiscoverEdgeBranches(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
-	if _, err := DiscoverFiles(filepath.Join(root, "missing"), 1); err == nil {
-		t.Fatal("DiscoverFiles(missing) error = nil")
+	if _, _, err := DiscoverFilesWithWarnings(filepath.Join(root, "missing"), 1); err == nil {
+		t.Fatal("DiscoverFilesWithWarnings(missing) error = nil")
 	}
 	regular := filepath.Join(root, "file")
 	writeDockerImageTestFile(t, regular, "x")
-	if _, err := DiscoverFiles(regular, 1); err == nil {
-		t.Fatal("DiscoverFiles(file) error = nil")
+	if _, _, err := DiscoverFilesWithWarnings(regular, 1); err == nil {
+		t.Fatal("DiscoverFilesWithWarnings(file) error = nil")
 	}
 
 	writeDockerImageTestFile(t, filepath.Join(root, ".github", "workflows", "Dockerfile.ci"), "FROM alpine:3.23\n")
 	writeDockerImageTestFile(t, filepath.Join(root, ".cache", "Dockerfile"), "FROM ignored:latest\n")
-	files, err := DiscoverFiles(root, 5)
+	files, _, err := DiscoverFilesWithWarnings(root, 5)
 	if err != nil {
-		t.Fatalf("DiscoverFiles(.github) error = %v", err)
+		t.Fatalf("DiscoverFilesWithWarnings(.github) error = %v", err)
 	}
 	var sawGitHub, sawCache bool
 	for _, file := range files {
@@ -66,7 +66,7 @@ func TestCollectorAndDiscoverEdgeBranches(t *testing.T) {
 		}
 	}
 	if !sawGitHub || sawCache {
-		t.Fatalf("DiscoverFiles hidden handling sawGitHub=%v sawCache=%v files=%+v", sawGitHub, sawCache, files)
+		t.Fatalf("DiscoverFilesWithWarnings hidden handling sawGitHub=%v sawCache=%v files=%+v", sawGitHub, sawCache, files)
 	}
 
 	if _, err := parseFile(File{Path: filepath.Join(root, "missing"), RelPath: "missing", Kind: KindDockerfile}); err == nil {

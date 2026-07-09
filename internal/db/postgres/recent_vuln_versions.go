@@ -40,46 +40,7 @@ func summarizeRangeClauses(raw string) string {
 
 	var clauses []string
 	for _, r := range ranges {
-		events := r.Events
-		if len(events) == 0 && (r.Introduced != "" || r.Fixed != "" || r.LastAffected != "") {
-			if r.Introduced != "" {
-				events = append(events, recentRangeEvent{Introduced: r.Introduced})
-			}
-			if r.Fixed != "" {
-				events = append(events, recentRangeEvent{Fixed: r.Fixed})
-			}
-			if r.LastAffected != "" {
-				events = append(events, recentRangeEvent{LastAffected: r.LastAffected})
-			}
-		}
-
-		introduced := ""
-		hadIntroduced := false
-		for _, event := range events {
-			if event.Introduced != "" {
-				introduced = normalizeIntroduced(event.Introduced)
-				hadIntroduced = true
-			}
-			if event.Fixed != "" {
-				if clause := formatAffectedClause(introduced, event.Fixed, "", hadIntroduced); clause != "" {
-					clauses = append(clauses, clause)
-				}
-				introduced = ""
-				hadIntroduced = false
-			}
-			if event.LastAffected != "" {
-				if clause := formatAffectedClause(introduced, "", event.LastAffected, hadIntroduced); clause != "" {
-					clauses = append(clauses, clause)
-				}
-				introduced = ""
-				hadIntroduced = false
-			}
-		}
-		if hadIntroduced {
-			if clause := formatAffectedClause(introduced, "", "", true); clause != "" {
-				clauses = append(clauses, clause)
-			}
-		}
+		clauses = append(clauses, summarizeRecentRangeEvents(recentRangeEvents(r))...)
 	}
 
 	if len(clauses) == 0 {
@@ -89,6 +50,59 @@ func summarizeRangeClauses(raw string) string {
 		return clauses[0]
 	}
 	return strings.Join(clauses, " or ")
+}
+
+func recentRangeEvents(r recentRange) []recentRangeEvent {
+	if len(r.Events) > 0 {
+		return r.Events
+	}
+	if r.Introduced == "" && r.Fixed == "" && r.LastAffected == "" {
+		return nil
+	}
+
+	events := make([]recentRangeEvent, 0, 3)
+	if r.Introduced != "" {
+		events = append(events, recentRangeEvent{Introduced: r.Introduced})
+	}
+	if r.Fixed != "" {
+		events = append(events, recentRangeEvent{Fixed: r.Fixed})
+	}
+	if r.LastAffected != "" {
+		events = append(events, recentRangeEvent{LastAffected: r.LastAffected})
+	}
+	return events
+}
+
+func summarizeRecentRangeEvents(events []recentRangeEvent) []string {
+	clauses := make([]string, 0, len(events))
+	introduced := ""
+	hadIntroduced := false
+	for _, event := range events {
+		if event.Introduced != "" {
+			introduced = normalizeIntroduced(event.Introduced)
+			hadIntroduced = true
+		}
+		if event.Fixed != "" {
+			if clause := formatAffectedClause(introduced, event.Fixed, "", hadIntroduced); clause != "" {
+				clauses = append(clauses, clause)
+			}
+			introduced = ""
+			hadIntroduced = false
+		}
+		if event.LastAffected != "" {
+			if clause := formatAffectedClause(introduced, "", event.LastAffected, hadIntroduced); clause != "" {
+				clauses = append(clauses, clause)
+			}
+			introduced = ""
+			hadIntroduced = false
+		}
+	}
+	if hadIntroduced {
+		if clause := formatAffectedClause(introduced, "", "", true); clause != "" {
+			clauses = append(clauses, clause)
+		}
+	}
+	return clauses
 }
 
 func summarizeExplicitVersions(raw string) string {

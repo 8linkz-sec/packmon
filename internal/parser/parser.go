@@ -25,38 +25,73 @@ type Parser interface {
 	Ecosystem() domain.Ecosystem
 }
 
+// ParserDescriptor describes a parser factory that can be registered in a
+// Registry.
+type ParserDescriptor struct {
+	Name string
+	New  func() Parser
+}
+
+var builtInParserDescriptors = []ParserDescriptor{
+	{Name: "npm-package-lock", New: func() Parser { return NewNPMParser() }},
+	{Name: "github-actions", New: func() Parser { return NewActionsParser() }},
+	{Name: "yarn-lock", New: func() Parser { return NewYarnParser() }},
+	{Name: "pnpm-lock", New: func() Parser { return NewPnpmParser() }},
+	{Name: "pipfile-lock", New: func() Parser { return NewPipfileParser() }},
+	{Name: "poetry-lock", New: func() Parser { return NewPoetryParser() }},
+	{Name: "uv-lock", New: func() Parser { return NewUVParser() }},
+	{Name: "requirements", New: func() Parser { return NewRequirementsParser() }},
+	{Name: "go-sum", New: func() Parser { return NewGoSumParser() }},
+	{Name: "go-mod", New: func() Parser { return NewGoModParser() }},
+	{Name: "cargo-lock", New: func() Parser { return NewCargoParser() }},
+	{Name: "nuget-packages-lock", New: func() Parser { return NewNuGetParser() }},
+	{Name: "composer-lock", New: func() Parser { return NewComposerParser() }},
+	{Name: "gemfile-lock", New: func() Parser { return NewGemParser() }},
+	{Name: "pubspec-lock", New: func() Parser { return NewPubParser() }},
+	{Name: "cocoapods-lock", New: func() Parser { return NewCocoaPodsParser() }},
+	{Name: "swiftpm-resolved", New: func() Parser { return NewSwiftPMParser() }},
+	{Name: "hex-lock", New: func() Parser { return NewHexParser() }},
+	{Name: "cran-renv-lock", New: func() Parser { return NewCRANParser() }},
+	{Name: "maven-pom", New: func() Parser { return NewMavenParser() }},
+	{Name: "gradle-lockfile", New: func() Parser { return NewGradleParser() }},
+}
+
+// BuiltInParserDescriptors returns a copy of the built-in parser descriptors.
+func BuiltInParserDescriptors() []ParserDescriptor {
+	return append([]ParserDescriptor(nil), builtInParserDescriptors...)
+}
+
 // Registry holds registered parsers and resolves the correct parser for a
 // given filename.
 type Registry struct {
 	parsers []Parser
 }
 
-// NewRegistry creates a Registry pre-loaded with all built-in parsers.
-func NewRegistry() *Registry {
-	return &Registry{
-		parsers: []Parser{
-			NewNPMParser(),
-			NewActionsParser(),
-			NewYarnParser(),
-			NewPnpmParser(),
-			NewPipfileParser(),
-			NewPoetryParser(),
-			NewUVParser(),
-			NewRequirementsParser(),
-			NewGoSumParser(),
-			NewGoModParser(),
-			NewCargoParser(),
-			NewNuGetParser(),
-			NewComposerParser(),
-			NewGemParser(),
-			NewPubParser(),
-			NewCocoaPodsParser(),
-			NewSwiftPMParser(),
-			NewHexParser(),
-			NewCRANParser(),
-			NewMavenParser(),
-			NewGradleParser(),
-		},
+// NewRegistry creates a Registry pre-loaded with all built-in parsers and any
+// additional parser descriptors passed by the caller.
+func NewRegistry(extra ...ParserDescriptor) *Registry {
+	r := &Registry{}
+	r.RegisterDescriptors(BuiltInParserDescriptors()...)
+	r.RegisterDescriptors(extra...)
+	return r
+}
+
+// RegisterDescriptor instantiates and registers descriptor's parser.
+func (r *Registry) RegisterDescriptor(descriptor ParserDescriptor) {
+	if descriptor.New == nil {
+		return
+	}
+	parser := descriptor.New()
+	if parser == nil {
+		return
+	}
+	r.parsers = append(r.parsers, parser)
+}
+
+// RegisterDescriptors instantiates and registers parser descriptors in order.
+func (r *Registry) RegisterDescriptors(descriptors ...ParserDescriptor) {
+	for _, descriptor := range descriptors {
+		r.RegisterDescriptor(descriptor)
 	}
 }
 

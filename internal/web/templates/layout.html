@@ -1,32 +1,49 @@
 {{define "layout"}}
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" dir="{{layoutDir .}}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{block "title" .}}Packmon{{end}}</title>
-  <meta name="htmx-config" content='{"includeIndicatorStyles":false,"allowEval":false,"allowScriptTags":false,"historyEnabled":false}'>
-  <link rel="stylesheet" href="/static/tailwind.css">
-  <link rel="stylesheet" href="/static/style.css">
-  <script src="/static/htmx.min.js" defer></script>
-  <script src="/static/auto-refresh.js" defer></script>
+  {{if layoutNeedsHTMX}}
+  <meta name="htmx-config" content='{"includeIndicatorStyles":false,"allowEval":false,"allowScriptTags":false,"historyEnabled":false,"timeout":10000,"defaultSettleDelay":80}'>
+  {{end}}
+  <link rel="stylesheet" href="{{assetURL "/static/tailwind.css"}}">
+  <link rel="stylesheet" href="{{assetURL "/static/style.css"}}">
+  <script src="{{assetURL "/static/locale-format.js"}}" defer></script>
+  {{if layoutNeedsHTMX}}
+  <script src="{{assetURL "/static/htmx.min.js"}}" defer></script>
+  {{end}}
+  {{if layoutNeedsHelperScript}}
+  <script src="{{assetURL "/static/auto-refresh.js"}}" defer></script>
+  <script src="{{assetURL "/static/form-actions.js"}}" defer></script>
+  <script src="{{assetURL "/static/htmx-regions.js"}}" defer></script>
+  {{end}}
 </head>
-<body class="bg-gray-50 text-gray-900 min-h-screen flex flex-col">
-  <a href="#main-content" class="skip-link">Skip to main content</a>
+<body class="bg-gray-50 text-gray-900 min-h-dvh flex flex-col">
+  <a href="#main-content" class="skip-link">{{t "a11y.skip_to_main"}}</a>
 
   {{block "nav" .}}
-  <nav aria-label="Primary" class="bg-black text-white shadow">
-    <div class="max-w-[1700px] mx-auto px-4 sm:px-6 lg:px-8">
+  <nav aria-label="{{t "nav.primary"}}" class="bg-black text-white shadow">
+    <div class="max-w-shell mx-auto px-4 sm:px-6 lg:px-8">
       <div class="flex min-h-14 flex-wrap items-center gap-x-4 gap-y-2 py-2">
         <a href="/" class="flex min-h-11 items-center text-lg font-bold tracking-tight hover:text-gray-300">Packmon</a>
         <div class="flex flex-wrap items-center gap-2 text-sm">
-          <a href="/" {{if eq .ActiveNav "dashboard"}}aria-current="page"{{end}} class="flex min-h-11 items-center rounded px-3 py-2 hover:text-gray-300 {{if eq .ActiveNav "dashboard"}}bg-gray-700{{end}}">Dashboard</a>
-          <a href="/search" {{if eq .ActiveNav "search"}}aria-current="page"{{end}} class="flex min-h-11 items-center rounded px-3 py-2 hover:text-gray-300 {{if eq .ActiveNav "search"}}bg-gray-700{{end}}">Search</a>
-          <a href="/feeds" {{if eq .ActiveNav "feeds"}}aria-current="page"{{end}} class="flex min-h-11 items-center rounded px-3 py-2 hover:text-gray-300 {{if eq .ActiveNav "feeds"}}bg-gray-700{{end}}">Feed Status</a>
+          <a href="/" {{if eq .ActiveNav "dashboard"}}aria-current="page"{{end}}
+            class="flex min-h-11 items-center rounded-md px-3 py-2 hover:text-gray-300 {{if eq .ActiveNav "dashboard"}}bg-gray-700{{end}}"
+          >{{t "nav.dashboard"}}</a>
+          <a href="/search" {{if eq .ActiveNav "search"}}aria-current="page"{{end}}
+            class="flex min-h-11 items-center rounded-md px-3 py-2 hover:text-gray-300 {{if eq .ActiveNav "search"}}bg-gray-700{{end}}"
+          >{{t "nav.search"}}</a>
+          <a href="/feeds" {{if eq .ActiveNav "feeds"}}aria-current="page"{{end}}
+            class="flex min-h-11 items-center rounded-md px-3 py-2 hover:text-gray-300 {{if eq .ActiveNav "feeds"}}bg-gray-700{{end}}"
+          >{{t "nav.feeds"}}</a>
         </div>
         {{if adminNavEnabled}}
-        <div class="ml-auto flex flex-wrap items-center gap-2 text-sm">
-          <a href="/admin/" {{if eq .ActiveNav "admin"}}aria-current="page"{{end}} class="flex min-h-11 items-center rounded px-3 py-2 hover:text-gray-300 {{if eq .ActiveNav "admin"}}bg-gray-700{{end}}">Admin</a>
+        <div class="ms-auto flex flex-wrap items-center gap-2 text-sm">
+          <a href="/admin/" {{if eq .ActiveNav "admin"}}aria-current="page"{{end}}
+            class="flex min-h-11 items-center rounded-md px-3 py-2 hover:text-gray-300 {{if eq .ActiveNav "admin"}}bg-gray-700{{end}}"
+          >{{t "nav.admin"}}</a>
         </div>
         {{end}}
       </div>
@@ -34,21 +51,25 @@
   </nav>
   {{end}}
 
-  <main id="main-content" tabindex="-1" class="flex-1 max-w-[1700px] mx-auto px-4 sm:px-6 lg:px-8 py-6 w-full">
+  <main id="main-content" tabindex="-1" class="flex-1 max-w-shell mx-auto px-4 sm:px-6 lg:px-8 py-6 w-full">
     {{block "content" .}}{{end}}
   </main>
 
   <footer class="bg-gray-100 border-t border-gray-200 mt-auto">
-    <div class="max-w-[1700px] mx-auto px-4 sm:px-6 lg:px-8 py-3 text-center text-xs text-gray-600">
+    <div class="max-w-shell mx-auto px-4 sm:px-6 lg:px-8 py-3 text-center text-xs text-gray-600">
       <div class="flex flex-wrap items-center justify-center gap-x-3 gap-y-1">
-        <span>Packmon Dependency Scanner</span>
+        <span>{{t "footer.product"}}</span>
         {{if privacyURL}}
-        <span aria-hidden="true">·</span>
-        <a href="{{privacyURL}}" class="underline hover:text-gray-900">Privacy</a>
+        <span aria-hidden="true">&middot;</span>
+        <a href="{{privacyURL}}" class="underline hover:text-gray-900">{{t "footer.privacy"}}</a>
         {{end}}
         {{if legalURL}}
-        <span aria-hidden="true">·</span>
-        <a href="{{legalURL}}" class="underline hover:text-gray-900">Legal Notice</a>
+        <span aria-hidden="true">&middot;</span>
+        <a href="{{legalURL}}" class="underline hover:text-gray-900">{{t "footer.legal"}}</a>
+        {{end}}
+        {{if termsURL}}
+        <span aria-hidden="true">&middot;</span>
+        <a href="{{termsURL}}" class="underline hover:text-gray-900">{{t "footer.terms"}}</a>
         {{end}}
       </div>
     </div>

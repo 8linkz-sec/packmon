@@ -10,13 +10,13 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/8linkz-sec/packmon/internal/db"
 	feedqueue "github.com/8linkz-sec/packmon/internal/feed"
 	"github.com/8linkz-sec/packmon/internal/feed/packagefilter"
-	"github.com/8linkz-sec/packmon/internal/telemetry"
+	"github.com/8linkz-sec/packmon/internal/feed/ratelimit"
+	"github.com/8linkz-sec/packmon/internal/httpclient"
 )
 
 const (
@@ -34,6 +34,7 @@ const (
 	maxResponseSize         = 2 << 20
 	stuckThreshold          = 5 * time.Minute
 	completeTimeout         = 2 * time.Second
+	dequeueTimeout          = 2 * time.Second
 	resetStuckJobsTimeout   = 2 * time.Second
 )
 
@@ -45,46 +46,16 @@ var (
 // RateLimiter holds ReversingLabs token-bucket state. It can be shared by
 // successive workers so runtime reconfiguration does not reset upstream
 // capacity.
-type RateLimiter struct {
-	tokensMu         sync.Mutex
-	tokens           int
-	maxTokens        int
-	lastRefill       time.Time
-	fractionalTokens float64
-}
+type RateLimiter = ratelimit.Bucket
 
 // NewRateLimiter creates a token bucket for ReversingLabs calls per hour.
 func NewRateLimiter(callsPerHour int) *RateLimiter {
-	if callsPerHour <= 0 {
-		callsPerHour = defaultRateLimitPerHour
-	}
-	return &RateLimiter{
-		tokens:     callsPerHour,
-		maxTokens:  callsPerHour,
-		lastRefill: time.Now(),
-	}
-}
-
-func (l *RateLimiter) SetLimit(callsPerHour int) {
-	if l == nil || callsPerHour <= 0 {
-		return
-	}
-	l.tokensMu.Lock()
-	defer l.tokensMu.Unlock()
-
-	wasFull := l.tokens >= l.maxTokens
-	l.maxTokens = callsPerHour
-	switch {
-	case wasFull:
-		l.tokens = callsPerHour
-	case l.tokens > callsPerHour:
-		l.tokens = callsPerHour
-	}
+	return ratelimit.New(callsPerHour, defaultRateLimitPerHour)
 }
 
 type reputationStore interface {
 	DequeueRefresh(context.Context, string) (*db.RefreshJob, error)
-	CompleteRefresh(context.Context, int, error) error
+	CompleteClaimedRefresh(context.Context, int, *time.Time, error) error
 	ResetStuckJobs(context.Context, string, time.Duration) (int, error)
 	ListDuePackageReputations(context.Context, string, string, string, int) ([]db.PackageReputation, error)
 	UpsertPackageReputation(context.Context, *db.PackageReputation) error
@@ -92,6 +63,27 @@ type reputationStore interface {
 
 type reputationPruner interface {
 	PrunePackageReputation(context.Context, string, time.Duration) (int, error)
+}
+
+type pollTicker interface {
+	C() <-chan time.Time
+	Stop()
+}
+
+type realPollTicker struct {
+	ticker *time.Ticker
+}
+
+func newRealPollTicker(d time.Duration) pollTicker {
+	return &realPollTicker{ticker: time.NewTicker(d)}
+}
+
+func (t *realPollTicker) C() <-chan time.Time {
+	return t.ticker.C
+}
+
+func (t *realPollTicker) Stop() {
+	t.ticker.Stop()
 }
 
 type Worker struct {
@@ -110,6 +102,8 @@ type Worker struct {
 	excluded       []string
 	dequeueLogs    *feedqueue.RepeatedErrorLogger
 	resetLogs      *feedqueue.RepeatedErrorLogger
+	newPollTicker  func(time.Duration) pollTicker
+	metrics        feedqueue.MetricsRecorder
 
 	*RateLimiter
 }
@@ -196,28 +190,17 @@ func WithJobTimeout(d time.Duration) Option {
 
 func WithExcludedNamespaces(prefixes []string) Option {
 	return func(w *Worker) {
-		w.excluded = normalizeNamespacePrefixes(prefixes)
+		w.excluded = packagefilter.NormalizeNamespacePrefixes(prefixes)
 	}
 }
 
-func normalizeNamespacePrefixes(prefixes []string) []string {
-	out := make([]string, 0, len(prefixes))
-	seen := make(map[string]struct{}, len(prefixes))
-	for _, prefix := range prefixes {
-		prefix = strings.ToLower(strings.TrimSpace(prefix))
-		if prefix == "" {
-			continue
-		}
-		if _, ok := seen[prefix]; ok {
-			continue
-		}
-		seen[prefix] = struct{}{}
-		out = append(out, prefix)
+func WithMetricsRecorder(recorder feedqueue.MetricsRecorder) Option {
+	return func(w *Worker) {
+		w.metrics = feedqueue.MetricsRecorderOrNoop(recorder)
 	}
-	return out
 }
 
-func NewWorker(store db.Store, apiKey string, logger *slog.Logger, opts ...Option) *Worker {
+func NewWorker(store reputationStore, apiKey string, logger *slog.Logger, opts ...Option) *Worker {
 	return newWorker(store, apiKey, logger, opts...)
 }
 
@@ -241,11 +224,14 @@ func newWorker(store reputationStore, apiKey string, logger *slog.Logger, opts .
 		pruneInterval:  defaultPruneInterval,
 		dequeueLogs:    feedqueue.NewRepeatedErrorLogger(feedqueue.DefaultRepeatedErrorLogWindow),
 		resetLogs:      feedqueue.NewRepeatedErrorLogger(feedqueue.DefaultRepeatedErrorLogWindow),
+		newPollTicker:  newRealPollTicker,
+		metrics:        feedqueue.NoopMetricsRecorder(),
 		RateLimiter:    NewRateLimiter(defaultRateLimitPerHour),
 	}
 	for _, opt := range opts {
 		opt(w)
 	}
+	w.httpClient = httpclient.CloneWithSafeRedirectPolicy(w.httpClient)
 	return w
 }
 
@@ -259,11 +245,11 @@ func (w *Worker) Run(ctx context.Context) error {
 
 	w.logger.Info("ReversingLabs worker started",
 		slog.Duration("poll_interval", w.pollInterval),
-		slog.Int("rate_limit", w.maxTokens),
+		slog.Int("rate_limit", w.Limit()),
 		slog.Int("batch_size", w.batchSize),
 	)
 
-	ticker := time.NewTicker(w.pollInterval)
+	ticker := w.newPollTicker(w.pollInterval)
 	defer ticker.Stop()
 
 	w.pruneCache(ctx)
@@ -272,7 +258,7 @@ func (w *Worker) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			w.logger.Info("ReversingLabs worker shutting down")
 			return ctx.Err()
-		case <-ticker.C:
+		case <-ticker.C():
 			w.processNextJob(ctx)
 		}
 	}
@@ -282,49 +268,72 @@ func (w *Worker) processNextJob(ctx context.Context) {
 	w.pruneCache(ctx)
 	w.resetStuckJobs(ctx)
 
-	if !w.acquireToken() {
+	if !w.RateLimiter.Acquire() {
 		return
 	}
 
-	job, err := w.store.DequeueRefresh(ctx, FeedName)
+	dequeueCtx, cancel := context.WithTimeout(ctx, dequeueTimeout)
+	job, err := w.store.DequeueRefresh(dequeueCtx, FeedName)
+	cancel()
 	if err != nil {
-		w.returnToken()
+		w.RateLimiter.Return()
 		w.dequeueLogs.Error(w.logger, "failed to dequeue job", err)
 		return
 	}
 	if job == nil {
-		w.returnToken()
+		w.RateLimiter.Return()
 		return
 	}
 
 	jobCtx, cancel := context.WithTimeout(ctx, w.jobTimeout)
-	checkErr := w.processJob(jobCtx, job)
+	madeUpstreamRequest, checkErr := w.processJob(jobCtx, job)
 	cancel()
+	if !madeUpstreamRequest {
+		w.RateLimiter.Return()
+	}
 	if errors.Is(checkErr, errRateLimited) {
-		telemetry.Default().IncQueueError(FeedName)
+		w.metrics.IncQueueError(FeedName)
 		w.logger.Warn("ReversingLabs check rate limited; leaving job processing for retry",
 			slog.String("ecosystem", job.Ecosystem),
 			slog.String("name", job.Name),
-			slog.String("error", checkErr.Error()),
+			slog.Int("job_id", job.ID),
+			slog.String("error", feedqueue.SafeDiagnosticError(checkErr)),
 		)
 		return
 	}
 	completeCtx, cancel := context.WithTimeout(context.Background(), completeTimeout)
 	defer cancel()
-	if completeErr := feedqueue.CompleteClaimedRefresh(completeCtx, w.store, job, checkErr); completeErr != nil {
+	if completeErr := completeQueueJob(completeCtx, w.store, job, checkErr, w.metrics); completeErr != nil {
 		w.logger.Error("failed to complete job",
 			slog.Int("job_id", job.ID),
 			slog.String("error", completeErr.Error()),
 		)
 	}
 	if checkErr != nil {
-		telemetry.Default().IncQueueError(FeedName)
+		w.metrics.IncQueueError(FeedName)
 		w.logger.Warn("ReversingLabs check failed",
 			slog.String("ecosystem", job.Ecosystem),
 			slog.String("name", job.Name),
-			slog.String("error", checkErr.Error()),
+			slog.Int("job_id", job.ID),
+			slog.String("error", feedqueue.SafeDiagnosticError(checkErr)),
 		)
 	}
+}
+
+func completeQueueJob(ctx context.Context, store reputationStore, job *db.RefreshJob, jobErr error, recorder feedqueue.MetricsRecorder) error {
+	err := feedqueue.CompleteClaimedRefresh(ctx, store, job, jobErr)
+	if err != nil || job == nil {
+		return err
+	}
+	feedqueue.MetricsRecorderOrNoop(recorder).IncQueueJobCompleted(FeedName, queueJobCompletionResult(jobErr))
+	return nil
+}
+
+func queueJobCompletionResult(jobErr error) string {
+	if jobErr != nil {
+		return feedqueue.QueueJobResultError
+	}
+	return feedqueue.QueueJobResultSuccess
 }
 
 func (w *Worker) pruneCache(ctx context.Context) {
@@ -354,13 +363,13 @@ func (w *Worker) pruneCache(ctx context.Context) {
 	}
 }
 
-func (w *Worker) processJob(ctx context.Context, job *db.RefreshJob) error {
+func (w *Worker) processJob(ctx context.Context, job *db.RefreshJob) (bool, error) {
 	due, err := w.store.ListDuePackageReputations(ctx, job.Ecosystem, job.Name, FeedName, w.batchSize)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if len(due) == 0 {
-		return nil
+		return false, nil
 	}
 
 	var mappable []db.PackageReputation
@@ -375,7 +384,7 @@ func (w *Worker) processJob(ctx context.Context, job *db.RefreshJob) error {
 			rep.NextCheckAt = nil
 			rep.LastError = ""
 			if err := w.store.UpsertPackageReputation(ctx, &rep); err != nil {
-				return err
+				return false, err
 			}
 			continue
 		}
@@ -388,29 +397,29 @@ func (w *Worker) processJob(ctx context.Context, job *db.RefreshJob) error {
 			rep.NextCheckAt = nil
 			rep.LastError = ""
 			if err := w.store.UpsertPackageReputation(ctx, &rep); err != nil {
-				return err
+				return false, err
 			}
 			continue
 		}
 		mappable = append(mappable, rep)
 	}
 	if len(mappable) == 0 {
-		return nil
+		return false, nil
 	}
 
 	results, lookupErr := w.lookupBatch(ctx, mappable)
 	if lookupErr != nil {
 		if errors.Is(lookupErr, errRateLimited) {
-			return lookupErr
+			return true, lookupErr
 		}
 		results = w.errorResults(mappable, lookupErr)
 	}
 	for i := range results {
 		if err := w.store.UpsertPackageReputation(ctx, &results[i]); err != nil {
-			return err
+			return true, err
 		}
 	}
-	return lookupErr
+	return true, lookupErr
 }
 
 type findPackageRequest struct {
@@ -557,7 +566,7 @@ func (w *Worker) lookupBatch(ctx context.Context, reps []db.PackageReputation) (
 	}
 	if err := reversingLabsLookupStatusError(statusCode); err != nil {
 		if errors.Is(err, errRateLimited) {
-			w.drainTokens()
+			w.RateLimiter.Drain()
 		}
 		return nil, err
 	}
@@ -604,16 +613,16 @@ func (w *Worker) postLookupRequest(ctx context.Context, requests []findPackageRe
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(w.baseURL, "/")+"/find/packages?compact=true", bytes.NewReader(payload))
 	if err != nil {
-		return 0, nil, fmt.Errorf("create request: %w", err)
+		return 0, nil, fmt.Errorf("create request: %s", feedqueue.SafeDiagnosticError(err))
 	}
 	req.Header.Set("Authorization", "Bearer "+w.apiKey)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "packmon-feedsync/1.0")
+	req.Header.Set("User-Agent", feedqueue.FeedSyncUserAgent)
 
 	resp, err := w.httpClient.Do(req)
 	if err != nil {
-		return 0, nil, fmt.Errorf("http post: %w", err)
+		return 0, nil, fmt.Errorf("http post: %s", feedqueue.SafeDiagnosticError(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -648,7 +657,7 @@ func (w *Worker) lookupBatch413Fallback(ctx context.Context, reps []db.PackageRe
 		if _, ok := BuildPURL(rep.Ecosystem, rep.Name, rep.Version); !ok {
 			continue
 		}
-		if !w.acquireToken() {
+		if !w.RateLimiter.Acquire() {
 			return nil, fmt.Errorf("%w by ReversingLabs local 413 fallback budget", errRateLimited)
 		}
 		one, oneErr := w.lookupBatch(ctx, []db.PackageReputation{rep})
@@ -749,7 +758,7 @@ func (w *Worker) errorResult(rep db.PackageReputation, err error, now time.Time)
 	}
 	rep.LastCheckedAt = &now
 	rep.NextCheckAt = &next
-	rep.LastError = err.Error()
+	rep.LastError = feedqueue.SafeDiagnosticError(err)
 	return rep
 }
 
@@ -823,57 +832,7 @@ func (w *Worker) resetStuckJobs(ctx context.Context) {
 		return
 	}
 	if count > 0 {
-		telemetry.Default().AddQueueStuckRecovered(count)
+		w.metrics.AddQueueStuckRecovered(count)
 		w.logger.Info("reset stuck jobs", slog.Int("count", count))
 	}
-}
-
-func (w *Worker) acquireToken() bool {
-	w.tokensMu.Lock()
-	defer w.tokensMu.Unlock()
-
-	w.refillTokens()
-	if w.tokens <= 0 {
-		return false
-	}
-	w.tokens--
-	return true
-}
-
-func (w *Worker) returnToken() {
-	w.tokensMu.Lock()
-	defer w.tokensMu.Unlock()
-	if w.tokens < w.maxTokens {
-		w.tokens++
-	}
-}
-
-func (w *Worker) drainTokens() {
-	w.tokensMu.Lock()
-	defer w.tokensMu.Unlock()
-	w.tokens = 0
-	w.fractionalTokens = 0
-	w.lastRefill = time.Now()
-}
-
-func (w *Worker) refillTokens() {
-	now := time.Now()
-	elapsed := now.Sub(w.lastRefill)
-	if elapsed <= 0 {
-		return
-	}
-
-	raw := elapsed.Seconds() * float64(w.maxTokens) / 3600.0
-	w.fractionalTokens += raw
-	whole := int(w.fractionalTokens)
-	w.fractionalTokens -= float64(whole)
-	if whole <= 0 {
-		return
-	}
-
-	w.tokens += whole
-	if w.tokens > w.maxTokens {
-		w.tokens = w.maxTokens
-	}
-	w.lastRefill = now
 }

@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +25,7 @@ type ghsaStoreStub struct {
 	status          *db.FeedSyncStatus
 	vulns           []*db.Vulnerability
 	deleted         []string
+	deletedSources  []string
 	upsertErr       error
 	deleteErr       error
 	statusUpsertErr error
@@ -43,6 +46,15 @@ func (s *ghsaStoreStub) DeleteVulnerability(_ context.Context, id string) error 
 		return s.deleteErr
 	}
 	s.deleted = append(s.deleted, id)
+	return nil
+}
+
+func (s *ghsaStoreStub) DeleteVulnerabilityForSource(_ context.Context, id, source string) error {
+	if s.deleteErr != nil {
+		return s.deleteErr
+	}
+	s.deleted = append(s.deleted, id)
+	s.deletedSources = append(s.deletedSources, source)
 	return nil
 }
 
@@ -96,7 +108,10 @@ func TestMapToVulnerability_PreservesGitHubActionsPackage(t *testing.T) {
 		},
 	}
 
-	vuln := mapToVulnerability(advisory, []byte(`{}`))
+	vuln, err := mapToVulnerability(advisory, []byte(`{}`))
+	if err != nil {
+		t.Fatalf("mapToVulnerability() error = %v", err)
+	}
 	if len(vuln.AffectedPackages) != 1 {
 		t.Fatalf("AffectedPackages count = %d, want 1", len(vuln.AffectedPackages))
 	}
@@ -133,7 +148,10 @@ func TestMapToVulnerabilityMergesDuplicateGitHubActionsRanges(t *testing.T) {
 		t.Fatalf("unmarshal advisory: %v", err)
 	}
 
-	vuln := mapToVulnerability(&advisory, raw)
+	vuln, err := mapToVulnerability(&advisory, raw)
+	if err != nil {
+		t.Fatalf("mapToVulnerability() error = %v", err)
+	}
 	if len(vuln.AffectedPackages) != 1 {
 		t.Fatalf("AffectedPackages count = %d, want 1 merged package", len(vuln.AffectedPackages))
 	}
@@ -156,12 +174,36 @@ func TestMapToVulnerabilityMergesDuplicateGitHubActionsRanges(t *testing.T) {
 func TestNewSyncerDefaultsAndName(t *testing.T) {
 	t.Parallel()
 
-	syncer := NewSyncer(&ghsaStoreStub{}, nil, "")
+	syncer := NewSyncer(nil, "")
 	if syncer.Name() != FeedName {
 		t.Fatalf("Name() = %q, want %q", syncer.Name(), FeedName)
 	}
 	if syncer.dataDir == "" {
 		t.Fatal("dataDir is empty, want default temp dir")
+	}
+}
+
+func TestSyncerDoesNotOwnStoreOutsideSyncContract(t *testing.T) {
+	t.Parallel()
+
+	syncerType := reflect.TypeOf(Syncer{})
+	storeType := reflect.TypeOf((*db.Store)(nil)).Elem()
+	for i := 0; i < syncerType.NumField(); i++ {
+		field := syncerType.Field(i)
+		if field.Type == storeType {
+			t.Fatalf("Syncer field %s stores db.Store; use Sync(ctx, store) as the only persistence input", field.Name)
+		}
+	}
+
+	source, err := os.ReadFile("syncer.go")
+	if err != nil {
+		t.Fatalf("read syncer.go: %v", err)
+	}
+	if regexp.MustCompile(`(?m)^\s*store\s+db\.Store\b`).Match(source) {
+		t.Fatal("syncer.go declares a store db.Store field; use Sync(ctx, store) as the only persistence input")
+	}
+	if strings.Contains(string(source), "s.store") {
+		t.Fatal("syncer.go references s.store; use the store passed to Sync(ctx, store)")
 	}
 }
 
@@ -189,7 +231,10 @@ func TestMapToVulnerabilityHandlesAliasesReferencesAndWithdrawn(t *testing.T) {
 		},
 	}
 
-	vuln := mapToVulnerability(advisory, []byte(`{"id":"GHSA-map-1234-5678"}`))
+	vuln, err := mapToVulnerability(advisory, []byte(`{"id":"GHSA-map-1234-5678"}`))
+	if err != nil {
+		t.Fatalf("mapToVulnerability() error = %v", err)
+	}
 	if vuln.Severity != "CRITICAL" || vuln.Withdrawn == nil {
 		t.Fatalf("mapped vulnerability severity/withdrawn = %q/%v", vuln.Severity, vuln.Withdrawn)
 	}
@@ -204,12 +249,12 @@ func TestMapToVulnerabilityHandlesAliasesReferencesAndWithdrawn(t *testing.T) {
 		if !aliasSet[want] {
 			t.Fatalf("aliases = %+v, missing %s", vuln.Aliases, want)
 		}
+	}
 
-		badWithdrawn := "not a timestamp"
-		vuln = mapToVulnerability(&ghsaAdvisory{ID: "GHSA-bad-withdrawn", Withdrawn: &badWithdrawn}, nil)
-		if vuln.Withdrawn != nil {
-			t.Fatalf("invalid withdrawn parsed as %v, want nil", vuln.Withdrawn)
-		}
+	badWithdrawn := "not a timestamp"
+	_, err = mapToVulnerability(&ghsaAdvisory{ID: "GHSA-bad-withdrawn", Withdrawn: &badWithdrawn}, nil)
+	if err == nil || !strings.Contains(err.Error(), "withdrawn") {
+		t.Fatalf("mapToVulnerability(invalid withdrawn) error = %v, want withdrawn parse error", err)
 	}
 }
 
@@ -223,7 +268,7 @@ func TestProcessChangedFilesDoesNotReadOutsideRepo(t *testing.T) {
 	}
 
 	store := &ghsaStoreStub{}
-	syncer := NewSyncer(store, nil, "")
+	syncer := NewSyncer(nil, "")
 	_, _, err := syncer.processChangedFiles(context.Background(), store, repoDir, []string{
 		reviewedDir + "/../../../outside.json",
 	})
@@ -259,7 +304,7 @@ func TestProcessChangedFilesFiltersAndUpsertsReviewedJSON(t *testing.T) {
 	}
 
 	store := &ghsaStoreStub{}
-	syncer := NewSyncer(store, nil, "")
+	syncer := NewSyncer(nil, "")
 	synced, total, err := syncer.processChangedFiles(context.Background(), store, repoDir, []string{
 		reviewedDir + "/2026/05/GHSA-test.json",
 		reviewedDir + "/2026/05/note.txt",
@@ -278,6 +323,9 @@ func TestProcessChangedFilesFiltersAndUpsertsReviewedJSON(t *testing.T) {
 	if len(store.deleted) != 1 || store.deleted[0] != "missing" {
 		t.Fatalf("deleted IDs = %v, want [missing]", store.deleted)
 	}
+	if len(store.deletedSources) != 1 || store.deletedSources[0] != "ghsa" {
+		t.Fatalf("deleted sources = %v, want [ghsa]", store.deletedSources)
+	}
 }
 
 func TestProcessChangedFilesDeletesRemovedReviewedJSON(t *testing.T) {
@@ -285,7 +333,7 @@ func TestProcessChangedFilesDeletesRemovedReviewedJSON(t *testing.T) {
 
 	repoDir := t.TempDir()
 	store := &ghsaStoreStub{}
-	syncer := NewSyncer(store, nil, "")
+	syncer := NewSyncer(nil, "")
 	synced, total, err := syncer.processChangedFiles(context.Background(), store, repoDir, []string{
 		reviewedDir + "/2026/05/GHSA-deleted-1234-5678.json",
 	})
@@ -297,6 +345,9 @@ func TestProcessChangedFilesDeletesRemovedReviewedJSON(t *testing.T) {
 	}
 	if len(store.deleted) != 1 || store.deleted[0] != "GHSA-deleted-1234-5678" {
 		t.Fatalf("deleted IDs = %v", store.deleted)
+	}
+	if len(store.deletedSources) != 1 || store.deletedSources[0] != "ghsa" {
+		t.Fatalf("deleted sources = %v, want [ghsa]", store.deletedSources)
 	}
 
 	store = &ghsaStoreStub{deleteErr: errors.New("delete failed")}
@@ -325,7 +376,7 @@ func TestProcessChangedFilesDoesNotDeleteOnOversizedReadError(t *testing.T) {
 	}
 
 	store := &ghsaStoreStub{}
-	syncer := NewSyncer(store, nil, "")
+	syncer := NewSyncer(nil, "")
 	synced, total, err := syncer.processChangedFiles(context.Background(), store, repoDir, []string{advisoryRelPath})
 	if err == nil || !strings.Contains(err.Error(), "1 GHSA advisory import errors") {
 		t.Fatalf("processChangedFiles() error = %v, want aggregate import error", err)
@@ -335,6 +386,35 @@ func TestProcessChangedFilesDoesNotDeleteOnOversizedReadError(t *testing.T) {
 	}
 	if len(store.deleted) != 0 {
 		t.Fatalf("deleted IDs = %v, want none for oversized read error", store.deleted)
+	}
+}
+
+func TestProcessChangedFilesReportsMalformedWithdrawnTimestamp(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	advisoryRelPath := reviewedDir + "/2026/05/GHSA-bad-withdrawn-1234.json"
+	advisoryPath := filepath.Join(repoDir, filepath.FromSlash(advisoryRelPath))
+	if err := os.MkdirAll(filepath.Dir(advisoryPath), 0o750); err != nil {
+		t.Fatalf("mkdir advisory dir: %v", err)
+	}
+	if err := os.WriteFile(advisoryPath, []byte(`{
+		"id":"GHSA-bad-withdrawn-1234",
+		"summary":"bad withdrawn advisory",
+		"withdrawn":"not a timestamp",
+		"database_specific":{"severity":"LOW"}
+	}`), 0o600); err != nil {
+		t.Fatalf("write advisory: %v", err)
+	}
+
+	store := &ghsaStoreStub{}
+	syncer := NewSyncer(nil, "")
+	synced, total, err := syncer.processChangedFiles(context.Background(), store, repoDir, []string{advisoryRelPath})
+	if err == nil || !strings.Contains(err.Error(), "1 GHSA advisory import errors") {
+		t.Fatalf("processChangedFiles() error = %v, want aggregate import error", err)
+	}
+	if synced != 0 || total != 1 || store.upserts != 0 {
+		t.Fatalf("synced=%d total=%d upserts=%d, want 0/1/0", synced, total, store.upserts)
 	}
 }
 
@@ -354,7 +434,7 @@ func TestWalkAdvisoriesRejectsOversizedAdvisoryJSON(t *testing.T) {
 	}
 
 	store := &ghsaStoreStub{}
-	syncer := NewSyncer(store, nil, "")
+	syncer := NewSyncer(nil, "")
 	synced, total, err := syncer.walkAdvisories(context.Background(), store, root)
 	if err == nil || !strings.Contains(err.Error(), "1 GHSA advisory import errors") {
 		t.Fatalf("walkAdvisories() error = %v, want aggregate import error", err)
@@ -381,7 +461,7 @@ func TestWalkAdvisoriesReportsInvalidFiles(t *testing.T) {
 	}
 
 	store := &ghsaStoreStub{}
-	syncer := NewSyncer(store, nil, "")
+	syncer := NewSyncer(nil, "")
 	synced, total, err := syncer.walkAdvisories(context.Background(), store, root)
 	if err == nil || !strings.Contains(err.Error(), "2 GHSA advisory import errors") {
 		t.Fatalf("walkAdvisories() error = %v, want aggregate import error", err)
@@ -421,7 +501,7 @@ func TestProcessChangedFilesReportsSkippedImportErrors(t *testing.T) {
 	}
 
 	store := &ghsaStoreStub{}
-	syncer := NewSyncer(store, nil, "")
+	syncer := NewSyncer(nil, "")
 	synced, total, err := syncer.processChangedFiles(context.Background(), store, repoDir, []string{
 		reviewedDir + "/2026/05/GHSA-valid.json",
 		reviewedDir + "/2026/05/GHSA-invalid.json",
@@ -439,9 +519,9 @@ func TestGHSASyncStatusAndRepairHelpers(t *testing.T) {
 	t.Parallel()
 
 	store := &ghsaStoreStub{}
-	syncer := NewSyncer(store, nil, "")
-	syncer.recordSyncSuccessWithCommit(context.Background(), time.Second, 10, 8, "abc123")
-	syncer.recordSyncFailure(context.Background(), time.Now(), context.Canceled)
+	syncer := NewSyncer(nil, "")
+	syncer.recordSyncSuccessWithCommit(context.Background(), store, time.Second, 10, 8, "abc123", true)
+	syncer.recordSyncFailure(context.Background(), store, time.Now(), context.Canceled)
 
 	if len(store.statuses) != 2 {
 		t.Fatalf("statuses length = %d, want 2", len(store.statuses))
@@ -449,32 +529,68 @@ func TestGHSASyncStatusAndRepairHelpers(t *testing.T) {
 	if store.statuses[0].LastSyncStatus != "success" || store.statuses[0].LastCommitHash != "abc123" {
 		t.Fatalf("success status = %+v", store.statuses[0])
 	}
+	if !ghsaMetadataIsCurrentForTest(store.statuses[0].Metadata) {
+		t.Fatalf("success metadata = %s, want current", store.statuses[0].Metadata)
+	}
 	if store.statuses[1].LastSyncStatus != "error" || store.statuses[1].LastError == "" {
 		t.Fatalf("failure status = %+v", store.statuses[1])
 	}
 	canceledCtx, cancel := context.WithCancel(context.Background())
 	cancel()
 	store.rejectCanceled = true
-	syncer.recordSyncFailure(canceledCtx, time.Now(), context.Canceled)
+	syncer.recordSyncFailure(canceledCtx, store, time.Now(), context.Canceled)
 	if len(store.statuses) != 3 {
 		t.Fatalf("statuses length after canceled context = %d, want 3", len(store.statuses))
 	}
 
 	repairStore := &ghsaRepairStoreStub{repaired: 3}
-	if got := syncer.repairAffectedPackages(context.Background(), repairStore); got != 3 {
-		t.Fatalf("repairAffectedPackages() = %d, want 3", got)
+	if got, ok := syncer.repairAffectedPackages(context.Background(), repairStore); got != 3 || !ok {
+		t.Fatalf("repairAffectedPackages() = %d/%t, want 3/true", got, ok)
 	}
 	repairStore.err = errors.New("repair failed")
-	if got := syncer.repairAffectedPackages(context.Background(), repairStore); got != 0 {
-		t.Fatalf("repairAffectedPackages(error) = %d, want 0", got)
+	if got, ok := syncer.repairAffectedPackages(context.Background(), repairStore); got != 0 || ok {
+		t.Fatalf("repairAffectedPackages(error) = %d/%t, want 0/false", got, ok)
 	}
-	if got := syncer.repairAffectedPackages(context.Background(), store); got != 0 {
-		t.Fatalf("repairAffectedPackages(non-repairer) = %d, want 0", got)
+	if got, ok := syncer.repairAffectedPackages(context.Background(), store); got != 0 || !ok {
+		t.Fatalf("repairAffectedPackages(non-repairer) = %d/%t, want 0/true", got, ok)
 	}
 
 	store.statusUpsertErr = errors.New("status db down")
-	syncer.recordSyncSuccessWithCommit(context.Background(), time.Second, 1, 1, "def456")
-	syncer.recordSyncFailure(context.Background(), time.Now(), context.Canceled)
+	syncer.recordSyncSuccessWithCommit(context.Background(), store, time.Second, 1, 1, "def456", true)
+	syncer.recordSyncFailure(context.Background(), store, time.Now(), context.Canceled)
+}
+
+func TestRecordSyncFailurePreservesLastUsableSync(t *testing.T) {
+	t.Parallel()
+
+	lastSync := time.Date(2026, 5, 1, 12, 30, 0, 0, time.UTC)
+	store := &ghsaStoreStub{status: &db.FeedSyncStatus{
+		FeedName:       FeedName,
+		LastSyncStatus: db.FeedSyncStatusSuccess,
+		LastSyncAt:     &lastSync,
+		EntriesSynced:  17,
+		EntriesTotal:   23,
+		LastCommitHash: "abc123",
+	}}
+	syncer := NewSyncer(nil, "")
+
+	syncer.recordSyncFailure(context.Background(), store, time.Now().Add(-time.Second), errors.New("upstream unavailable"))
+
+	if store.status == nil {
+		t.Fatal("recordSyncFailure did not write feed status")
+	}
+	if store.status.LastSyncStatus != db.FeedSyncStatusError {
+		t.Fatalf("LastSyncStatus = %q, want error", store.status.LastSyncStatus)
+	}
+	if store.status.LastSyncAt == nil || !store.status.LastSyncAt.Equal(lastSync) {
+		t.Fatalf("LastSyncAt = %v, want preserved %v", store.status.LastSyncAt, lastSync)
+	}
+	if store.status.EntriesSynced != 17 || store.status.EntriesTotal != 23 {
+		t.Fatalf("entries = %d/%d, want preserved 17/23", store.status.EntriesSynced, store.status.EntriesTotal)
+	}
+	if store.status.LastCommitHash != "abc123" {
+		t.Fatalf("LastCommitHash = %q, want preserved abc123", store.status.LastCommitHash)
+	}
 }
 
 func TestSyncUsesExistingGitCheckoutAndRecordsUnchangedStatus(t *testing.T) {
@@ -497,7 +613,7 @@ func TestSyncUsesExistingGitCheckoutAndRecordsUnchangedStatus(t *testing.T) {
 	commitGHSAGitRepo(t, repoDir)
 
 	store := &ghsaStoreStub{}
-	syncer := NewSyncer(store, nil, dataDir)
+	syncer := NewSyncer(nil, dataDir)
 	result, err := syncer.Sync(context.Background(), store)
 	if err != nil {
 		t.Fatalf("Sync() error = %v", err)
@@ -507,6 +623,76 @@ func TestSyncUsesExistingGitCheckoutAndRecordsUnchangedStatus(t *testing.T) {
 	}
 	if len(store.statuses) == 0 || store.status.LastSyncStatus != "success" || store.status.LastCommitHash == "" {
 		t.Fatalf("statuses = %+v, want success with commit", store.statuses)
+	}
+}
+
+func TestSyncRepairsUnchangedCommitOnlyWhenRepairMetadataIsStale(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	for _, tt := range []struct {
+		name            string
+		metadata        json.RawMessage
+		wantRepairCalls int
+	}{
+		{
+			name:            "current metadata skips repair",
+			metadata:        ghsaCurrentSyncMetadataJSON(t),
+			wantRepairCalls: 0,
+		},
+		{
+			name:            "missing metadata runs repair",
+			wantRepairCalls: 1,
+		},
+		{
+			name:            "old metadata runs repair",
+			metadata:        json.RawMessage(`{"importer_version":1,"affected_package_repair_version":0}`),
+			wantRepairCalls: 1,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			dataDir := t.TempDir()
+			repoDir := filepath.Join(dataDir, "advisory-database")
+			initGHSAGitRepo(t, repoDir)
+			advisoryPath := filepath.Join(repoDir, reviewedDir, "2026", "05", "GHSA-sync.json")
+			if err := os.MkdirAll(filepath.Dir(advisoryPath), 0o750); err != nil {
+				t.Fatalf("mkdir advisory dir: %v", err)
+			}
+			if err := os.WriteFile(advisoryPath, []byte(`{"id":"GHSA-sync-1234-5678","database_specific":{"severity":"LOW"}}`), 0o600); err != nil {
+				t.Fatalf("write advisory: %v", err)
+			}
+			commitGHSAGitRepo(t, repoDir)
+			commitHash := headGHSAGit(t, repoDir)
+
+			store := &ghsaRepairingStoreStub{repaired: 2}
+			store.status = &db.FeedSyncStatus{
+				FeedName:       FeedName,
+				LastSyncStatus: db.FeedSyncStatusSuccess,
+				EntriesTotal:   7,
+				LastCommitHash: commitHash,
+				Metadata:       tt.metadata,
+			}
+			syncer := NewSyncer(nil, dataDir)
+
+			result, err := syncer.Sync(context.Background(), store)
+			if err != nil {
+				t.Fatalf("Sync() error = %v", err)
+			}
+			if result.EntriesSynced != 0 || result.EntriesTotal != 7 {
+				t.Fatalf("Sync() result = %+v, want unchanged result with preserved total", result)
+			}
+			if store.repairCalls != tt.wantRepairCalls {
+				t.Fatalf("repair calls = %d, want %d", store.repairCalls, tt.wantRepairCalls)
+			}
+			if !ghsaMetadataIsCurrentForTest(store.status.Metadata) {
+				t.Fatalf("stored metadata = %s, want current GHSA importer/repair versions", store.status.Metadata)
+			}
+		})
 	}
 }
 
@@ -543,6 +729,34 @@ func (s *ghsaRepairStoreStub) RepairGHSAAffectedPackages(context.Context) (int, 
 	return s.repaired, s.err
 }
 
+type ghsaRepairingStoreStub struct {
+	ghsaStoreStub
+	repaired    int
+	repairErr   error
+	repairCalls int
+}
+
+func (s *ghsaRepairingStoreStub) RepairGHSAAffectedPackages(context.Context) (int, error) {
+	s.repairCalls++
+	return s.repaired, s.repairErr
+}
+
+func ghsaCurrentSyncMetadataJSON(t *testing.T) json.RawMessage {
+	t.Helper()
+	return json.RawMessage(`{"importer_version":1,"affected_package_repair_version":1}`)
+}
+
+func ghsaMetadataIsCurrentForTest(raw json.RawMessage) bool {
+	var metadata struct {
+		ImporterVersion              int `json:"importer_version"`
+		AffectedPackageRepairVersion int `json:"affected_package_repair_version"`
+	}
+	if err := json.Unmarshal(raw, &metadata); err != nil {
+		return false
+	}
+	return metadata.ImporterVersion == 1 && metadata.AffectedPackageRepairVersion == 1
+}
+
 func initGHSAGitRepo(t *testing.T, repoDir string) {
 	t.Helper()
 	if err := os.MkdirAll(repoDir, 0o750); err != nil {
@@ -559,6 +773,17 @@ func commitGHSAGitRepo(t *testing.T, repoDir string) {
 	runGHSAGit(t, repoDir, "add", ".")
 	runGHSAGit(t, repoDir, "commit", "-m", "test data")
 	runGHSAGit(t, repoDir, "update-ref", "refs/remotes/origin/HEAD", "HEAD")
+}
+
+func headGHSAGit(t *testing.T, repoDir string) string {
+	t.Helper()
+	cmd := exec.Command("git", "rev-parse", "HEAD")
+	cmd.Dir = repoDir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git rev-parse HEAD: %v\n%s", err, out)
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func runGHSAGit(t *testing.T, repoDir string, args ...string) {

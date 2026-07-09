@@ -41,21 +41,23 @@ func FeedStatusHealth(s db.FeedSyncStatus, opts HealthOptions) HealthAssessment 
 
 	status := strings.ToLower(strings.TrimSpace(s.LastSyncStatus))
 	switch status {
-	case "error":
+	case db.FeedSyncStatusError:
 		return HealthAssessment{Status: "error", Reason: "last sync failed"}
-	case "permanent_error":
+	case db.FeedSyncStatusPermanentError:
 		return HealthAssessment{Status: "error", Reason: "permanent feed error"}
-	case "disabled":
+	case db.FeedSyncStatusDisabled:
 		return HealthAssessment{Status: "disabled", Reason: "feed disabled"}
-	case "external":
+	case db.FeedSyncStatusExternal:
 		return HealthAssessment{Status: "configured", Reason: "external feed managed outside Packmon"}
-	case "running":
+	case db.FeedSyncStatusRunning:
 		return HealthAssessment{Status: "pending", Reason: "sync running"}
-	case "pending":
+	case db.FeedSyncStatusPending:
 		return HealthAssessment{Status: "pending", Reason: "sync pending"}
-	case "skipped":
+	case db.FeedSyncStatusSkipped:
 		return HealthAssessment{Status: "warning", Reason: "last sync skipped"}
-	case "", "success":
+	case db.FeedSyncStatusRejected:
+		return HealthAssessment{Status: "error", Reason: "feed import rejected"}
+	case "", db.FeedSyncStatusSuccess:
 	default:
 		return HealthAssessment{Status: "error", Reason: "unknown feed status: " + status}
 	}

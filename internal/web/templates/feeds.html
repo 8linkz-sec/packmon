@@ -1,30 +1,70 @@
-{{define "title"}}Packmon - Feed Status{{end}}
+{{define "title"}}{{t "page.feeds.title"}}{{end}}
 
 {{define "content"}}
 <div class="space-y-6">
 
   <div class="flex flex-wrap items-center justify-between gap-3">
-    <h1 class="text-2xl font-bold">Feed Status</h1>
+    <h1 class="text-2xl font-bold">{{t "feeds.heading"}}</h1>
     <div
       class="flex flex-wrap items-center gap-3 text-sm"
       data-auto-refresh-control
       data-auto-refresh-event="feed-status-refresh"
       data-auto-refresh-interval-ms="30000"
-      data-auto-refresh-running-label="Auto-refresh on (30s)"
-      data-auto-refresh-paused-label="Auto-refresh paused"
+      data-auto-refresh-storage-key="packmon:auto-refresh:feeds"
+      data-auto-refresh-label="{{t "feeds.refresh.auto_label"}}"
+      data-auto-refresh-running-label="{{t "feeds.refresh.running"}}"
+      data-auto-refresh-paused-label="{{t "feeds.refresh.paused"}}"
+      data-auto-refresh-running-class="bg-green-50 text-green-700"
+      data-auto-refresh-paused-class="bg-gray-100 text-gray-700"
     >
-      <span id="feed-status-refresh-state" data-auto-refresh-status role="status" aria-live="polite" aria-atomic="true" class="text-gray-500">Auto-refresh on (30s)</span>
+      <span id="feed-status-refresh-state" data-auto-refresh-status role="status" aria-live="polite" aria-atomic="true"
+        class="text-gray-500"
+      >{{t "feeds.refresh.running"}}</span>
+      <span
+        id="feed-status-indicator"
+        class="htmx-indicator text-gray-600"
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+      >{{t "feeds.refreshing"}}</span>
       <button
         type="button"
         data-auto-refresh-toggle
         aria-controls="feed-status-container"
-        aria-pressed="false"
-        class="border border-gray-500 bg-white rounded-md px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
-      >Pause auto-refresh</button>
+        aria-describedby="feed-status-refresh-state"
+        aria-pressed="true"
+        class="inline-flex min-h-11 items-center justify-center border border-gray-500 bg-white rounded-md px-3 py-1.5 text-sm
+          font-medium text-gray-700 hover:bg-gray-50 pm-focus-ring"
+      >{{t "feeds.refresh.auto_label"}}</button>
+      <button
+        type="button"
+        data-auto-refresh-now
+        aria-controls="feed-status-container"
+        aria-label="{{t "feeds.refresh.now_aria"}}"
+        class="inline-flex min-h-11 items-center justify-center border border-blue-500 bg-white rounded-md px-3 py-1.5 text-sm
+          font-medium text-blue-700 hover:bg-blue-50 active:bg-blue-100 pm-focus-ring"
+      >{{t "feeds.refresh.now"}}</button>
     </div>
   </div>
 
-  <div id="feed-status-container" aria-live="polite" aria-busy="false" hx-get="/feeds?partial=status" hx-trigger="feed-status-refresh from:body" hx-swap="innerHTML" data-preserve-scroll-container>
+  <div
+    id="feed-status-container"
+    aria-busy="false"
+    hx-get="/feeds?partial=status"
+    hx-trigger="feed-status-refresh from:body"
+    hx-swap="innerHTML transition:true settle:80ms"
+    hx-indicator="#feed-status-indicator"
+    data-htmx-transition
+    data-htmx-status-target="#feed-status-refresh-state"
+    data-htmx-loading-message="{{t "feeds.refreshing"}}"
+    data-htmx-success-message="{{t "feeds.htmx.success"}}"
+    data-htmx-error-message="{{t "feeds.htmx.error"}}"
+    data-htmx-timeout-message="{{t "feeds.htmx.timeout"}}"
+    data-htmx-swap-error-message="{{t "feeds.htmx.swap_error"}}"
+    data-htmx-stale-message="{{t "feeds.htmx.stale"}}"
+    data-htmx-retry-label="{{t "action.retry"}}"
+    data-preserve-scroll-container
+  >
     {{template "feed-status-partial" .}}
   </div>
 
@@ -32,21 +72,36 @@
 {{end}}
 
 {{define "feed-status-partial"}}
-<div class="bg-white rounded-lg shadow border border-gray-200">
+<div id="feed-status-announcement" class="sr-only" role="status" aria-live="polite" aria-atomic="true">
+  {{if .LoadError}}
+    {{t "feeds.status.load_failed"}}
+  {{else if .Feeds}}
+    {{t "feeds.status.updated_count" (count (len .Feeds) "feed" "feeds")}}
+  {{else}}
+    {{t "feeds.status.updated_empty"}}
+  {{end}}
+</div>
+<div class="pm-surface">
   {{if .LoadError}}
   <div class="px-5 py-4 border-b border-red-100">
     {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .LoadError}}
   </div>
   {{else if .Feeds}}
-  <div class="overflow-x-auto focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2" tabindex="0" role="region" aria-label="Feed status table" data-preserve-scroll="feed-status-table">
+  <div
+    class="pm-scroll-region"
+    tabindex="0"
+    role="region"
+    aria-label="{{t "feeds.table.label"}}"
+    data-preserve-scroll="feed-status-table"
+  >
     <table class="min-w-full text-sm">
       <thead>
-        <tr class="text-left text-gray-500 border-b bg-gray-50">
-          <th class="px-5 py-2">Feed</th>
-          <th class="px-5 py-2">Status</th>
-          <th class="px-5 py-2">Last Sync</th>
-          <th class="px-5 py-2 text-right">Entries</th>
-          <th class="px-5 py-2">Message</th>
+        <tr class="text-start text-gray-500 border-b bg-gray-50">
+          <th class="px-5 py-2">{{t "feeds.table.feed"}}</th>
+          <th class="px-5 py-2">{{t "feeds.table.status"}}</th>
+          <th class="px-5 py-2">{{t "feeds.table.last_sync"}}</th>
+          <th class="px-5 py-2 text-end">{{t "feeds.table.entries"}}</th>
+          <th class="px-5 py-2">{{t "feeds.table.message"}}</th>
         </tr>
       </thead>
       <tbody>
@@ -54,22 +109,19 @@
         <tr class="border-b border-gray-100 hover:bg-gray-50">
           <td class="px-5 py-2 font-medium">{{.FeedName}}</td>
           <td class="px-5 py-2">
-            <span class="inline-block px-2 py-0.5 rounded text-xs font-medium {{statusClass .Status}}">{{.Status}}</span>
+            {{template "feed-status-badge" .}}
           </td>
           <td class="px-5 py-2 text-gray-500">
-            {{if .LastSyncAt}}
-              <time datetime="{{formatTimeISO .LastSyncAtTime}}" aria-label="{{formatTime .LastSyncAtTime}}">{{formatTimeAgo .LastSyncAtTime}}</time>
-            {{else}}
-              <span class="text-gray-600">never</span>
-            {{end}}
+            {{template "feed-last-sync-cell" .}}
           </td>
-          <td class="px-5 py-2 text-right">{{.EntriesSynced}} / {{.EntriesTotal}}</td>
+          <td class="px-5 py-2 text-end">{{.EntriesSynced}} / {{.EntriesTotal}}</td>
           <td class="px-5 py-2 text-xs text-gray-500">
+            {{if .LastSyncStatus}}
+              <div class="mb-1 text-gray-600">{{t "feeds.last_result"}} <span class="font-medium">{{.LastSyncStatus}}</span></div>
+            {{end}}
+            {{template "feed-rejected-count" .}}
             {{if .LastError}}
-              <details class="text-left text-red-700">
-                <summary aria-label="Show full feed error for {{.FeedName}}" class="cursor-pointer text-red-600">{{truncate .LastError 60}}</summary>
-                <pre class="mt-2 whitespace-pre-wrap break-words rounded bg-red-50 p-2 text-xs text-red-800">{{.LastError}}</pre>
-              </details>
+              {{template "feed-error-details" dict "Feed" . "Max" 60}}
             {{else if .StatusReason}}
               <span class="break-words">{{.StatusReason}}</span>
             {{else}}
@@ -82,8 +134,8 @@
     </table>
   </div>
   {{else}}
-  <div class="px-5 py-10 text-center text-gray-600">
-    No feed sync data available. Feeds may not have run yet.
+  <div class="pm-empty-state py-10">
+    {{t "feeds.empty"}}
   </div>
   {{end}}
 </div>

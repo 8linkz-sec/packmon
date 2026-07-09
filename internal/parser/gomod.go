@@ -134,10 +134,13 @@ func (p *GoModParser) Parse(r io.Reader) ([]domain.Package, error) {
 			inBlock = true
 			// A require ( on the same line as a package is unusual but handle it.
 			rest := strings.TrimPrefix(code, "require")
+			rest = strings.TrimSpace(rest)
 			rest = strings.TrimSpace(strings.TrimPrefix(rest, "("))
 			if rest != "" && rest != ")" {
 				if pkg, err := parseGoRequireLine(rest, lineNo); err == nil {
 					pkgs = append(pkgs, pkg)
+				} else {
+					errs = append(errs, err)
 				}
 			}
 			continue

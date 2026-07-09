@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -71,7 +72,7 @@ func TestSetAdminAuditQueueJobsDetail(t *testing.T) {
 		Ecosystem:   "npm",
 		Name:        "left-pad",
 		Source:      "socket",
-		Priority:    1,
+		Priority:    RefreshPriorityUnknownPackage,
 		Status:      "error",
 		RequestedAt: requested,
 		ProcessedAt: &processed,
@@ -93,7 +94,7 @@ func TestSetAdminAuditQueueJobsDetail(t *testing.T) {
 		t.Fatalf("rows = %d, want 1", len(rows))
 	}
 	row := rows[0]
-	if row.ID != 7 || row.Ecosystem != "npm" || row.Name != "left-pad" || row.Source != "socket" || row.Priority != 1 || row.Status != "error" {
+	if row.ID != 7 || row.Ecosystem != "npm" || row.Name != "left-pad" || row.Source != "socket" || row.Priority != RefreshPriorityUnknownPackage || row.Status != "error" {
 		t.Fatalf("row identity = %+v", row)
 	}
 	if row.RequestedAt == "" || row.ProcessedAt == "" {
@@ -104,72 +105,99 @@ func TestSetAdminAuditQueueJobsDetail(t *testing.T) {
 	}
 }
 
-type legacyDeleteStore struct {
-	Store
-	vulnerabilityID string
-	maliciousID     string
-}
-
-func (s *legacyDeleteStore) DeleteVulnerability(_ context.Context, id string) error {
-	s.vulnerabilityID = id
-	return nil
-}
-
-func (s *legacyDeleteStore) DeleteMaliciousFinding(_ context.Context, id string) error {
-	s.maliciousID = id
-	return nil
-}
-
-type scopedDeleteStore struct {
-	legacyDeleteStore
-	vulnerabilitySource string
-	maliciousSource     string
-}
-
-func (s *scopedDeleteStore) DeleteVulnerabilityForSource(_ context.Context, id, source string) error {
-	s.vulnerabilityID = id
-	s.vulnerabilitySource = source
-	return nil
-}
-
-func (s *scopedDeleteStore) DeleteMaliciousFindingForSource(_ context.Context, id, source string) error {
-	s.maliciousID = id
-	s.maliciousSource = source
-	return nil
-}
-
-func TestDeleteForSourceUsesScopedStoreWhenAvailable(t *testing.T) {
+func TestStoreLifecycleSyncContractRequiresAtomicReplacement(t *testing.T) {
 	t.Parallel()
 
-	store := &scopedDeleteStore{}
-	if err := DeleteVulnerabilityForSource(context.Background(), store, "GHSA-1", "osv"); err != nil {
-		t.Fatalf("DeleteVulnerabilityForSource() error = %v", err)
+	storeType := reflect.TypeOf((*Store)(nil)).Elem()
+	method, ok := storeType.MethodByName("ReplaceLifecycleProducts")
+	if !ok {
+		t.Fatal("Store is missing ReplaceLifecycleProducts; full lifecycle snapshots must use atomic replacement")
 	}
-	if store.vulnerabilityID != "GHSA-1" || store.vulnerabilitySource != "osv" {
-		t.Fatalf("scoped vulnerability delete = id %q source %q", store.vulnerabilityID, store.vulnerabilitySource)
+	ctxType := reflect.TypeOf((*context.Context)(nil)).Elem()
+	productsType := reflect.TypeOf([]LifecycleProduct{})
+	errorType := reflect.TypeOf((*error)(nil)).Elem()
+	if method.Type.NumIn() != 2 ||
+		method.Type.In(0) != ctxType ||
+		method.Type.In(1) != productsType ||
+		method.Type.NumOut() != 2 ||
+		method.Type.Out(0) != reflect.TypeOf(0) ||
+		method.Type.Out(1) != errorType {
+		t.Fatalf("ReplaceLifecycleProducts signature = %s, want func(context.Context, []LifecycleProduct) (int, error)", method.Type)
 	}
-	if err := DeleteMaliciousFindingForSource(context.Background(), store, "MAL-1", "openssf"); err != nil {
-		t.Fatalf("DeleteMaliciousFindingForSource() error = %v", err)
-	}
-	if store.maliciousID != "MAL-1" || store.maliciousSource != "openssf" {
-		t.Fatalf("scoped malicious delete = id %q source %q", store.maliciousID, store.maliciousSource)
+	if _, ok := storeType.MethodByName("UpsertLifecycleProducts"); ok {
+		t.Fatal("Store exposes UpsertLifecycleProducts; lifecycle full snapshots must not keep a stale-prone upsert contract")
 	}
 }
 
-func TestDeleteForSourceFallsBackToLegacyStore(t *testing.T) {
+func TestStoreRetentionContractRequiresExplicitPruneMethods(t *testing.T) {
 	t.Parallel()
 
-	store := &legacyDeleteStore{}
-	if err := DeleteVulnerabilityForSource(context.Background(), store, "GHSA-2", "ignored"); err != nil {
-		t.Fatalf("DeleteVulnerabilityForSource() fallback error = %v", err)
+	storeType := reflect.TypeOf((*Store)(nil)).Elem()
+	ctxType := reflect.TypeOf((*context.Context)(nil)).Elem()
+	durationType := reflect.TypeOf(time.Duration(0))
+	intType := reflect.TypeOf(0)
+	errorType := reflect.TypeOf((*error)(nil)).Elem()
+
+	for _, name := range []string{
+		"PruneScanLogs",
+		"PruneAdminAuditLogs",
+		"PruneRefreshQueue",
+		"PrunePackageCheckStatus",
+		"PruneDeletedAPIKeys",
+	} {
+		method, ok := storeType.MethodByName(name)
+		if !ok {
+			t.Fatalf("Store is missing %s; configured retention must not be skipped by optional assertions", name)
+		}
+		if method.Type.NumIn() != 2 ||
+			method.Type.In(0) != ctxType ||
+			method.Type.In(1) != durationType ||
+			method.Type.NumOut() != 2 ||
+			method.Type.Out(0) != intType ||
+			method.Type.Out(1) != errorType {
+			t.Fatalf("%s signature = %s, want func(context.Context, time.Duration) (int, error)", name, method.Type)
+		}
 	}
-	if store.vulnerabilityID != "GHSA-2" {
-		t.Fatalf("legacy vulnerability delete id = %q", store.vulnerabilityID)
+
+	method, ok := storeType.MethodByName("PrunePackageReputation")
+	if !ok {
+		t.Fatal("Store is missing PrunePackageReputation; configured reputation retention must not be skipped by optional assertions")
 	}
-	if err := DeleteMaliciousFindingForSource(context.Background(), store, "MAL-2", "ignored"); err != nil {
-		t.Fatalf("DeleteMaliciousFindingForSource() fallback error = %v", err)
+	if method.Type.NumIn() != 3 ||
+		method.Type.In(0) != ctxType ||
+		method.Type.In(1) != reflect.TypeOf("") ||
+		method.Type.In(2) != durationType ||
+		method.Type.NumOut() != 2 ||
+		method.Type.Out(0) != intType ||
+		method.Type.Out(1) != errorType {
+		t.Fatalf("PrunePackageReputation signature = %s, want func(context.Context, string, time.Duration) (int, error)", method.Type)
 	}
-	if store.maliciousID != "MAL-2" {
-		t.Fatalf("legacy malicious delete id = %q", store.maliciousID)
+}
+
+func TestRefreshPriorityOptionsDefineSupportedScale(t *testing.T) {
+	t.Parallel()
+
+	want := []RefreshPriorityOption{
+		{Value: RefreshPriorityManual, Label: "0 - manual trigger/highest"},
+		{Value: RefreshPriorityUnknownPackage, Label: "1 - unknown packages"},
+		{Value: RefreshPriorityKnownFinding, Label: "2 - known findings"},
+		{Value: RefreshPriorityNormal, Label: "3 - normal re-check/lowest"},
+	}
+	got := RefreshPriorityOptions()
+	if len(got) != len(want) {
+		t.Fatalf("RefreshPriorityOptions() length = %d, want %d: %#v", len(got), len(want), got)
+	}
+	for i, option := range want {
+		if got[i] != option {
+			t.Fatalf("RefreshPriorityOptions()[%d] = %#v, want %#v", i, got[i], option)
+		}
+		if !ValidRefreshPriority(option.Value) {
+			t.Fatalf("ValidRefreshPriority(%d) = false", option.Value)
+		}
+	}
+	for _, priority := range []int{-1, RefreshPriorityNormal + 1} {
+		if ValidRefreshPriority(priority) {
+			t.Fatalf("ValidRefreshPriority(%d) = true, want false", priority)
+		}
 	}
 }

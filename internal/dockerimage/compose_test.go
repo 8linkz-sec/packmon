@@ -58,6 +58,30 @@ func TestParseComposeImagesRejectsMalformedYAML(t *testing.T) {
 	}
 }
 
+func TestParseComposeImagesRedactsInvalidImageValue(t *testing.T) {
+	const raw = "https://user:token@example.internal/private/app"
+	input := `
+services:
+  app:
+    image: https://user:token@example.internal/private/app
+`
+	_, err := ParseComposeImages(strings.NewReader(input), "docker-compose.yml")
+	if err == nil {
+		t.Fatal("ParseComposeImages returned nil error for invalid image")
+	}
+	msg := err.Error()
+	for _, leaked := range []string{"user", "token", "example.internal", "/private/app", raw} {
+		if strings.Contains(msg, leaked) {
+			t.Fatalf("Compose parse error leaked %q: %s", leaked, msg)
+		}
+	}
+	for _, want := range []string{"docker-compose.yml:4", "invalid image for compose service"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("Compose parse error missing %q: %s", want, msg)
+		}
+	}
+}
+
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {

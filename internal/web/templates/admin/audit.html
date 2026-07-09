@@ -6,27 +6,30 @@
   {{template "admin-page-header" dict "Title" "Audit Log" "Section" "audit" "CSRFToken" .CSRFToken}}
 
   <!-- Audit log table -->
-  <div class="bg-white rounded-lg shadow border border-gray-200">
+  <div class="pm-surface">
     {{if .AuditLoadError}}
     <div class="px-5 py-4 border-b border-red-100">
       {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .AuditLoadError}}
     </div>
     {{else if .Entries}}
-    <div class="flex items-center justify-between gap-3 px-5 py-3 text-xs text-gray-600 border-b border-gray-100">
-      <span>Showing audit events {{.AuditPageStart}}-{{.AuditPageEnd}}</span>
-      <div class="flex items-center gap-2">
+    <nav class="flex flex-wrap items-center justify-between gap-3 px-5 py-3 text-xs text-gray-600 border-b border-gray-100" aria-label="Audit log pages">
+      <div class="flex flex-wrap items-center gap-3">
+        <span>Showing audit events {{.AuditPageStart}}-{{.AuditPageEnd}}</span>
+        <span id="audit-integrity-help" class="text-gray-500">Integrity badges verify each row in the audit hash chain.</span>
+      </div>
+      <div class="flex flex-wrap items-center gap-2">
         {{if .AuditHasPrevious}}
-        <a href="/admin/audit?offset={{.AuditPreviousOffset}}" class="inline-flex items-center rounded border border-gray-500 px-2 py-1 text-gray-700 hover:bg-gray-50">Newer</a>
+        <a href="/admin/audit?offset={{.AuditPreviousOffset}}" class="inline-flex min-h-11 items-center justify-center rounded-md border border-gray-500 px-3 py-2 font-medium text-gray-700 hover:bg-gray-50 pm-focus-ring">Newer</a>
         {{end}}
         {{if .AuditHasNext}}
-        <a href="/admin/audit?offset={{.AuditNextOffset}}" class="inline-flex items-center rounded border border-gray-500 px-2 py-1 text-gray-700 hover:bg-gray-50">Older</a>
+        <a href="/admin/audit?offset={{.AuditNextOffset}}" class="inline-flex min-h-11 items-center justify-center rounded-md border border-gray-500 px-3 py-2 font-medium text-gray-700 hover:bg-gray-50 pm-focus-ring">Older</a>
         {{end}}
       </div>
-    </div>
-    <div class="overflow-x-auto focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2" tabindex="0" role="region" aria-label="Admin audit log table">
+    </nav>
+    <div class="pm-scroll-region" tabindex="0" role="region" aria-label="Admin audit log table">
       <table class="min-w-full text-sm">
         <thead>
-          <tr class="text-left text-gray-500 border-b bg-gray-50">
+          <tr class="text-start text-gray-500 border-b bg-gray-50">
             <th class="px-5 py-2">ID</th>
             <th class="px-5 py-2">Time</th>
             <th class="px-5 py-2">Action</th>
@@ -39,36 +42,40 @@
           {{range .Entries}}
           <tr class="border-b border-gray-100 hover:bg-gray-50">
             <td class="px-5 py-2 font-mono text-xs">{{.ID}}</td>
-            <td class="px-5 py-2 text-gray-500"><time datetime="{{formatTimeISO .CreatedAt}}" aria-label="{{formatTime .CreatedAt}}">{{formatTimeAgo .CreatedAt}}</time></td>
+            <td class="px-5 py-2 text-gray-500"><time data-local-time="relative" datetime="{{formatTimeISO .CreatedAt}}" aria-label="{{formatTime .CreatedAt}}">{{formatTimeAgo .CreatedAt}}</time></td>
             <td class="px-5 py-2">
-              <span class="inline-block px-2 py-0.5 rounded text-xs font-medium
-                {{if eq .Action "login_success"}}bg-blue-100 text-blue-800
-                {{else if eq .Action "login_failed"}}bg-red-100 text-red-800
-                {{else if eq .Action "login_lockout"}}bg-amber-100 text-amber-800
-                {{else}}bg-gray-100 text-gray-800{{end}}
-              ">{{.Action}}</span>
+              <span class="inline-block px-2 py-0.5 rounded text-xs font-medium {{.ActionClass}}">{{.Action}}</span>
             </td>
             <td class="px-5 py-2 text-xs font-mono text-gray-600 max-w-xl">
               {{if .DetailsExpanded}}
-              <details>
-                <summary class="cursor-pointer text-gray-600">{{truncate .DetailsStr 80}}</summary>
-                <pre class="mt-2 whitespace-pre-wrap break-words rounded bg-gray-50 p-2 text-gray-700">{{.DetailsStr}}</pre>
+              <details data-print-open>
+                <summary dir="auto" class="inline-flex min-h-11 cursor-pointer items-center rounded px-2 py-1 text-gray-600"><bdi dir="auto">{{truncate .DetailsStr 80}}</bdi></summary>
+                <pre dir="auto" class="mt-2 whitespace-pre-wrap break-words rounded bg-gray-50 p-2 text-gray-700"><bdi dir="auto">{{.DetailsStr}}</bdi></pre>
               </details>
               {{else}}
-              {{.DetailsStr}}
+              <bdi dir="auto">{{.DetailsStr}}</bdi>
               {{end}}
             </td>
             <td class="px-5 py-2 text-xs text-gray-500">{{.IP}}</td>
             <td class="px-5 py-2">
-              <span class="inline-block px-2 py-0.5 rounded text-xs font-medium {{.IntegrityClass}}">{{.IntegrityLabel}}</span>
+              <span aria-label="Audit integrity {{.IntegrityLabel}}" aria-describedby="audit-integrity-help" class="inline-block px-2 py-0.5 rounded text-xs font-medium {{.IntegrityClass}}">{{.IntegrityLabel}}</span>
             </td>
           </tr>
           {{end}}
         </tbody>
       </table>
     </div>
+    {{else if .AuditPageOutOfRange}}
+    <div class="pm-empty-state py-10">
+      <p class="font-medium text-gray-900">No audit log entries on this page.</p>
+      <p class="mt-2 text-sm">The current page is past the available audit events.</p>
+      <div class="mt-4 flex flex-wrap justify-center gap-2">
+        <a href="/admin/audit?offset={{.AuditPreviousOffset}}" class="inline-flex min-h-11 items-center justify-center rounded-md border border-gray-500 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 pm-focus-ring">Newer audit events</a>
+        <a href="/admin/audit" class="{{adminPrimaryButtonClass}}">Back to first page</a>
+      </div>
+    </div>
     {{else}}
-    <div class="px-5 py-10 text-center text-gray-600">
+    <div class="pm-empty-state py-10">
       No audit log entries yet.
     </div>
     {{end}}

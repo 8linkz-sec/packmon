@@ -5,41 +5,138 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/8linkz-sec/packmon/internal/db"
+	feedqueue "github.com/8linkz-sec/packmon/internal/feed"
 )
 
 type socketTestStore struct {
-	job            *db.RefreshJob
-	jobs           []*db.RefreshJob
-	dequeueErr     error
-	completeErr    error
-	resetErr       error
-	resetCount     int
-	upsertErr      error
-	statusErr      error
-	dequeueSource  string
-	findings       []db.MaliciousFinding
-	statuses       []db.PackageCheckStatus
-	completed      []socketCompletion
-	completeCtxErr error
-	resetSource    string
-	resetCh        chan struct{}
-	statusBlock    chan struct{}
-	resetOnce      sync.Once
+	job                 *db.RefreshJob
+	jobs                []*db.RefreshJob
+	dequeueErr          error
+	completeErr         error
+	resetErr            error
+	resetCount          int
+	upsertErr           error
+	statusErr           error
+	dequeueSource       string
+	findings            []db.MaliciousFinding
+	statuses            []db.PackageCheckStatus
+	completed           []socketCompletion
+	completeCtxErr      error
+	dequeueDeadlineSet  bool
+	dequeueDeadline     time.Time
+	completeDeadlineSet bool
+	completeDeadline    time.Time
+	resetDeadlineSet    bool
+	resetDeadline       time.Time
+	resetSource         string
+	resetCh             chan struct{}
+	statusBlock         chan struct{}
+	resetOnce           sync.Once
 }
 
 type socketCompletion struct {
-	id  int
-	err error
+	id        int
+	claimedAt *time.Time
+	err       error
+}
+
+type socketRecordingMetricsRecorder struct {
+	queueErrors    map[string]int
+	stuckRecovered int
+	jobsCompleted  map[string]int
+}
+
+func newSocketRecordingMetricsRecorder() *socketRecordingMetricsRecorder {
+	return &socketRecordingMetricsRecorder{
+		queueErrors:   make(map[string]int),
+		jobsCompleted: make(map[string]int),
+	}
+}
+
+func (r *socketRecordingMetricsRecorder) IncFeedSyncTimeout(string) {}
+
+func (r *socketRecordingMetricsRecorder) IncQueueError(source string) {
+	r.queueErrors[source]++
+}
+
+func (r *socketRecordingMetricsRecorder) AddQueueStuckRecovered(count int) {
+	r.stuckRecovered += count
+}
+
+func (r *socketRecordingMetricsRecorder) IncQueueJobCompleted(source, result string) {
+	r.jobsCompleted[source+":"+result]++
+}
+
+type socketRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f socketRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func assertSocketJSONLogIntField(t *testing.T, output, msg, field string, want int) {
+	t.Helper()
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		if line == "" {
+			continue
+		}
+		var entry map[string]any
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("parse log line %q: %v", line, err)
+		}
+		if entry["msg"] != msg {
+			continue
+		}
+		got, ok := entry[field].(float64)
+		if !ok {
+			t.Fatalf("log %q missing numeric %q field in:\n%s", msg, field, output)
+		}
+		if int(got) != want {
+			t.Fatalf("log %q %s = %v, want %d; logs:\n%s", msg, field, got, want, output)
+		}
+		return
+	}
+	t.Fatalf("log message %q not found in:\n%s", msg, output)
+}
+
+func assertSocketRateLimit(t *testing.T, worker *Worker, wantTokens, wantLimit int) {
+	t.Helper()
+	state := worker.Snapshot()
+	if state.Tokens != wantTokens || state.Limit != wantLimit {
+		t.Fatalf("rate limit tokens = %d/%d, want %d/%d", state.Tokens, state.Limit, wantTokens, wantLimit)
+	}
+}
+
+func assertSocketTokens(t *testing.T, worker *Worker, want int) {
+	t.Helper()
+	state := worker.Snapshot()
+	if state.Tokens != want {
+		t.Fatalf("tokens = %d, want %d", state.Tokens, want)
+	}
+}
+
+func withPollTicks(ticks <-chan time.Time) Option {
+	return func(w *Worker) {
+		w.pollTicks = ticks
+	}
+}
+
+func withRunReady(ready chan<- struct{}) Option {
+	return func(w *Worker) {
+		w.runReady = ready
+	}
 }
 
 func (s *socketTestStore) UpsertMaliciousFinding(_ context.Context, finding *db.MaliciousFinding) error {
@@ -65,33 +162,153 @@ func (s *socketTestStore) UpsertPackageCheckStatus(ctx context.Context, status *
 	return nil
 }
 
-func (s *socketTestStore) DequeueRefresh(_ context.Context, source string) (*db.RefreshJob, error) {
+func (s *socketTestStore) DequeueRefresh(ctx context.Context, source string) (*db.RefreshJob, error) {
 	s.dequeueSource = source
+	if deadline, ok := ctx.Deadline(); ok {
+		s.dequeueDeadlineSet = true
+		s.dequeueDeadline = deadline
+	}
 	if s.dequeueErr != nil {
 		return nil, s.dequeueErr
 	}
 	if len(s.jobs) > 0 {
 		job := s.jobs[0]
 		s.jobs = s.jobs[1:]
-		return job, nil
+		return claimSocketTestJob(job), nil
 	}
-	return s.job, nil
+	return claimSocketTestJob(s.job), nil
 }
 
-func (s *socketTestStore) CompleteRefresh(ctx context.Context, id int, err error) error {
+func claimSocketTestJob(job *db.RefreshJob) *db.RefreshJob {
+	if job == nil {
+		return nil
+	}
+	if job.ProcessedAt == nil {
+		now := time.Now().UTC()
+		job.ProcessedAt = &now
+	}
+	job.Status = "processing"
+	return job
+}
+
+func (s *socketTestStore) CompleteClaimedRefresh(ctx context.Context, id int, claimedAt *time.Time, err error) error {
 	s.completeCtxErr = ctx.Err()
-	s.completed = append(s.completed, socketCompletion{id: id, err: err})
+	if deadline, ok := ctx.Deadline(); ok {
+		s.completeDeadlineSet = true
+		s.completeDeadline = deadline
+	}
+	s.completed = append(s.completed, socketCompletion{id: id, claimedAt: claimedAt, err: err})
 	return s.completeErr
 }
 
-func (s *socketTestStore) ResetStuckJobs(_ context.Context, source string, _ time.Duration) (int, error) {
+func (s *socketTestStore) ResetStuckJobs(ctx context.Context, source string, _ time.Duration) (int, error) {
 	s.resetSource = source
+	if deadline, ok := ctx.Deadline(); ok {
+		s.resetDeadlineSet = true
+		s.resetDeadline = deadline
+	}
 	if s.resetCh != nil {
 		s.resetOnce.Do(func() {
 			close(s.resetCh)
 		})
 	}
 	return s.resetCount, s.resetErr
+}
+
+func TestProcessNextJobUpdatesCompletedThroughputTelemetry(t *testing.T) {
+	recorder := newSocketRecordingMetricsRecorder()
+	successStore := &socketTestStore{
+		job: &db.RefreshJob{ID: 1179, Ecosystem: "npm", Name: "left-pad", Source: FeedName},
+	}
+	successWorker := NewWorker(successStore, "socket-secret", nil,
+		WithRateLimit(1),
+		WithMetricsRecorder(recorder),
+		WithHTTPClient(&http.Client{Transport: socketRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		})}),
+	)
+
+	successWorker.processNextJob(context.Background())
+
+	if got := recorder.jobsCompleted[FeedName+":"+feedqueue.QueueJobResultSuccess]; got != 1 {
+		t.Fatalf("completed success counter = %d, want 1", got)
+	}
+
+	errorStore := &socketTestStore{
+		job: &db.RefreshJob{ID: 1180, Ecosystem: "hex", Name: "plug", Source: FeedName},
+	}
+	errorWorker := NewWorker(errorStore, "socket-secret", nil, WithRateLimit(1), WithMetricsRecorder(recorder))
+
+	errorWorker.processNextJob(context.Background())
+
+	if got := recorder.jobsCompleted[FeedName+":"+feedqueue.QueueJobResultError]; got != 1 {
+		t.Fatalf("completed error counter = %d, want 1", got)
+	}
+
+	rateSuccessBefore := recorder.jobsCompleted[FeedName+":"+feedqueue.QueueJobResultSuccess]
+	rateErrorBefore := recorder.jobsCompleted[FeedName+":"+feedqueue.QueueJobResultError]
+	rateStore := &socketTestStore{
+		job: &db.RefreshJob{ID: 1181, Ecosystem: "npm", Name: "rate-limited", Source: FeedName},
+	}
+	rateWorker := NewWorker(rateStore, "socket-secret", nil,
+		WithRateLimit(1),
+		WithMetricsRecorder(recorder),
+		WithHTTPClient(&http.Client{Transport: socketRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusTooManyRequests,
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		})}),
+	)
+
+	rateWorker.processNextJob(context.Background())
+
+	if len(rateStore.completed) != 0 {
+		t.Fatalf("completed jobs = %+v, want rate-limited job left processing", rateStore.completed)
+	}
+	if got := recorder.jobsCompleted[FeedName+":"+feedqueue.QueueJobResultSuccess]; got != rateSuccessBefore {
+		t.Fatalf("completed success counter changed after rate limit: got %d, want %d", got, rateSuccessBefore)
+	}
+	if got := recorder.jobsCompleted[FeedName+":"+feedqueue.QueueJobResultError]; got != rateErrorBefore {
+		t.Fatalf("completed error counter changed after rate limit: got %d, want %d", got, rateErrorBefore)
+	}
+}
+
+func TestCheckPackageRejectsHTTPSDowngradeRedirect(t *testing.T) {
+	t.Parallel()
+
+	var targetReached atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		targetReached.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer target.Close()
+
+	source := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/api/v1/npm/left-pad/score", http.StatusFound)
+	}))
+	defer source.Close()
+
+	worker := NewWorker(&socketTestStore{}, "socket-secret", nil,
+		WithBaseURL(source.URL),
+		WithHTTPClient(source.Client()),
+	)
+
+	err := worker.checkPackage(context.Background(), &db.RefreshJob{Ecosystem: "npm", Name: "left-pad"})
+	if err == nil || !strings.Contains(err.Error(), "refusing redirect from https to http") {
+		t.Fatalf("checkPackage() error = %v, want HTTPS downgrade redirect refusal", err)
+	}
+	if got := targetReached.Load(); got != 0 {
+		t.Fatalf("downgrade redirect target reached %d time(s), want 0", got)
+	}
 }
 
 func TestNewWorkerOptionsAndName(t *testing.T) {
@@ -108,14 +325,53 @@ func TestNewWorkerOptionsAndName(t *testing.T) {
 	if worker.Name() != FeedName {
 		t.Fatalf("Name() = %q, want %q", worker.Name(), FeedName)
 	}
-	if worker.httpClient != client || worker.baseURL != "https://socket.example/api/" || worker.pollInterval != 25*time.Millisecond {
+	if worker.httpClient == client || worker.httpClient.Timeout != client.Timeout || worker.baseURL != "https://socket.example/api/" || worker.pollInterval != 25*time.Millisecond {
 		t.Fatalf("worker options not applied: %+v", worker)
 	}
-	if worker.tokens != 7 || worker.maxTokens != 7 {
-		t.Fatalf("rate limit tokens = %d/%d, want 7/7", worker.tokens, worker.maxTokens)
+	if err := worker.httpClient.CheckRedirect(
+		&http.Request{URL: mustSocketTestURL(t, "http://socket.example/next")},
+		[]*http.Request{{URL: mustSocketTestURL(t, "https://socket.example/start")}},
+	); err == nil || !strings.Contains(err.Error(), "https to http") {
+		t.Fatalf("worker redirect policy error = %v, want HTTPS downgrade refusal", err)
 	}
+	assertSocketRateLimit(t, worker, 7, 7)
 	if worker.jobTimeout != 15*time.Second {
 		t.Fatalf("jobTimeout = %v, want 15s", worker.jobTimeout)
+	}
+}
+
+func mustSocketTestURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse URL %q: %v", raw, err)
+	}
+	return u
+}
+
+func TestProcessNextJobUsesQueueOperationDeadlines(t *testing.T) {
+	t.Parallel()
+
+	store := &socketTestStore{
+		job: &db.RefreshJob{ID: 42, Ecosystem: "hex", Name: "plug", Source: FeedName, Priority: 1},
+	}
+	worker := NewWorker(store, "socket-secret", nil, WithRateLimit(1))
+
+	worker.processNextJob(context.Background())
+
+	assertSocketDeadlineSoon(t, "reset stuck jobs", store.resetDeadlineSet, store.resetDeadline)
+	assertSocketDeadlineSoon(t, "dequeue refresh", store.dequeueDeadlineSet, store.dequeueDeadline)
+	assertSocketDeadlineSoon(t, "complete refresh", store.completeDeadlineSet, store.completeDeadline)
+}
+
+func assertSocketDeadlineSoon(t *testing.T, operation string, ok bool, deadline time.Time) {
+	t.Helper()
+	if !ok {
+		t.Fatalf("%s context has no deadline", operation)
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 || remaining > 3*time.Second {
+		t.Fatalf("%s deadline remaining = %v, want bounded positive deadline within 3s", operation, remaining)
 	}
 }
 
@@ -126,14 +382,14 @@ func TestWorkersShareRateLimitState(t *testing.T) {
 	first := NewWorker(&socketTestStore{}, "secret", nil, WithRateLimiter(limiter))
 	second := NewWorker(&socketTestStore{}, "secret", nil, WithRateLimiter(limiter))
 
-	if !first.acquireToken() {
+	if !first.RateLimiter.Acquire() {
 		t.Fatal("first worker could not acquire initial shared token")
 	}
-	if second.acquireToken() {
+	if second.RateLimiter.Acquire() {
 		t.Fatal("second worker acquired a fresh token from a shared exhausted bucket")
 	}
-	first.returnToken()
-	if !second.acquireToken() {
+	first.RateLimiter.Return()
+	if !second.RateLimiter.Acquire() {
 		t.Fatal("second worker could not acquire token returned by first worker")
 	}
 }
@@ -242,6 +498,41 @@ func TestCheckPackageStoresNormalizedNotFoundStatus(t *testing.T) {
 	}
 }
 
+func TestProcessNextJobSkipsExcludedNamespaceBeforeHTTPRequest(t *testing.T) {
+	t.Parallel()
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+
+	store := &socketTestStore{
+		job: &db.RefreshJob{ID: 71, Ecosystem: "npm", Name: "@internal/widget", Source: FeedName},
+	}
+	worker := NewWorker(store, "socket-secret", nil,
+		WithBaseURL(server.URL),
+		WithExcludedNamespaces([]string{"npm/@internal/"}),
+		WithRateLimit(1),
+	)
+	worker.processNextJob(context.Background())
+
+	if requests != 0 {
+		t.Fatalf("Socket.dev HTTP requests = %d, want 0 for excluded private namespace", requests)
+	}
+	if len(store.completed) != 1 || store.completed[0].id != 71 {
+		t.Fatalf("completed jobs = %+v, want excluded job completed", store.completed)
+	}
+	if store.completed[0].err == nil || !strings.Contains(store.completed[0].err.Error(), "excluded by private namespace policy") {
+		t.Fatalf("completion error = %v, want private namespace policy error", store.completed[0].err)
+	}
+	if len(store.statuses) != 0 || len(store.findings) != 0 {
+		t.Fatalf("statuses/findings = %d/%d, want no provider-derived writes", len(store.statuses), len(store.findings))
+	}
+	assertSocketTokens(t, worker, 1)
+}
+
 func TestProcessNextJobCompletesWithErrorWhenFindingWriteFails(t *testing.T) {
 	t.Parallel()
 
@@ -268,6 +559,9 @@ func TestProcessNextJobCompletesWithErrorWhenFindingWriteFails(t *testing.T) {
 	if len(store.completed) != 1 || store.completed[0].id != 91 {
 		t.Fatalf("completed jobs = %+v, want job 91", store.completed)
 	}
+	if store.completed[0].claimedAt == nil {
+		t.Fatalf("completion claim = nil, want dequeued processed_at claim")
+	}
 	if store.completed[0].err == nil || !strings.Contains(store.completed[0].err.Error(), "store unavailable") {
 		t.Fatalf("completion error = %v, want finding write failure", store.completed[0].err)
 	}
@@ -286,15 +580,12 @@ func TestCheckPackageRateLimitDrainsTokens(t *testing.T) {
 
 	store := &socketTestStore{}
 	worker := NewWorker(store, "socket-secret", nil, WithBaseURL(server.URL), WithRateLimit(5))
-	worker.tokens = 5
 
 	err := worker.checkPackage(context.Background(), &db.RefreshJob{Ecosystem: "npm", Name: "left-pad"})
 	if err == nil || !strings.Contains(err.Error(), "rate limited") {
 		t.Fatalf("checkPackage() error = %v, want rate limited", err)
 	}
-	if worker.tokens != 0 {
-		t.Fatalf("tokens = %d, want 0 after upstream 429", worker.tokens)
-	}
+	assertSocketTokens(t, worker, 0)
 	if len(store.statuses) != 0 {
 		t.Fatalf("statuses = %d, want 0 after upstream 429", len(store.statuses))
 	}
@@ -350,6 +641,148 @@ func TestProcessNextJobLeavesRateLimitedJobForRetry(t *testing.T) {
 	}
 	if len(store.statuses) != 0 {
 		t.Fatalf("statuses = %+v, want no status write for transient rate limit", store.statuses)
+	}
+}
+
+func TestProcessNextJobLogsJobIDOnRateLimitAndFailureWarnings(t *testing.T) {
+	t.Parallel()
+
+	t.Run("rate limited", func(t *testing.T) {
+		t.Parallel()
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusTooManyRequests)
+		}))
+		t.Cleanup(server.Close)
+
+		store := &socketTestStore{
+			job: &db.RefreshJob{ID: 89, Ecosystem: "npm", Name: "left-pad", Source: FeedName},
+		}
+		var logs bytes.Buffer
+		logger := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		worker := NewWorker(store, "socket-secret", logger,
+			WithBaseURL(server.URL),
+			WithRateLimit(1),
+		)
+
+		worker.processNextJob(context.Background())
+
+		assertSocketJSONLogIntField(t, logs.String(), "socket check rate limited; leaving job processing for retry", "job_id", 89)
+	})
+
+	t.Run("failed", func(t *testing.T) {
+		t.Parallel()
+
+		store := &socketTestStore{
+			job: &db.RefreshJob{ID: 90, Ecosystem: "npm", Name: "left-pad", Source: FeedName},
+		}
+		client := &http.Client{
+			Transport: socketRoundTripFunc(func(*http.Request) (*http.Response, error) {
+				return nil, errors.New("socket transport unavailable")
+			}),
+		}
+		var logs bytes.Buffer
+		logger := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		worker := NewWorker(store, "socket-secret", logger,
+			WithBaseURL("https://socket.example.test"),
+			WithHTTPClient(client),
+			WithRateLimit(1),
+		)
+
+		worker.processNextJob(context.Background())
+
+		assertSocketJSONLogIntField(t, logs.String(), "socket check failed", "job_id", 90)
+	})
+}
+
+func TestProcessNextJobCompletesTransportErrorWithoutStatusWrite(t *testing.T) {
+	t.Parallel()
+
+	store := &socketTestStore{
+		job: &db.RefreshJob{ID: 90, Ecosystem: "npm", Name: "left-pad", Source: FeedName},
+	}
+	client := &http.Client{
+		Transport: socketRoundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("dial tcp 127.0.0.1:443: connect: connection refused")
+		}),
+	}
+	worker := NewWorker(store, "socket-secret", nil,
+		WithBaseURL("https://socket.example.test"),
+		WithHTTPClient(client),
+		WithRateLimit(1),
+	)
+
+	worker.processNextJob(context.Background())
+
+	if len(store.completed) != 1 || store.completed[0].id != 90 {
+		t.Fatalf("completed jobs = %+v, want failed transport job completed", store.completed)
+	}
+	if store.completed[0].claimedAt == nil {
+		t.Fatal("completion claim = nil, want dequeued processed_at claim")
+	}
+	if store.completed[0].err == nil || !strings.Contains(store.completed[0].err.Error(), "connection refused") {
+		t.Fatalf("completion error = %v, want transport connection error", store.completed[0].err)
+	}
+	if len(store.statuses) != 0 || len(store.findings) != 0 {
+		t.Fatalf("statuses/findings = %d/%d, want no provider state after transport error", len(store.statuses), len(store.findings))
+	}
+	assertSocketTokens(t, worker, 0)
+}
+
+func TestProcessNextJobRedactsSocketTransportErrorsInLogs(t *testing.T) {
+	t.Parallel()
+
+	store := &socketTestStore{
+		job: &db.RefreshJob{ID: 88, Ecosystem: "npm", Name: "left-pad", Source: FeedName},
+	}
+	client := &http.Client{
+		Transport: socketRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return nil, &url.Error{
+				Op:  "Get",
+				URL: req.URL.String(),
+				Err: errors.New(`dial tcp password=transport-secret C:\Users\Admin\packmon\socket.json`),
+			}
+		}),
+	}
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	worker := NewWorker(
+		store,
+		"socket-secret",
+		logger,
+		WithBaseURL("https://user-secret:pass-secret@socket.example.test/private/path?token=query-secret#frag-secret"), //nolint:gosec // fake secret-bearing URL verifies redaction.
+		WithHTTPClient(client),
+		WithRateLimit(1),
+	)
+
+	worker.processNextJob(context.Background())
+
+	output := logs.String()
+	for _, leaked := range []string{
+		"user-secret",
+		"pass-secret",
+		"private/path",
+		"query-secret",
+		"frag-secret",
+		"transport-secret",
+		`C:\Users\Admin\packmon\socket.json`,
+	} {
+		if strings.Contains(output, leaked) {
+			t.Fatalf("socket transport log leaked %q in:\n%s", leaked, output)
+		}
+	}
+	for _, want := range []string{
+		"https://socket.example.test/...",
+		"password=[redacted]",
+		"(redacted-path)",
+		"socket check failed",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("socket transport log missing %q in:\n%s", want, output)
+		}
+	}
+	if len(store.completed) != 1 || store.completed[0].err == nil {
+		t.Fatalf("completed = %+v, want one failed completion", store.completed)
 	}
 }
 
@@ -425,7 +858,7 @@ func TestProcessNextJobHandlesStoreErrors(t *testing.T) {
 		t.Fatalf("completed jobs after canceled worker context = %+v, want job 4", store.completed)
 	}
 	if store.completeCtxErr != nil {
-		t.Fatalf("CompleteRefresh context error = %v, want independent live context", store.completeCtxErr)
+		t.Fatalf("CompleteClaimedRefresh context error = %v, want independent live context", store.completeCtxErr)
 	}
 
 	store = &socketTestStore{resetErr: errors.New("reset failed")}
@@ -443,7 +876,6 @@ func TestProcessNextJobCompletesUnsupportedEcosystemAsError(t *testing.T) {
 		job: &db.RefreshJob{ID: 42, Ecosystem: "hex", Name: "plug", Source: FeedName, Priority: 1},
 	}
 	worker := NewWorker(store, "socket-secret", nil, WithRateLimit(1))
-	worker.tokens = 1
 
 	worker.processNextJob(context.Background())
 
@@ -462,9 +894,7 @@ func TestProcessNextJobCompletesUnsupportedEcosystemAsError(t *testing.T) {
 	if !strings.Contains(store.completed[0].err.Error(), "unsupported ecosystem") {
 		t.Fatalf("completion error = %v", store.completed[0].err)
 	}
-	if worker.tokens != 1 {
-		t.Fatalf("tokens = %d, want returned token for unsupported ecosystem", worker.tokens)
-	}
+	assertSocketTokens(t, worker, 1)
 }
 
 func TestProcessNextJobReturnsTokenWhenQueueEmpty(t *testing.T) {
@@ -472,13 +902,10 @@ func TestProcessNextJobReturnsTokenWhenQueueEmpty(t *testing.T) {
 
 	store := &socketTestStore{}
 	worker := NewWorker(store, "socket-secret", nil, WithRateLimit(1))
-	worker.tokens = 1
 
 	worker.processNextJob(context.Background())
 
-	if worker.tokens != 1 {
-		t.Fatalf("tokens = %d, want returned token when no job was dequeued", worker.tokens)
-	}
+	assertSocketTokens(t, worker, 1)
 	if len(store.completed) != 0 {
 		t.Fatalf("completed jobs = %d, want 0", len(store.completed))
 	}
@@ -489,16 +916,13 @@ func TestProcessNextJobReturnsTokenWhenDequeueFails(t *testing.T) {
 
 	store := &socketTestStore{dequeueErr: errors.New("queue down")}
 	worker := NewWorker(store, "socket-secret", nil, WithRateLimit(1))
-	worker.tokens = 1
 
 	worker.processNextJob(context.Background())
 
 	if store.dequeueSource != FeedName {
 		t.Fatalf("dequeue source = %q, want %q", store.dequeueSource, FeedName)
 	}
-	if worker.tokens != 1 {
-		t.Fatalf("tokens = %d, want returned token when dequeue fails", worker.tokens)
-	}
+	assertSocketTokens(t, worker, 1)
 	if len(store.completed) != 0 {
 		t.Fatalf("completed jobs = %d, want 0", len(store.completed))
 	}
@@ -521,17 +945,13 @@ func TestProcessAvailableJobsDrainsAvailableTokens(t *testing.T) {
 		},
 	}
 	worker := NewWorker(store, "socket-secret", nil, WithBaseURL(server.URL), WithRateLimit(3))
-	worker.tokens = 3
-	worker.lastRefill = time.Now()
 
 	worker.processAvailableJobs(context.Background())
 
 	if len(store.completed) != 3 {
 		t.Fatalf("completed jobs = %+v, want all 3 available-token jobs", store.completed)
 	}
-	if worker.tokens != 0 {
-		t.Fatalf("tokens = %d, want drained available tokens", worker.tokens)
-	}
+	assertSocketTokens(t, worker, 0)
 }
 
 func TestProcessNextJobSuppressesRepeatedDequeueErrorLogs(t *testing.T) {
@@ -541,7 +961,6 @@ func TestProcessNextJobSuppressesRepeatedDequeueErrorLogs(t *testing.T) {
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	worker := NewWorker(store, "socket-secret", logger, WithRateLimit(2))
-	worker.tokens = 2
 
 	worker.processNextJob(context.Background())
 	worker.processNextJob(context.Background())
@@ -560,8 +979,7 @@ func TestProcessNextJobSkipsWhenNoToken(t *testing.T) {
 
 	store := &socketTestStore{job: &db.RefreshJob{ID: 1, Ecosystem: "npm", Name: "left-pad"}}
 	worker := NewWorker(store, "socket-secret", nil, WithRateLimit(1))
-	worker.tokens = 0
-	worker.lastRefill = time.Now()
+	worker.RateLimiter.Drain()
 
 	worker.processNextJob(context.Background())
 
@@ -574,18 +992,45 @@ func TestRunDoesNotResetStuckJobsBeforeFirstPoll(t *testing.T) {
 	t.Parallel()
 
 	resetCh := make(chan struct{})
+	runReady := make(chan struct{})
+	pollTick := make(chan time.Time)
 	store := &socketTestStore{resetCh: resetCh}
-	worker := NewWorker(store, "socket-secret", nil, WithPollInterval(time.Hour), WithRateLimit(1))
+	worker := NewWorker(store, "socket-secret", nil,
+		withPollTicks(pollTick),
+		withRunReady(runReady),
+		WithRateLimit(1),
+	)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- worker.Run(ctx) }()
 
 	select {
+	case <-runReady:
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("Run() did not enter the poll loop")
+	}
+
+	select {
 	case <-resetCh:
 		cancel()
 		t.Fatal("Run reset stuck jobs before the first poll")
-	case <-time.After(25 * time.Millisecond):
+	default:
+	}
+
+	select {
+	case pollTick <- time.Now():
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("Run() did not accept the first poll tick")
+	}
+
+	select {
+	case <-resetCh:
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("Run() did not reset stuck jobs after the first poll")
 	}
 
 	cancel()
@@ -641,36 +1086,6 @@ func TestUpdateCheckStatusLogsStoreError(t *testing.T) {
 
 	if len(store.statuses) != 0 {
 		t.Fatalf("statuses = %d, want none after status error", len(store.statuses))
-	}
-}
-
-func TestRefillTokensAccumulatesFractionalTokens(t *testing.T) {
-	t.Parallel()
-
-	worker := NewWorker(&socketTestStore{}, "socket-secret", nil, WithRateLimit(60))
-	worker.tokens = 0
-	worker.fractionalTokens = 0.75
-	worker.lastRefill = time.Now().Add(-15 * time.Second)
-
-	if !worker.acquireToken() {
-		t.Fatal("acquireToken() = false, want true after fractional refill reaches one whole token")
-	}
-	if worker.tokens != 0 {
-		t.Fatalf("tokens after acquire = %d, want 0", worker.tokens)
-	}
-}
-
-func TestDrainTokensClearsFractionalTokens(t *testing.T) {
-	t.Parallel()
-
-	worker := NewWorker(&socketTestStore{}, "socket-secret", nil, WithRateLimit(60))
-	worker.tokens = 3
-	worker.fractionalTokens = 0.75
-
-	worker.drainTokens()
-
-	if worker.tokens != 0 || worker.fractionalTokens != 0 {
-		t.Fatalf("drained tokens = %d fractional %.2f, want 0/0", worker.tokens, worker.fractionalTokens)
 	}
 }
 

@@ -12,30 +12,34 @@ import (
 
 	"github.com/8linkz-sec/packmon/internal/domain"
 	"github.com/8linkz-sec/packmon/internal/scanner"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
-const defaultCLIConfigFile = ".packmon.yaml"
+const (
+	defaultCLIConfigFile             = ".packmon.yaml"
+	maxAutoProjectCLIConfigFileBytes = 64 * 1024
+)
 
 type cliConfig struct {
-	Server            string           `yaml:"server"`
-	APIKey            string           `yaml:"api_key"`
-	APIKeyEnv         string           `yaml:"api_key_env"`
-	Mode              string           `yaml:"mode"`
-	FailOn            string           `yaml:"fail_on"`
-	Timeout           int              `yaml:"timeout"`
-	Ecosystems        []string         `yaml:"ecosystems"`
-	IncludeDev        *bool            `yaml:"include_dev"`
-	CACert            string           `yaml:"cacert"`
-	InsecureAllowHTTP *bool            `yaml:"insecure_allow_http"`
-	RequireRemote     *bool            `yaml:"require_remote"`
-	SendRepoMetadata  *bool            `yaml:"send_repo_metadata"`
-	Webhook           cliWebhookConfig `yaml:"webhook"`
-	Output            cliOutputConfig  `yaml:"output"`
-	Log               cliLogConfig     `yaml:"log"`
-	Hook              cliHookConfig    `yaml:"hook"`
-	DB                cliDBConfig      `yaml:"db"`
-	Repos             []cliRepoConfig  `yaml:"repos"`
+	Server            string            `yaml:"server"`
+	APIKey            string            `yaml:"api_key"`
+	APIKeyEnv         string            `yaml:"api_key_env"`
+	Mode              string            `yaml:"mode"`
+	FailOn            string            `yaml:"fail_on"`
+	Timeout           int               `yaml:"timeout"`
+	Ecosystems        []string          `yaml:"ecosystems"`
+	IncludeDev        *bool             `yaml:"include_dev"`
+	CACert            string            `yaml:"cacert"`
+	InsecureAllowHTTP *bool             `yaml:"insecure_allow_http"`
+	RequireRemote     *bool             `yaml:"require_remote"`
+	SendRepoMetadata  *bool             `yaml:"send_repo_metadata"`
+	Webhook           cliWebhookConfig  `yaml:"webhook"`
+	Output            cliOutputConfig   `yaml:"output"`
+	Log               cliLogConfig      `yaml:"log"`
+	Hook              cliHookConfig     `yaml:"hook"`
+	DB                cliDBConfig       `yaml:"db"`
+	Registries        cliRegistryConfig `yaml:"registries"`
+	Repos             []cliRepoConfig   `yaml:"repos"`
 }
 
 type cliWebhookConfig struct {
@@ -128,7 +132,7 @@ func loadCLIConfigWithOptions(path string, opts cliConfigLoadOptions) (*cliConfi
 	}
 
 	if !opts.SkipProjectConfig {
-		projectData, err := os.ReadFile(defaultCLIConfigFile) // #nosec G304 -- repo-local config.
+		projectData, err := readAutoProjectCLIConfig(defaultCLIConfigFile)
 		switch {
 		case err == nil:
 			var projectCfg cliConfig
@@ -156,6 +160,23 @@ func loadCLIConfigWithOptions(path string, opts cliConfigLoadOptions) (*cliConfi
 	}
 
 	return &cfg, sourcePath, nil
+}
+
+func readAutoProjectCLIConfig(path string) ([]byte, error) {
+	file, err := os.Open(path) // #nosec G304 -- repo-local config.
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(io.LimitReader(file, maxAutoProjectCLIConfigFileBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxAutoProjectCLIConfigFileBytes {
+		return nil, fmt.Errorf("project config exceeds %d byte limit", maxAutoProjectCLIConfigFileBytes)
+	}
+	return data, nil
 }
 
 // loadExplicitCLIConfig loads a single config file supplied via --config.
@@ -213,6 +234,7 @@ func (c *cliConfig) stripUntrustedAutoProjectFields() {
 	c.Webhook = cliWebhookConfig{}
 	c.Output = cliOutputConfig{}
 	c.DB.Path = ""
+	c.Registries = cliRegistryConfig{}
 	for i := range c.Repos {
 		c.Repos[i].Server = ""
 		c.Repos[i].APIKey = ""
@@ -225,6 +247,19 @@ func (c *cliConfig) stripUntrustedAutoProjectFields() {
 }
 
 func overlayCLIConfig(dst *cliConfig, src cliConfig) {
+	overlayCLIConnectionConfig(dst, src)
+	overlayCLIScanPolicyConfig(dst, src)
+	overlayCLIRepoMetadataConfig(dst, src)
+	overlayCLIWebhookConfig(&dst.Webhook, src.Webhook)
+	overlayCLIOutputConfig(&dst.Output, src.Output)
+	overlayCLILogConfig(&dst.Log, src.Log)
+	overlayCLIHookConfig(&dst.Hook, src.Hook)
+	overlayCLIDBConfig(&dst.DB, src.DB)
+	overlayCLIRegistryConfig(&dst.Registries, src.Registries)
+	overlayCLIReposConfig(dst, src)
+}
+
+func overlayCLIConnectionConfig(dst *cliConfig, src cliConfig) {
 	if src.Server != "" {
 		dst.Server = src.Server
 	}
@@ -234,6 +269,18 @@ func overlayCLIConfig(dst *cliConfig, src cliConfig) {
 	if src.APIKeyEnv != "" {
 		dst.APIKeyEnv = src.APIKeyEnv
 	}
+	if src.CACert != "" {
+		dst.CACert = src.CACert
+	}
+	if src.InsecureAllowHTTP != nil {
+		dst.InsecureAllowHTTP = src.InsecureAllowHTTP
+	}
+	if src.RequireRemote != nil {
+		dst.RequireRemote = src.RequireRemote
+	}
+}
+
+func overlayCLIScanPolicyConfig(dst *cliConfig, src cliConfig) {
 	if src.Mode != "" {
 		dst.Mode = src.Mode
 	}
@@ -249,51 +296,108 @@ func overlayCLIConfig(dst *cliConfig, src cliConfig) {
 	if src.IncludeDev != nil {
 		dst.IncludeDev = src.IncludeDev
 	}
-	if src.CACert != "" {
-		dst.CACert = src.CACert
-	}
-	if src.InsecureAllowHTTP != nil {
-		dst.InsecureAllowHTTP = src.InsecureAllowHTTP
-	}
-	if src.RequireRemote != nil {
-		dst.RequireRemote = src.RequireRemote
-	}
+}
+
+func overlayCLIRepoMetadataConfig(dst *cliConfig, src cliConfig) {
 	if src.SendRepoMetadata != nil {
 		dst.SendRepoMetadata = src.SendRepoMetadata
 	}
-	if src.Webhook.URL != "" {
-		dst.Webhook.URL = src.Webhook.URL
+}
+
+func overlayCLIWebhookConfig(dst *cliWebhookConfig, src cliWebhookConfig) {
+	if src.URL != "" {
+		dst.URL = src.URL
 	}
-	if src.Webhook.Secret != "" {
-		dst.Webhook.Secret = src.Webhook.Secret
+	if src.Secret != "" {
+		dst.Secret = src.Secret
 	}
-	if src.Output.Format != "" {
-		dst.Output.Format = src.Output.Format
+}
+
+func overlayCLIOutputConfig(dst *cliOutputConfig, src cliOutputConfig) {
+	if src.Format != "" {
+		dst.Format = src.Format
 	}
-	if src.Output.File != "" {
-		dst.Output.File = src.Output.File
+	if src.File != "" {
+		dst.File = src.File
 	}
-	if src.Log.Level != "" {
-		dst.Log.Level = src.Log.Level
+}
+
+func overlayCLILogConfig(dst *cliLogConfig, src cliLogConfig) {
+	if src.Level != "" {
+		dst.Level = src.Level
 	}
-	if src.Log.Format != "" {
-		dst.Log.Format = src.Log.Format
+	if src.Format != "" {
+		dst.Format = src.Format
 	}
-	if src.Log.File != "" {
-		dst.Log.File = src.Log.File
+	if src.File != "" {
+		dst.File = src.File
 	}
-	if src.Hook.Type != "" {
-		dst.Hook.Type = src.Hook.Type
+}
+
+func overlayCLIHookConfig(dst *cliHookConfig, src cliHookConfig) {
+	if src.Type != "" {
+		dst.Type = src.Type
 	}
-	if src.Hook.FailOn != "" {
-		dst.Hook.FailOn = src.Hook.FailOn
+	if src.FailOn != "" {
+		dst.FailOn = src.FailOn
 	}
-	if src.DB.Path != "" {
-		dst.DB.Path = src.DB.Path
+}
+
+func overlayCLIDBConfig(dst *cliDBConfig, src cliDBConfig) {
+	if src.Path != "" {
+		dst.Path = src.Path
 	}
-	if src.DB.SyncSource != "" {
-		dst.DB.SyncSource = src.DB.SyncSource
+	if src.SyncSource != "" {
+		dst.SyncSource = src.SyncSource
 	}
+}
+
+func overlayCLIRegistryConfig(dst *cliRegistryConfig, src cliRegistryConfig) {
+	if src.NPMRegistryBaseURL != "" {
+		dst.NPMRegistryBaseURL = src.NPMRegistryBaseURL
+	}
+	if src.PyPIAPIBaseURL != "" {
+		dst.PyPIAPIBaseURL = src.PyPIAPIBaseURL
+	}
+	if src.RubyGemsAPIBaseURL != "" {
+		dst.RubyGemsAPIBaseURL = src.RubyGemsAPIBaseURL
+	}
+	if src.CargoRegistryAPIBaseURL != "" {
+		dst.CargoRegistryAPIBaseURL = src.CargoRegistryAPIBaseURL
+	}
+	if src.CocoaPodsTrunkAPIBaseURL != "" {
+		dst.CocoaPodsTrunkAPIBaseURL = src.CocoaPodsTrunkAPIBaseURL
+	}
+	if src.ComposerRepositoryBaseURL != "" {
+		dst.ComposerRepositoryBaseURL = src.ComposerRepositoryBaseURL
+	}
+	if src.GoModuleProxyURL != "" {
+		dst.GoModuleProxyURL = src.GoModuleProxyURL
+	}
+	if src.MavenRepositoryBaseURL != "" {
+		dst.MavenRepositoryBaseURL = src.MavenRepositoryBaseURL
+	}
+	if len(src.DockerRegistryMirrors) > 0 {
+		dst.DockerRegistryMirrors = mergeStringMaps(dst.DockerRegistryMirrors, src.DockerRegistryMirrors)
+	}
+	if len(src.SwiftPMGitAllowedHosts) > 0 {
+		dst.SwiftPMGitAllowedHosts = mergeStringSlices(dst.SwiftPMGitAllowedHosts, src.SwiftPMGitAllowedHosts)
+	}
+	if src.CRANMirrorURL != "" {
+		dst.CRANMirrorURL = src.CRANMirrorURL
+	}
+	if src.PubHostedURL != "" {
+		dst.PubHostedURL = src.PubHostedURL
+	}
+	if src.HexAPIBaseURL != "" {
+		dst.HexAPIBaseURL = src.HexAPIBaseURL
+	}
+	if src.NuGetV3BaseURL != "" {
+		dst.NuGetV3BaseURL = src.NuGetV3BaseURL
+	}
+}
+
+func overlayCLIReposConfig(dst *cliConfig, src cliConfig) {
 	if len(src.Repos) > 0 {
 		dst.Repos = append([]cliRepoConfig(nil), src.Repos...)
 	}
@@ -310,6 +414,13 @@ func userGlobalConfigPath() (string, bool) {
 }
 
 func (c *cliConfig) normalize(baseDir string) error {
+	if err := normalizeTopLevelCLIConfig(c, baseDir); err != nil {
+		return err
+	}
+	return normalizeCLIRepoConfigs(c.Repos, baseDir)
+}
+
+func normalizeTopLevelCLIConfig(c *cliConfig, baseDir string) error {
 	c.Server = strings.TrimSpace(c.Server)
 	c.APIKey = strings.TrimSpace(c.APIKey)
 	c.APIKeyEnv = strings.TrimSpace(c.APIKeyEnv)
@@ -331,7 +442,26 @@ func (c *cliConfig) normalize(baseDir string) error {
 	c.Hook.FailOn = normalizeSeverityString(c.Hook.FailOn)
 	c.DB.Path = strings.TrimSpace(c.DB.Path)
 	c.DB.SyncSource = strings.TrimSpace(c.DB.SyncSource)
+	if err := normalizeCLIRegistryConfig(&c.Registries); err != nil {
+		return err
+	}
 
+	if err := validateTopLevelCLIConfig(c); err != nil {
+		return err
+	}
+
+	if c.DB.Path != "" {
+		resolvedPath, err := resolveConfigPath(baseDir, c.DB.Path)
+		if err != nil {
+			return fmt.Errorf("resolve db.path: %w", err)
+		}
+		c.DB.Path = resolvedPath
+	}
+
+	return nil
+}
+
+func validateTopLevelCLIConfig(c *cliConfig) error {
 	if err := validateModeString(c.Mode); err != nil {
 		return err
 	}
@@ -354,70 +484,75 @@ func (c *cliConfig) normalize(baseDir string) error {
 		return fmt.Errorf("hook.fail_on: %w", err)
 	}
 
-	if c.DB.Path != "" {
-		resolvedPath, err := resolveConfigPath(baseDir, c.DB.Path)
-		if err != nil {
-			return fmt.Errorf("resolve db.path: %w", err)
-		}
-		c.DB.Path = resolvedPath
-	}
+	return nil
+}
 
-	seenNames := make(map[string]struct{}, len(c.Repos))
-	for i := range c.Repos {
-		repo := &c.Repos[i]
-		repo.Name = strings.TrimSpace(repo.Name)
-		repo.Path = strings.TrimSpace(repo.Path)
-		repo.Server = strings.TrimSpace(repo.Server)
-		repo.APIKey = strings.TrimSpace(repo.APIKey)
-		repo.APIKeyEnv = strings.TrimSpace(repo.APIKeyEnv)
-		repo.Mode = normalizeModeString(repo.Mode)
-		repo.FailOn = normalizeSeverityString(repo.FailOn)
-		repo.Ecosystems = normalizeStringList(repo.Ecosystems)
-		if err := validateCanonicalEcosystemFilters(fmt.Sprintf("repos[%d].ecosystems", i), repo.Ecosystems); err != nil {
+func normalizeCLIRepoConfigs(repos []cliRepoConfig, baseDir string) error {
+	seenNames := make(map[string]struct{}, len(repos))
+	for i := range repos {
+		if err := normalizeCLIRepoConfig(&repos[i], baseDir, i); err != nil {
 			return err
 		}
-		repo.Webhook.URL = strings.TrimSpace(repo.Webhook.URL)
-		repo.Webhook.Secret = strings.TrimSpace(repo.Webhook.Secret)
 
-		if repo.Path == "" {
-			return fmt.Errorf("repos[%d].path is required", i)
+		if _, exists := seenNames[repos[i].Name]; exists {
+			return fmt.Errorf("duplicate repo name %q", repos[i].Name)
 		}
-		resolvedPath, err := resolveConfigPath(baseDir, repo.Path)
-		if err != nil {
-			return fmt.Errorf("resolve repos[%d].path: %w", i, err)
-		}
-		repo.Path = resolvedPath
-
-		if repo.Name == "" {
-			repo.Name = filepath.Base(repo.Path)
-		}
-		if repo.Name == "" || repo.Name == "." || repo.Name == string(filepath.Separator) {
-			return fmt.Errorf("repos[%d].name could not be derived from path", i)
-		}
-
-		if err := validateModeString(repo.Mode); err != nil {
-			return fmt.Errorf("repos[%d].mode: %w", i, err)
-		}
-		if err := validateSeverityString(repo.FailOn); err != nil {
-			return fmt.Errorf("repos[%d].fail_on: %w", i, err)
-		}
-		if repo.Timeout < 0 {
-			return fmt.Errorf("repos[%d].timeout must not be negative", i)
-		}
-		if _, exists := seenNames[repo.Name]; exists {
-			return fmt.Errorf("duplicate repo name %q", repo.Name)
-		}
-		seenNames[repo.Name] = struct{}{}
+		seenNames[repos[i].Name] = struct{}{}
 	}
 
 	return nil
 }
 
+func normalizeCLIRepoConfig(repo *cliRepoConfig, baseDir string, index int) error {
+	repo.Name = strings.TrimSpace(repo.Name)
+	repo.Path = strings.TrimSpace(repo.Path)
+	repo.Server = strings.TrimSpace(repo.Server)
+	repo.APIKey = strings.TrimSpace(repo.APIKey)
+	repo.APIKeyEnv = strings.TrimSpace(repo.APIKeyEnv)
+	repo.Mode = normalizeModeString(repo.Mode)
+	repo.FailOn = normalizeSeverityString(repo.FailOn)
+	repo.Ecosystems = normalizeStringList(repo.Ecosystems)
+	if err := validateCanonicalEcosystemFilters(fmt.Sprintf("repos[%d].ecosystems", index), repo.Ecosystems); err != nil {
+		return err
+	}
+	repo.Webhook.URL = strings.TrimSpace(repo.Webhook.URL)
+	repo.Webhook.Secret = strings.TrimSpace(repo.Webhook.Secret)
+
+	if repo.Path == "" {
+		return fmt.Errorf("repos[%d].path is required", index)
+	}
+	resolvedPath, err := resolveConfigPath(baseDir, repo.Path)
+	if err != nil {
+		return fmt.Errorf("resolve repos[%d].path: %w", index, err)
+	}
+	repo.Path = resolvedPath
+
+	if repo.Name == "" {
+		repo.Name = filepath.Base(repo.Path)
+	}
+
+	return validateCLIRepoConfig(repo, index)
+}
+
+func validateCLIRepoConfig(repo *cliRepoConfig, index int) error {
+	if repo.Name == "" || repo.Name == "." || repo.Name == string(filepath.Separator) {
+		return fmt.Errorf("repos[%d].name could not be derived from path", index)
+	}
+	if err := validateModeString(repo.Mode); err != nil {
+		return fmt.Errorf("repos[%d].mode: %w", index, err)
+	}
+	if err := validateSeverityString(repo.FailOn); err != nil {
+		return fmt.Errorf("repos[%d].fail_on: %w", index, err)
+	}
+	if repo.Timeout < 0 {
+		return fmt.Errorf("repos[%d].timeout must not be negative", index)
+	}
+	return nil
+}
+
 func validateOutputConfig(cfg cliOutputConfig) error {
-	switch cfg.Format {
-	case "", "table", "json", "sarif", "junit", "html":
-	default:
-		return fmt.Errorf("invalid output.format %q (want table|json|sarif|junit|html)", cfg.Format)
+	if !isValidScanOutputConfigFormat(cfg.Format) {
+		return fmt.Errorf("invalid output.format %q (want %s)", cfg.Format, scanOutputConfigFormatList())
 	}
 	if cfg.File != "" && cfg.Format == "" {
 		return fmt.Errorf("output.format is required when output.file is set")
@@ -503,27 +638,33 @@ func validateCanonicalEcosystemFilters(field string, ecosystems []string) error 
 }
 
 func normalizeModeString(value string) string {
-	return strings.ToLower(strings.TrimSpace(value))
+	mode, err := scanner.ParseMode(value)
+	if err != nil {
+		return strings.ToLower(strings.TrimSpace(value))
+	}
+	if strings.TrimSpace(value) == "" {
+		return ""
+	}
+	return string(mode)
 }
 
 func normalizeSeverityString(value string) string {
+	if severity, ok := domain.ParseBlockThreshold(value); ok {
+		return string(severity)
+	}
 	return strings.ToUpper(strings.TrimSpace(value))
 }
 
 func validateModeString(value string) error {
-	switch value {
-	case "", string(scanner.ModeAuto), string(scanner.ModeLocal), string(scanner.ModeRemote):
-		return nil
-	default:
-		return fmt.Errorf("invalid mode %q (want auto|local|remote)", value)
-	}
+	_, err := scanner.ParseMode(value)
+	return err
 }
 
 func validateSeverityString(value string) error {
 	if value == "" {
 		return nil
 	}
-	if _, ok := scanner.SeverityFromString(value); ok {
+	if _, ok := domain.ParseBlockThreshold(value); ok {
 		return nil
 	}
 	return fmt.Errorf("invalid severity %q (want CRITICAL|HIGH|MEDIUM|LOW|NONE)", value)

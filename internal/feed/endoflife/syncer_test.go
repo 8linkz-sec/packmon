@@ -4,46 +4,48 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/feed"
 )
 
 type lifecycleStoreStub struct {
 	db.Store
-	status           *db.FeedSyncStatus
-	statuses         []db.FeedSyncStatus
-	products         []db.LifecycleProduct
-	reconciledSlugs  []string
-	reconcileErr     error
-	statusErr        error
-	upsertErr        error
-	statusWriteErr   error
-	rejectCanceled   bool
-	reconcileDeleted int
-}
-
-type lifecycleReplaceStoreStub struct {
-	lifecycleStoreStub
+	status         *db.FeedSyncStatus
+	statuses       []db.FeedSyncStatus
+	products       []db.LifecycleProduct
+	replacedSlugs  []string
 	replaceErr     error
 	replaceCalls   int
 	replaceDeleted int
+	statusErr      error
+	statusWriteErr error
+	rejectCanceled bool
 }
 
-func (s *lifecycleReplaceStoreStub) ReplaceLifecycleProducts(_ context.Context, products []db.LifecycleProduct) (int, error) {
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func (s *lifecycleStoreStub) ReplaceLifecycleProducts(_ context.Context, products []db.LifecycleProduct) (int, error) {
 	s.replaceCalls++
 	if s.replaceErr != nil {
 		return 0, s.replaceErr
 	}
 	s.products = append(s.products, products...)
-	s.reconciledSlugs = make([]string, 0, len(products))
+	s.replacedSlugs = make([]string, 0, len(products))
 	for _, product := range products {
-		s.reconciledSlugs = append(s.reconciledSlugs, product.ProductSlug)
+		s.replacedSlugs = append(s.replacedSlugs, product.ProductSlug)
 	}
 	return s.replaceDeleted, nil
 }
@@ -70,19 +72,6 @@ func (s *lifecycleStoreStub) UpsertFeedSyncStatus(ctx context.Context, status *d
 	s.statuses = append(s.statuses, copied)
 	s.status = &copied
 	return nil
-}
-
-func (s *lifecycleStoreStub) UpsertLifecycleProducts(_ context.Context, products []db.LifecycleProduct) error {
-	if s.upsertErr != nil {
-		return s.upsertErr
-	}
-	s.products = append(s.products, products...)
-	return nil
-}
-
-func (s *lifecycleStoreStub) DeleteLifecycleProductsNotIn(_ context.Context, productSlugs []string) (int, error) {
-	s.reconciledSlugs = append([]string(nil), productSlugs...)
-	return s.reconcileDeleted, s.reconcileErr
 }
 
 func TestFetchProductsFullSendsHeadersAndParsesResponse(t *testing.T) {
@@ -162,7 +151,7 @@ func TestFetchProductsFullNotModified(t *testing.T) {
 	}
 }
 
-func TestSyncerUpsertsProductsAndPackageMapsFromPURLs(t *testing.T) {
+func TestSyncerReplacesProductsAndPackageMapsFromPURLs(t *testing.T) {
 	t.Parallel()
 
 	var sawIfNoneMatch string
@@ -190,8 +179,11 @@ func TestSyncerUpsertsProductsAndPackageMapsFromPURLs(t *testing.T) {
 	if result.EntriesSynced != 1 || result.EntriesTotal != 1 {
 		t.Fatalf("Sync() result = %+v, want 1/1", result)
 	}
+	if store.replaceCalls != 1 {
+		t.Fatalf("ReplaceLifecycleProducts calls = %d, want 1", store.replaceCalls)
+	}
 	if len(store.products) != 1 {
-		t.Fatalf("upserted products = %d, want 1", len(store.products))
+		t.Fatalf("replaced products = %d, want 1", len(store.products))
 	}
 	product := store.products[0]
 	if product.ProductSlug != "django" || product.Name != "Django" || product.Category != "framework" {
@@ -206,10 +198,10 @@ func TestSyncerUpsertsProductsAndPackageMapsFromPURLs(t *testing.T) {
 	if len(product.Releases) != 1 || product.Releases[0].Cycle != "4.2" || product.Releases[0].Latest != "4.2.22" || !product.Releases[0].IsEOAS {
 		t.Fatalf("releases = %+v", product.Releases)
 	}
-	if len(store.reconciledSlugs) != 1 || store.reconciledSlugs[0] != "django" {
-		t.Fatalf("reconciled slugs = %+v, want django", store.reconciledSlugs)
+	if len(store.replacedSlugs) != 1 || store.replacedSlugs[0] != "django" {
+		t.Fatalf("replaced slugs = %+v, want django", store.replacedSlugs)
 	}
-	if len(store.statuses) != 1 || store.statuses[0].LastSyncStatus != "success" || store.statuses[0].LastEtag != "fresh-etag" {
+	if len(store.statuses) != 1 || store.statuses[0].LastSyncStatus != "success" || store.statuses[0].LastETag != "fresh-etag" {
 		t.Fatalf("status = %+v", store.statuses)
 	}
 	if !strings.Contains(string(store.statuses[0].Metadata), `"schema_version":"1.2.1"`) {
@@ -217,7 +209,7 @@ func TestSyncerUpsertsProductsAndPackageMapsFromPURLs(t *testing.T) {
 	}
 }
 
-func TestSyncerUsesAtomicLifecycleReplacementWhenAvailable(t *testing.T) {
+func TestSyncerUsesLifecycleReplacementContract(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -226,7 +218,7 @@ func TestSyncerUsesAtomicLifecycleReplacementWhenAvailable(t *testing.T) {
 	}))
 	defer server.Close()
 
-	store := &lifecycleReplaceStoreStub{}
+	store := &lifecycleStoreStub{}
 	syncer := NewSyncer(nil, WithBaseURL(server.URL), WithHTTPClient(server.Client()))
 	result, err := syncer.Sync(context.Background(), store)
 	if err != nil {
@@ -255,7 +247,7 @@ func TestSyncerRecordsLifecycleReplacementDeletedCount(t *testing.T) {
 	}))
 	defer server.Close()
 
-	store := &lifecycleReplaceStoreStub{replaceDeleted: 3}
+	store := &lifecycleStoreStub{replaceDeleted: 3}
 	syncer := NewSyncer(nil, WithBaseURL(server.URL), WithHTTPClient(server.Client()))
 	if _, err := syncer.Sync(context.Background(), store); err != nil {
 		t.Fatalf("Sync() error = %v", err)
@@ -268,29 +260,33 @@ func TestSyncerRecordsLifecycleReplacementDeletedCount(t *testing.T) {
 	}
 }
 
-func TestSyncerRecordsLifecycleReconciliationDeletedCount(t *testing.T) {
+func TestSyncerRequiresLifecycleReplacementContract(t *testing.T) {
 	t.Parallel()
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("ETag", "fresh-etag")
-		_, _ = w.Write([]byte(sampleProductsResponse()))
-	}))
-	defer server.Close()
-
-	store := &lifecycleStoreStub{reconcileDeleted: 2}
-	syncer := NewSyncer(nil, WithBaseURL(server.URL), WithHTTPClient(server.Client()))
-	if _, err := syncer.Sync(context.Background(), store); err != nil {
-		t.Fatalf("Sync() error = %v", err)
+	source, err := os.ReadFile("syncer.go")
+	if err != nil {
+		t.Fatalf("read syncer source: %v", err)
 	}
-	if len(store.statuses) != 1 {
-		t.Fatalf("statuses = %d, want 1", len(store.statuses))
+	text := string(source)
+	forbidden := []string{
+		"type lifecycleReplacer interface",
+		"type lifecycleReconciler interface",
+		"store.(lifecycleReplacer)",
+		"store.(lifecycleReconciler)",
+		"UpsertLifecycleProducts(ctx, products)",
+		"DeleteLifecycleProductsNotIn",
 	}
-	if !strings.Contains(string(store.statuses[0].Metadata), `"deleted_products":2`) {
-		t.Fatalf("metadata = %s, want deleted_products count", store.statuses[0].Metadata)
+	for _, pattern := range forbidden {
+		if strings.Contains(text, pattern) {
+			t.Fatalf("syncer.go contains optional lifecycle fallback %q; full snapshots must call db.Store.ReplaceLifecycleProducts directly", pattern)
+		}
+	}
+	if !strings.Contains(text, "store.ReplaceLifecycleProducts(ctx, products)") {
+		t.Fatal("syncer.go must call db.Store.ReplaceLifecycleProducts directly for full lifecycle snapshots")
 	}
 }
 
-func TestSyncerNotModifiedRecordsSuccessWithoutUpsert(t *testing.T) {
+func TestSyncerNotModifiedRecordsSuccessWithoutStoreWrite(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -303,7 +299,7 @@ func TestSyncerNotModifiedRecordsSuccessWithoutUpsert(t *testing.T) {
 	store := &lifecycleStoreStub{status: &db.FeedSyncStatus{
 		FeedName:       FeedName,
 		LastSyncAt:     &lastSync,
-		LastEtag:       "cached-etag",
+		LastETag:       "cached-etag",
 		EntriesSynced:  5,
 		EntriesTotal:   9,
 		LastSyncStatus: "success",
@@ -316,10 +312,13 @@ func TestSyncerNotModifiedRecordsSuccessWithoutUpsert(t *testing.T) {
 	if result.EntriesSynced != 5 || result.EntriesTotal != 9 {
 		t.Fatalf("Sync(304) result = %+v, want preserved 5/9", result)
 	}
-	if len(store.products) != 0 {
-		t.Fatalf("Sync(304) upserted products = %+v, want none", store.products)
+	if store.replaceCalls != 0 {
+		t.Fatalf("Sync(304) ReplaceLifecycleProducts calls = %d, want 0", store.replaceCalls)
 	}
-	if len(store.statuses) != 1 || store.statuses[0].LastSyncStatus != "success" || store.statuses[0].LastEtag != "cached-etag" || store.statuses[0].EntriesTotal != 9 {
+	if len(store.products) != 0 {
+		t.Fatalf("Sync(304) replaced products = %+v, want none", store.products)
+	}
+	if len(store.statuses) != 1 || store.statuses[0].LastSyncStatus != "success" || store.statuses[0].LastETag != "cached-etag" || store.statuses[0].EntriesTotal != 9 {
 		t.Fatalf("Sync(304) status = %+v", store.statuses)
 	}
 }
@@ -347,6 +346,16 @@ func TestSyncerRejectsMalformedLifecyclePayload(t *testing.T) {
 			body: `{"total":1,"result":[{"name":"django","label":"Django","identifiers":[{"type":"purl","id":"pkg:pypi/%zz"}],"releases":[]}]}`,
 			want: "invalid purl",
 		},
+		{
+			name: "invalid response json",
+			body: `{"total":"one","result":[]}`,
+			want: "decode endoflife products response",
+		},
+		{
+			name: "missing result array",
+			body: `{"total":1}`,
+			want: "result array is required",
+		},
 	}
 
 	for _, tt := range tests {
@@ -362,20 +371,61 @@ func TestSyncerRejectsMalformedLifecyclePayload(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("Sync() error = %v, want containing %q", err, tt.want)
 			}
+			if !feed.IsNonRetryableError(err) {
+				t.Fatalf("Sync() error = %v, want non-retryable marker", err)
+			}
 			if result != nil {
 				t.Fatalf("Sync() result = %+v, want nil", result)
 			}
 			if len(store.products) != 0 {
-				t.Fatalf("upserted products = %+v, want none", store.products)
+				t.Fatalf("replaced products = %+v, want none", store.products)
 			}
 			if len(store.statuses) != 1 || store.statuses[0].LastSyncStatus != "error" {
 				t.Fatalf("status = %+v, want one error status", store.statuses)
 			}
 		})
 	}
+
+	t.Run("manager stops without retrying non retryable malformed payload", func(t *testing.T) {
+		requests := 0
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			requests++
+			_, _ = w.Write([]byte(`{"total":1,"result":[{"name":"django","label":"Django","identifiers":[{"type":"purl","id":"pkg:pypi/django"}],"releases":[{"name":"4.2","eolFrom":"not-a-date"}]}]}`))
+		}))
+		defer server.Close()
+
+		store := &lifecycleStoreStub{}
+		syncer := NewSyncer(nil, WithBaseURL(server.URL), WithHTTPClient(server.Client()))
+		manager := feed.NewManager(store, slog.New(slog.NewTextHandler(io.Discard, nil)), time.Hour)
+		manager.Register(feed.FeedConfig{
+			Syncer:  syncer,
+			Mode:    feed.FeedModeSelf,
+			Enabled: true,
+		})
+
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+
+		err := manager.SyncOne(ctx, FeedName)
+		if err == nil {
+			t.Fatal("SyncOne() error = nil, want malformed payload error")
+		}
+		if !feed.IsNonRetryableError(err) {
+			t.Fatalf("SyncOne() error = %v, want non-retryable marker", err)
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("SyncOne() exhausted context before returning non-retryable error: %v", ctx.Err())
+		}
+		if requests != 1 {
+			t.Fatalf("endoflife requests = %d, want 1", requests)
+		}
+		if len(store.statuses) == 0 || store.statuses[len(store.statuses)-1].LastSyncStatus != db.FeedSyncStatusError {
+			t.Fatalf("statuses = %+v, want final error status", store.statuses)
+		}
+	})
 }
 
-func TestSyncerHTTP429RecordsFailureWithoutUpsert(t *testing.T) {
+func TestSyncerHTTP429RecordsFailureWithoutStoreWrite(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -393,13 +443,116 @@ func TestSyncerHTTP429RecordsFailureWithoutUpsert(t *testing.T) {
 		t.Fatalf("Sync(429) result = %+v, want nil", result)
 	}
 	if len(store.products) != 0 {
-		t.Fatalf("Sync(429) upserted products = %+v, want none", store.products)
+		t.Fatalf("Sync(429) replaced products = %+v, want none", store.products)
 	}
 	if len(store.statuses) != 1 || store.statuses[0].LastSyncStatus != "error" || store.statuses[0].LastError == "" {
 		t.Fatalf("Sync(429) status = %+v", store.statuses)
 	}
 	if !errors.Is(err, ErrHTTPStatus) {
 		t.Fatalf("Sync(429) error = %v, want ErrHTTPStatus", err)
+	}
+}
+
+func TestSyncerTransportFailureRecordsFailureAndPreservesLifecycleRows(t *testing.T) {
+	t.Parallel()
+
+	lastSync := time.Now().UTC().Add(-time.Hour)
+	cachedProduct := db.LifecycleProduct{ProductSlug: "django", Name: "Django"}
+	store := &lifecycleStoreStub{
+		status: &db.FeedSyncStatus{
+			FeedName:       FeedName,
+			LastSyncAt:     &lastSync,
+			LastSyncStatus: db.FeedSyncStatusSuccess,
+			EntriesSynced:  1,
+			EntriesTotal:   1,
+			LastETag:       "cached-etag",
+			Metadata:       json.RawMessage(`{"etag":"cached-etag"}`),
+		},
+		products: []db.LifecycleProduct{cachedProduct},
+	}
+	transportErr := errors.New("dial tcp: lookup endoflife.example.test: no such host")
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, transportErr
+	})}
+	syncer := NewSyncer(nil, WithBaseURL("https://endoflife.example.test/api/v1"), WithHTTPClient(client))
+
+	result, err := syncer.Sync(context.Background(), store)
+
+	if err == nil || !strings.Contains(err.Error(), transportErr.Error()) {
+		t.Fatalf("Sync(transport error) error = %v, want containing %q", err, transportErr)
+	}
+	if result != nil {
+		t.Fatalf("Sync(transport error) result = %+v, want nil", result)
+	}
+	if store.replaceCalls != 0 {
+		t.Fatalf("Sync(transport error) ReplaceLifecycleProducts calls = %d, want 0", store.replaceCalls)
+	}
+	if len(store.products) != 1 || store.products[0].ProductSlug != cachedProduct.ProductSlug {
+		t.Fatalf("Sync(transport error) products = %+v, want cached lifecycle rows preserved", store.products)
+	}
+	if len(store.statuses) != 1 {
+		t.Fatalf("Sync(transport error) statuses = %d, want 1", len(store.statuses))
+	}
+	status := store.statuses[0]
+	if status.LastSyncStatus != db.FeedSyncStatusError || status.LastError == "" {
+		t.Fatalf("Sync(transport error) status = %+v, want error with diagnostic", status)
+	}
+	if status.LastSyncAt == nil || !status.LastSyncAt.Equal(lastSync) || status.EntriesSynced != 1 || status.EntriesTotal != 1 || status.LastETag != "cached-etag" {
+		t.Fatalf("Sync(transport error) preserved status data = %+v, want cached sync evidence", status)
+	}
+	if got := feed.OverallFeedStatus([]db.FeedSyncStatus{status}, feed.HealthOptions{Now: time.Now().UTC()}); got != "degraded" {
+		t.Fatalf("OverallFeedStatus(transport error) = %q, want degraded", got)
+	}
+}
+
+func TestRecordSyncFailureStoresSafeDiagnosticError(t *testing.T) {
+	t.Parallel()
+
+	rawDiagnostic := strings.Join([]string{
+		`sync failed: GET https://sync-user:sync-pass@endoflife.example.test/private/product.json?token=query-secret;`, //nolint:gosec // fake credential-bearing URL verifies redaction.
+		`Authorization: Bearer bearer-secret-token;`, //nolint:gosec // fake bearer token verifies redaction.
+		`cache C:\Users\Admin\AppData\Local\Packmon\endoflife.json;`,
+		`access_token=assignment-secret`, //nolint:gosec // fake token assignment verifies redaction.
+	}, " ") + " " + strings.Repeat("x", 2048)
+	syncErr := errors.New(rawDiagnostic)
+	store := &lifecycleStoreStub{}
+	syncer := NewSyncer(nil)
+
+	syncer.recordSyncFailure(context.Background(), store, time.Now(), syncErr)
+
+	if len(store.statuses) != 1 {
+		t.Fatalf("statuses = %d, want 1", len(store.statuses))
+	}
+	got := store.statuses[0].LastError
+	if want := feed.SafeDiagnosticError(syncErr); got != want {
+		t.Fatalf("LastError = %q, want SafeDiagnosticError %q", got, want)
+	}
+	if len(got) > 1024 {
+		t.Fatalf("LastError length = %d, want <= 1024", len(got))
+	}
+	for _, leaked := range []string{
+		"sync-user",
+		"sync-pass",
+		"private/product.json",
+		"query-secret",
+		"bearer-secret-token",
+		`C:\Users\Admin\AppData\Local\Packmon\endoflife.json`,
+		"assignment-secret",
+	} {
+		if strings.Contains(got, leaked) {
+			t.Fatalf("LastError leaked %q in %q", leaked, got)
+		}
+	}
+	for _, want := range []string{
+		"https://endoflife.example.test/...",
+		"Bearer [redacted]",
+		"(redacted-path)",
+		"access_token=[redacted]",
+		"[truncated]",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("LastError missing %q in %q", want, got)
+		}
 	}
 }
 
@@ -424,7 +577,7 @@ func TestSyncerOptionsNameStatusAndFailureBranches(t *testing.T) {
 		t.Fatalf("Sync(status read error still proceeds) error = %v", err)
 	}
 
-	if got := statusETag(&db.FeedSyncStatus{LastEtag: " direct "}); got != "direct" {
+	if got := statusETag(&db.FeedSyncStatus{LastETag: " direct "}); got != "direct" {
 		t.Fatalf("statusETag(last_etag) = %q", got)
 	}
 	if got := statusETag(&db.FeedSyncStatus{Metadata: json.RawMessage(`{"etag":" meta "}`)}); got != "meta" {
@@ -434,17 +587,12 @@ func TestSyncerOptionsNameStatusAndFailureBranches(t *testing.T) {
 		t.Fatalf("statusETag(invalid metadata) = %q, want empty", got)
 	}
 
-	store = &lifecycleStoreStub{upsertErr: errors.New("upsert down")}
-	if _, err := syncer.Sync(context.Background(), store); err == nil || !strings.Contains(err.Error(), "upsert lifecycle products") {
-		t.Fatalf("Sync(upsert error) = %v", err)
+	store = &lifecycleStoreStub{replaceErr: errors.New("replace down")}
+	if _, err := syncer.Sync(context.Background(), store); err == nil || !strings.Contains(err.Error(), "replace lifecycle products") {
+		t.Fatalf("Sync(replace error) = %v", err)
 	}
 	if len(store.statuses) != 1 || store.statuses[0].LastSyncStatus != "error" {
-		t.Fatalf("upsert error status = %+v", store.statuses)
-	}
-
-	store = &lifecycleStoreStub{reconcileErr: errors.New("reconcile down")}
-	if _, err := syncer.Sync(context.Background(), store); err == nil || !strings.Contains(err.Error(), "reconcile lifecycle products") {
-		t.Fatalf("Sync(reconcile error) = %v", err)
+		t.Fatalf("replace error status = %+v", store.statuses)
 	}
 
 	store = &lifecycleStoreStub{statusWriteErr: errors.New("status write down")}
@@ -484,16 +632,4 @@ func sampleProductsResponse() string {
 			}]
 		}]
 	}`
-}
-
-func TestParseLifecycleDate(t *testing.T) {
-	t.Parallel()
-
-	got := parseLifecycleDate("2026-06-02")
-	if got == nil || got.Format(time.DateOnly) != "2026-06-02" {
-		t.Fatalf("parseLifecycleDate() = %v, want 2026-06-02", got)
-	}
-	if got := parseLifecycleDate(""); got != nil {
-		t.Fatalf("parseLifecycleDate(empty) = %v, want nil", got)
-	}
 }

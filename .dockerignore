@@ -2,6 +2,14 @@
 .env
 .env.*
 !.env.example
+.npmrc
+.netrc
+*.key
+*.pem
+*.p12
+*.pfx
+*.crt
+*.cer
 node_modules
 CLAUDE.md
 Phase *.md

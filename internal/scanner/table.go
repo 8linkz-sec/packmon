@@ -58,7 +58,7 @@ type tableReference struct {
 func NewTableWriter(noColor bool, failOn ...domain.Severity) *TableWriter {
 	threshold := domain.SeverityCritical
 	if len(failOn) > 0 {
-		if parsed, ok := SeverityFromString(string(failOn[0])); ok {
+		if parsed, ok := domain.ParseBlockThreshold(string(failOn[0])); ok {
 			threshold = parsed
 		}
 	}
@@ -94,11 +94,8 @@ func (tw *TableWriter) Write(w io.Writer, result *domain.ScanResult) error {
 }
 
 func (tw *TableWriter) writeStatusMessages(w io.Writer, result *domain.ScanResult, statusMessage string) error {
-	if result.Mode == "local" && result.DBAgeDays != nil && result.DBStale {
-		if _, err := fmt.Fprintf(w, "\n!! ATTENTION: Local database last synced %s ago.\n", plural.Count(*result.DBAgeDays, "day", "days")); err != nil {
-			return err
-		}
-		if _, err := fmt.Fprintln(w, "!! Results may be incomplete. Update with: packmon db sync"); err != nil {
+	if message := LocalDBStaleWarning(result); message != "" {
+		if _, err := fmt.Fprintf(w, "\n!! ATTENTION: %s\n", message); err != nil {
 			return err
 		}
 	}
@@ -107,7 +104,7 @@ func (tw *TableWriter) writeStatusMessages(w io.Writer, result *domain.ScanResul
 		_, err := fmt.Fprintf(w, "\n%s\n", termtext.Sanitize(statusMessage))
 		return err
 	}
-	if result.FeedStatus == "degraded" {
+	if result.FeedStatus == string(domain.ScanFeedStatusDegraded) {
 		_, err := fmt.Fprintln(w, "\nWARN  "+DegradedFeedStatusWarning(result.Mode))
 		return err
 	}
@@ -131,7 +128,7 @@ func writeNoFindingResult(w io.Writer, result *domain.ScanResult, statusMessage 
 }
 
 func (tw *TableWriter) buildTableRows(findings []domain.Finding) ([]tableRow, tableLayout) {
-	layout := tableLayout{maxPkg: 7, maxEco: 9, maxAdv: 8, maxFix: 11}
+	layout := tableLayout{maxPkg: 7, maxEco: 9, maxAdv: 8, maxFix: 13}
 	rows := make([]tableRow, 0, len(findings))
 	for _, finding := range findings {
 		row := tw.buildTableRow(finding)
@@ -181,7 +178,7 @@ func tableFixVersion(finding domain.Finding) string {
 	case domain.FindingTypeMalicious:
 		return "Remove pkg"
 	case domain.FindingTypeSupplyChainRisk:
-		if strings.EqualFold(strings.TrimSpace(finding.RiskType), "malware_history") {
+		if strings.EqualFold(strings.TrimSpace(finding.RiskType), domain.RiskTypeMalwareHistory) {
 			return "Review history"
 		}
 		return "Review pkg"
@@ -199,7 +196,7 @@ func writeFindingTable(w io.Writer, rows []tableRow, layout tableLayout) error {
 		layout.maxEco, tableColumnGap,
 		layout.maxAdv, tableColumnGap,
 		layout.maxFix, tableColumnGap)
-	if _, err := fmt.Fprintf(w, headerFormat, "SEVERITY", "PACKAGE", "ECOSYSTEM", "ADVISORY", "FIX VERSION", "SOURCE"); err != nil {
+	if _, err := fmt.Fprintf(w, headerFormat, "SEVERITY", "PACKAGE", "ECOSYSTEM", "ADVISORY", "FIXED VERSION", "SOURCE"); err != nil {
 		return err
 	}
 
@@ -314,23 +311,4 @@ func (tw *TableWriter) countBlocking(result *domain.ScanResult) int {
 		return 1
 	}
 	return count
-}
-
-// SeverityFromString parses a severity string, accepting common variations.
-// Returns the severity and true if valid, or empty and false if not.
-func SeverityFromString(s string) (domain.Severity, bool) {
-	switch strings.ToUpper(strings.TrimSpace(s)) {
-	case "CRITICAL":
-		return domain.SeverityCritical, true
-	case "HIGH":
-		return domain.SeverityHigh, true
-	case "MEDIUM":
-		return domain.SeverityMedium, true
-	case "LOW":
-		return domain.SeverityLow, true
-	case "NONE":
-		return domain.SeverityNone, true
-	default:
-		return "", false
-	}
 }

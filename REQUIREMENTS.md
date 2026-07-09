@@ -89,13 +89,15 @@ Target-aware SBOM checks currently map:
 
 | Detected files | Checked tools |
 |---|---|
-| `go.mod` | Go and `cyclonedx-gomod` |
-| `package.json`, `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `yarn.lock` | Node.js, npm, and `cyclonedx-npm` |
-| `requirements.txt`, `pyproject.toml`, `poetry.lock`, `Pipfile`, `Pipfile.lock` | Python and `cyclonedx-py` |
-| `pom.xml` | JDK/Maven through `mvn` |
+| `go.mod` | Go toolchain (`go list`) |
+| `package.json` | Node.js, npm, and `cyclonedx-npm` |
+| `requirements.txt`, `pyproject.toml` | Python and `cyclonedx-py` |
+| `pom.xml` | Maven 3.9.9 or newer through `mvn`, running on JDK 17 or newer |
 
-Gradle lockfiles are scanned natively by Packmon. They are not currently an
-`--auto-sbom` generator target.
+Existing npm and Poetry lockfiles are used by their matching generators when a
+supported project manifest is present. Gradle, Yarn, pnpm, and Pipenv lockfiles
+are scanned natively by Packmon. They are not currently `--auto-sbom` generator
+targets.
 
 After the needed SBOM tools are present:
 
@@ -109,7 +111,12 @@ packmon scan --auto-sbom --install-tools --list-all --html packmon-report.html -
 
 Maven remains a base requirement for Maven SBOM generation: `--install-tools`
 can use the pinned CycloneDX Maven plugin, but it cannot install the JDK or
-`mvn` itself.
+`mvn` itself. The requirements preflight parses `mvn --version` and requires
+Maven 3.9.9 or newer plus the Maven runtime's JDK 17 or newer.
+
+Go auto-SBOM generation uses the Go toolchain directly through `go list`.
+`cyclonedx-gomod` is retained only for release SBOM generation, where the
+release workflow publishes the repository-level Go SBOM artifact.
 
 ## Build From Source
 
@@ -171,12 +178,18 @@ is already available:
 | Tool | Install source |
 |---|---|
 | `cyclonedx-gomod` | `go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.10.0` |
-| `cyclonedx-npm` | `npm install --global @cyclonedx/cyclonedx-npm@4.2.1` |
+| `cyclonedx-npm` | `npm install --global --ignore-scripts @cyclonedx/cyclonedx-npm@5.0.0` |
 | `cyclonedx-py` | `python -m pip install --user cyclonedx-bom==7.3.0` |
+| `go-licenses` | `go install github.com/google/go-licenses@v1.6.0` |
 | `gofumpt` | `go install mvdan.cc/gofumpt@v0.9.2` |
 | `golangci-lint` | `go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.11.0` |
 | `govulncheck` | `go install golang.org/x/vuln/cmd/govulncheck@v1.4.0` |
 | `gosec` | `go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1` |
+
+For managed tools, the versions in `requirements/packmon-tools.tsv` are
+authoritative pins: check-requirements rejects stale managed tool versions, and
+bootstrap upgrades stale managed tools to the pinned versions before running the
+final requirement check.
 
 The bootstrap scripts do not install OS-level runtimes such as Go, Node.js,
 Python, JDK/Maven, or Docker. Those installs are platform-specific and often

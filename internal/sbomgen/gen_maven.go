@@ -7,12 +7,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 type mavenGenerator struct{}
 
-func (mavenGenerator) Ecosystem() string { return "maven" }
-func (mavenGenerator) Tool() string      { return "mvn" }
+func (mavenGenerator) Ecosystem() domain.Ecosystem { return domain.EcosystemMaven }
+func (mavenGenerator) Tool() string                { return "mvn" }
 func (mavenGenerator) InstallSpec() InstallSpec {
 	return InstallSpec{
 		Package:        "cyclonedx-maven-plugin",
@@ -54,10 +56,10 @@ func (mavenGenerator) Generate(ctx context.Context, d Detection, outPath string,
 }
 
 func (mavenGenerator) DeclaresDependencies(d Detection, opts GenerateOptions) (bool, error) {
-	return mavenProjectDeclaresDependencies(d.ProjectDir, opts, map[string]struct{}{})
+	return mavenProjectDeclaresDependencies(d.ScanRoot, d.ProjectDir, opts, map[string]struct{}{})
 }
 
-func mavenProjectDeclaresDependencies(dir string, opts GenerateOptions, visited map[string]struct{}) (bool, error) {
+func mavenProjectDeclaresDependencies(root, dir string, opts GenerateOptions, visited map[string]struct{}) (bool, error) {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		abs = filepath.Clean(dir)
@@ -67,7 +69,7 @@ func mavenProjectDeclaresDependencies(dir string, opts GenerateOptions, visited 
 	}
 	visited[abs] = struct{}{}
 
-	data, err := readAutoSBOMManifest(filepath.Join(dir, "pom.xml"))
+	data, err := readAutoSBOMManifestScoped(root, filepath.Join(dir, "pom.xml"))
 	if err != nil {
 		return false, err
 	}
@@ -96,7 +98,17 @@ func mavenProjectDeclaresDependencies(dir string, opts GenerateOptions, visited 
 		if module == "" {
 			continue
 		}
-		declares, err := mavenProjectDeclaresDependencies(filepath.Join(dir, filepath.FromSlash(module)), opts, visited)
+		child := filepath.Join(dir, filepath.FromSlash(module))
+		if strings.TrimSpace(root) != "" {
+			bounds, err := newScanRootBounds(root)
+			if err != nil {
+				return false, err
+			}
+			if err := bounds.requireDerived(child); err != nil {
+				return false, err
+			}
+		}
+		declares, err := mavenProjectDeclaresDependencies(root, child, opts, visited)
 		if err != nil || declares {
 			return declares, err
 		}

@@ -1,7 +1,6 @@
 package postgres
 
 import (
-	"os"
 	"strings"
 	"testing"
 
@@ -35,19 +34,81 @@ func TestReputationToFindingMapsRemoved(t *testing.T) {
 	}
 }
 
+func TestReversingLabsReputationStatusMapping(t *testing.T) {
+	cases := []struct {
+		name         string
+		status       string
+		severity     string
+		wantOK       bool
+		wantType     domain.FindingType
+		wantRiskType string
+		wantSeverity domain.Severity
+		wantTitle    string
+	}{
+		{
+			name:         "malicious",
+			status:       reputationStatusMalicious,
+			severity:     "UNKNOWN",
+			wantOK:       true,
+			wantType:     domain.FindingTypeMalicious,
+			wantRiskType: "malware",
+			wantSeverity: domain.SeverityCritical,
+			wantTitle:    "ReversingLabs: malware detected",
+		},
+		{
+			name:         "removed",
+			status:       reputationStatusRemoved,
+			severity:     "MEDIUM",
+			wantOK:       true,
+			wantType:     domain.FindingTypeSupplyChainRisk,
+			wantRiskType: "removed_package",
+			wantSeverity: domain.SeverityMedium,
+			wantTitle:    "ReversingLabs: package version was removed",
+		},
+		{
+			name:         "historical risk",
+			status:       reputationStatusRisk,
+			severity:     "HIGH",
+			wantOK:       true,
+			wantType:     domain.FindingTypeSupplyChainRisk,
+			wantRiskType: domain.RiskTypeMalwareHistory,
+			wantSeverity: domain.SeverityLow,
+			wantTitle:    "ReversingLabs: malware incident history",
+		},
+		{
+			name:   "clean",
+			status: "clean",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := reversingLabsReputationStatusMapping(tc.status, tc.severity)
+			if ok != tc.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
+			}
+			if !tc.wantOK {
+				return
+			}
+			if got.findingType != tc.wantType || got.riskType != tc.wantRiskType || got.severity != tc.wantSeverity || got.title != tc.wantTitle {
+				t.Fatalf("mapping = %+v, want type=%q risk=%q severity=%q title=%q",
+					got, tc.wantType, tc.wantRiskType, tc.wantSeverity, tc.wantTitle)
+			}
+		})
+	}
+}
+
 func TestListDuePackageReputationsUsesPartialIndexPredicate(t *testing.T) {
 	t.Parallel()
 
-	source, err := os.ReadFile("reputation.go")
-	if err != nil {
-		t.Fatalf("read reputation.go: %v", err)
-	}
-	text := string(source)
 	const duePredicate = "status IN ('pending', 'error', 'malicious', 'removed', 'risk', 'clean', 'not_found')"
-	if !strings.Contains(text, duePredicate) {
+	if packageReputationDueStatusPredicateSQL != duePredicate {
+		t.Fatalf("packageReputationDueStatusPredicateSQL = %q, want %q", packageReputationDueStatusPredicateSQL, duePredicate)
+	}
+	if !strings.Contains(listDuePackageReputationsSQL, packageReputationDueStatusPredicateSQL) {
 		t.Fatalf("ListDuePackageReputations must use idx_reputation_due predicate %q", duePredicate)
 	}
-	if strings.Contains(text, "AND status <> 'unsupported'") {
+	if strings.Contains(listDuePackageReputationsSQL, "AND status <> 'unsupported'") {
 		t.Fatal("ListDuePackageReputations must not use status <> 'unsupported'; it bypasses the partial due index predicate")
 	}
 }
@@ -109,7 +170,7 @@ func TestReputationToFindingMapsHistoricalRisk(t *testing.T) {
 	if finding.Type != domain.FindingTypeSupplyChainRisk {
 		t.Fatalf("Type = %q, want supply_chain_risk", finding.Type)
 	}
-	if finding.RiskType != "malware_history" {
+	if finding.RiskType != domain.RiskTypeMalwareHistory {
 		t.Fatalf("RiskType = %q, want malware_history", finding.RiskType)
 	}
 	if finding.Severity != domain.SeverityLow {
@@ -158,7 +219,7 @@ func TestReputationSyncFindingMapsRowsAndTombstones(t *testing.T) {
 	risk.Severity = "HIGH"
 	risk.Summary = "ReversingLabs: malware incident history"
 	got = reputationSyncFinding(risk)
-	if got.Withdrawn || got.Type != "supply_chain_risk" || got.RiskType != "malware_history" || got.Severity != "LOW" {
+	if got.Withdrawn || got.Type != "supply_chain_risk" || got.RiskType != domain.RiskTypeMalwareHistory || got.Severity != "LOW" {
 		t.Fatalf("historical risk sync row = %+v, want non-withdrawn LOW malware_history reputation row", got)
 	}
 

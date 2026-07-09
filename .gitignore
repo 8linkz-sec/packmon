@@ -4,6 +4,8 @@
 CLAUDE.md
 Phase *.md
 Todo.txt
+docs/superpowers/plans/
+docs/superpowers/specs/
 
 # Docker
 node_modules/
@@ -12,6 +14,20 @@ node_modules/
 # Secrets
 .env
 .env.*
+!.env.example
+# Local credential artifacts. Intentionally committed fixtures should live in a
+# reviewed testdata path and be force-added explicitly.
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.kdbx
+*credentials*.json
+*service-account*.json
+terraform.tfstate*
+*.tfvars
+*.tfvars.json
 
 # Binaries (root only, not cmd/ directories)
 /packmon
@@ -21,6 +37,7 @@ node_modules/
 /.build/
 /.builds/
 /dist/
+/backups/
 
 # Go
 .gotmp/

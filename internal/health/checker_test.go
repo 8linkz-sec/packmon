@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -14,9 +15,11 @@ import (
 type mockPinger struct {
 	err   error
 	delay time.Duration
+	calls atomic.Int32
 }
 
 func (m *mockPinger) Ping(ctx context.Context) error {
+	m.calls.Add(1)
 	if m.delay > 0 {
 		select {
 		case <-time.After(m.delay):
@@ -147,5 +150,56 @@ func TestReadyHandler_DatabaseTimeout(t *testing.T) {
 	}
 	if body["status"] != "unavailable" {
 		t.Fatalf("ReadyHandler status field = %q, want %q", body["status"], "unavailable")
+	}
+}
+
+func TestReadyHandlerCachesRecentDatabasePingResult(t *testing.T) {
+	pinger := &mockPinger{}
+	c := NewChecker(pinger)
+	handler := c.ReadyHandler()
+
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+		rec := httptest.NewRecorder()
+		handler(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("ReadyHandler call %d status = %d, want %d", i+1, rec.Code, http.StatusOK)
+		}
+	}
+
+	if got := pinger.calls.Load(); got != 1 {
+		t.Fatalf("database ping calls = %d, want 1 for cached readiness result", got)
+	}
+}
+
+func TestReadyHandlerShuttingDownOverridesCachedReadyResult(t *testing.T) {
+	pinger := &mockPinger{}
+	c := NewChecker(pinger)
+	handler := c.ReadyHandler()
+
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("initial ReadyHandler status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	c.SetShuttingDown()
+	req = httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	rec = httptest.NewRecorder()
+	handler(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("ReadyHandler after shutdown status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+
+	var body map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("ReadyHandler body decode error: %v", err)
+	}
+	if body["reason"] != "shutting down" {
+		t.Fatalf("ReadyHandler reason = %q, want shutting down", body["reason"])
+	}
+	if got := pinger.calls.Load(); got != 1 {
+		t.Fatalf("database ping calls after shutdown = %d, want cached ready result not re-pinged", got)
 	}
 }

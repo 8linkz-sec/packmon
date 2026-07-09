@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -21,34 +22,241 @@ import (
 	"github.com/8linkz-sec/packmon/internal/feed/reversinglabs"
 	"github.com/8linkz-sec/packmon/internal/feed/socket"
 	"github.com/8linkz-sec/packmon/internal/feed/vulncheck"
+	"github.com/8linkz-sec/packmon/internal/telemetry"
 )
 
 type backgroundServices struct {
-	logger        *slog.Logger
-	cfg           *config.Config
-	defaultFeeds  config.FeedsConfig
-	store         db.Store
-	rootCtx       context.Context
-	manager       *feed.Manager
-	shutdownWait  time.Duration
-	manualMu      sync.Mutex
-	manualCond    *sync.Cond
-	manualRunning int
-	manualClosed  bool
-	queueMu       sync.Mutex
-	queueCancel   context.CancelFunc
-	queueDone     chan error
-	queueDones    []chan error
-	retentionDone chan error
+	logger           *slog.Logger
+	cfg              *config.Config
+	runtime          *config.RuntimeSettings
+	defaultFeeds     config.FeedsConfig
+	store            db.Store
+	rootCtx          context.Context
+	manager          *feed.Manager
+	shutdownWait     time.Duration
+	manualMu         sync.Mutex
+	manualCond       *sync.Cond
+	manualRunning    int
+	manualClosed     bool
+	queueMu          sync.Mutex
+	queueCancel      context.CancelFunc
+	queueDone        chan error
+	queueDones       []chan error
+	retentionDone    chan error
+	managerStartDone chan struct{}
+	backgroundTasks  sync.WaitGroup
 
 	socketRateLimiter        *socket.RateLimiter
 	reversingLabsRateLimiter *reversinglabs.RateLimiter
 }
 
-func startBackgroundServices(ctx context.Context, cfg *config.Config, defaultFeeds config.FeedsConfig, store db.Store, logger *slog.Logger) *backgroundServices {
+type asyncWorkerRateLimiters struct {
+	socket        *socket.RateLimiter
+	reversingLabs *reversinglabs.RateLimiter
+}
+
+type asyncWorkerRuntime struct {
+	store        db.Store
+	logger       *slog.Logger
+	feeds        config.FeedsConfig
+	metrics      feed.MetricsRecorder
+	rateLimiters asyncWorkerRateLimiters
+}
+
+type asyncWorkerDescriptor struct {
+	feedName             string
+	enabled              func(config.FeedsConfig) bool
+	mode                 func(config.FeedsConfig) config.FeedMode
+	apiKey               func(config.FeedsConfig) string
+	skippedStatusMessage string
+	newWorker            func(asyncWorkerRuntime) feed.AsyncWorker
+}
+
+func (d asyncWorkerDescriptor) configured(feeds config.FeedsConfig) bool {
+	return d.enabled != nil &&
+		d.mode != nil &&
+		d.enabled(feeds) &&
+		d.mode(feeds) == config.FeedModeSelf
+}
+
+func (d asyncWorkerDescriptor) apiKeyConfigured(feeds config.FeedsConfig) bool {
+	if d.apiKey == nil {
+		return true
+	}
+	return strings.TrimSpace(d.apiKey(feeds)) != ""
+}
+
+var asyncWorkerDescriptors = []asyncWorkerDescriptor{
+	{
+		feedName:             socket.FeedName,
+		enabled:              func(feeds config.FeedsConfig) bool { return feeds.SocketEnabled },
+		mode:                 func(feeds config.FeedsConfig) config.FeedMode { return feeds.SocketMode },
+		apiKey:               func(feeds config.FeedsConfig) string { return feeds.SocketAPIKey },
+		skippedStatusMessage: "Socket.dev API key not configured",
+		newWorker: func(runtime asyncWorkerRuntime) feed.AsyncWorker {
+			opts := []socket.Option{socket.WithMetricsRecorder(runtime.metrics)}
+			if strings.TrimSpace(runtime.feeds.SocketBaseURL) != "" {
+				opts = append(opts, socket.WithBaseURL(runtime.feeds.SocketBaseURL))
+			}
+			if runtime.rateLimiters.socket != nil {
+				opts = append(opts, socket.WithRateLimiter(runtime.rateLimiters.socket))
+			}
+			opts = append(opts, socket.WithExcludedNamespaces(runtime.feeds.SocketExcludedNamespaces))
+			return socket.NewWorker(runtime.store, runtime.feeds.SocketAPIKey, runtime.logger, opts...)
+		},
+	},
+	{
+		feedName:             reversinglabs.FeedName,
+		enabled:              func(feeds config.FeedsConfig) bool { return feeds.ReversingLabsEnabled },
+		mode:                 func(feeds config.FeedsConfig) config.FeedMode { return feeds.ReversingLabsMode },
+		apiKey:               func(feeds config.FeedsConfig) string { return feeds.ReversingLabsAPIKey },
+		skippedStatusMessage: "ReversingLabs API key not configured",
+		newWorker: func(runtime asyncWorkerRuntime) feed.AsyncWorker {
+			opts := []reversinglabs.Option{
+				reversinglabs.WithMetricsRecorder(runtime.metrics),
+				reversinglabs.WithBaseURL(runtime.feeds.ReversingLabsBaseURL),
+				reversinglabs.WithLookupTTL(runtime.feeds.ReversingLabsLookupTTL),
+				reversinglabs.WithCacheRetention(runtime.feeds.ReversingLabsCacheRetention),
+				reversinglabs.WithBatchSize(runtime.feeds.ReversingLabsBatchSize),
+				reversinglabs.WithExcludedNamespaces(runtime.feeds.ReversingLabsExcludedNamespaces),
+			}
+			if runtime.rateLimiters.reversingLabs != nil {
+				opts = append(opts, reversinglabs.WithRateLimiter(runtime.rateLimiters.reversingLabs))
+			}
+			return reversinglabs.NewWorker(
+				runtime.store,
+				runtime.feeds.ReversingLabsAPIKey,
+				runtime.logger,
+				opts...,
+			)
+		},
+	},
+}
+
+var asyncWorkerDescriptorsByFeedName = func() map[string]asyncWorkerDescriptor {
+	out := make(map[string]asyncWorkerDescriptor, len(asyncWorkerDescriptors))
+	for _, descriptor := range asyncWorkerDescriptors {
+		out[config.NormalizeFeedName(descriptor.feedName)] = descriptor
+	}
+	return out
+}()
+
+func asyncWorkerDescriptorForFeed(feedName string) (asyncWorkerDescriptor, bool) {
+	descriptor, ok := asyncWorkerDescriptorsByFeedName[config.NormalizeFeedName(feedName)]
+	return descriptor, ok
+}
+
+type feedRuntime struct {
+	cfg    *config.Config
+	feeds  config.FeedsConfig
+	logger *slog.Logger
+}
+
+type feedRuntimeDescriptor struct {
+	name      string
+	phase     feed.FeedPhase
+	newSyncer func(feedRuntime) feed.FeedSyncer
+}
+
+func (d feedRuntimeDescriptor) syncer(runtime feedRuntime) feed.FeedSyncer {
+	if d.newSyncer == nil {
+		return nil
+	}
+	return d.newSyncer(runtime)
+}
+
+var feedRuntimeDescriptors = []feedRuntimeDescriptor{
+	{
+		name:  osv.FeedName,
+		phase: feed.FeedPhaseVulnerability,
+		newSyncer: func(runtime feedRuntime) feed.FeedSyncer {
+			return osv.NewSyncer(runtime.logger, osv.WithBaseURL(runtime.feeds.OSVBaseURL))
+		},
+	},
+	{
+		name:  ghsa.FeedName,
+		phase: feed.FeedPhaseVulnerability,
+		newSyncer: func(runtime feedRuntime) feed.FeedSyncer {
+			return ghsa.NewSyncerWithOptions(runtime.logger, runtime.feeds.DataDir, ghsa.WithRepoURL(runtime.feeds.GHSARepoURL))
+		},
+	},
+	{
+		name:  malicious.FeedName,
+		phase: feed.FeedPhaseVulnerability,
+		newSyncer: func(runtime feedRuntime) feed.FeedSyncer {
+			return malicious.NewSyncerWithOptions(runtime.logger, runtime.feeds.DataDir, malicious.WithRepoURL(runtime.feeds.OpenSSFRepoURL))
+		},
+	},
+	{
+		name:  "vulncheck",
+		phase: feed.FeedPhaseEnrichment,
+		newSyncer: func(runtime feedRuntime) feed.FeedSyncer {
+			opts := []vulncheck.Option{}
+			if strings.TrimSpace(runtime.feeds.VulnCheckBaseURL) != "" {
+				opts = append(opts, vulncheck.WithBaseURL(runtime.feeds.VulnCheckBaseURL))
+			}
+			return vulncheck.NewSyncer(runtime.feeds.VulnCheckAPIKey, runtime.logger, opts...)
+		},
+	},
+	{
+		name:  "cisakev",
+		phase: feed.FeedPhaseEnrichment,
+		newSyncer: func(runtime feedRuntime) feed.FeedSyncer {
+			return cisakev.NewSyncer(runtime.logger, cisakev.WithCatalogURL(runtime.feeds.CISAKEVCatalogURL))
+		},
+	},
+	{
+		name:  "epss",
+		phase: feed.FeedPhaseEnrichment,
+		newSyncer: func(runtime feedRuntime) feed.FeedSyncer {
+			return epss.NewSyncer(runtime.logger, epss.WithScoresURL(runtime.feeds.EPSSScoresURL))
+		},
+	},
+	{
+		name:  "nvd",
+		phase: feed.FeedPhaseEnrichment,
+		newSyncer: func(runtime feedRuntime) feed.FeedSyncer {
+			return newNVDSyncer(runtime.cfg, runtime.logger)
+		},
+	},
+	{
+		name:  endoflife.FeedName,
+		phase: feed.FeedPhaseEnrichment,
+		newSyncer: func(runtime feedRuntime) feed.FeedSyncer {
+			return endoflife.NewSyncer(runtime.logger, endoflife.WithBaseURL(runtime.feeds.EndOfLifeBaseURL))
+		},
+	},
+}
+
+var feedRuntimeDescriptorsByName = func() map[string]feedRuntimeDescriptor {
+	out := make(map[string]feedRuntimeDescriptor, len(feedRuntimeDescriptors))
+	for _, descriptor := range feedRuntimeDescriptors {
+		out[config.NormalizeFeedName(descriptor.name)] = descriptor
+	}
+	return out
+}()
+
+func feedRuntimeDescriptorForName(name string) (feedRuntimeDescriptor, bool) {
+	descriptor, ok := feedRuntimeDescriptorsByName[config.NormalizeFeedName(name)]
+	return descriptor, ok
+}
+
+func newFeedRuntime(cfg *config.Config, logger *slog.Logger) feedRuntime {
+	runtime := feedRuntime{
+		cfg:    cfg,
+		logger: logger,
+	}
+	if cfg != nil {
+		runtime.feeds = cfg.FeedsSnapshot()
+	}
+	return runtime
+}
+
+func startBackgroundServices(ctx context.Context, cfg *config.Config, runtime *config.RuntimeSettings, defaultFeeds config.FeedsConfig, store db.Store, logger *slog.Logger) (*backgroundServices, error) {
 	services := &backgroundServices{
 		logger:                   logger,
 		cfg:                      cfg,
+		runtime:                  runtime,
 		defaultFeeds:             defaultFeeds,
 		store:                    store,
 		rootCtx:                  ctx,
@@ -57,18 +265,53 @@ func startBackgroundServices(ctx context.Context, cfg *config.Config, defaultFee
 		reversingLabsRateLimiter: reversinglabs.NewRateLimiter(0),
 	}
 	if cfg.IsDevelopment() {
-		return services
+		return services, nil
 	}
 
 	services.manager = newFeedManager(cfg, store, logger)
-	services.manager.Start(ctx)
+	services.managerStartDone = make(chan struct{})
+	go func() {
+		defer close(services.managerStartDone)
+		services.manager.Start(ctx)
+	}()
 
 	services.queueMu.Lock()
-	services.startQueueProcessorLocked()
+	err := services.startQueueProcessorLocked()
 	services.queueMu.Unlock()
+	if err != nil {
+		return services, err
+	}
 	services.startAuditRetentionWorker()
 
-	return services
+	return services, nil
+}
+
+func (b *backgroundServices) startBackgroundTask(name string, fn func(context.Context) error) {
+	if b == nil || fn == nil {
+		return
+	}
+	ctx := b.rootCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	b.backgroundTasks.Add(1)
+	go func() {
+		defer b.backgroundTasks.Done()
+		if err := fn(ctx); err != nil {
+			if b.logger != nil && !errors.Is(err, context.Canceled) {
+				b.logger.Warn("background startup task failed",
+					slog.String("task", name),
+					slog.String("error", err.Error()),
+				)
+			}
+			return
+		}
+		if b.logger != nil {
+			b.logger.Info("background startup task completed",
+				slog.String("task", name),
+			)
+		}
+	}()
 }
 
 func (b *backgroundServices) ApplyFeedConfig(ctx context.Context, settings config.FeedSettings) error {
@@ -76,18 +319,29 @@ func (b *backgroundServices) ApplyFeedConfig(ctx context.Context, settings confi
 		return nil
 	}
 
+	feedName := config.NormalizeFeedName(settings.Name)
+	beforeSettings, hadBeforeSettings := b.cfg.FeedSettings(feedName)
+	beforeFeeds := b.cfg.FeedsSnapshot()
+	beforeRuntime := runtimeFeedConfigSignature(b.cfg, beforeFeeds, beforeSettings)
+
 	if err := b.cfg.SetFeedSettings(settings); err != nil {
 		return err
 	}
 
-	feedName := config.NormalizeFeedName(settings.Name)
+	afterSettings, hadAfterSettings := b.cfg.FeedSettings(feedName)
+	afterFeeds := b.cfg.FeedsSnapshot()
+	if hadBeforeSettings && hadAfterSettings && beforeRuntime.equal(runtimeFeedConfigSignature(b.cfg, afterFeeds, afterSettings)) {
+		return nil
+	}
+
 	if b.manager != nil {
-		if syncer := newFeedSyncer(feedName, b.cfg, b.store, b.logger); syncer != nil {
+		if descriptor, ok := feedRuntimeDescriptorForName(feedName); ok {
+			syncer := descriptor.syncer(newFeedRuntime(b.cfg, b.logger))
 			feedCfg := feed.FeedConfig{
 				Syncer:  syncer,
 				Mode:    feed.FeedMode(settings.Mode),
 				Enabled: settings.Enabled,
-				Phase:   feedPhaseForName(feedName),
+				Phase:   descriptor.phase,
 			}
 
 			interval := time.Duration(0)
@@ -98,16 +352,18 @@ func (b *backgroundServices) ApplyFeedConfig(ctx context.Context, settings confi
 		}
 	}
 
-	if feedName == "socket" || feedName == "reversinglabs" {
-		b.restartQueueProcessor()
+	if _, ok := asyncWorkerDescriptorForFeed(feedName); ok {
+		if err := b.restartQueueProcessor(); err != nil {
+			return err
+		}
 	}
 
 	return nil
 }
 
-func (b *backgroundServices) ResetFeedConfig(ctx context.Context, feedName string) error {
+func (b *backgroundServices) ResetFeedConfig(ctx context.Context, feedName string) (config.FeedSettings, bool, error) {
 	if b == nil || b.cfg == nil {
-		return nil
+		return config.FeedSettings{}, false, nil
 	}
 	defaultCfg := &config.Config{
 		Feeds:    b.defaultFeeds,
@@ -115,9 +371,9 @@ func (b *backgroundServices) ResetFeedConfig(ctx context.Context, feedName strin
 	}
 	settings, ok := defaultCfg.FeedSettings(feedName)
 	if !ok {
-		return nil
+		return config.FeedSettings{}, false, nil
 	}
-	return b.ApplyFeedConfig(ctx, settings)
+	return settings, true, b.ApplyFeedConfig(ctx, settings)
 }
 
 func (b *backgroundServices) RunManualFeedSync(ctx context.Context, feedName string) error {
@@ -173,20 +429,21 @@ func (b *backgroundServices) waitManualSyncTasks() {
 	}
 }
 
-func (b *backgroundServices) restartQueueProcessor() {
+func (b *backgroundServices) restartQueueProcessor() error {
 	if b == nil || b.cfg == nil || b.cfg.IsDevelopment() {
-		return
+		return nil
 	}
 
 	b.queueMu.Lock()
 	defer b.queueMu.Unlock()
 
 	oldDone := b.stopQueueProcessorLocked()
-	b.removeQueueDoneLocked(oldDone)
 	if oldDone != nil && !b.waitForQueueProcessor(oldDone, "restart") {
-		return
+		b.queueDone = oldDone
+		return nil
 	}
-	b.startQueueProcessorLocked()
+	b.removeQueueDoneLocked(oldDone)
+	return b.startQueueProcessorLocked()
 }
 
 func (b *backgroundServices) stopQueueProcessorLocked() chan error {
@@ -229,15 +486,15 @@ func (b *backgroundServices) waitForQueueProcessor(done chan error, reason strin
 		if b.logger != nil {
 			b.logger.Warn("queue processor did not stop before deadline; replacement not started",
 				"reason", reason,
-				"timeout", wait.String())
+				slog.Duration("timeout", wait))
 		}
 		return false
 	}
 }
 
-func (b *backgroundServices) startQueueProcessorLocked() {
+func (b *backgroundServices) startQueueProcessorLocked() error {
 	if b.rootCtx == nil || b.rootCtx.Err() != nil {
-		return
+		return nil
 	}
 
 	if b.socketRateLimiter == nil {
@@ -246,10 +503,13 @@ func (b *backgroundServices) startQueueProcessorLocked() {
 	if b.reversingLabsRateLimiter == nil {
 		b.reversingLabsRateLimiter = reversinglabs.NewRateLimiter(0)
 	}
-	processor := newQueueProcessorWithRateLimiters(b.cfg, b.store, b.logger, b.socketRateLimiter, b.reversingLabsRateLimiter)
+	processor, err := newQueueProcessorWithRateLimitersAndRecorder(b.cfg, b.store, b.logger, b.socketRateLimiter, b.reversingLabsRateLimiter, b.recordQueueWorkerSkippedAsync)
+	if err != nil {
+		return err
+	}
 	if processor == nil {
 		b.queueDone = nil
-		return
+		return nil
 	}
 
 	queueCtx, cancel := context.WithCancel(b.rootCtx)
@@ -260,6 +520,7 @@ func (b *backgroundServices) startQueueProcessorLocked() {
 	go func() {
 		done <- processor.Run(queueCtx)
 	}()
+	return nil
 }
 
 // Wait blocks until all background services have stopped or the configured
@@ -274,51 +535,11 @@ func (b *backgroundServices) Wait() bool {
 	start := time.Now()
 	done := make(chan struct{})
 	go func() {
-		if b.manager != nil {
-			if b.logger != nil {
-				b.logger.Info("shutdown: waiting for feed manager")
-			}
-			b.manager.Wait()
-			if b.logger != nil {
-				b.logger.Info("shutdown: feed manager stopped", "elapsed", time.Since(start).String())
-			}
-		}
-		b.queueMu.Lock()
-		b.stopQueueProcessorLocked()
-		queueDones := append([]chan error(nil), b.queueDones...)
-		b.queueMu.Unlock()
-
-		for _, queueDone := range queueDones {
-			if b.logger != nil {
-				b.logger.Info("shutdown: waiting for queue processor")
-			}
-			err := <-queueDone
-			if err != nil && !errors.Is(err, context.Canceled) && b.logger != nil {
-				b.logger.Error("queue processor stopped with error", "error", err)
-			}
-			if b.logger != nil {
-				b.logger.Info("shutdown: queue processor stopped", "elapsed", time.Since(start).String())
-			}
-		}
-		if b.retentionDone != nil {
-			if b.logger != nil {
-				b.logger.Info("shutdown: waiting for audit retention worker")
-			}
-			err := <-b.retentionDone
-			if err != nil && !errors.Is(err, context.Canceled) && b.logger != nil {
-				b.logger.Error("audit retention worker stopped with error", "error", err)
-			}
-			if b.logger != nil {
-				b.logger.Info("shutdown: audit retention worker stopped", "elapsed", time.Since(start).String())
-			}
-		}
-		if b.logger != nil {
-			b.logger.Info("shutdown: waiting for manual feed syncs")
-		}
-		b.waitManualSyncTasks()
-		if b.logger != nil {
-			b.logger.Info("shutdown: manual feed syncs stopped", "elapsed", time.Since(start).String())
-		}
+		b.waitFeedManager(start)
+		b.stopAndWaitQueueProcessors(start)
+		b.waitRetentionWorker(start)
+		b.waitManualSyncs(start)
+		b.waitBackgroundStartupTasks(start)
 		close(done)
 	}()
 
@@ -329,127 +550,200 @@ func (b *backgroundServices) Wait() bool {
 	select {
 	case <-done:
 		if b.logger != nil {
-			b.logger.Info("shutdown: all background services stopped", "elapsed", time.Since(start).String())
+			b.logger.Info("shutdown: all background services stopped", slog.Duration("elapsed", time.Since(start)))
 		}
 		return true
 	case <-time.After(wait):
 		if b.logger != nil {
 			b.logger.Warn("shutdown: background services did not stop before deadline, abandoning",
-				"timeout", wait.String(),
-				"elapsed", time.Since(start).String())
+				slog.Duration("timeout", wait),
+				slog.Duration("elapsed", time.Since(start)))
 		}
 		return false
 	}
 }
 
+func (b *backgroundServices) waitFeedManager(start time.Time) {
+	if b.managerStartDone != nil {
+		if b.logger != nil {
+			b.logger.Info("shutdown: waiting for feed manager startup")
+		}
+		<-b.managerStartDone
+	}
+	if b.manager != nil {
+		if b.logger != nil {
+			b.logger.Info("shutdown: waiting for feed manager")
+		}
+		b.manager.Wait()
+		if b.logger != nil {
+			b.logger.Info("shutdown: feed manager stopped", slog.Duration("elapsed", time.Since(start)))
+		}
+	}
+}
+
+func (b *backgroundServices) stopAndWaitQueueProcessors(start time.Time) {
+	b.queueMu.Lock()
+	b.stopQueueProcessorLocked()
+	queueDones := append([]chan error(nil), b.queueDones...)
+	b.queueMu.Unlock()
+
+	for _, queueDone := range queueDones {
+		if b.logger != nil {
+			b.logger.Info("shutdown: waiting for queue processor")
+		}
+		err := <-queueDone
+		if err != nil && !errors.Is(err, context.Canceled) && b.logger != nil {
+			b.logger.Error("queue processor stopped with error", "error", err)
+		}
+		if b.logger != nil {
+			b.logger.Info("shutdown: queue processor stopped", slog.Duration("elapsed", time.Since(start)))
+		}
+	}
+}
+
+func (b *backgroundServices) waitRetentionWorker(start time.Time) {
+	if b.retentionDone != nil {
+		if b.logger != nil {
+			b.logger.Info("shutdown: waiting for audit retention worker")
+		}
+		err := <-b.retentionDone
+		if err != nil && !errors.Is(err, context.Canceled) && b.logger != nil {
+			b.logger.Error("audit retention worker stopped with error", "error", err)
+		}
+		if b.logger != nil {
+			b.logger.Info("shutdown: audit retention worker stopped", slog.Duration("elapsed", time.Since(start)))
+		}
+	}
+}
+
+func (b *backgroundServices) waitManualSyncs(start time.Time) {
+	if b.logger != nil {
+		b.logger.Info("shutdown: waiting for manual feed syncs")
+	}
+	b.waitManualSyncTasks()
+	if b.logger != nil {
+		b.logger.Info("shutdown: manual feed syncs stopped", slog.Duration("elapsed", time.Since(start)))
+	}
+}
+
+func (b *backgroundServices) waitBackgroundStartupTasks(start time.Time) {
+	if b.logger != nil {
+		b.logger.Info("shutdown: waiting for background startup tasks")
+	}
+	b.backgroundTasks.Wait()
+	if b.logger != nil {
+		b.logger.Info("shutdown: background startup tasks stopped", slog.Duration("elapsed", time.Since(start)))
+	}
+}
+
 func newFeedManager(cfg *config.Config, store db.Store, logger *slog.Logger) *feed.Manager {
-	manager := feed.NewManager(store, logger.With("component", "feed_manager"), cfg.FeedSync.Interval)
+	manager := feed.NewManager(store, logger.With("component", "feed_manager"), cfg.FeedSync.Interval, feed.WithMetricsRecorder(telemetry.Default()))
 	manager.SetSyncOnStartup(cfg.FeedSync.OnStartup)
 
-	registerFeedSyncer(manager, cfg, "osv", newFeedSyncer("osv", cfg, store, logger))
-	registerFeedSyncer(manager, cfg, "ghsa", newFeedSyncer("ghsa", cfg, store, logger))
-	registerFeedSyncer(manager, cfg, "openssf", newFeedSyncer("openssf", cfg, store, logger))
-	registerFeedSyncer(manager, cfg, "vulncheck", newFeedSyncer("vulncheck", cfg, store, logger))
-	registerFeedSyncer(manager, cfg, "cisakev", newFeedSyncer("cisakev", cfg, store, logger))
-	registerFeedSyncer(manager, cfg, "epss", newFeedSyncer("epss", cfg, store, logger))
-	registerFeedSyncer(manager, cfg, "nvd", newFeedSyncer("nvd", cfg, store, logger))
-	registerFeedSyncer(manager, cfg, "endoflife", newFeedSyncer("endoflife", cfg, store, logger))
+	for _, descriptor := range feedRuntimeDescriptors {
+		registerFeedSyncer(manager, cfg, logger, descriptor)
+	}
 
 	return manager
 }
 
-func newFeedSyncer(name string, cfg *config.Config, store db.Store, logger *slog.Logger) feed.FeedSyncer {
-	feeds := cfg.FeedsSnapshot()
-	switch config.NormalizeFeedName(name) {
-	case "osv":
-		return osv.NewSyncer(store, logger)
-	case "ghsa":
-		return ghsa.NewSyncer(store, logger, feeds.DataDir)
-	case "openssf":
-		return malicious.NewSyncer(store, logger, feeds.DataDir)
-	case "vulncheck":
-		return vulncheck.NewSyncer(feeds.VulnCheckAPIKey, logger)
-	case "cisakev":
-		return cisakev.NewSyncer(logger)
-	case "epss":
-		return epss.NewSyncer(logger)
-	case "nvd":
-		return newNVDSyncer(cfg, logger)
-	case "endoflife":
-		return endoflife.NewSyncer(logger, endoflife.WithBaseURL(feeds.EndOfLifeBaseURL))
-	default:
+func newFeedSyncer(name string, cfg *config.Config, logger *slog.Logger) feed.FeedSyncer {
+	descriptor, ok := feedRuntimeDescriptorForName(name)
+	if !ok {
 		return nil
 	}
+	return descriptor.syncer(newFeedRuntime(cfg, logger))
 }
 
-func newQueueProcessor(cfg *config.Config, store db.Store, logger *slog.Logger) *feed.QueueProcessor {
-	return newQueueProcessorWithRateLimiters(cfg, store, logger, nil, nil)
+func newQueueProcessorWithRateLimiters(cfg *config.Config, store db.Store, logger *slog.Logger, socketRateLimiter *socket.RateLimiter, reversingLabsRateLimiter *reversinglabs.RateLimiter) (*feed.QueueProcessor, error) {
+	return newQueueProcessorWithRateLimitersAndRecorder(cfg, store, logger, socketRateLimiter, reversingLabsRateLimiter, func(feedName, message string) error {
+		return recordQueueWorkerSkipped(context.Background(), store, logger, feedName, message)
+	})
 }
 
-func newQueueProcessorWithRateLimiters(cfg *config.Config, store db.Store, logger *slog.Logger, socketRateLimiter *socket.RateLimiter, reversingLabsRateLimiter *reversinglabs.RateLimiter) *feed.QueueProcessor {
-	feeds := cfg.FeedsSnapshot()
-	workers := make([]feed.AsyncWorker, 0, 2)
-	if feeds.SocketEnabled && feeds.SocketMode == config.FeedModeSelf {
-		if strings.TrimSpace(feeds.SocketAPIKey) != "" {
-			var opts []socket.Option
-			if socketRateLimiter != nil {
-				opts = append(opts, socket.WithRateLimiter(socketRateLimiter))
-			}
-			workers = append(workers, socket.NewWorker(store, feeds.SocketAPIKey, logger, opts...))
-		} else {
-			recordQueueWorkerSkipped(store, logger, socket.FeedName, "Socket.dev API key not configured")
+func newQueueProcessorWithRateLimitersAndRecorder(cfg *config.Config, store db.Store, logger *slog.Logger, socketRateLimiter *socket.RateLimiter, reversingLabsRateLimiter *reversinglabs.RateLimiter, recordSkipped func(feedName, message string) error) (*feed.QueueProcessor, error) {
+	if recordSkipped == nil {
+		recordSkipped = func(feedName, message string) error {
+			return recordQueueWorkerSkipped(context.Background(), store, logger, feedName, message)
 		}
 	}
-	if feeds.ReversingLabsEnabled && feeds.ReversingLabsMode == config.FeedModeSelf {
-		if strings.TrimSpace(feeds.ReversingLabsAPIKey) != "" {
-			opts := []reversinglabs.Option{
-				reversinglabs.WithBaseURL(feeds.ReversingLabsBaseURL),
-				reversinglabs.WithLookupTTL(feeds.ReversingLabsLookupTTL),
-				reversinglabs.WithCacheRetention(feeds.ReversingLabsCacheRetention),
-				reversinglabs.WithBatchSize(feeds.ReversingLabsBatchSize),
-				reversinglabs.WithExcludedNamespaces(feeds.ReversingLabsExcludedNamespaces),
-			}
-			if reversingLabsRateLimiter != nil {
-				opts = append(opts, reversinglabs.WithRateLimiter(reversingLabsRateLimiter))
-			}
-			workers = append(workers, reversinglabs.NewWorker(
-				store,
-				feeds.ReversingLabsAPIKey,
-				logger,
-				opts...,
-			))
-		} else {
-			recordQueueWorkerSkipped(store, logger, reversinglabs.FeedName, "ReversingLabs API key not configured")
+	feeds := cfg.FeedsSnapshot()
+	metrics := telemetry.Default()
+	runtime := asyncWorkerRuntime{
+		store:   store,
+		logger:  logger,
+		feeds:   feeds,
+		metrics: metrics,
+		rateLimiters: asyncWorkerRateLimiters{
+			socket:        socketRateLimiter,
+			reversingLabs: reversingLabsRateLimiter,
+		},
+	}
+	workers := make([]feed.AsyncWorker, 0, len(asyncWorkerDescriptors))
+	for _, descriptor := range asyncWorkerDescriptors {
+		if !descriptor.configured(feeds) {
+			continue
 		}
+		if !descriptor.apiKeyConfigured(feeds) {
+			if err := recordSkipped(descriptor.feedName, descriptor.skippedStatusMessage); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		workers = append(workers, descriptor.newWorker(runtime))
 	}
 	if len(workers) == 0 {
-		return nil
+		return nil, nil
 	}
-	return feed.NewQueueProcessor(store, logger, workers)
+	return feed.NewQueueProcessor(store, logger, workers, feed.WithMetricsRecorder(metrics)), nil
 }
 
-func recordQueueWorkerSkipped(store db.Store, logger *slog.Logger, feedName, message string) {
+func (b *backgroundServices) recordQueueWorkerSkippedAsync(feedName, message string) error {
+	b.startBackgroundTask("queue worker skipped status "+feedName, func(ctx context.Context) error {
+		return recordQueueWorkerSkipped(ctx, b.store, b.logger, feedName, message)
+	})
+	return nil
+}
+
+func recordQueueWorkerSkipped(ctx context.Context, store db.Store, logger *slog.Logger, feedName, message string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	now := time.Now().UTC()
 	status := &db.FeedSyncStatus{
 		FeedName:       feedName,
-		LastSyncStatus: "skipped",
+		LastSyncStatus: db.FeedSyncStatusSkipped,
 		LastError:      message,
 		UpdatedAt:      now,
 	}
-	if current, err := feed.GetFeedSyncStatusBounded(store, feedName); err != nil {
-		logger.Warn("failed to load current queue worker feed status",
-			slog.String("feed", feedName),
-			slog.String("error", err.Error()),
-		)
+	readCtx, readCancel := context.WithTimeout(ctx, feed.FeedStatusReadTimeout)
+	current, err := store.GetFeedSyncStatus(readCtx, feedName)
+	readCancel()
+	if err != nil {
+		if logger != nil {
+			logger.Warn("failed to load current queue worker feed status",
+				slog.String("feed", feedName),
+				slog.String("error", err.Error()),
+			)
+		}
+		return err
 	} else {
 		feed.PreserveFeedStatusData(status, current)
 	}
-	if err := feed.UpsertFeedSyncStatusBounded(store, status); err != nil {
-		logger.Warn("failed to record queue worker skipped status",
-			slog.String("feed", feedName),
-			slog.String("error", err.Error()),
-		)
+
+	writeCtx, writeCancel := context.WithTimeout(ctx, feed.FeedStatusWriteTimeout)
+	err = store.UpsertFeedSyncStatus(writeCtx, status)
+	writeCancel()
+	if err != nil {
+		if logger != nil {
+			logger.Warn("failed to record queue worker skipped status",
+				slog.String("feed", feedName),
+				slog.String("error", err.Error()),
+			)
+		}
+		return err
 	}
+	return nil
 }
 
 func newNVDSyncer(cfg *config.Config, logger *slog.Logger) *nvd.Syncer {
@@ -458,42 +752,94 @@ func newNVDSyncer(cfg *config.Config, logger *slog.Logger) *nvd.Syncer {
 	if feeds.NVDAPIKey != "" {
 		opts = append(opts, nvd.WithAPIKey(feeds.NVDAPIKey))
 	}
+	opts = append(opts, nvd.WithAPIURL(feeds.NVDAPIURL))
 	return nvd.NewSyncer(logger, opts...)
 }
 
-// enrichmentFeeds are feeds that enrich existing vulnerability data
-// and must wait for Phase 1 (vulnerability data) to complete first.
-var enrichmentFeeds = map[string]bool{
-	"vulncheck": true,
-	"cisakev":   true,
-	"epss":      true,
-	"nvd":       true,
-	"endoflife": true,
-}
-
 func feedPhaseForName(name string) feed.FeedPhase {
-	if enrichmentFeeds[config.NormalizeFeedName(name)] {
-		return feed.FeedPhaseEnrichment
+	descriptor, ok := feedRuntimeDescriptorForName(name)
+	if !ok {
+		return feed.FeedPhaseVulnerability
 	}
-	return feed.FeedPhaseVulnerability
+	return descriptor.phase
 }
 
-func registerFeedSyncer(manager *feed.Manager, cfg *config.Config, name string, syncer feed.FeedSyncer) {
+func registerFeedSyncer(manager *feed.Manager, cfg *config.Config, logger *slog.Logger, descriptor feedRuntimeDescriptor) {
+	name := descriptor.name
 	settings, ok := cfg.FeedSettings(name)
 	if !ok {
 		return
 	}
 
+	syncer := descriptor.syncer(newFeedRuntime(cfg, logger))
 	feedCfg := feed.FeedConfig{
 		Syncer:  syncer,
 		Mode:    feed.FeedMode(settings.Mode),
 		Enabled: settings.Enabled,
-		Phase:   feedPhaseForName(name),
+		Phase:   descriptor.phase,
 	}
 
 	if interval := cfg.EffectiveFeedInterval(name); interval > 0 && settings.SupportsSyncInterval {
-		manager.RegisterWithInterval(feedCfg, interval)
+		if err := manager.RegisterWithInterval(feedCfg, interval); err != nil {
+			logger.Error("failed to register feed syncer", "feed", name, "error", err)
+		}
 		return
 	}
-	manager.Register(feedCfg)
+	if err := manager.Register(feedCfg); err != nil {
+		logger.Error("failed to register feed syncer", "feed", name, "error", err)
+	}
+}
+
+type runtimeFeedConfig struct {
+	name                        string
+	enabled                     bool
+	mode                        config.FeedMode
+	syncInterval                time.Duration
+	apiKey                      string
+	reversingLabsBaseURL        string
+	reversingLabsLookupTTL      time.Duration
+	reversingLabsBatchSize      int
+	reversingLabsCacheRetention time.Duration
+	reversingLabsExcludedNS     []string
+	socketExcludedNS            []string
+}
+
+func runtimeFeedConfigSignature(cfg *config.Config, feeds config.FeedsConfig, settings config.FeedSettings) runtimeFeedConfig {
+	signature := runtimeFeedConfig{
+		name:    config.NormalizeFeedName(settings.Name),
+		enabled: settings.Enabled,
+		mode:    settings.Mode,
+		apiKey:  strings.TrimSpace(settings.APIKey),
+	}
+	if settings.SupportsSyncInterval {
+		signature.syncInterval = settings.SyncInterval
+		if signature.syncInterval <= 0 && cfg != nil {
+			signature.syncInterval = cfg.FeedSync.Interval
+		}
+	}
+	switch signature.name {
+	case "socket":
+		signature.socketExcludedNS = append([]string(nil), feeds.SocketExcludedNamespaces...)
+	case "reversinglabs":
+		signature.reversingLabsBaseURL = strings.TrimSpace(feeds.ReversingLabsBaseURL)
+		signature.reversingLabsLookupTTL = feeds.ReversingLabsLookupTTL
+		signature.reversingLabsBatchSize = feeds.ReversingLabsBatchSize
+		signature.reversingLabsCacheRetention = feeds.ReversingLabsCacheRetention
+		signature.reversingLabsExcludedNS = append([]string(nil), feeds.ReversingLabsExcludedNamespaces...)
+	}
+	return signature
+}
+
+func (c runtimeFeedConfig) equal(other runtimeFeedConfig) bool {
+	return c.name == other.name &&
+		c.enabled == other.enabled &&
+		c.mode == other.mode &&
+		c.syncInterval == other.syncInterval &&
+		c.apiKey == other.apiKey &&
+		c.reversingLabsBaseURL == other.reversingLabsBaseURL &&
+		c.reversingLabsLookupTTL == other.reversingLabsLookupTTL &&
+		c.reversingLabsBatchSize == other.reversingLabsBatchSize &&
+		c.reversingLabsCacheRetention == other.reversingLabsCacheRetention &&
+		slices.Equal(c.reversingLabsExcludedNS, other.reversingLabsExcludedNS) &&
+		slices.Equal(c.socketExcludedNS, other.socketExcludedNS)
 }

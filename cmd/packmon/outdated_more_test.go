@@ -12,9 +12,11 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/8linkz-sec/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/scanner"
 )
 
 func TestOutdatedDoesNotDependOnListAllPrivatePackageHelpers(t *testing.T) {
@@ -48,12 +50,206 @@ func TestOutdatedDoesNotDependOnListAllPrivatePackageHelpers(t *testing.T) {
 	}
 }
 
-func TestOutdatedHelperBranches(t *testing.T) {
+func TestOutdatedKeepsSharedUpdateLookupOutOfCommandFlow(t *testing.T) {
+	t.Parallel()
+
+	file, err := parser.ParseFile(token.NewFileSet(), "outdated.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse outdated.go: %v", err)
+	}
+
+	forbiddenFunctions := map[string]struct{}{
+		"fetchLatestVersionFromRegistry": {},
+		"publicLatestLookupAllowed":      {},
+	}
+	var foundFunctions []string
+	var ecosystemCaseDispatches int
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.FuncDecl:
+			if node.Name != nil {
+				if _, forbidden := forbiddenFunctions[node.Name.Name]; forbidden {
+					foundFunctions = append(foundFunctions, node.Name.Name)
+				}
+			}
+		case *ast.CaseClause:
+			for _, expr := range node.List {
+				if selector, ok := expr.(*ast.SelectorExpr); ok {
+					if ident, ok := selector.X.(*ast.Ident); ok && ident.Name == "domain" && strings.HasPrefix(selector.Sel.Name, "Ecosystem") {
+						ecosystemCaseDispatches++
+					}
+				}
+			}
+		}
+		return true
+	})
+	if len(foundFunctions) > 0 {
+		t.Fatalf("outdated.go still owns shared update lookup functions: %v", foundFunctions)
+	}
+	if ecosystemCaseDispatches > 0 {
+		t.Fatalf("outdated.go still dispatches ecosystem-specific update lookup policy; found %d domain.Ecosystem case clauses", ecosystemCaseDispatches)
+	}
+}
+
+func TestCollectOutdatedPackagesDeduplicatesAndCopiesMetadata(t *testing.T) {
+	t.Parallel()
+
+	collection := &scanner.PackageCollection{
+		Entries: []scanner.CollectedPackage{
+			{
+				Package: domain.Package{
+					Name:       "zeta",
+					Version:    "1.0.0",
+					Ecosystem:  domain.EcosystemNPM,
+					Direct:     true,
+					Via:        []string{"root"},
+					Parents:    []domain.PackageParent{{Name: "root", Version: "1.0.0", Ecosystem: domain.EcosystemNPM}},
+					SourceRefs: []string{"https://registry.npmjs.org/zeta/-/zeta-1.0.0.tgz"},
+				},
+				SourceFile: "package-lock.json",
+				SourceType: "lockfile",
+			},
+			{
+				Package: domain.Package{
+					Name:      "zeta",
+					Version:   "1.0.0",
+					Ecosystem: domain.EcosystemNPM,
+				},
+				SourceFile: "bom.cdx.json",
+				SourceType: "sbom",
+			},
+			{
+				Package: domain.Package{
+					Name:      "alpha",
+					Version:   "0.9.0",
+					Ecosystem: domain.EcosystemGo,
+					Indirect:  true,
+				},
+				SourceFile: "go.sum",
+				SourceType: "lockfile",
+			},
+		},
+		LockFiles: 1,
+		SBOMFiles: 1,
+	}
+
+	packages, err := collectOutdatedPackages(collection)
+	if err != nil {
+		t.Fatalf("collectOutdatedPackages() error = %v", err)
+	}
+	if len(packages) != 2 {
+		t.Fatalf("packages = %d, want 2: %+v", len(packages), packages)
+	}
+	if packages[0].Name != "zeta" || packages[0].LockFile != "package-lock.json" || packages[0].SourceType != "lockfile" {
+		t.Fatalf("first package = %+v, want zeta from lockfile", packages[0])
+	}
+	if packages[1].Name != "alpha" || packages[1].LockFile != "go.sum" {
+		t.Fatalf("second package = %+v, want alpha from go.sum", packages[1])
+	}
+
+	collection.Entries[0].Package.Via[0] = "mutated"
+	collection.Entries[0].Package.Parents[0].Name = "mutated"
+	collection.Entries[0].Package.SourceRefs[0] = "https://private.example/zeta.tgz"
+	if packages[0].Via[0] != "root" || packages[0].Parents[0].Name != "root" || !strings.Contains(packages[0].SourceRefs[0], "registry.npmjs.org") {
+		t.Fatalf("collectOutdatedPackages did not copy package metadata: %+v", packages[0])
+	}
+}
+
+func TestBuildInitialOutdatedReportCarriesInventoryCounts(t *testing.T) {
+	t.Parallel()
+
+	report := buildInitialOutdatedReport("repo", &scanner.PackageCollection{
+		LockFiles: 2,
+		SBOMFiles: 1,
+	})
+
+	if report.Target != "repo" {
+		t.Fatalf("Target = %q, want repo", report.Target)
+	}
+	if report.LockFiles != 2 || report.SBOMFiles != 1 {
+		t.Fatalf("source counts = %d lockfiles, %d SBOMs; want 2, 1", report.LockFiles, report.SBOMFiles)
+	}
+	if report.PackageWord != "packages" {
+		t.Fatalf("PackageWord = %q, want packages", report.PackageWord)
+	}
+	if report.ScannedAt == "" {
+		t.Fatal("ScannedAt is empty")
+	}
+}
+
+func TestResolveOutdatedStatusesUsesConfiguredLatestRegistryFallback(t *testing.T) {
+	t.Parallel()
+
+	var called atomic.Bool
+	statuses := resolveOutdatedStatuses([]outdatedPackage{{
+		Name:      "private",
+		Version:   "1.0.0",
+		Ecosystem: domain.EcosystemHex,
+	}}, outdatedOptions{
+		Context: context.Background(),
+		Timeout: 1,
+		LatestRegistry: latestRegistryConfig{
+			HexAPIBaseURL:           "https://hex-mirror.example/api",
+			HexAPIBaseURLConfigured: true,
+		},
+		resolver: packageUpdateResolver{
+			fetchLatest: func(context.Context, domain.Ecosystem, string) string {
+				called.Store(true)
+				return "1.2.0"
+			},
+		},
+	})
+
+	if !called.Load() {
+		t.Fatal("resolveOutdatedStatuses did not use configured latest registry fallback")
+	}
+	if len(statuses) != 1 || statuses[0].Latest != "1.2.0" || statuses[0].Update != "yes" {
+		t.Fatalf("statuses = %+v, want one outdated status", statuses)
+	}
+}
+
+func TestApplyOutdatedStatusesToReportCountsAndSorts(t *testing.T) {
+	t.Parallel()
+
+	packages := []outdatedPackage{
+		{Name: "zeta", Version: "1.0.0", Ecosystem: domain.EcosystemNPM, Direct: true, LockFile: "package-lock.json"},
+		{Name: "unknown", Version: "1.0.0", Ecosystem: domain.EcosystemNPM, LockFile: "package-lock.json"},
+		{Name: "alpha", Version: "1.0.0", Ecosystem: domain.EcosystemNPM, Dev: true, Indirect: true, Peer: true, Via: []string{"zeta"}, LockFile: "package-lock.json"},
+		{Name: "current", Version: "2.0.0", Ecosystem: domain.EcosystemGo, LockFile: "go.sum"},
+	}
+	statuses := []packageLatestStatus{
+		{Latest: "2.0.0", Update: "yes"},
+		{Latest: "unknown", Update: "-", Unknown: true},
+		{Latest: "1.1.0", Update: "yes"},
+		{Latest: "2.0.0", Update: "-"},
+	}
+
+	report := applyOutdatedStatusesToReport(outdatedReport{Target: "repo", PackageWord: "packages"}, packages, statuses)
+
+	if report.Total != 4 || report.Unknown != 1 || report.UpToDate != 1 {
+		t.Fatalf("summary = total %d, unknown %d, up-to-date %d; want 4, 1, 1", report.Total, report.Unknown, report.UpToDate)
+	}
+	if len(report.Outdated) != 2 {
+		t.Fatalf("Outdated rows = %d, want 2: %+v", len(report.Outdated), report.Outdated)
+	}
+	if report.Outdated[0].Name != "alpha" || report.Outdated[1].Name != "zeta" {
+		t.Fatalf("Outdated rows sorted = %+v, want alpha then zeta", report.Outdated)
+	}
+	if row := report.Outdated[0]; row.Scope != "dev" || row.Relation != "transitive" || row.Via != "zeta" || row.Flags != "peer" {
+		t.Fatalf("alpha row metadata = %+v", row)
+	}
+}
+
+func TestFinishOutdatedReportAllowsNoOutput(t *testing.T) {
 	t.Parallel()
 
 	if err := finishOutdatedReport(outdatedOptions{}, outdatedReport{}); err != nil {
 		t.Fatalf("finishOutdatedReport(no output) = %v", err)
 	}
+}
+
+func TestFinishOutdatedReportReturnsHTMLOutputPreparationErrors(t *testing.T) {
+	t.Parallel()
 
 	parentFile := filepath.Join(t.TempDir(), "not-a-dir")
 	if err := os.WriteFile(parentFile, []byte("x"), 0o600); err != nil {
@@ -63,6 +259,10 @@ func TestOutdatedHelperBranches(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "prepare HTML output") {
 		t.Fatalf("finishOutdatedReport(parent file) = %v, want prepare HTML error", err)
 	}
+}
+
+func TestSwiftPMGitRemoteNormalizesGitHubShorthandAndRejectsUnsafeRemotes(t *testing.T) {
+	t.Parallel()
 
 	if got := swiftPMGitRemote(""); got != "" {
 		t.Fatalf("swiftPMGitRemote(empty) = %q, want empty", got)
@@ -82,6 +282,11 @@ func TestOutdatedHelperBranches(t *testing.T) {
 			t.Fatalf("swiftPMGitRemote(%q) = %q, want empty unsafe remote", raw, got)
 		}
 	}
+}
+
+func TestOutdatedFetchLatestRejectsMalformedPackageInputs(t *testing.T) {
+	t.Parallel()
+
 	if got := fetchGitHubActionLatest(context.Background(), "bad"); got != "" {
 		t.Fatalf("fetchGitHubActionLatest(bad) = %q, want empty", got)
 	}
@@ -91,9 +296,19 @@ func TestOutdatedHelperBranches(t *testing.T) {
 	if got := fetchGitLatest(context.Background(), "not-a-url", domain.EcosystemSwiftPM); got != "" {
 		t.Fatalf("fetchGitLatest(invalid remote) = %q, want empty", got)
 	}
+}
+
+func TestSelectLatestVersionIgnoresNonVersionStrings(t *testing.T) {
+	t.Parallel()
+
 	if got := selectLatestVersion([]string{"not-a-version", "v1.2.0", "1.10.0"}, domain.EcosystemNPM); got != "1.10.0" {
 		t.Fatalf("selectLatestVersion() = %q, want 1.10.0", got)
 	}
+}
+
+func TestIsVersionLikeAcceptsVersionPrefixesOnly(t *testing.T) {
+	t.Parallel()
+
 	for _, raw := range []string{"", "v", "release"} {
 		if isVersionLike(raw) {
 			t.Fatalf("isVersionLike(%q) = true, want false", raw)
@@ -130,6 +345,52 @@ func TestSwiftPMLatestRejectsNonCanonicalPackageIdentities(t *testing.T) {
 	} {
 		if got := resolver.fetchSwiftPMLatest(context.Background(), raw); got != "" {
 			t.Fatalf("fetchSwiftPMLatest(%q) = %q, want empty", raw, got)
+		}
+	}
+}
+
+func TestSwiftPMLatestUsesConfiguredAllowedGitHosts(t *testing.T) {
+	var remotes []string
+	resolver := packageUpdateResolver{
+		latestRegistry: latestRegistryConfig{
+			SwiftPMGitAllowedHosts: []string{"git.example.com"},
+		},
+		gitRemoteTags: func(_ context.Context, remote string) ([]string, error) {
+			remotes = append(remotes, remote)
+			return []string{"1.0.0", "2.0.0"}, nil
+		},
+	}
+
+	if got := resolver.fetchSwiftPMLatest(context.Background(), "git.example.com/acme/private-kit"); got != "2.0.0" {
+		t.Fatalf("fetchSwiftPMLatest(configured host) = %q, want 2.0.0", got)
+	}
+	if strings.Join(remotes, "\n") != "https://git.example.com/acme/private-kit.git" {
+		t.Fatalf("SwiftPM git remotes = %v, want configured HTTPS remote", remotes)
+	}
+
+	blocked := packageUpdateResolver{
+		gitRemoteTags: func(_ context.Context, remote string) ([]string, error) {
+			t.Fatalf("unexpected git remote without configured host: %s", remote)
+			return nil, nil
+		},
+	}
+	if got := blocked.fetchSwiftPMLatest(context.Background(), "git.example.com/acme/private-kit"); got != "" {
+		t.Fatalf("fetchSwiftPMLatest(unconfigured host) = %q, want empty", got)
+	}
+}
+
+func TestNormalizeSwiftPMGitAllowedHostsRejectsUnsafeHosts(t *testing.T) {
+	for _, raw := range []string{
+		"http://git.example.com",
+		"git@example.com",
+		"git.example.com/org",
+		"git.example.com:8443",
+		"127.0.0.1",
+		"localhost",
+		"-git.example.com",
+	} {
+		if _, err := normalizeSwiftPMGitAllowedHosts("registries.swiftpm_git_allowed_hosts", []string{raw}); err == nil {
+			t.Fatalf("normalizeSwiftPMGitAllowedHosts(%q) error = nil, want rejection", raw)
 		}
 	}
 }

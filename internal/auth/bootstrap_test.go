@@ -5,24 +5,24 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
 	"strings"
 	"testing"
-
-	"github.com/8linkz-sec/packmon/internal/db"
 )
 
 type bootstrapStoreStub struct {
-	db.Store
-	auth      *db.AdminAuth
-	getErr    error
-	upsertErr error
-	auditErr  error
-	upserts   int
-	audits    int
-	lastAudit *db.AdminAuditEntry
+	auth           *AdminBootstrapAuth
+	getErr         error
+	upsertErr      error
+	auditErr       error
+	upserts        int
+	legacyUpserts  int
+	auditedUpserts int
+	audits         int
+	lastAudit      *AdminBootstrapAuditEntry
 }
 
-func (s *bootstrapStoreStub) GetAdminAuth(context.Context) (*db.AdminAuth, error) {
+func (s *bootstrapStoreStub) GetAdminBootstrapAuth(context.Context) (*AdminBootstrapAuth, error) {
 	if s.getErr != nil {
 		return nil, s.getErr
 	}
@@ -34,11 +34,12 @@ func (s *bootstrapStoreStub) UpsertAdminAuth(_ context.Context, passwordHash str
 		return s.upsertErr
 	}
 	s.upserts++
-	s.auth = &db.AdminAuth{PasswordHash: passwordHash, PasswordIsBootstrap: isBootstrap}
+	s.legacyUpserts++
+	s.auth = &AdminBootstrapAuth{PasswordHash: passwordHash, PasswordIsBootstrap: isBootstrap}
 	return nil
 }
 
-func (s *bootstrapStoreStub) InsertAdminAuditLog(_ context.Context, entry *db.AdminAuditEntry) error {
+func (s *bootstrapStoreStub) InsertAdminAuditLog(_ context.Context, entry *AdminBootstrapAuditEntry) error {
 	if s.auditErr != nil {
 		return s.auditErr
 	}
@@ -50,12 +51,50 @@ func (s *bootstrapStoreStub) InsertAdminAuditLog(_ context.Context, entry *db.Ad
 	return nil
 }
 
+func (s *bootstrapStoreStub) UpsertAdminBootstrapAuthWithAudit(_ context.Context, passwordHash string, isBootstrap bool, audit *AdminBootstrapAuditEntry) error {
+	if s.auditErr != nil {
+		return s.auditErr
+	}
+	if s.upsertErr != nil {
+		return s.upsertErr
+	}
+	s.upserts++
+	s.auditedUpserts++
+	s.auth = &AdminBootstrapAuth{PasswordHash: passwordHash, PasswordIsBootstrap: isBootstrap}
+	s.audits++
+	if audit != nil {
+		copyEntry := *audit
+		s.lastAudit = &copyEntry
+	}
+	return nil
+}
+
+func TestAdminBootstrapStoreDoesNotExposeDatabaseRecords(t *testing.T) {
+	t.Parallel()
+
+	source, err := os.ReadFile("auth.go")
+	if err != nil {
+		t.Fatalf("ReadFile(auth.go) error = %v", err)
+	}
+	text := string(source)
+	dbPackage := "db"
+	for _, forbidden := range []string{
+		`"github.com/8linkz-sec/packmon/internal/` + dbPackage + `"`,
+		"*" + dbPackage + ".AdminAuth",
+		"*" + dbPackage + ".AdminAuditEntry",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("auth.go contains %q, want bootstrap port free of database-owned records", forbidden)
+		}
+	}
+}
+
 func TestBootstrapAdminBranches(t *testing.T) {
 	t.Parallel()
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	existing := &bootstrapStoreStub{auth: &db.AdminAuth{PasswordHash: "hash"}}
+	existing := &bootstrapStoreStub{auth: &AdminBootstrapAuth{PasswordHash: "hash"}}
 	if err := BootstrapAdmin(context.Background(), existing, "ignored", logger); err != nil {
 		t.Fatalf("BootstrapAdmin(existing) error = %v", err)
 	}
@@ -104,7 +143,34 @@ func TestBootstrapAdminBranches(t *testing.T) {
 	}
 
 	auditErr := &bootstrapStoreStub{auditErr: errors.New("audit failed")}
-	if err := BootstrapAdmin(context.Background(), auditErr, "valid-password-123", logger); err == nil || !strings.Contains(err.Error(), "audit bootstrap admin") {
+	if err := BootstrapAdmin(context.Background(), auditErr, "valid-password-123", logger); err == nil || !strings.Contains(err.Error(), "bootstrap admin") {
 		t.Fatalf("BootstrapAdmin(audit error) error = %v", err)
+	}
+	if auditErr.auth != nil || auditErr.upserts != 0 || auditErr.audits != 0 {
+		t.Fatalf("audit failure store = %+v, want no persisted auth or audit", auditErr)
+	}
+}
+
+func TestBootstrapAdminUsesAuditedWriteWhenAvailable(t *testing.T) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store := &bootstrapStoreStub{}
+
+	if err := BootstrapAdmin(context.Background(), store, "initial-password", logger); err != nil {
+		t.Fatalf("BootstrapAdmin() error = %v", err)
+	}
+
+	if store.auditedUpserts != 1 {
+		t.Fatalf("audited upserts = %d, want 1", store.auditedUpserts)
+	}
+	if store.legacyUpserts != 0 {
+		t.Fatalf("legacy upserts = %d, want 0", store.legacyUpserts)
+	}
+	if store.audits != 1 || store.lastAudit == nil || store.lastAudit.Action != "admin_bootstrap" {
+		t.Fatalf("audit = (%d, %+v), want one admin_bootstrap entry", store.audits, store.lastAudit)
+	}
+	if store.auth == nil || !store.auth.PasswordIsBootstrap || !CheckPassword(store.auth.PasswordHash, "initial-password") {
+		t.Fatalf("auth = %+v, want bootstrap password hash", store.auth)
 	}
 }

@@ -3,11 +3,18 @@ package sbomgen
 import (
 	"strings"
 	"testing"
+
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 func TestDefaultRegistryHasAllV1Ecosystems(t *testing.T) {
 	reg := DefaultRegistry()
-	for _, eco := range []string{"go", "npm", "pypi", "maven"} {
+	for _, eco := range []domain.Ecosystem{
+		domain.EcosystemGo,
+		domain.EcosystemNPM,
+		domain.EcosystemPyPI,
+		domain.EcosystemMaven,
+	} {
 		g, ok := reg[eco]
 		if !ok {
 			t.Fatalf("registry missing %q", eco)
@@ -23,9 +30,9 @@ func TestDefaultRegistryHasAllV1Ecosystems(t *testing.T) {
 
 func TestInstallSpecPinsVersions(t *testing.T) {
 	reg := DefaultRegistry()
-	cases := map[string]string{
-		"npm":  "@cyclonedx/cyclonedx-npm@" + npmGeneratorVersion,
-		"pypi": "cyclonedx-bom==" + pypiGeneratorVersion,
+	cases := map[domain.Ecosystem]string{
+		domain.EcosystemNPM:  "@cyclonedx/cyclonedx-npm@" + npmGeneratorVersion,
+		domain.EcosystemPyPI: "cyclonedx-bom==" + pypiGeneratorVersion,
 	}
 	for eco, wantPkg := range cases {
 		spec := reg[eco].InstallSpec()
@@ -36,10 +43,10 @@ func TestInstallSpecPinsVersions(t *testing.T) {
 			t.Errorf("%q install args %v do not contain pinned %q", eco, spec.Args, wantPkg)
 		}
 	}
-	if reg["maven"].InstallSpec().CanAutoInstall {
+	if reg[domain.EcosystemMaven].InstallSpec().CanAutoInstall {
 		t.Errorf("maven must not be auto-installable")
 	}
-	if reg["go"].InstallSpec().CanAutoInstall {
+	if reg[domain.EcosystemGo].InstallSpec().CanAutoInstall {
 		t.Errorf("go must use the local Go toolchain and not be auto-installable")
 	}
 }

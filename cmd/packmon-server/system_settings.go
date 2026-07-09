@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"strings"
 
 	"github.com/8linkz-sec/packmon/internal/config"
 	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 func applyStoredSystemSettings(ctx context.Context, cfg *config.Config, store db.Store, logger *slog.Logger) error {
@@ -41,6 +41,16 @@ func applyStoredSystemSettings(ctx context.Context, cfg *config.Config, store db
 		logger.Warn("ignoring invalid persisted rate limit burst", "rate_limit_burst", settings.RateLimitBurst)
 	}
 
+	if settings.ScanLogRetention >= 0 {
+		cfg.Retention.ScanLog = settings.ScanLogRetention
+		applied++
+	}
+
+	if settings.AdminAuditRetention >= 0 {
+		cfg.Retention.AdminAuditLog = settings.AdminAuditRetention
+		applied++
+	}
+
 	if logger != nil && applied > 0 {
 		logger.Info("applied persisted system settings", "count", applied)
 	}
@@ -48,10 +58,9 @@ func applyStoredSystemSettings(ctx context.Context, cfg *config.Config, store db
 }
 
 func normalizeStoredBlockThreshold(raw string) (string, bool) {
-	switch normalized := strings.ToUpper(strings.TrimSpace(raw)); normalized {
-	case "CRITICAL", "HIGH", "MEDIUM", "LOW", "NONE":
-		return normalized, true
-	default:
+	threshold, ok := domain.ParseBlockThreshold(raw)
+	if !ok {
 		return "", false
 	}
+	return string(threshold), true
 }

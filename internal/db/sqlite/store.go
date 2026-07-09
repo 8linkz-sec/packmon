@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/8linkz-sec/packmon/internal/ioutils"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,7 +32,7 @@ type Store struct {
 // New opens (or creates) the SQLite database at dbPath and ensures the
 // schema tables exist. The parent directory is created if it does not
 // exist. The returned Store is safe for concurrent use.
-func New(dbPath string) (*Store, error) {
+func New(dbPath string) (store *Store, err error) {
 	dir := filepath.Dir(dbPath)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, fmt.Errorf("sqlite: create directory %s: %w", dir, err)
@@ -50,28 +51,38 @@ func New(dbPath string) (*Store, error) {
 	db.SetMaxOpenConns(1)
 
 	if err := db.Ping(); err != nil {
-		closeSilently(db)
+		ioutils.CloseSilently(db)
 		return nil, fmt.Errorf("sqlite: ping %s: %w", dbPath, err)
 	}
 
 	unlockMigration, err := acquireSQLiteMigrationLock(dbPath)
 	if err != nil {
-		closeSilently(db)
+		ioutils.CloseSilently(db)
 		return nil, err
 	}
-	defer unlockMigration()
+	defer func() {
+		if unlockErr := unlockMigration(); unlockErr != nil {
+			ioutils.CloseSilently(db)
+			store = nil
+			if err != nil {
+				err = errors.Join(err, unlockErr)
+			} else {
+				err = unlockErr
+			}
+		}
+	}()
 
 	// Create schema tables (idempotent).
 	if _, err := db.Exec(schemaSQL); err != nil {
-		closeSilently(db)
+		ioutils.CloseSilently(db)
 		return nil, fmt.Errorf("sqlite: create schema: %w", err)
 	}
 	if err := migrateSchema(db); err != nil {
-		closeSilently(db)
+		ioutils.CloseSilently(db)
 		return nil, err
 	}
 	if err := restrictSQLiteFilePermissions(dbPath); err != nil {
-		closeSilently(db)
+		ioutils.CloseSilently(db)
 		return nil, err
 	}
 
@@ -81,11 +92,13 @@ func New(dbPath string) (*Store, error) {
 var (
 	sqliteMigrationLockTimeout      = 5 * time.Second
 	sqliteMigrationLockPollInterval = 25 * time.Millisecond
+	sqliteSyncLockTimeout           = 5 * time.Second
+	removeSQLiteMigrationLockFile   = os.Remove
 )
 
-func acquireSQLiteMigrationLock(dbPath string) (func(), error) {
+func acquireSQLiteMigrationLock(dbPath string) (func() error, error) {
 	if skipSQLiteMigrationLock(dbPath) {
-		return func() {}, nil
+		return func() error { return nil }, nil
 	}
 
 	lockPath := dbPath + ".migrate.lock"
@@ -94,13 +107,12 @@ func acquireSQLiteMigrationLock(dbPath string) (func(), error) {
 		file, err := os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304 -- lock path is derived from the local DB path.
 		if err == nil {
 			unlocked := false
-			return func() {
+			return func() error {
 				if unlocked {
-					return
+					return nil
 				}
 				unlocked = true
-				closeSilently(file)
-				_ = os.Remove(lockPath)
+				return releaseSQLiteMigrationLock(file, lockPath)
 			}, nil
 		}
 		if !os.IsExist(err) {
@@ -113,8 +125,59 @@ func acquireSQLiteMigrationLock(dbPath string) (func(), error) {
 	}
 }
 
+func releaseSQLiteMigrationLock(file *os.File, lockPath string) error {
+	var errs []error
+	if err := file.Close(); err != nil {
+		errs = append(errs, fmt.Errorf("sqlite: close migration lock %s: %w", lockPath, err))
+	}
+	if err := removeSQLiteMigrationLockFile(lockPath); err != nil {
+		errs = append(errs, fmt.Errorf("sqlite: remove migration lock %s: %w", lockPath, err))
+	}
+	return errors.Join(errs...)
+}
+
 func skipSQLiteMigrationLock(dbPath string) bool {
 	return skipSQLiteFilePermissionHardening(dbPath)
+}
+
+func acquireSQLiteSyncLock(ctx context.Context, dbPath string) (func(), error) {
+	if skipSQLiteSyncLock(dbPath) {
+		return func() {}, nil
+	}
+	return acquireSQLiteLockFile(ctx, dbPath+".sync.lock", sqliteSyncLockTimeout, "sync")
+}
+
+func skipSQLiteSyncLock(dbPath string) bool {
+	return skipSQLiteFilePermissionHardening(dbPath)
+}
+
+func acquireSQLiteLockFile(ctx context.Context, lockPath string, timeout time.Duration, purpose string) (func(), error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		file, err := os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304 -- lock path is derived from the local DB path.
+		if err == nil {
+			unlocked := false
+			return func() {
+				if unlocked {
+					return
+				}
+				unlocked = true
+				ioutils.CloseSilently(file)
+				_ = os.Remove(lockPath)
+			}, nil
+		}
+		if !os.IsExist(err) {
+			return nil, fmt.Errorf("sqlite: create %s lock %s: %w", purpose, lockPath, err)
+		}
+		if !time.Now().Before(deadline) {
+			return nil, fmt.Errorf("sqlite: acquire %s lock %s: %w", purpose, lockPath, err)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("sqlite: acquire %s lock %s: %w", purpose, lockPath, ctx.Err())
+		case <-time.After(sqliteMigrationLockPollInterval):
+		}
+	}
 }
 
 func ensurePrivateSQLiteDatabaseFile(dbPath string) error {
@@ -198,7 +261,7 @@ func (s *Store) FindVulnerabilities(ctx context.Context, ecosystem, name, versio
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: query vulnerabilities: %w", err)
 	}
-	defer closeSilently(rows)
+	defer ioutils.CloseSilently(rows)
 
 	var findings []domain.Finding
 	for rows.Next() {
@@ -222,11 +285,11 @@ func (s *Store) FindVulnerabilities(ctx context.Context, ecosystem, name, versio
 			return nil, fmt.Errorf("sqlite: scan vulnerability row: %w", err)
 		}
 
-		// Check whether the requested version falls within any affected range.
-		// Uses the shared version package which handles both full OSV and
-		// flat range formats, and dispatches to ecosystem-specific comparators.
-		if version != "" && rangesJSON.Valid && rangesJSON.String != "" {
-			affected, matchErr := versionpkg.VersionAffected(version, rangesJSON.String, versionsJSON.String, eco)
+		// Check whether the requested version falls within any affected range
+		// or explicit affected-version list.
+		if version != "" {
+			constraintRanges, constraintVersions := db.NormalizeVersionConstraintJSON(nullableStringValue(rangesJSON), nullableStringValue(versionsJSON))
+			affected, matchErr := versionpkg.VersionAffected(version, constraintRanges, constraintVersions, eco)
 			if matchErr != nil {
 				// If we cannot parse ranges, treat the package as affected
 				// (fail-safe: do not silently hide vulnerabilities).
@@ -296,7 +359,7 @@ func (s *Store) findVulnerabilitiesBatchChunk(ctx context.Context, chunk localPa
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: query vulnerability batch: %w", err)
 	}
-	defer closeSilently(rows)
+	defer ioutils.CloseSilently(rows)
 
 	var findings []domain.Finding
 	for rows.Next() {
@@ -327,11 +390,10 @@ func (s *Store) findVulnerabilitiesBatchChunk(ctx context.Context, chunk localPa
 		}
 
 		for _, version := range versions {
-			if rangesJSON.Valid && rangesJSON.String != "" {
-				affected, matchErr := versionpkg.VersionAffected(version, rangesJSON.String, versionsJSON.String, eco)
-				if matchErr == nil && !affected {
-					continue
-				}
+			constraintRanges, constraintVersions := db.NormalizeVersionConstraintJSON(nullableStringValue(rangesJSON), nullableStringValue(versionsJSON))
+			affected, matchErr := versionpkg.VersionAffected(version, constraintRanges, constraintVersions, eco)
+			if matchErr == nil && !affected {
+				continue
 			}
 			findings = append(findings, localVulnerabilityFinding(id, eco, pkg, version, rangesJSON.String, refsJSON.String, severity, summary.String, source.String))
 		}
@@ -384,7 +446,7 @@ func (s *Store) FindMalicious(ctx context.Context, ecosystem, name, version stri
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: query malicious: %w", err)
 	}
-	defer closeSilently(rows)
+	defer ioutils.CloseSilently(rows)
 
 	var findings []domain.Finding
 	for rows.Next() {
@@ -414,22 +476,7 @@ func (s *Store) FindMalicious(ctx context.Context, ecosystem, name, version stri
 			continue
 		}
 
-		title := summary.String
-		if title == "" {
-			title = fmt.Sprintf("malicious package: %s (%s)", pkg, riskType)
-		}
-
-		findings = append(findings, domain.Finding{
-			Name:       pkg,
-			Ecosystem:  domain.Ecosystem(eco),
-			Type:       db.FindingTypeForMaliciousRiskType(riskType),
-			Severity:   domain.Severity(severity),
-			AdvisoryID: id,
-			Title:      title,
-			URL:        firstURLFromJSON(referencesRaw.String),
-			RiskType:   riskType,
-			Source:     localFindingSource(source.String),
-		})
+		findings = append(findings, localMaliciousFinding(id, eco, pkg, version, referencesRaw.String, riskType, severity, summary.String, source.String))
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("sqlite: iterate malicious rows: %w", err)
@@ -466,7 +513,7 @@ func (s *Store) findMaliciousBatchChunk(ctx context.Context, chunk localPackageP
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: query malicious batch: %w", err)
 	}
-	defer closeSilently(rows)
+	defer ioutils.CloseSilently(rows)
 
 	var findings []domain.Finding
 	for rows.Next() {
@@ -550,7 +597,7 @@ func (s *Store) FindReputationFindingsBatch(ctx context.Context, packages []db.P
 	if source != "" && source != "reversinglabs" {
 		return nil, nil
 	}
-	chunks := localPackagePredicateChunks(packages, localPackagePredicateChunkSize)
+	chunks := localReputationPackagePredicateChunks(packages, localReputationPredicateChunkSize)
 	if len(chunks) == 0 {
 		return nil, nil
 	}
@@ -585,7 +632,7 @@ func (s *Store) queryReputationFindings(ctx context.Context, ecosystem, name, ve
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: query reputation findings: %w", err)
 	}
-	defer closeSilently(rows)
+	defer ioutils.CloseSilently(rows)
 
 	var findings []domain.Finding
 	for rows.Next() {
@@ -628,18 +675,13 @@ func (s *Store) queryReputationFindings(ctx context.Context, ecosystem, name, ve
 	return findings, nil
 }
 
-func (s *Store) findReputationFindingsBatch(ctx context.Context, chunk localPackagePredicateChunk) ([]domain.Finding, error) {
-	query := `
-		WITH requested(ecosystem, name) AS (VALUES ` + chunk.values + `)
-		SELECT rep.id, rep.ecosystem, rep.name, rep.version, rep.type, rep.risk_type, rep.severity, rep.summary
-		FROM reputation_findings_local AS rep
-		JOIN requested AS r ON r.ecosystem = rep.ecosystem AND r.name = rep.name` // #nosec G202 -- localPackagePredicateChunks uses fixed SQL fragments and bound args.
-
+func (s *Store) findReputationFindingsBatch(ctx context.Context, chunk localReputationPackagePredicateChunk) ([]domain.Finding, error) {
+	query := reputationBatchQuery(chunk)
 	rows, err := s.db.QueryContext(ctx, query, chunk.args...)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: query reputation batch: %w", err)
 	}
-	defer closeSilently(rows)
+	defer ioutils.CloseSilently(rows)
 
 	var findings []domain.Finding
 	for rows.Next() {
@@ -656,9 +698,6 @@ func (s *Store) findReputationFindingsBatch(ctx context.Context, chunk localPack
 
 		if err := rows.Scan(&id, &eco, &pkg, &ver, &typ, &riskType, &severity, &summary); err != nil {
 			return nil, fmt.Errorf("sqlite: scan reputation batch row: %w", err)
-		}
-		if !containsString(chunk.versionsByPackage[localPackageKey{ecosystem: eco, name: pkg}], ver) {
-			continue
 		}
 		title := summary.String
 		if title == "" {
@@ -684,12 +723,22 @@ func (s *Store) findReputationFindingsBatch(ctx context.Context, chunk localPack
 	return findings, nil
 }
 
+func reputationBatchQuery(chunk localReputationPackagePredicateChunk) string {
+	query := `
+		WITH requested(ecosystem, name, version) AS (VALUES ` + chunk.values + `)
+		SELECT rep.id, rep.ecosystem, rep.name, rep.version, rep.type, rep.risk_type, rep.severity, rep.summary
+		FROM reputation_findings_local AS rep
+		JOIN requested AS r ON r.ecosystem = rep.ecosystem AND r.name = rep.name AND r.version = rep.version` // #nosec G202 -- localReputationPackagePredicateChunks uses fixed SQL fragments and bound args.
+	return query
+}
+
 type localPackageKey struct {
 	ecosystem string
 	name      string
 }
 
 const localPackagePredicateChunkSize = 400
+const localReputationPredicateChunkSize = 300
 
 type localPackagePredicateChunk struct {
 	where             string
@@ -705,13 +754,15 @@ type localPackagePredicateChunkBuilder struct {
 	versionsByPackage map[localPackageKey][]string
 }
 
-func localPackagePredicate(packages []db.PackageQuery) (string, []any, map[localPackageKey][]string) {
-	chunks := localPackagePredicateChunks(packages, len(packages))
-	if len(chunks) == 0 {
-		return "", nil, nil
-	}
-	chunk := chunks[0]
-	return chunk.where, chunk.args, chunk.versionsByPackage
+type localReputationPackageKey struct {
+	ecosystem string
+	name      string
+	version   string
+}
+
+type localReputationPackagePredicateChunk struct {
+	values string
+	args   []any
 }
 
 func localPackagePredicateChunks(packages []db.PackageQuery, maxKeys int) []localPackagePredicateChunk {
@@ -768,13 +819,57 @@ func localPackagePredicateChunks(packages []db.PackageQuery, maxKeys int) []loca
 	return chunks
 }
 
-func containsString(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
+func localReputationPackagePredicateChunks(packages []db.PackageQuery, maxKeys int) []localReputationPackagePredicateChunk {
+	if len(packages) == 0 {
+		return nil
 	}
-	return false
+	if maxKeys <= 0 {
+		maxKeys = localReputationPredicateChunkSize
+	}
+
+	type builder struct {
+		values []string
+		args   []any
+	}
+
+	builders := make([]builder, 0, (len(packages)/maxKeys)+1)
+	seen := make(map[localReputationPackageKey]struct{}, len(packages))
+	for _, pkg := range packages {
+		ecosystem := strings.TrimSpace(pkg.Ecosystem)
+		name := normalizePackageName(ecosystem, strings.TrimSpace(pkg.Name))
+		version := strings.TrimSpace(pkg.Version)
+		if ecosystem == "" || name == "" || version == "" {
+			continue
+		}
+
+		key := localReputationPackageKey{ecosystem: ecosystem, name: name, version: version}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+
+		if len(builders) == 0 || len(builders[len(builders)-1].values) >= maxKeys {
+			builders = append(builders, builder{
+				values: make([]string, 0, maxKeys),
+				args:   make([]any, 0, maxKeys*3),
+			})
+		}
+		current := &builders[len(builders)-1]
+		current.values = append(current.values, `(?, ?, ?)`)
+		current.args = append(current.args, ecosystem, name, version)
+	}
+
+	chunks := make([]localReputationPackagePredicateChunk, 0, len(builders))
+	for _, builder := range builders {
+		if len(builder.values) == 0 {
+			continue
+		}
+		chunks = append(chunks, localReputationPackagePredicateChunk{
+			values: strings.Join(builder.values, ", "),
+			args:   builder.args,
+		})
+	}
+	return chunks
 }
 
 func nullableStringValue(value sql.NullString) string {
@@ -784,33 +879,81 @@ func nullableStringValue(value sql.NullString) string {
 	return value.String
 }
 
-func validateLocalMaliciousVersions(id, versionsJSON string) error {
-	trimmed := strings.TrimSpace(versionsJSON)
-	if trimmed == "" || trimmed == "null" {
+type localVersionRange struct {
+	Events []localVersionEvent `json:"events"`
+}
+
+type localVersionEvent struct {
+	Introduced   string `json:"introduced"`
+	Fixed        string `json:"fixed"`
+	LastAffected string `json:"last_affected"`
+	Limit        string `json:"limit"`
+}
+
+func validateLocalVersionRanges(id, field, rangesJSON string, allowNull bool) error {
+	trimmed := strings.TrimSpace(rangesJSON)
+	if trimmed == "" {
 		return nil
+	}
+	if trimmed == "null" {
+		if allowNull {
+			return nil
+		}
+		return fmt.Errorf("sqlite: finding %s %s must be an array of range objects", id, field)
+	}
+	var ranges []localVersionRange
+	if err := json.Unmarshal([]byte(trimmed), &ranges); err != nil {
+		return fmt.Errorf("sqlite: finding %s %s must be an array of range objects: %w", id, field, err)
+	}
+	for i, versionRange := range ranges {
+		if len(versionRange.Events) == 0 {
+			return fmt.Errorf("sqlite: finding %s %s[%d].events must not be empty", id, field, i)
+		}
+		for j, event := range versionRange.Events {
+			if strings.TrimSpace(event.Introduced) == "" &&
+				strings.TrimSpace(event.Fixed) == "" &&
+				strings.TrimSpace(event.LastAffected) == "" &&
+				strings.TrimSpace(event.Limit) == "" {
+				return fmt.Errorf("sqlite: finding %s %s[%d].events[%d] must set introduced, fixed, last_affected, or limit", id, field, i, j)
+			}
+		}
+	}
+	return nil
+}
+
+func validateLocalStringArray(id, field, versionsJSON string, allowNull bool) error {
+	trimmed := strings.TrimSpace(versionsJSON)
+	if trimmed == "" {
+		return nil
+	}
+	if trimmed == "null" {
+		if allowNull {
+			return nil
+		}
+		return fmt.Errorf("sqlite: finding %s %s must be an array of strings", id, field)
 	}
 	var values []string
 	if err := json.Unmarshal([]byte(trimmed), &values); err != nil {
-		return fmt.Errorf("sqlite: malicious finding %s versions must be null or an array of strings: %w", id, err)
+		return fmt.Errorf("sqlite: finding %s %s must be an array of strings: %w", id, field, err)
 	}
 	return nil
+}
+
+func validateLocalMaliciousVersions(id, versionsJSON string) error {
+	return validateLocalStringArray(id, "versions", versionsJSON, true)
 }
 
 func localMaliciousAffectsVersion(id, ecosystem, version, rangesJSON, versionsJSON string) (bool, error) {
 	if strings.TrimSpace(version) == "" {
 		return true, nil
 	}
+	if err := validateLocalVersionRanges(id, "version_ranges", rangesJSON, true); err != nil {
+		return false, err
+	}
 	if err := validateLocalMaliciousVersions(id, versionsJSON); err != nil {
 		return false, err
 	}
-	rangesJSON = strings.TrimSpace(rangesJSON)
-	if rangesJSON == "" || rangesJSON == "null" {
-		rangesJSON = "[]"
-	}
-	versionsJSON = strings.TrimSpace(versionsJSON)
-	if versionsJSON == "" || versionsJSON == "null" {
-		versionsJSON = "[]"
-	}
+	rangesJSON, versionsJSON = db.NormalizeVersionConstraintJSON(rangesJSON, versionsJSON)
 	affected, err := versionpkg.VersionAffected(version, rangesJSON, versionsJSON, ecosystem)
 	if err != nil {
 		return false, fmt.Errorf("sqlite: malicious finding %s version constraints invalid: %w", id, err)
@@ -850,313 +993,6 @@ func resourceLinksFromVulnerabilityReferences(advisoryID, raw string) []domain.R
 	return findinglinks.ResourceLinksFromVulnerabilityReferences(advisoryID, raw)
 }
 
-func canonicalResourceLink(advisoryID string) domain.ResourceLink {
-	link, _, _ := findinglinks.CanonicalVulnerabilityResource(advisoryID)
-	return link
-}
-
-func resourceLinkFromURL(raw string) domain.ResourceLink {
-	return findinglinks.ResourceLinkFromURL(raw)
-}
-
 func firstURLFromJSON(raw string) string {
 	return findinglinks.FirstSafeHTTPURLFromJSON(raw)
-}
-
-func migrateSchema(db *sql.DB) error {
-	hasRowKey, err := tableHasColumn(db, "vulnerabilities_local", "row_key")
-	if err != nil {
-		return err
-	}
-	if !hasRowKey {
-		tx, err := db.Begin()
-		if err != nil {
-			return fmt.Errorf("sqlite: begin schema migration: %w", err)
-		}
-		defer tx.Rollback() //nolint:errcheck // rollback after commit is a no-op
-
-		statements := []string{
-			`ALTER TABLE vulnerabilities_local RENAME TO vulnerabilities_local_old`,
-			`CREATE TABLE vulnerabilities_local (
-			row_key        TEXT PRIMARY KEY,
-			id             TEXT NOT NULL,
-			ecosystem      TEXT NOT NULL,
-			name           TEXT NOT NULL,
-			version_ranges TEXT,
-			versions_affected TEXT,
-			references_json TEXT,
-			severity       TEXT NOT NULL,
-			cvss_score     REAL,
-			epss_score     REAL,
-			epss_percentile REAL,
-			cisa_kev       INTEGER DEFAULT 0,
-			summary        TEXT,
-			source         TEXT NOT NULL DEFAULT 'local'
-		)`,
-			`INSERT INTO vulnerabilities_local(row_key, id, ecosystem, name, version_ranges, versions_affected, references_json, severity, cvss_score, epss_score, epss_percentile, cisa_kev, summary, source)
-		 SELECT id || '|' || ecosystem || '|' || name, id, ecosystem, name, version_ranges, '[]', '[]', severity, cvss_score, epss_score, NULL, cisa_kev, summary, 'local'
-		 FROM vulnerabilities_local_old`,
-			`DROP TABLE vulnerabilities_local_old`,
-			`CREATE INDEX idx_vuln_eco_name ON vulnerabilities_local(ecosystem, name)`,
-			`CREATE INDEX idx_vuln_id ON vulnerabilities_local(id)`,
-		}
-
-		for _, stmt := range statements {
-			if _, err := tx.Exec(stmt); err != nil {
-				return fmt.Errorf("sqlite: migrate schema: %w", err)
-			}
-		}
-
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("sqlite: commit schema migration: %w", err)
-		}
-	}
-
-	hasVersionsAffected, err := tableHasColumn(db, "vulnerabilities_local", "versions_affected")
-	if err != nil {
-		return err
-	}
-	if !hasVersionsAffected {
-		if _, err := db.Exec(`ALTER TABLE vulnerabilities_local ADD COLUMN versions_affected TEXT`); err != nil {
-			return fmt.Errorf("sqlite: add versions_affected column: %w", err)
-		}
-	}
-
-	hasVulnReferences, err := tableHasColumn(db, "vulnerabilities_local", "references_json")
-	if err != nil {
-		return err
-	}
-	if !hasVulnReferences {
-		if _, err := db.Exec(`ALTER TABLE vulnerabilities_local ADD COLUMN references_json TEXT`); err != nil {
-			return fmt.Errorf("sqlite: add vulnerability references_json column: %w", err)
-		}
-	}
-
-	hasEPSSPercentile, err := tableHasColumn(db, "vulnerabilities_local", "epss_percentile")
-	if err != nil {
-		return err
-	}
-	if !hasEPSSPercentile {
-		if _, err := db.Exec(`ALTER TABLE vulnerabilities_local ADD COLUMN epss_percentile REAL`); err != nil {
-			return fmt.Errorf("sqlite: add vulnerability epss_percentile column: %w", err)
-		}
-	}
-
-	hasVulnSource, err := tableHasColumn(db, "vulnerabilities_local", "source")
-	if err != nil {
-		return err
-	}
-	if !hasVulnSource {
-		if _, err := db.Exec(`ALTER TABLE vulnerabilities_local ADD COLUMN source TEXT NOT NULL DEFAULT 'local'`); err != nil {
-			return fmt.Errorf("sqlite: add vulnerability source column: %w", err)
-		}
-	}
-
-	hasMaliciousTable, err := tableExists(db, "malicious_local")
-	if err != nil {
-		return err
-	}
-	if hasMaliciousTable {
-		hasMaliciousReferences, err := tableHasColumn(db, "malicious_local", "reference_urls")
-		if err != nil {
-			return err
-		}
-		if !hasMaliciousReferences {
-			if _, err := db.Exec(`ALTER TABLE malicious_local ADD COLUMN reference_urls TEXT`); err != nil {
-				return fmt.Errorf("sqlite: add malicious reference_urls column: %w", err)
-			}
-		}
-		hasMaliciousVersionRanges, err := tableHasColumn(db, "malicious_local", "version_ranges")
-		if err != nil {
-			return err
-		}
-		if !hasMaliciousVersionRanges {
-			if _, err := db.Exec(`ALTER TABLE malicious_local ADD COLUMN version_ranges TEXT`); err != nil {
-				return fmt.Errorf("sqlite: add malicious version_ranges column: %w", err)
-			}
-		}
-		hasMaliciousSource, err := tableHasColumn(db, "malicious_local", "source")
-		if err != nil {
-			return err
-		}
-		if !hasMaliciousSource {
-			if _, err := db.Exec(`ALTER TABLE malicious_local ADD COLUMN source TEXT NOT NULL DEFAULT 'local'`); err != nil {
-				return fmt.Errorf("sqlite: add malicious source column: %w", err)
-			}
-		}
-	}
-
-	hasHistoryTable, err := tableExists(db, "scan_history")
-	if err != nil {
-		return err
-	}
-	if hasHistoryTable {
-		hasHistoryCommit, err := tableHasColumn(db, "scan_history", "commit")
-		if err != nil {
-			return err
-		}
-		if !hasHistoryCommit {
-			if _, err := db.Exec(`ALTER TABLE scan_history ADD COLUMN "commit" TEXT`); err != nil {
-				return fmt.Errorf("sqlite: add scan history commit column: %w", err)
-			}
-		}
-		for _, stmt := range []string{
-			`CREATE INDEX IF NOT EXISTS idx_scan_history_scanned_at ON scan_history(scanned_at DESC)`,
-			`CREATE INDEX IF NOT EXISTS idx_scan_history_repo_scanned_at ON scan_history(repo_name, scanned_at DESC)`,
-		} {
-			if _, err := db.Exec(stmt); err != nil {
-				return fmt.Errorf("sqlite: create scan history index: %w", err)
-			}
-		}
-	}
-
-	if err := normalizeExistingCaseInsensitivePackageNames(db); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-type localPackageNameRow struct {
-	key       string
-	id        string
-	ecosystem string
-	name      string
-}
-
-func normalizeExistingCaseInsensitivePackageNames(db *sql.DB) error {
-	if err := normalizeExistingVulnerabilityPackageNames(db); err != nil {
-		return err
-	}
-	for _, table := range []string{"malicious_local", "reputation_findings_local", "lifecycle_releases_local"} {
-		if err := normalizeExistingNamedRows(db, table); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func normalizeExistingVulnerabilityPackageNames(db *sql.DB) error {
-	rows, err := db.Query(`
-		SELECT row_key, id, ecosystem, name
-		FROM vulnerabilities_local
-		WHERE lower(ecosystem) IN ('pypi', 'nuget')`)
-	if err != nil {
-		return fmt.Errorf("sqlite: inspect vulnerability package names: %w", err)
-	}
-
-	items := make([]localPackageNameRow, 0)
-	for rows.Next() {
-		var item localPackageNameRow
-		if err := rows.Scan(&item.key, &item.id, &item.ecosystem, &item.name); err != nil {
-			closeSilently(rows)
-			return fmt.Errorf("sqlite: scan vulnerability package name: %w", err)
-		}
-		items = append(items, item)
-	}
-	if err := rows.Err(); err != nil {
-		closeSilently(rows)
-		return fmt.Errorf("sqlite: iterate vulnerability package names: %w", err)
-	}
-	closeSilently(rows)
-
-	for _, item := range items {
-		normalized := normalizePackageName(item.ecosystem, item.name)
-		if normalized == item.name {
-			continue
-		}
-		rowKey := syncVulnerabilityRowKey(item.id, item.ecosystem, normalized)
-		if _, err := db.Exec(`DELETE FROM vulnerabilities_local WHERE row_key = ? AND row_key <> ?`, rowKey, item.key); err != nil {
-			return fmt.Errorf("sqlite: remove duplicate normalized vulnerability row: %w", err)
-		}
-		if _, err := db.Exec(`UPDATE vulnerabilities_local SET row_key = ?, name = ? WHERE row_key = ?`, rowKey, normalized, item.key); err != nil {
-			return fmt.Errorf("sqlite: normalize vulnerability package name: %w", err)
-		}
-	}
-	return nil
-}
-
-func normalizeExistingNamedRows(db *sql.DB, table string) error {
-	exists, err := tableExists(db, table)
-	if err != nil {
-		return err
-	}
-	if !exists {
-		return nil
-	}
-
-	rows, err := db.Query(`
-		SELECT id, ecosystem, name
-		FROM ` + table + `
-		WHERE lower(ecosystem) IN ('pypi', 'nuget')`) // #nosec G202 -- table is chosen from a fixed internal allowlist.
-	if err != nil {
-		return fmt.Errorf("sqlite: inspect %s package names: %w", table, err)
-	}
-
-	items := make([]localPackageNameRow, 0)
-	for rows.Next() {
-		var item localPackageNameRow
-		if err := rows.Scan(&item.id, &item.ecosystem, &item.name); err != nil {
-			closeSilently(rows)
-			return fmt.Errorf("sqlite: scan %s package name: %w", table, err)
-		}
-		items = append(items, item)
-	}
-	if err := rows.Err(); err != nil {
-		closeSilently(rows)
-		return fmt.Errorf("sqlite: iterate %s package names: %w", table, err)
-	}
-	closeSilently(rows)
-
-	for _, item := range items {
-		normalized := normalizePackageName(item.ecosystem, item.name)
-		if normalized == item.name {
-			continue
-		}
-		if _, err := db.Exec(`UPDATE `+table+` SET name = ? WHERE id = ?`, normalized, item.id); err != nil { // #nosec G202 -- table is chosen from a fixed internal allowlist.
-			return fmt.Errorf("sqlite: normalize %s package name: %w", table, err)
-		}
-	}
-	return nil
-}
-
-func tableExists(db *sql.DB, tableName string) (bool, error) {
-	var name string
-	err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`, tableName).Scan(&name)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("sqlite: inspect table %s: %w", tableName, err)
-	}
-	return true, nil
-}
-
-func tableHasColumn(db *sql.DB, tableName, columnName string) (bool, error) {
-	rows, err := db.Query(`PRAGMA table_info(` + tableName + `)`)
-	if err != nil {
-		return false, fmt.Errorf("sqlite: inspect table %s: %w", tableName, err)
-	}
-	defer closeSilently(rows)
-
-	for rows.Next() {
-		var (
-			cid        int
-			name       string
-			columnType string
-			notNull    int
-			defaultVal sql.NullString
-			pk         int
-		)
-		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultVal, &pk); err != nil {
-			return false, fmt.Errorf("sqlite: scan table info for %s: %w", tableName, err)
-		}
-		if strings.EqualFold(name, columnName) {
-			return true, nil
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return false, fmt.Errorf("sqlite: iterate table info for %s: %w", tableName, err)
-	}
-	return false, nil
 }

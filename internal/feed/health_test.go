@@ -26,6 +26,7 @@ func TestFeedStatusHealthBranches(t *testing.T) {
 		{name: "running", in: db.FeedSyncStatus{LastSyncStatus: "running"}, want: "pending", reason: "sync running"},
 		{name: "pending", in: db.FeedSyncStatus{LastSyncStatus: "pending"}, want: "pending", reason: "sync pending"},
 		{name: "skipped", in: db.FeedSyncStatus{LastSyncStatus: "skipped"}, want: "warning", reason: "last sync skipped"},
+		{name: "rejected", in: db.FeedSyncStatus{LastSyncStatus: "rejected"}, want: "error", reason: "feed import rejected"},
 		{name: "unknown", in: db.FeedSyncStatus{LastSyncStatus: "failed"}, want: "error", reason: "unknown feed status: failed"},
 		{name: "never", in: db.FeedSyncStatus{LastSyncStatus: "success"}, want: "error", reason: "never synced"},
 		{name: "future", in: db.FeedSyncStatus{LastSyncStatus: "success", LastSyncAt: &future, EntriesTotal: 1}, want: "warning", reason: "last sync timestamp is in the future"},
@@ -67,6 +68,12 @@ func TestOverallFeedStatusAndFreshEntriesUseLastUsableSync(t *testing.T) {
 	}
 	if HasFreshFeedEntries(db.FeedSyncStatus{LastSyncAt: &future, EntriesTotal: 1}, HealthOptions{Now: now}) {
 		t.Fatal("HasFreshFeedEntries(future timestamp) = true, want false")
+	}
+	if !HasFreshFeedEntries(db.FeedSyncStatus{LastSyncStatus: "running", LastSyncAt: &recent, EntriesTotal: 1}, HealthOptions{Now: now}) {
+		t.Fatal("HasFreshFeedEntries(running with cached entries) = false, want true")
+	}
+	if HasFreshFeedEntries(db.FeedSyncStatus{LastSyncStatus: "running"}, HealthOptions{Now: now}) {
+		t.Fatal("HasFreshFeedEntries(running without entries) = true, want false")
 	}
 }
 

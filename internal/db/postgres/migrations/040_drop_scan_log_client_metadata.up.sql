@@ -1,0 +1,4 @@
+ALTER TABLE scan_log
+    DROP COLUMN IF EXISTS branch,
+    DROP COLUMN IF EXISTS commit,
+    DROP COLUMN IF EXISTS user_agent;

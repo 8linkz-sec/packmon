@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -100,6 +101,7 @@ func writeServerCertPEM(t *testing.T, srv *httptest.Server, path string) {
 
 // tlsFakeLocalChecker records calls and returns a fixed set of findings.
 type tlsFakeLocalChecker struct {
+	noopLocalCoverage
 	findings []domain.Finding
 	calls    int
 }
@@ -131,8 +133,11 @@ func TestCheckRemote_RejectsHTTPByDefault(t *testing.T) {
 	if exitCode != ExitOperational {
 		t.Fatalf("exit=%d want=%d (http should be rejected)", exitCode, ExitOperational)
 	}
-	if result.FeedStatus == "" {
-		t.Fatal("expected an error message in FeedStatus")
+	if result.FeedStatus != "error" {
+		t.Fatalf("FeedStatus = %q, want error", result.FeedStatus)
+	}
+	if result.ScanError == "" {
+		t.Fatal("expected remote validation error in ScanError")
 	}
 }
 
@@ -205,7 +210,37 @@ func TestCheckRemote_HTTPSFailsWithoutCustomCA(t *testing.T) {
 	}
 }
 
-func TestNew_BadCACertFileSurfacesError(t *testing.T) {
+func TestLocalModeDoesNotLoadInvalidCACertFile(t *testing.T) {
+	dir := t.TempDir()
+	writeTLSLock(t, dir)
+
+	cfg := Config{
+		Path:       dir,
+		Mode:       ModeLocal,
+		CACertFile: filepath.Join(dir, "missing-ca.pem"),
+		FailOn:     domain.SeverityCritical,
+		Timeout:    2 * time.Second,
+	}
+	sc := New(parser.NewRegistry(), cfg)
+	if sc.clientErr != nil {
+		t.Fatalf("New loaded local-mode CA bundle: %v", sc.clientErr)
+	}
+	local := &tlsFakeLocalChecker{}
+	sc.SetLocalChecker(local)
+
+	result, exitCode := sc.Run(context.Background())
+	if exitCode != ExitOK {
+		t.Fatalf("exit=%d want=%d; ScanError=%q", exitCode, ExitOK, result.ScanError)
+	}
+	if result.ScanError != "" {
+		t.Fatalf("ScanError = %q, want empty", result.ScanError)
+	}
+	if local.calls == 0 {
+		t.Fatal("local checker was not called")
+	}
+}
+
+func TestRemoteModeLoadsInvalidCACertFileWhenChecking(t *testing.T) {
 	dir := t.TempDir()
 	writeTLSLock(t, dir)
 
@@ -223,24 +258,36 @@ func TestNew_BadCACertFileSurfacesError(t *testing.T) {
 		Timeout:    2 * time.Second,
 	}
 	sc := New(parser.NewRegistry(), cfg)
-	if sc.clientErr == nil {
-		t.Fatal("expected clientErr to be set for invalid CA bundle")
+	if sc.clientErr != nil {
+		t.Fatalf("New loaded remote-mode CA bundle: %v", sc.clientErr)
 	}
-	_, exitCode := sc.Run(context.Background())
+	result, exitCode := sc.Run(context.Background())
 	if exitCode != ExitOperational {
 		t.Fatalf("exit=%d want=%d (invalid CA bundle should fail the scan)", exitCode, ExitOperational)
 	}
+	if !strings.Contains(result.ScanError, "contains no valid certificate") {
+		t.Fatalf("ScanError = %q, want invalid CA bundle error", result.ScanError)
+	}
 }
 
-func TestTransportHasMinVersionAndRootCAs(t *testing.T) {
+func TestTransportHasMinVersionAndLazyRootCAs(t *testing.T) {
 	dir := t.TempDir()
+	writeTLSLock(t, dir)
 	caFile := filepath.Join(dir, "ca.pem")
 	srv := httptest.NewTLSServer(http.HandlerFunc(okFindingHandler))
 	defer srv.Close()
 	writeServerCertPEM(t, srv, caFile)
 
-	// With a CA file: RootCAs must be non-nil and MinVersion TLS 1.2.
-	scWithCA := New(parser.NewRegistry(), Config{CACertFile: caFile, Timeout: time.Second})
+	// With a CA file: RootCAs are deferred until remote use, but MinVersion is
+	// still set at construction.
+	scWithCA := New(parser.NewRegistry(), Config{
+		Path:       dir,
+		Mode:       ModeRemote,
+		ServerURL:  srv.URL,
+		CACertFile: caFile,
+		FailOn:     domain.SeverityCritical,
+		Timeout:    time.Second,
+	})
 	tr, ok := scWithCA.client.Transport.(*http.Transport)
 	if !ok {
 		t.Fatal("transport is not *http.Transport")
@@ -251,8 +298,14 @@ func TestTransportHasMinVersionAndRootCAs(t *testing.T) {
 	if tr.TLSClientConfig.MinVersion != tls.VersionTLS12 {
 		t.Fatalf("MinVersion=%d want=%d", tr.TLSClientConfig.MinVersion, tls.VersionTLS12)
 	}
+	if tr.TLSClientConfig.RootCAs != nil {
+		t.Fatal("RootCAs should be deferred until the remote checker runs")
+	}
+	if _, exitCode := scWithCA.Run(context.Background()); exitCode != ExitOK {
+		t.Fatalf("exit=%d want=%d (remote check should load custom CA)", exitCode, ExitOK)
+	}
 	if tr.TLSClientConfig.RootCAs == nil {
-		t.Fatal("RootCAs should be non-nil when CACertFile is set")
+		t.Fatal("RootCAs should be loaded after remote checker uses the client")
 	}
 
 	// Without a CA file: RootCAs nil (system roots), MinVersion still 1.2.

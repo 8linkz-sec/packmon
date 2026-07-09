@@ -63,8 +63,23 @@ func TestNuGetParser_Parse(t *testing.T) {
 			}`,
 			wantCount: 2,
 			wantPkgs: map[string]string{
-				"Newtonsoft.Json": "13.0.3",
-				"Serilog":         "3.1.1",
+				"newtonsoft.json": "13.0.3",
+				"serilog":         "3.1.1",
+			},
+		},
+		{
+			name: "mixed case package IDs are canonicalized",
+			input: `{
+				"version": 2,
+				"dependencies": {
+					"net8.0": {
+						"Microsoft.Extensions.Logging": {"type": "Direct", "resolved": "8.0.0"}
+					}
+				}
+			}`,
+			wantCount: 1,
+			wantPkgs: map[string]string{
+				"microsoft.extensions.logging": "8.0.0",
 			},
 		},
 		{
@@ -89,7 +104,7 @@ func TestNuGetParser_Parse(t *testing.T) {
 				}
 			}`,
 			wantCount: 1,
-			wantPkgs:  map[string]string{"Newtonsoft.Json": "13.0.3"},
+			wantPkgs:  map[string]string{"newtonsoft.json": "13.0.3"},
 			wantErr:   true,
 		},
 		{
@@ -104,7 +119,7 @@ func TestNuGetParser_Parse(t *testing.T) {
 				}
 			}`,
 			wantCount: 1,
-			wantPkgs:  map[string]string{"Newtonsoft.Json": "13.0.3"},
+			wantPkgs:  map[string]string{"newtonsoft.json": "13.0.3"},
 		},
 	}
 
@@ -116,27 +131,14 @@ func TestNuGetParser_Parse(t *testing.T) {
 				if err == nil {
 					t.Fatal("expected error, got nil")
 				}
-				if len(pkgs) != tt.wantCount {
-					t.Fatalf("got %d packages, want %d (with error)", len(pkgs), tt.wantCount)
-				}
-				return
-			}
-			if err != nil {
+			} else if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			if len(pkgs) != tt.wantCount {
 				t.Fatalf("got %d packages, want %d", len(pkgs), tt.wantCount)
 			}
-			for _, pkg := range pkgs {
-				if pkg.Ecosystem != domain.EcosystemNuGet {
-					t.Errorf("package %q ecosystem = %q, want %q", pkg.Name, pkg.Ecosystem, domain.EcosystemNuGet)
-				}
-				if wantVer, ok := tt.wantPkgs[pkg.Name]; ok {
-					if pkg.Version != wantVer {
-						t.Errorf("package %q version = %q, want %q", pkg.Name, pkg.Version, wantVer)
-					}
-				}
-			}
+
+			assertPackages(t, pkgs, tt.wantPkgs, domain.EcosystemNuGet)
 		})
 	}
 }

@@ -157,6 +157,17 @@ SPEC REPOS:
 			pkgName:  "com.acme.payroll:risk-model",
 			wantRefs: []string{"https://maven.internal.example/repository/releases"},
 		},
+		{
+			name: "hex private repository",
+			parse: func() ([]domain.Package, error) {
+				return parseSourceRefPackages(NewHexParser(), `%{
+  "payroll": {:hex, :payroll, "1.0.0", "hash", [:mix], [], "internal_hex", "hash"}
+}
+`)
+			},
+			pkgName:  "payroll",
+			wantRefs: []string{"repo=internal_hex"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -168,6 +179,161 @@ SPEC REPOS:
 				}
 				return
 			}
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			got, ok := sourceRefPackageByName(pkgs, tt.pkgName)
+			if !ok {
+				t.Fatalf("package %q not found in %+v", tt.pkgName, pkgs)
+			}
+			if !reflect.DeepEqual(got.SourceRefs, tt.wantRefs) {
+				t.Fatalf("%s SourceRefs = %#v, want %#v", tt.pkgName, got.SourceRefs, tt.wantRefs)
+			}
+		})
+	}
+}
+
+func TestUpdateRequirementSourceRefsOptionVariants(t *testing.T) {
+	tests := []struct {
+		name    string
+		line    string
+		current []string
+		want    []string
+	}{
+		{
+			name:    "extra index appends space separated value",
+			line:    "--extra-index-url https://extra.pypi.example/simple",
+			current: []string{"https://primary.pypi.example/simple"},
+			want: []string{
+				"https://extra.pypi.example/simple",
+				"https://primary.pypi.example/simple",
+			},
+		},
+		{
+			name:    "find links appends space separated value",
+			line:    "--find-links https://wheels.pypi.example/simple",
+			current: []string{"https://primary.pypi.example/simple"},
+			want: []string{
+				"https://primary.pypi.example/simple",
+				"https://wheels.pypi.example/simple",
+			},
+		},
+		{
+			name:    "no index replaces active refs",
+			line:    "--no-index",
+			current: []string{"https://primary.pypi.example/simple"},
+			want:    []string{"no-index"},
+		},
+		{
+			name:    "index url equals replaces active refs",
+			line:    "--index-url=https://replacement.pypi.example/simple",
+			current: []string{"https://primary.pypi.example/simple", "https://extra.pypi.example/simple"},
+			want:    []string{"https://replacement.pypi.example/simple"},
+		},
+		{
+			name:    "short index equals replaces active refs",
+			line:    "-i=https://short.pypi.example/simple",
+			current: []string{"https://primary.pypi.example/simple", "https://extra.pypi.example/simple"},
+			want:    []string{"https://short.pypi.example/simple"},
+		},
+		{
+			name:    "extra index equals appends active refs",
+			line:    "--extra-index-url=https://extra.pypi.example/simple",
+			current: []string{"https://primary.pypi.example/simple"},
+			want: []string{
+				"https://extra.pypi.example/simple",
+				"https://primary.pypi.example/simple",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := updateRequirementSourceRefs(tt.line, tt.current)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("updateRequirementSourceRefs(%q, %#v) = %#v, want %#v", tt.line, tt.current, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRequirementsParserSourceRefsOptionVariants(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		pkgName  string
+		wantRefs []string
+	}{
+		{
+			name: "extra index appends space separated value",
+			input: `--index-url https://primary.pypi.example/simple
+--extra-index-url https://extra.pypi.example/simple
+extra-pkg==1.0.0
+`,
+			pkgName: "extra-pkg",
+			wantRefs: []string{
+				"https://extra.pypi.example/simple",
+				"https://primary.pypi.example/simple",
+			},
+		},
+		{
+			name: "find links appends space separated value",
+			input: `--index-url https://primary.pypi.example/simple
+--find-links https://wheels.pypi.example/simple
+wheel-pkg==2.0.0
+`,
+			pkgName: "wheel-pkg",
+			wantRefs: []string{
+				"https://primary.pypi.example/simple",
+				"https://wheels.pypi.example/simple",
+			},
+		},
+		{
+			name: "no index replaces active refs",
+			input: `--index-url https://primary.pypi.example/simple
+--extra-index-url https://extra.pypi.example/simple
+--no-index
+offline-pkg==3.0.0
+`,
+			pkgName:  "offline-pkg",
+			wantRefs: []string{"no-index"},
+		},
+		{
+			name: "index url equals replaces active refs",
+			input: `--extra-index-url https://extra.pypi.example/simple
+--index-url=https://replacement.pypi.example/simple
+replace-pkg==4.0.0
+`,
+			pkgName:  "replace-pkg",
+			wantRefs: []string{"https://replacement.pypi.example/simple"},
+		},
+		{
+			name: "short index equals replaces active refs",
+			input: `--index-url https://primary.pypi.example/simple
+--extra-index-url https://extra.pypi.example/simple
+-i=https://short.pypi.example/simple
+short-pkg==5.0.0
+`,
+			pkgName:  "short-pkg",
+			wantRefs: []string{"https://short.pypi.example/simple"},
+		},
+		{
+			name: "extra index equals appends active refs",
+			input: `--index-url https://primary.pypi.example/simple
+--extra-index-url=https://extra.pypi.example/simple
+eq-extra-pkg==6.0.0
+`,
+			pkgName: "eq-extra-pkg",
+			wantRefs: []string{
+				"https://extra.pypi.example/simple",
+				"https://primary.pypi.example/simple",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pkgs, err := parseSourceRefPackages(NewRequirementsParser(), tt.input)
 			if err != nil {
 				t.Fatalf("parse: %v", err)
 			}

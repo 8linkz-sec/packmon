@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"github.com/8linkz-sec/packmon/internal/ioutils"
 	"strings"
 	"time"
 
@@ -45,6 +46,44 @@ const upsertPackageReputationSQL = `
 	   OR package_reputation_cache.last_checked_at IS DISTINCT FROM EXCLUDED.last_checked_at
 	   OR package_reputation_cache.next_check_at IS DISTINCT FROM EXCLUDED.next_check_at
 	   OR package_reputation_cache.last_error IS DISTINCT FROM EXCLUDED.last_error`
+
+const (
+	packageReputationDueStatusPredicateSQL      = "status IN ('pending', 'error', 'malicious', 'removed', 'risk', 'clean', 'not_found')"
+	packageReputationCacheDueStatusPredicateSQL = "package_reputation_cache." + packageReputationDueStatusPredicateSQL
+)
+
+const markPackageReputationDueSQL = `
+	WITH upsert AS (
+		INSERT INTO package_reputation_cache (
+			ecosystem, name, version, source, status, severity, next_check_at
+		) VALUES (
+			$1, $2, $3, $4, 'pending', $5, NOW()
+		)
+		ON CONFLICT (ecosystem, name, version, source) DO UPDATE SET
+			next_check_at = NOW(),
+			updated_at = NOW()
+		WHERE ` + packageReputationCacheDueStatusPredicateSQL + `
+		  AND (
+			package_reputation_cache.next_check_at IS NULL
+			OR package_reputation_cache.next_check_at <= NOW()
+		  )
+		RETURNING 1
+	)
+	SELECT EXISTS(SELECT 1 FROM upsert)`
+
+const listDuePackageReputationsSQL = `
+	SELECT
+		ecosystem, name, version, source, status, severity, summary, description,
+		reference_urls::text, evidence::text, last_checked_at, next_check_at, last_error, updated_at
+	FROM package_reputation_cache
+	WHERE ecosystem = $1
+	  AND name = $2
+	  AND source = $3
+	  AND ` + packageReputationDueStatusPredicateSQL + `
+	  AND next_check_at IS NOT NULL
+	  AND next_check_at <= NOW()
+	ORDER BY next_check_at ASC, version ASC
+	LIMIT $4`
 
 func (s *Store) FindReputationFindingsBatch(ctx context.Context, packages []db.PackageQuery, source string) ([]domain.Finding, error) {
 	if len(packages) == 0 {
@@ -96,7 +135,7 @@ func (s *Store) FindReputationFindingsBatch(ctx context.Context, packages []db.P
 	if err != nil {
 		return nil, fmt.Errorf("postgres: find reputation findings batch: %w", err)
 	}
-	defer closeSilently(rows)
+	defer ioutils.CloseSilently(rows)
 
 	findings := make([]domain.Finding, 0)
 	for rows.Next() {
@@ -134,7 +173,7 @@ func (s *Store) FindReputationFindings(ctx context.Context, ecosystem, name, sou
 	if err != nil {
 		return nil, fmt.Errorf("postgres: find reputation findings: %w", err)
 	}
-	defer closeSilently(rows)
+	defer ioutils.CloseSilently(rows)
 
 	findings := make([]domain.Finding, 0)
 	for rows.Next() {
@@ -159,31 +198,16 @@ func (s *Store) MarkPackageReputationDue(ctx context.Context, rep *db.PackageRep
 	if strings.TrimSpace(rep.Ecosystem) == "" || strings.TrimSpace(rep.Name) == "" || strings.TrimSpace(rep.Version) == "" || strings.TrimSpace(rep.Source) == "" {
 		return false, nil
 	}
+	ecosystem, err := normalizeStoredEcosystem(rep.Ecosystem)
+	if err != nil {
+		return false, err
+	}
 
-	name := normalizePackageName(rep.Ecosystem, rep.Name)
+	name := normalizePackageName(ecosystem, rep.Name)
 	severity := normalizeReputationSeverity(rep.Severity)
 
-	const query = `
-		WITH upsert AS (
-			INSERT INTO package_reputation_cache (
-				ecosystem, name, version, source, status, severity, next_check_at
-			) VALUES (
-				$1, $2, $3, $4, 'pending', $5, NOW()
-			)
-			ON CONFLICT (ecosystem, name, version, source) DO UPDATE SET
-				next_check_at = NOW(),
-				updated_at = NOW()
-			WHERE package_reputation_cache.status IN ('pending', 'error', 'malicious', 'removed', 'risk', 'clean', 'not_found')
-			  AND (
-				package_reputation_cache.next_check_at IS NULL
-				OR package_reputation_cache.next_check_at <= NOW()
-			  )
-			RETURNING 1
-		)
-		SELECT EXISTS(SELECT 1 FROM upsert)`
-
 	var queued bool
-	if err := s.pool.QueryRow(ctx, query, rep.Ecosystem, name, rep.Version, rep.Source, severity).Scan(&queued); err != nil {
+	if err := s.pool.QueryRow(ctx, markPackageReputationDueSQL, ecosystem, name, rep.Version, rep.Source, severity).Scan(&queued); err != nil {
 		return false, fmt.Errorf("postgres: mark package reputation due: %w", err)
 	}
 	return queued, nil
@@ -193,25 +217,11 @@ func (s *Store) ListDuePackageReputations(ctx context.Context, ecosystem, name, 
 	limit = clampLimit(limit, 5, 100)
 	name = normalizePackageName(ecosystem, name)
 
-	const query = `
-		SELECT
-			ecosystem, name, version, source, status, severity, summary, description,
-			reference_urls::text, evidence::text, last_checked_at, next_check_at, last_error, updated_at
-		FROM package_reputation_cache
-		WHERE ecosystem = $1
-		  AND name = $2
-		  AND source = $3
-		  AND status IN ('pending', 'error', 'malicious', 'removed', 'risk', 'clean', 'not_found')
-		  AND next_check_at IS NOT NULL
-		  AND next_check_at <= NOW()
-		ORDER BY next_check_at ASC, version ASC
-		LIMIT $4`
-
-	rows, err := s.pool.Query(ctx, query, ecosystem, name, source, limit)
+	rows, err := s.pool.Query(ctx, listDuePackageReputationsSQL, ecosystem, name, source, limit)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list due package reputations: %w", err)
 	}
-	defer closeSilently(rows)
+	defer ioutils.CloseSilently(rows)
 
 	reps := make([]db.PackageReputation, 0)
 	for rows.Next() {
@@ -231,17 +241,24 @@ func (s *Store) UpsertPackageReputation(ctx context.Context, rep *db.PackageRepu
 	if rep == nil {
 		return nil
 	}
-	name := normalizePackageName(rep.Ecosystem, rep.Name)
+	ecosystem, err := normalizeStoredEcosystem(rep.Ecosystem)
+	if err != nil {
+		return err
+	}
+	name := normalizePackageName(ecosystem, rep.Name)
 	status := strings.ToLower(strings.TrimSpace(rep.Status))
 	if status == "" {
 		status = reputationStatusPending
 	}
-	severity := normalizeReputationSeverity(rep.Severity)
+	severity, err := normalizeStoredReputationSeverity(rep.Severity)
+	if err != nil {
+		return err
+	}
 	summary := strings.TrimSpace(rep.Summary)
 	description := strings.TrimSpace(rep.Description)
 
 	if _, err := s.pool.Exec(ctx, upsertPackageReputationSQL,
-		rep.Ecosystem,
+		ecosystem,
 		name,
 		rep.Version,
 		rep.Source,
@@ -280,30 +297,47 @@ func (s *Store) PrunePackageReputation(ctx context.Context, source string, older
 	return int(tag.RowsAffected()), nil
 }
 
-func reputationToFinding(rep db.PackageReputation) (domain.Finding, bool) {
-	var (
-		findingType domain.FindingType
-		riskType    string
-		title       string
-	)
+type reversingLabsReputationMapping struct {
+	findingType domain.FindingType
+	riskType    string
+	severity    domain.Severity
+	title       string
+}
 
-	switch strings.ToLower(strings.TrimSpace(rep.Status)) {
+func reversingLabsReputationStatusMapping(status, severity string) (reversingLabsReputationMapping, bool) {
+	var mapping reversingLabsReputationMapping
+	switch status {
 	case reputationStatusMalicious:
-		findingType = domain.FindingTypeMalicious
-		riskType = "malware"
-		title = "ReversingLabs: malware detected"
+		mapping.findingType = domain.FindingTypeMalicious
+		mapping.riskType = "malware"
+		mapping.title = "ReversingLabs: malware detected"
 	case reputationStatusRemoved:
-		findingType = domain.FindingTypeSupplyChainRisk
-		riskType = "removed_package"
-		title = "ReversingLabs: package version was removed"
+		mapping.findingType = domain.FindingTypeSupplyChainRisk
+		mapping.riskType = "removed_package"
+		mapping.title = "ReversingLabs: package version was removed"
 	case reputationStatusRisk:
-		findingType = domain.FindingTypeSupplyChainRisk
-		riskType = "malware_history"
-		title = "ReversingLabs: malware incident history"
+		mapping.findingType = domain.FindingTypeSupplyChainRisk
+		mapping.riskType = domain.RiskTypeMalwareHistory
+		mapping.title = "ReversingLabs: malware incident history"
 	default:
+		return reversingLabsReputationMapping{}, false
+	}
+
+	mapping.severity = domain.NormalizeFindingSeverity(domain.Finding{
+		Type:     mapping.findingType,
+		RiskType: mapping.riskType,
+		Severity: domain.Severity(normalizeReputationSeverity(severity)),
+	})
+	return mapping, true
+}
+
+func reputationToFinding(rep db.PackageReputation) (domain.Finding, bool) {
+	mapping, ok := reversingLabsReputationStatusMapping(strings.ToLower(strings.TrimSpace(rep.Status)), rep.Severity)
+	if !ok {
 		return domain.Finding{}, false
 	}
 
+	title := mapping.title
 	if strings.TrimSpace(rep.Summary) != "" {
 		title = strings.TrimSpace(rep.Summary)
 	}
@@ -312,22 +346,17 @@ func reputationToFinding(rep db.PackageReputation) (domain.Finding, bool) {
 		source = db.ReputationSourceReversingLabs
 	}
 	referenceURLs := string(rep.ReferenceURLs)
-	severity := domain.NormalizeFindingSeverity(domain.Finding{
-		Type:     findingType,
-		RiskType: riskType,
-		Severity: domain.Severity(normalizeReputationSeverity(rep.Severity)),
-	})
 
 	return domain.Finding{
 		Name:       rep.Name,
 		Version:    rep.Version,
 		Ecosystem:  domain.Ecosystem(rep.Ecosystem),
-		Type:       findingType,
-		Severity:   severity,
+		Type:       mapping.findingType,
+		Severity:   mapping.severity,
 		AdvisoryID: reputationFindingID(rep.Ecosystem, rep.Name, rep.Version),
 		Title:      title,
 		URL:        extractFirstURL(referenceURLs),
-		RiskType:   riskType,
+		RiskType:   mapping.riskType,
 		Source:     source,
 	}, true
 }
@@ -342,6 +371,14 @@ func normalizeReputationSeverity(severity string) string {
 		return "CRITICAL"
 	}
 	return normalized
+}
+
+func normalizeStoredReputationSeverity(severity string) (string, error) {
+	normalized := normalizeReputationSeverity(severity)
+	if !storedSeverityValid(normalized, false) {
+		return "", fmt.Errorf("unsupported reputation severity %q", severity)
+	}
+	return normalized, nil
 }
 
 type reputationScanner interface {

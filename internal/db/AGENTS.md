@@ -50,7 +50,7 @@ sync with `DESIGN.md` and `SECURITY.md` when the behavior intentionally changes.
 ## Tests
 
 ```bash
-go test ./internal/db/...
+go test -count=1 ./internal/db/...
 ```
 DB-backed tests require Postgres (see `tests/integration`). State explicitly if
 Postgres is unavailable locally.

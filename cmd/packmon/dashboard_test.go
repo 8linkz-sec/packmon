@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -71,6 +72,19 @@ func TestLocalDashboardRoutesExplainUnavailableAdminAndDoNotExposeStaleRefreshAP
 	if !strings.Contains(adminBody, "Local dashboard is read-only") || !strings.Contains(adminBody, "packmon-server") {
 		t.Fatalf("admin unavailable body = %q", adminBody)
 	}
+	if got := adminRecorder.Header().Get("Content-Type"); !strings.Contains(got, "text/html") {
+		t.Fatalf("admin unavailable content type = %q, want text/html", got)
+	}
+	for _, want := range []string{
+		`href="/"`,
+		`href="/search"`,
+		`href="/feeds"`,
+		`Local dashboard destinations`,
+	} {
+		if !strings.Contains(adminBody, want) {
+			t.Fatalf("admin unavailable body missing return path %q\nbody=%s", want, adminBody)
+		}
+	}
 
 	noticeRecorder := httptest.NewRecorder()
 	mux.ServeHTTP(noticeRecorder, httptest.NewRequest(http.MethodPost, "/api/v1/packages/npm/pkg%3Cscript%3E", nil))
@@ -82,14 +96,53 @@ func TestLocalDashboardRoutesExplainUnavailableAdminAndDoNotExposeStaleRefreshAP
 	}
 }
 
-func TestOpenBrowserSourceReapsStartedProcess(t *testing.T) {
-	t.Parallel()
+func TestStartBrowserCommandWaitsForStartedProcess(t *testing.T) {
+	originalWaitBrowserCommand := waitBrowserCommand
+	t.Cleanup(func() {
+		waitBrowserCommand = originalWaitBrowserCommand
+	})
 
-	source, err := os.ReadFile("dashboard.go")
-	if err != nil {
-		t.Fatalf("read dashboard.go: %v", err)
+	waitResult := make(chan error, 1)
+	waitBrowserCommand = func(cmd *exec.Cmd) error {
+		err := cmd.Wait()
+		waitResult <- err
+		return err
 	}
-	if !strings.Contains(string(source), ".Wait()") {
-		t.Fatal("dashboard browser launcher should reap started helper processes with Wait")
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestDashboardBrowserHelperProcess$")
+	cmd.Env = append(os.Environ(), "PACKMON_DASHBOARD_BROWSER_HELPER=1")
+
+	if err := startBrowserCommand(cmd); err != nil {
+		t.Fatalf("start browser command: %v", err)
 	}
+
+	select {
+	case err := <-waitResult:
+		if err != nil {
+			t.Fatalf("wait browser command: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+		t.Fatal("startBrowserCommand did not wait for the helper process")
+	}
+
+	if cmd.ProcessState == nil {
+		t.Fatal("browser helper process was not reaped")
+	}
+	if !cmd.ProcessState.Exited() {
+		t.Fatalf("browser helper process state = %v, want exited", cmd.ProcessState)
+	}
+}
+
+func TestDashboardBrowserHelperProcess(t *testing.T) {
+	if os.Getenv("PACKMON_DASHBOARD_BROWSER_HELPER") != "1" {
+		return
+	}
+	if os.Getenv("PACKMON_DASHBOARD_BROWSER_HELPER_EXIT") == "7" {
+		os.Exit(7)
+	}
+	os.Exit(0)
 }

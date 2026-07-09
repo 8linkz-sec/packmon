@@ -103,6 +103,188 @@ func testScanResult() *domain.ScanResult {
 	}
 }
 
+func testWebhookLogger(logs *bytes.Buffer, level slog.Level) *slog.Logger {
+	return slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: level}))
+}
+
+func TestSendWebhookUsesConfiguredLoggerWithScanID(t *testing.T) {
+	var configuredLogs bytes.Buffer
+	var defaultLogs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(testWebhookLogger(&defaultLogs, slog.LevelInfo))
+	defer slog.SetDefault(previousLogger)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	SendWebhook(context.Background(), WebhookConfig{
+		URL:     server.URL,
+		Version: "1.0.0",
+		Logger:  testWebhookLogger(&configuredLogs, slog.LevelInfo),
+	}, testScanResult(), nil)
+
+	if output := defaultLogs.String(); output != "" {
+		t.Fatalf("webhook wrote to package default logger:\n%s", output)
+	}
+	output := configuredLogs.String()
+	for _, want := range []string{"webhook: POST succeeded", "scan_id=test-scan-1", "status=202"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("configured webhook log missing %q:\n%s", want, output)
+		}
+	}
+}
+
+func TestSendWebhookConfiguredLoggerSuppressesRoutineSuccess(t *testing.T) {
+	var logs bytes.Buffer
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	SendWebhook(context.Background(), WebhookConfig{
+		URL:     server.URL,
+		Version: "1.0.0",
+		Logger:  testWebhookLogger(&logs, slog.LevelWarn),
+	}, testScanResult(), nil)
+
+	if output := logs.String(); output != "" {
+		t.Fatalf("webhook success log was not suppressed at WARN level:\n%s", output)
+	}
+}
+
+func TestSendWebhookLogsScanIDOnValidationAndDeliveryFailures(t *testing.T) {
+	t.Run("validation refusal", func(t *testing.T) {
+		var logs bytes.Buffer
+
+		SendWebhook(context.Background(), WebhookConfig{
+			URL:     "http://user:hook-secret@example.test/private?token=query-secret",
+			Version: "1.0.0",
+			Logger:  testWebhookLogger(&logs, slog.LevelInfo),
+		}, testScanResult(), nil) //nolint:gosec // fake secret-bearing URL verifies redaction.
+
+		output := logs.String()
+		for _, want := range []string{"webhook: refusing insecure webhook URL", "scan_id=test-scan-1"} {
+			if !strings.Contains(output, want) {
+				t.Fatalf("validation log missing %q:\n%s", want, output)
+			}
+		}
+		for _, leaked := range []string{"hook-secret", "query-secret", "/private"} {
+			if strings.Contains(output, leaked) {
+				t.Fatalf("validation log leaked %q:\n%s", leaked, output)
+			}
+		}
+	})
+
+	t.Run("marshal failure", func(t *testing.T) {
+		var logs bytes.Buffer
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			t.Fatal("webhook server should not be called after marshal failure")
+		}))
+		defer server.Close()
+
+		result := testScanResult()
+		result.ScannedAt = time.Date(10000, time.January, 1, 0, 0, 0, 0, time.UTC)
+
+		SendWebhook(context.Background(), WebhookConfig{
+			URL:     server.URL,
+			Version: "1.0.0",
+			Logger:  testWebhookLogger(&logs, slog.LevelInfo),
+		}, result, nil)
+
+		output := logs.String()
+		for _, want := range []string{"webhook: marshal error", "scan_id=test-scan-1"} {
+			if !strings.Contains(output, want) {
+				t.Fatalf("marshal log missing %q:\n%s", want, output)
+			}
+		}
+	})
+
+	t.Run("post failure", func(t *testing.T) {
+		var logs bytes.Buffer
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		addr := ln.Addr().String()
+		if err := ln.Close(); err != nil {
+			t.Fatalf("close listener: %v", err)
+		}
+
+		SendWebhook(context.Background(), WebhookConfig{
+			URL:     "http://" + addr,
+			Version: "1.0.0",
+			Logger:  testWebhookLogger(&logs, slog.LevelInfo),
+		}, testScanResult(), nil)
+
+		output := logs.String()
+		for _, want := range []string{"webhook: POST failed", "scan_id=test-scan-1"} {
+			if !strings.Contains(output, want) {
+				t.Fatalf("POST failure log missing %q:\n%s", want, output)
+			}
+		}
+	})
+
+	t.Run("non-2xx", func(t *testing.T) {
+		var logs bytes.Buffer
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		defer server.Close()
+
+		SendWebhook(context.Background(), WebhookConfig{
+			URL:     server.URL,
+			Version: "1.0.0",
+			Logger:  testWebhookLogger(&logs, slog.LevelInfo),
+		}, testScanResult(), nil)
+
+		output := logs.String()
+		for _, want := range []string{"webhook: POST returned non-2xx", "scan_id=test-scan-1", "status=500"} {
+			if !strings.Contains(output, want) {
+				t.Fatalf("non-2xx log missing %q:\n%s", want, output)
+			}
+		}
+	})
+}
+
+func TestSendWebhookUsesSafeRedirectPolicy(t *testing.T) {
+	var logs bytes.Buffer
+	var targetCalled bool
+
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		targetCalled = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer target.Close()
+
+	redirector := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
+	}))
+	defer redirector.Close()
+
+	previousTransport := http.DefaultTransport
+	http.DefaultTransport = redirector.Client().Transport
+	defer func() { http.DefaultTransport = previousTransport }()
+
+	SendWebhook(context.Background(), WebhookConfig{
+		URL:     redirector.URL,
+		Version: "1.0.0",
+		Logger:  testWebhookLogger(&logs, slog.LevelInfo),
+	}, testScanResult(), nil)
+
+	if targetCalled {
+		t.Fatal("webhook followed HTTPS-to-HTTP redirect")
+	}
+	output := logs.String()
+	for _, want := range []string{"webhook: POST failed", "refusing redirect from https to http", "scan_id=test-scan-1"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("redirect refusal log missing %q:\n%s", want, output)
+		}
+	}
+}
+
 func TestSendWebhook_Success(t *testing.T) {
 	t.Parallel()
 
@@ -200,8 +382,8 @@ func TestSendWebhook_Success(t *testing.T) {
 	if envelope.Repository.Name != "org/repo" {
 		t.Fatalf("envelope.Repository.Name = %q, want %q", envelope.Repository.Name, "org/repo")
 	}
-	if envelope.Repository.Branch != "" || envelope.Repository.Commit != "" {
-		t.Fatalf("envelope.Repository includes branch/commit metadata: %+v", envelope.Repository)
+	if strings.Contains(string(gotBody), `"branch"`) || strings.Contains(string(gotBody), `"commit"`) {
+		t.Fatalf("webhook body includes branch/commit metadata: %s", string(gotBody))
 	}
 	if envelope.Result.ScanID != "test-scan-1" {
 		t.Fatalf("envelope.Result.ScanID = %q, want %q", envelope.Result.ScanID, "test-scan-1")
@@ -232,13 +414,13 @@ func TestSendWebhook_NoSecret_NoAuthenticationHeader(t *testing.T) {
 }
 
 func TestSendWebhookRejectsPlainHTTPToNonLoopback(t *testing.T) {
-	var logs strings.Builder
-	logger := slog.New(slog.NewTextHandler(&logs, nil))
-	oldLogger := slog.Default()
-	slog.SetDefault(logger)
-	defer slog.SetDefault(oldLogger)
+	var logs bytes.Buffer
 
-	SendWebhook(context.Background(), WebhookConfig{URL: "http://user:hook-secret@example.test/private?token=query-secret", Version: "1.0.0"}, testScanResult(), nil) //nolint:gosec // fake secret-bearing URL verifies redaction.
+	SendWebhook(context.Background(), WebhookConfig{
+		URL:     "http://user:hook-secret@example.test/private?token=query-secret",
+		Version: "1.0.0",
+		Logger:  testWebhookLogger(&logs, slog.LevelInfo),
+	}, testScanResult(), nil) //nolint:gosec // fake secret-bearing URL verifies redaction.
 
 	output := logs.String()
 	if !strings.Contains(output, "refusing insecure webhook URL") {
@@ -285,6 +467,8 @@ func TestSendWebhook_Timeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create listener: %v", err)
 	}
+	releaseConnections := make(chan struct{})
+	defer close(releaseConnections)
 	defer func() { _ = ln.Close() }()
 
 	// Accept connections in the background but never respond.
@@ -296,7 +480,7 @@ func TestSendWebhook_Timeout(t *testing.T) {
 			}
 			// Hold the connection open without sending anything.
 			go func(c net.Conn) {
-				<-time.After(30 * time.Second)
+				<-releaseConnections
 				_ = c.Close()
 			}(conn)
 		}
@@ -347,9 +531,6 @@ func TestSendWebhook_ServerError(t *testing.T) {
 
 func TestSendWebhookLogsRedactedURL(t *testing.T) {
 	var logs bytes.Buffer
-	previousLogger := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
-	defer slog.SetDefault(previousLogger)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -365,7 +546,11 @@ func TestSendWebhookLogsRedactedURL(t *testing.T) {
 	webhookURL.RawQuery = "sig=query-secret"
 	webhookURL.Fragment = "frag-secret"
 
-	SendWebhook(context.Background(), WebhookConfig{URL: webhookURL.String(), Version: "1.0.0"}, testScanResult(), nil)
+	SendWebhook(context.Background(), WebhookConfig{
+		URL:     webhookURL.String(),
+		Version: "1.0.0",
+		Logger:  testWebhookLogger(&logs, slog.LevelInfo),
+	}, testScanResult(), nil)
 
 	output := logs.String()
 	for _, leaked := range []string{"user-secret", "pass-secret", "path-token", "query-secret", "frag-secret"} {
@@ -380,9 +565,6 @@ func TestSendWebhookLogsRedactedURL(t *testing.T) {
 
 func TestSendWebhookPostFailureLogsRedactedURLAndError(t *testing.T) {
 	var logs bytes.Buffer
-	previousLogger := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
-	defer slog.SetDefault(previousLogger)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -394,7 +576,11 @@ func TestSendWebhookPostFailureLogsRedactedURLAndError(t *testing.T) {
 	}
 
 	rawURL := "http://user-secret:pass-secret@" + addr + "/services/path-token?sig=query-secret#frag-secret"
-	SendWebhook(context.Background(), WebhookConfig{URL: rawURL, Version: "1.0.0"}, testScanResult(), nil)
+	SendWebhook(context.Background(), WebhookConfig{
+		URL:     rawURL,
+		Version: "1.0.0",
+		Logger:  testWebhookLogger(&logs, slog.LevelInfo),
+	}, testScanResult(), nil)
 
 	output := logs.String()
 	for _, leaked := range []string{"user-secret", "pass-secret", "path-token", "query-secret", "frag-secret"} {
@@ -409,12 +595,13 @@ func TestSendWebhookPostFailureLogsRedactedURLAndError(t *testing.T) {
 
 func TestSendWebhookCreateRequestLogsRedactedURL(t *testing.T) {
 	var logs bytes.Buffer
-	previousLogger := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
-	defer slog.SetDefault(previousLogger)
 
 	rawURL := "://user-secret/path-token?sig=query-secret#frag-secret"
-	SendWebhook(context.Background(), WebhookConfig{URL: rawURL, Version: "1.0.0"}, testScanResult(), nil)
+	SendWebhook(context.Background(), WebhookConfig{
+		URL:     rawURL,
+		Version: "1.0.0",
+		Logger:  testWebhookLogger(&logs, slog.LevelInfo),
+	}, testScanResult(), nil)
 
 	output := logs.String()
 	for _, leaked := range []string{"user-secret", "path-token", "query-secret", "frag-secret"} {

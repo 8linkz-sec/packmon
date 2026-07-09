@@ -1,8 +1,10 @@
 package admin
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -26,6 +28,7 @@ type adminFlowStoreStub struct {
 	db.Store
 	mu             sync.Mutex
 	adminAuth      *db.AdminAuth
+	onGetAdminAuth func(*adminFlowStoreStub)
 	apiKeys        []db.APIKey
 	nextAPIKeyID   int
 	audit          []db.AdminAuditLogEntry
@@ -37,6 +40,8 @@ type adminFlowStoreStub struct {
 	queueJobs      []db.RefreshJob
 	nextJobID      int
 	dashboard      *db.DashboardStatsResult
+	dailyScans     []db.DailyScanStats
+	recentScans    []db.ScanLogEntry
 
 	listFeedConfigs     int
 	dashboardStatsCalls int
@@ -53,11 +58,17 @@ func newAdminStoreStub() *adminFlowStoreStub {
 
 func (s *adminFlowStoreStub) GetAdminAuth(context.Context) (*db.AdminAuth, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.adminAuth == nil {
+		s.mu.Unlock()
 		return nil, nil
 	}
 	copyValue := *s.adminAuth
+	onGetAdminAuth := s.onGetAdminAuth
+	s.onGetAdminAuth = nil
+	s.mu.Unlock()
+	if onGetAdminAuth != nil {
+		onGetAdminAuth(s)
+	}
 	return &copyValue, nil
 }
 
@@ -75,6 +86,19 @@ func (s *adminFlowStoreStub) UpsertAdminAuthWithAudit(_ context.Context, passwor
 		return err
 	}
 	s.upsertAdminAuthLocked(passwordHash, isBootstrap)
+	return nil
+}
+
+func (s *adminFlowStoreStub) ChangeAdminPasswordWithAudit(_ context.Context, newHash, expectedOldHash string, audit *db.AdminAuditEntry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.adminAuth == nil || s.adminAuth.PasswordHash != expectedOldHash {
+		return db.ErrAdminAuthConflict
+	}
+	if err := s.insertAdminAuditLogLocked(audit); err != nil {
+		return err
+	}
+	s.upsertAdminAuthLocked(newHash, false)
 	return nil
 }
 
@@ -109,6 +133,7 @@ func (s *adminFlowStoreStub) insertAdminAuditLogLocked(entry *db.AdminAuditEntry
 		Action:         entry.Action,
 		Details:        append([]byte(nil), entry.Details...),
 		IP:             entry.IP,
+		CorrelationID:  entry.CorrelationID,
 		CreatedAt:      time.Now().UTC().Truncate(time.Microsecond),
 		PreviousDigest: previousDigest,
 	}
@@ -163,6 +188,22 @@ func (s *adminFlowStoreStub) ListAPIKeys(context.Context) ([]db.APIKey, error) {
 	defer s.mu.Unlock()
 	out := append([]db.APIKey(nil), s.apiKeys...)
 	return out, nil
+}
+
+func (s *adminFlowStoreStub) ListAPIKeysPage(_ context.Context, limit, offset int) ([]db.APIKey, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if limit <= 0 {
+		return nil, nil
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= len(s.apiKeys) {
+		return nil, nil
+	}
+	end := min(offset+limit, len(s.apiKeys))
+	return append([]db.APIKey(nil), s.apiKeys[offset:end]...), nil
 }
 
 func (s *adminFlowStoreStub) CreateAPIKey(_ context.Context, name, keyHash string, expiresAt *time.Time) (int, error) {
@@ -264,6 +305,8 @@ func (s *adminFlowStoreStub) DeleteAPIKeyWithAudit(_ context.Context, keyID int,
 	}
 	now := time.Now().UTC()
 	s.apiKeys[index].DeletedAt = &now
+	s.apiKeys[index].Name = ""
+	s.apiKeys[index].KeyHash = fmt.Sprintf("deleted:%d", keyID)
 	return nil
 }
 
@@ -278,6 +321,8 @@ func (s *adminFlowStoreStub) deleteAPIKeyLocked(keyID int) error {
 			}
 			now := time.Now().UTC()
 			s.apiKeys[i].DeletedAt = &now
+			s.apiKeys[i].Name = ""
+			s.apiKeys[i].KeyHash = fmt.Sprintf("deleted:%d", keyID)
 			return nil
 		}
 	}
@@ -347,22 +392,61 @@ func (s *adminFlowStoreStub) GetFeedConfig(_ context.Context, feedName string) (
 func (s *adminFlowStoreStub) UpsertFeedConfig(_ context.Context, cfg *db.FeedConfig) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.upsertFeedConfigLocked(cfg)
+	return nil
+}
+
+func (s *adminFlowStoreStub) UpsertFeedConfigWithAudit(_ context.Context, cfg *db.FeedConfig, audit *db.AdminAuditEntry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if expected, ok := expectedAdminFlowFeedConfigUpdatedAt(cfg); ok {
+		if err := s.checkFeedConfigRevisionLocked(cfg.FeedName, expected); err != nil {
+			return err
+		}
+	}
+	if err := s.insertAdminAuditLogLocked(audit); err != nil {
+		return err
+	}
+	s.upsertFeedConfigLocked(cfg)
+	return nil
+}
+
+func (s *adminFlowStoreStub) upsertFeedConfigLocked(cfg *db.FeedConfig) {
 	copyValue := *cfg
 	copyValue.FeedName = config.NormalizeFeedName(cfg.FeedName)
 	copyValue.UpdatedAt = time.Now().UTC()
+	copyValue.ExpectedUpdatedAt = nil
 	if cfg.SyncInterval != nil {
 		duration := *cfg.SyncInterval
 		copyValue.SyncInterval = &duration
 	}
 	s.feedConfigs[copyValue.FeedName] = copyValue
-	return nil
 }
 
 func (s *adminFlowStoreStub) DeleteFeedConfig(_ context.Context, feedName string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.feedConfigs, config.NormalizeFeedName(feedName))
+	s.deleteFeedConfigLocked(feedName)
 	return nil
+}
+
+func (s *adminFlowStoreStub) DeleteFeedConfigWithAudit(_ context.Context, feedName string, expectedUpdatedAt *time.Time, audit *db.AdminAuditEntry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if expectedUpdatedAt != nil {
+		if err := s.checkFeedConfigRevisionLocked(feedName, *expectedUpdatedAt); err != nil {
+			return err
+		}
+	}
+	if err := s.insertAdminAuditLogLocked(audit); err != nil {
+		return err
+	}
+	s.deleteFeedConfigLocked(feedName)
+	return nil
+}
+
+func (s *adminFlowStoreStub) deleteFeedConfigLocked(feedName string) {
+	delete(s.feedConfigs, config.NormalizeFeedName(feedName))
 }
 
 func (s *adminFlowStoreStub) ListFeedConfigs(context.Context) ([]db.FeedConfig, error) {
@@ -375,6 +459,33 @@ func (s *adminFlowStoreStub) ListFeedConfigs(context.Context) ([]db.FeedConfig, 
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].FeedName < out[j].FeedName })
 	return out, nil
+}
+
+func expectedAdminFlowFeedConfigUpdatedAt(cfg *db.FeedConfig) (time.Time, bool) {
+	if cfg == nil {
+		return time.Time{}, false
+	}
+	if cfg.ExpectedUpdatedAt != nil {
+		return *cfg.ExpectedUpdatedAt, true
+	}
+	if !cfg.UpdatedAt.IsZero() {
+		return cfg.UpdatedAt, true
+	}
+	return time.Time{}, false
+}
+
+func (s *adminFlowStoreStub) checkFeedConfigRevisionLocked(feedName string, expected time.Time) error {
+	current, found := s.feedConfigs[config.NormalizeFeedName(feedName)]
+	if expected.IsZero() {
+		if found {
+			return db.ErrConflict
+		}
+		return nil
+	}
+	if !found || !current.UpdatedAt.Equal(expected.UTC()) {
+		return db.ErrConflict
+	}
+	return nil
 }
 
 func (s *adminFlowStoreStub) GetSystemSettings(context.Context) (*db.SystemSettings, error) {
@@ -396,6 +507,38 @@ func (s *adminFlowStoreStub) UpsertSystemSettings(_ context.Context, settings *d
 	return nil
 }
 
+func (s *adminFlowStoreStub) UpsertSystemSettingsWithAudit(_ context.Context, settings *db.SystemSettings, audit *db.AdminAuditEntry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if expected, ok := expectedAdminFlowSystemSettingsUpdatedAt(settings); ok {
+		if s.systemSettings == nil {
+			if !expected.IsZero() {
+				return db.ErrConflict
+			}
+		} else if expected.IsZero() || !s.systemSettings.UpdatedAt.Equal(expected.UTC()) {
+			return db.ErrConflict
+		}
+	}
+	copyValue := *settings
+	copyValue.UpdatedAt = time.Now().UTC()
+	copyValue.ExpectedUpdatedAt = nil
+	s.systemSettings = &copyValue
+	return s.insertAdminAuditLogLocked(audit)
+}
+
+func expectedAdminFlowSystemSettingsUpdatedAt(settings *db.SystemSettings) (time.Time, bool) {
+	if settings == nil {
+		return time.Time{}, false
+	}
+	if settings.ExpectedUpdatedAt != nil {
+		return *settings.ExpectedUpdatedAt, true
+	}
+	if !settings.UpdatedAt.IsZero() {
+		return settings.UpdatedAt, true
+	}
+	return time.Time{}, false
+}
+
 func (s *adminFlowStoreStub) DashboardStats(context.Context) (*db.DashboardStatsResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -408,6 +551,28 @@ func (s *adminFlowStoreStub) DashboardStats(context.Context) (*db.DashboardStats
 	return &copyValue, nil
 }
 
+func (s *adminFlowStoreStub) CountScansByDay(context.Context, int) ([]db.DailyScanStats, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]db.DailyScanStats(nil), s.dailyScans...), nil
+}
+
+func (s *adminFlowStoreStub) ListRecentScans(_ context.Context, limit, offset int) ([]db.ScanLogEntry, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	scans := append([]db.ScanLogEntry(nil), s.recentScans...)
+	if offset > 0 {
+		if offset >= len(scans) {
+			return []db.ScanLogEntry{}, nil
+		}
+		scans = scans[offset:]
+	}
+	if limit > 0 && len(scans) > limit {
+		scans = scans[:limit]
+	}
+	return scans, nil
+}
+
 func (s *adminFlowStoreStub) UpsertManualAdvisory(_ context.Context, advisory *db.ManualAdvisory) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -416,9 +581,37 @@ func (s *adminFlowStoreStub) UpsertManualAdvisory(_ context.Context, advisory *d
 	return nil
 }
 
+func (s *adminFlowStoreStub) UpsertManualAdvisoryWithAudit(_ context.Context, advisory *db.ManualAdvisory, audit *db.AdminAuditEntry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if current, ok := s.manual[advisory.ID]; ok && !advisory.UpdatedAt.IsZero() && !current.UpdatedAt.Equal(advisory.UpdatedAt) {
+		return db.ErrConflict
+	}
+	if err := s.insertAdminAuditLogLocked(audit); err != nil {
+		return err
+	}
+	copyValue := *advisory
+	copyValue.UpdatedAt = time.Now().UTC()
+	s.manual[copyValue.ID] = copyValue
+	return nil
+}
+
 func (s *adminFlowStoreStub) DeleteManualAdvisory(_ context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, ok := s.manual[id]; !ok {
+		return fmt.Errorf("manual advisory %s not found", id)
+	}
+	delete(s.manual, id)
+	return nil
+}
+
+func (s *adminFlowStoreStub) DeleteManualAdvisoryWithAudit(_ context.Context, id string, audit *db.AdminAuditEntry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.insertAdminAuditLogLocked(audit); err != nil {
+		return err
+	}
 	if _, ok := s.manual[id]; !ok {
 		return fmt.Errorf("manual advisory %s not found", id)
 	}
@@ -445,6 +638,8 @@ func (s *adminFlowStoreStub) QueueStats(context.Context) (*db.QueueStatsResult, 
 		switch job.Status {
 		case "pending":
 			stats.Pending++
+		case "processing":
+			stats.Processing++
 		case "paused":
 			stats.Paused++
 		case "done":
@@ -691,7 +886,7 @@ func (s *adminFlowStoreStub) addQueueJob(status string) int {
 		Ecosystem:   "npm",
 		Name:        "left-pad",
 		Source:      "socket",
-		Priority:    3,
+		Priority:    db.RefreshPriorityNormal,
 		Status:      status,
 		RequestedAt: time.Now().UTC(),
 	})
@@ -703,14 +898,21 @@ func newAdminFlowHandler(t *testing.T, store *adminFlowStoreStub, cfg *config.Co
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	sm := auth.NewSessionManager(ctx, time.Hour, false)
+	sm := auth.NewSessionManagerWithIdleTimeout(ctx, time.Hour, auth.DefaultAdminIdleTimeout, false)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	runtime := config.NewRuntimeSettings(cfg.Server.BlockThreshold, cfg.Server.RateLimitPerMinute, cfg.Server.RateLimitBurst)
+	runtime := config.NewRuntimeSettingsFromConfig(cfg)
 	var syncFn FeedSyncFunc
 	if len(syncFeed) > 0 {
 		syncFn = syncFeed[0]
 	}
-	handler := NewAdminHandler(ctx, store, sm, web.NewRenderer(web.TemplateFS(), false), logger, cfg, runtime, syncFn)
+	handler := NewAdminHandler(ctx, store, sm, web.NewRendererWithLayoutLinks(web.TemplateFS(), false, web.LayoutLinks{}), logger, cfg, runtime, syncFn)
+	handler.SetFeedConfigApplyFunc(func(context.Context, config.FeedSettings) error {
+		return nil
+	})
+	handler.SetFeedConfigResetFunc(func(_ context.Context, feedName string) (config.FeedSettings, bool, error) {
+		feed, ok := cfg.FeedSettings(feedName)
+		return feed, ok, nil
+	})
 	return handler, sm, cancel
 }
 
@@ -725,6 +927,10 @@ func adminFlowConfig() *config.Config {
 		DB:      config.DBConfig{Host: "db.internal", Name: "packmon", SSLMode: "disable"},
 		Metrics: config.MetricsConfig{Host: "127.0.0.1", Port: 9090},
 		Admin:   config.AdminConfig{SessionTimeout: time.Hour},
+		Retention: config.RetentionConfig{
+			ScanLog:       30 * 24 * time.Hour,
+			AdminAuditLog: 30 * 24 * time.Hour,
+		},
 		FeedSync: config.FeedSyncConfig{
 			Interval:  time.Hour,
 			OnStartup: true,
@@ -758,9 +964,9 @@ func authenticatedAdminRequest(t *testing.T, sm *auth.SessionManager, method, ta
 	t.Helper()
 
 	rec := httptest.NewRecorder()
-	sess, err := sm.Create(rec)
+	sess, err := sm.CreateAdmin(rec, false)
 	if err != nil {
-		t.Fatalf("Create session: %v", err)
+		t.Fatalf("CreateAdmin session: %v", err)
 	}
 
 	req := httptest.NewRequest(method, target, nil)
@@ -774,9 +980,9 @@ func authenticatedAdminFormRequest(t *testing.T, sm *auth.SessionManager, target
 	t.Helper()
 
 	rec := httptest.NewRecorder()
-	sess, err := sm.Create(rec)
+	sess, err := sm.CreateAdmin(rec, false)
 	if err != nil {
-		t.Fatalf("Create session: %v", err)
+		t.Fatalf("CreateAdmin session: %v", err)
 	}
 	token, err := auth.CSRFToken(sess)
 	if err != nil {
@@ -824,7 +1030,7 @@ func loginAdminFormRequest(t *testing.T, handler *AdminHandler, sm *auth.Session
 
 	var sessionCookie *http.Cookie
 	for _, cookie := range loginRec.Result().Cookies() {
-		if cookie.Name == auth.SessionCookieName && cookie.Value != "" && cookie.MaxAge > 0 {
+		if cookie.Name == auth.SessionCookieName && cookie.Value != "" {
 			copyCookie := *cookie
 			sessionCookie = &copyCookie
 		}
@@ -882,7 +1088,7 @@ func TestAdminPagesRenderWithAuthenticatedSession(t *testing.T) {
 	store.audit = append(store.audit, db.AdminAuditLogEntry{ID: 1, Action: "login_success", Details: []byte(`{"ip":"127.0.0.1"}`), CreatedAt: now})
 	store.manual["manual:existing"] = db.ManualAdvisory{ID: "manual:existing", FindingType: "vulnerability", Ecosystem: "npm", Name: "left-pad", Severity: "HIGH", Summary: "manual"}
 
-	handler, sm, _ := newAdminFlowHandler(t, store, adminFlowConfig())
+	handler, sm := newAdminHandlerForStore(t, store, adminFlowConfig())
 
 	for _, tt := range []struct {
 		name   string
@@ -951,7 +1157,88 @@ func TestAdminPagesRenderWithAuthenticatedSession(t *testing.T) {
 			if tt.name == "advisories" && !strings.Contains(body, "apply to all versions") {
 				t.Fatalf("%s body missing manual vulnerability version-scope warning\nbody=%s", tt.target, body)
 			}
+			if tt.name == "advisories" && strings.Contains(body, `value="docker"`) {
+				t.Fatalf("%s body exposes Docker as manual advisory scan coverage\nbody=%s", tt.target, body)
+			}
 		})
+	}
+}
+
+func TestAdminAdvisoriesCreateFormIncludesStableManualID(t *testing.T) {
+	store := newAdminStoreStub()
+	handler, sm := newAdminHandlerForStore(t, store, adminFlowConfig())
+
+	req, _ := authenticatedAdminRequest(t, sm, http.MethodGet, "/admin/advisories")
+	rec := httptest.NewRecorder()
+	handler.HandleAdminAdvisories(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("HandleAdminAdvisories status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `name="id" value="manual:`) {
+		t.Fatalf("create form missing stable manual advisory ID\nbody=%s", body)
+	}
+}
+
+func TestAdminAdvisoryCreateFormRendersConstraintCues(t *testing.T) {
+	store := newAdminStoreStub()
+	handler, sm := newAdminHandlerForStore(t, store, adminFlowConfig())
+
+	req, _ := authenticatedAdminRequest(t, sm, http.MethodGet, "/admin/advisories")
+	rec := httptest.NewRecorder()
+	handler.HandleAdminAdvisories(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("HandleAdminAdvisories status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	body := rec.Body.String()
+	for _, want := range []string{
+		`id="adv-ecosystem-help"`,
+		`aria-describedby="adv-ecosystem-help"`,
+		`id="adv-name-help"`,
+		`maxlength="256"`,
+		`aria-describedby="adv-name-help"`,
+		`id="adv-severity-help"`,
+		`aria-describedby="adv-severity-help"`,
+		`id="adv-summary-help"`,
+		`maxlength="1000"`,
+		`aria-describedby="adv-summary-help"`,
+		`id="adv-description-help"`,
+		`maxlength="8000"`,
+		`aria-describedby="adv-description-help"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("manual advisory create form missing constraint cue %q\nbody=%s", want, body)
+		}
+	}
+}
+
+func TestAdminSettingsPasswordFormRendersConfirmationCues(t *testing.T) {
+	store := newAdminStoreStub()
+	handler, sm := newAdminHandlerForStore(t, store, adminFlowConfig())
+
+	req, _ := authenticatedAdminRequest(t, sm, http.MethodGet, "/admin/settings")
+	rec := httptest.NewRecorder()
+	handler.HandleAdminSettings(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("HandleAdminSettings status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	body := rec.Body.String()
+	for _, want := range []string{
+		`data-password-confirm-form`,
+		`id="password-confirm-help"`,
+		`aria-describedby="password-length-help password-confirm-help"`,
+		`data-password-confirm-source`,
+		`data-password-confirm-target`,
+		`data-password-mismatch-message="New passwords do not match."`,
+		`autocomplete="current-password"`,
+		`autocomplete="new-password"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("password form missing confirmation cue %q\nbody=%s", want, body)
+		}
 	}
 }
 
@@ -979,12 +1266,18 @@ func TestAdminDashboardUsesRuntimeFeedRowsAndPausedQueue(t *testing.T) {
 		t.Fatalf("dashboard status = %d, want 200; body=%s", rec.Code, body)
 	}
 	for _, want := range []string{
-		"Queue Paused",
+		"Queue Summary",
+		">Paused</div>",
 		"ReversingLabs",
 		"configured",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard body missing runtime-aware marker %q\nbody=%s", want, body)
+		}
+	}
+	for _, notWant := range []string{"Queue Pending", "Queue Paused"} {
+		if strings.Contains(body, notWant) {
+			t.Fatalf("dashboard body still duplicates queue metric %q in top-level cards\nbody=%s", notWant, body)
 		}
 	}
 	rlRow := adminTableRowContaining(body, "ReversingLabs")
@@ -993,10 +1286,101 @@ func TestAdminDashboardUsesRuntimeFeedRowsAndPausedQueue(t *testing.T) {
 	}
 }
 
+func TestAdminDashboardLoadsIndependentWidgetsConcurrently(t *testing.T) {
+	base := newAdminStoreStub()
+	hash, err := auth.HashPassword("current-password")
+	if err != nil {
+		t.Fatalf("HashPassword() error = %v", err)
+	}
+	base.adminAuth = &db.AdminAuth{PasswordHash: hash, PasswordIsBootstrap: false, CreatedAt: time.Now().UTC()}
+	base.dashboard = &db.DashboardStatsResult{BySeverity: map[string]int{}}
+
+	store := &blockingAdminDashboardStore{
+		adminFlowStoreStub: base,
+		started:            make(chan string, 4),
+		release:            make(chan struct{}),
+	}
+	handler, sm := newAdminHandlerForStore(t, store, adminFlowConfig())
+	req, _ := authenticatedAdminRequest(t, sm, http.MethodGet, "/admin/")
+	rec := httptest.NewRecorder()
+	done := make(chan int, 1)
+	go func() {
+		handler.HandleDashboard(rec, req)
+		done <- rec.Code
+	}()
+
+	waitForStartedAdminDashboardReads(t, store.started, []string{"auth", "stats", "feeds", "queue"}, store.release)
+	close(store.release)
+
+	select {
+	case code := <-done:
+		if code != http.StatusOK {
+			t.Fatalf("dashboard status = %d, want %d; body=%s", code, http.StatusOK, rec.Body.String())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("admin dashboard handler did not finish after releasing concurrent store reads")
+	}
+}
+
+type blockingAdminDashboardStore struct {
+	*adminFlowStoreStub
+	started chan string
+	release chan struct{}
+}
+
+func (s *blockingAdminDashboardStore) GetAdminAuth(ctx context.Context) (*db.AdminAuth, error) {
+	s.waitForAdminDashboardRelease(ctx, "auth")
+	return s.adminFlowStoreStub.GetAdminAuth(ctx)
+}
+
+func (s *blockingAdminDashboardStore) DashboardStats(ctx context.Context) (*db.DashboardStatsResult, error) {
+	s.waitForAdminDashboardRelease(ctx, "stats")
+	return s.adminFlowStoreStub.DashboardStats(ctx)
+}
+
+func (s *blockingAdminDashboardStore) ListFeedSyncStatuses(ctx context.Context) ([]db.FeedSyncStatus, error) {
+	s.waitForAdminDashboardRelease(ctx, "feeds")
+	return s.adminFlowStoreStub.ListFeedSyncStatuses(ctx)
+}
+
+func (s *blockingAdminDashboardStore) QueueStats(ctx context.Context) (*db.QueueStatsResult, error) {
+	s.waitForAdminDashboardRelease(ctx, "queue")
+	return s.adminFlowStoreStub.QueueStats(ctx)
+}
+
+func (s *blockingAdminDashboardStore) waitForAdminDashboardRelease(ctx context.Context, name string) {
+	select {
+	case s.started <- name:
+	case <-ctx.Done():
+		return
+	}
+	select {
+	case <-s.release:
+	case <-ctx.Done():
+	}
+}
+
+func waitForStartedAdminDashboardReads(t *testing.T, started <-chan string, want []string, release chan struct{}) {
+	t.Helper()
+
+	seen := make(map[string]bool, len(want))
+	timeout := time.After(750 * time.Millisecond)
+	for len(seen) < len(want) {
+		select {
+		case name := <-started:
+			seen[name] = true
+		case <-timeout:
+			close(release)
+			t.Fatalf("admin dashboard store reads did not start concurrently; saw %v, want %v", seen, want)
+		}
+	}
+}
+
 func TestAdminFeedsRuntimePartialSkipsFullPageOnlyQueries(t *testing.T) {
 	store := newAdminStoreStub()
 	handler, sm, _ := newAdminFlowHandler(t, store, adminFlowConfig())
 	req, _ := authenticatedAdminRequest(t, sm, http.MethodGet, "/admin/feeds?partial=runtime")
+	req.Header.Set("HX-Request", "true")
 	rec := httptest.NewRecorder()
 
 	handler.HandleAdminFeeds(rec, req)
@@ -1015,6 +1399,67 @@ func TestAdminFeedsRuntimePartialSkipsFullPageOnlyQueries(t *testing.T) {
 	}
 }
 
+func TestAdminFeedsPartialURLsWithoutHTMXRenderFullPage(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		target string
+	}{
+		{name: "runtime", target: "/admin/feeds?partial=runtime"},
+		{name: "flash", target: "/admin/feeds?partial=flash&msg=Saved"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newAdminStoreStub()
+			handler, sm, _ := newAdminFlowHandler(t, store, adminFlowConfig())
+			req, _ := authenticatedAdminRequest(t, sm, http.MethodGet, tt.target)
+			rec := httptest.NewRecorder()
+
+			handler.HandleAdminFeeds(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("admin feeds partial URL status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+			}
+			body := rec.Body.String()
+			for _, want := range []string{"<!DOCTYPE html>", `href="/admin/feeds"`, "Feed Configuration"} {
+				if !strings.Contains(body, want) {
+					t.Fatalf("admin feeds partial URL full page missing %q:\n%s", want, body)
+				}
+			}
+		})
+	}
+}
+
+func TestAdminFeedsPartialURLsWithHTMXRenderFragments(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		target string
+		want   string
+	}{
+		{name: "runtime", target: "/admin/feeds?partial=runtime", want: "Current Runtime"},
+		{name: "flash", target: "/admin/feeds?partial=flash&msg=Saved", want: "Saved"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newAdminStoreStub()
+			handler, sm, _ := newAdminFlowHandler(t, store, adminFlowConfig())
+			req, _ := authenticatedAdminRequest(t, sm, http.MethodGet, tt.target)
+			req.Header.Set("HX-Request", "true")
+			rec := httptest.NewRecorder()
+
+			handler.HandleAdminFeeds(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("admin feeds HTMX partial status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+			}
+			body := rec.Body.String()
+			if strings.Contains(body, "<!DOCTYPE html>") {
+				t.Fatalf("admin feeds HTMX partial rendered full layout:\n%s", body)
+			}
+			if !strings.Contains(body, tt.want) {
+				t.Fatalf("admin feeds HTMX partial missing %q:\n%s", tt.want, body)
+			}
+		})
+	}
+}
+
 func TestRegisterRoutesRejectsUnknownAdminSubpaths(t *testing.T) {
 	store := newAdminStoreStub()
 	hash, err := auth.HashPassword("current-password")
@@ -1025,7 +1470,7 @@ func TestRegisterRoutesRejectsUnknownAdminSubpaths(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	cfg := adminFlowConfig()
-	sm := auth.NewSessionManager(ctx, time.Hour, false)
+	sm := auth.NewSessionManagerWithIdleTimeout(ctx, time.Hour, auth.DefaultAdminIdleTimeout, false)
 	runtime := config.NewRuntimeSettings(cfg.Server.BlockThreshold, cfg.Server.RateLimitPerMinute, cfg.Server.RateLimitBurst)
 	mux := http.NewServeMux()
 	RegisterRoutes(ctx, mux, store, sm, slog.New(slog.NewTextHandler(io.Discard, nil)), cfg, runtime, nil, nil, nil)
@@ -1111,8 +1556,8 @@ func TestAdminKeyLifecycleUsesFlashAndAudit(t *testing.T) {
 		t.Fatalf("HandleKeyDelete status = %d, want 303", rec.Code)
 	}
 	keys, _ = store.ListAPIKeys(context.Background())
-	if len(keys) != 1 || keys[0].DeletedAt == nil || keys[0].Name != "ci" || keys[0].KeyHash == "" || keys[0].RevokedAt == nil || keys[0].ExpiresAt == nil {
-		t.Fatalf("keys after delete = %+v, want soft-deleted lifecycle metadata retained", keys)
+	if len(keys) != 1 || keys[0].DeletedAt == nil || keys[0].Name != "" || keys[0].KeyHash == "" || keys[0].KeyHash == "hash-ci" || keys[0].RevokedAt == nil || keys[0].ExpiresAt == nil {
+		t.Fatalf("keys after delete = %+v, want soft-deleted lifecycle metadata retained with label/hash scrubbed", keys)
 	}
 
 	audit, err = store.ListAdminAuditLog(context.Background(), 10)
@@ -1123,6 +1568,329 @@ func TestAdminKeyLifecycleUsesFlashAndAudit(t *testing.T) {
 		if !adminFlowAuditContains(audit, want) {
 			t.Fatalf("audit missing %q: %+v", want, audit)
 		}
+	}
+}
+
+func TestAdminKeyCreateValidationPreservesSafeFormValues(t *testing.T) {
+	store := newAdminStoreStub()
+	hash, err := auth.HashPassword("current-password")
+	if err != nil {
+		t.Fatalf("HashPassword() error = %v", err)
+	}
+	store.adminAuth = &db.AdminAuth{PasswordHash: hash, PasswordIsBootstrap: false}
+	handler, sm, _ := newAdminFlowHandler(t, store, adminFlowConfig())
+
+	expiresAt := validAPIKeyExpiryFormValue()
+	req, _ := authenticatedAdminFormRequest(t, sm, "/admin/keys/create", url.Values{
+		"name":             {" ci pipeline "},
+		"expires_at":       {expiresAt},
+		"current_password": {"wrong-password"},
+	})
+	rec := httptest.NewRecorder()
+	handler.HandleKeyCreate(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("HandleKeyCreate status = %d, want 303", rec.Code)
+	}
+	location := rec.Header().Get("Location")
+	parsed, err := url.Parse(location)
+	if err != nil {
+		t.Fatalf("parse redirect Location %q: %v", location, err)
+	}
+	query := parsed.Query()
+	if got := query.Get("name"); got != "ci pipeline" {
+		t.Fatalf("redirect preserved name = %q, want normalized safe value", got)
+	}
+	if got := query.Get("expires_at"); got != expiresAt {
+		t.Fatalf("redirect preserved expires_at = %q, want %q", got, expiresAt)
+	}
+	if strings.Contains(location, "wrong-password") || query.Has("current_password") {
+		t.Fatalf("redirect Location leaked current_password: %q", location)
+	}
+
+	req, _ = authenticatedAdminRequest(t, sm, http.MethodGet, location)
+	rec = httptest.NewRecorder()
+	handler.HandleAdminKeys(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("HandleAdminKeys status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `name="name"`) || !strings.Contains(body, `value="ci pipeline"`) {
+		t.Fatalf("admin keys page did not re-render preserved key name\nbody=%s", body)
+	}
+	if !strings.Contains(body, `name="expires_at"`) || !strings.Contains(body, `value="`+expiresAt+`"`) {
+		t.Fatalf("admin keys page did not re-render preserved expires_at\nbody=%s", body)
+	}
+	if strings.Contains(body, "wrong-password") || strings.Contains(body, `value="wrong-password"`) {
+		t.Fatalf("admin keys page leaked current_password\nbody=%s", body)
+	}
+}
+
+func TestHandleKeyRevokeDeleteEnforceGuardsMutateStateAndAudit(t *testing.T) {
+	now := time.Date(2026, 6, 27, 9, 30, 0, 0, time.UTC)
+	revokedAt := now.Add(time.Hour)
+
+	type mutationCase struct {
+		name            string
+		target          string
+		keyID           string
+		auditAction     string
+		successLocation string
+		call            func(*AdminHandler, http.ResponseWriter, *http.Request)
+		seed            func(*adminFlowStoreStub)
+		assertUnchanged func(*testing.T, *adminFlowStoreStub)
+		assertChanged   func(*testing.T, *adminFlowStoreStub)
+		auditDetails    map[string]string
+	}
+
+	cases := []mutationCase{
+		{
+			name:            "revoke",
+			target:          "/admin/keys/revoke",
+			keyID:           "17",
+			auditAction:     "api_key_revoke",
+			successLocation: "/admin/keys?msg=Key+revoked",
+			call: func(h *AdminHandler, w http.ResponseWriter, r *http.Request) {
+				h.HandleKeyRevoke(w, r)
+			},
+			seed: func(store *adminFlowStoreStub) {
+				store.apiKeys = []db.APIKey{{
+					ID:        17,
+					Name:      "ci-revoke",
+					KeyHash:   "hash-revoke",
+					CreatedAt: now,
+				}}
+			},
+			assertUnchanged: func(t *testing.T, store *adminFlowStoreStub) {
+				t.Helper()
+				keys, err := store.ListAPIKeys(context.Background())
+				if err != nil {
+					t.Fatalf("ListAPIKeys() error = %v", err)
+				}
+				if len(keys) != 1 || keys[0].ID != 17 || keys[0].Name != "ci-revoke" || keys[0].RevokedAt != nil || keys[0].DeletedAt != nil {
+					t.Fatalf("keys after blocked revoke = %+v, want active key unchanged", keys)
+				}
+			},
+			assertChanged: func(t *testing.T, store *adminFlowStoreStub) {
+				t.Helper()
+				keys, err := store.ListAPIKeys(context.Background())
+				if err != nil {
+					t.Fatalf("ListAPIKeys() error = %v", err)
+				}
+				if len(keys) != 1 || keys[0].ID != 17 || keys[0].RevokedAt == nil || keys[0].DeletedAt != nil || keys[0].Name != "ci-revoke" {
+					t.Fatalf("keys after revoke = %+v, want revoked key with metadata retained", keys)
+				}
+			},
+			auditDetails: map[string]string{
+				"key_id":     "17",
+				"name":       "ci-revoke",
+				"created_at": now.Format(time.RFC3339),
+			},
+		},
+		{
+			name:            "delete",
+			target:          "/admin/keys/delete",
+			keyID:           "18",
+			auditAction:     "api_key_delete",
+			successLocation: "/admin/keys?msg=Key+deleted",
+			call: func(h *AdminHandler, w http.ResponseWriter, r *http.Request) {
+				h.HandleKeyDelete(w, r)
+			},
+			seed: func(store *adminFlowStoreStub) {
+				store.apiKeys = []db.APIKey{{
+					ID:        18,
+					Name:      "ci-delete",
+					KeyHash:   "hash-delete",
+					CreatedAt: now,
+					RevokedAt: &revokedAt,
+				}}
+			},
+			assertUnchanged: func(t *testing.T, store *adminFlowStoreStub) {
+				t.Helper()
+				keys, err := store.ListAPIKeys(context.Background())
+				if err != nil {
+					t.Fatalf("ListAPIKeys() error = %v", err)
+				}
+				if len(keys) != 1 || keys[0].ID != 18 || keys[0].Name != "ci-delete" || keys[0].KeyHash != "hash-delete" || keys[0].RevokedAt == nil || keys[0].DeletedAt != nil {
+					t.Fatalf("keys after blocked delete = %+v, want revoked key unchanged", keys)
+				}
+			},
+			assertChanged: func(t *testing.T, store *adminFlowStoreStub) {
+				t.Helper()
+				keys, err := store.ListAPIKeys(context.Background())
+				if err != nil {
+					t.Fatalf("ListAPIKeys() error = %v", err)
+				}
+				if len(keys) != 1 || keys[0].ID != 18 || keys[0].Name != "" || keys[0].KeyHash == "" || keys[0].KeyHash == "hash-delete" || keys[0].RevokedAt == nil || keys[0].DeletedAt == nil {
+					t.Fatalf("keys after delete = %+v, want soft-deleted key with label/hash scrubbed", keys)
+				}
+			},
+			auditDetails: map[string]string{
+				"key_id":     "18",
+				"name":       "ci-delete",
+				"created_at": now.Format(time.RFC3339),
+				"revoked_at": revokedAt.Format(time.RFC3339),
+			},
+		},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name+"/unauthenticated", func(t *testing.T) {
+			store := newAdminStoreStub()
+			tt.seed(store)
+			handler, _, _ := newAdminFlowHandler(t, store, adminFlowConfig())
+
+			req := httptest.NewRequest(http.MethodPost, tt.target, strings.NewReader(url.Values{"key_id": {tt.keyID}}.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			rec := httptest.NewRecorder()
+			tt.call(handler, rec, req)
+
+			if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/admin/login" {
+				t.Fatalf("unauthenticated response = %d %q, want redirect to login", rec.Code, rec.Header().Get("Location"))
+			}
+			tt.assertUnchanged(t, store)
+			audit, err := store.ListAdminAuditLog(context.Background(), 10)
+			if err != nil {
+				t.Fatalf("ListAdminAuditLog() error = %v", err)
+			}
+			if len(audit) != 0 {
+				t.Fatalf("audit after unauthenticated %s = %+v, want none", tt.name, audit)
+			}
+		})
+
+		t.Run(tt.name+"/bad csrf", func(t *testing.T) {
+			store := newAdminStoreStub()
+			tt.seed(store)
+			handler, sm, _ := newAdminFlowHandler(t, store, adminFlowConfig())
+			var logs bytes.Buffer
+			handler.logger = slog.New(slog.NewTextHandler(&logs, nil))
+
+			req, _ := authenticatedAdminRequest(t, sm, http.MethodPost, tt.target)
+			req.Body = io.NopCloser(strings.NewReader(url.Values{"key_id": {tt.keyID}}.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			rec := httptest.NewRecorder()
+			tt.call(handler, rec, req)
+
+			if rec.Code != http.StatusSeeOther {
+				t.Fatalf("bad CSRF response = %d, want 303", rec.Code)
+			}
+			if got := rec.Header().Get("Location"); !strings.HasPrefix(got, "/admin/keys?") || !strings.Contains(got, "err=") {
+				t.Fatalf("bad CSRF Location = %q, want keys error redirect", got)
+			}
+			tt.assertUnchanged(t, store)
+			audit, err := store.ListAdminAuditLog(context.Background(), 10)
+			if err != nil {
+				t.Fatalf("ListAdminAuditLog() error = %v", err)
+			}
+			if len(audit) != 1 || audit[0].Action != "admin_csrf_rejected" || adminFlowAuditContains(audit, tt.auditAction) {
+				t.Fatalf("audit after bad CSRF %s = %+v, want csrf rejection only", tt.name, audit)
+			}
+			assertAdminAuditDetails(t, audit[0], map[string]string{
+				"target_action": tt.auditAction,
+				"path":          tt.target,
+			})
+			logText := logs.String()
+			if !strings.Contains(logText, "admin CSRF validation failed") || !strings.Contains(logText, tt.auditAction) {
+				t.Fatalf("CSRF warning log = %q, want validation warning with target action %q", logText, tt.auditAction)
+			}
+		})
+
+		t.Run(tt.name+"/bootstrap password", func(t *testing.T) {
+			store := newAdminStoreStub()
+			tt.seed(store)
+			store.adminAuth = &db.AdminAuth{PasswordHash: "bootstrap-hash", PasswordIsBootstrap: true, CreatedAt: now}
+			handler, sm, _ := newAdminFlowHandler(t, store, adminFlowConfig())
+
+			req, _ := authenticatedAdminFormRequest(t, sm, tt.target, url.Values{"key_id": {tt.keyID}})
+			rec := httptest.NewRecorder()
+			tt.call(handler, rec, req)
+
+			if rec.Code != http.StatusSeeOther {
+				t.Fatalf("bootstrap response status = %d, want 303", rec.Code)
+			}
+			if got := rec.Header().Get("Location"); !strings.Contains(got, "bootstrap+password") {
+				t.Fatalf("bootstrap Location = %q, want rotation error", got)
+			}
+			tt.assertUnchanged(t, store)
+			audit, err := store.ListAdminAuditLog(context.Background(), 10)
+			if err != nil {
+				t.Fatalf("ListAdminAuditLog() error = %v", err)
+			}
+			if len(audit) != 1 || audit[0].Action != "bootstrap_rotation_required" || adminFlowAuditContains(audit, tt.auditAction) {
+				t.Fatalf("audit after bootstrap-blocked %s = %+v, want bootstrap warning only", tt.name, audit)
+			}
+			assertAdminAuditDetails(t, audit[0], map[string]string{"path": tt.target})
+		})
+
+		t.Run(tt.name+"/success", func(t *testing.T) {
+			store := newAdminStoreStub()
+			tt.seed(store)
+			handler, sm, _ := newAdminFlowHandler(t, store, adminFlowConfig())
+
+			req, _ := authenticatedAdminFormRequest(t, sm, tt.target, url.Values{"key_id": {tt.keyID}})
+			rec := httptest.NewRecorder()
+			tt.call(handler, rec, req)
+
+			if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != tt.successLocation {
+				t.Fatalf("success response = %d %q, want %q", rec.Code, rec.Header().Get("Location"), tt.successLocation)
+			}
+			tt.assertChanged(t, store)
+			audit, err := store.ListAdminAuditLog(context.Background(), 10)
+			if err != nil {
+				t.Fatalf("ListAdminAuditLog() error = %v", err)
+			}
+			if len(audit) != 1 || audit[0].Action != tt.auditAction {
+				t.Fatalf("audit after successful %s = %+v, want %s", tt.name, audit, tt.auditAction)
+			}
+			assertAdminAuditDetails(t, audit[0], tt.auditDetails)
+		})
+	}
+}
+
+func TestAdminKeyCreateRetryDoesNotMintDuplicateCredential(t *testing.T) {
+	store := newAdminStoreStub()
+	hash, err := auth.HashPassword("current-password")
+	if err != nil {
+		t.Fatalf("HashPassword() error = %v", err)
+	}
+	store.adminAuth = &db.AdminAuth{PasswordHash: hash, PasswordIsBootstrap: false}
+	handler, sm, _ := newAdminFlowHandler(t, store, adminFlowConfig())
+
+	values := url.Values{
+		"name":             {"ci-retry"},
+		"expires_at":       {validAPIKeyExpiryFormValue()},
+		"current_password": {"current-password"},
+		"create_nonce":     {"retry-nonce"},
+	}
+	req, sess := authenticatedAdminFormRequest(t, sm, "/admin/keys/create", values)
+	sm.SetFlash(sess.ID, "api_key_create_nonce", "retry-nonce")
+	cookies := req.Cookies()
+
+	rec := httptest.NewRecorder()
+	handler.HandleKeyCreate(rec, req)
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/admin/keys?msg=API+key+created" {
+		t.Fatalf("first HandleKeyCreate status/location = %d %q, want key-created redirect", rec.Code, rec.Header().Get("Location"))
+	}
+
+	retryReq := httptest.NewRequest(http.MethodPost, "/admin/keys/create", strings.NewReader(values.Encode()))
+	retryReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	for _, cookie := range cookies {
+		retryReq.AddCookie(cookie)
+	}
+	retryRec := httptest.NewRecorder()
+	handler.HandleKeyCreate(retryRec, retryReq)
+	if retryRec.Code != http.StatusSeeOther || retryRec.Header().Get("Location") != "/admin/keys?msg=API+key+created" {
+		t.Fatalf("retry HandleKeyCreate status/location = %d %q, want key-created redirect", retryRec.Code, retryRec.Header().Get("Location"))
+	}
+
+	keys, err := store.ListAPIKeys(context.Background())
+	if err != nil {
+		t.Fatalf("ListAPIKeys() error = %v", err)
+	}
+	if len(keys) != 1 {
+		t.Fatalf("keys after retried create = %+v, want exactly one key", keys)
+	}
+	if newKey := sm.GetFlash(sess.ID, "newkey"); len(newKey) != 64 {
+		t.Fatalf("newkey flash after retry length = %d, want original key still available", len(newKey))
 	}
 }
 
@@ -1189,7 +1957,7 @@ func TestHandleKeyCreateRequiresCurrentPasswordStepUp(t *testing.T) {
 	})
 	rec := httptest.NewRecorder()
 	handler.HandleKeyCreate(rec, req)
-	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/admin/keys?msg=Key+created" {
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/admin/keys?msg=API+key+created" {
 		t.Fatalf("HandleKeyCreate with step-up status/location = %d %q, want key-created redirect", rec.Code, rec.Header().Get("Location"))
 	}
 	keys, err := store.ListAPIKeys(context.Background())
@@ -1321,6 +2089,59 @@ func TestBootstrapPasswordBlocksAdminWritesUntilRotated(t *testing.T) {
 	}
 }
 
+func TestPasswordChangeRejectsConcurrentRotationAfterCurrentPasswordCheck(t *testing.T) {
+	t.Parallel()
+
+	store := newAdminStoreStub()
+	oldHash, err := auth.HashPassword("current-password")
+	if err != nil {
+		t.Fatalf("HashPassword(old) error = %v", err)
+	}
+	concurrentHash, err := auth.HashPassword("other-new-password")
+	if err != nil {
+		t.Fatalf("HashPassword(concurrent) error = %v", err)
+	}
+	store.adminAuth = &db.AdminAuth{PasswordHash: oldHash, CreatedAt: time.Now().UTC()}
+	store.onGetAdminAuth = func(s *adminFlowStoreStub) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.upsertAdminAuthLocked(concurrentHash, false)
+	}
+	handler, sm, _ := newAdminFlowHandler(t, store, adminFlowConfig())
+
+	req, _ := authenticatedAdminFormRequest(t, sm, "/admin/settings/password", url.Values{
+		"current_password": {"current-password"},
+		"new_password":     {"new-password-123"},
+		"confirm_password": {"new-password-123"},
+	})
+	rec := httptest.NewRecorder()
+	handler.HandlePasswordChange(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("HandlePasswordChange status = %d, want 303", rec.Code)
+	}
+	if got := rec.Header().Get("Location"); !strings.Contains(strings.ToLower(got), "current+password") {
+		t.Fatalf("HandlePasswordChange Location = %q, want stale current-password error", got)
+	}
+	authInfo, err := store.GetAdminAuth(context.Background())
+	if err != nil {
+		t.Fatalf("GetAdminAuth() error = %v", err)
+	}
+	if authInfo == nil || !auth.CheckPassword(authInfo.PasswordHash, "other-new-password") {
+		t.Fatalf("admin auth after stale password change = %+v, want concurrent password retained", authInfo)
+	}
+	if auth.CheckPassword(authInfo.PasswordHash, "new-password-123") {
+		t.Fatal("stale password change overwrote concurrent password rotation")
+	}
+	audit, err := store.ListAdminAuditLog(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("ListAdminAuditLog() error = %v", err)
+	}
+	if adminFlowAuditContains(audit, "password_change") {
+		t.Fatalf("audit contains password_change after stale password change: %+v", audit)
+	}
+}
+
 func TestBootstrapAuthenticatedSessionCannotWriteAfterBootstrapFlagCleared(t *testing.T) {
 	store := newAdminStoreStub()
 	hash, err := auth.HashPassword("bootstrap-password")
@@ -1408,7 +2229,7 @@ func TestPasswordChangeInvalidatesPreExistingAdminSessions(t *testing.T) {
 	if freshRec.Code != http.StatusSeeOther {
 		t.Fatalf("fresh session key create status = %d, want 303", freshRec.Code)
 	}
-	if got := freshRec.Header().Get("Location"); got != "/admin/keys?msg=Key+created" {
+	if got := freshRec.Header().Get("Location"); got != "/admin/keys?msg=API+key+created" {
 		t.Fatalf("fresh session key create Location = %q, want key-created redirect", got)
 	}
 	keys, err = store.ListAPIKeys(context.Background())
@@ -1527,9 +2348,10 @@ func TestAdminFeedConfigSaveResetAndSyncNow(t *testing.T) {
 		return nil
 	})
 	var resetFeed string
-	handler.SetFeedConfigResetFunc(func(_ context.Context, feedName string) error {
+	handler.SetFeedConfigResetFunc(func(_ context.Context, feedName string) (config.FeedSettings, bool, error) {
 		resetFeed = feedName
-		return nil
+		feed, ok := handler.cfg.FeedSettings(feedName)
+		return feed, ok, nil
 	})
 
 	req, _ := authenticatedAdminFormRequest(t, sm, "/admin/feeds/save", url.Values{
@@ -1609,9 +2431,11 @@ func TestAdminSystemSettingsPasswordAndAdvisoryFlows(t *testing.T) {
 	handler, sm, _ := newAdminFlowHandler(t, store, cfg)
 
 	req, _ := authenticatedAdminFormRequest(t, sm, "/admin/settings/system", url.Values{
-		"block_threshold":       {"HIGH"},
-		"rate_limit_per_minute": {"120"},
-		"rate_limit_burst":      {"25"},
+		"block_threshold":            {"HIGH"},
+		"rate_limit_per_minute":      {"120"},
+		"rate_limit_burst":           {"25"},
+		"scan_log_retention_days":    {"45"},
+		"admin_audit_retention_days": {"14"},
 	})
 	rec := httptest.NewRecorder()
 	handler.HandleSystemSettingsSave(rec, req)
@@ -1624,6 +2448,13 @@ func TestAdminSystemSettingsPasswordAndAdvisoryFlows(t *testing.T) {
 	}
 	if settings == nil || settings.BlockThreshold != "HIGH" || handler.runtime.BlockThreshold() != "HIGH" {
 		t.Fatalf("settings = %+v runtime threshold=%q, want HIGH", settings, handler.runtime.BlockThreshold())
+	}
+	if settings.ScanLogRetention != 45*24*time.Hour || settings.AdminAuditRetention != 14*24*time.Hour {
+		t.Fatalf("settings retention = scan %s admin %s, want 1080h/336h", settings.ScanLogRetention, settings.AdminAuditRetention)
+	}
+	runtimeRetention := handler.runtime.Retention()
+	if runtimeRetention.ScanLog != 45*24*time.Hour || runtimeRetention.AdminAuditLog != 14*24*time.Hour {
+		t.Fatalf("runtime retention = scan %s admin %s, want 1080h/336h", runtimeRetention.ScanLog, runtimeRetention.AdminAuditLog)
 	}
 
 	newPassword := "newpass12345"
@@ -1683,17 +2514,24 @@ func TestAdminSystemSettingsPasswordAndAdvisoryFlows(t *testing.T) {
 
 func TestHandleSystemSettingsSaveAuditsBeforeAndAfterValues(t *testing.T) {
 	store := newAdminStoreStub()
+	updatedAt := time.Now().UTC().Add(-time.Minute).Truncate(time.Microsecond)
 	store.systemSettings = &db.SystemSettings{
-		BlockThreshold:     "LOW",
-		RateLimitPerMinute: 60,
-		RateLimitBurst:     10,
+		BlockThreshold:      "LOW",
+		RateLimitPerMinute:  60,
+		RateLimitBurst:      10,
+		ScanLogRetention:    30 * 24 * time.Hour,
+		AdminAuditRetention: 30 * 24 * time.Hour,
+		UpdatedAt:           updatedAt,
 	}
 	handler, sm, _ := newAdminFlowHandler(t, store, adminFlowConfig())
 
 	req, _ := authenticatedAdminFormRequest(t, sm, "/admin/settings/system", url.Values{
-		"block_threshold":       {"HIGH"},
-		"rate_limit_per_minute": {"120"},
-		"rate_limit_burst":      {"25"},
+		"block_threshold":            {"HIGH"},
+		"rate_limit_per_minute":      {"120"},
+		"rate_limit_burst":           {"25"},
+		"scan_log_retention_days":    {"45"},
+		"admin_audit_retention_days": {"14"},
+		"updated_at":                 {updatedAt.Format(time.RFC3339Nano)},
 	})
 	rec := httptest.NewRecorder()
 	handler.HandleSystemSettingsSave(rec, req)
@@ -1712,10 +2550,83 @@ func TestHandleSystemSettingsSaveAuditsBeforeAndAfterValues(t *testing.T) {
 		"previous_block_threshold":       "LOW",
 		"previous_rate_limit_per_minute": "60",
 		"previous_rate_limit_burst":      "10",
+		"previous_scan_log_retention":    "720h0m0s",
+		"previous_admin_audit_retention": "720h0m0s",
 		"new_block_threshold":            "HIGH",
 		"new_rate_limit_per_minute":      "120",
 		"new_rate_limit_burst":           "25",
+		"new_scan_log_retention":         "1080h0m0s",
+		"new_admin_audit_retention":      "336h0m0s",
 	})
+}
+
+func TestHandleSystemSettingsSaveRejectsStaleRevisionWithoutApplyingRuntime(t *testing.T) {
+	store := newAdminStoreStub()
+	formRevision := time.Now().UTC().Add(-2 * time.Minute).Truncate(time.Microsecond)
+	concurrentRevision := formRevision.Add(time.Minute)
+	store.systemSettings = &db.SystemSettings{
+		BlockThreshold:     "LOW",
+		RateLimitPerMinute: 60,
+		RateLimitBurst:     10,
+		UpdatedAt:          concurrentRevision,
+	}
+	handler, sm, _ := newAdminFlowHandler(t, store, adminFlowConfig())
+	beforeThreshold := handler.runtime.BlockThreshold()
+
+	req, _ := authenticatedAdminFormRequest(t, sm, "/admin/settings/system", url.Values{
+		"block_threshold":       {"HIGH"},
+		"rate_limit_per_minute": {"120"},
+		"rate_limit_burst":      {"25"},
+		"updated_at":            {formRevision.Format(time.RFC3339Nano)},
+	})
+	rec := httptest.NewRecorder()
+	handler.HandleSystemSettingsSave(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("HandleSystemSettingsSave status = %d, want 303", rec.Code)
+	}
+	if got := rec.Header().Get("Location"); !strings.Contains(got, "System+settings+changed+while+you+were+editing") {
+		t.Fatalf("Location = %q, want conflict message", got)
+	}
+	settings, err := store.GetSystemSettings(context.Background())
+	if err != nil {
+		t.Fatalf("GetSystemSettings() error = %v", err)
+	}
+	if settings == nil || settings.BlockThreshold != "LOW" || settings.RateLimitPerMinute != 60 || settings.RateLimitBurst != 10 {
+		t.Fatalf("settings after stale save = %+v, want concurrent settings preserved", settings)
+	}
+	if handler.runtime.BlockThreshold() != beforeThreshold {
+		t.Fatalf("runtime threshold = %q, want unchanged %q", handler.runtime.BlockThreshold(), beforeThreshold)
+	}
+	audit, err := store.ListAdminAuditLog(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("ListAdminAuditLog() error = %v", err)
+	}
+	if len(audit) != 0 {
+		t.Fatalf("audit entries = %+v, want none on conflict", audit)
+	}
+}
+
+func TestHandleAdminSettingsIncludesSystemSettingsRevision(t *testing.T) {
+	store := newAdminStoreStub()
+	updatedAt := time.Date(2026, 6, 27, 12, 45, 0, 654321000, time.UTC)
+	store.systemSettings = &db.SystemSettings{
+		BlockThreshold:     "HIGH",
+		RateLimitPerMinute: 120,
+		RateLimitBurst:     25,
+		UpdatedAt:          updatedAt,
+	}
+	handler, sm, _ := newAdminFlowHandler(t, store, adminFlowConfig())
+
+	req, _ := authenticatedAdminRequest(t, sm, http.MethodGet, "/admin/settings")
+	rec := httptest.NewRecorder()
+	handler.HandleAdminSettings(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("HandleAdminSettings status = %d, want 200", rec.Code)
+	}
+	want := `name="updated_at" value="` + updatedAt.Format(time.RFC3339Nano) + `"`
+	if body := rec.Body.String(); !strings.Contains(body, want) {
+		t.Fatalf("settings form missing system revision %q\nbody=%s", want, body)
+	}
 }
 
 func TestHandleSystemSettingsSaveDoesNotPersistOrApplyWhenAuditFails(t *testing.T) {
@@ -1742,6 +2653,44 @@ func TestHandleSystemSettingsSaveDoesNotPersistOrApplyWhenAuditFails(t *testing.
 	}
 	if settings != nil {
 		t.Fatalf("settings = %+v, want no persisted settings when audit fails", settings)
+	}
+	if handler.runtime.BlockThreshold() != beforeThreshold {
+		t.Fatalf("runtime threshold = %q, want unchanged %q", handler.runtime.BlockThreshold(), beforeThreshold)
+	}
+}
+
+func TestHandleSystemSettingsSaveDoesNotAuditOrApplyWhenPersistFails(t *testing.T) {
+	store := newAdminErrorStore()
+	handler, sm := newAdminHandlerForStore(t, store, adminFlowConfig())
+	beforeThreshold := handler.runtime.BlockThreshold()
+
+	store.fail = map[string]error{"UpsertSystemSettings": errors.New("settings down")}
+	req, _ := authenticatedAdminFormRequest(t, sm, "/admin/settings/system", url.Values{
+		"block_threshold":       {"HIGH"},
+		"rate_limit_per_minute": {"120"},
+		"rate_limit_burst":      {"25"},
+	})
+	rec := httptest.NewRecorder()
+	handler.HandleSystemSettingsSave(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("HandleSystemSettingsSave status = %d, want 303", rec.Code)
+	}
+	if got := rec.Header().Get("Location"); !strings.Contains(got, "Failed+to+save") {
+		t.Fatalf("Location = %q, want save failure", got)
+	}
+	settings, err := store.GetSystemSettings(context.Background())
+	if err != nil {
+		t.Fatalf("GetSystemSettings() error = %v", err)
+	}
+	if settings != nil {
+		t.Fatalf("settings = %+v, want no persisted settings when save fails", settings)
+	}
+	audit, err := store.ListAdminAuditLog(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("ListAdminAuditLog() error = %v", err)
+	}
+	if len(audit) != 0 {
+		t.Fatalf("audit entries = %+v, want none when save fails", audit)
 	}
 	if handler.runtime.BlockThreshold() != beforeThreshold {
 		t.Fatalf("runtime threshold = %q, want unchanged %q", handler.runtime.BlockThreshold(), beforeThreshold)
@@ -1911,6 +2860,7 @@ func TestHandleAdvisoryCreateDefaultsToVulnerabilityAndAuditsCreate(t *testing.T
 
 func TestHandleAdvisoryUpdateAuditsUpdateWithBeforeAndAfterDetails(t *testing.T) {
 	store := newAdminStoreStub()
+	updatedAt := time.Date(2026, 6, 27, 10, 30, 0, 123456000, time.UTC)
 	store.manual["manual:existing"] = db.ManualAdvisory{
 		ID:          "manual:existing",
 		FindingType: "vulnerability",
@@ -1919,6 +2869,7 @@ func TestHandleAdvisoryUpdateAuditsUpdateWithBeforeAndAfterDetails(t *testing.T)
 		Severity:    "MEDIUM",
 		Summary:     "old summary",
 		Description: "old details",
+		UpdatedAt:   updatedAt,
 	}
 	handler, sm, _ := newAdminFlowHandler(t, store, adminFlowConfig())
 
@@ -1931,6 +2882,7 @@ func TestHandleAdvisoryUpdateAuditsUpdateWithBeforeAndAfterDetails(t *testing.T)
 		"risk_type":    {"malware"},
 		"summary":      {"new summary"},
 		"description":  {"new details"},
+		"updated_at":   {updatedAt.Format(time.RFC3339Nano)},
 	})
 	rec := httptest.NewRecorder()
 	handler.HandleAdvisoryCreate(rec, req)
@@ -1959,6 +2911,73 @@ func TestHandleAdvisoryUpdateAuditsUpdateWithBeforeAndAfterDetails(t *testing.T)
 		"new_risk_type":         "malware",
 		"new_summary":           "new summary",
 	})
+}
+
+func TestHandleAdminAdvisoriesEditIncludesRevision(t *testing.T) {
+	store := newAdminStoreStub()
+	updatedAt := time.Date(2026, 6, 27, 11, 15, 0, 987654000, time.UTC)
+	store.manual["manual:existing"] = db.ManualAdvisory{
+		ID:          "manual:existing",
+		FindingType: "vulnerability",
+		Ecosystem:   "npm",
+		Name:        "left-pad",
+		Severity:    "MEDIUM",
+		Summary:     "old summary",
+		UpdatedAt:   updatedAt,
+	}
+	handler, sm, _ := newAdminFlowHandler(t, store, adminFlowConfig())
+
+	req, _ := authenticatedAdminRequest(t, sm, http.MethodGet, "/admin/advisories?edit=manual:existing")
+	rec := httptest.NewRecorder()
+	handler.HandleAdminAdvisories(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("HandleAdminAdvisories edit status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	want := `name="updated_at" value="` + updatedAt.Format(time.RFC3339Nano) + `"`
+	if !strings.Contains(body, want) {
+		t.Fatalf("edit form missing advisory revision %q\nbody=%s", want, body)
+	}
+}
+
+func TestHandleAdvisoryUpdateRejectsStaleRevision(t *testing.T) {
+	store := newAdminStoreStub()
+	formUpdatedAt := time.Date(2026, 6, 27, 10, 30, 0, 0, time.UTC)
+	currentUpdatedAt := formUpdatedAt.Add(time.Minute)
+	store.manual["manual:existing"] = db.ManualAdvisory{
+		ID:          "manual:existing",
+		FindingType: "vulnerability",
+		Ecosystem:   "npm",
+		Name:        "left-pad",
+		Severity:    "MEDIUM",
+		Summary:     "concurrent summary",
+		UpdatedAt:   currentUpdatedAt,
+	}
+	handler, sm, _ := newAdminFlowHandler(t, store, adminFlowConfig())
+
+	req, _ := authenticatedAdminFormRequest(t, sm, "/admin/advisories/create", url.Values{
+		"id":           {"manual:existing"},
+		"finding_type": {"vulnerability"},
+		"ecosystem":    {"npm"},
+		"name":         {"left-pad"},
+		"severity":     {"HIGH"},
+		"summary":      {"stale submit"},
+		"updated_at":   {formUpdatedAt.Format(time.RFC3339Nano)},
+	})
+	rec := httptest.NewRecorder()
+	handler.HandleAdvisoryCreate(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("HandleAdvisoryCreate stale status = %d, want 303", rec.Code)
+	}
+	if got := rec.Header().Get("Location"); !strings.Contains(got, "Advisory+changed+while+you+were+editing") {
+		t.Fatalf("Location = %q, want stale advisory conflict", got)
+	}
+	if got := store.manual["manual:existing"].Summary; got != "concurrent summary" {
+		t.Fatalf("manual summary = %q, want concurrent summary preserved", got)
+	}
+	if audit, _ := store.ListAdminAuditLog(context.Background(), 10); len(audit) != 0 {
+		t.Fatalf("audit = %+v, want none for stale update", audit)
+	}
 }
 
 func TestHandleAdvisoryDeleteRequiresConfirmationAndAuditsDeletedDetails(t *testing.T) {
@@ -2299,6 +3318,38 @@ func TestHandlePasswordChangeDoesNotUpdatePasswordWhenAuditFails(t *testing.T) {
 	}
 }
 
+func TestAdminAdvisoryCreateRejectsDockerCoverage(t *testing.T) {
+	store := newAdminStoreStub()
+	handler, sm, _ := newAdminFlowHandler(t, store, adminFlowConfig())
+
+	req, _ := authenticatedAdminFormRequest(t, sm, "/admin/advisories/create", url.Values{
+		"finding_type": {"vulnerability"},
+		"ecosystem":    {"docker"},
+		"name":         {"alpine"},
+		"severity":     {"HIGH"},
+		"summary":      {"docker should be inventory only"},
+	})
+	rec := httptest.NewRecorder()
+	handler.HandleAdvisoryCreate(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("HandleAdvisoryCreate status = %d, want 400; location=%q body=%s", rec.Code, rec.Header().Get("Location"), rec.Body.String())
+	}
+	if location := rec.Header().Get("Location"); location != "" {
+		t.Fatalf("Docker validation error redirected to %q", location)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "Docker is inventory-only") {
+		t.Fatalf("body missing Docker inventory-only error:\n%s", body)
+	}
+	advisories, err := store.ListManualAdvisories(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("ListManualAdvisories() error = %v", err)
+	}
+	if len(advisories) != 0 {
+		t.Fatalf("advisories = %+v, want no Docker advisory", advisories)
+	}
+}
+
 func TestAdminAdvisoriesPaginationRendersReachableHistory(t *testing.T) {
 	store := newAdminStoreStub()
 	for i := 0; i < 105; i++ {
@@ -2337,6 +3388,290 @@ func TestAdminAdvisoriesPaginationRendersReachableHistory(t *testing.T) {
 	}
 	if !strings.Contains(body, `/admin/advisories?offset=0`) {
 		t.Fatalf("second advisory page missing previous-page link\nbody=%s", body)
+	}
+}
+
+func TestAdminAdvisoriesOutOfRangePageShowsRecoveryState(t *testing.T) {
+	store := newAdminStoreStub()
+	for i := 0; i < 3; i++ {
+		id := fmt.Sprintf("manual:%03d", i)
+		store.manual[id] = db.ManualAdvisory{
+			ID:          id,
+			FindingType: "vulnerability",
+			Ecosystem:   "npm",
+			Name:        fmt.Sprintf("pkg-%03d", i),
+			Severity:    "LOW",
+			Summary:     "manual advisory",
+		}
+	}
+	handler, sm, _ := newAdminFlowHandler(t, store, adminFlowConfig())
+
+	req, _ := authenticatedAdminRequest(t, sm, http.MethodGet, "/admin/advisories?offset=1000")
+	rec := httptest.NewRecorder()
+	handler.HandleAdminAdvisories(rec, req)
+	body := rec.Body.String()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("out-of-range advisory page status = %d, want 200", rec.Code)
+	}
+	for _, want := range []string{
+		"No manual advisories on this page.",
+		"The current page is past the available manual advisories.",
+		`href="/admin/advisories?offset=900"`,
+		`href="/admin/advisories"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("out-of-range advisory page missing %q\nbody=%s", want, body)
+		}
+	}
+	if strings.Contains(body, "No manual advisories yet.") {
+		t.Fatalf("out-of-range advisory page rendered global empty state\nbody=%s", body)
+	}
+}
+
+func TestAdminAdvisoriesListRevealsFullSummaryAndDescription(t *testing.T) {
+	store := newAdminStoreStub()
+	longSummary := "Manual coverage summary with enough detail to exceed the compact list preview and preserve the full operator context for review."
+	description := "Operator rationale: created during upstream feed lag and should remain visible without entering edit mode."
+	store.manual["manual:context"] = db.ManualAdvisory{
+		ID:          "manual:context",
+		FindingType: "vulnerability",
+		Ecosystem:   "npm",
+		Name:        "left-pad",
+		Severity:    "HIGH",
+		Summary:     longSummary,
+		Description: description,
+	}
+	handler, sm, _ := newAdminFlowHandler(t, store, adminFlowConfig())
+
+	req, _ := authenticatedAdminRequest(t, sm, http.MethodGet, "/admin/advisories")
+	rec := httptest.NewRecorder()
+	handler.HandleAdminAdvisories(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("advisory page status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		"<details",
+		"Details",
+		longSummary,
+		description,
+		"Manual coverage summary with enough detail",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("advisory page missing %q\nbody=%s", want, body)
+		}
+	}
+}
+
+func TestAdminAdvisoriesPaginationStateIsPreservedInActions(t *testing.T) {
+	store := newAdminStoreStub()
+	for i := 0; i < 105; i++ {
+		id := fmt.Sprintf("manual:%03d", i)
+		store.manual[id] = db.ManualAdvisory{
+			ID:          id,
+			FindingType: "vulnerability",
+			Ecosystem:   "npm",
+			Name:        fmt.Sprintf("pkg-%03d", i),
+			Severity:    "LOW",
+			Summary:     "manual advisory",
+		}
+	}
+	handler, sm, _ := newAdminFlowHandler(t, store, adminFlowConfig())
+
+	req, _ := authenticatedAdminRequest(t, sm, http.MethodGet, "/admin/advisories?offset=100")
+	rec := httptest.NewRecorder()
+	handler.HandleAdminAdvisories(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second advisory page status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		`name="return_offset" value="100"`,
+		`href="/admin/advisories?edit=manual%3a100&amp;offset=100"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("second advisory page missing %q\nbody=%s", want, body)
+		}
+	}
+
+	req, _ = authenticatedAdminRequest(t, sm, http.MethodGet, "/admin/advisories?edit=manual:100&offset=100")
+	rec = httptest.NewRecorder()
+	handler.HandleAdminAdvisories(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("edit advisory page status = %d, want 200", rec.Code)
+	}
+	body = rec.Body.String()
+	if !strings.Contains(body, `href="/admin/advisories?offset=100"`) {
+		t.Fatalf("edit advisory page missing offset-preserving cancel link\nbody=%s", body)
+	}
+}
+
+func TestAdminAdvisoryMutationsPreserveReturnOffset(t *testing.T) {
+	store := newAdminStoreStub()
+	handler, sm, _ := newAdminFlowHandler(t, store, adminFlowConfig())
+
+	req, _ := authenticatedAdminFormRequest(t, sm, "/admin/advisories/create", url.Values{
+		"id":            {"manual:offset-create"},
+		"finding_type":  {"vulnerability"},
+		"ecosystem":     {"npm"},
+		"name":          {"left-pad"},
+		"severity":      {"HIGH"},
+		"summary":       {"manual vulnerability"},
+		"return_offset": {"100"},
+	})
+	rec := httptest.NewRecorder()
+	handler.HandleAdvisoryCreate(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("HandleAdvisoryCreate status = %d, want 303", rec.Code)
+	}
+	assertAdminAdvisoryRedirectQuery(t, rec.Header().Get("Location"), map[string]string{
+		"msg":    "Advisory created",
+		"offset": "100",
+	})
+
+	req, _ = authenticatedAdminFormRequest(t, sm, "/admin/advisories/delete", url.Values{
+		"id":            {"manual:offset-create"},
+		"confirm_id":    {"manual:offset-create"},
+		"return_offset": {"100"},
+	})
+	rec = httptest.NewRecorder()
+	handler.HandleAdvisoryDelete(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("HandleAdvisoryDelete status = %d, want 303", rec.Code)
+	}
+	assertAdminAdvisoryRedirectQuery(t, rec.Header().Get("Location"), map[string]string{
+		"msg":    "Advisory deleted",
+		"offset": "100",
+	})
+}
+
+func TestAdminAdvisoriesMissingEditShowsNotFoundError(t *testing.T) {
+	store := newAdminStoreStub()
+	handler, sm, _ := newAdminFlowHandler(t, store, adminFlowConfig())
+
+	req, _ := authenticatedAdminRequest(t, sm, http.MethodGet, "/admin/advisories?edit=manual:missing")
+	rec := httptest.NewRecorder()
+	handler.HandleAdminAdvisories(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("missing edit advisory status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"Manual advisory not found", "Create Manual Advisory"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing edit advisory page missing %q\nbody=%s", want, body)
+		}
+	}
+}
+
+func assertAdminAdvisoryRedirectQuery(t *testing.T, location string, want map[string]string) {
+	t.Helper()
+	parsed, err := url.Parse(location)
+	if err != nil {
+		t.Fatalf("redirect location %q is not a URL: %v", location, err)
+	}
+	if parsed.Path != "/admin/advisories" {
+		t.Fatalf("redirect path = %q, want /admin/advisories", parsed.Path)
+	}
+	query := parsed.Query()
+	for key, value := range want {
+		if got := query.Get(key); got != value {
+			t.Fatalf("redirect query %s = %q, want %q in %q", key, got, value, location)
+		}
+	}
+}
+
+func TestAdminScansRouteRendersScanHistory(t *testing.T) {
+	store := newAdminStoreStub()
+	now := time.Date(2026, 6, 27, 12, 0, 0, 0, time.UTC)
+	store.dailyScans = []db.DailyScanStats{{Date: now, ScanCount: 2, FindingsCount: 5}}
+	store.recentScans = []db.ScanLogEntry{{
+		ScanID:        "scan-admin-history",
+		ScannedAt:     now,
+		PackagesCount: 12,
+		FindingsCount: 5,
+		DurationMs:    123,
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfg := adminFlowConfig()
+	runtime := config.NewRuntimeSettings(cfg.Server.BlockThreshold, cfg.Server.RateLimitPerMinute, cfg.Server.RateLimitBurst)
+	sm := auth.NewSessionManagerWithIdleTimeout(ctx, time.Hour, auth.DefaultAdminIdleTimeout, false)
+	mux := http.NewServeMux()
+	RegisterRoutes(ctx, mux, store, sm, slog.New(slog.NewTextHandler(io.Discard, nil)), cfg, runtime, nil, nil, nil)
+
+	req, _ := authenticatedAdminRequest(t, sm, http.MethodGet, "/admin/scans")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/admin/scans status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"Scans", "scan-admin-history", "Recent Scans", "Scan Activity"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("/admin/scans missing %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, `href="/scans"`) {
+		t.Fatalf("/admin/scans should not link the unprotected /scans route:\n%s", body)
+	}
+}
+
+func TestAdminNotFoundRendersStyledFallback(t *testing.T) {
+	store := newAdminStoreStub()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfg := adminFlowConfig()
+	runtime := config.NewRuntimeSettings(cfg.Server.BlockThreshold, cfg.Server.RateLimitPerMinute, cfg.Server.RateLimitBurst)
+	sm := auth.NewSessionManagerWithIdleTimeout(ctx, time.Hour, auth.DefaultAdminIdleTimeout, false)
+	mux := http.NewServeMux()
+	RegisterRoutes(ctx, mux, store, sm, slog.New(slog.NewTextHandler(io.Discard, nil)), cfg, runtime, nil, nil, nil)
+
+	req, _ := authenticatedAdminRequest(t, sm, http.MethodGet, "/admin/missing-page")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("/admin/missing-page status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Type"); !strings.Contains(got, "text/html") {
+		t.Fatalf("/admin/missing-page Content-Type = %q, want text/html", got)
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("/admin/missing-page Cache-Control = %q, want no-store", got)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		"Page not found",
+		`href="/admin/"`,
+		`href="/search"`,
+		`id="main-content"`,
+		`href="/admin/" aria-current="page"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("/admin/missing-page body missing %q:\n%s", want, body)
+		}
+	}
+}
+
+func TestAdminNotFoundKeepsMethodSpecificHandling(t *testing.T) {
+	store := newAdminStoreStub()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfg := adminFlowConfig()
+	runtime := config.NewRuntimeSettings(cfg.Server.BlockThreshold, cfg.Server.RateLimitPerMinute, cfg.Server.RateLimitBurst)
+	sm := auth.NewSessionManagerWithIdleTimeout(ctx, time.Hour, auth.DefaultAdminIdleTimeout, false)
+	mux := http.NewServeMux()
+	RegisterRoutes(ctx, mux, store, sm, slog.New(slog.NewTextHandler(io.Discard, nil)), cfg, runtime, nil, nil, nil)
+
+	req, _ := authenticatedAdminRequest(t, sm, http.MethodPost, "/admin/missing-page")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST /admin/missing-page status = %d, want 405; body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "Page not found") {
+		t.Fatalf("POST /admin/missing-page rendered admin not-found fallback:\n%s", rec.Body.String())
 	}
 }
 
@@ -2403,6 +3738,200 @@ func TestAdminQueueActions(t *testing.T) {
 	jobs, _ = store.ListQueueJobs(context.Background(), "", 10)
 	if len(jobs) != 0 {
 		t.Fatalf("jobs after clear = %+v, want empty", jobs)
+	}
+}
+
+func TestAdminQueuePagePreservesReturnStateInActionForms(t *testing.T) {
+	store := newAdminStoreStub()
+	for i := 0; i < 55; i++ {
+		store.addQueueJob("error")
+	}
+	handler, sm, _ := newAdminFlowHandler(t, store, adminFlowConfig())
+
+	req, _ := authenticatedAdminRequest(t, sm, http.MethodGet, "/admin/queue?status=error&offset=50")
+	rec := httptest.NewRecorder()
+	handler.HandleAdminQueue(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("HandleAdminQueue status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		`name="return_status" value="error"`,
+		`name="return_offset" value="50"`,
+		`action="/admin/queue/retry"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("queue page missing %q\nbody=%s", want, body)
+		}
+	}
+}
+
+func TestAdminQueuePageRendersHumanReadableStatusBadges(t *testing.T) {
+	store := newAdminStoreStub()
+	for _, status := range []string{"pending", "processing", "done", "error", "paused"} {
+		store.addQueueJob(status)
+	}
+	handler, sm, _ := newAdminFlowHandler(t, store, adminFlowConfig())
+
+	req, _ := authenticatedAdminRequest(t, sm, http.MethodGet, "/admin/queue")
+	rec := httptest.NewRecorder()
+	handler.HandleAdminQueue(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("HandleAdminQueue status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"Pending", "Processing", "Done", "Error", "Paused"} {
+		if count := strings.Count(body, ">"+want+"</span>"); count != 2 {
+			t.Fatalf("queue page rendered %q badge count = %d, want 2\nbody=%s", want, count, body)
+		}
+	}
+	for _, raw := range []string{"pending", "processing", "done", "error", "paused"} {
+		if strings.Contains(body, ">"+raw+"</span>") {
+			t.Fatalf("queue page rendered raw lowercase status badge %q\nbody=%s", raw, body)
+		}
+	}
+}
+
+func TestAdminQueueBulkConfirmationsExplainDestructiveConsequences(t *testing.T) {
+	store := newAdminStoreStub()
+	store.addQueueJob("done")
+	store.addQueueJob("error")
+	store.addQueueJob("pending")
+	store.addQueueJob("paused")
+	handler, sm, _ := newAdminFlowHandler(t, store, adminFlowConfig())
+
+	req, _ := authenticatedAdminRequest(t, sm, http.MethodGet, "/admin/queue")
+	rec := httptest.NewRecorder()
+	handler.HandleAdminQueue(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("HandleAdminQueue status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		"This removes completed and errored queue records from the admin queue history.",
+		"This removes Pending refresh work from the queue; it will not be processed unless it is recreated.",
+		"This removes Paused refresh work from the queue; it will not be processed unless it is recreated.",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("queue page missing destructive consequence copy %q\nbody=%s", want, body)
+		}
+	}
+}
+
+func TestAdminQueueMutationsPreserveReturnState(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		status    string
+		target    string
+		form      url.Values
+		call      func(*AdminHandler, http.ResponseWriter, *http.Request)
+		wantQuery map[string]string
+	}{
+		{
+			name:   "purge",
+			status: "done",
+			target: "/admin/queue/purge",
+			form:   url.Values{},
+			call: func(h *AdminHandler, w http.ResponseWriter, r *http.Request) {
+				h.HandleQueuePurge(w, r)
+			},
+			wantQuery: map[string]string{"msg": "Purged 1 completed/errored job.", "status": "error", "offset": "50"},
+		},
+		{
+			name:   "priority",
+			status: "pending",
+			target: "/admin/queue/priority",
+			form:   url.Values{"priority": {"1"}},
+			call: func(h *AdminHandler, w http.ResponseWriter, r *http.Request) {
+				h.HandleQueuePriorityUpdate(w, r)
+			},
+			wantQuery: map[string]string{"msg": "Priority updated", "status": "error", "offset": "50"},
+		},
+		{
+			name:   "pause",
+			status: "pending",
+			target: "/admin/queue/pause",
+			form:   url.Values{},
+			call: func(h *AdminHandler, w http.ResponseWriter, r *http.Request) {
+				h.HandleQueuePause(w, r)
+			},
+			wantQuery: map[string]string{"msg": "Job paused", "status": "error", "offset": "50"},
+		},
+		{
+			name:   "resume",
+			status: "paused",
+			target: "/admin/queue/resume",
+			form:   url.Values{},
+			call: func(h *AdminHandler, w http.ResponseWriter, r *http.Request) {
+				h.HandleQueueResume(w, r)
+			},
+			wantQuery: map[string]string{"msg": "Job resumed", "status": "error", "offset": "50"},
+		},
+		{
+			name:   "retry",
+			status: "error",
+			target: "/admin/queue/retry",
+			form:   url.Values{},
+			call: func(h *AdminHandler, w http.ResponseWriter, r *http.Request) {
+				h.HandleQueueRetry(w, r)
+			},
+			wantQuery: map[string]string{"msg": "Job queued for retry", "status": "error", "offset": "50"},
+		},
+		{
+			name:   "clear",
+			status: "pending",
+			target: "/admin/queue/clear",
+			form:   url.Values{"status": {"pending"}},
+			call: func(h *AdminHandler, w http.ResponseWriter, r *http.Request) {
+				h.HandleQueueClear(w, r)
+			},
+			wantQuery: map[string]string{"msg": "Cleared 1 queue job.", "status": "error", "offset": "50"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newAdminStoreStub()
+			jobID := store.addQueueJob(tt.status)
+			handler, sm, _ := newAdminFlowHandler(t, store, adminFlowConfig())
+			form := cloneURLValues(tt.form)
+			if tt.target != "/admin/queue/purge" && tt.target != "/admin/queue/clear" {
+				form.Set("job_id", strconv.Itoa(jobID))
+			}
+			form.Set("return_status", "error")
+			form.Set("return_offset", "50")
+
+			req, _ := authenticatedAdminFormRequest(t, sm, tt.target, form)
+			rec := httptest.NewRecorder()
+			tt.call(handler, rec, req)
+			if rec.Code != http.StatusSeeOther {
+				t.Fatalf("%s status = %d, want 303", tt.target, rec.Code)
+			}
+			assertAdminQueueRedirectQuery(t, rec.Header().Get("Location"), tt.wantQuery)
+		})
+	}
+}
+
+func cloneURLValues(values url.Values) url.Values {
+	out := make(url.Values, len(values))
+	for key, vals := range values {
+		out[key] = append([]string(nil), vals...)
+	}
+	return out
+}
+
+func assertAdminQueueRedirectQuery(t *testing.T, location string, want map[string]string) {
+	t.Helper()
+	parsed, err := url.Parse(location)
+	if err != nil {
+		t.Fatalf("redirect location %q is not a URL: %v", location, err)
+	}
+	if parsed.Path != "/admin/queue" {
+		t.Fatalf("redirect path = %q, want /admin/queue", parsed.Path)
+	}
+	query := parsed.Query()
+	for key, value := range want {
+		if got := query.Get(key); got != value {
+			t.Fatalf("redirect query %s = %q, want %q in %q", key, got, value, location)
+		}
 	}
 }
 

@@ -118,7 +118,7 @@ func (sw *SARIFWriter) WriteFile(path string, result *domain.ScanResult) error {
 	}
 
 	if err := sw.Write(f, result); err != nil {
-		closeSilently(f)
+		ioutils.CloseSilently(f)
 		return err
 	}
 	return f.Close()
@@ -149,9 +149,10 @@ func (sw *SARIFWriter) buildSARIF(result *domain.ScanResult) sarifLog {
 	// coverage was degraded.
 	var invocations []sarifInvocation
 	diagnostics := scanArtifactDiagnostics(result)
-	if len(diagnostics) > 0 || len(result.ParseErrors) > 0 {
+	parseErrors, omittedParseErrors := BoundedParseDiagnostics(result.ParseErrors)
+	if len(diagnostics) > 0 || len(parseErrors) > 0 || omittedParseErrors > 0 {
 		executionSuccessful := true
-		notes := make([]sarifNotification, 0, len(diagnostics)+len(result.ParseErrors))
+		notes := make([]sarifNotification, 0, len(diagnostics)+len(parseErrors)+1)
 		for _, diagnostic := range diagnostics {
 			if diagnostic.Level == "error" {
 				executionSuccessful = false
@@ -161,11 +162,18 @@ func (sw *SARIFWriter) buildSARIF(result *domain.ScanResult) sarifLog {
 				Message: sarifMessage{Text: diagnostic.Message},
 			})
 		}
-		for _, pe := range result.ParseErrors {
+		for _, pe := range parseErrors {
 			executionSuccessful = false
 			notes = append(notes, sarifNotification{
 				Level:   "error",
 				Message: sarifMessage{Text: pe},
+			})
+		}
+		if summary := ParseDiagnosticsOmittedSummary(omittedParseErrors); summary != "" {
+			executionSuccessful = false
+			notes = append(notes, sarifNotification{
+				Level:   "error",
+				Message: sarifMessage{Text: summary},
 			})
 		}
 		invocations = []sarifInvocation{{

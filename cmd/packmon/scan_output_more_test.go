@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -76,12 +78,7 @@ func TestRunSingleScanOperationalFailureReportsInSARIFAndJUnit(t *testing.T) {
 	defer server.Close()
 
 	scanDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(scanDir, "package-lock.json"), []byte(`{
-		"lockfileVersion": 3,
-		"packages": {"": {"version":"1.0.0"}, "node_modules/prod": {"version":"1.0.0"}}
-	}`), 0o600); err != nil {
-		t.Fatalf("write package-lock: %v", err)
-	}
+	writePackageLockForScanCommand(t, scanDir, "prod", "1.0.0")
 	outDir := t.TempDir()
 	sarifPath := filepath.Join(outDir, "result.sarif")
 	junitPath := filepath.Join(outDir, "result.xml")
@@ -279,7 +276,7 @@ func TestScanCommandHTMLFlagWritesReport(t *testing.T) {
 	if !strings.HasPrefix(out, "<!DOCTYPE html>") {
 		t.Fatalf("report is not HTML:\n%.80s", out)
 	}
-	if !strings.Contains(out, "<h1>empty-project</h1>") {
+	if !strings.Contains(out, `<h1><bdi dir="auto">empty-project</bdi></h1>`) {
 		t.Fatal("report missing repo-name H1 title")
 	}
 }
@@ -325,7 +322,7 @@ func TestRunSingleScanWritesHTMLReport(t *testing.T) {
 	if !strings.HasPrefix(out, "<!DOCTYPE html>") {
 		t.Fatalf("report is not HTML:\n%.80s", out)
 	}
-	if !strings.Contains(out, "<h1>empty-project</h1>") {
+	if !strings.Contains(out, `<h1><bdi dir="auto">empty-project</bdi></h1>`) {
 		t.Fatal("report missing repo-name H1 title")
 	}
 }
@@ -394,16 +391,10 @@ func TestRunSingleScanRemotePostsPackagesAndSendsWebhook(t *testing.T) {
 	}
 
 	projectDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(projectDir, "package-lock.json"), []byte(`{
-		"lockfileVersion": 3,
-		"packages": {
-			"": {"version":"1.0.0"},
-			"node_modules/prod": {"version":"1.0.0"},
-			"node_modules/dev-only": {"version":"2.0.0","dev":true}
-		}
-	}`), 0o600); err != nil {
-		t.Fatalf("write package-lock: %v", err)
-	}
+	writePackageLockPackagesForScanCommand(t, projectDir,
+		scanCommandLockPackage{Name: "prod", Version: "1.0.0"},
+		scanCommandLockPackage{Name: "dev-only", Version: "2.0.0", Dev: true},
+	)
 
 	originalGitCommandOutput := gitCommandOutput
 	t.Cleanup(func() { gitCommandOutput = originalGitCommandOutput })
@@ -517,8 +508,8 @@ func TestRunSingleScanRemotePostsPackagesAndSendsWebhook(t *testing.T) {
 		if envelope.Repository == nil {
 			t.Fatal("webhook envelope repository is nil")
 		}
-		if envelope.Repository.Branch != "" || envelope.Repository.Commit != "" {
-			t.Fatalf("webhook repository includes branch/commit metadata: %+v", envelope.Repository)
+		if envelope.Repository.Name == "" {
+			t.Fatalf("webhook repository missing name: %+v", envelope.Repository)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("webhook request was not received")
@@ -528,19 +519,82 @@ func TestRunSingleScanRemotePostsPackagesAndSendsWebhook(t *testing.T) {
 	}
 }
 
+func TestRunSingleScanQuietSuppressesRoutineWebhookLogs(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	t.Setenv("PACKMON_HISTORY_ENABLED", "false")
+
+	projectDir := t.TempDir()
+	writePackageLockForScanCommand(t, projectDir, "prod", "1.0.0")
+
+	checkServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if err := writeJSONResponseForTest(w, domain.ScanResult{
+			ScanID:          "quiet-webhook-scan",
+			Mode:            "remote",
+			ScannedAt:       time.Now().UTC(),
+			PackagesScanned: 1,
+			Summary:         domain.EmptyScanSummary(),
+			FeedStatus:      "healthy",
+			FeedVersions:    map[string]string{"osv": time.Now().UTC().Format(time.RFC3339)},
+		}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	}))
+	defer checkServer.Close()
+
+	webhookServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer webhookServer.Close()
+
+	var defaultLogs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&defaultLogs, nil)))
+	defer slog.SetDefault(previousLogger)
+
+	stderr := captureStderr(t, func() {
+		exitCode, err := runSingleScan(context.Background(), scanSettings{
+			Path:         projectDir,
+			Mode:         string(scanner.ModeRemote),
+			ServerURL:    checkServer.URL,
+			APIKey:       "remote-key",
+			FailOn:       "CRITICAL",
+			MaxDepth:     3,
+			Timeout:      2,
+			Quiet:        true,
+			NoColor:      true,
+			LogLevel:     "DEBUG",
+			InsecureHTTP: true,
+			WebhookURL:   webhookServer.URL,
+		})
+		if err != nil {
+			t.Fatalf("runSingleScan(remote) error = %v", err)
+		}
+		if exitCode != ExitOK {
+			t.Fatalf("exitCode = %d, want %d", exitCode, ExitOK)
+		}
+	})
+
+	if output := defaultLogs.String(); output != "" {
+		t.Fatalf("webhook wrote through package default logger despite quiet scan logger:\n%s", output)
+	}
+	if strings.Contains(stderr, "webhook:") {
+		t.Fatalf("quiet scan stderr included routine webhook log:\n%s", stderr)
+	}
+}
+
 func TestRunSingleScanOmitsRepoMetadataWhenDisabled(t *testing.T) {
 	isolateCLIConfigDiscovery(t)
 	t.Setenv("PACKMON_HISTORY_ENABLED", "false")
 
 	projectDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(projectDir, "package-lock.json"), []byte(`{
-		"lockfileVersion": 3,
-		"packages": {
-			"": {"version":"1.0.0"},
-			"node_modules/prod": {"version":"1.0.0"}
-		}
-	}`), 0o600); err != nil {
-		t.Fatalf("write package-lock: %v", err)
+	writePackageLockForScanCommand(t, projectDir, "prod", "1.0.0")
+
+	originalGitCommandOutput := gitCommandOutput
+	t.Cleanup(func() { gitCommandOutput = originalGitCommandOutput })
+	gitMetadataCalls := 0
+	gitCommandOutput = func(context.Context, ...string) ([]byte, error) {
+		gitMetadataCalls++
+		return nil, errors.New("unexpected git metadata probe")
 	}
 
 	requests := make(chan domain.ScanRequest, 1)
@@ -612,6 +666,10 @@ func TestRunSingleScanOmitsRepoMetadataWhenDisabled(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("webhook request was not received")
+	}
+
+	if gitMetadataCalls != 0 {
+		t.Fatalf("git metadata calls = %d, want zero when metadata and history are disabled", gitMetadataCalls)
 	}
 }
 
@@ -688,16 +746,9 @@ func TestScanCommandListAllUsesRepoFlagTarget(t *testing.T) {
 	}
 	writePackageLockForScanCommand(t, appDir, "repo-list-all", "1.0.0")
 	writeSingleRepoConfigForScanCommand(t, "app", appDir)
-	ctx := stubLatestVersionContext(t, func(_ context.Context, _ domain.Ecosystem, name string) string {
-		if name == "repo-list-all" {
-			return "1.0.0"
-		}
-		return ""
-	})
 
 	cmd := newScanCmd()
-	cmd.SetContext(ctx)
-	cmd.SetArgs([]string{"--mode", "local", "--list-all", "--repo", "app"})
+	cmd.SetArgs([]string{"--mode", "local", "--list-all", "--list-all-offline", "--repo", "app"})
 	output := captureStdout(t, func() {
 		if err := cmd.Execute(); err != nil {
 			t.Fatalf("scan --list-all --repo app: %v", err)
@@ -717,7 +768,7 @@ func TestScanCommandOutdatedUsesRepoFlagTarget(t *testing.T) {
 	}
 	writePackageLockForScanCommand(t, appDir, "repo-outdated", "1.0.0")
 	writeSingleRepoConfigForScanCommand(t, "app", appDir)
-	ctx := stubLatestVersionContext(t, func(_ context.Context, _ domain.Ecosystem, name string) string {
+	resolver := stubLatestVersion(t, func(_ context.Context, _ domain.Ecosystem, name string) string {
 		if name == "repo-outdated" {
 			return "2.0.0"
 		}
@@ -725,11 +776,22 @@ func TestScanCommandOutdatedUsesRepoFlagTarget(t *testing.T) {
 	})
 
 	cmd := newScanCmd()
-	cmd.SetContext(ctx)
-	cmd.SetArgs([]string{"--outdated", "--repo", "app"})
+	settings, err := resolveSingleTargetScanSettings(cmd, nil, scanFlagValues{Repo: "app", MaxDepth: 10}, "--outdated")
+	if err != nil {
+		t.Fatalf("resolve --outdated --repo app settings: %v", err)
+	}
 	output := captureStdout(t, func() {
-		if err := cmd.Execute(); err != nil {
-			t.Fatalf("scan --outdated --repo app: %v", err)
+		if err := runOutdatedWithOptions([]string{settings.Path}, outdatedOptions{
+			Context:        context.Background(),
+			Ecosystems:     strings.Join(settings.Ecosystems, ","),
+			MaxDepth:       settings.MaxDepth,
+			IncludeDev:     true,
+			SBOMFiles:      settings.SBOMFiles,
+			Timeout:        settings.Timeout,
+			LatestRegistry: settings.LatestRegistry,
+			resolver:       resolver,
+		}); err != nil {
+			t.Fatalf("run --outdated --repo app: %v", err)
 		}
 	})
 
@@ -764,7 +826,7 @@ func TestScanCommandInventoryModesUseConfiguredEcosystemFilter(t *testing.T) {
 		t.Fatalf("list-packages output ignored configured ecosystem filter:\n%s", listOutput)
 	}
 
-	ctx := stubLatestVersionContext(t, func(_ context.Context, eco domain.Ecosystem, name string) string {
+	resolver := stubLatestVersion(t, func(_ context.Context, eco domain.Ecosystem, name string) string {
 		if eco == domain.EcosystemNPM {
 			t.Fatalf("outdated lookup reached npm package %q despite configured Go-only filter", name)
 		}
@@ -774,11 +836,22 @@ func TestScanCommandInventoryModesUseConfiguredEcosystemFilter(t *testing.T) {
 		return ""
 	})
 	outdatedCmd := newScanCmd()
-	outdatedCmd.SetContext(ctx)
-	outdatedCmd.SetArgs([]string{"--outdated", projectDir})
+	settings, err := resolveSingleTargetScanSettings(outdatedCmd, []string{projectDir}, scanFlagValues{MaxDepth: 10}, "--outdated")
+	if err != nil {
+		t.Fatalf("resolve scan --outdated settings: %v", err)
+	}
 	outdatedOutput := captureStdout(t, func() {
-		if err := outdatedCmd.Execute(); err != nil {
-			t.Fatalf("scan --outdated: %v", err)
+		if err := runOutdatedWithOptions([]string{settings.Path}, outdatedOptions{
+			Context:        context.Background(),
+			Ecosystems:     strings.Join(settings.Ecosystems, ","),
+			MaxDepth:       settings.MaxDepth,
+			IncludeDev:     true,
+			SBOMFiles:      settings.SBOMFiles,
+			Timeout:        settings.Timeout,
+			LatestRegistry: settings.LatestRegistry,
+			resolver:       resolver,
+		}); err != nil {
+			t.Fatalf("run scan --outdated: %v", err)
 		}
 	})
 	if !strings.Contains(outdatedOutput, "github.com/pkg/errors") || !strings.Contains(outdatedOutput, "v0.9.1") {
@@ -900,11 +973,16 @@ func TestRunSingleScanRejectsInvalidModeAndFailOn(t *testing.T) {
 
 func TestRunListPackagesNoLockFilesAndNoPackages(t *testing.T) {
 	noLockOutput := captureStdout(t, func() {
-		if err := runListPackages([]string{t.TempDir()}, "npm", 1); err != nil {
-			t.Fatalf("runListPackages(no lock files) error = %v", err)
+		if err := runListPackagesWithSettings(scanSettings{
+			Path:       t.TempDir(),
+			Ecosystems: []string{"npm"},
+			MaxDepth:   1,
+			IncludeDev: true,
+		}); err != nil {
+			t.Fatalf("runListPackagesWithSettings(no lock files) error = %v", err)
 		}
 	})
-	if !strings.Contains(noLockOutput, "No lock files found") {
+	if !strings.Contains(noLockOutput, "No lockfiles found") {
 		t.Fatalf("no lock output = %q", noLockOutput)
 	}
 
@@ -913,8 +991,13 @@ func TestRunListPackagesNoLockFilesAndNoPackages(t *testing.T) {
 		t.Fatalf("write empty package-lock: %v", err)
 	}
 	noPackagesOutput := captureStdout(t, func() {
-		if err := runListPackages([]string{projectDir}, "npm", 2); err != nil {
-			t.Fatalf("runListPackages(no packages) error = %v", err)
+		if err := runListPackagesWithSettings(scanSettings{
+			Path:       projectDir,
+			Ecosystems: []string{"npm"},
+			MaxDepth:   2,
+			IncludeDev: true,
+		}); err != nil {
+			t.Fatalf("runListPackagesWithSettings(no packages) error = %v", err)
 		}
 	})
 	if !strings.Contains(noPackagesOutput, "No packages found") {
@@ -927,15 +1010,37 @@ func strconvQuoteForYAML(s string) string {
 	return string(data)
 }
 
+type scanCommandLockPackage struct {
+	Name    string
+	Version string
+	Dev     bool
+}
+
 func writePackageLockForScanCommand(t *testing.T, dir, name, version string) {
 	t.Helper()
-	content := `{
-  "lockfileVersion": 3,
-  "packages": {
-    "": {"version": "1.0.0"},
-    "node_modules/` + name + `": {"version": "` + version + `"}
-  }
-}`
+	writePackageLockPackagesForScanCommand(t, dir, scanCommandLockPackage{Name: name, Version: version})
+}
+
+func writePackageLockPackagesForScanCommand(t *testing.T, dir string, packages ...scanCommandLockPackage) {
+	t.Helper()
+	type lockPackage struct {
+		Version string `json:"version"`
+		Dev     bool   `json:"dev,omitempty"`
+	}
+	lock := struct {
+		LockfileVersion int                    `json:"lockfileVersion"`
+		Packages        map[string]lockPackage `json:"packages"`
+	}{
+		LockfileVersion: 3,
+		Packages:        map[string]lockPackage{"": {Version: "1.0.0"}},
+	}
+	for _, pkg := range packages {
+		lock.Packages["node_modules/"+pkg.Name] = lockPackage{Version: pkg.Version, Dev: pkg.Dev}
+	}
+	content, err := json.MarshalIndent(lock, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal package-lock fixture: %v", err)
+	}
 	if err := os.WriteFile(filepath.Join(dir, "package-lock.json"), []byte(content), 0o600); err != nil {
 		t.Fatalf("write package-lock: %v", err)
 	}

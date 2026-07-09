@@ -3,6 +3,12 @@
 This file is a concise architecture map. `DESIGN.md` remains the canonical
 product and requirements baseline.
 
+Supporting artifacts:
+
+- `docs/architecture/system-context.mmd`: system-boundary diagram.
+- `docs/adr/README.md`: accepted architecture decision index.
+- `docs/data-classification.md`: data classes, storage locations, and controls.
+
 ## Runtime Surfaces
 
 Packmon has two main runtime surfaces:
@@ -28,6 +34,9 @@ Feed sources and N8N imports
      -> PostgreSQL normalized feed tables
      -> API checks, SQLite sync export, web UI, metrics
 ```
+
+The Mermaid diagram in `docs/architecture/system-context.mmd` shows the same
+surfaces with actors, stores, external inputs, and trust boundaries.
 
 ## Persistence
 

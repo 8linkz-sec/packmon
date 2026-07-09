@@ -1,6 +1,6 @@
 package parser
 
-import "gopkg.in/yaml.v3"
+import "go.yaml.in/yaml/v3"
 
 // yamlUnmarshal is a thin wrapper so that only this file imports the yaml
 // package directly.

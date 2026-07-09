@@ -2,6 +2,12 @@ package parser
 
 import (
 	"errors"
+	"fmt"
+	"go/ast"
+	goparser "go/parser"
+	"go/token"
+	"os"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -212,6 +218,25 @@ func TestNPMParser_ParseMarksDevDependencies(t *testing.T) {
 	}
 }
 
+func TestNPMRootDependencyScopeCallsitesUseNamedFlags(t *testing.T) {
+	source, err := os.ReadFile("npm.go")
+	if err != nil {
+		t.Fatalf("read npm.go: %v", err)
+	}
+	body := string(source)
+	for _, blocked := range []string{
+		`add := func(deps map[string]string, dev, optional, peer bool)`,
+		`add(root.Dependencies, false, false, false)`,
+		`add(root.DevDependencies, true, false, false)`,
+		`add(root.OptionalDependencies, false, true, false)`,
+		`add(root.PeerDependencies, false, false, true)`,
+	} {
+		if strings.Contains(body, blocked) {
+			t.Fatalf("npm root dependency scope still uses ambiguous boolean tuple %q", blocked)
+		}
+	}
+}
+
 func TestNPMParser_ParsePackageLockV3Metadata(t *testing.T) {
 	t.Parallel()
 
@@ -324,6 +349,187 @@ func TestNPMParser_DoesNotMarkNestedDuplicateNameAsDirect(t *testing.T) {
 	}
 }
 
+func TestNPMDirectDependencyMetadataPassPreservesScopeFlags(t *testing.T) {
+	t.Parallel()
+
+	packages := map[string]packageLockPkg{
+		"": {
+			Dependencies:         map[string]string{"runtime": "^1.0.0"},
+			DevDependencies:      map[string]string{"dev-tool": "^2.0.0"},
+			OptionalDependencies: map[string]string{"optional-root": "^3.0.0"},
+			PeerDependencies:     map[string]string{"peer-root": "^4.0.0"},
+		},
+		"node_modules/runtime": {
+			Version: "1.0.0",
+		},
+		"node_modules/dev-tool": {
+			Version: "2.0.0",
+		},
+		"node_modules/optional-root": {
+			Version: "3.0.0",
+		},
+		"node_modules/peer-root": {
+			Version: "4.0.0",
+		},
+		"node_modules/transitive-flagged": {
+			Version:  "5.0.0",
+			Optional: true,
+			Peer:     true,
+		},
+		"node_modules/runtime/node_modules/dev-tool": {
+			Version: "2.1.0",
+		},
+	}
+
+	resolver := newNPMPackageResolver(packages)
+	metadata := npmDirectDependencyMetadata(packages, resolver, npmRootDependencies(packages[""]))
+
+	assertNPMPackageMeta(t, metadata["node_modules/runtime"], npmPackageMeta{direct: true})
+	assertNPMPackageMeta(t, metadata["node_modules/dev-tool"], npmPackageMeta{direct: true, dev: true})
+	assertNPMPackageMeta(t, metadata["node_modules/optional-root"], npmPackageMeta{direct: true, optional: true})
+	assertNPMPackageMeta(t, metadata["node_modules/peer-root"], npmPackageMeta{direct: true, peer: true})
+	assertNPMPackageMeta(t, metadata["node_modules/transitive-flagged"], npmPackageMeta{indirect: true, optional: true, peer: true})
+	assertNPMPackageMeta(t, metadata["node_modules/runtime/node_modules/dev-tool"], npmPackageMeta{indirect: true})
+	if _, ok := metadata[""]; ok {
+		t.Fatalf("root package metadata present")
+	}
+}
+
+func TestNPMViaRootPropagationPassAddsOnlyIndirectRoots(t *testing.T) {
+	t.Parallel()
+
+	packages := map[string]packageLockPkg{
+		"": {
+			Dependencies: map[string]string{
+				"alpha": "^1.0.0",
+				"beta":  "^1.0.0",
+			},
+		},
+		"node_modules/alpha": {
+			Version: "1.0.0",
+			Dependencies: map[string]string{
+				"beta":   "^1.0.0",
+				"shared": "^1.0.0",
+			},
+		},
+		"node_modules/beta": {
+			Version:      "1.0.0",
+			Dependencies: map[string]string{"shared": "^1.0.0"},
+		},
+		"node_modules/shared": {
+			Version: "1.0.0",
+		},
+	}
+
+	resolver := newNPMPackageResolver(packages)
+	directDeps := npmRootDependencies(packages[""])
+	metadata := npmDirectDependencyMetadata(packages, resolver, directDeps)
+	npmPropagateViaRoots(metadata, resolver, directDeps)
+
+	assertNPMPackageMeta(t, metadata["node_modules/shared"], npmPackageMeta{indirect: true, via: []string{"alpha", "beta"}})
+	assertNPMPackageMeta(t, metadata["node_modules/beta"], npmPackageMeta{direct: true})
+}
+
+func TestNPMViaRootPropagationSharedGraphHasStableVia(t *testing.T) {
+	const (
+		rootCount = 40
+		depth     = 40
+	)
+	packages, wantVia, leafKey := sharedNPMViaGraph(rootCount, depth)
+
+	metadata := npmPackageMetadata(packages)
+	leaf := metadata[leafKey]
+	if leaf.direct || !leaf.indirect || !reflect.DeepEqual(leaf.via, wantVia) {
+		t.Fatalf("leaf metadata = %+v, want indirect via %v", leaf, wantVia)
+	}
+	assertNPMPackageMeta(t, metadata["node_modules/root-39"], npmPackageMeta{direct: true, dev: true})
+
+	allocs := testing.AllocsPerRun(10, func() {
+		metadata = npmPackageMetadata(packages)
+	})
+	if allocs > 6000 {
+		t.Fatalf("npmPackageMetadata shared graph allocations = %.0f, want <= 6000", allocs)
+	}
+}
+
+func TestNPMViaRootPropagationDoesNotUsePerRootReachability(t *testing.T) {
+	source, err := os.ReadFile("npm.go")
+	if err != nil {
+		t.Fatalf("read npm.go: %v", err)
+	}
+	file, err := goparser.ParseFile(token.NewFileSet(), "npm.go", source, 0)
+	if err != nil {
+		t.Fatalf("parse npm.go: %v", err)
+	}
+
+	var fn *ast.FuncDecl
+	for _, decl := range file.Decls {
+		candidate, ok := decl.(*ast.FuncDecl)
+		if ok && candidate.Name.Name == "npmPropagateViaRoots" {
+			fn = candidate
+			break
+		}
+	}
+	if fn == nil {
+		t.Fatalf("npmPropagateViaRoots not found")
+	}
+
+	ast.Inspect(fn.Body, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		selector, ok := call.Fun.(*ast.SelectorExpr)
+		if ok && selector.Sel.Name == "reachableDependencyKeys" {
+			t.Fatalf("npmPropagateViaRoots still calls reachableDependencyKeys")
+		}
+		return true
+	})
+}
+
+func TestNPMParentEdgeCollectionPassUsesDependencyKinds(t *testing.T) {
+	t.Parallel()
+
+	packages := map[string]packageLockPkg{
+		"node_modules/parent": {
+			Version: "1.0.0",
+			Dependencies: map[string]string{
+				"child": "^1.0.0",
+			},
+			OptionalDependencies: map[string]string{
+				"optional-child": "^1.0.0",
+			},
+		},
+		"node_modules/peer-parent": {
+			Version:          "2.0.0",
+			PeerDependencies: map[string]string{"child": "^1.0.0"},
+		},
+		"node_modules/no-version-parent": {
+			Dependencies: map[string]string{"child": "^1.0.0"},
+		},
+		"node_modules/child": {
+			Version: "1.0.0",
+		},
+		"node_modules/optional-child": {
+			Version: "1.0.0",
+		},
+	}
+
+	resolver := newNPMPackageResolver(packages)
+	metadata := npmDirectDependencyMetadata(packages, resolver, npmRootDependencies(packages[""]))
+	npmCollectParentEdges(metadata, packages, resolver)
+
+	if want := []domain.PackageParent{
+		{Name: "parent", Version: "1.0.0", Ecosystem: domain.EcosystemNPM},
+		{Name: "peer-parent", Version: "2.0.0", Ecosystem: domain.EcosystemNPM},
+	}; !reflect.DeepEqual(metadata["node_modules/child"].parents, want) {
+		t.Fatalf("child parents = %#v, want %#v", metadata["node_modules/child"].parents, want)
+	}
+	if want := []domain.PackageParent{{Name: "parent", Version: "1.0.0", Ecosystem: domain.EcosystemNPM}}; !reflect.DeepEqual(metadata["node_modules/optional-child"].parents, want) {
+		t.Fatalf("optional-child parents = %#v, want %#v", metadata["node_modules/optional-child"].parents, want)
+	}
+}
+
 func TestNPMParserNameHelperRejectsNonNodeModulePath(t *testing.T) {
 	t.Parallel()
 
@@ -364,6 +570,49 @@ func TestNPMPackageResolverUsesIndexedDependencyKeys(t *testing.T) {
 	if got := strings.Join(resolver.resolvedDependencyKeys("node_modules/app"), ","); got != "node_modules/app/node_modules/left-pad" {
 		t.Fatalf("resolvedDependencyKeys(app) = %q", got)
 	}
+}
+
+func assertNPMPackageMeta(t *testing.T, got, want npmPackageMeta) {
+	t.Helper()
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("metadata = %+v, want %+v", got, want)
+	}
+}
+
+func sharedNPMViaGraph(rootCount, depth int) (map[string]packageLockPkg, []string, string) {
+	packages := make(map[string]packageLockPkg, rootCount+depth+1)
+	root := packageLockPkg{
+		Dependencies:    make(map[string]string, rootCount-1),
+		DevDependencies: make(map[string]string, 1),
+	}
+	wantVia := make([]string, 0, rootCount)
+	for i := 0; i < rootCount; i++ {
+		name := fmt.Sprintf("root-%02d", i)
+		if i == rootCount-1 {
+			root.DevDependencies[name] = "^1.0.0"
+		} else {
+			root.Dependencies[name] = "^1.0.0"
+		}
+		wantVia = append(wantVia, name)
+		packages["node_modules/"+name] = packageLockPkg{
+			Version:      "1.0.0",
+			Dev:          i == rootCount-1,
+			Dependencies: map[string]string{"shared-00": "^1.0.0"},
+		}
+	}
+	packages[""] = root
+
+	for i := 0; i < depth; i++ {
+		name := fmt.Sprintf("shared-%02d", i)
+		entry := packageLockPkg{Version: "1.0.0"}
+		if i < depth-1 {
+			nextName := fmt.Sprintf("shared-%02d", i+1)
+			entry.Dependencies = map[string]string{nextName: "^1.0.0"}
+		}
+		packages["node_modules/"+name] = entry
+	}
+
+	return packages, wantVia, fmt.Sprintf("node_modules/shared-%02d", depth-1)
 }
 
 // ---------------------------------------------------------------------------

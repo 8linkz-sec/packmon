@@ -1,13 +1,20 @@
 package ci
 
 import (
+	"fmt"
 	"os"
 	"reflect"
 	"strings"
 	"testing"
 
+	apiv1 "github.com/8linkz-sec/packmon/internal/api/v1"
+	"github.com/8linkz-sec/packmon/internal/checkcontract"
 	"github.com/8linkz-sec/packmon/internal/domain"
-	"gopkg.in/yaml.v3"
+	"github.com/8linkz-sec/packmon/internal/synccontract"
+	"github.com/pb33f/libopenapi"
+	"github.com/pb33f/libopenapi/datamodel"
+	"github.com/santhosh-tekuri/jsonschema/v6"
+	"go.yaml.in/yaml/v3"
 )
 
 func TestOpenAPIIncludesCanonicalScanAndSyncFields(t *testing.T) {
@@ -28,13 +35,23 @@ func TestOpenAPIIncludesCanonicalScanAndSyncFields(t *testing.T) {
 		if got := schema["type"]; got != "integer" {
 			t.Fatalf("/api/v1/sync parameter %s type = %#v, want integer", name, got)
 		}
+		if got := requireInt(t, schema, "minimum"); got != 0 {
+			t.Fatalf("/api/v1/sync parameter %s minimum = %d, want 0", name, got)
+		}
+		if got := requireInt(t, schema, "maximum"); got != 9223372036854775807 {
+			t.Fatalf("/api/v1/sync parameter %s maximum = %d, want signed bigint max", name, got)
+		}
 	}
 
 	importOperation := requireMap(t, requireMap(t, paths, "/api/v1/feeds/{feed}/import"), "post")
 	feedParameter := requireOperationParameter(t, importOperation, "feed", "path")
 	feedSchema := requireMap(t, feedParameter, "schema")
 	feedEnums := requireStringEnum(t, feedSchema, "feed import path parameter")
-	for _, want := range []string{"osv", "ghsa", "openssf", "malicious", "vulncheck", "cisakev", "epss", "socket"} {
+	wantFeedEnums := apiv1.FeedImportPathFeedNames()
+	if len(feedEnums) != len(wantFeedEnums) {
+		t.Fatalf("feed import path enum length = %d (%v), want %d API capabilities", len(feedEnums), enumKeys(feedEnums), len(wantFeedEnums))
+	}
+	for _, want := range wantFeedEnums {
 		if _, ok := feedEnums[want]; !ok {
 			t.Fatalf("feed import path enum missing %q; got %v", want, enumKeys(feedEnums))
 		}
@@ -76,16 +93,60 @@ func TestOpenAPIIncludesCanonicalScanAndSyncFields(t *testing.T) {
 	if got := feedStatus["type"]; got != "string" {
 		t.Fatalf("SyncResponse.feed_status type = %#v, want string", got)
 	}
+	syncFeedStatusEnums := requireStringEnum(t, feedStatus, "SyncResponse.feed_status")
+	for _, want := range domain.ScanFeedStatusValues() {
+		if _, ok := syncFeedStatusEnums[string(want)]; !ok {
+			t.Errorf("SyncResponse.feed_status enum missing %q; got %v", want, enumKeys(syncFeedStatusEnums))
+		}
+	}
 	feedVersions := requireMap(t, syncResponseProperties, "feed_versions")
 	if got := feedVersions["type"]; got != "object" {
 		t.Fatalf("SyncResponse.feed_versions type = %#v, want object", got)
+	}
+	hasMore := requireMap(t, syncResponseProperties, "has_more")
+	if got := hasMore["type"]; got != "boolean" {
+		t.Fatalf("SyncResponse.has_more type = %#v, want boolean", got)
+	}
+	if got := requireBool(t, hasMore, "deprecated"); !got {
+		t.Fatalf("SyncResponse.has_more deprecated = %t, want true", got)
+	}
+	hasMoreDescription, _ := hasMore["description"].(string)
+	for _, want := range []string{"API v1", "truncated", "next_cursor", "future major API version"} {
+		if !strings.Contains(hasMoreDescription, want) {
+			t.Fatalf("SyncResponse.has_more description missing %q versioning guidance: %q", want, hasMoreDescription)
+		}
 	}
 	nextCursor := requireMap(t, syncResponseProperties, "next_cursor")
 	if got := nextCursor["$ref"]; got != "#/components/schemas/SyncCursor" {
 		t.Fatalf("SyncResponse.next_cursor ref = %#v, want SyncCursor", got)
 	}
 
+	limit := requireOperationParameter(t, syncOperation, "limit", "query")
+	limitSchema := requireMap(t, limit, "schema")
+	if got := requireInt(t, limitSchema, "default"); got != synccontract.DefaultLimit {
+		t.Fatalf("/api/v1/sync limit default = %d, want %d", got, synccontract.DefaultLimit)
+	}
+	if got := requireInt(t, limitSchema, "maximum"); got != synccontract.MaxLimit {
+		t.Fatalf("/api/v1/sync limit maximum = %d, want %d", got, synccontract.MaxLimit)
+	}
+	for _, name := range []string{"offset", "vulnerabilities_offset", "malicious_offset", "reputation_offset", "lifecycle_offset"} {
+		parameter := requireOperationParameter(t, syncOperation, name, "query")
+		if got := requireBool(t, parameter, "deprecated"); !got {
+			t.Fatalf("/api/v1/sync %s deprecated = %t, want true", name, got)
+		}
+		schema := requireMap(t, parameter, "schema")
+		if got := requireInt(t, schema, "maximum"); got != 10000 {
+			t.Fatalf("/api/v1/sync %s maximum = %d, want 10000", name, got)
+		}
+	}
+
 	syncCursorProperties := requireMap(t, requireMap(t, schemas, "SyncCursor"), "properties")
+	for _, name := range []string{"vulnerabilities", "malicious", "reputation", "lifecycle"} {
+		property := requireMap(t, syncCursorProperties, name)
+		if got := requireBool(t, property, "deprecated"); !got {
+			t.Fatalf("SyncCursor.%s deprecated = %t, want true", name, got)
+		}
+	}
 	vulnerabilitiesCursor := requireMap(t, syncCursorProperties, "vulnerabilities_cursor")
 	if got := vulnerabilitiesCursor["type"]; got != "string" {
 		t.Fatalf("SyncCursor.vulnerabilities_cursor type = %#v, want string", got)
@@ -160,6 +221,101 @@ func TestOpenAPI32UsesJSONSchemaNullTypes(t *testing.T) {
 	}
 }
 
+func TestOpenAPIFileValidatesAgainstOpenAPI32Standard(t *testing.T) {
+	data, err := os.ReadFile("../../api/openapi/packmon-v1.yaml")
+	if err != nil {
+		t.Fatalf("read OpenAPI spec: %v", err)
+	}
+	if err := validateOpenAPI32Document(data); err != nil {
+		t.Fatalf("OpenAPI spec failed OpenAPI 3.2 validation: %v", err)
+	}
+}
+
+func TestOpenAPI32StandardValidationRejectsInvalidDocument(t *testing.T) {
+	invalid := []byte(`openapi: "3.2.0"
+info:
+  title: Invalid API
+  version: "1.0.0"
+paths: []
+`)
+	err := validateOpenAPI32Document(invalid)
+	if err == nil {
+		t.Fatal("validateOpenAPI32Document(invalid paths shape) = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "OpenAPI 3.2 schema") {
+		t.Fatalf("validation error = %v, want OpenAPI 3.2 schema error", err)
+	}
+}
+
+func TestOpenAPICISAKEVClearMissingRequiresCVEs(t *testing.T) {
+	data, err := os.ReadFile("../../api/openapi/packmon-v1.yaml")
+	if err != nil {
+		t.Fatalf("read OpenAPI spec: %v", err)
+	}
+	var spec map[string]any
+	if err := yaml.Unmarshal(data, &spec); err != nil {
+		t.Fatalf("parse OpenAPI spec: %v", err)
+	}
+
+	schemas := requireMap(t, requireMap(t, spec, "components"), "schemas")
+	cisaKEV := requireMap(t, schemas, "CISAKEVImportRequest")
+
+	condition := requireMap(t, cisaKEV, "if")
+	requireRequiredFields(t, condition, "CISAKEVImportRequest.if", "clear_missing")
+	conditionProperties := requireMap(t, condition, "properties")
+	clearMissing := requireMap(t, conditionProperties, "clear_missing")
+	if got := clearMissing["const"]; got != true {
+		t.Fatalf("CISAKEVImportRequest.if.clear_missing const = %#v, want true", got)
+	}
+
+	thenClause := requireMap(t, cisaKEV, "then")
+	requireRequiredFields(t, thenClause, "CISAKEVImportRequest.then", "cve_ids")
+	thenProperties := requireMap(t, thenClause, "properties")
+	cveIDs := requireMap(t, thenProperties, "cve_ids")
+	if got := requireInt(t, cveIDs, "minItems"); got != 1 {
+		t.Fatalf("CISAKEVImportRequest.then.cve_ids minItems = %d, want 1", got)
+	}
+}
+
+func TestOpenAPIDocumentsV1CompatibilityPolicy(t *testing.T) {
+	data, err := os.ReadFile("../../api/openapi/packmon-v1.yaml")
+	if err != nil {
+		t.Fatalf("read OpenAPI spec: %v", err)
+	}
+	var spec map[string]any
+	if err := yaml.Unmarshal(data, &spec); err != nil {
+		t.Fatalf("parse OpenAPI spec: %v", err)
+	}
+
+	info := requireMap(t, spec, "info")
+	description, _ := info["description"].(string)
+	for _, want := range []string{
+		"API v1 compatibility policy",
+		"Additive response fields and enum values may be introduced within v1",
+		"Breaking changes require a new major API path",
+		"Deprecated fields stay documented with deprecated: true",
+	} {
+		if !strings.Contains(description, want) {
+			t.Fatalf("info.description missing compatibility guidance %q: %q", want, description)
+		}
+	}
+
+	policy := requireMap(t, spec, "x-packmon-compatibility-policy")
+	if got := policy["api_version"]; got != "v1" {
+		t.Fatalf("x-packmon-compatibility-policy.api_version = %#v, want v1", got)
+	}
+	for key, want := range map[string]string{
+		"additive_changes": "permitted",
+		"breaking_changes": "new major API path",
+		"deprecation":      "deprecated: true",
+	} {
+		text, _ := policy[key].(string)
+		if !strings.Contains(text, want) {
+			t.Fatalf("x-packmon-compatibility-policy.%s missing %q: %q", key, want, text)
+		}
+	}
+}
+
 func TestOpenAPIScanResultAllowsCanonicalCLIModesAndStatuses(t *testing.T) {
 	data, err := os.ReadFile("../../api/openapi/packmon-v1.yaml")
 	if err != nil {
@@ -192,16 +348,16 @@ func TestOpenAPIScanResultAllowsCanonicalCLIModesAndStatuses(t *testing.T) {
 
 	mode := requireMap(t, properties, "mode")
 	modeEnums := requireStringEnum(t, mode, "ScanResult.mode")
-	for _, want := range []string{"remote", "local", "auto"} {
-		if _, ok := modeEnums[want]; !ok {
+	for _, want := range domain.ScanModeValues() {
+		if _, ok := modeEnums[string(want)]; !ok {
 			t.Errorf("ScanResult.mode enum missing %q; got %v", want, enumKeys(modeEnums))
 		}
 	}
 
 	feedStatus := requireMap(t, properties, "feed_status")
 	statusEnums := requireStringEnum(t, feedStatus, "ScanResult.feed_status")
-	for _, want := range []string{"healthy", "degraded", "error"} {
-		if _, ok := statusEnums[want]; !ok {
+	for _, want := range domain.ScanFeedStatusValues() {
+		if _, ok := statusEnums[string(want)]; !ok {
 			t.Errorf("ScanResult.feed_status enum missing %q; got %v", want, enumKeys(statusEnums))
 		}
 	}
@@ -241,8 +397,8 @@ func TestOpenAPIScanRequestDocumentsPackageCoordinateLimits(t *testing.T) {
 	if got := requireInt(t, packages, "minItems"); got != 1 {
 		t.Fatalf("ScanRequest.packages minItems = %d, want 1", got)
 	}
-	if got := requireInt(t, packages, "maxItems"); got != 5000 {
-		t.Fatalf("ScanRequest.packages maxItems = %d, want 5000", got)
+	if got := requireInt(t, packages, "maxItems"); got != checkcontract.MaxPackagesPerCheck {
+		t.Fatalf("ScanRequest.packages maxItems = %d, want %d", got, checkcontract.MaxPackagesPerCheck)
 	}
 	packageItems := requireMap(t, packages, "items")
 	if got := packageItems["$ref"]; got != "#/components/schemas/ScanPackage" {
@@ -250,22 +406,11 @@ func TestOpenAPIScanRequestDocumentsPackageCoordinateLimits(t *testing.T) {
 	}
 
 	scanPackage := requireMap(t, schemas, "ScanPackage")
-	allOf, ok := scanPackage["allOf"].([]any)
-	if !ok || len(allOf) != 2 {
-		t.Fatalf("ScanPackage.allOf = %#v, want Package plus ScanEcosystem override", scanPackage["allOf"])
+	if got := requireBool(t, scanPackage, "additionalProperties"); got {
+		t.Fatalf("ScanPackage.additionalProperties = %t, want false to match strict JSON decoding", got)
 	}
-	basePackage, ok := allOf[0].(map[string]any)
-	if !ok {
-		t.Fatalf("ScanPackage.allOf[0] = %#v, want map", allOf[0])
-	}
-	if got := basePackage["$ref"]; got != "#/components/schemas/Package" {
-		t.Fatalf("ScanPackage base ref = %#v, want Package", got)
-	}
-	scanOverride, ok := allOf[1].(map[string]any)
-	if !ok {
-		t.Fatalf("ScanPackage.allOf[1] = %#v, want map", allOf[1])
-	}
-	scanProperties := requireMap(t, scanOverride, "properties")
+	requireRequiredFields(t, scanPackage, "ScanPackage", "name", "version", "ecosystem")
+	scanProperties := requireMap(t, scanPackage, "properties")
 	scanEcosystemProperty := requireMap(t, scanProperties, "ecosystem")
 	if got := scanEcosystemProperty["$ref"]; got != "#/components/schemas/ScanEcosystem" {
 		t.Fatalf("ScanPackage.ecosystem ref = %#v, want ScanEcosystem", got)
@@ -276,75 +421,64 @@ func TestOpenAPIScanRequestDocumentsPackageCoordinateLimits(t *testing.T) {
 		t.Fatalf("ScanEcosystem must not include %q", domain.EcosystemDocker)
 	}
 
-	packageSchema := requireMap(t, schemas, "Package")
-	if got := requireBool(t, packageSchema, "additionalProperties"); got {
-		t.Fatalf("Package.additionalProperties = %t, want false to match strict JSON decoding", got)
-	}
-	requireRequiredFields(t, packageSchema, "Package", "name", "version", "ecosystem")
-	packageProperties := requireMap(t, packageSchema, "properties")
-	name := requireMap(t, packageProperties, "name")
+	name := requireMap(t, scanProperties, "name")
 	if got := requireInt(t, name, "minLength"); got != 1 {
-		t.Fatalf("Package.name minLength = %d, want 1", got)
+		t.Fatalf("ScanPackage.name minLength = %d, want 1", got)
 	}
-	if got := requireInt(t, name, "maxLength"); got != 512 {
-		t.Fatalf("Package.name maxLength = %d, want 512", got)
+	if got := requireInt(t, name, "maxLength"); got != checkcontract.MaxPackageNameLength {
+		t.Fatalf("ScanPackage.name maxLength = %d, want %d", got, checkcontract.MaxPackageNameLength)
 	}
 	if got := name["pattern"]; got != `.*\S.*` {
-		t.Fatalf("Package.name pattern = %#v, want non-blank pattern", got)
+		t.Fatalf("ScanPackage.name pattern = %#v, want non-blank pattern", got)
 	}
-	version := requireMap(t, packageProperties, "version")
+	version := requireMap(t, scanProperties, "version")
 	if got := requireInt(t, version, "minLength"); got != 1 {
-		t.Fatalf("Package.version minLength = %d, want 1", got)
+		t.Fatalf("ScanPackage.version minLength = %d, want 1", got)
 	}
-	if got := requireInt(t, version, "maxLength"); got != 256 {
-		t.Fatalf("Package.version maxLength = %d, want 256", got)
+	if got := requireInt(t, version, "maxLength"); got != checkcontract.MaxPackageVersionLength {
+		t.Fatalf("ScanPackage.version maxLength = %d, want %d", got, checkcontract.MaxPackageVersionLength)
 	}
 	if got := version["pattern"]; got != `^\s*\S+\s*$` {
-		t.Fatalf("Package.version pattern = %#v, want single-token version pattern", got)
+		t.Fatalf("ScanPackage.version pattern = %#v, want single-token version pattern", got)
 	}
 
 	for _, field := range []string{"dev", "direct", "indirect", "optional", "peer"} {
-		property := requireMap(t, packageProperties, field)
-		if got := property["type"]; got != "boolean" {
-			t.Fatalf("Package.%s type = %#v, want boolean", field, got)
+		if _, ok := scanProperties[field]; ok {
+			t.Fatalf("ScanPackage must not document graph field %q for ScanRequest", field)
 		}
 	}
-	via := requireMap(t, packageProperties, "via")
-	if got := via["type"]; got != "array" {
-		t.Fatalf("Package.via type = %#v, want array", got)
-	}
-	viaItems := requireMap(t, via, "items")
-	if got := viaItems["type"]; got != "string" {
-		t.Fatalf("Package.via item type = %#v, want string", got)
-	}
-	parents := requireMap(t, packageProperties, "parents")
-	if got := parents["type"]; got != "array" {
-		t.Fatalf("Package.parents type = %#v, want array", got)
-	}
-	parentItems := requireMap(t, parents, "items")
-	if got := parentItems["$ref"]; got != "#/components/schemas/PackageParent" {
-		t.Fatalf("Package.parents item ref = %#v, want PackageParent", got)
-	}
-
-	packageParent := requireMap(t, schemas, "PackageParent")
-	if got := requireBool(t, packageParent, "additionalProperties"); got {
-		t.Fatalf("PackageParent.additionalProperties = %t, want false to match strict JSON decoding", got)
-	}
-	parentProperties := requireMap(t, packageParent, "properties")
-	for _, field := range []string{"name", "version"} {
-		property := requireMap(t, parentProperties, field)
-		if got := property["type"]; got != "string" {
-			t.Fatalf("PackageParent.%s type = %#v, want string", field, got)
+	for _, field := range []string{"via", "parents"} {
+		if _, ok := scanProperties[field]; ok {
+			t.Fatalf("ScanPackage must not document graph field %q for ScanRequest", field)
 		}
 	}
-	parentEcosystem := requireMap(t, parentProperties, "ecosystem")
-	if got := parentEcosystem["$ref"]; got != "#/components/schemas/Ecosystem" {
-		t.Fatalf("PackageParent.ecosystem ref = %#v, want Ecosystem", got)
+	if _, ok := schemas["Package"]; ok {
+		t.Fatal("OpenAPI components must not expose Package for ScanRequest graph metadata")
+	}
+	if _, ok := schemas["PackageParent"]; ok {
+		t.Fatal("OpenAPI components must not expose PackageParent for ScanRequest graph metadata")
 	}
 
-	repoInfo := requireMap(t, schemas, "RepoInfo")
-	if got := requireBool(t, repoInfo, "additionalProperties"); got {
-		t.Fatalf("RepoInfo.additionalProperties = %t, want false to match strict JSON decoding", got)
+	if _, ok := schemas["RepoInfo"]; ok {
+		t.Fatal("OpenAPI components must not expose RepoInfo with branch/commit metadata; use RemoteRepoInfo")
+	}
+
+	repoProperty := requireMap(t, requestProperties, "repo")
+	if got := repoProperty["$ref"]; got != "#/components/schemas/RemoteRepoInfo" {
+		t.Fatalf("ScanRequest.repo ref = %#v, want RemoteRepoInfo so remote API metadata only exposes repository name", got)
+	}
+	remoteRepoInfo := requireMap(t, schemas, "RemoteRepoInfo")
+	if got := requireBool(t, remoteRepoInfo, "additionalProperties"); got {
+		t.Fatalf("RemoteRepoInfo.additionalProperties = %t, want false to match strict JSON decoding", got)
+	}
+	remoteRepoProps := requireMap(t, remoteRepoInfo, "properties")
+	if _, ok := remoteRepoProps["name"]; !ok {
+		t.Fatal("RemoteRepoInfo missing name property")
+	}
+	for _, forbidden := range []string{"branch", "commit"} {
+		if _, ok := remoteRepoProps[forbidden]; ok {
+			t.Fatalf("RemoteRepoInfo must not expose %s metadata on remote API", forbidden)
+		}
 	}
 }
 
@@ -396,11 +530,21 @@ func TestOpenAPIErrorResponsesUseJSONErrorEnvelope(t *testing.T) {
 
 	schemas := requireMap(t, requireMap(t, spec, "components"), "schemas")
 	errorResponse := requireMap(t, schemas, "ErrorResponse")
-	requireRequiredFields(t, errorResponse, "ErrorResponse", "error")
+	requireRequiredFields(t, errorResponse, "ErrorResponse", "error", "code")
 	errorProperties := requireMap(t, errorResponse, "properties")
 	errorField := requireMap(t, errorProperties, "error")
 	if got := errorField["type"]; got != "string" {
 		t.Fatalf("ErrorResponse.error type = %#v, want string", got)
+	}
+	codeField := requireMap(t, errorProperties, "code")
+	if got := codeField["type"]; got != "string" {
+		t.Fatalf("ErrorResponse.code type = %#v, want string", got)
+	}
+	codeEnums := requireStringEnum(t, codeField, "ErrorResponse.code")
+	for _, want := range []string{"invalid_request", "auth_failed", "forbidden", "conflict", "rate_limited", "not_found", "unsupported", "service_unavailable", "internal_error"} {
+		if _, ok := codeEnums[want]; !ok {
+			t.Fatalf("ErrorResponse.code enum missing %q; got %v", want, enumKeys(codeEnums))
+		}
 	}
 
 	paths := requireMap(t, spec, "paths")
@@ -409,12 +553,12 @@ func TestOpenAPIErrorResponsesUseJSONErrorEnvelope(t *testing.T) {
 		method   string
 		statuses []string
 	}{
-		{"/api/v1/check", "post", []string{"400", "401", "403", "409", "429", "500"}},
+		{"/api/v1/check", "post", []string{"400", "401", "403", "409", "429", "503", "500"}},
 		{"/api/v1/feeds/status", "get", []string{"401", "403", "429", "500"}},
-		{"/api/v1/feeds/{feed}/import", "post", []string{"400", "401", "403", "429", "500"}},
+		{"/api/v1/feeds/{feed}/import", "post", []string{"400", "401", "403", "404", "429", "500"}},
 		{"/api/v1/packages/{ecosystem}/{rest}", "get", []string{"400", "401", "403", "404", "429", "500"}},
 		{"/api/v1/packages/{ecosystem}/{rest}/refresh", "post", []string{"400", "401", "403", "409", "429", "500"}},
-		{"/api/v1/sync", "get", []string{"400", "401", "403", "429", "500", "501"}},
+		{"/api/v1/sync", "get", []string{"400", "401", "403", "429", "500"}},
 	}
 	for _, tt := range cases {
 		operation := requireMap(t, requireMap(t, paths, tt.path), tt.method)
@@ -426,6 +570,63 @@ func TestOpenAPIErrorResponsesUseJSONErrorEnvelope(t *testing.T) {
 			schema := requireMap(t, jsonContent, "schema")
 			if got := schema["$ref"]; got != "#/components/schemas/ErrorResponse" {
 				t.Fatalf("%s %s response %s schema ref = %#v, want ErrorResponse", tt.method, tt.path, status, got)
+			}
+		}
+	}
+}
+
+func TestOpenAPIDocumentsAPIV1ResponseHeaders(t *testing.T) {
+	data, err := os.ReadFile("../../api/openapi/packmon-v1.yaml")
+	if err != nil {
+		t.Fatalf("read OpenAPI spec: %v", err)
+	}
+	var spec map[string]any
+	if err := yaml.Unmarshal(data, &spec); err != nil {
+		t.Fatalf("parse OpenAPI spec: %v", err)
+	}
+
+	headers := requireMap(t, requireMap(t, spec, "components"), "headers")
+	correlationID := requireMap(t, headers, "CorrelationID")
+	correlationSchema := requireMap(t, correlationID, "schema")
+	if got := correlationSchema["type"]; got != "string" {
+		t.Fatalf("CorrelationID header schema type = %#v, want string", got)
+	}
+	challenge := requireMap(t, headers, "BearerChallenge")
+	challengeSchema := requireMap(t, challenge, "schema")
+	if got := challengeSchema["type"]; got != "string" {
+		t.Fatalf("BearerChallenge header schema type = %#v, want string", got)
+	}
+	if got := challengeSchema["example"]; got != `Bearer realm="packmon-api"` {
+		t.Fatalf("BearerChallenge example = %#v, want Packmon bearer realm", got)
+	}
+
+	paths := requireMap(t, spec, "paths")
+	for path, rawPathItem := range paths {
+		if !strings.HasPrefix(path, "/api/v1/") {
+			continue
+		}
+		pathItem, ok := rawPathItem.(map[string]any)
+		if !ok {
+			t.Fatalf("path item %s = %#v, want map", path, rawPathItem)
+		}
+		for method, rawOperation := range pathItem {
+			if method != "get" && method != "post" && method != "head" {
+				continue
+			}
+			operation, ok := rawOperation.(map[string]any)
+			if !ok {
+				t.Fatalf("%s %s operation = %#v, want map", method, path, rawOperation)
+			}
+			responses := requireMap(t, operation, "responses")
+			for status, rawResponse := range responses {
+				response, ok := rawResponse.(map[string]any)
+				if !ok {
+					t.Fatalf("%s %s response %s = %#v, want map", method, path, status, rawResponse)
+				}
+				requireResponseHeaderRef(t, response, "X-Correlation-ID", "#/components/headers/CorrelationID")
+				if status == "401" {
+					requireResponseHeaderRef(t, response, "WWW-Authenticate", "#/components/headers/BearerChallenge")
+				}
 			}
 		}
 	}
@@ -483,6 +684,41 @@ func TestOpenAPIDocumentsRequiredAPIUserAgent(t *testing.T) {
 	}
 }
 
+func TestOpenAPIDocumentsOperationalHEADMethods(t *testing.T) {
+	data, err := os.ReadFile("../../api/openapi/packmon-v1.yaml")
+	if err != nil {
+		t.Fatalf("read OpenAPI spec: %v", err)
+	}
+	var spec map[string]any
+	if err := yaml.Unmarshal(data, &spec); err != nil {
+		t.Fatalf("parse OpenAPI spec: %v", err)
+	}
+
+	paths := requireMap(t, spec, "paths")
+	cases := []struct {
+		path     string
+		statuses []string
+	}{
+		{"/healthz", []string{"200"}},
+		{"/readyz", []string{"200", "503"}},
+		{"/version", []string{"200"}},
+	}
+	for _, tt := range cases {
+		operation := requireMap(t, requireMap(t, paths, tt.path), "head")
+		security, ok := operation["security"].([]any)
+		if !ok || len(security) != 0 {
+			t.Fatalf("HEAD %s security = %#v, want explicit public security []", tt.path, operation["security"])
+		}
+		responses := requireMap(t, operation, "responses")
+		for _, status := range tt.statuses {
+			response := requireMap(t, responses, status)
+			if _, ok := response["content"]; ok {
+				t.Fatalf("HEAD %s response %s documents body content: %#v", tt.path, status, response["content"])
+			}
+		}
+	}
+}
+
 func TestOpenAPIDocumentsHEADForGETResources(t *testing.T) {
 	data, err := os.ReadFile("../../api/openapi/packmon-v1.yaml")
 	if err != nil {
@@ -500,7 +736,7 @@ func TestOpenAPIDocumentsHEADForGETResources(t *testing.T) {
 	}{
 		{"/api/v1/feeds/status", []string{"200", "401", "403", "429", "500"}},
 		{"/api/v1/packages/{ecosystem}/{rest}", []string{"200", "400", "401", "403", "404", "429", "500"}},
-		{"/api/v1/sync", []string{"200", "400", "401", "403", "429", "500", "501"}},
+		{"/api/v1/sync", []string{"200", "400", "401", "403", "429", "500"}},
 	}
 	for _, tt := range cases {
 		operation := requireMap(t, requireMap(t, paths, tt.path), "head")
@@ -510,6 +746,45 @@ func TestOpenAPIDocumentsHEADForGETResources(t *testing.T) {
 			if _, ok := response["content"]; ok {
 				t.Fatalf("HEAD %s response %s documents body content: %#v", tt.path, status, response["content"])
 			}
+		}
+	}
+}
+
+func TestOpenAPICheckEndpointProvidesRequestAndResponseExamples(t *testing.T) {
+	data, err := os.ReadFile("../../api/openapi/packmon-v1.yaml")
+	if err != nil {
+		t.Fatalf("read OpenAPI spec: %v", err)
+	}
+	var spec map[string]any
+	if err := yaml.Unmarshal(data, &spec); err != nil {
+		t.Fatalf("parse OpenAPI spec: %v", err)
+	}
+
+	checkOperation := requireMap(t, requireMap(t, requireMap(t, spec, "paths"), "/api/v1/check"), "post")
+	requestMedia := requireMap(t, requireMap(t, requireMap(t, checkOperation, "requestBody"), "content"), "application/json")
+	requestExample := requireMap(t, requireMap(t, requestMedia, "examples"), "npmVulnerabilityCheck")
+	requestValue := requireMap(t, requestExample, "value")
+	packages, ok := requestValue["packages"].([]any)
+	if !ok || len(packages) != 1 {
+		t.Fatalf("check request example packages = %#v, want one package", requestValue["packages"])
+	}
+	packageValue, ok := packages[0].(map[string]any)
+	if !ok {
+		t.Fatalf("check request package example = %#v, want object", packages[0])
+	}
+	for field, want := range map[string]string{"ecosystem": "npm", "name": "lodash", "version": "4.17.20"} {
+		if got := packageValue[field]; got != want {
+			t.Fatalf("check request package %s = %#v, want %q", field, got, want)
+		}
+	}
+
+	okResponse := requireMap(t, requireMap(t, checkOperation, "responses"), "200")
+	responseMedia := requireMap(t, requireMap(t, okResponse, "content"), "application/json")
+	responseExample := requireMap(t, requireMap(t, responseMedia, "examples"), "blockingFinding")
+	responseValue := requireMap(t, responseExample, "value")
+	for _, field := range []string{"scan_id", "mode", "packages_scanned", "findings_blocking", "block_threshold", "feed_status", "summary", "findings"} {
+		if _, ok := responseValue[field]; !ok {
+			t.Fatalf("check 200 response example missing %q: %#v", field, responseValue)
 		}
 	}
 }
@@ -593,6 +868,7 @@ func TestOpenAPIDocumentsOperationResponseSchemas(t *testing.T) {
 		{"/readyz", "get", "200", "#/components/schemas/ReadyResponse"},
 		{"/readyz", "get", "503", "#/components/schemas/ReadyResponse"},
 		{"/version", "get", "200", "#/components/schemas/VersionResponse"},
+		{"/api/v1/packages/{ecosystem}/{rest}/refresh", "post", "202", "#/components/schemas/RefreshResponse"},
 	}
 	for _, tt := range cases {
 		operation := requireMap(t, requireMap(t, paths, tt.path), tt.method)
@@ -603,6 +879,10 @@ func TestOpenAPIDocumentsOperationResponseSchemas(t *testing.T) {
 		if got := schema["$ref"]; got != tt.ref {
 			t.Fatalf("%s %s response %s schema ref = %#v, want %s", tt.method, tt.path, tt.status, got, tt.ref)
 		}
+	}
+	refreshResponses := requireMap(t, requireMap(t, requireMap(t, paths, "/api/v1/packages/{ecosystem}/{rest}/refresh"), "post"), "responses")
+	if _, ok := refreshResponses["200"]; ok {
+		t.Fatal("package refresh must document 202 Accepted, not 200 OK")
 	}
 
 	schemas := requireMap(t, requireMap(t, spec, "components"), "schemas")
@@ -653,6 +933,10 @@ func TestOpenAPIExposesWebhookContract(t *testing.T) {
 	webhooks := requireMap(t, spec, "webhooks")
 	scanCompleted := requireMap(t, webhooks, "scanCompleted")
 	post := requireMap(t, scanCompleted, "post")
+	security, ok := post["security"].([]any)
+	if !ok || len(security) != 0 {
+		t.Fatalf("webhook security = %#v, want explicit [] so receiver callbacks do not inherit API bearer auth", post["security"])
+	}
 
 	requestBody := requireMap(t, post, "requestBody")
 	content := requireMap(t, requestBody, "content")
@@ -682,6 +966,10 @@ func TestOpenAPIExposesWebhookContract(t *testing.T) {
 	envelope := requireMap(t, schemas, "WebhookEnvelope")
 	requireRequiredFields(t, envelope, "WebhookEnvelope", "event", "version", "timestamp", "source", "result")
 	properties := requireMap(t, envelope, "properties")
+	repository := requireMap(t, properties, "repository")
+	if got := repository["$ref"]; got != "#/components/schemas/RemoteRepoInfo" {
+		t.Fatalf("WebhookEnvelope.repository ref = %#v, want RemoteRepoInfo", got)
+	}
 	result := requireMap(t, properties, "result")
 	if got := result["$ref"]; got != "#/components/schemas/ScanResult" {
 		t.Fatalf("WebhookEnvelope.result ref = %#v, want ScanResult", got)
@@ -690,6 +978,59 @@ func TestOpenAPIExposesWebhookContract(t *testing.T) {
 	eventEnums := requireStringEnum(t, event, "WebhookEnvelope.event")
 	if _, ok := eventEnums["scan_completed"]; !ok {
 		t.Fatalf("WebhookEnvelope.event enum missing scan_completed; got %v", enumKeys(eventEnums))
+	}
+	version := requireMap(t, properties, "version")
+	if got := version["type"]; got != "string" {
+		t.Fatalf("WebhookEnvelope.version type = %#v, want string", got)
+	}
+	versionEnums := requireStringEnum(t, version, "WebhookEnvelope.version")
+	if len(versionEnums) != 1 {
+		t.Fatalf("WebhookEnvelope.version enum = %v, want only schema version 1", enumKeys(versionEnums))
+	}
+	if _, ok := versionEnums["1"]; !ok {
+		t.Fatalf("WebhookEnvelope.version enum missing schema version 1; got %v", enumKeys(versionEnums))
+	}
+	versionDescription, _ := version["description"].(string)
+	for _, want := range []string{"schema version", "WebhookEnvelope", "breaking envelope changes"} {
+		if !strings.Contains(versionDescription, want) {
+			t.Fatalf("WebhookEnvelope.version description missing %q: %q", want, versionDescription)
+		}
+	}
+}
+
+func TestOpenAPIRefreshEndpointUsesSupportedEcosystemEnum(t *testing.T) {
+	data, err := os.ReadFile("../../api/openapi/packmon-v1.yaml")
+	if err != nil {
+		t.Fatalf("read OpenAPI spec: %v", err)
+	}
+	var spec map[string]any
+	if err := yaml.Unmarshal(data, &spec); err != nil {
+		t.Fatalf("parse OpenAPI spec: %v", err)
+	}
+
+	schemas := requireMap(t, requireMap(t, spec, "components"), "schemas")
+	refreshEcosystem := requireMap(t, schemas, "RefreshEcosystem")
+	enums := requireStringEnum(t, refreshEcosystem, "RefreshEcosystem")
+	wantSupported := []string{"npm", "pypi", "go", "maven", "cargo", "nuget", "composer", "gem"}
+	if len(enums) != len(wantSupported) {
+		t.Fatalf("RefreshEcosystem enum length = %d (%v), want %d supported Socket.dev ecosystems", len(enums), enumKeys(enums), len(wantSupported))
+	}
+	for _, want := range wantSupported {
+		if _, ok := enums[want]; !ok {
+			t.Fatalf("RefreshEcosystem enum missing %q; got %v", want, enumKeys(enums))
+		}
+	}
+	for _, unsupported := range []string{"actions", "docker", "pub", "cocoapods", "swiftpm", "hex", "cran"} {
+		if _, ok := enums[unsupported]; ok {
+			t.Fatalf("RefreshEcosystem enum includes unsupported refresh ecosystem %q", unsupported)
+		}
+	}
+
+	refreshOperation := requireMap(t, requireMap(t, requireMap(t, spec, "paths"), "/api/v1/packages/{ecosystem}/{rest}/refresh"), "post")
+	ecosystem := requireOperationParameter(t, refreshOperation, "ecosystem", "path")
+	schema := requireMap(t, ecosystem, "schema")
+	if got := schema["$ref"]; got != "#/components/schemas/RefreshEcosystem" {
+		t.Fatalf("refresh ecosystem schema ref = %#v, want RefreshEcosystem", got)
 	}
 }
 
@@ -770,12 +1111,52 @@ func TestOpenAPIDocumentsFeedImportSchemas(t *testing.T) {
 	paths := requireMap(t, spec, "paths")
 	feedImport := requireMap(t, paths, "/api/v1/feeds/{feed}/import")
 	post := requireMap(t, feedImport, "post")
+	feedParameter := requireOperationParameter(t, post, "feed", "path")
+	feedDescription, _ := feedParameter["description"].(string)
+	for _, want := range []string{"malicious", "deprecated legacy alias", "openssf"} {
+		if !strings.Contains(feedDescription, want) {
+			t.Fatalf("feed import path parameter description missing %q alias guidance: %q", want, feedDescription)
+		}
+	}
+	feedSchema := requireMap(t, feedParameter, "schema")
+	deprecatedValues := requireMap(t, feedSchema, "x-packmon-deprecated-values")
+	maliciousDeprecation, _ := deprecatedValues["malicious"].(string)
+	for _, want := range []string{"deprecated legacy alias", "openssf"} {
+		if !strings.Contains(maliciousDeprecation, want) {
+			t.Fatalf("feed import malicious enum deprecation missing %q: %q", want, maliciousDeprecation)
+		}
+	}
+
+	operationDescription, _ := post["description"].(string)
+	for _, want := range []string{
+		"osv and ghsa use VulnerabilityImportRequest",
+		"openssf, malicious, and socket use MaliciousImportRequest",
+		"vulncheck uses VulnCheckImportRequest",
+		"cisakev uses CISAKEVImportRequest",
+		"epss uses EPSSImportRequest",
+	} {
+		if !strings.Contains(operationDescription, want) {
+			t.Fatalf("feed import operation description missing feed-to-schema guidance %q: %q", want, operationDescription)
+		}
+	}
 	requestBody := requireMap(t, post, "requestBody")
+	requestBodyDescription, _ := requestBody["description"].(string)
+	for _, want := range []string{
+		"osv/ghsa",
+		"openssf/malicious/socket",
+		"vulncheck",
+		"cisakev",
+		"epss",
+	} {
+		if !strings.Contains(requestBodyDescription, want) {
+			t.Fatalf("feed import request body description missing %q mapping: %q", want, requestBodyDescription)
+		}
+	}
 	requestContent := requireMap(t, requireMap(t, requestBody, "content"), "application/json")
 	requestSchema := requireMap(t, requestContent, "schema")
-	oneOf, ok := requestSchema["oneOf"].([]any)
-	if !ok || len(oneOf) < 5 {
-		t.Fatalf("feed import request schema oneOf = %#v, want feed-specific request refs", requestSchema["oneOf"])
+	anyOf, ok := requestSchema["anyOf"].([]any)
+	if !ok || len(anyOf) < 5 {
+		t.Fatalf("feed import request schema anyOf = %#v, want path-dispatched feed request refs", requestSchema["anyOf"])
 	}
 	parameters, ok := post["parameters"].([]any)
 	if !ok {
@@ -806,6 +1187,9 @@ func TestOpenAPIDocumentsFeedImportSchemas(t *testing.T) {
 	if _, ok := responses["403"]; !ok {
 		t.Fatal("feed import is missing 403 response for invalid import secret")
 	}
+	if _, ok := responses["404"]; !ok {
+		t.Fatal("feed import is missing 404 response for unknown feed path")
+	}
 
 	schemas := requireMap(t, requireMap(t, spec, "components"), "schemas")
 	for _, name := range []string{
@@ -819,6 +1203,16 @@ func TestOpenAPIDocumentsFeedImportSchemas(t *testing.T) {
 	} {
 		if _, ok := schemas[name]; !ok {
 			t.Fatalf("OpenAPI components missing %s", name)
+		}
+	}
+	importResponse := requireMap(t, schemas, "ImportResponse")
+	requireRequiredFields(t, importResponse, "ImportResponse", "feed", "imported", "deleted", "entries_total")
+	importResponseProps := requireMap(t, importResponse, "properties")
+	importResponseFeed := requireMap(t, importResponseProps, "feed")
+	importResponseFeedDescription, _ := importResponseFeed["description"].(string)
+	for _, want := range []string{"deprecated legacy alias", "malicious", "openssf"} {
+		if !strings.Contains(importResponseFeedDescription, want) {
+			t.Fatalf("ImportResponse.feed description missing %q alias guidance: %q", want, importResponseFeedDescription)
 		}
 	}
 
@@ -849,6 +1243,13 @@ func TestOpenAPIDocumentsFeedImportSchemas(t *testing.T) {
 			t.Fatalf("EPSSImportEntry.%s bounds = min %#v max %#v, want 0..1", field, prop["minimum"], prop["maximum"])
 		}
 	}
+	epssRequest := requireMap(t, schemas, "EPSSImportRequest")
+	requireRequiredFields(t, epssRequest, "EPSSImportRequest", "entries")
+	epssRequestProps := requireMap(t, epssRequest, "properties")
+	epssEntries := requireMap(t, epssRequestProps, "entries")
+	if epssEntries["minItems"] != 1 {
+		t.Fatalf("EPSSImportRequest.entries minItems = %#v, want 1", epssEntries["minItems"])
+	}
 
 	affectedPackage := requireMap(t, schemas, "AffectedPackage")
 	affectedPackageProps := requireMap(t, affectedPackage, "properties")
@@ -876,7 +1277,18 @@ func TestOpenAPIDocumentsFeedImportSchemas(t *testing.T) {
 	}
 
 	maliciousImport := requireMap(t, schemas, "MaliciousImport")
+	requireRequiredFields(t, maliciousImport, "MaliciousImport", "id", "ecosystem", "name")
 	maliciousProps := requireMap(t, maliciousImport, "properties")
+	maliciousSource := requireMap(t, maliciousProps, "source")
+	if got := requireBool(t, maliciousSource, "deprecated"); !got {
+		t.Fatalf("MaliciousImport.source deprecated = %t, want true", got)
+	}
+	maliciousSourceDescription, _ := maliciousSource["description"].(string)
+	for _, want := range []string{"Deprecated compatibility input", "route feed"} {
+		if !strings.Contains(maliciousSourceDescription, want) {
+			t.Fatalf("MaliciousImport.source description missing %q deprecation guidance: %q", want, maliciousSourceDescription)
+		}
+	}
 	versions := requireMap(t, maliciousProps, "versions")
 	if versions["type"] != "array" {
 		t.Fatalf("MaliciousImport.versions type = %#v, want array", versions["type"])
@@ -884,6 +1296,19 @@ func TestOpenAPIDocumentsFeedImportSchemas(t *testing.T) {
 	versionItems := requireMap(t, versions, "items")
 	if versionItems["type"] != "string" {
 		t.Fatalf("MaliciousImport.versions items type = %#v, want string", versionItems["type"])
+	}
+
+	vulnerabilityImport := requireMap(t, schemas, "VulnerabilityImport")
+	vulnerabilityProps := requireMap(t, vulnerabilityImport, "properties")
+	vulnerabilitySources := requireMap(t, vulnerabilityProps, "sources")
+	if got := requireBool(t, vulnerabilitySources, "deprecated"); !got {
+		t.Fatalf("VulnerabilityImport.sources deprecated = %t, want true", got)
+	}
+	vulnerabilitySourcesDescription, _ := vulnerabilitySources["description"].(string)
+	for _, want := range []string{"Deprecated compatibility input", "route feed"} {
+		if !strings.Contains(vulnerabilitySourcesDescription, want) {
+			t.Fatalf("VulnerabilityImport.sources description missing %q deprecation guidance: %q", want, vulnerabilitySourcesDescription)
+		}
 	}
 }
 
@@ -906,6 +1331,7 @@ func TestOpenAPIDocumentsPackageDetailResponse(t *testing.T) {
 		t.Fatalf("package detail parameters = %#v, want array", get["parameters"])
 	}
 	hasVersionQuery := false
+	hasRefreshSuffixDocumentation := false
 	for _, raw := range parameters {
 		parameter, ok := raw.(map[string]any)
 		if !ok {
@@ -913,14 +1339,33 @@ func TestOpenAPIDocumentsPackageDetailResponse(t *testing.T) {
 		}
 		if parameter["name"] == "version" && parameter["in"] == "query" {
 			hasVersionQuery = true
-			break
+			continue
+		}
+		if parameter["name"] == "rest" && parameter["in"] == "path" {
+			description, _ := parameter["description"].(string)
+			hasRefreshSuffixDocumentation = strings.Contains(description, "GET/HEAD package detail requests may address names ending in /refresh") &&
+				strings.Contains(description, "only POST reserves a trailing /refresh suffix")
 		}
 	}
 	if !hasVersionQuery {
 		t.Fatal("package detail is missing optional version query parameter")
 	}
+	if !hasRefreshSuffixDocumentation {
+		t.Fatal("package detail rest parameter must document the GET/HEAD vs POST /refresh suffix contract")
+	}
 
 	responses := requireMap(t, get, "responses")
+	for _, method := range []string{"get", "head"} {
+		operation := requireMap(t, packageDetail, method)
+		notFound := requireMap(t, requireMap(t, operation, "responses"), "404")
+		description, _ := notFound["description"].(string)
+		for _, want := range []string{"No findings", "package coordinate"} {
+			if !strings.Contains(description, want) {
+				t.Fatalf("package detail %s 404 description missing %q: %q", method, want, description)
+			}
+		}
+	}
+
 	okResponse := requireMap(t, responses, "200")
 	content := requireMap(t, okResponse, "content")
 	jsonContent := requireMap(t, content, "application/json")
@@ -1064,6 +1509,16 @@ func operationHasParameterRef(operation map[string]any, ref string) bool {
 	return false
 }
 
+func requireResponseHeaderRef(t *testing.T, response map[string]any, name, ref string) map[string]any {
+	t.Helper()
+	headers := requireMap(t, response, "headers")
+	header := requireMap(t, headers, name)
+	if got := header["$ref"]; got != ref {
+		t.Fatalf("response header %s ref = %#v, want %s", name, got, ref)
+	}
+	return header
+}
+
 func requireRequiredFields(t *testing.T, schema map[string]any, schemaName string, fields ...string) {
 	t.Helper()
 	required, ok := schema["required"].([]any)
@@ -1117,4 +1572,43 @@ func enumKeys(values map[string]struct{}) []string {
 		keys = append(keys, value)
 	}
 	return keys
+}
+
+func validateOpenAPI32Document(data []byte) error {
+	document, err := libopenapi.NewDocument(data)
+	if err != nil {
+		return fmt.Errorf("parse OpenAPI document: %w", err)
+	}
+	if got := document.GetVersion(); got != "3.2.0" {
+		return fmt.Errorf("OpenAPI version = %s, want 3.2.0", got)
+	}
+	if got := document.GetSpecInfo().SpecFormat; got != datamodel.OAS32 {
+		return fmt.Errorf("OpenAPI spec format = %s, want %s", got, datamodel.OAS32)
+	}
+	if _, err := document.BuildV3Model(); err != nil {
+		return fmt.Errorf("build OpenAPI 3.2 model: %w", err)
+	}
+
+	var openAPISchema any
+	if err := yaml.Unmarshal([]byte(datamodel.OpenAPI32SchemaData), &openAPISchema); err != nil {
+		return fmt.Errorf("parse embedded OpenAPI 3.2 schema: %w", err)
+	}
+	compiler := jsonschema.NewCompiler()
+	compiler.AssertFormat()
+	if err := compiler.AddResource("https://spec.openapis.org/oas/3.2/schema/2025-09-17", openAPISchema); err != nil {
+		return fmt.Errorf("add embedded OpenAPI 3.2 schema: %w", err)
+	}
+	schema, err := compiler.Compile("https://spec.openapis.org/oas/3.2/schema/2025-09-17")
+	if err != nil {
+		return fmt.Errorf("compile embedded OpenAPI 3.2 schema: %w", err)
+	}
+
+	var spec any
+	if err := yaml.Unmarshal(data, &spec); err != nil {
+		return fmt.Errorf("parse OpenAPI YAML for schema validation: %w", err)
+	}
+	if err := schema.Validate(spec); err != nil {
+		return fmt.Errorf("validate against OpenAPI 3.2 schema: %w", err)
+	}
+	return nil
 }

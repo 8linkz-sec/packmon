@@ -18,7 +18,18 @@ import (
 //
 // The wellKnownChangePassword handler implements the .well-known
 // redirect for password managers (Bitwarden compatibility).
-func RegisterRoutes(ctx context.Context, mux *http.ServeMux, store Store, sm *auth.SessionManager, logger *slog.Logger, cfg *config.Config, runtime *config.RuntimeSettings, syncFeed FeedSyncFunc, applyFeedConfig FeedConfigApplyFunc, resetFeedConfig FeedConfigResetFunc) {
+func RegisterRoutes(
+	ctx context.Context,
+	mux *http.ServeMux,
+	store any,
+	sm *auth.SessionManager,
+	logger *slog.Logger,
+	cfg *config.Config,
+	runtime *config.RuntimeSettings,
+	syncFeed FeedSyncFunc,
+	applyFeedConfig FeedConfigApplyFunc,
+	resetFeedConfig FeedConfigResetFunc,
+) {
 	renderer := web.NewRendererWithLayoutLinks(web.TemplateFS(), false, adminLayoutLinks(cfg))
 	h := NewAdminHandler(ctx, store, sm, renderer, logger, cfg, runtime, syncFeed)
 	h.SetFeedConfigApplyFunc(applyFeedConfig)
@@ -44,6 +55,7 @@ func RegisterRoutes(ctx context.Context, mux *http.ServeMux, store Store, sm *au
 	mux.HandleFunc("POST /admin/feeds/reset", h.HandleFeedConfigReset)
 	mux.HandleFunc("POST /admin/feeds/sync", h.HandleFeedSyncNow)
 	mux.HandleFunc("GET /admin/queue", h.HandleAdminQueue)
+	mux.HandleFunc("GET /admin/scans", h.HandleAdminScans)
 	mux.HandleFunc("POST /admin/queue/purge", h.HandleQueuePurge)
 	mux.HandleFunc("POST /admin/queue/priority", h.HandleQueuePriorityUpdate)
 	mux.HandleFunc("POST /admin/queue/pause", h.HandleQueuePause)
@@ -61,6 +73,7 @@ func RegisterRoutes(ctx context.Context, mux *http.ServeMux, store Store, sm *au
 	mux.HandleFunc("GET /admin/settings", h.HandleAdminSettings)
 	mux.HandleFunc("POST /admin/settings/system", h.HandleSystemSettingsSave)
 	mux.HandleFunc("POST /admin/settings/password", h.HandlePasswordChange)
+	mux.HandleFunc("GET /admin/{path...}", h.HandleNotFound)
 
 	// Password-manager .well-known redirect (DESIGN.md Web UI).
 	mux.HandleFunc("GET /.well-known/change-password", func(w http.ResponseWriter, r *http.Request) {

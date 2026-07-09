@@ -4,10 +4,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 func TestGitLabPackmonTemplateDownloadsReleaseBinaryAtRuntime(t *testing.T) {
@@ -18,10 +19,8 @@ func TestGitLabPackmonTemplateDownloadsReleaseBinaryAtRuntime(t *testing.T) {
 	if _, ok := variables["PACKMON_BINARY_URL"]; ok {
 		t.Fatal("PACKMON_BINARY_URL must not be precomputed in GitLab variables; shell defaults are not recursively expanded")
 	}
-	if got := yamlString(t, variables["PACKMON_VERSION"], "variables.PACKMON_VERSION"); got == "" {
-		t.Fatal("PACKMON_VERSION must pin the shared template to an immutable release tag")
-	} else if strings.Contains(got, "latest") {
-		t.Fatalf("PACKMON_VERSION = %q, want immutable release tag", got)
+	if got := yamlString(t, variables["PACKMON_VERSION"], "variables.PACKMON_VERSION"); got != "" {
+		t.Fatalf("PACKMON_VERSION default = %q, want empty so consumers must provide an existing immutable release tag", got)
 	}
 	if got := yamlString(t, variables["PACKMON_ARTIFACT_EXPIRE_IN"], "variables.PACKMON_ARTIFACT_EXPIRE_IN"); got != "90 days" {
 		t.Fatalf("PACKMON_ARTIFACT_EXPIRE_IN = %q, want 90 days default", got)
@@ -33,9 +32,14 @@ func TestGitLabPackmonTemplateDownloadsReleaseBinaryAtRuntime(t *testing.T) {
 	if !strings.Contains(joinedBeforeScript, "set -e") {
 		t.Fatal("before_script must fail on the first download or checksum error")
 	}
-	wantDefault := `BINARY_BASE_URL="${PACKMON_BINARY_MIRROR:-https://github.com/8linkz-sec/packmon/releases/download/${PACKMON_VERSION}}"`
-	if !strings.Contains(joinedBeforeScript, wantDefault) {
-		t.Fatalf("before_script missing runtime binary mirror default %q", wantDefault)
+	wantDefaultBase := `DEFAULT_BINARY_BASE_URL="https://github.com/8linkz-sec/packmon/` +
+		`releases/download/${PACKMON_VERSION}"`
+	if !strings.Contains(joinedBeforeScript, wantDefaultBase) {
+		t.Fatalf("before_script missing runtime binary base URL default %q", wantDefaultBase)
+	}
+	wantMirrorDefault := `BINARY_BASE_URL="${PACKMON_BINARY_MIRROR:-${DEFAULT_BINARY_BASE_URL}}"`
+	if !strings.Contains(joinedBeforeScript, wantMirrorDefault) {
+		t.Fatalf("before_script missing runtime binary mirror default %q", wantMirrorDefault)
 	}
 	if strings.Contains(joinedBeforeScript, "releases/latest/download") {
 		t.Fatal("GitLab template must not download Packmon from a mutable latest release URL")
@@ -51,7 +55,7 @@ func TestGitLabPackmonTemplateDownloadsReleaseBinaryAtRuntime(t *testing.T) {
 			t.Fatalf("before_script missing %q", want)
 		}
 	}
-	if !strings.Contains(joinedBeforeScript, `curl -sfL "${BINARY_URL}" -o "/tmp/${BINARY_NAME}"`) {
+	if !strings.Contains(joinedBeforeScript, `curl ${CURL_FLAGS} "${BINARY_URL}" -o "/tmp/${BINARY_NAME}"`) {
 		t.Fatal("before_script must fail fast when downloading the release binary fails")
 	}
 	if !strings.Contains(joinedBeforeScript, `sha256sum -c "${BINARY_NAME}.sha256"`) {
@@ -77,6 +81,63 @@ func TestGitLabPackmonTemplatePinsRunnerImageByDigest(t *testing.T) {
 	}
 }
 
+func TestGitLabPackmonTemplateVerifiesReleaseBinaryAttestationBeforeInstall(t *testing.T) {
+	t.Parallel()
+
+	template := loadGitLabTemplate(t)
+	job := yamlMap(t, template["packmon"], "packmon")
+	beforeScript := strings.Join(yamlStringList(t, job["before_script"], "packmon.before_script"), "\n")
+	for _, want := range []string{
+		"apk add --no-cache \\",
+		"curl=8.19.0-r0",
+		"jq=1.8.1-r0",
+		"cosign=2.6.3-r1",
+		"github-cli=2.83.0-r6",
+		`gh attestation verify "/tmp/${BINARY_NAME}"`,
+		"--repo 8linkz-sec/packmon",
+		"--signer-workflow 8linkz-sec/packmon/.github/workflows/release.yml",
+		`--source-ref "refs/tags/${PACKMON_VERSION}"`,
+	} {
+		if !strings.Contains(beforeScript, want) {
+			t.Fatalf("before_script missing release binary attestation marker %q", want)
+		}
+	}
+	assertSubstringOrder(t, beforeScript, `sha256sum -c "${BINARY_NAME}.sha256"`, `gh attestation verify "/tmp/${BINARY_NAME}"`)
+	assertSubstringOrder(t, beforeScript, `gh attestation verify "/tmp/${BINARY_NAME}"`, `mv "/tmp/${BINARY_NAME}" /usr/local/bin/packmon`)
+	assertSubstringOrder(t, beforeScript, `gh attestation verify "/tmp/${BINARY_NAME}"`, "packmon version")
+}
+
+func TestGitLabPackmonTemplatePinsAlpinePackageInstalls(t *testing.T) {
+	t.Parallel()
+
+	template := loadGitLabTemplate(t)
+	job := yamlMap(t, template["packmon"], "packmon")
+	beforeScript := strings.Join(yamlStringList(t, job["before_script"], "packmon.before_script"), "\n")
+	assertApkPackagesPinned(t, "ci/gitlab/.packmon-scan.yml before_script", beforeScript, []string{
+		"curl",
+		"jq",
+		"cosign",
+		"github-cli",
+	})
+}
+
+func TestGitLabPackmonTemplateUsesBoundedCurlDownloads(t *testing.T) {
+	t.Parallel()
+
+	template := loadGitLabTemplate(t)
+	job := yamlMap(t, template["packmon"], "packmon")
+	beforeScript := strings.Join(yamlStringList(t, job["before_script"], "packmon.before_script"), "\n")
+	for _, want := range []string{
+		`CURL_FLAGS="--fail --show-error --location --retry 3 --retry-delay 2 --retry-connrefused --connect-timeout 10 --max-time 120"`,
+		`curl ${CURL_FLAGS} "${BINARY_URL}" -o "/tmp/${BINARY_NAME}"`,
+		`curl ${CURL_FLAGS} "${CHECKSUM_URL}" -o /tmp/packmon-checksums.txt`,
+	} {
+		if !strings.Contains(beforeScript, want) {
+			t.Fatalf("before_script missing bounded curl marker %q", want)
+		}
+	}
+}
+
 func TestGitLabPackmonTemplatePublishesExpectedReports(t *testing.T) {
 	t.Parallel()
 
@@ -91,12 +152,17 @@ func TestGitLabPackmonTemplatePublishesExpectedReports(t *testing.T) {
 		`--output-json results.json`,
 		`--output-junit results.xml`,
 		`--output-sarif results.sarif`,
+		`-- "$PACKMON_SCAN_PATH"`,
 		`exit $EXIT_CODE`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("packmon.script missing %q", want)
 		}
 	}
+	if strings.Contains(script, `packmon scan "$PACKMON_SCAN_PATH"`) {
+		t.Fatal("PACKMON_SCAN_PATH must not appear before fixed scan flags")
+	}
+	assertSubstringOrder(t, script, `--output-sarif results.sarif`, `-- "$PACKMON_SCAN_PATH"`)
 
 	artifacts := yamlMap(t, job["artifacts"], "packmon.artifacts")
 	if got := yamlString(t, artifacts["when"], "packmon.artifacts.when"); got != "always" {
@@ -138,6 +204,27 @@ func TestGitLabPackmonTemplateSurfacesDegradedFeedHealth(t *testing.T) {
 	}
 }
 
+func TestGitLabPackmonTemplateValidatesScanPathBeforeScan(t *testing.T) {
+	t.Parallel()
+
+	template := loadGitLabTemplate(t)
+	job := yamlMap(t, template["packmon"], "packmon")
+	script := strings.Join(yamlStringList(t, job["script"], "packmon.script"), "\n")
+	for _, want := range []string{
+		`case "$PACKMON_SCAN_PATH" in`,
+		`""|/*|-*|*..*)`,
+		`grep -q '[[:cntrl:]]'`,
+		`scan path must be a non-empty relative path without parent traversal or leading dash`,
+		`-- "$PACKMON_SCAN_PATH"`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("packmon.script missing scan path guard %q", want)
+		}
+	}
+	assertSubstringOrder(t, script, `case "$PACKMON_SCAN_PATH" in`, `packmon scan \`)
+	assertSubstringOrder(t, script, `grep -q '[[:cntrl:]]'`, `packmon scan \`)
+}
+
 func TestGitLabPackmonTemplateSignsResultArtifacts(t *testing.T) {
 	t.Parallel()
 
@@ -150,7 +237,8 @@ func TestGitLabPackmonTemplateSignsResultArtifacts(t *testing.T) {
 	}
 
 	beforeScript := strings.Join(yamlStringList(t, job["before_script"], "packmon.before_script"), "\n")
-	if !strings.Contains(beforeScript, "apk add --no-cache curl jq cosign") {
+	if !strings.Contains(beforeScript, "apk add --no-cache \\") ||
+		!strings.Contains(beforeScript, "cosign=2.6.3-r1") {
 		t.Fatal("before_script must install cosign before signing GitLab result artifacts")
 	}
 
@@ -177,10 +265,7 @@ func TestGitLabPackmonTemplateSignsResultArtifacts(t *testing.T) {
 func TestGitLabPackmonTemplateShellBlocksAreSyntacticallyValid(t *testing.T) {
 	t.Parallel()
 
-	sh, err := exec.LookPath("sh")
-	if err != nil {
-		t.Skip("sh not available")
-	}
+	sh := gitLabTemplateShell(t)
 
 	template := loadGitLabTemplate(t)
 	job := yamlMap(t, template["packmon"], "packmon")
@@ -203,10 +288,7 @@ func TestGitLabPackmonTemplateShellBlocksAreSyntacticallyValid(t *testing.T) {
 func TestGitLabPackmonTemplateScriptMapsExitCodeThreeToSuccess(t *testing.T) {
 	t.Parallel()
 
-	sh, err := exec.LookPath("sh")
-	if err != nil {
-		t.Skip("sh not available")
-	}
+	sh := gitLabTemplateShell(t)
 
 	template := loadGitLabTemplate(t)
 	job := yamlMap(t, template["packmon"], "packmon")
@@ -277,13 +359,55 @@ done
 	}
 }
 
+func TestGitLabPackmonTemplateScriptRejectsLeadingDashScanPath(t *testing.T) {
+	t.Parallel()
+
+	sh := gitLabTemplateShell(t)
+
+	template := loadGitLabTemplate(t)
+	job := yamlMap(t, template["packmon"], "packmon")
+	script := strings.Join(yamlStringList(t, job["script"], "packmon.script"), "\n")
+
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o750); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	writeExecutable(t, filepath.Join(binDir, "packmon"), `#!/bin/sh
+printf 'packmon was invoked\n' > packmon-called
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "jq"), `#!/bin/sh
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "cosign"), `#!/bin/sh
+exit 0
+`)
+
+	cmd := exec.Command(sh, "-c", script) // #nosec G204 -- test executes a static repository template with fake tools in t.TempDir.
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"PACKMON_SCAN_PATH=--list-packages",
+		"PACKMON_FAIL_ON=CRITICAL",
+		"PACKMON_SERVER=https://packmon.example.test",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("GitLab script accepted a leading-dash PACKMON_SCAN_PATH:\n%s", out)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "packmon-called")); !os.IsNotExist(statErr) {
+		t.Fatalf("packmon must not be invoked for a leading-dash PACKMON_SCAN_PATH; stat err=%v", statErr)
+	}
+	if !strings.Contains(string(out), "scan path must be a non-empty relative path without parent traversal or leading dash") {
+		t.Fatalf("GitLab script output missing scan path validation error:\n%s", out)
+	}
+}
+
 func TestGitLabPackmonTemplateScriptSurfacesDegradedFeedHealth(t *testing.T) {
 	t.Parallel()
 
-	sh, err := exec.LookPath("sh")
-	if err != nil {
-		t.Skip("sh not available")
-	}
+	sh := gitLabTemplateShell(t)
 
 	template := loadGitLabTemplate(t)
 	job := yamlMap(t, template["packmon"], "packmon")
@@ -312,6 +436,9 @@ done
 exit 0
 `)
 	writeExecutable(t, filepath.Join(binDir, "jq"), `#!/bin/sh
+if [ "$1" = "-r" ]; then
+  shift
+fi
 query="$1"
 case "$query" in
   *packages_scanned*) printf 'Packages scanned: 1, Findings: 0\n' ;;
@@ -417,6 +544,61 @@ func contains(items []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func assertApkPackagesPinned(t *testing.T, source, text string, packageNames []string) {
+	t.Helper()
+
+	normalized := regexp.MustCompile(`\\\r?\n\s*`).ReplaceAllString(text, " ")
+	apkAddRE := regexp.MustCompile(`apk\s+add\s+--no-cache\s+([^&;\r\n]+)`)
+	versionPinRE := regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+~:-]*-r[0-9]+$`)
+	found := make(map[string]bool, len(packageNames))
+
+	for _, match := range apkAddRE.FindAllStringSubmatch(normalized, -1) {
+		for _, token := range strings.Fields(match[1]) {
+			token = strings.Trim(token, `"'`)
+			if token == "" || strings.HasPrefix(token, "-") {
+				continue
+			}
+			for _, packageName := range packageNames {
+				if token == packageName {
+					t.Fatalf("%s installs Alpine package %q without an exact version pin", source, packageName)
+				}
+				if !strings.HasPrefix(token, packageName+"=") {
+					continue
+				}
+				found[packageName] = true
+				version := strings.TrimPrefix(token, packageName+"=")
+				if !versionPinRE.MatchString(version) {
+					t.Fatalf("%s installs Alpine package %q with non-exact pin %q; want name=version-rN", source, packageName, token)
+				}
+			}
+		}
+	}
+
+	for _, packageName := range packageNames {
+		if !found[packageName] {
+			t.Fatalf("%s does not install expected Alpine package %q with name=version-rN", source, packageName)
+		}
+	}
+}
+
+func gitLabTemplateShell(t *testing.T) string {
+	t.Helper()
+
+	if sh, err := exec.LookPath("sh"); err == nil {
+		return sh
+	}
+	for _, candidate := range []string{
+		`C:\Program Files\Git\bin\sh.exe`,
+		`C:\Program Files (x86)\Git\bin\sh.exe`,
+	} {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	t.Skip("sh not available")
+	return ""
 }
 
 func writeExecutable(t *testing.T, path, script string) {

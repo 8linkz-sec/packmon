@@ -41,6 +41,18 @@ func readFileLimited(path string, maxBytes int, label string) ([]byte, error) {
 	}
 	defer func() { _ = file.Close() }()
 
+	return readOpenedFileLimited(file, path, maxBytes, label)
+}
+
+func readOpenedFileLimited(file *os.File, path string, maxBytes int, label string) ([]byte, error) {
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if info.Size() > int64(maxBytes) {
+		return nil, fmt.Errorf("%s %s exceeds maximum %s size of %d bytes", label, path, label, maxBytes)
+	}
+
 	data, err := io.ReadAll(io.LimitReader(file, int64(maxBytes)+1))
 	if err != nil {
 		return nil, err

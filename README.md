@@ -78,8 +78,7 @@ export PACKMON_API_KEY="<copied-api-key>"
 ```
 
 Packmon is distributed under the private project license in `LICENSE`. The
-OpenAPI contract references `LicenseRef-Private`, whose text is also shipped in
-`LICENSES/LicenseRef-Private.txt`.
+OpenAPI contract references it via the SPDX identifier `LicenseRef-Private`.
 
 The canonical source and Go module namespace is
 `github.com/8linkz-sec/packmon`.
@@ -103,6 +102,15 @@ The canonical source and Go module namespace is
 - `DESIGN.md`: canonical product requirements, data flow, and non-goals.
 - `ARCHITECTURE.md`: concise runtime and deployment architecture map.
 - `SECURITY.md`: security model, invariants, and audit checklist.
+- `docs/runbook.md`: operator backup, restore, upgrade, rollback, rotation, alerting, and incident response procedures.
+- `docs/architecture/system-context.mmd`: system-boundary diagram.
+- `docs/adr/README.md`: accepted architecture decision index.
+- `docs/data-classification.md`: storage and sensitivity map.
+- `docs/deferred-scope.md`: fork-local audit scope that is intentionally not fixed yet.
+- `docs/risk-register.md`: risk assessment and treatment register.
+- `docs/secure-coding.md`: secure-coding and security-awareness checklist for contributors.
+- `docs/supplier-security.md`: supplier and feed-provider security assessment.
+- `CONTRIBUTING.md`: human contributor workflow, validation, and documentation rules.
 - `.github/SECURITY.md`: private vulnerability reporting entry point.
 
 Use these files as the baseline for future audits and implementation reviews.
@@ -120,6 +128,59 @@ Use these files as the baseline for future audits and implementation reviews.
 For a first functional test, use the agent-only path. Use the Docker path when
 you specifically want remote scans, central feed sync, the admin UI, API keys,
 or local DB sync from the server.
+
+### Get A Release Binary
+
+For the agent-only path, download the matching asset from the GitHub release for
+`github.com/8linkz-sec/packmon`:
+
+- `packmon-windows-amd64.exe` or `packmon-windows-arm64.exe`
+- `packmon-linux-amd64` or `packmon-linux-arm64`
+- `packmon-darwin-amd64` or `packmon-darwin-arm64`
+- `checksums.txt`
+
+### Verify Release Binary
+
+Verify the binary before running it. Compare its SHA-256 digest against
+`checksums.txt`, then verify the GitHub artifact attestation for the same
+release tag. Replace `<release-tag>` and the architecture-specific asset name
+with the release you downloaded.
+
+Windows:
+
+```powershell
+$ReleaseTag = "<release-tag>"
+$ExpectedHash = (Select-String -Path .\checksums.txt `
+  -Pattern "\s$([regex]::Escape('packmon-windows-amd64.exe'))$").Line.Split()[0].ToLowerInvariant()
+$ActualHash = (Get-FileHash .\packmon-windows-amd64.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($ActualHash -ne $ExpectedHash) { throw "checksum verification failed" }
+gh attestation verify .\packmon-windows-amd64.exe `
+  --repo 8linkz-sec/packmon `
+  --signer-workflow 8linkz-sec/packmon/.github/workflows/release.yml `
+  --source-ref "refs/tags/<release-tag>"
+```
+
+Linux:
+
+```bash
+grep -E ' packmon-linux-amd64$' checksums.txt > packmon-linux-amd64.sha256
+sha256sum -c packmon-linux-amd64.sha256
+gh attestation verify ./packmon-linux-amd64 \
+  --repo 8linkz-sec/packmon \
+  --signer-workflow 8linkz-sec/packmon/.github/workflows/release.yml \
+  --source-ref "refs/tags/<release-tag>"
+```
+
+macOS:
+
+```bash
+grep -E ' packmon-darwin-amd64$' checksums.txt > packmon-darwin-amd64.sha256
+shasum -a 256 -c packmon-darwin-amd64.sha256
+gh attestation verify ./packmon-darwin-amd64 \
+  --repo 8linkz-sec/packmon \
+  --signer-workflow 8linkz-sec/packmon/.github/workflows/release.yml \
+  --source-ref "refs/tags/<release-tag>"
+```
 
 ### Windows
 
@@ -173,6 +234,18 @@ If `packmon` is on `PATH`, use `packmon` instead of `.\packmon.exe` or
 The scripts in `scripts/` are helper tools for a source checkout of this
 repository. Release-binary users do not need them.
 
+If you already have a source checkout and want a helper to install a release
+agent binary, these scripts perform the same checksum and attestation checks
+before installing it:
+
+```powershell
+.\scripts\install-release.ps1 -Version <release-tag> -Arch amd64
+```
+
+```bash
+./scripts/install-release.sh <release-tag>
+```
+
 Profiles are documented in `REQUIREMENTS.md` and listed in
 `requirements/packmon-tools.tsv`:
 
@@ -191,12 +264,14 @@ Source builds require Go. The install helpers build both `packmon` and
 ```powershell
 .\scripts\check-requirements.ps1 -Profile agent
 .\scripts\install.ps1
+$env:Path = "$HOME\.packmon\bin;$env:Path"
 packmon version
 ```
 
 ```bash
 bash scripts/check-requirements.sh --profile agent
 ./scripts/install.sh
+export PATH="$HOME/.packmon/bin:$PATH"
 packmon version
 ```
 
@@ -209,7 +284,8 @@ go build -o packmon-server ./cmd/packmon-server
 PACKMON_SERVER_MODE=development ./packmon-server
 ```
 
-The development server uses the in-memory dev store, exposes the web UI, and binds metrics to `127.0.0.1:9090` by default.
+The development server uses the in-memory dev store, exposes the web UI, and
+binds metrics to `127.0.0.1:9090` by default.
 
 ### Local Docker stack
 
@@ -237,12 +313,22 @@ Start the local stack:
 bash scripts/start-local-stack.sh
 ```
 
-The start helper creates or completes `.env` from `.env.example` with generated local-only secrets for `POSTGRES_PASSWORD`, `PACKMON_DB_PASSWORD`, `PACKMON_ADMIN_INITIAL_PASSWORD`, and `PACKMON_ENCRYPTION_KEY`. It keeps existing non-empty values, makes the Packmon DB password match the local PostgreSQL password when either value is missing, and runs the database migration before starting the server. Helpers do not print generated secret values.
+The start helper creates or completes `.env` from `.env.example` with generated
+local-only secrets for `POSTGRES_PASSWORD`, `PACKMON_DB_PASSWORD`,
+`PACKMON_ADMIN_INITIAL_PASSWORD`, `PACKMON_ENCRYPTION_KEY`, and
+`PACKMON_ADMIN_AUDIT_HMAC_KEY`. It keeps existing non-empty values, makes the
+Packmon DB password match the local PostgreSQL password when either value is
+missing, and runs the database migration before starting the server. After
+Compose starts, the helper waits up to 120 seconds for the Packmon `/readyz`
+endpoint; on timeout it prints `docker compose ps` plus recent
+`packmon-server` logs and exits non-zero. It prints the local URLs only after
+readiness succeeds. Helpers do not print generated secret values.
 
-Admins can later adjust `.env`, feed-provider API keys, TLS/proxy settings, and other deployment-specific values before shared or production use.
+Admins can later adjust `.env`, feed-provider API keys, TLS/proxy settings, and
+other deployment-specific values before shared or production use.
 
-The local server is now reachable at `http://localhost:8080`. Open the admin UI
-and sign in:
+After the helper reports readiness, the local server is reachable at
+`http://localhost:8080`. Open the admin UI and sign in:
 
 ```text
 http://localhost:8080/admin/login
@@ -320,23 +406,55 @@ The `PACKMON_API_KEY` environment variable is reused by both `scan` and
 The `--insecure-allow-http` flag is only for this loopback Docker setup. For
 shared deployments, expose the server over HTTPS and remove that flag.
 
-The Docker stack runs PostgreSQL and `packmon-server` in production mode so synced feed data is persisted. The start helper prepares the database schema with `packmon-migrate` before starting the server; normal server startup only verifies the schema version. The `packmon-migrate` service is a manual Compose profile and receives only database/logging environment values, not admin or feed-provider secrets.
-The local Compose database uses a digest-pinned Chainguard PostgreSQL image instead of the official `postgres:*-alpine` image, avoiding the vulnerable Go 1.24.x `gosu` helper present in the official image line.
-Compose forwards `PACKMON_VERSION`, `PACKMON_COMMIT`, and `PACKMON_BUILD_DATE` as Docker build args so `packmon-server version`, startup logs, and `/version` report the image source. They default to `dev`, `none`, and `unknown` for local builds.
-For local-only use, `.env.example` enables `PACKMON_ALLOW_INSECURE_LOCAL_HTTP=true` with explicit container bind mode while Compose publishes the host port on `127.0.0.1`; remove those local HTTP settings and configure TLS or a TLS-terminating reverse proxy for shared deployments.
-The same local Docker profile sets `PACKMON_METRICS_HOST=0.0.0.0` so the metrics listener is reachable through Compose's host-loopback `127.0.0.1:9090:9090` port mapping without exposing that port beyond the host.
-After the server binds its HTTP listener, the container log prints `dashboard_url`, for example `http://localhost:8080/`.
-The PostgreSQL cluster is stored in the named Docker volume `packmon-postgres-data`, so normal `docker compose stop`, `docker compose down`, and `docker compose up` cycles keep the database intact.
-Only explicit volume removal such as `docker compose down -v` or `docker volume rm packmon-postgres-data` will delete the database.
-The UI ships local Tailwind and htmx assets from the repository, so runtime and normal container builds do not depend on external CDNs.
-When you change web templates or Tailwind classes, use Node.js 20+ and refresh the generated Tailwind v4 and htmx assets with `npm ci --ignore-scripts && npm run build:web` before building the image.
+The Docker stack runs PostgreSQL and `packmon-server` in production mode so
+synced feed data is persisted. The start helper prepares the database schema
+with `packmon-migrate` before starting the server; normal server startup only
+verifies the schema version. The `packmon-migrate` service is a manual Compose
+profile and receives only database/logging environment values, not admin or
+feed-provider secrets. Its database connection, advisory-lock wait, migration
+statements, and post-migration version read are bounded by
+`PACKMON_DB_CONNECT_TIMEOUT`.
+The local Compose database uses a digest-pinned Chainguard PostgreSQL image
+instead of the official `postgres:*-alpine` image, avoiding the vulnerable Go
+1.24.x `gosu` helper present in the official image line.
+Compose forwards `PACKMON_VERSION`, `PACKMON_COMMIT`, and
+`PACKMON_BUILD_DATE` as Docker build args so `packmon-server version`, startup
+logs, and `/version` report the image source. They default to `dev`, `none`,
+and `unknown` for local builds.
+Compose also supports digest-pinned internal image mirrors through
+`PACKMON_POSTGRES_IMAGE`, `PACKMON_GO_BUILDER_IMAGE`, and
+`PACKMON_ALPINE_RUNTIME_IMAGE`. Overrides should point at mirrored images with
+the same pinned `@sha256` digest policy as the repository defaults.
+For local-only use, `.env.example` enables
+`PACKMON_ALLOW_INSECURE_LOCAL_HTTP=true` with explicit container bind mode
+while Compose publishes the host port on `127.0.0.1`; remove those local HTTP
+settings and configure TLS or a TLS-terminating reverse proxy for shared
+deployments.
+The same local Docker profile sets `PACKMON_METRICS_HOST=0.0.0.0` so the
+metrics listener is reachable through Compose's host-loopback
+`127.0.0.1:9090:9090` port mapping without exposing that port beyond the host.
+After the server binds its HTTP listener, the container log prints
+`dashboard_url`, for example `http://localhost:8080/`.
+The PostgreSQL cluster is stored in the named Docker volume
+`packmon-postgres-data`, so normal `docker compose stop`, `docker compose down`,
+and `docker compose up` cycles keep the database intact.
+Only explicit volume removal such as `docker compose down -v` or
+`docker volume rm packmon-postgres-data` will delete the database.
+The UI ships local Tailwind and htmx assets from the repository, so runtime and
+normal container builds do not depend on external CDNs.
+When you change web templates or Tailwind classes, use Node.js 24.11.0 or newer
+and refresh the generated Tailwind v4 and htmx assets with
+`npm ci --ignore-scripts && npm run build:web` before building the image.
 
 ## Common Commands
 
 ```bash
 packmon scan .
 packmon scan --html report.html .
-PACKMON_API_KEY=... packmon scan . --mode remote --server https://packmon.internal:8080 --cacert /etc/packmon/ca.pem --require-remote
+PACKMON_API_KEY=... packmon scan . --mode remote \
+  --server https://packmon.internal:8080 \
+  --cacert /etc/packmon/ca.pem \
+  --require-remote
 PACKMON_NO_REPO_METADATA=true packmon scan . --mode remote --server https://packmon.internal:8080
 packmon config init
 packmon scan --all
@@ -368,9 +486,12 @@ dashboard. It stores compact scan metadata in the local SQLite database:
 repository name, branch, commit SHA when available, scan time, package/finding
 counts, finding IDs, and severities. Set `PACKMON_HISTORY_ENABLED=false` to
 disable recording, or `PACKMON_HISTORY_MAX_SCANS_PER_REPO=<n>` to change the
-per-repository retention cap (`100` by default, `0` disables retention
-cleanup). `packmon history clear --before YYYY-MM-DD` uses a UTC date cutoff;
-clearing all history without `--repo` or `--before` requires `--force`.
+per-repository retention cap (`100` by default, `0` disables count-based
+cleanup). Set `PACKMON_HISTORY_MAX_AGE=<duration>` to change automatic
+age-based cleanup (`2160h`, 90 days by default; `0` disables age-based
+cleanup). Invalid history retention values fail before recording a scan.
+`packmon history clear --before YYYY-MM-DD` uses a UTC date cutoff; clearing all
+history without `--repo` or `--before` requires `--force`.
 
 ## CLI Config
 
@@ -413,10 +534,59 @@ packmon`, and `packmon scan --list-all --repo packmon`. These inventory views
 reject multi-target `--all` runs; use `packmon scan --all` for normal
 multi-repository scanning.
 
-Remote scans send the repository name by default and never send branch or commit metadata. Use `--no-repo-metadata`, `PACKMON_NO_REPO_METADATA=true`, or `send_repo_metadata: false` to omit the repository name from remote scan requests and webhooks.
+Remote scans send the repository name by default and never send branch or
+commit metadata. Use `--no-repo-metadata`,
+`PACKMON_NO_REPO_METADATA=true`, or `send_repo_metadata: false` to omit the
+repository name from remote scan requests and webhooks.
 
-Config precedence is: command-line flags > environment variables > project `.packmon.yaml` > user-global `~/.packmon/config/packmon.yaml` > built-in defaults. Auto-discovered project config is treated as repository input and cannot set credential/server routing fields or local write destinations such as `server`, `api_key`, `api_key_env`, `cacert`, `insecure_allow_http`, `require_remote`, webhook URL/secret, `output.format`/`output.file`, or `db.path`. It may opt out of remote repository-name metadata with `send_repo_metadata: false`, but it cannot re-enable metadata if a higher-precedence user config, environment variable, or flag disabled it.
-Store API keys in environment variables, CI secrets, OS secret stores, or the user-global config. Use `api_key_env` in trusted user-global or explicit config files rather than writing plaintext keys.
+Trusted user-global config or an explicit `--config` file can also set latest-version mirrors and Docker digest mirrors:
+
+```yaml
+registries:
+  npm_registry_base_url: "https://npm-mirror.example/registry"
+  pypi_api_base_url: "https://pypi-mirror.example/pypi"
+  rubygems_api_base_url: "https://rubygems-mirror.example/api/v1/gems"
+  cargo_registry_api_base_url: "https://cargo-mirror.example/api/v1/crates"
+  cocoapods_trunk_api_base_url: "https://cocoapods-mirror.example/api/v1/pods"
+  composer_repository_base_url: "https://composer-mirror.example/p2"
+  go_proxy_url: "https://go-proxy.example"
+  maven_repository_base_url: "https://maven-mirror.example/repository/maven-public"
+  docker_registry_mirrors:
+    docker.io: "https://docker-mirror.example/dockerhub"
+    ghcr.io: "https://ghcr-mirror.example"
+  swiftpm_git_allowed_hosts:
+    - git.example.com
+  cran_mirror_url: "https://cran-mirror.example"
+  pub_hosted_url: "https://pub-mirror.example"
+  hex_api_base_url: "https://hex-mirror.example/api"
+  nuget_v3_base_url: "https://nuget-mirror.example/v3-flatcontainer"
+```
+
+The matching environment variables are `PACKMON_NPM_REGISTRY_BASE_URL`,
+`PACKMON_PYPI_API_BASE_URL`, `PACKMON_RUBYGEMS_API_BASE_URL`,
+`PACKMON_CARGO_REGISTRY_API_BASE_URL`,
+`PACKMON_COCOAPODS_TRUNK_API_BASE_URL`,
+`PACKMON_COMPOSER_REPOSITORY_BASE_URL`, `PACKMON_CRAN_MIRROR_URL`,
+`PACKMON_GO_PROXY_URL`, `PACKMON_MAVEN_REPOSITORY_BASE_URL`,
+`PACKMON_DOCKER_REGISTRY_MIRRORS`,
+`PACKMON_SWIFTPM_GIT_ALLOWED_HOSTS`,
+`PACKMON_PUB_HOSTED_URL`, `PACKMON_HEX_API_BASE_URL`, and
+`PACKMON_NUGET_V3_BASE_URL`.
+
+Config precedence is: command-line flags > environment variables > project
+`.packmon.yaml` > user-global `~/.packmon/config/packmon.yaml` > built-in
+defaults. Auto-discovered project config is treated as repository input and
+cannot set credential/server routing fields, latest-version or Docker registry
+mirror URLs, or local write destinations such as `server`, `api_key`,
+`api_key_env`, `cacert`,
+`insecure_allow_http`, `require_remote`, webhook URL/secret,
+`output.format`/`output.file`, or `db.path`. It may opt out of remote
+repository-name metadata with `send_repo_metadata: false`, but it cannot
+re-enable metadata if a higher-precedence user config, environment variable,
+or flag disabled it.
+Store API keys in environment variables, CI secrets, OS secret stores, or the
+user-global config. Use `api_key_env` in trusted user-global or explicit config
+files rather than writing plaintext keys.
 
 ## SBOM Input
 
@@ -450,6 +620,8 @@ This requires only the matching local tool for the target ecosystem on `PATH`:
 the Go toolchain for Go modules, `cyclonedx-npm` for npm, `cyclonedx-py` for
 Python, or `mvn` for Maven projects. Add `--install-tools` to let Packmon
 install pinned CycloneDX generators where automatic installation is supported.
+Yarn, pnpm, and Pipenv lockfiles are scanned by Packmon's native parsers, but
+they are not generated as auto-SBOM targets.
 Existing npm/Python CycloneDX tools are version-checked against Packmon's
 pinned versions before use; generated-output and cleanup failures are reported
 as scan errors. Use the target-aware `sbom` requirements profile in
@@ -493,14 +665,32 @@ Docker inventory is metadata-only. Packmon reads image declarations from
 `Dockerfile`, `Dockerfile.*`, `docker-compose.yml`, `docker-compose.yaml`,
 `compose.yml`, and `compose.yaml`; it does not build, pull, or layer-scan
 images. Registry digest lookups are best-effort for Packmon's built-in public
-registry allowlist; unsupported registries or unsafe network targets are shown
-as `unknown`.
+registry allowlist. Trusted config can route those lookups through explicit
+operator mirrors with `PACKMON_DOCKER_REGISTRY_MIRRORS`, using comma-separated
+`public-host=https://mirror-base` entries such as
+`docker.io=https://docker-mirror.example/dockerhub`. Unsupported registries or
+unsafe network targets are shown as `unknown`.
 
 For latest-version reports, Packmon keeps lockfile registry/source provenance
 local to the CLI. If npm, requirements.txt, Cargo, Bundler, CocoaPods,
-Composer, renv, pub, or Maven inputs identify a private or non-default source,
-`--outdated` and `--list-all` report latest status as `unknown` instead of
-querying the matching public registry.
+Composer, renv, pub, Maven, or Hex inputs identify a private or non-default
+source, `--outdated` and `--list-all` report latest status as `unknown` instead
+of querying the matching public registry. npm, PyPI, RubyGems, Cargo,
+CocoaPods, Composer, Go, Maven, CRAN, Pub, Hex, and NuGet packages can use approved HTTPS
+mirrors through `PACKMON_NPM_REGISTRY_BASE_URL`,
+`PACKMON_PYPI_API_BASE_URL`, `PACKMON_RUBYGEMS_API_BASE_URL`,
+`PACKMON_CARGO_REGISTRY_API_BASE_URL`,
+`PACKMON_COCOAPODS_TRUNK_API_BASE_URL`,
+`PACKMON_COMPOSER_REPOSITORY_BASE_URL`, `PACKMON_CRAN_MIRROR_URL`,
+`PACKMON_GO_PROXY_URL`, `PACKMON_MAVEN_REPOSITORY_BASE_URL`,
+`PACKMON_PUB_HOSTED_URL`, `PACKMON_HEX_API_BASE_URL`, and
+`PACKMON_NUGET_V3_BASE_URL`; loopback HTTP is accepted only for local tests.
+Set `PACKMON_GO_PROXY_URL=off` to disable Go latest-version lookups without
+enabling direct VCS fallback.
+SwiftPM Git freshness can additionally allow trusted self-hosted or mirrored
+Git hosts with `PACKMON_SWIFTPM_GIT_ALLOWED_HOSTS`; values are bare hostnames,
+and Packmon still builds the remote as `https://host/path.git` rather than
+passing raw lockfile URLs to Git.
 
 ## Git Hooks
 
@@ -535,33 +725,74 @@ Important environment variables:
 - `PACKMON_SERVER_MODE=production|development`
 - `PACKMON_SERVER_PORT=8080`
 - `PACKMON_SERVER_PUBLIC_HOST` (host:port clients use to reach the server)
-- `PACKMON_TLS_CERT_FILE`, `PACKMON_TLS_KEY_FILE`, `PACKMON_TLS_MIN_VERSION=1.2|1.3`
-- `PACKMON_ALLOW_INSECURE_LOCAL_HTTP=false` (loopback-only override for the fail-closed transport check)
-- `PACKMON_INSECURE_LOCAL_HTTP_BIND_MODE=loopback|container` (`container` is only for local Docker with host-loopback port publishing)
+- `PACKMON_TLS_CERT_FILE`, `PACKMON_TLS_KEY_FILE`,
+  `PACKMON_TLS_MIN_VERSION=1.2|1.3`
+- `PACKMON_ALLOW_INSECURE_LOCAL_HTTP=false` (loopback-only override for the
+  fail-closed transport check)
+- `PACKMON_INSECURE_LOCAL_HTTP_BIND_MODE=loopback|container` (`container` is
+  only for local Docker with host-loopback port publishing)
 - `PACKMON_TRUSTED_PROXIES=10.0.0.0/8,192.168.10.10` (valid IP addresses or CIDR prefixes)
-- `PACKMON_SERVER_READ_TIMEOUT=30s`, `PACKMON_SERVER_WRITE_TIMEOUT=30s`, `PACKMON_SERVER_SHUTDOWN_TIMEOUT=5s`
+- `PACKMON_SERVER_READ_TIMEOUT=30s`, `PACKMON_SERVER_WRITE_TIMEOUT=30s`,
+  `PACKMON_SERVER_SHUTDOWN_TIMEOUT=5s`
 - `PACKMON_BLOCK_THRESHOLD=CRITICAL`
 - `PACKMON_RATE_LIMIT_PER_MINUTE=60`
 - `PACKMON_RATE_LIMIT_BURST=60`
 - `PACKMON_METRICS_HOST=127.0.0.1`
 - `PACKMON_METRICS_PORT=9090`
-- `PACKMON_WEB_PRIVACY_URL=/privacy` (footer privacy link; defaults to the built-in notice)
+- `PACKMON_WEB_PRIVACY_URL=/privacy` (footer privacy link; defaults to the
+  built-in notice)
 - `PACKMON_WEB_LEGAL_URL` (optional operator legal notice / Impressum URL)
-- `PACKMON_DB_HOST`, `PACKMON_DB_PORT`, `PACKMON_DB_NAME`, `PACKMON_DB_USER`, `PACKMON_DB_PASSWORD`
+- `PACKMON_WEB_TERMS_URL=/terms` (footer terms link; defaults to the built-in
+  operator terms hook)
+- `PACKMON_DB_HOST`, `PACKMON_DB_PORT`, `PACKMON_DB_NAME`,
+  `PACKMON_DB_USER`, `PACKMON_DB_PASSWORD`
 - `PACKMON_DB_SSLMODE` (default `verify-full` in production, `disable` in development)
-- `PACKMON_DB_CONNECT_TIMEOUT=10s` (startup schema-check and connection-pool deadline)
-- `PACKMON_ENCRYPTION_KEY` (required in production; encrypts stored feed API keys at rest. Development mode may run without it.)
+- `PACKMON_DB_MAX_CONNS=20`
+- `PACKMON_DB_MIN_CONNS=2`
+- `PACKMON_DB_CONNECT_TIMEOUT=10s` (startup schema-check, connection-pool, and
+  explicit migration-operation deadline)
+- `PACKMON_ENCRYPTION_KEY` (required in production; encrypts stored feed API
+  keys at rest. Development mode may run without it.)
+- `PACKMON_ADMIN_AUDIT_HMAC_KEY` (required in production; base64-encoded 32
+  random bytes used to HMAC new admin audit digest-chain rows. Development
+  mode may run without it and writes legacy `sha256:` audit digests.)
 - `PACKMON_ADMIN_INITIAL_PASSWORD` (at least 12 characters)
 - `PACKMON_ADMIN_SESSION_TIMEOUT=8h`
 - `PACKMON_ADMIN_IDLE_TIMEOUT=15m`
-- `PACKMON_SCAN_LOG_RETENTION=2160h` (90-day retention for server `scan_log`; `0` disables pruning)
-- `PACKMON_ADMIN_AUDIT_LOG_RETENTION=8760h` (365-day retention for `admin_audit_log`; `0` disables pruning)
-- `PACKMON_REFRESH_QUEUE_RETENTION=720h` (30-day retention for completed or failed `refresh_queue` jobs; `0` disables pruning)
+- `PACKMON_SCAN_LOG_RETENTION=720h` (30-day retention for server `scan_log`;
+  `0` disables pruning; admins can override this in `/admin/settings`)
+- `PACKMON_SCAN_LOG_IDENTITY_MODE=full` controls identity metadata retained in
+  server `scan_log` rows. `full` preserves existing behavior, `minimal` omits
+  `client_ip`, `api_key_id`, and `api_key_name`, and `none` also omits the
+  repository name and normalized client version.
+- `PACKMON_ADMIN_AUDIT_LOG_RETENTION=720h` (30-day retention for
+  `admin_audit_log`; `0` disables pruning; admins can override this in
+  `/admin/settings`)
+- `PACKMON_DELETED_API_KEY_RETENTION=8760h` (365-day retention for
+  soft-deleted API-key rows; `0` disables hard-delete pruning)
+- `PACKMON_REFRESH_QUEUE_RETENTION=720h` (30-day retention for completed or
+  failed `refresh_queue` jobs; `0` disables pruning)
+- `PACKMON_PACKAGE_CHECK_STATUS_RETENTION=2160h` (90-day retention for
+  Socket.dev `package_check_status` rows; `0` disables pruning)
 - `PACKMON_AUDIT_RETENTION_INTERVAL=24h` (background prune cadence)
-- `PACKMON_FEED_IMPORT_SECRET` (required for production `POST /api/v1/feeds/{feed}/import`; send it as `X-Packmon-Feed-Import-Secret`)
+- `PACKMON_FEED_SYNC_INTERVAL=8h`
+- `PACKMON_FEED_SYNC_ON_STARTUP=false`
+- `PACKMON_FEED_IMPORT_SECRET` (required for production
+  `POST /api/v1/feeds/{feed}/import`; send it as
+  `X-Packmon-Feed-Import-Secret`)
 - `PACKMON_SOCKET_API_KEY`
+- `PACKMON_SOCKET_API_BASE_URL=https://socket.dev/api/v1`
+- `PACKMON_SOCKET_EXCLUDED_NAMESPACES` (comma-separated prefixes such as
+  `npm/@internal/,maven/com.acme:`; suppresses Socket.dev refresh egress)
 - `PACKMON_VULNCHECK_API_KEY`
+- `PACKMON_VULNCHECK_API_BASE_URL=https://api.vulncheck.com`
 - `PACKMON_NVD_API_KEY`
+- `PACKMON_FEED_OSV_BASE_URL=https://osv-vulnerabilities.storage.googleapis.com`
+- `PACKMON_FEED_GHSA_REPO_URL=https://github.com/github/advisory-database.git`
+- `PACKMON_FEED_OPENSSF_REPO_URL=https://github.com/ossf/malicious-packages.git`
+- `PACKMON_FEED_CISAKEV_CATALOG_URL=https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json`
+- `PACKMON_FEED_EPSS_SCORES_URL=https://epss.cyentia.com/epss_scores-current.csv.gz`
+- `PACKMON_FEED_NVD_API_URL=https://services.nvd.nist.gov/rest/json/cves/2.0`
 - `PACKMON_FEED_ENDOFLIFE_ENABLED=true`
 - `PACKMON_FEED_ENDOFLIFE_MODE=self`
 - `PACKMON_ENDOFLIFE_API_BASE_URL=https://endoflife.date/api/v1`
@@ -571,13 +802,36 @@ Important environment variables:
 - `PACKMON_REVERSINGLABS_LOOKUP_TTL=24h`
 - `PACKMON_REVERSINGLABS_BATCH_SIZE=5`
 - `PACKMON_REVERSINGLABS_MAX_SCHEDULE_PER_CHECK=100`
-- `PACKMON_REVERSINGLABS_CACHE_RETENTION=168h`
+- `PACKMON_REVERSINGLABS_CACHE_RETENTION=168h` (non-finding cache retention;
+  `0` disables pruning)
 - `PACKMON_REVERSINGLABS_EXCLUDED_NAMESPACES` (comma-separated prefixes such as `npm/@internal/,maven/com.acme:`)
 
-Block threshold and rate-limit values can also be saved from `/admin/settings`; saved values are applied immediately and persisted for future server starts. Saving `NONE` requires an explicit acknowledgement because it disables vulnerability blocking.
-Feed enablement, mode, cadence, and feed API keys can be saved from `/admin/feeds`; saved values are applied immediately and persisted for future server starts.
-Manual advisories can be managed from `/admin/advisories` as either vulnerability or malicious findings.
-API keys can be created with a required RFC3339 UTC expiration timestamp, revoked, and marked deleted after revocation from `/admin/keys`; deletion is a soft-delete that retains lifecycle metadata for auditability. Creation requires the current admin password and expiration must be no more than 90 days in the future. Create separate named keys per client class so `last_used_at` and revocation are useful.
+Block threshold and rate-limit values can also be saved from `/admin/settings`;
+saved values are applied immediately and persisted for future server starts.
+Saving `NONE` requires an explicit acknowledgement because it disables
+vulnerability blocking.
+Feed enablement, mode, cadence, and feed API keys can be saved from
+`/admin/feeds`; saved values are applied immediately and persisted for future
+server starts.
+Strict feed imports must be operator-visible. When a server rejects imported
+feed data, the feed-status/API and web UI are expected to show bounded rejection
+diagnostics, rejected-record counts or reason classes, correlation ID,
+client/API-key attribution when available, the last successful usable import
+timestamp, and source-level finding/blocking changes so remote agents do not
+lose coverage context.
+Manual advisories can be managed from `/admin/advisories` as either
+vulnerability or malicious findings. Docker is not offered there because
+Packmon's Docker support is inventory-only, not container-layer vulnerability
+coverage.
+API keys can be created with a required RFC3339 UTC expiration timestamp,
+revoked, and marked deleted after revocation from `/admin/keys`; deletion is a
+soft-delete that retains lifecycle metadata for auditability. Creation requires
+the current admin password and expiration must be no more than 90 days in the
+future. Create separate named keys per client class so `last_used_at` and
+revocation are useful.
+Existing keys created before expiration support may show no expiration. Those
+legacy keys do not expire automatically; rotate, revoke, or delete them
+manually when you no longer want them accepted.
 The core OSV, GHSA, OpenSSF, CISA KEV, EPSS, NVD-without-key, endoflife.date,
 and registry latest-version paths are free public sources.
 This product uses the NVD API but is not endorsed or certified by the NVD.
@@ -589,6 +843,28 @@ type and severity threshold, not on EPSS.
 `PACKMON_SOCKET_API_KEY`, `PACKMON_VULNCHECK_API_KEY`, `PACKMON_NVD_API_KEY`,
 and ReversingLabs settings are optional enrichment/reputation inputs and are
 not required for baseline vulnerability, lifecycle, or outdated detection.
+Self-sync and enrichment feed URL settings accept HTTPS operator-controlled
+mirrors or loopback HTTP test endpoints so deployments can route OSV, GHSA,
+OpenSSF, CISA KEV, EPSS, NVD, endoflife.date, VulnCheck, and Socket.dev
+traffic through approved caches or relays.
+CLI latest-version mirror settings `PACKMON_NPM_REGISTRY_BASE_URL`,
+`PACKMON_PYPI_API_BASE_URL`, `PACKMON_RUBYGEMS_API_BASE_URL`,
+`PACKMON_CARGO_REGISTRY_API_BASE_URL`,
+`PACKMON_COCOAPODS_TRUNK_API_BASE_URL`,
+`PACKMON_COMPOSER_REPOSITORY_BASE_URL`, `PACKMON_CRAN_MIRROR_URL`,
+`PACKMON_GO_PROXY_URL`, `PACKMON_MAVEN_REPOSITORY_BASE_URL`,
+`PACKMON_SWIFTPM_GIT_ALLOWED_HOSTS`,
+`PACKMON_PUB_HOSTED_URL`, `PACKMON_HEX_API_BASE_URL`, and
+`PACKMON_NUGET_V3_BASE_URL` provide the same routing control for npm, PyPI,
+RubyGems, Cargo, CocoaPods, Composer, Go, Maven, CRAN, Pub, Hex, and NuGet
+freshness checks. Go uses a single module-proxy root plus `/@latest`; Maven
+uses a Maven repository root and `maven-metadata.xml`.
+`PACKMON_SWIFTPM_GIT_ALLOWED_HOSTS` extends SwiftPM Git freshness to trusted
+self-hosted or mirrored hosts without accepting raw repository URLs.
+`PACKMON_DOCKER_REGISTRY_MIRRORS` provides the same operator-routing control
+for `--list-all` Docker manifest digest checks. It maps supported public
+registry hosts to trusted mirror base URLs and does not read Docker credentials,
+pull images, or enable arbitrary repository-controlled registries.
 The Docker `.env.example` keeps account-gated feeds such as VulnCheck,
 Socket.dev, and ReversingLabs disabled until the matching API key is supplied
 and the feed is explicitly enabled.
@@ -596,18 +872,46 @@ Lifecycle/EOL findings are available only where package coordinates map to an
 endoflife.date product and release cycle. Library packages without official
 lifecycle metadata may still be vulnerable or outdated without being reported
 as EOL.
-ReversingLabs lookups are disabled by default. When enabled with an API key, the server performs bounded demand-driven lookups only for supported, length-bounded packages that are not already covered by other feeds, percent-encodes outbound PURLs, deduplicates and caps scheduled work per check request, stores normalized cache rows internally, and refreshes each package version at most once per day. Use `PACKMON_REVERSINGLABS_EXCLUDED_NAMESPACES` to suppress private package prefixes before external lookup. Non-finding cache rows are pruned by `PACKMON_REVERSINGLABS_CACHE_RETENTION`. Active malware signals are reported as malicious findings; historical malware incident evidence is reported separately as non-blocking `LOW` reputation info.
+ReversingLabs lookups are disabled by default. When enabled with an API key,
+the server performs bounded demand-driven lookups only for supported,
+length-bounded packages that are not already covered by other feeds,
+percent-encodes outbound PURLs, deduplicates and caps scheduled work per check
+request, stores normalized cache rows internally, and refreshes each package
+version at most once per day. Use
+`PACKMON_REVERSINGLABS_EXCLUDED_NAMESPACES` to suppress private package
+prefixes before external lookup. Non-finding cache rows are pruned by
+`PACKMON_REVERSINGLABS_CACHE_RETENTION`; `0` disables pruning. Active malware
+signals are reported as malicious findings; historical malware incident evidence
+is reported separately as non-blocking `LOW` reputation info.
+Socket.dev refreshes are disabled by default. When enabled with an API key,
+manual refresh requests and the worker both honor
+`PACKMON_SOCKET_EXCLUDED_NAMESPACES` before queueing or sending package names to
+Socket.dev.
 
 ## Client Profiles
 
-- Dev laptops: use the HTTPS server URL, `PACKMON_CA_CERT` or `--cacert` for the internal CA, and `PACKMON_API_KEY` from the user environment or OS secret store.
-- CI runners: create a dedicated named key, store it as a CI secret, set `PACKMON_REQUIRE_REMOTE=true`, and rotate it before its required expiration.
-- Segmented production networks: distribute the internal CA bundle to scanners, allow only the Packmon TLS port through the firewall, and make sure the server certificate SAN covers the address clients use.
-- N8N: create a dedicated key for the workflow and call `/api/v1/check` over HTTPS with `Authorization: Bearer <key>` and a `User-Agent` starting with `packmon-n8n/`. For feed import endpoints, also configure `PACKMON_FEED_IMPORT_SECRET` on the server and send the same value as `X-Packmon-Feed-Import-Secret`.
+- Dev laptops: use the HTTPS server URL, `PACKMON_CA_CERT_FILE` or `--cacert`
+  for the internal CA, and `PACKMON_API_KEY` from the user environment or OS
+  secret store. `PACKMON_CA_CERT` remains a legacy alias.
+- CI runners: create a dedicated named key, store it as a CI secret, set
+  `PACKMON_REQUIRE_REMOTE=true`, and rotate it before its required expiration.
+- Segmented production networks: distribute the internal CA bundle to scanners,
+  allow only the Packmon TLS port through the firewall, and make sure the
+  server certificate SAN covers the address clients use.
+- N8N: create a dedicated key for the workflow and call `/api/v1/check` over
+  HTTPS with `Authorization: Bearer <key>` and a `User-Agent` starting with
+  `packmon-n8n/`. For feed import endpoints, also configure
+  `PACKMON_FEED_IMPORT_SECRET` on the server and send the same value as
+  `X-Packmon-Feed-Import-Secret`.
 
 For CLI local freshness warnings:
 
 - `PACKMON_DB_WARN_AFTER_DAYS=7`
+
+When local DB age exceeds this threshold, scan artifacts expose `db_stale` and
+`db_age_days`, and `packmon dashboard` must show a visible stale-data warning to
+all dashboard viewers. Treat the warning as degraded local coverage and sync the
+local DB from the server; stale data alone does not block scans.
 
 ## Testing
 
@@ -647,9 +951,10 @@ GOTMPDIR="$PWD/.gotmp" go test -count=1 ./tests/ci
 ```
 
 `go test -count=1 ./tests/ci` validates the reusable GitHub workflow and
-GitLab template, including release binary download defaults, checksum
-verification, report artifacts, degraded feed/local-DB warnings, and
-Sigstore/Cosign signing metadata for retained scan-result artifacts.
+GitLab template, including explicit release-version requirements, checksum
+verification, release-binary attestation verification, container image OS
+vulnerability scan gates, report artifacts, degraded feed/local-DB warnings,
+and Sigstore/Cosign signing metadata for retained scan-result artifacts.
 `make test-ci` is available as a wrapper on systems with `make`. A real GitLab
 Runner smoke test remains externally dependent on an available GitLab project
 and registered runner.
@@ -706,5 +1011,8 @@ The backup strategy is intentionally simple:
 - 7-day local retention
 - backup files stored outside the application data path
 
-Keep restore drills and deployment-specific backup destinations in the
-operator-owned runbook for the environment where Packmon runs.
+RPO is roughly 24 hours. RTO (Recovery Time Objective) is not a Packmon product
+SLA for the repository-provided Compose model; each deployment must document
+its own target and validate it with restore drills. Keep restore drills and
+deployment-specific backup destinations in the operator-owned runbook for the
+environment where Packmon runs.

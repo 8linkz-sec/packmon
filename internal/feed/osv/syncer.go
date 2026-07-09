@@ -26,9 +26,10 @@ const (
 	// FeedName is the canonical name used in feed_sync_status.
 	FeedName = "osv"
 
-	// bucketBaseURL is the base URL for the OSV GCS bucket. Each
+	// DefaultBaseURL is the base URL for the OSV GCS bucket. Each
 	// ecosystem has a directory with an all.zip file.
-	bucketBaseURL = "https://osv-vulnerabilities.storage.googleapis.com"
+	DefaultBaseURL = "https://osv-vulnerabilities.storage.googleapis.com"
+	bucketBaseURL  = DefaultBaseURL
 
 	// httpTimeout is the per-request timeout for downloading a single
 	// ecosystem ZIP file. These can be large (10-50 MB), so we allow
@@ -42,6 +43,8 @@ const (
 	// maxEntrySize is a safety limit for individual JSON entries within
 	// the ZIP archive. A single OSV entry should never exceed 10 MB.
 	maxEntrySize = 10 * 1024 * 1024 // 10 MB
+
+	maxErrorBodyDrain = 64 << 10
 )
 
 // Compile-time interface assertion.
@@ -56,13 +59,22 @@ func (e *errArchiveUnavailable) Error() string {
 	return fmt.Sprintf("archive unavailable: HTTP %d from %s", e.statusCode, e.url)
 }
 
+type errMalformedArchiveEntries struct {
+	ecosystem string
+	count     int
+}
+
+func (e *errMalformedArchiveEntries) Error() string {
+	return fmt.Sprintf("ecosystem %s: %d malformed archive entry error(s)", e.ecosystem, e.count)
+}
+
 // Syncer downloads OSV vulnerability data from the public GCS bucket
 // and upserts it into the Packmon database. It implements the
 // FeedSyncer interface defined in feed.go.
 type Syncer struct {
-	store  db.Store
-	logger *slog.Logger
-	client *http.Client
+	logger  *slog.Logger
+	client  *http.Client
+	baseURL string
 }
 
 // Option configures a Syncer.
@@ -73,16 +85,25 @@ func WithHTTPClient(c *http.Client) Option {
 	return func(s *Syncer) { s.client = c }
 }
 
+// WithBaseURL overrides the OSV archive root.
+func WithBaseURL(url string) Option {
+	return func(s *Syncer) {
+		if strings.TrimSpace(url) != "" {
+			s.baseURL = strings.TrimRight(strings.TrimSpace(url), "/")
+		}
+	}
+}
+
 // NewSyncer creates an OSV Syncer. If logger is nil, slog.Default() is
 // used.
-func NewSyncer(store db.Store, logger *slog.Logger, opts ...Option) *Syncer {
+func NewSyncer(logger *slog.Logger, opts ...Option) *Syncer {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	s := &Syncer{
-		store:  store,
-		logger: logger.With(slog.String("feed", FeedName)),
-		client: &http.Client{Timeout: httpTimeout},
+		logger:  logger.With(slog.String("feed", FeedName)),
+		client:  &http.Client{Timeout: httpTimeout},
+		baseURL: DefaultBaseURL,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -103,7 +124,7 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 	s.logger.Info("starting OSV sync")
 
 	// Load stored per-ecosystem ETags from feed_sync_status.metadata.
-	status := s.loadFeedStatus(ctx)
+	status := s.loadFeedStatus(ctx, store)
 	etags := ecosystemETags(status)
 
 	ecosystems := feed.OSVBucketEcosystems()
@@ -111,11 +132,12 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 	var skippedByETag int
 	var unavailableArchives int
 	var failedEcosystems int
+	var nonRetryableFailures int
 	var syncErrors []error
 
 	for _, eco := range ecosystems {
 		if ctx.Err() != nil {
-			s.recordSyncFailure(ctx, start, ctx.Err())
+			s.recordSyncFailure(ctx, store, start, ctx.Err())
 			return nil, ctx.Err()
 		}
 
@@ -148,6 +170,10 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 				continue
 			}
 			failedEcosystems++
+			var malformed *errMalformedArchiveEntries
+			if errors.As(err, &malformed) {
+				nonRetryableFailures++
+			}
 			syncErrors = append(syncErrors, err)
 			totalSynced += synced
 			totalEntries += entries
@@ -180,20 +206,23 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 		slog.Int("skipped_by_etag", skippedByETag),
 		slog.Int("unavailable_archives", unavailableArchives),
 		slog.Int("failed_ecosystems", failedEcosystems),
-		slog.String("duration", duration.String()),
+		slog.Duration("duration", duration),
 	)
 
 	if failedEcosystems > 0 {
 		syncErr := fmt.Errorf("OSV sync failed for %d ecosystem(s): %w", failedEcosystems, errors.Join(syncErrors...))
-		s.recordSyncFailure(ctx, start, syncErr)
+		if nonRetryableFailures == failedEcosystems {
+			syncErr = feed.NonRetryableError(syncErr)
+		}
+		s.recordSyncFailure(ctx, store, start, syncErr)
 		return nil, syncErr
 	}
 	if totalEntries == 0 && totalSynced == 0 && skippedByETag > 0 {
 		totalSynced, totalEntries = statusCounts(status)
 	}
 
-	s.recordSyncSuccess(ctx, duration, totalEntries, totalSynced)
-	s.saveEcosystemETags(ctx, etags)
+	s.recordSyncSuccess(ctx, store, duration, totalEntries, totalSynced)
+	s.saveEcosystemETags(ctx, store, etags)
 	return &feed.SyncResult{
 		EntriesSynced: totalSynced,
 		EntriesTotal:  totalEntries,
@@ -205,18 +234,17 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 // available.
 var errNotModified = errors.New("not modified (HTTP 304)")
 
-// loadEcosystemETags reads the per-ecosystem ETag map from the
-// feed_sync_status metadata JSONB column.
-func (s *Syncer) loadFeedStatus(ctx context.Context) *db.FeedSyncStatus {
-	status, err := s.store.GetFeedSyncStatus(ctx, FeedName)
+// loadFeedStatus reads the previous OSV feed status row used for incremental
+// sync metadata such as per-ecosystem ETags.
+func (s *Syncer) loadFeedStatus(ctx context.Context, store db.Store) *db.FeedSyncStatus {
+	status, err := store.GetFeedSyncStatus(ctx, FeedName)
 	if err != nil {
+		s.logger.Warn("failed to get feed sync status, proceeding with full sync",
+			slog.String("error", feed.SafeDiagnosticError(err)),
+		)
 		return nil
 	}
 	return status
-}
-
-func (s *Syncer) loadEcosystemETags(ctx context.Context) map[string]string {
-	return ecosystemETags(s.loadFeedStatus(ctx))
 }
 
 func ecosystemETags(status *db.FeedSyncStatus) map[string]string {
@@ -242,7 +270,7 @@ func statusCounts(status *db.FeedSyncStatus) (synced, total int) {
 
 // saveEcosystemETags persists the per-ecosystem ETag map into the
 // feed_sync_status metadata JSONB column.
-func (s *Syncer) saveEcosystemETags(ctx context.Context, etags map[string]string) {
+func (s *Syncer) saveEcosystemETags(ctx context.Context, store db.Store, etags map[string]string) {
 	meta := struct {
 		ETags map[string]string `json:"ecosystem_etags"`
 	}{ETags: etags}
@@ -253,7 +281,7 @@ func (s *Syncer) saveEcosystemETags(ctx context.Context, etags map[string]string
 		return
 	}
 
-	status, err := feed.GetFeedSyncStatusBounded(s.store, FeedName)
+	status, err := feed.GetFeedSyncStatusBounded(store, FeedName)
 	if err != nil || status == nil {
 		// The status row should already exist from recordSyncSuccess.
 		// If not, we just skip saving ETags this time.
@@ -262,17 +290,38 @@ func (s *Syncer) saveEcosystemETags(ctx context.Context, etags map[string]string
 	}
 
 	status.Metadata = metaJSON
-	if err := feed.UpsertFeedSyncStatusBounded(s.store, status); err != nil {
+	if err := feed.UpsertFeedSyncStatusBounded(store, status); err != nil {
 		s.logger.Warn("failed to save ecosystem ETags", "error", feed.SafeDiagnosticError(err))
 	}
 	_ = ctx
+}
+
+type osvEntryOutcome string
+
+const (
+	osvEntryOutcomeSkipped       osvEntryOutcome = "skipped"
+	osvEntryOutcomeDeleted       osvEntryOutcome = "deleted"
+	osvEntryOutcomeMalicious     osvEntryOutcome = "malicious"
+	osvEntryOutcomeVulnerability osvEntryOutcome = "vulnerability"
+	osvEntryOutcomeError         osvEntryOutcome = "error"
+)
+
+type osvEntryProcessResult struct {
+	outcome         osvEntryOutcome
+	synced          int
+	errors          int
+	malformedErrors int
 }
 
 // syncEcosystem downloads and processes a single ecosystem's all.zip.
 // It returns the new ETag from the server response (empty if none).
 // If the stored ETag matches, it returns errNotModified.
 func (s *Syncer) syncEcosystem(ctx context.Context, store db.Store, ecosystem, storedETag string) (synced, total int, newETag string, err error) {
-	url := fmt.Sprintf("%s/%s/all.zip", bucketBaseURL, ecosystem)
+	baseURL := strings.TrimRight(strings.TrimSpace(s.baseURL), "/")
+	if baseURL == "" {
+		baseURL = DefaultBaseURL
+	}
+	url := fmt.Sprintf("%s/%s/all.zip", baseURL, ecosystem)
 	s.logger.Debug("downloading ecosystem archive", slog.String("url", url))
 
 	tmpPath, respETag, err := s.download(ctx, url, storedETag)
@@ -291,6 +340,7 @@ func (s *Syncer) syncEcosystem(ctx context.Context, store db.Store, ecosystem, s
 	defer func() { _ = reader.Close() }()
 
 	var entryErrors int
+	var malformedEntryErrors int
 
 	for _, f := range reader.File {
 		if ctx.Err() != nil {
@@ -303,96 +353,104 @@ func (s *Syncer) syncEcosystem(ctx context.Context, store db.Store, ecosystem, s
 		}
 		total++
 
-		rc, err := f.Open()
-		if err != nil {
-			entryErrors++
-			s.logger.Warn("failed to open zip entry",
-				slog.String("file", f.Name),
-				slog.String("error", feed.SafeDiagnosticError(err)),
-			)
-			continue
-		}
-
-		data, err := io.ReadAll(io.LimitReader(rc, maxEntrySize))
-		_ = rc.Close()
-		if err != nil {
-			entryErrors++
-			s.logger.Warn("failed to read zip entry",
-				slog.String("file", f.Name),
-				slog.String("error", feed.SafeDiagnosticError(err)),
-			)
-			continue
-		}
-
-		var entry osvEntry
-		if err := json.Unmarshal(data, &entry); err != nil {
-			entryErrors++
-			s.logger.Warn("failed to parse OSV entry",
-				slog.String("file", f.Name),
-				slog.String("error", feed.SafeDiagnosticError(err)),
-			)
-			continue
-		}
-
-		// Skip MAL-* entries -- these are malicious package advisories
-		// from OpenSSF that OSV aggregates. They belong in the
-		// malicious_findings table, handled by the OpenSSF syncer.
-		if strings.HasPrefix(entry.ID, "MAL-") {
-			continue
-		}
-
-		if entry.Withdrawn != nil && strings.TrimSpace(*entry.Withdrawn) != "" {
-			if err := db.DeleteVulnerabilityForSource(ctx, store, entry.ID, "osv"); err != nil {
-				entryErrors++
-				s.logger.Warn("failed to delete withdrawn vulnerability",
-					slog.String("id", entry.ID),
-					slog.String("error", feed.SafeDiagnosticError(err)),
-				)
-				continue
-			}
-			synced++
-			continue
-		}
-
-		if findings := mapToMaliciousFindings(&entry); len(findings) > 0 {
-			if err := db.DeleteVulnerabilityForSource(ctx, store, entry.ID, "osv"); err != nil {
-				entryErrors++
-				s.logger.Warn("failed to delete vulnerability superseded by malicious OSV category",
-					slog.String("id", entry.ID),
-					slog.String("error", feed.SafeDiagnosticError(err)),
-				)
-			}
-			for _, finding := range findings {
-				if err := store.UpsertMaliciousFinding(ctx, finding); err != nil {
-					entryErrors++
-					s.logger.Warn("failed to upsert malicious finding",
-						slog.String("id", finding.ID),
-						slog.String("error", feed.SafeDiagnosticError(err)),
-					)
-					continue
-				}
-				synced++
-			}
-			continue
-		}
-
-		vuln := mapToVulnerability(&entry, data)
-		if err := store.UpsertVulnerability(ctx, vuln); err != nil {
-			entryErrors++
-			s.logger.Warn("failed to upsert vulnerability",
-				slog.String("id", entry.ID),
-				slog.String("error", feed.SafeDiagnosticError(err)),
-			)
-			continue
-		}
-		synced++
+		result := s.processOSVEntry(ctx, store, f)
+		synced += result.synced
+		entryErrors += result.errors
+		malformedEntryErrors += result.malformedErrors
 	}
 
 	if entryErrors > 0 {
+		if malformedEntryErrors == entryErrors {
+			return synced, total, newETag, &errMalformedArchiveEntries{ecosystem: ecosystem, count: malformedEntryErrors}
+		}
 		return synced, total, newETag, fmt.Errorf("ecosystem %s: %d entry import error(s)", ecosystem, entryErrors)
 	}
 
 	return synced, total, newETag, nil
+}
+
+func (s *Syncer) processOSVEntry(ctx context.Context, store db.Store, f *zip.File) osvEntryProcessResult {
+	rc, err := f.Open()
+	if err != nil {
+		s.logger.Warn("failed to open zip entry",
+			slog.String("file", f.Name),
+			slog.String("error", feed.SafeDiagnosticError(err)),
+		)
+		return osvEntryProcessResult{outcome: osvEntryOutcomeError, errors: 1}
+	}
+
+	data, err := io.ReadAll(io.LimitReader(rc, maxEntrySize))
+	_ = rc.Close()
+	if err != nil {
+		s.logger.Warn("failed to read zip entry",
+			slog.String("file", f.Name),
+			slog.String("error", feed.SafeDiagnosticError(err)),
+		)
+		return osvEntryProcessResult{outcome: osvEntryOutcomeError, errors: 1}
+	}
+
+	var entry osvEntry
+	if err := json.Unmarshal(data, &entry); err != nil {
+		s.logger.Warn("failed to parse OSV entry",
+			slog.String("file", f.Name),
+			slog.String("error", feed.SafeDiagnosticError(err)),
+		)
+		return osvEntryProcessResult{outcome: osvEntryOutcomeError, errors: 1, malformedErrors: 1}
+	}
+
+	// Skip MAL-* entries -- these are malicious package advisories
+	// from OpenSSF that OSV aggregates. They belong in the
+	// malicious_findings table, handled by the OpenSSF syncer.
+	if strings.HasPrefix(entry.ID, "MAL-") {
+		return osvEntryProcessResult{outcome: osvEntryOutcomeSkipped}
+	}
+
+	if entry.Withdrawn != nil && strings.TrimSpace(*entry.Withdrawn) != "" {
+		if err := feed.DeleteVulnerabilityForSource(ctx, store, entry.ID, FeedName); err != nil {
+			s.logger.Warn("failed to delete withdrawn vulnerability",
+				slog.String("id", entry.ID),
+				slog.String("error", feed.SafeDiagnosticError(err)),
+			)
+			return osvEntryProcessResult{outcome: osvEntryOutcomeError, errors: 1}
+		}
+		return osvEntryProcessResult{outcome: osvEntryOutcomeDeleted, synced: 1}
+	}
+
+	if findings := mapToMaliciousFindings(&entry); len(findings) > 0 {
+		result := osvEntryProcessResult{outcome: osvEntryOutcomeMalicious}
+		if err := feed.DeleteVulnerabilityForSource(ctx, store, entry.ID, FeedName); err != nil {
+			result.errors++
+			s.logger.Warn("failed to delete vulnerability superseded by malicious OSV category",
+				slog.String("id", entry.ID),
+				slog.String("error", feed.SafeDiagnosticError(err)),
+			)
+		}
+		for _, finding := range findings {
+			if err := store.UpsertMaliciousFinding(ctx, finding); err != nil {
+				result.errors++
+				s.logger.Warn("failed to upsert malicious finding",
+					slog.String("id", finding.ID),
+					slog.String("error", feed.SafeDiagnosticError(err)),
+				)
+				continue
+			}
+			result.synced++
+		}
+		if result.errors > 0 {
+			result.outcome = osvEntryOutcomeError
+		}
+		return result
+	}
+
+	vuln := mapToVulnerability(&entry, data)
+	if err := store.UpsertVulnerability(ctx, vuln); err != nil {
+		s.logger.Warn("failed to upsert vulnerability",
+			slog.String("id", entry.ID),
+			slog.String("error", feed.SafeDiagnosticError(err)),
+		)
+		return osvEntryProcessResult{outcome: osvEntryOutcomeError, errors: 1}
+	}
+	return osvEntryProcessResult{outcome: osvEntryOutcomeVulnerability, synced: 1}
 }
 
 // download fetches a URL and streams the response body to a temporary
@@ -402,11 +460,35 @@ func (s *Syncer) syncEcosystem(ctx context.Context, store db.Store, ecosystem, s
 // the server responds with 304 Not Modified, download returns
 // errNotModified (wrapped so errors.Is works).
 func (s *Syncer) download(ctx context.Context, url, storedETag string) (tmpPath, etag string, err error) {
+	return s.downloadWithTempArchiveFileHooks(ctx, url, storedETag, defaultTempArchiveFileHooks())
+}
+
+type tempArchiveWriteFile interface {
+	io.Writer
+	io.Closer
+	Name() string
+}
+
+type tempArchiveFileHooks struct {
+	create func() (tempArchiveWriteFile, error)
+	remove func(string) error
+}
+
+func defaultTempArchiveFileHooks() tempArchiveFileHooks {
+	return tempArchiveFileHooks{
+		create: func() (tempArchiveWriteFile, error) {
+			return os.CreateTemp("", "packmon-osv-*.zip")
+		},
+		remove: os.Remove,
+	}
+}
+
+func (s *Syncer) downloadWithTempArchiveFileHooks(ctx context.Context, url, storedETag string, hooks tempArchiveFileHooks) (tmpPath, etag string, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", "", err
 	}
-	req.Header.Set("User-Agent", "packmon-feedsync/1.0")
+	req.Header.Set("User-Agent", feed.FeedSyncUserAgent)
 	if storedETag != "" {
 		req.Header.Set("If-None-Match", storedETag)
 	}
@@ -422,6 +504,7 @@ func (s *Syncer) download(ctx context.Context, url, storedETag string) (tmpPath,
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		drainErrorBody(resp.Body)
 		return "", "", &errArchiveUnavailable{
 			url:        url,
 			statusCode: resp.StatusCode,
@@ -430,42 +513,59 @@ func (s *Syncer) download(ctx context.Context, url, storedETag string) (tmpPath,
 
 	// Stream the response body to a temporary file instead of loading
 	// the entire ZIP into memory.
-	tmpFile, err := os.CreateTemp("", "packmon-osv-*.zip")
+	tmpFile, err := hooks.create()
 	if err != nil {
 		return "", "", fmt.Errorf("creating temp file: %w", err)
 	}
-	tmpPath = tmpFile.Name()
+	tmpName := tmpFile.Name()
 
-	// If anything goes wrong after creating the file, clean it up.
+	closed := false
 	defer func() {
-		_ = tmpFile.Close()
+		if !closed {
+			_ = tmpFile.Close()
+		}
 		if err != nil {
-			_ = os.Remove(tmpPath)
+			_ = hooks.remove(tmpName)
 		}
 	}()
 
-	written, err := io.Copy(tmpFile, io.LimitReader(resp.Body, maxZIPSize))
-	if err != nil {
-		return "", "", fmt.Errorf("writing response to temp file: %w", err)
+	written, copyErr := io.Copy(tmpFile, io.LimitReader(resp.Body, maxZIPSize))
+	closeErr := tmpFile.Close()
+	closed = true
+	if copyErr != nil {
+		if closeErr != nil {
+			return "", "", errors.Join(
+				fmt.Errorf("writing response to temp file: %w", copyErr),
+				fmt.Errorf("close temp archive: %w", closeErr),
+			)
+		}
+		return "", "", fmt.Errorf("writing response to temp file: %w", copyErr)
+	}
+	if closeErr != nil {
+		return "", "", fmt.Errorf("close temp archive: %w", closeErr)
 	}
 
 	s.logger.Debug("downloaded archive to temp file",
-		slog.String("file", filepath.Base(tmpPath)),
+		slog.String("file", filepath.Base(tmpName)),
 		slog.Int64("bytes", written),
 	)
 
 	respETag := resp.Header.Get("ETag")
-	return tmpPath, respETag, nil
+	return tmpName, respETag, nil
+}
+
+func drainErrorBody(r io.Reader) {
+	_, _ = io.Copy(io.Discard, io.LimitReader(r, maxErrorBodyDrain))
 }
 
 // recordSyncSuccess persists a successful sync status.
-func (s *Syncer) recordSyncSuccess(ctx context.Context, dur time.Duration, total, synced int) {
+func (s *Syncer) recordSyncSuccess(ctx context.Context, store db.Store, dur time.Duration, total, synced int) {
 	now := time.Now()
-	err := feed.UpsertFeedSyncStatusBounded(s.store, &db.FeedSyncStatus{
+	err := feed.UpsertFeedSyncStatusBounded(store, &db.FeedSyncStatus{
 		FeedName:         FeedName,
 		LastSyncAt:       &now,
 		LastSyncDuration: &dur,
-		LastSyncStatus:   "success",
+		LastSyncStatus:   db.FeedSyncStatusSuccess,
 		EntriesSynced:    synced,
 		EntriesTotal:     total,
 	})
@@ -476,20 +576,20 @@ func (s *Syncer) recordSyncSuccess(ctx context.Context, dur time.Duration, total
 }
 
 // recordSyncFailure persists a failed sync status.
-func (s *Syncer) recordSyncFailure(ctx context.Context, start time.Time, syncErr error) {
+func (s *Syncer) recordSyncFailure(ctx context.Context, store db.Store, start time.Time, syncErr error) {
 	dur := time.Since(start)
 	now := time.Now()
 	status := &db.FeedSyncStatus{
 		FeedName:         FeedName,
 		LastSyncDuration: &dur,
-		LastSyncStatus:   "error",
+		LastSyncStatus:   db.FeedSyncStatusError,
 		LastError:        feed.SafeDiagnosticError(syncErr),
 		UpdatedAt:        now,
 	}
-	if current, err := feed.GetFeedSyncStatusBounded(s.store, FeedName); err == nil {
+	if current, err := feed.GetFeedSyncStatusBounded(store, FeedName); err == nil {
 		feed.PreserveFeedStatusData(status, current)
 	}
-	err := feed.UpsertFeedSyncStatusBounded(s.store, status)
+	err := feed.UpsertFeedSyncStatusBounded(store, status)
 	if err != nil {
 		s.logger.Warn("failed to record sync failure", "error", err)
 	}
@@ -536,7 +636,7 @@ type osvAffected struct {
 type osvPackage struct {
 	Ecosystem string `json:"ecosystem"`
 	Name      string `json:"name"`
-	Purl      string `json:"purl"`
+	PURL      string `json:"purl"`
 }
 
 // osvRange defines a version range in the OSV schema.
@@ -765,54 +865,11 @@ func marshalReferenceURLs(refs []osvReference) json.RawMessage {
 }
 
 func classifyMaliciousRiskType(entry *osvEntry) string {
-	if riskType := maliciousRiskTypeFromJSON(entry.DatabaseSpecific); riskType != "" {
-		return riskType
-	}
-	lower := strings.ToLower(entry.Summary + " " + entry.Details)
-	switch {
-	case strings.Contains(lower, "typosquat"):
-		return "typosquatting"
-	case strings.Contains(lower, "supply chain") || strings.Contains(lower, "supply-chain"):
-		return "supply_chain"
-	case strings.Contains(lower, "dependency confusion"):
-		return "supply_chain"
-	default:
-		return "malware"
-	}
+	return feed.ClassifyMaliciousRiskType(entry.DatabaseSpecific, entry.Summary, entry.Details)
 }
 
 func maliciousRiskTypeFromJSON(raw json.RawMessage) string {
-	if len(raw) == 0 {
-		return ""
-	}
-	var spec struct {
-		RiskType       string   `json:"risk_type"`
-		Type           string   `json:"type"`
-		Classification string   `json:"classification"`
-		Categories     []string `json:"categories"`
-	}
-	if err := json.Unmarshal(raw, &spec); err != nil {
-		return ""
-	}
-	for _, candidate := range append([]string{spec.RiskType, spec.Type, spec.Classification}, spec.Categories...) {
-		if normalized := normalizeMaliciousRiskType(candidate); normalized != "" {
-			return normalized
-		}
-	}
-	return ""
-}
-
-func normalizeMaliciousRiskType(raw string) string {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "malware", "trojan", "backdoor", "cryptominer", "cryptomining", "exfiltration", "protestware":
-		return "malware"
-	case "typosquat", "typosquatting", "typo-squatting":
-		return "typosquatting"
-	case "supply_chain", "supply-chain", "supply chain", "dependency_confusion", "dependency confusion":
-		return "supply_chain"
-	default:
-		return ""
-	}
+	return feed.MaliciousRiskTypeFromJSON(raw)
 }
 
 // mapSeverity derives a Packmon severity string from OSV severity entries.

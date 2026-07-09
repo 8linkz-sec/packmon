@@ -56,6 +56,167 @@ func TestCollectPackagesIncludesExplicitSBOM(t *testing.T) {
 	}
 }
 
+func symlinkOrSkip(t *testing.T, oldname, newname string) {
+	t.Helper()
+	if err := os.Symlink(oldname, newname); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+}
+
+func TestCollectPackagesRejectsLockfileSymlinkOutsideRoot(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "repo")
+	outside := filepath.Join(parent, "outside")
+	if err := os.MkdirAll(root, 0o750); err != nil {
+		t.Fatalf("mkdir root: %v", err)
+	}
+	if err := os.MkdirAll(outside, 0o750); err != nil {
+		t.Fatalf("mkdir outside: %v", err)
+	}
+	outsideLock := filepath.Join(outside, "package-lock.json")
+	if err := os.WriteFile(outsideLock, []byte(`{
+		"lockfileVersion": 3,
+		"packages": {"node_modules/external": {"version":"9.9.9"}}
+	}`), 0o600); err != nil {
+		t.Fatalf("write outside lockfile: %v", err)
+	}
+	symlinkOrSkip(t, outsideLock, filepath.Join(root, "package-lock.json"))
+
+	got, err := CollectPackages(CollectConfig{
+		Registry: parser.NewRegistry(),
+		Root:     root,
+		MaxDepth: 2,
+	})
+	if err != nil {
+		t.Fatalf("CollectPackages() error = %v", err)
+	}
+	if len(got.Packages) != 0 {
+		t.Fatalf("Packages = %+v, want no packages from external symlink target", got.Packages)
+	}
+	if len(got.ParseErrors) != 1 || !strings.Contains(got.ParseErrors[0], "package-lock.json") {
+		t.Fatalf("ParseErrors = %#v, want symlinked lockfile rejection", got.ParseErrors)
+	}
+}
+
+func TestParseCollectedLockFileUnderRootRejectsRelativeEscape(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "repo")
+	outside := filepath.Join(parent, "outside")
+	if err := os.MkdirAll(root, 0o750); err != nil {
+		t.Fatalf("mkdir root: %v", err)
+	}
+	if err := os.MkdirAll(outside, 0o750); err != nil {
+		t.Fatalf("mkdir outside: %v", err)
+	}
+	outsideLock := filepath.Join(outside, "package-lock.json")
+	if err := os.WriteFile(outsideLock, []byte(`{
+		"lockfileVersion": 3,
+		"packages": {"node_modules/external": {"version":"9.9.9"}}
+	}`), 0o600); err != nil {
+		t.Fatalf("write outside lockfile: %v", err)
+	}
+	p := parser.NewRegistry().ParserFor(outsideLock)
+	if p == nil {
+		t.Fatal("package-lock parser not registered")
+	}
+
+	_, err := parseCollectedLockFileUnderRoot(root, LockFile{
+		Path:    outsideLock,
+		RelPath: filepath.ToSlash(filepath.Join("..", "outside", "package-lock.json")),
+		Parser:  p,
+	})
+	if err == nil {
+		t.Fatal("parseCollectedLockFileUnderRoot() error = nil, want root escape rejection")
+	}
+}
+
+func TestCollectLockfilePackagesRecordsParseErrorsAsNonFatal(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "package-lock.json"), []byte(`{
+		"lockfileVersion": 3,
+		"packages": {"": {"version":"1.0.0"}, "node_modules/prod": {"version":"1.0.0"}}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pnpm-lock.yaml"), []byte(`{{{not yaml`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result := &PackageCollection{}
+	err := collectLockfilePackages(result, parser.NewRegistry(), dir, 2, nil, ecosystemFilter(nil))
+	if err != nil {
+		t.Fatalf("collectLockfilePackages() error = %v", err)
+	}
+	if result.LockFiles != 2 {
+		t.Fatalf("LockFiles = %d, want 2", result.LockFiles)
+	}
+	if len(result.ParseErrors) != 1 || !strings.Contains(result.ParseErrors[0], "pnpm-lock.yaml") {
+		t.Fatalf("ParseErrors = %#v, want pnpm parse warning", result.ParseErrors)
+	}
+	if len(result.FatalParseErrors) != 0 {
+		t.Fatalf("FatalParseErrors = %#v, want none for lockfile parse errors", result.FatalParseErrors)
+	}
+	if len(result.Entries) != 1 || result.Entries[0].Package.Name != "prod" {
+		t.Fatalf("Entries = %+v, want parsed lockfile package", result.Entries)
+	}
+}
+
+func TestCollectExplicitSBOMPackagesRecordsParseErrorsAsFatal(t *testing.T) {
+	dir := t.TempDir()
+	badPath := filepath.Join(dir, "bad.cdx.json")
+	if err := os.WriteFile(badPath, []byte(`{"bomFormat":"CycloneDX",`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	goodPath := filepath.Join(dir, "good.cdx.json")
+	if err := os.WriteFile(goodPath, []byte(`{
+		"bomFormat":"CycloneDX",
+		"components":[{"type":"library","name":"django","version":"4.2.11","purl":"pkg:pypi/django@4.2.11"}]
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result := &PackageCollection{}
+	err := collectExplicitSBOMPackages(result, dir, []string{badPath, goodPath}, ecosystemFilter(nil))
+	if err != nil {
+		t.Fatalf("collectExplicitSBOMPackages() error = %v", err)
+	}
+	if result.SBOMFiles != 2 {
+		t.Fatalf("SBOMFiles = %d, want 2", result.SBOMFiles)
+	}
+	if len(result.ParseErrors) != 1 || !strings.Contains(result.ParseErrors[0], "bad.cdx.json") {
+		t.Fatalf("ParseErrors = %#v, want malformed SBOM error", result.ParseErrors)
+	}
+	if len(result.FatalParseErrors) != 1 || result.FatalParseErrors[0] != result.ParseErrors[0] {
+		t.Fatalf("FatalParseErrors = %#v, want malformed SBOM marked fatal", result.FatalParseErrors)
+	}
+	if len(result.Entries) != 1 || result.Entries[0].Package.Name != "django" || result.Entries[0].SourceType != "sbom" {
+		t.Fatalf("Entries = %+v, want imported SBOM package", result.Entries)
+	}
+}
+
+func TestFinalizePackageCollectionKeepsExistingFilters(t *testing.T) {
+	collection := &PackageCollection{}
+	collection.add(domain.Package{Name: "github.com/klauspost/compress", Version: "v1.18.6", Ecosystem: domain.EcosystemGo}, "go.mod", "lockfile")
+	collection.add(domain.Package{Name: "github.com/klauspost/compress", Version: "v1.18.0", Ecosystem: domain.EcosystemGo}, "go.sum", "lockfile")
+	collection.add(domain.Package{Name: "dev-only", Version: "1.0.0", Ecosystem: domain.EcosystemNPM, Dev: true}, "package-lock.json", "lockfile")
+
+	finalizePackageCollection(collection, false)
+
+	if len(collection.Packages) != 1 {
+		t.Fatalf("Packages = %+v, want only selected Go module", collection.Packages)
+	}
+	pkg := collection.Packages[0]
+	if pkg.Name != "github.com/klauspost/compress" || pkg.Version != "v1.18.6" {
+		t.Fatalf("remaining package = %+v, want selected Go module", pkg)
+	}
+	if len(collection.Entries) != 1 ||
+		collection.Entries[0].Package.Name != pkg.Name ||
+		collection.Entries[0].Package.Version != pkg.Version ||
+		collection.Entries[0].Package.Ecosystem != pkg.Ecosystem {
+		t.Fatalf("Entries = %+v, want rebuilt entries matching Packages", collection.Entries)
+	}
+}
+
 func TestParseCollectedLockFileRejectsOversizedRegularFileBeforeParser(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "package-lock.json")
@@ -77,38 +238,6 @@ func TestParseCollectedLockFileRejectsOversizedRegularFileBeforeParser(t *testin
 	}
 	if parser.called {
 		t.Fatal("parser was called for an oversized regular lockfile")
-	}
-}
-
-func TestLimitedLockfileReaderAllowsExactLimit(t *testing.T) {
-	reader := &limitedLockfileReader{
-		r:    strings.NewReader("a"),
-		read: maxLockfileSize - 1,
-	}
-	buf := make([]byte, 2)
-	n, err := reader.Read(buf)
-	if n != 1 || err != nil {
-		t.Fatalf("first Read() = %d, %v; want 1, nil", n, err)
-	}
-	n, err = reader.Read(buf)
-	if n != 0 || !errors.Is(err, io.EOF) {
-		t.Fatalf("second Read() = %d, %v; want 0, EOF", n, err)
-	}
-}
-
-func TestLimitedLockfileReaderRejectsBytePastLimit(t *testing.T) {
-	reader := &limitedLockfileReader{
-		r:    strings.NewReader("ab"),
-		read: maxLockfileSize - 1,
-	}
-	buf := make([]byte, 2)
-	n, err := reader.Read(buf)
-	if n != 1 || err != nil {
-		t.Fatalf("first Read() = %d, %v; want 1, nil", n, err)
-	}
-	n, err = reader.Read(buf)
-	if n != 0 || err == nil || !strings.Contains(err.Error(), "exceeds maximum lockfile size") {
-		t.Fatalf("second Read() = %d, %v; want size-limit error", n, err)
 	}
 }
 
@@ -219,14 +348,15 @@ func TestCollectPackagesRedactsExternalSBOMPathInParseErrors(t *testing.T) {
 	}
 }
 
-func TestCollectPackagesReportsSkippedSBOMComponents(t *testing.T) {
+func TestCollectPackagesReportsSkippedSBOMComponentsWithoutPrivateNames(t *testing.T) {
 	dir := t.TempDir()
 	sbomPath := filepath.Join(dir, "bom.cdx.json")
+	privateName := "corp-internal-auth-service"
 	if err := os.WriteFile(sbomPath, []byte(`{
 		"bomFormat":"CycloneDX",
 		"components":[
 			{"type":"library","name":"django","version":"4.2.11","purl":"pkg:pypi/django@4.2.11"},
-			{"type":"library","name":"no-purl","version":"1.0.0"}
+			{"type":"library","name":"corp-internal-auth-service","version":"1.0.0"}
 		]
 	}`), 0o600); err != nil {
 		t.Fatal(err)
@@ -244,8 +374,15 @@ func TestCollectPackagesReportsSkippedSBOMComponents(t *testing.T) {
 	if len(got.Packages) != 1 {
 		t.Fatalf("packages = %+v, want one imported package", got.Packages)
 	}
-	if len(got.ParseErrors) != 1 || !strings.Contains(got.ParseErrors[0], `skipped SBOM component "no-purl": missing purl`) {
-		t.Fatalf("parse errors = %#v, want skipped component warning", got.ParseErrors)
+	if len(got.ParseErrors) != 1 {
+		t.Fatalf("parse errors = %#v, want one skipped component warning", got.ParseErrors)
+	}
+	parseErr := got.ParseErrors[0]
+	if strings.Contains(parseErr, privateName) {
+		t.Fatalf("parse error leaked private SBOM component name %q: %q", privateName, parseErr)
+	}
+	if !strings.Contains(parseErr, `skipped SBOM component #1: missing purl`) {
+		t.Fatalf("parse error = %q, want generic skipped component warning with ordinal and reason", parseErr)
 	}
 }
 
@@ -329,15 +466,22 @@ func TestPackageCollectorHelperBranches(t *testing.T) {
 	for _, item := range []struct {
 		component string
 		reason    string
+		ordinal   int
 		want      string
 	}{
-		{component: "pkg", reason: "", want: `skipped SBOM component "pkg"`},
-		{component: "", reason: "missing purl", want: "skipped SBOM component: missing purl"},
-		{component: "", reason: "", want: "skipped SBOM component"},
+		{component: "private-pkg", reason: "", ordinal: 0, want: "skipped SBOM component #1: component could not be imported"},
+		{component: "", reason: "missing purl", ordinal: 2, want: "skipped SBOM component #2: missing purl"},
+		{component: "", reason: "pkg:npm/@corp/private@1.0.0", ordinal: 3, want: "skipped SBOM component #3: component could not be imported"},
 	} {
-		got := formatSBOMSkippedComponent("bom.json", sbom.SkippedComponent{Name: item.component, Reason: item.reason})
+		got := formatSBOMSkippedComponent("bom.json", item.ordinal, sbom.SkippedComponent{Name: item.component, Reason: item.reason})
 		if !strings.Contains(got, item.want) {
 			t.Fatalf("formatSBOMSkippedComponent() = %q, want %q", got, item.want)
+		}
+		if item.component != "" && strings.Contains(got, item.component) {
+			t.Fatalf("formatSBOMSkippedComponent() leaked component name %q: %q", item.component, got)
+		}
+		if strings.Contains(got, "pkg:npm/@corp/private@1.0.0") {
+			t.Fatalf("formatSBOMSkippedComponent() leaked raw reason coordinate: %q", got)
 		}
 	}
 

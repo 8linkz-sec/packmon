@@ -2,6 +2,7 @@ package ci
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,6 +30,9 @@ func TestRepositoryPinsGoSourceLineEndingsToLF(t *testing.T) {
 	for _, rel := range strings.Fields(string(out)) {
 		data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel))) // #nosec G304 -- rel comes from git ls-files for tracked Go files.
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
 			t.Fatalf("read tracked Go file %s: %v", rel, err)
 		}
 		if bytes.Contains(data, []byte("\r\n")) {

@@ -139,3 +139,109 @@ func TestApplyStoredFeedConfigOverridesRejectsUnsafeSyncInterval(t *testing.T) {
 		t.Fatalf("unsafe vulncheck interval was applied: %+v", vulncheck)
 	}
 }
+
+func TestApplyStoredFeedConfigOverridesRejectsProductionPlaintextAPIKey(t *testing.T) {
+	t.Parallel()
+
+	store := newNoopStore()
+	if err := store.UpsertFeedConfig(context.Background(), &db.FeedConfig{
+		FeedName: "socket",
+		Enabled:  true,
+		Mode:     "self",
+		APIKey:   "legacy-plaintext-key",
+	}); err != nil {
+		t.Fatalf("UpsertFeedConfig(socket) error = %v", err)
+	}
+
+	cfg := testAdminConfig()
+	cfg.Server.Mode = config.ModeProduction
+	cfg.Admin.EncryptionKey = "active-test-key"
+	err := applyStoredFeedConfigOverrides(context.Background(), cfg, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err == nil || !strings.Contains(err.Error(), "plaintext feed API key") || strings.Contains(err.Error(), "legacy-plaintext-key") {
+		t.Fatalf("applyStoredFeedConfigOverrides() error = %v, want non-secret plaintext rejection", err)
+	}
+
+	socket, _ := cfg.FeedSettings("socket")
+	if socket.APIKey != "" {
+		t.Fatalf("socket API key = %q, want not applied after plaintext rejection", socket.APIKey)
+	}
+}
+
+func TestApplyStoredFeedConfigOverridesAllowsProductionEncryptedAPIKey(t *testing.T) {
+	t.Parallel()
+
+	store := newNoopStore()
+	if err := store.UpsertFeedConfig(context.Background(), &db.FeedConfig{
+		FeedName:        "socket",
+		Enabled:         true,
+		Mode:            "self",
+		APIKey:          "decrypted-key",
+		APIKeyEncrypted: true,
+	}); err != nil {
+		t.Fatalf("UpsertFeedConfig(socket) error = %v", err)
+	}
+
+	cfg := testAdminConfig()
+	cfg.Server.Mode = config.ModeProduction
+	cfg.Admin.EncryptionKey = "active-test-key"
+	if err := applyStoredFeedConfigOverrides(context.Background(), cfg, store, slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
+		t.Fatalf("applyStoredFeedConfigOverrides() error = %v", err)
+	}
+
+	socket, _ := cfg.FeedSettings("socket")
+	if socket.APIKey != "decrypted-key" {
+		t.Fatalf("socket API key = %q, want decrypted-key", socket.APIKey)
+	}
+}
+
+func TestApplyStoredFeedConfigOverridesAllowsDevelopmentPlaintextAPIKey(t *testing.T) {
+	t.Parallel()
+
+	store := newNoopStore()
+	if err := store.UpsertFeedConfig(context.Background(), &db.FeedConfig{
+		FeedName: "socket",
+		Enabled:  true,
+		Mode:     "self",
+		APIKey:   "development-plaintext-key",
+	}); err != nil {
+		t.Fatalf("UpsertFeedConfig(socket) error = %v", err)
+	}
+
+	cfg := testAdminConfig()
+	cfg.Server.Mode = config.ModeDevelopment
+	cfg.Admin.EncryptionKey = "active-test-key"
+	if err := applyStoredFeedConfigOverrides(context.Background(), cfg, store, slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
+		t.Fatalf("applyStoredFeedConfigOverrides() error = %v", err)
+	}
+
+	socket, _ := cfg.FeedSettings("socket")
+	if socket.APIKey != "development-plaintext-key" {
+		t.Fatalf("socket API key = %q, want development-plaintext-key", socket.APIKey)
+	}
+}
+
+func TestApplyStoredFeedConfigOverridesRejectsReversingLabsHTTPWithPersistedAPIKey(t *testing.T) {
+	t.Parallel()
+
+	store := newNoopStore()
+	if err := store.UpsertFeedConfig(context.Background(), &db.FeedConfig{
+		FeedName: "reversinglabs",
+		Enabled:  true,
+		Mode:     "self",
+		APIKey:   "persisted-rl-key",
+	}); err != nil {
+		t.Fatalf("UpsertFeedConfig(reversinglabs) error = %v", err)
+	}
+
+	cfg := testAdminConfig()
+	cfg.Feeds.ReversingLabsBaseURL = "http://downloads.example.test/community"
+	err := applyStoredFeedConfigOverrides(context.Background(), cfg, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err == nil || !strings.Contains(err.Error(), "PACKMON_REVERSINGLABS_API_BASE_URL") || !strings.Contains(err.Error(), "https") {
+		t.Fatalf("applyStoredFeedConfigOverrides() error = %v, want ReversingLabs HTTPS validation error", err)
+	}
+
+	rl, _ := cfg.FeedSettings("reversinglabs")
+	if rl.APIKey != "" {
+		t.Fatalf("reversinglabs API key = %q, want not applied after rejected HTTP base URL", rl.APIKey)
+	}
+}

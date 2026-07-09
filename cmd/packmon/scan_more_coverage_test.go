@@ -25,8 +25,8 @@ func TestNewScanCmdRunEBranches(t *testing.T) {
 		args []string
 		want string
 	}{
-		{name: "list packages", args: []string{"--list-packages", emptyDir}, want: "No lock files found."},
-		{name: "outdated", args: []string{"--outdated", emptyDir}, want: "No lock files found."},
+		{name: "list packages", args: []string{"--list-packages", emptyDir}, want: "No lockfiles found."},
+		{name: "outdated", args: []string{"--outdated", emptyDir}, want: "No lockfiles found."},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			cmd := newScanCmd()
@@ -121,8 +121,13 @@ func TestRunListPackagesIncludesSPDXSBOM(t *testing.T) {
 	}
 
 	output := captureStdout(t, func() {
-		if err := runListPackages([]string{projectDir}, "", 2, []string{sbomPath}); err != nil {
-			t.Fatalf("runListPackages(SBOM) error = %v", err)
+		if err := runListPackagesWithSettings(scanSettings{
+			Path:       projectDir,
+			MaxDepth:   2,
+			SBOMFiles:  []string{sbomPath},
+			IncludeDev: true,
+		}); err != nil {
+			t.Fatalf("runListPackagesWithSettings(SBOM) error = %v", err)
 		}
 	})
 	if !strings.Contains(output, "django") || !strings.Contains(output, "4.2.11") || !strings.Contains(output, "sbom.spdx.json") {
@@ -147,8 +152,13 @@ func TestRunListPackagesSanitizesTerminalControlText(t *testing.T) {
 	}
 
 	output := captureStdout(t, func() {
-		if err := runListPackages([]string{projectDir}, "", 2, []string{sbomPath}); err != nil {
-			t.Fatalf("runListPackages(SBOM) error = %v", err)
+		if err := runListPackagesWithSettings(scanSettings{
+			Path:       projectDir,
+			MaxDepth:   2,
+			SBOMFiles:  []string{sbomPath},
+			IncludeDev: true,
+		}); err != nil {
+			t.Fatalf("runListPackagesWithSettings(SBOM) error = %v", err)
 		}
 	})
 
@@ -293,9 +303,14 @@ func TestRunListPackagesMalformedSBOMReturnsParserExit(t *testing.T) {
 		t.Fatalf("write malformed SBOM: %v", err)
 	}
 
-	err := runListPackages([]string{projectDir}, "", 2, []string{badPath})
+	err := runListPackagesWithSettings(scanSettings{
+		Path:       projectDir,
+		MaxDepth:   2,
+		SBOMFiles:  []string{badPath},
+		IncludeDev: true,
+	})
 	if err == nil {
-		t.Fatal("runListPackages(malformed SBOM) error = nil")
+		t.Fatal("runListPackagesWithSettings(malformed SBOM) error = nil")
 	}
 	if code := exitCodeForError(err); code != ExitParser {
 		t.Fatalf("exitCodeForError = %d, want %d; err=%v", code, ExitParser, err)
@@ -416,6 +431,8 @@ func TestResolveScanSettingsLogLevelOverridesConfig(t *testing.T) {
 	cfg := &cliConfig{Log: cliLogConfig{Level: "WARN"}}
 	target := scanTarget{Path: "."}
 	flags := scanFlagValues{Mode: "local", FailOn: "CRITICAL", Timeout: 1}
+	originalLogLevel := flagLogLevel
+	t.Cleanup(func() { flagLogLevel = originalLogLevel })
 
 	t.Setenv("PACKMON_LOG_LEVEL", "debug")
 	flagLogLevel = "debug"
@@ -437,6 +454,66 @@ func TestResolveScanSettingsLogLevelOverridesConfig(t *testing.T) {
 	}
 	if settings.LogLevel != "ERROR" {
 		t.Fatalf("LogLevel = %q, want flag ERROR over env/config", settings.LogLevel)
+	}
+}
+
+func TestResolveScanSettingsRejectsInvalidLogLevelInputs(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	originalLogLevel := flagLogLevel
+	t.Cleanup(func() { flagLogLevel = originalLogLevel })
+
+	target := scanTarget{Path: "."}
+	flags := scanFlagValues{Mode: "local", FailOn: "CRITICAL", Timeout: 1}
+
+	t.Run("environment", func(t *testing.T) {
+		t.Setenv("PACKMON_LOG_LEVEL", "verbose")
+		flagLogLevel = "INFO"
+
+		_, err := resolveScanSettings(newScanCmd(), nil, target, flags)
+		if err == nil || !strings.Contains(err.Error(), "PACKMON_LOG_LEVEL") {
+			t.Fatalf("resolveScanSettings() error = %v, want invalid PACKMON_LOG_LEVEL rejection", err)
+		}
+	})
+
+	t.Run("flag", func(t *testing.T) {
+		t.Setenv("PACKMON_LOG_LEVEL", "")
+		cmd := newScanCmd()
+		cmd.Flags().String("log-level", "INFO", "")
+		mustSetFlag(t, cmd, "log-level", "verbose")
+		flagLogLevel = "verbose"
+
+		_, err := resolveScanSettings(cmd, nil, target, flags)
+		if err == nil || !strings.Contains(err.Error(), "--log-level") {
+			t.Fatalf("resolveScanSettings() error = %v, want invalid --log-level rejection", err)
+		}
+	})
+
+	t.Run("flag overrides invalid environment", func(t *testing.T) {
+		t.Setenv("PACKMON_LOG_LEVEL", "verbose")
+		cmd := newScanCmd()
+		cmd.Flags().String("log-level", "INFO", "")
+		mustSetFlag(t, cmd, "log-level", "ERROR")
+		flagLogLevel = "ERROR"
+
+		settings, err := resolveScanSettings(cmd, nil, target, flags)
+		if err != nil {
+			t.Fatalf("resolveScanSettings() error = %v, want valid --log-level to override invalid env", err)
+		}
+		if settings.LogLevel != "ERROR" {
+			t.Fatalf("LogLevel = %q, want ERROR", settings.LogLevel)
+		}
+	})
+}
+
+func TestResolveScanSettingsRejectsInvalidLogFormatEnv(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	target := scanTarget{Path: "."}
+	flags := scanFlagValues{Mode: "local", FailOn: "CRITICAL", Timeout: 1}
+	t.Setenv("PACKMON_LOG_FORMAT", "xml")
+
+	_, err := resolveScanSettings(newScanCmd(), nil, target, flags)
+	if err == nil || !strings.Contains(err.Error(), "PACKMON_LOG_FORMAT") {
+		t.Fatalf("resolveScanSettings() error = %v, want invalid PACKMON_LOG_FORMAT rejection", err)
 	}
 }
 
@@ -490,15 +567,7 @@ func TestRunSingleScanReportErrorsOverrideFindingExit(t *testing.T) {
 	}
 
 	projectDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(projectDir, "package-lock.json"), []byte(`{
-		"lockfileVersion": 3,
-		"packages": {
-			"": {"version":"1.0.0"},
-			"node_modules/vulnerable": {"version":"1.2.3"}
-		}
-	}`), 0o600); err != nil {
-		t.Fatalf("write package-lock: %v", err)
-	}
+	writePackageLockForScanCommand(t, projectDir, "vulnerable", "1.2.3")
 	blocker := filepath.Join(t.TempDir(), "blocker")
 	if err := os.WriteFile(blocker, []byte("not a directory"), 0o600); err != nil {
 		t.Fatalf("write blocker: %v", err)
@@ -643,15 +712,7 @@ func TestRunSingleScanLocalUsesSeededAdvisoryData(t *testing.T) {
 	}
 
 	projectDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(projectDir, "package-lock.json"), []byte(`{
-		"lockfileVersion": 3,
-		"packages": {
-			"": {"version":"1.0.0"},
-			"node_modules/vulnerable": {"version":"1.2.3"}
-		}
-	}`), 0o600); err != nil {
-		t.Fatalf("write package-lock: %v", err)
-	}
+	writePackageLockForScanCommand(t, projectDir, "vulnerable", "1.2.3")
 
 	output := captureStdout(t, func() {
 		exitCode, err := runSingleScan(ctx, scanSettings{
@@ -689,12 +750,7 @@ func TestRunSingleScanWarnsAboutPartialParseErrors(t *testing.T) {
 	}
 
 	projectDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(projectDir, "package-lock.json"), []byte(`{
-		"lockfileVersion": 3,
-		"packages": {"": {"version":"1.0.0"}, "node_modules/prod": {"version":"1.0.0"}}
-	}`), 0o600); err != nil {
-		t.Fatalf("write package-lock: %v", err)
-	}
+	writePackageLockForScanCommand(t, projectDir, "prod", "1.0.0")
 	if err := os.WriteFile(filepath.Join(projectDir, "pnpm-lock.yaml"), []byte(`{{{not yaml`), 0o600); err != nil {
 		t.Fatalf("write pnpm-lock: %v", err)
 	}
@@ -758,12 +814,7 @@ func TestRunSingleScanQuietWarnsAboutAutoFallback(t *testing.T) {
 	}
 
 	projectDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(projectDir, "package-lock.json"), []byte(`{
-		"lockfileVersion": 3,
-		"packages": {"": {"version":"1.0.0"}, "node_modules/prod": {"version":"1.0.0"}}
-	}`), 0o600); err != nil {
-		t.Fatalf("write package-lock: %v", err)
-	}
+	writePackageLockForScanCommand(t, projectDir, "prod", "1.0.0")
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -849,7 +900,7 @@ func TestRunScanPipelineRemoteSkipsLocalSQLiteWhenHistoryDisabled(t *testing.T) 
 		if exitCode != ExitOK {
 			t.Fatalf("exitCode = %d, want %d; result=%+v", exitCode, ExitOK, result)
 		}
-		resultMode = result.Mode
+		resultMode = string(result.Mode)
 	})
 
 	if strings.Contains(stderr, "unable to open local database") {
@@ -862,6 +913,140 @@ func TestRunScanPipelineRemoteSkipsLocalSQLiteWhenHistoryDisabled(t *testing.T) 
 	case <-requests:
 	default:
 		t.Fatal("remote check server was not called")
+	}
+}
+
+func TestRunScanPipelineAutoRemoteSuccessDoesNotOpenLocalFallbackDB(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+
+	projectDir := t.TempDir()
+	writePackageLockForScanCommand(t, projectDir, "prod", "1.0.0")
+
+	dbDir := t.TempDir()
+	dbPath := filepath.Join(dbDir, "packmon.db")
+	t.Setenv("PACKMON_DB_PATH", dbDir)
+	t.Setenv("PACKMON_HISTORY_ENABLED", "false")
+
+	requests := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests <- struct{}{}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"scan_id":"remote-scan",
+			"mode":"remote",
+			"scanned_at":"2026-06-22T12:00:00Z",
+			"duration_ms":1,
+			"packages_scanned":1,
+			"findings_count":0,
+			"findings_blocking":false,
+			"feed_status":"healthy",
+			"summary":{"by_severity":{},"by_type":{},"by_source":{}},
+			"findings":[],
+			"feed_versions":{},
+			"manual_advisories_count":0
+		}`))
+	}))
+	defer server.Close()
+
+	var resultMode string
+	stderr := captureStderr(t, func() {
+		result, _, exitCode, _, _, err := runScanPipeline(context.Background(), scanSettings{
+			Path:         projectDir,
+			Mode:         "auto",
+			ServerURL:    server.URL,
+			FailOn:       "CRITICAL",
+			MaxDepth:     3,
+			Timeout:      2,
+			InsecureHTTP: true,
+			Quiet:        true,
+		})
+		if err != nil {
+			t.Fatalf("runScanPipeline(auto) error = %v", err)
+		}
+		if exitCode != ExitOK {
+			t.Fatalf("exitCode = %d, want %d; result=%+v", exitCode, ExitOK, result)
+		}
+		resultMode = string(result.Mode)
+	})
+
+	if strings.Contains(stderr, "unable to open local database") {
+		t.Fatalf("auto remote success opened local SQLite fallback:\n%s", stderr)
+	}
+	if _, err := os.Stat(dbPath); err == nil {
+		t.Fatalf("auto remote success initialized local fallback database at %s", dbPath)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat local fallback database: %v", err)
+	}
+	if resultMode != "remote" {
+		t.Fatalf("result mode = %q, want remote", resultMode)
+	}
+	select {
+	case <-requests:
+	default:
+		t.Fatal("remote check server was not called")
+	}
+}
+
+func TestRunScanPipelineLocalDatabaseWarningRedactsPath(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+
+	projectDir := t.TempDir()
+	writePackageLockForScanCommand(t, projectDir, "prod", "1.0.0")
+
+	badDBRoot := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(badDBRoot, []byte("file, not directory"), 0o600); err != nil {
+		t.Fatalf("write bad db root: %v", err)
+	}
+	t.Setenv("PACKMON_DB_PATH", badDBRoot)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"scan_id":"remote-scan",
+			"mode":"remote",
+			"scanned_at":"2026-06-22T12:00:00Z",
+			"duration_ms":1,
+			"packages_scanned":1,
+			"findings_count":0,
+			"findings_blocking":false,
+			"feed_status":"healthy",
+			"summary":{"by_severity":{},"by_type":{},"by_source":{}},
+			"findings":[],
+			"feed_versions":{},
+			"manual_advisories_count":0
+		}`))
+	}))
+	defer server.Close()
+
+	stderr := captureStderr(t, func() {
+		result, _, exitCode, _, _, err := runScanPipeline(context.Background(), scanSettings{
+			Path:         projectDir,
+			Mode:         "remote",
+			ServerURL:    server.URL,
+			FailOn:       "CRITICAL",
+			MaxDepth:     3,
+			Timeout:      2,
+			InsecureHTTP: true,
+			Quiet:        true,
+		})
+		if err != nil {
+			t.Fatalf("runScanPipeline(remote) error = %v", err)
+		}
+		if exitCode != ExitOK {
+			t.Fatalf("exitCode = %d, want %d; result=%+v", exitCode, ExitOK, result)
+		}
+	})
+
+	if !strings.Contains(stderr, "warning: unable to open local database:") {
+		t.Fatalf("stderr missing local database warning:\n%s", stderr)
+	}
+	for _, leaked := range []string{badDBRoot, "not-a-directory", "packmon.db"} {
+		if strings.Contains(stderr, leaked) {
+			t.Fatalf("stderr leaked local database path marker %q:\n%s", leaked, stderr)
+		}
+	}
+	if !strings.Contains(stderr, "(redacted-path)") {
+		t.Fatalf("stderr missing redacted path marker:\n%s", stderr)
 	}
 }
 

@@ -8,10 +8,13 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -30,6 +33,7 @@ type osvStoreStub struct {
 	vulns            []*db.Vulnerability
 	malicious        []*db.MaliciousFinding
 	deletedVulns     []string
+	deletedSources   []string
 	status           *db.FeedSyncStatus
 	statusHistory    []db.FeedSyncStatus
 	statusErr        error
@@ -61,6 +65,14 @@ func (s *osvStoreStub) DeleteVulnerability(_ context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.deletedVulns = append(s.deletedVulns, id)
+	return nil
+}
+
+func (s *osvStoreStub) DeleteVulnerabilityForSource(_ context.Context, id, source string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.deletedVulns = append(s.deletedVulns, id)
+	s.deletedSources = append(s.deletedSources, source)
 	return nil
 }
 
@@ -109,7 +121,31 @@ func createZIP(t *testing.T, files map[string][]byte) []byte {
 	return buf.Bytes()
 }
 
+func zipEntry(t *testing.T, name string, data []byte) *zip.File {
+	t.Helper()
+
+	zipData := createZIP(t, map[string][]byte{name: data})
+	reader, err := zip.NewReader(bytes.NewReader(zipData), int64(len(zipData)))
+	if err != nil {
+		t.Fatalf("zip reader: %v", err)
+	}
+	if len(reader.File) != 1 {
+		t.Fatalf("zip entries = %d, want 1", len(reader.File))
+	}
+	return reader.File[0]
+}
+
 // -- Tests --------------------------------------------------------------------
+
+func TestOSVPackageUnmarshalsPURL(t *testing.T) {
+	var pkg osvPackage
+	if err := json.Unmarshal([]byte(`{"ecosystem":"npm","name":"left-pad","purl":"pkg:npm/left-pad"}`), &pkg); err != nil {
+		t.Fatalf("Unmarshal(osvPackage) error = %v", err)
+	}
+	if pkg.PURL != "pkg:npm/left-pad" {
+		t.Fatalf("pkg.PURL = %q, want %q", pkg.PURL, "pkg:npm/left-pad")
+	}
+}
 
 func TestSync_ETagNotModified(t *testing.T) {
 	t.Parallel()
@@ -149,7 +185,7 @@ func TestSync_ETagNotModified(t *testing.T) {
 
 	// Override the bucket base URL to point at our test server.
 	origURL := bucketBaseURL
-	syncer := NewSyncer(store, logger, WithHTTPClient(srv.Client()))
+	syncer := NewSyncer(logger, WithHTTPClient(srv.Client()))
 
 	// We need to intercept the URL. Since bucketBaseURL is a const, we
 	// use the test server and make the download method call the test server.
@@ -193,7 +229,7 @@ func TestSync_HTTPRateLimitRecordsFailure(t *testing.T) {
 	defer srv.Close()
 
 	store := &osvStoreStub{}
-	syncer := NewSyncer(store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	syncer := NewSyncer(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	syncer.client = &http.Client{
 		Transport: &rewriteTransport{base: srv.URL, inner: http.DefaultTransport},
 		Timeout:   10 * time.Second,
@@ -217,6 +253,76 @@ func TestSync_HTTPRateLimitRecordsFailure(t *testing.T) {
 	}
 }
 
+func TestSync_TransportErrorRecordsFailureAndPreservesCachedState(t *testing.T) {
+	t.Parallel()
+
+	lastSyncAt := time.Date(2026, 6, 1, 12, 30, 0, 0, time.UTC)
+	oldMeta, err := json.Marshal(struct {
+		ETags map[string]string `json:"ecosystem_etags"`
+	}{ETags: map[string]string{"npm": `"old-etag"`}})
+	if err != nil {
+		t.Fatalf("marshal metadata: %v", err)
+	}
+
+	store := &osvStoreStub{
+		status: &db.FeedSyncStatus{
+			FeedName:       FeedName,
+			LastSyncAt:     &lastSyncAt,
+			LastSyncStatus: db.FeedSyncStatusSuccess,
+			EntriesSynced:  11,
+			EntriesTotal:   17,
+			LastETag:       `"legacy-feed-etag"`,
+			Metadata:       oldMeta,
+		},
+	}
+	dnsErr := &net.DNSError{Err: "no such host", Name: "osv-unreachable.test", IsNotFound: true}
+	syncer := NewSyncer(
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		WithBaseURL("https://osv-unreachable.test"),
+		WithHTTPClient(&http.Client{
+			Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+				return nil, dnsErr
+			}),
+		}),
+	)
+
+	result, err := syncer.Sync(context.Background(), store)
+	if err == nil {
+		t.Fatal("Sync() error = nil, want transport failure")
+	}
+	if result != nil {
+		t.Fatalf("Sync() result = %+v, want nil on failed sync", result)
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	if got := len(store.statusHistory); got != 1 {
+		t.Fatalf("status history entries = %d, want one failed sync status only", got)
+	}
+	if store.status == nil || store.status.LastSyncStatus != db.FeedSyncStatusError {
+		t.Fatalf("status = %+v, want error", store.status)
+	}
+	if !strings.Contains(store.status.LastError, "no such host") {
+		t.Fatalf("LastError = %q, want DNS transport error context", store.status.LastError)
+	}
+	if store.status.LastSyncAt == nil || !store.status.LastSyncAt.Equal(lastSyncAt) {
+		t.Fatalf("LastSyncAt = %v, want preserved %v", store.status.LastSyncAt, lastSyncAt)
+	}
+	if store.status.EntriesSynced != 11 || store.status.EntriesTotal != 17 {
+		t.Fatalf("counts = synced %d total %d, want preserved 11/17", store.status.EntriesSynced, store.status.EntriesTotal)
+	}
+	if store.status.LastETag != `"legacy-feed-etag"` {
+		t.Fatalf("LastETag = %q, want preserved legacy feed ETag", store.status.LastETag)
+	}
+	if !bytes.Equal(store.status.Metadata, oldMeta) {
+		t.Fatalf("metadata = %s, want preserved %s", store.status.Metadata, oldMeta)
+	}
+	if len(store.vulns) != 0 || len(store.malicious) != 0 || len(store.deletedVulns) != 0 {
+		t.Fatalf("store mutated despite transport failure: vulns=%d malicious=%d deleted=%d", len(store.vulns), len(store.malicious), len(store.deletedVulns))
+	}
+}
+
 func TestDownloadLogsTempFilenameWithoutFullPath(t *testing.T) {
 	t.Parallel()
 
@@ -228,7 +334,7 @@ func TestDownloadLogsTempFilenameWithoutFullPath(t *testing.T) {
 	defer srv.Close()
 
 	var logs bytes.Buffer
-	syncer := NewSyncer(&osvStoreStub{}, slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})), WithHTTPClient(srv.Client()))
+	syncer := NewSyncer(slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})), WithHTTPClient(srv.Client()))
 	tmpPath, _, err := syncer.download(context.Background(), srv.URL+"/npm/all.zip", "")
 	if err != nil {
 		t.Fatalf("download() error = %v", err)
@@ -241,6 +347,94 @@ func TestDownloadLogsTempFilenameWithoutFullPath(t *testing.T) {
 	}
 	if !strings.Contains(logLine, `"file":"`+filepath.Base(tmpPath)+`"`) {
 		t.Fatalf("download log missing temp filename %q: %s", filepath.Base(tmpPath), logLine)
+	}
+}
+
+func TestDownloadBoundsErrorBodyDrain(t *testing.T) {
+	t.Parallel()
+
+	for _, status := range []int{http.StatusNotFound, http.StatusInternalServerError} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			t.Parallel()
+
+			body := &countingReadCloser{remaining: 1 << 20}
+			syncer := NewSyncer(
+				slog.New(slog.NewTextHandler(io.Discard, nil)),
+				WithHTTPClient(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: status,
+						Header:     make(http.Header),
+						Body:       body,
+						Request:    req,
+					}, nil
+				})}),
+			)
+
+			tmpPath, _, err := syncer.download(context.Background(), "https://osv.example.test/npm/all.zip", "")
+			if tmpPath != "" {
+				t.Fatalf("download() tmpPath = %q, want empty on error", tmpPath)
+			}
+			var unavailable *errArchiveUnavailable
+			if !errors.As(err, &unavailable) || unavailable.statusCode != status {
+				t.Fatalf("download() error = %v, want archive unavailable status %d", err, status)
+			}
+			if body.read > maxErrorBodyDrain {
+				t.Fatalf("drained %d bytes, want at most %d", body.read, maxErrorBodyDrain)
+			}
+			if !body.closed {
+				t.Fatal("download() did not close error response body")
+			}
+		})
+	}
+}
+
+func TestDownloadReportsTempArchiveCloseError(t *testing.T) {
+	t.Parallel()
+
+	zipData := createZIP(t, map[string][]byte{
+		"GHSA-close-error.json": []byte(`{"id":"GHSA-close-error"}`),
+	})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("ETag", `"close-error-etag"`)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(zipData)
+	}))
+	defer srv.Close()
+
+	closeErr := errors.New("forced temp archive close failure")
+	temp := &failingCloseTempArchive{closeErr: closeErr}
+	removeCalls := 0
+
+	syncer := NewSyncer(slog.New(slog.NewTextHandler(io.Discard, nil)), WithHTTPClient(srv.Client()))
+	tmpPath, etag, err := syncer.downloadWithTempArchiveFileHooks(context.Background(), srv.URL+"/npm/all.zip", "", tempArchiveFileHooks{
+		create: func() (tempArchiveWriteFile, error) {
+			return temp, nil
+		},
+		remove: func(path string) error {
+			removeCalls++
+			if path != temp.Name() {
+				t.Fatalf("removed path = %q, want %q", path, temp.Name())
+			}
+			return nil
+		},
+	})
+	if err == nil {
+		t.Fatal("downloadWithTempArchiveFileHooks() error = nil, want temp archive close error")
+	}
+	if !errors.Is(err, closeErr) || !strings.Contains(err.Error(), "close temp archive") {
+		t.Fatalf("downloadWithTempArchiveFileHooks() error = %v, want wrapped close temp archive error", err)
+	}
+	if tmpPath != "" {
+		t.Fatalf("downloadWithTempArchiveFileHooks() tmpPath = %q, want empty on close error", tmpPath)
+	}
+	if etag != "" {
+		t.Fatalf("downloadWithTempArchiveFileHooks() etag = %q, want empty on close error", etag)
+	}
+	if temp.closeCalls != 1 {
+		t.Fatalf("temp archive Close calls = %d, want 1", temp.closeCalls)
+	}
+	if removeCalls != 1 {
+		t.Fatalf("temp archive remove calls = %d, want 1", removeCalls)
 	}
 }
 
@@ -300,7 +494,7 @@ func TestSync_ParsesVulnerability(t *testing.T) {
 	store := &osvStoreStub{}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	syncer := NewSyncer(store, logger)
+	syncer := NewSyncer(logger)
 	transport := &rewriteTransport{base: srv.URL, inner: http.DefaultTransport}
 	syncer.client = &http.Client{Transport: transport, Timeout: 10 * time.Second}
 
@@ -383,7 +577,7 @@ func TestSyncDeletesWithdrawnVulnerability(t *testing.T) {
 	defer srv.Close()
 
 	store := &osvStoreStub{}
-	syncer := NewSyncer(store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	syncer := NewSyncer(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	syncer.client = &http.Client{
 		Transport: &rewriteTransport{base: srv.URL, inner: http.DefaultTransport},
 		Timeout:   10 * time.Second,
@@ -401,6 +595,9 @@ func TestSyncDeletesWithdrawnVulnerability(t *testing.T) {
 	defer store.mu.Unlock()
 	if len(store.deletedVulns) != 1 || store.deletedVulns[0] != "PYSEC-2025-74" {
 		t.Fatalf("deleted vulnerabilities = %#v, want PYSEC-2025-74", store.deletedVulns)
+	}
+	if len(store.deletedSources) != 1 || store.deletedSources[0] != FeedName {
+		t.Fatalf("deleted sources = %#v, want %s", store.deletedSources, FeedName)
 	}
 	if len(store.vulns) != 0 {
 		t.Fatalf("upserted vulnerabilities = %d, want 0 for withdrawn entry", len(store.vulns))
@@ -445,7 +642,7 @@ func TestSync_DoesNotPersistNewETagWhenArchiveImportPartiallyFails(t *testing.T)
 		},
 		vulnUpsertErrIDs: map[string]error{"GHSA-import-fails": errors.New("db down")},
 	}
-	syncer := NewSyncer(store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	syncer := NewSyncer(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	syncer.client = &http.Client{
 		Transport: &rewriteTransport{base: srv.URL, inner: http.DefaultTransport},
 		Timeout:   10 * time.Second,
@@ -454,6 +651,9 @@ func TestSync_DoesNotPersistNewETagWhenArchiveImportPartiallyFails(t *testing.T)
 	result, err := syncer.Sync(context.Background(), store)
 	if err == nil {
 		t.Fatal("Sync() error = nil, want partial import failure")
+	}
+	if feed.IsNonRetryableError(err) {
+		t.Fatalf("Sync() error = %v, want retryable DB import failure", err)
 	}
 	if result != nil {
 		t.Fatalf("Sync() result = %+v, want nil on failed sync", result)
@@ -468,6 +668,68 @@ func TestSync_DoesNotPersistNewETagWhenArchiveImportPartiallyFails(t *testing.T)
 	}
 	if store.status == nil || store.status.LastSyncStatus != "error" {
 		t.Fatalf("status = %+v, want error", store.status)
+	}
+}
+
+func TestSync_MalformedArchiveEntryReturnsNonRetryableErrorAndDoesNotPersistNewETag(t *testing.T) {
+	t.Parallel()
+
+	zipData := createZIP(t, map[string][]byte{
+		"GHSA-malformed.json": []byte(`{"id":"GHSA-malformed","modified":"not a timestamp"`),
+	})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/npm/all.zip" {
+			w.Header().Set("ETag", `"new-etag"`)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(zipData)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	oldMeta, _ := json.Marshal(struct {
+		ETags map[string]string `json:"ecosystem_etags"`
+	}{ETags: map[string]string{"npm": `"old-etag"`}})
+	store := &osvStoreStub{
+		status: &db.FeedSyncStatus{
+			FeedName: FeedName,
+			Metadata: oldMeta,
+		},
+	}
+	syncer := NewSyncer(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	syncer.client = &http.Client{
+		Transport: &rewriteTransport{base: srv.URL, inner: http.DefaultTransport},
+		Timeout:   10 * time.Second,
+	}
+
+	result, err := syncer.Sync(context.Background(), store)
+	if err == nil {
+		t.Fatal("Sync() error = nil, want malformed entry failure")
+	}
+	if !feed.IsNonRetryableError(err) {
+		t.Fatalf("Sync() error = %v, want non-retryable malformed archive entry error", err)
+	}
+	if result != nil {
+		t.Fatalf("Sync() result = %+v, want nil on failed sync", result)
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	for _, status := range store.statusHistory {
+		if bytes.Contains(status.Metadata, []byte("new-etag")) {
+			t.Fatalf("persisted new ETag despite malformed entry: %s", status.Metadata)
+		}
+	}
+	if store.status == nil || store.status.LastSyncStatus != db.FeedSyncStatusError {
+		t.Fatalf("status = %+v, want error", store.status)
+	}
+	if !bytes.Equal(store.status.Metadata, oldMeta) {
+		t.Fatalf("metadata = %s, want preserved %s", store.status.Metadata, oldMeta)
+	}
+	if len(store.vulns) != 0 || len(store.malicious) != 0 || len(store.deletedVulns) != 0 {
+		t.Fatalf("store mutated despite malformed entry: vulns=%d malicious=%d deleted=%d", len(store.vulns), len(store.malicious), len(store.deletedVulns))
 	}
 }
 
@@ -510,7 +772,7 @@ func TestSync_ClassifiesRustSecMaliciousCategoryAsMaliciousFinding(t *testing.T)
 	defer srv.Close()
 
 	store := &osvStoreStub{}
-	syncer := NewSyncer(store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	syncer := NewSyncer(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	syncer.client = &http.Client{
 		Transport: &rewriteTransport{base: srv.URL, inner: http.DefaultTransport},
 		Timeout:   10 * time.Second,
@@ -533,6 +795,9 @@ func TestSync_ClassifiesRustSecMaliciousCategoryAsMaliciousFinding(t *testing.T)
 	if len(store.deletedVulns) != 1 || store.deletedVulns[0] != "RUSTSEC-2023-0115" {
 		t.Fatalf("deleted vulnerabilities = %+v, want RUSTSEC-2023-0115 cleanup", store.deletedVulns)
 	}
+	if len(store.deletedSources) != 1 || store.deletedSources[0] != FeedName {
+		t.Fatalf("deleted sources = %+v, want %s cleanup", store.deletedSources, FeedName)
+	}
 	if len(store.malicious) != 1 {
 		t.Fatalf("malicious findings = %d, want 1", len(store.malicious))
 	}
@@ -554,34 +819,214 @@ func TestSync_ClassifiesRustSecMaliciousCategoryAsMaliciousFinding(t *testing.T)
 	}
 }
 
+func TestProcessOSVEntryReturnsOutcomeForEntryTypes(t *testing.T) {
+	t.Parallel()
+
+	syncer := NewSyncer(slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	t.Run("skipped MAL advisory", func(t *testing.T) {
+		t.Parallel()
+
+		store := &osvStoreStub{}
+		result := syncer.processOSVEntry(context.Background(), store, zipEntry(t, "MAL-2026-0001.json", []byte(`{"id":"MAL-2026-0001"}`)))
+
+		if result.outcome != osvEntryOutcomeSkipped {
+			t.Fatalf("outcome = %s, want %s", result.outcome, osvEntryOutcomeSkipped)
+		}
+		if result.synced != 0 || result.errors != 0 {
+			t.Fatalf("result = %+v, want no synced entries or errors", result)
+		}
+		if len(store.vulns) != 0 || len(store.malicious) != 0 || len(store.deletedVulns) != 0 {
+			t.Fatalf("store mutated for skipped entry: vulns=%d malicious=%d deleted=%d", len(store.vulns), len(store.malicious), len(store.deletedVulns))
+		}
+	})
+
+	t.Run("withdrawn vulnerability delete", func(t *testing.T) {
+		t.Parallel()
+
+		withdrawn := "2026-06-09T15:56:00Z"
+		raw, err := json.Marshal(osvEntry{
+			ID:        "PYSEC-2026-0001",
+			Withdrawn: &withdrawn,
+		})
+		if err != nil {
+			t.Fatalf("marshal entry: %v", err)
+		}
+		store := &osvStoreStub{}
+		result := syncer.processOSVEntry(context.Background(), store, zipEntry(t, "PYSEC-2026-0001.json", raw))
+
+		if result.outcome != osvEntryOutcomeDeleted {
+			t.Fatalf("outcome = %s, want %s", result.outcome, osvEntryOutcomeDeleted)
+		}
+		if result.synced != 1 || result.errors != 0 {
+			t.Fatalf("result = %+v, want one synced delete and no errors", result)
+		}
+		if len(store.deletedVulns) != 1 || store.deletedVulns[0] != "PYSEC-2026-0001" {
+			t.Fatalf("deleted vulnerabilities = %+v, want PYSEC-2026-0001", store.deletedVulns)
+		}
+		if len(store.deletedSources) != 1 || store.deletedSources[0] != FeedName {
+			t.Fatalf("deleted sources = %+v, want %s", store.deletedSources, FeedName)
+		}
+	})
+
+	t.Run("malicious category finding", func(t *testing.T) {
+		t.Parallel()
+
+		raw := []byte(`{
+			"id":"RUSTSEC-2026-0001",
+			"summary":"malware package",
+			"published":"2026-01-01T00:00:00Z",
+			"affected":[{
+				"package":{"name":"badcrate","ecosystem":"crates.io"},
+				"database_specific":{"categories":["malicious"]}
+			}]
+		}`)
+		store := &osvStoreStub{}
+		result := syncer.processOSVEntry(context.Background(), store, zipEntry(t, "RUSTSEC-2026-0001.json", raw))
+
+		if result.outcome != osvEntryOutcomeMalicious {
+			t.Fatalf("outcome = %s, want %s", result.outcome, osvEntryOutcomeMalicious)
+		}
+		if result.synced != 1 || result.errors != 0 {
+			t.Fatalf("result = %+v, want one synced malicious finding and no errors", result)
+		}
+		if len(store.deletedVulns) != 1 || store.deletedVulns[0] != "RUSTSEC-2026-0001" {
+			t.Fatalf("deleted vulnerabilities = %+v, want cleanup of superseded vulnerability", store.deletedVulns)
+		}
+		if len(store.deletedSources) != 1 || store.deletedSources[0] != FeedName {
+			t.Fatalf("deleted sources = %+v, want %s cleanup", store.deletedSources, FeedName)
+		}
+		if len(store.malicious) != 1 || store.malicious[0].ID != "RUSTSEC-2026-0001" {
+			t.Fatalf("malicious findings = %+v, want RUSTSEC-2026-0001", store.malicious)
+		}
+	})
+
+	t.Run("vulnerability upsert", func(t *testing.T) {
+		t.Parallel()
+
+		raw, err := json.Marshal(osvEntry{
+			ID:      "GHSA-2026-0001",
+			Summary: "regular vulnerability",
+			Affected: []osvAffected{
+				{Package: osvPackage{Ecosystem: "npm", Name: "left-pad"}},
+			},
+		})
+		if err != nil {
+			t.Fatalf("marshal entry: %v", err)
+		}
+		store := &osvStoreStub{}
+		result := syncer.processOSVEntry(context.Background(), store, zipEntry(t, "GHSA-2026-0001.json", raw))
+
+		if result.outcome != osvEntryOutcomeVulnerability {
+			t.Fatalf("outcome = %s, want %s", result.outcome, osvEntryOutcomeVulnerability)
+		}
+		if result.synced != 1 || result.errors != 0 {
+			t.Fatalf("result = %+v, want one synced vulnerability and no errors", result)
+		}
+		if len(store.vulns) != 1 || store.vulns[0].ID != "GHSA-2026-0001" {
+			t.Fatalf("vulnerabilities = %+v, want GHSA-2026-0001", store.vulns)
+		}
+	})
+
+	t.Run("parse error", func(t *testing.T) {
+		t.Parallel()
+
+		store := &osvStoreStub{}
+		result := syncer.processOSVEntry(context.Background(), store, zipEntry(t, "broken.json", []byte(`not json`)))
+
+		if result.outcome != osvEntryOutcomeError {
+			t.Fatalf("outcome = %s, want %s", result.outcome, osvEntryOutcomeError)
+		}
+		if result.synced != 0 || result.errors != 1 {
+			t.Fatalf("result = %+v, want one entry error and no synced entries", result)
+		}
+	})
+}
+
 func TestSyncerName(t *testing.T) {
 	t.Parallel()
-	syncer := NewSyncer(nil, nil)
+	syncer := NewSyncer(nil)
 	if syncer.Name() != "osv" {
 		t.Errorf("Name() = %q, want %q", syncer.Name(), "osv")
+	}
+}
+
+func TestSyncerDoesNotOwnStoreOutsideSyncContract(t *testing.T) {
+	t.Parallel()
+
+	syncerType := reflect.TypeOf(Syncer{})
+	storeType := reflect.TypeOf((*db.Store)(nil)).Elem()
+	for i := 0; i < syncerType.NumField(); i++ {
+		field := syncerType.Field(i)
+		if field.Type == storeType {
+			t.Fatalf("Syncer field %s stores db.Store; use Sync(ctx, store) as the only persistence input", field.Name)
+		}
+	}
+
+	source, err := os.ReadFile("syncer.go")
+	if err != nil {
+		t.Fatalf("read syncer.go: %v", err)
+	}
+	if regexp.MustCompile(`(?m)^\s*store\s+db\.Store\b`).Match(source) {
+		t.Fatal("syncer.go declares a store db.Store field; use Sync(ctx, store) as the only persistence input")
+	}
+	if strings.Contains(string(source), "s.store") {
+		t.Fatal("syncer.go references s.store; use the store passed to Sync(ctx, store)")
 	}
 }
 
 func TestOSVMetadataHelpersHandleInvalidAndPersistedETags(t *testing.T) {
 	t.Parallel()
 
-	syncer := NewSyncer(&osvStoreStub{status: &db.FeedSyncStatus{Metadata: json.RawMessage(`not json`)}}, nil)
-	if got := syncer.loadEcosystemETags(context.Background()); len(got) != 0 {
-		t.Fatalf("loadEcosystemETags(invalid) = %+v, want empty map", got)
+	invalidStore := &osvStoreStub{status: &db.FeedSyncStatus{Metadata: json.RawMessage(`not json`)}}
+	syncer := NewSyncer(nil)
+	if got := ecosystemETags(syncer.loadFeedStatus(context.Background(), invalidStore)); len(got) != 0 {
+		t.Fatalf("ecosystemETags(invalid metadata) = %+v, want empty map", got)
 	}
 
 	store := &osvStoreStub{status: &db.FeedSyncStatus{FeedName: FeedName}}
-	syncer = NewSyncer(store, nil)
-	syncer.saveEcosystemETags(context.Background(), map[string]string{"npm": `"etag"`})
+	syncer = NewSyncer(nil)
+	syncer.saveEcosystemETags(context.Background(), store, map[string]string{"npm": `"etag"`})
 	if store.status == nil || !bytes.Contains(store.status.Metadata, []byte(`"npm"`)) {
 		t.Fatalf("saved metadata = %s", store.status.Metadata)
 	}
 
 	store.statusErr = io.ErrUnexpectedEOF
-	if got := syncer.loadEcosystemETags(context.Background()); len(got) != 0 {
-		t.Fatalf("loadEcosystemETags(error) = %+v, want empty map", got)
+	if got := ecosystemETags(syncer.loadFeedStatus(context.Background(), store)); len(got) != 0 {
+		t.Fatalf("ecosystemETags(load status error) = %+v, want empty map", got)
 	}
-	syncer.saveEcosystemETags(context.Background(), map[string]string{"go": "etag"})
+	syncer.saveEcosystemETags(context.Background(), store, map[string]string{"go": "etag"})
+}
+
+func TestLoadFeedStatusLogsReadFailureBeforeFullSyncFallback(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	syncer := NewSyncer(slog.New(slog.NewJSONHandler(&logs, nil)))
+	store := &osvStoreStub{
+		statusErr: errors.New(`GET https://user:secret@feeds.example.test/private/osv?token=query-secret failed from C:\Users\Admin\Packmon\feed.json`),
+	}
+
+	if got := syncer.loadFeedStatus(context.Background(), store); got != nil {
+		t.Fatalf("loadFeedStatus() = %+v, want nil after status read failure", got)
+	}
+
+	logOutput := logs.String()
+	for _, want := range []string{
+		`"level":"WARN"`,
+		`"msg":"failed to get feed sync status, proceeding with full sync"`,
+		`"feed":"osv"`,
+		`"error":`,
+	} {
+		if !strings.Contains(logOutput, want) {
+			t.Fatalf("log output missing %s: %s", want, logOutput)
+		}
+	}
+	for _, leaked := range []string{"user:secret", "query-secret", "/private/osv", `C:\Users\Admin\Packmon\feed.json`} {
+		if strings.Contains(logOutput, leaked) {
+			t.Fatalf("log output leaked %q: %s", leaked, logOutput)
+		}
+	}
 }
 
 func TestOSVMappingHelpersCoverMaliciousAndSeverityBranches(t *testing.T) {
@@ -713,15 +1158,15 @@ func TestRecordSyncStatusBranches(t *testing.T) {
 	t.Parallel()
 
 	store := &osvStoreStub{}
-	syncer := NewSyncer(store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	syncer := NewSyncer(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	start := time.Now().Add(-time.Second)
 
-	syncer.recordSyncSuccess(context.Background(), time.Second, 7, 5)
+	syncer.recordSyncSuccess(context.Background(), store, time.Second, 7, 5)
 	if store.status == nil || store.status.LastSyncStatus != "success" || store.status.EntriesSynced != 5 {
 		t.Fatalf("success status = %+v", store.status)
 	}
 	lastSuccessfulSync := *store.status.LastSyncAt
-	syncer.recordSyncFailure(context.Background(), start, io.ErrUnexpectedEOF)
+	syncer.recordSyncFailure(context.Background(), store, start, io.ErrUnexpectedEOF)
 	if store.status == nil || store.status.LastSyncStatus != "error" || !strings.Contains(store.status.LastError, "unexpected EOF") {
 		t.Fatalf("failure status = %+v", store.status)
 	}
@@ -731,20 +1176,68 @@ func TestRecordSyncStatusBranches(t *testing.T) {
 	canceledCtx, cancel := context.WithCancel(context.Background())
 	cancel()
 	store.rejectCanceled = true
-	syncer.recordSyncFailure(canceledCtx, start, context.Canceled)
+	syncer.recordSyncFailure(canceledCtx, store, start, context.Canceled)
 	if got := len(store.statusHistory); got != 3 {
 		t.Fatalf("status history after canceled context = %d, want 3", got)
 	}
 
 	store.upsertErr = io.ErrClosedPipe
-	syncer.recordSyncSuccess(context.Background(), time.Second, 1, 1)
-	syncer.recordSyncFailure(context.Background(), start, io.ErrUnexpectedEOF)
+	syncer.recordSyncSuccess(context.Background(), store, time.Second, 1, 1)
+	syncer.recordSyncFailure(context.Background(), store, start, io.ErrUnexpectedEOF)
 }
 
 // Verify compile-time interface compliance.
 var _ feed.FeedSyncer = (*Syncer)(nil)
 
 // -- Transport helper ---------------------------------------------------------
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type countingReadCloser struct {
+	remaining int64
+	read      int64
+	closed    bool
+}
+
+func (r *countingReadCloser) Read(p []byte) (int, error) {
+	if r.remaining <= 0 {
+		return 0, io.EOF
+	}
+	if int64(len(p)) > r.remaining {
+		p = p[:r.remaining]
+	}
+	for i := range p {
+		p[i] = 'x'
+	}
+	n := len(p)
+	r.remaining -= int64(n)
+	r.read += int64(n)
+	return n, nil
+}
+
+func (r *countingReadCloser) Close() error {
+	r.closed = true
+	return nil
+}
+
+type failingCloseTempArchive struct {
+	bytes.Buffer
+	closeErr   error
+	closeCalls int
+}
+
+func (f *failingCloseTempArchive) Close() error {
+	f.closeCalls++
+	return f.closeErr
+}
+
+func (f *failingCloseTempArchive) Name() string {
+	return "failing-temp-archive.zip"
+}
 
 // rewriteTransport rewrites all request URLs to point at the test server,
 // preserving the original path.

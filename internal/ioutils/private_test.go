@@ -3,13 +3,14 @@ package ioutils
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
+
+	"github.com/8linkz-sec/packmon/internal/testutil"
 )
 
 func TestOpenPrivateFileTightensExistingPermissions(t *testing.T) {
 	baseDir := t.TempDir()
-	skipIfPOSIXModesAreNotPreserved(t, baseDir)
+	testutil.SkipIfPOSIXModesAreNotPreserved(t, baseDir)
 
 	path := filepath.Join(baseDir, "report.json")
 	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil { // #nosec G306 -- test seeds broad permissions to verify the helper tightens them.
@@ -68,7 +69,7 @@ func TestOpenPrivateFileCreatesAndTruncatesFile(t *testing.T) {
 		t.Fatalf("close truncated file: %v", err)
 	}
 
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- test reads a file path created under t.TempDir().
 	if err != nil {
 		t.Fatalf("read private file: %v", err)
 	}
@@ -82,27 +83,5 @@ func TestOpenPrivateFileReturnsCreateError(t *testing.T) {
 	if file, err := OpenPrivateFile(path); err == nil {
 		CloseSilently(file)
 		t.Fatal("OpenPrivateFile(missing parent) error = nil")
-	}
-}
-
-func skipIfPOSIXModesAreNotPreserved(t *testing.T, baseDir string) {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX mode bits are not reliable on Windows")
-	}
-
-	probe := filepath.Join(baseDir, "mode-probe")
-	if err := os.WriteFile(probe, []byte("x"), 0o600); err != nil {
-		t.Fatalf("create mode probe file: %v", err)
-	}
-	if err := os.Chmod(probe, 0o600); err != nil {
-		t.Fatalf("chmod mode probe file: %v", err)
-	}
-	info, err := os.Stat(probe)
-	if err != nil {
-		t.Fatalf("stat mode probe file: %v", err)
-	}
-	if got := info.Mode().Perm(); got != 0o600 {
-		t.Skipf("filesystem does not preserve POSIX file mode bits: got %o after chmod 0600", got)
 	}
 }

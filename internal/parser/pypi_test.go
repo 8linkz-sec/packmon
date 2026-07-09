@@ -563,6 +563,34 @@ flask==3.0.0 --hash=sha256:ccccccccccccccccccccccccccccccccccccccccccccccccccccc
 	}
 }
 
+func TestRequirementsParserRejectsEmptyPinnedVersions(t *testing.T) {
+	t.Parallel()
+
+	input := "--index-url https://pypi.internal.example/simple\n" +
+		"empty==\n" +
+		"space==" + strings.Repeat(" ", 4) + "\n" +
+		"hash-only== \\\n" +
+		"    --hash=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n" +
+		"requests==2.31.0 \\\n" +
+		"    --hash=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"
+	pkgs, err := NewRequirementsParser().Parse(strings.NewReader(input))
+	if err == nil {
+		t.Fatal("expected empty pinned version error, got nil")
+	}
+	if !strings.Contains(err.Error(), "empty pinned version") {
+		t.Fatalf("error = %v, want empty pinned version", err)
+	}
+	if len(pkgs) != 1 {
+		t.Fatalf("got %d packages, want 1: %+v", len(pkgs), pkgs)
+	}
+	if pkgs[0].Name != "requests" || pkgs[0].Version != "2.31.0" {
+		t.Fatalf("package = %+v, want requests 2.31.0", pkgs[0])
+	}
+	if len(pkgs[0].SourceRefs) != 1 || pkgs[0].SourceRefs[0] != "https://pypi.internal.example/simple" {
+		t.Fatalf("SourceRefs = %#v, want internal index ref", pkgs[0].SourceRefs)
+	}
+}
+
 func TestRequirementsParserAcceptsLongLines(t *testing.T) {
 	t.Parallel()
 
@@ -582,14 +610,26 @@ func TestRequirementsParserAcceptsLongLines(t *testing.T) {
 
 func assertPackages(t *testing.T, pkgs []domain.Package, wantPkgs map[string]string, eco domain.Ecosystem) {
 	t.Helper()
+	seen := make(map[string]struct{}, len(pkgs))
 	for _, pkg := range pkgs {
 		if pkg.Ecosystem != eco {
 			t.Errorf("package %q has ecosystem %q, want %q", pkg.Name, pkg.Ecosystem, eco)
+		}
+		if wantPkgs == nil {
+			continue
 		}
 		if wantVer, ok := wantPkgs[pkg.Name]; ok {
 			if pkg.Version != wantVer {
 				t.Errorf("package %q version = %q, want %q", pkg.Name, pkg.Version, wantVer)
 			}
+			seen[pkg.Name] = struct{}{}
+		} else {
+			t.Errorf("unexpected package %q version %q", pkg.Name, pkg.Version)
+		}
+	}
+	for name, version := range wantPkgs {
+		if _, ok := seen[name]; !ok {
+			t.Errorf("missing package %q version %q", name, version)
 		}
 	}
 }

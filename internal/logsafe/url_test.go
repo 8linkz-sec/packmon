@@ -119,6 +119,51 @@ func TestRedactDiagnosticMessageRemovesURLsTokensAndPaths(t *testing.T) {
 	}
 }
 
+func TestRedactDiagnosticMessageRedactsSecretAssignments(t *testing.T) {
+	t.Parallel()
+
+	raw := strings.Join([]string{ //nolint:gosec // fake secret-bearing assignments verify diagnostic redaction.
+		"password=password-secret-12345",
+		"passwd: passwd-secret-12345",
+		"pwd=pwd-secret-12345",
+		"client_secret=client-secret-12345",
+		"client-secret: oauth-secret-12345",
+		"refresh_token=refresh-secret-12345",
+		"private_key=private-key-secret-12345",
+		"credential=credential-secret-12345",
+	}, " ")
+
+	got := RedactDiagnosticMessage(raw)
+	for _, leaked := range []string{
+		"password-secret-12345",
+		"passwd-secret-12345",
+		"pwd-secret-12345",
+		"client-secret-12345",
+		"oauth-secret-12345",
+		"refresh-secret-12345",
+		"private-key-secret-12345",
+		"credential-secret-12345",
+	} {
+		if strings.Contains(got, leaked) {
+			t.Fatalf("RedactDiagnosticMessage leaked %q in %q", leaked, got)
+		}
+	}
+	for _, want := range []string{
+		"password=[redacted]",
+		"passwd: [redacted]",
+		"pwd=[redacted]",
+		"client_secret=[redacted]",
+		"client-secret: [redacted]",
+		"refresh_token=[redacted]",
+		"private_key=[redacted]",
+		"credential=[redacted]",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("RedactDiagnosticMessage missing %q in %q", want, got)
+		}
+	}
+}
+
 func TestBoundedDiagnosticValueRedactsControlsAndTruncates(t *testing.T) {
 	t.Parallel()
 
@@ -136,6 +181,27 @@ func TestBoundedDiagnosticValueRedactsControlsAndTruncates(t *testing.T) {
 	}
 	if len(got) > 96 {
 		t.Fatalf("BoundedDiagnosticValue length = %d, want <= 96", len(got))
+	}
+}
+
+func TestRemoteErrorSnippetRedactsAndTruncatesUTF8(t *testing.T) {
+	t.Parallel()
+
+	body := []byte("Authorization: Bearer leaked-remote-token api_key=leaked-query-token " + strings.Repeat("x", 160) + "ä" + strings.Repeat("y", 50))
+	got := RemoteErrorSnippet(body, 220)
+
+	if !strings.Contains(got, "ä") || !strings.HasSuffix(got, "...") {
+		t.Fatalf("RemoteErrorSnippet() = %q, want UTF-8 boundary and ellipsis", got)
+	}
+	for _, leaked := range []string{"leaked-remote-token", "leaked-query-token"} {
+		if strings.Contains(got, leaked) {
+			t.Fatalf("RemoteErrorSnippet leaked %q in %q", leaked, got)
+		}
+	}
+	for _, want := range []string{"Bearer [redacted]", "api_key=[redacted]"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("RemoteErrorSnippet missing %q in %q", want, got)
+		}
 	}
 }
 

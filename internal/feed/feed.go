@@ -10,7 +10,12 @@ import (
 	"errors"
 
 	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
+
+// FeedSyncUserAgent is the shared User-Agent value used by feed syncers and
+// async feed workers for upstream HTTP requests.
+const FeedSyncUserAgent = "packmon-feedsync/1.0"
 
 // SyncResult is returned by a FeedSyncer after a successful sync.
 // It carries counters that the manager persists in feed_sync_status.
@@ -29,11 +34,23 @@ type permanentSyncError struct {
 	err error
 }
 
+type nonRetryableSyncError struct {
+	err error
+}
+
 func (e *permanentSyncError) Error() string {
 	return e.err.Error()
 }
 
 func (e *permanentSyncError) Unwrap() error {
+	return e.err
+}
+
+func (e *nonRetryableSyncError) Error() string {
+	return e.err.Error()
+}
+
+func (e *nonRetryableSyncError) Unwrap() error {
 	return e.err
 }
 
@@ -46,9 +63,26 @@ func PermanentError(err error) error {
 	return &permanentSyncError{err: err}
 }
 
+// NonRetryableError marks a current sync failure as deterministic for the
+// current payload or response. The manager records it as an error, but does
+// not retry the same invalid input.
+func NonRetryableError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &nonRetryableSyncError{err: err}
+}
+
 // IsPermanentError reports whether err should not be retried by the manager.
 func IsPermanentError(err error) bool {
 	var target *permanentSyncError
+	return errors.As(err, &target)
+}
+
+// IsNonRetryableError reports whether err should be recorded as an error
+// without retrying the same current-run input.
+func IsNonRetryableError(err error) bool {
+	var target *nonRetryableSyncError
 	return errors.As(err, &target)
 }
 
@@ -71,29 +105,31 @@ type FeedSyncer interface {
 // FeedMode controls whether the FeedManager runs a feed's syncer
 // itself ("self") or expects an external system like N8N to push
 // data via the import API ("external"). See DE-18.
-type FeedMode string
+type FeedMode = domain.FeedMode
 
 const (
 	// FeedModeSelf means the manager runs the syncer on its own schedule.
-	FeedModeSelf FeedMode = "self"
+	FeedModeSelf = domain.FeedModeSelf
 	// FeedModeExternal means the feed is populated by an external system
 	// (e.g. N8N) and the manager does not schedule syncs.
-	FeedModeExternal FeedMode = "external"
+	FeedModeExternal = domain.FeedModeExternal
 )
 
 // FeedPhase controls the execution order of feeds. Phase 1 feeds
-// (vulnerability data: OSV, GHSA, OpenSSF) run first. Phase 2 feeds
-// (enrichment: EPSS, CISA KEV, VulnCheck) wait for all Phase 1 feeds
-// to finish their initial sync before starting. This ensures
-// enrichment feeds find vulnerability data to enrich.
+// (base vulnerability/malicious-package data: OSV, GHSA, OpenSSF) run
+// first. Phase 2 post-base feeds wait for all Phase 1 feeds to finish
+// their initial sync before starting. Phase 2 includes vulnerability
+// enrichers such as NVD, EPSS, CISA KEV, and VulnCheck, plus lifecycle
+// metadata feeds such as endoflife.date.
 type FeedPhase int
 
 const (
 	// FeedPhaseVulnerability is for feeds that provide base vulnerability
 	// data (OSV, GHSA, OpenSSF). They run first.
 	FeedPhaseVulnerability FeedPhase = 1
-	// FeedPhaseEnrichment is for feeds that enrich existing vulnerability
-	// data (EPSS, CISA KEV, VulnCheck). They wait for Phase 1.
+	// FeedPhaseEnrichment is the Phase 2 post-base phase. It includes
+	// vulnerability enrichers (NVD, EPSS, CISA KEV, VulnCheck) and lifecycle
+	// metadata feeds (endoflife.date). It waits for Phase 1.
 	FeedPhaseEnrichment FeedPhase = 2
 )
 

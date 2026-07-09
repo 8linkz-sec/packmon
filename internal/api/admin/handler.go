@@ -4,6 +4,7 @@
 package admin
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -55,15 +56,42 @@ type FeedSyncFunc func(ctx context.Context, feedName string) error
 type FeedConfigApplyFunc func(ctx context.Context, feed config.FeedSettings) error
 
 // FeedConfigResetFunc applies the runtime default for a feed after its saved
-// database override has been removed.
-type FeedConfigResetFunc func(ctx context.Context, feedName string) error
+// database override has been removed and returns the settings it applied.
+type FeedConfigResetFunc func(ctx context.Context, feedName string) (config.FeedSettings, bool, error)
 
-// Store is the admin handler persistence surface. Optional atomic/audited
-// variants are modeled as separate interfaces in pages.go.
+// AdminMutationStore is the required persistence surface for security-sensitive
+// admin mutations that must be committed atomically with their audit row.
+type AdminMutationStore interface {
+	UpsertManualAdvisoryWithAudit(ctx context.Context, advisory *db.ManualAdvisory, audit *adminAuditEntry) error
+	DeleteManualAdvisoryWithAudit(ctx context.Context, id string, audit *adminAuditEntry) error
+
+	CreateAPIKeyWithAudit(ctx context.Context, name, keyHash string, expiresAt *time.Time, audit *adminAuditEntry) (int, error)
+	RevokeAPIKeyWithAudit(ctx context.Context, keyID int, audit *adminAuditEntry) error
+	DeleteAPIKeyWithAudit(ctx context.Context, keyID int, audit *adminAuditEntry) error
+
+	UpsertAdminAuthWithAudit(ctx context.Context, passwordHash string, isBootstrap bool, audit *adminAuditEntry) error
+	ChangeAdminPasswordWithAudit(ctx context.Context, newHash, expectedOldHash string, audit *adminAuditEntry) error
+
+	UpsertSystemSettingsWithAudit(ctx context.Context, settings *db.SystemSettings, audit *adminAuditEntry) error
+
+	UpsertFeedConfigWithAudit(ctx context.Context, cfg *db.FeedConfig, audit *adminAuditEntry) error
+	DeleteFeedConfigWithAudit(ctx context.Context, feedName string, expectedUpdatedAt *time.Time, audit *adminAuditEntry) error
+
+	PurgeQueueWithAudit(ctx context.Context, audit *adminAuditEntry) (int, error)
+	UpdateQueueJobPriorityWithAudit(ctx context.Context, jobID, priority int, audit *adminAuditEntry) error
+	PauseQueueJobWithAudit(ctx context.Context, jobID int, audit *adminAuditEntry) error
+	ResumeQueueJobWithAudit(ctx context.Context, jobID int, audit *adminAuditEntry) error
+	RetryQueueJobWithAudit(ctx context.Context, jobID int, audit *adminAuditEntry) error
+	ClearQueueWithAudit(ctx context.Context, statuses []string, audit *adminAuditEntry) (int, error)
+}
+
+// Store is the admin handler persistence surface.
 type Store interface {
+	AdminMutationStore
+
 	GetAdminAuth(ctx context.Context) (*db.AdminAuth, error)
 	UpsertAdminAuth(ctx context.Context, passwordHash string, isBootstrap bool) error
-	InsertAdminAuditLog(ctx context.Context, entry *db.AdminAuditEntry) error
+	InsertAdminAuditLog(ctx context.Context, entry *adminAuditEntry) error
 	ListAdminAuditLog(ctx context.Context, limit int) ([]db.AdminAuditLogEntry, error)
 
 	ListAPIKeys(ctx context.Context) ([]db.APIKey, error)
@@ -83,19 +111,15 @@ type Store interface {
 	UpsertSystemSettings(ctx context.Context, settings *db.SystemSettings) error
 
 	DashboardStats(ctx context.Context) (*db.DashboardStatsResult, error)
+	CountScansByDay(ctx context.Context, days int) ([]db.DailyScanStats, error)
+	ListRecentScans(ctx context.Context, limit, offset int) ([]db.ScanLogEntry, error)
 
 	ListManualAdvisories(ctx context.Context, limit int) ([]db.ManualAdvisory, error)
 	UpsertManualAdvisory(ctx context.Context, advisory *db.ManualAdvisory) error
 	DeleteManualAdvisory(ctx context.Context, id string) error
 
-	QueueStats(ctx context.Context) (*db.QueueStatsResult, error)
-	ListQueueJobs(ctx context.Context, status string, limit int) ([]db.RefreshJob, error)
-	PurgeQueue(ctx context.Context) (int, error)
-	UpdateQueueJobPriority(ctx context.Context, jobID, priority int) error
-	PauseQueueJob(ctx context.Context, jobID int) error
-	ResumeQueueJob(ctx context.Context, jobID int) error
-	RetryQueueJob(ctx context.Context, jobID int) error
-	ClearQueue(ctx context.Context, statuses []string) (int, error)
+	QueueStats(ctx context.Context) (*adminQueueStats, error)
+	ListQueueJobs(ctx context.Context, status string, limit int) ([]adminQueueJob, error)
 }
 
 // AdminHandler holds the dependencies for admin HTTP handlers.
@@ -110,6 +134,7 @@ type AdminHandler struct {
 	syncFeed        FeedSyncFunc
 	applyFeedConfig FeedConfigApplyFunc
 	resetFeedConfig FeedConfigResetFunc
+	csrfToken       func(*auth.Session) (string, error)
 
 	// loginMu protects the loginAttempts map.
 	loginMu       sync.Mutex
@@ -122,12 +147,12 @@ type AdminHandler struct {
 // NewAdminHandler creates an AdminHandler with the given dependencies.
 // The provided context controls the lifetime of the background cleanup
 // goroutine; when the context is cancelled the goroutine exits.
-func NewAdminHandler(ctx context.Context, store Store, sm *auth.SessionManager, renderer *web.Renderer, logger *slog.Logger, cfg *config.Config, runtime *config.RuntimeSettings, syncFeed FeedSyncFunc) *AdminHandler {
+func NewAdminHandler(ctx context.Context, store any, sm *auth.SessionManager, renderer *web.Renderer, logger *slog.Logger, cfg *config.Config, runtime *config.RuntimeSettings, syncFeed FeedSyncFunc) *AdminHandler {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	h := &AdminHandler{
-		store:         store,
+		store:         adaptAdminStore(store),
 		sm:            sm,
 		renderer:      renderer,
 		logger:        logger,
@@ -135,12 +160,27 @@ func NewAdminHandler(ctx context.Context, store Store, sm *auth.SessionManager, 
 		runtime:       runtime,
 		rootCtx:       ctx,
 		syncFeed:      syncFeed,
+		csrfToken:     auth.CSRFToken,
 		loginAttempts: make(map[string]*loginAttempt),
 		manualSyncs:   make(map[string]struct{}),
 	}
 	// Background goroutine to evict stale lockout entries.
 	go h.cleanupAttempts(ctx)
 	return h
+}
+
+func (h *AdminHandler) adminCSRFToken(w http.ResponseWriter, r *http.Request, sess *auth.Session, scope string) (string, bool) {
+	csrfToken := auth.CSRFToken
+	if h.csrfToken != nil {
+		csrfToken = h.csrfToken
+	}
+	token, err := csrfToken(sess)
+	if err != nil {
+		h.logger.Error("admin csrf token generation failed", h.adminLogAttrs(r, "scope", scope, "error", err)...)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return "", false
+	}
+	return token, true
 }
 
 // SetFeedConfigApplyFunc installs the callback used after admin feed saves.
@@ -192,21 +232,18 @@ func (h *AdminHandler) showLoginForm(w http.ResponseWriter, r *http.Request, err
 		return
 	}
 
-	// Create a short-lived, non-admin session just to carry the CSRF token on
-	// the login form. It is created non-admin atomically (no post-hoc mutation)
-	// and expires quickly, so anonymous form loads cannot accumulate long-lived
-	// sessions. On successful login a new authenticated session replaces it.
-	sess, err := h.sm.CreatePreAuth(w)
+	// Reuse a valid short-lived, non-admin session when the browser already has
+	// one; otherwise create one just to carry the CSRF token on the login form.
+	// On successful login a new authenticated session replaces it.
+	sess, err := h.sm.CreateOrReusePreAuth(w, r)
 	if err != nil {
-		h.logger.Error("failed to create login session", "error", err)
+		h.logger.Error("failed to create login session", h.adminLogAttrs(r, "error", err)...)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
-	csrfToken, err := auth.CSRFToken(sess)
-	if err != nil {
-		h.logger.Error("failed to generate CSRF token", "error", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+	csrfToken, ok := h.adminCSRFToken(w, r, sess, "login")
+	if !ok {
 		return
 	}
 
@@ -221,7 +258,7 @@ func (h *AdminHandler) showLoginForm(w http.ResponseWriter, r *http.Request, err
 		"NextPath":          auth.SafeAdminReturnTarget(r.URL.Query().Get("next")),
 	}
 	if err := h.renderer.Render(w, "admin/login.html", data); err != nil {
-		h.logger.Error("failed to render login template", "error", err)
+		h.logger.Error("failed to render login template", h.adminLogAttrs(r, "error", err)...)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 	}
 }
@@ -237,10 +274,13 @@ func (h *AdminHandler) processLogin(w http.ResponseWriter, r *http.Request) {
 	if h.isLockedOut(ip) {
 		telemetry.Default().IncAuthLoginFailures()
 		if h.markLockoutAudited(ip) {
-			h.logger.Warn("login attempt from locked out principal", "ip", ip)
-			h.auditLogBestEffort(r, "login_lockout", map[string]string{
+			h.logger.Warn("login attempt from locked out principal", h.adminLogAttrs(r, "client_ip", ip)...)
+			if !h.requireAudit(w, r, "login_lockout", map[string]string{
 				"reason": "too many failed attempts",
-			})
+			}) {
+				return
+			}
+			h.markLockoutAuditWritten(ip)
 		}
 		h.showLoginForm(w, r, "Too many failed login attempts. Please try again later.")
 		return
@@ -250,7 +290,7 @@ func (h *AdminHandler) processLogin(w http.ResponseWriter, r *http.Request) {
 	sess := h.sm.Get(r)
 	if sess == nil || !auth.ValidateCSRF(r, sess) {
 		h.recordFailedAttemptFor(ip, false)
-		h.logger.Warn("CSRF validation failed on login", "ip", ip)
+		h.logger.Warn("CSRF validation failed on login", h.adminLogAttrs(r, "client_ip", ip)...)
 		h.showLoginForm(w, r, "Invalid request. Please try again.")
 		return
 	}
@@ -264,32 +304,40 @@ func (h *AdminHandler) processLogin(w http.ResponseWriter, r *http.Request) {
 	nextPath := auth.SafeAdminReturnTarget(r.PostForm.Get("next"))
 
 	if username != "admin" {
-		h.recordFailedAttempt(ip)
-		h.auditLogBestEffort(r, "login_failed", map[string]string{
+		if !h.requireAudit(w, r, "login_failed", map[string]string{
 			"reason": "invalid username",
-		})
+		}) {
+			return
+		}
+		h.recordFailedAttempt(ip)
 		h.showLoginForm(w, r, "Invalid username or password.")
 		return
 	}
 
 	adminAuth, err := h.store.GetAdminAuth(r.Context())
 	if err != nil {
-		h.logger.Error("failed to get admin auth", "error", err)
+		h.logger.Error("failed to get admin auth", h.adminLogAttrs(r, "error", err)...)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 	if adminAuth == nil {
-		h.logger.Warn("login attempt but no admin account exists", "ip", ip)
+		h.logger.Warn("login attempt but no admin account exists", h.adminLogAttrs(r, "client_ip", ip)...)
 		h.showLoginForm(w, r, adminUnconfiguredLoginError)
 		return
 	}
 
 	if !auth.CheckPassword(adminAuth.PasswordHash, password) {
-		h.recordFailedAttempt(ip)
-		h.auditLogBestEffort(r, "login_failed", map[string]string{
+		if !h.requireAudit(w, r, "login_failed", map[string]string{
 			"reason": "invalid password",
-		})
+		}) {
+			return
+		}
+		h.recordFailedAttempt(ip)
 		h.showLoginForm(w, r, "Invalid username or password.")
+		return
+	}
+
+	if !h.requireAudit(w, r, "login_success", map[string]string{}) {
 		return
 	}
 
@@ -298,14 +346,12 @@ func (h *AdminHandler) processLogin(w http.ResponseWriter, r *http.Request) {
 
 	_, err = h.sm.CreateAdmin(w, adminAuth.PasswordIsBootstrap)
 	if err != nil {
-		h.logger.Error("failed to create admin session", "error", err)
+		h.logger.Error("failed to create admin session", h.adminLogAttrs(r, "error", err)...)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
-	h.auditLogBestEffort(r, "login_success", map[string]string{})
-
-	h.logger.Info("admin login successful", "ip", ip)
+	h.logger.Info("admin login successful", h.adminLogAttrs(r)...)
 	auth.RedirectSameOrigin(w, r, adminLoginSuccessRedirect(nextPath), http.StatusSeeOther)
 }
 
@@ -317,7 +363,7 @@ func adminLoginSuccessRedirect(nextPath string) string {
 }
 
 // HandleLogout destroys the admin session and redirects to the login page.
-// Requires a valid CSRF token to prevent cross-site logout attacks (SEC-H6).
+// Requires a valid CSRF token to prevent cross-site logout attacks.
 func (h *AdminHandler) HandleLogout(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -330,18 +376,39 @@ func (h *AdminHandler) HandleLogout(w http.ResponseWriter, r *http.Request) {
 
 	sess := h.sm.Get(r)
 	if sess == nil || !auth.ValidateCSRF(r, sess) {
-		h.logger.Warn("CSRF validation failed on logout", "ip", clientIP(r))
+		h.recordInvalidAdminCSRF(r, "logout")
 		http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
 		return
 	}
 
-	ip := clientIP(r)
+	if !h.requireAudit(w, r, "logout", map[string]string{}) {
+		return
+	}
+
 	h.sm.Delete(w, r)
 
-	h.auditLogBestEffort(r, "logout", map[string]string{})
-
-	h.logger.Info("admin logout", "ip", ip)
+	h.logger.Info("admin logout", h.adminLogAttrs(r)...)
 	http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
+}
+
+// HandleNotFound renders a styled 404 for authenticated admin routes that do
+// not match a concrete admin page or action.
+func (h *AdminHandler) HandleNotFound(w http.ResponseWriter, r *http.Request) {
+	if sess := h.requireAdmin(w, r); sess == nil {
+		return
+	}
+
+	var buf bytes.Buffer
+	if err := h.renderer.Render(&buf, "not_found.html", web.NotFoundData{ActiveNav: "admin"}); err != nil {
+		h.logger.Error("admin not found: render failed", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusNotFound)
+	_, _ = w.Write(buf.Bytes())
 }
 
 // HandleDashboard serves the admin dashboard page with DB stats, feed
@@ -358,44 +425,72 @@ func (h *AdminHandler) HandleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+	correlationID := adminRequestCorrelationID(r)
 
-	csrfToken, _ := auth.CSRFToken(sess)
+	csrfToken, ok := h.adminCSRFToken(w, r, sess, "dashboard")
+	if !ok {
+		return
+	}
 
 	// Check if this session is still constrained by the bootstrap password.
 	bootstrapWarning := sess.AuthenticatedWithBootstrap
-	adminAuthLoadError := ""
-	adminAuth, err := h.store.GetAdminAuth(ctx)
-	if err != nil {
-		h.logger.Error("admin dashboard: failed to check bootstrap flag", "error", err)
-		adminAuthLoadError = "Bootstrap password status could not be verified. Check the server logs and database connection before relying on this account state."
-	} else if adminAuth != nil && adminAuth.PasswordIsBootstrap {
+	var (
+		adminAuth               *db.AdminAuth
+		adminAuthLoadError      string
+		stats                   *db.DashboardStatsResult
+		dashboardStatsLoadError string
+		feeds                   []db.FeedSyncStatus
+		feedStatusLoadError     string
+		queueStats              *adminQueueStats
+		queueStatsLoadError     string
+		widgetReads             sync.WaitGroup
+	)
+
+	widgetReads.Add(4)
+	go func() {
+		defer widgetReads.Done()
+		var err error
+		adminAuth, err = h.store.GetAdminAuth(ctx)
+		if err != nil {
+			h.logger.Error("admin dashboard: failed to check bootstrap flag", adminLogAttrsForCorrelationID(correlationID, "error", err)...)
+			adminAuthLoadError = "Bootstrap password status could not be verified. Check the server logs and database connection before relying on this account state."
+		}
+	}()
+	go func() {
+		defer widgetReads.Done()
+		var err error
+		stats, err = h.store.DashboardStats(ctx)
+		if err != nil {
+			h.logger.Error("admin dashboard: failed to load stats", adminLogAttrsForCorrelationID(correlationID, "error", err)...)
+			stats = &db.DashboardStatsResult{BySeverity: map[string]int{}}
+			dashboardStatsLoadError = "Dashboard stats could not be loaded. Check the server logs and database connection before relying on these totals."
+		}
+	}()
+	go func() {
+		defer widgetReads.Done()
+		var err error
+		feeds, err = h.store.ListFeedSyncStatuses(ctx)
+		if err != nil {
+			h.logger.Error("admin dashboard: failed to load feed statuses", adminLogAttrsForCorrelationID(correlationID, "error", err)...)
+			feedStatusLoadError = "Feed status could not be loaded. Check the server logs and database connection before relying on feed health."
+		}
+	}()
+	go func() {
+		defer widgetReads.Done()
+		var err error
+		queueStats, err = h.store.QueueStats(ctx)
+		if err != nil {
+			h.logger.Error("admin dashboard: failed to load queue stats", adminLogAttrsForCorrelationID(correlationID, "error", err)...)
+			queueStats = &adminQueueStats{}
+			queueStatsLoadError = "Queue summary could not be loaded. Check the server logs and database connection before relying on queue counts."
+		}
+	}()
+	widgetReads.Wait()
+
+	if adminAuth != nil && adminAuth.PasswordIsBootstrap {
 		bootstrapWarning = true
 	}
-
-	stats, err := h.store.DashboardStats(ctx)
-	dashboardStatsLoadError := ""
-	if err != nil {
-		h.logger.Error("admin dashboard: failed to load stats", "error", err)
-		stats = &db.DashboardStatsResult{BySeverity: map[string]int{}}
-		dashboardStatsLoadError = "Dashboard stats could not be loaded. Check the server logs and database connection before relying on these totals."
-	}
-
-	feeds, err := h.store.ListFeedSyncStatuses(ctx)
-	feedStatusLoadError := ""
-	if err != nil {
-		h.logger.Error("admin dashboard: failed to load feed statuses", "error", err)
-		feedStatusLoadError = "Feed status could not be loaded. Check the server logs and database connection before relying on feed health."
-	}
-
 	feedRows := h.adminFeedRows(feeds)
-
-	queueStats, err := h.store.QueueStats(ctx)
-	queueStatsLoadError := ""
-	if err != nil {
-		h.logger.Error("admin dashboard: failed to load queue stats", "error", err)
-		queueStats = &db.QueueStatsResult{}
-		queueStatsLoadError = "Queue summary could not be loaded. Check the server logs and database connection before relying on queue counts."
-	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
@@ -413,27 +508,34 @@ func (h *AdminHandler) HandleDashboard(w http.ResponseWriter, r *http.Request) {
 		"BootstrapWarning":        bootstrapWarning,
 	}
 	if err := h.renderer.Render(w, "admin/dashboard.html", data); err != nil {
-		h.logger.Error("admin dashboard: render failed", "error", err)
+		h.logger.Error("admin dashboard: render failed", h.adminLogAttrs(r, "error", err)...)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 	}
 }
 
 // adminFeedRow is a view model for feed status rows in admin templates.
 type adminFeedRow struct {
-	FeedName        string
-	Status          string
-	LastSyncAt      *time.Time
-	LastSyncAtTime  time.Time
-	LastSyncStatus  string
-	EntriesSynced   int
-	EntriesTotal    int
-	LastError       string
-	DurationStr     string
-	ConfigMode      string
-	ConfigEnabled   bool
-	APIKeyState     string
-	FeedKey         string
-	SyncIntervalStr string
+	FeedName              string
+	Status                string
+	LastSyncAt            *time.Time
+	LastSyncAtTime        time.Time
+	LastSyncStatus        string
+	EntriesSynced         int
+	EntriesTotal          int
+	RejectedCount         int
+	RejectedClientIP      string
+	RejectedAPIKeyID      int
+	RejectedAPIKeyName    string
+	RejectedCorrelationID string
+	LastError             string
+	DurationStr           string
+	ConfigMode            string
+	ConfigEnabled         bool
+	APIKeyState           string
+	APIKeyStateCode       string
+	FeedKey               string
+	SyncIntervalStr       string
+	SyncIntervalCode      string
 }
 
 // adminFeedHealth derives a health string from runtime config and sync status
@@ -526,11 +628,26 @@ func (h *AdminHandler) markLockoutAudited(ip string) bool {
 			continue
 		}
 		if a.lockoutAuditedAt.IsZero() || a.lockoutAuditedAt.Before(a.lockedAt) {
-			a.lockoutAuditedAt = now
 			shouldAudit = true
 		}
 	}
 	return shouldAudit
+}
+
+func (h *AdminHandler) markLockoutAuditWritten(ip string) {
+	h.loginMu.Lock()
+	defer h.loginMu.Unlock()
+
+	now := time.Now()
+	for _, key := range []string{ip, adminLoginAccountKey} {
+		a, ok := h.loginAttempts[key]
+		if !ok || !h.isAttemptLocked(key, now) {
+			continue
+		}
+		if a.lockoutAuditedAt.IsZero() || a.lockoutAuditedAt.Before(a.lockedAt) {
+			a.lockoutAuditedAt = now
+		}
+	}
 }
 
 // resetAttempts clears the failure count for the given IP and the shared admin
@@ -587,12 +704,13 @@ func (h *AdminHandler) auditLog(r *http.Request, action string, details map[stri
 	return h.writeAdminAuditLog(h.adminAuditEntry(r, action, details))
 }
 
-func (h *AdminHandler) adminAuditEntry(r *http.Request, action string, details map[string]string) *db.AdminAuditEntry {
+func (h *AdminHandler) adminAuditEntry(r *http.Request, action string, details map[string]string) *adminAuditEntry {
 	raw, _ := json.Marshal(details)
-	return &db.AdminAuditEntry{
-		Action:  action,
-		Details: raw,
-		IP:      clientIP(r),
+	return &adminAuditEntry{
+		Action:        action,
+		Details:       raw,
+		IP:            clientIP(r),
+		CorrelationID: adminRequestCorrelationID(r),
 	}
 }
 
@@ -604,7 +722,7 @@ func (h *AdminHandler) adminAuditContext() (context.Context, context.CancelFunc)
 	return context.WithTimeout(ctx, adminAuditWriteTimeout)
 }
 
-func (h *AdminHandler) writeAdminAuditLog(entry *db.AdminAuditEntry) error {
+func (h *AdminHandler) writeAdminAuditLog(entry *adminAuditEntry) error {
 	auditCtx, cancel := h.adminAuditContext()
 	defer cancel()
 
@@ -622,6 +740,51 @@ func (h *AdminHandler) auditLogBestEffort(r *http.Request, action string, detail
 	if err := h.auditLog(r, action, details); err != nil {
 		return
 	}
+}
+
+func (h *AdminHandler) adminLogAttrs(r *http.Request, attrs ...any) []any {
+	return adminLogAttrsForCorrelationID(adminRequestCorrelationID(r), attrs...)
+}
+
+func adminLogAttrsForCorrelationID(correlationID string, attrs ...any) []any {
+	out := make([]any, 0, len(attrs)+1)
+	out = append(out, attrs...)
+	out = append(out, slog.String("correlation_id", correlationID))
+	return out
+}
+
+func adminRequestCorrelationID(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	return requestctx.CorrelationIDFromContext(r.Context())
+}
+
+func (h *AdminHandler) rejectInvalidAdminCSRF(w http.ResponseWriter, r *http.Request, targetAction, redirectPath string) {
+	h.recordInvalidAdminCSRF(r, targetAction)
+	redirectAdminFormError(w, r, redirectPath, adminInvalidRequestMessage)
+}
+
+func (h *AdminHandler) recordInvalidAdminCSRF(r *http.Request, targetAction string) {
+	path := r.URL.Path
+	h.logger.Warn("admin CSRF validation failed",
+		slog.String("target_action", targetAction),
+		slog.String("path", path),
+		slog.String("client_ip", clientIP(r)),
+		slog.String("correlation_id", requestctx.CorrelationIDFromContext(r.Context())),
+	)
+	h.auditLogBestEffort(r, "admin_csrf_rejected", map[string]string{
+		"target_action": targetAction,
+		"path":          path,
+	})
+}
+
+func (h *AdminHandler) requireAudit(w http.ResponseWriter, r *http.Request, action string, details map[string]string) bool {
+	if err := h.auditLog(r, action, details); err != nil {
+		http.Error(w, "failed to record audit log", http.StatusInternalServerError)
+		return false
+	}
+	return true
 }
 
 // clientIP delegates to the shared request-context helper.

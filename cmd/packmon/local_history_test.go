@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,50 +15,148 @@ import (
 
 func TestHistoryEnabledEnvParsing(t *testing.T) {
 	tests := []struct {
-		name string
-		env  string
-		want bool
+		name   string
+		env    string
+		setEnv bool
+		want   bool
 	}{
 		{name: "default", want: true},
-		{name: "true", env: "true", want: true},
-		{name: "one", env: "1", want: true},
-		{name: "false", env: "false", want: false},
-		{name: "off", env: "off", want: false},
-		{name: "unknown defaults true", env: "maybe", want: true},
+		{name: "blank defaults true", env: "  ", setEnv: true, want: true},
+		{name: "true", env: "true", setEnv: true, want: true},
+		{name: "one", env: "1", setEnv: true, want: true},
+		{name: "false", env: "false", setEnv: true, want: false},
+		{name: "off", env: "off", setEnv: true, want: false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.env != "" {
+			if tt.setEnv {
 				t.Setenv("PACKMON_HISTORY_ENABLED", tt.env)
 			}
-			if got := historyEnabled(); got != tt.want {
+			got, err := historyEnabled()
+			if err != nil {
+				t.Fatalf("historyEnabled() error = %v", err)
+			}
+			if got != tt.want {
 				t.Fatalf("historyEnabled() = %v, want %v", got, tt.want)
 			}
 		})
 	}
 }
 
+func TestHistoryEnabledEnvRejectsUnknownBoolean(t *testing.T) {
+	t.Setenv("PACKMON_HISTORY_ENABLED", "maybe")
+
+	_, err := historyEnabled()
+	if err == nil {
+		t.Fatal("historyEnabled() error = nil, want invalid PACKMON_HISTORY_ENABLED")
+	}
+	if !strings.Contains(err.Error(), "PACKMON_HISTORY_ENABLED") {
+		t.Fatalf("historyEnabled() error = %v, want env var name", err)
+	}
+}
+
 func TestHistoryMaxScansPerRepoEnvParsing(t *testing.T) {
 	tests := []struct {
-		name string
-		env  string
-		want int
+		name   string
+		env    string
+		setEnv bool
+		want   int
 	}{
 		{name: "default", want: defaultMaxScansPerRepo},
-		{name: "valid", env: "25", want: 25},
-		{name: "zero disables retention", env: "0", want: 0},
-		{name: "negative falls back", env: "-1", want: defaultMaxScansPerRepo},
-		{name: "invalid falls back", env: "many", want: defaultMaxScansPerRepo},
+		{name: "blank defaults", env: "  ", setEnv: true, want: defaultMaxScansPerRepo},
+		{name: "valid", env: "25", setEnv: true, want: 25},
+		{name: "zero disables retention", env: "0", setEnv: true, want: 0},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.env != "" {
+			if tt.setEnv {
 				t.Setenv("PACKMON_HISTORY_MAX_SCANS_PER_REPO", tt.env)
 			}
-			if got := historyMaxScansPerRepo(); got != tt.want {
+			got, err := historyMaxScansPerRepo()
+			if err != nil {
+				t.Fatalf("historyMaxScansPerRepo() error = %v", err)
+			}
+			if got != tt.want {
 				t.Fatalf("historyMaxScansPerRepo() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHistoryMaxScansPerRepoRejectsMalformedOrNegativeEnv(t *testing.T) {
+	tests := []struct {
+		name string
+		env  string
+	}{
+		{name: "malformed integer", env: "many"},
+		{name: "negative retention", env: "-1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("PACKMON_HISTORY_MAX_SCANS_PER_REPO", tt.env)
+
+			_, err := historyMaxScansPerRepo()
+			if err == nil {
+				t.Fatal("historyMaxScansPerRepo() error = nil, want invalid PACKMON_HISTORY_MAX_SCANS_PER_REPO")
+			}
+			if !strings.Contains(err.Error(), "PACKMON_HISTORY_MAX_SCANS_PER_REPO") {
+				t.Fatalf("historyMaxScansPerRepo() error = %v, want env var name", err)
+			}
+		})
+	}
+}
+
+func TestHistoryMaxAgeEnvParsing(t *testing.T) {
+	tests := []struct {
+		name   string
+		env    string
+		setEnv bool
+		want   time.Duration
+	}{
+		{name: "default", want: defaultHistoryMaxAge},
+		{name: "blank defaults", env: "  ", setEnv: true, want: defaultHistoryMaxAge},
+		{name: "valid duration", env: "48h", setEnv: true, want: 48 * time.Hour},
+		{name: "zero disables age retention", env: "0", setEnv: true, want: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.setEnv {
+				t.Setenv("PACKMON_HISTORY_MAX_AGE", tt.env)
+			}
+			got, err := historyMaxAge()
+			if err != nil {
+				t.Fatalf("historyMaxAge() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("historyMaxAge() = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHistoryMaxAgeRejectsMalformedOrNegativeEnv(t *testing.T) {
+	tests := []struct {
+		name string
+		env  string
+	}{
+		{name: "malformed duration", env: "many"},
+		{name: "negative duration", env: "-1h"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("PACKMON_HISTORY_MAX_AGE", tt.env)
+
+			_, err := historyMaxAge()
+			if err == nil {
+				t.Fatal("historyMaxAge() error = nil, want invalid PACKMON_HISTORY_MAX_AGE")
+			}
+			if !strings.Contains(err.Error(), "PACKMON_HISTORY_MAX_AGE") {
+				t.Fatalf("historyMaxAge() error = %v, want env var name", err)
 			}
 		})
 	}
@@ -155,21 +254,21 @@ func TestScanRepoMetadataTimesOutGitProbe(t *testing.T) {
 		gitMetadataTimeout = originalGitMetadataTimeout
 	})
 
-	gitMetadataTimeout = 20 * time.Millisecond
+	gitMetadataTimeout = time.Hour
 	calls := 0
+	sawDeadline := false
 	gitCommandOutput = func(ctx context.Context, args ...string) ([]byte, error) {
 		calls++
-		<-ctx.Done()
-		return nil, ctx.Err()
+		_, sawDeadline = ctx.Deadline()
+		return nil, context.DeadlineExceeded
 	}
 
-	start := time.Now()
 	repoName, branch, commit := scanRepoMetadata(repoDir)
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Fatalf("scanRepoMetadata took %s, want bounded git metadata probe", elapsed)
-	}
 	if repoName != "repo" || branch != "" || commit != "" {
 		t.Fatalf("scanRepoMetadata(timeout) = %q, %q, %q; want fallback repo name only", repoName, branch, commit)
+	}
+	if !sawDeadline {
+		t.Fatal("git command context had no deadline")
 	}
 	if calls != 1 {
 		t.Fatalf("git command calls = %d, want only root probe after timeout", calls)

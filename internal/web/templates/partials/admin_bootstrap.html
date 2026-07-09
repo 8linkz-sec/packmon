@@ -1,7 +1,7 @@
 {{define "admin-bootstrap-warning"}}
 {{if .BootstrapWarning}}
 {{template "admin-alert-start" dict "Variant" "warning" "Icon" true}}
-<h3 class="font-semibold">Bootstrap password still active</h3>
+<p class="text-sm font-semibold text-amber-950">Bootstrap password still active</p>
 <p class="mt-1">
   The admin password was set from the <code>PACKMON_ADMIN_INITIAL_PASSWORD</code> environment variable
   and has not been changed. <a href="/admin/settings" class="underline font-medium">Change admin password</a>

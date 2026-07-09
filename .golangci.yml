@@ -12,12 +12,12 @@ linters:
     - staticcheck
     - unused
   settings:
-    gosec:
-      excludes:
-        - G104
     misspell:
       ignore-rules:
         - packageid
+    nolintlint:
+      require-explanation: true
+      require-specific: true
 
 formatters:
   enable:

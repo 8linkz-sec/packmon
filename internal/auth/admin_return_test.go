@@ -14,7 +14,8 @@ func TestSafeAdminReturnTarget(t *testing.T) {
 		want string
 	}{
 		{raw: "/admin/settings", want: "/admin/settings"},
-		{raw: "/admin/feeds?partial=runtime", want: "/admin/feeds?partial=runtime"},
+		{raw: "/admin/feeds?partial=runtime", want: "/admin/feeds"},
+		{raw: "/admin/feeds?partial=runtime&err=stale", want: "/admin/feeds?err=stale"},
 		{raw: "/admin", want: "/admin"},
 		{raw: "/admin/login", want: ""},
 		{raw: "/search", want: ""},
@@ -51,6 +52,36 @@ func TestSafeSameOriginRedirectTarget(t *testing.T) {
 		if got := SafeSameOriginRedirectTarget(tt.raw, tt.fallback); got != tt.want {
 			t.Fatalf("SafeSameOriginRedirectTarget(%q, %q) = %q, want %q", tt.raw, tt.fallback, got, tt.want)
 		}
+	}
+}
+
+func TestRedirectSameOriginUsesSanitizedLocation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		target string
+		want   string
+	}{
+		{name: "safe admin path", target: "/admin/queue?msg=Saved", want: "/admin/queue?msg=Saved"},
+		{name: "unsafe absolute url", target: "https://evil.example/admin", want: "/"},
+		{name: "unsafe protocol relative url", target: "//evil.example/admin", want: "/"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/admin", nil)
+
+			RedirectSameOrigin(rec, req, tt.target, http.StatusSeeOther)
+
+			if rec.Code != http.StatusSeeOther {
+				t.Fatalf("status = %d, want %d", rec.Code, http.StatusSeeOther)
+			}
+			if got := rec.Header().Get("Location"); got != tt.want {
+				t.Fatalf("Location = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

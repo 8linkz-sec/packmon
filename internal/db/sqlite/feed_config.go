@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"time"
 
 	"github.com/8linkz-sec/packmon/internal/db"
 )
@@ -14,7 +15,15 @@ func (*Store) UpsertFeedConfig(context.Context, *db.FeedConfig) error {
 	return nil
 }
 
+func (*Store) UpsertFeedConfigWithAudit(context.Context, *db.FeedConfig, *db.AdminAuditEntry) error {
+	return nil
+}
+
 func (*Store) DeleteFeedConfig(context.Context, string) error {
+	return nil
+}
+
+func (*Store) DeleteFeedConfigWithAudit(context.Context, string, *time.Time, *db.AdminAuditEntry) error {
 	return nil
 }
 

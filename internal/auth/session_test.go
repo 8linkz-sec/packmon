@@ -11,7 +11,7 @@ import (
 // newTestSessionManager creates a SessionManager with a short maxAge for
 // testing. It uses secure=false so we do not need TLS in tests.
 func newTestSessionManager(maxAge time.Duration) *SessionManager {
-	return NewSessionManager(context.Background(), maxAge, false)
+	return NewSessionManagerWithIdleTimeout(context.Background(), maxAge, DefaultAdminIdleTimeout, false)
 }
 
 // createSession is a helper that creates a session and returns both the
@@ -20,12 +20,12 @@ func createSession(t *testing.T, sm *SessionManager) (*Session, string) {
 	t.Helper()
 
 	rec := httptest.NewRecorder()
-	sess, err := sm.Create(rec)
+	sess, err := sm.CreateAdmin(rec, false)
 	if err != nil {
-		t.Fatalf("Create returned error: %v", err)
+		t.Fatalf("CreateAdmin returned error: %v", err)
 	}
 	if sess == nil {
-		t.Fatal("Create returned nil session")
+		t.Fatal("CreateAdmin returned nil session")
 	}
 
 	// Extract the session ID from the Set-Cookie header.
@@ -55,7 +55,20 @@ func requestWithSession(sessionID string) *http.Request {
 	return req
 }
 
-func TestCreateGeneratesUniqueSessionIDs(t *testing.T) {
+func mutateStoredSession(t *testing.T, sm *SessionManager, sessionID string, mutate func(*Session)) {
+	t.Helper()
+
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	sess, ok := sm.sessions[sessionID]
+	if !ok {
+		t.Fatalf("session %q not found", sessionID)
+	}
+	mutate(sess)
+}
+
+func TestCreateAdminGeneratesUniqueSessionIDs(t *testing.T) {
 	t.Parallel()
 
 	sm := newTestSessionManager(time.Hour)
@@ -75,7 +88,7 @@ func TestCreateGeneratesUniqueSessionIDs(t *testing.T) {
 	}
 }
 
-func TestCreateSetsSessionFields(t *testing.T) {
+func TestCreateAdminSetsSessionFields(t *testing.T) {
 	t.Parallel()
 
 	sm := newTestSessionManager(time.Hour)
@@ -340,8 +353,7 @@ func TestDeleteWithoutCookieIsNoop(t *testing.T) {
 func TestSessionExpiryByMaxAge(t *testing.T) {
 	t.Parallel()
 
-	// Use a very short maxAge so the session expires quickly.
-	sm := newTestSessionManager(50 * time.Millisecond)
+	sm := newTestSessionManager(time.Hour)
 	_, cookieID := createSession(t, sm)
 
 	// Immediately the session should be valid.
@@ -350,8 +362,9 @@ func TestSessionExpiryByMaxAge(t *testing.T) {
 		t.Fatal("session should be valid immediately after creation")
 	}
 
-	// Wait for it to expire.
-	time.Sleep(100 * time.Millisecond)
+	mutateStoredSession(t, sm, cookieID, func(sess *Session) {
+		sess.expiresAt = time.Now().Add(-time.Second)
+	})
 
 	req2 := requestWithSession(cookieID)
 	if sm.Get(req2) != nil {
@@ -363,11 +376,11 @@ func TestGetUpdatesLastAccessed(t *testing.T) {
 	t.Parallel()
 
 	sm := newTestSessionManager(time.Hour)
-	sess, cookieID := createSession(t, sm)
-	initialAccess := sess.LastAccessed
-
-	// Small delay to ensure time moves forward.
-	time.Sleep(10 * time.Millisecond)
+	_, cookieID := createSession(t, sm)
+	initialAccess := time.Now().Add(-time.Minute)
+	mutateStoredSession(t, sm, cookieID, func(sess *Session) {
+		sess.LastAccessed = initialAccess
+	})
 
 	req := requestWithSession(cookieID)
 	got := sm.Get(req)
@@ -383,10 +396,15 @@ func TestGetUpdatesLastAccessed(t *testing.T) {
 func TestGetExpiresIdleAdminSession(t *testing.T) {
 	t.Parallel()
 
-	sm := NewSessionManagerWithIdleTimeout(context.Background(), time.Hour, 100*time.Millisecond, false)
+	idleTimeout := 30 * time.Minute
+	sm := NewSessionManagerWithIdleTimeout(context.Background(), 2*time.Hour, idleTimeout, false)
 	_, cookieID := createSession(t, sm)
 
-	time.Sleep(200 * time.Millisecond)
+	now := time.Now()
+	mutateStoredSession(t, sm, cookieID, func(sess *Session) {
+		sess.LastAccessed = now.Add(-idleTimeout - time.Minute)
+		sess.expiresAt = now.Add(time.Hour)
+	})
 
 	if got := sm.Get(requestWithSession(cookieID)); got != nil {
 		t.Fatalf("Get returned idle session %+v, want nil", got)
@@ -396,15 +414,25 @@ func TestGetExpiresIdleAdminSession(t *testing.T) {
 func TestGetRefreshesIdleWindow(t *testing.T) {
 	t.Parallel()
 
-	sm := NewSessionManagerWithIdleTimeout(context.Background(), time.Hour, 500*time.Millisecond, false)
+	idleTimeout := 30 * time.Minute
+	sm := NewSessionManagerWithIdleTimeout(context.Background(), 2*time.Hour, idleTimeout, false)
 	_, cookieID := createSession(t, sm)
 
-	time.Sleep(100 * time.Millisecond)
-	if got := sm.Get(requestWithSession(cookieID)); got == nil {
+	originalAccess := time.Now().Add(-idleTimeout + time.Minute)
+	mutateStoredSession(t, sm, cookieID, func(sess *Session) {
+		sess.LastAccessed = originalAccess
+		sess.expiresAt = time.Now().Add(time.Hour)
+	})
+
+	got := sm.Get(requestWithSession(cookieID))
+	if got == nil {
 		t.Fatal("Get returned nil before idle timeout")
 	}
+	if !got.LastAccessed.After(originalAccess) {
+		t.Fatalf("LastAccessed was not refreshed: original=%v, got=%v", originalAccess, got.LastAccessed)
+	}
 
-	time.Sleep(150 * time.Millisecond)
+	sm.cleanupExpiredSessions(originalAccess.Add(idleTimeout + 30*time.Second))
 	if got := sm.Get(requestWithSession(cookieID)); got == nil {
 		t.Fatal("Get returned nil after activity refreshed the idle window")
 	}
@@ -493,25 +521,25 @@ func TestCreatePreAuthIsNonAdminAndShortLived(t *testing.T) {
 	}
 }
 
-func TestNewSessionManagerDefaultsMaxAge(t *testing.T) {
+func TestNewSessionManagerWithIdleTimeoutDefaultsMaxAge(t *testing.T) {
 	t.Parallel()
 
-	sm := NewSessionManager(context.Background(), 0, false)
-	// We cannot read maxAge directly, but creating a session with maxAge=0
-	// should default to 8h. We verify the cookie MaxAge reflects this.
+	sm := NewSessionManagerWithIdleTimeout(context.Background(), 0, DefaultAdminIdleTimeout, false)
 	rec := httptest.NewRecorder()
-	_, err := sm.Create(rec)
+	sess, err := sm.CreateAdmin(rec, false)
 	if err != nil {
-		t.Fatalf("Create returned error: %v", err)
+		t.Fatalf("CreateAdmin returned error: %v", err)
+	}
+	if sess.expiresAt.IsZero() || time.Until(sess.expiresAt) < 7*time.Hour || time.Until(sess.expiresAt) > 8*time.Hour+time.Second {
+		t.Fatalf("session expiry = %s from now, want default 8h server-side lifetime", time.Until(sess.expiresAt))
 	}
 
 	resp := rec.Result()
 	defer resp.Body.Close() //nolint:errcheck // test helper
 	for _, c := range resp.Cookies() {
 		if c.Name == SessionCookieName {
-			expected := int((8 * time.Hour).Seconds())
-			if c.MaxAge != expected {
-				t.Fatalf("cookie MaxAge = %d, want %d (8h default)", c.MaxAge, expected)
+			if c.MaxAge != 0 {
+				t.Fatalf("cookie MaxAge = %d, want 0 for browser-session admin cookie", c.MaxAge)
 			}
 			return
 		}
@@ -548,11 +576,11 @@ func TestCSRFTokenIsSetOnSession(t *testing.T) {
 func TestCookieAttributes(t *testing.T) {
 	t.Parallel()
 
-	sm := NewSessionManager(context.Background(), time.Hour, true) // secure=true
+	sm := NewSessionManagerWithIdleTimeout(context.Background(), time.Hour, DefaultAdminIdleTimeout, true) // secure=true
 	rec := httptest.NewRecorder()
-	_, err := sm.Create(rec)
+	_, err := sm.CreateAdmin(rec, false)
 	if err != nil {
-		t.Fatalf("Create returned error: %v", err)
+		t.Fatalf("CreateAdmin returned error: %v", err)
 	}
 
 	resp := rec.Result()
@@ -570,6 +598,9 @@ func TestCookieAttributes(t *testing.T) {
 			}
 			if c.Path != "/admin" {
 				t.Fatalf("cookie Path = %q, want /admin", c.Path)
+			}
+			if c.MaxAge != 0 {
+				t.Fatalf("cookie MaxAge = %d, want 0 for browser-session admin cookie", c.MaxAge)
 			}
 			return
 		}
