@@ -5,6 +5,8 @@ ci/ @8linkz-sec/security-engineering
 deploy/ @8linkz-sec/security-engineering
 Dockerfile @8linkz-sec/security-engineering
 docker-compose.yml @8linkz-sec/security-engineering
+docker-compose.prod.yml @8linkz-sec/security-engineering
+docker-compose.override.yml @8linkz-sec/security-engineering
 SECURITY.md @8linkz-sec/security-engineering
 DESIGN.md @8linkz-sec/security-engineering
 cmd/packmon-server/ @8linkz-sec/security-engineering

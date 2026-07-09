@@ -68,7 +68,7 @@ For the repository-provided Compose model, run the same policy as an explicit
 operator action:
 
 ```bash
-docker compose run --rm packmon-backup
+docker compose -f docker-compose.yml -f docker-compose.prod.yml run --rm packmon-backup
 ```
 
 For Docker Compose deployments, run the same command from a host or job

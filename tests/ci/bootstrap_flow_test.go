@@ -42,7 +42,7 @@ func TestOverrideDefinesInitSecretsAndMigrateChain(t *testing.T) {
 	}
 }
 
-func TestBaseComposeKeepsStrictSecretGuards(t *testing.T) {
+func TestProdOverlayHoldsStrictSecretGuardsAndBaseStaysPermissive(t *testing.T) {
 	t.Parallel()
 	base := repoFile(t, "docker-compose.yml")
 	prod := repoFile(t, "docker-compose.prod.yml")
