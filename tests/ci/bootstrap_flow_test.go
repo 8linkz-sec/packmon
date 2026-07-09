@@ -154,6 +154,7 @@ func TestServerComposeIsSelfContainedAndHardened(t *testing.T) {
 		"PACKMON_ALLOW_INSECURE_LOCAL_HTTP:",
 		`PACKMON_METRICS_HOST: "127.0.0.1"`,
 		"${PACKMON_TRUSTED_PROXIES:?",
+		"PACKMON_DB_HOST: ${PACKMON_DB_HOST:-postgres}",
 		"env_file:",
 		"required: false",
 		"restart: unless-stopped",

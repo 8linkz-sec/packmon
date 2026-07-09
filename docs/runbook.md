@@ -153,6 +153,11 @@ curl -fsS http://127.0.0.1:8080/version
 curl -fsS http://127.0.0.1:9090/metrics
 ```
 
+Note: `docker-compose.server.yml` does not publish the metrics port (metrics
+stay on container loopback). Verify metrics with
+`docker compose -f docker-compose.server.yml exec packmon-server wget -qO- http://127.0.0.1:9090/metrics`
+instead of a host curl.
+
 ## Upgrade And Rollback
 
 Packmon server startup verifies the schema version and does not run migrations

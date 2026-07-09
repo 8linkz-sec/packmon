@@ -65,6 +65,11 @@ services:
       # Required: the reverse proxy's IP or CIDR (e.g. the Docker gateway or your
       # proxy host). Startup fails closed if unset.
       PACKMON_TRUSTED_PROXIES: "${PACKMON_TRUSTED_PROXIES:?missing. Set your reverse proxy IP/CIDR; the server serves plaintext HTTP and trusts X-Forwarded-* only from here. See README → Troubleshooting}"
+      PACKMON_DB_HOST: ${PACKMON_DB_HOST:-postgres}
+      PACKMON_DB_PORT: ${PACKMON_DB_PORT:-5432}
+      PACKMON_DB_NAME: ${PACKMON_DB_NAME:-packmon}
+      PACKMON_DB_USER: ${PACKMON_DB_USER:-packmon}
+      PACKMON_DB_SSLMODE: ${PACKMON_DB_SSLMODE:-disable}
       PACKMON_DB_PASSWORD: "${PACKMON_DB_PASSWORD:?missing. Set in .env/secrets manager. See README → Troubleshooting}"
       PACKMON_ADMIN_INITIAL_PASSWORD: "${PACKMON_ADMIN_INITIAL_PASSWORD:?missing. Set in .env/secrets manager. See README → Troubleshooting}"
       PACKMON_ENCRYPTION_KEY: "${PACKMON_ENCRYPTION_KEY:?missing (base64 32 bytes). Set in .env/secrets manager. See README → Troubleshooting}"
