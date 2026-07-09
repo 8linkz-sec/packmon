@@ -86,6 +86,16 @@ func TestEffectiveHardExitDelayExceedsConfiguredShutdownTimeout(t *testing.T) {
 	}
 }
 
+// TestRequireProductionFieldEncryption covers the remaining
+// requireProductionFieldEncryption guard: whether the *constructed*
+// encryptor reports itself active. Raw key format/length validation
+// (base64, byte length) now lives in config.ValidateProductionSecrets and
+// is covered by internal/config/secrets_test.go; run() calls that
+// aggregated validator before this guard even runs, so a malformed key
+// never reaches here in production. secret.NewFieldEncryptor stretches
+// any non-empty raw key via SHA-256, so Active() is true for any
+// non-empty key regardless of its format -- this guard exists to catch a
+// nil/never-constructed encryptor, not a malformed key.
 func TestRequireProductionFieldEncryption(t *testing.T) {
 	t.Parallel()
 
@@ -93,98 +103,54 @@ func TestRequireProductionFieldEncryption(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFieldEncryptor(inactive) error = %v", err)
 	}
-	weakActive, err := secret.NewFieldEncryptor("test-encryption-key")
-	if err != nil {
-		t.Fatalf("NewFieldEncryptor(weak active) error = %v", err)
-	}
 	helperStyleKey := base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))
-	helperStyleActive, err := secret.NewFieldEncryptor(helperStyleKey)
+	active, err := secret.NewFieldEncryptor(helperStyleKey)
 	if err != nil {
-		t.Fatalf("NewFieldEncryptor(helper-style active) error = %v", err)
+		t.Fatalf("NewFieldEncryptor(active) error = %v", err)
 	}
 
 	production := &config.Config{Server: config.ServerConfig{Mode: config.ModeProduction}}
 	if err := requireProductionFieldEncryption(production, inactive); err == nil {
 		t.Fatal("requireProductionFieldEncryption(production inactive) error = nil")
 	}
-	production.Admin.EncryptionKey = "test-encryption-key"
-	if err := requireProductionFieldEncryption(production, weakActive); err == nil {
-		t.Fatal("requireProductionFieldEncryption(production weak active) error = nil")
-	}
-
-	for _, tt := range []struct {
-		name   string
-		rawKey string
-	}{
-		{name: "non-base64", rawKey: "not-base64!"},
-		{name: "short", rawKey: base64.StdEncoding.EncodeToString([]byte("short"))},
-		{name: "31-bytes", rawKey: base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcde"))},
-		{name: "33-bytes", rawKey: base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef0"))},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := &config.Config{
-				Server: config.ServerConfig{Mode: config.ModeProduction},
-				Admin:  config.AdminConfig{EncryptionKey: tt.rawKey},
-			}
-			active, err := secret.NewFieldEncryptor(tt.rawKey)
-			if err != nil {
-				t.Fatalf("NewFieldEncryptor(%q) error = %v", tt.rawKey, err)
-			}
-			if err := requireProductionFieldEncryption(cfg, active); err == nil {
-				t.Fatalf("requireProductionFieldEncryption(%q) error = nil", tt.rawKey)
-			}
-		})
+	if err := requireProductionFieldEncryption(production, nil); err == nil {
+		t.Fatal("requireProductionFieldEncryption(production nil encryptor) error = nil")
 	}
 
 	production.Admin.EncryptionKey = helperStyleKey
-	if err := requireProductionFieldEncryption(production, helperStyleActive); err != nil {
-		t.Fatalf("requireProductionFieldEncryption(production helper-style active) error = %v", err)
+	if err := requireProductionFieldEncryption(production, active); err != nil {
+		t.Fatalf("requireProductionFieldEncryption(production active) error = %v", err)
 	}
+
 	development := &config.Config{Server: config.ServerConfig{Mode: config.ModeDevelopment}}
 	if err := requireProductionFieldEncryption(development, inactive); err != nil {
 		t.Fatalf("requireProductionFieldEncryption(development inactive) error = %v", err)
 	}
-	if err := requireProductionFieldEncryption(development, weakActive); err != nil {
-		t.Fatalf("requireProductionFieldEncryption(development weak active) error = %v", err)
+	if err := requireProductionFieldEncryption(development, active); err != nil {
+		t.Fatalf("requireProductionFieldEncryption(development active) error = %v", err)
 	}
 }
 
-func TestRequireProductionAdminAuditHMACKey(t *testing.T) {
+// TestRequiredSecretSpecLooksUpAdminAuditHMACKey covers the helper that
+// replaced requireProductionAdminAuditHMACKey for callers (e.g. privacy
+// export) that validate a single production secret outside of full server
+// startup. Aggregated production validation across all secrets, including
+// PACKMON_ADMIN_AUDIT_HMAC_KEY, is covered by
+// internal/config/secrets_test.go's TestValidateProductionSecretsAggregates
+// and TestValidateProductionSecretsSkipsDevelopment.
+func TestRequiredSecretSpecLooksUpAdminAuditHMACKey(t *testing.T) {
 	t.Parallel()
 
-	production := &config.Config{Server: config.ServerConfig{Mode: config.ModeProduction}}
-	if err := requireProductionAdminAuditHMACKey(production); err == nil {
-		t.Fatal("requireProductionAdminAuditHMACKey(production empty) error = nil")
+	spec := requiredSecretSpec("PACKMON_ADMIN_AUDIT_HMAC_KEY")
+	if spec.Key != "PACKMON_ADMIN_AUDIT_HMAC_KEY" || spec.Kind != config.SecretBase64Bytes || spec.Bytes != productionFieldEncryptionKeyBytes {
+		t.Fatalf("requiredSecretSpec(PACKMON_ADMIN_AUDIT_HMAC_KEY) = %+v, want base64/%d spec", spec, productionFieldEncryptionKeyBytes)
 	}
-
-	for _, tt := range []struct {
-		name   string
-		rawKey string
-	}{
-		{name: "non-base64", rawKey: "not-base64!"},
-		{name: "short", rawKey: base64.StdEncoding.EncodeToString([]byte("short"))},
-		{name: "31-bytes", rawKey: base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcde"))},
-		{name: "33-bytes", rawKey: base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef0"))},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := &config.Config{
-				Server: config.ServerConfig{Mode: config.ModeProduction},
-				Admin:  config.AdminConfig{AdminAuditHMACKey: tt.rawKey},
-			}
-			if err := requireProductionAdminAuditHMACKey(cfg); err == nil {
-				t.Fatalf("requireProductionAdminAuditHMACKey(%q) error = nil", tt.rawKey)
-			}
-		})
+	if err := spec.Validate(""); err == nil {
+		t.Fatal("spec.Validate(empty) error = nil")
 	}
-
-	production.Admin.AdminAuditHMACKey = base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))
-	if err := requireProductionAdminAuditHMACKey(production); err != nil {
-		t.Fatalf("requireProductionAdminAuditHMACKey(production valid) error = %v", err)
-	}
-
-	development := &config.Config{Server: config.ServerConfig{Mode: config.ModeDevelopment}}
-	if err := requireProductionAdminAuditHMACKey(development); err != nil {
-		t.Fatalf("requireProductionAdminAuditHMACKey(development empty) error = %v", err)
+	valid := base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))
+	if err := spec.Validate(valid); err != nil {
+		t.Fatalf("spec.Validate(valid) error = %v", err)
 	}
 }
 

@@ -164,6 +164,10 @@ func run() error {
 
 	logRuntimeConfigWarnings(runtimeCfg)
 
+	if err := config.ValidateProductionSecrets(os.Getenv); err != nil {
+		return withConfiguredFatalLogger(err, logger)
+	}
+
 	runtimeStore, defaultFeeds, err := bootstrapRuntimeDatabase(context.Background(), runtimeCfg, runtimeDatabaseBootstrapHooks{})
 	if err != nil {
 		return withConfiguredFatalLogger(err, logger)
@@ -347,10 +351,6 @@ func openRuntimeStore(parent context.Context, cfg *config.Config, logger *slog.L
 		logger.Error("feed API-key encryption is required in production")
 		return nil, err
 	}
-	if err := requireProductionAdminAuditHMACKey(cfg); err != nil {
-		logger.Error("admin audit HMAC key is required in production")
-		return nil, err
-	}
 	if err := configureAdminAuditDigestHMACKey(cfg); err != nil {
 		return nil, err
 	}
@@ -478,38 +478,33 @@ func shutdownRuntime(runtime *runtimeServer, runErr error) error {
 	return runErr
 }
 
+// requireProductionFieldEncryption verifies the *constructed* encryptor is
+// active, not just that the raw key string looks well-formed. Raw
+// base64/length validation for PACKMON_ENCRYPTION_KEY now happens earlier in
+// run() via config.ValidateProductionSecrets; this guard catches the case
+// where secret.NewFieldEncryptor rejected a key that passed that format
+// check for some other reason.
 func requireProductionFieldEncryption(cfg *config.Config, encryptor *secret.FieldEncryptor) error {
 	if cfg == nil || cfg.IsDevelopment() {
 		return nil
 	}
-	if encryptor == nil || !encryptor.Active() || strings.TrimSpace(cfg.Admin.EncryptionKey) == "" {
+	if encryptor == nil || !encryptor.Active() {
 		return fmt.Errorf("PACKMON_ENCRYPTION_KEY is required in production to protect feed API keys at rest")
-	}
-	rawKey, err := base64.StdEncoding.DecodeString(cfg.Admin.EncryptionKey)
-	if err != nil {
-		return fmt.Errorf("PACKMON_ENCRYPTION_KEY must be base64-encoded %d random bytes in production: %w", productionFieldEncryptionKeyBytes, err)
-	}
-	if len(rawKey) != productionFieldEncryptionKeyBytes {
-		return fmt.Errorf("PACKMON_ENCRYPTION_KEY must decode to %d bytes in production (got %d)", productionFieldEncryptionKeyBytes, len(rawKey))
 	}
 	return nil
 }
 
-func requireProductionAdminAuditHMACKey(cfg *config.Config) error {
-	if cfg == nil || cfg.IsDevelopment() {
-		return nil
+// requiredSecretSpec looks up a config.SecretSpec from
+// config.RequiredSecrets() by key. Used by commands (e.g. privacy export)
+// that need to validate a single production secret outside of full server
+// startup, where config.ValidateProductionSecrets validates all of them.
+func requiredSecretSpec(key string) config.SecretSpec {
+	for _, s := range config.RequiredSecrets() {
+		if s.Key == key {
+			return s
+		}
 	}
-	if strings.TrimSpace(cfg.Admin.AdminAuditHMACKey) == "" {
-		return fmt.Errorf("PACKMON_ADMIN_AUDIT_HMAC_KEY is required in production to protect admin audit digests")
-	}
-	rawKey, err := base64.StdEncoding.DecodeString(cfg.Admin.AdminAuditHMACKey)
-	if err != nil {
-		return fmt.Errorf("PACKMON_ADMIN_AUDIT_HMAC_KEY must be base64-encoded %d random bytes in production: %w", productionFieldEncryptionKeyBytes, err)
-	}
-	if len(rawKey) != productionFieldEncryptionKeyBytes {
-		return fmt.Errorf("PACKMON_ADMIN_AUDIT_HMAC_KEY must decode to %d bytes in production (got %d)", productionFieldEncryptionKeyBytes, len(rawKey))
-	}
-	return nil
+	return config.SecretSpec{Key: key, Kind: config.SecretBase64Bytes, Bytes: productionFieldEncryptionKeyBytes}
 }
 
 func configureAdminAuditDigestHMACKey(cfg *config.Config) error {

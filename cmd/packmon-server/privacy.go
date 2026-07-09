@@ -67,8 +67,11 @@ func runPrivacyExport(args []string) error {
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
-	if err := requireProductionAdminAuditHMACKey(cfg); err != nil {
-		return err
+	if !cfg.IsDevelopment() {
+		spec := requiredSecretSpec("PACKMON_ADMIN_AUDIT_HMAC_KEY")
+		if err := spec.Validate(cfg.Admin.AdminAuditHMACKey); err != nil {
+			return fmt.Errorf("%s is required in production to protect admin audit digests: %w", spec.Key, err)
+		}
 	}
 	if err := configureAdminAuditDigestHMACKey(cfg); err != nil {
 		return err
