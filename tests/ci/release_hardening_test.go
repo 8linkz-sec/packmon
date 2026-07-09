@@ -298,7 +298,7 @@ func TestGoBuildSurfacesEnforceReadonlyModuleState(t *testing.T) {
 		t.Fatal("Dockerfile build stage must set GOFLAGS=-mod=readonly")
 	}
 	assertSubstringOrder(t, dockerText, "ENV GOFLAGS=-mod=readonly", "RUN go mod download")
-	assertSubstringOrder(t, dockerText, "ENV GOFLAGS=-mod=readonly", "RUN CGO_ENABLED=0 go build")
+	assertSubstringOrder(t, dockerText, "ENV GOFLAGS=-mod=readonly", "CGO_ENABLED=0 go build")
 
 	makeData, err := os.ReadFile(filepath.Join("..", "..", "Makefile")) //nolint:gosec // static repository fixture path
 	if err != nil {

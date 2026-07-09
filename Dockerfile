@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 ARG PACKMON_GO_BUILDER_IMAGE=golang:1.26.4-alpine@sha256:3ad57304ad93bbec8548a0437ad9e06a455660655d9af011d58b993f6f615648
 ARG PACKMON_ALPINE_RUNTIME_IMAGE=alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
@@ -13,13 +14,19 @@ ARG VERSION=dev
 ARG COMMIT=none
 ARG DATE=unknown
 
-RUN CGO_ENABLED=0 go build -trimpath \
+# Persist the Go build cache across image builds so an incremental
+# `docker compose up --build` recompiles only changed packages instead of the
+# whole dependency tree (modernc.org/sqlite alone is a heavy compile).
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -trimpath \
     -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${DATE}" \
     -o /packmon ./cmd/packmon
-RUN CGO_ENABLED=0 go build -trimpath \
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -trimpath \
     -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${DATE}" \
     -o /packmon-server ./cmd/packmon-server
-RUN go install github.com/google/go-licenses@v1.6.0 && \
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    go install github.com/google/go-licenses@v1.6.0 && \
     go-licenses save ./cmd/packmon ./cmd/packmon-server --save_path /go-license-notices --force \
       --ignore github.com/8linkz-sec/packmon \
       --ignore modernc.org/mathutil
