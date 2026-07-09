@@ -29,8 +29,8 @@ later.
 
 Current local scope:
 
-- `scripts/start-local-stack.ps1` starts PostgreSQL, runs migrations, and starts
-  `packmon-server`;
+- `docker compose run --rm init-secrets` followed by `docker compose up` starts
+  PostgreSQL, runs migrations automatically, and starts `packmon-server`;
 - the admin UI and API are reachable through `http://localhost:8080`;
 - metrics are reachable locally through `127.0.0.1:9090`;
 - the CLI/agent can scan against the local server with

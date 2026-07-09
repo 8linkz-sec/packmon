@@ -34,7 +34,7 @@ func TestDockerEnvExampleKeepsAccountGatedFeedsDisabled(t *testing.T) {
 	}
 }
 
-func TestReadmeDockerQuickStartUsesLocalFirstStackHelper(t *testing.T) {
+func TestReadmeDockerQuickStartUsesInitSecretsFlow(t *testing.T) {
 	t.Parallel()
 
 	data, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
@@ -43,9 +43,9 @@ func TestReadmeDockerQuickStartUsesLocalFirstStackHelper(t *testing.T) {
 	}
 	text := string(data)
 
-	startIndex := strings.Index(text, "scripts\\start-local-stack.ps1")
+	startIndex := strings.Index(text, "docker compose run --rm init-secrets")
 	if startIndex < 0 {
-		t.Fatal("README Docker quick start must show the Windows local stack helper")
+		t.Fatal("README Docker quick start must show the init-secrets flow")
 	}
 	agentCheckIndex := strings.Index(text, `.\scripts\check-requirements.ps1 -Profile agent`)
 	if agentCheckIndex < 0 {
@@ -76,11 +76,11 @@ func TestReadmeDockerQuickStartUsesLocalFirstStackHelper(t *testing.T) {
 	if startIndex <= descriptionIndex || startIndex >= capabilitiesIndex {
 		t.Fatal("README Docker quick start must appear near the top, directly after the short product description")
 	}
-	if !strings.Contains(text, "scripts/start-local-stack.sh") {
-		t.Fatal("README Docker quick start must show the Bash local stack helper")
+	if !strings.Contains(text, "docker compose up") {
+		t.Fatal("README Docker quick start must show the docker compose up step")
 	}
 	if strings.Contains(text[:startIndex], "Copy-Item .env.example .env") || strings.Contains(text[:startIndex], "cp .env.example .env") {
-		t.Fatal("README Docker quick start must not require manually copying .env before the local stack helper")
+		t.Fatal("README Docker quick start must not require manually copying .env before init-secrets")
 	}
 	if strings.Contains(text[:startIndex], "edit `.env`") {
 		t.Fatal("README Docker quick start must not require editing .env before stack startup")
@@ -93,113 +93,8 @@ func TestReadmeDockerQuickStartUsesLocalFirstStackHelper(t *testing.T) {
 		"do not print generated secret values",
 	} {
 		if !strings.Contains(collapsedReadme, want) {
-			t.Fatalf("README Docker quick start must document local-first helper behavior with %q", want)
+			t.Fatalf("README Docker quick start must document init-secrets flow behavior with %q", want)
 		}
-	}
-
-	for _, rel := range []string{
-		filepath.Join("scripts", "start-local-stack.ps1"),
-		filepath.Join("scripts", "start-local-stack.sh"),
-	} {
-		scriptData, err := os.ReadFile(filepath.Join("..", "..", rel)) //nolint:gosec // static repository script path.
-		if err != nil {
-			t.Fatalf("read %s: %v", rel, err)
-		}
-		script := string(scriptData)
-		if !strings.Contains(script, ".env.example") {
-			t.Fatalf("%s must use .env.example when bootstrapping local .env", rel)
-		}
-		if !strings.Contains(script, ".env") {
-			t.Fatalf("%s must write or update local .env", rel)
-		}
-		for _, key := range []string{
-			"POSTGRES_PASSWORD",
-			"PACKMON_DB_PASSWORD",
-			"PACKMON_ADMIN_INITIAL_PASSWORD",
-			"PACKMON_ENCRYPTION_KEY",
-			"PACKMON_ADMIN_AUDIT_HMAC_KEY",
-		} {
-			if !strings.Contains(script, key) {
-				t.Fatalf("%s must ensure required env value %s", rel, key)
-			}
-		}
-		migrateIndex := strings.Index(script, "docker compose run --build --rm packmon-migrate")
-		if migrateIndex < 0 {
-			t.Fatalf("%s must prepare the database with packmon-migrate", rel)
-		}
-		upIndex := strings.Index(script, "docker compose up --build -d")
-		if upIndex < 0 {
-			t.Fatalf("%s must start the local stack detached", rel)
-		}
-		if migrateIndex >= upIndex {
-			t.Fatalf("%s must prepare the database before starting compose", rel)
-		}
-	}
-}
-
-func TestLocalStackHelpersReconcileExistingEnvFromExample(t *testing.T) {
-	t.Parallel()
-
-	envExampleData, err := os.ReadFile(filepath.Join("..", "..", ".env.example")) //nolint:gosec // static repository fixture path.
-	if err != nil {
-		t.Fatalf("read .env.example: %v", err)
-	}
-	envExample := string(envExampleData)
-
-	for _, tc := range []struct {
-		rel   string
-		wants []string
-	}{
-		{
-			rel: filepath.Join("scripts", "start-local-stack.sh"),
-			wants: []string{
-				"append_missing_env_example_defaults",
-				"Added from .env.example for current local stack defaults.",
-				"secret_key(key)",
-				"POSTGRES_PASSWORD",
-				"PACKMON_DB_PASSWORD",
-				"PACKMON_ADMIN_INITIAL_PASSWORD",
-				"PACKMON_ENCRYPTION_KEY",
-				"PACKMON_ADMIN_AUDIT_HMAC_KEY",
-			},
-		},
-		{
-			rel: filepath.Join("scripts", "start-local-stack.ps1"),
-			wants: []string{
-				"Sync-EnvExampleDefaults",
-				"Added from .env.example for current local stack defaults.",
-				"$LocalEnvSecretKeys",
-				"POSTGRES_PASSWORD",
-				"PACKMON_DB_PASSWORD",
-				"PACKMON_ADMIN_INITIAL_PASSWORD",
-				"PACKMON_ENCRYPTION_KEY",
-				"PACKMON_ADMIN_AUDIT_HMAC_KEY",
-			},
-		},
-	} {
-		t.Run(tc.rel, func(t *testing.T) {
-			t.Parallel()
-
-			data, err := os.ReadFile(filepath.Join("..", "..", tc.rel)) //nolint:gosec // static repository script path.
-			if err != nil {
-				t.Fatalf("read %s: %v", tc.rel, err)
-			}
-			script := string(data)
-			for _, want := range tc.wants {
-				if !strings.Contains(script, want) {
-					t.Fatalf("%s must reconcile existing .env with .env.example; missing %q", tc.rel, want)
-				}
-			}
-			for _, key := range []string{
-				"PACKMON_ALLOW_INSECURE_LOCAL_HTTP",
-				"PACKMON_INSECURE_LOCAL_HTTP_BIND_MODE",
-				"PACKMON_METRICS_HOST",
-			} {
-				if !strings.Contains(envExample, key+"=") {
-					t.Fatalf(".env.example missing local default key %s", key)
-				}
-			}
-		})
 	}
 }
 
@@ -222,74 +117,6 @@ func TestDockerComposeFailsFastOnEmptyRequiredSecrets(t *testing.T) {
 			t.Fatalf("docker-compose.yml must fail fast on empty required secret via %q", want)
 		}
 	}
-}
-
-func TestLocalStackHelpersWaitForReadinessBeforeReportingSuccess(t *testing.T) {
-	t.Parallel()
-
-	for _, rel := range []string{
-		filepath.Join("scripts", "start-local-stack.ps1"),
-		filepath.Join("scripts", "start-local-stack.sh"),
-	} {
-		rel := rel
-		t.Run(rel, func(t *testing.T) {
-			t.Parallel()
-
-			data, err := os.ReadFile(filepath.Join("..", "..", rel)) //nolint:gosec // static repository script path.
-			if err != nil {
-				t.Fatalf("read %s: %v", rel, err)
-			}
-			script := string(data)
-
-			upIndex := strings.Index(script, "docker compose up --build -d")
-			if upIndex < 0 {
-				t.Fatalf("%s must start the local stack detached", rel)
-			}
-			successIndex := strings.Index(script, "Packmon local server:")
-			if successIndex < 0 {
-				t.Fatalf("%s must print the local server URL after readiness", rel)
-			}
-			if !strings.Contains(script, "/readyz") {
-				t.Fatalf("%s must probe the Packmon /readyz endpoint before reporting success", rel)
-			}
-			waitIndex := indexAny(script[upIndex:], []string{
-				"Wait-LocalStackReady",
-				"wait_local_stack_ready",
-			})
-			if waitIndex < 0 {
-				t.Fatalf("%s must wait for readiness after compose startup", rel)
-			}
-			waitIndex += upIndex
-			if waitIndex >= successIndex {
-				t.Fatalf("%s must wait for readiness before printing the local server success URL", rel)
-			}
-			for _, want := range []string{
-				"docker compose ps",
-				"docker compose logs --tail=120 packmon-server",
-			} {
-				if !strings.Contains(script, want) {
-					t.Fatalf("%s must print diagnostics containing %q when readiness fails", rel, want)
-				}
-			}
-			if strings.HasSuffix(rel, ".ps1") && !strings.Contains(script, `throw "Packmon local stack did not become ready."`) {
-				t.Fatalf("%s must fail clearly when readiness times out", rel)
-			}
-			if strings.HasSuffix(rel, ".sh") && !strings.Contains(script, "return 1") {
-				t.Fatalf("%s must exit non-zero when readiness times out", rel)
-			}
-		})
-	}
-}
-
-func indexAny(text string, needles []string) int {
-	best := -1
-	for _, needle := range needles {
-		index := strings.Index(text, needle)
-		if index >= 0 && (best < 0 || index < best) {
-			best = index
-		}
-	}
-	return best
 }
 
 func TestRetentionControlsAreDocumentedInReadmeAndEnvExample(t *testing.T) {

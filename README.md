@@ -18,7 +18,8 @@ cd <path-to-cloned-packmon>
 .\scripts\check-requirements.ps1 -Profile server
 New-Item -ItemType Directory -Force .build | Out-Null
 go build -o .build\packmon.exe .\cmd\packmon
-.\scripts\start-local-stack.ps1
+docker compose run --rm init-secrets   # first run: generate .env with local secrets
+docker compose up --build              # migrate runs automatically before the server
 ```
 
 Linux/macOS, or WSL on Windows:
@@ -29,7 +30,8 @@ bash scripts/check-requirements.sh --profile agent
 bash scripts/check-requirements.sh --profile server
 mkdir -p .build
 go build -o .build/packmon ./cmd/packmon
-bash scripts/start-local-stack.sh
+docker compose run --rm init-secrets   # first run: generate .env with local secrets
+docker compose up --build              # migrate runs automatically before the server
 ```
 
 Use the Windows block from PowerShell. Use the Linux/macOS block only from a
@@ -76,6 +78,31 @@ export PACKMON_API_KEY="<copied-api-key>"
   --html packmon-report.html \
   --output-json packmon-report.json
 ```
+
+## Troubleshooting
+
+**`required variable … is missing a value` / the server won't start**
+Run the two commands in order: `docker compose run --rm init-secrets` (creates
+`.env`), then `docker compose up`. Compose's `:?` guard fails the same way whether
+a secret is unset *or* empty.
+
+**All variables appear "missing" even though `.env` exists (Windows)**
+Symptom: every `${VAR}` reports missing. Cause: the `.env` was written as UTF-16 /
+with a BOM (PowerShell's default), which Docker Compose cannot parse. Check with
+`Format-Hex .env | Select-Object -First 1` — a leading `FF FE` means UTF-16. Fix by
+regenerating it: delete `.env` and run `docker compose run --rm init-secrets`
+(writes UTF-8/LF from inside the container). Bind mounting to write `.env` requires
+Docker Desktop file sharing for the drive.
+
+**`PACKMON_ENCRYPTION_KEY` / `PACKMON_ADMIN_AUDIT_HMAC_KEY` invalid**
+These must be base64-encoded 32-byte values. Regenerate with
+`docker compose run --rm init-secrets`.
+
+**Production**
+Supply secrets yourself (`.env` or a secrets manager) and run migrations
+explicitly: `docker compose -f docker-compose.yml run --rm packmon-server migrate`,
+then `docker compose -f docker-compose.yml up -d`. `init-secrets` never overwrites
+values you set. See `docs/runbook.md` for operations detail.
 
 Packmon is distributed under the private project license in `LICENSE`. The
 OpenAPI contract references it via the SPDX identifier `LicenseRef-Private`.
@@ -305,29 +332,26 @@ bash scripts/check-requirements.sh --profile server
 
 Start the local stack:
 
-```powershell
-.\scripts\start-local-stack.ps1
-```
-
 ```bash
-bash scripts/start-local-stack.sh
+docker compose run --rm init-secrets   # first run: generate .env with local secrets
+docker compose up --build              # migrate runs automatically before the server
 ```
 
-The start helper creates or completes `.env` from `.env.example` with generated
+`init-secrets` creates or completes `.env` from `.env.example` with generated
 local-only secrets for `POSTGRES_PASSWORD`, `PACKMON_DB_PASSWORD`,
 `PACKMON_ADMIN_INITIAL_PASSWORD`, `PACKMON_ENCRYPTION_KEY`, and
-`PACKMON_ADMIN_AUDIT_HMAC_KEY`. It keeps existing non-empty values, makes the
-Packmon DB password match the local PostgreSQL password when either value is
-missing, and runs the database migration before starting the server. After
-Compose starts, the helper waits up to 120 seconds for the Packmon `/readyz`
-endpoint; on timeout it prints `docker compose ps` plus recent
-`packmon-server` logs and exits non-zero. It prints the local URLs only after
-readiness succeeds. Helpers do not print generated secret values.
+`PACKMON_ADMIN_AUDIT_HMAC_KEY` into a UTF-8 `.env`. It keeps existing
+non-empty values and never overwrites them; these commands do not print
+generated secret values. `docker compose up --build` then runs the database
+migration automatically before starting the server. The same two commands
+work identically on Windows, macOS, and Linux.
 
 Admins can later adjust `.env`, feed-provider API keys, TLS/proxy settings, and
 other deployment-specific values before shared or production use.
 
-After the helper reports readiness, the local server is reachable at
+Once `packmon-server` finishes starting (its container log prints
+`dashboard_url` once the HTTP listener is bound; `docker compose logs -f
+packmon-server` shows this live), the local server is reachable at
 `http://localhost:8080`. Open the admin UI and sign in:
 
 ```text
@@ -407,9 +431,12 @@ The `--insecure-allow-http` flag is only for this loopback Docker setup. For
 shared deployments, expose the server over HTTPS and remove that flag.
 
 The Docker stack runs PostgreSQL and `packmon-server` in production mode so
-synced feed data is persisted. The start helper prepares the database schema
-with `packmon-migrate` before starting the server; normal server startup only
-verifies the schema version. The `packmon-migrate` service is a manual Compose
+synced feed data is persisted. `docker-compose.override.yml` (auto-loaded by
+plain `docker compose` commands run from the repository root) clears the
+`packmon-migrate` manual profile so `docker compose up` runs the migration
+automatically before starting the server; normal server startup only verifies
+the schema version. In production (`docker compose -f docker-compose.yml`,
+which never loads the override) `packmon-migrate` stays a manual Compose
 profile and receives only database/logging environment values, not admin or
 feed-provider secrets. Its database connection, advisory-lock wait, migration
 statements, and post-migration version read are bounded by
