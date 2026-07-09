@@ -58,6 +58,12 @@ func main() {
 				os.Exit(1)
 			}
 			return
+		case "init-secrets":
+			if err := runInitSecrets(os.Args[2:]); err != nil {
+				logFatalError("packmon-server init-secrets", "packmon-server init-secrets failed", err)
+				os.Exit(1)
+			}
+			return
 		case "privacy":
 			if err := runPrivacy(os.Args[2:]); err != nil {
 				logFatalError("packmon-server privacy", "packmon-server privacy command failed", err)
