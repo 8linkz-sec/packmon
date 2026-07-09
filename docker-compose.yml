@@ -59,7 +59,7 @@ services:
       PACKMON_TRUSTED_PROXIES: ${PACKMON_TRUSTED_PROXIES:-}
       PACKMON_ALLOW_INSECURE_LOCAL_HTTP: ${PACKMON_ALLOW_INSECURE_LOCAL_HTTP:-false}
       PACKMON_INSECURE_LOCAL_HTTP_BIND_MODE: ${PACKMON_INSECURE_LOCAL_HTTP_BIND_MODE:-container}
-      PACKMON_METRICS_HOST: ${PACKMON_METRICS_HOST:-0.0.0.0}
+      PACKMON_METRICS_HOST: ${PACKMON_METRICS_HOST:-127.0.0.1}
       PACKMON_METRICS_PORT: ${PACKMON_METRICS_PORT:-9090}
       PACKMON_SERVER_READ_TIMEOUT: ${PACKMON_SERVER_READ_TIMEOUT:-30s}
       PACKMON_SERVER_WRITE_TIMEOUT: ${PACKMON_SERVER_WRITE_TIMEOUT:-30s}
@@ -199,9 +199,9 @@ services:
       - -ec
       - |
         install -d -m 0700 /backups/packmon
-        dump="/backups/packmon/packmon-$(date -u +%Y%m%d-%H%M%S).dump"
-        pg_dump --format=custom --file "$dump"
-        pg_restore --list "$dump" >/dev/null
+        dump="/backups/packmon/packmon-$$(date -u +%Y%m%d-%H%M%S).dump"
+        pg_dump --format=custom --file "$$dump"
+        pg_restore --list "$$dump" >/dev/null
         find /backups/packmon -type f -name 'packmon-*.dump' -mtime +7 -delete
     depends_on:
       postgres:
