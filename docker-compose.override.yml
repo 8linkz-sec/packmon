@@ -27,11 +27,25 @@ services:
 
   # Local convenience: the base file's secret defaults are already permissive
   # (${VAR:-}), so `init-secrets` can run before .env exists and the app-level
-  # validator produces the actionable message. Only the insecure-HTTP default
-  # needs to flip here; the strict :? guards live in docker-compose.prod.yml.
+  # validator produces the actionable message. The strict :? guards live in
+  # docker-compose.prod.yml.
+  #
+  # Keep PRODUCTION mode locally so the server uses the real PostgreSQL store
+  # (development mode swaps in an ephemeral in-memory store and ignores the
+  # postgres + migrate services). Two production gates must still be satisfied
+  # for a local-only HTTP stack:
+  #   - PACKMON_ALLOW_INSECURE_LOCAL_HTTP relaxes the TLS transport requirement;
+  #     the host port stays bound to loopback via the compose port mapping.
+  #   - PACKMON_METRICS_HOST binds /metrics to loopback, which
+  #     ValidateMetricsExposure requires in production because /metrics is
+  #     unauthenticated plaintext HTTP. Consequence: the metrics port is not
+  #     reachable from the host locally (the server still serves it in-container).
   packmon-server:
     environment:
       PACKMON_ALLOW_INSECURE_LOCAL_HTTP: ${PACKMON_ALLOW_INSECURE_LOCAL_HTTP:-true}
+      # Literal (not ${...:-}) so it wins even when .env sets METRICS_HOST=0.0.0.0
+      # (the .env.example seed does); a ${VAR:-default} would inherit that value.
+      PACKMON_METRICS_HOST: "127.0.0.1"
     depends_on:
       postgres:
         condition: service_healthy
