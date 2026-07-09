@@ -1,0 +1,41 @@
+# Local development overlay. Compose auto-loads this file, so `docker compose up`
+# is the friendly local path. Production uses `docker compose -f docker-compose.yml`
+# (an explicit -f disables auto-loading of this override).
+services:
+  # One-shot: generate/complete .env with local secrets. Run via
+  # `docker compose run --rm init-secrets`. Bind-mounts the project dir to write
+  # the host .env; runs in Linux so encoding/line-endings are correct on any OS.
+  init-secrets:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: server
+    command: ["init-secrets"]
+    working_dir: /workspace
+    volumes:
+      - ".:/workspace"
+    restart: "no"
+
+  # Local convenience: packmon-migrate is `profiles: ["manual"]` in the base
+  # (production) file so it never runs implicitly there. Locally we want the
+  # friendly auto-chain (postgres -> migrate -> server), so clear its profile
+  # here; this does not affect `docker compose -f docker-compose.yml` runs,
+  # which never load this override.
+  packmon-migrate:
+    profiles: !override []
+
+  # Local convenience: soften the hard :? guards so `init-secrets` can run before
+  # .env exists, and let the app-level validator produce the actionable message.
+  packmon-server:
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+      PACKMON_DB_PASSWORD: ${PACKMON_DB_PASSWORD:-}
+      PACKMON_ADMIN_INITIAL_PASSWORD: ${PACKMON_ADMIN_INITIAL_PASSWORD:-}
+      PACKMON_ENCRYPTION_KEY: ${PACKMON_ENCRYPTION_KEY:-}
+      PACKMON_ADMIN_AUDIT_HMAC_KEY: ${PACKMON_ADMIN_AUDIT_HMAC_KEY:-}
+      PACKMON_ALLOW_INSECURE_LOCAL_HTTP: ${PACKMON_ALLOW_INSECURE_LOCAL_HTTP:-true}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      packmon-migrate:
+        condition: service_completed_successfully

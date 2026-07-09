@@ -212,11 +212,11 @@ func TestDockerComposeFailsFastOnEmptyRequiredSecrets(t *testing.T) {
 	}
 	text := string(data)
 	for _, want := range []string{
-		"POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}",
-		"PACKMON_DB_PASSWORD: ${PACKMON_DB_PASSWORD:?PACKMON_DB_PASSWORD is required}",
-		"PACKMON_ADMIN_INITIAL_PASSWORD: ${PACKMON_ADMIN_INITIAL_PASSWORD:?PACKMON_ADMIN_INITIAL_PASSWORD is required}",
-		"PACKMON_ENCRYPTION_KEY: ${PACKMON_ENCRYPTION_KEY:?PACKMON_ENCRYPTION_KEY is required}",
-		"PACKMON_ADMIN_AUDIT_HMAC_KEY: ${PACKMON_ADMIN_AUDIT_HMAC_KEY:?PACKMON_ADMIN_AUDIT_HMAC_KEY is required}",
+		`POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?missing. Local dev: run 'docker compose run --rm init-secrets' then retry. Production: set it in .env or your secrets manager. See README → Troubleshooting}"`,
+		`PACKMON_DB_PASSWORD: "${PACKMON_DB_PASSWORD:?missing. Local dev: 'docker compose run --rm init-secrets'. Production: set in .env/secrets manager. See README → Troubleshooting}"`,
+		`PACKMON_ADMIN_INITIAL_PASSWORD: "${PACKMON_ADMIN_INITIAL_PASSWORD:?missing. Local dev: 'docker compose run --rm init-secrets'. Production: set in .env/secrets manager. See README → Troubleshooting}"`,
+		`PACKMON_ENCRYPTION_KEY: "${PACKMON_ENCRYPTION_KEY:?missing (base64 32 bytes). Local dev: 'docker compose run --rm init-secrets'. Production: set in .env/secrets manager. See README → Troubleshooting}"`,
+		`PACKMON_ADMIN_AUDIT_HMAC_KEY: "${PACKMON_ADMIN_AUDIT_HMAC_KEY:?missing (base64 32 bytes). Local dev: 'docker compose run --rm init-secrets'. Production: set in .env/secrets manager. See README → Troubleshooting}"`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("docker-compose.yml must fail fast on empty required secret via %q", want)

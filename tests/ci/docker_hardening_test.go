@@ -233,6 +233,71 @@ func TestDockerComposePublishesPackmonServerPortFromEnvironment(t *testing.T) {
 	}
 }
 
+func TestDockerComposeBaseIsProdStrictAndOverrideRelaxesForLocalDev(t *testing.T) {
+	t.Parallel()
+
+	basePath := filepath.Join("..", "..", "docker-compose.yml")
+	baseData, err := os.ReadFile(basePath) //nolint:gosec // static repository fixture path
+	if err != nil {
+		t.Fatalf("read docker-compose.yml: %v", err)
+	}
+
+	var base struct {
+		Services map[string]struct {
+			Environment map[string]string `yaml:"environment"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal(baseData, &base); err != nil {
+		t.Fatalf("parse docker-compose.yml: %v", err)
+	}
+	baseServer, ok := base.Services["packmon-server"]
+	if !ok {
+		t.Fatal("docker-compose.yml has no packmon-server service")
+	}
+	const wantBaseInsecureHTTP = "${PACKMON_ALLOW_INSECURE_LOCAL_HTTP:-false}"
+	if got := baseServer.Environment["PACKMON_ALLOW_INSECURE_LOCAL_HTTP"]; got != wantBaseInsecureHTTP {
+		t.Fatalf("docker-compose.yml packmon-server PACKMON_ALLOW_INSECURE_LOCAL_HTTP = %q, want prod-strict default %q", got, wantBaseInsecureHTTP)
+	}
+
+	overridePath := filepath.Join("..", "..", "docker-compose.override.yml")
+	overrideData, err := os.ReadFile(overridePath) //nolint:gosec // static repository fixture path
+	if err != nil {
+		t.Fatalf("read docker-compose.override.yml: %v", err)
+	}
+
+	var override struct {
+		Services map[string]struct {
+			Command     any               `yaml:"command"`
+			Environment map[string]string `yaml:"environment"`
+			Volumes     []string          `yaml:"volumes"`
+			DependsOn   any               `yaml:"depends_on"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal(overrideData, &override); err != nil {
+		t.Fatalf("parse docker-compose.override.yml: %v", err)
+	}
+
+	overrideServer, ok := override.Services["packmon-server"]
+	if !ok {
+		t.Fatal("docker-compose.override.yml has no packmon-server service")
+	}
+	const wantOverrideInsecureHTTP = "${PACKMON_ALLOW_INSECURE_LOCAL_HTTP:-true}"
+	if got := overrideServer.Environment["PACKMON_ALLOW_INSECURE_LOCAL_HTTP"]; got != wantOverrideInsecureHTTP {
+		t.Fatalf("docker-compose.override.yml packmon-server PACKMON_ALLOW_INSECURE_LOCAL_HTTP = %q, want local-relaxed default %q", got, wantOverrideInsecureHTTP)
+	}
+
+	initSecrets, ok := override.Services["init-secrets"]
+	if !ok {
+		t.Fatal("docker-compose.override.yml must define an init-secrets service")
+	}
+	if !composeCommandContains(initSecrets.Command, "init-secrets") {
+		t.Fatalf("docker-compose.override.yml init-secrets command = %#v, want it to run the init-secrets subcommand", initSecrets.Command)
+	}
+	if !stringSliceContains(initSecrets.Volumes, ".:/workspace") {
+		t.Fatalf("docker-compose.override.yml init-secrets volumes = %#v, want a .:/workspace bind mount", initSecrets.Volumes)
+	}
+}
+
 func TestDockerComposeCapsServiceLogRetention(t *testing.T) {
 	t.Parallel()
 

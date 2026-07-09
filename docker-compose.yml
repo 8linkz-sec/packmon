@@ -11,7 +11,7 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?missing. Local dev: run 'docker compose run --rm init-secrets' then retry. Production: set it in .env or your secrets manager. See README → Troubleshooting}"
       # Keep the actual PostgreSQL cluster inside the named compose volume.
       # Postgres 18 images default to a versioned path under /var/lib/postgresql,
       # which can otherwise fall back to an anonymous Docker volume.
@@ -57,7 +57,7 @@ services:
       PACKMON_TLS_KEY_FILE: ${PACKMON_TLS_KEY_FILE:-}
       PACKMON_TLS_MIN_VERSION: ${PACKMON_TLS_MIN_VERSION:-1.2}
       PACKMON_TRUSTED_PROXIES: ${PACKMON_TRUSTED_PROXIES:-}
-      PACKMON_ALLOW_INSECURE_LOCAL_HTTP: ${PACKMON_ALLOW_INSECURE_LOCAL_HTTP:-true}
+      PACKMON_ALLOW_INSECURE_LOCAL_HTTP: ${PACKMON_ALLOW_INSECURE_LOCAL_HTTP:-false}
       PACKMON_INSECURE_LOCAL_HTTP_BIND_MODE: ${PACKMON_INSECURE_LOCAL_HTTP_BIND_MODE:-container}
       PACKMON_METRICS_HOST: ${PACKMON_METRICS_HOST:-0.0.0.0}
       PACKMON_METRICS_PORT: ${PACKMON_METRICS_PORT:-9090}
@@ -73,18 +73,18 @@ services:
       PACKMON_DB_PORT: ${PACKMON_DB_PORT:-5432}
       PACKMON_DB_NAME: ${PACKMON_DB_NAME:-packmon}
       PACKMON_DB_USER: ${PACKMON_DB_USER:-packmon}
-      PACKMON_DB_PASSWORD: ${PACKMON_DB_PASSWORD:?PACKMON_DB_PASSWORD is required}
+      PACKMON_DB_PASSWORD: "${PACKMON_DB_PASSWORD:?missing. Local dev: 'docker compose run --rm init-secrets'. Production: set in .env/secrets manager. See README → Troubleshooting}"
       PACKMON_DB_SSLMODE: ${PACKMON_DB_SSLMODE:-disable}
       PACKMON_DB_MAX_CONNS: ${PACKMON_DB_MAX_CONNS:-20}
       PACKMON_DB_MIN_CONNS: ${PACKMON_DB_MIN_CONNS:-2}
       PACKMON_DB_CONNECT_TIMEOUT: ${PACKMON_DB_CONNECT_TIMEOUT:-10s}
       PACKMON_LOG_LEVEL: ${PACKMON_LOG_LEVEL:-info}
       PACKMON_LOG_FORMAT: ${PACKMON_LOG_FORMAT:-json}
-      PACKMON_ADMIN_INITIAL_PASSWORD: ${PACKMON_ADMIN_INITIAL_PASSWORD:?PACKMON_ADMIN_INITIAL_PASSWORD is required}
+      PACKMON_ADMIN_INITIAL_PASSWORD: "${PACKMON_ADMIN_INITIAL_PASSWORD:?missing. Local dev: 'docker compose run --rm init-secrets'. Production: set in .env/secrets manager. See README → Troubleshooting}"
       PACKMON_ADMIN_SESSION_TIMEOUT: ${PACKMON_ADMIN_SESSION_TIMEOUT:-8h}
       PACKMON_ADMIN_IDLE_TIMEOUT: ${PACKMON_ADMIN_IDLE_TIMEOUT:-15m}
-      PACKMON_ENCRYPTION_KEY: ${PACKMON_ENCRYPTION_KEY:?PACKMON_ENCRYPTION_KEY is required}
-      PACKMON_ADMIN_AUDIT_HMAC_KEY: ${PACKMON_ADMIN_AUDIT_HMAC_KEY:?PACKMON_ADMIN_AUDIT_HMAC_KEY is required}
+      PACKMON_ENCRYPTION_KEY: "${PACKMON_ENCRYPTION_KEY:?missing (base64 32 bytes). Local dev: 'docker compose run --rm init-secrets'. Production: set in .env/secrets manager. See README → Troubleshooting}"
+      PACKMON_ADMIN_AUDIT_HMAC_KEY: "${PACKMON_ADMIN_AUDIT_HMAC_KEY:?missing (base64 32 bytes). Local dev: 'docker compose run --rm init-secrets'. Production: set in .env/secrets manager. See README → Troubleshooting}"
       PACKMON_SCAN_LOG_RETENTION: ${PACKMON_SCAN_LOG_RETENTION:-2160h}
       PACKMON_ADMIN_AUDIT_LOG_RETENTION: ${PACKMON_ADMIN_AUDIT_LOG_RETENTION:-8760h}
       PACKMON_DELETED_API_KEY_RETENTION: ${PACKMON_DELETED_API_KEY_RETENTION:-8760h}
@@ -165,7 +165,7 @@ services:
       PACKMON_DB_PORT: ${PACKMON_DB_PORT:-5432}
       PACKMON_DB_NAME: ${PACKMON_DB_NAME:-packmon}
       PACKMON_DB_USER: ${PACKMON_DB_USER:-packmon}
-      PACKMON_DB_PASSWORD: ${PACKMON_DB_PASSWORD:?PACKMON_DB_PASSWORD is required}
+      PACKMON_DB_PASSWORD: "${PACKMON_DB_PASSWORD:?missing. Local dev: 'docker compose run --rm init-secrets'. Production: set in .env/secrets manager. See README → Troubleshooting}"
       PACKMON_DB_SSLMODE: ${PACKMON_DB_SSLMODE:-disable}
       PACKMON_DB_CONNECT_TIMEOUT: ${PACKMON_DB_CONNECT_TIMEOUT:-10s}
       PACKMON_LOG_LEVEL: ${PACKMON_LOG_LEVEL:-info}
@@ -191,7 +191,7 @@ services:
       PGPORT: ${PACKMON_DB_PORT:-5432}
       PGDATABASE: ${PACKMON_DB_NAME:-packmon}
       PGUSER: ${PACKMON_DB_USER:-packmon}
-      PGPASSWORD: ${PACKMON_DB_PASSWORD:?PACKMON_DB_PASSWORD is required}
+      PGPASSWORD: "${PACKMON_DB_PASSWORD:?missing. Local dev: 'docker compose run --rm init-secrets'. Production: set in .env/secrets manager. See README → Troubleshooting}"
     volumes:
       - "${PACKMON_BACKUP_DIR:-./backups}:/backups/packmon"
     command:
