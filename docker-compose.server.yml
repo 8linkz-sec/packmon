@@ -1,0 +1,150 @@
+# Self-contained PRODUCTION server deployment. Needs no base file:
+#   docker compose -f docker-compose.server.yml run --rm packmon-migrate
+#   docker compose -f docker-compose.server.yml up -d
+#
+# Transport: the server serves plain HTTP in-container; terminate TLS with your
+# own reverse proxy (nginx/Traefik/Caddy) and set PACKMON_TRUSTED_PROXIES to the
+# proxy's IP/CIDR. The server HTTP port is published only on 127.0.0.1 so only a
+# host-local proxy can reach it. Operator supplies all secrets in .env.
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  postgres:
+    image: ${PACKMON_POSTGRES_IMAGE:-cgr.dev/chainguard/postgres:18@sha256:891139a6d9036632791857fb7585425f1bf0c64516fc52bc39da94305ee92461}
+    logging: *default-logging
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-packmon}
+      POSTGRES_USER: ${POSTGRES_USER:-packmon}
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?missing. Set it in .env or your secrets manager (see README → Troubleshooting).}"
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-packmon}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1.0'
+        reservations:
+          memory: 128M
+    restart: unless-stopped
+
+  packmon-server:
+    logging: *default-logging
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: server
+      args:
+        VERSION: ${PACKMON_VERSION:-dev}
+        COMMIT: ${PACKMON_COMMIT:-none}
+        DATE: ${PACKMON_BUILD_DATE:-unknown}
+        PACKMON_GO_BUILDER_IMAGE: ${PACKMON_GO_BUILDER_IMAGE:-golang:1.26.4-alpine@sha256:3ad57304ad93bbec8548a0437ad9e06a455660655d9af011d58b993f6f615648}
+        PACKMON_ALPINE_RUNTIME_IMAGE: ${PACKMON_ALPINE_RUNTIME_IMAGE:-alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b}
+    # Operator config comes from .env when present; the explicit block below is
+    # the security contract and always wins over env_file. required: false so a
+    # deployment that injects config another way (shell env / secrets manager)
+    # still resolves — the :? guards below, not the file, enforce fail-closed.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      PACKMON_SERVER_MODE: production
+      PACKMON_ALLOW_INSECURE_LOCAL_HTTP: "false"
+      PACKMON_METRICS_HOST: "127.0.0.1"
+      # Required: the reverse proxy's IP or CIDR (e.g. the Docker gateway or your
+      # proxy host). Startup fails closed if unset.
+      PACKMON_TRUSTED_PROXIES: "${PACKMON_TRUSTED_PROXIES:?missing. Set your reverse proxy IP/CIDR; the server serves plaintext HTTP and trusts X-Forwarded-* only from here. See README → Troubleshooting}"
+      PACKMON_DB_PASSWORD: "${PACKMON_DB_PASSWORD:?missing. Set in .env/secrets manager. See README → Troubleshooting}"
+      PACKMON_ADMIN_INITIAL_PASSWORD: "${PACKMON_ADMIN_INITIAL_PASSWORD:?missing. Set in .env/secrets manager. See README → Troubleshooting}"
+      PACKMON_ENCRYPTION_KEY: "${PACKMON_ENCRYPTION_KEY:?missing (base64 32 bytes). Set in .env/secrets manager. See README → Troubleshooting}"
+      PACKMON_ADMIN_AUDIT_HMAC_KEY: "${PACKMON_ADMIN_AUDIT_HMAC_KEY:?missing (base64 32 bytes). Set in .env/secrets manager. See README → Troubleshooting}"
+    ports:
+      - "127.0.0.1:${PACKMON_SERVER_PORT:-8080}:${PACKMON_SERVER_PORT:-8080}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '2.0'
+        reservations:
+          memory: 256M
+    stop_grace_period: 25s
+    restart: unless-stopped
+
+  packmon-migrate:
+    profiles: ["manual"]
+    logging: *default-logging
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: server
+      args:
+        VERSION: ${PACKMON_VERSION:-dev}
+        COMMIT: ${PACKMON_COMMIT:-none}
+        DATE: ${PACKMON_BUILD_DATE:-unknown}
+        PACKMON_GO_BUILDER_IMAGE: ${PACKMON_GO_BUILDER_IMAGE:-golang:1.26.4-alpine@sha256:3ad57304ad93bbec8548a0437ad9e06a455660655d9af011d58b993f6f615648}
+        PACKMON_ALPINE_RUNTIME_IMAGE: ${PACKMON_ALPINE_RUNTIME_IMAGE:-alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b}
+    command: ["migrate"]
+    environment:
+      PACKMON_DB_HOST: ${PACKMON_DB_HOST:-postgres}
+      PACKMON_DB_PORT: ${PACKMON_DB_PORT:-5432}
+      PACKMON_DB_NAME: ${PACKMON_DB_NAME:-packmon}
+      PACKMON_DB_USER: ${PACKMON_DB_USER:-packmon}
+      PACKMON_DB_PASSWORD: "${PACKMON_DB_PASSWORD:?missing. Set in .env/secrets manager. See README → Troubleshooting}"
+      PACKMON_DB_SSLMODE: ${PACKMON_DB_SSLMODE:-disable}
+      PACKMON_DB_CONNECT_TIMEOUT: ${PACKMON_DB_CONNECT_TIMEOUT:-10s}
+      PACKMON_LOG_LEVEL: ${PACKMON_LOG_LEVEL:-info}
+      PACKMON_LOG_FORMAT: ${PACKMON_LOG_FORMAT:-json}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1.0'
+        reservations:
+          memory: 128M
+    restart: "no"
+
+  packmon-backup:
+    profiles: ["manual"]
+    image: ${PACKMON_POSTGRES_IMAGE:-cgr.dev/chainguard/postgres:18@sha256:891139a6d9036632791857fb7585425f1bf0c64516fc52bc39da94305ee92461}
+    logging: *default-logging
+    environment:
+      PGHOST: ${PACKMON_DB_HOST:-postgres}
+      PGPORT: ${PACKMON_DB_PORT:-5432}
+      PGDATABASE: ${PACKMON_DB_NAME:-packmon}
+      PGUSER: ${PACKMON_DB_USER:-packmon}
+      PGPASSWORD: "${PACKMON_DB_PASSWORD:?missing. Set in .env/secrets manager. See README → Troubleshooting}"
+    volumes:
+      - "${PACKMON_BACKUP_DIR:-./backups}:/backups/packmon"
+    command:
+      - sh
+      - -ec
+      - |
+        install -d -m 0700 /backups/packmon
+        dump="/backups/packmon/packmon-$$(date -u +%Y%m%d-%H%M%S).dump"
+        pg_dump --format=custom --file "$$dump"
+        pg_restore --list "$$dump" >/dev/null
+        find /backups/packmon -type f -name 'packmon-*.dump' -mtime +7 -delete
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+volumes:
+  postgres-data:

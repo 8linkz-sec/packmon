@@ -147,6 +147,51 @@ func TestDockerComposeConfigResolvesForLocalAndFailsClosedForProd(t *testing.T) 
 	}
 }
 
+func TestServerComposeIsSelfContainedAndHardened(t *testing.T) {
+	t.Parallel()
+	server := repoFile(t, "docker-compose.server.yml")
+
+	// Fail-closed secret guards (strict :? on all five secrets).
+	for _, key := range []string{
+		"POSTGRES_PASSWORD", "PACKMON_DB_PASSWORD", "PACKMON_ADMIN_INITIAL_PASSWORD",
+		"PACKMON_ENCRYPTION_KEY", "PACKMON_ADMIN_AUDIT_HMAC_KEY",
+	} {
+		if !strings.Contains(server, key+":?") && !strings.Contains(server, key+" :?") &&
+			!strings.Contains(server, "${"+key+":?") {
+			t.Fatalf("docker-compose.server.yml missing fail-closed :? guard for %s", key)
+		}
+	}
+
+	// Hardening: production mode, no insecure HTTP, loopback metrics, required trusted proxy.
+	for _, want := range []string{
+		"PACKMON_SERVER_MODE: production",
+		"PACKMON_ALLOW_INSECURE_LOCAL_HTTP:",
+		`PACKMON_METRICS_HOST: "127.0.0.1"`,
+		"${PACKMON_TRUSTED_PROXIES:?",
+		"env_file:",
+		"restart: unless-stopped",
+	} {
+		if !strings.Contains(server, want) {
+			t.Fatalf("docker-compose.server.yml missing hardening marker %q", want)
+		}
+	}
+	if strings.Contains(server, "PACKMON_ALLOW_INSECURE_LOCAL_HTTP: ${PACKMON_ALLOW_INSECURE_LOCAL_HTTP:-true}") ||
+		strings.Contains(server, `PACKMON_ALLOW_INSECURE_LOCAL_HTTP: "true"`) {
+		t.Fatal("server compose must not enable insecure local HTTP")
+	}
+
+	// No dev conveniences.
+	for _, forbidden := range []string{"init-secrets", ".:/workspace", "service_completed_successfully"} {
+		if strings.Contains(server, forbidden) {
+			t.Fatalf("docker-compose.server.yml must not contain dev-mode marker %q", forbidden)
+		}
+	}
+	// Migrate stays a manual, explicit step.
+	if !strings.Contains(server, `profiles: ["manual"]`) {
+		t.Fatal("docker-compose.server.yml packmon-migrate must stay behind profiles: [\"manual\"]")
+	}
+}
+
 func TestReadmeHasTroubleshootingSection(t *testing.T) {
 	t.Parallel()
 	readme := repoFile(t, "README.md")
