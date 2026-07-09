@@ -261,7 +261,7 @@ func (s *Server) Run(ctx context.Context) error {
 
 		if tlsCfg.Enabled() {
 			s.main.TLSConfig = buildServerTLSConfig(tlsCfg)
-			s.logger.Info("main server listening",
+			s.logger.Info(mainServerReadyMessage(dashboard),
 				slog.String("addr", boundAddr),
 				slog.String("mode", string(s.cfg.Server.Mode)),
 				slog.String("transport", "https"),
@@ -274,7 +274,7 @@ func (s *Server) Run(ctx context.Context) error {
 			}
 			return
 		}
-		s.logger.Info("main server listening",
+		s.logger.Info(mainServerReadyMessage(dashboard),
 			slog.String("addr", boundAddr),
 			slog.String("mode", string(s.cfg.Server.Mode)),
 			slog.String("transport", "http"),

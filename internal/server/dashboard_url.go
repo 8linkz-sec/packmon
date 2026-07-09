@@ -9,6 +9,14 @@ import (
 	"github.com/8linkz-sec/packmon/internal/config"
 )
 
+// mainServerReadyMessage puts the dashboard URL in the log message itself so it
+// is easy to spot when the "server listening" line scrolls past among the
+// simultaneous feed-sync startup lines. The bind address stays in a separate
+// structured field.
+func mainServerReadyMessage(dashboard string) string {
+	return "server ready -- open the dashboard at " + dashboard
+}
+
 func dashboardURL(cfg *config.Config, listenerAddr string) string {
 	scheme := "http"
 	if cfg != nil && cfg.Server.TLS.Enabled() {

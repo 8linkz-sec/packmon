@@ -1,10 +1,23 @@
 package server
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/8linkz-sec/packmon/internal/config"
 )
+
+func TestMainServerReadyMessageLeadsWithDashboardURL(t *testing.T) {
+	t.Parallel()
+
+	// The startup log line scrolls past among ~10 simultaneous feed-sync-loop
+	// lines, so the human-readable message itself must carry the URL -- a
+	// structured dashboard_url field alone is too easy to miss.
+	got := mainServerReadyMessage("http://localhost:8080/")
+	if !strings.Contains(got, "http://localhost:8080/") {
+		t.Fatalf("mainServerReadyMessage() = %q, want it to contain the dashboard URL", got)
+	}
+}
 
 func TestDashboardURLUsesLocalhostForWildcardBind(t *testing.T) {
 	t.Parallel()
