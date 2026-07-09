@@ -3,7 +3,6 @@ package main
 import (
 	"flag"
 	"fmt"
-	"os"
 
 	"github.com/8linkz-sec/packmon/internal/config"
 	"github.com/8linkz-sec/packmon/internal/envfile"
@@ -41,7 +40,7 @@ func runInitSecrets(args []string) error {
 		return fmt.Errorf("write %s: %w", *envPath, err)
 	}
 
-	fmt.Fprintf(os.Stdout, "init-secrets: %d generated, %d kept — %s ready\n", generated, kept, *envPath)
+	fmt.Printf("init-secrets: %d generated, %d kept — %s ready\n", generated, kept, *envPath)
 	return nil
 }
 

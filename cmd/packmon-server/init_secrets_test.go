@@ -52,7 +52,7 @@ func TestRunInitSecretsSeedsFromExample(t *testing.T) {
 	if err := runInitSecrets([]string{"--env", env, "--example", example}); err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	data, err := os.ReadFile(env)
+	data, err := os.ReadFile(env) //nolint:gosec // test reads a path built from t.TempDir()
 	if err != nil {
 		t.Fatalf("read .env: %v", err)
 	}
@@ -84,17 +84,19 @@ func TestRunInitSecretsIsIdempotent(t *testing.T) {
 	dir := t.TempDir()
 	env := filepath.Join(dir, ".env")
 	example := filepath.Join(dir, ".env.example")
-	os.WriteFile(example, []byte("POSTGRES_PASSWORD=\nPACKMON_DB_PASSWORD=\n"+
+	if err := os.WriteFile(example, []byte("POSTGRES_PASSWORD=\nPACKMON_DB_PASSWORD=\n"+
 		"PACKMON_ADMIN_INITIAL_PASSWORD=\nPACKMON_ENCRYPTION_KEY=\n"+
-		"PACKMON_ADMIN_AUDIT_HMAC_KEY=\n"), 0o600)
+		"PACKMON_ADMIN_AUDIT_HMAC_KEY=\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := runInitSecrets([]string{"--env", env, "--example", example}); err != nil {
 		t.Fatal(err)
 	}
-	first, _ := os.ReadFile(env)
+	first, _ := os.ReadFile(env) //nolint:gosec // test reads a path built from t.TempDir()
 	if err := runInitSecrets([]string{"--env", env, "--example", example}); err != nil {
 		t.Fatal(err)
 	}
-	second, _ := os.ReadFile(env)
+	second, _ := os.ReadFile(env) //nolint:gosec // test reads a path built from t.TempDir()
 	if string(first) != string(second) {
 		t.Fatal("second run changed .env; must be idempotent")
 	}
