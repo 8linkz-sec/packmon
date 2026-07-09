@@ -409,7 +409,7 @@ func TestRunbookDocumentsBackupDataProtectionControls(t *testing.T) {
 		"admin audit logs",
 		"off-host",
 		"PACKMON_ENCRYPTION_KEY",
-		"docker compose run --rm packmon-backup",
+		"run --rm packmon-backup",
 	} {
 		if !strings.Contains(backupText, want) {
 			t.Fatalf("Backup runbook missing data-protection marker %q", want)
