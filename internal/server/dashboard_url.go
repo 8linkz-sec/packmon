@@ -5,6 +5,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/8linkz-sec/packmon/internal/config"
 )
@@ -15,6 +16,18 @@ import (
 // structured field.
 func mainServerReadyMessage(dashboard string) string {
 	return "server ready -- open the dashboard at " + dashboard
+}
+
+// dashboardBanner frames the dashboard URL in a plain-text box. It is printed to
+// stdout at startup independent of the structured JSON logger, so the URL stays
+// unmissable even when it would otherwise scroll past among the ~10 simultaneous
+// feed-sync startup lines -- or be hidden entirely when `docker compose up`
+// merely re-attaches to an already-running container and never replays the
+// startup log line. The border adapts to the content width.
+func dashboardBanner(dashboard string) string {
+	content := "  Packmon → " + dashboard + "  "
+	rule := strings.Repeat("─", utf8.RuneCountInString(content))
+	return "\n" + rule + "\n" + content + "\n" + rule + "\n"
 }
 
 func dashboardURL(cfg *config.Config, listenerAddr string) string {

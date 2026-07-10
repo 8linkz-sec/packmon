@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/8linkz-sec/packmon/internal/api/admin"
@@ -258,6 +259,11 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		boundAddr := listener.Addr().String()
 		dashboard := dashboardURL(s.cfg, boundAddr)
+
+		// Print a plain-text banner to stdout so the URL is unmissable even when
+		// the structured JSON ready-line below scrolls past among the feed-sync
+		// startup lines.
+		fmt.Fprint(os.Stdout, dashboardBanner(dashboard))
 
 		if tlsCfg.Enabled() {
 			s.main.TLSConfig = buildServerTLSConfig(tlsCfg)

@@ -3,6 +3,7 @@ package server
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/8linkz-sec/packmon/internal/config"
 )
@@ -16,6 +17,33 @@ func TestMainServerReadyMessageLeadsWithDashboardURL(t *testing.T) {
 	got := mainServerReadyMessage("http://localhost:8080/")
 	if !strings.Contains(got, "http://localhost:8080/") {
 		t.Fatalf("mainServerReadyMessage() = %q, want it to contain the dashboard URL", got)
+	}
+}
+
+func TestDashboardBannerHighlightsURL(t *testing.T) {
+	t.Parallel()
+
+	// The banner is printed to stdout independent of the JSON logger so the URL
+	// stays unmissable even when it would otherwise scroll past among the
+	// feed-sync startup lines. It must carry the URL and frame it with rules
+	// exactly as wide as the content line.
+	got := dashboardBanner("http://localhost:8080/")
+	if !strings.Contains(got, "http://localhost:8080/") {
+		t.Fatalf("dashboardBanner() = %q, want it to contain the dashboard URL", got)
+	}
+
+	lines := strings.Split(strings.Trim(got, "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("dashboardBanner() produced %d lines, want 3 (rule/content/rule): %q", len(lines), got)
+	}
+	topWidth := utf8.RuneCountInString(lines[0])
+	contentWidth := utf8.RuneCountInString(lines[1])
+	botWidth := utf8.RuneCountInString(lines[2])
+	if topWidth != contentWidth || botWidth != contentWidth {
+		t.Fatalf("dashboardBanner() rule widths = %d/%d, want both %d (content width)", topWidth, botWidth, contentWidth)
+	}
+	if strings.TrimSpace(strings.ReplaceAll(lines[0], "─", "")) != "" {
+		t.Fatalf("dashboardBanner() top border = %q, want only box-drawing rule", lines[0])
 	}
 }
 
