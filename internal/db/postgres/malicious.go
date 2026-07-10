@@ -287,21 +287,7 @@ func upsertMaliciousFindingTx(ctx context.Context, tx pgx.Tx, mf *db.MaliciousFi
 			published = EXCLUDED.published,
 			created_by = EXCLUDED.created_by,
 			removed_at = NULL,
-			updated_at = NOW()
-		WHERE malicious_findings.ecosystem IS DISTINCT FROM EXCLUDED.ecosystem
-		   OR malicious_findings.name IS DISTINCT FROM EXCLUDED.name
-		   OR malicious_findings.version_ranges IS DISTINCT FROM EXCLUDED.version_ranges
-		   OR malicious_findings.versions IS DISTINCT FROM EXCLUDED.versions
-		   OR malicious_findings.source IS DISTINCT FROM EXCLUDED.source
-		   OR malicious_findings.risk_type IS DISTINCT FROM EXCLUDED.risk_type
-		   OR malicious_findings.severity IS DISTINCT FROM EXCLUDED.severity
-		   OR malicious_findings.summary IS DISTINCT FROM EXCLUDED.summary
-		   OR malicious_findings.description IS DISTINCT FROM EXCLUDED.description
-		   OR malicious_findings.reference_urls IS DISTINCT FROM EXCLUDED.reference_urls
-		   OR malicious_findings.origin_ref IS DISTINCT FROM EXCLUDED.origin_ref
-		   OR malicious_findings.published IS DISTINCT FROM EXCLUDED.published
-		   OR malicious_findings.created_by IS DISTINCT FROM EXCLUDED.created_by
-		   OR malicious_findings.removed_at IS NOT NULL`
+			updated_at = NOW()`
 
 	_, err = tx.Exec(ctx, query,
 		mf.ID,

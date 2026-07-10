@@ -40,23 +40,34 @@ func TestFeedImportDeletesDoNotRefreshExistingTombstones(t *testing.T) {
 	}
 }
 
-func TestMaliciousUpsertSkipsUnchangedActiveRows(t *testing.T) {
+// TestMaliciousUpsertRefreshesUpdatedAtForEveryResync guards the fix for the
+// cutoff-prune regression. pruneStaleFindings withdraws OpenSSF findings whose
+// updated_at predates the sync start, so the upsert MUST refresh updated_at for
+// every re-seen entry. Gating the ON CONFLICT update behind a content diff (the
+// old "skip unchanged rows" optimization) leaves unchanged live malware at a
+// stale updated_at, so the next sync of an unchanged catalog withdraws all of
+// it -- 231k findings vanished this way in production.
+func TestMaliciousUpsertRefreshesUpdatedAtForEveryResync(t *testing.T) {
 	source, err := os.ReadFile("malicious.go")
 	if err != nil {
 		t.Fatalf("read malicious.go: %v", err)
 	}
 	text := string(source)
 
-	required := []string{
-		"WHERE malicious_findings.ecosystem IS DISTINCT FROM EXCLUDED.ecosystem",
-		"OR malicious_findings.version_ranges IS DISTINCT FROM EXCLUDED.version_ranges",
-		"OR malicious_findings.reference_urls IS DISTINCT FROM EXCLUDED.reference_urls",
-		"OR malicious_findings.removed_at IS NOT NULL",
+	const marker = "ON CONFLICT (id) DO UPDATE SET"
+	idx := strings.Index(text, marker)
+	if idx < 0 {
+		t.Fatal("malicious upsert missing ON CONFLICT (id) DO UPDATE block")
 	}
-	for _, want := range required {
-		if !strings.Contains(text, want) {
-			t.Fatalf("malicious upsert missing idempotency guard %q", want)
-		}
+	block := text[idx:]
+	if end := strings.Index(block, "`"); end >= 0 {
+		block = block[:end]
+	}
+	if !strings.Contains(block, "updated_at = NOW()") {
+		t.Fatal("malicious upsert must refresh updated_at = NOW() on conflict so the cutoff prune keeps re-seen findings")
+	}
+	if strings.Contains(block, "IS DISTINCT FROM") {
+		t.Fatal("malicious upsert must NOT gate the conflict update behind a content diff; the cutoff prune requires updated_at refreshed for every re-seen entry")
 	}
 }
 

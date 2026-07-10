@@ -396,6 +396,49 @@ func TestUpsertMaliciousFindingRejectsNonArrayVersions(t *testing.T) {
 	}
 }
 
+// TestUpsertMaliciousFindingRefreshesUpdatedAtOnUnchangedResync guards the
+// OpenSSF sync contract: pruneStaleFindings withdraws findings whose updated_at
+// predates the sync start, so every entry re-seen in a sync -- even one whose
+// content is byte-for-byte identical to the stored row -- must have its
+// updated_at refreshed. If the no-op upsert skips the timestamp, the very next
+// sync of an unchanged catalog treats all live malware as stale and withdraws
+// it (231k findings vanished this way in production).
+func TestUpsertMaliciousFindingRefreshesUpdatedAtOnUnchangedResync(t *testing.T) {
+	store, _ := startDockerPostgresStore(t)
+	ctx := context.Background()
+
+	mf := &db.MaliciousFinding{
+		ID:        "MAL-resync-updated-at",
+		Ecosystem: "npm",
+		Name:      "resync-guard",
+		Source:    "openssf",
+		RiskType:  "malware",
+		Severity:  "CRITICAL",
+		Summary:   "supply chain malware that must survive unchanged resyncs",
+	}
+
+	if err := store.UpsertMaliciousFinding(ctx, mf); err != nil {
+		t.Fatalf("UpsertMaliciousFinding(initial) error = %v", err)
+	}
+	var first time.Time
+	if err := store.pool.QueryRow(ctx, `SELECT updated_at FROM malicious_findings WHERE id = $1`, mf.ID).Scan(&first); err != nil {
+		t.Fatalf("read initial updated_at: %v", err)
+	}
+
+	// Re-import the identical entry, exactly as a subsequent unchanged feed sync does.
+	if err := store.UpsertMaliciousFinding(ctx, mf); err != nil {
+		t.Fatalf("UpsertMaliciousFinding(resync) error = %v", err)
+	}
+	var second time.Time
+	if err := store.pool.QueryRow(ctx, `SELECT updated_at FROM malicious_findings WHERE id = $1`, mf.ID).Scan(&second); err != nil {
+		t.Fatalf("read resynced updated_at: %v", err)
+	}
+
+	if !second.After(first) {
+		t.Fatalf("updated_at not refreshed on unchanged resync (first=%s second=%s); the cutoff prune would withdraw live malware", first, second)
+	}
+}
+
 func TestUpsertVulnerabilityRejectsNonArrayAffectedVersionJSON(t *testing.T) {
 	store, _ := startDockerPostgresStore(t)
 	ctx := context.Background()
