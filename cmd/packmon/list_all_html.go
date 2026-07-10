@@ -32,7 +32,6 @@ type listAllHTMLPackageRow struct {
 	Source               string
 	Scope                string
 	Relation             string
-	Technology           string
 	Via                  string
 	Flags                string
 	Vuln                 string
@@ -69,7 +68,6 @@ type listAllHTMLMessages struct {
 	SourceLabel                        string
 	ScopeLabel                         string
 	RelationLabel                      string
-	TechnologyLabel                    string
 	NoPackageStatusIssues              string
 	PackageAttentionWarnings           string
 	SecurityFindingsHeading            string
@@ -121,7 +119,6 @@ func defaultListAllHTMLMessages() listAllHTMLMessages {
 		SourceLabel:                        "Source",
 		ScopeLabel:                         "Scope",
 		RelationLabel:                      "Relation",
-		TechnologyLabel:                    "Technology",
 		NoPackageStatusIssues:              "No package status issues requiring attention.",
 		PackageAttentionWarnings:           "Package attention could not be fully evaluated because report warnings require review.",
 		SecurityFindingsHeading:            "Security Findings",
@@ -248,7 +245,6 @@ func listAllHTMLPackageView(row listAllRow, findingStatuses map[string]listAllHT
 		Source:               listAllHTMLPackageSource(row),
 		Scope:                row.Scope,
 		Relation:             row.Relation,
-		Technology:           row.Technology,
 		Via:                  row.Via,
 		Flags:                row.Flags,
 		Vuln:                 vuln,
@@ -349,9 +345,16 @@ func listAllHTMLAttentionRows(rows []listAllRow, findingStatuses map[string]list
 	return out
 }
 
+// listAllHTMLStatusNeedsAttention reports whether a package status represents an
+// actionable security or lifecycle finding worth surfacing under "Packages
+// Needing Attention": malicious/removed/supply-chain-compromised and
+// reputation-flagged malware history ("infected"), a CVE ("Vulnerable"), or
+// end-of-life ("Lifecycle"). A merely-outdated package ("Update available" with
+// no finding) is NOT an attention item -- that is just an available update.
+// Vulnerable packages whose status reads "Update available" because a fix exists
+// are still caught via the separate vulnerability set.
 func listAllHTMLStatusNeedsAttention(status string) bool {
-	return status == "Update available" ||
-		status == "Malicious" ||
+	return status == "Malicious" ||
 		status == "Removed" ||
 		status == "Supply-chain risk" ||
 		status == "Lifecycle" ||
@@ -541,12 +544,12 @@ th,td{padding:var(--report-space-2) var(--report-space-3);border-bottom:1px soli
 th{color:var(--heading);font-size:var(--report-type-xs);text-transform:uppercase;}
 td{word-break:break-word;overflow-wrap:anywhere;}
 .name{min-width:260px;word-break:break-word;overflow-wrap:anywhere;}
-.installed,.version{width:210px;min-width:190px;overflow-wrap:anywhere;word-break:break-word;}
+.installed,.version{width:250px;min-width:220px;overflow-wrap:anywhere;word-break:break-word;}
 .short{white-space:nowrap;min-width:90px;}
 .nowrap{white-space:nowrap;}
 .source{white-space:nowrap;min-width:105px;}
 .package-status{white-space:nowrap;min-width:110px;}
-.meta-cell{min-width:260px;}
+.meta-cell{min-width:170px;max-width:230px;}
 .package-meta-list{display:flex;flex-wrap:wrap;gap:var(--report-space-1-5) var(--report-space-3);margin:0;padding:0;}
 .package-meta-list div{display:flex;gap:var(--report-space-1);min-width:0;}
 .package-meta-list dt{font-weight:700;color:var(--dim);}
@@ -586,9 +589,12 @@ a:hover{text-decoration:underline;}
 	`border-block-start:1.5px solid currentColor;border-inline-end:1.5px solid currentColor;` +
 	`transform:translateY(-0.08em);}` + `
 .copy-value{white-space:nowrap;}
-` + `.copy-btn{margin-inline-start:var(--report-space-2);border:1px solid var(--border);border-radius:var(--report-radius-sm);` +
-	`background:var(--button-bg);color:var(--button-fg);font:inherit;font-size:var(--report-type-xs);` +
-	`min-width:var(--report-touch-target);min-height:var(--report-touch-target);padding:var(--report-space-1) var(--report-space-3);cursor:pointer;}` + `
+.copy-cell{display:inline-flex;align-items:center;white-space:nowrap;max-width:100%;}
+` + `.copy-btn{order:-1;margin-inline-end:var(--report-space-2);display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--border);border-radius:var(--report-radius-sm);` +
+	`background:var(--button-bg);color:var(--button-fg);` +
+	`width:1.4rem;height:1.4rem;padding:0;cursor:pointer;}` +
+	`.copy-icon{width:11px;height:11px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;}` +
+	`.copy-btn.copied{border-color:var(--success);color:var(--success);}` + `
 .copy-btn:hover{border-color:var(--link);color:var(--link);}
 .copy-btn:focus-visible{outline:var(--report-focus-ring) solid var(--link);outline-offset:var(--report-space-0-5);border-color:var(--link);}
 .copy-btn:active{background:var(--link);border-color:var(--link);color:var(--bg);}
@@ -646,7 +652,7 @@ a:hover{text-decoration:underline;}
 	`}.name,.installed,.version,.short,.source,.package-status,.vuln-col,.findings-table ` +
 	`.finding-package,.findings-table .finding-advisory,.finding-action{min-width:0;` +
 	`white-space:normal;}.finding-title{min-width:0;}.installed,.version{width:auto;` +
-	`}.copy-value{white-space:normal;}.copy-btn{display:none;` +
+	`}.copy-value{white-space:normal;}.copy-cell{display:inline;white-space:normal;}.copy-btn{display:none;` +
 	`}.print-copy-value{display:inline;white-space:normal;overflow-wrap:anywhere;` +
 	`word-break:break-word;}.findings-table .finding-advisory a{white-space:normal;` +
 	`overflow-wrap:anywhere;word-break:break-word;` +
@@ -686,23 +692,23 @@ const listAllHTMLBody = `
 <tbody>
 ` + `{{range .Attention}}{{with htmlPackageRow (index $.PackageRows .) $.FindingStatuses $.VulnerabilityFindingKeys}}<tr><td class="name"><bdi dir="auto">{{.Name}}` +
 	`</bdi></td><td class="installed">{{if .InstalledCopy}}` +
-	`<span class="copy-value"><bdi dir="auto">{{.Installed}}` +
+	`<span class="copy-cell"><span class="copy-value"><bdi dir="auto">{{.Installed}}` +
 	`</bdi></span><button type="button" class="copy-btn" data-copy="{{.InstalledCopy}}` +
 	`" data-copy-label="{{.InstalledCopyLabel}}" data-copy-message="{{.InstalledCopyMessage}}` +
 	`" aria-label="{{.InstalledCopyLabel}}` +
-	`">{{$.Messages.CopyButton}}</button><span class="print-copy-value"><bdi dir="auto">{{.InstalledCopy}}` +
+	`"><svg class="copy-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg></button></span><span class="print-copy-value"><bdi dir="auto">{{.InstalledCopy}}` +
 	`</bdi></span>{{else}}<bdi dir="auto">{{.Installed}}</bdi>{{end}}` +
 	`</td><td class="version">{{if .LatestCopy}}` +
-	`<span class="copy-value"><bdi dir="auto">{{.Latest}}` +
+	`<span class="copy-cell"><span class="copy-value"><bdi dir="auto">{{.Latest}}` +
 	`</bdi></span><button type="button" class="copy-btn" data-copy="{{.LatestCopy}}` +
 	`" data-copy-label="{{.LatestCopyLabel}}" data-copy-message="{{.LatestCopyMessage}}` +
-	`" aria-label="{{.LatestCopyLabel}}">{{$.Messages.CopyButton}}</button><span class="print-copy-value">` +
+	`" aria-label="{{.LatestCopyLabel}}"><svg class="copy-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg></button></span><span class="print-copy-value">` +
 	`<bdi dir="auto">{{.LatestCopy}}</bdi></span>{{else}}<bdi dir="auto">{{.Latest}}` +
 	`</bdi>{{end}}</td><td class="package-status{{if .StatusClass}} {{.StatusClass}}{{end}}` +
 	`">{{.Status}}</td><td class="meta-cell"><dl class="package-meta-list"><div><dt>{{$.Messages.EcosystemLabel}}</dt><dd>{{.Ecosystem}}` +
 	`</dd></div><div><dt>{{$.Messages.SourceLabel}}</dt><dd><bdi dir="auto">{{.Source}}` +
 	`</bdi></dd></div><div><dt>{{$.Messages.ScopeLabel}}</dt><dd>{{.Scope}}</dd></div><div><dt>{{$.Messages.RelationLabel}}</dt><dd>{{.Relation}}` +
-	`</dd></div><div><dt>{{$.Messages.TechnologyLabel}}</dt><dd>{{.Technology}}</dd></div></dl></td><td class="vuln-col{{if .VulnClass}}` +
+	`</dd></div></dl></td><td class="vuln-col{{if .VulnClass}}` +
 	` {{.VulnClass}}{{end}}">{{.Vuln}}</td></tr>{{end}}{{end}}` + `
 </tbody>
 </table>
@@ -756,23 +762,23 @@ const listAllHTMLBody = `
 <tbody>
 ` + `{{range .PackageRows}}{{with htmlPackageRow . $.FindingStatuses $.VulnerabilityFindingKeys}}<tr><td class="name"><bdi dir="auto">{{.Name}}` +
 	`</bdi></td><td class="installed">{{if .InstalledCopy}}` +
-	`<span class="copy-value"><bdi dir="auto">{{.Installed}}` +
+	`<span class="copy-cell"><span class="copy-value"><bdi dir="auto">{{.Installed}}` +
 	`</bdi></span><button type="button" class="copy-btn" data-copy="{{.InstalledCopy}}` +
 	`" data-copy-label="{{.InstalledCopyLabel}}" data-copy-message="{{.InstalledCopyMessage}}` +
 	`" aria-label="{{.InstalledCopyLabel}}` +
-	`">{{$.Messages.CopyButton}}</button><span class="print-copy-value"><bdi dir="auto">{{.InstalledCopy}}` +
+	`"><svg class="copy-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg></button></span><span class="print-copy-value"><bdi dir="auto">{{.InstalledCopy}}` +
 	`</bdi></span>{{else}}<bdi dir="auto">{{.Installed}}</bdi>{{end}}` +
 	`</td><td class="version">{{if .LatestCopy}}` +
-	`<span class="copy-value"><bdi dir="auto">{{.Latest}}` +
+	`<span class="copy-cell"><span class="copy-value"><bdi dir="auto">{{.Latest}}` +
 	`</bdi></span><button type="button" class="copy-btn" data-copy="{{.LatestCopy}}` +
 	`" data-copy-label="{{.LatestCopyLabel}}" data-copy-message="{{.LatestCopyMessage}}` +
-	`" aria-label="{{.LatestCopyLabel}}">{{$.Messages.CopyButton}}</button><span class="print-copy-value">` +
+	`" aria-label="{{.LatestCopyLabel}}"><svg class="copy-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg></button></span><span class="print-copy-value">` +
 	`<bdi dir="auto">{{.LatestCopy}}</bdi></span>{{else}}<bdi dir="auto">{{.Latest}}` +
 	`</bdi>{{end}}</td><td class="package-status{{if .StatusClass}} {{.StatusClass}}{{end}}` +
 	`">{{.Status}}</td><td class="meta-cell"><dl class="package-meta-list"><div><dt>{{$.Messages.EcosystemLabel}}</dt><dd>{{.Ecosystem}}` +
 	`</dd></div><div><dt>{{$.Messages.SourceLabel}}</dt><dd><bdi dir="auto">{{.Source}}` +
 	`</bdi></dd></div><div><dt>{{$.Messages.ScopeLabel}}</dt><dd>{{.Scope}}</dd></div><div><dt>{{$.Messages.RelationLabel}}</dt><dd>{{.Relation}}` +
-	`</dd></div><div><dt>{{$.Messages.TechnologyLabel}}</dt><dd>{{.Technology}}</dd></div></dl></td><td class="vuln-col{{if .VulnClass}}` +
+	`</dd></div></dl></td><td class="vuln-col{{if .VulnClass}}` +
 	` {{.VulnClass}}{{end}}">{{.Vuln}}</td></tr>{{end}}{{end}}` + `
 </tbody>
 </table>
@@ -810,7 +816,7 @@ const listAllHTMLBody = `
   }
   function resetButton(button){
     var label=button.getAttribute('data-copy-label') || copyFullValueLabel;
-    button.textContent=copyButtonLabel;
+    button.classList.remove('copied');
     button.classList.remove('copy-failed');
     button.setAttribute('aria-label',label);
   }
@@ -818,12 +824,13 @@ const listAllHTMLBody = `
     var label=button.getAttribute('data-copy-label') || copyFullValueLabel;
     var message=button.getAttribute('data-copy-message') || copiedFullValueMessage;
     if(ok){
-      button.textContent=message;
+      button.classList.remove('copy-failed');
+      button.classList.add('copied');
       button.setAttribute('aria-label',message);
       announce(message);
     }else{
       showManualCopy(value,button);
-      button.textContent=copyFailedLabel;
+      button.classList.remove('copied');
       button.classList.add('copy-failed');
       button.setAttribute('aria-label',copyFailedManualMessage+' '+label);
       announce(copyFailedManualMessage);

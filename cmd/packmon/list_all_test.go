@@ -140,160 +140,6 @@ func writeListAllPackageLock(t *testing.T, dir string, packages ...listAllLockPa
 	writeFile(t, filepath.Join(dir, "package-lock.json"), string(out))
 }
 
-func TestListAllPackageTechnologies(t *testing.T) {
-	tests := []struct {
-		name string
-		pkg  listAllPackage
-		want string
-	}{
-		{
-			name: "angular scoped package",
-			pkg:  listAllPackage{Name: "@angular/core", Version: "18.2.0", Ecosystem: domain.EcosystemNPM},
-			want: "angular",
-		},
-		{
-			name: "legacy angular package",
-			pkg:  listAllPackage{Name: "angular", Version: "1.8.3", Ecosystem: domain.EcosystemNPM},
-			want: "angular",
-		},
-		{
-			name: "angular dash package",
-			pkg:  listAllPackage{Name: "angular-material", Version: "1.2.5", Ecosystem: domain.EcosystemNPM},
-			want: "angular",
-		},
-		{
-			name: "non angular npm package has no generic js tag",
-			pkg:  listAllPackage{Name: "react", Version: "19.0.0", Ecosystem: domain.EcosystemNPM},
-			want: "-",
-		},
-		{
-			name: "openai npm package has no gpt technology tag",
-			pkg:  listAllPackage{Name: "openai", Version: "4.0.0", Ecosystem: domain.EcosystemNPM},
-			want: "-",
-		},
-		{
-			name: "gpt named npm package has no gpt technology tag",
-			pkg:  listAllPackage{Name: "gpt-3-encoder", Version: "1.1.4", Ecosystem: domain.EcosystemNPM},
-			want: "-",
-		},
-		{
-			name: "openai pypi package has no gpt technology tag",
-			pkg:  listAllPackage{Name: "openai", Version: "1.3.0", Ecosystem: domain.EcosystemPyPI},
-			want: "-",
-		},
-		{
-			name: "maven package is java",
-			pkg:  listAllPackage{Name: "org.springframework:spring-core", Version: "6.2.0", Ecosystem: domain.EcosystemMaven},
-			want: "java",
-		},
-		{
-			name: "tomcat maven package is java",
-			pkg:  listAllPackage{Name: "org.apache.tomcat.embed:tomcat-embed-core", Version: "9.0.80", Ecosystem: domain.EcosystemMaven},
-			want: "java",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := listAllPackageTechnologies(tt.pkg); got != tt.want {
-				t.Fatalf("listAllPackageTechnologies(%+v) = %q, want %q", tt.pkg, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestPrintListAllPackageReportIncludesTechnologyColumn(t *testing.T) {
-	report := listAllPackageReport{
-		Rows: []listAllRow{
-			{
-				Name:       "@angular/core",
-				Installed:  "18.2.0",
-				Latest:     "18.2.0",
-				Update:     "-",
-				Ecosystem:  "npm",
-				Source:     "lockfile",
-				Scope:      "runtime",
-				Relation:   "direct",
-				Technology: "angular",
-				Vuln:       "-",
-				LockFile:   "package-lock.json",
-			},
-			{
-				Name:       "org.springframework:spring-core",
-				Installed:  "6.2.0",
-				Latest:     "6.2.0",
-				Update:     "-",
-				Ecosystem:  "maven",
-				Source:     "lockfile",
-				Scope:      "runtime",
-				Relation:   "direct",
-				Technology: "java",
-				Vuln:       "-",
-				LockFile:   "pom.xml",
-			},
-		},
-	}
-
-	output := captureStdout(t, func() {
-		printListAllPackageReport(report)
-	})
-
-	for _, want := range []string{"TECHNOLOGY", "angular", "java"} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("terminal list-all output missing %q:\n%s", want, output)
-		}
-	}
-}
-
-func TestListAllHTMLIncludesTechnologyColumn(t *testing.T) {
-	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
-	report := listAllPackageReport{
-		Rows: []listAllRow{
-			{
-				Name:       "@angular/core",
-				Installed:  "18.2.0",
-				Latest:     "18.2.0",
-				Update:     "-",
-				Ecosystem:  "npm",
-				Source:     "lockfile",
-				Scope:      "runtime",
-				Relation:   "direct",
-				Technology: "angular",
-				Vuln:       "-",
-				LockFile:   "package-lock.json",
-			},
-			{
-				Name:       "org.springframework:spring-core",
-				Installed:  "6.2.0",
-				Latest:     "6.2.0",
-				Update:     "-",
-				Ecosystem:  "maven",
-				Source:     "lockfile",
-				Scope:      "runtime",
-				Relation:   "direct",
-				Technology: "java",
-				Vuln:       "-",
-				LockFile:   "pom.xml",
-			},
-		},
-	}
-
-	result := &domain.ScanResult{Mode: "local"}
-	if err := writeListAllHTML(htmlPath, "test", result, report); err != nil {
-		t.Fatalf("writeListAllHTML: %v", err)
-	}
-	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
-	if err != nil {
-		t.Fatalf("read HTML: %v", err)
-	}
-	out := string(data)
-	for _, want := range []string{">Technology<", ">angular<", ">java<"} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("list-all HTML missing %q:\n%s", want, out)
-		}
-	}
-}
-
 func TestListAllHTMLExposesMachineReadableReportTimeAndLanguage(t *testing.T) {
 	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
 	report := listAllPackageReport{
@@ -307,7 +153,6 @@ func TestListAllHTMLExposesMachineReadableReportTimeAndLanguage(t *testing.T) {
 			Source:     "lockfile",
 			Scope:      "runtime",
 			Relation:   "direct",
-			Technology: "-",
 			Vuln:       "-",
 			LockFile:   "package-lock.json",
 		}},
@@ -380,7 +225,6 @@ func TestListAllHTMLCollapsesFullPackageInventoryByDefault(t *testing.T) {
 				Source:     "lockfile",
 				Scope:      "runtime",
 				Relation:   "direct",
-				Technology: "-",
 				Vuln:       "-",
 				LockFile:   "package-lock.json",
 			},
@@ -393,7 +237,6 @@ func TestListAllHTMLCollapsesFullPackageInventoryByDefault(t *testing.T) {
 				Source:     "lockfile",
 				Scope:      "runtime",
 				Relation:   "direct",
-				Technology: "-",
 				Vuln:       "-",
 				LockFile:   "package-lock.json",
 			},
@@ -654,7 +497,6 @@ func renderListAllAccessibilityHTML(t *testing.T) string {
 			Source:     "lockfile",
 			Scope:      "runtime",
 			Relation:   "direct",
-			Technology: "-",
 			Vuln:       "yes",
 			LockFile:   "package-lock.json",
 		}},
@@ -2532,7 +2374,7 @@ func TestListAllHTMLIncludesResponsivePrintAndLightThemePolicy(t *testing.T) {
 		"--button-bg:",
 		"--button-fg:",
 		"--status-bg:",
-		".copy-btn{margin-inline-start:var(--report-space-2);border:1px solid var(--border);border-radius:var(--report-radius-sm);background:var(--button-bg);color:var(--button-fg);",
+		".copy-btn{order:-1;margin-inline-end:var(--report-space-2);display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--border);border-radius:var(--report-radius-sm);background:var(--button-bg);color:var(--button-fg);",
 		".status{margin:var(--report-space-5) 0;padding:var(--report-space-3) var(--report-space-4);background:var(--status-bg);",
 		"@media (prefers-color-scheme: light)",
 		"@media (prefers-color-scheme: light){:root{color-scheme:light;",
@@ -2583,7 +2425,7 @@ func TestListAllHTMLUsesReportTypeAndSpacingScales(t *testing.T) {
 		`h2{font-size:var(--report-type-lg);margin:var(--report-space-6) 0 var(--report-space-2);`,
 		`.badge{border:1px solid var(--border);border-radius:var(--report-radius-md);padding:var(--report-space-1) var(--report-space-3);font-size:var(--report-type-sm);`,
 		`.sev{display:inline-block;border:1px solid var(--border);border-radius:var(--report-radius-sm);padding:var(--report-space-0-5) var(--report-space-2);`,
-		`.copy-btn{margin-inline-start:var(--report-space-2);border:1px solid var(--border);border-radius:var(--report-radius-sm);background:var(--button-bg);color:var(--button-fg);font:inherit;font-size:var(--report-type-xs);min-width:var(--report-touch-target);min-height:var(--report-touch-target);padding:var(--report-space-1) var(--report-space-3);cursor:pointer;}`,
+		`.copy-btn{order:-1;margin-inline-end:var(--report-space-2);display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--border);border-radius:var(--report-radius-sm);background:var(--button-bg);color:var(--button-fg);width:1.4rem;height:1.4rem;padding:0;cursor:pointer;}`,
 		`.footer{border-top:1px solid var(--border);margin-top:var(--report-space-7);padding-top:var(--report-space-3);color:var(--dim);font-size:var(--report-type-xs);}`,
 	} {
 		if !strings.Contains(out, want) {
@@ -2793,6 +2635,53 @@ func TestListAllHTMLKeepsUnknownOnlyPackagesOutOfAttention(t *testing.T) {
 	if !strings.Contains(allPackages, `<td class="name"><bdi dir="auto">docker.io/library/alpine</bdi></td>`) ||
 		!strings.Contains(allPackages, `<td class="package-status">Unknown</td>`) {
 		t.Fatalf("unknown docker package should still be visible in All Packages:\n%s", allPackages)
+	}
+}
+
+func TestListAllHTMLExcludesMerelyOutdatedPackagesFromAttention(t *testing.T) {
+	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+	report := listAllPackageReport{
+		Rows: []listAllRow{{
+			Name:      "left-pad",
+			Installed: "1.0.0",
+			Latest:    "1.3.0",
+			Update:    "yes",
+			Ecosystem: "npm",
+			Source:    "lockfile",
+			Scope:     "runtime",
+			Relation:  "direct",
+			Vuln:      "-",
+			LockFile:  "package-lock.json",
+		}},
+	}
+	result := &domain.ScanResult{Mode: "remote"}
+
+	if err := writeListAllHTML(htmlPath, "test", result, report); err != nil {
+		t.Fatalf("writeListAllHTML: %v", err)
+	}
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read HTML: %v", err)
+	}
+	out := string(data)
+	attentionStart := strings.Index(out, "<h2>Packages Needing Attention</h2>")
+	securityStart := strings.Index(out, "<h2>Security Findings</h2>")
+	if attentionStart < 0 || securityStart < 0 || securityStart <= attentionStart {
+		t.Fatalf("HTML missing expected sections:\n%s", out)
+	}
+	// A package that merely has an available update (no security or lifecycle
+	// finding) must NOT be flagged as needing attention.
+	attention := out[attentionStart:securityStart]
+	if strings.Contains(attention, "left-pad") {
+		t.Fatalf("merely-outdated package must not appear under Packages Needing Attention:\n%s", attention)
+	}
+	if !strings.Contains(attention, "No package status issues requiring attention.") {
+		t.Fatalf("attention section should report no actionable issues:\n%s", attention)
+	}
+	// It must still be listed with its available update in All Packages.
+	allStart := strings.Index(out, `<details class="inventory-details">`)
+	if allStart < 0 || !strings.Contains(out[allStart:], "left-pad") {
+		t.Fatalf("outdated package should still appear in All Packages:\n%s", out)
 	}
 }
 
@@ -3254,7 +3143,6 @@ func TestListAllHTMLUsesCompactActionAndInventoryLayouts(t *testing.T) {
 				Source:     "lockfile",
 				Scope:      "runtime",
 				Relation:   "transitive",
-				Technology: "angular",
 				Vuln:       "yes",
 				LockFile:   "package-lock.json",
 			},
@@ -3267,7 +3155,6 @@ func TestListAllHTMLUsesCompactActionAndInventoryLayouts(t *testing.T) {
 				Source:     "compose",
 				Scope:      "runtime",
 				Relation:   "service-image",
-				Technology: "-",
 				Vuln:       "-",
 				LockFile:   "docker-compose.yml",
 			},
@@ -3290,7 +3177,7 @@ func TestListAllHTMLUsesCompactActionAndInventoryLayouts(t *testing.T) {
 		`<th scope="col" class="meta-cell">Triage</th>`,
 		`<table class="package-table inventory-table">`,
 		`<th scope="col" class="meta-cell">Inventory Details</th>`,
-		`<dl class="package-meta-list"><div><dt>Ecosystem</dt><dd>npm</dd></div><div><dt>Source</dt><dd><bdi dir="auto">lockfile</bdi></dd></div><div><dt>Scope</dt><dd>runtime</dd></div><div><dt>Relation</dt><dd>transitive</dd></div><div><dt>Technology</dt><dd>angular</dd></div></dl>`,
+		`<dl class="package-meta-list"><div><dt>Ecosystem</dt><dd>npm</dd></div><div><dt>Source</dt><dd><bdi dir="auto">lockfile</bdi></dd></div><div><dt>Scope</dt><dd>runtime</dd></div><div><dt>Relation</dt><dd>transitive</dd></div></dl>`,
 		`<td class="vuln-col vuln-yes">yes</td>`,
 	} {
 		if !strings.Contains(out, want) {
@@ -3300,7 +3187,7 @@ func TestListAllHTMLUsesCompactActionAndInventoryLayouts(t *testing.T) {
 
 	for _, old := range []string{
 		`.package-table{min-width:1500px;`,
-		`<th scope="col" class="installed">Installed</th><th scope="col" class="version">Latest</th><th scope="col" class="package-status">Status</th><th scope="col" class="short">Ecosystem</th><th scope="col" class="source">Source</th><th scope="col" class="short">Scope</th><th scope="col" class="short">Relation</th><th scope="col" class="short">Technology</th><th scope="col" class="vuln-col">Vulnerability</th>`,
+		`<th scope="col" class="installed">Installed</th><th scope="col" class="version">Latest</th><th scope="col" class="package-status">Status</th><th scope="col" class="short">Ecosystem</th><th scope="col" class="source">Source</th><th scope="col" class="short">Scope</th><th scope="col" class="short">Relation</th><th scope="col" class="vuln-col">Vulnerability</th>`,
 	} {
 		if strings.Contains(out, old) {
 			t.Fatalf("list-all HTML still renders old 10-column inventory layout %q:\n%s", old, out)
@@ -3339,7 +3226,7 @@ func TestListAllHTMLShortensDigestAndRendersCopyButton(t *testing.T) {
 	}
 	out := string(data)
 	for _, want := range []string{
-		`<span class="copy-value"><bdi dir="auto">sha256:5b10f432ef3d..</bdi></span>`,
+		`<span class="copy-value"><bdi dir="auto">5b10f432ef3d12345..</bdi></span>`,
 		`<span class="print-copy-value"><bdi dir="auto">` + digest + `</bdi></span>`,
 		`data-copy="` + digest + `"`,
 		`data-copy-label="Copy full latest value for docker.io/library/alpine 3.23"`,
@@ -3415,7 +3302,7 @@ func TestListAllHTMLPrintsExternalHrefsFullDigestsAndIsolatesBidi(t *testing.T) 
 		`<h1><bdi dir="auto">test-` + "\u05d7" + `</bdi></h1>`,
 		`<bdi dir="auto">repo-` + "\u05d0" + `</bdi>`,
 		`<td class="name"><bdi dir="auto">docker.io/library/alpine-` + "\u05d1" + `</bdi></td>`,
-		`<span class="copy-value"><bdi dir="auto">sha256:5b10f432ef3d..</bdi></span>`,
+		`<span class="copy-value"><bdi dir="auto">5b10f432ef3d12345..</bdi></span>`,
 		`<span class="print-copy-value"><bdi dir="auto">` + digest + `</bdi></span>`,
 		`<td class="finding-advisory"><a class="external-link" href="https://github.com/advisories/GHSA-test" target="_blank" rel="noopener" aria-label="GHSA-test opens in a new tab"><bdi dir="auto">GHSA-test</bdi><span class="sr-only"> (opens in a new tab)</span></a></td>`,
 		`<td class="finding-title"><bdi dir="auto">mixed bidi finding ` + "\u05d5" + `</bdi></td>`,
@@ -3471,7 +3358,7 @@ func TestListAllHTMLAppliesTableLayoutAndAttentionClasses(t *testing.T) {
 		`.status-update{color:var(--high);font-weight:700;}`,
 		`.vuln-yes{color:var(--crit);font-weight:700;}`,
 		`.sev-high{color:var(--high);border-color:var(--high);}`,
-		`.copy-btn{margin-inline-start:var(--report-space-2);border:1px solid var(--border);border-radius:var(--report-radius-sm);background:var(--button-bg);color:var(--button-fg);font:inherit;font-size:var(--report-type-xs);min-width:var(--report-touch-target);min-height:var(--report-touch-target);padding:var(--report-space-1) var(--report-space-3);cursor:pointer;}`,
+		`.copy-btn{order:-1;margin-inline-end:var(--report-space-2);display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--border);border-radius:var(--report-radius-sm);background:var(--button-bg);color:var(--button-fg);width:1.4rem;height:1.4rem;padding:0;cursor:pointer;}`,
 		`.copy-btn:focus-visible{outline:var(--report-focus-ring) solid var(--link);outline-offset:var(--report-space-0-5);border-color:var(--link);}`,
 		`.copy-btn:active{background:var(--link);border-color:var(--link);color:var(--bg);}`,
 		`.vuln-col{text-align:center;`,
@@ -3490,7 +3377,7 @@ func TestListAllHTMLAppliesTableLayoutAndAttentionClasses(t *testing.T) {
 		`<th scope="col" class="finding-title">Finding</th>`,
 		`<th scope="col" class="finding-action">Action</th>`,
 		`<td class="finding-action"><bdi dir="auto">Fix &gt;= 8.5.10</bdi></td>`,
-		`<td class="installed"><span class="copy-value"><bdi dir="auto">sha256:aaaaaaaaaaaa..</bdi></span><button type="button" class="copy-btn" data-copy="` + installedDigest + `" data-copy-label="Copy full installed value for docker.io/library/nginx ` + installedDigest + `" data-copy-message="Copied full installed value for docker.io/library/nginx" aria-label="Copy full installed value for docker.io/library/nginx ` + installedDigest + `">Copy</button><span class="print-copy-value"><bdi dir="auto">` + installedDigest + `</bdi></span></td>`,
+		`<td class="installed"><span class="copy-cell"><span class="copy-value"><bdi dir="auto">aaaaaaaaaaaa12345..</bdi></span><button type="button" class="copy-btn" data-copy="` + installedDigest + `" data-copy-label="Copy full installed value for docker.io/library/nginx ` + installedDigest + `" data-copy-message="Copied full installed value for docker.io/library/nginx" aria-label="Copy full installed value for docker.io/library/nginx ` + installedDigest + `"><svg class="copy-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg></button></span><span class="print-copy-value"><bdi dir="auto">` + installedDigest + `</bdi></span></td>`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("HTML missing layout requirement %q:\n%s", want, out)
@@ -3831,7 +3718,7 @@ func TestListAllHelperBranches(t *testing.T) {
 	if !ok || ref.Name != "docker.io/library/postgres" || ref.Reference != "sha256:abcdef" {
 		t.Fatalf("docker ref = %+v/%v", ref, ok)
 	}
-	if got := shortDigest("sha256:1234567890abcdef"); got != "sha256:1234567890ab.." {
+	if got := shortDigest("sha256:1234567890abcdef1234567890"); got != "1234567890abcdef1.." {
 		t.Fatalf("shortDigest = %q", got)
 	}
 	if got := shortDigest("not-a-digest"); got != "not-a-digest" {
@@ -4124,5 +4011,274 @@ func TestResolveDockerImageStatusMarksMovedPinnedTagAsUpdateAvailable(t *testing
 	}, nil)
 	if got.Unknown || got.Update != "yes" || got.Latest != shortDigest(current) || got.LatestCopy != current {
 		t.Fatalf("resolveDockerImageStatus() = %+v, want update to current tag digest", got)
+	}
+}
+
+// --- DESIGN.md contract guards for the --list-all HTML report -------------
+// These tests lock the documented behaviors of the list-all HTML report so a
+// future refactor cannot silently regress them. See DESIGN.md, the "--list-all
+// keeps the findings scan scope identical to a normal scan" bullet.
+
+// TestListAllHTMLReportNeverImpliesFailOnFiltering locks the guarantee that the
+// report never filters findings by the --fail-on threshold and therefore
+// carries no fail-on footer and no per-finding detail row that could imply such
+// filtering.
+func TestListAllHTMLReportNeverImpliesFailOnFiltering(t *testing.T) {
+	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+	report := listAllPackageReport{
+		Rows: []listAllRow{{
+			Name:      "postcss",
+			Installed: "8.5.8",
+			Latest:    "8.5.10",
+			Update:    "yes",
+			Ecosystem: "npm",
+			Source:    "lockfile",
+			Scope:     "runtime",
+			Relation:  "transitive",
+			Vuln:      "yes",
+			LockFile:  "package-lock.json",
+		}},
+	}
+	result := &domain.ScanResult{
+		Mode: "remote",
+		Findings: []domain.Finding{{
+			Name:         "postcss",
+			Version:      "8.5.8",
+			Ecosystem:    domain.EcosystemNPM,
+			Type:         domain.FindingTypeVulnerability,
+			Severity:     domain.SeverityHigh,
+			AdvisoryID:   "GHSA-guard",
+			Title:        "guard finding",
+			FixedVersion: ">= 8.5.10",
+			Source:       "osv",
+		}},
+	}
+
+	if err := writeListAllHTML(htmlPath, "test", result, report); err != nil {
+		t.Fatalf("writeListAllHTML: %v", err)
+	}
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read HTML: %v", err)
+	}
+	out := string(data)
+	for _, banned := range []string{
+		`class="footer"`,
+		"fail-on",
+		"Fail-on",
+		"--fail-on",
+		"finding-details-row",
+		`class="finding-details"`,
+	} {
+		if strings.Contains(out, banned) {
+			t.Fatalf("list-all HTML must not imply fail-on filtering; found %q:\n%s", banned, out)
+		}
+	}
+}
+
+// TestListAllHTMLOmitsTechnologyAnnotations locks the removal of the
+// report-only "Technology" column/label from the list-all HTML report.
+func TestListAllHTMLOmitsTechnologyAnnotations(t *testing.T) {
+	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+	report := listAllPackageReport{
+		Rows: []listAllRow{
+			{Name: "@angular/core", Installed: "17.0.0", Latest: "18.0.0", Update: "yes", Ecosystem: "npm", Source: "lockfile", Scope: "runtime", Relation: "direct", Vuln: "-", LockFile: "package-lock.json"},
+			{Name: "org.apache.commons:commons-lang3", Installed: "3.12.0", Latest: "3.14.0", Update: "yes", Ecosystem: "maven", Source: "lockfile", Scope: "runtime", Relation: "direct", Vuln: "-", LockFile: "pom.xml"},
+		},
+	}
+	result := &domain.ScanResult{Mode: "remote"}
+	if err := writeListAllHTML(htmlPath, "test", result, report); err != nil {
+		t.Fatalf("writeListAllHTML: %v", err)
+	}
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read HTML: %v", err)
+	}
+	out := string(data)
+	for _, banned := range []string{"Technology", "TECHNOLOGY"} {
+		if strings.Contains(out, banned) {
+			t.Fatalf("list-all HTML must not carry a Technology annotation; found %q", banned)
+		}
+	}
+}
+
+// TestListAllHTMLKeepsVulnerableWithFixInAttention locks the contract that a
+// vulnerability finding still counts as needing attention even when a fix is
+// available and its status therefore renders as "Update available".
+func TestListAllHTMLKeepsVulnerableWithFixInAttention(t *testing.T) {
+	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+	report := listAllPackageReport{
+		Rows: []listAllRow{{
+			Name:      "postcss",
+			Installed: "8.5.8",
+			Latest:    "8.5.10",
+			Update:    "yes",
+			Ecosystem: "npm",
+			Source:    "lockfile",
+			Scope:     "runtime",
+			Relation:  "transitive",
+			Vuln:      "yes",
+			LockFile:  "package-lock.json",
+		}},
+	}
+	result := &domain.ScanResult{
+		Mode: "remote",
+		Findings: []domain.Finding{{
+			Name:         "postcss",
+			Version:      "8.5.8",
+			Ecosystem:    domain.EcosystemNPM,
+			Type:         domain.FindingTypeVulnerability,
+			Severity:     domain.SeverityHigh,
+			AdvisoryID:   "GHSA-fixable",
+			Title:        "fixable vulnerability",
+			FixedVersion: ">= 8.5.10",
+			Source:       "osv",
+		}},
+	}
+	if err := writeListAllHTML(htmlPath, "test", result, report); err != nil {
+		t.Fatalf("writeListAllHTML: %v", err)
+	}
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read HTML: %v", err)
+	}
+	out := string(data)
+	attentionStart := strings.Index(out, "<h2>Packages Needing Attention</h2>")
+	securityStart := strings.Index(out, "<h2>Security Findings</h2>")
+	if attentionStart < 0 || securityStart < 0 || securityStart <= attentionStart {
+		t.Fatalf("HTML missing expected sections:\n%s", out)
+	}
+	attention := out[attentionStart:securityStart]
+	if !strings.Contains(attention, "postcss") {
+		t.Fatalf("vulnerable package with an available fix must appear under Packages Needing Attention:\n%s", attention)
+	}
+	// The status still renders as "Update available" (a fix exists), not "Vulnerable".
+	if !strings.Contains(out, `<td class="package-status status-update">Update available</td>`) {
+		t.Fatalf("fixable vulnerability should render status Update available:\n%s", out)
+	}
+}
+
+// TestListAllHTMLDigestDisplayDropsAlgoAndTruncatesTo17 locks the digest
+// presentation: the visible table shows the digest without its algorithm
+// prefix, truncated to 17 characters plus "..", while the full "sha256:" digest
+// stays available through the copy control and the print span.
+func TestListAllHTMLDigestDisplayDropsAlgoAndTruncatesTo17(t *testing.T) {
+	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+	const digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	report := listAllPackageReport{
+		Rows: []listAllRow{{
+			Name:       "docker.io/library/alpine",
+			Installed:  "3.23",
+			Latest:     digest,
+			LatestCopy: digest,
+			Update:     "unknown",
+			Ecosystem:  "docker",
+			Source:     "dockerfile",
+			Scope:      "runtime",
+			Relation:   "base",
+			Vuln:       "-",
+			LockFile:   "Dockerfile",
+		}},
+		Unknown: 1,
+	}
+	result := &domain.ScanResult{Mode: "remote"}
+	if err := writeListAllHTML(htmlPath, "test", result, report); err != nil {
+		t.Fatalf("writeListAllHTML: %v", err)
+	}
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read HTML: %v", err)
+	}
+	out := string(data)
+
+	// Visible display: exactly 17 hex chars + "..", with no algorithm prefix.
+	const wantDisplay = `<span class="copy-value"><bdi dir="auto">0123456789abcdef0..</bdi></span>`
+	if !strings.Contains(out, wantDisplay) {
+		t.Fatalf("digest not shown as 17-char prefix without algo; want %q:\n%s", wantDisplay, out)
+	}
+	// Anchor on the full visible-span class so this does not match the hidden
+	// print-copy-value span, which legitimately carries the full sha256: digest.
+	if strings.Contains(out, `<span class="copy-value"><bdi dir="auto">sha256:`) {
+		t.Fatalf("visible digest display must not keep the sha256: prefix:\n%s", out)
+	}
+	// Full digest remains available for copy and print.
+	for _, want := range []string{
+		`data-copy="` + digest + `"`,
+		`<span class="print-copy-value"><bdi dir="auto">` + digest + `</bdi></span>`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("full digest must remain copyable/printable; missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestListAllHTMLCopyControlIsCompactIconBeforeValue locks the copy control
+// design: a compact, icon-only copy button (no visible "Copy" text) rendered
+// before the value and kept on one line with it.
+func TestListAllHTMLCopyControlIsCompactIconBeforeValue(t *testing.T) {
+	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+	const digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	report := listAllPackageReport{
+		Rows: []listAllRow{{
+			Name:       "docker.io/library/alpine",
+			Installed:  "3.23",
+			Latest:     digest,
+			LatestCopy: digest,
+			Update:     "unknown",
+			Ecosystem:  "docker",
+			Source:     "dockerfile",
+			Scope:      "runtime",
+			Relation:   "base",
+			Vuln:       "-",
+			LockFile:   "Dockerfile",
+		}},
+		Unknown: 1,
+	}
+	result := &domain.ScanResult{Mode: "remote"}
+	if err := writeListAllHTML(htmlPath, "test", result, report); err != nil {
+		t.Fatalf("writeListAllHTML: %v", err)
+	}
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read HTML: %v", err)
+	}
+	out := string(data)
+	for _, want := range []string{
+		// order:-1 renders the button before the value; the inline-flex/nowrap
+		// wrapper keeps the button and shortened digest on a single line.
+		`.copy-btn{order:-1;margin-inline-end:var(--report-space-2);`,
+		`.copy-cell{display:inline-flex;align-items:center;white-space:nowrap;`,
+		`<span class="copy-cell"><span class="copy-value">`,
+		`<svg class="copy-icon"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("copy control missing compact/before-value markup %q:\n%s", want, out)
+		}
+	}
+	// Icon-only: the button carries no visible "Copy" text label.
+	if strings.Contains(out, ">Copy</button>") {
+		t.Fatalf("copy button must be icon-only, not a text label:\n%s", out)
+	}
+}
+
+// TestShortDigestDropsAlgoAndTruncatesAt17 locks the 17-character truncation
+// boundary and algorithm-prefix removal used by both list-all tables.
+func TestShortDigestDropsAlgoAndTruncatesAt17(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"long digest truncates to 17 and drops algo", "sha256:" + strings.Repeat("a", 64), strings.Repeat("a", 17) + ".."},
+		{"exactly 17 kept whole", "sha256:" + strings.Repeat("b", 17), "sha256:" + strings.Repeat("b", 17)},
+		{"eighteen truncates to 17", "sha256:" + strings.Repeat("c", 18), strings.Repeat("c", 17) + ".."},
+		{"non digest unchanged", "not-a-digest", "not-a-digest"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shortDigest(tc.in); got != tc.want {
+				t.Fatalf("shortDigest(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
 	}
 }

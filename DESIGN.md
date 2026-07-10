@@ -300,25 +300,31 @@ Important behavior:
   inventory section still lists every detected package by default and annotates
   source (`lockfile`, `sbom`, `dockerfile`, `compose`), scope (`runtime`,
   `dev`, `ci`, `sbom`, `build`), relation (`direct`, `transitive`,
-  `workflow`, etc.), report-only technology tags (`angular` for Angular npm
-  packages and `java` for Maven/Gradle rows), npm `via` roots, and
+  `workflow`, etc.), npm `via` roots, and
   optional/peer flags. HTML reports
   omit the noisy `Via` and `Flags` columns, keep full source paths out of
   package rows, and render a deduplicated "Checked Inventory Sources" section
   at the bottom for lockfiles, SBOMs, and Docker inventory files. The HTML
-  "Packages Needing Attention" section lists actionable updates, current
-  ReversingLabs malware/removed-package findings, lifecycle findings,
-  vulnerability findings, and non-blocking historical ReversingLabs incident
-  context as `LOW` `Reputation info`; unknown latest-status rows remain visible
-  only in "All Packages". Finding-derived states such as `Malicious`, `Removed`,
-  `Supply-chain risk`, `Lifecycle`, and `Reputation info` override general
-  latest-version status. Vulnerability findings with a known fix or update path
-  render as `Update available`; only vulnerability findings without a known
-  update path render as `Vulnerable`, and a package with a security finding is
-  never shown as merely `Up-to-Date`. Security finding advisories link to
-  canonical external reports when available. Long digest values are shortened
-  with `..` in the visible table and exposed through a local copy-to-clipboard
-  control containing the full value. JSON, SARIF, and JUnit output flags still
+  "Packages Needing Attention" section is scoped to genuine security and
+  lifecycle findings only: current ReversingLabs malware/removed-package
+  findings, supply-chain-risk findings, lifecycle (end-of-life) findings,
+  vulnerability findings (including those with a known fix), and non-blocking
+  historical ReversingLabs incident context as `LOW` `Reputation info`.
+  Packages that are merely outdated (an available update with no security or
+  lifecycle finding) and unknown latest-status rows are not listed there; they
+  remain visible only in "All Packages". The report never filters findings by
+  the `--fail-on` threshold, so it carries no fail-on footer and no per-finding
+  detail row that could imply such filtering. Finding-derived states such as
+  `Malicious`, `Removed`, `Supply-chain risk`, `Lifecycle`, and `Reputation
+  info` override general latest-version status. Vulnerability findings with a
+  known fix or update path render as `Update available`; only vulnerability
+  findings without a known update path render as `Vulnerable`, and a package
+  with a security finding is never shown as merely `Up-to-Date`. Security
+  finding advisories link to canonical external reports when available. Long
+  digest values are shown without their algorithm prefix and truncated to 17
+  characters with `..` in the visible table; a compact icon-only
+  copy-to-clipboard control placed before the value exposes the full digest.
+  JSON, SARIF, and JUnit output flags still
   write the standard scan result when used with `--list-all`; `--html` writes
   the combined list-all HTML report. `--list-all-offline` preserves the
   findings scan and full package inventory but disables the external
