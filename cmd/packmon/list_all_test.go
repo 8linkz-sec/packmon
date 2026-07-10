@@ -2424,7 +2424,7 @@ func TestListAllHTMLUsesReportTypeAndSpacingScales(t *testing.T) {
 		`h1{font-size:var(--report-type-xl);margin:0;color:var(--heading);`,
 		`h2{font-size:var(--report-type-lg);margin:var(--report-space-6) 0 var(--report-space-2);`,
 		`.badge{border:1px solid var(--border);border-radius:var(--report-radius-md);padding:var(--report-space-1) var(--report-space-3);font-size:var(--report-type-sm);`,
-		`.sev{display:inline-block;border:1px solid var(--border);border-radius:var(--report-radius-sm);padding:var(--report-space-0-5) var(--report-space-2);`,
+		`.sev{display:inline-block;border:1px solid var(--border);border-radius:var(--report-radius-sm);padding:var(--report-space-0-5) var(--report-space-1-5);font-size:var(--report-type-xs);font-weight:700;line-height:1.3;}`,
 		`.copy-btn{order:-1;margin-inline-end:var(--report-space-2);display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--border);border-radius:var(--report-radius-sm);background:var(--button-bg);color:var(--button-fg);width:1.4rem;height:1.4rem;padding:0;cursor:pointer;}`,
 		`.footer{border-top:1px solid var(--border);margin-top:var(--report-space-7);padding-top:var(--report-space-3);color:var(--dim);font-size:var(--report-type-xs);}`,
 	} {
@@ -4280,5 +4280,67 @@ func TestShortDigestDropsAlgoAndTruncatesAt17(t *testing.T) {
 				t.Fatalf("shortDigest(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestListAllHTMLSeverityBadgeIsCompact locks the compact sizing of the
+// Security-Findings severity badge (.sev): an explicit small font and tight
+// horizontal padding, so a future change cannot silently enlarge it back.
+func TestListAllHTMLSeverityBadgeIsCompact(t *testing.T) {
+	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+	report := listAllPackageReport{
+		Rows: []listAllRow{{
+			Name:      "postcss",
+			Installed: "8.5.8",
+			Latest:    "8.5.10",
+			Update:    "yes",
+			Ecosystem: "npm",
+			Source:    "lockfile",
+			Scope:     "runtime",
+			Relation:  "transitive",
+			Vuln:      "yes",
+			LockFile:  "package-lock.json",
+		}},
+	}
+	result := &domain.ScanResult{
+		Mode: "remote",
+		Findings: []domain.Finding{{
+			Name:         "postcss",
+			Version:      "8.5.8",
+			Ecosystem:    domain.EcosystemNPM,
+			Type:         domain.FindingTypeVulnerability,
+			Severity:     domain.SeverityHigh,
+			AdvisoryID:   "GHSA-sev",
+			Title:        "severity badge finding",
+			FixedVersion: ">= 8.5.10",
+			Source:       "osv",
+		}},
+	}
+	if err := writeListAllHTML(htmlPath, "test", result, report); err != nil {
+		t.Fatalf("writeListAllHTML: %v", err)
+	}
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read HTML: %v", err)
+	}
+	out := string(data)
+
+	// The badge renders with its severity class.
+	if !strings.Contains(out, `<span class="sev sev-high">HIGH</span>`) {
+		t.Fatalf("severity badge markup missing:\n%s", out)
+	}
+	// Compact sizing: small font + tight horizontal padding.
+	const wantRule = `.sev{display:inline-block;border:1px solid var(--border);border-radius:var(--report-radius-sm);padding:var(--report-space-0-5) var(--report-space-1-5);font-size:var(--report-type-xs);font-weight:700;line-height:1.3;}`
+	if !strings.Contains(out, wantRule) {
+		t.Fatalf("severity badge not compact; missing rule %q:\n%s", wantRule, out)
+	}
+	// The badge must set an explicit small font-size rather than inherit the
+	// (larger) table cell size.
+	if !strings.Contains(out, `.sev{`) || !strings.Contains(out, `font-size:var(--report-type-xs)`) {
+		t.Fatalf("severity badge must set an explicit small font-size:\n%s", out)
+	}
+	// Guard against regressing to the previous, larger horizontal padding.
+	if strings.Contains(out, `.sev{display:inline-block;border:1px solid var(--border);border-radius:var(--report-radius-sm);padding:var(--report-space-0-5) var(--report-space-2);`) {
+		t.Fatalf("severity badge regressed to the larger space-2 padding:\n%s", out)
 	}
 }

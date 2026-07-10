@@ -320,7 +320,9 @@ Important behavior:
   known fix or update path render as `Update available`; only vulnerability
   findings without a known update path render as `Vulnerable`, and a package
   with a security finding is never shown as merely `Up-to-Date`. Security
-  finding advisories link to canonical external reports when available. Long
+  finding advisories link to canonical external reports when available, and each
+  finding's severity renders as a compact, color-coded badge (small font, tight
+  padding). Long
   digest values are shown without their algorithm prefix and truncated to 17
   characters with `..` in the visible table; a compact icon-only
   copy-to-clipboard control placed before the value exposes the full digest.

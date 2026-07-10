@@ -558,7 +558,7 @@ td{word-break:break-word;overflow-wrap:anywhere;}
 .vuln-col{text-align:center;white-space:nowrap;min-width:64px;}
 .vuln-yes{color:var(--crit);font-weight:700;}
 ` + `.sev{display:inline-block;border:1px solid var(--border);border-radius:var(--report-radius-sm);` +
-	`padding:var(--report-space-0-5) var(--report-space-2);font-weight:700;line-height:1.4;}` + `
+	`padding:var(--report-space-0-5) var(--report-space-1-5);font-size:var(--report-type-xs);font-weight:700;line-height:1.3;}` + `
 .sev-critical{color:var(--crit);border-color:var(--crit);}
 .sev-high{color:var(--high);border-color:var(--high);}
 .sev-medium{color:var(--warning);border-color:var(--warning);}
