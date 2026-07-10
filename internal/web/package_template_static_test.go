@@ -15,9 +15,9 @@ func TestPackageRiskFindingTablesUseSharedPartial(t *testing.T) {
 		t.Fatalf("package.html risk table partial calls = %d, want 3", got)
 	}
 	for _, want := range []string{
-		`{{template "package-risk-finding-table" dict "Findings" .Malicious "AriaLabel" (t "package.malicious.table") "RowClass" "border-b border-gray-100 bg-red-50 hover:bg-red-100"}}`,
-		`{{template "package-risk-finding-table" dict "Findings" .SupplyChain "AriaLabel" (t "package.supply_chain.table") "RowClass" "border-b border-gray-100 bg-amber-50 hover:bg-amber-100"}}`,
-		`{{template "package-risk-finding-table" dict "Findings" .Lifecycle "AriaLabel" (t "package.lifecycle.table") "RowClass" "border-b border-gray-100 hover:bg-gray-50"}}`,
+		`{{template "package-risk-finding-table" dict "Findings" .Malicious "AriaLabel" (t "package.malicious.table") "RowClass" "border-b border-border bg-danger-bg hover:bg-danger-bg"}}`,
+		`{{template "package-risk-finding-table" dict "Findings" .SupplyChain "AriaLabel" (t "package.supply_chain.table") "RowClass" "border-b border-border bg-warning-bg hover:bg-warning-bg"}}`,
+		`{{template "package-risk-finding-table" dict "Findings" .Lifecycle "AriaLabel" (t "package.lifecycle.table") "RowClass" "border-b border-border hover:bg-surface-2"}}`,
 	} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("package.html missing shared risk table call %q:\n%s", want, page)

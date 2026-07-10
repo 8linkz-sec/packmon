@@ -80,7 +80,7 @@ func TestHandlePackageScopedPackageBreadcrumbIsSemantic(t *testing.T) {
 			t.Fatalf("Package breadcrumb missing marker %q:\n%s", want, body)
 		}
 	}
-	if strings.Contains(body, `<span class="inline-block bg-gray-100 text-gray-700 px-2 py-0.5 rounded text-xs font-medium">npm</span> /`) {
+	if strings.Contains(body, `<span class="inline-block bg-surface-2 text-fg px-2 py-0.5 rounded text-xs font-medium">npm</span> /`) {
 		t.Fatalf("Package breadcrumb still renders ecosystem/name as plain slash-delimited text:\n%s", body)
 	}
 }

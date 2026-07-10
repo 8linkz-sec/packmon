@@ -5,20 +5,19 @@
  */
 
 :root {
-  color-scheme: light dark;
   --pm-space-2: 0.5rem;
   --pm-space-3: 0.75rem;
   --pm-radius-sm: 0.25rem;
   --pm-font-sm: 0.875rem;
   --pm-font-semibold: 600;
-  --pm-focus-outline: 2px solid var(--color-white);
+  --pm-focus-outline: 2px solid var(--color-accent-contrast);
   --pm-motion-fast: 120ms;
   --pm-motion-standard: 150ms;
   --pm-meter-height: 0.5rem;
   --pm-meter-radius: var(--pm-radius-sm);
-  --pm-meter-track: var(--color-gray-200);
-  --pm-meter-risk: var(--color-red-600);
-  --pm-meter-clean: var(--color-green-600);
+  --pm-meter-track: var(--color-surface-2);
+  --pm-meter-risk: var(--color-danger);
+  --pm-meter-clean: var(--color-success);
 }
 
 .skip-link {
@@ -28,8 +27,8 @@
   z-index: 50;
   transform: translateY(-150%);
   border-radius: var(--pm-radius-sm);
-  background: var(--color-gray-900);
-  color: var(--color-white);
+  background: var(--color-fg);
+  color: var(--color-bg);
   padding: var(--pm-space-2) var(--pm-space-3);
   font-size: var(--pm-font-sm);
   font-weight: var(--pm-font-semibold);
@@ -158,122 +157,23 @@ textarea:disabled,
   transform: scaleX(-1);
 }
 
+/*
+ * Dark mode used to live here as !important overrides on Tailwind utility
+ * classes (.text-gray-500 { color: ... !important }). It is now driven by the
+ * design tokens in tailwind.input.css, keyed off [data-pm-theme] on <html>.
+ * Elevated surfaces need a stronger shadow in dark, which tokens cannot express.
+ */
+[data-pm-theme="dark"] .shadow,
+[data-pm-theme="dark"] .shadow-sm,
+[data-pm-theme="dark"] .shadow-lg {
+  box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.45), 0 0 0 1px rgb(148 163 184 / 0.08);
+}
+
 @media (prefers-color-scheme: dark) {
-  :root {
-    color-scheme: dark;
-  }
-
-  body,
-  .bg-gray-50 {
-    background: var(--color-blue-950) !important;
-    color: var(--color-gray-200) !important;
-  }
-
-  footer,
-  .bg-white {
-    background: var(--color-gray-900) !important;
-    color: var(--color-gray-200) !important;
-  }
-
-  .bg-gray-100,
-  .hover\:bg-gray-50:hover,
-  .hover\:bg-gray-100:hover,
-  .hover\:bg-blue-50:hover {
-    background: var(--color-gray-800) !important;
-  }
-
-  .bg-red-50,
-  .hover\:bg-red-50:hover,
-  .hover\:bg-red-100:hover {
-    background: var(--color-red-950) !important;
-  }
-
-  .bg-orange-50,
-  .hover\:bg-orange-100:hover {
-    background: color-mix(in oklab, var(--color-orange-800) 45%, var(--color-black)) !important;
-  }
-
-  .bg-amber-50 {
-    background: var(--color-amber-950) !important;
-  }
-
-  .bg-blue-50 {
-    background: var(--color-blue-950) !important;
-  }
-
-  .border-gray-100,
-  .border-gray-200,
-  .border-red-100,
-  .border-red-200,
-  .border-orange-200,
-  .border-amber-200,
-  .border-blue-200 {
-    border-color: var(--color-gray-700) !important;
-  }
-
-  .text-gray-900,
-  .text-gray-800,
-  .text-gray-700 {
-    color: var(--color-gray-100) !important;
-  }
-
-  .text-gray-600,
-  .text-gray-500 {
-    color: var(--color-gray-300) !important;
-  }
-
-  .text-red-900,
-  .text-red-800,
-  .text-red-700,
-  .text-red-600 {
-    color: var(--color-red-200) !important;
-  }
-
-  .text-orange-800,
-  .text-amber-900,
-  .text-amber-800,
-  .text-yellow-900,
-  .text-yellow-800,
-  .text-yellow-700 {
-    color: var(--color-yellow-200) !important;
-  }
-
-  .text-blue-900,
-  .text-blue-800,
-  .text-blue-700,
-  .text-blue-600 {
-    color: var(--color-blue-200) !important;
-  }
-
-  .text-green-800,
-  .text-green-700,
-  .text-green-600 {
-    color: var(--color-green-200) !important;
-  }
-
-  a.text-blue-600,
-  a.text-blue-700,
-  .hover\:text-blue-900:hover {
-    color: var(--color-blue-300) !important;
-  }
-
-  input,
-  select,
-  textarea {
-    background: var(--color-gray-900) !important;
-    border-color: var(--color-gray-500) !important;
-    color: var(--color-gray-50) !important;
-  }
-
-  input::placeholder,
-  textarea::placeholder {
-    color: var(--color-gray-300) !important;
-  }
-
-  .shadow,
-  .shadow-sm,
-  .shadow-lg {
-    box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.45), 0 0 0 1px rgb(148 163 184 / 0.08) !important;
+  [data-pm-theme="system"] .shadow,
+  [data-pm-theme="system"] .shadow-sm,
+  [data-pm-theme="system"] .shadow-lg {
+    box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.45), 0 0 0 1px rgb(148 163 184 / 0.08);
   }
 }
 
@@ -283,47 +183,32 @@ textarea:disabled,
   }
 
   body,
-  .bg-white,
-  .bg-gray-50,
-  .bg-gray-100,
-  .bg-red-50,
-  .bg-orange-50,
-  .bg-amber-50,
-  .bg-blue-50,
-  .bg-green-50,
-  .bg-yellow-50 {
-    background: var(--color-white) !important;
-    color: var(--color-gray-900) !important;
+  .bg-surface,
+  .bg-surface-2,
+  .bg-bg,
+  .bg-danger-bg,
+  .bg-warning-bg,
+  .bg-info-bg,
+  .bg-success-bg {
+    background: white !important;
+    color: black !important;
   }
 
-  .text-gray-500,
-  .text-gray-600,
-  .text-gray-700,
-  .text-gray-800,
-  .text-gray-900,
-  .text-red-600,
-  .text-red-700,
-  .text-red-800,
-  .text-red-900,
-  .text-orange-800,
-  .text-amber-800,
-  .text-amber-900,
-  .text-yellow-700,
-  .text-yellow-800,
-  .text-yellow-900,
-  .text-green-600,
-  .text-green-700,
-  .text-green-800,
-  .text-blue-600,
-  .text-blue-700,
-  .text-blue-800,
-  .text-blue-900 {
-    color: var(--color-gray-900) !important;
+  .text-muted,
+  .text-fg,
+  .text-accent,
+  .text-danger,
+  .text-danger-fg,
+  .text-high-fg,
+  .text-warning-fg,
+  .text-success-fg,
+  .text-info-fg {
+    color: black !important;
   }
 
   .border,
   [class*="border-"] {
-    border-color: var(--color-gray-900) !important;
+    border-color: black !important;
   }
 
   .shadow,
@@ -345,7 +230,7 @@ textarea:disabled,
   textarea:focus,
   summary:focus,
   [tabindex]:focus {
-    outline: 3px solid var(--color-gray-900) !important;
+    outline: 3px solid black !important;
     outline-offset: 3px;
     box-shadow: none !important;
   }
@@ -353,8 +238,8 @@ textarea:disabled,
 
 @media print {
   body {
-    background: var(--color-white) !important;
-    color: var(--color-gray-900) !important;
+    background: white !important;
+    color: black !important;
   }
 
   nav,
@@ -376,13 +261,14 @@ textarea:disabled,
     box-shadow: none !important;
   }
 
-  .bg-white,
-  .bg-gray-50,
-  .bg-red-50,
-  .bg-orange-50,
-  .bg-amber-50,
-  .bg-blue-50 {
-    background: var(--color-white) !important;
+  .bg-surface,
+  .bg-surface-2,
+  .bg-bg,
+  .bg-danger-bg,
+  .bg-warning-bg,
+  .bg-info-bg,
+  .bg-success-bg {
+    background: white !important;
   }
 
   .overflow-x-auto {
@@ -402,7 +288,7 @@ textarea:disabled,
   }
 
   a {
-    color: var(--color-gray-900) !important;
+    color: black !important;
     text-decoration: underline !important;
   }
 

@@ -1134,7 +1134,7 @@ func TestAdminPagesRenderWithAuthenticatedSession(t *testing.T) {
 					`href="/search?finding=malicious"`,
 					`href="/search?finding=supply_chain_risk"`,
 					`href="/search?finding=lifecycle"`,
-					`border-red-200`,
+					`border-danger`,
 				} {
 					if !strings.Contains(body, want) {
 						t.Fatalf("admin dashboard body missing risk finding marker %q\nbody=%s", want, body)
@@ -1151,8 +1151,8 @@ func TestAdminPagesRenderWithAuthenticatedSession(t *testing.T) {
 					}
 				}
 			}
-			if tt.name == "keys" && !strings.Contains(body, "Use RFC3339 UTC") {
-				t.Fatalf("%s body missing API-key expiry timezone hint\nbody=%s", tt.target, body)
+			if tt.name == "keys" && !strings.Contains(body, "Maximum 365 days") {
+				t.Fatalf("%s body missing API-key expiry duration hint\nbody=%s", tt.target, body)
 			}
 			if tt.name == "advisories" && !strings.Contains(body, "apply to all versions") {
 				t.Fatalf("%s body missing manual vulnerability version-scope warning\nbody=%s", tt.target, body)
@@ -1508,7 +1508,7 @@ func TestAdminKeyLifecycleUsesFlashAndAudit(t *testing.T) {
 
 	req, sess := authenticatedAdminFormRequest(t, sm, "/admin/keys/create", url.Values{
 		"name":             {"ci"},
-		"expires_at":       {validAPIKeyExpiryFormValue()},
+		"expires_in_days":  {validAPIKeyExpiryFormValue()},
 		"current_password": {"current-password"},
 	})
 	rec := httptest.NewRecorder()
@@ -1583,7 +1583,7 @@ func TestAdminKeyCreateValidationPreservesSafeFormValues(t *testing.T) {
 	expiresAt := validAPIKeyExpiryFormValue()
 	req, _ := authenticatedAdminFormRequest(t, sm, "/admin/keys/create", url.Values{
 		"name":             {" ci pipeline "},
-		"expires_at":       {expiresAt},
+		"expires_in_days":  {expiresAt},
 		"current_password": {"wrong-password"},
 	})
 	rec := httptest.NewRecorder()
@@ -1600,8 +1600,8 @@ func TestAdminKeyCreateValidationPreservesSafeFormValues(t *testing.T) {
 	if got := query.Get("name"); got != "ci pipeline" {
 		t.Fatalf("redirect preserved name = %q, want normalized safe value", got)
 	}
-	if got := query.Get("expires_at"); got != expiresAt {
-		t.Fatalf("redirect preserved expires_at = %q, want %q", got, expiresAt)
+	if got := query.Get("expires_in_days"); got != expiresAt {
+		t.Fatalf("redirect preserved expires_in_days = %q, want %q", got, expiresAt)
 	}
 	if strings.Contains(location, "wrong-password") || query.Has("current_password") {
 		t.Fatalf("redirect Location leaked current_password: %q", location)
@@ -1617,8 +1617,8 @@ func TestAdminKeyCreateValidationPreservesSafeFormValues(t *testing.T) {
 	if !strings.Contains(body, `name="name"`) || !strings.Contains(body, `value="ci pipeline"`) {
 		t.Fatalf("admin keys page did not re-render preserved key name\nbody=%s", body)
 	}
-	if !strings.Contains(body, `name="expires_at"`) || !strings.Contains(body, `value="`+expiresAt+`"`) {
-		t.Fatalf("admin keys page did not re-render preserved expires_at\nbody=%s", body)
+	if !strings.Contains(body, `name="expires_in_days"`) || !strings.Contains(body, `<option value="`+expiresAt+`" selected>`) {
+		t.Fatalf("admin keys page did not re-render preserved expires_in_days selection\nbody=%s", body)
 	}
 	if strings.Contains(body, "wrong-password") || strings.Contains(body, `value="wrong-password"`) {
 		t.Fatalf("admin keys page leaked current_password\nbody=%s", body)
@@ -1857,7 +1857,7 @@ func TestAdminKeyCreateRetryDoesNotMintDuplicateCredential(t *testing.T) {
 
 	values := url.Values{
 		"name":             {"ci-retry"},
-		"expires_at":       {validAPIKeyExpiryFormValue()},
+		"expires_in_days":  {validAPIKeyExpiryFormValue()},
 		"current_password": {"current-password"},
 		"create_nonce":     {"retry-nonce"},
 	}
@@ -1913,8 +1913,8 @@ func TestHandleKeyCreateRequiresCurrentPasswordStepUp(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			values := url.Values{
-				"name":       {"ci"},
-				"expires_at": {validAPIKeyExpiryFormValue()},
+				"name":            {"ci"},
+				"expires_in_days": {validAPIKeyExpiryFormValue()},
 			}
 			if tt.current != "" {
 				values.Set("current_password", tt.current)
@@ -1952,7 +1952,7 @@ func TestHandleKeyCreateRequiresCurrentPasswordStepUp(t *testing.T) {
 
 	req, _ := authenticatedAdminFormRequest(t, sm, "/admin/keys/create", url.Values{
 		"name":             {"ci"},
-		"expires_at":       {validAPIKeyExpiryFormValue()},
+		"expires_in_days":  {validAPIKeyExpiryFormValue()},
 		"current_password": {"current-password"},
 	})
 	rec := httptest.NewRecorder()
@@ -2221,7 +2221,7 @@ func TestPasswordChangeInvalidatesPreExistingAdminSessions(t *testing.T) {
 
 	freshReq, _ := loginAdminFormRequest(t, handler, sm, "new-password-123", "/admin/keys/create", url.Values{
 		"name":             {"fresh-session"},
-		"expires_at":       {validAPIKeyExpiryFormValue()},
+		"expires_in_days":  {validAPIKeyExpiryFormValue()},
 		"current_password": {"new-password-123"},
 	})
 	freshRec := httptest.NewRecorder()
@@ -3108,7 +3108,7 @@ func TestHandleKeyCreateDoesNotPersistWhenAuditFails(t *testing.T) {
 
 	req, sess := authenticatedAdminFormRequest(t, sm, "/admin/keys/create", url.Values{
 		"name":             {"ci"},
-		"expires_at":       {validAPIKeyExpiryFormValue()},
+		"expires_in_days":  {validAPIKeyExpiryFormValue()},
 		"current_password": {"current-password"},
 	})
 	rec := httptest.NewRecorder()
@@ -3944,8 +3944,10 @@ func adminFlowAuditContains(entries []db.AdminAuditLogEntry, action string) bool
 	return false
 }
 
+// validAPIKeyExpiryFormValue returns a valid value for the create form's
+// expires_in_days dropdown (a whole number of days within the allowed lifetime).
 func validAPIKeyExpiryFormValue() string {
-	return time.Now().UTC().Add(24 * time.Hour).Truncate(time.Second).Format(time.RFC3339)
+	return "30"
 }
 
 func assertAdminAuditDetails(t *testing.T, entry db.AdminAuditLogEntry, want map[string]string) {

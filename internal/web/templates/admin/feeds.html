@@ -15,15 +15,15 @@
     {{end}}
   </div>
   <div class="pm-surface">
-    <div class="px-5 py-3 border-b border-gray-200">
+    <div class="px-5 py-3 border-b border-border">
       <h2 class="text-lg font-semibold">{{t "admin.feeds.runtime.heading"}}</h2>
     </div>
     {{if .FeedStatusLoadError}}
-    <div class="px-5 py-4 border-b border-red-100">
+    <div class="px-5 py-4 border-b border-danger">
       {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .FeedStatusLoadError}}
     </div>
     {{else if .Feeds}}
-    <div class="divide-y divide-gray-100 md:hidden" data-admin-mobile-layout="feed-runtime">
+    <div class="divide-y divide-border md:hidden" data-admin-mobile-layout="feed-runtime">
       {{range .Feeds}}
       <article class="px-5 py-4">
         <div class="flex items-start justify-between gap-3">
@@ -38,46 +38,46 @@
           <div class="text-end">
             {{template "feed-status-badge" .}}
             {{if .StatusReason}}
-              <div class="mt-1 text-xs text-gray-600">{{.StatusReason}}</div>
+              <div class="mt-1 text-xs text-muted">{{.StatusReason}}</div>
             {{end}}
           </div>
         </div>
         <dl class="mt-4 grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
           <div>
-            <dt class="text-xs font-semibold uppercase tracking-wide text-gray-500">{{t "admin.feeds.table.last_sync"}}</dt>
-            <dd class="mt-1 text-gray-700">{{template "feed-last-sync-cell" .}}</dd>
+            <dt class="text-xs font-semibold uppercase tracking-wide text-muted">{{t "admin.feeds.table.last_sync"}}</dt>
+            <dd class="mt-1 text-fg">{{template "feed-last-sync-cell" .}}</dd>
           </div>
           <div>
-            <dt class="text-xs font-semibold uppercase tracking-wide text-gray-500">{{t "admin.feeds.table.last_result"}}</dt>
-            <dd class="mt-1 text-gray-700">
+            <dt class="text-xs font-semibold uppercase tracking-wide text-muted">{{t "admin.feeds.table.last_result"}}</dt>
+            <dd class="mt-1 text-fg">
               {{if .LastSyncStatus}}
                 <span class="inline-block px-2 py-0.5 rounded {{.LastSyncStatusClass}}">{{.LastSyncStatus}}</span>
               {{else}}
-                <span class="text-gray-600">{{t "admin.feeds.status.never"}}</span>
+                <span class="text-muted">{{t "admin.feeds.status.never"}}</span>
               {{end}}
               {{if .DurationStr}}
-                <span class="ms-1 text-xs text-gray-500">{{.DurationStr}}</span>
+                <span class="ms-1 text-xs text-muted">{{.DurationStr}}</span>
               {{end}}
             </dd>
           </div>
           <div>
-            <dt class="text-xs font-semibold uppercase tracking-wide text-gray-500">{{t "admin.feeds.table.entries"}}</dt>
-            <dd class="mt-1 text-gray-700">{{.EntriesSynced}} / {{.EntriesTotal}}</dd>
+            <dt class="text-xs font-semibold uppercase tracking-wide text-muted">{{t "admin.feeds.table.entries"}}</dt>
+            <dd class="mt-1 text-fg">{{.EntriesSynced}} / {{.EntriesTotal}}</dd>
           </div>
           <div>
-            <dt class="text-xs font-semibold uppercase tracking-wide text-gray-500">{{t "admin.feeds.table.api_key"}}</dt>
-            <dd class="mt-1 text-gray-700">
+            <dt class="text-xs font-semibold uppercase tracking-wide text-muted">{{t "admin.feeds.table.api_key"}}</dt>
+            <dd class="mt-1 text-fg">
               <span class="inline-block px-2 py-0.5 rounded {{.APIKeyStateClass}}">{{.APIKeyState}}</span>
             </dd>
           </div>
           <div class="sm:col-span-2">
-            <dt class="text-xs font-semibold uppercase tracking-wide text-gray-500">{{t "admin.feeds.table.details"}}</dt>
-            <dd class="mt-1 text-gray-700">
+            <dt class="text-xs font-semibold uppercase tracking-wide text-muted">{{t "admin.feeds.table.details"}}</dt>
+            <dd class="mt-1 text-fg">
               {{template "feed-admin-rejection-details" .}}
               {{if .LastError}}
                 {{template "feed-error-details" dict "Feed" . "Max" 80 "Interactive" true}}
               {{else}}
-                <span class="text-gray-600">-</span>
+                <span class="text-muted">-</span>
               {{end}}
             </dd>
           </div>
@@ -95,7 +95,7 @@
     >
       <table class="min-w-full text-sm">
         <thead>
-          <tr class="text-start text-gray-500 border-b bg-gray-50">
+          <tr class="text-start text-muted border-b bg-bg">
             <th scope="col" class="px-5 py-2">{{t "admin.feeds.table.feed"}}</th>
             <th scope="col" class="px-5 py-2">{{t "admin.feeds.table.status"}}</th>
             <th scope="col" class="px-5 py-2">{{t "admin.feeds.table.configuration"}}</th>
@@ -106,14 +106,14 @@
         </thead>
         <tbody>
           {{range .Feeds}}
-          <tr class="border-b border-gray-100 hover:bg-gray-50">
+          <tr class="border-b border-border hover:bg-surface-2">
             <td class="px-5 py-2">
               <div class="font-medium">{{.FeedName}}</div>
             </td>
             <td class="px-5 py-2">
               {{template "feed-status-badge" .}}
               {{if .StatusReason}}
-                <div class="mt-1 text-xs text-gray-600">{{.StatusReason}}</div>
+                <div class="mt-1 text-xs text-muted">{{.StatusReason}}</div>
               {{end}}
             </td>
             <td class="px-5 py-2 text-xs">
@@ -124,29 +124,29 @@
                 <span class="inline-block px-2 py-0.5 rounded {{.APIKeyStateClass}}">{{t "admin.feeds.status.key" .APIKeyState}}</span>
               </div>
             </td>
-            <td class="px-5 py-2 text-gray-500">
+            <td class="px-5 py-2 text-muted">
               <div>{{template "feed-last-sync-cell" .}}</div>
               <div class="mt-1 text-xs">
                 {{if .LastSyncStatus}}
                   <span class="inline-block px-2 py-0.5 rounded {{.LastSyncStatusClass}}">{{.LastSyncStatus}}</span>
                 {{else}}
-                <span class="text-gray-600">{{t "admin.feeds.status.never"}}</span>
+                <span class="text-muted">{{t "admin.feeds.status.never"}}</span>
                 {{end}}
                 {{if .DurationStr}}
-                  <span class="ms-1 text-gray-500">{{.DurationStr}}</span>
+                  <span class="ms-1 text-muted">{{.DurationStr}}</span>
                 {{end}}
               </div>
             </td>
             <td class="px-5 py-2 text-end">
               <span>{{.EntriesSynced}}</span>
-              <span class="text-gray-500">/ {{.EntriesTotal}}</span>
+              <span class="text-muted">/ {{.EntriesTotal}}</span>
             </td>
             <td class="px-5 py-2 text-xs">
               {{template "feed-admin-rejection-details" .}}
               {{if .LastError}}
                 {{template "feed-error-details" dict "Feed" . "Max" 40 "Interactive" true}}
               {{else}}
-                <span class="text-gray-600">-</span>
+                <span class="text-muted">-</span>
               {{end}}
             </td>
           </tr>
@@ -182,7 +182,7 @@
   <p>
     <span class="font-medium">{{t "admin.feeds.warning.unknown_severity_prefix" .UnknownSeverityCount}}</span>
     {{t "admin.feeds.warning.unknown_severity_body"}}
-    {{t "admin.feeds.warning.unknown_severity_suffix"}} (<code class="bg-yellow-100 px-1 rounded">PACKMON_NVD_API_KEY</code>) {{t "admin.feeds.warning.unknown_severity_tail"}}
+    {{t "admin.feeds.warning.unknown_severity_suffix"}} (<code class="bg-warning-bg px-1 rounded">PACKMON_NVD_API_KEY</code>) {{t "admin.feeds.warning.unknown_severity_tail"}}
   </p>
   {{template "admin-alert-end" .}}
   {{end}}
@@ -196,15 +196,15 @@
     data-auto-refresh-label="{{t "admin.feeds.runtime.refresh_label"}}"
     data-auto-refresh-running-label="{{t "admin.feeds.runtime.refresh_on"}}"
     data-auto-refresh-paused-label="{{t "admin.feeds.runtime.refresh_paused"}}"
-    data-auto-refresh-running-class="bg-green-50 text-green-700"
-    data-auto-refresh-paused-class="bg-gray-100 text-gray-700"
+    data-auto-refresh-running-class="bg-success-bg text-success-fg"
+    data-auto-refresh-paused-class="bg-surface-2 text-fg"
   >
     <span id="admin-feed-runtime-refresh-state" data-auto-refresh-status role="status" aria-live="polite" aria-atomic="true"
-      class="text-gray-500"
+      class="text-muted"
     >{{t "admin.feeds.runtime.refresh_on"}}</span>
     <span
       id="admin-feed-runtime-indicator"
-      class="htmx-indicator text-gray-600"
+      class="htmx-indicator text-muted"
       role="status"
       aria-live="polite"
       aria-atomic="true"
@@ -215,16 +215,16 @@
       aria-controls="admin-feed-runtime"
       aria-describedby="admin-feed-runtime-refresh-state"
       aria-pressed="true"
-      class="inline-flex min-h-11 items-center justify-center border border-gray-500 bg-white rounded-md px-3 py-1.5 text-sm
-        font-medium text-gray-700 hover:bg-gray-50 active:bg-gray-100 pm-focus-ring"
+      class="inline-flex min-h-11 items-center justify-center border border-muted bg-surface rounded-md px-3 py-1.5 text-sm
+        font-medium text-fg hover:bg-surface-2 active:bg-surface-2 pm-focus-ring"
   >{{t "admin.feeds.runtime.refresh_label"}}</button>
     <button
       type="button"
       data-auto-refresh-now
       aria-controls="admin-feed-runtime"
     aria-label="{{t "admin.feeds.runtime.refresh_now_aria"}}"
-      class="inline-flex min-h-11 items-center justify-center border border-blue-500 bg-white rounded-md px-3 py-1.5 text-sm
-        font-medium text-blue-700 hover:bg-blue-50 active:bg-blue-100 pm-focus-ring"
+      class="inline-flex min-h-11 items-center justify-center border border-accent bg-surface rounded-md px-3 py-1.5 text-sm
+        font-medium text-accent hover:bg-surface-2 active:bg-info-bg pm-focus-ring"
   >{{t "admin.feeds.runtime.refresh_now"}}</button>
   </div>
 
@@ -256,16 +256,16 @@
 
   {{if not .BootstrapWarning}}
   <div class="no-print pm-surface" data-no-print>
-    <div class="no-print px-5 py-3 border-b border-gray-200" data-no-print>
+    <div class="no-print px-5 py-3 border-b border-border" data-no-print>
       <h2 class="text-lg font-semibold">{{t "admin.feeds.form.heading"}}</h2>
-      <p class="mt-1 text-sm text-gray-500">{{t "admin.feeds.form.description"}}</p>
+      <p class="mt-1 text-sm text-muted">{{t "admin.feeds.form.description"}}</p>
     </div>
     <div class="p-5 space-y-4">
       {{if .FeedConfigLoadError}}
       {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .FeedConfigLoadError}}
       {{else}}
       {{range .EditableFeeds}}
-      <details id="feed-{{.FeedKey}}" class="border border-gray-200 rounded-lg" data-feed-key="{{.FeedKey}}" data-feed-error-target="{{if eq $.ActiveFeedKey .FeedKey}}true{{else}}false{{end}}" {{if eq $.ActiveFeedKey .FeedKey}}open{{end}}>
+      <details id="feed-{{.FeedKey}}" class="border border-border rounded-lg" data-feed-key="{{.FeedKey}}" data-feed-error-target="{{if eq $.ActiveFeedKey .FeedKey}}true{{else}}false{{end}}" {{if eq $.ActiveFeedKey .FeedKey}}open{{end}}>
         <summary
           class="flex cursor-pointer list-none flex-col gap-2 p-4 focus:outline-none pm-focus-ring sm:flex-row sm:items-start sm:justify-between"
         >
@@ -288,7 +288,7 @@
                 <span class="inline-block px-2 py-0.5 rounded {{.UpdatedAtClass}}">{{t "admin.feeds.status.updated"}} <time data-local-time="relative" datetime="{{formatTimeISO .UpdatedAt}}" aria-label="{{formatTime .UpdatedAt}}">{{formatTimeAgo .UpdatedAt}}</time></span>
               {{end}}
             </div>
-                <div class="text-xs text-gray-500">
+                <div class="text-xs text-muted">
                   {{$runtimeModeLabel := feedModeLabel .RuntimeMode}}
                   {{$runtimeEnabledLabel := t "admin.feeds.status.disabled"}}
                   {{if .RuntimeEnabled}}{{$runtimeEnabledLabel = t "admin.feeds.status.enabled"}}{{end}}
@@ -299,10 +299,10 @@
                   {{t "admin.feeds.form.runtime_line" $runtimeModeLabel $runtimeEnabledLabel $runtimeSyncLabel $runtimeAPIKeyLabel}}
                 </div>
           </div>
-          <span class="text-sm font-medium text-blue-700">{{t "admin.feeds.form.edit"}}</span>
+          <span class="text-sm font-medium text-accent">{{t "admin.feeds.form.edit"}}</span>
         </summary>
 
-        <div class="border-t border-gray-200 p-4">
+        <div class="border-t border-border p-4">
           <div class="space-y-4">
           <form action="/admin/feeds/save" method="POST" class="space-y-4" data-submit-lock data-submit-lock-label="{{t "admin.feeds.form.saving"}}">
             <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
@@ -311,13 +311,13 @@
               <legend class="sr-only">{{t "admin.feeds.form.legend" .FeedName}}</legend>
 
               <div class="grid gap-4 md:grid-cols-2 xl:grid-cols-4 xl:items-start">
-                <label class="mt-7 flex min-h-11 cursor-pointer items-center gap-2 rounded-md px-2 py-2 text-sm text-gray-700
-                  hover:bg-gray-50 focus-within:outline-none focus-within:ring-2 focus-within:ring-blue-500 focus-within:ring-offset-2">
-                  <input type="checkbox" name="enabled" {{if .Enabled}}checked{{end}} class="rounded border-gray-500 text-blue-600 pm-focus-ring">
+                <label class="mt-7 flex min-h-11 cursor-pointer items-center gap-2 rounded-md px-2 py-2 text-sm text-fg
+                  hover:bg-surface-2 focus-within:outline-none focus-within:ring-2 focus-within:ring-accent focus-within:ring-offset-2">
+                  <input type="checkbox" name="enabled" {{if .Enabled}}checked{{end}} class="rounded border-muted text-accent pm-focus-ring">
                   {{t "admin.feeds.form.enabled"}}
                 </label>
 
-                <label class="text-sm text-gray-700">
+                <label class="text-sm text-fg">
                   <span class="block mb-1">{{t "admin.feeds.form.mode_label"}}</span>
                   <select name="mode" class="pm-form-control"
                     aria-describedby="feed-{{.FeedKey}}-mode-help">
@@ -326,7 +326,7 @@
                     <option value="{{.Value}}" {{if eq $selectedMode (printf "%s" .Value)}}selected{{end}}>{{feedModeLabel .Value}}</option>
                     {{end}}
                   </select>
-                  <span id="feed-{{.FeedKey}}-mode-help" class="mt-1 block text-xs text-gray-500">
+                  <span id="feed-{{.FeedKey}}-mode-help" class="mt-1 block text-xs text-muted">
                     {{if .SupportsExternalMode}}
                     {{t "admin.feeds.form.mode_external_help"}}
                     {{else}}
@@ -335,7 +335,7 @@
                   </span>
                 </label>
 
-                <label class="text-sm text-gray-700">
+                <label class="text-sm text-fg">
                   <span class="block mb-1">{{.SyncIntervalLabel}}</span>
                   {{if .SupportsSyncInterval}}
                     <input
@@ -354,14 +354,14 @@
                       type="text"
                       value="{{t "admin.feeds.status.queue_driven"}}"
                       disabled
-                      class="pm-form-control bg-gray-50 text-gray-500"
+                      class="pm-form-control bg-bg text-muted"
                     >
                   {{end}}
-                  <span id="feed-{{.FeedKey}}-sync-interval-help" class="mt-1 block text-xs text-gray-500">{{.SyncIntervalHelp}}</span>
+                  <span id="feed-{{.FeedKey}}-sync-interval-help" class="mt-1 block text-xs text-muted">{{.SyncIntervalHelp}}</span>
                 </label>
 
                 {{if .SupportsAPIKey}}
-                <div class="text-sm text-gray-700">
+                <div class="text-sm text-fg">
                   <label for="feed-{{.FeedKey}}-api-key" class="block mb-1">{{t "admin.feeds.form.api_key.label"}}</label>
                   <input
                     id="feed-{{.FeedKey}}-api-key"
@@ -374,32 +374,32 @@
                     placeholder="{{if .APIKeyConfigured}}{{t "admin.feeds.form.api_key.keep_placeholder"}}{{else}}{{t "admin.feeds.form.api_key.new_placeholder"}}{{end}}"
                     class="pm-form-control"
                   >
-                  <span id="feed-{{.FeedKey}}-api-key-help" class="mt-2 block rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm leading-6 text-amber-950">
+                  <span id="feed-{{.FeedKey}}-api-key-help" class="mt-2 block rounded-md border border-warning bg-warning-bg px-3 py-2 text-sm leading-6 text-warning-fg">
                     {{.APIKeyHelp}}
                   </span>
-                  <label class="mt-2 flex min-h-11 cursor-pointer items-center gap-2 rounded-md px-2 py-2 text-sm text-gray-700
-                    hover:bg-gray-50 focus-within:outline-none focus-within:ring-2 focus-within:ring-blue-500 focus-within:ring-offset-2">
+                  <label class="mt-2 flex min-h-11 cursor-pointer items-center gap-2 rounded-md px-2 py-2 text-sm text-fg
+                    hover:bg-surface-2 focus-within:outline-none focus-within:ring-2 focus-within:ring-accent focus-within:ring-offset-2">
                     <input
                       type="checkbox"
                       name="clear_api_key"
                       aria-describedby="feed-{{.FeedKey}}-clear-key-help"
-                      class="h-4 w-4 rounded border-gray-500 text-blue-600 pm-focus-ring"
+                      class="h-4 w-4 rounded border-muted text-accent pm-focus-ring"
                     >
                     {{t "admin.feeds.form.api_key.clear_label" .FeedName}}
                   </label>
-                  <label class="mt-1 flex min-h-11 cursor-pointer items-center gap-2 rounded-md px-2 py-2 text-sm text-red-700
-                    hover:bg-red-50 focus-within:outline-none focus-within:ring-2 focus-within:ring-red-500 focus-within:ring-offset-2">
+                  <label class="mt-1 flex min-h-11 cursor-pointer items-center gap-2 rounded-md px-2 py-2 text-sm text-danger-fg
+                    hover:bg-danger-bg focus-within:outline-none focus-within:ring-2 focus-within:ring-danger focus-within:ring-offset-2">
                     <input
                       type="checkbox"
                       name="confirm_clear_api_key"
                       data-required-when-checked="clear_api_key"
                       data-required-message="{{t "admin.feeds.form.api_key.clear_required"}}"
                       aria-describedby="feed-{{.FeedKey}}-clear-key-help feed-{{.FeedKey}}-confirm-clear-key-help"
-                      class="h-4 w-4 rounded border-red-600 text-red-600 pm-focus-ring pm-focus-ring-danger"
+                      class="h-4 w-4 rounded border-danger text-danger pm-focus-ring pm-focus-ring-danger"
                     >
                     {{t "admin.feeds.form.api_key.clear_confirm" .FeedName}}
                   </label>
-                  <span id="feed-{{.FeedKey}}-clear-key-help" class="mt-1 block text-xs text-gray-500">{{t "admin.feeds.form.api_key.clear_help" .FeedName}}</span>
+                  <span id="feed-{{.FeedKey}}-clear-key-help" class="mt-1 block text-xs text-muted">{{t "admin.feeds.form.api_key.clear_help" .FeedName}}</span>
                   <span id="feed-{{.FeedKey}}-confirm-clear-key-help" class="sr-only">{{t "admin.feeds.form.api_key.clear_sr_help"}}</span>
                 </div>
                 {{end}}
@@ -427,13 +427,13 @@
                   data-feed-sync-running-label="{{t "admin.feeds.sync.running"}}"
                   data-feed-sync-error-reset="true"
                   data-feed-sync-flash-target="#admin-feed-flash"
-                  class="inline-flex min-h-11 items-center justify-center border border-blue-600 text-blue-700 px-4 py-2 rounded-md text-sm
-                    font-medium hover:bg-blue-50 active:bg-blue-100 pm-focus-ring"
+                  class="inline-flex min-h-11 items-center justify-center border border-accent text-accent px-4 py-2 rounded-md text-sm
+                    font-medium hover:bg-surface-2 active:bg-info-bg pm-focus-ring"
                 >
                   {{t "admin.feeds.sync.button"}}
                 </button>
                 {{end}}
-                <span class="text-xs text-gray-500">{{t "admin.feeds.sync.uses_runtime"}}</span>
+                <span class="text-xs text-muted">{{t "admin.feeds.sync.uses_runtime"}}</span>
               </div>
             </fieldset>
           </form>
@@ -442,21 +442,21 @@
           <form action="/admin/feeds/reset" method="POST" class="flex justify-start" data-submit-lock data-submit-lock-label="{{t "admin.feeds.reset.saving"}}">
             <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
             <input type="hidden" name="feed_name" value="{{.FeedKey}}">
-            <label class="me-3 flex min-h-11 cursor-pointer items-center gap-2 rounded-md px-2 py-2 text-xs text-red-700
-              hover:bg-red-50 focus-within:outline-none focus-within:ring-2 focus-within:ring-red-500 focus-within:ring-offset-2">
+            <label class="me-3 flex min-h-11 cursor-pointer items-center gap-2 rounded-md px-2 py-2 text-xs text-danger-fg
+              hover:bg-danger-bg focus-within:outline-none focus-within:ring-2 focus-within:ring-danger focus-within:ring-offset-2">
               <input
                 type="checkbox"
                 name="confirm_reset"
                 required
                 aria-describedby="feed-{{.FeedKey}}-confirm-reset-help"
-                class="rounded border-red-600 text-red-600 pm-focus-ring pm-focus-ring-danger"
+                class="rounded border-danger text-danger pm-focus-ring pm-focus-ring-danger"
               >
               {{t "admin.feeds.reset.confirm" .FeedName}}
             </label>
             <span id="feed-{{.FeedKey}}-confirm-reset-help" class="sr-only">{{t "admin.feeds.reset.help" .FeedName}}</span>
             <button type="submit" data-submit-lock-button aria-label="{{t "admin.feeds.reset.aria" .FeedName}}"
-              class="inline-flex min-h-11 items-center justify-center border border-gray-500 text-gray-700 px-4 py-2 rounded-md text-sm
-                font-medium hover:bg-gray-50 active:bg-gray-100 pm-focus-ring"
+              class="inline-flex min-h-11 items-center justify-center border border-muted text-fg px-4 py-2 rounded-md text-sm
+                font-medium hover:bg-surface-2 active:bg-surface-2 pm-focus-ring"
             >
               {{t "admin.feeds.reset.button"}}
             </button>

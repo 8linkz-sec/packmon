@@ -995,7 +995,7 @@ func TestManagerStartRecordsStatusWhenAliasPropagationPanics(t *testing.T) {
 
 	deadline := time.After(time.Second)
 	for {
-		if status, ok := managerStatusByName(store, aliasSeverityPropagationStatusName); ok {
+		if status, ok := managerStatusByName(store, AliasSeverityPropagationStatusName); ok {
 			if status.LastSyncStatus != db.FeedSyncStatusError {
 				t.Fatalf("alias propagation status = %+v, want error", status)
 			}

@@ -358,7 +358,9 @@ func mainServerAddrFromJSONLog(line []byte) string {
 	if err := json.Unmarshal(line, &record); err != nil {
 		return ""
 	}
-	if record.Message != "main server listening" {
+	// The main server logs its bound address on the "server ready" startup line
+	// (see mainServerReadyMessage); the metrics listener uses a different msg.
+	if !strings.HasPrefix(record.Message, "server ready") {
 		return ""
 	}
 	return record.Addr

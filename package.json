@@ -3,10 +3,10 @@
   "private": true,
   "scripts": {
     "build:web": "npm run build:web:css && npm run build:web:js",
-    "build:web:css": "tailwindcss -c ./tailwind.config.js -i ./internal/web/static/tailwind.input.css -o ./internal/web/static/tailwind.css --minify",
+    "build:web:css": "tailwindcss -i ./internal/web/static/tailwind.input.css -o ./internal/web/static/tailwind.css --minify",
     "build:web:js": "node ./scripts/build-web-assets.mjs",
     "lint:css": "stylelint \"internal/web/static/{style,tailwind.input}.css\"",
-    "lint:js": "node --check ./scripts/build-web-assets.mjs && node --check ./internal/web/static/auto-refresh.js && node --check ./tailwind.config.js && eslint ./scripts/build-web-assets.mjs ./internal/web/static/auto-refresh.js ./tailwind.config.js",
+    "lint:js": "node --check ./scripts/build-web-assets.mjs && node --check ./internal/web/static/auto-refresh.js && node --check ./internal/web/static/theme-init.js && eslint ./scripts/build-web-assets.mjs ./internal/web/static/auto-refresh.js ./internal/web/static/theme-init.js",
     "lint:openapi": "redocly lint ./api/openapi/packmon-v1.yaml",
     "lint:web": "npm run lint:js && npm run lint:css"
   },
@@ -17,10 +17,10 @@
   "devDependencies": {
     "@eslint/js": "10.0.1",
     "@redocly/cli": "2.35.1",
-    "@tailwindcss/cli": "4.3.1",
+    "@tailwindcss/cli": "4.3.2",
     "eslint": "10.6.0",
     "htmx.org": "2.0.10",
     "stylelint": "17.14.0",
-    "tailwindcss": "4.3.1"
+    "tailwindcss": "4.3.2"
   }
 }

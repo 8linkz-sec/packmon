@@ -423,6 +423,31 @@
     document.querySelectorAll("[data-feed-sync-now]").forEach(setupFeedSyncButton);
   }
 
+  function setupRevealSelect(select) {
+    if (select.dataset.revealReady === "true") {
+      return;
+    }
+
+    var target = document.querySelector(select.dataset.revealTarget);
+    if (!target) {
+      return;
+    }
+
+    select.dataset.revealReady = "true";
+    var revealValue = select.dataset.revealValue || "";
+
+    function syncReveal() {
+      target.classList.toggle("hidden", select.value !== revealValue);
+    }
+
+    select.addEventListener("change", syncReveal);
+    syncReveal();
+  }
+
+  function initRevealSelects() {
+    document.querySelectorAll("[data-reveal-target]").forEach(setupRevealSelect);
+  }
+
   function initFormActions() {
     initDismissibleAlerts();
     initConditionalRequiredCheckboxes();
@@ -433,6 +458,7 @@
     initSelectOnFocusInputs();
     initCopyButtons();
     initFeedSyncButtons();
+    initRevealSelects();
   }
 
   if (document.readyState === "loading") {

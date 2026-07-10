@@ -22,7 +22,19 @@ var backoffSchedule = [3]time.Duration{
 
 const interruptedFeedSyncError = "previous feed sync was interrupted before completion"
 
-const aliasSeverityPropagationStatusName = "alias-severity-propagation"
+// AliasSeverityPropagationStatusName is the feed_sync_status name recorded by
+// the post-sync severity-propagation step. It is a pipeline maintenance task,
+// not an upstream feed, so it is persisted for observability but excluded from
+// user-facing feed listings (see IsSyntheticStatus).
+const AliasSeverityPropagationStatusName = "alias-severity-propagation"
+
+// IsSyntheticStatus reports whether a feed_sync_status row is a synthetic
+// pipeline/maintenance entry rather than a real upstream feed. Such rows are
+// recorded for observability but must not appear in the feed list, where they
+// would read as a feed that only ever "synced" a single entry.
+func IsSyntheticStatus(name string) bool {
+	return name == AliasSeverityPropagationStatusName
+}
 
 // ErrSyncAlreadyRunning is returned by manual sync triggers when the same feed
 // is already syncing. Background loops still serialize normally.
@@ -248,7 +260,7 @@ func (m *Manager) Start(ctx context.Context) {
 				err := fmt.Errorf("alias severity propagation panic: %v", recovered)
 				m.logger.Error("alias severity propagation panic", "error", SafeDiagnosticError(err))
 				if ctx.Err() == nil {
-					_ = m.recordStatus(ctx, aliasSeverityPropagationStatusName, db.FeedSyncStatusError, SafeDiagnosticError(err), 0, nil)
+					_ = m.recordStatus(ctx, AliasSeverityPropagationStatusName, db.FeedSyncStatusError, SafeDiagnosticError(err), 0, nil)
 				}
 			}
 		}()
@@ -271,13 +283,13 @@ func (m *Manager) Start(ctx context.Context) {
 		if updated, err := m.store.PropagateSeverityViaAliases(ctx); err != nil {
 			m.logger.Warn("failed to propagate severity via aliases", "error", SafeDiagnosticError(err))
 			if ctx.Err() == nil {
-				_ = m.recordStatus(ctx, aliasSeverityPropagationStatusName, db.FeedSyncStatusError, SafeDiagnosticError(err), 0, nil)
+				_ = m.recordStatus(ctx, AliasSeverityPropagationStatusName, db.FeedSyncStatusError, SafeDiagnosticError(err), 0, nil)
 			}
 		} else if updated > 0 {
-			_ = m.recordStatus(ctx, aliasSeverityPropagationStatusName, db.FeedSyncStatusSuccess, "", 0, &SyncResult{EntriesSynced: 1, EntriesTotal: 1})
+			_ = m.recordStatus(ctx, AliasSeverityPropagationStatusName, db.FeedSyncStatusSuccess, "", 0, &SyncResult{EntriesSynced: 1, EntriesTotal: 1})
 			m.logger.Info("propagated severity via aliases", slog.Int("updated", updated))
 		} else {
-			_ = m.recordStatus(ctx, aliasSeverityPropagationStatusName, db.FeedSyncStatusSuccess, "", 0, &SyncResult{EntriesSynced: 1, EntriesTotal: 1})
+			_ = m.recordStatus(ctx, AliasSeverityPropagationStatusName, db.FeedSyncStatusSuccess, "", 0, &SyncResult{EntriesSynced: 1, EntriesTotal: 1})
 		}
 	}()
 

@@ -53,12 +53,20 @@ func TestDashboardTemplatesUseSharedStatCardPartial(t *testing.T) {
 		}
 	}
 
+	// The public dashboard shows only the four developer-facing cards. Lifecycle,
+	// scans and feed health are operator numbers and live on the admin dashboard.
+	// See DESIGN.md, "Web UI -- design system and dashboard contract".
+	wantCardCalls := map[string]int{
+		"public dashboard": 4,
+		"admin dashboard":  7,
+	}
+
 	for name, source := range map[string]string{
 		"public dashboard": publicDashboard,
 		"admin dashboard":  adminDashboard,
 	} {
-		if got := strings.Count(source, `{{template "dashboard-stat-card"`); got != len(statLabelKeys) {
-			t.Fatalf("%s dashboard-stat-card calls = %d, want %d:\n%s", name, got, len(statLabelKeys), source)
+		if got := strings.Count(source, `{{template "dashboard-stat-card"`); got != wantCardCalls[name] {
+			t.Fatalf("%s dashboard-stat-card calls = %d, want %d:\n%s", name, got, wantCardCalls[name], source)
 		}
 
 		for _, label := range statLabels {

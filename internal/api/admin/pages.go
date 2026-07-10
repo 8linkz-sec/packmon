@@ -24,14 +24,39 @@ import (
 )
 
 const (
-	adminPasswordMinLength    = auth.MinAdminPasswordLength
-	maxAPIKeyLifetime         = 90 * 24 * time.Hour
+	adminPasswordMinLength = auth.MinAdminPasswordLength
+	// maxAPIKeyLifetimeDays bounds how far in the future a new API key may
+	// expire. Keys are created as a whole number of days from "now".
+	maxAPIKeyLifetimeDays     = 365
+	maxAPIKeyLifetime         = maxAPIKeyLifetimeDays * 24 * time.Hour
+	defaultAPIKeyExpiryDays   = 30
+	apiKeyExpiresCustomValue  = "custom"
 	maxAPIKeyNameLength       = 128
 	apiKeyCreateNonceField    = "create_nonce"
 	apiKeyCreateNonceFlashKey = "api_key_create_nonce"
 	adminAuditPageSize        = 100
 	adminAPIKeyPageSize       = 100
 )
+
+// apiKeyExpiryPreset is a selectable duration in the create form's dropdown.
+type apiKeyExpiryPreset struct {
+	Days  int
+	Label string
+}
+
+// apiKeyExpiryPresets returns the fixed dropdown options, shortest first. All
+// values are <= maxAPIKeyLifetimeDays; "Custom" is rendered separately.
+func apiKeyExpiryPresets() []apiKeyExpiryPreset {
+	return []apiKeyExpiryPreset{
+		{Days: 1, Label: "1 day"},
+		{Days: 7, Label: "7 days"},
+		{Days: 14, Label: "14 days"},
+		{Days: 30, Label: "30 days"},
+		{Days: 90, Label: "90 days"},
+		{Days: 180, Label: "180 days"},
+		{Days: 365, Label: "365 days"},
+	}
+}
 
 var bootstrapRotationRequiredMessage = web.Message("admin.bootstrap.error.rotation_required")
 
@@ -362,9 +387,12 @@ func (h *AdminHandler) HandleAdminKeys(w http.ResponseWriter, r *http.Request) {
 		"NewKey":                newKey,
 		"MaxAPIKeyNameLength":   maxAPIKeyNameLength,
 		"APIKeyCreateNonce":     createNonce,
-		"APIKeyExpiryExample":   apiKeyExpiryExample(time.Now().UTC()),
+		"APIKeyExpiryPresets":   apiKeyExpiryPresets(),
+		"APIKeyExpiryMaxDays":   maxAPIKeyLifetimeDays,
 		"APIKeyCreateName":      r.URL.Query().Get("name"),
-		"APIKeyCreateExpiresAt": r.URL.Query().Get("expires_at"),
+		"APIKeySelectedDays":    apiKeySelectedExpiryDays(r.URL.Query().Get("expires_in_days")),
+		"APIKeyCustomSelected":  r.URL.Query().Get("expires_in_days") == apiKeyExpiresCustomValue,
+		"APIKeyCustomDaysValue": safeAPIKeyExpiresCustomDays(r.URL.Query().Get("expires_custom_days")),
 	}
 	addAdminBootstrapPageState(data, h.adminBootstrapPageState(ctx, r, sess, "admin keys"))
 	h.renderAdmin(w, "admin/keys.html", data)
@@ -398,8 +426,21 @@ func (h *AdminHandler) listAPIKeyPage(ctx context.Context, offset int) ([]db.API
 	return keys, false, nil
 }
 
-func apiKeyExpiryExample(now time.Time) string {
-	return now.UTC().Add(30 * 24 * time.Hour).Truncate(time.Second).Format(time.RFC3339)
+// apiKeySelectedExpiryDays picks which dropdown preset to mark selected when
+// re-rendering the create form. Returns 0 when "Custom" was chosen (no preset
+// matches), the matching preset when a valid one was submitted, and the default
+// otherwise.
+func apiKeySelectedExpiryDays(raw string) int {
+	raw = strings.TrimSpace(raw)
+	if raw == apiKeyExpiresCustomValue {
+		return 0
+	}
+	for _, preset := range apiKeyExpiryPresets() {
+		if raw == strconv.Itoa(preset.Days) {
+			return preset.Days
+		}
+	}
+	return defaultAPIKeyExpiryDays
 }
 
 // apiKeyView wraps db.APIKey with template-friendly accessor methods.
@@ -477,15 +518,15 @@ func (h *AdminHandler) HandleKeyCreate(w http.ResponseWriter, r *http.Request) {
 
 	name, err := normalizeAPIKeyName(r.PostForm.Get("name"))
 	if err != nil {
-		redirectAPIKeyCreateError(w, r, apiKeyNameValidationMessage(err), r.PostForm.Get("name"), r.PostForm.Get("expires_at"))
+		redirectAPIKeyCreateError(w, r, apiKeyNameValidationMessage(err), r.PostForm.Get("name"))
 		return
 	}
-	expiresAt, err := parseAPIKeyExpiresAt(r.PostForm.Get("expires_at"), time.Now().UTC())
+	expiresAt, err := parseAPIKeyExpiresInDays(r.PostForm.Get("expires_in_days"), r.PostForm.Get("expires_custom_days"), time.Now().UTC())
 	if err != nil {
-		redirectAPIKeyCreateError(w, r, err.Error(), name, r.PostForm.Get("expires_at"))
+		redirectAPIKeyCreateError(w, r, err.Error(), name)
 		return
 	}
-	if !h.requireAPIKeyCreateStepUp(w, r, name, r.PostForm.Get("expires_at")) {
+	if !h.requireAPIKeyCreateStepUp(w, r, name) {
 		return
 	}
 
@@ -493,7 +534,7 @@ func (h *AdminHandler) HandleKeyCreate(w http.ResponseWriter, r *http.Request) {
 	rawKey := make([]byte, 32)
 	if _, err := rand.Read(rawKey); err != nil {
 		h.logger.Error("admin keys: failed to generate key", h.adminLogAttrs(r, "error", err)...)
-		redirectAPIKeyCreateError(w, r, web.Message("admin.keys.error.generate"), name, r.PostForm.Get("expires_at"))
+		redirectAPIKeyCreateError(w, r, web.Message("admin.keys.error.generate"), name)
 		return
 	}
 	plaintext := hex.EncodeToString(rawKey)
@@ -515,7 +556,7 @@ func (h *AdminHandler) HandleKeyCreate(w http.ResponseWriter, r *http.Request) {
 	keyID, createErr = h.store.CreateAPIKeyWithAudit(r.Context(), name, keyHash, expiresAt, audit)
 	if createErr != nil {
 		h.logger.Error("admin keys: failed to create key", h.adminLogAttrs(r, "error", createErr, "key_id", keyID)...)
-		redirectAPIKeyCreateError(w, r, apiKeyMutationErrorMessage(createErr, web.Message("admin.keys.error.create")), name, r.PostForm.Get("expires_at"))
+		redirectAPIKeyCreateError(w, r, apiKeyMutationErrorMessage(createErr, web.Message("admin.keys.error.create")), name)
 		return
 	}
 
@@ -525,13 +566,16 @@ func (h *AdminHandler) HandleKeyCreate(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/admin/keys?msg="+url.QueryEscape(web.Message("admin.keys.flash.created")), http.StatusSeeOther)
 }
 
-func redirectAPIKeyCreateError(w http.ResponseWriter, r *http.Request, message, name, expiresAt string) {
+func redirectAPIKeyCreateError(w http.ResponseWriter, r *http.Request, message, name string) {
 	values := url.Values{"err": {message}}
 	if safeName := safeAPIKeyCreateNameValue(name); safeName != "" {
 		values.Set("name", safeName)
 	}
-	if safeExpiresAt := safeAPIKeyCreateExpiresAtValue(expiresAt); safeExpiresAt != "" {
-		values.Set("expires_at", safeExpiresAt)
+	if selected := safeAPIKeyExpiresSelection(r.PostForm.Get("expires_in_days")); selected != "" {
+		values.Set("expires_in_days", selected)
+	}
+	if custom := safeAPIKeyExpiresCustomDays(r.PostForm.Get("expires_custom_days")); custom != "" {
+		values.Set("expires_custom_days", custom)
 	}
 	http.Redirect(w, r, "/admin/keys?"+values.Encode(), http.StatusSeeOther)
 }
@@ -544,12 +588,30 @@ func safeAPIKeyCreateNameValue(raw string) string {
 	return name
 }
 
-func safeAPIKeyCreateExpiresAtValue(raw string) string {
-	expiresAt := strings.TrimSpace(raw)
-	if len(expiresAt) > len(time.RFC3339) {
+// safeAPIKeyExpiresSelection sanitizes the dropdown value preserved across an
+// error redirect: it must be "custom" or one of the known presets.
+func safeAPIKeyExpiresSelection(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == apiKeyExpiresCustomValue {
+		return raw
+	}
+	for _, preset := range apiKeyExpiryPresets() {
+		if raw == strconv.Itoa(preset.Days) {
+			return raw
+		}
+	}
+	return ""
+}
+
+// safeAPIKeyExpiresCustomDays sanitizes the custom-days value preserved across
+// an error redirect: a positive integer within the allowed lifetime.
+func safeAPIKeyExpiresCustomDays(raw string) string {
+	raw = strings.TrimSpace(raw)
+	days, err := strconv.Atoi(raw)
+	if err != nil || days < 1 || days > maxAPIKeyLifetimeDays {
 		return ""
 	}
-	return expiresAt
+	return raw
 }
 
 func newAdminFormNonce() (string, error) {
@@ -602,30 +664,34 @@ func apiKeyNameValidationMessage(err error) string {
 	return msg
 }
 
-func parseAPIKeyExpiresAt(raw string, now time.Time) (*time.Time, error) {
-	raw = strings.TrimSpace(raw)
+// parseAPIKeyExpiresInDays resolves the create form's duration into an absolute
+// expiry. selected is the dropdown value (a day count or "custom"); custom is
+// the days entered in the custom field, used only when selected == "custom".
+func parseAPIKeyExpiresInDays(selected, custom string, now time.Time) (*time.Time, error) {
+	raw := strings.TrimSpace(selected)
+	if raw == apiKeyExpiresCustomValue {
+		raw = strings.TrimSpace(custom)
+	}
 	if raw == "" {
 		return nil, errors.New(web.Message("admin.keys.error.expiration_required"))
 	}
 
-	expiresAt, err := time.Parse(time.RFC3339, raw)
+	days, err := strconv.Atoi(raw)
 	if err != nil {
 		return nil, errors.New(web.Message("admin.keys.error.expiration_invalid"))
 	}
-	if _, offset := expiresAt.Zone(); offset != 0 || !strings.HasSuffix(raw, "Z") {
-		return nil, errors.New(web.Message("admin.keys.error.expiration_utc"))
-	}
-	expiresAt = expiresAt.UTC()
-	if !expiresAt.After(now.UTC()) {
+	if days < 1 {
 		return nil, errors.New(web.Message("admin.keys.error.expiration_future"))
 	}
-	if expiresAt.After(now.UTC().Add(maxAPIKeyLifetime)) {
+	if days > maxAPIKeyLifetimeDays {
 		return nil, errors.New(web.Message("admin.keys.error.expiration_max_lifetime"))
 	}
+
+	expiresAt := now.UTC().Add(time.Duration(days) * 24 * time.Hour).Truncate(time.Second)
 	return &expiresAt, nil
 }
 
-func (h *AdminHandler) requireAPIKeyCreateStepUp(w http.ResponseWriter, r *http.Request, name, expiresAt string) bool {
+func (h *AdminHandler) requireAPIKeyCreateStepUp(w http.ResponseWriter, r *http.Request, name string) bool {
 	ip := clientIP(r)
 	if h.isLockedOut(ip) {
 		telemetry.Default().IncAuthLoginFailures()
@@ -634,29 +700,29 @@ func (h *AdminHandler) requireAPIKeyCreateStepUp(w http.ResponseWriter, r *http.
 			if err := h.auditLog(r, "login_lockout", map[string]string{
 				"reason": "too many failed attempts",
 			}); err != nil {
-				redirectAPIKeyCreateError(w, r, web.Message("admin.keys.error.audit_log"), name, expiresAt)
+				redirectAPIKeyCreateError(w, r, web.Message("admin.keys.error.audit_log"), name)
 				return false
 			}
 			h.markLockoutAuditWritten(ip)
 		}
-		redirectAPIKeyCreateError(w, r, web.Message("admin.keys.error.too_many_attempts"), name, expiresAt)
+		redirectAPIKeyCreateError(w, r, web.Message("admin.keys.error.too_many_attempts"), name)
 		return false
 	}
 
 	adminAuth, err := h.store.GetAdminAuth(r.Context())
 	if err != nil || adminAuth == nil {
-		redirectAPIKeyCreateError(w, r, web.Message("admin.keys.error.verify_current_password"), name, expiresAt)
+		redirectAPIKeyCreateError(w, r, web.Message("admin.keys.error.verify_current_password"), name)
 		return false
 	}
 	if !auth.CheckPassword(adminAuth.PasswordHash, r.PostForm.Get("current_password")) {
 		if err := h.auditLog(r, "api_key_create_failed", map[string]string{
 			"reason": "invalid current password",
 		}); err != nil {
-			redirectAPIKeyCreateError(w, r, web.Message("admin.keys.error.audit_log"), name, expiresAt)
+			redirectAPIKeyCreateError(w, r, web.Message("admin.keys.error.audit_log"), name)
 			return false
 		}
 		h.recordFailedAttempt(ip)
-		redirectAPIKeyCreateError(w, r, web.Message("admin.keys.error.current_password_incorrect"), name, expiresAt)
+		redirectAPIKeyCreateError(w, r, web.Message("admin.keys.error.current_password_incorrect"), name)
 		return false
 	}
 

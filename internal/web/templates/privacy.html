@@ -3,10 +3,10 @@
 {{define "content"}}
 <div class="max-w-3xl space-y-6">
   <h1 class="text-2xl font-bold">{{t "privacy.heading"}}</h1>
-  <p class="text-sm text-gray-600">{{t "privacy.last_updated"}}</p>
+  <p class="text-sm text-muted">{{t "privacy.last_updated"}}</p>
 
-  <section class="space-y-3 text-sm text-gray-700">
-    <h2 class="text-lg font-semibold text-gray-900">{{t "privacy.session.heading"}}</h2>
+  <section class="space-y-3 text-sm text-fg">
+    <h2 class="text-lg font-semibold text-fg">{{t "privacy.session.heading"}}</h2>
     <p>
       {{t "privacy.session.body_intro"}} <code class="font-mono">packmon_session</code>
       {{t "privacy.session.body_after_cookie"}} <code class="font-mono">/admin</code>,
@@ -14,22 +14,22 @@
     </p>
   </section>
 
-  <section class="space-y-3 text-sm text-gray-700">
-    <h2 class="text-lg font-semibold text-gray-900">{{t "privacy.controller.heading"}}</h2>
+  <section class="space-y-3 text-sm text-fg">
+    <h2 class="text-lg font-semibold text-fg">{{t "privacy.controller.heading"}}</h2>
     <p>
       {{t "privacy.controller.body_intro"}} <code class="font-mono">PACKMON_WEB_LEGAL_URL</code>.
     </p>
   </section>
 
-  <section class="space-y-3 text-sm text-gray-700">
-    <h2 class="text-lg font-semibold text-gray-900">{{t "privacy.legal_basis.heading"}}</h2>
+  <section class="space-y-3 text-sm text-fg">
+    <h2 class="text-lg font-semibold text-fg">{{t "privacy.legal_basis.heading"}}</h2>
     <p>
       {{t "privacy.legal_basis.body"}}
     </p>
   </section>
 
-  <section class="space-y-3 text-sm text-gray-700">
-    <h2 class="text-lg font-semibold text-gray-900">{{t "privacy.operational_metadata.heading"}}</h2>
+  <section class="space-y-3 text-sm text-fg">
+    <h2 class="text-lg font-semibold text-fg">{{t "privacy.operational_metadata.heading"}}</h2>
     <p>
       {{t "privacy.operational_metadata.audit"}}
     </p>
@@ -41,8 +41,8 @@
     </p>
   </section>
 
-  <section class="space-y-3 text-sm text-gray-700">
-    <h2 class="text-lg font-semibold text-gray-900">{{t "privacy.data_categories.heading"}}</h2>
+  <section class="space-y-3 text-sm text-fg">
+    <h2 class="text-lg font-semibold text-fg">{{t "privacy.data_categories.heading"}}</h2>
     <p>
       {{t "privacy.data_categories.categories"}}
     </p>
@@ -54,29 +54,29 @@
     </p>
   </section>
 
-  <section class="space-y-3 text-sm text-gray-700">
-    <h2 class="text-lg font-semibold text-gray-900">{{t "privacy.third_party.heading"}}</h2>
+  <section class="space-y-3 text-sm text-fg">
+    <h2 class="text-lg font-semibold text-fg">{{t "privacy.third_party.heading"}}</h2>
     <p>
       {{t "privacy.third_party.body"}}
     </p>
   </section>
 
-  <section class="space-y-3 text-sm text-gray-700">
-    <h2 class="text-lg font-semibold text-gray-900">{{t "privacy.webhook.heading"}}</h2>
+  <section class="space-y-3 text-sm text-fg">
+    <h2 class="text-lg font-semibold text-fg">{{t "privacy.webhook.heading"}}</h2>
     <p>
       {{t "privacy.webhook.body"}}
     </p>
   </section>
 
-  <section class="space-y-3 text-sm text-gray-700">
-    <h2 class="text-lg font-semibold text-gray-900">{{t "privacy.rights.heading"}}</h2>
+  <section class="space-y-3 text-sm text-fg">
+    <h2 class="text-lg font-semibold text-fg">{{t "privacy.rights.heading"}}</h2>
     <p>
       {{t "privacy.rights.body"}}
     </p>
   </section>
 
-  <section class="space-y-3 text-sm text-gray-700">
-    <h2 class="text-lg font-semibold text-gray-900">{{t "privacy.california.heading"}}</h2>
+  <section class="space-y-3 text-sm text-fg">
+    <h2 class="text-lg font-semibold text-fg">{{t "privacy.california.heading"}}</h2>
     <p>
       {{t "privacy.california.rights"}}
     </p>
@@ -85,14 +85,14 @@
     </p>
   </section>
 
-  <section class="space-y-3 text-sm text-gray-700">
-    <h2 class="text-lg font-semibold text-gray-900">{{t "privacy.operator_notice.heading"}}</h2>
+  <section class="space-y-3 text-sm text-fg">
+    <h2 class="text-lg font-semibold text-fg">{{t "privacy.operator_notice.heading"}}</h2>
     <p>
       {{t "privacy.operator_notice.body"}}
     </p>
     {{if legalURL}}
     <p>
-      {{t "privacy.legal_notice.prefix"}} <a href="{{legalURL}}" class="text-blue-700 underline hover:text-blue-900">{{t "privacy.legal_notice.link"}}</a> {{t "privacy.legal_notice.suffix"}}
+      {{t "privacy.legal_notice.prefix"}} <a href="{{legalURL}}" class="text-accent underline hover:text-accent-hover">{{t "privacy.legal_notice.link"}}</a> {{t "privacy.legal_notice.suffix"}}
     </p>
     {{end}}
   </section>

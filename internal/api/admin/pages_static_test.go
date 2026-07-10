@@ -51,9 +51,9 @@ func TestAdminAPIKeyTemplateUsesStatusViewModel(t *testing.T) {
 	}
 	text := string(src)
 	for _, forbidden := range []string{
-		`bg-gray-200 text-gray-800">deleted`,
-		`bg-red-100 text-red-800">revoked`,
-		`bg-amber-100 text-amber-800">expired`,
+		`bg-surface-2 text-fg">deleted`,
+		`bg-danger-bg text-danger-fg">revoked`,
+		`bg-warning-bg text-warning-fg">expired`,
 		`bg-green-100 text-green-800">active`,
 	} {
 		if strings.Contains(text, forbidden) {
@@ -457,10 +457,10 @@ func TestAdminAuditTemplateUsesActionClassViewModel(t *testing.T) {
 		`eq .Action "login_success"`,
 		`eq .Action "login_failed"`,
 		`eq .Action "login_lockout"`,
-		`bg-blue-100 text-blue-800`,
-		`bg-red-100 text-red-800`,
-		`bg-amber-100 text-amber-800`,
-		`bg-gray-100 text-gray-800`,
+		`bg-info-bg text-accent`,
+		`bg-danger-bg text-danger-fg`,
+		`bg-warning-bg text-warning-fg`,
+		`bg-surface-2 text-fg`,
 	} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("audit template still hardcodes audit action badge %q", forbidden)

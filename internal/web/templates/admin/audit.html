@@ -8,28 +8,28 @@
   <!-- Audit log table -->
   <div class="pm-surface">
     {{if .AuditLoadError}}
-    <div class="px-5 py-4 border-b border-red-100">
+    <div class="px-5 py-4 border-b border-danger">
       {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .AuditLoadError}}
     </div>
     {{else if .Entries}}
-    <nav class="flex flex-wrap items-center justify-between gap-3 px-5 py-3 text-xs text-gray-600 border-b border-gray-100" aria-label="Audit log pages">
+    <nav class="flex flex-wrap items-center justify-between gap-3 px-5 py-3 text-xs text-muted border-b border-border" aria-label="Audit log pages">
       <div class="flex flex-wrap items-center gap-3">
         <span>Showing audit events {{.AuditPageStart}}-{{.AuditPageEnd}}</span>
-        <span id="audit-integrity-help" class="text-gray-500">Integrity badges verify each row in the audit hash chain.</span>
+        <span id="audit-integrity-help" class="text-muted">Integrity badges verify each row in the audit hash chain.</span>
       </div>
       <div class="flex flex-wrap items-center gap-2">
         {{if .AuditHasPrevious}}
-        <a href="/admin/audit?offset={{.AuditPreviousOffset}}" class="inline-flex min-h-11 items-center justify-center rounded-md border border-gray-500 px-3 py-2 font-medium text-gray-700 hover:bg-gray-50 pm-focus-ring">Newer</a>
+        <a href="/admin/audit?offset={{.AuditPreviousOffset}}" class="inline-flex min-h-11 items-center justify-center rounded-md border border-muted px-3 py-2 font-medium text-fg hover:bg-surface-2 pm-focus-ring">Newer</a>
         {{end}}
         {{if .AuditHasNext}}
-        <a href="/admin/audit?offset={{.AuditNextOffset}}" class="inline-flex min-h-11 items-center justify-center rounded-md border border-gray-500 px-3 py-2 font-medium text-gray-700 hover:bg-gray-50 pm-focus-ring">Older</a>
+        <a href="/admin/audit?offset={{.AuditNextOffset}}" class="inline-flex min-h-11 items-center justify-center rounded-md border border-muted px-3 py-2 font-medium text-fg hover:bg-surface-2 pm-focus-ring">Older</a>
         {{end}}
       </div>
     </nav>
     <div class="pm-scroll-region" tabindex="0" role="region" aria-label="Admin audit log table">
       <table class="min-w-full text-sm">
         <thead>
-          <tr class="text-start text-gray-500 border-b bg-gray-50">
+          <tr class="text-start text-muted border-b bg-bg">
             <th class="px-5 py-2">ID</th>
             <th class="px-5 py-2">Time</th>
             <th class="px-5 py-2">Action</th>
@@ -40,23 +40,23 @@
         </thead>
         <tbody>
           {{range .Entries}}
-          <tr class="border-b border-gray-100 hover:bg-gray-50">
+          <tr class="border-b border-border hover:bg-surface-2">
             <td class="px-5 py-2 font-mono text-xs">{{.ID}}</td>
-            <td class="px-5 py-2 text-gray-500"><time data-local-time="relative" datetime="{{formatTimeISO .CreatedAt}}" aria-label="{{formatTime .CreatedAt}}">{{formatTimeAgo .CreatedAt}}</time></td>
+            <td class="px-5 py-2 text-muted"><time data-local-time="relative" datetime="{{formatTimeISO .CreatedAt}}" aria-label="{{formatTime .CreatedAt}}">{{formatTimeAgo .CreatedAt}}</time></td>
             <td class="px-5 py-2">
               <span class="inline-block px-2 py-0.5 rounded text-xs font-medium {{.ActionClass}}">{{.Action}}</span>
             </td>
-            <td class="px-5 py-2 text-xs font-mono text-gray-600 max-w-xl">
+            <td class="px-5 py-2 text-xs font-mono text-muted max-w-xl">
               {{if .DetailsExpanded}}
               <details data-print-open>
-                <summary dir="auto" class="inline-flex min-h-11 cursor-pointer items-center rounded px-2 py-1 text-gray-600"><bdi dir="auto">{{truncate .DetailsStr 80}}</bdi></summary>
-                <pre dir="auto" class="mt-2 whitespace-pre-wrap break-words rounded bg-gray-50 p-2 text-gray-700"><bdi dir="auto">{{.DetailsStr}}</bdi></pre>
+                <summary dir="auto" class="inline-flex min-h-11 cursor-pointer items-center rounded px-2 py-1 text-muted"><bdi dir="auto">{{truncate .DetailsStr 80}}</bdi></summary>
+                <pre dir="auto" class="mt-2 whitespace-pre-wrap break-words rounded bg-bg p-2 text-fg"><bdi dir="auto">{{.DetailsStr}}</bdi></pre>
               </details>
               {{else}}
               <bdi dir="auto">{{.DetailsStr}}</bdi>
               {{end}}
             </td>
-            <td class="px-5 py-2 text-xs text-gray-500">{{.IP}}</td>
+            <td class="px-5 py-2 text-xs text-muted">{{.IP}}</td>
             <td class="px-5 py-2">
               <span aria-label="Audit integrity {{.IntegrityLabel}}" aria-describedby="audit-integrity-help" class="inline-block px-2 py-0.5 rounded text-xs font-medium {{.IntegrityClass}}">{{.IntegrityLabel}}</span>
             </td>
@@ -67,10 +67,10 @@
     </div>
     {{else if .AuditPageOutOfRange}}
     <div class="pm-empty-state py-10">
-      <p class="font-medium text-gray-900">No audit log entries on this page.</p>
+      <p class="font-medium text-fg">No audit log entries on this page.</p>
       <p class="mt-2 text-sm">The current page is past the available audit events.</p>
       <div class="mt-4 flex flex-wrap justify-center gap-2">
-        <a href="/admin/audit?offset={{.AuditPreviousOffset}}" class="inline-flex min-h-11 items-center justify-center rounded-md border border-gray-500 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 pm-focus-ring">Newer audit events</a>
+        <a href="/admin/audit?offset={{.AuditPreviousOffset}}" class="inline-flex min-h-11 items-center justify-center rounded-md border border-muted px-3 py-2 text-sm font-medium text-fg hover:bg-surface-2 pm-focus-ring">Newer audit events</a>
         <a href="/admin/audit" class="{{adminPrimaryButtonClass}}">Back to first page</a>
       </div>
     </div>

@@ -202,6 +202,26 @@ func TestRuntimeConfigFormattingHelpers(t *testing.T) {
 	}
 }
 
+func TestAdminFeedRowsExcludeSyntheticPipelineStatuses(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{Feeds: config.FeedsConfig{OSVEnabled: true, OSVMode: config.FeedModeSelf}}
+	handler := &AdminHandler{cfg: cfg}
+
+	rows := handler.adminFeedRows([]db.FeedSyncStatus{
+		{FeedName: "OSV", LastSyncStatus: "success"},
+		{FeedName: "alias-severity-propagation", LastSyncStatus: "success", EntriesSynced: 1, EntriesTotal: 1},
+	})
+
+	for _, row := range rows {
+		if strings.EqualFold(row.FeedName, "alias-severity-propagation") || row.FeedKey == "alias-severity-propagation" {
+			t.Fatalf("admin feed rows include synthetic pipeline status alias-severity-propagation: %+v", rows)
+		}
+	}
+	// The real feed is still present.
+	findAdminFeedRow(t, rows, "osv")
+}
+
 func findAdminFeedRow(t *testing.T, rows []adminFeedRow, key string) adminFeedRow {
 	t.Helper()
 	for _, row := range rows {

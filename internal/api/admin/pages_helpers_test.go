@@ -125,36 +125,52 @@ func TestAdminQueueStatusClassUsesSemanticBadges(t *testing.T) {
 	}
 }
 
-func TestParseAPIKeyExpiresAt(t *testing.T) {
+func TestParseAPIKeyExpiresInDays(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 5, 30, 12, 0, 0, 0, time.UTC)
-	if got, err := parseAPIKeyExpiresAt("", now); err == nil || !strings.Contains(err.Error(), "required") || got != nil {
-		t.Fatalf("blank expiry = %v, %v; want required error", got, err)
+
+	if _, err := parseAPIKeyExpiresInDays("", "", now); err == nil || !strings.Contains(err.Error(), "required") {
+		t.Fatalf("blank duration error = %v, want required", err)
 	}
 
-	got, err := parseAPIKeyExpiresAt("2026-06-01T13:45:00Z", now)
+	got, err := parseAPIKeyExpiresInDays("30", "", now)
 	if err != nil {
-		t.Fatalf("parseAPIKeyExpiresAt(RFC3339 UTC): %v", err)
+		t.Fatalf("parseAPIKeyExpiresInDays(30): %v", err)
 	}
-	if got == nil || !got.After(now) || got.Location() != time.UTC {
-		t.Fatalf("parseAPIKeyExpiresAt(RFC3339 UTC) = %v, want future UTC time", got)
+	if got == nil || got.Location() != time.UTC || !got.Equal(now.Add(30*24*time.Hour)) {
+		t.Fatalf("parseAPIKeyExpiresInDays(30) = %v, want %v", got, now.Add(30*24*time.Hour))
 	}
 
-	for _, raw := range []string{"2026-06-01", "2026-06-01T13:45", "2026-06-01T13:45:00+02:00"} {
-		if _, err := parseAPIKeyExpiresAt(raw, now); err == nil || !strings.Contains(err.Error(), "RFC3339 UTC") {
-			t.Fatalf("parseAPIKeyExpiresAt(%q) error = %v, want RFC3339 UTC error", raw, err)
+	// The custom field is used only when the dropdown value is "custom".
+	custom, err := parseAPIKeyExpiresInDays(apiKeyExpiresCustomValue, "200", now)
+	if err != nil {
+		t.Fatalf("parseAPIKeyExpiresInDays(custom,200): %v", err)
+	}
+	if custom == nil || !custom.Equal(now.Add(200*24*time.Hour)) {
+		t.Fatalf("parseAPIKeyExpiresInDays(custom,200) = %v, want now+200d", custom)
+	}
+	// A preset selection ignores whatever sits in the custom field.
+	if preset, _ := parseAPIKeyExpiresInDays("7", "999", now); preset == nil || !preset.Equal(now.Add(7*24*time.Hour)) {
+		t.Fatalf("preset selection honored custom field = %v, want now+7d", preset)
+	}
+
+	if _, err := parseAPIKeyExpiresInDays(apiKeyExpiresCustomValue, "", now); err == nil || !strings.Contains(err.Error(), "required") {
+		t.Fatalf("custom with blank days error = %v, want required", err)
+	}
+	for _, raw := range []string{"tomorrow", "30.5", "-"} {
+		if _, err := parseAPIKeyExpiresInDays(raw, "", now); err == nil || !strings.Contains(err.Error(), "whole number") {
+			t.Fatalf("parseAPIKeyExpiresInDays(%q) error = %v, want whole-number error", raw, err)
 		}
 	}
-
-	if _, err := parseAPIKeyExpiresAt("2026-05-01T00:00:00Z", now); err == nil || !strings.Contains(err.Error(), "future") {
-		t.Fatalf("past expiry error = %v", err)
+	if _, err := parseAPIKeyExpiresInDays("0", "", now); err == nil || !strings.Contains(err.Error(), "future") {
+		t.Fatalf("zero-day error = %v, want future error", err)
 	}
-	if _, err := parseAPIKeyExpiresAt("2026-09-15T00:00:00Z", now); err == nil || !strings.Contains(err.Error(), "90 days") {
-		t.Fatalf("too-far expiry error = %v", err)
+	if _, err := parseAPIKeyExpiresInDays("366", "", now); err == nil || !strings.Contains(err.Error(), "365 days") {
+		t.Fatalf("too-far error = %v, want 365-day error", err)
 	}
-	if _, err := parseAPIKeyExpiresAt("tomorrow", now); err == nil || !strings.Contains(err.Error(), "invalid") {
-		t.Fatalf("invalid expiry error = %v", err)
+	if _, err := parseAPIKeyExpiresInDays(apiKeyExpiresCustomValue, "1000", now); err == nil || !strings.Contains(err.Error(), "365 days") {
+		t.Fatalf("custom too-far error = %v, want 365-day error", err)
 	}
 }
 

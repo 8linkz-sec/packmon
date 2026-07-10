@@ -824,11 +824,11 @@ indicator. Feed-status auto-refresh must preserve the horizontal scroll
 position of refreshed table regions so operators can inspect right-side columns
 without being reset to the first column on every htmx swap.
 Meaningful status, helper, empty-state, and badge text must use contrast-safe
-foreground tokens on white and gray-50 surfaces. Form-control borders must meet
-the WCAG non-text contrast target, and focus indication must not depend solely
-on Tailwind ring box-shadows; the custom stylesheet provides a forced-colors
-outline fallback for links, buttons, form controls, summaries, and focusable
-regions.
+foreground tokens on the `surface` and `surface-2` backgrounds. Form-control
+borders must meet the WCAG non-text contrast target, and focus indication must
+not depend solely on Tailwind ring box-shadows; the custom stylesheet provides a
+forced-colors outline fallback for links, buttons, form controls, summaries, and
+focusable regions.
 Current public and admin navigation items must expose the active page with
 `aria-current="page"` in addition to visual styling.
 HTMX-updated status, search, and feed-refresh regions must expose live-region
@@ -853,6 +853,86 @@ same lockout window.
 The admin UI exposes `/.well-known/change-password` as a redirect to the
 password settings page so password managers can discover the password-change
 entry point.
+
+### Design system
+
+Colors are semantic CSS custom properties declared once in the `@theme` block of
+`internal/web/static/tailwind.input.css`. Tailwind v4 generates the utilities
+from them, so `bg-surface`, `text-muted`, and `border-border` resolve to
+`var(--color-*)` at runtime.
+
+| Token | Purpose |
+| --- | --- |
+| `bg`, `surface`, `surface-2` | Page background, cards, raised rows |
+| `border` | Hairlines and dividers |
+| `fg`, `muted` | Primary and secondary text |
+| `accent`, `accent-hover`, `accent-contrast` | Links, primary buttons, text on the accent |
+| `danger`, `high`, `warning`, `success`, `info` (+ `-bg`, `-fg`) | Status only |
+| `nav`, `nav-fg`, `nav-muted`, `nav-active` | The dark primary nav, in both themes |
+
+Consequences of this layout, all of them load-bearing:
+
+- **Dark mode is a token override, not a variant.** `[data-pm-theme="dark"]`
+  reassigns the same variables. Templates therefore contain no `dark:` classes,
+  and a raw palette class such as `bg-gray-50` would silently stay light. This
+  is enforced: `internal/web/design_tokens_test.go` fails on any raw Tailwind
+  palette class in a template or in a Go file that emits class strings.
+- **Status colors are separate from the accent** so severity never reads as
+  branding. Severity badges use `pm-badge-severity-*`, not accent utilities.
+- **There is no `tailwind.config.js`.** Layout tokens (`--container-shell`,
+  `--container-finding-id`) live in the same `@theme` block. A reintroduced JS
+  config would split the source of truth; `tailwind_assets_test.go` fails if one
+  appears.
+- Component classes (`pm-surface`, `pm-alert-*`, `pm-badge-*`, `pm-seg`) are
+  defined in `@layer components` and reference only semantic tokens.
+- Print and forced-colors rules deliberately use the `white`/`black` keywords
+  rather than tokens: paper is white in both themes.
+
+The theme is `light`, `dark`, or `system` (default). `internal/web/static/theme-init.js`
+reads `localStorage` and sets `data-pm-theme` on `<html>` before first paint. It
+is an external, non-deferred script, not an inline one, because the CSP is
+`script-src 'self'` with no nonce and a security test forbids relaxing it. The
+switcher is a three-button segmented control in the nav with `aria-pressed`.
+
+### Dashboard contract
+
+The public dashboard (`/`) is a **display-only** surface. It renders links, never
+controls: no `<button>`, `<form>`, `<input>`, `<select>`, or `<textarea>` inside
+`<main>`. Everything that acts or configures lives behind `/admin/`.
+
+Its four stat cards, in order, are Packages Tracked, Vulnerabilities, Malicious
+Packages, and Supply-chain Risks. Supply-chain stays on the public dashboard
+because `supply_chain_risk` findings always block the CI gate, exactly like
+malicious ones; hiding it while showing Malicious would explain only half of a
+red gate.
+
+Lifecycle Findings, Scans (7d), and Feeds Healthy are operator metrics and
+appear only on the admin dashboard, which renders seven cards. `Feeds Healthy`
+is `healthy / total`, aggregated by the admin handler from existing feed-sync
+rows; it introduces no schema change. The public dashboard handler does not read
+scan counts at all.
+
+The recent-vulnerabilities table lists advisories published in the last seven
+days, capped at twenty rows (`ListRecentVulnerabilities(ctx, 7, 20)`), with six
+columns in this order:
+
+| Column | Source | Note |
+| --- | --- | --- |
+| Package | `Name` | links to the package page |
+| Version | `Affected` | the affected range, e.g. `< 2.15.0` |
+| Ecosystem | `Ecosystem` | own column, not a package-name prefix |
+| Severity | `Severity` | `CRITICAL`/`HIGH`/`MEDIUM`/`LOW` only |
+| Advisory | `ID` | external link, monospace |
+| Published | `PublishedAt` | relative time |
+
+`MALICIOUS` is not a severity value and never appears in this table. The advisory
+summary is not shown here; it remains on the package page.
+
+`internal/web/dashboard_contract_test.go` renders the handler and asserts the
+card set and order, the column set and order, the twenty-row cap, the absence of
+controls in `<main>`, and the presence of the theme switcher and skip link. The
+assertions are structural, so restyling does not break them; removing a card or
+a column does.
 
 The shared web layout includes operator-facing notice links. `PACKMON_WEB_PRIVACY_URL`
 defaults to the built-in `/privacy` page, which documents the admin session

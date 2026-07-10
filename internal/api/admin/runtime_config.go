@@ -145,6 +145,11 @@ func (h *AdminHandler) adminFeedRows(statuses []db.FeedSyncStatus) []adminFeedRo
 	}
 
 	for _, status := range statuses {
+		// Synthetic pipeline statuses (alias-severity-propagation) are recorded
+		// for observability but are not feeds; keep them out of the feed list.
+		if feedhealth.IsSyntheticStatus(status.FeedName) {
+			continue
+		}
 		feedKey := config.NormalizeFeedName(status.FeedName)
 		if _, ok := seen[feedKey]; ok {
 			continue

@@ -53,6 +53,12 @@ func HandleFeeds(store Store, renderer *Renderer, logger *slog.Logger) http.Hand
 
 		rows := make([]FeedRow, 0, len(statuses))
 		for _, s := range statuses {
+			// Synthetic pipeline statuses (e.g. alias-severity-propagation) are
+			// recorded for observability but are not feeds, so keep them out of
+			// the user-facing feed list.
+			if feedhealth.IsSyntheticStatus(s.FeedName) {
+				continue
+			}
 			status, reason := feedHealth(s)
 			row := FeedRow{
 				FeedName:       s.FeedName,

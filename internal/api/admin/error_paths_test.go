@@ -797,7 +797,7 @@ func TestAdminWriteHandlersRedirectOnStoreFailures(t *testing.T) {
 	}{
 		{name: "feed save", fail: "UpsertFeedConfig", target: "/admin/feeds/save", values: url.Values{"feed_name": {"osv"}, "mode": {"self"}}, call: handler.HandleFeedConfigSave, want: "Failed+to+save"},
 		{name: "feed reset", fail: "DeleteFeedConfig", target: "/admin/feeds/reset", values: url.Values{"feed_name": {"osv"}, "confirm_reset": {"on"}}, call: handler.HandleFeedConfigReset, want: "Failed+to+reset"},
-		{name: "key create", fail: "CreateAPIKey", target: "/admin/keys/create", values: url.Values{"name": {"ci"}, "expires_at": {validAPIKeyExpiryFormValue()}, "current_password": {"current-password"}}, call: handler.HandleKeyCreate, want: "Failed+to+create"},
+		{name: "key create", fail: "CreateAPIKey", target: "/admin/keys/create", values: url.Values{"name": {"ci"}, "expires_in_days": {validAPIKeyExpiryFormValue()}, "current_password": {"current-password"}}, call: handler.HandleKeyCreate, want: "Failed+to+create"},
 		{name: "key revoke", fail: "RevokeAPIKey", target: "/admin/keys/revoke", values: url.Values{"key_id": {"1"}}, call: handler.HandleKeyRevoke, want: "Failed+to+revoke"},
 		{name: "key delete", fail: "DeleteAPIKey", target: "/admin/keys/delete", values: url.Values{"key_id": {"1"}}, call: handler.HandleKeyDelete, want: "Failed+to+delete"},
 		{name: "queue purge", fail: "PurgeQueue", target: "/admin/queue/purge", values: url.Values{}, call: handler.HandleQueuePurge, want: "err=Purge+failed"},
@@ -849,7 +849,7 @@ func TestAdminWriteHandlersRedirectOnAuditFailures(t *testing.T) {
 		want   string
 	}{
 		{name: "feed save", target: "/admin/feeds/save", values: url.Values{"feed_name": {"osv"}, "mode": {"self"}}, call: handler.HandleFeedConfigSave, want: "Failed+to+record+audit"},
-		{name: "key create", target: "/admin/keys/create", values: url.Values{"name": {"ci-new"}, "expires_at": {validAPIKeyExpiryFormValue()}, "current_password": {"current-password"}}, call: handler.HandleKeyCreate, want: "Failed+to+record+audit"},
+		{name: "key create", target: "/admin/keys/create", values: url.Values{"name": {"ci-new"}, "expires_in_days": {validAPIKeyExpiryFormValue()}, "current_password": {"current-password"}}, call: handler.HandleKeyCreate, want: "Failed+to+record+audit"},
 		{name: "key revoke", target: "/admin/keys/revoke", values: url.Values{"key_id": {"1"}}, call: handler.HandleKeyRevoke, want: "Failed+to+record+audit"},
 		{name: "queue priority", target: "/admin/queue/priority", values: url.Values{"job_id": {"1"}, "priority": {"1"}}, call: handler.HandleQueuePriorityUpdate, want: "Failed+to+record+audit"},
 		{name: "advisory create", target: "/admin/advisories/create", values: url.Values{"id": {"manual:two"}, "ecosystem": {"npm"}, "name": {"left-pad"}, "severity": {"HIGH"}, "summary": {"summary"}}, call: handler.HandleAdvisoryCreate, want: "Failed+to+record+audit"},
@@ -905,16 +905,16 @@ func TestAdminAdditionalValidationAndRenderBranches(t *testing.T) {
 		t.Fatalf("key create missing name Location = %q", got)
 	}
 
-	req, _ = authenticatedAdminFormRequest(t, sm, "/admin/keys/create", url.Values{"name": {"ci"}, "expires_at": {"yesterday"}})
+	req, _ = authenticatedAdminFormRequest(t, sm, "/admin/keys/create", url.Values{"name": {"ci"}, "expires_in_days": {"yesterday"}})
 	rec = httptest.NewRecorder()
 	handler.HandleKeyCreate(rec, req)
-	if got := rec.Header().Get("Location"); !strings.Contains(got, "invalid+expiration") {
+	if got := rec.Header().Get("Location"); !strings.Contains(got, "whole+number") {
 		t.Fatalf("key create invalid expiry Location = %q", got)
 	}
 
 	req, _ = authenticatedAdminFormRequest(t, sm, "/admin/keys/create", url.Values{
-		"name":       {strings.Repeat("a", maxAPIKeyNameLength+1)},
-		"expires_at": {validAPIKeyExpiryFormValue()},
+		"name":            {strings.Repeat("a", maxAPIKeyNameLength+1)},
+		"expires_in_days": {validAPIKeyExpiryFormValue()},
 	})
 	rec = httptest.NewRecorder()
 	handler.HandleKeyCreate(rec, req)

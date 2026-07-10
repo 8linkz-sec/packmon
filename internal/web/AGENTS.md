@@ -16,9 +16,14 @@ Read `AGENTS.md` (root) first.
   dependencies (a recent change vendored Tailwind/htmx locally and added a CSP
   scoped to self-hosted assets -- keep it that way).
 - After changing templates, Tailwind class strings, `tailwind.input.css`,
-  `tailwind.config.js`, `package.json`, `package-lock.json`, or htmx assets, run
+  `package.json`, `package-lock.json`, or htmx assets, run
   `npm ci --ignore-scripts && npm run build:web` from the repository root with
   Node.js 20+ and commit the resulting files under `internal/web/static`.
+- There is no `tailwind.config.js`. Design tokens and layout tokens live in the
+  `@theme` block of `tailwind.input.css`; dark mode overrides those variables
+  under `[data-pm-theme="dark"]`. Never write a raw palette class such as
+  `bg-gray-50` in a template or in Go -- `design_tokens_test.go` fails on it,
+  and it would stay light in dark mode.
 - The admin login form must stay Bitwarden/Vaultwarden compatible: clean HTML
   semantics, `autocomplete="username"` / `autocomplete="current-password"`, no
   JS tricks that block autofill, and a stable `/admin/login` URL.

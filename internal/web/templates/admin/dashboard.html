@@ -7,7 +7,11 @@
 
   {{template "admin-bootstrap-warning" .}}
 
-  <!-- DB stats -->
+  <!-- DB stats. Operator-only numbers (lifecycle, scans, feed health) live here,
+       not on the public dashboard. -->
+  {{if .ScanCountLoadError}}
+  {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .ScanCountLoadError}}
+  {{end}}
   {{if .DashboardStatsLoadError}}
   {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .DashboardStatsLoadError}}
   {{else}}
@@ -17,23 +21,25 @@
     {{template "dashboard-stat-card" dict "Kind" "malicious" "Stats" .Stats "SearchPath" "/search"}}
     {{template "dashboard-stat-card" dict "Kind" "supply-chain" "Stats" .Stats "SearchPath" "/search"}}
     {{template "dashboard-stat-card" dict "Kind" "lifecycle" "Stats" .Stats "SearchPath" "/search"}}
+    {{template "dashboard-stat-card" dict "Kind" "scans" "Stats" .Stats "Value" .TotalScans7d}}
+    {{template "dashboard-stat-card" dict "Kind" "feeds" "Stats" .Stats "Value" (printf "%d / %d" .FeedsHealthy .FeedsTotal)}}
   </div>
   {{end}}
 
   <!-- Feed status summary -->
   <div class="pm-surface">
-    <div class="px-5 py-3 border-b border-gray-200">
+    <div class="px-5 py-3 border-b border-border">
       <h2 class="text-lg font-semibold">Feed Sync Status</h2>
     </div>
     {{if .FeedStatusLoadError}}
-    <div class="px-5 py-4 border-b border-red-100">
+    <div class="px-5 py-4 border-b border-danger">
       {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .FeedStatusLoadError}}
     </div>
     {{else if .Feeds}}
     <div class="pm-scroll-region" tabindex="0" role="region" aria-label="Admin feed sync status table">
       <table class="min-w-full text-sm">
         <thead>
-          <tr class="text-start text-gray-500 border-b bg-gray-50">
+          <tr class="text-start text-muted border-b bg-bg">
             <th class="px-5 py-2">Feed</th>
             <th class="px-5 py-2">Status</th>
             <th class="px-5 py-2">Reason</th>
@@ -43,22 +49,22 @@
         </thead>
         <tbody>
           {{range .Feeds}}
-          <tr class="border-b border-gray-100 hover:bg-gray-50">
+          <tr class="border-b border-border hover:bg-surface-2">
             <td class="px-5 py-2 font-medium">{{.FeedName}}</td>
             <td class="px-5 py-2">
               {{template "feed-status-badge" .}}
             </td>
-            <td class="px-5 py-2 text-xs text-gray-600">
+            <td class="px-5 py-2 text-xs text-muted">
               {{template "feed-admin-rejection-details" .}}
               {{if .LastError}}
                 {{template "feed-error-details" dict "Feed" . "Max" 60}}
               {{else if .LastSyncStatus}}
                 <span>{{.LastSyncStatus}}</span>
               {{else}}
-                <span class="text-gray-600">-</span>
+                <span class="text-muted">-</span>
               {{end}}
             </td>
-            <td class="px-5 py-2 text-gray-500">
+            <td class="px-5 py-2 text-muted">
               {{template "feed-last-sync-cell" .}}
             </td>
             <td class="px-5 py-2 text-end">{{.EntriesTotal}}</td>
@@ -80,24 +86,24 @@
     {{else}}
     <div class="grid grid-cols-2 sm:grid-cols-5 gap-4 text-center">
       <div>
-        <div class="text-2xl font-semibold text-yellow-700">{{.QueueStats.Pending}}</div>
-        <div class="text-xs text-gray-500 uppercase">Pending</div>
+        <div class="text-2xl font-semibold text-warning-fg">{{.QueueStats.Pending}}</div>
+        <div class="text-xs text-muted uppercase">Pending</div>
       </div>
       <div>
-        <div class="text-2xl font-semibold text-blue-600">{{.QueueStats.Processing}}</div>
-        <div class="text-xs text-gray-500 uppercase">Processing</div>
+        <div class="text-2xl font-semibold text-accent">{{.QueueStats.Processing}}</div>
+        <div class="text-xs text-muted uppercase">Processing</div>
       </div>
       <div>
-        <div class="text-2xl font-semibold text-green-600">{{.QueueStats.Done}}</div>
-        <div class="text-xs text-gray-500 uppercase">Done</div>
+        <div class="text-2xl font-semibold text-success-fg">{{.QueueStats.Done}}</div>
+        <div class="text-xs text-muted uppercase">Done</div>
       </div>
       <div>
-        <div class="text-2xl font-semibold text-red-600">{{.QueueStats.Error}}</div>
-        <div class="text-xs text-gray-500 uppercase">Error</div>
+        <div class="text-2xl font-semibold text-danger">{{.QueueStats.Error}}</div>
+        <div class="text-xs text-muted uppercase">Error</div>
       </div>
       <div>
-        <div class="text-2xl font-semibold text-gray-600">{{.QueueStats.Paused}}</div>
-        <div class="text-xs text-gray-500 uppercase">Paused</div>
+        <div class="text-2xl font-semibold text-muted">{{.QueueStats.Paused}}</div>
+        <div class="text-xs text-muted uppercase">Paused</div>
       </div>
     </div>
     {{end}}

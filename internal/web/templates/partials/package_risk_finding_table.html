@@ -2,7 +2,7 @@
 <div class="pm-scroll-region" tabindex="0" role="region" aria-label="{{.AriaLabel}}">
   <table class="min-w-full text-sm package-finding-print-table">
     <thead>
-      <tr class="text-start text-gray-500 border-b bg-gray-50">
+      <tr class="text-start text-muted border-b bg-bg">
         <th class="px-5 py-2">{{t "package.table.severity"}}</th>
         <th class="px-5 py-2 whitespace-nowrap package-finding-print-cell">{{t "package.table.advisory"}}</th>
         <th class="px-5 py-2">{{t "package.table.version"}}</th>
@@ -19,15 +19,15 @@
           <span class="inline-block px-2 py-0.5 rounded text-xs font-medium border {{severityClass (printf "%s" .Severity)}}">{{.Severity}}</span>
         </td>
         <td class="px-5 py-2 font-mono text-sm align-top min-w-finding-id break-all package-finding-print-cell">
-          {{if .AdvisoryID}}<bdi dir="auto">{{.AdvisoryID}}</bdi>{{else}}<span class="text-gray-600">-</span>{{end}}
+          {{if .AdvisoryID}}<bdi dir="auto">{{.AdvisoryID}}</bdi>{{else}}<span class="text-muted">-</span>{{end}}
         </td>
         <td class="px-5 py-2 text-sm align-top whitespace-nowrap package-finding-print-cell">
-          {{if .Version}}<bdi dir="auto">{{.Version}}</bdi>{{else}}<span class="text-gray-600">-</span>{{end}}
+          {{if .Version}}<bdi dir="auto">{{.Version}}</bdi>{{else}}<span class="text-muted">-</span>{{end}}
         </td>
         <td class="px-5 py-2 text-xs align-top">{{template "risk-type-cell" .}}</td>
         <td class="px-5 py-2 align-top min-w-finding-title break-words package-finding-print-cell"><bdi dir="auto">{{.Title}}</bdi></td>
         <td class="px-5 py-2 text-xs align-top">{{template "finding-resources" .}}</td>
-        <td class="px-5 py-2 text-xs text-gray-500 align-top whitespace-nowrap package-finding-print-cell"><bdi dir="auto">{{.Source}}</bdi></td>
+        <td class="px-5 py-2 text-xs text-muted align-top whitespace-nowrap package-finding-print-cell"><bdi dir="auto">{{.Source}}</bdi></td>
       </tr>
       {{end}}
     </tbody>

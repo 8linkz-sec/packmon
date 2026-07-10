@@ -354,11 +354,11 @@ func buildAdminQueueStatCards(active string, stats *adminQueueStats) []adminQueu
 		status     string
 		countClass string
 	}{
-		{db.RefreshStatusPending, "text-yellow-700"},
-		{db.RefreshStatusProcessing, "text-blue-600"},
-		{db.RefreshStatusDone, "text-green-600"},
-		{db.RefreshStatusError, "text-red-600"},
-		{db.RefreshStatusPaused, "text-gray-600"},
+		{db.RefreshStatusPending, "text-warning-fg"},
+		{db.RefreshStatusProcessing, "text-accent"},
+		{db.RefreshStatusDone, "text-success-fg"},
+		{db.RefreshStatusError, "text-danger"},
+		{db.RefreshStatusPaused, "text-muted"},
 	}
 	out := make([]adminQueueStatCardView, 0, len(cards))
 	for _, card := range cards {

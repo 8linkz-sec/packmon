@@ -10,12 +10,13 @@ import (
 )
 
 // DashboardData is the view model for the dashboard template.
+//
+// Scan counts and lifecycle totals are deliberately absent: they are
+// operator-facing numbers and live on the admin dashboard.
 type DashboardData struct {
 	ActiveNav                      string
 	Stats                          *db.DashboardStatsResult
 	StatsLoadError                 string
-	TotalScans7d                   int
-	ScanCountLoadError             string
 	RecentVulnerabilities          []db.RecentVulnerability
 	RecentVulnerabilitiesLoadError string
 	LocalDBWarning                 string
@@ -47,7 +48,6 @@ func HandleDashboardWithOptions(store Store, renderer *Renderer, logger *slog.Lo
 		activeNav = "dashboard"
 	}
 	statsCache := newWebAggregateCache[*db.DashboardStatsResult](webAggregateCacheTTL)
-	dailyCache := newWebAggregateCache[[]db.DailyScanStats](webAggregateCacheTTL)
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Only handle exact root path; let other routes fall through.
@@ -61,14 +61,12 @@ func HandleDashboardWithOptions(store Store, renderer *Renderer, logger *slog.Lo
 		var (
 			stats                *db.DashboardStatsResult
 			statsLoadError       string
-			daily                []db.DailyScanStats
-			scanCountLoadError   string
 			recentVulns          []db.RecentVulnerability
 			recentVulnsLoadError string
 			widgetReads          sync.WaitGroup
 		)
 
-		widgetReads.Add(3)
+		widgetReads.Add(2)
 		go func() {
 			defer widgetReads.Done()
 			var err error
@@ -82,17 +80,6 @@ func HandleDashboardWithOptions(store Store, renderer *Renderer, logger *slog.Lo
 		go func() {
 			defer widgetReads.Done()
 			var err error
-			daily, err = dailyCache.get(ctx, func(ctx context.Context) ([]db.DailyScanStats, error) {
-				return store.CountScansByDay(ctx, 7)
-			})
-			if err != nil {
-				logger.Error("dashboard: failed to load daily stats", contextLogAttrs(ctx, "error", err)...)
-				scanCountLoadError = webMessage(webMessageKey("dashboard.error.scan_activity"))
-			}
-		}()
-		go func() {
-			defer widgetReads.Done()
-			var err error
 			recentVulns, err = store.ListRecentVulnerabilities(ctx, 7, 20)
 			if err != nil {
 				logger.Error("dashboard: failed to load recent vulnerabilities", contextLogAttrs(ctx, "error", err)...)
@@ -100,11 +87,6 @@ func HandleDashboardWithOptions(store Store, renderer *Renderer, logger *slog.Lo
 			}
 		}()
 		widgetReads.Wait()
-
-		totalScans := 0
-		for _, d := range daily {
-			totalScans += d.ScanCount
-		}
 
 		localDBWarning := ""
 		if options.LocalDBWarning != nil {
@@ -115,8 +97,6 @@ func HandleDashboardWithOptions(store Store, renderer *Renderer, logger *slog.Lo
 			ActiveNav:                      activeNav,
 			Stats:                          stats,
 			StatsLoadError:                 statsLoadError,
-			TotalScans7d:                   totalScans,
-			ScanCountLoadError:             scanCountLoadError,
 			RecentVulnerabilities:          recentVulns,
 			RecentVulnerabilitiesLoadError: recentVulnsLoadError,
 			LocalDBWarning:                 localDBWarning,

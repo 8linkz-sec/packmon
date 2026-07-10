@@ -67,11 +67,13 @@ func TestWebAssetAndOpenAPILintScriptsArePinned(t *testing.T) {
 	}
 
 	scriptMarkers := map[string][]string{
+		// tailwind.config.js was removed: Tailwind v4 keeps design tokens in
+		// tailwind.input.css (@theme). theme-init.js took its place in the lint set.
 		"lint:js": {
 			"node --check ./scripts/build-web-assets.mjs",
 			"node --check ./internal/web/static/auto-refresh.js",
-			"node --check ./tailwind.config.js",
-			"eslint ./scripts/build-web-assets.mjs ./internal/web/static/auto-refresh.js ./tailwind.config.js",
+			"node --check ./internal/web/static/theme-init.js",
+			"eslint ./scripts/build-web-assets.mjs ./internal/web/static/auto-refresh.js ./internal/web/static/theme-init.js",
 		},
 		"lint:css": {
 			"stylelint",

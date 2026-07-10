@@ -477,7 +477,6 @@ func TestAdminKeysExpiryHelpIsProgrammaticallyAssociated(t *testing.T) {
 	handler, sm := newAdminTestHandler(t, store, testAdminConfig())
 	req := newAuthenticatedAdminRequest(t, sm, http.MethodGet, "/admin/keys")
 	rec := httptest.NewRecorder()
-	renderedAt := time.Now().UTC()
 
 	handler.HandleAdminKeys(rec, req)
 
@@ -486,50 +485,43 @@ func TestAdminKeysExpiryHelpIsProgrammaticallyAssociated(t *testing.T) {
 	}
 
 	body := rec.Body.String()
-	if !strings.Contains(body, `id="key-expires-at-help"`) ||
-		!strings.Contains(body, "Use RFC3339 UTC") ||
-		!strings.Contains(body, "Maximum lifetime is 90 days") {
-		t.Fatalf("GET /admin/keys body missing expiry help text\nbody=%s", body)
-	}
-	idStart := strings.Index(body, `id="key-expires-at"`)
-	if idStart < 0 {
-		t.Fatalf("GET /admin/keys body missing expiry input\nbody=%s", body)
-	}
-	start := strings.LastIndex(body[:idStart], "<input")
-	if start < 0 {
-		t.Fatalf("GET /admin/keys expiry id is not inside an input\nbody=%s", body)
-	}
-	inputEnd := strings.Index(body[start:], ">")
-	if inputEnd < 0 {
-		t.Fatalf("GET /admin/keys expiry input is not closed\nbody=%s", body)
-	}
-	input := body[start : start+inputEnd]
-	if !strings.Contains(input, `aria-describedby="key-expires-at-help"`) {
-		t.Fatalf("GET /admin/keys expiry input = %s, want help association", input)
-	}
 	for _, want := range []string{
-		`type="text"`,
+		`id="key-expires-in-help"`,
+		"Maximum 365 days",
+		`id="key-expires-custom-help"`,
 	} {
-		if !strings.Contains(input, want) {
-			t.Fatalf("GET /admin/keys expiry input = %s, want %s", input, want)
+		if !strings.Contains(body, want) {
+			t.Fatalf("GET /admin/keys body missing expiry help %q\nbody=%s", want, body)
 		}
 	}
-	example := htmlAttributeValue(t, input, "placeholder")
-	if !strings.HasSuffix(example, "Z") {
-		t.Fatalf("GET /admin/keys expiry placeholder = %q, want RFC3339 UTC ending in Z", example)
+
+	selectIDStart := strings.Index(body, `id="key-expires-in"`)
+	if selectIDStart < 0 {
+		t.Fatalf("GET /admin/keys body missing expiry select\nbody=%s", body)
 	}
-	exampleAt, err := time.Parse(time.RFC3339, example)
-	if err != nil {
-		t.Fatalf("GET /admin/keys expiry placeholder = %q, want RFC3339 UTC: %v", example, err)
+	selectStart := strings.LastIndex(body[:selectIDStart], "<select")
+	if selectStart < 0 {
+		t.Fatalf("GET /admin/keys expiry id is not inside a select\nbody=%s", body)
 	}
-	if !exampleAt.After(renderedAt) {
-		t.Fatalf("GET /admin/keys expiry placeholder = %q, want future example after %s", example, renderedAt.Format(time.RFC3339))
+	selectTag := body[selectStart : selectStart+strings.Index(body[selectStart:], ">")]
+	if !strings.Contains(selectTag, `aria-describedby="key-expires-in-help"`) {
+		t.Fatalf("GET /admin/keys expiry select = %s, want help association", selectTag)
 	}
-	if !strings.Contains(body, "for example "+example) {
-		t.Fatalf("GET /admin/keys expiry help does not reuse placeholder example %q\nbody=%s", example, body)
+	if !strings.Contains(selectTag, `name="expires_in_days"`) {
+		t.Fatalf("GET /admin/keys expiry select = %s, want name=expires_in_days", selectTag)
 	}
-	if strings.Contains(input, `type="datetime-local"`) {
-		t.Fatalf("GET /admin/keys expiry input still uses datetime-local: %s", input)
+
+	customIDStart := strings.Index(body, `id="key-expires-custom"`)
+	if customIDStart < 0 {
+		t.Fatalf("GET /admin/keys body missing custom-days input\nbody=%s", body)
+	}
+	customStart := strings.LastIndex(body[:customIDStart], "<input")
+	customTag := body[customStart : customStart+strings.Index(body[customStart:], ">")]
+	if !strings.Contains(customTag, `aria-describedby="key-expires-custom-help"`) {
+		t.Fatalf("GET /admin/keys custom input = %s, want help association", customTag)
+	}
+	if !strings.Contains(customTag, `type="number"`) {
+		t.Fatalf("GET /admin/keys custom input = %s, want type=number", customTag)
 	}
 
 	nameIDStart := strings.Index(body, `id="key-name"`)
@@ -862,7 +854,7 @@ func TestAdminDashboardHeadingPrecedesBootstrapWarning(t *testing.T) {
 	}
 
 	adminHeading := `<h1 class="text-2xl font-bold">Admin Dashboard</h1>`
-	bootstrapHeading := `<p class="text-sm font-semibold text-amber-950">Bootstrap password still active</p>`
+	bootstrapHeading := `<p class="text-sm font-semibold text-warning-fg">Bootstrap password still active</p>`
 	adminHeadingIndex := strings.Index(body, adminHeading)
 	bootstrapHeadingIndex := strings.Index(body, bootstrapHeading)
 	if adminHeadingIndex < 0 || bootstrapHeadingIndex < 0 {
@@ -1004,10 +996,9 @@ func TestHandleKeyCreateStoresExpiration(t *testing.T) {
 	store := newNoopStore()
 	setNoopAdminPassword(t, store, "current-password", false)
 	handler, sm := newAdminTestHandler(t, store, testAdminConfig())
-	expiresAt := testAPIKeyExpiryFormValue()
 	req := newAuthenticatedAdminFormRequest(t, sm, "/admin/keys/create", url.Values{
 		"name":             {"ci-short-lived"},
-		"expires_at":       {expiresAt},
+		"expires_in_days":  {testAPIKeyExpiryFormValue()},
 		"current_password": {"current-password"},
 	})
 	rec := httptest.NewRecorder()
@@ -1027,8 +1018,11 @@ func TestHandleKeyCreateStoresExpiration(t *testing.T) {
 	if keys[0].ExpiresAt == nil {
 		t.Fatal("ExpiresAt = nil, want parsed expiration")
 	}
-	if got := keys[0].ExpiresAt.UTC().Format(time.RFC3339); got != expiresAt {
-		t.Fatalf("ExpiresAt = %q, want %s", got, expiresAt)
+	// testAPIKeyExpiryFormValue() selects "30" days; the stored expiry must be
+	// ~30 days from now (allow a minute of slack for wall-clock drift).
+	want := time.Now().UTC().Add(30 * 24 * time.Hour)
+	if diff := keys[0].ExpiresAt.UTC().Sub(want); diff > time.Minute || diff < -time.Minute {
+		t.Fatalf("ExpiresAt = %v, want ~%v (30 days out)", keys[0].ExpiresAt.UTC(), want)
 	}
 }
 
@@ -1038,7 +1032,7 @@ func TestAdminKeysPageRendersNewKeyAsKeyboardCopyableControl(t *testing.T) {
 	handler, sm := newAdminTestHandler(t, store, testAdminConfig())
 	createReq := newAuthenticatedAdminFormRequest(t, sm, "/admin/keys/create", url.Values{
 		"name":             {"ci"},
-		"expires_at":       {testAPIKeyExpiryFormValue()},
+		"expires_in_days":  {testAPIKeyExpiryFormValue()},
 		"current_password": {"current-password"},
 	})
 	createRec := httptest.NewRecorder()
@@ -1499,7 +1493,7 @@ func TestAdminAuditAndQueuePaginationUseNavigationLandmarks(t *testing.T) {
 			t.Fatalf("GET /admin/audit status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 		}
 		body := rec.Body.String()
-		wantNav := `<nav class="flex flex-wrap items-center justify-between gap-3 px-5 py-3 text-xs text-gray-600 border-b border-gray-100" aria-label="Audit log pages">`
+		wantNav := `<nav class="flex flex-wrap items-center justify-between gap-3 px-5 py-3 text-xs text-muted border-b border-border" aria-label="Audit log pages">`
 		if !strings.Contains(body, wantNav) {
 			t.Fatalf("GET /admin/audit body missing pagination landmark fragment %q\nbody=%s", wantNav, body)
 		}
@@ -1531,7 +1525,7 @@ func TestAdminAuditAndQueuePaginationUseNavigationLandmarks(t *testing.T) {
 			t.Fatalf("GET /admin/queue?status=pending status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 		}
 		body := rec.Body.String()
-		wantNav := `<nav class="flex flex-wrap items-center justify-between gap-3 px-5 py-3 text-xs text-gray-600 border-b border-gray-100" aria-label="Queue job pages">`
+		wantNav := `<nav class="flex flex-wrap items-center justify-between gap-3 px-5 py-3 text-xs text-muted border-b border-border" aria-label="Queue job pages">`
 		if !strings.Contains(body, wantNav) {
 			t.Fatalf("GET /admin/queue?status=pending body missing pagination landmark fragment %q\nbody=%s", wantNav, body)
 		}
@@ -1712,7 +1706,7 @@ func TestAdminQueueBulkActionsShowCountsAndDisableEmptyDestructiveActions(t *tes
 		"Clear pending queue jobs",
 		"Clear paused queue jobs",
 	} {
-		pattern := regexp.MustCompile(`(?s)<summary\b[^>]*aria-label="` + regexp.QuoteMeta(ariaLabel) + `"[^>]*class="[^"]*\bmin-h-11\b[^"]*\bbg-red-600\b[^"]*"`)
+		pattern := regexp.MustCompile(`(?s)<summary\b[^>]*aria-label="` + regexp.QuoteMeta(ariaLabel) + `"[^>]*class="[^"]*\bmin-h-11\b[^"]*\bbg-danger\b[^"]*"`)
 		if !pattern.MatchString(body) {
 			t.Fatalf("GET /admin/queue body missing destructive summary for %q\nbody=%s", ariaLabel, body)
 		}
@@ -1881,7 +1875,7 @@ func TestAdminQueueDestructiveSummariesExposePersistentStateStyling(t *testing.T
 			for _, want := range []string{
 				`data-admin-expand-affordance`,
 				`shadow-sm`,
-				`active:bg-red-800`,
+				`active:bg-danger`,
 				`pm-focus-ring`,
 				`pm-focus-ring-danger`,
 			} {
@@ -2184,8 +2178,8 @@ func TestHandleKeyCreateRejectsPastExpiration(t *testing.T) {
 	store := newNoopStore()
 	handler, sm := newAdminTestHandler(t, store, testAdminConfig())
 	req := newAuthenticatedAdminFormRequest(t, sm, "/admin/keys/create", url.Values{
-		"name":       {"ci-expired"},
-		"expires_at": {"2000-01-01T00:00:00Z"},
+		"name":            {"ci-expired"},
+		"expires_in_days": {"0"},
 	})
 	rec := httptest.NewRecorder()
 
@@ -2201,7 +2195,7 @@ func TestHandleKeyCreateRejectsPastExpiration(t *testing.T) {
 	if len(keys) != 0 {
 		t.Fatalf("ListAPIKeys() len = %d, want 0 after invalid expiration", len(keys))
 	}
-	if location := rec.Header().Get("Location"); !strings.Contains(location, "expiration+must+be+in+the+future") {
+	if location := rec.Header().Get("Location"); !strings.Contains(location, "in+the+future") {
 		t.Fatalf("Location = %q, want expiration error", location)
 	}
 }
@@ -3085,7 +3079,7 @@ func auditContainsAction(entries []db.AdminAuditLogEntry, action string) bool {
 }
 
 func testAPIKeyExpiryFormValue() string {
-	return time.Now().UTC().Add(24 * time.Hour).Truncate(time.Second).Format(time.RFC3339)
+	return "30"
 }
 
 func setNoopAdminPassword(t *testing.T, store *noopStore, password string, isBootstrap bool) {

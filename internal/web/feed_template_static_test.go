@@ -87,7 +87,7 @@ func TestAdminFeedRuntimeUsesResponsiveScannableLayouts(t *testing.T) {
 	runtime := body[runtimeStart:runtimeEnd]
 
 	if !strings.Contains(runtime, `data-admin-mobile-layout="feed-runtime"`) ||
-		!strings.Contains(runtime, `class="divide-y divide-gray-100 md:hidden"`) {
+		!strings.Contains(runtime, `class="divide-y divide-border md:hidden"`) {
 		t.Fatalf("admin feed runtime missing mobile card layout marker:\n%s", runtime)
 	}
 
@@ -128,11 +128,11 @@ func TestAdminFeedTemplateUsesSemanticBadgeViewModels(t *testing.T) {
 
 	body := readTextFile(t, "templates", "admin", "feeds.html")
 	for _, forbidden := range []string{
-		"bg-gray-100 text-gray-700 px-2 py-0.5 rounded",
-		"bg-gray-100 text-gray-600 px-2 py-0.5 rounded",
-		"bg-green-50 text-green-700 px-2 py-0.5 rounded",
-		"bg-yellow-100 text-yellow-800 px-2 py-0.5 rounded",
-		"bg-blue-50 text-blue-700 px-2 py-0.5 rounded",
+		"bg-surface-2 text-fg px-2 py-0.5 rounded",
+		"bg-surface-2 text-muted px-2 py-0.5 rounded",
+		"bg-success-bg text-success-fg px-2 py-0.5 rounded",
+		"bg-warning-bg text-yellow-800 px-2 py-0.5 rounded",
+		"bg-info-bg text-accent px-2 py-0.5 rounded",
 	} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("admin feeds template still hardcodes badge color bundle %q", forbidden)

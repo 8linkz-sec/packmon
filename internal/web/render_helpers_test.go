@@ -262,8 +262,8 @@ func TestRemainingPublicTemplatesUseMessageKeys(t *testing.T) {
 			path: "templates/dashboard.html",
 			want: []string{
 				`{{t "page.dashboard.title"}}`,
-				`{{t "dashboard.heading"}}`,
-				`{{t "dashboard.total_scans_7d"}}`,
+				`{{t "dashboard.table.version"}}`,
+				`{{t "dashboard.table.ecosystem"}}`,
 				`{{t "dashboard.recent_vulnerabilities.heading"}}`,
 				`{{t "dashboard.recent_vulnerabilities.empty"}}`,
 			},
@@ -425,7 +425,6 @@ func TestPublicHandlersUseMessageCatalogForAlertText(t *testing.T) {
 			path: "dashboard.go",
 			want: []string{
 				`webMessage(webMessageKey("dashboard.error.stats"))`,
-				`webMessage(webMessageKey("dashboard.error.scan_activity"))`,
 				`webMessage(webMessageKey("dashboard.error.recent_vulnerabilities"))`,
 			},
 		},
@@ -523,7 +522,7 @@ func TestSharedLayoutSupportsExplicitDirectionAndDynamicViewport(t *testing.T) {
 
 	layout := readTextFile(t, "templates", "layout.html")
 	for _, want := range []string{
-		`<html lang="en" dir="{{layoutDir .}}">`,
+		`<html lang="en" dir="{{layoutDir .}}" data-pm-theme="system">`,
 		`min-h-dvh`,
 	} {
 		if !strings.Contains(layout, want) {
@@ -540,7 +539,7 @@ func TestSharedLayoutSupportsExplicitDirectionAndDynamicViewport(t *testing.T) {
 	if err := renderer.Render(&out, "not_found.html", map[string]any{"LayoutDir": "rtl"}); err != nil {
 		t.Fatalf("Render(rtl) error = %v", err)
 	}
-	if body := out.String(); !strings.Contains(body, `<html lang="en" dir="rtl">`) {
+	if body := out.String(); !strings.Contains(body, `<html lang="en" dir="rtl" data-pm-theme="system">`) {
 		t.Fatalf("rendered layout missing explicit rtl dir:\n%s", body)
 	}
 
@@ -548,7 +547,7 @@ func TestSharedLayoutSupportsExplicitDirectionAndDynamicViewport(t *testing.T) {
 	if err := renderer.Render(&out, "not_found.html", nil); err != nil {
 		t.Fatalf("Render(default) error = %v", err)
 	}
-	if body := out.String(); !strings.Contains(body, `<html lang="en" dir="ltr">`) {
+	if body := out.String(); !strings.Contains(body, `<html lang="en" dir="ltr" data-pm-theme="system">`) {
 		t.Fatalf("rendered layout missing default ltr dir:\n%s", body)
 	}
 }

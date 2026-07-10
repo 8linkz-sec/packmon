@@ -5,8 +5,8 @@
       <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
       <button
         type="submit"
-        class="inline-flex min-h-11 items-center rounded-md px-3 py-2 text-sm font-medium text-gray-600 hover:bg-gray-100
-          hover:text-gray-900 pm-focus-ring"
+        class="inline-flex min-h-11 items-center rounded-md px-3 py-2 text-sm font-medium text-muted hover:bg-surface-2
+          hover:text-fg pm-focus-ring"
       >Log out</button>
     </form>
   </div>
@@ -14,7 +14,7 @@
 {{end}}
 
 {{define "admin-nav"}}
-  <div class="border-b border-gray-200">
+  <div class="border-b border-border">
     <nav aria-label="Admin" class="flex flex-wrap gap-2 text-sm">
       {{template "admin-nav-link" dict "Href" "/admin/" "Section" "overview" "Active" .Active "Label" "Overview"}}
       {{template "admin-nav-link" dict "Href" "/admin/feeds" "Section" "feeds" "Active" .Active "Label" "Feeds"}}
@@ -33,6 +33,6 @@
         href="{{.Href}}"
         {{if eq .Section .Active}}aria-current="page"{{end}}
         class="shrink-0 inline-flex min-h-11 items-center rounded-md px-3 py-2 {{if eq .Section .Active}}
-          border-b-2 border-blue-500 font-medium text-blue-600{{else}}text-gray-600 hover:bg-gray-50 hover:text-gray-900{{end}}"
+          border-b-2 border-accent font-medium text-accent{{else}}text-muted hover:bg-surface-2 hover:text-fg{{end}}"
       >{{.Label}}</a>
 {{end}}

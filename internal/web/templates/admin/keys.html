@@ -24,7 +24,7 @@
         spellcheck="false"
         data-select-on-focus
         aria-label="{{t "admin.keys.new_key.aria"}}"
-        class="min-w-0 flex-1 min-h-11 bg-white border border-blue-500 rounded px-3 py-2 font-mono text-sm text-blue-950 outline-none pm-focus-ring"
+        class="min-w-0 flex-1 min-h-11 bg-surface border border-accent rounded px-3 py-2 font-mono text-sm text-info-fg outline-none pm-focus-ring"
       >
       <button
         type="button"
@@ -32,8 +32,8 @@
         aria-describedby="new-api-key-copy-status"
         data-copy-target="#new-api-key"
         data-copy-status="#new-api-key-copy-status"
-        class="inline-flex min-h-11 items-center justify-center bg-blue-700 text-white px-3 py-2 rounded text-sm
-          font-medium hover:bg-blue-800 active:bg-blue-900 pm-focus-ring"
+        class="inline-flex min-h-11 items-center justify-center bg-accent text-accent-contrast px-3 py-2 rounded text-sm
+          font-medium hover:bg-accent-hover active:bg-accent-hover pm-focus-ring"
       >
         {{t "admin.keys.copy"}}
       </button>
@@ -47,11 +47,11 @@
   {{if not .BootstrapWarning}}
   <div class="no-print pm-surface p-5" data-no-print>
     <h2 class="text-lg font-semibold mb-3">{{t "admin.keys.create.heading"}}</h2>
-    <form action="/admin/keys/create" method="POST" class="grid gap-3 md:grid-cols-2 xl:grid-cols-4 xl:items-end" data-submit-lock data-submit-lock-label="{{t "admin.keys.create.saving"}}">
+    <form action="/admin/keys/create" method="POST" class="grid gap-3 md:grid-cols-2 xl:grid-cols-3" data-submit-lock data-submit-lock-label="{{t "admin.keys.create.saving"}}">
       <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
       <input type="hidden" name="create_nonce" value="{{.APIKeyCreateNonce}}">
       <div>
-        <label for="key-name" class="block text-sm font-medium text-gray-700 mb-1">{{t "admin.keys.create.name_label"}}</label>
+        <label for="key-name" class="block text-sm font-medium text-fg mb-1">{{t "admin.keys.create.name_label"}}</label>
         <input
           type="text"
           name="name"
@@ -64,27 +64,43 @@
           placeholder="{{t "admin.keys.create.name_placeholder"}}"
           class="pm-form-control"
         >
-        <p id="key-name-help" class="mt-1 text-xs text-gray-500">{{t "admin.keys.create.name_help" .MaxAPIKeyNameLength}}</p>
+        <p id="key-name-help" class="mt-1 text-xs text-muted">{{t "admin.keys.create.name_help" .MaxAPIKeyNameLength}}</p>
       </div>
       <div>
-        <label for="key-expires-at" class="block text-sm font-medium text-gray-700 mb-1">{{t "admin.keys.create.expires_label"}}</label>
-        <input
-          type="text"
-          name="expires_at"
-          id="key-expires-at"
-          required
-          maxlength="20"
-          pattern="\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z"
-          placeholder="{{.APIKeyExpiryExample}}"
-          title="{{t "admin.keys.create.expires_title" .APIKeyExpiryExample}}"
-          value="{{.APIKeyCreateExpiresAt}}"
-          aria-describedby="key-expires-at-help"
+        <label for="key-expires-in" class="block text-sm font-medium text-fg mb-1">{{t "admin.keys.create.expires_label"}}</label>
+        <select
+          name="expires_in_days"
+          id="key-expires-in"
+          aria-describedby="key-expires-in-help"
+          data-reveal-target="#key-expires-custom-wrap"
+          data-reveal-value="custom"
           class="pm-form-control"
         >
-        <p id="key-expires-at-help" class="mt-1 text-xs text-gray-500">{{t "admin.keys.create.expires_help" .APIKeyExpiryExample}}</p>
+          {{range .APIKeyExpiryPresets}}
+          <option value="{{.Days}}"{{if eq .Days $.APIKeySelectedDays}} selected{{end}}>{{.Label}}</option>
+          {{end}}
+          <option value="custom"{{if .APIKeyCustomSelected}} selected{{end}}>{{t "admin.keys.create.expires_custom_option"}}</option>
+        </select>
+        <div id="key-expires-custom-wrap" class="mt-2{{if not .APIKeyCustomSelected}} hidden{{end}}">
+          <label for="key-expires-custom" class="block text-sm font-medium text-fg mb-1">{{t "admin.keys.create.expires_custom_label"}}</label>
+          <input
+            type="number"
+            name="expires_custom_days"
+            id="key-expires-custom"
+            min="1"
+            max="{{.APIKeyExpiryMaxDays}}"
+            step="1"
+            inputmode="numeric"
+            value="{{.APIKeyCustomDaysValue}}"
+            aria-describedby="key-expires-custom-help"
+            class="pm-form-control"
+          >
+          <p id="key-expires-custom-help" class="mt-1 text-xs text-muted">{{t "admin.keys.create.expires_custom_help" .APIKeyExpiryMaxDays}}</p>
+        </div>
+        <p id="key-expires-in-help" class="mt-1 text-xs text-muted">{{t "admin.keys.create.expires_help" .APIKeyExpiryMaxDays}}</p>
       </div>
       <div>
-        <label for="key-current-password" class="block text-sm font-medium text-gray-700 mb-1">{{t "admin.keys.create.current_password_label"}}</label>
+        <label for="key-current-password" class="block text-sm font-medium text-fg mb-1">{{t "admin.keys.create.current_password_label"}}</label>
         <input
           type="password"
           name="current_password"
@@ -94,72 +110,74 @@
           aria-describedby="key-current-password-help"
           class="pm-form-control"
         >
-        <p id="key-current-password-help" class="mt-1 text-xs text-gray-500">{{t "admin.keys.create.current_password_help"}}</p>
+        <p id="key-current-password-help" class="mt-1 text-xs text-muted">{{t "admin.keys.create.current_password_help"}}</p>
       </div>
-      <button
-        type="submit"
-        data-submit-lock-button
-        class="{{adminPrimaryButtonClass}}"
-      >
-        {{t "admin.keys.create.submit"}}
-      </button>
+      <div class="md:col-span-2 xl:col-span-3">
+        <button
+          type="submit"
+          data-submit-lock-button
+          class="{{adminPrimaryButtonClass}}"
+        >
+          {{t "admin.keys.create.submit"}}
+        </button>
+      </div>
     </form>
   </div>
   {{end}}
 
   <!-- Existing keys -->
   <div class="pm-surface">
-    <div class="px-5 py-3 border-b border-gray-200">
+    <div class="px-5 py-3 border-b border-border">
       <h2 class="text-lg font-semibold">Existing Keys</h2>
     </div>
     {{if .KeysLoadError}}
-    <div class="px-5 py-4 border-b border-red-100">
+    <div class="px-5 py-4 border-b border-danger">
       {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .KeysLoadError}}
     </div>
     {{else if .Keys}}
-    <nav class="flex flex-wrap items-center justify-between gap-3 px-5 py-3 text-xs text-gray-600 border-b border-gray-100" aria-label="API key pages">
+    <nav class="flex flex-wrap items-center justify-between gap-3 px-5 py-3 text-xs text-muted border-b border-border" aria-label="API key pages">
       <span>Showing API keys {{.KeyPageStart}}-{{.KeyPageEnd}}</span>
       <div class="flex flex-wrap items-center gap-2">
         {{if .KeyHasPrevious}}
-        <a href="/admin/keys?offset={{.KeyPreviousOffset}}" class="inline-flex min-h-11 items-center justify-center rounded-md border border-gray-500 px-3 py-2 font-medium text-gray-700 hover:bg-gray-50">Newer</a>
+        <a href="/admin/keys?offset={{.KeyPreviousOffset}}" class="inline-flex min-h-11 items-center justify-center rounded-md border border-muted px-3 py-2 font-medium text-fg hover:bg-surface-2">Newer</a>
         {{end}}
         {{if .KeyHasNext}}
-        <a href="/admin/keys?offset={{.KeyNextOffset}}" class="inline-flex min-h-11 items-center justify-center rounded-md border border-gray-500 px-3 py-2 font-medium text-gray-700 hover:bg-gray-50">Older</a>
+        <a href="/admin/keys?offset={{.KeyNextOffset}}" class="inline-flex min-h-11 items-center justify-center rounded-md border border-muted px-3 py-2 font-medium text-fg hover:bg-surface-2">Older</a>
         {{end}}
       </div>
     </nav>
-    <div class="md:hidden divide-y divide-gray-100" data-admin-mobile-actions="keys">
+    <div class="md:hidden divide-y divide-border" data-admin-mobile-actions="keys">
       {{range .Keys}}
-      <div class="p-5 space-y-4 {{if .DeletedAt}}bg-gray-50{{else if .RevokedAt}}bg-red-50{{end}}">
+      <div class="p-5 space-y-4 {{if .DeletedAt}}bg-bg{{else if .RevokedAt}}bg-danger-bg{{end}}">
         <div class="flex items-start justify-between gap-3">
           <div class="min-w-0">
             <div class="font-medium break-words"><bdi dir="auto">{{.Name}}</bdi></div>
-            <div class="mt-1 font-mono text-xs text-gray-500">Key {{.ID}}</div>
+            <div class="mt-1 font-mono text-xs text-muted">Key {{.ID}}</div>
           </div>
           <div class="shrink-0">{{template "admin-key-status-badge" .}}</div>
         </div>
         <dl class="grid grid-cols-1 gap-y-2 text-sm">
           <div class="flex justify-between gap-3">
-            <dt class="text-gray-500">Created</dt>
-            <dd class="text-end text-gray-700"><time data-local-time="relative" datetime="{{formatTimeISO .CreatedAt}}" aria-label="{{formatTime .CreatedAt}}">{{formatTimeAgo .CreatedAt}}</time></dd>
+            <dt class="text-muted">Created</dt>
+            <dd class="text-end text-fg"><time data-local-time="relative" datetime="{{formatTimeISO .CreatedAt}}" aria-label="{{formatTime .CreatedAt}}">{{formatTimeAgo .CreatedAt}}</time></dd>
           </div>
           <div class="flex justify-between gap-3">
-            <dt class="text-gray-500">Last Used</dt>
-            <dd class="text-end text-gray-700">
+            <dt class="text-muted">Last Used</dt>
+            <dd class="text-end text-fg">
               {{if .LastUsedAt}}
                 <time data-local-time="relative" datetime="{{formatTimeISO .DerefLastUsedAt}}" aria-label="{{formatTime .DerefLastUsedAt}}">{{formatTimeAgo .DerefLastUsedAt}}</time>
               {{else}}
-                <span class="text-gray-600">never</span>
+                <span class="text-muted">never</span>
               {{end}}
             </dd>
           </div>
           <div class="flex justify-between gap-3">
-            <dt class="text-gray-500">Expires</dt>
-            <dd class="text-end text-gray-700">
+            <dt class="text-muted">Expires</dt>
+            <dd class="text-end text-fg">
               {{if .ExpiresAt}}
                 <time data-local-time="relative" datetime="{{formatTimeISO .DerefExpiresAt}}" aria-label="{{formatTime .DerefExpiresAt}}">{{formatTimeAgo .DerefExpiresAt}}</time>
               {{else}}
-                <span class="text-gray-600">never</span>
+                <span class="text-muted">never</span>
               {{end}}
             </dd>
           </div>
@@ -181,7 +199,7 @@
     >
       <table class="min-w-full text-sm">
         <thead>
-          <tr class="text-start text-gray-500 border-b bg-gray-50">
+          <tr class="text-start text-muted border-b bg-bg">
             <th class="px-5 py-2">ID</th>
             <th class="px-5 py-2">Name</th>
             <th class="px-5 py-2">Created</th>
@@ -193,22 +211,22 @@
         </thead>
         <tbody>
           {{range .Keys}}
-          <tr class="border-b border-gray-100 hover:bg-gray-50 {{if .DeletedAt}}bg-gray-50{{else if .RevokedAt}}bg-red-50{{end}}">
+          <tr class="border-b border-border hover:bg-surface-2 {{if .DeletedAt}}bg-bg{{else if .RevokedAt}}bg-danger-bg{{end}}">
             <td class="px-5 py-2 font-mono text-xs">{{.ID}}</td>
             <td class="px-5 py-2 font-medium"><bdi dir="auto">{{.Name}}</bdi></td>
-            <td class="px-5 py-2 text-gray-500"><time data-local-time="relative" datetime="{{formatTimeISO .CreatedAt}}" aria-label="{{formatTime .CreatedAt}}">{{formatTimeAgo .CreatedAt}}</time></td>
-            <td class="px-5 py-2 text-gray-500">
+            <td class="px-5 py-2 text-muted"><time data-local-time="relative" datetime="{{formatTimeISO .CreatedAt}}" aria-label="{{formatTime .CreatedAt}}">{{formatTimeAgo .CreatedAt}}</time></td>
+            <td class="px-5 py-2 text-muted">
               {{if .LastUsedAt}}
                 <time data-local-time="relative" datetime="{{formatTimeISO .DerefLastUsedAt}}" aria-label="{{formatTime .DerefLastUsedAt}}">{{formatTimeAgo .DerefLastUsedAt}}</time>
               {{else}}
-                <span class="text-gray-600">never</span>
+                <span class="text-muted">never</span>
               {{end}}
             </td>
-            <td class="px-5 py-2 text-gray-500">
+            <td class="px-5 py-2 text-muted">
               {{if .ExpiresAt}}
                 <time data-local-time="relative" datetime="{{formatTimeISO .DerefExpiresAt}}" aria-label="{{formatTime .DerefExpiresAt}}">{{formatTimeAgo .DerefExpiresAt}}</time>
               {{else}}
-                <span class="text-gray-600">never</span>
+                <span class="text-muted">never</span>
               {{end}}
             </td>
             <td class="px-5 py-2">
@@ -242,20 +260,20 @@
 
 {{define "admin-key-actions"}}
 {{if .Key.DeletedAt}}
-<span class="inline-flex min-h-11 items-center rounded-md px-3 py-2 text-sm font-medium text-gray-600">No actions</span>
+<span class="inline-flex min-h-11 items-center rounded-md px-3 py-2 text-sm font-medium text-muted">No actions</span>
 {{else if not .Key.RevokedAt}}
 <details class="no-print w-full sm:w-auto" data-no-print>
   <summary
     aria-label="{{t "admin.keys.action.revoke_aria" .Key.Name .Key.ID}}"
     class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-md px-3 py-2 text-sm font-medium
-      text-red-700 hover:bg-red-50 active:bg-red-100 pm-focus-ring pm-focus-ring-danger"
+      text-danger-fg hover:bg-danger-bg active:bg-danger-bg pm-focus-ring pm-focus-ring-danger"
   >
     <span>{{t "admin.keys.action.revoke"}}</span>
-    <span aria-hidden="true" data-admin-expand-affordance class="rounded border border-red-300 px-1.5 py-0.5 text-xs font-semibold leading-none text-red-800">{{t "admin.keys.action.review"}}</span>
+    <span aria-hidden="true" data-admin-expand-affordance class="rounded border border-danger px-1.5 py-0.5 text-xs font-semibold leading-none text-danger-fg">{{t "admin.keys.action.review"}}</span>
   </summary>
-  <div class="mt-2 rounded-md border border-red-200 bg-white p-3 text-sm text-red-900 shadow-sm">
+  <div class="mt-2 rounded-md border border-danger bg-surface p-3 text-sm text-danger-fg shadow-sm">
     <p class="mb-2 whitespace-normal">{{t "admin.keys.action.revoke_question_prefix"}} <bdi dir="auto">{{.Key.Name}}</bdi> {{t "admin.keys.action.revoke_question_suffix" .Key.ID}}</p>
-    <p class="mb-2 text-xs leading-5 text-red-800">{{t "admin.keys.action.revoke_impact"}}</p>
+    <p class="mb-2 text-xs leading-5 text-danger-fg">{{t "admin.keys.action.revoke_impact"}}</p>
     <form action="/admin/keys/revoke" method="POST" class="inline-flex" data-submit-lock data-submit-lock-label="{{t "admin.keys.action.revoking"}}">
       <input type="hidden" name="_csrf" value="{{.Root.CSRFToken}}">
       <input type="hidden" name="key_id" value="{{.Key.ID}}">
@@ -264,8 +282,8 @@
         type="submit"
         data-submit-lock-button
         aria-label="{{t "admin.keys.action.confirm_revoke_aria" .Key.Name .Key.ID}}"
-        class="inline-flex min-h-11 items-center rounded-md bg-red-700 px-3 py-2 text-sm font-medium
-          text-white hover:bg-red-800 active:bg-red-900 pm-focus-ring pm-focus-ring-danger"
+        class="inline-flex min-h-11 items-center rounded-md bg-danger px-3 py-2 text-sm font-medium
+          text-accent-contrast hover:bg-danger active:bg-danger pm-focus-ring pm-focus-ring-danger"
       >
         {{t "admin.keys.action.confirm_revoke"}}
       </button>
@@ -277,14 +295,14 @@
   <summary
     aria-label="{{t "admin.keys.action.mark_deleted_aria" .Key.Name .Key.ID}}"
     class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-md px-3 py-2 text-sm font-medium
-      text-red-700 hover:bg-red-50 active:bg-red-100 pm-focus-ring pm-focus-ring-danger"
+      text-danger-fg hover:bg-danger-bg active:bg-danger-bg pm-focus-ring pm-focus-ring-danger"
   >
     <span>{{t "admin.keys.action.mark_deleted"}}</span>
-    <span aria-hidden="true" data-admin-expand-affordance class="rounded border border-red-300 px-1.5 py-0.5 text-xs font-semibold leading-none text-red-800">{{t "admin.keys.action.review"}}</span>
+    <span aria-hidden="true" data-admin-expand-affordance class="rounded border border-danger px-1.5 py-0.5 text-xs font-semibold leading-none text-danger-fg">{{t "admin.keys.action.review"}}</span>
   </summary>
-  <div class="mt-2 rounded-md border border-red-200 bg-white p-3 text-sm text-red-900 shadow-sm">
+  <div class="mt-2 rounded-md border border-danger bg-surface p-3 text-sm text-danger-fg shadow-sm">
     <p class="mb-2 whitespace-normal">{{t "admin.keys.action.mark_deleted_question_prefix"}} <bdi dir="auto">{{.Key.Name}}</bdi> {{t "admin.keys.action.mark_deleted_question_suffix" .Key.ID}}</p>
-    <p class="mb-2 text-xs leading-5 text-red-800">{{t "admin.keys.action.delete_impact"}}</p>
+    <p class="mb-2 text-xs leading-5 text-danger-fg">{{t "admin.keys.action.delete_impact"}}</p>
     <form action="/admin/keys/delete" method="POST" class="inline-flex" data-submit-lock data-submit-lock-label="{{t "admin.keys.action.deleting"}}">
       <input type="hidden" name="_csrf" value="{{.Root.CSRFToken}}">
       <input type="hidden" name="key_id" value="{{.Key.ID}}">
@@ -293,8 +311,8 @@
         type="submit"
         data-submit-lock-button
         aria-label="{{t "admin.keys.action.confirm_delete_aria" .Key.Name .Key.ID}}"
-        class="inline-flex min-h-11 items-center rounded-md bg-red-700 px-3 py-2 text-sm font-medium
-          text-white hover:bg-red-800 active:bg-red-900 pm-focus-ring pm-focus-ring-danger"
+        class="inline-flex min-h-11 items-center rounded-md bg-danger px-3 py-2 text-sm font-medium
+          text-accent-contrast hover:bg-danger active:bg-danger pm-focus-ring pm-focus-ring-danger"
       >
         {{t "admin.keys.action.confirm_delete"}}
       </button>

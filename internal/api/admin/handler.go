@@ -443,10 +443,12 @@ func (h *AdminHandler) HandleDashboard(w http.ResponseWriter, r *http.Request) {
 		feedStatusLoadError     string
 		queueStats              *adminQueueStats
 		queueStatsLoadError     string
+		daily                   []db.DailyScanStats
+		scanCountLoadError      string
 		widgetReads             sync.WaitGroup
 	)
 
-	widgetReads.Add(4)
+	widgetReads.Add(5)
 	go func() {
 		defer widgetReads.Done()
 		var err error
@@ -485,12 +487,32 @@ func (h *AdminHandler) HandleDashboard(w http.ResponseWriter, r *http.Request) {
 			queueStatsLoadError = "Queue summary could not be loaded. Check the server logs and database connection before relying on queue counts."
 		}
 	}()
+	go func() {
+		defer widgetReads.Done()
+		var err error
+		daily, err = h.store.CountScansByDay(ctx, 7)
+		if err != nil {
+			h.logger.Error("admin dashboard: failed to load daily stats", adminLogAttrsForCorrelationID(correlationID, "error", err)...)
+			scanCountLoadError = web.Message("dashboard.error.scan_activity")
+		}
+	}()
 	widgetReads.Wait()
 
 	if adminAuth != nil && adminAuth.PasswordIsBootstrap {
 		bootstrapWarning = true
 	}
 	feedRows := h.adminFeedRows(feeds)
+
+	totalScans7d := 0
+	for _, day := range daily {
+		totalScans7d += day.ScanCount
+	}
+	feedsHealthy := 0
+	for _, row := range feedRows {
+		if row.Status == "healthy" {
+			feedsHealthy++
+		}
+	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
@@ -502,8 +524,12 @@ func (h *AdminHandler) HandleDashboard(w http.ResponseWriter, r *http.Request) {
 		"DashboardStatsLoadError": dashboardStatsLoadError,
 		"Feeds":                   feedRows,
 		"FeedStatusLoadError":     feedStatusLoadError,
+		"FeedsHealthy":            feedsHealthy,
+		"FeedsTotal":              len(feedRows),
 		"QueueStats":              queueStats,
 		"QueueStatsLoadError":     queueStatsLoadError,
+		"TotalScans7d":            totalScans7d,
+		"ScanCountLoadError":      scanCountLoadError,
 		"AdminAuthLoadError":      adminAuthLoadError,
 		"BootstrapWarning":        bootstrapWarning,
 	}

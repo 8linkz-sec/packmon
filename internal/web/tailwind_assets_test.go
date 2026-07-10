@@ -35,9 +35,12 @@ func TestTailwindV4AssetsAreConfiguredAndGenerated(t *testing.T) {
 	inputCSS := readTextFile(t, "static", "tailwind.input.css")
 	for _, want := range []string{
 		`@import "tailwindcss" source(none);`,
-		`@config "../../../tailwind.config.js";`,
 		`@source "../templates";`,
 		`@source "../render.go";`,
+		`@theme {`,
+		`--color-surface:`,
+		`--container-shell: 1700px;`,
+		`[data-pm-theme="dark"] {`,
 	} {
 		if !strings.Contains(inputCSS, want) {
 			t.Fatalf("tailwind.input.css missing %q:\n%s", want, inputCSS)
@@ -53,23 +56,16 @@ func TestTailwindV4AssetsAreConfiguredAndGenerated(t *testing.T) {
 		}
 	}
 
-	configJS := readTextFile(t, "..", "..", "tailwind.config.js")
-	for _, want := range []string{
-		`"./internal/web/templates/**/*.html"`,
-		`"./internal/web/render.go"`,
-	} {
-		if !strings.Contains(configJS, want) {
-			t.Fatalf("tailwind.config.js missing explicit production source %q:\n%s", want, configJS)
-		}
+	// Tokens live in CSS since the Tailwind v4 migration. A reintroduced JS
+	// config would split the source of truth for design tokens in two.
+	if strings.Contains(inputCSS, "@config") {
+		t.Fatalf("tailwind.input.css must not load a JS config:\n%s", inputCSS)
 	}
-	for _, blocked := range []string{
-		`"./internal/web/**/*.go"`,
-		`"./internal/web/*.go"`,
-		`*_test.go`,
-	} {
-		if strings.Contains(configJS, blocked) {
-			t.Fatalf("tailwind.config.js scans test or broad Go sources with %q:\n%s", blocked, configJS)
-		}
+	if _, err := os.Stat(filepath.Join("..", "..", "tailwind.config.js")); err == nil {
+		t.Fatal("tailwind.config.js exists; design tokens belong in tailwind.input.css @theme")
+	}
+	if got := pkg.Scripts["build:web:css"]; strings.Contains(got, "tailwind.config.js") {
+		t.Fatalf("build:web:css = %q, want no -c JS config flag", got)
 	}
 
 	outputCSS := readTextFile(t, "static", "tailwind.css")
@@ -80,13 +76,17 @@ func TestTailwindV4AssetsAreConfiguredAndGenerated(t *testing.T) {
 		".flex-wrap{",
 		".min-h-11{",
 		".min-h-dvh{",
-		".border-gray-200{",
-		".bg-blue-600{",
+		".border-border{",
+		".bg-accent{",
+		".text-muted{",
+		".max-w-shell{",
 		".ms-auto{",
 		".pe-4{",
 		".text-start{",
 		".text-end{",
-		".hover\\:bg-blue-700:hover",
+		// Base reset so table headers align to the start edge instead of the
+		// browser default center; the text-end utility still overrides it.
+		"th{text-align:start}",
 		".pm-focus-ring{",
 		".pm-scroll-region{",
 		".pm-surface{",
@@ -148,14 +148,27 @@ func TestCustomStylesUseTailwindColorTokens(t *testing.T) {
 		t.Fatalf("style.css contains raw hex colors %v; use Tailwind color variables instead", matches)
 	}
 	for _, want := range []string{
-		"var(--color-gray-900)",
-		"var(--color-white)",
-		"var(--color-gray-200)",
-		"var(--color-red-600)",
-		"var(--color-green-600)",
+		"var(--color-fg)",
+		"var(--color-bg)",
+		"var(--color-surface-2)",
+		"var(--color-danger)",
+		"var(--color-success)",
 	} {
 		if !strings.Contains(styleCSS, want) {
-			t.Fatalf("style.css missing Tailwind color token %q:\n%s", want, styleCSS)
+			t.Fatalf("style.css missing semantic color token %q:\n%s", want, styleCSS)
+		}
+	}
+	// Raw palette variables bypass the [data-pm-theme] override in
+	// tailwind.input.css and would stay light in dark mode.
+	for _, blocked := range []string{
+		"var(--color-gray-",
+		"var(--color-blue-",
+		"var(--color-red-",
+		"var(--color-green-",
+		"var(--color-white)",
+	} {
+		if strings.Contains(styleCSS, blocked) {
+			t.Fatalf("style.css uses raw palette variable %q; use a semantic token:\n%s", blocked, styleCSS)
 		}
 	}
 }
@@ -247,32 +260,37 @@ func TestCustomStylesUseSafeWrappingAndPrintRules(t *testing.T) {
 	}
 }
 
+// Dark mode is driven by design tokens keyed off [data-pm-theme], not by
+// !important overrides on utility classes. The theme itself is asserted in
+// tailwind.input.css; style.css only carries what tokens cannot express.
 func TestCustomStylesProvideSystemDarkTheme(t *testing.T) {
 	t.Parallel()
 
+	inputCSS := readTextFile(t, "static", "tailwind.input.css")
+	for _, want := range []string{
+		`[data-pm-theme="dark"] {`,
+		"@media (prefers-color-scheme: dark)",
+		`[data-pm-theme="system"] {`,
+		"color-scheme: dark",
+	} {
+		if !strings.Contains(inputCSS, want) {
+			t.Fatalf("tailwind.input.css missing theme rule %q:\n%s", want, inputCSS)
+		}
+	}
+
 	styleCSS := readTextFile(t, "static", "style.css")
 	for _, want := range []string{
-		"color-scheme: light dark",
-		"@media (prefers-color-scheme: dark)",
-		"color-scheme: dark",
-		".bg-gray-50",
-		".bg-white",
-		".bg-gray-100",
-		".bg-red-50",
-		".bg-amber-50",
-		".bg-blue-50",
-		".border-gray-200",
-		".text-gray-900",
-		".text-gray-700",
-		".text-blue-600",
-		".hover\\:bg-gray-50:hover",
-		"input,",
-		"select,",
-		"textarea",
+		`[data-pm-theme="dark"] .shadow`,
+		`[data-pm-theme="system"] .shadow`,
 	} {
 		if !strings.Contains(styleCSS, want) {
-			t.Fatalf("style.css missing system dark-theme rule %q:\n%s", want, styleCSS)
+			t.Fatalf("style.css missing dark elevation rule %q:\n%s", want, styleCSS)
 		}
+	}
+	// Ignore comments: the block below documents the removed override hack.
+	withoutComments := regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(styleCSS, "")
+	if regexp.MustCompile(`\.text-gray-\d+\s*[,{]`).MatchString(withoutComments) {
+		t.Fatalf("style.css still overrides raw utility classes for dark mode:\n%s", styleCSS)
 	}
 }
 
@@ -336,10 +354,10 @@ func TestCustomStylesHonorPrefersContrastPreference(t *testing.T) {
 	styleCSS := readTextFile(t, "static", "style.css")
 	for _, want := range []string{
 		"@media (prefers-contrast: more)",
-		"border-color: var(--color-gray-900) !important",
+		"border-color: black !important",
 		"box-shadow: none !important",
 		"text-decoration-thickness: 0.12em",
-		"outline: 3px solid var(--color-gray-900)",
+		"outline: 3px solid black",
 	} {
 		if !strings.Contains(styleCSS, want) {
 			t.Fatalf("style.css missing prefers-contrast rule %q:\n%s", want, styleCSS)
@@ -397,11 +415,12 @@ func TestWebTemplatesAvoidLowContrastTokens(t *testing.T) {
 
 	for _, path := range allTemplateFiles(t) {
 		body := readTextFile(t, path)
+		// bg-gray-100/text-gray-500 used to be the low-contrast pair guarded here.
+		// The semantic tokens replace it: muted on surface-2 is 4.84:1 (WCAG AA).
+		// Raw palette classes are now forbidden outright by design_tokens_test.go.
 		for _, blocked := range []string{
 			"text-gray-400",
 			"text-yellow-600",
-			"bg-gray-100 text-gray-500",
-			"border-green-600 bg-green-600 text-white",
 			"opacity-50",
 		} {
 			if strings.Contains(body, blocked) {
@@ -427,7 +446,7 @@ func TestAdminFeedConfigurationControlsUseFocusToken(t *testing.T) {
 
 	body := readTextFile(t, "templates", "admin", "feeds.html")
 	for _, want := range []string{
-		`name="enabled" {{if .Enabled}}checked{{end}} class="rounded border-gray-500 text-blue-600 pm-focus-ring"`,
+		`name="enabled" {{if .Enabled}}checked{{end}} class="rounded border-muted text-accent pm-focus-ring"`,
 		`name="mode" class="pm-form-control"`,
 		`name="sync_interval"`,
 		`class="pm-form-control"`,
@@ -448,7 +467,7 @@ func TestAdminFeedConfigurationControlsUseFocusToken(t *testing.T) {
 			marker: `name="clear_api_key"`,
 			wants: []string{
 				`aria-describedby="feed-{{.FeedKey}}-clear-key-help"`,
-				`border-gray-500`,
+				`border-muted`,
 				`pm-focus-ring`,
 			},
 		},
@@ -456,8 +475,8 @@ func TestAdminFeedConfigurationControlsUseFocusToken(t *testing.T) {
 			name:   "confirm clear API key checkbox",
 			marker: `name="confirm_clear_api_key"`,
 			wants: []string{
-				`border-red-600`,
-				`text-red-600`,
+				`border-danger`,
+				`text-danger`,
 				`pm-focus-ring`,
 				`pm-focus-ring-danger`,
 			},
@@ -466,8 +485,8 @@ func TestAdminFeedConfigurationControlsUseFocusToken(t *testing.T) {
 			name:   "confirm reset checkbox",
 			marker: `name="confirm_reset"`,
 			wants: []string{
-				`border-red-600`,
-				`text-red-600`,
+				`border-danger`,
+				`text-danger`,
 				`pm-focus-ring`,
 				`pm-focus-ring-danger`,
 			},
@@ -540,9 +559,9 @@ func TestWebTemplatesUseSemanticFormControlTokens(t *testing.T) {
 	for _, path := range allTemplateFiles(t) {
 		body := readTextFile(t, path)
 		for _, forbidden := range []string{
-			"w-full min-h-11 border border-gray-500 rounded-md px-3 py-2 text-sm",
-			"min-h-11 border border-gray-500 rounded-md px-3 py-2 text-sm",
-			"min-h-11 w-full rounded-md border border-gray-500 px-3 py-2 text-sm",
+			"w-full min-h-11 border border-muted rounded-md px-3 py-2 text-sm",
+			"min-h-11 border border-muted rounded-md px-3 py-2 text-sm",
+			"min-h-11 w-full rounded-md border border-muted px-3 py-2 text-sm",
 		} {
 			if strings.Contains(body, forbidden) {
 				t.Fatalf("%s still uses primitive form-control bundle %q", path, forbidden)
@@ -558,11 +577,12 @@ func TestAdminAPIKeyCreateFormPreservesSafeValuesAndConstrainsExpiration(t *test
 	for _, want := range []string{
 		`name="name"`,
 		`value="{{.APIKeyCreateName}}"`,
-		`name="expires_at"`,
-		`value="{{.APIKeyCreateExpiresAt}}"`,
-		`maxlength="20"`,
-		`pattern="\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z"`,
-		`title="{{t "admin.keys.create.expires_title" .APIKeyExpiryExample}}"`,
+		`name="expires_in_days"`,
+		`data-reveal-target="#key-expires-custom-wrap"`,
+		`data-reveal-value="custom"`,
+		`name="expires_custom_days"`,
+		`max="{{.APIKeyExpiryMaxDays}}"`,
+		`value="{{.APIKeyCustomDaysValue}}"`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("admin keys template missing API key create form fragment %q", want)
@@ -578,8 +598,8 @@ func TestAdminFeedConfigurationEditorsAreCollapsedByDefault(t *testing.T) {
 
 	body := readTextFile(t, "templates", "admin", "feeds.html")
 	for _, want := range []string{
-		`<details id="feed-{{.FeedKey}}" class="border border-gray-200 rounded-lg" data-feed-key="{{.FeedKey}}"`,
-		`<div class="border-t border-gray-200 p-4">`,
+		`<details id="feed-{{.FeedKey}}" class="border border-border rounded-lg" data-feed-key="{{.FeedKey}}"`,
+		`<div class="border-t border-border p-4">`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("admin feed template missing collapsed editor fragment %q", want)
@@ -599,7 +619,7 @@ func TestAdminFeedConfigurationEditorsAreCollapsedByDefault(t *testing.T) {
 			t.Fatalf("admin feed collapsed editor summary missing %q:\n%s", want, summary)
 		}
 	}
-	if strings.Contains(body, `<div class="border border-gray-200 rounded-lg p-4" data-feed-key="{{.FeedKey}}">`) {
+	if strings.Contains(body, `<div class="border border-border rounded-lg p-4" data-feed-key="{{.FeedKey}}">`) {
 		t.Fatal("admin feed template still renders every editor as an expanded card")
 	}
 }
@@ -671,8 +691,8 @@ func TestAdminFeedDestructiveKeyControlsAreLargeAndContextual(t *testing.T) {
 	body := readTextFile(t, "templates", "admin", "feeds.html")
 	for _, want := range []string{
 		`{{.APIKeyHelp}}`,
-		`class="mt-2 flex min-h-11 cursor-pointer items-center gap-2 rounded-md px-2 py-2 text-sm text-gray-700`,
-		`class="mt-1 flex min-h-11 cursor-pointer items-center gap-2 rounded-md px-2 py-2 text-sm text-red-700`,
+		`class="mt-2 flex min-h-11 cursor-pointer items-center gap-2 rounded-md px-2 py-2 text-sm text-fg`,
+		`class="mt-1 flex min-h-11 cursor-pointer items-center gap-2 rounded-md px-2 py-2 text-sm text-danger-fg`,
 		`{{t "admin.feeds.form.api_key.clear_label" .FeedName}}`,
 		`{{t "admin.feeds.form.api_key.clear_confirm" .FeedName}}`,
 		`{{t "admin.feeds.form.api_key.clear_help" .FeedName}}`,
@@ -683,8 +703,8 @@ func TestAdminFeedDestructiveKeyControlsAreLargeAndContextual(t *testing.T) {
 	}
 	confirmClear := openingTagContaining(t, body, `name="confirm_clear_api_key"`)
 	for _, want := range []string{
-		`border-red-600`,
-		`text-red-600`,
+		`border-danger`,
+		`text-danger`,
 		`pm-focus-ring`,
 		`pm-focus-ring-danger`,
 	} {
@@ -695,8 +715,8 @@ func TestAdminFeedDestructiveKeyControlsAreLargeAndContextual(t *testing.T) {
 	clearKey := openingTagContaining(t, body, `name="clear_api_key"`)
 	for _, want := range []string{
 		`aria-describedby="feed-{{.FeedKey}}-clear-key-help"`,
-		`border-gray-500`,
-		`text-blue-600`,
+		`border-muted`,
+		`text-accent`,
 		`pm-focus-ring`,
 	} {
 		if !strings.Contains(clearKey, want) {
@@ -1195,7 +1215,7 @@ func TestAdminQueueStatusFiltersExposeActiveState(t *testing.T) {
 	queue := readTextFile(t, "templates", "admin", "queue.html")
 	for _, want := range []string{
 		`{{if .Active}}aria-current="page"{{end}}`,
-		`{{if .Active}}border-blue-300 bg-blue-50 text-blue-700{{else}}border-gray-500 text-gray-700 hover:bg-gray-50{{end}}`,
+		`{{if .Active}}border-info bg-info-bg text-accent{{else}}border-muted text-fg hover:bg-surface-2{{end}}`,
 		`{{if .QueueStatusWarning}}`,
 		`{{template "admin-alert" dict "Variant" "warning" "Icon" true "Message" .QueueStatusWarning}}`,
 	} {
@@ -1208,35 +1228,54 @@ func TestAdminQueueStatusFiltersExposeActiveState(t *testing.T) {
 func TestDashboardMetricCardsExposeLabelValueAndInteractionStates(t *testing.T) {
 	t.Parallel()
 
+	// Lifecycle, scans and feed health are operator numbers: admin dashboard only.
 	for _, tc := range []struct {
 		name     string
 		path     []string
 		template string
+		labels   []string
+		hrefs    []string
 	}{
-		{name: "public dashboard", path: []string{"templates", "dashboard.html"}, template: "dashboard.html"},
-		{name: "admin dashboard", path: []string{"templates", "admin", "dashboard.html"}, template: "admin/dashboard.html"},
+		{
+			name:     "public dashboard",
+			path:     []string{"templates", "dashboard.html"},
+			template: "dashboard.html",
+			labels:   []string{"Packages Tracked", "Vulnerabilities", "Malicious Packages", "Supply-chain Risks"},
+			hrefs: []string{
+				`href="/search?finding=vulnerability"`,
+				`href="/search?finding=malicious"`,
+				`href="/search?finding=supply_chain_risk"`,
+			},
+		},
+		{
+			name:     "admin dashboard",
+			path:     []string{"templates", "admin", "dashboard.html"},
+			template: "admin/dashboard.html",
+			labels: []string{
+				"Packages Tracked", "Vulnerabilities", "Malicious Packages",
+				"Supply-chain Risks", "Lifecycle Findings", "Scans (7d)", "Feeds Healthy",
+			},
+			hrefs: []string{
+				`href="/search?finding=vulnerability"`,
+				`href="/search?finding=malicious"`,
+				`href="/search?finding=supply_chain_risk"`,
+				`href="/search?finding=lifecycle"`,
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
 			body := renderDashboardTemplateForStaticTest(t, tc.template)
-			for _, label := range []string{
-				"Packages Tracked",
-				"Vulnerabilities",
-				"Malicious Packages",
-				"Supply-chain Risks",
-				"Lifecycle Findings",
-			} {
+			for _, label := range tc.labels {
 				if !strings.Contains(body, `<dt class="text-sm`) || !strings.Contains(body, ">"+label+"</dt>") {
 					t.Fatalf("%s metric %q is not rendered as a label/value definition pair:\n%s", strings.Join(tc.path, string(os.PathSeparator)), label, body)
 				}
 			}
-			for _, href := range []string{
-				`href="/search?finding=vulnerability"`,
-				`href="/search?finding=malicious"`,
-				`href="/search?finding=supply_chain_risk"`,
-				`href="/search?finding=lifecycle"`,
-			} {
+			if tc.name == "public dashboard" && strings.Contains(body, "Lifecycle Findings") {
+				t.Fatalf("public dashboard must not show operator-only lifecycle card:\n%s", body)
+			}
+			for _, href := range tc.hrefs {
 				tag := openingTagContaining(t, body, href)
 				for _, want := range []string{
 					`pm-focus-ring`,
@@ -1267,12 +1306,15 @@ func TestDashboardHoverControlsUseExplicitTransitionUtilities(t *testing.T) {
 			t.Parallel()
 
 			body := renderDashboardTemplateForStaticTest(t, tc.template)
-			for _, href := range []string{
+			hrefs := []string{
 				`href="/search?finding=vulnerability"`,
 				`href="/search?finding=malicious"`,
 				`href="/search?finding=supply_chain_risk"`,
-				`href="/search?finding=lifecycle"`,
-			} {
+			}
+			if tc.name == "admin dashboard" {
+				hrefs = append(hrefs, `href="/search?finding=lifecycle"`)
+			}
+			for _, href := range hrefs {
 				tag := openingTagContaining(t, body, href)
 				if broadTransition.MatchString(tag) {
 					t.Fatalf("%s dashboard KPI link %s uses broad transition utility:\n%s", strings.Join(tc.path, string(os.PathSeparator)), href, tag)
@@ -1319,14 +1361,14 @@ func TestPackageVisualsUseConsistentRiskAndControlScale(t *testing.T) {
 		}
 	}
 	checkButton := openingTagContaining(t, body, `>{{t "package.action.check_version"}}</button>`)
-	for _, want := range []string{`min-h-11`, `rounded-md`, `active:bg-blue-800`} {
+	for _, want := range []string{`min-h-11`, `rounded-md`, `active:bg-accent-hover`} {
 		if !strings.Contains(checkButton, want) {
 			t.Fatalf("package version submit button missing established control token %q:\n%s", want, checkButton)
 		}
 	}
 
 	if !strings.Contains(riskTable, `<tr class="{{$.RowClass}}">`) ||
-		!strings.Contains(body, `"RowClass" "border-b border-gray-100 bg-amber-50 hover:bg-amber-100"`) {
+		!strings.Contains(body, `"RowClass" "border-b border-border bg-warning-bg hover:bg-warning-bg"`) {
 		t.Fatalf("package supply-chain rows must use amber risk hue through the shared risk table partial:\n%s\n%s", body, riskTable)
 	}
 	if strings.Contains(packageTemplates, `bg-orange-50`) || strings.Contains(packageTemplates, `hover:bg-orange-100`) {
@@ -1386,7 +1428,7 @@ func TestAdminVisualHierarchySpacingMarkers(t *testing.T) {
 		`<th scope="col" class="px-4 py-2">`,
 		`<td class="px-4 py-2`,
 		`<td class="no-print px-4 py-2"`,
-		`<dt class="text-xs uppercase text-gray-500">`,
+		`<dt class="text-xs uppercase text-muted">`,
 	} {
 		if strings.Contains(advisories, blocked) {
 			t.Fatalf("admin advisories template still uses old hierarchy/spacing marker %q", blocked)
@@ -1395,9 +1437,9 @@ func TestAdminVisualHierarchySpacingMarkers(t *testing.T) {
 	for _, want := range []string{
 		`<th scope="col" class="px-5 py-2">ID</th>`,
 		`<td class="px-5 py-2 font-mono text-xs"><bdi dir="auto">{{.ID}}</bdi></td>`,
-		`<dt class="text-xs font-semibold uppercase tracking-wide text-gray-500">Type</dt>`,
-		`<dt class="text-xs font-semibold uppercase tracking-wide text-gray-500">Risk Type</dt>`,
-		`<dt class="text-xs font-semibold uppercase tracking-wide text-gray-500">Summary</dt>`,
+		`<dt class="text-xs font-semibold uppercase tracking-wide text-muted">Type</dt>`,
+		`<dt class="text-xs font-semibold uppercase tracking-wide text-muted">Risk Type</dt>`,
+		`<dt class="text-xs font-semibold uppercase tracking-wide text-muted">Summary</dt>`,
 	} {
 		if !strings.Contains(advisories, want) {
 			t.Fatalf("admin advisories template missing hierarchy/spacing marker %q", want)
@@ -1405,18 +1447,18 @@ func TestAdminVisualHierarchySpacingMarkers(t *testing.T) {
 	}
 
 	feeds := readTextFile(t, "templates", "admin", "feeds.html")
-	if strings.Contains(feeds, `id="feed-{{.FeedKey}}-api-key-help" class="mt-1 block text-xs text-gray-500"`) {
+	if strings.Contains(feeds, `id="feed-{{.FeedKey}}-api-key-help" class="mt-1 block text-xs text-muted"`) {
 		t.Fatal("admin feeds API-key billing disclosure still uses xs helper-text styling")
 	}
-	if !strings.Contains(feeds, `id="feed-{{.FeedKey}}-api-key-help" class="mt-2 block rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm leading-6 text-amber-950"`) {
+	if !strings.Contains(feeds, `id="feed-{{.FeedKey}}-api-key-help" class="mt-2 block rounded-md border border-warning bg-warning-bg px-3 py-2 text-sm leading-6 text-warning-fg"`) {
 		t.Fatal("admin feeds API-key billing disclosure missing emphasized disclosure panel styling")
 	}
 
 	queue := readTextFile(t, "templates", "admin", "queue.html")
 	for _, blocked := range []string{
-		`<dt class="text-xs uppercase text-gray-500">`,
+		`<dt class="text-xs uppercase text-muted">`,
 		`<div class="text-2xl font-semibold {{.CountClass}}">{{.Count}}</div>`,
-		`<div class="text-xs text-gray-500 uppercase mt-1">{{.Label}}</div>`,
+		`<div class="text-xs text-muted uppercase mt-1">{{.Label}}</div>`,
 	} {
 		if strings.Contains(queue, blocked) {
 			t.Fatalf("admin queue template still uses old hierarchy/spacing marker %q", blocked)
@@ -1424,12 +1466,12 @@ func TestAdminVisualHierarchySpacingMarkers(t *testing.T) {
 	}
 	for _, want := range []string{
 		`<dl class="grid grid-cols-1 gap-1">`,
-		`<dt class="text-xs font-semibold uppercase tracking-wide text-gray-500">{{.Label}}</dt>`,
+		`<dt class="text-xs font-semibold uppercase tracking-wide text-muted">{{.Label}}</dt>`,
 		`<dd class="text-2xl font-semibold {{.CountClass}}">{{.Count}}</dd>`,
-		`<dt class="text-xs font-semibold uppercase tracking-wide text-gray-500">Source</dt>`,
-		`<dt class="text-xs font-semibold uppercase tracking-wide text-gray-500">Priority</dt>`,
-		`<dt class="text-xs font-semibold uppercase tracking-wide text-gray-500">Requested</dt>`,
-		`<dt class="text-xs font-semibold uppercase tracking-wide text-gray-500">Error</dt>`,
+		`<dt class="text-xs font-semibold uppercase tracking-wide text-muted">Source</dt>`,
+		`<dt class="text-xs font-semibold uppercase tracking-wide text-muted">Priority</dt>`,
+		`<dt class="text-xs font-semibold uppercase tracking-wide text-muted">Requested</dt>`,
+		`<dt class="text-xs font-semibold uppercase tracking-wide text-muted">Error</dt>`,
 	} {
 		if !strings.Contains(queue, want) {
 			t.Fatalf("admin queue template missing hierarchy/semantic metric marker %q", want)
@@ -1440,7 +1482,7 @@ func TestAdminVisualHierarchySpacingMarkers(t *testing.T) {
 	if strings.Contains(bootstrap, `<p class="font-semibold">Bootstrap password still active</p>`) {
 		t.Fatalf("admin bootstrap warning still uses paragraph as heading:\n%s", bootstrap)
 	}
-	if !strings.Contains(bootstrap, `<p class="text-sm font-semibold text-amber-950">Bootstrap password still active</p>`) {
+	if !strings.Contains(bootstrap, `<p class="text-sm font-semibold text-warning-fg">Bootstrap password still active</p>`) {
 		t.Fatalf("admin bootstrap warning missing non-heading warning label marker:\n%s", bootstrap)
 	}
 }
@@ -1451,16 +1493,16 @@ func TestPackmonSurfaceUtilitiesAreTokenized(t *testing.T) {
 	tailwindInput := readTextFile(t, "static", "tailwind.input.css")
 	for _, want := range []string{
 		`.pm-surface {`,
-		`background: var(--color-white);`,
-		`border: 1px solid var(--color-gray-200);`,
+		`background: var(--color-surface);`,
+		`border: 1px solid var(--color-border);`,
 		`border-radius: var(--radius-lg);`,
 		`.pm-scroll-region {`,
 		`overflow-x: auto;`,
 		`.pm-panel-header {`,
-		`border-bottom: 1px solid var(--color-red-100);`,
+		`border-bottom: 1px solid var(--color-border);`,
 		`.pm-empty-state {`,
 		`text-align: center;`,
-		`color: var(--color-gray-600);`,
+		`color: var(--color-muted);`,
 	} {
 		if !strings.Contains(tailwindInput, want) {
 			t.Fatalf("tailwind input missing Packmon surface token %q:\n%s", want, tailwindInput)
@@ -1473,7 +1515,7 @@ func TestAdminAuditAndQueuePaginationUseTouchTargets(t *testing.T) {
 
 	audit := readTextFile(t, "templates", "admin", "audit.html")
 	for _, compact := range []string{
-		`inline-flex items-center rounded border border-gray-500 px-2 py-1`,
+		`inline-flex items-center rounded border border-muted px-2 py-1`,
 		`rounded border px-2 py-1`,
 	} {
 		if strings.Contains(audit, compact) {
@@ -1503,7 +1545,7 @@ func TestAdminAuditAndQueuePaginationUseTouchTargets(t *testing.T) {
 
 	queue := readTextFile(t, "templates", "admin", "queue.html")
 	for _, compact := range []string{
-		`inline-flex items-center rounded border border-gray-500 px-2 py-1`,
+		`inline-flex items-center rounded border border-muted px-2 py-1`,
 		`rounded border px-2 py-1`,
 	} {
 		if strings.Contains(queue, compact) {
@@ -1527,11 +1569,11 @@ func TestAdminAuditAndQueuePaginationUseTouchTargets(t *testing.T) {
 		},
 		{
 			name:   "queue filters",
-			marker: `{{if .Active}}border-blue-300 bg-blue-50 text-blue-700{{else}}border-gray-500 text-gray-700 hover:bg-gray-50{{end}}`,
+			marker: `{{if .Active}}border-info bg-info-bg text-accent{{else}}border-muted text-fg hover:bg-surface-2{{end}}`,
 			wants: append(adminControlLinkClassTokens(),
-				`border-blue-300`,
-				`bg-blue-50`,
-				`text-blue-700`,
+				`border-info`,
+				`bg-info-bg`,
+				`text-accent`,
 			),
 		},
 	} {
@@ -1555,8 +1597,8 @@ func adminControlLinkClassTokens() []string {
 		`px-3`,
 		`py-2`,
 		`font-medium`,
-		`text-gray-700`,
-		`hover:bg-gray-50`,
+		`text-fg`,
+		`hover:bg-surface-2`,
 		`pm-focus-ring`,
 	}
 }
@@ -1585,7 +1627,7 @@ func TestAdminPackageLinksUsePackageDetailsAndTouchTargets(t *testing.T) {
 				`rounded-md`,
 				`px-3`,
 				`py-2`,
-				`text-blue-700`,
+				`text-accent`,
 			},
 		},
 		{
@@ -1603,7 +1645,7 @@ func TestAdminPackageLinksUsePackageDetailsAndTouchTargets(t *testing.T) {
 				`rounded-md`,
 				`px-3`,
 				`py-2`,
-				`text-blue-700`,
+				`text-accent`,
 			},
 		},
 	} {
@@ -1740,11 +1782,6 @@ func TestDiagnosticDisclosuresArePrintExpanded(t *testing.T) {
 		path   []string
 		marker string
 	}{
-		{
-			name:   "public dashboard recent vulnerability details",
-			path:   []string{"templates", "dashboard.html"},
-			marker: `{{truncate .Summary 80}}`,
-		},
 		{
 			name:   "shared feed status",
 			path:   []string{"templates", "partials", "feed_status.html"},
@@ -1923,7 +1960,7 @@ func TestExternalLinkIndicatorsAreDirectionAware(t *testing.T) {
 func TestFilledActionButtonsUseSharedFocusRing(t *testing.T) {
 	t.Parallel()
 
-	filledButton := regexp.MustCompile(`(?s)<button\b[^>]*class="([^"]*\b(?:bg-blue-600|bg-red-600|bg-red-700|bg-green-700)\b[^"]*)"`)
+	filledButton := regexp.MustCompile(`(?s)<button\b[^>]*class="([^"]*\b(?:bg-blue-600|bg-danger|bg-danger|bg-green-700)\b[^"]*)"`)
 	for _, path := range allTemplateFiles(t) {
 		body := readTextFile(t, path)
 		for _, match := range filledButton.FindAllStringSubmatch(body, -1) {
@@ -1958,14 +1995,14 @@ func TestAdminPrimaryActionButtonsUseSharedTouchTargetPattern(t *testing.T) {
 		`items-center`,
 		`justify-center`,
 		`rounded-md`,
-		`bg-blue-600`,
+		`bg-accent`,
 		`px-4`,
 		`py-2`,
 		`text-sm`,
 		`font-medium`,
-		`text-white`,
-		`hover:bg-blue-700`,
-		`active:bg-blue-800`,
+		`text-accent-contrast`,
+		`hover:bg-accent-hover`,
+		`active:bg-accent-hover`,
 		`pm-focus-ring`,
 	} {
 		if !strings.Contains(helper, want) {
@@ -2326,11 +2363,11 @@ func TestAdminAlertsUseSharedPartialAndDecorativeIcons(t *testing.T) {
 	for _, path := range allTemplateFiles(t) {
 		body := readTextFile(t, path)
 		for _, blocked := range []string{
-			`bg-green-50 border border-green-200 text-green-800 rounded-md px-4 py-3 text-sm`,
-			`bg-red-50 border border-red-200 text-red-700 rounded-md px-4 py-3 text-sm`,
-			`bg-red-50 border border-red-200 text-red-800 rounded-md px-4 py-3 text-sm`,
-			`bg-yellow-50 border border-yellow-200 rounded-md p-4 text-sm text-yellow-800`,
-			`bg-red-50 text-red-700 text-sm border-b border-red-100`,
+			`bg-success-bg border border-green-200 text-green-800 rounded-md px-4 py-3 text-sm`,
+			`bg-danger-bg border border-danger text-danger-fg rounded-md px-4 py-3 text-sm`,
+			`bg-danger-bg border border-danger text-danger-fg rounded-md px-4 py-3 text-sm`,
+			`bg-warning-bg border border-yellow-200 rounded-md p-4 text-sm text-yellow-800`,
+			`bg-danger-bg text-danger-fg text-sm border-b border-danger`,
 		} {
 			if strings.Contains(body, blocked) {
 				t.Fatalf("%s still implements alert markup directly with %q", path, blocked)
@@ -2379,7 +2416,7 @@ func TestAdminBootstrapWarningDoesNotBreakHeadingOrder(t *testing.T) {
 			t.Fatalf("admin bootstrap warning must not render heading markup %q:\n%s", blocked, bootstrap)
 		}
 	}
-	if !strings.Contains(bootstrap, `<p class="text-sm font-semibold text-amber-950">Bootstrap password still active</p>`) {
+	if !strings.Contains(bootstrap, `<p class="text-sm font-semibold text-warning-fg">Bootstrap password still active</p>`) {
 		t.Fatalf("admin bootstrap warning missing non-heading title text:\n%s", bootstrap)
 	}
 
@@ -2394,9 +2431,9 @@ func TestAdminFeedActionControlsUseContrastSafeBorders(t *testing.T) {
 
 	body := readTextFile(t, "templates", "admin", "feeds.html")
 	for _, blocked := range []string{
-		`name="confirm_clear_api_key" class="h-4 w-4 rounded border-red-300`,
-		`name="confirm_reset" class="rounded border-red-300`,
-		`border border-blue-300 text-blue-700`,
+		`name="confirm_clear_api_key" class="h-4 w-4 rounded border-danger`,
+		`name="confirm_reset" class="rounded border-danger`,
+		`border border-info text-accent`,
 	} {
 		if strings.Contains(body, blocked) {
 			t.Fatalf("admin feed action control still uses low-contrast border marker %q:\n%s", blocked, body)
@@ -2407,17 +2444,17 @@ func TestAdminFeedActionControlsUseContrastSafeBorders(t *testing.T) {
 		t.Fatalf("disabled feed interval input missing shared form-control token:\n%s", disabledInterval)
 	}
 	confirmClear := openingTagContaining(t, body, `name="confirm_clear_api_key"`)
-	for _, want := range []string{`border-red-600`, `pm-focus-ring`, `pm-focus-ring-danger`} {
+	for _, want := range []string{`border-danger`, `pm-focus-ring`, `pm-focus-ring-danger`} {
 		if !strings.Contains(confirmClear, want) {
 			t.Fatalf("feed clear-key confirmation missing %q:\n%s", want, confirmClear)
 		}
 	}
 	syncNow := openingTagContaining(t, body, `data-feed-sync-now`)
-	if !strings.Contains(syncNow, `border-blue-600`) {
+	if !strings.Contains(syncNow, `border-accent`) {
 		t.Fatalf("feed sync-now button missing contrast-safe blue border:\n%s", syncNow)
 	}
 	confirmReset := openingTagContaining(t, body, `name="confirm_reset"`)
-	for _, want := range []string{`border-red-600`, `pm-focus-ring`, `pm-focus-ring-danger`} {
+	for _, want := range []string{`border-danger`, `pm-focus-ring`, `pm-focus-ring-danger`} {
 		if !strings.Contains(confirmReset, want) {
 			t.Fatalf("feed reset confirmation missing %q:\n%s", want, confirmReset)
 		}
@@ -2434,13 +2471,13 @@ func TestAdminNoneThresholdAcknowledgementUsesContrastSafeFocus(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		`border border-yellow-700 bg-yellow-50`,
+		`border border-warning bg-warning-bg`,
 		`id="ack-block-threshold-none"`,
 		`aria-describedby="ack-block-threshold-none-help"`,
 		`data-required-when-select="#block-threshold"`,
 		`data-required-value="NONE"`,
 		`data-required-message="{{t "admin.settings.system.none_required"}}"`,
-		`class="mt-0.5 h-4 w-4 rounded border-yellow-700 text-yellow-700 pm-focus-ring pm-focus-ring-warning"`,
+		`class="mt-0.5 h-4 w-4 rounded border-warning text-warning-fg pm-focus-ring pm-focus-ring-warning"`,
 		`id="ack-block-threshold-none-help"`,
 	} {
 		if !strings.Contains(body, want) {
@@ -2520,11 +2557,11 @@ func TestAdminNewAPIKeyFieldUsesContrastSafeBorder(t *testing.T) {
 	t.Parallel()
 
 	keys := readTextFile(t, "templates", "admin", "keys.html")
-	if strings.Contains(keys, `border border-blue-200 rounded`) {
-		t.Fatalf("new API key field still uses low-contrast border-blue-200:\n%s", keys)
+	if strings.Contains(keys, `border border-info rounded`) {
+		t.Fatalf("new API key field still uses low-contrast border-info:\n%s", keys)
 	}
-	if !strings.Contains(keys, `class="min-w-0 flex-1 min-h-11 bg-white border border-blue-500 rounded`) {
-		t.Fatalf("new API key field missing contrast-safe border-blue-500 class:\n%s", keys)
+	if !strings.Contains(keys, `class="min-w-0 flex-1 min-h-11 bg-surface border border-accent rounded`) {
+		t.Fatalf("new API key field missing contrast-safe border-accent class:\n%s", keys)
 	}
 }
 
@@ -2841,7 +2878,8 @@ func TestAdminFormFieldsUseTouchHeight(t *testing.T) {
 			markers: []string{
 				`id="new-api-key"`,
 				`id="key-name"`,
-				`id="key-expires-at"`,
+				`id="key-expires-in"`,
+				`id="key-expires-custom"`,
 				`id="key-current-password"`,
 			},
 		},

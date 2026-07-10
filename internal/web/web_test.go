@@ -378,9 +378,6 @@ func TestHandleDashboard_ReturnsOK(t *testing.T) {
 	if !strings.Contains(body, "Dashboard") {
 		t.Fatal("Dashboard response does not contain expected heading")
 	}
-	if !strings.Contains(body, `<h1 class="text-2xl font-bold">Dashboard</h1>`) {
-		t.Fatal("Dashboard response does not contain a primary h1 heading")
-	}
 	if !strings.Contains(body, "Recently Published Vulnerabilities") {
 		t.Fatal("Dashboard response does not contain the published vulnerabilities section")
 	}
@@ -394,7 +391,7 @@ func TestHandleDashboard_ReturnsOK(t *testing.T) {
 			`min-h-11`,
 			`items-center`,
 			`justify-center`,
-			`rounded-full`,
+			`rounded-lg`,
 			`hover:brightness-95`,
 		} {
 			if !strings.Contains(tag, want) {
@@ -408,13 +405,14 @@ func TestHandleDashboard_ReturnsOK(t *testing.T) {
 	if !strings.Contains(body, "/search?finding=supply_chain_risk") {
 		t.Fatal("Dashboard response does not contain the supply-chain risks link")
 	}
-	if !strings.Contains(body, "/search?finding=lifecycle") {
-		t.Fatal("Dashboard response does not contain the lifecycle findings link")
+	// Lifecycle is an operator metric and lives on the admin dashboard only.
+	if strings.Contains(body, "/search?finding=lifecycle") {
+		t.Fatal("Dashboard response exposes the operator-only lifecycle findings card")
 	}
 	if strings.Contains(body, `href="/scans"`) {
 		t.Fatal("Dashboard response exposes the protected scan-log page in public navigation")
 	}
-	if !strings.Contains(body, "border-red-200") {
+	if !strings.Contains(body, "border-danger") {
 		t.Fatal("Dashboard response does not style malicious package count as a risk KPI")
 	}
 	if !strings.Contains(body, "Published") {
@@ -432,20 +430,20 @@ func TestHandleDashboard_ReturnsOK(t *testing.T) {
 	if strings.Contains(body, `href="/package/actions/example/action">GHSA-test-1234</a>`) {
 		t.Fatalf("Dashboard advisory ID links to package page instead of advisory resource:\n%s", body)
 	}
-	if !strings.Contains(body, `<details class="group" data-print-open>`) || !strings.Contains(body, "Details") {
-		t.Fatalf("Dashboard recent vulnerability summary missing disclosure affordance:\n%s", body)
+	// The summary column moved to the package page; the dashboard table shows
+	// the six columns fixed by the dashboard contract.
+	if strings.Contains(body, `<details class="group" data-print-open>`) {
+		t.Fatalf("Dashboard still renders the removed summary disclosure:\n%s", body)
 	}
-	if !strings.Contains(body, longSummary) {
-		t.Fatalf("Dashboard recent vulnerability summary does not include full text:\n%s", body)
-	}
-	if !strings.Contains(body, truncate(longSummary, 80)) {
-		t.Fatalf("Dashboard recent vulnerability summary does not include compact preview:\n%s", body)
+	if strings.Contains(body, longSummary) {
+		t.Fatalf("Dashboard still renders advisory summary text:\n%s", body)
 	}
 	for _, want := range []string{
-		`<th scope="col" class="pb-2 pe-4">Advisory</th>`,
 		`<th scope="col" class="pb-2 pe-4">Package</th>`,
+		`<th scope="col" class="pb-2 pe-4">Version</th>`,
+		`<th scope="col" class="pb-2 pe-4">Ecosystem</th>`,
 		`<th scope="col" class="pb-2 pe-4">Severity</th>`,
-		`<th scope="col" class="pb-2 pe-4">Summary</th>`,
+		`<th scope="col" class="pb-2 pe-4">Advisory</th>`,
 		`<th scope="col" class="pb-2">Published</th>`,
 		`class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium border `,
 	} {
@@ -453,8 +451,12 @@ func TestHandleDashboard_ReturnsOK(t *testing.T) {
 			t.Fatalf("Dashboard response missing table/accessibility marker %q:\n%s", want, body)
 		}
 	}
-	if !strings.Contains(body, "Affected: &gt;= 1.2.0, &lt; 1.2.5") {
+	// Affected ranges now fill the dedicated Version column, without the label.
+	if !strings.Contains(body, "&gt;= 1.2.0, &lt; 1.2.5") {
 		t.Fatal("Dashboard response does not contain affected version details")
+	}
+	if strings.Contains(body, "Affected: &gt;= 1.2.0") {
+		t.Fatal("Dashboard still renders the inline affected-version label")
 	}
 	if !strings.Contains(body, "<!DOCTYPE html>") {
 		t.Fatal("Dashboard response does not contain full HTML layout")
@@ -527,13 +529,15 @@ func TestDashboardSearchLinksLandOnFilteredSearchResults(t *testing.T) {
 	}
 	dashboardBody := dashboardRec.Body.String()
 
+	// notOnPublicDashboard marks drill-downs that only the admin dashboard links to.
 	tests := []struct {
-		name         string
-		href         string
-		wantSeverity string
-		wantFinding  string
-		wantResult   string
-		wantSummary  string
+		name                 string
+		href                 string
+		wantSeverity         string
+		wantFinding          string
+		wantResult           string
+		wantSummary          string
+		notOnPublicDashboard bool
 	}{
 		{
 			name:        "vulnerability KPI",
@@ -557,11 +561,12 @@ func TestDashboardSearchLinksLandOnFilteredSearchResults(t *testing.T) {
 			wantSummary: "for supply-chain risks",
 		},
 		{
-			name:        "lifecycle finding KPI",
-			href:        "/search?finding=lifecycle",
-			wantFinding: "lifecycle",
-			wantResult:  "django",
-			wantSummary: "for lifecycle findings",
+			name:                 "lifecycle finding KPI",
+			href:                 "/search?finding=lifecycle",
+			wantFinding:          "lifecycle",
+			wantResult:           "django",
+			wantSummary:          "for lifecycle findings",
+			notOnPublicDashboard: true,
 		},
 		{
 			name:         "critical severity facet",
@@ -595,7 +600,12 @@ func TestDashboardSearchLinksLandOnFilteredSearchResults(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if !strings.Contains(dashboardBody, `href="`+tt.href+`"`) {
+			switch {
+			case tt.notOnPublicDashboard:
+				if strings.Contains(dashboardBody, `href="`+tt.href+`"`) {
+					t.Fatalf("public dashboard links operator-only drill-down %q:\n%s", tt.href, dashboardBody)
+				}
+			case !strings.Contains(dashboardBody, `href="`+tt.href+`"`):
 				t.Fatalf("Dashboard missing drill-down link %q:\n%s", tt.href, dashboardBody)
 			}
 
@@ -771,12 +781,15 @@ func TestHandleDashboard_StoreErrorsRenderLoadErrors(t *testing.T) {
 	body := rec.Body.String()
 	for _, want := range []string{
 		"Dashboard metrics could not be loaded",
-		"Scan activity could not be loaded",
 		"Recent vulnerabilities could not be loaded",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("Dashboard error response missing %q:\n%s", want, body)
 		}
+	}
+	// The public dashboard no longer loads scan counts at all.
+	if strings.Contains(body, "Scan activity could not be loaded") {
+		t.Fatalf("Public dashboard surfaces an operator-only scan-count error:\n%s", body)
 	}
 	if strings.Contains(body, "Total Scans (7d)</div>\n      <div class=\"mt-1 text-3xl font-semibold\">0</div>") {
 		t.Fatalf("Dashboard rendered scan-count zero as authoritative on load failure:\n%s", body)
@@ -797,7 +810,7 @@ func TestHandleDashboardLoadsIndependentWidgetsConcurrently(t *testing.T) {
 		done <- rec.Code
 	}()
 
-	waitForStartedDashboardReads(t, store.started, []string{"stats", "daily", "recent"}, store.release)
+	waitForStartedDashboardReads(t, store.started, []string{"stats", "recent"}, store.release)
 	close(store.release)
 
 	select {
@@ -850,14 +863,15 @@ func TestHandleDashboardCachesAggregateReadsAcrossRequests(t *testing.T) {
 	if calls.dashboardStats != 1 {
 		t.Fatalf("DashboardStats calls = %d, want 1 cached aggregate read across requests", calls.dashboardStats)
 	}
-	if calls.dailyStats != 1 {
-		t.Fatalf("CountScansByDay calls = %d, want 1 cached aggregate read across requests", calls.dailyStats)
+	// The public dashboard no longer reads scan counts at all.
+	if calls.dailyStats != 0 {
+		t.Fatalf("CountScansByDay calls = %d, want 0 on the public dashboard", calls.dailyStats)
 	}
 	if calls.recentVulnerabilities != 2 {
 		t.Fatalf("ListRecentVulnerabilities calls = %d, want 2 uncached list reads", calls.recentVulnerabilities)
 	}
-	if calls.lastDashboardStatsRequestID != "first-dashboard-request" || calls.lastDailyStatsRequestID != "first-dashboard-request" {
-		t.Fatalf("aggregate reads used request IDs stats=%q daily=%q, want first request context", calls.lastDashboardStatsRequestID, calls.lastDailyStatsRequestID)
+	if calls.lastDashboardStatsRequestID != "first-dashboard-request" {
+		t.Fatalf("aggregate read used request ID stats=%q, want first request context", calls.lastDashboardStatsRequestID)
 	}
 }
 
@@ -1107,8 +1121,8 @@ func TestHandleSearchSummaryWrapsLongQueries(t *testing.T) {
 	}
 	body := rec.Body.String()
 	for _, want := range []string{
-		`text-sm text-gray-500 break-words`,
-		`<bdi dir="auto" class="font-medium text-gray-700 break-all">"` + query + `"</bdi>`,
+		`text-sm text-muted break-words`,
+		`<bdi dir="auto" class="font-medium text-fg break-all">"` + query + `"</bdi>`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("Search response missing long-query wrapping marker %q:\n%s", want, body)
@@ -1184,7 +1198,7 @@ func TestHandleSearchHighlightsMatchedPackageNameSubstrings(t *testing.T) {
 	for _, want := range []string{
 		`Lo<mark>Dash</mark>-lo<mark>dASH</mark>`,
 		`<bdi dir="auto">`,
-		`for <bdi dir="auto" class="font-medium text-gray-700 break-all">"DASH"</bdi>`,
+		`for <bdi dir="auto" class="font-medium text-fg break-all">"DASH"</bdi>`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("Search response missing package highlight marker %q:\n%s", want, body)
@@ -1217,7 +1231,7 @@ func TestHandleSearchHighlightEscapesMarkupLikePackageNames(t *testing.T) {
 	body := rec.Body.String()
 	for _, want := range []string{
 		`safe-<mark>&lt;em</mark>&gt;DASH&lt;/em&gt;`,
-		`for <bdi dir="auto" class="font-medium text-gray-700 break-all">"&lt;em"</bdi>`,
+		`for <bdi dir="auto" class="font-medium text-fg break-all">"&lt;em"</bdi>`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("Search response missing escaped highlight marker %q:\n%s", want, body)
@@ -2015,6 +2029,36 @@ func TestHandleFeedsRedactsDiagnosticMessages(t *testing.T) {
 	}
 }
 
+func TestHandleFeedsHidesSyntheticPipelineStatuses(t *testing.T) {
+	// alias-severity-propagation is a post-sync maintenance step recorded in
+	// feed_sync_status for observability, not an upstream feed. It must not show
+	// in the user-facing feed list (where it reads as a feed that only ever
+	// synced a single entry), while real feeds stay visible.
+	store := &mockStore{
+		feedStatuses: []db.FeedSyncStatus{
+			{FeedName: "osv", LastSyncStatus: "success", EntriesSynced: 500, EntriesTotal: 500},
+			{FeedName: "alias-severity-propagation", LastSyncStatus: "success", EntriesSynced: 1, EntriesTotal: 1},
+		},
+	}
+	handler := HandleFeeds(store, testRenderer(), discardLogger())
+
+	req := httptest.NewRequest(http.MethodGet, "/feeds?partial=status", nil)
+	req.Header.Set("HX-Request", "true")
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Feeds partial status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "alias-severity-propagation") {
+		t.Fatalf("feeds list shows synthetic pipeline status alias-severity-propagation; it is not a feed:\n%s", body)
+	}
+	if !strings.Contains(body, "osv") {
+		t.Fatalf("feeds list dropped the real osv feed:\n%s", body)
+	}
+}
+
 func TestHandleFeedsShowsRejectedImportDetails(t *testing.T) {
 	store := &mockStore{
 		feedStatuses: []db.FeedSyncStatus{{
@@ -2162,7 +2206,7 @@ func TestHandlePackage_ReturnsOK(t *testing.T) {
 	if !strings.Contains(body, "Example advisory title that should remain fully visible in the package table") {
 		t.Fatal("Package response does not contain the full advisory title")
 	}
-	if strings.Contains(body, "href=\"https://nvd.nist.gov/vuln/detail/CVE-2026-0001\" target=\"_blank\" rel=\"noopener\" class=\"text-blue-600 hover:underline\">GHSA-test-1234</a>") {
+	if strings.Contains(body, "href=\"https://nvd.nist.gov/vuln/detail/CVE-2026-0001\" target=\"_blank\" rel=\"noopener\" class=\"text-accent hover:underline\">GHSA-test-1234</a>") {
 		t.Fatal("Package response should not link the advisory ID directly to NVD")
 	}
 	if strings.Contains(body, "/api/v1/packages/npm/lodash/refresh") {

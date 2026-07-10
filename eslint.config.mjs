@@ -3,6 +3,7 @@ import js from "@eslint/js";
 const browserGlobals = {
   document: "readonly",
   Event: "readonly",
+  localStorage: "readonly",
   navigator: "readonly",
   Number: "readonly",
   window: "readonly",
@@ -25,7 +26,10 @@ export default [
   },
   js.configs.recommended,
   {
-    files: ["internal/web/static/auto-refresh.js"],
+    files: [
+      "internal/web/static/auto-refresh.js",
+      "internal/web/static/theme-init.js",
+    ],
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: "script",
@@ -37,14 +41,6 @@ export default [
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: "module",
-      globals: nodeGlobals,
-    },
-  },
-  {
-    files: ["tailwind.config.js"],
-    languageOptions: {
-      ecmaVersion: 2022,
-      sourceType: "commonjs",
       globals: nodeGlobals,
     },
   },
