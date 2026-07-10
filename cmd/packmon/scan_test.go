@@ -423,7 +423,7 @@ func TestStandaloneHTMLReportWritersTightenExistingFilePermissions(t *testing.T)
 			name: "list-all",
 			path: filepath.Join(baseDir, "list-all.html"),
 			write: func(path string) error {
-				return writeListAllHTML(path, "svc", domain.SeverityCritical, &domain.ScanResult{}, listAllPackageReport{})
+				return writeListAllHTML(path, "svc", &domain.ScanResult{}, listAllPackageReport{})
 			},
 		},
 		{

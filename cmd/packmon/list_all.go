@@ -207,7 +207,7 @@ func writeListAllOutputPhase(ctx context.Context, settings scanSettings, scan li
 	packageReport.Sources = mergeListAllSourceRows(packageReport.Sources, listAllExplicitSBOMSources(settings))
 	htmlWritten := false
 	if settings.OutputHTML != "" {
-		if err := writeListAllHTML(settings.OutputHTML, settings.TargetName, scan.failOn, scan.result, packageReport); err != nil {
+		if err := writeListAllHTML(settings.OutputHTML, settings.TargetName, scan.result, packageReport); err != nil {
 			return scan.exitCode, withDefaultExitCode(ExitOperational, err)
 		}
 		htmlWritten = true

@@ -279,7 +279,7 @@ func TestListAllHTMLIncludesTechnologyColumn(t *testing.T) {
 	}
 
 	result := &domain.ScanResult{Mode: "local"}
-	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+	if err := writeListAllHTML(htmlPath, "test", result, report); err != nil {
 		t.Fatalf("writeListAllHTML: %v", err)
 	}
 	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
@@ -314,7 +314,7 @@ func TestListAllHTMLExposesMachineReadableReportTimeAndLanguage(t *testing.T) {
 	}
 	result := &domain.ScanResult{Mode: "remote"}
 
-	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+	if err := writeListAllHTML(htmlPath, "test", result, report); err != nil {
 		t.Fatalf("writeListAllHTML: %v", err)
 	}
 	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
@@ -400,7 +400,7 @@ func TestListAllHTMLCollapsesFullPackageInventoryByDefault(t *testing.T) {
 		},
 	}
 
-	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, &domain.ScanResult{Mode: "local"}, report); err != nil {
+	if err := writeListAllHTML(htmlPath, "test", &domain.ScanResult{Mode: "local"}, report); err != nil {
 		t.Fatalf("writeListAllHTML: %v", err)
 	}
 	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
@@ -556,7 +556,7 @@ func TestListAllHTMLIncludesStandaloneCSPMeta(t *testing.T) {
 		}},
 	}
 
-	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, &domain.ScanResult{Mode: "local"}, report); err != nil {
+	if err := writeListAllHTML(htmlPath, "test", &domain.ScanResult{Mode: "local"}, report); err != nil {
 		t.Fatalf("writeListAllHTML: %v", err)
 	}
 	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
@@ -612,7 +612,7 @@ func TestListAllHTMLFindingSectionClassesHaveCSSRules(t *testing.T) {
 		},
 	}
 
-	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+	if err := writeListAllHTML(htmlPath, "test", result, report); err != nil {
 		t.Fatalf("writeListAllHTML: %v", err)
 	}
 	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
@@ -677,7 +677,7 @@ func renderListAllAccessibilityHTML(t *testing.T) string {
 			URL:          "https://osv.dev/vuln/GHSA-test",
 		}},
 	}
-	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+	if err := writeListAllHTML(htmlPath, "test", result, report); err != nil {
 		t.Fatalf("writeListAllHTML: %v", err)
 	}
 	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
@@ -2155,7 +2155,7 @@ func TestListAllHTMLRendersScopeSummaryAndFindingMetadata(t *testing.T) {
 			Source:       "osv",
 		}},
 	}
-	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+	if err := writeListAllHTML(htmlPath, "test", result, report); err != nil {
 		t.Fatalf("writeListAllHTML: %v", err)
 	}
 	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
@@ -2179,19 +2179,17 @@ func TestListAllHTMLRendersScopeSummaryAndFindingMetadata(t *testing.T) {
 	}
 	for _, want := range []string{
 		`<td class="finding-package"><bdi dir="auto">postcss</bdi></td><td class="finding-advisory"><a class="external-link" href="https://github.com/advisories/GHSA-postcss-test" target="_blank" rel="noopener" aria-label="GHSA-postcss-test opens in a new tab"><bdi dir="auto">GHSA-postcss-test</bdi><span class="sr-only"> (opens in a new tab)</span></a></td><td class="finding-title"><bdi dir="auto">PostCSS test advisory</bdi></td><td class="finding-action"><bdi dir="auto">Fix 8.5.10</bdi></td>`,
-		`<tr class="finding-details-row"><td colspan="5"><dl class="finding-details-list">`,
-		`<dt>Installed</dt><dd><bdi dir="auto">8.5.8</bdi></dd>`,
-		`<dt>Ecosystem</dt><dd>npm</dd>`,
-		`<dt>Source</dt><dd><bdi dir="auto">osv</bdi></dd>`,
-		`<dt>Scope</dt><dd>dev</dd>`,
-		`<dt>Relation</dt><dd>transitive</dd>`,
-		`<dt>Fixed Version</dt><dd><bdi dir="auto">8.5.10</bdi></dd>`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("HTML finding row missing compact/detail data %q:\n%s", want, out)
 		}
 	}
 	for _, removed := range []string{
+		// The redundant per-finding detail row was removed; the summary row
+		// already carries the advisory, title and fix action. (Package-scope
+		// <dt>Scope</dt>/<dt>Relation</dt> still live in the inventory meta list.)
+		`<tr class="finding-details-row"`,
+		`<dl class="finding-details-list"`,
 		`<th class="text via">Via</th>`,
 		`<th class="text flags">Flags</th>`,
 		`<td class="text via">tailwindcss</td>`,
@@ -2231,7 +2229,7 @@ func TestListAllHTMLLinksSecurityFindingAdvisoryWithoutWrapping(t *testing.T) {
 		}},
 	}
 
-	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+	if err := writeListAllHTML(htmlPath, "test", result, report); err != nil {
 		t.Fatalf("writeListAllHTML: %v", err)
 	}
 	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
@@ -2294,7 +2292,7 @@ func TestListAllHTMLGroupsSecurityFindingsByOperationalPriority(t *testing.T) {
 		},
 	}
 
-	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+	if err := writeListAllHTML(htmlPath, "test", result, report); err != nil {
 		t.Fatalf("writeListAllHTML: %v", err)
 	}
 	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
@@ -2302,7 +2300,7 @@ func TestListAllHTMLGroupsSecurityFindingsByOperationalPriority(t *testing.T) {
 		t.Fatalf("read HTML: %v", err)
 	}
 	out := string(data)
-	for _, want := range []string{"Malicious", "Vulnerabilities", "Lifecycle Findings", "Reputation info", "<th scope=\"col\" class=\"finding-action\">Action</th>", "<dt>Type</dt><dd>", "<dt>Risk</dt><dd>", "Malware history", "Known vulnerability", "Security support ended"} {
+	for _, want := range []string{"Malicious", "Vulnerabilities", "Lifecycle Findings", "Reputation info", "<th scope=\"col\" class=\"finding-action\">Action</th>"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("grouped finding HTML missing %q:\n%s", want, out)
 		}
@@ -2340,7 +2338,7 @@ func TestListAllHTMLDoesNotLinkUnsafeFindingURLs(t *testing.T) {
 		}},
 	}
 
-	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+	if err := writeListAllHTML(htmlPath, "test", result, report); err != nil {
 		t.Fatalf("writeListAllHTML: %v", err)
 	}
 	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
@@ -2362,7 +2360,7 @@ func TestListAllHTMLWarningOnlyReportExplainsEmptySections(t *testing.T) {
 	}
 	result := &domain.ScanResult{Mode: "local"}
 
-	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+	if err := writeListAllHTML(htmlPath, "test", result, report); err != nil {
 		t.Fatalf("writeListAllHTML: %v", err)
 	}
 	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
@@ -2388,7 +2386,7 @@ func TestListAllHTMLSuppressesCleanEmptyStatesWhenInventoryWarningsExist(t *test
 	}
 	result := &domain.ScanResult{Mode: "local"}
 
-	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+	if err := writeListAllHTML(htmlPath, "test", result, report); err != nil {
 		t.Fatalf("writeListAllHTML: %v", err)
 	}
 	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
@@ -2442,7 +2440,7 @@ func TestListAllHTMLSecurityFindingRegionsUseGroupSpecificLabels(t *testing.T) {
 		},
 	}
 
-	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+	if err := writeListAllHTML(htmlPath, "test", result, report); err != nil {
 		t.Fatalf("writeListAllHTML: %v", err)
 	}
 	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
@@ -2514,7 +2512,7 @@ func TestListAllHTMLIncludesResponsivePrintAndLightThemePolicy(t *testing.T) {
 	}
 	result := &domain.ScanResult{Mode: "local"}
 
-	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+	if err := writeListAllHTML(htmlPath, "test", result, report); err != nil {
 		t.Fatalf("writeListAllHTML: %v", err)
 	}
 	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
@@ -2569,7 +2567,7 @@ func TestListAllHTMLUsesReportTypeAndSpacingScales(t *testing.T) {
 	}
 	result := &domain.ScanResult{Mode: "local"}
 
-	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+	if err := writeListAllHTML(htmlPath, "test", result, report); err != nil {
 		t.Fatalf("writeListAllHTML: %v", err)
 	}
 	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
@@ -2586,7 +2584,6 @@ func TestListAllHTMLUsesReportTypeAndSpacingScales(t *testing.T) {
 		`.badge{border:1px solid var(--border);border-radius:var(--report-radius-md);padding:var(--report-space-1) var(--report-space-3);font-size:var(--report-type-sm);`,
 		`.sev{display:inline-block;border:1px solid var(--border);border-radius:var(--report-radius-sm);padding:var(--report-space-0-5) var(--report-space-2);`,
 		`.copy-btn{margin-inline-start:var(--report-space-2);border:1px solid var(--border);border-radius:var(--report-radius-sm);background:var(--button-bg);color:var(--button-fg);font:inherit;font-size:var(--report-type-xs);min-width:var(--report-touch-target);min-height:var(--report-touch-target);padding:var(--report-space-1) var(--report-space-3);cursor:pointer;}`,
-		`.finding-details-list{display:flex;flex-wrap:wrap;gap:var(--report-space-1-5) var(--report-space-3);margin:0;padding:0;}`,
 		`.footer{border-top:1px solid var(--border);margin-top:var(--report-space-7);padding-top:var(--report-space-3);color:var(--dim);font-size:var(--report-type-xs);}`,
 	} {
 		if !strings.Contains(out, want) {
@@ -2732,7 +2729,7 @@ func TestListAllHTMLOmitsFindingBlockingSummaryBadge(t *testing.T) {
 		}},
 	}
 
-	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+	if err := writeListAllHTML(htmlPath, "test", result, report); err != nil {
 		t.Fatalf("writeListAllHTML: %v", err)
 	}
 	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
@@ -2768,7 +2765,7 @@ func TestListAllHTMLKeepsUnknownOnlyPackagesOutOfAttention(t *testing.T) {
 	}
 	result := &domain.ScanResult{Mode: "remote"}
 
-	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+	if err := writeListAllHTML(htmlPath, "test", result, report); err != nil {
 		t.Fatalf("writeListAllHTML: %v", err)
 	}
 	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
@@ -2830,7 +2827,7 @@ func TestListAllHTMLMarksMaliciousPackagesAsAttention(t *testing.T) {
 		}},
 	}
 
-	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+	if err := writeListAllHTML(htmlPath, "test", result, report); err != nil {
 		t.Fatalf("writeListAllHTML: %v", err)
 	}
 	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
@@ -2884,7 +2881,7 @@ func TestListAllHTMLSurfacesHistoricalReputationRisk(t *testing.T) {
 		}},
 	}
 
-	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+	if err := writeListAllHTML(htmlPath, "test", result, report); err != nil {
 		t.Fatalf("writeListAllHTML: %v", err)
 	}
 	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
@@ -2942,7 +2939,7 @@ func TestListAllHTMLDegradedFeedStatusIsWarningNotClean(t *testing.T) {
 		FeedStatus:      "degraded",
 	}
 
-	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+	if err := writeListAllHTML(htmlPath, "test", result, report); err != nil {
 		t.Fatalf("writeListAllHTML: %v", err)
 	}
 	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
@@ -2981,7 +2978,7 @@ func TestListAllHTMLLocalDegradedFeedStatusMentionsSyncedDatabase(t *testing.T) 
 		FeedStatus:      "degraded",
 	}
 
-	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+	if err := writeListAllHTML(htmlPath, "test", result, report); err != nil {
 		t.Fatalf("writeListAllHTML: %v", err)
 	}
 	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
@@ -3149,7 +3146,7 @@ func TestListAllHTMLDoesNotMarkVulnerablePackageUpToDate(t *testing.T) {
 		},
 	}
 
-	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+	if err := writeListAllHTML(htmlPath, "test", result, report); err != nil {
 		t.Fatalf("writeListAllHTML: %v", err)
 	}
 	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
@@ -3210,7 +3207,7 @@ func TestListAllHTMLOmitsViaAndFlagsColumns(t *testing.T) {
 	}
 	result := &domain.ScanResult{Mode: "remote"}
 
-	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+	if err := writeListAllHTML(htmlPath, "test", result, report); err != nil {
 		t.Fatalf("writeListAllHTML: %v", err)
 	}
 	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
@@ -3278,7 +3275,7 @@ func TestListAllHTMLUsesCompactActionAndInventoryLayouts(t *testing.T) {
 	}
 	result := &domain.ScanResult{Mode: "remote"}
 
-	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+	if err := writeListAllHTML(htmlPath, "test", result, report); err != nil {
 		t.Fatalf("writeListAllHTML: %v", err)
 	}
 	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
@@ -3333,7 +3330,7 @@ func TestListAllHTMLShortensDigestAndRendersCopyButton(t *testing.T) {
 	}
 	result := &domain.ScanResult{Mode: "remote"}
 
-	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+	if err := writeListAllHTML(htmlPath, "test", result, report); err != nil {
 		t.Fatalf("writeListAllHTML: %v", err)
 	}
 	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
@@ -3406,7 +3403,7 @@ func TestListAllHTMLPrintsExternalHrefsFullDigestsAndIsolatesBidi(t *testing.T) 
 		}},
 	}
 
-	if err := writeListAllHTML(htmlPath, "test-\u05d7", domain.SeverityCritical, result, report); err != nil {
+	if err := writeListAllHTML(htmlPath, "test-\u05d7", result, report); err != nil {
 		t.Fatalf("writeListAllHTML: %v", err)
 	}
 	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
@@ -3422,7 +3419,6 @@ func TestListAllHTMLPrintsExternalHrefsFullDigestsAndIsolatesBidi(t *testing.T) 
 		`<span class="print-copy-value"><bdi dir="auto">` + digest + `</bdi></span>`,
 		`<td class="finding-advisory"><a class="external-link" href="https://github.com/advisories/GHSA-test" target="_blank" rel="noopener" aria-label="GHSA-test opens in a new tab"><bdi dir="auto">GHSA-test</bdi><span class="sr-only"> (opens in a new tab)</span></a></td>`,
 		`<td class="finding-title"><bdi dir="auto">mixed bidi finding ` + "\u05d5" + `</bdi></td>`,
-		`<dt>Source</dt><dd><bdi dir="auto">ghsa-` + "\u05d6" + `</bdi></dd>`,
 		`<span class="source-path"><bdi dir="auto">Dockerfile-` + "\u05d3" + `</bdi></span>`,
 		`a[href]::after{content:" (" attr(href) ")";`,
 		`.copy-btn{display:none;}`,
@@ -3463,7 +3459,7 @@ func TestListAllHTMLAppliesTableLayoutAndAttentionClasses(t *testing.T) {
 		}},
 	}
 
-	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+	if err := writeListAllHTML(htmlPath, "test", result, report); err != nil {
 		t.Fatalf("writeListAllHTML: %v", err)
 	}
 	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
@@ -3485,8 +3481,6 @@ func TestListAllHTMLAppliesTableLayoutAndAttentionClasses(t *testing.T) {
 		`.finding-advisory a{display:inline-flex;align-items:center;min-height:var(--report-touch-target);padding:var(--report-space-1-5) var(--report-space-2);margin:calc(-1 * var(--report-space-1-5)) calc(-1 * var(--report-space-2));white-space:nowrap;overflow-wrap:normal;word-break:normal;}`,
 		`.finding-title{min-width:320px;white-space:normal;overflow-wrap:break-word;word-break:normal;}`,
 		`.finding-action{min-width:150px;white-space:nowrap;overflow-wrap:normal;word-break:normal;}`,
-		`.finding-details-row td{padding-top:0;color:var(--dim);font-size:var(--report-type-sm);}`,
-		`.finding-details-list{display:flex;flex-wrap:wrap;gap:var(--report-space-1-5) var(--report-space-3);margin:0;padding:0;}`,
 		`<td class="package-status status-update">Update available</td>`,
 		`<td class="vuln-col vuln-yes">yes</td>`,
 		`<span class="sev sev-high">HIGH</span>`,
@@ -3496,7 +3490,6 @@ func TestListAllHTMLAppliesTableLayoutAndAttentionClasses(t *testing.T) {
 		`<th scope="col" class="finding-title">Finding</th>`,
 		`<th scope="col" class="finding-action">Action</th>`,
 		`<td class="finding-action"><bdi dir="auto">Fix &gt;= 8.5.10</bdi></td>`,
-		`<dt>Fixed Version</dt><dd><bdi dir="auto">&gt;= 8.5.10</bdi></dd>`,
 		`<td class="installed"><span class="copy-value"><bdi dir="auto">sha256:aaaaaaaaaaaa..</bdi></span><button type="button" class="copy-btn" data-copy="` + installedDigest + `" data-copy-label="Copy full installed value for docker.io/library/nginx ` + installedDigest + `" data-copy-message="Copied full installed value for docker.io/library/nginx" aria-label="Copy full installed value for docker.io/library/nginx ` + installedDigest + `">Copy</button><span class="print-copy-value"><bdi dir="auto">` + installedDigest + `</bdi></span></td>`,
 	} {
 		if !strings.Contains(out, want) {
@@ -3542,7 +3535,7 @@ func TestListAllHTMLRendersStatusAndCheckedLockFiles(t *testing.T) {
 			Source:     "reversinglabs",
 		}},
 	}
-	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+	if err := writeListAllHTML(htmlPath, "test", result, report); err != nil {
 		t.Fatalf("writeListAllHTML: %v", err)
 	}
 	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
@@ -3595,7 +3588,7 @@ func TestListAllHTMLOmitsLongFlagsAndListsInventorySources(t *testing.T) {
 	}
 	result := &domain.ScanResult{Mode: "remote"}
 
-	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+	if err := writeListAllHTML(htmlPath, "test", result, report); err != nil {
 		t.Fatalf("writeListAllHTML: %v", err)
 	}
 	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
@@ -3647,7 +3640,7 @@ func TestListAllHTMLUsesReportInventorySources(t *testing.T) {
 	}
 	result := &domain.ScanResult{Mode: "remote"}
 
-	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+	if err := writeListAllHTML(htmlPath, "test", result, report); err != nil {
 		t.Fatalf("writeListAllHTML: %v", err)
 	}
 	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
@@ -3735,7 +3728,7 @@ func TestListAllHTMLMinimizesAbsoluteReportPaths(t *testing.T) {
 		},
 	}
 
-	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, &domain.ScanResult{Mode: "local"}, report); err != nil {
+	if err := writeListAllHTML(htmlPath, "test", &domain.ScanResult{Mode: "local"}, report); err != nil {
 		t.Fatalf("writeListAllHTML: %v", err)
 	}
 	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
@@ -3786,7 +3779,7 @@ func TestListAllHTMLSurfacesUpdatesWithoutSecurityFindings(t *testing.T) {
 		WithUpdates: 1,
 	}
 	result := &domain.ScanResult{Mode: "remote"}
-	if err := writeListAllHTML(htmlPath, "test", domain.SeverityCritical, result, report); err != nil {
+	if err := writeListAllHTML(htmlPath, "test", result, report); err != nil {
 		t.Fatalf("writeListAllHTML: %v", err)
 	}
 	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
@@ -3886,7 +3879,7 @@ func TestListAllHelperBranches(t *testing.T) {
 	if err := os.WriteFile(parentFile, []byte("x"), 0o600); err != nil {
 		t.Fatalf("write parent file: %v", err)
 	}
-	err := writeListAllHTML(filepath.Join(parentFile, "report.html"), "", domain.SeverityCritical, &domain.ScanResult{}, listAllPackageReport{})
+	err := writeListAllHTML(filepath.Join(parentFile, "report.html"), "", &domain.ScanResult{}, listAllPackageReport{})
 	if err == nil || !strings.Contains(err.Error(), "prepare HTML output") {
 		t.Fatalf("writeListAllHTML(parent file) = %v", err)
 	}

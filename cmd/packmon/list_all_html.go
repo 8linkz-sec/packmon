@@ -76,9 +76,6 @@ type listAllHTMLMessages struct {
 	SeverityColumn                     string
 	AdvisoryColumn                     string
 	FindingColumn                      string
-	TypeLabel                          string
-	RiskLabel                          string
-	FixedVersionLabel                  string
 	OpenInNewTabAriaLabel              string
 	OpenInNewTabScreenReader           string
 	NoSecurityFindingsPrefix           string
@@ -91,7 +88,6 @@ type listAllHTMLMessages struct {
 	NoPackagesFound                    string
 	NoPackageInventoryRows             string
 	CheckedInventorySourcesHeading     string
-	FailOnPrefix                       string
 	CopyButton                         string
 	CopyFullValue                      string
 	CopiedFullValue                    string
@@ -132,9 +128,6 @@ func defaultListAllHTMLMessages() listAllHTMLMessages {
 		SeverityColumn:                     "Severity",
 		AdvisoryColumn:                     "Advisory",
 		FindingColumn:                      "Finding",
-		TypeLabel:                          "Type",
-		RiskLabel:                          "Risk",
-		FixedVersionLabel:                  "Fixed Version",
 		OpenInNewTabAriaLabel:              "%s opens in a new tab",
 		OpenInNewTabScreenReader:           " (opens in a new tab)",
 		NoSecurityFindingsPrefix:           "No security findings in",
@@ -147,7 +140,6 @@ func defaultListAllHTMLMessages() listAllHTMLMessages {
 		NoPackagesFound:                    "No packages found.",
 		NoPackageInventoryRows:             "No package inventory rows were available; review the warnings above for coverage gaps.",
 		CheckedInventorySourcesHeading:     "Checked Inventory Sources",
-		FailOnPrefix:                       "fail-on",
 		CopyButton:                         "Copy",
 		CopyFullValue:                      "Copy full value",
 		CopiedFullValue:                    "Copied full value",
@@ -164,7 +156,7 @@ var listAllHTMLTemplate = sync.OnceValue(func() *template.Template {
 	}).Parse(listAllHTML))
 })
 
-func writeListAllHTML(path, title string, failOn domain.Severity, result *domain.ScanResult, packages listAllPackageReport) error {
+func writeListAllHTML(path, title string, result *domain.ScanResult, packages listAllPackageReport) error {
 	if err := ensureOutputDir(path); err != nil {
 		return fmt.Errorf("prepare HTML output: %w", err)
 	}
@@ -196,7 +188,6 @@ func writeListAllHTML(path, title string, failOn domain.Severity, result *domain
 		Sources                  []listAllSourceRow
 		Status                   string
 		Warnings                 []string
-		FailOn                   string
 		FindingStatuses          map[string]listAllHTMLFindingState
 		VulnerabilityFindingKeys map[string]struct{}
 	}{
@@ -212,7 +203,6 @@ func writeListAllHTML(path, title string, failOn domain.Severity, result *domain
 		Sources:                  packages.Sources,
 		Status:                   listAllOperationalStatusForResult(result),
 		Warnings:                 listAllHTMLWarnings(result, packages.Warnings),
-		FailOn:                   string(failOn),
 		FindingStatuses:          findingStatuses,
 		VulnerabilityFindingKeys: vulnSet,
 	}
@@ -576,11 +566,6 @@ td{word-break:break-word;overflow-wrap:anywhere;}
 .finding-advisory a{display:inline-flex;align-items:center;min-height:var(--report-touch-target);padding:var(--report-space-1-5) var(--report-space-2);margin:calc(-1 * var(--report-space-1-5)) calc(-1 * var(--report-space-2));white-space:nowrap;overflow-wrap:normal;word-break:normal;}
 .finding-title{min-width:320px;white-space:normal;overflow-wrap:break-word;word-break:normal;}
 .finding-action{min-width:150px;white-space:nowrap;overflow-wrap:normal;word-break:normal;}
-.finding-details-row td{padding-top:0;color:var(--dim);font-size:var(--report-type-sm);}
-.finding-details-list{display:flex;flex-wrap:wrap;gap:var(--report-space-1-5) var(--report-space-3);margin:0;padding:0;}
-.finding-details-list div{display:flex;gap:var(--report-space-1);min-width:0;}
-.finding-details-list dt{font-weight:700;color:var(--heading);}
-.finding-details-list dd{margin:0;overflow-wrap:anywhere;word-break:break-word;}
 .finding-section{margin:0 0 var(--report-space-5);}
 .finding-section h3{font-size:var(--report-type-base);margin:var(--report-space-3) 0 var(--report-space-2);color:var(--heading);}
 .finding-section h3.s-mal{color:var(--crit);}
@@ -632,7 +617,7 @@ a:hover{text-decoration:underline;}
 .source-path{min-width:0;overflow-wrap:anywhere;word-break:break-word;}
 ` + `@supports not (font-size:var(--report-type-base)){body{font-size:0.875rem;}` +
 	`h1{font-size:1.375rem;}h2,.inventory-details summary{font-size:1rem;}` +
-	`.meta,.badge,.finding-details-row td{font-size:0.8125rem;}` +
+	`.meta,.badge{font-size:0.8125rem;}` +
 	`th,.source-kind,.footer,.copy-btn,.copy-fallback{font-size:0.75rem;}` +
 	`.status,.warning,.empty{font-size:0.9375rem;}}` + `
 ` + `@media (prefers-color-scheme: light){:root{` + reporthtml.LightBaseThemeCSS +
@@ -748,16 +733,7 @@ const listAllHTMLBody = `
 	`<bdi dir="auto">{{.Advisory}}</bdi>{{end}}` +
 	`</td><td class="finding-title"><bdi dir="auto">{{.Title}}` +
 	`</bdi></td><td class="finding-action"><bdi dir="auto">{{.Action}}` +
-	`</bdi></td></tr><tr class="finding-details-row"><td colspan="5">` +
-	`<dl class="finding-details-list"><div><dt>{{$.Messages.TypeLabel}}</dt><dd>{{.Type}}` +
-	`</dd></div><div><dt>{{$.Messages.RiskLabel}}</dt><dd>{{.RiskType}}` +
-	`</dd></div><div><dt>{{$.Messages.InstalledColumn}}</dt><dd><bdi dir="auto">{{.Version}}` +
-	`</bdi></dd></div><div><dt>{{$.Messages.EcosystemLabel}}</dt><dd>{{.Ecosystem}}` +
-	`</dd></div><div><dt>{{$.Messages.SourceLabel}}</dt><dd><bdi dir="auto">{{.Source}}` +
-	`</bdi></dd></div><div><dt>{{$.Messages.ScopeLabel}}</dt><dd>{{.Scope}}` +
-	`</dd></div><div><dt>{{$.Messages.RelationLabel}}</dt><dd>{{.Relation}}` +
-	`</dd></div><div><dt>{{$.Messages.FixedVersionLabel}}</dt><dd><bdi dir="auto">{{.FixedVersion}}` +
-	`</bdi></dd></div></dl></td></tr>{{end}}` + `
+	`</bdi></td></tr>{{end}}` + `
 </tbody>
 </table>
 </div>
@@ -817,7 +793,6 @@ const listAllHTMLBody = `
 	`</span><span class="source-path"><bdi dir="auto">{{.Path}}</bdi></span></li>{{end}}` + `
 </ul>
 {{end}}
-<div class="footer">{{.Messages.FailOnPrefix}} {{.FailOn}}</div>
 <div id="copy-status" class="sr-only" role="status" aria-live="polite"></div>
 </main>
 <script>
