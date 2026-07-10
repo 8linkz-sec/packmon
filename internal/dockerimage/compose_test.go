@@ -51,6 +51,63 @@ services:
 	}
 }
 
+func TestResolveComposeImageDefault(t *testing.T) {
+	cases := []struct {
+		name   string
+		raw    string
+		want   string
+		wantOK bool
+	}{
+		{"literal", "postgres:18-alpine", "postgres:18-alpine", true},
+		{"colon-dash default", "${IMG:-cgr.dev/chainguard/postgres:18@sha256:abc}", "cgr.dev/chainguard/postgres:18@sha256:abc", true},
+		{"dash default", "${IMG-nginx:1.27}", "nginx:1.27", true},
+		{"partial default", "nginx:${TAG:-latest}", "nginx:latest", true},
+		{"no default", "${IMG}", "", false},
+		{"required", "${IMG:?must be set}", "", false},
+		{"plus form unset", "${IMG:+override}", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := resolveComposeImageDefault(tc.raw)
+			if got != tc.want || ok != tc.wantOK {
+				t.Fatalf("resolveComposeImageDefault(%q) = (%q, %v), want (%q, %v)", tc.raw, got, ok, tc.want, tc.wantOK)
+			}
+		})
+	}
+}
+
+func TestParseComposeImagesResolvesVariableDefaults(t *testing.T) {
+	input := `
+services:
+  postgres:
+    image: ${PACKMON_POSTGRES_IMAGE:-cgr.dev/chainguard/postgres:18@sha256:891139a6d9036632791857fb7585425f1bf0c64516fc52bc39da94305ee92461}
+  missing:
+    image: ${UNSET_IMAGE}
+  fallback:
+    image: ${UNSET_IMAGE}
+    build: .
+`
+	images, err := ParseComposeImages(strings.NewReader(input), "docker-compose.yml")
+	if err != nil {
+		t.Fatalf("ParseComposeImages: %v", err)
+	}
+	// postgres resolves to its declared default; the "missing" service has no
+	// usable default and no build, so it is skipped; "fallback" falls back to
+	// its local build image.
+	if len(images) != 2 {
+		t.Fatalf("images = %#v, want 2 rows (resolved default + local build)", images)
+	}
+	if !strings.Contains(images[0].Ref.Name, "chainguard/postgres") || images[0].Ref.Registry != "cgr.dev" {
+		t.Fatalf("postgres resolved image = %#v", images[0].Ref)
+	}
+	if !containsString(images[0].Flags, "service=postgres") {
+		t.Fatalf("postgres flags = %#v", images[0].Flags)
+	}
+	if !images[1].LocalBuild || !containsString(images[1].Flags, "service=fallback") {
+		t.Fatalf("fallback build row = %#v", images[1])
+	}
+}
+
 func TestParseComposeImagesRejectsMalformedYAML(t *testing.T) {
 	_, err := ParseComposeImages(strings.NewReader("services:\n  bad: ["), "compose.yml")
 	if err == nil {
