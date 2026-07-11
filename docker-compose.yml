@@ -32,7 +32,7 @@ services:
           cpus: '1.0'
         reservations:
           memory: 128M
-    restart: unless-stopped
+    # restart: unless-stopped
 
   packmon-server:
     logging: *default-logging
@@ -144,7 +144,7 @@ services:
         reservations:
           memory: 256M
     stop_grace_period: 25s
-    restart: unless-stopped
+    # restart: unless-stopped
 
   packmon-migrate:
     profiles: ["manual"]
@@ -180,7 +180,7 @@ services:
           cpus: '1.0'
         reservations:
           memory: 128M
-    restart: "no"
+    # restart: "no"
 
   packmon-backup:
     profiles: ["manual"]
@@ -206,7 +206,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    restart: "no"
+    # restart: "no"
 
 volumes:
   postgres-data:

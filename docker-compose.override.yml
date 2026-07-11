@@ -14,7 +14,7 @@ services:
     working_dir: /workspace
     volumes:
       - ".:/workspace"
-    restart: "no"
+    # restart: "no"
 
   # Local convenience: packmon-migrate is `profiles: ["manual"]` in the base
   # file so it never runs implicitly there. Locally we want the friendly
