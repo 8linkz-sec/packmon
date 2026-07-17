@@ -45,6 +45,8 @@ type adminFlowStoreStub struct {
 
 	listFeedConfigs     int
 	dashboardStatsCalls int
+	unknownSeverityCalls int
+	unknownSeverityCount int
 }
 
 func newAdminStoreStub() *adminFlowStoreStub {
@@ -549,6 +551,13 @@ func (s *adminFlowStoreStub) DashboardStats(context.Context) (*db.DashboardStats
 		copyValue.BySeverity[severity] = count
 	}
 	return &copyValue, nil
+}
+
+func (s *adminFlowStoreStub) CountUnknownSeverityFindings(context.Context) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.unknownSeverityCalls++
+	return s.unknownSeverityCount, nil
 }
 
 func (s *adminFlowStoreStub) CountScansByDay(context.Context, int) ([]db.DailyScanStats, error) {
@@ -1120,7 +1129,7 @@ func TestAdminPagesRenderWithAuthenticatedSession(t *testing.T) {
 				`href="/admin/advisories"`,
 				`href="/admin/settings"`,
 				`aria-current="page"`,
-				`class="shrink-0 inline-flex min-h-11 items-center rounded-md px-3 py-2`,
+				`class="shrink-0 inline-flex min-h-8 items-center rounded-md border px-3 py-1.5 pm-focus-ring`,
 			} {
 				if !strings.Contains(body, want) {
 					t.Fatalf("%s body missing responsive admin nav marker %q\nbody=%s", tt.target, want, body)
@@ -1267,7 +1276,7 @@ func TestAdminDashboardUsesRuntimeFeedRowsAndPausedQueue(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Queue Summary",
-		">Paused</div>",
+		">Paused</dt>",
 		"ReversingLabs",
 		"configured",
 	} {
@@ -1281,7 +1290,7 @@ func TestAdminDashboardUsesRuntimeFeedRowsAndPausedQueue(t *testing.T) {
 		}
 	}
 	rlRow := adminTableRowContaining(body, "ReversingLabs")
-	if strings.Contains(rlRow, ">pending</span>") {
+	if strings.Contains(rlRow, ">pending</bdi>") {
 		t.Fatalf("dashboard ReversingLabs row status = pending, want configured\nrow=%s", rlRow)
 	}
 }
@@ -1373,6 +1382,48 @@ func waitForStartedAdminDashboardReads(t *testing.T, started <-chan string, want
 			close(release)
 			t.Fatalf("admin dashboard store reads did not start concurrently; saw %v, want %v", seen, want)
 		}
+	}
+}
+
+func TestAdminFeedsPageUsesDedicatedUnknownSeverityCount(t *testing.T) {
+	store := newAdminStoreStub()
+	store.unknownSeverityCount = 3
+	handler, sm, _ := newAdminFlowHandler(t, store, adminFlowConfig())
+	req, _ := authenticatedAdminRequest(t, sm, http.MethodGet, "/admin/feeds")
+	rec := httptest.NewRecorder()
+
+	handler.HandleAdminFeeds(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("feeds status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.dashboardStatsCalls != 0 {
+		t.Fatalf("DashboardStats calls = %d, want 0: the feeds page must not run the full dashboard aggregate for one number", store.dashboardStatsCalls)
+	}
+	if store.unknownSeverityCalls != 1 {
+		t.Fatalf("CountUnknownSeverityFindings calls = %d, want 1", store.unknownSeverityCalls)
+	}
+}
+
+func TestAdminDashboardStatsAreCachedAcrossRequests(t *testing.T) {
+	store := newAdminStoreStub()
+	handler, sm, _ := newAdminFlowHandler(t, store, adminFlowConfig())
+
+	for range 2 {
+		req, _ := authenticatedAdminRequest(t, sm, http.MethodGet, "/admin/")
+		rec := httptest.NewRecorder()
+		handler.HandleDashboard(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("dashboard status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.dashboardStatsCalls != 1 {
+		t.Fatalf("DashboardStats calls = %d, want 1: repeated dashboard loads within the TTL must reuse the cached aggregate", store.dashboardStatsCalls)
 	}
 }
 
@@ -3781,12 +3832,12 @@ func TestAdminQueuePageRendersHumanReadableStatusBadges(t *testing.T) {
 	}
 	body := rec.Body.String()
 	for _, want := range []string{"Pending", "Processing", "Done", "Error", "Paused"} {
-		if count := strings.Count(body, ">"+want+"</span>"); count != 2 {
+		if count := strings.Count(body, ">"+want+"</bdi>"); count != 2 {
 			t.Fatalf("queue page rendered %q badge count = %d, want 2\nbody=%s", want, count, body)
 		}
 	}
 	for _, raw := range []string{"pending", "processing", "done", "error", "paused"} {
-		if strings.Contains(body, ">"+raw+"</span>") {
+		if strings.Contains(body, ">"+raw+"</bdi>") {
 			t.Fatalf("queue page rendered raw lowercase status badge %q\nbody=%s", raw, body)
 		}
 	}

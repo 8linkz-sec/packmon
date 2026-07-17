@@ -47,7 +47,7 @@ func HandleDashboardWithOptions(store Store, renderer *Renderer, logger *slog.Lo
 	if activeNav == "" {
 		activeNav = "dashboard"
 	}
-	statsCache := newWebAggregateCache[*db.DashboardStatsResult](webAggregateCacheTTL)
+	statsCache := NewAggregateCache[*db.DashboardStatsResult](webAggregateCacheTTL)
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Only handle exact root path; let other routes fall through.
@@ -70,7 +70,7 @@ func HandleDashboardWithOptions(store Store, renderer *Renderer, logger *slog.Lo
 		go func() {
 			defer widgetReads.Done()
 			var err error
-			stats, err = statsCache.get(ctx, store.DashboardStats)
+			stats, err = statsCache.Get(ctx, store.DashboardStats)
 			if err != nil {
 				logger.Error("dashboard: failed to load stats", contextLogAttrs(ctx, "error", err)...)
 				stats = &db.DashboardStatsResult{BySeverity: map[string]int{}}

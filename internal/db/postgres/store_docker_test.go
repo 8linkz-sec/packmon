@@ -396,6 +396,35 @@ func TestUpsertMaliciousFindingRejectsNonArrayVersions(t *testing.T) {
 	}
 }
 
+func TestCountVulnerabilitiesBySourceAgainstDocker(t *testing.T) {
+	store, _ := startDockerPostgresStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	for _, vuln := range []*db.Vulnerability{
+		{ID: "GHSA-count-0001", Summary: "count one", Severity: "LOW", Published: now, Modified: now,
+			Sources: []db.VulnerabilitySource{{Source: "ghsa", SourceID: "GHSA-count-0001"}}},
+		{ID: "GHSA-count-0002", Summary: "count two", Severity: "LOW", Published: now, Modified: now,
+			Sources: []db.VulnerabilitySource{{Source: "ghsa", SourceID: "GHSA-count-0002"}}},
+		{ID: "OSV-count-0001", Summary: "other source", Severity: "LOW", Published: now, Modified: now,
+			Sources: []db.VulnerabilitySource{{Source: "osv", SourceID: "OSV-count-0001"}}},
+	} {
+		if err := store.UpsertVulnerability(ctx, vuln); err != nil {
+			t.Fatalf("UpsertVulnerability(%s) error = %v", vuln.ID, err)
+		}
+	}
+
+	if count, err := store.CountVulnerabilitiesBySource(ctx, "ghsa"); err != nil || count != 2 {
+		t.Fatalf("CountVulnerabilitiesBySource(ghsa) = %d, %v; want 2 nil", count, err)
+	}
+	if count, err := store.CountVulnerabilitiesBySource(ctx, "osv"); err != nil || count != 1 {
+		t.Fatalf("CountVulnerabilitiesBySource(osv) = %d, %v; want 1 nil", count, err)
+	}
+	if count, err := store.CountVulnerabilitiesBySource(ctx, "nvd"); err != nil || count != 0 {
+		t.Fatalf("CountVulnerabilitiesBySource(nvd) = %d, %v; want 0 nil", count, err)
+	}
+}
+
 // TestUpsertMaliciousFindingRefreshesUpdatedAtOnUnchangedResync guards the
 // OpenSSF sync contract: pruneStaleFindings withdraws findings whose updated_at
 // predates the sync start, so every entry re-seen in a sync -- even one whose
@@ -4144,4 +4173,18 @@ func syncReputationExportContains(items []db.SyncReputationFinding, id string) b
 
 func ptrDuration(d time.Duration) *time.Duration {
 	return &d
+}
+
+func TestCountUnknownSeverityFindingsAgainstDocker(t *testing.T) {
+	store, _ := startDockerPostgresStore(t)
+	ctx := context.Background()
+
+	if count, err := store.CountUnknownSeverityFindings(ctx); err != nil || count != 0 {
+		t.Fatalf("CountUnknownSeverityFindings(empty) = %d, %v; want 0 nil", count, err)
+	}
+
+	// Check constraints restrict all finding severities to the four supported
+	// values, so the unknown bucket can only be filled by legacy rows imported
+	// before the constraints existed; the counter must still answer cheaply
+	// and without error for that defensive case.
 }

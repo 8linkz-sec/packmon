@@ -211,3 +211,18 @@ func adminQueueJobsFromDB(jobs []db.RefreshJob) []adminQueueJob {
 	}
 	return out
 }
+
+// CountUnknownSeverityFindings delegates to the store's dedicated counter and
+// falls back to the full dashboard aggregate for stores that lack it.
+func (s dbAdminStoreAdapter) CountUnknownSeverityFindings(ctx context.Context) (int, error) {
+	if counter, ok := s.Store.(interface {
+		CountUnknownSeverityFindings(context.Context) (int, error)
+	}); ok {
+		return counter.CountUnknownSeverityFindings(ctx)
+	}
+	stats, err := s.Store.DashboardStats(ctx)
+	if err != nil || stats == nil {
+		return 0, err
+	}
+	return stats.BySeverity["UNKNOWN"], nil
+}

@@ -240,3 +240,27 @@ func (s *Store) DashboardStats(ctx context.Context) (*db.DashboardStatsResult, e
 	}
 	return stats, nil
 }
+
+// CountUnknownSeverityFindings counts active findings whose stored severity
+// normalizes to UNKNOWN (empty or literal unknown), matching the UNKNOWN
+// bucket of DashboardStats without running the full dashboard aggregate. The
+// admin feeds page uses it for the NVD enrichment hint.
+func (s *Store) CountUnknownSeverityFindings(ctx context.Context) (int, error) {
+	var count int
+	err := s.pool.QueryRow(ctx, `
+		SELECT (
+			(SELECT COUNT(*) FROM vulnerabilities
+			 WHERE withdrawn IS NULL
+			   AND (TRIM(severity) = '' OR UPPER(TRIM(severity)) = 'UNKNOWN'))
+			+ (SELECT COUNT(*) FROM malicious_findings
+			 WHERE removed_at IS NULL
+			   AND (TRIM(severity) = '' OR UPPER(TRIM(severity)) = 'UNKNOWN'))
+			+ (SELECT COUNT(*) FROM package_reputation_cache
+			 WHERE status IN ('malicious', 'removed', 'risk')
+			   AND (TRIM(severity) = '' OR UPPER(TRIM(severity)) = 'UNKNOWN'))
+		)::int`).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("postgres: count unknown severity findings: %w", err)
+	}
+	return count, nil
+}

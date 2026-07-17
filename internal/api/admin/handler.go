@@ -111,6 +111,7 @@ type Store interface {
 	UpsertSystemSettings(ctx context.Context, settings *db.SystemSettings) error
 
 	DashboardStats(ctx context.Context) (*db.DashboardStatsResult, error)
+	CountUnknownSeverityFindings(ctx context.Context) (int, error)
 	CountScansByDay(ctx context.Context, days int) ([]db.DailyScanStats, error)
 	ListRecentScans(ctx context.Context, limit, offset int) ([]db.ScanLogEntry, error)
 
@@ -123,6 +124,11 @@ type Store interface {
 }
 
 // AdminHandler holds the dependencies for admin HTTP handlers.
+// adminDashboardStatsCacheTTL bounds how stale the admin dashboard aggregate
+// may be; feed syncs are hours apart, so 15s is invisible to operators while
+// collapsing repeated tab switches into one aggregate query.
+const adminDashboardStatsCacheTTL = 15 * time.Second
+
 type AdminHandler struct {
 	store           Store
 	sm              *auth.SessionManager
@@ -135,6 +141,11 @@ type AdminHandler struct {
 	applyFeedConfig FeedConfigApplyFunc
 	resetFeedConfig FeedConfigResetFunc
 	csrfToken       func(*auth.Session) (string, error)
+
+	// dashboardStatsCache memoizes the expensive dashboard aggregate (UNION
+	// dedupe over all finding sources) between page loads; the numbers only
+	// change when feeds sync or advisories are edited.
+	dashboardStatsCache *web.AggregateCache[*db.DashboardStatsResult]
 
 	// loginMu protects the loginAttempts map.
 	loginMu       sync.Mutex
@@ -153,6 +164,7 @@ func NewAdminHandler(ctx context.Context, store any, sm *auth.SessionManager, re
 	}
 	h := &AdminHandler{
 		store:         adaptAdminStore(store),
+		dashboardStatsCache: web.NewAggregateCache[*db.DashboardStatsResult](adminDashboardStatsCacheTTL),
 		sm:            sm,
 		renderer:      renderer,
 		logger:        logger,
@@ -461,7 +473,7 @@ func (h *AdminHandler) HandleDashboard(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer widgetReads.Done()
 		var err error
-		stats, err = h.store.DashboardStats(ctx)
+		stats, err = h.dashboardStatsCache.Get(ctx, h.store.DashboardStats)
 		if err != nil {
 			h.logger.Error("admin dashboard: failed to load stats", adminLogAttrsForCorrelationID(correlationID, "error", err)...)
 			stats = &db.DashboardStatsResult{BySeverity: map[string]int{}}

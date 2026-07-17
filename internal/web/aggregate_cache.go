@@ -8,7 +8,10 @@ import (
 
 const webAggregateCacheTTL = 5 * time.Second
 
-type webAggregateCache[T any] struct {
+// AggregateCache memoizes one expensive aggregate value for a short TTL so
+// page handlers do not recompute it on every request. Shared by the public web
+// and admin handlers.
+type AggregateCache[T any] struct {
 	mu      sync.RWMutex
 	ttl     time.Duration
 	value   T
@@ -16,11 +19,14 @@ type webAggregateCache[T any] struct {
 	ok      bool
 }
 
-func newWebAggregateCache[T any](ttl time.Duration) *webAggregateCache[T] {
-	return &webAggregateCache[T]{ttl: ttl}
+// NewAggregateCache returns an AggregateCache with the given TTL; a TTL <= 0
+// disables caching.
+func NewAggregateCache[T any](ttl time.Duration) *AggregateCache[T] {
+	return &AggregateCache[T]{ttl: ttl}
 }
 
-func (c *webAggregateCache[T]) get(ctx context.Context, load func(context.Context) (T, error)) (T, error) {
+// Get returns the cached value or loads and stores a fresh one.
+func (c *AggregateCache[T]) Get(ctx context.Context, load func(context.Context) (T, error)) (T, error) {
 	var zero T
 	if err := ctx.Err(); err != nil {
 		return zero, err

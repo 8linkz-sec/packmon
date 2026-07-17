@@ -216,10 +216,13 @@ func (h *AdminHandler) HandleAdminFeeds(w http.ResponseWriter, r *http.Request) 
 		defaultSyncInterval = formatRuntimeDuration(h.cfg.FeedSync.Interval)
 	}
 
-	// Count UNKNOWN-severity vulnerabilities for the NVD info hint.
+	// Count UNKNOWN-severity findings for the NVD info hint via the dedicated
+	// counter; the full dashboard aggregate is far too expensive for one number.
 	unknownCount := 0
-	if stats, statsErr := h.store.DashboardStats(ctx); statsErr == nil && stats != nil {
-		unknownCount = stats.BySeverity["UNKNOWN"]
+	if count, countErr := h.store.CountUnknownSeverityFindings(ctx); countErr == nil {
+		unknownCount = count
+	} else {
+		h.logger.Warn("admin feeds: unknown severity count failed", h.adminLogAttrs(r, "error", countErr)...)
 	}
 
 	data := map[string]any{

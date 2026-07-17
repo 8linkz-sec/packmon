@@ -50,7 +50,7 @@ func HandleScans(store ScansStore, renderer *Renderer, logger *slog.Logger) http
 // HandleScansWithOptions serves the scans page with route-specific navigation
 // state.
 func HandleScansWithOptions(store ScansStore, renderer *Renderer, logger *slog.Logger, opts ScansOptions) http.HandlerFunc {
-	dailyCache := newWebAggregateCache[[]db.DailyScanStats](webAggregateCacheTTL)
+	dailyCache := NewAggregateCache[[]db.DailyScanStats](webAggregateCacheTTL)
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
@@ -63,7 +63,7 @@ func HandleScansWithOptions(store ScansStore, renderer *Renderer, logger *slog.L
 			adminSection = "scans"
 		}
 
-		daily, err := dailyCache.get(ctx, func(ctx context.Context) ([]db.DailyScanStats, error) {
+		daily, err := dailyCache.Get(ctx, func(ctx context.Context) ([]db.DailyScanStats, error) {
 			return store.CountScansByDay(ctx, 7)
 		})
 		dailyStatsLoadError := ""

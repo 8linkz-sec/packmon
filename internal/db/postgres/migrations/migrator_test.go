@@ -1475,7 +1475,7 @@ func TestReadEmbeddedMigrationReadsSpecificDownMigration(t *testing.T) {
 		!strings.HasSuffix(migration.Name, ".down.sql") {
 		t.Fatalf("Name = %q, want current down migration", migration.Name)
 	}
-	if !strings.Contains(migration.SQL, "DROP COLUMN IF EXISTS admin_audit_retention_seconds") {
+	if !strings.Contains(migration.SQL, "DROP INDEX IF EXISTS idx_vulnerabilities_unknown_severity") {
 		t.Fatalf("current down migration SQL does not include expected rollback marker:\n%s", migration.SQL)
 	}
 }
