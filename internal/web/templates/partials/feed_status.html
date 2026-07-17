@@ -1,5 +1,5 @@
 {{define "feed-status-badge"}}
-<span class="inline-block px-2 py-0.5 rounded text-xs font-medium {{statusClass .Status}}">{{.Status}}</span>
+{{template "pm-badge" dict "Class" (statusClass .Status) "Label" .Status}}
 {{end}}
 
 {{define "feed-last-sync-cell"}}

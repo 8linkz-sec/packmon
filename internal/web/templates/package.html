@@ -208,7 +208,7 @@
     target="_blank"
     rel="noopener"
     aria-label="{{newTabAriaLabel .Label}}"
-    class="inline-flex min-h-11 items-center rounded-md bg-surface-2 px-2.5 py-1 text-xs font-medium text-fg hover:bg-surface-2"
+    class="inline-flex min-h-6 items-center rounded border border-border bg-surface-2 px-2 py-0.5 text-xs font-medium text-fg hover:underline"
   ><bdi dir="auto">{{.Label}}</bdi>{{template "external-link-icon"}}<span class="sr-only">{{newTabSRText}}</span></a>
   {{end}}
 </div>
@@ -219,7 +219,7 @@
   target="_blank"
   rel="noopener"
   aria-label="{{newTabAriaLabel $label}}"
-  class="inline-flex min-h-11 items-center rounded-md bg-surface-2 px-2.5 py-1 text-xs font-medium text-fg hover:bg-surface-2"
+  class="inline-flex min-h-6 items-center rounded border border-border bg-surface-2 px-2 py-0.5 text-xs font-medium text-fg hover:underline"
 ><bdi dir="auto">{{$label}}</bdi>{{template "external-link-icon"}}<span class="sr-only">{{newTabSRText}}</span></a>
 {{else}}
 <span class="text-muted">-</span>

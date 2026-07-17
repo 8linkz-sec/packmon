@@ -147,8 +147,7 @@
       {{if .IsEditing}}
       <a
         href="/admin/advisories{{if gt .AdvisoryCurrentOffset 0}}?offset={{.AdvisoryCurrentOffset}}{{end}}"
-        class="inline-flex min-h-11 items-center rounded-md border border-muted px-3 py-2 text-sm
-          font-medium text-fg hover:bg-surface-2 ms-3"
+        class="{{adminSecondaryButtonClass "ms-3"}}"
       >Cancel</a>
       {{end}}
     </form>
@@ -157,6 +156,25 @@
 
   <div class="pm-surface p-5">
     <h2 class="text-lg font-semibold mb-3">Existing Manual Advisories</h2>
+    {{if or .AdvisoryHasPrevious .AdvisoryHasNext}}
+    <nav class="mb-4 flex flex-wrap items-center justify-between gap-3 border-b border-border pb-3 text-xs text-muted" aria-label="Manual advisory pages">
+      <span>Showing manual advisories {{.AdvisoryPageStart}}-{{.AdvisoryPageEnd}}</span>
+      <div class="flex flex-wrap items-center gap-2">
+        {{if .AdvisoryHasPrevious}}
+        <a
+          href="/admin/advisories?offset={{.AdvisoryPreviousOffset}}"
+          class="{{adminSecondaryButtonClass}}"
+        >Newer</a>
+        {{end}}
+        {{if .AdvisoryHasNext}}
+        <a
+          href="/admin/advisories?offset={{.AdvisoryNextOffset}}"
+          class="{{adminSecondaryButtonClass}}"
+        >Older</a>
+        {{end}}
+      </div>
+    </nav>
+    {{end}}
     {{if .AdvisoriesLoadError}}
     {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .AdvisoriesLoadError}}
     {{else if .Advisories}}
@@ -169,11 +187,11 @@
               href="/package/{{.Ecosystem}}/{{.Name}}"
               aria-label="View package details for {{.Ecosystem}}/{{.Name}}"
               class="inline-flex min-h-11 max-w-full items-center rounded-md px-3 py-2 font-medium
-                text-accent hover:bg-surface-2 hover:underline pm-focus-ring"
+                text-accent-fg hover:bg-surface-2 hover:underline pm-focus-ring"
             ><span class="min-w-0 break-words"><bdi dir="auto">{{.Ecosystem}}</bdi> / <bdi dir="auto">{{.Name}}</bdi></span></a>
             <div class="mt-1 font-mono text-xs text-muted break-all"><bdi dir="auto">{{.ID}}</bdi></div>
           </div>
-          <span class="shrink-0 inline-block px-2 py-0.5 rounded text-xs font-medium border {{severityClass .Severity}}">{{.Severity}}</span>
+          {{template "pm-badge" dict "Class" (printf "shrink-0 border %s" (severityClass .Severity)) "Label" .Severity}}
         </div>
         {{if not $.BootstrapWarning}}
         <div class="no-print flex flex-wrap gap-2" data-no-print>
@@ -228,7 +246,7 @@
     >
       <table class="min-w-full text-sm">
         <thead>
-          <tr class="text-start text-muted border-b bg-bg">
+          <tr class="text-start text-muted border-b border-border">
             <th scope="col" class="px-5 py-2">ID</th>
             <th scope="col" class="px-5 py-2">Type</th>
             <th scope="col" class="px-5 py-2">Package</th>
@@ -248,11 +266,11 @@
                 href="/package/{{.Ecosystem}}/{{.Name}}"
                 aria-label="View package details for {{.Ecosystem}}/{{.Name}}"
                 class="inline-flex min-h-11 max-w-full items-center rounded-md px-3 py-2 font-medium
-                  text-accent hover:bg-surface-2 hover:underline pm-focus-ring"
+                  text-accent-fg hover:bg-surface-2 hover:underline pm-focus-ring"
               ><span class="min-w-0 break-words"><bdi dir="auto">{{.Ecosystem}}</bdi> / <bdi dir="auto">{{.Name}}</bdi></span></a>
             </td>
             <td class="px-5 py-2">
-              <span class="inline-block px-2 py-0.5 rounded text-xs font-medium border {{severityClass .Severity}}">{{.Severity}}</span>
+              {{template "pm-badge" dict "Class" (printf "border %s" (severityClass .Severity)) "Label" .Severity}}
             </td>
             <td class="px-5 py-2">
               {{if eq .RiskType "malware"}}<bdi dir="auto">Malware</bdi>{{else if eq .RiskType "typosquatting"}}<bdi dir="auto">Typosquatting</bdi>{{else if eq .RiskType "supply_chain"}}<bdi dir="auto">Supply-chain risk</bdi>{{else if eq .RiskType "other"}}<bdi dir="auto">Other</bdi>{{else}}<bdi dir="auto">Unknown</bdi>{{end}}
@@ -311,27 +329,6 @@
       <p class="text-sm font-medium text-fg">No manual advisories yet.</p>
     </div>
     {{end}}
-    {{if or .AdvisoryHasPrevious .AdvisoryHasNext}}
-    <nav class="mt-4 flex flex-wrap items-center justify-between gap-3 text-sm" aria-label="Manual advisory pages">
-      <div class="text-muted">Showing {{.AdvisoryPageStart}}-{{.AdvisoryPageEnd}}</div>
-      <div class="flex flex-wrap gap-2">
-        {{if .AdvisoryHasPrevious}}
-        <a
-          href="/admin/advisories?offset={{.AdvisoryPreviousOffset}}"
-          class="inline-flex min-h-11 items-center rounded-md border border-muted px-3 py-2 font-medium
-            text-fg hover:bg-surface-2"
-        >Previous</a>
-        {{end}}
-        {{if .AdvisoryHasNext}}
-        <a
-          href="/admin/advisories?offset={{.AdvisoryNextOffset}}"
-          class="inline-flex min-h-11 items-center rounded-md border border-muted px-3 py-2 font-medium
-            text-fg hover:bg-surface-2"
-        >Next</a>
-        {{end}}
-      </div>
-    </nav>
-    {{end}}
   </div>
 
   {{template "admin-alert-start" dict "Variant" "info" "Icon" true}}
@@ -348,8 +345,7 @@
 <a
   href="/admin/advisories?edit={{.Advisory.ID}}{{if gt .CurrentOffset 0}}&amp;offset={{.CurrentOffset}}{{end}}"
   aria-label="{{t "admin.advisories.action.edit_aria" .Advisory.ID .Advisory.Ecosystem .Advisory.Name}}"
-  class="no-print inline-flex min-h-11 items-center rounded-md px-3 py-2 text-sm font-medium
-    text-accent hover:bg-surface-2"
+  class="{{adminGhostButtonClass "no-print"}}"
   data-no-print
 >{{t "admin.advisories.action.edit"}}</a>
 <details class="no-print inline-flex" data-no-print>
@@ -394,8 +390,7 @@
       type="submit"
       data-submit-lock-button
       aria-label="{{t "admin.advisories.action.confirm_delete_aria" .Advisory.ID .Advisory.Ecosystem .Advisory.Name}}"
-      class="inline-flex min-h-11 items-center rounded-md bg-danger px-3 py-2 text-sm font-medium
-        text-accent-contrast hover:bg-danger active:bg-danger pm-focus-ring pm-focus-ring-danger"
+      class="{{adminDangerButtonClass}}"
     >{{t "admin.advisories.action.confirm_delete"}}</button>
   </form>
 </details>

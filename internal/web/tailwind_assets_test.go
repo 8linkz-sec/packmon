@@ -446,7 +446,7 @@ func TestAdminFeedConfigurationControlsUseFocusToken(t *testing.T) {
 
 	body := readTextFile(t, "templates", "admin", "feeds.html")
 	for _, want := range []string{
-		`name="enabled" {{if .Enabled}}checked{{end}} class="rounded border-muted text-accent pm-focus-ring"`,
+		`name="enabled" {{if .Enabled}}checked{{end}} class="h-4 w-4 rounded border-muted text-accent-fg pm-focus-ring"`,
 		`name="mode" class="pm-form-control"`,
 		`name="sync_interval"`,
 		`class="pm-form-control"`,
@@ -497,7 +497,7 @@ func TestAdminFeedConfigurationControlsUseFocusToken(t *testing.T) {
 			wants: []string{
 				`data-submit-lock-button`,
 				`inline-flex`,
-				`min-h-11`,
+				`min-h-8`,
 				`justify-center`,
 				`pm-focus-ring`,
 			},
@@ -507,7 +507,7 @@ func TestAdminFeedConfigurationControlsUseFocusToken(t *testing.T) {
 			marker: `aria-label="{{t "admin.feeds.sync.aria" .FeedName}}"`,
 			wants: []string{
 				`inline-flex`,
-				`min-h-11`,
+				`min-h-8`,
 				`justify-center`,
 				`pm-focus-ring`,
 			},
@@ -518,7 +518,7 @@ func TestAdminFeedConfigurationControlsUseFocusToken(t *testing.T) {
 			wants: []string{
 				`data-submit-lock-button`,
 				`inline-flex`,
-				`min-h-11`,
+				`min-h-8`,
 				`justify-center`,
 				`pm-focus-ring`,
 			},
@@ -716,7 +716,7 @@ func TestAdminFeedDestructiveKeyControlsAreLargeAndContextual(t *testing.T) {
 	for _, want := range []string{
 		`aria-describedby="feed-{{.FeedKey}}-clear-key-help"`,
 		`border-muted`,
-		`text-accent`,
+		`text-accent-fg`,
 		`pm-focus-ring`,
 	} {
 		if !strings.Contains(clearKey, want) {
@@ -1215,7 +1215,7 @@ func TestAdminQueueStatusFiltersExposeActiveState(t *testing.T) {
 	queue := readTextFile(t, "templates", "admin", "queue.html")
 	for _, want := range []string{
 		`{{if .Active}}aria-current="page"{{end}}`,
-		`{{if .Active}}border-info bg-info-bg text-accent{{else}}border-muted text-fg hover:bg-surface-2{{end}}`,
+		`{{if .Active}}border-accent bg-accent-bg text-accent-fg{{else}}border-muted text-fg hover:bg-surface-2{{end}}`,
 		`{{if .QueueStatusWarning}}`,
 		`{{template "admin-alert" dict "Variant" "warning" "Icon" true "Message" .QueueStatusWarning}}`,
 	} {
@@ -1539,7 +1539,7 @@ func TestAdminAuditAndQueuePaginationUseTouchTargets(t *testing.T) {
 			}
 		}
 	}
-	if want := `pm-focus-ring`; !strings.Contains(audit, want) {
+	if want := `pm-focus-ring`; !strings.Contains(expandAdminButtonClassCalls(audit), want) {
 		t.Fatalf("templates/admin/audit.html missing audit pagination focus state %q", want)
 	}
 
@@ -1568,13 +1568,24 @@ func TestAdminAuditAndQueuePaginationUseTouchTargets(t *testing.T) {
 			wants:  adminControlLinkClassTokens(),
 		},
 		{
+			// Status filter chips are deliberately compact (they sit in the
+			// dense table header bar), unlike the 44px pagination controls.
 			name:   "queue filters",
-			marker: `{{if .Active}}border-info bg-info-bg text-accent{{else}}border-muted text-fg hover:bg-surface-2{{end}}`,
-			wants: append(adminControlLinkClassTokens(),
-				`border-info`,
-				`bg-info-bg`,
-				`text-accent`,
-			),
+			marker: `{{if .Active}}border-accent bg-accent-bg text-accent-fg{{else}}border-muted text-fg hover:bg-surface-2{{end}}`,
+			wants: []string{
+				`inline-flex`,
+				`items-center`,
+				`justify-center`,
+				`rounded-md`,
+				`border`,
+				`px-3`,
+				`py-1.5`,
+				`font-medium`,
+				`pm-focus-ring`,
+				`border-accent`,
+				`bg-accent-bg`,
+				`text-accent-fg`,
+			},
 		},
 	} {
 		tag := openingTagContaining(t, queue, tc.marker)
@@ -1589,13 +1600,13 @@ func TestAdminAuditAndQueuePaginationUseTouchTargets(t *testing.T) {
 func adminControlLinkClassTokens() []string {
 	return []string{
 		`inline-flex`,
-		`min-h-11`,
+		`min-h-8`,
 		`items-center`,
 		`justify-center`,
 		`rounded-md`,
 		`border`,
 		`px-3`,
-		`py-2`,
+		`py-1.5`,
 		`font-medium`,
 		`text-fg`,
 		`hover:bg-surface-2`,
@@ -1611,6 +1622,10 @@ func TestAdminPackageLinksUsePackageDetailsAndTouchTargets(t *testing.T) {
 		path    []string
 		markers []string
 		wants   []string
+		// wantTouchTargets is the minimum number of matching links that must
+		// keep the 44px min-h-11 touch target. Mobile card links always keep
+		// it; desktop table links may be compact.
+		wantTouchTargets int
 	}{
 		{
 			name: "manual advisories",
@@ -1622,13 +1637,10 @@ func TestAdminPackageLinksUsePackageDetailsAndTouchTargets(t *testing.T) {
 				`href="/package/{{.Ecosystem}}/{{.Name}}"`,
 				`aria-label="View package details for {{.Ecosystem}}/{{.Name}}"`,
 				`inline-flex`,
-				`min-h-11`,
 				`items-center`,
-				`rounded-md`,
-				`px-3`,
-				`py-2`,
-				`text-accent`,
+				`text-accent-fg`,
 			},
+			wantTouchTargets: 2,
 		},
 		{
 			name: "queue",
@@ -1640,13 +1652,10 @@ func TestAdminPackageLinksUsePackageDetailsAndTouchTargets(t *testing.T) {
 				`href="/package/{{.Ecosystem}}/{{.Name}}"`,
 				`aria-label="View package details for {{.Ecosystem}}/{{.Name}}"`,
 				`inline-flex`,
-				`min-h-11`,
 				`items-center`,
-				`rounded-md`,
-				`px-3`,
-				`py-2`,
-				`text-accent`,
+				`text-accent-fg`,
 			},
+			wantTouchTargets: 1,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1657,12 +1666,19 @@ func TestAdminPackageLinksUsePackageDetailsAndTouchTargets(t *testing.T) {
 				if got := strings.Count(body, marker); got < 2 {
 					t.Fatalf("%s package link marker %q count = %d, want at least 2 for mobile and desktop:\n%s", strings.Join(tc.path, string(os.PathSeparator)), marker, got, body)
 				}
+				touchTargets := 0
 				for _, tag := range ancestorOpeningTagsContaining(t, body, "<a", marker) {
 					for _, want := range tc.wants {
 						if !strings.Contains(tag, want) {
 							t.Fatalf("%s %s package link missing %q:\n%s", strings.Join(tc.path, string(os.PathSeparator)), tc.name, want, tag)
 						}
 					}
+					if strings.Contains(tag, "min-h-11") {
+						touchTargets++
+					}
+				}
+				if touchTargets < tc.wantTouchTargets {
+					t.Fatalf("%s %s package links with min-h-11 touch target = %d, want at least %d (mobile links must keep 44px targets)", strings.Join(tc.path, string(os.PathSeparator)), tc.name, touchTargets, tc.wantTouchTargets)
 				}
 			}
 		})
@@ -1672,30 +1688,53 @@ func TestAdminPackageLinksUsePackageDetailsAndTouchTargets(t *testing.T) {
 func TestDiagnosticDisclosureSummariesUseTouchTargets(t *testing.T) {
 	t.Parallel()
 
+	standardWants := []string{
+		`inline-flex`,
+		`min-h-11`,
+		`items-center`,
+		`rounded`,
+		`px-2`,
+		`py-1`,
+	}
+	// Desktop table disclosure summaries are compact but must not shrink
+	// below the WCAG 2.5.8 minimum target size (24px).
+	compactWants := []string{
+		`inline-flex`,
+		`min-h-6`,
+		`items-center`,
+		`rounded`,
+		`px-1.5`,
+		`py-0.5`,
+	}
 	for _, tc := range []struct {
 		name   string
 		path   []string
 		marker string
+		wants  []string
 	}{
 		{
 			name:   "shared feed status",
 			path:   []string{"templates", "partials", "feed_status.html"},
 			marker: `aria-label="Show full feed ` + `error for {{$feed.FeedName}}"`,
+			wants:  standardWants,
 		},
 		{
 			name:   "admin queue mobile",
 			path:   []string{"templates", "admin", "queue.html"},
 			marker: `{{truncate .Error 80}}`,
+			wants:  standardWants,
 		},
 		{
 			name:   "admin queue desktop",
 			path:   []string{"templates", "admin", "queue.html"},
 			marker: `{{truncate .Error 40}}`,
+			wants:  compactWants,
 		},
 		{
 			name:   "admin audit details",
 			path:   []string{"templates", "admin", "audit.html"},
 			marker: `dir="auto" class="inline-flex`,
+			wants:  standardWants,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1703,16 +1742,9 @@ func TestDiagnosticDisclosureSummariesUseTouchTargets(t *testing.T) {
 
 			body := readTextFile(t, tc.path...)
 			summary := openingTagContaining(t, body, tc.marker)
-			for _, want := range []string{
-				`inline-flex`,
-				`min-h-11`,
-				`items-center`,
-				`rounded`,
-				`px-2`,
-				`py-1`,
-			} {
+			for _, want := range tc.wants {
 				if !strings.Contains(summary, want) {
-					t.Fatalf("%s diagnostic summary missing touch-target class %q:\n%s", strings.Join(tc.path, string(os.PathSeparator)), want, summary)
+					t.Fatalf("%s diagnostic summary missing target-size class %q:\n%s", strings.Join(tc.path, string(os.PathSeparator)), want, summary)
 				}
 			}
 		})
@@ -1860,7 +1892,7 @@ func TestBidiSensitiveTemplateValuesUseAutoDirection(t *testing.T) {
 		`dir="auto"`,
 		`<bdi dir="auto">{{.Name}}</bdi>`,
 		`{{t "search.version.label"}} <bdi dir="auto">{{.Version}}</bdi>`,
-		`<bdi dir="auto">{{.VulnerabilityIDs}}</bdi>`,
+		`<bdi dir="auto">{{$item.Label}}</bdi>`,
 		`<bdi dir="auto">{{.Sources}}</bdi>`,
 	} {
 		if !strings.Contains(search, want) {
@@ -1976,6 +2008,50 @@ func TestFilledActionButtonsUseSharedFocusRing(t *testing.T) {
 	}
 }
 
+func TestAdminButtonHelpersShareSizingTokens(t *testing.T) {
+	t.Parallel()
+
+	render := readTextFile(t, "render.go")
+	// Admin action buttons use a compact 32px control height (modern admin
+	// scale, above the WCAG 2.5.8 24px minimum target size).
+	shared := []string{
+		`inline-flex`,
+		`min-h-8`,
+		`items-center`,
+		`justify-center`,
+		`rounded-md`,
+		`py-1.5`,
+		`text-sm`,
+		`font-medium`,
+		`pm-focus-ring`,
+	}
+	for _, tc := range []struct {
+		helper string
+		wants  []string
+	}{
+		{helper: "adminPrimaryButtonClass", wants: []string{`bg-accent`, `px-4`, `text-accent-contrast`}},
+		{helper: "adminDangerButtonClass", wants: []string{`bg-danger`, `px-4`, `text-accent-contrast`, `pm-focus-ring-danger`}},
+		{helper: "adminSecondaryButtonClass", wants: []string{`border`, `border-muted`, `px-3`, `text-fg`, `hover:bg-surface-2`}},
+		{helper: "adminGhostButtonClass", wants: []string{`px-3`, `text-accent-fg`, `hover:bg-surface-2`}},
+		{helper: "adminAccentOutlineButtonClass", wants: []string{`border`, `border-accent`, `px-3`, `text-accent-fg`, `hover:bg-surface-2`}},
+	} {
+		helperAt := strings.Index(render, "func "+tc.helper+"(")
+		if helperAt < 0 {
+			t.Fatalf("render.go missing shared %s helper", tc.helper)
+		}
+		helperEnd := strings.Index(render[helperAt:], "\n}\n")
+		if helperEnd < 0 {
+			t.Fatalf("%s helper body is not delimited", tc.helper)
+		}
+		body := render[helperAt : helperAt+helperEnd]
+		for _, want := range append(append([]string{}, shared...), tc.wants...) {
+			if !strings.Contains(body, want) {
+				t.Fatalf("%s missing shared sizing/style token %q:\n%s", tc.helper, want, body)
+			}
+		}
+	}
+}
+
 func TestAdminPrimaryActionButtonsUseSharedTouchTargetPattern(t *testing.T) {
 	t.Parallel()
 
@@ -1991,13 +2067,13 @@ func TestAdminPrimaryActionButtonsUseSharedTouchTargetPattern(t *testing.T) {
 	helper := render[helperAt : helperAt+helperEnd]
 	for _, want := range []string{
 		`inline-flex`,
-		`min-h-11`,
+		`min-h-8`,
 		`items-center`,
 		`justify-center`,
 		`rounded-md`,
 		`bg-accent`,
 		`px-4`,
-		`py-2`,
+		`py-1.5`,
 		`text-sm`,
 		`font-medium`,
 		`text-accent-contrast`,
@@ -2135,7 +2211,37 @@ func openingTagContaining(t *testing.T, body, marker string) string {
 	if tagEndOffset < 0 {
 		t.Fatalf("marker %q is inside an unterminated HTML tag", marker)
 	}
-	return body[tagStart : markerAt+tagEndOffset+1]
+	return expandAdminButtonClassCalls(body[tagStart : markerAt+tagEndOffset+1])
+}
+
+var adminButtonClassCallPattern = regexp.MustCompile(`\{\{admin(Primary|Danger|Secondary|Ghost|AccentOutline)ButtonClass(?:\s+"([^"]*)")?\}\}`)
+
+// expandAdminButtonClassCalls resolves shared admin button helper calls in a
+// template fragment to the class tokens they render, so class-token contract
+// assertions keep working on templates that use the shared helpers.
+func expandAdminButtonClassCalls(s string) string {
+	return adminButtonClassCallPattern.ReplaceAllStringFunc(s, func(m string) string {
+		sub := adminButtonClassCallPattern.FindStringSubmatch(m)
+		var fn func(...string) string
+		switch sub[1] {
+		case "Primary":
+			fn = adminPrimaryButtonClass
+		case "Danger":
+			fn = adminDangerButtonClass
+		case "Secondary":
+			fn = adminSecondaryButtonClass
+		case "Ghost":
+			fn = adminGhostButtonClass
+		case "AccentOutline":
+			fn = adminAccentOutlineButtonClass
+		default:
+			return m
+		}
+		if sub[2] != "" {
+			return fn(sub[2])
+		}
+		return fn()
+	})
 }
 
 func tagContainsDirectOrAdminPrimaryClass(tag, token string) bool {
@@ -2185,7 +2291,7 @@ func ancestorOpeningTagsContaining(t *testing.T, body, tagName, marker string) [
 		if tagEndOffset < 0 || tagStart+tagEndOffset > markerAt {
 			t.Fatalf("ancestor tag %q before marker %q is malformed", tagName, marker)
 		}
-		tags = append(tags, body[tagStart:tagStart+tagEndOffset+1])
+		tags = append(tags, expandAdminButtonClassCalls(body[tagStart:tagStart+tagEndOffset+1]))
 		searchFrom = markerAt + len(marker)
 	}
 	if len(tags) == 0 {
@@ -2433,7 +2539,7 @@ func TestAdminFeedActionControlsUseContrastSafeBorders(t *testing.T) {
 	for _, blocked := range []string{
 		`name="confirm_clear_api_key" class="h-4 w-4 rounded border-danger`,
 		`name="confirm_reset" class="rounded border-danger`,
-		`border border-info text-accent`,
+		`border border-info text-accent-fg`,
 	} {
 		if strings.Contains(body, blocked) {
 			t.Fatalf("admin feed action control still uses low-contrast border marker %q:\n%s", blocked, body)
@@ -2634,12 +2740,12 @@ func TestAdminFeedModeAndResetCopyUsesHumanLabels(t *testing.T) {
 
 	feeds := readTextFile(t, "templates", "admin", "feeds.html")
 	for _, want := range []string{
-		`{{feedModeLabel .ConfigMode}}`,
+		`(feedModeLabel .ConfigMode)`,
 		`{{t "admin.feeds.form.runtime_line" $runtimeModeLabel $runtimeEnabledLabel $runtimeSyncLabel $runtimeAPIKeyLabel}}`,
 		`{{feedModeLabel .Value}}`,
 		`{{t "admin.feeds.form.mode_external_help"}}`,
 		`{{t "admin.feeds.form.mode_self_help"}}`,
-		`{{t "admin.feeds.status.database_override"}}`,
+		`(t "admin.feeds.status.database_override")`,
 	} {
 		if !strings.Contains(feeds, want) {
 			t.Fatalf("admin feeds template missing human feed copy %q:\n%s", want, feeds)
@@ -2758,7 +2864,7 @@ func TestAdminActionButtonsUseTouchTargets(t *testing.T) {
 			body := readTextFile(t, tc.path...)
 			for _, marker := range tc.markers {
 				tag := openingTagContaining(t, body, marker)
-				for _, want := range []string{`inline-flex`, `min-h-11`, `items-center`, `justify-center`} {
+				for _, want := range []string{`inline-flex`, `min-h-8`, `items-center`, `justify-center`} {
 					if !tagContainsDirectOrAdminPrimaryClass(tag, want) {
 						t.Fatalf("%s action button %q missing %q:\n%s", strings.Join(tc.path, string(os.PathSeparator)), marker, want, tag)
 					}
@@ -3319,18 +3425,22 @@ func TestAutoRefreshToggleUsesStablePressedState(t *testing.T) {
 		path       []string
 		controlsID string
 		statusID   string
+		minH       string
 	}{
 		{
 			name:       "public feeds",
 			path:       []string{"templates", "feeds.html"},
 			controlsID: "feed-status-container",
 			statusID:   "feed-status-refresh-state",
+			minH:       "min-h-11",
 		},
 		{
+			// Admin controls use the compact shared admin button scale.
 			name:       "admin feeds",
 			path:       []string{"templates", "admin", "feeds.html"},
 			controlsID: "admin-feed-runtime",
 			statusID:   "admin-feed-runtime-refresh-state",
+			minH:       "min-h-8",
 		},
 	} {
 		t.Run(page.name, func(t *testing.T) {
@@ -3343,7 +3453,7 @@ func TestAutoRefreshToggleUsesStablePressedState(t *testing.T) {
 				`aria-describedby="` + page.statusID + `"`,
 				`aria-pressed="true"`,
 				`inline-flex`,
-				`min-h-11`,
+				page.minH,
 				`items-center`,
 				`justify-center`,
 			} {
@@ -3442,9 +3552,10 @@ func TestFeedStatusRefreshControlsExposeRefreshNowAction(t *testing.T) {
 		name  string
 		path  []string
 		label string
+		minH  string
 	}{
-		{name: "public feeds", path: []string{"templates", "feeds.html"}, label: `{{t "feeds.refresh.now_aria"}}`},
-		{name: "admin feeds", path: []string{"templates", "admin", "feeds.html"}, label: `{{t "admin.feeds.runtime.refresh_now_aria"}}`},
+		{name: "public feeds", path: []string{"templates", "feeds.html"}, label: `{{t "feeds.refresh.now_aria"}}`, minH: "min-h-11"},
+		{name: "admin feeds", path: []string{"templates", "admin", "feeds.html"}, label: `{{t "admin.feeds.runtime.refresh_now_aria"}}`, minH: "min-h-8"},
 	} {
 		t.Run(page.name, func(t *testing.T) {
 			t.Parallel()
@@ -3456,7 +3567,7 @@ func TestFeedStatusRefreshControlsExposeRefreshNowAction(t *testing.T) {
 				`aria-controls=`,
 				`aria-label="` + page.label + `"`,
 				`inline-flex`,
-				`min-h-11`,
+				page.minH,
 			} {
 				if !strings.Contains(button, want) {
 					t.Fatalf("%s refresh-now button missing %q:\n%s", page.name, want, button)

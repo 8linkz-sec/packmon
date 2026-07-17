@@ -182,19 +182,18 @@ func TestHandlePackageInteractiveControlsMeetTouchTargetHeight(t *testing.T) {
 	}
 	body := rec.Body.String()
 	versionButton := tagContaining(t, body, `<button`, `Check version`)
+	if !strings.Contains(versionButton, "min-h-11") {
+		t.Fatalf("version submit button missing min-h-11 touch target:\n%s", versionButton)
+	}
+
+	// Advisory resource chips are deliberately compact badge-sized links, but
+	// must not shrink below the WCAG 2.5.8 minimum target size (24px).
 	resourceLink := tagContaining(t, body, `<a`, `aria-label="GHSA opens in a new tab"`)
-	for label, tag := range map[string]string{
-		"version submit button":  versionButton,
-		"advisory resource chip": resourceLink,
-	} {
-		if !strings.Contains(tag, "min-h-11") {
-			t.Fatalf("%s missing min-h-11 touch target:\n%s", label, tag)
-		}
-		for _, notWant := range []string{"min-h-8", "min-h-10"} {
-			if strings.Contains(tag, notWant) {
-				t.Fatalf("%s still contains %s:\n%s", label, notWant, tag)
-			}
-		}
+	if !strings.Contains(resourceLink, "min-h-6") {
+		t.Fatalf("advisory resource chip missing min-h-6 minimum target size:\n%s", resourceLink)
+	}
+	if strings.Contains(resourceLink, "min-h-11") {
+		t.Fatalf("advisory resource chip still uses oversized min-h-11:\n%s", resourceLink)
 	}
 }
 

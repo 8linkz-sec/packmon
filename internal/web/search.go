@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/8linkz-sec/packmon/internal/findinglinks"
 )
 
 const (
@@ -44,6 +46,31 @@ type PackageSearchResultView struct {
 type SearchTextSegment struct {
 	Text  string
 	Match bool
+}
+
+// VulnerabilityIDItem is one entry of the search-result advisory preview.
+type VulnerabilityIDItem struct {
+	Label string
+	URL   string
+}
+
+// VulnerabilityIDItems splits the formatted advisory ID preview into items
+// and attaches the canonical advisory URL for known ID prefixes. The
+// "+N more" remainder and unknown prefixes stay plain text (empty URL).
+func (r PackageSearchResult) VulnerabilityIDItems() []VulnerabilityIDItem {
+	parts := splitSearchVulnerabilityIDs(r.VulnerabilityIDs)
+	if len(parts) == 0 {
+		return nil
+	}
+	items := make([]VulnerabilityIDItem, 0, len(parts))
+	for _, part := range parts {
+		item := VulnerabilityIDItem{Label: part}
+		if link, _, ok := findinglinks.CanonicalVulnerabilityResource(part); ok {
+			item.URL = link.URL
+		}
+		items = append(items, item)
+	}
+	return items
 }
 
 // HandleSearch serves GET /search. It supports both full-page and HTMX

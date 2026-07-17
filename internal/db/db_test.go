@@ -178,10 +178,10 @@ func TestRefreshPriorityOptionsDefineSupportedScale(t *testing.T) {
 	t.Parallel()
 
 	want := []RefreshPriorityOption{
-		{Value: RefreshPriorityManual, Label: "0 - manual trigger/highest"},
-		{Value: RefreshPriorityUnknownPackage, Label: "1 - unknown packages"},
-		{Value: RefreshPriorityKnownFinding, Label: "2 - known findings"},
-		{Value: RefreshPriorityNormal, Label: "3 - normal re-check/lowest"},
+		{Value: RefreshPriorityManual, Label: "0 - Immediate (manual trigger)"},
+		{Value: RefreshPriorityUnknownPackage, Label: "1 - High (unknown packages)"},
+		{Value: RefreshPriorityKnownFinding, Label: "2 - Medium (known findings)"},
+		{Value: RefreshPriorityNormal, Label: "3 - Normal (scheduled re-check)"},
 	}
 	got := RefreshPriorityOptions()
 	if len(got) != len(want) {

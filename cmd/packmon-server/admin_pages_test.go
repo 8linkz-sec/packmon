@@ -135,10 +135,10 @@ func TestAdminFeedsPageShowsQueueDrivenFeedConfiguredWithoutSyncStatus(t *testin
 	if rlRow == "" {
 		t.Fatalf("GET /admin/feeds runtime body missing ReversingLabs row\nbody=%s", body)
 	}
-	if strings.Contains(rlRow, ">pending</span>") {
+	if strings.Contains(rlRow, ">pending</bdi>") {
 		t.Fatalf("ReversingLabs runtime row status = pending, want configured\nrow=%s", rlRow)
 	}
-	configuredStatus := regexp.MustCompile(`(?s)<td class="px-5 py-2">\s*<span[^>]*>configured</span>.*?</td>`)
+	configuredStatus := regexp.MustCompile(`(?s)<td class="px-5 py-2">\s*<span[^>]*><bdi[^>]*>configured</bdi></span>.*?</td>`)
 	if !configuredStatus.MatchString(rlRow) {
 		t.Fatalf("ReversingLabs runtime row missing configured status\nrow=%s", rlRow)
 	}
@@ -1497,7 +1497,7 @@ func TestAdminAuditAndQueuePaginationUseNavigationLandmarks(t *testing.T) {
 		if !strings.Contains(body, wantNav) {
 			t.Fatalf("GET /admin/audit body missing pagination landmark fragment %q\nbody=%s", wantNav, body)
 		}
-		auditOlderLink := regexp.MustCompile(`(?s)<a\b[^>]*href="/admin/audit\?offset=100"[^>]*class="[^"]*\binline-flex min-h-11\b`)
+		auditOlderLink := regexp.MustCompile(`(?s)<a\b[^>]*href="/admin/audit\?offset=100"[^>]*class="[^"]*\binline-flex min-h-8\b`)
 		if !auditOlderLink.MatchString(body) {
 			t.Fatalf("GET /admin/audit body missing older-page link\nbody=%s", body)
 		}
@@ -1529,7 +1529,7 @@ func TestAdminAuditAndQueuePaginationUseNavigationLandmarks(t *testing.T) {
 		if !strings.Contains(body, wantNav) {
 			t.Fatalf("GET /admin/queue?status=pending body missing pagination landmark fragment %q\nbody=%s", wantNav, body)
 		}
-		queueOlderLink := regexp.MustCompile(`(?s)<a\b[^>]*href="/admin/queue\?status=pending&amp;offset=50"[^>]*class="[^"]*\binline-flex min-h-11\b`)
+		queueOlderLink := regexp.MustCompile(`(?s)<a\b[^>]*href="/admin/queue\?status=pending&amp;offset=50"[^>]*class="[^"]*\binline-flex min-h-8\b`)
 		if !queueOlderLink.MatchString(body) {
 			t.Fatalf("GET /admin/queue?status=pending body missing older-page link\nbody=%s", body)
 		}
@@ -1706,7 +1706,7 @@ func TestAdminQueueBulkActionsShowCountsAndDisableEmptyDestructiveActions(t *tes
 		"Clear pending queue jobs",
 		"Clear paused queue jobs",
 	} {
-		pattern := regexp.MustCompile(`(?s)<summary\b[^>]*aria-label="` + regexp.QuoteMeta(ariaLabel) + `"[^>]*class="[^"]*\bmin-h-11\b[^"]*\bbg-danger\b[^"]*"`)
+		pattern := regexp.MustCompile(`(?s)<summary\b[^>]*aria-label="` + regexp.QuoteMeta(ariaLabel) + `"[^>]*class="[^"]*\bmin-h-8\b[^"]*\bbg-danger\b[^"]*"`)
 		if !pattern.MatchString(body) {
 			t.Fatalf("GET /admin/queue body missing destructive summary for %q\nbody=%s", ariaLabel, body)
 		}
@@ -2711,7 +2711,7 @@ func TestAdminAdvisoriesEditVulnerabilityFormKeepsScopedRiskTypeControl(t *testi
 	}
 	body := rec.Body.String()
 	assertAdminAdvisoryRiskTypeSelect(t, body, false)
-	cancelLink := regexp.MustCompile(`(?s)<a\b[^>]*href="/admin/advisories"[^>]*class="[^"]*\bmin-h-11\b[^"]*\bms-3\b[^"]*"`)
+	cancelLink := regexp.MustCompile(`(?s)<a\b[^>]*href="/admin/advisories"[^>]*class="[^"]*\bmin-h-8\b[^"]*\bms-3\b[^"]*"`)
 	if !cancelLink.MatchString(body) {
 		t.Fatalf("GET /admin/advisories edit body missing cancel link\nbody=%s", body)
 	}

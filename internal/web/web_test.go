@@ -1568,11 +1568,48 @@ func TestHandleSearchCapsVulnerabilityIDPreview(t *testing.T) {
 	if strings.Contains(body, "7 advisories") {
 		t.Fatalf("Search response still uses advisory wording for vulnerability counts:\n%s", body)
 	}
-	if !strings.Contains(body, "GHSA-001, GHSA-002, GHSA-003, GHSA-004, GHSA-005, &#43;2 more") {
-		t.Fatalf("Search response missing capped advisory preview:\n%s", body)
+	for _, id := range []string{"GHSA-001", "GHSA-002", "GHSA-003", "GHSA-004", "GHSA-005"} {
+		if !strings.Contains(body, id) {
+			t.Fatalf("Search response missing advisory preview ID %s:\n%s", id, body)
+		}
+	}
+	if !strings.Contains(body, "&#43;2 more") {
+		t.Fatalf("Search response missing capped advisory preview remainder:\n%s", body)
 	}
 	if strings.Contains(body, "GHSA-006") || strings.Contains(body, "GHSA-007") {
 		t.Fatalf("Search response rendered advisory IDs beyond the preview cap:\n%s", body)
+	}
+}
+
+func TestHandleSearchLinksAdvisoryIDsToCanonicalAdvisoryPages(t *testing.T) {
+	store := &mockStore{searchResults: []PackageSearchResult{{
+		Ecosystem:          "npm",
+		Name:               "obsidian-local-rest-api",
+		FindingsCount:      3,
+		VulnerabilityCount: 3,
+		VulnerabilityIDs:   "GHSA-62gx-5q78-wrvx, CVE-2026-0001, UNKNOWN-1",
+		FindingTypes:       "vulnerability",
+		Sources:            "osv",
+	}}}
+	handler := HandleSearch(store, testRenderer(), discardLogger())
+
+	req := httptest.NewRequest(http.MethodGet, "/search?q=obsidian", nil)
+	rec := httptest.NewRecorder()
+
+	handler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Search status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `href="https://github.com/advisories/GHSA-62gx-5q78-wrvx"`) {
+		t.Fatalf("Search response missing canonical GHSA advisory link:\n%s", body)
+	}
+	if !strings.Contains(body, `href="https://nvd.nist.gov/vuln/detail/CVE-2026-0001"`) {
+		t.Fatalf("Search response missing canonical NVD advisory link:\n%s", body)
+	}
+	if !strings.Contains(body, "UNKNOWN-1") || strings.Contains(body, `href="UNKNOWN-1"`) {
+		t.Fatalf("Search response must keep unknown advisory IDs as plain text:\n%s", body)
 	}
 }
 

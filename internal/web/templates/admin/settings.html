@@ -18,15 +18,15 @@
         <p class="text-sm text-muted mt-1">{{t "admin.settings.runtime.description"}}</p>
       </div>
       {{if .SystemSettingsLoadError}}
-      <span class="inline-block bg-danger-bg text-danger-fg px-2 py-0.5 rounded text-xs font-medium">{{t "admin.settings.status.unavailable"}}</span>
+      {{template "pm-badge" dict "Class" "bg-danger-bg text-danger-fg" "Label" (t "admin.settings.status.unavailable")}}
       {{else if .HasSystemSettings}}
         {{if .HasSystemSettingsUpdatedAt}}
-        <span class="inline-block bg-info-bg text-accent px-2 py-0.5 rounded text-xs font-medium">{{t "admin.settings.status.updated"}} <time data-local-time="relative" datetime="{{formatTimeISO .SystemSettingsUpdatedAt}}" aria-label="{{formatTime .SystemSettingsUpdatedAt}}">{{formatTimeAgo .SystemSettingsUpdatedAt}}</time></span>
+        <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-info-bg text-accent-fg">{{t "admin.settings.status.updated"}}&nbsp;<time data-local-time="relative" datetime="{{formatTimeISO .SystemSettingsUpdatedAt}}" aria-label="{{formatTime .SystemSettingsUpdatedAt}}">{{formatTimeAgo .SystemSettingsUpdatedAt}}</time></span>
         {{else}}
-        <span class="inline-block bg-info-bg text-accent px-2 py-0.5 rounded text-xs font-medium">{{t "admin.settings.status.database_override"}}</span>
+        {{template "pm-badge" dict "Class" "bg-info-bg text-accent-fg" "Label" (t "admin.settings.status.database_override")}}
         {{end}}
       {{else}}
-      <span class="inline-block bg-surface-2 text-muted px-2 py-0.5 rounded text-xs font-medium">{{t "admin.settings.status.runtime_default"}}</span>
+      {{template "pm-badge" dict "Class" "bg-surface-2 text-muted" "Label" (t "admin.settings.status.runtime_default")}}
       {{end}}
     </div>
 

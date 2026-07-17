@@ -202,35 +202,39 @@ func defaultFuncMapWithAssets(links LayoutLinks, assets *staticAssetVersions) te
 		assets = newStaticAssetVersions(content)
 	}
 	return template.FuncMap{
-		"formatTime":              formatTime,
-		"formatTimeAgo":           formatTimeAgo,
-		"formatTimeISO":           formatTimeISO,
-		"formatFixedIn":           formatFixedIn,
-		"severityClass":           severityClass,
-		"statusClass":             statusClass,
-		"feedModeLabel":           feedModeLabel,
-		"truncate":                truncate,
-		"findingLabels":           findingTypeLabels,
-		"lower":                   strings.ToLower,
-		"upper":                   strings.ToUpper,
-		"hasPrefix":               strings.HasPrefix,
-		"advisoryURL":             advisoryURL,
-		"adminPrimaryButtonClass": adminPrimaryButtonClass,
-		"dict":                    dict,
-		"adminAlert":              adminAlertViewFor,
-		"newTabAriaLabel":         newTabAriaLabel,
-		"newTabSRText":            newTabSRText,
-		"t":                       templateMessage,
-		"count":                   plural.Count,
-		"word":                    plural.Word,
-		"add":                     func(a, b int) int { return a + b },
-		"sub":                     func(a, b int) int { return a - b },
-		"seq":                     seq,
-		"privacyURL":              func() string { return links.PrivacyURL },
-		"legalURL":                func() string { return links.LegalURL },
-		"termsURL":                func() string { return links.TermsURL },
-		"layoutDir":               layoutDir,
-		"assetURL":                assets.URL,
+		"formatTime":                    formatTime,
+		"formatTimeAgo":                 formatTimeAgo,
+		"formatTimeISO":                 formatTimeISO,
+		"formatFixedIn":                 formatFixedIn,
+		"severityClass":                 severityClass,
+		"statusClass":                   statusClass,
+		"feedModeLabel":                 feedModeLabel,
+		"truncate":                      truncate,
+		"findingLabels":                 findingTypeLabels,
+		"lower":                         strings.ToLower,
+		"upper":                         strings.ToUpper,
+		"hasPrefix":                     strings.HasPrefix,
+		"advisoryURL":                   advisoryURL,
+		"adminPrimaryButtonClass":       adminPrimaryButtonClass,
+		"adminDangerButtonClass":        adminDangerButtonClass,
+		"adminSecondaryButtonClass":     adminSecondaryButtonClass,
+		"adminGhostButtonClass":         adminGhostButtonClass,
+		"adminAccentOutlineButtonClass": adminAccentOutlineButtonClass,
+		"dict":                          dict,
+		"adminAlert":                    adminAlertViewFor,
+		"newTabAriaLabel":               newTabAriaLabel,
+		"newTabSRText":                  newTabSRText,
+		"t":                             templateMessage,
+		"count":                         plural.Count,
+		"word":                          plural.Word,
+		"add":                           func(a, b int) int { return a + b },
+		"sub":                           func(a, b int) int { return a - b },
+		"seq":                           seq,
+		"privacyURL":                    func() string { return links.PrivacyURL },
+		"legalURL":                      func() string { return links.LegalURL },
+		"termsURL":                      func() string { return links.TermsURL },
+		"layoutDir":                     layoutDir,
+		"assetURL":                      assets.URL,
 		"layoutNeedsHTMX": func() bool {
 			return false
 		},
@@ -243,9 +247,43 @@ func defaultFuncMapWithAssets(links LayoutLinks, assets *staticAssetVersions) te
 	}
 }
 
+// The admin button helpers define the single sizing system for admin action
+// controls: a compact 32px control height (min-h-8/py-1.5/rounded-md/text-sm,
+// above the WCAG 2.5.8 24px minimum target size); solid buttons (primary,
+// danger) use px-4, quiet buttons (secondary, ghost, accent outline) use
+// px-3. Templates must use these helpers instead of ad-hoc class strings so
+// button sizing cannot drift per page.
 func adminPrimaryButtonClass(extra ...string) string {
 	return joinClassTokens(
-		"inline-flex min-h-11 items-center justify-center rounded-md bg-accent px-4 py-2 text-sm font-medium text-accent-contrast hover:bg-accent-hover active:bg-accent-hover pm-focus-ring",
+		"inline-flex min-h-8 items-center justify-center rounded-md bg-accent px-4 py-1.5 text-sm font-medium text-accent-contrast hover:bg-accent-hover active:bg-accent-hover disabled:bg-surface-2 disabled:text-muted disabled:pointer-events-none pm-focus-ring",
+		strings.Join(extra, " "),
+	)
+}
+
+func adminDangerButtonClass(extra ...string) string {
+	return joinClassTokens(
+		"inline-flex min-h-8 items-center justify-center rounded-md bg-danger px-4 py-1.5 text-sm font-medium text-accent-contrast hover:bg-danger-hover active:bg-danger-hover disabled:bg-surface-2 disabled:text-muted disabled:pointer-events-none pm-focus-ring pm-focus-ring-danger",
+		strings.Join(extra, " "),
+	)
+}
+
+func adminSecondaryButtonClass(extra ...string) string {
+	return joinClassTokens(
+		"inline-flex min-h-8 items-center justify-center rounded-md border border-muted px-3 py-1.5 text-sm font-medium text-fg hover:bg-surface-2 active:bg-surface-2 disabled:bg-surface-2 disabled:text-muted disabled:pointer-events-none pm-focus-ring",
+		strings.Join(extra, " "),
+	)
+}
+
+func adminGhostButtonClass(extra ...string) string {
+	return joinClassTokens(
+		"inline-flex min-h-8 items-center justify-center rounded-md px-3 py-1.5 text-sm font-medium text-accent-fg hover:bg-surface-2 active:bg-accent-bg disabled:bg-surface-2 disabled:text-muted disabled:pointer-events-none pm-focus-ring",
+		strings.Join(extra, " "),
+	)
+}
+
+func adminAccentOutlineButtonClass(extra ...string) string {
+	return joinClassTokens(
+		"inline-flex min-h-8 items-center justify-center rounded-md border border-accent px-3 py-1.5 text-sm font-medium text-accent-fg hover:bg-surface-2 active:bg-accent-bg disabled:bg-surface-2 disabled:text-muted disabled:pointer-events-none pm-focus-ring",
 		strings.Join(extra, " "),
 	)
 }
@@ -969,7 +1007,8 @@ var webMessagesEN = map[webMessageKey]string{
 	webMessageKey("admin.feeds.runtime.updated_count"):                  "Feed runtime updated. %d %s shown.",
 	webMessageKey("admin.feeds.runtime.updated_empty"):                  "Feed runtime updated. No feeds configured.",
 	webMessageKey("admin.feeds.runtime.table_aria"):                     "Admin feed runtime table",
-	webMessageKey("admin.feeds.runtime.empty"):                          "No feeds configured. Check server environment variables.",
+	webMessageKey("admin.feeds.runtime.empty"):                          "No feeds configured.",
+	webMessageKey("admin.feeds.runtime.empty_hint"):                     "Check server environment variables and feed settings to enable at least one feed.",
 	webMessageKey("admin.feeds.runtime.info"):                           "The table below shows the current runtime state. Saved configuration changes are stored in the database and applied immediately.",
 	webMessageKey("admin.feeds.runtime.warning"):                        "Runtime values are derived from the currently running process. Feed sync intervals fall back to the global default of %s when no per-feed override is configured.",
 	webMessageKey("admin.feeds.runtime.refresh_label"):                  "Auto-refresh",
@@ -1140,9 +1179,7 @@ var webMessagesEN = map[webMessageKey]string{
 	webMessageKey("admin.advisories.flash.deleted"):                     "Advisory deleted",
 	webMessageKey("page.admin.queue.title"):                             "Packmon - Admin Queue",
 	webMessageKey("admin.queue.heading"):                                "Queue Management",
-	webMessageKey("admin.queue.row.actions_aria"):                       "Show actions for queue job %d %s/%s",
-	webMessageKey("admin.queue.row.actions"):                            "Actions",
-	webMessageKey("admin.queue.row.manage"):                             "Manage",
+	webMessageKey("admin.queue.row.actions_aria"):                       "Actions for queue job %d %s/%s",
 	webMessageKey("admin.queue.row.priority.saving"):                    "Saving priority",
 	webMessageKey("admin.queue.row.priority.aria"):                      "Priority for queue job %d %s/%s",
 	webMessageKey("admin.queue.row.priority.save_aria"):                 "Save priority for queue job %d %s/%s",

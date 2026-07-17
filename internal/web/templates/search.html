@@ -180,7 +180,7 @@
               <div class="text-sm font-medium text-fg">{{t "search.detail.lifecycle" .FindingsCount (word .FindingsCount "finding" "findings")}}</div>
               {{else if gt .VulnerabilityCount 0}}
               <div class="text-sm font-medium text-fg">{{t "search.detail.vulnerability" .VulnerabilityCount (word .VulnerabilityCount "finding" "findings")}}</div>
-              {{if .VulnerabilityIDs}}<div class="text-xs text-muted mt-0.5"><bdi dir="auto">{{.VulnerabilityIDs}}</bdi></div>{{end}}
+              {{if .VulnerabilityIDs}}<div class="text-xs text-muted mt-0.5">{{range $i, $item := .VulnerabilityIDItems}}{{if $i}}, {{end}}{{if $item.URL}}<a href="{{$item.URL}}" target="_blank" rel="noopener" aria-label="{{newTabAriaLabel $item.Label}}" class="text-accent hover:underline"><bdi dir="auto">{{$item.Label}}</bdi></a>{{else}}<bdi dir="auto">{{$item.Label}}</bdi>{{end}}{{end}}</div>{{end}}
               {{else if gt .FindingsCount 0}}
               <div class="text-sm font-medium text-fg">{{t "search.detail.non_vulnerability" .FindingsCount (word .FindingsCount "finding" "findings")}}</div>
               {{else}}

@@ -406,7 +406,7 @@ func TestAdminQueuePaginationAndStatusFilterRenderReachableJobs(t *testing.T) {
 	}
 }
 
-func TestAdminQueueRendersRowActionsCollapsed(t *testing.T) {
+func TestAdminQueueRendersInlineRowActions(t *testing.T) {
 	store := newAdminStoreStub()
 	now := time.Now().UTC()
 	for i := 1; i <= 50; i++ {
@@ -430,10 +430,10 @@ func TestAdminQueueRendersRowActionsCollapsed(t *testing.T) {
 		t.Fatalf("status = %d body=%s", rec.Code, body)
 	}
 	if got := strings.Count(body, `data-admin-queue-row-actions`); got != 100 {
-		t.Fatalf("collapsed row action disclosure count = %d, want 100 for mobile and desktop queue rows\nbody=%s", got, body)
+		t.Fatalf("row action group count = %d, want 100 for mobile and desktop queue rows\nbody=%s", got, body)
 	}
 	for _, want := range []string{
-		`aria-label="Show actions for queue job 50 npm/pkg-050"`,
+		`aria-label="Actions for queue job 50 npm/pkg-050"`,
 		`action="/admin/queue/priority"`,
 		`action="/admin/queue/pause"`,
 		`name="_csrf"`,
@@ -441,11 +441,15 @@ func TestAdminQueueRendersRowActionsCollapsed(t *testing.T) {
 		`name="return_offset"`,
 	} {
 		if !strings.Contains(body, want) {
-			t.Fatalf("collapsed queue row actions missing %q\nbody=%s", want, body)
+			t.Fatalf("inline queue row actions missing %q\nbody=%s", want, body)
 		}
 	}
-	if strings.Contains(body, `open data-admin-queue-row-actions`) {
-		t.Fatalf("queue row action disclosures render open by default\nbody=%s", body)
+	// Row actions render inline; they must not hide behind a disclosure that
+	// reflows the table when opened.
+	if strings.Contains(body, `<summary`) && strings.Contains(body, `data-admin-queue-row-actions`) {
+		if strings.Contains(body, `<details class="no-print relative`) {
+			t.Fatalf("queue row actions still render as a disclosure widget\nbody=%s", body)
+		}
 	}
 }
 

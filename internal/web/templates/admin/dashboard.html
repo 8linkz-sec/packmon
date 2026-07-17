@@ -39,7 +39,7 @@
     <div class="pm-scroll-region" tabindex="0" role="region" aria-label="Admin feed sync status table">
       <table class="min-w-full text-sm">
         <thead>
-          <tr class="text-start text-muted border-b bg-bg">
+          <tr class="text-start text-muted border-b border-border">
             <th class="px-5 py-2">Feed</th>
             <th class="px-5 py-2">Status</th>
             <th class="px-5 py-2">Reason</th>
@@ -74,7 +74,10 @@
       </table>
     </div>
     {{else}}
-    <div class="pm-empty-state">No feed data available.</div>
+    <div class="pm-empty-state">
+      <p class="text-sm font-medium text-fg">No feed data available.</p>
+      <p class="mt-1 text-sm">Feed sync status appears here after the first feed synchronization has run.</p>
+    </div>
     {{end}}
   </div>
 
@@ -85,25 +88,35 @@
     {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .QueueStatsLoadError}}
     {{else}}
     <div class="grid grid-cols-2 sm:grid-cols-5 gap-4 text-center">
-      <div>
-        <div class="text-2xl font-semibold text-warning-fg">{{.QueueStats.Pending}}</div>
-        <div class="text-xs text-muted uppercase">Pending</div>
+      <div class="pm-surface p-5">
+        <dl>
+          <dt class="text-xs font-semibold uppercase tracking-wide text-muted">Pending</dt>
+          <dd class="mt-1 text-2xl font-semibold text-warning-fg">{{.QueueStats.Pending}}</dd>
+        </dl>
       </div>
-      <div>
-        <div class="text-2xl font-semibold text-accent">{{.QueueStats.Processing}}</div>
-        <div class="text-xs text-muted uppercase">Processing</div>
+      <div class="pm-surface p-5">
+        <dl>
+          <dt class="text-xs font-semibold uppercase tracking-wide text-muted">Processing</dt>
+          <dd class="mt-1 text-2xl font-semibold text-accent-fg">{{.QueueStats.Processing}}</dd>
+        </dl>
       </div>
-      <div>
-        <div class="text-2xl font-semibold text-success-fg">{{.QueueStats.Done}}</div>
-        <div class="text-xs text-muted uppercase">Done</div>
+      <div class="pm-surface p-5">
+        <dl>
+          <dt class="text-xs font-semibold uppercase tracking-wide text-muted">Done</dt>
+          <dd class="mt-1 text-2xl font-semibold text-success-fg">{{.QueueStats.Done}}</dd>
+        </dl>
       </div>
-      <div>
-        <div class="text-2xl font-semibold text-danger">{{.QueueStats.Error}}</div>
-        <div class="text-xs text-muted uppercase">Error</div>
+      <div class="pm-surface p-5">
+        <dl>
+          <dt class="text-xs font-semibold uppercase tracking-wide text-muted">Error</dt>
+          <dd class="mt-1 text-2xl font-semibold text-danger">{{.QueueStats.Error}}</dd>
+        </dl>
       </div>
-      <div>
-        <div class="text-2xl font-semibold text-muted">{{.QueueStats.Paused}}</div>
-        <div class="text-xs text-muted uppercase">Paused</div>
+      <div class="pm-surface p-5">
+        <dl>
+          <dt class="text-xs font-semibold uppercase tracking-wide text-muted">Paused</dt>
+          <dd class="mt-1 text-2xl font-semibold text-muted">{{.QueueStats.Paused}}</dd>
+        </dl>
       </div>
     </div>
     {{end}}

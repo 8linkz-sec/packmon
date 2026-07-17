@@ -731,13 +731,16 @@ type RefreshPriorityOption struct {
 }
 
 // RefreshPriorityOptions returns the supported refresh priority scale ordered
-// from highest priority to lowest priority.
+// from highest priority to lowest priority. Labels name the urgency level
+// first (what an operator selects) and keep the automatic assignment origin
+// in parentheses, so the queue UI does not read like a package property such
+// as severity.
 func RefreshPriorityOptions() []RefreshPriorityOption {
 	return []RefreshPriorityOption{
-		{Value: RefreshPriorityManual, Label: "0 - manual trigger/highest"},
-		{Value: RefreshPriorityUnknownPackage, Label: "1 - unknown packages"},
-		{Value: RefreshPriorityKnownFinding, Label: "2 - known findings"},
-		{Value: RefreshPriorityNormal, Label: "3 - normal re-check/lowest"},
+		{Value: RefreshPriorityManual, Label: "0 - Immediate (manual trigger)"},
+		{Value: RefreshPriorityUnknownPackage, Label: "1 - High (unknown packages)"},
+		{Value: RefreshPriorityKnownFinding, Label: "2 - Medium (known findings)"},
+		{Value: RefreshPriorityNormal, Label: "3 - Normal (scheduled re-check)"},
 	}
 }
 

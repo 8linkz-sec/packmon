@@ -355,7 +355,7 @@ func buildAdminQueueStatCards(active string, stats *adminQueueStats) []adminQueu
 		countClass string
 	}{
 		{db.RefreshStatusPending, "text-warning-fg"},
-		{db.RefreshStatusProcessing, "text-accent"},
+		{db.RefreshStatusProcessing, "text-accent-fg"},
 		{db.RefreshStatusDone, "text-success-fg"},
 		{db.RefreshStatusError, "text-danger"},
 		{db.RefreshStatusPaused, "text-muted"},
