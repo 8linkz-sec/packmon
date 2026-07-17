@@ -847,7 +847,10 @@ Important environment variables:
   `npm/@internal/,maven/com.acme:`; suppresses Socket.dev refresh egress)
 - `PACKMON_VULNCHECK_API_KEY`
 - `PACKMON_VULNCHECK_API_BASE_URL=https://api.vulncheck.com`
-- `PACKMON_NVD_API_KEY`
+- `PACKMON_NVD_API_KEY` (optional; raises the NVD API rate limit from 5 to 50
+  requests per 30 seconds -- without it, NVD severity enrichment over a few
+  thousand CVEs takes hours. Request a free key at
+  https://nvd.nist.gov/developers/request-an-api-key)
 - `PACKMON_FEED_OSV_BASE_URL=https://osv-vulnerabilities.storage.googleapis.com`
 - `PACKMON_FEED_GHSA_REPO_URL=https://github.com/github/advisory-database.git`
 - `PACKMON_FEED_OPENSSF_REPO_URL=https://github.com/ossf/malicious-packages.git`

@@ -446,6 +446,30 @@ Avoid launching overlapping manual syncs for the same feed. Manual sync is not
 available for disabled feeds, external feeds, or demand-driven queue sources
 such as ReversingLabs.
 
+### NVD enrichment stays in running for a long time
+
+NVD is a phase-2 enrichment feed: it does not import advisories itself, it
+raises CVSS/severity for already-imported CVEs that arrived without usable
+severity data. Its `Entries` counters show CVEs updated/processed by the last
+completed enrichment run, not a vulnerability inventory. Two symptoms look
+alarming but have expected causes:
+
+- `running` with an old last-sync timestamp for hours: `last_sync_at`
+  intentionally keeps the timestamp of the last usable data while a sync is
+  in progress. Without `PACKMON_NVD_API_KEY` the NVD API allows 5 requests
+  per 30 seconds (with a key: 50), so an enrichment pass over a few thousand
+  fallback-severity CVEs takes hours, and progress logs appear only once per
+  500-CVE discovery page. Request a free key at
+  https://nvd.nist.gov/developers/request-an-api-key and set it as
+  `PACKMON_NVD_API_KEY` (or save it from `/admin/feeds`) to cut the runtime
+  roughly by a factor of ten.
+- A `running` row that never finishes after an unclean server stop: the
+  interrupted sync could not finalize its status row, so `running` persists
+  as a stale heartbeat. The next scheduled or manual sync replaces it.
+  Confirm in recent server logs (`starting NVD enrichment sync`,
+  `NVD enrichment: processing CVE page`) that a new run is actually active
+  before treating the feed as stuck.
+
 ### Feed scheduler controls
 
 Global self-sync scheduling uses:
