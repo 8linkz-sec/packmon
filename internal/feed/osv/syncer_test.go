@@ -1154,6 +1154,59 @@ func TestMapToVulnerabilityCoversAliasesWithdrawnAndUnsupportedEcosystem(t *test
 	}
 }
 
+func TestMapToVulnerabilityDerivesClosureFromLastKnownAffectedRange(t *testing.T) {
+	t.Parallel()
+
+	vuln := mapToVulnerability(&osvEntry{
+		ID: "GHSA-62gx-5q78-wrvx",
+		Affected: []osvAffected{{
+			Package:          osvPackage{Ecosystem: "npm", Name: "obsidian-local-rest-api"},
+			Ranges:           []osvRange{{Type: "SEMVER", Events: []osvEvent{{Introduced: "0"}}}},
+			DatabaseSpecific: json.RawMessage(`{"last_known_affected_version_range": "< 4.1.3"}`),
+		}},
+	}, nil)
+	if len(vuln.AffectedPackages) != 1 {
+		t.Fatalf("affected packages = %+v, want 1", vuln.AffectedPackages)
+	}
+	var ranges []osvRange
+	if err := json.Unmarshal(vuln.AffectedPackages[0].VersionRanges, &ranges); err != nil {
+		t.Fatalf("unmarshal version ranges: %v", err)
+	}
+	if len(ranges) != 1 || len(ranges[0].Events) != 2 || ranges[0].Events[1].Fixed != "4.1.3" {
+		t.Fatalf("ranges = %+v, want closure event with fixed 4.1.3 appended", ranges)
+	}
+
+	vuln = mapToVulnerability(&osvEntry{
+		ID: "GHSA-le-case",
+		Affected: []osvAffected{{
+			Package:          osvPackage{Ecosystem: "npm", Name: "pkg"},
+			Ranges:           []osvRange{{Type: "SEMVER", Events: []osvEvent{{Introduced: "0"}}}},
+			DatabaseSpecific: json.RawMessage(`{"last_known_affected_version_range": "<= 2.0.0"}`),
+		}},
+	}, nil)
+	if err := json.Unmarshal(vuln.AffectedPackages[0].VersionRanges, &ranges); err != nil {
+		t.Fatalf("unmarshal version ranges: %v", err)
+	}
+	if len(ranges) != 1 || len(ranges[0].Events) != 2 || ranges[0].Events[1].LastAffected != "2.0.0" {
+		t.Fatalf("ranges = %+v, want closure event with last_affected 2.0.0 appended", ranges)
+	}
+
+	vuln = mapToVulnerability(&osvEntry{
+		ID: "GHSA-already-closed",
+		Affected: []osvAffected{{
+			Package:          osvPackage{Ecosystem: "npm", Name: "pkg"},
+			Ranges:           []osvRange{{Type: "SEMVER", Events: []osvEvent{{Introduced: "0", Fixed: "1.5.0"}}}},
+			DatabaseSpecific: json.RawMessage(`{"last_known_affected_version_range": "< 2.0.0"}`),
+		}},
+	}, nil)
+	if err := json.Unmarshal(vuln.AffectedPackages[0].VersionRanges, &ranges); err != nil {
+		t.Fatalf("unmarshal version ranges: %v", err)
+	}
+	if len(ranges) != 1 || len(ranges[0].Events) != 1 || ranges[0].Events[0].Fixed != "1.5.0" {
+		t.Fatalf("ranges = %+v, want existing closure untouched", ranges)
+	}
+}
+
 func TestRecordSyncStatusBranches(t *testing.T) {
 	t.Parallel()
 

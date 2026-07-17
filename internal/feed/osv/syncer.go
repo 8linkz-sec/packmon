@@ -736,7 +736,7 @@ func mapToVulnerability(entry *osvEntry, rawJSON []byte) *db.Vulnerability {
 		}
 
 		// Encode version ranges as JSON.
-		rangesJSON, _ := json.Marshal(aff.Ranges)
+		rangesJSON, _ := json.Marshal(normalizeAffectedRanges(aff))
 		versionsJSON, _ := json.Marshal(aff.Versions)
 
 		vuln.AffectedPackages = append(vuln.AffectedPackages, db.AffectedPackage{
@@ -748,6 +748,60 @@ func mapToVulnerability(entry *osvEntry, rawJSON []byte) *db.Vulnerability {
 	}
 
 	return vuln
+}
+
+// normalizeAffectedRanges appends the closure boundary from
+// database_specific.last_known_affected_version_range to ranges that would
+// otherwise stay open-ended (no fixed/last_affected event). This mirrors the
+// GHSA importer, so GHSA advisories mirrored through OSV keep their fix
+// boundary instead of matching every later release and rendering without a
+// fixed version.
+func normalizeAffectedRanges(aff osvAffected) []osvRange {
+	if len(aff.Ranges) == 0 {
+		return aff.Ranges
+	}
+	closure, ok := closureEventFromDatabaseSpecific(aff.DatabaseSpecific)
+	if !ok {
+		return aff.Ranges
+	}
+	out := make([]osvRange, 0, len(aff.Ranges))
+	for _, r := range aff.Ranges {
+		normalized := osvRange{
+			Type:   r.Type,
+			Events: append([]osvEvent(nil), r.Events...),
+		}
+		if len(normalized.Events) > 0 && !hasRangeClosure(normalized.Events) {
+			normalized.Events = append(normalized.Events, closure)
+		}
+		out = append(out, normalized)
+	}
+	return out
+}
+
+func closureEventFromDatabaseSpecific(raw json.RawMessage) (osvEvent, bool) {
+	if len(raw) == 0 {
+		return osvEvent{}, false
+	}
+	var dbSpec struct {
+		LastKnownAffectedVersionRange string `json:"last_known_affected_version_range"`
+	}
+	if err := json.Unmarshal(raw, &dbSpec); err != nil {
+		return osvEvent{}, false
+	}
+	fixed, lastAffected, ok := feed.ParseLastKnownAffectedClosure(dbSpec.LastKnownAffectedVersionRange)
+	if !ok {
+		return osvEvent{}, false
+	}
+	return osvEvent{Fixed: fixed, LastAffected: lastAffected}, true
+}
+
+func hasRangeClosure(events []osvEvent) bool {
+	for _, event := range events {
+		if strings.TrimSpace(event.Fixed) != "" || strings.TrimSpace(event.LastAffected) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func mapToMaliciousFindings(entry *osvEntry) []*db.MaliciousFinding {

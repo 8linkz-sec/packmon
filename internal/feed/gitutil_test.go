@@ -64,7 +64,7 @@ func TestGitRepoClonePullHeadHashAndChangedFiles(t *testing.T) {
 	runGit(t, remote, "add", ".")
 	runGit(t, remote, "commit", "-m", "update")
 
-	newHash, changed, err := repo.PullWithChangedFiles(ctx)
+	newHash, changed, err := repo.PullWithChangedFiles(ctx, firstHash)
 	if err != nil {
 		t.Fatalf("PullWithChangedFiles() error = %v", err)
 	}
@@ -86,7 +86,7 @@ func TestGitRepoClonePullHeadHashAndChangedFiles(t *testing.T) {
 	if err := os.WriteFile(lockFile, []byte("stale"), 0o600); err != nil {
 		t.Fatalf("write stale index lock: %v", err)
 	}
-	sameHash, noChanges, err := repo.PullWithChangedFiles(ctx)
+	sameHash, noChanges, err := repo.PullWithChangedFiles(ctx, newHash)
 	if err != nil {
 		t.Fatalf("PullWithChangedFiles(no changes) error = %v", err)
 	}
@@ -129,12 +129,82 @@ func TestGitRepoPullWithChangedFilesFreshClone(t *testing.T) {
 		Dir:    filepath.Join(t.TempDir(), "clone"),
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
-	hash, changed, err := repo.PullWithChangedFiles(ctx)
+	hash, changed, err := repo.PullWithChangedFiles(ctx, "")
 	if err != nil {
 		t.Fatalf("PullWithChangedFiles(fresh clone) error = %v", err)
 	}
 	if hash == "" || changed != nil {
 		t.Fatalf("PullWithChangedFiles(fresh clone) = %q, %#v; want hash and nil changed files", hash, changed)
+	}
+}
+
+func TestGitRepoPullWithChangedFilesUsesImportBaselineNotCheckoutHead(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	ctx := context.Background()
+	remote := filepath.Join(t.TempDir(), "remote")
+	runGit(t, "", "init", remote)
+	runGit(t, remote, "config", "user.email", "packmon@example.test")
+	runGit(t, remote, "config", "user.name", "Packmon Test")
+	if err := os.WriteFile(filepath.Join(remote, "one.txt"), []byte("one"), 0o600); err != nil {
+		t.Fatalf("write one.txt: %v", err)
+	}
+	runGit(t, remote, "add", ".")
+	runGit(t, remote, "commit", "-m", "baseline")
+
+	repo := &GitRepo{
+		URL:    remote,
+		Dir:    filepath.Join(t.TempDir(), "clone"),
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	baseline, err := repo.EnsureCloned(ctx)
+	if err != nil {
+		t.Fatalf("EnsureCloned() error = %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(remote, "two.txt"), []byte("two"), 0o600); err != nil {
+		t.Fatalf("write two.txt: %v", err)
+	}
+	runGit(t, remote, "add", ".")
+	runGit(t, remote, "commit", "-m", "missed change")
+
+	// Simulate an interrupted sync attempt that advanced the checkout to the
+	// newest commit without importing anything.
+	if _, err := repo.EnsureCloned(ctx); err != nil {
+		t.Fatalf("EnsureCloned(advance checkout) error = %v", err)
+	}
+
+	// The retry must not treat "checkout already at origin/HEAD" as "no
+	// changes": the import baseline is older than the checkout.
+	hash, changed, err := repo.PullWithChangedFiles(ctx, baseline)
+	if err != nil {
+		t.Fatalf("PullWithChangedFiles(stale baseline) error = %v", err)
+	}
+	if hash == baseline {
+		t.Fatalf("hash = %q, want new commit past baseline", hash)
+	}
+	if changed != nil && len(changed) == 0 {
+		t.Fatalf("changed = empty non-nil slice; stale baseline must yield the real delta or nil (full walk)")
+	}
+	if changed != nil {
+		seen := map[string]bool{}
+		for _, file := range changed {
+			seen[file] = true
+		}
+		if !seen["two.txt"] {
+			t.Fatalf("changed = %#v, want two.txt from baseline delta", changed)
+		}
+	}
+
+	// An empty baseline on an existing checkout must request a full walk.
+	hash, changed, err = repo.PullWithChangedFiles(ctx, "")
+	if err != nil {
+		t.Fatalf("PullWithChangedFiles(no baseline) error = %v", err)
+	}
+	if hash == "" || changed != nil {
+		t.Fatalf("PullWithChangedFiles(no baseline) = %q, %#v; want hash and nil changed files", hash, changed)
 	}
 }
 
@@ -171,7 +241,7 @@ func TestGitRepoPullWithChangedFilesWaitsForPackmonSyncLockBeforeRemovingIndexLo
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
 
-	_, _, err := repo.PullWithChangedFiles(ctx)
+	_, _, err := repo.PullWithChangedFiles(ctx, "")
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("PullWithChangedFiles() error = %v, want context deadline exceeded", err)
 	}

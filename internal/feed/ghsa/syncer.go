@@ -53,6 +53,10 @@ type affectedPackageRepairer interface {
 	RepairGHSAAffectedPackages(ctx context.Context) (int, error)
 }
 
+type vulnerabilitySourceCounter interface {
+	CountVulnerabilitiesBySource(ctx context.Context, source string) (int, error)
+}
+
 // NewSyncer creates a GHSA Syncer. dataDir is the parent directory
 // where the advisory-database repo will be cloned. If dataDir is
 // empty, os.TempDir() is used.
@@ -109,24 +113,32 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 		Logger: s.logger,
 	}
 
-	// PullWithChangedFiles handles clone-or-pull and computes the diff
-	// between old HEAD and fetched origin/HEAD before resetting. This is
-	// necessary because after a shallow fetch+reset the old commit is
-	// unreachable and git diff would fail.
-	commitHash, changedFiles, err := repo.PullWithChangedFiles(ctx)
-	if err != nil {
-		s.recordSyncFailure(ctx, store, start, err)
-		return nil, fmt.Errorf("ghsa: pull with changed files: %w", err)
-	}
-	s.logger.Info("advisory-database ready", slog.String("commit", commitHash))
-
-	// Check whether we already synced this commit.
+	// Load the recorded sync state first: the delta baseline is the last
+	// successfully imported commit, never the checkout's incidental HEAD
+	// (an interrupted attempt may have advanced the checkout without
+	// importing anything).
 	status, err := store.GetFeedSyncStatus(ctx, FeedName)
 	if err != nil {
 		s.logger.Warn("failed to get feed sync status, proceeding with full sync",
 			slog.String("error", feed.SafeDiagnosticError(err)),
 		)
 	}
+	baseline := ""
+	if status != nil {
+		baseline = strings.TrimSpace(status.LastCommitHash)
+	}
+
+	// PullWithChangedFiles handles clone-or-pull and computes the diff
+	// between the import baseline and fetched origin/HEAD before
+	// resetting. When the baseline is empty or unreachable in the shallow
+	// history it returns nil changed files and the sync falls back to a
+	// full walk.
+	commitHash, changedFiles, err := repo.PullWithChangedFiles(ctx, baseline)
+	if err != nil {
+		s.recordSyncFailure(ctx, store, start, err)
+		return nil, fmt.Errorf("ghsa: pull with changed files: %w", err)
+	}
+	s.logger.Info("advisory-database ready", slog.String("commit", commitHash))
 	if status != nil && status.LastCommitHash == commitHash && status.LastSyncStatus == db.FeedSyncStatusSuccess {
 		s.logger.Info("advisory-database unchanged, skipping sync",
 			slog.String("commit", commitHash),
@@ -137,10 +149,11 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 		}
 		// Still record a successful status to update the timestamp.
 		dur := time.Since(start)
-		s.recordSyncSuccessWithCommit(ctx, store, dur, status.EntriesTotal, 0, commitHash, repairCurrent)
+		total := s.resolveDeltaEntriesTotal(ctx, store, status, 0)
+		s.recordSyncSuccessWithCommit(ctx, store, dur, total, 0, commitHash, repairCurrent)
 		return &feed.SyncResult{
 			EntriesSynced: 0,
-			EntriesTotal:  status.EntriesTotal,
+			EntriesTotal:  total,
 		}, nil
 	}
 
@@ -158,6 +171,9 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 			s.recordSyncFailure(ctx, store, start, err)
 			return nil, fmt.Errorf("ghsa: process changed files: %w", err)
 		}
+		// A delta run only sees changed files; its per-run count must not
+		// overwrite the corpus total in feed_sync_status.
+		total = s.resolveDeltaEntriesTotal(ctx, store, status, total)
 	} else {
 		// Full walk: first clone or diff unavailable.
 		synced, total, err = s.walkAdvisories(ctx, store, advisoryRoot)
@@ -384,6 +400,35 @@ func (s *Syncer) walkAdvisories(ctx context.Context, store db.Store, root string
 		return synced, total, fmt.Errorf("%d GHSA advisory import errors", entryErrors)
 	}
 	return synced, total, nil
+}
+
+// resolveDeltaEntriesTotal returns the entries_total to persist after a sync
+// that did not walk the full advisory corpus. The previous status total is
+// carried forward, and a zero baseline (a fresh status row, or a legacy row
+// overwritten by a per-run delta count) is recovered from the stored GHSA
+// entry count when the store supports counting. Without either signal the
+// per-run processed count is kept as a last resort.
+func (s *Syncer) resolveDeltaEntriesTotal(ctx context.Context, store db.Store, status *db.FeedSyncStatus, processed int) int {
+	baseline := 0
+	if status != nil {
+		baseline = status.EntriesTotal
+	}
+	total := max(baseline, processed)
+	if baseline > 0 {
+		return total
+	}
+	counter, ok := store.(vulnerabilitySourceCounter)
+	if !ok {
+		return total
+	}
+	count, err := counter.CountVulnerabilitiesBySource(ctx, FeedName)
+	if err != nil {
+		s.logger.Warn("failed to count stored GHSA entries for sync status",
+			slog.String("error", feed.SafeDiagnosticError(err)),
+		)
+		return total
+	}
+	return max(total, count)
 }
 
 // recordSyncSuccessWithCommit persists a successful sync status including
@@ -695,26 +740,11 @@ func closureEventFromLastKnownAffectedRange(specific *ghsaAffectedDatabaseSpecif
 	if specific == nil {
 		return ghsaEvent{}, false
 	}
-	for _, part := range strings.Split(specific.LastKnownAffectedVersionRange, ",") {
-		part = strings.TrimSpace(part)
-		switch {
-		case strings.HasPrefix(part, "<="):
-			version := cleanConstraintVersion(strings.TrimPrefix(part, "<="))
-			if version != "" {
-				return ghsaEvent{LastAffected: version}, true
-			}
-		case strings.HasPrefix(part, "<"):
-			version := cleanConstraintVersion(strings.TrimPrefix(part, "<"))
-			if version != "" {
-				return ghsaEvent{Fixed: version}, true
-			}
-		}
+	fixed, lastAffected, ok := feed.ParseLastKnownAffectedClosure(specific.LastKnownAffectedVersionRange)
+	if !ok {
+		return ghsaEvent{}, false
 	}
-	return ghsaEvent{}, false
-}
-
-func cleanConstraintVersion(version string) string {
-	return strings.Trim(strings.TrimSpace(version), "`\"'")
+	return ghsaEvent{Fixed: fixed, LastAffected: lastAffected}, true
 }
 
 // mapSeverity derives a Packmon severity string from the GHSA advisory.

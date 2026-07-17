@@ -593,7 +593,7 @@ func TestRecordSyncFailurePreservesLastUsableSync(t *testing.T) {
 	}
 }
 
-func TestSyncUsesExistingGitCheckoutAndRecordsUnchangedStatus(t *testing.T) {
+func TestSyncExistingCheckoutWithoutImportBaselineDoesFullWalk(t *testing.T) {
 	t.Parallel()
 
 	if _, err := exec.LookPath("git"); err != nil {
@@ -612,17 +612,173 @@ func TestSyncUsesExistingGitCheckoutAndRecordsUnchangedStatus(t *testing.T) {
 	}
 	commitGHSAGitRepo(t, repoDir)
 
+	// An existing checkout without any recorded import must not be treated as
+	// "already synced": the checkout state says nothing about the database.
 	store := &ghsaStoreStub{}
 	syncer := NewSyncer(nil, dataDir)
 	result, err := syncer.Sync(context.Background(), store)
 	if err != nil {
 		t.Fatalf("Sync() error = %v", err)
 	}
-	if result.EntriesSynced != 0 || result.EntriesTotal != 0 {
-		t.Fatalf("Sync() result = %+v, want unchanged delta with no processed files", result)
+	if result.EntriesSynced != 1 || result.EntriesTotal != 1 {
+		t.Fatalf("Sync() result = %+v, want full walk importing the advisory", result)
+	}
+	if store.upserts != 1 {
+		t.Fatalf("upserts = %d, want 1 imported advisory", store.upserts)
 	}
 	if len(store.statuses) == 0 || store.status.LastSyncStatus != "success" || store.status.LastCommitHash == "" {
 		t.Fatalf("statuses = %+v, want success with commit", store.statuses)
+	}
+}
+
+func TestSyncImportsAdvisoriesMissedWhenCheckoutIsAheadOfImportBaseline(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	dataDir := t.TempDir()
+	repoDir := filepath.Join(dataDir, "advisory-database")
+	initGHSAGitRepo(t, repoDir)
+	firstAdvisory := filepath.Join(repoDir, reviewedDir, "2026", "05", "GHSA-early.json")
+	if err := os.MkdirAll(filepath.Dir(firstAdvisory), 0o750); err != nil {
+		t.Fatalf("mkdir advisory dir: %v", err)
+	}
+	if err := os.WriteFile(firstAdvisory, []byte(`{"id":"GHSA-early-1234-5678","database_specific":{"severity":"LOW"}}`), 0o600); err != nil {
+		t.Fatalf("write first advisory: %v", err)
+	}
+	commitGHSAGitRepo(t, repoDir)
+	baseline := headGHSAGit(t, repoDir)
+
+	// A new advisory lands after the last successful import. The checkout is
+	// already at the newest commit (e.g. a clone from an interrupted attempt),
+	// so a diff against the checkout HEAD would report "no changes" and lose
+	// the advisory forever.
+	lateAdvisory := filepath.Join(repoDir, reviewedDir, "2026", "07", "GHSA-late.json")
+	if err := os.MkdirAll(filepath.Dir(lateAdvisory), 0o750); err != nil {
+		t.Fatalf("mkdir late advisory dir: %v", err)
+	}
+	if err := os.WriteFile(lateAdvisory, []byte(`{"id":"GHSA-late-1234-5678","database_specific":{"severity":"HIGH"}}`), 0o600); err != nil {
+		t.Fatalf("write late advisory: %v", err)
+	}
+	commitGHSAGitRepo(t, repoDir)
+
+	store := &ghsaStoreStub{status: &db.FeedSyncStatus{
+		FeedName:       FeedName,
+		LastSyncStatus: db.FeedSyncStatusSuccess,
+		EntriesTotal:   1,
+		LastCommitHash: baseline,
+	}}
+	syncer := NewSyncer(nil, dataDir)
+
+	result, err := syncer.Sync(context.Background(), store)
+	if err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	if result.EntriesSynced < 1 {
+		t.Fatalf("Sync() result = %+v, want the missed advisory imported", result)
+	}
+	imported := false
+	for _, vuln := range store.vulns {
+		if vuln.ID == "GHSA-late-1234-5678" {
+			imported = true
+		}
+	}
+	if !imported {
+		t.Fatalf("imported vulns = %+v, want GHSA-late-1234-5678", store.vulns)
+	}
+	if store.status.LastSyncStatus != "success" || store.status.LastCommitHash == baseline {
+		t.Fatalf("recorded status = %+v, want success at the new commit", store.status)
+	}
+}
+
+func TestResolveDeltaEntriesTotalCarriesForwardPreviousTotal(t *testing.T) {
+	t.Parallel()
+
+	store := &ghsaStoreStub{}
+	syncer := NewSyncer(nil, "")
+	status := &db.FeedSyncStatus{FeedName: FeedName, EntriesTotal: 41028}
+
+	if got := syncer.resolveDeltaEntriesTotal(context.Background(), store, status, 0); got != 41028 {
+		t.Fatalf("resolveDeltaEntriesTotal(no changes) = %d, want previous total 41028", got)
+	}
+	if got := syncer.resolveDeltaEntriesTotal(context.Background(), store, status, 12); got != 41028 {
+		t.Fatalf("resolveDeltaEntriesTotal(12 changed) = %d, want previous total 41028", got)
+	}
+}
+
+func TestResolveDeltaEntriesTotalRecoversZeroBaselineFromStoredEntries(t *testing.T) {
+	t.Parallel()
+
+	store := &ghsaCountingStoreStub{count: 41028}
+	syncer := NewSyncer(nil, "")
+	status := &db.FeedSyncStatus{FeedName: FeedName, EntriesTotal: 0}
+
+	if got := syncer.resolveDeltaEntriesTotal(context.Background(), store, status, 0); got != 41028 {
+		t.Fatalf("resolveDeltaEntriesTotal(zero baseline) = %d, want store count 41028", got)
+	}
+	if len(store.countedSources) != 1 || store.countedSources[0] != FeedName {
+		t.Fatalf("counted sources = %v, want single %q count", store.countedSources, FeedName)
+	}
+
+	store.countErr = errors.New("count failed")
+	if got := syncer.resolveDeltaEntriesTotal(context.Background(), store, status, 3); got != 3 {
+		t.Fatalf("resolveDeltaEntriesTotal(count error) = %d, want processed fallback 3", got)
+	}
+}
+
+func TestResolveDeltaEntriesTotalFallsBackToProcessedCount(t *testing.T) {
+	t.Parallel()
+
+	store := &ghsaStoreStub{}
+	syncer := NewSyncer(nil, "")
+
+	if got := syncer.resolveDeltaEntriesTotal(context.Background(), store, nil, 5); got != 5 {
+		t.Fatalf("resolveDeltaEntriesTotal(no status, non-counting store) = %d, want processed 5", got)
+	}
+}
+
+func TestSyncDeltaWithNoChangesPreservesPreviousEntriesTotal(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	dataDir := t.TempDir()
+	repoDir := filepath.Join(dataDir, "advisory-database")
+	initGHSAGitRepo(t, repoDir)
+	advisoryPath := filepath.Join(repoDir, reviewedDir, "2026", "05", "GHSA-sync.json")
+	if err := os.MkdirAll(filepath.Dir(advisoryPath), 0o750); err != nil {
+		t.Fatalf("mkdir advisory dir: %v", err)
+	}
+	if err := os.WriteFile(advisoryPath, []byte(`{"id":"GHSA-sync-1234-5678","database_specific":{"severity":"LOW"}}`), 0o600); err != nil {
+		t.Fatalf("write advisory: %v", err)
+	}
+	commitGHSAGitRepo(t, repoDir)
+	commitHash := headGHSAGit(t, repoDir)
+
+	// A failed previous attempt leaves an error status whose preserved
+	// EntriesTotal must survive the follow-up delta sync that finds no
+	// changed files (the retry-after-timeout production scenario).
+	store := &ghsaStoreStub{status: &db.FeedSyncStatus{
+		FeedName:       FeedName,
+		LastSyncStatus: db.FeedSyncStatusError,
+		EntriesTotal:   7,
+		LastCommitHash: commitHash,
+	}}
+	syncer := NewSyncer(nil, dataDir)
+
+	result, err := syncer.Sync(context.Background(), store)
+	if err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	if result.EntriesSynced != 0 || result.EntriesTotal != 7 {
+		t.Fatalf("Sync() result = %+v, want 0 synced with preserved total 7", result)
+	}
+	if store.status.EntriesTotal != 7 || store.status.LastSyncStatus != "success" {
+		t.Fatalf("recorded status = %+v, want success with preserved total 7", store.status)
 	}
 }
 
@@ -717,6 +873,21 @@ func TestMapSeverityFallbacks(t *testing.T) {
 	if got := mapSeverity(&ghsaAdvisory{}); got != "UNKNOWN" {
 		t.Fatalf("mapSeverity(empty) = %q", got)
 	}
+}
+
+type ghsaCountingStoreStub struct {
+	ghsaStoreStub
+	count          int
+	countErr       error
+	countedSources []string
+}
+
+func (s *ghsaCountingStoreStub) CountVulnerabilitiesBySource(_ context.Context, source string) (int, error) {
+	s.countedSources = append(s.countedSources, source)
+	if s.countErr != nil {
+		return 0, s.countErr
+	}
+	return s.count, nil
 }
 
 type ghsaRepairStoreStub struct {

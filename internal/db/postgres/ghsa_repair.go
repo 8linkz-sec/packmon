@@ -5,6 +5,22 @@ import (
 	"fmt"
 )
 
+// CountVulnerabilitiesBySource returns the number of distinct vulnerabilities
+// attributed to a feed source. Feed syncers use it to recover a usable
+// entries_total for delta syncs whose per-run counts do not represent the
+// stored corpus.
+func (s *Store) CountVulnerabilitiesBySource(ctx context.Context, source string) (int, error) {
+	var count int
+	err := s.pool.QueryRow(ctx, `
+		SELECT COUNT(DISTINCT vulnerability_id)
+		FROM vulnerability_sources
+		WHERE source = $1`, source).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count vulnerabilities for source %s: %w", source, err)
+	}
+	return count, nil
+}
+
 // RepairGHSAAffectedPackages reconciles affected_packages rows from stored
 // GHSA raw JSON. This repairs older advisories that were imported while the
 // GHSA ecosystem mapper did not recognize "GitHub Actions", and refreshes rows

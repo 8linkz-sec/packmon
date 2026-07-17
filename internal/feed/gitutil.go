@@ -121,15 +121,19 @@ func (g *GitRepo) headHash(ctx context.Context) (string, error) {
 }
 
 // PullWithChangedFiles fetches the latest changes, computes the list of
-// changed files between the current HEAD and the fetched origin/HEAD,
-// then resets to origin/HEAD. It returns the new commit hash and the
-// list of changed files. If the repo was freshly cloned (oldHash is
-// empty), changedFiles will be nil (meaning the caller should do a full
-// walk). This method must be called instead of EnsureCloned when delta
-// detection is desired, because after a shallow fetch+reset the old
-// commit is no longer reachable.
-func (g *GitRepo) PullWithChangedFiles(ctx context.Context) (newHash string, changedFiles []string, err error) {
+// changed files between sinceCommit -- the caller's last successfully
+// imported commit -- and the fetched origin/HEAD, then resets to
+// origin/HEAD. It returns the new commit hash and the list of changed
+// files. changedFiles is nil when no delta is available (empty
+// sinceCommit, fresh clone with a different baseline, or sinceCommit not
+// reachable in the shallow history) -- the caller must do a full walk.
+// The delta baseline is deliberately NOT the checkout's previous HEAD: a
+// checkout advanced by an interrupted earlier attempt would otherwise
+// report "no changes" and silently skip everything committed since the
+// last real import.
+func (g *GitRepo) PullWithChangedFiles(ctx context.Context, sinceCommit string) (newHash string, changedFiles []string, err error) {
 	log := g.Logger.With(slog.String("repo", g.URL))
+	sinceCommit = strings.TrimSpace(sinceCommit)
 
 	if !g.isCloned() {
 		log.Info("cloning repository (shallow)")
@@ -140,7 +144,11 @@ func (g *GitRepo) PullWithChangedFiles(ctx context.Context) (newHash string, cha
 		if err != nil {
 			return "", nil, fmt.Errorf("git rev-parse HEAD: %w", err)
 		}
-		// Fresh clone: no delta available.
+		if sinceCommit != "" && sinceCommit == hash {
+			// Everything up to the cloned commit is already imported.
+			return hash, []string{}, nil
+		}
+		// Fresh clone without a matching baseline: no delta available.
 		return hash, nil, nil
 	}
 
@@ -152,58 +160,58 @@ func (g *GitRepo) PullWithChangedFiles(ctx context.Context) (newHash string, cha
 	}
 	defer releaseSyncLock()
 
-	// Step 1: record current HEAD before fetch.
-	oldHash, err := g.headHash(ctx)
-	if err != nil {
-		return "", nil, fmt.Errorf("git rev-parse HEAD (pre-fetch): %w", err)
-	}
-
-	// Step 2: fetch latest from origin.
+	// Step 1: fetch latest from origin.
 	if err := g.run(ctx, g.Dir, "fetch", "--depth=1", "origin"); err != nil {
 		return "", nil, fmt.Errorf("git fetch: %w", err)
 	}
 
-	// Step 3: compute diff between local HEAD and fetched origin/HEAD.
-	// Both commits are still reachable at this point (before reset).
+	// Step 2: compute diff between the import baseline and fetched
+	// origin/HEAD while both may still be reachable (before reset).
 	var diffFiles []string
-	var stdout bytes.Buffer
-	cmdCtx, cancel := g.commandContext(ctx)
-	defer cancel()
-	// #nosec G204 -- command is fixed to git; oldHash is read from git itself and origin/HEAD is fixed.
-	cmd := gitCommand(cmdCtx, "diff", "--name-only", oldHash, "origin/HEAD")
-	cmd.Dir = g.Dir
-	cmd.Stdout = &stdout
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	cmd.WaitDelay = 2 * time.Second
-
-	if diffErr := cmd.Run(); diffErr != nil {
-		if cmdCtx.Err() != nil {
-			diffErr = cmdCtx.Err()
-		}
-		diffErr = gitCommandError([]string{"diff", "--name-only", oldHash, "origin/HEAD"}, diffErr, stdout.String(), stderr.String())
-		log.Warn("git diff failed, delta sync not available",
-			slog.String("error", SafeDiagnosticError(diffErr)),
-		)
-		// diffFiles stays nil -> caller does full walk.
+	haveDelta := false
+	if sinceCommit == "" {
+		log.Info("no import baseline commit recorded, full sync required")
 	} else {
-		lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
-		for _, line := range lines {
-			line = strings.TrimSpace(line)
-			if line != "" {
-				diffFiles = append(diffFiles, line)
+		var stdout bytes.Buffer
+		cmdCtx, cancel := g.commandContext(ctx)
+		defer cancel()
+		// #nosec G204 -- command is fixed to git; sinceCommit is a stored commit hash and origin/HEAD is fixed.
+		cmd := gitCommand(cmdCtx, "diff", "--name-only", sinceCommit, "origin/HEAD")
+		cmd.Dir = g.Dir
+		cmd.Stdout = &stdout
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		cmd.WaitDelay = 2 * time.Second
+
+		if diffErr := cmd.Run(); diffErr != nil {
+			if cmdCtx.Err() != nil {
+				diffErr = cmdCtx.Err()
+			}
+			diffErr = gitCommandError([]string{"diff", "--name-only", sinceCommit, "origin/HEAD"}, diffErr, stdout.String(), stderr.String())
+			log.Warn("git diff against import baseline failed, delta sync not available",
+				slog.String("error", SafeDiagnosticError(diffErr)),
+			)
+			// diffFiles stays nil -> caller does full walk.
+		} else {
+			haveDelta = true
+			lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if line != "" {
+					diffFiles = append(diffFiles, line)
+				}
 			}
 		}
 	}
 
-	// Step 4: remove stale index.lock if a previous git process crashed.
+	// Step 3: remove stale index.lock if a previous git process crashed.
 	lockFile := filepath.Join(g.Dir, ".git", "index.lock")
 	if _, statErr := os.Stat(lockFile); statErr == nil {
 		log.Warn("removing stale git index.lock", slog.String("file", filepath.Base(lockFile)))
 		_ = os.Remove(lockFile)
 	}
 
-	// Step 5: reset to origin/HEAD.
+	// Step 4: reset to origin/HEAD.
 	if err := g.run(ctx, g.Dir, "reset", "--hard", "origin/HEAD"); err != nil {
 		return "", nil, fmt.Errorf("git reset: %w", err)
 	}
@@ -213,11 +221,13 @@ func (g *GitRepo) PullWithChangedFiles(ctx context.Context) (newHash string, cha
 		return "", nil, fmt.Errorf("git rev-parse HEAD (post-reset): %w", err)
 	}
 
-	if oldHash == hash {
-		// No changes -- return empty list (not nil) to signal "no changes".
+	if sinceCommit == hash {
+		// Baseline already matches origin/HEAD -- nothing new to import.
 		return hash, []string{}, nil
 	}
-
+	if !haveDelta {
+		return hash, nil, nil
+	}
 	return hash, diffFiles, nil
 }
 
