@@ -1,11 +1,14 @@
 package sbomgen
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -330,6 +333,67 @@ func TestRunDisambiguatesInternalOutputNameCollisions(t *testing.T) {
 			t.Fatalf("duplicate SBOM basename %q in %v", name, result.SBOMPaths)
 		}
 		seen[name] = struct{}{}
+	}
+}
+
+func TestDefaultRunnerStreamsStdoutDataSeparatelyFromDiagnostics(t *testing.T) {
+	wantStdoutBytes := maxCommandOutputBytes + 4096
+	var stdout bytes.Buffer
+	diag, err := defaultRunner(context.Background(), RunOptions{
+		Name: os.Args[0],
+		Args: []string{"-test.run=^TestSBOMGenExecHelperProcess$"},
+		Env: []string{
+			"SBOMGEN_EXEC_HELPER=1",
+			"SBOMGEN_EXEC_HELPER_STDOUT_BYTES=" + strconv.Itoa(wantStdoutBytes),
+		},
+		Stdout: &stdout,
+	})
+	if err != nil {
+		t.Fatalf("defaultRunner: %v: %s", err, diag)
+	}
+	if stdout.Len() != wantStdoutBytes {
+		t.Fatalf("stdout data = %d bytes, want %d without truncation", stdout.Len(), wantStdoutBytes)
+	}
+	if bytes.Contains(stdout.Bytes(), []byte(commandOutputTruncatedMarker)) {
+		t.Fatalf("stdout data contains truncation marker")
+	}
+	if !strings.Contains(string(diag), "helper-stderr-diagnostics") {
+		t.Fatalf("diagnostics = %q, want helper stderr output", diag)
+	}
+	if strings.Contains(string(diag), "aaaa") {
+		t.Fatalf("diagnostics contain stdout data: %q", diag)
+	}
+}
+
+// TestSBOMGenExecHelperProcess is not a real test: defaultRunner tests re-exec
+// the test binary with SBOMGEN_EXEC_HELPER=1 as a portable subprocess that
+// emits a controlled amount of stdout data plus a stderr diagnostic line.
+func TestSBOMGenExecHelperProcess(t *testing.T) {
+	if os.Getenv("SBOMGEN_EXEC_HELPER") != "1" {
+		return
+	}
+	size, err := strconv.Atoi(os.Getenv("SBOMGEN_EXEC_HELPER_STDOUT_BYTES"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "invalid SBOMGEN_EXEC_HELPER_STDOUT_BYTES:", err)
+		os.Exit(2)
+	}
+	if _, err := os.Stdout.Write(bytes.Repeat([]byte("a"), size)); err != nil {
+		os.Exit(2)
+	}
+	fmt.Fprint(os.Stderr, "helper-stderr-diagnostics")
+	os.Exit(0)
+}
+
+func TestLimitedDataBufferRejectsWritesBeyondLimit(t *testing.T) {
+	buf := &limitedDataBuffer{limit: 8}
+	if _, err := buf.Write([]byte("12345678")); err != nil {
+		t.Fatalf("Write within limit: %v", err)
+	}
+	if _, err := buf.Write([]byte("9")); err == nil {
+		t.Fatalf("Write beyond limit should fail instead of truncating data")
+	}
+	if got := string(buf.Bytes()); got != "12345678" {
+		t.Fatalf("Bytes = %q, want data written within limit", got)
 	}
 }
 

@@ -3,6 +3,9 @@ package sbomgen
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,11 +22,15 @@ func TestGoGeneratorGenerateUsesNativeGoList(t *testing.T) {
 	outPath := filepath.Join(root, "bom.json")
 	err := (goGenerator{}).Generate(context.Background(), d, outPath, GenerateOptions{IncludeDev: true}, func(_ context.Context, opts RunOptions) ([]byte, error) {
 		got = opts
-		return []byte(strings.Join([]string{
+		if opts.Stdout == nil {
+			return nil, errors.New("go list runner must stream stdout via RunOptions.Stdout")
+		}
+		_, err := io.WriteString(opts.Stdout, strings.Join([]string{
 			`{"Path":"example.test","Main":true}`,
 			`{"Path":"golang.org/x/text","Version":"v0.3.7","Indirect":false}`,
 			`{"Path":"golang.org/x/sys","Version":"v0.1.0","Indirect":true}`,
-		}, "\n")), nil
+		}, "\n"))
+		return nil, err
 	})
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
@@ -54,6 +61,40 @@ func TestGoGeneratorGenerateUsesNativeGoList(t *testing.T) {
 	}
 	if parsed.Packages[0].Package.Name != "golang.org/x/text" || parsed.Packages[0].Package.Version != "v0.3.7" {
 		t.Fatalf("first package = %+v", parsed.Packages[0].Package)
+	}
+}
+
+func TestGoGeneratorGenerateHandlesModuleListLargerThanDiagnosticBound(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "go.mod", "module example.test\n\ngo 1.26\n")
+	d := Detection{ProjectDir: root, ManifestPath: filepath.Join(root, "go.mod")}
+	outPath := filepath.Join(root, "bom.json")
+	moduleCount := 0
+	err := (goGenerator{}).Generate(context.Background(), d, outPath, GenerateOptions{}, func(_ context.Context, opts RunOptions) ([]byte, error) {
+		if opts.Stdout == nil {
+			return nil, errors.New("go list runner must stream stdout via RunOptions.Stdout")
+		}
+		total, err := io.WriteString(opts.Stdout, `{"Path":"example.test","Main":true}`+"\n")
+		if err != nil {
+			return nil, err
+		}
+		for total <= maxCommandOutputBytes {
+			line := fmt.Sprintf("{\"Path\":\"example.test/dep%06d\",\"Version\":\"v1.0.0\"}\n", moduleCount)
+			n, err := io.WriteString(opts.Stdout, line)
+			if err != nil {
+				return nil, err
+			}
+			total += n
+			moduleCount++
+		}
+		return []byte("go: stderr diagnostics only"), nil
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	bom := readGoCycloneDXBOM(t, outPath)
+	if len(bom.Components) != moduleCount {
+		t.Fatalf("components = %d, want %d (module list larger than the diagnostic capture bound must not be truncated)", len(bom.Components), moduleCount)
 	}
 }
 

@@ -356,7 +356,11 @@ Important behavior:
   `cyclonedx-maven-plugin` 2.9.1. Existing PATH tools for npm and PyPI are
   version-checked before use. Manifest reads, generator output capture, and
   generated-SBOM validation are size-bounded, and cleanup failures are returned
-  as operational errors instead of being silently ignored. Generation runs local
+  as operational errors instead of being silently ignored. The Go generator
+  captures `go list` stdout as data separately from the bounded stderr
+  diagnostics under the generated-SBOM size cap, so large module lists are
+  neither truncated by the small diagnostic bound nor interleaved with
+  stderr; exceeding the data cap fails the generation explicitly. Generation runs local
   external toolchains and may cause those toolchains to contact package
   registries.
 - config precedence is flags, environment, project `.packmon.yaml`, user-global

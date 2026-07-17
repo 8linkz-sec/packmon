@@ -1,6 +1,7 @@
 package sbomgen
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -16,6 +17,11 @@ const (
 	maxGeneratedSBOMBytes        = sbom.MaxSizeBytes
 	maxCommandOutputBytes        = 64 << 10
 	commandOutputTruncatedMarker = "\n...[truncated]\n"
+	// maxGoListStdoutBytes bounds go list module JSON captured as data via
+	// RunOptions.Stdout. It mirrors the generated-SBOM size cap because the
+	// module list is SBOM input, not diagnostics; the small diagnostic capture
+	// bound would truncate real module lists mid-JSON.
+	maxGoListStdoutBytes = maxGeneratedSBOMBytes
 )
 
 func readAutoSBOMManifest(path string) ([]byte, error) {
@@ -80,6 +86,23 @@ func commandOutputSummary(raw []byte) string {
 	}
 	return out
 }
+
+// limitedDataBuffer captures command stdout as data up to limit bytes. Unlike
+// boundedOutputWriter it never truncates silently: a write beyond the limit
+// fails, which aborts the producing command with an explicit error.
+type limitedDataBuffer struct {
+	limit int
+	buf   bytes.Buffer
+}
+
+func (b *limitedDataBuffer) Write(p []byte) (int, error) {
+	if b.buf.Len()+len(p) > b.limit {
+		return 0, fmt.Errorf("command output exceeds maximum data size of %d bytes", b.limit)
+	}
+	return b.buf.Write(p)
+}
+
+func (b *limitedDataBuffer) Bytes() []byte { return b.buf.Bytes() }
 
 type boundedOutputWriter struct {
 	mu        sync.Mutex

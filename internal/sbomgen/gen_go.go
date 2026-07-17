@@ -26,16 +26,20 @@ func (goGenerator) InstallSpec() InstallSpec {
 }
 
 func (goGenerator) Generate(ctx context.Context, d Detection, outPath string, opts GenerateOptions, run RunnerFunc) error {
-	out, err := run(ctx, RunOptions{
-		Name: "go",
-		Args: []string{"list", "-mod=readonly", "-m", "-json", "all"},
-		Dir:  d.ProjectDir,
-		Env:  []string{"GOWORK=off"},
+	// go list emits the module list on stdout as data, so it must bypass the
+	// bounded diagnostic capture (which truncates and mixes in stderr).
+	stdout := &limitedDataBuffer{limit: maxGoListStdoutBytes}
+	diag, err := run(ctx, RunOptions{
+		Name:   "go",
+		Args:   []string{"list", "-mod=readonly", "-m", "-json", "all"},
+		Dir:    d.ProjectDir,
+		Env:    []string{"GOWORK=off"},
+		Stdout: stdout,
 	})
 	if err != nil {
-		return fmt.Errorf("go list modules: %w: %s", err, commandOutputSummary(out))
+		return fmt.Errorf("go list modules: %w: %s", err, commandOutputSummary(diag))
 	}
-	return writeGoListCycloneDX(outPath, out)
+	return writeGoListCycloneDX(outPath, stdout.Bytes())
 }
 
 func (goGenerator) DeclaresDependencies(d Detection, _ GenerateOptions) (bool, error) {

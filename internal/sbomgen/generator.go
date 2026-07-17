@@ -2,6 +2,7 @@ package sbomgen
 
 import (
 	"context"
+	"io"
 
 	"github.com/8linkz-sec/packmon/internal/domain"
 )
@@ -23,9 +24,15 @@ type RunOptions struct {
 	Dir string
 	// Env contains extra environment entries allowed by the command environment filter.
 	Env []string
+	// Stdout, when set, receives the command's standard output as data instead
+	// of routing it into the bounded diagnostic capture. Generators that parse
+	// stdout (e.g. go list) must set it so large output is neither truncated by
+	// the diagnostic bound nor interleaved with standard error.
+	Stdout io.Writer
 }
 
-// RunnerFunc runs an external command and returns bounded combined output.
+// RunnerFunc runs an external command and returns bounded diagnostic output:
+// combined stdout+stderr by default, stderr only when RunOptions.Stdout is set.
 type RunnerFunc func(ctx context.Context, opts RunOptions) ([]byte, error)
 
 // GenerateOptions controls a single generated SBOM.

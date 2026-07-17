@@ -535,11 +535,15 @@ func defaultRunner(ctx context.Context, opts RunOptions) ([]byte, error) {
 	}
 	cmd.Env = sanitizedCommandEnv(opts.Env)
 	cmd.WaitDelay = 2 * time.Second
-	var output boundedOutputWriter
-	cmd.Stdout = &output
-	cmd.Stderr = &output
+	var diagnostics boundedOutputWriter
+	if opts.Stdout != nil {
+		cmd.Stdout = opts.Stdout
+	} else {
+		cmd.Stdout = &diagnostics
+	}
+	cmd.Stderr = &diagnostics
 	err := cmd.Run()
-	return output.Bytes(), err
+	return diagnostics.Bytes(), err
 }
 
 func sanitizedCommandEnv(extra []string) []string {
