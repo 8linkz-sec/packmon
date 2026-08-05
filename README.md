@@ -96,14 +96,25 @@ go build -trimpath -o packmon ./cmd/packmon
 
 ### Windows
 
-Copy `packmon.exe` into the repository or project directory you want to scan.
-Then run these commands from that directory:
+Place `packmon.exe` anywhere you like (or put it on `PATH`). `packmon scan`
+takes the directory to scan as an argument, so the binary does not need to
+live inside the project. From the project directory, scan `.`:
 
 ```powershell
 .\packmon.exe version
 .\packmon.exe scan --list-all --html packmon-report.html --output-json packmon-report.json .
 .\packmon.exe db info
 ```
+
+Or scan any project by passing its path:
+
+```powershell
+C:\Tools\packmon.exe scan --list-all --html packmon-report.html --output-json packmon-report.json C:\path\to\project
+```
+
+Relative report paths such as `packmon-report.html` are written to the current
+working directory, not the scanned directory; pass absolute paths if you want
+the reports elsewhere.
 
 This native full scan reads supported lockfiles and existing SBOMs directly. It
 does not require Go, Node.js, Python, JDK/Maven, Docker, or repository helper
@@ -127,11 +138,18 @@ Use the Packmon binary for your platform:
 - Linux: Packmon ELF binary, normally named `packmon`
 - macOS: Packmon Mach-O binary, normally named `packmon`
 
+As on Windows, the binary can live anywhere; pass the directory to scan as an
+argument (`.` for the current directory):
+
 ```bash
 chmod +x ./packmon
 ./packmon version
 ./packmon scan --list-all --html packmon-report.html --output-json packmon-report.json .
 ./packmon db info
+```
+
+```bash
+/opt/tools/packmon scan --list-all --html packmon-report.html --output-json packmon-report.json /path/to/project
 ```
 
 ```bash
@@ -187,6 +205,9 @@ result with `packmon db info`. `PACKMON_DB_WARN_AFTER_DAYS` (default `7`)
 controls when Packmon starts warning that local data is stale.
 
 ### Common commands
+
+The examples use `.` as the scan target; any directory path works in its
+place (`packmon scan /path/to/project`).
 
 ```bash
 packmon scan .
