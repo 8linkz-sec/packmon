@@ -1,0 +1,82 @@
+{{define "admin-alert-start"}}
+{{$alert := adminAlert .}}
+<div
+  {{if $alert.Live}}role="{{$alert.Role}}" aria-live="{{$alert.AriaLive}}" aria-atomic="true"{{end}}
+  data-alert-variant="{{$alert.Variant}}"
+  {{if $alert.Dismissible}}data-alert-dismissible{{end}}
+  class="{{$alert.ContainerClass}} rounded-md px-4 py-2 text-sm"
+>
+  <div class="flex items-start gap-3">
+    {{if $alert.Icon}}{{template "admin-alert-icon" $alert}}{{end}}
+    <div class="min-w-0 max-w-3xl flex-1">
+{{end}}
+
+{{define "admin-alert-end"}}
+{{$alert := adminAlert .}}
+    </div>
+    {{if $alert.Dismissible}}
+    <button
+      type="button"
+      data-alert-dismiss
+      aria-label="Dismiss alert"
+      class="ms-auto inline-flex min-h-8 shrink-0 items-center justify-center rounded px-2 py-1 text-sm font-medium hover:bg-surface-2 pm-focus-ring"
+    >
+      <svg aria-hidden="true" viewBox="0 0 20 20" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" focusable="false">
+        <path d="m6 6 8 8"></path>
+        <path d="m14 6-8 8"></path>
+      </svg>
+    </button>
+    {{end}}
+  </div>
+</div>
+{{end}}
+
+{{define "admin-alert-icon"}}
+<span
+  aria-hidden="true"
+  data-alert-icon="{{.Variant}}"
+  class="mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center {{.IconClass}}"
+>
+  {{if .Success}}
+  <svg viewBox="0 0 20 20" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" focusable="false">
+    <path d="M16 5 8 14l-4-4"></path>
+  </svg>
+  {{else if .Error}}
+  <svg viewBox="0 0 20 20" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" focusable="false">
+    <path d="M10 4v7"></path>
+    <path d="M10 15h.01"></path>
+    <circle cx="10" cy="10" r="8"></circle>
+  </svg>
+  {{else if .Warning}}
+  <svg viewBox="0 0 20 20" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" focusable="false">
+    <path d="M10 3 2 17h16L10 3z"></path>
+    <path d="M10 8v4"></path>
+    <path d="M10 15h.01"></path>
+  </svg>
+  {{else if .Info}}
+  <svg viewBox="0 0 20 20" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" focusable="false">
+    <circle cx="10" cy="10" r="8"></circle>
+    <path d="M10 9v5"></path>
+    <path d="M10 6h.01"></path>
+  </svg>
+  {{end}}
+</span>
+{{end}}
+
+{{define "admin-alert"}}
+{{if .Message}}
+{{template "admin-alert-start" .}}
+{{with .Title}}<p class="font-medium">{{.}}</p>{{end}}
+<p {{if .Title}}class="mt-1"{{end}}>{{.Message}}</p>
+{{template "admin-alert-end" .}}
+{{end}}
+{{end}}
+
+{{define "admin-flash-alerts"}}
+{{if .Message}}
+  {{template "admin-alert" dict "Variant" "success" "Icon" true "Live" true "Dismissible" true "Message" .Message}}
+{{end}}
+{{if .Error}}
+  {{template "admin-alert" dict "Variant" "error" "Icon" true "Live" true "Dismissible" true "Message" .Error}}
+{{end}}
+{{end}}

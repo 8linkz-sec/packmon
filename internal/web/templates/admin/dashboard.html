@@ -1,0 +1,126 @@
+{{define "title"}}Packmon - Admin Dashboard{{end}}
+
+{{define "content"}}
+<div class="space-y-6">
+
+  {{template "admin-page-header" dict "Title" "Admin Dashboard" "Section" "overview" "CSRFToken" .CSRFToken}}
+
+  {{template "admin-bootstrap-warning" .}}
+
+  <!-- DB stats. Operator-only numbers (lifecycle, scans, feed health) live here,
+       not on the public dashboard. -->
+  {{if .ScanCountLoadError}}
+  {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .ScanCountLoadError}}
+  {{end}}
+  {{if .DashboardStatsLoadError}}
+  {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .DashboardStatsLoadError}}
+  {{else}}
+  <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+    {{template "dashboard-stat-card" dict "Kind" "packages" "Stats" .Stats "SearchPath" "/search"}}
+    {{template "dashboard-stat-card" dict "Kind" "vulnerabilities" "Stats" .Stats "SearchPath" "/search"}}
+    {{template "dashboard-stat-card" dict "Kind" "malicious" "Stats" .Stats "SearchPath" "/search"}}
+    {{template "dashboard-stat-card" dict "Kind" "supply-chain" "Stats" .Stats "SearchPath" "/search"}}
+    {{template "dashboard-stat-card" dict "Kind" "lifecycle" "Stats" .Stats "SearchPath" "/search"}}
+    {{template "dashboard-stat-card" dict "Kind" "scans" "Stats" .Stats "Value" .TotalScans7d}}
+    {{template "dashboard-stat-card" dict "Kind" "feeds" "Stats" .Stats "Value" (printf "%d / %d" .FeedsHealthy .FeedsTotal)}}
+  </div>
+  {{end}}
+
+  <!-- Feed status summary -->
+  <div class="pm-surface">
+    <div class="px-5 py-3 border-b border-border">
+      <h2 class="text-lg font-semibold">Feed Sync Status</h2>
+    </div>
+    {{if .FeedStatusLoadError}}
+    <div class="px-5 py-4 border-b border-danger">
+      {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .FeedStatusLoadError}}
+    </div>
+    {{else if .Feeds}}
+    <div class="pm-scroll-region" tabindex="0" role="region" aria-label="Admin feed sync status table">
+      <table class="min-w-full text-sm">
+        <thead>
+          <tr class="text-start text-muted border-b border-border">
+            <th class="px-5 py-2">Feed</th>
+            <th class="px-5 py-2">Status</th>
+            <th class="px-5 py-2">Reason</th>
+            <th class="px-5 py-2">Last Sync</th>
+            <th class="px-5 py-2 text-end">Entries</th>
+          </tr>
+        </thead>
+        <tbody>
+          {{range .Feeds}}
+          <tr class="border-b border-border hover:bg-surface-2">
+            <td class="px-5 py-2 font-medium">{{.FeedName}}</td>
+            <td class="px-5 py-2">
+              {{template "feed-status-badge" .}}
+            </td>
+            <td class="px-5 py-2 text-xs text-muted">
+              {{template "feed-admin-rejection-details" .}}
+              {{if .LastError}}
+                {{template "feed-error-details" dict "Feed" . "Max" 60}}
+              {{else if .LastSyncStatus}}
+                <span>{{.LastSyncStatus}}</span>
+              {{else}}
+                <span class="text-muted">-</span>
+              {{end}}
+            </td>
+            <td class="px-5 py-2 text-muted">
+              {{template "feed-last-sync-cell" .}}
+            </td>
+            <td class="px-5 py-2 text-end">{{.EntriesTotal}}</td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}
+    <div class="pm-empty-state">
+      <p class="text-sm font-medium text-fg">No feed data available.</p>
+      <p class="mt-1 text-sm">Feed sync status appears here after the first feed synchronization has run.</p>
+    </div>
+    {{end}}
+  </div>
+
+  <!-- Queue summary -->
+  <div class="pm-surface p-5">
+    <h2 class="text-lg font-semibold mb-3">Queue Summary</h2>
+    {{if .QueueStatsLoadError}}
+    {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .QueueStatsLoadError}}
+    {{else}}
+    <div class="grid grid-cols-2 sm:grid-cols-5 gap-4 text-center">
+      <div class="pm-surface p-5">
+        <dl>
+          <dt class="text-xs font-semibold uppercase tracking-wide text-muted">Pending</dt>
+          <dd class="mt-1 text-2xl font-semibold text-warning-fg">{{.QueueStats.Pending}}</dd>
+        </dl>
+      </div>
+      <div class="pm-surface p-5">
+        <dl>
+          <dt class="text-xs font-semibold uppercase tracking-wide text-muted">Processing</dt>
+          <dd class="mt-1 text-2xl font-semibold text-accent-fg">{{.QueueStats.Processing}}</dd>
+        </dl>
+      </div>
+      <div class="pm-surface p-5">
+        <dl>
+          <dt class="text-xs font-semibold uppercase tracking-wide text-muted">Done</dt>
+          <dd class="mt-1 text-2xl font-semibold text-success-fg">{{.QueueStats.Done}}</dd>
+        </dl>
+      </div>
+      <div class="pm-surface p-5">
+        <dl>
+          <dt class="text-xs font-semibold uppercase tracking-wide text-muted">Error</dt>
+          <dd class="mt-1 text-2xl font-semibold text-danger">{{.QueueStats.Error}}</dd>
+        </dl>
+      </div>
+      <div class="pm-surface p-5">
+        <dl>
+          <dt class="text-xs font-semibold uppercase tracking-wide text-muted">Paused</dt>
+          <dd class="mt-1 text-2xl font-semibold text-muted">{{.QueueStats.Paused}}</dd>
+        </dl>
+      </div>
+    </div>
+    {{end}}
+  </div>
+
+</div>
+{{end}}

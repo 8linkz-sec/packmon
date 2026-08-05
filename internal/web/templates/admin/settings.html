@@ -1,0 +1,289 @@
+{{define "title"}}{{t "page.admin.settings.title"}}{{end}}
+
+{{define "content"}}
+<div class="space-y-6">
+
+  {{template "admin-page-header" dict "Title" (t "admin.settings.heading") "Section" "settings" "CSRFToken" .CSRFToken}}
+
+  {{template "admin-bootstrap-warning" .}}
+
+  {{template "admin-flash-alerts" .}}
+
+  <!-- System settings: saved values apply immediately through the runtime config
+       and are persisted for future server starts (no restart required). -->
+  <div class="pm-surface p-5">
+    <div class="flex flex-wrap items-start justify-between gap-3 mb-4">
+      <div>
+        <h2 class="text-lg font-semibold">{{t "admin.settings.runtime.heading"}}</h2>
+        <p class="text-sm text-muted mt-1">{{t "admin.settings.runtime.description"}}</p>
+      </div>
+      {{if .SystemSettingsLoadError}}
+      {{template "pm-badge" dict "Class" "bg-danger-bg text-danger-fg" "Label" (t "admin.settings.status.unavailable")}}
+      {{else if .HasSystemSettings}}
+        {{if .HasSystemSettingsUpdatedAt}}
+        <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-info-bg text-accent-fg">{{t "admin.settings.status.updated"}}&nbsp;<time data-local-time="relative" datetime="{{formatTimeISO .SystemSettingsUpdatedAt}}" aria-label="{{formatTime .SystemSettingsUpdatedAt}}">{{formatTimeAgo .SystemSettingsUpdatedAt}}</time></span>
+        {{else}}
+        {{template "pm-badge" dict "Class" "bg-info-bg text-accent-fg" "Label" (t "admin.settings.status.database_override")}}
+        {{end}}
+      {{else}}
+      {{template "pm-badge" dict "Class" "bg-surface-2 text-muted" "Label" (t "admin.settings.status.runtime_default")}}
+      {{end}}
+    </div>
+
+    {{if .SystemSettingsLoadError}}
+    <div class="mb-4">
+      {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .SystemSettingsLoadError}}
+    </div>
+    {{end}}
+
+    {{if .BootstrapWarning}}
+    {{template "admin-alert" dict "Variant" "warning" "Icon" true "Message" (t "admin.settings.system.locked_bootstrap")}}
+    {{else}}
+    <form action="/admin/settings/system" method="POST" class="max-w-3xl" data-submit-lock data-submit-lock-label="{{t "admin.settings.system.saving"}}">
+      <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+      <input type="hidden" name="updated_at" value="{{.SystemSettingsRevision}}">
+
+      <fieldset {{if .SystemSettingsLoadError}}disabled{{end}} class="space-y-4">
+      <div class="grid grid-cols-1 md:grid-cols-filters gap-4">
+        <div>
+          <label for="block-threshold" class="block text-sm font-medium text-fg mb-1">{{t "admin.settings.system.threshold_label"}}</label>
+          <select
+            name="block_threshold"
+            id="block-threshold"
+            aria-describedby="block-threshold-help block-threshold-runtime"
+            class="pm-form-control"
+          >
+            <option value="CRITICAL" {{if eq .SystemBlockThreshold "CRITICAL"}}selected{{end}}>CRITICAL</option>
+            <option value="HIGH" {{if eq .SystemBlockThreshold "HIGH"}}selected{{end}}>HIGH</option>
+            <option value="MEDIUM" {{if eq .SystemBlockThreshold "MEDIUM"}}selected{{end}}>MEDIUM</option>
+            <option value="LOW" {{if eq .SystemBlockThreshold "LOW"}}selected{{end}}>LOW</option>
+            <option value="NONE" {{if eq .SystemBlockThreshold "NONE"}}selected{{end}}>{{t "admin.settings.system.threshold_none"}}</option>
+          </select>
+          <p id="block-threshold-help" class="mt-1 text-xs text-muted">{{t "admin.settings.system.threshold_help"}}</p>
+          <p id="block-threshold-runtime" class="mt-1 text-xs text-muted">{{t "admin.settings.system.runtime_value" .RuntimeBlockThreshold}}</p>
+        </div>
+
+        <div>
+          <label for="rate-limit-per-minute" class="block text-sm font-medium text-fg mb-1">{{t "admin.settings.system.rate_minute_label"}}</label>
+          <input
+            type="number"
+            name="rate_limit_per_minute"
+            id="rate-limit-per-minute"
+            min="1"
+            max="{{.MaxAdminRateLimit}}"
+            required
+            value="{{.SystemRateLimitPerMinute}}"
+            aria-describedby="rate-limit-per-minute-help rate-limit-per-minute-runtime"
+            class="pm-form-control"
+          >
+          <p id="rate-limit-per-minute-help" class="mt-1 text-xs text-muted">{{t "admin.settings.system.rate_minute_help" .MaxAdminRateLimit}}</p>
+          <p id="rate-limit-per-minute-runtime" class="mt-1 text-xs text-muted">{{t "admin.settings.system.runtime_value" .RuntimeRateLimitPerMinute}}</p>
+        </div>
+
+        <div>
+          <label for="rate-limit-burst" class="block text-sm font-medium text-fg mb-1">{{t "admin.settings.system.rate_burst_label"}}</label>
+          <input
+            type="number"
+            name="rate_limit_burst"
+            id="rate-limit-burst"
+            min="1"
+            max="{{.MaxAdminRateLimit}}"
+            required
+            value="{{.SystemRateLimitBurst}}"
+            aria-describedby="rate-limit-burst-help rate-limit-burst-runtime"
+            class="pm-form-control"
+          >
+          <p id="rate-limit-burst-help" class="mt-1 text-xs text-muted">{{t "admin.settings.system.rate_burst_help" .MaxAdminRateLimit}}</p>
+          <p id="rate-limit-burst-runtime" class="mt-1 text-xs text-muted">{{t "admin.settings.system.runtime_value" .RuntimeRateLimitBurst}}</p>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div>
+          <label for="scan-log-retention-days" class="block text-sm font-medium text-fg mb-1">{{t "admin.settings.system.scan_retention"}}</label>
+          <input
+            type="number"
+            name="scan_log_retention_days"
+            id="scan-log-retention-days"
+            min="0"
+            max="{{.MaxAdminRetentionDays}}"
+            required
+            value="{{.SystemScanLogRetentionDays}}"
+            aria-describedby="scan-log-retention-days-help scan-log-retention-days-runtime"
+            class="pm-form-control"
+          >
+          <p id="scan-log-retention-days-help" class="mt-1 text-xs text-muted">{{t "admin.settings.system.scan_retention_help"}}</p>
+          <p id="scan-log-retention-days-runtime" class="mt-1 text-xs text-muted">{{t "admin.settings.system.runtime_days" .RuntimeScanLogRetentionDays}}</p>
+        </div>
+
+        <div>
+          <label for="admin-audit-retention-days" class="block text-sm font-medium text-fg mb-1">{{t "admin.settings.system.audit_retention"}}</label>
+          <input
+            type="number"
+            name="admin_audit_retention_days"
+            id="admin-audit-retention-days"
+            min="0"
+            max="{{.MaxAdminRetentionDays}}"
+            required
+            value="{{.SystemAdminAuditRetentionDays}}"
+            aria-describedby="admin-audit-retention-days-help admin-audit-retention-days-runtime"
+            class="pm-form-control"
+          >
+          <p id="admin-audit-retention-days-help" class="mt-1 text-xs text-muted">{{t "admin.settings.system.audit_retention_help"}}</p>
+          <p id="admin-audit-retention-days-runtime" class="mt-1 text-xs text-muted">{{t "admin.settings.system.runtime_days" .RuntimeAdminAuditRetentionDays}}</p>
+        </div>
+      </div>
+
+      <label class="flex items-start gap-3 rounded-md border border-warning bg-warning-bg px-3 py-2 text-sm text-warning-fg">
+        <input
+          type="checkbox"
+          id="ack-block-threshold-none"
+          name="ack_block_threshold_none"
+          value="true"
+          aria-describedby="ack-block-threshold-none-help"
+          data-required-when-select="#block-threshold"
+          data-required-value="NONE"
+          data-required-message="{{t "admin.settings.system.none_required"}}"
+          class="mt-0.5 h-4 w-4 rounded border-warning text-warning-fg pm-focus-ring pm-focus-ring-warning"
+        >
+        <span id="ack-block-threshold-none-help">
+          {{t "admin.settings.system.none_warning"}}
+        </span>
+      </label>
+
+      <button
+        type="submit"
+        data-submit-lock-button
+        class="{{adminPrimaryButtonClass}}"
+      >{{t "admin.settings.system.save"}}</button>
+      </fieldset>
+    </form>
+    {{end}}
+  </div>
+
+  <!-- Change password -->
+  <div class="no-print pm-surface p-5" data-no-print>
+    <h2 class="text-lg font-semibold mb-3">{{t "admin.settings.password.heading"}}</h2>
+    <form action="/admin/settings/password" method="POST" class="space-y-4 max-w-md" data-password-confirm-form data-submit-lock data-submit-lock-label="{{t "admin.settings.password.changing"}}">
+      <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+
+      <!-- Hidden username for Bitwarden/password-manager compatibility -->
+      <input type="hidden" name="username" value="admin" autocomplete="username">
+
+      <p id="password-length-help" class="text-xs text-muted">{{t "admin.settings.password.length_help" .MinPasswordLength}}</p>
+      <p id="password-confirm-help" class="text-xs text-muted">{{t "admin.settings.password.confirm_help"}}</p>
+
+      <div>
+        <label for="current-password" class="block text-sm font-medium text-fg mb-1">{{t "admin.settings.password.current_label"}}</label>
+        <input
+          type="password"
+          name="current_password"
+          id="current-password"
+          required
+          autocomplete="current-password"
+          class="pm-form-control"
+        >
+      </div>
+
+      <div>
+        <label for="new-password" class="block text-sm font-medium text-fg mb-1">{{t "admin.settings.password.new_label"}}</label>
+        <input
+          type="password"
+          name="new_password"
+          id="new-password"
+          required
+          minlength="{{.MinPasswordLength}}"
+          aria-describedby="password-length-help password-confirm-help"
+          autocomplete="new-password"
+          data-password-confirm-source
+          class="pm-form-control"
+        >
+      </div>
+
+      <div>
+        <label for="confirm-password" class="block text-sm font-medium text-fg mb-1">{{t "admin.settings.password.confirm_label"}}</label>
+        <input
+          type="password"
+          name="confirm_password"
+          id="confirm-password"
+          required
+          minlength="{{.MinPasswordLength}}"
+          aria-describedby="password-length-help password-confirm-help"
+          autocomplete="new-password"
+          data-password-confirm-target
+          data-password-mismatch-message="{{t "admin.settings.password.mismatch"}}"
+          class="pm-form-control"
+        >
+      </div>
+
+      <button
+        type="submit"
+        data-submit-lock-button
+        class="{{adminPrimaryButtonClass}}"
+      >{{t "admin.settings.password.change"}}</button>
+    </form>
+  </div>
+
+  <!-- Server info -->
+  <div class="pm-surface p-5">
+    <h2 class="text-lg font-semibold mb-3">Server Information</h2>
+    {{if .AdminAuthLoadError}}
+    <div class="mb-4">
+      {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .AdminAuthLoadError}}
+    </div>
+    {{end}}
+    <dl class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2 text-sm">
+      <div class="flex justify-between gap-3 sm:block">
+        <dt class="text-muted">Server Mode</dt>
+        <dd class="min-w-0 break-words text-end font-medium sm:text-start">{{.ServerMode}}</dd>
+      </div>
+      <div class="flex justify-between gap-3 sm:block">
+        <dt class="text-muted">Feed Sync Interval</dt>
+        <dd class="min-w-0 break-words text-end font-medium sm:text-start">{{.SyncInterval}}</dd>
+      </div>
+      <div class="flex justify-between gap-3 sm:block">
+        <dt class="text-muted">Feed Sync On Startup</dt>
+        <dd class="min-w-0 break-words text-end font-medium sm:text-start">{{.FeedSyncOnStartup}}</dd>
+      </div>
+      <div class="flex justify-between gap-3 sm:block">
+        <dt class="text-muted">Admin Session Timeout</dt>
+        <dd class="min-w-0 break-words text-end font-medium sm:text-start">{{.AdminSessionTimeout}}</dd>
+      </div>
+      <div class="flex justify-between gap-3 sm:block">
+        <dt class="text-muted">Metrics Address</dt>
+        <dd class="min-w-0 break-words text-end font-medium sm:text-start">{{.MetricsAddr}}</dd>
+      </div>
+      <div class="flex justify-between gap-3 sm:block">
+        <dt class="text-muted">Database Host</dt>
+        <dd class="min-w-0 break-words text-end font-medium sm:text-start">{{.DatabaseHost}}</dd>
+      </div>
+      <div class="flex justify-between gap-3 sm:block">
+        <dt class="text-muted">Database Name</dt>
+        <dd class="min-w-0 break-words text-end font-medium sm:text-start">{{.DatabaseName}}</dd>
+      </div>
+      <div class="flex justify-between gap-3 sm:block">
+        <dt class="text-muted">Database SSL Mode</dt>
+        <dd class="min-w-0 break-words text-end font-medium sm:text-start">{{.DatabaseSSLMode}}</dd>
+      </div>
+      <div class="flex justify-between gap-3 sm:block">
+        <dt class="text-muted">Admin Last Login</dt>
+        <dd class="min-w-0 break-words text-end font-medium sm:text-start">{{if .AdminAuthLoadError}}unavailable{{else if .HasLastLoginAt}}<time data-local-time="absolute" datetime="{{formatTimeISO .LastLoginAt}}" aria-label="{{formatTime .LastLoginAt}}">{{formatTime .LastLoginAt}}</time>{{else}}never{{end}}</dd>
+      </div>
+      <div class="flex justify-between gap-3 sm:block">
+        <dt class="text-muted">Password Changed</dt>
+        <dd class="min-w-0 break-words text-end font-medium sm:text-start">
+          {{if .AdminAuthLoadError}}unavailable{{else if .HasPasswordChangedAt}}<time data-local-time="absolute" datetime="{{formatTimeISO .PasswordChangedAt}}" aria-label="{{formatTime .PasswordChangedAt}}">{{formatTime .PasswordChangedAt}}</time>{{else}}never{{end}}
+        </dd>
+      </div>
+    </dl>
+  </div>
+
+  {{template "admin-alert-start" dict "Variant" "warning" "Icon" true}}
+  <p>
+    Most server settings are configured via environment variables (PACKMON_*) and require a restart to take effect.
+    See the deployment documentation for the full list.
+  </p>
+  {{template "admin-alert-end" .}}
+
+</div>
+{{end}}

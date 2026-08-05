@@ -1,0 +1,68 @@
+{
+  "name": "Packmon Daily Sync",
+  "active": false,
+  "settings": {},
+  "nodes": [
+    {
+      "id": "daily-trigger",
+      "name": "Daily Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [260, 260],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 3 * * *"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "sync-db",
+      "name": "Sync Local DB",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [540, 260],
+      "parameters": {
+        "command": "packmon db sync"
+      }
+    },
+    {
+      "id": "result",
+      "name": "Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [800, 260],
+      "parameters": {
+        "jsCode": "return [{ json: { workflow: 'daily-sync', status: 'ok', finishedAt: new Date().toISOString() } }];"
+      }
+    }
+  ],
+  "connections": {
+    "Daily Trigger": {
+      "main": [
+        [
+          {
+            "node": "Sync Local DB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sync Local DB": {
+      "main": [
+        [
+          {
+            "node": "Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

@@ -1,0 +1,133 @@
+{{define "title"}}{{t "page.dashboard.title"}}{{end}}
+
+{{/*
+  Public dashboard: display only. Every action and every operator-facing number
+  lives behind /admin/ (see DESIGN.md, "Web UI -- design system and dashboard
+  contract"). dashboard_contract_test.go enforces the card set, the column set,
+  the 20-row limit and the absence of buttons/forms/inputs.
+*/}}
+{{define "content"}}
+<div class="space-y-6">
+
+  {{if .StatsLoadError}}
+  {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .StatsLoadError}}
+  {{end}}
+  {{if .RecentVulnerabilitiesLoadError}}
+  {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .RecentVulnerabilitiesLoadError}}
+  {{end}}
+  {{if .LocalDBWarning}}
+  {{template "admin-alert" dict "Variant" "warning" "Icon" true "Message" .LocalDBWarning}}
+  {{end}}
+
+  <!-- Malicious and supply-chain findings both block the CI gate, so both stay here. -->
+  {{if not .StatsLoadError}}
+  <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+    {{template "dashboard-stat-card" dict "Kind" "packages" "Stats" .Stats "AlignClass" "text-center" "SearchPath" "/search"}}
+    {{template "dashboard-stat-card" dict "Kind" "vulnerabilities" "Stats" .Stats "AlignClass" "text-center" "SearchPath" "/search"}}
+    {{template "dashboard-stat-card" dict "Kind" "malicious" "Stats" .Stats "AlignClass" "text-center" "SearchPath" "/search"}}
+    {{template "dashboard-stat-card" dict "Kind" "supply-chain" "Stats" .Stats "AlignClass" "text-center" "SearchPath" "/search"}}
+  </div>
+  {{end}}
+
+  <!-- Severity breakdown -->
+  {{if .Stats.BySeverity}}
+  <div class="pm-surface p-5 text-center">
+    <h2 class="text-lg font-semibold mb-3">{{t "dashboard.severity.heading"}}</h2>
+    <div class="flex flex-wrap gap-3 justify-center">
+      {{with .Stats.BySeverity}}
+      {{if index . "CRITICAL"}}
+      <a
+        href="/search?severity=CRITICAL"
+        class="inline-flex min-h-11 items-center justify-center px-3 py-1.5 rounded-lg text-sm font-medium border hover:brightness-95 transition-[filter] duration-150 ease-out {{severityClass "CRITICAL"}}"
+      >CRITICAL: {{index . "CRITICAL"}}</a>
+      {{end}}
+      {{if index . "HIGH"}}
+      <a
+        href="/search?severity=HIGH"
+        class="inline-flex min-h-11 items-center justify-center px-3 py-1.5 rounded-lg text-sm font-medium border hover:brightness-95 transition-[filter] duration-150 ease-out {{severityClass "HIGH"}}"
+      >HIGH: {{index . "HIGH"}}</a>
+      {{end}}
+      {{if index . "MEDIUM"}}
+      <a
+        href="/search?severity=MEDIUM"
+        class="inline-flex min-h-11 items-center justify-center px-3 py-1.5 rounded-lg text-sm font-medium border hover:brightness-95 transition-[filter] duration-150 ease-out {{severityClass "MEDIUM"}}"
+      >MEDIUM: {{index . "MEDIUM"}}</a>
+      {{end}}
+      {{if index . "LOW"}}
+      <a
+        href="/search?severity=LOW"
+        class="inline-flex min-h-11 items-center justify-center px-3 py-1.5 rounded-lg text-sm font-medium border hover:brightness-95 transition-[filter] duration-150 ease-out {{severityClass "LOW"}}"
+      >LOW: {{index . "LOW"}}</a>
+      {{end}}
+      {{end}}
+    </div>
+  </div>
+  {{end}}
+
+  <!-- Recently published vulnerabilities (7 days, at most 20 rows) -->
+  {{if not .RecentVulnerabilitiesLoadError}}
+  <div class="pm-surface p-5">
+    <h2 class="text-lg font-semibold mb-3">{{t "dashboard.recent_vulnerabilities.heading"}}</h2>
+    {{if .RecentVulnerabilities}}
+    <div class="pm-scroll-region" tabindex="0" role="region" aria-label="{{t "dashboard.recent_vulnerabilities.table"}}">
+      <table class="min-w-full text-sm" data-dashboard-recent-table>
+        <thead>
+          <tr class="text-start text-muted border-b border-border">
+            <th scope="col" class="pb-2 pe-4">{{t "dashboard.table.package"}}</th>
+            <th scope="col" class="pb-2 pe-4">{{t "dashboard.table.version"}}</th>
+            <th scope="col" class="pb-2 pe-4">{{t "dashboard.table.ecosystem"}}</th>
+            <th scope="col" class="pb-2 pe-4">{{t "dashboard.table.severity"}}</th>
+            <th scope="col" class="pb-2 pe-4">{{t "dashboard.table.advisory"}}</th>
+            <th scope="col" class="pb-2">{{t "dashboard.table.published"}}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {{range .RecentVulnerabilities}}
+          <tr class="border-b border-border hover:bg-surface-2">
+            <td class="py-2 pe-4">
+              {{if .Name}}
+              <a
+                href="/package/{{.Ecosystem}}/{{.Name}}"
+                aria-label="{{t "dashboard.package_details_aria" .Ecosystem .Name}}"
+                class="inline-flex min-h-11 items-center rounded-md px-2 py-1 text-accent hover:bg-surface-2 hover:underline font-medium"
+              ><bdi dir="auto">{{.Name}}</bdi></a>
+              {{else}}
+              <span class="text-muted">-</span>
+              {{end}}
+            </td>
+            <td class="py-2 pe-4 font-mono text-xs text-muted">
+              {{if .Affected}}<bdi dir="auto">{{.Affected}}</bdi>{{else}}-{{end}}
+            </td>
+            <td class="py-2 pe-4 text-muted">{{if .Ecosystem}}{{.Ecosystem}}{{else}}-{{end}}</td>
+            <td class="py-2 pe-4">
+              <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium border {{severityClass .Severity}}">{{.Severity}}</span>
+            </td>
+            <td class="py-2 pe-4 font-mono text-xs">
+              {{$advisoryURL := advisoryURL .ID}}
+              {{if $advisoryURL}}
+              <a
+                href="{{$advisoryURL}}"
+                target="_blank"
+                rel="noopener"
+                aria-label="{{newTabAriaLabel (t "dashboard.advisory_label" .ID)}}"
+                class="text-accent hover:underline"
+              ><bdi dir="auto">{{.ID}}</bdi>{{template "external-link-icon"}}<span class="sr-only">{{newTabSRText}}</span></a>
+              {{else}}
+              <bdi dir="auto">{{.ID}}</bdi>
+              {{end}}
+            </td>
+            <td class="py-2 text-muted whitespace-nowrap"><time data-local-time="relative" datetime="{{formatTimeISO .PublishedAt}}" aria-label="{{formatTime .PublishedAt}}">{{formatTimeAgo .PublishedAt}}</time></td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}
+    <p class="text-sm text-muted">{{t "dashboard.recent_vulnerabilities.empty"}}</p>
+    {{end}}
+  </div>
+  {{end}}
+
+
+</div>
+{{end}}

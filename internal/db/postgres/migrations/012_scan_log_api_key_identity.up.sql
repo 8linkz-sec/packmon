@@ -1,0 +1,3 @@
+ALTER TABLE scan_log
+    ADD COLUMN IF NOT EXISTS api_key_id INTEGER,
+    ADD COLUMN IF NOT EXISTS api_key_name TEXT;

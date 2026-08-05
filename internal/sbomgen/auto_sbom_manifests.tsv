@@ -1,0 +1,9 @@
+# name|kind|ecosystem|input_kind|requirement_ids
+go.mod|detect|go|go.mod|go
+package.json|detect|npm|npm-package|node,npm,cyclonedx-npm
+requirements.txt|detect|pypi|requirements|python,cyclonedx-py
+pyproject.toml|poetry-pyproject|pypi|poetry|python,cyclonedx-py
+pom.xml|detect|maven|maven-pom|mvn
+poetry.lock|support-file|||
+Pipfile|unsupported|||
+Pipfile.lock|unsupported|||

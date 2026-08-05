@@ -1,0 +1,16 @@
+{{define "admin-bootstrap-warning"}}
+{{if .BootstrapWarning}}
+{{template "admin-alert-start" dict "Variant" "warning" "Icon" true}}
+<p class="text-sm font-semibold text-warning-fg">Bootstrap password still active</p>
+<p class="mt-1">
+  The admin password was set from the <code>PACKMON_ADMIN_INITIAL_PASSWORD</code> environment variable
+  and has not been changed. <a href="/admin/settings" class="underline font-medium">Change admin password</a>
+  before making admin changes.
+</p>
+{{template "admin-alert-end" .}}
+{{end}}
+
+{{if .AdminAuthLoadError}}
+{{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .AdminAuthLoadError}}
+{{end}}
+{{end}}

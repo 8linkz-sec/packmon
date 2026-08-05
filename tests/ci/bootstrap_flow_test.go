@@ -1,0 +1,195 @@
+package ci
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func repoFile(t *testing.T, rel string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("..", "..", filepath.FromSlash(rel)))
+	if err != nil {
+		t.Fatalf("read %s: %v", rel, err)
+	}
+	return string(data)
+}
+
+func TestOldLocalStackScriptsAreGone(t *testing.T) {
+	t.Parallel()
+	for _, rel := range []string{"scripts/start-local-stack.sh", "scripts/start-local-stack.ps1"} {
+		if _, err := os.Stat(filepath.Join("..", "..", filepath.FromSlash(rel))); !os.IsNotExist(err) {
+			t.Fatalf("%s must be removed", rel)
+		}
+	}
+}
+
+func TestOverrideDefinesInitSecretsAndMigrateChain(t *testing.T) {
+	t.Parallel()
+	override := repoFile(t, "docker-compose.override.yml")
+	for _, want := range []string{
+		"init-secrets:",
+		`command: ["init-secrets"]`,
+		".:/workspace",
+		"packmon-migrate:",
+		"service_completed_successfully",
+		// The base binds metrics to 0.0.0.0 (so prod's Docker host can publish
+		// the port), but ValidateMetricsExposure fails closed in production
+		// unless /metrics is on loopback. The local override keeps production
+		// mode (real PostgreSQL store, not the in-memory dev store) and instead
+		// binds metrics to loopback so the server starts.
+		`PACKMON_METRICS_HOST: "127.0.0.1"`,
+	} {
+		if !strings.Contains(override, want) {
+			t.Fatalf("docker-compose.override.yml missing %q", want)
+		}
+	}
+	// Guard against reintroducing development mode locally: it silently swaps
+	// PostgreSQL for an ephemeral in-memory store and makes postgres + migrate
+	// decorative.
+	if strings.Contains(override, "PACKMON_SERVER_MODE: development") {
+		t.Fatal("docker-compose.override.yml must not force development mode (uses in-memory store, bypasses postgres)")
+	}
+}
+
+func TestBaseComposeStaysPermissive(t *testing.T) {
+	t.Parallel()
+	base := repoFile(t, "docker-compose.yml")
+	for _, key := range []string{"POSTGRES_PASSWORD", "PACKMON_ENCRYPTION_KEY", "PACKMON_ADMIN_AUDIT_HMAC_KEY"} {
+		if strings.Contains(base, "${"+key+":?") {
+			t.Fatalf("docker-compose.yml must stay permissive on %s (strict guards live in docker-compose.server.yml)", key)
+		}
+	}
+}
+
+// TestDockerComposeConfigResolvesForLocalAndFailsClosedForServer is a real
+// `docker compose config` invocation. It is the test that would have caught
+// the original bug: Compose interpolates a base file's `:?` guard at load
+// time, before any override merges, so softening the secrets only in an
+// override never worked. The fix moved the strict guards into the
+// self-contained docker-compose.server.yml, keeping the base + auto-loaded
+// override permissive.
+func TestDockerComposeConfigResolvesForLocalAndFailsClosedForServer(t *testing.T) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker not available")
+	}
+	t.Parallel()
+
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("resolve repo root: %v", err)
+	}
+
+	envPath := filepath.Join(t.TempDir(), "blank.env")
+	const envContent = "POSTGRES_USER=packmon\n" +
+		"POSTGRES_DB=packmon\n" +
+		"POSTGRES_PASSWORD=\n" +
+		"PACKMON_DB_PASSWORD=\n" +
+		"PACKMON_ADMIN_INITIAL_PASSWORD=\n" +
+		"PACKMON_ENCRYPTION_KEY=\n" +
+		"PACKMON_ADMIN_AUDIT_HMAC_KEY=\n" +
+		"PACKMON_TRUSTED_PROXIES=\n"
+	if err := os.WriteFile(envPath, []byte(envContent), 0o600); err != nil {
+		t.Fatalf("write scratch env file: %v", err)
+	}
+
+	// (a) local path: base + auto-loaded override must resolve even though the
+	// secrets are blank, because init-secrets needs to run before .env exists.
+	localCmd := exec.Command("docker", "compose", "--env-file", envPath, "config") // #nosec G204 -- fixed docker/compose args, no user input.
+	localCmd.Dir = repoRoot
+	localOut, localErr := localCmd.CombinedOutput()
+	if localErr != nil {
+		t.Fatalf("local `docker compose config` (base+override) must resolve with blank secrets, got error: %v\noutput:\n%s", localErr, localOut)
+	}
+
+	// (b) server path: the self-contained docker-compose.server.yml must fail
+	// closed on blank secrets (and a blank PACKMON_TRUSTED_PROXIES), since its
+	// :? guards are authoritative and it loads no base/override file.
+	serverCmd := exec.Command("docker", "compose", //nolint:gosec // fixed docker/compose args, no user input.
+		"-f", "docker-compose.server.yml",
+		"--env-file", envPath, "config")
+	serverCmd.Dir = repoRoot
+	serverOut, serverErr := serverCmd.CombinedOutput()
+	if serverErr == nil {
+		t.Fatalf("server `docker compose config` (docker-compose.server.yml) must fail closed on blank secrets, but it resolved:\n%s", serverOut)
+	}
+
+	outText := string(serverOut)
+	guardedSecrets := []string{
+		"POSTGRES_PASSWORD", "PACKMON_DB_PASSWORD", "PACKMON_ADMIN_INITIAL_PASSWORD",
+		"PACKMON_ENCRYPTION_KEY", "PACKMON_ADMIN_AUDIT_HMAC_KEY", "PACKMON_TRUSTED_PROXIES",
+	}
+	found := false
+	for _, secret := range guardedSecrets {
+		if strings.Contains(outText, secret) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("server `docker compose config` failure output should mention a guarded secret name, got:\n%s", outText)
+	}
+}
+
+func TestServerComposeIsSelfContainedAndHardened(t *testing.T) {
+	t.Parallel()
+	server := repoFile(t, "docker-compose.server.yml")
+
+	// Fail-closed secret guards (strict :? on all five secrets).
+	for _, key := range []string{
+		"POSTGRES_PASSWORD", "PACKMON_DB_PASSWORD", "PACKMON_ADMIN_INITIAL_PASSWORD",
+		"PACKMON_ENCRYPTION_KEY", "PACKMON_ADMIN_AUDIT_HMAC_KEY",
+	} {
+		if !strings.Contains(server, key+":?") && !strings.Contains(server, key+" :?") &&
+			!strings.Contains(server, "${"+key+":?") {
+			t.Fatalf("docker-compose.server.yml missing fail-closed :? guard for %s", key)
+		}
+	}
+
+	// Hardening: production mode, no insecure HTTP, loopback metrics, required trusted proxy.
+	for _, want := range []string{
+		"PACKMON_SERVER_MODE: production",
+		"PACKMON_ALLOW_INSECURE_LOCAL_HTTP:",
+		`PACKMON_METRICS_HOST: "127.0.0.1"`,
+		"${PACKMON_TRUSTED_PROXIES:?",
+		"PACKMON_DB_HOST: ${PACKMON_DB_HOST:-postgres}",
+		"env_file:",
+		"required: false",
+		"restart: unless-stopped",
+	} {
+		if !strings.Contains(server, want) {
+			t.Fatalf("docker-compose.server.yml missing hardening marker %q", want)
+		}
+	}
+	if strings.Contains(server, "PACKMON_ALLOW_INSECURE_LOCAL_HTTP: ${PACKMON_ALLOW_INSECURE_LOCAL_HTTP:-true}") ||
+		strings.Contains(server, `PACKMON_ALLOW_INSECURE_LOCAL_HTTP: "true"`) {
+		t.Fatal("server compose must not enable insecure local HTTP")
+	}
+
+	// No dev conveniences.
+	for _, forbidden := range []string{"init-secrets", ".:/workspace", "service_completed_successfully"} {
+		if strings.Contains(server, forbidden) {
+			t.Fatalf("docker-compose.server.yml must not contain dev-mode marker %q", forbidden)
+		}
+	}
+	// Migrate stays a manual, explicit step.
+	if !strings.Contains(server, "packmon-migrate:") || !strings.Contains(server, `profiles: ["manual"]`) {
+		t.Fatal("docker-compose.server.yml packmon-migrate must stay behind profiles: [\"manual\"]")
+	}
+}
+
+func TestReadmeHasTroubleshootingSection(t *testing.T) {
+	t.Parallel()
+	readme := repoFile(t, "README.md")
+	for _, want := range []string{
+		"## Troubleshooting",
+		"docker compose run --rm init-secrets",
+		"UTF-16",
+	} {
+		if !strings.Contains(readme, want) {
+			t.Fatalf("README missing troubleshooting marker %q", want)
+		}
+	}
+}
