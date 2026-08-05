@@ -1,0 +1,43 @@
+{{define "feed-status-badge"}}
+{{template "pm-badge" dict "Class" (statusClass .Status) "Label" .Status}}
+{{end}}
+
+{{define "feed-last-sync-cell"}}
+{{if .LastSyncAt}}
+  <time data-local-time="relative" datetime="{{formatTimeISO .LastSyncAtTime}}" aria-label="{{formatTime .LastSyncAtTime}}">{{formatTimeAgo .LastSyncAtTime}}</time>
+{{else}}
+  <span class="text-muted">never</span>
+{{end}}
+{{end}}
+
+{{define "feed-rejected-count"}}
+{{if gt .RejectedCount 0}}
+  <div class="mb-1 font-medium text-danger-fg">Rejected records: {{.RejectedCount}}</div>
+{{end}}
+{{end}}
+
+{{define "feed-admin-rejection-details"}}
+{{template "feed-rejected-count" .}}
+{{if gt .RejectedCount 0}}
+  {{if .RejectedAPIKeyName}}<div class="text-danger-fg">API key: {{.RejectedAPIKeyName}}{{if .RejectedAPIKeyID}} (#{{.RejectedAPIKeyID}}){{end}}</div>{{end}}
+  {{if .RejectedClientIP}}<div class="text-danger-fg">Client: {{.RejectedClientIP}}</div>{{end}}
+  {{if .RejectedCorrelationID}}<div class="text-danger-fg">Correlation: {{.RejectedCorrelationID}}</div>{{end}}
+{{end}}
+{{end}}
+
+{{define "feed-error-details"}}
+{{$feed := .Feed}}
+{{$max := or .Max 60}}
+{{if $feed.LastError}}
+  {{/* The width and height caps are load-bearing: a feed error is up to 1 KB
+       of subprocess output, and an uncapped <pre> inside a table cell widens
+       its column and pushes the rest of the page sideways when opened. */}}
+  <details class="max-w-md text-start text-danger-fg" data-print-open>
+    <summary
+      aria-label="Show full feed error for {{$feed.FeedName}}"
+      class="inline-flex min-h-11 cursor-pointer items-center rounded px-2 py-1 text-danger{{if .Interactive}} hover:bg-danger-bg active:bg-danger-bg pm-focus-ring pm-focus-ring-danger{{end}}"
+    ><span class="break-words">{{truncate $feed.LastError $max}}</span></summary>
+    <pre tabindex="0" class="mt-2 max-h-48 max-w-full overflow-auto whitespace-pre-wrap break-words rounded bg-danger-bg p-2 text-xs text-danger-fg pm-focus-ring pm-focus-ring-danger">{{$feed.LastError}}</pre>
+  </details>
+{{end}}
+{{end}}

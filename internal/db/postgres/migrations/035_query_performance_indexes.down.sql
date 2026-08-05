@@ -1,0 +1,6 @@
+DROP INDEX IF EXISTS idx_reputation_prune_source_updated_at;
+DROP INDEX IF EXISTS idx_queue_oldest_active_source_requested_at;
+DROP INDEX IF EXISTS idx_malicious_active_updated_at;
+DROP INDEX IF EXISTS idx_malicious_active_source_updated_at;
+DROP INDEX IF EXISTS idx_lifecycle_releases_eoas_status_date;
+DROP INDEX IF EXISTS idx_lifecycle_releases_eol_status_date;

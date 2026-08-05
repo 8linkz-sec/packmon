@@ -1,0 +1,94 @@
+{{define "layout"}}
+<!DOCTYPE html>
+<html lang="en" dir="{{layoutDir .}}" data-pm-theme="system">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{block "title" .}}Packmon{{end}}</title>
+  {{if layoutNeedsHTMX}}
+  <meta name="htmx-config" content='{"includeIndicatorStyles":false,"allowEval":false,"allowScriptTags":false,"historyEnabled":false,"timeout":10000,"defaultSettleDelay":80}'>
+  {{end}}
+  <!-- Not deferred: must set data-pm-theme before first paint, or the page
+       flashes in the wrong theme. External file because the CSP is
+       script-src 'self' with no nonce. -->
+  <script src="{{assetURL "/static/theme-init.js"}}"></script>
+  <link rel="stylesheet" href="{{assetURL "/static/tailwind.css"}}">
+  <link rel="stylesheet" href="{{assetURL "/static/style.css"}}">
+  <script src="{{assetURL "/static/locale-format.js"}}" defer></script>
+  {{if layoutNeedsHTMX}}
+  <script src="{{assetURL "/static/htmx.min.js"}}" defer></script>
+  {{end}}
+  {{if layoutNeedsHelperScript}}
+  <script src="{{assetURL "/static/auto-refresh.js"}}" defer></script>
+  <script src="{{assetURL "/static/form-actions.js"}}" defer></script>
+  <script src="{{assetURL "/static/htmx-regions.js"}}" defer></script>
+  {{end}}
+</head>
+<body class="bg-bg text-fg min-h-dvh flex flex-col">
+  <a href="#main-content" class="skip-link">{{t "a11y.skip_to_main"}}</a>
+
+  {{block "nav" .}}
+  <nav aria-label="{{t "nav.primary"}}" class="sticky top-0 z-30 bg-nav text-nav-fg shadow">
+    <div class="max-w-shell mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="flex min-h-12 flex-wrap items-center gap-x-3 gap-y-1 py-1 sm:py-0">
+        <a href="/" class="flex min-h-11 items-center pe-1 text-base font-semibold tracking-tight hover:text-nav-muted">Packmon</a>
+        {{/* Below sm the links take a full row of their own, so the wordmark
+             and the theme switcher share the first row instead of producing
+             three stacked rows. */}}
+        <div class="order-last flex w-full flex-wrap items-center gap-1 text-sm sm:order-none sm:w-auto">
+          <a href="/" {{if eq .ActiveNav "dashboard"}}aria-current="page"{{end}}
+            class="flex min-h-11 items-center rounded-md px-3 py-2 {{if eq .ActiveNav "dashboard"}}bg-nav-active font-medium text-nav-fg{{else}}text-nav-muted hover:text-nav-fg{{end}}"
+          >{{t "nav.dashboard"}}</a>
+          <a href="/search" {{if eq .ActiveNav "search"}}aria-current="page"{{end}}
+            class="flex min-h-11 items-center rounded-md px-3 py-2 {{if eq .ActiveNav "search"}}bg-nav-active font-medium text-nav-fg{{else}}text-nav-muted hover:text-nav-fg{{end}}"
+          >{{t "nav.search"}}</a>
+          <a href="/feeds" {{if eq .ActiveNav "feeds"}}aria-current="page"{{end}}
+            class="flex min-h-11 items-center rounded-md px-3 py-2 {{if eq .ActiveNav "feeds"}}bg-nav-active font-medium text-nav-fg{{else}}text-nav-muted hover:text-nav-fg{{end}}"
+          >{{t "nav.feeds"}}</a>
+          {{if adminNavEnabled}}
+          <a href="/admin/" {{if eq .ActiveNav "admin"}}aria-current="page"{{end}}
+            class="flex min-h-11 items-center rounded-md px-3 py-2 {{if eq .ActiveNav "admin"}}bg-nav-active font-medium text-nav-fg{{else}}text-nav-muted hover:text-nav-fg{{end}}"
+          >{{t "nav.admin"}}</a>
+          {{end}}
+        </div>
+        <div class="ms-auto flex flex-wrap items-center gap-2 text-sm">
+          <div class="pm-seg" role="group" aria-label="{{t "theme.label"}}" data-pm-theme-switcher>
+            <button type="button" class="pm-seg-btn pm-focus-ring" data-pm-theme-set="light" aria-pressed="false">{{t "theme.light"}}</button>
+            <button type="button" class="pm-seg-btn pm-focus-ring" data-pm-theme-set="dark" aria-pressed="false">{{t "theme.dark"}}</button>
+            <button type="button" class="pm-seg-btn pm-focus-ring" data-pm-theme-set="system" aria-pressed="true">{{t "theme.system"}}</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </nav>
+  {{end}}
+
+  <!-- scroll-mt keeps the sticky nav from covering the target when the skip
+       link or an in-page anchor jumps here. -->
+  <main id="main-content" tabindex="-1" class="flex-1 max-w-shell mx-auto px-4 sm:px-6 lg:px-8 py-6 w-full scroll-mt-16">
+    {{block "content" .}}{{end}}
+  </main>
+
+  <footer class="bg-surface-2 border-t border-border mt-auto">
+    <div class="max-w-shell mx-auto px-4 sm:px-6 lg:px-8 py-3 text-center text-xs text-muted">
+      <div class="flex flex-wrap items-center justify-center gap-x-3 gap-y-1">
+        <span>{{t "footer.product"}}</span>
+        {{if privacyURL}}
+        <span aria-hidden="true">&middot;</span>
+        <a href="{{privacyURL}}" class="underline hover:text-fg">{{t "footer.privacy"}}</a>
+        {{end}}
+        {{if legalURL}}
+        <span aria-hidden="true">&middot;</span>
+        <a href="{{legalURL}}" class="underline hover:text-fg">{{t "footer.legal"}}</a>
+        {{end}}
+        {{if termsURL}}
+        <span aria-hidden="true">&middot;</span>
+        <a href="{{termsURL}}" class="underline hover:text-fg">{{t "footer.terms"}}</a>
+        {{end}}
+      </div>
+    </div>
+  </footer>
+
+</body>
+</html>
+{{end}}

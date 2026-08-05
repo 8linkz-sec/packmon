@@ -1,0 +1,15 @@
+{
+  "ignoreFiles": [
+    "internal/web/static/htmx.min.js",
+    "internal/web/static/tailwind.css"
+  ],
+  "rules": {
+    "block-no-empty": true,
+    "color-no-invalid-hex": true,
+    "declaration-block-no-duplicate-properties": true,
+    "function-calc-no-unspaced-operator": true,
+    "no-duplicate-selectors": true,
+    "no-invalid-double-slash-comments": true,
+    "selector-type-no-unknown": true
+  }
+}

@@ -1,0 +1,1 @@
+-- Irreversible data minimization: deleted API-key labels and hashes are not restored.

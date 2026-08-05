@@ -1,0 +1,148 @@
+// Package feed defines the FeedSyncer interface and supporting types
+// for the Packmon feed synchronisation pipeline. Each external data
+// source (OSV, GHSA, OpenSSF, VulnCheck, etc.) implements FeedSyncer
+// so the FeedManager can orchestrate them uniformly.
+package feed
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+
+	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/domain"
+)
+
+// FeedSyncUserAgent is the shared User-Agent value used by feed syncers and
+// async feed workers for upstream HTTP requests.
+const FeedSyncUserAgent = "packmon-feedsync/1.0"
+
+// SyncResult is returned by a FeedSyncer after a successful sync.
+// It carries counters that the manager persists in feed_sync_status.
+type SyncResult struct {
+	// EntriesSynced is the number of entries written/updated in this run.
+	EntriesSynced int
+	// EntriesTotal is the total number of entries the syncer is aware of
+	// (may equal EntriesSynced for a full sync, or differ for deltas).
+	EntriesTotal int
+	// Metadata carries optional feed-specific provenance or cursor data that
+	// the manager persists in feed_sync_status.metadata after a successful sync.
+	Metadata json.RawMessage
+}
+
+type permanentSyncError struct {
+	err error
+}
+
+type nonRetryableSyncError struct {
+	err error
+}
+
+func (e *permanentSyncError) Error() string {
+	return e.err.Error()
+}
+
+func (e *permanentSyncError) Unwrap() error {
+	return e.err
+}
+
+func (e *nonRetryableSyncError) Error() string {
+	return e.err.Error()
+}
+
+func (e *nonRetryableSyncError) Unwrap() error {
+	return e.err
+}
+
+// PermanentError marks a sync failure as non-retryable, for example when a
+// required API key is missing or the feed is statically misconfigured.
+func PermanentError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &permanentSyncError{err: err}
+}
+
+// NonRetryableError marks a current sync failure as deterministic for the
+// current payload or response. The manager records it as an error, but does
+// not retry the same invalid input.
+func NonRetryableError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &nonRetryableSyncError{err: err}
+}
+
+// IsPermanentError reports whether err should not be retried by the manager.
+func IsPermanentError(err error) bool {
+	var target *permanentSyncError
+	return errors.As(err, &target)
+}
+
+// IsNonRetryableError reports whether err should be recorded as an error
+// without retrying the same current-run input.
+func IsNonRetryableError(err error) bool {
+	var target *nonRetryableSyncError
+	return errors.As(err, &target)
+}
+
+// FeedSyncer is the interface every feed source must implement.
+type FeedSyncer interface {
+	// Name returns a short, stable identifier for the feed (e.g. "osv",
+	// "ghsa", "openssf"). It is used as the key in feed_sync_status.
+	Name() string
+
+	// Sync fetches data from the upstream source and upserts it into the
+	// store. The context carries a cancellation signal for graceful
+	// shutdown. The returned SyncResult informs the manager about the
+	// number of entries processed.
+	//
+	// Implementations must be safe for sequential calls (idempotent
+	// upserts) and must respect context cancellation promptly.
+	Sync(ctx context.Context, store db.Store) (*SyncResult, error)
+}
+
+// FeedMode controls whether the FeedManager runs a feed's syncer
+// itself ("self") or expects an external system like N8N to push
+// data via the import API ("external"). See DE-18.
+type FeedMode = domain.FeedMode
+
+const (
+	// FeedModeSelf means the manager runs the syncer on its own schedule.
+	FeedModeSelf = domain.FeedModeSelf
+	// FeedModeExternal means the feed is populated by an external system
+	// (e.g. N8N) and the manager does not schedule syncs.
+	FeedModeExternal = domain.FeedModeExternal
+)
+
+// FeedPhase controls the execution order of feeds. Phase 1 feeds
+// (base vulnerability/malicious-package data: OSV, GHSA, OpenSSF) run
+// first. Phase 2 post-base feeds wait for all Phase 1 feeds to finish
+// their initial sync before starting. Phase 2 includes vulnerability
+// enrichers such as NVD, EPSS, CISA KEV, and VulnCheck, plus lifecycle
+// metadata feeds such as endoflife.date.
+type FeedPhase int
+
+const (
+	// FeedPhaseVulnerability is for feeds that provide base vulnerability
+	// data (OSV, GHSA, OpenSSF). They run first.
+	FeedPhaseVulnerability FeedPhase = 1
+	// FeedPhaseEnrichment is the Phase 2 post-base phase. It includes
+	// vulnerability enrichers (NVD, EPSS, CISA KEV, VulnCheck) and lifecycle
+	// metadata feeds (endoflife.date). It waits for Phase 1.
+	FeedPhaseEnrichment FeedPhase = 2
+)
+
+// FeedConfig holds per-feed configuration used by the FeedManager.
+type FeedConfig struct {
+	// Syncer is the concrete feed syncer implementation.
+	Syncer FeedSyncer
+	// Mode determines whether the manager runs the syncer or an external
+	// system is responsible. Default: FeedModeSelf.
+	Mode FeedMode
+	// Enabled controls whether the feed is active at all.
+	Enabled bool
+	// Phase controls execution order. Phase 1 runs before Phase 2.
+	// Default (0) is treated as Phase 1.
+	Phase FeedPhase
+}

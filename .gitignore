@@ -1,0 +1,81 @@
+# AI assistants / agents
+.claude/
+.superpowers/
+CLAUDE.md
+CLAUDE.local.md
+AGENTS.md
+TESTING.md
+.mcp.json
+Phase *.md
+Todo.txt
+docs/superpowers/
+docs/superpowers/plans/
+docs/superpowers/specs/
+.cursor/
+.cursorrules
+.cursorignore
+.windsurf/
+.windsurfrules
+.aider*
+.codex/
+.gemini/
+GEMINI.md
+.copilot/
+.github/copilot-instructions.md
+.continue/
+.cline/
+.roo/
+*.claude-flow/
+.playwright-mcp/
+
+# Docker
+node_modules/
+
+
+# Secrets
+.env
+.env.*
+!.env.example
+# Local credential artifacts. Intentionally committed fixtures should live in a
+# reviewed testdata path and be force-added explicitly.
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.kdbx
+*credentials*.json
+*service-account*.json
+terraform.tfstate*
+*.tfvars
+*.tfvars.json
+
+# Binaries (root only, not cmd/ directories)
+/packmon
+/packmon.exe
+/packmon-server
+/packmon-server.exe
+/.build/
+/.builds/
+/dist/
+/backups/
+
+# Go
+.gotmp/
+coverage.out
+*.test
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Local working documents (not tracked; see file headers)
+Roadmap.txt

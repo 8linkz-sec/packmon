@@ -1,0 +1,49 @@
+{{define "dashboard-stat-card"}}
+{{$kind := .Kind}}
+{{$stats := .Stats}}
+{{$alignClass := .AlignClass}}
+{{$searchPath := or .SearchPath "/search"}}
+{{if eq $kind "packages"}}
+{{template "dashboard-stat-card-frame" dict "CardClass" "pm-surface px-5 py-2.5" "AlignClass" $alignClass "LabelClass" "text-sm text-muted uppercase tracking-wide" "Label" (t "dashboard.card.packages") "ValueClass" "mt-1 text-3xl font-semibold" "Value" $stats.TotalPackages}}
+{{else if eq $kind "vulnerabilities"}}
+{{template "dashboard-stat-card-frame" dict "Href" (printf "%s?finding=vulnerability" $searchPath) "CardClass" "pm-surface px-5 py-2.5" "AlignClass" $alignClass "InteractiveClass" "block hover:shadow-md active:bg-surface-2 active:shadow-sm pm-focus-ring transition-colors duration-150 ease-out" "LabelClass" "text-sm text-muted uppercase tracking-wide" "Label" (t "dashboard.card.vulnerabilities") "ValueClass" "mt-1 text-3xl font-semibold" "Value" $stats.TotalVulnerabilities}}
+{{else if eq $kind "malicious"}}
+{{template "dashboard-stat-card-frame" dict "Href" (printf "%s?finding=malicious" $searchPath) "CardClass" "bg-danger-bg rounded-lg shadow px-5 py-2.5 border border-danger" "AlignClass" $alignClass "InteractiveClass" "block hover:shadow-md active:bg-danger-bg active:shadow-sm pm-focus-ring transition-colors duration-150 ease-out" "LabelClass" "text-sm text-danger-fg uppercase tracking-wide" "Label" (t "dashboard.card.malicious") "ValueClass" "mt-1 text-3xl font-semibold text-danger-fg" "Value" $stats.TotalMalicious}}
+{{else if eq $kind "supply-chain"}}
+{{template "dashboard-stat-card-frame" dict "Href" (printf "%s?finding=supply_chain_risk" $searchPath) "CardClass" "bg-warning-bg rounded-lg shadow px-5 py-2.5 border border-warning" "AlignClass" $alignClass "InteractiveClass" "block hover:shadow-md active:bg-warning-bg active:shadow-sm pm-focus-ring transition-colors duration-150 ease-out" "LabelClass" "text-sm text-warning-fg uppercase tracking-wide" "Label" (t "dashboard.card.supply_chain") "ValueClass" "mt-1 text-3xl font-semibold text-warning-fg" "Value" $stats.TotalSupplyChainRisk}}
+{{else if eq $kind "lifecycle"}}
+{{template "dashboard-stat-card-frame" dict "Href" (printf "%s?finding=lifecycle" $searchPath) "CardClass" "bg-info-bg rounded-lg shadow px-5 py-2.5 border border-info" "AlignClass" $alignClass "InteractiveClass" "block hover:shadow-md active:bg-info-bg active:shadow-sm pm-focus-ring transition-colors duration-150 ease-out" "LabelClass" "text-sm text-accent uppercase tracking-wide" "Label" (t "dashboard.card.lifecycle") "ValueClass" "mt-1 text-3xl font-semibold text-accent" "Value" $stats.TotalLifecycle}}
+{{else if eq $kind "scans"}}
+{{template "dashboard-stat-card-frame" dict "CardClass" "pm-surface px-5 py-2.5" "AlignClass" $alignClass "LabelClass" "text-sm text-muted uppercase tracking-wide" "Label" (t "dashboard.card.scans_7d") "ValueClass" "mt-1 text-3xl font-semibold" "Value" .Value}}
+{{else if eq $kind "feeds"}}
+{{template "dashboard-stat-card-frame" dict "CardClass" "pm-surface px-5 py-2.5" "AlignClass" $alignClass "LabelClass" "text-sm text-muted uppercase tracking-wide" "Label" (t "dashboard.card.feeds_healthy") "ValueClass" "mt-1 text-3xl font-semibold" "Value" .Value "PlainValue" true}}
+{{end}}
+{{end}}
+
+{{define "dashboard-stat-card-frame"}}
+{{if .Href}}
+<a href="{{.Href}}" class="{{.CardClass}}{{if .AlignClass}} {{.AlignClass}}{{end}}{{if .InteractiveClass}} {{.InteractiveClass}}{{end}}">
+  <dl>
+    <dt class="{{.LabelClass}}">{{.Label}}</dt>
+    {{template "dashboard-stat-card-value" .}}
+  </dl>
+</a>
+{{else}}
+<div class="{{.CardClass}}{{if .AlignClass}} {{.AlignClass}}{{end}}">
+  <dl>
+    <dt class="{{.LabelClass}}">{{.Label}}</dt>
+    {{template "dashboard-stat-card-value" .}}
+  </dl>
+</div>
+{{end}}
+{{end}}
+
+{{/* PlainValue skips data-local-number: the client-side number formatter would
+     mangle composite values such as "9 / 9". */}}
+{{define "dashboard-stat-card-value"}}
+{{if .PlainValue}}
+<dd class="{{.ValueClass}}">{{.Value}}</dd>
+{{else}}
+<dd class="{{.ValueClass}}" data-local-number="{{.Value}}">{{.Value}}</dd>
+{{end}}
+{{end}}

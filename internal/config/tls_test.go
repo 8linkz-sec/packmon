@@ -1,0 +1,279 @@
+package config
+
+import (
+	"crypto/tls"
+	"testing"
+)
+
+func TestTLSMinVersionDefault(t *testing.T) {
+	clearPackmonEnv(t)
+	t.Setenv("PACKMON_DB_PASSWORD", "secret")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if got := cfg.Server.TLS.MinVersion; got != "1.2" {
+		t.Fatalf("default MinVersion = %q, want 1.2", got)
+	}
+	if got := cfg.Server.TLS.MinVersionTLS(); got != tls.VersionTLS12 {
+		t.Fatalf("MinVersionTLS() = %d, want %d", got, tls.VersionTLS12)
+	}
+	if cfg.Server.TLS.Enabled() {
+		t.Fatal("TLS should be disabled by default (no cert/key)")
+	}
+}
+
+func TestTLSMinVersionParsing(t *testing.T) {
+	tests := []struct {
+		val     string
+		wantErr bool
+		wantTLS uint16
+	}{
+		{"1.2", false, tls.VersionTLS12},
+		{"1.3", false, tls.VersionTLS13},
+		{"1.1", true, 0},
+		{"junk", true, 0},
+		{"", false, tls.VersionTLS12}, // empty falls back to default
+	}
+	for _, tc := range tests {
+		t.Run(tc.val, func(t *testing.T) {
+			clearPackmonEnv(t)
+			t.Setenv("PACKMON_DB_PASSWORD", "secret")
+			if tc.val != "" {
+				t.Setenv("PACKMON_TLS_MIN_VERSION", tc.val)
+			}
+			cfg, err := Load()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("Load() with PACKMON_TLS_MIN_VERSION=%q: want error, got nil", tc.val)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load() error: %v", err)
+			}
+			if got := cfg.Server.TLS.MinVersionTLS(); got != tc.wantTLS {
+				t.Fatalf("MinVersionTLS() = %d, want %d", got, tc.wantTLS)
+			}
+		})
+	}
+}
+
+func TestTLSCertKeyLoad(t *testing.T) {
+	clearPackmonEnv(t)
+	t.Setenv("PACKMON_DB_PASSWORD", "secret")
+	t.Setenv("PACKMON_TLS_CERT_FILE", "/etc/packmon/tls.crt")
+	t.Setenv("PACKMON_TLS_KEY_FILE", "/etc/packmon/tls.key")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if !cfg.Server.TLS.Enabled() {
+		t.Fatal("TLS should be enabled when cert+key set")
+	}
+	if cfg.Server.TLS.CertFile != "/etc/packmon/tls.crt" {
+		t.Fatalf("CertFile = %q", cfg.Server.TLS.CertFile)
+	}
+	if cfg.Server.TLS.KeyFile != "/etc/packmon/tls.key" {
+		t.Fatalf("KeyFile = %q", cfg.Server.TLS.KeyFile)
+	}
+}
+
+func TestTLSEnabledRequiresBoth(t *testing.T) {
+	clearPackmonEnv(t)
+	t.Setenv("PACKMON_DB_PASSWORD", "secret")
+	t.Setenv("PACKMON_TLS_CERT_FILE", "/etc/packmon/tls.crt")
+	// no key file
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.Server.TLS.Enabled() {
+		t.Fatal("TLS should not be enabled with only a cert file")
+	}
+}
+
+func TestValidateTransportSecurity(t *testing.T) {
+	tests := []struct {
+		name    string
+		mode    ServerMode
+		tlsCfg  TLSConfig
+		proxies []string
+		public  string
+		localOK bool
+		wantErr bool
+	}{
+		{
+			name:    "production with TLS ok",
+			mode:    ModeProduction,
+			tlsCfg:  TLSConfig{CertFile: "c", KeyFile: "k", MinVersion: "1.2"},
+			wantErr: false,
+		},
+		{
+			name:    "production with trusted proxies ok",
+			mode:    ModeProduction,
+			proxies: []string{"127.0.0.1"},
+			wantErr: false,
+		},
+		{
+			name:    "production with invalid trusted proxies errors",
+			mode:    ModeProduction,
+			proxies: []string{"nginx"},
+			wantErr: true,
+		},
+		{
+			name:    "production with invalid trusted proxy cidr errors",
+			mode:    ModeProduction,
+			proxies: []string{"10.0.0.0/33"},
+			wantErr: true,
+		},
+		{
+			name:    "production with local insecure HTTP override and loopback host ok",
+			mode:    ModeProduction,
+			public:  "localhost:8080",
+			localOK: true,
+			wantErr: false,
+		},
+		{
+			name:    "production with local insecure HTTP override and external host errors",
+			mode:    ModeProduction,
+			public:  "packmon.example.com",
+			localOK: true,
+			wantErr: true,
+		},
+		{
+			name:    "production with neither errors",
+			mode:    ModeProduction,
+			wantErr: true,
+		},
+		{
+			name:    "development with neither ok",
+			mode:    ModeDevelopment,
+			wantErr: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{
+				Server: ServerConfig{
+					Mode:                   tc.mode,
+					PublicHost:             tc.public,
+					TrustedProxies:         tc.proxies,
+					AllowInsecureLocalHTTP: tc.localOK,
+					TLS:                    tc.tlsCfg,
+				},
+			}
+			err := cfg.ValidateTransportSecurity()
+			if tc.wantErr && err == nil {
+				t.Fatal("want error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("want nil, got %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateTransportSecurityRejectsInvalidTrustedProxiesWithTLS(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{
+			Mode:           ModeProduction,
+			TrustedProxies: []string{"nginx"},
+			TLS:            TLSConfig{CertFile: "server.crt", KeyFile: "server.key", MinVersion: "1.2"},
+		},
+	}
+
+	err := cfg.ValidateTransportSecurity()
+	if err == nil {
+		t.Fatal("ValidateTransportSecurity() error = nil, want trusted proxy validation error")
+	}
+	want := "config: invalid PACKMON_TRUSTED_PROXIES: invalid trusted proxy entry (want IP address or CIDR prefix)"
+	if err.Error() != want {
+		t.Fatalf("ValidateTransportSecurity() error = %q, want %q", err.Error(), want)
+	}
+}
+
+func TestValidateMetricsExposure(t *testing.T) {
+	tests := []struct {
+		name    string
+		mode    ServerMode
+		host    string
+		wantErr bool
+	}{
+		{name: "production default empty host ok", mode: ModeProduction, host: ""},
+		{name: "production localhost ok", mode: ModeProduction, host: "localhost"},
+		{name: "production ipv4 loopback ok", mode: ModeProduction, host: "127.0.0.1"},
+		{name: "production ipv6 loopback ok", mode: ModeProduction, host: "::1"},
+		{name: "production ipv4 wildcard errors", mode: ModeProduction, host: "0.0.0.0", wantErr: true},
+		{name: "production ipv6 wildcard errors", mode: ModeProduction, host: "::", wantErr: true},
+		{name: "production non-loopback hostname errors", mode: ModeProduction, host: "metrics.internal.example", wantErr: true},
+		{name: "development wildcard ok", mode: ModeDevelopment, host: "0.0.0.0"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{
+				Server:  ServerConfig{Mode: tt.mode},
+				Metrics: MetricsConfig{Host: tt.host, Port: 9090},
+			}
+			err := cfg.ValidateMetricsExposure()
+			if tt.wantErr && err == nil {
+				t.Fatal("ValidateMetricsExposure() error = nil, want error")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("ValidateMetricsExposure() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadReadsInsecureLocalHTTPOverride(t *testing.T) {
+	clearPackmonEnv(t)
+	t.Setenv("PACKMON_DB_PASSWORD", "secret")
+	t.Setenv("PACKMON_SERVER_PUBLIC_HOST", "localhost:8080")
+	t.Setenv("PACKMON_ALLOW_INSECURE_LOCAL_HTTP", "true")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if !cfg.Server.AllowInsecureLocalHTTP {
+		t.Fatal("AllowInsecureLocalHTTP = false, want true")
+	}
+	if err := cfg.ValidateTransportSecurity(); err != nil {
+		t.Fatalf("ValidateTransportSecurity() error: %v", err)
+	}
+}
+
+func TestServerConfigAddrBindsLocalHTTPOverrideToLoopback(t *testing.T) {
+	dev := ServerConfig{
+		Mode: ModeDevelopment,
+		Port: 8080,
+	}
+	if got := dev.Addr(); got != "127.0.0.1:8080" {
+		t.Fatalf("Addr() in development = %q, want loopback bind", got)
+	}
+
+	cfg := ServerConfig{
+		Mode:                   ModeProduction,
+		Port:                   8080,
+		PublicHost:             "localhost:8080",
+		AllowInsecureLocalHTTP: true,
+	}
+	if got := cfg.Addr(); got != "127.0.0.1:8080" {
+		t.Fatalf("Addr() = %q, want loopback bind for local HTTP override", got)
+	}
+
+	cfg.InsecureLocalHTTPBind = "container"
+	if got := cfg.Addr(); got != ":8080" {
+		t.Fatalf("Addr() with container bind mode = %q, want wildcard bind", got)
+	}
+
+	cfg.InsecureLocalHTTPBind = "loopback"
+	cfg.TLS = TLSConfig{CertFile: "server.crt", KeyFile: "server.key"}
+	if got := cfg.Addr(); got != ":8080" {
+		t.Fatalf("Addr() with TLS = %q, want wildcard bind", got)
+	}
+}

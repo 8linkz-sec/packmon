@@ -1,0 +1,10 @@
+apis:
+  packmon@v1:
+    root: api/openapi/packmon-v1.yaml
+
+extends:
+  - recommended
+
+rules:
+  no-server-example.com: off
+  operation-4xx-response: off

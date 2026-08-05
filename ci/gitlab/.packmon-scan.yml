@@ -1,0 +1,157 @@
+# GitLab CI shared template for Packmon dependency scanning.
+#
+# Include in your project's .gitlab-ci.yml:
+#
+#   include:
+#     - project: 'security/packmon'
+#       ref: main
+#       file: '/ci/gitlab/.packmon-scan.yml'
+#
+# Override variables as needed:
+#
+#   variables:
+#     PACKMON_VERSION: "<existing-release-tag>"
+#     PACKMON_FAIL_ON: "HIGH"
+#
+# Binary source: GitHub Releases by default, override PACKMON_BINARY_MIRROR
+# for internal mirrors (DE-22).
+
+variables:
+  PACKMON_FAIL_ON: "CRITICAL"
+  PACKMON_SCAN_PATH: "."
+  PACKMON_SERVER: "https://packmon.intern"
+  PACKMON_VERSION: ""
+  PACKMON_ARTIFACT_EXPIRE_IN: "90 days"
+
+packmon:
+  image: alpine:3.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40
+  stage: test
+  id_tokens:
+    SIGSTORE_ID_TOKEN:
+      aud: sigstore
+  before_script:
+    - |
+      apk add --no-cache \
+        curl=8.19.0-r0 \
+        jq=1.8.1-r0 \
+        cosign=2.6.3-r1 \
+        github-cli=2.83.0-r6
+    - |
+      set -e
+      PACKMON_VERSION_REGEX='^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z][0-9A-Za-z.-]*)?$'
+      case "$PACKMON_VERSION" in
+        "") echo "PACKMON_VERSION must not be empty" >&2; exit 1 ;;
+      esac
+      printf '%s\n' "$PACKMON_VERSION" | grep -Eq "$PACKMON_VERSION_REGEX" || {
+        echo "PACKMON_VERSION must be an immutable release tag like v1.2.3" >&2
+        exit 1
+      }
+      ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+      DEFAULT_BINARY_BASE_URL="https://github.com/8linkz-sec/packmon/releases/download/${PACKMON_VERSION}"
+      BINARY_BASE_URL="${PACKMON_BINARY_MIRROR:-${DEFAULT_BINARY_BASE_URL}}"
+      BINARY_BASE_URL="${BINARY_BASE_URL%/}"
+      BINARY_NAME="packmon-linux-${ARCH}"
+      BINARY_URL="${BINARY_BASE_URL}/${BINARY_NAME}"
+      CHECKSUM_URL="${BINARY_BASE_URL}/checksums.txt"
+      CURL_FLAGS="--fail --show-error --location --retry 3 --retry-delay 2 --retry-connrefused --connect-timeout 10 --max-time 120"
+      echo "Downloading packmon from ${BINARY_URL}"
+      curl ${CURL_FLAGS} "${BINARY_URL}" -o "/tmp/${BINARY_NAME}"
+      curl ${CURL_FLAGS} "${CHECKSUM_URL}" -o /tmp/packmon-checksums.txt
+      grep " ${BINARY_NAME}$" /tmp/packmon-checksums.txt > "/tmp/${BINARY_NAME}.sha256"
+      (cd /tmp && sha256sum -c "${BINARY_NAME}.sha256")
+      gh attestation verify "/tmp/${BINARY_NAME}" \
+        --repo 8linkz-sec/packmon \
+        --signer-workflow 8linkz-sec/packmon/.github/workflows/release.yml \
+        --source-ref "refs/tags/${PACKMON_VERSION}"
+      chmod +x "/tmp/${BINARY_NAME}"
+      mv "/tmp/${BINARY_NAME}" /usr/local/bin/packmon
+      packmon version
+  script:
+    - |
+      case "$PACKMON_SCAN_PATH" in
+        ""|/*|-*|*..*)
+          echo "scan path must be a non-empty relative path without parent traversal or leading dash" >&2
+          exit 1
+          ;;
+      esac
+      if printf '%s' "$PACKMON_SCAN_PATH" | grep -q '[[:cntrl:]]'; then
+        echo "scan path must be a non-empty relative path without parent traversal or leading dash" >&2
+        exit 1
+      fi
+
+      set +e
+      packmon scan \
+        --fail-on "$PACKMON_FAIL_ON" \
+        --mode remote \
+        --server "$PACKMON_SERVER" \
+        --no-project-config \
+        --output-json results.json \
+        --output-junit results.xml \
+        --output-sarif results.sarif \
+        -- "$PACKMON_SCAN_PATH"
+      EXIT_CODE=$?
+      set -e
+
+      echo "Packmon exit code: ${EXIT_CODE}"
+      if [ -f results.json ]; then
+        jq -r '"Packages scanned: \(.packages_scanned), Findings: \(.findings_count)"' results.json
+        FEED_STATUS=$(jq -r '.feed_status // "unknown"' results.json 2>/dev/null || echo unknown)
+        DB_STALE=$(
+          jq -r 'if .db_stale == true then "true" else "false" end' results.json 2>/dev/null ||
+            echo false
+        )
+        DB_AGE_DAYS=$(
+          jq -r 'if .db_age_days == null then "" else (.db_age_days | tostring) end' \
+            results.json 2>/dev/null ||
+            echo ""
+        )
+        echo "Packmon feed status: ${FEED_STATUS}"
+        echo "Packmon local DB stale: ${DB_STALE}"
+        if [ -n "${DB_AGE_DAYS}" ]; then
+          echo "Packmon local DB age days: ${DB_AGE_DAYS}"
+        fi
+        if [ "${FEED_STATUS}" != "healthy" ] || [ "${DB_STALE}" = "true" ]; then
+          printf '%s%s%s\n' \
+            "WARNING: Packmon scan coverage degraded (feed_status=${FEED_STATUS}, " \
+            "db_stale=${DB_STALE}, " \
+            "db_age_days=${DB_AGE_DAYS:-unknown})" >&2
+        fi
+      fi
+
+      RESULT_ARTIFACTS=""
+      for artifact in results.json results.xml results.sarif; do
+        if [ -f "$artifact" ]; then
+          RESULT_ARTIFACTS="${RESULT_ARTIFACTS} ${artifact}"
+        fi
+      done
+      if [ -n "$RESULT_ARTIFACTS" ]; then
+        sha256sum $RESULT_ARTIFACTS > results.sha256
+        cosign sign-blob --yes --bundle results.sigstore.json results.sha256
+      else
+        echo "No Packmon result artifacts to sign." >&2
+      fi
+
+      # Exit code 3 means findings below the blocking threshold were reported.
+      # Per the exit-code contract this is a passing ("green") pipeline.
+      if [ "${EXIT_CODE}" = "3" ]; then
+        echo "Findings below blocking threshold; pipeline stays green."
+        EXIT_CODE=0
+      fi
+
+      exit $EXIT_CODE
+  artifacts:
+    when: always
+    paths:
+      - results.json
+      - results.xml
+      - results.sarif
+      - results.sha256
+      - results.sigstore.json
+    reports:
+      junit: results.xml
+    expire_in: "$PACKMON_ARTIFACT_EXPIRE_IN"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+  allow_failure: false

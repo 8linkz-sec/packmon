@@ -1,0 +1,52 @@
+flowchart LR
+    subgraph Clients["Client Boundary"]
+        Dev["Developer workstation"]
+        CI["CI runner"]
+        N8N["N8N workflow"]
+        Admin["Admin browser"]
+        Prom["Metrics scraper"]
+    end
+
+    CLI["packmon CLI"]
+
+    subgraph Server["Packmon Server Boundary"]
+        API["API v1"]
+        AdminUI["Admin UI"]
+        Web["Public web UI"]
+        Feeds["Feed syncers"]
+        Queue["Refresh queue workers"]
+        Metrics["Metrics listener"]
+    end
+
+    subgraph Stores["Data Stores"]
+        PG["PostgreSQL"]
+        SQLite["Local SQLite"]
+    end
+
+    subgraph External["External Inputs"]
+        PublicFeeds["OSV, GHSA, OpenSSF, NVD, CISA KEV, EPSS, endoflife.date"]
+        OptionalFeeds["VulnCheck, Socket.dev, ReversingLabs"]
+        Registries["Public registries for latest-version metadata"]
+    end
+
+    Dev --> CLI
+    CI --> CLI
+    CLI -->|"lockfiles/SBOMs read locally"| CLI
+    CLI -->|"authenticated HTTPS /api/v1/check and /api/v1/sync"| API
+    CLI -->|"local fallback and history"| SQLite
+
+    N8N -->|"Bearer key plus feed-import secret"| API
+    Admin -->|"admin session plus CSRF"| AdminUI
+    Prom -->|"localhost/private scrape"| Metrics
+
+    API --> PG
+    AdminUI --> PG
+    Web --> PG
+    Feeds --> PG
+    Queue --> PG
+    Metrics --> PG
+
+    Feeds --> PublicFeeds
+    Feeds --> OptionalFeeds
+    Queue --> OptionalFeeds
+    CLI -->|"metadata-only best effort"| Registries

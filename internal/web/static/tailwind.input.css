@@ -1,0 +1,391 @@
+@import "tailwindcss" source(none);
+@source "../templates";
+@source "../render.go";
+
+/*
+ * Design tokens. Utilities such as `bg-surface` or `text-muted` are generated
+ * from these variables, so dark mode is a single override block below -- never
+ * a `dark:` variant in a template. Status colors stay separate from the accent
+ * so severity never reads as "branded".
+ */
+@theme {
+  --color-bg: #f5f6f9;
+  --color-surface: #ffffff;
+  --color-surface-2: #eef0f4;
+  --color-border: #e2e5ec;
+  --color-fg: #1a1d24;
+  --color-muted: #616978;
+
+  --color-accent: #0f766e;
+  --color-accent-hover: #115e59;
+  --color-accent-contrast: #ffffff;
+  --color-accent-fg: #0f766e;
+  --color-accent-bg: #e6f4f2;
+
+  --color-danger: #d43a40;
+  --color-danger-hover: #b92e34;
+  --color-danger-bg: #fbe9ea;
+  --color-danger-fg: #8f2126;
+  --color-high: #d1620c;
+  --color-high-bg: #fbeddf;
+  --color-high-fg: #8a3f07;
+  --color-warning: #a9760a;
+  --color-warning-bg: #f8f0dc;
+  --color-warning-fg: #6f4c06;
+  --color-success: #1c9a68;
+  --color-success-bg: #e4f5ed;
+  --color-success-fg: #10603f;
+  --color-info: #2563c9;
+  --color-info-bg: #e6eefb;
+  --color-info-fg: #17407f;
+
+  /* The primary nav is a dark bar in both themes; it needs its own scale. */
+  --color-nav: #15171e;
+  --color-nav-fg: #eceef3;
+  --color-nav-muted: #a7adba;
+  --color-nav-active: rgb(255 255 255 / 0.1);
+
+  /* Layout tokens, migrated from the removed tailwind.config.js. */
+  --container-shell: 1700px;
+  --container-finding-id: 13rem;
+  --container-finding-title: 28rem;
+}
+
+/*
+ * Dark theme. `data-pm-theme` is set on <html> by /static/theme-init.js before
+ * first paint. "system" follows prefers-color-scheme; an explicit light/dark
+ * choice wins over it.
+ */
+@layer theme {
+  [data-pm-theme="dark"] {
+    --color-bg: #0c0e12;
+    --color-surface: #15181f;
+    --color-surface-2: #1c212a;
+    --color-border: #2a2f3a;
+    --color-fg: #e8eaef;
+    --color-muted: #98a1af;
+
+    --color-accent: #14b8a6;
+    --color-accent-hover: #2dd4bf;
+    --color-accent-contrast: #0c0e12;
+    --color-accent-fg: #2dd4bf;
+    --color-accent-bg: #0f2622;
+
+    --color-danger: #f0595e;
+    --color-danger-hover: #f4797d;
+    --color-danger-bg: #2b1517;
+    --color-danger-fg: #f7a2a5;
+    --color-high: #ef8a3c;
+    --color-high-bg: #2a1c11;
+    --color-high-fg: #f3b485;
+    --color-warning: #e0a11a;
+    --color-warning-bg: #292110;
+    --color-warning-fg: #edc86e;
+    --color-success: #3ec489;
+    --color-success-bg: #0f2620;
+    --color-success-fg: #86dcb4;
+    --color-info: #6c9ef0;
+    --color-info-bg: #111c2e;
+    --color-info-fg: #a5c3f6;
+
+    --color-nav: #0f1116;
+    --color-nav-fg: #e8eaef;
+    --color-nav-muted: #98a1af;
+    --color-nav-active: rgb(255 255 255 / 0.08);
+
+    color-scheme: dark;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    [data-pm-theme="system"] {
+      --color-bg: #0c0e12;
+      --color-surface: #15181f;
+      --color-surface-2: #1c212a;
+      --color-border: #2a2f3a;
+      --color-fg: #e8eaef;
+      --color-muted: #98a1af;
+
+      --color-accent: #14b8a6;
+      --color-accent-hover: #2dd4bf;
+      --color-accent-contrast: #0c0e12;
+      --color-accent-fg: #2dd4bf;
+      --color-accent-bg: #0f2622;
+
+      --color-danger: #f0595e;
+      --color-danger-hover: #f4797d;
+      --color-danger-bg: #2b1517;
+      --color-danger-fg: #f7a2a5;
+      --color-high: #ef8a3c;
+      --color-high-bg: #2a1c11;
+      --color-high-fg: #f3b485;
+      --color-warning: #e0a11a;
+      --color-warning-bg: #292110;
+      --color-warning-fg: #edc86e;
+      --color-success: #3ec489;
+      --color-success-bg: #0f2620;
+      --color-success-fg: #86dcb4;
+      --color-info: #6c9ef0;
+      --color-info-bg: #111c2e;
+      --color-info-fg: #a5c3f6;
+
+      color-scheme: dark;
+    }
+  }
+}
+
+@utility grid-cols-filters {
+  grid-template-columns: minmax(0, 1fr) 220px 220px;
+}
+
+/*
+ * Browsers default <th> to text-align:center, which drifts every table header
+ * out of alignment with the start-aligned <td> cells below it and reads as a
+ * shifted interface. Reset headers to the logical start edge so tables line up
+ * cleanly. The `text-end` utility still wins for numeric/action columns because
+ * the utilities layer outranks base.
+ */
+@layer base {
+  th {
+    text-align: start;
+  }
+}
+
+@layer components {
+  .pm-focus-ring {
+    outline: 2px solid transparent;
+    outline-offset: 2px;
+  }
+
+  .pm-focus-ring:focus,
+  .pm-focus-ring:focus-visible {
+    outline-color: var(--color-accent);
+    box-shadow: 0 0 0 2px var(--color-surface), 0 0 0 4px var(--color-accent);
+  }
+
+  .pm-focus-ring-danger:focus,
+  .pm-focus-ring-danger:focus-visible {
+    outline-color: var(--color-danger);
+    box-shadow: 0 0 0 2px var(--color-surface), 0 0 0 4px var(--color-danger);
+  }
+
+  .pm-focus-ring-warning:focus,
+  .pm-focus-ring-warning:focus-visible {
+    outline-color: var(--color-warning);
+    box-shadow: 0 0 0 2px var(--color-surface), 0 0 0 4px var(--color-warning);
+  }
+
+  .pm-form-control {
+    min-height: 2.75rem;
+    width: 100%;
+    border: 1px solid var(--color-muted);
+    border-radius: 0.375rem;
+    background: var(--color-surface);
+    padding: 0.5rem 0.75rem;
+    color: var(--color-fg);
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+    outline: 2px solid transparent;
+    outline-offset: 2px;
+  }
+
+  .pm-form-control:focus {
+    border-color: var(--color-accent);
+    box-shadow: 0 0 0 2px var(--color-accent);
+  }
+
+  .pm-surface {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-sm, 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1));
+  }
+
+  .pm-scroll-region {
+    /* Load-bearing: without it the region is not the containing block for
+       absolutely positioned descendants, so `overflow-x` never clips them.
+       The `sr-only` spans inside wide tables are `position: absolute` and
+       sit at their static position far to the right of the visible column,
+       which extended the *document* scroll width and made the whole page
+       scroll sideways into an empty strip on narrow viewports. */
+    position: relative;
+    overflow-x: auto;
+    outline: 2px solid transparent;
+    outline-offset: 2px;
+  }
+
+  .pm-scroll-region:focus,
+  .pm-scroll-region:focus-visible {
+    outline-color: var(--color-accent);
+    box-shadow: 0 0 0 2px var(--color-surface), 0 0 0 4px var(--color-accent);
+  }
+
+  .pm-panel-header {
+    padding: 1rem 1.25rem;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .pm-empty-state {
+    padding: 2rem 1.25rem;
+    text-align: center;
+    color: var(--color-muted);
+  }
+
+  /* Segmented theme switcher in the nav. */
+  .pm-seg {
+    display: inline-flex;
+    gap: 2px;
+    padding: 2px;
+    border: 1px solid rgb(255 255 255 / 0.1);
+    border-radius: 0.5rem;
+    background: rgb(255 255 255 / 0.07);
+  }
+
+  /* Sized to sit inside the 3rem nav bar without driving its height. The
+     switcher lives only on the dark nav, so it uses the nav scale -- the
+     regular --color-muted is a light-surface grey and reads as unusable
+     contrast on that bar. */
+  .pm-seg-btn {
+    min-height: 1.75rem;
+    padding: 0.125rem 0.625rem;
+    border-radius: 0.375rem;
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: var(--color-nav-muted);
+    cursor: pointer;
+  }
+
+  .pm-seg-btn:hover {
+    color: var(--color-nav-fg);
+  }
+
+  .pm-seg-btn[aria-pressed="true"] {
+    background: var(--color-accent);
+    color: var(--color-accent-contrast);
+  }
+
+  .pm-alert-success,
+  .pm-alert-error,
+  .pm-alert-warning,
+  .pm-alert-info,
+  .pm-alert-default {
+    border-width: 1px;
+    border-style: solid;
+  }
+
+  .pm-alert-success {
+    border-color: var(--color-success);
+    background: var(--color-success-bg);
+    color: var(--color-success-fg);
+  }
+
+  .pm-alert-error {
+    border-color: var(--color-danger);
+    background: var(--color-danger-bg);
+    color: var(--color-danger-fg);
+  }
+
+  .pm-alert-warning {
+    border-color: var(--color-warning);
+    background: var(--color-warning-bg);
+    color: var(--color-warning-fg);
+  }
+
+  .pm-alert-info {
+    border-color: var(--color-info);
+    background: var(--color-info-bg);
+    color: var(--color-info-fg);
+  }
+
+  .pm-alert-default {
+    border-color: var(--color-border);
+    background: var(--color-surface-2);
+    color: var(--color-fg);
+  }
+
+  .pm-alert-icon-success {
+    color: var(--color-success);
+  }
+
+  .pm-alert-icon-error {
+    color: var(--color-danger);
+  }
+
+  .pm-alert-icon-warning {
+    color: var(--color-warning);
+  }
+
+  .pm-alert-icon-info {
+    color: var(--color-info);
+  }
+
+  .pm-alert-icon-default {
+    color: var(--color-muted);
+  }
+
+  .pm-badge-severity-critical,
+  .pm-badge-severity-high,
+  .pm-badge-severity-medium,
+  .pm-badge-severity-low,
+  .pm-badge-severity-default {
+    border-width: 1px;
+    border-style: solid;
+  }
+
+  .pm-badge-severity-critical {
+    border-color: var(--color-danger);
+    background: var(--color-danger-bg);
+    color: var(--color-danger-fg);
+  }
+
+  .pm-badge-severity-high {
+    border-color: var(--color-high);
+    background: var(--color-high-bg);
+    color: var(--color-high-fg);
+  }
+
+  .pm-badge-severity-medium {
+    border-color: var(--color-warning);
+    background: var(--color-warning-bg);
+    color: var(--color-warning-fg);
+  }
+
+  .pm-badge-severity-low {
+    border-color: var(--color-info);
+    background: var(--color-info-bg);
+    color: var(--color-info-fg);
+  }
+
+  .pm-badge-severity-default,
+  .pm-badge-status-default,
+  .pm-badge-status-pending {
+    border-color: var(--color-border);
+    background: var(--color-surface-2);
+    color: var(--color-fg);
+  }
+
+  .pm-badge-status-healthy {
+    background: var(--color-success-bg);
+    color: var(--color-success-fg);
+  }
+
+  .pm-badge-status-warning {
+    background: var(--color-warning-bg);
+    color: var(--color-warning-fg);
+  }
+
+  .pm-badge-status-error {
+    background: var(--color-danger-bg);
+    color: var(--color-danger-fg);
+  }
+
+  .pm-badge-status-configured,
+  .pm-badge-status-running {
+    background: var(--color-info-bg);
+    color: var(--color-info-fg);
+  }
+
+  .pm-badge-status-disabled {
+    background: var(--color-surface-2);
+    color: var(--color-muted);
+  }
+}

@@ -1,0 +1,397 @@
+{{define "title"}}{{t "page.admin.advisories.title"}}{{end}}
+
+{{define "content"}}
+<div class="space-y-6">
+
+  {{template "admin-page-header" dict "Title" (t "admin.advisories.heading") "Section" "advisories" "CSRFToken" .CSRFToken}}
+
+  {{template "admin-bootstrap-warning" .}}
+
+  {{template "admin-flash-alerts" .}}
+
+  <!-- Create new advisory -->
+  {{if not .BootstrapWarning}}
+  <div class="no-print pm-surface p-5" data-no-print>
+    <h2 class="text-lg font-semibold mb-3">{{if .IsEditing}}{{t "admin.advisories.form.edit_heading"}}{{else}}{{t "admin.advisories.form.create_heading"}}{{end}}</h2>
+    <form action="/admin/advisories/create" method="POST" class="space-y-4" data-unsaved-guard data-submit-lock data-submit-lock-label="{{t "admin.advisories.form.saving"}}">
+      {{$fieldErrors := .AdvisoryFieldErrors}}
+      {{$formAdvisory := .EditAdvisory}}
+      <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+      <input type="hidden" name="id" value="{{with $formAdvisory}}{{.ID}}{{else}}{{.NewAdvisoryID}}{{end}}">
+      <input type="hidden" name="return_offset" value="{{.AdvisoryCurrentOffset}}">
+      {{if .IsEditing}}{{with $formAdvisory}}<input type="hidden" name="updated_at" value="{{.UpdatedAt}}">{{end}}{{end}}
+
+      <div>
+        {{$findingTypeError := index $fieldErrors "finding_type"}}
+        <label for="adv-finding-type" class="block text-sm font-medium text-fg mb-1">Finding Type</label>
+        <select name="finding_type" id="adv-finding-type" required aria-describedby="adv-finding-type-help{{if $findingTypeError}} adv-finding-type-error{{end}}" {{if $findingTypeError}}aria-invalid="true"{{end}}
+          class="pm-form-control">
+          {{with .InvalidAdvisoryFindingType}}<option value="{{.}}" selected>Unsupported: {{.}}</option>{{end}}
+          <option value="vulnerability"
+            {{with $formAdvisory}}{{if eq .FindingType "vulnerability"}}selected{{end}}{{else}}selected{{end}}>Vulnerability</option>
+          <option value="malicious" {{with $formAdvisory}}{{if eq .FindingType "malicious"}}selected{{end}}{{end}}>Malicious package</option>
+        </select>
+        <span id="adv-finding-type-help" class="mt-1 block text-xs text-muted">
+          Malicious advisories always block scans; vulnerabilities block according to the configured severity threshold.
+        </span>
+        {{with $findingTypeError}}<p id="adv-finding-type-error" class="mt-1 text-sm font-medium text-danger-fg">{{.}}</p>{{end}}
+      </div>
+
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div>
+          {{$ecosystemError := index $fieldErrors "ecosystem"}}
+          <label for="adv-ecosystem" class="block text-sm font-medium text-fg mb-1">Ecosystem</label>
+          <select name="ecosystem" id="adv-ecosystem" required aria-describedby="adv-ecosystem-help{{if $ecosystemError}} adv-ecosystem-error{{end}}" {{if $ecosystemError}}aria-invalid="true"{{end}}
+            class="pm-form-control">
+            <option value="">-- select --</option>
+            {{with .InvalidAdvisoryEcosystem}}<option value="{{.}}" selected>Unsupported: {{.}}</option>{{end}}
+            <option value="npm" {{with $formAdvisory}}{{if eq .Ecosystem "npm"}}selected{{end}}{{end}}>npm</option>
+            <option value="pypi" {{with $formAdvisory}}{{if eq .Ecosystem "pypi"}}selected{{end}}{{end}}>pypi</option>
+            <option value="go" {{with $formAdvisory}}{{if eq .Ecosystem "go"}}selected{{end}}{{end}}>go</option>
+            <option value="maven" {{with $formAdvisory}}{{if eq .Ecosystem "maven"}}selected{{end}}{{end}}>maven</option>
+            <option value="cargo" {{with $formAdvisory}}{{if eq .Ecosystem "cargo"}}selected{{end}}{{end}}>cargo</option>
+            <option value="nuget" {{with $formAdvisory}}{{if eq .Ecosystem "nuget"}}selected{{end}}{{end}}>nuget</option>
+            <option value="composer" {{with $formAdvisory}}{{if eq .Ecosystem "composer"}}selected{{end}}{{end}}>composer</option>
+            <option value="gem" {{with $formAdvisory}}{{if eq .Ecosystem "gem"}}selected{{end}}{{end}}>gem</option>
+            <option value="pub" {{with $formAdvisory}}{{if eq .Ecosystem "pub"}}selected{{end}}{{end}}>pub</option>
+            <option value="actions" {{with $formAdvisory}}{{if eq .Ecosystem "actions"}}selected{{end}}{{end}}>actions</option>
+            <option value="cocoapods" {{with $formAdvisory}}{{if eq .Ecosystem "cocoapods"}}selected{{end}}{{end}}>cocoapods</option>
+            <option value="swiftpm" {{with $formAdvisory}}{{if eq .Ecosystem "swiftpm"}}selected{{end}}{{end}}>swiftpm</option>
+            <option value="hex" {{with $formAdvisory}}{{if eq .Ecosystem "hex"}}selected{{end}}{{end}}>hex</option>
+            <option value="cran" {{with $formAdvisory}}{{if eq .Ecosystem "cran"}}selected{{end}}{{end}}>cran</option>
+          </select>
+          <span id="adv-ecosystem-help" class="mt-1 block text-xs text-muted">
+            Required. Select the package ecosystem Packmon scans for this advisory.
+          </span>
+          {{with $ecosystemError}}<p id="adv-ecosystem-error" class="mt-1 text-sm font-medium text-danger-fg">{{.}}</p>{{end}}
+        </div>
+        <div>
+          {{$nameError := index $fieldErrors "name"}}
+          <label for="adv-name" class="block text-sm font-medium text-fg mb-1">Package Name</label>
+          <input type="text" name="name" id="adv-name" required maxlength="{{.ManualAdvisoryNameMaxLength}}" aria-describedby="adv-name-help{{if $nameError}} adv-name-error{{end}}" {{if $nameError}}aria-invalid="true"{{end}} dir="auto" value="{{with $formAdvisory}}{{.Name}}{{end}}"
+            class="pm-form-control">
+          <span id="adv-name-help" class="mt-1 block text-xs text-muted">
+            Required. Maximum {{.ManualAdvisoryNameMaxLength}} characters.
+          </span>
+          {{with $nameError}}<p id="adv-name-error" class="mt-1 text-sm font-medium text-danger-fg">{{.}}</p>{{end}}
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div>
+          {{$severityError := index $fieldErrors "severity"}}
+          <label for="adv-severity" class="block text-sm font-medium text-fg mb-1">Severity Classification</label>
+          <select name="severity" id="adv-severity" required aria-describedby="adv-severity-help{{if $severityError}} adv-severity-error{{end}}" {{if $severityError}}aria-invalid="true"{{end}}
+            class="pm-form-control">
+            {{with .InvalidAdvisorySeverity}}<option value="{{.}}" selected>Unsupported: {{.}}</option>{{end}}
+            <option value="CRITICAL" {{with $formAdvisory}}{{if eq .Severity "CRITICAL"}}selected{{end}}{{end}}>CRITICAL</option>
+            <option value="HIGH" {{with $formAdvisory}}{{if eq .Severity "HIGH"}}selected{{end}}{{end}}>HIGH</option>
+            <option value="MEDIUM"
+              {{with $formAdvisory}}{{if eq .Severity "MEDIUM"}}selected{{end}}{{else}}selected{{end}}>MEDIUM</option>
+            <option value="LOW" {{with $formAdvisory}}{{if eq .Severity "LOW"}}selected{{end}}{{end}}>LOW</option>
+          </select>
+          <span id="adv-severity-help" class="mt-1 block text-xs text-muted">
+            Required. Vulnerability blocking follows the configured threshold; malicious findings still block.
+          </span>
+          {{with $severityError}}<p id="adv-severity-error" class="mt-1 text-sm font-medium text-danger-fg">{{.}}</p>{{end}}
+        </div>
+        {{if .ShowRiskTypeControl}}
+        <div>
+          <label for="adv-risk-type" class="block text-sm font-medium text-fg mb-1">Risk Type</label>
+          <select name="risk_type" id="adv-risk-type" aria-describedby="adv-risk-type-help"
+            class="pm-form-control">
+            <option value="malware"
+              {{with $formAdvisory}}{{if eq .RiskType "malware"}}selected{{end}}{{else}}selected{{end}}>Malware</option>
+            <option value="typosquatting" {{with $formAdvisory}}{{if eq .RiskType "typosquatting"}}selected{{end}}{{end}}>Typosquatting</option>
+            <option value="supply_chain" {{with $formAdvisory}}{{if eq .RiskType "supply_chain"}}selected{{end}}{{end}}>Supply-chain risk</option>
+            <option value="other" {{with $formAdvisory}}{{if eq .RiskType "other"}}selected{{end}}{{end}}>Other</option>
+          </select>
+          <span id="adv-risk-type-help" class="mt-1 block text-xs text-muted">
+            Risk type classifies malicious manual advisories; it does not change blocking behavior.
+          </span>
+        </div>
+        {{end}}
+      </div>
+
+      <div>
+        {{$summaryError := index $fieldErrors "summary"}}
+        <label for="adv-summary" class="block text-sm font-medium text-fg mb-1">Summary</label>
+        <input type="text" name="summary" id="adv-summary" required maxlength="{{.ManualAdvisorySummaryMaxLength}}" aria-describedby="adv-summary-help{{if $summaryError}} adv-summary-error{{end}}" {{if $summaryError}}aria-invalid="true"{{end}} dir="auto" value="{{with $formAdvisory}}{{.Summary}}{{end}}"
+          class="pm-form-control">
+        <span id="adv-summary-help" class="mt-1 block text-xs text-muted">
+          Required. Maximum {{.ManualAdvisorySummaryMaxLength}} characters.
+        </span>
+        {{with $summaryError}}<p id="adv-summary-error" class="mt-1 text-sm font-medium text-danger-fg">{{.}}</p>{{end}}
+      </div>
+
+      {{template "admin-alert-start" dict "Variant" "warning" "Icon" true}}
+      <p>Manual advisories created here apply to all versions of the selected package and appear alongside feed-sourced vulnerability or malicious findings.</p>
+      {{template "admin-alert-end" .}}
+
+      <div>
+        {{$descriptionError := index $fieldErrors "description"}}
+        <label for="adv-description" class="block text-sm font-medium text-fg mb-1">Description (optional)</label>
+        <textarea name="description" id="adv-description" rows="3" maxlength="{{.ManualAdvisoryDescriptionMaxLength}}" aria-describedby="adv-description-help{{if $descriptionError}} adv-description-error{{end}}" {{if $descriptionError}}aria-invalid="true"{{end}} dir="auto"
+          class="pm-form-control"
+        >{{with $formAdvisory}}{{.Description}}{{end}}</textarea>
+        <span id="adv-description-help" class="mt-1 block text-xs text-muted">
+          Optional. Maximum {{.ManualAdvisoryDescriptionMaxLength}} characters.
+        </span>
+        {{with $descriptionError}}<p id="adv-description-error" class="mt-1 text-sm font-medium text-danger-fg">{{.}}</p>{{end}}
+      </div>
+
+      <button type="submit" data-submit-lock-button
+        class="{{adminPrimaryButtonClass}}">
+        {{if .IsEditing}}{{t "admin.advisories.form.save"}}{{else}}{{t "admin.advisories.form.create"}}{{end}}
+      </button>
+      {{if .IsEditing}}
+      <a
+        href="/admin/advisories{{if gt .AdvisoryCurrentOffset 0}}?offset={{.AdvisoryCurrentOffset}}{{end}}"
+        class="{{adminSecondaryButtonClass "ms-3"}}"
+      >Cancel</a>
+      {{end}}
+    </form>
+  </div>
+  {{end}}
+
+  <div class="pm-surface p-5">
+    <h2 class="text-lg font-semibold mb-3">Existing Manual Advisories</h2>
+    {{if or .AdvisoryHasPrevious .AdvisoryHasNext}}
+    <nav class="mb-4 flex flex-wrap items-center justify-between gap-3 border-b border-border pb-3 text-xs text-muted" aria-label="Manual advisory pages">
+      <span>Showing manual advisories {{.AdvisoryPageStart}}-{{.AdvisoryPageEnd}}</span>
+      <div class="flex flex-wrap items-center gap-2">
+        {{if .AdvisoryHasPrevious}}
+        <a
+          href="/admin/advisories?offset={{.AdvisoryPreviousOffset}}"
+          class="{{adminSecondaryButtonClass}}"
+        >Newer</a>
+        {{end}}
+        {{if .AdvisoryHasNext}}
+        <a
+          href="/admin/advisories?offset={{.AdvisoryNextOffset}}"
+          class="{{adminSecondaryButtonClass}}"
+        >Older</a>
+        {{end}}
+      </div>
+    </nav>
+    {{end}}
+    {{if .AdvisoriesLoadError}}
+    {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .AdvisoriesLoadError}}
+    {{else if .Advisories}}
+    <div class="md:hidden divide-y divide-border" data-admin-mobile-actions="advisories">
+      {{range .Advisories}}
+      <div class="py-4 space-y-4">
+        <div class="flex items-start justify-between gap-3">
+          <div class="min-w-0">
+            <a
+              href="/package/{{.Ecosystem}}/{{.Name}}"
+              aria-label="View package details for {{.Ecosystem}}/{{.Name}}"
+              class="inline-flex min-h-11 max-w-full items-center rounded-md px-3 py-2 font-medium
+                text-accent-fg hover:bg-surface-2 hover:underline pm-focus-ring"
+            ><span class="min-w-0 break-words"><bdi dir="auto">{{.Ecosystem}}</bdi> / <bdi dir="auto">{{.Name}}</bdi></span></a>
+            <div class="mt-1 font-mono text-xs text-muted break-all"><bdi dir="auto">{{.ID}}</bdi></div>
+          </div>
+          {{template "pm-badge" dict "Class" (printf "shrink-0 border %s" (severityClass .Severity)) "Label" .Severity}}
+        </div>
+        {{if not $.BootstrapWarning}}
+        <div class="no-print flex flex-wrap gap-2" data-no-print>
+          {{template "admin-advisory-actions" dict "Advisory" . "CSRFToken" $.CSRFToken "CurrentOffset" $.AdvisoryCurrentOffset "ConfirmIDPrefix" "mobile"}}
+        </div>
+        {{end}}
+        <dl class="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+          <div>
+            <dt class="text-xs font-semibold uppercase tracking-wide text-muted">Type</dt>
+            <dd class="mt-0.5 break-words">{{range findingLabels .FindingType}}<bdi dir="auto">{{.}}</bdi>{{end}}</dd>
+          </div>
+          <div>
+            <dt class="text-xs font-semibold uppercase tracking-wide text-muted">Risk Type</dt>
+            <dd class="mt-0.5 break-words">
+              {{if eq .RiskType "malware"}}<bdi dir="auto">Malware</bdi>{{else if eq .RiskType "typosquatting"}}<bdi dir="auto">Typosquatting</bdi>{{else if eq .RiskType "supply_chain"}}<bdi dir="auto">Supply-chain risk</bdi>{{else if eq .RiskType "other"}}<bdi dir="auto">Other</bdi>{{else}}<bdi dir="auto">Unknown</bdi>{{end}}
+            </dd>
+          </div>
+          <div class="col-span-2 min-w-0">
+            <dt class="text-xs font-semibold uppercase tracking-wide text-muted">Summary</dt>
+            <dd class="mt-0.5 break-words">
+              <details class="group" data-print-open>
+                <summary
+                  class="min-h-11 cursor-pointer rounded-md px-2 py-1 text-fg hover:bg-surface-2
+                    active:bg-surface-2 pm-focus-ring"
+                >
+                  <span class="inline-flex items-center gap-2">
+                    <bdi dir="auto">{{truncate .Summary 120}}</bdi>
+                    <span
+                      aria-hidden="true"
+                      class="rounded border border-muted px-1.5 py-0.5 text-xs font-semibold leading-none
+                        text-fg"
+                    >Details</span>
+                  </span>
+                </summary>
+                <div class="mt-2 space-y-2 text-sm leading-6 text-fg">
+                  <p><bdi dir="auto">{{.Summary}}</bdi></p>
+                  {{if .Description}}<p><span class="font-medium text-fg">Description:</span> <bdi dir="auto">{{.Description}}</bdi></p>{{end}}
+                </div>
+              </details>
+            </dd>
+          </div>
+        </dl>
+      </div>
+      {{end}}
+    </div>
+    <div
+      class="hidden md:block pm-scroll-region"
+      tabindex="0"
+      role="region"
+      aria-label="Manual advisories table"
+      data-admin-desktop-table="advisories"
+    >
+      <table class="min-w-full text-sm">
+        <thead>
+          <tr class="text-start text-muted border-b border-border">
+            <th scope="col" class="px-5 py-2">ID</th>
+            <th scope="col" class="px-5 py-2">Type</th>
+            <th scope="col" class="px-5 py-2">Package</th>
+            <th scope="col" class="px-5 py-2">Severity</th>
+            <th scope="col" class="px-5 py-2">Risk Type</th>
+            <th scope="col" class="px-5 py-2">Summary</th>
+            <th scope="col" class="no-print px-5 py-2 text-end" data-no-print>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {{range .Advisories}}
+          <tr class="border-b border-border">
+            <td class="px-5 py-2 font-mono text-xs"><bdi dir="auto">{{.ID}}</bdi></td>
+            <td class="px-5 py-2">{{range findingLabels .FindingType}}<bdi dir="auto">{{.}}</bdi>{{end}}</td>
+            <td class="px-5 py-2">
+              <a
+                href="/package/{{.Ecosystem}}/{{.Name}}"
+                aria-label="View package details for {{.Ecosystem}}/{{.Name}}"
+                class="inline-flex min-h-11 max-w-full items-center rounded-md px-3 py-2 font-medium
+                  text-accent-fg hover:bg-surface-2 hover:underline pm-focus-ring"
+              ><span class="min-w-0 break-words"><bdi dir="auto">{{.Ecosystem}}</bdi> / <bdi dir="auto">{{.Name}}</bdi></span></a>
+            </td>
+            <td class="px-5 py-2">
+              {{template "pm-badge" dict "Class" (printf "border %s" (severityClass .Severity)) "Label" .Severity}}
+            </td>
+            <td class="px-5 py-2">
+              {{if eq .RiskType "malware"}}<bdi dir="auto">Malware</bdi>{{else if eq .RiskType "typosquatting"}}<bdi dir="auto">Typosquatting</bdi>{{else if eq .RiskType "supply_chain"}}<bdi dir="auto">Supply-chain risk</bdi>{{else if eq .RiskType "other"}}<bdi dir="auto">Other</bdi>{{else}}<bdi dir="auto">Unknown</bdi>{{end}}
+            </td>
+            <td class="px-5 py-2">
+              <details class="group max-w-md" data-print-open>
+                <summary
+                  class="min-h-11 cursor-pointer rounded-md px-2 py-1 text-fg hover:bg-surface-2
+                    active:bg-surface-2 pm-focus-ring"
+                >
+                  <span class="inline-flex items-center gap-2">
+                    <bdi dir="auto">{{truncate .Summary 80}}</bdi>
+                    <span
+                      aria-hidden="true"
+                      class="rounded border border-muted px-1.5 py-0.5 text-xs font-semibold leading-none
+                        text-fg"
+                    >Details</span>
+                  </span>
+                </summary>
+                <div class="mt-2 space-y-2 text-sm leading-6 text-fg">
+                  <p><bdi dir="auto">{{.Summary}}</bdi></p>
+                  {{if .Description}}<p><span class="font-medium text-fg">Description:</span> <bdi dir="auto">{{.Description}}</bdi></p>{{end}}
+                </div>
+              </details>
+            </td>
+            <td class="no-print px-5 py-2" data-no-print>
+              {{if not $.BootstrapWarning}}
+              <div class="no-print flex flex-wrap justify-end gap-2" data-no-print>
+              {{template "admin-advisory-actions" dict "Advisory" . "CSRFToken" $.CSRFToken "CurrentOffset" $.AdvisoryCurrentOffset "ConfirmIDPrefix" "desktop"}}
+              </div>
+              {{end}}
+            </td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else if .AdvisoryPageOutOfRange}}
+    <div class="rounded-md border border-warning bg-warning-bg p-5 text-sm text-warning-fg">
+      <p class="font-medium">No manual advisories on this page.</p>
+      <p class="mt-2">The current page is past the available manual advisories.</p>
+      <div class="mt-4 flex flex-wrap gap-2">
+        <a
+          href="/admin/advisories?offset={{.AdvisoryPreviousOffset}}"
+          class="inline-flex min-h-11 items-center rounded-md border border-warning px-3 py-2 font-medium
+            text-warning-fg hover:bg-warning-bg"
+        >Previous advisory page</a>
+        <a
+          href="/admin/advisories"
+          class="{{adminPrimaryButtonClass}}"
+        >Back to first page</a>
+      </div>
+    </div>
+    {{else}}
+    <div class="pm-empty-state">
+      <p class="text-sm font-medium text-fg">No manual advisories yet.</p>
+    </div>
+    {{end}}
+  </div>
+
+  {{template "admin-alert-start" dict "Variant" "info" "Icon" true}}
+  <p>
+    Manual advisories are stored with source "manual", get a stable manual:&lt;uuid&gt; ID when no ID is provided,
+    and appear alongside feed-sourced vulnerability or malicious findings.
+  </p>
+  {{template "admin-alert-end" .}}
+
+</div>
+{{end}}
+
+{{define "admin-advisory-actions"}}
+<a
+  href="/admin/advisories?edit={{.Advisory.ID}}{{if gt .CurrentOffset 0}}&amp;offset={{.CurrentOffset}}{{end}}"
+  aria-label="{{t "admin.advisories.action.edit_aria" .Advisory.ID .Advisory.Ecosystem .Advisory.Name}}"
+  class="{{adminGhostButtonClass "no-print"}}"
+  data-no-print
+>{{t "admin.advisories.action.edit"}}</a>
+<details class="no-print inline-flex" data-no-print>
+  <summary
+  aria-label="{{t "admin.advisories.action.delete_aria" .Advisory.ID .Advisory.Ecosystem .Advisory.Name}}"
+    class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-md px-3 py-2
+      text-sm font-medium text-danger-fg hover:bg-danger-bg active:bg-danger-bg pm-focus-ring pm-focus-ring-danger"
+  ><span>{{t "admin.advisories.action.delete"}}</span><span
+    aria-hidden="true"
+    data-admin-expand-affordance
+    class="rounded border border-danger px-1.5 py-0.5 text-xs font-semibold leading-none text-danger-fg"
+  >{{t "admin.advisories.action.review"}}</span></summary>
+  <form
+    action="/admin/advisories/delete"
+    method="POST"
+    class="mt-2 flex w-72 max-w-full flex-col gap-2"
+    data-submit-lock
+    data-submit-lock-label="{{t "admin.advisories.action.deleting"}}"
+  >
+    <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+    <input type="hidden" name="id" value="{{.Advisory.ID}}">
+    <input type="hidden" name="return_offset" value="{{.CurrentOffset}}">
+    <p class="text-xs leading-5 text-danger-fg">{{t "admin.advisories.action.delete_impact"}}</p>
+    <label for="adv-delete-confirm-{{.ConfirmIDPrefix}}-{{.Advisory.ID}}" class="text-xs font-medium text-danger-fg">{{t "admin.advisories.action.confirm_label"}}</label>
+    <code
+      class="block rounded border border-danger bg-danger-bg px-2 py-1 font-mono text-xs
+        text-danger-fg break-all"
+    ><bdi dir="auto">{{.Advisory.ID}}</bdi></code>
+    <input
+      type="text"
+      name="confirm_id"
+      id="adv-delete-confirm-{{.ConfirmIDPrefix}}-{{.Advisory.ID}}"
+      required
+      autocomplete="off"
+      autocapitalize="none"
+      spellcheck="false"
+      aria-label="{{t "admin.advisories.action.confirm_input_aria" .Advisory.ID}}"
+      class="w-full min-h-11 rounded-md border border-danger px-3 py-2 text-sm text-fg
+        pm-focus-ring pm-focus-ring-danger"
+    >
+    <button
+      type="submit"
+      data-submit-lock-button
+      aria-label="{{t "admin.advisories.action.confirm_delete_aria" .Advisory.ID .Advisory.Ecosystem .Advisory.Name}}"
+      class="{{adminDangerButtonClass}}"
+    >{{t "admin.advisories.action.confirm_delete"}}</button>
+  </form>
+</details>
+{{end}}

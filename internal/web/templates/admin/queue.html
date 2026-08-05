@@ -1,0 +1,378 @@
+{{define "title"}}{{t "page.admin.queue.title"}}{{end}}
+
+{{define "admin-queue-return-state"}}
+<input type="hidden" name="return_status" value="{{.QueueStatus}}">
+<input type="hidden" name="return_offset" value="{{.QueueCurrentOffset}}">
+{{end}}
+
+{{define "admin-queue-row-actions"}}
+{{$root := .Root}}
+{{$job := .Job}}
+<div
+  role="group"
+  aria-label="{{t "admin.queue.row.actions_aria" $job.ID $job.Ecosystem $job.Name}}"
+  class="no-print flex flex-wrap items-center gap-2 md:justify-end"
+  data-admin-queue-row-actions
+  data-no-print
+>
+  <form action="/admin/queue/priority" method="POST" class="inline-flex items-center gap-2" data-submit-lock data-submit-lock-label="{{t "admin.queue.row.priority.saving"}}">
+    <input type="hidden" name="_csrf" value="{{$root.CSRFToken}}">
+    <input type="hidden" name="job_id" value="{{$job.ID}}">
+    {{template "admin-queue-return-state" $root}}
+    <select
+      name="priority"
+      aria-label="{{t "admin.queue.row.priority.aria" $job.ID $job.Ecosystem $job.Name}}"
+      aria-describedby="queue-priority-help"
+      class="pm-form-control w-auto md:min-h-6 md:px-2 md:py-0.5 md:text-xs"
+    >
+      {{range $root.QueuePriorityOptions}}
+      <option value="{{.Value}}" {{if eq $job.Priority .Value}}selected{{end}}>{{.Label}}</option>
+      {{end}}
+    </select>
+    <button
+      type="submit"
+      data-submit-lock-button
+      aria-label="{{t "admin.queue.row.priority.save_aria" $job.ID $job.Ecosystem $job.Name}}"
+      class="{{adminGhostButtonClass "md:min-h-6 md:px-2 md:py-0.5 md:text-xs"}}"
+    >{{t "admin.queue.row.priority.save"}}</button>
+  </form>
+  {{if $job.CanPause}}
+  <form action="/admin/queue/pause" method="POST" class="inline-flex" data-submit-lock data-submit-lock-label="{{t "admin.queue.row.pause.saving"}}">
+    <input type="hidden" name="_csrf" value="{{$root.CSRFToken}}">
+    <input type="hidden" name="job_id" value="{{$job.ID}}">
+    {{template "admin-queue-return-state" $root}}
+    <button
+      type="submit"
+      data-submit-lock-button
+      aria-label="{{t "admin.queue.row.pause_aria" $job.ID $job.Ecosystem $job.Name}}"
+      class="{{adminSecondaryButtonClass "md:min-h-6 md:px-2 md:py-0.5 md:text-xs"}}"
+    >{{t "admin.queue.row.pause"}}</button>
+  </form>
+  {{else if $job.CanResume}}
+  <form action="/admin/queue/resume" method="POST" class="inline-flex" data-submit-lock data-submit-lock-label="{{t "admin.queue.row.resume.saving"}}">
+    <input type="hidden" name="_csrf" value="{{$root.CSRFToken}}">
+    <input type="hidden" name="job_id" value="{{$job.ID}}">
+    {{template "admin-queue-return-state" $root}}
+    <button
+      type="submit"
+      data-submit-lock-button
+      aria-label="{{t "admin.queue.row.resume_aria" $job.ID $job.Ecosystem $job.Name}}"
+      class="{{adminAccentOutlineButtonClass "md:min-h-6 md:px-2 md:py-0.5 md:text-xs"}}"
+    >{{t "admin.queue.row.resume"}}</button>
+  </form>
+  {{else if $job.CanRetry}}
+  <form action="/admin/queue/retry" method="POST" class="inline-flex" data-submit-lock data-submit-lock-label="{{t "admin.queue.row.retry.saving"}}">
+    <input type="hidden" name="_csrf" value="{{$root.CSRFToken}}">
+    <input type="hidden" name="job_id" value="{{$job.ID}}">
+    {{template "admin-queue-return-state" $root}}
+    <button
+      type="submit"
+      data-submit-lock-button
+      aria-label="{{t "admin.queue.row.retry_aria" $job.ID $job.Ecosystem $job.Name}}"
+      class="{{adminAccentOutlineButtonClass "md:min-h-6 md:px-2 md:py-0.5 md:text-xs"}}"
+    >{{t "admin.queue.row.retry"}}</button>
+  </form>
+  {{end}}
+</div>
+{{end}}
+
+{{define "content"}}
+<div class="space-y-6">
+
+  {{template "admin-page-header" dict "Title" (t "admin.queue.heading") "Section" "queue" "CSRFToken" .CSRFToken}}
+
+  {{template "admin-bootstrap-warning" .}}
+
+  <!-- Queue stats -->
+  {{if .QueueStatsLoadError}}
+  {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .QueueStatsLoadError}}
+  {{else}}
+  <div class="grid grid-cols-2 sm:grid-cols-5 gap-4">
+    {{range .QueueStatCards}}
+    <a
+      href="{{.URL}}"
+      aria-label="{{.AriaLabel}}"
+      {{if .Active}}aria-current="page"{{end}}
+      class="block pm-surface p-5 text-center {{if .Active}}border-accent bg-accent-bg{{end}}
+        hover:shadow-md active:shadow-sm pm-focus-ring transition-colors duration-150 ease-out"
+    >
+      <dl class="grid grid-cols-1 gap-1">
+        <dt class="text-xs font-semibold uppercase tracking-wide text-muted">{{.Label}}</dt>
+        <dd class="text-2xl font-semibold {{.CountClass}}">{{.Count}}</dd>
+      </dl>
+    </a>
+    {{end}}
+  </div>
+  {{end}}
+
+  <!-- Actions -->
+  {{if not .BootstrapWarning}}
+  <div class="no-print flex flex-wrap gap-3" data-admin-queue-bulk-actions data-no-print>
+    {{if gt .QueuePurgeCount 0}}
+    <details class="w-full sm:w-auto">
+      <summary
+        aria-label="{{t "admin.queue.bulk.purge_aria"}}"
+        class="{{adminDangerButtonClass "w-full cursor-pointer gap-2 shadow-sm sm:w-auto"}}"
+      >
+        <span>{{t "admin.queue.bulk.purge"}}</span>
+        <span aria-hidden="true" data-admin-expand-affordance class="rounded border border-accent-contrast px-1.5 py-0.5 text-xs font-semibold leading-none">{{t "admin.queue.bulk.review"}}</span>
+      </summary>
+      <div class="mt-2 rounded-md border border-danger bg-surface p-3 text-sm text-danger-fg shadow-sm">
+        <p class="mb-2">{{t "admin.queue.bulk.purge_question" .QueuePurgePhrase}}</p>
+        <p class="mb-3">{{t "admin.queue.bulk.purge_impact"}}</p>
+        <form action="/admin/queue/purge" method="POST" class="inline-flex w-full sm:w-auto" data-submit-lock data-submit-lock-label="{{t "admin.queue.bulk.purging"}}">
+          <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+          {{template "admin-queue-return-state" .}}
+          <button
+            type="submit"
+            data-submit-lock-button
+            aria-label="{{t "admin.queue.bulk.confirm_purge_aria" .QueuePurgeCount}}"
+            class="{{adminDangerButtonClass "w-full sm:w-auto"}}"
+          >
+            {{t "admin.queue.bulk.confirm_purge"}}
+          </button>
+        </form>
+      </div>
+    </details>
+    {{else}}
+    <div
+      aria-disabled="true"
+      role="status"
+      class="inline-flex min-h-8 w-full items-center justify-center rounded-md border border-muted
+        bg-surface-2 px-4 py-1.5 text-sm font-medium text-fg sm:w-auto"
+    >
+      {{t "admin.queue.bulk.no_purge"}}
+    </div>
+    {{end}}
+    {{range .QueueClearActions}}
+    {{if gt .Count 0}}
+    <details class="w-full sm:w-auto">
+      <summary
+        aria-label="{{t "admin.queue.bulk.clear_aria" .Status}}"
+        class="{{adminDangerButtonClass "w-full cursor-pointer gap-2 shadow-sm sm:w-auto"}}"
+      >
+        <span>{{t "admin.queue.bulk.clear" .Label}}</span>
+        <span aria-hidden="true" data-admin-expand-affordance class="rounded border border-accent-contrast px-1.5 py-0.5 text-xs font-semibold leading-none">{{t "admin.queue.bulk.review"}}</span>
+      </summary>
+      <div class="mt-2 rounded-md border border-danger bg-surface p-3 text-sm text-danger-fg shadow-sm">
+        <p class="mb-2">{{t "admin.queue.bulk.clear_question" .CountPhrase}}</p>
+        <p class="mb-3">{{t "admin.queue.bulk.clear_impact" .Label}}</p>
+        <form action="/admin/queue/clear" method="POST" class="inline-flex w-full sm:w-auto" data-submit-lock data-submit-lock-label="{{t "admin.queue.bulk.clearing"}}">
+          <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
+          <input type="hidden" name="status" value="{{.Status}}">
+          {{template "admin-queue-return-state" $}}
+          <button
+            type="submit"
+            data-submit-lock-button
+            aria-label="{{t "admin.queue.bulk.confirm_clear_aria" .Count .Status (word .Count "job" "jobs")}}"
+            class="{{adminDangerButtonClass "w-full sm:w-auto"}}"
+          >
+            {{t "admin.queue.bulk.confirm_clear" .Status}}
+          </button>
+        </form>
+      </div>
+    </details>
+    {{else}}
+    <div
+      aria-disabled="true"
+      role="status"
+      class="inline-flex min-h-8 w-full items-center justify-center rounded-md border border-muted
+        bg-surface-2 px-4 py-1.5 text-sm font-medium text-fg sm:w-auto"
+    >
+      {{t "admin.queue.bulk.no_clear" .Status}}
+    </div>
+    {{end}}
+    {{end}}
+  </div>
+  {{end}}
+
+  {{template "admin-flash-alerts" .}}
+  {{if .QueueStatusWarning}}
+  {{template "admin-alert" dict "Variant" "warning" "Icon" true "Message" .QueueStatusWarning}}
+  {{end}}
+
+  <!-- Queue jobs table -->
+  <div class="pm-surface">
+    <div class="px-5 py-3 border-b border-border flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+      <h2 class="text-lg font-semibold">Recent Queue Jobs</h2>
+      <div class="flex flex-wrap gap-2 text-xs">
+        {{range .QueueFilters}}
+        <a
+          href="{{.URL}}"
+          {{if .Active}}aria-current="page"{{end}}
+          class="inline-flex items-center justify-center rounded-md border px-3 py-1.5 font-medium pm-focus-ring
+            {{if .Active}}border-accent bg-accent-bg text-accent-fg{{else}}border-muted text-fg hover:bg-surface-2{{end}}"
+        >{{.Label}}</a>
+        {{end}}
+      </div>
+    </div>
+    {{if .QueueJobsLoadError}}
+    <div class="px-5 py-4 border-b border-danger">
+      {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .QueueJobsLoadError}}
+    </div>
+    {{else if .Jobs}}
+    <nav class="flex flex-wrap items-center justify-between gap-3 px-5 py-3 text-xs text-muted border-b border-border" aria-label="Queue job pages">
+      <span>Showing queue jobs {{.QueuePageStart}}-{{.QueuePageEnd}}</span>
+      <div class="flex flex-wrap items-center gap-2">
+        {{if .QueueHasPrevious}}
+        <a
+          href="{{.QueuePreviousURL}}"
+          class="{{adminSecondaryButtonClass}}"
+        >Newer</a>
+        {{end}}
+        {{if .QueueHasNext}}
+        <a
+          href="{{.QueueNextURL}}"
+          class="{{adminSecondaryButtonClass}}"
+        >Older</a>
+        {{end}}
+      </div>
+    </nav>
+    <div id="queue-priority-help" class="px-5 py-3 text-xs text-fg border-b border-border bg-surface-2">
+      <span class="font-medium text-fg">Priority levels:</span>
+      {{range $i, $opt := .QueuePriorityOptions}}{{if $i}}<span aria-hidden="true" class="text-muted"> &middot; </span>{{end}}<span>{{$opt.Label}}</span>{{end}}
+      <span class="text-muted">&mdash; lower numbers are processed first; jobs get their level automatically from how they were queued.</span>
+    </div>
+    <div class="md:hidden divide-y divide-border" data-admin-mobile-actions="queue">
+      {{range .Jobs}}
+      {{$job := .}}
+      <div class="p-5 space-y-4">
+        <div class="flex items-start justify-between gap-3">
+          <div class="min-w-0">
+            <a
+              href="/package/{{.Ecosystem}}/{{.Name}}"
+              aria-label="View package details for {{.Ecosystem}}/{{.Name}}"
+              class="inline-flex min-h-11 max-w-full items-center rounded-md px-3 py-2 font-medium
+                text-accent-fg hover:bg-surface-2 hover:underline pm-focus-ring"
+            ><span class="min-w-0 break-words"><bdi dir="auto">{{.Ecosystem}}</bdi>/<bdi dir="auto">{{.Name}}</bdi></span></a>
+            <div class="mt-1 font-mono text-xs text-muted">Job {{.ID}}</div>
+          </div>
+          {{template "pm-badge" dict "Class" (printf "shrink-0 %s" .StatusClass) "Label" .StatusLabel}}
+        </div>
+        <dl class="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+          <div>
+            <dt class="text-xs font-semibold uppercase tracking-wide text-muted">Source</dt>
+            <dd class="mt-0.5 break-words">{{.Source}}</dd>
+          </div>
+          <div>
+            <dt class="text-xs font-semibold uppercase tracking-wide text-muted">Priority</dt>
+            <dd class="mt-0.5">{{.Priority}}</dd>
+          </div>
+          <div>
+            <dt class="text-xs font-semibold uppercase tracking-wide text-muted">Requested</dt>
+            <dd class="mt-0.5 text-fg">
+              <time data-local-time="relative" datetime="{{formatTimeISO .RequestedAt}}" aria-label="{{formatTime .RequestedAt}}">{{formatTimeAgo .RequestedAt}}</time>
+            </dd>
+          </div>
+          <div class="min-w-0">
+            <dt class="text-xs font-semibold uppercase tracking-wide text-muted">Error</dt>
+            <dd class="mt-0.5 break-words">
+              {{if .Error}}
+              <details class="text-danger-fg" data-print-open>
+                <summary
+                  aria-label="Show full queue error for job {{.ID}}"
+                  class="inline-flex min-h-11 cursor-pointer items-center rounded px-2 py-1 text-danger
+                    hover:bg-danger-bg active:bg-danger-bg pm-focus-ring pm-focus-ring-danger"
+                >{{truncate .Error 80}}</summary>
+                <pre class="mt-2 whitespace-pre-wrap break-words rounded bg-danger-bg p-2 text-xs text-danger-fg">{{.Error}}</pre>
+              </details>
+              {{else}}-{{end}}
+            </dd>
+          </div>
+        </dl>
+        {{if not $.BootstrapWarning}}
+        {{template "admin-queue-row-actions" dict "Root" $ "Job" .}}
+        {{end}}
+      </div>
+      {{end}}
+    </div>
+    <div
+      class="hidden md:block pm-scroll-region"
+      tabindex="0"
+      role="region"
+      aria-label="Refresh queue jobs table"
+      data-admin-desktop-table="queue"
+    >
+      <table class="min-w-full text-sm">
+        <thead>
+          <tr class="text-start text-muted border-b border-border">
+            <th class="px-5 py-2">ID</th>
+            <th class="px-5 py-2">Package</th>
+            <th class="px-5 py-2">Source</th>
+            <th class="px-5 py-2">Priority</th>
+            <th class="px-5 py-2">Status</th>
+            <th class="px-5 py-2">Requested</th>
+            <th class="px-5 py-2">Error</th>
+            <th class="no-print px-5 py-2 text-end" data-no-print>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {{range .Jobs}}
+          {{$job := .}}
+          <tr class="border-b border-border hover:bg-surface-2">
+            <td class="px-5 py-2 font-mono text-xs">{{.ID}}</td>
+            <td class="px-5 py-2">
+              <a
+                href="/package/{{.Ecosystem}}/{{.Name}}"
+                aria-label="View package details for {{.Ecosystem}}/{{.Name}}"
+                class="inline-flex max-w-full items-center rounded font-medium
+                  text-accent-fg hover:underline pm-focus-ring"
+              ><span class="min-w-0 break-words"><bdi dir="auto">{{.Ecosystem}}</bdi>/<bdi dir="auto">{{.Name}}</bdi></span></a>
+            </td>
+            <td class="px-5 py-2 text-xs">{{.Source}}</td>
+            <td class="px-5 py-2 text-xs">{{.Priority}}</td>
+            <td class="px-5 py-2">
+              {{template "pm-badge" dict "Class" .StatusClass "Label" .StatusLabel}}
+            </td>
+            <td class="px-5 py-2 text-muted">
+              <time data-local-time="relative" datetime="{{formatTimeISO .RequestedAt}}" aria-label="{{formatTime .RequestedAt}}">{{formatTimeAgo .RequestedAt}}</time>
+            </td>
+            <td class="px-5 py-2 text-xs">
+              {{if .Error}}
+              <details class="text-start text-danger-fg" data-print-open>
+                <summary
+                  aria-label="Show full queue error for job {{.ID}}"
+                  class="inline-flex min-h-6 cursor-pointer items-center rounded px-1.5 py-0.5 text-danger
+                    hover:bg-danger-bg active:bg-danger-bg pm-focus-ring pm-focus-ring-danger"
+                >{{truncate .Error 40}}</summary>
+                <pre class="mt-2 whitespace-pre-wrap break-words rounded bg-danger-bg p-2 text-xs text-danger-fg">{{.Error}}</pre>
+              </details>
+              {{else}}-{{end}}
+            </td>
+            <td class="no-print px-5 py-2" data-no-print>
+              {{if not $.BootstrapWarning}}
+              <div class="flex justify-end">
+                {{template "admin-queue-row-actions" dict "Root" $ "Job" .}}
+              </div>
+              {{end}}
+            </td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}
+    <div class="pm-empty-state">
+      {{$empty := .QueueEmptyState}}
+      <p class="text-sm font-medium text-fg">{{$empty.Title}}</p>
+      {{if $empty.Message}}<p class="mt-1 text-sm">{{$empty.Message}}</p>{{end}}
+      <div class="mt-4 flex flex-wrap justify-center gap-2">
+        {{if $empty.PrimaryURL}}
+        <a
+          href="{{$empty.PrimaryURL}}"
+          class="{{adminSecondaryButtonClass}}"
+        >{{$empty.PrimaryLabel}}</a>
+        {{end}}
+        {{if $empty.SecondaryURL}}
+        <a
+          href="{{$empty.SecondaryURL}}"
+          class="{{adminSecondaryButtonClass}}"
+        >{{$empty.SecondaryLabel}}</a>
+        {{end}}
+      </div>
+    </div>
+    {{end}}
+  </div>
+
+</div>
+{{end}}

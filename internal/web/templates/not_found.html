@@ -1,0 +1,27 @@
+{{define "title"}}Page not found - Packmon{{end}}
+
+{{define "content"}}
+<section class="mx-auto max-w-3xl py-10 text-center">
+  <div class="rounded-lg border border-border bg-surface p-8 shadow-sm">
+    <p class="text-sm font-semibold uppercase tracking-wide text-danger-fg">404</p>
+    <h1 class="mt-3 text-3xl font-bold">Page not found</h1>
+    <p class="mt-3 text-base text-fg">
+      The page you requested is not available in this Packmon web UI.
+    </p>
+    <div class="mt-6 flex flex-wrap items-center justify-center gap-3">
+      <a href="/" class="inline-flex min-h-11 items-center rounded-md bg-accent px-4 py-2 text-sm font-medium text-accent-contrast transition hover:bg-accent-hover">
+        Open dashboard
+      </a>
+      <a href="/search" class="inline-flex min-h-11 items-center rounded-md border border-muted bg-surface px-4 py-2 text-sm font-medium text-fg transition hover:bg-surface-2">
+        Search packages
+      </a>
+      <a href="/feeds" class="inline-flex min-h-11 items-center rounded-md border border-muted bg-surface px-4 py-2 text-sm font-medium text-fg transition hover:bg-surface-2">
+        Check feed status
+      </a>
+      <a href="/admin/" class="inline-flex min-h-11 items-center rounded-md border border-muted bg-surface px-4 py-2 text-sm font-medium text-fg transition hover:bg-surface-2">
+        Open admin
+      </a>
+    </div>
+  </div>
+</section>
+{{end}}
