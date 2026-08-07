@@ -64,10 +64,10 @@
       {{if or .RecentScansHasPrev .RecentScansHasNext}}
       <nav aria-label="{{t "scans.recent.pages_label"}}" class="flex flex-wrap gap-2 text-sm">
         {{if .RecentScansHasPrev}}
-        <a href="{{.RecentScansPrevURL}}" class="inline-flex min-h-11 items-center rounded-md border border-muted px-3 py-2 text-fg hover:bg-surface-2 pm-focus-ring">{{t "scans.recent.newer"}}</a>
+        <a href="{{.RecentScansPrevURL}}" class="inline-flex min-h-8 items-center rounded-md border border-muted px-3 py-1.5 text-fg hover:bg-surface-2 pm-focus-ring">{{t "scans.recent.newer"}}</a>
         {{end}}
         {{if .RecentScansHasNext}}
-        <a href="{{.RecentScansNextURL}}" class="inline-flex min-h-11 items-center rounded-md border border-muted px-3 py-2 text-fg hover:bg-surface-2 pm-focus-ring">{{t "scans.recent.older"}}</a>
+        <a href="{{.RecentScansNextURL}}" class="inline-flex min-h-8 items-center rounded-md border border-muted px-3 py-1.5 text-fg hover:bg-surface-2 pm-focus-ring">{{t "scans.recent.older"}}</a>
         {{end}}
       </nav>
       {{end}}
