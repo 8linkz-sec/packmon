@@ -3455,11 +3455,13 @@ func TestAutoRefreshToggleUsesStablePressedState(t *testing.T) {
 		minH       string
 	}{
 		{
+			// Matches the compact scale of the admin refresh controls so both
+			// feed pages render the same control size.
 			name:       "public feeds",
 			path:       []string{"templates", "feeds.html"},
 			controlsID: "feed-status-container",
 			statusID:   "feed-status-refresh-state",
-			minH:       "min-h-11",
+			minH:       "min-h-8",
 		},
 		{
 			// Admin controls use the compact shared admin button scale.
@@ -3581,7 +3583,7 @@ func TestFeedStatusRefreshControlsExposeRefreshNowAction(t *testing.T) {
 		label string
 		minH  string
 	}{
-		{name: "public feeds", path: []string{"templates", "feeds.html"}, label: `{{t "feeds.refresh.now_aria"}}`, minH: "min-h-11"},
+		{name: "public feeds", path: []string{"templates", "feeds.html"}, label: `{{t "feeds.refresh.now_aria"}}`, minH: "min-h-8"},
 		{name: "admin feeds", path: []string{"templates", "admin", "feeds.html"}, label: `{{t "admin.feeds.runtime.refresh_now_aria"}}`, minH: "min-h-8"},
 	} {
 		t.Run(page.name, func(t *testing.T) {
