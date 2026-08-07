@@ -79,6 +79,7 @@ type listAllHTMLMessages struct {
 	FindingColumn                      string
 	OpenInNewTabAriaLabel              string
 	OpenInNewTabScreenReader           string
+	AdvisoryNoLinkHint                 string
 	NoSecurityFindingsPrefix           string
 	NoSecurityFindingsSuffix           string
 	SecurityFindingsWarnings           string
@@ -135,6 +136,7 @@ func defaultListAllHTMLMessages() listAllHTMLMessages {
 		FindingColumn:                      "Finding",
 		OpenInNewTabAriaLabel:              "%s opens in a new tab",
 		OpenInNewTabScreenReader:           " (opens in a new tab)",
+		AdvisoryNoLinkHint:                 "No advisory link is available yet; search for this ID manually (for example on osv.dev).",
 		NoSecurityFindingsPrefix:           "No security findings in",
 		NoSecurityFindingsSuffix:           ".",
 		SecurityFindingsWarnings:           "Security findings could not be confirmed clean because report warnings require review.",
@@ -624,6 +626,11 @@ a:hover{text-decoration:underline;}
 	`block-size:0.65em;margin-inline-start:0.25em;` +
 	`border-block-start:1.5px solid currentColor;border-inline-end:1.5px solid currentColor;` +
 	`transform:translateY(-0.08em);}` + `
+` + `.advisory-no-link{display:inline-flex;align-items:center;justify-content:center;` +
+	`inline-size:1.1em;block-size:1.1em;margin-inline-start:0.35em;` +
+	`border:1.5px solid var(--dim);border-radius:50%;color:var(--dim);` +
+	`font-size:var(--report-type-xs);font-weight:700;line-height:1;font-style:normal;` +
+	`cursor:help;vertical-align:middle;}` + `
 .copy-value{white-space:nowrap;}
 .copy-cell{display:inline-flex;align-items:center;white-space:nowrap;max-width:100%;}
 ` + `.copy-btn{order:-1;margin-inline-end:var(--report-space-2);display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--border);border-radius:var(--report-radius-sm);` +
@@ -690,7 +697,8 @@ a:hover{text-decoration:underline;}
 	`white-space:normal;}.finding-title{min-width:0;}.installed,.version{width:auto;` +
 	`}.copy-value{white-space:normal;}.copy-cell{display:inline;white-space:normal;}.copy-btn{display:none;` +
 	`}.print-copy-value{display:inline;white-space:normal;overflow-wrap:anywhere;` +
-	`word-break:break-word;}.findings-table .finding-advisory a{white-space:normal;` +
+	`word-break:break-word;}.advisory-no-link{display:none;` +
+	`}.findings-table .finding-advisory a{white-space:normal;` +
 	`overflow-wrap:anywhere;word-break:break-word;` +
 	`}.status,.warning,.empty,.finding-section{break-inside:avoid;page-break-inside:avoid;` +
 	`background:#fff;}a{color:var(--link);}a[href]::after{content:" (" attr(href) ")";` +
@@ -773,7 +781,9 @@ const listAllHTMLBody = `
 	`<a class="external-link" href="{{.AdvisoryURL}}` +
 	`" target="_blank" rel="noopener" aria-label="{{printf $.Messages.OpenInNewTabAriaLabel .Advisory}}"><bdi dir="auto">{{.Advisory}}` +
 	`</bdi><span class="sr-only">{{$.Messages.OpenInNewTabScreenReader}}</span></a>{{else}}` +
-	`<bdi dir="auto">{{.Advisory}}</bdi>{{end}}` +
+	`<bdi dir="auto">{{.Advisory}}</bdi>` +
+	`<span class="advisory-no-link" title="{{$.Messages.AdvisoryNoLinkHint}}" aria-hidden="true">i</span>` +
+	`<span class="sr-only"> {{$.Messages.AdvisoryNoLinkHint}}</span>{{end}}` +
 	`</td><td class="finding-title"><bdi dir="auto">{{.Title}}` +
 	`</bdi></td><td class="finding-action"><bdi dir="auto">{{.Action}}` +
 	`</bdi></td></tr>{{end}}` + `
