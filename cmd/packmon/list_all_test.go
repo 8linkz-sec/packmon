@@ -2091,6 +2091,69 @@ func TestListAllHTMLLinksSecurityFindingAdvisoryWithoutWrapping(t *testing.T) {
 	}
 }
 
+func TestListAllHTMLMarksSecurityFindingAdvisoryWithoutLink(t *testing.T) {
+	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+	report := listAllPackageReport{
+		Rows: []listAllRow{{
+			Name:      "github.com/jackc/pgx/v5",
+			Installed: "v5.8.0",
+			Latest:    "v5.9.0",
+			Update:    "yes",
+			Ecosystem: "go",
+			Scope:     "runtime",
+			Relation:  "direct",
+			Vuln:      "yes",
+		}},
+		Vulnerable: 1,
+	}
+	result := &domain.ScanResult{
+		Mode: "remote",
+		Findings: []domain.Finding{{
+			Name:       "github.com/jackc/pgx/v5",
+			Version:    "v5.8.0",
+			Ecosystem:  domain.EcosystemGo,
+			Severity:   domain.SeverityCritical,
+			AdvisoryID: "GO-2026-4771",
+			Title:      "CVE-2026-33815 in github.com/jackc/pgx",
+			Source:     "osv",
+		}},
+	}
+
+	if err := writeListAllHTML(htmlPath, "test", result, report); err != nil {
+		t.Fatalf("writeListAllHTML: %v", err)
+	}
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read HTML: %v", err)
+	}
+	out := string(data)
+	hint := "No advisory link is available yet; search for this ID manually (for example on osv.dev)."
+	want := `<td class="finding-advisory"><bdi dir="auto">GO-2026-4771</bdi>` +
+		`<span class="advisory-no-link" title="` + hint + `" aria-hidden="true">i</span>` +
+		`<span class="sr-only"> ` + hint + `</span></td>`
+	if !strings.Contains(out, want) {
+		t.Fatalf("HTML linkless finding advisory missing manual-search hint:\n%s", out)
+	}
+	if strings.Contains(out, `</a><span class="advisory-no-link"`) {
+		t.Fatalf("HTML linked finding advisory should not carry the manual-search hint:\n%s", out)
+	}
+	for _, wantCSS := range []string{
+		`.advisory-no-link{display:inline-flex;`,
+		`cursor:help;`,
+	} {
+		if !strings.Contains(out, wantCSS) {
+			t.Fatalf("HTML report missing advisory-no-link style %q:\n%s", wantCSS, out)
+		}
+	}
+	printAt := strings.Index(out, "@media print")
+	if printAt < 0 {
+		t.Fatalf("HTML report missing print styles:\n%s", out)
+	}
+	if !strings.Contains(out[printAt:], `.advisory-no-link{display:none;}`) {
+		t.Fatalf("HTML report should hide the hover-only advisory hint in print:\n%s", out[printAt:printAt+2000])
+	}
+}
+
 func TestListAllHTMLNewTabTextUsesReorderableMessages(t *testing.T) {
 	t.Parallel()
 
