@@ -269,27 +269,27 @@ func TestPerRequestLookupContextBoundsGitLookups(t *testing.T) {
 func TestAnnounceLookupPhase(t *testing.T) {
 	t.Parallel()
 	var buf strings.Builder
-	announceLookupPhase(&buf, 1311, false)
+	announceLookupPhase(&buf, 1311, 0, false)
 	got := buf.String()
 	if !strings.Contains(got, "1311 packages") || !strings.Contains(got, "rate-limited") {
 		t.Fatalf("announcement = %q", got)
 	}
 
 	buf.Reset()
-	announceLookupPhase(&buf, 1, false)
+	announceLookupPhase(&buf, 1, 0, false)
 	got = buf.String()
 	if !strings.Contains(got, "1 package (") || strings.Contains(got, "1 packages") {
 		t.Fatalf("singular announcement = %q, want \"1 package\"", got)
 	}
 
 	buf.Reset()
-	announceLookupPhase(&buf, 1311, true)
+	announceLookupPhase(&buf, 1311, 0, true)
 	if buf.Len() != 0 {
 		t.Fatalf("quiet mode wrote %q", buf.String())
 	}
 
 	buf.Reset()
-	announceLookupPhase(&buf, 0, false)
+	announceLookupPhase(&buf, 0, 0, false)
 	if buf.Len() != 0 {
 		t.Fatalf("zero packages wrote %q", buf.String())
 	}

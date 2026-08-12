@@ -27,7 +27,11 @@ const (
 	// below the rate an unthrottled worker pool produces, and a throttled scan
 	// loses freshness data silently, so trading scan time for complete results
 	// is the better default.
-	defaultRegistryRequestInterval   = 50 * time.Millisecond
+	defaultRegistryRequestInterval = 50 * time.Millisecond
+	// cratesIORequestInterval mirrors the crates.io crawler policy of one
+	// request per second; it drives both the crates.io throttle and the
+	// lookup-phase time estimate for cargo packages.
+	cratesIORequestInterval          = time.Second
 	maxRegistryResponseSize          = 512 * 1024
 	maxRegistryErrorBodyDrain        = 64 * 1024
 	maxPackagistRegistryResponseSize = 4 * 1024 * 1024
@@ -36,7 +40,7 @@ const (
 
 // announceLookupPhase tells the user up front that a large lookup phase is
 // rate-limited work, not a hang. Not trust-changing, so --quiet suppresses it.
-func announceLookupPhase(w io.Writer, packageCount int, quiet bool) {
+func announceLookupPhase(w io.Writer, packageCount, cargoCount int, quiet bool) {
 	if quiet || packageCount == 0 {
 		return
 	}
@@ -44,7 +48,13 @@ func announceLookupPhase(w io.Writer, packageCount int, quiet bool) {
 	if packageCount == 1 {
 		unit = "package"
 	}
+	// Cargo lookups serialize behind the one-request-per-second crates.io
+	// throttle while everything else runs at the generic interval; the slower
+	// stream dominates the wall-clock estimate.
 	estimate := time.Duration(packageCount) * defaultRegistryRequestInterval
+	if cargoEstimate := time.Duration(cargoCount) * cratesIORequestInterval; cargoEstimate > estimate {
+		estimate = cargoEstimate
+	}
 	_, _ = fmt.Fprintf(w, "Looking up latest versions for %d %s (rate-limited, %s)...\n",
 		packageCount, unit, humanLookupEstimate(estimate))
 }
@@ -818,7 +828,7 @@ type registryThrottle struct {
 // policy asks for a stricter one-request-per-second rate.
 var (
 	registryRequestThrottle = newRegistryThrottle(defaultRegistryRequestInterval)
-	cratesIOThrottle        = newRegistryThrottle(time.Second)
+	cratesIOThrottle        = newRegistryThrottle(cratesIORequestInterval)
 )
 
 func newRegistryThrottle(interval time.Duration) *registryThrottle {

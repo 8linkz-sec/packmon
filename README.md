@@ -177,21 +177,30 @@ packmon scan . \
 What each flag adds: `--auto-sbom` generates a CycloneDX SBOM with the local
 ecosystem tooling and scans it alongside the lockfiles, so packages that no
 lockfile declares are still covered (`--install-tools` installs the pinned
-generators it needs). `--list-all` adds a full package inventory with
+generators it needs). Auto-SBOM generation exists for Go, npm, Python, and
+Maven projects only; on a project without any of those manifests the scan
+aborts with `no supported manifests found for auto-SBOM generation` -- drop
+`--auto-sbom --install-tools` there, the normal scan reads that project's
+lockfiles (Cargo, NuGet, and the other supported ecosystems) directly.
+`--list-all` adds a full package inventory with
 available-update information on top of the findings, querying public registries
 for latest versions -- add `--list-all-offline` when you have no outbound
-network. `--html` writes a self-contained report for a browser or a ticket, and
+network. The lookup phase is rate-limited (crates.io lookups pace at one
+request per second, so a large Rust inventory takes several minutes) and
+reports its progress every 10 seconds. `--html` writes a self-contained report for a browser or a ticket, and
 `--output-json` the same result in the canonical machine shape;
 `--output-sarif` and `--output-junit` exist for code scanning and CI test
 reporting.
 
 ### First run: the feeds have to sync first
 
-A freshly started Packmon server has an **empty advisory database**. It does not
-sync feeds on startup by default (`PACKMON_FEED_SYNC_ON_STARTUP=false`), and the
-background sync runs on `PACKMON_FEED_SYNC_INTERVAL` (`8h`). Until the first sync
-finishes, a scan can legitimately come back with zero findings simply because
-there is nothing to match against.
+A freshly started Packmon server has an **empty advisory database**. The bare
+server binary does not sync feeds on startup (`PACKMON_FEED_SYNC_ON_STARTUP`
+defaults to `false`); the repository `docker-compose.yml` overrides this to
+`true`, so the bundled Compose stack starts its first sync automatically. In
+both cases the background sync then runs on `PACKMON_FEED_SYNC_INTERVAL`
+(`8h`). Until the first sync finishes, a scan can legitimately come back with
+zero findings simply because there is nothing to match against.
 
 On a new server, trigger the sync yourself under `/admin/feeds` and wait for the
 feeds to report a successful import before you judge any scan result. The first
@@ -656,6 +665,15 @@ Store API keys in environment variables, CI secrets, OS secret stores, or the
 user-global config. Use `api_key_env` in trusted user-global or explicit config
 files rather than writing plaintext keys.
 
+The `--api-key` and `--webhook-secret` flags exist for compatibility but
+reject secret values by default, because command-line arguments leak into
+shell history and are visible to other processes. Setting
+`PACKMON_ALLOW_SECRET_FLAGS=true` in the CLI's environment re-enables them --
+an explicit opt-in intended for isolated test environments, not for CI or
+production. Note that this variable (like `PACKMON_API_KEY`) belongs to the
+machine running the CLI; the server-side `.env` file used by Docker Compose
+plays no role for CLI settings.
+
 ### Registry mirrors
 
 Trusted user-global config or an explicit `--config` file can also set
@@ -721,6 +739,12 @@ Kept SBOMs use timestamped snapshot names such as
 `go-20260607T131329Z.cdx.json` and `package-20260607T131329Z.cdx.json`, so
 repeated automated runs in the same directory do not overwrite previous SBOMs.
 
+Auto-SBOM generation supports Go, npm, Python, and Maven projects. If the
+target contains no manifest from these ecosystems (`go.mod`, `package.json`,
+`requirements.txt`/Poetry `pyproject.toml`, `pom.xml`), the scan fails with
+`no supported manifests found for auto-SBOM generation`; run without
+`--auto-sbom` in that case -- the normal lockfile scan covers the other
+supported ecosystems without SBOM generation.
 This requires only the matching local tool for the target ecosystem on `PATH`:
 the Go toolchain for Go modules, `cyclonedx-npm` for npm, `cyclonedx-py` for
 Python, or `mvn` for Maven projects. Add `--install-tools` to let Packmon
@@ -877,7 +901,9 @@ Important environment variables:
   Socket.dev `package_check_status` rows; `0` disables pruning)
 - `PACKMON_AUDIT_RETENTION_INTERVAL=24h` (background prune cadence)
 - `PACKMON_FEED_SYNC_INTERVAL=8h`
-- `PACKMON_FEED_SYNC_ON_STARTUP=false`
+- `PACKMON_FEED_SYNC_ON_STARTUP=false` (binary default; the repository
+  `docker-compose.yml` sets it to `true` so a fresh Compose stack syncs
+  immediately)
 - `PACKMON_FEED_IMPORT_SECRET` (required for production
   `POST /api/v1/feeds/{feed}/import`; send it as
   `X-Packmon-Feed-Import-Secret`)
