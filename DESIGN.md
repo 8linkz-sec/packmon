@@ -454,7 +454,10 @@ Important behavior:
   flat-container-compatible base such as
   `https://nuget-mirror.example/v3-flatcontainer`.
   crates.io lookups use an identifying Packmon User-Agent and are serialized at
-  one request per second.
+  one request per second. The lookup phase announces an upfront duration
+  estimate that accounts for the slower crates.io rate when cargo packages
+  dominate the inventory, and prints a `done/total` progress line every 10
+  seconds until the phase completes (suppressed by `--quiet`).
 - `--list-all` also inventories Docker image declarations from `Dockerfile`,
   `Dockerfile.*`, `docker-compose.yml`, `docker-compose.yaml`, `compose.yml`,
   and `compose.yaml`. Docker rows use ecosystem `docker`, show declared
@@ -1022,7 +1025,10 @@ development and the repository Compose example may explicitly override
 deployments are expected to keep certificate-verifying database TLS.
 
 Trusted CLI configuration may reference API keys via `api_key_env` so config
-files do not need plaintext secrets. Auto-discovered project `.packmon.yaml`
+files do not need plaintext secrets. The deprecated `--api-key` and
+`--webhook-secret` flags reject non-empty values unless the CLI environment
+sets `PACKMON_ALLOW_SECRET_FLAGS=true`, a test-environment escape hatch that
+keeps secrets out of argv by default. Auto-discovered project `.packmon.yaml`
 files cannot select API-key environment variables or override the Packmon
 server/local DB path. They also cannot set latest-version registry mirror URLs,
 because those URLs control network egress. Trusted user-global config or an

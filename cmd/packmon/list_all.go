@@ -360,7 +360,13 @@ func buildListAllPackageReportWithOptions(parent context.Context, packages []lis
 			latest[i] = packageLatestStatus{Latest: "unknown", Update: "-", Unknown: true}
 		}
 	} else {
-		announceLookupPhase(os.Stderr, len(packages), options.Quiet)
+		cargoCount := 0
+		for _, p := range packages {
+			if p.Ecosystem == domain.EcosystemCargo {
+				cargoCount++
+			}
+		}
+		announceLookupPhase(os.Stderr, len(packages), cargoCount, options.Quiet)
 		lookup := newCachedPackageUpdateLookupWithResolver(options.resolver)
 		// Scoped to this call only: a hung docker daemon must not block the
 		// whole lookup phase, which otherwise carries no deadline.
@@ -373,9 +379,12 @@ func buildListAllPackageReportWithOptions(parent context.Context, packages []lis
 		if listAllContainsDockerPackage(packages) {
 			dockerDigestLookup = newCachedDockerDigestLookup(newDockerRegistryClientWithMirrors(options.resolver.latestRegistry))
 		}
+		progress := startLookupProgress(os.Stderr, len(packages), options.Quiet, lookupProgressInterval)
 		latest = resolveLatestWithWorkerPool(ctx, packages, func(ctx context.Context, p listAllPackage) packageLatestStatus {
+			defer progress.increment()
 			return resolveListAllLatestWithCachedDockerLookup(ctx, p, lookup, localDockerDigests, dockerDigestLookup)
 		})
+		progress.stop()
 	}
 
 	// Index vulnerability findings by ecosystem+name+version for the VULN column.

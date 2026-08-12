@@ -250,6 +250,10 @@ Client key handling:
 - store keys in CI secrets, OS secret stores, or environment variables;
 - reference keys from trusted user-global or explicit config files with
   `api_key_env` rather than plaintext `api_key` values;
+- the `--api-key` and `--webhook-secret` CLI flags reject secret values by
+  default because argv leaks into shell history and process listings;
+  `PACKMON_ALLOW_SECRET_FLAGS=true` is the deliberate opt-out for isolated
+  test environments and must not be set on shared or CI machines;
 - treat auto-discovered project `.packmon.yaml` as repository input; it must not
   choose API-key environment variables, Packmon server URLs, TLS trust settings,
   webhook URLs/secrets, report output paths, local advisory database paths, or
