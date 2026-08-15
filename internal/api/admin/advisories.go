@@ -523,12 +523,12 @@ func invalidManualAdvisoryEcosystem(view *manualAdvisoryView) string {
 	if view == nil || view.Ecosystem == "" {
 		return ""
 	}
-	switch view.Ecosystem {
-	case "npm", "pypi", "go", "maven", "cargo", "nuget", "composer", "gem", "pub", "actions", "cocoapods", "swiftpm", "hex", "cran":
+	// Inventory-only ecosystems (docker, chocolatey) are valid enum values but
+	// never manual-advisory targets, so they are echoed back as unsupported.
+	if domain.Ecosystem(view.Ecosystem).ScanInput() {
 		return ""
-	default:
-		return view.Ecosystem
 	}
+	return view.Ecosystem
 }
 
 func invalidManualAdvisorySeverity(view *manualAdvisoryView) string {

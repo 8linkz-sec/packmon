@@ -105,10 +105,16 @@ func TestBuildListAllReportRendersUnpinnedChocolateyRows(t *testing.T) {
 	if report.Unknown != 1 {
 		t.Fatalf("Unknown = %d, want 1 (only the row whose feed lookup failed)", report.Unknown)
 	}
-	for _, name := range []string{"7zip.vm", "missing.vm"} {
-		if got := listAllHTMLPackageStatus(rows[name], nil); got != "Unpinned" {
-			t.Fatalf("HTML status for %s = %q, want Unpinned", name, got)
-		}
+	if got := listAllHTMLPackageStatus(rows["7zip.vm"], nil); got != "Unpinned" {
+		t.Fatalf("HTML status for unpinned row with known latest = %q, want Unpinned", got)
+	}
+	// A failed feed lookup is reported honestly: the row is unknown, not
+	// merely unpinned, and the HTML recount must agree with report.Unknown.
+	if got := listAllHTMLPackageStatus(rows["missing.vm"], nil); got != "Unknown" {
+		t.Fatalf("HTML status for unpinned row with unknown latest = %q, want Unknown", got)
+	}
+	if info := listAllHTMLPackageInfo(report, report.Rows, nil, nil); info.Unknown != report.Unknown || info.WithUpdates != report.WithUpdates {
+		t.Fatalf("HTML recount unknown=%d updates=%d, want report unknown=%d updates=%d", info.Unknown, info.WithUpdates, report.Unknown, report.WithUpdates)
 	}
 	for _, source := range []string{"config.xml", "choco-install"} {
 		if got := listAllInventorySourceKind(listAllRow{Source: source, Ecosystem: "chocolatey"}); got != "chocolatey" {

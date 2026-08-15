@@ -1060,3 +1060,34 @@ func TestIsGitCommitSHA(t *testing.T) {
 		}
 	}
 }
+
+// TestVersionAffected_ChocolateyExplicitVersionsUseNuGetEquality pins that
+// the inventory-only chocolatey ecosystem is NuGet-like everywhere the
+// package compares versions, including explicit version-list equality and
+// case-insensitive ecosystem spelling.
+func TestVersionAffected_ChocolateyExplicitVersionsUseNuGetEquality(t *testing.T) {
+	t.Parallel()
+
+	for _, ecosystem := range []string{"chocolatey", "Chocolatey"} {
+		got, err := VersionAffected("1.23", `[]`, `["1.23.0"]`, ecosystem)
+		if err != nil {
+			t.Fatalf("VersionAffected(%s) error = %v", ecosystem, err)
+		}
+		if !got {
+			t.Fatalf("VersionAffected(%s 1.23 vs [1.23.0]) = false, want NuGet-normalized match", ecosystem)
+		}
+		got, err = VersionAffected("1.0.0-alpha", `[]`, `["1.0.0-Alpha"]`, ecosystem)
+		if err != nil {
+			t.Fatalf("VersionAffected(%s) error = %v", ecosystem, err)
+		}
+		if !got {
+			t.Fatalf("VersionAffected(%s prerelease case) = false, want NuGet case-insensitive match", ecosystem)
+		}
+	}
+	if !versionsEqual("1.23", "1.23.0", "CHOCOLATEY") {
+		t.Fatal("versionsEqual(CHOCOLATEY) must apply NuGet normalization case-insensitively")
+	}
+	if got := Compare("1.23", "1.23.0", "ECOSYSTEM", "Chocolatey"); got != 0 {
+		t.Fatalf("Compare(Chocolatey mixed case) = %d, want 0", got)
+	}
+}

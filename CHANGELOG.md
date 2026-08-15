@@ -27,4 +27,9 @@
 
 ### Operator action
 
-- No operator action required.
+- Run `packmon-server migrate` (or the `packmon-migrate` compose service)
+  before starting the updated server: this release adds schema migration 047
+  (schema version 46 -> 47), which widens the ecosystem CHECK constraints for
+  the inventory-only `chocolatey` ecosystem. The server refuses to start on a
+  schema version mismatch. Rolling 047 back removes any `chocolatey` rows
+  (none are written by the scan path).

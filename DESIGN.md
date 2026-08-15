@@ -119,7 +119,9 @@ Parser diagnostics identify the parser/file, line or entry position, and a
 generic reason; they do not echo raw dependency-file lines or malformed private
 coordinates. Lockfile and SBOM parsers enforce input-size limits before parsing;
 Dockerfile and Compose inventory collection has its own bounded input-size
-policy for `--list-all` Docker image discovery.
+policy for `--list-all` Docker image discovery, and the Chocolatey inventory
+collector (`internal/chocolatey`) bounds `config.xml` package lists and
+`choco install` script scanning the same way.
 
 The server owns feed synchronization, normalized advisory storage, API checks,
 admin UI, web UI, queue operations, and metrics. The server receives package
@@ -225,7 +227,9 @@ PEP 503 normalization: lowercase and replace each run of `.`, `_`, or `-` with
 a single `-`. Other ecosystem names preserve their registry casing unless a
 specific ecosystem rule is added. NuGet version matching follows NuGet's
 case-insensitive prerelease-label behavior for both ecosystem ranges and
-explicit affected-version lists.
+explicit affected-version lists. Chocolatey packages are NuGet packages:
+inventory IDs are lowercased and their versions compare under the same NuGet
+rules (`internal/version` dispatches `chocolatey` to the NuGet comparator).
 SwiftPM packages are identified by OSV/PURL SwiftURL name
 (`host/owner/repo`, without URL scheme or `.git`) when `Package.resolved`
 provides a repository location. URL userinfo and non-HTTP(S) repository

@@ -1755,15 +1755,30 @@ func TestChocolateyEcosystemConstraintMigrationCoversEveryEcosystemCheck(t *test
 	}
 	downSQL := string(down)
 
-	for _, constraint := range []string{
-		"affected_packages_ecosystem_check",
-		"malicious_findings_ecosystem_check",
-		"package_reputation_cache_ecosystem_check",
-		"package_check_status_ecosystem_check",
-		"refresh_queue_ecosystem_check",
-		"lifecycle_package_map_ecosystem_check",
-		"lifecycle_sync_tombstones_ecosystem_check",
+	// checkList returns the CHECK (...) list text of the named constraint.
+	checkList := func(t *testing.T, sql, constraint string) string {
+		t.Helper()
+		start := strings.Index(sql, "ADD CONSTRAINT "+constraint)
+		if start < 0 {
+			t.Fatalf("migration missing ADD CONSTRAINT %s:\n%s", constraint, sql)
+		}
+		rest := sql[start:]
+		end := strings.Index(rest, "NOT VALID")
+		if end < 0 {
+			t.Fatalf("ADD CONSTRAINT %s must be added NOT VALID and validated afterwards:\n%s", constraint, sql)
+		}
+		return rest[:end]
+	}
+	for _, table := range []string{
+		"affected_packages",
+		"malicious_findings",
+		"package_reputation_cache",
+		"package_check_status",
+		"refresh_queue",
+		"lifecycle_package_map",
+		"lifecycle_sync_tombstones",
 	} {
+		constraint := table + "_ecosystem_check"
 		for _, sql := range []string{upSQL, downSQL} {
 			if strings.Count(sql, "DROP CONSTRAINT IF EXISTS "+constraint) != 1 {
 				t.Fatalf("migration must drop %s exactly once:\n%s", constraint, sql)
@@ -1775,14 +1790,28 @@ func TestChocolateyEcosystemConstraintMigrationCoversEveryEcosystemCheck(t *test
 				t.Fatalf("migration must validate %s exactly once:\n%s", constraint, sql)
 			}
 		}
+		upList := checkList(t, upSQL, constraint)
+		if !strings.Contains(upList, "'chocolatey'") || !strings.Contains(upList, "'docker'") {
+			t.Fatalf("up migration %s must list 'docker' and 'chocolatey':\n%s", constraint, upList)
+		}
+		downList := checkList(t, downSQL, constraint)
+		if strings.Contains(downList, "'chocolatey'") {
+			t.Fatalf("down migration %s must restore the previous ecosystem list without 'chocolatey':\n%s", constraint, downList)
+		}
+		if !strings.Contains(downList, "'docker'") {
+			t.Fatalf("down migration %s must keep 'docker':\n%s", constraint, downList)
+		}
+		// The rollback must not leave rows behind that the restored constraint
+		// would reject during VALIDATE.
+		deleteStmt := "DELETE FROM " + table + " WHERE ecosystem = 'chocolatey';"
+		if strings.Count(downSQL, deleteStmt) != 1 {
+			t.Fatalf("down migration must remove chocolatey rows from %s before re-adding the constraint:\n%s", table, downSQL)
+		}
+		if strings.Index(downSQL, deleteStmt) > strings.Index(downSQL, "ADD CONSTRAINT "+constraint) {
+			t.Fatalf("down migration must delete chocolatey rows from %s before ADD CONSTRAINT %s", table, constraint)
+		}
 	}
-	if strings.Count(upSQL, "'chocolatey'") != 8 { // 7 CHECK lists + 1 header comment
-		t.Fatalf("up migration must list 'chocolatey' in all 7 ecosystem checks, found %d", strings.Count(upSQL, "'chocolatey'")-1)
-	}
-	if strings.Contains(downSQL, "'chocolatey'") {
-		t.Fatalf("down migration must restore the previous ecosystem list without 'chocolatey'")
-	}
-	if strings.Count(downSQL, "'docker'") != 7 {
-		t.Fatalf("down migration must keep 'docker' in all 7 ecosystem checks, found %d", strings.Count(downSQL, "'docker'"))
+	if strings.Contains(upSQL, "DELETE FROM") {
+		t.Fatalf("up migration only widens the ecosystem list and must not delete rows:\n%s", upSQL)
 	}
 }

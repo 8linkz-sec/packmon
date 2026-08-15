@@ -65,7 +65,7 @@ func parseFileFromRoot(root *os.Root, file File) ([]Package, error) {
 	file.RelPath = filepath.ToSlash(relPath)
 	f, err := root.Open(relPath)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", file.RelPath, err)
+		return nil, fmt.Errorf("%s: %w", file.RelPath, unwrapPathError(err))
 	}
 	defer ioutils.CloseSilently(f)
 
@@ -77,7 +77,7 @@ func parseFileFromRoot(root *os.Root, file File) ([]Package, error) {
 		return fmt.Errorf("%s: chocolatey inventory file exceeds maximum size of %d bytes", file.RelPath, limit)
 	}
 	if info, err := f.Stat(); err != nil {
-		return nil, fmt.Errorf("%s: %w", file.RelPath, err)
+		return nil, fmt.Errorf("%s: %w", file.RelPath, unwrapPathError(err))
 	} else if !info.Mode().IsRegular() {
 		return nil, nil
 	} else if info.Size() > limit {

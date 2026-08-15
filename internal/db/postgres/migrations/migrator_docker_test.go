@@ -938,3 +938,94 @@ func expectedEmbeddedMigrationChecksum(t *testing.T, name string) string {
 	sum := sha256.Sum256(data)
 	return fmt.Sprintf("%x", sum)
 }
+
+// TestChocolateyEcosystemMigrationRoundTripAgainstPostgres proves that 047
+// widens every ecosystem CHECK to accept 'chocolatey', that re-running the up
+// migration is harmless, and that the down migration removes chocolatey rows
+// and restores the previous constraint so the value is rejected again.
+func TestChocolateyEcosystemMigrationRoundTripAgainstPostgres(t *testing.T) {
+	dsn := startMigrationPostgres(t)
+	if err := Run(dsn); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	defer ioutils.CloseSilently(db)
+	ctx := context.Background()
+
+	insertStatus := func(ecosystem string) error {
+		_, err := db.ExecContext(ctx, `
+			INSERT INTO package_check_status (ecosystem, name, source)
+			VALUES ($1, 'roundtrip-'||$1, 'socket')`, ecosystem)
+		return err
+	}
+	if err := insertStatus("chocolatey"); err != nil {
+		t.Fatalf("insert chocolatey row after 047 up: %v", err)
+	}
+	if err := insertStatus("docker"); err != nil {
+		t.Fatalf("insert docker row after 047 up: %v", err)
+	}
+	if err := insertStatus("homebrew"); err == nil {
+		t.Fatal("insert of unknown ecosystem succeeded after 047 up, want CHECK violation")
+	}
+
+	up, err := ReadEmbeddedMigration(47, MigrationDirectionUp)
+	if err != nil {
+		t.Fatalf("read migration 047 up: %v", err)
+	}
+	if err := applyMigration(ctx, db, migrationFile{version: up.Version, name: up.Name, direction: up.Direction, sql: up.SQL}); err != nil {
+		t.Fatalf("re-applying migration 047 up must be idempotent: %v", err)
+	}
+	var count int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM package_check_status WHERE ecosystem = 'chocolatey'`).Scan(&count); err != nil {
+		t.Fatalf("count chocolatey rows: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("chocolatey rows after re-applied up = %d, want 1", count)
+	}
+
+	down, err := ReadEmbeddedMigration(47, MigrationDirectionDown)
+	if err != nil {
+		t.Fatalf("read migration 047 down: %v", err)
+	}
+	if err := applyMigration(ctx, db, migrationFile{version: down.Version, name: down.Name, direction: down.Direction, sql: down.SQL}); err != nil {
+		t.Fatalf("apply migration 047 down: %v", err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM package_check_status WHERE ecosystem = 'chocolatey'`).Scan(&count); err != nil {
+		t.Fatalf("count chocolatey rows after down: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("chocolatey rows after 047 down = %d, want 0", count)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM package_check_status WHERE ecosystem = 'docker'`).Scan(&count); err != nil {
+		t.Fatalf("count docker rows after down: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("docker rows after 047 down = %d, want 1 (rollback must only remove chocolatey rows)", count)
+	}
+	if err := insertStatus("chocolatey"); err == nil {
+		t.Fatal("insert of chocolatey succeeded after 047 down, want CHECK violation")
+	}
+	for _, table := range []string{
+		"affected_packages", "malicious_findings", "package_reputation_cache", "package_check_status",
+		"refresh_queue", "lifecycle_package_map", "lifecycle_sync_tombstones",
+	} {
+		var validated bool
+		if err := db.QueryRowContext(ctx, `SELECT convalidated FROM pg_constraint WHERE conname = $1`, table+"_ecosystem_check").Scan(&validated); err != nil {
+			t.Fatalf("constraint %s_ecosystem_check missing after down: %v", table, err)
+		}
+		if !validated {
+			t.Fatalf("constraint %s_ecosystem_check not validated after down", table)
+		}
+	}
+
+	if err := applyMigration(ctx, db, migrationFile{version: up.Version, name: up.Name, direction: up.Direction, sql: up.SQL}); err != nil {
+		t.Fatalf("re-apply migration 047 up after down: %v", err)
+	}
+	if err := insertStatus("chocolatey"); err != nil {
+		t.Fatalf("insert chocolatey row after up/down/up: %v", err)
+	}
+}
