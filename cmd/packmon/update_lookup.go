@@ -156,12 +156,14 @@ func newCachedPackageUpdateLookupWithResolver(resolver packageUpdateResolver) pa
 		latestInflight:      make(map[latestVersionCacheKey]*latestVersionCacheCall),
 		npmMetadata:         make(map[string]npmMetadataCacheEntry),
 		npmMetadataInflight: make(map[string]*npmMetadataCacheCall),
+		tagCommits:          make(map[gitTagCommitCacheKey]gitTagCommitCacheEntry),
+		tagCommitsInflight:  make(map[gitTagCommitCacheKey]*gitTagCommitCacheCall),
 		resolver:            resolver,
 	}
 	return packageUpdateLookup{
 		fetchLatest:        cache.fetchLatestVersion,
 		fetchNPMMetadata:   cache.fetchNPMMetadata,
-		gitRemoteTagCommit: resolver.gitRemoteTagCommit,
+		gitRemoteTagCommit: cache.gitRemoteTagCommit,
 		latestRegistry:     resolver.latestRegistry,
 	}
 }
@@ -193,7 +195,61 @@ type packageUpdateCache struct {
 	latestInflight      map[latestVersionCacheKey]*latestVersionCacheCall
 	npmMetadata         map[string]npmMetadataCacheEntry
 	npmMetadataInflight map[string]*npmMetadataCacheCall
+	tagCommits          map[gitTagCommitCacheKey]gitTagCommitCacheEntry
+	tagCommitsInflight  map[gitTagCommitCacheKey]*gitTagCommitCacheCall
 	resolver            packageUpdateResolver
+}
+
+type gitTagCommitCacheKey struct {
+	remote string
+	tag    string
+}
+
+type gitTagCommitCacheEntry struct {
+	commit string
+	ok     bool
+}
+
+type gitTagCommitCacheCall struct {
+	done   chan struct{}
+	commit string
+	ok     bool
+}
+
+// gitRemoteTagCommit memoizes tag-to-commit dereferences per (remote, tag) so
+// the same SHA-pinned action referenced from several workflows costs one
+// `git ls-remote`, and concurrent callers share one in-flight invocation.
+func (c *packageUpdateCache) gitRemoteTagCommit(ctx context.Context, remote, tag string) (string, bool) {
+	key := gitTagCommitCacheKey{remote: remote, tag: tag}
+
+	c.mu.Lock()
+	if entry, ok := c.tagCommits[key]; ok {
+		c.mu.Unlock()
+		return entry.commit, entry.ok
+	}
+	if call, ok := c.tagCommitsInflight[key]; ok {
+		c.mu.Unlock()
+		select {
+		case <-call.done:
+			return call.commit, call.ok
+		case <-ctx.Done():
+			return "", false
+		}
+	}
+	call := &gitTagCommitCacheCall{done: make(chan struct{})}
+	c.tagCommitsInflight[key] = call
+	c.mu.Unlock()
+
+	commit, ok := c.resolver.gitRemoteTagCommit(ctx, remote, tag)
+
+	c.mu.Lock()
+	call.commit = commit
+	call.ok = ok
+	c.tagCommits[key] = gitTagCommitCacheEntry{commit: commit, ok: ok}
+	delete(c.tagCommitsInflight, key)
+	close(call.done)
+	c.mu.Unlock()
+	return commit, ok
 }
 
 func (c *packageUpdateCache) fetchLatestVersion(ctx context.Context, eco domain.Ecosystem, name string) string {
@@ -265,27 +321,87 @@ func resolveOutdatedLatestWithLookup(ctx context.Context, p outdatedPackage, loo
 	if !latestLookupAllowed(p.Ecosystem, p.SourceRefs, lookup) {
 		return unknownLatestStatus()
 	}
-	return resolvePackageUpdateStatusWithLookup(ctx, p.Name, p.Version, p.Ecosystem, p.Direct, p.Parents, lookup)
+	return resolvePackageUpdateStatusWithLookup(ctx, packageUpdateQuery{
+		name:      p.Name,
+		installed: p.Version,
+		declared:  p.DeclaredVersion,
+		ecosystem: p.Ecosystem,
+		direct:    p.Direct,
+		parents:   p.Parents,
+	}, lookup)
 }
 
-func resolvePackageUpdateStatusWithLookup(ctx context.Context, name, installed string, eco domain.Ecosystem, direct bool, parents []domain.PackageParent, lookup packageUpdateLookup) packageLatestStatus {
-	latest := lookup.fetchLatest(ctx, eco, name)
+// packageUpdateQuery describes one installed package whose latest version and
+// update status should be resolved.
+type packageUpdateQuery struct {
+	name      string
+	installed string
+	// declared is the optional human-readable version hint that accompanies an
+	// opaque pin (for example the "# v4.2.2" comment on a SHA-pinned GitHub
+	// Action). Empty when the source did not provide one.
+	declared  string
+	ecosystem domain.Ecosystem
+	direct    bool
+	parents   []domain.PackageParent
+}
+
+func resolvePackageUpdateStatusWithLookup(ctx context.Context, q packageUpdateQuery, lookup packageUpdateLookup) packageLatestStatus {
+	latest := lookup.fetchLatest(ctx, q.ecosystem, q.name)
 	if latest == "" {
 		return failedLatestStatus()
 	}
 	target := latest
-	if eco == domain.EcosystemNPM && !direct && len(parents) > 0 {
-		if wanted := resolveNPMWantedVersionWithLookup(ctx, name, installed, latest, parents, lookup); wanted != "" {
+	if q.ecosystem == domain.EcosystemNPM && !q.direct && len(q.parents) > 0 {
+		if wanted := resolveNPMWantedVersionWithLookup(ctx, q.name, q.installed, latest, q.parents, lookup); wanted != "" {
 			target = wanted
 		}
 	}
-	if updateAvailable(installed, target, eco) {
-		if eco == domain.EcosystemGitHubActions && githubActionSHAAtTag(ctx, name, installed, target, lookup.gitRemoteTagCommit) {
-			return packageLatestStatus{Latest: target, Update: "-"}
-		}
+	if q.ecosystem == domain.EcosystemGitHubActions && versioncmp.IsGitCommitSHA(q.installed) {
+		return resolveGitHubActionSHAPinStatus(ctx, q, target, lookup.gitRemoteTagCommit)
+	}
+	if updateAvailable(q.installed, target, q.ecosystem) {
 		return packageLatestStatus{Latest: target, Update: "yes"}
 	}
 	return packageLatestStatus{Latest: target, Update: "-"}
+}
+
+// resolveGitHubActionSHAPinStatus decides the update status of a GitHub
+// Action pinned by commit SHA. A SHA is never fed to the version comparator
+// (its leading hex digits would be misread as a version number). When the
+// workflow carries a declared version hint at least as precise as the latest
+// tag, that hint decides without any git traffic. Otherwise the pin is
+// compared against the dereferenced latest tag commit: equal means current,
+// different means an update is available, and an unresolvable tag leaves the
+// status unknown rather than guessing.
+func resolveGitHubActionSHAPinStatus(ctx context.Context, q packageUpdateQuery, target string, resolveTagCommit func(context.Context, string, string) (string, bool)) packageLatestStatus {
+	if declared := strings.TrimSpace(q.declared); declared != "" && versionPrecision(declared) >= versionPrecision(target) {
+		if updateAvailable(declared, target, q.ecosystem) {
+			return packageLatestStatus{Latest: target, Update: "yes"}
+		}
+		return packageLatestStatus{Latest: target, Update: "-"}
+	}
+	commit, ok := githubActionTagCommit(ctx, q.name, target, resolveTagCommit)
+	if !ok {
+		return packageLatestStatus{Latest: target, Update: "unknown", Unknown: true}
+	}
+	if gitSHAMatches(q.installed, commit) {
+		return packageLatestStatus{Latest: target, Update: "-"}
+	}
+	return packageLatestStatus{Latest: target, Update: "yes"}
+}
+
+// versionPrecision counts the numeric components of a version string
+// ("v4" -> 1, "v4.2.2" -> 3) so a coarse declared hint is not mistaken for a
+// definitive comparison against a finer-grained latest tag.
+func versionPrecision(version string) int {
+	version = strings.TrimPrefix(strings.TrimSpace(version), "v")
+	if idx := strings.IndexAny(version, "-+"); idx >= 0 {
+		version = version[:idx]
+	}
+	if version == "" {
+		return 0
+	}
+	return len(strings.Split(version, "."))
 }
 
 func unknownLatestStatus() packageLatestStatus {
@@ -479,19 +595,22 @@ func pubSourceRefsAllowPublicLookup(refs []string) bool {
 	return true
 }
 
-func githubActionSHAAtTag(ctx context.Context, name, installed, tag string, resolveTagCommit func(context.Context, string, string) (string, bool)) bool {
-	if !isLikelyGitSHA(installed) {
-		return false
-	}
+// githubActionTagCommit dereferences tag on the action's GitHub repository
+// to a commit SHA. ok is false when the remote is unsafe or the tag could not
+// be resolved, which callers must treat as "unknown", not as a mismatch.
+func githubActionTagCommit(ctx context.Context, name, tag string, resolveTagCommit func(context.Context, string, string) (string, bool)) (string, bool) {
 	if resolveTagCommit == nil {
 		resolveTagCommit = gitRemoteTagCommit
 	}
 	remote := githubActionRemote(name)
 	if remote == "" {
-		return false
+		return "", false
 	}
 	commit, ok := resolveTagCommit(ctx, remote, tag)
-	return ok && gitSHAMatches(installed, commit)
+	if !ok || !isLikelyGitSHA(commit) {
+		return "", false
+	}
+	return commit, true
 }
 
 func githubActionRemote(name string) string {

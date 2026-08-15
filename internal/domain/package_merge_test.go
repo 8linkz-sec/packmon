@@ -1,7 +1,9 @@
 package domain
 
 import (
+	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -68,5 +70,38 @@ func TestMergePackageStringSetNil(t *testing.T) {
 
 	if got := MergePackageStringSet(nil, nil); got != nil {
 		t.Fatalf("MergePackageStringSet(nil, nil) = %#v, want nil", got)
+	}
+}
+
+func TestMergePackageMetadataKeepsFirstDeclaredVersion(t *testing.T) {
+	t.Parallel()
+
+	sha := "11bd71901bbe5b1630ceea73d27597364c9af683"
+	dst := Package{Name: "actions/checkout", Version: sha, Ecosystem: EcosystemGitHubActions}
+	MergePackageMetadata(&dst, Package{Name: "actions/checkout", Version: sha, Ecosystem: EcosystemGitHubActions, DeclaredVersion: " v4.2.2 "})
+	if dst.DeclaredVersion != "v4.2.2" {
+		t.Fatalf("DeclaredVersion after filling merge = %q, want %q", dst.DeclaredVersion, "v4.2.2")
+	}
+
+	MergePackageMetadata(&dst, Package{Name: "actions/checkout", Version: sha, Ecosystem: EcosystemGitHubActions, DeclaredVersion: "v4.2.1"})
+	if dst.DeclaredVersion != "v4.2.2" {
+		t.Fatalf("DeclaredVersion after conflicting merge = %q, want first value kept", dst.DeclaredVersion)
+	}
+
+	MergePackageMetadata(&dst, Package{Name: "actions/checkout", Version: sha, Ecosystem: EcosystemGitHubActions})
+	if dst.DeclaredVersion != "v4.2.2" {
+		t.Fatalf("DeclaredVersion after empty merge = %q, want kept", dst.DeclaredVersion)
+	}
+}
+
+func TestPackageDeclaredVersionIsNotSerialized(t *testing.T) {
+	t.Parallel()
+
+	data, err := json.Marshal(Package{Name: "actions/checkout", Version: "abc", Ecosystem: EcosystemGitHubActions, DeclaredVersion: "v4.2.2"})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(data), "v4.2.2") || strings.Contains(strings.ToLower(string(data)), "declared") {
+		t.Fatalf("DeclaredVersion leaked into JSON: %s", data)
 	}
 }

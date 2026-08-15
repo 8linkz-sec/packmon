@@ -66,6 +66,12 @@ type Package struct {
 	// decisions such as outdated checks. It is intentionally not serialized in
 	// scan requests, scan results, or webhooks.
 	SourceRefs []string `json:"-"`
+	// DeclaredVersion is a human-readable version that accompanies an opaque
+	// pin, such as the "# v4.2.2" comment next to a commit-SHA-pinned GitHub
+	// Action. It is a local reporting hint only: it never participates in
+	// advisory matching and is intentionally not serialized in scan requests,
+	// scan results, or webhooks.
+	DeclaredVersion string `json:"-"`
 }
 
 // PackageParent identifies an immediate dependency parent for graph-aware

@@ -4539,3 +4539,136 @@ func TestListAllLookupsOutliveTimeoutBudget(t *testing.T) {
 		t.Fatalf("RefusedRequests = %d, want 0", report.RefusedRequests)
 	}
 }
+
+func actionsSHAPinResolver(t *testing.T, latest string, tagCommit func(remote, tag string) (string, bool)) packageUpdateResolver {
+	t.Helper()
+	return packageUpdateResolver{
+		fetchLatest: func(_ context.Context, eco domain.Ecosystem, name string) string {
+			if eco != domain.EcosystemGitHubActions || name != "actions/checkout" {
+				t.Fatalf("fetchLatest(%s, %q)", eco, name)
+			}
+			return latest
+		},
+		gitRemoteTagCommit: func(_ context.Context, remote, tag string) (string, bool) {
+			if tagCommit == nil {
+				t.Fatalf("unexpected gitRemoteTagCommit(%q, %q)", remote, tag)
+			}
+			if remote != "https://github.com/actions/checkout.git" {
+				t.Fatalf("gitRemoteTagCommit remote = %q", remote)
+			}
+			return tagCommit(remote, tag)
+		},
+	}
+}
+
+func resolveActionsSHAPin(t *testing.T, resolver packageUpdateResolver, sha, declared string) packageLatestStatus {
+	t.Helper()
+	return resolveListAllLatestWithLookup(context.Background(), listAllPackage{
+		Name:            "actions/checkout",
+		Version:         sha,
+		DeclaredVersion: declared,
+		Ecosystem:       domain.EcosystemGitHubActions,
+	}, directPackageUpdateLookupWithResolver(resolver), nil)
+}
+
+// The SHA below starts with "11", which versioncmp would read as major 11 >
+// 7 -- the regression that hid outdated SHA pins behind a leading-digit
+// coincidence.
+const actionsSHAPinBehindLatest = "11bd71901bbe5b1630ceea73d27597364c9af683"
+
+func TestResolveListAllLatestGitHubActionSHAWithDeclaredVersionBehindLatestReportsUpdate(t *testing.T) {
+	resolver := actionsSHAPinResolver(t, "v7.0.1", nil)
+	got := resolveActionsSHAPin(t, resolver, actionsSHAPinBehindLatest, "v4.2.2")
+	if got.Latest != "v7.0.1" || got.Update != "yes" || got.Unknown {
+		t.Fatalf("resolveListAllLatest() = %+v, want update from declared version without git lookup", got)
+	}
+}
+
+func TestResolveListAllLatestGitHubActionSHAWithCurrentDeclaredVersionDoesNotReportUpdate(t *testing.T) {
+	resolver := actionsSHAPinResolver(t, "v7.0.1", nil)
+	got := resolveActionsSHAPin(t, resolver, actionsSHAPinBehindLatest, "v7.0.1")
+	if got.Latest != "v7.0.1" || got.Update != "-" || got.Unknown {
+		t.Fatalf("resolveListAllLatest() = %+v, want no update for current declared version", got)
+	}
+}
+
+func TestResolveListAllLatestGitHubActionSHAMajorOnlyDeclaredVersionFallsBackToTagCommit(t *testing.T) {
+	calls := 0
+	resolver := actionsSHAPinResolver(t, "v4.2.2", func(_, tag string) (string, bool) {
+		calls++
+		if tag != "v4.2.2" {
+			t.Fatalf("tag = %q", tag)
+		}
+		return actionsSHAPinBehindLatest, true
+	})
+	got := resolveActionsSHAPin(t, resolver, actionsSHAPinBehindLatest, "v4")
+	if got.Latest != "v4.2.2" || got.Update != "-" || got.Unknown || calls != 1 {
+		t.Fatalf("resolveListAllLatest() = %+v (git calls %d), want tag-commit match to decide for major-only hint", got, calls)
+	}
+
+	resolver = actionsSHAPinResolver(t, "v4.2.2", func(_, _ string) (string, bool) {
+		return "ffffffffffffffffffffffffffffffffffffffff", true
+	})
+	got = resolveActionsSHAPin(t, resolver, actionsSHAPinBehindLatest, "v4")
+	if got.Update != "yes" {
+		t.Fatalf("resolveListAllLatest() = %+v, want update when major-only hint pin is not the latest tag commit", got)
+	}
+}
+
+func TestResolveListAllLatestGitHubActionSHAWithoutHintBehindLatestTagReportsUpdate(t *testing.T) {
+	resolver := actionsSHAPinResolver(t, "v7.0.1", func(_, tag string) (string, bool) {
+		if tag != "v7.0.1" {
+			t.Fatalf("tag = %q", tag)
+		}
+		return "ffffffffffffffffffffffffffffffffffffffff", true
+	})
+	got := resolveActionsSHAPin(t, resolver, actionsSHAPinBehindLatest, "")
+	if got.Latest != "v7.0.1" || got.Update != "yes" || got.Unknown {
+		t.Fatalf("resolveListAllLatest() = %+v, want update for SHA pin that is not the latest tag commit", got)
+	}
+}
+
+func TestResolveListAllLatestGitHubActionSHAWithoutHintUnresolvableTagIsUnknown(t *testing.T) {
+	resolver := actionsSHAPinResolver(t, "v7.0.1", func(_, _ string) (string, bool) {
+		return "", false
+	})
+	got := resolveActionsSHAPin(t, resolver, actionsSHAPinBehindLatest, "")
+	if got.Latest != "v7.0.1" || got.Update != "unknown" || !got.Unknown {
+		t.Fatalf("resolveListAllLatest() = %+v, want unknown update status when the tag commit cannot be resolved", got)
+	}
+}
+
+func TestResolveOutdatedLatestGitHubActionSHAUsesDeclaredVersion(t *testing.T) {
+	resolver := actionsSHAPinResolver(t, "v7.0.1", nil)
+	got := resolveOutdatedLatestWithLookup(context.Background(), outdatedPackage{
+		Name:            "actions/checkout",
+		Version:         actionsSHAPinBehindLatest,
+		DeclaredVersion: "v4.2.2",
+		Ecosystem:       domain.EcosystemGitHubActions,
+	}, directPackageUpdateLookupWithResolver(resolver))
+	if got.Latest != "v7.0.1" || got.Update != "yes" || got.Unknown {
+		t.Fatalf("resolveOutdatedLatest() = %+v, want update from declared version", got)
+	}
+}
+
+func TestCachedPackageUpdateLookupMemoizesGitHubActionTagCommits(t *testing.T) {
+	var calls atomic.Int32
+	resolver := actionsSHAPinResolver(t, "v7.0.1", func(_, _ string) (string, bool) {
+		calls.Add(1)
+		return "ffffffffffffffffffffffffffffffffffffffff", true
+	})
+	lookup := newCachedPackageUpdateLookupWithResolver(resolver)
+	for i := 0; i < 3; i++ {
+		got := resolveListAllLatestWithLookup(context.Background(), listAllPackage{
+			Name:      "actions/checkout",
+			Version:   actionsSHAPinBehindLatest,
+			Ecosystem: domain.EcosystemGitHubActions,
+		}, lookup, nil)
+		if got.Update != "yes" {
+			t.Fatalf("iteration %d: resolveListAllLatest() = %+v, want update", i, got)
+		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("gitRemoteTagCommit calls = %d, want 1 memoized lookup", got)
+	}
+}
