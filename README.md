@@ -974,9 +974,9 @@ available, and the last successful usable import timestamp. The public
 `GET /api/v1/feeds/status` response stays limited to feed name, status, last
 sync time, entry count, and a redacted error message.
 Manual advisories can be managed from `/admin/advisories` as either
-vulnerability or malicious findings. Docker is not offered there because
-Packmon's Docker support is inventory-only, not container-layer vulnerability
-coverage.
+vulnerability or malicious findings. The inventory-only ecosystems (Docker,
+Chocolatey) are not offered there because Packmon's support for them is
+metadata-only inventory, not vulnerability coverage.
 API keys can be created with a required RFC3339 UTC expiration timestamp,
 revoked, and permanently deleted after revocation from `/admin/keys`; the
 delete action stays recorded in the admin audit log. Creation requires

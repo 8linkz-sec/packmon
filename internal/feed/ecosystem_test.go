@@ -54,3 +54,39 @@ func TestOSVBucketEcosystemsIncludesSupportedBuckets(t *testing.T) {
 		}
 	}
 }
+
+// TestFeedEcosystemMapsNeverYieldInventoryOnlyEcosystems pins that no feed
+// name maps to an inventory-only ecosystem (docker, chocolatey): those never
+// receive feed advisories, so a mapping to them would silently store
+// unmatched data.
+func TestFeedEcosystemMapsNeverYieldInventoryOnlyEcosystems(t *testing.T) {
+	t.Parallel()
+
+	for name, m := range map[string]map[string]domain.Ecosystem{
+		"osv":     osvEcosystemMap,
+		"ghsa":    ghsaEcosystemMap,
+		"openssf": openssfEcosystemMap,
+	} {
+		for feedName, ecosystem := range m {
+			if !ecosystem.ScanInput() {
+				t.Errorf("%s map entry %q -> %q is not a scan ecosystem", name, feedName, ecosystem)
+			}
+		}
+	}
+	for _, inventoryOnly := range []string{"docker", "chocolatey", "Chocolatey", "Docker"} {
+		if got, ok := MapOSVEcosystem(inventoryOnly); ok {
+			t.Errorf("MapOSVEcosystem(%q) = %q, want unmapped", inventoryOnly, got)
+		}
+		if got, ok := MapGHSAEcosystem(inventoryOnly); ok {
+			t.Errorf("MapGHSAEcosystem(%q) = %q, want unmapped", inventoryOnly, got)
+		}
+		if got, ok := MapOpenSSFEcosystem(inventoryOnly); ok {
+			t.Errorf("MapOpenSSFEcosystem(%q) = %q, want unmapped", inventoryOnly, got)
+		}
+	}
+	for _, bucket := range OSVBucketEcosystems() {
+		if eco, ok := MapOSVEcosystem(bucket); !ok || !eco.ScanInput() {
+			t.Errorf("OSV bucket %q maps to %q (ok=%v), want a scan ecosystem", bucket, eco, ok)
+		}
+	}
+}

@@ -920,6 +920,11 @@ components:
 
     Ecosystem:
       type: string
+      description: >-
+        Canonical Packmon ecosystem identifiers. Includes the inventory-only
+        ecosystems (docker, chocolatey), which appear in CLI inventory reports
+        and are valid enum values in responses, but are never accepted as
+        scan input; see ScanEcosystem.
       enum:
         - npm
         - pypi
@@ -940,6 +945,10 @@ components:
 
     ScanEcosystem:
       type: string
+      description: >-
+        Ecosystems accepted as vulnerability/malicious-package scan input by
+        POST /api/v1/check. This is Ecosystem without the inventory-only
+        ecosystems (docker, chocolatey).
       enum:
         - npm
         - pypi

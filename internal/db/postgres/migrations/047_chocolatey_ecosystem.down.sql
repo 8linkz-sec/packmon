@@ -1,6 +1,16 @@
 -- Restore the pre-047 ecosystem CHECK constraints (without the chocolatey
--- ecosystem). Rows carrying that value would fail VALIDATE; none are expected
--- because the ecosystem is inventory-only and never persisted server-side.
+-- ecosystem). Rows carrying that value cannot survive the rollback: the
+-- ecosystem is inventory-only and never persisted by the scan path, so none
+-- are expected, but any that exist (for example from a feed import) are
+-- removed first so the restored constraints VALIDATE cleanly.
+
+DELETE FROM affected_packages WHERE ecosystem = 'chocolatey';
+DELETE FROM malicious_findings WHERE ecosystem = 'chocolatey';
+DELETE FROM package_reputation_cache WHERE ecosystem = 'chocolatey';
+DELETE FROM package_check_status WHERE ecosystem = 'chocolatey';
+DELETE FROM refresh_queue WHERE ecosystem = 'chocolatey';
+DELETE FROM lifecycle_package_map WHERE ecosystem = 'chocolatey';
+DELETE FROM lifecycle_sync_tombstones WHERE ecosystem = 'chocolatey';
 
 ALTER TABLE affected_packages
     DROP CONSTRAINT IF EXISTS affected_packages_ecosystem_check;

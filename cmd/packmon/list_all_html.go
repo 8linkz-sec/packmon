@@ -422,12 +422,14 @@ func listAllHTMLPackageStatus(row listAllRow, findingStatuses map[string]listAll
 	if strings.EqualFold(strings.TrimSpace(row.Update), "pinned") {
 		return "Digest pinned"
 	}
-	if strings.EqualFold(strings.TrimSpace(row.Update), "unpinned") {
-		return "Unpinned"
-	}
 	if strings.EqualFold(strings.TrimSpace(row.Update), "unknown") ||
 		strings.EqualFold(strings.TrimSpace(row.Latest), "unknown") {
+		// An unpinned inventory row whose feed lookup failed is reported as
+		// Unknown, keeping the HTML recount aligned with report.Unknown.
 		return "Unknown"
+	}
+	if strings.EqualFold(strings.TrimSpace(row.Update), "unpinned") {
+		return "Unpinned"
 	}
 	return "Up-to-Date"
 }

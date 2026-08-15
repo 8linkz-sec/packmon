@@ -1,6 +1,7 @@
 package chocolatey
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -126,13 +127,29 @@ func relDisplay(rel string) string {
 	return filepath.ToSlash(clean)
 }
 
+// walkWarning renders a walk failure for the warnings list. The display path
+// is always root-relative: the root itself is shown as ".", and paths outside
+// the root (which WalkDir never yields, but a hook might) fall back to their
+// base name so no absolute host path can leak.
 func walkWarning(root, path string, cause error) string {
-	display := filepath.ToSlash(path)
-	if rel, err := filepath.Rel(root, path); err == nil && rel != "." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != ".." {
-		display = filepath.ToSlash(rel)
+	display := relDisplay(filepath.Base(path))
+	if rel, err := filepath.Rel(root, path); err == nil {
+		switch {
+		case rel == ".":
+			display = "."
+		case rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)):
+			display = filepath.ToSlash(rel)
+		}
 	}
-	if pathErr, ok := cause.(*fs.PathError); ok {
-		return fmt.Sprintf("%s: %v", display, pathErr.Err)
+	return fmt.Sprintf("%s: %v", display, unwrapPathError(cause))
+}
+
+// unwrapPathError strips the path from a *fs.PathError so callers can render
+// their own repository-relative display path exactly once.
+func unwrapPathError(err error) error {
+	var pathErr *fs.PathError
+	if errors.As(err, &pathErr) {
+		return pathErr.Err
 	}
-	return fmt.Sprintf("%s: %v", display, cause)
+	return err
 }

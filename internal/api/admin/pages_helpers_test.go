@@ -222,6 +222,32 @@ func TestManualAdvisoryHelpers(t *testing.T) {
 	}
 }
 
+func TestInvalidManualAdvisoryEcosystemFollowsScanInput(t *testing.T) {
+	t.Parallel()
+
+	if got := invalidManualAdvisoryEcosystem(nil); got != "" {
+		t.Fatalf("invalidManualAdvisoryEcosystem(nil) = %q, want empty", got)
+	}
+	if got := invalidManualAdvisoryEcosystem(&manualAdvisoryView{}); got != "" {
+		t.Fatalf("invalidManualAdvisoryEcosystem(blank) = %q, want empty", got)
+	}
+	for _, ecosystem := range []domain.Ecosystem{
+		domain.EcosystemNPM, domain.EcosystemPyPI, domain.EcosystemGo, domain.EcosystemMaven,
+		domain.EcosystemCargo, domain.EcosystemNuGet, domain.EcosystemComposer, domain.EcosystemGem,
+		domain.EcosystemPub, domain.EcosystemGitHubActions, domain.EcosystemCocoaPods,
+		domain.EcosystemSwiftPM, domain.EcosystemHex, domain.EcosystemCRAN,
+	} {
+		if got := invalidManualAdvisoryEcosystem(&manualAdvisoryView{Ecosystem: string(ecosystem)}); got != "" {
+			t.Errorf("invalidManualAdvisoryEcosystem(%q) = %q, want empty (scan ecosystem)", ecosystem, got)
+		}
+	}
+	for _, ecosystem := range []string{string(domain.EcosystemDocker), string(domain.EcosystemChocolatey), "bogus"} {
+		if got := invalidManualAdvisoryEcosystem(&manualAdvisoryView{Ecosystem: ecosystem}); got != ecosystem {
+			t.Errorf("invalidManualAdvisoryEcosystem(%q) = %q, want the value echoed as unsupported", ecosystem, got)
+		}
+	}
+}
+
 func TestSettingsFormHelpers(t *testing.T) {
 	t.Parallel()
 

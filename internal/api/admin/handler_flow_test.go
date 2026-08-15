@@ -21,6 +21,7 @@ import (
 	"github.com/8linkz-sec/packmon/internal/auth"
 	"github.com/8linkz-sec/packmon/internal/config"
 	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/domain"
 	"github.com/8linkz-sec/packmon/internal/web"
 )
 
@@ -3372,35 +3373,52 @@ func TestHandlePasswordChangeDoesNotUpdatePasswordWhenAuditFails(t *testing.T) {
 	}
 }
 
-func TestAdminAdvisoryCreateRejectsDockerCoverage(t *testing.T) {
-	store := newAdminStoreStub()
-	handler, sm, _ := newAdminFlowHandler(t, store, adminFlowConfig())
+func TestAdminAdvisoryCreateRejectsInventoryOnlyEcosystems(t *testing.T) {
+	for _, tt := range []struct {
+		ecosystem domain.Ecosystem
+		name      string
+	}{
+		{domain.EcosystemDocker, "alpine"},
+		{domain.EcosystemChocolatey, "7zip"},
+	} {
+		t.Run(string(tt.ecosystem), func(t *testing.T) {
+			if !tt.ecosystem.InventoryOnly() {
+				t.Fatalf("%q is not inventory-only; update the test", tt.ecosystem)
+			}
+			store := newAdminStoreStub()
+			handler, sm, _ := newAdminFlowHandler(t, store, adminFlowConfig())
 
-	req, _ := authenticatedAdminFormRequest(t, sm, "/admin/advisories/create", url.Values{
-		"finding_type": {"vulnerability"},
-		"ecosystem":    {"docker"},
-		"name":         {"alpine"},
-		"severity":     {"HIGH"},
-		"summary":      {"docker should be inventory only"},
-	})
-	rec := httptest.NewRecorder()
-	handler.HandleAdvisoryCreate(rec, req)
+			req, _ := authenticatedAdminFormRequest(t, sm, "/admin/advisories/create", url.Values{
+				"finding_type": {"vulnerability"},
+				"ecosystem":    {string(tt.ecosystem)},
+				"name":         {tt.name},
+				"severity":     {"HIGH"},
+				"summary":      {"inventory-only ecosystems must be rejected"},
+			})
+			rec := httptest.NewRecorder()
+			handler.HandleAdvisoryCreate(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("HandleAdvisoryCreate status = %d, want 400; location=%q body=%s", rec.Code, rec.Header().Get("Location"), rec.Body.String())
-	}
-	if location := rec.Header().Get("Location"); location != "" {
-		t.Fatalf("Docker validation error redirected to %q", location)
-	}
-	if body := rec.Body.String(); !strings.Contains(body, "inventory-only and cannot be used") {
-		t.Fatalf("body missing inventory-only error:\n%s", body)
-	}
-	advisories, err := store.ListManualAdvisories(context.Background(), 10)
-	if err != nil {
-		t.Fatalf("ListManualAdvisories() error = %v", err)
-	}
-	if len(advisories) != 0 {
-		t.Fatalf("advisories = %+v, want no Docker advisory", advisories)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("HandleAdvisoryCreate status = %d, want 400; location=%q body=%s", rec.Code, rec.Header().Get("Location"), rec.Body.String())
+			}
+			if location := rec.Header().Get("Location"); location != "" {
+				t.Fatalf("validation error redirected to %q", location)
+			}
+			body := rec.Body.String()
+			if !strings.Contains(body, "inventory-only and cannot be used") {
+				t.Fatalf("body missing inventory-only error:\n%s", body)
+			}
+			if !strings.Contains(body, "Unsupported: "+string(tt.ecosystem)) {
+				t.Fatalf("form does not echo %q as an unsupported ecosystem:\n%s", tt.ecosystem, body)
+			}
+			advisories, err := store.ListManualAdvisories(context.Background(), 10)
+			if err != nil {
+				t.Fatalf("ListManualAdvisories() error = %v", err)
+			}
+			if len(advisories) != 0 {
+				t.Fatalf("advisories = %+v, want no %s advisory", advisories, tt.ecosystem)
+			}
+		})
 	}
 }
 
