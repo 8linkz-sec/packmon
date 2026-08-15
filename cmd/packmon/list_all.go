@@ -35,10 +35,13 @@ type listAllPackage struct {
 	Via        []string
 	Parents    []domain.PackageParent
 	SourceRefs []string
-	Scope      string
-	Relation   string
-	Flags      string
-	DockerRef  string
+	// DeclaredVersion is the human-readable version hint next to an opaque
+	// pin (GitHub Actions "# v1.2.3" comment); local reporting only.
+	DeclaredVersion string
+	Scope           string
+	Relation        string
+	Flags           string
+	DockerRef       string
 }
 
 type listAllPackageReport struct {
@@ -273,19 +276,20 @@ func listAllPackagesFromCollection(collection *scanner.PackageCollection) ([]lis
 		}
 		seen[key] = struct{}{}
 		packages = append(packages, listAllPackage{
-			Name:       p.Name,
-			Version:    p.Version,
-			Ecosystem:  p.Ecosystem,
-			LockFile:   entry.SourceFile,
-			SourceType: entry.SourceType,
-			Dev:        p.Dev,
-			Direct:     p.Direct,
-			Indirect:   p.Indirect,
-			Optional:   p.Optional,
-			Peer:       p.Peer,
-			Via:        append([]string(nil), p.Via...),
-			Parents:    append([]domain.PackageParent(nil), p.Parents...),
-			SourceRefs: append([]string(nil), p.SourceRefs...),
+			Name:            p.Name,
+			Version:         p.Version,
+			Ecosystem:       p.Ecosystem,
+			LockFile:        entry.SourceFile,
+			SourceType:      entry.SourceType,
+			Dev:             p.Dev,
+			Direct:          p.Direct,
+			Indirect:        p.Indirect,
+			Optional:        p.Optional,
+			Peer:            p.Peer,
+			Via:             append([]string(nil), p.Via...),
+			Parents:         append([]domain.PackageParent(nil), p.Parents...),
+			SourceRefs:      append([]string(nil), p.SourceRefs...),
+			DeclaredVersion: p.DeclaredVersion,
 		})
 	}
 
@@ -517,7 +521,14 @@ func resolveListAllLatestWithCachedDockerLookup(ctx context.Context, p listAllPa
 	if !latestLookupAllowed(p.Ecosystem, p.SourceRefs, lookup) {
 		return unknownLatestStatus()
 	}
-	return resolvePackageUpdateStatusWithLookup(ctx, p.Name, p.Version, p.Ecosystem, p.Direct, p.Parents, lookup)
+	return resolvePackageUpdateStatusWithLookup(ctx, packageUpdateQuery{
+		name:      p.Name,
+		installed: p.Version,
+		declared:  p.DeclaredVersion,
+		ecosystem: p.Ecosystem,
+		direct:    p.Direct,
+		parents:   p.Parents,
+	}, lookup)
 }
 
 func inspectListAllLocalDockerDigests(ctx context.Context, packages []listAllPackage) map[string]string {

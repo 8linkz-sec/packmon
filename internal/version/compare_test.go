@@ -1,6 +1,9 @@
 package version
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // ---------------------------------------------------------------------------
 // Compare -- semver mode (default)
@@ -1019,5 +1022,27 @@ func TestInternalParseRanges_FlatDetection(t *testing.T) {
 	}
 	if ranges[0].Type != "SEMVER" {
 		t.Fatalf("expected SEMVER type for converted flat range, got %q", ranges[0].Type)
+	}
+}
+
+func TestIsGitCommitSHA(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		value string
+		want  bool
+	}{
+		{"11bd71901bbe5b1630ceea73d27597364c9af683", true},
+		{"11BD71901BBE5B1630CEEA73D27597364C9AF683", true},
+		{"  11bd71901bbe5b1630ceea73d27597364c9af683  ", true},
+		{strings.Repeat("a", 64), true},
+		{"11bd719", false},
+		{"v4.2.2", false},
+		{"11bd71901bbe5b1630ceea73d27597364c9af68g", false},
+		{"", false},
+	} {
+		if got := IsGitCommitSHA(tt.value); got != tt.want {
+			t.Errorf("IsGitCommitSHA(%q) = %v, want %v", tt.value, got, tt.want)
+		}
 	}
 }

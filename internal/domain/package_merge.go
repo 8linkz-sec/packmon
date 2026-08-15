@@ -21,6 +21,9 @@ func MergePackageMetadata(dst *Package, src Package) {
 	dst.Via = MergePackageStringSet(dst.Via, src.Via)
 	dst.Parents = MergePackageParents(dst.Parents, src.Parents)
 	dst.SourceRefs = MergePackageStringSet(dst.SourceRefs, src.SourceRefs)
+	if strings.TrimSpace(dst.DeclaredVersion) == "" {
+		dst.DeclaredVersion = strings.TrimSpace(src.DeclaredVersion)
+	}
 }
 
 // MergePackageStringSet trims, de-duplicates, and sorts package metadata

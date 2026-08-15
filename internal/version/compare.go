@@ -300,6 +300,14 @@ func skipRangeComparisonForVersion(version, rangeType, ecosystem string) bool {
 	return isFullGitCommitSHA(version)
 }
 
+// IsGitCommitSHA reports whether value is a full 40- or 64-character
+// hexadecimal Git commit SHA (surrounding whitespace ignored). Short
+// abbreviated SHAs are not accepted because they cannot be told apart from
+// numeric version strings reliably.
+func IsGitCommitSHA(value string) bool {
+	return isFullGitCommitSHA(value)
+}
+
 func isFullGitCommitSHA(value string) bool {
 	value = strings.TrimSpace(value)
 	if len(value) != 40 && len(value) != 64 {

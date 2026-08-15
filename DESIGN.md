@@ -405,16 +405,24 @@ Important behavior:
   used by local tooling.
 - `--outdated` uses free public registry metadata for every canonical
   ecosystem where a package version can be resolved. Private registries,
-  branch pins, commit-only pins, and unavailable upstream metadata are reported
-  as unknown rather than failing the scan. Its terminal and HTML reports include
+  branch pins, commit-only pins (except GitHub Actions SHA pins, below), and
+  unavailable upstream metadata are reported as unknown rather than failing
+  the scan. Its terminal and HTML reports include
   the same package provenance columns (`scope`, `relation`, `via`, and flags)
   as `--list-all`. For npm transitive packages with known immediate parents,
   Packmon resolves the highest version allowed by the parents' dependency
   ranges and does not report a registry-latest major as an actionable update
   when the parent range cannot select it. GitHub Actions pinned by commit SHA
-  are not reported as outdated when the pin matches the dereferenced latest tag
-  commit. Go inventory suppresses stale `go.sum` versions when `go.mod` or a
-  generated Go SBOM provides the selected module version. SwiftPM identities
+  are never compared as version strings. When the workflow carries the
+  conventional version comment (`uses: owner/repo@<sha> # v1.2.3`, as written
+  by Dependabot, Renovate, and pinact), that declared version decides the
+  update status without git traffic, provided it is at least as precise as the
+  latest tag (`# v4` alone falls through). Otherwise the pin is compared with
+  the dereferenced latest tag commit: a match is current, a confirmed mismatch
+  is an available update, and an unresolvable tag is reported as unknown. Tag
+  dereferences are memoized per remote and tag within one run. Go inventory
+  suppresses stale `go.sum` versions when `go.mod` or a generated Go SBOM
+  provides the selected module version. SwiftPM identities
   outside the canonical public-host format are treated as unknown instead of
   being passed to Git. Package-manager source provenance from npm
   `resolved` URLs, requirements index options, Cargo sources, Bundler remotes,

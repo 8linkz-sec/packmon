@@ -206,6 +206,8 @@ func FuzzActionsParser(f *testing.F) {
 	f.Add([]byte("name: CI\non: [push]\njobs:\n  build:\n    steps:\n      - uses: actions/checkout@v4\n"))
 	f.Add([]byte("jobs:\n  reuse:\n    uses: octo-org/reusable/.github/workflows/build.yml@v2\n"))
 	f.Add([]byte("jobs:\n  build:\n    steps:\n      - uses: docker://alpine:3\n      - uses: ./local-action\n"))
+	f.Add([]byte("jobs:\n  build:\n    steps:\n      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2\n"))
+	f.Add([]byte("jobs:\n  build:\n    steps: [{uses: \"actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683\"}] # v4\n  jobs: 1\n"))
 	f.Add([]byte(``))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		p := NewActionsParser()
