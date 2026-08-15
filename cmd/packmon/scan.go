@@ -1009,11 +1009,11 @@ func commandFlagChanged(cmd *cobra.Command, name string) bool {
 	return flag != nil && flag.Changed
 }
 
-func validateScanEcosystemFilters(ecosystems []string, allowDocker bool) ([]string, error) {
+func validateScanEcosystemFilters(ecosystems []string, allowInventoryOnly bool) ([]string, error) {
 	if len(ecosystems) == 0 {
 		return nil, nil
 	}
-	valid := validScanEcosystemFilterValues(allowDocker)
+	valid := validScanEcosystemFilterValues(allowInventoryOnly)
 	allowed := make(map[string]struct{}, len(valid))
 	for _, value := range valid {
 		allowed[value] = struct{}{}
@@ -1032,7 +1032,11 @@ func validateScanEcosystemFilters(ecosystems []string, allowDocker bool) ([]stri
 	return out, nil
 }
 
-func validScanEcosystemFilterValues(allowDocker bool) []string {
+// validScanEcosystemFilterValues lists the accepted --ecosystems values.
+// Inventory-only ecosystems (docker, chocolatey) are accepted only when the
+// caller renders inventory (--list-all), because they never take part in
+// vulnerability scanning.
+func validScanEcosystemFilterValues(allowInventoryOnly bool) []string {
 	values := []string{
 		string(domain.EcosystemNPM),
 		string(domain.EcosystemPyPI),
@@ -1049,8 +1053,8 @@ func validScanEcosystemFilterValues(allowDocker bool) []string {
 		string(domain.EcosystemHex),
 		string(domain.EcosystemCRAN),
 	}
-	if allowDocker {
-		values = append(values, string(domain.EcosystemDocker))
+	if allowInventoryOnly {
+		values = append(values, string(domain.EcosystemDocker), string(domain.EcosystemChocolatey))
 	}
 	sort.Strings(values)
 	return values

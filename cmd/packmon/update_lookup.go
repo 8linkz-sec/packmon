@@ -31,16 +31,44 @@ const (
 	// cratesIORequestInterval mirrors the crates.io crawler policy of one
 	// request per second; it drives both the crates.io throttle and the
 	// lookup-phase time estimate for cargo packages.
-	cratesIORequestInterval          = time.Second
+	cratesIORequestInterval = time.Second
+	// chocolateyRequestInterval spaces Chocolatey feed requests: the community
+	// feed rate-limits anonymous OData clients aggressively, and each package
+	// may need one request per configured feed.
+	chocolateyRequestInterval        = 500 * time.Millisecond
 	maxRegistryResponseSize          = 512 * 1024
 	maxRegistryErrorBodyDrain        = 64 * 1024
 	maxPackagistRegistryResponseSize = 4 * 1024 * 1024
 	maxPyPIRegistryResponseSize      = 16 * 1024 * 1024
 )
 
+// lookupSlowCounts counts the packages that serialize behind a dedicated
+// per-registry throttle slower than the generic request interval.
+type lookupSlowCounts struct {
+	Cargo      int
+	Chocolatey int
+}
+
+func countSlowLookups(ecosystems []domain.Ecosystem) lookupSlowCounts {
+	var counts lookupSlowCounts
+	for _, eco := range ecosystems {
+		switch eco {
+		case domain.EcosystemCargo:
+			counts.Cargo++
+		case domain.EcosystemChocolatey:
+			counts.Chocolatey++
+		}
+	}
+	return counts
+}
+
 // announceLookupPhase tells the user up front that a large lookup phase is
 // rate-limited work, not a hang. Not trust-changing, so --quiet suppresses it.
 func announceLookupPhase(w io.Writer, packageCount, cargoCount int, quiet bool) {
+	announceLookupPhaseWithCounts(w, packageCount, lookupSlowCounts{Cargo: cargoCount}, quiet)
+}
+
+func announceLookupPhaseWithCounts(w io.Writer, packageCount int, slow lookupSlowCounts, quiet bool) {
 	if quiet || packageCount == 0 {
 		return
 	}
@@ -48,12 +76,15 @@ func announceLookupPhase(w io.Writer, packageCount, cargoCount int, quiet bool) 
 	if packageCount == 1 {
 		unit = "package"
 	}
-	// Cargo lookups serialize behind the one-request-per-second crates.io
-	// throttle while everything else runs at the generic interval; the slower
-	// stream dominates the wall-clock estimate.
+	// Cargo and Chocolatey lookups serialize behind their own throttles while
+	// everything else runs at the generic interval; the slowest stream
+	// dominates the wall-clock estimate.
 	estimate := time.Duration(packageCount) * defaultRegistryRequestInterval
-	if cargoEstimate := time.Duration(cargoCount) * cratesIORequestInterval; cargoEstimate > estimate {
+	if cargoEstimate := time.Duration(slow.Cargo) * cratesIORequestInterval; cargoEstimate > estimate {
 		estimate = cargoEstimate
+	}
+	if chocoEstimate := time.Duration(slow.Chocolatey) * chocolateyRequestInterval; chocoEstimate > estimate {
+		estimate = chocoEstimate
 	}
 	_, _ = fmt.Fprintf(w, "Looking up latest versions for %d %s (rate-limited, %s)...\n",
 		packageCount, unit, humanLookupEstimate(estimate))
@@ -877,6 +908,11 @@ func registryGetLimitedWithHeaders(ctx context.Context, url string, limit int64,
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
+	// Caller-supplied headers replace the defaults of the same name (an XML
+	// feed must not receive both an Accept: json and an Accept: xml).
+	for name := range headers {
+		req.Header.Del(name)
+	}
 	for name, values := range headers {
 		for _, value := range values {
 			req.Header.Add(name, value)
@@ -948,6 +984,7 @@ type registryThrottle struct {
 var (
 	registryRequestThrottle = newRegistryThrottle(defaultRegistryRequestInterval)
 	cratesIOThrottle        = newRegistryThrottle(cratesIORequestInterval)
+	chocolateyFeedThrottle  = newRegistryThrottle(chocolateyRequestInterval)
 )
 
 func newRegistryThrottle(interval time.Duration) *registryThrottle {
@@ -1138,6 +1175,76 @@ func fetchNuGetLatestFromBase(ctx context.Context, baseURL, name string) string 
 		return ""
 	}
 	return selectLatestNuGetVersion(res.Versions)
+}
+
+// chocolatey: GET {feed}/Packages()?$filter=tolower(Id) eq '{id}' and IsLatestVersion
+// against each configured NuGet v2 feed in order; the first feed that returns
+// an entry wins. Chocolatey feeds compare Id case-sensitively, hence tolower.
+func fetchChocolateyLatestFromFeeds(ctx context.Context, feeds []string, name string) string {
+	id := strings.ToLower(strings.TrimSpace(name))
+	if id == "" || !isChocolateyPackageID(id) {
+		return ""
+	}
+	filter := "tolower(Id) eq '" + id + "' and IsLatestVersion"
+	for _, feed := range feeds {
+		feed = strings.TrimRight(strings.TrimSpace(feed), "/")
+		if feed == "" {
+			continue
+		}
+		if !chocolateyFeedThrottle.wait(ctx) {
+			return ""
+		}
+		// OData servers (notably community.chocolatey.org) do not treat "+" as a
+		// space inside $filter, so percent-encode spaces explicitly.
+		endpoint := registryEndpoint(feed, "Packages()") + "?$filter=" + strings.ReplaceAll(url.QueryEscape(filter), "+", "%20")
+		headers := http.Header{}
+		headers.Set("Accept", "application/atom+xml")
+		data, err := registryGetLimitedWithHeaders(ctx, endpoint, maxRegistryResponseSize, headers)
+		if err != nil {
+			continue
+		}
+		if version := parseChocolateyODataLatestVersion(data); version != "" {
+			return version
+		}
+	}
+	return ""
+}
+
+func isChocolateyPackageID(id string) bool {
+	if id == "" || len(id) > 100 {
+		return false
+	}
+	for i, ch := range id {
+		switch {
+		case ch >= 'a' && ch <= 'z', ch >= '0' && ch <= '9':
+		case i > 0 && (ch == '.' || ch == '-' || ch == '_'):
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// parseChocolateyODataLatestVersion extracts the highest d:Version from an
+// OData Atom feed body; an empty feed yields "".
+func parseChocolateyODataLatestVersion(data []byte) string {
+	var feed struct {
+		Entries []struct {
+			Properties struct {
+				Version string `xml:"Version"`
+			} `xml:"properties"`
+		} `xml:"entry"`
+	}
+	if xml.Unmarshal(data, &feed) != nil {
+		return ""
+	}
+	versions := make([]string, 0, len(feed.Entries))
+	for _, entry := range feed.Entries {
+		if version := strings.TrimSpace(entry.Properties.Version); version != "" {
+			versions = append(versions, version)
+		}
+	}
+	return selectLatestNuGetVersion(versions)
 }
 
 func selectLatestNuGetVersion(versions []string) string {

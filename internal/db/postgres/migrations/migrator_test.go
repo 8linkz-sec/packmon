@@ -1475,7 +1475,7 @@ func TestReadEmbeddedMigrationReadsSpecificDownMigration(t *testing.T) {
 		!strings.HasSuffix(migration.Name, ".down.sql") {
 		t.Fatalf("Name = %q, want current down migration", migration.Name)
 	}
-	if !strings.Contains(migration.SQL, "tombstone rows cannot be restored") {
+	if !strings.Contains(migration.SQL, "Restore the pre-047 ecosystem CHECK constraints") {
 		t.Fatalf("current down migration SQL does not include expected rollback marker:\n%s", migration.SQL)
 	}
 }
@@ -1739,4 +1739,50 @@ func migrationDropColumns(sql string) map[string]map[string]bool {
 		}
 	}
 	return drops
+}
+
+func TestChocolateyEcosystemConstraintMigrationCoversEveryEcosystemCheck(t *testing.T) {
+	t.Parallel()
+
+	up, err := fs.ReadFile("047_chocolatey_ecosystem.up.sql")
+	if err != nil {
+		t.Fatalf("read up migration: %v", err)
+	}
+	upSQL := string(up)
+	down, err := fs.ReadFile("047_chocolatey_ecosystem.down.sql")
+	if err != nil {
+		t.Fatalf("read down migration: %v", err)
+	}
+	downSQL := string(down)
+
+	for _, constraint := range []string{
+		"affected_packages_ecosystem_check",
+		"malicious_findings_ecosystem_check",
+		"package_reputation_cache_ecosystem_check",
+		"package_check_status_ecosystem_check",
+		"refresh_queue_ecosystem_check",
+		"lifecycle_package_map_ecosystem_check",
+		"lifecycle_sync_tombstones_ecosystem_check",
+	} {
+		for _, sql := range []string{upSQL, downSQL} {
+			if strings.Count(sql, "DROP CONSTRAINT IF EXISTS "+constraint) != 1 {
+				t.Fatalf("migration must drop %s exactly once:\n%s", constraint, sql)
+			}
+			if strings.Count(sql, "ADD CONSTRAINT "+constraint) != 1 {
+				t.Fatalf("migration must re-add %s exactly once:\n%s", constraint, sql)
+			}
+			if strings.Count(sql, "VALIDATE CONSTRAINT "+constraint) != 1 {
+				t.Fatalf("migration must validate %s exactly once:\n%s", constraint, sql)
+			}
+		}
+	}
+	if strings.Count(upSQL, "'chocolatey'") != 8 { // 7 CHECK lists + 1 header comment
+		t.Fatalf("up migration must list 'chocolatey' in all 7 ecosystem checks, found %d", strings.Count(upSQL, "'chocolatey'")-1)
+	}
+	if strings.Contains(downSQL, "'chocolatey'") {
+		t.Fatalf("down migration must restore the previous ecosystem list without 'chocolatey'")
+	}
+	if strings.Count(downSQL, "'docker'") != 7 {
+		t.Fatalf("down migration must keep 'docker' in all 7 ecosystem checks, found %d", strings.Count(downSQL, "'docker'"))
+	}
 }

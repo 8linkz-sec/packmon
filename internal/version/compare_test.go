@@ -337,6 +337,20 @@ func TestCompare_Ecosystem_NuGetPrereleaseCaseInsensitive(t *testing.T) {
 	}
 }
 
+func TestCompare_Ecosystem_ChocolateyUsesNuGetRules(t *testing.T) {
+	t.Parallel()
+
+	if got := Compare("1.0.0-alpha", "1.0.0-Alpha", "ECOSYSTEM", "chocolatey"); got != 0 {
+		t.Fatalf("Compare(chocolatey prerelease case) = %d, want 0", got)
+	}
+	if got := Compare("23.1.0.20250902", "23.1.0.20240101", "ECOSYSTEM", "chocolatey"); got <= 0 {
+		t.Fatalf("Compare(chocolatey four-part) = %d, want newer build date to win", got)
+	}
+	if got := Compare("1.23.0", "1.23", "ECOSYSTEM", "chocolatey"); got != 0 {
+		t.Fatalf("Compare(chocolatey 1.23.0 vs 1.23) = %d, want 0 (NuGet normalization)", got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // VersionAffected -- full OSV format
 // ---------------------------------------------------------------------------

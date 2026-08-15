@@ -417,8 +417,10 @@ func TestOpenAPIScanRequestDocumentsPackageCoordinateLimits(t *testing.T) {
 	}
 	scanEcosystem := requireMap(t, schemas, "ScanEcosystem")
 	scanEcosystemEnums := requireStringEnum(t, scanEcosystem, "ScanEcosystem")
-	if _, ok := scanEcosystemEnums[string(domain.EcosystemDocker)]; ok {
-		t.Fatalf("ScanEcosystem must not include %q", domain.EcosystemDocker)
+	for _, inventoryOnly := range []domain.Ecosystem{domain.EcosystemDocker, domain.EcosystemChocolatey} {
+		if _, ok := scanEcosystemEnums[string(inventoryOnly)]; ok {
+			t.Fatalf("ScanEcosystem must not include inventory-only %q", inventoryOnly)
+		}
 	}
 
 	name := requireMap(t, scanProperties, "name")
@@ -1020,7 +1022,7 @@ func TestOpenAPIRefreshEndpointUsesSupportedEcosystemEnum(t *testing.T) {
 			t.Fatalf("RefreshEcosystem enum missing %q; got %v", want, enumKeys(enums))
 		}
 	}
-	for _, unsupported := range []string{"actions", "docker", "pub", "cocoapods", "swiftpm", "hex", "cran"} {
+	for _, unsupported := range []string{"actions", "docker", "chocolatey", "pub", "cocoapods", "swiftpm", "hex", "cran"} {
 		if _, ok := enums[unsupported]; ok {
 			t.Fatalf("RefreshEcosystem enum includes unsupported refresh ecosystem %q", unsupported)
 		}
@@ -1087,6 +1089,7 @@ func TestEcosystemContractsIncludeDomainEcosystems(t *testing.T) {
 		domain.EcosystemHex,
 		domain.EcosystemCRAN,
 		domain.EcosystemDocker,
+		domain.EcosystemChocolatey,
 	} {
 		value := string(ecosystem)
 		if _, ok := openAPIEnums[value]; !ok {

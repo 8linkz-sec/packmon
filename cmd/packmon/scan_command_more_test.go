@@ -495,6 +495,35 @@ func TestResolveScanSettingsAllowsDockerOnlyForListAll(t *testing.T) {
 	}
 }
 
+func TestResolveScanSettingsAllowsChocolateyOnlyForListAll(t *testing.T) {
+	cmd := newScanCmd()
+	mustSetFlag(t, cmd, "ecosystems", "chocolatey")
+
+	settings, err := resolveScanSettings(cmd, nil, scanTarget{Path: "."}, scanFlagValues{
+		Mode:       "local",
+		FailOn:     "CRITICAL",
+		Ecosystems: "chocolatey",
+		Timeout:    1,
+		ListAll:    true,
+	})
+	if err != nil {
+		t.Fatalf("resolveScanSettings(list-all chocolatey) error = %v", err)
+	}
+	if got := strings.Join(settings.Ecosystems, ","); got != "chocolatey" {
+		t.Fatalf("ecosystems = %q, want chocolatey", got)
+	}
+
+	_, err = resolveScanSettings(cmd, nil, scanTarget{Path: "."}, scanFlagValues{
+		Mode:       "local",
+		FailOn:     "CRITICAL",
+		Ecosystems: "chocolatey",
+		Timeout:    1,
+	})
+	if err == nil || !strings.Contains(err.Error(), `unknown ecosystem filter "chocolatey"`) {
+		t.Fatalf("resolveScanSettings(scan chocolatey) error = %v, want chocolatey rejection", err)
+	}
+}
+
 func TestRunScanCommandRejectsOutputFilesForMultipleTargets(t *testing.T) {
 	isolateCLIConfigDiscovery(t)
 	if err := os.WriteFile(".packmon.yaml", []byte(`

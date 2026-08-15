@@ -107,6 +107,7 @@ func newConfigShowCmd() *cobra.Command {
 			printEnvVar("PACKMON_PUB_HOSTED_URL")
 			printEnvVar("PACKMON_HEX_API_BASE_URL")
 			printEnvVar("PACKMON_NUGET_V3_BASE_URL")
+			printEnvVar("PACKMON_CHOCOLATEY_FEED_URLS")
 			printEnvVar(clientCACertFileEnv)
 			printEnvVar(clientCACertLegacyFileEnv)
 			printEnvVar("PACKMON_INSECURE_ALLOW_HTTP")
@@ -194,6 +195,11 @@ db:
 #   pub_hosted_url: "https://pub-mirror.example"
 #   hex_api_base_url: "https://hex-mirror.example/api"
 #   nuget_v3_base_url: "https://nuget-mirror.example/v3-flatcontainer"
+#   # Ordered NuGet v2 feeds for Chocolatey inventory (--list-all) latest
+#   # lookups; replaces the default community feed when set.
+#   chocolatey_feed_urls:
+#     - "https://www.myget.org/F/vm-packages/api/v2"
+#     - "https://community.chocolatey.org/api/v2"
 
 repos:
   - name: packmon

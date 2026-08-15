@@ -23,6 +23,7 @@ const (
 	EcosystemHex           Ecosystem = "hex"
 	EcosystemCRAN          Ecosystem = "cran"
 	EcosystemDocker        Ecosystem = "docker"
+	EcosystemChocolatey    Ecosystem = "chocolatey"
 )
 
 // Valid reports whether e is one of the canonical supported ecosystems.
@@ -30,10 +31,29 @@ func (e Ecosystem) Valid() bool {
 	switch e {
 	case EcosystemNPM, EcosystemPyPI, EcosystemGo, EcosystemMaven, EcosystemCargo,
 		EcosystemNuGet, EcosystemComposer, EcosystemGem, EcosystemPub, EcosystemGitHubActions,
-		EcosystemCocoaPods, EcosystemSwiftPM, EcosystemHex, EcosystemCRAN, EcosystemDocker:
+		EcosystemCocoaPods, EcosystemSwiftPM, EcosystemHex, EcosystemCRAN, EcosystemDocker,
+		EcosystemChocolatey:
 		return true
 	}
 	return false
+}
+
+// InventoryOnly reports whether e is a metadata-only inventory ecosystem:
+// its packages appear in CLI `--list-all` reports (with latest-version
+// freshness checks) but are never vulnerability-scan inputs for
+// /api/v1/check, feed matching, or manual advisories.
+func (e Ecosystem) InventoryOnly() bool {
+	switch e {
+	case EcosystemDocker, EcosystemChocolatey:
+		return true
+	}
+	return false
+}
+
+// ScanInput reports whether e is a valid ecosystem for vulnerability and
+// malicious-package scanning (valid and not inventory-only).
+func (e Ecosystem) ScanInput() bool {
+	return e.Valid() && !e.InventoryOnly()
 }
 
 // Package represents a dependency found in a lock file.

@@ -340,7 +340,7 @@ func TestAdminManualAdvisoryHandlersUseMessageCatalogForFlashText(t *testing.T) 
 		`web.Message("admin.advisories.error.required_fields")`,
 		`web.Message("admin.advisories.error.invalid_severity")`,
 		`web.Message("admin.advisories.error.unknown_ecosystem")`,
-		`web.Message("admin.advisories.error.docker_unsupported")`,
+		`web.Message("admin.advisories.error.inventory_only_unsupported")`,
 		`web.Message("admin.advisories.field.max_length"`,
 		`web.Message("admin.advisories.error.max_length")`,
 		`web.Message("admin.advisories.error.generate_id")`,

@@ -15,10 +15,13 @@ It can run as a local CLI, as a central API server, or both together.
 
 - Reads lockfiles and SBOMs and inventories the packages they declare,
   including the transitive dependencies those files enumerate. Dockerfile and
-  Compose image references are collected as metadata-only inventory.
+  Compose image references and Chocolatey package declarations (FLARE-VM
+  style `config.xml` lists, `choco install` script lines) are collected as
+  metadata-only inventory.
 - Checks the lockfile/SBOM packages against vulnerability, malicious-package,
   exploit, and lifecycle/end-of-life data. Docker image entries get
-  digest-freshness checks only, not vulnerability scanning.
+  digest-freshness checks only and Chocolatey entries get feed
+  latest-version checks only, not vulnerability scanning.
 - Reports which packages have a newer version available, with the update path.
 - Blocks a build on findings you choose to block on: malicious packages and
   active supply-chain risk always block; vulnerabilities and lifecycle
@@ -698,6 +701,11 @@ registries:
   pub_hosted_url: "https://pub-mirror.example"
   hex_api_base_url: "https://hex-mirror.example/api"
   nuget_v3_base_url: "https://nuget-mirror.example/v3-flatcontainer"
+  # Ordered NuGet v2 feeds for Chocolatey inventory lookups; replaces the
+  # default community feed, so list it too if you still want it queried.
+  chocolatey_feed_urls:
+    - "https://www.myget.org/F/vm-packages/api/v2"
+    - "https://community.chocolatey.org/api/v2"
 ```
 
 The matching environment variables are `PACKMON_NPM_REGISTRY_BASE_URL`,
@@ -708,8 +716,9 @@ The matching environment variables are `PACKMON_NPM_REGISTRY_BASE_URL`,
 `PACKMON_GO_PROXY_URL`, `PACKMON_MAVEN_REPOSITORY_BASE_URL`,
 `PACKMON_DOCKER_REGISTRY_MIRRORS`,
 `PACKMON_SWIFTPM_GIT_ALLOWED_HOSTS`,
-`PACKMON_PUB_HOSTED_URL`, `PACKMON_HEX_API_BASE_URL`, and
-`PACKMON_NUGET_V3_BASE_URL`.
+`PACKMON_PUB_HOSTED_URL`, `PACKMON_HEX_API_BASE_URL`,
+`PACKMON_NUGET_V3_BASE_URL`, and `PACKMON_CHOCOLATEY_FEED_URLS`
+(comma-separated, ordered).
 
 ## SBOM Input
 
@@ -765,7 +774,8 @@ metadata as CycloneDX properties.
 
 `packmon scan --list-all --html <file> <target>` runs the normal findings scan
 and adds a full package inventory. The package table includes each package's
-input source (`lockfile`, `sbom`, `dockerfile`, or `compose`), scope, relation,
+input source (`lockfile`, `sbom`, `dockerfile`, `compose`, `config.xml`, or
+`choco-install`), scope, relation,
 and vulnerability marker. The HTML report intentionally
 omits noisy `Via` and `Flags` columns. Its `Packages Needing Attention` section
 shows actionable updates, removed packages, and packages with security
@@ -805,6 +815,20 @@ operator mirrors with `PACKMON_DOCKER_REGISTRY_MIRRORS`, using comma-separated
 `public-host=https://mirror-base` entries such as
 `docker.io=https://docker-mirror.example/dockerhub`. Unsupported registries or
 unsafe network targets are shown as `unknown`.
+
+Chocolatey inventory is metadata-only as well. Packmon reads FLARE-VM /
+VM-Packages style `config.xml` package lists (a root `<config>` element with
+`<packages><package name="..."/>` entries; other `config.xml` files are ignored
+by content) and `choco install|upgrade` / `cinst` / `cup` lines in `.ps1`,
+`.psm1`, `.bat`, and `.cmd` scripts. Pinned `--version` entries are compared
+with the feed's latest release; unpinned entries (config.xml always installs
+latest) show `INSTALLED -`, the feed's latest version, and status `unpinned`
+and are never counted as available updates. Lookups query the ordered feeds
+from `registries.chocolatey_feed_urls` / `PACKMON_CHOCOLATEY_FEED_URLS`
+(default: the Chocolatey community feed) at two requests per second; packages
+hosted on private feeds such as the FLARE-VM `vm-packages` MyGet feed show
+`unknown` until that feed is configured. `--source` arguments inside scripts
+are never used as lookup targets.
 
 For latest-version reports, Packmon keeps lockfile registry/source provenance
 local to the CLI. If npm, requirements.txt, Cargo, Bundler, CocoaPods,

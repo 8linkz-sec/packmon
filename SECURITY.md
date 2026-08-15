@@ -528,12 +528,18 @@ queries, or fragments; HTTPS is required except loopback HTTP test endpoints,
 and literal link-local, multicast, or unspecified mirror addresses are rejected.
 Private registry credentials are not read. Failures degrade to `unknown` in
 reports. The server scan API rejects Docker packages because Packmon does not
-provide container-layer vulnerability coverage.
+provide container-layer vulnerability coverage. Chocolatey inventory follows
+the same rules: `config.xml` package lists are identified by content and
+size-bounded before parsing, script scanning for `choco install` lines is
+bounded per file, feed URLs come only from trusted configuration (never from
+`--source` arguments found in repository scripts), and the server scan API and
+manual advisories reject `chocolatey` packages (`Ecosystem.InventoryOnly`).
 The local Docker inspector abstraction accepts only image references; the
 executable and `image inspect` subcommand remain fixed in production code.
 CLI ecosystem filters are validated before package discovery so a typo cannot
 turn all parser-backed ecosystems off and produce a successful zero-package
-security scan; `docker` remains a `--list-all` inventory filter only.
+security scan; `docker` and `chocolatey` remain `--list-all` inventory
+filters only.
 
 npm transitive update checks may fetch public npm package manifests for
 immediate parent packages and child version lists to compute the highest
@@ -943,11 +949,13 @@ mirror, `PACKMON_CRAN_MIRROR_URL` for a CRAN mirror root,
 `PACKMON_GO_PROXY_URL` for a single Go module proxy root,
 `PACKMON_MAVEN_REPOSITORY_BASE_URL` for a Maven repository root,
 `PACKMON_PUB_HOSTED_URL` for a hosted Pub API root, `PACKMON_HEX_API_BASE_URL`
-for a Hex API-compatible mirror, and `PACKMON_NUGET_V3_BASE_URL` for a NuGet
-v3 flat-container-compatible mirror; HTTPS is required except loopback HTTP
-test endpoints. `PACKMON_GO_PROXY_URL=off` disables Go latest-version lookups
+for a Hex API-compatible mirror, `PACKMON_NUGET_V3_BASE_URL` for a NuGet
+v3 flat-container-compatible mirror, and `PACKMON_CHOCOLATEY_FEED_URLS` for
+the ordered NuGet v2 feeds queried for Chocolatey inventory; HTTPS is required
+except loopback HTTP test endpoints. `PACKMON_GO_PROXY_URL=off` disables Go latest-version lookups
 without using direct VCS fallback. crates.io requests must use an identifying
-Packmon User-Agent and a one-request-per-second throttle.
+Packmon User-Agent and a one-request-per-second throttle; Chocolatey feed
+requests are throttled to two per second.
 
 Required checks:
 

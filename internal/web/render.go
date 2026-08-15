@@ -1159,7 +1159,7 @@ var webMessagesEN = map[webMessageKey]string{
 	webMessageKey("admin.advisories.error.required_fields"):             "All required fields must be filled",
 	webMessageKey("admin.advisories.error.invalid_severity"):            "Invalid severity",
 	webMessageKey("admin.advisories.error.unknown_ecosystem"):           "Unknown ecosystem",
-	webMessageKey("admin.advisories.error.docker_unsupported"):          "Docker is inventory-only and cannot be used for manual scan advisories",
+	webMessageKey("admin.advisories.error.inventory_only_unsupported"):  "This ecosystem is inventory-only and cannot be used for manual scan advisories",
 	webMessageKey("admin.advisories.field.max_length"):                  "Use %d characters or fewer.",
 	webMessageKey("admin.advisories.error.max_length"):                  "Field exceeds maximum length",
 	webMessageKey("admin.advisories.error.generate_id"):                 "Failed to generate advisory ID",

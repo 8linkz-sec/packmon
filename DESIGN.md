@@ -204,16 +204,19 @@ The canonical ecosystem identifiers are lowercase:
 
 ```text
 npm, pypi, go, maven, cargo, nuget, composer, gem, pub,
-cocoapods, swiftpm, hex, cran, actions, docker
+cocoapods, swiftpm, hex, cran, actions, docker, chocolatey
 ```
 
 The `/api/v1/check` scan contract accepts the vulnerability/malware scan
-ecosystems in that list except `docker`. Docker is retained as a canonical
-metadata-only inventory ecosystem for CLI reports, not as a server-side
-vulnerability-scan ecosystem.
+ecosystems in that list except the inventory-only ecosystems `docker` and
+`chocolatey` (`domain.Ecosystem.InventoryOnly`). Those two are canonical
+metadata-only inventory ecosystems for CLI reports, not server-side
+vulnerability-scan ecosystems: their rows are collected after the scan
+pipeline, never enter the scan package collection, are rejected by
+`/api/v1/check` and manual advisories, and are absent from every feed mapping.
 CLI ecosystem filters from flags, environment, project config, or repo config
-are normalized and validated against this list before scanning; `docker` is
-accepted only for `--list-all` inventory filtering.
+are normalized and validated against this list before scanning; `docker` and
+`chocolatey` are accepted only for `--list-all` inventory filtering.
 
 Feed-specific names must be mapped into this enum at the import boundary.
 Package identities are canonicalized anywhere they cross a scan, feed, sync,
@@ -297,13 +300,15 @@ Important behavior:
 - `--list-all` keeps the findings scan scope identical to a normal scan:
   dev/test packages are checked only when `--include-dev` is set. Its package
   inventory section still lists every detected package by default and annotates
-  source (`lockfile`, `sbom`, `dockerfile`, `compose`), scope (`runtime`,
+  source (`lockfile`, `sbom`, `dockerfile`, `compose`, `config.xml`,
+  `choco-install`), scope (`runtime`,
   `dev`, `ci`, `sbom`, `build`), relation (`direct`, `transitive`,
   `workflow`, etc.), npm `via` roots, and
   optional/peer flags. HTML reports
   omit the noisy `Via` and `Flags` columns, keep full source paths out of
   package rows, and render a deduplicated "Checked Inventory Sources" section
-  at the bottom for lockfiles, SBOMs, and Docker inventory files. The HTML
+  at the bottom for lockfiles, SBOMs, Docker inventory files, and Chocolatey
+  inventory files. The HTML
   "Packages Needing Attention" section is scoped to genuine security and
   lifecycle findings only: current ReversingLabs malware/removed-package
   findings, supply-chain-risk findings, lifecycle (end-of-life) findings,
@@ -460,12 +465,19 @@ Important behavior:
   API-compatible base such as `https://hex-mirror.example/api`;
   `PACKMON_NUGET_V3_BASE_URL` points NuGet freshness checks at a v3
   flat-container-compatible base such as
-  `https://nuget-mirror.example/v3-flatcontainer`.
+  `https://nuget-mirror.example/v3-flatcontainer`;
+  `PACKMON_CHOCOLATEY_FEED_URLS` (comma-separated) or
+  `registries.chocolatey_feed_urls` (ordered YAML list) names the NuGet v2
+  OData feeds queried for Chocolatey inventory rows, replacing the default
+  `https://community.chocolatey.org/api/v2`; the first feed that knows the
+  package answers, so private feeds such as the FLARE-VM `vm-packages` MyGet
+  feed must be listed explicitly (before or after the community feed).
   crates.io lookups use an identifying Packmon User-Agent and are serialized at
-  one request per second. The lookup phase announces an upfront duration
-  estimate that accounts for the slower crates.io rate when cargo packages
-  dominate the inventory, and prints a `done/total` progress line every 10
-  seconds until the phase completes (suppressed by `--quiet`).
+  one request per second; Chocolatey feed requests are serialized at two per
+  second. The lookup phase announces an upfront duration
+  estimate that accounts for the slower crates.io and Chocolatey rates when
+  those packages dominate the inventory, and prints a `done/total` progress
+  line every 10 seconds until the phase completes (suppressed by `--quiet`).
 - `--list-all` also inventories Docker image declarations from `Dockerfile`,
   `Dockerfile.*`, `docker-compose.yml`, `docker-compose.yaml`, `compose.yml`,
   and `compose.yaml`. Docker rows use ecosystem `docker`, show declared
@@ -484,6 +496,21 @@ Important behavior:
   does not pull images, scan OS packages inside images, or read private
   registry credentials as part of `--list-all`; `/api/v1/check` rejects
   `ecosystem: "docker"` packages for the same reason.
+- `--list-all` also inventories Chocolatey package declarations: FLARE-VM /
+  VM-Packages style `config.xml` files (root `<config>` element with a
+  `<packages><package name="..."/>` list, identified by content so unrelated
+  `config.xml` files are ignored silently) and `choco install|upgrade` /
+  `cinst` / `cup` command lines in `.ps1`, `.psm1`, `.bat`, and `.cmd`
+  scripts. Rows use ecosystem `chocolatey`, source `config.xml` or
+  `choco-install`, scope `runtime`, relation `declared`, and lowercase
+  package IDs. A `--version` pin is compared with the feed's latest release
+  under NuGet version rules; entries without a version (config.xml always
+  installs latest) show INSTALLED `-`, the feed's latest version, UPDATE
+  `unpinned`, and the `unpinned` flag, and are never counted as available
+  updates. Script `--source` arguments are ignored; feeds come only from
+  configuration. Chocolatey inventory is metadata-only: no vulnerability or
+  malicious-package matching, no `/api/v1/check` submission, no `--outdated`
+  rows, and no JSON/SARIF/JUnit entries.
 
 ## Server Behavior
 
@@ -630,8 +657,8 @@ operator-supplied ID use stable `manual:<uuid>` IDs. The admin advisory list is
 paginated so older manual coverage remains reachable. Manual advisory
 create/update/delete operations write admin-audit records with the affected
 record details; PostgreSQL commits the advisory mutation and audit entry in the
-same transaction. Docker is not accepted for manual scan advisories because
-Docker support is inventory-only and does not imply container-layer
+same transaction. Inventory-only ecosystems (Docker, Chocolatey) are not
+accepted for manual scan advisories because their support does not imply
 vulnerability coverage.
 
 ## Feed Sources
@@ -1047,8 +1074,8 @@ explicit `--config` file may set `registries.npm_registry_base_url`,
 `registries.composer_repository_base_url`, `registries.go_proxy_url`,
 `registries.maven_repository_base_url`, `registries.docker_registry_mirrors`,
 `registries.swiftpm_git_allowed_hosts`, `registries.cran_mirror_url`,
-`registries.pub_hosted_url`, `registries.hex_api_base_url`, and
-`registries.nuget_v3_base_url`;
+`registries.pub_hosted_url`, `registries.hex_api_base_url`,
+`registries.nuget_v3_base_url`, and `registries.chocolatey_feed_urls`;
 environment variables `PACKMON_NPM_REGISTRY_BASE_URL`,
 `PACKMON_PYPI_API_BASE_URL`, `PACKMON_RUBYGEMS_API_BASE_URL`,
 `PACKMON_CARGO_REGISTRY_API_BASE_URL`,
@@ -1056,8 +1083,9 @@ environment variables `PACKMON_NPM_REGISTRY_BASE_URL`,
 `PACKMON_COMPOSER_REPOSITORY_BASE_URL`, `PACKMON_GO_PROXY_URL`,
 `PACKMON_MAVEN_REPOSITORY_BASE_URL`, `PACKMON_DOCKER_REGISTRY_MIRRORS`,
 `PACKMON_SWIFTPM_GIT_ALLOWED_HOSTS`, `PACKMON_CRAN_MIRROR_URL`,
-`PACKMON_PUB_HOSTED_URL`, `PACKMON_HEX_API_BASE_URL`, and
-`PACKMON_NUGET_V3_BASE_URL` take precedence.
+`PACKMON_PUB_HOSTED_URL`, `PACKMON_HEX_API_BASE_URL`,
+`PACKMON_NUGET_V3_BASE_URL`, and `PACKMON_CHOCOLATEY_FEED_URLS` take
+precedence.
 
 API keys are named with a bounded operator label, hashed at rest, track
 `last_used_at`, support revocation, permanent deletion after revocation, and

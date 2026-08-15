@@ -384,6 +384,9 @@ func overlayCLIRegistryConfig(dst *cliRegistryConfig, src cliRegistryConfig) {
 	if len(src.SwiftPMGitAllowedHosts) > 0 {
 		dst.SwiftPMGitAllowedHosts = mergeStringSlices(dst.SwiftPMGitAllowedHosts, src.SwiftPMGitAllowedHosts)
 	}
+	if len(src.ChocolateyFeedURLs) > 0 {
+		dst.ChocolateyFeedURLs = append([]string(nil), src.ChocolateyFeedURLs...)
+	}
 	if src.CRANMirrorURL != "" {
 		dst.CRANMirrorURL = src.CRANMirrorURL
 	}
