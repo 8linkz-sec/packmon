@@ -936,6 +936,7 @@ components:
         - hex
         - cran
         - docker
+        - chocolatey
 
     ScanEcosystem:
       type: string

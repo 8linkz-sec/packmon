@@ -352,7 +352,8 @@ func compareEcosystem(a, b, ecosystem string) int {
 		return comparePEP440(a, b)
 	case "maven":
 		return compareMaven(a, b)
-	case "nuget":
+	case "nuget", "chocolatey":
+		// Chocolatey packages are NuGet packages and follow NuGet version rules.
 		return compareNuGet(a, b)
 	default:
 		// Most ecosystems (npm, Go, Cargo, Composer, Gem, etc.)
@@ -362,7 +363,7 @@ func compareEcosystem(a, b, ecosystem string) int {
 }
 
 func versionsEqual(a, b, ecosystem string) bool {
-	if strings.EqualFold(ecosystem, "nuget") {
+	if strings.EqualFold(ecosystem, "nuget") || strings.EqualFold(ecosystem, "chocolatey") {
 		return compareNuGet(a, b) == 0
 	}
 	return a == b

@@ -1169,6 +1169,9 @@ func TestAdminPagesRenderWithAuthenticatedSession(t *testing.T) {
 			if tt.name == "advisories" && strings.Contains(body, `value="docker"`) {
 				t.Fatalf("%s body exposes Docker as manual advisory scan coverage\nbody=%s", tt.target, body)
 			}
+			if tt.name == "advisories" && strings.Contains(body, `value="chocolatey"`) {
+				t.Fatalf("%s body exposes Chocolatey as manual advisory scan coverage\nbody=%s", tt.target, body)
+			}
 		})
 	}
 }
@@ -3389,8 +3392,8 @@ func TestAdminAdvisoryCreateRejectsDockerCoverage(t *testing.T) {
 	if location := rec.Header().Get("Location"); location != "" {
 		t.Fatalf("Docker validation error redirected to %q", location)
 	}
-	if body := rec.Body.String(); !strings.Contains(body, "Docker is inventory-only") {
-		t.Fatalf("body missing Docker inventory-only error:\n%s", body)
+	if body := rec.Body.String(); !strings.Contains(body, "inventory-only and cannot be used") {
+		t.Fatalf("body missing inventory-only error:\n%s", body)
 	}
 	advisories, err := store.ListManualAdvisories(context.Background(), 10)
 	if err != nil {

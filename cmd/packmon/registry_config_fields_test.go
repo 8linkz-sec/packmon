@@ -4,6 +4,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
 // registryStringFields returns the name of every plain string field on
@@ -249,5 +251,73 @@ func TestInheritFallbackCoversTheCollectionFields(t *testing.T) {
 	}
 	if len(kept.SwiftPMGitAllowedHosts) != 1 || kept.SwiftPMGitAllowedHosts[0] != "own.internal" {
 		t.Errorf("allowed hosts = %v, want the explicit list kept", kept.SwiftPMGitAllowedHosts)
+	}
+}
+
+func TestChocolateyFeedURLsConfigDefaultsInheritanceAndValidation(t *testing.T) {
+	t.Parallel()
+
+	defaults := latestRegistryConfig{}.withDefaults()
+	if len(defaults.ChocolateyFeedURLs) != 1 || defaults.ChocolateyFeedURLs[0] != defaultChocolateyFeedURL || defaults.ChocolateyFeedURLsConfigured {
+		t.Fatalf("default chocolatey feeds = %v (configured=%v), want [%s] unconfigured", defaults.ChocolateyFeedURLs, defaults.ChocolateyFeedURLsConfigured, defaultChocolateyFeedURL)
+	}
+
+	explicit := latestRegistryConfig{ChocolateyFeedURLs: []string{"https://www.myget.org/F/vm-packages/api/v2/", " https://community.chocolatey.org/api/v2 ", "https://www.myget.org/F/vm-packages/api/v2"}}.withDefaults()
+	if got := strings.Join(explicit.ChocolateyFeedURLs, ","); got != "https://www.myget.org/F/vm-packages/api/v2,https://community.chocolatey.org/api/v2" {
+		t.Fatalf("explicit chocolatey feeds = %q, want trimmed, deduplicated, ordered list", got)
+	}
+	if !explicit.ChocolateyFeedURLsConfigured {
+		t.Fatal("ChocolateyFeedURLsConfigured = false, want true for an explicit list")
+	}
+	if !latestRegistryMirrorConfigured(explicit, domain.EcosystemChocolatey) {
+		t.Fatal("latestRegistryMirrorConfigured(chocolatey) = false, want true for explicit feeds")
+	}
+
+	fallback := latestRegistryConfig{ChocolateyFeedURLs: []string{"https://feeds.internal/api/v2"}, ChocolateyFeedURLsConfigured: true}
+	merged := latestRegistryConfig{}.inheritFallback(fallback)
+	if len(merged.ChocolateyFeedURLs) != 1 || merged.ChocolateyFeedURLs[0] != "https://feeds.internal/api/v2" || !merged.ChocolateyFeedURLsConfigured {
+		t.Fatalf("inherited chocolatey feeds = %v (configured=%v), want fallback list", merged.ChocolateyFeedURLs, merged.ChocolateyFeedURLsConfigured)
+	}
+	merged.ChocolateyFeedURLs[0] = "https://evil.internal"
+	if fallback.ChocolateyFeedURLs[0] != "https://feeds.internal/api/v2" {
+		t.Fatal("inherited chocolatey feed list aliases the fallback")
+	}
+	own := latestRegistryConfig{ChocolateyFeedURLs: []string{"https://own.internal/api/v2"}}.inheritFallback(fallback)
+	if len(own.ChocolateyFeedURLs) != 1 || own.ChocolateyFeedURLs[0] != "https://own.internal/api/v2" {
+		t.Fatalf("own chocolatey feeds = %v, want the explicit list kept", own.ChocolateyFeedURLs)
+	}
+
+	cfg := cliRegistryConfig{ChocolateyFeedURLs: []string{"https://www.myget.org/F/vm-packages/api/v2", "http://127.0.0.1:8081/api/v2"}}
+	if err := normalizeCLIRegistryConfig(&cfg); err != nil {
+		t.Fatalf("normalizeCLIRegistryConfig(valid feeds) error = %v", err)
+	}
+	for _, bad := range []string{"http://feeds.example/api/v2", "https://user:pw@feeds.example/api/v2", "https://feeds.example/api/v2?x=1", "ftp://feeds.example"} {
+		cfg := cliRegistryConfig{ChocolateyFeedURLs: []string{bad}}
+		if err := normalizeCLIRegistryConfig(&cfg); err == nil || !strings.Contains(err.Error(), "registries.chocolatey_feed_urls") {
+			t.Fatalf("normalizeCLIRegistryConfig(%q) error = %v, want chocolatey_feed_urls rejection", bad, err)
+		}
+	}
+
+	var settings scanSettings
+	applyCLIRegistryConfig(&settings, cliRegistryConfig{ChocolateyFeedURLs: []string{"https://a.internal/api/v2"}})
+	applyCLIRegistryConfig(&settings, cliRegistryConfig{ChocolateyFeedURLs: []string{"https://b.internal/api/v2"}})
+	if got := strings.Join(settings.LatestRegistry.ChocolateyFeedURLs, ","); got != "https://b.internal/api/v2" || !settings.LatestRegistry.ChocolateyFeedURLsConfigured {
+		t.Fatalf("applied chocolatey feeds = %q, want the later config layer to replace the ordered list", got)
+	}
+}
+
+func TestChocolateyFeedURLsEnvOverridesConfig(t *testing.T) {
+	t.Setenv("PACKMON_CHOCOLATEY_FEED_URLS", " https://env-a.internal/api/v2 , https://env-b.internal/api/v2/ ")
+	settings := scanSettings{LatestRegistry: latestRegistryConfig{ChocolateyFeedURLs: []string{"https://cfg.internal/api/v2"}, ChocolateyFeedURLsConfigured: true}}
+	if err := applyLatestRegistryEnvSettings(&settings); err != nil {
+		t.Fatalf("applyLatestRegistryEnvSettings() error = %v", err)
+	}
+	if got := strings.Join(settings.LatestRegistry.ChocolateyFeedURLs, ","); got != "https://env-a.internal/api/v2,https://env-b.internal/api/v2" {
+		t.Fatalf("env chocolatey feeds = %q, want CSV env list to replace config", got)
+	}
+
+	t.Setenv("PACKMON_CHOCOLATEY_FEED_URLS", "http://insecure.internal/api/v2")
+	if err := applyLatestRegistryEnvSettings(&settings); err == nil || !strings.Contains(err.Error(), "PACKMON_CHOCOLATEY_FEED_URLS") {
+		t.Fatalf("applyLatestRegistryEnvSettings(insecure) error = %v, want rejection naming the variable", err)
 	}
 }

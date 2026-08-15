@@ -2581,6 +2581,11 @@ func TestHandleCheck_InvalidPackageFields(t *testing.T) {
 			body: `{"packages":[{"ecosystem":"docker","name":"alpine","version":"3.20"}]}`,
 			want: "packages[1].ecosystem is invalid",
 		},
+		{
+			name: "chocolatey ecosystem is not a scan ecosystem",
+			body: `{"packages":[{"ecosystem":"chocolatey","name":"7zip","version":"23.1.0"}]}`,
+			want: "packages[1].ecosystem is invalid",
+		},
 	}
 
 	for _, tt := range tests {

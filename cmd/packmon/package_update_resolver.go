@@ -149,6 +149,16 @@ var latestVersionResolverRegistry = map[domain.Ecosystem]latestVersionResolverEn
 		publicLookupAllowed:          allowAllPublicSourceRefs,
 		allowLookupWithoutSourceRefs: true,
 	},
+	domain.EcosystemChocolatey: {
+		fetchLatest: func(ctx context.Context, r packageUpdateResolver, name string) string {
+			return fetchChocolateyLatestFromFeeds(ctx, r.latestRegistry.ChocolateyFeedURLs, name)
+		},
+		publicLookupAllowed:          allowAllPublicSourceRefs,
+		allowLookupWithoutSourceRefs: true,
+		configuredLatestRegistryMirror: func(c latestRegistryConfig) bool {
+			return c.withDefaults().ChocolateyFeedURLsConfigured
+		},
+	},
 }
 
 func latestVersionResolverFor(eco domain.Ecosystem) (latestVersionResolverEntry, bool) {

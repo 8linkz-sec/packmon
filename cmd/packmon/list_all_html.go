@@ -422,6 +422,9 @@ func listAllHTMLPackageStatus(row listAllRow, findingStatuses map[string]listAll
 	if strings.EqualFold(strings.TrimSpace(row.Update), "pinned") {
 		return "Digest pinned"
 	}
+	if strings.EqualFold(strings.TrimSpace(row.Update), "unpinned") {
+		return "Unpinned"
+	}
 	if strings.EqualFold(strings.TrimSpace(row.Update), "unknown") ||
 		strings.EqualFold(strings.TrimSpace(row.Latest), "unknown") {
 		return "Unknown"
@@ -457,6 +460,8 @@ func listAllHTMLPackageSource(row listAllRow) string {
 	switch {
 	case strings.EqualFold(strings.TrimSpace(row.Ecosystem), string(domain.EcosystemDocker)):
 		return "docker"
+	case strings.EqualFold(strings.TrimSpace(row.Ecosystem), string(domain.EcosystemChocolatey)):
+		return "chocolatey"
 	case listAllRowLooksLikeSBOM(row):
 		return "sbom"
 	case strings.TrimSpace(row.LockFile) != "":

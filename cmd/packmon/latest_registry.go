@@ -21,6 +21,9 @@ const (
 	defaultPubHostedURL              = "https://pub.dev"
 	defaultHexAPIBaseURL             = "https://hex.pm/api"
 	defaultNuGetV3BaseURL            = "https://api.nuget.org/v3-flatcontainer"
+	// defaultChocolateyFeedURL is the Chocolatey community NuGet v2 feed used
+	// for inventory latest-version lookups when no feed list is configured.
+	defaultChocolateyFeedURL = "https://community.chocolatey.org/api/v2"
 )
 
 type cliRegistryConfig struct {
@@ -38,6 +41,10 @@ type cliRegistryConfig struct {
 	PubHostedURL              string            `yaml:"pub_hosted_url"`
 	HexAPIBaseURL             string            `yaml:"hex_api_base_url"`
 	NuGetV3BaseURL            string            `yaml:"nuget_v3_base_url"`
+	// ChocolateyFeedURLs is the ordered list of NuGet v2 feeds queried for
+	// Chocolatey inventory latest versions; the first feed that knows the
+	// package wins. When set it replaces the default community feed.
+	ChocolateyFeedURLs []string `yaml:"chocolatey_feed_urls"`
 }
 
 type latestRegistryConfig struct {
@@ -69,6 +76,8 @@ type latestRegistryConfig struct {
 	HexAPIBaseURLConfigured             bool
 	NuGetV3BaseURL                      string
 	NuGetV3BaseURLConfigured            bool
+	ChocolateyFeedURLs                  []string
+	ChocolateyFeedURLsConfigured        bool
 }
 
 func defaultLatestRegistryConfig() latestRegistryConfig {
@@ -85,6 +94,7 @@ func defaultLatestRegistryConfig() latestRegistryConfig {
 		PubHostedURL:              defaultPubHostedURL,
 		HexAPIBaseURL:             defaultHexAPIBaseURL,
 		NuGetV3BaseURL:            defaultNuGetV3BaseURL,
+		ChocolateyFeedURLs:        []string{defaultChocolateyFeedURL},
 	}
 }
 
@@ -109,6 +119,12 @@ func (c latestRegistryConfig) withDefaults() latestRegistryConfig {
 	c.PubHostedURL = strings.TrimRight(strings.TrimSpace(c.PubHostedURL), "/")
 	c.HexAPIBaseURL = strings.TrimRight(strings.TrimSpace(c.HexAPIBaseURL), "/")
 	c.NuGetV3BaseURL = strings.TrimRight(strings.TrimSpace(c.NuGetV3BaseURL), "/")
+	c.ChocolateyFeedURLs = dedupFeedURLList(c.ChocolateyFeedURLs)
+	if len(c.ChocolateyFeedURLs) == 0 {
+		c.ChocolateyFeedURLs = []string{defaultChocolateyFeedURL}
+	} else if len(c.ChocolateyFeedURLs) != 1 || c.ChocolateyFeedURLs[0] != defaultChocolateyFeedURL {
+		c.ChocolateyFeedURLsConfigured = true
+	}
 	if c.NPMRegistryBaseURL == "" {
 		c.NPMRegistryBaseURL = defaultNPMRegistryBaseURL
 	} else if c.NPMRegistryBaseURL != defaultNPMRegistryBaseURL {
@@ -213,6 +229,10 @@ func (c latestRegistryConfig) inheritFallback(fallback latestRegistryConfig) lat
 		c.SwiftPMGitAllowedHosts = append([]string(nil), fallback.SwiftPMGitAllowedHosts...)
 		c.SwiftPMGitAllowedHostsConfigured = fallback.SwiftPMGitAllowedHostsConfigured
 	}
+	if len(c.ChocolateyFeedURLs) == 0 && len(fallback.ChocolateyFeedURLs) > 0 {
+		c.ChocolateyFeedURLs = append([]string(nil), fallback.ChocolateyFeedURLs...)
+		c.ChocolateyFeedURLsConfigured = fallback.ChocolateyFeedURLsConfigured
+	}
 	if strings.TrimSpace(c.CRANMirrorURL) == "" {
 		c.CRANMirrorURL = fallback.CRANMirrorURL
 		c.CRANMirrorURLConfigured = fallback.CRANMirrorURLConfigured
@@ -293,7 +313,51 @@ func normalizeCLIRegistryConfig(cfg *cliRegistryConfig) error {
 	if err != nil {
 		return err
 	}
+	cfg.ChocolateyFeedURLs, err = normalizeFeedURLList("registries.chocolatey_feed_urls", cfg.ChocolateyFeedURLs)
+	if err != nil {
+		return err
+	}
 	return nil
+}
+
+// normalizeFeedURLList validates every entry of an ordered feed list with the
+// same rules as single registry base URLs and drops blanks and duplicates
+// while preserving order.
+func normalizeFeedURLList(name string, urls []string) ([]string, error) {
+	out := make([]string, 0, len(urls))
+	for _, raw := range urls {
+		normalized, err := normalizeLatestRegistryBaseURL(name, raw)
+		if err != nil {
+			return nil, err
+		}
+		if normalized != "" {
+			out = append(out, normalized)
+		}
+	}
+	return dedupFeedURLList(out), nil
+}
+
+func dedupFeedURLList(urls []string) []string {
+	if len(urls) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(urls))
+	out := make([]string, 0, len(urls))
+	for _, raw := range urls {
+		value := strings.TrimRight(strings.TrimSpace(raw), "/")
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func applyCLIRegistryConfig(settings *scanSettings, cfg cliRegistryConfig) {
@@ -336,6 +400,12 @@ func applyCLIRegistryConfig(settings *scanSettings, cfg cliRegistryConfig) {
 	if len(cfg.SwiftPMGitAllowedHosts) > 0 {
 		settings.LatestRegistry.SwiftPMGitAllowedHosts = mergeStringSlices(settings.LatestRegistry.SwiftPMGitAllowedHosts, cfg.SwiftPMGitAllowedHosts)
 		settings.LatestRegistry.SwiftPMGitAllowedHostsConfigured = true
+	}
+	if len(cfg.ChocolateyFeedURLs) > 0 {
+		// Ordered feed lists replace rather than merge: order decides which
+		// feed answers first, so a later layer states the complete list.
+		settings.LatestRegistry.ChocolateyFeedURLs = append([]string(nil), cfg.ChocolateyFeedURLs...)
+		settings.LatestRegistry.ChocolateyFeedURLsConfigured = true
 	}
 	if cfg.CRANMirrorURL != "" {
 		settings.LatestRegistry.CRANMirrorURL = cfg.CRANMirrorURL
@@ -467,6 +537,16 @@ func applyLatestRegistryEnvSettings(settings *scanSettings) error {
 		}
 		settings.LatestRegistry.NuGetV3BaseURL = baseURL
 		settings.LatestRegistry.NuGetV3BaseURLConfigured = true
+	}
+	if raw := strings.TrimSpace(os.Getenv("PACKMON_CHOCOLATEY_FEED_URLS")); raw != "" {
+		feeds, err := normalizeFeedURLList("PACKMON_CHOCOLATEY_FEED_URLS", splitCSV(raw))
+		if err != nil {
+			return err
+		}
+		if len(feeds) > 0 {
+			settings.LatestRegistry.ChocolateyFeedURLs = feeds
+			settings.LatestRegistry.ChocolateyFeedURLsConfigured = true
+		}
 	}
 	return nil
 }

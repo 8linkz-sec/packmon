@@ -308,9 +308,9 @@ func validateManualAdvisoryInput(input manualAdvisoryInput) (manualAdvisoryInput
 		if !ecosystem.Valid() {
 			validation.addField("ecosystem", web.Message("admin.advisories.field.ecosystem_required"))
 			validation.setMessage(web.Message("admin.advisories.error.unknown_ecosystem"))
-		} else if ecosystem == domain.EcosystemDocker {
-			validation.addField("ecosystem", web.Message("admin.advisories.error.docker_unsupported")+".")
-			validation.setMessage(web.Message("admin.advisories.error.docker_unsupported"))
+		} else if ecosystem.InventoryOnly() {
+			validation.addField("ecosystem", web.Message("admin.advisories.error.inventory_only_unsupported")+".")
+			validation.setMessage(web.Message("admin.advisories.error.inventory_only_unsupported"))
 		}
 	}
 	if len(input.Name) > ManualAdvisoryNameMaxLength {

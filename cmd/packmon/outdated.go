@@ -257,13 +257,11 @@ func resolveOutdatedStatuses(packages []outdatedPackage, opts outdatedOptions) [
 	fallbackResolver := opts.resolver
 	fallbackResolver.latestRegistry = fallbackResolver.latestRegistry.inheritFallback(opts.LatestRegistry)
 	lookup := newCachedPackageUpdateLookupWithResolver(fallbackResolver)
-	cargoCount := 0
+	ecosystems := make([]domain.Ecosystem, 0, len(packages))
 	for _, p := range packages {
-		if p.Ecosystem == domain.EcosystemCargo {
-			cargoCount++
-		}
+		ecosystems = append(ecosystems, p.Ecosystem)
 	}
-	announceLookupPhase(os.Stderr, len(packages), cargoCount, opts.Quiet)
+	announceLookupPhaseWithCounts(os.Stderr, len(packages), countSlowLookups(ecosystems), opts.Quiet)
 	progress := startLookupProgress(os.Stderr, len(packages), opts.Quiet, lookupProgressInterval)
 	statuses := resolveLatestWithWorkerPool(ctx, packages, func(ctx context.Context, p outdatedPackage) packageLatestStatus {
 		defer progress.increment()

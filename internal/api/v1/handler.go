@@ -662,7 +662,7 @@ func validateCheckPackages(packages []domain.Package) error {
 }
 
 func validCheckPackageEcosystem(ecosystem domain.Ecosystem) bool {
-	return ecosystem.Valid() && ecosystem != domain.EcosystemDocker
+	return ecosystem.ScanInput()
 }
 
 type checkPackageKey struct {

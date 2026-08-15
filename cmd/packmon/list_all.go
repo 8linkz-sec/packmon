@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/8linkz-sec/packmon/internal/chocolatey"
 	"github.com/8linkz-sec/packmon/internal/dockerimage"
 	"github.com/8linkz-sec/packmon/internal/domain"
 	"github.com/8linkz-sec/packmon/internal/findinglinks"
@@ -199,6 +200,15 @@ func collectListAllInventoryPhase(settings scanSettings, collection *scanner.Pac
 		inventoryWarnings = append(inventoryWarnings, dockerWarnings...)
 		packages = append(packages, dockerRows...)
 	}
+	chocoRows, chocoWarnings, chocoErr := collectChocolateyPackagesWithWarnings(absPath, settings)
+	if chocoErr != nil {
+		warning := "chocolatey inventory error: " + chocoErr.Error()
+		inventoryWarnings = append(inventoryWarnings, warning)
+		fmt.Fprintf(os.Stderr, "warning: %s\n", termtext.Sanitize(warning))
+	} else {
+		inventoryWarnings = append(inventoryWarnings, chocoWarnings...)
+		packages = append(packages, chocoRows...)
+	}
 	return listAllInventoryPhaseResult{packages: packages, warnings: inventoryWarnings}, nil
 }
 
@@ -336,15 +346,64 @@ func collectDockerPackagesWithWarnings(absPath string, settings scanSettings) ([
 }
 
 func listAllAllowsDocker(ecosystems []string) bool {
+	return listAllAllowsInventoryEcosystem(ecosystems, domain.EcosystemDocker)
+}
+
+func listAllAllowsChocolatey(ecosystems []string) bool {
+	return listAllAllowsInventoryEcosystem(ecosystems, domain.EcosystemChocolatey)
+}
+
+func listAllAllowsInventoryEcosystem(ecosystems []string, want domain.Ecosystem) bool {
 	if len(ecosystems) == 0 {
 		return true
 	}
 	for _, raw := range ecosystems {
-		if strings.EqualFold(strings.TrimSpace(raw), string(domain.EcosystemDocker)) {
+		if strings.EqualFold(strings.TrimSpace(raw), string(want)) {
 			return true
 		}
 	}
 	return false
+}
+
+// collectChocolateyPackagesWithWarnings gathers the metadata-only Chocolatey
+// inventory (config.xml package lists and choco install lines) for list-all
+// rows. Like Docker rows, these never enter the scan collection and are never
+// sent to /api/v1/check.
+func collectChocolateyPackagesWithWarnings(absPath string, settings scanSettings) ([]listAllPackage, []string, error) {
+	if !listAllAllowsChocolatey(settings.Ecosystems) {
+		return nil, nil, nil
+	}
+	collection, err := chocolatey.Collect(absPath, settings.MaxDepth)
+	if err != nil {
+		return nil, nil, err
+	}
+	var warnings []string
+	for _, discoveryWarning := range collection.DiscoveryWarnings {
+		warning := "chocolatey discovery warning in " + discoveryWarning
+		warnings = append(warnings, warning)
+		fmt.Fprintf(os.Stderr, "warning: %s\n", termtext.Sanitize(warning))
+	}
+	for _, parseErr := range collection.ParseErrors {
+		warning := "chocolatey parse error in " + parseErr
+		warnings = append(warnings, warning)
+		fmt.Fprintf(os.Stderr, "warning: %s\n", termtext.Sanitize(warning))
+	}
+	rows := make([]listAllPackage, 0, len(collection.Packages))
+	for _, entry := range collection.Packages {
+		pkg := entry.Package()
+		rows = append(rows, listAllPackage{
+			Name:       pkg.Name,
+			Version:    pkg.Version,
+			Ecosystem:  pkg.Ecosystem,
+			LockFile:   entry.SourceFile,
+			SourceType: string(entry.SourceType),
+			Direct:     pkg.Direct,
+			Scope:      "runtime",
+			Relation:   "declared",
+			Flags:      strings.Join(entry.Flags, ", "),
+		})
+	}
+	return rows, warnings, nil
 }
 
 type listAllPackageReportOptions struct {
@@ -364,13 +423,11 @@ func buildListAllPackageReportWithOptions(parent context.Context, packages []lis
 			latest[i] = packageLatestStatus{Latest: "unknown", Update: "-", Unknown: true}
 		}
 	} else {
-		cargoCount := 0
+		ecosystems := make([]domain.Ecosystem, 0, len(packages))
 		for _, p := range packages {
-			if p.Ecosystem == domain.EcosystemCargo {
-				cargoCount++
-			}
+			ecosystems = append(ecosystems, p.Ecosystem)
 		}
-		announceLookupPhase(os.Stderr, len(packages), cargoCount, options.Quiet)
+		announceLookupPhaseWithCounts(os.Stderr, len(packages), countSlowLookups(ecosystems), options.Quiet)
 		lookup := newCachedPackageUpdateLookupWithResolver(options.resolver)
 		// Scoped to this call only: a hung docker daemon must not block the
 		// whole lookup phase, which otherwise carries no deadline.
@@ -436,9 +493,13 @@ func buildListAllPackageReportWithOptions(parent context.Context, packages []lis
 		status := packageStatusFromListAllPackage(p)
 		scope := packageStatusScope(status)
 		report.ScopeCounts[scope]++
+		installed := p.Version
+		if strings.TrimSpace(installed) == "" {
+			installed = "-"
+		}
 		report.Rows = append(report.Rows, listAllRow{
 			Name:       p.Name,
-			Installed:  p.Version,
+			Installed:  installed,
 			Latest:     latestCol,
 			LatestCopy: lat.LatestCopy,
 			Update:     update,
@@ -521,6 +582,9 @@ func resolveListAllLatestWithCachedDockerLookup(ctx context.Context, p listAllPa
 	if !latestLookupAllowed(p.Ecosystem, p.SourceRefs, lookup) {
 		return unknownLatestStatus()
 	}
+	if p.Ecosystem == domain.EcosystemChocolatey && strings.TrimSpace(p.Version) == "" {
+		return resolveUnpinnedInventoryStatus(ctx, p, lookup)
+	}
 	return resolvePackageUpdateStatusWithLookup(ctx, packageUpdateQuery{
 		name:      p.Name,
 		installed: p.Version,
@@ -529,6 +593,19 @@ func resolveListAllLatestWithCachedDockerLookup(ctx context.Context, p listAllPa
 		direct:    p.Direct,
 		parents:   p.Parents,
 	}, lookup)
+}
+
+// resolveUnpinnedInventoryStatus handles inventory rows that declare a package
+// without any version (for example a Chocolatey config.xml entry, which always
+// installs the feed's latest release). The latest version is still looked up
+// for the report, but there is no installed version to compare, so the row is
+// reported as "unpinned" rather than as an available update.
+func resolveUnpinnedInventoryStatus(ctx context.Context, p listAllPackage, lookup packageUpdateLookup) packageLatestStatus {
+	latest := lookup.fetchLatest(ctx, p.Ecosystem, p.Name)
+	if latest == "" {
+		return packageLatestStatus{Latest: "unknown", Update: "unpinned", Unknown: true}
+	}
+	return packageLatestStatus{Latest: latest, Update: "unpinned"}
 }
 
 func inspectListAllLocalDockerDigests(ctx context.Context, packages []listAllPackage) map[string]string {
@@ -562,6 +639,9 @@ func listAllPackageSource(p listAllPackage) string {
 	}
 	if p.Ecosystem == domain.EcosystemDocker {
 		return "docker"
+	}
+	if p.Ecosystem == domain.EcosystemChocolatey {
+		return "chocolatey"
 	}
 	if strings.TrimSpace(p.LockFile) != "" {
 		return "lockfile"
@@ -1161,6 +1241,8 @@ func listAllInventorySourceKind(row listAllRow) string {
 	switch source {
 	case "dockerfile", "compose", "docker":
 		return "docker"
+	case "config.xml", "choco-install", "chocolatey":
+		return "chocolatey"
 	case "sbom":
 		return "sbom"
 	case "lockfile":
@@ -1168,6 +1250,9 @@ func listAllInventorySourceKind(row listAllRow) string {
 	}
 	if strings.EqualFold(strings.TrimSpace(row.Ecosystem), string(domain.EcosystemDocker)) {
 		return "docker"
+	}
+	if strings.EqualFold(strings.TrimSpace(row.Ecosystem), string(domain.EcosystemChocolatey)) {
+		return "chocolatey"
 	}
 	if listAllRowLooksLikeSBOM(row) {
 		return "sbom"

@@ -12,7 +12,7 @@ func TestEcosystemValidAcceptsEverySupportedEcosystem(t *testing.T) {
 		EcosystemNPM, EcosystemPyPI, EcosystemGo, EcosystemMaven, EcosystemCargo,
 		EcosystemNuGet, EcosystemComposer, EcosystemGem, EcosystemPub,
 		EcosystemGitHubActions, EcosystemCocoaPods, EcosystemSwiftPM, EcosystemHex,
-		EcosystemCRAN, EcosystemDocker,
+		EcosystemCRAN, EcosystemDocker, EcosystemChocolatey,
 	} {
 		if !ecosystem.Valid() {
 			t.Errorf("Ecosystem(%q).Valid() = false, want it supported", ecosystem)
@@ -64,5 +64,35 @@ func TestScanModeValuesListsTheWholePublicEnum(t *testing.T) {
 	values[0] = "mutated"
 	if again := ScanModeValues(); again[0] == "mutated" {
 		t.Fatal("ScanModeValues() returns a shared backing array")
+	}
+}
+
+// TestEcosystemInventoryOnly pins the metadata-only ecosystems: they appear in
+// CLI inventory reports but are never scan inputs for /api/v1/check, feed
+// matching, or manual advisories.
+func TestEcosystemInventoryOnly(t *testing.T) {
+	t.Parallel()
+
+	for _, ecosystem := range []Ecosystem{EcosystemDocker, EcosystemChocolatey} {
+		if !ecosystem.Valid() {
+			t.Errorf("Ecosystem(%q).Valid() = false, want valid", ecosystem)
+		}
+		if !ecosystem.InventoryOnly() {
+			t.Errorf("Ecosystem(%q).InventoryOnly() = false, want true", ecosystem)
+		}
+		if ecosystem.ScanInput() {
+			t.Errorf("Ecosystem(%q).ScanInput() = true, want false", ecosystem)
+		}
+	}
+	for _, ecosystem := range []Ecosystem{EcosystemNPM, EcosystemNuGet, EcosystemGitHubActions} {
+		if ecosystem.InventoryOnly() {
+			t.Errorf("Ecosystem(%q).InventoryOnly() = true, want false", ecosystem)
+		}
+		if !ecosystem.ScanInput() {
+			t.Errorf("Ecosystem(%q).ScanInput() = false, want true", ecosystem)
+		}
+	}
+	if Ecosystem("bogus").ScanInput() {
+		t.Errorf("invalid ecosystem must not be a scan input")
 	}
 }
