@@ -199,11 +199,13 @@ reporting.
 
 A freshly started Packmon server has an **empty advisory database**. The bare
 server binary does not sync feeds on startup (`PACKMON_FEED_SYNC_ON_STARTUP`
-defaults to `false`); the repository `docker-compose.yml` overrides this to
-`true`, so the bundled Compose stack starts its first sync automatically. In
-both cases the background sync then runs on `PACKMON_FEED_SYNC_INTERVAL`
-(`8h`). Until the first sync finishes, a scan can legitimately come back with
-zero findings simply because there is nothing to match against.
+defaults to `false`); the repository `docker-compose.yml` and the `.env`
+seeded from `.env.example` both set it to `true`, so the bundled Compose stack
+starts its first sync automatically. Keep that value at `true` in `.env` --
+with `false` a fresh stack waits a full `PACKMON_FEED_SYNC_INTERVAL` (`8h`)
+before the first import. Until the first sync finishes, a scan can
+legitimately come back with zero findings simply because there is nothing to
+match against.
 
 On a new server, trigger the sync yourself under `/admin/feeds` and wait for the
 feeds to report a successful import before you judge any scan result. The first
@@ -926,8 +928,8 @@ Important environment variables:
 - `PACKMON_AUDIT_RETENTION_INTERVAL=24h` (background prune cadence)
 - `PACKMON_FEED_SYNC_INTERVAL=8h`
 - `PACKMON_FEED_SYNC_ON_STARTUP=false` (binary default; the repository
-  `docker-compose.yml` sets it to `true` so a fresh Compose stack syncs
-  immediately)
+  `docker-compose.yml` and `.env.example` set it to `true` so a fresh Compose
+  stack syncs immediately -- a `false` in `.env` overrides the Compose default)
 - `PACKMON_FEED_IMPORT_SECRET` (required for production
   `POST /api/v1/feeds/{feed}/import`; send it as
   `X-Packmon-Feed-Import-Secret`)

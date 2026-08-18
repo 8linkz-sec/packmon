@@ -3,7 +3,7 @@
 ## Local Setup
 
 Install the pinned toolchain from `requirements/packmon-tools.tsv`. The current
-Go toolchain is Go 1.26.5, matching `go.mod` and the Docker builder image. Run
+Go toolchain is Go 1.26.6, matching `go.mod` and the Docker builder image. Run
 the requirement check for the profile you need before building.
 
 Windows PowerShell:
