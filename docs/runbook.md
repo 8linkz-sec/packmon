@@ -483,7 +483,8 @@ because CVEs enriched so far drop out of the discovery query. Repeated
 Global self-sync scheduling uses:
 
 - `PACKMON_FEED_SYNC_INTERVAL=8h`
-- `PACKMON_FEED_SYNC_ON_STARTUP=true`
+- `PACKMON_FEED_SYNC_ON_STARTUP=true` (Compose/`.env.example` value; the bare
+  binary defaults to `false`)
 
 Per-feed cadence saved from `/admin/feeds` overrides the global interval for
 that feed and must be at least `15m`. Disable startup sync only during planned

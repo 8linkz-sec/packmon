@@ -100,7 +100,7 @@
           <th class="px-5 py-2">{{t "feeds.table.feed"}}</th>
           <th class="px-5 py-2">{{t "feeds.table.status"}}</th>
           <th class="px-5 py-2">{{t "feeds.table.last_sync"}}</th>
-          <th class="px-5 py-2 text-end">{{t "feeds.table.entries"}}</th>
+          <th class="px-5 py-2 text-end" title="{{t "feeds.table.entries_hint"}}">{{t "feeds.table.entries"}}</th>
           <th class="px-5 py-2">{{t "feeds.table.message"}}</th>
         </tr>
       </thead>
@@ -114,7 +114,7 @@
           <td class="px-5 py-2 text-muted">
             {{template "feed-last-sync-cell" .}}
           </td>
-          <td class="px-5 py-2 text-end">{{.EntriesSynced}} / {{.EntriesTotal}}</td>
+          <td class="px-5 py-2 text-end" title="{{t "feeds.table.entries_hint"}}">{{.EntriesSynced}} / {{.EntriesTotal}}</td>
           <td class="px-5 py-2 text-xs text-muted">
             {{if .LastSyncStatus}}
               <div class="mb-1 text-muted">{{t "feeds.last_result"}} <span class="font-medium">{{.LastSyncStatus}}</span></div>

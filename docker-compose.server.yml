@@ -49,7 +49,7 @@ services:
         VERSION: ${PACKMON_VERSION:-dev}
         COMMIT: ${PACKMON_COMMIT:-none}
         DATE: ${PACKMON_BUILD_DATE:-unknown}
-        PACKMON_GO_BUILDER_IMAGE: ${PACKMON_GO_BUILDER_IMAGE:-golang:1.26.5-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2}
+        PACKMON_GO_BUILDER_IMAGE: ${PACKMON_GO_BUILDER_IMAGE:-golang:1.26.6-alpine@sha256:3889b425f035be855a72fb4755265311293b6d414521f0a519d819df32222d83}
         PACKMON_ALPINE_RUNTIME_IMAGE: ${PACKMON_ALPINE_RUNTIME_IMAGE:-alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b}
     # Operator config comes from .env when present; the explicit block below is
     # the security contract and always wins over env_file. required: false so a
@@ -100,7 +100,7 @@ services:
         VERSION: ${PACKMON_VERSION:-dev}
         COMMIT: ${PACKMON_COMMIT:-none}
         DATE: ${PACKMON_BUILD_DATE:-unknown}
-        PACKMON_GO_BUILDER_IMAGE: ${PACKMON_GO_BUILDER_IMAGE:-golang:1.26.5-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2}
+        PACKMON_GO_BUILDER_IMAGE: ${PACKMON_GO_BUILDER_IMAGE:-golang:1.26.6-alpine@sha256:3889b425f035be855a72fb4755265311293b6d414521f0a519d819df32222d83}
         PACKMON_ALPINE_RUNTIME_IMAGE: ${PACKMON_ALPINE_RUNTIME_IMAGE:-alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b}
     command: ["migrate"]
     environment:
