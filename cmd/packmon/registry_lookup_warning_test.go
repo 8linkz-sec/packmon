@@ -301,8 +301,7 @@ func TestAnnounceLookupPhase(t *testing.T) {
 // the outer context, captured before the per-request wrap, is not canceled)
 // counts as a refusal, but a policy rejection that never reaches git does not.
 func TestGitRemoteTagsRecordsRefusalOnCommandError(t *testing.T) {
-	t.Parallel()
-
+	// Not parallel: swaps the package-level gitCommandOutput stub.
 	original := gitCommandOutput
 	t.Cleanup(func() { gitCommandOutput = original })
 	gitCommandOutput = func(context.Context, ...string) ([]byte, error) {
@@ -330,8 +329,7 @@ func TestGitRemoteTagsRecordsRefusalOnCommandError(t *testing.T) {
 // TestGitRemoteTagsRecordsRefusalOnCommandError for the other git lookup entry
 // point, which has its own argument guards ahead of the git invocation.
 func TestGitRemoteTagCommitRecordsRefusalOnCommandError(t *testing.T) {
-	t.Parallel()
-
+	// Not parallel: swaps the package-level gitCommandOutput stub.
 	original := gitCommandOutput
 	t.Cleanup(func() { gitCommandOutput = original })
 	gitCommandOutput = func(context.Context, ...string) ([]byte, error) {

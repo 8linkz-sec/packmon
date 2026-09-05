@@ -228,7 +228,7 @@ func TestPythonToolVenvDirSeparatesPackagesAndVersions(t *testing.T) {
 		t.Fatal("two tool versions resolved to the same virtualenv")
 	}
 	for _, dir := range []string{first, second} {
-		if !strings.HasPrefix(dir, cacheRoot) {
+		if !strings.HasPrefix(filepath.Clean(dir), filepath.Clean(cacheRoot)) {
 			t.Errorf("venv dir %q escaped the configured cache root %q", dir, cacheRoot)
 		}
 	}

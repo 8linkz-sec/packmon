@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -344,10 +345,29 @@ func TestSchedulerAsyncSchedulesSynchronouslyWhenSaturated(t *testing.T) {
 	}
 }
 
+// syncLogBuffer is a race-safe log sink for output written from the async
+// scheduler goroutine.
+type syncLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 func TestSchedulerAsyncRecoversPanicsAndReleasesSlot(t *testing.T) {
 	t.Parallel()
 
-	var logs bytes.Buffer
+	var logs syncLogBuffer
 	panicValue := "mark panic " + strings.Repeat("x", 512) + " tail-marker"
 	store := &schedulerStore{
 		markCalled: make(chan struct{}, 1),

@@ -27,6 +27,7 @@ import (
 // ---------------------------------------------------------------------------
 
 type mockStore struct {
+	mu               sync.Mutex // guards packageLookups and repBatchQueries; HandlePackage queries stores concurrently
 	dashboardErr     error
 	dailyErr         error
 	scansErr         error
@@ -209,7 +210,9 @@ func (m *mockStore) SearchPackages(_ context.Context, params PackageSearchParams
 }
 
 func (m *mockStore) FindVulnerabilities(_ context.Context, _, _, _ string) ([]domain.Finding, error) {
+	m.mu.Lock()
 	m.packageLookups++
+	m.mu.Unlock()
 	if m.vulnErr != nil {
 		return nil, m.vulnErr
 	}
@@ -220,7 +223,9 @@ func (m *mockStore) FindVulnerabilities(_ context.Context, _, _, _ string) ([]do
 }
 
 func (m *mockStore) FindMalicious(_ context.Context, _, _, _ string) ([]domain.Finding, error) {
+	m.mu.Lock()
 	m.packageLookups++
+	m.mu.Unlock()
 	if m.malErr != nil {
 		return nil, m.malErr
 	}
@@ -231,7 +236,9 @@ func (m *mockStore) FindMalicious(_ context.Context, _, _, _ string) ([]domain.F
 }
 
 func (m *mockStore) FindReputationFindings(_ context.Context, _, _, _ string) ([]domain.Finding, error) {
+	m.mu.Lock()
 	m.packageLookups++
+	m.mu.Unlock()
 	if m.repErr != nil {
 		return nil, m.repErr
 	}
@@ -242,12 +249,14 @@ func (m *mockStore) FindReputationFindings(_ context.Context, _, _, _ string) ([
 }
 
 func (m *mockStore) FindReputationFindingsBatch(_ context.Context, packages []db.PackageQuery, source string) ([]domain.Finding, error) {
-	m.packageLookups++
 	copied := append([]db.PackageQuery(nil), packages...)
+	m.mu.Lock()
+	m.packageLookups++
 	m.repBatchQueries = append(m.repBatchQueries, struct {
 		packages []db.PackageQuery
 		source   string
 	}{packages: copied, source: source})
+	m.mu.Unlock()
 	if m.repErr != nil {
 		return nil, m.repErr
 	}
@@ -261,7 +270,9 @@ func (m *mockStore) FindReputationFindingsBatch(_ context.Context, packages []db
 }
 
 func (m *mockStore) FindLifecycleFindingsBatch(_ context.Context, _ []db.PackageQuery, _ time.Time) ([]domain.Finding, error) {
+	m.mu.Lock()
 	m.packageLookups++
+	m.mu.Unlock()
 	if m.lifecycleErr != nil {
 		return nil, m.lifecycleErr
 	}
