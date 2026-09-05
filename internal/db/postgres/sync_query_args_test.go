@@ -106,7 +106,8 @@ func TestSyncLifecycleQueryArgsCombinesTheDeltaWindowWithItsXID(t *testing.T) {
 
 	timeOnly := newSyncLifecycleQueryArgs(db.SyncExportOptions{Since: &since}, snapshot, 0)
 	withXID := newSyncLifecycleQueryArgs(
-		db.SyncExportOptions{Since: &since, SinceXID: 99}, snapshot, 0)
+		db.SyncExportOptions{Since: &since, SinceXID: 99}, snapshot, 0,
+	)
 
 	if len(withXID.args) <= len(timeOnly.args) {
 		t.Fatalf("SinceXID added no bind value: %v", withXID.args)

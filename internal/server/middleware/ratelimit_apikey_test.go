@@ -26,7 +26,8 @@ func requestWithAPIKey(id int) *http.Request {
 	req.RemoteAddr = "203.0.113.7:44321"
 	if id > 0 {
 		req = req.WithContext(requestctx.ContextWithAPIKeyIdentity(
-			req.Context(), requestctx.APIKeyIdentity{ID: id, Name: "client"}))
+			req.Context(), requestctx.APIKeyIdentity{ID: id, Name: "client"},
+		))
 	}
 	return req
 }
@@ -148,7 +149,8 @@ func TestAuthenticatedAPIKeyRateLimitIgnoresAnUnusableIdentity(t *testing.T) {
 	for _, id := range []int{0, -1} {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/check", nil)
 		req = req.WithContext(requestctx.ContextWithAPIKeyIdentity(
-			req.Context(), requestctx.APIKeyIdentity{ID: id}))
+			req.Context(), requestctx.APIKeyIdentity{ID: id},
+		))
 
 		for range 3 {
 			recorder := httptest.NewRecorder()
