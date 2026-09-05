@@ -8,7 +8,7 @@ import (
 func TestSyncCursorZeroAndEffectiveCursor(t *testing.T) {
 	t.Parallel()
 
-	if !((SyncCursor{}).IsZero()) {
+	if !(SyncCursor{}).IsZero() {
 		t.Fatal("empty cursor should be zero")
 	}
 	if (SyncCursor{Malicious: 1}).IsZero() {

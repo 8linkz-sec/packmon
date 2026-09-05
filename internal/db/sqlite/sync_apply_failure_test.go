@@ -100,7 +100,8 @@ func TestApplySyncRollsBackWhenOneTableFails(t *testing.T) {
 	// must have been rolled back with it.
 	var count int
 	if err := store.DB().QueryRow(
-		`SELECT COUNT(*) FROM vulnerabilities_local WHERE id = 'GHSA-sync-1'`).Scan(&count); err != nil {
+		`SELECT COUNT(*) FROM vulnerabilities_local WHERE id = 'GHSA-sync-1'`,
+	).Scan(&count); err != nil {
 		t.Fatalf("count vulnerabilities: %v", err)
 	}
 	if count != 0 {
@@ -168,7 +169,8 @@ func TestApplySyncFullClearsBeforeInserting(t *testing.T) {
 
 	var stalePresent int
 	if err := store.DB().QueryRow(
-		`SELECT COUNT(*) FROM vulnerabilities_local WHERE id = 'GHSA-stale'`).Scan(&stalePresent); err != nil {
+		`SELECT COUNT(*) FROM vulnerabilities_local WHERE id = 'GHSA-stale'`,
+	).Scan(&stalePresent); err != nil {
 		t.Fatalf("count stale rows: %v", err)
 	}
 	if stalePresent != 0 {

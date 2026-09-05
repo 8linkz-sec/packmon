@@ -65,7 +65,8 @@ func TestHandleSecurityTxtServesAnRFC9116Document(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	HandleSecurityTxt(slog.New(slog.DiscardHandler))(
-		recorder, httptest.NewRequest(http.MethodGet, "/.well-known/security.txt", nil))
+		recorder, httptest.NewRequest(http.MethodGet, "/.well-known/security.txt", nil),
+	)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", recorder.Code)
@@ -104,7 +105,8 @@ func TestHandleSecurityTxtRejectsOtherPaths(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	HandleSecurityTxt(slog.New(slog.DiscardHandler))(
-		recorder, httptest.NewRequest(http.MethodGet, "/.well-known/other", nil))
+		recorder, httptest.NewRequest(http.MethodGet, "/.well-known/other", nil),
+	)
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", recorder.Code)
 	}

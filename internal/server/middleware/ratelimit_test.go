@@ -53,7 +53,8 @@ func TestRateLimitWithSourceUsesDynamicLimit(t *testing.T) {
 	handler := RateLimitWithSource(context.Background(), logger, RateLimitConfig{Rate: 1000, Burst: 1000}, source)(
 		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusOK)
-		}))
+		}),
+	)
 
 	send := func() int {
 		req := httptest.NewRequest(http.MethodGet, "/test", nil)

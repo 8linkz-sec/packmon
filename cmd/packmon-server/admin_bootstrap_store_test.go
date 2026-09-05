@@ -166,7 +166,8 @@ func TestAdminBootstrapStoreAdapterPropagatesWriteErrors(t *testing.T) {
 	store := &recordingBootstrapStore{upsertErr: writeErr}
 
 	err := newAdminBootstrapStore(store).UpsertAdminBootstrapAuthWithAudit(
-		context.Background(), "hash", true, &auth.AdminBootstrapAuditEntry{Action: "admin_bootstrap"})
+		context.Background(), "hash", true, &auth.AdminBootstrapAuditEntry{Action: "admin_bootstrap"},
+	)
 	if !errors.Is(err, writeErr) {
 		t.Fatalf("error = %v, want the write failure", err)
 	}

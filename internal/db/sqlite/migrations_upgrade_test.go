@@ -227,12 +227,14 @@ func TestNormalizeExistingVulnerabilityPackageNamesDropsDuplicateRows(t *testing
 	db := openLegacyLocalDB(t, legacyVulnerabilitiesTable)
 	if _, err := db.Exec(
 		`INSERT INTO vulnerabilities_local (row_key, id, ecosystem, name, severity) VALUES (?, ?, ?, ?, ?)`,
-		"legacy-1", "GHSA-1", "PyPI", "Django", "HIGH"); err != nil {
+		"legacy-1", "GHSA-1", "PyPI", "Django", "HIGH",
+	); err != nil {
 		t.Fatalf("seed legacy row: %v", err)
 	}
 	if _, err := db.Exec(
 		`INSERT INTO vulnerabilities_local (row_key, id, ecosystem, name, severity) VALUES (?, ?, ?, ?, ?)`,
-		normalizedKey, "GHSA-1", "PyPI", normalized, "HIGH"); err != nil {
+		normalizedKey, "GHSA-1", "PyPI", normalized, "HIGH",
+	); err != nil {
 		t.Fatalf("seed normalised row: %v", err)
 	}
 

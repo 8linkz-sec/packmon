@@ -1,6 +1,6 @@
 # id|command|profiles|required|version|installer|install_hint|purpose
 packmon|packmon|full|true|any|manual|Install the Packmon release binary for Windows EXE, Linux ELF, or macOS Mach-O, or build it with scripts/install after the agent profile passes|Run Packmon native scans
-go|go|agent,sbom,dev|true|1.26.6|manual|Install Go 1.26.6 from https://go.dev/dl/|Build Packmon binaries and Go SBOMs
+go|go|agent,sbom,dev|true|1.27.0|manual|Install Go 1.27.0 from https://go.dev/dl/|Build Packmon binaries and Go SBOMs
 node|node|web,sbom,dev|true|>=24.11.0|manual|Install Node.js 24.11.0 or newer from https://nodejs.org/|Build web assets and install npm-based SBOM tools
 npm|npm|web,sbom,dev|true|>=10|manual|Install npm 10 or newer with Node.js|Install npm packages and npm-based SBOM tools
 python|python|sbom,dev|true|>=3.12.0|manual|Install Python 3.12.0 or newer from https://www.python.org/downloads/|Install and run Python SBOM tools

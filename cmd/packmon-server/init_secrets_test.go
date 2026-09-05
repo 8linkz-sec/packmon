@@ -46,7 +46,8 @@ func TestRunInitSecretsSeedsFromExample(t *testing.T) {
 	if err := os.WriteFile(example, []byte(
 		"# packmon config\nPACKMON_LOG_LEVEL=info\nPOSTGRES_PASSWORD=\n"+
 			"PACKMON_DB_PASSWORD=\nPACKMON_ADMIN_INITIAL_PASSWORD=\n"+
-			"PACKMON_ENCRYPTION_KEY=\nPACKMON_ADMIN_AUDIT_HMAC_KEY=\n"), 0o600); err != nil {
+			"PACKMON_ENCRYPTION_KEY=\nPACKMON_ADMIN_AUDIT_HMAC_KEY=\n",
+	), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := runInitSecrets([]string{"--env", env, "--example", example}); err != nil {

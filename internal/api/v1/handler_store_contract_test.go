@@ -17,7 +17,7 @@ type scanLogIdempotencyStoreRequirement interface {
 	GetScanLogByIdempotencyKey(context.Context, string) (*db.ScanLogEntry, error)
 }
 
-var _ scanLogIdempotencyStoreRequirement = (Store)(nil)
+var _ scanLogIdempotencyStoreRequirement = Store(nil)
 
 func TestStoreRequiresScanLogIdempotencyLookup(t *testing.T) {
 	t.Parallel()
