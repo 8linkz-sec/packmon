@@ -58,7 +58,7 @@ func TestReadmeDockerQuickStartUsesInitSecretsFlow(t *testing.T) {
 	if agentCheckIndex >= agentBuildIndex || agentBuildIndex >= startIndex {
 		t.Fatal("README local server + agent test must check agent requirements and build packmon.exe before starting the server")
 	}
-	firstLocalSectionEnd := strings.Index(text, "Packmon is proprietary software; all rights reserved.")
+	firstLocalSectionEnd := strings.Index(text, "Packmon is licensed under the Apache License, Version 2.0.")
 	if firstLocalSectionEnd < 0 {
 		t.Fatal("README.md must keep the license paragraph after the first local test")
 	}

@@ -15,8 +15,8 @@ info:
     published as paths on this API server.
   version: "1.0.0"
   license:
-    name: Private
-    identifier: LicenseRef-Private
+    name: Apache-2.0
+    identifier: Apache-2.0
 
 servers:
   - url: http://localhost:8080

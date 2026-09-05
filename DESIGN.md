@@ -172,7 +172,8 @@ Packmon's maintained deployment surfaces are intentionally narrow:
   removed in August 2026 (internal deployment, no hosted CI). Build, test,
   lint, and security gates run locally via the verification gate in
   `CONTRIBUTING.md`. Release binaries are built locally from source; the container
-  images ship `SECURITY.md` but no license or third-party notice files.
+  images ship `SECURITY.md` and `LICENSE` (Apache-2.0) but no third-party
+  notice files.
 - The maintained Dockerfile and Compose model keep digest-pinned default images
   but expose `PACKMON_GO_BUILDER_IMAGE`, `PACKMON_ALPINE_RUNTIME_IMAGE`, and
   `PACKMON_POSTGRES_IMAGE` so operators can substitute internal registry
