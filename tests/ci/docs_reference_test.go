@@ -14,8 +14,10 @@ func TestTrackedMarkdownDoesNotReferenceIgnoredLocalDocs(t *testing.T) {
 
 	root := filepath.Join("..", "..")
 	skipFiles := map[string]struct{}{
-		"CLAUDE.md": {},
-		"Todo.txt":  {},
+		"CLAUDE.md":   {},
+		"TESTING.md":  {},
+		"WORKFLOW.md": {},
+		"Todo.txt":    {},
 	}
 	skipDirs := map[string]struct{}{
 		".build":       {},

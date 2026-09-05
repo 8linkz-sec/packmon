@@ -1,10 +1,10 @@
 ## Summary
 
-- 
+-
 
 ## Risk And Scope
 
-- 
+-
 
 ## Tests
 
