@@ -35,6 +35,7 @@ RUN apk add --no-cache \
     mkdir -p /data/feeds /usr/share/doc/packmon && chown packmon:packmon /data/feeds
 COPY --from=build /packmon-server /usr/local/bin/packmon-server
 COPY SECURITY.md /usr/share/doc/packmon/SECURITY.md
+COPY LICENSE /usr/share/doc/packmon/LICENSE
 
 USER packmon
 ENV PACKMON_SERVER_PORT=8080
@@ -61,6 +62,7 @@ RUN apk add --no-cache \
     mkdir -p /usr/share/doc/packmon
 COPY --from=build /packmon /usr/local/bin/packmon
 COPY SECURITY.md /usr/share/doc/packmon/SECURITY.md
+COPY LICENSE /usr/share/doc/packmon/LICENSE
 
 USER packmon
 ENTRYPOINT ["packmon"]

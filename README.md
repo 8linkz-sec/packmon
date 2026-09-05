@@ -1259,13 +1259,15 @@ Use these files as the baseline for future audits and implementation reviews.
 
 ## License
 
-Packmon is proprietary software; all rights reserved. The repository and the
-container images intentionally ship no license file for Packmon's own code:
-without a license grant, no reuse or redistribution rights are given. The
-OpenAPI contract declares this via the SPDX identifier `LicenseRef-Private`.
+Copyright 2026 8linkz-sec.
 
-This applies to Packmon's own code only. Third-party open-source components
-keep their own permissive licenses (MIT, BSD, Apache-2.0, ISC, 0BSD).
+Packmon is licensed under the Apache License, Version 2.0. The full text is
+in `LICENSE` at the repository root and is shipped in the container images
+under `/usr/share/doc/packmon/`. The OpenAPI contract declares the same via
+the SPDX identifier `Apache-2.0`.
+
+This applies to Packmon's own code. Third-party open-source components keep
+their own permissive licenses (MIT, BSD, Apache-2.0, ISC, 0BSD).
 `THIRD_PARTY_NOTICES.md` documents the web assets embedded in the server
 binary with their full license texts; the Go modules fetched at build time
 carry their license files in the Go module cache. Packmon does not distribute
