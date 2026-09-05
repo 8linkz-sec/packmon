@@ -748,7 +748,7 @@ func TestCheckRemoteRejectsOversizedResponseBody(t *testing.T) {
 	oversized := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"scan_id":"`))
-		chunk := strings.Repeat("x", 8192)
+		chunk := strings.Repeat("x", 1<<20)
 		for written := int64(0); written <= maxRemoteCheckResponseSize; written += int64(len(chunk)) {
 			_, _ = w.Write([]byte(chunk))
 		}
