@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -104,6 +105,9 @@ func TestDefaultGitCommandOutputReturnsChildFailure(t *testing.T) {
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) {
 		t.Fatalf("defaultGitCommandOutput() error = %T %v, want *exec.ExitError", err, err)
+	}
+	if strings.Contains(err.Error(), "fake git failure") {
+		t.Fatalf("defaultGitCommandOutput() error unexpectedly exposes terminal stderr: %v", err)
 	}
 	if output != nil {
 		t.Fatalf("defaultGitCommandOutput() output = %q, want nil", output)
