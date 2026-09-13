@@ -263,6 +263,9 @@ func TestHistoryClearCommandCancellationDoesNotDeleteHistory(t *testing.T) {
 
 func TestHistoryClearCommandKeepsExactUTCCutoff(t *testing.T) {
 	isolateCLIConfigDiscovery(t)
+	originalLocal := time.Local
+	time.Local = time.FixedZone("test-utc-plus-seven", 7*60*60)
+	t.Cleanup(func() { time.Local = originalLocal })
 	dbDir := t.TempDir()
 	t.Setenv("PACKMON_DB_PATH", dbDir)
 	store, _ := newTestSQLiteStore(t, dbDir)
