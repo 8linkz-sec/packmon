@@ -24,14 +24,27 @@ func TestListAllHTMLFindingStatusesMergeEqualRankFixes(t *testing.T) {
 
 func TestListAllHTMLFindingStatusesKeepHigherRankState(t *testing.T) {
 	vuln := domain.Finding{Name: "pkg", Version: "1.0.0", Ecosystem: domain.Ecosystem("npm"), Type: domain.FindingTypeVulnerability, AdvisoryID: "CVE-1", FixedVersion: "1.0.1"}
-	malicious := vuln
-	malicious.Type = domain.FindingTypeMalicious
-	malicious.FixedVersion = ""
-	for _, findings := range [][]domain.Finding{{vuln, malicious}, {malicious, vuln}} {
-		state := listAllHTMLFindingStatuses(findings)[listAllFindingKey(vuln)]
-		if state.Status != "Malicious" || state.Rank != 50 || state.HasFixedVersion {
-			t.Fatalf("higher-rank state = %+v, want malicious rank 50 without leaked fix", state)
-		}
+	for _, tc := range []struct {
+		name   string
+		type_  domain.FindingType
+		status string
+		rank   int
+	}{
+		{name: "malicious", type_: domain.FindingTypeMalicious, status: "Malicious", rank: 50},
+		{name: "lifecycle", type_: domain.FindingTypeLifecycle, status: "Lifecycle", rank: 20},
+		{name: "supply chain", type_: domain.FindingTypeSupplyChainRisk, status: "Supply-chain risk", rank: 30},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			higher := vuln
+			higher.Type = tc.type_
+			higher.FixedVersion = ""
+			for _, findings := range [][]domain.Finding{{vuln, higher}, {higher, vuln}} {
+				state := listAllHTMLFindingStatuses(findings)[listAllFindingKey(vuln)]
+				if state.Status != tc.status || state.Rank != tc.rank || state.HasFixedVersion {
+					t.Fatalf("higher-rank state = %+v, want %s rank %d without leaked fix", state, tc.status, tc.rank)
+				}
+			}
+		})
 	}
 }
 
@@ -53,5 +66,9 @@ func TestListAllHTMLPackageStatusExplicitContracts(t *testing.T) {
 	}
 	if got := listAllHTMLPackageSource(listAllRow{Ecosystem: string(domain.EcosystemChocolatey)}); got != "chocolatey" {
 		t.Fatalf("Chocolatey source = %q", got)
+	}
+	label, message := listAllHTMLCopyContext("", listAllRow{})
+	if label != "Copy full value value for package unknown version" || message != "Copied full value value for package" {
+		t.Fatalf("copy context = %q, %q", label, message)
 	}
 }
