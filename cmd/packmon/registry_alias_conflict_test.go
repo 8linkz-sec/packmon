@@ -100,23 +100,43 @@ func TestDockerRegistryMirrorAliasConflictYAMLStopsBeforeRequest(t *testing.T) {
 }
 
 func TestDockerRegistryMirrorAliasConflictEnvironmentStopsBeforeRequest(t *testing.T) {
-	isolateLatestRegistryEnvironment(t)
-	t.Setenv("PACKMON_DOCKER_REGISTRY_MIRRORS", "index.docker.io=https://mirror.invalid/index,docker.io=https://mirror.invalid/docker")
-
-	originalClient := registryClient
-	t.Cleanup(func() { registryClient = originalClient })
-	var requests atomic.Int32
-	registryClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		requests.Add(1)
-		return nil, errors.New("configuration validation must stop before a registry request")
-	})}
-
-	err := applyLatestRegistryEnvSettings(&scanSettings{})
-	want := `PACKMON_DOCKER_REGISTRY_MIRRORS defines colliding Docker registry mirror aliases "docker.io" and "index.docker.io" (both normalize to "registry-1.docker.io")`
-	if err == nil || err.Error() != want {
-		t.Fatalf("applyLatestRegistryEnvSettings() error = %v, want %q", err, want)
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "normalized aliases",
+			raw:  "index.docker.io=https://mirror.invalid/index,docker.io=https://mirror.invalid/docker",
+			want: `PACKMON_DOCKER_REGISTRY_MIRRORS defines colliding Docker registry mirror aliases "docker.io" and "index.docker.io" (both normalize to "registry-1.docker.io")`,
+		},
+		{
+			name: "repeated source key",
+			raw:  "docker.io=https://mirror.invalid/first,docker.io=https://mirror.invalid/second",
+			want: `PACKMON_DOCKER_REGISTRY_MIRRORS defines colliding Docker registry mirror aliases "docker.io" and "docker.io" (both normalize to "registry-1.docker.io")`,
+		},
 	}
-	if got := requests.Load(); got != 0 {
-		t.Fatalf("environment alias conflict sent %d registry request(s), want 0", got)
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateLatestRegistryEnvironment(t)
+			t.Setenv("PACKMON_DOCKER_REGISTRY_MIRRORS", tc.raw)
+
+			originalClient := registryClient
+			t.Cleanup(func() { registryClient = originalClient })
+			var requests atomic.Int32
+			registryClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				requests.Add(1)
+				return nil, errors.New("configuration validation must stop before a registry request")
+			})}
+
+			err := applyLatestRegistryEnvSettings(&scanSettings{})
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("applyLatestRegistryEnvSettings() error = %v, want %q", err, tc.want)
+			}
+			if got := requests.Load(); got != 0 {
+				t.Fatalf("environment alias conflict sent %d registry request(s), want 0", got)
+			}
+		})
 	}
 }

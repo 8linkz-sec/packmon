@@ -612,6 +612,13 @@ func parseDockerRegistryMirrorEnv(raw string) (map[string]string, error) {
 		if !ok || strings.TrimSpace(host) == "" || strings.TrimSpace(mirror) == "" {
 			return nil, fmt.Errorf("PACKMON_DOCKER_REGISTRY_MIRRORS entries must use host=https://mirror form")
 		}
+		if _, duplicate := out[host]; duplicate {
+			canonicalHost, err := normalizeDockerRegistryMirrorSourceHost("PACKMON_DOCKER_REGISTRY_MIRRORS", host)
+			if err != nil {
+				return nil, err
+			}
+			return nil, fmt.Errorf("PACKMON_DOCKER_REGISTRY_MIRRORS defines colliding Docker registry mirror aliases %q and %q (both normalize to %q)", host, host, canonicalHost)
+		}
 		out[host] = mirror
 	}
 	return normalizeDockerRegistryMirrorMap("PACKMON_DOCKER_REGISTRY_MIRRORS", out)
