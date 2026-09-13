@@ -791,7 +791,7 @@ func registryEndpoint(base string, escapedPathParts ...string) string {
 		base = "/"
 	}
 	for _, part := range escapedPathParts {
-		base += "/" + strings.Trim(part, "/")
+		base = strings.TrimRight(base, "/") + "/" + strings.Trim(part, "/")
 	}
 	return base
 }

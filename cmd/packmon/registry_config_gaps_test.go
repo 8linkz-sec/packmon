@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -27,16 +29,20 @@ func isolateLatestRegistryEnvironment(t *testing.T) {
 func TestLatestRegistryGoProxyOffEnvironmentSkipsLookup(t *testing.T) {
 	originalClient := registryClient
 	t.Cleanup(func() { registryClient = originalClient })
+	var requests atomic.Int32
 	registryClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		t.Fatalf("Go proxy off sent request to %s", req.URL)
-		return nil, nil
+		requests.Add(1)
+		return nil, errors.New("Go proxy off must not send a request")
 	})}
 
 	for _, raw := range []string{"off", "OFF", "  Off  "} {
 		t.Run(raw, func(t *testing.T) {
 			isolateLatestRegistryEnvironment(t)
 			t.Setenv("PACKMON_GO_PROXY_URL", raw)
-			var settings scanSettings
+			settings := scanSettings{LatestRegistry: latestRegistryConfig{
+				NPMRegistryBaseURL:           "https://configured.example/",
+				NPMRegistryBaseURLConfigured: true,
+			}}
 			if err := applyLatestRegistryEnvSettings(&settings); err != nil {
 				t.Fatalf("apply env: %v", err)
 			}
@@ -44,8 +50,14 @@ func TestLatestRegistryGoProxyOffEnvironmentSkipsLookup(t *testing.T) {
 			if cfg.GoModuleProxyURL != "off" || !cfg.GoModuleProxyURLConfigured {
 				t.Fatalf("Go proxy config = %+v, want configured off", cfg)
 			}
+			if cfg.NPMRegistryBaseURL != "https://configured.example" || !cfg.NPMRegistryBaseURLConfigured {
+				t.Fatalf("unrelated configured registry was not preserved: %+v", cfg)
+			}
 			if got := fetchGoLatestFromBase(context.Background(), cfg.GoModuleProxyURL, "github.com/acme/lib"); got != "" {
 				t.Fatalf("fetchGoLatestFromBase(off) = %q, want empty", got)
+			}
+			if got := requests.Load(); got != 0 {
+				t.Fatalf("Go proxy off sent %d request(s), want none", got)
 			}
 		})
 	}
@@ -70,6 +82,7 @@ func TestLatestRegistryEnvironmentRejectsInvalidValues(t *testing.T) {
 	for _, tc := range []struct{ name, value string }{
 		{"docker missing equals", "ghcr.io"}, {"docker empty host", "=https://mirror.example"},
 		{"docker empty mirror", "ghcr.io="}, {"docker unsupported host", "private.example=https://mirror.example"},
+		{"docker invalid mirror URL", "ghcr.io=http://registry.invalid"},
 		{"swift malformed host", "git.example.com,broken..host"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -113,6 +126,9 @@ func TestLatestRegistryNormalizersHandleListsAndEndpoints(t *testing.T) {
 	if feeds, err := normalizeFeedURLList("feeds", []string{" ", "https://feeds.example/api/", "https://feeds.example/api"}); err != nil || strings.Join(feeds, ",") != "https://feeds.example/api" {
 		t.Fatalf("feeds = %v, %v", feeds, err)
 	}
+	if feeds, err := normalizeFeedURLList("feeds", []string{" ", "\t"}); err != nil || len(feeds) != 0 {
+		t.Fatalf("blank feeds = %v, %v; want no configured entries", feeds, err)
+	}
 	if _, err := normalizeLatestRegistryBaseURL("url", "http://registry.invalid"); err == nil {
 		t.Fatal("non-loopback HTTP accepted")
 	}
@@ -121,5 +137,8 @@ func TestLatestRegistryNormalizersHandleListsAndEndpoints(t *testing.T) {
 	}
 	if got := registryEndpoint(" /base/ ", "/one/", "two/"); got != "/base/one/two" {
 		t.Fatalf("endpoint = %q", got)
+	}
+	if got := registryEndpoint("", "/one/", "two/"); got != "/one/two" {
+		t.Fatalf("blank-base endpoint = %q", got)
 	}
 }
