@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -251,17 +252,81 @@ func TestRunReportCommandUsesInjectedDependenciesAndClosesStore(t *testing.T) {
 	}
 }
 
+func TestRunReportCommandReturnsDependencyErrorsAndClosesQueriedStore(t *testing.T) {
+	t.Parallel()
+	resolveErr := errors.New("resolve failed")
+	openErr := errors.New("open failed")
+	queryErr := errors.New("query failed")
+
+	tests := []struct {
+		name     string
+		deps     reportCommandDeps
+		wantErr  error
+		contains string
+		store    *reportCommandTestStore
+	}{
+		{
+			name: "resolve database path",
+			deps: reportCommandDeps{
+				resolveDBPath: func() (string, error) { return "", resolveErr },
+			},
+			wantErr: resolveErr,
+		},
+		{
+			name: "open local database",
+			deps: reportCommandDeps{
+				resolveDBPath: func() (string, error) { return "local.db", nil },
+				openStore:     func(string) (reportScanStore, error) { return nil, openErr },
+			},
+			wantErr:  openErr,
+			contains: "open local database",
+		},
+		{
+			name: "read scan history closes store",
+			store: &reportCommandTestStore{
+				queryErr: queryErr,
+			},
+			deps: reportCommandDeps{
+				resolveDBPath: func() (string, error) { return "local.db", nil },
+			},
+			wantErr:  queryErr,
+			contains: "read scan history",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			deps := tt.deps
+			if tt.store != nil {
+				deps.openStore = func(string) (reportScanStore, error) { return tt.store, nil }
+			}
+
+			err := runReportCommand(context.Background(), reportCommandOptions{}, deps)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("runReportCommand() error = %v, want wrapped %v", err, tt.wantErr)
+			}
+			if tt.contains != "" && !strings.Contains(err.Error(), tt.contains) {
+				t.Fatalf("runReportCommand() error = %q, want context %q", err, tt.contains)
+			}
+			if tt.store != nil && !tt.store.closed {
+				t.Fatal("store was not closed after scan-history query failure")
+			}
+		})
+	}
+}
+
 type reportCommandTestStore struct {
-	entries []sqlite.ScanEntry
-	repo    string
-	limit   int
-	closed  bool
+	entries  []sqlite.ScanEntry
+	repo     string
+	limit    int
+	closed   bool
+	queryErr error
 }
 
 func (s *reportCommandTestStore) GetRecentScans(_ context.Context, repo string, limit int) ([]sqlite.ScanEntry, error) {
 	s.repo = repo
 	s.limit = limit
-	return s.entries, nil
+	return s.entries, s.queryErr
 }
 
 func (s *reportCommandTestStore) Close() error {
