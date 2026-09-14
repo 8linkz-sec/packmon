@@ -142,3 +142,83 @@ func TestLatestRegistryNormalizersHandleListsAndEndpoints(t *testing.T) {
 		t.Fatalf("blank-base endpoint = %q", got)
 	}
 }
+
+func TestLatestRegistryBaseURLRejectsQueryOrFragment(t *testing.T) {
+	t.Parallel()
+
+	for _, raw := range []string{
+		"https://mirror.example/api?tenant=blue",
+		"https://mirror.example/api#anchor",
+		"https://mirror.example/api?tenant=blue#anchor",
+		"https://mirror.example/api?",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			_, err := normalizeLatestRegistryBaseURL("registries.npm_registry_base_url", raw)
+			if !errors.Is(err, errLatestRegistryBaseURLHasQueryOrFragment) {
+				t.Fatalf("normalizeLatestRegistryBaseURL() error = %v, want query/fragment sentinel", err)
+			}
+			if !strings.Contains(err.Error(), "registries.npm_registry_base_url") {
+				t.Fatalf("error %q does not name the setting", err)
+			}
+		})
+	}
+
+	got, err := normalizeLatestRegistryBaseURL("registries.npm_registry_base_url", "https://mirror.example/api/")
+	if err != nil || got != "https://mirror.example/api" {
+		t.Fatalf("path-only base = %q, %v", got, err)
+	}
+}
+
+func TestLatestRegistryQueryOrFragmentRejectionAcrossIngress(t *testing.T) {
+	isolateLatestRegistryEnvironment(t)
+
+	tests := []struct {
+		name     string
+		apply    func() error
+		wantName string
+	}{
+		{
+			name: "YAML registry field",
+			apply: func() error {
+				return normalizeCLIRegistryConfig(&cliRegistryConfig{NPMRegistryBaseURL: "https://mirror.example/api?"})
+			},
+			wantName: "registries.npm_registry_base_url",
+		},
+		{
+			name: "environment registry field",
+			apply: func() error {
+				t.Setenv("PACKMON_NPM_REGISTRY_BASE_URL", "https://mirror.example/api?")
+				return applyLatestRegistryEnvSettings(&scanSettings{})
+			},
+			wantName: "PACKMON_NPM_REGISTRY_BASE_URL",
+		},
+		{
+			name: "feed list",
+			apply: func() error {
+				_, err := normalizeFeedURLList("registries.chocolatey_feed_urls", []string{"https://mirror.example/api?"})
+				return err
+			},
+			wantName: "registries.chocolatey_feed_urls",
+		},
+		{
+			name: "Docker mirror",
+			apply: func() error {
+				_, err := normalizeDockerRegistryMirrorBaseURL("registries.docker_registry_mirrors[ghcr.io]", "https://mirror.example/api?")
+				return err
+			},
+			wantName: "registries.docker_registry_mirrors[ghcr.io]",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.apply()
+			if !errors.Is(err, errLatestRegistryBaseURLHasQueryOrFragment) {
+				t.Fatalf("ingress error = %v, want query/fragment sentinel", err)
+			}
+			if !strings.Contains(err.Error(), tc.wantName) {
+				t.Fatalf("error %q does not name %q", err, tc.wantName)
+			}
+		})
+	}
+}
