@@ -93,6 +93,43 @@ func TestLoadLocalDBInfoMarksStaleBySyncAge(t *testing.T) {
 	}
 }
 
+func TestLoadLocalDBInfoAppliesExactAndZeroDayStaleThresholds(t *testing.T) {
+	tests := []struct {
+		name          string
+		warnAfterDays string
+		lastSync      time.Time
+	}{
+		{
+			name:          "exact threshold",
+			warnAfterDays: "7",
+			lastSync:      time.Now().UTC().Add(-7 * 24 * time.Hour),
+		},
+		{
+			name:          "zero threshold",
+			warnAfterDays: "0",
+			lastSync:      time.Now().UTC(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("PACKMON_DB_WARN_AFTER_DAYS", tt.warnAfterDays)
+			store, _ := newTestSQLiteStore(t, t.TempDir())
+			if err := store.SetSyncMeta(context.Background(), "last_sync_at", tt.lastSync.Format(time.RFC3339Nano)); err != nil {
+				t.Fatalf("set sync meta: %v", err)
+			}
+
+			info, err := loadLocalDBInfo(context.Background(), store)
+			if err != nil {
+				t.Fatalf("load local db info: %v", err)
+			}
+			if !info.DBStale {
+				t.Fatalf("DBStale = false, want true at %s-day threshold", tt.warnAfterDays)
+			}
+		})
+	}
+}
+
 func TestReadLocalSyncAgeClampsFutureTimestamps(t *testing.T) {
 	store, _ := newTestSQLiteStore(t, t.TempDir())
 	future := time.Now().UTC().Add(24 * time.Hour)
@@ -106,6 +143,25 @@ func TestReadLocalSyncAgeClampsFutureTimestamps(t *testing.T) {
 	}
 	if ageDays == nil || *ageDays != 0 {
 		t.Fatalf("ageDays = %v, want clamped zero", ageDays)
+	}
+}
+
+func TestExportLocalDBInfoRedactsPathWithoutMutatingInput(t *testing.T) {
+	t.Parallel()
+
+	info := &localDBInfo{Path: "C:/sensitive/cache/local.db", Exists: true}
+	exported := exportLocalDBInfo(info)
+	if exported == nil {
+		t.Fatal("exportLocalDBInfo() = nil")
+	}
+	if exported == info {
+		t.Fatal("exportLocalDBInfo() returned the input pointer")
+	}
+	if exported.Path != "local.db" {
+		t.Fatalf("exported path = %q, want basename", exported.Path)
+	}
+	if info.Path != "C:/sensitive/cache/local.db" {
+		t.Fatalf("input path = %q, want unchanged full path", info.Path)
 	}
 }
 
