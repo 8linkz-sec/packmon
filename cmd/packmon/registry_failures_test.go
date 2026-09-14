@@ -24,6 +24,36 @@ func TestRegistryLookupPhaseBreakerTripsAtThreshold(t *testing.T) {
 	}
 }
 
+func TestRegistryLookupPhaseSuccessKeepsLatchedBreakerAndCumulativeRefusals(t *testing.T) {
+	t.Parallel()
+	_, phase := withRegistryLookupPhase(context.Background(), 0)
+	for i := 0; i < registryBreakerThreshold; i++ {
+		phase.recordRefusal()
+	}
+	if !phase.breakerOpen() {
+		t.Fatal("breaker closed at refusal threshold")
+	}
+
+	phase.recordSuccess()
+	if got := phase.consecutive.Load(); got != 0 {
+		t.Fatalf("consecutive refusals after success = %d, want 0", got)
+	}
+	if got := phase.refusedCount(); got != registryBreakerThreshold {
+		t.Fatalf("refusedCount() after success = %d, want %d", got, registryBreakerThreshold)
+	}
+	if !phase.breakerOpen() {
+		t.Fatal("breaker closed after success, want latched open")
+	}
+
+	phase.recordRefusal()
+	if got := phase.refusedCount(); got != registryBreakerThreshold+1 {
+		t.Fatalf("refusedCount() after additional refusal = %d, want %d", got, registryBreakerThreshold+1)
+	}
+	if !phase.breakerOpen() {
+		t.Fatal("breaker closed after additional refusal, want latched open")
+	}
+}
+
 func TestRegistryLookupPhaseSuccessResetsStreak(t *testing.T) {
 	t.Parallel()
 	_, phase := withRegistryLookupPhase(context.Background(), 0)
