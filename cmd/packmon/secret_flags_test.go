@@ -65,3 +65,29 @@ func TestRejectSecretFlagValueAllowsChangedEmptyValues(t *testing.T) {
 		})
 	}
 }
+
+func TestRejectSecretFlagValueRedactsMalformedCompatibilityEnvironment(t *testing.T) {
+	const (
+		secretSentinel = "test-secret-sentinel"
+		envSentinel    = "test-invalid-env-sentinel"
+	)
+	t.Setenv(allowSecretFlagsEnv, envSentinel)
+	cmd := &cobra.Command{Use: "test"}
+	cmd.Flags().String("token", "", "test-only secret flag")
+	if err := cmd.Flags().Set("token", secretSentinel); err != nil {
+		t.Fatalf("set token flag: %v", err)
+	}
+
+	err := rejectSecretFlagValue(cmd, "token", "PACKMON_TOKEN")
+	if err == nil {
+		t.Fatal("rejectSecretFlagValue() error = nil, want malformed compatibility environment error")
+	}
+	if !strings.Contains(err.Error(), allowSecretFlagsEnv) {
+		t.Fatalf("rejectSecretFlagValue() error = %q, want variable name %q", err, allowSecretFlagsEnv)
+	}
+	for _, forbidden := range []string{secretSentinel, envSentinel} {
+		if strings.Contains(err.Error(), forbidden) {
+			t.Fatalf("rejectSecretFlagValue() error leaks %q: %v", forbidden, err)
+		}
+	}
+}
