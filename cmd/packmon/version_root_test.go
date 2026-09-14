@@ -22,6 +22,20 @@ func TestVersionCommandPrintsBuildMetadata(t *testing.T) {
 	}
 }
 
+func TestVersionCommandRendersExactMetadataLine(t *testing.T) {
+	cmd := newVersionCmd()
+	output := captureStdout(t, func() {
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("version command: %v", err)
+		}
+	})
+
+	want := "packmon " + version + " (" + commit + ") built " + date + " " + runtime.GOOS + "/" + runtime.GOARCH + "\n"
+	if output != want {
+		t.Fatalf("version output = %q, want %q", output, want)
+	}
+}
+
 func TestEnvHelpers(t *testing.T) {
 	t.Setenv("PACKMON_TEST_VALUE", "from-env")
 	if got := envOrDefault("PACKMON_TEST_VALUE", "fallback"); got != "from-env" {
