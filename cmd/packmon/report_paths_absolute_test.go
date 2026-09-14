@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
 
 // TestReportTargetReducesAbsolutePathsRegardlessOfSeparator pins the privacy
 // intent of htmlReportDisplayTarget: an absolute path must never reach the
@@ -55,6 +58,59 @@ func TestReportPathsKeepRelativeInputs(t *testing.T) {
 	for in, want := range cases {
 		if got := htmlReportDisplayTarget(in); got != want {
 			t.Errorf("htmlReportDisplayTarget(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestReportSourcePathGapOneSentinels covers the display values that must not
+// reveal a scan root or turn an empty value into a misleading pathname.
+func TestReportSourcePathGapOneSentinels(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	rootBase := filepath.Base(root)
+	cases := []struct {
+		name string
+		root string
+		path string
+		want string
+	}{
+		{name: "empty source", root: root, path: "", want: ""},
+		{name: "whitespace source", root: root, path: " \t ", want: ""},
+		{name: "empty root", root: "", path: "/private/vendor.lock", want: "vendor.lock"},
+		{name: "whitespace root", root: " \t ", path: "/private/vendor.lock", want: "vendor.lock"},
+		{name: "source equals root", root: root, path: root, want: rootBase},
+		{name: "dot source", root: root, path: ".", want: "."},
+		{name: "parent sentinel", root: root, path: "..", want: "external-file"},
+		{name: "simple basename", root: root, path: "go.sum", want: "go.sum"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := htmlReportDisplaySourcePath(tc.root, tc.path); got != tc.want {
+				t.Fatalf("htmlReportDisplaySourcePath(%q, %q) = %q, want %q", tc.root, tc.path, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestReportPathLastSegmentHandlesSentinelsAndBasenames(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]string{
+		"basename":      "basename",
+		" / ":           "",
+		" C: ":          "C:",
+		" /path/name/ ": "name",
+	}
+	for input, want := range cases {
+		if got := reportPathLastSegment(input); got != want {
+			t.Errorf("reportPathLastSegment(%q) = %q, want %q", input, got, want)
+		}
+	}
+
+	for _, input := range []string{"/", "C:", ".."} {
+		if got := safeHTMLExternalPath(input); got != "external-file" {
+			t.Errorf("safeHTMLExternalPath(%q) = %q, want external-file", input, got)
 		}
 	}
 }
