@@ -339,3 +339,45 @@ func TestRecordScanHistoryStoresFindingIDsAndSeverities(t *testing.T) {
 		t.Fatalf("finding severities = %v", severities)
 	}
 }
+
+func TestRecordScanHistoryDefaultsBlankRepositoryAndPreservesScanTime(t *testing.T) {
+	scannedAt := time.Date(2026, 5, 30, 10, 0, 0, 0, time.FixedZone("UTC+2", 2*60*60))
+
+	for _, tt := range []struct {
+		name string
+		repo *domain.RepoInfo
+	}{
+		{name: "nil repository"},
+		{name: "blank repository name", repo: &domain.RepoInfo{}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			store, _ := newTestSQLiteStore(t, t.TempDir())
+			result := &domain.ScanResult{
+				ScannedAt: scannedAt,
+				Findings:  []domain.Finding{{Severity: domain.Severity("  ")}},
+			}
+
+			if err := recordScanHistoryWithRepo(context.Background(), store, tt.repo, result); err != nil {
+				t.Fatalf("recordScanHistoryWithRepo() error = %v", err)
+			}
+
+			entries, err := store.GetRecentScans(context.Background(), "local", 1)
+			if err != nil {
+				t.Fatalf("GetRecentScans() error = %v", err)
+			}
+			if len(entries) != 1 {
+				t.Fatalf("GetRecentScans() returned %d entries, want 1", len(entries))
+			}
+			entry := entries[0]
+			if entry.RepoName != "local" || entry.Branch != "" || entry.Commit != "" {
+				t.Fatalf("stored repo metadata = %+v, want local with no branch or commit", entry)
+			}
+			if !entry.ScannedAt.Equal(scannedAt) {
+				t.Fatalf("stored scanned_at = %s, want %s", entry.ScannedAt, scannedAt)
+			}
+			if len(entry.FindingSeverities) != 1 || entry.FindingSeverities[0] != "UNKNOWN" {
+				t.Fatalf("stored finding severities = %v, want [UNKNOWN]", entry.FindingSeverities)
+			}
+		})
+	}
+}
