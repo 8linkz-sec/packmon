@@ -104,6 +104,47 @@ func TestLogAuditRetentionResultUsesNumericJSONDuration(t *testing.T) {
 	}
 }
 
+func TestBackgroundServicesRetentionSnapshotUsesLiveAdminRetention(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		Retention: config.RetentionConfig{
+			Interval:           15 * time.Minute,
+			ScanLog:            24 * time.Hour,
+			AdminAuditLog:      48 * time.Hour,
+			RefreshQueue:       72 * time.Hour,
+			PackageCheckStatus: 96 * time.Hour,
+		},
+	}
+	runtime := config.NewRuntimeSettingsFromConfig(cfg)
+	runtime.UpdateRetention(7*24*time.Hour, 14*24*time.Hour)
+
+	got := (&backgroundServices{cfg: cfg, runtime: runtime}).retentionSnapshot()
+	if got.ScanLog != 7*24*time.Hour || got.AdminAuditLog != 14*24*time.Hour {
+		t.Fatalf("live retention = scan:%s admin:%s, want 168h/336h", got.ScanLog, got.AdminAuditLog)
+	}
+	if got.Interval != cfg.Retention.Interval || got.RefreshQueue != cfg.Retention.RefreshQueue || got.PackageCheckStatus != cfg.Retention.PackageCheckStatus {
+		t.Fatalf("non-admin retention changed: got %+v, want config %+v", got, cfg.Retention)
+	}
+}
+
+func TestRunAuditRetentionOnceUsesBackgroundForNilContext(t *testing.T) {
+	t.Parallel()
+
+	store := &deadlineCapturingAuditRetentionStore{}
+	runAuditRetentionOnce(nil, config.RetentionConfig{ScanLog: time.Hour}, config.FeedsConfig{}, store, nil)
+
+	if len(store.calls) != 1 {
+		t.Fatalf("prune calls = %d, want 1", len(store.calls))
+	}
+	if store.calls[0].name != "scan_log" {
+		t.Fatalf("prune table = %q, want scan_log", store.calls[0].name)
+	}
+	if _, ok := store.calls[0].ctx.Deadline(); !ok {
+		t.Fatal("nil caller context did not receive the bounded prune deadline")
+	}
+}
+
 type panickingScanAuditRetentionStore struct {
 	auditRetentionTestStore
 }
