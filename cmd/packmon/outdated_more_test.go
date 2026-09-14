@@ -240,6 +240,44 @@ func TestApplyOutdatedStatusesToReportCountsAndSorts(t *testing.T) {
 	}
 }
 
+func TestOutdatedReportEmptyStateMessage(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		report outdatedReport
+		want   string
+	}{
+		{
+			name:   "one up to date",
+			report: outdatedReport{UpToDate: 1},
+			want:   "All 1 package is up to date.",
+		},
+		{
+			name:   "many up to date",
+			report: outdatedReport{UpToDate: 2},
+			want:   "All 2 packages are up to date.",
+		},
+		{
+			name:   "unknown with up to date packages",
+			report: outdatedReport{Total: 3, UpToDate: 1, Unknown: 2},
+			want:   "No outdated packages found; 1 up to date, latest status is unknown for 2 packages (3 total).",
+		},
+		{
+			name:   "only one unknown package",
+			report: outdatedReport{Total: 1, Unknown: 1},
+			want:   "No outdated packages found; latest status is unknown for 1 package (1 total).",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.report.EmptyStateMessage(); got != tt.want {
+				t.Fatalf("EmptyStateMessage() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestFinishOutdatedReportAllowsNoOutput(t *testing.T) {
 	t.Parallel()
 
