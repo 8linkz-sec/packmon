@@ -306,6 +306,93 @@ func TestDBExportCommandRejectsUninitializedDatabase(t *testing.T) {
 	}
 }
 
+func TestDBInfoCommandReturnsPathResolutionErrorWithoutOutput(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	if err := os.WriteFile(".packmon.yaml", []byte("db: ["), 0o600); err != nil {
+		t.Fatalf("write invalid config: %v", err)
+	}
+
+	var commandErr error
+	output := captureStdout(t, func() {
+		commandErr = newDBInfoCmd().Execute()
+	})
+	if commandErr == nil || !strings.Contains(commandErr.Error(), "parse") {
+		t.Fatalf("db info error = %v, want config parse error", commandErr)
+	}
+	if output != "" {
+		t.Fatalf("db info output = %q, want no success output", output)
+	}
+}
+
+func TestDBInfoCommandReturnsCorruptDatabaseErrorWithoutOutput(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	dbDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dbDir, "packmon.db"), []byte("not sqlite"), 0o600); err != nil {
+		t.Fatalf("write corrupt local database: %v", err)
+	}
+	t.Setenv("PACKMON_DB_PATH", dbDir)
+
+	var commandErr error
+	output := captureStdout(t, func() {
+		commandErr = newDBInfoCmd().Execute()
+	})
+	if commandErr == nil || !strings.Contains(commandErr.Error(), "file is not a database") {
+		t.Fatalf("db info error = %v, want corrupt-database error", commandErr)
+	}
+	if output != "" {
+		t.Fatalf("db info output = %q, want no success output", output)
+	}
+}
+
+func TestDBSyncCommandReturnsSQLiteOpenErrorWithoutSuccessOutput(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	dbParent := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(dbParent, []byte("file"), 0o600); err != nil {
+		t.Fatalf("write invalid database parent: %v", err)
+	}
+	t.Setenv("PACKMON_DB_PATH", dbParent)
+
+	cmd := newDBSyncCmd()
+	cmd.SetArgs([]string{"--server", "https://server.example"})
+	var commandErr error
+	output := captureStdout(t, func() {
+		commandErr = cmd.Execute()
+	})
+	if commandErr == nil || !strings.Contains(commandErr.Error(), "open local database") {
+		t.Fatalf("db sync error = %v, want SQLite-open context", commandErr)
+	}
+	if output != "" {
+		t.Fatalf("db sync output = %q, want no success output", output)
+	}
+}
+
+func TestDBExportCommandReturnsOutputCreationErrorWithoutSuccessOutput(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	dbDir := t.TempDir()
+	t.Setenv("PACKMON_DB_PATH", dbDir)
+	store, _ := newTestSQLiteStore(t, dbDir)
+	if err := store.Close(); err != nil {
+		t.Fatalf("close seed store: %v", err)
+	}
+
+	outputPath := filepath.Join(t.TempDir(), "missing", "export.json")
+	cmd := newDBExportCmd()
+	cmd.SetArgs([]string{"--output", outputPath})
+	var commandErr error
+	output := captureStdout(t, func() {
+		commandErr = cmd.Execute()
+	})
+	if commandErr == nil || !strings.Contains(commandErr.Error(), "create export file") {
+		t.Fatalf("db export error = %v, want output-create context", commandErr)
+	}
+	if output != "" {
+		t.Fatalf("db export output = %q, want no success output", output)
+	}
+	if _, err := os.Stat(outputPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("export path stat error = %v, want no output file", err)
+	}
+}
+
 func TestDBSyncCommandReturnsConfigLoadErrors(t *testing.T) {
 	isolateCLIConfigDiscovery(t)
 	if err := os.WriteFile(".packmon.yaml", []byte("server: ["), 0o600); err != nil {
