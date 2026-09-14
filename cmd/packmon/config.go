@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -470,6 +471,8 @@ func printEnvVarWithMask(key string, forceSecret bool) {
 		v = "(not set)"
 	} else if isURLSecretEnvVar(key) {
 		v = logsafe.RedactURL(v)
+	} else if isRegistryURLEnvVar(key) {
+		v = redactRegistryEnvValue(key, v)
 	} else if forceSecret || isSecretEnvVar(key) {
 		v = maskSecret(v)
 	}
@@ -505,6 +508,85 @@ func configuredAPIKeyEnvVars(cfg *cliConfig) []string {
 func isURLSecretEnvVar(key string) bool {
 	upper := strings.ToUpper(strings.TrimSpace(key))
 	return upper == "PACKMON_WEBHOOK_URL" || upper == "PACKMON_SERVER"
+}
+
+func isRegistryURLEnvVar(key string) bool {
+	switch strings.ToUpper(strings.TrimSpace(key)) {
+	case "PACKMON_NPM_REGISTRY_BASE_URL", "PACKMON_PYPI_API_BASE_URL",
+		"PACKMON_RUBYGEMS_API_BASE_URL", "PACKMON_CARGO_REGISTRY_API_BASE_URL",
+		"PACKMON_COCOAPODS_TRUNK_API_BASE_URL", "PACKMON_COMPOSER_REPOSITORY_BASE_URL",
+		"PACKMON_GO_PROXY_URL", "PACKMON_MAVEN_REPOSITORY_BASE_URL",
+		"PACKMON_DOCKER_REGISTRY_MIRRORS", "PACKMON_CRAN_MIRROR_URL",
+		"PACKMON_PUB_HOSTED_URL", "PACKMON_HEX_API_BASE_URL",
+		"PACKMON_NUGET_V3_BASE_URL", "PACKMON_CHOCOLATEY_FEED_URLS":
+		return true
+	default:
+		return false
+	}
+}
+
+func redactRegistryEnvValue(key, value string) string {
+	upper := strings.ToUpper(strings.TrimSpace(key))
+	if upper == "PACKMON_GO_PROXY_URL" && strings.EqualFold(strings.TrimSpace(value), "off") {
+		return "off"
+	}
+	if upper == "PACKMON_DOCKER_REGISTRY_MIRRORS" {
+		parts := splitCSV(value)
+		if len(parts) == 0 {
+			return "(redacted-url)"
+		}
+		for index, part := range parts {
+			name, mirror, found := strings.Cut(part, "=")
+			if !found || strings.TrimSpace(name) == "" {
+				return "(redacted-url)"
+			}
+			redactedMirror := redactRegistryURL(mirror)
+			if redactedMirror == "(redacted-url)" {
+				return "(redacted-url)"
+			}
+			parts[index] = strings.TrimSpace(name) + "=" + redactedMirror
+		}
+		return strings.Join(parts, ",")
+	}
+	if upper == "PACKMON_CHOCOLATEY_FEED_URLS" {
+		parts := splitCSV(value)
+		if len(parts) == 0 {
+			return "(redacted-url)"
+		}
+		for index, part := range parts {
+			redactedURL := redactRegistryURL(part)
+			if redactedURL == "(redacted-url)" {
+				return "(redacted-url)"
+			}
+			parts[index] = redactedURL
+		}
+		return strings.Join(parts, ",")
+	}
+	return redactRegistryURL(value)
+}
+
+func redactRegistryURL(raw string) string {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "(redacted-url)"
+	}
+	parsed.User = nil
+	parsed.Fragment = ""
+	parsed.ForceQuery = false
+	if parsed.RawQuery != "" {
+		query, queryErr := url.ParseQuery(parsed.RawQuery)
+		if queryErr != nil {
+			return "(redacted-url)"
+		}
+		for name, values := range query {
+			for index := range values {
+				values[index] = "redacted"
+			}
+			query[name] = values
+		}
+		parsed.RawQuery = query.Encode()
+	}
+	return parsed.String()
 }
 
 func isSecretEnvVar(key string) bool {

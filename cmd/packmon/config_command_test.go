@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -457,6 +458,92 @@ func TestConfigShowRedactsWebhookURL(t *testing.T) {
 	}
 	if !strings.Contains(output, "PACKMON_WEBHOOK_URL:") || !strings.Contains(output, "https://hooks.example/...") {
 		t.Fatalf("config show missing redacted webhook URL:\n%s", output)
+	}
+}
+
+func TestRegistryURLConfigValuesAreRedacted(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	isolateLatestRegistryEnvironment(t)
+	configPath := filepath.Join(t.TempDir(), "packmon.yaml")
+	if err := os.WriteFile(configPath, []byte(`mode: local`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	for index, key := range []string{
+		"PACKMON_NPM_REGISTRY_BASE_URL", "PACKMON_PYPI_API_BASE_URL",
+		"PACKMON_RUBYGEMS_API_BASE_URL", "PACKMON_CARGO_REGISTRY_API_BASE_URL",
+		"PACKMON_COCOAPODS_TRUNK_API_BASE_URL", "PACKMON_COMPOSER_REPOSITORY_BASE_URL",
+		"PACKMON_MAVEN_REPOSITORY_BASE_URL", "PACKMON_CRAN_MIRROR_URL",
+		"PACKMON_PUB_HOSTED_URL", "PACKMON_HEX_API_BASE_URL", "PACKMON_NUGET_V3_BASE_URL",
+	} {
+		t.Setenv(key, fmt.Sprintf("https://user-%d:password-%d@registry-%d.example/path-%d?token-%d=secret-%d#fragment-%d", index, index, index, index, index, index, index))
+	}
+	t.Setenv("PACKMON_GO_PROXY_URL", "off")
+	t.Setenv("PACKMON_DOCKER_REGISTRY_MIRRORS", "docker.io=https://user-docker:password-docker@docker.example/v2?token-docker=secret-docker,ghcr.io=https://user-ghcr:password-ghcr@ghcr.example/v2?token-ghcr=secret-ghcr")
+	t.Setenv("PACKMON_CHOCOLATEY_FEED_URLS", "https://user-choco:password-choco@choco.example/api?key-choco=secret-choco,https://user-feed:password-feed@feed.example/api?key-feed=secret-feed")
+
+	cmd := newConfigShowCmd()
+	cmd.SetArgs([]string{"--file", configPath})
+	output := captureStdout(t, func() {
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("config show: %v", err)
+		}
+	})
+
+	for index, key := range []string{
+		"PACKMON_NPM_REGISTRY_BASE_URL", "PACKMON_PYPI_API_BASE_URL",
+		"PACKMON_RUBYGEMS_API_BASE_URL", "PACKMON_CARGO_REGISTRY_API_BASE_URL",
+		"PACKMON_COCOAPODS_TRUNK_API_BASE_URL", "PACKMON_COMPOSER_REPOSITORY_BASE_URL",
+		"PACKMON_MAVEN_REPOSITORY_BASE_URL", "PACKMON_CRAN_MIRROR_URL",
+		"PACKMON_PUB_HOSTED_URL", "PACKMON_HEX_API_BASE_URL", "PACKMON_NUGET_V3_BASE_URL",
+	} {
+		want := fmt.Sprintf("https://registry-%d.example/path-%d?token-%d=redacted", index, index, index)
+		if !strings.Contains(output, key+":") || !strings.Contains(output, want) {
+			t.Fatalf("config show missing redacted registry URL %q for %s:\n%s", want, key, output)
+		}
+		for _, secret := range []string{fmt.Sprintf("user-%d", index), fmt.Sprintf("password-%d", index), fmt.Sprintf("secret-%d", index), fmt.Sprintf("fragment-%d", index)} {
+			if strings.Contains(output, secret) {
+				t.Fatalf("config show leaked registry URL component %q:\n%s", secret, output)
+			}
+		}
+	}
+	for _, test := range []struct {
+		key  string
+		want string
+	}{
+		{"PACKMON_GO_PROXY_URL", "off"},
+		{"PACKMON_DOCKER_REGISTRY_MIRRORS", "docker.io=https://docker.example/v2?token-docker=redacted,ghcr.io=https://ghcr.example/v2?token-ghcr=redacted"},
+		{"PACKMON_CHOCOLATEY_FEED_URLS", "https://choco.example/api?key-choco=redacted,https://feed.example/api?key-feed=redacted"},
+	} {
+		if !strings.Contains(output, test.key+":") || !strings.Contains(output, test.want) {
+			t.Fatalf("config show missing redacted registry collection %q for %s:\n%s", test.want, test.key, output)
+		}
+	}
+	for _, secret := range []string{"user-docker", "password-docker", "secret-docker", "user-ghcr", "password-ghcr", "secret-ghcr", "user-choco", "password-choco", "secret-choco", "user-feed", "password-feed", "secret-feed"} {
+		if strings.Contains(output, secret) {
+			t.Fatalf("config show leaked registry URL component %q:\n%s", secret, output)
+		}
+	}
+
+	for _, test := range []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{"malformed URL", "PACKMON_NPM_REGISTRY_BASE_URL", "not-a-url-secret"},
+		{"malformed query", "PACKMON_NPM_REGISTRY_BASE_URL", "https://registry.example/path?secret=%zz"},
+		{"malformed Docker map", "PACKMON_DOCKER_REGISTRY_MIRRORS", "docker.io=https://registry.example/v2?token=secret,broken-secret"},
+		{"malformed Chocolatey list", "PACKMON_CHOCOLATEY_FEED_URLS", "https://registry.example/api?token=secret,broken-secret"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := redactRegistryEnvValue(test.key, test.value)
+			if got != "(redacted-url)" {
+				t.Fatalf("redactRegistryEnvValue(%q, %q) = %q, want fixed marker", test.key, test.value, got)
+			}
+			if strings.Contains(got, "secret") {
+				t.Fatalf("redacted malformed value leaks secret: %q", got)
+			}
+		})
 	}
 }
 
