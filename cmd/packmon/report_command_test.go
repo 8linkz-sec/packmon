@@ -125,6 +125,62 @@ func TestReportCommandSanitizesRepoNames(t *testing.T) {
 	}
 }
 
+func TestReportCommandFiltersRepoLimitsEntriesAndSanitizesFilterLabel(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	dbDir := t.TempDir()
+	t.Setenv("PACKMON_DB_PATH", dbDir)
+	store, _ := newTestSQLiteStore(t, dbDir)
+	filteredRepo := "app\x1b\n::warning::spoof"
+	insertReportEntry(t, store, sqlite.ScanEntry{
+		RepoName:      filteredRepo,
+		ScannedAt:     time.Date(2026, 5, 30, 12, 0, 0, 0, time.UTC),
+		PackagesCount: 2,
+	})
+	insertReportEntry(t, store, sqlite.ScanEntry{
+		RepoName:      filteredRepo,
+		ScannedAt:     time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC),
+		PackagesCount: 9,
+	})
+	insertReportEntry(t, store, sqlite.ScanEntry{
+		RepoName:      "other-repository",
+		ScannedAt:     time.Date(2026, 5, 31, 12, 0, 0, 0, time.UTC),
+		PackagesCount: 99,
+	})
+	if err := store.Close(); err != nil {
+		t.Fatalf("close seed store: %v", err)
+	}
+
+	cmd := newReportCmd()
+	cmd.SetArgs([]string{"--repo", filteredRepo, "--limit", "1"})
+	output := captureStdout(t, func() {
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("report command: %v", err)
+		}
+	})
+
+	for _, want := range []string{"Scans:     1", "Packages:  2", "2026-05-30 12:00 UTC", `app\x1B\n::warning::spoof`} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("filtered report output missing %q:\n%s", want, output)
+		}
+	}
+	for _, unexpected := range []string{"other-repository", "2026-05-31 12:00 UTC", "2026-05-29 12:00 UTC", "Packages:  99", "Packages:  9", "\x1b", "\n::warning::"} {
+		if strings.Contains(output, unexpected) {
+			t.Fatalf("filtered report output contains %q:\n%s", unexpected, output)
+		}
+	}
+}
+
+func TestWriteReportOutputOmitsEmptyFilterLabel(t *testing.T) {
+	t.Parallel()
+	var output bytes.Buffer
+	if err := writeReportOutput(&output, "", []sqlite.ScanEntry{{RepoName: "app"}}); err != nil {
+		t.Fatalf("writeReportOutput: %v", err)
+	}
+	if strings.Contains(output.String(), "Packmon Security Report --") {
+		t.Fatalf("unfiltered report includes filter label:\n%s", output.String())
+	}
+}
+
 func TestSummarizeReportEntriesCountsReturnedScans(t *testing.T) {
 	t.Parallel()
 
