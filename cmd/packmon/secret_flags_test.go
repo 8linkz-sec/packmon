@@ -22,3 +22,26 @@ func TestRejectSecretFlagValuePropagatesChangedNonStringFlagError(t *testing.T) 
 		t.Fatalf("rejectSecretFlagValue() error = %q, want GetString type context", err)
 	}
 }
+
+func TestSecretFlagStringValueNilAndMissingFlagAreEmpty(t *testing.T) {
+	t.Parallel()
+
+	missing := &cobra.Command{Use: "test"}
+	for _, tc := range []struct {
+		name string
+		cmd  *cobra.Command
+	}{
+		{name: "nil command"},
+		{name: "missing flag", cmd: missing},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := secretFlagStringValue(tc.cmd, "token")
+			if err != nil {
+				t.Fatalf("secretFlagStringValue() error = %v, want nil", err)
+			}
+			if got != "" {
+				t.Fatalf("secretFlagStringValue() = %q, want empty", got)
+			}
+		})
+	}
+}
