@@ -532,20 +532,33 @@ func redactRegistryEnvValue(key, value string) string {
 	}
 	if upper == "PACKMON_DOCKER_REGISTRY_MIRRORS" {
 		parts := splitCSV(value)
+		if len(parts) == 0 {
+			return "(redacted-url)"
+		}
 		for index, part := range parts {
 			name, mirror, found := strings.Cut(part, "=")
-			if !found {
-				parts[index] = "(redacted-url)"
-				continue
+			if !found || strings.TrimSpace(name) == "" {
+				return "(redacted-url)"
 			}
-			parts[index] = strings.TrimSpace(name) + "=" + redactRegistryURL(mirror)
+			redactedMirror := redactRegistryURL(mirror)
+			if redactedMirror == "(redacted-url)" {
+				return "(redacted-url)"
+			}
+			parts[index] = strings.TrimSpace(name) + "=" + redactedMirror
 		}
 		return strings.Join(parts, ",")
 	}
 	if upper == "PACKMON_CHOCOLATEY_FEED_URLS" {
 		parts := splitCSV(value)
+		if len(parts) == 0 {
+			return "(redacted-url)"
+		}
 		for index, part := range parts {
-			parts[index] = redactRegistryURL(part)
+			redactedURL := redactRegistryURL(part)
+			if redactedURL == "(redacted-url)" {
+				return "(redacted-url)"
+			}
+			parts[index] = redactedURL
 		}
 		return strings.Join(parts, ",")
 	}
