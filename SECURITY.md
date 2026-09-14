@@ -523,8 +523,9 @@ does not let repository-controlled image references add arbitrary registry
 targets. Public-registry hosts, bearer-token realms, and resolved addresses are
 rejected when they target unsupported hosts, plain HTTP without an explicit
 insecure test override, loopback, link-local, private, multicast, or
-unspecified addresses. Configured mirror URLs must not contain credentials,
-queries, or fragments; HTTPS is required except loopback HTTP test endpoints,
+unspecified addresses. Configured latest-version registry base and mirror URLs
+must not contain credentials, queries (including an empty trailing `?`
+delimiter), or fragments; HTTPS is required except loopback HTTP test endpoints,
 and literal link-local, multicast, or unspecified mirror addresses are rejected.
 Private registry credentials are not read. Failures degrade to `unknown` in
 reports. The server scan API rejects Docker packages because Packmon does not

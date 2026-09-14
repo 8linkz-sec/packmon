@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -8,6 +9,8 @@ import (
 	"sort"
 	"strings"
 )
+
+var errLatestRegistryBaseURLHasQueryOrFragment = errors.New("latest registry base URL has query or fragment")
 
 const (
 	defaultNPMRegistryBaseURL        = "https://registry.npmjs.org"
@@ -788,8 +791,8 @@ func normalizeLatestRegistryBaseURL(name, raw string) (string, error) {
 	if parsed.User != nil {
 		return "", fmt.Errorf("%s must not include credentials", name)
 	}
-	if parsed.RawQuery != "" || parsed.Fragment != "" {
-		return "", fmt.Errorf("%s must not include query or fragment components", name)
+	if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+		return "", fmt.Errorf("%s must not include query or fragment components: %w", name, errLatestRegistryBaseURLHasQueryOrFragment)
 	}
 	switch strings.ToLower(parsed.Scheme) {
 	case "https":
