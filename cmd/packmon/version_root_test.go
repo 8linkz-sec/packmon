@@ -36,6 +36,21 @@ func TestVersionCommandRendersExactMetadataLine(t *testing.T) {
 	}
 }
 
+func TestVersionCommandRejectsExtraArgumentWithoutOutput(t *testing.T) {
+	cmd := newVersionCmd()
+	cmd.SetArgs([]string{"unexpected"})
+	var executeErr error
+	output := captureStdout(t, func() {
+		executeErr = cmd.Execute()
+	})
+	if executeErr == nil {
+		t.Fatal("version command with an extra argument succeeded")
+	}
+	if output != "" {
+		t.Fatalf("version command printed despite argument error: %q", output)
+	}
+}
+
 func TestEnvHelpers(t *testing.T) {
 	t.Setenv("PACKMON_TEST_VALUE", "from-env")
 	if got := envOrDefault("PACKMON_TEST_VALUE", "fallback"); got != "from-env" {
