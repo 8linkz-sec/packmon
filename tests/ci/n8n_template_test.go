@@ -239,6 +239,101 @@ func TestN8NDailySyncKeepsAPIKeyOutOfCommandArguments(t *testing.T) {
 	t.Fatal("daily sync workflow has no executeCommand node")
 }
 
+func TestN8NDailySyncPinsCompleteWorkflowTopology(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join("..", "..", "deploy", "n8n", "daily-sync.json")
+	data, err := os.ReadFile(path) //nolint:gosec // static repository fixture path
+	if err != nil {
+		t.Fatalf("read daily-sync.json: %v", err)
+	}
+
+	var workflow struct {
+		Active bool `json:"active"`
+		Nodes  []struct {
+			Name       string         `json:"name"`
+			Type       string         `json:"type"`
+			Parameters map[string]any `json:"parameters"`
+		} `json:"nodes"`
+		Connections map[string]map[string][][]struct {
+			Node  string `json:"node"`
+			Type  string `json:"type"`
+			Index int    `json:"index"`
+		} `json:"connections"`
+	}
+	if err := json.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("parse daily-sync.json: %v", err)
+	}
+	if workflow.Active {
+		t.Fatal("daily sync workflow must remain disabled by default")
+	}
+	if len(workflow.Nodes) != 3 {
+		t.Fatalf("daily sync node count = %d, want exactly 3", len(workflow.Nodes))
+	}
+
+	nodes := make(map[string]struct {
+		Type       string
+		Parameters map[string]any
+	}, len(workflow.Nodes))
+	for _, node := range workflow.Nodes {
+		if _, duplicate := nodes[node.Name]; duplicate {
+			t.Fatalf("daily sync has duplicate node name %q", node.Name)
+		}
+		nodes[node.Name] = struct {
+			Type       string
+			Parameters map[string]any
+		}{Type: node.Type, Parameters: node.Parameters}
+	}
+	for name, wantType := range map[string]string{
+		"Daily Trigger": "n8n-nodes-base.scheduleTrigger",
+		"Sync Local DB": "n8n-nodes-base.executeCommand",
+		"Result":        "n8n-nodes-base.code",
+	} {
+		node, ok := nodes[name]
+		if !ok || node.Type != wantType {
+			t.Fatalf("daily sync node %q = %+v, want type %q", name, node, wantType)
+		}
+	}
+
+	rule, ok := nodes["Daily Trigger"].Parameters["rule"].(map[string]any)
+	if !ok {
+		t.Fatalf("daily trigger rule = %T, want object", nodes["Daily Trigger"].Parameters["rule"])
+	}
+	interval, ok := rule["interval"].([]any)
+	if !ok || len(interval) != 1 {
+		t.Fatalf("daily trigger interval = %#v, want one cron rule", rule["interval"])
+	}
+	cron, ok := interval[0].(map[string]any)
+	if !ok || cron["field"] != "cronExpression" || cron["expression"] != "0 3 * * *" {
+		t.Fatalf("daily trigger cron = %#v, want 0 3 * * *", interval[0])
+	}
+	if got := nodes["Sync Local DB"].Parameters["command"]; got != "packmon db sync" {
+		t.Fatalf("daily sync command = %#v, want packmon db sync", got)
+	}
+
+	assertN8NMainConnection(t, workflow.Connections, "Daily Trigger", "Sync Local DB")
+	assertN8NMainConnection(t, workflow.Connections, "Sync Local DB", "Result")
+	if len(workflow.Connections) != 2 {
+		t.Fatalf("daily sync connection sources = %d, want exactly 2", len(workflow.Connections))
+	}
+}
+
+func assertN8NMainConnection(t *testing.T, connections map[string]map[string][][]struct {
+	Node  string `json:"node"`
+	Type  string `json:"type"`
+	Index int    `json:"index"`
+}, from, wantNode string) {
+	t.Helper()
+	branches := connections[from]["main"]
+	if len(branches) != 1 || len(branches[0]) != 1 {
+		t.Fatalf("connection %q main = %#v, want one target", from, branches)
+	}
+	target := branches[0][0]
+	if target.Node != wantNode || target.Type != "main" || target.Index != 0 {
+		t.Fatalf("connection %q target = %+v, want main -> %q index 0", from, target, wantNode)
+	}
+}
+
 func TestN8NWeeklyMaintenanceDoesNotWriteUnusedExportFile(t *testing.T) {
 	t.Parallel()
 
