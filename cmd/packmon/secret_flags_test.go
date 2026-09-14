@@ -66,6 +66,42 @@ func TestRejectSecretFlagValueAllowsChangedEmptyValues(t *testing.T) {
 	}
 }
 
+func TestRejectSecretFlagValueCompatibilityEnvironmentAliases(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		env     string
+		wantErr bool
+	}{
+		{name: "true", env: "true"},
+		{name: "one", env: "1"},
+		{name: "yes", env: "yes"},
+		{name: "padded mixed case true", env: " TrUe \t"},
+		{name: "false", env: "false", wantErr: true},
+		{name: "zero", env: "0", wantErr: true},
+		{name: "no", env: "no", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(allowSecretFlagsEnv, tc.env)
+			cmd := &cobra.Command{Use: "test"}
+			cmd.Flags().String("token", "", "test-only secret flag")
+			if err := cmd.Flags().Set("token", "test-secret-sentinel"); err != nil {
+				t.Fatalf("set token flag: %v", err)
+			}
+
+			err := rejectSecretFlagValue(cmd, "token", "PACKMON_TOKEN")
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("rejectSecretFlagValue() error = nil, want rejection")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("rejectSecretFlagValue() error = %v, want nil", err)
+			}
+		})
+	}
+}
+
 func TestRejectSecretFlagValueRedactsMalformedCompatibilityEnvironment(t *testing.T) {
 	const (
 		secretSentinel = "test-secret-sentinel"
