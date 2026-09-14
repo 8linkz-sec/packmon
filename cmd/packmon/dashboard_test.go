@@ -138,9 +138,99 @@ func TestStartBrowserCommandWaitsForStartedProcess(t *testing.T) {
 	}
 }
 
+func TestStartBrowserCommandReportsMissingExecutable(t *testing.T) {
+	//nolint:gosec // G204: the test deliberately names a command that cannot exist.
+	cmd := exec.Command("packmon-dashboard-browser-command-that-does-not-exist")
+	if err := startBrowserCommand(cmd); err == nil {
+		t.Fatal("startBrowserCommand(missing executable) error = nil")
+	}
+}
+
+func TestStartBrowserCommandReturnsPromptlyWhenStartupWaitIsDisabled(t *testing.T) {
+	originalBrowserProcessStartupWait := browserProcessStartupWait
+	originalWaitBrowserCommand := waitBrowserCommand
+	browserProcessStartupWait = 0
+	t.Cleanup(func() {
+		browserProcessStartupWait = originalBrowserProcessStartupWait
+		waitBrowserCommand = originalWaitBrowserCommand
+	})
+
+	reaped := make(chan error, 1)
+	waitBrowserCommand = browserCommandWaiter(reaped)
+	cmd := dashboardBrowserHelperCommand(t, 250*time.Millisecond)
+	started := time.Now()
+	if err := startBrowserCommand(cmd); err != nil {
+		t.Fatalf("start browser command: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed >= 150*time.Millisecond {
+		t.Fatalf("startBrowserCommand elapsed = %s, want return without waiting for helper", elapsed)
+	}
+	waitForBrowserHelperExit(t, reaped)
+}
+
+func TestStartBrowserCommandReturnsAfterStartupTimeoutAndReapsHelper(t *testing.T) {
+	originalBrowserProcessStartupWait := browserProcessStartupWait
+	originalWaitBrowserCommand := waitBrowserCommand
+	browserProcessStartupWait = 20 * time.Millisecond
+	t.Cleanup(func() {
+		browserProcessStartupWait = originalBrowserProcessStartupWait
+		waitBrowserCommand = originalWaitBrowserCommand
+	})
+
+	reaped := make(chan error, 1)
+	waitBrowserCommand = browserCommandWaiter(reaped)
+	cmd := dashboardBrowserHelperCommand(t, 250*time.Millisecond)
+	started := time.Now()
+	if err := startBrowserCommand(cmd); err != nil {
+		t.Fatalf("start browser command: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed >= 150*time.Millisecond {
+		t.Fatalf("startBrowserCommand elapsed = %s, want startup-timeout return", elapsed)
+	}
+	waitForBrowserHelperExit(t, reaped)
+}
+
+func dashboardBrowserHelperCommand(t *testing.T, sleep time.Duration) *exec.Cmd {
+	t.Helper()
+	//nolint:gosec // G204: the test re-executes its own binary as a helper process.
+	cmd := exec.Command(os.Args[0], "-test.run=^TestDashboardBrowserHelperProcess$")
+	cmd.Env = append(os.Environ(),
+		"PACKMON_DASHBOARD_BROWSER_HELPER=1",
+		"PACKMON_DASHBOARD_BROWSER_HELPER_SLEEP="+sleep.String(),
+	)
+	return cmd
+}
+
+func browserCommandWaiter(reaped chan<- error) func(*exec.Cmd) error {
+	return func(cmd *exec.Cmd) error {
+		err := cmd.Wait()
+		reaped <- err
+		return err
+	}
+}
+
+func waitForBrowserHelperExit(t *testing.T, reaped <-chan error) {
+	t.Helper()
+	select {
+	case err := <-reaped:
+		if err != nil {
+			t.Fatalf("browser helper exit: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("browser helper process was not reaped")
+	}
+}
+
 func TestDashboardBrowserHelperProcess(t *testing.T) {
 	if os.Getenv("PACKMON_DASHBOARD_BROWSER_HELPER") != "1" {
 		return
+	}
+	if rawSleep := os.Getenv("PACKMON_DASHBOARD_BROWSER_HELPER_SLEEP"); rawSleep != "" {
+		delay, err := time.ParseDuration(rawSleep)
+		if err != nil {
+			os.Exit(2)
+		}
+		time.Sleep(delay)
 	}
 	if os.Getenv("PACKMON_DASHBOARD_BROWSER_HELPER_EXIT") == "7" {
 		os.Exit(7)
