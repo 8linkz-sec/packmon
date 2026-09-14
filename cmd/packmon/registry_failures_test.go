@@ -74,6 +74,9 @@ func TestRegistryLookupPhaseNilSafety(t *testing.T) {
 	if got := registryLookupPhaseFrom(context.Background()); got != nil {
 		t.Fatalf("registryLookupPhaseFrom(no phase) = %v, want nil", got)
 	}
+	if got := registryLookupPhaseFrom(nil); got != nil {
+		t.Fatalf("registryLookupPhaseFrom(nil) = %v, want nil", got)
+	}
 }
 
 func TestRegistryLookupPhaseSetsNoDeadline(t *testing.T) {
