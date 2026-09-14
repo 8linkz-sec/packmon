@@ -157,6 +157,40 @@ func TestDockerfileRuntimeTargetsKeepLeastPrivilegeEntrypointsAndServerFeedAcces
 	}
 }
 
+func TestDockerfileRuntimeTargetsCopyOnlyPublishedArtifactsAndDocs(t *testing.T) {
+	t.Parallel()
+
+	dockerfile := filepath.Join("..", "..", "Dockerfile")
+	dockerData, err := os.ReadFile(dockerfile) //nolint:gosec // static repository fixture path
+	if err != nil {
+		t.Fatalf("read Dockerfile: %v", err)
+	}
+
+	stages := dockerfileRuntimeStages(t, string(dockerData))
+	for stage, wantCopies := range map[string][]string{
+		"server": {
+			"COPY --from=build /packmon-server /usr/local/bin/packmon-server",
+			"COPY SECURITY.md /usr/share/doc/packmon/SECURITY.md",
+			"COPY LICENSE /usr/share/doc/packmon/LICENSE",
+		},
+		"cli": {
+			"COPY --from=build /packmon /usr/local/bin/packmon",
+			"COPY SECURITY.md /usr/share/doc/packmon/SECURITY.md",
+			"COPY LICENSE /usr/share/doc/packmon/LICENSE",
+		},
+	} {
+		gotCopies := dockerfileCopyInstructions(stages[stage])
+		if !slices.Equal(gotCopies, wantCopies) {
+			t.Fatalf("%s runtime COPY instructions = %#v, want only published binary and SECURITY.md/LICENSE documentation %#v", stage, gotCopies, wantCopies)
+		}
+	}
+}
+
+func dockerfileCopyInstructions(stage string) []string {
+	copyRE := regexp.MustCompile(`(?m)^COPY .+$`)
+	return copyRE.FindAllString(stage, -1)
+}
+
 func dockerfileRuntimeStages(t *testing.T, dockerfile string) map[string]string {
 	t.Helper()
 
