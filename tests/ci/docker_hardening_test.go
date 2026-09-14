@@ -114,6 +114,69 @@ func TestDockerfilePinsAlpineRuntimePackageInstalls(t *testing.T) {
 	})
 }
 
+func TestDockerfileRuntimeTargetsKeepLeastPrivilegeEntrypointsAndServerFeedAccess(t *testing.T) {
+	t.Parallel()
+
+	dockerfile := filepath.Join("..", "..", "Dockerfile")
+	dockerData, err := os.ReadFile(dockerfile) //nolint:gosec // static repository fixture path
+	if err != nil {
+		t.Fatalf("read Dockerfile: %v", err)
+	}
+
+	stages := dockerfileRuntimeStages(t, string(dockerData))
+	server := stages["server"]
+	for _, want := range []string{
+		"git=",
+		"addgroup -S packmon && adduser -S packmon -G packmon",
+		"mkdir -p /data/feeds /usr/share/doc/packmon && chown packmon:packmon /data/feeds",
+		"COPY --from=build /packmon-server /usr/local/bin/packmon-server",
+		"USER packmon",
+		`ENTRYPOINT ["packmon-server"]`,
+	} {
+		if !strings.Contains(server, want) {
+			t.Fatalf("server runtime stage missing %q", want)
+		}
+	}
+	if strings.Index(server, "USER packmon") > strings.Index(server, `ENTRYPOINT ["packmon-server"]`) {
+		t.Fatal("server runtime stage must select the unprivileged user before its entrypoint")
+	}
+
+	cli := stages["cli"]
+	for _, want := range []string{
+		"addgroup -S packmon && adduser -S packmon -G packmon",
+		"COPY --from=build /packmon /usr/local/bin/packmon",
+		"USER packmon",
+		`ENTRYPOINT ["packmon"]`,
+	} {
+		if !strings.Contains(cli, want) {
+			t.Fatalf("cli runtime stage missing %q", want)
+		}
+	}
+	if strings.Index(cli, "USER packmon") > strings.Index(cli, `ENTRYPOINT ["packmon"]`) {
+		t.Fatal("cli runtime stage must select the unprivileged user before its entrypoint")
+	}
+}
+
+func dockerfileRuntimeStages(t *testing.T, dockerfile string) map[string]string {
+	t.Helper()
+
+	stageRE := regexp.MustCompile(`(?m)^FROM \$\{PACKMON_ALPINE_RUNTIME_IMAGE\} AS (server|cli)\r?$`)
+	matches := stageRE.FindAllStringSubmatchIndex(dockerfile, -1)
+	if len(matches) != 2 {
+		t.Fatalf("runtime stages = %d, want server and cli", len(matches))
+	}
+
+	stages := make(map[string]string, len(matches))
+	for i, match := range matches {
+		end := len(dockerfile)
+		if i+1 < len(matches) {
+			end = matches[i+1][0]
+		}
+		stages[dockerfile[match[2]:match[3]]] = dockerfile[match[0]:end]
+	}
+	return stages
+}
+
 func TestDockerfilePinsAllExternalBaseImagesByDigest(t *testing.T) {
 	t.Parallel()
 
