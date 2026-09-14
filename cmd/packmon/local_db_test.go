@@ -109,6 +109,86 @@ func TestReadLocalSyncAgeClampsFutureTimestamps(t *testing.T) {
 	}
 }
 
+func TestInspectLocalDBReportsOpenErrorForDirectory(t *testing.T) {
+	dbPath := t.TempDir()
+
+	info, err := inspectLocalDB(context.Background(), dbPath)
+	if err == nil {
+		t.Fatal("inspectLocalDB() error = nil, want local database open error")
+	}
+	if info != nil {
+		t.Fatalf("inspectLocalDB() info = %+v, want nil on open error", info)
+	}
+	if !strings.Contains(err.Error(), "open local database") {
+		t.Fatalf("inspectLocalDB() error = %v, want local database open context", err)
+	}
+}
+
+func TestInspectLocalDBReportsStatErrorForInvalidPath(t *testing.T) {
+	info, err := inspectLocalDB(context.Background(), string([]byte{'\x00'}))
+	if err == nil {
+		t.Fatal("inspectLocalDB() error = nil, want stat error")
+	}
+	if info != nil {
+		t.Fatalf("inspectLocalDB() info = %+v, want nil on stat error", info)
+	}
+	if !strings.Contains(err.Error(), "stat local database") {
+		t.Fatalf("inspectLocalDB() error = %v, want local database stat context", err)
+	}
+}
+
+func TestInspectLocalDBRejectsInvalidWarnAfterEnvironment(t *testing.T) {
+	t.Setenv("PACKMON_DB_WARN_AFTER_DAYS", "soon")
+
+	info, err := inspectLocalDB(context.Background(), "unused.db")
+	if err == nil {
+		t.Fatal("inspectLocalDB() error = nil, want invalid warn-after error")
+	}
+	if info != nil {
+		t.Fatalf("inspectLocalDB() info = %+v, want nil on invalid warn-after error", info)
+	}
+	if !strings.Contains(err.Error(), "PACKMON_DB_WARN_AFTER_DAYS") {
+		t.Fatalf("inspectLocalDB() error = %v, want warn-after validation error", err)
+	}
+}
+
+func TestApplyLocalDBFreshnessClosedStoreMarksFreshnessUnknown(t *testing.T) {
+	store, _ := newTestSQLiteStore(t, t.TempDir())
+	if err := store.Close(); err != nil {
+		t.Fatalf("close local store: %v", err)
+	}
+
+	result := &domain.ScanResult{Mode: domain.ScanModeLocal}
+	err := applyLocalDBFreshness(context.Background(), store, result)
+	if err == nil {
+		t.Fatal("applyLocalDBFreshness() error = nil, want closed-store error")
+	}
+	if !result.DBStale {
+		t.Fatal("DBStale = false, want true when freshness cannot be read")
+	}
+	if result.DBAgeDays != nil {
+		t.Fatalf("DBAgeDays = %v, want nil when freshness cannot be read", result.DBAgeDays)
+	}
+}
+
+func TestReadLocalSyncAgeReportsClosedStoreErrorContext(t *testing.T) {
+	store, _ := newTestSQLiteStore(t, t.TempDir())
+	if err := store.Close(); err != nil {
+		t.Fatalf("close local store: %v", err)
+	}
+
+	lastSyncAt, ageDays, err := readLocalSyncAge(context.Background(), store)
+	if err == nil {
+		t.Fatal("readLocalSyncAge() error = nil, want closed-store error")
+	}
+	if lastSyncAt != nil || ageDays != nil {
+		t.Fatalf("readLocalSyncAge() = (%v, %v), want nil values on error", lastSyncAt, ageDays)
+	}
+	if !strings.Contains(err.Error(), "read local sync timestamp") {
+		t.Fatalf("readLocalSyncAge() error = %v, want sync timestamp context", err)
+	}
+}
+
 func TestApplyLocalDBFreshnessOnlyAnnotatesLocalResults(t *testing.T) {
 	t.Setenv("PACKMON_DB_WARN_AFTER_DAYS", "1")
 	store, _ := newTestSQLiteStore(t, t.TempDir())
