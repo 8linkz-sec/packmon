@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"io"
 	"strings"
 	"sync"
 	"testing"
@@ -70,6 +71,36 @@ func TestLookupProgressQuietAndNilAreSilent(t *testing.T) {
 
 	if p := startLookupProgress(out, 0, false, time.Millisecond); p != nil {
 		t.Fatal("startLookupProgress should return nil for zero packages")
+	}
+}
+
+// TestLookupProgressInvalidReporterInputsAreSilent proves each non-quiet
+// guard operand suppresses reporter startup independently.
+func TestLookupProgressInvalidReporterInputsAreSilent(t *testing.T) {
+	t.Parallel()
+
+	out := &syncWriter{}
+	for _, tc := range []struct {
+		name     string
+		writer   io.Writer
+		interval time.Duration
+	}{
+		{name: "nil writer", writer: nil, interval: time.Millisecond},
+		{name: "zero interval", writer: out, interval: 0},
+		{name: "negative interval", writer: out, interval: -time.Millisecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			progress := startLookupProgress(tc.writer, 10, false, tc.interval)
+			if progress != nil {
+				t.Fatal("startLookupProgress returned a reporter for invalid input")
+			}
+			progress.increment()
+			progress.stop()
+		})
+	}
+
+	if got := out.String(); got != "" {
+		t.Fatalf("invalid reporter inputs wrote %q, want no output", got)
 	}
 }
 
