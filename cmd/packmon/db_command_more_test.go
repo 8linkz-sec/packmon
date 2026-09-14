@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/8linkz-sec/packmon/internal/db/sqlite"
 	"github.com/8linkz-sec/packmon/internal/ioutils"
 
 	"github.com/8linkz-sec/packmon/internal/testutil"
@@ -236,6 +237,21 @@ type failingCloseWriter struct {
 	err error
 }
 
+type failingExportCloseWriter struct {
+	err        error
+	closeErr   error
+	closeCalls int
+}
+
+func (w *failingExportCloseWriter) Write([]byte) (int, error) {
+	return 0, w.err
+}
+
+func (w *failingExportCloseWriter) Close() error {
+	w.closeCalls++
+	return w.closeErr
+}
+
 func (w *failingCloseWriter) Close() error {
 	return w.err
 }
@@ -253,6 +269,68 @@ func TestWriteLocalDBExportReturnsCloseError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "close export file") || !strings.Contains(err.Error(), "delayed writeback failed") {
 		t.Fatalf("writeLocalDBExport() error = %v, want close context", err)
+	}
+}
+
+func TestWriteLocalDBExportHandlesNilCloserAndKeepsExportError(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	dbDir := t.TempDir()
+	store, _ := newTestSQLiteStore(t, dbDir)
+	defer ioutils.CloseSilently(store)
+
+	var output bytes.Buffer
+	if err := writeLocalDBExport(context.Background(), store, &output, nil); err != nil {
+		t.Fatalf("writeLocalDBExport() with nil closer: %v", err)
+	}
+	if output.Len() == 0 {
+		t.Fatal("writeLocalDBExport() with nil closer wrote no export")
+	}
+
+	exportErr := errors.New("export write failed")
+	closeErr := errors.New("close also failed")
+	writer := &failingExportCloseWriter{err: exportErr, closeErr: closeErr}
+	err := writeLocalDBExport(context.Background(), store, writer, writer)
+	if !errors.Is(err, exportErr) {
+		t.Fatalf("writeLocalDBExport() error = %v, want export error", err)
+	}
+	if errors.Is(err, closeErr) {
+		t.Fatalf("writeLocalDBExport() error = %v, must not replace export error with close error", err)
+	}
+	if writer.closeCalls != 1 {
+		t.Fatalf("close calls = %d, want 1", writer.closeCalls)
+	}
+}
+
+func TestPrintSyncRemovalStatsReportsMixedCounters(t *testing.T) {
+	stats := sqlite.SyncStats{
+		FullCleared: sqlite.SyncRemovalStats{
+			Vulnerabilities: 2,
+			Reputation:      1,
+		},
+		TombstoneDeleted: sqlite.SyncRemovalStats{
+			Malicious: 3,
+			Lifecycle: 4,
+		},
+	}
+
+	output := captureStdout(t, func() {
+		printSyncRemovalStats(stats)
+	})
+	for _, want := range []string{
+		"Removed cached rows:",
+		"Full sync clear: vulnerabilities=2 malicious=0 reputation=1 lifecycle=0",
+		"Tombstones: vulnerabilities=0 malicious=3 reputation=0 lifecycle=4",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("printSyncRemovalStats() output missing %q:\n%s", want, output)
+		}
+	}
+
+	noRemovalOutput := captureStdout(t, func() {
+		printSyncRemovalStats(sqlite.SyncStats{})
+	})
+	if noRemovalOutput != "" {
+		t.Fatalf("printSyncRemovalStats() without removals = %q, want empty", noRemovalOutput)
 	}
 }
 
