@@ -318,6 +318,83 @@ func TestN8NDailySyncPinsCompleteWorkflowTopology(t *testing.T) {
 	}
 }
 
+func TestN8NOnDemandScanPinsCompleteWorkflowTopology(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join("..", "..", "deploy", "n8n", "on-demand-scan.json")
+	data, err := os.ReadFile(path) //nolint:gosec // static repository fixture path
+	if err != nil {
+		t.Fatalf("read on-demand-scan.json: %v", err)
+	}
+
+	var workflow struct {
+		Active bool `json:"active"`
+		Nodes  []struct {
+			Name       string         `json:"name"`
+			Type       string         `json:"type"`
+			Parameters map[string]any `json:"parameters"`
+		} `json:"nodes"`
+		Connections map[string]map[string][][]struct {
+			Node  string `json:"node"`
+			Type  string `json:"type"`
+			Index int    `json:"index"`
+		} `json:"connections"`
+	}
+	if err := json.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("parse on-demand-scan.json: %v", err)
+	}
+	if workflow.Active {
+		t.Fatal("on-demand scan workflow must remain disabled by default")
+	}
+	if len(workflow.Nodes) != 3 {
+		t.Fatalf("on-demand scan node count = %d, want exactly 3", len(workflow.Nodes))
+	}
+
+	nodes := make(map[string]struct {
+		Type       string
+		Parameters map[string]any
+	}, len(workflow.Nodes))
+	for _, node := range workflow.Nodes {
+		if _, duplicate := nodes[node.Name]; duplicate {
+			t.Fatalf("on-demand scan has duplicate node name %q", node.Name)
+		}
+		nodes[node.Name] = struct {
+			Type       string
+			Parameters map[string]any
+		}{Type: node.Type, Parameters: node.Parameters}
+	}
+	for name, wantType := range map[string]string{
+		"Webhook":  "n8n-nodes-base.webhook",
+		"Run Scan": "n8n-nodes-base.executeCommand",
+		"Respond":  "n8n-nodes-base.respondToWebhook",
+	} {
+		node, ok := nodes[name]
+		if !ok || node.Type != wantType {
+			t.Fatalf("on-demand scan node %q = %+v, want type %q", name, node, wantType)
+		}
+	}
+
+	for key, want := range map[string]string{
+		"httpMethod":     "POST",
+		"path":           "packmon/scan",
+		"authentication": "headerAuth",
+		"responseMode":   "responseNode",
+	} {
+		if got := nodes["Webhook"].Parameters[key]; got != want {
+			t.Fatalf("webhook parameter %q = %#v, want %q", key, got, want)
+		}
+	}
+	if got := nodes["Respond"].Parameters["respondWith"]; got != "json" {
+		t.Fatalf("response format = %#v, want json", got)
+	}
+
+	assertN8NMainConnection(t, workflow.Connections, "Webhook", "Run Scan")
+	assertN8NMainConnection(t, workflow.Connections, "Run Scan", "Respond")
+	if len(workflow.Connections) != 2 {
+		t.Fatalf("on-demand scan connection sources = %d, want exactly 2", len(workflow.Connections))
+	}
+}
+
 func assertN8NMainConnection(t *testing.T, connections map[string]map[string][][]struct {
 	Node  string `json:"node"`
 	Type  string `json:"type"`
