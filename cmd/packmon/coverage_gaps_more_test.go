@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"log/slog"
 	"strings"
@@ -89,5 +90,25 @@ func TestLocalDashboardDBWarningStaysSilentOnFreshData(t *testing.T) {
 	// A nil logger must not turn the check into a panic.
 	if got := localDashboardDBWarning(context.Background(), store, nil); got != "" {
 		t.Fatalf("localDashboardDBWarning(nil logger) = %q, want no warning", got)
+	}
+}
+
+// TestLocalDashboardDBWarningReportsUnknownFreshnessWhenStoreIsClosed proves
+// that a failed freshness read is visible to dashboard users. A closed cache
+// must not be presented as current merely because its age cannot be loaded.
+func TestLocalDashboardDBWarningReportsUnknownFreshnessWhenStoreIsClosed(t *testing.T) {
+	store, _ := newTestSQLiteStore(t, t.TempDir())
+	if err := store.Close(); err != nil {
+		t.Fatalf("close sqlite store: %v", err)
+	}
+
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	const wantWarning = "Local database freshness could not be verified. Results may be incomplete. Update with: packmon db sync."
+	if got := localDashboardDBWarning(context.Background(), store, logger); got != wantWarning {
+		t.Fatalf("localDashboardDBWarning(closed store) = %q, want %q", got, wantWarning)
+	}
+	if got := logs.String(); !strings.Contains(got, "dashboard: failed to verify local database freshness") {
+		t.Fatalf("closed-store freshness failure was not logged: %q", got)
 	}
 }
