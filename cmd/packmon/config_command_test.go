@@ -460,6 +460,31 @@ func TestConfigShowRedactsWebhookURL(t *testing.T) {
 	}
 }
 
+func TestRegistryURLConfigValuesAreRedacted(t *testing.T) {
+	for _, test := range []struct {
+		key   string
+		value string
+		want  string
+	}{
+		{"PACKMON_NPM_REGISTRY_BASE_URL", "https://user:password@npm.example/registry?token=secret", "https://npm.example/registry?token=redacted"},
+		{"PACKMON_GO_PROXY_URL", "off", "off"},
+		{"PACKMON_DOCKER_REGISTRY_MIRRORS", "docker.io=https://user:password@docker.example/v2?token=secret", "docker.io=https://docker.example/v2?token=redacted"},
+		{"PACKMON_CHOCOLATEY_FEED_URLS", "https://user:password@choco.example/api?key=secret", "https://choco.example/api?key=redacted"},
+	} {
+		t.Run(test.key, func(t *testing.T) {
+			got := redactRegistryEnvValue(test.key, test.value)
+			if got != test.want {
+				t.Fatalf("redactRegistryEnvValue(%q, %q) = %q, want %q", test.key, test.value, got, test.want)
+			}
+			for _, secret := range []string{"user", "password", "secret"} {
+				if strings.Contains(got, secret) {
+					t.Fatalf("redacted value leaks %q: %q", secret, got)
+				}
+			}
+		})
+	}
+}
+
 func TestConfigCommandHelpers(t *testing.T) {
 	if got := valueOrDefault("", "fallback"); got != "fallback" {
 		t.Fatalf("valueOrDefault(empty) = %q", got)
