@@ -252,6 +252,45 @@ func TestRunReportCommandUsesInjectedDependenciesAndClosesStore(t *testing.T) {
 	}
 }
 
+func TestRunReportCommandSuppliesAllOmittedDependencies(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	dbDir := t.TempDir()
+	t.Setenv("PACKMON_DB_PATH", dbDir)
+	store, _ := newTestSQLiteStore(t, dbDir)
+	if err := store.Close(); err != nil {
+		t.Fatalf("close empty store: %v", err)
+	}
+
+	output := captureStdout(t, func() {
+		if err := runReportCommand(context.Background(), reportCommandOptions{}, reportCommandDeps{}); err != nil {
+			t.Fatalf("runReportCommand() with omitted dependencies: %v", err)
+		}
+	})
+	if !strings.Contains(output, "No scan history found.") {
+		t.Fatalf("default report output = %q, want empty-history message", output)
+	}
+}
+
+func TestReportOutputAndTableDefaultToStdout(t *testing.T) {
+	output := captureStdout(t, func() {
+		if err := writeReportOutput(nil, "", nil); err != nil {
+			t.Fatalf("writeReportOutput(nil, empty): %v", err)
+		}
+		if err := writeReportTable(nil, []sqlite.ScanEntry{{
+			RepoName:      "app",
+			ScannedAt:     time.Date(2026, 5, 30, 12, 0, 0, 0, time.UTC),
+			PackagesCount: 1,
+		}}); err != nil {
+			t.Fatalf("writeReportTable(nil): %v", err)
+		}
+	})
+	for _, want := range []string{"No scan history found.", "DATE", "app"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("default report output missing %q:\n%s", want, output)
+		}
+	}
+}
+
 func TestRunReportCommandReturnsDependencyErrorsAndClosesQueriedStore(t *testing.T) {
 	t.Parallel()
 	resolveErr := errors.New("resolve failed")
