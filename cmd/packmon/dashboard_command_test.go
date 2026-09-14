@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -134,6 +135,87 @@ func TestDashboardCommandAppliesSecurityHeadersAndHidesAdminNav(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("dashboard command did not stop after context cancellation")
+	}
+}
+
+func TestDashboardCommandProductionMuxAnnouncesLoopbackAndRejectsMutations(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	dbDir := t.TempDir()
+	t.Setenv("PACKMON_DB_PATH", dbDir)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ready := make(chan string, 1)
+	cmd := newDashboardCmdWithOptions(dashboardOptions{
+		shutdownTimeout: 200 * time.Millisecond,
+		onReady: func(rawURL string) {
+			ready <- rawURL
+		},
+	})
+	cmd.SetContext(ctx)
+	cmd.SetArgs([]string{"--port=0"})
+
+	done := make(chan error, 1)
+	go func() { done <- cmd.Execute() }()
+
+	var dashboardURL string
+	select {
+	case dashboardURL = <-ready:
+	case err := <-done:
+		t.Fatalf("dashboard command exited before ready: %v", err)
+	case <-time.After(15 * time.Second):
+		cancel()
+		t.Fatal("dashboard command did not become ready")
+	}
+
+	parsedURL, err := url.Parse(dashboardURL)
+	if err != nil {
+		cancel()
+		t.Fatalf("parse announced dashboard URL: %v", err)
+	}
+	if got := parsedURL.Hostname(); got != "127.0.0.1" {
+		cancel()
+		t.Fatalf("announced dashboard host = %q, want loopback 127.0.0.1", got)
+	}
+
+	for _, tt := range []struct {
+		path       string
+		wantStatus int
+	}{
+		{path: "/api/v1/check", wantStatus: http.StatusNotFound},
+		{path: "/api/v1/packages/npm/pkg%3Cscript%3E", wantStatus: http.StatusNotFound},
+		{path: "/package/npm/refresh/pkg", wantStatus: http.StatusMethodNotAllowed},
+	} {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, dashboardURL+tt.path, nil)
+		if err != nil {
+			cancel()
+			t.Fatalf("create mutation request for %s: %v", tt.path, err)
+		}
+		resp, err := http.DefaultClient.Do(req) // #nosec G107 -- test calls the loopback URL announced by the command.
+		if err != nil {
+			cancel()
+			t.Fatalf("POST %s: %v", tt.path, err)
+		}
+		body, readErr := io.ReadAll(resp.Body)
+		ioutils.CloseSilently(resp.Body)
+		if readErr != nil {
+			cancel()
+			t.Fatalf("read POST %s response: %v", tt.path, readErr)
+		}
+		if resp.StatusCode != tt.wantStatus {
+			cancel()
+			t.Fatalf("POST %s status = %d, want %d; body=%s", tt.path, resp.StatusCode, tt.wantStatus, body)
+		}
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("dashboard command error = %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("dashboard command did not stop after cancellation")
 	}
 }
 
