@@ -45,3 +45,23 @@ func TestSecretFlagStringValueNilAndMissingFlagAreEmpty(t *testing.T) {
 		})
 	}
 }
+
+func TestRejectSecretFlagValueAllowsChangedEmptyValues(t *testing.T) {
+	t.Setenv(allowSecretFlagsEnv, "")
+	for _, value := range []string{"", " \t "} {
+		t.Run("value="+value, func(t *testing.T) {
+			cmd := &cobra.Command{Use: "test"}
+			cmd.Flags().String("token", "default", "test-only secret flag")
+			if err := cmd.Flags().Set("token", value); err != nil {
+				t.Fatalf("set token flag: %v", err)
+			}
+			if !cmd.Flags().Changed("token") {
+				t.Fatal("token flag is not marked changed")
+			}
+
+			if err := rejectSecretFlagValue(cmd, "token", "PACKMON_TOKEN"); err != nil {
+				t.Fatalf("rejectSecretFlagValue(changed %q): %v", value, err)
+			}
+		})
+	}
+}
