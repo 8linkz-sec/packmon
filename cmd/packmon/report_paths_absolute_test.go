@@ -93,6 +93,15 @@ func TestReportSourcePathGapOneSentinels(t *testing.T) {
 	}
 }
 
+func TestReportSourcePathKeepsPathsInsideScanRootRelative(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "nested", "vendor", "go.sum")
+
+	if got := htmlReportDisplaySourcePath(root, path); got != "nested/vendor/go.sum" {
+		t.Fatalf("htmlReportDisplaySourcePath(%q, %q) = %q, want relative source path", root, path, got)
+	}
+}
+
 func TestReportPathLastSegmentHandlesSentinelsAndBasenames(t *testing.T) {
 	t.Parallel()
 
