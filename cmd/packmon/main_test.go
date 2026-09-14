@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"testing"
 )
@@ -44,6 +45,18 @@ func TestExitCodeErrorHelpers(t *testing.T) {
 	}
 	if err := withExitCode(ExitOperational, nil); err != nil {
 		t.Fatalf("withExitCode(nil) = %v, want nil", err)
+	}
+	if err := withDefaultExitCode(ExitInternal, nil); err != nil {
+		t.Fatalf("withDefaultExitCode(nil) = %v, want nil", err)
+	}
+
+	wrapped := fmt.Errorf("while scanning: %w", withExitCode(ExitInternal, base))
+	got := withDefaultExitCode(ExitOperational, wrapped)
+	if got != wrapped {
+		t.Fatalf("withDefaultExitCode() = %v, want the original outer error %v", got, wrapped)
+	}
+	if code := exitCodeForError(got); code != ExitInternal {
+		t.Fatalf("exitCodeForError(withDefaultExitCode(...)) = %d, want %d", code, ExitInternal)
 	}
 }
 
