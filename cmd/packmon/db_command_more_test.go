@@ -627,6 +627,22 @@ func TestDBSyncCommandRejectsInvalidTimeoutEnv(t *testing.T) {
 	}
 }
 
+func TestDBSyncCommandRejectsNonPositiveTimeoutEnv(t *testing.T) {
+	for _, timeout := range []string{"0", "-1"} {
+		t.Run(timeout, func(t *testing.T) {
+			isolateCLIConfigDiscovery(t)
+			t.Setenv("PACKMON_TIMEOUT", timeout)
+
+			cmd := newDBSyncCmd()
+			cmd.SetArgs([]string{"--server", "https://server.example"})
+			err := cmd.Execute()
+			if err == nil || !strings.Contains(err.Error(), "PACKMON_TIMEOUT must be greater than zero") {
+				t.Fatalf("db sync error = %v, want non-positive PACKMON_TIMEOUT rejection", err)
+			}
+		})
+	}
+}
+
 func TestDBSyncCommandRejectsNonPositiveTimeout(t *testing.T) {
 	isolateCLIConfigDiscovery(t)
 	t.Setenv("PACKMON_DB_PATH", t.TempDir())
@@ -642,6 +658,22 @@ func TestDBSyncCommandRejectsNonPositiveTimeout(t *testing.T) {
 	err := cmd.Execute()
 	if err == nil || !strings.Contains(err.Error(), "timeout must be greater than zero") {
 		t.Fatalf("db sync error = %v, want non-positive timeout rejection", err)
+	}
+}
+
+func TestResolveDBSyncSettingsRejectsUnsetConfiguredAPIKeyEnv(t *testing.T) {
+	t.Setenv("PACKMON_API_KEY", "")
+
+	_, err := resolveDBSyncSettings(newDBSyncCmd(), &cliConfig{
+		Server:    "https://server.example",
+		APIKeyEnv: "PACKMON_MISSING_SYNC_KEY",
+		DB:        cliDBConfig{SyncSource: "server"},
+	})
+	if err == nil {
+		t.Fatal("resolveDBSyncSettings() error = nil, want unset api_key_env rejection")
+	}
+	if !strings.Contains(err.Error(), `api_key_env "PACKMON_MISSING_SYNC_KEY" is not set`) {
+		t.Fatalf("resolveDBSyncSettings() error = %v, want configured api_key_env context", err)
 	}
 }
 
