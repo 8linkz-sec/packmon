@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 )
 
@@ -611,6 +612,13 @@ func parseDockerRegistryMirrorEnv(raw string) (map[string]string, error) {
 		if !ok || strings.TrimSpace(host) == "" || strings.TrimSpace(mirror) == "" {
 			return nil, fmt.Errorf("PACKMON_DOCKER_REGISTRY_MIRRORS entries must use host=https://mirror form")
 		}
+		if _, duplicate := out[host]; duplicate {
+			canonicalHost, err := normalizeDockerRegistryMirrorSourceHost("PACKMON_DOCKER_REGISTRY_MIRRORS", host)
+			if err != nil {
+				return nil, err
+			}
+			return nil, fmt.Errorf("PACKMON_DOCKER_REGISTRY_MIRRORS defines colliding Docker registry mirror aliases %q and %q (both normalize to %q)", host, host, canonicalHost)
+		}
 		out[host] = mirror
 	}
 	return normalizeDockerRegistryMirrorMap("PACKMON_DOCKER_REGISTRY_MIRRORS", out)
@@ -620,8 +628,27 @@ func normalizeDockerRegistryMirrorMap(name string, mirrors map[string]string) (m
 	if len(mirrors) == 0 {
 		return nil, nil
 	}
+	keys := make([]string, 0, len(mirrors))
+	for rawHost := range mirrors {
+		keys = append(keys, rawHost)
+	}
+	sort.Strings(keys)
+
+	canonicalSources := make(map[string]string, len(mirrors))
+	for _, rawHost := range keys {
+		host, err := normalizeDockerRegistryMirrorSourceHost(name, rawHost)
+		if err != nil {
+			return nil, err
+		}
+		if firstRawHost, ok := canonicalSources[host]; ok {
+			return nil, fmt.Errorf("%s defines colliding Docker registry mirror aliases %q and %q (both normalize to %q)", name, firstRawHost, rawHost, host)
+		}
+		canonicalSources[host] = rawHost
+	}
+
 	out := make(map[string]string, len(mirrors))
-	for rawHost, rawMirror := range mirrors {
+	for _, rawHost := range keys {
+		rawMirror := mirrors[rawHost]
 		host, err := normalizeDockerRegistryMirrorSourceHost(name, rawHost)
 		if err != nil {
 			return nil, err
