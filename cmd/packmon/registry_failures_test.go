@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 )
@@ -114,5 +115,100 @@ func TestRegistryLookupPhaseSetsNoDeadline(t *testing.T) {
 	ctx, _ := withRegistryLookupPhase(context.Background(), 30)
 	if _, ok := ctx.Deadline(); ok {
 		t.Fatal("phase context has a deadline; the phase must be unbounded")
+	}
+}
+
+func TestRegistryLookupPhaseContextsKeepIndependentState(t *testing.T) {
+	t.Parallel()
+	firstCtx, first := withRegistryLookupPhase(context.Background(), 10)
+	secondCtx, second := withRegistryLookupPhase(context.Background(), 20)
+
+	if got := registryLookupPhaseFrom(firstCtx); got != first {
+		t.Fatalf("first phase from context = %p, want %p", got, first)
+	}
+	if got := registryLookupPhaseFrom(secondCtx); got != second {
+		t.Fatalf("second phase from context = %p, want %p", got, second)
+	}
+
+	first.recordRefusal()
+	first.recordSkipped()
+	if got := second.refusedCount(); got != 0 {
+		t.Fatalf("second refused count = %d, want 0", got)
+	}
+	if got := second.skippedCount(); got != 0 {
+		t.Fatalf("second skipped count = %d, want 0", got)
+	}
+	if got := first.perRequestTimeout(); got != 10*time.Second {
+		t.Fatalf("first timeout = %v, want 10s", got)
+	}
+	if got := second.perRequestTimeout(); got != 20*time.Second {
+		t.Fatalf("second timeout = %v, want 20s", got)
+	}
+}
+
+func TestRegistryLookupPhaseInheritsParentCancellationAndDeadline(t *testing.T) {
+	t.Parallel()
+	parent, cancel := context.WithCancel(context.Background())
+	ctx, _ := withRegistryLookupPhase(parent, 0)
+	cancel()
+	if err := ctx.Err(); err != context.Canceled {
+		t.Fatalf("phase context error after parent cancellation = %v, want %v", err, context.Canceled)
+	}
+
+	deadline := time.Now().Add(time.Minute)
+	deadlineParent, deadlineCancel := context.WithDeadline(context.Background(), deadline)
+	defer deadlineCancel()
+	deadlineCtx, _ := withRegistryLookupPhase(deadlineParent, 0)
+	got, ok := deadlineCtx.Deadline()
+	if !ok {
+		t.Fatal("phase context did not inherit parent deadline")
+	}
+	if !got.Equal(deadline) {
+		t.Fatalf("phase deadline = %v, want %v", got, deadline)
+	}
+
+	nilParentCtx, nilParentPhase := withRegistryLookupPhase(nil, 0)
+	if got := registryLookupPhaseFrom(nilParentCtx); got != nilParentPhase {
+		t.Fatalf("nil-parent phase from context = %p, want %p", got, nilParentPhase)
+	}
+	if _, ok := nilParentCtx.Deadline(); ok {
+		t.Fatal("nil-parent phase context has a deadline")
+	}
+	if err := nilParentCtx.Err(); err != nil {
+		t.Fatalf("nil-parent phase context error = %v, want nil", err)
+	}
+}
+
+func TestRegistryLookupPhaseConcurrentCountersTripBreakerWithoutLostIncrements(t *testing.T) {
+	t.Parallel()
+	_, phase := withRegistryLookupPhase(context.Background(), 0)
+	const workers = registryBreakerThreshold * 4
+
+	ready := sync.WaitGroup{}
+	ready.Add(workers)
+	start := make(chan struct{})
+	var done sync.WaitGroup
+	done.Add(workers)
+	for range workers {
+		go func() {
+			defer done.Done()
+			ready.Done()
+			<-start
+			phase.recordRefusal()
+			phase.recordSkipped()
+		}()
+	}
+	ready.Wait()
+	close(start)
+	done.Wait()
+
+	if got := phase.refusedCount(); got != workers {
+		t.Fatalf("concurrent refused count = %d, want %d", got, workers)
+	}
+	if got := phase.skippedCount(); got != workers {
+		t.Fatalf("concurrent skipped count = %d, want %d", got, workers)
+	}
+	if !phase.breakerOpen() {
+		t.Fatalf("breaker closed after %d concurrent refusals, want open", workers)
 	}
 }
