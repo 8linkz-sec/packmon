@@ -246,6 +246,39 @@ func TestWalk_NonExistentPath(t *testing.T) {
 	}
 }
 
+func TestWalkRejectsNonDirectoryAndMissingRoots(t *testing.T) {
+	reg := parser.NewRegistry()
+	w := NewWalker(reg, 10, nil)
+
+	root := t.TempDir()
+	notDirectory := filepath.Join(root, "package-lock.json")
+	createFile(t, notDirectory)
+
+	_, err := w.Walk(notDirectory)
+	if err == nil {
+		t.Fatal("Walk(file) error = nil, want invalid-root error")
+	}
+	if !errors.Is(err, fs.ErrInvalid) {
+		t.Fatalf("Walk(file) error = %v, want fs.ErrInvalid", err)
+	}
+	var pathErr *fs.PathError
+	if !errors.As(err, &pathErr) {
+		t.Fatalf("Walk(file) error = %T, want *fs.PathError", err)
+	}
+	if pathErr.Op != "walk" || pathErr.Path != notDirectory {
+		t.Fatalf("Walk(file) PathError = %#v, want walk on %q", pathErr, notDirectory)
+	}
+
+	missing := filepath.Join(root, "missing")
+	_, err = w.Walk(missing)
+	if err == nil {
+		t.Fatal("Walk(missing) error = nil, want stat error")
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("Walk(missing) error = %v, want fs.ErrNotExist", err)
+	}
+}
+
 func TestWalkInputErrorUsesRelativePath(t *testing.T) {
 	t.Parallel()
 
