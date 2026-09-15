@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -278,5 +279,28 @@ func TestSARIFOmitsInvocationsWithoutParseErrors(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "invocations") {
 		t.Fatalf("did not expect invocations block without parse errors\n%s", out.String())
+	}
+}
+
+func TestSARIFBuildLocationsNormalizesDeduplicatesAndOmitsBlankURIs(t *testing.T) {
+	manifestPath := filepath.Join("manifests", "package-lock.json")
+	manifestURI := filepath.ToSlash(manifestPath)
+	locations := NewSARIFWriter("dev").buildLocations(domain.Finding{
+		Locations: []domain.FindingLocation{
+			{URI: "  " + manifestPath + "  "},
+			{URI: manifestURI},
+			{URI: "\t\n"},
+			{URI: "requirements.txt"},
+		},
+	})
+
+	if len(locations) != 2 {
+		t.Fatalf("locations = %#v, want two normalized locations", locations)
+	}
+	if got := locations[0].PhysicalLocation.ArtifactLocation.URI; got != manifestURI {
+		t.Fatalf("first URI = %q, want normalized manifest path", got)
+	}
+	if got := locations[1].PhysicalLocation.ArtifactLocation.URI; got != "requirements.txt" {
+		t.Fatalf("second URI = %q, want requirements.txt", got)
 	}
 }
