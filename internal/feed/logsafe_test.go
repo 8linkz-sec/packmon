@@ -29,3 +29,11 @@ func TestSafeDiagnosticErrorRedactsPathsURLsAndTokens(t *testing.T) {
 		}
 	}
 }
+
+func TestSafeDiagnosticErrorReturnsEmptyForNil(t *testing.T) {
+	t.Parallel()
+
+	if got := SafeDiagnosticError(nil); got != "" {
+		t.Fatalf("SafeDiagnosticError(nil) = %q, want empty diagnostic", got)
+	}
+}
