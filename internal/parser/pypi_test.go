@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -410,6 +411,50 @@ dev = true
 	}
 }
 
+func TestPyPILockParsersWrapReaderErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		parse  func() error
+		prefix string
+	}{
+		{
+			name: "pipfile",
+			parse: func() error {
+				_, err := NewPipfileParser().Parse(&pypiReadThenError{err: errors.New("forced read error")})
+				return err
+			},
+			prefix: "pipfile: invalid JSON:",
+		},
+		{
+			name: "poetry",
+			parse: func() error {
+				_, err := NewPoetryParser().Parse(&pypiReadThenError{err: errors.New("forced read error")})
+				return err
+			},
+			prefix: "poetry: read error:",
+		},
+		{
+			name: "uv",
+			parse: func() error {
+				_, err := NewUVParser().Parse(&pypiReadThenError{err: errors.New("forced read error")})
+				return err
+			},
+			prefix: "uv: read error:",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if err := tt.parse(); err == nil || !strings.Contains(err.Error(), tt.prefix+" forced read error") {
+				t.Fatalf("Parse(read error) = %v, want contextual forced read error", err)
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // RequirementsParser
 // ---------------------------------------------------------------------------
@@ -602,6 +647,38 @@ func TestRequirementsParserAcceptsLongLines(t *testing.T) {
 	if len(pkgs) != 1 || pkgs[0].Name != "requests" || pkgs[0].Version != "2.31.0" {
 		t.Fatalf("Parse(long line) = %+v, want requests 2.31.0", pkgs)
 	}
+}
+
+func TestRequirementsParserReturnsPartialResultWithReaderError(t *testing.T) {
+	t.Parallel()
+
+	pkgs, err := NewRequirementsParser().Parse(&pypiReadThenError{
+		data: []byte("requests==2.31.0\n"),
+		err:  errors.New("forced read error"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "requirements.txt: read error: forced read error") {
+		t.Fatalf("Parse(read error) = %v, want contextual forced read error", err)
+	}
+	if len(pkgs) != 1 || pkgs[0].Name != "requests" || pkgs[0].Version != "2.31.0" {
+		t.Fatalf("Parse(read error) packages = %+v, want parsed package before error", pkgs)
+	}
+}
+
+type pypiReadThenError struct {
+	data []byte
+	err  error
+	read bool
+}
+
+func (r *pypiReadThenError) Read(p []byte) (int, error) {
+	if r.read {
+		return 0, r.err
+	}
+	r.read = true
+	if len(r.data) == 0 {
+		return 0, r.err
+	}
+	return copy(p, r.data), nil
 }
 
 // ---------------------------------------------------------------------------
