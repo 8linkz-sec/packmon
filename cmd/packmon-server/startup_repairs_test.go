@@ -205,3 +205,31 @@ func TestRunStartupRepairsBoundsRepairContext(t *testing.T) {
 		t.Fatalf("repair context error = %v, want deadline exceeded", err)
 	}
 }
+
+type startupRepairContextCapture struct {
+	ctx context.Context
+}
+
+func (s *startupRepairContextCapture) RepairCaseInsensitivePackageNames(ctx context.Context) (int, error) {
+	s.ctx = ctx
+	return 0, nil
+}
+
+func TestRunStartupRepairsWithTimeoutNormalizesNilContextAndDefaultTimeout(t *testing.T) {
+	t.Parallel()
+
+	store := &startupRepairContextCapture{}
+	before := time.Now()
+	runStartupRepairsWithTimeout(nil, store, nil, 0)
+
+	if store.ctx == nil {
+		t.Fatal("repair received a nil context")
+	}
+	deadline, ok := store.ctx.Deadline()
+	if !ok {
+		t.Fatal("repair context had no deadline")
+	}
+	if remaining := deadline.Sub(before); remaining < startupRepairTimeout-time.Second || remaining > startupRepairTimeout+time.Second {
+		t.Fatalf("repair deadline remaining = %v, want approximately %v", remaining, startupRepairTimeout)
+	}
+}
