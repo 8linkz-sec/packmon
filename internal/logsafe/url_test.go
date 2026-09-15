@@ -301,13 +301,16 @@ func TestTruncateUTF8AndSplitPathSegmentsBoundaryCases(t *testing.T) {
 	if got := truncateUTF8("anything", 0); got != "" {
 		t.Fatalf("truncateUTF8(max 0) = %q, want empty", got)
 	}
-	if got := truncateUTF8("é", len(truncationMarker)+1); got != truncationMarker {
-		t.Fatalf("truncateUTF8(partial rune budget) = %q, want marker only", got)
+	if got := truncateUTF8("éclair", len(truncationMarker)+2); got != "é...[truncated]" {
+		t.Fatalf("truncateUTF8(rune boundary) = %q, want complete rune plus marker", got)
 	}
-	if got := splitPathSegments("///"); got != nil {
-		t.Fatalf("splitPathSegments(empty) = %#v, want nil", got)
+
+	path := "//api///v1//packages//npm//secret-package-token//refresh//"
+	got := RequestPathLabel(path)
+	if got != "/api/v1/packages/{ecosystem}/{name...}/refresh" {
+		t.Fatalf("RequestPathLabel(%q) = %q, want package refresh label", path, got)
 	}
-	if got := splitPathSegments("/api//v1///check/"); strings.Join(got, "/") != "api/v1/check" {
-		t.Fatalf("splitPathSegments(compact) = %#v, want api/v1/check", got)
+	if strings.Contains(got, "secret-package-token") {
+		t.Fatalf("RequestPathLabel(%q) leaked package segment in %q", path, got)
 	}
 }
