@@ -17,6 +17,14 @@ import (
 	"github.com/8linkz-sec/packmon/internal/db"
 )
 
+type failingWriter struct {
+	err error
+}
+
+func (w failingWriter) Write([]byte) (int, error) {
+	return 0, w.err
+}
+
 func TestRenderHelperFunctions(t *testing.T) {
 	fixed := time.Date(2026, 5, 30, 12, 34, 0, 0, time.FixedZone("CEST", 2*60*60))
 	if got := formatTime(time.Time{}); got != "-" {
@@ -690,6 +698,40 @@ func TestRenderPartialTemplateErrorDoesNotWritePartialOutput(t *testing.T) {
 	}
 	if out.String() != "" {
 		t.Fatalf("RenderPartial output = %q, want empty output on template error", out.String())
+	}
+}
+
+func TestRendererPropagatesResponseWriterErrors(t *testing.T) {
+	t.Parallel()
+
+	renderer := NewRendererWithLayoutLinks(fstest.MapFS{
+		"templates/layout.html":  {Data: []byte(`{{define "layout"}}{{template "content" .}}{{end}}`)},
+		"templates/partial.html": {Data: []byte(`{{define "content"}}page{{end}}{{define "fragment"}}partial{{end}}`)},
+	}, false, LayoutLinks{})
+	wantErr := errors.New("response writer disconnected")
+
+	for _, render := range []struct {
+		name string
+		run  func() error
+	}{
+		{
+			name: "page",
+			run: func() error {
+				return renderer.Render(failingWriter{err: wantErr}, "partial.html", nil)
+			},
+		},
+		{
+			name: "partial",
+			run: func() error {
+				return renderer.RenderPartial(failingWriter{err: wantErr}, "partial.html", "fragment", nil)
+			},
+		},
+	} {
+		t.Run(render.name, func(t *testing.T) {
+			if err := render.run(); !errors.Is(err, wantErr) {
+				t.Fatalf("render error = %v, want writer error %v", err, wantErr)
+			}
+		})
 	}
 }
 
