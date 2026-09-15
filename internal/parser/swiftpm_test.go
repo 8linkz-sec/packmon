@@ -509,3 +509,74 @@ func TestSwiftPMParserLocalPathsRedactedInErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestSwiftPMParserReportsReadAndUnsupportedVersionErrors(t *testing.T) {
+	t.Parallel()
+
+	t.Run("read error", func(t *testing.T) {
+		t.Parallel()
+
+		packages, err := NewSwiftPMParser().Parse(errorReader{})
+		if err == nil || !strings.Contains(err.Error(), "swiftpm: reading input: forced read error") {
+			t.Fatalf("Parse(read error) = %v, want contextual read error", err)
+		}
+		if packages != nil {
+			t.Fatalf("packages = %#v, want nil", packages)
+		}
+	})
+
+	t.Run("unknown version with pins remains readable", func(t *testing.T) {
+		t.Parallel()
+
+		packages, err := NewSwiftPMParser().Parse(strings.NewReader(`{
+			"version": 4,
+			"pins": [{
+				"identity": "swift-nio",
+				"location": "https://github.com/apple/swift-nio.git",
+				"state": {"version": "2.65.0"}
+			}]
+		}`))
+		if err != nil {
+			t.Fatalf("Parse(unknown version with v2 pins) error = %v, want nil", err)
+		}
+		if len(packages) != 1 || packages[0].Name != "github.com/apple/swift-nio" || packages[0].Version != "2.65.0" {
+			t.Fatalf("Parse(unknown version with v2 pins) = %#v, want canonical v2 package", packages)
+		}
+	})
+
+	t.Run("unknown version without pins is rejected", func(t *testing.T) {
+		t.Parallel()
+
+		packages, err := NewSwiftPMParser().Parse(strings.NewReader(`{"version": 4}`))
+		if err == nil || !strings.Contains(err.Error(), "unsupported Package.resolved version 4") {
+			t.Fatalf("Parse(unknown empty version) = %v, want unsupported-version error", err)
+		}
+		if len(packages) != 0 {
+			t.Fatalf("Parse(unknown empty version) packages = %#v, want none", packages)
+		}
+	})
+}
+
+func TestCanonicalSwiftPackageLocationRejectsInvalidHostsAndPaths(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "dotless bare host", raw: "gitserver/org/repo", want: ""},
+		{name: "trailing-dot bare host", raw: "gitserver.example./org/repo", want: ""},
+		{name: "http URL without a path", raw: "https://gitserver.example", want: ""},
+		{name: "query and git suffix are discarded", raw: "https://GitServer.Example/org/repo.git?ref=v1", want: "gitserver.example/org/repo"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := canonicalSwiftPackageLocation(tt.raw); got != tt.want {
+				t.Fatalf("canonicalSwiftPackageLocation(%q) = %q, want %q", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
