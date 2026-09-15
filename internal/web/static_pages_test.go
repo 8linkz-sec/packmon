@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 )
 
@@ -54,6 +55,37 @@ func TestHandleTermsServesOnlyItsOwnPath(t *testing.T) {
 	handler(recorder, httptest.NewRequest(http.MethodGet, "/terms/extra", nil))
 	if recorder.Code != http.StatusNotFound {
 		t.Errorf("GET /terms/extra = %d, want 404", recorder.Code)
+	}
+}
+
+// TestStaticPageHandlersReturnInternalErrorWhenRenderingFails keeps the public
+// static endpoints from reporting a successful page when their embedded
+// templates cannot be loaded.
+func TestStaticPageHandlersReturnInternalErrorWhenRenderingFails(t *testing.T) {
+	t.Parallel()
+
+	brokenRenderer := NewRendererWithLayoutLinks(fstest.MapFS{}, false, LayoutLinks{})
+	for _, tc := range []struct {
+		name    string
+		path    string
+		handler func(*Renderer, *slog.Logger) http.HandlerFunc
+	}{
+		{name: "privacy", path: "/privacy", handler: HandlePrivacy},
+		{name: "terms", path: "/terms", handler: HandleTerms},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			tc.handler(brokenRenderer, slog.New(slog.DiscardHandler))(
+				recorder, httptest.NewRequest(http.MethodGet, tc.path, nil),
+			)
+
+			if recorder.Code != http.StatusInternalServerError {
+				t.Fatalf("GET %s = %d, want 500", tc.path, recorder.Code)
+			}
+			if got := recorder.Body.String(); got != "internal server error\n" {
+				t.Errorf("GET %s body = %q, want generic internal-error response", tc.path, got)
+			}
+		})
 	}
 }
 
