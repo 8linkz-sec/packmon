@@ -261,6 +261,24 @@ func TestWriteReportTableRendersTrendAndSanitizesRepo(t *testing.T) {
 	}
 }
 
+func TestWriteReportTablePropagatesFlushError(t *testing.T) {
+	t.Parallel()
+
+	writeErr := errors.New("closed report pipe")
+	err := writeReportTable(failingWriter{err: writeErr}, []sqlite.ScanEntry{{
+		RepoName:      "app",
+		ScannedAt:     time.Date(2026, 5, 30, 12, 0, 0, 0, time.UTC),
+		PackagesCount: 2,
+		FindingsCount: 1,
+	}})
+	if !errors.Is(err, writeErr) {
+		t.Fatalf("writeReportTable() error = %v, want writer failure", err)
+	}
+	if !strings.Contains(err.Error(), "flush report output") {
+		t.Fatalf("writeReportTable() error = %q, want flush context", err)
+	}
+}
+
 func TestRunReportCommandUsesInjectedDependenciesAndClosesStore(t *testing.T) {
 	t.Parallel()
 
