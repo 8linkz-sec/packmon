@@ -20,3 +20,17 @@ func TestSanitizeNeutralizesTerminalControls(t *testing.T) {
 		}
 	}
 }
+
+func TestSanitizePreservesPrintableTextAndEscapesC1Controls(t *testing.T) {
+	input := "package\u0085name\u009f"
+
+	if got, want := Sanitize(input), `package\u0085name\u009F`; got != want {
+		t.Fatalf("Sanitize() = %q, want %q", got, want)
+	}
+}
+
+func TestSanitizeEmptyInput(t *testing.T) {
+	if got := Sanitize(""); got != "" {
+		t.Fatalf("Sanitize(empty) = %q, want empty string", got)
+	}
+}
