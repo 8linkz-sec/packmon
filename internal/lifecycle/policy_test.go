@@ -109,6 +109,49 @@ func TestLongestMatchingReleasesPicksMostSpecificCyclePerProduct(t *testing.T) {
 	}
 }
 
+func TestLongestMatchingReleasesRejectsBlankAndNearMatchingCycles(t *testing.T) {
+	t.Parallel()
+
+	rows := []ReleaseRow{
+		{ProductSlug: "django", Release: Release{Cycle: "3.2"}},
+		{ProductSlug: "django", Release: Release{Cycle: "3.20"}},
+		{ProductSlug: "empty", Release: Release{Cycle: " "}},
+	}
+	if got := LongestMatchingReleases(rows, " \t "); got != nil {
+		t.Fatalf("LongestMatchingReleases(blank) = %+v, want nil", got)
+	}
+
+	got := LongestMatchingReleases(rows, " 3.2.25 ")
+	if len(got) != 1 || got[0].Release.Cycle != "3.2" {
+		t.Fatalf("LongestMatchingReleases() = %+v, want only 3.2", got)
+	}
+}
+
+func TestFindingForReleaseUsesSlugFallbackAndLeavesHealthyReleaseUnreported(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC)
+	pkg := PackageQuery{Ecosystem: "pypi", Name: "django", Version: "3.2.25"}
+
+	got, ok := FindingForRelease(pkg, ReleaseRow{
+		ProductSlug: "django",
+		Release: Release{
+			Cycle: "3.2",
+			IsEOL: true,
+		},
+	}, now)
+	if !ok {
+		t.Fatal("FindingForRelease(IsEOL) ok = false")
+	}
+	if got.Title != "django 3.2 is end-of-life" {
+		t.Fatalf("FindingForRelease(IsEOL) title = %q", got.Title)
+	}
+
+	if got, ok := FindingForRelease(pkg, ReleaseRow{ProductSlug: "django", Release: Release{Cycle: "4.2"}}, now); ok || got.AdvisoryID != "" || got.Name != "" || len(got.Resources) != 0 {
+		t.Fatalf("FindingForRelease(healthy) = (%+v, %t), want (zero, false)", got, ok)
+	}
+}
+
 func TestLifecyclePolicyIsNotDuplicatedInStoreAdapters(t *testing.T) {
 	t.Parallel()
 
