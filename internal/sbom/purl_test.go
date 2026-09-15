@@ -57,3 +57,54 @@ func TestPackageIdentityFromPURLAllowsVersionlessIdentifiers(t *testing.T) {
 		t.Fatalf("PackageFromPURL(versionless) = %+v, %v; want zero, false", got, ok)
 	}
 }
+
+func TestPackageFromPURLRejectsMalformedEscapesAndEmptyComponents(t *testing.T) {
+	tests := []string{
+		"pkg:npm/example@%",
+		"pkg:npm/example@%20",
+		"pkg:npm/%ZZ@1.0.0",
+		"pkg:npm/%20@1.0.0",
+		"pkg:npm//example@1.0.0",
+	}
+
+	for _, raw := range tests {
+		t.Run(raw, func(t *testing.T) {
+			if got, ok := PackageFromPURL(raw); ok || !reflect.DeepEqual(got, domain.Package{}) {
+				t.Fatalf("PackageFromPURL(%q) = %+v, %v; want zero, false", raw, got, ok)
+			}
+		})
+	}
+}
+
+func TestPackageFromPURLRejectsInvalidSwiftRepositorySegments(t *testing.T) {
+	tests := []string{
+		"pkg:swift/github.com/owner/.git@1.0.0",
+		"pkg:swift/github.com/owner%5Crepo@1.0.0",
+	}
+
+	for _, raw := range tests {
+		t.Run(raw, func(t *testing.T) {
+			if got, ok := PackageFromPURL(raw); ok || !reflect.DeepEqual(got, domain.Package{}) {
+				t.Fatalf("PackageFromPURL(%q) = %+v, %v; want zero, false", raw, got, ok)
+			}
+		})
+	}
+}
+
+func TestPURLDecodersTrimSuffixesAndRejectEmptySegments(t *testing.T) {
+	if got := stripPURLSuffix(" 1.2.3?qualifier=value#fragment "); got != "1.2.3" {
+		t.Fatalf("stripPURLSuffix() = %q, want 1.2.3", got)
+	}
+	if got, ok := decodePURLVersion(" 1.2.3%2Bbuild#fragment "); !ok || got != "1.2.3+build" {
+		t.Fatalf("decodePURLVersion() = %q, %v; want 1.2.3+build, true", got, ok)
+	}
+	if got, ok := decodePURLPath("one/two%2Fthree"); !ok || !reflect.DeepEqual(got, []string{"one", "two/three"}) {
+		t.Fatalf("decodePURLPath() = %#v, %v; want decoded path, true", got, ok)
+	}
+	if got, ok := decodePURLPath("one//two"); ok || got != nil {
+		t.Fatalf("decodePURLPath(empty segment) = %#v, %v; want nil, false", got, ok)
+	}
+	if got := lastSegment(nil); got != "" {
+		t.Fatalf("lastSegment(nil) = %q, want empty", got)
+	}
+}
