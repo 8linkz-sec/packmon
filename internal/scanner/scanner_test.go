@@ -56,6 +56,53 @@ func TestGenerateScanIDUses128BitHex(t *testing.T) {
 	}
 }
 
+func TestAnnotateFindingLocationsDeduplicatesAndKeepsPackageBoundaries(t *testing.T) {
+	t.Parallel()
+
+	findings := []domain.Finding{
+		{
+			Name:      "left-pad",
+			Version:   "1.3.0",
+			Ecosystem: domain.Ecosystem("npm"),
+			Locations: []domain.FindingLocation{{URI: "package-lock.json"}},
+		},
+		{
+			Name:      "other",
+			Version:   "1.0.0",
+			Ecosystem: domain.Ecosystem("npm"),
+		},
+	}
+	entries := []CollectedPackage{
+		{Package: domain.Package{Name: "left-pad", Version: "1.3.0", Ecosystem: domain.Ecosystem("npm")}, SourceFile: "package-lock.json"},
+		{Package: domain.Package{Name: "left-pad", Version: "1.3.0", Ecosystem: domain.Ecosystem("npm")}, SourceFile: "nested\\package-lock.json"},
+		{Package: domain.Package{Name: "left-pad", Version: "1.3.0", Ecosystem: domain.Ecosystem("npm")}, SourceFile: "nested\\package-lock.json"},
+		{Package: domain.Package{Name: "left-pad", Version: "1.3.0", Ecosystem: domain.Ecosystem("npm")}, SourceFile: "  "},
+	}
+
+	annotateFindingLocations(findings, entries)
+
+	want := []domain.FindingLocation{{URI: "package-lock.json"}, {URI: "nested/package-lock.json"}}
+	if !reflect.DeepEqual(findings[0].Locations, want) {
+		t.Fatalf("matching finding locations = %#v, want %#v", findings[0].Locations, want)
+	}
+	if len(findings[1].Locations) != 0 {
+		t.Fatalf("non-matching finding locations = %#v, want none", findings[1].Locations)
+	}
+}
+
+func TestRemoteErrorCorrelationSuffixUsesValidFallbackWhenResponseIDIsInvalid(t *testing.T) {
+	t.Parallel()
+
+	fallback := "123e4567-e89b-12d3-a456-426614174000"
+	resp := &http.Response{Header: http.Header{correlation.Header: []string{"not-a-correlation-id"}}}
+	if got, want := remoteErrorCorrelationSuffix(resp, fallback), " correlation_id="+fallback; got != want {
+		t.Fatalf("remoteErrorCorrelationSuffix() = %q, want %q", got, want)
+	}
+	if got := remoteErrorCorrelationSuffix(nil, "not-a-correlation-id"); got != "" {
+		t.Fatalf("remoteErrorCorrelationSuffix() = %q, want empty for invalid fallback", got)
+	}
+}
+
 func writeJSONForScannerTest(t *testing.T, w http.ResponseWriter, value any) {
 	t.Helper()
 	w.Header().Set("Content-Type", "application/json")
