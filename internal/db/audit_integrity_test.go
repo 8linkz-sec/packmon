@@ -125,3 +125,51 @@ func TestAnnotateAdminAuditIntegrityDetectsBrokenChain(t *testing.T) {
 		t.Fatalf("legacy integrity = %q, want legacy", entries[2].IntegrityStatus)
 	}
 }
+
+func TestAnnotateAdminAuditIntegrityLeavesBoundaryAndUnavailableLinksVerified(t *testing.T) {
+	t.Parallel()
+
+	created := time.Date(2026, 6, 24, 12, 0, 0, 0, time.UTC)
+	newest := AdminAuditLogEntry{
+		ID:             3,
+		Action:         "queue.clear",
+		Details:        json.RawMessage(`{}`),
+		IP:             "192.0.2.3",
+		CreatedAt:      created,
+		PreviousDigest: "sha256:unavailable-older-row",
+	}
+	newest.RowDigest = ComputeAdminAuditDigest(newest)
+
+	legacy := AdminAuditLogEntry{ID: 2, Action: "legacy"}
+	middle := AdminAuditLogEntry{
+		ID:        1,
+		Action:    "login",
+		Details:   json.RawMessage(`{}`),
+		IP:        "192.0.2.2",
+		CreatedAt: created.Add(-time.Minute),
+	}
+
+	oldest := AdminAuditLogEntry{
+		ID:             0,
+		Action:         "logout",
+		Details:        json.RawMessage(`{}`),
+		IP:             "192.0.2.1",
+		CreatedAt:      created.Add(-2 * time.Minute),
+		PreviousDigest: "sha256:unloaded-older-row",
+	}
+	oldest.RowDigest = ComputeAdminAuditDigest(oldest)
+	middle.PreviousDigest = oldest.RowDigest
+	middle.RowDigest = ComputeAdminAuditDigest(middle)
+
+	entries := []AdminAuditLogEntry{newest, legacy, middle, oldest}
+	AnnotateAdminAuditIntegrity(entries)
+
+	for _, entry := range []AdminAuditLogEntry{entries[0], entries[2], entries[3]} {
+		if entry.IntegrityStatus != AdminAuditIntegrityVerified {
+			t.Fatalf("entry %d integrity = %q, want verified", entry.ID, entry.IntegrityStatus)
+		}
+	}
+	if entries[1].IntegrityStatus != AdminAuditIntegrityLegacy {
+		t.Fatalf("legacy integrity = %q, want legacy", entries[1].IntegrityStatus)
+	}
+}
