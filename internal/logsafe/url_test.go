@@ -119,6 +119,14 @@ func TestRedactDiagnosticMessageRemovesURLsTokensAndPaths(t *testing.T) {
 	}
 }
 
+func TestRedactDiagnosticMessageBlankIsEmpty(t *testing.T) {
+	t.Parallel()
+
+	if got := RedactDiagnosticMessage(" \t\n "); got != "" {
+		t.Fatalf("RedactDiagnosticMessage(blank) = %q, want empty", got)
+	}
+}
+
 func TestRedactDiagnosticMessageRedactsSecretAssignments(t *testing.T) {
 	t.Parallel()
 
@@ -205,6 +213,17 @@ func TestRemoteErrorSnippetRedactsAndTruncatesUTF8(t *testing.T) {
 	}
 }
 
+func TestRemoteErrorSnippetHandlesShortAndNegativeLimits(t *testing.T) {
+	t.Parallel()
+
+	if got := RemoteErrorSnippet([]byte("short response"), 100); got != "short response" {
+		t.Fatalf("RemoteErrorSnippet(short) = %q, want unmodified response", got)
+	}
+	if got := RemoteErrorSnippet([]byte("longer than a negative limit"), -1); got != "..." {
+		t.Fatalf("RemoteErrorSnippet(negative limit) = %q, want ellipsis", got)
+	}
+}
+
 func TestBoundedValueLimitsAndUTF8(t *testing.T) {
 	t.Parallel()
 
@@ -246,6 +265,8 @@ func TestRequestPathLabelDoesNotEchoAttackerControlledSegments(t *testing.T) {
 	}{
 		{"empty", "", "/"},
 		{"root", "/", "/"},
+		{"missing leading slash", "healthz", "/healthz"},
+		{"trailing slash", "/healthz///", "/healthz"},
 		{"health", "/healthz", "/healthz"},
 		{"static", "/static/tailwind.css", "/static/..."},
 		{"api check", "/api/v1/check", "/api/v1/check"},
@@ -271,5 +292,22 @@ func TestRequestPathLabelDoesNotEchoAttackerControlledSegments(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestTruncateUTF8AndSplitPathSegmentsBoundaryCases(t *testing.T) {
+	t.Parallel()
+
+	if got := truncateUTF8("anything", 0); got != "" {
+		t.Fatalf("truncateUTF8(max 0) = %q, want empty", got)
+	}
+	if got := truncateUTF8("é", len(truncationMarker)+1); got != truncationMarker {
+		t.Fatalf("truncateUTF8(partial rune budget) = %q, want marker only", got)
+	}
+	if got := splitPathSegments("///"); got != nil {
+		t.Fatalf("splitPathSegments(empty) = %#v, want nil", got)
+	}
+	if got := splitPathSegments("/api//v1///check/"); strings.Join(got, "/") != "api/v1/check" {
+		t.Fatalf("splitPathSegments(compact) = %#v, want api/v1/check", got)
 	}
 }
