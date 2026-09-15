@@ -65,11 +65,29 @@ func TestMergePackageMetadataKeepsDevWhenOnlyDev(t *testing.T) {
 	}
 }
 
+func TestMergePackageMetadataNilDestinationDoesNotPanic(t *testing.T) {
+	t.Parallel()
+
+	MergePackageMetadata(nil, Package{
+		Direct:     true,
+		Via:        []string{"npm"},
+		SourceRefs: []string{"https://registry.example/pkg"},
+	})
+}
+
 func TestMergePackageStringSetNil(t *testing.T) {
 	t.Parallel()
 
 	if got := MergePackageStringSet(nil, nil); got != nil {
 		t.Fatalf("MergePackageStringSet(nil, nil) = %#v, want nil", got)
+	}
+}
+
+func TestMergePackageParentsNil(t *testing.T) {
+	t.Parallel()
+
+	if got := MergePackageParents(nil, nil); got != nil {
+		t.Fatalf("MergePackageParents(nil, nil) = %#v, want nil", got)
 	}
 }
 
