@@ -65,6 +65,20 @@ func (failingReportWriter) Write([]byte) (int, error) {
 	return 0, errors.New("write failed")
 }
 
+// headerThenFailReportWriter accepts the XML declaration written by the JUnit
+// writer, then fails the serialized document write.
+type headerThenFailReportWriter struct {
+	writes int
+}
+
+func (w *headerThenFailReportWriter) Write(p []byte) (int, error) {
+	w.writes++
+	if w.writes == 1 {
+		return len(p), nil
+	}
+	return 0, errors.New("body write failed")
+}
+
 func TestReportWritersPropagateWriteErrors(t *testing.T) {
 	t.Parallel()
 
@@ -73,6 +87,19 @@ func TestReportWritersPropagateWriteErrors(t *testing.T) {
 	}
 	if err := NewJUnitWriter().Write(failingReportWriter{}, sampleReportResult()); err == nil {
 		t.Fatal("JUnit Write() error = nil, want writer error")
+	}
+}
+
+func TestJUnitWriterPropagatesDocumentWriteErrorAfterXMLHeader(t *testing.T) {
+	t.Parallel()
+
+	w := &headerThenFailReportWriter{}
+	err := NewJUnitWriter().Write(w, sampleReportResult())
+	if err == nil || !strings.Contains(err.Error(), "body write failed") {
+		t.Fatalf("JUnit Write() error = %v, want body write error", err)
+	}
+	if w.writes != 2 {
+		t.Fatalf("writer calls = %d, want XML header then document", w.writes)
 	}
 }
 
