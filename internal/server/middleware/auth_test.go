@@ -23,6 +23,15 @@ type authStoreStub struct {
 	err     error
 }
 
+type recordingLastUsedUpdater struct {
+	keyIDs []int
+}
+
+func (u *recordingLastUsedUpdater) Enqueue(keyID int) bool {
+	u.keyIDs = append(u.keyIDs, keyID)
+	return true
+}
+
 func (s *authStoreStub) FindAPIKeyCredentialByHash(_ context.Context, keyHash string) (*auth.APIKeyCredential, error) {
 	if s.err != nil {
 		return nil, s.err
@@ -416,7 +425,13 @@ func TestAuthRejectsExpiredBearerTokenInProduction(t *testing.T) {
 			ExpiresAt: &expiredAt,
 		},
 	}
-	handler := Auth(context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil)), store, false)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	updater := &recordingLastUsedUpdater{}
+	nextCalled := false
+	handler := AuthWithLastUsedUpdater(slog.New(slog.NewTextHandler(io.Discard, nil)), store, false, updater)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nextCalled = true
+		if identity, ok := APIKeyIdentityFromContext(r.Context()); ok {
+			t.Fatalf("expired request reached next handler with API key identity %+v", identity)
+		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
 
@@ -429,6 +444,12 @@ func TestAuthRejectsExpiredBearerTokenInProduction(t *testing.T) {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
 	}
 	assertBearerChallenge(t, rec)
+	if nextCalled {
+		t.Fatal("expired credential reached next handler")
+	}
+	if len(updater.keyIDs) != 0 {
+		t.Fatalf("last-used updates = %v, want none for expired credential", updater.keyIDs)
+	}
 }
 
 func TestAuthAllowsPublicDashboardInProduction(t *testing.T) {
