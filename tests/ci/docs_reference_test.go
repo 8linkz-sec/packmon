@@ -224,7 +224,9 @@ func TestPrometheusStarterAlertsCoverPackmonHealthSignals(t *testing.T) {
 		"PackmonDegradedResponses":       {"packmon_degraded_responses_total"},
 		"PackmonFeedStale":               {"packmon_feed_last_sync_timestamp"},
 		"PackmonFeedSyncDegraded":        {"packmon_feed_sync_status"},
+		"PackmonMetricsScrapeDown":       {"up"},
 		"PackmonMetricsStoreReadFailure": {"packmon_metrics_store_read_failures_total"},
+		"PackmonQueueErrors":             {"packmon_queue_error_total"},
 		"PackmonQueueStalled":            {"packmon_queue_oldest_job_seconds"},
 	}
 	for alertName, metricMarkers := range requiredAlerts {
