@@ -45,23 +45,35 @@ func (s *recordingBootstrapStore) UpsertAdminAuthWithAudit(_ context.Context, pa
 func TestAdminBootstrapStoreAdapterReportsTheBootstrapFlag(t *testing.T) {
 	t.Parallel()
 
-	store := &recordingBootstrapStore{record: &db.AdminAuth{
-		PasswordHash:        testAdminPasswordHash,
-		PasswordIsBootstrap: true,
-	}}
+	for _, tc := range []struct {
+		name        string
+		isBootstrap bool
+	}{
+		{name: "bootstrap password remains gated", isBootstrap: true},
+		{name: "rotated password remains ungated", isBootstrap: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	got, err := newAdminBootstrapStore(store).GetAdminBootstrapAuth(context.Background())
-	if err != nil {
-		t.Fatalf("GetAdminBootstrapAuth: %v", err)
-	}
-	if got == nil {
-		t.Fatal("GetAdminBootstrapAuth returned no record")
-	}
-	if got.PasswordHash != testAdminPasswordHash {
-		t.Errorf("PasswordHash = %q, want the stored hash", got.PasswordHash)
-	}
-	if !got.PasswordIsBootstrap {
-		t.Error("PasswordIsBootstrap = false, want the bootstrap gate to stay active")
+			store := &recordingBootstrapStore{record: &db.AdminAuth{
+				PasswordHash:        testAdminPasswordHash,
+				PasswordIsBootstrap: tc.isBootstrap,
+			}}
+
+			got, err := newAdminBootstrapStore(store).GetAdminBootstrapAuth(context.Background())
+			if err != nil {
+				t.Fatalf("GetAdminBootstrapAuth: %v", err)
+			}
+			if got == nil {
+				t.Fatal("GetAdminBootstrapAuth returned no record")
+			}
+			if got.PasswordHash != testAdminPasswordHash {
+				t.Errorf("PasswordHash = %q, want the stored hash", got.PasswordHash)
+			}
+			if got.PasswordIsBootstrap != tc.isBootstrap {
+				t.Errorf("PasswordIsBootstrap = %v, want %v", got.PasswordIsBootstrap, tc.isBootstrap)
+			}
+		})
 	}
 }
 
