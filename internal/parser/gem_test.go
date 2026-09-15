@@ -1,6 +1,8 @@
 package parser
 
 import (
+	"errors"
+	"io"
 	"strings"
 	"testing"
 
@@ -129,6 +131,82 @@ PLATFORMS
 			assertParsedPackages(t, pkgs, tt.wantPkgs, domain.EcosystemGem)
 		})
 	}
+}
+
+func TestGemParserParsePreservesCleanRemoteProvenance(t *testing.T) {
+	t.Parallel()
+
+	input := "GEM\n" +
+		"  remote: https://rubygems.org/\n" +
+		"  remote:  https://private.example/gems/ \n" +
+		"  remote: https://rubygems.org/\n" +
+		"  specs:\n" +
+		"    private_gem (1.2.3)\n\n" +
+		"DEPENDENCIES\n" +
+		"  private_gem\n"
+	pkgs, err := NewGemParser().Parse(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(pkgs) != 1 {
+		t.Fatalf("package count = %d, want 1", len(pkgs))
+	}
+	if got, want := pkgs[0].SourceRefs, []string{"https://private.example/gems/", "https://rubygems.org/"}; !equalStrings(got, want) {
+		t.Fatalf("source refs = %q, want %q", got, want)
+	}
+}
+
+func TestGemParserParseReturnsReadErrorWithPartialPackages(t *testing.T) {
+	t.Parallel()
+
+	input := "GEM\n  specs:\n    rack (3.0.9)\n"
+	pkgs, err := NewGemParser().Parse(&readThenError{data: []byte(input), err: errors.New("forced read error")})
+	if err == nil || !strings.Contains(err.Error(), "gem: reading input: forced read error") {
+		t.Fatalf("Parse(read error) = %v, want contextual read error", err)
+	}
+	if len(pkgs) != 1 || pkgs[0].Name != "rack" || pkgs[0].Version != "3.0.9" {
+		t.Fatalf("partial packages = %#v, want rack 3.0.9", pkgs)
+	}
+}
+
+func TestGemParserParseReturnsReadErrorWithoutPackages(t *testing.T) {
+	t.Parallel()
+
+	pkgs, err := NewGemParser().Parse(errorReader{})
+	if err == nil || !strings.Contains(err.Error(), "gem: reading input: forced read error") {
+		t.Fatalf("Parse(read error) = %v, want contextual read error", err)
+	}
+	if pkgs != nil {
+		t.Fatalf("packages = %#v, want nil without a completed entry", pkgs)
+	}
+}
+
+type readThenError struct {
+	data []byte
+	err  error
+	read bool
+}
+
+func (r *readThenError) Read(p []byte) (int, error) {
+	if r.read {
+		return 0, r.err
+	}
+	r.read = true
+	return copy(p, r.data), nil
+}
+
+var _ io.Reader = (*readThenError)(nil)
+
+func equalStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for index := range got {
+		if got[index] != want[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func assertParsedPackages(t *testing.T, pkgs []domain.Package, wantPkgs map[string]string, wantEco domain.Ecosystem) {
