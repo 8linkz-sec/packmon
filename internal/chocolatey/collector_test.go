@@ -229,6 +229,76 @@ func TestCollectRejectsSymlinkOutsideRoot(t *testing.T) {
 	}
 }
 
+func TestCollectReturnsDiscoveryErrorForMissingRoot(t *testing.T) {
+	t.Parallel()
+
+	missing := filepath.Join(t.TempDir(), "missing-root")
+	collection, err := Collect(missing, 1)
+	if err == nil {
+		t.Fatalf("Collect(%q) error = nil, want missing-root error", missing)
+	}
+	if collection != nil {
+		t.Fatalf("Collect(%q) collection = %+v, want nil", missing, collection)
+	}
+}
+
+func TestParseFileFromRootRejectsInvalidFileInputs(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "known.ps1"), "choco install known\n")
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("OpenRoot(%q): %v", dir, err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+
+	for _, tt := range []struct {
+		name string
+		file File
+		want string
+	}{
+		{
+			name: "root escape",
+			file: File{RelPath: "../outside.ps1", Kind: KindScript},
+			want: "escapes scan root",
+		},
+		{
+			name: "missing file",
+			file: File{RelPath: "missing.ps1", Kind: KindScript},
+			want: "missing.ps1",
+		},
+		{
+			name: "unsupported kind",
+			file: File{RelPath: "known.ps1", Kind: Kind("unknown")},
+			want: "unsupported chocolatey inventory file kind",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			packages, err := parseFileFromRoot(root, tt.file)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("parseFileFromRoot(%+v) error = %v, want %q", tt.file, err, tt.want)
+			}
+			if packages != nil {
+				t.Fatalf("parseFileFromRoot(%+v) packages = %+v, want nil", tt.file, packages)
+			}
+			if strings.Contains(err.Error(), dir) {
+				t.Fatalf("parseFileFromRoot(%+v) error leaks root %q: %v", tt.file, dir, err)
+			}
+		})
+	}
+}
+
+func TestMergeStringsKeepsFirstOccurrenceAndDropsEmptyValues(t *testing.T) {
+	t.Parallel()
+
+	got := mergeStrings([]string{"unpinned", "direct", "unpinned", ""}, []string{"", "direct", "transitive", "unpinned"})
+	want := []string{"unpinned", "direct", "transitive"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("mergeStrings() = %v, want %v", got, want)
+	}
+}
+
 func TestParseChocoInstallLineShapes(t *testing.T) {
 	t.Parallel()
 
