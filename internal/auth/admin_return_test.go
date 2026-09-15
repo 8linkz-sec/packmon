@@ -3,6 +3,7 @@ package auth
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 )
 
@@ -96,5 +97,47 @@ func TestAdminLoginRedirectTarget(t *testing.T) {
 	req = httptest.NewRequest(http.MethodPost, "/admin/settings/password", nil)
 	if got := AdminLoginRedirectTarget(req); got != "/admin/login" {
 		t.Fatalf("AdminLoginRedirectTarget(POST) = %q, want /admin/login", got)
+	}
+}
+
+func TestAdminLoginRedirectTargetRejectsMissingOrUnsafeRequestTargets(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		req  *http.Request
+		want string
+	}{
+		{name: "nil request", want: "/admin/login"},
+		{name: "nil URL", req: &http.Request{Method: http.MethodGet}, want: "/admin/login"},
+		{name: "head request", req: httptest.NewRequest(http.MethodHead, "/admin/queue?msg=Saved", nil), want: "/admin/login?next=%2Fadmin%2Fqueue%3Fmsg%3DSaved"},
+		{name: "unsafe request URI", req: &http.Request{Method: http.MethodGet, URL: &url.URL{Path: "//evil.example/admin"}}, want: "/admin/login"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := AdminLoginRedirectTarget(tt.req); got != tt.want {
+				t.Fatalf("AdminLoginRedirectTarget() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAdminLoginURLRejectsUnsafeTarget(t *testing.T) {
+	t.Parallel()
+
+	if got := AdminLoginURL("https://evil.example/admin"); got != "/admin/login" {
+		t.Fatalf("AdminLoginURL() = %q, want /admin/login", got)
+	}
+}
+
+func TestSameOriginTargetRejectsMalformedEscapes(t *testing.T) {
+	t.Parallel()
+
+	if got := SafeAdminReturnTarget("/admin/%zz"); got != "" {
+		t.Fatalf("SafeAdminReturnTarget() = %q, want empty", got)
+	}
+	if got := SafeSameOriginRedirectTarget("/admin/%zz", "/"); got != "/" {
+		t.Fatalf("SafeSameOriginRedirectTarget() = %q, want /", got)
 	}
 }
