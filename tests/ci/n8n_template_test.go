@@ -474,3 +474,87 @@ func TestN8NWeeklyMaintenanceUsesConfiguredMetricsURL(t *testing.T) {
 	}
 	t.Fatal("weekly maintenance workflow has no httpRequest node")
 }
+
+func TestN8NWeeklyMaintenancePinsTopology(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join("..", "..", "deploy", "n8n", "weekly-maintenance.json")
+	data, err := os.ReadFile(path) //nolint:gosec // static repository fixture path
+	if err != nil {
+		t.Fatalf("read weekly-maintenance.json: %v", err)
+	}
+
+	var workflow struct {
+		Active bool `json:"active"`
+		Nodes  []struct {
+			ID         string         `json:"id"`
+			Name       string         `json:"name"`
+			Type       string         `json:"type"`
+			Parameters map[string]any `json:"parameters"`
+		} `json:"nodes"`
+		Connections map[string]map[string][][]struct {
+			Node  string `json:"node"`
+			Type  string `json:"type"`
+			Index int    `json:"index"`
+		} `json:"connections"`
+	}
+	if err := json.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("parse weekly-maintenance.json: %v", err)
+	}
+	if workflow.Active {
+		t.Fatal("weekly maintenance workflow must be disabled by default")
+	}
+	if len(workflow.Nodes) != 2 {
+		t.Fatalf("weekly maintenance nodes = %d, want 2", len(workflow.Nodes))
+	}
+
+	nodes := make(map[string]struct {
+		ID         string
+		Type       string
+		Parameters map[string]any
+	}, len(workflow.Nodes))
+	ids := make(map[string]struct{}, len(workflow.Nodes))
+	for _, node := range workflow.Nodes {
+		if node.Name == "" || node.ID == "" {
+			t.Fatalf("weekly maintenance node must have name and id: %+v", node)
+		}
+		if _, exists := nodes[node.Name]; exists {
+			t.Fatalf("duplicate weekly maintenance node name %q", node.Name)
+		}
+		if _, exists := ids[node.ID]; exists {
+			t.Fatalf("duplicate weekly maintenance node id %q", node.ID)
+		}
+		nodes[node.Name] = struct {
+			ID         string
+			Type       string
+			Parameters map[string]any
+		}{node.ID, node.Type, node.Parameters}
+		ids[node.ID] = struct{}{}
+	}
+
+	trigger, ok := nodes["Weekly Trigger"]
+	if !ok || trigger.Type != "n8n-nodes-base.scheduleTrigger" {
+		t.Fatalf("weekly trigger = %+v, want schedule trigger", trigger)
+	}
+	rule, ok := trigger.Parameters["rule"].(map[string]any)
+	if !ok {
+		t.Fatalf("weekly trigger rule = %#v, want object", trigger.Parameters["rule"])
+	}
+	intervals, ok := rule["interval"].([]any)
+	if !ok || len(intervals) != 1 {
+		t.Fatalf("weekly trigger intervals = %#v, want one cron interval", rule["interval"])
+	}
+	interval, ok := intervals[0].(map[string]any)
+	if !ok || interval["field"] != "cronExpression" || interval["expression"] != "0 4 * * 0" {
+		t.Fatalf("weekly trigger interval = %#v, want Sunday 04:00 cron", intervals[0])
+	}
+
+	fetch, ok := nodes["Fetch Metrics"]
+	if !ok || fetch.Type != "n8n-nodes-base.httpRequest" {
+		t.Fatalf("fetch metrics node = %+v, want HTTP request", fetch)
+	}
+	assertN8NMainConnection(t, workflow.Connections, "Weekly Trigger", "Fetch Metrics")
+	if len(workflow.Connections) != 1 {
+		t.Fatalf("weekly maintenance connection sources = %d, want exactly 1", len(workflow.Connections))
+	}
+}
