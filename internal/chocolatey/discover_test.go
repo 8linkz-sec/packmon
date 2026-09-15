@@ -148,3 +148,91 @@ func TestCollectSkipsDirectoriesNamedLikeScripts(t *testing.T) {
 		t.Fatalf("Files = %d, want 2", collection.Files)
 	}
 }
+
+func TestDiscoverFilesWithWarningsHonorsDepthAndDirectoryExclusions(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "config.xml"), `<config/>`)
+	writeTestFile(t, filepath.Join(root, "scripts", "install.ps1"), "choco install alpha")
+	writeTestFile(t, filepath.Join(root, ".github", "setup.cmd"), "choco install beta")
+	writeTestFile(t, filepath.Join(root, ".hidden", "hidden.ps1"), "choco install hidden")
+	writeTestFile(t, filepath.Join(root, "vendor", "vendored.ps1"), "choco install vendor")
+	writeTestFile(t, filepath.Join(root, "nested", "deeper", "too-deep.ps1"), "choco install deep")
+
+	files, warnings, err := DiscoverFilesWithWarnings(root, 1)
+	if err != nil {
+		t.Fatalf("DiscoverFilesWithWarnings() error = %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %v, want none", warnings)
+	}
+	got := make([]string, 0, len(files))
+	for _, file := range files {
+		got = append(got, string(file.Kind)+":"+file.RelPath)
+	}
+	want := []string{
+		"script:.github/setup.cmd",
+		"config-xml:config.xml",
+		"script:scripts/install.ps1",
+	}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("discovered files = %v, want %v", got, want)
+	}
+}
+
+func TestDiscoverFilesWithWarningsRejectsFileRoot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "not-a-directory.ps1")
+	writeTestFile(t, root, "choco install alpha")
+
+	_, _, err := DiscoverFilesWithWarnings(root, 1)
+	if !errors.Is(err, fs.ErrInvalid) {
+		t.Fatalf("DiscoverFilesWithWarnings() error = %v, want fs.ErrInvalid", err)
+	}
+}
+
+func TestRelDisplayNeverReturnsAbsoluteHostPath(t *testing.T) {
+	absFile := filepath.Join(t.TempDir(), "sensitive.ps1")
+	absRoot := filepath.VolumeName(absFile) + string(filepath.Separator)
+	for _, tt := range []struct {
+		name string
+		path string
+		want string
+	}{
+		{name: "empty", path: "", want: "chocolatey-inventory-file"},
+		{name: "dot", path: ".", want: "chocolatey-inventory-file"},
+		{name: "whitespace", path: "   ", want: "chocolatey-inventory-file"},
+		{name: "absolute file", path: absFile, want: "sensitive.ps1"},
+		{name: "absolute root", path: absRoot, want: "chocolatey-inventory-file"},
+		{name: "relative path", path: "scripts\\install.ps1", want: "scripts/install.ps1"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := relDisplay(tt.path); got != tt.want {
+				t.Fatalf("relDisplay(%q) = %q, want %q", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDiscoverFilesWithWarningsRejectsRootEscapingCallbackPath(t *testing.T) {
+	// not parallel: swaps the package-level walk hook
+	root := t.TempDir()
+	withFakeWalk(t, func(root string, fn fs.WalkDirFunc) error {
+		if err := fn(filepath.Join(root, "..", "outside.ps1"), fakeDirEntry{name: "outside.ps1"}, nil); err != nil {
+			return err
+		}
+		return nil
+	})
+
+	files, warnings, err := DiscoverFilesWithWarnings(root, 2)
+	if err != nil {
+		t.Fatalf("DiscoverFilesWithWarnings() error = %v", err)
+	}
+	if len(files) != 0 {
+		t.Fatalf("files = %v, want none", files)
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("warnings = %v, want one warning", warnings)
+	}
+	if !strings.Contains(warnings[0], "escapes scan root") {
+		t.Fatalf("first warning = %q, want root escape", warnings[0])
+	}
+}
