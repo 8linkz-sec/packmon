@@ -28,6 +28,67 @@ func TestHexParser_CanParse(t *testing.T) {
 	}
 }
 
+func TestHexParser_ParseReportsReadError(t *testing.T) {
+	pkgs, err := NewHexParser().Parse(errorReader{})
+	if err == nil || !strings.Contains(err.Error(), "reading input: forced read error") {
+		t.Fatalf("Parse(read error) = %v, want wrapped read error", err)
+	}
+	if len(pkgs) != 0 {
+		t.Fatalf("Parse(read error) packages = %#v, want none", pkgs)
+	}
+}
+
+func TestHexRepositoryFromLockLineRejectsIncompleteAndMalformedTuples(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		line string
+		want string
+	}{
+		{
+			name: "no hex tuple",
+			line: `"package": {:path, "../package"},`,
+		},
+		{
+			name: "too few fields",
+			line: `"package": {:hex, :package, "1.0.0", "hash"},`,
+		},
+		{
+			name: "repository is not a quoted string",
+			line: `"package": {:hex, :package, "1.0.0", "hash", [:mix], [], :hexpm, "hash"},`,
+		},
+		{
+			name: "repository is empty after trimming",
+			line: `"package": {:hex, :package, "1.0.0", "hash", [:mix], [], "  ", "hash"},`,
+		},
+		{
+			name: "nested tuples and comma inside quoted values do not shift repository",
+			line: `"package": {:hex, :package, "1.0.0", "hash", [:mix], [{:dep, "~> 1.0", [repo: "other,repo"]}], "private_hex", "hash"},`,
+			want: "private_hex",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := hexRepositoryFromLockLine(tt.line); got != tt.want {
+				t.Fatalf("hexRepositoryFromLockLine(%q) = %q, want %q", tt.line, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHexStringFieldValueRejectsEmptyAndInvalidQuotedValues(t *testing.T) {
+	t.Parallel()
+
+	for _, raw := range []string{"", "   ", `"unterminated`, "not-a-string"} {
+		if got := hexStringFieldValue(raw); got != "" {
+			t.Errorf("hexStringFieldValue(%q) = %q, want empty", raw, got)
+		}
+	}
+}
+
 func TestHexParser_Ecosystem(t *testing.T) {
 	t.Parallel()
 	if got := NewHexParser().Ecosystem(); got != domain.EcosystemHex {
