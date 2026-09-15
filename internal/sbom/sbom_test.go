@@ -1,11 +1,18 @@
 package sbom
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/8linkz-sec/packmon/internal/domain"
 )
+
+type sbomFailingReader struct{}
+
+func (sbomFailingReader) Read([]byte) (int, error) {
+	return 0, errors.New("read failed")
+}
 
 func TestParseDispatchesSupportedSBOMFormats(t *testing.T) {
 	t.Parallel()
@@ -40,5 +47,29 @@ func TestParseDispatchesSupportedSBOMFormats(t *testing.T) {
 				t.Fatalf("Parse() = %+v, want one %s package", got, tt.source)
 			}
 		})
+	}
+}
+
+func TestParseRejectsUnsupportedSBOMFormat(t *testing.T) {
+	t.Parallel()
+
+	got, err := Parse(strings.NewReader(`{"not":"an sbom"}`))
+	if err == nil || !strings.Contains(err.Error(), "unsupported SBOM format") {
+		t.Fatalf("Parse() error = %v, want unsupported-format error", err)
+	}
+	if got != nil {
+		t.Fatalf("Parse() result = %+v, want nil", got)
+	}
+}
+
+func TestParsePropagatesInputReadErrors(t *testing.T) {
+	t.Parallel()
+
+	got, err := Parse(sbomFailingReader{})
+	if err == nil || !strings.Contains(err.Error(), "read SBOM: read failed") {
+		t.Fatalf("Parse() error = %v, want wrapped read error", err)
+	}
+	if got != nil {
+		t.Fatalf("Parse() result = %+v, want nil", got)
 	}
 }
