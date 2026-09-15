@@ -572,6 +572,48 @@ func TestNPMPackageResolverUsesIndexedDependencyKeys(t *testing.T) {
 	}
 }
 
+func TestNPMPackageResolverResolvesAncestorAndIndexedFallbackKeys(t *testing.T) {
+	t.Parallel()
+
+	packages := map[string]packageLockPkg{
+		"node_modules/app": {
+			Dependencies: map[string]string{
+				"ancestor": "^1.0.0",
+				"indexed":  "^1.0.0",
+				"missing":  "^1.0.0",
+			},
+		},
+		"node_modules/app/node_modules/child":    {},
+		"node_modules/app/node_modules/ancestor": {},
+		"node_modules/a/node_modules/indexed":    {},
+		"node_modules/z/node_modules/indexed":    {},
+	}
+
+	resolver := newNPMPackageResolver(packages)
+	if got := resolver.dependencyKey("node_modules/app/node_modules/child", "ancestor"); got != "node_modules/app/node_modules/ancestor" {
+		t.Fatalf("dependencyKey(ancestor) = %q", got)
+	}
+	if got := resolver.dependencyKey("", "indexed"); got != "node_modules/a/node_modules/indexed" {
+		t.Fatalf("dependencyKey(indexed fallback) = %q", got)
+	}
+	if got := resolver.dependencyKey("node_modules/app", " \t"); got != "" {
+		t.Fatalf("dependencyKey(blank) = %q, want empty", got)
+	}
+	if got := resolver.dependencyKey("node_modules/app", "missing"); got != "" {
+		t.Fatalf("dependencyKey(missing) = %q, want empty", got)
+	}
+
+	got := resolver.resolvedDependencyKeys("node_modules/app")
+	want := []string{"node_modules/a/node_modules/indexed", "node_modules/app/node_modules/ancestor"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("resolvedDependencyKeys(app) = %#v, want %#v", got, want)
+	}
+	got[0] = "mutated"
+	if got := resolver.resolvedDependencyKeys("node_modules/app"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("resolvedDependencyKeys cache = %#v, want %#v", got, want)
+	}
+}
+
 func assertNPMPackageMeta(t *testing.T, got, want npmPackageMeta) {
 	t.Helper()
 	if !reflect.DeepEqual(got, want) {
