@@ -638,3 +638,64 @@ func TestSendWebhook_DefaultUserAgent(t *testing.T) {
 		t.Fatalf("User-Agent = %q, expected to contain 'dev' when version is empty", gotUA)
 	}
 }
+
+func TestValidateWebhookURLRejectsNonHTTPSAndMalformedURLs(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{name: "missing scheme", raw: "example.test/hooks/scan"},
+		{name: "missing host", raw: "https:///hooks/scan"},
+		{name: "remote HTTP", raw: "http://example.test/hooks/scan"},
+		{name: "unsupported scheme", raw: "ftp://example.test/hooks/scan"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if err := validateWebhookURL(tt.raw); err == nil {
+				t.Fatalf("validateWebhookURL(%q) accepted an unsafe URL", tt.raw)
+			}
+		})
+	}
+}
+
+func TestValidateWebhookURLAllowsHTTPSAndLoopbackVariants(t *testing.T) {
+	t.Parallel()
+
+	for _, raw := range []string{
+		" HTTPS://example.test/hooks/scan ",
+		"http://localhost:8080/hooks/scan",
+		"http://127.0.0.1:8080/hooks/scan",
+		"http://[::1]:8080/hooks/scan",
+	} {
+		if err := validateWebhookURL(raw); err != nil {
+			t.Fatalf("validateWebhookURL(%q): %v", raw, err)
+		}
+	}
+
+	for _, host := range []string{"localhost", "LOCALHOST", "127.0.0.1", "::1"} {
+		if !isLoopbackWebhookHost(host) {
+			t.Fatalf("isLoopbackWebhookHost(%q) = false, want true", host)
+		}
+	}
+	if isLoopbackWebhookHost("localhost.example.test") {
+		t.Fatal("isLoopbackWebhookHost accepted a non-loopback hostname")
+	}
+}
+
+func TestWebhookRepoInfoTrimsNameAndOmitsEmptyRepository(t *testing.T) {
+	t.Parallel()
+
+	if got := webhookRepoInfo(nil); got != nil {
+		t.Fatalf("webhookRepoInfo(nil) = %#v, want nil", got)
+	}
+	if got := webhookRepoInfo(&domain.RepoInfo{Name: " \t "}); got != nil {
+		t.Fatalf("webhookRepoInfo(blank) = %#v, want nil", got)
+	}
+	if got := webhookRepoInfo(&domain.RepoInfo{Name: "  org/repository  "}); got == nil || got.Name != "org/repository" {
+		t.Fatalf("webhookRepoInfo(trimmed name) = %#v, want org/repository", got)
+	}
+}
