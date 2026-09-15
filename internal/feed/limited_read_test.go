@@ -3,6 +3,7 @@ package feed
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -45,5 +46,64 @@ func TestReadRootFileLimitedReadsSmallFile(t *testing.T) {
 	}
 	if string(data) != `{"id":"GHSA-test"}` {
 		t.Fatalf("ReadRootFileLimited() = %q", data)
+	}
+}
+
+func TestReadRootFileLimitedUsesDefaultForNonPositiveLimit(t *testing.T) {
+	rootPath := t.TempDir()
+	contents := []byte(`{"id":"GHSA-default-limit"}`)
+	if err := os.WriteFile(filepath.Join(rootPath, "advisory.json"), contents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+
+	for _, maxBytes := range []int64{0, -1} {
+		t.Run("limit="+strconv.FormatInt(maxBytes, 10), func(t *testing.T) {
+			data, err := ReadRootFileLimited(root, "advisory.json", maxBytes)
+			if err != nil {
+				t.Fatalf("ReadRootFileLimited() error = %v", err)
+			}
+			if string(data) != string(contents) {
+				t.Fatalf("ReadRootFileLimited() = %q, want %q", data, contents)
+			}
+		})
+	}
+}
+
+func TestReadRootFileLimitedAcceptsExactLimit(t *testing.T) {
+	rootPath := t.TempDir()
+	contents := []byte(`{"id":"GHSA-exact-limit"}`)
+	if err := os.WriteFile(filepath.Join(rootPath, "advisory.json"), contents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+
+	data, err := ReadRootFileLimited(root, "advisory.json", int64(len(contents)))
+	if err != nil {
+		t.Fatalf("ReadRootFileLimited() error = %v", err)
+	}
+	if string(data) != string(contents) {
+		t.Fatalf("ReadRootFileLimited() = %q, want %q", data, contents)
+	}
+}
+
+func TestReadRootFileLimitedPropagatesOpenError(t *testing.T) {
+	root, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+
+	_, err = ReadRootFileLimited(root, "missing.json", MaxGitAdvisoryJSONSize)
+	if err == nil || !os.IsNotExist(err) {
+		t.Fatalf("ReadRootFileLimited() error = %v, want not-exist error", err)
 	}
 }
