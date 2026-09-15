@@ -1,6 +1,7 @@
 package httpclient
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,5 +27,18 @@ func TestLoadCAPoolRejectsInvalidPEM(t *testing.T) {
 	_, err := LoadCAPool(path)
 	if err == nil || !strings.Contains(err.Error(), "contains no valid certificate") {
 		t.Fatalf("LoadCAPool() error = %v, want invalid certificate error", err)
+	}
+}
+
+func TestLoadCAPoolWrapsUnreadableBundle(t *testing.T) {
+	_, err := LoadCAPool(filepath.Join(t.TempDir(), "missing-ca.pem"))
+	if err == nil {
+		t.Fatal("LoadCAPool() error = nil, want read error")
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("LoadCAPool() error = %v, want wrapped fs.ErrNotExist", err)
+	}
+	if !strings.Contains(err.Error(), "read CA bundle") {
+		t.Fatalf("LoadCAPool() error = %v, want CA bundle context", err)
 	}
 }
