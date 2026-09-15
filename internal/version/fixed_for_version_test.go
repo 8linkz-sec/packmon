@@ -83,3 +83,36 @@ func TestFixedVersionForInstalledToleratesMissingRanges(t *testing.T) {
 		}
 	}
 }
+
+// TestFixedVersionForInstalledIgnoresGitRanges ensures commit ranges cannot
+// supply a misleading version recommendation. They use incomparable commit
+// identifiers, so the compatible ecosystem range remains authoritative.
+func TestFixedVersionForInstalledIgnoresGitRanges(t *testing.T) {
+	t.Parallel()
+
+	const ranges = `[
+  {"type":"GIT","events":[{"introduced":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},{"fixed":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]},
+  {"type":"ECOSYSTEM","events":[{"introduced":"1.0.0"},{"fixed":"1.2.0"}]}
+]`
+
+	if got := ExtractFixedVersionFor("1.1.0", ranges, "npm"); got != "1.2.0" {
+		t.Fatalf("ExtractFixedVersionFor() = %q, want the ecosystem fix", got)
+	}
+}
+
+// TestFixedVersionForInstalledSkipsActionCommitIdentifiers preserves the
+// fallback for Actions entries pinned to a full commit SHA: it must not be
+// compared as though it were a semantic version.
+func TestFixedVersionForInstalledSkipsActionCommitIdentifiers(t *testing.T) {
+	t.Parallel()
+
+	const ranges = `[
+  {"type":"ECOSYSTEM","events":[{"introduced":"1.0.0"},{"fixed":"1.2.0"}]},
+  {"type":"ECOSYSTEM","events":[{"introduced":"2.0.0"},{"fixed":"2.1.0"}]}
+]`
+	const commit = "0123456789abcdef0123456789abcdef01234567"
+
+	if got := ExtractFixedVersionFor(commit, ranges, "actions"); got != "1.2.0" {
+		t.Fatalf("ExtractFixedVersionFor(commit) = %q, want the lowest fallback fix", got)
+	}
+}
