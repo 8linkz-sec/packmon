@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/8linkz-sec/packmon/internal/config"
@@ -100,5 +101,52 @@ func TestRunInitSecretsIsIdempotent(t *testing.T) {
 	second, _ := os.ReadFile(env) //nolint:gosec // test reads a path built from t.TempDir()
 	if string(first) != string(second) {
 		t.Fatal("second run changed .env; must be idempotent")
+	}
+}
+
+func TestRunInitSecretsReportsInvalidInputPaths(t *testing.T) {
+	dir := t.TempDir()
+	example := filepath.Join(dir, ".env.example")
+	if err := os.WriteFile(example, []byte("POSTGRES_PASSWORD=\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "invalid flag",
+			args: []string{"--unknown"},
+			want: "flag provided but not defined",
+		},
+		{
+			name: "environment path is directory",
+			args: []string{"--env", dir, "--example", example},
+			want: "read " + dir,
+		},
+		{
+			name: "template path is directory for fresh environment",
+			args: []string{"--env", filepath.Join(dir, ".env"), "--example", dir},
+			want: "read " + dir,
+		},
+		{
+			name: "environment parent cannot be created",
+			args: []string{"--env", filepath.Join(dir, "missing", ".env"), "--example", example},
+			want: "write " + filepath.Join(dir, "missing", ".env"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := runInitSecrets(tt.args)
+			if err == nil {
+				t.Fatal("runInitSecrets succeeded, want error")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %q, want it to contain %q", err, tt.want)
+			}
+		})
 	}
 }
