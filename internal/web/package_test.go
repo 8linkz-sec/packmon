@@ -23,6 +23,38 @@ const (
 	testPackageDetailVersionLimit = 256
 )
 
+func TestPackageFindingRiskTypeLabelsHandleUnknownAndBlankCodes(t *testing.T) {
+	unknown := PackageFinding{Finding: domain.Finding{RiskType: "credential-harvesting.signal"}}
+	if got, want := unknown.RiskTypeLabel(), "Credential harvesting signal"; got != want {
+		t.Fatalf("unknown risk label = %q, want %q", got, want)
+	}
+	if got, want := unknown.RiskTypeDescription(), "Source-specific risk type not yet mapped by Packmon."; got != want {
+		t.Fatalf("unknown risk description = %q, want %q", got, want)
+	}
+
+	blank := PackageFinding{Finding: domain.Finding{RiskType: " \t "}}
+	if got := blank.RiskTypeLabel(); got != "" {
+		t.Fatalf("blank risk label = %q, want empty", got)
+	}
+	if got := blank.RiskTypeDescription(); got != "" {
+		t.Fatalf("blank risk description = %q, want empty", got)
+	}
+
+	separatorOnly := PackageFinding{Finding: domain.Finding{RiskType: "---.___"}}
+	if got, want := separatorOnly.RiskTypeLabel(), "Source-specific risk"; got != want {
+		t.Fatalf("separator-only risk label = %q, want %q", got, want)
+	}
+	if got, want := separatorOnly.RiskTypeDescription(), "Source-specific risk type not yet mapped by Packmon."; got != want {
+		t.Fatalf("separator-only risk description = %q, want %q", got, want)
+	}
+}
+
+func TestPackageRiskTypeFallbackLabelHandlesOnlySeparators(t *testing.T) {
+	if got, want := packageRiskTypeFallbackLabel("---.___"), "Source-specific risk"; got != want {
+		t.Fatalf("separator-only fallback label = %q, want %q", got, want)
+	}
+}
+
 func TestHandlePackageRejectsTooLongNameBeforeLookup(t *testing.T) {
 	store := &mockStore{}
 	handler := HandlePackage(store, testRenderer(), discardLogger())
