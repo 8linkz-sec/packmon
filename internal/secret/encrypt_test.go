@@ -1,6 +1,7 @@
 package secret
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 )
@@ -51,11 +52,33 @@ func TestFieldEncryptorRoundTripAndRejectsInvalidCiphertext(t *testing.T) {
 		t.Fatalf("Decrypt = %q", plaintext)
 	}
 
-	for _, value := range []string{EncryptedPrefix + "not-base64!", EncryptedPrefix + "YQ==", ciphertext[:len(ciphertext)-1] + "A"} {
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(ciphertext, EncryptedPrefix))
+	if err != nil {
+		t.Fatalf("Decode generated ciphertext: %v", err)
+	}
+	raw[len(raw)-1] ^= 1
+	tampered := EncryptedPrefix + base64.StdEncoding.EncodeToString(raw)
+
+	for _, value := range []string{EncryptedPrefix + "not-base64!", EncryptedPrefix + "YQ==", tampered} {
 		t.Run(value, func(t *testing.T) {
 			if _, err := encryptor.Decrypt(value); err == nil {
 				t.Fatal("Decrypt invalid ciphertext error = nil")
 			}
 		})
+	}
+}
+
+func TestFieldEncryptorDecryptEmptyValue(t *testing.T) {
+	encryptor, err := NewFieldEncryptor("test-key")
+	if err != nil {
+		t.Fatalf("NewFieldEncryptor: %v", err)
+	}
+
+	got, err := encryptor.Decrypt("")
+	if err != nil {
+		t.Fatalf("Decrypt empty value: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("Decrypt empty value = %q, want empty", got)
 	}
 }
