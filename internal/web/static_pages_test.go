@@ -3,6 +3,8 @@ package web
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -12,6 +14,48 @@ import (
 	"testing/fstest"
 	"time"
 )
+
+type failingSecurityTxtWriter struct {
+	header http.Header
+}
+
+func (w *failingSecurityTxtWriter) Header() http.Header {
+	return w.header
+}
+
+func (w *failingSecurityTxtWriter) WriteHeader(int) {}
+
+func (w *failingSecurityTxtWriter) Write([]byte) (int, error) {
+	return 0, errors.New("security.txt write failed")
+}
+
+type securityTxtLogEvent struct {
+	level slog.Level
+	msg   string
+	attrs map[string]any
+}
+
+type securityTxtLogHandler struct {
+	events []securityTxtLogEvent
+}
+
+func (h *securityTxtLogHandler) Enabled(context.Context, slog.Level) bool {
+	return true
+}
+
+func (h *securityTxtLogHandler) Handle(_ context.Context, record slog.Record) error {
+	event := securityTxtLogEvent{level: record.Level, msg: record.Message, attrs: make(map[string]any)}
+	record.Attrs(func(attr slog.Attr) bool {
+		event.attrs[attr.Key] = attr.Value.Any()
+		return true
+	})
+	h.events = append(h.events, event)
+	return nil
+}
+
+func (h *securityTxtLogHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+
+func (h *securityTxtLogHandler) WithGroup(string) slog.Handler { return h }
 
 // TestHandlePrivacyServesOnlyItsOwnPath covers the exact-path guard. These
 // handlers are registered on a prefix pattern, so without the check every
@@ -141,6 +185,39 @@ func TestHandleSecurityTxtRejectsOtherPaths(t *testing.T) {
 	)
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", recorder.Code)
+	}
+}
+
+// TestHandleSecurityTxtLogsWriteFailures ensures an unavailable client cannot
+// turn the public discovery handler into a panic. The response writer error is
+// intentionally swallowed after logging because no usable HTTP response remains.
+func TestHandleSecurityTxtLogsWriteFailures(t *testing.T) {
+	t.Parallel()
+
+	writer := &failingSecurityTxtWriter{header: make(http.Header)}
+	logs := &securityTxtLogHandler{}
+	HandleSecurityTxt(slog.New(logs))(
+		writer, httptest.NewRequest(http.MethodGet, "/.well-known/security.txt", nil),
+	)
+
+	if got := writer.Header().Get("Content-Type"); got != "text/plain; charset=utf-8" {
+		t.Errorf("Content-Type = %q, want plain text", got)
+	}
+	if got := writer.Header().Get("Cache-Control"); got != "public, max-age=3600" {
+		t.Errorf("Cache-Control = %q, want caching policy", got)
+	}
+	if len(logs.events) != 1 {
+		t.Fatalf("log events = %d, want 1", len(logs.events))
+	}
+	event := logs.events[0]
+	if event.level != slog.LevelError {
+		t.Errorf("log level = %v, want ERROR", event.level)
+	}
+	if event.msg != "security.txt: write failed" {
+		t.Errorf("log message = %q, want write-failure context", event.msg)
+	}
+	if got, ok := event.attrs["error"].(error); !ok || got.Error() != "security.txt write failed" {
+		t.Errorf("log error = %#v, want failing writer error", event.attrs["error"])
 	}
 }
 
