@@ -372,6 +372,29 @@ func TestParseCycloneDXRejectsDependencyEdgesOverWorkLimit(t *testing.T) {
 	}
 }
 
+func TestParseCycloneDXRejectsComponentCountOverWorkLimit(t *testing.T) {
+	var components strings.Builder
+	for i := 0; i <= maxCycloneDXComponents; i++ {
+		if i > 0 {
+			components.WriteByte(',')
+		}
+		components.WriteString(`{"type":"library","purl":"pkg:npm/example@1.0.0"}`)
+	}
+	input := []byte(`{"bomFormat":"CycloneDX","components":[` + components.String() + `]}`)
+
+	_, err := Parse(bytes.NewReader(input))
+	if err == nil || !strings.Contains(err.Error(), "component count") {
+		t.Fatalf("Parse() error = %v, want component-count work-limit error", err)
+	}
+}
+
+func TestParseCycloneDXXMLReportsMalformedDocument(t *testing.T) {
+	_, err := Parse(strings.NewReader(`<bom><components>`))
+	if err == nil || !strings.Contains(err.Error(), "parse CycloneDX XML") {
+		t.Fatalf("Parse() error = %v, want contextual CycloneDX XML parse error", err)
+	}
+}
+
 func TestAttachCycloneDXRootViaCapsBeforeViaStateLimit(t *testing.T) {
 	rootCount := 225
 	childCount := 225
