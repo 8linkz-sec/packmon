@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -132,5 +133,20 @@ func TestHashPasswordProducesDifferentHashesForSameInput(t *testing.T) {
 	}
 	if !CheckPassword(hash2, "same-password") {
 		t.Fatal("hash2 does not validate")
+	}
+}
+
+func TestHashPasswordRejectsPasswordOverBcryptLimit(t *testing.T) {
+	t.Parallel()
+
+	hash, err := HashPassword(strings.Repeat("p", 73))
+	if err == nil {
+		t.Fatal("HashPassword() error = nil, want bcrypt length error")
+	}
+	if !errors.Is(err, bcrypt.ErrPasswordTooLong) {
+		t.Fatalf("HashPassword() error = %v, want bcrypt.ErrPasswordTooLong", err)
+	}
+	if hash != "" {
+		t.Fatalf("HashPassword() hash = %q, want empty hash on error", hash)
 	}
 }
