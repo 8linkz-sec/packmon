@@ -57,6 +57,20 @@ func (s *legacyRefreshCompletionSpy) CompleteRefresh(_ context.Context, jobID in
 	return s.err
 }
 
+type claimedOnlyRefreshCompletionSpy struct {
+	calls []refreshCompletionCall
+	err   error
+}
+
+func (s *claimedOnlyRefreshCompletionSpy) CompleteClaimedRefresh(_ context.Context, jobID int, claimedAt *time.Time, jobErr error) error {
+	s.calls = append(s.calls, refreshCompletionCall{
+		jobID:     jobID,
+		claimedAt: claimedAt,
+		jobErr:    jobErr,
+	})
+	return s.err
+}
+
 func TestCompleteClaimedRefreshDispatchesByStoreCapabilityAndClaim(t *testing.T) {
 	t.Parallel()
 
@@ -170,6 +184,32 @@ func TestCompleteClaimedRefreshReturnsCompletionErrors(t *testing.T) {
 				t.Fatalf("CompleteClaimedRefresh() error = %v, want %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestCompleteClaimedRefreshHandlesNilAndClaimedOnlyStores(t *testing.T) {
+	t.Parallel()
+
+	jobErr := errors.New("lookup failed")
+	claimedOnly := &claimedOnlyRefreshCompletionSpy{}
+	job := &db.RefreshJob{ID: 987}
+
+	if err := CompleteClaimedRefresh(context.Background(), claimedOnly, job, jobErr); err != nil {
+		t.Fatalf("CompleteClaimedRefresh() error = %v", err)
+	}
+	if len(claimedOnly.calls) != 1 {
+		t.Fatalf("claimed-only calls = %+v, want one call", claimedOnly.calls)
+	}
+	got := claimedOnly.calls[0]
+	if got.jobID != job.ID || got.claimedAt != nil || got.jobErr != jobErr {
+		t.Fatalf("claimed-only call = %+v, want job ID %d, nil claim, and job error", got, job.ID)
+	}
+
+	if err := CompleteClaimedRefresh(context.Background(), struct{}{}, &db.RefreshJob{ID: 1}, nil); !errors.Is(err, errUnsupportedRefreshCompleter) {
+		t.Fatalf("unsupported store error = %v, want %v", err, errUnsupportedRefreshCompleter)
+	}
+	if err := CompleteClaimedRefresh(context.Background(), struct{}{}, nil, nil); err != nil {
+		t.Fatalf("nil job error = %v, want nil", err)
 	}
 }
 
