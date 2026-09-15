@@ -30,6 +30,31 @@ func TestValidateBase64Failures(t *testing.T) {
 	}
 }
 
+func TestSecretPasswordValidateRejectsBlankValues(t *testing.T) {
+	s := SecretSpec{Key: "POSTGRES_PASSWORD", Kind: SecretPassword}
+	for _, tc := range []struct {
+		name    string
+		value   string
+		wantErr bool
+	}{
+		{name: "empty", value: "", wantErr: true},
+		{name: "whitespace", value: " \t\n ", wantErr: true},
+		{name: "double quoted empty", value: `""`, wantErr: true},
+		{name: "single quoted empty", value: `''`, wantErr: true},
+		{name: "nonempty", value: "correct horse battery staple"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := s.Validate(tc.value)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Validate(%q) error = %v, wantErr %t", tc.value, err, tc.wantErr)
+			}
+			if tc.wantErr && (err == nil || err.Error() != "empty") {
+				t.Fatalf("Validate(%q) error = %v, want empty error", tc.value, err)
+			}
+		})
+	}
+}
+
 func TestValidateProductionSecretsAggregates(t *testing.T) {
 	env := map[string]string{
 		"PACKMON_SERVER_MODE":          "production",
