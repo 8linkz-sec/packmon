@@ -37,3 +37,14 @@ func TestBoundedParseDiagnosticsIgnoresOnlyBlankDiagnostics(t *testing.T) {
 		t.Fatalf("omitted diagnostics = %d, want 0", omitted)
 	}
 }
+
+func TestParseDiagnosticsOmittedSummaryReportsCountAndJSONHint(t *testing.T) {
+	if got, want := ParseDiagnosticsOmittedSummary(3), "3 additional parse diagnostics omitted; see JSON parse_errors for full detail"; got != want {
+		t.Fatalf("omitted summary = %q, want %q", got, want)
+	}
+	for _, omitted := range []int{0, -1} {
+		if got := ParseDiagnosticsOmittedSummary(omitted); got != "" {
+			t.Fatalf("summary for omitted=%d = %q, want empty", omitted, got)
+		}
+	}
+}
