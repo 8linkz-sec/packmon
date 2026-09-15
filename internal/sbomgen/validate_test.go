@@ -60,3 +60,18 @@ func TestValidateGeneratedSBOMCountsPackagesAndSkippedComponents(t *testing.T) {
 		t.Fatalf("packages/skipped = %d/%d, want 1/1", packages, skipped)
 	}
 }
+
+func TestValidateGeneratedSBOMWrapsCycloneDXParseErrors(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "invalid-components.cdx.json")
+	// The header is enough for format recognition, while the wrong components
+	// shape makes the full CycloneDX parse fail.
+	content := `{"bomFormat":"CycloneDX","components":{}}`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := validateGeneratedSBOM(path); err == nil || !strings.Contains(err.Error(), "parse generated SBOM") {
+		t.Fatalf("validate invalid CycloneDX err = %v, want wrapped parse error", err)
+	}
+}
