@@ -85,6 +85,14 @@ func TestActionsParserInvalidYAMLReturnsError(t *testing.T) {
 	}
 }
 
+func TestActionsParserReturnsContextForReadError(t *testing.T) {
+	t.Parallel()
+
+	if _, err := NewActionsParser().Parse(errorReader{}); err == nil || !strings.Contains(err.Error(), "actions: reading input: forced read error") {
+		t.Fatalf("Parse(read error) = %v, want contextual read error", err)
+	}
+}
+
 func TestActionsParserRecordsDeclaredVersionCommentForSHAPins(t *testing.T) {
 	t.Parallel()
 
@@ -188,6 +196,37 @@ func TestParseActionsVersionComment(t *testing.T) {
 	} {
 		if got := parseActionsVersionComment(tt.comment); got != tt.want {
 			t.Errorf("parseActionsVersionComment(%q) = %q, want %q", tt.comment, got, tt.want)
+		}
+	}
+}
+
+func TestParseActionsVersionCommentRejectsInvalidSuffixCharacters(t *testing.T) {
+	t.Parallel()
+
+	for _, comment := range []string{
+		"# v1.2.3-rc_1",
+		"# v1.2.3-rc/1",
+		"# v1.2.3-rc@1",
+	} {
+		if got := parseActionsVersionComment(comment); got != "" {
+			t.Errorf("parseActionsVersionComment(%q) = %q, want empty", comment, got)
+		}
+	}
+}
+
+func TestParseActionUsesRejectsIncompleteReferences(t *testing.T) {
+	t.Parallel()
+
+	for _, uses := range []string{
+		"actions/checkout",
+		"actions/checkout@",
+		"@v4",
+		"actions@v4",
+		"actions/@v4",
+		"actions/checkout@   ",
+	} {
+		if name, version, ok := parseActionUses(uses); ok || name != "" || version != "" {
+			t.Errorf("parseActionUses(%q) = (%q, %q, %t), want empty rejected reference", uses, name, version, ok)
 		}
 	}
 }
