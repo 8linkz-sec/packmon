@@ -8,6 +8,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 type bootstrapStoreStub struct {
@@ -172,5 +174,26 @@ func TestBootstrapAdminUsesAuditedWriteWhenAvailable(t *testing.T) {
 	}
 	if store.auth == nil || !store.auth.PasswordIsBootstrap || !CheckPassword(store.auth.PasswordHash, "initial-password") {
 		t.Fatalf("auth = %+v, want bootstrap password hash", store.auth)
+	}
+}
+
+func TestBootstrapAdminRejectsPasswordOverBcryptLimitWithoutWrites(t *testing.T) {
+	t.Parallel()
+
+	store := &bootstrapStoreStub{}
+	err := BootstrapAdmin(
+		context.Background(),
+		store,
+		strings.Repeat("p", 73),
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	if err == nil {
+		t.Fatal("BootstrapAdmin() error = nil, want bcrypt length error")
+	}
+	if !errors.Is(err, bcrypt.ErrPasswordTooLong) {
+		t.Fatalf("BootstrapAdmin() error = %v, want bcrypt.ErrPasswordTooLong", err)
+	}
+	if store.auth != nil || store.upserts != 0 || store.audits != 0 {
+		t.Fatalf("store after bcrypt error = %+v, want no bootstrap writes or audit", store)
 	}
 }
