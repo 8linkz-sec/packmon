@@ -1,6 +1,7 @@
 package httpclient
 
 import (
+	"errors"
 	"net/http"
 	"net/url"
 	"strings"
@@ -92,6 +93,19 @@ func TestCloneWithSafeRedirectPolicy(t *testing.T) {
 		}
 	})
 
+	t.Run("installs safe policy for nil client", func(t *testing.T) {
+		client := CloneWithSafeRedirectPolicy(nil)
+		if client == nil {
+			t.Fatal("CloneWithSafeRedirectPolicy(nil) = nil")
+		}
+		if err := client.CheckRedirect(
+			&http.Request{URL: mustURL("http://example.test/next")},
+			[]*http.Request{{URL: mustURL("https://example.test/start")}},
+		); err == nil || !strings.Contains(err.Error(), "https to http") {
+			t.Fatalf("CheckRedirect() error = %v, want HTTPS downgrade refusal", err)
+		}
+	})
+
 	t.Run("preserves existing policy", func(t *testing.T) {
 		existingCalled := false
 		client := CloneWithSafeRedirectPolicy(&http.Client{
@@ -110,6 +124,23 @@ func TestCloneWithSafeRedirectPolicy(t *testing.T) {
 		}
 		if !existingCalled {
 			t.Fatal("existing CheckRedirect policy was not called")
+		}
+	})
+
+	t.Run("returns existing policy error before shared policy", func(t *testing.T) {
+		wantErr := errors.New("existing redirect rejected")
+		client := CloneWithSafeRedirectPolicy(&http.Client{
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return wantErr
+			},
+		})
+
+		err := client.CheckRedirect(
+			&http.Request{URL: mustURL("http://example.test/next")},
+			[]*http.Request{{URL: mustURL("https://example.test/start")}},
+		)
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("CheckRedirect() error = %v, want existing policy error", err)
 		}
 	})
 }
