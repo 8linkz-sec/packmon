@@ -157,6 +157,67 @@ func TestDockerfileRuntimeTargetsKeepLeastPrivilegeEntrypointsAndServerFeedAcces
 	}
 }
 
+func TestDockerfileRuntimeTargetsCopyOnlyPublishedArtifactsAndDocs(t *testing.T) {
+	t.Parallel()
+
+	dockerfile := filepath.Join("..", "..", "Dockerfile")
+	dockerData, err := os.ReadFile(dockerfile) //nolint:gosec // static repository fixture path
+	if err != nil {
+		t.Fatalf("read Dockerfile: %v", err)
+	}
+
+	stages := dockerfileRuntimeStages(t, string(dockerData))
+	for stage, wantCopies := range map[string][]string{
+		"server": {
+			"COPY --from=build /packmon-server /usr/local/bin/packmon-server",
+			"COPY SECURITY.md /usr/share/doc/packmon/SECURITY.md",
+			"COPY LICENSE /usr/share/doc/packmon/LICENSE",
+		},
+		"cli": {
+			"COPY --from=build /packmon /usr/local/bin/packmon",
+			"COPY SECURITY.md /usr/share/doc/packmon/SECURITY.md",
+			"COPY LICENSE /usr/share/doc/packmon/LICENSE",
+		},
+	} {
+		if !dockerfileRuntimeStageHasOnlyAllowedCopies(stages[stage], wantCopies) {
+			gotCopies := dockerfileCopyInstructions(stages[stage])
+			t.Fatalf("%s runtime COPY instructions = %#v, want only published binary and SECURITY.md/LICENSE documentation %#v", stage, gotCopies, wantCopies)
+		}
+	}
+}
+
+func TestDockerfileRuntimeCopyContractRejectsCaseVariantsAndAdd(t *testing.T) {
+	t.Parallel()
+
+	allowed := []string{"COPY LICENSE /usr/share/doc/packmon/LICENSE"}
+	for _, stage := range []string{
+		"copy . /workspace\nCOPY LICENSE /usr/share/doc/packmon/LICENSE\n",
+		"CoPy .env /run/secrets/env\nCOPY LICENSE /usr/share/doc/packmon/LICENSE\n",
+		" COPY . /workspace\nCOPY LICENSE /usr/share/doc/packmon/LICENSE\n",
+		"ADD . /workspace\nCOPY LICENSE /usr/share/doc/packmon/LICENSE\n",
+		"aDd credentials.pem /run/secrets/credentials.pem\nCOPY LICENSE /usr/share/doc/packmon/LICENSE\n",
+		"\tADD credentials.pem /run/secrets/credentials.pem\nCOPY LICENSE /usr/share/doc/packmon/LICENSE\n",
+	} {
+		if dockerfileRuntimeStageHasOnlyAllowedCopies(stage, allowed) {
+			t.Fatalf("runtime COPY contract accepted build-context instruction %q", stage)
+		}
+	}
+}
+
+func dockerfileRuntimeStageHasOnlyAllowedCopies(stage string, allowed []string) bool {
+	return slices.Equal(dockerfileCopyInstructions(stage), allowed)
+}
+
+func dockerfileCopyInstructions(stage string) []string {
+	copyRE := regexp.MustCompile(`(?im)^[\t ]*(copy|add)\s+(.+)$`)
+	matches := copyRE.FindAllStringSubmatch(stage, -1)
+	instructions := make([]string, 0, len(matches))
+	for _, match := range matches {
+		instructions = append(instructions, strings.ToUpper(match[1])+" "+match[2])
+	}
+	return instructions
+}
+
 func dockerfileRuntimeStages(t *testing.T, dockerfile string) map[string]string {
 	t.Helper()
 
