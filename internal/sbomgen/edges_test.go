@@ -310,6 +310,46 @@ func TestCommandOutputSummaryRedactsSecretsControlsAndPaths(t *testing.T) {
 	}
 }
 
+func TestCommandOutputSummaryUsesEmptyMarkerForWhitespaceOnlyOutput(t *testing.T) {
+	got := commandOutputSummary([]byte(" \t\r\n"))
+	if got != "<empty>" {
+		t.Fatalf("commandOutputSummary(whitespace) = %q, want <empty>", got)
+	}
+}
+
+func TestReadFileLimitedEnforcesBoundaryBeforeAndAfterOpen(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "manifest.json")
+	const maxBytes = 8
+
+	if err := os.WriteFile(path, []byte("12345678"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readFileLimited(path, maxBytes, "manifest")
+	if err != nil {
+		t.Fatalf("readFileLimited at boundary: %v", err)
+	}
+	if string(got) != "12345678" {
+		t.Fatalf("readFileLimited at boundary = %q", got)
+	}
+
+	if err := os.WriteFile(path, []byte("123456789"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readFileLimited(path, maxBytes, "manifest"); err == nil || !strings.Contains(err.Error(), "exceeds maximum manifest size") {
+		t.Fatalf("readFileLimited oversized error = %v", err)
+	}
+
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = file.Close() }()
+	if _, err := readOpenedFileLimited(file, path, maxBytes, "manifest"); err == nil || !strings.Contains(err.Error(), "exceeds maximum manifest size") {
+		t.Fatalf("readOpenedFileLimited oversized error = %v", err)
+	}
+}
+
 func TestDefaultRunnerRunsCommand(t *testing.T) {
 	if _, err := exec.LookPath("go"); err != nil {
 		t.Skip("go command not on PATH")
