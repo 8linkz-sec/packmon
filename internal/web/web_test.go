@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/8linkz-sec/packmon/internal/db"
@@ -2034,6 +2035,95 @@ func TestHandleFeeds_StoreErrorRendersLoadError(t *testing.T) {
 	}
 	if strings.Contains(body, "No feed sync data available") {
 		t.Fatalf("Feeds error partial rendered empty feed state:\n%s", body)
+	}
+}
+
+func TestHandleFeedsPreservesTimestampMetadata(t *testing.T) {
+	lastSyncAt := time.Date(2026, time.September, 15, 10, 30, 0, 0, time.UTC)
+	handler := HandleFeeds(&mockStore{feedStatuses: []db.FeedSyncStatus{{
+		FeedName:       "osv",
+		LastSyncStatus: "success",
+		LastSyncAt:     &lastSyncAt,
+		EntriesSynced:  1,
+		EntriesTotal:   1,
+	}}}, testRenderer(), discardLogger())
+
+	req := httptest.NewRequest(http.MethodGet, "/feeds?partial=status", nil)
+	req.Header.Set("HX-Request", "true")
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("HandleFeeds() status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `datetime="2026-09-15T10:30:00Z"`) {
+		t.Fatalf("HandleFeeds() response missing timestamp metadata:\n%s", body)
+	}
+}
+
+func TestHandleFeedsRoundsDurationBeforeRendering(t *testing.T) {
+	duration := 1234*time.Millisecond + 567*time.Microsecond
+	renderer := NewRendererWithLayoutLinks(fstest.MapFS{
+		"templates/layout.html": {Data: []byte(`{{define "layout"}}{{template "content" .}}{{end}}`)},
+		"templates/feeds.html":  {Data: []byte(`{{define "content"}}{{range .Feeds}}{{.DurationStr}}{{end}}{{end}}`)},
+	}, false, LayoutLinks{})
+	handler := HandleFeeds(&mockStore{feedStatuses: []db.FeedSyncStatus{{
+		FeedName:         "osv",
+		LastSyncStatus:   "success",
+		LastSyncDuration: &duration,
+		EntriesSynced:    1,
+		EntriesTotal:     1,
+	}}}, renderer, discardLogger())
+
+	rec := httptest.NewRecorder()
+	handler(rec, httptest.NewRequest(http.MethodGet, "/feeds", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("HandleFeeds() status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if got := rec.Body.String(); got != "1.235s" {
+		t.Fatalf("HandleFeeds() rendered duration = %q, want %q", got, "1.235s")
+	}
+}
+
+func TestHandleFeedsRenderFailuresReturnGenericServerError(t *testing.T) {
+	// A renderer filesystem without feeds.html forces the handler's two render
+	// paths to fail after the store was read. The browser must receive the same
+	// generic error in both cases rather than a template or filesystem detail.
+	renderer := NewRendererWithLayoutLinks(fstest.MapFS{
+		"templates/layout.html": {Data: []byte(`{{define "layout"}}{{template "content" .}}{{end}}`)},
+	}, false, LayoutLinks{})
+	handler := HandleFeeds(&mockStore{}, renderer, discardLogger())
+
+	tests := []struct {
+		name     string
+		path     string
+		htmx     bool
+		wantVary bool
+	}{
+		{name: "full page", path: "/feeds"},
+		{name: "HTMX status partial", path: "/feeds?partial=status", htmx: true, wantVary: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			if tt.htmx {
+				req.Header.Set("HX-Request", "true")
+			}
+			rec := httptest.NewRecorder()
+			handler(rec, req)
+
+			if rec.Code != http.StatusInternalServerError {
+				t.Fatalf("HandleFeeds() status = %d, want %d", rec.Code, http.StatusInternalServerError)
+			}
+			if body := rec.Body.String(); body != "internal server error\n" {
+				t.Fatalf("HandleFeeds() body = %q, want generic server error", body)
+			}
+			if got := rec.Header().Get("Vary"); tt.wantVary && got != "HX-Request" {
+				t.Fatalf("Vary = %q, want HX-Request for an HTMX partial", got)
+			}
+		})
 	}
 }
 
