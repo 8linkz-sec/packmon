@@ -69,3 +69,23 @@ func TestReportWarningsKeepsOperationalStatusSeparate(t *testing.T) {
 		t.Fatalf("warnings = %#v, want none because operational status is rendered separately", warnings)
 	}
 }
+
+func TestReportWarningsNilResultHasNoWarnings(t *testing.T) {
+	t.Parallel()
+
+	if warnings := ReportWarnings(nil); warnings != nil {
+		t.Fatalf("ReportWarnings(nil) = %#v, want nil", warnings)
+	}
+	if diagnostics := scanArtifactDiagnostics(nil); diagnostics != nil {
+		t.Fatalf("scanArtifactDiagnostics(nil) = %#v, want nil", diagnostics)
+	}
+}
+
+func TestScanOperationalStatusMessageUsesNonStandardFeedStatus(t *testing.T) {
+	t.Parallel()
+
+	result := &domain.ScanResult{FeedStatus: "  server unavailable  "}
+	if got, want := scanOperationalStatusMessage(result), "server unavailable"; got != want {
+		t.Fatalf("scanOperationalStatusMessage() = %q, want %q", got, want)
+	}
+}
