@@ -209,6 +209,28 @@ func TestNewFeedSyncerWiresConfiguredMirrorURLs(t *testing.T) {
 	}
 }
 
+func TestNewNVDSyncerForwardsConfiguredAPIKey(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{Feeds: config.FeedsConfig{
+		NVDAPIKey: "test-nvd-api-key",
+		NVDAPIURL: "https://mirror.example/nvd/rest/json/cves/2.0",
+	}}
+
+	syncer := newFeedSyncer("nvd", cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if syncer == nil {
+		t.Fatal("newFeedSyncer(nvd) = nil")
+	}
+
+	value := reflect.Indirect(reflect.ValueOf(syncer))
+	if got := value.FieldByName("apiKey").String(); got != cfg.Feeds.NVDAPIKey {
+		t.Fatalf("NVD syncer apiKey = %q, want configured API key", got)
+	}
+	if got := value.FieldByName("apiURL").String(); got != cfg.Feeds.NVDAPIURL {
+		t.Fatalf("NVD syncer apiURL = %q, want %q", got, cfg.Feeds.NVDAPIURL)
+	}
+}
+
 func TestAsyncWorkerDescriptorWiresConfiguredSocketBaseURL(t *testing.T) {
 	t.Parallel()
 
