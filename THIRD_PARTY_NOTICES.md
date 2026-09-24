@@ -43,7 +43,7 @@ SOFTWARE.
 
 Package: `htmx.org`
 
-Version: 2.0.10
+Version: 2.0.11
 
 License: Zero-Clause BSD
 
