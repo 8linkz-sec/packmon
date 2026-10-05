@@ -20,7 +20,7 @@
     "@tailwindcss/cli": "4.3.3",
     "eslint": "10.10.0",
     "htmx.org": "2.0.10",
-    "stylelint": "17.15.0",
+    "stylelint": "17.16.0",
     "tailwindcss": "4.3.3"
   },
   "overrides": {
