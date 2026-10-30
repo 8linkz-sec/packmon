@@ -461,8 +461,10 @@ such as ReversingLabs.
 NVD is a phase-2 enrichment feed: it does not import advisories itself, it
 raises CVSS/severity for already-imported CVEs that arrived without usable
 severity data. Its `Entries` counters show CVEs updated/processed by the last
-completed enrichment run, not a vulnerability inventory. Two symptoms look
-alarming but have expected causes:
+completed enrichment run, not a vulnerability inventory. NVD is excluded from
+the aggregate `feed_status`, so a slow or stalled NVD sync shows up only in its
+own row on `/admin/feeds` and in the per-feed `/api/v1/feeds/status` list, not
+as a degraded scan result. Two symptoms look alarming but have expected causes:
 
 - `running` with an old last-sync timestamp for hours: `last_sync_at`
   intentionally keeps the timestamp of the last usable data while a sync is
@@ -485,8 +487,11 @@ at WARN with a separate `failed` count, and is recorded as an error without
 the manager's usual immediate retries: retrying seconds after a run that
 already exhausted the rate limit would hit the same wall and only add load.
 The feed resumes at its next scheduled sync and picks up where it stopped,
-because CVEs enriched so far drop out of the discovery query. Repeated
-`failed` counts are the signal to configure `PACKMON_NVD_API_KEY`.
+because CVEs enriched so far drop out of the discovery query. CVEs for which
+NVD returned no CVSS data are recorded in `nvd_cvss_negative_cache` and skipped
+for 30 days, or until their advisory changes, so an interrupted run (server
+restart, image rebuild) loses at most the CVE in flight. Repeated `failed`
+counts are the signal to configure `PACKMON_NVD_API_KEY`.
 
 ### Feed scheduler controls
 

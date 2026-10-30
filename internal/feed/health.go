@@ -99,8 +99,13 @@ func RuntimeFeedHealth(cfg RuntimeHealthConfig, status *db.FeedSyncStatus, opts 
 	return HealthAssessment{Status: "pending", Reason: "never synced"}
 }
 
+// overallStatusExcludedFeeds keeps feeds out of OverallFeedStatus while their
+// per-feed health stays reported. NVD only enriches advisories the base feeds
+// already provide, and a stalled NVD sync must not mark every scan degraded.
+var overallStatusExcludedFeeds = map[string]bool{"nvd": true}
+
 // OverallFeedStatus returns the aggregate feed status used by check responses
-// and /api/v1/feeds/status.
+// and /api/v1/feeds/status. Feeds in overallStatusExcludedFeeds are ignored.
 func OverallFeedStatus(statuses []db.FeedSyncStatus, opts HealthOptions) string {
 	if len(statuses) == 0 {
 		return "degraded"
@@ -109,6 +114,9 @@ func OverallFeedStatus(statuses []db.FeedSyncStatus, opts HealthOptions) string 
 	active := false
 	configuredOnly := false
 	for _, status := range statuses {
+		if overallStatusExcludedFeeds[strings.ToLower(strings.TrimSpace(status.FeedName))] {
+			continue
+		}
 		health := FeedStatusHealth(status, opts).Status
 		if health == "disabled" {
 			continue

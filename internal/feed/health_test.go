@@ -60,10 +60,10 @@ func TestOverallFeedStatusAndFreshEntriesUseLastUsableSync(t *testing.T) {
 	if got := OverallFeedStatus([]db.FeedSyncStatus{{FeedName: "vulncheck", LastSyncStatus: "disabled"}}, HealthOptions{Now: now}); got != "degraded" {
 		t.Fatalf("OverallFeedStatus(disabled only) = %q, want degraded", got)
 	}
-	if got := OverallFeedStatus([]db.FeedSyncStatus{{FeedName: "nvd", LastSyncStatus: "running", LastSyncAt: &recent, EntriesTotal: 1}}, HealthOptions{Now: now}); got != "healthy" {
+	if got := OverallFeedStatus([]db.FeedSyncStatus{{FeedName: "epss", LastSyncStatus: "running", LastSyncAt: &recent, EntriesTotal: 1}}, HealthOptions{Now: now}); got != "healthy" {
 		t.Fatalf("OverallFeedStatus(running fresh data) = %q, want healthy", got)
 	}
-	if got := OverallFeedStatus([]db.FeedSyncStatus{{FeedName: "nvd", LastSyncStatus: "running", LastSyncAt: &old, EntriesTotal: 1}}, HealthOptions{Now: now}); got != "degraded" {
+	if got := OverallFeedStatus([]db.FeedSyncStatus{{FeedName: "epss", LastSyncStatus: "running", LastSyncAt: &old, EntriesTotal: 1}}, HealthOptions{Now: now}); got != "degraded" {
 		t.Fatalf("OverallFeedStatus(running stale data) = %q, want degraded", got)
 	}
 	if HasFreshFeedEntries(db.FeedSyncStatus{LastSyncAt: &future, EntriesTotal: 1}, HealthOptions{Now: now}) {
@@ -74,6 +74,40 @@ func TestOverallFeedStatusAndFreshEntriesUseLastUsableSync(t *testing.T) {
 	}
 	if HasFreshFeedEntries(db.FeedSyncStatus{LastSyncStatus: "running"}, HealthOptions{Now: now}) {
 		t.Fatal("HasFreshFeedEntries(running without entries) = true, want false")
+	}
+}
+
+func TestOverallFeedStatusIgnoresNVD(t *testing.T) {
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	recent := now.Add(-time.Hour)
+	old := now.Add(-73 * 24 * time.Hour)
+	osv := db.FeedSyncStatus{FeedName: "osv", LastSyncStatus: "success", LastSyncAt: &recent, EntriesTotal: 10}
+
+	for _, tc := range []struct {
+		name string
+		nvd  db.FeedSyncStatus
+	}{
+		{name: "stale", nvd: db.FeedSyncStatus{FeedName: "nvd", LastSyncStatus: "success", LastSyncAt: &old, EntriesTotal: 3}},
+		{name: "stuck running", nvd: db.FeedSyncStatus{FeedName: "nvd", LastSyncStatus: "running", LastSyncAt: &old, EntriesTotal: 3}},
+		{name: "failed", nvd: db.FeedSyncStatus{FeedName: "nvd", LastSyncStatus: "error", LastSyncAt: &old}},
+		{name: "never synced", nvd: db.FeedSyncStatus{FeedName: "nvd"}},
+		{name: "name casing", nvd: db.FeedSyncStatus{FeedName: " NVD ", LastSyncStatus: "error"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := OverallFeedStatus([]db.FeedSyncStatus{osv, tc.nvd}, HealthOptions{Now: now}); got != "healthy" {
+				t.Fatalf("OverallFeedStatus(healthy osv + %s nvd) = %q, want healthy", tc.name, got)
+			}
+		})
+	}
+
+	// NVD alone is no usable vulnerability coverage.
+	if got := OverallFeedStatus([]db.FeedSyncStatus{{FeedName: "nvd", LastSyncStatus: "success", LastSyncAt: &recent, EntriesTotal: 3}}, HealthOptions{Now: now}); got != "degraded" {
+		t.Fatalf("OverallFeedStatus(nvd only) = %q, want degraded", got)
+	}
+	// Other enrichment feeds still count.
+	epss := db.FeedSyncStatus{FeedName: "epss", LastSyncStatus: "success", LastSyncAt: &old, EntriesTotal: 3}
+	if got := OverallFeedStatus([]db.FeedSyncStatus{osv, epss}, HealthOptions{Now: now}); got != "degraded" {
+		t.Fatalf("OverallFeedStatus(healthy osv + stale epss) = %q, want degraded", got)
 	}
 }
 
