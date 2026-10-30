@@ -83,6 +83,8 @@ type listAllHTMLMessages struct {
 	NoSecurityFindingsPrefix           string
 	NoSecurityFindingsSuffix           string
 	SecurityFindingsWarnings           string
+	AvailableUpdatesHeading            string
+	AvailableUpdatesTableLabel         string
 	AllPackagesHeading                 string
 	AllPackagesTableLabel              string
 	StatusColumn                       string
@@ -140,6 +142,8 @@ func defaultListAllHTMLMessages() listAllHTMLMessages {
 		NoSecurityFindingsPrefix:           "No security findings in",
 		NoSecurityFindingsSuffix:           ".",
 		SecurityFindingsWarnings:           "Security findings could not be confirmed clean because report warnings require review.",
+		AvailableUpdatesHeading:            "Available Updates",
+		AvailableUpdatesTableLabel:         "Available updates table",
 		AllPackagesHeading:                 "All Packages",
 		AllPackagesTableLabel:              "All packages table",
 		StatusColumn:                       "Status",
@@ -216,6 +220,7 @@ func writeListAllHTML(path, title string, result *domain.ScanResult, packages li
 		Mode                     string
 		PackageRows              []listAllRow
 		Attention                []int
+		Updates                  []int
 		PackageInfo              listAllPackageReport
 		ScopeSummary             []listAllScopeSummary
 		Findings                 []listAllFindingSection
@@ -241,7 +246,9 @@ func writeListAllHTML(path, title string, result *domain.ScanResult, packages li
 		VulnerabilityFindingKeys: vulnSet,
 	}
 	rep.Attention = listAllHTMLAttentionRows(packages.Rows, findingStatuses, vulnSet)
+	rep.Updates = listAllHTMLUpdateRows(packages.Rows, findingStatuses)
 	rep.PackageInfo = listAllHTMLPackageInfo(rep.PackageInfo, packages.Rows, findingStatuses, vulnSet)
+	rep.PackageInfo.WithUpdates = len(rep.Updates)
 	if len(rep.Sources) == 0 {
 		rep.Sources = listAllCheckedInventorySources(packages.Rows)
 	}
@@ -300,15 +307,11 @@ func listAllVulnerabilityFindingKeys(findings []domain.Finding) map[string]struc
 }
 
 func listAllHTMLPackageInfo(info listAllPackageReport, rows []listAllRow, findingStatuses map[string]listAllHTMLFindingState, vulnSet map[string]struct{}) listAllPackageReport {
-	info.WithUpdates = 0
 	info.Vulnerable = 0
 	info.Unknown = 0
 	for _, row := range rows {
 		status := listAllHTMLPackageStatus(row, findingStatuses)
 		vuln := listAllHTMLPackageVulnerability(row, vulnSet)
-		if status == "Update available" {
-			info.WithUpdates++
-		}
 		if strings.EqualFold(strings.TrimSpace(vuln), "yes") {
 			info.Vulnerable++
 		}
@@ -317,6 +320,16 @@ func listAllHTMLPackageInfo(info listAllPackageReport, rows []listAllRow, findin
 		}
 	}
 	return info
+}
+
+func listAllHTMLUpdateRows(rows []listAllRow, findingStatuses map[string]listAllHTMLFindingState) []int {
+	out := make([]int, 0)
+	for i, row := range rows {
+		if listAllHTMLPackageStatus(row, findingStatuses) == "Update available" {
+			out = append(out, i)
+		}
+	}
+	return out
 }
 
 func listAllHTMLFindingStatuses(findings []domain.Finding) map[string]listAllHTMLFindingState {
@@ -712,6 +725,27 @@ a:hover{text-decoration:underline;}
 	`display:inline;inline-size:auto;block-size:auto;margin-inline-start:0;border:0;` +
 	`transform:none;color:var(--dim);overflow-wrap:anywhere;word-break:break-word;}}`
 
+const listAllHTMLPackageTableRow = `<tr><td class="name"><bdi dir="auto">{{.Name}}` +
+	`</bdi></td><td class="installed">{{if .InstalledCopy}}` +
+	`<span class="copy-cell"><span class="copy-value"><bdi dir="auto">{{.Installed}}` +
+	`</bdi></span><button type="button" class="copy-btn" data-copy="{{.InstalledCopy}}` +
+	`" data-copy-label="{{.InstalledCopyLabel}}" data-copy-message="{{.InstalledCopyMessage}}` +
+	`" aria-label="{{.InstalledCopyLabel}}` +
+	`"><svg class="copy-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg></button></span><span class="print-copy-value"><bdi dir="auto">{{.InstalledCopy}}` +
+	`</bdi></span>{{else}}<bdi dir="auto">{{.Installed}}</bdi>{{end}}` +
+	`</td><td class="version">{{if .LatestCopy}}` +
+	`<span class="copy-cell"><span class="copy-value"><bdi dir="auto">{{.Latest}}` +
+	`</bdi></span><button type="button" class="copy-btn" data-copy="{{.LatestCopy}}` +
+	`" data-copy-label="{{.LatestCopyLabel}}" data-copy-message="{{.LatestCopyMessage}}` +
+	`" aria-label="{{.LatestCopyLabel}}"><svg class="copy-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg></button></span><span class="print-copy-value">` +
+	`<bdi dir="auto">{{.LatestCopy}}</bdi></span>{{else}}<bdi dir="auto">{{.Latest}}` +
+	`</bdi>{{end}}</td><td class="package-status{{if .StatusClass}} {{.StatusClass}}{{end}}` +
+	`">{{.Status}}</td><td class="meta-cell"><dl class="package-meta-list"><div><dt>{{$.Messages.EcosystemLabel}}</dt><dd>{{.Ecosystem}}` +
+	`</dd></div><div><dt>{{$.Messages.SourceLabel}}</dt><dd><bdi dir="auto">{{.Source}}` +
+	`</bdi></dd></div><div><dt>{{$.Messages.ScopeLabel}}</dt><dd>{{.Scope}}</dd></div><div><dt>{{$.Messages.RelationLabel}}</dt><dd>{{.Relation}}` +
+	`</dd></div></dl></td><td class="vuln-col{{if .VulnClass}}` +
+	` {{.VulnClass}}{{end}}">{{.Vuln}}</td></tr>`
+
 const listAllHTMLBody = `
 </style>
 </head>
@@ -742,26 +776,7 @@ const listAllHTMLBody = `
 	`{{.Messages.TriageColumn}}</th><th scope="col" class="vuln-col">` +
 	`{{.Messages.VulnerabilityColumn}}</th></tr></thead>` + `
 <tbody>
-` + `{{range .Attention}}{{with htmlPackageRow (index $.PackageRows .) $.FindingStatuses $.VulnerabilityFindingKeys}}<tr><td class="name"><bdi dir="auto">{{.Name}}` +
-	`</bdi></td><td class="installed">{{if .InstalledCopy}}` +
-	`<span class="copy-cell"><span class="copy-value"><bdi dir="auto">{{.Installed}}` +
-	`</bdi></span><button type="button" class="copy-btn" data-copy="{{.InstalledCopy}}` +
-	`" data-copy-label="{{.InstalledCopyLabel}}" data-copy-message="{{.InstalledCopyMessage}}` +
-	`" aria-label="{{.InstalledCopyLabel}}` +
-	`"><svg class="copy-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg></button></span><span class="print-copy-value"><bdi dir="auto">{{.InstalledCopy}}` +
-	`</bdi></span>{{else}}<bdi dir="auto">{{.Installed}}</bdi>{{end}}` +
-	`</td><td class="version">{{if .LatestCopy}}` +
-	`<span class="copy-cell"><span class="copy-value"><bdi dir="auto">{{.Latest}}` +
-	`</bdi></span><button type="button" class="copy-btn" data-copy="{{.LatestCopy}}` +
-	`" data-copy-label="{{.LatestCopyLabel}}" data-copy-message="{{.LatestCopyMessage}}` +
-	`" aria-label="{{.LatestCopyLabel}}"><svg class="copy-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg></button></span><span class="print-copy-value">` +
-	`<bdi dir="auto">{{.LatestCopy}}</bdi></span>{{else}}<bdi dir="auto">{{.Latest}}` +
-	`</bdi>{{end}}</td><td class="package-status{{if .StatusClass}} {{.StatusClass}}{{end}}` +
-	`">{{.Status}}</td><td class="meta-cell"><dl class="package-meta-list"><div><dt>{{$.Messages.EcosystemLabel}}</dt><dd>{{.Ecosystem}}` +
-	`</dd></div><div><dt>{{$.Messages.SourceLabel}}</dt><dd><bdi dir="auto">{{.Source}}` +
-	`</bdi></dd></div><div><dt>{{$.Messages.ScopeLabel}}</dt><dd>{{.Scope}}</dd></div><div><dt>{{$.Messages.RelationLabel}}</dt><dd>{{.Relation}}` +
-	`</dd></div></dl></td><td class="vuln-col{{if .VulnClass}}` +
-	` {{.VulnClass}}{{end}}">{{.Vuln}}</td></tr>{{end}}{{end}}` + `
+` + `{{range .Attention}}{{with htmlPackageRow (index $.PackageRows .) $.FindingStatuses $.VulnerabilityFindingKeys}}` + listAllHTMLPackageTableRow + `{{end}}{{end}}` + `
 </tbody>
 </table>
 </div>
@@ -804,6 +819,20 @@ const listAllHTMLBody = `
 {{else if .Warnings}}
 <div class="empty warning-empty">{{.Messages.SecurityFindingsWarnings}}</div>
 {{end}}
+{{if .Updates}}
+<h2>{{.Messages.AvailableUpdatesHeading}} <span class="count">({{len .Updates}})</span></h2>
+<div class="table-scroll" tabindex="0" role="region" aria-label="{{.Messages.AvailableUpdatesTableLabel}}">
+<table class="package-table updates-table">
+` + `<thead><tr><th scope="col" class="name">{{.Messages.PackageColumn}}</th><th scope="col" class="installed">{{.Messages.InstalledColumn}}</th>` +
+	`<th scope="col" class="version">{{.Messages.LatestColumn}}</th><th scope="col" class="package-status">{{.Messages.ActionColumn}}</th><th scope="col" class="meta-cell">` +
+	`{{.Messages.TriageColumn}}</th><th scope="col" class="vuln-col">` +
+	`{{.Messages.VulnerabilityColumn}}</th></tr></thead>` + `
+<tbody>
+` + `{{range .Updates}}{{with htmlPackageRow (index $.PackageRows .) $.FindingStatuses $.VulnerabilityFindingKeys}}` + listAllHTMLPackageTableRow + `{{end}}{{end}}` + `
+</tbody>
+</table>
+</div>
+{{end}}
 {{if .PackageRows}}
 <details class="inventory-details">
 <summary>{{.Messages.AllPackagesHeading}} <span class="count">({{count (len .PackageRows) .Messages.PackageSingular .Messages.PackagePlural}})</span></summary>
@@ -814,26 +843,7 @@ const listAllHTMLBody = `
 	`{{.Messages.InventoryDetailsColumn}}</th><th scope="col" class="vuln-col">` +
 	`{{.Messages.VulnerabilityColumn}}</th></tr></thead>` + `
 <tbody>
-` + `{{range .PackageRows}}{{with htmlPackageRow . $.FindingStatuses $.VulnerabilityFindingKeys}}<tr><td class="name"><bdi dir="auto">{{.Name}}` +
-	`</bdi></td><td class="installed">{{if .InstalledCopy}}` +
-	`<span class="copy-cell"><span class="copy-value"><bdi dir="auto">{{.Installed}}` +
-	`</bdi></span><button type="button" class="copy-btn" data-copy="{{.InstalledCopy}}` +
-	`" data-copy-label="{{.InstalledCopyLabel}}" data-copy-message="{{.InstalledCopyMessage}}` +
-	`" aria-label="{{.InstalledCopyLabel}}` +
-	`"><svg class="copy-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg></button></span><span class="print-copy-value"><bdi dir="auto">{{.InstalledCopy}}` +
-	`</bdi></span>{{else}}<bdi dir="auto">{{.Installed}}</bdi>{{end}}` +
-	`</td><td class="version">{{if .LatestCopy}}` +
-	`<span class="copy-cell"><span class="copy-value"><bdi dir="auto">{{.Latest}}` +
-	`</bdi></span><button type="button" class="copy-btn" data-copy="{{.LatestCopy}}` +
-	`" data-copy-label="{{.LatestCopyLabel}}" data-copy-message="{{.LatestCopyMessage}}` +
-	`" aria-label="{{.LatestCopyLabel}}"><svg class="copy-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg></button></span><span class="print-copy-value">` +
-	`<bdi dir="auto">{{.LatestCopy}}</bdi></span>{{else}}<bdi dir="auto">{{.Latest}}` +
-	`</bdi>{{end}}</td><td class="package-status{{if .StatusClass}} {{.StatusClass}}{{end}}` +
-	`">{{.Status}}</td><td class="meta-cell"><dl class="package-meta-list"><div><dt>{{$.Messages.EcosystemLabel}}</dt><dd>{{.Ecosystem}}` +
-	`</dd></div><div><dt>{{$.Messages.SourceLabel}}</dt><dd><bdi dir="auto">{{.Source}}` +
-	`</bdi></dd></div><div><dt>{{$.Messages.ScopeLabel}}</dt><dd>{{.Scope}}</dd></div><div><dt>{{$.Messages.RelationLabel}}</dt><dd>{{.Relation}}` +
-	`</dd></div></dl></td><td class="vuln-col{{if .VulnClass}}` +
-	` {{.VulnClass}}{{end}}">{{.Vuln}}</td></tr>{{end}}{{end}}` + `
+` + `{{range .PackageRows}}{{with htmlPackageRow . $.FindingStatuses $.VulnerabilityFindingKeys}}` + listAllHTMLPackageTableRow + `{{end}}{{end}}` + `
 </tbody>
 </table>
 </div>

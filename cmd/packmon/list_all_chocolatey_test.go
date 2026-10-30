@@ -113,8 +113,11 @@ func TestBuildListAllReportRendersUnpinnedChocolateyRows(t *testing.T) {
 	if got := listAllHTMLPackageStatus(rows["missing.vm"], nil); got != "Unknown" {
 		t.Fatalf("HTML status for unpinned row with unknown latest = %q, want Unknown", got)
 	}
-	if info := listAllHTMLPackageInfo(report, report.Rows, nil, nil); info.Unknown != report.Unknown || info.WithUpdates != report.WithUpdates {
-		t.Fatalf("HTML recount unknown=%d updates=%d, want report unknown=%d updates=%d", info.Unknown, info.WithUpdates, report.Unknown, report.WithUpdates)
+	if info := listAllHTMLPackageInfo(report, report.Rows, nil, nil); info.Unknown != report.Unknown {
+		t.Fatalf("HTML recount unknown=%d, want report unknown=%d", info.Unknown, report.Unknown)
+	}
+	if updates := listAllHTMLUpdateRows(report.Rows, nil); len(updates) != report.WithUpdates {
+		t.Fatalf("HTML update rows=%d, want report updates=%d", len(updates), report.WithUpdates)
 	}
 	for _, source := range []string{"config.xml", "choco-install"} {
 		if got := listAllInventorySourceKind(listAllRow{Source: source, Ecosystem: "chocolatey"}); got != "chocolatey" {

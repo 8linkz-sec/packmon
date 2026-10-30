@@ -330,8 +330,11 @@ Important behavior:
   vulnerability findings (including those with a known fix), and non-blocking
   historical ReversingLabs incident context as `LOW` `Reputation info`.
   Packages that are merely outdated (an available update with no security or
-  lifecycle finding) and unknown latest-status rows are not listed there; they
-  remain visible only in "All Packages". The report never filters findings by
+  lifecycle finding) and unknown latest-status rows are not listed there.
+  Every package whose resolved status is `Update available` is instead shown in
+  a visible "Available Updates" table immediately after Security Findings and
+  remains present in "All Packages"; the summary update count and table rows
+  share the same canonical set. The report never filters findings by
   the `--fail-on` threshold, so it carries no fail-on footer and no per-finding
   detail row that could imply such filtering. Finding-derived states such as
   `Malicious`, `Removed`, `Supply-chain risk`, `Lifecycle`, and `Reputation
