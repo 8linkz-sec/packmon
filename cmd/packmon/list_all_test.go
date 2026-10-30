@@ -187,6 +187,8 @@ func TestListAllHTMLTemplateUsesMessageDataForStaticReportLabels(t *testing.T) {
 		`{{.Messages.ModeSuffix}}`,
 		`{{.Messages.PackagesNeedingAttentionHeading}}`,
 		`{{.Messages.SecurityFindingsHeading}}`,
+		`{{.Messages.AvailableUpdatesHeading}}`,
+		`{{.Messages.AvailableUpdatesTableLabel}}`,
 		`{{.Messages.AllPackagesHeading}}`,
 		`{{.Messages.CheckedInventorySourcesHeading}}`,
 		`{{.Messages.CopyButton}}`,
@@ -200,6 +202,7 @@ func TestListAllHTMLTemplateUsesMessageDataForStaticReportLabels(t *testing.T) {
 	for _, scattered := range []string{
 		"<h2>Packages Needing Attention</h2>",
 		"<h2>Security Findings</h2>",
+		"<h2>Available Updates",
 		"<summary>All Packages",
 		"<h2>Checked Inventory Sources</h2>",
 		">Copy</button>",
@@ -2742,10 +2745,79 @@ func TestListAllHTMLExcludesMerelyOutdatedPackagesFromAttention(t *testing.T) {
 	if !strings.Contains(attention, "No package status issues requiring attention.") {
 		t.Fatalf("attention section should report no actionable issues:\n%s", attention)
 	}
-	// It must still be listed with its available update in All Packages.
+	// It must be visible in the dedicated update section immediately after
+	// Security Findings, as well as in All Packages.
+	updatesStart := strings.Index(out, `<h2>Available Updates <span class="count">(1)</span></h2>`)
 	allStart := strings.Index(out, `<details class="inventory-details">`)
-	if allStart < 0 || !strings.Contains(out[allStart:], "left-pad") {
+	if updatesStart < securityStart || allStart <= updatesStart {
+		t.Fatalf("Available Updates section is not between Security Findings and All Packages:\n%s", out)
+	}
+	updates := out[updatesStart:allStart]
+	if !strings.Contains(updates, "left-pad") || !strings.Contains(updates, `aria-label="Available updates table"`) {
+		t.Fatalf("outdated package missing from Available Updates:\n%s", updates)
+	}
+	if !strings.Contains(out[allStart:], "left-pad") {
 		t.Fatalf("outdated package should still appear in All Packages:\n%s", out)
+	}
+}
+
+func TestListAllHTMLUpdateRowsAreCanonicalForBadgeAndSection(t *testing.T) {
+	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+	report := listAllPackageReport{
+		WithUpdates: 99,
+		Rows: []listAllRow{
+			{Name: "pkg<&", Installed: "1.0.0", Latest: "2.0.0", Update: "yes", Ecosystem: "npm", Source: "lockfile", Scope: "runtime", Relation: "direct", Vuln: "-"},
+			{Name: "current", Installed: "1.0.0", Latest: "1.0.0", Update: "-", Ecosystem: "npm", Source: "lockfile", Scope: "runtime", Relation: "direct", Vuln: "-"},
+		},
+	}
+	if err := writeListAllHTML(htmlPath, "test", &domain.ScanResult{Mode: "remote"}, report); err != nil {
+		t.Fatalf("writeListAllHTML: %v", err)
+	}
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read HTML: %v", err)
+	}
+	out := string(data)
+	for _, want := range []string{
+		`<span class="badge warn">1 with update</span>`,
+		`<h2>Available Updates <span class="count">(1)</span></h2>`,
+		`<table class="package-table updates-table">`,
+		`<bdi dir="auto">pkg&lt;&amp;</bdi>`,
+		`<td class="package-status status-update">Update available</td>`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("Available Updates output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "99 with updates") {
+		t.Fatalf("stale input update count leaked into rendered report:\n%s", out)
+	}
+	updatesStart := strings.Index(out, `<h2>Available Updates`)
+	allStart := strings.Index(out, `<details class="inventory-details">`)
+	updates := out[updatesStart:allStart]
+	if strings.Contains(updates, ">current<") {
+		t.Fatalf("current package leaked into Available Updates:\n%s", updates)
+	}
+}
+
+func TestListAllHTMLOmitsAvailableUpdatesSectionWhenEmpty(t *testing.T) {
+	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+	report := listAllPackageReport{Rows: []listAllRow{{
+		Name: "current", Installed: "1.0.0", Latest: "1.0.0", Update: "-",
+		Ecosystem: "npm", Source: "lockfile", Scope: "runtime", Relation: "direct", Vuln: "-",
+	}}}
+	if err := writeListAllHTML(htmlPath, "test", &domain.ScanResult{Mode: "remote"}, report); err != nil {
+		t.Fatalf("writeListAllHTML: %v", err)
+	}
+	data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+	if err != nil {
+		t.Fatalf("read HTML: %v", err)
+	}
+	out := string(data)
+	for _, unwanted := range []string{"Available Updates", "Available updates table", "updates-table"} {
+		if strings.Contains(out, unwanted) {
+			t.Fatalf("zero-update report contains %q:\n%s", unwanted, out)
+		}
 	}
 }
 
@@ -4221,6 +4293,11 @@ func TestListAllHTMLKeepsVulnerableWithFixInAttention(t *testing.T) {
 	attention := out[attentionStart:securityStart]
 	if !strings.Contains(attention, "postcss") {
 		t.Fatalf("vulnerable package with an available fix must appear under Packages Needing Attention:\n%s", attention)
+	}
+	updatesStart := strings.Index(out, `<h2>Available Updates <span class="count">(1)</span></h2>`)
+	allStart := strings.Index(out, `<details class="inventory-details">`)
+	if updatesStart < securityStart || allStart <= updatesStart || !strings.Contains(out[updatesStart:allStart], "postcss") {
+		t.Fatalf("vulnerable package with an available fix must also appear under Available Updates:\n%s", out)
 	}
 	// The status still renders as "Update available" (a fix exists), not "Vulnerable".
 	if !strings.Contains(out, `<td class="package-status status-update">Update available</td>`) {
