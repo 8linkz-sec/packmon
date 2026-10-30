@@ -76,18 +76,46 @@ const npmLSProblemsOutput = "npm error code ELSPROBLEMS\n" +
 	"npm error missing: @emnapi/core@^1.11.1, required by @tailwindcss/oxide-wasm32-wasi@4.3.3\n" +
 	"Error: npm-ls exited with errors: 1 noSignal\n"
 
-func TestNpmGeneratorRetriesWithIgnoreNpmErrorsOnTreeProblems(t *testing.T) {
+// optionalWasmLockfile records the requirers from npmLSProblemsOutput as
+// optional packages, as npm does for platform-specific Tailwind binaries.
+const optionalWasmLockfile = `{"lockfileVersion":3,"packages":{
+	"":{"devDependencies":{"tailwindcss":"4.3.3"}},
+	"node_modules/@tailwindcss/oxide-wasm32-wasi":{"version":"4.3.3","optional":true,
+		"bundleDependencies":["@emnapi/core","@emnapi/runtime"]},
+	"node_modules/tailwindcss":{"version":"4.3.3","dev":true}}}`
+
+// npmTreeProblemsDetection writes a package.json and the given lockfile into a
+// fresh scan root and returns the matching detection.
+func npmTreeProblemsDetection(t *testing.T, lockfile string) (Detection, string) {
+	t.Helper()
 	root := t.TempDir()
 	writeFile(t, root, "package.json", `{"devDependencies":{"tailwindcss":"4.3.3"}}`)
-	writeFile(t, root, "package-lock.json", `{"lockfileVersion":3,"packages":{}}`)
-	d := Detection{ManifestPath: filepath.Join(root, "package.json"), ProjectDir: root, DisplayPath: "package.json"}
+	writeFile(t, root, "package-lock.json", lockfile)
+	return Detection{ScanRoot: root, ManifestPath: filepath.Join(root, "package.json"), ProjectDir: root, DisplayPath: "package.json"}, root
+}
+
+func TestNpmGeneratorRetriesWithIgnoreNpmErrorsOnTreeProblems(t *testing.T) {
+	// cyclonedx-npm relays npm's stderr indented by two spaces, with CRLF on
+	// Windows; both shapes must be recognized.
+	relayed := "Command failed: npm ls --json --long --all --package-lock-only\r\n" +
+		"  " + strings.ReplaceAll(strings.TrimSuffix(npmLSProblemsOutput, "\n"), "\n", "\r\n  ") + "\r\n"
+	for name, output := range map[string]string{"plain npm": npmLSProblemsOutput, "relayed by cyclonedx-npm": relayed} {
+		t.Run(name, func(t *testing.T) {
+			assertNpmTreeProblemsRetried(t, output)
+		})
+	}
+}
+
+func assertNpmTreeProblemsRetried(t *testing.T, output string) {
+	t.Helper()
+	d, root := npmTreeProblemsDetection(t, optionalWasmLockfile)
 	var logs bytes.Buffer
 	opts := GenerateOptions{IncludeDev: true, Logger: slog.New(slog.NewTextHandler(&logs, nil))}
 	var calls []RunOptions
 	err := (npmGenerator{}).Generate(context.Background(), d, filepath.Join(root, "bom.json"), opts, func(_ context.Context, opts RunOptions) ([]byte, error) {
 		calls = append(calls, opts)
 		if len(calls) == 1 {
-			return []byte(npmLSProblemsOutput), errors.New("exit status 254")
+			return []byte(output), errors.New("exit status 254")
 		}
 		return nil, nil
 	})
@@ -144,12 +172,63 @@ func TestNpmGeneratorDoesNotRetryOtherFailures(t *testing.T) {
 	}
 }
 
+func TestNpmGeneratorDoesNotRetryUntoleratedTreeProblems(t *testing.T) {
+	requiredLockfile := `{"lockfileVersion":3,"packages":{
+		"node_modules/@tailwindcss/oxide-wasm32-wasi":{"version":"4.3.3"}}}`
+	for _, tc := range []struct {
+		name     string
+		lockfile string
+		output   string
+	}{
+		{
+			name:     "missing dependency of a required package",
+			lockfile: requiredLockfile,
+			output:   npmLSProblemsOutput,
+		},
+		{
+			name:     "invalid package",
+			lockfile: optionalWasmLockfile,
+			output: "npm error code ELSPROBLEMS\n" +
+				"npm error invalid: left-pad@1.0.0, required by @tailwindcss/oxide-wasm32-wasi@4.3.3\n",
+		},
+		{
+			name:     "extraneous package",
+			lockfile: optionalWasmLockfile,
+			output:   "npm error code ELSPROBLEMS\nnpm error extraneous: left-pad@1.3.0\n",
+		},
+		{
+			name:     "code only as a substring",
+			lockfile: optionalWasmLockfile,
+			output: "npm error code EOTHER mentioning ELSPROBLEMS\n" +
+				"npm error missing: @emnapi/core@^1.11.1, required by @tailwindcss/oxide-wasm32-wasi@4.3.3\n",
+		},
+		{
+			name:     "unparseable lockfile",
+			lockfile: `{`,
+			output:   npmLSProblemsOutput,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, _ := npmTreeProblemsDetection(t, tc.lockfile)
+			calls := 0
+			err := (npmGenerator{}).Generate(context.Background(), d, filepath.Join(d.ProjectDir, "bom.json"), GenerateOptions{IncludeDev: true}, func(context.Context, RunOptions) ([]byte, error) {
+				calls++
+				return []byte(tc.output), errors.New("exit status 254")
+			})
+			if err == nil {
+				t.Fatal("Generate succeeded, want the npm failure to stay fatal")
+			}
+			if calls != 1 {
+				t.Fatalf("runner calls = %d, want 1 (no retry)", calls)
+			}
+		})
+	}
+}
+
 func TestNpmGeneratorFailsWhenRetryAlsoFails(t *testing.T) {
-	root := t.TempDir()
-	writeFile(t, root, "package.json", `{"dependencies":{"left-pad":"1.3.0"}}`)
-	d := Detection{ManifestPath: filepath.Join(root, "package.json"), ProjectDir: root, DisplayPath: "package.json"}
+	d, _ := npmTreeProblemsDetection(t, optionalWasmLockfile)
 	calls := 0
-	err := (npmGenerator{}).Generate(context.Background(), d, filepath.Join(root, "bom.json"), GenerateOptions{}, func(context.Context, RunOptions) ([]byte, error) {
+	err := (npmGenerator{}).Generate(context.Background(), d, filepath.Join(d.ProjectDir, "bom.json"), GenerateOptions{}, func(context.Context, RunOptions) ([]byte, error) {
 		calls++
 		if calls == 1 {
 			return []byte(npmLSProblemsOutput), errors.New("exit status 254")
