@@ -774,6 +774,10 @@ rows are missing or any feed is degraded, while retaining the per-feed list for
 automation. Per-feed status can be `configured` for intentionally external
 feeds; configured external feeds are not active self-sync data sources and do
 not degrade the aggregate status merely because they have zero self-sync rows.
+NVD is excluded from the aggregate status (check responses, local sync, and
+the top-level `/api/v1/feeds/status` value): it only enriches advisories the
+base feeds already provide, and a long-running or stalled NVD sync must not
+mark every scan degraded. Its own per-feed row and health stay reported.
 Git-backed self-sync reads cloned advisory JSON through scoped repository roots
 with a per-file size limit. GHSA delta sync treats a changed advisory as
 removed only when the scoped read reports that the file no longer exists; other
