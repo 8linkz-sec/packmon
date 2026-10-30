@@ -568,6 +568,12 @@ The local Compose database uses a digest-pinned Chainguard PostgreSQL image
 instead of the official `postgres:*-alpine` image, avoiding the vulnerable Go
 1.24.x `gosu` helper present in the official image line.
 
+The bundled database records normalized historical query statistics, I/O
+timings, and statements slower than one second by default. See
+[`docs/postgres-query-observability.md`](docs/postgres-query-observability.md)
+for migration prerequisites, external-database setup, tunable overhead and
+logging controls, and the query-ID-first diagnostic workflow.
+
 Compose forwards `PACKMON_VERSION`, `PACKMON_COMMIT`, and `PACKMON_BUILD_DATE`
 as Docker build args so `packmon-server version`, startup logs, and `/version`
 report the image source. They default to `dev`, `none`, and `unknown` for local

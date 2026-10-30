@@ -23,11 +23,12 @@ var fs embed.FS
 
 // ExpectedVersion is the schema version that this binary expects.
 // It must match the highest migration number embedded in the binary.
-const ExpectedVersion = 47
+const ExpectedVersion = 48
 
 const (
-	migrationAdvisoryLockKey int64 = 0x7061636b6d6f6e // ASCII "packmon"
-	noTransactionDirective         = "packmon:migration no-transaction"
+	migrationAdvisoryLockKey  int64 = 0x7061636b6d6f6e // ASCII "packmon"
+	noTransactionDirective          = "packmon:migration no-transaction"
+	pgStatStatementsDirective       = "packmon:migration require-pg-stat-statements"
 )
 
 var historicalMigrationChecksums = map[string]map[string]struct{}{
@@ -473,6 +474,9 @@ func validateAppliedMigrationMetadata(ctx context.Context, db migrationConn, mig
 }
 
 func applyMigration(ctx context.Context, db migrationConn, migration migrationFile) (err error) {
+	if err := validateMigrationPrerequisites(ctx, db, migration); err != nil {
+		return err
+	}
 	eventID, err := startMigrationEventAndMarkDirty(ctx, db, migration)
 	if err != nil {
 		return err
@@ -518,6 +522,86 @@ func applyMigration(ctx context.Context, db migrationConn, migration migrationFi
 	migrationDirty = false
 	migrationSucceeded = true
 	return nil
+}
+
+func validateMigrationPrerequisites(ctx context.Context, db migrationConn, migration migrationFile) error {
+	if !strings.Contains(migration.sql, pgStatStatementsDirective) {
+		return nil
+	}
+
+	var (
+		extensionAvailable   bool
+		extensionInstalled   bool
+		extensionSchema      string
+		currentUserSuperuser bool
+	)
+	if err := db.QueryRowContext(ctx, `
+		SELECT
+			EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'pg_stat_statements'),
+			EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'),
+			COALESCE((
+				SELECT namespace.nspname
+				FROM pg_extension extension
+				JOIN pg_namespace namespace ON namespace.oid = extension.extnamespace
+				WHERE extension.extname = 'pg_stat_statements'
+			), ''),
+			COALESCE((SELECT rolsuper FROM pg_roles WHERE rolname = current_user), false)`,
+	).Scan(
+		&extensionAvailable,
+		&extensionInstalled,
+		&extensionSchema,
+		&currentUserSuperuser,
+	); err != nil {
+		return fmt.Errorf("migrations: check pg_stat_statements prerequisite for %s: %w", migration.name, err)
+	}
+
+	var computeQueryID string
+	if err := db.QueryRowContext(ctx, `SELECT COALESCE(current_setting('compute_query_id', true), 'off')`).Scan(&computeQueryID); err != nil {
+		return fmt.Errorf("migrations: check compute_query_id prerequisite for %s: %w", migration.name, err)
+	}
+	if !postgresQueryIDsEnabled(computeQueryID) {
+		return fmt.Errorf("migrations: %s requires compute_query_id to be on or auto before retrying", migration.name)
+	}
+	if !extensionAvailable {
+		return fmt.Errorf("migrations: %s requires the pg_stat_statements extension files on the PostgreSQL server", migration.name)
+	}
+	if extensionInstalled {
+		if extensionSchema != "public" {
+			return fmt.Errorf("migrations: %s requires pg_stat_statements to be installed in schema public; database administrator installed it in schema %q", migration.name, extensionSchema)
+		}
+		var usable bool
+		if err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM public.pg_stat_statements(false) LIMIT 1)`).Scan(&usable); err != nil {
+			return fmt.Errorf("migrations: %s requires pg_stat_statements in shared_preload_libraries and a PostgreSQL restart before retrying: %w", migration.name, err)
+		}
+		return nil
+	}
+	if !currentUserSuperuser {
+		return fmt.Errorf("migrations: %s requires a database administrator to run CREATE EXTENSION pg_stat_statements before retrying with the non-superuser migration role", migration.name)
+	}
+
+	var sharedPreloadLibraries string
+	if err := db.QueryRowContext(ctx, `SELECT COALESCE(current_setting('shared_preload_libraries', true), '')`).Scan(&sharedPreloadLibraries); err != nil {
+		return fmt.Errorf("migrations: check shared_preload_libraries prerequisite for %s: %w", migration.name, err)
+	}
+	if !postgresLibraryListContains(sharedPreloadLibraries, "pg_stat_statements") {
+		return fmt.Errorf("migrations: %s requires pg_stat_statements in shared_preload_libraries and a PostgreSQL restart before retrying", migration.name)
+	}
+	return nil
+}
+
+func postgresLibraryListContains(setting, library string) bool {
+	for _, entry := range strings.Split(setting, ",") {
+		entry = strings.Trim(strings.TrimSpace(entry), "'\"")
+		if entry == library {
+			return true
+		}
+	}
+	return false
+}
+
+func postgresQueryIDsEnabled(setting string) bool {
+	setting = strings.TrimSpace(setting)
+	return strings.EqualFold(setting, "on") || strings.EqualFold(setting, "auto")
 }
 
 func startMigrationEventAndMarkDirty(ctx context.Context, db migrationConn, migration migrationFile) (int64, error) {

@@ -775,6 +775,12 @@ Requirements:
   `PACKMON_DB_CONNECT_TIMEOUT`; the migrator writes durable
   `schema_migration_events` rows for started, successful, and failed migration
   attempts without storing environment values or feed secrets;
+- query observability uses `pg_stat_statements` with utility tracking disabled
+  and bind-parameter logging suppressed. Slow-query logs still contain SQL
+  statement text and may expose literal values embedded by ad hoc SQL, so
+  database and Docker log access is restricted to operators and application
+  queries remain parameterized. The Packmon runtime role is not granted
+  superuser or `pg_read_all_stats` solely for diagnostics;
 - normal server startup verifies expected schema version with a bounded
   `PACKMON_DB_CONNECT_TIMEOUT` deadline and exits on mismatch or connectivity
   failure;

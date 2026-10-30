@@ -122,6 +122,11 @@ func startPostgresRoutesStore(t *testing.T, ctx context.Context) *postgres.Store
 		"-e", "POSTGRES_PASSWORD=packmon",
 		"-p", "127.0.0.1::5432",
 		postgresRoutesIntegrationImage,
+		"-c", "shared_preload_libraries=pg_stat_statements",
+		"-c", "compute_query_id=on",
+		"-c", "track_io_timing=on",
+		"-c", "pg_stat_statements.track=top",
+		"-c", "pg_stat_statements.track_utility=off",
 	)
 	containerID := strings.TrimSpace(string(out))
 	t.Cleanup(func() {

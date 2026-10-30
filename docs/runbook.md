@@ -168,17 +168,27 @@ change.
    `/version`, `packmon_build_info`, and `packmon_db_migration_version`.
 2. Take and verify a fresh backup with the command in `Backup`.
 3. Stop or drain `packmon-server` so clients do not write during migration.
-4. Run the explicit migration step:
+4. Apply release-specific database prerequisites before running migrations.
+   Migration 48 introduces PostgreSQL query observability; follow
+   [`postgres-query-observability.md`](postgres-query-observability.md) first.
+   For the bundled database, recreate and wait for PostgreSQL so the new
+   preload setting is active while preserving its named volume:
+   ```bash
+   docker compose -f docker-compose.server.yml up -d --force-recreate --wait postgres
+   ```
+   External PostgreSQL requires the documented administrator preload, restart,
+   query-ID setting, and extension creation instead.
+5. Run the explicit migration step:
    ```bash
    docker compose -f docker-compose.server.yml run --build --rm packmon-migrate
    ```
-5. Start the new server build:
+6. Start the new server build:
    ```bash
    docker compose -f docker-compose.server.yml up --build -d packmon-server
    ```
-6. Verify `/healthz`, `/readyz`, `/version`, `/metrics`,
+7. Verify `/healthz`, `/readyz`, `/version`, `/metrics`,
    `/api/v1/feeds/status`, and the admin dashboard.
-7. Run a remote CLI scan with a non-production test key or a known safe target.
+8. Run a remote CLI scan with a non-production test key or a known safe target.
 
 If startup fails before a migration changed the schema, roll back the binary and
 start the previous server version. If a migration already changed the schema,

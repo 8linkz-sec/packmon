@@ -156,6 +156,12 @@ Packmon's maintained deployment surfaces are intentionally narrow:
   service receives only database and logging environment values. The migrator
   records durable per-migration events in PostgreSQL so operators can audit
   which migrations started, finished, succeeded, or left the database dirty.
+  The bundled PostgreSQL process preloads `pg_stat_statements`, computes query
+  identifiers, records I/O timing, and emits bounded slow-query logs. External
+  PostgreSQL operators must preload and pre-create the extension before schema
+  migration 48; external Packmon application and migration roles remain
+  non-superuser. A prerequisite failure is checked before migration state is
+  marked dirty.
 - The server's feed working directory (`PACKMON_FEED_DATA_DIR`, `/data/feeds`
   in the container) is backed by the named `feed-data` volume. It holds the
   git checkouts of the GHSA advisory database and the OpenSSF
