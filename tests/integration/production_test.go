@@ -749,6 +749,11 @@ func startIntegrationPostgres(t *testing.T, namePrefix string) (containerName st
 		"-e", "POSTGRES_PASSWORD=packmon",
 		"-p", "127.0.0.1::5432",
 		postgresIntegrationImage,
+		"-c", "shared_preload_libraries=pg_stat_statements",
+		"-c", "compute_query_id=on",
+		"-c", "track_io_timing=on",
+		"-c", "pg_stat_statements.track=top",
+		"-c", "pg_stat_statements.track_utility=off",
 	)
 	defer cancel()
 	out, err := run.Output()

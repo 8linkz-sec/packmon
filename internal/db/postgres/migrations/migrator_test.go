@@ -60,6 +60,81 @@ func TestExpectedVersionMatchesHighestEmbeddedMigration(t *testing.T) {
 	}
 }
 
+func TestPostgresLibraryListContains(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		setting string
+		want    bool
+	}{
+		{name: "only library", setting: "pg_stat_statements", want: true},
+		{name: "comma separated with whitespace", setting: "auto_explain, pg_stat_statements", want: true},
+		{name: "quoted entry", setting: `auto_explain, "pg_stat_statements"`, want: true},
+		{name: "single quoted entry", setting: "'pg_stat_statements'", want: true},
+		{name: "substring is not a match", setting: "custom_pg_stat_statements", want: false},
+		{name: "empty", setting: "", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := postgresLibraryListContains(tt.setting, "pg_stat_statements"); got != tt.want {
+				t.Fatalf("postgresLibraryListContains(%q) = %v, want %v", tt.setting, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPostgresQueryIDsEnabled(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		setting string
+		want    bool
+	}{
+		{setting: "on", want: true},
+		{setting: " auto ", want: true},
+		{setting: "ON", want: true},
+		{setting: "off", want: false},
+		{setting: "regress", want: false},
+		{setting: "", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.setting, func(t *testing.T) {
+			t.Parallel()
+			if got := postgresQueryIDsEnabled(tt.setting); got != tt.want {
+				t.Fatalf("postgresQueryIDsEnabled(%q) = %v, want %v", tt.setting, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPGStatStatementsMigrationContract(t *testing.T) {
+	t.Parallel()
+
+	up, err := ReadEmbeddedMigration(ExpectedVersion, MigrationDirectionUp)
+	if err != nil {
+		t.Fatalf("ReadEmbeddedMigration(up): %v", err)
+	}
+	if !strings.Contains(up.SQL, pgStatStatementsDirective) {
+		t.Fatalf("migration %s missing %q prerequisite directive", up.Name, pgStatStatementsDirective)
+	}
+	if !strings.Contains(up.SQL, "CREATE EXTENSION IF NOT EXISTS pg_stat_statements WITH SCHEMA public") {
+		t.Fatalf("migration %s does not install pg_stat_statements", up.Name)
+	}
+
+	down, err := ReadEmbeddedMigration(ExpectedVersion, MigrationDirectionDown)
+	if err != nil {
+		t.Fatalf("ReadEmbeddedMigration(down): %v", err)
+	}
+	if strings.Contains(strings.ToUpper(down.SQL), "DROP EXTENSION") {
+		t.Fatalf("migration %s must not remove an operator-owned extension", down.Name)
+	}
+	if !strings.Contains(down.SQL, "operator") {
+		t.Fatalf("migration %s must document the non-destructive ownership rationale", down.Name)
+	}
+}
+
 func TestPostInitialDownMigrationsDoNotDropBaselineSchemaObjects(t *testing.T) {
 	t.Parallel()
 
@@ -1475,7 +1550,7 @@ func TestReadEmbeddedMigrationReadsSpecificDownMigration(t *testing.T) {
 		!strings.HasSuffix(migration.Name, ".down.sql") {
 		t.Fatalf("Name = %q, want current down migration", migration.Name)
 	}
-	if !strings.Contains(migration.SQL, "Restore the pre-047 ecosystem CHECK constraints") {
+	if !strings.Contains(migration.SQL, "must not remove that cluster-wide observability facility") {
 		t.Fatalf("current down migration SQL does not include expected rollback marker:\n%s", migration.SQL)
 	}
 }

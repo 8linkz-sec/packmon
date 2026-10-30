@@ -274,6 +274,50 @@ func TestDockerEnvExampleMetricsBindMatchesComposePort(t *testing.T) {
 	}
 }
 
+func TestPostgresQueryObservabilityComposeContract(t *testing.T) {
+	t.Parallel()
+
+	envData, err := os.ReadFile(filepath.Join("..", "..", ".env.example"))
+	if err != nil {
+		t.Fatalf("read .env.example: %v", err)
+	}
+	values := activeEnvExampleValues(string(envData))
+	if got := values["PACKMON_POSTGRES_TRACK_IO_TIMING"]; got != "on" {
+		t.Fatalf("PACKMON_POSTGRES_TRACK_IO_TIMING = %q, want on", got)
+	}
+	if got := values["PACKMON_POSTGRES_SLOW_QUERY_MS"]; got != "1000" {
+		t.Fatalf("PACKMON_POSTGRES_SLOW_QUERY_MS = %q, want 1000", got)
+	}
+
+	wants := []string{
+		"shared_preload_libraries=pg_stat_statements",
+		"compute_query_id=on",
+		"track_io_timing=${PACKMON_POSTGRES_TRACK_IO_TIMING:-on}",
+		"pg_stat_statements.track=top",
+		"pg_stat_statements.track_utility=off",
+		"pg_stat_statements.max=5000",
+		"log_min_duration_statement=${PACKMON_POSTGRES_SLOW_QUERY_MS:-1000}",
+		"log_parameter_max_length=0",
+		"log_parameter_max_length_on_error=0",
+		"log_statement=none",
+	}
+	for _, name := range []string{"docker-compose.yml", "docker-compose.server.yml"} {
+		data, err := os.ReadFile(filepath.Join("..", "..", name)) // #nosec G304 -- names are fixed repository fixtures.
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		text := string(data)
+		for _, want := range wants {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s missing PostgreSQL setting %q", name, want)
+			}
+		}
+		if strings.Contains(text, "track_wal_io_timing") {
+			t.Errorf("%s unexpectedly enables WAL I/O timing", name)
+		}
+	}
+}
+
 func TestDockerComposeStopGraceExceedsServerShutdownTimeout(t *testing.T) {
 	t.Parallel()
 

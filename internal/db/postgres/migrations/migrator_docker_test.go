@@ -21,7 +21,17 @@ import (
 
 const postgresMigrationTestImage = "cgr.dev/chainguard/postgres:18@sha256:891139a6d9036632791857fb7585425f1bf0c64516fc52bc39da94305ee92461"
 
+type migrationPostgresInstance struct {
+	containerName string
+	dsn           string
+}
+
 func startMigrationPostgres(t *testing.T) string {
+	t.Helper()
+	return startMigrationPostgresInstance(t, true).dsn
+}
+
+func startMigrationPostgresInstance(t *testing.T, observability bool) migrationPostgresInstance {
 	t.Helper()
 
 	if _, err := exec.LookPath("docker"); err != nil {
@@ -29,14 +39,25 @@ func startMigrationPostgres(t *testing.T) string {
 	}
 
 	containerName := fmt.Sprintf("packmon-migrations-unit-%d", time.Now().UnixNano())
-	run := exec.Command("docker", "run", "-d", "--rm", // #nosec G204 -- test launches a fixed docker image with generated container name/port.
+	dockerArgs := []string{
+		"run", "-d", "--rm",
 		"--name", containerName,
 		"-e", "POSTGRES_DB=packmon",
 		"-e", "POSTGRES_USER=packmon",
 		"-e", "POSTGRES_PASSWORD=packmon",
 		"-p", "127.0.0.1::5432",
 		postgresMigrationTestImage,
-	)
+	}
+	if observability {
+		dockerArgs = append(dockerArgs,
+			"-c", "shared_preload_libraries=pg_stat_statements",
+			"-c", "compute_query_id=on",
+			"-c", "track_io_timing=on",
+			"-c", "pg_stat_statements.track=top",
+			"-c", "pg_stat_statements.track_utility=off",
+		)
+	}
+	run := exec.Command("docker", dockerArgs...) // #nosec G204 -- test launches a fixed docker image with generated container name/port.
 	out, err := run.Output()
 	if err != nil {
 		t.Fatalf("docker postgres unavailable: %v", err)
@@ -54,12 +75,12 @@ func startMigrationPostgres(t *testing.T) string {
 		if err := cmd.Run(); err == nil {
 			dsn := fmt.Sprintf("postgres://packmon:packmon@127.0.0.1:%d/packmon?sslmode=disable", port)
 			waitForMigrationPostgresDSN(t, dsn)
-			return dsn
+			return migrationPostgresInstance{containerName: containerName, dsn: dsn}
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
 	t.Fatalf("postgres container %s did not become ready", containerName)
-	return ""
+	return migrationPostgresInstance{}
 }
 
 func dockerMigrationPublishedPort(t *testing.T, containerName, containerPort string) int {
@@ -122,6 +143,158 @@ func TestRunAndVersionAgainstPostgres(t *testing.T) {
 	}
 	if dirty || version != ExpectedVersion {
 		t.Fatalf("Version() = %d dirty=%v, want %d clean", version, dirty, ExpectedVersion)
+	}
+
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	defer ioutils.CloseSilently(db)
+	var statementRows int
+	if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM public.pg_stat_statements(false)`).Scan(&statementRows); err != nil {
+		t.Fatalf("query pg_stat_statements(false): %v", err)
+	}
+	if statementRows == 0 {
+		t.Fatal("pg_stat_statements(false) row count = 0, want collected statements")
+	}
+}
+
+func TestPGStatStatementsPreflightFailureStaysCleanAndCanRetry(t *testing.T) {
+	instance := startMigrationPostgresInstance(t, false)
+	applyEmbeddedMigrationsBeforePGStatStatements(t, instance.dsn)
+
+	err := Run(instance.dsn)
+	if err == nil || !strings.Contains(err.Error(), "requires pg_stat_statements in shared_preload_libraries") {
+		t.Fatalf("Run() error = %v, want missing pg_stat_statements preload", err)
+	}
+	version, dirty, err := Version(instance.dsn)
+	if err != nil {
+		t.Fatalf("Version() after failed preflight error = %v", err)
+	}
+	if version != ExpectedVersion-1 || dirty {
+		t.Fatalf("Version() after failed preflight = %d dirty=%v, want %d clean", version, dirty, ExpectedVersion-1)
+	}
+
+	setConfig := exec.Command( // #nosec G204 -- test configures its generated PostgreSQL container.
+		"docker", "exec", instance.containerName,
+		"psql", "-U", "packmon", "-d", "packmon", "-v", "ON_ERROR_STOP=1",
+		"-c", "ALTER SYSTEM SET shared_preload_libraries = 'pg_stat_statements'",
+		"-c", "ALTER SYSTEM SET compute_query_id = 'on'",
+	)
+	if out, configErr := setConfig.CombinedOutput(); configErr != nil {
+		t.Fatalf("configure pg_stat_statements before retry: %v: %s", configErr, strings.TrimSpace(string(out)))
+	}
+	if out, restartErr := exec.Command("docker", "restart", instance.containerName).CombinedOutput(); restartErr != nil { // #nosec G204 -- test restarts its generated container.
+		t.Fatalf("restart PostgreSQL after pg_stat_statements preload: %v: %s", restartErr, strings.TrimSpace(string(out)))
+	}
+	port := dockerMigrationPublishedPort(t, instance.containerName, "5432/tcp")
+	instance.dsn = fmt.Sprintf("postgres://packmon:packmon@127.0.0.1:%d/packmon?sslmode=disable", port)
+	waitForMigrationPostgresDSN(t, instance.dsn)
+	if err := Run(instance.dsn); err != nil {
+		t.Fatalf("Run() retry error = %v", err)
+	}
+	version, dirty, err = Version(instance.dsn)
+	if err != nil {
+		t.Fatalf("Version() after retry error = %v", err)
+	}
+	if version != ExpectedVersion || dirty {
+		t.Fatalf("Version() after retry = %d dirty=%v, want %d clean", version, dirty, ExpectedVersion)
+	}
+}
+
+func TestPGStatStatementsPrecreatedExtensionAllowsNonSuperuserMigration(t *testing.T) {
+	dsn := startMigrationPostgres(t)
+
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	ctx := context.Background()
+	statements := []string{
+		`CREATE ROLE packmon_migrator LOGIN PASSWORD 'packmon_migrator'`,
+		`GRANT CONNECT ON DATABASE packmon TO packmon_migrator`,
+		`GRANT ALL ON SCHEMA public TO packmon_migrator`,
+		`CREATE EXTENSION pg_trgm`,
+	}
+	for _, statement := range statements {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			ioutils.CloseSilently(db)
+			t.Fatalf("prepare non-superuser migration (%s): %v", statement, err)
+		}
+	}
+
+	migratorDSN := strings.Replace(dsn, "packmon:packmon@", "packmon_migrator:packmon_migrator@", 1)
+	applyEmbeddedMigrationsBeforePGStatStatements(t, migratorDSN)
+	if _, err := db.ExecContext(ctx, `CREATE EXTENSION pg_stat_statements`); err != nil {
+		ioutils.CloseSilently(db)
+		t.Fatalf("administrator pre-create pg_stat_statements: %v", err)
+	}
+	ioutils.CloseSilently(db)
+
+	if err := Run(migratorDSN); err != nil {
+		t.Fatalf("Run() as non-superuser with precreated extension error = %v", err)
+	}
+	version, dirty, err := Version(dsn)
+	if err != nil {
+		t.Fatalf("Version() error = %v", err)
+	}
+	if version != ExpectedVersion || dirty {
+		t.Fatalf("Version() = %d dirty=%v, want %d clean", version, dirty, ExpectedVersion)
+	}
+}
+
+func TestPGStatStatementsPrecreatedExtensionRequiresPublicSchema(t *testing.T) {
+	dsn := startMigrationPostgres(t)
+	applyEmbeddedMigrationsBeforePGStatStatements(t, dsn)
+
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	defer ioutils.CloseSilently(db)
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx, `CREATE SCHEMA extensions`); err != nil {
+		t.Fatalf("create extension schema: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `CREATE EXTENSION pg_stat_statements WITH SCHEMA extensions`); err != nil {
+		t.Fatalf("pre-create pg_stat_statements in extension schema: %v", err)
+	}
+
+	err = Run(dsn)
+	if err == nil || !strings.Contains(err.Error(), `requires pg_stat_statements to be installed in schema public`) {
+		t.Fatalf("Run() error = %v, want public extension schema requirement", err)
+	}
+	version, dirty, versionErr := Version(dsn)
+	if versionErr != nil {
+		t.Fatalf("Version() error = %v", versionErr)
+	}
+	if version != ExpectedVersion-1 || dirty {
+		t.Fatalf("Version() = %d dirty=%v, want %d clean", version, dirty, ExpectedVersion-1)
+	}
+}
+
+func applyEmbeddedMigrationsBeforePGStatStatements(t *testing.T, dsn string) {
+	t.Helper()
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	defer ioutils.CloseSilently(db)
+	ctx := context.Background()
+	if err := ensureVersionTable(ctx, db); err != nil {
+		t.Fatalf("ensureVersionTable() error = %v", err)
+	}
+	migrations, err := embeddedUpMigrations()
+	if err != nil {
+		t.Fatalf("embeddedUpMigrations() error = %v", err)
+	}
+	for _, migration := range migrations {
+		if migration.version >= ExpectedVersion {
+			continue
+		}
+		if err := applyMigration(ctx, db, migration); err != nil {
+			t.Fatalf("apply migration %s: %v", migration.name, err)
+		}
 	}
 }
 
