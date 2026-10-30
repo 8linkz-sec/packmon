@@ -32,8 +32,8 @@ packmon:
   before_script:
     - |
       apk add --no-cache \
-        curl=8.19.0-r0 \
-        jq=1.8.1-r0 \
+        curl=8.23.0-r0 \
+        jq=1.8.2-r0 \
         cosign=2.6.3-r1 \
         github-cli=2.83.0-r6
     - |
