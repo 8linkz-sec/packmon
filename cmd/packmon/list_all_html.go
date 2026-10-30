@@ -762,7 +762,9 @@ const listAllHTMLBody = `
 	`data-report-time="scanned-at">{{.PackageInfo.ScannedAt}}</time>{{else}}{{.PackageInfo.ScannedAt}}{{end}}{{end}}</div>` + `
 <div class="summary">
 <a class="badge summary-link" href="#all-packages">{{count (len .PackageRows) .Messages.PackageSingular .Messages.PackagePlural}}</a>
-{{if .Updates}}<a class="badge warn summary-link" href="#available-updates">{{count .PackageInfo.WithUpdates .Messages.WithUpdateSingular .Messages.WithUpdatePlural}}</a>{{else}}<span class="badge warn">{{count .PackageInfo.WithUpdates .Messages.WithUpdateSingular .Messages.WithUpdatePlural}}</span>{{end}}
+{{if .Updates}}<a class="badge warn summary-link" href="#available-updates">` +
+	`{{count .PackageInfo.WithUpdates .Messages.WithUpdateSingular .Messages.WithUpdatePlural}}</a>{{else}}` +
+	`<span class="badge warn">{{count .PackageInfo.WithUpdates .Messages.WithUpdateSingular .Messages.WithUpdatePlural}}</span>{{end}}
 <a class="badge bad summary-link" href="#security-findings">{{count .PackageInfo.Vulnerable .Messages.VulnerabilitySingular .Messages.VulnerabilityPlural}}</a>
 <a class="badge summary-link" href="#all-packages">{{count .PackageInfo.Unknown .Messages.UnknownSingular .Messages.UnknownPlural}}</a>
 {{range .ScopeSummary}}<a class="badge summary-link" href="#all-packages">{{.Scope}} {{.Count}}</a>{{end}}
