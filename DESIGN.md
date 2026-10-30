@@ -640,7 +640,23 @@ SQLite scans can match malicious findings by range instead of only by exact
 listed versions. PostgreSQL validates malicious exact-version data at the
 write boundary: empty, `null`, and JSON string arrays are accepted, while
 objects, scalars, malformed JSON, and non-string arrays are rejected with the
-finding ID before persistence.
+finding ID before persistence. A changed OpenSSF catalog is streamed into
+bounded, session-local PostgreSQL staging tables and reconciled only after the
+complete snapshot passes validation. The final source-scoped transaction
+updates only new, changed, or resurrected findings and tombstones active
+OpenSSF rows absent from the snapshot. Unchanged findings preserve both their
+row identity and `updated_at`; feed freshness remains represented by
+`feed_sync_status.last_sync_at`, not by rewriting every finding. Failed,
+cancelled, empty, duplicate, or cross-source snapshots leave the previously
+usable finding set untouched. Every OpenSSF-capable writer, including legacy
+upserts, external imports, source-scoped deletes, and retention pruning,
+serializes behind the snapshot's OpenSSF source lock before taking the global
+malicious-finding mutation lock. Unscoped writers use the same order. Finding
+IDs cannot transfer between sources through an upsert. This prevents a writer
+that commits during staging from being removed by the later absence pass.
+Snapshot connections are discarded after any pre-commit failure. A cleanup
+failure after a confirmed commit also discards the connection but does not
+change the already-successful snapshot result.
 
 Package reputation cache rows are version-specific normalized records from
 demand-driven reputation sources. They store status, minimal evidence,

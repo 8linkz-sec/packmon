@@ -590,6 +590,10 @@ type MaliciousFinding struct {
 	CreatedBy     string          `json:"created_by"`
 }
 
+// MaliciousSnapshotBatchSize bounds the number of active and withdrawn
+// OpenSSF findings staged in one PostgreSQL COPY operation.
+const MaliciousSnapshotBatchSize = 1000
+
 // PackageReputation is a normalized cache row from a package reputation source.
 type PackageReputation struct {
 	Ecosystem     string

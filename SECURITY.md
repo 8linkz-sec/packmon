@@ -450,6 +450,22 @@ delta sync may tombstone a changed advisory only when the scoped read proves the
 file no longer exists; other read errors must fail the sync attempt without
 deleting existing data.
 
+OpenSSF full-catalog reconciliation stages the complete normalized feed in
+bounded, session-local PostgreSQL temporary tables before taking the global
+malicious-finding mutation lock. Under that lock it validates the staged sets
+before changing the durable table. IDs present in both active and withdrawn
+sets, duplicate IDs, and IDs already owned by another source fail closed.
+Snapshot failures must not fall back to per-row persistence. Every error before
+a confirmed snapshot commit discards the physical connection so temporary
+tables, transaction state, or session locks cannot return to the pool. Cleanup
+or unlock failure after a confirmed commit also discards the connection, but
+does not report the durable snapshot as failed. All runtime mutations of
+`malicious_findings` serialize through the same transaction-scoped global
+lock. Writers that can touch OpenSSF rows, plus unscoped/all-source writers,
+first acquire the OpenSSF source lock in the same order as snapshot builders.
+Cross-source ID ownership is immutable through upsert, preventing another feed
+from silently replacing a staged or durable OpenSSF finding.
+
 ReversingLabs API tokens are sensitive feed API keys and follow the same
 handling rules as VulnCheck, NVD, and Socket.dev keys. Packmon stores only
 normalized ReversingLabs status and minimal evidence, not full raw reports.
