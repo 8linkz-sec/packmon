@@ -24,6 +24,14 @@ import (
 	"github.com/8linkz-sec/packmon/internal/scanner"
 )
 
+const (
+	listAllAttentionHeadingHTML      = `<h2 id="packages-needing-attention" class="report-anchor">Packages Needing Attention</h2>`
+	listAllSecurityHeadingHTML       = `<h2 id="security-findings" class="report-anchor">Security Findings</h2>`
+	listAllUpdatesHeadingHTMLPrefix  = `<h2 id="available-updates" class="report-anchor">Available Updates`
+	listAllCheckedSourcesHeadingHTML = `<h2 id="checked-inventory-sources" class="report-anchor">Checked Inventory Sources</h2>`
+	listAllPackagesSummaryHTMLPrefix = `<summary id="all-packages" class="report-anchor">All Packages`
+)
+
 func TestRunListAllUsesScanPipelineInventorySemantics(t *testing.T) {
 	t.Setenv("PACKMON_HISTORY_ENABLED", "false")
 	dir := t.TempDir()
@@ -215,6 +223,114 @@ func TestListAllHTMLTemplateUsesMessageDataForStaticReportLabels(t *testing.T) {
 	}
 }
 
+func TestListAllHTMLSummaryLinksResolveToUniqueSectionTargets(t *testing.T) {
+	t.Run("populated report", func(t *testing.T) {
+		htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+		report := listAllPackageReport{
+			Rows: []listAllRow{
+				{Name: "outdated", Installed: "1.0.0", Latest: "2.0.0", Update: "yes", Ecosystem: "npm", Source: "lockfile", Scope: "runtime", Relation: "direct", Vuln: "-"},
+				{Name: "unknown", Installed: "1.0.0", Latest: "unknown", Update: "unknown", Ecosystem: "npm", Source: "lockfile", Scope: "dev", Relation: "direct", Vuln: "-"},
+				{Name: "vulnerable", Installed: "1.0.0", Latest: "1.0.0", Update: "-", Ecosystem: "npm", Source: "lockfile", Scope: "runtime", Relation: "direct", Vuln: "yes"},
+			},
+			Sources: []listAllSourceRow{{Kind: "lockfile", Path: "package-lock.json"}},
+		}
+		result := &domain.ScanResult{Mode: "remote", Findings: []domain.Finding{{
+			Name: "vulnerable", Version: "1.0.0", Ecosystem: domain.EcosystemNPM,
+			Type: domain.FindingTypeVulnerability, Severity: domain.SeverityHigh,
+			AdvisoryID: "GHSA-test", Title: "Example vulnerability", Source: "osv",
+		}}}
+		if err := writeListAllHTML(htmlPath, "test", result, report); err != nil {
+			t.Fatalf("writeListAllHTML: %v", err)
+		}
+		data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+		if err != nil {
+			t.Fatalf("read HTML: %v", err)
+		}
+		out := string(data)
+		for _, want := range []string{
+			`<a class="badge summary-link" href="#all-packages">3 packages</a>`,
+			`<a class="badge warn summary-link" href="#available-updates">1 with update</a>`,
+			`<a class="badge bad summary-link" href="#security-findings">1 vulnerability</a>`,
+			`<a class="badge summary-link" href="#all-packages">1 unknown</a>`,
+			`<a class="badge summary-link" href="#all-packages">runtime 2</a>`,
+			`<a class="badge summary-link" href="#all-packages">dev 1</a>`,
+		} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("summary navigation missing %q:\n%s", want, out)
+			}
+		}
+		for _, id := range []string{
+			"packages-needing-attention", "security-findings", "available-updates",
+			"all-packages", "checked-inventory-sources",
+		} {
+			marker := `id="` + id + `"`
+			if got := strings.Count(out, marker); got != 1 {
+				t.Fatalf("section target %s occurs %d times, want once:\n%s", marker, got, out)
+			}
+		}
+	})
+
+	t.Run("missing optional update section", func(t *testing.T) {
+		htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+		report := listAllPackageReport{Rows: []listAllRow{{
+			Name: "current", Installed: "1.0.0", Latest: "1.0.0", Update: "-",
+			Ecosystem: "npm", Source: "lockfile", Scope: "runtime", Relation: "direct", Vuln: "-",
+		}}}
+		if err := writeListAllHTML(htmlPath, "test", &domain.ScanResult{Mode: "remote"}, report); err != nil {
+			t.Fatalf("writeListAllHTML: %v", err)
+		}
+		data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+		if err != nil {
+			t.Fatalf("read HTML: %v", err)
+		}
+		out := string(data)
+		if !strings.Contains(out, `<span class="badge warn">0 with updates</span>`) {
+			t.Fatalf("zero-update badge should remain visible and inert:\n%s", out)
+		}
+		for _, unwanted := range []string{`href="#available-updates"`, `id="available-updates"`} {
+			if strings.Contains(out, unwanted) {
+				t.Fatalf("report without update section contains %q:\n%s", unwanted, out)
+			}
+		}
+	})
+
+	t.Run("empty inventory fallback", func(t *testing.T) {
+		htmlPath := filepath.Join(t.TempDir(), "list-all.html")
+		if err := writeListAllHTML(htmlPath, "test", &domain.ScanResult{Mode: "local"}, listAllPackageReport{}); err != nil {
+			t.Fatalf("writeListAllHTML: %v", err)
+		}
+		data, err := os.ReadFile(htmlPath) // #nosec G304 -- test reads generated report.
+		if err != nil {
+			t.Fatalf("read HTML: %v", err)
+		}
+		out := string(data)
+		if !strings.Contains(out, `<a class="badge summary-link" href="#all-packages">0 packages</a>`) ||
+			!strings.Contains(out, `<h2 id="all-packages" class="report-anchor">All Packages</h2>`) ||
+			strings.Count(out, `id="all-packages"`) != 1 {
+			t.Fatalf("empty inventory summary link does not resolve to the fallback heading:\n%s", out)
+		}
+	})
+}
+
+func TestListAllHTMLSummaryLinksKeepExternalURLsPrintable(t *testing.T) {
+	generalPrintRule := `a[href]::after{content:" (" attr(href) ")";`
+	fragmentPrintOverride := `.summary-link[href]::after{content:none;}`
+	generalIndex := strings.Index(listAllHTML, generalPrintRule)
+	overrideIndex := strings.Index(listAllHTML, fragmentPrintOverride)
+	if generalIndex < 0 || overrideIndex <= generalIndex {
+		t.Fatalf("summary fragment print override must follow the general printable-URL rule")
+	}
+	for _, want := range []string{
+		`.summary-link:focus-visible{outline:var(--report-focus-ring) solid var(--link);`,
+		`.report-anchor{scroll-margin-block-start:var(--report-space-5);}`,
+		`<a class="external-link" href="{{.AdvisoryURL}}`,
+	} {
+		if !strings.Contains(listAllHTML, want) {
+			t.Fatalf("list-all summary navigation contract missing %q", want)
+		}
+	}
+}
+
 func TestListAllHTMLCollapsesFullPackageInventoryByDefault(t *testing.T) {
 	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
 	report := listAllPackageReport{
@@ -260,7 +376,7 @@ func TestListAllHTMLCollapsesFullPackageInventoryByDefault(t *testing.T) {
 	if strings.Contains(out, `<details class="inventory-details" open>`) {
 		t.Fatalf("full package inventory details should not be open by default:\n%s", out)
 	}
-	if !strings.Contains(out, `<summary>All Packages <span class="count">(2 packages)</span></summary>`) {
+	if !strings.Contains(out, listAllPackagesSummaryHTMLPrefix+` <span class="count">(2 packages)</span></summary>`) {
 		t.Fatalf("full package inventory summary should show package count:\n%s", out)
 	}
 	if strings.Index(out, `<details class="inventory-details">`) > strings.Index(out, `aria-label="All packages table"`) {
@@ -2221,7 +2337,7 @@ func TestListAllHTMLGroupsSecurityFindingsByOperationalPriority(t *testing.T) {
 			t.Fatalf("grouped finding HTML still contains raw risk token %q:\n%s", raw, out)
 		}
 	}
-	securityStart := strings.Index(out, "<h2>Security Findings</h2>")
+	securityStart := strings.Index(out, listAllSecurityHeadingHTML)
 	if securityStart < 0 {
 		t.Fatalf("HTML missing Security Findings section:\n%s", out)
 	}
@@ -2579,7 +2695,7 @@ func firstLineContaining(t *testing.T, out, needle string) string {
 func listAllHTMLSecurityFindingTable(t *testing.T, out string) string {
 	t.Helper()
 
-	securityStart := strings.Index(out, "<h2>Security Findings</h2>")
+	securityStart := strings.Index(out, listAllSecurityHeadingHTML)
 	if securityStart < 0 {
 		t.Fatalf("HTML missing Security Findings section:\n%s", out)
 	}
@@ -2649,7 +2765,7 @@ func TestListAllHTMLOmitsFindingBlockingSummaryBadge(t *testing.T) {
 	if strings.Contains(out, "findings &middot;") || strings.Contains(out, " blocking</span>") {
 		t.Fatalf("HTML still renders findings/blocking summary badge:\n%s", out)
 	}
-	if !strings.Contains(out, "<h2>Security Findings</h2>") ||
+	if !strings.Contains(out, listAllSecurityHeadingHTML) ||
 		!strings.Contains(out, "GHSA-vqf5-2xx6-9wfm") {
 		t.Fatalf("HTML should still render the Security Findings section:\n%s", out)
 	}
@@ -2682,8 +2798,8 @@ func TestListAllHTMLKeepsUnknownOnlyPackagesOutOfAttention(t *testing.T) {
 		t.Fatalf("read HTML: %v", err)
 	}
 	out := string(data)
-	attentionStart := strings.Index(out, "<h2>Packages Needing Attention</h2>")
-	securityStart := strings.Index(out, "<h2>Security Findings</h2>")
+	attentionStart := strings.Index(out, listAllAttentionHeadingHTML)
+	securityStart := strings.Index(out, listAllSecurityHeadingHTML)
 	if attentionStart < 0 || securityStart < 0 || securityStart <= attentionStart {
 		t.Fatalf("HTML missing expected sections:\n%s", out)
 	}
@@ -2731,8 +2847,8 @@ func TestListAllHTMLExcludesMerelyOutdatedPackagesFromAttention(t *testing.T) {
 		t.Fatalf("read HTML: %v", err)
 	}
 	out := string(data)
-	attentionStart := strings.Index(out, "<h2>Packages Needing Attention</h2>")
-	securityStart := strings.Index(out, "<h2>Security Findings</h2>")
+	attentionStart := strings.Index(out, listAllAttentionHeadingHTML)
+	securityStart := strings.Index(out, listAllSecurityHeadingHTML)
 	if attentionStart < 0 || securityStart < 0 || securityStart <= attentionStart {
 		t.Fatalf("HTML missing expected sections:\n%s", out)
 	}
@@ -2747,7 +2863,7 @@ func TestListAllHTMLExcludesMerelyOutdatedPackagesFromAttention(t *testing.T) {
 	}
 	// It must be visible in the dedicated update section immediately after
 	// Security Findings, as well as in All Packages.
-	updatesStart := strings.Index(out, `<h2>Available Updates <span class="count">(1)</span></h2>`)
+	updatesStart := strings.Index(out, listAllUpdatesHeadingHTMLPrefix+` <span class="count">(1)</span></h2>`)
 	allStart := strings.Index(out, `<details class="inventory-details">`)
 	if updatesStart < securityStart || allStart <= updatesStart {
 		t.Fatalf("Available Updates section is not between Security Findings and All Packages:\n%s", out)
@@ -2779,8 +2895,8 @@ func TestListAllHTMLUpdateRowsAreCanonicalForBadgeAndSection(t *testing.T) {
 	}
 	out := string(data)
 	for _, want := range []string{
-		`<span class="badge warn">1 with update</span>`,
-		`<h2>Available Updates <span class="count">(1)</span></h2>`,
+		`<a class="badge warn summary-link" href="#available-updates">1 with update</a>`,
+		listAllUpdatesHeadingHTMLPrefix + ` <span class="count">(1)</span></h2>`,
 		`<table class="package-table updates-table">`,
 		`<bdi dir="auto">pkg&lt;&amp;</bdi>`,
 		`<td class="package-status status-update">Update available</td>`,
@@ -2792,7 +2908,7 @@ func TestListAllHTMLUpdateRowsAreCanonicalForBadgeAndSection(t *testing.T) {
 	if strings.Contains(out, "99 with updates") {
 		t.Fatalf("stale input update count leaked into rendered report:\n%s", out)
 	}
-	updatesStart := strings.Index(out, `<h2>Available Updates`)
+	updatesStart := strings.Index(out, listAllUpdatesHeadingHTMLPrefix)
 	allStart := strings.Index(out, `<details class="inventory-details">`)
 	updates := out[updatesStart:allStart]
 	if strings.Contains(updates, ">current<") {
@@ -2860,8 +2976,8 @@ func TestListAllHTMLMarksMaliciousPackagesAsAttention(t *testing.T) {
 		t.Fatalf("read HTML: %v", err)
 	}
 	out := string(data)
-	attentionStart := strings.Index(out, "<h2>Packages Needing Attention</h2>")
-	securityStart := strings.Index(out, "<h2>Security Findings</h2>")
+	attentionStart := strings.Index(out, listAllAttentionHeadingHTML)
+	securityStart := strings.Index(out, listAllSecurityHeadingHTML)
 	if attentionStart < 0 || securityStart < 0 || securityStart <= attentionStart {
 		t.Fatalf("HTML missing expected sections:\n%s", out)
 	}
@@ -2914,8 +3030,8 @@ func TestListAllHTMLSurfacesHistoricalReputationRisk(t *testing.T) {
 		t.Fatalf("read HTML: %v", err)
 	}
 	out := string(data)
-	attentionStart := strings.Index(out, "<h2>Packages Needing Attention</h2>")
-	securityStart := strings.Index(out, "<h2>Security Findings</h2>")
+	attentionStart := strings.Index(out, listAllAttentionHeadingHTML)
+	securityStart := strings.Index(out, listAllSecurityHeadingHTML)
 	if attentionStart < 0 || securityStart < 0 || securityStart <= attentionStart {
 		t.Fatalf("HTML missing expected sections:\n%s", out)
 	}
@@ -2938,7 +3054,7 @@ func TestListAllHTMLSurfacesHistoricalReputationRisk(t *testing.T) {
 	if strings.Contains(out, "No security findings in 1 packages.") {
 		t.Fatalf("historical reputation risk should create security finding rows:\n%s", out)
 	}
-	if !strings.Contains(out, `<span class="badge bad">0 vulnerabilities</span>`) {
+	if !strings.Contains(out, `<a class="badge bad summary-link" href="#security-findings">0 vulnerabilities</a>`) {
 		t.Fatalf("historical reputation risk should not be counted as a vulnerability badge:\n%s", out)
 	}
 }
@@ -3185,10 +3301,10 @@ func TestListAllHTMLDoesNotMarkVulnerablePackageUpToDate(t *testing.T) {
 		t.Fatalf("read HTML: %v", err)
 	}
 	out := string(data)
-	if !strings.Contains(out, `<span class="badge bad">3 vulnerabilities</span>`) {
+	if !strings.Contains(out, `<a class="badge bad summary-link" href="#security-findings">3 vulnerabilities</a>`) {
 		t.Fatalf("HTML summary should count vulnerability findings:\n%s", out)
 	}
-	if !strings.Contains(out, `<span class="badge warn">2 with updates</span>`) {
+	if !strings.Contains(out, `<a class="badge warn summary-link" href="#available-updates">2 with updates</a>`) {
 		t.Fatalf("HTML summary should count vulnerability findings with update paths:\n%s", out)
 	}
 	for _, pkg := range []struct {
@@ -3573,8 +3689,8 @@ func TestListAllHTMLRendersStatusAndCheckedLockFiles(t *testing.T) {
 	}
 	out := string(data)
 	for _, want := range []string{
-		"<h2>Packages Needing Attention</h2>",
-		"<h2>Checked Inventory Sources</h2>",
+		listAllAttentionHeadingHTML,
+		listAllCheckedSourcesHeadingHTML,
 		`<th scope="col" class="package-status">Status</th>`,
 		`<td class="package-status">Removed</td>`,
 		`<td class="package-status status-update">Update available</td>`,
@@ -3626,7 +3742,7 @@ func TestListAllHTMLOmitsLongFlagsAndListsInventorySources(t *testing.T) {
 	}
 	out := string(data)
 	for _, want := range []string{
-		"<h2>Checked Inventory Sources</h2>",
+		listAllCheckedSourcesHeadingHTML,
 		`<span class="source-kind">docker</span><span class="source-path"><bdi dir="auto">Dockerfile</bdi></span>`,
 		`<span class="source-kind">docker</span><span class="source-path"><bdi dir="auto">docker-compose.yml</bdi></span>`,
 		`<span class="source-kind">lockfile</span><span class="source-path"><bdi dir="auto">package-lock.json</bdi></span>`,
@@ -3818,8 +3934,8 @@ func TestListAllHTMLSurfacesUpdatesWithoutSecurityFindings(t *testing.T) {
 	out := string(data)
 	for _, want := range []string{
 		"No security findings in 1 package.",
-		"<h2>Packages Needing Attention</h2>",
-		"<h2>Security Findings</h2>",
+		listAllAttentionHeadingHTML,
+		listAllSecurityHeadingHTML,
 		`<td class="name"><bdi dir="auto">node-addon-api</bdi></td><td class="installed"><bdi dir="auto">7.1.1</bdi></td><td class="version"><bdi dir="auto">8.8.0</bdi></td><td class="package-status status-update">Update available</td>`,
 	} {
 		if !strings.Contains(out, want) {
@@ -4285,8 +4401,8 @@ func TestListAllHTMLKeepsVulnerableWithFixInAttention(t *testing.T) {
 		t.Fatalf("read HTML: %v", err)
 	}
 	out := string(data)
-	attentionStart := strings.Index(out, "<h2>Packages Needing Attention</h2>")
-	securityStart := strings.Index(out, "<h2>Security Findings</h2>")
+	attentionStart := strings.Index(out, listAllAttentionHeadingHTML)
+	securityStart := strings.Index(out, listAllSecurityHeadingHTML)
 	if attentionStart < 0 || securityStart < 0 || securityStart <= attentionStart {
 		t.Fatalf("HTML missing expected sections:\n%s", out)
 	}
@@ -4294,7 +4410,7 @@ func TestListAllHTMLKeepsVulnerableWithFixInAttention(t *testing.T) {
 	if !strings.Contains(attention, "postcss") {
 		t.Fatalf("vulnerable package with an available fix must appear under Packages Needing Attention:\n%s", attention)
 	}
-	updatesStart := strings.Index(out, `<h2>Available Updates <span class="count">(1)</span></h2>`)
+	updatesStart := strings.Index(out, listAllUpdatesHeadingHTMLPrefix+` <span class="count">(1)</span></h2>`)
 	allStart := strings.Index(out, `<details class="inventory-details">`)
 	if updatesStart < securityStart || allStart <= updatesStart || !strings.Contains(out[updatesStart:allStart], "postcss") {
 		t.Fatalf("vulnerable package with an available fix must also appear under Available Updates:\n%s", out)

@@ -334,7 +334,12 @@ Important behavior:
   Every package whose resolved status is `Update available` is instead shown in
   a visible "Available Updates" table immediately after Security Findings and
   remains present in "All Packages"; the summary update count and table rows
-  share the same canonical set. The report never filters findings by
+  share the same canonical set. Summary badges provide in-page navigation to
+  the corresponding unfiltered report sections: total, unknown, and scope
+  counts lead to "All Packages", vulnerability counts lead to Security
+  Findings, and a non-zero update count leads to "Available Updates". The
+  zero-update badge remains non-interactive because that empty section is not
+  rendered. The report never filters findings by
   the `--fail-on` threshold, so it carries no fail-on footer and no per-finding
   detail row that could imply such filtering. Finding-derived states such as
   `Malicious`, `Removed`, `Supply-chain risk`, `Lifecycle`, and `Reputation
