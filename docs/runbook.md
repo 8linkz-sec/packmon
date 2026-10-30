@@ -461,8 +461,10 @@ such as ReversingLabs.
 NVD is a phase-2 enrichment feed: it does not import advisories itself, it
 raises CVSS/severity for already-imported CVEs that arrived without usable
 severity data. Its `Entries` counters show CVEs updated/processed by the last
-completed enrichment run, not a vulnerability inventory. Two symptoms look
-alarming but have expected causes:
+completed enrichment run, not a vulnerability inventory. NVD is excluded from
+the aggregate `feed_status`, so a slow or stalled NVD sync shows up only in its
+own row on `/admin/feeds` and in the per-feed `/api/v1/feeds/status` list, not
+as a degraded scan result. Two symptoms look alarming but have expected causes:
 
 - `running` with an old last-sync timestamp for hours: `last_sync_at`
   intentionally keeps the timestamp of the last usable data while a sync is
