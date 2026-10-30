@@ -196,5 +196,6 @@ func (s *Store) RepairGHSAAffectedPackages(ctx context.Context) (int, error) {
 	if err := s.pool.QueryRow(ctx, query).Scan(&repaired); err != nil {
 		return 0, fmt.Errorf("postgres: repair GHSA affected packages: %w", err)
 	}
+	s.invalidateDashboardStats()
 	return repaired, nil
 }

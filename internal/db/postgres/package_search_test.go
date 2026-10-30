@@ -4,11 +4,46 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/8linkz-sec/packmon/internal/db"
 )
+
+func TestMaliciousPackageSearchQueryUsesFixedParameterizedVariants(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		like         string
+		severity     string
+		wantQuery    string
+		wantArgs     []any
+		wantSeverity bool
+	}{
+		{name: "unfiltered", wantQuery: maliciousPackageSearchUnfilteredSQL, wantArgs: []any{25}},
+		{name: "name", like: "%left%", wantQuery: maliciousPackageSearchNameSQL, wantArgs: []any{"%left%", 25}},
+		{name: "severity", severity: "CRITICAL", wantQuery: maliciousPackageSearchSeveritySQL, wantArgs: []any{"CRITICAL", 25}, wantSeverity: true},
+		{name: "name and severity", like: "%left%", severity: "HIGH", wantQuery: maliciousPackageSearchNameSeveritySQL, wantArgs: []any{"%left%", "HIGH", 25}, wantSeverity: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			query, args := maliciousPackageSearchQuery(tt.like, tt.severity, 25)
+			if query != tt.wantQuery || !reflect.DeepEqual(args, tt.wantArgs) {
+				t.Fatalf("query selection = (%q, %#v), want (%q, %#v)", query, args, tt.wantQuery, tt.wantArgs)
+			}
+			if strings.Contains(query, "UPPER(") || strings.Contains(query, "COALESCE(severity") {
+				t.Fatalf("query retained functional severity predicate: %s", query)
+			}
+			if got := strings.Contains(query, "severity = $"); got != tt.wantSeverity {
+				t.Fatalf("direct severity predicate present = %v, want %v: %s", got, tt.wantSeverity, query)
+			}
+		})
+	}
+}
 
 func TestPackageSearchCollectorPlanExpandsUnfilteredCategories(t *testing.T) {
 	t.Parallel()

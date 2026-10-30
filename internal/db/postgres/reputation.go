@@ -275,6 +275,7 @@ func (s *Store) UpsertPackageReputation(ctx context.Context, rep *db.PackageRepu
 	); err != nil {
 		return fmt.Errorf("postgres: upsert package reputation: %w", err)
 	}
+	s.invalidateDashboardStats()
 	return nil
 }
 

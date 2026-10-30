@@ -381,11 +381,10 @@ type metricsStoreReadSnapshot struct {
 }
 
 type metricsDerivedCache struct {
-	mu             sync.Mutex
-	expiresAt      time.Time
-	dashboardStats *db.DashboardStatsResult
-	scanTotals     *db.ScanTotals
-	refreshDone    chan struct{}
+	mu          sync.Mutex
+	expiresAt   time.Time
+	scanTotals  *db.ScanTotals
+	refreshDone chan struct{}
 }
 
 type metricsStoreErrorLogger struct {
@@ -559,35 +558,6 @@ func collectMetricsStoreReadSnapshot(ctx context.Context, store MetricsStore, de
 }
 
 func (c *metricsDerivedCache) load(ctx context.Context, store MetricsStore) (*db.DashboardStatsResult, *db.ScanTotals, []metricsStoreFailure) {
-	for {
-		now := time.Now()
-
-		c.mu.Lock()
-		if c.expiresAt.After(now) {
-			dashboardStats := cloneDashboardStats(c.dashboardStats)
-			scanTotals := cloneScanTotals(c.scanTotals)
-			c.mu.Unlock()
-			return dashboardStats, scanTotals, nil
-		}
-		if done := c.refreshDone; done != nil {
-			c.mu.Unlock()
-			select {
-			case <-done:
-				continue
-			case <-ctx.Done():
-				c.mu.Lock()
-				dashboardStats := cloneDashboardStats(c.dashboardStats)
-				scanTotals := cloneScanTotals(c.scanTotals)
-				c.mu.Unlock()
-				return dashboardStats, scanTotals, nil
-			}
-		}
-		c.refreshDone = make(chan struct{})
-		c.mu.Unlock()
-		break
-	}
-
-	var failures []metricsStoreFailure
 	var dashboardStats *db.DashboardStatsResult
 	var scanTotals *db.ScanTotals
 	var dashboardFailures []metricsStoreFailure
@@ -606,42 +576,62 @@ func (c *metricsDerivedCache) load(ctx context.Context, store MetricsStore) (*db
 	go func() {
 		defer wg.Done()
 		var err error
-		scanTotals, err = store.ScanTotals(ctx)
+		scanTotals, err = c.loadScanTotals(ctx, store)
 		if err != nil {
 			scanFailures = appendMetricStoreFailure(scanFailures, "scan_totals", err)
 		}
 	}()
 	wg.Wait()
-	failures = append(failures, dashboardFailures...)
-	failures = append(failures, scanFailures...)
+
+	failures := append(dashboardFailures, scanFailures...)
+	return dashboardStats, scanTotals, failures
+}
+
+func (c *metricsDerivedCache) loadScanTotals(ctx context.Context, store MetricsStore) (*db.ScanTotals, error) {
+	for {
+		now := time.Now()
+
+		c.mu.Lock()
+		if c.expiresAt.After(now) {
+			scanTotals := cloneScanTotals(c.scanTotals)
+			c.mu.Unlock()
+			return scanTotals, nil
+		}
+		if done := c.refreshDone; done != nil {
+			c.mu.Unlock()
+			select {
+			case <-done:
+				continue
+			case <-ctx.Done():
+				c.mu.Lock()
+				scanTotals := cloneScanTotals(c.scanTotals)
+				c.mu.Unlock()
+				if scanTotals != nil {
+					return scanTotals, nil
+				}
+				return nil, ctx.Err()
+			}
+		}
+		c.refreshDone = make(chan struct{})
+		c.mu.Unlock()
+		break
+	}
+
+	scanTotals, err := store.ScanTotals(ctx)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if len(dashboardFailures) == 0 {
-		c.dashboardStats = cloneDashboardStats(dashboardStats)
-	}
-	if scanTotals != nil {
+	if err == nil && scanTotals != nil {
 		c.scanTotals = cloneScanTotals(scanTotals)
 	}
 	c.expiresAt = time.Now().Add(metricsDerivedCacheTTL)
 	close(c.refreshDone)
 	c.refreshDone = nil
 
-	return cloneDashboardStats(c.dashboardStats), cloneScanTotals(c.scanTotals), failures
-}
-
-func cloneDashboardStats(stats *db.DashboardStatsResult) *db.DashboardStatsResult {
-	if stats == nil {
-		return nil
+	if err != nil {
+		return cloneScanTotals(c.scanTotals), err
 	}
-	out := *stats
-	if stats.BySeverity != nil {
-		out.BySeverity = make(map[string]int, len(stats.BySeverity))
-		for severity, count := range stats.BySeverity {
-			out.BySeverity[severity] = count
-		}
-	}
-	return &out
+	return cloneScanTotals(c.scanTotals), nil
 }
 
 func cloneScanTotals(totals *db.ScanTotals) *db.ScanTotals {

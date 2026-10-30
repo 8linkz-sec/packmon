@@ -124,11 +124,6 @@ type Store interface {
 }
 
 // AdminHandler holds the dependencies for admin HTTP handlers.
-// adminDashboardStatsCacheTTL bounds how stale the admin dashboard aggregate
-// may be; feed syncs are hours apart, so 15s is invisible to operators while
-// collapsing repeated tab switches into one aggregate query.
-const adminDashboardStatsCacheTTL = 15 * time.Second
-
 type AdminHandler struct {
 	store           Store
 	sm              *auth.SessionManager
@@ -141,11 +136,6 @@ type AdminHandler struct {
 	applyFeedConfig FeedConfigApplyFunc
 	resetFeedConfig FeedConfigResetFunc
 	csrfToken       func(*auth.Session) (string, error)
-
-	// dashboardStatsCache memoizes the expensive dashboard aggregate (UNION
-	// dedupe over all finding sources) between page loads; the numbers only
-	// change when feeds sync or advisories are edited.
-	dashboardStatsCache *web.AggregateCache[*db.DashboardStatsResult]
 
 	// loginMu protects the loginAttempts map.
 	loginMu       sync.Mutex
@@ -163,18 +153,17 @@ func NewAdminHandler(ctx context.Context, store any, sm *auth.SessionManager, re
 		logger = slog.Default()
 	}
 	h := &AdminHandler{
-		store:               adaptAdminStore(store),
-		dashboardStatsCache: web.NewAggregateCache[*db.DashboardStatsResult](adminDashboardStatsCacheTTL),
-		sm:                  sm,
-		renderer:            renderer,
-		logger:              logger,
-		cfg:                 cfg,
-		runtime:             runtime,
-		rootCtx:             ctx,
-		syncFeed:            syncFeed,
-		csrfToken:           auth.CSRFToken,
-		loginAttempts:       make(map[string]*loginAttempt),
-		manualSyncs:         make(map[string]struct{}),
+		store:         adaptAdminStore(store),
+		sm:            sm,
+		renderer:      renderer,
+		logger:        logger,
+		cfg:           cfg,
+		runtime:       runtime,
+		rootCtx:       ctx,
+		syncFeed:      syncFeed,
+		csrfToken:     auth.CSRFToken,
+		loginAttempts: make(map[string]*loginAttempt),
+		manualSyncs:   make(map[string]struct{}),
 	}
 	// Background goroutine to evict stale lockout entries.
 	go h.cleanupAttempts(ctx)
@@ -473,7 +462,7 @@ func (h *AdminHandler) HandleDashboard(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer widgetReads.Done()
 		var err error
-		stats, err = h.dashboardStatsCache.Get(ctx, h.store.DashboardStats)
+		stats, err = h.store.DashboardStats(ctx)
 		if err != nil {
 			h.logger.Error("admin dashboard: failed to load stats", adminLogAttrsForCorrelationID(correlationID, "error", err)...)
 			stats = &db.DashboardStatsResult{BySeverity: map[string]int{}}

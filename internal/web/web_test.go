@@ -835,7 +835,7 @@ func TestHandleDashboardLoadsIndependentWidgetsConcurrently(t *testing.T) {
 	}
 }
 
-func TestHandleDashboardCachesAggregateReadsAcrossRequests(t *testing.T) {
+func TestHandleDashboardDelegatesAggregateCachingToStore(t *testing.T) {
 	store := &webAggregateCacheCountingStore{
 		mockStore: mockStore{
 			dashboardStats: &db.DashboardStatsResult{
@@ -872,8 +872,8 @@ func TestHandleDashboardCachesAggregateReadsAcrossRequests(t *testing.T) {
 	}
 
 	calls := store.snapshot()
-	if calls.dashboardStats != 1 {
-		t.Fatalf("DashboardStats calls = %d, want 1 cached aggregate read across requests", calls.dashboardStats)
+	if calls.dashboardStats != 2 {
+		t.Fatalf("DashboardStats calls = %d, want 2; the Store owns aggregate caching", calls.dashboardStats)
 	}
 	// The public dashboard no longer reads scan counts at all.
 	if calls.dailyStats != 0 {
@@ -882,8 +882,8 @@ func TestHandleDashboardCachesAggregateReadsAcrossRequests(t *testing.T) {
 	if calls.recentVulnerabilities != 2 {
 		t.Fatalf("ListRecentVulnerabilities calls = %d, want 2 uncached list reads", calls.recentVulnerabilities)
 	}
-	if calls.lastDashboardStatsRequestID != "first-dashboard-request" {
-		t.Fatalf("aggregate read used request ID stats=%q, want first request context", calls.lastDashboardStatsRequestID)
+	if calls.lastDashboardStatsRequestID != "second-dashboard-request" {
+		t.Fatalf("aggregate read used request ID stats=%q, want second request context", calls.lastDashboardStatsRequestID)
 	}
 }
 

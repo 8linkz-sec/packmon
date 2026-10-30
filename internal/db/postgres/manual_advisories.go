@@ -26,12 +26,16 @@ func (s *Store) UpsertManualAdvisory(ctx context.Context, advisory *db.ManualAdv
 	if _, ok := domain.ParseManualAdvisoryFindingType(advisory.FindingType); !ok {
 		return fmt.Errorf("postgres: unsupported manual advisory finding type %q", advisory.FindingType)
 	}
-	return withTx(ctx, s.pool, func(tx pgx.Tx) error {
+	err := withTx(ctx, s.pool, func(tx pgx.Tx) error {
 		if err := acquireManualAdvisoryLockTx(ctx, tx, advisory.ID); err != nil {
 			return err
 		}
 		return upsertManualAdvisoryTx(ctx, tx, advisory)
 	})
+	if err == nil {
+		s.invalidateDashboardStats()
+	}
+	return err
 }
 
 func (s *Store) UpsertManualAdvisoryWithAudit(ctx context.Context, advisory *db.ManualAdvisory, audit *db.AdminAuditEntry) error {
@@ -44,7 +48,7 @@ func (s *Store) UpsertManualAdvisoryWithAudit(ctx context.Context, advisory *db.
 	if _, ok := domain.ParseManualAdvisoryFindingType(advisory.FindingType); !ok {
 		return fmt.Errorf("postgres: unsupported manual advisory finding type %q", advisory.FindingType)
 	}
-	return withTx(ctx, s.pool, func(tx pgx.Tx) error {
+	err := withTx(ctx, s.pool, func(tx pgx.Tx) error {
 		if err := acquireManualAdvisoryLockTx(ctx, tx, advisory.ID); err != nil {
 			return err
 		}
@@ -59,6 +63,10 @@ func (s *Store) UpsertManualAdvisoryWithAudit(ctx context.Context, advisory *db.
 		}
 		return nil
 	})
+	if err == nil {
+		s.invalidateDashboardStats()
+	}
+	return err
 }
 
 func upsertManualAdvisoryTx(ctx context.Context, tx pgx.Tx, advisory *db.ManualAdvisory) error {
@@ -88,19 +96,23 @@ func (s *Store) DeleteManualAdvisory(ctx context.Context, id string) error {
 	if _, err := normalizeManualAdvisoryID(id); err != nil {
 		return err
 	}
-	return withTx(ctx, s.pool, func(tx pgx.Tx) error {
+	err := withTx(ctx, s.pool, func(tx pgx.Tx) error {
 		if err := acquireManualAdvisoryLockTx(ctx, tx, id); err != nil {
 			return err
 		}
 		return deleteManualAdvisoryTx(ctx, tx, id)
 	})
+	if err == nil {
+		s.invalidateDashboardStats()
+	}
+	return err
 }
 
 func (s *Store) DeleteManualAdvisoryWithAudit(ctx context.Context, id string, audit *db.AdminAuditEntry) error {
 	if _, err := normalizeManualAdvisoryID(id); err != nil {
 		return err
 	}
-	return withTx(ctx, s.pool, func(tx pgx.Tx) error {
+	err := withTx(ctx, s.pool, func(tx pgx.Tx) error {
 		if err := acquireManualAdvisoryLockTx(ctx, tx, id); err != nil {
 			return err
 		}
@@ -112,6 +124,10 @@ func (s *Store) DeleteManualAdvisoryWithAudit(ctx context.Context, id string, au
 		}
 		return nil
 	})
+	if err == nil {
+		s.invalidateDashboardStats()
+	}
+	return err
 }
 
 func deleteManualAdvisoryTx(ctx context.Context, tx pgx.Tx, id string) error {

@@ -143,11 +143,24 @@ func (s *Store) ScanTotals(ctx context.Context) (*db.ScanTotals, error) {
 }
 
 func (s *Store) DashboardStats(ctx context.Context) (*db.DashboardStatsResult, error) {
+	return s.dashboardStatsCache.get(ctx, s.loadDashboardStats)
+}
+
+func (s *Store) loadDashboardStats(ctx context.Context) (*db.DashboardStatsResult, time.Time, error) {
 	stats := &db.DashboardStatsResult{
 		BySeverity: make(map[string]int),
 	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{
+		IsoLevel:   pgx.RepeatableRead,
+		AccessMode: pgx.ReadOnly,
+	})
+	if err != nil {
+		return nil, time.Time{}, fmt.Errorf("postgres: begin dashboard stats snapshot: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 
-	if err := s.pool.QueryRow(ctx, `
+	var databaseMidnight time.Time
+	if err := tx.QueryRow(ctx, `
 		SELECT
 			(SELECT COUNT(*)
 			 FROM (
@@ -194,17 +207,19 @@ func (s *Store) DashboardStats(ctx context.Context) (*db.DashboardStatsResult, e
 					(r.eol_from IS NOT NULL AND r.eol_from > CURRENT_DATE AND r.eol_from <= CURRENT_DATE + ($1::int * INTERVAL '1 day'))
 					OR r.is_eoas
 					OR (r.eoas_from IS NOT NULL AND r.eoas_from <= CURRENT_DATE)
-			   ))::int`, lifecyclepolicy.EOLSoonDays).Scan(
+			   ))::int,
+			(CURRENT_DATE + 1)::timestamptz`, lifecyclepolicy.EOLSoonDays).Scan(
 		&stats.TotalPackages,
 		&stats.TotalVulnerabilities,
 		&stats.TotalMalicious,
 		&stats.TotalSupplyChainRisk,
 		&stats.TotalLifecycle,
+		&databaseMidnight,
 	); err != nil {
-		return nil, fmt.Errorf("postgres: dashboard totals: %w", err)
+		return nil, time.Time{}, fmt.Errorf("postgres: dashboard totals: %w", err)
 	}
 
-	rows, err := s.pool.Query(ctx, `
+	rows, err := tx.Query(ctx, `
 		SELECT severity, COUNT(*)::int
 		FROM (
 			SELECT id, severity
@@ -221,9 +236,8 @@ func (s *Store) DashboardStats(ctx context.Context) (*db.DashboardStatsResult, e
 		) current_findings
 		GROUP BY severity`)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: dashboard severities: %w", err)
+		return nil, time.Time{}, fmt.Errorf("postgres: dashboard severities: %w", err)
 	}
-	defer ioutils.CloseSilently(rows)
 
 	for rows.Next() {
 		var (
@@ -231,14 +245,20 @@ func (s *Store) DashboardStats(ctx context.Context) (*db.DashboardStatsResult, e
 			count    int
 		)
 		if err := rows.Scan(&severity, &count); err != nil {
-			return nil, fmt.Errorf("postgres: scan dashboard severity row: %w", err)
+			rows.Close()
+			return nil, time.Time{}, fmt.Errorf("postgres: scan dashboard severity row: %w", err)
 		}
 		stats.BySeverity[normalizeSeverity(severity)] = count
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("postgres: iterate dashboard severities: %w", err)
+		rows.Close()
+		return nil, time.Time{}, fmt.Errorf("postgres: iterate dashboard severities: %w", err)
 	}
-	return stats, nil
+	rows.Close()
+	if err := tx.Commit(ctx); err != nil {
+		return nil, time.Time{}, fmt.Errorf("postgres: commit dashboard stats snapshot: %w", err)
+	}
+	return stats, databaseMidnight, nil
 }
 
 // CountUnknownSeverityFindings counts active findings whose stored severity

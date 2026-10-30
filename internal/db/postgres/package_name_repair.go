@@ -12,15 +12,24 @@ import (
 // RepairCaseInsensitivePackageNames reconciles legacy rows written before
 // package names were canonicalized at write boundaries.
 func (s *Store) RepairCaseInsensitivePackageNames(ctx context.Context) (int, error) {
-	affected, err := repairAffectedPackageNames(ctx, s.pool)
+	var repaired int
+	err := withTx(ctx, s.pool, func(tx pgx.Tx) error {
+		affected, err := repairAffectedPackageNames(ctx, tx)
+		if err != nil {
+			return err
+		}
+		malicious, err := repairMaliciousPackageNames(ctx, tx)
+		if err != nil {
+			return err
+		}
+		repaired = affected + malicious
+		return nil
+	})
 	if err != nil {
 		return 0, err
 	}
-	malicious, err := repairMaliciousPackageNames(ctx, s.pool)
-	if err != nil {
-		return 0, err
-	}
-	return affected + malicious, nil
+	s.invalidateDashboardStats()
+	return repaired, nil
 }
 
 // RepairCaseInsensitivePackageNamesWithAudit reconciles legacy package-name
@@ -48,6 +57,7 @@ func (s *Store) RepairCaseInsensitivePackageNamesWithAudit(ctx context.Context, 
 	if err != nil {
 		return 0, err
 	}
+	s.invalidateDashboardStats()
 	return repaired, nil
 }
 
