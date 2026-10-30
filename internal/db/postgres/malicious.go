@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -195,8 +196,15 @@ func (s *Store) FindMaliciousBatch(ctx context.Context, packages []db.PackageQue
 }
 
 func (s *Store) UpsertMaliciousFinding(ctx context.Context, mf *db.MaliciousFinding) error {
-	err := withTx(ctx, s.pool, func(tx pgx.Tx) error {
-		return upsertMaliciousFindingTx(ctx, tx, mf)
+	normalized, err := normalizeMaliciousFinding(mf)
+	if err != nil {
+		return err
+	}
+	err = withTx(ctx, s.pool, func(tx pgx.Tx) error {
+		if err := acquireMaliciousMutationLocksTx(ctx, tx, normalized.Source, false); err != nil {
+			return err
+		}
+		return upsertNormalizedMaliciousFindingTx(ctx, tx, normalized)
 	})
 	if err == nil {
 		s.invalidateDashboardStats()
@@ -215,7 +223,17 @@ func (s *Store) ImportMaliciousFeedWithAudit(ctx context.Context, feed string, i
 func (s *Store) importMaliciousFeed(ctx context.Context, feed string, items []db.MaliciousFinding, deleteIDs []string, status *db.FeedSyncStatus, audit db.FeedImportAuditBuilder) (int, int, error) {
 	imported := 0
 	deleted := 0
+	lockSource := feed
+	for i := range items {
+		if strings.EqualFold(strings.TrimSpace(items[i].Source), "openssf") {
+			lockSource = "openssf"
+			break
+		}
+	}
 	err := withTx(ctx, s.pool, func(tx pgx.Tx) error {
+		if err := acquireMaliciousMutationLocksTx(ctx, tx, lockSource, false); err != nil {
+			return err
+		}
 		for i := range items {
 			if err := upsertMaliciousFindingTx(ctx, tx, &items[i]); err != nil {
 				return fmt.Errorf("import malicious finding %s: %w", items[i].ID, err)
@@ -248,28 +266,93 @@ func (s *Store) importMaliciousFeed(ctx context.Context, feed string, items []db
 }
 
 func upsertMaliciousFindingTx(ctx context.Context, tx pgx.Tx, mf *db.MaliciousFinding) error {
-	if err := validateStoredVersionRangesJSON("malicious finding "+mf.ID, "version_ranges", mf.VersionRanges, true); err != nil {
+	normalized, err := normalizeMaliciousFinding(mf)
+	if err != nil {
 		return err
 	}
+
+	return upsertNormalizedMaliciousFindingTx(ctx, tx, normalized)
+}
+
+type normalizedMaliciousFinding struct {
+	ID            string
+	Ecosystem     string
+	Name          string
+	VersionRanges []byte
+	Versions      []byte
+	Source        string
+	RiskType      string
+	Severity      string
+	Summary       string
+	Description   any
+	ReferenceURLs []byte
+	OriginRef     any
+	Published     *time.Time
+	CreatedBy     any
+}
+
+func normalizeMaliciousFinding(mf *db.MaliciousFinding) (*normalizedMaliciousFinding, error) {
+	if mf == nil {
+		return nil, fmt.Errorf("postgres: malicious finding is nil")
+	}
+	if err := validateStoredVersionRangesJSON("malicious finding "+mf.ID, "version_ranges", mf.VersionRanges, true); err != nil {
+		return nil, err
+	}
 	if err := validateStoredStringArrayJSON("malicious finding "+mf.ID, "versions", mf.Versions, true); err != nil {
-		return err
+		return nil, err
 	}
 	ecosystem, err := normalizeStoredEcosystem(mf.Ecosystem)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	riskType, err := normalizeMaliciousRiskType(mf.RiskType)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if strings.EqualFold(strings.TrimSpace(mf.Source), "manual") {
 		if _, err := normalizeManualAdvisoryID(mf.ID); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	severity, err := normalizeMaliciousSeverity(mf.Severity)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	var versionRanges []byte
+	if normalized := normalizeNullableJSON(mf.VersionRanges); normalized != nil {
+		versionRanges = append([]byte(nil), normalized.([]byte)...)
+	}
+	var versions []byte
+	if normalized := normalizeNullableJSON(mf.Versions); normalized != nil {
+		versions = append([]byte(nil), normalized.([]byte)...)
+	}
+
+	return &normalizedMaliciousFinding{
+		ID:            mf.ID,
+		Ecosystem:     ecosystem,
+		Name:          normalizePackageName(ecosystem, mf.Name),
+		VersionRanges: versionRanges,
+		Versions:      versions,
+		Source:        mf.Source,
+		RiskType:      riskType,
+		Severity:      severity,
+		Summary:       mf.Summary,
+		Description:   nullableString(mf.Description),
+		ReferenceURLs: append([]byte(nil), normalizeJSON(mf.ReferenceURLs, []byte("[]")).([]byte)...),
+		OriginRef:     nullableString(mf.OriginRef),
+		Published:     mf.Published,
+		CreatedBy:     nullableString(mf.CreatedBy),
+	}, nil
+}
+
+func upsertNormalizedMaliciousFindingTx(ctx context.Context, tx pgx.Tx, mf *normalizedMaliciousFinding) error {
+	var existingSource string
+	err := tx.QueryRow(ctx, `SELECT source FROM malicious_findings WHERE id = $1`, mf.ID).Scan(&existingSource)
+	if err == nil && existingSource != mf.Source {
+		return fmt.Errorf("postgres: malicious finding %s is owned by source %s, not %s", mf.ID, existingSource, mf.Source)
+	}
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("postgres: check malicious finding %s source ownership: %w", mf.ID, err)
 	}
 
 	const query = `
@@ -299,19 +382,19 @@ func upsertMaliciousFindingTx(ctx context.Context, tx pgx.Tx, mf *db.MaliciousFi
 
 	_, err = tx.Exec(ctx, query,
 		mf.ID,
-		ecosystem,
-		normalizePackageName(ecosystem, mf.Name),
-		normalizeNullableJSON(mf.VersionRanges),
-		normalizeNullableJSON(mf.Versions),
+		mf.Ecosystem,
+		mf.Name,
+		mf.VersionRanges,
+		mf.Versions,
 		mf.Source,
-		riskType,
-		severity,
+		mf.RiskType,
+		mf.Severity,
 		mf.Summary,
-		nullableString(mf.Description),
-		normalizeJSON(mf.ReferenceURLs, []byte("[]")),
-		nullableString(mf.OriginRef),
+		mf.Description,
+		mf.ReferenceURLs,
+		mf.OriginRef,
 		mf.Published,
-		nullableString(mf.CreatedBy),
+		mf.CreatedBy,
 	)
 	if err != nil {
 		return fmt.Errorf("postgres: upsert malicious finding %s: %w", mf.ID, err)
@@ -320,12 +403,18 @@ func upsertMaliciousFindingTx(ctx context.Context, tx pgx.Tx, mf *db.MaliciousFi
 }
 
 func (s *Store) DeleteMaliciousFinding(ctx context.Context, id string) error {
-	_, err := s.pool.Exec(ctx, `
-		UPDATE malicious_findings
-		SET removed_at = COALESCE(removed_at, NOW()),
-		    updated_at = NOW()
-		WHERE id = $1
-		  AND removed_at IS NULL`, id)
+	err := withTx(ctx, s.pool, func(tx pgx.Tx) error {
+		if err := acquireMaliciousMutationLocksTx(ctx, tx, "", true); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `
+			UPDATE malicious_findings
+			SET removed_at = COALESCE(removed_at, NOW()),
+			    updated_at = NOW()
+			WHERE id = $1
+			  AND removed_at IS NULL`, id)
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("postgres: delete malicious finding %s: %w", id, err)
 	}
@@ -340,6 +429,9 @@ func (s *Store) DeleteMaliciousFindingForSource(ctx context.Context, id, source 
 	}
 
 	err := withTx(ctx, s.pool, func(tx pgx.Tx) error {
+		if err := acquireMaliciousMutationLocksTx(ctx, tx, source, false); err != nil {
+			return err
+		}
 		return deleteMaliciousFindingForSourceTx(ctx, tx, id, source)
 	})
 	if err == nil {
@@ -370,33 +462,49 @@ func deleteMaliciousFindingForSourceTx(ctx context.Context, execer postgresExece
 }
 
 func (s *Store) DeleteMaliciousFindingsNotInSource(ctx context.Context, source string, ids []string) (int, error) {
-	cmd, err := s.pool.Exec(ctx, `
-		UPDATE malicious_findings
-		SET removed_at = COALESCE(removed_at, NOW()),
-		    updated_at = NOW()
-		WHERE source = $1
-		  AND removed_at IS NULL
-		  AND NOT (id = ANY($2))`, source, ids)
+	var count int
+	err := withTx(ctx, s.pool, func(tx pgx.Tx) error {
+		if err := acquireMaliciousMutationLocksTx(ctx, tx, source, false); err != nil {
+			return err
+		}
+		cmd, err := tx.Exec(ctx, `
+			UPDATE malicious_findings
+			SET removed_at = COALESCE(removed_at, NOW()),
+			    updated_at = NOW()
+			WHERE source = $1
+			  AND removed_at IS NULL
+			  AND NOT (id = ANY($2))`, source, ids)
+		count = int(cmd.RowsAffected())
+		return err
+	})
 	if err != nil {
 		return 0, fmt.Errorf("postgres: prune malicious findings for source %s: %w", source, err)
 	}
 	s.invalidateDashboardStats()
-	return int(cmd.RowsAffected()), nil
+	return count, nil
 }
 
 func (s *Store) PruneMaliciousFindingsForSourceUpdatedBefore(ctx context.Context, source string, updatedBefore time.Time) (int, error) {
-	cmd, err := s.pool.Exec(ctx, `
-		UPDATE malicious_findings
-		SET removed_at = COALESCE(removed_at, NOW()),
-		    updated_at = NOW()
-		WHERE source = $1
-		  AND removed_at IS NULL
-		  AND updated_at < $2`, source, updatedBefore)
+	var count int
+	err := withTx(ctx, s.pool, func(tx pgx.Tx) error {
+		if err := acquireMaliciousMutationLocksTx(ctx, tx, source, false); err != nil {
+			return err
+		}
+		cmd, err := tx.Exec(ctx, `
+			UPDATE malicious_findings
+			SET removed_at = COALESCE(removed_at, NOW()),
+			    updated_at = NOW()
+			WHERE source = $1
+			  AND removed_at IS NULL
+			  AND updated_at < $2`, source, updatedBefore)
+		count = int(cmd.RowsAffected())
+		return err
+	})
 	if err != nil {
 		return 0, fmt.Errorf("postgres: prune stale malicious findings for source %s: %w", source, err)
 	}
 	s.invalidateDashboardStats()
-	return int(cmd.RowsAffected()), nil
+	return count, nil
 }
 
 func (s *Store) ListMaliciousFindings(ctx context.Context, source string, limit int) ([]db.MaliciousFinding, error) {

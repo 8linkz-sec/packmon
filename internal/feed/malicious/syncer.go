@@ -51,6 +51,21 @@ type Syncer struct {
 	repoURL string
 }
 
+type maliciousSnapshotReplacer interface {
+	ReplaceMaliciousFindingsSnapshot(
+		ctx context.Context,
+		source string,
+		stream func(yield func(active []db.MaliciousFinding, withdrawnIDs []string) error) error,
+	) (changed, withdrawn int, err error)
+}
+
+type maliciousWalkStats struct {
+	synced        int
+	entries       int
+	activeFinding int
+	roots         int
+}
+
 // NewSyncer creates a Syncer for the OpenSSF Malicious Packages feed.
 // dataDir is the parent directory where the repo will be cloned. If
 // empty, os.TempDir() is used.
@@ -139,75 +154,104 @@ func (s *Syncer) Sync(ctx context.Context, store db.Store) (*feed.SyncResult, er
 		)
 	}
 
-	// The repository has two potential directory layouts:
-	//   malicious/{ecosystem}/{name}/...json
-	//   osv/{ecosystem}/{name}/...json
-	// We try both.
-	var totalSynced, totalEntries, rootsFound int
-	var totalActiveFindings int
-
-	for _, dir := range []string{maliciousDir, osvDir} {
-		root := filepath.Join(repoDir, dir)
-		info, statErr := os.Stat(root)
-		if os.IsNotExist(statErr) {
-			continue
-		}
-		if statErr != nil {
-			s.recordSyncFailure(ctx, store, start, statErr)
-			return nil, fmt.Errorf("malicious: inspect feed root %s: %w", dir, statErr)
-		}
-		if !info.IsDir() {
-			validationErr := fmt.Errorf("feed root %s is not a directory", dir)
-			s.recordSyncFailure(ctx, store, start, validationErr)
-			return nil, fmt.Errorf("malicious: validate feed root: %w", validationErr)
-		}
-		rootsFound++
-
-		synced, entries, activeFindings, walkErr := s.walkEntries(ctx, store, root, nil)
-		if walkErr != nil {
-			s.recordSyncFailure(ctx, store, start, walkErr)
-			return nil, fmt.Errorf("malicious: walk %s: %w", dir, walkErr)
-		}
-		totalSynced += synced
-		totalEntries += entries
-		totalActiveFindings += activeFindings
-	}
-	if rootsFound == 0 {
-		validationErr := fmt.Errorf("expected feed roots %q or %q not found", maliciousDir, osvDir)
-		s.recordSyncFailure(ctx, store, start, validationErr)
-		return nil, fmt.Errorf("malicious: validate feed: %w", validationErr)
-	}
-	if totalEntries == 0 && totalActiveFindings == 0 {
-		validationErr := fmt.Errorf("no entries found under expected feed roots")
-		s.recordSyncFailure(ctx, store, start, validationErr)
-		return nil, fmt.Errorf("malicious: validate feed: %w", validationErr)
-	}
-	if totalActiveFindings == 0 {
-		validationErr := fmt.Errorf("no active supported entries found under expected feed roots")
-		s.recordSyncFailure(ctx, store, start, validationErr)
-		return nil, fmt.Errorf("malicious: validate feed: %w", validationErr)
-	}
-
-	pruned, pruneErr := s.pruneStaleFindings(ctx, store, start)
-	if pruneErr != nil {
-		s.recordSyncFailure(ctx, store, start, pruneErr)
-		return nil, fmt.Errorf("malicious: prune stale findings: %w", pruneErr)
+	stats, pruned, syncErr := s.syncRepositorySnapshot(ctx, store, repoDir, start)
+	if syncErr != nil {
+		s.recordSyncFailure(ctx, store, start, syncErr)
+		return nil, syncErr
 	}
 
 	duration := time.Since(start)
 	s.logger.Info("OpenSSF malicious packages sync completed",
-		slog.Int("synced", totalSynced),
-		slog.Int("total", totalEntries),
+		slog.Int("synced", stats.synced),
+		slog.Int("total", stats.entries),
 		slog.Int("pruned", pruned),
 		slog.String("commit", commitHash),
 		slog.Duration("duration", duration),
 	)
 
-	s.recordSyncSuccessWithCommit(ctx, store, duration, totalEntries, totalSynced, commitHash)
+	s.recordSyncSuccessWithCommit(ctx, store, duration, stats.entries, stats.synced, commitHash)
 	return &feed.SyncResult{
-		EntriesSynced: totalSynced,
-		EntriesTotal:  totalEntries,
+		EntriesSynced: stats.synced,
+		EntriesTotal:  stats.entries,
 	}, nil
+}
+
+func (s *Syncer) syncRepositorySnapshot(ctx context.Context, store db.Store, repoDir string, started time.Time) (maliciousWalkStats, int, error) {
+	if replacer, ok := store.(maliciousSnapshotReplacer); ok {
+		var stats maliciousWalkStats
+		_, pruned, err := replacer.ReplaceMaliciousFindingsSnapshot(ctx, FeedName, func(yield func(active []db.MaliciousFinding, withdrawnIDs []string) error) error {
+			var walkErr error
+			stats, walkErr = s.walkSnapshotRoots(ctx, repoDir, yield)
+			return walkErr
+		})
+		if err != nil {
+			return stats, 0, fmt.Errorf("malicious: replace snapshot: %w", err)
+		}
+		return stats, pruned, nil
+	}
+
+	stats, err := s.walkLegacyRoots(ctx, store, repoDir)
+	if err != nil {
+		return stats, 0, err
+	}
+	pruned, err := s.pruneStaleFindings(ctx, store, started)
+	if err != nil {
+		return stats, 0, fmt.Errorf("malicious: prune stale findings: %w", err)
+	}
+	return stats, pruned, nil
+}
+
+func (s *Syncer) walkLegacyRoots(ctx context.Context, store db.Store, repoDir string) (maliciousWalkStats, error) {
+	var stats maliciousWalkStats
+	for _, dir := range []string{maliciousDir, osvDir} {
+		root, found, err := inspectMaliciousRoot(repoDir, dir)
+		if err != nil {
+			return stats, err
+		}
+		if !found {
+			continue
+		}
+		stats.roots++
+		synced, entries, active, err := s.walkEntries(ctx, store, root, nil)
+		if err != nil {
+			return stats, fmt.Errorf("malicious: walk %s: %w", dir, err)
+		}
+		stats.synced += synced
+		stats.entries += entries
+		stats.activeFinding += active
+	}
+	if err := validateMaliciousWalkStats(stats); err != nil {
+		return stats, err
+	}
+	return stats, nil
+}
+
+func inspectMaliciousRoot(repoDir, dir string) (string, bool, error) {
+	root := filepath.Join(repoDir, dir)
+	info, err := os.Stat(root)
+	if os.IsNotExist(err) {
+		return root, false, nil
+	}
+	if err != nil {
+		return root, false, fmt.Errorf("malicious: inspect feed root %s: %w", dir, err)
+	}
+	if !info.IsDir() {
+		return root, false, fmt.Errorf("malicious: validate feed root: feed root %s is not a directory", dir)
+	}
+	return root, true, nil
+}
+
+func validateMaliciousWalkStats(stats maliciousWalkStats) error {
+	if stats.roots == 0 {
+		return fmt.Errorf("malicious: validate feed: expected feed roots %q or %q not found", maliciousDir, osvDir)
+	}
+	if stats.entries == 0 && stats.activeFinding == 0 {
+		return fmt.Errorf("malicious: validate feed: no entries found under expected feed roots")
+	}
+	if stats.activeFinding == 0 {
+		return fmt.Errorf("malicious: validate feed: no active supported entries found under expected feed roots")
+	}
+	return nil
 }
 
 // walkEntries traverses an entry root directory and processes each
@@ -265,31 +309,133 @@ func (s *Syncer) walkEntries(ctx context.Context, store db.Store, root string, s
 	return synced, total, activeFindings, err
 }
 
+type maliciousSnapshotBatch struct {
+	active    []db.MaliciousFinding
+	withdrawn []string
+}
+
+func (s *Syncer) walkSnapshotRoots(
+	ctx context.Context,
+	repoDir string,
+	yield func(active []db.MaliciousFinding, withdrawnIDs []string) error,
+) (maliciousWalkStats, error) {
+	var stats maliciousWalkStats
+	batch := maliciousSnapshotBatch{
+		active:    make([]db.MaliciousFinding, 0, db.MaliciousSnapshotBatchSize),
+		withdrawn: make([]string, 0, db.MaliciousSnapshotBatchSize),
+	}
+	flush := func() error {
+		if len(batch.active)+len(batch.withdrawn) == 0 {
+			return nil
+		}
+		if err := yield(batch.active, batch.withdrawn); err != nil {
+			return err
+		}
+		batch.active = make([]db.MaliciousFinding, 0, db.MaliciousSnapshotBatchSize)
+		batch.withdrawn = make([]string, 0, db.MaliciousSnapshotBatchSize)
+		return nil
+	}
+	add := func(findings []*db.MaliciousFinding, withdrawnIDs []string) error {
+		for _, finding := range findings {
+			if finding == nil {
+				continue
+			}
+			batch.active = append(batch.active, *finding)
+			if len(batch.active)+len(batch.withdrawn) == db.MaliciousSnapshotBatchSize {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+		}
+		for _, id := range withdrawnIDs {
+			batch.withdrawn = append(batch.withdrawn, id)
+			if len(batch.active)+len(batch.withdrawn) == db.MaliciousSnapshotBatchSize {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+
+	for _, dir := range []string{maliciousDir, osvDir} {
+		root, found, err := inspectMaliciousRoot(repoDir, dir)
+		if err != nil {
+			return stats, err
+		}
+		if !found {
+			continue
+		}
+		stats.roots++
+		synced, entries, active, err := s.walkSnapshotEntries(ctx, root, add)
+		if err != nil {
+			return stats, fmt.Errorf("malicious: walk %s: %w", dir, err)
+		}
+		stats.synced += synced
+		stats.entries += entries
+		stats.activeFinding += active
+	}
+	if err := validateMaliciousWalkStats(stats); err != nil {
+		return stats, err
+	}
+	if err := flush(); err != nil {
+		return stats, err
+	}
+	return stats, nil
+}
+
+func (s *Syncer) walkSnapshotEntries(
+	ctx context.Context,
+	root string,
+	add func(findings []*db.MaliciousFinding, withdrawnIDs []string) error,
+) (synced, total, activeFindings int, err error) {
+	rootDir, err := os.OpenRoot(root)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("open malicious feed root: %w", err)
+	}
+	defer func() { _ = rootDir.Close() }()
+
+	err = filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			return nil
+		}
+		total++
+		relativePath, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		findings, withdrawnIDs, err := s.parseMaliciousEntry(rootDir, relativePath)
+		if err != nil {
+			return err
+		}
+		if err := add(findings, withdrawnIDs); err != nil {
+			return err
+		}
+		if len(withdrawnIDs) > 0 {
+			synced += len(withdrawnIDs)
+			return nil
+		}
+		synced += len(findings)
+		activeFindings += len(findings)
+		return nil
+	})
+	return synced, total, activeFindings, err
+}
+
 func (s *Syncer) processMaliciousEntry(ctx context.Context, store db.Store, rootDir *os.Root, relativePath string, seenIDs map[string]struct{}) (int, int, error) {
-	fileName := filepath.Base(relativePath)
-	data, readErr := feed.ReadRootFileLimited(rootDir, relativePath, feed.MaxGitAdvisoryJSONSize)
-	if readErr != nil {
-		s.logger.Warn("failed to read entry file",
-			slog.String("file", fileName),
-			slog.String("error", feed.SafeDiagnosticError(readErr)),
-		)
-		return 0, 0, fmt.Errorf("read entry %s: %w", fileName, readErr)
+	findings, withdrawnIDs, err := s.parseMaliciousEntry(rootDir, relativePath)
+	if err != nil {
+		return 0, 0, err
 	}
-
-	var entry malEntry
-	if parseErr := json.Unmarshal(data, &entry); parseErr != nil {
-		s.logger.Warn("failed to parse entry JSON",
-			slog.String("file", fileName),
-			slog.String("error", feed.SafeDiagnosticError(parseErr)),
-		)
-		return 0, 0, fmt.Errorf("parse entry %s: %w", fileName, parseErr)
-	}
-
-	findings := mapToMaliciousFindings(&entry, relativePath)
-	if isWithdrawnEntry(&entry, relativePath) {
+	if len(withdrawnIDs) > 0 {
 		synced := 0
-		ids := findingIDsForTombstone(&entry, relativePath, findings)
-		for _, id := range ids {
+		for _, id := range withdrawnIDs {
 			if deleteErr := feed.DeleteMaliciousFindingForSource(ctx, store, id, FeedName); deleteErr != nil {
 				s.logger.Warn("failed to tombstone withdrawn malicious finding",
 					slog.String("id", id),
@@ -326,6 +472,33 @@ func (s *Syncer) processMaliciousEntry(ctx context.Context, store db.Store, root
 	}
 
 	return synced, active, nil
+}
+
+func (s *Syncer) parseMaliciousEntry(rootDir *os.Root, relativePath string) ([]*db.MaliciousFinding, []string, error) {
+	fileName := filepath.Base(relativePath)
+	data, readErr := feed.ReadRootFileLimited(rootDir, relativePath, feed.MaxGitAdvisoryJSONSize)
+	if readErr != nil {
+		s.logger.Warn("failed to read entry file",
+			slog.String("file", fileName),
+			slog.String("error", feed.SafeDiagnosticError(readErr)),
+		)
+		return nil, nil, fmt.Errorf("read entry %s: %w", fileName, readErr)
+	}
+
+	var entry malEntry
+	if parseErr := json.Unmarshal(data, &entry); parseErr != nil {
+		s.logger.Warn("failed to parse entry JSON",
+			slog.String("file", fileName),
+			slog.String("error", feed.SafeDiagnosticError(parseErr)),
+		)
+		return nil, nil, fmt.Errorf("parse entry %s: %w", fileName, parseErr)
+	}
+
+	findings := mapToMaliciousFindings(&entry, relativePath)
+	if isWithdrawnEntry(&entry, relativePath) {
+		return nil, findingIDsForTombstone(&entry, relativePath, findings), nil
+	}
+	return findings, nil, nil
 }
 
 func (s *Syncer) pruneStaleFindings(ctx context.Context, store db.Store, updatedBefore time.Time) (int, error) {

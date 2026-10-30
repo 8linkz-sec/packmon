@@ -14,6 +14,9 @@ import (
 func (s *Store) RepairCaseInsensitivePackageNames(ctx context.Context) (int, error) {
 	var repaired int
 	err := withTx(ctx, s.pool, func(tx pgx.Tx) error {
+		if err := acquireMaliciousMutationLocksTx(ctx, tx, "", true); err != nil {
+			return err
+		}
 		affected, err := repairAffectedPackageNames(ctx, tx)
 		if err != nil {
 			return err
@@ -37,6 +40,9 @@ func (s *Store) RepairCaseInsensitivePackageNames(ctx context.Context) (int, err
 func (s *Store) RepairCaseInsensitivePackageNamesWithAudit(ctx context.Context, audit *db.AdminAuditEntry) (int, error) {
 	var repaired int
 	err := withTx(ctx, s.pool, func(tx pgx.Tx) error {
+		if err := acquireMaliciousMutationLocksTx(ctx, tx, "", true); err != nil {
+			return err
+		}
 		affected, err := repairAffectedPackageNames(ctx, tx)
 		if err != nil {
 			return err

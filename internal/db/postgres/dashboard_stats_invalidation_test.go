@@ -18,6 +18,7 @@ func TestDashboardStatsMutationMethodsInvalidateCache(t *testing.T) {
 			"UpsertMaliciousFinding", "importMaliciousFeed", "DeleteMaliciousFinding", "DeleteMaliciousFindingForSource",
 			"DeleteMaliciousFindingsNotInSource", "PruneMaliciousFindingsForSourceUpdatedBefore",
 		},
+		"malicious_snapshot.go":       {"replaceMaliciousFindingsSnapshot"},
 		"reputation.go":               {"UpsertPackageReputation"},
 		"lifecycle.go":                {"ReplaceLifecycleProducts"},
 		"manual_advisories.go":        {"UpsertManualAdvisory", "UpsertManualAdvisoryWithAudit", "DeleteManualAdvisory", "DeleteManualAdvisoryWithAudit"},
