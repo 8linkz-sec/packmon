@@ -3,6 +3,7 @@ package sbomgen
 import (
 	"context"
 	"io"
+	"log/slog"
 
 	"github.com/8linkz-sec/packmon/internal/domain"
 )
@@ -39,6 +40,8 @@ type RunnerFunc func(ctx context.Context, opts RunOptions) ([]byte, error)
 type GenerateOptions struct {
 	// IncludeDev requests development dependencies when the generator supports that split.
 	IncludeDev bool
+	// Logger receives non-fatal generator warnings; nil discards them.
+	Logger *slog.Logger
 }
 
 // InstallSpec describes how to obtain or verify a missing generator.

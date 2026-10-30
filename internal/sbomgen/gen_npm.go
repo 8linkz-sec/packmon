@@ -1,14 +1,17 @@
 package sbomgen
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/8linkz-sec/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/logsafe"
 )
 
 type npmGenerator struct{}
@@ -38,12 +41,56 @@ func (npmGenerator) Generate(ctx context.Context, d Detection, outPath string, o
 	if !opts.IncludeDev {
 		args = append(args, "--omit", "dev")
 	}
-	args = append(args, "--", d.ManifestPath)
-	out, err := run(ctx, RunOptions{Name: "cyclonedx-npm", Args: args})
-	if err != nil {
+	out, err := run(ctx, RunOptions{Name: "cyclonedx-npm", Args: npmManifestArgs(args, d.ManifestPath)})
+	if err == nil {
+		return nil
+	}
+	if !bytes.Contains(out, []byte(npmLSProblemsCode)) {
 		return fmt.Errorf("cyclonedx-npm: %w: %s", err, commandOutputSummary(out))
 	}
+
+	// npm ls reports tree problems that do not stop it from emitting a usable
+	// tree, notably bundleDependencies of optional platform packages (e.g.
+	// @tailwindcss/oxide-wasm32-wasi) that npm never records in the lockfile.
+	// Retry once ignoring them, and warn with the reported problems so the
+	// gap stays visible instead of failing the whole scan.
+	retryArgs := npmManifestArgs(append(append([]string(nil), args...), "--ignore-npm-errors"), d.ManifestPath)
+	retryOut, retryErr := run(ctx, RunOptions{Name: "cyclonedx-npm", Args: retryArgs})
+	if retryErr != nil {
+		return fmt.Errorf("cyclonedx-npm: %w: %s; retry with --ignore-npm-errors: %w: %s",
+			err, commandOutputSummary(out), retryErr, commandOutputSummary(retryOut))
+	}
+	if opts.Logger != nil {
+		opts.Logger.Warn("npm reported dependency-tree problems; generated SBOM with --ignore-npm-errors and may omit these packages",
+			"manifest", d.DisplayPath,
+			"npm_problems", logsafe.BoundedDiagnosticValue(strings.Join(npmLSProblems(out), "; "), maxCommandOutputBytes),
+		)
+	}
 	return nil
+}
+
+// npmLSProblemsCode is the npm error code for missing, invalid, or extraneous
+// packages in the dependency tree reported by `npm ls`.
+const npmLSProblemsCode = "ELSPROBLEMS"
+
+var npmLSProblemPattern = regexp.MustCompile(`(?:missing|invalid|extraneous): [^,\s]+(?:, required by [^,\s]+)?`)
+
+func npmManifestArgs(args []string, manifestPath string) []string {
+	return append(append([]string(nil), args...), "--", manifestPath)
+}
+
+// npmLSProblems returns the de-duplicated problem entries from npm ls output
+// in first-seen order.
+func npmLSProblems(out []byte) []string {
+	var problems []string
+	seen := map[string]bool{}
+	for _, problem := range npmLSProblemPattern.FindAllString(string(out), -1) {
+		if !seen[problem] {
+			seen[problem] = true
+			problems = append(problems, problem)
+		}
+	}
+	return problems
 }
 
 func npmHasLockfileScoped(root, projectDir string) (bool, error) {

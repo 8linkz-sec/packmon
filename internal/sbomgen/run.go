@@ -97,7 +97,7 @@ func Run(ctx context.Context, cfg Config) (result Result, err error) {
 	}()
 
 	paths := make([]string, 0, len(detections))
-	opts := GenerateOptions{IncludeDev: cfg.IncludeDev}
+	opts := GenerateOptions{IncludeDev: cfg.IncludeDev, Logger: cfg.Logger}
 	usedNames := map[string]int{}
 	nameTag := ""
 	if cfg.KeepSBOMDir != "" {

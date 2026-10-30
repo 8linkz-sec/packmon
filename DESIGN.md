@@ -369,7 +369,14 @@ Important behavior:
   captures `go list` stdout as data separately from the bounded stderr
   diagnostics under the generated-SBOM size cap, so large module lists are
   neither truncated by the small diagnostic bound nor interleaved with
-  stderr; exceeding the data cap fails the generation explicitly. Generation runs local
+  stderr; exceeding the data cap fails the generation explicitly. When
+  `cyclonedx-npm` fails because `npm ls` reports dependency-tree problems
+  (`ELSPROBLEMS`, e.g. bundled dependencies of an optional platform package
+  that npm never records in the lockfile), the npm generator retries once with
+  `--ignore-npm-errors` and logs a warning naming the manifest and the reported
+  packages; any other generator failure, or a failed retry, still aborts.
+  Because the scan also parses the lockfile itself, packages missing from such
+  an SBOM are still checked. Generation runs local
   external toolchains and may cause those toolchains to contact package
   registries.
 - config precedence is flags, environment, project `.packmon.yaml`, user-global
