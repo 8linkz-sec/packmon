@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"slices"
 	"testing"
 	"time"
 
@@ -425,6 +426,63 @@ func TestRecordNVDCVSSNegativeLookupIsIdempotentAndNormalises(t *testing.T) {
 	for _, blank := range []string{"", "   "} {
 		if err := store.RecordNVDCVSSNegativeLookup(ctx, blank); err != nil {
 			t.Fatalf("RecordNVDCVSSNegativeLookup(%q) = %v, want a silent no-op", blank, err)
+		}
+	}
+}
+
+// TestFindUnknownSeverityCVEIDsHonoursNegativeCacheWindow pins the 30-day
+// negative-cache window: without an NVD API key a full pass over the CVEs NVD
+// has no CVSS for takes hours, so a CVE stays skipped for 30 days after a
+// negative lookup and only then becomes a candidate again.
+func TestFindUnknownSeverityCVEIDsHonoursNegativeCacheWindow(t *testing.T) {
+	store, _ := startDockerPostgresStore(t)
+	ctx := context.Background()
+	const cve = "CVE-2026-9101"
+
+	now := time.Now().UTC()
+	if _, _, err := store.ImportVulnerabilityFeed(ctx, "osv", []db.Vulnerability{{
+		ID:               "GO-2026-9101",
+		Summary:          "negative cache fixture",
+		Severity:         "UNKNOWN",
+		Published:        now,
+		Modified:         now,
+		Aliases:          []db.VulnerabilityAlias{{AliasID: cve}},
+		Sources:          []db.VulnerabilitySource{{Source: "osv", SourceID: "GO-2026-9101"}},
+		AffectedPackages: []db.AffectedPackage{{Ecosystem: "go", Name: "example.com/negative-cache"}},
+	}}, nil, nil); err != nil {
+		t.Fatalf("seed %s: %v", cve, err)
+	}
+	isCandidate := func() bool {
+		t.Helper()
+		ids, err := store.FindUnknownSeverityCVEIDs(ctx, "", 100)
+		if err != nil {
+			t.Fatalf("FindUnknownSeverityCVEIDs: %v", err)
+		}
+		return slices.Contains(ids, cve)
+	}
+
+	if !isCandidate() {
+		t.Fatalf("%s without a negative lookup must be a candidate", cve)
+	}
+	if err := store.RecordNVDCVSSNegativeLookup(ctx, cve); err != nil {
+		t.Fatalf("RecordNVDCVSSNegativeLookup: %v", err)
+	}
+	for _, tc := range []struct {
+		age  string
+		want bool
+	}{
+		{age: "0 days", want: false},
+		{age: "8 days", want: false},
+		{age: "29 days", want: false},
+		{age: "31 days", want: true},
+	} {
+		if _, err := store.pool.Exec(ctx,
+			`UPDATE nvd_cvss_negative_cache SET checked_at = NOW() - $2::interval WHERE cve_id = $1`, cve, tc.age,
+		); err != nil {
+			t.Fatalf("age negative lookup to %s: %v", tc.age, err)
+		}
+		if got := isCandidate(); got != tc.want {
+			t.Fatalf("candidate after a negative lookup %s old = %v, want %v", tc.age, got, tc.want)
 		}
 	}
 }

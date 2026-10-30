@@ -487,8 +487,11 @@ at WARN with a separate `failed` count, and is recorded as an error without
 the manager's usual immediate retries: retrying seconds after a run that
 already exhausted the rate limit would hit the same wall and only add load.
 The feed resumes at its next scheduled sync and picks up where it stopped,
-because CVEs enriched so far drop out of the discovery query. Repeated
-`failed` counts are the signal to configure `PACKMON_NVD_API_KEY`.
+because CVEs enriched so far drop out of the discovery query. CVEs for which
+NVD returned no CVSS data are recorded in `nvd_cvss_negative_cache` and skipped
+for 30 days, or until their advisory changes, so an interrupted run (server
+restart, image rebuild) loses at most the CVE in flight. Repeated `failed`
+counts are the signal to configure `PACKMON_NVD_API_KEY`.
 
 ### Feed scheduler controls
 
