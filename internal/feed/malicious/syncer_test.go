@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -37,6 +38,40 @@ type maliciousTestStore struct {
 	stalePruneErr     error
 	maxNotInPruneIDs  int
 	rejectCanceled    bool
+}
+
+type maliciousSnapshotTestStore struct {
+	*maliciousTestStore
+	snapshotBatches   []int
+	snapshotActive    []db.MaliciousFinding
+	snapshotWithdraw  []string
+	snapshotFinalized bool
+	snapshotErr       error
+}
+
+func (s *maliciousSnapshotTestStore) ReplaceMaliciousFindingsSnapshot(
+	_ context.Context,
+	source string,
+	stream func(func([]db.MaliciousFinding, []string) error) error,
+) (int, int, error) {
+	if source != FeedName {
+		return 0, 0, fmt.Errorf("source = %q, want %q", source, FeedName)
+	}
+	var stagedActive []db.MaliciousFinding
+	var stagedWithdrawn []string
+	err := stream(func(active []db.MaliciousFinding, withdrawn []string) error {
+		s.snapshotBatches = append(s.snapshotBatches, len(active)+len(withdrawn))
+		stagedActive = append(stagedActive, active...)
+		stagedWithdrawn = append(stagedWithdrawn, withdrawn...)
+		return s.snapshotErr
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	s.snapshotActive = stagedActive
+	s.snapshotWithdraw = stagedWithdrawn
+	s.snapshotFinalized = true
+	return len(stagedActive), len(stagedWithdrawn), nil
 }
 
 func (s *maliciousTestStore) UpsertMaliciousFinding(_ context.Context, finding *db.MaliciousFinding) error {
@@ -675,6 +710,95 @@ func TestSyncPrunesStaleOpenSSFFindingsByCutoffWithoutFullSeenIDList(t *testing.
 	}
 	if len(store.findings) != 3 {
 		t.Fatalf("upserted findings = %d, want 3", len(store.findings))
+	}
+}
+
+func TestSyncUsesSnapshotWithoutLegacyMutations(t *testing.T) {
+	t.Parallel()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	dataDir := t.TempDir()
+	repoDir := filepath.Join(dataDir, "malicious-packages")
+	initGitRepo(t, repoDir)
+	for i := 0; i < 2; i++ {
+		id := fmt.Sprintf("MAL-snapshot-%04d", i)
+		writeFile(t, filepath.Join(repoDir, maliciousDir, "npm", id, id+".json"), `{
+			"id":"`+id+`",
+			"summary":"backdoor package",
+			"affected":[{"package":{"ecosystem":"npm","name":"pkg-`+id+`"}}]
+		}`)
+	}
+	writeFile(t, filepath.Join(repoDir, osvDir, "pypi", "active", "MAL-snapshot-active.json"), `{
+		"id":"MAL-snapshot-active",
+		"summary":"backdoor package",
+		"affected":[{"package":{"ecosystem":"PyPI","name":"Active_Pkg"}}]
+	}`)
+	writeFile(t, filepath.Join(repoDir, maliciousDir, "withdrawn", "npm", "old", "MAL-snapshot-withdrawn.json"), `{
+		"id":"MAL-snapshot-withdrawn",
+		"withdrawn":"2026-05-26T13:04:03Z",
+		"affected":[{"package":{"ecosystem":"npm","name":"old"}}]
+	}`)
+	gitCommitAll(t, repoDir)
+
+	legacy := &maliciousTestStore{}
+	store := &maliciousSnapshotTestStore{maliciousTestStore: legacy}
+	syncer := NewSyncer(slog.New(slog.NewTextHandler(os.Stdout, nil)), dataDir)
+	result, err := syncer.Sync(context.Background(), store)
+	if err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	if !store.snapshotFinalized {
+		t.Fatal("snapshot was not finalized")
+	}
+	if len(store.snapshotActive) != 3 || len(store.snapshotWithdraw) != 1 {
+		t.Fatalf("snapshot active/withdrawn = %d/%d, want 3/1", len(store.snapshotActive), len(store.snapshotWithdraw))
+	}
+	for _, size := range store.snapshotBatches {
+		if size <= 0 || size > db.MaliciousSnapshotBatchSize {
+			t.Fatalf("snapshot batch size = %d, want 1..%d", size, db.MaliciousSnapshotBatchSize)
+		}
+	}
+	if len(legacy.findings) != 0 || len(legacy.deletedIDs) != 0 || legacy.stalePrunedSource != "" {
+		t.Fatalf("legacy mutations = findings %d deletes %v prune %q, want none", len(legacy.findings), legacy.deletedIDs, legacy.stalePrunedSource)
+	}
+	if result.EntriesSynced != 4 || result.EntriesTotal != 4 {
+		t.Fatalf("Sync() result = %+v, want existing processed-entry semantics", result)
+	}
+}
+
+func TestSyncSnapshotFailureDoesNotFinalizeOrFallBack(t *testing.T) {
+	t.Parallel()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	dataDir := t.TempDir()
+	repoDir := filepath.Join(dataDir, "malicious-packages")
+	initGitRepo(t, repoDir)
+	writeFile(t, filepath.Join(repoDir, maliciousDir, "npm", "bad", "MAL-bad.json"), `{
+		"id":"MAL-bad",
+		"summary":"backdoor package",
+		"affected":[{"package":{"ecosystem":"npm","name":"bad"}}]
+	}`)
+	gitCommitAll(t, repoDir)
+
+	legacy := &maliciousTestStore{}
+	store := &maliciousSnapshotTestStore{
+		maliciousTestStore: legacy,
+		snapshotErr:        errors.New("snapshot staging failed"),
+	}
+	syncer := NewSyncer(slog.New(slog.NewTextHandler(os.Stdout, nil)), dataDir)
+	result, err := syncer.Sync(context.Background(), store)
+	if err == nil || !strings.Contains(err.Error(), "snapshot staging failed") {
+		t.Fatalf("Sync() error = %v, want snapshot staging failure", err)
+	}
+	if result != nil || store.snapshotFinalized {
+		t.Fatalf("result/finalized = %+v/%v, want nil/false", result, store.snapshotFinalized)
+	}
+	if len(legacy.findings) != 0 || len(legacy.deletedIDs) != 0 || legacy.stalePrunedSource != "" {
+		t.Fatalf("legacy fallback mutated store: findings=%d deletes=%v prune=%q", len(legacy.findings), legacy.deletedIDs, legacy.stalePrunedSource)
 	}
 }
 

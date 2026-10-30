@@ -27,6 +27,9 @@ func (s *Store) UpsertManualAdvisory(ctx context.Context, advisory *db.ManualAdv
 		return fmt.Errorf("postgres: unsupported manual advisory finding type %q", advisory.FindingType)
 	}
 	return withTx(ctx, s.pool, func(tx pgx.Tx) error {
+		if err := acquireMaliciousMutationLockTx(ctx, tx); err != nil {
+			return err
+		}
 		if err := acquireManualAdvisoryLockTx(ctx, tx, advisory.ID); err != nil {
 			return err
 		}
@@ -45,6 +48,9 @@ func (s *Store) UpsertManualAdvisoryWithAudit(ctx context.Context, advisory *db.
 		return fmt.Errorf("postgres: unsupported manual advisory finding type %q", advisory.FindingType)
 	}
 	return withTx(ctx, s.pool, func(tx pgx.Tx) error {
+		if err := acquireMaliciousMutationLockTx(ctx, tx); err != nil {
+			return err
+		}
 		if err := acquireManualAdvisoryLockTx(ctx, tx, advisory.ID); err != nil {
 			return err
 		}
@@ -89,6 +95,9 @@ func (s *Store) DeleteManualAdvisory(ctx context.Context, id string) error {
 		return err
 	}
 	return withTx(ctx, s.pool, func(tx pgx.Tx) error {
+		if err := acquireMaliciousMutationLockTx(ctx, tx); err != nil {
+			return err
+		}
 		if err := acquireManualAdvisoryLockTx(ctx, tx, id); err != nil {
 			return err
 		}
@@ -101,6 +110,9 @@ func (s *Store) DeleteManualAdvisoryWithAudit(ctx context.Context, id string, au
 		return err
 	}
 	return withTx(ctx, s.pool, func(tx pgx.Tx) error {
+		if err := acquireMaliciousMutationLockTx(ctx, tx); err != nil {
+			return err
+		}
 		if err := acquireManualAdvisoryLockTx(ctx, tx, id); err != nil {
 			return err
 		}
