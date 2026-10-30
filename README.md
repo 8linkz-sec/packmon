@@ -786,8 +786,10 @@ input source (`lockfile`, `sbom`, `dockerfile`, `compose`, `config.xml`, or
 `choco-install`), scope, relation,
 and vulnerability marker. The HTML report intentionally
 omits noisy `Via` and `Flags` columns. Its `Packages Needing Attention` section
-shows actionable updates, removed packages, and packages with security
-findings; unknown latest-status rows stay in `All Packages`.
+shows packages with security or lifecycle findings; ordinary update candidates
+appear in a separate visible `Available Updates` section, and unknown
+latest-status rows stay in `All Packages`. Summary badges act as in-page links
+to these unfiltered sections when their target section is present.
 Finding-derived states such as `Malicious`, `Removed`, `Supply-chain risk`,
 and `Lifecycle` override general latest-version status.
 Standard scan artifact flags such as `--output-json`, `--output-sarif`, and

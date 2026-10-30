@@ -590,6 +590,8 @@ const listAllHTMLStyle = `:root{` + reporthtml.DarkBaseThemeCSS +
 	`--link:#58a6ff;` + cliHTMLReportScaleCSS + `}` + cliHTMLReportBaseCSS + `
 h2{font-size:var(--report-type-lg);margin:var(--report-space-6) 0 var(--report-space-2);color:var(--heading);border-bottom:1px solid var(--border);padding-bottom:var(--report-space-1);}
 .bad{color:var(--crit);border-color:var(--crit);}
+.summary-link:focus-visible{outline:var(--report-focus-ring) solid var(--link);outline-offset:var(--report-focus-offset);}
+.report-anchor{scroll-margin-block-start:var(--report-space-5);}
 .hint{margin:var(--report-space-2) 0 0;color:var(--dim);font-size:var(--report-type-xs);max-width:70rem;}
 .table-scroll{overflow-x:auto;border:1px solid var(--border);border-radius:var(--report-radius-md);background:var(--panel);}
 .table-scroll:focus{outline:var(--report-focus-ring) solid var(--link);outline-offset:var(--report-focus-offset);}
@@ -723,7 +725,8 @@ a:hover{text-decoration:underline;}
 	`}.status,.warning,.empty,.finding-section{break-inside:avoid;page-break-inside:avoid;` +
 	`background:#fff;}a{color:var(--link);}a[href]::after{content:" (" attr(href) ")";` +
 	`display:inline;inline-size:auto;block-size:auto;margin-inline-start:0;border:0;` +
-	`transform:none;color:var(--dim);overflow-wrap:anywhere;word-break:break-word;}}`
+	`transform:none;color:var(--dim);overflow-wrap:anywhere;word-break:break-word;` +
+	`}.summary-link[href]::after{content:none;}}`
 
 const listAllHTMLPackageTableRow = `<tr><td class="name"><bdi dir="auto">{{.Name}}` +
 	`</bdi></td><td class="installed">{{if .InstalledCopy}}` +
@@ -758,16 +761,16 @@ const listAllHTMLBody = `
 	` &middot; {{if .PackageInfo.ScannedAtDateTime}}<time datetime="{{.PackageInfo.ScannedAtDateTime}}" ` +
 	`data-report-time="scanned-at">{{.PackageInfo.ScannedAt}}</time>{{else}}{{.PackageInfo.ScannedAt}}{{end}}{{end}}</div>` + `
 <div class="summary">
-<span class="badge">{{count (len .PackageRows) .Messages.PackageSingular .Messages.PackagePlural}}</span>
-<span class="badge warn">{{count .PackageInfo.WithUpdates .Messages.WithUpdateSingular .Messages.WithUpdatePlural}}</span>
-<span class="badge bad">{{count .PackageInfo.Vulnerable .Messages.VulnerabilitySingular .Messages.VulnerabilityPlural}}</span>
-<span class="badge">{{count .PackageInfo.Unknown .Messages.UnknownSingular .Messages.UnknownPlural}}</span>
-{{range .ScopeSummary}}<span class="badge">{{.Scope}} {{.Count}}</span>{{end}}
+<a class="badge summary-link" href="#all-packages">{{count (len .PackageRows) .Messages.PackageSingular .Messages.PackagePlural}}</a>
+{{if .Updates}}<a class="badge warn summary-link" href="#available-updates">{{count .PackageInfo.WithUpdates .Messages.WithUpdateSingular .Messages.WithUpdatePlural}}</a>{{else}}<span class="badge warn">{{count .PackageInfo.WithUpdates .Messages.WithUpdateSingular .Messages.WithUpdatePlural}}</span>{{end}}
+<a class="badge bad summary-link" href="#security-findings">{{count .PackageInfo.Vulnerable .Messages.VulnerabilitySingular .Messages.VulnerabilityPlural}}</a>
+<a class="badge summary-link" href="#all-packages">{{count .PackageInfo.Unknown .Messages.UnknownSingular .Messages.UnknownPlural}}</a>
+{{range .ScopeSummary}}<a class="badge summary-link" href="#all-packages">{{.Scope}} {{.Count}}</a>{{end}}
 </div>
 {{if .PackageInfo.Unknown}}<div class="hint"><bdi dir="auto">{{.Messages.UnknownStatusHint}}</bdi></div>{{end}}
 {{if .Status}}<div class="status">{{.Messages.StatusPrefix}} <bdi dir="auto">{{.Status}}</bdi></div>{{end}}
 {{range .Warnings}}<div class="warning"><bdi dir="auto">{{.}}</bdi></div>{{end}}
-<h2>{{.Messages.PackagesNeedingAttentionHeading}}</h2>
+<h2 id="packages-needing-attention" class="report-anchor">{{.Messages.PackagesNeedingAttentionHeading}}</h2>
 {{if .Attention}}
 <div class="table-scroll" tabindex="0" role="region" aria-label="{{.Messages.PackagesNeedingAttentionTableLabel}}">
 <table class="package-table attention-table">
@@ -785,7 +788,7 @@ const listAllHTMLBody = `
 {{else if .Warnings}}
 <div class="empty warning-empty">{{.Messages.PackageAttentionWarnings}}</div>
 {{end}}
-<h2>{{.Messages.SecurityFindingsHeading}}</h2>
+<h2 id="security-findings" class="report-anchor">{{.Messages.SecurityFindingsHeading}}</h2>
 {{if .Findings}}
 {{range .Findings}}
 <div class="finding-section">
@@ -820,7 +823,7 @@ const listAllHTMLBody = `
 <div class="empty warning-empty">{{.Messages.SecurityFindingsWarnings}}</div>
 {{end}}
 {{if .Updates}}
-<h2>{{.Messages.AvailableUpdatesHeading}} <span class="count">({{len .Updates}})</span></h2>
+<h2 id="available-updates" class="report-anchor">{{.Messages.AvailableUpdatesHeading}} <span class="count">({{len .Updates}})</span></h2>
 <div class="table-scroll" tabindex="0" role="region" aria-label="{{.Messages.AvailableUpdatesTableLabel}}">
 <table class="package-table updates-table">
 ` + `<thead><tr><th scope="col" class="name">{{.Messages.PackageColumn}}</th><th scope="col" class="installed">{{.Messages.InstalledColumn}}</th>` +
@@ -835,7 +838,7 @@ const listAllHTMLBody = `
 {{end}}
 {{if .PackageRows}}
 <details class="inventory-details">
-<summary>{{.Messages.AllPackagesHeading}} <span class="count">({{count (len .PackageRows) .Messages.PackageSingular .Messages.PackagePlural}})</span></summary>
+<summary id="all-packages" class="report-anchor">{{.Messages.AllPackagesHeading}} <span class="count">({{count (len .PackageRows) .Messages.PackageSingular .Messages.PackagePlural}})</span></summary>
 <div class="table-scroll" tabindex="0" role="region" aria-label="{{.Messages.AllPackagesTableLabel}}">
 <table class="package-table inventory-table">
 ` + `<thead><tr><th scope="col" class="name">{{.Messages.PackageColumn}}</th><th scope="col" class="installed">{{.Messages.InstalledColumn}}</th>` +
@@ -849,7 +852,7 @@ const listAllHTMLBody = `
 </div>
 </details>
 {{else}}
-<h2>{{.Messages.AllPackagesHeading}}</h2>
+<h2 id="all-packages" class="report-anchor">{{.Messages.AllPackagesHeading}}</h2>
 {{if not .Warnings}}
 <div class="empty">{{.Messages.NoPackagesFound}}</div>
 {{else}}
@@ -857,7 +860,7 @@ const listAllHTMLBody = `
 {{end}}
 {{end}}
 {{if .Sources}}
-<h2>{{.Messages.CheckedInventorySourcesHeading}}</h2>
+<h2 id="checked-inventory-sources" class="report-anchor">{{.Messages.CheckedInventorySourcesHeading}}</h2>
 <ul class="source-list">
 ` + `{{range .Sources}}<li><span class="source-kind">{{.Kind}}` +
 	`</span><span class="source-path"><bdi dir="auto">{{.Path}}</bdi></span></li>{{end}}` + `
