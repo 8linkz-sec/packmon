@@ -399,7 +399,8 @@ func assertN8NMainConnection(t *testing.T, connections map[string]map[string][][
 	Node  string `json:"node"`
 	Type  string `json:"type"`
 	Index int    `json:"index"`
-}, from, wantNode string) {
+}, from, wantNode string,
+) {
 	t.Helper()
 	branches := connections[from]["main"]
 	if len(branches) != 1 || len(branches[0]) != 1 {

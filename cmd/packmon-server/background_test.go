@@ -212,6 +212,7 @@ func TestNewFeedSyncerWiresConfiguredMirrorURLs(t *testing.T) {
 func TestNewNVDSyncerForwardsConfiguredAPIKey(t *testing.T) {
 	t.Parallel()
 
+	//nolint:gosec // G101: fixture credential, deliberately fake.
 	cfg := &config.Config{Feeds: config.FeedsConfig{
 		NVDAPIKey: "test-nvd-api-key",
 		NVDAPIURL: "https://mirror.example/nvd/rest/json/cves/2.0",

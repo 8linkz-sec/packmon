@@ -67,8 +67,8 @@ func TestDockerBuildsStampBinaryMetadata(t *testing.T) {
 		"VERSION: ${PACKMON_VERSION:-dev}",
 		"COMMIT: ${PACKMON_COMMIT:-none}",
 		"DATE: ${PACKMON_BUILD_DATE:-unknown}",
-		"PACKMON_GO_BUILDER_IMAGE: ${PACKMON_GO_BUILDER_IMAGE:-golang:1.27.0-alpine@sha256:4c9fe60190a2a3350ddc51de80d0224b8a6698d12bdfc999fee45ea9d6c46dbc}",
-		"PACKMON_ALPINE_RUNTIME_IMAGE: ${PACKMON_ALPINE_RUNTIME_IMAGE:-alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b}",
+		"PACKMON_GO_BUILDER_IMAGE: ${PACKMON_GO_BUILDER_IMAGE:-golang:1.27.3-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb}",
+		"PACKMON_ALPINE_RUNTIME_IMAGE: ${PACKMON_ALPINE_RUNTIME_IMAGE:-alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a}",
 	} {
 		if !strings.Contains(composeText, want) {
 			t.Fatalf("docker-compose.yml missing build arg %q", want)
@@ -86,7 +86,7 @@ func TestDockerRuntimeStagesUseCurrentAlpine(t *testing.T) {
 	}
 	dockerText := string(dockerData)
 	for _, want := range []string{
-		"ARG PACKMON_ALPINE_RUNTIME_IMAGE=alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b",
+		"ARG PACKMON_ALPINE_RUNTIME_IMAGE=alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a",
 		"FROM ${PACKMON_ALPINE_RUNTIME_IMAGE} AS server",
 		"FROM ${PACKMON_ALPINE_RUNTIME_IMAGE} AS cli",
 	} {
@@ -258,8 +258,8 @@ func TestDockerfilePinsAllExternalBaseImagesByDigest(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		"ARG PACKMON_GO_BUILDER_IMAGE=golang:1.27.0-alpine@sha256:4c9fe60190a2a3350ddc51de80d0224b8a6698d12bdfc999fee45ea9d6c46dbc",
-		"ARG PACKMON_ALPINE_RUNTIME_IMAGE=alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b",
+		"ARG PACKMON_GO_BUILDER_IMAGE=golang:1.27.3-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb",
+		"ARG PACKMON_ALPINE_RUNTIME_IMAGE=alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a",
 	} {
 		if !strings.Contains(string(dockerData), want) {
 			t.Fatalf("Dockerfile missing digest-pinned mirror build arg default %q", want)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"strconv"
 	"testing"
 
 	"github.com/8linkz-sec/packmon/internal/domain"
@@ -55,7 +56,7 @@ func TestWriteListAllSecurityFindingsPropagatesWriterErrors(t *testing.T) {
 func TestListAllTerminalFindingTableAndRowPropagateWriterErrors(t *testing.T) {
 	row := listAllWriterFindingRow()
 	for _, failAt := range []int{1, 2, 3, 4} {
-		t.Run("table write "+string(rune('0'+failAt)), func(t *testing.T) {
+		t.Run("table write "+strconv.Itoa(failAt), func(t *testing.T) {
 			writer := &failListAllTerminalWriter{failAt: failAt}
 			err := writeListAllTerminalFindingTable(writer, []listAllFindingRow{row}, true)
 			if !errors.Is(err, errListAllTerminalWrite) {
@@ -64,7 +65,7 @@ func TestListAllTerminalFindingTableAndRowPropagateWriterErrors(t *testing.T) {
 		})
 	}
 	for _, failAt := range []int{1, 2} {
-		t.Run("row write "+string(rune('0'+failAt)), func(t *testing.T) {
+		t.Run("row write "+strconv.Itoa(failAt), func(t *testing.T) {
 			writer := &failListAllTerminalWriter{failAt: failAt}
 			err := writeListAllTerminalFindingRow(writer, row, "%-8s  %s\n", 8, true)
 			if !errors.Is(err, errListAllTerminalWrite) {

@@ -101,9 +101,9 @@ func TestWebAssetAndOpenAPILintScriptsArePinned(t *testing.T) {
 
 	for name, wantVersion := range map[string]string{
 		"@eslint/js":   "10.0.1",
-		"@redocly/cli": "2.54.2",
-		"eslint":       "10.11.0",
-		"stylelint":    "17.15.0",
+		"@redocly/cli": "2.70.0",
+		"eslint":       "10.13.0",
+		"stylelint":    "17.16.0",
 	} {
 		if got := pkg.DevDependencies[name]; got != wantVersion {
 			t.Fatalf("package.json devDependency %s = %q, want %q", name, got, wantVersion)
@@ -183,7 +183,7 @@ func TestMakefileLintTargetsEnforcePinnedTooling(t *testing.T) {
 	makefile := readRepoFile(t, "Makefile")
 	for _, want := range []string{
 		"GOFUMPT_VERSION ?= v0.9.2",
-		"GOLANGCI_LINT_VERSION ?= v2.11.0",
+		"GOLANGCI_LINT_VERSION ?= v2.14.0",
 		"SHELLCHECK_IMAGE ?= koalaman/shellcheck-alpine:v0.10.0",
 		"HADOLINT_IMAGE ?= hadolint/hadolint:v2.12.0-alpine",
 		"ACTIONLINT_VERSION ?= v1.7.7",

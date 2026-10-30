@@ -27,7 +27,7 @@ func TestOutdatedHTMLReportCSPBlocksNetworkCapabilities(t *testing.T) {
 	if err := writeOutdatedHTML(reportPath, outdatedReport{Total: 1, PackageWord: "package"}); err != nil {
 		t.Fatalf("write outdated report: %v", err)
 	}
-	report, err := os.ReadFile(reportPath)
+	report, err := os.ReadFile(reportPath) //nolint:gosec // G304: path built by the test itself, not from request data.
 	if err != nil {
 		t.Fatalf("read generated report: %v", err)
 	}
@@ -159,7 +159,7 @@ func runCLIHTMLReportBrowser(t *testing.T, browser string, args []string) ([]byt
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, browser, args...)
+	cmd := exec.CommandContext(ctx, browser, args...) //nolint:gosec // G204: browser resolved by the test's own lookup; args are test constants.
 	output, err := cmd.CombinedOutput()
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return output, fmt.Errorf("timed out after 15s")
@@ -168,6 +168,6 @@ func runCLIHTMLReportBrowser(t *testing.T, browser string, args []string) ([]byt
 }
 
 func cliHTMLReportFileExists(path string) bool {
-	info, err := os.Stat(path)
+	info, err := os.Stat(path) //nolint:gosec // G703: candidate browser paths are test constants.
 	return err == nil && !info.IsDir()
 }

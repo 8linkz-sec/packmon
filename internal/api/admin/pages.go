@@ -33,7 +33,7 @@ const (
 	apiKeyExpiresCustomValue = "custom"
 	maxAPIKeyNameLength      = 128
 	apiKeyCreateNonceField   = "create_nonce"
-	//nolint:gosec // G101: flash-message key name, not a credential.
+	// #nosec G101 -- flash-message key name, not a credential.
 	apiKeyCreateNonceFlashKey = "api_key_create_nonce"
 	adminAuditPageSize        = 100
 	adminAPIKeyPageSize       = 100

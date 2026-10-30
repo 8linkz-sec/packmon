@@ -132,7 +132,7 @@ func TestRunAuditRetentionOnceUsesBackgroundForNilContext(t *testing.T) {
 	t.Parallel()
 
 	store := &deadlineCapturingAuditRetentionStore{}
-	runAuditRetentionOnce(nil, config.RetentionConfig{ScanLog: time.Hour}, config.FeedsConfig{}, store, nil)
+	runAuditRetentionOnce(nil, config.RetentionConfig{ScanLog: time.Hour}, config.FeedsConfig{}, store, nil) //nolint:staticcheck // SA1012: the nil-context fallback is under test.
 
 	if len(store.calls) != 1 {
 		t.Fatalf("prune calls = %d, want 1", len(store.calls))

@@ -126,7 +126,7 @@ func TestHookInstallOperationalFailuresPreserveHooks(t *testing.T) {
 			}
 			hookPath := filepath.Join(hooksDir, "pre-push")
 			if tc.hook != nil {
-				if err := os.WriteFile(hookPath, tc.hook, 0o700); err != nil {
+				if err := os.WriteFile(hookPath, tc.hook, 0o700); err != nil { //nolint:gosec // G306: git hooks must be executable.
 					t.Fatalf("write custom hook: %v", err)
 				}
 			}

@@ -7,7 +7,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-//nolint:gosec // G101: environment variable name, not a credential.
+// #nosec G101 -- environment variable name, not a credential.
 const allowSecretFlagsEnv = "PACKMON_ALLOW_SECRET_FLAGS"
 
 func rejectSecretFlagValue(cmd *cobra.Command, flagName, replacement string) error {

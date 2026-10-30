@@ -80,8 +80,10 @@ func TestLatestRegistryEnvironmentRejectsInvalidValues(t *testing.T) {
 		})
 	}
 	for _, tc := range []struct{ name, value string }{
-		{"docker missing equals", "ghcr.io"}, {"docker empty host", "=https://mirror.example"},
-		{"docker empty mirror", "ghcr.io="}, {"docker unsupported host", "private.example=https://mirror.example"},
+		{"docker missing equals", "ghcr.io"},
+		{"docker empty host", "=https://mirror.example"},
+		{"docker empty mirror", "ghcr.io="},
+		{"docker unsupported host", "private.example=https://mirror.example"},
 		{"docker invalid mirror URL", "ghcr.io=http://registry.invalid"},
 		{"swift malformed host", "git.example.com,broken..host"},
 	} {

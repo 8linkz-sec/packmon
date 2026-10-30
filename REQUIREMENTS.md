@@ -182,7 +182,7 @@ is already available:
 | `cyclonedx-py` | `python -m pip install --user cyclonedx-bom==7.3.0` |
 | `go-licenses` | `go install github.com/google/go-licenses@v1.6.0` |
 | `gofumpt` | `go install mvdan.cc/gofumpt@v0.9.2` |
-| `golangci-lint` | `go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.11.0` |
+| `golangci-lint` | `go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0` |
 | `govulncheck` | `go install golang.org/x/vuln/cmd/govulncheck@v1.4.0` |
 | `gosec` | `go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1` |
 

@@ -105,7 +105,7 @@ func TestRegistryLookupPhaseNilSafety(t *testing.T) {
 	if got := registryLookupPhaseFrom(context.Background()); got != nil {
 		t.Fatalf("registryLookupPhaseFrom(no phase) = %v, want nil", got)
 	}
-	if got := registryLookupPhaseFrom(nil); got != nil {
+	if got := registryLookupPhaseFrom(nil); got != nil { //nolint:staticcheck // SA1012: the nil-context case is under test.
 		t.Fatalf("registryLookupPhaseFrom(nil) = %v, want nil", got)
 	}
 }
@@ -167,7 +167,7 @@ func TestRegistryLookupPhaseInheritsParentCancellationAndDeadline(t *testing.T) 
 		t.Fatalf("phase deadline = %v, want %v", got, deadline)
 	}
 
-	nilParentCtx, nilParentPhase := withRegistryLookupPhase(nil, 0)
+	nilParentCtx, nilParentPhase := withRegistryLookupPhase(nil, 0) //nolint:staticcheck // SA1012: the nil-parent fallback is under test.
 	if got := registryLookupPhaseFrom(nilParentCtx); got != nilParentPhase {
 		t.Fatalf("nil-parent phase from context = %p, want %p", got, nilParentPhase)
 	}

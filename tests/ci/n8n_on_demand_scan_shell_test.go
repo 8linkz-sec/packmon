@@ -131,7 +131,7 @@ func n8nPackmonStub(t *testing.T) (recordPath, binDir string) {
 	binDir = t.TempDir()
 	recordPath = filepath.Join(t.TempDir(), "packmon-record")
 	stub := "#!/bin/sh\n{\n  printf 'argc=%s\\n' \"$#\"\n  i=0\n  for arg do\n    printf 'argv[%s]=%s\\n' \"$i\" \"$arg\"\n    i=$((i + 1))\n  done\n  printf 'api_key=%s\\n' \"${PACKMON_API_KEY-}\"\n} > \"$PACKMON_TEST_RECORD\"\nexit \"${PACKMON_STUB_EXIT:-0}\"\n"
-	if err := os.WriteFile(filepath.Join(binDir, "packmon"), []byte(stub), 0o700); err != nil {
+	if err := os.WriteFile(filepath.Join(binDir, "packmon"), []byte(stub), 0o700); err != nil { //nolint:gosec // G306: the packmon stub must be executable.
 		t.Fatalf("write packmon stub: %v", err)
 	}
 	return recordPath, binDir
@@ -181,7 +181,7 @@ func n8nRunOnDemandScan(t *testing.T, shell string, env []string) (int, string) 
 	if err != nil {
 		t.Fatalf("resolve on-demand scan helper path: %v", err)
 	}
-	command := exec.Command(shell, helperPath)
+	command := exec.Command(shell, helperPath) //nolint:gosec // G204: static repository script path.
 	command.Dir = filepath.Dir(recordPathFromEnvironment(env))
 	command.Env = env
 	output, err := command.CombinedOutput()

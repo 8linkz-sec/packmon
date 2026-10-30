@@ -220,7 +220,7 @@ func TestRunStartupRepairsWithTimeoutNormalizesNilContextAndDefaultTimeout(t *te
 
 	store := &startupRepairContextCapture{}
 	before := time.Now()
-	runStartupRepairsWithTimeout(nil, store, nil, 0)
+	runStartupRepairsWithTimeout(nil, store, nil, 0) //nolint:staticcheck // SA1012: the nil-context fallback is under test.
 
 	if store.ctx == nil {
 		t.Fatal("repair received a nil context")

@@ -276,7 +276,7 @@ func (g *GitRepo) acquireSyncLock(ctx context.Context) (func(), error) {
 			return nil, err
 		}
 
-		//nolint:gosec // G304: lockFile is the operator-configured feed directory
+		// #nosec G304 -- lockFile is the operator-configured feed directory
 		// joined with a constant file name; no request data reaches this path.
 		file, err := os.OpenFile(lockFile, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
 		if err == nil {

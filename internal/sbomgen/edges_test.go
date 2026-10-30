@@ -340,7 +340,7 @@ func TestReadFileLimitedEnforcesBoundaryBeforeAndAfterOpen(t *testing.T) {
 		t.Fatalf("readFileLimited oversized error = %v", err)
 	}
 
-	file, err := os.Open(path)
+	file, err := os.Open(path) //nolint:gosec // G304: path built by the test itself, not from request data.
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -212,12 +212,12 @@ func TestGitCommandOutputFakeGit(t *testing.T) {
 		os.Exit(0)
 	case "cancel":
 		ready := os.Getenv("PACKMON_F027_FAKE_GIT_READY")
-		if ready == "" || os.WriteFile(ready, []byte("ready"), 0o600) != nil {
+		if ready == "" || os.WriteFile(ready, []byte("ready"), 0o600) != nil { //nolint:gosec // G703: temp path chosen by the parent test.
 			os.Exit(99)
 		}
 		select {}
 	case "linger-parent":
-		cmd := exec.Command(os.Args[0], "-test.run=^TestGitCommandOutputFakeGit$") // #nosec G204 -- test helper re-executes its own test binary.
+		cmd := exec.Command(os.Args[0], "-test.run=^TestGitCommandOutputFakeGit$") //nolint:gosec // G204/G702: test helper re-executes its own test binary.
 		cmd.Env = replaceFakeGitMode(os.Environ(), "linger-child")
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -256,7 +256,7 @@ func installFakeGit(t *testing.T) []string {
 
 func copyTestExecutable(t *testing.T, source, destination string) {
 	t.Helper()
-	in, err := os.Open(source)
+	in, err := os.Open(source) //nolint:gosec // G304: path built by the test itself, not from request data.
 	if err != nil {
 		t.Fatalf("open test binary: %v", err)
 	}
@@ -265,7 +265,7 @@ func copyTestExecutable(t *testing.T, source, destination string) {
 			t.Errorf("close test binary: %v", err)
 		}
 	}()
-	out, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o700)
+	out, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o700) //nolint:gosec // G302: the copied test binary must be executable.
 	if err != nil {
 		t.Fatalf("create fake git: %v", err)
 	}

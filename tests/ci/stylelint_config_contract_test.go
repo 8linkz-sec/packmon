@@ -26,13 +26,13 @@ func TestStylelintConfigUsesExpectedStructuredRules(t *testing.T) {
 	}
 
 	wantRules := map[string]bool{
-		"block-no-empty":                           true,
+		"block-no-empty":                            true,
 		"color-no-invalid-hex":                      true,
 		"declaration-block-no-duplicate-properties": true,
 		"function-calc-no-unspaced-operator":        true,
-		"no-duplicate-selectors":                     true,
-		"no-invalid-double-slash-comments":           true,
-		"selector-type-no-unknown":                   true,
+		"no-duplicate-selectors":                    true,
+		"no-invalid-double-slash-comments":          true,
+		"selector-type-no-unknown":                  true,
 	}
 	if !reflect.DeepEqual(config.Rules, wantRules) {
 		t.Fatalf(".stylelintrc.json rules = %#v, want %#v", config.Rules, wantRules)

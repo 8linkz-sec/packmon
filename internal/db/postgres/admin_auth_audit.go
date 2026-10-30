@@ -50,7 +50,7 @@ func (s *Store) UpsertAdminAuth(ctx context.Context, passwordHash string, isBoot
 
 const (
 	lockAdminAuthForMutationSQL = `SELECT id FROM admin_auth WHERE id = 1 FOR UPDATE`
-	//nolint:gosec // G101: SQL statement constant, not a credential.
+	// #nosec G101 -- SQL statement constant, not a credential.
 	changeAdminPasswordSQL = `
 		UPDATE admin_auth
 		SET password_hash = $1,

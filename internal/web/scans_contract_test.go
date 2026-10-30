@@ -25,6 +25,7 @@ func TestHandleScansWithOptionsDefaultsAdminNavigationAndKeepsRoutePagination(t 
 		dailyStats:  []db.DailyScanStats{{Date: now, ScanCount: 1}},
 		recentScans: scans,
 	}
+	//nolint:gosec // G101: fixture CSRF token, deliberately fake.
 	handler := HandleScansWithOptions(store, testRenderer(), discardLogger(), ScansOptions{
 		AdminPage: true,
 		CSRFToken: "csrf-scans-contract",

@@ -13,12 +13,12 @@ import (
 )
 
 const (
-	//nolint:gosec // G101: UI state code, not a credential.
+	// #nosec G101 -- UI state code, not a credential.
 	adminFeedAPIKeyStateConfiguredCode = "api-key-configured"
 	adminFeedAPIKeyStateMissingCode    = "api-key-missing"
-	//nolint:gosec // G101: UI state code, not a credential.
+	// #nosec G101 -- UI state code, not a credential.
 	adminFeedAPIKeyStateNotConfiguredCode = "api-key-not-configured"
-	//nolint:gosec // G101: UI state code, not a credential.
+	// #nosec G101 -- UI state code, not a credential.
 	adminFeedAPIKeyStateNotRequiredCode = "api-key-not-required"
 
 	adminFeedSyncIntervalDefaultCode     = "sync-interval-default"

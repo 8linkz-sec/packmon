@@ -93,7 +93,7 @@ func IsBlank(value string) bool {
 
 // Load reads path into entries. A missing file returns (nil, nil).
 func Load(path string) ([]Entry, error) {
-	data, err := os.ReadFile(path) //nolint:gosec // caller-controlled local path.
+	data, err := os.ReadFile(path) // #nosec G304 -- caller-controlled local path.
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}

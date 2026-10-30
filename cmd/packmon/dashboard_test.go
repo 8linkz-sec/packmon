@@ -139,7 +139,6 @@ func TestStartBrowserCommandWaitsForStartedProcess(t *testing.T) {
 }
 
 func TestStartBrowserCommandReportsMissingExecutable(t *testing.T) {
-	//nolint:gosec // G204: the test deliberately names a command that cannot exist.
 	cmd := exec.Command("packmon-dashboard-browser-command-that-does-not-exist")
 	if err := startBrowserCommand(cmd); err == nil {
 		t.Fatal("startBrowserCommand(missing executable) error = nil")

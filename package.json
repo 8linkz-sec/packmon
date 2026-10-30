@@ -16,11 +16,11 @@
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
-    "@redocly/cli": "2.54.2",
+    "@redocly/cli": "2.70.0",
     "@tailwindcss/cli": "4.3.3",
-    "eslint": "10.11.0",
+    "eslint": "10.13.0",
     "htmx.org": "2.0.11",
-    "stylelint": "17.15.0",
+    "stylelint": "17.16.0",
     "tailwindcss": "4.3.3"
   },
   "overrides": {
