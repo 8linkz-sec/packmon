@@ -310,7 +310,7 @@ func TestMetricsHandlerExportsStoreReadFailureCounter(t *testing.T) {
 		`packmon_metrics_store_read_failures_total{operation="feed_sync_statuses"} 3`,
 		`packmon_metrics_store_read_failures_total{operation="queue_jobs"} 3`,
 		`packmon_metrics_store_read_failures_total{operation="queue_stats"} 3`,
-		`packmon_metrics_store_read_failures_total{operation="dashboard_stats"} 1`,
+		`packmon_metrics_store_read_failures_total{operation="dashboard_stats"} 3`,
 		`packmon_metrics_store_read_failures_total{operation="scan_totals"} 1`,
 	} {
 		if !strings.Contains(output, want) {
@@ -1213,7 +1213,7 @@ func TestMetricsHandlerParallelizesIndependentStoreReads(t *testing.T) {
 	}
 }
 
-func TestMetricsDerivedCacheCoalescesConcurrentColdRefreshStampede(t *testing.T) {
+func TestMetricsDerivedCacheCoalescesScanTotalsAndDelegatesDashboardCaching(t *testing.T) {
 	const callers = 16
 
 	store := newDerivedStampedeMetricsStore()
@@ -1265,8 +1265,8 @@ func TestMetricsDerivedCacheCoalescesConcurrentColdRefreshStampede(t *testing.T)
 		t.Error(err)
 	}
 
-	if got := store.dashboardCalls.Load(); got != 1 {
-		t.Fatalf("DashboardStats calls = %d, want 1 coalesced refresh", got)
+	if got := store.dashboardCalls.Load(); got != callers {
+		t.Fatalf("DashboardStats calls = %d, want %d delegated calls", got, callers)
 	}
 	if got := store.scanCalls.Load(); got != 1 {
 		t.Fatalf("ScanTotals calls = %d, want 1 coalesced refresh", got)
@@ -1360,7 +1360,7 @@ func TestMetricsHandlerUsesOldestQueueJobsProvider(t *testing.T) {
 	}
 }
 
-func TestMetricsHandlerCachesDashboardAndScanTotals(t *testing.T) {
+func TestMetricsHandlerDelegatesDashboardCacheAndCachesScanTotals(t *testing.T) {
 	store := &metricsStoreStub{
 		dash:  &db.DashboardStatsResult{TotalPackages: 3},
 		scans: &db.ScanTotals{PackagesScanned: 4, Findings: 5},
@@ -1385,8 +1385,8 @@ func TestMetricsHandlerCachesDashboardAndScanTotals(t *testing.T) {
 		}
 	}
 
-	if store.dashCalls != 1 {
-		t.Fatalf("DashboardStats calls = %d, want 1 within metrics cache window", store.dashCalls)
+	if store.dashCalls != 2 {
+		t.Fatalf("DashboardStats calls = %d, want 2 delegated calls", store.dashCalls)
 	}
 	if store.scanCalls != 1 {
 		t.Fatalf("ScanTotals calls = %d, want 1 within metrics cache window", store.scanCalls)

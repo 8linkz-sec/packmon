@@ -177,6 +177,7 @@ func (s *Store) replaceMaliciousFindingsSnapshot(
 		return 0, 0, fmt.Errorf("postgres: commit malicious snapshot: %w", err)
 	}
 	committed = true
+	s.invalidateDashboardStats()
 	return changed, withdrawn, nil
 }
 

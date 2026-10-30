@@ -112,7 +112,7 @@ func TestPostgresQueryIDsEnabled(t *testing.T) {
 func TestPGStatStatementsMigrationContract(t *testing.T) {
 	t.Parallel()
 
-	up, err := ReadEmbeddedMigration(ExpectedVersion, MigrationDirectionUp)
+	up, err := ReadEmbeddedMigration(48, MigrationDirectionUp)
 	if err != nil {
 		t.Fatalf("ReadEmbeddedMigration(up): %v", err)
 	}
@@ -123,7 +123,7 @@ func TestPGStatStatementsMigrationContract(t *testing.T) {
 		t.Fatalf("migration %s does not install pg_stat_statements", up.Name)
 	}
 
-	down, err := ReadEmbeddedMigration(ExpectedVersion, MigrationDirectionDown)
+	down, err := ReadEmbeddedMigration(48, MigrationDirectionDown)
 	if err != nil {
 		t.Fatalf("ReadEmbeddedMigration(down): %v", err)
 	}
@@ -132,6 +132,38 @@ func TestPGStatStatementsMigrationContract(t *testing.T) {
 	}
 	if !strings.Contains(down.SQL, "operator") {
 		t.Fatalf("migration %s must document the non-destructive ownership rationale", down.Name)
+	}
+}
+
+func TestMaliciousActiveSearchIndexMigrationContract(t *testing.T) {
+	t.Parallel()
+
+	up, err := ReadEmbeddedMigration(49, MigrationDirectionUp)
+	if err != nil {
+		t.Fatalf("ReadEmbeddedMigration(49, up): %v", err)
+	}
+	for _, want := range []string{
+		"ON malicious_findings (name, ecosystem, source)",
+		"INCLUDE (severity)",
+		"ON malicious_findings (severity, name, ecosystem, source)",
+		"WHERE removed_at IS NULL",
+	} {
+		if !strings.Contains(up.SQL, want) {
+			t.Fatalf("migration %s missing %q:\n%s", up.Name, want, up.SQL)
+		}
+	}
+	if got := strings.Count(up.SQL, "WHERE removed_at IS NULL"); got != 2 {
+		t.Fatalf("active index predicate count = %d, want 2", got)
+	}
+
+	down, err := ReadEmbeddedMigration(49, MigrationDirectionDown)
+	if err != nil {
+		t.Fatalf("ReadEmbeddedMigration(49, down): %v", err)
+	}
+	for _, index := range []string{"idx_malicious_active_search_order", "idx_malicious_active_severity_search"} {
+		if !strings.Contains(down.SQL, "DROP INDEX CONCURRENTLY IF EXISTS "+index) {
+			t.Fatalf("migration %s does not drop %s: %s", down.Name, index, down.SQL)
+		}
 	}
 }
 
@@ -1167,6 +1199,14 @@ func TestBlockingIndexMigrationsRunOutsideTransaction(t *testing.T) {
 				"CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_lifecycle_package_map_name_trgm",
 			},
 		},
+		{
+			version: 49,
+			name:    "049_malicious_active_search_indexes.up.sql",
+			wants: []string{
+				"CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_malicious_active_search_order",
+				"CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_malicious_active_severity_search",
+			},
+		},
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
@@ -1229,6 +1269,14 @@ func TestBlockingIndexDownMigrationsUseConcurrentDrops(t *testing.T) {
 				"DROP INDEX CONCURRENTLY IF EXISTS idx_package_reputation_cache_name_trgm;",
 				"DROP INDEX CONCURRENTLY IF EXISTS idx_malicious_findings_name_trgm;",
 				"DROP INDEX CONCURRENTLY IF EXISTS idx_affected_packages_name_trgm;",
+			},
+		},
+		{
+			version: 49,
+			name:    "049_malicious_active_search_indexes.down.sql",
+			wants: []string{
+				"DROP INDEX CONCURRENTLY IF EXISTS idx_malicious_active_severity_search;",
+				"DROP INDEX CONCURRENTLY IF EXISTS idx_malicious_active_search_order;",
 			},
 		},
 	} {
@@ -1550,7 +1598,7 @@ func TestReadEmbeddedMigrationReadsSpecificDownMigration(t *testing.T) {
 		!strings.HasSuffix(migration.Name, ".down.sql") {
 		t.Fatalf("Name = %q, want current down migration", migration.Name)
 	}
-	if !strings.Contains(migration.SQL, "must not remove that cluster-wide observability facility") {
+	if !strings.Contains(migration.SQL, "DROP INDEX CONCURRENTLY IF EXISTS idx_malicious_active_search_order") {
 		t.Fatalf("current down migration SQL does not include expected rollback marker:\n%s", migration.SQL)
 	}
 }

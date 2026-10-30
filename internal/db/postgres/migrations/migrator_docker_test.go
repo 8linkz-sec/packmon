@@ -159,6 +159,71 @@ func TestRunAndVersionAgainstPostgres(t *testing.T) {
 	}
 }
 
+func TestMaliciousActiveSearchIndexMigrationRoundTripAgainstPostgres(t *testing.T) {
+	dsn := startMigrationPostgres(t)
+	if err := Run(dsn); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	defer ioutils.CloseSilently(db)
+	ctx := context.Background()
+
+	toMigrationFile := func(embedded EmbeddedMigration) migrationFile {
+		return migrationFile{
+			version:   embedded.Version,
+			name:      embedded.Name,
+			direction: embedded.Direction,
+			sql:       embedded.SQL,
+		}
+	}
+	down, err := ReadEmbeddedMigration(49, MigrationDirectionDown)
+	if err != nil {
+		t.Fatalf("read migration 49 down: %v", err)
+	}
+	if err := applyMigrationWithoutTransaction(ctx, db, toMigrationFile(down)); err != nil {
+		t.Fatalf("apply migration 49 down: %v", err)
+	}
+	assertMaliciousActiveSearchIndexes(t, ctx, db, false)
+	if err := applyMigrationWithoutTransaction(ctx, db, toMigrationFile(down)); err != nil {
+		t.Fatalf("reapply guarded migration 49 down: %v", err)
+	}
+
+	up, err := ReadEmbeddedMigration(49, MigrationDirectionUp)
+	if err != nil {
+		t.Fatalf("read migration 49 up: %v", err)
+	}
+	if err := applyMigrationWithoutTransaction(ctx, db, toMigrationFile(up)); err != nil {
+		t.Fatalf("apply migration 49 up: %v", err)
+	}
+	assertMaliciousActiveSearchIndexes(t, ctx, db, true)
+	if err := applyMigrationWithoutTransaction(ctx, db, toMigrationFile(up)); err != nil {
+		t.Fatalf("reapply guarded migration 49 up: %v", err)
+	}
+}
+
+func assertMaliciousActiveSearchIndexes(t *testing.T, ctx context.Context, db *sql.DB, want bool) {
+	t.Helper()
+	for _, index := range []string{"idx_malicious_active_search_order", "idx_malicious_active_severity_search"} {
+		var existsAndValid bool
+		if err := db.QueryRowContext(ctx, `
+			SELECT COALESCE((
+				SELECT i.indisvalid AND i.indisready
+				FROM pg_index i
+				INNER JOIN pg_class c ON c.oid = i.indexrelid
+				WHERE c.relname = $1
+			), false)`, index).Scan(&existsAndValid); err != nil {
+			t.Fatalf("inspect index %s: %v", index, err)
+		}
+		if existsAndValid != want {
+			t.Fatalf("index %s exists and is valid = %v, want %v", index, existsAndValid, want)
+		}
+	}
+}
+
 func TestPGStatStatementsPreflightFailureStaysCleanAndCanRetry(t *testing.T) {
 	instance := startMigrationPostgresInstance(t, false)
 	applyEmbeddedMigrationsBeforePGStatStatements(t, instance.dsn)
@@ -171,8 +236,8 @@ func TestPGStatStatementsPreflightFailureStaysCleanAndCanRetry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Version() after failed preflight error = %v", err)
 	}
-	if version != ExpectedVersion-1 || dirty {
-		t.Fatalf("Version() after failed preflight = %d dirty=%v, want %d clean", version, dirty, ExpectedVersion-1)
+	if version != 47 || dirty {
+		t.Fatalf("Version() after failed preflight = %d dirty=%v, want 47 clean", version, dirty)
 	}
 
 	setConfig := exec.Command( // #nosec G204 -- test configures its generated PostgreSQL container.
@@ -268,8 +333,8 @@ func TestPGStatStatementsPrecreatedExtensionRequiresPublicSchema(t *testing.T) {
 	if versionErr != nil {
 		t.Fatalf("Version() error = %v", versionErr)
 	}
-	if version != ExpectedVersion-1 || dirty {
-		t.Fatalf("Version() = %d dirty=%v, want %d clean", version, dirty, ExpectedVersion-1)
+	if version != 47 || dirty {
+		t.Fatalf("Version() = %d dirty=%v, want 47 clean", version, dirty)
 	}
 }
 
@@ -289,7 +354,7 @@ func applyEmbeddedMigrationsBeforePGStatStatements(t *testing.T, dsn string) {
 		t.Fatalf("embeddedUpMigrations() error = %v", err)
 	}
 	for _, migration := range migrations {
-		if migration.version >= ExpectedVersion {
+		if migration.version >= 48 {
 			continue
 		}
 		if err := applyMigration(ctx, db, migration); err != nil {

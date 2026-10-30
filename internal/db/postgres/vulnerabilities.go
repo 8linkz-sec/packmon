@@ -390,9 +390,13 @@ func (s *Store) FindVulnerabilitiesBatch(ctx context.Context, packages []db.Pack
 }
 
 func (s *Store) UpsertVulnerability(ctx context.Context, vuln *db.Vulnerability) error {
-	return withTx(ctx, s.pool, func(tx pgx.Tx) error {
+	err := withTx(ctx, s.pool, func(tx pgx.Tx) error {
 		return upsertVulnerabilityTx(ctx, tx, vuln)
 	})
+	if err == nil {
+		s.invalidateDashboardStats()
+	}
+	return err
 }
 
 func upsertVulnerabilityTx(ctx context.Context, tx pgx.Tx, vuln *db.Vulnerability) error {
@@ -672,6 +676,9 @@ func (s *Store) importVulnerabilityFeed(ctx context.Context, feed string, items 
 		}
 		return nil
 	})
+	if err == nil {
+		s.invalidateDashboardStats()
+	}
 	return imported, deleted, err
 }
 
@@ -685,6 +692,7 @@ func (s *Store) DeleteVulnerability(ctx context.Context, id string) error {
 	if err != nil {
 		return fmt.Errorf("postgres: delete vulnerability %s: %w", id, err)
 	}
+	s.invalidateDashboardStats()
 	return nil
 }
 
@@ -694,9 +702,13 @@ func (s *Store) DeleteVulnerabilityForSource(ctx context.Context, id, source str
 		return fmt.Errorf("postgres: source-scoped vulnerability delete requires source: %w", db.ErrSourceScopedDeleteSourceRequired)
 	}
 
-	return withTx(ctx, s.pool, func(tx pgx.Tx) error {
+	err := withTx(ctx, s.pool, func(tx pgx.Tx) error {
 		return deleteVulnerabilityForSourceTx(ctx, tx, id, source)
 	})
+	if err == nil {
+		s.invalidateDashboardStats()
+	}
+	return err
 }
 
 func deleteVulnerabilityForSourceTx(ctx context.Context, tx pgx.Tx, id, source string) error {

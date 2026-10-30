@@ -178,6 +178,11 @@ change.
    ```
    External PostgreSQL requires the documented administrator preload, restart,
    query-ID setting, and extension creation instead.
+   Migration 49 concurrently builds two partial covering indexes over active
+   `malicious_findings`. Before starting it, verify PostgreSQL has temporary
+   working space and durable-volume headroom for both index builds. The
+   concurrent build avoids a long table-write lock but still consumes I/O and
+   CPU; keep the server drained as required above and monitor PostgreSQL logs.
 5. Run the explicit migration step:
    ```bash
    docker compose -f docker-compose.server.yml run --build --rm packmon-migrate

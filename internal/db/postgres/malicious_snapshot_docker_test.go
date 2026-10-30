@@ -406,6 +406,74 @@ func TestMaliciousSnapshotCleanupFailureAfterCommitReturnsSuccessAndDiscardsConn
 	}
 }
 
+func TestMaliciousSnapshotInvalidatesDashboardCacheOnceAfterCommitBeforeCleanup(t *testing.T) {
+	store, _ := startDockerPostgresStore(t)
+	ctx := context.Background()
+	before := dashboardStatsGeneration(store)
+	cleanupObserved := false
+	hooks := &maliciousSnapshotHooks{
+		commit: func(ctx context.Context, tx pgx.Tx) error {
+			if got := dashboardStatsGeneration(store); got != before {
+				t.Errorf("generation before commit = %d, want %d", got, before)
+			}
+			return tx.Commit(ctx)
+		},
+		cleanup: func(conn *pgxpool.Conn, unlock bool) error {
+			cleanupObserved = true
+			if got := dashboardStatsGeneration(store); got != before+1 {
+				t.Errorf("generation during cleanup = %d, want %d", got, before+1)
+			}
+			return cleanupMaliciousSnapshotConnection(conn, unlock)
+		},
+	}
+	finding := snapshotFinding("MAL-snapshot-cache-invalidation", "committed")
+	changed, withdrawn, err := store.replaceMaliciousFindingsSnapshot(ctx, "openssf", func(yield func([]db.MaliciousFinding, []string) error) error {
+		return yield([]db.MaliciousFinding{finding}, nil)
+	}, hooks)
+	if err != nil || changed != 1 || withdrawn != 0 {
+		t.Fatalf("snapshot result = %d/%d err=%v, want 1/0 success", changed, withdrawn, err)
+	}
+	if !cleanupObserved {
+		t.Fatal("successful snapshot did not run cleanup hook")
+	}
+	if got := dashboardStatsGeneration(store); got != before+1 {
+		t.Fatalf("generation after successful snapshot = %d, want %d", got, before+1)
+	}
+
+	beforeFailure := dashboardStatsGeneration(store)
+	cleanupObserved = false
+	failingHooks := &maliciousSnapshotHooks{
+		commit: func(context.Context, pgx.Tx) error {
+			if got := dashboardStatsGeneration(store); got != beforeFailure {
+				t.Errorf("generation before failed commit = %d, want %d", got, beforeFailure)
+			}
+			return errors.New("forced commit failure")
+		},
+		cleanup: func(conn *pgxpool.Conn, unlock bool) error {
+			cleanupObserved = true
+			return cleanupMaliciousSnapshotConnection(conn, unlock)
+		},
+	}
+	failingFinding := snapshotFinding("MAL-snapshot-cache-no-invalidation", "not committed")
+	if _, _, err := store.replaceMaliciousFindingsSnapshot(ctx, "openssf", func(yield func([]db.MaliciousFinding, []string) error) error {
+		return yield([]db.MaliciousFinding{failingFinding}, nil)
+	}, failingHooks); err == nil {
+		t.Fatal("snapshot commit error = nil, want forced failure")
+	}
+	if cleanupObserved {
+		t.Fatal("failed snapshot used successful cleanup path")
+	}
+	if got := dashboardStatsGeneration(store); got != beforeFailure {
+		t.Fatalf("generation after failed snapshot = %d, want %d", got, beforeFailure)
+	}
+}
+
+func dashboardStatsGeneration(store *Store) uint64 {
+	store.dashboardStatsCache.mu.Lock()
+	defer store.dashboardStatsCache.mu.Unlock()
+	return store.dashboardStatsCache.generation
+}
+
 func TestMaliciousSnapshotRepresentativeScalePreservesUnchangedRows(t *testing.T) {
 	store, _ := startDockerPostgresStore(t)
 	ctx := context.Background()

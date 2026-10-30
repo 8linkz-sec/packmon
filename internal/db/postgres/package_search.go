@@ -58,6 +58,74 @@ type packageSearchTask struct {
 	run       func(context.Context) (map[string]*db.PackageSearchResult, error)
 }
 
+const maliciousPackageSearchUnfilteredSQL = `
+	SELECT
+		ecosystem,
+		name,
+		''::text AS version,
+		COUNT(*)::int,
+		0::int,
+		''::text,
+		COALESCE(string_agg(DISTINCT source, ', ' ORDER BY source), ''),
+		'malicious'::text
+	FROM malicious_findings
+	WHERE removed_at IS NULL
+	GROUP BY name, ecosystem
+	ORDER BY name ASC, ecosystem ASC
+	LIMIT $1`
+
+const maliciousPackageSearchNameSQL = `
+	SELECT
+		ecosystem,
+		name,
+		''::text AS version,
+		COUNT(*)::int,
+		0::int,
+		''::text,
+		COALESCE(string_agg(DISTINCT source, ', ' ORDER BY source), ''),
+		'malicious'::text
+	FROM malicious_findings
+	WHERE name ILIKE $1
+	  AND removed_at IS NULL
+	GROUP BY name, ecosystem
+	ORDER BY name ASC, ecosystem ASC
+	LIMIT $2`
+
+const maliciousPackageSearchSeveritySQL = `
+	SELECT
+		ecosystem,
+		name,
+		''::text AS version,
+		COUNT(*)::int,
+		0::int,
+		''::text,
+		COALESCE(string_agg(DISTINCT source, ', ' ORDER BY source), ''),
+		'malicious'::text
+	FROM malicious_findings
+	WHERE severity = $1
+	  AND removed_at IS NULL
+	GROUP BY name, ecosystem
+	ORDER BY name ASC, ecosystem ASC
+	LIMIT $2`
+
+const maliciousPackageSearchNameSeveritySQL = `
+	SELECT
+		ecosystem,
+		name,
+		''::text AS version,
+		COUNT(*)::int,
+		0::int,
+		''::text,
+		COALESCE(string_agg(DISTINCT source, ', ' ORDER BY source), ''),
+		'malicious'::text
+	FROM malicious_findings
+	WHERE name ILIKE $1
+	  AND severity = $2
+	  AND removed_at IS NULL
+	GROUP BY name, ecosystem
+	ORDER BY name ASC, ecosystem ASC
+	LIMIT $3`
+
 func (s *Store) SearchPackages(ctx context.Context, params db.PackageSearchParams) ([]db.PackageSearchResult, error) {
 	query := strings.TrimSpace(params.Query)
 	severity := strings.ToUpper(strings.TrimSpace(params.Severity))
@@ -272,25 +340,21 @@ func (s *Store) collectVulnerabilityPackageSearch(ctx context.Context, results m
 }
 
 func (s *Store) collectMaliciousPackageSearch(ctx context.Context, results map[string]*db.PackageSearchResult, like, severity string, limit int) error {
-	const maliciousQuery = `
-		SELECT
-			ecosystem,
-			name,
-			''::text AS version,
-			COUNT(*)::int,
-			0::int,
-			''::text,
-			COALESCE(string_agg(DISTINCT source, ', ' ORDER BY source), ''),
-			'malicious'::text
-		FROM malicious_findings
-		WHERE ($1 = '' OR name ILIKE $1)
-		  AND ($2 = '' OR UPPER(COALESCE(severity, 'UNKNOWN')) = $2)
-		  AND removed_at IS NULL
-		GROUP BY ecosystem, name
-		ORDER BY name ASC, ecosystem ASC
-		LIMIT $3`
+	query, args := maliciousPackageSearchQuery(like, severity, limit)
+	return s.collectSearchResults(ctx, results, query, args...)
+}
 
-	return s.collectSearchResults(ctx, results, maliciousQuery, like, severity, limit)
+func maliciousPackageSearchQuery(like, severity string, limit int) (string, []any) {
+	switch {
+	case like != "" && severity != "":
+		return maliciousPackageSearchNameSeveritySQL, []any{like, severity, limit}
+	case like != "":
+		return maliciousPackageSearchNameSQL, []any{like, limit}
+	case severity != "":
+		return maliciousPackageSearchSeveritySQL, []any{severity, limit}
+	default:
+		return maliciousPackageSearchUnfilteredSQL, []any{limit}
+	}
 }
 
 func (s *Store) collectReputationMaliciousPackageSearch(ctx context.Context, results map[string]*db.PackageSearchResult, like, severity string, limit int) error {

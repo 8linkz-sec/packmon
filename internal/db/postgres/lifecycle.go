@@ -28,6 +28,9 @@ func (s *Store) ReplaceLifecycleProducts(ctx context.Context, products []db.Life
 		deleted, err = deleteLifecycleProductsNotInTx(ctx, tx, slugs)
 		return err
 	})
+	if err == nil {
+		s.invalidateDashboardStats()
+	}
 	return deleted, err
 }
 

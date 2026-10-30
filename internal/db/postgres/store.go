@@ -18,8 +18,13 @@ import (
 // Store is the PostgreSQL-backed implementation of db.Store used by the
 // production Packmon server.
 type Store struct {
-	pool      *pgxpool.Pool
-	encryptor *secret.FieldEncryptor
+	pool                *pgxpool.Pool
+	encryptor           *secret.FieldEncryptor
+	dashboardStatsCache dashboardStatsMemo
+}
+
+func (s *Store) invalidateDashboardStats() {
+	s.dashboardStatsCache.invalidate()
 }
 
 var _ db.Store = (*Store)(nil)

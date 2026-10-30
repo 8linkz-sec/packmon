@@ -1411,7 +1411,7 @@ func TestAdminFeedsPageUsesDedicatedUnknownSeverityCount(t *testing.T) {
 	}
 }
 
-func TestAdminDashboardStatsAreCachedAcrossRequests(t *testing.T) {
+func TestAdminDashboardDelegatesStatsCachingToStore(t *testing.T) {
 	store := newAdminStoreStub()
 	handler, sm, _ := newAdminFlowHandler(t, store, adminFlowConfig())
 
@@ -1426,8 +1426,8 @@ func TestAdminDashboardStatsAreCachedAcrossRequests(t *testing.T) {
 
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	if store.dashboardStatsCalls != 1 {
-		t.Fatalf("DashboardStats calls = %d, want 1: repeated dashboard loads within the TTL must reuse the cached aggregate", store.dashboardStatsCalls)
+	if store.dashboardStatsCalls != 2 {
+		t.Fatalf("DashboardStats calls = %d, want 2: the Store owns aggregate caching", store.dashboardStatsCalls)
 	}
 }
 

@@ -200,12 +200,16 @@ func (s *Store) UpsertMaliciousFinding(ctx context.Context, mf *db.MaliciousFind
 	if err != nil {
 		return err
 	}
-	return withTx(ctx, s.pool, func(tx pgx.Tx) error {
+	err = withTx(ctx, s.pool, func(tx pgx.Tx) error {
 		if err := acquireMaliciousMutationLocksTx(ctx, tx, normalized.Source, false); err != nil {
 			return err
 		}
 		return upsertNormalizedMaliciousFindingTx(ctx, tx, normalized)
 	})
+	if err == nil {
+		s.invalidateDashboardStats()
+	}
+	return err
 }
 
 func (s *Store) ImportMaliciousFeed(ctx context.Context, feed string, items []db.MaliciousFinding, deleteIDs []string, status *db.FeedSyncStatus) (int, int, error) {
@@ -255,6 +259,9 @@ func (s *Store) importMaliciousFeed(ctx context.Context, feed string, items []db
 		}
 		return nil
 	})
+	if err == nil {
+		s.invalidateDashboardStats()
+	}
 	return imported, deleted, err
 }
 
@@ -411,6 +418,7 @@ func (s *Store) DeleteMaliciousFinding(ctx context.Context, id string) error {
 	if err != nil {
 		return fmt.Errorf("postgres: delete malicious finding %s: %w", id, err)
 	}
+	s.invalidateDashboardStats()
 	return nil
 }
 
@@ -420,12 +428,16 @@ func (s *Store) DeleteMaliciousFindingForSource(ctx context.Context, id, source 
 		return fmt.Errorf("postgres: source-scoped malicious finding delete requires source: %w", db.ErrSourceScopedDeleteSourceRequired)
 	}
 
-	return withTx(ctx, s.pool, func(tx pgx.Tx) error {
+	err := withTx(ctx, s.pool, func(tx pgx.Tx) error {
 		if err := acquireMaliciousMutationLocksTx(ctx, tx, source, false); err != nil {
 			return err
 		}
 		return deleteMaliciousFindingForSourceTx(ctx, tx, id, source)
 	})
+	if err == nil {
+		s.invalidateDashboardStats()
+	}
+	return err
 }
 
 func deleteMaliciousFindingForSourceTx(ctx context.Context, execer postgresExecer, id, source string) error {
@@ -468,6 +480,7 @@ func (s *Store) DeleteMaliciousFindingsNotInSource(ctx context.Context, source s
 	if err != nil {
 		return 0, fmt.Errorf("postgres: prune malicious findings for source %s: %w", source, err)
 	}
+	s.invalidateDashboardStats()
 	return count, nil
 }
 
@@ -490,6 +503,7 @@ func (s *Store) PruneMaliciousFindingsForSourceUpdatedBefore(ctx context.Context
 	if err != nil {
 		return 0, fmt.Errorf("postgres: prune stale malicious findings for source %s: %w", source, err)
 	}
+	s.invalidateDashboardStats()
 	return count, nil
 }
 

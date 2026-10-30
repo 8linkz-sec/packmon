@@ -162,6 +162,10 @@ Packmon's maintained deployment surfaces are intentionally narrow:
   migration 48; external Packmon application and migration roles remain
   non-superuser. A prerequisite failure is checked before migration state is
   marked dirty.
+  Active malicious-package search uses partial covering indexes so broad and
+  severity-filtered searches can aggregate the narrow index entries without
+  scanning the wide finding heap. Those indexes are built concurrently by the
+  explicit migration command.
 - The server's feed working directory (`PACKMON_FEED_DATA_DIR`, `/data/feeds`
   in the container) is backed by the named `feed-data` volume. It holds the
   git checkouts of the GHSA advisory database and the OpenSSF
@@ -1020,6 +1024,18 @@ card set and order, the column set and order, the twenty-row cap, the absence of
 controls in `<main>`, and the presence of the theme switcher and skip link. The
 assertions are structural, so restyling does not break them; removing a card or
 a column does.
+
+The PostgreSQL store owns the single cache for the dashboard aggregate consumed
+by the public dashboard, admin dashboard, and metrics endpoint. Successful
+finding, reputation, lifecycle, repair, and severity mutations invalidate the
+cache only after their transaction commits. Concurrent cache misses share one
+load, a mutation racing that load prevents the stale snapshot from being
+published, and callers receive independent copies. Cache validity is bounded by
+the earlier of five minutes or the next PostgreSQL midnight, so another process'
+writes and `CURRENT_DATE` lifecycle transitions become visible without relying
+on an HTTP-handler cache. This is a process-local optimization for Packmon's
+single-server deployment model; a future multi-replica design must add
+cross-process invalidation rather than increasing the bound.
 
 The shared web layout includes operator-facing notice links. `PACKMON_WEB_PRIVACY_URL`
 defaults to the built-in `/privacy` page, which documents the admin session
