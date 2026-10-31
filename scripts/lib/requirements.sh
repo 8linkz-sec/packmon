@@ -152,9 +152,10 @@ emit_auto_sbom_requirement_ids_for_manifest() {
   local file="$1"
   local name="$2"
   local dir="$3"
-  local manifest kind ecosystem input_kind ids
+  local manifest kind ids
 
-  while IFS='|' read -r manifest kind ecosystem input_kind ids; do
+  # Columns 3-4 (ecosystem, input kind) are not needed here.
+  while IFS='|' read -r manifest kind _ _ ids; do
     [[ -n "${manifest:-}" ]] || continue
     [[ "$manifest" != \#* ]] || continue
     [[ "$name" == "$manifest" ]] || continue

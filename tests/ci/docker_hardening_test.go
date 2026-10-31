@@ -801,6 +801,7 @@ func TestDockerBackedPostgresTestsUseExplicitIntegrationGate(t *testing.T) {
 		"./tests/integration",
 		"./internal/db/postgres",
 		"./internal/db/postgres/migrations",
+		"./internal/server",
 	} {
 		if !strings.Contains(makeText, want) {
 			t.Fatalf("Makefile test-integration target missing %q", want)

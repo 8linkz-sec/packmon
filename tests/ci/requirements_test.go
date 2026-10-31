@@ -237,7 +237,7 @@ func TestGoAutoSBOMRequirementsUseGoToolchainOnly(t *testing.T) {
 	scriptMarkers := map[string][]string{
 		filepath.Join("scripts", "lib", "requirements.sh"): {
 			"AUTO_SBOM_MANIFESTS_PATH=\"$ROOT_DIR/internal/sbomgen/auto_sbom_manifests.tsv\"",
-			"while IFS='|' read -r manifest kind ecosystem input_kind ids; do",
+			"while IFS='|' read -r manifest kind _ _ ids; do",
 			"tr ',' '\\n' <<< \"$ids\"",
 		},
 		filepath.Join("scripts", "lib", "requirements.ps1"): {

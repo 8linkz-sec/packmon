@@ -212,6 +212,25 @@ func TestMakefileLintTargetsEnforcePinnedTooling(t *testing.T) {
 	}
 }
 
+// TestMakefileGateStepsFailOnFindingsAndIgnoreScratchDirs keeps the lint and
+// security steps meaningful: actionlint must not fail verify when the repo
+// ships no workflows, PSScriptAnalyzer must turn findings into a non-zero exit,
+// and trivy must not scan gitignored scratch copies under .gotmp or .build.
+func TestMakefileGateStepsFailOnFindingsAndIgnoreScratchDirs(t *testing.T) {
+	t.Parallel()
+
+	makefile := readRepoFile(t, "Makefile")
+	for _, want := range []string{
+		`@if [ ! -d .github/workflows ]; then echo "lint-actions: .github/workflows absent, skipping actionlint"; exit 0; fi; \`,
+		`$$findings = Invoke-ScriptAnalyzer -Path scripts -Recurse -Severity Error; if ($$findings) { $$findings; exit 1 }`,
+		"--exit-code 1 --skip-dirs .gotmp,.build .",
+	} {
+		if !strings.Contains(makefile, want) {
+			t.Fatalf("Makefile missing gate marker %q", want)
+		}
+	}
+}
+
 func TestGolangCINolintlintRequiresSpecificExplanations(t *testing.T) {
 	t.Parallel()
 
