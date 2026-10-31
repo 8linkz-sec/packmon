@@ -15,10 +15,10 @@ func TestReportTargetReducesAbsolutePathsRegardlessOfSeparator(t *testing.T) {
 	t.Parallel()
 
 	cases := map[string]string{
-		`/home/user/sample-app`:        "sample-app",
-		`/home/user/sample-app/`:       "sample-app",
-		`E:\Github\sample-app`:         "sample-app",
-		`E:/Github/sample-app`:         "sample-app",
+		`/home/user/sample-app`:      "sample-app",
+		`/home/user/sample-app/`:     "sample-app",
+		`E:\Github\sample-app`:       "sample-app",
+		`E:/Github/sample-app`:       "sample-app",
 		`C:\Users\Admin\my-service`:  "my-service",
 		`\\fileserver\share\project`: "project",
 	}

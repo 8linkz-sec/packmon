@@ -111,7 +111,7 @@ func TestRefusedLookupsProduceReportWarning(t *testing.T) {
 }
 
 // TestNotFoundLookupsProduceNoReportWarning is the end-to-end guard for the
-// sample-app case: workspace packages that are simply absent from the public
+// private-workspace case: packages that are simply absent from the public
 // registry must not raise a rate-limit warning.
 func TestNotFoundLookupsProduceNoReportWarning(t *testing.T) {
 	t.Parallel()
