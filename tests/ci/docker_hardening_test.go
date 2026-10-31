@@ -600,6 +600,7 @@ func TestDockerignoreExcludesLocalStateAndPackmonConfig(t *testing.T) {
 		"*.test",
 		"Audit.md",
 		"Todo.txt",
+		"Todo-done.txt",
 		"CLAUDE.md",
 		"Phase *.md",
 		".idea/",
@@ -801,6 +802,7 @@ func TestDockerBackedPostgresTestsUseExplicitIntegrationGate(t *testing.T) {
 		"./tests/integration",
 		"./internal/db/postgres",
 		"./internal/db/postgres/migrations",
+		"./internal/server",
 	} {
 		if !strings.Contains(makeText, want) {
 			t.Fatalf("Makefile test-integration target missing %q", want)

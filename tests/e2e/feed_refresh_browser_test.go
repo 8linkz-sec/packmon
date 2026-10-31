@@ -186,11 +186,13 @@ func dumpHeadlessBrowserDOM(t *testing.T, browser, url string) string {
 	args := []string{
 		"--headless=new",
 		"--disable-background-networking",
+		"--disable-component-update",
 		"--disable-default-apps",
 		"--disable-extensions",
 		"--disable-gpu",
 		"--disable-popup-blocking",
 		"--disable-sync",
+		"--no-default-browser-check",
 		"--no-first-run",
 		"--no-sandbox",
 		"--user-data-dir=" + profileDir,
@@ -208,18 +210,28 @@ func dumpHeadlessBrowserDOM(t *testing.T, browser, url string) string {
 	return html.UnescapeString(string(output))
 }
 
+// browserRunTimeout bounds one headless browser process; it only exists to stop
+// a hung browser. Healthy Windows/Edge runs measured 14-36s (startup includes
+// Edge's update probe, and the full suite runs in parallel), so the former 15s
+// budget turned harness slowness into spurious failures.
+const browserRunTimeout = 60 * time.Second
+
 func runBrowser(t *testing.T, browser string, args []string) ([]byte, error) {
 	t.Helper()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), browserRunTimeout)
 	defer cancel()
 
+	start := time.Now()
 	cmd := exec.CommandContext(ctx, browser, args...)
 	output, err := cmd.CombinedOutput()
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return output, fmt.Errorf("timed out after 15s")
+		return output, fmt.Errorf("timed out after %s", browserRunTimeout)
 	}
-	return output, err
+	if err != nil {
+		return output, fmt.Errorf("browser exited after %s: %w", time.Since(start).Round(time.Millisecond), err)
+	}
+	return output, nil
 }
 
 func readRepoFile(t *testing.T, path ...string) []byte {

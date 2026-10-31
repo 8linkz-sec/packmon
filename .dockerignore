@@ -24,6 +24,7 @@ coverage.out
 *.test
 Audit.md
 Todo.txt
+Todo-done.txt
 packmon
 packmon.exe
 packmon-server

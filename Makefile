@@ -40,7 +40,7 @@ test-ci:
 
 test-integration: build build-server
 	mkdir -p "$(GOTMPDIR)"
-	GOTMPDIR="$(GOTMPDIR)" PACKMON_TEST_BIN_DIR=$(CURDIR) go test -count=1 -tags integration ./tests/integration ./internal/db/postgres ./internal/db/postgres/migrations
+	GOTMPDIR="$(GOTMPDIR)" PACKMON_TEST_BIN_DIR=$(CURDIR) go test -count=1 -tags integration ./tests/integration ./internal/db/postgres ./internal/db/postgres/migrations ./internal/server
 
 test-e2e: build
 	mkdir -p "$(GOTMPDIR)"
@@ -82,19 +82,22 @@ lint-shell:
 lint-docker:
 	docker run --rm -i $(HADOLINT_IMAGE) < Dockerfile
 
+# actionlint exits non-zero when no workflows directory exists, which would
+# fail lint/verify on a repository that ships no GitHub Actions workflows.
 lint-actions:
-	go install github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION)
-	actionlint
+	@if [ ! -d .github/workflows ]; then echo "lint-actions: .github/workflows absent, skipping actionlint"; exit 0; fi; \
+	go install github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION) && actionlint
 
+# Invoke-ScriptAnalyzer only emits diagnostic records; fail explicitly on any.
 lint-powershell:
-	pwsh -NoLogo -NoProfile -Command 'Install-Module -Name PSScriptAnalyzer -RequiredVersion $(PSSCRIPTANALYZER_VERSION) -Scope CurrentUser -Force; Invoke-ScriptAnalyzer -Path scripts -Recurse -Severity Error'
+	pwsh -NoLogo -NoProfile -Command 'Install-Module -Name PSScriptAnalyzer -RequiredVersion $(PSSCRIPTANALYZER_VERSION) -Scope CurrentUser -Force; $$findings = Invoke-ScriptAnalyzer -Path scripts -Recurse -Severity Error; if ($$findings) { $$findings; exit 1 }'
 
 security:
 	npm ci --ignore-scripts
 	npm audit --audit-level=high
 	govulncheck $(GO_PACKAGES)
 	gosec -nosec-require-rules -nosec-require-justification $(GOSEC_DIRS)
-	$(TRIVY) fs --scanners vuln --vuln-type library --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 .
+	$(TRIVY) fs --scanners vuln --vuln-type library --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --skip-dirs .gotmp,.build .
 
 # security-images scans the runtime images themselves. `trivy fs` above only
 # covers library dependencies in the working tree and says nothing about the

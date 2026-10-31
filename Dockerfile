@@ -2,6 +2,9 @@
 ARG PACKMON_GO_BUILDER_IMAGE=golang:1.27.3-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb
 ARG PACKMON_ALPINE_RUNTIME_IMAGE=alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
 
+# DL3006: hadolint does not resolve ARG defaults; both base-image ARGs above
+# are tag+digest pinned.
+# hadolint ignore=DL3006
 FROM ${PACKMON_GO_BUILDER_IMAGE} AS build
 
 WORKDIR /src
@@ -20,11 +23,12 @@ ARG DATE=unknown
 RUN --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 go build -trimpath \
     -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${DATE}" \
-    -o /packmon ./cmd/packmon
-RUN --mount=type=cache,target=/root/.cache/go-build \
+    -o /packmon ./cmd/packmon && \
     CGO_ENABLED=0 go build -trimpath \
     -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${DATE}" \
     -o /packmon-server ./cmd/packmon-server
+
+# hadolint ignore=DL3006
 FROM ${PACKMON_ALPINE_RUNTIME_IMAGE} AS server
 
 RUN apk add --no-cache \
@@ -53,6 +57,7 @@ HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
 
 ENTRYPOINT ["packmon-server"]
 
+# hadolint ignore=DL3006
 FROM ${PACKMON_ALPINE_RUNTIME_IMAGE} AS cli
 
 RUN apk add --no-cache \
