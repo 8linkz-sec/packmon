@@ -600,6 +600,7 @@ func TestDockerignoreExcludesLocalStateAndPackmonConfig(t *testing.T) {
 		"*.test",
 		"Audit.md",
 		"Todo.txt",
+		"Todo-done.txt",
 		"CLAUDE.md",
 		"Phase *.md",
 		".idea/",
