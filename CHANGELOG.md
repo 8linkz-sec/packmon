@@ -20,6 +20,15 @@
   stdout fails. It used to discard every write error outside the history
   table, so a closed pipe or full disk ended the command with exit `0` and no
   (or a truncated) report, and the empty-history message never failed at all.
+- `packmon scan --outdated` exits `4` (parser error) when a lockfile or SBOM
+  fails to parse. Nonfatal parse errors used to print only a warning and exit
+  `0`; the run now reports the packages it could parse (terminal table and
+  `--html` report) and then fails with "package inventory is incomplete: N
+  parse errors". An inventory where nothing parsed exits `4` instead of
+  printing "No packages found.". `--outdated --quiet` without `--html` used to
+  return before reading the inventory, so even fatal parse errors exited `0`;
+  it still skips the registry lookups but now collects the inventory and keeps
+  the discovery (`2`) and parser (`4`) exit codes.
 - The list-all and `--outdated` HTML reports format their timestamps in the
   viewer's browser locale and time zone again. The inline script combined
   `dateStyle`/`timeStyle` with `timeZoneName`, which conforming JavaScript

@@ -46,9 +46,11 @@ unrelated persistence capabilities do not leak across subsystem boundaries.
   - `3`: findings below the blocking threshold (non-blocking; treated as a
     passing pipeline by the GitLab consumer template);
   - `4`: parser error, including partial lockfile/SBOM parse errors when no
-    blocking finding has already failed the scan; `--list-packages` has no
-    findings, so any lockfile/SBOM parse error makes it exit `4` after it
-    prints the packages it could parse;
+    blocking finding has already failed the scan; `--list-packages` and
+    `--outdated` have no findings, so any lockfile/SBOM parse error makes them
+    exit `4` after they report the packages they could parse (terminal table
+    and, for `--outdated --html`, the HTML report), and an inventory where
+    nothing parsed exits `4` instead of reporting "No packages found.";
   - `10`: internal bug.
 - Treat malicious and active supply-chain risk findings as always blocking.
   Historical ReversingLabs malware-incident evidence is `LOW` reputation info
@@ -287,7 +289,11 @@ Important behavior:
 
 - stdout is human-readable unless `--quiet` is used. `--quiet` suppresses
   routine stdout, but trust-changing warnings such as auto-mode local fallback
-  and partial parse errors still go to stderr.
+  and partial parse errors still go to stderr. `--outdated --quiet` without
+  `--html` has no output to produce, so it skips the registry lookups, but it
+  still discovers and parses the inventory: parse warnings go to stderr and
+  discovery, parser, and partial-parse failures keep their exit codes (`2` /
+  `4`) instead of exiting `0` unchecked.
 - Canonical `ScanResult.feed_status` is a compact machine-readable status:
   `healthy`, `degraded`, or `error`. Parser and operational failure details are
   carried in optional `scan_error`; partial inventory details remain in
