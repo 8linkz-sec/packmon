@@ -33,6 +33,11 @@ const maxImportBody = 100 << 20
 // the feed status row and reflected through status APIs.
 const maxImportStatusLastErrorLength = 2048
 
+// maxImportStatusDurationMs is the largest last_sync_duration_ms that still
+// fits time.Duration after the conversion to nanoseconds; larger values would
+// overflow to a negative duration.
+const maxImportStatusDurationMs = math.MaxInt64 / int64(time.Millisecond)
+
 const (
 	maxImportStatusLastETagLength       = 512
 	maxImportStatusLastCommitHashLength = 128
@@ -688,8 +693,11 @@ func (h *FeedImportHandler) importCISAKEV(ctx context.Context, feed string, req 
 	}, nil
 }
 
-type epssScoreStreamReplacer interface {
-	ReplaceEPSSScoresStream(ctx context.Context, stream func(func([]db.EPSSEntry) error) error) (updated, cleared, total int, err error)
+// epssStreamImporter applies a streamed EPSS snapshot together with the feed
+// status the stream returns and the admin audit row, in one transaction that
+// only opens after the stream finished without error.
+type epssStreamImporter interface {
+	ImportEPSSStreamWithAudit(ctx context.Context, feed string, stream func(func([]db.EPSSEntry) error) (*db.FeedSyncStatus, error), audit db.FeedImportAuditBuilder) (updated, cleared, total int, err error)
 }
 
 func (h *FeedImportHandler) importEPSS(ctx context.Context, feed string, req *epssImportRequest, audit db.FeedImportAuditBuilder) (*importResponse, error) {
@@ -719,7 +727,7 @@ func (h *FeedImportHandler) importEPSS(ctx context.Context, feed string, req *ep
 }
 
 func (h *FeedImportHandler) importEPSSRequest(ctx context.Context, feed string, r *http.Request, audit feedImportAuditFunc) (*importResponse, int, error) {
-	replacer, ok := epssStreamReplacerFor(h.store)
+	importer, ok := epssStreamImporterFor(h.store)
 	if !ok {
 		req := &epssImportRequest{}
 		if err := readJSONWithLimit(r, req, maxImportBody); err != nil {
@@ -729,12 +737,12 @@ func (h *FeedImportHandler) importEPSSRequest(ctx context.Context, feed string, 
 		return resp, len(req.Entries), err
 	}
 
-	var (
-		statusInput  *feedSyncStatusInput
-		entriesTotal int
-	)
-	updated, cleared, streamTotal, err := replacer.ReplaceEPSSScoresStream(ctx, func(yield func([]db.EPSSEntry) error) error {
-		var streamErr error
+	entriesTotal := 0
+	updated, cleared, streamTotal, err := importer.ImportEPSSStreamWithAudit(ctx, feed, func(yield func([]db.EPSSEntry) error) (*db.FeedSyncStatus, error) {
+		var (
+			statusInput *feedSyncStatusInput
+			streamErr   error
+		)
 		statusInput, entriesTotal, streamErr = streamImportEntriesObject[epssImportEntry, db.EPSSEntry](
 			r,
 			"epss",
@@ -743,27 +751,28 @@ func (h *FeedImportHandler) importEPSSRequest(ctx context.Context, feed string, 
 			yield,
 		)
 		if streamErr != nil {
-			return streamErr
+			return nil, streamErr
 		}
 		if entriesTotal == 0 {
-			return feedImportValidationErrorf("epss import entries must contain at least one score")
+			return nil, feedImportValidationErrorf("epss import entries must contain at least one score")
 		}
-		return nil
-	})
+		// Validate the complete, defaulted status before the store commits the
+		// snapshot: a status that only fails once the streamed entry count is
+		// applied must reject the whole import and keep the stored snapshot.
+		return importStatusFromInput(feed, statusInput, entriesTotal, entriesTotal)
+	}, audit)
 	if err != nil {
 		return nil, entriesTotal, err
 	}
 	if streamTotal != 0 {
 		entriesTotal = streamTotal
 	}
-	if err := h.applyImportStatus(ctx, feed, statusInput, entriesTotal, entriesTotal); err != nil {
-		return nil, entriesTotal, err
-	}
 	return &importResponse{
-		Feed:         feed,
-		Imported:     updated,
-		Deleted:      cleared,
-		EntriesTotal: entriesTotal,
+		Feed:          feed,
+		Imported:      updated,
+		Deleted:       cleared,
+		EntriesTotal:  entriesTotal,
+		AuditRecorded: true,
 	}, entriesTotal, nil
 }
 
@@ -778,26 +787,15 @@ func vulnCheckStreamImporterFor(store FeedImportStore) (vulnCheckStreamImporter,
 	return nil, false
 }
 
-func epssStreamReplacerFor(store FeedImportStore) (epssScoreStreamReplacer, bool) {
-	if replacer, ok := store.(epssScoreStreamReplacer); ok {
-		return replacer, true
+func epssStreamImporterFor(store FeedImportStore) (epssStreamImporter, bool) {
+	if importer, ok := store.(epssStreamImporter); ok {
+		return importer, true
 	}
 	if adapter, ok := store.(*DBStoreAdapter); ok {
-		replacer, ok := any(adapter.store).(epssScoreStreamReplacer)
-		return replacer, ok
+		importer, ok := any(adapter.store).(epssStreamImporter)
+		return importer, ok
 	}
 	return nil, false
-}
-
-func (h *FeedImportHandler) applyImportStatus(ctx context.Context, feed string, input *feedSyncStatusInput, entriesSynced, entriesTotal int) error {
-	status, err := importStatusFromInput(feed, input, entriesSynced, entriesTotal)
-	if err != nil {
-		return err
-	}
-	if status == nil {
-		return nil
-	}
-	return h.store.UpsertFeedSyncStatus(ctx, status)
 }
 
 func importStatusFromInput(feed string, input *feedSyncStatusInput, entriesSynced, entriesTotal int) (*db.FeedSyncStatus, error) {
@@ -1428,6 +1426,9 @@ func validateImportStatusInput(input *feedSyncStatusInput) error {
 	}
 	if input.LastSyncDurationMs != nil && *input.LastSyncDurationMs < 0 {
 		return feedImportValidationErrorf("feed import status last_sync_duration_ms must not be negative")
+	}
+	if input.LastSyncDurationMs != nil && *input.LastSyncDurationMs > maxImportStatusDurationMs {
+		return feedImportValidationErrorf("feed import status last_sync_duration_ms must not exceed %d", maxImportStatusDurationMs)
 	}
 	if input.EntriesSynced < 0 {
 		return feedImportValidationErrorf("feed import status entries_synced must not be negative")

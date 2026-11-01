@@ -408,6 +408,103 @@ func TestImportVulnCheckStreamWithAuditRollsBackOnStreamFailure(t *testing.T) {
 	}
 }
 
+// TestImportEPSSStreamWithAuditCommitsSnapshotStatusAndAuditTogether covers the
+// streamed EPSS feed import: the snapshot, the feed status returned by the
+// stream and the admin audit row land in one transaction.
+func TestImportEPSSStreamWithAuditCommitsSnapshotStatusAndAuditTogether(t *testing.T) {
+	store, _ := startDockerPostgresStore(t)
+	ctx := context.Background()
+
+	cve := seedEnrichmentCVE(t, store, "CVE-2026-10011")
+	syncedAt := time.Now().UTC().Truncate(time.Second)
+
+	updated, cleared, total, err := store.ImportEPSSStreamWithAudit(ctx, "epss",
+		func(yield func([]db.EPSSEntry) error) (*db.FeedSyncStatus, error) {
+			if err := yield([]db.EPSSEntry{{CVEID: cve, Score: 0.42, Percentile: 0.97}}); err != nil {
+				return nil, err
+			}
+			return &db.FeedSyncStatus{
+				FeedName:       "epss",
+				LastSyncAt:     &syncedAt,
+				LastSyncStatus: db.FeedSyncStatusSuccess,
+				EntriesSynced:  1,
+				EntriesTotal:   1,
+			}, nil
+		},
+		func(int, int) db.AdminAuditEntry {
+			return db.AdminAuditEntry{Action: "feed.epss.stream", IP: "127.0.0.1"}
+		})
+	if err != nil {
+		t.Fatalf("ImportEPSSStreamWithAudit: %v", err)
+	}
+	if updated != 1 || cleared != 0 || total != 1 {
+		t.Fatalf("ImportEPSSStreamWithAudit = updated %d cleared %d total %d, want 1/0/1", updated, cleared, total)
+	}
+	score, percentile, _, _ := readEnrichment(t, store, cve)
+	assertEnrichmentFloat(t, "EPSS score", score, 0.42)
+	assertEnrichmentFloat(t, "EPSS percentile", percentile, 0.97)
+
+	status, err := store.GetFeedSyncStatus(ctx, "epss")
+	if err != nil {
+		t.Fatalf("GetFeedSyncStatus: %v", err)
+	}
+	if status == nil || status.LastSyncStatus != db.FeedSyncStatusSuccess || status.EntriesSynced != 1 || status.EntriesTotal != 1 {
+		t.Fatalf("EPSS feed status = %+v, want success 1/1", status)
+	}
+	entries, err := store.ListAdminAuditLog(ctx, 20)
+	if err != nil {
+		t.Fatalf("ListAdminAuditLog: %v", err)
+	}
+	if !auditLogHasAction(entries, "feed.epss.stream") {
+		t.Fatal("audited EPSS stream wrote no admin audit entry")
+	}
+}
+
+// TestImportEPSSStreamWithAuditKeepsSnapshotOnStreamFailure covers the import
+// rejecting its status after every score was streamed (for example a status
+// that fails validation once defaults are applied): the stored snapshot, the
+// feed status and the audit log must stay untouched.
+func TestImportEPSSStreamWithAuditKeepsSnapshotOnStreamFailure(t *testing.T) {
+	store, _ := startDockerPostgresStore(t)
+	ctx := context.Background()
+
+	cve := seedEnrichmentCVE(t, store, "CVE-2026-10012")
+	if updated, err := store.SetEPSSScores(ctx, []db.EPSSEntry{{CVEID: cve, Score: 0.33, Percentile: 0.44}}); err != nil || updated != 1 {
+		t.Fatalf("SetEPSSScores(seed) = %d, %v; want 1 nil", updated, err)
+	}
+	statusErr := errors.New("status rejected after streaming")
+
+	_, _, _, err := store.ImportEPSSStreamWithAudit(ctx, "epss",
+		func(yield func([]db.EPSSEntry) error) (*db.FeedSyncStatus, error) {
+			if err := yield([]db.EPSSEntry{{CVEID: cve, Score: 0.88, Percentile: 0.89}}); err != nil {
+				return nil, err
+			}
+			return nil, statusErr
+		},
+		func(int, int) db.AdminAuditEntry {
+			return db.AdminAuditEntry{Action: "feed.epss.stream.rejected", IP: "127.0.0.1"}
+		})
+	if !errors.Is(err, statusErr) {
+		t.Fatalf("ImportEPSSStreamWithAudit error = %v, want it to wrap the stream failure", err)
+	}
+
+	score, percentile, _, _ := readEnrichment(t, store, cve)
+	assertEnrichmentFloat(t, "EPSS score", score, 0.33)
+	assertEnrichmentFloat(t, "EPSS percentile", percentile, 0.44)
+	if status, err := store.GetFeedSyncStatus(ctx, "epss"); err != nil {
+		t.Fatalf("GetFeedSyncStatus: %v", err)
+	} else if status != nil {
+		t.Fatalf("EPSS feed status = %+v, want none after the rejected stream", status)
+	}
+	entries, err := store.ListAdminAuditLog(ctx, 20)
+	if err != nil {
+		t.Fatalf("ListAdminAuditLog: %v", err)
+	}
+	if auditLogHasAction(entries, "feed.epss.stream.rejected") {
+		t.Fatal("rejected EPSS stream wrote an admin audit entry")
+	}
+}
+
 // TestRecordNVDCVSSNegativeLookupIsIdempotentAndNormalises covers the negative
 // cache for NVD lookups. It exists to stop the syncer re-querying NVD for a CVE
 // that has no CVSS score, so it must tolerate repeats and treat a lower-case or

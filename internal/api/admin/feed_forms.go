@@ -133,19 +133,16 @@ func (h *AdminHandler) HandleFeedConfigSave(w http.ResponseWriter, r *http.Reque
 	}
 
 	feedName := r.PostForm.Get("feed_name")
-	feed, err := h.desiredFeedSettings(r.Context(), feedName)
+	// The kept API key and the expected revision come from the same read: a
+	// second read could pair a newer revision with an older kept key and let a
+	// "keep existing key" save restore a key that was rotated in between.
+	feed, previous, err := h.desiredFeedSettings(r.Context(), feedName)
 	if err != nil {
 		errMsg := desiredFeedSettingsRedirectError(err)
 		if errMsg == failedFeedConfigLoadMessage && h.logger != nil {
 			h.logger.Error("admin feeds: failed to load desired feed configuration", h.adminLogAttrs(r, "feed", config.NormalizeFeedName(feedName), "error", err)...)
 		}
 		redirectAdminFeedsError(w, r, errMsg, feedName)
-		return
-	}
-	previous, err := h.store.GetFeedConfig(r.Context(), feed.Name)
-	if err != nil {
-		h.logger.Error("admin feeds: failed to load previous config", h.adminLogAttrs(r, "feed", feed.Name, "error", err)...)
-		redirectAdminFeedsError(w, r, failedFeedConfigLoadMessage, feed.Name)
 		return
 	}
 
@@ -578,24 +575,27 @@ func isHTMXRequest(r *http.Request) bool {
 	return strings.EqualFold(strings.TrimSpace(r.Header.Get("HX-Request")), "true")
 }
 
-func (h *AdminHandler) desiredFeedSettings(ctx context.Context, feedName string) (config.FeedSettings, error) {
+// desiredFeedSettings returns the runtime settings overlaid with the persisted
+// override, plus that override itself (nil when none is stored). Callers use the
+// returned override as the revision baseline of their save.
+func (h *AdminHandler) desiredFeedSettings(ctx context.Context, feedName string) (config.FeedSettings, *db.FeedConfig, error) {
 	name := config.NormalizeFeedName(feedName)
 	current, ok := h.cfg.FeedSettings(name)
 	if !ok {
-		return config.FeedSettings{}, errors.New(web.Message("admin.feeds.error.unknown_feed"))
+		return config.FeedSettings{}, nil, errors.New(web.Message("admin.feeds.error.unknown_feed"))
 	}
 
 	stored, err := h.store.GetFeedConfig(ctx, name)
 	if err != nil {
-		return config.FeedSettings{}, fmt.Errorf("load persisted feed config: %w", err)
+		return config.FeedSettings{}, nil, fmt.Errorf("load persisted feed config: %w", err)
 	}
 	if stored == nil {
-		return current, nil
+		return current, nil, nil
 	}
 
 	mode, err := config.ParseFeedMode(stored.Mode)
 	if err != nil {
-		return config.FeedSettings{}, fmt.Errorf("%s: invalid persisted mode: %w", web.Message("admin.feeds.error.load_config"), err)
+		return config.FeedSettings{}, nil, fmt.Errorf("%s: invalid persisted mode: %w", web.Message("admin.feeds.error.load_config"), err)
 	}
 
 	current.Enabled = stored.Enabled
@@ -608,7 +608,7 @@ func (h *AdminHandler) desiredFeedSettings(ctx context.Context, feedName string)
 	if current.SupportsAPIKey || strings.TrimSpace(stored.APIKey) != "" {
 		current.APIKey = strings.TrimSpace(stored.APIKey)
 	}
-	return current, nil
+	return current, stored, nil
 }
 
 func feedConfigAuditDetails(feedName string, previous, next *db.FeedConfig) map[string]string {
