@@ -29,6 +29,11 @@
   are re-validated. The store's own pre-write check now matches keys exactly,
   as the database does, so a case-variant key such as `"Introduced"` is
   rejected before the write instead of failing the CHECK constraint.
+- Refresh-queue clear, purge and single-job admin audit details omit
+  `requested_at` / `processed_at` for a job that has no such timestamp. They
+  used to record an empty string (for example `"processed_at":""` for a job
+  that was never processed). Existing audit rows are unchanged; readers must
+  treat a missing key as "never set".
 - The baseline down migration `001_initial.down.sql` can reverse the baseline
   schema on its own: it dropped `api_keys` before `scan_log`, whose
   `scan_log_api_key_id_fkey` references it, so PostgreSQL refused the drop. It

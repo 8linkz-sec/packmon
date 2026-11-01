@@ -659,7 +659,10 @@ consistent `admin_auth` then `admin_audit_log` lock order. Destructive refresh-q
 clear/purge actions preserve a bounded sample of deleted job identities in
 audit details from the delete operation, including job ID, package coordinate,
 source, priority, prior status, timestamps, redacted bounded error text,
-`total_deleted`, `sample_count`, and `truncated`. PostgreSQL exposes the
+`total_deleted`, `sample_count`, and `truncated`. The per-job `requested_at`
+and `processed_at` values are RFC 3339 UTC timestamps; a job without one (for
+example a job that was never processed) omits the key instead of storing an
+empty string. PostgreSQL exposes the
 scan package/finding totals through the `scan_log_totals` view (migration
 043), which sums the retained `scan_log` rows on read; there is no separately
 maintained rollup, so `InsertScanLog` writes only the `scan_log` row and

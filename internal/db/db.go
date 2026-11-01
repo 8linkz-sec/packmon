@@ -889,13 +889,16 @@ type adminAuditQueueJob struct {
 	Source      string `json:"source"`
 	Priority    int    `json:"priority"`
 	Status      string `json:"status"`
-	RequestedAt string `json:"requested_at"`
-	ProcessedAt string `json:"processed_at"`
+	RequestedAt string `json:"requested_at,omitempty"`
+	ProcessedAt string `json:"processed_at,omitempty"`
 	Error       string `json:"error"`
 }
 
 // SetAdminAuditQueueJobsDetail stores refresh queue job identities in a string
 // audit detail value so destructive queue actions keep reviewable evidence.
+// requested_at and processed_at are RFC 3339 UTC timestamps and are omitted
+// when the job has none (a zero time or a nil ProcessedAt), so an absent key
+// means "never set" rather than an empty string.
 func SetAdminAuditQueueJobsDetail(entry *AdminAuditEntry, key string, jobs []RefreshJob) error {
 	rows := make([]adminAuditQueueJob, 0, len(jobs))
 	for _, job := range jobs {

@@ -321,7 +321,8 @@ Admin properties:
   mutations acquire locks in `admin_auth` then `admin_audit_log` order.
   Refresh-queue clear/purge audit rows must
   preserve an affected-job sample with job IDs, package coordinates, sources,
-  priorities, prior statuses, timestamps, redacted bounded error text, and
+  priorities, prior statuses, timestamps (a timestamp the job never had is
+  omitted, not recorded as an empty string), redacted bounded error text, and
   total/sample/truncation metadata from the same delete operation;
 - new production admin audit rows carry an `hmac-sha256:` previous-row digest
   chain keyed by `PACKMON_ADMIN_AUDIT_HMAC_KEY`; older `sha256:` rows remain
