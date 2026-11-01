@@ -438,7 +438,8 @@ Important behavior:
   the trusted user-global config. A project `repos:` list replaces the
   user-global list, but a project entry that refers to a user-global entry
   (matched by name, then by path) inherits that entry's routing (`server`,
-  `api_key`, `api_key_env`, webhook) and `send_repo_metadata: false`; the
+  `api_key`, `api_key_env`, webhook), and it inherits `send_repo_metadata:
+  false` from every user-global entry that matches it by name or by path; the
   project entry keeps its own name, path (the project path wins on a name
   match), and scan policy.
   CLI errors for remote scans and local DB sync may show redacted server URL

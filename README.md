@@ -707,8 +707,10 @@ repository-name metadata with `send_repo_metadata: false`, but it cannot
 re-enable metadata if a higher-precedence user config, environment variable,
 or flag disabled it. A project `repos:` list replaces the user-global list;
 an entry that refers to a user-global repo (matched by name, then by path)
-inherits that repo's `send_repo_metadata: false`, server/API-key routing, and
-webhook, and keeps its own name, path (the project path wins), and scan policy.
+inherits that repo's server/API-key routing and webhook, inherits
+`send_repo_metadata: false` from every user-global repo that matches it by name
+or by path, and keeps its own name, path (the project path wins), and scan
+policy.
 Store API keys in environment variables, CI secrets, OS secret stores, or the
 user-global config. Use `api_key_env` in trusted user-global or explicit config
 files rather than writing plaintext keys.

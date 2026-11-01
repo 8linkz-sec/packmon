@@ -543,3 +543,76 @@ repos:
 		t.Fatal("OmitRepoMetadata = false, want the trusted opt-out inherited")
 	}
 }
+
+// TestLoadCLIConfigProjectRepoAppliesEveryMatchingTrustedOptOut covers a
+// project entry that takes one trusted repo's name but another trusted repo's
+// path. The routing still comes from the name match, but the opt-out of the
+// trusted entry that owns the directory must apply as well: otherwise reusing
+// an unrestricted name would be a way around a path's send_repo_metadata: false.
+func TestLoadCLIConfigProjectRepoAppliesEveryMatchingTrustedOptOut(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	t.Setenv("PACKMON_NO_REPO_METADATA", "")
+	privatePath, _ := trustedRepoLayeringFixture(t)
+	writeProjectConfig(t, `
+repos:
+  - name: other
+    path: `+yamlQuote(privatePath)+`
+`)
+
+	cfg, _, err := loadCLIConfigWithOptions("", cliConfigLoadOptions{})
+	if err != nil {
+		t.Fatalf("loadCLIConfigWithOptions: %v", err)
+	}
+	repo := cfg.findRepo("other")
+	if repo == nil || !sameCLIRepoPath(repo.Path, privatePath) {
+		t.Fatalf("repos = %+v, want the project's name and path kept", cfg.Repos)
+	}
+	if repo.SendRepoMetadata == nil || *repo.SendRepoMetadata {
+		t.Fatalf("SendRepoMetadata = %v, want the opt-out of the trusted entry for this path", repo.SendRepoMetadata)
+	}
+	if repo.Server != "" || repo.Webhook.URL != "" {
+		t.Fatalf("repo = %+v, want the routing of the name match (none), not the path match", repo)
+	}
+
+	targets, err := buildScanTargets(cfg, nil, scanFlagValues{Repo: "other"})
+	if err != nil {
+		t.Fatalf("buildScanTargets: %v", err)
+	}
+	settings, err := resolveScanSettings(newScanCmd(), cfg, targets[0], scanFlagValues{})
+	if err != nil {
+		t.Fatalf("resolveScanSettings: %v", err)
+	}
+	if !settings.OmitRepoMetadata {
+		t.Fatal("OmitRepoMetadata = false, want the path match's opt-out to reach the scan")
+	}
+}
+
+// TestOverlayCLIReposConfigTakesRoutingFromTheNameMatch pins the routing side
+// of the same case directly: name match first, then path match, while an
+// opt-out from either match applies.
+func TestOverlayCLIReposConfigTakesRoutingFromTheNameMatch(t *testing.T) {
+	t.Parallel()
+
+	optOut := false
+	optIn := true
+	dst := &cliConfig{Repos: []cliRepoConfig{
+		{Name: "a", Path: filepath.FromSlash("/repos/a"), Server: "https://a.internal", SendRepoMetadata: &optIn},
+		{Name: "b", Path: filepath.FromSlash("/repos/b"), Server: "https://b.internal", SendRepoMetadata: &optOut},
+	}}
+	overlayCLIReposConfig(dst, cliConfig{Repos: []cliRepoConfig{
+		{Name: "a", Path: filepath.FromSlash("/repos/b")},
+		{Name: "c", Path: filepath.FromSlash("/repos/a")},
+	}})
+
+	byName := dst.Repos[0]
+	if byName.Server != "https://a.internal" {
+		t.Fatalf("name+path match Server = %q, want the name match's routing", byName.Server)
+	}
+	if byName.SendRepoMetadata == nil || *byName.SendRepoMetadata {
+		t.Fatalf("name+path match SendRepoMetadata = %v, want the path match's opt-out", byName.SendRepoMetadata)
+	}
+	byPath := dst.Repos[1]
+	if byPath.Server != "https://a.internal" || byPath.SendRepoMetadata != nil {
+		t.Fatalf("path-only match = %+v, want the path match's routing and no opt-out", byPath)
+	}
+}

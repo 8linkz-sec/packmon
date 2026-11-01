@@ -43,6 +43,12 @@
   own name, path (the project path wins on a name match), and scan policy.
   Previously a project entry naming a trusted repo silently re-enabled
   repository metadata that repo had disabled.
+- A project `.packmon.yaml` `repos:` entry whose name matches one user-global
+  repo and whose path matches another now inherits `send_repo_metadata: false`
+  from both. Routing (server, API key, webhook) still comes from the name
+  match. Previously only the name match was consulted, so reusing an
+  unrestricted repo name for an opted-out directory dropped that directory's
+  opt-out.
 - `packmon config show` escapes terminal control characters in every config-,
   flag-, and environment-derived value it prints: config file path, server,
   masked API key, API key env name, mode, fail_on, ecosystems, CA cert path,
