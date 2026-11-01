@@ -29,10 +29,11 @@ type SyncExport struct {
 	Lifecycle       []SyncLifecycleRelease
 	Truncated       bool
 	NextCursor      *SyncCursor
-	// VulnerabilityAffectedComplete reports that the exporter sends every
-	// vulnerability it includes in a request sequence with all of its current
-	// affected packages (within the requested ecosystems), so delta clients
-	// can drop local affected rows the sequence did not send.
+	// VulnerabilityAffectedComplete reports that this export is a single-page
+	// delta (since window, not paginated) that sends every vulnerability it
+	// includes with all of its current affected packages (within the requested
+	// ecosystems), so a delta client can drop local affected rows of that
+	// vulnerability the page did not send.
 	VulnerabilityAffectedComplete bool
 }
 

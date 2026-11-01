@@ -26,10 +26,12 @@ func syncReplaceVulnerability(id, ecosystem, name string) syncVulnerability {
 }
 
 // seedSyncReplaceRows stores the pre-move state: GHSA-move affects npm
-// left-pad and pypi requests, GHSA-other affects npm other.
-func seedSyncReplaceRows(t *testing.T, store *Store) {
+// left-pad and pypi requests, GHSA-other affects npm other. With since set,
+// the next non-full sync is a delta with a since window.
+func seedSyncReplaceRows(t *testing.T, store *Store, since string) {
 	t.Helper()
-	if _, err := applySync(context.Background(), store, true, &syncResponse{
+	ctx := context.Background()
+	if _, err := applySync(ctx, store, true, &syncResponse{
 		SyncedAt: "2026-05-30T09:00:00Z",
 		Vulnerabilities: []syncVulnerability{
 			syncReplaceVulnerability("GHSA-move", "npm", "left-pad"),
@@ -38,6 +40,11 @@ func seedSyncReplaceRows(t *testing.T, store *Store) {
 		},
 	}); err != nil {
 		t.Fatalf("seed full sync: %v", err)
+	}
+	if since != "" {
+		if err := store.SetSyncMeta(ctx, syncMetaKeyLastSync, since); err != nil {
+			t.Fatalf("seed last sync: %v", err)
+		}
 	}
 }
 
@@ -100,67 +107,76 @@ func finalSyncReplacePage(complete bool, vulnerabilities ...syncVulnerability) *
 }
 
 // TestDeltaSyncReplacesAffectedPackagesOfChangedVulnerabilities covers a
-// server-side coverage move (GHSA-move: npm left-pad -> npm right-pad). A
-// server that marks its delta as carrying the complete affected set of every
-// included vulnerability lets the client drop the moved-away package, so a
-// local scan matches /api/v1/check without a full sync.
+// server-side coverage move (GHSA-move: npm left-pad -> npm right-pad). Only a
+// single-page delta with a since window that the server marks with
+// vulnerability_affected_complete lets the client drop the moved-away package.
+// Every other sequence stays upsert-only: pages of a multi-page delta are
+// separate statements, so a vulnerability changed between them can arrive
+// incomplete, even when a (buggy or older) server flags every page.
 func TestDeltaSyncReplacesAffectedPackagesOfChangedVulnerabilities(t *testing.T) {
 	t.Parallel()
 
+	const since = "2026-05-30T09:00:00Z"
 	moved := []syncVulnerability{
 		syncReplaceVulnerability("GHSA-move", "npm", "right-pad"),
 		syncReplaceVulnerability("GHSA-move", "pypi", "requests"),
 	}
+	replaced := []string{"GHSA-move|npm|right-pad", "GHSA-move|pypi|requests", "GHSA-other|npm|other"}
+	upserted := []string{"GHSA-move|npm|left-pad", "GHSA-move|npm|right-pad", "GHSA-move|pypi|requests", "GHSA-other|npm|other"}
 	tests := []struct {
 		name       string
+		since      string
 		pages      map[string]*syncResponse
 		ecosystems []string
 		wantErr    bool
 		want       []string
 	}{
 		{
-			name:  "single complete page",
+			name:  "single complete page with since",
+			since: since,
 			pages: map[string]*syncResponse{"": finalSyncReplacePage(true, moved...)},
-			want:  []string{"GHSA-move|npm|right-pad", "GHSA-move|pypi|requests", "GHSA-other|npm|other"},
+			want:  replaced,
 		},
 		{
-			name: "complete set split across pages",
+			name:  "single complete page without since stays upsert-only",
+			pages: map[string]*syncResponse{"": finalSyncReplacePage(true, moved...)},
+			want:  upserted,
+		},
+		{
+			name:  "multi-page sequence stays upsert-only even when every page is flagged",
+			since: since,
 			pages: map[string]*syncResponse{
 				"":   truncatedSyncReplacePage(true, "c1", moved[0]),
 				"c1": finalSyncReplacePage(true, moved[1]),
 			},
-			want: []string{"GHSA-move|npm|right-pad", "GHSA-move|pypi|requests", "GHSA-other|npm|other"},
+			want: upserted,
 		},
 		{
 			name:  "older server without the completeness flag keeps upsert-only behavior",
+			since: since,
 			pages: map[string]*syncResponse{"": finalSyncReplacePage(false, moved...)},
-			want:  []string{"GHSA-move|npm|left-pad", "GHSA-move|npm|right-pad", "GHSA-move|pypi|requests", "GHSA-other|npm|other"},
+			want:  upserted,
 		},
 		{
-			name: "one page without the flag disables replacement for the sequence",
-			pages: map[string]*syncResponse{
-				"":   truncatedSyncReplacePage(true, "c1", moved[0]),
-				"c1": finalSyncReplacePage(false, moved[1]),
-			},
-			want: []string{"GHSA-move|npm|left-pad", "GHSA-move|npm|right-pad", "GHSA-move|pypi|requests", "GHSA-other|npm|other"},
-		},
-		{
-			name: "failed sequence deletes nothing",
+			name:  "failed sequence deletes nothing",
+			since: since,
 			pages: map[string]*syncResponse{
 				"":   truncatedSyncReplacePage(true, "c1", moved[0]),
 				"c1": nil,
 			},
 			wantErr: true,
-			want:    []string{"GHSA-move|npm|left-pad", "GHSA-move|npm|right-pad", "GHSA-move|pypi|requests", "GHSA-other|npm|other"},
+			want:    upserted,
 		},
 		{
 			name:       "ecosystem-filtered sync replaces only filtered ecosystems",
+			since:      since,
 			pages:      map[string]*syncResponse{"": finalSyncReplacePage(true, moved[0])},
 			ecosystems: []string{" NPM "},
-			want:       []string{"GHSA-move|npm|right-pad", "GHSA-move|pypi|requests", "GHSA-other|npm|other"},
+			want:       replaced,
 		},
 		{
-			name: "withdrawn vulnerability is deleted, not replaced",
+			name:  "withdrawn vulnerability is deleted, not replaced",
+			since: since,
 			pages: map[string]*syncResponse{"": finalSyncReplacePage(true, syncVulnerability{
 				ID: "GHSA-move", Ecosystem: "npm", Name: "right-pad", Withdrawn: true,
 			})},
@@ -173,7 +189,7 @@ func TestDeltaSyncReplacesAffectedPackagesOfChangedVulnerabilities(t *testing.T)
 			t.Parallel()
 
 			store := newSQLiteTestStore(t)
-			seedSyncReplaceRows(t, store)
+			seedSyncReplaceRows(t, store, tt.since)
 			server := newSyncReplaceServer(t, tt.pages)
 
 			err := Sync(context.Background(), store, SyncConfig{
@@ -198,17 +214,21 @@ func TestDeltaSyncReplacesAffectedPackagesOfChangedVulnerabilities(t *testing.T)
 func TestDeltaSyncReplacementUsesCanonicalPackageNames(t *testing.T) {
 	t.Parallel()
 
+	ctx := context.Background()
 	store := newSQLiteTestStore(t)
-	if _, err := applySync(context.Background(), store, true, &syncResponse{
+	if _, err := applySync(ctx, store, true, &syncResponse{
 		SyncedAt:        "2026-05-30T09:00:00Z",
 		Vulnerabilities: []syncVulnerability{syncReplaceVulnerability("GHSA-pypi", "pypi", "My.Pkg")},
 	}); err != nil {
 		t.Fatalf("seed full sync: %v", err)
 	}
+	if err := store.SetSyncMeta(ctx, syncMetaKeyLastSync, "2026-05-30T09:00:00Z"); err != nil {
+		t.Fatalf("seed last sync: %v", err)
+	}
 	server := newSyncReplaceServer(t, map[string]*syncResponse{
 		"": finalSyncReplacePage(true, syncReplaceVulnerability("GHSA-pypi", "pypi", "my_pkg")),
 	})
-	if err := Sync(context.Background(), store, SyncConfig{ServerURL: server.URL, AllowInsecureHTTP: true}); err != nil {
+	if err := Sync(ctx, store, SyncConfig{ServerURL: server.URL, AllowInsecureHTTP: true}); err != nil {
 		t.Fatalf("Sync() error = %v", err)
 	}
 	if got, want := localVulnerabilityRowKeys(t, store), []string{"GHSA-pypi|pypi|my-pkg"}; !slices.Equal(got, want) {

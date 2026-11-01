@@ -36,11 +36,12 @@ type Response struct {
 	// omitted when reputation is served, which keeps older clients and servers
 	// compatible.
 	ReputationDisabled bool `json:"reputation_disabled,omitempty"`
-	// VulnerabilityAffectedComplete reports that every vulnerability with a
-	// row in this request sequence is exported with all of its current
-	// affected packages (within the requested ecosystems), so a delta client
-	// can drop local affected rows of that vulnerability the sequence did not
-	// send. It is omitted by servers that do not make this guarantee, which
+	// VulnerabilityAffectedComplete reports that this response is a delta
+	// (since window) delivered in a single page and that every vulnerability
+	// with a row in it is exported with all of its current affected packages
+	// (within the requested ecosystems), so the client can drop local affected
+	// rows of that vulnerability the page did not send. Full exports and pages
+	// of a multi-page delta never carry it. It is omitted when false, which
 	// keeps older clients and servers compatible.
 	VulnerabilityAffectedComplete bool `json:"vulnerability_affected_complete,omitempty"`
 }

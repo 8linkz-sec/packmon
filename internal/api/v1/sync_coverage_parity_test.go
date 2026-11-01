@@ -23,9 +23,9 @@ const coverageParityAdvisory = "GHSA-cove-rage-move"
 
 // coverageParityStore simulates a server-side coverage move of one advisory:
 // the check path matches the advisory against its current affected packages,
-// and the sync path exports it like the PostgreSQL exporter does -- a delta
-// includes a changed advisory with its complete current affected set and says
-// so with VulnerabilityAffectedComplete.
+// and the sync path exports it like the PostgreSQL exporter does -- a
+// single-page delta includes a changed advisory with its complete current
+// affected set and says so with VulnerabilityAffectedComplete.
 type coverageParityStore struct {
 	stubStore
 
@@ -66,9 +66,11 @@ func (s *coverageParityStore) FindVulnerabilitiesBatch(_ context.Context, packag
 func (s *coverageParityStore) ExportSync(_ context.Context, opts db.SyncExportOptions) (*db.SyncExport, error) {
 	s.coverageMu.Lock()
 	defer s.coverageMu.Unlock()
+	// Like the PostgreSQL exporter, only a single-page delta (since window)
+	// promises complete affected sets; this store never paginates.
 	export := &db.SyncExport{
 		SyncedAt:                      time.Now().UTC().Add(-time.Second),
-		VulnerabilityAffectedComplete: true,
+		VulnerabilityAffectedComplete: opts.Since != nil,
 	}
 	if opts.Since != nil && s.changedAt.Before(*opts.Since) {
 		return export, nil

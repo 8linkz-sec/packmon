@@ -52,6 +52,12 @@ func TestPostgresStoreCorrectnessAgainstDocker(t *testing.T) {
 	t.Run("manual edit delta sends the complete affected set", func(t *testing.T) {
 		testManualEditDeltaSendsCompleteAffectedSet(ctx, t, store)
 	})
+	t.Run("affected-complete flag only on single-page deltas", func(t *testing.T) {
+		testSyncAffectedCompleteOnlyOnSinglePageDeltas(ctx, t, store)
+	})
+	t.Run("split delta keeps rows of a vulnerability changed between pages", func(t *testing.T) {
+		testSplitDeltaKeepsRowsOfVulnerabilityChangedBetweenPages(ctx, t, store)
+	})
 	t.Run("package name repair marks merged vulnerabilities changed", func(t *testing.T) {
 		testPackageNameRepairDeltaIncludesMergedVulnerability(ctx, t, store)
 	})

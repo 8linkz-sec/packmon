@@ -76,18 +76,28 @@ func (s *Store) ExportSync(ctx context.Context, opts db.SyncExportOptions) (*db.
 	}
 
 	return &db.SyncExport{
-		SyncedAt:        snapshot,
-		SyncedXID:       snapshotXID,
-		Vulnerabilities: vulns,
-		Malicious:       malicious,
-		Reputation:      reputation,
-		Lifecycle:       lifecycle,
-		Truncated:       truncated,
-		NextCursor:      nextCursor,
-		// exportSyncVulnerabilities sends each vulnerability of a delta with
-		// its complete current affected set.
-		VulnerabilityAffectedComplete: true,
+		SyncedAt:                      snapshot,
+		SyncedXID:                     snapshotXID,
+		Vulnerabilities:               vulns,
+		Malicious:                     malicious,
+		Reputation:                    reputation,
+		Lifecycle:                     lifecycle,
+		Truncated:                     truncated,
+		NextCursor:                    nextCursor,
+		VulnerabilityAffectedComplete: syncVulnerabilityAffectedComplete(opts, truncated),
 	}, nil
+}
+
+// syncVulnerabilityAffectedComplete reports whether this response may promise
+// vulnerability_affected_complete. Only a delta (since window) that fits in a
+// single page qualifies: that page is one statement, and the delta query sends
+// each changed vulnerability with all of its current affected packages. A full
+// export bounds affected rows by the snapshot, and the pages of a multi-page
+// delta are separate statements that re-evaluate the vulnerability bounds, so
+// a vulnerability changed between pages can arrive incomplete (whole-advisory
+// paging is backlog AUDIT-046).
+func syncVulnerabilityAffectedComplete(opts db.SyncExportOptions, truncated bool) bool {
+	return opts.Since != nil && !truncated && opts.Cursor.IsZero() && opts.Offset == 0
 }
 
 type syncDatasetExporters struct {
@@ -361,11 +371,12 @@ func (q syncVulnerabilityQueryArgs) addSnapshotXIDFilters(query *string, delta b
 
 // exportSyncVulnerabilitiesBaseSQL selects one row per affected package. A
 // delta joins the changed-ID CTE and exports every current affected package of
-// each selected vulnerability, without a per-row snapshot bound, so the
-// response can promise vulnerability_affected_complete: a client may drop
-// local affected rows of that vulnerability the request sequence did not send.
-// A package changed after the snapshot is sent now and again by the next
-// delta, which is idempotent. The full export keeps the row-level bound.
+// each selected vulnerability, without a per-row snapshot bound, so a delta
+// that fits in one page can promise vulnerability_affected_complete (see
+// syncVulnerabilityAffectedComplete): a client may drop local affected rows of
+// that vulnerability the page did not send. A package changed after the
+// snapshot is sent now and again by the next delta, which is idempotent. The
+// full export keeps the row-level bound.
 func exportSyncVulnerabilitiesBaseSQL(delta bool) string {
 	fromSQL := `FROM vulnerabilities v`
 	affectedBound := `

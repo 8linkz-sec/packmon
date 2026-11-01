@@ -65,7 +65,7 @@ type SyncStats struct {
 	// it does not serve package reputation (reputation_disabled).
 	ReputationDisabled SyncRemovalStats
 	// AffectedReplaced counts affected-package rows of changed vulnerabilities
-	// that a delta sync dropped because the server no longer lists them
+	// that a single-page delta sync dropped because the server no longer lists them
 	// (vulnerability_affected_complete). It is not part of AnyRemoved.
 	AffectedReplaced SyncRemovalStats
 }
@@ -115,65 +115,62 @@ type syncPageApply struct {
 	// to clearReputationEcosystems when that filter is non-empty.
 	clearReputation           bool
 	clearReputationEcosystems []string
-	// replaceAffected, set on the final page of a delta sequence, drops local
-	// affected rows of the vulnerabilities the sequence delivered that it did
-	// not deliver again.
+	// replaceAffected, set only for the single page of a delta with a since
+	// window, drops local affected rows of the vulnerabilities the page
+	// delivered that it did not deliver again.
 	replaceAffected *syncAffectedReplacement
 	metadata        syncApplyMetadata
 }
 
-// syncAffectedReplacement collects the affected-package rows one delta
-// request sequence delivered per vulnerability. A server that sets
-// vulnerability_affected_complete on every page exports each included
+// syncAffectedReplacement lists the affected-package rows a single-page
+// delta delivered per vulnerability. A server sets
+// vulnerability_affected_complete only on a delta with a since window that
+// fits in one page: that page is one statement, so it carries each included
 // vulnerability with its complete current affected set (within the requested
-// ecosystems), possibly spread over several pages, so local rows of that
-// vulnerability the sequence did not deliver are no longer affected on the
-// server. The replacement runs in the final page's transaction: a sequence
-// that fails earlier deletes nothing and the next sync starts over.
+// ecosystems), and local rows of that vulnerability it did not deliver are no
+// longer affected on the server. Pages of a multi-page sequence are separate
+// statements; a vulnerability changed between them can arrive incomplete, so
+// such sequences stay upsert-only even when a page carries the flag.
 type syncAffectedReplacement struct {
-	// complete stays true only while every page carried the guarantee.
-	complete   bool
 	ecosystems map[string]struct{}
-	// received maps a vulnerability ID to the row keys delivered for it; a
-	// nil set marks a withdrawn vulnerability, which is deleted, not replaced.
+	// received maps a vulnerability ID to the row keys delivered for it.
 	received map[string]map[string]struct{}
 }
 
-func newSyncAffectedReplacement(ecosystems []string) *syncAffectedReplacement {
+// newSyncAffectedReplacement returns the replacement for one sync page, or nil
+// unless the page is the only page of a delta with a since window and carries
+// vulnerability_affected_complete. Withdrawn vulnerabilities are deleted by
+// applySyncVulnerabilities instead of being replaced.
+func newSyncAffectedReplacement(pass syncPass, firstPage bool, resp *syncResponse, ecosystems []string) *syncAffectedReplacement {
+	if pass.full || pass.cursorState.Since == "" || !firstPage || resp.Truncated || !resp.VulnerabilityAffectedComplete {
+		return nil
+	}
+	withdrawn := make(map[string]struct{})
+	for _, v := range resp.Vulnerabilities {
+		if v.Withdrawn {
+			withdrawn[v.ID] = struct{}{}
+		}
+	}
+	received := make(map[string]map[string]struct{})
+	for _, v := range resp.Vulnerabilities {
+		if _, ok := withdrawn[v.ID]; ok {
+			continue
+		}
+		keys := received[v.ID]
+		if keys == nil {
+			keys = make(map[string]struct{})
+			received[v.ID] = keys
+		}
+		keys[syncVulnerabilityRowKey(v.ID, v.Ecosystem, normalizePackageName(v.Ecosystem, v.Name))] = struct{}{}
+	}
+	if len(received) == 0 {
+		return nil
+	}
 	scope := make(map[string]struct{}, len(ecosystems))
 	for _, ecosystem := range ecosystems {
 		scope[strings.ToLower(strings.TrimSpace(ecosystem))] = struct{}{}
 	}
-	return &syncAffectedReplacement{
-		complete:   true,
-		ecosystems: scope,
-		received:   make(map[string]map[string]struct{}),
-	}
-}
-
-// observe records the vulnerability rows of one page.
-func (r *syncAffectedReplacement) observe(resp *syncResponse) {
-	if !resp.VulnerabilityAffectedComplete {
-		r.complete = false
-	}
-	if !r.complete {
-		return
-	}
-	for _, v := range resp.Vulnerabilities {
-		keys, seen := r.received[v.ID]
-		if v.Withdrawn {
-			r.received[v.ID] = nil
-			continue
-		}
-		if seen && keys == nil {
-			continue
-		}
-		if keys == nil {
-			keys = make(map[string]struct{})
-			r.received[v.ID] = keys
-		}
-		keys[syncVulnerabilityRowKey(v.ID, v.Ecosystem, normalizePackageName(v.Ecosystem, v.Name))] = struct{}{}
-	}
+	return &syncAffectedReplacement{ecosystems: scope, received: received}
 }
 
 func (r *syncAffectedReplacement) inScope(ecosystem string) bool {
@@ -229,9 +226,10 @@ type (
 // reputation-only sequence (no since window, other datasets marked done)
 // restores the complete reputation dataset.
 //
-// When every page of a delta sequence reports vulnerability_affected_complete,
-// the final page also drops local affected rows of each delivered
-// vulnerability that the sequence did not deliver (syncAffectedReplacement).
+// When a delta with a since window arrives in a single page that reports
+// vulnerability_affected_complete, that page also drops local affected rows of
+// each delivered vulnerability that it did not deliver
+// (syncAffectedReplacement). Multi-page sequences stay upsert-only.
 func Sync(ctx context.Context, store *Store, cfg SyncConfig) error {
 	cfg, err := validateSyncConfig(cfg)
 	if err != nil {
@@ -343,10 +341,6 @@ func syncPaginatedResponses(ctx context.Context, store *Store, client *http.Clie
 	firstPage := true
 	reputationDisabled := false
 	var stats SyncStats
-	var replacement *syncAffectedReplacement
-	if !pass.full {
-		replacement = newSyncAffectedReplacement(cfg.Ecosystems)
-	}
 
 	// Loop to handle paginated responses.
 	for {
@@ -384,12 +378,9 @@ func syncPaginatedResponses(ctx context.Context, store *Store, client *http.Clie
 			metadata.ClearReputationResync = pass.completesReputation && !reputationDisabled
 		}
 
-		page := syncPageApply{metadata: metadata}
-		if replacement != nil {
-			replacement.observe(resp)
-			if !resp.Truncated && replacement.complete && len(replacement.received) > 0 {
-				page.replaceAffected = replacement
-			}
+		page := syncPageApply{
+			metadata:        metadata,
+			replaceAffected: newSyncAffectedReplacement(pass, firstPage, resp, cfg.Ecosystems),
 		}
 		if firstPage {
 			page.full = pass.full
@@ -1031,8 +1022,8 @@ func applySyncVulnerabilities(ctx context.Context, tx *sql.Tx, vulnerabilities [
 }
 
 // replaceSyncAffectedPackages deletes local affected rows of every
-// vulnerability the delta sequence delivered that the sequence did not
-// deliver again, limited to the requested ecosystems. Rows are compared by
+// vulnerability the single-page delta delivered that it did not deliver
+// again, limited to the requested ecosystems. Rows are compared by
 // row key, which uses the canonical package name like applySyncVulnerabilities.
 func replaceSyncAffectedPackages(ctx context.Context, tx *sql.Tx, replacement *syncAffectedReplacement) (int64, error) {
 	selectStmt, err := tx.PrepareContext(ctx, `SELECT row_key, ecosystem FROM vulnerabilities_local WHERE id = ?`)
@@ -1047,10 +1038,8 @@ func replaceSyncAffectedPackages(ctx context.Context, tx *sql.Tx, replacement *s
 	defer ioutils.CloseSilently(deleteStmt)
 
 	ids := make([]string, 0, len(replacement.received))
-	for id, keys := range replacement.received {
-		if keys != nil {
-			ids = append(ids, id)
-		}
+	for id := range replacement.received {
+		ids = append(ids, id)
 	}
 	slices.Sort(ids)
 

@@ -119,15 +119,20 @@
   advisory was withdrawn), so after a server-side coverage change -- a manual
   advisory edited to another package, or the package-name repair -- a local
   scan kept reporting the old package until a full sync while
-  `/api/v1/check` no longer did. Delta `GET /api/v1/sync` responses now carry
-  the optional `vulnerability_affected_complete: true` field: each changed
-  vulnerability is exported with its complete current affected set (the
-  delta no longer drops affected rows written after the snapshot), and the
-  client replaces that vulnerability's local affected rows in the final
-  page's transaction. The package-name repair also marks merged
-  vulnerabilities changed so they enter the next delta. Older servers omit
-  the field and older clients ignore it, so both keep the previous
-  upsert-only behavior.
+  `/api/v1/check` no longer did. A delta `GET /api/v1/sync` now exports each
+  changed vulnerability with its complete current affected set (it no longer
+  drops affected rows written after the snapshot). A delta with a `since`
+  window that fits in a single page carries the new optional
+  `vulnerability_affected_complete: true` field, and the client then replaces
+  the local affected rows of each delivered vulnerability in that page's
+  transaction. Full exports and every page of a multi-page delta omit the
+  field, and the client applies the replacement only to a single-page delta
+  with a stored `since`, so a vulnerability changed between two pages of a
+  larger delta can never delete still-valid local rows; such deltas stay
+  upsert-only (whole-advisory paging is backlog AUDIT-046). The package-name
+  repair also marks merged vulnerabilities changed so they enter the next
+  delta. Older servers omit the field and older clients ignore it, so both
+  keep the previous upsert-only behavior.
 - Manual advisory writes and deletes on PostgreSQL use the normalized
   (trimmed) advisory ID throughout. A padded ID such as ` manual:x ` no longer
   leaves both the vulnerability and the malicious record active after a type

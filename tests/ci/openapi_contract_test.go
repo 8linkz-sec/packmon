@@ -138,7 +138,7 @@ func TestOpenAPIIncludesCanonicalScanAndSyncFields(t *testing.T) {
 		t.Fatalf("SyncResponse.vulnerability_affected_complete type = %#v, want boolean", got)
 	}
 	affectedCompleteDescription, _ := affectedComplete["description"].(string)
-	for _, want := range []string{"all of its current affected", "final page", "every page", "omit", "compatible"} {
+	for _, want := range []string{"since window", "single page", "all of its current affected", "multi-page delta omit", "compatible"} {
 		if !strings.Contains(affectedCompleteDescription, want) {
 			t.Fatalf("SyncResponse.vulnerability_affected_complete description missing %q: %q", want, affectedCompleteDescription)
 		}
