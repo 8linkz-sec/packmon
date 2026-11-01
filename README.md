@@ -1179,6 +1179,12 @@ server serves plain HTTP in-container -- terminate TLS at your own reverse
 proxy (nginx/Traefik/Caddy) and set `PACKMON_TRUSTED_PROXIES` to the proxy's
 IP/CIDR so the server trusts its `X-Forwarded-*` headers. The server port is
 published only on `127.0.0.1`, so only a host-local proxy can reach it.
+`PACKMON_SERVER_PORT` (default `8080`) sets both that published port and the
+in-container listener. PostgreSQL and the server run with
+`restart: unless-stopped`; the server keeps its feed git checkouts in the
+named `feed-data` volume (mounted at `/data/feeds`) next to the
+`postgres-data` database volume, so recreating the container does not force a
+full feed re-clone.
 
 Example nginx front (TLS terminated at the proxy, forwarding to the
 loopback-published server):

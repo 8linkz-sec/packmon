@@ -2,9 +2,26 @@
 
 ## Services
 
-- API and web UI: port `8080`
+- API and web UI: port `8080` (`PACKMON_SERVER_PORT`; the Compose files use
+  the same value for the in-container listener and both sides of the
+  `127.0.0.1` port mapping, so point your reverse proxy at the same port)
 - metrics: `127.0.0.1:9090`
 - PostgreSQL: port `5432`
+
+Persistent Docker volumes (project-scoped, by default `packmon_<name>`):
+
+- `postgres-data`: the PostgreSQL cluster. Covered by the `Backup` section.
+- `feed-data`: the server's feed working directory (`/data/feeds`) with the
+  git checkouts of the GHSA advisory database and the OpenSSF
+  malicious-packages repository. It needs no backup -- after loss the next
+  sync re-clones -- but keeping it avoids a full re-clone of roughly 350k files
+  on every container recreation.
+
+In `docker-compose.server.yml`, `postgres` and `packmon-server` run with
+`restart: unless-stopped`, so they come back after a crash, a Docker daemon
+restart, or a host reboot. A container stopped explicitly with
+`docker compose -f docker-compose.server.yml stop` (or removed with `down`)
+stays down, including across daemon restarts. The one-shot `packmon-migrate` and `packmon-backup` jobs never restart.
 
 ## Transport security (read before first production start)
 
@@ -102,6 +119,10 @@ operator action:
 ```bash
 docker compose -f docker-compose.server.yml run --rm packmon-backup
 ```
+
+The backup covers PostgreSQL only. The `feed-data` volume is deliberately not
+backed up: it holds re-clonable upstream git checkouts, and a restored server
+with an empty feed volume re-clones them on its next feed sync.
 
 For Docker Compose deployments, run the same command from a host or job
 container that can reach the PostgreSQL service and receives database

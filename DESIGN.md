@@ -166,14 +166,25 @@ Packmon's maintained deployment surfaces are intentionally narrow:
   severity-filtered searches can aggregate the narrow index entries without
   scanning the wide finding heap. Those indexes are built concurrently by the
   explicit migration command.
-- The server's feed working directory (`PACKMON_FEED_DATA_DIR`, `/data/feeds`
-  in the container) is backed by the named `feed-data` volume. It holds the
-  git checkouts of the GHSA advisory database and the OpenSSF
-  malicious-packages repository. Losing it is not a correctness problem --
-  the next sync re-clones -- but a first clone of the advisory database
+- `docker-compose.server.yml` is the self-contained production Compose model
+  (no base or override file). It keeps PostgreSQL and `packmon-server` on
+  `restart: unless-stopped` while the one-shot `packmon-migrate` and
+  `packmon-backup` jobs use `restart: "no"`, and passes the same
+  `PACKMON_SERVER_PORT` expression into the container that it uses for both
+  sides of the loopback port mapping, so the published container port and the
+  in-container listener cannot diverge.
+- In both Compose models the server's feed working directory
+  (`PACKMON_FEED_DATA_DIR`, `/data/feeds` in the container; the production file
+  pins this value) is backed by the named `feed-data` volume
+  (`<project>_feed-data`). The image creates `/data/feeds` owned by the
+  non-root `packmon` user and Docker seeds a new named volume from it, so the
+  server can write there. It holds the git checkouts of the GHSA advisory
+  database and the OpenSSF malicious-packages repository. Losing it is not a
+  correctness problem -- the next sync re-clones, so the volume is not part of
+  the PostgreSQL backup -- but a first clone of the advisory database
   transfers and checks out roughly 350k files, so an unbacked directory turns
-  every image rebuild into the slowest and most failure-prone operation the
-  server performs.
+  every container recreation into the slowest and most failure-prone
+  operation the server performs.
 - `deploy/n8n` contains workflow templates that call the Packmon server over
   authenticated HTTPS APIs. Command-node templates use environment variables,
   short-lived `mktemp` files with cleanup traps, and path-minimized webhook

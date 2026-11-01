@@ -157,10 +157,17 @@ func TestServerComposeIsSelfContainedAndHardened(t *testing.T) {
 		"PACKMON_DB_HOST: ${PACKMON_DB_HOST:-postgres}",
 		"env_file:",
 		"required: false",
-		"restart: unless-stopped",
 	} {
 		if !strings.Contains(server, want) {
 			t.Fatalf("docker-compose.server.yml missing hardening marker %q", want)
+		}
+	}
+	// Restart policies are checked on the parsed file: a substring match also
+	// accepted a commented-out `# restart: unless-stopped`, which is no policy.
+	parsed := readComposeContract(t, "docker-compose.server.yml")
+	for _, name := range []string{"postgres", "packmon-server"} {
+		if got := parsed.Services[name].Restart; got != "unless-stopped" {
+			t.Fatalf("docker-compose.server.yml %s restart = %q, want a parsed unless-stopped policy", name, got)
 		}
 	}
 	if strings.Contains(server, "PACKMON_ALLOW_INSECURE_LOCAL_HTTP: ${PACKMON_ALLOW_INSECURE_LOCAL_HTTP:-true}") ||

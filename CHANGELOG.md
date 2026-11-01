@@ -20,6 +20,24 @@
   `--list-all` / `--outdated`. The `# vX.Y.Z` comment convention is used as
   the declared version; without it the pin is compared with the dereferenced
   latest tag commit, and unresolvable tags report `unknown` instead of a guess.
+- `docker-compose.server.yml` passes `PACKMON_SERVER_PORT` into the container,
+  so a shell override no longer publishes a container port the server does not
+  listen on.
+- `docker-compose.server.yml` mounts a named `feed-data` volume at
+  `/data/feeds` and pins `PACKMON_FEED_DATA_DIR` to it; the git-backed GHSA and
+  OpenSSF checkouts survive container recreation instead of living in
+  temporary storage.
+- `docker-compose.server.yml` enables `restart: unless-stopped` for
+  PostgreSQL and the server (previously commented out); the one-shot migrate
+  and backup jobs keep `restart: "no"`.
+- `docker-compose.yml` defaults `PACKMON_SCAN_LOG_RETENTION` and
+  `PACKMON_ADMIN_AUDIT_LOG_RETENTION` to the documented `720h` (30 days)
+  instead of `2160h` / `8760h`.
+- `.dockerignore` now excludes every git-ignored path, including the local
+  working documents (`AGENTS.md` at any depth, `CLAUDE.local.md`,
+  `TESTING.md`, `WORKFLOW.md`, `Roadmap.txt`, `docs/superpowers/`) and the
+  default `backups/` dump directory, so they no longer enter the build
+  context.
 
 ### Security updates
 
@@ -33,3 +51,16 @@
   the inventory-only `chocolatey` ecosystem. The server refuses to start on a
   schema version mismatch. Rolling 047 back removes any `chocolatey` rows
   (none are written by the scan path).
+- `docker-compose.server.yml` deployments: the next `up` creates the new
+  `<project>_feed-data` volume, so the first feed sync after the upgrade
+  re-clones the GHSA and OpenSSF repositories once. A `PACKMON_FEED_DATA_DIR`
+  set in `.env` is now overridden by `/data/feeds`. PostgreSQL and the server
+  now restart automatically; stop them with `docker compose -f
+  docker-compose.server.yml stop` when they must stay down. Make sure the
+  reverse proxy targets the port in `PACKMON_SERVER_PORT`.
+- `docker-compose.yml` deployments that relied on the old implicit
+  `2160h` / `8760h` scan-log and admin-audit retention: set
+  `PACKMON_SCAN_LOG_RETENTION` / `PACKMON_ADMIN_AUDIT_LOG_RETENTION`
+  explicitly (or in `/admin/settings`) before upgrading, otherwise the next
+  prune deletes rows older than 30 days. Values saved in `/admin/settings`
+  take precedence over the environment default.
