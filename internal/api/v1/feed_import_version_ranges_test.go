@@ -38,6 +38,8 @@ func TestHandleFeedImportVersionRangesMatchStoreRule(t *testing.T) {
 		{name: "numeric boundary", ranges: `[{"events":[{"introduced":1}]}]`, wantDetail: "version_ranges[0].events[0].introduced must be a string"},
 		{name: "numeric sibling", ranges: `[{"events":[{"introduced":"0","fixed":5}]}]`, wantDetail: "version_ranges[0].events[0].fixed must be a string"},
 		{name: "blank boundary", ranges: `[{"events":[{"introduced":"  "}]}]`, wantDetail: "version_ranges[0].events[0] must set introduced, fixed, last_affected, or limit"},
+		{name: "null type", ranges: `[{"type":null,"events":[{"introduced":"0"}]}]`},
+		{name: "numeric type", ranges: `[{"type":1,"events":[{"introduced":"0"}]}]`, wantDetail: "version_ranges[0].type must be a string"},
 		{name: "not an array", ranges: `{"introduced":"0"}`, wantDetail: "version_ranges must be an array of range objects"},
 	}
 	for _, tt := range tests {

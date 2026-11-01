@@ -37,7 +37,9 @@
   import endpoint applies the same rule to `version_ranges` in vulnerability
   and malicious imports, so such a range gets a `400` naming the failing
   field (for example `version_ranges[0].events[0].fixed must be a string`)
-  instead of the generic store-rejection message.
+  instead of the generic store-rejection message. The shared rule also
+  requires a range `type`, when present, to be a string or `null`, as the
+  range matcher reads it.
 - Refresh-queue clear, purge and single-job admin audit details omit
   `requested_at` / `processed_at` for a job that has no such timestamp. They
   used to record an empty string (for example `"processed_at":""` for a job

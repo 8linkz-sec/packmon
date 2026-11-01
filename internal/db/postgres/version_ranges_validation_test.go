@@ -51,6 +51,8 @@ var storedVersionRangeCases = []storedVersionRangeCase{
 	{name: "valid range then invalid range", raw: `[{"events":[{"introduced":"0"}]},{}]`},
 	{name: "valid event then invalid event", raw: `[{"events":[{"introduced":"0"},{"fixed":""}]}]`},
 	{name: "unicode blank boundary", raw: "[{\"events\":[{\"introduced\":\" \"}]}]", goOnly: true},
+	// The range matcher reads type as a string; only Go enforces that.
+	{name: "numeric type", raw: `[{"type":1,"events":[{"introduced":"0"}]}]`, goOnly: true},
 }
 
 func TestValidateStoredVersionRangesJSONCases(t *testing.T) {

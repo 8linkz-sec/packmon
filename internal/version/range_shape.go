@@ -35,12 +35,14 @@ func (e *RangeShapeError) Error() string {
 // and (as SQL) the database CHECK constraint: a JSON array of range objects,
 // each with a nonempty "events" array of event objects; in each event the
 // boundary keys introduced/fixed/last_affected/limit hold a string or null
-// when present, and at least one holds a nonblank string. Other keys (type,
-// repo, database_specific, ...) are ignored, and [] is valid.
+// when present, and at least one holds a nonblank string. A range "type", when
+// present, must be a string or null. Other keys (repo, database_specific, ...)
+// are ignored, and [] is valid.
 //
 // raw must be a JSON value; callers decide beforehand whether an absent or
-// null value is acceptable. The SQL function trims only ASCII whitespace, so
-// it may accept a Unicode-blank boundary this check rejects, never the reverse.
+// null value is acceptable. The SQL function trims only ASCII whitespace and
+// does not check "type", so it may accept what this check rejects, never the
+// reverse.
 func CheckRangesShape(raw []byte) *RangeShapeError {
 	var ranges []json.RawMessage
 	if err := json.Unmarshal(raw, &ranges); err != nil {
@@ -51,6 +53,14 @@ func CheckRangesShape(raw []byte) *RangeShapeError {
 		var versionRange map[string]json.RawMessage
 		if err := json.Unmarshal(rawRange, &versionRange); err != nil || versionRange == nil {
 			return &RangeShapeError{Path: rangePath, Reason: "must be a range object"}
+		}
+		// The range matcher decodes type into a string (parseRanges); any other
+		// JSON type there makes the whole ranges value fail to parse.
+		if rawType, ok := versionRange["type"]; ok {
+			var rangeType *string
+			if err := json.Unmarshal(rawType, &rangeType); err != nil {
+				return &RangeShapeError{Path: rangePath + ".type", Reason: "must be a string"}
+			}
 		}
 		var events []json.RawMessage
 		if rawEvents, ok := versionRange["events"]; ok {

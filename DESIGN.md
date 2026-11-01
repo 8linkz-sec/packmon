@@ -761,8 +761,10 @@ Stored OSV version ranges (`affected_packages.version_ranges` and the optional
 `malicious_findings.version_ranges`) are a JSON array of range objects. Each
 range needs a nonempty `events` array of event objects, and each event needs at
 least one nonblank string among `introduced`, `fixed`, `last_affected`, and
-`limit`; the other boundary keys may be absent, `null`, or blank strings, and
-keys such as `type` or `repo` are ignored. Keys match exactly (lowercase). `[]`
+`limit`; the other boundary keys may be absent, `null`, or blank strings. A
+range `type`, when present, must be a string or `null` (the range matcher reads
+it as a string; the database check does not test it), and other keys such as
+`repo` are ignored. Keys match exactly (lowercase). `[]`
 stays valid and means "no range data", which matches every version unless
 exact versions are listed (fail-safe). One shared rule
 (`version.CheckRangesShape`) is applied by the feed import endpoint, which

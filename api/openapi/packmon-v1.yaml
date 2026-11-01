@@ -1259,7 +1259,7 @@ components:
       required: [events]
       properties:
         type:
-          type: string
+          type: [string, "null"]
         repo:
           type: string
         events:
