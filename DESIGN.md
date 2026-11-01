@@ -189,8 +189,10 @@ Packmon's maintained deployment surfaces are intentionally narrow:
   authenticated HTTPS APIs. Command-node templates use environment variables,
   short-lived `mktemp` files with cleanup traps, and path-minimized webhook
   responses.
-- The first-party GitHub Actions workflows and the GitLab CI template were
-  removed in August 2026 (internal deployment, no hosted CI). Build, test,
+- The first-party GitHub Actions workflows and the hosted release pipeline
+  were removed in August 2026 (internal deployment, no hosted CI);
+  `ci/gitlab/.packmon-scan.yml` remains only as an unoperated consumer
+  template whose delivery hardening is deferred. Build, test,
   lint, and security gates run locally via the verification gate in
   `CONTRIBUTING.md`. Release binaries are built locally from source; the container
   images ship `SECURITY.md` and `LICENSE` (Apache-2.0) but no third-party
@@ -1186,10 +1188,12 @@ artifacts:
 - `--require-remote` to fail hard instead of falling back to stale local data;
 - optional webhook delivery.
 
-The first-party GitHub Actions workflows, the GitLab shared CI template,
-release artifact attestations, release SBOM/notice artifacts, secret-scanning
-gates, and PR comment automation were removed in August 2026 together with
-the hosted CI setup.
+The first-party GitHub Actions workflows, release artifact attestations,
+release SBOM/notice artifacts, secret-scanning gates, the protected release
+environment, and PR comment automation were removed in August 2026 together
+with the hosted CI setup. The GitLab shared CI template
+(`ci/gitlab/.packmon-scan.yml`) is still in the repository but is not run by
+any pipeline here.
 
 Reusable CI templates parse `feed_status`, `db_stale`, and `db_age_days` from
 the JSON result artifact and surface degraded coverage independently from
@@ -1197,9 +1201,10 @@ finding count or exit-code mapping. GitHub writes an Actions warning, step
 summary, and PR-comment coverage warning when comments are enabled. GitLab
 writes the same state into the job log.
 
-The GitLab template is locally validated by `tests/ci`. A real GitLab runner
-validation remains externally dependent on a GitLab project and registered
-runner.
+`tests/ci` checks only that the GitLab template's container image stays
+digest-pinned; its YAML and contract behavior are not validated locally. A
+real GitLab runner validation remains externally dependent on a GitLab project
+and registered runner.
 
 ## Monitoring and Operations
 
