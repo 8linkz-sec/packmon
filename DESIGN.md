@@ -590,7 +590,11 @@ Important behavior:
   updates. A script `choco` verb counts only in command position (line start,
   after an unquoted `;`, `|`, `&`, `(`, `)`, `{`, `}`, redirection, or `=`,
   or after `call` / `sudo`); quoted text is always an argument, so a quoted
-  `';'` neither starts a new command nor ends the package list. Script
+  `';'` neither starts a new command nor ends the package list. Backtick
+  (PowerShell) and caret (batch) line continuations are joined, but a
+  backtick inside a `#` line comment, or either marker inside a `<# ... #>`
+  block comment, is comment text and does not pull the next line into the
+  comment. Script
   `--source` arguments are ignored; feeds come only from
   configuration. Chocolatey inventory is metadata-only: no vulnerability or
   malicious-package matching, no `/api/v1/check` submission, no `--outdated`

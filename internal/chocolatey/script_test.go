@@ -170,6 +170,61 @@ func TestParseScriptMultiLineConstructs(t *testing.T) {
 			want:   "bar@[unpinned]",
 		},
 		{
+			name:   "backtick in line comment does not continue",
+			script: "# note `\nchoco install git\n",
+			want:   "git@[unpinned]",
+		},
+		{
+			name:   "backtick in indented line comment does not continue",
+			script: "  # note `\r\nchoco install git\r\n",
+			want:   "git@[unpinned]",
+		},
+		{
+			name:   "backtick in trailing comment does not continue",
+			script: "choco install a # note `\nchoco install git\n",
+			want:   "a@[unpinned] git@[unpinned]",
+		},
+		{
+			name:   "backtick in comment after a continued line ends the command",
+			script: "choco install a `\n# note `\nchoco install git\n",
+			want:   "a@[unpinned] git@[unpinned]",
+		},
+		{
+			name:   "backtick in unterminated block comment does not continue",
+			script: "choco install a <# note `\n#> choco install git\n",
+			want:   "a@[unpinned] git@[unpinned]",
+		},
+		{
+			name:   "backtick inside multi-line block comment does not continue",
+			script: "<#\nnote `\n#>\nchoco install git\n",
+			want:   "git@[unpinned]",
+		},
+		{
+			name:   "backtick after a closed block comment continues",
+			script: "<# note #> choco install a `\n b\n",
+			want:   "a@[unpinned] b@[unpinned]",
+		},
+		{
+			name:   "backtick after a block comment closed on this line continues",
+			script: "<# doc\ncomment #> choco install a `\n b\n",
+			want:   "a@[unpinned] b@[unpinned]",
+		},
+		{
+			name:   "hash inside quotes before backtick continues",
+			script: "choco install a --params \"#x\" `\n b\n",
+			want:   "a@[unpinned] b@[unpinned]",
+		},
+		{
+			name:   "hash mid token before backtick continues",
+			script: "choco install a --params=/a#b `\n b\n",
+			want:   "a@[unpinned] b@[unpinned]",
+		},
+		{
+			name:   "quote spanning a continuation hides a hash",
+			script: "choco install a --params \"x `\n #y\" `\n b\n",
+			want:   "a@[unpinned] b@[unpinned]",
+		},
+		{
 			name:   "same package pinned twice yields two rows",
 			script: "choco install a --version 1.0\nchoco install a\n",
 			want:   "a@1.0[] a@[unpinned]",

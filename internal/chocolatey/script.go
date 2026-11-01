@@ -13,8 +13,9 @@ import (
 // `choco install|upgrade` / `cinst` / `cup` invocations and returns the
 // package IDs (and `--version` pins) they name. It tolerates UTF-8/UTF-16
 // byte-order marks and CRLF line endings, joins backtick (PowerShell) and
-// caret (batch) line continuations, and skips PowerShell here-strings and
-// `<# ... #>` block comments.
+// caret (batch) line continuations (a backtick inside a `#` or `<# ... #>`
+// comment is comment text, not a continuation), and skips PowerShell
+// here-strings and `<# ... #>` block comments.
 func ParseScript(r io.Reader, sourceFile string) ([]Package, error) {
 	data, err := io.ReadAll(r)
 	if err != nil {
@@ -85,6 +86,7 @@ type installEntry struct {
 type scriptScanner struct {
 	pending        strings.Builder
 	hasPending     bool
+	pendingQuote   byte // quote left open by the pending continuation, else 0
 	hereString     byte // '"' or '\'' while inside a here-string, else 0
 	inBlockComment bool
 }
@@ -100,19 +102,18 @@ func (s *scriptScanner) feed(rawLine string) []installEntry {
 		}
 		return nil
 	}
-	if !s.inBlockComment {
-		if body, ok := continuationBody(line); ok {
-			s.pending.WriteString(body)
-			s.pending.WriteByte(' ')
-			s.hasPending = true
-			return nil
-		}
+	if body, marker, ok := continuationBody(line); ok && s.continues(line, marker) {
+		s.pending.WriteString(body)
+		s.pending.WriteByte(' ')
+		s.hasPending = true
+		return nil
 	}
 	if s.hasPending {
 		s.pending.WriteString(line)
 		line = s.pending.String()
 		s.pending.Reset()
 		s.hasPending = false
+		s.pendingQuote = 0
 	}
 	return s.parseLine(line)
 }
@@ -125,21 +126,78 @@ func (s *scriptScanner) flush() []installEntry {
 	line := s.pending.String()
 	s.pending.Reset()
 	s.hasPending = false
+	s.pendingQuote = 0
 	return s.parseLine(line)
 }
 
 // continuationBody reports whether line ends with a PowerShell backtick or
-// batch caret continuation marker and returns the line without it.
-func continuationBody(line string) (string, bool) {
+// batch caret continuation marker and returns the line without it and the
+// marker.
+func continuationBody(line string) (string, byte, bool) {
 	trimmed := strings.TrimRight(line, " \t")
 	if trimmed == "" {
-		return "", false
+		return "", 0, false
 	}
-	switch trimmed[len(trimmed)-1] {
+	switch marker := trimmed[len(trimmed)-1]; marker {
 	case '`', '^':
-		return trimmed[:len(trimmed)-1], true
+		return trimmed[:len(trimmed)-1], marker, true
 	}
-	return "", false
+	return "", 0, false
+}
+
+// continues reports whether the continuation marker that ends line is code
+// rather than comment text, and records the quote the line leaves open for
+// the next physical line. A marker inside a `<# ... #>` block comment never
+// continues, and neither does a PowerShell backtick inside a `#` line
+// comment. A batch caret after `#` still continues: `#` starts no comment in
+// batch files.
+func (s *scriptScanner) continues(line string, marker byte) bool {
+	// A pending continuation never ends inside a block comment, so the block
+	// comment state only carries over into the first physical line.
+	inBlock := s.inBlockComment && !s.hasPending
+	quote, lineComment, blockComment := lineEndState(line, s.pendingQuote, inBlock)
+	if blockComment || (lineComment && marker == '`') {
+		return false
+	}
+	s.pendingQuote = quote
+	return true
+}
+
+// lineEndState applies tokenize's quote and comment rules to one physical
+// line that starts inside quote (0 for none) and, if inBlock, inside a
+// `<# ... #>` block comment. It reports the quote still open at the end of the
+// line and whether the line ends inside a `#` line comment or a block comment.
+func lineEndState(line string, quote byte, inBlock bool) (byte, bool, bool) {
+	inToken := quote != 0
+	for i := 0; i < len(line); i++ {
+		ch := line[i]
+		switch {
+		case inBlock:
+			if ch == '#' && i+1 < len(line) && line[i+1] == '>' {
+				inBlock = false
+				i++
+			}
+		case quote != 0:
+			if ch == quote {
+				quote = 0
+			} else {
+				inToken = true
+			}
+		case ch == '"' || ch == '\'':
+			quote = ch
+		case ch == '#' && !inToken:
+			return 0, true, false
+		case ch == '<' && i+1 < len(line) && line[i+1] == '#':
+			inBlock = true
+			inToken = false
+			i++
+		case strings.IndexByte(" \t\r<>;|&(){}", ch) >= 0:
+			inToken = false
+		default:
+			inToken = true
+		}
+	}
+	return quote, false, inBlock
 }
 
 func (s *scriptScanner) parseLine(line string) []installEntry {

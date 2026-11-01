@@ -247,6 +247,12 @@
   (the quoted `;` used to put `choco` back into command position), and
   `choco install a --params ';' b` reports `b` as well as `a` (the quoted
   `;` used to end the package list).
+- Chocolatey script inventory no longer treats a backtick at the end of a
+  PowerShell comment as a line continuation. ``# note ` `` followed by
+  `choco install git` used to join both lines into one comment and drop
+  `git`; the same applied to trailing `#` comments and to lines ending inside
+  a `<# ... #>` block comment. A continued command that ends after a closed
+  block comment (``<# doc #> choco install a ` `` + `b`) now keeps `b`.
 
 ### Security updates
 
