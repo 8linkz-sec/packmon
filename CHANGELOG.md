@@ -58,6 +58,31 @@
   `--timeout`, config `timeout`, or `PACKMON_TIMEOUT`. Such values used to
   overflow `time.Duration` into a negative deadline, so the sync aborted at
   once with a context deadline error instead of a clear validation error.
+- A project `.packmon.yaml` `repos:` entry that refers to a user-global repo
+  (matched by name, then by path) now inherits that trusted repo's
+  `send_repo_metadata: false`, server/API-key routing, and webhook. The
+  project's repos still replace the user-global list, and each entry keeps its
+  own name, path (the project path wins on a name match), and scan policy.
+  Previously a project entry naming a trusted repo silently re-enabled
+  repository metadata that repo had disabled.
+- `packmon config show` escapes terminal control characters in every config-,
+  flag-, and environment-derived value it prints: config file path, server,
+  masked API key, API key env name, mode, fail_on, ecosystems, CA cert path,
+  webhook URL, masked webhook secret, DB path, repo names and paths, and log
+  level. A crafted value,
+  including one from an auto-discovered project `.packmon.yaml`, could
+  previously inject ANSI escape sequences or forge output lines.
+- `packmon hook install` sets the hook file's mode to `0755` explicitly after
+  writing it. Updating an existing packmon hook kept its old mode, so a managed
+  hook that had lost its execute bit stayed non-executable while install
+  reported success and Git skipped the scan. `packmon hook status` now reports
+  such a hook as `packmon hook not executable` instead of `installed` (POSIX
+  only; Git for Windows does not use mode bits for hooks).
+- Latest-version registry base URLs, Docker registry mirrors, and Chocolatey
+  feed URLs ending in an empty fragment marker (`https://mirror.example/api#`)
+  are now rejected like any other fragment. `net/url` records no fragment for a
+  bare `#` and drops it on re-serialization, so the value was previously
+  accepted and silently rewritten.
 - SHA-pinned GitHub Actions are no longer compared as version strings in
   `--list-all` / `--outdated`. The `# vX.Y.Z` comment convention is used as
   the declared version; without it the pin is compared with the dereferenced
@@ -107,6 +132,59 @@
   `docs/monitoring/packmon-alerts.yml` use `for: 0m`. Their `for` duration
   equalled the `increase()` range, so an isolated event left the range before
   the alert could fire. Re-import the rule file if you deployed it.
+- The dashboard severity buckets and the `/metrics` finding-severity totals
+  count ReversingLabs `malware_history` (historical risk) reputation rows as
+  `LOW`, the severity of the informational finding they produce, instead of the
+  stored provider severity (often `HIGH`). Stored reputation data is unchanged.
+- PostgreSQL scan totals no longer fail once a retained sum exceeds
+  2147483647: the cumulative `/metrics` package/finding totals and the daily
+  findings sum on the scans page are read as BIGINT instead of being cast to
+  int.
+- The GHSA affected-package repair writes canonical package names (PyPI
+  separator/case folding, NuGet and GitHub Actions lowercase, trimmed) like
+  every feed upsert, so repair-only rows such as PyPI `My.Pkg_Name` or NuGet
+  `Newtonsoft.Json` match canonical lookups and new repairs no longer add
+  a duplicate beside the canonical row.
+- One stored GHSA advisory with `affected: null` (or an object/scalar where an
+  array is expected, or range `events` that are null or not an array) no
+  longer aborts the GHSA affected-package repair for every advisory. A
+  package whose reconstructed ranges or versions the schema would reject is
+  skipped and keeps its feed-written row.
+- PostgreSQL `FindMaliciousBatch` keeps a versionless request for a package
+  when the same batch also asks for concrete versions of it, so the empty
+  version still returns every active malicious finding of the package, as
+  `FindMalicious(..., "")` and a versionless-only batch already did.
+- Manual advisory writes and deletes on PostgreSQL use the normalized
+  (trimmed) advisory ID throughout. A padded ID such as ` manual:x ` no longer
+  leaves both the vulnerability and the malicious record active after a type
+  change, and deleting it no longer reports "not found".
+- Editing a manual vulnerability advisory replaces its stored state instead of
+  going through the feed merge: a `HIGH` -> `LOW` edit is stored as `LOW`, a
+  cleared description is cleared, and moving coverage from package A to B no
+  longer leaves A affected. Feed severity/details retention is unchanged.
+- Rejected admin credentials (a login with a wrong username or password, the
+  API-key create step-up, and the password-change current-password check)
+  are counted toward the IP and shared-account lockout and
+  `packmon_auth_login_failures_total` before the rejection audit row is
+  written. A failing audit write previously returned early, so the attempt
+  escaped lockout accounting; the request still fails closed.
+- The admin login and admin pages render the shared footer's terms link
+  (`PACKMON_WEB_TERMS_URL`, default `/terms`) like the public pages; the
+  admin renderer previously received only the privacy and legal URLs.
+- The 12-character minimum for bootstrap (`PACKMON_ADMIN_INITIAL_PASSWORD`)
+  and rotated admin passwords counts Unicode characters instead of bytes, so
+  a password of four three-byte characters no longer passes.
+- Overlapping `/admin/feeds` saves and resets no longer leave the running
+  feed configuration out of step with PostgreSQL. The request that lost the
+  revision race used to roll the runtime back to a snapshot taken before the
+  winner applied its change; apply, persistence and rollback now run as one
+  step ordered against other feed saves and resets.
+- `/admin/feeds` save and reset forms carry the stored override's revision
+  (`updated_at`) like the system settings form. Submitting a form that was
+  rendered before another admin saved or reset the feed is rejected with the
+  existing conflict message instead of silently overwriting that change;
+  a malformed revision is rejected as invalid. A blank API key still keeps
+  the stored key.
 
 ### Security updates
 

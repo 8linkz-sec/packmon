@@ -53,31 +53,36 @@ func newConfigShowCmd() *cobra.Command {
 
 			fmt.Println("# Effective packmon configuration")
 			fmt.Println()
-			fmt.Printf("config_file:  %s\n", valueOrDefault(configPath, "(none)"))
+			// Every string below comes from a config file (possibly the
+			// auto-discovered project config), the environment, or a flag, so
+			// it is sanitized like printEnvVar does: a crafted value must not
+			// inject terminal controls or forge output lines.
+			show := termtext.Sanitize
+			fmt.Printf("config_file:  %s\n", show(valueOrDefault(configPath, "(none)")))
 			if cfg != nil {
-				fmt.Printf("server:       %s\n", valueOrDefault(logsafe.RedactURL(effective.Server), "(not set)"))
-				fmt.Printf("api_key:      %s\n", maskSecret(effective.APIKey))
-				fmt.Printf("api_key_env:  %s\n", valueOrDefault(effective.APIKeyEnv, "(not set)"))
-				fmt.Printf("mode:         %s\n", effective.Mode)
-				fmt.Printf("fail_on:      %s\n", effective.FailOn)
+				fmt.Printf("server:       %s\n", show(valueOrDefault(logsafe.RedactURL(effective.Server), "(not set)")))
+				fmt.Printf("api_key:      %s\n", show(maskSecret(effective.APIKey)))
+				fmt.Printf("api_key_env:  %s\n", show(valueOrDefault(effective.APIKeyEnv, "(not set)")))
+				fmt.Printf("mode:         %s\n", show(effective.Mode))
+				fmt.Printf("fail_on:      %s\n", show(effective.FailOn))
 				fmt.Printf("timeout:      %ds\n", effective.Timeout)
-				fmt.Printf("ecosystems:   %s\n", valueOrDefault(strings.Join(effective.Ecosystems, ","), "(all)"))
+				fmt.Printf("ecosystems:   %s\n", show(valueOrDefault(strings.Join(effective.Ecosystems, ","), "(all)")))
 				fmt.Printf("include_dev:  %v\n", effective.IncludeDev)
-				fmt.Printf("cacert:       %s\n", valueOrDefault(effective.CACertFile, "(not set)"))
+				fmt.Printf("cacert:       %s\n", show(valueOrDefault(effective.CACertFile, "(not set)")))
 				fmt.Printf("insecure_allow_http: %v\n", effective.InsecureHTTP)
 				fmt.Printf("require_remote: %v\n", effective.RequireRemote)
 				fmt.Printf("send_repo_metadata: %v\n", effective.SendRepoMetadata)
-				fmt.Printf("webhook_url:  %s\n", valueOrDefault(logsafe.RedactURL(effective.WebhookURL), "(not set)"))
-				fmt.Printf("webhook_secret: %s\n", maskSecret(effective.WebhookSecret))
-				fmt.Printf("db_path:      %s\n", effective.DBPath)
+				fmt.Printf("webhook_url:  %s\n", show(valueOrDefault(logsafe.RedactURL(effective.WebhookURL), "(not set)")))
+				fmt.Printf("webhook_secret: %s\n", show(maskSecret(effective.WebhookSecret)))
+				fmt.Printf("db_path:      %s\n", show(effective.DBPath))
 				fmt.Printf("repos:        %d\n", len(cfg.Repos))
 				if len(cfg.Repos) > 0 {
 					for _, repo := range cfg.Repos {
-						fmt.Printf("  - %s -> %s\n", repo.Name, repo.Path)
+						fmt.Printf("  - %s -> %s\n", show(repo.Name), show(repo.Path))
 					}
 				}
 			}
-			fmt.Printf("log_level:    %s\n", flagLogLevel)
+			fmt.Printf("log_level:    %s\n", show(flagLogLevel))
 			fmt.Printf("quiet:        %v\n", flagQuiet)
 			fmt.Printf("no_color:     %v\n", flagNoColor)
 			fmt.Println()

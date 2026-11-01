@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -401,9 +402,73 @@ func overlayCLIRegistryConfig(dst *cliRegistryConfig, src cliRegistryConfig) {
 	}
 }
 
+// overlayCLIReposConfig layers the project repos over the trusted repos. A
+// non-empty project list replaces the trusted list (project order, and repos
+// only the trusted config lists are dropped), but each project entry that
+// refers to a trusted entry inherits that entry's routing and privacy
+// restriction. Without the inheritance, a project entry naming a trusted repo
+// silently dropped its send_repo_metadata: false.
 func overlayCLIReposConfig(dst *cliConfig, src cliConfig) {
-	if len(src.Repos) > 0 {
-		dst.Repos = append([]cliRepoConfig(nil), src.Repos...)
+	if len(src.Repos) == 0 {
+		return
+	}
+	repos := append([]cliRepoConfig(nil), src.Repos...)
+	for i := range repos {
+		if j := matchCLIRepoConfig(dst.Repos, repos[i]); j >= 0 {
+			inheritTrustedCLIRepoConfig(&repos[i], dst.Repos[j])
+		}
+	}
+	dst.Repos = repos
+}
+
+// matchCLIRepoConfig returns the index of the trusted repo that the project
+// repo refers to: a name match wins, otherwise a path match, otherwise -1.
+func matchCLIRepoConfig(base []cliRepoConfig, repo cliRepoConfig) int {
+	for i := range base {
+		if base[i].Name == repo.Name {
+			return i
+		}
+	}
+	for i := range base {
+		if sameCLIRepoPath(base[i].Path, repo.Path) {
+			return i
+		}
+	}
+	return -1
+}
+
+func sameCLIRepoPath(a, b string) bool {
+	a, b = filepath.Clean(a), filepath.Clean(b)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
+}
+
+// inheritTrustedCLIRepoConfig copies the trusted entry's routing and privacy
+// restriction into the matching project entry. The project entry keeps its
+// own name, path (it wins over a trusted path on a name match), and scan
+// policy (mode, fail_on, timeout, ecosystems, include_dev) as written.
+//
+// The empty checks on server/api_key/api_key_env never see a project value in
+// practice: stripUntrustedAutoProjectFields runs first and clears them, as it
+// clears the webhook block, which is therefore taken from the trusted entry as
+// a whole. A trusted send_repo_metadata: false always wins; the project may
+// still set false itself, and the strip step already turned a project true
+// into "unset".
+func inheritTrustedCLIRepoConfig(dst *cliRepoConfig, trusted cliRepoConfig) {
+	if dst.Server == "" {
+		dst.Server = trusted.Server
+	}
+	if dst.APIKey == "" {
+		dst.APIKey = trusted.APIKey
+	}
+	if dst.APIKeyEnv == "" {
+		dst.APIKeyEnv = trusted.APIKeyEnv
+	}
+	dst.Webhook = trusted.Webhook
+	if trusted.SendRepoMetadata != nil && !*trusted.SendRepoMetadata {
+		dst.SendRepoMetadata = trusted.SendRepoMetadata
 	}
 }
 

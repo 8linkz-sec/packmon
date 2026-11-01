@@ -1112,6 +1112,7 @@ var webMessagesEN = map[webMessageKey]string{
 	webMessageKey("admin.feeds.error.save_apply_failed"):                "Feed configuration was not saved because applying it failed",
 	webMessageKey("admin.feeds.error.apply_unavailable"):                "Feed configuration was not saved because runtime apply is unavailable",
 	webMessageKey("admin.feeds.error.save_conflict"):                    "Feed configuration changed while you were editing",
+	webMessageKey("admin.feeds.error.invalid_revision"):                 "Invalid feed configuration revision",
 	webMessageKey("admin.feeds.error.audit_log"):                        "Failed to record audit log",
 	webMessageKey("admin.feeds.error.save_persist"):                     "Failed to save feed configuration",
 	webMessageKey("admin.feeds.error.unknown_feed"):                     "Unknown feed",

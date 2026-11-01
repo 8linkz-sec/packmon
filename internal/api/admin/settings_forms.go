@@ -85,7 +85,7 @@ func (h *AdminHandler) HandleSystemSettingsSave(w http.ResponseWriter, r *http.R
 		AdminAuditRetention: adminAuditRetention,
 	}
 	if _, submitted := r.PostForm["updated_at"]; submitted {
-		expectedUpdatedAt, ok := parseSystemSettingsRevision(r.PostForm.Get("updated_at"))
+		expectedUpdatedAt, ok := parseAdminFormRevision(r.PostForm.Get("updated_at"))
 		if !ok {
 			redirectSettings(w, r, web.Message("admin.settings.error.invalid_revision"), true)
 			return
@@ -230,7 +230,9 @@ func (h *AdminHandler) effectiveSystemMetadataRetention(previous *db.SystemSetti
 	return scanLogRetention, adminAuditRetention
 }
 
-func parseSystemSettingsRevision(raw string) (time.Time, bool) {
+// parseAdminFormRevision parses the updated_at revision an admin form was
+// rendered with. An empty value is the zero time ("nothing stored yet").
+func parseAdminFormRevision(raw string) (time.Time, bool) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return time.Time{}, true

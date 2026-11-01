@@ -712,13 +712,15 @@ func (h *AdminHandler) requireAPIKeyCreateStepUp(w http.ResponseWriter, r *http.
 		return false
 	}
 	if !auth.CheckPassword(adminAuth.PasswordHash, r.PostForm.Get("current_password")) {
+		// Count the failure before the audit write so a failing audit store
+		// cannot exempt wrong passwords from lockout and metrics.
+		h.recordFailedAttempt(ip)
 		if err := h.auditLog(r, "api_key_create_failed", map[string]string{
 			"reason": "invalid current password",
 		}); err != nil {
 			redirectAPIKeyCreateError(w, r, web.Message("admin.keys.error.audit_log"), name)
 			return false
 		}
-		h.recordFailedAttempt(ip)
 		redirectAPIKeyCreateError(w, r, web.Message("admin.keys.error.current_password_incorrect"), name)
 		return false
 	}
@@ -1264,13 +1266,15 @@ func (h *AdminHandler) HandlePasswordChange(w http.ResponseWriter, r *http.Reque
 	}
 
 	if !auth.CheckPassword(adminAuth.PasswordHash, currentPassword) {
+		// Count the failure before the audit write so a failing audit store
+		// cannot exempt wrong passwords from lockout and metrics.
+		h.recordFailedAttempt(ip)
 		if err := h.auditLog(r, "password_change_failed", map[string]string{
 			"reason": "invalid current password",
 		}); err != nil {
 			http.Redirect(w, r, "/admin/settings?err="+url.QueryEscape(web.Message("admin.settings.error.audit_log")), http.StatusSeeOther)
 			return
 		}
-		h.recordFailedAttempt(ip)
 		http.Redirect(w, r, "/admin/settings?err="+url.QueryEscape(web.Message("admin.settings.error.password.current_incorrect")), http.StatusSeeOther)
 		return
 	}

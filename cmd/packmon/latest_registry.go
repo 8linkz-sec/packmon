@@ -791,7 +791,10 @@ func normalizeLatestRegistryBaseURL(name, raw string) (string, error) {
 	if parsed.User != nil {
 		return "", fmt.Errorf("%s must not include credentials", name)
 	}
-	if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+	// An unescaped "#" always starts a fragment. Checking the raw value also
+	// catches an empty trailing "#", which URL.Parse records nowhere (and
+	// String() would silently drop), just as ForceQuery catches a trailing "?".
+	if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || strings.Contains(raw, "#") {
 		return "", fmt.Errorf("%s must not include query or fragment components: %w", name, errLatestRegistryBaseURLHasQueryOrFragment)
 	}
 	switch strings.ToLower(parsed.Scheme) {

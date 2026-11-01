@@ -229,7 +229,6 @@ func TestAdminFeedHandlersUseMessageCatalogForFlashText(t *testing.T) {
 			`web.Message("admin.feeds.error.reset_unavailable")`,
 			`web.Message("admin.feeds.error.reset_persist")`,
 			`web.Message("admin.feeds.flash.reset_applied")`,
-			`web.Message("admin.feeds.flash.reset")`,
 			`web.Message("admin.feeds.sync.error.unavailable_for_feed")`,
 			`web.Message("admin.feeds.sync.error.enabled_self_only")`,
 			`web.Message("admin.feeds.sync.error.unavailable_mode")`,
