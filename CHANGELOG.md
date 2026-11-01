@@ -16,6 +16,9 @@
 
 ### Fixed
 
+- `packmon scan --outdated --quiet --html <file>` no longer prints the routine
+  "Checking N packages for updates..." line to stderr; `--quiet` now
+  suppresses it like the later lookup progress.
 - `packmon scan --list-packages` now exits with the parser-failure code `4`
   when a lockfile or SBOM entry could not be parsed, as `packmon scan` does.
   Partially parsed inventories are still listed before the error; a lockfile
