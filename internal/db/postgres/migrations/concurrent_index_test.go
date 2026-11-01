@@ -17,11 +17,19 @@ type scriptedIndexConn struct {
 	lookups    []string
 	lookupErr  error
 	execErr    map[string]error
+	// failOnce fails the first statement containing the key, then is consumed.
+	failOnce map[string]error
 }
 
 func (c *scriptedIndexConn) ExecContext(_ context.Context, query string, _ ...any) (sql.Result, error) {
 	query = strings.TrimSpace(query)
 	c.statements = append(c.statements, query)
+	for fragment, err := range c.failOnce {
+		if strings.Contains(query, fragment) {
+			delete(c.failOnce, fragment)
+			return nil, err
+		}
+	}
 	for fragment, err := range c.execErr {
 		if strings.Contains(query, fragment) {
 			return nil, err
@@ -249,14 +257,15 @@ func TestApplyMigrationWithoutTransactionStopsWhenInvalidIndexDropFails(t *testi
 	assertStatements(t, conn.statements, []string{`DROP INDEX CONCURRENTLY IF EXISTS "idx_a"`})
 }
 
-func TestRepairInvalidConcurrentIndexesRebuildsOnlyInvalidAppliedIndexes(t *testing.T) {
+func TestRepairInvalidConcurrentIndexesRebuildsInvalidAndMissingAppliedIndexes(t *testing.T) {
 	t.Parallel()
 
 	migrations := []migrationFile{
 		{version: 1, name: "001_mixed.up.sql", sql: `-- packmon:migration no-transaction
 ALTER TABLE t ADD COLUMN x int;
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_a ON t(x);
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_b ON t(y);`},
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_b ON t(y);
+CREATE INDEX CONCURRENTLY idx_e ON t(v);`},
 		{version: 2, name: "002_transactional.up.sql", sql: `CREATE INDEX IF NOT EXISTS idx_c ON t(z);`},
 		{version: 3, name: "003_pending.up.sql", sql: `-- packmon:migration no-transaction
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_d ON t(w);`},
@@ -266,6 +275,7 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_d ON t(w);`},
 		"idx_b": {indexInvalid, indexValid},
 		"idx_c": {indexInvalid},
 		"idx_d": {indexInvalid},
+		"idx_e": {indexMissing, indexValid},
 	}}
 
 	if err := repairInvalidConcurrentIndexes(context.Background(), conn, migrations, 2); err != nil {
@@ -274,9 +284,40 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_d ON t(w);`},
 	assertStatements(t, conn.statements, []string{
 		`DROP INDEX CONCURRENTLY IF EXISTS "idx_b"`,
 		"CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_b ON t(y)",
+		"CREATE INDEX CONCURRENTLY idx_e ON t(v)",
 	})
-	if got := strings.Join(conn.lookups, ","); got != "idx_a,idx_b,idx_b" {
+	if got := strings.Join(conn.lookups, ","); got != "idx_a,idx_b,idx_b,idx_e,idx_e" {
 		t.Fatalf("index lookups = %s, want only applied concurrent indexes", got)
+	}
+}
+
+// TestRepairInvalidConcurrentIndexesRecreatesIndexLostByInterruptedRebuild
+// covers a rebuild whose drop committed but whose build failed before its
+// catalog entry: the index is then missing, and the next migrate run must build
+// it instead of leaving it lost.
+func TestRepairInvalidConcurrentIndexesRecreatesIndexLostByInterruptedRebuild(t *testing.T) {
+	t.Parallel()
+
+	migrations := []migrationFile{
+		{version: 1, name: "001_index.up.sql", sql: `-- packmon:migration no-transaction
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_a ON t(x);`},
+	}
+	build := "-- packmon:migration no-transaction\nCREATE INDEX CONCURRENTLY IF NOT EXISTS idx_a ON t(x)"
+	conn := &scriptedIndexConn{
+		states:   map[string][]indexState{"idx_a": {indexInvalid, indexMissing, indexValid}},
+		failOnce: map[string]error{"CREATE INDEX": errors.New("connection reset")},
+	}
+
+	err := repairInvalidConcurrentIndexes(context.Background(), conn, migrations, 1)
+	if err == nil || !strings.Contains(err.Error(), "rebuild INVALID index idx_a") || !strings.Contains(err.Error(), "connection reset") {
+		t.Fatalf("first repairInvalidConcurrentIndexes() error = %v, want interrupted rebuild", err)
+	}
+	if err := repairInvalidConcurrentIndexes(context.Background(), conn, migrations, 1); err != nil {
+		t.Fatalf("second repairInvalidConcurrentIndexes() error = %v", err)
+	}
+	assertStatements(t, conn.statements, []string{`DROP INDEX CONCURRENTLY IF EXISTS "idx_a"`, build, build})
+	if got := strings.Join(conn.lookups, ","); got != "idx_a,idx_a,idx_a" {
+		t.Fatalf("index lookups = %s, want invalid, missing, then valid", got)
 	}
 }
 
@@ -296,6 +337,11 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_a ON t(x);`},
 			name: "still invalid",
 			conn: &scriptedIndexConn{states: map[string][]indexState{"idx_a": {indexInvalid}}},
 			want: []string{"rebuild INVALID index idx_a from 001_index.up.sql", "INVALID", "rerun"},
+		},
+		{
+			name: "missing stays missing",
+			conn: &scriptedIndexConn{states: map[string][]indexState{"idx_a": {indexMissing}}},
+			want: []string{"recreate missing index idx_a from 001_index.up.sql", "missing or not an index", "rerun"},
 		},
 		{
 			name: "build fails",

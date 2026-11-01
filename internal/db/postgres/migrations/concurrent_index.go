@@ -13,8 +13,8 @@ import (
 // never uses it for reads. IF NOT EXISTS then skips the build on a retry, so the
 // migrator guards every concurrent index build of a no-transaction migration:
 // it drops an INVALID index of the same name before the build, checks that the
-// build left a valid index, and rebuilds INVALID indexes of migrations that are
-// already applied on every migrate run.
+// build left a valid index, and on every migrate run rebuilds INVALID and
+// recreates missing indexes of migrations that are already applied.
 
 // indexState is the catalog state of a named index.
 type indexState int
@@ -186,9 +186,12 @@ func requireValidIndex(ctx context.Context, db noTransactionConn, name string) e
 }
 
 // repairInvalidConcurrentIndexes rebuilds, concurrently and outside a
-// transaction, every INVALID index that an already applied no-transaction
-// migration builds concurrently. Only the index build itself is rerun, never the
-// migration's other statements; missing and valid indexes are left alone.
+// transaction, every INVALID or missing index that an already applied
+// no-transaction migration builds concurrently. Only the index build itself is
+// rerun, never the migration's other statements; valid indexes are left alone.
+// A missing index is never intended at an applied version: the down migration
+// that drops one also lowers the schema version. Recreating it also covers a
+// rebuild interrupted between its drop and its build.
 func repairInvalidConcurrentIndexes(ctx context.Context, db noTransactionConn, migrations []migrationFile, current int) error {
 	for _, migration := range migrations {
 		if migration.version > current {
@@ -210,11 +213,15 @@ func repairInvalidConcurrentIndexes(ctx context.Context, db noTransactionConn, m
 			if err != nil {
 				return fmt.Errorf("migrations: read state of index %s from %s: %w", build.name, migration.name, err)
 			}
-			if state != indexInvalid {
-				continue
-			}
-			if err := rebuildInvalidIndex(ctx, db, build.name, statement); err != nil {
-				return fmt.Errorf("migrations: rebuild INVALID index %s from %s: %w; rerun packmon-server migrate to retry the rebuild", build.name, migration.name, err)
+			switch state {
+			case indexInvalid:
+				if err := rebuildInvalidIndex(ctx, db, build.name, statement); err != nil {
+					return fmt.Errorf("migrations: rebuild INVALID index %s from %s: %w; rerun packmon-server migrate to retry the rebuild", build.name, migration.name, err)
+				}
+			case indexMissing:
+				if err := buildIndex(ctx, db, build.name, statement); err != nil {
+					return fmt.Errorf("migrations: recreate missing index %s from %s: %w; rerun packmon-server migrate to retry the build", build.name, migration.name, err)
+				}
 			}
 		}
 	}
@@ -226,6 +233,12 @@ func rebuildInvalidIndex(ctx context.Context, db noTransactionConn, name, statem
 	if _, err := db.ExecContext(ctx, drop); err != nil {
 		return fmt.Errorf("drop: %w", err)
 	}
+	return buildIndex(ctx, db, name, statement)
+}
+
+// buildIndex runs a migration's own concurrent index build, which is safe while
+// the name is free, and requires a valid index afterwards.
+func buildIndex(ctx context.Context, db noTransactionConn, name, statement string) error {
 	if _, err := db.ExecContext(ctx, statement); err != nil {
 		return fmt.Errorf("build: %w", err)
 	}

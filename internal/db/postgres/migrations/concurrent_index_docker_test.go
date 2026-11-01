@@ -126,6 +126,44 @@ func TestRunRebuildsInvalidConcurrentIndexesOfAppliedMigrations(t *testing.T) {
 	}
 }
 
+// TestRunRecreatesMissingConcurrentIndexOfAppliedMigration covers an applied
+// 049 index that is gone, as after a rebuild whose drop committed but whose
+// build was cancelled before its catalog entry: migrate builds it again.
+func TestRunRecreatesMissingConcurrentIndexOfAppliedMigration(t *testing.T) {
+	dsn := startMigrationPostgres(t)
+	if err := Run(dsn); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	defer ioutils.CloseSilently(db)
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `DROP INDEX CONCURRENTLY idx_malicious_active_severity_search`); err != nil {
+		t.Fatalf("drop idx_malicious_active_severity_search: %v", err)
+	}
+	if state := catalogIndexState(t, ctx, db, "idx_malicious_active_severity_search"); state != indexMissing {
+		t.Fatalf("index state after drop = %s, want missing", state)
+	}
+
+	if err := Run(dsn); err != nil {
+		t.Fatalf("Run() with a missing applied index error = %v", err)
+	}
+	assertValidIndexOnTable(t, ctx, db, "idx_malicious_active_severity_search", "malicious_findings")
+	assertMaliciousActiveSearchIndexes(t, ctx, db, true)
+
+	version, dirty, err := Version(dsn)
+	if err != nil {
+		t.Fatalf("Version() error = %v", err)
+	}
+	if version != ExpectedVersion || dirty {
+		t.Fatalf("Version() = %d dirty=%v, want %d clean", version, dirty, ExpectedVersion)
+	}
+}
+
 // TestInterruptedConcurrentIndexMigrationRetriesAfterClearingDirtyMarker walks
 // the documented recovery path for an interrupted 049: the dirty database is
 // refused with the retry instructions, and once the dirty marker is cleared the

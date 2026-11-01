@@ -210,10 +210,16 @@ change.
    drops an `INVALID` index of the same name before each concurrent build and
    fails, leaving that migration dirty, if the build does not leave a valid
    index. Every `packmon-server migrate` run, including one with nothing
-   pending, also rebuilds concurrently (outside a transaction) any `INVALID`
-   index that an already applied migration builds concurrently; a failed
-   rebuild names the index and leaves the schema version clean, so rerun
-   migrate to retry. To list `INVALID` indexes yourself:
+   pending, also checks every index that an already applied migration builds
+   concurrently: an `INVALID` one is dropped and rebuilt, and a missing one
+   (for example after a rebuild cancelled between its drop and its build) is
+   built again, both concurrently and outside a transaction; valid indexes
+   are left alone. This repair runs before any pending migration. A failed
+   repair names the index and aborts the run before pending migrations are
+   applied, so the schema version stays clean; rerun migrate to retry. The
+   repair's `DROP INDEX CONCURRENTLY` waits behind a still-running abandoned
+   build of the same index, so check `pg_stat_activity` for one first. To
+   list `INVALID` indexes yourself:
    ```sql
    SELECT indexrelid::regclass AS index_name, indrelid::regclass AS table_name
    FROM pg_index

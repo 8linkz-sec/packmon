@@ -23,8 +23,10 @@
   was never used and its queries fell back to sequential scans. The migrator
   now drops an `INVALID` index of the same name before each concurrent build,
   fails the migration (dirty) unless the build left a valid index, and on
-  every run rebuilds concurrently any `INVALID` index of an already applied
-  migration (010, 011, 021 and 049 build indexes concurrently). A database
+  every run, before any pending migration, rebuilds concurrently any
+  `INVALID` or missing index of an already applied migration (010, 011, 021
+  and 049 build indexes concurrently); a failed repair aborts the run with
+  the schema version clean. A database
   left dirty by an interrupted 049 no longer needs a backup restore: migrate
   still refuses it, but its error names the retry path (clear the 49 dirty
   marker, rerun migrate), documented in "Upgrade And Rollback" in
@@ -587,8 +589,9 @@
     "Upgrade And Rollback" in `docs/runbook.md`.
 - Databases already past a concurrent index migration (010, 011, 021, 049),
   including those already at schema 49 or 50: the next `packmon-server
-  migrate` run rebuilds any `INVALID` index such a migration builds (it
-  needs no pending migration). It is a no-op when every index is valid; to
+  migrate` run rebuilds any `INVALID` or missing index such a migration
+  builds (it needs no pending migration). It is a no-op when every index is
+  valid; to
   check beforehand, run `SELECT indexrelid::regclass FROM pg_index WHERE NOT
   indisvalid;`. A rebuild takes as long as the original build, so drain the
   server and allow for it in `PACKMON_DB_CONNECT_TIMEOUT`.
