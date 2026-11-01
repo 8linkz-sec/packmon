@@ -11,8 +11,17 @@
 *.crt
 *.cer
 node_modules
+# Local agent / working documents (git-ignored; mirrors .gitignore).
 CLAUDE.md
+CLAUDE.local.md
+**/AGENTS.md
+TESTING.md
+WORKFLOW.md
+Roadmap.txt
 Phase *.md
+docs/superpowers/
+# Local database backup dumps (default PACKMON_BACKUP_DIR).
+backups/
 .gotmp/
 .build/
 .builds/

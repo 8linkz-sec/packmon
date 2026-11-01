@@ -886,12 +886,19 @@ stale or unknown instead of silently healthy.
 
 ## CI/CD Security
 
-The first-party GitHub Actions workflows and the GitLab CI template were
+The first-party GitHub Actions workflows and the hosted release pipeline were
 removed in August 2026. The former hosted gates (release attestations, Trivy
-image and filesystem scans, secret scanning, protected release environment)
-are replaced by the local verification gate in `CONTRIBUTING.md`; run Trivy image
-and filesystem scans locally before shipping images (see
-`docs/runbook.md` -> "Container image vulnerability scans").
+image and filesystem scans, secret scanning, the protected `release`
+environment) are replaced by the local verification gate in `CONTRIBUTING.md`;
+there is no hosted release pipeline or release environment approval left to
+protect. Run Trivy image and filesystem scans locally before shipping images
+(see `docs/runbook.md` -> "Container image vulnerability scans").
+
+`ci/gitlab/.packmon-scan.yml` remains in the repository only as an unoperated
+consumer template. No pipeline in this deployment runs it, its CI/CD delivery
+hardening is deferred in `docs/deferred-scope.md`, and `tests/ci` checks only
+that its container image stays digest-pinned -- not its YAML or contract
+behavior.
 
 Consumer CI pipelines that run the Packmon CLI must:
 
@@ -917,8 +924,9 @@ Consumer CI pipelines that run the Packmon CLI must:
   rendering scan result data into forge comments;
 - preserve exit codes so blocking findings fail pipelines.
 
-The GitLab template is locally tested for YAML and contract behavior. A real
-GitLab runner execution remains an external validation requirement.
+The GitLab consumer template has not been validated on a real GitLab runner.
+Re-open `docs/deferred-scope.md` and validate it end to end before another
+repository consumes it.
 
 ## Dependency and Tooling Security
 
@@ -1021,14 +1029,16 @@ For each security review:
 - Confirm CI templates preserve exit codes and artifacts.
 - Confirm PRs include the security checklist and sensitive paths route through
   CODEOWNERS.
-- Confirm release publishing remains behind the protected `release`
-  environment approval gate.
+- Confirm release binaries and images are built from source through the local
+  verification gate in `CONTRIBUTING.md`; no hosted release pipeline or
+  protected release environment exists to rely on.
 
 ## Current Open Security-Relevant Validation
 
-The GitLab CI template still needs a real GitLab runner smoke test. Local tests
-validate the template contract, but only a real runner can prove GitLab UI
-artifact/report behavior end to end.
+The unoperated GitLab consumer template (`ci/gitlab/.packmon-scan.yml`) has
+never run on a real GitLab runner, and no local test covers its YAML or
+contract behavior. That validation is deferred together with the rest of the
+GitLab/CI/CD delivery scope below.
 
 Fork-local note: GitLab/CI/CD and release-binary distribution hardening are
 currently deferred for this fork because those delivery surfaces are not

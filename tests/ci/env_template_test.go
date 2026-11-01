@@ -259,8 +259,12 @@ func TestDockerEnvExampleMetricsBindMatchesComposePort(t *testing.T) {
 	}
 
 	values := activeEnvExampleValues(string(envData))
-	if got := values["PACKMON_METRICS_HOST"]; got != "0.0.0.0" {
-		t.Fatalf("PACKMON_METRICS_HOST = %q in .env.example, want 0.0.0.0 so Compose's published host metrics port reaches the container listener", got)
+	// The local stack runs in production mode, where
+	// Config.ValidateMetricsExposure rejects any non-loopback metrics host and
+	// docker-compose.override.yml pins 127.0.0.1 anyway; the template must
+	// seed the value the server actually accepts.
+	if got := values["PACKMON_METRICS_HOST"]; got != "127.0.0.1" {
+		t.Fatalf("PACKMON_METRICS_HOST = %q in .env.example, want loopback 127.0.0.1: production startup rejects non-loopback metrics hosts (Config.ValidateMetricsExposure) and docker-compose.override.yml binds metrics to 127.0.0.1", got)
 	}
 	if got := values["PACKMON_METRICS_PORT"]; got != "9090" {
 		t.Fatalf("PACKMON_METRICS_PORT = %q in .env.example, want 9090 to match docker-compose.yml", got)
