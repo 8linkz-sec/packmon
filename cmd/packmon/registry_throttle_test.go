@@ -171,3 +171,120 @@ func TestThrottledRegistryRequestHonoursCancellation(t *testing.T) {
 		t.Fatalf("registry received %d requests, want 1 (the aborted wait must not issue one)", got)
 	}
 }
+
+// TestRegistryPerRequestTimeoutStartsAfterThrottleWait pins the order of the
+// two bounds: --timeout limits one registry request, so queueing behind the
+// shared rate limiter must not use it up. With a small timeout and heavy
+// contention the request used to expire before it was sent and the row ended
+// up unknown without any warning.
+func TestRegistryPerRequestTimeoutStartsAfterThrottleWait(t *testing.T) {
+	original := registryRequestThrottle
+	t.Cleanup(func() { registryRequestThrottle = original })
+	registryRequestThrottle = &registryThrottle{
+		interval: time.Hour,
+		last:     time.Now(),
+		now:      time.Now,
+		// A queue position that outlasts the 1s per-request timeout.
+		sleep: func(ctx context.Context, _ time.Duration) bool {
+			return sleepWithContext(ctx, 1500*time.Millisecond)
+		},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"version":"1.0.0"}`))
+	}))
+	defer server.Close()
+
+	ctx, phase := withRegistryLookupPhase(context.Background(), 1)
+	data, err := registryGet(ctx, server.URL)
+	if err != nil {
+		t.Fatalf("registryGet() after a long throttle wait error = %v, want the request to be sent", err)
+	}
+	if string(data) != `{"version":"1.0.0"}` {
+		t.Fatalf("registryGet() = %q", data)
+	}
+	if got := phase.refusedCount(); got != 0 {
+		t.Fatalf("refusedCount() = %d, want 0", got)
+	}
+}
+
+// TestRegistryThrottleWaitAbortIsVisible covers a throttle wait that ends
+// without a user cancellation, here a caller deadline that expires while the
+// request is still queued: the lookup gets no answer, so it must reach the
+// refused total behind the stderr warning and the list-all hint. Nothing was
+// sent, so it says nothing about reachability and must not advance the
+// breaker streak. A cancelled phase (Ctrl-C) stays silent.
+func TestRegistryThrottleWaitAbortIsVisible(t *testing.T) {
+	original := registryRequestThrottle
+	t.Cleanup(func() { registryRequestThrottle = original })
+	registryRequestThrottle = &registryThrottle{
+		interval: time.Hour,
+		last:     time.Now(),
+		now:      time.Now,
+		sleep:    sleepWithContext,
+	}
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+
+	phaseCtx, phase := withRegistryLookupPhase(context.Background(), 30)
+	deadlineCtx, cancelDeadline := context.WithTimeout(phaseCtx, 50*time.Millisecond)
+	defer cancelDeadline()
+	if _, err := registryGet(deadlineCtx, server.URL); err == nil {
+		t.Fatal("registryGet() whose deadline expired in the throttle queue returned no error")
+	}
+	if got := phase.refusedCount(); got != 1 {
+		t.Fatalf("refusedCount() = %d, want 1 (an expired queued request got no answer)", got)
+	}
+	if got := phase.consecutive.Load(); got != 0 {
+		t.Fatalf("consecutive failures = %d, want 0 (nothing was sent)", got)
+	}
+
+	canceledCtx, cancel := context.WithCancel(phaseCtx)
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+	if _, err := registryGet(canceledCtx, server.URL); err == nil {
+		t.Fatal("registryGet() cancelled in the throttle queue returned no error")
+	}
+	if got := phase.refusedCount(); got != 1 {
+		t.Fatalf("refusedCount() after a cancellation = %d, want 1 (a cancelled phase is no refusal)", got)
+	}
+	if got := hits.Load(); got != 0 {
+		t.Fatalf("registry received %d requests, want 0", got)
+	}
+}
+
+// TestCratesIOThrottleWaitAbortIsVisible keeps the dedicated crates.io queue
+// consistent with the shared one: an expired queued lookup is a refusal.
+func TestCratesIOThrottleWaitAbortIsVisible(t *testing.T) {
+	originalShared, originalCrates := registryRequestThrottle, cratesIOThrottle
+	t.Cleanup(func() {
+		registryRequestThrottle = originalShared
+		cratesIOThrottle = originalCrates
+	})
+	registryRequestThrottle = &registryThrottle{}
+	cratesIOThrottle = &registryThrottle{
+		interval: time.Hour,
+		last:     time.Now(),
+		now:      time.Now,
+		sleep:    sleepWithContext,
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"crate":{"max_stable_version":"1.0.0"}}`))
+	}))
+	defer server.Close()
+
+	phaseCtx, phase := withRegistryLookupPhase(context.Background(), 30)
+	ctx, cancel := context.WithTimeout(phaseCtx, 50*time.Millisecond)
+	defer cancel()
+	if got := fetchCratesLatestFromBase(ctx, server.URL, "serde"); got != "" {
+		t.Fatalf("fetchCratesLatestFromBase() = %q, want empty after an expired queue wait", got)
+	}
+	if got := phase.refusedCount(); got != 1 {
+		t.Fatalf("refusedCount() = %d, want 1", got)
+	}
+}

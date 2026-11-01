@@ -171,7 +171,7 @@ func listAllUnknownStatusHint(report listAllPackageReport) string {
 		return "Unknown status means the latest version was not looked up in offline mode; " +
 			findingsUnaffected + reversingLabsNote
 	}
-	if report.RefusedRequests == 0 && !report.BreakerTripped {
+	if report.RefusedRequests == 0 && report.OversizedResponses == 0 && !report.BreakerTripped {
 		return "The unknown rows are packages the public registry does not carry (workspace or " +
 			"private packages) or sources Packmon intentionally does not query; no action is needed, and " +
 			findingsUnaffected + reversingLabsNote
@@ -179,6 +179,9 @@ func listAllUnknownStatusHint(report listAllPackageReport) string {
 	hint := "Unknown status means the latest version could not be determined; " + findingsUnaffected
 	if report.RefusedRequests > 0 {
 		hint += fmt.Sprintf(" %d registry requests were refused or failed -- rerun the scan, raise --timeout, or configure a registry mirror.", report.RefusedRequests)
+	}
+	if report.OversizedResponses > 0 {
+		hint += fmt.Sprintf(" %d registry responses exceeded the CLI's response size limit and were discarded -- a memory bound, not a rate limit or a timeout.", report.OversizedResponses)
 	}
 	if report.BreakerTripped {
 		hint += fmt.Sprintf(" Lookups were aborted after consecutive registry failures (%d skipped) -- check network connectivity and proxy settings.", report.SkippedRequests)

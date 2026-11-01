@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -285,15 +286,26 @@ func resolveOutdatedStatuses(packages []outdatedPackage, opts outdatedOptions) [
 	progress.stop()
 
 	if ctx.Err() == nil && !opts.Quiet {
-		if refused := phase.refusedCount(); refused > 0 {
-			fmt.Fprintf(os.Stderr, "warning: %d registry requests were refused or failed; some latest-version data is missing. Rerun the scan, raise --timeout, or route the lookups through a mirror.\n", refused)
-		}
-		if phase.breakerOpen() {
-			fmt.Fprintf(os.Stderr, "warning: %d lookups were skipped after %d consecutive registry request failures; check network connectivity and proxy settings.\n", phase.skippedCount(), registryBreakerThreshold)
-		}
+		writeOutdatedLookupPhaseWarnings(os.Stderr, phase)
 	}
 
 	return statuses
+}
+
+// writeOutdatedLookupPhaseWarnings reports the lookup failures by kind, so
+// each count gets the advice that fits it: a discarded oversized response is
+// neither a rate limit nor a timeout.
+func writeOutdatedLookupPhaseWarnings(w io.Writer, phase *registryLookupPhase) {
+	oversized := phase.oversizedCount()
+	if refused := phase.refusedCount() - oversized; refused > 0 {
+		_, _ = fmt.Fprintf(w, "warning: %d registry requests were refused or failed; some latest-version data is missing. Rerun the scan, raise --timeout, or route the lookups through a mirror.\n", refused)
+	}
+	if oversized > 0 {
+		_, _ = fmt.Fprintf(w, "warning: %d registry responses exceeded the CLI's response size limit and were discarded; some latest-version data is missing. The limit bounds memory use; this is not a rate limit or a timeout, so rerunning the scan or allowing more time does not help.\n", oversized)
+	}
+	if phase.breakerOpen() {
+		_, _ = fmt.Fprintf(w, "warning: %d lookups were skipped after %d consecutive registry request failures; check network connectivity and proxy settings.\n", phase.skippedCount(), registryBreakerThreshold)
+	}
 }
 
 func applyOutdatedStatusesToReport(report outdatedReport, packages []outdatedPackage, statuses []packageLatestStatus) outdatedReport {
