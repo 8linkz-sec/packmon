@@ -875,9 +875,10 @@ Local SQLite sync:
   ecosystems, and only in that page's transaction. The server sets the flag
   only on such single-page deltas, never on full exports or on any page of a
   multi-page delta, whose separate statements can deliver an advisory changed
-  between pages incompletely. Full syncs, syncs without `since`, multi-page
-  deltas, failed sequences, and older servers therefore never remove a still
-  valid local finding;
+  between pages incompletely. The replacement therefore never runs for full
+  syncs (which clear and reload the local tables), syncs without `since`,
+  multi-page deltas, failed sequences, or older servers, so none of them can
+  remove a still-valid local finding;
 - refuses to mark the local database fresh from a server `synced_at` timestamp
   that is beyond the allowed future clock-skew tolerance;
 - rejects semantically empty full-sync snapshots before clearing local finding

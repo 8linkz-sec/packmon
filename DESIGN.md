@@ -251,10 +251,14 @@ are normalized and validated against this list before scanning; `docker` and
 
 Feed-specific names must be mapped into this enum at the import boundary.
 Package identities are canonicalized anywhere they cross a scan, feed, sync,
-or storage boundary. NuGet package IDs are lowercased. PyPI package names use
-PEP 503 normalization: lowercase and replace each run of `.`, `_`, or `-` with
-a single `-`. Other ecosystem names preserve their registry casing unless a
-specific ecosystem rule is added. NuGet version matching follows NuGet's
+or storage boundary (`packageid.NormalizeName`). Surrounding whitespace is
+trimmed for every ecosystem. NuGet package IDs are lowercased. GitHub Actions
+`owner/repo` names (ecosystem `actions`, also spelled `github actions`) are
+lowercased. PyPI package names use PEP 503 normalization: lowercase and
+replace each run of `.`, `_`, or `-` with a single `-`. Other ecosystem names
+preserve their registry casing unless a specific ecosystem rule is added. The
+PostgreSQL startup package-name repair folds legacy rows into this canonical
+identity for every ecosystem. NuGet version matching follows NuGet's
 case-insensitive prerelease-label behavior for both ecosystem ranges and
 explicit affected-version lists. Chocolatey packages are NuGet packages:
 inventory IDs are lowercased and their versions compare under the same NuGet
@@ -945,8 +949,9 @@ that is delivered in a single page. Only for such a response -- a non-full
 sync with a stored `since`, whose first page is not truncated and carries the
 flag -- does the client drop, in that page's transaction, the local affected
 rows of each delivered non-withdrawn vulnerability that the page did not
-deliver. Full syncs, syncs without a `since`, and multi-page deltas stay
-upsert-only: the pages of a multi-page delta are separate statements, so an
+deliver. Syncs without a `since` and multi-page deltas stay upsert-only (a
+full sync clears and reloads the local tables instead): the pages of a
+multi-page delta are separate statements, so an
 advisory changed between two pages can arrive incomplete, and the client must
 not delete its rows (whole-advisory paging is backlog AUDIT-046). Server writes
 that only delete affected rows (the package-name repair merging a legacy row
@@ -965,6 +970,10 @@ Local scans query those reputation rows through explicit reputation lookup
 methods; `FindMalicious` and `FindMaliciousBatch` remain malicious-package-only
 boundaries so package detail views and scanner output do not double-count or
 misclassify supply-chain reputation rows.
+The vulnerability and malicious batch lookups (PostgreSQL and local SQLite)
+treat a versionless request as the all-versions match of the single-package
+lookup, also when the same batch requests concrete versions of that package;
+requested versions are deduplicated per package in request order.
 If a server response contains a `synced_at` timestamp beyond the allowed local
 clock-skew tolerance, the client may use it for the current paginated request
 sequence but does not persist it as the local freshness marker.
