@@ -28,6 +28,11 @@
   2147483647: the cumulative `/metrics` package/finding totals and the daily
   findings sum on the scans page are read as BIGINT instead of being cast to
   int.
+- The GHSA affected-package repair writes canonical package names (PyPI
+  separator/case folding, NuGet and GitHub Actions lowercase, trimmed) like
+  every feed upsert, so repair-only rows such as PyPI `My.Pkg_Name` or NuGet
+  `Newtonsoft.Json` match canonical lookups and no longer sit beside the
+  canonical row as duplicates.
 
 ### Security updates
 

@@ -21,13 +21,10 @@ func (s *Store) CountVulnerabilitiesBySource(ctx context.Context, source string)
 	return count, nil
 }
 
-// RepairGHSAAffectedPackages reconciles affected_packages rows from stored
-// GHSA raw JSON. This repairs older advisories that were imported while the
-// GHSA ecosystem mapper did not recognize "GitHub Actions", and refreshes rows
-// whose duplicate affected entries were previously collapsed by the unique
-// package key.
-func (s *Store) RepairGHSAAffectedPackages(ctx context.Context) (int, error) {
-	const query = `
+// repairGHSAAffectedPackagesSQL rebuilds affected_packages rows from stored
+// GHSA raw JSON. Package names go through canonicalPackageNameSQL so repaired
+// rows use the same canonical identity as feed upserts and lookups.
+const repairGHSAAffectedPackagesSQL = `
 	WITH candidates AS (
 		SELECT
 			vs.vulnerability_id,
@@ -52,7 +49,7 @@ func (s *Store) RepairGHSAAffectedPackages(ctx context.Context) (int, error) {
 					WHEN 'cargo' THEN 'cargo'
 					ELSE NULL
 			END AS ecosystem,
-			aff.item->'package'->>'name' AS name,
+			aff.item->'package'->>'name' AS raw_name,
 			COALESCE(aff.item->'ranges', '[]'::jsonb) AS version_ranges,
 			COALESCE(aff.item->'versions', '[]'::jsonb) AS versions_affected,
 			(regexp_match(
@@ -79,10 +76,21 @@ func (s *Store) RepairGHSAAffectedPackages(ctx context.Context) (int, error) {
 				versions_affected,
 				last_affected_bound,
 				fixed_bound
-			FROM candidates
-			WHERE ecosystem IS NOT NULL
-			  AND ecosystem <> ''
-			  AND name <> ''
+			FROM (
+				SELECT
+					vulnerability_id,
+					affected_ordinal,
+					ecosystem,
+					` + canonicalPackageNameSQL + ` AS name,
+					version_ranges,
+					versions_affected,
+					last_affected_bound,
+					fixed_bound
+				FROM candidates
+				WHERE ecosystem IS NOT NULL
+				  AND ecosystem <> ''
+			) canonical
+			WHERE name <> ''
 		),
 		keys AS (
 			SELECT DISTINCT vulnerability_id, ecosystem, name
@@ -192,8 +200,14 @@ func (s *Store) RepairGHSAAffectedPackages(ctx context.Context) (int, error) {
 		)
 		SELECT COUNT(*) FROM repaired`
 
+// RepairGHSAAffectedPackages reconciles affected_packages rows from stored
+// GHSA raw JSON. This repairs older advisories that were imported while the
+// GHSA ecosystem mapper did not recognize "GitHub Actions", and refreshes rows
+// whose duplicate affected entries were previously collapsed by the unique
+// package key.
+func (s *Store) RepairGHSAAffectedPackages(ctx context.Context) (int, error) {
 	var repaired int
-	if err := s.pool.QueryRow(ctx, query).Scan(&repaired); err != nil {
+	if err := s.pool.QueryRow(ctx, repairGHSAAffectedPackagesSQL).Scan(&repaired); err != nil {
 		return 0, fmt.Errorf("postgres: repair GHSA affected packages: %w", err)
 	}
 	s.invalidateDashboardStats()

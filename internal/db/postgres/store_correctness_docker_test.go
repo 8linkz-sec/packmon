@@ -4,12 +4,15 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/8linkz-sec/packmon/internal/db"
 	"github.com/8linkz-sec/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/packageid"
 )
 
 // TestPostgresStoreCorrectnessAgainstDocker groups store-correctness
@@ -25,6 +28,143 @@ func TestPostgresStoreCorrectnessAgainstDocker(t *testing.T) {
 	t.Run("scan totals above int32 are not narrowed", func(t *testing.T) {
 		testScanTotalsAboveInt32AreNotNarrowed(ctx, t, store)
 	})
+	t.Run("canonical package name SQL mirrors packageid", func(t *testing.T) {
+		testCanonicalPackageNameSQLMirrorsPackageID(ctx, t, store)
+	})
+	t.Run("GHSA repair writes canonical package names", func(t *testing.T) {
+		testGHSARepairWritesCanonicalPackageNames(ctx, t, store)
+	})
+}
+
+func testCanonicalPackageNameSQLMirrorsPackageID(ctx context.Context, t *testing.T, store *Store) {
+	t.Helper()
+
+	cases := []struct{ ecosystem, name string }{
+		{"nuget", "Newtonsoft.Json"},
+		{"NuGet", "NuGet.Mixed_Case"},
+		{"pypi", "My.Pkg_Name"},
+		{"PyPI", "a..B__c---d"},
+		{"pypi", "  Spaced_Name \t"},
+		{"actions", "Actions/Checkout"},
+		{"GitHub Actions", "GitHub/CodeQL-Action"},
+		{"npm", "@Scope/Name"},
+		{"npm", " @Scope/Padded "},
+		{"go", "github.com/Org/Repo"},
+		{"maven", "org.Example:Artifact_ID"},
+	}
+	for _, tc := range cases {
+		var got string
+		if err := store.pool.QueryRow(ctx,
+			`SELECT `+canonicalPackageNameSQL+` FROM (VALUES ($1::text, $2::text)) AS input(ecosystem, raw_name)`,
+			tc.ecosystem, tc.name,
+		).Scan(&got); err != nil {
+			t.Fatalf("canonicalPackageNameSQL(%q, %q) error = %v", tc.ecosystem, tc.name, err)
+		}
+		if want := packageid.NormalizeName(tc.ecosystem, tc.name); got != want {
+			t.Fatalf("canonicalPackageNameSQL(%q, %q) = %q, want packageid.NormalizeName %q", tc.ecosystem, tc.name, got, want)
+		}
+	}
+}
+
+func upsertGHSARepairFixture(ctx context.Context, t *testing.T, store *Store, id, rawJSON string) {
+	t.Helper()
+
+	now := time.Now().UTC()
+	if err := store.UpsertVulnerability(ctx, &db.Vulnerability{
+		ID:        id,
+		Summary:   "GHSA repair fixture " + id,
+		Severity:  "HIGH",
+		Published: now,
+		Modified:  now,
+		Sources: []db.VulnerabilitySource{{
+			Source:   "ghsa",
+			SourceID: id,
+			RawJSON:  json.RawMessage(rawJSON),
+		}},
+		AffectedPackages: []db.AffectedPackage{{
+			Ecosystem:        "npm",
+			Name:             "ghsa-repair-anchor-" + strings.ToLower(id),
+			VersionRanges:    json.RawMessage(`[]`),
+			VersionsAffected: json.RawMessage(`[]`),
+		}},
+	}); err != nil {
+		t.Fatalf("UpsertVulnerability(%s) error = %v", id, err)
+	}
+}
+
+func affectedPackageNames(ctx context.Context, t *testing.T, store *Store, vulnerabilityID, ecosystem string) []string {
+	t.Helper()
+
+	rows, err := store.pool.Query(ctx, `
+		SELECT name FROM affected_packages
+		WHERE vulnerability_id = $1 AND ecosystem = $2
+		ORDER BY name`, vulnerabilityID, ecosystem)
+	if err != nil {
+		t.Fatalf("query affected package names: %v", err)
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatalf("scan affected package name: %v", err)
+		}
+		names = append(names, name)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate affected package names: %v", err)
+	}
+	return names
+}
+
+func testGHSARepairWritesCanonicalPackageNames(ctx context.Context, t *testing.T, store *Store) {
+	t.Helper()
+
+	upsertGHSARepairFixture(ctx, t, store, "GHSA-repair-canonical", `{
+		"id": "GHSA-repair-canonical",
+		"affected": [
+			{"package": {"ecosystem": "PyPI", "name": "My.Pkg_Name"},
+			 "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "2.0.0"}]}]},
+			{"package": {"ecosystem": "PyPI", "name": "my-pkg-name"},
+			 "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "3.0.0"}, {"fixed": "3.1.0"}]}]},
+			{"package": {"ecosystem": "NuGet", "name": "Newtonsoft.Json"},
+			 "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "13.0.1"}]}]}
+		]
+	}`)
+
+	if _, err := store.RepairGHSAAffectedPackages(ctx); err != nil {
+		t.Fatalf("RepairGHSAAffectedPackages() error = %v", err)
+	}
+
+	if got := affectedPackageNames(ctx, t, store, "GHSA-repair-canonical", "pypi"); len(got) != 1 || got[0] != "my-pkg-name" {
+		t.Fatalf("pypi affected package names = %v, want only canonical my-pkg-name", got)
+	}
+	if got := affectedPackageNames(ctx, t, store, "GHSA-repair-canonical", "nuget"); len(got) != 1 || got[0] != "newtonsoft.json" {
+		t.Fatalf("nuget affected package names = %v, want only canonical newtonsoft.json", got)
+	}
+
+	for _, lookup := range []struct{ ecosystem, name, version string }{
+		{"pypi", "My.Pkg_Name", "1.0.0"},
+		{"pypi", "my_pkg.name", "3.0.5"},
+		{"nuget", "Newtonsoft.Json", "12.0.0"},
+	} {
+		findings, err := store.FindVulnerabilities(ctx, lookup.ecosystem, lookup.name, lookup.version)
+		if err != nil {
+			t.Fatalf("FindVulnerabilities(%s/%s@%s) error = %v", lookup.ecosystem, lookup.name, lookup.version, err)
+		}
+		if !findingsContainAdvisory(findings, "GHSA-repair-canonical") {
+			t.Fatalf("FindVulnerabilities(%s/%s@%s) = %+v, want repaired GHSA-repair-canonical", lookup.ecosystem, lookup.name, lookup.version, findings)
+		}
+	}
+}
+
+func findingsContainAdvisory(findings []domain.Finding, advisoryID string) bool {
+	for _, finding := range findings {
+		if finding.AdvisoryID == advisoryID {
+			return true
+		}
+	}
+	return false
 }
 
 func testScanTotalsAboveInt32AreNotNarrowed(ctx context.Context, t *testing.T, store *Store) {
