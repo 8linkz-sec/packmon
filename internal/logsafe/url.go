@@ -10,6 +10,7 @@ import (
 
 const (
 	redactedURL      = "(redacted-url)"
+	redactedPath     = "(redacted-path)"
 	truncationMarker = "...[truncated]"
 	unmatchedRoute   = "(unmatched-route)"
 )
@@ -18,7 +19,6 @@ var (
 	// Database driver errors can echo the PostgreSQL connection URL, whose
 	// userinfo carries the database password.
 	httpURLPattern     = regexp.MustCompile(`(?i)\b(?:https?|postgres(?:ql)?)://[^\s<>"']+`)
-	bearerTokenPattern = regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}`)
 	windowsPathPattern = regexp.MustCompile(`(?i)\b[A-Z]:\\(?:[^\\\s]+\\){2,}[^\\\s]+`)
 	unixPathPattern    = regexp.MustCompile(`(^|[\s=:])/(?:[^/\s]+/){2,}[^/\s]+`)
 )
@@ -83,7 +83,8 @@ func RedactURLRequestError(err error, label string) string {
 
 // RedactDiagnosticMessage removes secret-bearing details from mixed diagnostic
 // text before it is shown to users. It preserves the failure class while hiding
-// URL credentials/query strings, bearer-like tokens, and local filesystem paths.
+// URL credentials/query strings, PEM private keys, bearer-like tokens, the
+// values of secret keys, and local filesystem paths.
 func RedactDiagnosticMessage(raw string) string {
 	msg := strings.TrimSpace(raw)
 	if msg == "" {
@@ -91,12 +92,8 @@ func RedactDiagnosticMessage(raw string) string {
 	}
 
 	msg = httpURLPattern.ReplaceAllStringFunc(msg, redactURLInMessage)
-	msg = bearerTokenPattern.ReplaceAllString(msg, "Bearer [redacted]")
-	msg = redactQuotedKeySecrets(msg)
-	msg = redactSecretAssignments(msg)
-	msg = windowsPathPattern.ReplaceAllString(msg, "(redacted-path)")
-	msg = unixPathPattern.ReplaceAllString(msg, "${1}(redacted-path)")
-	return msg
+	msg = longBearerTokenPattern.ReplaceAllString(msg, "Bearer "+redactedValue)
+	return redactSecretsAndPaths(msg)
 }
 
 // BoundedValue strips control characters, collapses whitespace, and truncates

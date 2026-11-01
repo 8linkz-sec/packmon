@@ -767,30 +767,60 @@ Server startup, schema-check, background-worker, and fatal error logs,
 including the plain-stderr fatal fallback used before a logger is configured,
 must pass through the same diagnostic redaction and a 512-byte bound: database
 driver errors can echo the connection URL, secret assignments, or local paths.
-The redaction strips userinfo, paths, and queries from `http(s)://` and
-`postgres(ql)://` URLs and redacts quoted secret values (for example libpq's
-`password='...'`) as a whole. Secret keys are also recognized when the key
-itself is quoted, as in JSON or dict-style text (`"password":"..."`,
-`"api_key" : "..."`, `'token':'...'`, or `\"token\":\"...\"` inside an escaped
-JSON string): the quoted value is redacted and the other, non-secret fields of
-the object stay readable. An escaped value inside such a string
+The redaction replaces PEM private key blocks
+(`-----BEGIN ... PRIVATE KEY-----` through the matching END marker, or through
+the end of a message cut off inside the block) with
+`(redacted-private-key)`, strips userinfo, paths, and
+queries from `http(s)://` and `postgres(ql)://` URLs, redacts the credential
+after `Bearer` whatever its length (below eight characters, words of prose
+such as `Bearer token` or `Bearer realm=` stay readable), and redacts quoted
+secret values (for example
+libpq's `password='...'`) as a whole. Secret keys are also recognized when the
+key itself is quoted, as in JSON or dict-style text (`"password":"..."`,
+`"api_key" : "..."`, `'token':'...'`, `"Client Secret":"..."`, or
+`\"token\":\"...\"` inside an escaped JSON string), including keys with
+spaces, `/`, or `:` (`"auth/token"`, `"db:password"`) and keys quoted with
+HTML character references (`&quot;password&quot;:&quot;...&quot;`, `&#34;`,
+`&#39;`): the quoted value is redacted and the other, non-secret fields of the
+object stay readable. An escaped value inside such a string
 (`\"token\":\"a b\"`) is redacted up to its matching escaped closing quote,
 spaces and escaped characters (including an escaped quote inside the value)
 included; an unterminated one redacts the rest of the message. A backslash
 escapes any character inside a secret value, a newline included, so an escaped
 line break does not end the redaction early. A key is a secret key, quoted or
-not, when one component of its name (split at `_`, `-`, `.`, digits, and
-camelCase boundaries) ends with a secret word (`password`, `passwd`, `pwd`,
-`secret`, `token`, `credential`, `signature`, `sig`, `apikey`, `privatekey`,
-and the plurals `passwords`, `passwds`, `secrets`, `credentials`) or is `key`
-right after an `api` or `private` component: `authToken`, `db_password`,
-`DB_PASSWORD`, `client_secret_value`, `GITHUB_TOKEN`, `PGPASSWORD`,
-`x-api-key`, `db.password`, and `dbCredentials` are secret keys. A secret word
-followed by more letters in the same component does not count, so
-`tokenizer`, `tokens_count`, `passwordless`, and `secretariat` stay readable;
-`tokens` is not a secret word because it usually holds a count. The rule errs
-toward over-redaction: a key with a secret word as a whole component is
-redacted even where its value is harmless (`token_count`, `has_signature`).
+not, when one component of its name (split at `_`, `-`, `.`, digits, other
+non-letters, and camelCase boundaries) ends with a secret word (`password`,
+`passwd`, `pwd`, `secret`, `token`, `credential`, `signature`, `sig`,
+`apikey`, `privatekey`, `passphrase`, `authorization`, `accesskey`,
+`accountkey`, `signingkey`, `encryptionkey`, `masterkey`, `sessionid`,
+`sessid`, and the plurals `passwords`, `passwds`, `secrets`, `credentials`,
+`passphrases`), is `key` right after an `api`, `private`, `access`,
+`account`, `signing`, `encryption`, or `master` component, or is `id` right
+after a `session` component: `authToken`, `db_password`, `DB_PASSWORD`,
+`client_secret_value`, `GITHUB_TOKEN`, `PGPASSWORD`, `x-api-key`,
+`db.password`, `dbCredentials`, `aws_access_key`, `AccountKey`,
+`SharedAccessKey`, `signing_key`, `MASTER_KEY`, `GPG_PASSPHRASE`,
+`session_id`, and `JSESSIONID` are secret keys. A component that ends with
+`tokens` makes the key secret unless its value is a bare number (`tokens=3`,
+`"max_tokens":4096` stay readable, `"tokens":["..."]` does not), because
+`tokens` usually holds a count. The short words `pass`, `pw`, `auth`,
+`cookie`, and `session` count only as the whole last component (`DB_PASS`,
+`basic_auth`, `Set-Cookie`, but not `bypass`, `auth_mode`, or
+`session_count`), and an unquoted short key needs `=` or a `:` that is not
+followed by whitespace, so Go-wrapped errors such as `admin auth: connection
+refused` stay readable. A cookie header value runs to the end of the line,
+because it holds `;`-separated pairs: after `Cookie:` or `Set-Cookie:`
+capitalized as headers are, and after a lower-case `cookie:` or `set-cookie:`
+(as HTTP/2 and proxies write them) whose first token, up to whitespace or
+`;`, is a `name=value` pair; lower-case prose without one (`invalid cookie:
+missing name`) follows the short-word rule. An `Authorization` or `auth` value
+keeps a known scheme
+readable and redacts the credential after it (`Authorization: Basic
+[redacted]`). A secret word followed by more letters in the same component
+does not count, so `tokenizer`, `passwordless`, and `secretariat` stay
+readable. The rule errs toward over-redaction: a key with a secret word as a
+whole component is redacted even where its value is harmless (`token_count`,
+`has_signature`).
 Escaped JSON is recognized at any embedding depth
 (`\\\"token\\\":\\\"a b\\\"`): a quoted key needs the same quote, escaped by
 the same number of backslashes, on both sides, and a quoted value ends at the
@@ -799,9 +829,49 @@ closes the string the value was cut off in. An object or array assigned to a
 secret key (`"token": {"value": "..."}`, `"password": ["...", "..."]`) is
 redacted as a whole up to its balanced closing bracket, ignoring brackets
 inside its strings; an unbalanced structure, or one larger than 16 KiB,
-redacts the rest of the message. An unquoted key right after an opening quote
-(`"password=..."`) ends its value at that string's closing quote. The
-redaction runs in time linear in the message length.
+redacts the rest of the message. A value of an escaped quoted key that starts
+with a less escaped quote followed by a JSON delimiter, whitespace, or the end
+is empty (the key was cut off where the enclosing string closes); any other
+such quote, and a quote after an even number of backslashes, opens or belongs
+to the value. An unquoted secret key
+also matches a URL-encoded separator (`password%3D...`, `%22token%22%3A...`)
+and, as a command-line flag, a value in the next argument (`--password ...`,
+`-token ...`, `-p ...`) when the flag's last name component names a secret
+(`--password-stdin` and `--token-file` do not) and the next argument does not
+start with `-`; `-p` is treated as a password flag although many tools use it
+for a port or parallelism, erring toward redaction. An unquoted value runs to
+the next unquoted whitespace; a `;` or `&` (or `%26`) ends it only before
+whitespace, the end, or the next `key=` pair, so `password=a;b` and
+`password=a&amp;b` are redacted whole while `a=1&token=x&b=2` keeps `a` and
+`b` readable. The scan of unquoted keys tracks the quoted strings of the free
+text: a quote opens a string only when it does not follow a letter, digit, or
+`_`, closes it only when none follows (so the apostrophe in `can't` opens
+nothing), and a line break closes any open string; the quotes of a redacted
+value (`password="a b"`) never open one. An unquoted key inside such a string
+(`"password=..."`, `"x password: a" next`) ends its value at that string's
+closing quote, and its value is empty only for a label, whose separator the
+closing quote follows after nothing but whitespace and which whitespace or the
+end follows (`"Password:" PGPASSWORD=...`). Because these readings of quotes
+are heuristics, the redaction keeps the baseline redaction (the rules as they
+stood before the component-based key names were extended: URL and Bearer
+tokens of eight or more characters, the original secret words, no quote
+tracking, a quote right before an unquoted key as the only enclosing quote,
+values that end at any `;` or `&`, then local paths) and adds every other
+rule to it. Only the URL and long-Bearer rewrites change the text; the
+baseline scan, the PEM private keys, the short Bearer tokens, and the
+extended scan described here all report the byte ranges they redact in that
+same text, the local paths are matched once with the baseline's ranges and
+once with all ranges taken out, and the union of all ranges is replaced at
+once. So the baseline scan and its path patterns see exactly the text they
+always saw, and no new rule can reveal a value or a path the baseline
+redaction hides. Ranges that overlap or touch become one marker:
+`(redacted-path)` when a path is among them, else `[redacted]`, else
+`(redacted-private-key)`. Where the two scans read the same text differently,
+overlapping ranges therefore merge (`"x password: a" PGPASSWORD:"0 s 0"`
+becomes `"x password: [redacted]`). A golden fixture of messages and their
+baseline outputs (`internal/logsafe/testdata/baseline_golden.json`) pins the
+baseline, and a differential fuzz target checks that a value it hides stays
+hidden. The redaction runs in time linear in the message length.
 
 The built-in `/privacy` page is a deployment-neutral disclosure for the
 first-party admin session cookie and routine Packmon audit/scan metadata. It is

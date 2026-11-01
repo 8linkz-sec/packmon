@@ -1,0 +1,4838 @@
+[
+  {
+    "in": "\"x password: a\" PGPASSWORD:\"0 s 0\"",
+    "out": "\"x password: [redacted] s 0\""
+  },
+  {
+    "in": "prompt \"passwd: \" PGPASSWORD:\"0 quote-secret-2 0\"",
+    "out": "prompt \"passwd: \" PGPASSWORD:[redacted]"
+  },
+  {
+    "in": "{\\\"token\\\":\"ghp_zq0001\"}",
+    "out": "{\\\"token\\\":[redacted]}"
+  },
+  {
+    "in": "unmatched \" here password=\"!zq0002\"",
+    "out": "unmatched \" here password=[redacted]"
+  },
+  {
+    "in": "read token from Bearer C:\\Users\\alice\\zq0003\\token.txt failed",
+    "out": "read token from Bearer (redacted-path) failed"
+  },
+  {
+    "in": "Bearer sig=\"zq0004 a b\"",
+    "out": "Bearer sig=[redacted]"
+  },
+  {
+    "in": "-----BEGIN PRIVATE KEY----- password: {-----END PRIVATE KEY-----zq0005\"x password: PGPASSWORD-----END PRIVATE KEY-----\"",
+    "out": "-----BEGIN PRIVATE KEY----- password: [redacted]"
+  },
+  {
+    "in": "he said \"hello password=zq0006\"!zq0007",
+    "out": "he said \"hello password=[redacted]"
+  },
+  {
+    "in": "A:\\0\\!\"Apikey:0\":\\\"\"zq0008",
+    "out": "(redacted-path)"
+  },
+  {
+    "in": ".,\\\\\": :Cookie",
+    "out": ".,\\\\\": :Cookie"
+  },
+  {
+    "in": "{--password--password = zq0100'0session_idAccountKeyzq01010",
+    "out": "{--password--password = [redacted]"
+  },
+  {
+    "in": "zq0102 zq0103AccountKey AccountKeysession_id;}db.passwordapi_keyzq0104",
+    "out": "zq0102 zq0103AccountKey AccountKeysession_id;}db.passwordapi_keyzq0104"
+  },
+  {
+    "in": ":Cookieit's,\u0026\\",
+    "out": ":Cookieit's,\u0026\\"
+  },
+  {
+    "in": "%3Dcookie[",
+    "out": "%3Dcookie["
+  },
+  {
+    "in": "=labelzq0105\ndb.passwordsession_id",
+    "out": "=labelzq0105\ndb.passwordsession_id"
+  },
+  {
+    "in": "!'PGPASSWORD-----BEGIN PRIVATE KEY-----zq0106\n:\tAccountKey-----END PRIVATE KEY-----zq0107",
+    "out": "!'PGPASSWORD-----BEGIN PRIVATE KEY-----zq0106\n:\tAccountKey-----END PRIVATE KEY-----zq0107"
+  },
+  {
+    "in": "00;![",
+    "out": "00;!["
+  },
+  {
+    "in": "\u0026\"\"Client Secret\"authzq0108zq0109=",
+    "out": "\u0026\"\"Client Secret\"authzq0108zq0109="
+  },
+  {
+    "in": "\n'zq0110\"zq0111zq0112AuthorizationAuthorization: zq0113token",
+    "out": "'zq0110\"zq0111zq0112AuthorizationAuthorization: zq0113token"
+  },
+  {
+    "in": "db.passwordtokensBearer zq0114",
+    "out": "db.passwordtokensBearer zq0114"
+  },
+  {
+    "in": "zq0115password = \\\"PGPASSWORDsecretzq0116zq0117Authorization",
+    "out": "zq0115password = [redacted]"
+  },
+  {
+    "in": "\nzq0118zq0119zq0120db.passwordcookiezq0121zq0122",
+    "out": "zq0118zq0119zq0120db.passwordcookiezq0121zq0122"
+  },
+  {
+    "in": "=PGPASSWORDsession_idpassword=zq0123authCookiezq0124",
+    "out": "=PGPASSWORDsession_idpassword=[redacted]"
+  },
+  {
+    "in": "https://u:p@example.test/x?token=yzq0125zq0126",
+    "out": "https://example.test/..."
+  },
+  {
+    "in": "-----END PRIVATE KEY-----label%3D. 0zq0127zq0128passphrase",
+    "out": "-----END PRIVATE KEY-----label%3D. 0zq0127zq0128passphrase"
+  },
+  {
+    "in": "Authorizationzq0129tokens\u0026zq0130\u0026authzq0131",
+    "out": "Authorizationzq0129tokens\u0026zq0130\u0026authzq0131"
+  },
+  {
+    "in": "Bearer ]zq0132",
+    "out": "Bearer ]zq0132"
+  },
+  {
+    "in": "-----BEGIN PRIVATE KEY-----cookie=",
+    "out": "-----BEGIN PRIVATE KEY-----cookie="
+  },
+  {
+    "in": "api_key{0\"",
+    "out": "api_key{0\""
+  },
+  {
+    "in": "--passwordC:\\Users\\a\\b\\c.txt zq0133zq0134",
+    "out": "--passwordC:[redacted] zq0133zq0134"
+  },
+  {
+    "in": "x\nzq0135 zq0136zq0137AccountKeyzq0138session_id",
+    "out": "x\nzq0135 zq0136zq0137AccountKeyzq0138session_id"
+  },
+  {
+    "in": "zq0139zq0140labelzq0141\\! ",
+    "out": "zq0139zq0140labelzq0141\\!"
+  },
+  {
+    "in": ":\ttokensCookieauthzq0142': zq0143tokenzq0144tokens",
+    "out": ":\ttokensCookieauthzq0142': zq0143tokenzq0144tokens"
+  },
+  {
+    "in": "zq0145\"zq0146secret[passwordzq0147!zq0148:\t ",
+    "out": "zq0145\"zq0146secret[passwordzq0147!zq0148:"
+  },
+  {
+    "in": "secretx[",
+    "out": "secretx["
+  },
+  {
+    "in": "\"Client Secret\"zq0149api_key: Basic  .",
+    "out": "\"Client Secret\"zq0149api_key: [redacted]  ."
+  },
+  {
+    "in": "zq0150,zq0151zq0152it'sAuthorizationx\\\":\t",
+    "out": "zq0150,zq0151zq0152it'sAuthorizationx\\\":"
+  },
+  {
+    "in": "-p'zq0153",
+    "out": "-p'zq0153"
+  },
+  {
+    "in": "zq0154\u0026#39;: zq0155",
+    "out": "zq0154\u0026#39;: zq0155"
+  },
+  {
+    "in": "zq0156cookieapi_keyhttps://u:p@example.test/x?token=yAccountKey\u0026quot;!Bearer /home/a/b/c",
+    "out": "zq0156cookieapi_keyhttps://u:p@example.test/x?token=[redacted]\u0026quot;!Bearer [redacted]"
+  },
+  {
+    "in": "Authorizationzq0157Bearer zq0158db.passwordzq0159 PGPASSWORD",
+    "out": "Authorizationzq0157Bearer zq0158db.passwordzq0159 PGPASSWORD"
+  },
+  {
+    "in": "\u0026\n\u0026#39;:zq0160",
+    "out": "\u0026\n\u0026#39;:zq0160"
+  },
+  {
+    "in": "it's%3D\u0026quot;\\\\\"tokenszq0161it's\u0026#39;--password\u0026quot;",
+    "out": "it's%3D\u0026quot;\\\\\"tokenszq0161it's\u0026#39;--password\u0026quot;"
+  },
+  {
+    "in": "/home/a/b/c=\\\"zq0162: ",
+    "out": "(redacted-path)"
+  },
+  {
+    "in": "zq0163zq0164\u0026quot;",
+    "out": "zq0163zq0164\u0026quot;"
+  },
+  {
+    "in": "-p{\u0026\u0026quot;zq0165\u0026#39;",
+    "out": "-p{\u0026\u0026quot;zq0165\u0026#39;"
+  },
+  {
+    "in": "zq0166}Cookie'",
+    "out": "zq0166}Cookie'"
+  },
+  {
+    "in": ",!-----BEGIN PRIVATE KEY----- zq0167\\\\\\\"-----END PRIVATE KEY-----: ",
+    "out": ",!-----BEGIN PRIVATE KEY----- zq0167\\\\\\\"-----END PRIVATE KEY-----:"
+  },
+  {
+    "in": " authAccountKeyauth-p",
+    "out": "authAccountKeyauth-p"
+  },
+  {
+    "in": "zq0168https://u:p@example.test/x?token=yzq0169password0zq0170",
+    "out": "zq0168https://u:p@example.test/x?token=[redacted]"
+  },
+  {
+    "in": "zq0171db.passwordtokens",
+    "out": "zq0171db.passwordtokens"
+  },
+  {
+    "in": "set-cookiezq0172\\\"zq0173",
+    "out": "set-cookiezq0172\\\"zq0173"
+  },
+  {
+    "in": "%3Dzq0174-pzq0175 = [zq0176",
+    "out": "%3Dzq0174-pzq0175 = [zq0176"
+  },
+  {
+    "in": "https://u:p@example.test/x?token=yzq0177zq0178",
+    "out": "https://example.test/..."
+  },
+  {
+    "in": "Bearer {:;;-pset-cookiehttps://u:p@example.test/x?token=yAccountKey",
+    "out": "Bearer {:;;-pset-cookiehttps://u:p@example.test/x?token=[redacted]"
+  },
+  {
+    "in": "Bearer \\zq0179]zq0180Authorizationcookie\u0026\\ ",
+    "out": "Bearer \\zq0179]zq0180Authorizationcookie\u0026\\"
+  },
+  {
+    "in": "\\session_idpassword",
+    "out": "\\session_idpassword"
+  },
+  {
+    "in": "zq0181zq0182C:\\Users\\a\\b\\c.txtapi_keyAuthorizationset-cookie0",
+    "out": "zq0181zq0182C:\\Users\\a\\b\\c.txtapi_keyAuthorizationset-cookie0"
+  },
+  {
+    "in": ",Authorizationpassphrase-p",
+    "out": ",Authorizationpassphrase-p"
+  },
+  {
+    "in": "labelzq0183/home/a/b/c;",
+    "out": "labelzq0183/home/a/b/c;"
+  },
+  {
+    "in": " /home/a/b/c'",
+    "out": "(redacted-path)"
+  },
+  {
+    "in": ":\tcookiezq0184{",
+    "out": ":\tcookiezq0184{"
+  },
+  {
+    "in": "zq0185zq0186\\zq0187/home/a/b/c-pAccountKey\\\u0026quot;",
+    "out": "zq0185zq0186\\zq0187/home/a/b/c-pAccountKey\\\u0026quot;"
+  },
+  {
+    "in": "zq0188credentialszq0189:auth C:\\Users\\a\\b\\c.txtBasic \\\"https://u:p@example.test/x?token=y",
+    "out": "zq0188credentialszq0189:auth (redacted-path) \\\"https://example.test/..."
+  },
+  {
+    "in": "\\\"=zq0190zq01910\ncookie",
+    "out": "\\\"=zq0190zq01910\ncookie"
+  },
+  {
+    "in": "zq0192passphrase\\\\\"Basic }",
+    "out": "zq0192passphrase\\\\\"Basic }"
+  },
+  {
+    "in": "}-----BEGIN PRIVATE KEY-----{it's\n -----END PRIVATE KEY-----",
+    "out": "}-----BEGIN PRIVATE KEY-----{it's\n -----END PRIVATE KEY-----"
+  },
+  {
+    "in": "--password\"%3Dzq0193",
+    "out": "--password\"%3Dzq0193"
+  },
+  {
+    "in": "0passphrase\\set-cookie-----END PRIVATE KEY-----}",
+    "out": "0passphrase\\set-cookie-----END PRIVATE KEY-----}"
+  },
+  {
+    "in": "zq0194xapi_key",
+    "out": "zq0194xapi_key"
+  },
+  {
+    "in": "PGPASSWORD\\\\\"set-cookie",
+    "out": "PGPASSWORD\\\\\"set-cookie"
+  },
+  {
+    "in": ":Cookie\u0026",
+    "out": ":Cookie\u0026"
+  },
+  {
+    "in": "db.passwordAccountKeyzq0195",
+    "out": "db.passwordAccountKeyzq0195"
+  },
+  {
+    "in": "zq0196cookiepassword \u0026#39;'PGPASSWORDit's%3Dcookieauth = ",
+    "out": "zq0196cookiepassword \u0026#39;'PGPASSWORDit's%3Dcookieauth ="
+  },
+  {
+    "in": "{,zq0197}: zq0198zq0199",
+    "out": "{,zq0197}: zq0198zq0199"
+  },
+  {
+    "in": "[zq0200 password\"Client Secret\"secretzq0201]auth.",
+    "out": "[zq0200 password\"Client Secret\"secretzq0201]auth."
+  },
+  {
+    "in": "[{api_key: '\u0026zq0202credentials{AccountKeyzq0203",
+    "out": "[{api_key: [redacted]"
+  },
+  {
+    "in": "Authorizationtokenszq0204",
+    "out": "Authorizationtokenszq0204"
+  },
+  {
+    "in": "auth0-----END PRIVATE KEY-----'Bearer !",
+    "out": "auth0-----END PRIVATE KEY-----'Bearer !"
+  },
+  {
+    "in": "PGPASSWORD zq0205https://u:p@example.test/x?token=ycookie=tokenzq0206authAuthorizationzq0207session_id",
+    "out": "PGPASSWORD zq0205https://u:p@example.test/x?token=[redacted]"
+  },
+  {
+    "in": "zq0208xzq0209.",
+    "out": "zq0208xzq0209."
+  },
+  {
+    "in": "{ ;zq0210xBasic ",
+    "out": "{ ;zq0210xBasic"
+  },
+  {
+    "in": "zq0211-pit'shttps://u:p@example.test/x?token=yzq0212zq0213\u0026quot;",
+    "out": "zq0211-pit'shttps://u:p@example.test/x?token=[redacted]\u0026quot;"
+  },
+  {
+    "in": "tokenzq0214!/home/a/b/c",
+    "out": "tokenzq0214!/home/a/b/c"
+  },
+  {
+    "in": "zq0215;!zq0216: [zq0217zq0218 ",
+    "out": "zq0215;!zq0216: [zq0217zq0218"
+  },
+  {
+    "in": "zq0219 = %3D.,AccountKey}https://u:p@example.test/x?token=y",
+    "out": "zq0219 = %3D.,AccountKey}https://example.test/..."
+  },
+  {
+    "in": "db.password  tokenzq0220",
+    "out": "db.password  tokenzq0220"
+  },
+  {
+    "in": "Cookiecredentials[.xhttps://u:p@example.test/x?token=y passwordzq0221zq0222https://u:p@example.test/x?token=y",
+    "out": "Cookiecredentials[.xhttps://u:p@example.test/x?token=[redacted] passwordzq0221zq0222https://u:p@example.test/x?token=[redacted]"
+  },
+  {
+    "in": "api_keyzq0223Authorization--passwordlabel=Bearer zq0224",
+    "out": "api_keyzq0223Authorization--passwordlabel=Bearer zq0224"
+  },
+  {
+    "in": "zq02250C:\\Users\\a\\b\\c.txt",
+    "out": "zq02250C:\\Users\\a\\b\\c.txt"
+  },
+  {
+    "in": "zq0226\"Client Secret\"\"Client Secret\"zq0227: zq0228cookieC:\\Users\\a\\b\\c.txtBearer \\\"AccountKey",
+    "out": "zq0226\"Client Secret\"\"Client Secret\"zq0227: zq0228cookieC:\\Users\\a\\b\\c.txtBearer \\\"AccountKey"
+  },
+  {
+    "in": "zq0229api_keyzq0230: token\\\\\\\"set-cookiezq0231",
+    "out": "zq0229api_keyzq0230: token\\\\\\\"set-cookiezq0231"
+  },
+  {
+    "in": ";zq0232C:\\Users\\a\\b\\c.txt]zq0233zq0234",
+    "out": ";zq0232C:\\Users\\a\\b\\c.txt]zq0233zq0234"
+  },
+  {
+    "in": "password\"Client Secret\"db.password0",
+    "out": "password\"Client Secret\"db.password0"
+  },
+  {
+    "in": "]zq0235C:\\Users\\a\\b\\c.txtpassphrase;-p:\tdb.password",
+    "out": "]zq0235C:\\Users\\a\\b\\c.txtpassphrase;-p:\tdb.password"
+  },
+  {
+    "in": ":\tpassphrase.\\\":zq0236set-cookie}-----END PRIVATE KEY-----\nzq0237token",
+    "out": ":\tpassphrase.\\\":zq0236set-cookie}-----END PRIVATE KEY-----\nzq0237token"
+  },
+  {
+    "in": "Cookiezq0238-p\u0026 zq0239",
+    "out": "Cookiezq0238-p\u0026 zq0239"
+  },
+  {
+    "in": "PGPASSWORDPGPASSWORDBearer !tokencredentials = zq0240Cookiezq0241",
+    "out": "PGPASSWORDPGPASSWORDBearer !tokencredentials = [redacted]"
+  },
+  {
+    "in": "zq0242zq0243\u0026quot;zq0244\u0026quot; = zq0245': ",
+    "out": "zq0242zq0243\u0026quot;zq0244\u0026quot; = zq0245':"
+  },
+  {
+    "in": "zq0246zq0247\u0026#39;cookiex:",
+    "out": "zq0246zq0247\u0026#39;cookiex:"
+  },
+  {
+    "in": "credentialsapi_key\\}zq0248zq0249 {zq0250",
+    "out": "credentialsapi_key\\}zq0248zq0249 {zq0250"
+  },
+  {
+    "in": "-----END PRIVATE KEY-----: \u0026quot;zq0251zq0252zq0253\\\"zq0254",
+    "out": "-----END PRIVATE KEY-----: \u0026quot;zq0251zq0252zq0253\\\"zq0254"
+  },
+  {
+    "in": "zq0255session_idapi_key\"zq0256 -----BEGIN PRIVATE KEY-----0:\t",
+    "out": "zq0255session_idapi_key\"zq0256 -----BEGIN PRIVATE KEY-----0:"
+  },
+  {
+    "in": "api_key!PGPASSWORDzq0257C:\\Users\\a\\b\\c.txt:session_id",
+    "out": "api_key!PGPASSWORDzq0257C:\\Users\\a\\b\\c.txt:session_id"
+  },
+  {
+    "in": "it'sxzq0258--password-----END PRIVATE KEY-----",
+    "out": "it'sxzq0258--password-----END PRIVATE KEY-----"
+  },
+  {
+    "in": "PGPASSWORDdb.passwordzq0259session_id labelzq0260zq0261db.passwordsession_id\"}",
+    "out": "PGPASSWORDdb.passwordzq0259session_id labelzq0260zq0261db.passwordsession_id\"}"
+  },
+  {
+    "in": "-p,session_id: .zq0262tokenapi_key-pzq0263",
+    "out": "-p,session_id: .zq0262tokenapi_key-pzq0263"
+  },
+  {
+    "in": "]zq0264zq0265zq0266 %3D",
+    "out": "]zq0264zq0265zq0266 %3D"
+  },
+  {
+    "in": "Basic -pdb.passwordC:\\Users\\a\\b\\c.txt",
+    "out": "Basic -pdb.passwordC:[redacted]"
+  },
+  {
+    "in": "secretzq0267zq0268auth'zq0269",
+    "out": "secretzq0267zq0268auth'zq0269"
+  },
+  {
+    "in": ";zq0270;\u0026#39;token{.\\\\\\\"]",
+    "out": ";zq0270;\u0026#39;token{.\\\\\\\"]"
+  },
+  {
+    "in": "-----END PRIVATE KEY-----\\!;-p;C:\\Users\\a\\b\\c.txt-p\u0026--passwordzq0271",
+    "out": "-----END PRIVATE KEY-----\\!;-p;(redacted-path)"
+  },
+  {
+    "in": "zq0272secretset-cookieC:\\Users\\a\\b\\c.txtcookieCookieC:\\Users\\a\\b\\c.txt",
+    "out": "zq0272secretset-cookieC:\\Users\\a\\b\\c.txtcookieCookieC:\\Users\\a\\b\\c.txt"
+  },
+  {
+    "in": "PGPASSWORD}zq0273api_keyBasic Basic zq0274 passphrase",
+    "out": "PGPASSWORD}zq0273api_keyBasic Basic zq0274 passphrase"
+  },
+  {
+    "in": "!zq0275%3D!AccountKeyzq0276it's-----END PRIVATE KEY-----zq0277cookie",
+    "out": "!zq0275%3D!AccountKeyzq0276it's-----END PRIVATE KEY-----zq0277cookie"
+  },
+  {
+    "in": "=\\\"label\"Client Secret\"--password: ",
+    "out": "=\\\"label\"Client Secret\"--password:"
+  },
+  {
+    "in": "\u0026zq0278\\\"/home/a/b/c = zq0279 ",
+    "out": "\u0026zq0278\\\"/home/a/b/c = zq0279"
+  },
+  {
+    "in": "zq0280.zq0281'; PGPASSWORDcookie",
+    "out": "zq0280.zq0281'; PGPASSWORDcookie"
+  },
+  {
+    "in": "zq0282zq0283]\n",
+    "out": "zq0282zq0283]"
+  },
+  {
+    "in": "\"Authorizationzq0284{\nzq0285labelzq0286zq0287x,!",
+    "out": "\"Authorizationzq0284{\nzq0285labelzq0286zq0287x,!"
+  },
+  {
+    "in": "\\zq0288cookie--password-----BEGIN PRIVATE KEY-----\",",
+    "out": "\\zq0288cookie--password-----BEGIN PRIVATE KEY-----\","
+  },
+  {
+    "in": ":\tcookie = \u0026quot;",
+    "out": ":\tcookie = \u0026quot;"
+  },
+  {
+    "in": "\\\\\\\"it's\u0026#39;}",
+    "out": "\\\\\\\"it's\u0026#39;}"
+  },
+  {
+    "in": "'-----END PRIVATE KEY-----\n[.}!,}.--passwordcookie",
+    "out": "'-----END PRIVATE KEY-----\n[.}!,}.--passwordcookie"
+  },
+  {
+    "in": "zq0289passwordapi_key",
+    "out": "zq0289passwordapi_key"
+  },
+  {
+    "in": "[zq0290zq0291zq0292Bearer session_id--password-----BEGIN PRIVATE KEY----- = tokenshttps://u:p@example.test/x?token=y",
+    "out": "[zq0290zq0291zq0292Bearer session_id--password-----BEGIN PRIVATE KEY----- = tokenshttps://u:p@example.test/x?token=[redacted]"
+  },
+  {
+    "in": "--passwordzq0293 = https://u:p@example.test/x?token=yBasic PGPASSWORDauth%3D",
+    "out": "--passwordzq0293 = https://example.test/... PGPASSWORDauth%3D"
+  },
+  {
+    "in": "zq0294Basic zq0295\\\"",
+    "out": "zq0294Basic zq0295\\\""
+  },
+  {
+    "in": "xzq0296.zq0297\u0026#39;--passwordzq0298passphraseit's\n",
+    "out": "xzq0296.zq0297\u0026#39;--passwordzq0298passphraseit's"
+  },
+  {
+    "in": "!zq0299;passphrasexlabelzq0300credentialszq0301\\\\\"zq0302Bearer ",
+    "out": "!zq0299;passphrasexlabelzq0300credentialszq0301\\\\\"zq0302Bearer"
+  },
+  {
+    "in": "xzq0303 = password=it's/home/a/b/czq0304zq0305",
+    "out": "xzq0303 = password=[redacted]"
+  },
+  {
+    "in": "\u0026#39;\\zq0306 = ",
+    "out": "\u0026#39;\\zq0306 ="
+  },
+  {
+    "in": "0\\\"zq0307[;;{\\\\\"api_keyCookiezq0308cookie",
+    "out": "0\\\"zq0307[;;{\\\\\"api_keyCookiezq0308cookie"
+  },
+  {
+    "in": ".\\\\\\\"passphrase zq0309\n{db.password,",
+    "out": ".\\\\\\\"passphrase zq0309\n{db.password,"
+  },
+  {
+    "in": "0zq0310zq0311Basic PGPASSWORD\n",
+    "out": "0zq0310zq0311Basic PGPASSWORD"
+  },
+  {
+    "in": "zq0312\u0026#39;secret .",
+    "out": "zq0312\u0026#39;secret ."
+  },
+  {
+    "in": ": \"Client Secret\"zq0313PGPASSWORD\"Client Secret\"set-cookie]zq0314",
+    "out": ": \"Client Secret\"zq0313PGPASSWORD\"Client Secret\"set-cookie]zq0314"
+  },
+  {
+    "in": "\u0026quot;Bearer \\\\\" Authorizationzq0315zq0316",
+    "out": "\u0026quot;Bearer \\\\\" Authorizationzq0315zq0316"
+  },
+  {
+    "in": "/home/a/b/c\u0026quot;0 zq0317secret",
+    "out": "(redacted-path) zq0317secret"
+  },
+  {
+    "in": "session_idx%3Dhttps://u:p@example.test/x?token=y/home/a/b/cBearer ",
+    "out": "session_idx%3Dhttps://u:p@example.test/x?token=[redacted]"
+  },
+  {
+    "in": "zq0318zq0319\u0026quot;\\\"zq0320zq0321\\\" .",
+    "out": "zq0318zq0319\u0026quot;\\\"zq0320zq0321\\\" ."
+  },
+  {
+    "in": "0zq0322zq0323password\"tokenhttps://u:p@example.test/x?token=y\u0026#39;-plabel secret",
+    "out": "0zq0322zq0323password\"tokenhttps://u:p@example.test/x?token=[redacted]\u0026#39;-plabel secret"
+  },
+  {
+    "in": "credentialssecretzq0324zq0325",
+    "out": "credentialssecretzq0324zq0325"
+  },
+  {
+    "in": "Basic ]label\u0026Bearer zq0326-----BEGIN PRIVATE KEY-----",
+    "out": "Basic ]label\u0026Bearer [redacted] PRIVATE KEY-----"
+  },
+  {
+    "in": "-----END PRIVATE KEY-----it's[",
+    "out": "-----END PRIVATE KEY-----it's["
+  },
+  {
+    "in": "session_idzq0327it'slabel]zq0328:\t,-----BEGIN PRIVATE KEY-----session_idsecret\u0026",
+    "out": "session_idzq0327it'slabel]zq0328:\t,-----BEGIN PRIVATE KEY-----session_idsecret\u0026"
+  },
+  {
+    "in": "zq0329token-----END PRIVATE KEY-----zq0330api_keypassword!",
+    "out": "zq0329token-----END PRIVATE KEY-----zq0330api_keypassword!"
+  },
+  {
+    "in": "zq0331passphraseset-cookie.zq0332-pxzq0333password\"Client Secret\"",
+    "out": "zq0331passphraseset-cookie.zq0332-pxzq0333password\"Client Secret\""
+  },
+  {
+    "in": "cookiezq0334 Cookie\\\"xC:\\Users\\a\\b\\c.txt\u0026quot;\"https://u:p@example.test/x?token=y = ",
+    "out": "cookiezq0334 Cookie\\\"xC:\\Users\\a\\b\\c.txt\u0026quot;\"https://example.test/... ="
+  },
+  {
+    "in": "AccountKeyzq0335'zq0336AccountKey:\t",
+    "out": "AccountKeyzq0335'zq0336AccountKey:"
+  },
+  {
+    "in": "zq0337set-cookiezq0338zq0339tokens]zq0340C:\\Users\\a\\b\\c.txt = zq0341\\\\\\\"",
+    "out": "zq0337set-cookiezq0338zq0339tokens]zq0340C:\\Users\\a\\b\\c.txt = zq0341\\\\\\\""
+  },
+  {
+    "in": "\\zq0342xzq0343zq0344zq0345.zq0346",
+    "out": "\\zq0342xzq0343zq0344zq0345.zq0346"
+  },
+  {
+    "in": "\\\\\"password'\\",
+    "out": "\\\\\"password'\\"
+  },
+  {
+    "in": "\\\\\"db.password\\\"cookietoken\\\"token",
+    "out": "\\\\\"db.password\\\"cookietoken\\\"token"
+  },
+  {
+    "in": "\\\\\" \u0026quot;0tokensCookiezq0347\\\"\u0026}",
+    "out": "\\\\\" \u0026quot;0tokensCookiezq0347\\\"\u0026}"
+  },
+  {
+    "in": "zq0348-----END PRIVATE KEY-----Bearer .zq0349;CookiePGPASSWORDsession_idzq0350PGPASSWORD-----END PRIVATE KEY-----",
+    "out": "zq0348-----END PRIVATE KEY-----Bearer .zq0349;CookiePGPASSWORDsession_idzq0350PGPASSWORD-----END PRIVATE KEY-----"
+  },
+  {
+    "in": "x:\t0Cookie-----BEGIN PRIVATE KEY-----it's\n",
+    "out": "x:\t0Cookie-----BEGIN PRIVATE KEY-----it's"
+  },
+  {
+    "in": "\\\\\"secret: ",
+    "out": "\\\\\"secret:"
+  },
+  {
+    "in": "-pzq0351[zq0352zq0353zq0354\"Client Secret\"zq0355",
+    "out": "-pzq0351[zq0352zq0353zq0354\"Client Secret\"zq0355"
+  },
+  {
+    "in": "\nzq0356-----BEGIN PRIVATE KEY-----zq0357",
+    "out": "zq0356-----BEGIN PRIVATE KEY-----zq0357"
+  },
+  {
+    "in": "zq0358zq0359 Authorizationzq0360zq0361credentialszq0362zq0363db.password",
+    "out": "zq0358zq0359 Authorizationzq0360zq0361credentialszq0362zq0363db.password"
+  },
+  {
+    "in": "]-----BEGIN PRIVATE KEY-----Basic \u0026#39;zq0364Cookiezq0365}\\\\\" zq0366",
+    "out": "]-----BEGIN PRIVATE KEY-----Basic \u0026#39;zq0364Cookiezq0365}\\\\\" zq0366"
+  },
+  {
+    "in": "zq0367,; =\u0026#39;zq0368!",
+    "out": "zq0367,; =\u0026#39;zq0368!"
+  },
+  {
+    "in": "zq0369passwordhttps://u:p@example.test/x?token=y,",
+    "out": "zq0369passwordhttps://u:p@example.test/x?token=[redacted]"
+  },
+  {
+    "in": "session_id:db.password",
+    "out": "session_id:db.password"
+  },
+  {
+    "in": "zq0370--password\\\"labelzq0371",
+    "out": "zq0370--password\\\"labelzq0371"
+  },
+  {
+    "in": "token\\\"zq0372: zq0373",
+    "out": "token\\\"zq0372: zq0373"
+  },
+  {
+    "in": "zq0374 secret:\t0/home/a/b/cAccountKey!zq0375https://u:p@example.test/x?token=y{x",
+    "out": "zq0374 secret:\t[redacted]"
+  },
+  {
+    "in": "session_id]zq0376C:\\Users\\a\\b\\c.txtzq0377,{\u0026",
+    "out": "session_id]zq0376C:\\Users\\a\\b\\c.txtzq0377,{\u0026"
+  },
+  {
+    "in": "Cookie,it'sBearer -pzq0378\"zq0379.zq0380\\\"cookie",
+    "out": "Cookie,it'sBearer -pzq0378\"zq0379.zq0380\\\"cookie"
+  },
+  {
+    "in": "zq0381zq0382\u0026#39;",
+    "out": "zq0381zq0382\u0026#39;"
+  },
+  {
+    "in": "[\u0026#39;\"xzq0383-pcredentialsBearer ,api_key\\Authorization",
+    "out": "[\u0026#39;\"xzq0383-pcredentialsBearer ,api_key\\Authorization"
+  },
+  {
+    "in": "zq0384authAuthorization:\ndb.passwordBasic zq0385}Cookieit's",
+    "out": "zq0384authAuthorization:\ndb.passwordBasic zq0385}Cookieit's"
+  },
+  {
+    "in": "it's credentials = ",
+    "out": "it's credentials ="
+  },
+  {
+    "in": ",\\\u0026]}Bearer ::\ttokensecretset-cookie",
+    "out": ",\\\u0026]}Bearer ::\ttokensecretset-cookie"
+  },
+  {
+    "in": "zq0386zq0387--passwordapi_key\\\\\\\"zq0388session_idtokens'",
+    "out": "zq0386zq0387--passwordapi_key\\\\\\\"zq0388session_idtokens'"
+  },
+  {
+    "in": "\n0%3D:\t\u0026}%3D",
+    "out": "0%3D:\t\u0026}%3D"
+  },
+  {
+    "in": "%3Dzq0389zq0390\\zq0391\u0026quot;zq0392",
+    "out": "%3Dzq0389zq0390\\zq0391\u0026quot;zq0392"
+  },
+  {
+    "in": "password =  !Authorizationzq0393session_idPGPASSWORD/home/a/b/c",
+    "out": "password =  [redacted]"
+  },
+  {
+    "in": "zq0394[!zq0395passwordzq0396=x\u0026#39;\\\"",
+    "out": "zq0394[!zq0395passwordzq0396=x\u0026#39;\\\""
+  },
+  {
+    "in": "\\\\\",]--passwordC:\\Users\\a\\b\\c.txt",
+    "out": "\\\\\",]--passwordC:[redacted]"
+  },
+  {
+    "in": ": zq0397zq0398: --passwordzq0399AccountKeyzq0400secret=credentials",
+    "out": ": zq0397zq0398: --passwordzq0399AccountKeyzq0400secret=[redacted]"
+  },
+  {
+    "in": "zq0401token:.-----END PRIVATE KEY----- token",
+    "out": "zq0401token:[redacted] PRIVATE KEY----- token"
+  },
+  {
+    "in": "zq0402.passphrasesession_idzq0403-----END PRIVATE KEY-----zq0404zq0405",
+    "out": "zq0402.passphrasesession_idzq0403-----END PRIVATE KEY-----zq0404zq0405"
+  },
+  {
+    "in": "0secret: \u0026",
+    "out": "0secret: \u0026"
+  },
+  {
+    "in": "zq0406/home/a/b/cBasic /home/a/b/c--password\"Client Secret\"]",
+    "out": "zq0406/home/a/b/cBasic (redacted-path) Secret\"]"
+  },
+  {
+    "in": "[\\\"it's",
+    "out": "[\\\"it's"
+  },
+  {
+    "in": "password : ",
+    "out": "password :"
+  },
+  {
+    "in": "\nzq0407-phttps://u:p@example.test/x?token=y\":zq0408\\\".session_id\\",
+    "out": "zq0407-phttps://u:p@example.test/x?token=[redacted]"
+  },
+  {
+    "in": "!https://u:p@example.test/x?token=ytokenlabel[ https://u:p@example.test/x?token=yzq0409'",
+    "out": "!https://example.test/... https://example.test/...'"
+  },
+  {
+    "in": "\\\"\n, tokenszq0410zq0411zq0412%3Dzq0413: = ",
+    "out": "\\\"\n, tokenszq0410zq0411zq0412%3Dzq0413: ="
+  },
+  {
+    "in": "zq0414-----BEGIN PRIVATE KEY-----zq0415 = zq0416zq0417zq0418credentials\\credentials\\\"",
+    "out": "zq0414-----BEGIN PRIVATE KEY-----zq0415 = zq0416zq0417zq0418credentials\\credentials\\\""
+  },
+  {
+    "in": "Bearer x:\t[zq0419set-cookiepassword0",
+    "out": "Bearer x:\t[zq0419set-cookiepassword0"
+  },
+  {
+    "in": "zq0420: \\\\\\\"",
+    "out": "zq0420: \\\\\\\""
+  },
+  {
+    "in": "zq0421 = ,%3D",
+    "out": "zq0421 = ,%3D"
+  },
+  {
+    "in": "-----END PRIVATE KEY-----\\\\\\\"auth",
+    "out": "-----END PRIVATE KEY-----\\\\\\\"auth"
+  },
+  {
+    "in": "zq0422[zq0423 = 0",
+    "out": "zq0422[zq0423 = 0"
+  },
+  {
+    "in": "\n\\C:\\Users\\a\\b\\c.txt;it'szq0424}",
+    "out": "\\(redacted-path)"
+  },
+  {
+    "in": " -----BEGIN PRIVATE KEY-----Authorizationzq0425tokens,.!",
+    "out": "-----BEGIN PRIVATE KEY-----Authorizationzq0425tokens,.!"
+  },
+  {
+    "in": "zq0426xx:\tzq0427 credentials%3Dzq0428zq0429zq0430",
+    "out": "zq0426xx:\tzq0427 credentials%3Dzq0428zq0429zq0430"
+  },
+  {
+    "in": "zq0431\"Client Secret\" = \"",
+    "out": "zq0431\"Client Secret\" = \""
+  },
+  {
+    "in": "\\db.passwordzq0432-----BEGIN PRIVATE KEY-----api_keyzq0433-----BEGIN PRIVATE KEY-----zq0434zq0435\nzq0436session_id",
+    "out": "\\db.passwordzq0432-----BEGIN PRIVATE KEY-----api_keyzq0433-----BEGIN PRIVATE KEY-----zq0434zq0435\nzq0436session_id"
+  },
+  {
+    "in": "zq0437zq0438Bearer zq0439[authzq0440zq0441it's\u0026quot;",
+    "out": "zq0437zq0438Bearer zq0439[authzq0440zq0441it's\u0026quot;"
+  },
+  {
+    "in": "]\\\"labelsession_id/home/a/b/ccredentialszq0442]]",
+    "out": "]\\\"labelsession_id/home/a/b/ccredentialszq0442]]"
+  },
+  {
+    "in": "Authorization0{zq0443{it'sit'szq0444Bearer ",
+    "out": "Authorization0{zq0443{it'sit'szq0444Bearer"
+  },
+  {
+    "in": "xzq0445zq0446,",
+    "out": "xzq0445zq0446,"
+  },
+  {
+    "in": " zq0447-----END PRIVATE KEY-----0label ",
+    "out": "zq0447-----END PRIVATE KEY-----0label"
+  },
+  {
+    "in": "tokenlabel\\\\\"zq0448",
+    "out": "tokenlabel\\\\\"zq0448"
+  },
+  {
+    "in": " zq0449secretzq0450zq0451x",
+    "out": "zq0449secretzq0450zq0451x"
+  },
+  {
+    "in": "cookielabelzq0452zq0453Cookiezq0454auth'\\\"\\\\\"",
+    "out": "cookielabelzq0452zq0453Cookiezq0454auth'\\\"\\\\\""
+  },
+  {
+    "in": "label\"'zq0455zq0456AccountKey:",
+    "out": "label\"'zq0455zq0456AccountKey:"
+  },
+  {
+    "in": "]'it's\"=zq0457C:\\Users\\a\\b\\c.txt:tokenlabel",
+    "out": "]'it's\"=zq0457C:\\Users\\a\\b\\c.txt:tokenlabel"
+  },
+  {
+    "in": "\u0026zq0458:\t",
+    "out": "\u0026zq0458:"
+  },
+  {
+    "in": " = \"}zq0459:\t-----BEGIN PRIVATE KEY-----]Bearer ",
+    "out": "= \"}zq0459:\t-----BEGIN PRIVATE KEY-----]Bearer"
+  },
+  {
+    "in": "C:\\Users\\a\\b\\c.txt zq0460\nhttps://u:p@example.test/x?token=y}",
+    "out": "(redacted-path) zq0460\nhttps://example.test/...}"
+  },
+  {
+    "in": "zq0461password.zq0462passphrase]",
+    "out": "zq0461password.zq0462passphrase]"
+  },
+  {
+    "in": "0zq0463\\\\\\\"",
+    "out": "0zq0463\\\\\\\""
+  },
+  {
+    "in": "zq0464\u0026zq04650\nzq0466token0session_id",
+    "out": "zq0464\u0026zq04650\nzq0466token0session_id"
+  },
+  {
+    "in": "https://u:p@example.test/x?token=y \\'token",
+    "out": "https://example.test/... \\'token"
+  },
+  {
+    "in": "C:\\Users\\a\\b\\c.txtzq0467}zq0468label\"Client Secret\"",
+    "out": "(redacted-path) Secret\""
+  },
+  {
+    "in": "zq0469zq0470:\t;\"Client Secret\"",
+    "out": "zq0469zq0470:\t;\"Client Secret\""
+  },
+  {
+    "in": "zq0471\\\\\\\"\ncredentials--passwordzq0472zq0473zq0474'x\\\\\\\"zq0475",
+    "out": "zq0471\\\\\\\"\ncredentials--passwordzq0472zq0473zq0474'x\\\\\\\"zq0475"
+  },
+  {
+    "in": "zq0476\"Client Secret\"zq0477-----END PRIVATE KEY-----credentialstokenszq0478 ",
+    "out": "zq0476\"Client Secret\"zq0477-----END PRIVATE KEY-----credentialstokenszq0478"
+  },
+  {
+    "in": "zq0479:zq0480passphrasehttps://u:p@example.test/x?token=y,--password}=Cookie: ",
+    "out": "zq0479:zq0480passphrasehttps://u:p@example.test/x?token=[redacted]"
+  },
+  {
+    "in": "zq0481\"Client Secret\":--passwordzq0482zq04830zq0484Authorization\\\\\"zq0485",
+    "out": "zq0481\"Client Secret\":--passwordzq0482zq04830zq0484Authorization\\\\\"zq0485"
+  },
+  {
+    "in": "AccountKey=Bearer !it's\u0026zq0486Cookie=-----BEGIN PRIVATE KEY-----\u0026#39;",
+    "out": "AccountKey=Bearer !it's\u0026zq0486Cookie=-----BEGIN PRIVATE KEY-----\u0026#39;"
+  },
+  {
+    "in": " label\\\\\"tokenszq0487",
+    "out": "label\\\\\"tokenszq0487"
+  },
+  {
+    "in": "zq0488zq0489:;zq0490\u0026 it'szq0491",
+    "out": "zq0488zq0489:;zq0490\u0026 it'szq0491"
+  },
+  {
+    "in": "Bearer }zq0492Basic [:PGPASSWORD;",
+    "out": "Bearer }zq0492Basic [:PGPASSWORD;"
+  },
+  {
+    "in": "{ 0 /home/a/b/czq0493",
+    "out": "{ 0 (redacted-path)"
+  },
+  {
+    "in": "zq0494tokenapi_key zq0495=\u0026quot;\\\"zq0496zq0497zq0498",
+    "out": "zq0494tokenapi_key zq0495=\u0026quot;\\\"zq0496zq0497zq0498"
+  },
+  {
+    "in": "][C:\\Users\\a\\b\\c.txt\\\\\\\" zq0499x{ zq0500",
+    "out": "][(redacted-path)\\\\\\\" zq0499x{ zq0500"
+  },
+  {
+    "in": ",db.password\u0026quot;'.session_id",
+    "out": ",db.password\u0026quot;'.session_id"
+  },
+  {
+    "in": "passphrasezq0501zq0502!-pzq0503{zq0504zq0505",
+    "out": "passphrasezq0501zq0502!-pzq0503{zq0504zq0505"
+  },
+  {
+    "in": " zq0506passwordzq0507zq0508\\\": zq0509",
+    "out": "zq0506passwordzq0507zq0508\\\": zq0509"
+  },
+  {
+    "in": "0zq0510/home/a/b/c\u0026quot;-----END PRIVATE KEY-----https://u:p@example.test/x?token=y",
+    "out": "0zq0510/home/a/b/c\u0026quot;-----END PRIVATE KEY-----https://example.test/..."
+  },
+  {
+    "in": "label} auth:\t",
+    "out": "label} auth:"
+  },
+  {
+    "in": "zq0511Bearer zq0512zq0513 \u0026\"zq0514/home/a/b/cxzq0515",
+    "out": "zq0511Bearer zq0512zq0513 \u0026\"zq0514/home/a/b/cxzq0515"
+  },
+  {
+    "in": "zq0516 zq0517passphrasezq0518zq0519\u0026\"Client Secret\"/home/a/b/cpasswordauth",
+    "out": "zq0516 zq0517passphrasezq0518zq0519\u0026\"Client Secret\"/home/a/b/cpasswordauth"
+  },
+  {
+    "in": "\nsession_id,PGPASSWORDzq0520] \\\": = zq0521",
+    "out": "session_id,PGPASSWORDzq0520] \\\": = zq0521"
+  },
+  {
+    "in": " labelzq0522PGPASSWORDzq0523.zq0524AccountKeyzq0525",
+    "out": "labelzq0522PGPASSWORDzq0523.zq0524AccountKeyzq0525"
+  },
+  {
+    "in": "-pzq0526}zq0527zq0528=zq0529,",
+    "out": "-pzq0526}zq0527zq0528=zq0529,"
+  },
+  {
+    "in": "zq0530!credentials\\\"{zq0531\"Client Secret\"zq0532-----END PRIVATE KEY-----Basic C:\\Users\\a\\b\\c.txt",
+    "out": "zq0530!credentials\\\"{zq0531\"Client Secret\"zq0532-----END PRIVATE KEY-----Basic (redacted-path)"
+  },
+  {
+    "in": "zq0533 = AccountKey];-p]zq0534PGPASSWORDzq0535Authorization}",
+    "out": "zq0533 = AccountKey];-p]zq0534PGPASSWORDzq0535Authorization}"
+  },
+  {
+    "in": "\"zq0536\u0026zq0537Authorization[zq0538Bearer \u0026zq0539:zq0540",
+    "out": "\"zq0536\u0026zq0537Authorization[zq0538Bearer \u0026zq0539:zq0540"
+  },
+  {
+    "in": "set-cookie[-----BEGIN PRIVATE KEY-----%3D",
+    "out": "set-cookie[-----BEGIN PRIVATE KEY-----%3D"
+  },
+  {
+    "in": "PGPASSWORDdb.passwordzq0541zq0542-----BEGIN PRIVATE KEY----- ",
+    "out": "PGPASSWORDdb.passwordzq0541zq0542-----BEGIN PRIVATE KEY-----"
+  },
+  {
+    "in": "!{,api_key{",
+    "out": "!{,api_key{"
+  },
+  {
+    "in": ":authzq0543-----BEGIN PRIVATE KEY-----",
+    "out": ":authzq0543-----BEGIN PRIVATE KEY-----"
+  },
+  {
+    "in": "zq0544zq0545\\\"passphrase = PGPASSWORD\\\\\\\"-pzq0546\u0026quot;zq0547\\\"",
+    "out": "zq0544zq0545\\\"passphrase = PGPASSWORD\\\\\\\"-pzq0546\u0026quot;zq0547\\\""
+  },
+  {
+    "in": "it'szq0548 = \"Client Secret\"zq0549 ",
+    "out": "it'szq0548 = \"Client Secret\"zq0549"
+  },
+  {
+    "in": " --password;zq0550",
+    "out": "--password;zq0550"
+  },
+  {
+    "in": "tokenszq0551PGPASSWORDzq0552PGPASSWORD",
+    "out": "tokenszq0551PGPASSWORDzq0552PGPASSWORD"
+  },
+  {
+    "in": " = zq0553zq0554 AccountKeyset-cookie secret\\\\\\\"",
+    "out": "= zq0553zq0554 AccountKeyset-cookie secret\\\\\\\""
+  },
+  {
+    "in": "-p[/home/a/b/czq0555Authorization={zq0556it's;zq0557;",
+    "out": "-p[/home/a/b/czq0555Authorization={zq0556it's;zq0557;"
+  },
+  {
+    "in": "Basic session_idtoken0zq0558session_idzq0559\u0026#39;-p\ncookie",
+    "out": "Basic session_idtoken0zq0558session_idzq0559\u0026#39;-p\ncookie"
+  },
+  {
+    "in": ":api_keyset-cookie!-ptokenszq0560 .zq0561\n\\\"",
+    "out": ":api_keyset-cookie!-ptokenszq0560 .zq0561\n\\\""
+  },
+  {
+    "in": "\n \\\\\"zq0562secretset-cookiezq0563-----END PRIVATE KEY-----zq0564Authorizationcookiezq0565",
+    "out": "\\\\\"zq0562secretset-cookiezq0563-----END PRIVATE KEY-----zq0564Authorizationcookiezq0565"
+  },
+  {
+    "in": "it'scookiezq0566zq0567",
+    "out": "it'scookiezq0566zq0567"
+  },
+  {
+    "in": "zq0568Basic secretzq0569db.passwordC:\\Users\\a\\b\\c.txtzq0570zq0571set-cookie]zq0572passphrase",
+    "out": "zq0568Basic secretzq0569db.passwordC:[redacted]"
+  },
+  {
+    "in": ";Basic api_keyzq0573password = ",
+    "out": ";Basic api_keyzq0573password ="
+  },
+  {
+    "in": "zq0574\"Client Secret\"\u0026C:\\Users\\a\\b\\c.txtzq0575zq0576:\t",
+    "out": "zq0574\"Client Secret\"\u0026(redacted-path)"
+  },
+  {
+    "in": "secretpassword\u0026#39;\ntokenAccountKey",
+    "out": "secretpassword\u0026#39;\ntokenAccountKey"
+  },
+  {
+    "in": "zq0577https://u:p@example.test/x?token=yzq0578authlabelzq0579zq0580it's",
+    "out": "zq0577https://u:p@example.test/x?token=[redacted]"
+  },
+  {
+    "in": "zq0581\\\u0026quot;Cookiex\\\\\"0: -----BEGIN PRIVATE KEY-----tokens\\\"\\\\\"",
+    "out": "zq0581\\\u0026quot;Cookiex\\\\\"0: -----BEGIN PRIVATE KEY-----tokens\\\"\\\\\""
+  },
+  {
+    "in": "tokens\u0026#39;it'sset-cookie",
+    "out": "tokens\u0026#39;it'sset-cookie"
+  },
+  {
+    "in": "zq0582AccountKey}:\tzq0583zq0584\u0026quot;",
+    "out": "zq0582AccountKey}:\tzq0583zq0584\u0026quot;"
+  },
+  {
+    "in": "--password:Bearer zq0585\\,zq0586Bearer -----BEGIN PRIVATE KEY-----set-cookie",
+    "out": "--password:[redacted] zq0585\\,zq0586Bearer -----BEGIN PRIVATE KEY-----set-cookie"
+  },
+  {
+    "in": "=%3D--passwordtokenzq0587\\\\\\\"",
+    "out": "=%3D--passwordtokenzq0587\\\\\\\""
+  },
+  {
+    "in": " zq0588Basic passwordtoken",
+    "out": "zq0588Basic passwordtoken"
+  },
+  {
+    "in": "secret\u0026Cookiezq0589\nzq0590",
+    "out": "secret\u0026Cookiezq0589\nzq0590"
+  },
+  {
+    "in": "\u0026#39;..zq0591\nsecretPGPASSWORD zq0592passphrase\\\\\"",
+    "out": "\u0026#39;..zq0591\nsecretPGPASSWORD zq0592passphrase\\\\\""
+  },
+  {
+    "in": "credentialsBasic zq0593zq0594,api_key[",
+    "out": "credentialsBasic zq0593zq0594,api_key["
+  },
+  {
+    "in": "zq0595zq0596 ",
+    "out": "zq0595zq0596"
+  },
+  {
+    "in": " !\u0026quot;zq0597\\\" = =",
+    "out": "!\u0026quot;zq0597\\\" = ="
+  },
+  {
+    "in": "%3Dzq0598-p--password",
+    "out": "%3Dzq0598-p--password"
+  },
+  {
+    "in": "zq0599zq0600zq0601]: PGPASSWORD",
+    "out": "zq0599zq0600zq0601]: PGPASSWORD"
+  },
+  {
+    "in": "\n\\\\\":\tzq0602https://u:p@example.test/x?token=ypassphrase",
+    "out": "\\\\\":\tzq0602https://u:p@example.test/x?token=[redacted]"
+  },
+  {
+    "in": "zq0603cookiezq0604-----BEGIN PRIVATE KEY-----zq0605/home/a/b/czq0606",
+    "out": "zq0603cookiezq0604-----BEGIN PRIVATE KEY-----zq0605/home/a/b/czq0606"
+  },
+  {
+    "in": "zq0607: \\\\\\\"cookiezq0608zq0609C:\\Users\\a\\b\\c.txt\"Client Secret\"token",
+    "out": "zq0607: \\\\\\\"cookiezq0608zq0609C:\\Users\\a\\b\\c.txt\"Client Secret\"token"
+  },
+  {
+    "in": "--passwordtokenPGPASSWORD[--passwordAccountKeyauthPGPASSWORD -----END PRIVATE KEY-----",
+    "out": "--passwordtokenPGPASSWORD[--passwordAccountKeyauthPGPASSWORD -----END PRIVATE KEY-----"
+  },
+  {
+    "in": "db.password.\\\\\\\"AccountKey\"Client Secret\"zq0610!zq0611 = zq0612zq0613",
+    "out": "db.password.\\\\\\\"AccountKey\"Client Secret\"zq0610!zq0611 = zq0612zq0613"
+  },
+  {
+    "in": ": -----END PRIVATE KEY-----\\\"zq0614it's ]zq0615zq0616api_keyzq0617",
+    "out": ": -----END PRIVATE KEY-----\\\"zq0614it's ]zq0615zq0616api_keyzq0617"
+  },
+  {
+    "in": "AccountKeyit'szq0618api_key",
+    "out": "AccountKeyit'szq0618api_key"
+  },
+  {
+    "in": "C:\\Users\\a\\b\\c.txtlabelpassphrase,\\",
+    "out": "(redacted-path)\\"
+  },
+  {
+    "in": "zq0619db.passwordzq0620 = ",
+    "out": "zq0619db.passwordzq0620 ="
+  },
+  {
+    "in": "zq0621AccountKeyBasic zq0622zq0623session_id = ",
+    "out": "zq0621AccountKeyBasic zq0622zq0623session_id ="
+  },
+  {
+    "in": "zq0624\"Client Secret\": 'AccountKeycredentialszq0625password : ",
+    "out": "zq0624\"Client Secret\": 'AccountKeycredentialszq0625password :"
+  },
+  {
+    "in": "zq0626,;\\cookieset-cookieAuthorization%3D}",
+    "out": "zq0626,;\\cookieset-cookieAuthorization%3D}"
+  },
+  {
+    "in": "-----BEGIN PRIVATE KEY-----passphrase\\\\\\\"",
+    "out": "-----BEGIN PRIVATE KEY-----passphrase\\\\\\\""
+  },
+  {
+    "in": "api_keyzq0627-p\\\"zq0628",
+    "out": "api_keyzq0627-p\\\"zq0628"
+  },
+  {
+    "in": "zq0629\\\"--passwordzq0630",
+    "out": "zq0629\\\"--passwordzq0630"
+  },
+  {
+    "in": "Bearer credentialszq0631AccountKey",
+    "out": "Bearer [redacted]"
+  },
+  {
+    "in": "zq0632\u0026#39;!}/home/a/b/cAuthorizationsecret",
+    "out": "zq0632\u0026#39;!}/home/a/b/cAuthorizationsecret"
+  },
+  {
+    "in": "\u0026quot;\u0026quot;-p: --password=Cookie",
+    "out": "\u0026quot;\u0026quot;-p: --password=[redacted]"
+  },
+  {
+    "in": "credentialssession_id0Basic zq0633zq0634token\u0026cookie",
+    "out": "credentialssession_id0Basic zq0633zq0634token\u0026cookie"
+  },
+  {
+    "in": "\u0026quot;C:\\Users\\a\\b\\c.txt--passwordit's--password\"",
+    "out": "\u0026quot;(redacted-path)"
+  },
+  {
+    "in": "PGPASSWORDzq0635xCookiepassphrasezq0636-----BEGIN PRIVATE KEY-----passphrase\"",
+    "out": "PGPASSWORDzq0635xCookiepassphrasezq0636-----BEGIN PRIVATE KEY-----passphrase\""
+  },
+  {
+    "in": "zq0637]%3Dzq0638zq0639zq0640",
+    "out": "zq0637]%3Dzq0638zq0639zq0640"
+  },
+  {
+    "in": "-----BEGIN PRIVATE KEY-----zq0641zq0642",
+    "out": "-----BEGIN PRIVATE KEY-----zq0641zq0642"
+  },
+  {
+    "in": " \\\\\\\"{",
+    "out": "\\\\\\\"{"
+  },
+  {
+    "in": "zq0643zq0644:\tcredentials%3Dzq0645[zq0646cookie: ",
+    "out": "zq0643zq0644:\tcredentials%3Dzq0645[zq0646cookie:"
+  },
+  {
+    "in": ": \ntokenshttps://u:p@example.test/x?token=y/home/a/b/czq0647zq0648\u0026quot;",
+    "out": ": \ntokenshttps://u:p@example.test/x?token=[redacted]\u0026quot;"
+  },
+  {
+    "in": "-----END PRIVATE KEY-----cookie%3D\\\\\\\"=api_keypassphrasehttps://u:p@example.test/x?token=y ",
+    "out": "-----END PRIVATE KEY-----cookie%3D\\\\\\\"=api_keypassphrasehttps://u:p@example.test/x?token=[redacted]"
+  },
+  {
+    "in": "zq0649/home/a/b/czq0650passwordzq0651",
+    "out": "zq0649/home/a/b/czq0650passwordzq0651"
+  },
+  {
+    "in": "zq0652\\/home/a/b/c",
+    "out": "zq0652\\/home/a/b/c"
+  },
+  {
+    "in": "passphrase--passwordhttps://u:p@example.test/x?token=y%3Dsession_idzq0653\\\\\\\"",
+    "out": "passphrase--passwordhttps://u:p@example.test/x?token=[redacted]"
+  },
+  {
+    "in": "token/home/a/b/c%3DBearer \u0026quot;zq0654zq06550api_key",
+    "out": "token/home/a/b/c%3DBearer \u0026quot;zq0654zq06550api_key"
+  },
+  {
+    "in": "passphrase]--passwordBasic ,",
+    "out": "passphrase]--passwordBasic ,"
+  },
+  {
+    "in": "\u0026#39;\nBasic zq0656zq0657,zq06580 = : zq0659",
+    "out": "\u0026#39;\nBasic zq0656zq0657,zq06580 = : zq0659"
+  },
+  {
+    "in": "Basic zq0660=-psecretBasic zq0661",
+    "out": "Basic zq0660=-psecretBasic zq0661"
+  },
+  {
+    "in": "]\"db.password0:\tzq0662zq0663-----BEGIN PRIVATE KEY-----\u0026zq0664zq0665passphrase",
+    "out": "]\"db.password0:\t[redacted] PRIVATE KEY-----\u0026zq0664zq0665passphrase"
+  },
+  {
+    "in": "Bearer zq0666credentials: zq0667",
+    "out": "Bearer [redacted]: zq0667"
+  },
+  {
+    "in": "credentialsdb.passwordBearer xit's'[' \n\\\\\"",
+    "out": "credentialsdb.passwordBearer xit's'[' \n\\\\\""
+  },
+  {
+    "in": "label-----END PRIVATE KEY-----zq0668",
+    "out": "label-----END PRIVATE KEY-----zq0668"
+  },
+  {
+    "in": "zq0669zq0670zq0671zq0672zq0673 ;\nzq0674secret",
+    "out": "zq0669zq0670zq0671zq0672zq0673 ;\nzq0674secret"
+  },
+  {
+    "in": "0\"-----BEGIN PRIVATE KEY-----: passphraseC:\\Users\\a\\b\\c.txt",
+    "out": "0\"-----BEGIN PRIVATE KEY-----: passphraseC:\\Users\\a\\b\\c.txt"
+  },
+  {
+    "in": ",Cookie0set-cookiezq0675token\\\\\\\"AccountKey",
+    "out": ",Cookie0set-cookiezq0675token\\\\\\\"AccountKey"
+  },
+  {
+    "in": "[session_id0;",
+    "out": "[session_id0;"
+  },
+  {
+    "in": ":\t}zq0676tokens \"zq0677--password{zq0678AccountKey",
+    "out": ":\t}zq0676tokens \"zq0677--password{zq0678AccountKey"
+  },
+  {
+    "in": "session_idBasic ;passphrasetoken\u0026Bearer \"db.passwordzq0679",
+    "out": "session_idBasic ;passphrasetoken\u0026Bearer \"db.passwordzq0679"
+  },
+  {
+    "in": "[]zq0680PGPASSWORD\n = /home/a/b/cAccountKey\\\\\"",
+    "out": "[]zq0680PGPASSWORD\n = [redacted]"
+  },
+  {
+    "in": " {]",
+    "out": "{]"
+  },
+  {
+    "in": "credentialszq0681zq0682{C:\\Users\\a\\b\\c.txt}:",
+    "out": "credentialszq0681zq0682{(redacted-path)"
+  },
+  {
+    "in": "zq0683zq0684tokenzq0685x\u0026quot;zq0686-----BEGIN PRIVATE KEY-----]",
+    "out": "zq0683zq0684tokenzq0685x\u0026quot;zq0686-----BEGIN PRIVATE KEY-----]"
+  },
+  {
+    "in": "\"Client Secret\": -p.\u0026\u0026#39;it'szq0687",
+    "out": "\"Client Secret\": -p.\u0026\u0026#39;it'szq0687"
+  },
+  {
+    "in": ":passphrasezq0688.zq0689api_keycredentials-----END PRIVATE KEY-----\u0026quot;",
+    "out": ":passphrasezq0688.zq0689api_keycredentials-----END PRIVATE KEY-----\u0026quot;"
+  },
+  {
+    "in": "label%3Dx [--password%3D%3Dzq0690",
+    "out": "label%3Dx [--password%3D%3Dzq0690"
+  },
+  {
+    "in": "Bearer \\\"!zq0691",
+    "out": "Bearer \\\"!zq0691"
+  },
+  {
+    "in": "--passwordzq0692zq0693zq0694tokenzq0695\"]db.passwordzq0696=",
+    "out": "--passwordzq0692zq0693zq0694tokenzq0695\"]db.passwordzq0696="
+  },
+  {
+    "in": "Authorization\u0026quot;[\\\\\"zq0697zq0698. :\t,zq0699",
+    "out": "Authorization\u0026quot;[\\\\\"zq0697zq0698. :\t,zq0699"
+  },
+  {
+    "in": "zq0700\\\\\"zq0701 = :\t\\zq0702secretzq0703zq0704 !",
+    "out": "zq0700\\\\\"zq0701 = :\t\\zq0702secretzq0703zq0704 !"
+  },
+  {
+    "in": " = \u0026#39;Bearer  zq0705=Authorization:",
+    "out": "= \u0026#39;Bearer [redacted]:"
+  },
+  {
+    "in": "zq0706[,zq0707db.passwordzq0708token\u0026#39;",
+    "out": "zq0706[,zq0707db.passwordzq0708token\u0026#39;"
+  },
+  {
+    "in": "=\\zq0709'secret: ",
+    "out": "=\\zq0709'secret:"
+  },
+  {
+    "in": "\u0026quot;;zq0710db.passwordapi_keysecrettokens\u0026zq0711zq0712",
+    "out": "\u0026quot;;zq0710db.passwordapi_keysecrettokens\u0026zq0711zq0712"
+  },
+  {
+    "in": "zq0713zq0714Cookiecookiehttps://u:p@example.test/x?token=yzq0715\n\".password.zq0716",
+    "out": "zq0713zq0714Cookiecookiehttps://u:p@example.test/x?token=[redacted]\n\".password.zq0716"
+  },
+  {
+    "in": "!AccountKeyzq0717",
+    "out": "!AccountKeyzq0717"
+  },
+  {
+    "in": "zq0718cookie--password-pzq0719\\\\\".zq0720",
+    "out": "zq0718cookie--password-pzq0719\\\\\".zq0720"
+  },
+  {
+    "in": "\"Basic \n-p[zq0721zq0722zq0723C:\\Users\\a\\b\\c.txt{zq0724https://u:p@example.test/x?token=y",
+    "out": "\"Basic \n-p[zq0721zq0722zq0723C:\\Users\\a\\b\\c.txt{zq0724https://u:p@example.test/x?token=[redacted]"
+  },
+  {
+    "in": "Basic Authorization-----BEGIN PRIVATE KEY----- --passwordzq0725[zq0726%3Dzq0727 zq0728",
+    "out": "Basic Authorization-----BEGIN PRIVATE KEY----- --passwordzq0725[zq0726%3Dzq0727 zq0728"
+  },
+  {
+    "in": " zq0729::\t:\t",
+    "out": "zq0729::\t:"
+  },
+  {
+    "in": "zq0730=token\u0026#39;token ",
+    "out": "zq0730=token\u0026#39;token"
+  },
+  {
+    "in": "https://u:p@example.test/x?token=ysession_id--password.label:\ttokens]\u0026#39;zq0731Bearer https://u:p@example.test/x?token=y",
+    "out": "https://example.test/...:\ttokens]\u0026#39;zq0731Bearer https://example.test/..."
+  },
+  {
+    "in": "{credentials=zq0732\u0026quot;",
+    "out": "{credentials=[redacted]\u0026quot;"
+  },
+  {
+    "in": ";\u0026#39;}api_keyAccountKeyzq0733 !session_id",
+    "out": ";\u0026#39;}api_keyAccountKeyzq0733 !session_id"
+  },
+  {
+    "in": ": cookieapi_key\\\"AccountKey: --password.!\u0026#39;passwordcredentials",
+    "out": ": cookieapi_key\\\"AccountKey: --password.!\u0026#39;passwordcredentials"
+  },
+  {
+    "in": "-----BEGIN PRIVATE KEY----- zq0734zq0735",
+    "out": "-----BEGIN PRIVATE KEY----- zq0734zq0735"
+  },
+  {
+    "in": "zq0736\u0026quot;: https://u:p@example.test/x?token=yzq0737/home/a/b/c\u0026#39;'zq0738",
+    "out": "zq0736\u0026quot;: https://example.test/...;'zq0738"
+  },
+  {
+    "in": "zq0739cookiesecretzq0740passwordzq0741:\tzq0742AccountKey\"",
+    "out": "zq0739cookiesecretzq0740passwordzq0741:\tzq0742AccountKey\""
+  },
+  {
+    "in": "tokens\\\\\\\"set-cookiePGPASSWORDzq0743zq0744--passwordPGPASSWORD\u0026\\\"",
+    "out": "tokens\\\\\\\"set-cookiePGPASSWORDzq0743zq0744--passwordPGPASSWORD\u0026\\\""
+  },
+  {
+    "in": "zq0745: api_keyapi_key",
+    "out": "zq0745: api_keyapi_key"
+  },
+  {
+    "in": "AccountKeyzq0746: 'token",
+    "out": "AccountKeyzq0746: 'token"
+  },
+  {
+    "in": ", zq0747it'szq0748\\PGPASSWORD}token",
+    "out": ", zq0747it'szq0748\\PGPASSWORD}token"
+  },
+  {
+    "in": "passphrasezq0749;--passwordC:\\Users\\a\\b\\c.txttokens',zq0750zq0751",
+    "out": "passphrasezq0749;--passwordC:[redacted]"
+  },
+  {
+    "in": "token/home/a/b/cBasic Bearer ;cookie \u0026#39;0,C:\\Users\\a\\b\\c.txt\\\\\\\"",
+    "out": "token/home/a/b/cBasic Bearer ;cookie \u0026#39;0,(redacted-path)\\\\\\\""
+  },
+  {
+    "in": " = zq0752api_key]}-----BEGIN PRIVATE KEY-----zq0753\" = \u0026#39;",
+    "out": "= zq0752api_key]}-----BEGIN PRIVATE KEY-----zq0753\" = \u0026#39;"
+  },
+  {
+    "in": "-----END PRIVATE KEY-----zq0754:\tzq0755\u0026",
+    "out": "-----END PRIVATE KEY-----zq0754:\tzq0755\u0026"
+  },
+  {
+    "in": "\u0026tokensAccountKeyapi_key: password./home/a/b/c\\ credentialsset-cookie",
+    "out": "\u0026tokensAccountKeyapi_key: [redacted]"
+  },
+  {
+    "in": "\\\"zq0756tokenslabelzq0757it's[zq0758",
+    "out": "\\\"zq0756tokenslabelzq0757it's[zq0758"
+  },
+  {
+    "in": "https://u:p@example.test/x?token=y[Cookie = ",
+    "out": "https://example.test/... ="
+  },
+  {
+    "in": "!,Basic \u0026it's\\\\\\\"\u0026#39;: \n\u0026quot;\"label",
+    "out": "!,Basic \u0026it's\\\\\\\"\u0026#39;: \n\u0026quot;\"label"
+  },
+  {
+    "in": "-pzq0759\u0026quot;db.passwordCookie\u0026",
+    "out": "-pzq0759\u0026quot;db.passwordCookie\u0026"
+  },
+  {
+    "in": "cookie\\\" ,zq0760Authorizationzq0761tokenstoken",
+    "out": "cookie\\\" ,zq0760Authorizationzq0761tokenstoken"
+  },
+  {
+    "in": "zq0762 AccountKeyzq0763",
+    "out": "zq0762 AccountKeyzq0763"
+  },
+  {
+    "in": "zq0764}:",
+    "out": "zq0764}:"
+  },
+  {
+    "in": "]}label:\ttoken = https://u:p@example.test/x?token=yzq0765zq0766",
+    "out": "]}label:\ttoken = [redacted]"
+  },
+  {
+    "in": ": token' set-cookie",
+    "out": ": token' set-cookie"
+  },
+  {
+    "in": "\\\"tokenzq0767",
+    "out": "\\\"tokenzq0767"
+  },
+  {
+    "in": "/home/a/b/c{\\",
+    "out": "(redacted-path)"
+  },
+  {
+    "in": "set-cookie:\t-pzq0768token[zq0769label",
+    "out": "set-cookie:\t-pzq0768token[zq0769label"
+  },
+  {
+    "in": "/home/a/b/czq0770zq0771\\%3D\\\\\\\"Cookiezq0772",
+    "out": "(redacted-path)"
+  },
+  {
+    "in": "zq0773set-cookie0auth[;\"",
+    "out": "zq0773set-cookie0auth[;\""
+  },
+  {
+    "in": " \\\"=xcookieset-cookie\\\u0026quot;zq0774",
+    "out": "\\\"=xcookieset-cookie\\\u0026quot;zq0774"
+  },
+  {
+    "in": ": zq0775\u0026quot;",
+    "out": ": zq0775\u0026quot;"
+  },
+  {
+    "in": "{/home/a/b/ctokencookiesecret",
+    "out": "{/home/a/b/ctokencookiesecret"
+  },
+  {
+    "in": ";zq0776PGPASSWORD\"Client Secret\"0/home/a/b/ccredentials=--password",
+    "out": ";zq0776PGPASSWORD\"Client Secret\"0/home/a/b/ccredentials=[redacted]"
+  },
+  {
+    "in": "passphrase,Authorization=authzq0777}: AccountKeyzq0778Bearer ",
+    "out": "passphrase,Authorization=authzq0777}: AccountKeyzq0778Bearer"
+  },
+  {
+    "in": "--passwordzq0779zq0780zq0781;it'sdb.passwordhttps://u:p@example.test/x?token=y",
+    "out": "--passwordzq0779zq0780zq0781;it'sdb.passwordhttps://u:p@example.test/x?token=[redacted]"
+  },
+  {
+    "in": "\u0026{passphrase x{zq0782zq0783session_id",
+    "out": "\u0026{passphrase x{zq0782zq0783session_id"
+  },
+  {
+    "in": "zq0784set-cookie;",
+    "out": "zq0784set-cookie;"
+  },
+  {
+    "in": "passwordpassphraseit'szq0785passphraselabel0zq0786zq0787",
+    "out": "passwordpassphraseit'szq0785passphraselabel0zq0786zq0787"
+  },
+  {
+    "in": "{! = \\\\\" =   = zq0788\\:\tzq0789",
+    "out": "{! = \\\\\" =   = zq0788\\:\tzq0789"
+  },
+  {
+    "in": "',[zq0790-----BEGIN PRIVATE KEY-----",
+    "out": "',[zq0790-----BEGIN PRIVATE KEY-----"
+  },
+  {
+    "in": "[C:\\Users\\a\\b\\c.txt-----BEGIN PRIVATE KEY-----\\\\\\\"-----BEGIN PRIVATE KEY-----\"Client Secret\"zq0791,",
+    "out": "[(redacted-path) PRIVATE KEY-----\\\\\\\"-----BEGIN PRIVATE KEY-----\"Client Secret\"zq0791,"
+  },
+  {
+    "in": "zq0792zq0793{zq0794-----BEGIN PRIVATE KEY-----zq0795x-pzq0796\\",
+    "out": "zq0792zq0793{zq0794-----BEGIN PRIVATE KEY-----zq0795x-pzq0796\\"
+  },
+  {
+    "in": "!\\zq0797{secret--passwordzq0798\\\\\\\\\"0zq0799\\\\\"",
+    "out": "!\\zq0797{secret--passwordzq0798\\\\\\\\\"0zq0799\\\\\""
+  },
+  {
+    "in": "set-cookie0zq0800\\\"zq0801zq0802",
+    "out": "set-cookie0zq0800\\\"zq0801zq0802"
+  },
+  {
+    "in": "secret\npassword}https://u:p@example.test/x?token=yzq0803zq0804xzq0805 ",
+    "out": "secret\npassword}https://example.test/..."
+  },
+  {
+    "in": "Basic credentials ",
+    "out": "Basic credentials"
+  },
+  {
+    "in": "-----BEGIN PRIVATE KEY-----\\\\\": zq0806zq0807tokens = ",
+    "out": "-----BEGIN PRIVATE KEY-----\\\\\": zq0806zq0807tokens ="
+  },
+  {
+    "in": "zq0808\u0026passphrasezq0809",
+    "out": "zq0808\u0026passphrasezq0809"
+  },
+  {
+    "in": "AccountKeytokenzq0810Bearer label",
+    "out": "AccountKeytokenzq0810Bearer label"
+  },
+  {
+    "in": "'};]secretzq0811zq0812]\" '",
+    "out": "'};]secretzq0811zq0812]\" '"
+  },
+  {
+    "in": "Basic  }\n",
+    "out": "Basic  }"
+  },
+  {
+    "in": "label\u0026#39;zq0813it's%3D;,PGPASSWORDzq0814[{\u0026#39;",
+    "out": "label\u0026#39;zq0813it's%3D;,PGPASSWORDzq0814[{\u0026#39;"
+  },
+  {
+    "in": ".xzq0815C:\\Users\\a\\b\\c.txt = {: ",
+    "out": ".xzq0815C:\\Users\\a\\b\\c.txt = {:"
+  },
+  {
+    "in": "https://u:p@example.test/x?token=ypassword\\\\\\\"labelzq0816%3D,-----END PRIVATE KEY-----passphrasezq0817",
+    "out": "https://example.test/...\"labelzq0816%3D,-----END PRIVATE KEY-----passphrasezq0817"
+  },
+  {
+    "in": "Bearer label\u0026#39;\\\"\\\"\n--password\nx\\\\\\\"0",
+    "out": "Bearer label\u0026#39;\\\"\\\"\n--password\nx\\\\\\\"0"
+  },
+  {
+    "in": "https://u:p@example.test/x?token=yzq0818zq0819zq0820--passwordBearer set-cookie-----BEGIN PRIVATE KEY-----zq0821\\\\\" = PGPASSWORD",
+    "out": "https://example.test/... set-cookie-----BEGIN PRIVATE KEY-----zq0821\\\\\" = PGPASSWORD"
+  },
+  {
+    "in": "https://u:p@example.test/x?token=y/home/a/b/c\nBasic Bearer ",
+    "out": "https://example.test/...\nBasic Bearer"
+  },
+  {
+    "in": "zq0822\n!!:\t\\\"labellabelzq0823",
+    "out": "zq0822\n!!:\t\\\"labellabelzq0823"
+  },
+  {
+    "in": "zq0824cookieAuthorization}!password; AccountKey: {zq0825",
+    "out": "zq0824cookieAuthorization}!password; AccountKey: {zq0825"
+  },
+  {
+    "in": "cookie:\\\\\"zq0826authzq0827\\\"-pzq0828",
+    "out": "cookie:\\\\\"zq0826authzq0827\\\"-pzq0828"
+  },
+  {
+    "in": "tokens-----BEGIN PRIVATE KEY-----zq0829=!zq0830zq0831",
+    "out": "tokens-----BEGIN PRIVATE KEY-----zq0829=!zq0830zq0831"
+  },
+  {
+    "in": ".].=",
+    "out": ".].="
+  },
+  {
+    "in": "it's{zq0832PGPASSWORDC:\\Users\\a\\b\\c.txtzq0833\"",
+    "out": "it's{zq0832PGPASSWORDC:\\Users\\a\\b\\c.txtzq0833\""
+  },
+  {
+    "in": " .:=--password\u0026zq0834\u0026quot;'labelauth",
+    "out": ".:=--password\u0026zq0834\u0026quot;'labelauth"
+  },
+  {
+    "in": "--passwordcookiezq0835xxzq0836https://u:p@example.test/x?token=ycredentialspassword!\\\\\"password",
+    "out": "--passwordcookiezq0835xxzq0836https://u:p@example.test/x?token=[redacted]"
+  },
+  {
+    "in": "zq0837[tokens--passwordauth",
+    "out": "zq0837[tokens--passwordauth"
+  },
+  {
+    "in": "[token\n",
+    "out": "[token"
+  },
+  {
+    "in": ";=zq0838zq0839\\\\\"\\\"'[zq0840api_key",
+    "out": ";=zq0838zq0839\\\\\"\\\"'[zq0840api_key"
+  },
+  {
+    "in": "[passphraseBasic cookie\u0026#39; -----BEGIN PRIVATE KEY----- session_id",
+    "out": "[passphraseBasic cookie\u0026#39; -----BEGIN PRIVATE KEY----- session_id"
+  },
+  {
+    "in": " \u0026=",
+    "out": "\u0026="
+  },
+  {
+    "in": "\u0026quot;zq0841passphrasexzq0842-----BEGIN PRIVATE KEY-----AccountKey\u0026quot;",
+    "out": "\u0026quot;zq0841passphrasexzq0842-----BEGIN PRIVATE KEY-----AccountKey\u0026quot;"
+  },
+  {
+    "in": "[Bearer \"api_key",
+    "out": "[Bearer \"api_key"
+  },
+  {
+    "in": "zq0843labelsecretzq0844zq0845%3DPGPASSWORD = ",
+    "out": "zq0843labelsecretzq0844zq0845%3DPGPASSWORD ="
+  },
+  {
+    "in": " zq08460zq0847 zq0848secret;passwordtoken",
+    "out": "zq08460zq0847 zq0848secret;passwordtoken"
+  },
+  {
+    "in": ".zq0849\\\"https://u:p@example.test/x?token=yzq0850-----END PRIVATE KEY-----;session_idhttps://u:p@example.test/x?token=y'",
+    "out": ".zq0849\\\"https://example.test/... PRIVATE KEY-----;session_idhttps://u:p@example.test/x?token=[redacted]"
+  },
+  {
+    "in": "passwordzq0851labelzq0852  : zq0853'",
+    "out": "passwordzq0851labelzq0852  : zq0853'"
+  },
+  {
+    "in": ": Authorization-pcookieAuthorizationC:\\Users\\a\\b\\c.txtsession_id",
+    "out": ": Authorization-pcookieAuthorizationC:\\Users\\a\\b\\c.txtsession_id"
+  },
+  {
+    "in": "zq0854%3D]",
+    "out": "zq0854%3D]"
+  },
+  {
+    "in": "--password\"Client Secret\"zq0855",
+    "out": "--password\"Client Secret\"zq0855"
+  },
+  {
+    "in": "xlabelzq0856zq0857 zq0858zq0859\n",
+    "out": "xlabelzq0856zq0857 zq0858zq0859"
+  },
+  {
+    "in": "%3D\\\\\"zq0860api_key.set-cookie",
+    "out": "%3D\\\\\"zq0860api_key.set-cookie"
+  },
+  {
+    "in": "}Cookiezq0861\u0026quot;",
+    "out": "}Cookiezq0861\u0026quot;"
+  },
+  {
+    "in": "db.password-----END PRIVATE KEY-----zq0862zq0863set-cookie'{-----END PRIVATE KEY-----,\\\\\"\u0026'",
+    "out": "db.password-----END PRIVATE KEY-----zq0862zq0863set-cookie'{-----END PRIVATE KEY-----,\\\\\"\u0026'"
+  },
+  {
+    "in": "db.password%3Dzq0864token",
+    "out": "db.password%3Dzq0864token"
+  },
+  {
+    "in": "zq0865Authorization[\\\\\\\"",
+    "out": "zq0865Authorization[\\\\\\\""
+  },
+  {
+    "in": "--password{ ",
+    "out": "--password{"
+  },
+  {
+    "in": "Authorization label--passwordzq0866",
+    "out": "Authorization label--passwordzq0866"
+  },
+  {
+    "in": "-pBearer AccountKey-papi_key",
+    "out": "-pBearer AccountKey-papi_key"
+  },
+  {
+    "in": "\\it's\"\"Client Secret\"passphrase\u0026credentialstokenszq0867",
+    "out": "\\it's\"\"Client Secret\"passphrase\u0026credentialstokenszq0867"
+  },
+  {
+    "in": "zq0868\u0026quot;0PGPASSWORDzq0869zq0870passphrasexzq0871\n",
+    "out": "zq0868\u0026quot;0PGPASSWORDzq0869zq0870passphrasexzq0871"
+  },
+  {
+    "in": "zq0872; =  AccountKey/home/a/b/czq0873db.password\\\\\\\"passphraseBasic [",
+    "out": "zq0872; =  AccountKey/home/a/b/czq0873db.password\\\\\\\"passphraseBasic ["
+  },
+  {
+    "in": "zq0874=--passwordzq0875-----BEGIN PRIVATE KEY-----zq0876zq0877\n",
+    "out": "zq0874=--passwordzq0875-----BEGIN PRIVATE KEY-----zq0876zq0877"
+  },
+  {
+    "in": "\\\"zq0878secretBearer label\\\"",
+    "out": "\\\"zq0878secretBearer label\\\""
+  },
+  {
+    "in": "secretzq0879:\ttokenxtokens\\\\\"",
+    "out": "secretzq0879:\ttokenxtokens\\\\\""
+  },
+  {
+    "in": "secretsession_idzq0880\\\"=.tokens\"Client Secret\"-----BEGIN PRIVATE KEY-----",
+    "out": "secretsession_idzq0880\\\"=.tokens\"Client Secret\"-----BEGIN PRIVATE KEY-----"
+  },
+  {
+    "in": "[.zq0881session_idBearer -----END PRIVATE KEY-----\ntoken",
+    "out": "[.zq0881session_idBearer -----END PRIVATE KEY-----\ntoken"
+  },
+  {
+    "in": "secretzq0882Basic :\tzq0883db.passwordCookieset-cookie\u0026#39;",
+    "out": "secretzq0882Basic :\tzq0883db.passwordCookieset-cookie\u0026#39;"
+  },
+  {
+    "in": "\\\"[\u0026#39;zq0884it's",
+    "out": "\\\"[\u0026#39;zq0884it's"
+  },
+  {
+    "in": "zq0885!\\\\\"zq0886\\\\\":;]Basic zq0887",
+    "out": "zq0885!\\\\\"zq0886\\\\\":;]Basic zq0887"
+  },
+  {
+    "in": "cookie-pzq0888\\https://u:p@example.test/x?token=y\\\"[\\\\\\\"}: ",
+    "out": "cookie-pzq0888\\https://example.test/...\"[\\\\\\\"}:"
+  },
+  {
+    "in": "zq0889[token\ncookiepassphraseset-cookie = C:\\Users\\a\\b\\c.txt: ",
+    "out": "zq0889[token\ncookiepassphraseset-cookie = (redacted-path)"
+  },
+  {
+    "in": "secretauth!\"PGPASSWORD-----BEGIN PRIVATE KEY-----\\/home/a/b/c\\",
+    "out": "secretauth!\"PGPASSWORD-----BEGIN PRIVATE KEY-----\\/home/a/b/c\\"
+  },
+  {
+    "in": "%3Dzq0890\\\"zq0891!zq0892zq0893zq0894%3D-p[",
+    "out": "%3Dzq0890\\\"zq0891!zq0892zq0893zq0894%3D-p["
+  },
+  {
+    "in": "session_idset-cookie-ptokenspassphrase-pzq0895secretit's--passwordlabel,",
+    "out": "session_idset-cookie-ptokenspassphrase-pzq0895secretit's--passwordlabel,"
+  },
+  {
+    "in": "\\\\\\\"C:\\Users\\a\\b\\c.txtBearer !%3Dzq0896Bearer secret\\\"zq0897",
+    "out": "\\\\\\\"(redacted-path) !%3Dzq0896Bearer secret\\\"zq0897"
+  },
+  {
+    "in": "\"api_keysession_idzq0898Basic ",
+    "out": "\"api_keysession_idzq0898Basic"
+  },
+  {
+    "in": "db.password[db.password :]\nsecretzq0899",
+    "out": "db.password[db.password :[redacted]\nsecretzq0899"
+  },
+  {
+    "in": "zq0900zq0901.passphrase--password",
+    "out": "zq0900zq0901.passphrase--password"
+  },
+  {
+    "in": "db.passwordzq0902\"Client Secret\"zq0903/home/a/b/c",
+    "out": "db.passwordzq0902\"Client Secret\"zq0903/home/a/b/c"
+  },
+  {
+    "in": "\nzq0904\u0026passphrasezq0905:\t} PGPASSWORDsession_id",
+    "out": "zq0904\u0026passphrasezq0905:\t} PGPASSWORDsession_id"
+  },
+  {
+    "in": "tokenssecretzq0906passwordzq0907C:\\Users\\a\\b\\c.txtzq0908,,'",
+    "out": "tokenssecretzq0906passwordzq0907C:\\Users\\a\\b\\c.txtzq0908,,'"
+  },
+  {
+    "in": "cookie https://u:p@example.test/x?token=y;\u0026#39;zq0909-pzq0910zq0911-----END PRIVATE KEY-----\u0026#39;",
+    "out": "cookie https://example.test/... PRIVATE KEY-----\u0026#39;"
+  },
+  {
+    "in": "zq0912/home/a/b/ctokens\\\"api_key\"\u0026#39;Basic zq0913zq0914-----END PRIVATE KEY-----zq0915",
+    "out": "zq0912/home/a/b/ctokens\\\"api_key\"\u0026#39;Basic zq0913zq0914-----END PRIVATE KEY-----zq0915"
+  },
+  {
+    "in": "zq0916!\\\\\\\"it's\\\\\"passwordsession_idzq0917cookie",
+    "out": "zq0916!\\\\\\\"it's\\\\\"passwordsession_idzq0917cookie"
+  },
+  {
+    "in": "[zq0918https://u:p@example.test/x?token=y-----BEGIN PRIVATE KEY-----'",
+    "out": "[zq0918https://u:p@example.test/x?token=[redacted] PRIVATE KEY-----'"
+  },
+  {
+    "in": "zq0919token: ,.zq0920Bearer ",
+    "out": "zq0919token: [redacted]"
+  },
+  {
+    "in": "db.password zq0921secret'\u0026quot;=}label",
+    "out": "db.password zq0921secret'\u0026quot;=}label"
+  },
+  {
+    "in": "passwordsession_idit'stokens;zq0922zq0923--passwordpasswordzq0924",
+    "out": "passwordsession_idit'stokens;zq0922zq0923--passwordpasswordzq0924"
+  },
+  {
+    "in": ",zq0925'Authorization--password: \"Client Secret\"zq0926zq0927",
+    "out": ",zq0925'Authorization--password: [redacted]"
+  },
+  {
+    "in": "secretcookiezq0928token-----END PRIVATE KEY-----session_idBasic authsession_id'",
+    "out": "secretcookiezq0928token-----END PRIVATE KEY-----session_idBasic authsession_id'"
+  },
+  {
+    "in": "zq0929passphrasezq0930xzq0931\n'token!",
+    "out": "zq0929passphrasezq0930xzq0931\n'token!"
+  },
+  {
+    "in": "zq0932zq0933secret0",
+    "out": "zq0932zq0933secret0"
+  },
+  {
+    "in": "zq0934api_key \u0026quot;zq0935-----BEGIN PRIVATE KEY-----\\",
+    "out": "zq0934api_key \u0026quot;zq0935-----BEGIN PRIVATE KEY-----\\"
+  },
+  {
+    "in": "api_key  = db.passwordzq0936zq0937db.passwordzq0938\\\"\"Client Secret\"",
+    "out": "api_key  = [redacted]"
+  },
+  {
+    "in": "\u0026#39;\u0026 {passwordAccountKeycookiedb.passwordhttps://u:p@example.test/x?token=y",
+    "out": "\u0026#39;\u0026 {passwordAccountKeycookiedb.passwordhttps:[redacted]"
+  },
+  {
+    "in": "zq0939zq0940tokensBearer ]'passphrasePGPASSWORDzq0941api_key-----END PRIVATE KEY-----Authorization",
+    "out": "zq0939zq0940tokensBearer ]'passphrasePGPASSWORDzq0941api_key-----END PRIVATE KEY-----Authorization"
+  },
+  {
+    "in": "zq0942zq0943set-cookie%3D-pzq0944it's -----END PRIVATE KEY-----",
+    "out": "zq0942zq0943set-cookie%3D-pzq0944it's -----END PRIVATE KEY-----"
+  },
+  {
+    "in": "zq0945PGPASSWORDcookie\\\\\\\"0%3D Cookiezq0946x ",
+    "out": "zq0945PGPASSWORDcookie\\\\\\\"0%3D Cookiezq0946x"
+  },
+  {
+    "in": "zq0947zq0948-----BEGIN PRIVATE KEY-----zq0949zq0950\u0026#39;/home/a/b/c--password\nzq0951session_id\u0026quot;",
+    "out": "zq0947zq0948-----BEGIN PRIVATE KEY-----zq0949zq0950\u0026#39;/home/a/b/c--password\nzq0951session_id\u0026quot;"
+  },
+  {
+    "in": "\u0026quot;token Bearer \\\\\"",
+    "out": "\u0026quot;token Bearer \\\\\""
+  },
+  {
+    "in": "zq0952 = \\",
+    "out": "zq0952 = \\"
+  },
+  {
+    "in": "{tokens[\\\\\\\"zq0953zq0954zq0955 passwordzq0956 zq0957",
+    "out": "{tokens[\\\\\\\"zq0953zq0954zq0955 passwordzq0956 zq0957"
+  },
+  {
+    "in": "zq0958zq0959:\tzq0960\\zq0961db.passwordzq0962zq0963",
+    "out": "zq0958zq0959:\tzq0960\\zq0961db.passwordzq0962zq0963"
+  },
+  {
+    "in": "Bearer zq0964\u0026Basic \\zq0965-----END PRIVATE KEY-----\"Client Secret\"password",
+    "out": "Bearer zq0964\u0026Basic \\zq0965-----END PRIVATE KEY-----\"Client Secret\"password"
+  },
+  {
+    "in": "--password'zq0966/home/a/b/czq0967:\"",
+    "out": "--password'zq0966/home/a/b/czq0967:\""
+  },
+  {
+    "in": "zq0968Basic -p\\\"",
+    "out": "zq0968Basic -p\\\""
+  },
+  {
+    "in": "PGPASSWORDzq0969\"Client Secret\"Basic zq0970zq0971db.passwordapi_key\u0026#39;",
+    "out": "PGPASSWORDzq0969\"Client Secret\"Basic zq0970zq0971db.passwordapi_key\u0026#39;"
+  },
+  {
+    "in": "zq0972authzq0973%3Dzq0974db.passwordtoken",
+    "out": "zq0972authzq0973%3Dzq0974db.passwordtoken"
+  },
+  {
+    "in": "session_id'zq0975zq0976\n\"Client Secret\"zq0977,.zq0978",
+    "out": "session_id'zq0975zq0976\n\"Client Secret\"zq0977,.zq0978"
+  },
+  {
+    "in": "!passworddb.password:\t\"Client Secret\"labelit's\\\\\\\"",
+    "out": "!passworddb.password:\t[redacted]"
+  },
+  {
+    "in": ": C:\\Users\\a\\b\\c.txtset-cookiezq0979xlabel ]https://u:p@example.test/x?token=ysecret",
+    "out": ": (redacted-path) ]https://example.test/..."
+  },
+  {
+    "in": "zq0980--password-----BEGIN PRIVATE KEY-----PGPASSWORD",
+    "out": "zq0980--password-----BEGIN PRIVATE KEY-----PGPASSWORD"
+  },
+  {
+    "in": "set-cookietoken0 zq0981:Authorizationit's",
+    "out": "set-cookietoken0 zq0981:Authorizationit's"
+  },
+  {
+    "in": "tokens.it's!authzq0982zq0983Cookie secret",
+    "out": "tokens.it's!authzq0982zq0983Cookie secret"
+  },
+  {
+    "in": "tokenzq0984api_key--passwordzq0985:  zq0986cookie",
+    "out": "tokenzq0984api_key--passwordzq0985:  [redacted]"
+  },
+  {
+    "in": "zq0987api_key\u0026quot;zq0988',",
+    "out": "zq0987api_key\u0026quot;zq0988',"
+  },
+  {
+    "in": "Basic \u0026]zq0989zq0990xAuthorizationapi_keyauthPGPASSWORD",
+    "out": "Basic \u0026]zq0989zq0990xAuthorizationapi_keyauthPGPASSWORD"
+  },
+  {
+    "in": "zq0991\"Client Secret\"it's",
+    "out": "zq0991\"Client Secret\"it's"
+  },
+  {
+    "in": "AccountKey\"Client Secret\"=passphrasezq0992zq0993\\",
+    "out": "AccountKey\"Client Secret\"=passphrasezq0992zq0993\\"
+  },
+  {
+    "in": "zq0994[Basic zq0995",
+    "out": "zq0994[Basic zq0995"
+  },
+  {
+    "in": "set-cookiezq0996-----BEGIN PRIVATE KEY-----{zq0997https://u:p@example.test/x?token=y\u0026secretzq0998\u0026quot;'0",
+    "out": "set-cookiezq0996-----BEGIN PRIVATE KEY-----{zq0997https://u:p@example.test/x?token=[redacted]\u0026secretzq0998\u0026quot;'0"
+  },
+  {
+    "in": "}:.",
+    "out": "}:."
+  },
+  {
+    "in": "!zq0999}zq1000:-pzq1001tokenzq1002\u0026quot;",
+    "out": "!zq0999}zq1000:-pzq1001tokenzq1002\u0026quot;"
+  },
+  {
+    "in": "}:.zq1003/home/a/b/csecretpassword",
+    "out": "}:.zq1003/home/a/b/csecretpassword"
+  },
+  {
+    "in": ":\t\"zq1004--passwordsession_idzq1005,-----END PRIVATE KEY----- set-cookie zq1006",
+    "out": ":\t\"zq1004--passwordsession_idzq1005,-----END PRIVATE KEY----- set-cookie zq1006"
+  },
+  {
+    "in": "labelapi_key%3D=zq1007",
+    "out": "labelapi_key%3D=zq1007"
+  },
+  {
+    "in": "C:\\Users\\a\\b\\c.txt\"Client Secret\"\\\"\"zq1008\u0026#39;--password zq1009zq1010'PGPASSWORD",
+    "out": "(redacted-path) Secret\"\\\"\"zq1008\u0026#39;--password zq1009zq1010'PGPASSWORD"
+  },
+  {
+    "in": "cookieCookiezq1011-p\"Client Secret\"\u0026quot;\\\\\\\"zq1012 it's",
+    "out": "cookieCookiezq1011-p\"Client Secret\"\u0026quot;\\\\\\\"zq1012 it's"
+  },
+  {
+    "in": "\u0026#39;zq1013zq1014 zq1015passphrase\"Client Secret\"tokens",
+    "out": "\u0026#39;zq1013zq1014 zq1015passphrase\"Client Secret\"tokens"
+  },
+  {
+    "in": "PGPASSWORDzq1016zq1017 = session_idCookie",
+    "out": "PGPASSWORDzq1016zq1017 = session_idCookie"
+  },
+  {
+    "in": "zq1018-ppassword -p",
+    "out": "zq1018-ppassword -p"
+  },
+  {
+    "in": "https://u:p@example.test/x?token=ysecretzq1019Basic zq1020zq1021",
+    "out": "https://example.test/... zq1020zq1021"
+  },
+  {
+    "in": " \\\"https://u:p@example.test/x?token=yzq1022'-----END PRIVATE KEY-----zq1023",
+    "out": "\\\"https://example.test/...'-----END PRIVATE KEY-----zq1023"
+  },
+  {
+    "in": "{'zq1024\\\"zq1025']Bearer zq1026set-cookie=",
+    "out": "{'zq1024\\\"zq1025']Bearer [redacted]"
+  },
+  {
+    "in": "[password\\\"\u0026zq1027zq1028C:\\Users\\a\\b\\c.txt",
+    "out": "[password\\\"\u0026zq1027zq1028C:\\Users\\a\\b\\c.txt"
+  },
+  {
+    "in": "\u0026zq1029zq1030} = zq1031}session_id\\\\\\\"=\ndb.password",
+    "out": "\u0026zq1029zq1030} = zq1031}session_id\\\\\\\"=\ndb.password"
+  },
+  {
+    "in": "\"-----BEGIN PRIVATE KEY-----\u0026#39;]passphrase/home/a/b/c",
+    "out": "\"-----BEGIN PRIVATE KEY-----\u0026#39;]passphrase/home/a/b/c"
+  },
+  {
+    "in": "passwordzq1032authzq1033Bearer zq1034",
+    "out": "passwordzq1032authzq1033Bearer zq1034"
+  },
+  {
+    "in": "set-cookie.zq1035: \\'it'szq1036 ",
+    "out": "set-cookie.zq1035: \\'it'szq1036"
+  },
+  {
+    "in": "AccountKey]db.passwordPGPASSWORDBasic  /home/a/b/c",
+    "out": "AccountKey]db.passwordPGPASSWORDBasic  (redacted-path)"
+  },
+  {
+    "in": "zq1037}zq1038AccountKey\u0026Authorizationauth}tokenapi_key",
+    "out": "zq1037}zq1038AccountKey\u0026Authorizationauth}tokenapi_key"
+  },
+  {
+    "in": "Authorization\"Client Secret\"\u0026quot;0api_keyzq1039tokencredentials = Bearer -----BEGIN PRIVATE KEY-----",
+    "out": "Authorization\"Client Secret\"\u0026quot;0api_keyzq1039tokencredentials = [redacted] [redacted] PRIVATE KEY-----"
+  },
+  {
+    "in": "zq1040\u0026[Bearer  ;: /home/a/b/czq1041credentialscredentialszq1042",
+    "out": "zq1040\u0026[Bearer  ;: (redacted-path)"
+  },
+  {
+    "in": " = zq1043zq1044authzq1045session_id='Bearer  = =--password",
+    "out": "= zq1043zq1044authzq1045session_id='Bearer  = =--password"
+  },
+  {
+    "in": "AccountKey!zq1046zq1047zq1048",
+    "out": "AccountKey!zq1046zq1047zq1048"
+  },
+  {
+    "in": "it'szq1049session_id",
+    "out": "it'szq1049session_id"
+  },
+  {
+    "in": " passwordzq1050zq1051",
+    "out": "passwordzq1050zq1051"
+  },
+  {
+    "in": "tokenszq1052\nzq1053-----BEGIN PRIVATE KEY-----",
+    "out": "tokenszq1052\nzq1053-----BEGIN PRIVATE KEY-----"
+  },
+  {
+    "in": ": db.passwordBasic ",
+    "out": ": db.passwordBasic"
+  },
+  {
+    "in": "PGPASSWORD.}C:\\Users\\a\\b\\c.txt:\t:\tzq1054;zq1055",
+    "out": "PGPASSWORD.}(redacted-path)\t:\tzq1054;zq1055"
+  },
+  {
+    "in": "Cookie:\t\nzq1056https://u:p@example.test/x?token=y:\tzq1057/home/a/b/c--passwordzq1058",
+    "out": "Cookie:\t\nzq1056https://u:p@example.test/x?token=[redacted]\tzq1057/home/a/b/c--passwordzq1058"
+  },
+  {
+    "in": "\u0026-----BEGIN PRIVATE KEY-----tokensset-cookiezq1059session_id/home/a/b/cPGPASSWORD\\\\\"\"",
+    "out": "\u0026-----BEGIN PRIVATE KEY-----tokensset-cookiezq1059session_id/home/a/b/cPGPASSWORD\\\\\"\""
+  },
+  {
+    "in": "zq1060!session_iddb.passwordcookieCookie",
+    "out": "zq1060!session_iddb.passwordcookieCookie"
+  },
+  {
+    "in": "-----BEGIN PRIVATE KEY-----it's\\labelBasic \u0026quot;C:\\Users\\a\\b\\c.txt:zq1061",
+    "out": "-----BEGIN PRIVATE KEY-----it's\\labelBasic \u0026quot;(redacted-path)"
+  },
+  {
+    "in": "zq1062session_idcredentials\u0026quot;it'sit's\\zq1063\u0026",
+    "out": "zq1062session_idcredentials\u0026quot;it'sit's\\zq1063\u0026"
+  },
+  {
+    "in": ":\t,zq1064zq1065AccountKey",
+    "out": ":\t,zq1064zq1065AccountKey"
+  },
+  {
+    "in": "%3Dzq1066=zq1067:it's\\\\\",{zq1068zq1069-----END PRIVATE KEY-----",
+    "out": "%3Dzq1066=zq1067:it's\\\\\",{zq1068zq1069-----END PRIVATE KEY-----"
+  },
+  {
+    "in": "::\t\\\"zq1070PGPASSWORDzq1071zq1072zq1073zq1074Basic '",
+    "out": "::\t\\\"zq1070PGPASSWORDzq1071zq1072zq1073zq1074Basic '"
+  },
+  {
+    "in": "0C:\\Users\\a\\b\\c.txt\\\\\\\"zq1075credentials:\t\"Client Secret\"zq1076zq1077",
+    "out": "0C:\\Users\\a\\b\\c.txt\\\\\\\"zq1075credentials:\t[redacted]"
+  },
+  {
+    "in": "zq1078zq1079!\u0026quot;",
+    "out": "zq1078zq1079!\u0026quot;"
+  },
+  {
+    "in": "-----END PRIVATE KEY-----'zq1080zq1081;Cookie;\\it's",
+    "out": "-----END PRIVATE KEY-----'zq1080zq1081;Cookie;\\it's"
+  },
+  {
+    "in": "zq1082\n.--passwordsession_id = \u0026",
+    "out": "zq1082\n.--passwordsession_id = \u0026"
+  },
+  {
+    "in": "set-cookiepasswordzq1083 = \\}%3Dzq1084'\\",
+    "out": "set-cookiepasswordzq1083 = \\}%3Dzq1084'\\"
+  },
+  {
+    "in": "\\[zq1085\"Client Secret\"",
+    "out": "\\[zq1085\"Client Secret\""
+  },
+  {
+    "in": "Authorization\u0026quot;:\t]\nzq1086it'sC:\\Users\\a\\b\\c.txtzq1087\\\\token",
+    "out": "Authorization\u0026quot;:\t]\nzq1086it'sC:\\Users\\a\\b\\c.txtzq1087\\\\token"
+  },
+  {
+    "in": ",api_keyapi_keypassphrasezq1088 PGPASSWORD:zq1089PGPASSWORD{",
+    "out": ",api_keyapi_keypassphrasezq1088 PGPASSWORD:[redacted]"
+  },
+  {
+    "in": "/home/a/b/czq1090Authorization-pzq1091zq1092https://u:p@example.test/x?token=y[  = ",
+    "out": "(redacted-path)//u:p@example.test/x?token=[redacted]  ="
+  },
+  {
+    "in": "session_id\\\\\\\"zq1093-----BEGIN PRIVATE KEY------p;;zq1094C:\\Users\\a\\b\\c.txt:\tzq1095 ",
+    "out": "session_id\\\\\\\"zq1093-----BEGIN PRIVATE KEY------p;;zq1094C:\\Users\\a\\b\\c.txt:\tzq1095"
+  },
+  {
+    "in": "zq1096 = zq1097",
+    "out": "zq1096 = zq1097"
+  },
+  {
+    "in": "secret\\\\\"\u0026quot;tokensAccountKey",
+    "out": "secret\\\\\"\u0026quot;tokensAccountKey"
+  },
+  {
+    "in": "it's/home/a/b/clabelBasic [zq1098it's%3D",
+    "out": "it's/home/a/b/clabelBasic [zq1098it's%3D"
+  },
+  {
+    "in": "zq1099 passphrase = [",
+    "out": "zq1099 passphrase = ["
+  },
+  {
+    "in": "passphrase: %3Dpassword\"Client Secret\"\"zq1100",
+    "out": "passphrase: %3Dpassword\"Client Secret\"\"zq1100"
+  },
+  {
+    "in": "zq1101zq1102\\",
+    "out": "zq1101zq1102\\"
+  },
+  {
+    "in": "zq1103];\u0026quot;",
+    "out": "zq1103];\u0026quot;"
+  },
+  {
+    "in": "db.passwordzq1104\\--passwordzq1105",
+    "out": "db.passwordzq1104\\--passwordzq1105"
+  },
+  {
+    "in": "\u0026zq1106tokens PGPASSWORDzq1107zq1108zq1109zq1110secret",
+    "out": "\u0026zq1106tokens PGPASSWORDzq1107zq1108zq1109zq1110secret"
+  },
+  {
+    "in": "\"Client Secret\"password\\labelzq1111zq1112\\",
+    "out": "\"Client Secret\"password\\labelzq1111zq1112\\"
+  },
+  {
+    "in": "authpassphrase'",
+    "out": "authpassphrase'"
+  },
+  {
+    "in": "it'sx\\PGPASSWORDBearer Basic zq1113labelzq1114",
+    "out": "it'sx\\PGPASSWORDBearer Basic zq1113labelzq1114"
+  },
+  {
+    "in": "api_keytokenzq1115zq1116zq1117zq1118authzq1119",
+    "out": "api_keytokenzq1115zq1116zq1117zq1118authzq1119"
+  },
+  {
+    "in": ": zq1120]Basic zq1121=.-pzq1122https://u:p@example.test/x?token=yhttps://u:p@example.test/x?token=y",
+    "out": ": zq1120]Basic zq1121=.-pzq1122https://u:p@example.test/x?token=[redacted]"
+  },
+  {
+    "in": "!, = api_keyzq1123' = }0\\\\\". ",
+    "out": "!, = api_keyzq1123' = }0\\\\\"."
+  },
+  {
+    "in": "Basic zq1124zq1125label\\\"\u0026quot;zq1126zq1127zq1128\u0026quot;zq1129 = ",
+    "out": "Basic zq1124zq1125label\\\"\u0026quot;zq1126zq1127zq1128\u0026quot;zq1129 ="
+  },
+  {
+    "in": "%3Dzq1130.Basic session_idzq1131zq1132\"Client Secret\"x-p0",
+    "out": "%3Dzq1130.Basic session_idzq1131zq1132\"Client Secret\"x-p0"
+  },
+  {
+    "in": "zq1133Basic zq1134 label\u0026#39;Bearer Authorization\\\\\\\"'",
+    "out": "zq1133Basic zq1134 label\u0026#39;Bearer [redacted]\\\\\\\"'"
+  },
+  {
+    "in": "tokensauth ",
+    "out": "tokensauth"
+  },
+  {
+    "in": "zq1135,\"Client Secret\"cookie it's:\t",
+    "out": "zq1135,\"Client Secret\"cookie it's:"
+  },
+  {
+    "in": "xAccountKeypassphrase-----END PRIVATE KEY-------password .: zq1136': ",
+    "out": "xAccountKeypassphrase-----END PRIVATE KEY-------password .: zq1136':"
+  },
+  {
+    "in": "authzq1137zq1138-----END PRIVATE KEY-----].",
+    "out": "authzq1137zq1138-----END PRIVATE KEY-----]."
+  },
+  {
+    "in": " = zq1139zq1140zq1141{",
+    "out": "= zq1139zq1140zq1141{"
+  },
+  {
+    "in": "tokenzq1142password=zq1143zq1144auth",
+    "out": "tokenzq1142password=[redacted]"
+  },
+  {
+    "in": "zq1145\u0026#39;\u0026#39; \u0026",
+    "out": "zq1145\u0026#39;\u0026#39; \u0026"
+  },
+  {
+    "in": "zq1146 = credentialsset-cookieset-cookie",
+    "out": "zq1146 = credentialsset-cookieset-cookie"
+  },
+  {
+    "in": "credentialspassphrasezq1147zq1148xzq1149Basic password.zq1150Cookie}",
+    "out": "credentialspassphrasezq1147zq1148xzq1149Basic password.zq1150Cookie}"
+  },
+  {
+    "in": ";zq1151zq1152zq1153api_keyC:\\Users\\a\\b\\c.txt!\\\\\"password",
+    "out": ";zq1151zq1152zq1153api_keyC:[redacted]"
+  },
+  {
+    "in": "/home/a/b/czq1154api_key;zq1155Cookie",
+    "out": "(redacted-path)"
+  },
+  {
+    "in": " = !zq1156\\\\\"zq1157!zq1158Authorization}xzq1159",
+    "out": "= !zq1156\\\\\"zq1157!zq1158Authorization}xzq1159"
+  },
+  {
+    "in": "\u0026#39;zq1160zq1161zq1162; = ",
+    "out": "\u0026#39;zq1160zq1161zq1162; ="
+  },
+  {
+    "in": "PGPASSWORD\\\"zq1163-pzq1164.credentialszq1165Basic  = zq1166",
+    "out": "PGPASSWORD\\\"zq1163-pzq1164.credentialszq1165Basic  = zq1166"
+  },
+  {
+    "in": "\\\"Basic zq1167 credentials\\\u0026\\\\\"",
+    "out": "\\\"Basic zq1167 credentials\\\u0026\\\\\""
+  },
+  {
+    "in": "\\zq1168zq1169zq1170.-----BEGIN PRIVATE KEY-----Bearer /home/a/b/cAuthorizationzq1171zq1172auth",
+    "out": "\\zq1168zq1169zq1170.-----BEGIN PRIVATE KEY-----Bearer [redacted]"
+  },
+  {
+    "in": "-pPGPASSWORD\\\\\"secretlabelzq1173zq1174db.passwordzq1175{",
+    "out": "-pPGPASSWORD\\\\\"secretlabelzq1173zq1174db.passwordzq1175{"
+  },
+  {
+    "in": "set-cookie \\token0zq1176{zq1177passwordBearer ",
+    "out": "set-cookie \\token0zq1176{zq1177passwordBearer"
+  },
+  {
+    "in": "cookie}zq1178zq1179%3Dzq1180api_keyzq1181secret--password",
+    "out": "cookie}zq1178zq1179%3Dzq1180api_keyzq1181secret--password"
+  },
+  {
+    "in": "]\\zq1182passphrasezq1183PGPASSWORD0\u0026#39; zq1184",
+    "out": "]\\zq1182passphrasezq1183PGPASSWORD0\u0026#39; zq1184"
+  },
+  {
+    "in": "https://u:p@example.test/x?token=y}zq1185zq1186'",
+    "out": "https://example.test/...'"
+  },
+  {
+    "in": ":\t\\\"AuthorizationPGPASSWORD=-pzq1187/home/a/b/c",
+    "out": ":\t\\\"AuthorizationPGPASSWORD=[redacted]"
+  },
+  {
+    "in": "xzq1188Cookie",
+    "out": "xzq1188Cookie"
+  },
+  {
+    "in": "{Cookie[zq1189",
+    "out": "{Cookie[zq1189"
+  },
+  {
+    "in": "zq1190zq1191zq1192zq1193",
+    "out": "zq1190zq1191zq1192zq1193"
+  },
+  {
+    "in": "zq1194zq1195tokens:\tzq1196%3Dapi_key[zq1197",
+    "out": "zq1194zq1195tokens:\tzq1196%3Dapi_key[zq1197"
+  },
+  {
+    "in": "zq1198:xtokenset-cookie\\https://u:p@example.test/x?token=ytokenzq1199zq1200",
+    "out": "zq1198:xtokenset-cookie\\https://example.test/..."
+  },
+  {
+    "in": "\\:C:\\Users\\a\\b\\c.txtset-cookieit's",
+    "out": "\\:(redacted-path)"
+  },
+  {
+    "in": "\\\\\\\":\t\"0secretzq1201db.password%3D%3D[",
+    "out": "\\\\\\\":\t\"0secretzq1201db.password%3D%3D["
+  },
+  {
+    "in": "\u0026authcookiezq1202zq1203https://u:p@example.test/x?token=yzq1204",
+    "out": "\u0026authcookiezq1202zq1203https://u:p@example.test/x?token=[redacted]"
+  },
+  {
+    "in": "it'szq1205--passwordapi_key https://u:p@example.test/x?token=y\\",
+    "out": "it'szq1205--passwordapi_key https://example.test/..."
+  },
+  {
+    "in": "zq1206authhttps://u:p@example.test/x?token=yzq1207zq1208Bearer it'szq1209/home/a/b/c",
+    "out": "zq1206authhttps://u:p@example.test/x?token=[redacted] it'szq1209/home/a/b/c"
+  },
+  {
+    "in": "zq1210zq1211\"[\"\u0026quot;",
+    "out": "zq1210zq1211\"[\"\u0026quot;"
+  },
+  {
+    "in": "api_keyauth\nzq1212zq1213zq1214\"Client Secret\"Authorization}Authorization} ",
+    "out": "api_keyauth\nzq1212zq1213zq1214\"Client Secret\"Authorization}Authorization}"
+  },
+  {
+    "in": "--password\"zq1215api_keyzq1216C:\\Users\\a\\b\\c.txtzq1217\" zq1218 ",
+    "out": "--password\"zq1215api_keyzq1216C:\\Users\\a\\b\\c.txtzq1217\" zq1218"
+  },
+  {
+    "in": "Basic session_id = Basic .credentialszq1219Cookiezq1220zq1221x",
+    "out": "Basic session_id = Basic .credentialszq1219Cookiezq1220zq1221x"
+  },
+  {
+    "in": "zq1222,AccountKey\u0026Basic Authorizationapi_keyit's \\\"",
+    "out": "zq1222,AccountKey\u0026Basic Authorizationapi_keyit's \\\""
+  },
+  {
+    "in": ";zq1223zq1224\u0026#39;https://u:p@example.test/x?token=yhttps://u:p@example.test/x?token=yzq1225zq1226",
+    "out": ";zq1223zq1224\u0026#39;https://example.test/..."
+  },
+  {
+    "in": "zq1227xzq1228{[tokenzq1229auth-pCookie",
+    "out": "zq1227xzq1228{[tokenzq1229auth-pCookie"
+  },
+  {
+    "in": "zq1230 \\\"api_key\\api_key]zq1231zq1232x/home/a/b/c",
+    "out": "zq1230 \\\"api_key\\api_key]zq1231zq1232x/home/a/b/c"
+  },
+  {
+    "in": "Basic Bearer \\\\\\\"\napi_key/home/a/b/c![zq1233zq1234\u0026it's",
+    "out": "Basic Bearer \\\\\\\"\napi_key/home/a/b/c![zq1233zq1234\u0026it's"
+  },
+  {
+    "in": ":https://u:p@example.test/x?token=ypasswordzq1235password",
+    "out": ":https://example.test/..."
+  },
+  {
+    "in": "session_id:\ttokenapi_key]Authorization! zq1236Authorization",
+    "out": "session_id:\ttokenapi_key]Authorization! zq1236Authorization"
+  },
+  {
+    "in": "db.passwordCookietokenzq1237set-cookiezq1238credentials",
+    "out": "db.passwordCookietokenzq1237set-cookiezq1238credentials"
+  },
+  {
+    "in": "cookiesession_id = zq1239%3D!tokenszq1240.\u0026quot;PGPASSWORD",
+    "out": "cookiesession_id = zq1239%3D!tokenszq1240.\u0026quot;PGPASSWORD"
+  },
+  {
+    "in": "%3D\\\"zq1241C:\\Users\\a\\b\\c.txt",
+    "out": "%3D\\\"zq1241C:\\Users\\a\\b\\c.txt"
+  },
+  {
+    "in": "api_keyzq1242passwordzq1243tokens].zq1244-----BEGIN PRIVATE KEY-----",
+    "out": "api_keyzq1242passwordzq1243tokens].zq1244-----BEGIN PRIVATE KEY-----"
+  },
+  {
+    "in": "zq1245zq1246tokens--passwordBearer .set-cookiezq1247\u0026quot;password",
+    "out": "zq1245zq1246tokens--passwordBearer .set-cookiezq1247\u0026quot;password"
+  },
+  {
+    "in": "it'szq1248zq1249zq1250",
+    "out": "it'szq1248zq1249zq1250"
+  },
+  {
+    "in": "-p\u0026: zq1251zq1252-pxzq1253Authorization",
+    "out": "-p\u0026: zq1251zq1252-pxzq1253Authorization"
+  },
+  {
+    "in": "{[passphrasezq1254zq1255Cookie\u0026quot;cookiezq1256zq1257",
+    "out": "{[passphrasezq1254zq1255Cookie\u0026quot;cookiezq1256zq1257"
+  },
+  {
+    "in": "Bearer 0-----BEGIN PRIVATE KEY-----zq1258Cookiezq1259",
+    "out": "Bearer [redacted] PRIVATE KEY-----zq1258Cookiezq1259"
+  },
+  {
+    "in": "-----END PRIVATE KEY-----\ntokenPGPASSWORD;tokenpassword",
+    "out": "-----END PRIVATE KEY-----\ntokenPGPASSWORD;tokenpassword"
+  },
+  {
+    "in": "label\"zq1260\"CookieBearer {zq1261Basic ",
+    "out": "label\"zq1260\"CookieBearer {zq1261Basic"
+  },
+  {
+    "in": "][-----BEGIN PRIVATE KEY-----\\\"zq1262%3Dxzq1263",
+    "out": "][-----BEGIN PRIVATE KEY-----\\\"zq1262%3Dxzq1263"
+  },
+  {
+    "in": "zq12640credentialszq1265api_keydb.password",
+    "out": "zq12640credentialszq1265api_keydb.password"
+  },
+  {
+    "in": "--password.\n:Authorizationzq1266--passwordzq1267Authorization-----END PRIVATE KEY-----.",
+    "out": "--password.\n:[redacted] PRIVATE KEY-----."
+  },
+  {
+    "in": "\npassphrase\ndb.password\\:zq1268Authorizationdb.password",
+    "out": "passphrase\ndb.password\\:zq1268Authorizationdb.password"
+  },
+  {
+    "in": ";zq1269api_keyzq1270Bearer -p{xBasic 'https://u:p@example.test/x?token=yC:\\Users\\a\\b\\c.txt",
+    "out": ";zq1269api_keyzq1270Bearer -p{xBasic 'https://example.test/..."
+  },
+  {
+    "in": "zq1271zq1272=zq12730:\t-----BEGIN PRIVATE KEY-----Authorizationzq1274",
+    "out": "zq1271zq1272=zq12730:\t-----BEGIN PRIVATE KEY-----Authorizationzq1274"
+  },
+  {
+    "in": "zq1275{session_idtokens: :\tzq1276;",
+    "out": "zq1275{session_idtokens: :\tzq1276;"
+  },
+  {
+    "in": "zq1277/home/a/b/c;xpassphrase\u0026!\n",
+    "out": "zq1277/home/a/b/c;xpassphrase\u0026!"
+  },
+  {
+    "in": "https://u:p@example.test/x?token=yCookiezq1278api_keyzq1279zq1280AccountKeycredentials\" : zq1281",
+    "out": "https://example.test/...\" : zq1281"
+  },
+  {
+    "in": "zq1282Bearer '\\\"\\\\\\\"--password}\\\\\\\"auth",
+    "out": "zq1282Bearer '\\\"\\\\\\\"--password}\\\\\\\"auth"
+  },
+  {
+    "in": "xsecret\\\\\"tokentokens",
+    "out": "xsecret\\\\\"tokentokens"
+  },
+  {
+    "in": "C:\\Users\\a\\b\\c.txtPGPASSWORD\\\\\\\"api_key",
+    "out": "(redacted-path)\\\\\\\"api_key"
+  },
+  {
+    "in": "zq1283\u0026#39;credentialszq1284zq1285Authorization-----BEGIN PRIVATE KEY-----",
+    "out": "zq1283\u0026#39;credentialszq1284zq1285Authorization-----BEGIN PRIVATE KEY-----"
+  },
+  {
+    "in": "'C:\\Users\\a\\b\\c.txtzq1286zq1287C:\\Users\\a\\b\\c.txt=zq1288Authorizationxzq1289 zq1290",
+    "out": "'(redacted-path) zq1290"
+  },
+  {
+    "in": "--password\"Client Secret\"tokens\u0026#39;\\\\\"zq1291\\\\\\\"",
+    "out": "--password\"Client Secret\"tokens\u0026#39;\\\\\"zq1291\\\\\\\""
+  },
+  {
+    "in": "credentials!zq1292session_idzq1293token-----BEGIN PRIVATE KEY-----",
+    "out": "credentials!zq1292session_idzq1293token-----BEGIN PRIVATE KEY-----"
+  },
+  {
+    "in": "0\u0026--password\\\\\\\"C:\\Users\\a\\b\\c.txthttps://u:p@example.test/x?token=ylabelAuthorization\\\\\"password\"Client Secret\"\\\\\"",
+    "out": "0\u0026--password\\\\\\\"(redacted-path) Secret\"\\\\\""
+  },
+  {
+    "in": "cookie{zq1294-----BEGIN PRIVATE KEY-------passwordpassphrasezq1295zq1296api_key-p\n ",
+    "out": "cookie{zq1294-----BEGIN PRIVATE KEY-------passwordpassphrasezq1295zq1296api_key-p"
+  },
+  {
+    "in": "zq1297:zq1298zq1299\u0026quot;zq1300zq1301 \u0026quot;",
+    "out": "zq1297:zq1298zq1299\u0026quot;zq1300zq1301 \u0026quot;"
+  },
+  {
+    "in": "zq1302db.passwordit'szq1303%3Dtoken",
+    "out": "zq1302db.passwordit'szq1303%3Dtoken"
+  },
+  {
+    "in": "0\u0026: :\tauth}credentials",
+    "out": "0\u0026: :\tauth}credentials"
+  },
+  {
+    "in": "authPGPASSWORD\u0026quot;zq1304zq1305[={: zq1306\"\\\\\\\"",
+    "out": "authPGPASSWORD\u0026quot;zq1304zq1305[={: zq1306\"\\\\\\\""
+  },
+  {
+    "in": "%3Dsecret=\nzq1307\\\"}\\\\\"zq1308it's-pzq1309",
+    "out": "%3Dsecret=\n[redacted]"
+  },
+  {
+    "in": "0 = it's:\t\\\\\\\"zq1310zq1311}zq1312zq1313",
+    "out": "0 = it's:\t\\\\\\\"zq1310zq1311}zq1312zq1313"
+  },
+  {
+    "in": "credentials\"{0",
+    "out": "credentials\"{0"
+  },
+  {
+    "in": "--passwordpassphraseBearer ",
+    "out": "--passwordpassphraseBearer"
+  },
+  {
+    "in": "%3Dzq1314zq1315,\"';zq1316label",
+    "out": "%3Dzq1314zq1315,\"';zq1316label"
+  },
+  {
+    "in": "zq1317zq1318xhttps://u:p@example.test/x?token=yapi_key\"Client Secret\" ",
+    "out": "zq1317zq1318xhttps://u:p@example.test/x?token=[redacted]"
+  },
+  {
+    "in": " zq1319zq1320zq1321https://u:p@example.test/x?token=y !zq1322tokens",
+    "out": "zq1319zq1320zq1321https://u:p@example.test/x?token=[redacted] !zq1322tokens"
+  },
+  {
+    "in": ".session_id.C:\\Users\\a\\b\\c.txt",
+    "out": ".session_id.(redacted-path)"
+  },
+  {
+    "in": ";\u0026--passwordPGPASSWORDcredentials\\\\\"tokenstokenslabel\u0026zq1323zq1324",
+    "out": ";\u0026--passwordPGPASSWORDcredentials\\\\\"tokenstokenslabel\u0026zq1323zq1324"
+  },
+  {
+    "in": "=\\\\\"zq1325",
+    "out": "=\\\\\"zq1325"
+  },
+  {
+    "in": "\n\\\\\"/home/a/b/czq1326 https://u:p@example.test/x?token=yzq1327",
+    "out": "\\\\\"/home/a/b/czq1326 https://example.test/..."
+  },
+  {
+    "in": "zq1328-----BEGIN PRIVATE KEY-----PGPASSWORD!zq1329 auth",
+    "out": "zq1328-----BEGIN PRIVATE KEY-----PGPASSWORD!zq1329 auth"
+  },
+  {
+    "in": "zq1330passphrasexBearer zq1331-----END PRIVATE KEY-----zq1332auth[{;",
+    "out": "zq1330passphrasexBearer zq1331-----END PRIVATE KEY-----zq1332auth[{;"
+  },
+  {
+    "in": "{zq1333zq1334zq1335Authorization-----END PRIVATE KEY-----session_id\u0026}",
+    "out": "{zq1333zq1334zq1335Authorization-----END PRIVATE KEY-----session_id\u0026}"
+  },
+  {
+    "in": "{zq1336password[-----BEGIN PRIVATE KEY-------password",
+    "out": "{zq1336password[-----BEGIN PRIVATE KEY-------password"
+  },
+  {
+    "in": "passphrasePGPASSWORD\"\\\\\\\"zq1337zq1338zq1339zq1340Cookie",
+    "out": "passphrasePGPASSWORD\"\\\\\\\"zq1337zq1338zq1339zq1340Cookie"
+  },
+  {
+    "in": "zq1341api_keytokenszq1342Authorizationpasswordtokens !zq1343",
+    "out": "zq1341api_keytokenszq1342Authorizationpasswordtokens !zq1343"
+  },
+  {
+    "in": "zq1344 = Basic zq1345db.password:\tzq1346zq1347\u0026quot;zq1348",
+    "out": "zq1344 = Basic zq1345db.password:\t[redacted]\u0026quot;zq1348"
+  },
+  {
+    "in": "-pxC:\\Users\\a\\b\\c.txt",
+    "out": "-pxC:\\Users\\a\\b\\c.txt"
+  },
+  {
+    "in": "api_keyzq1349:PGPASSWORDBearer zq1350api_keyzq1351",
+    "out": "api_keyzq1349:PGPASSWORDBearer zq1350api_keyzq1351"
+  },
+  {
+    "in": "secret[ = zq1352-----END PRIVATE KEY-----zq1353\nzq1354-p = = ",
+    "out": "secret[ = zq1352-----END PRIVATE KEY-----zq1353\nzq1354-p = ="
+  },
+  {
+    "in": " = -----END PRIVATE KEY----- zq1355\"Client Secret\"\"zq1356",
+    "out": "= -----END PRIVATE KEY----- zq1355\"Client Secret\"\"zq1356"
+  },
+  {
+    "in": ",'label: db.password \"Client Secret\"",
+    "out": ",'label: db.password \"Client Secret\""
+  },
+  {
+    "in": "zq1357\u0026zq1358set-cookiezq1359Bearer ",
+    "out": "zq1357\u0026zq1358set-cookiezq1359Bearer"
+  },
+  {
+    "in": "}--passwordzq1360 zq1361%3D.zq1362",
+    "out": "}--passwordzq1360 zq1361%3D.zq1362"
+  },
+  {
+    "in": "Authorizationzq1363zq1364Basic :\t: zq1365\u0026quot;zq1366 x",
+    "out": "Authorizationzq1363zq1364Basic :\t: zq1365\u0026quot;zq1366 x"
+  },
+  {
+    "in": "!zq1367zq1368 ",
+    "out": "!zq1367zq1368"
+  },
+  {
+    "in": ".\u0026\"zq1369\u0026quot;passphrase",
+    "out": ".\u0026\"zq1369\u0026quot;passphrase"
+  },
+  {
+    "in": "tokensession_idapi_keyPGPASSWORD\\\\\\\"zq1370zq1371",
+    "out": "tokensession_idapi_keyPGPASSWORD\\\\\\\"zq1370zq1371"
+  },
+  {
+    "in": "}credentials0\"Client Secret\"/home/a/b/cdb.passwordzq1372",
+    "out": "}credentials0\"Client Secret\"/home/a/b/cdb.passwordzq1372"
+  },
+  {
+    "in": "zq1373\u0026#39;\u0026#39;tokenslabellabelcredentials\n0,zq1374credentials",
+    "out": "zq1373\u0026#39;\u0026#39;tokenslabellabelcredentials\n0,zq1374credentials"
+  },
+  {
+    "in": "zq1375Authorization,",
+    "out": "zq1375Authorization,"
+  },
+  {
+    "in": " = ,\nset-cookie",
+    "out": "= ,\nset-cookie"
+  },
+  {
+    "in": "it's{\u0026C:\\Users\\a\\b\\c.txt\u0026#39;session_id",
+    "out": "it's{\u0026(redacted-path)"
+  },
+  {
+    "in": "!\"zq1376 ]zq1377{\u0026",
+    "out": "!\"zq1376 ]zq1377{\u0026"
+  },
+  {
+    "in": "\u0026#39;}zq1378{zq1379:\tapi_keyAccountKey/home/a/b/ctokens]",
+    "out": "\u0026#39;}zq1378{zq1379:\tapi_keyAccountKey/home/a/b/ctokens]"
+  },
+  {
+    "in": ",= = zq1380=zq1381\u0026AccountKey!zq1382passphrase",
+    "out": ",= = zq1380=zq1381\u0026AccountKey!zq1382passphrase"
+  },
+  {
+    "in": "zq1383: token' \\\\\"0",
+    "out": "zq1383: token' \\\\\"0"
+  },
+  {
+    "in": "zq1384%3DPGPASSWORDapi_key",
+    "out": "zq1384%3DPGPASSWORDapi_key"
+  },
+  {
+    "in": ".zq1385\u0026#39;-p%3Dapi_key",
+    "out": ".zq1385\u0026#39;-p%3Dapi_key"
+  },
+  {
+    "in": "0secret-p",
+    "out": "0secret-p"
+  },
+  {
+    "in": "zq1386zq1387!",
+    "out": "zq1386zq1387!"
+  },
+  {
+    "in": "zq1388![AccountKeyzq1389secret\"-p",
+    "out": "zq1388![AccountKeyzq1389secret\"-p"
+  },
+  {
+    "in": "tokens\"{zq1390\\\\\\\"';",
+    "out": "tokens\"{zq1390\\\\\\\"';"
+  },
+  {
+    "in": "/home/a/b/cCookieAccountKeyzq1391--passwordsession_id Cookie",
+    "out": "(redacted-path) Cookie"
+  },
+  {
+    "in": "zq1392zq1393auth",
+    "out": "zq1392zq1393auth"
+  },
+  {
+    "in": ",zq1394zq1395api_key",
+    "out": ",zq1394zq1395api_key"
+  },
+  {
+    "in": "\\\\\"label-phttps://u:p@example.test/x?token=ycredentials%3Dcredentialszq1396-----BEGIN PRIVATE KEY-----",
+    "out": "\\\\\"label-phttps://u:p@example.test/x?token=[redacted] PRIVATE KEY-----"
+  },
+  {
+    "in": "Cookie zq1397secretlabel-----END PRIVATE KEY-----zq1398secret--password  ",
+    "out": "Cookie zq1397secretlabel-----END PRIVATE KEY-----zq1398secret--password"
+  },
+  {
+    "in": "/home/a/b/capi_key\\,it'sBearer ",
+    "out": "(redacted-path)"
+  },
+  {
+    "in": "-----END PRIVATE KEY-----zq1399\\\",'",
+    "out": "-----END PRIVATE KEY-----zq1399\\\",'"
+  },
+  {
+    "in": "zq1400tokensit'scookiezq1401zq1402zq1403'authsession_id",
+    "out": "zq1400tokensit'scookiezq1401zq1402zq1403'authsession_id"
+  },
+  {
+    "in": "x,zq1404",
+    "out": "x,zq1404"
+  },
+  {
+    "in": "zq1405.cookie{zq1406it'stoken%3DBearer db.passwordzq1407zq1408",
+    "out": "zq1405.cookie{zq1406it'stoken%3DBearer db.passwordzq1407zq1408"
+  },
+  {
+    "in": ";\"Client Secret\"Authorizationhttps://u:p@example.test/x?token=yzq1409passphraseAccountKeyzq1410 = [zq1411zq1412",
+    "out": ";\"Client Secret\"Authorizationhttps://u:p@example.test/x?token=[redacted] = [zq1411zq1412"
+  },
+  {
+    "in": "]zq1413 AccountKeyzq1414],",
+    "out": "]zq1413 AccountKeyzq1414],"
+  },
+  {
+    "in": "zq1415[AccountKeyzq1416:\t{C:\\Users\\a\\b\\c.txt0:zq1417zq1418",
+    "out": "zq1415[AccountKeyzq1416:\t{(redacted-path)"
+  },
+  {
+    "in": "\n/home/a/b/c= = zq1419zq1420\u0026token!",
+    "out": "(redacted-path) = zq1419zq1420\u0026token!"
+  },
+  {
+    "in": "'-pzq1421{;",
+    "out": "'-pzq1421{;"
+  },
+  {
+    "in": "zq1422\u0026#39;credentials: ",
+    "out": "zq1422\u0026#39;credentials:"
+  },
+  {
+    "in": "\"set-cookiezq1423/home/a/b/czq1424\u0026zq1425",
+    "out": "\"set-cookiezq1423/home/a/b/czq1424\u0026zq1425"
+  },
+  {
+    "in": "-----END PRIVATE KEY-----Bearer -pzq1426zq1427zq1428",
+    "out": "-----END PRIVATE KEY-----Bearer [redacted]"
+  },
+  {
+    "in": "[zq1429-pzq1430zq1431/home/a/b/c'Basic {session_id",
+    "out": "[zq1429-pzq1430zq1431/home/a/b/c'Basic {session_id"
+  },
+  {
+    "in": "zq1432zq1433zq1434/home/a/b/csecret\u0026#39;api_key--passwordtoken\u0026quot;zq1435",
+    "out": "zq1432zq1433zq1434/home/a/b/csecret\u0026#39;api_key--passwordtoken\u0026quot;zq1435"
+  },
+  {
+    "in": "] \\\\\"",
+    "out": "] \\\\\""
+  },
+  {
+    "in": "passphrase ;{Bearer token\\\\\" cookieC:\\Users\\a\\b\\c.txt",
+    "out": "passphrase ;{Bearer token\\\\\" cookieC:\\Users\\a\\b\\c.txt"
+  },
+  {
+    "in": " = zq1436AccountKey'\u0026#39;%3Dzq1437-p;Authorizationzq1438\n",
+    "out": "= zq1436AccountKey'\u0026#39;%3Dzq1437-p;Authorizationzq1438"
+  },
+  {
+    "in": "zq1439label[0",
+    "out": "zq1439label[0"
+  },
+  {
+    "in": "set-cookieauthtokens",
+    "out": "set-cookieauthtokens"
+  },
+  {
+    "in": "zq1440set-cookie PGPASSWORD",
+    "out": "zq1440set-cookie PGPASSWORD"
+  },
+  {
+    "in": "zq1441PGPASSWORD-p: zq1442\u0026Basic credentialszq1443!PGPASSWORDzq1444",
+    "out": "zq1441PGPASSWORD-p: [redacted]\u0026Basic credentialszq1443!PGPASSWORDzq1444"
+  },
+  {
+    "in": "auth=\\\\\"/home/a/b/ccookie",
+    "out": "auth=\\\\\"/home/a/b/ccookie"
+  },
+  {
+    "in": "zq1445Authorization\u0026quot;zq1446x%3D.Basic ",
+    "out": "zq1445Authorization\u0026quot;zq1446x%3D.Basic"
+  },
+  {
+    "in": "tokenzq1447zq1448-p--password\"Client Secret\"zq1449credentials",
+    "out": "tokenzq1447zq1448-p--password\"Client Secret\"zq1449credentials"
+  },
+  {
+    "in": "cookieAccountKeylabelzq1450\\\\\\\"zq1451zq1452zq1453! zq1454\\\\\"",
+    "out": "cookieAccountKeylabelzq1450\\\\\\\"zq1451zq1452zq1453! zq1454\\\\\""
+  },
+  {
+    "in": " zq1455cookie\u0026Cookie,=\\\u0026#39;zq1456",
+    "out": "zq1455cookie\u0026Cookie,=\\\u0026#39;zq1456"
+  },
+  {
+    "in": " zq1457zq1458zq1459[passphrase: Authorization-----END PRIVATE KEY-----",
+    "out": "zq1457zq1458zq1459[passphrase: Authorization-----END PRIVATE KEY-----"
+  },
+  {
+    "in": "\u0026#39; Authorizationsession_idAuthorization",
+    "out": "\u0026#39; Authorizationsession_idAuthorization"
+  },
+  {
+    "in": "\u0026#39;AuthorizationpassphraseBearer cookie--passwordsecret0-----BEGIN PRIVATE KEY-----",
+    "out": "\u0026#39;AuthorizationpassphraseBearer cookie--passwordsecret0-----BEGIN PRIVATE KEY-----"
+  },
+  {
+    "in": "Authorization\u0026#39;tokenspassphrase",
+    "out": "Authorization\u0026#39;tokenspassphrase"
+  },
+  {
+    "in": "it's\"Client Secret\" credentialszq1460AccountKey",
+    "out": "it's\"Client Secret\" credentialszq1460AccountKey"
+  },
+  {
+    "in": "zq1461}=\"Client Secret\"x",
+    "out": "zq1461}=\"Client Secret\"x"
+  },
+  {
+    "in": "\u0026#39;\\zq1462credentials%3D\"Client Secret\"zq1463AccountKeyzq1464",
+    "out": "\u0026#39;\\zq1462credentials%3D\"Client Secret\"zq1463AccountKeyzq1464"
+  },
+  {
+    "in": "{Authorizationzq1465",
+    "out": "{Authorizationzq1465"
+  },
+  {
+    "in": "\"Client Secret\" -pit's",
+    "out": "\"Client Secret\" -pit's"
+  },
+  {
+    "in": "label ]zq1466}}secret",
+    "out": "label ]zq1466}}secret"
+  },
+  {
+    "in": "\u0026#39;}=zq1467--password}it's\n",
+    "out": "\u0026#39;}=zq1467--password}it's"
+  },
+  {
+    "in": "'db.password-----BEGIN PRIVATE KEY-----:\\\\\": zq1468zq1469secret",
+    "out": "'db.password-----BEGIN PRIVATE KEY-----:\\\\\": zq1468zq1469secret"
+  },
+  {
+    "in": "zq1470api_key.\u0026AccountKey\"Client Secret\"=:\t\u0026quot;\nzq1471",
+    "out": "zq1470api_key.\u0026AccountKey\"Client Secret\"=:\t\u0026quot;\nzq1471"
+  },
+  {
+    "in": "token; set-cookie%3Dzq1472passphrasezq1473.\u0026",
+    "out": "token; set-cookie%3Dzq1472passphrasezq1473.\u0026"
+  },
+  {
+    "in": "zq1474:session_idzq1475} \u0026quot;",
+    "out": "zq1474:session_idzq1475} \u0026quot;"
+  },
+  {
+    "in": "zq1476https://u:p@example.test/x?token=y : %3D. --password\u0026quot;: \\\"",
+    "out": "zq1476https://u:p@example.test/x?token=[redacted] : %3D. --password\u0026quot;: \\\""
+  },
+  {
+    "in": "db.password!label\\\\\\\"https://u:p@example.test/x?token=y-pzq1477",
+    "out": "db.password!label\\\\\\\"https://example.test/..."
+  },
+  {
+    "in": ".Cookie-----END PRIVATE KEY-----/home/a/b/czq1478",
+    "out": ".Cookie-----END PRIVATE KEY-----/home/a/b/czq1478"
+  },
+  {
+    "in": "Cookiepasswordzq1479session_id",
+    "out": "Cookiepasswordzq1479session_id"
+  },
+  {
+    "in": ";zq1480zq1481zq1482zq1483passphrase\"Client Secret\"Authorization\\\\\\\\\"zq1484",
+    "out": ";zq1480zq1481zq1482zq1483passphrase\"Client Secret\"Authorization\\\\\\\\\"zq1484"
+  },
+  {
+    "in": "C:\\Users\\a\\b\\c.txtzq14850zq1486zq1487-----BEGIN PRIVATE KEY-----zq1488",
+    "out": "(redacted-path) PRIVATE KEY-----zq1488"
+  },
+  {
+    "in": "}labelauth",
+    "out": "}labelauth"
+  },
+  {
+    "in": " -----END PRIVATE KEY-----\"Client Secret\"",
+    "out": "-----END PRIVATE KEY-----\"Client Secret\""
+  },
+  {
+    "in": "\\set-cookiezq1489\u0026#39;Basic :CookiePGPASSWORDtoken",
+    "out": "\\set-cookiezq1489\u0026#39;Basic :CookiePGPASSWORDtoken"
+  },
+  {
+    "in": " \\\"passphrase'",
+    "out": "\\\"passphrase'"
+  },
+  {
+    "in": "zq1490zq1491Cookie'zq1492!zq1493zq1494\nC:\\Users\\a\\b\\c.txtcookiezq1495",
+    "out": "zq1490zq1491Cookie'zq1492!zq1493zq1494\n(redacted-path)"
+  },
+  {
+    "in": "zq1496zq1497zq1498zq1499zq1500session_id\\\"\\\\\\\"",
+    "out": "zq1496zq1497zq1498zq1499zq1500session_id\\\"\\\\\\\""
+  },
+  {
+    "in": " {Cookie::\t:\t-p",
+    "out": "{Cookie::\t:\t-p"
+  },
+  {
+    "in": " zq1501db.passwordx\n \\\\\"PGPASSWORD'",
+    "out": "zq1501db.passwordx\n \\\\\"PGPASSWORD'"
+  },
+  {
+    "in": "\\\" PGPASSWORDzq1502zq1503",
+    "out": "\\\" PGPASSWORDzq1502zq1503"
+  },
+  {
+    "in": "https://u:p@example.test/x?token=y!\\\\\";zq1504{",
+    "out": "https://example.test/...\";zq1504{"
+  },
+  {
+    "in": "\u0026AccountKeyzq1505--passwordzq1506[zq1507%3D  Cookie/home/a/b/c",
+    "out": "\u0026AccountKeyzq1505--passwordzq1506[zq1507%3D  Cookie/home/a/b/c"
+  },
+  {
+    "in": "auth\"Client Secret\"--passwordzq1508\u0026'zq1509https://u:p@example.test/x?token=y",
+    "out": "auth\"Client Secret\"--passwordzq1508\u0026'zq1509https://u:p@example.test/x?token=[redacted]"
+  },
+  {
+    "in": "set-cookiepassphraseC:\\Users\\a\\b\\c.txtCookiecredentialszq1510-----END PRIVATE KEY-----Cookiezq1511,",
+    "out": "set-cookiepassphraseC:\\Users\\a\\b\\c.txtCookiecredentialszq1510-----END PRIVATE KEY-----Cookiezq1511,"
+  },
+  {
+    "in": "it'szq1512zq1513Cookie",
+    "out": "it'szq1512zq1513Cookie"
+  },
+  {
+    "in": "zq1514zq1515api_key'Cookiezq1516db.passwordzq1517cookiezq1518AccountKey",
+    "out": "zq1514zq1515api_key'Cookiezq1516db.passwordzq1517cookiezq1518AccountKey"
+  },
+  {
+    "in": ";AccountKeyzq1519it's]zq1520 !zq1521password",
+    "out": ";AccountKeyzq1519it's]zq1520 !zq1521password"
+  },
+  {
+    "in": "[x-----BEGIN PRIVATE KEY-----credentialstokensC:\\Users\\a\\b\\c.txt\\\\\\\"tokensAccountKey",
+    "out": "[x-----BEGIN PRIVATE KEY-----credentialstokensC:\\Users\\a\\b\\c.txt\\\\\\\"tokensAccountKey"
+  },
+  {
+    "in": "password/home/a/b/czq1522\nlabel-pzq1523{;C:\\Users\\a\\b\\c.txttokens",
+    "out": "password/home/a/b/czq1522\nlabel-pzq1523{;(redacted-path)"
+  },
+  {
+    "in": "'zq1524zq1525",
+    "out": "'zq1524zq1525"
+  },
+  {
+    "in": "\\\"\\\\\\\",:zq1526 = session_idhttps://u:p@example.test/x?token=y Bearer ",
+    "out": "\\\"\\\\\\\",:zq1526 = session_idhttps://u:p@example.test/x?token=[redacted] Bearer"
+  },
+  {
+    "in": "-pauthset-cookiezq1527:\tzq1528",
+    "out": "-pauthset-cookiezq1527:\tzq1528"
+  },
+  {
+    "in": "label\\,: ",
+    "out": "label\\,:"
+  },
+  {
+    "in": "Basic zq1529labelBasic credentialszq1530zq1531Basic zq1532{:\tzq1533",
+    "out": "Basic zq1529labelBasic credentialszq1530zq1531Basic zq1532{:\tzq1533"
+  },
+  {
+    "in": "zq1534\ncookieset-cookie",
+    "out": "zq1534\ncookieset-cookie"
+  },
+  {
+    "in": "zq1535zq15360/home/a/b/czq1537]cookieAuthorizationAuthorization;%3D",
+    "out": "zq1535zq15360/home/a/b/czq1537]cookieAuthorizationAuthorization;%3D"
+  },
+  {
+    "in": "\u0026#39; zq1538zq1539{\npasswordzq1540'zq1541\u0026#39;",
+    "out": "\u0026#39; zq1538zq1539{\npasswordzq1540'zq1541\u0026#39;"
+  },
+  {
+    "in": "\\\\\\\"credentials\nzq1542cookie.Basic ",
+    "out": "\\\\\\\"credentials\nzq1542cookie.Basic"
+  },
+  {
+    "in": "]zq1543https://u:p@example.test/x?token=yauth:Cookiezq1544AccountKeyzq1545%3D",
+    "out": "]zq1543https://u:p@example.test/x?token=[redacted]"
+  },
+  {
+    "in": "zq1546AuthorizationAuthorization xzq1547api_key:\tx",
+    "out": "zq1546AuthorizationAuthorization xzq1547api_key:\t[redacted]"
+  },
+  {
+    "in": "zq1548-----BEGIN PRIVATE KEY-----zq1549\\\\\\\",passphrasezq1550",
+    "out": "zq1548-----BEGIN PRIVATE KEY-----zq1549\\\\\\\",passphrasezq1550"
+  },
+  {
+    "in": ",{\u0026#39;%3D AccountKey!%3Dapi_keyx]zq1551",
+    "out": ",{\u0026#39;%3D AccountKey!%3Dapi_keyx]zq1551"
+  },
+  {
+    "in": "zq1552zq1553zq1554-pPGPASSWORDpassphrasezq1555",
+    "out": "zq1552zq1553zq1554-pPGPASSWORDpassphrasezq1555"
+  },
+  {
+    "in": "zq1556zq1557zq1558C:\\Users\\a\\b\\c.txtzq1559zq1560\\\\\" Basic zq1561",
+    "out": "zq1556zq1557zq1558C:\\Users\\a\\b\\c.txtzq1559zq1560\\\\\" Basic zq1561"
+  },
+  {
+    "in": ":%3Dtoken/home/a/b/czq1562Basic ",
+    "out": ":%3Dtoken/home/a/b/czq1562Basic"
+  },
+  {
+    "in": " secret\"Client Secret\"api_key\n = Authorization\\\"set-cookie",
+    "out": "secret\"Client Secret\"api_key\n = [redacted]"
+  },
+  {
+    "in": "[zq1563zq1564'-----END PRIVATE KEY-----label]:zq1565it's",
+    "out": "[zq1563zq1564'-----END PRIVATE KEY-----label]:zq1565it's"
+  },
+  {
+    "in": "https://u:p@example.test/x?token=yzq1566api_keypassword{zq1567token ",
+    "out": "https://example.test/..."
+  },
+  {
+    "in": "set-cookie\\\"-----END PRIVATE KEY-----zq1568Cookiezq1569zq1570",
+    "out": "set-cookie\\\"-----END PRIVATE KEY-----zq1568Cookiezq1569zq1570"
+  },
+  {
+    "in": "-----BEGIN PRIVATE KEY-----zq1571C:\\Users\\a\\b\\c.txt: cookie[zq1572zq1573\"zq1574",
+    "out": "-----BEGIN PRIVATE KEY-----zq1571C:\\Users\\a\\b\\c.txt: cookie[zq1572zq1573\"zq1574"
+  },
+  {
+    "in": "zq1575\u0026quot;\u0026#39;\"set-cookie/home/a/b/czq1576zq1577/home/a/b/cauth:\t]",
+    "out": "zq1575\u0026quot;\u0026#39;\"set-cookie/home/a/b/czq1576zq1577/home/a/b/cauth:\t]"
+  },
+  {
+    "in": "zq1578: zq1579",
+    "out": "zq1578: zq1579"
+  },
+  {
+    "in": "Authorizationzq1580,",
+    "out": "Authorizationzq1580,"
+  },
+  {
+    "in": "%3D secret\\\"PGPASSWORDzq1581credentials:\t--password\n",
+    "out": "%3D secret\\\"PGPASSWORDzq1581credentials:\t[redacted]"
+  },
+  {
+    "in": "Basic !auth\u0026\\\u0026\"Client Secret\" ",
+    "out": "Basic !auth\u0026\\\u0026\"Client Secret\""
+  },
+  {
+    "in": " zq1582it's-p\\\\\"tokens;zq1583,",
+    "out": "zq1582it's-p\\\\\"tokens;zq1583,"
+  },
+  {
+    "in": "session_idlabel%3Dlabellabeltokenauth-ptokenszq1584label%3D",
+    "out": "session_idlabel%3Dlabellabeltokenauth-ptokenszq1584label%3D"
+  },
+  {
+    "in": "]C:\\Users\\a\\b\\c.txtcookiezq1585\\\\\\\"-----BEGIN PRIVATE KEY----- zq1586zq1587it's--password",
+    "out": "](redacted-path)\\\\\\\"-----BEGIN PRIVATE KEY----- zq1586zq1587it's--password"
+  },
+  {
+    "in": "\u0026api_keyhttps://u:p@example.test/x?token=y",
+    "out": "\u0026api_keyhttps://u:p@example.test/x?token=[redacted]"
+  },
+  {
+    "in": "zq1588zq1589]\"zq1590!:\t-----BEGIN PRIVATE KEY-----\"Client Secret\"zq1591https://u:p@example.test/x?token=y",
+    "out": "zq1588zq1589]\"zq1590!:\t-----BEGIN PRIVATE KEY-----\"Client Secret\"zq1591https://u:p@example.test/x?token=[redacted]"
+  },
+  {
+    "in": "\\\\\\\"/home/a/b/czq1592",
+    "out": "\\\\\\\"/home/a/b/czq1592"
+  },
+  {
+    "in": "Basic \u0026#39;credentialszq1593session_id'",
+    "out": "Basic \u0026#39;credentialszq1593session_id'"
+  },
+  {
+    "in": "\u0026quot;zq1594Basic --password[=zq1595}Authorization\u0026quot;",
+    "out": "\u0026quot;zq1594Basic --password[=zq1595}Authorization\u0026quot;"
+  },
+  {
+    "in": "0 AccountKey",
+    "out": "0 AccountKey"
+  },
+  {
+    "in": " \u0026#39;Authorizationzq1596\\\\\\\"x = zq1597\\\".credentials",
+    "out": "\u0026#39;Authorizationzq1596\\\\\\\"x = zq1597\\\".credentials"
+  },
+  {
+    "in": "\u0026Bearer !zq1598:xAccountKeyzq1599zq1600zq1601",
+    "out": "\u0026Bearer !zq1598:xAccountKeyzq1599zq1600zq1601"
+  },
+  {
+    "in": "'PGPASSWORDCookiezq1602 :]",
+    "out": "'PGPASSWORDCookiezq1602 :[redacted]"
+  },
+  {
+    "in": "\u0026#39;secret-----END PRIVATE KEY-----xpassword = \": zq1603Bearer Cookie\\\\\"",
+    "out": "\u0026#39;secret-----END PRIVATE KEY-----xpassword = [redacted]"
+  },
+  {
+    "in": ": tokencredentials",
+    "out": ": tokencredentials"
+  },
+  {
+    "in": "C:\\Users\\a\\b\\c.txtzq1604AccountKey]zq1605tokenszq1606Cookietokens",
+    "out": "(redacted-path)"
+  },
+  {
+    "in": "[zq1607zq1608zq1609",
+    "out": "[zq1607zq1608zq1609"
+  },
+  {
+    "in": "zq1610tokenspassword--password",
+    "out": "zq1610tokenspassword--password"
+  },
+  {
+    "in": "zq1611{zq1612\\\\\\\"-p}zq1613!Bearer \",",
+    "out": "zq1611{zq1612\\\\\\\"-p}zq1613!Bearer \","
+  },
+  {
+    "in": "\\\\\\\"/home/a/b/c! = -----END PRIVATE KEY------p.zq1614zq1615",
+    "out": "\\\\\\\"/home/a/b/c! = -----END PRIVATE KEY------p.zq1614zq1615"
+  },
+  {
+    "in": " tokensPGPASSWORD\\\\\\\" ",
+    "out": "tokensPGPASSWORD\\\\\\\""
+  },
+  {
+    "in": "\"\\\"credentials\ncredentialszq1616 label\"Client Secret\"\\\\\\\"https://u:p@example.test/x?token=y",
+    "out": "\"\\\"credentials\ncredentialszq1616 label\"Client Secret\"\\\\\\\"https://example.test/..."
+  },
+  {
+    "in": "zq1617'zq1618zq1619Basic \u0026quot;zq1620: :\ttokenshttps://u:p@example.test/x?token=y\\",
+    "out": "zq1617'zq1618zq1619Basic \u0026quot;zq1620: :\ttokenshttps://u:p@example.test/x?token=[redacted]\\"
+  },
+  {
+    "in": "\\\"passphraseit's'session_idzq1621\n",
+    "out": "\\\"passphraseit's'session_idzq1621"
+  },
+  {
+    "in": "%3Dzq1622authzq1623}label = ;session_idzq1624zq1625zq1626",
+    "out": "%3Dzq1622authzq1623}label = ;session_idzq1624zq1625zq1626"
+  },
+  {
+    "in": "db.password\\\\\\\": zq1627--passwordhttps://u:p@example.test/x?token=y=zq1628\"Client Secret\"authzq1629token",
+    "out": "db.password\\\\\\\": zq1627--passwordhttps://u:p@example.test/x?token=[redacted]"
+  },
+  {
+    "in": "%3D]zq1630",
+    "out": "%3D]zq1630"
+  },
+  {
+    "in": ",0zq1631zq1632zq1633Bearer \\\\\" = \u0026",
+    "out": ",0zq1631zq1632zq1633Bearer \\\\\" = \u0026"
+  },
+  {
+    "in": "zq1634xC:\\Users\\a\\b\\c.txt! ",
+    "out": "zq1634xC:\\Users\\a\\b\\c.txt!"
+  },
+  {
+    "in": "zq1635'}labelsecretit's\nzq1636/home/a/b/c",
+    "out": "zq1635'}labelsecretit's\nzq1636/home/a/b/c"
+  },
+  {
+    "in": "%3Dpassphrase--passwordzq1637 = zq1638",
+    "out": "%3Dpassphrase--passwordzq1637 = zq1638"
+  },
+  {
+    "in": "\u0026Authorizationx zq1639-----BEGIN PRIVATE KEY-----:\t",
+    "out": "\u0026Authorizationx zq1639-----BEGIN PRIVATE KEY-----:"
+  },
+  {
+    "in": ",\\\\\\\"secret;[AccountKey",
+    "out": ",\\\\\\\"secret;[AccountKey"
+  },
+  {
+    "in": "credentialscookie-----END PRIVATE KEY-----\u0026quot;credentials0token",
+    "out": "credentialscookie-----END PRIVATE KEY-----\u0026quot;credentials0token"
+  },
+  {
+    "in": " ;zq1640\u0026quot;",
+    "out": ";zq1640\u0026quot;"
+  },
+  {
+    "in": "zq1641api_keyzq1642Basic it'szq1643db.passwordzq1644it's;",
+    "out": "zq1641api_keyzq1642Basic it'szq1643db.passwordzq1644it's;"
+  },
+  {
+    "in": "/home/a/b/c[zq1645 zq1646zq1647session_idzq1648\\zq1649zq1650]",
+    "out": "(redacted-path) zq1646zq1647session_idzq1648\\zq1649zq1650]"
+  },
+  {
+    "in": "Authorizationzq1651zq1652 =;labelpassphrase%3Dzq1653",
+    "out": "Authorizationzq1651zq1652 =;labelpassphrase%3Dzq1653"
+  },
+  {
+    "in": "zq1654\u0026-pPGPASSWORDtoken",
+    "out": "zq1654\u0026-pPGPASSWORDtoken"
+  },
+  {
+    "in": "auth=\u0026quot;:\tzq1655zq1656zq1657 = zq1658zq1659",
+    "out": "auth=\u0026quot;:\tzq1655zq1656zq1657 = zq1658zq1659"
+  },
+  {
+    "in": "\"Client Secret\"\\\":\tlabel",
+    "out": "\"Client Secret\"\\\":\tlabel"
+  },
+  {
+    "in": "zq1660\u0026quot;zq1661zq1662\\\\\"PGPASSWORD",
+    "out": "zq1660\u0026quot;zq1661zq1662\\\\\"PGPASSWORD"
+  },
+  {
+    "in": "C:\\Users\\a\\b\\c.txt= zq1663",
+    "out": "(redacted-path) zq1663"
+  },
+  {
+    "in": "Bearer x-ptoken",
+    "out": "Bearer [redacted]"
+  },
+  {
+    "in": "zq1664tokenPGPASSWORDpassphrase\u0026#39;cookiedb.password,PGPASSWORDsession_id",
+    "out": "zq1664tokenPGPASSWORDpassphrase\u0026#39;cookiedb.password,PGPASSWORDsession_id"
+  },
+  {
+    "in": "zq1665zq1666password;https://u:p@example.test/x?token=yC:\\Users\\a\\b\\c.txtC:\\Users\\a\\b\\c.txt-p",
+    "out": "zq1665zq1666password;https://example.test/..."
+  },
+  {
+    "in": "%3Dzq1667,credentialszq1668  ;\n\" ",
+    "out": "%3Dzq1667,credentialszq1668  ;\n\""
+  },
+  {
+    "in": "{. =",
+    "out": "{. ="
+  },
+  {
+    "in": "it's\\\\\"0",
+    "out": "it's\\\\\"0"
+  },
+  {
+    "in": "%3D/home/a/b/cCookie: \"\\\"db.password..--passwordBasic zq1669",
+    "out": "%3D/home/a/b/cCookie: \"\\\"db.password..--passwordBasic zq1669"
+  },
+  {
+    "in": "[zq1670-----BEGIN PRIVATE KEY-----",
+    "out": "[zq1670-----BEGIN PRIVATE KEY-----"
+  },
+  {
+    "in": "\"Client Secret\"labelcredentialstokenlabel",
+    "out": "\"Client Secret\"labelcredentialstokenlabel"
+  },
+  {
+    "in": "zq1671! = \\\\\"",
+    "out": "zq1671! = \\\\\""
+  },
+  {
+    "in": ",]tokendb.password=;x",
+    "out": ",]tokendb.password=;x"
+  },
+  {
+    "in": " = \\\"zq1672credentials%3Dzq1673",
+    "out": "= \\\"zq1672credentials%3Dzq1673"
+  },
+  {
+    "in": "zq1674zq1675-----BEGIN PRIVATE KEY-----",
+    "out": "zq1674zq1675-----BEGIN PRIVATE KEY-----"
+  },
+  {
+    "in": "/home/a/b/c%3DPGPASSWORDx'auth = zq1676session_idPGPASSWORD]",
+    "out": "(redacted-path) = zq1676session_idPGPASSWORD]"
+  },
+  {
+    "in": "\u0026#39;token{zq1677",
+    "out": "\u0026#39;token{zq1677"
+  },
+  {
+    "in": "session_iddb.passwordtoken'\\\\\"zq1678credentials:\tzq1679cookie\u0026#39;",
+    "out": "session_iddb.passwordtoken'\\\\\"zq1678credentials:\t[redacted]\u0026#39;"
+  },
+  {
+    "in": "PGPASSWORD-p[passphrase set-cookietoken,PGPASSWORDzq1680zq1681",
+    "out": "PGPASSWORD-p[passphrase set-cookietoken,PGPASSWORDzq1680zq1681"
+  },
+  {
+    "in": " session_id\\\\\\\"\n",
+    "out": "session_id\\\\\\\""
+  },
+  {
+    "in": "api_keyzq1682;[!zq1683C:\\Users\\a\\b\\c.txtzq1684Basic \n{",
+    "out": "api_keyzq1682;[!zq1683C:\\Users\\a\\b\\c.txtzq1684Basic \n{"
+  },
+  {
+    "in": ":\tzq1685\\\\\":",
+    "out": ":\tzq1685\\\\\":"
+  },
+  {
+    "in": "labelCookiezq1686",
+    "out": "labelCookiezq1686"
+  },
+  {
+    "in": "zq1687Basic Cookie\"}passwordzq1688xzq1689PGPASSWORD",
+    "out": "zq1687Basic Cookie\"}passwordzq1688xzq1689PGPASSWORD"
+  },
+  {
+    "in": "-----BEGIN PRIVATE KEY-----zq1690zq1691\\ ",
+    "out": "-----BEGIN PRIVATE KEY-----zq1690zq1691\\"
+  },
+  {
+    "in": "https://u:p@example.test/x?token=ytokens-----END PRIVATE KEY-----=authzq1692",
+    "out": "https://example.test/... PRIVATE KEY-----=authzq1692"
+  },
+  {
+    "in": "zq1693credentialszq1694Authorizationtokens/home/a/b/cAuthorization",
+    "out": "zq1693credentialszq1694Authorizationtokens/home/a/b/cAuthorization"
+  },
+  {
+    "in": "AccountKeypassphrasecredentialszq1695zq1696zq1697-pAccountKeyzq1698]credentials-----END PRIVATE KEY-----",
+    "out": "AccountKeypassphrasecredentialszq1695zq1696zq1697-pAccountKeyzq1698]credentials-----END PRIVATE KEY-----"
+  },
+  {
+    "in": "-----BEGIN PRIVATE KEY-------password-----BEGIN PRIVATE KEY-----\"Client Secret\"Cookiezq1699\"Cookie[-----BEGIN PRIVATE KEY-----zq1700",
+    "out": "-----BEGIN PRIVATE KEY-------password-----BEGIN PRIVATE KEY-----\"Client Secret\"Cookiezq1699\"Cookie[-----BEGIN PRIVATE KEY-----zq1700"
+  },
+  {
+    "in": "zq1701credentials--passwordcredentialszq1702",
+    "out": "zq1701credentials--passwordcredentialszq1702"
+  },
+  {
+    "in": "labelzq1703.\\zq1704zq1705it's,-----END PRIVATE KEY-----",
+    "out": "labelzq1703.\\zq1704zq1705it's,-----END PRIVATE KEY-----"
+  },
+  {
+    "in": "secretzq1706/home/a/b/c%3D-ppassphrase/home/a/b/c",
+    "out": "secretzq1706/home/a/b/c%3D-ppassphrase/home/a/b/c"
+  },
+  {
+    "in": "password\"Client Secret\"'\u0026,zq1707credentialsBasic \\\"\\\\\\\"",
+    "out": "password\"Client Secret\"'\u0026,zq1707credentialsBasic \\\"\\\\\\\""
+  },
+  {
+    "in": "x\n-p}Basic \"Client Secret\"\"passphrase\\\\\"zq1708Authorizationzq1709",
+    "out": "x\n-p}Basic \"Client Secret\"\"passphrase\\\\\"zq1708Authorizationzq1709"
+  },
+  {
+    "in": ":zq1710\"\u0026#39;=:cookiedb.passwordzq1711zq1712zq1713",
+    "out": ":zq1710\"\u0026#39;=:cookiedb.passwordzq1711zq1712zq1713"
+  },
+  {
+    "in": "AuthorizationCookieAuthorizationzq1714 PGPASSWORDAccountKey\\\\\\\"https://u:p@example.test/x?token=y:",
+    "out": "AuthorizationCookieAuthorizationzq1714 PGPASSWORDAccountKey\\\\\\\"https://example.test/...:"
+  },
+  {
+    "in": "/home/a/b/cdb.passwordpasswordzq1715{ = zq1716secret\\\\\\\"]zq1717zq1718",
+    "out": "(redacted-path) = zq1716secret\\\\\\\"]zq1717zq1718"
+  },
+  {
+    "in": "token,:\t\u0026",
+    "out": "token,:\t\u0026"
+  },
+  {
+    "in": "set-cookiesecret[ zq1719",
+    "out": "set-cookiesecret[ zq1719"
+  },
+  {
+    "in": "\"Client Secret\"{zq1720zq1721label it's\\\"\u0026",
+    "out": "\"Client Secret\"{zq1720zq1721label it's\\\"\u0026"
+  },
+  {
+    "in": "\u0026quot;secretit's0'PGPASSWORD",
+    "out": "\u0026quot;secretit's0'PGPASSWORD"
+  },
+  {
+    "in": "\\\\\\\"zq1722it'scookiecookieit'spassword",
+    "out": "\\\\\\\"zq1722it'scookiecookieit'spassword"
+  },
+  {
+    "in": "zq1723\"{zq1724\u0026quot;set-cookie",
+    "out": "zq1723\"{zq1724\u0026quot;set-cookie"
+  },
+  {
+    "in": "zq1725passwordzq1726labelcredentials",
+    "out": "zq1725passwordzq1726labelcredentials"
+  },
+  {
+    "in": "zq1727 Cookiezq1728https://u:p@example.test/x?token=yzq1729zq1730",
+    "out": "zq1727 Cookiezq1728https://u:p@example.test/x?token=[redacted]"
+  },
+  {
+    "in": "!!xlabel",
+    "out": "!!xlabel"
+  },
+  {
+    "in": "\\\\\"secret-----BEGIN PRIVATE KEY-----\u0026#39;Bearer zq1731zq1732secret",
+    "out": "\\\\\"secret-----BEGIN PRIVATE KEY-----\u0026#39;Bearer [redacted]"
+  },
+  {
+    "in": "passphrasepasswordsession_idzq1733passphrase\n%3D\\\\\" zq1734",
+    "out": "passphrasepasswordsession_idzq1733passphrase\n%3D\\\\\" zq1734"
+  },
+  {
+    "in": ".  zq1735\u0026#39;",
+    "out": ".  zq1735\u0026#39;"
+  },
+  {
+    "in": "\u0026 zq1736CookieBearer ",
+    "out": "\u0026 zq1736CookieBearer"
+  },
+  {
+    "in": "] zq1737",
+    "out": "] zq1737"
+  },
+  {
+    "in": " :api_key",
+    "out": ":api_key"
+  },
+  {
+    "in": "passphrase token}xAuthorizationzq1738:]",
+    "out": "passphrase token}xAuthorizationzq1738:]"
+  },
+  {
+    "in": "\u0026quot;=zq1739token {];api_key",
+    "out": "\u0026quot;=zq1739token {];api_key"
+  },
+  {
+    "in": "] zq1740",
+    "out": "] zq1740"
+  },
+  {
+    "in": "=zq1741.%3D-p]C:\\Users\\a\\b\\c.txt;\"\\\\\"",
+    "out": "=zq1741.%3D-p](redacted-path)\\\\\""
+  },
+  {
+    "in": " zq1742\\\\\"\\\\\"",
+    "out": "zq1742\\\\\"\\\\\""
+  },
+  {
+    "in": ";\"Client Secret\"passphrasezq1743:\u0026#39;zq1744",
+    "out": ";\"Client Secret\"passphrasezq1743:\u0026#39;zq1744"
+  },
+  {
+    "in": "zq1745\\\\\\\"'it'sC:\\Users\\a\\b\\c.txtzq1746zq1747",
+    "out": "zq1745\\\\\\\"'it'sC:\\Users\\a\\b\\c.txtzq1746zq1747"
+  },
+  {
+    "in": "%3D \\\"\\\\\\\"zq1748labelzq1749]cookie zq1750\"Client Secret\"",
+    "out": "%3D \\\"\\\\\\\"zq1748labelzq1749]cookie zq1750\"Client Secret\""
+  },
+  {
+    "in": "authauthBasic set-cookie\"/home/a/b/ctoken-p\\\"Basic ",
+    "out": "authauthBasic set-cookie\"/home/a/b/ctoken-p\\\"Basic"
+  },
+  {
+    "in": "-----BEGIN PRIVATE KEY-----zq1751zq1752labeldb.passwordzq1753-----END PRIVATE KEY----- = zq1754session_id",
+    "out": "-----BEGIN PRIVATE KEY-----zq1751zq1752labeldb.passwordzq1753-----END PRIVATE KEY----- = zq1754session_id"
+  },
+  {
+    "in": "passphraseapi_keyxzq1755[https://u:p@example.test/x?token=yx",
+    "out": "passphraseapi_keyxzq1755[https://example.test/..."
+  },
+  {
+    "in": "zq1756 = tokensauth}AccountKeyzq1757-----END PRIVATE KEY-----",
+    "out": "zq1756 = tokensauth}AccountKeyzq1757-----END PRIVATE KEY-----"
+  },
+  {
+    "in": "authzq1758zq1759",
+    "out": "authzq1758zq1759"
+  },
+  {
+    "in": "Bearer %3D-----BEGIN PRIVATE KEY-----Authorization\\\"authzq1760",
+    "out": "Bearer %3D-----BEGIN PRIVATE KEY-----Authorization\\\"authzq1760"
+  },
+  {
+    "in": "PGPASSWORDsession_idBasic zq1761-----BEGIN PRIVATE KEY-----\\",
+    "out": "PGPASSWORDsession_idBasic zq1761-----BEGIN PRIVATE KEY-----\\"
+  },
+  {
+    "in": "\nzq1762\u0026#39;zq1763zq1764}it'sx = ",
+    "out": "zq1762\u0026#39;zq1763zq1764}it'sx ="
+  },
+  {
+    "in": "db.passwordtokenszq1765 = :.,zq1766}}",
+    "out": "db.passwordtokenszq1765 = :.,zq1766}}"
+  },
+  {
+    "in": "{!https://u:p@example.test/x?token=y: set-cookie: ",
+    "out": "{!https://example.test/...: set-cookie:"
+  },
+  {
+    "in": "https://u:p@example.test/x?token=y'=/home/a/b/czq1767authdb.passwordsession_id\\\\\"=tokenzq1768",
+    "out": "https://example.test/...'=(redacted-path)"
+  },
+  {
+    "in": "PGPASSWORDzq1769api_keyzq1770\\\\\":\t\"Client Secret\"Bearer zq1771zq1772 ",
+    "out": "PGPASSWORDzq1769api_keyzq1770\\\\\":\t\"Client Secret\"Bearer [redacted]"
+  },
+  {
+    "in": "cookie-pzq1773]\u0026quot;{ ",
+    "out": "cookie-pzq1773]\u0026quot;{"
+  },
+  {
+    "in": " credentials}",
+    "out": "credentials}"
+  },
+  {
+    "in": "zq1774:\tAccountKey !zq1775C:\\Users\\a\\b\\c.txtzq1776auth",
+    "out": "zq1774:\tAccountKey !zq1775C:\\Users\\a\\b\\c.txtzq1776auth"
+  },
+  {
+    "in": "zq1777'\u0026#39;-----BEGIN PRIVATE KEY-----\"\"\\\"zq1778 -----END PRIVATE KEY-----]zq1779",
+    "out": "zq1777'\u0026#39;-----BEGIN PRIVATE KEY-----\"\"\\\"zq1778 -----END PRIVATE KEY-----]zq1779"
+  },
+  {
+    "in": "db.passwordzq1780zq17810zq1782",
+    "out": "db.passwordzq1780zq17810zq1782"
+  },
+  {
+    "in": "set-cookiecookieauthzq1783]zq1784C:\\Users\\a\\b\\c.txtzq1785 zq1786!",
+    "out": "set-cookiecookieauthzq1783]zq1784C:\\Users\\a\\b\\c.txtzq1785 zq1786!"
+  },
+  {
+    "in": "https://u:p@example.test/x?token=yhttps://u:p@example.test/x?token=yzq1787-pBasic %3Dapi_key'",
+    "out": "https://example.test/... %3Dapi_key'"
+  },
+  {
+    "in": "]db.password = 0'\nBearer  ;zq1788zq1789",
+    "out": "]db.password = [redacted]"
+  },
+  {
+    "in": "Cookiezq1790zq17910\u0026#39;zq1792zq1793\\\\\\\"!}",
+    "out": "Cookiezq1790zq17910\u0026#39;zq1792zq1793\\\\\\\"!}"
+  },
+  {
+    "in": "zq1794C:\\Users\\a\\b\\c.txtzq1795",
+    "out": "zq1794C:\\Users\\a\\b\\c.txtzq1795"
+  },
+  {
+    "in": "\u0026:credentials[zq1796zq1797Bearer ]password%3D",
+    "out": "\u0026:credentials[zq1796zq1797Bearer ]password%3D"
+  },
+  {
+    "in": "\"zq1798api_key\\\\\\\".zq1799zq1800zq1801db.password",
+    "out": "\"zq1798api_key\\\\\\\".zq1799zq1800zq1801db.password"
+  },
+  {
+    "in": "zq1802zq1803-----BEGIN PRIVATE KEY-----zq1804api_keyzq1805",
+    "out": "zq1802zq1803-----BEGIN PRIVATE KEY-----zq1804api_keyzq1805"
+  },
+  {
+    "in": "'x zq1806}",
+    "out": "'x zq1806}"
+  },
+  {
+    "in": "zq1807zq1808AccountKey\n",
+    "out": "zq1807zq1808AccountKey"
+  },
+  {
+    "in": "api_key,\"Client Secret\"-pzq1809 :\t\\\\\".:Cookie!",
+    "out": "api_key,\"Client Secret\"-pzq1809 :\t\\\\\".:Cookie!"
+  },
+  {
+    "in": ";it'sset-cookiezq1810'passphrasezq1811!\nset-cookie",
+    "out": ";it'sset-cookiezq1810'passphrasezq1811!\nset-cookie"
+  },
+  {
+    "in": "zq1812=\n = :secret\\\\\\\"-----BEGIN PRIVATE KEY-----,",
+    "out": "zq1812=\n = :secret\\\\\\\"-----BEGIN PRIVATE KEY-----,"
+  },
+  {
+    "in": "\\\\\\\"\\\\\\\"https://u:p@example.test/x?token=yhttps://u:p@example.test/x?token=yzq1813 credentialstokenssession_id=-pzq1814",
+    "out": "\\\\\\\"\\\\\\\"https://example.test/... credentialstokenssession_id=-pzq1814"
+  },
+  {
+    "in": "!zq1815session_idzq1816\\\\\"Bearer zq1817:\tzq1818",
+    "out": "!zq1815session_idzq1816\\\\\"Bearer zq1817:\tzq1818"
+  },
+  {
+    "in": "]api_keyzq1819it's,",
+    "out": "]api_keyzq1819it's,"
+  },
+  {
+    "in": " \"Client Secret\"PGPASSWORD",
+    "out": "\"Client Secret\"PGPASSWORD"
+  },
+  {
+    "in": "\"zq1820AccountKey!cookiezq1821\u0026#39;\n\u0026#39;[",
+    "out": "\"zq1820AccountKey!cookiezq1821\u0026#39;\n\u0026#39;["
+  },
+  {
+    "in": "\\set-cookie0\u0026#39;0Bearer ",
+    "out": "\\set-cookie0\u0026#39;0Bearer"
+  },
+  {
+    "in": "'-----BEGIN PRIVATE KEY----------END PRIVATE KEY-----Basic AuthorizationC:\\Users\\a\\b\\c.txtzq1822--password zq1823",
+    "out": "'-----BEGIN PRIVATE KEY----------END PRIVATE KEY-----Basic AuthorizationC:\\Users\\a\\b\\c.txtzq1822--password zq1823"
+  },
+  {
+    "in": "{tokenAccountKey-pzq1824;zq1825{db.password",
+    "out": "{tokenAccountKey-pzq1824;zq1825{db.password"
+  },
+  {
+    "in": "/home/a/b/c/home/a/b/ctokens\\'\u0026quot;AccountKeyzq1826Basic \"Client Secret\"",
+    "out": "(redacted-path) \"Client Secret\""
+  },
+  {
+    "in": "authdb.password[\\\\\\\"zq1827",
+    "out": "authdb.password[\\\\\\\"zq1827"
+  },
+  {
+    "in": "x--passwordAuthorizationBasic it'spassword",
+    "out": "x--passwordAuthorizationBasic it'spassword"
+  },
+  {
+    "in": "zq1828Basic zq1829secretauth%3D passphrase",
+    "out": "zq1828Basic zq1829secretauth%3D passphrase"
+  },
+  {
+    "in": "zq1830zq1831tokenzq1832--passwordzq1833-----BEGIN PRIVATE KEY-----:/home/a/b/c:\t",
+    "out": "zq1830zq1831tokenzq1832--passwordzq1833-----BEGIN PRIVATE KEY-----:(redacted-path)"
+  },
+  {
+    "in": "-----BEGIN PRIVATE KEY-----,: zq1834:;\"Client Secret\" zq1835",
+    "out": "-----BEGIN PRIVATE KEY-----,: zq1834:;\"Client Secret\" zq1835"
+  },
+  {
+    "in": "x=\"Client Secret\"secret}cookie.;",
+    "out": "x=\"Client Secret\"secret}cookie.;"
+  },
+  {
+    "in": "zq1836Basic !",
+    "out": "zq1836Basic !"
+  },
+  {
+    "in": "authzq1837:\tit's.zq1838zq1839zq1840",
+    "out": "authzq1837:\tit's.zq1838zq1839zq1840"
+  },
+  {
+    "in": "tokens\"Client Secret\"PGPASSWORD]\"\\token",
+    "out": "tokens\"Client Secret\"PGPASSWORD]\"\\token"
+  },
+  {
+    "in": "Cookie-----BEGIN PRIVATE KEY-----cookie,\u0026quot;https://u:p@example.test/x?token=yPGPASSWORD-p!zq1841PGPASSWORD",
+    "out": "Cookie-----BEGIN PRIVATE KEY-----cookie,\u0026quot;https://example.test/..."
+  },
+  {
+    "in": "].\"zq1842 zq1843",
+    "out": "].\"zq1842 zq1843"
+  },
+  {
+    "in": "it'szq1844C:\\Users\\a\\b\\c.txt",
+    "out": "it'szq1844C:\\Users\\a\\b\\c.txt"
+  },
+  {
+    "in": "\u0026quot;}Cookie}passphrase/home/a/b/c",
+    "out": "\u0026quot;}Cookie}passphrase/home/a/b/c"
+  },
+  {
+    "in": "zq1845zq1846zq1847credentialsAuthorization",
+    "out": "zq1845zq1846zq1847credentialsAuthorization"
+  },
+  {
+    "in": "\"cookiezq1848\u0026",
+    "out": "\"cookiezq1848\u0026"
+  },
+  {
+    "in": "%3D]--password",
+    "out": "%3D]--password"
+  },
+  {
+    "in": "AccountKey\\passwordBasic it'szq1849passphrase;",
+    "out": "AccountKey\\passwordBasic it'szq1849passphrase;"
+  },
+  {
+    "in": ",\\\\\"zq1850",
+    "out": ",\\\\\"zq1850"
+  },
+  {
+    "in": "zq1851C:\\Users\\a\\b\\c.txtzq1852Authorizationzq1853zq1854zq1855\\",
+    "out": "zq1851C:\\Users\\a\\b\\c.txtzq1852Authorizationzq1853zq1854zq1855\\"
+  },
+  {
+    "in": "Cookiezq1856-pzq1857Cookiesession_idzq1858zq1859\\\"Basic ",
+    "out": "Cookiezq1856-pzq1857Cookiesession_idzq1858zq1859\\\"Basic"
+  },
+  {
+    "in": "zq1860]Cookie-p .Bearer \u0026[",
+    "out": "zq1860]Cookie-p .Bearer \u0026["
+  },
+  {
+    "in": "[=zq1861!\n\\\\\",Cookiezq1862!zq1863",
+    "out": "[=zq1861!\n\\\\\",Cookiezq1862!zq1863"
+  },
+  {
+    "in": "zq1864/home/a/b/c'zq1865zq1866",
+    "out": "zq1864/home/a/b/c'zq1865zq1866"
+  },
+  {
+    "in": "zq1867: 'zq1868",
+    "out": "zq1867: 'zq1868"
+  },
+  {
+    "in": ",xpassword\\\\\\\"zq1869",
+    "out": ",xpassword\\\\\\\"zq1869"
+  },
+  {
+    "in": " \u0026quot;--passwordcookie/home/a/b/cC:\\Users\\a\\b\\c.txtAccountKey\u0026quot;]\\\\\"token-----END PRIVATE KEY-----",
+    "out": "\u0026quot;--passwordcookie/home/a/b/cC:\\Users\\a\\b\\c.txtAccountKey\u0026quot;]\\\\\"token-----END PRIVATE KEY-----"
+  },
+  {
+    "in": " zq1870zq1871zq1872{it's",
+    "out": "zq1870zq1871zq1872{it's"
+  },
+  {
+    "in": "api_key\"Client Secret\".credentialslabelcredentialspassphrase",
+    "out": "api_key\"Client Secret\".credentialslabelcredentialspassphrase"
+  },
+  {
+    "in": "x': :https://u:p@example.test/x?token=y!zq1873'https://u:p@example.test/x?token=yzq1874--password\\\\\"",
+    "out": "x': :https://example.test/...'https://example.test/...\""
+  },
+  {
+    "in": "secret:\tit'stokenspasswordzq1875zq1876tokenszq1877passwordzq1878",
+    "out": "secret:\t[redacted]"
+  },
+  {
+    "in": " =  zq1879C:\\Users\\a\\b\\c.txtCookiehttps://u:p@example.test/x?token=ysecret ",
+    "out": "=  zq1879C:\\Users\\a\\b\\c.txtCookiehttps://u:p@example.test/x?token=[redacted]"
+  },
+  {
+    "in": "passphrase Basic ",
+    "out": "passphrase Basic"
+  },
+  {
+    "in": "session_id;zq1880x",
+    "out": "session_id;zq1880x"
+  },
+  {
+    "in": "cookie-p,zq1881C:\\Users\\a\\b\\c.txt\"credentials/home/a/b/c:\t ",
+    "out": "cookie-p,zq1881C:\\Users\\a\\b\\c.txt\"credentials/home/a/b/c:"
+  },
+  {
+    "in": "zq1882zq1883cookie ",
+    "out": "zq1882zq1883cookie"
+  },
+  {
+    "in": ":\tAuthorizationzq1884cookie}\\\"cookie\"Client Secret\"cookiezq1885",
+    "out": ":\tAuthorizationzq1884cookie}\\\"cookie\"Client Secret\"cookiezq1885"
+  },
+  {
+    "in": "zq1886-----END PRIVATE KEY-----PGPASSWORD:\tzq1887%3D",
+    "out": "zq1886-----END PRIVATE KEY-----PGPASSWORD:\t[redacted]"
+  },
+  {
+    "in": " --password=}zq1888\"Client Secret\"zq1889",
+    "out": "--password=[redacted]"
+  },
+  {
+    "in": "zq1890\u0026#39;zq1891",
+    "out": "zq1890\u0026#39;zq1891"
+  },
+  {
+    "in": "passphrase\u0026password=",
+    "out": "passphrase\u0026password="
+  },
+  {
+    "in": ", tokens",
+    "out": ", tokens"
+  },
+  {
+    "in": "\"Client Secret\"-p'db.password",
+    "out": "\"Client Secret\"-p'db.password"
+  },
+  {
+    "in": ".zq1892C:\\Users\\a\\b\\c.txt",
+    "out": ".zq1892C:\\Users\\a\\b\\c.txt"
+  },
+  {
+    "in": "\\Authorization\\secretcredentialssession_id\"Client Secret\"zq1893zq1894zq1895tokens",
+    "out": "\\Authorization\\secretcredentialssession_id\"Client Secret\"zq1893zq1894zq1895tokens"
+  },
+  {
+    "in": "db.password-----BEGIN PRIVATE KEY-----secret",
+    "out": "db.password-----BEGIN PRIVATE KEY-----secret"
+  },
+  {
+    "in": ":\t-pzq1896credentials",
+    "out": ":\t-pzq1896credentials"
+  },
+  {
+    "in": "zq1897 \u0026'https://u:p@example.test/x?token=yapi_keydb.password%3Dsession_id\nzq1898",
+    "out": "zq1897 \u0026'https://example.test/...\nzq1898"
+  },
+  {
+    "in": "\nzq1899\ntokens; zq1900api_key]",
+    "out": "zq1899\ntokens; zq1900api_key]"
+  },
+  {
+    "in": "zq1901\\\\\"'\nAuthorization",
+    "out": "zq1901\\\\\"'\nAuthorization"
+  },
+  {
+    "in": "zq1902 \\\\\"0/home/a/b/czq1903set-cookietoken",
+    "out": "zq1902 \\\\\"0/home/a/b/czq1903set-cookietoken"
+  },
+  {
+    "in": " zq1904session_id,\"Client Secret\":\tzq1905",
+    "out": "zq1904session_id,\"Client Secret\":\tzq1905"
+  },
+  {
+    "in": "it'szq1906\u0026quot;passwordtokenssecret ",
+    "out": "it'szq1906\u0026quot;passwordtokenssecret"
+  },
+  {
+    "in": "\"Bearer zq1907\u0026api_keyzq1908zq1909zq1910:\t",
+    "out": "\"Bearer zq1907\u0026api_keyzq1908zq1909zq1910:"
+  },
+  {
+    "in": ":\t\u0026#39;-p",
+    "out": ":\t\u0026#39;-p"
+  },
+  {
+    "in": ";https://u:p@example.test/x?token=yzq1911--password{zq1912password-----BEGIN PRIVATE KEY-----",
+    "out": ";https://example.test/... PRIVATE KEY-----"
+  },
+  {
+    "in": "Basic secret\u0026#39;tokens\\\"",
+    "out": "Basic secret\u0026#39;tokens\\\""
+  },
+  {
+    "in": "zq1913it's\\\\\\\": -----BEGIN PRIVATE KEY-----%3Dzq1914",
+    "out": "zq1913it's\\\\\\\": -----BEGIN PRIVATE KEY-----%3Dzq1914"
+  },
+  {
+    "in": ":zq1915tokenAuthorizationdb.passwordzq1916-----END PRIVATE KEY-----",
+    "out": ":zq1915tokenAuthorizationdb.passwordzq1916-----END PRIVATE KEY-----"
+  },
+  {
+    "in": "set-cookiezq1917Bearer -----BEGIN PRIVATE KEY-----passphrasezq1918\\\"Cookie-----END PRIVATE KEY-----Authorization]%3D",
+    "out": "set-cookiezq1917Bearer -----BEGIN PRIVATE KEY-----passphrasezq1918\\\"Cookie-----END PRIVATE KEY-----Authorization]%3D"
+  },
+  {
+    "in": "zq1919label=zq1920label-----END PRIVATE KEY-----https://u:p@example.test/x?token=y,zq1921session_idsecrettokens",
+    "out": "zq1919label=zq1920label-----END PRIVATE KEY-----https://example.test/..."
+  },
+  {
+    "in": "PGPASSWORDtokenzq19220AccountKeyset-cookie",
+    "out": "PGPASSWORDtokenzq19220AccountKeyset-cookie"
+  },
+  {
+    "in": "{'set-cookie\\\\\\\"\u0026credentialssession_id",
+    "out": "{'set-cookie\\\\\\\"\u0026credentialssession_id"
+  },
+  {
+    "in": "zq1923Basic /home/a/b/c0zq1924zq1925https://u:p@example.test/x?token=yzq1926",
+    "out": "zq1923Basic (redacted-path)//u:p@example.test/x?token=[redacted]"
+  },
+  {
+    "in": ".zq1927;\\}zq1928],PGPASSWORDtokenzq1929: ",
+    "out": ".zq1927;\\}zq1928],PGPASSWORDtokenzq1929:"
+  },
+  {
+    "in": "--passwordzq1930-----END PRIVATE KEY-----\"",
+    "out": "--passwordzq1930-----END PRIVATE KEY-----\""
+  },
+  {
+    "in": "Authorization = set-cookie",
+    "out": "Authorization = set-cookie"
+  },
+  {
+    "in": "zq1931secret\\\"Cookiezq1932Basic zq1933passphrase'zq1934",
+    "out": "zq1931secret\\\"Cookiezq1932Basic zq1933passphrase'zq1934"
+  },
+  {
+    "in": " label{-p\nhttps://u:p@example.test/x?token=y/home/a/b/c\\\\\\\"db.password=zq1935label",
+    "out": "label{-p\nhttps://example.test/...\"db.password=[redacted]"
+  },
+  {
+    "in": "-----BEGIN PRIVATE KEY-----zq1936\\zq1937zq1938https://u:p@example.test/x?token=yzq1939secret]",
+    "out": "-----BEGIN PRIVATE KEY-----zq1936\\zq1937zq1938https://u:p@example.test/x?token=[redacted]"
+  },
+  {
+    "in": "!:\t:\tAuthorizationzq1940Basic : \\\"",
+    "out": "!:\t:\tAuthorizationzq1940Basic : \\\""
+  },
+  {
+    "in": "zq1941Basic :,\\-pzq1942",
+    "out": "zq1941Basic :,\\-pzq1942"
+  },
+  {
+    "in": "credentialszq1943zq1944 !zq1945zq1946}C:\\Users\\a\\b\\c.txtBearer ",
+    "out": "credentialszq1943zq1944 !zq1945zq1946}(redacted-path)"
+  },
+  {
+    "in": "https://u:p@example.test/x?token=ydb.password-p",
+    "out": "https://example.test/..."
+  },
+  {
+    "in": "Cookie,label  ",
+    "out": "Cookie,label"
+  },
+  {
+    "in": "C:\\Users\\a\\b\\c.txtcredentials}\\\"zq1947zq1948zq1949zq1950AccountKey",
+    "out": "(redacted-path)"
+  },
+  {
+    "in": "\"Client Secret\"\\\\\"zq1951C:\\Users\\a\\b\\c.txttoken,",
+    "out": "\"Client Secret\"\\\\\"zq1951C:\\Users\\a\\b\\c.txttoken,"
+  },
+  {
+    "in": "/home/a/b/ccookie;%3D[xxPGPASSWORD",
+    "out": "(redacted-path)"
+  },
+  {
+    "in": "secretzq1952zq1953 %3Dzq1954;;\\\\\"':",
+    "out": "secretzq1952zq1953 %3Dzq1954;;\\\\\"':"
+  },
+  {
+    "in": "passphrase\\zq1955x",
+    "out": "passphrase\\zq1955x"
+  },
+  {
+    "in": "Cookiezq19560zq1957",
+    "out": "Cookiezq19560zq1957"
+  },
+  {
+    "in": ":zq1958set-cookie=session_id\\zq1959",
+    "out": ":zq1958set-cookie=session_id\\zq1959"
+  },
+  {
+    "in": "credentialszq1960zq1961Bearer ",
+    "out": "credentialszq1960zq1961Bearer"
+  },
+  {
+    "in": " = labellabel[AccountKeyauthcredentialslabel",
+    "out": "= labellabel[AccountKeyauthcredentialslabel"
+  },
+  {
+    "in": "tokenszq1962zq1963",
+    "out": "tokenszq1962zq1963"
+  },
+  {
+    "in": "! = =set-cookiezq1964",
+    "out": "! = =set-cookiezq1964"
+  },
+  {
+    "in": "zq1965zq1966\\\\\"https://u:p@example.test/x?token=y",
+    "out": "zq1965zq1966\\\\\"https://example.test/..."
+  },
+  {
+    "in": "zq1967\"Client Secret\" = ",
+    "out": "zq1967\"Client Secret\" ="
+  },
+  {
+    "in": " \\\\\\\"x = cookiezq1968tokenzq1969]\\\"Authorization",
+    "out": "\\\\\\\"x = cookiezq1968tokenzq1969]\\\"Authorization"
+  },
+  {
+    "in": ":https://u:p@example.test/x?token=y-pzq1970\\\\\": \nBasic \"",
+    "out": ":https://example.test/...\": \nBasic \""
+  },
+  {
+    "in": " zq1971[zq1972zq1973zq1974--password-----END PRIVATE KEY-----][tokenszq1975",
+    "out": "zq1971[zq1972zq1973zq1974--password-----END PRIVATE KEY-----][tokenszq1975"
+  },
+  {
+    "in": "\u0026quot;tokensession_idzq1976authlabel",
+    "out": "\u0026quot;tokensession_idzq1976authlabel"
+  },
+  {
+    "in": "cookie%3Dzq1977:\t\nzq1978",
+    "out": "cookie%3Dzq1977:\t\nzq1978"
+  },
+  {
+    "in": "token-p!",
+    "out": "token-p!"
+  },
+  {
+    "in": "tokens\u0026#39;:",
+    "out": "tokens\u0026#39;:"
+  },
+  {
+    "in": "\ntoken--passwordzq1979zq1980",
+    "out": "token--passwordzq1979zq1980"
+  },
+  {
+    "in": ":zq1981.zq1982'",
+    "out": ":zq1981.zq1982'"
+  },
+  {
+    "in": "\"Client Secret\"zq1983zq1984zq1985zq1986Basic :\t;Authorization\u0026",
+    "out": "\"Client Secret\"zq1983zq1984zq1985zq1986Basic :\t;Authorization\u0026"
+  },
+  {
+    "in": "\nxzq1987zq1988Basic ]",
+    "out": "xzq1987zq1988Basic ]"
+  },
+  {
+    "in": "zq1989label=%3D-p=https://u:p@example.test/x?token=yzq1990\\\"Client Secret\"zq1991",
+    "out": "zq1989label=%3D-p=https://example.test/...\"Client Secret\"zq1991"
+  },
+  {
+    "in": ": zq1992passwordxtokenstoken\u0026quot;",
+    "out": ": zq1992passwordxtokenstoken\u0026quot;"
+  },
+  {
+    "in": "zq1993zq1994zq1995Cookie",
+    "out": "zq1993zq1994zq1995Cookie"
+  },
+  {
+    "in": "zq1996\\.\\zq1997: \\\\\\\"\\\\\\\"",
+    "out": "zq1996\\.\\zq1997: \\\\\\\"\\\\\\\""
+  },
+  {
+    "in": "api_keyzq1998xzq1999zq2000\\-----BEGIN PRIVATE KEY-----label/home/a/b/c; ",
+    "out": "api_keyzq1998xzq1999zq2000\\-----BEGIN PRIVATE KEY-----label/home/a/b/c;"
+  },
+  {
+    "in": "auth'api_key\u0026zq2001",
+    "out": "auth'api_key\u0026zq2001"
+  },
+  {
+    "in": "\n=/home/a/b/czq2002-----BEGIN PRIVATE KEY-----zq2003it's ! = label ",
+    "out": "=(redacted-path) PRIVATE KEY-----zq2003it's ! = label"
+  },
+  {
+    "in": "zq2004zq2005api_keyzq20060\npassphraseBasic set-cookie",
+    "out": "zq2004zq2005api_keyzq20060\npassphraseBasic set-cookie"
+  },
+  {
+    "in": ".[set-cookie\u0026#39;zq20070",
+    "out": ".[set-cookie\u0026#39;zq20070"
+  },
+  {
+    "in": "]\"zq2008zq2009\\\\\\\"tokensAuthorizationzq2010zq2011passphrase",
+    "out": "]\"zq2008zq2009\\\\\\\"tokensAuthorizationzq2010zq2011passphrase"
+  },
+  {
+    "in": "labelsession_idzq2012credentials[zq2013",
+    "out": "labelsession_idzq2012credentials[zq2013"
+  },
+  {
+    "in": "cookieAccountKeyzq2014 Bearer zq2015;PGPASSWORD-pC:\\Users\\a\\b\\c.txtzq2016",
+    "out": "cookieAccountKeyzq2014 Bearer zq2015;PGPASSWORD-pC:[redacted]"
+  },
+  {
+    "in": "{zq2017\"zq2018zq2019\u0026,",
+    "out": "{zq2017\"zq2018zq2019\u0026,"
+  },
+  {
+    "in": "]%3D:{'tokens --passwordcookie:",
+    "out": "]%3D:{'tokens --passwordcookie:"
+  },
+  {
+    "in": "Bearer zq2020zq2021zq2022",
+    "out": "Bearer [redacted]"
+  },
+  {
+    "in": "zq2023tokenBearer zq2024'",
+    "out": "zq2023tokenBearer zq2024'"
+  },
+  {
+    "in": "passphrase: \\\\\"xcookiezq2025",
+    "out": "passphrase: \\\\\"xcookiezq2025"
+  },
+  {
+    "in": "zq2026C:\\Users\\a\\b\\c.txt\"Client Secret\"-----BEGIN PRIVATE KEY-----'set-cookie\\\"",
+    "out": "zq2026C:\\Users\\a\\b\\c.txt\"Client Secret\"-----BEGIN PRIVATE KEY-----'set-cookie\\\""
+  },
+  {
+    "in": "'zq2027zq2028zq2029passphrasepassword\\\\\"zq2030",
+    "out": "'zq2027zq2028zq2029passphrasepassword\\\\\"zq2030"
+  },
+  {
+    "in": "credentials-----BEGIN PRIVATE KEY-----\u0026 zq2031credentials\u0026#39; zq2032zq2033",
+    "out": "credentials-----BEGIN PRIVATE KEY-----\u0026 zq2031credentials\u0026#39; zq2032zq2033"
+  },
+  {
+    "in": "zq2034zq2035,\\!'/home/a/b/c\nAccountKey;",
+    "out": "zq2034zq2035,\\!'/home/a/b/c\nAccountKey;"
+  },
+  {
+    "in": "\\\\\\\"Basic zq2036https://u:p@example.test/x?token=yit's",
+    "out": "\\\\\\\"Basic zq2036https://u:p@example.test/x?token=[redacted]"
+  },
+  {
+    "in": "zq2037zq2038--password0-----END PRIVATE KEY-----zq2039zq2040\u0026:\t\nzq2041",
+    "out": "zq2037zq2038--password0-----END PRIVATE KEY-----zq2039zq2040\u0026:\t\nzq2041"
+  },
+  {
+    "in": "Basic \n\"zq2042",
+    "out": "Basic \n\"zq2042"
+  },
+  {
+    "in": "passphrase\u0026#39;]:tokens=] session_id:\t",
+    "out": "passphrase\u0026#39;]:tokens=] session_id:"
+  },
+  {
+    "in": "zq2043--password\\\"",
+    "out": "zq2043--password\\\""
+  },
+  {
+    "in": "zq2044x/home/a/b/c-----BEGIN PRIVATE KEY-----",
+    "out": "zq2044x/home/a/b/c-----BEGIN PRIVATE KEY-----"
+  },
+  {
+    "in": "zq2045CookieBearer zq2046:Authorizationzq2047zq2048",
+    "out": "zq2045CookieBearer zq2046:Authorizationzq2047zq2048"
+  },
+  {
+    "in": "\u0026\"Client Secret\"tokens\"zq2049zq2050api_key",
+    "out": "\u0026\"Client Secret\"tokens\"zq2049zq2050api_key"
+  },
+  {
+    "in": "!session_idzq2051zq2052-----END PRIVATE KEY-----\"{",
+    "out": "!session_idzq2051zq2052-----END PRIVATE KEY-----\"{"
+  },
+  {
+    "in": "PGPASSWORDauthzq2053zq2054\u0026#39;auth = ",
+    "out": "PGPASSWORDauthzq2053zq2054\u0026#39;auth ="
+  },
+  {
+    "in": "\nzq2055zq2056]-----END PRIVATE KEY-----C:\\Users\\a\\b\\c.txtzq2057Cookiex",
+    "out": "zq2055zq2056]-----END PRIVATE KEY-----(redacted-path)"
+  },
+  {
+    "in": "credentialsPGPASSWORDBasic  =",
+    "out": "credentialsPGPASSWORDBasic  ="
+  },
+  {
+    "in": "https://u:p@example.test/x?token=y='zq2058https://u:p@example.test/x?token=ydb.passwordxlabel ,\\\\\\\"Basic ",
+    "out": "https://example.test/...'zq2058https://u:p@example.test/x?token=[redacted] ,\\\\\\\"Basic"
+  },
+  {
+    "in": "https://u:p@example.test/x?token=y/home/a/b/cx'api_keysecret] Authorization zq2059",
+    "out": "https://example.test/...'api_keysecret] Authorization zq2059"
+  },
+  {
+    "in": "\"Client Secret\"api_keyzq2060:\tzq2061zq2062zq2063",
+    "out": "\"Client Secret\"api_keyzq2060:\tzq2061zq2062zq2063"
+  },
+  {
+    "in": "%3Dzq2064-----END PRIVATE KEY-----CookielabelAuthorizationzq2065",
+    "out": "%3Dzq2064-----END PRIVATE KEY-----CookielabelAuthorizationzq2065"
+  },
+  {
+    "in": "zq2066'\"credentials",
+    "out": "zq2066'\"credentials"
+  },
+  {
+    "in": "\\\\\"credentials \\zq2067zq2068zq2069zq2070Bearer :\ttokenzq2071",
+    "out": "\\\\\"credentials \\zq2067zq2068zq2069zq2070Bearer :\ttokenzq2071"
+  },
+  {
+    "in": "Bearer api_keyapi_key 'zq2072.  = credentials: zq2073",
+    "out": "Bearer [redacted] 'zq2072.  = credentials: [redacted]"
+  },
+  {
+    "in": "\nxset-cookie",
+    "out": "xset-cookie"
+  },
+  {
+    "in": "}-----END PRIVATE KEY-----it's-----BEGIN PRIVATE KEY-----[0",
+    "out": "}-----END PRIVATE KEY-----it's-----BEGIN PRIVATE KEY-----[0"
+  },
+  {
+    "in": "\u0026: zq2074: db.passwordzq2075\u0026#39; ",
+    "out": "\u0026: zq2074: db.passwordzq2075\u0026#39;"
+  },
+  {
+    "in": "zq2076\\\".labelsession_id}={",
+    "out": "zq2076\\\".labelsession_id}={"
+  },
+  {
+    "in": "=credentialszq2077:zq2078{Cookie.passphrase",
+    "out": "=credentialszq2077:zq2078{Cookie.passphrase"
+  },
+  {
+    "in": "/home/a/b/c\"Client Secret\"-----END PRIVATE KEY-----zq2079credentialssession_id",
+    "out": "(redacted-path) Secret\"-----END PRIVATE KEY-----zq2079credentialssession_id"
+  },
+  {
+    "in": "secretx:\tzq2080\u0026#39;,",
+    "out": "secretx:\tzq2080\u0026#39;,"
+  },
+  {
+    "in": "\\\\\\\"\\\\\"-----BEGIN PRIVATE KEY-----/home/a/b/cpassphrase.-pzq2081",
+    "out": "\\\\\\\"\\\\\"-----BEGIN PRIVATE KEY-----/home/a/b/cpassphrase.-pzq2081"
+  },
+  {
+    "in": "zq2082\"credentials[Cookie\u0026zq2083 ",
+    "out": "zq2082\"credentials[Cookie\u0026zq2083"
+  },
+  {
+    "in": "label\n\u0026",
+    "out": "label\n\u0026"
+  },
+  {
+    "in": "zq2084zq2085!zq2086: Authorizationsession_idcookie zq2087-----BEGIN PRIVATE KEY-----x",
+    "out": "zq2084zq2085!zq2086: Authorizationsession_idcookie zq2087-----BEGIN PRIVATE KEY-----x"
+  },
+  {
+    "in": "zq2088zq2089-p!.label",
+    "out": "zq2088zq2089-p!.label"
+  },
+  {
+    "in": "\n/home/a/b/czq2090x\u0026 \\\\\\\"zq2091zq2092PGPASSWORDtokens",
+    "out": "(redacted-path) \\\\\\\"zq2091zq2092PGPASSWORDtokens"
+  },
+  {
+    "in": " \\\\\\\"\"'PGPASSWORDzq2093[zq2094credentials\u0026quot;\u0026quot;",
+    "out": "\\\\\\\"\"'PGPASSWORDzq2093[zq2094credentials\u0026quot;\u0026quot;"
+  },
+  {
+    "in": ";zq2095.",
+    "out": ";zq2095."
+  },
+  {
+    "in": "\u0026#39;cookie\\\\\\\"set-cookie0zq2096",
+    "out": "\u0026#39;cookie\\\\\\\"set-cookie0zq2096"
+  },
+  {
+    "in": "zq2097labelC:\\Users\\a\\b\\c.txtzq2098\u0026quot;-----BEGIN PRIVATE KEY-----%3Dit's\\\"",
+    "out": "zq2097labelC:\\Users\\a\\b\\c.txtzq2098\u0026quot;-----BEGIN PRIVATE KEY-----%3Dit's\\\""
+  },
+  {
+    "in": "zq2099-----END PRIVATE KEY-----0zq2100zq2101[\\: zq2102zq2103",
+    "out": "zq2099-----END PRIVATE KEY-----0zq2100zq2101[\\: zq2102zq2103"
+  },
+  {
+    "in": "zq2104=[C:\\Users\\a\\b\\c.txtzq2105zq2106 = -----BEGIN PRIVATE KEY-----Basic :\t: \u0026#39;",
+    "out": "zq2104=[(redacted-path) = -----BEGIN PRIVATE KEY-----Basic :\t: \u0026#39;"
+  },
+  {
+    "in": "cookietokenszq2107set-cookieauthsession_id;,zq2108",
+    "out": "cookietokenszq2107set-cookieauthsession_id;,zq2108"
+  },
+  {
+    "in": "\"Bearer zq2109\u0026#39;PGPASSWORDzq2110session_id-pAccountKey C:\\Users\\a\\b\\c.txt--password",
+    "out": "\"Bearer zq2109\u0026#39;PGPASSWORDzq2110session_id-pAccountKey (redacted-path)"
+  },
+  {
+    "in": "\\session_idhttps://u:p@example.test/x?token=yAccountKeyzq2111\\\\\"session_id'",
+    "out": "\\session_idhttps://u:p@example.test/x?token=[redacted]"
+  },
+  {
+    "in": " zq2112xzq2113:zq2114,-----BEGIN PRIVATE KEY-----zq2115tokens",
+    "out": "zq2112xzq2113:zq2114,-----BEGIN PRIVATE KEY-----zq2115tokens"
+  },
+  {
+    "in": "secret-----END PRIVATE KEY-----set-cookie0\\\\\\\"tokentoken",
+    "out": "secret-----END PRIVATE KEY-----set-cookie0\\\\\\\"tokentoken"
+  },
+  {
+    "in": "zq2116authzq2117 zq2118",
+    "out": "zq2116authzq2117 zq2118"
+  },
+  {
+    "in": "Cookiezq2119zq2120x zq2121",
+    "out": "Cookiezq2119zq2120x zq2121"
+  },
+  {
+    "in": "https://u:p@example.test/x?token=ylabel%3Dset-cookiexzq2122 'it's-----END PRIVATE KEY-----zq2123}",
+    "out": "https://example.test/... 'it's-----END PRIVATE KEY-----zq2123}"
+  },
+  {
+    "in": "secrettokenAuthorizationzq2124=credentialsAuthorization\"/home/a/b/c=",
+    "out": "secrettokenAuthorizationzq2124=[redacted]"
+  },
+  {
+    "in": "\u0026#39;\\\"\\'{",
+    "out": "\u0026#39;\\\"\\'{"
+  },
+  {
+    "in": "\"Client Secret\"it'sBasic ]\n\\\"Basic Cookiecookie]",
+    "out": "\"Client Secret\"it'sBasic ]\n\\\"Basic Cookiecookie]"
+  },
+  {
+    "in": "\\-----BEGIN PRIVATE KEY-------passwordapi_keyzq2125-p",
+    "out": "\\-----BEGIN PRIVATE KEY-------passwordapi_keyzq2125-p"
+  },
+  {
+    "in": "zq2126C:\\Users\\a\\b\\c.txtpassword",
+    "out": "zq2126C:\\Users\\a\\b\\c.txtpassword"
+  },
+  {
+    "in": "'db.passwordsecret,zq2127credentials.zq2128.auth",
+    "out": "'db.passwordsecret,zq2127credentials.zq2128.auth"
+  },
+  {
+    "in": " session_id{\\\\\"db.passwordzq2129",
+    "out": "session_id{\\\\\"db.passwordzq2129"
+  },
+  {
+    "in": "-----BEGIN PRIVATE KEY-----zq2130set-cookieAuthorizationCookie",
+    "out": "-----BEGIN PRIVATE KEY-----zq2130set-cookieAuthorizationCookie"
+  },
+  {
+    "in": "=-p!]--password",
+    "out": "=-p!]--password"
+  },
+  {
+    "in": ":\t = zq2131]zq2132]zq2133zq2134",
+    "out": ":\t = zq2131]zq2132]zq2133zq2134"
+  },
+  {
+    "in": "zq2135zq2136zq2137 : {zq2138\n/home/a/b/cpassphraseapi_key\n",
+    "out": "zq2135zq2136zq2137 : {zq2138\n(redacted-path)"
+  },
+  {
+    "in": "\\\\\"session_id authzq2139",
+    "out": "\\\\\"session_id authzq2139"
+  },
+  {
+    "in": "zq2140token-pzq2141[.zq2142",
+    "out": "zq2140token-pzq2141[.zq2142"
+  },
+  {
+    "in": "zq2143\\\"db.password\\\\\"zq2144Cookie",
+    "out": "zq2143\\\"db.password\\\\\"zq2144Cookie"
+  },
+  {
+    "in": "session_id-p}https://u:p@example.test/x?token=yAuthorization{PGPASSWORD",
+    "out": "session_id-p}https://example.test/..."
+  },
+  {
+    "in": "cookiezq2145\u0026#39;%3Dlabel",
+    "out": "cookiezq2145\u0026#39;%3Dlabel"
+  },
+  {
+    "in": " zq2146zq2147secret",
+    "out": "zq2146zq2147secret"
+  },
+  {
+    "in": "secretzq2148\u0026quot;zq2149",
+    "out": "secretzq2148\u0026quot;zq2149"
+  },
+  {
+    "in": "\":%3Dzq2150\"Client Secret\"zq2151\u0026#39;zq2152Cookie",
+    "out": "\":%3Dzq2150\"Client Secret\"zq2151\u0026#39;zq2152Cookie"
+  },
+  {
+    "in": "auth-----END PRIVATE KEY-----\\\":",
+    "out": "auth-----END PRIVATE KEY-----\\\":"
+  },
+  {
+    "in": " -p\u0026\\\\\"zq2153passwordzq2154zq2155Bearer it'szq2156\\\\\"",
+    "out": "-p\u0026\\\\\"zq2153passwordzq2154zq2155Bearer it'szq2156\\\\\""
+  },
+  {
+    "in": "set-cookieAccountKeyauthpassphraseCookie;db.password:: password0\u0026quot;",
+    "out": "set-cookieAccountKeyauthpassphraseCookie;db.password:[redacted] password0\u0026quot;"
+  },
+  {
+    "in": "it's.\u00260token\\\"\u0026-----END PRIVATE KEY-----zq2157\u0026#39;",
+    "out": "it's.\u00260token\\\"\u0026-----END PRIVATE KEY-----zq2157\u0026#39;"
+  },
+  {
+    "in": "Authorization\\\": it'szq2158zq2159AccountKeyC:\\Users\\a\\b\\c.txtBasic password",
+    "out": "Authorization\\\": it'szq2158zq2159AccountKeyC:\\Users\\a\\b\\c.txtBasic password"
+  },
+  {
+    "in": "zq2160set-cookiezq2161\\-plabel tokenszq2162=-p",
+    "out": "zq2160set-cookiezq2161\\-plabel tokenszq2162=-p"
+  },
+  {
+    "in": "[}[zq2163.[zq2164=zq2165-----END PRIVATE KEY-----zq2166",
+    "out": "[}[zq2163.[zq2164=zq2165-----END PRIVATE KEY-----zq2166"
+  },
+  {
+    "in": "\u0026#39;api_keyapi_key\\\"",
+    "out": "\u0026#39;api_keyapi_key\\\""
+  },
+  {
+    "in": "auth --passwordzq2167%3Dzq2168-----BEGIN PRIVATE KEY-----zq2169-----BEGIN PRIVATE KEY-----.AccountKey",
+    "out": "auth --passwordzq2167%3Dzq2168-----BEGIN PRIVATE KEY-----zq2169-----BEGIN PRIVATE KEY-----.AccountKey"
+  },
+  {
+    "in": ": zq2170Basic ",
+    "out": ": zq2170Basic"
+  },
+  {
+    "in": ":zq2171!\u0026\u0026zq2172AccountKeylabelzq21730",
+    "out": ":zq2171!\u0026\u0026zq2172AccountKeylabelzq21730"
+  },
+  {
+    "in": "zq2174zq2175\u0026#39;!credentialsauthsession_id",
+    "out": "zq2174zq2175\u0026#39;!credentialsauthsession_id"
+  },
+  {
+    "in": "tokens\n\u0026\u0026quot;.",
+    "out": "tokens\n\u0026\u0026quot;."
+  },
+  {
+    "in": "\u0026quot; zq2176\"Client Secret\"'",
+    "out": "\u0026quot; zq2176\"Client Secret\"'"
+  },
+  {
+    "in": "xset-cookie ",
+    "out": "xset-cookie"
+  },
+  {
+    "in": "-----END PRIVATE KEY-----\\\\\"zq2177session_idzq2178set-cookie\\\"credentials!",
+    "out": "-----END PRIVATE KEY-----\\\\\"zq2177session_idzq2178set-cookie\\\"credentials!"
+  },
+  {
+    "in": "AccountKeyzq2179' [CookiePGPASSWORD;it'szq2180",
+    "out": "AccountKeyzq2179' [CookiePGPASSWORD;it'szq2180"
+  },
+  {
+    "in": ":zq2181}zq2182[password = api_key}it's",
+    "out": ":zq2181}zq2182[password = [redacted]"
+  },
+  {
+    "in": "PGPASSWORDzq2183https://u:p@example.test/x?token=y--password\"-----BEGIN PRIVATE KEY-----zq2184zq2185labelauth",
+    "out": "PGPASSWORDzq2183https://u:p@example.test/x?token=[redacted]"
+  },
+  {
+    "in": "[zq2186secrettokens",
+    "out": "[zq2186secrettokens"
+  },
+  {
+    "in": "-----END PRIVATE KEY-------passwordBearer 0Cookiezq2187\nsession_id",
+    "out": "-----END PRIVATE KEY-------passwordBearer 0Cookiezq2187\nsession_id"
+  },
+  {
+    "in": "-----END PRIVATE KEY-----}tokenzq2188cookie\u0026",
+    "out": "-----END PRIVATE KEY-----}tokenzq2188cookie\u0026"
+  },
+  {
+    "in": "Basic {-----BEGIN PRIVATE KEY-----;/home/a/b/ctokenszq2189{zq2190",
+    "out": "Basic {-----BEGIN PRIVATE KEY-----;/home/a/b/ctokenszq2189{zq2190"
+  },
+  {
+    "in": "xcredentialstokens\"\\\\\"zq2191;-----END PRIVATE KEY-----zq2192",
+    "out": "xcredentialstokens\"\\\\\"zq2191;-----END PRIVATE KEY-----zq2192"
+  },
+  {
+    "in": ":\tit's]-----END PRIVATE KEY-----zq21930--passwordPGPASSWORD",
+    "out": ":\tit's]-----END PRIVATE KEY-----zq21930--passwordPGPASSWORD"
+  },
+  {
+    "in": "=.\\\\\\\"zq2194passwordsecret \\\\\\\"password ",
+    "out": "=.\\\\\\\"zq2194passwordsecret \\\\\\\"password"
+  },
+  {
+    "in": "\u0026tokenscredentialszq2195zq2196\\%3Dzq2197db.password",
+    "out": "\u0026tokenscredentialszq2195zq2196\\%3Dzq2197db.password"
+  },
+  {
+    "in": "zq2198zq2199\n]https://u:p@example.test/x?token=yzq2200:\tpasswordAccountKey",
+    "out": "zq2198zq2199\n]https://example.test/...:\tpasswordAccountKey"
+  },
+  {
+    "in": "zq2201zq2202zq2203.:  \\",
+    "out": "zq2201zq2202zq2203.:  \\"
+  },
+  {
+    "in": " labelapi_key = zq2204it's",
+    "out": "labelapi_key = [redacted]"
+  },
+  {
+    "in": "zq2205https://u:p@example.test/x?token=yzq2206AccountKey zq2207 = password",
+    "out": "zq2205https://u:p@example.test/x?token=[redacted] zq2207 = password"
+  },
+  {
+    "in": "]0Cookiesession_id [",
+    "out": "]0Cookiesession_id ["
+  },
+  {
+    "in": "zq2208session_idzq2209/home/a/b/c\\\\\"set-cookie,x",
+    "out": "zq2208session_idzq2209/home/a/b/c\\\\\"set-cookie,x"
+  },
+  {
+    "in": "}.zq2210passphrasezq2211 C:\\Users\\a\\b\\c.txt",
+    "out": "}.zq2210passphrasezq2211 (redacted-path)"
+  },
+  {
+    "in": "credentialslabel\nzq2212tokenscookie--passwordzq2213",
+    "out": "credentialslabel\nzq2212tokenscookie--passwordzq2213"
+  },
+  {
+    "in": "/home/a/b/cpassphrasezq2214zq2215",
+    "out": "(redacted-path)"
+  },
+  {
+    "in": "0zq2216passwordsession_id\n/home/a/b/czq2217session_id\\\\\\\" \\\\\"-----END PRIVATE KEY-----",
+    "out": "0zq2216passwordsession_id\n(redacted-path) \\\\\"-----END PRIVATE KEY-----"
+  },
+  {
+    "in": "Cookiezq2218tokensAccountKey: {/home/a/b/cC:\\Users\\a\\b\\c.txt",
+    "out": "Cookiezq2218tokensAccountKey: {/home/a/b/cC:\\Users\\a\\b\\c.txt"
+  },
+  {
+    "in": "\ntokenapi_key{.zq2219zq2220/home/a/b/c",
+    "out": "tokenapi_key{.zq2219zq2220/home/a/b/c"
+  },
+  {
+    "in": ".set-cookie=zq2221tokenszq2222secret:\tsecretpassphrase;",
+    "out": ".set-cookie=zq2221tokenszq2222secret:\t[redacted];"
+  },
+  {
+    "in": "zq2223'zq2224Bearer zq2225",
+    "out": "zq2223'zq2224Bearer zq2225"
+  },
+  {
+    "in": "zq2226zq2227\nsession_id\u0026quot;zq2228\u0026",
+    "out": "zq2226zq2227\nsession_id\u0026quot;zq2228\u0026"
+  },
+  {
+    "in": "\"Client Secret\"zq2229zq2230zq2231/home/a/b/czq2232 }C:\\Users\\a\\b\\c.txt}db.password",
+    "out": "\"Client Secret\"zq2229zq2230zq2231/home/a/b/czq2232 }(redacted-path)"
+  },
+  {
+    "in": "zq2233{AuthorizationtokenscookielabelAccountKey}https://u:p@example.test/x?token=y: zq2234zq2235",
+    "out": "zq2233{AuthorizationtokenscookielabelAccountKey}https://example.test/...: zq2234zq2235"
+  },
+  {
+    "in": ": zq2236zq2237set-cookie\"zq2238zq2239Basic zq2240zq2241[:\t",
+    "out": ": zq2236zq2237set-cookie\"zq2238zq2239Basic zq2240zq2241[:"
+  },
+  {
+    "in": "https://u:p@example.test/x?token=y\u0026#39;:\t%3D\u0026zq2242!credentials",
+    "out": "https://example.test/...;:\t%3D\u0026zq2242!credentials"
+  },
+  {
+    "in": "\\Basic labelapi_key= = label--passwordzq2243:\tAuthorizationC:\\Users\\a\\b\\c.txt",
+    "out": "\\Basic labelapi_key= [redacted] label--passwordzq2243:\tAuthorizationC:\\Users\\a\\b\\c.txt"
+  },
+  {
+    "in": "zq2244:\tBearer ,",
+    "out": "zq2244:\tBearer ,"
+  },
+  {
+    "in": "passphrase\\\\\"zq2245zq2246'\"Client Secret\"authauth",
+    "out": "passphrase\\\\\"zq2245zq2246'\"Client Secret\"authauth"
+  },
+  {
+    "in": "%3Dpassphrasezq2247zq2248[\\\\\\\"zq2249",
+    "out": "%3Dpassphrasezq2247zq2248[\\\\\\\"zq2249"
+  },
+  {
+    "in": "\u0026#39;label\"Client Secret\"AccountKeyzq2250[--passwordcookieCookie",
+    "out": "\u0026#39;label\"Client Secret\"AccountKeyzq2250[--passwordcookieCookie"
+  },
+  {
+    "in": "Basic :\tzq2251secretpassphrasezq2252zq2253AccountKey",
+    "out": "Basic :\tzq2251secretpassphrasezq2252zq2253AccountKey"
+  },
+  {
+    "in": "/home/a/b/cit'slabel-----BEGIN PRIVATE KEY-----zq2254db.password \u0026%3D[",
+    "out": "(redacted-path) PRIVATE KEY-----zq2254db.password \u0026%3D["
+  },
+  {
+    "in": "] /home/a/b/czq2255 auth%3D/home/a/b/cpasswordpassphrase =  = ",
+    "out": "] (redacted-path) auth%3D/home/a/b/cpasswordpassphrase =  ="
+  },
+  {
+    "in": "\nzq2256: \\zq2257zq2258C:\\Users\\a\\b\\c.txt\\\"zq2259:\t/home/a/b/czq2260",
+    "out": "zq2256: \\zq2257zq2258C:\\Users\\a\\b\\c.txt\\\"zq2259:\t(redacted-path)"
+  },
+  {
+    "in": "'-----BEGIN PRIVATE KEY----------END PRIVATE KEY-----zq2261zq2262:\t0zq2263\u0026",
+    "out": "'-----BEGIN PRIVATE KEY----------END PRIVATE KEY-----zq2261zq2262:\t0zq2263\u0026"
+  },
+  {
+    "in": "auth0PGPASSWORD.-----BEGIN PRIVATE KEY-----",
+    "out": "auth0PGPASSWORD.-----BEGIN PRIVATE KEY-----"
+  },
+  {
+    "in": "zq2264\\\"cookieBearer db.passwordlabel\\\\\"%3D'zq2265",
+    "out": "zq2264\\\"cookieBearer db.passwordlabel\\\\\"%3D'zq2265"
+  },
+  {
+    "in": "Bearer \\Authorization-psession_idzq2266zq2267Basic -----END PRIVATE KEY-----labelpassphrase",
+    "out": "Bearer \\Authorization-psession_idzq2266zq2267Basic -----END PRIVATE KEY-----labelpassphrase"
+  },
+  {
+    "in": " zq2268 zq2269password\u0026quot;=-p",
+    "out": "zq2268 zq2269password\u0026quot;=-p"
+  },
+  {
+    "in": "session_id\\zq2270zq2271-p\u0026#39;",
+    "out": "session_id\\zq2270zq2271-p\u0026#39;"
+  },
+  {
+    "in": "\"Client Secret\"zq2272zq2273zq2274}{zq22750[Bearer set-cookietokens",
+    "out": "\"Client Secret\"zq2272zq2273zq2274}{zq22750[Bearer [redacted]"
+  },
+  {
+    "in": "zq2276--password%3Dzq2277\"Client Secret\";",
+    "out": "zq2276--password%3Dzq2277\"Client Secret\";"
+  },
+  {
+    "in": "tokenszq2278Cookie = zq22790,-p",
+    "out": "tokenszq2278Cookie = zq22790,-p"
+  },
+  {
+    "in": "!labeltokenszq2280secret,Cookietokenzq2281Cookiezq2282Basic ",
+    "out": "!labeltokenszq2280secret,Cookietokenzq2281Cookiezq2282Basic"
+  },
+  {
+    "in": ": zq2283 zq2284password\u0026password",
+    "out": ": zq2283 zq2284password\u0026password"
+  },
+  {
+    "in": "password\\\\\\\"--passwordlabelcookie",
+    "out": "password\\\\\\\"--passwordlabelcookie"
+  },
+  {
+    "in": "!.!",
+    "out": "!.!"
+  },
+  {
+    "in": "\\\"{zq2285\u0026#39;zq2286zq2287\\\\\\\"zq2288api_keyset-cookie",
+    "out": "\\\"{zq2285\u0026#39;zq2286zq2287\\\\\\\"zq2288api_keyset-cookie"
+  },
+  {
+    "in": "]:--password Bearer \\",
+    "out": "]:--password Bearer \\"
+  },
+  {
+    "in": ",zq22890.'",
+    "out": ",zq22890.'"
+  },
+  {
+    "in": " = \\\"api_key\u0026quot;zq2290\u0026quot;--passwordzq2291",
+    "out": "= \\\"api_key\u0026quot;zq2290\u0026quot;--passwordzq2291"
+  },
+  {
+    "in": "\u0026#39;,session_id;zq2292api_key0 session_idsession_idCookie:\t",
+    "out": "\u0026#39;,session_id;zq2292api_key0 session_idsession_idCookie:"
+  },
+  {
+    "in": "zq2293]Basic zq2294db.password}\u0026#39;=zq2295",
+    "out": "zq2293]Basic zq2294db.password}\u0026#39;=zq2295"
+  },
+  {
+    "in": "cookie-----BEGIN PRIVATE KEY-----zq2296labelzq2297/home/a/b/c",
+    "out": "cookie-----BEGIN PRIVATE KEY-----zq2296labelzq2297/home/a/b/c"
+  },
+  {
+    "in": "PGPASSWORD-----END PRIVATE KEY-----: ]{\\\\\\\"{",
+    "out": "PGPASSWORD-----END PRIVATE KEY-----: ]{\\\\\\\"{"
+  },
+  {
+    "in": "\"Client Secret\"zq2298AccountKeypasswordzq2299;zq2300",
+    "out": "\"Client Secret\"zq2298AccountKeypasswordzq2299;zq2300"
+  },
+  {
+    "in": "0AccountKeyC:\\Users\\a\\b\\c.txt--passwordtokenssession_idzq2301",
+    "out": "0AccountKeyC:\\Users\\a\\b\\c.txt--passwordtokenssession_idzq2301"
+  },
+  {
+    "in": "https://u:p@example.test/x?token=yzq2302x/home/a/b/ccredentials\\\u0026quot;",
+    "out": "https://example.test/...;"
+  },
+  {
+    "in": "zq2303%3D:\tzq2304tokens-----END PRIVATE KEY-----Cookiezq2305zq2306zq2307.",
+    "out": "zq2303%3D:\tzq2304tokens-----END PRIVATE KEY-----Cookiezq2305zq2306zq2307."
+  },
+  {
+    "in": "'zq2308\u0026#39;",
+    "out": "'zq2308\u0026#39;"
+  },
+  {
+    "in": "%3Dzq2309[ = /home/a/b/czq2310zq2311--passwordx\u0026#39;: ",
+    "out": "%3Dzq2309[ = (redacted-path)"
+  },
+  {
+    "in": "zq2312zq2313zq2314zq2315https://u:p@example.test/x?token=y",
+    "out": "zq2312zq2313zq2314zq2315https://u:p@example.test/x?token=[redacted]"
+  },
+  {
+    "in": "=/home/a/b/czq2316https://u:p@example.test/x?token=y[label\"Client Secret\"zq2317auth",
+    "out": "=(redacted-path)//u:p@example.test/x?token=[redacted]"
+  },
+  {
+    "in": "\u0026quot;PGPASSWORDcookie--password\u0026#39;\\\\\"0[",
+    "out": "\u0026quot;PGPASSWORDcookie--password\u0026#39;\\\\\"0["
+  },
+  {
+    "in": "zq2318it's:\t: zq2319",
+    "out": "zq2318it's:\t: zq2319"
+  },
+  {
+    "in": "! -----END PRIVATE KEY-----zq2320tokenscookiezq2321\u0026:\tapi_key\nAccountKey",
+    "out": "! -----END PRIVATE KEY-----zq2320tokenscookiezq2321\u0026:\tapi_key\nAccountKey"
+  },
+  {
+    "in": "0 zq2322https://u:p@example.test/x?token=y;",
+    "out": "0 zq2322https://u:p@example.test/x?token=[redacted];"
+  },
+  {
+    "in": "db.passwordBasic ]zq2323zq2324",
+    "out": "db.passwordBasic ]zq2323zq2324"
+  },
+  {
+    "in": "\u0026{zq2325credentialszq2326\\\"",
+    "out": "\u0026{zq2325credentialszq2326\\\""
+  },
+  {
+    "in": "]PGPASSWORDzq2327zq2328-----END PRIVATE KEY-----%3Dx= credentials-p",
+    "out": "]PGPASSWORDzq2327zq2328-----END PRIVATE KEY-----%3Dx= credentials-p"
+  },
+  {
+    "in": "!authBasic ",
+    "out": "!authBasic"
+  },
+  {
+    "in": "C:\\Users\\a\\b\\c.txt,\"Client Secret\"zq2329zq2330PGPASSWORD.zq2331zq2332",
+    "out": "(redacted-path) Secret\"zq2329zq2330PGPASSWORD.zq2331zq2332"
+  },
+  {
+    "in": "'zq2333C:\\Users\\a\\b\\c.txtzq2334 = \"Client Secret\"zq2335passphraseset-cookiezq2336C:\\Users\\a\\b\\c.txt0",
+    "out": "'zq2333C:\\Users\\a\\b\\c.txtzq2334 = \"Client Secret\"zq2335passphraseset-cookiezq2336C:\\Users\\a\\b\\c.txt0"
+  },
+  {
+    "in": "passphrasecookie\\Authorizationzq2337: Cookie",
+    "out": "passphrasecookie\\Authorizationzq2337: Cookie"
+  },
+  {
+    "in": "Bearer passwordsecret--passwordzq2338auth",
+    "out": "Bearer [redacted]"
+  },
+  {
+    "in": "Authorizationzq2339zq2340\u0026#39;Basic zq2341}:\t",
+    "out": "Authorizationzq2339zq2340\u0026#39;Basic zq2341}:"
+  },
+  {
+    "in": " 'passphrase",
+    "out": "'passphrase"
+  },
+  {
+    "in": "\\\\\"zq2342]\\api_keyzq2343-----BEGIN PRIVATE KEY-----Basic auth",
+    "out": "\\\\\"zq2342]\\api_keyzq2343-----BEGIN PRIVATE KEY-----Basic auth"
+  },
+  {
+    "in": "zq2344: \u0026#39;credentials\"Client Secret\"passphrase] ; zq2345}",
+    "out": "zq2344: \u0026#39;credentials\"Client Secret\"passphrase] ; zq2345}"
+  },
+  {
+    "in": "Cookiezq2346AccountKeyzq2347\"Client Secret\"}\u0026",
+    "out": "Cookiezq2346AccountKeyzq2347\"Client Secret\"}\u0026"
+  },
+  {
+    "in": "PGPASSWORDzq2348Bearer \"Client Secret\"xpassphraseauthAuthorization [",
+    "out": "PGPASSWORDzq2348Bearer \"Client Secret\"xpassphraseauthAuthorization ["
+  },
+  {
+    "in": "\\:token=session_idpassphrase ",
+    "out": "\\:token=[redacted]"
+  },
+  {
+    "in": ":\tauthit'szq2349C:\\Users\\a\\b\\c.txtzq2350:\tzq2351 !\u0026quot;\\\\\"",
+    "out": ":\tauthit'szq2349C:\\Users\\a\\b\\c.txtzq2350:\tzq2351 !\u0026quot;\\\\\""
+  },
+  {
+    "in": " zq2352  ",
+    "out": "zq2352"
+  },
+  {
+    "in": "zq2353={zq2354zq2355tokens,",
+    "out": "zq2353={zq2354zq2355tokens,"
+  },
+  {
+    "in": "\u0026zq2356-----BEGIN PRIVATE KEY-----PGPASSWORD",
+    "out": "\u0026zq2356-----BEGIN PRIVATE KEY-----PGPASSWORD"
+  },
+  {
+    "in": "[--passwordAuthorization\\\\\"Cookiedb.password}zq2357}",
+    "out": "[--passwordAuthorization\\\\\"Cookiedb.password}zq2357}"
+  },
+  {
+    "in": "-----BEGIN PRIVATE KEY-----zq2358Basic : \\\"",
+    "out": "-----BEGIN PRIVATE KEY-----zq2358Basic : \\\""
+  }
+]
