@@ -195,34 +195,55 @@ change.
    `/version`, `packmon_build_info`, and `packmon_db_migration_version`.
 2. Take and verify a fresh backup with the command in `Backup`.
 3. Stop or drain `packmon-server` so clients do not write during migration.
-4. Apply release-specific database prerequisites before running migrations.
-   Migration 48 introduces PostgreSQL query observability; follow
-   [`postgres-query-observability.md`](postgres-query-observability.md) first.
-   For the bundled database, recreate and wait for PostgreSQL so the new
-   preload setting is active while preserving its named volume:
-   ```bash
-   docker compose -f docker-compose.server.yml up -d --force-recreate --wait postgres
-   ```
-   External PostgreSQL requires the documented administrator preload, restart,
-   query-ID setting, and extension creation instead.
-   Migration 49 concurrently builds two partial covering indexes over active
-   `malicious_findings`. Before starting it, verify PostgreSQL has temporary
-   working space and durable-volume headroom for both index builds. The
-   concurrent build avoids a long table-write lock but still consumes I/O and
-   CPU; keep the server drained as required above and monitor PostgreSQL logs.
-   Migration 50 tightens the `version_ranges` CHECK constraints on
-   `affected_packages` and `malicious_findings` (every range needs a nonempty
-   `events` array and every event a nonblank string boundary). It scans both
-   tables once to repair rows that only passed the older check and once more to
-   validate the constraints, inside one transaction; expect it to take longer
-   on large databases. Repaired affected-package rows fall back to `[]`
-   (every version of that package is treated as affected) and repaired
-   malicious-finding rows to `NULL` ranges, so the affected packages may report
-   more findings until the next feed sync rewrites them with valid ranges.
-   Compare finding/blocking totals by feed source after the upgrade and run
-   the feed syncs before treating a spike as new risk. The repair is one-way:
-   the 050 down migration restores only the previous check function, so
-   restore the pre-upgrade backup if the original rows are needed.
+4. Apply release-specific database prerequisites before running migrations,
+   and plan for the per-migration notes below. `packmon-server migrate`
+   applies every pending migration in one run. Apart from the 48 prerequisite
+   check, a migration that fails is recorded as dirty at its version, and
+   migrate and server startup then refuse that database; recover by restoring
+   the pre-upgrade backup (see the rollback steps below).
+   - Migration 48 (`048_pg_stat_statements`, schema 47 -> 48) creates the
+     `pg_stat_statements` extension in schema `public` for PostgreSQL query
+     observability. Follow
+     [`postgres-query-observability.md`](postgres-query-observability.md)
+     first. For the bundled database, recreate and wait for PostgreSQL so the
+     new preload setting is active while preserving its named volume:
+     ```bash
+     docker compose -f docker-compose.server.yml up -d --force-recreate --wait postgres
+     ```
+     External PostgreSQL requires the documented administrator preload,
+     restart, query-ID setting, and extension creation instead. The migration
+     itself is quick; its prerequisites are checked before anything is marked
+     dirty, so a missing preload, query-ID setting or extension leaves schema
+     47 clean and retryable. Its down migration keeps the extension, which may
+     be shared with other users of the database.
+   - Migration 49 (`049_malicious_active_search_indexes`, schema 48 -> 49)
+     builds two partial covering indexes over active `malicious_findings`
+     rows with `CREATE INDEX CONCURRENTLY`, outside a transaction. Before
+     starting it, verify PostgreSQL has temporary working space and
+     durable-volume headroom for both index builds. The concurrent build
+     avoids a long table-write lock but still consumes I/O and CPU and takes
+     longer on large catalogs; keep the server drained as required above and
+     monitor PostgreSQL logs. An interrupted concurrent build can leave an
+     `INVALID` index behind, and a retry would keep it because the statements
+     use `IF NOT EXISTS`; restore the backup rather than retrying by hand.
+   - Migration 50 (`050_version_range_boundary_values`, schema 49 -> 50)
+     tightens the `version_ranges` CHECK constraints on `affected_packages`
+     and `malicious_findings` (every range needs a nonempty `events` array and
+     every event a nonblank string boundary). Inside one transaction it scans
+     both tables once to repair rows that only passed the older check and once
+     more to validate the constraints; expect it to take longer on large
+     databases. The re-added constraints hold an exclusive lock on both
+     tables until the transaction commits, so reads and writes to them wait
+     during validation (another reason to keep the server drained). A failure
+     rolls back every 50 change but still leaves the version dirty. Repaired
+     affected-package rows fall back to `[]` (every version of that package is
+     treated as affected) and repaired malicious-finding rows to `NULL`
+     ranges, so the affected packages may report more findings until the next
+     feed sync rewrites them with valid ranges. Compare finding/blocking
+     totals by feed source after the upgrade and run the feed syncs before
+     treating a spike as new risk. The repair is one-way: the 050 down
+     migration restores only the previous check function, so restore the
+     pre-upgrade backup if the original rows are needed.
 5. Run the explicit migration step:
    ```bash
    docker compose -f docker-compose.server.yml run --build --rm packmon-migrate

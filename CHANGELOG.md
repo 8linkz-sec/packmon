@@ -435,20 +435,33 @@
 
 ### Operator action
 
-- Run `packmon-server migrate` before starting the updated server: this
-  release adds schema migration 050 (schema version 49 -> 50), which tightens
-  the `version_ranges` CHECK constraints and repairs rows that fail them. It
-  scans `affected_packages` and `malicious_findings` twice in one transaction;
-  repaired affected-package rows match every version until the next feed sync
-  rewrites them, so finding totals for those packages can rise temporarily.
-  See "Upgrade And Rollback" in `docs/runbook.md`. The server refuses to start
-  on a schema version mismatch.
 - Run `packmon-server migrate` (or the `packmon-migrate` compose service)
-  before starting the updated server: this release adds schema migration 047
-  (schema version 46 -> 47), which widens the ecosystem CHECK constraints for
-  the inventory-only `chocolatey` ecosystem. The server refuses to start on a
-  schema version mismatch. Rolling 047 back removes any `chocolatey` rows
-  (none are written by the scan path).
+  before starting the updated server: this release adds schema migrations 047
+  to 050 (schema version 46 -> 50), applied in one run. The server refuses to
+  start on a schema version mismatch. Read "Upgrade And Rollback" in
+  `docs/runbook.md` first; a failed migration other than a 048 prerequisite
+  failure leaves the database dirty, and the documented recovery is restoring
+  the pre-upgrade backup.
+  - 047 widens the ecosystem CHECK constraints for the inventory-only
+    `chocolatey` ecosystem. Rolling 047 back removes any `chocolatey` rows
+    (none are written by the scan path).
+  - 048 creates the `pg_stat_statements` extension and needs preparation
+    first: `pg_stat_statements` in `shared_preload_libraries` (bundled
+    Compose: recreate the `postgres` service), `compute_query_id` on or
+    `auto`, and for external PostgreSQL an administrator-created extension in
+    schema `public` (see `docs/postgres-query-observability.md`). The check
+    runs before anything is marked dirty, so missing preparation leaves schema
+    47 clean and retryable. Rolling 048 back keeps the extension.
+  - 049 builds two partial indexes over active `malicious_findings` rows with
+    `CREATE INDEX CONCURRENTLY`, outside a transaction. It avoids a long
+    write lock but can run for a while on large catalogs; check PostgreSQL
+    temporary space and volume headroom before starting.
+  - 050 tightens the `version_ranges` CHECK constraints and repairs rows that
+    fail them. It scans `affected_packages` and `malicious_findings` twice in
+    one transaction and holds an exclusive lock on both tables until it
+    commits; repaired affected-package rows match every version until the
+    next feed sync rewrites them, so finding totals for those packages can
+    rise temporarily.
 - `docker-compose.server.yml` deployments: the next `up` creates the new
   `<project>_feed-data` volume, so the first feed sync after the upgrade
   re-clones the GHSA and OpenSSF repositories once. A `PACKMON_FEED_DATA_DIR`
