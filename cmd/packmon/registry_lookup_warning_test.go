@@ -331,6 +331,9 @@ func TestRegistryGetOversizedBodyIsARefusal(t *testing.T) {
 	if got := phase.consecutive.Load(); got != 0 {
 		t.Fatalf("consecutive failures = %d, want 0 (the registry answered)", got)
 	}
+	if got := phase.oversizedCount(); got != 1 {
+		t.Fatalf("oversizedCount() = %d, want 1 (the size limit, not the registry, discarded the answer)", got)
+	}
 
 	// A body of exactly the limit is still a complete answer.
 	exact := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -343,6 +346,73 @@ func TestRegistryGetOversizedBodyIsARefusal(t *testing.T) {
 	}
 	if got := phase.refusedCount(); got != registryBreakerThreshold {
 		t.Fatalf("refusedCount() after a limit-sized body = %d, want %d", got, registryBreakerThreshold)
+	}
+}
+
+// TestOversizedResponsesGetSizeLimitAdvice keeps the advice honest: a
+// response discarded by the client-side size limit is not a rate limit or a
+// slow registry, so the warning and the list-all hint must not tell the user
+// to raise --timeout or rerun for it.
+func TestOversizedResponsesGetSizeLimitAdvice(t *testing.T) {
+	t.Parallel()
+	_, phase := withRegistryLookupPhase(context.Background(), 0)
+	phase.recordOversized()
+	phase.recordOversized()
+
+	report := listAllPackageReport{}
+	appendLookupPhaseWarnings(&report, phase, false)
+	if report.RefusedRequests != 0 || report.OversizedResponses != 2 {
+		t.Fatalf("counters = refused %d oversized %d, want 0/2", report.RefusedRequests, report.OversizedResponses)
+	}
+	if len(report.Warnings) != 1 || !strings.Contains(report.Warnings[0], "2 registry responses exceeded") {
+		t.Fatalf("warnings = %v, want one size-limit warning", report.Warnings)
+	}
+	if strings.Contains(report.Warnings[0], "--timeout") || hasWarningContaining(report.Warnings, "refused or failed") {
+		t.Fatalf("size-limit warning gives rate-limit advice: %q", report.Warnings[0])
+	}
+	hint := listAllUnknownStatusHint(report)
+	if !strings.Contains(hint, "2 registry responses exceeded") || strings.Contains(hint, "--timeout") {
+		t.Fatalf("hint = %q, want size-limit advice without --timeout", hint)
+	}
+	if strings.Contains(hint, "no action is needed") {
+		t.Fatalf("hint claims no action needed for discarded responses: %q", hint)
+	}
+
+	var stderr strings.Builder
+	writeOutdatedLookupPhaseWarnings(&stderr, phase)
+	if got := stderr.String(); !strings.Contains(got, "2 registry responses exceeded") || strings.Contains(got, "--timeout") {
+		t.Fatalf("outdated warnings = %q, want size-limit advice without --timeout", got)
+	}
+}
+
+// TestMixedRefusalsAndOversizedResponsesAreReportedSeparately splits the
+// refused/failed total by failure kind so each count gets the advice that
+// fits it.
+func TestMixedRefusalsAndOversizedResponsesAreReportedSeparately(t *testing.T) {
+	t.Parallel()
+	_, phase := withRegistryLookupPhase(context.Background(), 0)
+	phase.recordRefusal()
+	phase.recordRefusal()
+	phase.recordRefusal()
+	phase.recordOversized()
+
+	report := listAllPackageReport{}
+	appendLookupPhaseWarnings(&report, phase, false)
+	if report.RefusedRequests != 3 || report.OversizedResponses != 1 {
+		t.Fatalf("counters = refused %d oversized %d, want 3/1", report.RefusedRequests, report.OversizedResponses)
+	}
+	if !hasWarningContaining(report.Warnings, "3 registry requests were refused or failed") {
+		t.Fatalf("warnings = %v, want the refusal warning with the non-oversized count", report.Warnings)
+	}
+	if !hasWarningContaining(report.Warnings, "1 registry responses exceeded") {
+		t.Fatalf("warnings = %v, want the size-limit warning", report.Warnings)
+	}
+
+	var stderr strings.Builder
+	writeOutdatedLookupPhaseWarnings(&stderr, phase)
+	got := stderr.String()
+	if !strings.Contains(got, "3 registry requests were refused or failed") || !strings.Contains(got, "1 registry responses exceeded") {
+		t.Fatalf("outdated warnings = %q, want both counts", got)
 	}
 }
 

@@ -851,7 +851,11 @@ rows render latest status as `unknown`.
 A package status of `Unknown` in the report always means the latest version
 could not be determined (offline mode, unreachable registry, or an
 unsupported/private source as described below); it is not a security signal,
-and security findings for that package are unaffected. Independent of the
+and security findings for that package are unaffected. When registry lookups
+failed, stderr and the report hint say how: refused or failed requests (a
+rate limit, a slow registry) are worth a rerun, a higher `--timeout`, or a
+mirror; responses discarded for exceeding the CLI's response size limit are
+reported separately, because neither changes them. Independent of the
 `Unknown` status: for additional reputation and malware coverage on top of the
 vulnerability feeds, configure the optional server-side ReversingLabs Spectra
 Assure key (`PACKMON_REVERSINGLABS_API_KEY`, see Server Configuration).

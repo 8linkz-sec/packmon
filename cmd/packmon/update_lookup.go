@@ -40,6 +40,17 @@ const (
 	maxRegistryErrorBodyDrain        = 64 * 1024
 	maxPackagistRegistryResponseSize = 4 * 1024 * 1024
 	maxPyPIRegistryResponseSize      = 16 * 1024 * 1024
+	// maxNPMMetadataResponseSize bounds one npm metadata document. Even the
+	// abbreviated install document of a popular package (thousands of
+	// published versions, each with its dependency maps) runs to several MiB,
+	// far beyond the general registry limit; at most
+	// maxConcurrentRegistryRequests of these are buffered at once.
+	maxNPMMetadataResponseSize = 16 * 1024 * 1024
+	// npmAbbreviatedMetadataMediaType selects npm's abbreviated install
+	// metadata document. It carries dist-tags and, per version, the version
+	// and dependency maps the range resolver reads, but drops readmes,
+	// maintainers and the time map, so it is a fraction of the full packument.
+	npmAbbreviatedMetadataMediaType = "application/vnd.npm.install-v1+json"
 )
 
 // lookupSlowCounts counts the packages that serialize behind a dedicated
@@ -988,10 +999,9 @@ func registryGetLimitedWithHeaders(ctx context.Context, url string, limit int64,
 		// The registry answered, so the streak stays reset: an oversized
 		// document says nothing about reachability. The lookup still got no
 		// usable data, so count it with the refused/failed requests that drive
-		// the stderr warning and the list-all HTML hint.
-		if phase != nil {
-			phase.refused.Add(1)
-		}
+		// the stderr warning and the list-all HTML hint, flagged as oversized
+		// so the advice does not blame a rate limit or the timeout.
+		phase.recordOversized()
 		return nil, fmt.Errorf("registry response exceeds %d byte limit", limit)
 	}
 	return data, nil
@@ -1104,7 +1114,12 @@ func fetchNPMMetadata(ctx context.Context, name string) (npmRegistryMetadata, bo
 }
 
 func fetchNPMMetadataFromBase(ctx context.Context, baseURL, name string) (npmRegistryMetadata, bool) {
-	data, err := registryGet(ctx, registryEndpoint(baseURL, url.PathEscape(name)))
+	// Ask for the abbreviated install document, the format the npm CLI itself
+	// resolves ranges from; a registry or mirror without it falls back to the
+	// full packument, which decodes into the same fields.
+	headers := http.Header{}
+	headers.Set("Accept", npmAbbreviatedMetadataMediaType+"; q=1.0, application/json; q=0.8")
+	data, err := registryGetLimitedWithHeaders(ctx, registryEndpoint(baseURL, url.PathEscape(name)), maxNPMMetadataResponseSize, headers)
 	if err != nil {
 		return npmRegistryMetadata{}, false
 	}
