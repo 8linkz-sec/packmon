@@ -680,8 +680,8 @@ from the database. To reset it:
      -c "DELETE FROM admin_auth WHERE id = 1;"
    ```
 
-2. Ensure `PACKMON_ADMIN_INITIAL_PASSWORD` (at least 12 characters) is set in
-   the server environment.
+2. Ensure `PACKMON_ADMIN_INITIAL_PASSWORD` (at least 12 characters, at most
+   72 bytes) is set in the server environment.
 3. Restart the server: `docker compose restart packmon-server`. Startup
    re-creates the admin account from the bootstrap password because no admin
    hash exists anymore.

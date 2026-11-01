@@ -176,3 +176,49 @@ func TestValidateAdminPasswordCountsCharactersNotBytes(t *testing.T) {
 		})
 	}
 }
+
+// TestValidateAdminPasswordRejectsPasswordsOverBcryptLimit keeps the policy in
+// step with bcrypt, which refuses more than MaxAdminPasswordBytes bytes. A
+// longer password used to pass validation and then fail hashing, so a password
+// change showed the generic update failure and bootstrap a hash error.
+func TestValidateAdminPasswordRejectsPasswordsOverBcryptLimit(t *testing.T) {
+	t.Parallel()
+
+	if MaxAdminPasswordBytes != 72 {
+		t.Fatalf("MaxAdminPasswordBytes = %d, want the bcrypt input limit 72", MaxAdminPasswordBytes)
+	}
+	for _, tt := range []struct {
+		name     string
+		password string
+		wantErr  error
+	}{
+		{name: "72 ASCII bytes", password: strings.Repeat("a", 72)},
+		{name: "73 ASCII bytes", password: strings.Repeat("a", 73), wantErr: ErrAdminPasswordTooLong},
+		// 24 three-byte runes are exactly 72 bytes.
+		{name: "72 multi-byte bytes", password: strings.Repeat("一", 24)},
+		// 25 three-byte runes are only 25 characters but 75 bytes.
+		{name: "75 multi-byte bytes", password: strings.Repeat("一", 25), wantErr: ErrAdminPasswordTooLong},
+		{name: "too short", password: "short", wantErr: ErrAdminPasswordTooShort},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := ValidateAdminPassword(tt.password)
+			if tt.wantErr == nil {
+				if err != nil {
+					t.Fatalf("ValidateAdminPassword(%d bytes) error = %v, want nil", len(tt.password), err)
+				}
+				if _, hashErr := HashPassword(tt.password); hashErr != nil {
+					t.Fatalf("HashPassword(%d bytes) error = %v, want a password the policy accepts to hash", len(tt.password), hashErr)
+				}
+				return
+			}
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("ValidateAdminPassword(%d bytes) error = %v, want %v", len(tt.password), err, tt.wantErr)
+			}
+		})
+	}
+	if errors.Is(ErrAdminPasswordTooLong, ErrAdminPasswordTooShort) || !strings.Contains(ErrAdminPasswordTooLong.Error(), "72 bytes") {
+		t.Fatalf("ErrAdminPasswordTooLong = %v, want its own error naming the 72-byte maximum", ErrAdminPasswordTooLong)
+	}
+}

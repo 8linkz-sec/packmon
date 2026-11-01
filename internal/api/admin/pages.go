@@ -1222,6 +1222,19 @@ func adminSettingsTemplateData(state adminSettingsViewState, csrfToken string, q
 	return data
 }
 
+// adminPasswordPolicyMessage maps each auth.ValidateAdminPassword error to its
+// own admin message, so an over-long password is not reported as too short.
+func adminPasswordPolicyMessage(err error) string {
+	switch {
+	case errors.Is(err, auth.ErrAdminPasswordTooLong):
+		return web.Message("admin.settings.error.password.too_long", auth.MaxAdminPasswordBytes)
+	case errors.Is(err, auth.ErrAdminPasswordTooShort):
+		return web.Message("admin.settings.error.password.too_short", adminPasswordMinLength)
+	default:
+		return web.Message("admin.settings.error.password.policy")
+	}
+}
+
 // HandlePasswordChange handles POST /admin/settings/password.
 func (h *AdminHandler) HandlePasswordChange(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.requireAdminPost(w, r, adminPostGate{csrfAction: "password_change"}); !ok {
@@ -1255,7 +1268,7 @@ func (h *AdminHandler) HandlePasswordChange(w http.ResponseWriter, r *http.Reque
 	}
 
 	if err := auth.ValidateAdminPassword(newPassword); err != nil {
-		http.Redirect(w, r, "/admin/settings?err="+url.QueryEscape(web.Message("admin.settings.error.password.too_short", adminPasswordMinLength)), http.StatusSeeOther)
+		http.Redirect(w, r, "/admin/settings?err="+url.QueryEscape(adminPasswordPolicyMessage(err)), http.StatusSeeOther)
 		return
 	}
 

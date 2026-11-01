@@ -937,6 +937,8 @@ var webMessagesEN = map[webMessageKey]string{
 	webMessageKey("admin.settings.error.password.too_many_attempts"):    "Too many failed password attempts. Please try again later.",
 	webMessageKey("admin.settings.error.password.mismatch"):             "New passwords do not match",
 	webMessageKey("admin.settings.error.password.too_short"):            "Password must be at least %d characters",
+	webMessageKey("admin.settings.error.password.too_long"):             "Password must be at most %d bytes (characters outside ASCII count as several bytes)",
+	webMessageKey("admin.settings.error.password.policy"):               "Password does not meet the admin password policy",
 	webMessageKey("admin.settings.error.password.verify_current"):       "Failed to verify current password",
 	webMessageKey("admin.settings.error.password.current_incorrect"):    "Current password is incorrect",
 	webMessageKey("admin.settings.error.password.reused"):               "New password must differ from current password",

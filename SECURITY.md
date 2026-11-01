@@ -284,7 +284,10 @@ Admin properties:
 - bootstrap password comes from `PACKMON_ADMIN_INITIAL_PASSWORD` only when no
   admin hash exists yet;
 - bootstrap and rotated admin passwords must be at least 12 characters long,
-  counted as Unicode code points rather than bytes;
+  counted as Unicode code points rather than bytes, and at most 72 bytes
+  (UTF-8), the bcrypt input limit; a longer password is rejected by the
+  policy with its own error (bootstrap fails, the password-change form shows
+  the maximum) instead of failing later in hashing;
 - password is stored as a bcrypt hash;
 - existing admin hash takes precedence over bootstrap env;
 - sessions authenticated with the bootstrap password may only rotate that

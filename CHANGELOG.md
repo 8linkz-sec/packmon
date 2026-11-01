@@ -35,6 +35,13 @@
   `https://packmon.internal#fragment/admin`; the server now refuses to start
   with a clear configuration error. The HTTPS redirect builder also drops such
   hosts.
+- Admin passwords longer than 72 bytes (bcrypt's input limit) are now rejected
+  by the password policy with their own error. A password change used to pass
+  validation and then fail hashing with the generic "Failed to update
+  password", and a too-long `PACKMON_ADMIN_INITIAL_PASSWORD` failed bootstrap
+  with a bcrypt hash error. The form now answers "Password must be at most 72
+  bytes", and each policy error maps to its own message instead of every one
+  being reported as too short.
 - Local scans no longer report ReversingLabs reputation findings that the
   server's `/api/v1/check` ignores. `GET /api/v1/sync` now exports reputation
   rows only while ReversingLabs is enabled in `self` mode; otherwise it sends

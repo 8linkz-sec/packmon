@@ -22,6 +22,20 @@ const bcryptCost = 12
 // bytes.
 const MinAdminPasswordLength = 12
 
+// MaxAdminPasswordBytes is the longest admin password in bytes (UTF-8), not
+// characters. It is bcrypt's input limit: HashPassword refuses longer input,
+// so the policy rejects it up front with its own error.
+const MaxAdminPasswordBytes = 72
+
+var (
+	// ErrAdminPasswordTooShort reports a password with fewer than
+	// MinAdminPasswordLength characters.
+	ErrAdminPasswordTooShort = fmt.Errorf("auth: admin password must be at least %d characters", MinAdminPasswordLength)
+	// ErrAdminPasswordTooLong reports a password longer than
+	// MaxAdminPasswordBytes bytes.
+	ErrAdminPasswordTooLong = fmt.Errorf("auth: admin password must be at most %d bytes", MaxAdminPasswordBytes)
+)
+
 // AdminBootstrapStore is the persistence surface needed to bootstrap the
 // shared admin account and audit that event.
 type AdminBootstrapStore interface {
@@ -46,10 +60,15 @@ type AdminBootstrapAuditEntry struct {
 
 // ValidateAdminPassword enforces the shared admin password policy. The
 // minimum counts code points so multi-byte characters cannot satisfy it with
-// fewer than MinAdminPasswordLength characters.
+// fewer than MinAdminPasswordLength characters; the maximum counts bytes
+// because bcrypt does. It returns ErrAdminPasswordTooShort or
+// ErrAdminPasswordTooLong.
 func ValidateAdminPassword(password string) error {
 	if utf8.RuneCountInString(password) < MinAdminPasswordLength {
-		return fmt.Errorf("auth: admin password must be at least %d characters", MinAdminPasswordLength)
+		return ErrAdminPasswordTooShort
+	}
+	if len(password) > MaxAdminPasswordBytes {
+		return ErrAdminPasswordTooLong
 	}
 	return nil
 }

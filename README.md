@@ -951,7 +951,7 @@ Important environment variables:
 - `PACKMON_ADMIN_AUDIT_HMAC_KEY` (required in production; base64-encoded 32
   random bytes used to HMAC new admin audit digest-chain rows. Development
   mode may run without it and writes legacy `sha256:` audit digests.)
-- `PACKMON_ADMIN_INITIAL_PASSWORD` (at least 12 characters)
+- `PACKMON_ADMIN_INITIAL_PASSWORD` (at least 12 characters, at most 72 bytes)
 - `PACKMON_ADMIN_SESSION_TIMEOUT=8h`
 - `PACKMON_ADMIN_IDLE_TIMEOUT=15m`
 - `PACKMON_SCAN_LOG_RETENTION=720h` (30-day retention for server `scan_log`;
