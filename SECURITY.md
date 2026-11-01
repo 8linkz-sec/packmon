@@ -541,7 +541,8 @@ rejected when they target unsupported hosts, plain HTTP without an explicit
 insecure test override, loopback, link-local, private, multicast, or
 unspecified addresses. Configured latest-version registry base and mirror URLs
 must not contain credentials, queries (including an empty trailing `?`
-delimiter), or fragments; HTTPS is required except loopback HTTP test endpoints,
+delimiter), or fragments (including an empty trailing `#` marker); such values
+are rejected, never stripped. HTTPS is required except loopback HTTP test endpoints,
 and literal link-local, multicast, or unspecified mirror addresses are rejected.
 `packmon config show` preserves scheme, host, and path for configured
 latest-version registry URLs while redacting userinfo, fragments, and every

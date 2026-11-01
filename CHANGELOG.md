@@ -36,6 +36,11 @@
   reported success and Git skipped the scan. `packmon hook status` now reports
   such a hook as `packmon hook not executable` instead of `installed` (POSIX
   only; Git for Windows does not use mode bits for hooks).
+- Latest-version registry base URLs, Docker registry mirrors, and Chocolatey
+  feed URLs ending in an empty fragment marker (`https://mirror.example/api#`)
+  are now rejected like any other fragment. `net/url` records no fragment for a
+  bare `#` and drops it on re-serialization, so the value was previously
+  accepted and silently rewritten.
 - SHA-pinned GitHub Actions are no longer compared as version strings in
   `--list-all` / `--outdated`. The `# vX.Y.Z` comment convention is used as
   the declared version; without it the pin is compared with the dereferenced

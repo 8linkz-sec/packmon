@@ -153,6 +153,11 @@ func TestLatestRegistryBaseURLRejectsQueryOrFragment(t *testing.T) {
 		"https://mirror.example/api#anchor",
 		"https://mirror.example/api?tenant=blue#anchor",
 		"https://mirror.example/api?",
+		// An empty fragment marker leaves URL.Fragment empty and String()
+		// drops it, so it must be caught on the raw value, not stripped.
+		"https://mirror.example/api#",
+		"https://mirror.example/api/#",
+		"https://mirror.example/api?#",
 	} {
 		t.Run(raw, func(t *testing.T) {
 			_, err := normalizeLatestRegistryBaseURL("registries.npm_registry_base_url", raw)
@@ -176,51 +181,55 @@ func TestLatestRegistryQueryOrFragmentRejectionAcrossIngress(t *testing.T) {
 
 	tests := []struct {
 		name     string
-		apply    func() error
+		apply    func(raw string) error
 		wantName string
 	}{
 		{
 			name: "YAML registry field",
-			apply: func() error {
-				return normalizeCLIRegistryConfig(&cliRegistryConfig{NPMRegistryBaseURL: "https://mirror.example/api?"})
+			apply: func(raw string) error {
+				return normalizeCLIRegistryConfig(&cliRegistryConfig{NPMRegistryBaseURL: raw})
 			},
 			wantName: "registries.npm_registry_base_url",
 		},
 		{
 			name: "environment registry field",
-			apply: func() error {
-				t.Setenv("PACKMON_NPM_REGISTRY_BASE_URL", "https://mirror.example/api?")
+			apply: func(raw string) error {
+				t.Setenv("PACKMON_NPM_REGISTRY_BASE_URL", raw)
 				return applyLatestRegistryEnvSettings(&scanSettings{})
 			},
 			wantName: "PACKMON_NPM_REGISTRY_BASE_URL",
 		},
 		{
 			name: "feed list",
-			apply: func() error {
-				_, err := normalizeFeedURLList("registries.chocolatey_feed_urls", []string{"https://mirror.example/api?"})
+			apply: func(raw string) error {
+				_, err := normalizeFeedURLList("registries.chocolatey_feed_urls", []string{raw})
 				return err
 			},
 			wantName: "registries.chocolatey_feed_urls",
 		},
 		{
 			name: "Docker mirror",
-			apply: func() error {
-				_, err := normalizeDockerRegistryMirrorBaseURL("registries.docker_registry_mirrors[ghcr.io]", "https://mirror.example/api?")
+			apply: func(raw string) error {
+				_, err := normalizeDockerRegistryMirrorBaseURL("registries.docker_registry_mirrors[ghcr.io]", raw)
 				return err
 			},
 			wantName: "registries.docker_registry_mirrors[ghcr.io]",
 		},
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			err := tc.apply()
-			if !errors.Is(err, errLatestRegistryBaseURLHasQueryOrFragment) {
-				t.Fatalf("ingress error = %v, want query/fragment sentinel", err)
-			}
-			if !strings.Contains(err.Error(), tc.wantName) {
-				t.Fatalf("error %q does not name %q", err, tc.wantName)
-			}
-		})
+	// Both empty markers: a trailing "?" (URL.ForceQuery) and a trailing "#"
+	// (which URL.Parse records nowhere at all).
+	for _, raw := range []string{"https://mirror.example/api?", "https://mirror.example/api#"} {
+		for _, tc := range tests {
+			t.Run(tc.name+" "+raw, func(t *testing.T) {
+				err := tc.apply(raw)
+				if !errors.Is(err, errLatestRegistryBaseURLHasQueryOrFragment) {
+					t.Fatalf("ingress error = %v, want query/fragment sentinel", err)
+				}
+				if !strings.Contains(err.Error(), tc.wantName) {
+					t.Fatalf("error %q does not name %q", err, tc.wantName)
+				}
+			})
+		}
 	}
 }
