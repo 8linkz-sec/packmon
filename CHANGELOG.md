@@ -16,6 +16,62 @@
 
 ### Fixed
 
+- The PostgreSQL `version_ranges` CHECK constraints accepted malformed OSV
+  ranges: a range without an `events` key (`[{}]`) and events whose boundary
+  was `null`, a number, or blank (`{"introduced":null}`), because the check
+  only tested that a boundary key exists. Migration 050 replaces
+  `packmon_jsonb_version_ranges_valid` with the rule the store already applied
+  before writes (nonempty `events` arrays, event objects, at least one
+  nonblank string boundary among `introduced` / `fixed` / `last_affected` /
+  `limit`, other boundaries a string or `null`); `[]` stays valid. Existing
+  rows that fail it are repaired before the constraints are re-validated:
+  affected-package ranges become `[]` (as in migration 032); a malicious
+  finding keeps its nonempty exact `versions` and loses only the ranges; an
+  active malicious finding without exact versions is quarantined (tombstoned
+  via `removed_at`, exported to local clients as withdrawn) instead of becoming
+  an all-version blocking finding. Each repaired row is recorded with its
+  original value in `packmon_m050_version_range_repairs`, and the 050 down
+  migration restores the rows unchanged since the repair (rows changed since
+  keep their current state). The store's
+  own pre-write check now matches keys exactly, as the database does, so a
+  case-variant key such as `"Introduced"` is rejected before the write
+  instead of failing the CHECK constraint. The feed
+  import endpoint applies the same rule to `version_ranges` in vulnerability
+  and malicious imports, so such a range gets a `400` naming the failing
+  field (for example `version_ranges[0].events[0].fixed must be a string`)
+  instead of the generic store-rejection message. The shared rule also
+  requires a range `type`, when present, to be a string or `null`, as the
+  range matcher reads it.
+- Refresh-queue clear, purge and single-job admin audit details omit
+  `requested_at` / `processed_at` for a job that has no such timestamp. They
+  used to record an empty string (for example `"processed_at":""` for a job
+  that was never processed). Existing audit rows are unchanged; readers must
+  treat a missing key as "never set".
+- The baseline down migration `001_initial.down.sql` can reverse the baseline
+  schema on its own: it dropped `api_keys` before `scan_log`, whose
+  `scan_log_api_key_id_fkey` references it, so PostgreSQL refused the drop. It
+  now drops `scan_log` first and also removes the two JSON helper functions
+  the baseline creates. Down migrations are review and verification aids that
+  are never applied by `packmon-server migrate` or server startup; the
+  documented rollback path remains restoring the pre-upgrade backup.
+- `POST /api/v1/packages/{ecosystem}/{name}/refresh` accepts a chunked request
+  with an empty body like a request without a body. Only `Content-Length: 0`
+  counted as "no body" before, so an empty chunked body (`Content-Length`
+  unknown) got `400 empty JSON body`, or `415` without a JSON Content-Type,
+  although the body is optional. Bodies that carry bytes keep the strict
+  empty-object rules.
+- Feed imports answer `400` instead of `500` when the request passes
+  validation but the store rejects a value: an EPSS score or percentile too
+  small for the stored precision, a NUL character in a text or JSON field, a
+  record that fails the store's own version-JSON checks, or a CHECK
+  constraint. Only an allowlist of PostgreSQL value errors (SQLSTATE 22001,
+  22003, 22007, 22008, 22021, 22P02, 22P05) and CHECK violations (23514) are
+  treated this way; other database errors stay `500`. This covers every
+  import path (OSV/GHSA, OpenSSF/Socket, VulnCheck, CISA KEV and EPSS,
+  buffered and streamed). The response and the
+  recorded `rejected` feed status carry the fixed message "feed import
+  contains values the store cannot accept"; the detailed store error is only
+  logged. Nothing from the rejected import commits.
 - Diagnostic redaction now hides secrets whose key is quoted, as in JSON or
   dict-style error text: `"password":"x"`, `"api_key": "x"`, `'token':'x'`, and
   `\"token\":\"x\"` inside an escaped JSON string, with optional whitespace
@@ -459,12 +515,33 @@
   command's `choco` / `install` words as packages. A continued line is joined
   without an inserted space and the first character of the next line is
   escaped, as in cmd.exe. Only the cmd.exe separators `&`, `&&`, `||`, `|`,
-  parentheses, and redirections start a new batch command: `;`, `{`, `}`,
+  and parentheses start a new batch command: `;`, `{`, `}`,
   and `=` are ordinary text, so `echo x;choco install a` and
   `set x = choco install a` no longer report `a`, and `choco install a ; b`
   reports `b` as well. A batch `--version='1.0'` keeps its single quotes, as
   cmd.exe passes them to choco.exe, and is reported unpinned instead of as
   version `1.0`. PowerShell parsing is unchanged.
+- Chocolatey script inventory removes a redirection together with its target
+  instead of treating it as a command separator, in PowerShell and batch
+  files alike. `>nul choco install a` used to report nothing and
+  `choco install a >nul b` only `a`, although the shell runs choco with both
+  packages; a word after a redirection such as `echo x > choco install a` is
+  no longer read as a command either. This covers `>`, `>>`, `<`, `2>`,
+  `2>>`, `*>`, `2>&1`, `1>&2`, `>nul`, `>$null`, and quoted targets.
+- Chocolatey script inventory groups a batch `^"...^"` for choco.exe's
+  argument splitting, so `choco install a --params ^"/x y z^"` no longer
+  reports `y` and `z` as packages; `&` and `|` after a `^"` still separate
+  commands. An empty `""` is an argument in batch files, so
+  `--version "" b` no longer reads `b` as the version.
+- Chocolatey script inventory recognizes batch `choco` commands after
+  `for ... in (...) do`, after an `if` condition (`if exist x`, `if not ...`,
+  `if errorlevel 1`, `if defined x`, `if "%1"==""`, `if %x% EQU 1`, with
+  `/i`), and after `else`; they used to be missed. The words of a `for` set
+  are no longer read as commands. A batch `%ProgramFiles(x86)%` expansion and
+  a PowerShell `${env:ProgramFiles(x86)}` variable stay one word, so their
+  parentheses no longer split a command (`Write-Host
+  ${env:ProgramFiles(x86)} choco install a` no longer reports `a`).
+  PowerShell `if` / `foreach` / `try` block bodies were already recognized.
 
 ### Security updates
 
@@ -473,11 +550,40 @@
 ### Operator action
 
 - Run `packmon-server migrate` (or the `packmon-migrate` compose service)
-  before starting the updated server: this release adds schema migration 047
-  (schema version 46 -> 47), which widens the ecosystem CHECK constraints for
-  the inventory-only `chocolatey` ecosystem. The server refuses to start on a
-  schema version mismatch. Rolling 047 back removes any `chocolatey` rows
-  (none are written by the scan path).
+  before starting the updated server: this release adds schema migrations 047
+  to 050 (schema version 46 -> 50), applied in one run. The server refuses to
+  start on a schema version mismatch. Read "Upgrade And Rollback" in
+  `docs/runbook.md` first; a failed migration other than a 048 prerequisite
+  failure leaves the database dirty, and the documented recovery is restoring
+  the pre-upgrade backup.
+  - 047 widens the ecosystem CHECK constraints for the inventory-only
+    `chocolatey` ecosystem. Rolling 047 back removes any `chocolatey` rows
+    (none are written by the scan path).
+  - 048 creates the `pg_stat_statements` extension and needs preparation
+    first: `pg_stat_statements` in `shared_preload_libraries` (bundled
+    Compose: recreate the `postgres` service), `compute_query_id` on or
+    `auto`, and for external PostgreSQL an administrator-created extension in
+    schema `public` (see `docs/postgres-query-observability.md`). The check
+    runs before anything is marked dirty, so missing preparation leaves schema
+    47 clean and retryable. Rolling 048 back keeps the extension.
+  - 049 builds two partial indexes over active `malicious_findings` rows with
+    `CREATE INDEX CONCURRENTLY`, outside a transaction. It avoids a long
+    write lock but can run for a while on large catalogs; check PostgreSQL
+    temporary space and volume headroom before starting.
+  - 050 tightens the `version_ranges` CHECK constraints and repairs rows that
+    fail them. In one transaction it scans `affected_packages` and
+    `malicious_findings` to log the failing rows in
+    `packmon_m050_version_range_repairs`, rewrites the logged rows, and scans
+    both tables again to validate the constraints, holding an exclusive lock
+    on both tables from the constraint step until it commits. Repaired
+    affected-package rows match every version until the next feed sync
+    rewrites them, so finding totals for those packages can
+    rise temporarily. Malicious findings without exact versions are
+    quarantined: they stop blocking until a feed import that contains them
+    resurrects them, and quarantined manual advisories (`manual:` IDs) must
+    be re-entered in `/admin/advisories`. The migration reports its counts as
+    a PostgreSQL NOTICE; list the repaired rows afterwards with the query in
+    "Upgrade And Rollback" in `docs/runbook.md`.
 - `docker-compose.server.yml` deployments: the next `up` creates the new
   `<project>_feed-data` volume, so the first feed sync after the upgrade
   re-clones the GHSA and OpenSSF repositories once. A `PACKMON_FEED_DATA_DIR`

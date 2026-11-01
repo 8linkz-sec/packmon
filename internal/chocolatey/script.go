@@ -18,10 +18,17 @@ import (
 // comment is comment text) and skips `#` comments, `<# ... #>` block
 // comments, and here-strings; KindBatchScript (.bat, .cmd) follows cmd.exe:
 // only double quotes group, an unquoted caret makes the next character
-// literal, a caret that ends the line joins the next line, only `&`, `|`,
-// parentheses, and redirections separate commands, and `REM` and `::`
-// comment lines are skipped. Any other kind is an error. UTF-8/UTF-16
-// byte-order marks and CRLF line endings are tolerated.
+// literal, a caret that ends the line joins the next line, only `&`, `|`, and
+// parentheses separate commands, `for ... in (...) do`, `if <condition>`, and
+// `else` hand command position on, and `REM` and `::` comment lines are
+// skipped. In both languages a redirection and its target are removed from
+// wherever they stand without ending the command. Any other kind is an error.
+// UTF-8/UTF-16 byte-order marks and CRLF line endings are tolerated.
+//
+// Not modeled: variables are never resolved (a `for` loop variable or `$p`
+// names no package), delayed `!name!` expansion, `%name%` values that hold
+// parentheses closing an enclosing block, PowerShell backtick escapes inside a
+// line, and choco.exe's backslash-quote argument rules.
 func ParseScript(r io.Reader, sourceFile string, kind Kind) ([]Package, error) {
 	if kind != KindPowerShellScript && kind != KindBatchScript {
 		return nil, fmt.Errorf("%s: unsupported chocolatey script kind %q", sourceFile, kind)
@@ -252,8 +259,16 @@ func (s *scriptScanner) continues(line string) bool {
 // line and whether the line ends inside a `#` line comment or a block comment.
 func lineEndState(line string, quote byte, inBlock bool) (byte, bool, bool) {
 	inToken := quote != 0
+	lastBrace := strings.LastIndexByte(line, '}')
 	for i := 0; i < len(line); i++ {
 		ch := line[i]
+		if !inBlock && quote == 0 {
+			if end := bracedVariableEnd(line, i, lastBrace); end > 0 {
+				i = end - 1
+				inToken = true
+				continue
+			}
+		}
 		switch {
 		case inBlock:
 			if ch == '#' && i+1 < len(line) && line[i+1] == '>' {
@@ -301,13 +316,9 @@ func (s *scriptScanner) parseLine(line string) []installEntry {
 		}
 	}
 	if !s.powerShell() {
-		// cmd.exe hands single quotes to choco.exe unchanged: only double
-		// quotes group on a Windows command line, so `--version='1.0'`
-		// carries the value `'1.0'`, which is not a version literal.
-		return parseChocoTokens(tokenizeBatch(line), `"`)
+		return parseChocoTokens(tokenizeBatch(line), true)
 	}
-	tokens := s.tokenize(line)
-	return parseChocoTokens(tokens, `"'`)
+	return parseChocoTokens(s.tokenize(line), false)
 }
 
 // isBatchComment reports whether a batch line is a `REM` or `::` comment line.
@@ -359,10 +370,13 @@ var commandPrefixes = map[string]bool{"call": true, "sudo": true}
 // token with quoted text, so a quoted `;` or `|` is an argument; in batch
 // files every word token, because tokenizeBatch alone recognizes the cmd.exe
 // separators and so `;`, `{`, `}`, `=` and any quoted or caret-escaped text
-// stay argument text.
+// stay argument text. raw is the source text of a batch word, quotes and
+// carets included, which tells an unquoted `==` in an `if` condition from a
+// quoted one; PowerShell tokens leave it empty.
 type scriptToken struct {
 	text    string
 	literal bool
+	raw     string
 }
 
 func (t scriptToken) isSeparator() bool {
@@ -370,7 +384,7 @@ func (t scriptToken) isSeparator() bool {
 		return false
 	}
 	switch t.text {
-	case ";", "|", "&", "(", ")", "{", "}", "&&", "||", "<", ">", "=":
+	case ";", "|", "&", "(", ")", "{", "}", "&&", "||", "=":
 		return true
 	}
 	return false
@@ -378,14 +392,37 @@ func (t scriptToken) isSeparator() bool {
 
 // parseChocoTokens walks a tokenized logical line and extracts package IDs
 // from every choco install/upgrade command it contains. The choco verb must
-// be in command position (start of line, right after a command separator or
-// redirection, or after a wrapper such as `call`) so text inside strings such
-// as `Write-Host "run choco install x"` is ignored. valueQuotes lists the
-// quote characters stripped from `--option=value` values (see splitOption).
-func parseChocoTokens(tokens []scriptToken, valueQuotes string) []installEntry {
+// be in command position (start of line, right after a command separator, or
+// after a wrapper such as `call`) so text inside strings such as
+// `Write-Host "run choco install x"` is ignored. The tokenizers have already
+// removed redirections with their targets, so a redirection is transparent
+// here. batch selects the cmd.exe rules: a `for` header up to its `) do`, the
+// condition of an `if`, and an `else` or `do` right after a closing
+// parenthesis all hand command position on, and only double quotes are
+// stripped from `--option=value` values, because cmd.exe hands single quotes
+// to choco.exe unchanged (only double quotes group on a Windows command line,
+// so `--version='1.0'` carries the value `'1.0'`, which is not a version
+// literal; see splitOption).
+func parseChocoTokens(tokens []scriptToken, batch bool) []installEntry {
+	valueQuotes := `"'`
+	if batch {
+		valueQuotes = `"`
+	}
 	var entries []installEntry
 	commandPosition := true
+	// forHeader is set while reading a batch `for` header (`for %%i in
+	// (set)`), whose words are loop syntax and data rather than commands. Its
+	// `do` hands command position to the loop body; a command separator ends
+	// a header that has none.
+	forHeader := false
 	for i := 0; i < len(tokens); i++ {
+		if forHeader {
+			if tokens[i].isSeparator() && (tokens[i].text == "&" || tokens[i].text == "|") || isBatchKeywordAfterParen(tokens, i, "do") {
+				forHeader = false
+				commandPosition = true
+			}
+			continue
+		}
 		if tokens[i].isSeparator() {
 			commandPosition = true
 			continue
@@ -393,8 +430,21 @@ func parseChocoTokens(tokens []scriptToken, valueQuotes string) []installEntry {
 		if !commandPosition {
 			continue
 		}
-		if commandPrefixes[strings.ToLower(strings.TrimPrefix(tokens[i].text, "@"))] {
+		word := strings.ToLower(strings.TrimPrefix(tokens[i].text, "@"))
+		if commandPrefixes[word] {
 			continue
+		}
+		if batch {
+			switch {
+			case word == "for":
+				forHeader = true
+				continue
+			case word == "if":
+				i = batchIfCommandStart(tokens, i) - 1
+				continue
+			case isBatchKeywordAfterParen(tokens, i, "do"), isBatchKeywordAfterParen(tokens, i, "else"):
+				continue
+			}
 		}
 		commandPosition = false
 		argStart, ok := chocoCommandArgStart(tokens, i)
@@ -510,13 +560,85 @@ func isRedirectPrefix(token string) bool {
 	return true
 }
 
+func isBlank(ch byte) bool {
+	return ch == ' ' || ch == '\t' || ch == '\r'
+}
+
+// redirectionOperatorEnd returns the index just past the redirection
+// operator (`<`, `>`, or `>>`) at line[i] and reports whether the operator
+// duplicates a stream onto another (`>&1`, as in `2>&1`), which takes no
+// target. A stream selector before the operator (`2`, `*`) is the caller's.
+func redirectionOperatorEnd(line string, i int) (int, bool) {
+	if line[i] == '>' && i+1 < len(line) && line[i+1] == '>' {
+		i++
+	}
+	i++
+	if i+1 < len(line) && line[i] == '&' && line[i+1] >= '0' && line[i+1] <= '9' {
+		return i + 2, true
+	}
+	return i, false
+}
+
+// powerShellRedirectionEnd returns the index just past the PowerShell
+// redirection that starts at line[i]: its operator and, unless it duplicates
+// a stream, its target. The target may follow after blanks, single and double
+// quotes group it, a `${name}` variable is part of it (lastBrace as for
+// bracedVariableEnd), and it ends at the next unquoted blank or separator
+// character. A `#` comment or `@"` / `@'` here-string opener where the target
+// would start is left to the caller, matching lineEndState.
+func powerShellRedirectionEnd(line string, i, lastBrace int) int {
+	i, dup := redirectionOperatorEnd(line, i)
+	if dup {
+		return i
+	}
+	for i < len(line) && isBlank(line[i]) {
+		i++
+	}
+	if i < len(line) && (line[i] == '#' || line[i] == '@' && i+1 < len(line) && (line[i+1] == '"' || line[i+1] == '\'')) {
+		return i
+	}
+	quote := byte(0)
+	for ; i < len(line); i++ {
+		ch := line[i]
+		switch {
+		case quote != 0:
+			if ch == quote {
+				quote = 0
+			}
+		case ch == '"' || ch == '\'':
+			quote = ch
+		case isBlank(ch) || strings.IndexByte("<>;|&(){}", ch) >= 0:
+			return i
+		default:
+			if end := bracedVariableEnd(line, i, lastBrace); end > 0 {
+				i = end - 1
+			}
+		}
+	}
+	return len(line)
+}
+
+// bracedVariableEnd returns the index just past the `}` that closes the
+// PowerShell `${name}` variable starting at line[i], or -1 if line[i] does
+// not start one. lastBrace is the index of the last `}` in line, so an
+// unclosed `${` costs no search and the scan stays linear.
+func bracedVariableEnd(line string, i, lastBrace int) int {
+	if line[i] != '$' || i+1 >= len(line) || line[i+1] != '{' || lastBrace <= i+1 {
+		return -1
+	}
+	return i + 3 + strings.IndexByte(line[i+2:], '}')
+}
+
 // tokenize splits a PowerShell line into tokens: whitespace separates,
-// single/double quotes group (quotes removed, the token marked literal), the
-// unquoted characters ; | & ( ) { } < > become standalone separator tokens
-// (stream selectors such as `2>` are dropped), an unquoted `#` at token start
-// starts a comment that ends the line, `<# ... #>` block comments are skipped
-// (possibly across lines), and a trailing `@"` / `@'` opens a here-string that
-// suppresses following lines until the matching `"@` / `'@` terminator.
+// single/double quotes group (quotes removed, the token marked literal), a
+// `${name}` variable is one word, the unquoted characters ; | & ( ) { }
+// become standalone separator tokens, a redirection (`>`, `>>`, `<`, with a
+// stream selector such as `2` or `*`, a duplication such as `2>&1`, and its
+// target) is removed without separating anything, an unquoted `#` at token
+// start starts a comment that ends the line, `<# ... #>` block comments are
+// skipped (possibly across lines), and a trailing `@"` / `@'` opens a
+// here-string that suppresses following lines until the matching `"@` / `'@`
+// terminator.
 func (s *scriptScanner) tokenize(line string) []scriptToken {
 	var tokens []scriptToken
 	var current strings.Builder
@@ -529,6 +651,7 @@ func (s *scriptScanner) tokenize(line string) []scriptToken {
 		quoted = false
 	}
 	quote := byte(0)
+	lastBrace := strings.LastIndexByte(line, '}')
 	for i := 0; i < len(line); i++ {
 		ch := line[i]
 		switch {
@@ -558,18 +681,23 @@ func (s *scriptScanner) tokenize(line string) []scriptToken {
 			flush()
 			s.inBlockComment = true
 			i++
-		case ch == ' ' || ch == '\t' || ch == '\r':
+		case isBlank(ch):
 			flush()
 		case ch == '<' || ch == '>':
 			if !quoted && isRedirectPrefix(current.String()) {
 				current.Reset()
 			}
 			flush()
-			tokens = append(tokens, scriptToken{text: string(ch)})
+			i = powerShellRedirectionEnd(line, i, lastBrace) - 1
 		case ch == ';' || ch == '|' || ch == '&' || ch == '(' || ch == ')' || ch == '{' || ch == '}':
 			flush()
 			tokens = append(tokens, scriptToken{text: string(ch)})
 		default:
+			if end := bracedVariableEnd(line, i, lastBrace); end > 0 {
+				current.WriteString(line[i:end])
+				i = end - 1
+				continue
+			}
 			current.WriteByte(ch)
 		}
 	}
@@ -581,66 +709,230 @@ func (s *scriptScanner) tokenize(line string) []scriptToken {
 // and escaping rules: whitespace separates; only double quotes group (quotes
 // removed), and inside them every character, including a caret, is literal; a
 // single quote is ordinary text. An unquoted caret is removed and makes the
-// next character literal, so `^&`, `^|`, `^<`, `^>` and `^"` are argument text
-// and `^^` is a literal caret; an escaped space or tab still separates
-// arguments, because the invoked program splits its command line on it. A
-// caret with nothing after it escapes nothing. Only the unquoted, unescaped
-// cmd.exe command separators & | (which also form && and ||), the block
-// parentheses ( ), and the redirections < > become standalone separator
-// tokens (stream selectors such as `2>` are dropped); `;`, `{`, `}` and `=`
+// next character literal, so `^&`, `^|`, `^<` and `^>` are argument text and
+// `^^` is a literal caret; an escaped space or tab still separates arguments,
+// because the invoked program splits its command line on it. A caret with
+// nothing after it escapes nothing. Only the unquoted, unescaped cmd.exe
+// command separators & | (which also form && and ||) and the block
+// parentheses ( ) become standalone separator tokens; `;`, `{`, `}` and `=`
 // are ordinary text, and every word token is marked literal so its text can
-// never read as a separator. Batch files have no inline comments, block
-// comments, or here-strings.
+// never read as a separator. A redirection (`>`, `>>`, `<`, with a handle
+// such as `2`, a duplication such as `2>&1`, and its target) is removed
+// without separating anything, as cmd.exe removes it before running the
+// command. A `%name%` expansion is one word (see batchVariableEnd).
+//
+// Word splitting follows the invoked program, which sees every double quote
+// that reaches it: an escaped `^"` opens no cmd.exe quote, so `&` and `|`
+// still separate commands after it, but it still groups words for choco.exe,
+// so `--params ^"/x y^"` is one argument. argQuote tracks that grouping
+// separately from the cmd.exe quote state and ends with the command at a
+// separator. An empty `""` is an (empty) argument. Batch files have no inline
+// comments, block comments, or here-strings.
 func tokenizeBatch(line string) []scriptToken {
 	var tokens []scriptToken
 	var current strings.Builder
 	quoted := false // the current word has quoted or escaped text
-	flush := func() {
-		if current.Len() > 0 {
-			tokens = append(tokens, scriptToken{text: current.String(), literal: true})
+	start := -1     // index in line where the current word starts, else -1
+	begin := func(at int) {
+		if start < 0 {
+			start = at
+		}
+	}
+	flush := func(end int) {
+		if current.Len() > 0 || quoted {
+			tokens = append(tokens, scriptToken{text: current.String(), literal: true, raw: line[start:end]})
 			current.Reset()
 		}
 		quoted = false
+		start = -1
 	}
-	inQuote := false
+	inQuote := false  // inside a cmd.exe double quote
+	argQuote := false // inside a double quote as choco.exe splits its arguments
 	for i := 0; i < len(line); i++ {
 		ch := line[i]
 		switch {
-		case inQuote:
-			if ch == '"' {
-				inQuote = false
-			} else {
-				current.WriteByte(ch)
-			}
 		case ch == '"':
-			inQuote = true
+			begin(i)
+			inQuote = !inQuote
+			argQuote = !argQuote
 			quoted = true
+		case isBlank(ch) && !argQuote:
+			flush(i)
+		case inQuote || isBlank(ch):
+			begin(i)
+			current.WriteByte(ch)
 		case ch == '^':
 			if i+1 >= len(line) {
 				continue
 			}
+			begin(i)
 			i++
-			if next := line[i]; next == ' ' || next == '\t' || next == '\r' {
-				flush()
-			} else {
+			switch next := line[i]; {
+			case next == '"':
+				argQuote = !argQuote
+				quoted = true
+			case isBlank(next) && !argQuote:
+				flush(i - 1)
+			default:
 				current.WriteByte(next)
 				quoted = true
 			}
-		case ch == ' ' || ch == '\t' || ch == '\r':
-			flush()
+		case ch == '%':
+			begin(i)
+			end := batchVariableEnd(line, i)
+			current.WriteString(line[i:end])
+			i = end - 1
 		case ch == '<' || ch == '>':
-			if !quoted && isRedirectPrefix(current.String()) {
-				current.Reset()
+			// Inside an escaped-quote group the redirection is removed from
+			// the middle of the argument, which goes on after it.
+			if !argQuote {
+				if !quoted && isRedirectPrefix(current.String()) {
+					current.Reset()
+				}
+				flush(i)
 			}
-			flush()
-			tokens = append(tokens, scriptToken{text: string(ch)})
+			i = batchRedirectionEnd(line, i) - 1
 		case ch == '|' || ch == '&' || ch == '(' || ch == ')':
-			flush()
+			flush(i)
+			argQuote = false
 			tokens = append(tokens, scriptToken{text: string(ch)})
 		default:
+			begin(i)
 			current.WriteByte(ch)
 		}
 	}
-	flush()
+	flush(len(line))
 	return tokens
+}
+
+// batchRedirectionEnd returns the index just past the batch redirection that
+// starts at line[i]: its operator and, unless it duplicates a handle, its
+// target. The target may follow after blanks and runs to the next blank or
+// cmd.exe separator that is neither quoted nor caret-escaped.
+func batchRedirectionEnd(line string, i int) int {
+	i, dup := redirectionOperatorEnd(line, i)
+	if dup {
+		return i
+	}
+	for i < len(line) && isBlank(line[i]) {
+		i++
+	}
+	inQuote := false
+	for ; i < len(line); i++ {
+		ch := line[i]
+		switch {
+		case ch == '"':
+			inQuote = !inQuote
+		case inQuote:
+		case ch == '^':
+			i++
+		case isBlank(ch) || strings.IndexByte("<>|&()", ch) >= 0:
+			return i
+		}
+	}
+	return len(line)
+}
+
+// batchVariableEnd returns the index just past the percent expression that
+// starts at line[i]: a doubled `%%` (as in a `%%i` loop variable), or a whole
+// `%name%` expansion whose name holds no blank, double quote, caret, `&`,
+// `|`, `<`, or `>`. cmd.exe expands such a variable before it splits the
+// line, so `%ProgramFiles(x86)%` is one word and its parentheses close no
+// block. Any other percent sign, including a `%1` / `%~dp0` / `%*` argument
+// reference, is a single ordinary character. Each search stops at the next
+// percent sign, so a line is scanned in linear time.
+func batchVariableEnd(line string, i int) int {
+	if i+1 >= len(line) {
+		return i + 1
+	}
+	switch next := line[i+1]; {
+	case next == '%':
+		return i + 2
+	case next == '~' || next == '*' || next >= '0' && next <= '9':
+		return i + 1
+	}
+	k := strings.IndexByte(line[i+1:], '%')
+	if k < 0 || strings.ContainsAny(line[i+1:i+1+k], " \t\r\"^&|<>") {
+		return i + 1
+	}
+	return i + k + 2
+}
+
+// isBatchKeywordAfterParen reports whether tokens[i] is the batch keyword
+// (`do`, `else`) written directly after a closing block parenthesis, the only
+// place where cmd.exe reads it as a keyword: `for ... in (set) do command`
+// and `if ... (command) else command`.
+func isBatchKeywordAfterParen(tokens []scriptToken, i int, keyword string) bool {
+	return i > 0 && !tokens[i].isSeparator() && strings.EqualFold(tokens[i].text, keyword) &&
+		tokens[i-1].isSeparator() && tokens[i-1].text == ")"
+}
+
+// batchIfConditions are the batch `if` conditions that take one operand.
+var batchIfConditions = map[string]bool{"exist": true, "defined": true, "errorlevel": true, "cmdextversion": true}
+
+// batchCompareOps are the extended batch `if` comparison operators.
+var batchCompareOps = map[string]bool{"equ": true, "neq": true, "lss": true, "leq": true, "gtr": true, "geq": true}
+
+// batchIfCommandStart returns the index of the command that the batch `if`
+// at tokens[i] runs. It skips `/i`, `not`, and the condition: `exist`,
+// `defined`, `errorlevel`, or `cmdextversion` with one operand, a
+// `string1==string2` comparison written as one to three words, or a
+// `string1 OP string2` comparison with an `EQU`-style operator. Keywords and
+// `==` count only unquoted (they are read from the raw word), so
+// `if "%1"=="" ...` is a whole comparison. A separator ends the condition
+// early; a malformed condition hands command position to its second word.
+func batchIfCommandStart(tokens []scriptToken, i int) int {
+	isWord := func(k int) bool { return k < len(tokens) && !tokens[k].isSeparator() }
+	keyword := func(k int) string { return strings.ToLower(tokens[k].raw) }
+	j := i + 1
+	if isWord(j) && keyword(j) == "/i" {
+		j++
+	}
+	if isWord(j) && keyword(j) == "not" {
+		j++
+	}
+	if !isWord(j) {
+		return j
+	}
+	if batchIfConditions[keyword(j)] {
+		if isWord(j + 1) {
+			return j + 2
+		}
+		return j + 1
+	}
+	if found, tail := unquotedEquals(tokens[j].raw); found {
+		if !tail && isWord(j+1) {
+			return j + 2
+		}
+		return j + 1
+	}
+	j++
+	if !isWord(j) {
+		return j
+	}
+	if found, tail := unquotedEquals(tokens[j].raw); found || batchCompareOps[keyword(j)] {
+		if !tail && isWord(j+1) {
+			return j + 2
+		}
+		return j + 1
+	}
+	return j
+}
+
+// unquotedEquals reports whether a raw batch word holds `==` outside double
+// quotes and caret escapes, and whether any text follows the first one.
+func unquotedEquals(raw string) (found, tail bool) {
+	inQuote := false
+	for k := 0; k < len(raw); k++ {
+		switch {
+		case raw[k] == '"':
+			inQuote = !inQuote
+		case inQuote:
+		case raw[k] == '^':
+			k++
+		case raw[k] == '=' && k+1 < len(raw) && raw[k+1] == '=':
+			return true, k+2 < len(raw)
+		}
+	}
+	return false, false
 }
