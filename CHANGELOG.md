@@ -16,6 +16,23 @@
 
 ### Fixed
 
+- A panicking latest-version, npm-metadata, or Git tag lookup in
+  `--outdated` / `--list-all` no longer hangs the run. The shared in-flight
+  lookup is now always completed, so other packages waiting on the same
+  registry key get a failed lookup instead of blocking forever.
+- `packmon scan --outdated --quiet --html <file>` no longer prints the routine
+  "Checking N packages for updates..." line to stderr; `--quiet` now
+  suppresses it like the later lookup progress.
+- `packmon scan --list-packages` now exits with the parser-failure code `4`
+  when a lockfile or SBOM entry could not be parsed, as `packmon scan` does.
+  Partially parsed inventories are still listed before the error; a lockfile
+  set that could not be parsed at all no longer exits `0` with
+  "No packages found.".
+- `packmon scan --list-all` now writes the requested `--output-json`,
+  `--output-sarif`, and `--output-junit` files when the scan completes but the
+  local scan-history write fails, and returns the history error afterwards,
+  matching a normal `packmon scan`. Previously the artifacts were silently
+  omitted while the HTML report was still written.
 - Local scans no longer report ReversingLabs reputation findings that the
   server's `/api/v1/check` ignores. `GET /api/v1/sync` now exports reputation
   rows only while ReversingLabs is enabled in `self` mode; otherwise it sends

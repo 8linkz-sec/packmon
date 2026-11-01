@@ -630,3 +630,51 @@ func TestGitRemoteTagsPropagatesOversizedOutput(t *testing.T) {
 		t.Fatalf("gitRemoteTags err = %v, want oversized output error", err)
 	}
 }
+
+func TestRunOutdatedQuietHTMLSuppressesCheckingBanner(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "package-lock.json"), `{
+		"lockfileVersion": 3,
+		"packages": {
+			"": {"version": "1.0.0"},
+			"node_modules/outdated": {"version": "1.0.0"}
+		}
+	}`)
+	resolver := packageUpdateResolver{
+		fetchLatest: func(context.Context, domain.Ecosystem, string) string { return "2.0.0" },
+	}
+
+	for _, tc := range []struct {
+		name       string
+		quiet      bool
+		wantBanner bool
+	}{
+		{name: "quiet", quiet: true, wantBanner: false},
+		{name: "default", quiet: false, wantBanner: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var err error
+			var stderr string
+			captureStdout(t, func() {
+				stderr = captureScanStderr(t, func() {
+					err = runOutdatedWithOptions([]string{dir}, outdatedOptions{
+						Context:    context.Background(),
+						Ecosystems: "npm",
+						MaxDepth:   2,
+						IncludeDev: true,
+						OutputHTML: filepath.Join(t.TempDir(), "outdated.html"),
+						Quiet:      tc.quiet,
+						resolver:   resolver,
+						Timeout:    1,
+					})
+				})
+			})
+			if err != nil {
+				t.Fatalf("runOutdatedWithOptions: %v", err)
+			}
+			if got := strings.Contains(stderr, "Checking 1 package for updates..."); got != tc.wantBanner {
+				t.Fatalf("checking banner on stderr = %v, want %v:\n%s", got, tc.wantBanner, stderr)
+			}
+		})
+	}
+}
