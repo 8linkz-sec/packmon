@@ -490,9 +490,9 @@ pair: when only one is set, the other is copied from it, and when both are
 blank one shared value is generated. If both are set to different values,
 `init-secrets` keeps them and prints a warning that names the two variables
 (never their values), because a fresh bundled PostgreSQL would reject the
-server login. `docker compose up --build` then runs
-the database migration automatically before starting the server. The same two
-commands work identically on Windows, macOS, and Linux.
+server login. `docker compose up --build` then runs the database migration
+automatically before starting the server. The same two commands work
+identically on Windows, macOS, and Linux.
 
 `init-secrets` writes into the bind-mounted checkout, so it runs as
 `${PACKMON_UID:-1000}:${PACKMON_GID:-1000}` instead of the image's `packmon`
@@ -506,8 +506,9 @@ bash scripts/init-secrets.sh
 
 The wrapper detects rootless Docker (`docker info` lists `rootless` under
 security options) and uses `0:0` there, because rootless Docker maps container
-root to your host user. Explicit `PACKMON_UID` / `PACKMON_GID` values in your
-environment always win over the detected defaults.
+root to your host user. An explicit `PACKMON_UID` or `PACKMON_GID` in your
+environment wins over the detected default for that variable only: setting just
+`PACKMON_UID=<n>` under rootless Docker runs the container as `<n>:0`.
 
 Admins can later adjust `.env`, feed-provider API keys, TLS/proxy settings, and
 other deployment-specific values before shared or production use.
@@ -1024,8 +1025,8 @@ deleted after revocation from `/admin/keys`; the delete action stays recorded
 in the admin audit log. Creation requires the current admin password. The
 expiration is a lifetime in whole days -- a preset of 1, 7, 14, 30, 90, 180, or
 365 days (default 30) or a custom value from 1 to 365 -- so a key never expires
-more than 365 days in the future. Create separate named keys per client class so `last_used_at` and
-revocation are useful.
+more than 365 days in the future. Create separate named keys per client class
+so `last_used_at` and revocation are useful.
 Existing keys created before expiration support may show no expiration. Those
 legacy keys do not expire automatically; rotate, revoke, or delete them
 manually when you no longer want them accepted.

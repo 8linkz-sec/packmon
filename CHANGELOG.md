@@ -48,10 +48,11 @@
 - `.env.example` seeds `PACKMON_METRICS_HOST=127.0.0.1` instead of `0.0.0.0`,
   which production startup rejects. README, runbook, and deferred-scope notes
   no longer claim the metrics port is reachable from the host; read metrics
-  with `docker compose exec packmon-server wget -qO-
-  http://127.0.0.1:9090/metrics`. An existing `.env` that still says
-  `0.0.0.0` keeps working under Compose (both Compose models pin loopback) but
-  should be changed for any other launch path.
+  with
+  `docker compose exec packmon-server wget -qO- http://127.0.0.1:9090/metrics`.
+  An existing `.env` that still says `0.0.0.0` keeps working under Compose
+  (both Compose models pin loopback) but should be changed for any other launch
+  path.
 - `packmon-server init-secrets` copies an existing `PACKMON_DB_PASSWORD` onto
   a blank `POSTGRES_PASSWORD` instead of generating a different value. The
   bundled PostgreSQL was previously initialized with a password the server

@@ -42,7 +42,7 @@ unrelated persistence capabilities do not leak across subsystem boundaries.
   - `1`: blocking findings;
   - `2`: operational error;
   - `3`: findings below the blocking threshold (non-blocking; treated as a
-    passing pipeline by the shipped CI templates);
+    passing pipeline by the GitLab consumer template);
   - `4`: parser error, including partial lockfile/SBOM parse errors when no
     blocking finding has already failed the scan;
   - `10`: internal bug.
@@ -1211,11 +1211,10 @@ with the hosted CI setup. The GitLab shared CI template
 (`ci/gitlab/.packmon-scan.yml`) is still in the repository but is not run by
 any pipeline here.
 
-Reusable CI templates parse `feed_status`, `db_stale`, and `db_age_days` from
-the JSON result artifact and surface degraded coverage independently from
-finding count or exit-code mapping. GitHub writes an Actions warning, step
-summary, and PR-comment coverage warning when comments are enabled. GitLab
-writes the same state into the job log.
+The GitLab consumer template parses `feed_status`, `db_stale`, and
+`db_age_days` from the JSON result artifact and writes degraded coverage into
+the job log independently from finding count or exit-code mapping. No GitHub
+Actions template is maintained any more.
 
 `tests/ci` checks only that the GitLab template's container image stays
 digest-pinned; its YAML and contract behavior are not validated locally. A
@@ -1270,18 +1269,26 @@ Normal local gate:
 ```bash
 mkdir -p .gotmp
 export GOTMPDIR="$PWD/.gotmp"
-PACKAGES="$(go list ./...)"
-GOSEC_DIRS="$(go list -f '{{.Dir}}' ./...)"
+PACKAGES="$(go list ./... | grep -v /node_modules/)"
+GOSEC_DIRS="$(go list -f '{{.Dir}}' ./... | grep -v node_modules)"
 GOFMT_FILES="$(git ls-files '*.go')"
 gofumpt -extra -l ${GOFMT_FILES}
-go test -count=1 ./...
+go test -count=1 ${PACKAGES}
 go test -race -count=1 -coverprofile=coverage.out ${PACKAGES}
 go run ./tools/checkcoverage -profile=coverage.out -min=79.5
-go vet ./...
-golangci-lint run ./...
+go vet ${PACKAGES}
+golangci-lint run ${GOSEC_DIRS}
 govulncheck ${PACKAGES}
 gosec -nosec-require-rules -nosec-require-justification ${GOSEC_DIRS}
 ```
+
+The package lists exclude `node_modules`, matching `GO_PACKAGES` in the
+Makefile: with the web toolchain installed, `go list ./...` also reports
+`node_modules/flatted/golang/pkg/flatted`, which is not Packmon code.
+`GOSEC_DIRS` filters on `node_modules` without slashes because
+`go list -f '{{.Dir}}'` prints backslash-separated paths on Windows.
+`golangci-lint` gets directories rather than import paths because it treats a
+non-relative argument as a path below the current directory.
 
 Build and tagged test gate:
 

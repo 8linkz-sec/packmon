@@ -1026,7 +1026,7 @@ For each security review:
 - Confirm migrations remain a separate command.
 - Confirm scan result schema and blocking semantics stay consistent.
 - Confirm stale/degraded feed states are visible to clients.
-- Confirm CI templates preserve exit codes and artifacts.
+- Confirm the GitLab consumer template preserves exit codes and artifacts.
 - Confirm PRs include the security checklist and sensitive paths route through
   CODEOWNERS.
 - Confirm release binaries and images are built from source through the local
