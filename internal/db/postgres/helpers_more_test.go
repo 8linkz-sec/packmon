@@ -169,7 +169,7 @@ func TestAddSyncWindowFilters(t *testing.T) {
 	query := "WHERE true"
 	args := []any{"first"}
 	addSyncWindowFilters(&query, &args, db.SyncExportOptions{Since: &since, SinceXID: 99}, 123, "updated_at", "xmin")
-	for _, want := range []string{"xmin < $2::bigint", "(updated_at >= $3 OR xmin >= $4::bigint)"} {
+	for _, want := range []string{" AND " + syncXIDBeforeSQL("xmin", "$2"), " AND (updated_at >= $3 OR " + syncXIDAtOrAfterSQL("xmin", "$4") + ")"} {
 		if !strings.Contains(query, want) {
 			t.Fatalf("query = %q, missing %q", query, want)
 		}

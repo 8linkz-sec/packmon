@@ -66,9 +66,11 @@ func TestSyncSplitPagesNameTheirAdvisoryAndItsLastPage(t *testing.T) {
 // vulnerability_split_complete: the split advisory's vulnerability row and
 // every affected row of it (in any ecosystem) still carry versions from
 // before the pinned snapshot, by timestamp and by transaction ID. The 32-bit
-// xmin is compared with the low 32 bits of the 64-bit, epoch-extended
-// snapshot ID modulo 2^32, and only while the snapshot is at most 2^31
-// transactions old. Without a snapshot transaction ID the check cannot prove
+// xmin is compared with the 64-bit, epoch-extended snapshot ID modulo 2^32
+// (syncXIDAtOrAfterSQL), which counts every row as changed once the snapshot
+// is more than 2^31 transactions old, so the vulnerability row must provably
+// predate the snapshot (NOT at or after it, never the fail-open
+// syncXIDBeforeSQL). Without a snapshot transaction ID the check cannot prove
 // anything, so the split is never reported complete.
 func TestSyncSplitAdvisoryUnchangedQuery(t *testing.T) {
 	t.Parallel()
@@ -79,17 +81,13 @@ func TestSyncSplitAdvisoryUnchangedQuery(t *testing.T) {
 	if !ok {
 		t.Fatal("split advisory check with a snapshot xid is disabled, want it built")
 	}
-	if !slices.Equal(args, []any{snapshot, "GHSA-big", "42", strconv.FormatUint(epochXID, 10)}) {
-		t.Fatalf("split advisory check args = %v, want snapshot, id, the 32-bit snapshot xid 42, and the 64-bit snapshot xid", args)
+	if !slices.Equal(args, []any{snapshot, "GHSA-big", strconv.FormatUint(epochXID, 10)}) {
+		t.Fatalf("split advisory check args = %v, want snapshot, id, and the 64-bit snapshot xid as text", args)
 	}
 	normalized := strings.Join(strings.Fields(query), " ")
-	notBefore := func(column string) string {
-		return "(((" + column + "::text)::bigint - $3::bigint + 4294967296) % 4294967296) < 2147483648"
-	}
 	for _, want := range []string{
-		"SELECT txid_snapshot_xmax(txid_current_snapshot()) - $4::bigint BETWEEN 0 AND 2147483647",
-		"AND EXISTS ( SELECT 1 FROM vulnerabilities v WHERE v.id = $2 AND v.updated_at <= $1 AND NOT " + notBefore("v.xmin") + " )",
-		"AND NOT EXISTS ( SELECT 1 FROM affected_packages ap WHERE ap.vulnerability_id = $2 AND (ap.updated_at > $1 OR " + notBefore("ap.xmin") + ") )",
+		"SELECT EXISTS ( SELECT 1 FROM vulnerabilities v WHERE v.id = $2 AND v.updated_at <= $1 AND NOT " + syncXIDAtOrAfterSQL("v.xmin", "$3") + " )",
+		"AND NOT EXISTS ( SELECT 1 FROM affected_packages ap WHERE ap.vulnerability_id = $2 AND (ap.updated_at > $1 OR " + syncXIDAtOrAfterSQL("ap.xmin", "$3") + ") )",
 	} {
 		if !strings.Contains(normalized, want) {
 			t.Fatalf("split advisory check missing %q in:\n%s", want, query)
@@ -101,40 +99,6 @@ func TestSyncSplitAdvisoryUnchangedQuery(t *testing.T) {
 
 	if _, _, ok := buildSyncSplitAdvisoryUnchangedQuery("GHSA-big", snapshot, 0); ok {
 		t.Fatal("split advisory check without a snapshot xid is enabled, want the split never reported complete")
-	}
-}
-
-// TestSyncXIDNotBeforeSnapshotComparesModulo2To32 evaluates the condition of
-// syncXIDNotBeforeSnapshotSQL, with PostgreSQL's integer semantics, across the
-// 32-bit wraparound: an xmin at or up to 2^31 - 1 after the snapshot ID counts
-// as not before the snapshot (a change the check must see), also when the
-// transaction ID counter wrapped between them, and an xmin up to 2^31 before
-// it counts as older.
-func TestSyncXIDNotBeforeSnapshotComparesModulo2To32(t *testing.T) {
-	t.Parallel()
-
-	if got, want := syncXIDNotBeforeSnapshotSQL("ap.xmin", "$3"), "(((ap.xmin::text)::bigint - $3::bigint + 4294967296) % 4294967296) < 2147483648"; got != want {
-		t.Fatalf("syncXIDNotBeforeSnapshotSQL = %q, want %q", got, want)
-	}
-	notBefore := func(xmin, snapshot int64) bool {
-		return (xmin-snapshot+4294967296)%4294967296 < 2147483648
-	}
-	for _, tt := range []struct {
-		name           string
-		xmin, snapshot int64
-		want           bool
-	}{
-		{name: "snapshot xmin itself", xmin: 1000, snapshot: 1000, want: true},
-		{name: "after the snapshot", xmin: 1001, snapshot: 1000, want: true},
-		{name: "before the snapshot", xmin: 999, snapshot: 1000, want: false},
-		{name: "after the snapshot across the wraparound", xmin: 5, snapshot: 4294967290, want: true},
-		{name: "before the snapshot across the wraparound", xmin: 4294967290, snapshot: 5, want: false},
-		{name: "furthest change after the snapshot", xmin: 1000 + 2147483647, snapshot: 1000, want: true},
-		{name: "furthest version before the snapshot", xmin: 4294967296 + 1000 - 2147483648, snapshot: 1000, want: false},
-	} {
-		if got := notBefore(tt.xmin, tt.snapshot); got != tt.want {
-			t.Fatalf("%s: not before(xmin %d, snapshot %d) = %v, want %v", tt.name, tt.xmin, tt.snapshot, got, tt.want)
-		}
 	}
 }
 

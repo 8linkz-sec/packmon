@@ -73,6 +73,12 @@ func TestPostgresStoreCorrectnessAgainstDocker(t *testing.T) {
 	t.Run("malicious and reputation pages stay within their byte budgets", func(t *testing.T) {
 		testOtherDatasetPagesStayWithinTheirByteBudgets(ctx, t, store)
 	})
+	t.Run("sync xid conditions match their model", func(t *testing.T) {
+		testSyncXIDConditionsMatchTheirModel(ctx, t, store)
+	})
+	t.Run("delta delivers a row committed after the snapshot", func(t *testing.T) {
+		testDeltaDeliversRowCommittedAfterTheSnapshot(ctx, t, store)
+	})
 	t.Run("package name repair marks merged vulnerabilities changed", func(t *testing.T) {
 		testPackageNameRepairDeltaIncludesMergedVulnerability(ctx, t, store)
 	})

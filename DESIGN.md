@@ -1155,6 +1155,33 @@ remote check nor a local scan. Once a later sync no longer reports
 sync would never resend rows that did not change in the meantime. An
 ecosystem-filtered sync refetches only its ecosystems and keeps the refetch
 pending until an unfiltered sync completes it.
+Every `GET /api/v1/sync` page carries `synced_at` and `synced_xid`, the
+server's snapshot timestamp and transaction watermark
+(`txid_snapshot_xmin`, a 64-bit, epoch-extended PostgreSQL transaction ID).
+The first page of a sequence pins them, the client echoes them as `snapshot`
+and `snapshot_xid` on later pages, and a completed sequence stores them as the
+`since` and `since_xid` of the next delta. A delta page exports only row
+versions written before the pinned snapshot, by `updated_at` and by
+transaction ID, and selects rows changed at or after `since` or at or after
+`since_xid`. The transaction ID leg catches a transaction that started before
+a snapshot (so its `updated_at` predates it) and committed after it: the
+delta's snapshot bound excludes its rows, and the next delta delivers them. A
+full export (no `since`) is bounded by `updated_at` only and carries no
+transaction ID bound, so it may also deliver rows of a transaction still in
+flight at the snapshot; the next delta delivers them again, and local upserts
+are idempotent. A row's `xmin` is a 32-bit transaction ID, so the server
+compares it with the 64-bit watermarks modulo 2^32, within the window from the
+watermark up to the statement's next transaction ID, which stays correct past
+the first transaction ID epoch (about 4 billion transactions). A frozen or
+ancient `xmin` can alias into such a window: the `since_xid` leg then delivers
+the row once more, a delta's snapshot bound defers it to the next delta (whose
+`since_xid` window covers it), and a full export, which has no transaction ID
+bound, never excludes it, so a one-shot full sync that never runs a delta
+still receives every row. A `since_xid` more than 2^31 transactions old or
+ahead of the server's counter (for example after a database restore) makes the
+delta resend every row of each dataset within the snapshot, and a
+`snapshot_xid` outside that range excludes nothing, so neither ever skips a
+row.
 Local vulnerability rows are keyed by advisory, ecosystem, and package name, so
 a delta sync must also remove packages an advisory no longer affects. A delta
 `GET /api/v1/sync` exports every changed vulnerability with all of its current
@@ -1205,12 +1232,12 @@ advisory's (ecosystem, name) key space in consecutive ranges, each in its own
 statement over the current affected rows, so on the last split page the
 server checks that neither the vulnerability row nor any affected row of the
 advisory (in any ecosystem) has a version newer than the pinned snapshot, by
-`updated_at` and by transaction ID. The transaction ID comparison is
-epoch-safe: a row's 32-bit `xmin` is compared with the low 32 bits of the
-64-bit snapshot ID modulo 2^32, which never mistakes a change after the
-snapshot for an older version while the snapshot is at most 2^31
-transactions old (the check verifies that with 64-bit IDs and fails
-otherwise); a frozen or ancient `xmin` can at worst fail the check. Only then
+`updated_at` and by transaction ID. The transaction ID comparison is the
+epoch-safe one of the delta windows above: it never mistakes a change after
+the snapshot for an older version, counts every row as changed (and so fails
+the check) when the snapshot is more than 2^31 transactions old or ahead of
+the server's counter, and a frozen or ancient `xmin` can at worst fail the
+check. Only then
 can no split page have missed a row that still exists, and the page sets
 `vulnerability_split_complete: true`; an insert, re-insert, or update of the
 advisory during the split, or a missing snapshot transaction ID, leaves it

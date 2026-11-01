@@ -16,6 +16,29 @@
 
 ### Fixed
 
+- Incremental `/api/v1/sync` deltas no longer miss rows once the server's
+  PostgreSQL database has run through its first transaction ID epoch (about
+  4 billion transactions). The delta and snapshot filters compared each row's
+  32-bit `xmin` with the 64-bit, epoch-extended `since_xid` and
+  `snapshot_xid` watermarks, so past that point the `since_xid` leg never
+  matched and the snapshot bound never excluded anything, and deltas relied
+  on `updated_at` alone: a row whose transaction started before a sync's
+  snapshot and committed after it was missed by every later delta, leaving a
+  vulnerability or malicious package out of local databases until a full
+  sync. The delta filters of the vulnerability, malicious, reputation, and
+  lifecycle datasets, the split advisory continuation, and its completeness
+  check now compare the `xmin` with the watermarks modulo 2^32 within the
+  window from the watermark up to the statement's next transaction ID. An
+  old frozen row whose raw `xmin` aliases into that window is delivered once
+  more or deferred to the next delta, never dropped. Full exports no longer
+  carry a transaction ID bound at all, only the `updated_at` snapshot bound,
+  so such a row is never excluded from a one-shot full sync that never runs
+  a delta; rows of transactions in flight at the snapshot may arrive with
+  the full export and again with the next delta, which local upserts
+  absorb. A `since_xid` more than 2^31 transactions old or ahead of the
+  server's counter (for example after a database restore) resends the whole
+  dataset instead of skipping rows, and a `snapshot_xid` outside that range
+  excludes nothing. The wire format is unchanged.
 - `/api/v1/sync` pages are now bounded by bytes in every dataset, not only in
   the vulnerability dataset. The malicious, reputation, and lifecycle rows of
   a page were bounded only by the row `limit` (up to 10,000 rows each), so

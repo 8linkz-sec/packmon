@@ -301,7 +301,7 @@ func TestBuildSplitAdvisoryRowsQuery(t *testing.T) {
 		"WHERE v.id = " + arg("GHSA-big"),
 		"(ap.ecosystem, ap.name) > (" + arg("npm") + ", " + arg("big2") + ")",
 		"v.updated_at <= $1",
-		"(v.xmin::text)::bigint <",
+		syncXIDBeforeSQL("v.xmin", arg("42")),
 		"ap.ecosystem = ANY(",
 		"ORDER BY ap.ecosystem ASC, ap.name ASC",
 		"LIMIT " + arg(7) + "::bigint + 1",
