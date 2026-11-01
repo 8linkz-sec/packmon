@@ -6,7 +6,8 @@
 # by you with mode 0600.
 #
 # Usage (from anywhere): bash scripts/init-secrets.sh
-# Explicit PACKMON_UID / PACKMON_GID in the environment always win.
+# An explicit PACKMON_UID or PACKMON_GID in the environment wins for that
+# variable only; the other one keeps its detected default.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
