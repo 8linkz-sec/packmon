@@ -475,7 +475,14 @@ page) and older clients stay upsert-only on larger deltas and keep the old
 package until a later single-page incremental sync drops it or a full sync,
 which clears and reloads the local tables, replaces it. An ecosystem-filtered
 sync cannot drop the local rows of an advisory whose coverage moved entirely to
-another ecosystem; run an unfiltered sync or a full sync:
+another ecosystem; run an unfiltered sync or a full sync.
+
+During a rolling upgrade, a sync sequence that a new server started and an
+older server continues fails with `400` (the older server does not know the
+whole-advisory cursor); nothing is deleted and the next sync starts over.
+Clients that page by `offset` only, without the cursor, should not switch
+between old and new servers mid-sequence, because the two order offset pages
+differently. When in doubt, run a full sync:
 
 ```bash
 packmon db sync --server https://packmon.internal:8080 --full

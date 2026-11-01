@@ -761,9 +761,9 @@ JSON string): the quoted value is redacted and the other, non-secret fields of
 the object stay readable. An escaped value inside such a string
 (`\"token\":\"a b\"`) is redacted up to its matching escaped closing quote,
 spaces and escaped characters (including an escaped quote inside the value)
-included; an unterminated one redacts the rest of the message. A backslash escapes any character inside a secret
-value, a newline included, so an escaped line break does not end the redaction
-early.
+included; an unterminated one redacts the rest of the message. A backslash
+escapes any character inside a secret value, a newline included, so an escaped
+line break does not end the redaction early.
 
 The built-in `/privacy` page is a deployment-neutral disclosure for the
 first-party admin session cookie and routine Packmon audit/scan metadata. It is
@@ -926,7 +926,7 @@ Local SQLite sync:
   vulnerability on it with its complete current affected set: it pages a delta
   by whole advisories and never splits an advisory across pages, so an
   advisory changed between pages is either delivered whole on a later page or
-  sync, or excluded whole, and never arrives partially. Full exports and the
+  by the next sync, or excluded whole, and never arrives partially. Full exports and the
   legacy row-cursor and offset pages of a delta, which can split an advisory,
   are never flagged; older servers flag only a delta that fits in one page.
   The replacement therefore never runs for full syncs (which clear and reload
