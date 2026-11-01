@@ -681,12 +681,17 @@ Important behavior:
   `.cmd` files they are only the cmd.exe separators `&`, `&&`, `||`, `|` and
   the block parentheses `(` / `)`, while `;`, `{`, `}`, and `=` are ordinary
   argument text. As in cmd.exe, a batch `(` opens a block only where a
-  command starts (also as a `for` set and in `@(`, `)else(`, `do(`), and a
-  `)` closes one only while a block is open, which a multi-line block keeps
-  open across lines; any other parenthesis is argument text, so
+  command starts (also as a `for` set and after an `@` prefix, as in `@(`),
+  and a `)` closes one only while a block is open, which a multi-line block
+  keeps open across lines; any other parenthesis is argument text, so
   `echo Installing (x86) choco install a` is one `echo` command, a
   `^"...^"` group keeps its parentheses, and an unbalanced `)` outside any
-  block starts nothing. Batch files also hand command position on after a
+  block starts nothing. The attached forms `)else(`, `do(`, and `in(`, which
+  cmd.exe rejects as a syntax error, are tolerated and conservatively read as
+  block openers. A caret-escaped blank inside an `if` condition stays part of
+  its operand, as cmd.exe reads it, so
+  `if exist C:\Program^ Files\Git (choco install git)` reports `git`. Batch
+  files also hand command position on after a
   `for ... in (...) do` header (the loop set is data, not commands), after
   the condition of `if` (`exist`, `defined`, `errorlevel`, `cmdextversion`
   with their operand, a `==` or `EQU` / `NEQ` / `LSS` / `LEQ` / `GTR` / `GEQ`
@@ -715,7 +720,8 @@ Important behavior:
   escaping: only double quotes group (a single quote is ordinary text), a
   caret inside double quotes is literal, an unquoted caret makes the next
   character literal (`^&`, `^|`, `^<`, `^>`, and `^"` are argument text, `^^`
-  is a literal caret, and an escaped space still separates arguments; a `^"`
+  is a literal caret, and an escaped space still separates arguments, except
+  inside an `if` condition, where it stays part of the operand; a `^"`
   opens no cmd.exe quote, so `&` and `|` still separate after it, but it
   groups words for choco.exe, so `--params ^"/x y^"` is one argument), and
   only an unquoted, unescaped caret that is the last character of the line

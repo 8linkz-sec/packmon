@@ -494,6 +494,17 @@ func (c *commandTracker) opensBlock(tokens []scriptToken) bool {
 	return c.command
 }
 
+// readsIfCondition reports whether the word that follows tokens, which the
+// tracker has consumed, still belongs to the condition of a batch `if`,
+// because the condition is not complete yet.
+func (c *commandTracker) readsIfCondition(tokens []scriptToken) bool {
+	if c.ifStart < 0 {
+		return false
+	}
+	_, complete := batchIfCommandStart(tokens, c.ifStart)
+	return !complete
+}
+
 // parseChocoTokens walks a tokenized logical line and extracts package IDs
 // from every choco install/upgrade command it contains. The choco verb must
 // be in command position (see commandTracker) so text inside strings such as
@@ -780,7 +791,9 @@ func (s *scriptScanner) tokenize(line string) []scriptToken {
 // single quote is ordinary text. An unquoted caret is removed and makes the
 // next character literal, so `^&`, `^|`, `^<` and `^>` are argument text and
 // `^^` is a literal caret; an escaped space or tab still separates arguments,
-// because the invoked program splits its command line on it. A caret with
+// because the invoked program splits its command line on it, except inside
+// an `if` condition, which cmd.exe reads itself: there it stays part of the
+// operand, so `if exist C:\Program^ Files\Git (` tests one path. A caret with
 // nothing after it escapes nothing. Only the unquoted, unescaped cmd.exe
 // command separators & | (which also form && and ||) and the block
 // parentheses ( ) become standalone separator tokens; `;`, `{`, `}` and `=`
@@ -794,12 +807,14 @@ func (s *scriptScanner) tokenize(line string) []scriptToken {
 // goes up) only where it starts a word in command position, which the
 // tokenizer learns by running a commandTracker over the tokens it has
 // emitted (see commandTracker.opensBlock); an `@`, `else`, `do`, or `for` set
-// `in` written directly before the `(` is split off first, so `@(`,
-// `)else(`, `do(`, and `in(` still open one. A `)` closes a block (depth goes
-// down) wherever it stands while depth is above zero. Any other parenthesis
-// is argument text, so `echo Installing (x86) choco install a` is one echo
-// command and an unbalanced `)` at depth zero splits nothing. depth carries
-// the open blocks from one logical line to the next.
+// `in` written directly before the `(` is split off first, so `@(` opens one
+// as in cmd.exe, and `)else(`, `do(`, and `in(`, which cmd.exe rejects as a
+// syntax error, are tolerated and conservatively read as block openers too
+// (see opensAfterWord). A `)` closes a block (depth goes down) wherever it
+// stands while depth is above zero. Any other parenthesis is argument text,
+// so `echo Installing (x86) choco install a` is one echo command and an
+// unbalanced `)` at depth zero splits nothing. depth carries the open blocks
+// from one logical line to the next.
 //
 // Word splitting follows the invoked program, which sees every double quote
 // that reaches it: an escaped `^"` opens no cmd.exe quote, so `&` and `|`
@@ -856,7 +871,7 @@ func tokenizeBatch(line string, depth *int) []scriptToken {
 			case next == '"':
 				argQuote = !argQuote
 				quoted = true
-			case isBlank(next) && !argQuote:
+			case isBlank(next) && !argQuote && !tracker.readsIfCondition(tokens):
 				flush(i - 1)
 			default:
 				current.WriteByte(next)
@@ -904,10 +919,12 @@ func tokenizeBatch(line string, depth *int) []scriptToken {
 
 // opensAfterWord reports whether a batch `(` written directly after word, an
 // unquoted word tokenizeBatch has not emitted yet, opens a block once the word
-// is split off, because cmd.exe ends that word at the `(`: an `@`
-// echo-suppression prefix in command position, an `else` or `do` right after
-// a closing block parenthesis (`)else(`, `do(`), or the `in` of a `for`
-// header before its set (`in(`).
+// is split off: an `@` echo-suppression prefix in command position (`@(`,
+// which cmd.exe accepts), an `else` or `do` right after a closing block
+// parenthesis (`)else(`, `do(`), or the `in` of a `for` header before its set
+// (`in(`). cmd.exe rejects the last three with a syntax error; they are
+// tolerated and read as block openers anyway, so a script written that way
+// over-reports rather than hides its packages.
 func opensAfterWord(word string, tokens []scriptToken, tracker *commandTracker) bool {
 	afterParen := len(tokens) > 0 && tokens[len(tokens)-1].isSeparator() && tokens[len(tokens)-1].text == ")"
 	switch {

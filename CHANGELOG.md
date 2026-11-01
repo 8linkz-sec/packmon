@@ -600,15 +600,21 @@
   rules instead of splitting a command at every `(` and `)`. A `(` opens a
   block only where a command starts (line start, after `&` / `|` / `(`, after
   an `if` condition, after `else` or `do` that follows a closing parenthesis,
-  also written `)else(` / `do(`, as a `for` set, and after an `@`), and a `)`
-  closes one only while a block is open, which a multi-line block keeps open
-  across lines; any other parenthesis is argument text. So
-  `echo Installing (x86) choco install a` no longer reports `a`,
-  `choco install a (x86) b` and `choco install a >out(1).log b` report `b` as
-  well, a `^"...^"` group such as `--params ^"/InstallDir:C:\Program Files
-  (x86)\x^" b` is no longer split at its parentheses (so `b` is reported),
-  and an unbalanced `)` outside any block no longer starts a command
-  (`) choco install a` reports nothing). PowerShell parsing is unchanged.
+  as a `for` set, and after an `@`), and a `)` closes one only while a block
+  is open, which a multi-line block keeps open across lines; any other
+  parenthesis is argument text. So `echo Installing (x86) choco install a`
+  no longer reports `a`, `choco install a (x86) b` and
+  `choco install a >out(1).log b` report `b` as well, a `^"...^"` group such
+  as `--params ^"/InstallDir:C:\Program Files (x86)\x^" b` is no longer split
+  at its parentheses (so `b` is reported), and an unbalanced `)` outside any
+  block no longer starts a command (`) choco install a` reports nothing).
+  The attached forms `)else(`, `do(`, and `in(`, which cmd.exe rejects as a
+  syntax error, are tolerated and conservatively read as block openers. A
+  bare `@` prefix keeps command position, so `@ choco install a` now reports
+  `a`. A caret-escaped blank inside an `if` condition stays part of its
+  operand, as cmd.exe reads it, so
+  `if exist C:\Program^ Files\Git choco install git` now reports `git`.
+  PowerShell parsing is unchanged.
 - `packmon-server migrate` no longer bounds the migrations themselves by
   `PACKMON_DB_CONNECT_TIMEOUT` (default `10s`). The whole run used to share
   that deadline, so on a large catalog the 049 `CREATE INDEX CONCURRENTLY`

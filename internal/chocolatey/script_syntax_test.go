@@ -167,13 +167,21 @@ func TestParseScriptBatchParenthesesFollowBlockDepth(t *testing.T) {
 		{"echo-suppressed block", "@(choco install a)\r\n", "a@[unpinned]", "a@[unpinned]"},
 		{"multi-line block", "(\r\n  choco install a\r\n)\r\n", "a@[unpinned]", "a@[unpinned]"},
 		{"if else blocks", "if exist x (choco install a) else (choco install b)\r\n", "a@[unpinned] b@[unpinned]", "a@[unpinned] b@[unpinned]"},
-		{"if else blocks without spaces", "if exist x (choco install a)else(choco install b)\r\n", "a@[unpinned] b@[unpinned]", "a@[unpinned] b@[unpinned]"},
+		{"if with an escaped blank in the operand", "if exist x^ y choco install a\r\n", "", "a@[unpinned]"},
+		{"if block with an escaped blank in the operand", "if not exist C:\\Program^ Files\\Git (choco install git)\r\n", "git@[unpinned]", "git@[unpinned]"},
+		{"if exist block with an escaped blank", "if exist x^ y (choco install a)\r\n", "a@[unpinned]", "a@[unpinned]"},
+		{"if defined block with an escaped blank", "if defined A^ B (choco install a)\r\n", "a@[unpinned]", "a@[unpinned]"},
+		{"if comparison with an escaped blank", "if a==b^ c (choco install a)\r\n", "a@[unpinned]", "a@[unpinned]"},
+		{"escaped blank in the command still separates", "if exist x choco^ install a\r\n", "", "a@[unpinned]"},
+		{"bare echo-suppression prefix", "@ choco install a\r\n", "", "a@[unpinned]"},
+		{"bare echo-suppression prefix before a block", "@ (choco install a)\r\n", "a@[unpinned]", "a@[unpinned]"},
+		{"tolerated if else blocks without spaces", "if exist x (choco install a)else(choco install b)\r\n", "a@[unpinned] b@[unpinned]", "a@[unpinned] b@[unpinned]"},
 		{"multi-line if else blocks", "if exist x (\r\n  choco install a\r\n) else (\r\n  choco install b\r\n)\r\n", "a@[unpinned] b@[unpinned]", "a@[unpinned] b@[unpinned]"},
 		{"nested blocks", "if exist x (if exist y (choco install a) else (choco install b))\r\n", "a@[unpinned] b@[unpinned]", "a@[unpinned] b@[unpinned]"},
 		{"nested multi-line blocks", "if exist x (\r\n  if exist y (\r\n    choco install a\r\n  )\r\n  echo done (ok^)\r\n  choco install b\r\n)\r\n", "a@[unpinned] b@[unpinned]", "a@[unpinned] b@[unpinned]"},
 		{"closing parenthesis inside a block ends it", "if exist x (\r\n  echo Installing (x86)\r\n  choco install a\r\n)\r\n", "a@[unpinned]", "a@[unpinned]"},
-		{"for do block without a space", "for %%i in (1) do(choco install a)\r\n", "a@[unpinned]", "a@[unpinned]"},
-		{"for set without a space", "for %%i in(1 2) do choco install a\r\n", "", "a@[unpinned]"},
+		{"tolerated for do block without a space", "for %%i in (1) do(choco install a)\r\n", "a@[unpinned]", "a@[unpinned]"},
+		{"tolerated for set without a space", "for %%i in(1 2) do choco install a\r\n", "", "a@[unpinned]"},
 		{"multi-line for set", "for %%i in (\r\n  1 2\r\n) do choco install a\r\n", "", "a@[unpinned]"},
 		{"unbalanced closing parenthesis is text", "echo done) & choco install b\r\n", "b@[unpinned]", "b@[unpinned]"},
 		{"unbalanced closing parenthesis at a command start", ") choco install a\r\n", "a@[unpinned]", ""},
@@ -204,7 +212,7 @@ func TestParseScriptLongShellSyntaxIsLinear(t *testing.T) {
 	const linearParseDeadline = 2 * time.Minute
 	units := []string{
 		"%a ", "%", "${", "${ x", "for ", "if ", "if not ", "> ", ">", "2>&", "^\"a ", "do ", ") do ", "\"a==\" ",
-		"(", ")", "( ", ") ", "(a ", "a) ", "if exist x (", ") else (", "@(", "for %%i in (", "^\"(a ", ">x(",
+		"(", ")", "( ", ") ", "(a ", "a) ", "if exist x (", ") else (", "@(", "for %%i in (", "^\"(a ", ">x(", "if a^ ", "if exist a^ b (",
 	}
 	for _, unit := range units {
 		t.Run(unit, func(t *testing.T) {
