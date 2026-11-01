@@ -276,8 +276,9 @@ SCP-like remote (`user@host:path`), or a bare `host/path` location must be a
 valid DNS hostname (non-empty labels of ASCII letters, digits, and hyphens,
 no leading or trailing dot or hyphen; bare hosts also need a dot, and
 `http(s)` URLs may also use an IPv6 literal); otherwise the location is
-ignored and the pin's identity is used. As in Git, a location with a slash before its first colon is
-a local path, not an SCP-like remote. SwiftPM latest-version lookup is
+ignored and the pin's identity is used. As in Git, a location with a slash
+before its first colon is a local path, not an SCP-like remote. SwiftPM
+latest-version lookup is
 limited to canonical public Git host identities on the built-in allowlist
 (`github.com`, `gitlab.com`, and `bitbucket.org`) plus trusted operator
 hostnames configured through `PACKMON_SWIFTPM_GIT_ALLOWED_HOSTS` or
@@ -640,13 +641,13 @@ Important behavior:
   continuations and skip `#` comments, `<# ... #>` block comments, and
   here-strings, where a backtick inside a `#` or block comment is comment text
   and does not pull the next line into the comment; `.bat` / `.cmd` files join
-  caret line continuations and skip `REM` and `::` comment lines, and `#` is
-  ordinary text there. A caret in a PowerShell file and a backtick in a batch
-  file never continue a line. Script
-  `--source` arguments are ignored; feeds come only from
-  configuration. Chocolatey inventory is metadata-only: no vulnerability or
-  malicious-package matching, no `/api/v1/check` submission, no `--outdated`
-  rows, and no JSON/SARIF/JUnit entries.
+  caret line continuations and skip `REM` / `@REM` and `::` comment lines,
+  and `#` is ordinary text there. A caret in a PowerShell file and a backtick
+  in a batch file never continue a line. Script `--source` arguments are
+  ignored; feeds come only from configuration. Chocolatey inventory is
+  metadata-only: no vulnerability or malicious-package matching, no
+  `/api/v1/check` submission, no `--outdated` rows, and no JSON/SARIF/JUnit
+  entries.
 
 ## Server Behavior
 

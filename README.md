@@ -869,8 +869,16 @@ unsafe network targets are shown as `unknown`.
 Chocolatey inventory is metadata-only as well. Packmon reads FLARE-VM /
 VM-Packages style `config.xml` package lists (a root `<config>` element with
 `<packages><package name="..."/>` entries; other `config.xml` files are ignored
-by content) and `choco install|upgrade` / `cinst` / `cup` lines in `.ps1`,
-`.psm1`, `.bat`, and `.cmd` scripts. Pinned `--version` entries are compared
+by content, and a malformed or truncated file is reported as a parse error only
+once its `<packages>` section has been read) and `choco install|upgrade` /
+`cinst` / `cup` lines in `.ps1`, `.psm1`, `.bat`, and `.cmd` scripts. Scripts
+are read with their own language's rules: `.ps1` / `.psm1` files continue lines
+with a trailing backtick and skip `#` comments, `<# ... #>` block comments, and
+here-strings (a backtick inside a comment does not continue the line);
+`.bat` / `.cmd` files continue lines with a trailing caret and skip `REM`,
+`@REM`, and `::` comment lines. Quoted text is always an argument, so a quoted
+`';'` or `'|'` neither starts a new command nor ends the package list.
+Pinned `--version` entries are compared
 with the feed's latest release; unpinned entries (config.xml always installs
 latest) show `INSTALLED -`, the feed's latest version, and status `unpinned`
 and are never counted as available updates. Lookups query the ordered feeds
@@ -893,7 +901,10 @@ enabling direct VCS fallback.
 SwiftPM Git freshness can additionally allow trusted self-hosted or mirrored
 Git hosts with `PACKMON_SWIFTPM_GIT_ALLOWED_HOSTS`; values are bare hostnames,
 and Packmon still builds the remote as `https://host/path.git` rather than
-passing raw lockfile URLs to Git.
+passing raw lockfile URLs to Git. A `Package.resolved` location whose host is
+not a valid DNS hostname (for example `git@.gitserver.example:org/repo`, or a
+non-ASCII host not written in punycode) is not used as package identity; the
+pin's identity is used instead.
 
 ## Git Hooks
 
