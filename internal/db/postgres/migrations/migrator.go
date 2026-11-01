@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"embed"
+	"errors"
 	"fmt"
 	iofs "io/fs"
 	"path/filepath"
@@ -92,28 +93,32 @@ func Run(dsn string) (err error) {
 }
 
 // RunContext applies all pending migrations with caller-controlled cancellation.
-func RunContext(ctx context.Context, dsn string) (err error) {
+func RunContext(ctx context.Context, dsn string) error {
+	return RunContextWithOptions(ctx, dsn, RunOptions{})
+}
+
+// RunContextWithOptions is RunContext with a separate bound for connecting
+// and acquiring the migration lock (see RunOptions).
+func RunContextWithOptions(ctx context.Context, dsn string, opts RunOptions) (err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	db, err := sql.Open("pgx", dsn)
+	db, err := openMigrationDB(dsn)
 	if err != nil {
 		return fmt.Errorf("migrations: open db: %w", err)
 	}
 	defer ioutils.CloseSilently(db)
 
-	conn, err := db.Conn(ctx)
+	conn, err := connectAndLockMigrations(ctx, db, opts.SetupTimeout)
 	if err != nil {
-		return fmt.Errorf("migrations: connect db: %w", err)
-	}
-	defer ioutils.CloseSilently(conn)
-
-	if err := acquireMigrationLock(ctx, conn); err != nil {
 		return err
 	}
+	defer ioutils.CloseSilently(conn)
 	defer func() {
-		if unlockErr := releaseMigrationLock(ctx, conn); unlockErr != nil && err == nil {
-			err = unlockErr
+		cleanupCtx, cancel := migrationCleanupContext(ctx)
+		defer cancel()
+		if unlockErr := releaseMigrationLock(cleanupCtx, conn); unlockErr != nil {
+			err = errors.Join(err, unlockErr)
 		}
 	}()
 
@@ -405,7 +410,7 @@ func migrationChecksumMatches(migration migrationFile, checksum string) bool {
 }
 
 func backfillAppliedMigrationMetadata(ctx context.Context, db migrationConn, migrations []migrationFile, current int) error {
-	tx, err := db.BeginTx(ctx, nil)
+	tx, err := beginMigrationTx(ctx, db)
 	if err != nil {
 		return fmt.Errorf("migrations: backfill migration metadata: %w", err)
 	}
@@ -487,8 +492,10 @@ func applyMigration(ctx context.Context, db migrationConn, migration migrationFi
 		if migrationSucceeded {
 			return
 		}
-		if finishErr := finishMigrationEvent(ctx, db, eventID, false, migrationDirty); finishErr != nil && err == nil {
-			err = finishErr
+		cleanupCtx, cancel := migrationCleanupContext(ctx)
+		defer cancel()
+		if finishErr := finishMigrationEvent(cleanupCtx, db, eventID, false, migrationDirty); finishErr != nil {
+			err = errors.Join(err, finishErr)
 		}
 	}()
 
@@ -504,7 +511,7 @@ func applyMigration(ctx context.Context, db migrationConn, migration migrationFi
 		return nil
 	}
 
-	tx, err := db.BeginTx(ctx, nil)
+	tx, err := beginMigrationTx(ctx, db)
 	if err != nil {
 		return fmt.Errorf("migrations: begin %s: %w", migration.name, err)
 	}
@@ -605,7 +612,7 @@ func postgresQueryIDsEnabled(setting string) bool {
 }
 
 func startMigrationEventAndMarkDirty(ctx context.Context, db migrationConn, migration migrationFile) (int64, error) {
-	tx, err := db.BeginTx(ctx, nil)
+	tx, err := beginMigrationTx(ctx, db)
 	if err != nil {
 		return 0, fmt.Errorf("migrations: start %s: %w", migration.name, err)
 	}
@@ -636,7 +643,7 @@ func startMigrationEventAndMarkDirty(ctx context.Context, db migrationConn, migr
 }
 
 func finishSuccessfulMigrationEvent(ctx context.Context, db migrationConn, eventID int64, migration migrationFile) error {
-	tx, err := db.BeginTx(ctx, nil)
+	tx, err := beginMigrationTx(ctx, db)
 	if err != nil {
 		return fmt.Errorf("migrations: mark %s clean: %w", migration.name, err)
 	}

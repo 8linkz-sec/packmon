@@ -280,6 +280,15 @@ change.
    ```bash
    docker compose -f docker-compose.server.yml run --build --rm packmon-migrate
    ```
+   `PACKMON_DB_CONNECT_TIMEOUT` bounds only connecting, the wait for the
+   migration lock (another `migrate` run holds it), and the final version
+   read. The migrations themselves have no time limit, so the 49 index builds
+   and the 50 repair can take as long as the catalog needs; do not raise the
+   connect timeout for them. Ctrl-C or `SIGTERM` (`docker stop`) cancels the
+   run: PostgreSQL cancels the running statement, the failed attempt is
+   recorded in `schema_migration_events`, the migration lock is released, and
+   a migration that had started leaves its version dirty; recover as for any
+   failed migration in step 4.
 6. Start the new server build:
    ```bash
    docker compose -f docker-compose.server.yml up --build -d packmon-server

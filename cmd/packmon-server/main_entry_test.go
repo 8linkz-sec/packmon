@@ -15,6 +15,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	migrations "github.com/8linkz-sec/packmon/internal/db/postgres/migrations"
 )
 
 func TestMainVersionCommandPrintsBuildInfo(t *testing.T) {
@@ -184,9 +186,12 @@ func TestRunMigrateBranches(t *testing.T) {
 				runDSN     string
 				versionDSN string
 			)
-			runDatabaseMigrationsContext = func(ctx context.Context, dsn string) error {
-				if _, ok := ctx.Deadline(); !ok {
-					t.Fatal("migration context has no deadline")
+			runDatabaseMigrationsContext = func(ctx context.Context, dsn string, opts migrations.RunOptions) error {
+				if _, ok := ctx.Deadline(); ok {
+					t.Fatal("migration context has a deadline; only setup is bounded by the connect timeout")
+				}
+				if opts.SetupTimeout <= 0 {
+					t.Fatalf("migration setup timeout = %s, want the connect timeout", opts.SetupTimeout)
 				}
 				runDSN = dsn
 				return tt.runErr

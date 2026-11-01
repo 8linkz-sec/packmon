@@ -732,10 +732,14 @@ startup bounds schema-version and pool-connect checks with
 `PACKMON_DB_CONNECT_TIMEOUT` (default `10s`) so unreachable databases fail fast
 before HTTP listeners are created. The explicit `packmon-server migrate`
 operator step uses the same timeout to bound its database connection,
-advisory-lock wait, migration SQL execution, and post-migration version read.
-Each applied migration also writes an append-only `schema_migration_events`
-row with start/finish timestamps, success state, dirty state, name, and
-checksum metadata.
+advisory-lock wait, and post-migration version read, but not the migration SQL
+itself: index builds and data repairs on a large catalog run until they finish
+or `SIGINT`/`SIGTERM` cancels the run. A cancelled run asks PostgreSQL to
+cancel the running statement, then records the failed attempt and releases the
+advisory lock on a separate short deadline, and the version stays dirty as for
+any other migration failure. Each applied migration also writes an append-only
+`schema_migration_events` row with start/finish timestamps, success state,
+dirty state, name, and checksum metadata.
 
 Server-side operational audit metadata is bounded by retention policy and by
 input normalization at write time. Remote scan-log rows include scan ID,

@@ -536,6 +536,20 @@
   parentheses no longer split a command (`Write-Host
   ${env:ProgramFiles(x86)} choco install a` no longer reports `a`).
   PowerShell `if` / `foreach` / `try` block bodies were already recognized.
+- `packmon-server migrate` no longer bounds the migrations themselves by
+  `PACKMON_DB_CONNECT_TIMEOUT` (default `10s`). The whole run used to share
+  that deadline, so on a large catalog the 049 `CREATE INDEX CONCURRENTLY`
+  builds or the single-transaction 050 repair were cancelled, leaving the
+  database dirty at that version (049 also with `INVALID` indexes). The
+  timeout now bounds connecting, the migration advisory-lock wait and the
+  post-migration version read only; the migrations run until they finish or
+  `SIGINT`/`SIGTERM` cancels the run. A cancelled run asks PostgreSQL to
+  cancel the running statement instead of dropping the connection, then
+  records the failed attempt (with `finished_at`) in `schema_migration_events`
+  and releases the advisory lock on a separate short deadline; the failure
+  bookkeeping and the lock release used to run on the already cancelled
+  context and could fail. When the bookkeeping or the lock release fails, the
+  migrate error now reports that failure together with the migration error.
 
 ### Security updates
 
@@ -549,7 +563,9 @@
   start on a schema version mismatch. Read "Upgrade And Rollback" in
   `docs/runbook.md` first; a failed migration other than a 048 prerequisite
   failure leaves the database dirty, and the documented recovery is restoring
-  the pre-upgrade backup.
+  the pre-upgrade backup. The run has no overall time limit (049 and 050 can
+  take a while on a large catalog); `PACKMON_DB_CONNECT_TIMEOUT` does not need
+  raising for it, and Ctrl-C or `SIGTERM` cancels it.
   - 047 widens the ecosystem CHECK constraints for the inventory-only
     `chocolatey` ecosystem. Rolling 047 back removes any `chocolatey` rows
     (none are written by the scan path).

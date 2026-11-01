@@ -639,7 +639,7 @@ func TestDatabaseStartupContextFallsBackToDefaultDeadline(t *testing.T) {
 	}
 }
 
-func TestRunMigrateUsesStartupTimeoutForMigration(t *testing.T) {
+func TestRunMigrateMigrationsOutliveConnectTimeout(t *testing.T) {
 	originalRun := runDatabaseMigrationsContext
 	originalVersion := readDatabaseMigrationVersionContext
 	t.Cleanup(func() {
@@ -651,31 +651,78 @@ func TestRunMigrateUsesStartupTimeoutForMigration(t *testing.T) {
 	t.Setenv("PACKMON_LOG_LEVEL", "error")
 
 	configuredTimeout := 25 * time.Millisecond
-	deadlineSeen := make(chan time.Duration, 1)
-	runDatabaseMigrationsContext = func(ctx context.Context, _ string) error {
-		deadline, ok := ctx.Deadline()
-		if !ok {
-			t.Fatal("migration context has no deadline")
+	var setupTimeout time.Duration
+	runDatabaseMigrationsContext = func(ctx context.Context, _ string, opts migrations.RunOptions) error {
+		setupTimeout = opts.SetupTimeout
+		// A slow migration step (a large CREATE INDEX CONCURRENTLY build or
+		// data repair) must not be cut off by the connect timeout.
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(10 * configuredTimeout):
+			return nil
 		}
-		deadlineSeen <- time.Until(deadline)
-		return context.DeadlineExceeded
 	}
 
-	versionCalled := false
+	var versionDeadline time.Duration
+	readDatabaseMigrationVersionContext = func(ctx context.Context, _ string) (uint, bool, error) {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Fatal("version context has no deadline")
+		}
+		versionDeadline = time.Until(deadline)
+		return migrations.ExpectedVersion, false, nil
+	}
+
+	if err := runMigrate(); err != nil {
+		t.Fatalf("runMigrate() error = %v, want slow migration to finish", err)
+	}
+	if setupTimeout != configuredTimeout {
+		t.Fatalf("migration setup timeout = %s, want connect timeout %s", setupTimeout, configuredTimeout)
+	}
+	if versionDeadline <= 0 || versionDeadline > configuredTimeout {
+		t.Fatalf("version context deadline remaining = %s, want within connect timeout %s", versionDeadline, configuredTimeout)
+	}
+}
+
+func TestRunMigrateSignalCancelsMigrations(t *testing.T) {
+	originalRun := runDatabaseMigrationsContext
+	originalVersion := readDatabaseMigrationVersionContext
+	originalSignalContext := serverSignalContext
+	t.Cleanup(func() {
+		runDatabaseMigrationsContext = originalRun
+		readDatabaseMigrationVersionContext = originalVersion
+		serverSignalContext = originalSignalContext
+	})
+
+	t.Setenv("PACKMON_LOG_LEVEL", "error")
+
+	signalled := make(chan struct{})
+	serverSignalContext = func(parent context.Context) (context.Context, context.CancelFunc) {
+		ctx, cancel := context.WithCancel(parent)
+		go func() {
+			<-signalled
+			cancel()
+		}()
+		return ctx, cancel
+	}
+	runDatabaseMigrationsContext = func(ctx context.Context, _ string, _ migrations.RunOptions) error {
+		close(signalled)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(5 * time.Second):
+			return errors.New("migration was not cancelled by the signal context")
+		}
+	}
 	readDatabaseMigrationVersionContext = func(context.Context, string) (uint, bool, error) {
-		versionCalled = true
+		t.Fatal("readDatabaseMigrationVersionContext called after a cancelled migration")
 		return 0, false, nil
 	}
 
 	err := runMigrate()
-	if err == nil || !strings.Contains(err.Error(), "migrations failed: context deadline exceeded") {
-		t.Fatalf("runMigrate() error = %v, want context deadline exceeded migration failure", err)
-	}
-	if versionCalled {
-		t.Fatal("readDatabaseMigrationVersionContext called after migration timeout")
-	}
-	if remaining := <-deadlineSeen; remaining <= 0 || remaining > configuredTimeout {
-		t.Fatalf("migration context deadline remaining = %s, want within configured timeout %s", remaining, configuredTimeout)
+	if err == nil || !strings.Contains(err.Error(), "migrations cancelled by signal: context canceled") {
+		t.Fatalf("runMigrate() error = %v, want cancelled migration failure", err)
 	}
 }
 
@@ -691,7 +738,7 @@ func TestRunMigrateAddsDriverConnectTimeoutFromConfiguredStartupTimeout(t *testi
 	t.Setenv("PACKMON_LOG_LEVEL", "error")
 
 	var migrationDSN string
-	runDatabaseMigrationsContext = func(_ context.Context, dsn string) error {
+	runDatabaseMigrationsContext = func(_ context.Context, dsn string, _ migrations.RunOptions) error {
 		migrationDSN = dsn
 		return errors.New("stop after dsn capture")
 	}
