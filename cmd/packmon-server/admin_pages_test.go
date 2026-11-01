@@ -450,7 +450,7 @@ func TestAdminSettingsPasswordFormUsesServerMinimumLength(t *testing.T) {
 
 	body := rec.Body.String()
 	if !strings.Contains(body, `id="password-length-help"`) ||
-		!strings.Contains(body, "Use at least 12 characters.") {
+		!strings.Contains(body, "Use at least 12 characters and at most 72 bytes.") {
 		t.Fatalf("GET /admin/settings body missing password length help text\nbody=%s", body)
 	}
 	for _, field := range []string{`name="new_password"`, `name="confirm_password"`} {

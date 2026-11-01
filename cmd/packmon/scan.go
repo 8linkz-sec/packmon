@@ -56,6 +56,7 @@ func newScanCmd() *cobra.Command {
 		flagInstallTools   bool
 		flagKeepSBOM       string
 		flagSBOMOnly       bool
+		flagHook           bool
 	)
 
 	cmd := &cobra.Command{
@@ -92,12 +93,21 @@ packages, supply-chain risk findings, and lifecycle risks.`,
 				SBOMFiles:        flagSBOMFiles,
 				ListAll:          flagListAll,
 				ListAllOffline:   flagListAllOffline,
+				Hook:             flagHook,
 			}
 			auto := autoSBOMFlags{
 				Enabled:      flagAutoSBOM,
 				InstallTools: flagInstallTools,
 				KeepSBOM:     flagKeepSBOM,
 				SBOMOnly:     flagSBOMOnly,
+			}
+			if err := rejectHookWithReportModes(flagHook, map[string]bool{
+				"--list-packages": flagListPackages,
+				"--outdated":      flagOutdated,
+				"--list-all":      flagListAll,
+				"--auto-sbom":     flagAutoSBOM,
+			}); err != nil {
+				return withExitCode(ExitOperational, err)
 			}
 			if err := validateAutoSBOMFlags(auto, scanFlags, args); err != nil {
 				return withExitCode(ExitOperational, err)
@@ -163,7 +173,7 @@ packages, supply-chain risk findings, and lifecycle risks.`,
 	f.StringVar(&flagFailOn, "fail-on", "CRITICAL", "block on vulnerability severity (CRITICAL|HIGH|MEDIUM|LOW|NONE); NONE disables vulnerability blocking only; malicious and active supply-chain risk findings still block")
 	f.StringVar(&flagEcosystems, "ecosystems", "", "comma-separated ecosystem filter")
 	f.IntVar(&flagMaxDepth, "max-depth", 10, "directory walk depth")
-	f.IntVar(&flagTimeout, "timeout", 30, "HTTP timeout in seconds")
+	f.IntVar(&flagTimeout, "timeout", defaultScanTimeoutSeconds, "HTTP timeout in seconds")
 	f.BoolVar(&flagIncludeDev, "include-dev", false, "include dev dependencies")
 	f.StringVar(&flagOutputJSON, "output-json", "", "write JSON results to file")
 	f.StringVar(&flagOutputSARIF, "output-sarif", "", "write SARIF 2.1.0 results to file")
@@ -186,6 +196,7 @@ packages, supply-chain risk findings, and lifecycle risks.`,
 	f.BoolVar(&flagInstallTools, "install-tools", false, "with --auto-sbom: auto-install supported missing CycloneDX generators (pinned versions)")
 	f.StringVar(&flagKeepSBOM, "keep-sbom", "", "with --auto-sbom: write timestamped generated SBOM snapshots to this dir and keep them")
 	f.BoolVar(&flagSBOMOnly, "sbom-only", false, "with --auto-sbom: only generate SBOMs, do not scan")
+	f.BoolVar(&flagHook, "hook", false, "run as the packmon-managed Git hook: refuse report files and a local database inside the repository")
 
 	return cmd
 }
@@ -233,6 +244,7 @@ type scanFlagValues struct {
 	SBOMFiles        []string
 	ListAll          bool
 	ListAllOffline   bool
+	Hook             bool
 }
 
 type scanTarget struct {
@@ -270,6 +282,7 @@ type scanSettings struct {
 	SBOMFiles        []string
 	ListAllOffline   bool
 	InventoryAll     bool
+	Hook             bool
 	LatestRegistry   latestRegistryConfig
 	resolver         packageUpdateResolver
 }
@@ -464,16 +477,33 @@ func runScanCommand(cmd *cobra.Command, args []string, flags scanFlagValues) err
 		return withExitCode(ExitOperational, err)
 	}
 	hasConfigOutput := cfg != nil && scanOutputConfigRequestsArtifact(cfg.Output)
-	if len(targets) > 1 && (hasConfigOutput || hasScanOutputArtifactFlags(flags)) {
-		return withExitCode(ExitOperational, fmt.Errorf("%s can only be used when scanning a single target, not multiple targets", scanOutputArtifactFlagList()))
+	// A hook scan skips in-repository config outputs, so its multi-target
+	// check runs on the guarded settings below instead.
+	if !flags.Hook && len(targets) > 1 && (hasConfigOutput || hasScanOutputArtifactFlags(flags)) {
+		return withExitCode(ExitOperational, errMultiTargetScanOutput())
 	}
 
-	finalExitCode := ExitOK
-	for i, target := range targets {
+	// Resolve (and, for a hook scan, guard) every target before the first one
+	// is scanned, so a refused destination stops the run up front.
+	targetSettings := make([]scanSettings, 0, len(targets))
+	for _, target := range targets {
 		settings, err := resolveScanSettings(cmd, cfg, target, flags)
 		if err != nil {
 			return withExitCode(ExitOperational, err)
 		}
+		settings, err = applyHookScanWriteGuard(cmd, settings, flags, os.Stderr)
+		if err != nil {
+			return withExitCode(ExitOperational, err)
+		}
+		if flags.Hook && len(targets) > 1 && hasScanOutputArtifactSettings(settings) {
+			return withExitCode(ExitOperational, errMultiTargetScanOutput())
+		}
+		targetSettings = append(targetSettings, settings)
+	}
+
+	finalExitCode := ExitOK
+	for i, target := range targets {
+		settings := targetSettings[i]
 
 		if len(targets) > 1 && !flags.Quiet {
 			if i > 0 {
@@ -494,6 +524,10 @@ func runScanCommand(cmd *cobra.Command, args []string, flags scanFlagValues) err
 		os.Exit(finalExitCode)
 	}
 	return nil
+}
+
+func errMultiTargetScanOutput() error {
+	return fmt.Errorf("%s can only be used when scanning a single target, not multiple targets", scanOutputArtifactFlagList())
 }
 
 func resolveSingleTargetScanSettings(cmd *cobra.Command, args []string, flags scanFlagValues, commandName string) (scanSettings, error) {
@@ -654,12 +688,13 @@ func defaultScanSettings(target scanTarget, flags scanFlagValues) scanSettings {
 		Mode:           "auto",
 		FailOn:         string(defaultFailSeverity()),
 		MaxDepth:       flags.MaxDepth,
-		Timeout:        30,
+		Timeout:        defaultScanTimeoutSeconds,
 		Quiet:          flags.Quiet,
 		NoColor:        flags.NoColor,
 		LogLevel:       "INFO",
 		LogFormat:      "text",
 		LatestRegistry: defaultLatestRegistryConfig(),
+		Hook:           flags.Hook,
 	}
 }
 
@@ -839,8 +874,8 @@ func applyScanTimeoutEnvSetting(settings *scanSettings) error {
 		if parseErr != nil {
 			return fmt.Errorf("PACKMON_TIMEOUT: %w", parseErr)
 		}
-		if parsed <= 0 {
-			return fmt.Errorf("PACKMON_TIMEOUT must be greater than zero")
+		if _, err := timeoutSecondsDuration("PACKMON_TIMEOUT", parsed); err != nil {
+			return err
 		}
 		settings.Timeout = parsed
 	}
@@ -955,8 +990,8 @@ func validateResolvedScanSettings(settings *scanSettings, flags scanFlagValues, 
 	if err := validateResolvedScanLogFormat(settings); err != nil {
 		return err
 	}
-	if settings.Timeout <= 0 {
-		return fmt.Errorf("timeout must be greater than zero")
+	if _, err := timeoutSecondsDuration("timeout", settings.Timeout); err != nil {
+		return err
 	}
 	if settings.MaxDepth < 0 {
 		return fmt.Errorf("max-depth must be zero or greater")
@@ -1242,7 +1277,7 @@ func buildScannerConfig(settings scanSettings, repoInfo *domain.RepoInfo, failOn
 		FailOn:               failOn,
 		Ecosystems:           settings.Ecosystems,
 		MaxDepth:             settings.MaxDepth,
-		Timeout:              time.Duration(settings.Timeout) * time.Second,
+		Timeout:              boundedTimeoutDuration(settings.Timeout, defaultScanTimeoutSeconds*time.Second),
 		IncludeDev:           settings.IncludeDev,
 		InventoryAllPackages: settings.InventoryAll,
 		Quiet:                settings.Quiet,

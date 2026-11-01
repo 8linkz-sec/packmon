@@ -16,6 +16,45 @@
 
 ### Fixed
 
+- `packmon report` exits `2` (operational error) when writing the report to
+  stdout fails. It used to discard every write error outside the history
+  table, so a closed pipe or full disk ended the command with exit `0` and no
+  (or a truncated) report, and the empty-history message never failed at all.
+- `--outdated` / `--list-all` latest-version lookups whose `200` registry
+  response exceeds the read limit (512 KiB for most registries) now count as
+  refused or failed registry requests, so the stderr warning and the list-all
+  HTML hint report them. They used to count as successes without any warning
+  while the row silently ended up `unknown`. The registry did answer, so such
+  a response does not advance the consecutive-failure breaker.
+- `packmon scan --outdated` exits `4` (parser error) when a lockfile or SBOM
+  fails to parse. Nonfatal parse errors used to print only a warning and exit
+  `0`; the run now reports the packages it could parse (terminal table and
+  `--html` report) and then fails with "package inventory is incomplete: N
+  parse errors". An inventory where nothing parsed exits `4` instead of
+  printing "No packages found.". `--outdated --quiet` without `--html` used to
+  return before reading the inventory, so even fatal parse errors exited `0`;
+  it still skips the registry lookups but now collects the inventory and keeps
+  the discovery (`2`) and parser (`4`) exit codes. CI jobs that relied on
+  `--outdated --quiet` always exiting `0` can now see `2` or `4`.
+- The `packmon scan --html` report formats its timestamps in the viewer's
+  browser locale and time zone again; its inline script had the same
+  `dateStyle`/`timeStyle` plus `timeZoneName` combination as the list-all and
+  `--outdated` reports below. All three reports now share one Intl option set.
+- The list-all and `--outdated` HTML reports format their timestamps in the
+  viewer's browser locale and time zone again. The inline script combined
+  `dateStyle`/`timeStyle` with `timeZoneName`, which conforming JavaScript
+  engines reject with a `TypeError`, so every timestamp kept its UTC fallback
+  text.
+- The list-all and `--outdated` HTML reports no longer show a full Windows
+  drive or UNC source path (`C:\Users\...\go.sum`, `C:/...`, `\\server\...`)
+  on a Linux host when the scan root is relative (for example `.`). Such a
+  path was treated as "inside" the current directory and rendered in full;
+  it now shows only its final segment, like every other path outside the scan
+  root.
+- The list-all and `--outdated` HTML reports reduce a Windows path
+  rooted on the current drive (`\Users\Alice\go.sum`) to its final segment on
+  every OS. It was not recognized as absolute, so it rendered in full (as
+  `/Users/Alice/go.sum` on Windows) in the report target and source paths.
 - `packmon scan --list-all` compares each installed Docker image tag with its
   own local repo digest. Local digests used to be keyed by repository name
   only, so two installed tags of one repository (for example `postgres:17`
@@ -44,6 +83,56 @@
   local scan-history write fails, and returns the history error afterwards,
   matching a normal `packmon scan`. Previously the artifacts were silently
   omitted while the HTML report was still written.
+- A Socket.dev or ReversingLabs feed setting change no longer leaves the
+  refresh-queue workers stopped when the previous queue generation misses the
+  restart deadline. The replacement now starts as soon as that generation
+  exits, with the settings current at that time; before, both providers'
+  queue processing stayed stopped until another effective change or a server
+  restart, because saving the same settings again is a no-op.
+- The production startup schema check now redacts and bounds the database
+  error it logs, like the fatal startup log already did. Driver errors that
+  echoed the connection URL, secret assignments, or local filesystem paths were
+  logged verbatim. Diagnostic redaction now also strips credentials, paths, and
+  query strings from `postgres://` and `postgresql://` URLs. The same
+  redact-and-bound step now covers the server's other error logs: the startup
+  package-name repair, background startup tasks, queue-worker status
+  reads/writes, audit-retention prunes, queue-processor and retention-worker
+  exits, feed-syncer registration, invalid persisted feed modes, and the
+  plain-stderr fatal message printed before a logger is configured. A quoted
+  secret value such as libpq's `password='two words'` (single or double
+  quotes, with backslash-escaped quotes) is now redacted as a whole; before,
+  only its first word was hidden. The redacted value runs to the next
+  unquoted, unescaped whitespace, `;`, or `&`, so text after a closing quote
+  (`password="ab"cd`, `password=''secret`) or an escaped space
+  (`password=foo\ bar`) no longer leaks, and an unterminated quote redacts the
+  rest of the message.
+- `PACKMON_SERVER_PUBLIC_HOST` must now be a bare `host[:port]`. Values such
+  as `packmon.internal#fragment`, `packmon.internal?x=1`, a host with
+  whitespace, control characters, a percent-escape, a non-ASCII name, a
+  zone-scoped or bracketed non-IPv6 literal, a signed (`:+443`) or empty port
+  were accepted and produced broken redirects such as
+  `https://packmon.internal#fragment/admin`; the server now refuses to start
+  with a clear configuration error. The HTTPS redirect builder also drops such
+  hosts.
+- Admin passwords longer than 72 bytes (bcrypt's input limit) are now rejected
+  by the password policy with their own error. A password change used to pass
+  validation and then fail hashing with the generic "Failed to update
+  password", and a too-long `PACKMON_ADMIN_INITIAL_PASSWORD` failed bootstrap
+  with a bcrypt hash error. The form now answers "Password must be at most 72
+  bytes", and each policy error maps to its own message instead of every one
+  being reported as too short. The password form's help text now states both
+  bounds ("Use at least 12 characters and at most 72 bytes.").
+- Admin login and feed-config hardening: a feed save or reset that has to roll
+  the runtime back now does so on a context detached from the request (with a
+  30-second timeout), so a client disconnect can no longer cancel the rollback
+  and leave the server on an unpersisted feed configuration. A login while no
+  admin account exists now counts as a failed attempt (lockout, metrics, and a
+  `login_failed` audit row with reason `admin account not configured`), and
+  logins with an unknown username or without an admin account run a dummy
+  bcrypt comparison at the production cost, so they no longer answer
+  measurably faster than a wrong password. The dummy hash is generated at
+  server startup before serving; if that fails, an embedded production-cost
+  hash is used instead, so the equalization cannot silently disappear.
 - Local scans no longer report ReversingLabs reputation findings that the
   server's `/api/v1/check` ignores. `GET /api/v1/sync` now exports reputation
   rows only while ReversingLabs is enabled in `self` mode; otherwise it sends
@@ -63,6 +152,12 @@
   `--timeout`, config `timeout`, or `PACKMON_TIMEOUT`. Such values used to
   overflow `time.Duration` into a negative deadline, so the sync aborted at
   once with a context deadline error instead of a clear validation error.
+- `packmon scan` and `packmon config show` apply the same 9223372036-second
+  upper bound to `--timeout`, `PACKMON_TIMEOUT`, config `timeout`, and
+  `repos[].timeout` (config files are rejected on load). Larger values used to
+  overflow `time.Duration` into a negative or near-zero HTTP, SBOM-generation,
+  and per-request registry lookup timeout, so the scan failed or timed out at
+  once instead of reporting a validation error.
 - A project `.packmon.yaml` `repos:` entry that refers to a user-global repo
   (matched by name, then by path) now inherits that trusted repo's
   `send_repo_metadata: false`, server/API-key routing, and webhook. The
@@ -70,6 +165,31 @@
   own name, path (the project path wins on a name match), and scan policy.
   Previously a project entry naming a trusted repo silently re-enabled
   repository metadata that repo had disabled.
+- The managed Git hook no longer writes into the repository. It now runs
+  `packmon scan . --hook ...`. For destinations that resolve inside the
+  repository work tree or its Git directories, `--hook` skips a config
+  `output.file` with a stderr warning (also under `--quiet`) and still runs
+  the gated scan, and fails with exit code 2 before scanning for an explicit
+  `--output-json`, `--output-sarif`, `--output-junit`, or `--html` path or for
+  a used local database directory (`PACKMON_DB_PATH`, `db.path`). The check
+  follows symlinks (dangling ones by their target) and compares the deepest
+  existing ancestor by file identity, so a different letter case on a
+  case-insensitive filesystem does not bypass it. Previously a trusted
+  user-global `output.file` with a relative path was resolved against the
+  hook's working directory, so every hook run wrote a report file into the
+  repository. Destinations outside the repository still work. `--hook` cannot
+  be combined with `--list-packages`, `--outdated`, `--list-all`, or
+  `--auto-sbom`. `packmon hook status` reports hooks installed by older
+  versions as `outdated`; rerun `packmon hook install` to update them.
+  Multi-target scans (`--all`), with or without `--hook`, now resolve every
+  target's settings before the first scan, so a settings error on a later
+  target is reported before any target is scanned.
+- A project `.packmon.yaml` `repos:` entry whose name matches one user-global
+  repo and whose path matches another now inherits `send_repo_metadata: false`
+  from both. Routing (server, API key, webhook) still comes from the name
+  match. Previously only the name match was consulted, so reusing an
+  unrestricted repo name for an opted-out directory dropped that directory's
+  opt-out.
 - `packmon config show` escapes terminal control characters in every config-,
   flag-, and environment-derived value it prints: config file path, server,
   masked API key, API key env name, mode, fail_on, ecosystems, CA cert path,

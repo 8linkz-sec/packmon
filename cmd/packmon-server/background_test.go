@@ -958,11 +958,15 @@ func TestRestartQueueProcessorDoesNotOverlapGenerations(t *testing.T) {
 	if oldCtx.Err() == nil {
 		t.Fatal("old queue context was not cancelled")
 	}
-	if services.queueDone != oldDone {
-		t.Fatal("queueDone changed, want old generation retained while it is still running")
+	// The still-running old generation stays tracked (through the deferred
+	// restart's forwarding channel) and no replacement runs beside it.
+	services.queueMu.Lock()
+	defer services.queueMu.Unlock()
+	if services.queueDone == nil || services.queueDone != services.queueDeferred {
+		t.Fatal("queueDone does not track the deferred old generation")
 	}
-	if len(services.queueDones) != 1 || services.queueDones[0] != oldDone {
-		t.Fatalf("queueDones = %+v, want old generation retained while it is still running", services.queueDones)
+	if len(services.queueDones) != 1 || services.queueDones[0] != services.queueDone {
+		t.Fatalf("queueDones = %+v, want only the old generation tracked while it is still running", services.queueDones)
 	}
 }
 

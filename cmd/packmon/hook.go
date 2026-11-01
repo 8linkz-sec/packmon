@@ -27,7 +27,7 @@ func hookScript(failOn string) string {
 	return fmt.Sprintf(`#!/bin/sh
 # packmon managed hook -- do not edit
 # To remove: packmon hook uninstall
-packmon scan . --fail-on %s --quiet
+packmon scan . --hook --fail-on %s --quiet
 `, failOn)
 }
 
@@ -126,6 +126,16 @@ func isPackmonHook(path string) bool {
 		return false
 	}
 	return strings.Contains(string(data), hookMarker)
+}
+
+// isHookModePackmonHook reports whether a managed hook runs the scan with
+// --hook, as every hook written by this version does.
+func isHookModePackmonHook(path string) bool {
+	data, err := os.ReadFile(path) // #nosec G304 -- path is built from .git/hooks/ + known hook name
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(data), "packmon scan . --hook ")
 }
 
 func newHookCmd() *cobra.Command {
@@ -347,6 +357,10 @@ func newHookStatusCmd() *cobra.Command {
 					// Git skips a non-executable hook, so it is not installed
 					// in any useful sense; install restores the mode.
 					fmt.Printf("  %-12s packmon hook not executable (run packmon hook install to repair)\n", hookType+":")
+				case !isHookModePackmonHook(hookPath):
+					// Hooks written before `scan --hook` existed still gate
+					// pushes but lack the in-repository write guard.
+					fmt.Printf("  %-12s packmon hook outdated (run packmon hook install to update)\n", hookType+":")
 				default:
 					fmt.Printf("  %-12s packmon hook installed\n", hookType+":")
 				}

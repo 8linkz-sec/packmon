@@ -61,6 +61,46 @@ func TestValidatePublicHostRejectsURLsAndUserinfo(t *testing.T) {
 	}
 }
 
+// TestValidatePublicHostRejectsNonHostCharacters covers values that pass the
+// scheme/path/userinfo checks but still are not a bare host[:port]. The value
+// is pasted into "https://" + host + path redirects and links, so a fragment,
+// query, whitespace, or control character would change or truncate the URL.
+func TestValidatePublicHostRejectsNonHostCharacters(t *testing.T) {
+	t.Parallel()
+
+	for _, host := range []string{
+		"packmon.internal#fragment",
+		"packmon.internal:8443#fragment",
+		"packmon.internal?x=1",
+		"packmon.internal:8443?x=1",
+		"packmon .internal",
+		"packmon.internal\t:8443",
+		"packmon.internal\x00",
+		"packmon\x7f.internal",
+		"packmon.internal\r\nX-Injected: 1",
+		"packmon%2einternal",
+		"packmon.internal:+443",
+		"packmon.internal:",
+		"[2001:db8::1]:",
+		"packmon.internal: 443",
+		"[2001:db8::1%25eth0]",
+		"[packmon.internal]:8443",
+		"[192.0.2.10]",
+		"2001:db8::zz",
+		"päckmon.internal",
+		"packmon.internal;x",
+	} {
+		err := validatePublicHost("server.public_host", host)
+		if err == nil {
+			t.Errorf("validatePublicHost(%q) was accepted", host)
+			continue
+		}
+		if !strings.Contains(err.Error(), "server.public_host") {
+			t.Errorf("validatePublicHost(%q) error = %v, want it to name the key", host, err)
+		}
+	}
+}
+
 // TestValidatePublicHostRejectsMalformedIPv6Brackets covers the bracket parsing
 // specifically. An unterminated or doubly-suffixed bracket form must be refused
 // rather than silently reinterpreted as a hostname containing brackets.

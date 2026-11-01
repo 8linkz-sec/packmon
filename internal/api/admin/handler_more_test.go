@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -1339,6 +1340,10 @@ func TestAdminPasswordChangeValidationBranches(t *testing.T) {
 	}{
 		{"mismatch", url.Values{"current_password": {"current-password"}, "new_password": {"new-password-123"}, "confirm_password": {"different"}}, "do+not+match"},
 		{"short", url.Values{"current_password": {"current-password"}, "new_password": {"short"}, "confirm_password": {"short"}}, "at+least"},
+		// bcrypt refuses more than 72 bytes; the policy names the limit instead
+		// of the generic "Failed to update password" from the hash step.
+		{"too long", url.Values{"current_password": {"current-password"}, "new_password": {strings.Repeat("p", 73)}, "confirm_password": {strings.Repeat("p", 73)}}, "at+most+72+bytes"},
+		{"too long multi-byte", url.Values{"current_password": {"current-password"}, "new_password": {strings.Repeat("一", 25)}, "confirm_password": {strings.Repeat("一", 25)}}, "at+most+72+bytes"},
 		{"wrong current", url.Values{"current_password": {"wrong"}, "new_password": {"new-password-123"}, "confirm_password": {"new-password-123"}}, "incorrect"},
 	}
 	for _, tt := range cases {
@@ -1365,6 +1370,25 @@ func TestAdminPasswordChangeValidationBranches(t *testing.T) {
 	handler.HandlePasswordChange(rec, req)
 	if got := rec.Header().Get("Location"); !strings.Contains(got, "Failed+to+verify") {
 		t.Fatalf("Location = %q, want verify failure", got)
+	}
+}
+
+// TestAdminPasswordPolicyMessageMapsEachValidatorError gives every password
+// policy error its own message instead of reporting all of them as too short.
+func TestAdminPasswordPolicyMessageMapsEachValidatorError(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		err  error
+		want string
+	}{
+		{auth.ErrAdminPasswordTooShort, "Password must be at least 12 characters"},
+		{fmt.Errorf("wrapped: %w", auth.ErrAdminPasswordTooLong), "Password must be at most 72 bytes"},
+		{errors.New("some future policy rule"), "Password does not meet the admin password policy"},
+	} {
+		if got := adminPasswordPolicyMessage(tt.err); !strings.HasPrefix(got, tt.want) {
+			t.Errorf("adminPasswordPolicyMessage(%v) = %q, want prefix %q", tt.err, got, tt.want)
+		}
 	}
 }
 

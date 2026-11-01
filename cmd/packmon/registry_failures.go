@@ -95,9 +95,7 @@ func withRegistryLookupPhase(parent context.Context, timeoutSeconds int) (contex
 		parent = context.Background()
 	}
 	phase := &registryLookupPhase{}
-	if timeoutSeconds > 0 {
-		phase.requestTimeout = time.Duration(timeoutSeconds) * time.Second
-	}
+	phase.requestTimeout = boundedTimeoutDuration(timeoutSeconds, 0)
 	return context.WithValue(parent, registryLookupPhaseKey{}, phase), phase
 }
 

@@ -46,9 +46,12 @@ unrelated persistence capabilities do not leak across subsystem boundaries.
   - `3`: findings below the blocking threshold (non-blocking; treated as a
     passing pipeline by the GitLab consumer template);
   - `4`: parser error, including partial lockfile/SBOM parse errors when no
-    blocking finding has already failed the scan; `--list-packages` has no
-    findings, so any lockfile/SBOM parse error makes it exit `4` after it
-    prints the packages it could parse;
+    blocking finding has already failed the scan; `--list-packages` and
+    `--outdated` have no findings, so any lockfile/SBOM parse error makes them
+    exit `4` after they report the packages they could parse (terminal table
+    and, for `--outdated --html`, the HTML report), and an inventory where
+    nothing parsed exits `4` instead of reporting "No packages found." (no
+    `--outdated` HTML report is written in that case);
   - `10`: internal bug.
 - Treat malicious and active supply-chain risk findings as always blocking.
   Historical ReversingLabs malware-incident evidence is `LOW` reputation info
@@ -297,7 +300,11 @@ Important behavior:
 
 - stdout is human-readable unless `--quiet` is used. `--quiet` suppresses
   routine stdout, but trust-changing warnings such as auto-mode local fallback
-  and partial parse errors still go to stderr.
+  and partial parse errors still go to stderr. `--outdated --quiet` without
+  `--html` has no output to produce, so it skips the registry lookups, but it
+  still discovers and parses the inventory: parse warnings go to stderr and
+  discovery, parser, and partial-parse failures keep their exit codes (`2` /
+  `4`) instead of exiting `0` unchecked.
 - Canonical `ScanResult.feed_status` is a compact machine-readable status:
   `healthy`, `degraded`, or `error`. Parser and operational failure details are
   carried in optional `scan_error`; partial inventory details remain in
@@ -345,6 +352,39 @@ Important behavior:
 - `--no-repo-metadata` omits the optional repository name from remote
   `/api/v1/check` requests and webhooks. `PACKMON_NO_REPO_METADATA=true` and
   `.packmon.yaml` `send_repo_metadata: false` provide the same privacy opt-out.
+- Git hooks: apart from writing the managed hook file itself, neither
+  `packmon hook install` nor a hook run may write repository data, generated
+  files, lockfiles, configuration, or Git metadata; the hook's work is
+  read-only for the repository. The managed hook runs
+  `packmon scan . --hook --fail-on <threshold> --quiet`. A destination is
+  inside the repository when it resolves into the work tree, the Git
+  directory, or the Git common directory: relative paths resolve against the
+  working directory (the repository for a hook run), symlinks are followed
+  (a dangling symlink by its target path, and a link that lives in the
+  repository counts as inside), and the deepest existing ancestor is also
+  compared by file identity (`os.SameFile`) so case-insensitive filesystems
+  cannot bypass the check. For such destinations `--hook`:
+  - skips a config-derived report destination (`output.file`) with one stderr
+    warning, also under `--quiet`, and still runs the gated scan, because a
+    relative user-global `output.file` would otherwise block every commit;
+  - fails with exit code `2` before scanning for an explicit `--output-json`,
+    `--output-sarif`, `--output-junit`, or `--html` path;
+  - fails with exit code `2` before scanning when the scan opens the local
+    database (local checker or history) and its directory (`PACKMON_DB_PATH`,
+    `db.path`, or the default `~/.packmon/db`) is inside.
+
+  Destinations outside the repository are still written. With several
+  targets, the single-target rule for report outputs applies to what is left
+  after the skip. `--hook` cannot be combined with `--list-packages`,
+  `--outdated`, `--list-all`, or `--auto-sbom`.
+  `packmon hook status` reports a managed hook without `--hook` (installed by
+  an older version) as outdated; `packmon hook install` rewrites it.
+- Timeouts (`--timeout`, `PACKMON_TIMEOUT`, config `timeout`, and
+  `repos[].timeout`) are whole seconds from 1 through 9223372036, the largest
+  value that fits a Go `time.Duration`. `scan`, `config show`, and `db sync`
+  reject larger values with a configuration error, and config files that set
+  them fail to load, instead of overflowing into a negative or near-zero HTTP,
+  SBOM-generation, registry lookup, or sync deadline.
 - Unknown `--ecosystems` values are configuration errors, not empty successful
   scans. The same validation applies to `PACKMON_ECOSYSTEMS` and
   `.packmon.yaml` ecosystem filters.
@@ -363,7 +403,11 @@ Important behavior:
   omit the noisy `Via` and `Flags` columns, keep full source paths out of
   package rows, and render a deduplicated "Checked Inventory Sources" section
   at the bottom for lockfiles, SBOMs, Docker inventory files, and Chocolatey
-  inventory files. The HTML
+  inventory files. Source paths in the list-all and `--outdated` HTML reports
+  show inside the scan root as root-relative paths; every other absolute path,
+  including a Windows drive, UNC, or drive-rooted (`\Users\...`) path on a
+  Linux host and a POSIX or drive-rooted path on Windows, shows only its final
+  segment. The HTML
   "Packages Needing Attention" section is scoped to genuine security and
   lifecycle findings only: current ReversingLabs malware/removed-package
   findings, supply-chain-risk findings, lifecycle (end-of-life) findings,
@@ -450,7 +494,8 @@ Important behavior:
   the trusted user-global config. A project `repos:` list replaces the
   user-global list, but a project entry that refers to a user-global entry
   (matched by name, then by path) inherits that entry's routing (`server`,
-  `api_key`, `api_key_env`, webhook) and `send_repo_metadata: false`; the
+  `api_key`, `api_key_env`, webhook), and it inherits `send_repo_metadata:
+  false` from every user-global entry that matches it by name or by path; the
   project entry keeps its own name, path (the project path wins on a name
   match), and scan policy.
   CLI errors for remote scans and local DB sync may show redacted server URL
@@ -1066,8 +1111,14 @@ Admin pages are protected by the shared admin session model described in
 `SECURITY.md`: one shared admin identity, an `/admin`-scoped session cookie,
 CSRF-protected write forms, an absolute session lifetime, a shorter inactivity
 timeout, and login lockout that tracks both client IP and the shared admin
-account. Failed current-password checks during admin password changes use the
-same lockout window.
+account. Bootstrap and rotated admin passwords must be at least 12 characters
+(Unicode code points) and at most 72 bytes (UTF-8, the bcrypt input limit);
+each violation has its own error and admin message. Failed current-password
+checks during admin password changes use the same lockout window. Logins with
+an unknown username or while no admin account exists count as failed logins
+too, and they pay for one production-cost bcrypt comparison against a dummy
+hash (generated at startup, with an embedded fallback), so they do not answer
+measurably faster than a wrong password.
 
 The admin UI exposes `/.well-known/change-password` as a redirect to the
 password settings page so password managers can discover the password-change
@@ -1183,7 +1234,10 @@ Important server environment variables:
 
 - `PACKMON_SERVER_MODE`;
 - `PACKMON_SERVER_PORT`;
-- `PACKMON_SERVER_PUBLIC_HOST`;
+- `PACKMON_SERVER_PUBLIC_HOST` (a bare `host[:port]`: hostname, IPv4 address,
+  or IPv6 literal with an optional numeric port 1-65535; startup rejects any
+  scheme, path, query, fragment, userinfo, percent-escape, whitespace, or
+  control character);
 - `PACKMON_TLS_CERT_FILE`;
 - `PACKMON_TLS_KEY_FILE`;
 - `PACKMON_TLS_MIN_VERSION`;
@@ -1198,7 +1252,8 @@ Important server environment variables:
 - `PACKMON_WEB_LEGAL_URL`;
 - `PACKMON_WEB_TERMS_URL`;
 - `PACKMON_DB_*`;
-- `PACKMON_ADMIN_INITIAL_PASSWORD`;
+- `PACKMON_ADMIN_INITIAL_PASSWORD` (bootstrap admin password; 12 characters
+  minimum, 72 bytes maximum);
 - `PACKMON_ADMIN_SESSION_TIMEOUT`;
 - `PACKMON_ADMIN_IDLE_TIMEOUT`;
 - `PACKMON_ADMIN_AUDIT_HMAC_KEY`;
@@ -1239,7 +1294,14 @@ are applied to the running process immediately and are also loaded on future
 server starts. Each save or reset applies the runtime change, persists it, and
 rolls the runtime back if persistence fails as one step ordered against other
 feed saves and resets, so overlapping changes leave the runtime on the last
-committed configuration. The save and reset forms carry the stored override's
+committed configuration. The rollback runs detached from the request context
+with its own 30-second timeout, so a client disconnect cannot cancel it and
+leave the runtime on an unpersisted configuration. A change to a queue-worker feed (Socket.dev,
+ReversingLabs) restarts the refresh-queue processor; when the previous
+processor generation misses the shutdown-timeout deadline, it is left to
+finish and its replacement starts as soon as it exits, from the settings
+current at that time, so the change is never silently dropped. The save and
+reset forms carry the stored override's
 revision (`updated_at`) from the rendered page; a submitted revision that no
 longer matches the stored override is rejected with the conflict message
 instead of overwriting another admin's change. HTTP route wiring and API
@@ -1362,7 +1424,9 @@ as bounded categories rather than attacker-sized decoder text.
 Feed syncers sanitize git subprocess diagnostics, filesystem walker errors, and
 persisted `feed_sync_status.last_error` values through the shared diagnostic
 redaction path; git-backed feed helpers capture child output instead of wiring
-it directly to process stderr.
+it directly to process stderr. `packmon-server` startup, schema-check,
+background-worker, and fatal error logs (and the stderr fatal fallback) use the
+same redaction, bounded to 512 bytes.
 
 Backups are intentionally simple: periodic `pg_dump`, seven-day local
 retention, and storage outside the application data path. External backup

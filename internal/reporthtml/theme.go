@@ -1,5 +1,5 @@
-// Package reporthtml contains shared CSS fragments for Packmon's generated
-// self-contained HTML reports.
+// Package reporthtml contains shared CSS and script fragments for Packmon's
+// generated self-contained HTML reports.
 package reporthtml
 
 const DarkBaseThemeCSS = `color-scheme:dark;--bg:#0d1117;--panel:#161b22;` +

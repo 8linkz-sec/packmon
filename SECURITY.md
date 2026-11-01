@@ -284,7 +284,10 @@ Admin properties:
 - bootstrap password comes from `PACKMON_ADMIN_INITIAL_PASSWORD` only when no
   admin hash exists yet;
 - bootstrap and rotated admin passwords must be at least 12 characters long,
-  counted as Unicode code points rather than bytes;
+  counted as Unicode code points rather than bytes, and at most 72 bytes
+  (UTF-8), the bcrypt input limit; a longer password is rejected by the
+  policy with its own error (bootstrap fails, the password-change form shows
+  the maximum) instead of failing later in hashing;
 - password is stored as a bcrypt hash;
 - existing admin hash takes precedence over bootstrap env;
 - sessions authenticated with the bootstrap password may only rotate that
@@ -310,6 +313,20 @@ Admin properties:
   lockout window, stale partial failures expire, lockout audit events are
   deduplicated per lockout window, and failed as well as locked-out attempts are
   counted in metrics;
+- every failed login -- unknown username, wrong password, or a login while no
+  admin account exists yet -- is counted toward the lockout and metrics before
+  its `login_failed` audit row is written, and fails closed when that row
+  cannot be persisted;
+- an unknown username and a wrong password get the same "Invalid username or
+  password." response, and both pay for one bcrypt comparison at the
+  production cost: failures without a stored hash to compare (unknown
+  username, missing account) compare the submitted password against a dummy
+  hash that server startup generates before serving, falling back to an
+  embedded production-cost hash if generation fails. Timing is equalized for
+  the dominant bcrypt cost only, not exactly: the wrong-password branch also
+  reads the stored admin hash from the database, and the audit row's `reason`
+  differs. The unconfigured-account notice is shown on purpose so operators
+  know to set `PACKMON_ADMIN_INITIAL_PASSWORD`;
 - security-sensitive admin writes must fail or roll back when the required
   admin audit row cannot be persisted. PostgreSQL commits API-key lifecycle
   changes, queue mutations, password changes, and manual advisory writes
@@ -369,7 +386,11 @@ If a proxy is not trusted:
 - host/proto behavior must not trust attacker-supplied headers.
 
 HTTPS redirect behavior must use configured public host data, not arbitrary
-request `Host` values.
+request `Host` values. Startup rejects a `PACKMON_SERVER_PUBLIC_HOST` that is
+not a bare `host[:port]` (a hostname, IPv4 address, or IPv6 literal with an
+optional numeric port): a scheme, path, query, fragment, userinfo,
+percent-escape, whitespace, or control character would change or truncate the
+generated `https://` redirect target.
 
 Production startup must fail unless transport security is configured through
 in-app TLS or a trusted TLS-terminating reverse proxy. The only exception is
@@ -634,11 +655,13 @@ Feed-degraded responses must be visible so CI/N8N can make policy decisions.
 SARIF, JUnit, and HTML artifacts must carry degraded-feed, stale-local-DB, and
 parse-error diagnostics instead of presenting incomplete coverage as a clean
 scan. Partial lockfile/SBOM parse errors exit with parser failure unless a
-blocking finding has already failed the scan, and in-scope discovery filesystem
-errors are reported as operational failures rather than silently reducing
-inventory. SARIF must mark parser and operational scan failures as unsuccessful
-invocations with error-level notifications; JUnit must expose the same state as
-errored diagnostic suites.
+blocking finding has already failed the scan (the `--list-packages` and
+`--outdated` inventory views, `--outdated --quiet` included, have no findings
+and exit with parser failure on any parse error), and in-scope discovery
+filesystem errors are reported as operational failures rather than silently
+reducing inventory. SARIF must mark parser and operational scan failures as
+unsuccessful invocations with error-level notifications; JUnit must expose the
+same state as errored diagnostic suites.
 
 ## Webhooks
 
@@ -725,6 +748,13 @@ Feed-sync diagnostics, including git subprocess stderr/stdout and filesystem
 walker errors, must pass through the same diagnostic redaction before they reach
 structured logs or `feed_sync_status.last_error`. Git-backed feed helpers must
 not stream child-process output directly to process stderr.
+Server startup, schema-check, background-worker, and fatal error logs,
+including the plain-stderr fatal fallback used before a logger is configured,
+must pass through the same diagnostic redaction and a 512-byte bound: database
+driver errors can echo the connection URL, secret assignments, or local paths.
+The redaction strips userinfo, paths, and queries from `http(s)://` and
+`postgres(ql)://` URLs and redacts quoted secret values (for example libpq's
+`password='...'`) as a whole.
 
 The built-in `/privacy` page is a deployment-neutral disclosure for the
 first-party admin session cookie and routine Packmon audit/scan metadata. It is
@@ -893,6 +923,22 @@ Local SQLite sync:
   snapshot;
 - warns when data is stale;
 - does not block solely because data is stale.
+
+Git hooks:
+
+- apart from writing the managed hook file, neither `packmon hook install` nor
+  a hook run writes repository data, generated files, lockfiles,
+  configuration, or Git metadata;
+- the managed hook runs `packmon scan --hook`. A destination that resolves
+  (relative to the repository working directory, through symlinks including
+  dangling ones, and by file identity of its deepest existing ancestor so
+  letter case on case-insensitive filesystems does not matter) inside the work
+  tree, the Git directory, or the Git common directory is never written:
+  a config-derived `output.file` there (also a trusted user-global one, where
+  a relative path would otherwise land in the repository) is skipped with a
+  stderr warning while the scan still gates, and an explicit report flag or a
+  used local database directory there fails the scan with exit code `2`
+  before it runs.
 
 Local DB freshness is a policy input, not a hidden failure mode. When local DB
 age exceeds `PACKMON_DB_WARN_AFTER_DAYS` (default `7` days), canonical scan

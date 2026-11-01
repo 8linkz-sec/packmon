@@ -678,3 +678,120 @@ func TestRunOutdatedQuietHTMLSuppressesCheckingBanner(t *testing.T) {
 		})
 	}
 }
+
+// writeOutdatedPartialParseFixture writes one parseable lockfile with an
+// outdated package and one malformed lockfile in a subdirectory.
+func writeOutdatedPartialParseFixture(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "package-lock.json"), `{
+		"lockfileVersion": 3,
+		"packages": {
+			"": {"version": "1.0.0"},
+			"node_modules/outdated": {"version": "1.0.0"}
+		}
+	}`)
+	if err := os.MkdirAll(filepath.Join(dir, "broken"), 0o750); err != nil {
+		t.Fatalf("create broken dir: %v", err)
+	}
+	writeFile(t, filepath.Join(dir, "broken", "package-lock.json"), `{"lockfileVersion":3,"packages":`)
+	return dir
+}
+
+func TestRunOutdatedPartialParseErrorsReportParsedPackagesAndReturnParserExit(t *testing.T) {
+	dir := writeOutdatedPartialParseFixture(t)
+	htmlPath := filepath.Join(t.TempDir(), "outdated.html")
+	resolver := packageUpdateResolver{
+		fetchLatest: func(context.Context, domain.Ecosystem, string) string { return "2.0.0" },
+	}
+
+	var err error
+	var stderr string
+	output := captureStdout(t, func() {
+		stderr = captureScanStderr(t, func() {
+			err = runOutdatedWithOptions([]string{dir}, outdatedOptions{
+				Context:    context.Background(),
+				Ecosystems: "npm",
+				MaxDepth:   3,
+				IncludeDev: true,
+				OutputHTML: htmlPath,
+				resolver:   resolver,
+				Timeout:    5,
+			})
+		})
+	})
+	if code := exitCodeForError(err); err == nil || code != ExitParser {
+		t.Fatalf("runOutdatedWithOptions(partial parse failure) error = %v (exit %d), want parser exit %d", err, code, ExitParser)
+	}
+	if !strings.Contains(err.Error(), "inventory is incomplete: 1 parse error") {
+		t.Fatalf("partial parse failure error = %q, want incomplete-inventory summary", err)
+	}
+	// What could be parsed is still reported, on the terminal and in HTML.
+	if !strings.Contains(output, "outdated") || !strings.Contains(output, "2.0.0") {
+		t.Fatalf("partial parse failure output missing parsed packages:\n%s", output)
+	}
+	if !strings.Contains(stderr, "warning: parse error in") {
+		t.Fatalf("partial parse failure stderr missing parse warning:\n%s", stderr)
+	}
+	html, readErr := os.ReadFile(htmlPath) // #nosec G304 -- test reads a generated temp-file path.
+	if readErr != nil {
+		t.Fatalf("partial parse failure did not write the HTML report: %v", readErr)
+	}
+	if !strings.Contains(string(html), "outdated") {
+		t.Fatalf("HTML report misses the parsed outdated package")
+	}
+}
+
+func TestRunOutdatedQuietWithoutHTMLKeepsFailureExitCodesWithoutLookups(t *testing.T) {
+	malformedSBOMDir := t.TempDir()
+	malformedSBOM := filepath.Join(malformedSBOMDir, "bad.cdx.json")
+	writeFile(t, malformedSBOM, `{"bomFormat":"CycloneDX",`)
+
+	for _, tc := range []struct {
+		name      string
+		dir       string
+		sbomFiles []string
+		wantWarn  bool
+		wantExit  int
+	}{
+		{name: "partial lockfile parse error", dir: writeOutdatedPartialParseFixture(t), wantWarn: true, wantExit: ExitParser},
+		{name: "fatal SBOM parse error", dir: malformedSBOMDir, sbomFiles: []string{malformedSBOM}, wantExit: ExitParser},
+		{name: "missing scan path", dir: filepath.Join(t.TempDir(), "missing"), wantExit: ExitOperational},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var called atomic.Bool
+			resolver := packageUpdateResolver{
+				fetchLatest: func(context.Context, domain.Ecosystem, string) string {
+					called.Store(true)
+					return "2.0.0"
+				},
+			}
+			var err error
+			var stderr string
+			output := captureStdout(t, func() {
+				stderr = captureScanStderr(t, func() {
+					err = runOutdatedWithOptions([]string{tc.dir}, outdatedOptions{
+						Context:    context.Background(),
+						MaxDepth:   3,
+						IncludeDev: true,
+						SBOMFiles:  tc.sbomFiles,
+						Quiet:      true,
+						resolver:   resolver,
+					})
+				})
+			})
+			if code := exitCodeForError(err); err == nil || code != tc.wantExit {
+				t.Fatalf("quiet outdated error = %v (exit %d), want exit %d", err, code, tc.wantExit)
+			}
+			if called.Load() {
+				t.Fatal("quiet outdated run without HTML performed a registry lookup")
+			}
+			if output != "" {
+				t.Fatalf("quiet outdated run wrote stdout:\n%s", output)
+			}
+			if tc.wantWarn && !strings.Contains(stderr, "warning: parse error in") {
+				t.Fatalf("quiet outdated stderr missing parse warning:\n%s", stderr)
+			}
+		})
+	}
+}

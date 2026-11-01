@@ -68,7 +68,7 @@ func runListPackagesWithSettings(settings scanSettings) error {
 
 	if len(packages) == 0 {
 		// Nothing parseable is a parser failure, not an empty inventory.
-		if err := listPackagesParseError(collection); err != nil {
+		if err := inventoryParseError(collection); err != nil {
 			return err
 		}
 		fmt.Println("No packages found.")
@@ -101,13 +101,13 @@ func runListPackagesWithSettings(settings scanSettings) error {
 		plural.Count(collection.LockFiles+collection.SBOMFiles, "input file", "input files"))
 	// Partial parse errors leave the listed inventory incomplete, so the run
 	// still exits with parser failure after printing what could be parsed.
-	return listPackagesParseError(collection)
+	return inventoryParseError(collection)
 }
 
-// listPackagesParseError applies the partial-parser-failure contract to the
-// inventory view: any nonfatal parse error exits with parser failure. The
-// individual diagnostics are already on stderr.
-func listPackagesParseError(collection *scanner.PackageCollection) error {
+// inventoryParseError applies the partial-parser-failure contract to the
+// inventory views (--list-packages, --outdated): any nonfatal parse error
+// exits with parser failure. The individual diagnostics are already on stderr.
+func inventoryParseError(collection *scanner.PackageCollection) error {
 	if collection == nil || len(collection.ParseErrors) == 0 {
 		return nil
 	}

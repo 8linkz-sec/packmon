@@ -5,9 +5,12 @@ package auth
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sync"
 	"unicode/utf8"
 
 	"golang.org/x/crypto/bcrypt"
@@ -21,6 +24,20 @@ const bcryptCost = 12
 // rotated admin passwords, counted in Unicode characters (code points), not
 // bytes.
 const MinAdminPasswordLength = 12
+
+// MaxAdminPasswordBytes is the longest admin password in bytes (UTF-8), not
+// characters. It is bcrypt's input limit: HashPassword refuses longer input,
+// so the policy rejects it up front with its own error.
+const MaxAdminPasswordBytes = 72
+
+var (
+	// ErrAdminPasswordTooShort reports a password with fewer than
+	// MinAdminPasswordLength characters.
+	ErrAdminPasswordTooShort = fmt.Errorf("auth: admin password must be at least %d characters", MinAdminPasswordLength)
+	// ErrAdminPasswordTooLong reports a password longer than
+	// MaxAdminPasswordBytes bytes.
+	ErrAdminPasswordTooLong = fmt.Errorf("auth: admin password must be at most %d bytes", MaxAdminPasswordBytes)
+)
 
 // AdminBootstrapStore is the persistence surface needed to bootstrap the
 // shared admin account and audit that event.
@@ -46,10 +63,15 @@ type AdminBootstrapAuditEntry struct {
 
 // ValidateAdminPassword enforces the shared admin password policy. The
 // minimum counts code points so multi-byte characters cannot satisfy it with
-// fewer than MinAdminPasswordLength characters.
+// fewer than MinAdminPasswordLength characters; the maximum counts bytes
+// because bcrypt does. It returns ErrAdminPasswordTooShort or
+// ErrAdminPasswordTooLong.
 func ValidateAdminPassword(password string) error {
 	if utf8.RuneCountInString(password) < MinAdminPasswordLength {
-		return fmt.Errorf("auth: admin password must be at least %d characters", MinAdminPasswordLength)
+		return ErrAdminPasswordTooShort
+	}
+	if len(password) > MaxAdminPasswordBytes {
+		return ErrAdminPasswordTooLong
 	}
 	return nil
 }
@@ -68,6 +90,57 @@ func HashPassword(password string) (string, error) {
 // leaks timing information about the hash comparison.
 func CheckPassword(hash, password string) bool {
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
+}
+
+// fallbackLoginEqualizerHash is a bcrypt hash at bcryptCost of a random value
+// that was discarded after hashing; it protects nothing and matches no
+// password. EqualizePasswordCheck compares against it when a fresh dummy hash
+// cannot be generated, so login timing equalization never silently turns into
+// an instant rejection.
+const fallbackLoginEqualizerHash = "$2a$12$yWqtWCvstq4DKlyPJMOSQ.rO/OSyC3hEDDlEMqToSLhJLgfxiL8la" // #nosec G101 -- dummy timing-equalizer hash of a discarded random value, not a credential.
+
+var (
+	dummyPasswordHashOnce sync.Once
+	dummyPasswordHash     []byte
+)
+
+// PrepareLoginEqualizer generates the dummy hash EqualizePasswordCheck
+// compares against. Server startup calls it before serving so the first
+// failed login pays for one comparison, not a generation plus a comparison,
+// and concurrent first logins do not wait on the generation. It is idempotent.
+func PrepareLoginEqualizer() {
+	dummyPasswordHashOnce.Do(func() {
+		dummyPasswordHash = loginEqualizerHash(generateLoginEqualizerHash)
+	})
+}
+
+// EqualizePasswordCheck spends the cost of one CheckPassword call on a login
+// failure that has no stored hash to compare against (an unknown username or
+// a missing admin account), so those failures cannot be told apart from a
+// wrong password by response time. The result is always discarded.
+func EqualizePasswordCheck(password string) {
+	PrepareLoginEqualizer()
+	_ = bcrypt.CompareHashAndPassword(dummyPasswordHash, []byte(password))
+}
+
+func generateLoginEqualizerHash() ([]byte, error) {
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		return nil, err
+	}
+	return bcrypt.GenerateFromPassword([]byte(hex.EncodeToString(secret)), bcryptCost)
+}
+
+// loginEqualizerHash returns the generated dummy hash, or the embedded
+// fallback when generation fails or yields anything but a bcryptCost hash.
+func loginEqualizerHash(generate func() ([]byte, error)) []byte {
+	hash, err := generate()
+	if err == nil {
+		if cost, costErr := bcrypt.Cost(hash); costErr == nil && cost == bcryptCost {
+			return hash
+		}
+	}
+	return []byte(fallbackLoginEqualizerHash)
 }
 
 // BootstrapAdmin creates the admin row in the database if it does not

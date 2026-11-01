@@ -342,6 +342,7 @@ func TestBuildAdminSettingsPageDataPreservesTemplateContract(t *testing.T) {
 		"AdminAuthLoadError":             "",
 		"BootstrapWarning":               true,
 		"MinPasswordLength":              adminPasswordMinLength,
+		"MaxPasswordBytes":               adminPasswordMaxBytes,
 		"Message":                        "Saved",
 		"Error":                          "Bad",
 	}

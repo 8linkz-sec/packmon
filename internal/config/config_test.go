@@ -903,6 +903,8 @@ func TestLoadRejectsInvalidPublicHostForms(t *testing.T) {
 		"user@example.test",
 		"packmon.example.test:0",
 		"packmon.example.test:70000",
+		"packmon.internal#fragment",
+		"packmon.internal?next=/admin",
 	}
 	for _, raw := range tests {
 		t.Run(raw, func(t *testing.T) {
