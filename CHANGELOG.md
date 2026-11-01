@@ -16,6 +16,15 @@
 
 ### Fixed
 
+- Feed imports answer `400` instead of `500` when the request passes
+  validation but the store rejects a value: an EPSS score or percentile too
+  small for the stored precision, a NUL character in a text or JSON field, a
+  record that fails the store's own version-JSON checks, or a CHECK
+  constraint. This covers every import path (OSV/GHSA, OpenSSF/Socket,
+  VulnCheck, CISA KEV and EPSS, buffered and streamed). The response and the
+  recorded `rejected` feed status carry the fixed message "feed import
+  contains values the store cannot accept"; the detailed store error is only
+  logged. Nothing from the rejected import commits.
 - `packmon report` exits `2` (operational error) when writing the report to
   stdout fails. It used to discard every write error outside the history
   table, so a closed pipe or full disk ended the command with exit `0` and no

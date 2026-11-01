@@ -848,7 +848,15 @@ optional status `last_sync_duration_ms` is bounded to 0 through 9223372036854
 ms, the largest value that converts to a Go `time.Duration`; larger values are
 rejected with `400`. Malicious feed imports cannot persist malformed
 exact-version JSON; invalid rows fail the transaction instead of becoming
-all-version blocking findings.
+all-version blocking findings. Values that pass the request validation but
+that the store itself rejects -- its own record checks, a PostgreSQL data
+exception such as a `real` underflow or a NUL character, or a CHECK
+constraint -- are a client error as well: every import path (vulnerability,
+malicious, VulnCheck, CISA KEV, EPSS, buffered or streamed) answers `400` with
+the fixed message "feed import contains values the store cannot accept",
+records a `rejected` feed status, and commits nothing. The store's detailed
+error goes only to the server log. Store outages and other database errors
+stay `500`.
 Feed import strictness must be visible to operators and server/agent users.
 Rejected imports must expose bounded diagnostics for feed name, rejected record
 count, rejection reason classes, correlation ID, client/API-key attribution when

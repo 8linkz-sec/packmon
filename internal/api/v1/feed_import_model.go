@@ -47,6 +47,11 @@ const (
 	vulnCheckImportStreamBatchSize      = 1000
 )
 
+// feedImportStoreRejectedMessage is the client-facing reason for an import the
+// store rejected as invalid data (db.ErrInvalidFeedImportData). The store's own
+// error names tables, columns and database detail, so it stays in the logs.
+const feedImportStoreRejectedMessage = "feed import contains values the store cannot accept"
+
 var cveIDPattern = regexp.MustCompile(`^CVE-\d{4}-\d{4,}$`)
 
 type feedImportValidationError struct {

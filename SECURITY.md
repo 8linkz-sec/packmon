@@ -211,7 +211,10 @@ count, correlation ID, trusted client IP, and authenticated API-key identity
 when available. The admin/web UI and feed-status API must surface rejected
 imports, the last successful usable import timestamp, and source-level finding
 or blocking spikes so operators can distinguish strict validation from hidden
-coverage loss in server/agent deployments.
+coverage loss in server/agent deployments. When the store rather than the
+request validation rejects imported values (a database data exception or CHECK
+violation), the response and the recorded rejection reason use a fixed generic
+message; table, column and database error text stay in the server log.
 
 API keys are stored hashed. Plaintext keys are shown only at creation time.
 Keys have bounded labels/names for auditability, record `last_used_at`, must

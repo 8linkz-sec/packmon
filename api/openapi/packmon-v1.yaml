@@ -325,7 +325,15 @@ paths:
               schema:
                 $ref: "#/components/schemas/ImportResponse"
         "400":
-          description: Invalid import payload or semantic validation failure
+          description: |
+            Invalid import payload or semantic validation failure. This also
+            covers values that pass request validation but that the store
+            itself refuses (for example an EPSS score too small for the stored
+            precision, or a NUL character in a text field); those return the
+            fixed message "feed import contains values the store cannot accept"
+            without store internals. Every 400 rejects the whole import:
+            nothing commits, a `rejected` feed status is recorded, and no
+            `feed_import` audit row is written.
           headers: *apiCommonResponseHeaders
           content:
             application/json:

@@ -504,6 +504,11 @@ Actions:
 8. Compare recent finding/blocking totals by feed source before treating a
    spike as real dependency risk. If strict validation rejected the import,
    keep the previous good data and fix the importer payload before retrying.
+   The rejection reason "feed import contains values the store cannot accept"
+   means the request passed validation but PostgreSQL refused a value (for
+   example an EPSS score below the stored precision or a NUL character); the
+   server log line `feed import rejected by store validation` with the same
+   correlation ID names the record and field.
 
 Avoid launching overlapping manual syncs for the same feed. Manual sync is not
 available for disabled feeds, external feeds, or demand-driven queue sources

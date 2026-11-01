@@ -68,11 +68,11 @@ func validateStoredStringArrayJSON(id, field string, raw json.RawMessage, allowN
 		if allowNull {
 			return nil
 		}
-		return fmt.Errorf("%s %s must be an array of strings", id, field)
+		return invalidFeedImportDataf("%s %s must be an array of strings", id, field)
 	}
 	var values []string
 	if err := json.Unmarshal(raw, &values); err != nil {
-		return fmt.Errorf("%s %s must be an array of strings: %w", id, field, err)
+		return invalidFeedImportDataf("%s %s must be an array of strings: %v", id, field, err)
 	}
 	return nil
 }
@@ -86,22 +86,22 @@ func validateStoredVersionRangesJSON(id, field string, raw json.RawMessage, allo
 		if allowNull {
 			return nil
 		}
-		return fmt.Errorf("%s %s must be an array of range objects", id, field)
+		return invalidFeedImportDataf("%s %s must be an array of range objects", id, field)
 	}
 	var ranges []storedVersionRange
 	if err := json.Unmarshal(raw, &ranges); err != nil {
-		return fmt.Errorf("%s %s must be an array of range objects: %w", id, field, err)
+		return invalidFeedImportDataf("%s %s must be an array of range objects: %v", id, field, err)
 	}
 	for i, versionRange := range ranges {
 		if len(versionRange.Events) == 0 {
-			return fmt.Errorf("%s %s[%d].events must not be empty", id, field, i)
+			return invalidFeedImportDataf("%s %s[%d].events must not be empty", id, field, i)
 		}
 		for j, event := range versionRange.Events {
 			if strings.TrimSpace(event.Introduced) == "" &&
 				strings.TrimSpace(event.Fixed) == "" &&
 				strings.TrimSpace(event.LastAffected) == "" &&
 				strings.TrimSpace(event.Limit) == "" {
-				return fmt.Errorf("%s %s[%d].events[%d] must set introduced, fixed, last_affected, or limit", id, field, i, j)
+				return invalidFeedImportDataf("%s %s[%d].events[%d] must set introduced, fixed, last_affected, or limit", id, field, i, j)
 			}
 		}
 	}
@@ -699,7 +699,7 @@ func (s *Store) importVulnerabilityFeed(ctx context.Context, feed string, items 
 	if err == nil {
 		s.invalidateDashboardStats()
 	}
-	return imported, deleted, err
+	return imported, deleted, classifyFeedImportDataError(err)
 }
 
 func (s *Store) DeleteVulnerability(ctx context.Context, id string) error {
