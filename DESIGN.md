@@ -268,7 +268,13 @@ rules (`internal/version` dispatches `chocolatey` to the NuGet comparator).
 SwiftPM packages are identified by OSV/PURL SwiftURL name
 (`host/owner/repo`, without URL scheme or `.git`) when `Package.resolved`
 provides a repository location. URL userinfo and non-HTTP(S) repository
-schemes are not used as package identity. SwiftPM latest-version lookup is
+schemes are not used as package identity. The host of an `http(s)` URL, an
+SCP-like remote (`user@host:path`), or a bare `host/path` location must be a
+valid DNS hostname (non-empty labels of ASCII letters, digits, and hyphens,
+no leading or trailing dot or hyphen; bare hosts also need a dot, and
+`http(s)` URLs may also use an IPv6 literal); otherwise the location is
+ignored and the pin's identity is used. As in Git, a location with a slash before its first colon is
+a local path, not an SCP-like remote. SwiftPM latest-version lookup is
 limited to canonical public Git host identities on the built-in allowlist
 (`github.com`, `gitlab.com`, and `bitbucket.org`) plus trusted operator
 hostnames configured through `PACKMON_SWIFTPM_GIT_ALLOWED_HOSTS` or

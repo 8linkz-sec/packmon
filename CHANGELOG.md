@@ -228,6 +228,15 @@
   existing conflict message instead of silently overwriting that change;
   a malformed revision is rejected as invalid. A blank API key still keeps
   the stored key.
+- SwiftPM `Package.resolved` locations only become a `host/owner/repo`
+  identity when their host is a valid DNS hostname or IP address (IPv6 only
+  in an `http(s)` URL). SCP-like remotes such as `git@.gitserver.example:org/repo`
+  were canonicalized without any host check, so a dot-prefixed, empty-label,
+  hyphen-edged, or otherwise malformed host (even `git@..:org/repo` ->
+  `../org/repo`) became the package name; the same rules now apply to bare
+  `host/path` and `http(s)` locations. A location with a slash before its
+  first colon is a local path, as in Git, not an SCP-like remote. Rejected
+  locations fall back to the pin's identity.
 
 ### Security updates
 
