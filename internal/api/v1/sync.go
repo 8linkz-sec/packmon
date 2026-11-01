@@ -232,6 +232,7 @@ func (h *Handler) HandleSync(w http.ResponseWriter, r *http.Request) {
 		writeJSONHead(w, http.StatusOK)
 		return
 	}
+	syncReq.options.ExcludeReputation = !h.reputationSyncEnabled()
 
 	exported, failure := h.exportSyncData(r, syncReq)
 	if failure != nil {
@@ -241,7 +242,31 @@ func (h *Handler) HandleSync(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := h.syncResponseEnvelope(r.Context(), exported, syncReq.correlationID)
+	if syncReq.options.ExcludeReputation {
+		withholdSyncReputation(&resp)
+	}
 	writeStreamingJSONForRequest(w, r, http.StatusOK, resp)
+}
+
+// reputationSyncEnabled reports whether /api/v1/sync exports package
+// reputation rows. It uses the same source of truth as the /api/v1/check
+// reputation lookup (reputationReadSources), so local scans built from synced
+// data and remote checks see the same reputation findings.
+func (h *Handler) reputationSyncEnabled() bool {
+	return len(h.reputationReadSources()) > 0
+}
+
+// withholdSyncReputation marks the reputation dataset as disabled so clients
+// drop previously synced reputation rows. The exporter already skips the
+// dataset; clearing rows and the keyset cursor here keeps the wire contract
+// consistent even for a store that does not honor ExcludeReputation.
+func withholdSyncReputation(resp *syncResponsePayload) {
+	resp.ReputationDisabled = true
+	resp.Reputation = []synccontract.Reputation{}
+	if resp.NextCursor != nil {
+		resp.NextCursor.ReputationCursor = ""
+		resp.NextCursor.ReputationDone = true
+	}
 }
 
 func (h *Handler) exportSyncData(r *http.Request, req syncRequest) (*db.SyncExport, *syncExportFailure) {

@@ -994,10 +994,12 @@ type DashboardStatsResult struct {
 	BySeverity           map[string]int
 }
 
-// ScanTotals holds cumulative scan-log counters used by telemetry.
+// ScanTotals holds cumulative scan-log counters used by telemetry. The
+// counters are int64 because they sum every retained scan_log row and can
+// exceed the int32 range (the PostgreSQL view exposes them as BIGINT).
 type ScanTotals struct {
-	PackagesScanned int
-	Findings        int
+	PackagesScanned int64
+	Findings        int64
 }
 
 // DBPoolStats holds PostgreSQL connection pool gauges used by telemetry.

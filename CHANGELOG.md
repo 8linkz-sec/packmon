@@ -16,6 +16,20 @@
 
 ### Fixed
 
+- Local scans no longer report ReversingLabs reputation findings that the
+  server's `/api/v1/check` ignores. `GET /api/v1/sync` now exports reputation
+  rows only while ReversingLabs is enabled in `self` mode; otherwise it sends
+  no rows and the new optional `reputation_disabled: true` response field, and
+  `packmon db sync` drops previously synced reputation rows (also on
+  incremental syncs). Leftover `malicious` / `removed` rows from an earlier
+  enabled period therefore no longer block a local scan while the same
+  lockfile passes remotely. When ReversingLabs is enabled again, the next sync
+  refetches the whole reputation dataset. The field is omitted while
+  reputation is served, so older clients and servers remain compatible.
+- `packmon db sync` now rejects timeouts above 9223372036 seconds from
+  `--timeout`, config `timeout`, or `PACKMON_TIMEOUT`. Such values used to
+  overflow `time.Duration` into a negative deadline, so the sync aborted at
+  once with a context deadline error instead of a clear validation error.
 - SHA-pinned GitHub Actions are no longer compared as version strings in
   `--list-all` / `--outdated`. The `# vX.Y.Z` comment convention is used as
   the declared version; without it the pin is compared with the dereferenced
@@ -41,17 +55,18 @@
 - The local `init-secrets` Compose service runs as
   `${PACKMON_UID:-1000}:${PACKMON_GID:-1000}` instead of the image's `packmon`
   system account, and the new `scripts/init-secrets.sh` wrapper passes the
-  host UID/GID (or `0:0` under rootless Docker; explicit `PACKMON_UID` /
-  `PACKMON_GID` win), so bootstrapping on native Linux no longer fails with
-  `permission denied` on a host-owned checkout or `.env`. The production
-  server image still runs as `packmon`.
+  host UID/GID (or `0:0` under rootless Docker; an explicit `PACKMON_UID` or
+  `PACKMON_GID` wins for that variable only), so bootstrapping on native Linux
+  no longer fails with `permission denied` on a host-owned checkout or
+  `.env`. The production server image still runs as `packmon`.
 - `.env.example` seeds `PACKMON_METRICS_HOST=127.0.0.1` instead of `0.0.0.0`,
   which production startup rejects. README, runbook, and deferred-scope notes
   no longer claim the metrics port is reachable from the host; read metrics
-  with `docker compose exec packmon-server wget -qO-
-  http://127.0.0.1:9090/metrics`. An existing `.env` that still says
-  `0.0.0.0` keeps working under Compose (both Compose models pin loopback) but
-  should be changed for any other launch path.
+  with
+  `docker compose exec packmon-server wget -qO- http://127.0.0.1:9090/metrics`.
+  An existing `.env` that still says `0.0.0.0` keeps working under Compose
+  (both Compose models pin loopback) but should be changed for any other launch
+  path.
 - `packmon-server init-secrets` copies an existing `PACKMON_DB_PASSWORD` onto
   a blank `POSTGRES_PASSWORD` instead of generating a different value. The
   bundled PostgreSQL was previously initialized with a password the server
@@ -64,6 +79,36 @@
   `docs/monitoring/packmon-alerts.yml` use `for: 0m`. Their `for` duration
   equalled the `increase()` range, so an isolated event left the range before
   the alert could fire. Re-import the rule file if you deployed it.
+- The dashboard severity buckets and the `/metrics` finding-severity totals
+  count ReversingLabs `malware_history` (historical risk) reputation rows as
+  `LOW`, the severity of the informational finding they produce, instead of the
+  stored provider severity (often `HIGH`). Stored reputation data is unchanged.
+- PostgreSQL scan totals no longer fail once a retained sum exceeds
+  2147483647: the cumulative `/metrics` package/finding totals and the daily
+  findings sum on the scans page are read as BIGINT instead of being cast to
+  int.
+- The GHSA affected-package repair writes canonical package names (PyPI
+  separator/case folding, NuGet and GitHub Actions lowercase, trimmed) like
+  every feed upsert, so repair-only rows such as PyPI `My.Pkg_Name` or NuGet
+  `Newtonsoft.Json` match canonical lookups and new repairs no longer add
+  a duplicate beside the canonical row.
+- One stored GHSA advisory with `affected: null` (or an object/scalar where an
+  array is expected, or range `events` that are null or not an array) no
+  longer aborts the GHSA affected-package repair for every advisory. A
+  package whose reconstructed ranges or versions the schema would reject is
+  skipped and keeps its feed-written row.
+- PostgreSQL `FindMaliciousBatch` keeps a versionless request for a package
+  when the same batch also asks for concrete versions of it, so the empty
+  version still returns every active malicious finding of the package, as
+  `FindMalicious(..., "")` and a versionless-only batch already did.
+- Manual advisory writes and deletes on PostgreSQL use the normalized
+  (trimmed) advisory ID throughout. A padded ID such as ` manual:x ` no longer
+  leaves both the vulnerability and the malicious record active after a type
+  change, and deleting it no longer reports "not found".
+- Editing a manual vulnerability advisory replaces its stored state instead of
+  going through the feed merge: a `HIGH` -> `LOW` edit is stored as `LOW`, a
+  cleared description is cleared, and moving coverage from package A to B no
+  longer leaves A affected. Feed severity/details retention is unchanged.
 - Rejected admin credentials (a login with a wrong username or password, the
   API-key create step-up, and the password-change current-password check)
   are counted toward the IP and shared-account lockout and

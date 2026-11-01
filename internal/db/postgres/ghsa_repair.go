@@ -21,13 +21,15 @@ func (s *Store) CountVulnerabilitiesBySource(ctx context.Context, source string)
 	return count, nil
 }
 
-// RepairGHSAAffectedPackages reconciles affected_packages rows from stored
-// GHSA raw JSON. This repairs older advisories that were imported while the
-// GHSA ecosystem mapper did not recognize "GitHub Actions", and refreshes rows
-// whose duplicate affected entries were previously collapsed by the unique
-// package key.
-func (s *Store) RepairGHSAAffectedPackages(ctx context.Context) (int, error) {
-	const query = `
+// repairGHSAAffectedPackagesSQL rebuilds affected_packages rows from stored
+// GHSA raw JSON. Package names go through canonicalPackageNameSQL so repaired
+// rows use the same canonical identity as feed upserts and lookups. Every
+// array function is guarded with jsonb_typeof: raw advisories may carry JSON
+// null, objects, or scalars where arrays are expected, and COALESCE does not
+// replace a JSON null. Packages whose reconstructed constraints fail the
+// affected_packages CHECK predicates are skipped rather than written, in line
+// with the feed path rejecting malformed version ranges.
+const repairGHSAAffectedPackagesSQL = `
 	WITH candidates AS (
 		SELECT
 			vs.vulnerability_id,
@@ -52,7 +54,7 @@ func (s *Store) RepairGHSAAffectedPackages(ctx context.Context) (int, error) {
 					WHEN 'cargo' THEN 'cargo'
 					ELSE NULL
 			END AS ecosystem,
-			aff.item->'package'->>'name' AS name,
+			aff.item->'package'->>'name' AS raw_name,
 			COALESCE(aff.item->'ranges', '[]'::jsonb) AS version_ranges,
 			COALESCE(aff.item->'versions', '[]'::jsonb) AS versions_affected,
 			(regexp_match(
@@ -64,8 +66,9 @@ func (s *Store) RepairGHSAAffectedPackages(ctx context.Context) (int, error) {
 				'(^|,)\s*<\s*([^=,\s]+)'
 			))[2] AS fixed_bound
 			FROM vulnerability_sources vs
-			CROSS JOIN LATERAL jsonb_array_elements(COALESCE(vs.raw_json->'affected', '[]'::jsonb))
-				WITH ORDINALITY AS aff(item, ordinality)
+			CROSS JOIN LATERAL jsonb_array_elements(
+				CASE WHEN jsonb_typeof(vs.raw_json->'affected') = 'array' THEN vs.raw_json->'affected' ELSE '[]'::jsonb END
+			) WITH ORDINALITY AS aff(item, ordinality)
 			WHERE vs.source = 'ghsa'
 			  AND vs.raw_json IS NOT NULL
 		),
@@ -79,10 +82,21 @@ func (s *Store) RepairGHSAAffectedPackages(ctx context.Context) (int, error) {
 				versions_affected,
 				last_affected_bound,
 				fixed_bound
-			FROM candidates
-			WHERE ecosystem IS NOT NULL
-			  AND ecosystem <> ''
-			  AND name <> ''
+			FROM (
+				SELECT
+					vulnerability_id,
+					affected_ordinal,
+					ecosystem,
+					` + canonicalPackageNameSQL + ` AS name,
+					version_ranges,
+					versions_affected,
+					last_affected_bound,
+					fixed_bound
+				FROM candidates
+				WHERE ecosystem IS NOT NULL
+				  AND ecosystem <> ''
+			) canonical
+			WHERE name <> ''
 		),
 		keys AS (
 			SELECT DISTINCT vulnerability_id, ecosystem, name
@@ -96,10 +110,10 @@ func (s *Store) RepairGHSAAffectedPackages(ctx context.Context) (int, error) {
 				n.affected_ordinal,
 				r.ordinality AS range_ordinal,
 				CASE
-					WHEN jsonb_array_length(COALESCE(r.item->'events', '[]'::jsonb)) > 0
+					WHEN jsonb_array_length(range_events.items) > 0
 					  AND NOT EXISTS (
 						SELECT 1
-						FROM jsonb_array_elements(COALESCE(r.item->'events', '[]'::jsonb)) AS event(item)
+						FROM jsonb_array_elements(range_events.items) AS event(item)
 						WHERE NULLIF(event.item->>'fixed', '') IS NOT NULL
 						   OR NULLIF(event.item->>'last_affected', '') IS NOT NULL
 					  )
@@ -107,13 +121,13 @@ func (s *Store) RepairGHSAAffectedPackages(ctx context.Context) (int, error) {
 						THEN jsonb_set(
 							r.item,
 							'{events}',
-							COALESCE(r.item->'events', '[]'::jsonb) ||
+							range_events.items ||
 								jsonb_build_array(jsonb_build_object('last_affected', n.last_affected_bound))
 						)
-					WHEN jsonb_array_length(COALESCE(r.item->'events', '[]'::jsonb)) > 0
+					WHEN jsonb_array_length(range_events.items) > 0
 					  AND NOT EXISTS (
 						SELECT 1
-						FROM jsonb_array_elements(COALESCE(r.item->'events', '[]'::jsonb)) AS event(item)
+						FROM jsonb_array_elements(range_events.items) AS event(item)
 						WHERE NULLIF(event.item->>'fixed', '') IS NOT NULL
 						   OR NULLIF(event.item->>'last_affected', '') IS NOT NULL
 					  )
@@ -121,7 +135,7 @@ func (s *Store) RepairGHSAAffectedPackages(ctx context.Context) (int, error) {
 						THEN jsonb_set(
 							r.item,
 							'{events}',
-							COALESCE(r.item->'events', '[]'::jsonb) ||
+							range_events.items ||
 								jsonb_build_array(jsonb_build_object('fixed', n.fixed_bound))
 						)
 					ELSE r.item
@@ -130,6 +144,12 @@ func (s *Store) RepairGHSAAffectedPackages(ctx context.Context) (int, error) {
 			CROSS JOIN LATERAL jsonb_array_elements(
 				CASE WHEN jsonb_typeof(n.version_ranges) = 'array' THEN n.version_ranges ELSE '[]'::jsonb END
 			) WITH ORDINALITY AS r(item, ordinality)
+			-- A range whose events are missing, JSON null, an object, or a
+			-- scalar has no events to complete; treat it as an empty array so
+			-- one malformed range cannot raise and abort the whole repair.
+			CROSS JOIN LATERAL (
+				SELECT CASE WHEN jsonb_typeof(r.item->'events') = 'array' THEN r.item->'events' ELSE '[]'::jsonb END AS items
+			) range_events
 		),
 		ranges AS (
 			SELECT
@@ -182,6 +202,12 @@ func (s *Store) RepairGHSAAffectedPackages(ctx context.Context) (int, error) {
 				version_ranges,
 				versions_affected
 			FROM deduped
+			-- Skip a package whose reconstructed constraints the schema would
+			-- reject (for example a range without a non-empty events array):
+			-- its stored row stays as the feed wrote it, and the violation
+			-- cannot abort the repair of every other advisory.
+			WHERE packmon_jsonb_version_ranges_valid(version_ranges)
+			  AND packmon_jsonb_string_array_valid(versions_affected)
 			ON CONFLICT (vulnerability_id, ecosystem, name) DO UPDATE SET
 				version_ranges = EXCLUDED.version_ranges,
 				versions_affected = EXCLUDED.versions_affected,
@@ -192,8 +218,14 @@ func (s *Store) RepairGHSAAffectedPackages(ctx context.Context) (int, error) {
 		)
 		SELECT COUNT(*) FROM repaired`
 
+// RepairGHSAAffectedPackages reconciles affected_packages rows from stored
+// GHSA raw JSON. This repairs older advisories that were imported while the
+// GHSA ecosystem mapper did not recognize "GitHub Actions", and refreshes rows
+// whose duplicate affected entries were previously collapsed by the unique
+// package key.
+func (s *Store) RepairGHSAAffectedPackages(ctx context.Context) (int, error) {
 	var repaired int
-	if err := s.pool.QueryRow(ctx, query).Scan(&repaired); err != nil {
+	if err := s.pool.QueryRow(ctx, repairGHSAAffectedPackagesSQL).Scan(&repaired); err != nil {
 		return 0, fmt.Errorf("postgres: repair GHSA affected packages: %w", err)
 	}
 	s.invalidateDashboardStats()
