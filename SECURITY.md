@@ -947,11 +947,14 @@ Local SQLite sync:
   working directory, which is usually a repository;
 - stores compact finding, reputation, and lifecycle data, not raw feed JSON;
 - rejects any `/api/v1/sync` response body larger than 32 MiB instead of
-  buffering it. The server keeps the vulnerability rows of each page within
-  an estimated 12 MiB (an upper bound of their JSON encoding) besides the row
-  `limit`, so a sync always makes progress; an advisory whose affected rows
-  alone exceed that budget is split across several pages that never carry
-  `vulnerability_affected_complete` and therefore stay upsert-only;
+  buffering it. The server keeps each dataset of a page within an estimated
+  byte budget (an upper bound of its rows' JSON encoding) besides the row
+  `limit`: 12 MiB of vulnerability rows and 8, 4, and 4 MiB of malicious,
+  reputation, and lifecycle rows, 28 MiB in total. Each dataset still delivers
+  at least one row per page, so a sync always makes progress; an advisory
+  whose affected rows alone exceed the vulnerability budget is split across
+  several pages that never carry `vulnerability_affected_complete` and
+  therefore stay upsert-only;
 - preserves user-facing source attribution for synced vulnerability and
   malicious findings;
 - maps synced malicious-table rows with `supply_chain` or `typosquatting` risk

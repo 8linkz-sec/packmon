@@ -126,13 +126,15 @@ func syncPageVulnerabilityAffectedComplete(opts db.SyncExportOptions, cursor db.
 }
 
 // nextSyncExportCursor reports whether more data may follow this page and
-// returns the per-dataset cursor of the next page. The other row-paged
-// datasets keep the full-page heuristic: a dataset that filled the limit may
-// continue. The vulnerability page reports itself whether it may continue
-// (see syncVulnerabilityPageBuilder): an advisory page may hold fewer rows
-// than the limit (the next advisory did not fit the rows or the byte budget)
-// or more (its only advisory has more rows than the limit), and it continues
-// with the cursor the page computed, or else after its last advisory.
+// returns the per-dataset cursor of the next page. Every dataset page reports
+// itself whether it may continue. The other row-paged datasets
+// (syncRowPageBuilder) continue after their last row when the page filled the
+// limit or was cut by its byte budget, so such a page may hold fewer rows than
+// the limit and still continue. The vulnerability page (see
+// syncVulnerabilityPageBuilder) may hold fewer rows than the limit (the next
+// advisory did not fit the rows or the byte budget) or more (its only
+// advisory has more rows than the limit), and it continues with the cursor
+// the page computed, or else after its last advisory.
 func nextSyncExportCursor(cursor db.SyncCursor, paging syncVulnerabilityPaging, datasets syncDatasets, limit int) (bool, *db.SyncCursor) {
 	vulns := datasets.vulnerabilities
 	malicious := datasets.malicious
@@ -144,7 +146,7 @@ func nextSyncExportCursor(cursor db.SyncCursor, paging syncVulnerabilityPaging, 
 	}
 	// When pagination is active, signal that more data may follow if
 	// any result set may continue.
-	if !datasets.vulnerabilitiesHaveMore && len(malicious) != limit && len(reputation) != limit && len(lifecycle) != limit {
+	if !datasets.vulnerabilitiesHaveMore && !datasets.maliciousHaveMore && !datasets.reputationHaveMore && !datasets.lifecycleHaveMore {
 		return false, nil
 	}
 	nextCursor := &db.SyncCursor{
@@ -171,19 +173,19 @@ func nextSyncExportCursor(cursor db.SyncCursor, paging syncVulnerabilityPaging, 
 		last := vulns[len(vulns)-1]
 		nextCursor.VulnerabilitiesCursor = encodeSyncCursorKey(last.Ecosystem, last.Name, last.ID)
 	}
-	setNextDatasetCursor(nextCursor, cursor.MaliciousDone, len(malicious), limit, func() {
+	setNextDatasetCursor(nextCursor, cursor.MaliciousDone, datasets.maliciousHaveMore, func() {
 		nextCursor.MaliciousDone = true
 	}, func() {
 		last := malicious[len(malicious)-1]
 		nextCursor.MaliciousCursor = encodeSyncCursorKey(last.Ecosystem, last.Name, last.ID)
 	})
-	setNextDatasetCursor(nextCursor, cursor.ReputationDone, len(reputation), limit, func() {
+	setNextDatasetCursor(nextCursor, cursor.ReputationDone, datasets.reputationHaveMore, func() {
 		nextCursor.ReputationDone = true
 	}, func() {
 		last := reputation[len(reputation)-1]
 		nextCursor.ReputationCursor = encodeSyncCursorKey(last.Ecosystem, last.Name, last.Version)
 	})
-	setNextDatasetCursor(nextCursor, cursor.LifecycleDone, len(lifecycle), limit, func() {
+	setNextDatasetCursor(nextCursor, cursor.LifecycleDone, datasets.lifecycleHaveMore, func() {
 		nextCursor.LifecycleDone = true
 	}, func() {
 		last := lifecycle[len(lifecycle)-1]
@@ -228,9 +230,9 @@ func (p *syncVulnerabilityPage) add(item db.SyncVulnerability, withoutAffected b
 
 type syncDatasetExporters struct {
 	vulnerabilities func(context.Context, db.SyncExportOptions, time.Time, uint64) (syncVulnerabilityPage, error)
-	malicious       func(context.Context, db.SyncExportOptions, time.Time, uint64) ([]db.SyncMalicious, error)
-	reputation      func(context.Context, db.SyncExportOptions, time.Time, uint64) ([]db.SyncReputationFinding, error)
-	lifecycle       func(context.Context, db.SyncExportOptions, time.Time, uint64) ([]db.SyncLifecycleRelease, error)
+	malicious       func(context.Context, db.SyncExportOptions, time.Time, uint64) (syncRowPage[db.SyncMalicious], error)
+	reputation      func(context.Context, db.SyncExportOptions, time.Time, uint64) (syncRowPage[db.SyncReputationFinding], error)
+	lifecycle       func(context.Context, db.SyncExportOptions, time.Time, uint64) (syncRowPage[db.SyncLifecycleRelease], error)
 }
 
 type syncDatasets struct {
@@ -242,9 +244,13 @@ type syncDatasets struct {
 	vulnerabilitiesLastAdvisoryID  string
 	vulnerabilitiesNextCursor      string
 	vulnerabilitiesSplit           bool
-	malicious                      []db.SyncMalicious
-	reputation                     []db.SyncReputationFinding
-	lifecycle                      []db.SyncLifecycleRelease
+	// Each other dataset carries the rows and hasMore of its syncRowPage.
+	malicious          []db.SyncMalicious
+	maliciousHaveMore  bool
+	reputation         []db.SyncReputationFinding
+	reputationHaveMore bool
+	lifecycle          []db.SyncLifecycleRelease
+	lifecycleHaveMore  bool
 }
 
 type syncDatasetExportError struct {
@@ -277,8 +283,8 @@ func exportSyncDatasets(ctx context.Context, opts db.SyncExportOptions, cursor d
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			var err error
-			datasets.malicious, err = exporters.malicious(ctx, syncOptionsWithOffset(opts, cursor.Malicious), snapshot, snapshotXID)
+			page, err := exporters.malicious(ctx, syncOptionsWithOffset(opts, cursor.Malicious), snapshot, snapshotXID)
+			datasets.malicious, datasets.maliciousHaveMore = page.rows, page.hasMore
 			if err != nil {
 				errCh <- syncDatasetExportError{order: 1, err: err}
 			}
@@ -288,8 +294,8 @@ func exportSyncDatasets(ctx context.Context, opts db.SyncExportOptions, cursor d
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			var err error
-			datasets.reputation, err = exporters.reputation(ctx, syncOptionsWithOffset(opts, cursor.Reputation), snapshot, snapshotXID)
+			page, err := exporters.reputation(ctx, syncOptionsWithOffset(opts, cursor.Reputation), snapshot, snapshotXID)
+			datasets.reputation, datasets.reputationHaveMore = page.rows, page.hasMore
 			if err != nil {
 				errCh <- syncDatasetExportError{order: 2, err: err}
 			}
@@ -299,8 +305,8 @@ func exportSyncDatasets(ctx context.Context, opts db.SyncExportOptions, cursor d
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			var err error
-			datasets.lifecycle, err = exporters.lifecycle(ctx, syncOptionsWithOffset(opts, cursor.Lifecycle), snapshot, snapshotXID)
+			page, err := exporters.lifecycle(ctx, syncOptionsWithOffset(opts, cursor.Lifecycle), snapshot, snapshotXID)
+			datasets.lifecycle, datasets.lifecycleHaveMore = page.rows, page.hasMore
 			if err != nil {
 				errCh <- syncDatasetExportError{order: 3, err: err}
 			}
@@ -367,16 +373,15 @@ func syncOptionsWithOffset(opts db.SyncExportOptions, offset int) db.SyncExportO
 	return opts
 }
 
-func setNextDatasetCursor(next *db.SyncCursor, alreadyDone bool, rowCount, limit int, markDone, setCursor func()) {
-	if alreadyDone {
+// setNextDatasetCursor marks a dataset done unless its page reported that it
+// continues (hasMore), in which case setCursor continues it after the last row
+// of the page. A page that continues always holds at least one row.
+func setNextDatasetCursor(next *db.SyncCursor, alreadyDone, hasMore bool, markDone, setCursor func()) {
+	if alreadyDone || !hasMore {
 		markDone()
 		return
 	}
-	if rowCount == limit {
-		setCursor()
-		return
-	}
-	markDone()
+	setCursor()
 }
 
 func encodeSyncCursorKey(values ...string) string {
@@ -766,7 +771,7 @@ func (s *Store) exportSyncVulnerabilities(ctx context.Context, opts db.SyncExpor
 	return builder.finish(), nil
 }
 
-func (s *Store) exportSyncReputation(ctx context.Context, opts db.SyncExportOptions, snapshot time.Time, snapshotXID uint64) ([]db.SyncReputationFinding, error) {
+func (s *Store) exportSyncReputation(ctx context.Context, opts db.SyncExportOptions, snapshot time.Time, snapshotXID uint64) (syncRowPage[db.SyncReputationFinding], error) {
 	query := `
 		SELECT
 			ecosystem, name, version, source, status, severity, summary, description,
@@ -788,7 +793,7 @@ func (s *Store) exportSyncReputation(ctx context.Context, opts db.SyncExportOpti
 	if opts.Cursor.ReputationCursor != "" {
 		cursor, err := decodeSyncCursorKey(opts.Cursor.ReputationCursor, 3)
 		if err != nil {
-			return nil, fmt.Errorf("postgres: invalid reputation sync cursor: %w", err)
+			return syncRowPage[db.SyncReputationFinding]{}, fmt.Errorf("postgres: invalid reputation sync cursor: %w", err)
 		}
 		query += fmt.Sprintf(` AND (ecosystem, name, version) > ($%d, $%d, $%d)`, len(args)+1, len(args)+2, len(args)+3)
 		args = append(args, cursor[0], cursor[1], cursor[2])
@@ -805,23 +810,26 @@ func (s *Store) exportSyncReputation(ctx context.Context, opts db.SyncExportOpti
 
 	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: export sync reputation findings: %w", err)
+		return syncRowPage[db.SyncReputationFinding]{}, fmt.Errorf("postgres: export sync reputation findings: %w", err)
 	}
 	defer ioutils.CloseSilently(rows)
 
-	out := make([]db.SyncReputationFinding, 0)
+	builder := newSyncRowPageBuilder(opts.Limit, db.SyncReputationPageByteBudget, syncReputationWireBytes)
 	for rows.Next() {
 		rep, err := scanPackageReputation(rows)
 		if err != nil {
-			return nil, fmt.Errorf("postgres: scan sync reputation row: %w", err)
+			return syncRowPage[db.SyncReputationFinding]{}, fmt.Errorf("postgres: scan sync reputation row: %w", err)
 		}
-		out = append(out, reputationSyncFinding(rep))
+		if !builder.add(reputationSyncFinding(rep)) {
+			// The page is full; the rest of the result is not exported.
+			break
+		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("postgres: iterate sync reputation rows: %w", err)
+		return syncRowPage[db.SyncReputationFinding]{}, fmt.Errorf("postgres: iterate sync reputation rows: %w", err)
 	}
 
-	return out, nil
+	return builder.finish(), nil
 }
 
 func reputationSyncFinding(rep db.PackageReputation) db.SyncReputationFinding {
@@ -844,7 +852,7 @@ func reputationSyncFinding(rep db.PackageReputation) db.SyncReputationFinding {
 	return item
 }
 
-func (s *Store) exportSyncMalicious(ctx context.Context, opts db.SyncExportOptions, snapshot time.Time, snapshotXID uint64) ([]db.SyncMalicious, error) {
+func (s *Store) exportSyncMalicious(ctx context.Context, opts db.SyncExportOptions, snapshot time.Time, snapshotXID uint64) (syncRowPage[db.SyncMalicious], error) {
 	query := `
 		SELECT
 			id,
@@ -876,7 +884,7 @@ func (s *Store) exportSyncMalicious(ctx context.Context, opts db.SyncExportOptio
 	if opts.Cursor.MaliciousCursor != "" {
 		cursor, err := decodeSyncCursorKey(opts.Cursor.MaliciousCursor, 3)
 		if err != nil {
-			return nil, fmt.Errorf("postgres: invalid malicious sync cursor: %w", err)
+			return syncRowPage[db.SyncMalicious]{}, fmt.Errorf("postgres: invalid malicious sync cursor: %w", err)
 		}
 		query += fmt.Sprintf(` AND (ecosystem, name, id) > ($%d, $%d, $%d)`, len(args)+1, len(args)+2, len(args)+3)
 		args = append(args, cursor[0], cursor[1], cursor[2])
@@ -893,11 +901,11 @@ func (s *Store) exportSyncMalicious(ctx context.Context, opts db.SyncExportOptio
 
 	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: export sync malicious findings: %w", err)
+		return syncRowPage[db.SyncMalicious]{}, fmt.Errorf("postgres: export sync malicious findings: %w", err)
 	}
 	defer ioutils.CloseSilently(rows)
 
-	out := make([]db.SyncMalicious, 0)
+	builder := newSyncRowPageBuilder(opts.Limit, db.SyncMaliciousPageByteBudget, syncMaliciousWireBytes)
 	for rows.Next() {
 		var item db.SyncMalicious
 		if err := rows.Scan(
@@ -913,16 +921,19 @@ func (s *Store) exportSyncMalicious(ctx context.Context, opts db.SyncExportOptio
 			&item.Source,
 			&item.Withdrawn,
 		); err != nil {
-			return nil, fmt.Errorf("postgres: scan sync malicious row: %w", err)
+			return syncRowPage[db.SyncMalicious]{}, fmt.Errorf("postgres: scan sync malicious row: %w", err)
 		}
 		item.Severity = normalizeSeverity(item.Severity)
-		out = append(out, item)
+		if !builder.add(item) {
+			// The page is full; the rest of the result is not exported.
+			break
+		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("postgres: iterate sync malicious rows: %w", err)
+		return syncRowPage[db.SyncMalicious]{}, fmt.Errorf("postgres: iterate sync malicious rows: %w", err)
 	}
 
-	return out, nil
+	return builder.finish(), nil
 }
 
 type syncLifecycleQueryArgs struct {
@@ -1141,34 +1152,36 @@ func addSyncLifecyclePagination(query *string, args *[]any, opts db.SyncExportOp
 	}
 }
 
-func (s *Store) exportSyncLifecycle(ctx context.Context, opts db.SyncExportOptions, snapshot time.Time, snapshotXID uint64) ([]db.SyncLifecycleRelease, error) {
+func (s *Store) exportSyncLifecycle(ctx context.Context, opts db.SyncExportOptions, snapshot time.Time, snapshotXID uint64) (syncRowPage[db.SyncLifecycleRelease], error) {
 	query, args, err := buildExportSyncLifecycleQuery(opts, snapshot, snapshotXID)
 	if err != nil {
-		return nil, err
+		return syncRowPage[db.SyncLifecycleRelease]{}, err
 	}
-	return s.querySyncLifecycleRows(ctx, query, args)
+	return s.querySyncLifecycleRows(ctx, query, args, newSyncRowPageBuilder(opts.Limit, db.SyncLifecyclePageByteBudget, syncLifecycleWireBytes))
 }
 
-func (s *Store) querySyncLifecycleRows(ctx context.Context, query string, args []any) ([]db.SyncLifecycleRelease, error) {
+func (s *Store) querySyncLifecycleRows(ctx context.Context, query string, args []any, builder *syncRowPageBuilder[db.SyncLifecycleRelease]) (syncRowPage[db.SyncLifecycleRelease], error) {
 	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: export sync lifecycle releases: %w", err)
+		return syncRowPage[db.SyncLifecycleRelease]{}, fmt.Errorf("postgres: export sync lifecycle releases: %w", err)
 	}
 	defer ioutils.CloseSilently(rows)
 
-	out := make([]db.SyncLifecycleRelease, 0)
 	for rows.Next() {
 		item, err := scanSyncLifecycleRelease(rows)
 		if err != nil {
-			return nil, fmt.Errorf("postgres: scan sync lifecycle row: %w", err)
+			return syncRowPage[db.SyncLifecycleRelease]{}, fmt.Errorf("postgres: scan sync lifecycle row: %w", err)
 		}
-		out = append(out, item)
+		if !builder.add(item) {
+			// The page is full; the rest of the result is not exported.
+			break
+		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("postgres: iterate sync lifecycle rows: %w", err)
+		return syncRowPage[db.SyncLifecycleRelease]{}, fmt.Errorf("postgres: iterate sync lifecycle rows: %w", err)
 	}
 
-	return out, nil
+	return builder.finish(), nil
 }
 
 type syncLifecycleRowScanner interface {

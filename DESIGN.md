@@ -1158,9 +1158,19 @@ alone never splits an advisory (only the byte budget below can).
 versioned advisory cursor (the last advisory ID of the page), and the dataset
 continues only while the page left an advisory for the next one. Every page is
 also bounded by bytes: the client rejects a response body above 32 MiB, so the
-server keeps the vulnerability rows of a page within an estimated 12 MiB
-(`db.SyncVulnerabilityPageByteBudget`, an upper bound of their JSON encoding
-with escaping), leaving room for the other datasets of the page. When the next
+server keeps each dataset of a page within an estimated byte budget (an upper
+bound of its rows' JSON encoding with escaping): the vulnerability rows within
+12 MiB (`db.SyncVulnerabilityPageByteBudget`), and the malicious, reputation,
+and lifecycle rows, which share the remaining headroom, within 8 MiB, 4 MiB,
+and 4 MiB (`db.SyncMaliciousPageByteBudget`, `db.SyncReputationPageByteBudget`,
+`db.SyncLifecyclePageByteBudget`). The budgets total 28 MiB and leave 4 MiB for
+the envelope. A malicious, reputation, or lifecycle page ends before the row
+that no longer fits its budget, never before its first row, so every dataset
+with rows left advances on every page and a single row larger than its budget
+is still delivered alone; such a page holds fewer rows than the `limit` and
+still continues after its last row (keyset cursor and offset), so clients
+follow `truncated` and the per-dataset `next_cursor` instead of comparing row
+counts with the `limit`. When the next
 advisory no longer fits that budget, the page ends after the last whole
 advisory and stays flagged. When the first advisory of a page alone exceeds
 the budget (an unusually large affected set, whose summary and references

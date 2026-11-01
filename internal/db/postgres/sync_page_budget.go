@@ -34,6 +34,61 @@ func syncAdvisoryIDWireBytes(id string) int {
 	return jsonStringWireBytes(id) + 1
 }
 
+// syncMaliciousRowWireOverhead, syncReputationRowWireOverhead, and
+// syncLifecycleRowWireOverhead bound the JSON bytes of one exported row of
+// their dataset outside its string values: the field names and punctuation,
+// the booleans, the comma that separates the row from the next one, and for
+// lifecycle rows the six dates (at most 16 bytes each, quoted, for any year
+// PostgreSQL stores).
+const (
+	syncMaliciousRowWireOverhead  = 192
+	syncReputationRowWireOverhead = 160
+	syncLifecycleRowWireOverhead  = 448
+)
+
+// syncMaliciousWireBytes returns an upper bound of the JSON bytes one
+// malicious row takes in a sync response.
+func syncMaliciousWireBytes(row db.SyncMalicious) int {
+	return syncMaliciousRowWireOverhead +
+		jsonStringWireBytes(row.ID) +
+		jsonStringWireBytes(row.Ecosystem) +
+		jsonStringWireBytes(row.Name) +
+		jsonStringWireBytes(row.VersionRanges) +
+		jsonStringWireBytes(row.Versions) +
+		jsonStringWireBytes(row.ReferenceURLs) +
+		jsonStringWireBytes(row.RiskType) +
+		jsonStringWireBytes(row.Severity) +
+		jsonStringWireBytes(row.Summary) +
+		jsonStringWireBytes(row.Source)
+}
+
+// syncReputationWireBytes returns an upper bound of the JSON bytes one
+// reputation row takes in a sync response.
+func syncReputationWireBytes(row db.SyncReputationFinding) int {
+	return syncReputationRowWireOverhead +
+		jsonStringWireBytes(row.ID) +
+		jsonStringWireBytes(row.Ecosystem) +
+		jsonStringWireBytes(row.Name) +
+		jsonStringWireBytes(row.Version) +
+		jsonStringWireBytes(row.Type) +
+		jsonStringWireBytes(row.RiskType) +
+		jsonStringWireBytes(row.Severity) +
+		jsonStringWireBytes(row.Summary)
+}
+
+// syncLifecycleWireBytes returns an upper bound of the JSON bytes one
+// lifecycle row takes in a sync response.
+func syncLifecycleWireBytes(row db.SyncLifecycleRelease) int {
+	return syncLifecycleRowWireOverhead +
+		jsonStringWireBytes(row.ID) +
+		jsonStringWireBytes(row.Ecosystem) +
+		jsonStringWireBytes(row.Name) +
+		jsonStringWireBytes(row.ProductSlug) +
+		jsonStringWireBytes(row.ProductLabel) +
+		jsonStringWireBytes(row.Cycle) +
+		jsonStringWireBytes(row.Latest)
+}
+
 // jsonStringWireBytes returns an upper bound of the bytes encoding/json writes
 // for s as a JSON string with HTML escaping, as the sync handler encodes it:
 // the quotes, two bytes for an escaped quote or backslash, six for a control
@@ -201,5 +256,64 @@ func (b *syncVulnerabilityPageBuilder) finish() syncVulnerabilityPage {
 	default:
 		b.page.hasMore = b.stopped || (b.limit > 0 && len(b.page.rows) == b.limit)
 	}
+	return b.page
+}
+
+// syncRowPage is one exported page of a dataset paged by rows only
+// (malicious, reputation, and lifecycle). hasMore reports that the dataset may
+// continue on the next page, after the last row of this one.
+type syncRowPage[T any] struct {
+	rows    []T
+	hasMore bool
+}
+
+// syncRowPageBuilder assembles one page of a row-paged dataset from the rows
+// its query returns, in order, and bounds it by the estimated wire bytes of
+// its rows (wireBytes) as well as by the row limit the query applies: the page
+// ends before the row that no longer fits the budget, never before the first
+// one, so a sync response stays below the size a client accepts and every
+// dataset advances on every page. A page cut by bytes, or one that filled the
+// row limit, reports more data; its keyset cursor or offset continues after
+// its last row.
+type syncRowPageBuilder[T any] struct {
+	limit     int
+	budget    int
+	wireBytes func(T) int
+
+	page    syncRowPage[T]
+	used    int
+	stopped bool
+}
+
+// newSyncRowPageBuilder returns the builder of one page. An export without a
+// limit is not paginated and has no next page to continue on, so it is not
+// bounded by the byte budget either.
+func newSyncRowPageBuilder[T any](limit, budget int, wireBytes func(T) int) *syncRowPageBuilder[T] {
+	if limit <= 0 {
+		budget = math.MaxInt
+	}
+	return &syncRowPageBuilder[T]{limit: limit, budget: budget, wireBytes: wireBytes, page: syncRowPage[T]{rows: make([]T, 0)}}
+}
+
+// add offers the next row of the query result. It reports false once the
+// page is full; the row it rejects and every later row belong to a later
+// page.
+func (b *syncRowPageBuilder[T]) add(item T) bool {
+	if b.stopped {
+		return false
+	}
+	size := b.wireBytes(item)
+	if len(b.page.rows) > 0 && b.used+size > b.budget {
+		b.stopped = true
+		return false
+	}
+	b.used += size
+	b.page.rows = append(b.page.rows, item)
+	return true
+}
+
+// finish returns the page with whether the dataset continues.
+func (b *syncRowPageBuilder[T]) finish() syncRowPage[T] {
+	b.page.hasMore = b.stopped || (b.limit > 0 && len(b.page.rows) == b.limit)
 	return b.page
 }

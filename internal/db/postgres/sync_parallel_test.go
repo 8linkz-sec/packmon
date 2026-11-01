@@ -30,23 +30,23 @@ func TestExportSyncDatasetsRunsEnabledQueriesInParallel(t *testing.T) {
 				}
 				return syncVulnerabilityPage{rows: []db.SyncVulnerability{{ID: "CVE-2026-0001", Ecosystem: "npm", Name: "vuln-pkg"}}}, nil
 			},
-			malicious: func(ctx context.Context, opts db.SyncExportOptions, snapshot time.Time, snapshotXID uint64) ([]db.SyncMalicious, error) {
+			malicious: func(ctx context.Context, opts db.SyncExportOptions, snapshot time.Time, snapshotXID uint64) (syncRowPage[db.SyncMalicious], error) {
 				if err := waitForParallelExportRelease(ctx, started, release, "malicious"); err != nil {
-					return nil, err
+					return syncRowPage[db.SyncMalicious]{}, err
 				}
-				return []db.SyncMalicious{{ID: "MAL-2026-0001", Ecosystem: "npm", Name: "bad-pkg"}}, nil
+				return syncRowPage[db.SyncMalicious]{rows: []db.SyncMalicious{{ID: "MAL-2026-0001", Ecosystem: "npm", Name: "bad-pkg"}}}, nil
 			},
-			reputation: func(ctx context.Context, opts db.SyncExportOptions, snapshot time.Time, snapshotXID uint64) ([]db.SyncReputationFinding, error) {
+			reputation: func(ctx context.Context, opts db.SyncExportOptions, snapshot time.Time, snapshotXID uint64) (syncRowPage[db.SyncReputationFinding], error) {
 				if err := waitForParallelExportRelease(ctx, started, release, "reputation"); err != nil {
-					return nil, err
+					return syncRowPage[db.SyncReputationFinding]{}, err
 				}
-				return []db.SyncReputationFinding{{ID: "reputation:npm:removed-pkg:1.0.0", Ecosystem: "npm", Name: "removed-pkg", Version: "1.0.0"}}, nil
+				return syncRowPage[db.SyncReputationFinding]{rows: []db.SyncReputationFinding{{ID: "reputation:npm:removed-pkg:1.0.0", Ecosystem: "npm", Name: "removed-pkg", Version: "1.0.0"}}}, nil
 			},
-			lifecycle: func(ctx context.Context, opts db.SyncExportOptions, snapshot time.Time, snapshotXID uint64) ([]db.SyncLifecycleRelease, error) {
+			lifecycle: func(ctx context.Context, opts db.SyncExportOptions, snapshot time.Time, snapshotXID uint64) (syncRowPage[db.SyncLifecycleRelease], error) {
 				if err := waitForParallelExportRelease(ctx, started, release, "lifecycle"); err != nil {
-					return nil, err
+					return syncRowPage[db.SyncLifecycleRelease]{}, err
 				}
-				return []db.SyncLifecycleRelease{{ID: "endoflife:npm:old-pkg:old-pkg:1", Ecosystem: "npm", Name: "old-pkg", ProductSlug: "old-pkg", Cycle: "1"}}, nil
+				return syncRowPage[db.SyncLifecycleRelease]{rows: []db.SyncLifecycleRelease{{ID: "endoflife:npm:old-pkg:old-pkg:1", Ecosystem: "npm", Name: "old-pkg", ProductSlug: "old-pkg", Cycle: "1"}}}, nil
 			},
 		})
 		resultCh <- syncDatasetResult{datasets: result, err: err}

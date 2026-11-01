@@ -16,6 +16,19 @@
 
 ### Fixed
 
+- `/api/v1/sync` pages are now bounded by bytes in every dataset, not only in
+  the vulnerability dataset. The malicious, reputation, and lifecycle rows of
+  a page were bounded only by the row `limit` (up to 10,000 rows each), so
+  large rows (long version lists, references, or summaries) could push one
+  page past the 32 MiB a client accepts; the client rejected it with
+  `response too large` and the sync never advanced. The server now keeps them
+  within estimated byte budgets of 8 MiB, 4 MiB, and 4 MiB besides the
+  vulnerability rows' 12 MiB (28 MiB in total). A page cut by its budget
+  holds fewer rows than the `limit` but still continues after its last row,
+  and every dataset with rows left delivers at least one row per page, so a
+  sync always makes progress. The wire format is unchanged: current and older
+  clients already follow `truncated` and `next_cursor`, and a sequence that
+  an older server started continues by its keyset cursors or offsets.
 - `packmon-server migrate` no longer keeps an `INVALID` index left by an
   interrupted `CREATE INDEX CONCURRENTLY` (connection drop, cancel, crash).
   A retry used to skip such an index because the migrations use

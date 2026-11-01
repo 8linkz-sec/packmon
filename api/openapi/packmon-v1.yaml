@@ -637,12 +637,18 @@ paths:
             affected rows than the limit is a page of its own, so that page
             holds more rows than the limit; the row limit alone never splits
             an advisory.
-            Independently of the limit, the server keeps the vulnerability rows
-            of every page within an estimated byte budget well below the 32 MiB
-            response size the client accepts: a page then ends after the last
-            whole advisory that fits, and an advisory whose rows alone exceed
-            the budget is split over several pages that omit
-            vulnerability_affected_complete.
+            Independently of the limit, the server keeps every dataset of a
+            page within an estimated byte budget (12 MiB of vulnerability rows,
+            8 MiB of malicious, 4 MiB of reputation, and 4 MiB of lifecycle
+            rows), together well below the 32 MiB response size the client
+            accepts. A vulnerability page then ends after the last whole
+            advisory that fits, and an advisory whose rows alone exceed the
+            budget is split over several pages that omit
+            vulnerability_affected_complete. A malicious, reputation, or
+            lifecycle page ends before the row that no longer fits, never
+            before its first row, and continues after its last row even when
+            it holds fewer rows than the limit, so clients follow truncated
+            and next_cursor rather than comparing row counts with the limit.
           schema:
             type: integer
             minimum: 1

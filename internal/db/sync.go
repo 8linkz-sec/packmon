@@ -89,13 +89,28 @@ func DecodeSyncAdvisoryCursor(raw string) (string, bool) {
 // three-part legacy row cursor.
 const syncAdvisoryRowCursorTag = "advisory-rows-v2"
 
-// SyncVulnerabilityPageByteBudget bounds the estimated JSON bytes of the
-// vulnerability dataset on one /api/v1/sync page, in addition to the row
-// limit. It stays well below the response size a client accepts (32 MiB, see
-// synccontract.MaxResponseBytes), so the other datasets of the page and the
-// envelope still fit. An advisory whose rows alone exceed it is split over
-// several pages that do not carry VulnerabilityAffectedComplete.
-const SyncVulnerabilityPageByteBudget = 12 << 20
+// The sync page byte budgets bound the estimated JSON bytes of each dataset on
+// one /api/v1/sync page, in addition to the row limit. Each page of a dataset
+// takes rows while they fit its budget and always its first row, so every
+// dataset that has rows left advances on every page. Together they take 28 MiB
+// of the response size a client accepts (32 MiB, see
+// synccontract.MaxResponseBytes): the vulnerability dataset, which repeats an
+// advisory's summary and references on every affected row, keeps the largest
+// share, the other datasets share the remaining headroom, and 4 MiB stay free
+// for the envelope and for a first row that alone exceeds its budget.
+const (
+	// SyncVulnerabilityPageByteBudget bounds the vulnerability dataset. An
+	// advisory whose rows alone exceed it is split over several pages that do
+	// not carry VulnerabilityAffectedComplete.
+	SyncVulnerabilityPageByteBudget = 12 << 20
+	// SyncMaliciousPageByteBudget bounds the malicious dataset, whose rows can
+	// carry long version lists and references.
+	SyncMaliciousPageByteBudget = 8 << 20
+	// SyncReputationPageByteBudget bounds the reputation dataset.
+	SyncReputationPageByteBudget = 4 << 20
+	// SyncLifecyclePageByteBudget bounds the lifecycle dataset.
+	SyncLifecyclePageByteBudget = 4 << 20
+)
 
 // EncodeSyncAdvisoryRowCursor returns the vulnerabilities_cursor that
 // continues the advisory with the given ID after its affected row (ecosystem,

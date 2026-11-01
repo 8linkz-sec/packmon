@@ -146,19 +146,19 @@ func TestPostgresSyncCursorHelpers(t *testing.T) {
 
 	var done, cursor bool
 	next := db.SyncCursor{}
-	setNextDatasetCursor(&next, true, 10, 10, func() { done = true }, func() { cursor = true })
+	setNextDatasetCursor(&next, true, true, func() { done = true }, func() { cursor = true })
 	if !done || cursor {
 		t.Fatalf("alreadyDone path done=%v cursor=%v", done, cursor)
 	}
 	done, cursor = false, false
-	setNextDatasetCursor(&next, false, 10, 10, func() { done = true }, func() { cursor = true })
+	setNextDatasetCursor(&next, false, true, func() { done = true }, func() { cursor = true })
 	if done || !cursor {
-		t.Fatalf("full page path done=%v cursor=%v", done, cursor)
+		t.Fatalf("continuing page path done=%v cursor=%v", done, cursor)
 	}
 	done, cursor = false, false
-	setNextDatasetCursor(&next, false, 9, 10, func() { done = true }, func() { cursor = true })
+	setNextDatasetCursor(&next, false, false, func() { done = true }, func() { cursor = true })
 	if !done || cursor {
-		t.Fatalf("short page path done=%v cursor=%v", done, cursor)
+		t.Fatalf("finished page path done=%v cursor=%v", done, cursor)
 	}
 }
 

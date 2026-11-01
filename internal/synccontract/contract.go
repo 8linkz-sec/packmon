@@ -17,8 +17,10 @@ const (
 	MaxLimit = 10000
 
 	// MaxResponseBytes is the largest /api/v1/sync response body the SQLite
-	// client accepts. The server keeps the vulnerability dataset of a page
-	// within db.SyncVulnerabilityPageByteBudget, well below this cap.
+	// client accepts. The server keeps each dataset of a page within its byte
+	// budget (db.SyncVulnerabilityPageByteBudget and the malicious,
+	// reputation, and lifecycle budgets beside it), which together stay well
+	// below this cap.
 	MaxResponseBytes = 32 * 1024 * 1024
 )
 

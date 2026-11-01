@@ -617,6 +617,12 @@ lists stay in the local database until a full sync; the advisories around it
 are still replaced. Before this split existed, such an advisory made every
 incremental sync fail with `response too large` and the local database never
 advanced; upgrading the server is the fix, a full sync is not needed for it.
+The malicious, reputation, and lifecycle rows of a page have byte budgets of
+their own (8 MiB, 4 MiB, and 4 MiB) as well, so large rows there (long version
+lists, references, or summaries) make the sync take more pages instead of
+failing with `response too large`; a server from before these budgets could
+fail that way on a sync with many such rows, and upgrading the server fixes
+it too.
 
 During a rolling upgrade, a sync sequence that a new server started and an
 older server continues fails with `400` (the older server does not know the
