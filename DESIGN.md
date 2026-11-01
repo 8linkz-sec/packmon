@@ -179,7 +179,8 @@ Packmon's maintained deployment surfaces are intentionally narrow:
   a valid index, and on every migrate run, before any pending migration,
   rebuilds concurrently any `INVALID` or missing index of an already applied
   migration (only the index build is rerun; a down migration that drops such
-  an index also lowers the version, so a missing one is never intended). A
+  an index also lowers the version, so a missing one is never intended; a
+  missing index whose table is gone too is left alone). A
   failed repair aborts the run with the schema version clean. A
   dirty migration that only builds indexes concurrently with `IF NOT EXISTS`
   (049) is retry-safe: migrate still refuses the dirty database but names the

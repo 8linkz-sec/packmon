@@ -1490,6 +1490,10 @@ func (r *recordingSQLExecutor) indexState(context.Context, string) (indexState, 
 	return indexValid, nil
 }
 
+func (r *recordingSQLExecutor) tableExists(context.Context, string) (bool, error) {
+	return true, nil
+}
+
 func TestMaliciousActiveExactLookupIndexMigrationDefinesExpectedIndex(t *testing.T) {
 	t.Parallel()
 

@@ -18,7 +18,14 @@ type scriptedIndexConn struct {
 	lookupErr  error
 	execErr    map[string]error
 	// failOnce fails the first statement containing the key, then is consumed.
-	failOnce map[string]error
+	failOnce      map[string]error
+	missingTables map[string]bool
+	tableLookups  []string
+}
+
+func (c *scriptedIndexConn) tableExists(_ context.Context, name string) (bool, error) {
+	c.tableLookups = append(c.tableLookups, name)
+	return !c.missingTables[name], nil
 }
 
 func (c *scriptedIndexConn) ExecContext(_ context.Context, query string, _ ...any) (sql.Result, error) {
@@ -66,27 +73,35 @@ func TestParseConcurrentIndexBuild(t *testing.T) {
 		{
 			name:      "if not exists",
 			statement: "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_a ON t(x)",
-			want:      concurrentIndexBuild{name: "idx_a", ifNotExists: true},
+			want:      concurrentIndexBuild{name: "idx_a", table: "t", ifNotExists: true},
 			wantOK:    true,
 		},
 		{
 			name:      "leading directive and line comments",
 			statement: "-- packmon:migration no-transaction\n-- another note\nCREATE INDEX CONCURRENTLY IF NOT EXISTS idx_b\n    ON t (x)\n    WHERE y IS NULL",
-			want:      concurrentIndexBuild{name: "idx_b", ifNotExists: true},
+			want:      concurrentIndexBuild{name: "idx_b", table: "t", ifNotExists: true},
 			wantOK:    true,
 		},
 		{
 			name:      "leading block comment",
 			statement: "/* note; with text */ create index concurrently if not exists idx_c on t using gin (x)",
-			want:      concurrentIndexBuild{name: "idx_c", ifNotExists: true},
+			want:      concurrentIndexBuild{name: "idx_c", table: "t", ifNotExists: true},
 			wantOK:    true,
 		},
 		{
 			name:      "unique without if not exists folds case",
-			statement: "CREATE UNIQUE INDEX CONCURRENTLY Idx_D ON t(x)",
-			want:      concurrentIndexBuild{name: "idx_d"},
+			statement: "CREATE UNIQUE INDEX CONCURRENTLY Idx_D ON Some_Table(x)",
+			want:      concurrentIndexBuild{name: "idx_d", table: "some_table"},
 			wantOK:    true,
 		},
+		{
+			name:      "only table",
+			statement: "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_j ON ONLY t (x)",
+			want:      concurrentIndexBuild{name: "idx_j", table: "t", ifNotExists: true},
+			wantOK:    true,
+		},
+		{name: "schema qualified table", statement: "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_k ON public.t(x)"},
+		{name: "quoted table", statement: `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_l ON "T"(x)`},
 		{name: "non concurrent index", statement: "CREATE INDEX IF NOT EXISTS idx_e ON t(x)"},
 		{name: "drop index", statement: "DROP INDEX CONCURRENTLY IF EXISTS idx_f"},
 		{name: "unnamed index", statement: "CREATE INDEX CONCURRENTLY ON t(x)"},
@@ -288,6 +303,33 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_d ON t(w);`},
 	})
 	if got := strings.Join(conn.lookups, ","); got != "idx_a,idx_b,idx_b,idx_e,idx_e" {
 		t.Fatalf("index lookups = %s, want only applied concurrent indexes", got)
+	}
+	if got := strings.Join(conn.tableLookups, ","); got != "t" {
+		t.Fatalf("table lookups = %s, want only the missing index's table", got)
+	}
+}
+
+// TestRepairInvalidConcurrentIndexesSkipsMissingIndexOfMissingTable keeps the
+// repair to lost indexes: without the table no index build can help, so the
+// migrator neither builds nor fails on it.
+func TestRepairInvalidConcurrentIndexesSkipsMissingIndexOfMissingTable(t *testing.T) {
+	t.Parallel()
+
+	migrations := []migrationFile{
+		{version: 1, name: "001_index.up.sql", sql: `-- packmon:migration no-transaction
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_a ON gone(x);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_b ON t(y);`},
+	}
+	conn := &scriptedIndexConn{
+		states:        map[string][]indexState{"idx_a": {indexMissing}, "idx_b": {indexMissing, indexValid}},
+		missingTables: map[string]bool{"gone": true},
+	}
+	if err := repairInvalidConcurrentIndexes(context.Background(), conn, migrations, 1); err != nil {
+		t.Fatalf("repairInvalidConcurrentIndexes() error = %v", err)
+	}
+	assertStatements(t, conn.statements, []string{"CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_b ON t(y)"})
+	if got := strings.Join(conn.tableLookups, ","); got != "gone,t" {
+		t.Fatalf("table lookups = %s, want gone,t", got)
 	}
 }
 

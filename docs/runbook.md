@@ -213,8 +213,9 @@ change.
    pending, also checks every index that an already applied migration builds
    concurrently: an `INVALID` one is dropped and rebuilt, and a missing one
    (for example after a rebuild cancelled between its drop and its build) is
-   built again, both concurrently and outside a transaction; valid indexes
-   are left alone. This repair runs before any pending migration. A failed
+   built again when its table exists, both concurrently and outside a
+   transaction; valid indexes are left alone. This repair runs before any
+   pending migration. A failed
    repair names the index and aborts the run before pending migrations are
    applied, so the schema version stays clean; rerun migrate to retry. The
    repair's `DROP INDEX CONCURRENTLY` waits behind a still-running abandoned

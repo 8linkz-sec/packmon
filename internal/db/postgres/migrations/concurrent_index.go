@@ -39,10 +39,12 @@ func (s indexState) String() string {
 }
 
 // noTransactionConn runs the statements of a no-transaction migration and
-// reads the catalog state of the indexes they build concurrently.
+// reads the catalog state of the indexes they build concurrently and of the
+// tables they build them on.
 type noTransactionConn interface {
 	sqlExecutor
 	indexState(ctx context.Context, name string) (indexState, error)
+	tableExists(ctx context.Context, name string) (bool, error)
 }
 
 type rowQueryExecutor interface {
@@ -67,7 +69,7 @@ func (c catalogStatementConn) indexState(ctx context.Context, name string) (inde
 			SELECT i.indisvalid
 			FROM pg_index i
 			WHERE i.indexrelid = to_regclass($1::text)
-		)`, quoteIndexIdentifier(name)).Scan(&valid); err != nil {
+		)`, quoteIdentifier(name)).Scan(&valid); err != nil {
 		return indexMissing, err
 	}
 	switch {
@@ -80,19 +82,28 @@ func (c catalogStatementConn) indexState(ctx context.Context, name string) (inde
 	}
 }
 
-// concurrentIndexBuild is a CREATE INDEX CONCURRENTLY statement with a plain,
-// unqualified index name (folded to lower case as PostgreSQL does).
+func (c catalogStatementConn) tableExists(ctx context.Context, name string) (bool, error) {
+	var exists bool
+	if err := c.db.QueryRowContext(ctx, `SELECT to_regclass($1::text) IS NOT NULL`, quoteIdentifier(name)).Scan(&exists); err != nil {
+		return false, err
+	}
+	return exists, nil
+}
+
+// concurrentIndexBuild is a CREATE INDEX CONCURRENTLY statement with plain,
+// unqualified index and table names (folded to lower case as PostgreSQL does).
 type concurrentIndexBuild struct {
 	name        string
+	table       string
 	ifNotExists bool
 }
 
-var concurrentIndexBuildPattern = regexp.MustCompile(`(?is)^CREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\s+(IF\s+NOT\s+EXISTS\s+)?([a-z_][a-z0-9_]*)\s+ON\s`)
+var concurrentIndexBuildPattern = regexp.MustCompile(`(?is)^CREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\s+(IF\s+NOT\s+EXISTS\s+)?([a-z_][a-z0-9_]*)\s+ON\s+(?:ONLY\s+)?([a-z_][a-z0-9_]*)\s*(?:\(|\s|$)`)
 
 // parseConcurrentIndexBuild recognizes a concurrent index build after any
-// leading comments. Unnamed, quoted, or schema-qualified index names are not
-// recognized; TestEmbeddedConcurrentIndexBuildsAreRecognized keeps shipped
-// migrations within that shape.
+// leading comments. Unnamed builds and quoted or schema-qualified index or
+// table names are not recognized; TestEmbeddedConcurrentIndexBuildsAreRecognized
+// keeps shipped migrations within that shape.
 func parseConcurrentIndexBuild(statement string) (concurrentIndexBuild, bool) {
 	body, ok := stripLeadingSQLComments(statement)
 	if !ok {
@@ -104,6 +115,7 @@ func parseConcurrentIndexBuild(statement string) (concurrentIndexBuild, bool) {
 	}
 	return concurrentIndexBuild{
 		name:        strings.ToLower(match[2]),
+		table:       strings.ToLower(match[3]),
 		ifNotExists: match[1] != "",
 	}, true
 }
@@ -132,9 +144,9 @@ func stripLeadingSQLComments(statement string) (body string, ok bool) {
 	}
 }
 
-// quoteIndexIdentifier quotes a name accepted by parseConcurrentIndexBuild,
+// quoteIdentifier quotes a name accepted by parseConcurrentIndexBuild,
 // which only contains lower-case letters, digits, and underscores.
-func quoteIndexIdentifier(name string) string {
+func quoteIdentifier(name string) string {
 	return `"` + name + `"`
 }
 
@@ -167,7 +179,7 @@ func dropInvalidIndex(ctx context.Context, db noTransactionConn, name string) er
 	if state != indexInvalid {
 		return nil
 	}
-	drop := `DROP INDEX CONCURRENTLY IF EXISTS ` + quoteIndexIdentifier(name) // #nosec G202 -- name comes from an embedded migration and is restricted to [a-z0-9_] by parseConcurrentIndexBuild.
+	drop := `DROP INDEX CONCURRENTLY IF EXISTS ` + quoteIdentifier(name) // #nosec G202 -- name comes from an embedded migration and is restricted to [a-z0-9_] by parseConcurrentIndexBuild.
 	if _, err := db.ExecContext(ctx, drop); err != nil {
 		return fmt.Errorf("drop INVALID index %s: %w", name, err)
 	}
@@ -191,7 +203,9 @@ func requireValidIndex(ctx context.Context, db noTransactionConn, name string) e
 // rerun, never the migration's other statements; valid indexes are left alone.
 // A missing index is never intended at an applied version: the down migration
 // that drops one also lowers the schema version. Recreating it also covers a
-// rebuild interrupted between its drop and its build.
+// rebuild interrupted between its drop and its build. A missing index whose
+// table is missing too is left alone: that is schema loss no index build can
+// repair, not a lost index.
 func repairInvalidConcurrentIndexes(ctx context.Context, db noTransactionConn, migrations []migrationFile, current int) error {
 	for _, migration := range migrations {
 		if migration.version > current {
@@ -219,6 +233,13 @@ func repairInvalidConcurrentIndexes(ctx context.Context, db noTransactionConn, m
 					return fmt.Errorf("migrations: rebuild INVALID index %s from %s: %w; rerun packmon-server migrate to retry the rebuild", build.name, migration.name, err)
 				}
 			case indexMissing:
+				exists, err := db.tableExists(ctx, build.table)
+				if err != nil {
+					return fmt.Errorf("migrations: read state of table %s for index %s from %s: %w", build.table, build.name, migration.name, err)
+				}
+				if !exists {
+					continue
+				}
 				if err := buildIndex(ctx, db, build.name, statement); err != nil {
 					return fmt.Errorf("migrations: recreate missing index %s from %s: %w; rerun packmon-server migrate to retry the build", build.name, migration.name, err)
 				}
@@ -229,7 +250,7 @@ func repairInvalidConcurrentIndexes(ctx context.Context, db noTransactionConn, m
 }
 
 func rebuildInvalidIndex(ctx context.Context, db noTransactionConn, name, statement string) error {
-	drop := `DROP INDEX CONCURRENTLY IF EXISTS ` + quoteIndexIdentifier(name) // #nosec G202 -- name comes from an embedded migration and is restricted to [a-z0-9_] by parseConcurrentIndexBuild.
+	drop := `DROP INDEX CONCURRENTLY IF EXISTS ` + quoteIdentifier(name) // #nosec G202 -- name comes from an embedded migration and is restricted to [a-z0-9_] by parseConcurrentIndexBuild.
 	if _, err := db.ExecContext(ctx, drop); err != nil {
 		return fmt.Errorf("drop: %w", err)
 	}
