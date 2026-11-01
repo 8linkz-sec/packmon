@@ -935,7 +935,10 @@ followed):
   path inside the repository fails the scan with exit code `2` before it runs;
 - a local database directory (`PACKMON_DB_PATH`, `db.path`, or the default
   `~/.packmon/db`) inside the repository fails the scan with exit code `2`
-  when the scan opens it (local or auto mode, or scan history).
+  when the scan opens it (local or auto mode, or scan history). So does an
+  unknown home directory without `PACKMON_DB_PATH` or `db.path`: the default
+  database then has no location, and packmon never falls back to the
+  repository (the working directory).
 
 Report destinations outside the repository are still written. `--hook` cannot
 be combined with `--list-packages`, `--outdated`, `--list-all`, or

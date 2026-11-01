@@ -365,7 +365,9 @@ Important behavior:
     `--output-sarif`, `--output-junit`, or `--html` path;
   - fails with exit code `2` before scanning when the scan opens the local
     database (local checker or history) and its directory (`PACKMON_DB_PATH`,
-    `db.path`, or the default `~/.packmon/db`) is inside.
+    `db.path`, or the default `~/.packmon/db`) is inside, or when the home
+    directory is unknown and neither override is set (see "Local SQLite
+    Mode").
 
   Destinations outside the repository are still written. With several
   targets, the single-target rule for report outputs applies to what is left
@@ -979,6 +981,13 @@ explainable after rows are gone.
 
 Local mode uses a compact SQLite database populated from `GET /api/v1/sync`.
 It stores enough data for equivalent finding quality but not full server detail.
+The database file is `packmon.db` in `PACKMON_DB_PATH`, else in the trusted
+config `db.path`, else in `~/.packmon/db`. When the home directory cannot be
+resolved and neither override is set, the database has no location: commands
+that need it (`db sync`, `db info`, `db export`, `history clear`, `report`,
+`dashboard`, local-mode scans) fail with an error that names both overrides, and auto-mode
+fallback and scan-history recording warn and skip it. The CLI never falls back
+to the working directory, which is usually a repository.
 
 Remote and local modes should detect the same vulnerability, malicious, synced
 reputation, and lifecycle findings when local data is fresh. Local SQLite sync

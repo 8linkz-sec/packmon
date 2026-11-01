@@ -16,6 +16,14 @@
 
 ### Fixed
 
+- The CLI no longer creates its local SQLite database (and its WAL and
+  journal files) in the working directory when the home directory cannot be
+  resolved. The default `~/.packmon/db` used to fall back to `./.packmon/db`,
+  usually inside whatever repository the CLI ran in. Without a home directory
+  and without `PACKMON_DB_PATH` or `db.path`, commands that need the database
+  now fail with `the home directory is unknown; set PACKMON_DB_PATH or
+  db.path`, auto-mode fallback and scan history warn and skip it, a `--hook`
+  scan exits `2`, and `packmon config show` reports `db_path` as unresolved.
 - `--outdated` / `--list-all` start the per-request `--timeout` when a
   registry request leaves the shared rate limiter. The deadline used to start
   before the queue wait, so with a small `--timeout` and many packages a

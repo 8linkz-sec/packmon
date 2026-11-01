@@ -864,6 +864,10 @@ Requirements:
 Local SQLite sync:
 
 - pulls from Packmon server only;
+- keeps the database in `PACKMON_DB_PATH`, trusted `db.path`, or
+  `~/.packmon/db`, and fails with an error when none resolves (unknown home
+  directory) instead of creating the database, WAL, and journal files in the
+  working directory, which is usually a repository;
 - stores compact finding, reputation, and lifecycle data, not raw feed JSON;
 - preserves user-facing source attribution for synced vulnerability and
   malicious findings;
