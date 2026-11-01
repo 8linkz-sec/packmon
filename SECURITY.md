@@ -778,7 +778,30 @@ the object stay readable. An escaped value inside such a string
 spaces and escaped characters (including an escaped quote inside the value)
 included; an unterminated one redacts the rest of the message. A backslash
 escapes any character inside a secret value, a newline included, so an escaped
-line break does not end the redaction early.
+line break does not end the redaction early. A key is a secret key, quoted or
+not, when one component of its name (split at `_`, `-`, `.`, digits, and
+camelCase boundaries) ends with a secret word (`password`, `passwd`, `pwd`,
+`secret`, `token`, `credential`, `signature`, `sig`, `apikey`, `privatekey`,
+and the plurals `passwords`, `passwds`, `secrets`, `credentials`) or is `key`
+right after an `api` or `private` component: `authToken`, `db_password`,
+`DB_PASSWORD`, `client_secret_value`, `GITHUB_TOKEN`, `PGPASSWORD`,
+`x-api-key`, `db.password`, and `dbCredentials` are secret keys. A secret word
+followed by more letters in the same component does not count, so
+`tokenizer`, `tokens_count`, `passwordless`, and `secretariat` stay readable;
+`tokens` is not a secret word because it usually holds a count. The rule errs
+toward over-redaction: a key with a secret word as a whole component is
+redacted even where its value is harmless (`token_count`, `has_signature`).
+Escaped JSON is recognized at any embedding depth
+(`\\\"token\\\":\\\"a b\\\"`): a quoted key needs the same quote, escaped by
+the same number of backslashes, on both sides, and a quoted value ends at the
+closing quote of its own escaping depth, or before a less escaped quote that
+closes the string the value was cut off in. An object or array assigned to a
+secret key (`"token": {"value": "..."}`, `"password": ["...", "..."]`) is
+redacted as a whole up to its balanced closing bracket, ignoring brackets
+inside its strings; an unbalanced structure, or one larger than 16 KiB,
+redacts the rest of the message. An unquoted key right after an opening quote
+(`"password=..."`) ends its value at that string's closing quote. The
+redaction runs in time linear in the message length.
 
 The built-in `/privacy` page is a deployment-neutral disclosure for the
 first-party admin session cookie and routine Packmon audit/scan metadata. It is
@@ -921,6 +944,12 @@ Local SQLite sync:
   directory) instead of creating the database, WAL, and journal files in the
   working directory, which is usually a repository;
 - stores compact finding, reputation, and lifecycle data, not raw feed JSON;
+- rejects any `/api/v1/sync` response body larger than 32 MiB instead of
+  buffering it. The server keeps the vulnerability rows of each page within
+  an estimated 12 MiB (an upper bound of their JSON encoding) besides the row
+  `limit`, so a sync always makes progress; an advisory whose affected rows
+  alone exceed that budget is split across several pages that never carry
+  `vulnerability_affected_complete` and therefore stay upsert-only;
 - preserves user-facing source attribution for synced vulnerability and
   malicious findings;
 - maps synced malicious-table rows with `supply_chain` or `typosquatting` risk
@@ -935,15 +964,21 @@ Local SQLite sync:
   not through malicious-package lookup methods;
 - drops local affected rows of a changed vulnerability only on a delta sync
   page with a stored `since` that carries `vulnerability_affected_complete`,
-  only for vulnerabilities that page delivered, only for rows in the requested
-  ecosystems, and only in that page's transaction. The server sets the flag on
+  only for vulnerabilities that page delivered (as package rows, or by ID in
+  `vulnerabilities_without_affected` when no affected package is left within
+  the requested ecosystems), only for rows in the requested ecosystems, and
+  only in that page's transaction. A listed ID is never stored as a package
+  row, and package rows the same page delivers for it win over the list. The
+  server sets the flag on
   a delta page only when the page is one statement that carries every
   vulnerability on it with its complete current affected set: it pages a delta
-  by whole advisories and never splits an advisory across pages, so an
+  by whole advisories and never splits an advisory across flagged pages, so an
   advisory changed between pages is either delivered whole on a later page or
   by the next sync, or excluded whole, and never arrives partially. Full exports and the
   legacy row-cursor and offset pages of a delta, which can split an advisory,
-  are never flagged; older servers flag only a delta that fits in one page.
+  are never flagged, and neither are the pages of an advisory that the server
+  splits because its rows alone exceed the page byte budget; older servers
+  flag only a delta that fits in one page.
   The replacement therefore never runs for full syncs (which clear and reload
   the local tables), syncs without `since`, unflagged pages, or older servers'
   multi-page deltas. A failed sequence keeps only the replacements of its

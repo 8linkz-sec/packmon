@@ -73,9 +73,10 @@ func parseSyncCursor(r *http.Request) (db.SyncCursor, error) {
 			continue
 		}
 		// A delta paged by whole advisories continues with an advisory
-		// cursor; the legacy row cursor stays valid for sequences an older
-		// server started. Only a delta (since window) pages by advisory.
-		if _, ok := db.DecodeSyncAdvisoryCursor(raw); ok && param.target == &cursor.VulnerabilitiesCursor {
+		// cursor, or with an advisory row cursor inside an advisory too large
+		// for one page; the legacy row cursor stays valid for sequences an
+		// older server started. Only a delta (since window) pages by advisory.
+		if isSyncAdvisoryCursor(raw) && param.target == &cursor.VulnerabilitiesCursor {
 			if strings.TrimSpace(query.Get("since")) == "" {
 				return db.SyncCursor{}, fmt.Errorf("invalid %s parameter: an advisory cursor requires since", param.name)
 			}
@@ -109,6 +110,16 @@ func parseSyncCursor(r *http.Request) (db.SyncCursor, error) {
 		*param.target = parsed
 	}
 	return cursor, nil
+}
+
+// isSyncAdvisoryCursor reports whether raw is one of the vulnerability cursors
+// of a delta paged by whole advisories.
+func isSyncAdvisoryCursor(raw string) bool {
+	if _, ok := db.DecodeSyncAdvisoryCursor(raw); ok {
+		return true
+	}
+	_, _, _, ok := db.DecodeSyncAdvisoryRowCursor(raw)
+	return ok
 }
 
 func validateSyncCursorKey(raw string, wantParts int) error {
@@ -337,6 +348,9 @@ func newSyncResponseEnvelope(exported *db.SyncExport, feedStatus string, feedVer
 	resp.HasMore = exported.Truncated
 	resp.NextCursor = syncCursorResponse(exported.NextCursor)
 	resp.VulnerabilityAffectedComplete = exported.VulnerabilityAffectedComplete
+	if exported.VulnerabilityAffectedComplete {
+		resp.VulnerabilitiesWithoutAffected = exported.VulnerabilitiesWithoutAffected
+	}
 	return resp
 }
 
