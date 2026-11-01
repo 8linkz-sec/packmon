@@ -614,7 +614,12 @@ paths:
             maximum: 9223372036854775807
         - name: limit
           in: query
-          description: "Rows per source category"
+          description: >-
+            Rows per source category. A delta (since window) pages the
+            vulnerability dataset by whole advisories: a page takes advisories
+            while their affected rows fit the limit, and an advisory with more
+            affected rows than the limit is a page of its own, so that page
+            holds more rows than the limit instead of splitting the advisory.
           schema:
             type: integer
             minimum: 1
@@ -664,7 +669,13 @@ paths:
             maximum: 10000
         - name: vulnerabilities_cursor
           in: query
-          description: "Opaque keyset cursor for the vulnerability dataset"
+          description: >-
+            Opaque keyset cursor for the vulnerability dataset, echoed from
+            next_cursor. A delta paged by whole advisories returns an advisory
+            cursor, which is valid only together with since. The server still
+            accepts the legacy row cursor that older servers returned and
+            continues such a sequence with legacy row paging (pages without
+            vulnerability_affected_complete).
           schema:
             type: string
         - name: malicious_cursor
@@ -1645,22 +1656,25 @@ components:
         vulnerability_affected_complete:
           type: boolean
           description: >-
-            Present and true only on a delta response (a since window was
-            given) that is delivered in a single page (not truncated, first
-            page of the sequence) and whose every vulnerability is exported
-            with all of its current affected packages (within the requested
-            ecosystems). The client may then, in that page's transaction, drop
-            local affected rows of each delivered non-withdrawn vulnerability
-            that the page did not send, so a coverage change on the server (for
-            example a manual advisory moved to another package or a
-            package-name repair) reaches local scans without a full sync. Full
-            exports and every page of a multi-page delta omit the field: those
-            pages are separate statements, so a vulnerability changed between
-            them can arrive incomplete, and clients keep upserting rows for
-            such sequences (whole-advisory paging is a planned follow-up).
-            Servers without this guarantee omit the field, and clients that do
-            not know it keep upserting rows, so older clients and servers remain
-            compatible.
+            Present and true only on a delta page (a since window was given)
+            on which every vulnerability is exported with all of its current
+            affected packages (within the requested ecosystems). The flag
+            describes this page alone. The server pages a delta by whole
+            advisories: one page is one statement, and an advisory is never
+            split across pages, so the flag can appear on every page of a
+            multi-page delta. The client may then, in that page's transaction,
+            drop local affected rows of each delivered non-withdrawn
+            vulnerability that the page did not send, so a coverage change on
+            the server (for example a manual advisory moved to another package
+            or a package-name repair) reaches local scans without a full sync.
+            An advisory that changes between two pages is either delivered
+            whole on a later page or sync, or excluded whole from the
+            sequence; it never arrives partially. Full exports and the legacy
+            row-cursor or offset pages of a delta omit the field, and clients
+            keep upserting rows for unflagged pages. Servers without this
+            guarantee omit the field (older servers set it only on a delta that
+            fits in one page), and clients that do not know it keep upserting
+            rows, so older clients and servers remain compatible.
 
     SyncCursor:
       type: object

@@ -754,7 +754,16 @@ must pass through the same diagnostic redaction and a 512-byte bound: database
 driver errors can echo the connection URL, secret assignments, or local paths.
 The redaction strips userinfo, paths, and queries from `http(s)://` and
 `postgres(ql)://` URLs and redacts quoted secret values (for example libpq's
-`password='...'`) as a whole.
+`password='...'`) as a whole. Secret keys are also recognized when the key
+itself is quoted, as in JSON or dict-style text (`"password":"..."`,
+`"api_key" : "..."`, `'token':'...'`, or `\"token\":\"...\"` inside an escaped
+JSON string): the quoted value is redacted and the other, non-secret fields of
+the object stay readable. An escaped value inside such a string
+(`\"token\":\"a b\"`) is redacted up to its matching escaped closing quote,
+spaces and escaped characters (including an escaped quote inside the value)
+included; an unterminated one redacts the rest of the message. A backslash
+escapes any character inside a secret value, a newline included, so an escaped
+line break does not end the redaction early.
 
 The built-in `/privacy` page is a deployment-neutral disclosure for the
 first-party admin session cookie and routine Packmon audit/scan metadata. It is
@@ -910,15 +919,21 @@ Local SQLite sync:
 - resolves synced reputation rows through explicit reputation lookup methods,
   not through malicious-package lookup methods;
 - drops local affected rows of a changed vulnerability only on a delta sync
-  with a stored `since` whose response is a single page (not truncated)
-  carrying `vulnerability_affected_complete`, only for rows in the requested
-  ecosystems, and only in that page's transaction. The server sets the flag
-  only on such single-page deltas, never on full exports or on any page of a
-  multi-page delta, whose separate statements can deliver an advisory changed
-  between pages incompletely. The replacement therefore never runs for full
-  syncs (which clear and reload the local tables), syncs without `since`,
-  multi-page deltas, failed sequences, or older servers, so none of them can
-  remove a still-valid local finding;
+  page with a stored `since` that carries `vulnerability_affected_complete`,
+  only for vulnerabilities that page delivered, only for rows in the requested
+  ecosystems, and only in that page's transaction. The server sets the flag on
+  a delta page only when the page is one statement that carries every
+  vulnerability on it with its complete current affected set: it pages a delta
+  by whole advisories and never splits an advisory across pages, so an
+  advisory changed between pages is either delivered whole on a later page or
+  by the next sync, or excluded whole, and never arrives partially. Full exports and the
+  legacy row-cursor and offset pages of a delta, which can split an advisory,
+  are never flagged; older servers flag only a delta that fits in one page.
+  The replacement therefore never runs for full syncs (which clear and reload
+  the local tables), syncs without `since`, unflagged pages, or older servers'
+  multi-page deltas. A failed sequence keeps only the replacements of its
+  committed pages, which match what the server listed, and does not advance
+  the `since` window, so no sync can remove a still-valid local finding;
 - refuses to mark the local database fresh from a server `synced_at` timestamp
   that is beyond the allowed future clock-skew tolerance;
 - rejects semantically empty full-sync snapshots before clearing local finding

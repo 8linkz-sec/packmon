@@ -14,6 +14,23 @@ const (
 	unmatchedRoute   = "(unmatched-route)"
 )
 
+// redactedKeyNames lists the case-insensitive key names whose assigned values
+// are redacted from diagnostic text.
+const redactedKeyNames = `api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|password|passwd|pwd|credential|token|secret|sig|signature|x-amz-signature`
+
+// escapedQuotedValue matches a string value of JSON embedded in a JSON string,
+// whose quotes are backslash-escaped (\"a b\"), for the quote character q. The
+// value runs to the matching escaped closing quote: an escaped backslash
+// (\\) escapes the next character of the embedded value, so \\\" is an
+// escaped quote inside the value and does not end it, and any other escape
+// (\n) or plain character, spaces included, belongs to the value. An
+// unterminated value redacts the rest of the message, also when the message
+// is cut off after any number of trailing backslashes. RE2 matches it in
+// linear time.
+func escapedQuotedValue(q string) string {
+	return `\\` + q + `(?:\\\\(?:\\(?s:.)|[^\\])|\\[^` + q + `\\]|[^\\])*(?:\\` + q + `|\\*$)`
+}
+
 var (
 	// Database driver errors can echo the PostgreSQL connection URL, whose
 	// userinfo carries the database password.
@@ -24,10 +41,23 @@ var (
 	// (libpq key/value DSNs quote values with spaces), backslash escapes, and
 	// plain characters, so text after a closing quote ("ab"cd) or an escaped
 	// space (foo\ bar) is redacted with it. An unterminated quote redacts the
-	// rest of the message.
-	secretAssignmentPattern = regexp.MustCompile(`(?i)\b(api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|password|passwd|pwd|credential|token|secret|sig|signature|x-amz-signature)(\s*[:=]\s*)((?:'(?:[^'\\]|\\.)*(?:'|$)|"(?:[^"\\]|\\.)*(?:"|$)|\\.|[^\s;&\\])+)`)
-	windowsPathPattern      = regexp.MustCompile(`(?i)\b[A-Z]:\\(?:[^\\\s]+\\){2,}[^\\\s]+`)
-	unixPathPattern         = regexp.MustCompile(`(^|[\s=:])/(?:[^/\s]+/){2,}[^/\s]+`)
+	// rest of the message. A backslash escapes any character, a newline
+	// included.
+	secretAssignmentPattern = regexp.MustCompile(`(?i)\b(` + redactedKeyNames + `)(\s*[:=]\s*)((?:'(?:[^'\\]|\\(?s:.))*(?:'|$)|"(?:[^"\\]|\\(?s:.))*(?:"|$)|\\(?s:.)|[^\s;&\\])+)`)
+	// JSON- and dict-style text quotes the key ("password": "x", 'token':'x',
+	// or \"token\":\"x\" inside an escaped JSON string), optionally with
+	// whitespace around ':' or '='. The value is one quoted string (a
+	// backslash escapes any character; an unterminated quote redacts the rest
+	// of the message), one escaped quoted string (see escapedQuotedValue), or
+	// an unquoted scalar that ends at whitespace or a JSON delimiter, so the
+	// neighbouring non-secret fields of an object stay readable. It runs
+	// before secretAssignmentPattern, which does not match a key followed by a
+	// quote.
+	quotedKeySecretPattern = regexp.MustCompile(`(?i)(\\?["'])(` + redactedKeyNames + `)(\\?["']\s*[:=]\s*)(` +
+		escapedQuotedValue(`"`) + `|` + escapedQuotedValue(`'`) +
+		`|"(?:[^"\\]|\\(?s:.))*(?:"|$)|'(?:[^'\\]|\\(?s:.))*(?:'|$)|(?:\\(?s:.)|[^\s,;&}\]\\])+)`)
+	windowsPathPattern = regexp.MustCompile(`(?i)\b[A-Z]:\\(?:[^\\\s]+\\){2,}[^\\\s]+`)
+	unixPathPattern    = regexp.MustCompile(`(^|[\s=:])/(?:[^/\s]+/){2,}[^/\s]+`)
 )
 
 // RedactURL returns a display-safe URL that keeps only scheme, host, and a
@@ -99,6 +129,7 @@ func RedactDiagnosticMessage(raw string) string {
 
 	msg = httpURLPattern.ReplaceAllStringFunc(msg, redactURLInMessage)
 	msg = bearerTokenPattern.ReplaceAllString(msg, "Bearer [redacted]")
+	msg = quotedKeySecretPattern.ReplaceAllString(msg, "$1$2$3[redacted]")
 	msg = secretAssignmentPattern.ReplaceAllString(msg, "$1$2[redacted]")
 	msg = windowsPathPattern.ReplaceAllString(msg, "(redacted-path)")
 	msg = unixPathPattern.ReplaceAllString(msg, "${1}(redacted-path)")

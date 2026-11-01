@@ -138,9 +138,14 @@ func TestOpenAPIIncludesCanonicalScanAndSyncFields(t *testing.T) {
 		t.Fatalf("SyncResponse.vulnerability_affected_complete type = %#v, want boolean", got)
 	}
 	affectedCompleteDescription, _ := affectedComplete["description"].(string)
-	for _, want := range []string{"since window", "single page", "all of its current affected", "multi-page delta omit", "compatible"} {
+	for _, want := range []string{"since window", "this page", "every page of a multi-page delta", "whole advisories", "all of its current affected", "legacy", "compatible"} {
 		if !strings.Contains(affectedCompleteDescription, want) {
 			t.Fatalf("SyncResponse.vulnerability_affected_complete description missing %q: %q", want, affectedCompleteDescription)
+		}
+	}
+	for _, stale := range []string{"single page (not truncated", "planned follow-up"} {
+		if strings.Contains(affectedCompleteDescription, stale) {
+			t.Fatalf("SyncResponse.vulnerability_affected_complete description keeps the single-page-only wording %q: %q", stale, affectedCompleteDescription)
 		}
 	}
 	if fieldTag, ok := reflect.TypeOf(synccontract.Response{}).FieldByName("VulnerabilityAffectedComplete"); !ok || fieldTag.Tag.Get("json") != "vulnerability_affected_complete,omitempty" {
@@ -154,6 +159,19 @@ func TestOpenAPIIncludesCanonicalScanAndSyncFields(t *testing.T) {
 	}
 	if got := requireInt(t, limitSchema, "maximum"); got != synccontract.MaxLimit {
 		t.Fatalf("/api/v1/sync limit maximum = %d, want %d", got, synccontract.MaxLimit)
+	}
+	limitDescription, _ := limit["description"].(string)
+	for _, want := range []string{"whole advisories", "more affected rows than the limit"} {
+		if !strings.Contains(limitDescription, want) {
+			t.Fatalf("/api/v1/sync limit description missing %q: %q", want, limitDescription)
+		}
+	}
+	vulnerabilitiesCursorParameter := requireOperationParameter(t, syncOperation, "vulnerabilities_cursor", "query")
+	vulnerabilitiesCursorDescription, _ := vulnerabilitiesCursorParameter["description"].(string)
+	for _, want := range []string{"advisory cursor", "since", "legacy row cursor"} {
+		if !strings.Contains(vulnerabilitiesCursorDescription, want) {
+			t.Fatalf("/api/v1/sync vulnerabilities_cursor description missing %q: %q", want, vulnerabilitiesCursorDescription)
+		}
 	}
 	for _, name := range []string{"offset", "vulnerabilities_offset", "malicious_offset", "reputation_offset", "lifecycle_offset"} {
 		parameter := requireOperationParameter(t, syncOperation, name, "query")
