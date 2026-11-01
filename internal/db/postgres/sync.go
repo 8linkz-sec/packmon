@@ -124,9 +124,9 @@ func syncVulnerabilityPagingFor(opts db.SyncExportOptions) syncVulnerabilityPagi
 // of its current affected packages. A vulnerability changed between pages is
 // either delivered whole on a later page or sync, or excluded whole by the
 // snapshot bound. A full export bounds affected rows by the snapshot
-// timestamp, and the legacy row-cursor and offset pages of a delta can split an advisory, so
-// they never carry the flag, and neither do the pages that continue a split
-// advisory (syncVulnerabilityAdvisorySplit).
+// timestamp, and the legacy row-cursor and offset pages of a delta can split
+// an advisory, so they never carry the flag, and neither do the pages that
+// continue a split advisory (syncVulnerabilityAdvisorySplit).
 func syncVulnerabilityAffectedComplete(opts db.SyncExportOptions, cursor db.SyncCursor) bool {
 	return !cursor.VulnerabilitiesDone && syncVulnerabilityPagingFor(syncOptionsWithOffset(opts, cursor.Vulnerabilities)) == syncVulnerabilityAdvisoryPages
 }
@@ -880,11 +880,10 @@ func buildSyncSplitAdvisoryUnchangedQuery(id string, snapshot time.Time, snapsho
 // delivers it once more, a delta's snapshot bound defers it to the next delta
 // (whose since_xid window covers it), and the split completeness check fails,
 // so none of them skips the row. The window is used only while it is at most
-// 2^31 - 1
-// transactions wide (PostgreSQL never lets a live transaction ID age past
-// 2^31); a watermark older than that, or one from the future (a forged value
-// or a server restored from a backup), makes both conditions true for every
-// row, which errs toward delivering rows, never toward skipping them.
+// 2^31 - 1 transactions wide (PostgreSQL never lets a live transaction ID age
+// past 2^31); a watermark older than that, or one from the future (a forged
+// value or a server restored from a backup), makes both conditions true for
+// every row, which errs toward delivering rows, never toward skipping them.
 
 // syncXIDDistanceSQL returns the distance, modulo 2^32, from the low 32 bits
 // of the 64-bit transaction ID watermark in arg to the 32-bit transaction ID
