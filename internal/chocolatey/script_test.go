@@ -28,7 +28,7 @@ func TestParseChocoInstallLineEdgeCases(t *testing.T) {
 		{"stderr redirect", `choco install 7zip 2> err.log`, []string{"7zip@"}},
 		{"powershell all-stream redirect", `choco install 7zip *> $null`, []string{"7zip@"}},
 		{"batch nul redirect", `choco install 7zip >nul 2>&1`, []string{"7zip@"}},
-		{"redirect before id", `choco install > out.log 7zip`, nil},
+		{"redirect before id", `choco install > out.log 7zip`, []string{"7zip@"}},
 		// placeholders and variables
 		{"angle placeholder", `choco install -y <package_name>`, nil},
 		{"variable version is unpinned", `choco install 7zip --version $ver`, []string{"7zip@"}},

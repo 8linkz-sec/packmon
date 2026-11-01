@@ -1365,8 +1365,17 @@ func (h *Handler) handleRefresh(w http.ResponseWriter, r *http.Request, ecosyste
 	}
 
 	correlationID := requestCorrelationID(r)
-	// Body is optional. If present, it must be an empty JSON object.
-	if r.Body != nil && r.ContentLength != 0 {
+	// Body is optional. If present, it must be an empty JSON object. Whether a
+	// body is present is decided by reading it, not by ContentLength: a chunked
+	// request reports -1 even when it carries no bytes, and that is still an
+	// absent body.
+	present, err := refreshBodyPresent(r)
+	if err != nil {
+		h.logger.Warn("invalid refresh request body", "error", err, "correlation_id", correlationID)
+		errorResponseForRequest(w, r, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+	if present {
 		if err := requireJSONContentType(r); err != nil {
 			h.logger.Warn("invalid refresh request content type", "error", err, "correlation_id", correlationID)
 			errorResponseForRequest(w, r, http.StatusUnsupportedMediaType, err.Error())
@@ -1686,6 +1695,27 @@ func requireJSONContentType(r *http.Request) error {
 		return fmt.Errorf("Content-Type must be application/json")
 	}
 	return nil
+}
+
+// refreshBodyPresent reports whether r carries at least one body byte. It reads
+// that byte and puts it back in front of the remaining body, so the strict JSON
+// decoding (and its size limit) still sees the whole body.
+func refreshBodyPresent(r *http.Request) (bool, error) {
+	if r.Body == nil || r.Body == http.NoBody {
+		return false, nil
+	}
+	var first [1]byte
+	if _, err := io.ReadFull(r.Body, first[:]); err != nil {
+		if errors.Is(err, io.EOF) {
+			return false, nil
+		}
+		return false, sanitizedJSONDecodeError(err, maxRequestBody)
+	}
+	r.Body = struct {
+		io.Reader
+		io.Closer
+	}{io.MultiReader(bytes.NewReader(first[:]), r.Body), r.Body}
+	return true, nil
 }
 
 // readJSON decodes the request body into v with the standard API size limit.

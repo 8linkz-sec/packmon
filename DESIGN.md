@@ -661,14 +661,30 @@ Important behavior:
   installs latest) show INSTALLED `-`, the feed's latest version, UPDATE
   `unpinned`, and the `unpinned` flag, and are never counted as available
   updates. A script `choco` verb counts only in command position (line start,
-  after an unquoted command separator or redirection, or after `call` /
-  `sudo`). In `.ps1` / `.psm1` files the separators are `;`, `|`, `&`, `(`,
-  `)`, `{`, `}`, redirection, and `=`; in `.bat` / `.cmd` files they are only
-  the cmd.exe separators `&`, `&&`, `||`, `|`, the block parentheses `(` /
-  `)`, and redirection, while `;`, `{`, `}`, and `=` are ordinary argument
-  text. Quoted (and in batch files caret-escaped) text is always an argument,
-  so a quoted `';'` or `"&"` neither starts a new command nor ends the
-  package list. A `--version=value` pin has surrounding double quotes
+  after an unquoted command separator, or after `call` / `sudo`). In `.ps1` /
+  `.psm1` files the separators are `;`, `|`, `&`, `(`, `)`, `{`, `}`, and
+  `=`, so the bodies of `if (...) { ... }`, `foreach (...) { ... }`,
+  `try { ... }` and similar blocks are in command position; in `.bat` /
+  `.cmd` files they are only the cmd.exe separators `&`, `&&`, `||`, `|` and
+  the block parentheses `(` / `)`, while `;`, `{`, `}`, and `=` are ordinary
+  argument text. Batch files also hand command position on after a
+  `for ... in (...) do` header (the loop set is data, not commands), after
+  the condition of `if` (`exist`, `defined`, `errorlevel`, `cmdextversion`
+  with their operand, a `==` or `EQU` / `NEQ` / `LSS` / `LEQ` / `GTR` / `GEQ`
+  comparison, each optionally with `/i` and `not`), and after an `else` or
+  `do` that follows a closing parenthesis. A redirection (`>`, `>>`, `<`,
+  `2>`, `2>>`, `*>`, `2>&1`, `1>&2`, `>nul`, `>$null`, quoted targets) is
+  removed together with its target wherever it stands, as both shells do: it
+  neither ends the package list nor starts a command, and its target is never
+  a package ID, so `>nul choco install a` and `choco install a >nul b` report
+  `a` (and `b`). Quoted (and in batch files caret-escaped) text is always an
+  argument, so a quoted `';'` or `"&"` neither starts a new command nor ends
+  the package list. A batch `%name%` expansion and a PowerShell `${name}`
+  variable are one word, so `%ProgramFiles(x86)%` does not split a command
+  at its parentheses. Variables are never resolved: a `for` loop variable or
+  `$p` names no package, and delayed `!name!` expansion, backtick escapes
+  inside a PowerShell line, and choco.exe's backslash-quote rules are not
+  modeled. A `--version=value` pin has surrounding double quotes
   stripped in both languages and surrounding single quotes stripped only in
   PowerShell: cmd.exe passes single quotes to choco.exe unchanged, so a batch
   `--version='1.0'` is not a version literal and the entry is unpinned. Script
@@ -680,7 +696,9 @@ Important behavior:
   escaping: only double quotes group (a single quote is ordinary text), a
   caret inside double quotes is literal, an unquoted caret makes the next
   character literal (`^&`, `^|`, `^<`, `^>`, and `^"` are argument text, `^^`
-  is a literal caret, and an escaped space still separates arguments), and
+  is a literal caret, and an escaped space still separates arguments; a `^"`
+  opens no cmd.exe quote, so `&` and `|` still separate after it, but it
+  groups words for choco.exe, so `--params ^"/x y^"` is one argument), and
   only an unquoted, unescaped caret that is the last character of the line
   continues it; the next line is appended without a space and its first
   character is escaped. Batch files skip `REM` / `@REM` and `::` comment
@@ -757,7 +775,10 @@ consistent `admin_auth` then `admin_audit_log` lock order. Destructive refresh-q
 clear/purge actions preserve a bounded sample of deleted job identities in
 audit details from the delete operation, including job ID, package coordinate,
 source, priority, prior status, timestamps, redacted bounded error text,
-`total_deleted`, `sample_count`, and `truncated`. PostgreSQL exposes the
+`total_deleted`, `sample_count`, and `truncated`. The per-job `requested_at`
+and `processed_at` values are RFC 3339 UTC timestamps; a job without one (for
+example a job that was never processed) omits the key instead of storing an
+empty string. PostgreSQL exposes the
 scan package/finding totals through the `scan_log_totals` view (migration
 043), which sums the retained `scan_log` rows on read; there is no separately
 maintained rollup, so `InsertScanLog` writes only the `scan_log` row and
@@ -797,6 +818,30 @@ are unchanged, and affected-package rows are merged per advisory instead of
 being wholesale-replaced on every source import. Local sync clients can
 therefore use `updated_at` as a meaningful delta boundary across repeated feed
 imports and overlapping advisory sources.
+
+Stored OSV version ranges (`affected_packages.version_ranges` and the optional
+`malicious_findings.version_ranges`) are a JSON array of range objects. Each
+range needs a nonempty `events` array of event objects, and each event needs at
+least one nonblank string among `introduced`, `fixed`, `last_affected`, and
+`limit`; the other boundary keys may be absent, `null`, or blank strings. A
+range `type`, when present, must be a string or `null` (the range matcher reads
+it as a string; the database check does not test it), and other keys such as
+`repo` are ignored. Keys match exactly (lowercase). `[]`
+stays valid and means "no range data", which matches every version unless
+exact versions are listed (fail-safe). One shared rule
+(`version.CheckRangesShape`) is applied by the feed import endpoint, which
+rejects a violating import with a `400` naming the failing field, and by the
+store before every write; PostgreSQL enforces the same rule through the
+`packmon_jsonb_version_ranges_valid` CHECK constraints (tightened in migration
+050). Migration 050 repaired older rows that only passed the earlier
+key-presence check without widening malicious findings: affected-package
+ranges fell back to `[]`; a malicious finding with nonempty exact `versions`
+kept those and lost only its ranges; an active malicious finding without exact
+versions was quarantined with the normal `removed_at` tombstone instead of
+becoming an all-version blocking finding. Every repaired row is listed with its
+original value in `packmon_m050_version_range_repairs`. Rolling 050 back
+restores only rows unchanged since the repair (`updated_at` still equal to the
+logged `repaired_at`); rows changed since the repair keep their current state.
 
 Malicious findings are separate entities with stable IDs, package identity,
 source, risk type, severity, optional OSV version ranges, optional exact
@@ -946,7 +991,19 @@ optional status `last_sync_duration_ms` is bounded to 0 through 9223372036854
 ms, the largest value that converts to a Go `time.Duration`; larger values are
 rejected with `400`. Malicious feed imports cannot persist malformed
 exact-version JSON; invalid rows fail the transaction instead of becoming
-all-version blocking findings.
+all-version blocking findings. Values that pass the request validation but
+that the store itself rejects -- its own record checks, a CHECK constraint
+(SQLSTATE 23514), or one of the PostgreSQL value errors 22001 (too long),
+22003 (numeric out of range, including a `real` underflow), 22007/22008
+(datetime format/overflow), 22021 (a NUL byte in text), 22P02 (invalid text
+representation) or 22P05 (a `\u0000` escape in `jsonb`) -- are a client error
+as well: every import path (vulnerability,
+malicious, VulnCheck, CISA KEV, EPSS, buffered or streamed) answers `400` with
+the fixed message "feed import contains values the store cannot accept",
+records a `rejected` feed status, and commits nothing. The store's detailed
+error goes only to the server log. Store outages and all other database
+errors, including the remaining class 22 data exceptions, stay `500` and are
+logged at error level.
 Feed import strictness must be visible to operators and server/agent users.
 Rejected imports must expose bounded diagnostics for feed name, rejected record
 count, rejection reason classes, correlation ID, client/API-key attribution when
