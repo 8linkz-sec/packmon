@@ -201,23 +201,38 @@ func TestParseScriptBatchParenthesesFollowBlockDepth(t *testing.T) {
 // headers: a single logical line near the 1 MiB size bound that repeats one of
 // these constructs without ever closing it must finish quickly in both
 // dialects instead of rescanning the rest of the line for every repetition.
-// The same holds for batch block parentheses, opened or left as text. A linear
-// parse of one such line takes a few seconds at most, even under -race with
-// every subtest running in parallel; a quadratic one takes hours, so
-// linearParseDeadline leaves ample room for a loaded machine and still fails
-// such a regression instead of hanging until the test binary's own timeout.
+// The same holds for batch block parentheses, opened or left as text, and for
+// a batch `if` whose long operand is followed by many caret-escaped blanks:
+// the tokenizer asks at every escaped blank whether the condition is complete
+// and must not rescan the operand to answer. A linear parse of one such line
+// takes a few seconds at most, even under -race with every subtest running in
+// parallel; a quadratic one takes minutes to hours, so linearParseDeadline
+// leaves ample room for a loaded machine and still fails such a regression
+// instead of hanging until the test binary's own timeout.
 func TestParseScriptLongShellSyntaxIsLinear(t *testing.T) {
 	t.Parallel()
 
 	const linearParseDeadline = 2 * time.Minute
-	units := []string{
+	scripts := map[string]string{}
+	for _, unit := range []string{
 		"%a ", "%", "${", "${ x", "for ", "if ", "if not ", "> ", ">", "2>&", "^\"a ", "do ", ") do ", "\"a==\" ",
-		"(", ")", "( ", ") ", "(a ", "a) ", "if exist x (", ") else (", "@(", "for %%i in (", "^\"(a ", ">x(", "if a^ ", "if exist a^ b (",
+		"(", ")", "( ", ") ", "(a ", "a) ", "if exist x (", ") else (", "@(", "for %%i in (", "^\"(a ", ">x(",
+	} {
+		scripts[unit] = "choco install a " + strings.Repeat(unit, 1<<20/len(unit))
 	}
-	for _, unit := range units {
-		t.Run(unit, func(t *testing.T) {
+	// The `if` stands in command position here, so its condition stays open
+	// across all the escaped blanks that follow the long operand. Splitting
+	// the 1 MiB bound evenly between both maximizes the work of a parser that
+	// rescans the operand at every escaped blank.
+	operand := strings.Repeat("a", 1<<19)
+	escapedBlanks := strings.Repeat("x^ ", (1<<20-len(operand))/len("x^ "))
+	scripts["if operand then escaped blanks"] = "if " + operand + " " + escapedBlanks
+	scripts["if comparison then escaped blanks"] = "if " + operand + " == " + escapedBlanks
+	scripts["if case-insensitive not operand then escaped blanks"] = "if /i not " + operand + " " + escapedBlanks
+	for name, body := range scripts {
+		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			script := "choco install a " + strings.Repeat(unit, 1<<20/len(unit)) + "\r\n"
+			script := body + "\r\n"
 			for _, kind := range []Kind{KindPowerShellScript, KindBatchScript} {
 				done := make(chan error, 1)
 				go func() {

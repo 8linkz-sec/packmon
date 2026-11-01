@@ -417,8 +417,13 @@ type commandTracker struct {
 	forHeader bool
 	forSet    bool
 	// ifStart is the index of the batch `if` whose condition is being read,
-	// else -1.
-	ifStart int
+	// else -1. ifComplete caches whether that condition has all its words
+	// after the tokens consumed so far, as batchIfCommandStart reports it. It
+	// is computed once per consumed token, never per character, because the
+	// tokenizer asks for it at every `(` and escaped blank and rescanning a
+	// long operand each time would make a line quadratic.
+	ifStart    int
+	ifComplete bool
 }
 
 func newCommandTracker(batch bool) commandTracker {
@@ -445,15 +450,16 @@ func (c *commandTracker) next(tokens []scriptToken, i int) bool {
 	}
 	if token.isSeparator() {
 		c.command = true
-		c.ifStart = -1
+		c.ifStart, c.ifComplete = -1, false
 		return false
 	}
 	if c.ifStart >= 0 {
-		if end, _ := batchIfCommandStart(tokens[:i+1], c.ifStart); end > i {
+		if end, complete := batchIfCommandStart(tokens[:i+1], c.ifStart); end > i {
+			c.ifComplete = complete
 			return false
 		}
 		// tokens[i] is the command the `if` runs.
-		c.ifStart = -1
+		c.ifStart, c.ifComplete = -1, false
 	}
 	if !c.command {
 		return false
@@ -470,7 +476,8 @@ func (c *commandTracker) next(tokens []scriptToken, i int) bool {
 			c.forHeader, c.forSet = true, false
 			return false
 		case word == "if":
-			c.ifStart = i
+			// A bare `if` has no condition words yet.
+			c.ifStart, c.ifComplete = i, false
 			return false
 		}
 	}
@@ -478,31 +485,26 @@ func (c *commandTracker) next(tokens []scriptToken, i int) bool {
 	return true
 }
 
-// opensBlock reports whether a batch `(` that starts a word right after
-// tokens, which the tracker has consumed, opens a block: cmd.exe reads it so
+// opensBlock reports whether a batch `(` that starts a word right after the
+// tokens the tracker has consumed opens a block: cmd.exe reads it so
 // only where the next command starts (after an `if` condition that is
 // complete) or as the set of a `for` header. Anywhere else it is argument
 // text, so `echo Installing (x86)` and `if (%1)==()` open nothing.
-func (c *commandTracker) opensBlock(tokens []scriptToken) bool {
+func (c *commandTracker) opensBlock() bool {
 	switch {
 	case c.forHeader:
 		return !c.forSet
 	case c.ifStart >= 0:
-		_, complete := batchIfCommandStart(tokens, c.ifStart)
-		return complete
+		return c.ifComplete
 	}
 	return c.command
 }
 
-// readsIfCondition reports whether the word that follows tokens, which the
-// tracker has consumed, still belongs to the condition of a batch `if`,
+// readsIfCondition reports whether the word that follows the tokens the
+// tracker has consumed still belongs to the condition of a batch `if`,
 // because the condition is not complete yet.
-func (c *commandTracker) readsIfCondition(tokens []scriptToken) bool {
-	if c.ifStart < 0 {
-		return false
-	}
-	_, complete := batchIfCommandStart(tokens, c.ifStart)
-	return !complete
+func (c *commandTracker) readsIfCondition() bool {
+	return c.ifStart >= 0 && !c.ifComplete
 }
 
 // parseChocoTokens walks a tokenized logical line and extracts package IDs
@@ -871,7 +873,7 @@ func tokenizeBatch(line string, depth *int) []scriptToken {
 			case next == '"':
 				argQuote = !argQuote
 				quoted = true
-			case isBlank(next) && !argQuote && !tracker.readsIfCondition(tokens):
+			case isBlank(next) && !argQuote && !tracker.readsIfCondition():
 				flush(i - 1)
 			default:
 				current.WriteByte(next)
@@ -895,7 +897,7 @@ func tokenizeBatch(line string, depth *int) []scriptToken {
 		case ch == '(' && start >= 0 && !quoted && opensAfterWord(current.String(), tokens, &tracker):
 			flush(i)
 			fallthrough
-		case ch == '(' && start < 0 && tracker.opensBlock(tokens), ch == ')' && *depth > 0:
+		case ch == '(' && start < 0 && tracker.opensBlock(), ch == ')' && *depth > 0:
 			flush(i)
 			argQuote = false
 			if ch == '(' {
@@ -929,7 +931,7 @@ func opensAfterWord(word string, tokens []scriptToken, tracker *commandTracker) 
 	afterParen := len(tokens) > 0 && tokens[len(tokens)-1].isSeparator() && tokens[len(tokens)-1].text == ")"
 	switch {
 	case word == "@":
-		return tracker.opensBlock(tokens)
+		return tracker.opensBlock()
 	case strings.EqualFold(word, "do"):
 		return afterParen
 	case strings.EqualFold(word, "else"):
