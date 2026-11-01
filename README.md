@@ -883,13 +883,21 @@ with a trailing backtick and skip `#` comments, `<# ... #>` block comments, and
 here-strings (a backtick inside a comment does not continue the line);
 `.bat` / `.cmd` files follow cmd.exe rules: only double quotes group text
 (a single-quoted `--version='1.0'` stays unpinned), a caret escapes the next
-character outside double quotes (`^&` is an argument, `^^` a literal caret), a
-caret that is the last character of the line (not inside double quotes, not
-escaped, no trailing spaces) continues it, only `&`, `&&`, `||`, `|`,
-parentheses, and redirections separate commands (`;`, `{`, `}`, and `=` are
-ordinary text), and `REM`, `@REM`, and `::` comment lines are skipped. Quoted
-text is always an argument, so a quoted `';'` (PowerShell) or `"&"` neither
-starts a new command nor ends the package list.
+character outside double quotes (`^&` is an argument, `^^` a literal caret,
+and `^"` groups words for choco.exe without hiding a later `&`), a caret that
+is the last character of the line (not inside double quotes, not escaped, no
+trailing spaces) continues it, only `&`, `&&`, `||`, `|`, and parentheses
+separate commands (`;`, `{`, `}`, and `=` are ordinary text), `choco` is
+recognized after `for ... in (...) do`, after an `if` condition (`exist`,
+`defined`, `errorlevel`, `==` and `EQU`-style comparisons, with `/i` and
+`not`), and after `else`, a `%name%` expansion such as `%ProgramFiles(x86)%`
+is one word, and `REM`, `@REM`, and `::` comment lines are skipped. In both
+languages a redirection (`>nul`, `2>&1`, `*> $null`, `> "out file.log"`, ...)
+is removed with its target wherever it stands, so `>nul choco install a` and
+`choco install a >nul b` report every package choco would install and never
+the redirect target. Quoted text is always an argument, so a quoted `';'`
+(PowerShell) or `"&"` neither starts a new command nor ends the package list.
+Variables are not resolved, so `for` loop variables and `$p` name no package.
 Pinned `--version` entries are compared
 with the feed's latest release; unpinned entries (config.xml always installs
 latest) show `INSTALLED -`, the feed's latest version, and status `unpinned`
