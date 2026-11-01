@@ -1148,21 +1148,28 @@ server's snapshot timestamp and transaction watermark
 (`txid_snapshot_xmin`, a 64-bit, epoch-extended PostgreSQL transaction ID).
 The first page of a sequence pins them, the client echoes them as `snapshot`
 and `snapshot_xid` on later pages, and a completed sequence stores them as the
-`since` and `since_xid` of the next delta. Every page exports only row
+`since` and `since_xid` of the next delta. A delta page exports only row
 versions written before the pinned snapshot, by `updated_at` and by
-transaction ID, and a delta selects rows changed at or after `since` or at or
-after `since_xid`. The transaction ID leg catches a transaction that started
-before a snapshot (so its `updated_at` predates it) and committed after it:
-the snapshot bound excludes its rows, and the next delta delivers them. A
-row's `xmin` is a 32-bit transaction ID, so the server compares it with the
-64-bit watermarks modulo 2^32, within the window from the watermark up to the
-statement's next transaction ID, which stays correct past the first
-transaction ID epoch (about 4 billion transactions). A frozen or ancient
-`xmin` that aliases into such a window is at worst delivered once more. A
-`since_xid` more than 2^31 transactions old or ahead of the server's counter
-(for example after a database restore) makes the delta resend every row of
-each dataset within the snapshot, and a `snapshot_xid` outside that range
-excludes nothing, so neither ever skips a row.
+transaction ID, and selects rows changed at or after `since` or at or after
+`since_xid`. The transaction ID leg catches a transaction that started before
+a snapshot (so its `updated_at` predates it) and committed after it: the
+delta's snapshot bound excludes its rows, and the next delta delivers them. A
+full export (no `since`) is bounded by `updated_at` only and carries no
+transaction ID bound, so it may also deliver rows of a transaction still in
+flight at the snapshot; the next delta delivers them again, and local upserts
+are idempotent. A row's `xmin` is a 32-bit transaction ID, so the server
+compares it with the 64-bit watermarks modulo 2^32, within the window from the
+watermark up to the statement's next transaction ID, which stays correct past
+the first transaction ID epoch (about 4 billion transactions). A frozen or
+ancient `xmin` can alias into such a window: the `since_xid` leg then delivers
+the row once more, a delta's snapshot bound defers it to the next delta (whose
+`since_xid` window covers it), and a full export, which has no transaction ID
+bound, never excludes it, so a one-shot full sync that never runs a delta
+still receives every row. A `since_xid` more than 2^31 transactions old or
+ahead of the server's counter (for example after a database restore) makes the
+delta resend every row of each dataset within the snapshot, and a
+`snapshot_xid` outside that range excludes nothing, so neither ever skips a
+row.
 Local vulnerability rows are keyed by advisory, ecosystem, and package name, so
 a delta sync must also remove packages an advisory no longer affects. A delta
 `GET /api/v1/sync` exports every changed vulnerability with all of its current

@@ -123,8 +123,8 @@ func syncVulnerabilityPagingFor(opts db.SyncExportOptions) syncVulnerabilityPagi
 // an advisory, and the delta query sends each changed vulnerability with all
 // of its current affected packages. A vulnerability changed between pages is
 // either delivered whole on a later page or sync, or excluded whole by the
-// snapshot bound. A full export bounds affected rows by the snapshot, and the
-// legacy row-cursor and offset pages of a delta can split an advisory, so
+// snapshot bound. A full export bounds affected rows by the snapshot
+// timestamp, and the legacy row-cursor and offset pages of a delta can split an advisory, so
 // they never carry the flag, and neither do the pages that continue a split
 // advisory (syncVulnerabilityAdvisorySplit).
 func syncVulnerabilityAffectedComplete(opts db.SyncExportOptions, cursor db.SyncCursor) bool {
@@ -432,18 +432,20 @@ func decodeSyncCursorKey(raw string, wantParts int) ([]string, error) {
 	return values, nil
 }
 
-// addSyncWindowFilters bounds a row-paged dataset by the snapshot and, on a
-// delta, by the since window: the row's transaction ID column (xmin) must
-// predate the snapshot ID, and a delta row must have changed at or after the
+// addSyncWindowFilters bounds a delta of a row-paged dataset by the snapshot
+// transaction ID and the since window: the row's transaction ID column (xmin)
+// must predate the snapshot ID, and the row must have changed at or after the
 // since timestamp or the since transaction ID (see syncXIDBeforeSQL and
-// syncXIDAtOrAfterSQL for the epoch-safe comparisons).
+// syncXIDAtOrAfterSQL for the epoch-safe comparisons). A full export gets
+// neither; the caller bounds it by the snapshot timestamp only (see
+// syncXIDBeforeSQL for why it carries no transaction ID bound).
 func addSyncWindowFilters(query *string, args *[]any, opts db.SyncExportOptions, snapshotXID uint64, updatedExpr, xidColumn string) {
+	if opts.Since == nil {
+		return
+	}
 	if snapshotXID > 0 {
 		*query += ` AND ` + syncXIDBeforeSQL(xidColumn, fmt.Sprintf("$%d", len(*args)+1))
 		*args = append(*args, strconv.FormatUint(snapshotXID, 10))
-	}
-	if opts.Since == nil {
-		return
 	}
 
 	since := opts.Since.UTC()
@@ -463,15 +465,19 @@ type syncVulnerabilityQueryArgs struct {
 	snapshotXIDArg int
 }
 
+// newSyncVulnerabilityQueryArgs binds the snapshot timestamp and, for a
+// delta, the since window and the snapshot transaction ID. A full export binds
+// no transaction ID (see syncXIDBeforeSQL).
 func newSyncVulnerabilityQueryArgs(opts db.SyncExportOptions, snapshot time.Time, snapshotXID uint64) syncVulnerabilityQueryArgs {
 	queryArgs := syncVulnerabilityQueryArgs{
 		args: []any{snapshot},
 	}
-	if opts.Since != nil {
-		queryArgs.sinceArg = queryArgs.appendArg(opts.Since.UTC())
-		if opts.SinceXID > 0 {
-			queryArgs.sinceXIDArg = queryArgs.appendArg(strconv.FormatUint(opts.SinceXID, 10))
-		}
+	if opts.Since == nil {
+		return queryArgs
+	}
+	queryArgs.sinceArg = queryArgs.appendArg(opts.Since.UTC())
+	if opts.SinceXID > 0 {
+		queryArgs.sinceXIDArg = queryArgs.appendArg(strconv.FormatUint(opts.SinceXID, 10))
 	}
 	if snapshotXID > 0 {
 		queryArgs.snapshotXIDArg = queryArgs.appendArg(strconv.FormatUint(snapshotXID, 10))
@@ -536,21 +542,18 @@ func (q syncVulnerabilityQueryArgs) vulnerabilityChangedIDUpperFilter(alias stri
 		  AND ` + syncXIDBeforeSQL(alias+".xmin", fmt.Sprintf("$%d", q.snapshotXIDArg))
 }
 
-// addSnapshotXIDFilters bounds the exported rows by the snapshot watermark
-// (syncXIDBeforeSQL), on the split continuation query as well.
-// A delta bounds only the vulnerability row: the changed-ID CTE already
+// addSnapshotXIDFilters bounds the vulnerability row of a delta by the
+// snapshot watermark (syncXIDBeforeSQL), on the split continuation query as
+// well. Only the vulnerability row is bounded: the changed-ID CTE already
 // applied the snapshot to decide which vulnerabilities changed, and each of
 // them is then exported with its complete current affected set (see
-// exportSyncVulnerabilitiesBaseSQL).
-func (q syncVulnerabilityQueryArgs) addSnapshotXIDFilters(query *string, delta bool) {
+// exportSyncVulnerabilitiesBaseSQL). A full export binds no snapshot
+// transaction ID, so this adds nothing to it (see syncXIDBeforeSQL).
+func (q syncVulnerabilityQueryArgs) addSnapshotXIDFilters(query *string) {
 	if q.snapshotXIDArg == 0 {
 		return
 	}
-	snapshotXID := fmt.Sprintf("$%d", q.snapshotXIDArg)
-	*query += ` AND ` + syncXIDBeforeSQL("v.xmin", snapshotXID)
-	if !delta {
-		*query += ` AND ` + syncXIDBeforeSQL("ap.xmin", snapshotXID)
-	}
+	*query += ` AND ` + syncXIDBeforeSQL("v.xmin", fmt.Sprintf("$%d", q.snapshotXIDArg))
 }
 
 // syncVulnerabilityColumnsSQL is the exported column list of one affected
@@ -590,7 +593,7 @@ func syncVulnerabilityDetailJoinsSQL() string {
 // changed-ID CTE and exports every current affected package of each selected
 // vulnerability, without a per-row snapshot bound. A package changed after
 // the snapshot is sent now and again by the next delta, which is idempotent.
-// The full export keeps the row-level bound.
+// The full export keeps the row-level snapshot timestamp bound.
 func exportSyncVulnerabilitiesBaseSQL(delta bool) string {
 	fromSQL := `FROM vulnerabilities v`
 	affectedBound := `
@@ -630,7 +633,7 @@ func exportSyncVulnerabilitiesBaseSQL(delta bool) string {
 func buildExportSyncVulnerabilityAdvisoryPageQuery(opts db.SyncExportOptions, snapshot time.Time, snapshotXID uint64) (string, []any, error) {
 	queryArgs := newSyncVulnerabilityQueryArgs(opts, snapshot, snapshotXID)
 	candidateFilters := ""
-	queryArgs.addSnapshotXIDFilters(&candidateFilters, true)
+	queryArgs.addSnapshotXIDFilters(&candidateFilters)
 	affectedJoin := `
 		LEFT JOIN affected_packages ap ON ap.vulnerability_id = v.id`
 	if len(opts.Ecosystems) > 0 {
@@ -688,7 +691,7 @@ func buildExportSyncVulnerabilitiesQuery(opts db.SyncExportOptions, snapshot tim
 	}
 	queryArgs := newSyncVulnerabilityQueryArgs(opts, snapshot, snapshotXID)
 	query := queryArgs.changedIDsCTE() + exportSyncVulnerabilitiesBaseSQL(opts.Since != nil)
-	queryArgs.addSnapshotXIDFilters(&query, opts.Since != nil)
+	queryArgs.addSnapshotXIDFilters(&query)
 	if len(opts.Ecosystems) > 0 {
 		query += fmt.Sprintf(` AND ap.ecosystem = ANY($%d)`, len(queryArgs.args)+1)
 		queryArgs.args = append(queryArgs.args, opts.Ecosystems)
@@ -759,7 +762,7 @@ func buildExportSyncSplitAdvisoryQuery(opts db.SyncExportOptions, snapshot time.
 	WHERE v.id = $%d
 	  AND (ap.ecosystem, ap.name) > ($%d, $%d)
 	  AND v.updated_at <= $1`, queryArgs.appendArg(id), queryArgs.appendArg(ecosystem), queryArgs.appendArg(name))
-	queryArgs.addSnapshotXIDFilters(&query, true)
+	queryArgs.addSnapshotXIDFilters(&query)
 	if len(opts.Ecosystems) > 0 {
 		query += fmt.Sprintf(` AND ap.ecosystem = ANY($%d)`, queryArgs.appendArg(opts.Ecosystems))
 	}
@@ -873,10 +876,11 @@ func buildSyncSplitAdvisoryUnchangedQuery(id string, snapshot time.Time, snapsho
 // bits. A frozen tuple keeps its raw, possibly ancient xmin (as do the
 // special IDs 0 to 2), which may alias into the window; the window spans only
 // the transactions since the watermark, so that is rare, and both conditions
-// then treat the row like one written in the window: a delta delivers it once
-// more, the snapshot bound defers it to the next delta (whose since_xid
-// window covers it), and the split completeness check fails, so none of them
-// skips the row. The window is used only while it is at most 2^31 - 1
+// then treat the row like one written in the window: a delta's since leg
+// delivers it once more, a delta's snapshot bound defers it to the next delta
+// (whose since_xid window covers it), and the split completeness check fails,
+// so none of them skips the row. The window is used only while it is at most
+// 2^31 - 1
 // transactions wide (PostgreSQL never lets a live transaction ID age past
 // 2^31); a watermark older than that, or one from the future (a forged value
 // or a server restored from a backup), makes both conditions true for every
@@ -914,9 +918,20 @@ func syncXIDAtOrAfterSQL(column, arg string) string {
 // row is excluded now and matched by syncXIDAtOrAfterSQL with the same
 // watermark on the next delta (whose since_xid is this snapshot ID), so the
 // two never leave a gap. It fails toward true: with an out-of-range window no
-// row is excluded (width 0 never exceeds a distance), because a row
-// delivered beyond the snapshot is only delivered again by the next delta,
-// while a row excluded wrongly would be missed by a full export.
+// row is excluded (width 0 never exceeds a distance), because a row delivered
+// beyond the snapshot is only delivered again by the next delta.
+//
+// Only deltas use it. A full export (no since window) carries no transaction
+// ID bound at all, only updated_at <= snapshot: deferring an aliased frozen
+// row to the next delta is safe only for a client that runs one, while a
+// one-shot full sync (a fresh cache in CI) never does. Without the bound a
+// full export may also deliver row versions of transactions still in flight
+// at the snapshot whose updated_at predates it; their transaction ID is at or
+// after the snapshot ID (the oldest transaction running at the snapshot), so
+// the next delta, whose since_xid is that ID, delivers them again, and local
+// upserts are idempotent. Full exports page by keyset cursor or offset, never
+// split an advisory, and send no lifecycle tombstones, so none of their
+// paging depends on the bound.
 func syncXIDBeforeSQL(column, arg string) string {
 	return syncXIDDistanceSQL(column, arg) + ` >= ` + syncXIDWindowWidthSQL(arg, "0")
 }
@@ -1119,7 +1134,10 @@ func newSyncLifecycleQueryArgs(opts db.SyncExportOptions, snapshot time.Time, sn
 			"t.updated_at <= $1",
 		},
 	}
-	queryArgs.addSnapshotXID(snapshotXID)
+	if opts.Since != nil {
+		// A full export carries no transaction ID bound (see syncXIDBeforeSQL).
+		queryArgs.addSnapshotXID(snapshotXID)
+	}
 	queryArgs.addDeltaWindow(opts)
 	return queryArgs
 }

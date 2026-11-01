@@ -35,16 +35,24 @@ func TestNewSyncLifecycleQueryArgsAlwaysBoundsTheSnapshot(t *testing.T) {
 }
 
 // TestSyncLifecycleQueryArgsAddsTheSnapshotXID covers the transaction-ID bound
-// that complements the timestamp. Timestamps alone cannot exclude a transaction
-// that committed late with an earlier updated_at, which would let a client miss
-// a row permanently.
+// that complements the timestamp on a delta: a row version a transaction at or
+// after the snapshot wrote is left to the next delta, whose since_xid window
+// covers it. A full export carries no transaction-ID bound, so an old frozen
+// row whose raw xmin aliases into the snapshot window is never excluded from
+// a one-shot full sync.
 func TestSyncLifecycleQueryArgsAddsTheSnapshotXID(t *testing.T) {
 	t.Parallel()
 
 	snapshot := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	since := snapshot.Add(-time.Hour)
 
-	without := newSyncLifecycleQueryArgs(db.SyncExportOptions{}, snapshot, 0)
-	with := newSyncLifecycleQueryArgs(db.SyncExportOptions{}, snapshot, 4242)
+	full := newSyncLifecycleQueryArgs(db.SyncExportOptions{}, snapshot, 4242)
+	if len(full.args) != 1 || strings.Contains(strings.Join(full.activeFilters, "\n"), "xmin") {
+		t.Fatalf("full export args %v filters %q, want only the snapshot timestamp bound", full.args, full.activeFilters)
+	}
+
+	without := newSyncLifecycleQueryArgs(db.SyncExportOptions{Since: &since}, snapshot, 0)
+	with := newSyncLifecycleQueryArgs(db.SyncExportOptions{Since: &since}, snapshot, 4242)
 
 	if len(with.args) <= len(without.args) {
 		t.Fatalf("a snapshot XID added no bind value: %v", with.args)

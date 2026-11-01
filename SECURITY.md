@@ -960,15 +960,21 @@ Local SQLite sync:
   upsert-only unless the last of them reports the split complete (see the
   affected-row replacement below);
 - receives with each delta every row changed since its last sync: the server
-  bounds each page by the pinned snapshot and selects a delta by `since` or
-  `since_xid`, comparing the rows' 32-bit `xmin` with the 64-bit transaction
-  watermarks modulo 2^32 within the window up to the statement's next
-  transaction ID, so a row whose transaction committed after a snapshot with
-  an older `updated_at` reaches the next delta, also past the first
-  transaction ID epoch. A watermark outside a 2^31-transaction window, or one
-  ahead of the server's counter, errs toward resending rows, never toward
-  skipping them (a missed row would leave a malicious package or
-  vulnerability out of the local database until a full sync);
+  bounds each delta page by the pinned snapshot and selects a delta by `since`
+  or `since_xid`, comparing the rows' 32-bit `xmin` with the 64-bit
+  transaction watermarks modulo 2^32 within the window up to the statement's
+  next transaction ID, so a row whose transaction committed after a snapshot
+  with an older `updated_at` reaches the next delta, also past the first
+  transaction ID epoch. An old frozen `xmin` that aliases into a window is
+  delivered once more by the `since_xid` leg or deferred to the next delta by
+  a delta's snapshot bound, never dropped. A full sync is bounded by
+  `updated_at` only and carries no transaction ID bound, so it never excludes
+  such a row, and a one-shot full sync (for example a fresh cache in CI) that
+  never runs a delta still receives every row. A watermark outside a
+  2^31-transaction window, or one ahead of the server's counter, errs toward
+  resending rows, never toward skipping them (a missed row would leave a
+  malicious package or vulnerability out of the local database until a full
+  sync);
 - preserves user-facing source attribution for synced vulnerability and
   malicious findings;
 - maps synced malicious-table rows with `supply_chain` or `typosquatting` risk
