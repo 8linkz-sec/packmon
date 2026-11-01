@@ -44,6 +44,11 @@
   host UID/GID, so bootstrapping on native Linux no longer fails with
   `permission denied` on a host-owned checkout or `.env`. The production
   server image still runs as `packmon`.
+- The starter Prometheus alerts `PackmonMetricsStoreReadFailure`,
+  `PackmonDegradedResponses`, and `PackmonQueueErrors` in
+  `docs/monitoring/packmon-alerts.yml` use `for: 0m`. Their `for` duration
+  equalled the `increase()` range, so an isolated event left the range before
+  the alert could fire. Re-import the rule file if you deployed it.
 
 ### Security updates
 

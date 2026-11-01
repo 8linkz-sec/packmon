@@ -617,7 +617,10 @@ Starter alert rules:
 | Schema mismatch | `packmon_db_migration_version != 0` with an unexpected version label | Stop rollout and follow `Upgrade And Rollback`. |
 
 Tune thresholds for the deployment's feed cadence, package volume, and service
-objectives.
+objectives. The event-counter rules (`increase(...[R]) > 0`) fire without a
+pending period (`for: 0m`): a single event keeps the expression true for at
+most `R`, so a `for` of `R` or longer would never fire for an isolated event.
+Lengthen the range rather than the `for` duration to smooth them.
 
 Route firing alerts to the deployment's ticketing or incident channel and page the on-call owner for availability, security, or data-integrity impact. If you use Alertmanager, encode the Packmon service name, environment, severity, and runbook URL in alert labels or annotations before paging.
 
