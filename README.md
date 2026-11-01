@@ -919,7 +919,9 @@ Important environment variables:
 
 - `PACKMON_SERVER_MODE=production|development`
 - `PACKMON_SERVER_PORT=8080`
-- `PACKMON_SERVER_PUBLIC_HOST` (host:port clients use to reach the server)
+- `PACKMON_SERVER_PUBLIC_HOST` (host:port clients use to reach the server; a
+  bare hostname, IPv4 address, or IPv6 literal with an optional numeric port --
+  startup rejects a scheme, path, query, fragment, userinfo, or whitespace)
 - `PACKMON_TLS_CERT_FILE`, `PACKMON_TLS_KEY_FILE`,
   `PACKMON_TLS_MIN_VERSION=1.2|1.3`
 - `PACKMON_ALLOW_INSECURE_LOCAL_HTTP=false` (loopback-only override for the
@@ -1010,7 +1012,9 @@ Saving `NONE` requires an explicit acknowledgement because it disables
 vulnerability blocking.
 Feed enablement, mode, cadence, and feed API keys can be saved from
 `/admin/feeds`; saved values are applied immediately and persisted for future
-server starts.
+server starts. A Socket.dev or ReversingLabs change restarts the refresh-queue
+workers; if the running workers miss the shutdown-timeout deadline, the new
+workers start as soon as the old ones exit.
 Strict feed imports are operator-visible. When a server rejects imported feed
 data, `/admin/feeds` shows bounded rejection diagnostics: rejected-record
 counts and reason classes, correlation ID, client/API-key attribution when
