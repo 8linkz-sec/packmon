@@ -93,6 +93,22 @@
   so the part after its first space no longer leaks. A backslash-escaped
   newline inside a secret value (`password='ab\` followed by a line break)
   also no longer ends the redaction early and leaks the rest of the value.
+- Diagnostic redaction now also hides secrets whose key name carries a secret
+  word as one component: `"authToken":"x"`, `"db_password":"x"`,
+  `"DB_PASSWORD":"x"`, `"client_secret_value":"x"`, `GITHUB_TOKEN=x`,
+  `PGPASSWORD=x`, and `x-api-key: x` used to reach logs and error messages in
+  clear text, because the key had to be exactly the secret word. The secret
+  word must end a component of the name (split at `_`, `-`, `.`, digits, and
+  camelCase boundaries), so `tokenizer`, `tokens_count`, `passwordless`, and
+  `secretariat` stay readable. The plurals `credentials`, `secrets`,
+  `passwords`, and `passwds` are secret words too; `tokens` is not, because
+  it usually holds a count. An object or array assigned to a secret key
+  (`"token": {"value": "x"}`, `"password": ["a", "b"]`) is now redacted as a
+  whole up to its balanced closing bracket; before, everything after its
+  first delimiter leaked. JSON embedded in a JSON string more than once
+  (`\\\"token\\\":\\\"a b\\\"`) is now redacted too. A value cut off inside
+  embedded JSON now ends where the enclosing string closes, so the fields
+  after that string stay readable.
 - The CLI no longer creates its local SQLite database (and its WAL and
   journal files) in the working directory when the home directory cannot be
   resolved. The default `~/.packmon/db` used to fall back to `./.packmon/db`,
