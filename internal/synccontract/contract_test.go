@@ -89,6 +89,8 @@ func TestResponseFromExportMapsAllWireFields(t *testing.T) {
 
 		VulnerabilityAffectedComplete:  true,
 		VulnerabilitiesWithoutAffected: []string{"GHSA-empty"},
+		VulnerabilitySplitAdvisory:     "GHSA-split",
+		VulnerabilitySplitComplete:     true,
 	}
 
 	resp := ResponseFromExport(exported, "degraded", map[string]string{"osv": "2026-06-28T00:00:00Z"})
@@ -104,6 +106,9 @@ func TestResponseFromExportMapsAllWireFields(t *testing.T) {
 	}
 	if len(resp.VulnerabilitiesWithoutAffected) != 1 || resp.VulnerabilitiesWithoutAffected[0] != "GHSA-empty" {
 		t.Fatalf("vulnerabilities_without_affected = %q, want the exported advisory IDs passed through", resp.VulnerabilitiesWithoutAffected)
+	}
+	if resp.VulnerabilitySplitAdvisory != "GHSA-split" || !resp.VulnerabilitySplitComplete {
+		t.Fatalf("split markers = %q / %v, want the exported split advisory and completeness passed through", resp.VulnerabilitySplitAdvisory, resp.VulnerabilitySplitComplete)
 	}
 	if !resp.Truncated || !resp.HasMore {
 		t.Fatalf("pagination flags = truncated %v has_more %v, want both true", resp.Truncated, resp.HasMore)
@@ -174,9 +179,9 @@ func TestVulnerabilitiesWithoutAffectedStaysOptional(t *testing.T) {
 }
 
 // TestSyncPageByteBudgetLeavesRoomBelowTheClientCap keeps the server's byte
-// budget for the vulnerabilities of one sync page well below the response
-// size a client accepts, so the other datasets of the page and the envelope
-// still fit.
+// budgets for the datasets of one sync page positive and, together, at least
+// 4 MiB below the response size a client accepts, so the envelope and a first
+// row that alone exceeds its budget still fit.
 func TestSyncPageByteBudgetLeavesRoomBelowTheClientCap(t *testing.T) {
 	t.Parallel()
 
@@ -185,6 +190,60 @@ func TestSyncPageByteBudgetLeavesRoomBelowTheClientCap(t *testing.T) {
 	}
 	if db.SyncVulnerabilityPageByteBudget <= 0 || 2*db.SyncVulnerabilityPageByteBudget > MaxResponseBytes {
 		t.Fatalf("SyncVulnerabilityPageByteBudget = %d, want a positive budget of at most half of MaxResponseBytes (%d)", db.SyncVulnerabilityPageByteBudget, MaxResponseBytes)
+	}
+	budgets := map[string]int{
+		"vulnerabilities": db.SyncVulnerabilityPageByteBudget,
+		"malicious":       db.SyncMaliciousPageByteBudget,
+		"reputation":      db.SyncReputationPageByteBudget,
+		"lifecycle":       db.SyncLifecyclePageByteBudget,
+	}
+	total := 0
+	for name, budget := range budgets {
+		if budget <= 0 {
+			t.Fatalf("%s page byte budget = %d, want a positive budget", name, budget)
+		}
+		total += budget
+	}
+	const headroom = 4 << 20
+	if total+headroom > MaxResponseBytes {
+		t.Fatalf("page byte budgets total %d bytes, want at least %d below MaxResponseBytes (%d)", total, headroom, MaxResponseBytes)
+	}
+}
+
+// TestSplitAdvisoryMarkersStayOptional keeps the split markers off the wire
+// unless a page belongs to a split advisory, never reports completeness
+// without the advisory it belongs to, and checks that a client built before
+// the fields existed decodes a split page unchanged.
+func TestSplitAdvisoryMarkersStayOptional(t *testing.T) {
+	t.Parallel()
+
+	for _, exported := range []*db.SyncExport{{}, {VulnerabilitySplitComplete: true}} {
+		payload, err := json.Marshal(ResponseFromExport(exported, "healthy", nil))
+		if err != nil {
+			t.Fatalf("marshal response without a split advisory: %v", err)
+		}
+		if strings.Contains(string(payload), "vulnerability_split") {
+			t.Fatalf("response without a split advisory = %s, want the split markers omitted", payload)
+		}
+	}
+
+	payload, err := json.Marshal(ResponseFromExport(&db.SyncExport{
+		Vulnerabilities:            []db.SyncVulnerability{{ID: "GHSA-split", Ecosystem: "npm", Name: "a"}},
+		VulnerabilitySplitAdvisory: "GHSA-split",
+		VulnerabilitySplitComplete: true,
+	}, "healthy", nil))
+	if err != nil {
+		t.Fatalf("marshal split page: %v", err)
+	}
+	var older struct {
+		Vulnerabilities               []Vulnerability `json:"vulnerabilities"`
+		VulnerabilityAffectedComplete bool            `json:"vulnerability_affected_complete"`
+	}
+	if err := json.Unmarshal(payload, &older); err != nil {
+		t.Fatalf("older client decode error = %v", err)
+	}
+	if len(older.Vulnerabilities) != 1 || older.VulnerabilityAffectedComplete {
+		t.Fatalf("older client decoded %+v, want the package row on an unflagged page", older)
 	}
 }
 

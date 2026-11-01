@@ -138,7 +138,11 @@ func jsonStringWireBytes(s string) int {
 //   - A split page (syncVulnerabilityAdvisorySplit) carries the next rows of
 //     that advisory up to the row limit and the budget and continues with a
 //     row cursor while rows remain, or else with an advisory cursor after the
-//     advisory. It is always split and always continues.
+//     advisory; that page is the last of the split (splitLast), on which the
+//     exporter checks whether the split is complete. It is always split and
+//     always continues.
+//   - Every page of a split, including the one that starts it, names the
+//     split advisory (splitAdvisoryID).
 //   - Row pages (full exports and legacy deltas) end before the row that no
 //     longer fits, never before the first one; their row cursor or offset
 //     continues after the last delivered row.
@@ -233,6 +237,7 @@ func (b *syncVulnerabilityPageBuilder) stopAdvisoryPage() {
 	// rows of the first advisory are package rows.
 	last := b.page.rows[len(b.page.rows)-1]
 	b.page.split = true
+	b.page.splitAdvisoryID = last.ID
 	b.page.nextCursor = db.EncodeSyncAdvisoryRowCursor(last.ID, last.Ecosystem, last.Name)
 }
 
@@ -245,11 +250,13 @@ func (b *syncVulnerabilityPageBuilder) finish() syncVulnerabilityPage {
 		}
 	case syncVulnerabilityAdvisorySplit:
 		b.page.split = true
+		b.page.splitAdvisoryID = b.splitID
 		b.page.hasMore = true
 		if b.stopped && len(b.page.rows) > 0 {
 			last := b.page.rows[len(b.page.rows)-1]
 			b.page.nextCursor = db.EncodeSyncAdvisoryRowCursor(last.ID, last.Ecosystem, last.Name)
 		} else {
+			b.page.splitLast = true
 			b.page.lastAdvisoryID = b.splitID
 			b.page.nextCursor = db.EncodeSyncAdvisoryCursor(b.splitID)
 		}

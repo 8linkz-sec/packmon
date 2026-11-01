@@ -612,9 +612,15 @@ clients and servers keep such rows until a full sync.
 An advisory whose affected rows alone exceed the per-page byte budget of the
 sync (about 12 MiB of rows, against the 32 MiB a client accepts per response)
 is split across several pages. Those pages never carry
-`vulnerability_affected_complete`, so packages such an advisory no longer
-lists stay in the local database until a full sync; the advisories around it
-are still replaced. Before this split existed, such an advisory made every
+`vulnerability_affected_complete`; the advisories around it are still
+replaced. The last split page carries `vulnerability_split_complete` when
+nothing of the advisory changed on the server while the client paged through
+it, and current clients then drop the packages the advisory no longer lists
+(in the synced ecosystems). When the advisory changed during the split, or
+the sync was interrupted, its stale packages stay until a later incremental
+sync completes a split of it (the change itself makes the next delta deliver
+it again) or a full sync; older clients and servers keep them until a full
+sync. Before this split existed, such an advisory made every
 incremental sync fail with `response too large` and the local database never
 advanced; upgrading the server is the fix, a full sync is not needed for it.
 The malicious, reputation, and lifecycle rows of a page have byte budgets of

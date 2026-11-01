@@ -351,6 +351,7 @@ func newSyncResponseEnvelope(exported *db.SyncExport, feedStatus string, feedVer
 	if exported.VulnerabilityAffectedComplete {
 		resp.VulnerabilitiesWithoutAffected = exported.VulnerabilitiesWithoutAffected
 	}
+	resp.VulnerabilitySplitAdvisory, resp.VulnerabilitySplitComplete = synccontract.SplitAdvisoryFromExport(exported)
 	return resp
 }
 

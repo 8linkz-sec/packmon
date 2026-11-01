@@ -289,18 +289,6 @@ func TestSyncPageOfOversizedRowsStaysBelowTheClientCap(t *testing.T) {
 	}
 }
 
-// TestSyncPageByteBudgetsLeaveEnvelopeHeadroom keeps the sum of the dataset
-// byte budgets below the response size a client accepts, with room for the
-// envelope and for rows a budget admits because they start their page.
-func TestSyncPageByteBudgetsLeaveEnvelopeHeadroom(t *testing.T) {
-	t.Parallel()
-
-	total := db.SyncVulnerabilityPageByteBudget + db.SyncMaliciousPageByteBudget + db.SyncReputationPageByteBudget + db.SyncLifecyclePageByteBudget
-	if total+syncPageEnvelopeHeadroom > synccontract.MaxResponseBytes {
-		t.Fatalf("dataset byte budgets total %d bytes, want at least %d below the client cap %d", total, syncPageEnvelopeHeadroom, synccontract.MaxResponseBytes)
-	}
-}
-
 type countingWriter struct{ n int }
 
 func (w *countingWriter) Write(p []byte) (int, error) {

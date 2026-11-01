@@ -1178,10 +1178,28 @@ repeat on every row), the server falls back to splitting that advisory only:
 its pages carry as many of its rows as fit, at least one, in (ecosystem, name)
 order behind a versioned four-part advisory row cursor, and are never flagged,
 so the client only upserts them; the advisory after it is paged whole and
-flagged again. The completeness guarantee therefore never covers a split
-advisory, and local rows that such an advisory no longer lists stay until a
-full sync. A split page that finds the advisory changed after the pinned
+flagged again. A split page that finds the advisory changed after the pinned
 snapshot delivers no further rows of it, and the next delta delivers it again.
+Every page of a split, including the one that starts it, names the advisory
+in the optional `vulnerability_split_advisory` field. The pages cover the
+advisory's (ecosystem, name) key space in consecutive ranges, each in its own
+statement over the current affected rows, so on the last split page the
+server checks that neither the vulnerability row nor any affected row of the
+advisory (in any ecosystem) has a version newer than the pinned snapshot, by
+`updated_at` and by transaction ID. Only then can no split page have missed a
+row that still exists, and the page sets `vulnerability_split_complete: true`;
+an insert, re-insert, or update of the advisory during the split, or a
+missing snapshot transaction ID, leaves it unset. A non-full client with a
+stored `since` collects the row keys the split pages of one sequence
+delivered for the advisory in memory and, on the complete page, drops in that
+page's transaction its local affected rows of the advisory (within the
+requested ecosystems) that no split page delivered. It replaces nothing when
+it did not see the split from its first page (the complete page never starts
+a split), when a split page carries a row of another advisory or a withdrawn
+row, or when the sequence fails, and an incomplete split stays upsert-only
+until a later delta delivers the advisory again. Both fields are omitted on
+every other page; older clients ignore them and keep a split advisory's stale
+rows until a full sync, and older servers omit them.
 Full exports and the legacy delta row pages honor the same byte budget and
 continue after the last delivered row. The server
 promises that the affected sets of a page are complete, with

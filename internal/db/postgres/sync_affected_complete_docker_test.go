@@ -560,10 +560,12 @@ func testDeltaDeliversAdvisoriesWithoutAffectedPackages(ctx context.Context, t *
 // of JSON -- more than the 32 MiB a client accepts in one response. The pages
 // stay below that cap: the whole-advisory page before it ends at the advisory
 // boundary and stays flagged, the oversized advisory is split over several
-// unflagged (upsert-only) pages with a row cursor, and the advisory after it
-// is paged whole and flagged again. The real SQLite client completes the
-// sync, every row arrives exactly once, flagged pages drop their stale rows,
-// and the stale row of the split advisory stays until a full sync.
+// unflagged pages with a row cursor that all name it in
+// VulnerabilitySplitAdvisory, the last of them reports the split complete
+// (nothing of the advisory changed after the snapshot), and the advisory
+// after it is paged whole and flagged again. The real SQLite client completes
+// the sync, every row arrives exactly once, flagged pages drop their stale
+// rows, and the completed split drops the stale row of the split advisory.
 func testDeltaSplitsAnAdvisoryLargerThanThePageBudget(ctx context.Context, t *testing.T, store *Store) {
 	t.Helper()
 
@@ -611,8 +613,10 @@ func testDeltaSplitsAnAdvisoryLargerThanThePageBudget(ctx context.Context, t *te
 	}
 
 	type pageFacts struct {
-		ids      []string
-		complete bool
+		ids           []string
+		complete      bool
+		splitAdvisory string
+		splitComplete bool
 	}
 	var (
 		pages   []pageFacts
@@ -631,7 +635,7 @@ func testDeltaSplitsAnAdvisoryLargerThanThePageBudget(ctx context.Context, t *te
 		if len(encoded) > synccontract.MaxResponseBytes {
 			t.Fatalf("delta page %d encodes to %d bytes, more than the %d-byte client cap", len(pages)+1, len(encoded), synccontract.MaxResponseBytes)
 		}
-		facts := pageFacts{complete: page.VulnerabilityAffectedComplete}
+		facts := pageFacts{complete: page.VulnerabilityAffectedComplete, splitAdvisory: page.VulnerabilitySplitAdvisory, splitComplete: page.VulnerabilitySplitComplete}
 		for id := range syncExportRowsByID(page.Vulnerabilities) {
 			facts.ids = append(facts.ids, id)
 		}
@@ -657,18 +661,22 @@ func testDeltaSplitsAnAdvisoryLargerThanThePageBudget(ctx context.Context, t *te
 	if len(bigSeen) != bigRows {
 		t.Fatalf("delta delivered %d rows of %s, want %d", len(bigSeen), idBig, bigRows)
 	}
-	var splitPages int
+	var splitPages, lastSplitPage, completePages int
 	for i, page := range pages {
+		if page.splitComplete {
+			completePages++
+		}
 		switch {
 		case slices.Equal(page.ids, []string{idBefore}) || slices.Equal(page.ids, []string{idAfter}):
-			if !page.complete {
-				t.Fatalf("delta page %d with %q is unflagged, want whole advisories flagged (pages %+v)", i+1, page.ids, pages)
+			if !page.complete || page.splitAdvisory != "" {
+				t.Fatalf("delta page %d with %q is unflagged or names split advisory %q, want whole advisories flagged (pages %+v)", i+1, page.ids, page.splitAdvisory, pages)
 			}
-		case slices.Equal(page.ids, []string{idBig}):
-			if page.complete {
-				t.Fatalf("delta page %d of the split advisory is flagged (pages %+v)", i+1, pages)
+		case slices.Equal(page.ids, []string{idBig}) || (len(page.ids) == 0 && page.splitAdvisory != ""):
+			if page.complete || page.splitAdvisory != idBig {
+				t.Fatalf("delta page %d of the split advisory is flagged or names %q (pages %+v)", i+1, page.splitAdvisory, pages)
 			}
 			splitPages++
+			lastSplitPage = i
 		case len(page.ids) == 0:
 		default:
 			t.Fatalf("delta page %d mixes advisories %q (pages %+v)", i+1, page.ids, pages)
@@ -676,6 +684,9 @@ func testDeltaSplitsAnAdvisoryLargerThanThePageBudget(ctx context.Context, t *te
 	}
 	if splitPages < 2 {
 		t.Fatalf("oversized advisory spans %d page(s), want it split (pages %+v)", splitPages, pages)
+	}
+	if completePages != 1 || !pages[lastSplitPage].splitComplete {
+		t.Fatalf("split complete on %d page(s), want only the last split page (pages %+v)", completePages, pages)
 	}
 
 	server := newLoopbackSyncServer(t, store, synccontract.MaxLimit, func(int) {})
@@ -686,8 +697,79 @@ func testDeltaSplitsAnAdvisoryLargerThanThePageBudget(ctx context.Context, t *te
 	if !slices.Equal(got[idBefore], []string{"budget-a1"}) || !slices.Equal(got[idAfter], []string{"budget-c1"}) {
 		t.Fatalf("local rows of the whole advisories = %q / %q, want their stale rows dropped", got[idBefore], got[idAfter])
 	}
-	if len(got[idBig]) != bigRows+1 || !slices.Contains(got[idBig], "budget-big-stale") {
-		t.Fatalf("local rows of the split advisory = %d (stale kept %v), want all %d rows plus the stale row kept by upsert-only pages", len(got[idBig]), slices.Contains(got[idBig], "budget-big-stale"), bigRows)
+	if len(got[idBig]) != bigRows || slices.Contains(got[idBig], "budget-big-stale") {
+		t.Fatalf("local rows of the split advisory = %d (stale kept %v), want all %d rows and the stale row dropped by the completed split", len(got[idBig]), slices.Contains(got[idBig], "budget-big-stale"), bigRows)
+	}
+}
+
+// testSplitAdvisoryChangedMidSplitStaysUpsertOnly splits an oversized advisory
+// like testDeltaSplitsAnAdvisoryLargerThanThePageBudget, but one of its
+// affected rows changes on the server while the client pages through the
+// split. The split pages may then have missed a row, so the last split page
+// does not report the split complete and the client keeps the advisory's
+// stale local row. The change enters the next delta, which splits the
+// advisory again without interference, completes it, and drops the stale row.
+func testSplitAdvisoryChangedMidSplitStaysUpsertOnly(ctx context.Context, t *testing.T, store *Store) {
+	t.Helper()
+
+	const (
+		idBig   = "GHSA-midsplit-giant"
+		bigRows = 12000
+	)
+	if _, err := store.pool.Exec(ctx, `
+		INSERT INTO vulnerabilities(id, summary, severity, published, modified)
+		VALUES ($1, repeat('x', 3000), 'HIGH', NOW(), NOW())`, idBig); err != nil {
+		t.Fatalf("insert oversized vulnerability: %v", err)
+	}
+	if _, err := store.pool.Exec(ctx, `
+		INSERT INTO affected_packages(vulnerability_id, ecosystem, name, version_ranges, versions_affected)
+		SELECT $1, 'npm', 'midsplit-big-' || lpad(g::text, 5, '0'), '[]'::jsonb, '[]'::jsonb
+		FROM generate_series(1, $2::int) g`, idBig, bigRows); err != nil {
+		t.Fatalf("insert oversized affected packages: %v", err)
+	}
+
+	local, err := sqlite.New(filepath.Join(t.TempDir(), "packmon.db"))
+	if err != nil {
+		t.Fatalf("sqlite.New() error = %v", err)
+	}
+	t.Cleanup(func() { ioutils.CloseSilently(local) })
+	seedLocalSyncRows(ctx, t, local, idBig, "npm", "midsplit-big-stale")
+	since := syncDeltaBoundary(ctx, t, store)
+	if err := local.SetSyncMeta(ctx, "last_sync_at", since.Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("seed local last sync: %v", err)
+	}
+	if _, err := store.pool.Exec(ctx, `UPDATE vulnerabilities SET updated_at = NOW() WHERE id = $1`, idBig); err != nil {
+		t.Fatalf("mark the oversized advisory changed: %v", err)
+	}
+
+	var changeMidSplit atomic.Bool
+	changeMidSplit.Store(true)
+	server := newLoopbackSyncServer(t, store, synccontract.MaxLimit, func(page int) {
+		// Page 1 starts the split; change an affected row before page 2
+		// continues it.
+		if page == 2 && changeMidSplit.Load() {
+			if _, err := store.pool.Exec(ctx, `
+				UPDATE affected_packages SET updated_at = NOW()
+				WHERE vulnerability_id = $1 AND name = 'midsplit-big-00001'`, idBig); err != nil {
+				t.Errorf("change an affected row mid-split: %v", err)
+			}
+		}
+	})
+	if err := sqlite.Sync(ctx, local, sqlite.SyncConfig{ServerURL: server.URL, AllowInsecureHTTP: true}); err != nil {
+		t.Fatalf("sqlite.Sync(delta changed mid-split) error = %v", err)
+	}
+	got := localSyncPagingRows(ctx, t, local, idBig)
+	if len(got[idBig]) != bigRows+1 || !slices.Contains(got[idBig], "midsplit-big-stale") {
+		t.Fatalf("local rows after a split changed mid-split = %d (stale kept %v), want all %d rows plus the stale row", len(got[idBig]), slices.Contains(got[idBig], "midsplit-big-stale"), bigRows)
+	}
+
+	changeMidSplit.Store(false)
+	if err := sqlite.Sync(ctx, local, sqlite.SyncConfig{ServerURL: server.URL, AllowInsecureHTTP: true}); err != nil {
+		t.Fatalf("sqlite.Sync(next delta) error = %v", err)
+	}
+	got = localSyncPagingRows(ctx, t, local, idBig)
+	if len(got[idBig]) != bigRows || slices.Contains(got[idBig], "midsplit-big-stale") {
+		t.Fatalf("local rows after the next delta = %d (stale kept %v), want all %d rows and the stale row dropped", len(got[idBig]), slices.Contains(got[idBig], "midsplit-big-stale"), bigRows)
 	}
 }
 

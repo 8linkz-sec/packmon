@@ -32,6 +32,14 @@ func (s *Store) ExportSync(ctx context.Context, opts db.SyncExportOptions) (*db.
 	if err != nil {
 		return nil, err
 	}
+	return newSyncExport(opts, cursor, snapshot, snapshotXID, datasets), nil
+}
+
+// newSyncExport assembles the export of one page from its datasets: the
+// pagination state of the next page, the completeness flag of a whole-advisory
+// delta page with its advisories without affected rows, and the split markers
+// of a page that holds rows of an advisory split over several pages.
+func newSyncExport(opts db.SyncExportOptions, cursor db.SyncCursor, snapshot time.Time, snapshotXID uint64, datasets syncDatasets) *db.SyncExport {
 	paging := syncVulnerabilityPagingFor(syncOptionsWithOffset(opts, cursor.Vulnerabilities))
 	truncated, nextCursor := nextSyncExportCursor(cursor, paging, datasets, opts.Limit)
 	complete := syncPageVulnerabilityAffectedComplete(opts, cursor, datasets)
@@ -51,7 +59,9 @@ func (s *Store) ExportSync(ctx context.Context, opts db.SyncExportOptions) (*db.
 		NextCursor:                     nextCursor,
 		VulnerabilityAffectedComplete:  complete,
 		VulnerabilitiesWithoutAffected: withoutAffected,
-	}, nil
+		VulnerabilitySplitAdvisory:     datasets.vulnerabilitiesSplitAdvisory,
+		VulnerabilitySplitComplete:     datasets.vulnerabilitiesSplitAdvisory != "" && datasets.vulnerabilitiesSplitComplete,
+	}
 }
 
 // syncVulnerabilityPaging selects how the vulnerability dataset is paged.
@@ -76,7 +86,9 @@ const (
 	// an advisory of a delta whose rows alone exceed
 	// db.SyncVulnerabilityPageByteBudget, in (ecosystem, name) row order (see
 	// buildExportSyncSplitAdvisoryQuery). Its pages never carry
-	// vulnerability_affected_complete.
+	// vulnerability_affected_complete; they name the split advisory, and the
+	// last of them may report the split complete
+	// (buildSyncSplitAdvisoryUnchangedQuery).
 	syncVulnerabilityAdvisorySplit
 )
 
@@ -209,6 +221,14 @@ type syncVulnerabilityPage struct {
 	// exceed the byte budget (see syncVulnerabilityPageBuilder).
 	nextCursor string
 	split      bool
+	// splitAdvisoryID names the advisory a split page holds rows of, on the
+	// page that starts the split and on every page that continues it.
+	// splitLast marks the page that exhausts the advisory's rows, and
+	// splitComplete reports that the split pages delivered every current
+	// affected row of it (see buildSyncSplitAdvisoryUnchangedQuery).
+	splitAdvisoryID string
+	splitLast       bool
+	splitComplete   bool
 }
 
 func newSyncAdvisoryPage() syncVulnerabilityPage {
@@ -244,6 +264,8 @@ type syncDatasets struct {
 	vulnerabilitiesLastAdvisoryID  string
 	vulnerabilitiesNextCursor      string
 	vulnerabilitiesSplit           bool
+	vulnerabilitiesSplitAdvisory   string
+	vulnerabilitiesSplitComplete   bool
 	// Each other dataset carries the rows and hasMore of its syncRowPage.
 	malicious          []db.SyncMalicious
 	maliciousHaveMore  bool
@@ -274,6 +296,7 @@ func exportSyncDatasets(ctx context.Context, opts db.SyncExportOptions, cursor d
 			datasets.vulnerabilitiesWithoutAffected = page.withoutAffected
 			datasets.vulnerabilitiesLastAdvisoryID = page.lastAdvisoryID
 			datasets.vulnerabilitiesNextCursor, datasets.vulnerabilitiesSplit = page.nextCursor, page.split
+			datasets.vulnerabilitiesSplitAdvisory, datasets.vulnerabilitiesSplitComplete = page.splitAdvisoryID, page.splitComplete
 			if err != nil {
 				errCh <- syncDatasetExportError{order: 0, err: err}
 			}
@@ -768,7 +791,64 @@ func (s *Store) exportSyncVulnerabilities(ctx context.Context, opts db.SyncExpor
 	if err := rows.Err(); err != nil {
 		return syncVulnerabilityPage{}, fmt.Errorf("postgres: iterate sync vulnerability rows: %w", err)
 	}
-	return builder.finish(), nil
+	rows.Close()
+	page := builder.finish()
+	if page.splitLast {
+		page.splitComplete, err = s.syncSplitAdvisoryUnchanged(ctx, page.splitAdvisoryID, snapshot, snapshotXID)
+		if err != nil {
+			return syncVulnerabilityPage{}, err
+		}
+	}
+	return page, nil
+}
+
+// buildSyncSplitAdvisoryUnchangedQuery builds the check behind
+// vulnerability_split_complete on the last page of a split advisory: neither
+// the advisory's vulnerability row nor any of its affected rows (in any
+// ecosystem) has a version written after the pinned snapshot, by timestamp or
+// by transaction ID.
+//
+// The split pages cover the advisory's rows in (ecosystem, name) order, each
+// page the key range after the previous page's last row, every page in its own
+// statement over the current affected rows. When nothing of the advisory
+// changed after the snapshot, every affected row that exists now existed
+// unchanged while each page ran, so the page covering its key range delivered
+// it, and a row no split page delivered no longer exists. A vulnerability row
+// changed after the snapshot ends the split early (the split query excludes
+// it), and an affected row inserted, re-inserted, or updated after the
+// snapshot may have been missed; both fail the check, so the client keeps
+// upserting and the next delta delivers the advisory again. Without a
+// snapshot transaction ID the check cannot prove this, and ok is false.
+func buildSyncSplitAdvisoryUnchangedQuery(id string, snapshot time.Time, snapshotXID uint64) (query string, args []any, ok bool) {
+	if snapshotXID == 0 {
+		return "", nil, false
+	}
+	return `
+	SELECT EXISTS (
+		SELECT 1 FROM vulnerabilities v
+		WHERE v.id = $2
+		  AND v.updated_at <= $1
+		  AND (v.xmin::text)::bigint < $3::bigint
+	) AND NOT EXISTS (
+		SELECT 1 FROM affected_packages ap
+		WHERE ap.vulnerability_id = $2
+		  AND (ap.updated_at > $1 OR (ap.xmin::text)::bigint >= $3::bigint)
+	)`, []any{snapshot, id, strconv.FormatUint(snapshotXID, 10)}, true
+}
+
+// syncSplitAdvisoryUnchanged reports whether the split pages of the advisory
+// delivered every current affected row of it (see
+// buildSyncSplitAdvisoryUnchangedQuery).
+func (s *Store) syncSplitAdvisoryUnchanged(ctx context.Context, id string, snapshot time.Time, snapshotXID uint64) (bool, error) {
+	query, args, ok := buildSyncSplitAdvisoryUnchangedQuery(id, snapshot, snapshotXID)
+	if !ok {
+		return false, nil
+	}
+	var unchanged bool
+	if err := s.pool.QueryRow(ctx, query, args...).Scan(&unchanged); err != nil {
+		return false, fmt.Errorf("postgres: check split sync advisory: %w", err)
+	}
+	return unchanged, nil
 }
 
 func (s *Store) exportSyncReputation(ctx context.Context, opts db.SyncExportOptions, snapshot time.Time, snapshotXID uint64) (syncRowPage[db.SyncReputationFinding], error) {

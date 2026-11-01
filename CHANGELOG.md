@@ -29,6 +29,22 @@
   sync always makes progress. The wire format is unchanged: current and older
   clients already follow `truncated` and `next_cursor`, and a sequence that
   an older server started continues by its keyset cursors or offsets.
+- An incremental `packmon db sync` now drops the packages that an advisory too
+  large for one sync page no longer lists, instead of keeping them until a
+  full sync. The server split such an advisory over several pages without
+  `vulnerability_affected_complete`, so the client only upserted them. Every
+  page of a split now names the advisory in the new optional
+  `vulnerability_split_advisory` field, and the last split page sets
+  `vulnerability_split_complete` when the server finds that neither the
+  advisory nor any of its affected packages changed after the pinned snapshot,
+  so the split pages missed no package that still exists. The client collects
+  the packages the split pages of one sync delivered and, on that page, drops
+  the advisory's other local packages in the synced ecosystems in the page's
+  transaction. A split that changed on the server meanwhile, an interrupted
+  sync, or a split the client did not see from its first page drops nothing,
+  and the next delta delivers a changed advisory again. Older clients ignore
+  the fields and older servers omit them, so both keep the previous
+  upsert-only behavior.
 - `packmon-server migrate` no longer keeps an `INVALID` index left by an
   interrupted `CREATE INDEX CONCURRENTLY` (connection drop, cancel, crash).
   A retry used to skip such an index because the migrations use
@@ -498,7 +514,9 @@
   split over several pages in (ecosystem, name) order behind a new opaque
   advisory row cursor. Those pages omit `vulnerability_affected_complete`, so
   the client only upserts them and packages such an advisory no longer lists
-  stay until a full sync; the advisories around it are still replaced. Full
+  stay until a full sync (a completed split now drops them, see
+  `vulnerability_split_complete` above); the advisories around it are still
+  replaced. Full
   exports and legacy delta row pages honor the same budget. An older server
   rejects the new cursor with `400` if it continues a sequence a new server
   started, and the next sync starts over.

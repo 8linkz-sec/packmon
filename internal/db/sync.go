@@ -49,6 +49,19 @@ type SyncExport struct {
 	// local affected rows (within the requested ecosystems) instead. It is
 	// empty on every unflagged page.
 	VulnerabilitiesWithoutAffected []string
+	// VulnerabilitySplitAdvisory names, on every page that holds rows of an
+	// advisory split because its rows exceed SyncVulnerabilityPageByteBudget
+	// (the page that starts the split and every page that continues it), that
+	// advisory. It is empty on every other page.
+	VulnerabilitySplitAdvisory string
+	// VulnerabilitySplitComplete reports, on the last page of such a split,
+	// that the split pages of this request sequence together delivered every
+	// current affected row of the advisory (within the requested ecosystems):
+	// neither the advisory nor any of its affected rows changed after the
+	// pinned snapshot. A delta client that received every split page of the
+	// advisory in this sequence can then drop its local affected rows (within
+	// the requested ecosystems) that no split page delivered.
+	VulnerabilitySplitComplete bool
 }
 
 // syncAdvisoryCursorTag versions the vulnerabilities_cursor of a delta that
