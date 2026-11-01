@@ -16,6 +16,11 @@
 
 ### Fixed
 
+- `packmon scan --list-packages` now exits with the parser-failure code `4`
+  when a lockfile or SBOM entry could not be parsed, as `packmon scan` does.
+  Partially parsed inventories are still listed before the error; a lockfile
+  set that could not be parsed at all no longer exits `0` with
+  "No packages found.".
 - `packmon scan --list-all` now writes the requested `--output-json`,
   `--output-sarif`, and `--output-junit` files when the scan completes but the
   local scan-history write fails, and returns the history error afterwards,
