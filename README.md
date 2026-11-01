@@ -875,9 +875,13 @@ once its `<packages>` section has been read) and `choco install|upgrade` /
 are read with their own language's rules: `.ps1` / `.psm1` files continue lines
 with a trailing backtick and skip `#` comments, `<# ... #>` block comments, and
 here-strings (a backtick inside a comment does not continue the line);
-`.bat` / `.cmd` files continue lines with a trailing caret and skip `REM`,
-`@REM`, and `::` comment lines. Quoted text is always an argument, so a quoted
-`';'` or `'|'` neither starts a new command nor ends the package list.
+`.bat` / `.cmd` files follow cmd.exe rules: only double quotes group text, a
+caret escapes the next character outside double quotes (`^&` is an argument,
+`^^` a literal caret), a caret that is the last character of the line (not
+inside double quotes, not escaped, no trailing spaces) continues it, and `REM`,
+`@REM`, and `::` comment lines are skipped. Quoted text is always an argument,
+so a quoted `';'` (PowerShell) or `";"` neither starts a new command nor ends
+the package list.
 Pinned `--version` entries are compared
 with the feed's latest release; unpinned entries (config.xml always installs
 latest) show `INSTALLED -`, the feed's latest version, and status `unpinned`

@@ -52,6 +52,10 @@ func FuzzParseScript(f *testing.F) {
 	f.Add([]byte("choco install \"unterminated\n"))
 	f.Add([]byte("\xff\xfe\xfd choco install x\n"))
 	f.Add([]byte("REM note ^\r\n:: x `\r\nchoco install a # b ^\r\n c\r\n"))
+	f.Add([]byte("echo 'note & choco install b c'\r\nchoco install 'a' b\r\n"))
+	f.Add([]byte("echo x ^& choco install b ^| x ^< y ^> z\r\necho ^\"x & choco install c\r\n"))
+	f.Add([]byte("choco install a --params \"x ^\r\nchoco install b ^^\r\nchoco install c ^^^\r\n d ^ \r\n"))
+	f.Add([]byte("choco install sev^\r\nen ^\r\n& x ^\r\n\"y ^\r\n^\r\n^"))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		for _, kind := range []Kind{KindPowerShellScript, KindBatchScript} {
 			pkgs, err := ParseScript(bytes.NewReader(data), "x", kind)

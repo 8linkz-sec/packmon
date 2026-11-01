@@ -322,3 +322,176 @@ func TestParseScriptMultiLineConstructs(t *testing.T) {
 		})
 	}
 }
+
+// TestParseScriptLongContinuationIsLinear guards against rebuilding the
+// pending logical line for every continued physical line: a script near the
+// 1 MiB size bound made of caret (or backtick) continuations must finish
+// quickly instead of copying the growing line once per physical line.
+func TestParseScriptLongContinuationIsLinear(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		kind   Kind
+		marker string
+	}{
+		{KindBatchScript, "^"},
+		{KindPowerShellScript, "`"},
+	} {
+		t.Run(string(tt.kind), func(t *testing.T) {
+			t.Parallel()
+			script := "choco install a " + tt.marker + "\r\n" +
+				strings.Repeat("b "+tt.marker+"\r\n", 200_000) + "c\r\n"
+			if got, want := scriptKeys(t, tt.kind, script), "a@[unpinned]"+strings.Repeat(" b@[unpinned]", 200_000)+" c@[unpinned]"; got != want {
+				t.Errorf("ParseScript(long %s continuation) returned %d bytes of keys, want %d", tt.kind, len(got), len(want))
+			}
+		})
+	}
+}
+
+// TestParseScriptQuotingAndEscapingFollowScriptKind pins the cmd.exe quoting
+// and caret-escape rules for batch files against the unchanged PowerShell
+// rules: in batch files only double quotes group, a caret inside double
+// quotes is literal, an unquoted caret makes the next character literal (a
+// doubled caret is a literal caret), and a caret that ends the line joins the
+// next line without a space and escapes its first character.
+func TestParseScriptQuotingAndEscapingFollowScriptKind(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name       string
+		script     string
+		powerShell string
+		batch      string
+	}{
+		{
+			name:       "single quotes group only in powershell",
+			script:     "choco install 'a' b\r\n",
+			powerShell: "a@[unpinned] b@[unpinned]",
+			batch:      "b@[unpinned]",
+		},
+		{
+			name:       "single quotes do not hide a batch separator",
+			script:     "echo 'note & choco install b c'\r\n",
+			powerShell: "",
+			batch:      "b@[unpinned]",
+		},
+		{
+			name:       "double quotes group in both",
+			script:     "echo \"note & choco install b\"\r\n",
+			powerShell: "",
+			batch:      "",
+		},
+		{
+			name:       "escaped ampersand is a batch argument",
+			script:     "echo x ^& choco install b\r\n",
+			powerShell: "b@[unpinned]",
+			batch:      "",
+		},
+		{
+			name:       "escaped pipe is a batch argument",
+			script:     "echo x ^| choco install b\r\n",
+			powerShell: "b@[unpinned]",
+			batch:      "",
+		},
+		{
+			name:       "escaped output redirect is a batch argument",
+			script:     "choco install a ^> b\r\n",
+			powerShell: "a@[unpinned]",
+			batch:      "a@[unpinned] b@[unpinned]",
+		},
+		{
+			name:       "escaped input redirect is a batch argument",
+			script:     "choco install a ^< b\r\n",
+			powerShell: "a@[unpinned]",
+			batch:      "a@[unpinned] b@[unpinned]",
+		},
+		{
+			name:       "escaped double quote does not open a batch quote",
+			script:     "echo ^\"x & choco install b\r\n",
+			powerShell: "",
+			batch:      "b@[unpinned]",
+		},
+		{
+			name:       "escaped space still separates batch arguments",
+			script:     "choco install a^ b\r\n",
+			powerShell: "b@[unpinned]",
+			batch:      "a@[unpinned] b@[unpinned]",
+		},
+		{
+			name:       "caret inside double quotes is literal",
+			script:     "choco install a --params \"^&\" b\r\n",
+			powerShell: "a@[unpinned] b@[unpinned]",
+			batch:      "a@[unpinned] b@[unpinned]",
+		},
+		{
+			name:       "caret inside double quotes does not continue",
+			script:     "choco install a --params \"x ^\r\nchoco install b\r\n",
+			powerShell: "a@[unpinned] b@[unpinned]",
+			batch:      "a@[unpinned] b@[unpinned]",
+		},
+		{
+			name:       "caret after a closed double quote continues in batch",
+			script:     "choco install a --params \"x^\" ^\r\n b\r\n",
+			powerShell: "a@[unpinned]",
+			batch:      "a@[unpinned] b@[unpinned]",
+		},
+		{
+			name:       "caret after a single quote continues in batch",
+			script:     "choco install a 'x ^\r\n b\r\n",
+			powerShell: "a@[unpinned]",
+			batch:      "a@[unpinned] b@[unpinned]",
+		},
+		{
+			name:       "doubled caret at line end does not continue",
+			script:     "choco install a ^^\r\nchoco install b\r\n",
+			powerShell: "a@[unpinned] b@[unpinned]",
+			batch:      "a@[unpinned] b@[unpinned]",
+		},
+		{
+			name:       "escaped trailing caret continues",
+			script:     "choco install a ^^^\r\n b\r\n",
+			powerShell: "a@[unpinned]",
+			batch:      "a@[unpinned] b@[unpinned]",
+		},
+		{
+			name:       "caret followed by trailing whitespace does not continue",
+			script:     "choco install a ^ \r\nchoco install b\r\n",
+			powerShell: "a@[unpinned] b@[unpinned]",
+			batch:      "a@[unpinned] b@[unpinned]",
+		},
+		{
+			name:       "continuation joins without a space",
+			script:     "choco install sev^\r\nen\r\n",
+			powerShell: "",
+			batch:      "seven@[unpinned]",
+		},
+		{
+			name:       "continuation escapes the first separator of the next line",
+			script:     "echo x ^\r\n& choco install b\r\n",
+			powerShell: "b@[unpinned]",
+			batch:      "",
+		},
+		{
+			name:       "continuation escapes the first quote of the next line",
+			script:     "echo ^\r\n\"x & choco install b\r\n",
+			powerShell: "",
+			batch:      "b@[unpinned]",
+		},
+		{
+			name:       "continuation escapes a leading caret of the next line",
+			script:     "choco install a ^\r\n^\r\nchoco install b\r\n",
+			powerShell: "a@[unpinned] b@[unpinned]",
+			batch:      "a@[unpinned] b@[unpinned]",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := scriptKeys(t, KindPowerShellScript, tt.script); got != tt.powerShell {
+				t.Errorf("ParseScript(%q, powershell) = %q, want %q", tt.script, got, tt.powerShell)
+			}
+			if got := scriptKeys(t, KindBatchScript, tt.script); got != tt.batch {
+				t.Errorf("ParseScript(%q, batch) = %q, want %q", tt.script, got, tt.batch)
+			}
+		})
+	}
+}
