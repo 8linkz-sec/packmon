@@ -41,6 +41,7 @@ var (
 	errFeedConfigSaveApplyFailed   = errors.New(web.Message("admin.feeds.error.save_apply_failed"))
 	errFeedConfigApplyUnavailable  = errors.New(web.Message("admin.feeds.error.apply_unavailable"))
 	errFeedConfigSaveConflict      = errors.New(web.Message("admin.feeds.error.save_conflict"))
+	errInvalidFeedConfigRevision   = errors.New(web.Message("admin.feeds.error.invalid_revision"))
 	errFeedConfigSaveAuditFailed   = errors.New(web.Message("admin.feeds.error.audit_log"))
 	errFeedConfigSavePersistFailed = errors.New(web.Message("admin.feeds.error.save_persist"))
 	errFeedConfigResetUnavailable  = errors.New(web.Message("admin.feeds.error.reset_unavailable"))
@@ -143,6 +144,10 @@ func (h *AdminHandler) HandleFeedConfigSave(w http.ResponseWriter, r *http.Reque
 			h.logger.Error("admin feeds: failed to load desired feed configuration", h.adminLogAttrs(r, "feed", config.NormalizeFeedName(feedName), "error", err)...)
 		}
 		redirectAdminFeedsError(w, r, errMsg, feedName)
+		return
+	}
+	if err := checkFeedConfigFormRevision(r.PostForm, previous); err != nil {
+		redirectAdminFeedsError(w, r, err.Error(), feed.Name)
 		return
 	}
 
@@ -306,6 +311,40 @@ func (h *AdminHandler) persistAndApplyFeedConfig(r *http.Request, feed config.Fe
 	return appliedRuntime, nil
 }
 
+// formatFeedConfigRevision renders the revision of a stored override for the
+// feed save and reset forms; "" means no override is stored.
+func formatFeedConfigRevision(cfg *db.FeedConfig) string {
+	if cfg == nil || cfg.UpdatedAt.IsZero() {
+		return ""
+	}
+	return cfg.UpdatedAt.UTC().Format(time.RFC3339Nano)
+}
+
+// checkFeedConfigFormRevision rejects a save or reset whose form was rendered
+// for a different override revision than previous, the override this request
+// read: another admin changed the feed after the form was rendered. The
+// request keeps previous as its kept-API-key source and revision baseline, and
+// the conditional store write rejects a change committed after that read. A
+// form without the field (a client predating it) relies on that baseline
+// alone, as the system settings form does.
+func checkFeedConfigFormRevision(form url.Values, previous *db.FeedConfig) error {
+	if _, submitted := form["updated_at"]; !submitted {
+		return nil
+	}
+	rendered, ok := parseAdminFormRevision(form.Get("updated_at"))
+	if !ok {
+		return errInvalidFeedConfigRevision
+	}
+	stored := time.Time{}
+	if previous != nil {
+		stored = previous.UpdatedAt.UTC()
+	}
+	if !rendered.Equal(stored) {
+		return errFeedConfigSaveConflict
+	}
+	return nil
+}
+
 func feedConfigRevisionExpectation(previous *db.FeedConfig) *time.Time {
 	if previous == nil {
 		zero := time.Time{}
@@ -363,6 +402,10 @@ func (h *AdminHandler) HandleFeedConfigReset(w http.ResponseWriter, r *http.Requ
 	if err != nil {
 		h.logger.Error("admin feeds: failed to load previous config", h.adminLogAttrs(r, "feed", feedName, "error", err)...)
 		redirectAdminFeedsError(w, r, web.Message("admin.feeds.error.load_config"), feedName)
+		return
+	}
+	if err := checkFeedConfigFormRevision(r.PostForm, previous); err != nil {
+		redirectAdminFeedsError(w, r, err.Error(), feedName)
 		return
 	}
 

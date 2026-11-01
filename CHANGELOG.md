@@ -81,6 +81,12 @@
   revision race used to roll the runtime back to a snapshot taken before the
   winner applied its change; apply, persistence and rollback now run as one
   step ordered against other feed saves and resets.
+- `/admin/feeds` save and reset forms carry the stored override's revision
+  (`updated_at`) like the system settings form. Submitting a form that was
+  rendered before another admin saved or reset the feed is rejected with the
+  existing conflict message instead of silently overwriting that change;
+  a malformed revision is rejected as invalid. A blank API key still keeps
+  the stored key.
 
 ### Security updates
 

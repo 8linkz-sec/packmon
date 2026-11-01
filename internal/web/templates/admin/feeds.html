@@ -308,6 +308,7 @@
           <form action="/admin/feeds/save" method="POST" class="space-y-4" data-submit-lock data-submit-lock-label="{{t "admin.feeds.form.saving"}}">
             <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
             <input type="hidden" name="feed_name" value="{{.FeedKey}}">
+            <input type="hidden" name="updated_at" value="{{.Revision}}">
             <fieldset class="space-y-4">
               <legend class="sr-only">{{t "admin.feeds.form.legend" .FeedName}}</legend>
 
@@ -442,6 +443,7 @@
           <form action="/admin/feeds/reset" method="POST" class="flex justify-start" data-submit-lock data-submit-lock-label="{{t "admin.feeds.reset.saving"}}">
             <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
             <input type="hidden" name="feed_name" value="{{.FeedKey}}">
+            <input type="hidden" name="updated_at" value="{{.Revision}}">
             <label class="me-3 flex min-h-11 cursor-pointer items-center gap-2 rounded-md px-2 py-2 text-xs text-danger-fg
               hover:bg-danger-bg focus-within:outline-none focus-within:ring-2 focus-within:ring-danger focus-within:ring-offset-2">
               <input

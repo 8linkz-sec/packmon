@@ -1136,7 +1136,10 @@ are applied to the running process immediately and are also loaded on future
 server starts. Each save or reset applies the runtime change, persists it, and
 rolls the runtime back if persistence fails as one step ordered against other
 feed saves and resets, so overlapping changes leave the runtime on the last
-committed configuration. HTTP route wiring and API handlers read mutable runtime feed
+committed configuration. The save and reset forms carry the stored override's
+revision (`updated_at`) from the rendered page; a submitted revision that no
+longer matches the stored override is rejected with the conflict message
+instead of overwriting another admin's change. HTTP route wiring and API handlers read mutable runtime feed
 state through `FeedsSnapshot()` so admin hot-reload writes cannot race with
 ReversingLabs scheduling or feed-import-secret decisions.
 
