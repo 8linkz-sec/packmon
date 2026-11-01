@@ -60,9 +60,9 @@ func TestScanTotalQueriesKeepBigintTotals(t *testing.T) {
 	}
 
 	// Compile-time contract: the Go side of the cumulative totals is int64.
+	asInt64 := func(value int64) int64 { return value }
 	totals := db.ScanTotals{PackagesScanned: math.MaxInt32 + 1, Findings: math.MaxInt32 + 1}
-	var packages, findings int64 = totals.PackagesScanned, totals.Findings
-	if packages != math.MaxInt32+1 || findings != math.MaxInt32+1 {
+	if asInt64(totals.PackagesScanned) != math.MaxInt32+1 || asInt64(totals.Findings) != math.MaxInt32+1 {
 		t.Fatalf("ScanTotals = %+v, want values above int32 preserved", totals)
 	}
 }
