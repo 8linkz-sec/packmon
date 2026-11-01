@@ -434,6 +434,12 @@ PACKMON_SERVER_PUBLIC_HOST to be localhost/127.0.0.1/::1` -- means the insecure
 override is set but the public host is not loopback. Either point the public
 host at loopback or configure real TLS / a trusted proxy.
 
+`config: invalid PACKMON_SERVER_PUBLIC_HOST (want a bare host[:port] ...)`
+means the value is not just a hostname, IPv4 address, or IPv6 literal plus an
+optional port 1-65535. Remove any scheme, path, `?query`, `#fragment`,
+`user@`, percent-escape, or whitespace (for example `packmon.internal:8443`
+or `[2001:db8::1]:8443`).
+
 ### ReversingLabs reputation feed (demand-driven)
 
 ReversingLabs is optional, self-mode only, and disabled by default
@@ -495,6 +501,35 @@ the local tables, replaces it:
 ```bash
 packmon db sync --server https://packmon.internal:8080 --full
 ```
+
+### Git hook fails with "hook scans never write inside the repository"
+
+The packmon Git hook (`packmon scan . --hook`) never writes into the
+repository. It exits with code `2` before scanning, which blocks the commit or
+push, when the scan was asked to write there and cannot skip the write:
+
+- an explicit `--output-json`, `--output-sarif`, `--output-junit`, or `--html`
+  path inside the repository. The managed hook passes none of these; a
+  hand-edited hook or a manual `packmon scan --hook` does. Remove the flag or
+  point it outside the repository.
+- the local database directory is inside the repository. The scan opens it in
+  local and auto mode and to record scan history. Typical causes: a relative
+  `PACKMON_DB_PATH` (it resolves against the repository for a hook run), a
+  `db.path` pointing into the repository, the home directory itself being a
+  Git repository (the default database lives in `~/.packmon/db`), or an
+  unknown home directory, where the default falls back to `./.packmon/db`.
+  Set `PACKMON_DB_PATH` or `db.path` to an absolute directory outside every
+  repository, or make `HOME` / `USERPROFILE` resolvable for the hook.
+
+A config `output.file` inside the repository does not fail the hook: it is
+skipped with `warning: --hook: skipping output.file <path> (inside the
+repository)` on stderr and the scan still runs. To keep that report for hook
+runs, set `output.file` to an absolute path outside the repository.
+
+If `packmon hook status` shows `packmon hook outdated`, the hook was written
+by an older packmon and runs the scan without `--hook`, so none of these
+protections apply. Rerun `packmon hook install` (with the same `--type`) in
+the repository to rewrite it.
 
 ### Server reports degraded feed status
 
@@ -731,8 +766,8 @@ from the database. To reset it:
      -c "DELETE FROM admin_auth WHERE id = 1;"
    ```
 
-2. Ensure `PACKMON_ADMIN_INITIAL_PASSWORD` (at least 12 characters) is set in
-   the server environment.
+2. Ensure `PACKMON_ADMIN_INITIAL_PASSWORD` (at least 12 characters, at most
+   72 bytes) is set in the server environment.
 3. Restart the server: `docker compose restart packmon-server`. Startup
    re-creates the admin account from the bootstrap password because no admin
    hash exists anymore.

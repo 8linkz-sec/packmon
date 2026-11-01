@@ -170,7 +170,7 @@
       <!-- Hidden username for Bitwarden/password-manager compatibility -->
       <input type="hidden" name="username" value="admin" autocomplete="username">
 
-      <p id="password-length-help" class="text-xs text-muted">{{t "admin.settings.password.length_help" .MinPasswordLength}}</p>
+      <p id="password-length-help" class="text-xs text-muted">{{t "admin.settings.password.length_help" .MinPasswordLength .MaxPasswordBytes}}</p>
       <p id="password-confirm-help" class="text-xs text-muted">{{t "admin.settings.password.confirm_help"}}</p>
 
       <div>

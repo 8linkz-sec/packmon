@@ -253,3 +253,29 @@ func TestRedirectTargetHostAndLoopbackBranches(t *testing.T) {
 		t.Fatalf("sanitizeHost(bad@host) = %q, want empty", got)
 	}
 }
+
+// TestSanitizeHostRejectsURLDelimitersAndWhitespace keeps a host that would
+// end the authority early -- a fragment or query marker -- or that carries
+// whitespace or control characters out of the "https://" + host redirect.
+// Config validation rejects such a PACKMON_SERVER_PUBLIC_HOST at startup; this
+// is the defense in depth for the redirect builder itself.
+func TestSanitizeHostRejectsURLDelimitersAndWhitespace(t *testing.T) {
+	t.Parallel()
+
+	for _, host := range []string{
+		"packmon.internal#fragment",
+		"packmon.internal?x=1",
+		"packmon .internal",
+		"packmon\t.internal",
+		"packmon\x00.internal",
+		"packmon.internal\r\nX: 1",
+		"packmon%2finternal",
+	} {
+		if got := sanitizeHost(host); got != "" {
+			t.Errorf("sanitizeHost(%q) = %q, want empty", host, got)
+		}
+		if got := redirectTargetHost(host, "127.0.0.1:8080"); got != "127.0.0.1:8080" {
+			t.Errorf("redirectTargetHost(%q) = %q, want the loopback request host", host, got)
+		}
+	}
+}

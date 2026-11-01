@@ -139,6 +139,7 @@ func TestAdminSettingsHandlersUseMessageCatalogForFlashText(t *testing.T) {
 			`web.Message("admin.settings.error.audit_log")`,
 			`web.Message("admin.settings.error.password.mismatch")`,
 			`web.Message("admin.settings.error.password.too_short"`,
+			`web.Message("admin.settings.error.password.too_long"`,
 			`web.Message("admin.settings.error.password.verify_current")`,
 			`web.Message("admin.settings.error.password.current_incorrect")`,
 			`web.Message("admin.settings.error.password.reused")`,

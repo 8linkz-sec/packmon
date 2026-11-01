@@ -664,6 +664,7 @@ Example:
 ```yaml
 mode: auto
 fail_on: CRITICAL
+# Whole seconds, 1 through 9223372036 (also for PACKMON_TIMEOUT and --timeout).
 timeout: 30
 # Set to false to omit the optional repository name from remote scan requests and webhooks.
 # send_repo_metadata: false
@@ -707,8 +708,10 @@ repository-name metadata with `send_repo_metadata: false`, but it cannot
 re-enable metadata if a higher-precedence user config, environment variable,
 or flag disabled it. A project `repos:` list replaces the user-global list;
 an entry that refers to a user-global repo (matched by name, then by path)
-inherits that repo's `send_repo_metadata: false`, server/API-key routing, and
-webhook, and keeps its own name, path (the project path wins), and scan policy.
+inherits that repo's server/API-key routing and webhook, inherits
+`send_repo_metadata: false` from every user-global repo that matches it by name
+or by path, and keeps its own name, path (the project path wins), and scan
+policy.
 Store API keys in environment variables, CI secrets, OS secret stores, or the
 user-global config. Use `api_key_env` in trusted user-global or explicit config
 files rather than writing plaintext keys.
@@ -866,8 +869,16 @@ unsafe network targets are shown as `unknown`.
 Chocolatey inventory is metadata-only as well. Packmon reads FLARE-VM /
 VM-Packages style `config.xml` package lists (a root `<config>` element with
 `<packages><package name="..."/>` entries; other `config.xml` files are ignored
-by content) and `choco install|upgrade` / `cinst` / `cup` lines in `.ps1`,
-`.psm1`, `.bat`, and `.cmd` scripts. Pinned `--version` entries are compared
+by content, and a malformed or truncated file is reported as a parse error only
+once its `<packages>` section has been read) and `choco install|upgrade` /
+`cinst` / `cup` lines in `.ps1`, `.psm1`, `.bat`, and `.cmd` scripts. Scripts
+are read with their own language's rules: `.ps1` / `.psm1` files continue lines
+with a trailing backtick and skip `#` comments, `<# ... #>` block comments, and
+here-strings (a backtick inside a comment does not continue the line);
+`.bat` / `.cmd` files continue lines with a trailing caret and skip `REM`,
+`@REM`, and `::` comment lines. Quoted text is always an argument, so a quoted
+`';'` or `'|'` neither starts a new command nor ends the package list.
+Pinned `--version` entries are compared
 with the feed's latest release; unpinned entries (config.xml always installs
 latest) show `INSTALLED -`, the feed's latest version, and status `unpinned`
 and are never counted as available updates. Lookups query the ordered feeds
@@ -890,7 +901,10 @@ enabling direct VCS fallback.
 SwiftPM Git freshness can additionally allow trusted self-hosted or mirrored
 Git hosts with `PACKMON_SWIFTPM_GIT_ALLOWED_HOSTS`; values are bare hostnames,
 and Packmon still builds the remote as `https://host/path.git` rather than
-passing raw lockfile URLs to Git.
+passing raw lockfile URLs to Git. A `Package.resolved` location whose host is
+not a valid DNS hostname (for example `git@.gitserver.example:org/repo`, or a
+non-ASCII host not written in punycode) is not used as package identity; the
+pin's identity is used instead.
 
 ## Git Hooks
 
@@ -905,18 +919,43 @@ packmon hook uninstall                 # remove packmon-managed hooks
 packmon hook status                    # show hook status for this repo
 ```
 
-The installed hook runs `packmon scan . --fail-on CRITICAL --quiet`, so a push
-(or commit) is blocked when a CRITICAL vulnerability or lifecycle finding,
-malicious package, or active supply-chain-risk finding is present, or when
-parser or operational errors prevent complete scan coverage. Quiet mode still prints
-trust-changing warnings such as remote fallback and partial parse errors to
-stderr. `install` refuses to overwrite an existing hook that packmon did not
-create; `uninstall` only removes packmon-managed hooks. Every `install` (also
-an update of an existing packmon hook) leaves the hook executable (mode
-`0755`), and `status` reports a packmon hook that lost its execute bit as
-`not executable`, because Git skips such a hook. Supported types:
-`pre-push` (default) and `pre-commit`. The hook type and fail-on threshold can
-also be set under a
+The installed hook runs `packmon scan . --hook --fail-on CRITICAL --quiet`, so
+a push (or commit) is blocked when a CRITICAL vulnerability or lifecycle
+finding, malicious package, or active supply-chain-risk finding is present, or
+when parser or operational errors prevent complete scan coverage. Quiet mode
+still prints trust-changing warnings such as remote fallback and partial parse
+errors to stderr.
+
+Apart from writing the hook file itself, neither `hook install` nor a hook run
+writes into the repository. With `--hook`, a destination counts as inside the
+repository when it resolves into the work tree or its Git directories
+(relative paths resolve against the working directory, which is the
+repository when Git runs the hook; symlinks, including dangling ones, are
+followed):
+
+- a config `output.file` inside the repository is skipped with one stderr
+  warning, also under `--quiet`
+  (`warning: --hook: skipping output.file packmon.json (inside the repository)`),
+  and the scan still runs and gates on its findings;
+- an explicit `--output-json`, `--output-sarif`, `--output-junit`, or `--html`
+  path inside the repository fails the scan with exit code `2` before it runs;
+- a local database directory (`PACKMON_DB_PATH`, `db.path`, or the default
+  `~/.packmon/db`) inside the repository fails the scan with exit code `2`
+  when the scan opens it (local or auto mode, or scan history).
+
+Report destinations outside the repository are still written. `--hook` cannot
+be combined with `--list-packages`, `--outdated`, `--list-all`, or
+`--auto-sbom`. Hooks installed by an older packmon run the scan without
+`--hook`; `hook status` reports them as `outdated`, and `packmon hook install`
+updates them. See "Troubleshooting" in `docs/runbook.md` for a hook that exits
+with code `2`.
+
+`install` refuses to overwrite an existing hook that packmon did not create;
+`uninstall` only removes packmon-managed hooks. Every `install` (also an update
+of an existing packmon hook) leaves the hook executable (mode `0755`), and
+`status` reports a packmon hook that lost its execute bit as `not executable`,
+because Git skips such a hook. Supported types: `pre-push` (default) and
+`pre-commit`. The hook type and fail-on threshold can also be set under a
 `hook:` block in `.packmon.yaml`.
 
 ## Server Configuration
@@ -925,7 +964,9 @@ Important environment variables:
 
 - `PACKMON_SERVER_MODE=production|development`
 - `PACKMON_SERVER_PORT=8080`
-- `PACKMON_SERVER_PUBLIC_HOST` (host:port clients use to reach the server)
+- `PACKMON_SERVER_PUBLIC_HOST` (host:port clients use to reach the server; a
+  bare hostname, IPv4 address, or IPv6 literal with an optional numeric port --
+  startup rejects a scheme, path, query, fragment, userinfo, or whitespace)
 - `PACKMON_TLS_CERT_FILE`, `PACKMON_TLS_KEY_FILE`,
   `PACKMON_TLS_MIN_VERSION=1.2|1.3`
 - `PACKMON_ALLOW_INSECURE_LOCAL_HTTP=false` (loopback-only override for the
@@ -957,7 +998,7 @@ Important environment variables:
 - `PACKMON_ADMIN_AUDIT_HMAC_KEY` (required in production; base64-encoded 32
   random bytes used to HMAC new admin audit digest-chain rows. Development
   mode may run without it and writes legacy `sha256:` audit digests.)
-- `PACKMON_ADMIN_INITIAL_PASSWORD` (at least 12 characters)
+- `PACKMON_ADMIN_INITIAL_PASSWORD` (at least 12 characters, at most 72 bytes)
 - `PACKMON_ADMIN_SESSION_TIMEOUT=8h`
 - `PACKMON_ADMIN_IDLE_TIMEOUT=15m`
 - `PACKMON_SCAN_LOG_RETENTION=720h` (30-day retention for server `scan_log`;
@@ -1016,7 +1057,9 @@ Saving `NONE` requires an explicit acknowledgement because it disables
 vulnerability blocking.
 Feed enablement, mode, cadence, and feed API keys can be saved from
 `/admin/feeds`; saved values are applied immediately and persisted for future
-server starts.
+server starts. A Socket.dev or ReversingLabs change restarts the refresh-queue
+workers; if the running workers miss the shutdown-timeout deadline, the new
+workers start as soon as the old ones exit.
 Strict feed imports are operator-visible. When a server rejects imported feed
 data, `/admin/feeds` shows bounded rejection diagnostics: rejected-record
 counts and reason classes, correlation ID, client/API-key attribution when

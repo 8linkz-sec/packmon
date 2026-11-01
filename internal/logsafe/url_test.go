@@ -119,6 +119,26 @@ func TestRedactDiagnosticMessageRemovesURLsTokensAndPaths(t *testing.T) {
 	}
 }
 
+// TestRedactDiagnosticMessageRemovesPostgresDSNCredentials covers database
+// driver errors that echo the connection URL: its userinfo carries the
+// database password.
+func TestRedactDiagnosticMessageRemovesPostgresDSNCredentials(t *testing.T) {
+	t.Parallel()
+
+	for _, raw := range []string{
+		"cannot connect to postgres://packmon:dsn-secret-pass@db.internal:5432/packmon?sslmode=require: refused",
+		"cannot connect to POSTGRESQL://packmon:dsn-secret-pass@db.internal/packmon: refused",
+	} {
+		got := RedactDiagnosticMessage(raw)
+		if strings.Contains(got, "dsn-secret-pass") || strings.Contains(got, "sslmode") {
+			t.Fatalf("RedactDiagnosticMessage(%q) = %q, want DSN credentials and query removed", raw, got)
+		}
+		if !strings.Contains(got, "db.internal") || !strings.Contains(got, "refused") {
+			t.Fatalf("RedactDiagnosticMessage(%q) = %q, want host and failure class kept", raw, got)
+		}
+	}
+}
+
 func TestRedactDiagnosticMessageBlankIsEmpty(t *testing.T) {
 	t.Parallel()
 
@@ -168,6 +188,85 @@ func TestRedactDiagnosticMessageRedactsSecretAssignments(t *testing.T) {
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("RedactDiagnosticMessage missing %q in %q", want, got)
+		}
+	}
+}
+
+// TestRedactDiagnosticMessageRedactsWholeQuotedSecretValues covers libpq-style
+// key/value DSNs, where a value with spaces is quoted: redacting only the first
+// token used to leave the rest of the secret in the message.
+func TestRedactDiagnosticMessageRedactsWholeQuotedSecretValues(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		raw    string
+		leaked []string
+		want   string
+	}{
+		{
+			raw:    `cannot parse dsn: host=db password='first second third' sslmode=require`,
+			leaked: []string{"first", "second", "third"},
+			want:   `host=db password=[redacted] sslmode=require`,
+		},
+		{
+			raw:    `cannot parse dsn: password="dq first dq-second" user=packmon`,
+			leaked: []string{"dq first", "dq-second"},
+			want:   `password=[redacted] user=packmon`,
+		},
+		{
+			// libpq escapes a quote inside a quoted value with a backslash.
+			raw:    `password='it\'s a secret' dbname=packmon`,
+			leaked: []string{"it", "s a secret"},
+			want:   `password=[redacted] dbname=packmon`,
+		},
+		{
+			raw:    `password=unquoted-secret; next`,
+			leaked: []string{"unquoted-secret"},
+			want:   `password=[redacted]; next`,
+		},
+		{
+			raw:    `password=plain&next=1`,
+			leaked: []string{"plain"},
+			want:   `password=[redacted]&next=1`,
+		},
+		// A quote does not end the value: characters after the closing quote
+		// up to the next delimiter belong to the same value.
+		{
+			raw:    `password="ab"cd user=packmon`,
+			leaked: []string{"ab", "cd"},
+			want:   `password=[redacted] user=packmon`,
+		},
+		{
+			raw:    `password=''secret user=packmon`,
+			leaked: []string{"secret"},
+			want:   `password=[redacted] user=packmon`,
+		},
+		{
+			raw:    `password='a b'c d=1`,
+			leaked: []string{"a b", "'c"},
+			want:   `password=[redacted] d=1`,
+		},
+		// A backslash-escaped space does not end an unquoted value.
+		{
+			raw:    `password=foo\ bar user=packmon`,
+			leaked: []string{"foo", "bar"},
+			want:   `password=[redacted] user=packmon`,
+		},
+		// An unterminated quote redacts the rest of the message.
+		{
+			raw:    `password='never closed secret`,
+			leaked: []string{"never", "closed", "secret"},
+			want:   `password=[redacted]`,
+		},
+	} {
+		got := RedactDiagnosticMessage(tt.raw)
+		for _, leaked := range tt.leaked {
+			if strings.Contains(got, leaked) {
+				t.Fatalf("RedactDiagnosticMessage(%q) = %q, leaked %q", tt.raw, got, leaked)
+			}
+		}
+		if !strings.Contains(got, tt.want) {
+			t.Fatalf("RedactDiagnosticMessage(%q) = %q, want %q", tt.raw, got, tt.want)
 		}
 	}
 }

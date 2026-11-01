@@ -408,6 +408,11 @@ func overlayCLIRegistryConfig(dst *cliRegistryConfig, src cliRegistryConfig) {
 // refers to a trusted entry inherits that entry's routing and privacy
 // restriction. Without the inheritance, a project entry naming a trusted repo
 // silently dropped its send_repo_metadata: false.
+//
+// Routing comes from a single trusted entry (matchCLIRepoConfig), while the
+// metadata opt-out is applied from every trusted entry that matches by name or
+// by path: a project entry that reuses one trusted repo's name for another
+// trusted repo's directory must not shed that directory's opt-out.
 func overlayCLIReposConfig(dst *cliConfig, src cliConfig) {
 	if len(src.Repos) == 0 {
 		return
@@ -417,6 +422,7 @@ func overlayCLIReposConfig(dst *cliConfig, src cliConfig) {
 		if j := matchCLIRepoConfig(dst.Repos, repos[i]); j >= 0 {
 			inheritTrustedCLIRepoConfig(&repos[i], dst.Repos[j])
 		}
+		inheritTrustedCLIRepoMetadataOptOuts(&repos[i], dst.Repos)
 	}
 	dst.Repos = repos
 }
@@ -467,6 +473,21 @@ func inheritTrustedCLIRepoConfig(dst *cliRepoConfig, trusted cliRepoConfig) {
 		dst.APIKeyEnv = trusted.APIKeyEnv
 	}
 	dst.Webhook = trusted.Webhook
+	inheritTrustedCLIRepoMetadataOptOut(dst, trusted)
+}
+
+// inheritTrustedCLIRepoMetadataOptOuts applies the send_repo_metadata: false of
+// every trusted entry that the project entry matches by name or by path, not
+// only of the entry its routing comes from.
+func inheritTrustedCLIRepoMetadataOptOuts(dst *cliRepoConfig, trusted []cliRepoConfig) {
+	for i := range trusted {
+		if trusted[i].Name == dst.Name || sameCLIRepoPath(trusted[i].Path, dst.Path) {
+			inheritTrustedCLIRepoMetadataOptOut(dst, trusted[i])
+		}
+	}
+}
+
+func inheritTrustedCLIRepoMetadataOptOut(dst *cliRepoConfig, trusted cliRepoConfig) {
 	if trusted.SendRepoMetadata != nil && !*trusted.SendRepoMetadata {
 		dst.SendRepoMetadata = trusted.SendRepoMetadata
 	}
@@ -539,6 +560,9 @@ func validateTopLevelCLIConfig(c *cliConfig) error {
 	}
 	if c.Timeout < 0 {
 		return fmt.Errorf("timeout must not be negative")
+	}
+	if err := validateTimeoutUpperBound("timeout", c.Timeout); err != nil {
+		return err
 	}
 	if err := validateOutputConfig(c.Output); err != nil {
 		return err
@@ -615,6 +639,9 @@ func validateCLIRepoConfig(repo *cliRepoConfig, index int) error {
 	}
 	if repo.Timeout < 0 {
 		return fmt.Errorf("repos[%d].timeout must not be negative", index)
+	}
+	if err := validateTimeoutUpperBound(fmt.Sprintf("repos[%d].timeout", index), repo.Timeout); err != nil {
+		return err
 	}
 	return nil
 }

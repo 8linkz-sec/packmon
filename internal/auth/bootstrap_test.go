@@ -177,6 +177,9 @@ func TestBootstrapAdminUsesAuditedWriteWhenAvailable(t *testing.T) {
 	}
 }
 
+// TestBootstrapAdminRejectsPasswordOverBcryptLimitWithoutWrites reports an
+// over-long PACKMON_ADMIN_INITIAL_PASSWORD as the password policy violation it
+// is, not as a bcrypt hash failure, and writes nothing.
 func TestBootstrapAdminRejectsPasswordOverBcryptLimitWithoutWrites(t *testing.T) {
 	t.Parallel()
 
@@ -184,16 +187,16 @@ func TestBootstrapAdminRejectsPasswordOverBcryptLimitWithoutWrites(t *testing.T)
 	err := BootstrapAdmin(
 		context.Background(),
 		store,
-		strings.Repeat("p", 73),
+		strings.Repeat("p", MaxAdminPasswordBytes+1),
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	)
-	if err == nil {
-		t.Fatal("BootstrapAdmin() error = nil, want bcrypt length error")
+	if !errors.Is(err, ErrAdminPasswordTooLong) {
+		t.Fatalf("BootstrapAdmin(73-byte password) error = %v, want ErrAdminPasswordTooLong", err)
 	}
-	if !errors.Is(err, bcrypt.ErrPasswordTooLong) {
-		t.Fatalf("BootstrapAdmin() error = %v, want bcrypt.ErrPasswordTooLong", err)
+	if errors.Is(err, bcrypt.ErrPasswordTooLong) || strings.Contains(err.Error(), "hash") {
+		t.Fatalf("BootstrapAdmin(73-byte password) error = %v, want a policy error rather than a hash error", err)
 	}
 	if store.auth != nil || store.upserts != 0 || store.audits != 0 {
-		t.Fatalf("store after bcrypt error = %+v, want no bootstrap writes or audit", store)
+		t.Fatalf("store after policy error = %+v, want no bootstrap writes or audit", store)
 	}
 }

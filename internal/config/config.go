@@ -1019,44 +1019,84 @@ func envPublicHostOrDefault(key, fallback string) (string, error) {
 	return strings.TrimSpace(value), nil
 }
 
+// validatePublicHost accepts only a bare host[:port]. The value is pasted into
+// "https://" + host + path redirects and generated links, so anything beyond a
+// hostname, IPv4 address, or IPv6 literal plus an optional numeric port -- a
+// scheme, path, query, fragment, userinfo, percent-escape, whitespace, or
+// control character -- would change or truncate those URLs.
 func validatePublicHost(key, raw string) error {
+	invalid := fmt.Errorf("config: invalid %s (want a bare host[:port] without scheme, path, query, fragment, userinfo, or whitespace)", key)
 	hostport := strings.TrimSpace(raw)
-	if hostport == "" || strings.ContainsAny(hostport, "/\\@") || strings.Contains(hostport, "://") {
-		return fmt.Errorf("config: invalid %s (want host[:port] without scheme, path, or userinfo)", key)
+	if hostport == "" {
+		return invalid
 	}
 	host := hostport
 	port := ""
-	if strings.HasPrefix(hostport, "[") {
+	hasPort := false
+	bracketed := false
+	switch {
+	case strings.HasPrefix(hostport, "["):
 		end := strings.Index(hostport, "]")
 		if end < 0 {
-			return fmt.Errorf("config: invalid %s (want host[:port] without scheme, path, or userinfo)", key)
+			return invalid
 		}
+		bracketed = true
 		host = hostport[1:end]
-		rest := hostport[end+1:]
-		if rest != "" {
-			if !strings.HasPrefix(rest, ":") || strings.Count(rest, ":") != 1 {
-				return fmt.Errorf("config: invalid %s (want host[:port] without scheme, path, or userinfo)", key)
+		if rest := hostport[end+1:]; rest != "" {
+			if !strings.HasPrefix(rest, ":") {
+				return invalid
 			}
-			port = strings.TrimPrefix(rest, ":")
+			port, hasPort = rest[1:], true
 		}
-	} else if h, p, err := net.SplitHostPort(hostport); err == nil {
-		host, port = h, p
-	} else if strings.Count(hostport, ":") == 1 {
-		idx := strings.LastIndex(hostport, ":")
-		host, port = hostport[:idx], hostport[idx+1:]
-	} else if strings.Contains(hostport, ":") {
-		host = hostport
+	case strings.Count(hostport, ":") == 1:
+		idx := strings.IndexByte(hostport, ':')
+		host, port, hasPort = hostport[:idx], hostport[idx+1:], true
 	}
-	if strings.TrimSpace(host) == "" {
-		return fmt.Errorf("config: invalid %s (want host[:port] without scheme, path, or userinfo)", key)
+	if !validPublicHostName(host, bracketed) {
+		return invalid
 	}
-	if port != "" {
+	if hasPort {
 		parsed, err := strconv.Atoi(port)
-		if err != nil || parsed < 1 || parsed > 65535 {
+		if !isASCIIDigits(port) || err != nil || parsed < 1 || parsed > 65535 {
 			return fmt.Errorf("config: invalid %s (want host[:port] with port between 1 and 65535)", key)
 		}
 	}
 	return nil
+}
+
+// validPublicHostName reports whether host is an IPv6 literal (bracketed, or
+// unbracketed without a port) or a hostname/IPv4 address made of ASCII
+// letters, digits, '.', '-', and '_' only.
+func validPublicHostName(host string, bracketed bool) bool {
+	if host == "" {
+		return false
+	}
+	if bracketed || strings.Contains(host, ":") {
+		// net.ParseIP also rejects zone identifiers, which would need escaping.
+		return strings.Contains(host, ":") && net.ParseIP(host) != nil
+	}
+	for i := 0; i < len(host); i++ {
+		c := host[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '.', c == '-', c == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func isASCIIDigits(value string) bool {
+	if value == "" {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		if value[i] < '0' || value[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func parseLogLevel(key, raw string) (string, error) {
