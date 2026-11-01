@@ -24,10 +24,11 @@ const redactedKeyNames = `api[_-]?key|access[_-]?token|refresh[_-]?token|client[
 // (\\) escapes the next character of the embedded value, so \\\" is an
 // escaped quote inside the value and does not end it, and any other escape
 // (\n) or plain character, spaces included, belongs to the value. An
-// unterminated value redacts the rest of the message. RE2 matches it in
+// unterminated value redacts the rest of the message, also when the message
+// is cut off after any number of trailing backslashes. RE2 matches it in
 // linear time.
 func escapedQuotedValue(q string) string {
-	return `\\` + q + `(?:\\\\(?:\\(?s:.)|[^\\])|\\[^` + q + `\\]|[^\\])*(?:\\` + q + `|\\?$)`
+	return `\\` + q + `(?:\\\\(?:\\(?s:.)|[^\\])|\\[^` + q + `\\]|[^\\])*(?:\\` + q + `|\\*$)`
 }
 
 var (

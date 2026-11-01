@@ -410,6 +410,28 @@ func TestRedactDiagnosticMessageRedactsEscapedJSONStringValues(t *testing.T) {
 	}
 }
 
+// TestRedactDiagnosticMessageRedactsTruncatedEscapedValues cuts a message off
+// inside an escaped secret value after one, two, or three backslashes, as a
+// bounded log value can: the whole rest of the message must be redacted.
+func TestRedactDiagnosticMessageRedactsTruncatedEscapedValues(t *testing.T) {
+	t.Parallel()
+
+	for _, tail := range []string{`\`, `\\`, `\\\`} {
+		for _, prefix := range []string{`{"body":"{\"token\":\"`, `{\'secret\': \'`} {
+			raw := prefix + `first second cut-secret` + tail
+			got := RedactDiagnosticMessage(raw)
+			for _, leaked := range []string{"first", "second", "cut-secret"} {
+				if strings.Contains(got, leaked) {
+					t.Fatalf("RedactDiagnosticMessage(%q) = %q, leaked %q", raw, got, leaked)
+				}
+			}
+			if !strings.HasSuffix(got, "[redacted]") {
+				t.Fatalf("RedactDiagnosticMessage(%q) = %q, want the rest of the message redacted", raw, got)
+			}
+		}
+	}
+}
+
 // TestRedactDiagnosticMessageRedactsOnlySecretEscapedJSONFields keeps the
 // non-secret fields of an escaped JSON object readable.
 func TestRedactDiagnosticMessageRedactsOnlySecretEscapedJSONFields(t *testing.T) {
