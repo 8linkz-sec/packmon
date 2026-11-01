@@ -539,7 +539,15 @@ Important behavior:
   unavailable upstream metadata are reported as unknown rather than failing
   the scan. Its terminal and HTML reports include
   the same package provenance columns (`scope`, `relation`, `via`, and flags)
-  as `--list-all`. For npm transitive packages with known immediate parents,
+  as `--list-all`. The `--outdated` HTML report also carries the list-all
+  report's warning lines below its summary badges, capped at five with one
+  "N additional warnings were omitted from the top of this report." line: an
+  "Inventory incomplete: N files could not be parsed: ..." line that names
+  each unparsed lockfile or SBOM by file name only (no directory, no parser
+  detail; the full diagnostics stay on stderr), followed by the registry
+  lookup warnings for refused or failed requests, oversized responses, and the
+  consecutive-failure breaker, worded as in the list-all report. A run without
+  such warnings renders no warning lines. For npm transitive packages with known immediate parents,
   Packmon resolves the highest version allowed by the parents' dependency
   ranges and does not report a registry-latest major as an actionable update
   when the parent range cannot select it. GitHub Actions pinned by commit SHA

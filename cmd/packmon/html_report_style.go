@@ -1,5 +1,7 @@
 package main
 
+import "fmt"
+
 const cliHTMLReportHeadPrefix = `<!DOCTYPE html>
 <html lang="{{.Lang}}" dir="auto">
 <head>
@@ -32,3 +34,28 @@ h1{font-size:var(--report-type-xl);margin:0;color:var(--heading);overflow-wrap:a
 .meta,.footer{overflow-wrap:anywhere;word-break:break-word;}
 .footer{border-top:1px solid var(--border);margin-top:var(--report-space-7);padding-top:var(--report-space-3);color:var(--dim);font-size:var(--report-type-xs);}
 `
+
+// maxHTMLReportWarnings caps the warning lines at the top of a CLI HTML
+// report; the rest collapse into one omitted-count line, so a long warning
+// list cannot push the report content below the fold.
+const maxHTMLReportWarnings = 5
+
+// cliHTMLReportWarningCSS styles the warning lines at the top of a CLI HTML
+// report. The list-all and outdated reports share it with
+// cliHTMLReportWarningsBlock, so their diagnostics look the same.
+const cliHTMLReportWarningCSS = `.warning{margin:var(--report-space-5) 0;padding:var(--report-space-3) var(--report-space-4);background:var(--warning-bg);` +
+	`border:1px solid var(--warning);border-radius:var(--report-radius-md);color:var(--warning);` +
+	`font-size:var(--report-type-md);}`
+
+// cliHTMLReportWarningsBlock renders the report's Warnings, already capped by
+// limitHTMLReportWarnings, one line each.
+const cliHTMLReportWarningsBlock = `{{range .Warnings}}<div class="warning"><bdi dir="auto">{{.}}</bdi></div>{{end}}`
+
+func limitHTMLReportWarnings(warnings []string) []string {
+	if len(warnings) <= maxHTMLReportWarnings {
+		return warnings
+	}
+	out := append([]string(nil), warnings[:maxHTMLReportWarnings]...)
+	out = append(out, fmt.Sprintf("%d additional warnings were omitted from the top of this report.", len(warnings)-maxHTMLReportWarnings))
+	return out
+}

@@ -181,7 +181,7 @@ func TestResolveOutdatedStatusesUsesConfiguredLatestRegistryFallback(t *testing.
 	t.Parallel()
 
 	var called atomic.Bool
-	statuses := resolveOutdatedStatuses([]outdatedPackage{{
+	statuses, _ := resolveOutdatedStatuses([]outdatedPackage{{
 		Name:      "private",
 		Version:   "1.0.0",
 		Ecosystem: domain.EcosystemHex,

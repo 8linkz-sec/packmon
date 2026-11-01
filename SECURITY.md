@@ -654,7 +654,8 @@ do not put free-form operational text back into `feed_status`.
 Feed-degraded responses must be visible so CI/N8N can make policy decisions.
 SARIF, JUnit, and HTML artifacts must carry degraded-feed, stale-local-DB, and
 parse-error diagnostics instead of presenting incomplete coverage as a clean
-scan. Partial lockfile/SBOM parse errors exit with parser failure unless a
+scan. That includes the `--outdated` HTML report, which names each unparsed
+lockfile or SBOM by file name only, never by full path. Partial lockfile/SBOM parse errors exit with parser failure unless a
 blocking finding has already failed the scan (the `--list-packages` and
 `--outdated` inventory views, `--outdated --quiet` included, have no findings
 and exit with parser failure on any parse error), and in-scope discovery

@@ -547,25 +547,36 @@ func appendLookupPhaseWarnings(report *listAllPackageReport, phase *registryLook
 	if canceled {
 		return
 	}
-	if report.RefusedRequests > 0 {
-		report.Warnings = append(report.Warnings, fmt.Sprintf(
+	report.Warnings = append(report.Warnings, registryLookupPhaseReportWarnings(
+		report.RefusedRequests, report.OversizedResponses, report.SkippedRequests, report.BreakerTripped,
+	)...)
+}
+
+// registryLookupPhaseReportWarnings words the lookup-phase failures for the
+// warnings at the top of a report. The list-all and outdated reports share it,
+// so the same failure reads the same in both.
+func registryLookupPhaseReportWarnings(refused, oversized, skipped int, breakerTripped bool) []string {
+	var warnings []string
+	if refused > 0 {
+		warnings = append(warnings, fmt.Sprintf(
 			"%d registry requests were refused or failed, so some latest-version data is missing and the update status of the affected rows is incomplete. A registry rate limit or a slow registry is the usual cause -- rerun the scan, raise --timeout, or route the lookups through a mirror.",
-			report.RefusedRequests,
+			refused,
 		))
 	}
-	if report.OversizedResponses > 0 {
-		report.Warnings = append(report.Warnings, fmt.Sprintf(
+	if oversized > 0 {
+		warnings = append(warnings, fmt.Sprintf(
 			"%d registry responses exceeded the CLI's response size limit and were discarded, so some latest-version data is missing and the update status of the affected rows is incomplete. "+
 				"The limit bounds memory use; this is not a rate limit or a timeout, so rerunning the scan or allowing more time does not help.",
-			report.OversizedResponses,
+			oversized,
 		))
 	}
-	if report.BreakerTripped {
-		report.Warnings = append(report.Warnings, fmt.Sprintf(
+	if breakerTripped {
+		warnings = append(warnings, fmt.Sprintf(
 			"%d lookups were skipped after %d consecutive registry request failures; latest-version lookups were aborted. Check network connectivity and proxy settings, then rerun the scan.",
-			report.SkippedRequests, registryBreakerThreshold,
+			skipped, registryBreakerThreshold,
 		))
 	}
+	return warnings
 }
 
 func listAllContainsDockerPackage(packages []listAllPackage) bool {
