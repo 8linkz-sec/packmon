@@ -24,6 +24,10 @@
   count ReversingLabs `malware_history` (historical risk) reputation rows as
   `LOW`, the severity of the informational finding they produce, instead of the
   stored provider severity (often `HIGH`). Stored reputation data is unchanged.
+- PostgreSQL scan totals no longer fail once a retained sum exceeds
+  2147483647: the cumulative `/metrics` package/finding totals and the daily
+  findings sum on the scans page are read as BIGINT instead of being cast to
+  int.
 
 ### Security updates
 

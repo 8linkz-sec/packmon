@@ -1,6 +1,9 @@
 package postgres
 
 import (
+	"math"
+	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/8linkz-sec/packmon/internal/db"
@@ -38,6 +41,29 @@ func TestDashboardReputationSeverityMatchesFindingContract(t *testing.T) {
 
 	if got := dashboardReputationSeverity(reputationStatusRisk, "HIGH"); got != string(domain.SeverityLow) {
 		t.Fatalf("dashboardReputationSeverity(risk, HIGH) = %q, want LOW for informational malware_history", got)
+	}
+}
+
+// TestScanTotalQueriesKeepBigintTotals guards the cumulative and daily scan
+// totals against narrowing to PostgreSQL int: scan_log_totals exposes BIGINT
+// sums (migration 043), and a ::int cast fails once a retained sum exceeds
+// 2147483647.
+func TestScanTotalQueriesKeepBigintTotals(t *testing.T) {
+	t.Parallel()
+
+	narrowingCast := regexp.MustCompile(`::int\b`)
+	if narrowingCast.MatchString(scanTotalsSQL) {
+		t.Fatalf("scanTotalsSQL narrows BIGINT totals to int:\n%s", scanTotalsSQL)
+	}
+	if !strings.Contains(countScansByDaySQL, "COALESCE(SUM(scan_log.findings_count), 0)::bigint") {
+		t.Fatalf("countScansByDaySQL must keep the daily findings sum as bigint:\n%s", countScansByDaySQL)
+	}
+
+	// Compile-time contract: the Go side of the cumulative totals is int64.
+	totals := db.ScanTotals{PackagesScanned: math.MaxInt32 + 1, Findings: math.MaxInt32 + 1}
+	var packages, findings int64 = totals.PackagesScanned, totals.Findings
+	if packages != math.MaxInt32+1 || findings != math.MaxInt32+1 {
+		t.Fatalf("ScanTotals = %+v, want values above int32 preserved", totals)
 	}
 }
 

@@ -28,13 +28,20 @@ const countScansByDaySQL = `
 	SELECT
 		to_char(days.day AT TIME ZONE 'UTC', 'YYYY-MM-DD'),
 		COUNT(scan_log.id)::int,
-		COALESCE(SUM(scan_log.findings_count), 0)::int
+		COALESCE(SUM(scan_log.findings_count), 0)::bigint
 	FROM days
 	LEFT JOIN scan_log
 		ON scan_log.scanned_at >= days.day
 		AND scan_log.scanned_at < days.day + INTERVAL '1 day'
 	GROUP BY days.day
 	ORDER BY days.day ASC`
+
+// scanTotalsSQL reads the BIGINT cumulative totals exposed by the
+// scan_log_totals view (migration 043) without narrowing them.
+const scanTotalsSQL = `
+	SELECT packages_scanned, findings
+	FROM scan_log_totals
+	WHERE id = TRUE`
 
 func (s *Store) ListRecentVulnerabilities(ctx context.Context, days, limit int) ([]db.RecentVulnerability, error) {
 	if limit <= 0 || limit > 50 {
@@ -131,10 +138,7 @@ func (s *Store) CountScansByDay(ctx context.Context, days int) ([]db.DailyScanSt
 
 func (s *Store) ScanTotals(ctx context.Context) (*db.ScanTotals, error) {
 	totals := &db.ScanTotals{}
-	if err := s.pool.QueryRow(ctx, `
-		SELECT packages_scanned::int, findings::int
-		FROM scan_log_totals
-		WHERE id = TRUE`).Scan(&totals.PackagesScanned, &totals.Findings); err != nil {
+	if err := s.pool.QueryRow(ctx, scanTotalsSQL).Scan(&totals.PackagesScanned, &totals.Findings); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return totals, nil
 		}

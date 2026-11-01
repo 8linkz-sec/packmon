@@ -4,6 +4,7 @@ package postgres
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 
@@ -21,6 +22,44 @@ func TestPostgresStoreCorrectnessAgainstDocker(t *testing.T) {
 	t.Run("dashboard buckets historical reputation risk as LOW", func(t *testing.T) {
 		testDashboardBucketsHistoricalReputationRiskAsLow(ctx, t, store)
 	})
+	t.Run("scan totals above int32 are not narrowed", func(t *testing.T) {
+		testScanTotalsAboveInt32AreNotNarrowed(ctx, t, store)
+	})
+}
+
+func testScanTotalsAboveInt32AreNotNarrowed(ctx context.Context, t *testing.T, store *Store) {
+	t.Helper()
+
+	now := time.Now().UTC()
+	for i, scanID := range []string{"scan-bigint-1", "scan-bigint-2"} {
+		if err := store.InsertScanLog(ctx, &db.ScanLogEntry{
+			ScanID:         scanID,
+			ScannedAt:      now.Add(time.Duration(i) * time.Millisecond),
+			BlockThreshold: "CRITICAL",
+			FeedStatus:     "healthy",
+			PackagesCount:  math.MaxInt32,
+			FindingsCount:  math.MaxInt32,
+		}); err != nil {
+			t.Fatalf("InsertScanLog(%s) error = %v", scanID, err)
+		}
+	}
+	const want = int64(2 * math.MaxInt32)
+
+	totals, err := store.ScanTotals(ctx)
+	if err != nil {
+		t.Fatalf("ScanTotals() error = %v, want BIGINT totals above int32", err)
+	}
+	if totals.PackagesScanned < want || totals.Findings < want {
+		t.Fatalf("ScanTotals() = %+v, want both totals >= %d", totals, want)
+	}
+
+	daily, err := store.CountScansByDay(ctx, 1)
+	if err != nil {
+		t.Fatalf("CountScansByDay(1) error = %v, want BIGINT daily findings sum", err)
+	}
+	if len(daily) != 1 || int64(daily[0].FindingsCount) < want || daily[0].ScanCount < 2 {
+		t.Fatalf("CountScansByDay(1) = %+v, want today's findings sum >= %d over >= 2 scans", daily, want)
+	}
 }
 
 func testDashboardBucketsHistoricalReputationRiskAsLow(ctx context.Context, t *testing.T, store *Store) {
