@@ -101,6 +101,12 @@
   when the same batch also asks for concrete versions of it, so the empty
   version still returns every active malicious finding of the package, as
   `FindMalicious(..., "")` and a versionless-only batch already did.
+- The vulnerability batch lookup (PostgreSQL and local SQLite) and the local
+  SQLite malicious batch lookup apply the same rule: a versionless request
+  next to a concrete version of the same package no longer drops the
+  all-versions match, so a local scan and `/api/v1/check` return the same
+  findings for such a batch. Requested versions are deduplicated per package
+  in request order.
 - Manual advisory writes and deletes on PostgreSQL use the normalized
   (trimmed) advisory ID throughout. A padded ID such as ` manual:x ` no longer
   leaves both the vulnerability and the malicious record active after a type

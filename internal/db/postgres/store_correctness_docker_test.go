@@ -40,6 +40,9 @@ func TestPostgresStoreCorrectnessAgainstDocker(t *testing.T) {
 	t.Run("malicious batch keeps empty version beside concrete versions", func(t *testing.T) {
 		testMaliciousBatchKeepsEmptyVersionBesideConcreteVersions(ctx, t, store)
 	})
+	t.Run("vulnerability batch keeps empty version beside concrete versions", func(t *testing.T) {
+		testVulnerabilityBatchKeepsEmptyVersionBesideConcreteVersions(ctx, t, store)
+	})
 	t.Run("manual advisory writes and deletes use the normalized ID", func(t *testing.T) {
 		testManualAdvisoryUsesNormalizedID(ctx, t, store)
 	})
@@ -237,6 +240,49 @@ func testMaliciousBatchKeepsEmptyVersionBesideConcreteVersions(ctx context.Conte
 	}
 	if len(mixed) != 1 || mixed[0].Version != "" || mixed[0].AdvisoryID != "MAL-batch-empty-version" {
 		t.Fatalf("FindMaliciousBatch(empty + 2.0.0) = %+v, want only the versionless finding (2.0.0 is unaffected)", mixed)
+	}
+}
+
+func testVulnerabilityBatchKeepsEmptyVersionBesideConcreteVersions(ctx context.Context, t *testing.T, store *Store) {
+	t.Helper()
+
+	if err := store.UpsertVulnerability(ctx, &db.Vulnerability{
+		ID:        "GHSA-batc-hemp-tyvr",
+		Summary:   "affects only 1.0.0",
+		Severity:  "HIGH",
+		Published: time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC),
+		Modified:  time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC),
+		Sources:   []db.VulnerabilitySource{{Source: "ghsa", SourceID: "GHSA-batc-hemp-tyvr"}},
+		AffectedPackages: []db.AffectedPackage{{
+			Ecosystem:        "npm",
+			Name:             "vuln-batch-empty-version",
+			VersionRanges:    json.RawMessage(`[]`),
+			VersionsAffected: json.RawMessage(`["1.0.0"]`),
+		}},
+	}); err != nil {
+		t.Fatalf("UpsertVulnerability() error = %v", err)
+	}
+
+	single, err := store.FindVulnerabilities(ctx, "npm", "vuln-batch-empty-version", "")
+	if err != nil {
+		t.Fatalf("FindVulnerabilities(empty version) error = %v", err)
+	}
+	if len(single) != 1 {
+		t.Fatalf("FindVulnerabilities(empty version) = %+v, want the all-versions match", single)
+	}
+
+	for _, batch := range [][]db.PackageQuery{
+		{{Ecosystem: "npm", Name: "vuln-batch-empty-version"}},
+		{{Ecosystem: "npm", Name: "vuln-batch-empty-version"}, {Ecosystem: "npm", Name: "vuln-batch-empty-version", Version: "2.0.0"}},
+		{{Ecosystem: "npm", Name: "vuln-batch-empty-version", Version: "2.0.0"}, {Ecosystem: "npm", Name: "vuln-batch-empty-version"}, {Ecosystem: "npm", Name: "vuln-batch-empty-version"}},
+	} {
+		got, err := store.FindVulnerabilitiesBatch(ctx, batch)
+		if err != nil {
+			t.Fatalf("FindVulnerabilitiesBatch(%+v) error = %v", batch, err)
+		}
+		if len(got) != 1 || got[0].Version != "" || got[0].AdvisoryID != "GHSA-batc-hemp-tyvr" {
+			t.Fatalf("FindVulnerabilitiesBatch(%+v) = %+v, want only the versionless finding (2.0.0 is unaffected)", batch, got)
+		}
 	}
 }
 

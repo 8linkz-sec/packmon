@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/8linkz-sec/packmon/internal/db"
@@ -260,14 +261,17 @@ func packageLookupValues(packages []db.PackageQuery) (string, []any) {
 	return strings.Join(placeholders, ", "), args
 }
 
+// packageVersionsByKey groups the distinct requested versions per canonical
+// package, in request order, for the vulnerability and malicious batch
+// lookups. An empty version is kept: as in FindVulnerabilities(..., "") and
+// FindMalicious(..., ""), it asks for every active finding of the package
+// regardless of affected versions, also when the same batch requests concrete
+// versions of that package.
 func packageVersionsByKey(packages []db.PackageQuery) map[packageLookupKey][]string {
 	versionMap := make(map[packageLookupKey][]string, len(packages))
 	for _, pkg := range packages {
 		key := packageKey(pkg)
-		if _, ok := versionMap[key]; !ok {
-			versionMap[key] = nil
-		}
-		if pkg.Version != "" {
+		if !slices.Contains(versionMap[key], pkg.Version) {
 			versionMap[key] = append(versionMap[key], pkg.Version)
 		}
 	}
@@ -345,9 +349,11 @@ func findingsFromVulnerabilityRow(row vulnerabilityRow, versions []string) []dom
 
 	findings := make([]domain.Finding, 0, len(versions))
 	for _, version := range versions {
-		affected, matchErr := versionAffectedWithEcosystem(version, row.versionRangesRaw, row.versionsRaw, row.ecosystem)
-		if matchErr == nil && !affected {
-			continue
+		if version != "" {
+			affected, matchErr := versionAffectedWithEcosystem(version, row.versionRangesRaw, row.versionsRaw, row.ecosystem)
+			if matchErr == nil && !affected {
+				continue
+			}
 		}
 		findings = append(findings, findingForVersion(version))
 	}
