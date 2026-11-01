@@ -733,9 +733,14 @@ operator-supplied ID use stable `manual:<uuid>` IDs. The admin advisory list is
 paginated so older manual coverage remains reachable. Manual advisory
 create/update/delete operations write admin-audit records with the affected
 record details; PostgreSQL commits the advisory mutation and audit entry in the
-same transaction. Inventory-only ecosystems (Docker, Chocolatey) are not
-accepted for manual scan advisories because their support does not imply
-vulnerability coverage.
+same transaction. A manual advisory update replaces the stored record: its
+severity (also when lowered), summary, description (also when cleared), and
+affected package (coverage moved to another package no longer reports the
+previous one), so the stored advisory matches the audited edit. Feed merges
+keep their own retention rules (no severity downgrade, empty details keep the
+stored text, affected packages are only added). Inventory-only ecosystems
+(Docker, Chocolatey) are not accepted for manual scan advisories because their
+support does not imply vulnerability coverage.
 
 ## Feed Sources
 
@@ -1168,9 +1173,16 @@ audit digests. Feed
 setting audit entries record previous and new enablement, mode, cadence, and
 whether an API key is configured, but never the raw API key. Feed setting changes
 are applied to the running process immediately and are also loaded on future
-server starts. HTTP route wiring and API handlers read mutable runtime feed
-state through `FeedsSnapshot()` so admin hot-reload writes cannot race with
-ReversingLabs scheduling or feed-import-secret decisions.
+server starts. Each save or reset applies the runtime change, persists it, and
+rolls the runtime back if persistence fails as one step ordered against other
+feed saves and resets, so overlapping changes leave the runtime on the last
+committed configuration. The save and reset forms carry the stored override's
+revision (`updated_at`) from the rendered page; a submitted revision that no
+longer matches the stored override is rejected with the conflict message
+instead of overwriting another admin's change. HTTP route wiring and API
+handlers read mutable runtime feed state through `FeedsSnapshot()` so admin
+hot-reload writes cannot race with ReversingLabs scheduling or
+feed-import-secret decisions.
 
 Production PostgreSQL connections default to `sslmode=verify-full` so the
 client verifies both transport encryption and database server identity. Local
