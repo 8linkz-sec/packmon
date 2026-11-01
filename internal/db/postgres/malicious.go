@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -102,6 +103,22 @@ func maliciousFindingAffectsVersion(ecosystem, version, rangesJSON, versionsJSON
 	return affected
 }
 
+// maliciousBatchVersions groups the distinct requested versions per canonical
+// package, in request order. An empty version is kept: as in
+// FindMalicious(..., ""), it asks for every active finding of the package
+// regardless of affected versions, also when the same batch requests concrete
+// versions of that package.
+func maliciousBatchVersions(packages []db.PackageQuery) map[packageLookupKey][]string {
+	versionMap := make(map[packageLookupKey][]string, len(packages))
+	for _, pkg := range packages {
+		key := packageKey(pkg)
+		if !slices.Contains(versionMap[key], pkg.Version) {
+			versionMap[key] = append(versionMap[key], pkg.Version)
+		}
+	}
+	return versionMap
+}
+
 func (s *Store) FindMaliciousBatch(ctx context.Context, packages []db.PackageQuery) ([]domain.Finding, error) {
 	if len(packages) == 0 {
 		return nil, nil
@@ -140,19 +157,7 @@ func (s *Store) FindMaliciousBatch(ctx context.Context, packages []db.PackageQue
 	}
 	defer ioutils.CloseSilently(rows)
 
-	type pkgVersions struct{ versions []string }
-	versionMap := make(map[ecoName]*pkgVersions, len(packages))
-	for _, pkg := range packages {
-		key := ecoName{ecosystem: pkg.Ecosystem, name: normalizePackageName(pkg.Ecosystem, pkg.Name)}
-		entry, ok := versionMap[key]
-		if !ok {
-			entry = &pkgVersions{}
-			versionMap[key] = entry
-		}
-		if pkg.Version != "" {
-			entry.versions = append(entry.versions, pkg.Version)
-		}
-	}
+	versionMap := maliciousBatchVersions(packages)
 
 	var findings []domain.Finding
 	for rows.Next() {
@@ -168,22 +173,16 @@ func (s *Store) FindMaliciousBatch(ctx context.Context, packages []db.PackageQue
 			source = "unknown"
 		}
 
-		key := ecoName{ecosystem: ecosystem, name: normalizePackageName(ecosystem, name)}
-		entry := versionMap[key]
-		if entry != nil && len(entry.versions) > 0 {
-			for _, version := range entry.versions {
-				if !maliciousFindingAffectsVersion(ecosystem, version, versionRangesRaw, versionsRaw) {
-					continue
-				}
-				findings = append(findings, domain.Finding{
-					Name: name, Version: version, Ecosystem: domain.Ecosystem(ecosystem),
-					Type: db.FindingTypeForMaliciousRiskType(riskType), Severity: domain.Severity(normalizeSeverity(severity)),
-					AdvisoryID: id, Title: title, URL: extractFirstURL(referenceURLsRaw), RiskType: riskType, Source: source,
-				})
+		versions := versionMap[packageLookupKey{ecosystem: ecosystem, name: normalizePackageName(ecosystem, name)}]
+		if len(versions) == 0 {
+			versions = []string{""}
+		}
+		for _, version := range versions {
+			if !maliciousFindingAffectsVersion(ecosystem, version, versionRangesRaw, versionsRaw) {
+				continue
 			}
-		} else {
 			findings = append(findings, domain.Finding{
-				Name: name, Ecosystem: domain.Ecosystem(ecosystem),
+				Name: name, Version: version, Ecosystem: domain.Ecosystem(ecosystem),
 				Type: db.FindingTypeForMaliciousRiskType(riskType), Severity: domain.Severity(normalizeSeverity(severity)),
 				AdvisoryID: id, Title: title, URL: extractFirstURL(referenceURLsRaw), RiskType: riskType, Source: source,
 			})

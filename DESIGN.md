@@ -733,9 +733,14 @@ operator-supplied ID use stable `manual:<uuid>` IDs. The admin advisory list is
 paginated so older manual coverage remains reachable. Manual advisory
 create/update/delete operations write admin-audit records with the affected
 record details; PostgreSQL commits the advisory mutation and audit entry in the
-same transaction. Inventory-only ecosystems (Docker, Chocolatey) are not
-accepted for manual scan advisories because their support does not imply
-vulnerability coverage.
+same transaction. A manual advisory update replaces the stored record: its
+severity (also when lowered), summary, description (also when cleared), and
+affected package (coverage moved to another package no longer reports the
+previous one), so the stored advisory matches the audited edit. Feed merges
+keep their own retention rules (no severity downgrade, empty details keep the
+stored text, affected packages are only added). Inventory-only ecosystems
+(Docker, Chocolatey) are not accepted for manual scan advisories because their
+support does not imply vulnerability coverage.
 
 ## Feed Sources
 

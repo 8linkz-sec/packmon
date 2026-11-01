@@ -79,6 +79,36 @@
   `docs/monitoring/packmon-alerts.yml` use `for: 0m`. Their `for` duration
   equalled the `increase()` range, so an isolated event left the range before
   the alert could fire. Re-import the rule file if you deployed it.
+- The dashboard severity buckets and the `/metrics` finding-severity totals
+  count ReversingLabs `malware_history` (historical risk) reputation rows as
+  `LOW`, the severity of the informational finding they produce, instead of the
+  stored provider severity (often `HIGH`). Stored reputation data is unchanged.
+- PostgreSQL scan totals no longer fail once a retained sum exceeds
+  2147483647: the cumulative `/metrics` package/finding totals and the daily
+  findings sum on the scans page are read as BIGINT instead of being cast to
+  int.
+- The GHSA affected-package repair writes canonical package names (PyPI
+  separator/case folding, NuGet and GitHub Actions lowercase, trimmed) like
+  every feed upsert, so repair-only rows such as PyPI `My.Pkg_Name` or NuGet
+  `Newtonsoft.Json` match canonical lookups and new repairs no longer add
+  a duplicate beside the canonical row.
+- One stored GHSA advisory with `affected: null` (or an object/scalar where an
+  array is expected, or range `events` that are null or not an array) no
+  longer aborts the GHSA affected-package repair for every advisory. A
+  package whose reconstructed ranges or versions the schema would reject is
+  skipped and keeps its feed-written row.
+- PostgreSQL `FindMaliciousBatch` keeps a versionless request for a package
+  when the same batch also asks for concrete versions of it, so the empty
+  version still returns every active malicious finding of the package, as
+  `FindMalicious(..., "")` and a versionless-only batch already did.
+- Manual advisory writes and deletes on PostgreSQL use the normalized
+  (trimmed) advisory ID throughout. A padded ID such as ` manual:x ` no longer
+  leaves both the vulnerability and the malicious record active after a type
+  change, and deleting it no longer reports "not found".
+- Editing a manual vulnerability advisory replaces its stored state instead of
+  going through the feed merge: a `HIGH` -> `LOW` edit is stored as `LOW`, a
+  cleared description is cleared, and moving coverage from package A to B no
+  longer leaves A affected. Feed severity/details retention is unchanged.
 
 ### Security updates
 

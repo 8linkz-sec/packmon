@@ -313,8 +313,8 @@ func (s *Store) ScanTotals(context.Context) (*db.ScanTotals, error) {
 
 	totals := &db.ScanTotals{}
 	for _, entry := range s.scanLogs {
-		totals.PackagesScanned += entry.PackagesCount
-		totals.Findings += entry.FindingsCount
+		totals.PackagesScanned += int64(entry.PackagesCount)
+		totals.Findings += int64(entry.FindingsCount)
 	}
 	return totals, nil
 }
