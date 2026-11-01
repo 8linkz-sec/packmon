@@ -168,12 +168,14 @@ func runListAllScanOutputPhase(ctx context.Context, settings scanSettings) (list
 		collection: collection,
 	}
 	if err != nil {
+		// A history write failure still comes with a completed scan result:
+		// like the normal scan path, write the requested artifacts first and
+		// let the caller return the history error afterwards.
 		var historyErr *scanHistoryRecordError
-		if errors.As(err, &historyErr) {
-			scan.historyErr = historyErr
-			return scan, nil
+		if !errors.As(err, &historyErr) {
+			return scan, withDefaultExitCode(exitCode, err)
 		}
-		return scan, withDefaultExitCode(exitCode, err)
+		scan.historyErr = historyErr
 	}
 
 	if writeScanOutputArtifacts(settings, result, failOn, false) {
@@ -797,7 +799,9 @@ func resolveDockerImageStatusWithDigestResolver(ctx context.Context, p listAllPa
 			return dockerimage.LocalInspector{}.Digests(inspectCtx, []dockerimage.Ref{ref})
 		}()
 	}
-	localDigest := localDigests[ref.Name]
+	// Keyed per tag: two installed tags of one repository are separate images
+	// and must not share a comparison baseline.
+	localDigest := localDigests[dockerimage.LocalDigestKey(ref)]
 	if localDigest == "" {
 		return packageLatestStatus{Latest: shortDigest(remoteDigest), LatestCopy: remoteDigest, Update: "unknown", Unknown: true}
 	}

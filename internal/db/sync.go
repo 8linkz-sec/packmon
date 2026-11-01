@@ -29,6 +29,12 @@ type SyncExport struct {
 	Lifecycle       []SyncLifecycleRelease
 	Truncated       bool
 	NextCursor      *SyncCursor
+	// VulnerabilityAffectedComplete reports that this export is a single-page
+	// delta (since window, not paginated) that sends every vulnerability it
+	// includes with all of its current affected packages (within the requested
+	// ecosystems), so a delta client can drop local affected rows of that
+	// vulnerability the page did not send.
+	VulnerabilityAffectedComplete bool
 }
 
 // SyncCursor carries per-dataset pagination state for /api/v1/sync exports.

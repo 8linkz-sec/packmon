@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -391,10 +392,12 @@ func (s *Store) findVulnerabilitiesBatchChunk(ctx context.Context, chunk localPa
 		}
 
 		for _, version := range versions {
-			constraintRanges, constraintVersions := db.NormalizeVersionConstraintJSON(nullableStringValue(rangesJSON), nullableStringValue(versionsJSON))
-			affected, matchErr := versionpkg.VersionAffected(version, constraintRanges, constraintVersions, eco)
-			if matchErr == nil && !affected {
-				continue
+			if version != "" {
+				constraintRanges, constraintVersions := db.NormalizeVersionConstraintJSON(nullableStringValue(rangesJSON), nullableStringValue(versionsJSON))
+				affected, matchErr := versionpkg.VersionAffected(version, constraintRanges, constraintVersions, eco)
+				if matchErr == nil && !affected {
+					continue
+				}
 			}
 			findings = append(findings, localVulnerabilityFinding(id, eco, pkg, version, rangesJSON.String, refsJSON.String, severity, summary.String, source.String))
 		}
@@ -802,7 +805,11 @@ func localPackagePredicateChunks(packages []db.PackageQuery, maxKeys int) []loca
 			builders[chunkIndex].values = append(builders[chunkIndex].values, `(?, ?)`)
 			builders[chunkIndex].args = append(builders[chunkIndex].args, ecosystem, name)
 		}
-		if version := strings.TrimSpace(pkg.Version); version != "" {
+		// An empty version is kept: as in FindVulnerabilities/FindMalicious
+		// with an empty version, it asks for every finding of the package,
+		// also when the same batch requests concrete versions of it.
+		version := strings.TrimSpace(pkg.Version)
+		if !slices.Contains(builders[chunkIndex].versionsByPackage[key], version) {
 			builders[chunkIndex].versionsByPackage[key] = append(builders[chunkIndex].versionsByPackage[key], version)
 		}
 	}

@@ -271,15 +271,23 @@ func (c *packageUpdateCache) gitRemoteTagCommit(ctx context.Context, remote, tag
 	c.tagCommitsInflight[key] = call
 	c.mu.Unlock()
 
-	commit, ok := c.resolver.gitRemoteTagCommit(ctx, remote, tag)
-
-	c.mu.Lock()
-	call.commit = commit
-	call.ok = ok
-	c.tagCommits[key] = gitTagCommitCacheEntry{commit: commit, ok: ok}
-	delete(c.tagCommitsInflight, key)
-	close(call.done)
-	c.mu.Unlock()
+	var commit string
+	var ok, completed bool
+	// Deferred so a resolver panic still completes the in-flight call:
+	// waiters see a failed lookup, nothing is cached, and the panic goes on.
+	defer func() {
+		c.mu.Lock()
+		call.commit = commit
+		call.ok = ok
+		if completed {
+			c.tagCommits[key] = gitTagCommitCacheEntry{commit: commit, ok: ok}
+		}
+		delete(c.tagCommitsInflight, key)
+		close(call.done)
+		c.mu.Unlock()
+	}()
+	commit, ok = c.resolver.gitRemoteTagCommit(ctx, remote, tag)
+	completed = true
 	return commit, ok
 }
 
@@ -304,14 +312,22 @@ func (c *packageUpdateCache) fetchLatestVersion(ctx context.Context, eco domain.
 	c.latestInflight[key] = call
 	c.mu.Unlock()
 
-	value := c.resolver.latestVersion(ctx, eco, name)
-
-	c.mu.Lock()
-	call.value = value
-	c.latest[key] = value
-	delete(c.latestInflight, key)
-	close(call.done)
-	c.mu.Unlock()
+	var value string
+	completed := false
+	// Deferred so a resolver panic still completes the in-flight call:
+	// waiters see a failed lookup, nothing is cached, and the panic goes on.
+	defer func() {
+		c.mu.Lock()
+		call.value = value
+		if completed {
+			c.latest[key] = value
+		}
+		delete(c.latestInflight, key)
+		close(call.done)
+		c.mu.Unlock()
+	}()
+	value = c.resolver.latestVersion(ctx, eco, name)
+	completed = true
 	return value
 }
 
@@ -336,15 +352,23 @@ func (c *packageUpdateCache) fetchNPMMetadata(ctx context.Context, name string) 
 	c.npmMetadataInflight[key] = call
 	c.mu.Unlock()
 
-	value, ok := c.resolver.npmMetadata(ctx, name)
-
-	c.mu.Lock()
-	call.value = value
-	call.ok = ok
-	c.npmMetadata[key] = npmMetadataCacheEntry{value: value, ok: ok}
-	delete(c.npmMetadataInflight, key)
-	close(call.done)
-	c.mu.Unlock()
+	var value npmRegistryMetadata
+	var ok, completed bool
+	// Deferred so a resolver panic still completes the in-flight call:
+	// waiters see a failed lookup, nothing is cached, and the panic goes on.
+	defer func() {
+		c.mu.Lock()
+		call.value = value
+		call.ok = ok
+		if completed {
+			c.npmMetadata[key] = npmMetadataCacheEntry{value: value, ok: ok}
+		}
+		delete(c.npmMetadataInflight, key)
+		close(call.done)
+		c.mu.Unlock()
+	}()
+	value, ok = c.resolver.npmMetadata(ctx, name)
+	completed = true
 	return value, ok
 }
 
@@ -949,11 +973,17 @@ func registryGetLimitedWithHeaders(ctx context.Context, url string, limit int64,
 		}
 		return nil, fmt.Errorf("status %d", resp.StatusCode)
 	}
-	phase.recordSuccess()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
+		// A reset connection or a per-request timeout mid-body left the lookup
+		// without an answer: count it like a failed request, not a success.
+		if phaseCtx.Err() == nil {
+			phase.recordRefusal()
+		}
 		return nil, err
 	}
+	// Only a completely read body is an answer that resets the breaker streak.
+	phase.recordSuccess()
 	if int64(len(data)) > limit {
 		return nil, fmt.Errorf("registry response exceeds %d byte limit", limit)
 	}

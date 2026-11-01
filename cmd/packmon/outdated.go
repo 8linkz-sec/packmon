@@ -139,7 +139,9 @@ func runOutdatedWithOptions(args []string, opts outdatedOptions) error {
 		return withDefaultExitCode(ExitOperational, finishOutdatedReport(opts, report))
 	}
 
-	fmt.Fprintf(os.Stderr, "Checking %s for updates...\n", plural.Count(len(packages), "package", "packages"))
+	if !opts.Quiet {
+		fmt.Fprintf(os.Stderr, "Checking %s for updates...\n", plural.Count(len(packages), "package", "packages"))
+	}
 
 	results := resolveOutdatedStatuses(packages, opts)
 	report = applyOutdatedStatusesToReport(report, packages, results)

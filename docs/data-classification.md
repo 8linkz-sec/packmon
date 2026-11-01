@@ -12,7 +12,7 @@ code. This map summarizes where data lives and which controls apply.
 | `PACKMON_ENCRYPTION_KEY` | Deployment secret manager | Secret | Required in production; backed up with the recovery set; not stored in Packmon source or database. |
 | Admin password hash and sessions | PostgreSQL for password hash; process memory for sessions | Secret-derived/auth state | Bcrypt password hash; HttpOnly admin cookie; CSRF on writes; sessions tied to the single-server model. |
 | Admin audit log | PostgreSQL | Sensitive audit evidence | Includes action, source IP, details, timestamps, digest chain; retention-controlled. |
-| Scan log rollup | PostgreSQL | Internal operational metadata | Stores scan ID, optional path-minimized repo name, package/finding counts, decision evidence, correlation ID, digest, and API-key metadata. |
+| Scan log | PostgreSQL | Internal operational metadata | Stores scan ID, optional path-minimized repo name, package/finding counts, decision evidence, correlation ID, digest, and API-key metadata. |
 | Local scan history | SQLite | Local developer metadata | Compact repository name, branch, commit, counts, finding IDs, and timestamps; local retention controls. |
 | Refresh queue jobs | PostgreSQL | Internal operational metadata | Package coordinates, source, status, priority, retry/error state; admin mutations are audit logged. |
 | Logs | Server stdout/stderr or deployment log sink | Operational metadata | Must not contain secrets, full environment values, file contents, or full local paths. |
