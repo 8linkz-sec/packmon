@@ -29,14 +29,15 @@ It can run as a local CLI, as a central API server, or both together.
 - Writes results as a self-contained HTML report, JSON, SARIF, or JUnit XML,
   so CI systems and humans read the same scan.
 
-It ships as a local CLI, a central API/web server, and CI/CD scanner workflows,
-with production-oriented Docker Compose assets and example N8N workflow
-templates (CLI-based starting points, shipped disabled -- see
-`deploy/n8n/README.md`), onboarding scripts for Bash and PowerShell, a documented PostgreSQL backup and
-restore flow, localhost-only metrics exposure by default, CLI warnings for stale
-local advisory data, and operational documentation, ADRs, and integration/E2E
-test entry points. Vulnerability, lifecycle, and outdated-version coverage for
-the canonical package ecosystems comes from free public sources; the optional
+It ships as a local CLI and a central API/web server whose JSON, SARIF, and
+JUnit outputs plug into CI pipelines, with production-oriented Docker Compose
+assets and example N8N workflow templates (CLI-based starting points, shipped
+disabled -- see `deploy/n8n/README.md`), onboarding scripts for Bash and
+PowerShell, a documented PostgreSQL backup and restore flow, localhost-only
+metrics exposure by default, CLI warnings for stale local advisory data, and
+operational documentation, ADRs, and integration/E2E test entry points.
+Vulnerability, lifecycle, and outdated-version coverage for the canonical
+package ecosystems comes from free public sources; the optional
 account/API-key reputation feeds are not required.
 
 Every command has built-in help. Run `packmon --help` for the command list and
@@ -490,9 +491,9 @@ pair: when only one is set, the other is copied from it, and when both are
 blank one shared value is generated. If both are set to different values,
 `init-secrets` keeps them and prints a warning that names the two variables
 (never their values), because a fresh bundled PostgreSQL would reject the
-server login. `docker compose up --build` then runs
-the database migration automatically before starting the server. The same two
-commands work identically on Windows, macOS, and Linux.
+server login. `docker compose up --build` then runs the database migration
+automatically before starting the server. The same two commands work
+identically on Windows, macOS, and Linux.
 
 `init-secrets` writes into the bind-mounted checkout, so it runs as
 `${PACKMON_UID:-1000}:${PACKMON_GID:-1000}` instead of the image's `packmon`
@@ -506,8 +507,9 @@ bash scripts/init-secrets.sh
 
 The wrapper detects rootless Docker (`docker info` lists `rootless` under
 security options) and uses `0:0` there, because rootless Docker maps container
-root to your host user. Explicit `PACKMON_UID` / `PACKMON_GID` values in your
-environment always win over the detected defaults.
+root to your host user. An explicit `PACKMON_UID` or `PACKMON_GID` in your
+environment wins over the detected default for that variable only: setting just
+`PACKMON_UID=<n>` under rootless Docker runs the container as `<n>:0`.
 
 Admins can later adjust `.env`, feed-provider API keys, TLS/proxy settings, and
 other deployment-specific values before shared or production use.
@@ -523,8 +525,8 @@ Then create the API key that CLI agents need for remote scans:
 
 1. Go to `http://localhost:8080/admin/keys`.
 2. Enter a key name such as `local-agent`.
-3. Set an RFC3339 UTC expiration timestamp, for example
-   `2026-12-31T23:59:59Z`.
+3. Choose an expiration: a preset lifetime (default 30 days) or `Custom` with a
+   whole number of days from 1 to 365.
 4. Enter the current admin password you set under `/admin/settings`.
 5. Create the key and copy the displayed token once.
 
@@ -1025,12 +1027,13 @@ Manual advisories can be managed from `/admin/advisories` as either
 vulnerability or malicious findings. The inventory-only ecosystems (Docker,
 Chocolatey) are not offered there because Packmon's support for them is
 metadata-only inventory, not vulnerability coverage.
-API keys can be created with a required RFC3339 UTC expiration timestamp,
-revoked, and permanently deleted after revocation from `/admin/keys`; the
-delete action stays recorded in the admin audit log. Creation requires
-the current admin password and expiration must be no more than 365 days in the
-future. Create separate named keys per client class so `last_used_at` and
-revocation are useful.
+API keys can be created with a required expiration, revoked, and permanently
+deleted after revocation from `/admin/keys`; the delete action stays recorded
+in the admin audit log. Creation requires the current admin password. The
+expiration is a lifetime in whole days -- a preset of 1, 7, 14, 30, 90, 180, or
+365 days (default 30) or a custom value from 1 to 365 -- so a key never expires
+more than 365 days in the future. Create separate named keys per client class
+so `last_used_at` and revocation are useful.
 Existing keys created before expiration support may show no expiration. Those
 legacy keys do not expire automatically; rotate, revoke, or delete them
 manually when you no longer want them accepted.
@@ -1149,16 +1152,23 @@ GOTMPDIR="$PWD/.gotmp" go test -count=1 ./tests/ci
 `go test -count=1 ./tests/ci` validates repository governance and
 configuration gates (Dockerfile hardening, Compose defaults, documentation
 cross-references, agent permissions).
-`make test-ci` is available as a wrapper on systems with `make`. A real GitLab
-Runner smoke test remains externally dependent on an available GitLab project
-and registered runner.
+`make test-ci` is available as a wrapper on systems with `make`.
 
-Build both binaries before tagged integration and E2E tests:
+There is no hosted CI: the repository has no GitHub Actions workflows, and the
+former hosted release pipeline was removed. The commands in this section, or
+`make verify`, are the gate. `ci/gitlab/.packmon-scan.yml` remains only as an
+unoperated consumer template; `tests/ci` checks only that its container image
+stays digest-pinned, it has not been run on a real GitLab runner, and its
+hardening is deferred (see `docs/deferred-scope.md`).
+
+Build both binaries before tagged integration and E2E tests. The `integration`
+tag gates tests in `./tests/integration`, `./internal/db/postgres`,
+`./internal/db/postgres/migrations`, and `./internal/server`:
 
 ```bash
 go build -o .build/packmon ./cmd/packmon
 go build -o .build/packmon-server ./cmd/packmon-server
-PACKMON_TEST_BIN_DIR=.build go test -count=1 -tags integration ./tests/integration
+PACKMON_TEST_BIN_DIR=.build go test -count=1 -tags integration ./tests/integration ./internal/db/postgres ./internal/db/postgres/migrations ./internal/server
 PACKMON_TEST_BIN_DIR=.build go test -count=1 -tags e2e ./tests/e2e
 ```
 
@@ -1184,7 +1194,7 @@ gosec -nosec-require-rules -nosec-require-justification $gosecDirs
 go build -o .build\packmon.exe .\cmd\packmon
 go build -o .build\packmon-server.exe .\cmd\packmon-server
 $env:PACKMON_TEST_BIN_DIR = ".build"
-go test -count=1 -tags integration .\tests\integration
+go test -count=1 -tags integration .\tests\integration .\internal\db\postgres .\internal\db\postgres\migrations .\internal\server
 go test -count=1 -tags e2e .\tests\e2e
 ```
 

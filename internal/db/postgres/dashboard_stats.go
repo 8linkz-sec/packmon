@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/8linkz-sec/packmon/internal/db"
@@ -27,13 +28,20 @@ const countScansByDaySQL = `
 	SELECT
 		to_char(days.day AT TIME ZONE 'UTC', 'YYYY-MM-DD'),
 		COUNT(scan_log.id)::int,
-		COALESCE(SUM(scan_log.findings_count), 0)::int
+		COALESCE(SUM(scan_log.findings_count), 0)::bigint
 	FROM days
 	LEFT JOIN scan_log
 		ON scan_log.scanned_at >= days.day
 		AND scan_log.scanned_at < days.day + INTERVAL '1 day'
 	GROUP BY days.day
 	ORDER BY days.day ASC`
+
+// scanTotalsSQL reads the BIGINT cumulative totals exposed by the
+// scan_log_totals view (migration 043) without narrowing them.
+const scanTotalsSQL = `
+	SELECT packages_scanned, findings
+	FROM scan_log_totals
+	WHERE id = TRUE`
 
 func (s *Store) ListRecentVulnerabilities(ctx context.Context, days, limit int) ([]db.RecentVulnerability, error) {
 	if limit <= 0 || limit > 50 {
@@ -130,10 +138,7 @@ func (s *Store) CountScansByDay(ctx context.Context, days int) ([]db.DailyScanSt
 
 func (s *Store) ScanTotals(ctx context.Context) (*db.ScanTotals, error) {
 	totals := &db.ScanTotals{}
-	if err := s.pool.QueryRow(ctx, `
-		SELECT packages_scanned::int, findings::int
-		FROM scan_log_totals
-		WHERE id = TRUE`).Scan(&totals.PackagesScanned, &totals.Findings); err != nil {
+	if err := s.pool.QueryRow(ctx, scanTotalsSQL).Scan(&totals.PackagesScanned, &totals.Findings); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return totals, nil
 		}
@@ -219,36 +224,45 @@ func (s *Store) loadDashboardStats(ctx context.Context) (*db.DashboardStatsResul
 		return nil, time.Time{}, fmt.Errorf("postgres: dashboard totals: %w", err)
 	}
 
+	// Reputation rows are grouped by status as well as stored severity so each
+	// group lands in the bucket of the finding it produces: storage keeps the
+	// provider severity, but a malware_history (status=risk) finding is
+	// informational and always LOW.
 	rows, err := tx.Query(ctx, `
-		SELECT severity, COUNT(*)::int
+		SELECT reputation_status, severity, COUNT(*)::int
 		FROM (
-			SELECT id, severity
+			SELECT ''::text AS reputation_status, severity
 			FROM vulnerabilities
 			WHERE withdrawn IS NULL
 			UNION ALL
-			SELECT id, severity
+			SELECT ''::text AS reputation_status, severity
 			FROM malicious_findings
 			WHERE removed_at IS NULL
 			UNION ALL
-			SELECT 'reputation:' || id::text AS id, severity
+			SELECT status AS reputation_status, severity
 			FROM package_reputation_cache
 			WHERE status IN ('malicious', 'removed', 'risk')
 		) current_findings
-		GROUP BY severity`)
+		GROUP BY reputation_status, severity`)
 	if err != nil {
 		return nil, time.Time{}, fmt.Errorf("postgres: dashboard severities: %w", err)
 	}
 
 	for rows.Next() {
 		var (
-			severity string
-			count    int
+			reputationStatus string
+			severity         string
+			count            int
 		)
-		if err := rows.Scan(&severity, &count); err != nil {
+		if err := rows.Scan(&reputationStatus, &severity, &count); err != nil {
 			rows.Close()
 			return nil, time.Time{}, fmt.Errorf("postgres: scan dashboard severity row: %w", err)
 		}
-		stats.BySeverity[normalizeSeverity(severity)] = count
+		bucket := normalizeSeverity(severity)
+		if reputationStatus != "" {
+			bucket = dashboardReputationSeverity(reputationStatus, severity)
+		}
+		stats.BySeverity[bucket] += count
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
@@ -261,10 +275,25 @@ func (s *Store) loadDashboardStats(ctx context.Context) (*db.DashboardStatsResul
 	return stats, databaseMidnight, nil
 }
 
+// dashboardReputationSeverity returns the dashboard severity bucket of a cached
+// reputation row: the severity of the finding reputationToFinding emits for
+// it, so informational malware_history rows count as LOW and an unknown
+// provider severity counts as CRITICAL. Statuses that produce no finding keep
+// their normalized stored severity.
+func dashboardReputationSeverity(status, severity string) string {
+	mapping, ok := reversingLabsReputationStatusMapping(strings.ToLower(strings.TrimSpace(status)), severity)
+	if !ok {
+		return normalizeSeverity(severity)
+	}
+	return string(mapping.severity)
+}
+
 // CountUnknownSeverityFindings counts active findings whose stored severity
 // normalizes to UNKNOWN (empty or literal unknown), matching the UNKNOWN
 // bucket of DashboardStats without running the full dashboard aggregate. The
-// admin feeds page uses it for the NVD enrichment hint.
+// admin feeds page uses it for the NVD enrichment hint. Reputation rows never
+// land in that bucket because their findings map an unknown provider severity
+// to CRITICAL (dashboardReputationSeverity).
 func (s *Store) CountUnknownSeverityFindings(ctx context.Context) (int, error) {
 	var count int
 	err := s.pool.QueryRow(ctx, `
@@ -274,9 +303,6 @@ func (s *Store) CountUnknownSeverityFindings(ctx context.Context) (int, error) {
 			   AND (TRIM(severity) = '' OR UPPER(TRIM(severity)) = 'UNKNOWN'))
 			+ (SELECT COUNT(*) FROM malicious_findings
 			 WHERE removed_at IS NULL
-			   AND (TRIM(severity) = '' OR UPPER(TRIM(severity)) = 'UNKNOWN'))
-			+ (SELECT COUNT(*) FROM package_reputation_cache
-			 WHERE status IN ('malicious', 'removed', 'risk')
 			   AND (TRIM(severity) = '' OR UPPER(TRIM(severity)) = 'UNKNOWN'))
 		)::int`).Scan(&count)
 	if err != nil {

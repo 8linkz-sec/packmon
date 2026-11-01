@@ -11,7 +11,8 @@ It must work as:
 
 - a local CLI for developers;
 - a central feed/API server for teams;
-- a CI/CD scanner for GitHub Actions and GitLab CI;
+- a CI/CD scanner (exit codes plus JSON/SARIF/JUnit output; GitLab consumer
+  template only);
 - an automation component for N8N workflows.
 
 The expected scale is internal organizational use: hundreds of developers and
@@ -19,8 +20,9 @@ tens of thousands of unique packages. Packmon is not designed as a public SaaS
 or a public internet-facing API.
 
 The canonical source repository and Go module path are
-`github.com/8linkz-sec/packmon`; release metadata, CI templates, generated
-report links, and internal imports must use that namespace consistently.
+`github.com/8linkz-sec/packmon`; release metadata, the GitLab consumer
+template, generated report links, and internal imports must use that namespace
+consistently.
 
 HTTP handlers and middleware own their persistence boundaries. API v1 scan/read,
 feed-import, admin, API-key auth, and admin bootstrap code depend on small
@@ -42,7 +44,7 @@ unrelated persistence capabilities do not leak across subsystem boundaries.
   - `1`: blocking findings;
   - `2`: operational error;
   - `3`: findings below the blocking threshold (non-blocking; treated as a
-    passing pipeline by the shipped CI templates);
+    passing pipeline by the GitLab consumer template);
   - `4`: parser error, including partial lockfile/SBOM parse errors when no
     blocking finding has already failed the scan;
   - `10`: internal bug.
@@ -186,9 +188,12 @@ Packmon's maintained deployment surfaces are intentionally narrow:
   every container recreation into the slowest and most failure-prone
   operation the server performs.
 - `deploy/n8n` contains workflow templates that call the Packmon server over
-  authenticated HTTPS APIs. Command-node templates use environment variables,
-  short-lived `mktemp` files with cleanup traps, and path-minimized webhook
-  responses.
+  authenticated HTTPS APIs. Command-node templates use environment variables
+  and path-minimized webhook responses and write no scan or report artifacts:
+  `deploy/n8n/on-demand-scan.sh` validates `PACKMON_SERVER`,
+  `PACKMON_API_KEY`, and a relative, traversal-free `PACKMON_SCAN_PATH`, then
+  runs `packmon scan` in `--mode remote --require-remote` with no output-file
+  flags.
 - The first-party GitHub Actions workflows and the hosted release pipeline
   were removed in August 2026 (internal deployment, no hosted CI);
   `ci/gitlab/.packmon-scan.yml` remains only as an unoperated consumer
@@ -290,6 +295,16 @@ Important behavior:
   Malicious and active supply-chain risk findings still block independently of
   that threshold; historical ReversingLabs malware-incident evidence is `LOW`
   reputation info and does not block by itself.
+- The CLI's own `--fail-on` threshold is authoritative for the CLI result in
+  every mode. In `remote` mode (and auto mode served remotely) the CLI takes the
+  server's findings but recomputes `findings_blocking` locally from them with
+  its `--fail-on` value and records that value as `block_threshold`; the
+  server's `findings_blocking` and `block_threshold` are not carried over. The
+  CLI exit code, CLI JSON/SARIF/JUnit/HTML output, and CLI-sent webhooks
+  therefore follow `--fail-on`. The server's effective threshold
+  (`PACKMON_BLOCK_THRESHOLD` or the admin runtime setting) applies only to the
+  server's own `POST /api/v1/check` response and its scan log, so the two can
+  differ for the same scan.
 - Auto mode reports the actual execution path in `ScanResult.mode`: successful
   server-backed checks report `remote`, while local fallback reports `local`.
 - Discovery failures for in-scope files or directories are operational errors;
@@ -567,7 +582,8 @@ Important behavior:
 The server provides:
 
 - `POST /api/v1/check` for package-list checks;
-- `GET /api/v1/sync` for local SQLite sync;
+- `GET /api/v1/sync` for local SQLite sync (reputation rows only while
+  ReversingLabs is enabled in `self` mode; see "Local SQLite Mode");
 - feed status and import endpoints;
 - refresh queue endpoints;
 - health, readiness, version, and metrics endpoints;
@@ -723,9 +739,14 @@ operator-supplied ID use stable `manual:<uuid>` IDs. The admin advisory list is
 paginated so older manual coverage remains reachable. Manual advisory
 create/update/delete operations write admin-audit records with the affected
 record details; PostgreSQL commits the advisory mutation and audit entry in the
-same transaction. Inventory-only ecosystems (Docker, Chocolatey) are not
-accepted for manual scan advisories because their support does not imply
-vulnerability coverage.
+same transaction. A manual advisory update replaces the stored record: its
+severity (also when lowered), summary, description (also when cleared), and
+affected package (coverage moved to another package no longer reports the
+previous one), so the stored advisory matches the audited edit. Feed merges
+keep their own retention rules (no severity downgrade, empty details keep the
+stored text, affected packages are only added). Inventory-only ecosystems
+(Docker, Chocolatey) are not accepted for manual scan advisories because their
+support does not imply vulnerability coverage.
 
 ## Feed Sources
 
@@ -801,9 +822,12 @@ client IP, correlation ID, and API-key identity when available. Enrichment
 imports (VulnCheck, CISA KEV, EPSS, including the streamed EPSS snapshot)
 follow the same rule: the complete feed status, after defaults derived from
 the imported entry count are applied, is validated before anything commits,
-and the enrichment change, status row, and audit row commit together. Malicious feed
-imports cannot persist malformed exact-version JSON; invalid rows fail the
-transaction instead of becoming all-version blocking findings.
+and the enrichment change, status row, and audit row commit together. The
+optional status `last_sync_duration_ms` is bounded to 0 through 9223372036854
+ms, the largest value that converts to a Go `time.Duration`; larger values are
+rejected with `400`. Malicious feed imports cannot persist malformed
+exact-version JSON; invalid rows fail the transaction instead of becoming
+all-version blocking findings.
 Feed import strictness must be visible to operators and server/agent users.
 Rejected imports must expose bounded diagnostics for feed name, rejected record
 count, rejection reason classes, correlation ID, client/API-key attribution when
@@ -901,6 +925,22 @@ reputation context. Synced `risk` rows are exposed as `LOW`
 `malware_history` reputation info, not as their upstream severity, and benign
 `clean`, `not_found`, `unsupported`, or transient `error` observations are not
 synced.
+Reputation sync follows the same gate as the `/api/v1/check` reputation
+lookup: the server exports reputation rows only while ReversingLabs is enabled
+in `self` mode. Otherwise `GET /api/v1/sync` returns an empty `reputation`
+array, reports the dataset as done in `next_cursor` (`reputation_done=true`, no
+`reputation_cursor`), and sets `reputation_disabled: true`; the field is
+omitted while reputation is served, so older clients and servers stay
+compatible. A client that sees `reputation_disabled` drops every previously
+synced local reputation row in the same transaction, including on incremental
+syncs, and records a pending reputation refetch. Leftover `malicious` or
+`removed` cache rows from an earlier enabled period therefore block neither a
+remote check nor a local scan. Once a later sync no longer reports
+`reputation_disabled`, the client refetches the whole reputation dataset
+(no `since` window, the other datasets requested as done), because a delta
+sync would never resend rows that did not change in the meantime. An
+ecosystem-filtered sync refetches only its ecosystems and keeps the refetch
+pending until an unfiltered sync completes it.
 Local scans query those reputation rows through explicit reputation lookup
 methods; `FindMalicious` and `FindMaliciousBatch` remain malicious-package-only
 boundaries so package detail views and scanner output do not double-count or
@@ -1124,7 +1164,11 @@ Admin system settings can persist selected runtime values such as block
 threshold and rate-limit settings. Saving a `NONE` block threshold through the
 admin UI requires an explicit acknowledgement because it disables vulnerability
 blocking. System-setting audit entries record previous and new block-threshold
-and rate-limit values. Persisted values are loaded on server start.
+and rate-limit values. Persisted values are loaded on server start. A saved
+value set (block threshold, rate limits, metadata retention) is also applied to
+the running process immediately and as one unit; each save's commit and its
+runtime publication are ordered against other saves, so overlapping saves leave
+the live values equal to the last committed row.
 Admin feed settings can persist enablement, mode, cadence, and feed API keys.
 Production startup requires `PACKMON_ENCRYPTION_KEY` as base64-encoded 32
 random bytes so persisted feed API keys are encrypted at rest, and
@@ -1135,9 +1179,16 @@ audit digests. Feed
 setting audit entries record previous and new enablement, mode, cadence, and
 whether an API key is configured, but never the raw API key. Feed setting changes
 are applied to the running process immediately and are also loaded on future
-server starts. HTTP route wiring and API handlers read mutable runtime feed
-state through `FeedsSnapshot()` so admin hot-reload writes cannot race with
-ReversingLabs scheduling or feed-import-secret decisions.
+server starts. Each save or reset applies the runtime change, persists it, and
+rolls the runtime back if persistence fails as one step ordered against other
+feed saves and resets, so overlapping changes leave the runtime on the last
+committed configuration. The save and reset forms carry the stored override's
+revision (`updated_at`) from the rendered page; a submitted revision that no
+longer matches the stored override is rejected with the conflict message
+instead of overwriting another admin's change. HTTP route wiring and API
+handlers read mutable runtime feed state through `FeedsSnapshot()` so admin
+hot-reload writes cannot race with ReversingLabs scheduling or
+feed-import-secret decisions.
 
 Production PostgreSQL connections default to `sslmode=verify-full` so the
 client verifies both transport encryption and database server identity. Local
@@ -1175,7 +1226,10 @@ precedence.
 
 API keys are named with a bounded operator label, hashed at rest, track
 `last_used_at`, support revocation, permanent deletion after revocation, and
-require an RFC3339 UTC `expires_at` value no more than 90 days in the future.
+require a UTC `expires_at` value no more than 365 days in the future. The
+admin UI takes the lifetime in whole days (presets 1, 7, 14, 30, 90, 180, and
+365 days, default 30, or a custom value from 1 to 365) and stores creation time
+plus that many days.
 Creating a key in the admin UI requires current-password step-up verification
 before the secret is generated. Revoked or expired keys are not accepted by
 production `/api/v1/*` authentication. Deleting a revoked key permanently
@@ -1205,11 +1259,10 @@ with the hosted CI setup. The GitLab shared CI template
 (`ci/gitlab/.packmon-scan.yml`) is still in the repository but is not run by
 any pipeline here.
 
-Reusable CI templates parse `feed_status`, `db_stale`, and `db_age_days` from
-the JSON result artifact and surface degraded coverage independently from
-finding count or exit-code mapping. GitHub writes an Actions warning, step
-summary, and PR-comment coverage warning when comments are enabled. GitLab
-writes the same state into the job log.
+The GitLab consumer template parses `feed_status`, `db_stale`, and
+`db_age_days` from the JSON result artifact and writes degraded coverage into
+the job log independently from finding count or exit-code mapping. No GitHub
+Actions template is maintained any more.
 
 `tests/ci` checks only that the GitLab template's container image stays
 digest-pinned; its YAML and contract behavior are not validated locally. A
@@ -1264,27 +1317,41 @@ Normal local gate:
 ```bash
 mkdir -p .gotmp
 export GOTMPDIR="$PWD/.gotmp"
-PACKAGES="$(go list ./...)"
-GOSEC_DIRS="$(go list -f '{{.Dir}}' ./...)"
+PACKAGES="$(go list ./... | grep -v /node_modules/)"
+GOSEC_DIRS="$(go list -f '{{.Dir}}' ./... | grep -v node_modules)"
 GOFMT_FILES="$(git ls-files '*.go')"
 gofumpt -extra -l ${GOFMT_FILES}
-go test -count=1 ./...
+go test -count=1 ${PACKAGES}
 go test -race -count=1 -coverprofile=coverage.out ${PACKAGES}
 go run ./tools/checkcoverage -profile=coverage.out -min=79.5
-go vet ./...
-golangci-lint run ./...
+go vet ${PACKAGES}
+golangci-lint run ${GOSEC_DIRS}
 govulncheck ${PACKAGES}
 gosec -nosec-require-rules -nosec-require-justification ${GOSEC_DIRS}
 ```
+
+The package lists exclude `node_modules`, matching `GO_PACKAGES` in the
+Makefile: with the web toolchain installed, `go list ./...` also reports
+`node_modules/flatted/golang/pkg/flatted`, which is not Packmon code.
+`GOSEC_DIRS` filters on `node_modules` without slashes because
+`go list -f '{{.Dir}}'` prints backslash-separated paths on Windows.
+`golangci-lint` gets directories rather than import paths because it treats a
+non-relative argument as a path below the current directory.
 
 Build and tagged test gate:
 
 ```bash
 go build -o .build/packmon ./cmd/packmon
 go build -o .build/packmon-server ./cmd/packmon-server
-GOTMPDIR="$PWD/.gotmp" PACKMON_TEST_BIN_DIR=.build go test -count=1 -tags integration ./tests/integration
+GOTMPDIR="$PWD/.gotmp" PACKMON_TEST_BIN_DIR=.build go test -count=1 -tags integration ./tests/integration ./internal/db/postgres ./internal/db/postgres/migrations ./internal/server
 GOTMPDIR="$PWD/.gotmp" PACKMON_TEST_BIN_DIR=.build go test -count=1 -tags e2e ./tests/e2e
 ```
+
+The `integration` tag gates tests in four packages: `./tests/integration`,
+`./internal/db/postgres`, `./internal/db/postgres/migrations`, and
+`./internal/server`. `make test-integration` builds both binaries and runs all
+four; running only `./tests/integration` skips the tagged PostgreSQL store,
+migration, and server tests.
 
 The Docker/PostgreSQL production integration test is the strongest local proxy
 for a real deployment:

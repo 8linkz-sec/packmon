@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"sync"
 	"time"
 )
@@ -19,6 +20,22 @@ type RuntimeSettings struct {
 	rateLimitBurst      int
 	scanLogRetention    time.Duration
 	adminAuditRetention time.Duration
+
+	// commitSlot orders CommitAndPublish calls. It is a one-element channel
+	// rather than a mutex so a waiting save can give up when its context ends.
+	commitSlotOnce sync.Once
+	commitSlot     chan struct{}
+}
+
+// SystemSettingsValues is one admin system-settings save as published to the
+// live runtime: policy (block threshold, rate limit) and metadata retention
+// travel together so overlapping saves cannot leave a mix of both.
+type SystemSettingsValues struct {
+	BlockThreshold      string
+	RateLimitPerMinute  int
+	RateLimitBurst      int
+	ScanLogRetention    time.Duration
+	AdminAuditRetention time.Duration
 }
 
 // NewRuntimeSettings creates a holder seeded with the given values.
@@ -88,6 +105,46 @@ func (r *RuntimeSettings) Retention() RetentionConfig {
 func (r *RuntimeSettings) Update(blockThreshold string, perMinute, burst int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.updateLocked(blockThreshold, perMinute, burst)
+}
+
+// UpdateRetention replaces admin-managed retention durations. Zero is valid
+// and disables pruning for that dataset; negative values are ignored.
+func (r *RuntimeSettings) UpdateRetention(scanLog, adminAuditLog time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.updateRetentionLocked(scanLog, adminAuditLog)
+}
+
+// CommitAndPublish runs commit (the database write of a system-settings save)
+// and, when it succeeds, publishes values as one unit before any other
+// CommitAndPublish call can start its commit. Holding that order across the
+// publication keeps the live settings equal to the last committed row even
+// when admin saves overlap; publishing outside it would let an earlier commit
+// publish after a later one. Readers are not blocked during commit. When ctx
+// ends while waiting for an in-flight save, nothing is committed and ctx's
+// error is returned.
+func (r *RuntimeSettings) CommitAndPublish(ctx context.Context, values SystemSettingsValues, commit func() error) error {
+	r.commitSlotOnce.Do(func() { r.commitSlot = make(chan struct{}, 1) })
+	select {
+	case r.commitSlot <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-r.commitSlot }()
+
+	if err := commit(); err != nil {
+		return err
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.updateLocked(values.BlockThreshold, values.RateLimitPerMinute, values.RateLimitBurst)
+	r.updateRetentionLocked(values.ScanLogRetention, values.AdminAuditRetention)
+	return nil
+}
+
+func (r *RuntimeSettings) updateLocked(blockThreshold string, perMinute, burst int) {
 	if blockThreshold != "" {
 		r.blockThreshold = blockThreshold
 	}
@@ -99,11 +156,7 @@ func (r *RuntimeSettings) Update(blockThreshold string, perMinute, burst int) {
 	}
 }
 
-// UpdateRetention replaces admin-managed retention durations. Zero is valid
-// and disables pruning for that dataset; negative values are ignored.
-func (r *RuntimeSettings) UpdateRetention(scanLog, adminAuditLog time.Duration) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+func (r *RuntimeSettings) updateRetentionLocked(scanLog, adminAuditLog time.Duration) {
 	if scanLog >= 0 {
 		r.scanLogRetention = scanLog
 	}
