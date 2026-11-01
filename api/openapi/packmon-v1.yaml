@@ -1052,6 +1052,8 @@ components:
           type: integer
           format: int64
           minimum: 0
+          maximum: 9223372036854
+          description: Largest value that still fits a nanosecond duration; larger values are rejected with 400.
         last_sync_status:
           type: string
           enum: [success, error, running, skipped, disabled, pending]

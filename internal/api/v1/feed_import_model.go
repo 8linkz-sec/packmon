@@ -33,6 +33,11 @@ const maxImportBody = 100 << 20
 // the feed status row and reflected through status APIs.
 const maxImportStatusLastErrorLength = 2048
 
+// maxImportStatusDurationMs is the largest last_sync_duration_ms that still
+// fits time.Duration after the conversion to nanoseconds; larger values would
+// overflow to a negative duration.
+const maxImportStatusDurationMs = math.MaxInt64 / int64(time.Millisecond)
+
 const (
 	maxImportStatusLastETagLength       = 512
 	maxImportStatusLastCommitHashLength = 128
@@ -1428,6 +1433,9 @@ func validateImportStatusInput(input *feedSyncStatusInput) error {
 	}
 	if input.LastSyncDurationMs != nil && *input.LastSyncDurationMs < 0 {
 		return feedImportValidationErrorf("feed import status last_sync_duration_ms must not be negative")
+	}
+	if input.LastSyncDurationMs != nil && *input.LastSyncDurationMs > maxImportStatusDurationMs {
+		return feedImportValidationErrorf("feed import status last_sync_duration_ms must not exceed %d", maxImportStatusDurationMs)
 	}
 	if input.EntriesSynced < 0 {
 		return feedImportValidationErrorf("feed import status entries_synced must not be negative")

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -792,6 +793,8 @@ func TestHandleFeedImportValidatesBeforeMutatingState(t *testing.T) {
 		`{"entries_synced":-1}`,
 		`{"entries_total":-1}`,
 		`{"last_sync_duration_ms":-1}`,
+		`{"last_sync_duration_ms":9223372036855}`,
+		`{"last_sync_duration_ms":9223372036854775807}`,
 		`{"entries_synced":5,"entries_total":3}`,
 	} {
 		store = &stubStore{}
@@ -813,6 +816,29 @@ func TestHandleFeedImportValidatesBeforeMutatingState(t *testing.T) {
 			t.Fatalf("store mutated before numeric status validation: malicious=%+v statuses=%+v", store.upsertedMalicious, store.upsertedStatuses)
 		}
 		assertSingleRejectedFeedStatus(t, store.upsertedStatuses, "socket")
+	}
+}
+
+func TestImportStatusFromInputAcceptsLargestRepresentableDuration(t *testing.T) {
+	t.Parallel()
+
+	largest := int64(math.MaxInt64 / int64(time.Millisecond))
+	status, err := importStatusFromInput("osv", &feedSyncStatusInput{LastSyncDurationMs: &largest}, 1, 1)
+	if err != nil {
+		t.Fatalf("importStatusFromInput(%d ms) error = %v", largest, err)
+	}
+	if status.LastSyncDuration == nil || *status.LastSyncDuration <= 0 || *status.LastSyncDuration != time.Duration(largest)*time.Millisecond {
+		t.Fatalf("last sync duration = %v, want %d ms", status.LastSyncDuration, largest)
+	}
+
+	tooLarge := largest + 1
+	if _, err := importStatusFromInput("osv", &feedSyncStatusInput{LastSyncDurationMs: &tooLarge}, 1, 1); err == nil {
+		t.Fatalf("importStatusFromInput(%d ms) accepted a duration that overflows time.Duration", tooLarge)
+	} else {
+		var validationErr *feedImportValidationError
+		if !errors.As(err, &validationErr) {
+			t.Fatalf("importStatusFromInput(%d ms) error = %T %v, want feed import validation error", tooLarge, err, err)
+		}
 	}
 }
 
