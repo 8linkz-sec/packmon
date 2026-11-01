@@ -4191,12 +4191,12 @@ func TestListAllHTMLWarningsCollapseLargeWarningStacks(t *testing.T) {
 	t.Parallel()
 
 	var inventoryWarnings []string
-	for i := 0; i < maxListAllHTMLReportWarnings+2; i++ {
+	for i := 0; i < maxHTMLReportWarnings+2; i++ {
 		inventoryWarnings = append(inventoryWarnings, fmt.Sprintf("inventory-%d", i))
 	}
 	got := listAllHTMLWarnings(nil, inventoryWarnings)
-	if len(got) != maxListAllHTMLReportWarnings+1 {
-		t.Fatalf("warnings = %#v, want %d visible warnings plus summary", got, maxListAllHTMLReportWarnings)
+	if len(got) != maxHTMLReportWarnings+1 {
+		t.Fatalf("warnings = %#v, want %d visible warnings plus summary", got, maxHTMLReportWarnings)
 	}
 	joined := strings.Join(got, "\n")
 	if !strings.Contains(joined, "inventory-0") || strings.Contains(joined, "inventory-6") {

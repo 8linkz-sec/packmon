@@ -26,6 +26,7 @@ const outdatedHTMLStyle = `:root{` + reporthtml.DarkBaseThemeCSS +
 	cliHTMLReportScaleCSS + `}` + cliHTMLReportBaseCSS + `
 .ok{color:var(--success);border-color:var(--success);}
 .unknown{color:var(--unknown);border-color:var(--unknown);}
+` + cliHTMLReportWarningCSS + `
 ` + `.provenance-legend{border:1px solid var(--border);border-radius:var(--report-radius-md);` +
 	`background:var(--panel);padding:var(--report-space-3);margin:0 0 var(--report-space-3);color:var(--dim);` +
 	`font-size:var(--report-type-sm);}` + `
@@ -65,7 +66,7 @@ td{overflow-wrap:anywhere;word-break:break-word;}
 	`font-size:var(--report-type-md);}` + `
 .empty-unknown{background:var(--warning-bg);border-color:var(--warning);color:var(--warning);}
 ` + `@supports not (font-size:var(--report-type-base)){body{font-size:0.875rem;}` +
-	`h1{font-size:1.375rem;}.mobile-primary h2,.empty{font-size:0.9375rem;}` +
+	`h1{font-size:1.375rem;}.mobile-primary h2,.warning,.empty{font-size:0.9375rem;}` +
 	`.meta,.badge,.provenance-legend{font-size:0.8125rem;}` +
 	`.mobile-ecosystem,th,.footer{font-size:0.75rem;}` +
 	`.mobile-versions dt,.detail-grid dt{font-size:0.6875rem;}}` + `
@@ -73,11 +74,11 @@ td{overflow-wrap:anywhere;word-break:break-word;}
 	`--warning:#9a6700;--warning-bg:#fff8c5;--success:#116329;--success-bg:#dafbe1;` +
 	`--success-border:#2da44e;--unknown:#57606a;}}` + `
 ` + `@media (prefers-contrast: more){:root{--border:CanvasText;--dim:CanvasText;` +
-	`}.badge,.provenance-legend,.mobile-card,.table-scroll,.empty{border-width:2px;}}` + `
+	`}.badge,.provenance-legend,.mobile-card,.table-scroll,.warning,.empty{border-width:2px;}}` + `
 ` + `@media (forced-colors: active){:root{` + reporthtml.ForcedColorsBaseThemeCSS +
 	`--warning:CanvasText;--warning-bg:Canvas;--success:CanvasText;--success-bg:Canvas;` +
 	`--success-border:CanvasText;--unknown:CanvasText;}*{forced-color-adjust:auto;` +
-	`}.badge,.provenance-legend,.mobile-card,.table-scroll,.empty{border-color:CanvasText;` +
+	`}.badge,.provenance-legend,.mobile-card,.table-scroll,.warning,.empty{border-color:CanvasText;` +
 	`}.table-scroll:focus{outline-color:Highlight;}}` + `
 @media (min-width:900px){.mobile-list{display:none;}.table-scroll{display:block;}}
 ` + `@media print{:root{` + reporthtml.PrintBaseThemeCSS +
@@ -88,7 +89,7 @@ td{overflow-wrap:anywhere;word-break:break-word;}
 	`border-color:var(--border);}table{min-width:0;table-layout:fixed;` +
 	`}.name,.version,.ecosystem,.short,.lockfile{min-width:0;white-space:normal;` +
 	`}.provenance{min-width:0;white-space:normal;` +
-	`}.empty{break-inside:avoid;page-break-inside:avoid;background:#fff;}}`
+	`}.warning,.empty{break-inside:avoid;page-break-inside:avoid;background:#fff;}}`
 
 const outdatedHTMLBody = `
 </style>
@@ -106,6 +107,7 @@ const outdatedHTMLBody = `
 <span class="badge ok">{{.UpToDate}} {{.Messages.UpToDateLabel}}</span>
 <span class="badge unknown">{{.Unknown}} {{.Messages.UnknownLabel}}</span>
 </div>
+` + cliHTMLReportWarningsBlock + `
 {{if .Outdated}}
 <div id="outdated-provenance-legend" class="provenance-legend">
 ` + `<p><strong>{{.Messages.ProvenanceHeading}}</strong> {{.Messages.ProvenanceDescription}}</p>` + `
