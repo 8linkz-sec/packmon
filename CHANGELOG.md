@@ -20,6 +20,11 @@
   stdout fails. It used to discard every write error outside the history
   table, so a closed pipe or full disk ended the command with exit `0` and no
   (or a truncated) report, and the empty-history message never failed at all.
+- The list-all and `--outdated` HTML reports format their timestamps in the
+  viewer's browser locale and time zone again. The inline script combined
+  `dateStyle`/`timeStyle` with `timeZoneName`, which conforming JavaScript
+  engines reject with a `TypeError`, so every timestamp kept its UTC fallback
+  text.
 - The list-all and `--outdated` HTML reports no longer show a full Windows
   drive or UNC source path (`C:\Users\...\go.sum`, `C:/...`, `\\server\...`)
   on a Linux host when the scan root is relative (for example `.`). Such a
