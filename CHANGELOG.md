@@ -31,7 +31,8 @@
   via `removed_at`, exported to local clients as withdrawn) instead of becoming
   an all-version blocking finding. Each repaired row is recorded with its
   original value in `packmon_m050_version_range_repairs`, and the 050 down
-  migration restores rows that still hold their repaired value. The store's
+  migration restores the rows unchanged since the repair (rows changed since
+  keep their current state). The store's
   own pre-write check now matches keys exactly, as the database does, so a
   case-variant key such as `"Introduced"` is rejected before the write
   instead of failing the CHECK constraint. The feed
@@ -533,9 +534,11 @@
     write lock but can run for a while on large catalogs; check PostgreSQL
     temporary space and volume headroom before starting.
   - 050 tightens the `version_ranges` CHECK constraints and repairs rows that
-    fail them. It scans `affected_packages` and `malicious_findings` twice in
-    one transaction and holds an exclusive lock on both tables until it
-    commits. Repaired affected-package rows match every version until the
+    fail them. In one transaction it scans `affected_packages` and
+    `malicious_findings` to log the failing rows in
+    `packmon_m050_version_range_repairs`, rewrites the logged rows, and scans
+    both tables again to validate the constraints, holding an exclusive lock
+    on both tables from the constraint step until it commits. Repaired affected-package rows match every version until the
     next feed sync rewrites them, so finding totals for those packages can
     rise temporarily. Malicious findings without exact versions are
     quarantined: they stop blocking until a feed import that contains them

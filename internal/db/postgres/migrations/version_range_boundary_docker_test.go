@@ -46,6 +46,12 @@ type maliciousRepairRow struct {
 	versions   sql.NullString
 	removed    bool
 	wantAction string
+	// changedAfterRepair is a write that happens between 050 up and down:
+	// "retombstone" (an import resurrects the finding, then it is tombstoned
+	// again, leaving NULL ranges) or "reimport" (an import rewrites it with
+	// valid NULL ranges and new exact versions). 050 down must keep the row's
+	// current state although it still looks repaired.
+	changedAfterRepair string
 }
 
 var maliciousRepairRows = []maliciousRepairRow{
@@ -57,7 +63,14 @@ var maliciousRepairRows = []maliciousRepairRow{
 	{id: "MAL-repair-manual", wantAction: "quarantined"},
 	// Already tombstoned: stays tombstoned, only the ranges are cleared.
 	{id: "MAL-repair-already-removed", removed: true, wantAction: "ranges_cleared"},
+	// Written again after the repair: 050 down must leave them alone.
+	{id: "MAL-repair-retombstoned", wantAction: "quarantined", changedAfterRepair: "retombstone"},
+	{id: "MAL-repair-reimported", versions: sql.NullString{String: `["1.0.0"]`, Valid: true}, wantAction: "ranges_cleared", changedAfterRepair: "reimport"},
 }
+
+// rewrittenAffectedPackage is an affected package that 050 resets to [] and a
+// later feed import rewrites with a legitimate [] of its own.
+const rewrittenAffectedPackage = "rewritten-to-empty"
 
 // TestVersionRangeBoundaryMigrationRepairsAndTightensAgainstPostgres seeds rows
 // the old check accepted, applies 050, and verifies every repair branch and its
@@ -93,6 +106,11 @@ func TestVersionRangeBoundaryMigrationRepairsAndTightensAgainstPostgres(t *testi
 		INSERT INTO vulnerabilities (id, summary, published, modified)
 		VALUES ('GHSA-boundary-fixture', 'boundary fixture', NOW(), NOW())`); err != nil {
 		t.Fatalf("seed vulnerability: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO affected_packages (vulnerability_id, ecosystem, name, version_ranges, versions_affected)
+		VALUES ('GHSA-boundary-fixture', 'npm', $1, '[{}]'::jsonb, '[]'::jsonb)`, rewrittenAffectedPackage); err != nil {
+		t.Fatalf("seed rewritten affected package: %v", err)
 	}
 	for _, row := range versionRangeBoundaryRows {
 		if _, err := db.ExecContext(ctx, `
@@ -234,6 +252,32 @@ func TestVersionRangeBoundaryMigrationRepairsAndTightensAgainstPostgres(t *testi
 		}
 	}
 
+	// Writes after the repair: each moves updated_at away from repaired_at.
+	if _, err := db.ExecContext(ctx, `
+		UPDATE affected_packages SET version_ranges = '[]'::jsonb, versions_affected = '["3.0.0"]'::jsonb, updated_at = clock_timestamp()
+		WHERE vulnerability_id = 'GHSA-boundary-fixture' AND name = $1`, rewrittenAffectedPackage); err != nil {
+		t.Fatalf("rewrite affected package after repair: %v", err)
+	}
+	for _, row := range maliciousRepairRows {
+		switch row.changedAfterRepair {
+		case "retombstone":
+			for _, statement := range []string{
+				`UPDATE malicious_findings SET removed_at = NULL, versions = '["2.0.0"]'::jsonb, updated_at = clock_timestamp() WHERE id = $1`,
+				`UPDATE malicious_findings SET removed_at = clock_timestamp(), updated_at = clock_timestamp() WHERE id = $1`,
+			} {
+				if _, err := db.ExecContext(ctx, statement, row.id); err != nil {
+					t.Fatalf("re-tombstone %s: %v", row.id, err)
+				}
+			}
+		case "reimport":
+			if _, err := db.ExecContext(ctx, `
+				UPDATE malicious_findings SET version_ranges = NULL, versions = '["1.0.1"]'::jsonb, updated_at = clock_timestamp()
+				WHERE id = $1`, row.id); err != nil {
+				t.Fatalf("re-import %s: %v", row.id, err)
+			}
+		}
+	}
+
 	down, err := ReadEmbeddedMigration(versionRangeBoundaryMigrationVersion, MigrationDirectionDown)
 	if err != nil {
 		t.Fatalf("read migration 050 down: %v", err)
@@ -261,18 +305,40 @@ func TestVersionRangeBoundaryMigrationRepairsAndTightensAgainstPostgres(t *testi
 		if row.id == "MAL-repair-manual" {
 			id = "manual:repair-fixture"
 		}
-		var ranges string
+		var ranges, versions sql.NullString
 		var removedAt sql.NullTime
-		if err := db.QueryRowContext(ctx, `SELECT version_ranges::text, removed_at FROM malicious_findings WHERE id = $1`, id).Scan(&ranges, &removedAt); err != nil {
+		if err := db.QueryRowContext(ctx, `SELECT version_ranges::text, versions::text, removed_at FROM malicious_findings WHERE id = $1`, id).Scan(&ranges, &versions, &removedAt); err != nil {
 			t.Fatalf("read malicious repair row %s after down: %v", id, err)
 		}
-		if !jsonTextEqual(t, db, ranges, invalidRanges) {
-			t.Fatalf("%s version_ranges after down = %s, want restored %s", id, ranges, invalidRanges)
+		switch row.changedAfterRepair {
+		case "retombstone":
+			if ranges.Valid || !removedAt.Valid || versions.String != `["2.0.0"]` {
+				t.Fatalf("%s after down = ranges %v versions %v removed %v, want the later tombstone kept (not reactivated)", id, ranges, versions, removedAt)
+			}
+			continue
+		case "reimport":
+			if ranges.Valid || removedAt.Valid || versions.String != `["1.0.1"]` {
+				t.Fatalf("%s after down = ranges %v versions %v removed %v, want the re-imported row kept", id, ranges, versions, removedAt)
+			}
+			continue
+		}
+		if !ranges.Valid || !jsonTextEqual(t, db, ranges.String, invalidRanges) {
+			t.Fatalf("%s version_ranges after down = %v, want restored %s", id, ranges, invalidRanges)
 		}
 		if removedAt.Valid != row.removed {
 			t.Fatalf("%s removed_at after down = %v, want tombstoned=%t as before 050", id, removedAt, row.removed)
 		}
 	}
+	var rewrittenRanges, rewrittenVersions string
+	if err := db.QueryRowContext(ctx, `
+		SELECT version_ranges::text, versions_affected::text FROM affected_packages
+		WHERE vulnerability_id = 'GHSA-boundary-fixture' AND name = $1`, rewrittenAffectedPackage).Scan(&rewrittenRanges, &rewrittenVersions); err != nil {
+		t.Fatalf("read rewritten affected package after down: %v", err)
+	}
+	if rewrittenRanges != `[]` || rewrittenVersions != `["3.0.0"]` {
+		t.Fatalf("rewritten affected package after down = %s / %s, want the newer [] / [\"3.0.0\"] kept", rewrittenRanges, rewrittenVersions)
+	}
+
 	var repairLog sql.NullString
 	if err := db.QueryRowContext(ctx, `SELECT to_regclass('public.packmon_m050_version_range_repairs')::text`).Scan(&repairLog); err != nil {
 		t.Fatalf("check repair log after down: %v", err)

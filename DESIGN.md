@@ -812,7 +812,9 @@ ranges fell back to `[]`; a malicious finding with nonempty exact `versions`
 kept those and lost only its ranges; an active malicious finding without exact
 versions was quarantined with the normal `removed_at` tombstone instead of
 becoming an all-version blocking finding. Every repaired row is listed with its
-original value in `packmon_m050_version_range_repairs`.
+original value in `packmon_m050_version_range_repairs`. Rolling 050 back
+restores only rows unchanged since the repair (`updated_at` still equal to the
+logged `repaired_at`); rows changed since the repair keep their current state.
 
 Malicious findings are separate entities with stable IDs, package identity,
 source, risk type, severity, optional OSV version ranges, optional exact

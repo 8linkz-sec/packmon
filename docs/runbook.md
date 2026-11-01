@@ -230,9 +230,9 @@ change.
      tightens the `version_ranges` CHECK constraints on `affected_packages`
      and `malicious_findings` (every range needs a nonempty `events` array and
      every event a nonblank string boundary). Inside one transaction it scans
-     both tables once to repair rows that only passed the older check and once
-     more to validate the constraints; expect it to take longer on large
-     databases. The re-added constraints hold an exclusive lock on both
+     both tables once to find and log the rows that only passed the older
+     check, rewrites just the logged rows, and scans both tables once more to
+     validate the constraints; expect it to take longer on large databases. The re-added constraints hold an exclusive lock on both
      tables until the transaction commits, so reads and writes to them wait
      during validation (another reason to keep the server drained). A failure
      rolls back every 50 change but still leaves the version dirty. The
@@ -254,20 +254,27 @@ change.
      original value; list them after migrating:
      ```sql
      SELECT r.table_name, r.row_id, r.action, r.repaired_at,
-            mf.source, mf.ecosystem, mf.name, r.original_version_ranges
+            mf.source, mf.ecosystem, mf.name, mf.versions, mf.risk_type,
+            mf.severity, mf.summary, mf.description, mf.reference_urls,
+            mf.origin_ref, r.original_version_ranges
      FROM packmon_m050_version_range_repairs r
      LEFT JOIN malicious_findings mf
        ON r.table_name = 'malicious_findings' AND mf.id = r.row_id
      ORDER BY r.table_name, r.action, r.row_id;
      ```
+     Quarantined manual advisories no longer appear in `/admin/advisories`,
+     so take what you need to re-enter them (ecosystem, package name, exact
+     versions, risk type, severity, summary, description, references and
+     the original ranges, corrected) from this result.
      `action` is `ranges_reset` (affected package), `ranges_cleared`
      (malicious finding, exact versions kept) or `quarantined`; re-enter the
      quarantined rows whose `source` is `manual`. Compare finding/blocking
      totals by feed source after the upgrade and run the feed syncs before
      treating a spike as new risk. The 050 down migration restores the
-     previous check function and every recorded row that still holds its
-     repaired value (rows a feed import rewrote since keep the newer data),
-     then drops the repair table.
+     previous check function and every recorded row that is unchanged since
+     the repair, then drops the repair table. Rows changed since the repair
+     (re-imported, tombstoned again, deleted or re-entered by an admin) keep
+     their current state.
 5. Run the explicit migration step:
    ```bash
    docker compose -f docker-compose.server.yml run --build --rm packmon-migrate

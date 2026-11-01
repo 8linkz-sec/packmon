@@ -1086,6 +1086,23 @@ func TestVersionRangeBoundaryMigrationDefinesStrictCheck(t *testing.T) {
 	if functionIndex < 0 || restoreIndex < functionIndex || dropIndex < restoreIndex {
 		t.Fatalf("050 down must restore the function, then the recorded rows, then drop the repair log:\n%s", down.SQL)
 	}
+	// Only rows unchanged since the repair may be restored; a later write
+	// moves updated_at away from repaired_at.
+	for _, guard := range []string{"AND ap.updated_at = r.repaired_at", "AND mf.updated_at = r.repaired_at"} {
+		if !strings.Contains(downSQL, guard) {
+			t.Fatalf("050 down missing unchanged-since-repair guard %q:\n%s", guard, down.SQL)
+		}
+	}
+	for _, statement := range []string{
+		"UPDATE affected_packages ap SET version_ranges = '[]'::jsonb, updated_at = NOW()",
+		"UPDATE malicious_findings mf SET version_ranges = NULL, removed_at = NOW(), updated_at = NOW()",
+		"UPDATE malicious_findings mf SET version_ranges = NULL, updated_at = NOW()",
+		"repaired_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+	} {
+		if !strings.Contains(upSQL, statement) {
+			t.Fatalf("050 up must stamp repaired rows and the repair log with the same NOW(): missing %q", statement)
+		}
+	}
 }
 
 func TestScanLogTotalsMigrationDefinesRollup(t *testing.T) {
