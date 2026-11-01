@@ -705,7 +705,10 @@ mirror URLs, or local write destinations such as `server`, `api_key`,
 `output.format`/`output.file`, or `db.path`. It may opt out of remote
 repository-name metadata with `send_repo_metadata: false`, but it cannot
 re-enable metadata if a higher-precedence user config, environment variable,
-or flag disabled it.
+or flag disabled it. A project `repos:` list replaces the user-global list;
+an entry that refers to a user-global repo (matched by name, then by path)
+inherits that repo's `send_repo_metadata: false`, server/API-key routing, and
+webhook, and keeps its own name, path (the project path wins), and scan policy.
 Store API keys in environment variables, CI secrets, OS secret stores, or the
 user-global config. Use `api_key_env` in trusted user-global or explicit config
 files rather than writing plaintext keys.
@@ -908,7 +911,10 @@ malicious package, or active supply-chain-risk finding is present, or when
 parser or operational errors prevent complete scan coverage. Quiet mode still prints
 trust-changing warnings such as remote fallback and partial parse errors to
 stderr. `install` refuses to overwrite an existing hook that packmon did not
-create; `uninstall` only removes packmon-managed hooks. Supported types:
+create; `uninstall` only removes packmon-managed hooks. Every `install` (also
+an update of an existing packmon hook) leaves the hook executable (mode
+`0755`), and `status` reports a packmon hook that lost its execute bit as
+`not executable`, because Git skips such a hook. Supported types:
 `pre-push` (default) and `pre-commit`. The hook type and fail-on threshold can
 also be set under a
 `hook:` block in `.packmon.yaml`.

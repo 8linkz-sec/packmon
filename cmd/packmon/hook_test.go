@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -272,6 +273,135 @@ func TestHookInstallUpdatesExistingPackmonHook(t *testing.T) {
 	}
 	if strings.Contains(string(data), "echo old") || !strings.Contains(string(data), "packmon scan") {
 		t.Fatalf("hook was not updated:\n%s", data)
+	}
+}
+
+// skipHookModeTestOnWindows skips tests of the hook execute bit on Windows: Go
+// reports no POSIX execute bits there and Git for Windows does not use them to
+// decide whether to run a hook.
+func skipHookModeTestOnWindows(t *testing.T) {
+	t.Helper()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("hook execute bits are POSIX-only; Windows has no executable mode bit for Git hooks")
+	}
+}
+
+// TestHookInstallRestoresTheExecutableBitOfAManagedHook covers updating a
+// managed hook that lost its execute bit: os.WriteFile keeps an existing file's
+// mode, so without an explicit chmod the install reported success while Git
+// kept skipping the non-executable hook.
+func TestHookInstallRestoresTheExecutableBitOfAManagedHook(t *testing.T) {
+	skipHookModeTestOnWindows(t)
+
+	root := t.TempDir()
+	hooksDir := filepath.Join(root, ".git", "hooks")
+	if err := os.MkdirAll(hooksDir, 0o750); err != nil {
+		t.Fatalf("mkdir hooks: %v", err)
+	}
+	hookPath := filepath.Join(hooksDir, "pre-push")
+	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\n"+hookMarker+"\necho old\n"), 0o600); err != nil {
+		t.Fatalf("write existing hook: %v", err)
+	}
+	t.Chdir(root)
+
+	captureStdout(t, func() {
+		if err := newHookInstallCmd().Execute(); err != nil {
+			t.Fatalf("hook install update: %v", err)
+		}
+	})
+
+	info, err := os.Stat(hookPath)
+	if err != nil {
+		t.Fatalf("stat hook: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o755 {
+		t.Fatalf("hook mode = %o, want 755 restored by install", got)
+	}
+}
+
+// TestHookStatusReportsANonExecutableManagedHook keeps status from claiming a
+// managed hook is installed when Git would skip it.
+func TestHookStatusReportsANonExecutableManagedHook(t *testing.T) {
+	skipHookModeTestOnWindows(t)
+
+	root := t.TempDir()
+	hooksDir := filepath.Join(root, ".git", "hooks")
+	if err := os.MkdirAll(hooksDir, 0o750); err != nil {
+		t.Fatalf("mkdir hooks: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(hooksDir, "pre-push"), []byte(hookScript("HIGH")), 0o600); err != nil {
+		t.Fatalf("write hook: %v", err)
+	}
+	t.Chdir(root)
+
+	output := captureStdout(t, func() {
+		if err := newHookStatusCmd().Execute(); err != nil {
+			t.Fatalf("hook status: %v", err)
+		}
+	})
+	if strings.Contains(output, "packmon hook installed") || !strings.Contains(output, "packmon hook not executable") {
+		t.Fatalf("hook status output = %q, want the non-executable managed hook reported", output)
+	}
+}
+
+// TestHookStatusSanitizesStatErrors covers the status error line: the stat
+// error embeds the hook path, which comes from the repository's .git gitdir
+// file, so a crafted path must not reach the terminal raw.
+func TestHookStatusSanitizesStatErrors(t *testing.T) {
+	root := t.TempDir()
+	gitDir := filepath.Join(t.TempDir(), "gitdir\x1b[31m")
+	if runtime.GOOS != "windows" {
+		// A regular file in place of the git dir makes the hook stat fail
+		// with ENOTDIR. Windows rejects the control character in the name
+		// itself, which fails the stat the same way.
+		if err := os.WriteFile(gitDir, []byte("not a directory\n"), 0o600); err != nil {
+			t.Fatalf("write gitdir placeholder: %v", err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, ".git"), []byte("gitdir: "+gitDir+"\n"), 0o600); err != nil {
+		t.Fatalf("write .git file: %v", err)
+	}
+	t.Chdir(root)
+
+	output := captureStdout(t, func() {
+		if err := newHookStatusCmd().Execute(); err != nil {
+			t.Fatalf("hook status: %v", err)
+		}
+	})
+	if !strings.Contains(output, "error:") {
+		t.Fatalf("hook status output = %q, want a stat error line", output)
+	}
+	if strings.Contains(output, "\x1b") {
+		t.Fatalf("hook status error line contains a raw terminal control:\n%q", output)
+	}
+	if !strings.Contains(output, `gitdir\x1B[31m`) {
+		t.Fatalf("hook status output missing the sanitized path:\n%q", output)
+	}
+}
+
+func TestHookFileExecutable(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		mode os.FileMode
+		goos string
+		want bool
+	}{
+		{name: "unix owner executable", mode: 0o755, goos: "linux", want: true},
+		{name: "unix owner-only executable", mode: 0o700, goos: "darwin", want: true},
+		{name: "unix not executable", mode: 0o644, goos: "linux", want: false},
+		{name: "unix group and other executable only", mode: 0o655, goos: "linux", want: false},
+		{name: "windows ignores mode bits", mode: 0o666, goos: "windows", want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := hookFileExecutable(tt.mode, tt.goos); got != tt.want {
+				t.Fatalf("hookFileExecutable(%o, %q) = %v, want %v", tt.mode, tt.goos, got, tt.want)
+			}
+		})
 	}
 }
 

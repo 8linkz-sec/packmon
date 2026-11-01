@@ -30,6 +30,31 @@
   `--timeout`, config `timeout`, or `PACKMON_TIMEOUT`. Such values used to
   overflow `time.Duration` into a negative deadline, so the sync aborted at
   once with a context deadline error instead of a clear validation error.
+- A project `.packmon.yaml` `repos:` entry that refers to a user-global repo
+  (matched by name, then by path) now inherits that trusted repo's
+  `send_repo_metadata: false`, server/API-key routing, and webhook. The
+  project's repos still replace the user-global list, and each entry keeps its
+  own name, path (the project path wins on a name match), and scan policy.
+  Previously a project entry naming a trusted repo silently re-enabled
+  repository metadata that repo had disabled.
+- `packmon config show` escapes terminal control characters in every config-,
+  flag-, and environment-derived value it prints: config file path, server,
+  masked API key, API key env name, mode, fail_on, ecosystems, CA cert path,
+  webhook URL, masked webhook secret, DB path, repo names and paths, and log
+  level. A crafted value,
+  including one from an auto-discovered project `.packmon.yaml`, could
+  previously inject ANSI escape sequences or forge output lines.
+- `packmon hook install` sets the hook file's mode to `0755` explicitly after
+  writing it. Updating an existing packmon hook kept its old mode, so a managed
+  hook that had lost its execute bit stayed non-executable while install
+  reported success and Git skipped the scan. `packmon hook status` now reports
+  such a hook as `packmon hook not executable` instead of `installed` (POSIX
+  only; Git for Windows does not use mode bits for hooks).
+- Latest-version registry base URLs, Docker registry mirrors, and Chocolatey
+  feed URLs ending in an empty fragment marker (`https://mirror.example/api#`)
+  are now rejected like any other fragment. `net/url` records no fragment for a
+  bare `#` and drops it on re-serialization, so the value was previously
+  accepted and silently rewritten.
 - SHA-pinned GitHub Actions are no longer compared as version strings in
   `--list-all` / `--outdated`. The `# vX.Y.Z` comment convention is used as
   the declared version; without it the pin is compared with the dereferenced

@@ -545,13 +545,18 @@ rejected when they target unsupported hosts, plain HTTP without an explicit
 insecure test override, loopback, link-local, private, multicast, or
 unspecified addresses. Configured latest-version registry base and mirror URLs
 must not contain credentials, queries (including an empty trailing `?`
-delimiter), or fragments; HTTPS is required except loopback HTTP test endpoints,
+delimiter), or fragments (including an empty trailing `#` marker); such values
+are rejected, never stripped. HTTPS is required except loopback HTTP test endpoints,
 and literal link-local, multicast, or unspecified mirror addresses are rejected.
 `packmon config show` preserves scheme, host, and path for configured
 latest-version registry URLs while redacting userinfo, fragments, and every
 query value. Server and webhook URLs retain their stricter host-only redaction.
 Malformed registry URL, Docker-mirror-map, and Chocolatey-feed-list values are
-rendered as a fixed redacted marker rather than echoed.
+rendered as a fixed redacted marker rather than echoed. Every config-, flag-,
+and environment-derived string `packmon config show` prints (including repo
+names and paths from an auto-discovered project config) has terminal control
+characters escaped, so a crafted value cannot inject escape sequences or forge
+output lines.
 Private registry credentials are not read. Failures degrade to `unknown` in
 reports. The server scan API rejects Docker packages because Packmon does not
 provide container-layer vulnerability coverage. Chocolatey inventory follows
