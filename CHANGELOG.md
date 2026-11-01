@@ -16,6 +16,10 @@
 
 ### Fixed
 
+- A panicking latest-version, npm-metadata, or Git tag lookup in
+  `--outdated` / `--list-all` no longer hangs the run. The shared in-flight
+  lookup is now always completed, so other packages waiting on the same
+  registry key get a failed lookup instead of blocking forever.
 - `packmon scan --outdated --quiet --html <file>` no longer prints the routine
   "Checking N packages for updates..." line to stderr; `--quiet` now
   suppresses it like the later lookup progress.
