@@ -40,6 +40,10 @@
   when the same batch also asks for concrete versions of it, so the empty
   version still returns every active malicious finding of the package, as
   `FindMalicious(..., "")` and a versionless-only batch already did.
+- Manual advisory writes and deletes on PostgreSQL use the normalized
+  (trimmed) advisory ID throughout. A padded ID such as ` manual:x ` no longer
+  leaves both the vulnerability and the malicious record active after a type
+  change, and deleting it no longer reports "not found".
 
 ### Security updates
 

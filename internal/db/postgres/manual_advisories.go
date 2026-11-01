@@ -16,17 +16,32 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// normalizedManualAdvisory validates an operator advisory and returns a copy
+// carrying the normalized ID. The persisted rows use that ID, so the lock, the
+// revision check, and the counterpart cleanup must use it as well; the
+// caller's advisory is left untouched.
+func normalizedManualAdvisory(advisory *db.ManualAdvisory) (*db.ManualAdvisory, error) {
+	id, err := normalizeManualAdvisoryID(advisory.ID)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := domain.ParseManualAdvisoryFindingType(advisory.FindingType); !ok {
+		return nil, fmt.Errorf("postgres: unsupported manual advisory finding type %q", advisory.FindingType)
+	}
+	normalized := *advisory
+	normalized.ID = id
+	return &normalized, nil
+}
+
 func (s *Store) UpsertManualAdvisory(ctx context.Context, advisory *db.ManualAdvisory) error {
 	if advisory == nil {
 		return nil
 	}
-	if _, err := normalizeManualAdvisoryID(advisory.ID); err != nil {
+	advisory, err := normalizedManualAdvisory(advisory)
+	if err != nil {
 		return err
 	}
-	if _, ok := domain.ParseManualAdvisoryFindingType(advisory.FindingType); !ok {
-		return fmt.Errorf("postgres: unsupported manual advisory finding type %q", advisory.FindingType)
-	}
-	err := withTx(ctx, s.pool, func(tx pgx.Tx) error {
+	err = withTx(ctx, s.pool, func(tx pgx.Tx) error {
 		if err := acquireMaliciousMutationLockTx(ctx, tx); err != nil {
 			return err
 		}
@@ -45,13 +60,11 @@ func (s *Store) UpsertManualAdvisoryWithAudit(ctx context.Context, advisory *db.
 	if advisory == nil {
 		return nil
 	}
-	if _, err := normalizeManualAdvisoryID(advisory.ID); err != nil {
+	advisory, err := normalizedManualAdvisory(advisory)
+	if err != nil {
 		return err
 	}
-	if _, ok := domain.ParseManualAdvisoryFindingType(advisory.FindingType); !ok {
-		return fmt.Errorf("postgres: unsupported manual advisory finding type %q", advisory.FindingType)
-	}
-	err := withTx(ctx, s.pool, func(tx pgx.Tx) error {
+	err = withTx(ctx, s.pool, func(tx pgx.Tx) error {
 		if err := acquireMaliciousMutationLockTx(ctx, tx); err != nil {
 			return err
 		}
@@ -99,10 +112,11 @@ func upsertManualAdvisoryTx(ctx context.Context, tx pgx.Tx, advisory *db.ManualA
 }
 
 func (s *Store) DeleteManualAdvisory(ctx context.Context, id string) error {
-	if _, err := normalizeManualAdvisoryID(id); err != nil {
+	id, err := normalizeManualAdvisoryID(id)
+	if err != nil {
 		return err
 	}
-	err := withTx(ctx, s.pool, func(tx pgx.Tx) error {
+	err = withTx(ctx, s.pool, func(tx pgx.Tx) error {
 		if err := acquireMaliciousMutationLockTx(ctx, tx); err != nil {
 			return err
 		}
@@ -118,10 +132,11 @@ func (s *Store) DeleteManualAdvisory(ctx context.Context, id string) error {
 }
 
 func (s *Store) DeleteManualAdvisoryWithAudit(ctx context.Context, id string, audit *db.AdminAuditEntry) error {
-	if _, err := normalizeManualAdvisoryID(id); err != nil {
+	id, err := normalizeManualAdvisoryID(id)
+	if err != nil {
 		return err
 	}
-	err := withTx(ctx, s.pool, func(tx pgx.Tx) error {
+	err = withTx(ctx, s.pool, func(tx pgx.Tx) error {
 		if err := acquireMaliciousMutationLockTx(ctx, tx); err != nil {
 			return err
 		}
@@ -277,7 +292,7 @@ func (s *Store) GetManualAdvisory(ctx context.Context, id string) (*db.ManualAdv
 		LIMIT 1`
 
 	var item db.ManualAdvisory
-	err := s.pool.QueryRow(ctx, query, id, domain.ManualAdvisorySource).Scan(
+	err := s.pool.QueryRow(ctx, query, strings.TrimSpace(id), domain.ManualAdvisorySource).Scan(
 		&item.FindingType,
 		&item.ID,
 		&item.Ecosystem,

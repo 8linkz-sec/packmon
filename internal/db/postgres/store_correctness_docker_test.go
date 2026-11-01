@@ -40,6 +40,81 @@ func TestPostgresStoreCorrectnessAgainstDocker(t *testing.T) {
 	t.Run("malicious batch keeps empty version beside concrete versions", func(t *testing.T) {
 		testMaliciousBatchKeepsEmptyVersionBesideConcreteVersions(ctx, t, store)
 	})
+	t.Run("manual advisory writes and deletes use the normalized ID", func(t *testing.T) {
+		testManualAdvisoryUsesNormalizedID(ctx, t, store)
+	})
+}
+
+func manualAdvisoriesWithID(ctx context.Context, t *testing.T, store *Store, id string) []db.ManualAdvisory {
+	t.Helper()
+
+	all, err := store.ListManualAdvisories(ctx, 500)
+	if err != nil {
+		t.Fatalf("ListManualAdvisories() error = %v", err)
+	}
+	var matching []db.ManualAdvisory
+	for _, advisory := range all {
+		if advisory.ID == id {
+			matching = append(matching, advisory)
+		}
+	}
+	return matching
+}
+
+func testManualAdvisoryUsesNormalizedID(ctx context.Context, t *testing.T, store *Store) {
+	t.Helper()
+
+	const padded = "  manual:padded-id \t"
+	const normalized = "manual:padded-id"
+
+	if err := store.UpsertManualAdvisory(ctx, &db.ManualAdvisory{
+		ID: padded, FindingType: "vulnerability", Ecosystem: "npm", Name: "padded-id-pkg",
+		Severity: "HIGH", Summary: "padded manual vulnerability",
+	}); err != nil {
+		t.Fatalf("UpsertManualAdvisory(vulnerability) error = %v", err)
+	}
+	if err := store.UpsertManualAdvisoryWithAudit(ctx, &db.ManualAdvisory{
+		ID: padded, FindingType: "malicious", Ecosystem: "npm", Name: "padded-id-pkg",
+		Severity: "CRITICAL", RiskType: "malware", Summary: "padded manual malicious",
+	}, &db.AdminAuditEntry{Action: "manual_advisory_update"}); err != nil {
+		t.Fatalf("UpsertManualAdvisoryWithAudit(type change) error = %v", err)
+	}
+
+	active := manualAdvisoriesWithID(ctx, t, store, normalized)
+	if len(active) != 1 || active[0].FindingType != "malicious" {
+		t.Fatalf("manual advisories for %s after type change = %+v, want only the malicious advisory", normalized, active)
+	}
+	vulns, err := store.FindVulnerabilities(ctx, "npm", "padded-id-pkg", "1.0.0")
+	if err != nil {
+		t.Fatalf("FindVulnerabilities() error = %v", err)
+	}
+	if findingsContainAdvisory(vulns, normalized) {
+		t.Fatalf("FindVulnerabilities() after type change = %+v, want the manual vulnerability withdrawn", vulns)
+	}
+
+	if got, err := store.GetManualAdvisory(ctx, padded); err != nil || got == nil || got.ID != normalized {
+		t.Fatalf("GetManualAdvisory(padded) = %+v, %v; want the normalized advisory", got, err)
+	}
+
+	if err := store.DeleteManualAdvisoryWithAudit(ctx, padded, &db.AdminAuditEntry{Action: "manual_advisory_delete"}); err != nil {
+		t.Fatalf("DeleteManualAdvisoryWithAudit(padded) error = %v, want the normalized advisory deleted", err)
+	}
+	if remaining := manualAdvisoriesWithID(ctx, t, store, normalized); len(remaining) != 0 {
+		t.Fatalf("manual advisories for %s after delete = %+v, want none", normalized, remaining)
+	}
+
+	if err := store.UpsertManualAdvisory(ctx, &db.ManualAdvisory{
+		ID: normalized, FindingType: "vulnerability", Ecosystem: "npm", Name: "padded-id-pkg",
+		Severity: "LOW", Summary: "recreated manual vulnerability",
+	}); err != nil {
+		t.Fatalf("UpsertManualAdvisory(recreate) error = %v", err)
+	}
+	if err := store.DeleteManualAdvisory(ctx, " "+normalized+" "); err != nil {
+		t.Fatalf("DeleteManualAdvisory(padded) error = %v, want the normalized advisory deleted", err)
+	}
+	if remaining := manualAdvisoriesWithID(ctx, t, store, normalized); len(remaining) != 0 {
+		t.Fatalf("manual advisories for %s after plain delete = %+v, want none", normalized, remaining)
+	}
 }
 
 func testMaliciousBatchKeepsEmptyVersionBesideConcreteVersions(ctx context.Context, t *testing.T, store *Store) {
