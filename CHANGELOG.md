@@ -44,6 +44,10 @@
   (trimmed) advisory ID throughout. A padded ID such as ` manual:x ` no longer
   leaves both the vulnerability and the malicious record active after a type
   change, and deleting it no longer reports "not found".
+- Editing a manual vulnerability advisory replaces its stored state instead of
+  going through the feed merge: a `HIGH` -> `LOW` edit is stored as `LOW`, a
+  cleared description is cleared, and moving coverage from package A to B no
+  longer leaves A affected. Feed severity/details retention is unchanged.
 
 ### Security updates
 

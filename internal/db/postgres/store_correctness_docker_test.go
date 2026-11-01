@@ -43,6 +43,84 @@ func TestPostgresStoreCorrectnessAgainstDocker(t *testing.T) {
 	t.Run("manual advisory writes and deletes use the normalized ID", func(t *testing.T) {
 		testManualAdvisoryUsesNormalizedID(ctx, t, store)
 	})
+	t.Run("manual vulnerability edit replaces severity details and packages", func(t *testing.T) {
+		testManualVulnerabilityEditReplacesState(ctx, t, store)
+	})
+}
+
+func testManualVulnerabilityEditReplacesState(ctx context.Context, t *testing.T, store *Store) {
+	t.Helper()
+
+	const id = "manual:replace-edit"
+	if err := store.UpsertManualAdvisory(ctx, &db.ManualAdvisory{
+		ID: id, FindingType: "vulnerability", Ecosystem: "npm", Name: "replace-edit-a",
+		Severity: "HIGH", Summary: "original summary", Description: "original details",
+	}); err != nil {
+		t.Fatalf("UpsertManualAdvisory(create) error = %v", err)
+	}
+	current, err := store.GetManualAdvisory(ctx, id)
+	if err != nil || current == nil {
+		t.Fatalf("GetManualAdvisory(create) = %+v, %v; want advisory", current, err)
+	}
+
+	edit := &db.ManualAdvisory{
+		ID: id, FindingType: "vulnerability", Ecosystem: "pypi", Name: "Replace_Edit.B",
+		Severity: "LOW", Summary: "edited summary", Description: "", UpdatedAt: current.UpdatedAt,
+	}
+	if err := store.UpsertManualAdvisoryWithAudit(ctx, edit, &db.AdminAuditEntry{Action: "manual_advisory_update"}); err != nil {
+		t.Fatalf("UpsertManualAdvisoryWithAudit(edit) error = %v", err)
+	}
+
+	listed := manualAdvisoriesWithID(ctx, t, store, id)
+	if len(listed) != 1 {
+		t.Fatalf("manual advisories for %s after edit = %+v, want exactly the edited package", id, listed)
+	}
+	got := listed[0]
+	if got.Severity != "LOW" || got.Summary != "edited summary" || got.Description != "" || got.Ecosystem != "pypi" || got.Name != "replace-edit-b" {
+		t.Fatalf("manual advisory after edit = %+v, want LOW, edited summary, cleared description, pypi/replace-edit-b", got)
+	}
+
+	oldPackage, err := store.FindVulnerabilities(ctx, "npm", "replace-edit-a", "1.0.0")
+	if err != nil {
+		t.Fatalf("FindVulnerabilities(old package) error = %v", err)
+	}
+	if findingsContainAdvisory(oldPackage, id) {
+		t.Fatalf("FindVulnerabilities(old package) = %+v, want coverage moved away", oldPackage)
+	}
+	newPackage, err := store.FindVulnerabilities(ctx, "pypi", "replace-edit-b", "1.0.0")
+	if err != nil {
+		t.Fatalf("FindVulnerabilities(new package) error = %v", err)
+	}
+	if len(newPackage) != 1 || newPackage[0].AdvisoryID != id || newPackage[0].Severity != domain.SeverityLow {
+		t.Fatalf("FindVulnerabilities(new package) = %+v, want one LOW %s finding", newPackage, id)
+	}
+
+	// Feed merges keep their retention rules: a later, lower feed severity and
+	// an empty feed description do not replace stored feed data.
+	now := time.Now().UTC()
+	feed := func(severity, details string) *db.Vulnerability {
+		return &db.Vulnerability{
+			ID: "GHSA-feed-retention", Summary: "feed summary", Details: details, Severity: severity,
+			Published: now, Modified: now,
+			Sources: []db.VulnerabilitySource{{Source: "ghsa", SourceID: "GHSA-feed-retention"}},
+			AffectedPackages: []db.AffectedPackage{{
+				Ecosystem: "npm", Name: "feed-retention", VersionRanges: json.RawMessage(`[]`), VersionsAffected: json.RawMessage(`[]`),
+			}},
+		}
+	}
+	if err := store.UpsertVulnerability(ctx, feed("HIGH", "feed details")); err != nil {
+		t.Fatalf("UpsertVulnerability(feed HIGH) error = %v", err)
+	}
+	if err := store.UpsertVulnerability(ctx, feed("LOW", "")); err != nil {
+		t.Fatalf("UpsertVulnerability(feed LOW) error = %v", err)
+	}
+	var feedSeverity, feedDetails string
+	if err := store.pool.QueryRow(ctx, `SELECT severity, COALESCE(details, '') FROM vulnerabilities WHERE id = 'GHSA-feed-retention'`).Scan(&feedSeverity, &feedDetails); err != nil {
+		t.Fatalf("read feed vulnerability: %v", err)
+	}
+	if feedSeverity != "HIGH" || feedDetails != "feed details" {
+		t.Fatalf("feed vulnerability after weaker resync = %q/%q, want HIGH/feed details retained", feedSeverity, feedDetails)
+	}
 }
 
 func manualAdvisoriesWithID(ctx context.Context, t *testing.T, store *Store, id string) []db.ManualAdvisory {

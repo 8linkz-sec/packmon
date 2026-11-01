@@ -95,7 +95,7 @@ func upsertManualAdvisoryTx(ctx context.Context, tx pgx.Tx, advisory *db.ManualA
 	}
 	switch findingType {
 	case domain.FindingTypeVulnerability:
-		if err := upsertVulnerabilityTx(ctx, tx, db.ManualAdvisoryToVulnerability(advisory)); err != nil {
+		if err := upsertManualVulnerabilityTx(ctx, tx, db.ManualAdvisoryToVulnerability(advisory)); err != nil {
 			return err
 		}
 		_, err := deleteManualMaliciousFindingTx(ctx, tx, advisory.ID)
@@ -109,6 +109,73 @@ func upsertManualAdvisoryTx(ctx context.Context, tx pgx.Tx, advisory *db.ManualA
 	default:
 		return fmt.Errorf("postgres: unsupported manual advisory finding type %q", advisory.FindingType)
 	}
+}
+
+// upsertManualVulnerabilityTx persists an operator vulnerability advisory with
+// replace semantics. The shared feed merge (upsertVulnerabilityTx) keeps the
+// previous details when a field is cleared, never lowers severity, and only
+// adds affected packages. Those rules protect feed data from weaker feeds, but
+// an operator edit is authoritative: after the merge, the advisory's summary,
+// details, and severity are overwritten and affected packages the edit no
+// longer names are removed, so the stored advisory (and the audit record of
+// the edit) is exactly what the operator submitted.
+func upsertManualVulnerabilityTx(ctx context.Context, tx pgx.Tx, vuln *db.Vulnerability) error {
+	severity, err := normalizeVulnerabilitySeverity(vuln.Severity)
+	if err != nil {
+		return err
+	}
+	ecosystems, names, err := manualVulnerabilityPackageKeys(vuln)
+	if err != nil {
+		return err
+	}
+	if err := upsertVulnerabilityTx(ctx, tx, vuln); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE vulnerabilities
+		SET summary = $2,
+		    details = $3::text,
+		    severity = $4,
+		    updated_at = NOW()
+		WHERE id = $1
+		  AND (summary IS DISTINCT FROM $2
+		       OR details IS DISTINCT FROM $3::text
+		       OR severity IS DISTINCT FROM $4)`,
+		vuln.ID, vuln.Summary, nullableString(vuln.Details), severity,
+	); err != nil {
+		return fmt.Errorf("postgres: replace manual vulnerability %s: %w", vuln.ID, err)
+	}
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM affected_packages ap
+		WHERE ap.vulnerability_id = $1
+		  AND NOT EXISTS (
+			SELECT 1
+			FROM unnest($2::text[], $3::text[]) AS keep(ecosystem, name)
+			WHERE keep.ecosystem = ap.ecosystem
+			  AND keep.name = ap.name
+		  )`,
+		vuln.ID, ecosystems, names,
+	); err != nil {
+		return fmt.Errorf("postgres: replace manual vulnerability %s affected packages: %w", vuln.ID, err)
+	}
+	return nil
+}
+
+// manualVulnerabilityPackageKeys returns the canonical ecosystem/name pairs a
+// manual vulnerability keeps, normalized exactly as upsertVulnerabilityTx
+// stores them.
+func manualVulnerabilityPackageKeys(vuln *db.Vulnerability) ([]string, []string, error) {
+	ecosystems := make([]string, 0, len(vuln.AffectedPackages))
+	names := make([]string, 0, len(vuln.AffectedPackages))
+	for _, pkg := range vuln.AffectedPackages {
+		ecosystem, err := normalizeStoredEcosystem(pkg.Ecosystem)
+		if err != nil {
+			return nil, nil, err
+		}
+		ecosystems = append(ecosystems, ecosystem)
+		names = append(names, normalizePackageName(ecosystem, pkg.Name))
+	}
+	return ecosystems, names, nil
 }
 
 func (s *Store) DeleteManualAdvisory(ctx context.Context, id string) error {
