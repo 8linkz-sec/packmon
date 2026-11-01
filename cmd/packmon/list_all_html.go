@@ -13,10 +13,7 @@ import (
 	"github.com/8linkz-sec/packmon/internal/scanner"
 )
 
-const (
-	listAllHTMLCopyConfirmationVisibleMs = "5000"
-	maxListAllHTMLReportWarnings         = 5
-)
+const listAllHTMLCopyConfirmationVisibleMs = "5000"
 
 type listAllHTMLPackageRow struct {
 	Name                 string
@@ -554,7 +551,7 @@ func listAllHTMLFindingSections(rows []listAllFindingRow) []listAllFindingSectio
 }
 
 func listAllHTMLWarnings(result *domain.ScanResult, inventoryWarnings []string) []string {
-	return limitListAllHTMLWarnings(appendListAllInventoryWarnings(scanner.ReportWarnings(result), inventoryWarnings))
+	return limitHTMLReportWarnings(appendListAllInventoryWarnings(scanner.ReportWarnings(result), inventoryWarnings))
 }
 
 func appendListAllInventoryWarnings(warnings, inventoryWarnings []string) []string {
@@ -566,15 +563,6 @@ func appendListAllInventoryWarnings(warnings, inventoryWarnings []string) []stri
 		warnings = append(warnings, "Some requested package inventory could not be listed: "+warning)
 	}
 	return warnings
-}
-
-func limitListAllHTMLWarnings(warnings []string) []string {
-	if len(warnings) <= maxListAllHTMLReportWarnings {
-		return warnings
-	}
-	out := append([]string(nil), warnings[:maxListAllHTMLReportWarnings]...)
-	out = append(out, fmt.Sprintf("%d additional warnings were omitted from the top of this report.", len(warnings)-maxListAllHTMLReportWarnings))
-	return out
 }
 
 const listAllHTML = cliHTMLReportHeadPrefix + cliHTMLReportCSPMeta +
@@ -676,9 +664,7 @@ a:hover{text-decoration:underline;}
 	`clip:rect(0,0,0,0);white-space:nowrap;border:0;}` + `
 ` + `.status{margin:var(--report-space-5) 0;padding:var(--report-space-3) var(--report-space-4);background:var(--status-bg);` +
 	`border:1px solid var(--crit);border-radius:var(--report-radius-md);color:var(--crit);font-size:var(--report-type-md);}` + `
-` + `.warning{margin:var(--report-space-5) 0;padding:var(--report-space-3) var(--report-space-4);background:var(--warning-bg);` +
-	`border:1px solid var(--warning);border-radius:var(--report-radius-md);color:var(--warning);` +
-	`font-size:var(--report-type-md);}` + `
+` + cliHTMLReportWarningCSS + `
 ` + `.empty{margin:var(--report-space-4) 0;padding:var(--report-space-3) var(--report-space-4);background:var(--success-bg);` +
 	`border:1px solid var(--success-border);border-radius:var(--report-radius-md);color:var(--success);` +
 	`font-size:var(--report-type-md);}` + `
@@ -774,7 +760,7 @@ const listAllHTMLBody = `
 </div>
 {{if .PackageInfo.Unknown}}<div class="hint"><bdi dir="auto">{{.Messages.UnknownStatusHint}}</bdi></div>{{end}}
 {{if .Status}}<div class="status">{{.Messages.StatusPrefix}} <bdi dir="auto">{{.Status}}</bdi></div>{{end}}
-{{range .Warnings}}<div class="warning"><bdi dir="auto">{{.}}</bdi></div>{{end}}
+` + cliHTMLReportWarningsBlock + `
 <h2 id="packages-needing-attention" class="report-anchor">{{.Messages.PackagesNeedingAttentionHeading}}</h2>
 {{if .Attention}}
 <div class="table-scroll" tabindex="0" role="region" aria-label="{{.Messages.PackagesNeedingAttentionTableLabel}}">
