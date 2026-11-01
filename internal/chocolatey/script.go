@@ -18,7 +18,8 @@ import (
 // comment is comment text) and skips `#` comments, `<# ... #>` block
 // comments, and here-strings; KindBatchScript (.bat, .cmd) follows cmd.exe:
 // only double quotes group, an unquoted caret makes the next character
-// literal, a caret that ends the line joins the next line, and `REM` and `::`
+// literal, a caret that ends the line joins the next line, only `&`, `|`,
+// parentheses, and redirections separate commands, and `REM` and `::`
 // comment lines are skipped. Any other kind is an error. UTF-8/UTF-16
 // byte-order marks and CRLF line endings are tolerated.
 func ParseScript(r io.Reader, sourceFile string, kind Kind) ([]Package, error) {
@@ -300,10 +301,13 @@ func (s *scriptScanner) parseLine(line string) []installEntry {
 		}
 	}
 	if !s.powerShell() {
-		return parseChocoTokens(tokenizeBatch(line))
+		// cmd.exe hands single quotes to choco.exe unchanged: only double
+		// quotes group on a Windows command line, so `--version='1.0'`
+		// carries the value `'1.0'`, which is not a version literal.
+		return parseChocoTokens(tokenizeBatch(line), `"`)
 	}
 	tokens := s.tokenize(line)
-	return parseChocoTokens(tokens)
+	return parseChocoTokens(tokens, `"'`)
 }
 
 // isBatchComment reports whether a batch line is a `REM` or `::` comment line.
@@ -350,17 +354,19 @@ var chocoOptionsWithValue = map[string]bool{
 // while leaving it in command position.
 var commandPrefixes = map[string]bool{"call": true, "sudo": true}
 
-// scriptToken is one token of a logical script line. quoted records that
-// some of its text came from inside quotes or, in batch files, from a caret
-// escape: such literal text is always an argument, so a quoted or escaped `;`
-// or `|` never separates commands.
+// scriptToken is one token of a logical script line. literal records that
+// the token is argument text that never separates commands: in PowerShell a
+// token with quoted text, so a quoted `;` or `|` is an argument; in batch
+// files every word token, because tokenizeBatch alone recognizes the cmd.exe
+// separators and so `;`, `{`, `}`, `=` and any quoted or caret-escaped text
+// stay argument text.
 type scriptToken struct {
-	text   string
-	quoted bool
+	text    string
+	literal bool
 }
 
 func (t scriptToken) isSeparator() bool {
-	if t.quoted {
+	if t.literal {
 		return false
 	}
 	switch t.text {
@@ -374,8 +380,9 @@ func (t scriptToken) isSeparator() bool {
 // from every choco install/upgrade command it contains. The choco verb must
 // be in command position (start of line, right after a command separator or
 // redirection, or after a wrapper such as `call`) so text inside strings such
-// as `Write-Host "run choco install x"` is ignored.
-func parseChocoTokens(tokens []scriptToken) []installEntry {
+// as `Write-Host "run choco install x"` is ignored. valueQuotes lists the
+// quote characters stripped from `--option=value` values (see splitOption).
+func parseChocoTokens(tokens []scriptToken, valueQuotes string) []installEntry {
 	var entries []installEntry
 	commandPosition := true
 	for i := 0; i < len(tokens); i++ {
@@ -403,7 +410,7 @@ func parseChocoTokens(tokens []scriptToken) []installEntry {
 			}
 			token := tokens[j].text
 			if isOptionToken(token) {
-				option, value, hasValue := splitOption(token)
+				option, value, hasValue := splitOption(token, valueQuotes)
 				if !hasValue && chocoOptionsWithValue[option] && j+1 < len(tokens) && !tokens[j+1].isSeparator() {
 					j++
 					value = tokens[j].text
@@ -475,11 +482,13 @@ func commandName(token string) string {
 }
 
 // splitOption normalizes `--version=1.2`, `--version:1.2`, `-y`, `/y` style
-// option tokens into (name, value, hasValue).
-func splitOption(token string) (string, string, bool) {
+// option tokens into (name, value, hasValue). Leading and trailing
+// valueQuotes characters are stripped from the value: `"'` in PowerShell,
+// only `"` in batch files.
+func splitOption(token, valueQuotes string) (string, string, bool) {
 	name := strings.TrimLeft(token, "-/")
 	if idx := strings.IndexAny(name, "=:"); idx >= 0 {
-		return strings.ToLower(name[:idx]), strings.Trim(name[idx+1:], `"'`), true
+		return strings.ToLower(name[:idx]), strings.Trim(name[idx+1:], valueQuotes), true
 	}
 	return strings.ToLower(name), "", false
 }
@@ -502,7 +511,7 @@ func isRedirectPrefix(token string) bool {
 }
 
 // tokenize splits a PowerShell line into tokens: whitespace separates,
-// single/double quotes group (quotes removed, the token marked quoted), the
+// single/double quotes group (quotes removed, the token marked literal), the
 // unquoted characters ; | & ( ) { } < > become standalone separator tokens
 // (stream selectors such as `2>` are dropped), an unquoted `#` at token start
 // starts a comment that ends the line, `<# ... #>` block comments are skipped
@@ -514,7 +523,7 @@ func (s *scriptScanner) tokenize(line string) []scriptToken {
 	quoted := false
 	flush := func() {
 		if current.Len() > 0 {
-			tokens = append(tokens, scriptToken{text: current.String(), quoted: quoted})
+			tokens = append(tokens, scriptToken{text: current.String(), literal: quoted})
 			current.Reset()
 		}
 		quoted = false
@@ -570,23 +579,25 @@ func (s *scriptScanner) tokenize(line string) []scriptToken {
 
 // tokenizeBatch splits a batch logical line into tokens with cmd.exe quoting
 // and escaping rules: whitespace separates; only double quotes group (quotes
-// removed, the token marked quoted), and inside them every character,
-// including a caret, is literal; a single quote is ordinary text. An unquoted
-// caret is removed and makes the next character literal (the token is marked
-// quoted), so `^&`, `^|`, `^<`, `^>` and `^"` are argument text and `^^` is a
-// literal caret; an escaped space or tab still separates arguments, because
-// the invoked program splits its command line on it. A caret with nothing
-// after it escapes nothing. The unquoted, unescaped characters
-// ; | & ( ) { } < > become standalone separator tokens as in tokenize (stream
-// selectors such as `2>` are dropped). Batch files have no inline comments,
-// block comments, or here-strings.
+// removed), and inside them every character, including a caret, is literal; a
+// single quote is ordinary text. An unquoted caret is removed and makes the
+// next character literal, so `^&`, `^|`, `^<`, `^>` and `^"` are argument text
+// and `^^` is a literal caret; an escaped space or tab still separates
+// arguments, because the invoked program splits its command line on it. A
+// caret with nothing after it escapes nothing. Only the unquoted, unescaped
+// cmd.exe command separators & | (which also form && and ||), the block
+// parentheses ( ), and the redirections < > become standalone separator
+// tokens (stream selectors such as `2>` are dropped); `;`, `{`, `}` and `=`
+// are ordinary text, and every word token is marked literal so its text can
+// never read as a separator. Batch files have no inline comments, block
+// comments, or here-strings.
 func tokenizeBatch(line string) []scriptToken {
 	var tokens []scriptToken
 	var current strings.Builder
-	quoted := false
+	quoted := false // the current word has quoted or escaped text
 	flush := func() {
 		if current.Len() > 0 {
-			tokens = append(tokens, scriptToken{text: current.String(), quoted: quoted})
+			tokens = append(tokens, scriptToken{text: current.String(), literal: true})
 			current.Reset()
 		}
 		quoted = false
@@ -623,7 +634,7 @@ func tokenizeBatch(line string) []scriptToken {
 			}
 			flush()
 			tokens = append(tokens, scriptToken{text: string(ch)})
-		case ch == ';' || ch == '|' || ch == '&' || ch == '(' || ch == ')' || ch == '{' || ch == '}':
+		case ch == '|' || ch == '&' || ch == '(' || ch == ')':
 			flush()
 			tokens = append(tokens, scriptToken{text: string(ch)})
 		default:

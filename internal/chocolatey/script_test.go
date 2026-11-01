@@ -348,6 +348,54 @@ func TestParseScriptLongContinuationIsLinear(t *testing.T) {
 	}
 }
 
+// TestParseScriptSeparatorsAndOptionQuotesFollowScriptKind pins which
+// characters separate commands in each language and how option values are
+// unquoted. cmd.exe starts a new command only after an unquoted, unescaped
+// `&`, `&&`, `||`, `|`, a redirection, or a block parenthesis; `;`, `{`, `}`
+// and `=` are ordinary argument text there. cmd.exe passes single quotes to
+// choco.exe unchanged (only double quotes group on its command line), so a
+// batch `--version='1.0'` is not a version literal.
+func TestParseScriptSeparatorsAndOptionQuotesFollowScriptKind(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name       string
+		script     string
+		powerShell string
+		batch      string
+	}{
+		{"semicolon", "echo x ; choco install a\r\n", "a@[unpinned]", ""},
+		{"semicolon without spaces", "echo x;choco install a\r\n", "a@[unpinned]", ""},
+		{"semicolon inside the package list", "choco install a ; b\r\n", "a@[unpinned]", "a@[unpinned] b@[unpinned]"},
+		{"opening brace", "echo { choco install a }\r\n", "a@[unpinned]", ""},
+		{"closing brace", "echo } choco install a\r\n", "a@[unpinned]", ""},
+		{"equals", "set x = choco install a\r\n", "a@[unpinned]", ""},
+		{"ampersand", "echo x & choco install a\r\n", "a@[unpinned]", "a@[unpinned]"},
+		{"double ampersand", "echo x && choco install a\r\n", "a@[unpinned]", "a@[unpinned]"},
+		{"double pipe", "echo x || choco install a\r\n", "a@[unpinned]", "a@[unpinned]"},
+		{"pipe", "echo x | choco install a\r\n", "a@[unpinned]", "a@[unpinned]"},
+		{"redirection then ampersand", "choco install a >nul & choco install b\r\n", "a@[unpinned] b@[unpinned]", "a@[unpinned] b@[unpinned]"},
+		{"block parentheses", "if exist x (choco install a) else (choco install b)\r\n", "a@[unpinned] b@[unpinned]", "a@[unpinned] b@[unpinned]"},
+		{"ampersand ends the package list", "choco install a & b\r\n", "a@[unpinned]", "a@[unpinned]"},
+		{"single-quoted version value", "choco install a --version='1.0'\r\n", "a@1.0[]", "a@[unpinned]"},
+		{"single-quoted separate version value", "choco install a --version '1.0'\r\n", "a@1.0[]", "a@[unpinned]"},
+		{"single-quoted option token", "choco install a '--version=1.0'\r\n", "a@1.0[]", "a@[unpinned]"},
+		{"double-quoted version value", "choco install a --version=\"1.0\"\r\n", "a@1.0[]", "a@1.0[]"},
+		{"double-quoted separate version value", "choco install a --version \"1.0\"\r\n", "a@1.0[]", "a@1.0[]"},
+		{"escaped double quotes around version value", "choco install a --version=^\"1.0^\"\r\n", "a@[unpinned]", "a@1.0[]"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := scriptKeys(t, KindPowerShellScript, tt.script); got != tt.powerShell {
+				t.Errorf("ParseScript(%q, powershell) = %q, want %q", tt.script, got, tt.powerShell)
+			}
+			if got := scriptKeys(t, KindBatchScript, tt.script); got != tt.batch {
+				t.Errorf("ParseScript(%q, batch) = %q, want %q", tt.script, got, tt.batch)
+			}
+		})
+	}
+}
+
 // TestParseScriptQuotingAndEscapingFollowScriptKind pins the cmd.exe quoting
 // and caret-escape rules for batch files against the unchanged PowerShell
 // rules: in batch files only double quotes group, a caret inside double

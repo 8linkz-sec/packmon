@@ -634,9 +634,17 @@ Important behavior:
   installs latest) show INSTALLED `-`, the feed's latest version, UPDATE
   `unpinned`, and the `unpinned` flag, and are never counted as available
   updates. A script `choco` verb counts only in command position (line start,
-  after an unquoted `;`, `|`, `&`, `(`, `)`, `{`, `}`, redirection, or `=`,
-  or after `call` / `sudo`); quoted text is always an argument, so a quoted
-  `';'` neither starts a new command nor ends the package list. Script
+  after an unquoted command separator or redirection, or after `call` /
+  `sudo`). In `.ps1` / `.psm1` files the separators are `;`, `|`, `&`, `(`,
+  `)`, `{`, `}`, redirection, and `=`; in `.bat` / `.cmd` files they are only
+  the cmd.exe separators `&`, `&&`, `||`, `|`, the block parentheses `(` /
+  `)`, and redirection, while `;`, `{`, `}`, and `=` are ordinary argument
+  text. Quoted (and in batch files caret-escaped) text is always an argument,
+  so a quoted `';'` or `"&"` neither starts a new command nor ends the
+  package list. A `--version=value` pin has surrounding double quotes
+  stripped in both languages and surrounding single quotes stripped only in
+  PowerShell: cmd.exe passes single quotes to choco.exe unchanged, so a batch
+  `--version='1.0'` is not a version literal and the entry is unpinned. Script
   syntax follows the file type: `.ps1` / `.psm1` files group single- and
   double-quoted text, join backtick line continuations, and skip `#`
   comments, `<# ... #>` block comments, and here-strings, where a backtick
