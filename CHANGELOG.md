@@ -26,6 +26,10 @@
   lockfile passes remotely. When ReversingLabs is enabled again, the next sync
   refetches the whole reputation dataset. The field is omitted while
   reputation is served, so older clients and servers remain compatible.
+- `packmon db sync` now rejects timeouts above 9223372036 seconds from
+  `--timeout`, config `timeout`, or `PACKMON_TIMEOUT`. Such values used to
+  overflow `time.Duration` into a negative deadline, so the sync aborted at
+  once with a context deadline error instead of a clear validation error.
 - SHA-pinned GitHub Actions are no longer compared as version strings in
   `--list-all` / `--outdated`. The `# vX.Y.Z` comment convention is used as
   the declared version; without it the pin is compared with the dereferenced

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -30,6 +31,11 @@ func newDBCmd() *cobra.Command {
 
 	return dbCmd
 }
+
+// maxDBSyncTimeoutSeconds is the largest whole-second sync timeout that still
+// fits a time.Duration; larger values would overflow into a negative,
+// immediately expired sync deadline.
+const maxDBSyncTimeoutSeconds = math.MaxInt64 / int64(time.Second)
 
 type dbSyncSettings struct {
 	serverURL         string
@@ -265,6 +271,9 @@ func resolveDBSyncSettings(cmd *cobra.Command, cfg *cliConfig) (dbSyncSettings, 
 		if parsed <= 0 {
 			return dbSyncSettings{}, fmt.Errorf("PACKMON_TIMEOUT must be greater than zero")
 		}
+		if int64(parsed) > maxDBSyncTimeoutSeconds {
+			return dbSyncSettings{}, fmt.Errorf("PACKMON_TIMEOUT must be at most %d seconds", maxDBSyncTimeoutSeconds)
+		}
 		timeoutSeconds = parsed
 	}
 	if commandFlagChanged(cmd, "timeout") {
@@ -275,6 +284,9 @@ func resolveDBSyncSettings(cmd *cobra.Command, cfg *cliConfig) (dbSyncSettings, 
 	}
 	if timeoutSeconds <= 0 {
 		return dbSyncSettings{}, fmt.Errorf("timeout must be greater than zero")
+	}
+	if int64(timeoutSeconds) > maxDBSyncTimeoutSeconds {
+		return dbSyncSettings{}, fmt.Errorf("timeout must be at most %d seconds", maxDBSyncTimeoutSeconds)
 	}
 	settings.timeout = time.Duration(timeoutSeconds) * time.Second
 
