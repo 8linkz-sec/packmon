@@ -973,11 +973,17 @@ func registryGetLimitedWithHeaders(ctx context.Context, url string, limit int64,
 		}
 		return nil, fmt.Errorf("status %d", resp.StatusCode)
 	}
-	phase.recordSuccess()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
+		// A reset connection or a per-request timeout mid-body left the lookup
+		// without an answer: count it like a failed request, not a success.
+		if phaseCtx.Err() == nil {
+			phase.recordRefusal()
+		}
 		return nil, err
 	}
+	// Only a completely read body is an answer that resets the breaker streak.
+	phase.recordSuccess()
 	if int64(len(data)) > limit {
 		return nil, fmt.Errorf("registry response exceeds %d byte limit", limit)
 	}

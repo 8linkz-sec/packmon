@@ -46,7 +46,9 @@ unrelated persistence capabilities do not leak across subsystem boundaries.
   - `3`: findings below the blocking threshold (non-blocking; treated as a
     passing pipeline by the GitLab consumer template);
   - `4`: parser error, including partial lockfile/SBOM parse errors when no
-    blocking finding has already failed the scan;
+    blocking finding has already failed the scan; `--list-packages` has no
+    findings, so any lockfile/SBOM parse error makes it exit `4` after it
+    prints the packages it could parse;
   - `10`: internal bug.
 - Treat malicious and active supply-chain risk findings as always blocking.
   Historical ReversingLabs malware-incident evidence is `LOW` reputation info
@@ -555,8 +557,9 @@ Important behavior:
   loopback/private/link-local public-registry targets degrade to `unknown`
   without sending a registry request. `--list-all-offline` skips this registry digest phase. If
   the local Docker CLI can inspect the declared image, Packmon compares the
-  local repo digest with the current registry digest and marks `UPDATE yes`,
-  `-`, or `unknown`.
+  local repo digest of that repository and tag with the current registry
+  digest and marks `UPDATE yes`, `-`, or `unknown`; several installed tags of
+  one repository are compared separately.
 - Docker image inventory is not a container-layer vulnerability scan. Packmon
   does not pull images, scan OS packages inside images, or read private
   registry credentials as part of `--list-all`; `/api/v1/check` rejects

@@ -64,11 +64,40 @@ func TestLocalInspectorExtractsRepoDigest(t *testing.T) {
 	ref, _ := ParseRef("postgres:18-alpine")
 
 	got := inspector.Digests(context.Background(), []Ref{ref})
-	if got[ref.Name] != "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" {
+	if got[LocalDigestKey(ref)] != "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" {
 		t.Fatalf("digests = %#v", got)
 	}
 	if len(runner.refs) != 1 || runner.refs[0] != "docker.io/library/postgres:18-alpine" {
 		t.Fatalf("runner refs = %#v, want docker.io/library/postgres:18-alpine", runner.refs)
+	}
+}
+
+func TestLocalInspectorKeysDigestsByRepositoryAndTag(t *testing.T) {
+	const (
+		digest17 = "sha256:1717171717171717171717171717171717171717171717171717171717171717"
+		digest18 = "sha256:1818181818181818181818181818181818181818181818181818181818181818"
+	)
+	// Two installed tags of one repository are separate images with their own
+	// repo digests; a third requested tag shares the 18 image.
+	runner := &fakeRunner{out: `[
+		{"RepoTags":["postgres:17-alpine"],"RepoDigests":["postgres@` + digest17 + `"],"Id":"sha256:img17"},
+		{"RepoTags":["postgres:18-alpine","postgres:latest"],"RepoDigests":["postgres@` + digest18 + `"],"Id":"sha256:img18"}
+	]`}
+	ref17, _ := ParseRef("postgres:17-alpine")
+	ref18, _ := ParseRef("postgres:18-alpine")
+	refLatest, _ := ParseRef("postgres")
+
+	got := LocalInspector{Runner: runner}.Digests(context.Background(), []Ref{ref17, ref18, refLatest})
+	want := map[string]string{
+		LocalDigestKey(ref17):     digest17,
+		LocalDigestKey(ref18):     digest18,
+		LocalDigestKey(refLatest): digest18,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("digests = %#v, want %#v", got, want)
+	}
+	if LocalDigestKey(ref17) == LocalDigestKey(ref18) {
+		t.Fatalf("LocalDigestKey(%q) == LocalDigestKey(%q); tags of one repository must not share a key", ref17.Original, ref18.Original)
 	}
 }
 
