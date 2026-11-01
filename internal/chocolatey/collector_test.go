@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 	"unicode/utf16"
@@ -142,6 +143,40 @@ func TestPackageConvertsToChocolateyDomainPackage(t *testing.T) {
 	}
 }
 
+func TestCollectAppliesLineContinuationPerScriptType(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	// Each file uses the other dialect's continuation marker first, which must
+	// not join lines, then its own marker, which must.
+	writeTestFile(t, filepath.Join(dir, "install.ps1"), "choco install ps-a ^\r\nchoco install ps-b `\r\n ps-c\r\n")
+	writeTestFile(t, filepath.Join(dir, "Module.psm1"), "choco install psm-a ^\r\nchoco install psm-b\r\n")
+	writeTestFile(t, filepath.Join(dir, "setup.bat"), "choco install bat-a `\r\nchoco install bat-b ^\r\n bat-c\r\n")
+	writeTestFile(t, filepath.Join(dir, "setup.cmd"), "choco install cmd-a `\r\nchoco install cmd-b\r\n")
+
+	collection, err := Collect(dir, 10)
+	if err != nil {
+		t.Fatalf("Collect() error = %v", err)
+	}
+	if len(collection.ParseErrors) != 0 {
+		t.Fatalf("ParseErrors = %v, want none", collection.ParseErrors)
+	}
+	got := make([]string, 0, len(collection.Packages))
+	for _, pkg := range collection.Packages {
+		got = append(got, pkg.SourceFile+":"+pkg.Name)
+	}
+	sort.Strings(got)
+	want := []string{
+		"Module.psm1:psm-a", "Module.psm1:psm-b",
+		"install.ps1:ps-a", "install.ps1:ps-b", "install.ps1:ps-c",
+		"setup.bat:bat-a", "setup.bat:bat-b", "setup.bat:bat-c",
+		"setup.cmd:cmd-a", "setup.cmd:cmd-b",
+	}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("Packages = %v, want %v", got, want)
+	}
+}
+
 func TestCollectIgnoresConfigXMLWithoutChocolateyPackages(t *testing.T) {
 	t.Parallel()
 
@@ -262,12 +297,12 @@ func TestParseFileFromRootRejectsInvalidFileInputs(t *testing.T) {
 	}{
 		{
 			name: "root escape",
-			file: File{RelPath: "../outside.ps1", Kind: KindScript},
+			file: File{RelPath: "../outside.ps1", Kind: KindPowerShellScript},
 			want: "escapes scan root",
 		},
 		{
 			name: "missing file",
-			file: File{RelPath: "missing.ps1", Kind: KindScript},
+			file: File{RelPath: "missing.ps1", Kind: KindPowerShellScript},
 			want: "missing.ps1",
 		},
 		{
@@ -330,7 +365,7 @@ func TestParseChocoInstallLineShapes(t *testing.T) {
 		{`chocolatey install 7zip`, nil},
 		{`choco uninstall 7zip`, nil},
 	} {
-		got := parseChocoInstallLine(tt.line)
+		got := parseChocoInstallLine(KindPowerShellScript, tt.line)
 		var keys []string
 		for _, entry := range got {
 			keys = append(keys, entry.name+"@"+entry.version)
@@ -348,7 +383,7 @@ func TestDecodeScriptHandlesUTF16(t *testing.T) {
 	for _, unit := range utf16.Encode([]rune("choco install utf16pkg\r\n")) {
 		encoded = binary.LittleEndian.AppendUint16(encoded, unit)
 	}
-	pkgs, err := ParseScript(strings.NewReader(string(encoded)), "x.ps1")
+	pkgs, err := ParseScript(strings.NewReader(string(encoded)), "x.ps1", KindPowerShellScript)
 	if err != nil {
 		t.Fatalf("ParseScript() error = %v", err)
 	}

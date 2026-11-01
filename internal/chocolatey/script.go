@@ -2,6 +2,7 @@ package chocolatey
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"regexp"
 	"strings"
@@ -11,12 +12,17 @@ import (
 
 // ParseScript scans a Windows script (PowerShell, batch) line by line for
 // `choco install|upgrade` / `cinst` / `cup` invocations and returns the
-// package IDs (and `--version` pins) they name. It tolerates UTF-8/UTF-16
-// byte-order marks and CRLF line endings, joins backtick (PowerShell) and
-// caret (batch) line continuations (a backtick inside a `#` or `<# ... #>`
-// comment is comment text, not a continuation), and skips PowerShell
-// here-strings and `<# ... #>` block comments.
-func ParseScript(r io.Reader, sourceFile string) ([]Package, error) {
+// package IDs (and `--version` pins) they name. kind selects the language:
+// KindPowerShellScript (.ps1, .psm1) joins backtick line continuations (a
+// backtick inside a `#` or `<# ... #>` comment is comment text) and skips `#`
+// comments, `<# ... #>` block comments, and here-strings; KindBatchScript
+// (.bat, .cmd) joins caret line continuations and skips `REM` and `::`
+// comment lines. Any other kind is an error. UTF-8/UTF-16 byte-order marks
+// and CRLF line endings are tolerated.
+func ParseScript(r io.Reader, sourceFile string, kind Kind) ([]Package, error) {
+	if kind != KindPowerShellScript && kind != KindBatchScript {
+		return nil, fmt.Errorf("%s: unsupported chocolatey script kind %q", sourceFile, kind)
+	}
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return nil, err
@@ -38,7 +44,7 @@ func ParseScript(r io.Reader, sourceFile string) ([]Package, error) {
 			packages = append(packages, pkg)
 		}
 	}
-	var scanner scriptScanner
+	scanner := scriptScanner{kind: kind}
 	for _, line := range strings.Split(text, "\n") {
 		add(scanner.feed(line))
 	}
@@ -84,6 +90,7 @@ type installEntry struct {
 // physical line at a time: pending line continuations, an open PowerShell
 // here-string, and an open `<# ... #>` block comment.
 type scriptScanner struct {
+	kind           Kind // KindPowerShellScript or KindBatchScript
 	pending        strings.Builder
 	hasPending     bool
 	pendingQuote   byte // quote left open by the pending continuation, else 0
@@ -102,7 +109,7 @@ func (s *scriptScanner) feed(rawLine string) []installEntry {
 		}
 		return nil
 	}
-	if body, marker, ok := continuationBody(line); ok && s.continues(line, marker) {
+	if body, ok := continuationBody(line, s.continuationMarker()); ok && s.continues(line) {
 		s.pending.WriteString(body)
 		s.pending.WriteByte(' ')
 		s.hasPending = true
@@ -130,33 +137,45 @@ func (s *scriptScanner) flush() []installEntry {
 	return s.parseLine(line)
 }
 
-// continuationBody reports whether line ends with a PowerShell backtick or
-// batch caret continuation marker and returns the line without it and the
-// marker.
-func continuationBody(line string) (string, byte, bool) {
+// powerShell reports whether the scanner reads PowerShell syntax; otherwise
+// it reads cmd.exe batch syntax.
+func (s *scriptScanner) powerShell() bool {
+	return s.kind == KindPowerShellScript
+}
+
+// continuationMarker is the line-continuation character of the script's
+// language: a backtick in PowerShell, a caret in batch files.
+func (s *scriptScanner) continuationMarker() byte {
+	if s.powerShell() {
+		return '`'
+	}
+	return '^'
+}
+
+// continuationBody reports whether line ends with the continuation marker
+// and returns the line without it.
+func continuationBody(line string, marker byte) (string, bool) {
 	trimmed := strings.TrimRight(line, " \t")
-	if trimmed == "" {
-		return "", 0, false
+	if trimmed == "" || trimmed[len(trimmed)-1] != marker {
+		return "", false
 	}
-	switch marker := trimmed[len(trimmed)-1]; marker {
-	case '`', '^':
-		return trimmed[:len(trimmed)-1], marker, true
-	}
-	return "", 0, false
+	return trimmed[:len(trimmed)-1], true
 }
 
 // continues reports whether the continuation marker that ends line is code
-// rather than comment text, and records the quote the line leaves open for
-// the next physical line. A marker inside a `<# ... #>` block comment never
-// continues, and neither does a PowerShell backtick inside a `#` line
-// comment. A batch caret after `#` still continues: `#` starts no comment in
-// batch files.
-func (s *scriptScanner) continues(line string, marker byte) bool {
+// rather than comment text, and in PowerShell records the quote the line
+// leaves open for the next physical line. A PowerShell backtick inside a `#`
+// line comment or a `<# ... #>` block comment is comment text. Batch files
+// have neither comment form, so a batch caret always continues.
+func (s *scriptScanner) continues(line string) bool {
+	if !s.powerShell() {
+		return true
+	}
 	// A pending continuation never ends inside a block comment, so the block
 	// comment state only carries over into the first physical line.
 	inBlock := s.inBlockComment && !s.hasPending
 	quote, lineComment, blockComment := lineEndState(line, s.pendingQuote, inBlock)
-	if blockComment || (lineComment && marker == '`') {
+	if lineComment || blockComment {
 		return false
 	}
 	s.pendingQuote = quote
@@ -200,12 +219,20 @@ func lineEndState(line string, quote byte, inBlock bool) (byte, bool, bool) {
 	return quote, false, inBlock
 }
 
+// parseLine skips whole-line comments of the script's language (`#` in
+// PowerShell, `REM` and `::` in batch files) and extracts the install entries
+// of any other logical line.
 func (s *scriptScanner) parseLine(line string) []installEntry {
 	if !s.inBlockComment {
 		trimmed := strings.TrimSpace(line)
-		lower := strings.ToLower(trimmed)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "::") ||
-			isBatchRem(lower) {
+		if trimmed == "" {
+			return nil
+		}
+		if s.powerShell() {
+			if strings.HasPrefix(trimmed, "#") {
+				return nil
+			}
+		} else if strings.HasPrefix(trimmed, "::") || isBatchRem(strings.ToLower(trimmed)) {
 			return nil
 		}
 	}
@@ -221,8 +248,8 @@ func isBatchRem(lower string) bool {
 // parseChocoInstallLine extracts package IDs from `choco install|upgrade`,
 // `cinst`, and `cup` invocations on one self-contained script line. It is the
 // stateless entry point used when no multi-line context is available.
-func parseChocoInstallLine(line string) []installEntry {
-	var s scriptScanner
+func parseChocoInstallLine(kind Kind, line string) []installEntry {
+	s := scriptScanner{kind: kind}
 	return s.parseLine(line)
 }
 
@@ -404,10 +431,11 @@ func isRedirectPrefix(token string) bool {
 // tokenize splits a shell/PowerShell line into tokens: whitespace separates,
 // single/double quotes group (quotes removed, the token marked quoted), the
 // unquoted characters ; | & ( ) { } < > become standalone separator tokens
-// (stream selectors such as `2>` are dropped), an unquoted `#` at token start
-// starts a comment that ends the line, `<# ... #>` block comments are skipped
-// (possibly across lines), and a trailing `@"` / `@'` opens a here-string that
-// suppresses following lines until the matching `"@` / `'@` terminator.
+// (stream selectors such as `2>` are dropped). In PowerShell only, an unquoted
+// `#` at token start starts a comment that ends the line, `<# ... #>` block
+// comments are skipped (possibly across lines), and a trailing `@"` / `@'`
+// opens a here-string that suppresses following lines until the matching
+// `"@` / `'@` terminator.
 func (s *scriptScanner) tokenize(line string) []scriptToken {
 	var tokens []scriptToken
 	var current strings.Builder
@@ -420,6 +448,7 @@ func (s *scriptScanner) tokenize(line string) []scriptToken {
 		quoted = false
 	}
 	quote := byte(0)
+	powerShell := s.powerShell()
 	for i := 0; i < len(line); i++ {
 		ch := line[i]
 		switch {
@@ -437,15 +466,15 @@ func (s *scriptScanner) tokenize(line string) []scriptToken {
 		case ch == '"' || ch == '\'':
 			quote = ch
 			quoted = true
-		case ch == '@' && current.Len() == 0 && i+1 < len(line) && (line[i+1] == '"' || line[i+1] == '\'') &&
+		case powerShell && ch == '@' && current.Len() == 0 && i+1 < len(line) && (line[i+1] == '"' || line[i+1] == '\'') &&
 			strings.TrimSpace(line[i+2:]) == "":
 			s.hereString = line[i+1]
 			flush()
 			return tokens
-		case ch == '#' && current.Len() == 0:
+		case powerShell && ch == '#' && current.Len() == 0:
 			flush()
 			return tokens
-		case ch == '<' && i+1 < len(line) && line[i+1] == '#':
+		case powerShell && ch == '<' && i+1 < len(line) && line[i+1] == '#':
 			flush()
 			s.inBlockComment = true
 			i++

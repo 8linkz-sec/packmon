@@ -373,6 +373,15 @@
   `git`; the same applied to trailing `#` comments and to lines ending inside
   a `<# ... #>` block comment. A continued command that ends after a closed
   block comment (``<# doc #> choco install a ` `` + `b`) now keeps `b`.
+- Chocolatey script inventory reads each script with its own language's
+  rules. PowerShell files (`.ps1`, `.psm1`) continue lines only with a
+  backtick and batch files (`.bat`, `.cmd`) only with a caret; either marker
+  in the other language used to join the next line, so `choco install a ^`
+  followed by `choco install b` in a `.ps1` reported `choco` and `install` as
+  packages. `#` comments, `<# ... #>` block comments, and here-strings apply
+  only to PowerShell files (a batch `echo @"` no longer hides the rest of the
+  file, and `#` is ordinary text in batch), and `REM` / `::` comment lines
+  only to batch files.
 
 ### Security updates
 

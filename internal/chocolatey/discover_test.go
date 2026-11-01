@@ -22,13 +22,13 @@ func TestClassifyFile(t *testing.T) {
 		{"foo.config.xml", "", false},
 		{"config.xml.bak", "", false},
 		{"web.config", "", false},
-		{"install.ps1", KindScript, true},
-		{"Module.PSM1", KindScript, true},
-		{"setup.bat", KindScript, true},
-		{"setup.CMD", KindScript, true},
+		{"install.ps1", KindPowerShellScript, true},
+		{"Module.PSM1", KindPowerShellScript, true},
+		{"setup.bat", KindBatchScript, true},
+		{"setup.CMD", KindBatchScript, true},
 		{"install.ps1.txt", "", false},
 		{"README.md", "", false},
-		{".ps1", KindScript, true},
+		{".ps1", KindPowerShellScript, true},
 	} {
 		kind, ok := classifyFile(tt.base)
 		if kind != tt.kind || ok != tt.ok {
@@ -170,9 +170,9 @@ func TestDiscoverFilesWithWarningsHonorsDepthAndDirectoryExclusions(t *testing.T
 		got = append(got, string(file.Kind)+":"+file.RelPath)
 	}
 	want := []string{
-		"script:.github/setup.cmd",
+		"batch-script:.github/setup.cmd",
 		"config-xml:config.xml",
-		"script:scripts/install.ps1",
+		"powershell-script:scripts/install.ps1",
 	}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("discovered files = %v, want %v", got, want)
