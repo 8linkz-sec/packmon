@@ -25,6 +25,7 @@ import (
 
 const (
 	adminPasswordMinLength = auth.MinAdminPasswordLength
+	adminPasswordMaxBytes  = auth.MaxAdminPasswordBytes
 	// maxAPIKeyLifetimeDays bounds how far in the future a new API key may
 	// expire. Keys are created as a whole number of days from "now".
 	maxAPIKeyLifetimeDays    = 365
@@ -1216,6 +1217,7 @@ func adminSettingsTemplateData(state adminSettingsViewState, csrfToken string, q
 		"AdminAuthLoadError":             state.AdminAuthLoadError,
 		"BootstrapWarning":               state.BootstrapWarning,
 		"MinPasswordLength":              adminPasswordMinLength,
+		"MaxPasswordBytes":               adminPasswordMaxBytes,
 		"Message":                        query.Get("msg"),
 		"Error":                          query.Get("err"),
 	}
@@ -1227,7 +1229,7 @@ func adminSettingsTemplateData(state adminSettingsViewState, csrfToken string, q
 func adminPasswordPolicyMessage(err error) string {
 	switch {
 	case errors.Is(err, auth.ErrAdminPasswordTooLong):
-		return web.Message("admin.settings.error.password.too_long", auth.MaxAdminPasswordBytes)
+		return web.Message("admin.settings.error.password.too_long", adminPasswordMaxBytes)
 	case errors.Is(err, auth.ErrAdminPasswordTooShort):
 		return web.Message("admin.settings.error.password.too_short", adminPasswordMinLength)
 	default:

@@ -911,7 +911,7 @@ var webMessagesEN = map[webMessageKey]string{
 	webMessageKey("admin.settings.system.save"):                         "Save System Settings",
 	webMessageKey("admin.settings.password.heading"):                    "Change Admin Password",
 	webMessageKey("admin.settings.password.changing"):                   "Changing password",
-	webMessageKey("admin.settings.password.length_help"):                "Use at least %d characters.",
+	webMessageKey("admin.settings.password.length_help"):                "Use at least %d characters and at most %d bytes.",
 	webMessageKey("admin.settings.password.confirm_help"):               "The confirmation must match the new password.",
 	webMessageKey("admin.settings.password.current_label"):              "Current Password",
 	webMessageKey("admin.settings.password.new_label"):                  "New Password",

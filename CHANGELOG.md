@@ -41,7 +41,8 @@
   password", and a too-long `PACKMON_ADMIN_INITIAL_PASSWORD` failed bootstrap
   with a bcrypt hash error. The form now answers "Password must be at most 72
   bytes", and each policy error maps to its own message instead of every one
-  being reported as too short.
+  being reported as too short. The password form's help text now states both
+  bounds ("Use at least 12 characters and at most 72 bytes.").
 - Admin login and feed-config hardening: a feed save or reset that has to roll
   the runtime back now does so on a context detached from the request (with a
   30-second timeout), so a client disconnect can no longer cancel the rollback
