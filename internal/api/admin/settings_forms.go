@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/8linkz-sec/packmon/internal/config"
 	"github.com/8linkz-sec/packmon/internal/db"
 	"github.com/8linkz-sec/packmon/internal/domain"
 	"github.com/8linkz-sec/packmon/internal/web"
@@ -96,7 +97,25 @@ func (h *AdminHandler) HandleSystemSettingsSave(w http.ResponseWriter, r *http.R
 	auditCtx, cancel := h.adminAuditContext()
 	defer cancel()
 
-	if err := h.store.UpsertSystemSettingsWithAudit(auditCtx, settings, audit); err != nil {
+	// Commit and apply to the live runtime so the new block threshold, rate
+	// limit and retention take effect immediately, without a server restart.
+	// CommitAndPublish orders each commit with its publication, so overlapping
+	// saves cannot leave the runtime on an older commit than PostgreSQL.
+	commit := func() error {
+		return h.store.UpsertSystemSettingsWithAudit(auditCtx, settings, audit)
+	}
+	if h.runtime != nil {
+		err = h.runtime.CommitAndPublish(auditCtx, config.SystemSettingsValues{
+			BlockThreshold:      blockThreshold,
+			RateLimitPerMinute:  rateLimitPerMinute,
+			RateLimitBurst:      rateLimitBurst,
+			ScanLogRetention:    scanLogRetention,
+			AdminAuditRetention: adminAuditRetention,
+		}, commit)
+	} else {
+		err = commit()
+	}
+	if err != nil {
 		h.logger.Error("admin settings: failed to save system settings", h.adminLogAttrs(r, "error", err)...)
 		if errors.Is(err, db.ErrConflict) {
 			redirectSettings(w, r, web.Message("admin.settings.error.conflict"), true)
@@ -108,13 +127,6 @@ func (h *AdminHandler) HandleSystemSettingsSave(w http.ResponseWriter, r *http.R
 		}
 		redirectSettings(w, r, web.Message("admin.settings.error.save"), true)
 		return
-	}
-
-	// Apply to the live runtime so the new block threshold and rate limit take
-	// effect immediately, without a server restart.
-	if h.runtime != nil {
-		h.runtime.Update(blockThreshold, rateLimitPerMinute, rateLimitBurst)
-		h.runtime.UpdateRetention(scanLogRetention, adminAuditRetention)
 	}
 
 	redirectSettings(w, r, web.Message("admin.settings.flash.saved"), false)
