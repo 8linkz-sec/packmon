@@ -2,9 +2,29 @@
 
 ## Services
 
-- API and web UI: port `8080`
-- metrics: `127.0.0.1:9090`
+- API and web UI: port `8080` (`PACKMON_SERVER_PORT`; the Compose files use
+  the same value for the in-container listener and both sides of the
+  `127.0.0.1` port mapping, so point your reverse proxy at the same port)
+- metrics: `127.0.0.1:9090` -- host loopback for bare-metal / non-Compose
+  starts; in both Compose deployments it is container loopback, so read it with
+  `docker compose exec` (see the note under `Restore`), not a host curl
 - PostgreSQL: port `5432`
+
+Persistent Docker volumes (project-scoped, by default `packmon_<name>`):
+
+- `postgres-data`: the PostgreSQL cluster. Covered by the `Backup` section.
+- `feed-data`: the server's feed working directory (`/data/feeds`) with the
+  git checkouts of the GHSA advisory database and the OpenSSF
+  malicious-packages repository. It needs no backup -- after loss the next
+  sync re-clones -- but keeping it avoids a full re-clone of roughly 350k files
+  on every container recreation.
+
+In `docker-compose.server.yml`, `postgres` and `packmon-server` run with
+`restart: unless-stopped`, so they come back after a crash, a Docker daemon
+restart, or a host reboot. A container stopped explicitly with
+`docker compose -f docker-compose.server.yml stop` (or removed with `down`)
+stays down, including across daemon restarts. The one-shot `packmon-migrate`
+and `packmon-backup` jobs never restart.
 
 ## Transport security (read before first production start)
 
@@ -103,6 +123,10 @@ operator action:
 docker compose -f docker-compose.server.yml run --rm packmon-backup
 ```
 
+The backup covers PostgreSQL only. The `feed-data` volume is deliberately not
+backed up: it holds re-clonable upstream git checkouts, and a restored server
+with an empty feed volume re-clones them on its next feed sync.
+
 For Docker Compose deployments, run the same command from a host or job
 container that can reach the PostgreSQL service and receives database
 credentials through the deployment secret path. Do not write database passwords
@@ -150,11 +174,14 @@ pg_restore --single-transaction --no-owner --no-privileges --role packmon -d pac
 curl -fsS http://127.0.0.1:8080/healthz
 curl -fsS http://127.0.0.1:8080/readyz
 curl -fsS http://127.0.0.1:8080/version
+# Bare-metal / non-Compose deployments only; under Compose see the note below.
 curl -fsS http://127.0.0.1:9090/metrics
 ```
 
-Note: `docker-compose.server.yml` does not publish the metrics port (metrics
-stay on container loopback). Verify metrics with
+Note: in both Compose deployments metrics stay on container loopback
+(production rejects a non-loopback `PACKMON_METRICS_HOST`), so a host curl
+cannot reach them; `docker-compose.server.yml` does not publish the metrics
+port at all. Verify metrics with
 `docker compose -f docker-compose.server.yml exec packmon-server wget -qO- http://127.0.0.1:9090/metrics`
 instead of a host curl.
 
@@ -217,11 +244,12 @@ For an operator rollback:
 
 ## API Key Rotation
 
-API keys expire no more than 90 days after creation. Rotate one client class at
-a time so scans and imports keep working while the old key remains available.
+API keys expire no more than 365 days after creation (legacy keys created
+before expiration support have no expiry). Rotate one client class at a time so
+scans and imports keep working while the old key remains available.
 
 1. In `/admin/keys`, create a replacement key with a clear name such as
-   `ci-main-2026-07` and a UTC expiration before the 90-day limit.
+   `ci-main-2026-07` and a lifetime in whole days within the 365-day limit.
 2. Update the matching client secret store, CI variable, N8N credential, or
    user environment variable. Prefer `PACKMON_API_KEY` or config `api_key_env`
    over plaintext command-line arguments.
@@ -596,7 +624,10 @@ Starter alert rules:
 | Schema mismatch | `packmon_db_migration_version != 0` with an unexpected version label | Stop rollout and follow `Upgrade And Rollback`. |
 
 Tune thresholds for the deployment's feed cadence, package volume, and service
-objectives.
+objectives. The event-counter rules (`increase(...[R]) > 0`) fire without a
+pending period (`for: 0m`): a single event keeps the expression true for at
+most `R`, so a `for` of `R` or longer would never fire for an isolated event.
+Lengthen the range rather than the `for` duration to smooth them.
 
 Route firing alerts to the deployment's ticketing or incident channel and page the on-call owner for availability, security, or data-integrity impact. If you use Alertmanager, encode the Packmon service name, environment, severity, and runbook URL in alert labels or annotations before paging.
 

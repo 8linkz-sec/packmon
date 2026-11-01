@@ -875,8 +875,11 @@ func (h *Handler) logScan(ctx context.Context, result *domain.ScanResult, r *htt
 	entry.IdempotencyKey = idempotencyKey
 	entry.RequestDigest = requestDigest
 	entry.ResultDigest = resultDigest
+	// Persist the decision evidence captured with the result. Re-reading the
+	// runtime threshold here could record a value an admin set after the
+	// response was decided.
 	entry.FindingsBlocking = result.FindingsBlocking
-	entry.BlockThreshold = string(h.effectiveBlockThreshold())
+	entry.BlockThreshold = string(result.BlockThreshold)
 	entry.FeedStatus = result.FeedStatus
 	entry.FeedVersions = cloneStringMap(result.FeedVersions)
 	entry.FindingIDs = scanLogFindingIDs(result.Findings)
@@ -1369,10 +1372,16 @@ func (h *Handler) handleRefresh(w http.ResponseWriter, r *http.Request, ecosyste
 			errorResponseForRequest(w, r, http.StatusUnsupportedMediaType, err.Error())
 			return
 		}
-		var req struct{}
+		// Decode through a pointer so a JSON null leaves it nil and is
+		// rejected instead of silently decoding as an empty object.
+		var req *struct{}
 		if err := readJSON(r, &req); err != nil {
 			h.logger.Warn("invalid refresh request body", "error", err, "correlation_id", correlationID)
 			errorResponseForRequest(w, r, http.StatusBadRequest, "invalid request body: "+err.Error())
+			return
+		}
+		if req == nil {
+			errorResponseForRequest(w, r, http.StatusBadRequest, "invalid request body: json body must be an empty object")
 			return
 		}
 	}

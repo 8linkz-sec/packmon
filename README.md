@@ -29,14 +29,15 @@ It can run as a local CLI, as a central API server, or both together.
 - Writes results as a self-contained HTML report, JSON, SARIF, or JUnit XML,
   so CI systems and humans read the same scan.
 
-It ships as a local CLI, a central API/web server, and CI/CD scanner workflows,
-with production-oriented Docker Compose assets and example N8N workflow
-templates (CLI-based starting points, shipped disabled -- see
-`deploy/n8n/README.md`), onboarding scripts for Bash and PowerShell, a documented PostgreSQL backup and
-restore flow, localhost-only metrics exposure by default, CLI warnings for stale
-local advisory data, and operational documentation, ADRs, and integration/E2E
-test entry points. Vulnerability, lifecycle, and outdated-version coverage for
-the canonical package ecosystems comes from free public sources; the optional
+It ships as a local CLI and a central API/web server whose JSON, SARIF, and
+JUnit outputs plug into CI pipelines, with production-oriented Docker Compose
+assets and example N8N workflow templates (CLI-based starting points, shipped
+disabled -- see `deploy/n8n/README.md`), onboarding scripts for Bash and
+PowerShell, a documented PostgreSQL backup and restore flow, localhost-only
+metrics exposure by default, CLI warnings for stale local advisory data, and
+operational documentation, ADRs, and integration/E2E test entry points.
+Vulnerability, lifecycle, and outdated-version coverage for the canonical
+package ecosystems comes from free public sources; the optional
 account/API-key reputation feeds are not required.
 
 Every command has built-in help. Run `packmon --help` for the command list and
@@ -406,7 +407,7 @@ bash scripts/check-requirements.sh --profile agent
 bash scripts/check-requirements.sh --profile server
 mkdir -p .build
 go build -o .build/packmon ./cmd/packmon
-docker compose run --rm init-secrets   # first run: generate .env with local secrets
+bash scripts/init-secrets.sh           # first run: generate .env as your user
 docker compose up --build              # migrate runs automatically before the server
 ```
 
@@ -485,9 +486,30 @@ local-only secrets for `POSTGRES_PASSWORD`, `PACKMON_DB_PASSWORD`,
 `PACKMON_ADMIN_INITIAL_PASSWORD`, `PACKMON_ENCRYPTION_KEY`, and
 `PACKMON_ADMIN_AUDIT_HMAC_KEY` into a UTF-8 `.env`. It keeps existing
 non-empty values and never overwrites them; these commands do not print
-generated secret values. `docker compose up --build` then runs the database
-migration automatically before starting the server. The same two commands
-work identically on Windows, macOS, and Linux.
+generated secret values. `POSTGRES_PASSWORD` and `PACKMON_DB_PASSWORD` are a
+pair: when only one is set, the other is copied from it, and when both are
+blank one shared value is generated. If both are set to different values,
+`init-secrets` keeps them and prints a warning that names the two variables
+(never their values), because a fresh bundled PostgreSQL would reject the
+server login. `docker compose up --build` then runs the database migration
+automatically before starting the server. The same two commands work
+identically on Windows, macOS, and Linux.
+
+`init-secrets` writes into the bind-mounted checkout, so it runs as
+`${PACKMON_UID:-1000}:${PACKMON_GID:-1000}` instead of the image's `packmon`
+system account. Docker Desktop (Windows/macOS) accepts any ID. On native
+Linux, run it through the wrapper, which passes your own UID/GID so `.env`
+stays owned by you with mode `0600`:
+
+```bash
+bash scripts/init-secrets.sh
+```
+
+The wrapper detects rootless Docker (`docker info` lists `rootless` under
+security options) and uses `0:0` there, because rootless Docker maps container
+root to your host user. An explicit `PACKMON_UID` or `PACKMON_GID` in your
+environment wins over the detected default for that variable only: setting just
+`PACKMON_UID=<n>` under rootless Docker runs the container as `<n>:0`.
 
 Admins can later adjust `.env`, feed-provider API keys, TLS/proxy settings, and
 other deployment-specific values before shared or production use.
@@ -503,8 +525,8 @@ Then create the API key that CLI agents need for remote scans:
 
 1. Go to `http://localhost:8080/admin/keys`.
 2. Enter a key name such as `local-agent`.
-3. Set an RFC3339 UTC expiration timestamp, for example
-   `2026-12-31T23:59:59Z`.
+3. Choose an expiration: a preset lifetime (default 30 days) or `Custom` with a
+   whole number of days from 1 to 365.
 4. Enter the current admin password you set under `/admin/settings`.
 5. Create the key and copy the displayed token once.
 
@@ -586,9 +608,21 @@ For local-only use, `.env.example` enables
 `PACKMON_ALLOW_INSECURE_LOCAL_HTTP=true` with explicit container bind mode
 while Compose publishes the host port on `127.0.0.1`; remove those local HTTP
 settings and configure TLS or a TLS-terminating reverse proxy for shared
-deployments. The same local Docker profile sets `PACKMON_METRICS_HOST=0.0.0.0`
-so the metrics listener is reachable through Compose's host-loopback
-`127.0.0.1:9090:9090` port mapping without exposing that port beyond the host.
+deployments.
+
+Metrics stay on container loopback. The local stack runs in production mode,
+and production startup rejects any non-loopback `PACKMON_METRICS_HOST`
+(`Config.ValidateMetricsExposure`), so `.env.example` seeds `127.0.0.1` and
+`docker-compose.override.yml` pins it. The metrics listener therefore binds
+`127.0.0.1:9090` inside the container only: the `127.0.0.1:9090` host mapping
+in `docker-compose.yml` forwards to the container's network interface, not its
+loopback, so a host `curl http://127.0.0.1:9090/metrics` does not reach it.
+Read metrics from inside the container instead, or scrape them with a sidecar
+that shares the server's network namespace:
+
+```bash
+docker compose exec packmon-server wget -qO- http://127.0.0.1:9090/metrics
+```
 
 The PostgreSQL cluster is stored in a project-scoped Docker volume
 (`<project>_postgres-data`, by default `packmon_postgres-data`), so normal
@@ -987,12 +1021,13 @@ Manual advisories can be managed from `/admin/advisories` as either
 vulnerability or malicious findings. The inventory-only ecosystems (Docker,
 Chocolatey) are not offered there because Packmon's support for them is
 metadata-only inventory, not vulnerability coverage.
-API keys can be created with a required RFC3339 UTC expiration timestamp,
-revoked, and permanently deleted after revocation from `/admin/keys`; the
-delete action stays recorded in the admin audit log. Creation requires
-the current admin password and expiration must be no more than 365 days in the
-future. Create separate named keys per client class so `last_used_at` and
-revocation are useful.
+API keys can be created with a required expiration, revoked, and permanently
+deleted after revocation from `/admin/keys`; the delete action stays recorded
+in the admin audit log. Creation requires the current admin password. The
+expiration is a lifetime in whole days -- a preset of 1, 7, 14, 30, 90, 180, or
+365 days (default 30) or a custom value from 1 to 365 -- so a key never expires
+more than 365 days in the future. Create separate named keys per client class
+so `last_used_at` and revocation are useful.
 Existing keys created before expiration support may show no expiration. Those
 legacy keys do not expire automatically; rotate, revoke, or delete them
 manually when you no longer want them accepted.
@@ -1111,16 +1146,23 @@ GOTMPDIR="$PWD/.gotmp" go test -count=1 ./tests/ci
 `go test -count=1 ./tests/ci` validates repository governance and
 configuration gates (Dockerfile hardening, Compose defaults, documentation
 cross-references, agent permissions).
-`make test-ci` is available as a wrapper on systems with `make`. A real GitLab
-Runner smoke test remains externally dependent on an available GitLab project
-and registered runner.
+`make test-ci` is available as a wrapper on systems with `make`.
 
-Build both binaries before tagged integration and E2E tests:
+There is no hosted CI: the repository has no GitHub Actions workflows, and the
+former hosted release pipeline was removed. The commands in this section, or
+`make verify`, are the gate. `ci/gitlab/.packmon-scan.yml` remains only as an
+unoperated consumer template; `tests/ci` checks only that its container image
+stays digest-pinned, it has not been run on a real GitLab runner, and its
+hardening is deferred (see `docs/deferred-scope.md`).
+
+Build both binaries before tagged integration and E2E tests. The `integration`
+tag gates tests in `./tests/integration`, `./internal/db/postgres`,
+`./internal/db/postgres/migrations`, and `./internal/server`:
 
 ```bash
 go build -o .build/packmon ./cmd/packmon
 go build -o .build/packmon-server ./cmd/packmon-server
-PACKMON_TEST_BIN_DIR=.build go test -count=1 -tags integration ./tests/integration
+PACKMON_TEST_BIN_DIR=.build go test -count=1 -tags integration ./tests/integration ./internal/db/postgres ./internal/db/postgres/migrations ./internal/server
 PACKMON_TEST_BIN_DIR=.build go test -count=1 -tags e2e ./tests/e2e
 ```
 
@@ -1146,7 +1188,7 @@ gosec -nosec-require-rules -nosec-require-justification $gosecDirs
 go build -o .build\packmon.exe .\cmd\packmon
 go build -o .build\packmon-server.exe .\cmd\packmon-server
 $env:PACKMON_TEST_BIN_DIR = ".build"
-go test -count=1 -tags integration .\tests\integration
+go test -count=1 -tags integration .\tests\integration .\internal\db\postgres .\internal\db\postgres\migrations .\internal\server
 go test -count=1 -tags e2e .\tests\e2e
 ```
 
@@ -1179,6 +1221,12 @@ server serves plain HTTP in-container -- terminate TLS at your own reverse
 proxy (nginx/Traefik/Caddy) and set `PACKMON_TRUSTED_PROXIES` to the proxy's
 IP/CIDR so the server trusts its `X-Forwarded-*` headers. The server port is
 published only on `127.0.0.1`, so only a host-local proxy can reach it.
+`PACKMON_SERVER_PORT` (default `8080`) sets both that published port and the
+in-container listener. PostgreSQL and the server run with
+`restart: unless-stopped`; the server keeps its feed git checkouts in the
+named `feed-data` volume (mounted at `/data/feeds`) next to the
+`postgres-data` database volume, so recreating the container does not force a
+full feed re-clone.
 
 Example nginx front (TLS terminated at the proxy, forwarding to the
 loopback-published server):
@@ -1232,6 +1280,10 @@ with a BOM (PowerShell's default), which Docker Compose cannot parse. Check with
 regenerating it: delete `.env` and run `docker compose run --rm init-secrets`
 (writes UTF-8/LF from inside the container). Bind mounting to write `.env` requires
 Docker Desktop file sharing for the drive.
+
+**`init-secrets` fails with `permission denied` (native Linux)**
+The container user cannot write the checkout or read an existing `.env`. Run
+`bash scripts/init-secrets.sh`, which runs `init-secrets` with your own UID/GID.
 
 **`PACKMON_ENCRYPTION_KEY` / `PACKMON_ADMIN_AUDIT_HMAC_KEY` invalid**
 These must be base64-encoded 32-byte values. Regenerate with

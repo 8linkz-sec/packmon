@@ -56,8 +56,15 @@ surfaces are:
 - `docker-compose.yml` at the repository root for local and internal
   self-hosted container starts;
 - `deploy/n8n` for automation workflows that call Packmon APIs;
-- GitHub Actions and GitLab CI templates for consumer repository scans;
-- binary artifacts from the release workflow.
+- binaries built locally from source.
+
+There is no hosted CI or release pipeline: the first-party GitHub Actions
+workflows and the hosted release pipeline were removed, and build, test, lint,
+and security checks run as the local verification gate (`make verify`, see
+`CONTRIBUTING.md`).
+`ci/gitlab/.packmon-scan.yml` remains in the repository only as an unoperated
+consumer template; it has not been validated on a real GitLab runner and its
+hardening is deferred (`docs/deferred-scope.md`).
 
 The repository does not maintain first-party Kubernetes deployment packaging.
 Teams that run Packmon on an orchestrator own those manifests or platform

@@ -3,6 +3,7 @@
 # self-contained file: `docker compose -f docker-compose.server.yml up -d`.
 services:
   # One-shot: generate/complete .env with local secrets. Run via
+  # `bash scripts/init-secrets.sh` (native Linux) or
   # `docker compose run --rm init-secrets`. Bind-mounts the project dir to write
   # the host .env; runs in Linux so encoding/line-endings are correct on any OS.
   init-secrets:
@@ -10,6 +11,14 @@ services:
       context: .
       dockerfile: Dockerfile
       target: server
+    # Run as the checkout owner, not the image's packmon system account: on
+    # native Linux that account cannot create the temp file in a host-owned
+    # 0755 checkout or read an existing host-owned 0600 .env.
+    # scripts/init-secrets.sh exports the host IDs; 1000:1000 matches the
+    # first regular account on most distributions. Docker Desktop
+    # (Windows/macOS) bind mounts accept any ID. The production server image
+    # keeps USER packmon; only this local one-shot is overridden.
+    user: "${PACKMON_UID:-1000}:${PACKMON_GID:-1000}"
     command: ["init-secrets"]
     working_dir: /workspace
     volumes:
@@ -42,8 +51,8 @@ services:
   packmon-server:
     environment:
       PACKMON_ALLOW_INSECURE_LOCAL_HTTP: ${PACKMON_ALLOW_INSECURE_LOCAL_HTTP:-true}
-      # Literal (not ${...:-}) so it wins even when .env sets METRICS_HOST=0.0.0.0
-      # (the .env.example seed does); a ${VAR:-default} would inherit that value.
+      # Literal (not ${...:-}) so it wins even when an older .env still carries
+      # the former METRICS_HOST=0.0.0.0 seed; a ${VAR:-default} would inherit it.
       PACKMON_METRICS_HOST: "127.0.0.1"
     depends_on:
       postgres:

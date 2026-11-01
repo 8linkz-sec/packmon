@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -311,6 +312,9 @@ func TestPrintSyncRemovalStatsReportsMixedCounters(t *testing.T) {
 			Malicious: 3,
 			Lifecycle: 4,
 		},
+		ReputationDisabled: sqlite.SyncRemovalStats{
+			Reputation: 5,
+		},
 	}
 
 	output := captureStdout(t, func() {
@@ -320,6 +324,7 @@ func TestPrintSyncRemovalStatsReportsMixedCounters(t *testing.T) {
 		"Removed cached rows:",
 		"Full sync clear: vulnerabilities=2 malicious=0 reputation=1 lifecycle=0",
 		"Tombstones: vulnerabilities=0 malicious=3 reputation=0 lifecycle=4",
+		"Reputation disabled on server: vulnerabilities=0 malicious=0 reputation=5 lifecycle=0",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("printSyncRemovalStats() output missing %q:\n%s", want, output)
@@ -823,6 +828,79 @@ func TestDBSyncCommandRejectsNonPositiveTimeout(t *testing.T) {
 	err := cmd.Execute()
 	if err == nil || !strings.Contains(err.Error(), "timeout must be greater than zero") {
 		t.Fatalf("db sync error = %v, want non-positive timeout rejection", err)
+	}
+}
+
+// One second past the largest whole-second time.Duration (9223372036s): the
+// value passes the positive check but would overflow time.Duration into a
+// negative, immediately expired sync deadline.
+const overflowingDBSyncTimeoutSeconds = "9223372037"
+
+// skipUnless64BitInt skips tests whose timeout values only fit a 64-bit int;
+// on 32-bit builds such values are already rejected while parsing.
+func skipUnless64BitInt(t *testing.T) {
+	t.Helper()
+	if strconv.IntSize < 64 {
+		t.Skip("timeout overflow is only reachable with a 64-bit int")
+	}
+}
+
+func TestResolveDBSyncSettingsRejectsOverflowingTimeoutFlag(t *testing.T) {
+	skipUnless64BitInt(t)
+	t.Setenv("PACKMON_TIMEOUT", "")
+
+	cmd := newDBSyncCmd()
+	if err := cmd.Flags().Set("timeout", overflowingDBSyncTimeoutSeconds); err != nil {
+		t.Fatalf("set timeout flag: %v", err)
+	}
+	_, err := resolveDBSyncSettings(cmd, &cliConfig{Server: "https://server.example", DB: cliDBConfig{SyncSource: "server"}})
+	if err == nil || !strings.Contains(err.Error(), "timeout must be at most 9223372036 seconds") {
+		t.Fatalf("resolveDBSyncSettings() error = %v, want overflowing --timeout rejection", err)
+	}
+}
+
+func TestResolveDBSyncSettingsRejectsOverflowingTimeoutEnv(t *testing.T) {
+	skipUnless64BitInt(t)
+	t.Setenv("PACKMON_TIMEOUT", overflowingDBSyncTimeoutSeconds)
+
+	_, err := resolveDBSyncSettings(newDBSyncCmd(), &cliConfig{Server: "https://server.example", DB: cliDBConfig{SyncSource: "server"}})
+	if err == nil || !strings.Contains(err.Error(), "PACKMON_TIMEOUT must be at most 9223372036 seconds") {
+		t.Fatalf("resolveDBSyncSettings() error = %v, want overflowing PACKMON_TIMEOUT rejection", err)
+	}
+}
+
+func TestResolveDBSyncSettingsRejectsOverflowingTimeoutConfig(t *testing.T) {
+	skipUnless64BitInt(t)
+	t.Setenv("PACKMON_TIMEOUT", "")
+	overflowing, err := strconv.Atoi(overflowingDBSyncTimeoutSeconds)
+	if err != nil {
+		t.Fatalf("parse overflowing timeout: %v", err)
+	}
+
+	_, err = resolveDBSyncSettings(newDBSyncCmd(), &cliConfig{
+		Server:  "https://server.example",
+		Timeout: overflowing,
+		DB:      cliDBConfig{SyncSource: "server"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "timeout must be at most 9223372036 seconds") {
+		t.Fatalf("resolveDBSyncSettings() error = %v, want overflowing config timeout rejection", err)
+	}
+}
+
+func TestResolveDBSyncSettingsAcceptsLargestRepresentableTimeout(t *testing.T) {
+	skipUnless64BitInt(t)
+	t.Setenv("PACKMON_TIMEOUT", "")
+
+	cmd := newDBSyncCmd()
+	if err := cmd.Flags().Set("timeout", "9223372036"); err != nil {
+		t.Fatalf("set timeout flag: %v", err)
+	}
+	settings, err := resolveDBSyncSettings(cmd, &cliConfig{Server: "https://server.example", DB: cliDBConfig{SyncSource: "server"}})
+	if err != nil {
+		t.Fatalf("resolveDBSyncSettings() error = %v", err)
+	}
+	if want := 9223372036 * time.Second; settings.timeout != want {
+		t.Fatalf("timeout = %s, want %s", settings.timeout, want)
 	}
 }
 

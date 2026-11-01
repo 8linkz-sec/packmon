@@ -1367,3 +1367,78 @@ func TestAdminPasswordChangeValidationBranches(t *testing.T) {
 		t.Fatalf("Location = %q, want verify failure", got)
 	}
 }
+
+// keyRotatingFeedConfigStore simulates another admin rotating a feed API key
+// immediately after the save handler's first configuration read, so any later
+// read in the same request observes the rotated row and its newer revision.
+type keyRotatingFeedConfigStore struct {
+	*adminFlowStoreStub
+	rotated   db.FeedConfig
+	didRotate bool
+}
+
+func (s *keyRotatingFeedConfigStore) GetFeedConfig(ctx context.Context, feedName string) (*db.FeedConfig, error) {
+	cfg, err := s.adminFlowStoreStub.GetFeedConfig(ctx, feedName)
+	if err == nil && !s.didRotate {
+		s.didRotate = true
+		s.mu.Lock()
+		s.feedConfigs[config.NormalizeFeedName(feedName)] = s.rotated
+		s.mu.Unlock()
+	}
+	return cfg, err
+}
+
+func TestAdminFeedConfigSaveKeepExistingKeyDoesNotRestoreKeyRotatedBetweenReads(t *testing.T) {
+	baseStore := newAdminStoreStub()
+	original := time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC)
+	baseStore.feedConfigs["vulncheck"] = db.FeedConfig{
+		FeedName:  "vulncheck",
+		Enabled:   true,
+		Mode:      string(config.FeedModeSelf),
+		APIKey:    "old-key",
+		UpdatedAt: original,
+	}
+	store := &keyRotatingFeedConfigStore{
+		adminFlowStoreStub: baseStore,
+		rotated: db.FeedConfig{
+			FeedName:  "vulncheck",
+			Enabled:   true,
+			Mode:      string(config.FeedModeSelf),
+			APIKey:    "rotated-key",
+			UpdatedAt: original.Add(time.Minute),
+		},
+	}
+	cfg := adminFlowConfig()
+	handler, sm := newAdminHandlerForStore(t, store, cfg)
+	handler.SetFeedConfigApplyFunc(func(_ context.Context, feed config.FeedSettings) error {
+		return cfg.SetFeedSettings(feed)
+	})
+
+	// A blank api_key means "keep the existing key": the kept key and the
+	// expected revision must come from the same read.
+	req, _ := authenticatedAdminFormRequest(t, sm, "/admin/feeds/save", url.Values{
+		"feed_name": {"vulncheck"},
+		"mode":      {"self"},
+		"enabled":   {"on"},
+	})
+	rec := httptest.NewRecorder()
+	handler.HandleFeedConfigSave(rec, req)
+
+	if !store.didRotate {
+		t.Fatal("GetFeedConfig was never called; rotation not injected")
+	}
+	if got := rec.Header().Get("Location"); !strings.Contains(got, "changed+while+you+were+editing") {
+		t.Fatalf("Location = %q, want conflict message", got)
+	}
+	persisted, _ := baseStore.GetFeedConfig(context.Background(), "vulncheck")
+	if persisted == nil || persisted.APIKey != "rotated-key" {
+		t.Fatalf("persisted feed = %+v, want the rotated key preserved", persisted)
+	}
+	audit, err := baseStore.ListAdminAuditLog(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("ListAdminAuditLog() error = %v", err)
+	}
+	if len(audit) != 0 {
+		t.Fatalf("audit after stale save = %+v, want none", audit)
+	}
+}

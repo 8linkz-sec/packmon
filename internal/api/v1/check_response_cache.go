@@ -66,7 +66,9 @@ func (c *checkResponseCache) Set(key string, response cachedCheckResponse) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.deleteExpiredLocked(now)
-	if len(c.entries) >= c.maxEntries {
+	// Overwriting an existing key does not grow the cache, so it must not
+	// evict an unrelated live entry.
+	if _, exists := c.entries[key]; !exists && len(c.entries) >= c.maxEntries {
 		c.deleteOldestLocked()
 	}
 	c.entries[key] = checkResponseCacheEntry{

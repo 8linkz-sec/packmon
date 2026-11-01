@@ -31,6 +31,12 @@ const syncMetaKeyFeedStatus = "feed_status"
 
 const syncMetaKeyFeedVersions = "feed_versions"
 
+// syncMetaKeyReputationResync is set while locally synced reputation rows were
+// dropped because the server reported reputation as disabled. Once the server
+// serves reputation again, the client refetches the whole reputation dataset,
+// because a delta sync would never resend rows that did not change meanwhile.
+const syncMetaKeyReputationResync = "reputation_resync_required"
+
 const (
 	syncPageLimit       = synccontract.MaxLimit
 	maxSyncResponseSize = 32 * 1024 * 1024
@@ -54,6 +60,9 @@ type SyncConfig struct {
 type SyncStats struct {
 	FullCleared      SyncRemovalStats
 	TombstoneDeleted SyncRemovalStats
+	// ReputationDisabled counts rows dropped because the server reported that
+	// it does not serve package reputation (reputation_disabled).
+	ReputationDisabled SyncRemovalStats
 }
 
 type SyncRemovalStats struct {
@@ -67,11 +76,41 @@ type syncApplyMetadata struct {
 	LastSyncAt  string
 	LastSyncXID string
 	FeedState   *syncResponse
+	// ClearReputationResync removes the pending reputation refetch marker
+	// because this request sequence restored the complete reputation dataset.
+	ClearReputationResync bool
 }
 
 type syncCursorState struct {
 	Since    string
 	SinceXID string
+}
+
+// syncPass describes one paginated /api/v1/sync request sequence.
+type syncPass struct {
+	cursorState   syncCursorState
+	initialCursor syncCursor
+	// full clears every synced table on the first page (full sync).
+	full bool
+	// clearReputation clears only the reputation table on the first page
+	// (reputation refetch).
+	clearReputation bool
+	// storeFreshness persists synced_at/synced_xid and feed state with the
+	// final page. Only the main pass advances local freshness.
+	storeFreshness bool
+	// completesReputation means a successful sequence delivered the whole
+	// reputation dataset, so a pending refetch marker can be cleared.
+	completesReputation bool
+}
+
+// syncPageApply controls how one sync page is written locally.
+type syncPageApply struct {
+	full bool
+	// clearReputation drops reputation rows before applying the page, scoped
+	// to clearReputationEcosystems when that filter is non-empty.
+	clearReputation           bool
+	clearReputationEcosystems []string
+	metadata                  syncApplyMetadata
 }
 
 type syncPageSnapshot struct {
@@ -84,7 +123,7 @@ func (s SyncRemovalStats) Any() bool {
 }
 
 func (s SyncStats) AnyRemoved() bool {
-	return s.FullCleared.Any() || s.TombstoneDeleted.Any()
+	return s.FullCleared.Any() || s.TombstoneDeleted.Any() || s.ReputationDisabled.Any()
 }
 
 type (
@@ -112,6 +151,12 @@ type (
 // per-dataset next_cursor fields; see the OpenAPI sync contract for the full
 // query and response shape. Feed status/version metadata is persisted only
 // when the returned synced_at value is safe to use as local freshness.
+//
+// When the server reports reputation_disabled, previously synced reputation
+// rows are dropped so local scans match /api/v1/check, and a refetch marker is
+// stored. Once a later sync finds reputation served again, a second
+// reputation-only sequence (no since window, other datasets marked done)
+// restores the complete reputation dataset.
 func Sync(ctx context.Context, store *Store, cfg SyncConfig) error {
 	cfg, err := validateSyncConfig(cfg)
 	if err != nil {
@@ -135,16 +180,49 @@ func Sync(ctx context.Context, store *Store, cfg SyncConfig) error {
 	if err != nil {
 		return err
 	}
+	resyncPending, err := store.GetSyncMeta(ctx, syncMetaKeyReputationResync)
+	if err != nil {
+		return fmt.Errorf("sync: read reputation resync marker: %w", err)
+	}
 
-	stats, err := syncPaginatedResponses(ctx, store, client, cfg, cursorState, time.Now().UTC())
+	now := time.Now().UTC()
+	stats, reputationDisabled, err := syncPaginatedResponses(ctx, store, client, cfg, syncPass{
+		cursorState:         cursorState,
+		full:                cfg.Full,
+		storeFreshness:      true,
+		completesReputation: cfg.Full,
+	}, now)
 	if err != nil {
 		return err
+	}
+	if resyncPending != "" && !cfg.Full && !reputationDisabled {
+		refetchStats, _, err := syncPaginatedResponses(ctx, store, client, cfg, reputationRefetchPass(cfg), now)
+		if err != nil {
+			return fmt.Errorf("sync: refetch reputation after server re-enabled it: %w", err)
+		}
+		addSyncStats(&stats, refetchStats)
 	}
 	if cfg.Stats != nil {
 		*cfg.Stats = stats
 	}
 
 	return nil
+}
+
+// reputationRefetchPass requests the whole reputation dataset without a since
+// window. The other datasets start as done, so the server skips them. A
+// filtered refetch cannot prove the dataset is complete, so the marker stays
+// pending until an unfiltered sync completes it.
+func reputationRefetchPass(cfg SyncConfig) syncPass {
+	return syncPass{
+		initialCursor: syncCursor{
+			VulnerabilitiesDone: true,
+			MaliciousDone:       true,
+			LifecycleDone:       true,
+		},
+		clearReputation:     true,
+		completesReputation: len(cfg.Ecosystems) == 0,
+	}
 }
 
 func validateSyncConfig(cfg SyncConfig) (SyncConfig, error) {
@@ -180,19 +258,22 @@ func loadSyncCursorState(ctx context.Context, store *Store, full bool) (syncCurs
 	return syncCursorState{Since: since, SinceXID: sinceXID}, nil
 }
 
-func syncPaginatedResponses(ctx context.Context, store *Store, client *http.Client, cfg SyncConfig, cursorState syncCursorState, now time.Time) (SyncStats, error) {
-	cursor := syncCursor{}
+// syncPaginatedResponses runs one paginated request sequence and reports
+// whether any page said the server does not serve reputation rows.
+func syncPaginatedResponses(ctx context.Context, store *Store, client *http.Client, cfg SyncConfig, pass syncPass, now time.Time) (SyncStats, bool, error) {
+	cursor := pass.initialCursor
 	snapshot := syncPageSnapshot{}
 	feedState := &syncResponse{}
 	correlationID := newSyncCorrelationID()
-	fullPage := cfg.Full
+	firstPage := true
+	reputationDisabled := false
 	var stats SyncStats
 
 	// Loop to handle paginated responses.
 	for {
-		resp, err := fetchSyncPageWithCorrelationID(ctx, client, cfg, cursorState.Since, cursorState.SinceXID, cursor, snapshot.SyncedAt, snapshot.SyncedXID, correlationID)
+		resp, err := fetchSyncPageWithCorrelationID(ctx, client, cfg, pass.cursorState.Since, pass.cursorState.SinceXID, cursor, snapshot.SyncedAt, snapshot.SyncedXID, correlationID)
 		if err != nil {
-			return SyncStats{}, err
+			return SyncStats{}, false, err
 		}
 
 		if resp.SyncedAt != "" && snapshot.SyncedAt == "" {
@@ -203,29 +284,41 @@ func syncPaginatedResponses(ctx context.Context, store *Store, client *http.Clie
 		}
 
 		if resp.Truncated && snapshot.SyncedAt == "" {
-			return SyncStats{}, fmt.Errorf("sync: truncated response missing synced_at")
+			return SyncStats{}, false, fmt.Errorf("sync: truncated response missing synced_at")
 		}
 
 		mergeSyncFeedState(feedState, resp)
 
-		if err := validateSyncResponseBeforeApply(fullPage, resp); err != nil {
-			return SyncStats{}, err
+		if err := validateSyncResponseBeforeApply(firstPage && pass.full, resp); err != nil {
+			return SyncStats{}, false, err
 		}
+		reputationDisabled = reputationDisabled || resp.ReputationDisabled
 
 		metadata := syncApplyMetadata{}
 		if !resp.Truncated {
-			metadata, err = freshSyncApplyMetadata(snapshot, feedState, now)
-			if err != nil {
-				return SyncStats{}, err
+			if pass.storeFreshness {
+				metadata, err = freshSyncApplyMetadata(snapshot, feedState, now)
+				if err != nil {
+					return SyncStats{}, false, err
+				}
 			}
+			metadata.ClearReputationResync = pass.completesReputation && !reputationDisabled
 		}
 
-		pageStats, err := applySyncWithMetadata(ctx, store, fullPage, resp, metadata)
+		page := syncPageApply{metadata: metadata}
+		if firstPage {
+			page.full = pass.full
+			if pass.clearReputation {
+				page.clearReputation = true
+				page.clearReputationEcosystems = cfg.Ecosystems
+			}
+		}
+		pageStats, err := applySyncPage(ctx, store, resp, page)
 		if err != nil {
-			return SyncStats{}, err
+			return SyncStats{}, false, err
 		}
 		addSyncStats(&stats, pageStats)
-		fullPage = false
+		firstPage = false
 
 		if !resp.Truncated {
 			break
@@ -234,15 +327,15 @@ func syncPaginatedResponses(ctx context.Context, store *Store, client *http.Clie
 		if resp.NextCursor != nil {
 			nextCursor := *resp.NextCursor
 			if nextCursor == cursor {
-				return SyncStats{}, fmt.Errorf("sync: truncated response did not advance next_cursor")
+				return SyncStats{}, false, fmt.Errorf("sync: truncated response did not advance next_cursor")
 			}
 			cursor = nextCursor
 		} else {
-			return SyncStats{}, fmt.Errorf("sync: truncated response missing next_cursor")
+			return SyncStats{}, false, fmt.Errorf("sync: truncated response missing next_cursor")
 		}
 	}
 
-	return stats, nil
+	return stats, reputationDisabled, nil
 }
 
 func freshSyncApplyMetadata(snapshot syncPageSnapshot, feedState *syncResponse, now time.Time) (syncApplyMetadata, error) {
@@ -328,6 +421,7 @@ func addSyncStats(dst *SyncStats, src SyncStats) {
 	dst.TombstoneDeleted.Malicious += src.TombstoneDeleted.Malicious
 	dst.TombstoneDeleted.Reputation += src.TombstoneDeleted.Reputation
 	dst.TombstoneDeleted.Lifecycle += src.TombstoneDeleted.Lifecycle
+	dst.ReputationDisabled.Reputation += src.ReputationDisabled.Reputation
 }
 
 func storeSyncedFeedState(ctx context.Context, tx *sql.Tx, resp *syncResponse) error {
@@ -378,6 +472,11 @@ func storeFreshSyncMetadata(ctx context.Context, tx *sql.Tx, metadata syncApplyM
 	if metadata.FeedState != nil {
 		if err := storeSyncedFeedState(ctx, tx, metadata.FeedState); err != nil {
 			return err
+		}
+	}
+	if metadata.ClearReputationResync {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM sync_meta WHERE key = ?`, syncMetaKeyReputationResync); err != nil {
+			return fmt.Errorf("sync: clear reputation resync marker: %w", err)
 		}
 	}
 	return nil
@@ -631,6 +730,14 @@ func applySync(ctx context.Context, store *Store, full bool, resp *syncResponse)
 // into the local database inside a single transaction. On the first full-sync
 // page it drops existing rows before inserting.
 func applySyncWithMetadata(ctx context.Context, store *Store, full bool, resp *syncResponse, metadata syncApplyMetadata) (SyncStats, error) {
+	return applySyncPage(ctx, store, resp, syncPageApply{full: full, metadata: metadata})
+}
+
+// applySyncPage writes one sync page inside a single transaction. A page with
+// reputation_disabled drops every locally synced reputation row instead of
+// applying reputation data and records the pending refetch marker in the same
+// transaction, so a crash can never leave cleared rows without the marker.
+func applySyncPage(ctx context.Context, store *Store, resp *syncResponse, page syncPageApply) (SyncStats, error) {
 	var stats SyncStats
 	tx, err := store.DB().BeginTx(ctx, nil)
 	if err != nil {
@@ -638,12 +745,19 @@ func applySyncWithMetadata(ctx context.Context, store *Store, full bool, resp *s
 	}
 	defer tx.Rollback() //nolint:errcheck // rollback on commit is a no-op
 
-	if full {
+	if page.full {
 		cleared, err := clearSyncTables(ctx, tx)
 		if err != nil {
 			return SyncStats{}, err
 		}
 		stats.FullCleared = cleared
+	}
+	if page.clearReputation {
+		cleared, err := clearSyncReputation(ctx, tx, page.clearReputationEcosystems)
+		if err != nil {
+			return SyncStats{}, err
+		}
+		stats.FullCleared.Reputation += cleared
 	}
 
 	deleted, err := applySyncVulnerabilities(ctx, tx, resp.Vulnerabilities)
@@ -658,11 +772,22 @@ func applySyncWithMetadata(ctx context.Context, store *Store, full bool, resp *s
 	}
 	stats.TombstoneDeleted.Malicious += deleted
 
-	deleted, err = applySyncReputation(ctx, tx, resp.Reputation)
-	if err != nil {
-		return SyncStats{}, err
+	if resp.ReputationDisabled {
+		cleared, err := clearSyncReputation(ctx, tx, nil)
+		if err != nil {
+			return SyncStats{}, err
+		}
+		stats.ReputationDisabled.Reputation += cleared
+		if err := setSyncMetaTx(ctx, tx, syncMetaKeyReputationResync, "true"); err != nil {
+			return SyncStats{}, fmt.Errorf("sync: store reputation resync marker: %w", err)
+		}
+	} else {
+		deleted, err = applySyncReputation(ctx, tx, resp.Reputation)
+		if err != nil {
+			return SyncStats{}, err
+		}
+		stats.TombstoneDeleted.Reputation += deleted
 	}
-	stats.TombstoneDeleted.Reputation += deleted
 
 	deleted, err = applySyncLifecycle(ctx, tx, resp.Lifecycle)
 	if err != nil {
@@ -670,7 +795,7 @@ func applySyncWithMetadata(ctx context.Context, store *Store, full bool, resp *s
 	}
 	stats.TombstoneDeleted.Lifecycle += deleted
 
-	if err := storeFreshSyncMetadata(ctx, tx, metadata); err != nil {
+	if err := storeFreshSyncMetadata(ctx, tx, page.metadata); err != nil {
 		return SyncStats{}, err
 	}
 
@@ -696,11 +821,11 @@ func clearSyncTables(ctx context.Context, tx *sql.Tx) (SyncRemovalStats, error) 
 	}
 	stats.Malicious += rowsAffected(result)
 
-	result, err = tx.ExecContext(ctx, `DELETE FROM reputation_findings_local`)
+	cleared, err := clearSyncReputation(ctx, tx, nil)
 	if err != nil {
-		return SyncRemovalStats{}, fmt.Errorf("sync: clear reputation findings: %w", err)
+		return SyncRemovalStats{}, err
 	}
-	stats.Reputation += rowsAffected(result)
+	stats.Reputation += cleared
 
 	result, err = tx.ExecContext(ctx, `DELETE FROM lifecycle_releases_local`)
 	if err != nil {
@@ -709,6 +834,33 @@ func clearSyncTables(ctx context.Context, tx *sql.Tx) (SyncRemovalStats, error) 
 	stats.Lifecycle += rowsAffected(result)
 
 	return stats, nil
+}
+
+// clearSyncReputation deletes synced reputation rows, limited to the given
+// ecosystems when the list is non-empty. Server rows carry normalized
+// lowercase ecosystem names.
+func clearSyncReputation(ctx context.Context, tx *sql.Tx, ecosystems []string) (int64, error) {
+	if len(ecosystems) == 0 {
+		result, err := tx.ExecContext(ctx, `DELETE FROM reputation_findings_local`)
+		if err != nil {
+			return 0, fmt.Errorf("sync: clear reputation findings: %w", err)
+		}
+		return rowsAffected(result), nil
+	}
+	stmt, err := tx.PrepareContext(ctx, `DELETE FROM reputation_findings_local WHERE ecosystem = ?`)
+	if err != nil {
+		return 0, fmt.Errorf("sync: prepare reputation clear: %w", err)
+	}
+	defer ioutils.CloseSilently(stmt)
+	var cleared int64
+	for _, ecosystem := range ecosystems {
+		result, err := stmt.ExecContext(ctx, strings.ToLower(strings.TrimSpace(ecosystem)))
+		if err != nil {
+			return 0, fmt.Errorf("sync: clear reputation findings: %w", err)
+		}
+		cleared += rowsAffected(result)
+	}
+	return cleared, nil
 }
 
 func applySyncVulnerabilities(ctx context.Context, tx *sql.Tx, vulnerabilities []syncVulnerability) (int64, error) {

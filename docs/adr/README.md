@@ -12,7 +12,7 @@ tree to be complete.
 | [ADR-0030](ADR-0030-observability-metrics.md) | Accepted | Observability | Packmon exposes feed, queue, DB, auth, HTTP, scan, and finding metrics. |
 | [ADR-0031](ADR-0031-stale-data-warnings.md) | Accepted | CLI | Stale local data warns instead of blocking scans. |
 | [ADR-0032](ADR-0032-logging-rules.md) | Accepted | Security | Persistent server logs avoid paths, file contents, and secrets. |
-| [ADR-0033](ADR-0033-deployment-packaging-boundary.md) | Accepted | Deployment | The maintained deployment surface is Compose, release binaries, CI templates, and N8N assets. |
+| [ADR-0033](ADR-0033-deployment-packaging-boundary.md) | Accepted, amended | Deployment | The maintained deployment surface is Compose, source-built binaries, and N8N assets; the GitLab CI template is unoperated. |
 | [ADR-0034](ADR-0034-persistence-boundaries.md) | Accepted | Persistence | Server data belongs in PostgreSQL; local CLI cache belongs in SQLite synced from Packmon. |
 | [ADR-0035](ADR-0035-postgres-refresh-queue.md) | Accepted | Feeds | Async reputation/enrichment work uses a PostgreSQL-backed refresh queue. |
 | [ADR-0036](ADR-0036-admin-auth-model.md) | Accepted | Admin auth | Packmon uses one shared admin identity and in-memory admin sessions. |

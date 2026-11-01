@@ -542,8 +542,11 @@ func (m *Manager) runSync(ctx context.Context, rf *registeredFeed, log *slog.Log
 			log.Warn("feed sync skipped (permanent error)",
 				slog.String("error", SafeDiagnosticError(err)),
 			)
-			// Record the permanent failure so it surfaces in /admin/feeds
-			// and /readyz instead of being hidden in logs only (C-3).
+			// Record the permanent failure in feed_sync_status so it surfaces
+			// in /admin/feeds, the public /feeds page, GET
+			// /api/v1/feeds/status, and the packmon_feed_sync_status metric
+			// instead of being hidden in logs only (C-3). /readyz is not
+			// affected: it only checks database reachability.
 			if statusErr := m.recordStatusForFeed(ctx, rf, db.FeedSyncStatusPermanentError, SafeDiagnosticError(err), 0, nil); statusErr != nil {
 				return errors.Join(err, statusErr)
 			}

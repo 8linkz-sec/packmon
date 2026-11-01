@@ -58,7 +58,7 @@ services:
           cpus: '1.0'
         reservations:
           memory: 128M
-    # restart: unless-stopped
+    restart: unless-stopped
 
   packmon-server:
     logging: *default-logging
@@ -83,6 +83,13 @@ services:
       PACKMON_SERVER_MODE: production
       PACKMON_ALLOW_INSECURE_LOCAL_HTTP: "false"
       PACKMON_METRICS_HOST: "127.0.0.1"
+      # Same expression as both sides of the published port below, so the
+      # in-container listener can never diverge from the mapped container port
+      # (a shell override would otherwise map 8181:8181 onto a listener on 8080).
+      PACKMON_SERVER_PORT: ${PACKMON_SERVER_PORT:-8080}
+      # Pinned to the feed-data volume mount below; an env_file value pointing
+      # elsewhere would put the git-backed feed checkouts on ephemeral storage.
+      PACKMON_FEED_DATA_DIR: /data/feeds
       # Required: the reverse proxy's IP or CIDR (e.g. the Docker gateway or your
       # proxy host). Startup fails closed if unset.
       PACKMON_TRUSTED_PROXIES: "${PACKMON_TRUSTED_PROXIES:?missing. Set your reverse proxy IP/CIDR; the server serves plaintext HTTP and trusts X-Forwarded-* only from here. See README → Troubleshooting}"
@@ -97,6 +104,13 @@ services:
       PACKMON_ADMIN_AUDIT_HMAC_KEY: "${PACKMON_ADMIN_AUDIT_HMAC_KEY:?missing (base64 32 bytes). Set in .env/secrets manager. See README → Troubleshooting}"
     ports:
       - "127.0.0.1:${PACKMON_SERVER_PORT:-8080}:${PACKMON_SERVER_PORT:-8080}"
+    volumes:
+      # Feed working data, including the git checkouts of the GHSA advisory
+      # database and the OpenSSF malicious-packages repo. The image prepares
+      # /data/feeds owned by the packmon user, and Docker seeds a new named
+      # volume from it, so the non-root server can write here. Without this
+      # volume every container recreation forces a full re-clone of ~350k files.
+      - feed-data:/data/feeds
     depends_on:
       postgres:
         condition: service_healthy
@@ -108,7 +122,7 @@ services:
         reservations:
           memory: 256M
     stop_grace_period: 25s
-    # restart: unless-stopped
+    restart: unless-stopped
 
   packmon-migrate:
     profiles: ["manual"]
@@ -144,7 +158,7 @@ services:
           cpus: '1.0'
         reservations:
           memory: 128M
-    # restart: "no"
+    restart: "no"
 
   packmon-backup:
     profiles: ["manual"]
@@ -170,7 +184,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    # restart: "no"
+    restart: "no"
 
 volumes:
   postgres-data:
+  feed-data:

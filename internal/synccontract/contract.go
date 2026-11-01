@@ -30,6 +30,12 @@ type Response struct {
 	Truncated       bool              `json:"truncated"`
 	HasMore         bool              `json:"has_more"`
 	NextCursor      *Cursor           `json:"next_cursor,omitempty"`
+	// ReputationDisabled reports that the server does not serve package
+	// reputation rows (ReversingLabs not enabled in self mode), so /api/v1/check
+	// ignores them. Clients drop previously synced reputation rows. It is
+	// omitted when reputation is served, which keeps older clients and servers
+	// compatible.
+	ReputationDisabled bool `json:"reputation_disabled,omitempty"`
 }
 
 // Cursor is the opaque paginated-sync cursor returned by the server and echoed

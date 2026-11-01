@@ -44,6 +44,34 @@ func TestCheckResponseCacheEvictsOldestEntry(t *testing.T) {
 	}
 }
 
+func TestCheckResponseCacheOverwriteAtCapacityDoesNotEvict(t *testing.T) {
+	t.Parallel()
+
+	cache := newCheckResponseCache(time.Minute, 2)
+	cache.Set("older", cachedCheckResponse{statusCode: http.StatusOK, body: []byte(`{"n":1}`)})
+	cache.Set("newer", cachedCheckResponse{statusCode: http.StatusOK, body: []byte(`{"n":2}`)})
+	// Make the insertion order explicit instead of relying on clock ticks.
+	cache.mu.Lock()
+	older := cache.entries["older"]
+	older.stored = older.stored.Add(-time.Second)
+	cache.entries["older"] = older
+	cache.mu.Unlock()
+
+	// A duplicate completion re-stores an existing key while the cache is full.
+	cache.Set("newer", cachedCheckResponse{statusCode: http.StatusOK, body: []byte(`{"n":3}`)})
+
+	if _, ok := cache.Get("older"); !ok {
+		t.Fatal("overwriting an existing key evicted an unrelated live entry")
+	}
+	cached, ok := cache.Get("newer")
+	if !ok {
+		t.Fatal("overwritten cache entry missing")
+	}
+	if string(cached.body) != `{"n":3}` {
+		t.Fatalf("overwritten cache body = %q, want latest body", cached.body)
+	}
+}
+
 func TestCheckResponseCacheCopiesResponseBody(t *testing.T) {
 	t.Parallel()
 
