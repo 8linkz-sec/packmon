@@ -129,45 +129,76 @@ func writeReportOutput(output io.Writer, repo string, entries []sqlite.ScanEntry
 	if output == nil {
 		output = os.Stdout
 	}
+	// Every write is checked: a closed pipe or full disk must fail the
+	// command with an operational error instead of exiting 0 without a report.
+	p := &reportPrinter{w: output}
 	if len(entries) == 0 {
-		_, _ = fmt.Fprintln(output, "No scan history found.")
+		p.println("No scan history found.")
 		if repo != "" {
-			_, _ = fmt.Fprintf(output, "  (filtered by repo: %s)\n", termtext.Sanitize(repo))
+			p.printf("  (filtered by repo: %s)\n", termtext.Sanitize(repo))
 		}
-		_, _ = fmt.Fprintln(output, "Run 'packmon scan' to generate scan data.")
-		return nil
+		p.println("Run 'packmon scan' to generate scan data.")
+		return p.err
 	}
 
-	_, _ = fmt.Fprintf(output, "\nPackmon Security Report")
+	p.printf("\nPackmon Security Report")
 	if repo != "" {
-		_, _ = fmt.Fprintf(output, " -- %s", termtext.Sanitize(repo))
+		p.printf(" -- %s", termtext.Sanitize(repo))
 	}
-	_, _ = fmt.Fprintf(output, "\n%s\n\n", strings.Repeat("=", 60))
+	p.printf("\n%s\n\n", strings.Repeat("=", 60))
 
 	summary := summarizeReportEntries(entries)
-	_, _ = fmt.Fprintf(output, "Scans:     %d\n", summary.TotalScans)
-	_, _ = fmt.Fprintf(output, "Packages:  %d (total across scans)\n", summary.TotalPackages)
-	_, _ = fmt.Fprintf(output, "Findings:  %d (total across scans)\n", summary.TotalFindings)
-	_, _ = fmt.Fprintln(output)
+	p.printf("Scans:     %d\n", summary.TotalScans)
+	p.printf("Packages:  %d (total across scans)\n", summary.TotalPackages)
+	p.printf("Findings:  %d (total across scans)\n", summary.TotalFindings)
+	p.println()
 
-	_, _ = fmt.Fprintln(output, "Severity Distribution")
-	_, _ = fmt.Fprintln(output, strings.Repeat("-", 30))
+	p.println("Severity Distribution")
+	p.println(strings.Repeat("-", 30))
 	for _, sev := range reportSeverityOrder {
 		count := summary.SeverityCounts[sev]
 		if count > 0 {
-			_, _ = fmt.Fprintf(output, "  %-10s %d\n", sev, count)
+			p.printf("  %-10s %d\n", sev, count)
 		}
 	}
-	_, _ = fmt.Fprintln(output)
+	p.println()
 
-	_, _ = fmt.Fprintln(output, "Recent Scans")
-	_, _ = fmt.Fprintln(output, strings.Repeat("-", 60))
+	p.println("Recent Scans")
+	p.println(strings.Repeat("-", 60))
+	if p.err != nil {
+		return p.err
+	}
 	if err := writeReportTable(output, entries); err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintln(output)
+	p.println()
 
-	return nil
+	return p.err
+}
+
+// reportPrinter writes the terminal report and keeps the first write error;
+// once a write has failed, later writes are skipped.
+type reportPrinter struct {
+	w   io.Writer
+	err error
+}
+
+func (p *reportPrinter) printf(format string, args ...any) {
+	if p.err != nil {
+		return
+	}
+	if _, err := fmt.Fprintf(p.w, format, args...); err != nil {
+		p.err = fmt.Errorf("write report output: %w", err)
+	}
+}
+
+func (p *reportPrinter) println(args ...any) {
+	if p.err != nil {
+		return
+	}
+	if _, err := fmt.Fprintln(p.w, args...); err != nil {
+		p.err = fmt.Errorf("write report output: %w", err)
+	}
 }
 
 func writeReportTable(output io.Writer, entries []sqlite.ScanEntry) error {

@@ -16,6 +16,45 @@
 
 ### Fixed
 
+- `packmon report` exits `2` (operational error) when writing the report to
+  stdout fails. It used to discard every write error outside the history
+  table, so a closed pipe or full disk ended the command with exit `0` and no
+  (or a truncated) report, and the empty-history message never failed at all.
+- `--outdated` / `--list-all` latest-version lookups whose `200` registry
+  response exceeds the read limit (512 KiB for most registries) now count as
+  refused or failed registry requests, so the stderr warning and the list-all
+  HTML hint report them. They used to count as successes without any warning
+  while the row silently ended up `unknown`. The registry did answer, so such
+  a response does not advance the consecutive-failure breaker.
+- `packmon scan --outdated` exits `4` (parser error) when a lockfile or SBOM
+  fails to parse. Nonfatal parse errors used to print only a warning and exit
+  `0`; the run now reports the packages it could parse (terminal table and
+  `--html` report) and then fails with "package inventory is incomplete: N
+  parse errors". An inventory where nothing parsed exits `4` instead of
+  printing "No packages found.". `--outdated --quiet` without `--html` used to
+  return before reading the inventory, so even fatal parse errors exited `0`;
+  it still skips the registry lookups but now collects the inventory and keeps
+  the discovery (`2`) and parser (`4`) exit codes. CI jobs that relied on
+  `--outdated --quiet` always exiting `0` can now see `2` or `4`.
+- The `packmon scan --html` report formats its timestamps in the viewer's
+  browser locale and time zone again; its inline script had the same
+  `dateStyle`/`timeStyle` plus `timeZoneName` combination as the list-all and
+  `--outdated` reports below. All three reports now share one Intl option set.
+- The list-all and `--outdated` HTML reports format their timestamps in the
+  viewer's browser locale and time zone again. The inline script combined
+  `dateStyle`/`timeStyle` with `timeZoneName`, which conforming JavaScript
+  engines reject with a `TypeError`, so every timestamp kept its UTC fallback
+  text.
+- The list-all and `--outdated` HTML reports no longer show a full Windows
+  drive or UNC source path (`C:\Users\...\go.sum`, `C:/...`, `\\server\...`)
+  on a Linux host when the scan root is relative (for example `.`). Such a
+  path was treated as "inside" the current directory and rendered in full;
+  it now shows only its final segment, like every other path outside the scan
+  root.
+- The list-all and `--outdated` HTML reports reduce a Windows path
+  rooted on the current drive (`\Users\Alice\go.sum`) to its final segment on
+  every OS. It was not recognized as absolute, so it rendered in full (as
+  `/Users/Alice/go.sum` on Windows) in the report target and source paths.
 - `packmon scan --list-all` compares each installed Docker image tag with its
   own local repo digest. Local digests used to be keyed by repository name
   only, so two installed tags of one repository (for example `postgres:17`
