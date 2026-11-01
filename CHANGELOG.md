@@ -20,6 +20,12 @@
   stdout fails. It used to discard every write error outside the history
   table, so a closed pipe or full disk ended the command with exit `0` and no
   (or a truncated) report, and the empty-history message never failed at all.
+- `--outdated` / `--list-all` latest-version lookups whose `200` registry
+  response exceeds the read limit (512 KiB for most registries) now count as
+  refused or failed registry requests, so the stderr warning and the list-all
+  HTML hint report them. They used to count as successes without any warning
+  while the row silently ended up `unknown`. The registry did answer, so such
+  a response does not advance the consecutive-failure breaker.
 - `packmon scan --outdated` exits `4` (parser error) when a lockfile or SBOM
   fails to parse. Nonfatal parse errors used to print only a warning and exit
   `0`; the run now reports the packages it could parse (terminal table and
