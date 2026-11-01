@@ -237,6 +237,11 @@
   `host/path` and `http(s)` locations. A location with a slash before its
   first colon is a local path, as in Git, not an SCP-like remote. Rejected
   locations fall back to the pin's identity.
+- Chocolatey inventory ignores a malformed or truncated `config.xml` with a
+  `<config>` root but no `<packages>` section (for example `<config><envs>`)
+  as an unrelated file. It used to be reported as an "invalid config.xml
+  package list" parse error; only a file whose `<packages>` section was
+  already read reports a decoder error.
 
 ### Security updates
 

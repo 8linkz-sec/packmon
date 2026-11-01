@@ -149,6 +149,7 @@ func TestCollectIgnoresConfigXMLWithoutChocolateyPackages(t *testing.T) {
 	writeTestFile(t, filepath.Join(dir, "config.xml"), `<config><envs><env name="a" value="b"/></envs></config>`)
 	writeTestFile(t, filepath.Join(dir, "broken", "config.xml"), `<config><packages><package name="x"`)
 	writeTestFile(t, filepath.Join(dir, "garbage", "config.xml"), "not xml at all <<<")
+	writeTestFile(t, filepath.Join(dir, "truncated-envs", "config.xml"), `<config><envs>`)
 
 	collection, err := Collect(dir, 10)
 	if err != nil {
@@ -158,7 +159,8 @@ func TestCollectIgnoresConfigXMLWithoutChocolateyPackages(t *testing.T) {
 		t.Fatalf("Packages = %+v, want none", collection.Packages)
 	}
 	// A file that identifies itself as a <config> with <packages> but is
-	// truncated is a real parse error; unrelated XML and non-XML are silent.
+	// truncated is a real parse error; unrelated XML, a malformed <config>
+	// without a <packages> section, and non-XML are silent.
 	if len(collection.ParseErrors) != 1 || !strings.Contains(collection.ParseErrors[0], "broken/config.xml") {
 		t.Fatalf("ParseErrors = %v, want exactly one for broken/config.xml", collection.ParseErrors)
 	}

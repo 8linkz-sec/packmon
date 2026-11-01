@@ -37,8 +37,11 @@ func normalizePackageID(raw string) (string, bool) {
 // Files whose root element is not <config>, that are not well-formed XML
 // before the root element, that declare an unsupported character encoding, or
 // that carry no <packages> section are silently ignored so unrelated
-// config.xml files never produce warnings. A truncated or malformed document
-// that already identified itself as a package list is reported as an error.
+// config.xml files never produce warnings; this includes a malformed or
+// truncated <config> document whose decoder error comes before any <packages>
+// section. A truncated or malformed document that already identified itself
+// as a package list (a <packages> section directly under <config>) is
+// reported as an error.
 // UTF-8/UTF-16 byte-order marks and ASCII-compatible single-byte encodings
 // are tolerated; invalid byte sequences are replaced, never reported.
 func ParseConfigXML(r io.Reader, sourceFile string) ([]Package, error) {
@@ -50,7 +53,10 @@ func ParseConfigXML(r io.Reader, sourceFile string) ([]Package, error) {
 	decoder.Strict = true
 	decoder.CharsetReader = asciiCompatibleCharsetReader
 
-	sawRoot := false
+	// sawPackages records a <packages> section directly under <config>: only
+	// such a document has identified itself as a package list, so only its
+	// decoder errors are reported.
+	sawPackages := false
 	depth := 0
 	inPackages := false
 	var packages []Package
@@ -60,7 +66,7 @@ func ParseConfigXML(r io.Reader, sourceFile string) ([]Package, error) {
 			break
 		}
 		if err != nil {
-			if !sawRoot {
+			if !sawPackages {
 				return nil, nil
 			}
 			return nil, fmt.Errorf("%s: invalid config.xml package list", sourceFile)
@@ -73,11 +79,11 @@ func ParseConfigXML(r io.Reader, sourceFile string) ([]Package, error) {
 				if name != "config" {
 					return nil, nil
 				}
-				sawRoot = true
 				continue
 			}
 			if depth == 2 && name == "packages" {
 				inPackages = true
+				sawPackages = true
 				continue
 			}
 			if depth == 3 && inPackages && name == "package" {
@@ -102,7 +108,7 @@ func ParseConfigXML(r io.Reader, sourceFile string) ([]Package, error) {
 			depth--
 		}
 	}
-	if !sawRoot {
+	if !sawPackages {
 		return nil, nil
 	}
 	return packages, nil

@@ -577,7 +577,9 @@ Important behavior:
 - `--list-all` also inventories Chocolatey package declarations: FLARE-VM /
   VM-Packages style `config.xml` files (root `<config>` element with a
   `<packages><package name="..."/>` list, identified by content so unrelated
-  `config.xml` files are ignored silently) and `choco install|upgrade` /
+  `config.xml` files are ignored silently; a malformed or truncated file is a
+  parse error only once a `<packages>` section directly under `<config>` has
+  been read) and `choco install|upgrade` /
   `cinst` / `cup` command lines in `.ps1`, `.psm1`, `.bat`, and `.cmd`
   scripts. Rows use ecosystem `chocolatey`, source `config.xml` or
   `choco-install`, scope `runtime`, relation `declared`, and lowercase
