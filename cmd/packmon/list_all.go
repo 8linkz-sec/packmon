@@ -168,12 +168,14 @@ func runListAllScanOutputPhase(ctx context.Context, settings scanSettings) (list
 		collection: collection,
 	}
 	if err != nil {
+		// A history write failure still comes with a completed scan result:
+		// like the normal scan path, write the requested artifacts first and
+		// let the caller return the history error afterwards.
 		var historyErr *scanHistoryRecordError
-		if errors.As(err, &historyErr) {
-			scan.historyErr = historyErr
-			return scan, nil
+		if !errors.As(err, &historyErr) {
+			return scan, withDefaultExitCode(exitCode, err)
 		}
-		return scan, withDefaultExitCode(exitCode, err)
+		scan.historyErr = historyErr
 	}
 
 	if writeScanOutputArtifacts(settings, result, failOn, false) {

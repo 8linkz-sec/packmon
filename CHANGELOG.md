@@ -16,6 +16,11 @@
 
 ### Fixed
 
+- `packmon scan --list-all` now writes the requested `--output-json`,
+  `--output-sarif`, and `--output-junit` files when the scan completes but the
+  local scan-history write fails, and returns the history error afterwards,
+  matching a normal `packmon scan`. Previously the artifacts were silently
+  omitted while the HTML report was still written.
 - Local scans no longer report ReversingLabs reputation findings that the
   server's `/api/v1/check` ignores. `GET /api/v1/sync` now exports reputation
   rows only while ReversingLabs is enabled in `self` mode; otherwise it sends
