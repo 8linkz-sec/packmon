@@ -16,6 +16,15 @@
 
 ### Fixed
 
+- Diagnostic redaction now hides secrets whose key is quoted, as in JSON or
+  dict-style error text: `"password":"x"`, `"api_key": "x"`, `'token':'x'`, and
+  `\"token\":\"x\"` inside an escaped JSON string, with optional whitespace
+  around `:` or `=`. These values used to reach logs and error messages in
+  clear text, because the separator had to follow the key name directly. Only
+  the secret values are redacted; the other fields of the object stay
+  readable. A backslash-escaped newline inside a secret value
+  (`password='ab\` followed by a line break) also no longer ends the redaction
+  early and leaks the rest of the value.
 - `packmon report` exits `2` (operational error) when writing the report to
   stdout fails. It used to discard every write error outside the history
   table, so a closed pipe or full disk ended the command with exit `0` and no

@@ -754,7 +754,13 @@ must pass through the same diagnostic redaction and a 512-byte bound: database
 driver errors can echo the connection URL, secret assignments, or local paths.
 The redaction strips userinfo, paths, and queries from `http(s)://` and
 `postgres(ql)://` URLs and redacts quoted secret values (for example libpq's
-`password='...'`) as a whole.
+`password='...'`) as a whole. Secret keys are also recognized when the key
+itself is quoted, as in JSON or dict-style text (`"password":"..."`,
+`"api_key" : "..."`, `'token':'...'`, or `\"token\":\"...\"` inside an escaped
+JSON string): the quoted value is redacted and the other, non-secret fields of
+the object stay readable. A backslash escapes any character inside a secret
+value, a newline included, so an escaped line break does not end the redaction
+early.
 
 The built-in `/privacy` page is a deployment-neutral disclosure for the
 first-party admin session cookie and routine Packmon audit/scan metadata. It is
