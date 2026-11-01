@@ -16,6 +16,21 @@
 
 ### Fixed
 
+- `packmon-server migrate` no longer keeps an `INVALID` index left by an
+  interrupted `CREATE INDEX CONCURRENTLY` (connection drop, cancel, crash).
+  A retry used to skip such an index because the migrations use
+  `IF NOT EXISTS`, so the schema reported the new version while the index
+  was never used and its queries fell back to sequential scans. The migrator
+  now drops an `INVALID` index of the same name before each concurrent build,
+  fails the migration (dirty) unless the build left a valid index, and on
+  every run, before any pending migration, rebuilds concurrently any
+  `INVALID` or missing index of an already applied migration (010, 011, 021
+  and 049 build indexes concurrently); a failed repair aborts the run with
+  the schema version clean. A database
+  left dirty by an interrupted 049 no longer needs a backup restore: migrate
+  still refuses it, but its error names the retry path (clear the 49 dirty
+  marker, rerun migrate), documented in "Upgrade And Rollback" in
+  `docs/runbook.md`. No migration is added.
 - The PostgreSQL `version_ranges` CHECK constraints accepted malformed OSV
   ranges: a range without an `events` key (`[{}]`) and events whose boundary
   was `null`, a number, or blank (`{"introduced":null}`), because the check
@@ -594,7 +609,7 @@
   start on a schema version mismatch. Read "Upgrade And Rollback" in
   `docs/runbook.md` first; a failed migration other than a 048 prerequisite
   failure leaves the database dirty, and the documented recovery is restoring
-  the pre-upgrade backup.
+  the pre-upgrade backup, except for an interrupted 049 (see below).
   - 047 widens the ecosystem CHECK constraints for the inventory-only
     `chocolatey` ecosystem. Rolling 047 back removes any `chocolatey` rows
     (none are written by the scan path).
@@ -608,7 +623,11 @@
   - 049 builds two partial indexes over active `malicious_findings` rows with
     `CREATE INDEX CONCURRENTLY`, outside a transaction. It avoids a long
     write lock but can run for a while on large catalogs; check PostgreSQL
-    temporary space and volume headroom before starting.
+    temporary space and volume headroom before starting, and raise
+    `PACKMON_DB_CONNECT_TIMEOUT` for the migrate run, which bounds the whole
+    run including these builds. If 049 is interrupted, clear its dirty marker
+    (`DELETE FROM schema_migrations WHERE version = 49 AND dirty;`) and rerun
+    migrate; it replaces any `INVALID` index the interrupted run left.
   - 050 tightens the `version_ranges` CHECK constraints and repairs rows that
     fail them. In one transaction it scans `affected_packages` and
     `malicious_findings` to log the failing rows in
@@ -623,6 +642,14 @@
     be re-entered in `/admin/advisories`. The migration reports its counts as
     a PostgreSQL NOTICE; list the repaired rows afterwards with the query in
     "Upgrade And Rollback" in `docs/runbook.md`.
+- Databases already past a concurrent index migration (010, 011, 021, 049),
+  including those already at schema 49 or 50: the next `packmon-server
+  migrate` run rebuilds any `INVALID` or missing index such a migration
+  builds (it needs no pending migration). It is a no-op when every index is
+  valid; to
+  check beforehand, run `SELECT indexrelid::regclass FROM pg_index WHERE NOT
+  indisvalid;`. A rebuild takes as long as the original build, so drain the
+  server and allow for it in `PACKMON_DB_CONNECT_TIMEOUT`.
 - `docker-compose.server.yml` deployments: the next `up` creates the new
   `<project>_feed-data` volume, so the first feed sync after the upgrade
   re-clones the GHSA and OpenSSF repositories once. A `PACKMON_FEED_DATA_DIR`
