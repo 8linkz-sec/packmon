@@ -20,6 +20,12 @@
   stdout fails. It used to discard every write error outside the history
   table, so a closed pipe or full disk ended the command with exit `0` and no
   (or a truncated) report, and the empty-history message never failed at all.
+- The list-all and `--outdated` HTML reports no longer show a full Windows
+  drive or UNC source path (`C:\Users\...\go.sum`, `C:/...`, `\\server\...`)
+  on a Linux host when the scan root is relative (for example `.`). Such a
+  path was treated as "inside" the current directory and rendered in full;
+  it now shows only its final segment, like every other path outside the scan
+  root.
 - `packmon scan --list-all` compares each installed Docker image tag with its
   own local repo digest. Local digests used to be keyed by repository name
   only, so two installed tags of one repository (for example `postgres:17`
