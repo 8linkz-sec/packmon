@@ -120,6 +120,19 @@ func TestOpenAPIIncludesCanonicalScanAndSyncFields(t *testing.T) {
 	if got := nextCursor["$ref"]; got != "#/components/schemas/SyncCursor" {
 		t.Fatalf("SyncResponse.next_cursor ref = %#v, want SyncCursor", got)
 	}
+	reputationDisabled := requireMap(t, syncResponseProperties, "reputation_disabled")
+	if got := reputationDisabled["type"]; got != "boolean" {
+		t.Fatalf("SyncResponse.reputation_disabled type = %#v, want boolean", got)
+	}
+	reputationDisabledDescription, _ := reputationDisabled["description"].(string)
+	for _, want := range []string{"ReversingLabs", "self", "drop", "omitted"} {
+		if !strings.Contains(reputationDisabledDescription, want) {
+			t.Fatalf("SyncResponse.reputation_disabled description missing %q: %q", want, reputationDisabledDescription)
+		}
+	}
+	if fieldTag, ok := reflect.TypeOf(synccontract.Response{}).FieldByName("ReputationDisabled"); !ok || fieldTag.Tag.Get("json") != "reputation_disabled,omitempty" {
+		t.Fatalf("synccontract.Response.ReputationDisabled json tag = %q (found %v), want reputation_disabled,omitempty", fieldTag.Tag.Get("json"), ok)
+	}
 
 	limit := requireOperationParameter(t, syncOperation, "limit", "query")
 	limitSchema := requireMap(t, limit, "schema")

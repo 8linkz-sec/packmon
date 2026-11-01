@@ -3128,6 +3128,16 @@ func TestPostgresStoreDockerEndToEnd(t *testing.T) {
 			t.Fatalf("ExportSync().Reputation leaked non-active reputation row %s: %+v", id, exported.Reputation)
 		}
 	}
+	excluded, err := store.ExportSync(ctx, db.SyncExportOptions{SnapshotAt: time.Now().UTC().Add(time.Minute), Limit: 1, ExcludeReputation: true})
+	if err != nil {
+		t.Fatalf("ExportSync(ExcludeReputation) error = %v", err)
+	}
+	if len(excluded.Reputation) != 0 {
+		t.Fatalf("ExportSync(ExcludeReputation).Reputation = %+v, want no rows", excluded.Reputation)
+	}
+	if !excluded.Truncated || excluded.NextCursor == nil || !excluded.NextCursor.ReputationDone || excluded.NextCursor.ReputationCursor != "" {
+		t.Fatalf("ExportSync(ExcludeReputation) cursor = truncated %v cursor %+v, want reputation done without keyset cursor", excluded.Truncated, excluded.NextCursor)
+	}
 	if exported.SyncedXID == 0 {
 		t.Fatalf("ExportSync().SyncedXID = 0, want database xid watermark")
 	}

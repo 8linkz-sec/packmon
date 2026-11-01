@@ -5537,6 +5537,10 @@ func TestHandleSyncEmitsReputationRows(t *testing.T) {
 	}
 	h := newTestHandler(&store.stubStore)
 	h.store = store
+	h.ConfigureReversingLabs(config.FeedsConfig{
+		ReversingLabsEnabled: true,
+		ReversingLabsMode:    config.FeedModeSelf,
+	})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/sync", nil)
 	rr := httptest.NewRecorder()
@@ -5556,6 +5560,94 @@ func TestHandleSyncEmitsReputationRows(t *testing.T) {
 	}
 	if resp.Reputation[0].Type != "supply_chain_risk" || resp.Reputation[0].RiskType != "removed_package" {
 		t.Fatalf("reputation row = %+v", resp.Reputation[0])
+	}
+	if resp.ReputationDisabled {
+		t.Fatal("reputation_disabled = true, want false while ReversingLabs is enabled in self mode")
+	}
+	if strings.Contains(rr.Body.String(), "reputation_disabled") {
+		t.Fatalf("enabled sync response carries reputation_disabled: %s", rr.Body.String())
+	}
+	if store.opts.ExcludeReputation {
+		t.Fatal("ExportSync ExcludeReputation = true, want false while ReversingLabs is enabled in self mode")
+	}
+}
+
+// TestHandleSyncOmitsReputationWhenReversingLabsNotSelfEnabled pins the
+// remote/local parity rule: /api/v1/sync exports reputation rows only when the
+// same enabled+self ReversingLabs state lets /api/v1/check read them, and
+// otherwise tells clients to drop previously synced reputation rows.
+func TestHandleSyncOmitsReputationWhenReversingLabsNotSelfEnabled(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name      string
+		configure func(*Handler)
+	}{
+		{name: "not configured", configure: func(*Handler) {}},
+		{name: "disabled", configure: func(h *Handler) {
+			h.ConfigureReversingLabs(config.FeedsConfig{ReversingLabsEnabled: false, ReversingLabsMode: config.FeedModeSelf})
+		}},
+		{name: "external mode", configure: func(h *Handler) {
+			h.ConfigureReversingLabs(config.FeedsConfig{ReversingLabsEnabled: true, ReversingLabsMode: config.FeedModeExternal})
+		}},
+		{name: "disabled after enabled", configure: func(h *Handler) {
+			h.ConfigureReversingLabs(config.FeedsConfig{ReversingLabsEnabled: true, ReversingLabsMode: config.FeedModeSelf})
+			h.ConfigureReversingLabs(config.FeedsConfig{ReversingLabsEnabled: false, ReversingLabsMode: config.FeedModeSelf})
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := &syncExportStore{
+				export: &db.SyncExport{
+					SyncedAt: time.Now().UTC(),
+					Malicious: []db.SyncMalicious{
+						{ID: "MAL-1", Ecosystem: "npm", Name: "evil", RiskType: "malware", Severity: "CRITICAL", Source: "openssf"},
+					},
+					// A store that ignores ExcludeReputation must still not
+					// leak leftover cache rows or a reputation keyset cursor.
+					Reputation: []db.SyncReputationFinding{
+						{ID: "reversinglabs:npm/left-pad@1.3.0", Ecosystem: "npm", Name: "left-pad", Version: "1.3.0", Type: "malicious", Severity: "CRITICAL"},
+					},
+					Truncated:  true,
+					NextCursor: &db.SyncCursor{MaliciousCursor: "mal", ReputationCursor: "rep", Reputation: 3},
+				},
+			}
+			h := newTestHandler(&store.stubStore)
+			h.store = store
+			tc.configure(h)
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/sync?reputation_offset=3", nil)
+			rr := httptest.NewRecorder()
+			h.HandleSync(rr, req)
+			if rr.Code != http.StatusOK {
+				t.Fatalf("sync status = %d, want 200: %s", rr.Code, rr.Body.String())
+			}
+
+			if !store.opts.ExcludeReputation {
+				t.Fatal("ExportSync ExcludeReputation = false, want true when ReversingLabs is not enabled in self mode")
+			}
+			var resp syncResponsePayload
+			if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if !resp.ReputationDisabled {
+				t.Fatalf("reputation_disabled = false, want true: %s", rr.Body.String())
+			}
+			if resp.Reputation == nil || len(resp.Reputation) != 0 {
+				t.Fatalf("reputation = %+v, want empty array", resp.Reputation)
+			}
+			if len(resp.Malicious) != 1 {
+				t.Fatalf("malicious rows = %d, want 1 (only reputation is gated)", len(resp.Malicious))
+			}
+			if resp.NextCursor == nil || !resp.NextCursor.ReputationDone || resp.NextCursor.ReputationCursor != "" {
+				t.Fatalf("next cursor = %+v, want reputation done without keyset cursor", resp.NextCursor)
+			}
+			if resp.NextCursor.MaliciousCursor != "mal" {
+				t.Fatalf("next cursor = %+v, want other datasets untouched", resp.NextCursor)
+			}
+		})
 	}
 }
 

@@ -26,3 +26,24 @@ func TestSyncCursorZeroAndEffectiveCursor(t *testing.T) {
 		t.Fatalf("EffectiveCursor(no offset) = %+v, want zero", got)
 	}
 }
+
+func TestEffectiveCursorMarksReputationDoneWhenExcluded(t *testing.T) {
+	t.Parallel()
+
+	// Legacy offset-only clients keep their offset expansion; the reputation
+	// dataset is reported as exhausted so it is never queried or paginated.
+	if got := (SyncExportOptions{Offset: 25, ExcludeReputation: true}).EffectiveCursor(); got != (SyncCursor{
+		Vulnerabilities: 25, Malicious: 25, Reputation: 25, Lifecycle: 25, ReputationDone: true,
+	}) {
+		t.Fatalf("EffectiveCursor(offset, excluded) = %+v", got)
+	}
+	explicit := SyncCursor{VulnerabilitiesCursor: "v", ReputationCursor: "r"}
+	if got := (SyncExportOptions{Cursor: explicit, ExcludeReputation: true}).EffectiveCursor(); got != (SyncCursor{
+		VulnerabilitiesCursor: "v", ReputationDone: true,
+	}) {
+		t.Fatalf("EffectiveCursor(explicit, excluded) = %+v, want reputation cursor dropped and done", got)
+	}
+	if got := (SyncExportOptions{ExcludeReputation: true}).EffectiveCursor(); got != (SyncCursor{ReputationDone: true}) {
+		t.Fatalf("EffectiveCursor(first page, excluded) = %+v, want only reputation done", got)
+	}
+}
