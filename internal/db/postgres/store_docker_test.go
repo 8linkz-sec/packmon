@@ -4163,8 +4163,10 @@ func TestCountUnknownSeverityFindingsAgainstDocker(t *testing.T) {
 		t.Fatalf("CountUnknownSeverityFindings(empty) = %d, %v; want 0 nil", count, err)
 	}
 
-	// Check constraints restrict all finding severities to the four supported
-	// values, so the unknown bucket can only be filled by legacy rows imported
-	// before the constraints existed; the counter must still answer cheaply
-	// and without error for that defensive case.
+	// Migration 027 restricts vulnerabilities and package_reputation_cache to
+	// the four supported severities, but malicious_findings_severity_check
+	// also permits UNKNOWN (normalizeMaliciousSeverity stores an empty upstream
+	// severity as UNKNOWN), so current active malicious rows can fill the
+	// unknown bucket without any legacy data; the counter must answer cheaply
+	// and without error for that case as well as for an empty store.
 }

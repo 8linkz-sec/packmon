@@ -177,7 +177,10 @@ func NormalizeFindingSeverity(finding Finding) Severity {
 // FindingBlocks reports whether one finding blocks under Packmon's scan policy.
 // SeverityNone disables severity-gated vulnerability and lifecycle blocking
 // only; malicious and active supply-chain risk findings still block.
-// Informational reputation findings do not block.
+// "Lifecycle" here means FindingTypeLifecycle (risk_type eol_soon or
+// security_support_only); already end-of-life releases are emitted as
+// supply_chain_risk with risk_type=eol and therefore always block, even at
+// SeverityNone. Informational reputation findings do not block.
 func FindingBlocks(finding Finding, threshold Severity) bool {
 	if FindingIsInformational(finding) {
 		return false
@@ -191,7 +194,8 @@ func FindingBlocks(finding Finding, threshold Severity) bool {
 	return finding.Severity.Blocks(threshold)
 }
 
-// FindingsBlock reports whether any finding blocks under Packmon's scan policy.
+// FindingsBlock reports whether any finding blocks under Packmon's scan policy
+// (see FindingBlocks for the per-finding rules, including end-of-life).
 func FindingsBlock(findings []Finding, threshold Severity) bool {
 	for _, finding := range findings {
 		if FindingBlocks(finding, threshold) {
