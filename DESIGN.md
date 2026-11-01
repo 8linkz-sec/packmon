@@ -985,9 +985,10 @@ The database file is `packmon.db` in `PACKMON_DB_PATH`, else in the trusted
 config `db.path`, else in `~/.packmon/db`. When the home directory cannot be
 resolved and neither override is set, the database has no location: commands
 that need it (`db sync`, `db info`, `db export`, `history clear`, `report`,
-`dashboard`, local-mode scans) fail with an error that names both overrides, and auto-mode
-fallback and scan-history recording warn and skip it. The CLI never falls back
-to the working directory, which is usually a repository.
+`dashboard`, local-mode scans) fail with an error that names both overrides,
+auto-mode fallback and scan-history recording warn and skip it, and
+`packmon config show` prints the `db_path` as unresolved. The CLI never falls
+back to the working directory, which is usually a repository.
 
 Remote and local modes should detect the same vulnerability, malicious, synced
 reputation, and lifecycle findings when local data is fresh. Local SQLite sync
