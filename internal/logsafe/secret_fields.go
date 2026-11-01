@@ -11,77 +11,162 @@ const maxSecretStructureBytes = 16 << 10
 
 // secretKeyWords are the secret words a component of a key name may end with.
 // The multi-word names are covered by their last word (access_token,
-// client_secret, x-amz-signature), by the run-together forms apikey and
-// privatekey, or by keySecretPrefixes (api_key, private_key). The plurals
-// credentials, secrets, passwords, and passwds usually hold a collection of
-// secrets and count as well; tokens does not, because it usually counts
-// (LLM or rate-limit tokens).
+// client_secret, x-amz-signature), by run-together forms (apikey, privatekey,
+// accesskey, sessionid), or by keySecretPairs (api_key, private_key,
+// session_id). The plurals credentials, secrets, passwords, passwds, and
+// passphrases usually hold a collection of secrets and count as well; tokens
+// is a countKeyWord instead.
 var secretKeyWords = []string{
 	"password", "passwd", "pwd", "secret", "token", "credential",
-	"signature", "sig", "apikey", "privatekey",
-	"passwords", "passwds", "secrets", "credentials",
+	"signature", "sig", "apikey", "privatekey", "passphrase", "authorization",
+	"accesskey", "accountkey", "signingkey", "encryptionkey", "masterkey",
+	"sessionid", "sessid",
+	"passwords", "passwds", "secrets", "credentials", "passphrases",
 }
 
-// keySecretPrefixes are the components that make a following "key" component
-// secret (api_key, x-api-key, privateKey).
-var keySecretPrefixes = []string{"api", "private"}
+// countKeyWords are secret words that often name a count instead (LLM or
+// rate-limit tokens): a key whose only secret word is one of them keeps a bare
+// number value readable (see isBareNumber).
+var countKeyWords = []string{"tokens"}
 
-// isSecretKeyName reports whether a key name names a secret. The name is split
-// into components at every character that is not an ASCII letter ('_', '-',
-// '.', and digits) and at camelCase boundaries ("authToken" -> auth, Token;
-// "APIKey" -> API, Key). The key is secret when a component ends with a secret
-// word (db_password, GITHUB_TOKEN, PGPASSWORD, authToken, client_secret_value)
-// or is "key" right after an "api" or "private" component (x-api-key,
-// privateKey). A component may carry letters before the secret word
-// (PGPASSWORD, githubtoken) but not after it, so tokenizer, tokens_count,
-// passwordless, and secretariat stay readable. A whole-word component is
-// redacted even where it is harmless (token_count, has_signature): the rule
-// errs toward over-redaction. Matching ignores case.
-func isSecretKeyName(name string) bool {
+// shortKeyWords are common short words that name a secret only as the whole
+// last component of a key name (pass, DB_PASS, basic_auth, Set-Cookie, but
+// not bypass, auth_mode, or session_count). Unquoted, such a key also needs
+// '=' or a ':' that is not followed by whitespace (see shortKeySeparator),
+// because "admin auth: <error>" is how Go wraps errors.
+var shortKeyWords = []string{"pass", "pw", "auth", "cookie", "session"}
+
+// keySecretPairs makes a component secret when it follows one of the listed
+// components: "key" after api, private, access, account, signing,
+// encryption, or master (x-api-key, privateKey, AccountKey, SharedAccessKey,
+// MASTER_KEY), and "id" after session (session_id).
+var keySecretPairs = []struct {
+	word     string
+	prefixes []string
+}{
+	{"key", []string{"api", "private", "access", "account", "signing", "encryption", "master"}},
+	{"id", []string{"session"}},
+}
+
+// authSchemes are the Authorization header schemes that stay readable in front
+// of a redacted credential (Authorization: Basic [redacted]).
+var authSchemes = []string{
+	"basic", "bearer", "digest", "token", "negotiate", "ntlm", "oauth",
+	"apikey", "sharedkey", "dpop", "aws4-hmac-sha256",
+}
+
+// keyMatch is how strongly a key name names a secret.
+type keyMatch uint8
+
+const (
+	matchNone keyMatch = iota
+	// matchCount: the key names a secret unless its value is a bare number.
+	matchCount
+	// matchShort: a short word is the whole last component (see shortKeyWords).
+	matchShort
+	matchSecret
+)
+
+// secretKey describes a key name for redaction.
+type secretKey struct {
+	// match is the strongest match of any component.
+	match keyMatch
+	// last is the match of the last component; a space-separated flag
+	// (--password x) needs it, so --password-stdin and --token-file do not
+	// take the next argument as their value.
+	last keyMatch
+	// scheme is set for auth and authorization keys, whose value may start
+	// with a readable scheme (see authSchemes).
+	scheme bool
+	// line is set for cookie keys: a "Cookie:" header value runs to the end
+	// of the line, because it holds ';'-separated pairs.
+	line bool
+}
+
+// classifySecretKey classifies a key name. The name is split into components
+// at every character that is not an ASCII letter ('_', '-', '.', digits,
+// spaces, '/', ':') and at camelCase boundaries ("authToken" -> auth, Token;
+// "APIKey" -> API, Key). A component that ends with a secret word (db_password,
+// GITHUB_TOKEN, PGPASSWORD, authToken, client_secret_value) or that pairs with
+// the component before it (x-api-key, AccountKey, session_id) makes the key
+// secret; a component that ends with a count word (tokens, maxTokens) makes it
+// secret unless its value is a bare number; a short word as the whole last
+// component (DB_PASS, basic_auth) makes it secret with a stricter separator.
+// A component may carry letters before the secret word (PGPASSWORD,
+// githubtoken) but not after it, so tokenizer, passwordless, and secretariat
+// stay readable. A whole-word component is redacted even where it is harmless
+// (token_count, has_signature): the rule errs toward over-redaction. Matching
+// ignores case.
+func classifySecretKey(name string) secretKey {
+	var key secretKey
 	prevStart, prevEnd := -1, -1
-	secret := false
-	forEachKeyComponent(name, func(start, end int) bool {
-		comp := name[start:end]
-		for _, word := range secretKeyWords {
-			if hasSuffixFold(comp, word) {
-				secret = true
-				return false
-			}
+	lastStart, lastEnd := -1, -1
+	forEachKeyComponent(name, func(start, end int) {
+		m := componentMatch(name[start:end], name[max(prevStart, 0):max(prevEnd, 0)])
+		key.match = max(key.match, m)
+		key.last = m
+		prevStart, prevEnd = start, end
+		lastStart, lastEnd = start, end
+	})
+	if lastStart < 0 {
+		return key
+	}
+	last := name[lastStart:lastEnd]
+	for _, word := range shortKeyWords {
+		if strings.EqualFold(last, word) {
+			key.last = max(key.last, matchShort)
+			key.match = max(key.match, matchShort)
 		}
-		if prevStart >= 0 && strings.EqualFold(comp, "key") {
-			for _, prefix := range keySecretPrefixes {
-				if hasSuffixFold(name[prevStart:prevEnd], prefix) {
-					secret = true
-					return false
+	}
+	key.scheme = strings.EqualFold(last, "auth") || hasSuffixFold(last, "authorization")
+	key.line = strings.EqualFold(last, "cookie")
+	return key
+}
+
+// componentMatch matches one component of a key name; prev is the component
+// before it, or "" for the first one.
+func componentMatch(comp, prev string) keyMatch {
+	for _, word := range secretKeyWords {
+		if hasSuffixFold(comp, word) {
+			return matchSecret
+		}
+	}
+	if prev != "" {
+		for _, pair := range keySecretPairs {
+			if !strings.EqualFold(comp, pair.word) {
+				continue
+			}
+			for _, prefix := range pair.prefixes {
+				if hasSuffixFold(prev, prefix) {
+					return matchSecret
 				}
 			}
 		}
-		prevStart, prevEnd = start, end
-		return true
-	})
-	return secret
+	}
+	for _, word := range countKeyWords {
+		if hasSuffixFold(comp, word) {
+			return matchCount
+		}
+	}
+	return matchNone
 }
 
 // forEachKeyComponent calls fn with the bounds of each letter component of
-// name until fn returns false.
-func forEachKeyComponent(name string, fn func(start, end int) bool) {
+// name.
+func forEachKeyComponent(name string, fn func(start, end int)) {
 	start := -1
 	for i := 0; i <= len(name); i++ {
 		if i < len(name) && isASCIILetter(name[i]) {
 			if start < 0 {
 				start = i
 			} else if isCamelBoundary(name, start, i) {
-				if !fn(start, i) {
-					return
-				}
+				fn(start, i)
 				start = i
 			}
 			continue
 		}
 		if start >= 0 {
-			if !fn(start, i) {
-				return
-			}
+			fn(start, i)
 			start = -1
 		}
 	}
@@ -113,6 +198,18 @@ func isKeyChar(c byte) bool {
 	return isASCIILetter(c) || c >= '0' && c <= '9' || c == '_' || c == '-' || c == '.'
 }
 
+// isQuotedKeyChar reports whether c can be part of a quoted key name, which
+// may also hold spaces, '/', and ':' ("Client Secret", "auth/token",
+// "db:password").
+func isQuotedKeyChar(c byte) bool {
+	return isKeyChar(c) || c == ' ' || c == '/' || c == ':'
+}
+
+// isWordChar reports whether c is an ASCII letter, digit, or '_'.
+func isWordChar(c byte) bool {
+	return isASCIILetter(c) || c >= '0' && c <= '9' || c == '_'
+}
+
 // isSpace matches the whitespace of RE2's \s class.
 func isSpace(c byte) bool {
 	return c == ' ' || c == '\t' || c == '\n' || c == '\f' || c == '\r'
@@ -120,33 +217,88 @@ func isSpace(c byte) bool {
 
 func isQuote(c byte) bool { return c == '"' || c == '\'' }
 
+func hasPrefixFold(s, prefix string) bool {
+	return len(s) >= len(prefix) && strings.EqualFold(s[:len(prefix)], prefix)
+}
+
+// escapedAt reports whether msg[i] follows an odd number of backslashes.
+func escapedAt(msg string, i int) bool {
+	n := 0
+	for j := i - 1; j >= 0 && msg[j] == '\\'; j-- {
+		n++
+	}
+	return n%2 == 1
+}
+
+// opensQuotedText reports whether the unescaped quote at msg[i] can open a
+// quoted string in free text: it must not follow a word character, so the
+// apostrophe in "can't" or "user's" opens nothing.
+func opensQuotedText(msg string, i int) bool {
+	return i == 0 || !isWordChar(msg[i-1])
+}
+
+// closesQuotedText reports whether the unescaped quote at msg[i] can close a
+// quoted string: it must not be followed by a word character, so the
+// apostrophe in 'can't' or the segment quote in "ab"cd" closes nothing.
+func closesQuotedText(msg string, i int) bool {
+	return i+1 == len(msg) || !isWordChar(msg[i+1])
+}
+
+// quotedText tracks whether the free text the unquoted-key scan has read so
+// far left a quoted string open, and with which quote character. A key inside
+// an open string ("x password: a" or {"msg":"password=a b"}) ends its value at
+// the string's closing quote (see scanAssignmentValue). Redacted values are
+// skipped, so the quotes of password="a b" never open a string.
+type quotedText struct {
+	open byte
+}
+
+// observe updates the state for the free-text byte msg[i].
+func (q *quotedText) observe(msg string, i int) {
+	c := msg[i]
+	if !isQuote(c) || escapedAt(msg, i) {
+		return
+	}
+	switch {
+	case q.open == 0 && opensQuotedText(msg, i):
+		q.open = c
+	case q.open == c && closesQuotedText(msg, i):
+		q.open = 0
+	}
+}
+
 // redactQuotedKeySecrets redacts the values of quoted secret keys in JSON- and
 // dict-style text: "password":"x", 'token': 'x', or \"token\":\"x\" and
 // \\\"token\\\":\\\"x\\\" inside JSON embedded once or more in a JSON string,
 // with optional whitespace around ':' or '='. The key name runs between two
 // equal quotes escaped by the same number of backslashes (see
-// secretKeySeparator) and must be a secret key name (see isSecretKeyName),
-// and the value may start after any number of escaping backslashes. The value is
-// one quoted string (see scanQuotedValue), one object or array (see
-// scanStructuredValue), or an unquoted scalar that ends at whitespace or a
-// JSON delimiter, so the neighbouring non-secret fields of an object stay
-// readable. It runs before redactSecretAssignments, which does not match a key
-// followed by a quote, so a quoted value is never cut at a ';' or space by an
-// earlier unquoted assignment.
+// secretKeySeparator), may hold spaces, '/', and ':' ("Client Secret"), and
+// must name a secret (see classifySecretKey); the value may start after any
+// number of escaping backslashes. The value is one quoted string (see
+// scanQuotedValue), one object or array (see scanStructuredValue), or an
+// unquoted scalar that ends at whitespace or a JSON delimiter, so the
+// neighbouring non-secret fields of an object stay readable. It runs before
+// redactSecretAssignments, which does not match a key followed by a quote, so
+// a quoted value is never cut at a ';' or space by an earlier unquoted
+// assignment.
 func redactQuotedKeySecrets(msg string) string {
 	return redactSecretFields(msg, true)
 }
 
 // redactSecretAssignments redacts the values of unquoted secret keys followed
-// by ':' or '=' (password=x, GITHUB_TOKEN=x, x-api-key: x). The value runs to
-// the next unquoted, unescaped whitespace, ';', or '&' (or the end): it is a
-// sequence of single- or double-quoted segments (libpq key/value DSNs quote
-// values with spaces), backslash escapes, and plain characters, so text after
-// a closing quote ("ab"cd) or an escaped space (foo\ bar) is redacted with it.
-// A value that starts with an object or array, or with an escaped quote
-// (\"a b\"), takes that whole structure or escaped string first. A key right
-// after an unescaped quote ("password=x") sits inside that quoted string, so
-// the string's closing quote ends the value (see scanAssignmentValue). An
+// by ':' or '=' (password=x, GITHUB_TOKEN=x, x-api-key: x), by a URL-encoded
+// '=' or ':' (password%3Dx), or, for a command-line flag, by whitespace
+// (--password x, -p x; see flagValueStart). The value runs to the next
+// unquoted, unescaped whitespace, or to a ';' or '&' (or "%26") that is
+// followed by whitespace, the end, or the next key=value pair, so password=a;b
+// is redacted whole while a=1&token=x&b=2 keeps a and b readable (see
+// endsValueAfter). It is a sequence of single- or double-quoted segments
+// (libpq key/value DSNs quote values with spaces), backslash escapes, and
+// plain characters, so text after a closing quote ("ab"cd) or an escaped space
+// (foo\ bar) is redacted with it. A value that starts with an object or array,
+// or with an escaped quote (\"a b\"), takes that whole structure or escaped
+// string first. A key inside a quoted string of the free text ("x password:
+// a", see quotedText) ends its value at that string's closing quote. An
 // unterminated quote redacts the rest of the message. A backslash escapes any
 // character, a newline included.
 func redactSecretAssignments(msg string) string {
@@ -167,28 +319,20 @@ type keyQuote struct {
 // whole, so the scan is linear in the length of msg.
 func redactSecretFields(msg string, quotedKeys bool) string {
 	var out strings.Builder
+	var text quotedText
 	copied := 0
 	for i := 0; i < len(msg); {
-		if !isKeyChar(msg[i]) || (i > 0 && isKeyChar(msg[i-1])) {
+		keyEnd := keyRunEnd(msg, i, quotedKeys)
+		if keyEnd == i {
+			if !quotedKeys {
+				text.observe(msg, i)
+			}
 			i++
 			continue
 		}
-		keyEnd := i
-		for keyEnd < len(msg) && isKeyChar(msg[keyEnd]) {
-			keyEnd++
-		}
-		valueStart, quote, ok := secretKeySeparator(msg, i, keyEnd, quotedKeys)
-		if !ok || !isSecretKeyName(msg[i:keyEnd]) {
-			i = keyEnd
-			continue
-		}
-		var valueEnd int
-		if quotedKeys {
-			valueEnd = scanQuotedKeyValue(msg, valueStart, quote)
-		} else {
-			valueEnd = scanAssignmentValue(msg, valueStart, enclosingQuote(msg, i))
-		}
-		if valueEnd == valueStart {
+		valueStart, valueEnd, key := secretFieldValue(msg, i, keyEnd, quotedKeys, text.open)
+		if valueEnd == valueStart || key.match == matchNone ||
+			key.match == matchCount && isBareNumber(msg[valueStart:valueEnd]) {
 			i = keyEnd
 			continue
 		}
@@ -204,14 +348,147 @@ func redactSecretFields(msg string, quotedKeys bool) string {
 	return out.String()
 }
 
+// keyRunEnd returns the end of the key name that starts at msg[i], or i when
+// no key name starts there. An unquoted key name is a run of key characters
+// (see isKeyChar); a quoted one starts right after a quote and may also hold
+// spaces, '/', and ':' (see isQuotedKeyChar).
+func keyRunEnd(msg string, i int, quotedKeys bool) int {
+	isChar := isKeyChar
+	if quotedKeys {
+		if i == 0 || !isQuote(msg[i-1]) {
+			return i
+		}
+		isChar = isQuotedKeyChar
+	} else if i > 0 && isKeyChar(msg[i-1]) {
+		return i
+	}
+	end := i
+	for end < len(msg) && isChar(msg[end]) {
+		end++
+	}
+	return end
+}
+
+// secretFieldValue returns the bounds of the value of the key msg[start:end]
+// and the key's classification, or an empty value when the key has none.
+// enclosing is the quote of the free-text string the key sits in, or 0.
+func secretFieldValue(msg string, start, end int, quotedKeys bool, enclosing byte) (int, int, secretKey) {
+	valueStart, quote, ok := secretKeySeparator(msg, start, end, quotedKeys)
+	var key secretKey
+	switch {
+	case ok:
+		key = classifySecretKey(msg[start:end])
+		if !quotedKeys && key.match == matchShort && !key.line && !shortKeySeparator(msg, end) {
+			return 0, 0, secretKey{}
+		}
+	case !quotedKeys:
+		valueStart, key, ok = flagValueStart(msg, start, end)
+		if !ok {
+			return 0, 0, secretKey{}
+		}
+	default:
+		return 0, 0, secretKey{}
+	}
+	if key.match == matchNone {
+		return 0, 0, key
+	}
+	if quotedKeys {
+		return valueStart, scanQuotedKeyValue(msg, valueStart, quote), key
+	}
+	if key.line && strings.TrimLeft(msg[end:valueStart], " \t\n\f\r")[0] == ':' {
+		return valueStart, scanLineValue(msg, valueStart, enclosing), key
+	}
+	if key.scheme {
+		if credential := skipAuthScheme(msg, valueStart); credential > valueStart {
+			if credentialEnd := scanAssignmentValue(msg, credential, enclosing); credentialEnd > credential {
+				return credential, credentialEnd, key
+			}
+		}
+	}
+	return valueStart, scanAssignmentValue(msg, valueStart, enclosing), key
+}
+
+// shortKeySeparator reports whether the separator that secretKeySeparator
+// matched after the unquoted short key ending at msg[end] counts: '=' (with
+// optional whitespace), a URL-encoded separator, or a ':' that directly
+// follows the key and is not followed by whitespace (auth:x, but not "admin
+// auth: connection refused").
+func shortKeySeparator(msg string, end int) bool {
+	i := end
+	for isSpace(msg[i]) {
+		i++
+	}
+	if msg[i] != ':' {
+		return true
+	}
+	return i == end && i+1 < len(msg) && !isSpace(msg[i+1])
+}
+
+// flagValueStart matches a command-line flag whose value is the next argument
+// (--password x, -token x, -p x) and returns where the value starts. The flag
+// starts with one or two dashes at the start of msg or after whitespace or a
+// quote, its last name component must name a secret (see secretKey.last), and
+// the value must not start with '-', which would be the next flag. "-p" is
+// treated as a password flag although it means a port or parallelism for many
+// tools: the redaction errs toward hiding the value.
+func flagValueStart(msg string, start, end int) (int, secretKey, bool) {
+	flag := msg[start:end]
+	if !strings.HasPrefix(flag, "-") || start > 0 && !isSpace(msg[start-1]) && !isQuote(msg[start-1]) {
+		return 0, secretKey{}, false
+	}
+	name := strings.TrimPrefix(strings.TrimPrefix(flag, "-"), "-")
+	if name == "" || !isASCIILetter(name[0]) {
+		return 0, secretKey{}, false
+	}
+	var key secretKey
+	if flag == "-p" {
+		key = secretKey{match: matchSecret, last: matchSecret}
+	} else if key = classifySecretKey(name); key.last == matchNone {
+		return 0, secretKey{}, false
+	}
+	i := end
+	for i < len(msg) && (msg[i] == ' ' || msg[i] == '\t') {
+		i++
+	}
+	if i == end || i == len(msg) || msg[i] == '-' || isSpace(msg[i]) {
+		return 0, secretKey{}, false
+	}
+	key.line = false
+	return i, key, true
+}
+
+// skipAuthScheme returns where the credential after a readable Authorization
+// scheme (see authSchemes) starts in the value that starts at msg[i], or i
+// when the value does not start with a scheme and whitespace.
+func skipAuthScheme(msg string, i int) int {
+	j := i
+	for j < len(msg) && (isASCIILetter(msg[j]) || msg[j] >= '0' && msg[j] <= '9' || msg[j] == '-') {
+		j++
+	}
+	if j == i || j == len(msg) || (msg[j] != ' ' && msg[j] != '\t') {
+		return i
+	}
+	scheme := msg[i:j]
+	for _, known := range authSchemes {
+		if strings.EqualFold(scheme, known) {
+			for j < len(msg) && (msg[j] == ' ' || msg[j] == '\t') {
+				j++
+			}
+			return j
+		}
+	}
+	return i
+}
+
 // secretKeySeparator matches the separator after the key name msg[start:end]
 // and returns where the value starts. A quoted key needs the same quote
 // character, escaped by the same number of backslashes, right before and
 // right after it; text such as `token\":\"` inside a string value, whose two
 // quotes differ, is not a key. An unquoted key needs the separator right after
-// it. Whitespace may surround ':' or '='. When the key's quotes are escaped,
-// the key sits in an escaped JSON string, so an escaped tab, newline, or
-// carriage return (\t, \n, \r, after any number of backslashes) counts as
+// it, or a URL-encoded one (%3D or %3A, optionally after a URL-encoded quote
+// %22 or %27). Whitespace may surround ':' or '='. When the key's quotes are
+// escaped, the key sits in an escaped JSON string, so an escaped tab, newline,
+// or carriage return (\t, \n, \r, after any number of backslashes) counts as
 // whitespace too.
 func secretKeySeparator(msg string, start, end int, quotedKeys bool) (int, keyQuote, bool) {
 	var quote keyQuote
@@ -232,6 +509,14 @@ func secretKeySeparator(msg string, start, end int, quotedKeys bool) (int, keyQu
 			return 0, quote, false
 		}
 		i++
+	} else {
+		j := i
+		if hasPrefixFold(msg[j:], "%22") || hasPrefixFold(msg[j:], "%27") {
+			j += 3
+		}
+		if hasPrefixFold(msg[j:], "%3D") || hasPrefixFold(msg[j:], "%3A") {
+			return j + 3, quote, true
+		}
 	}
 	i = skipSeparatorSpace(msg, i, quote.level > 0)
 	if i == len(msg) || (msg[i] != ':' && msg[i] != '=') {
@@ -263,66 +548,105 @@ func skipSeparatorSpace(msg string, i int, escaped bool) int {
 	return i
 }
 
+// endsValueAfter reports whether a ';' or '&' (or "%26") delimiter that ends
+// right before msg[i] ends an unquoted value: it does when whitespace or the
+// end of msg follows, or the next key=value pair (a key name and '=' or
+// "%3D"). Otherwise it is part of the value (password=a;b, a&amp;b).
+func endsValueAfter(msg string, i int) bool {
+	if i == len(msg) || isSpace(msg[i]) {
+		return true
+	}
+	j := i
+	for j < len(msg) && isKeyChar(msg[j]) {
+		j++
+	}
+	return j > i && j < len(msg) && (msg[j] == '=' || hasPrefixFold(msg[j:], "%3D"))
+}
+
+// isBareNumber reports whether a value is a plain number such as 3, -1, 2.5,
+// or 4,096, optionally followed by sentence punctuation; a key whose only
+// secret word is a count word keeps such a value readable.
+func isBareNumber(value string) bool {
+	value = strings.TrimRight(value, ",.;)")
+	value = strings.TrimPrefix(strings.TrimPrefix(value, "-"), "+")
+	if value == "" {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if c >= '0' && c <= '9' {
+			continue
+		}
+		if (c != '.' && c != ',' && c != '_') || i == 0 || i+1 == len(value) || value[i+1] < '0' || value[i+1] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // scanQuotedKeyValue returns the end of the value of a quoted secret key that
-// starts at i, or i when there is none.
+// starts at i, or i when there is none. The key's quote character escaped by
+// fewer backslashes than the key's own quotes closes the string the key is
+// embedded in, so an unquoted scalar ends before it.
 func scanQuotedKeyValue(msg string, i int, quote keyQuote) int {
 	if end, ok := scanLeadingQuotedOrStructured(msg, i, quote); ok {
 		return end
 	}
-	j := i
-	for j < len(msg) {
+	j, run := i, 0
+	for ; j < len(msg); j++ {
 		c := msg[j]
 		if c == '\\' {
-			if j+1 == len(msg) {
-				break
-			}
-			j += 2
+			run++
 			continue
 		}
-		if isSpace(c) || strings.IndexByte(",;&}]", c) >= 0 {
+		if c == quote.char && run < quote.level {
+			return j - run
+		}
+		if run%2 == 0 && (isSpace(c) || strings.IndexByte(",}]", c) >= 0 ||
+			(c == ';' || c == '&') && endsValueAfter(msg, j+1)) {
 			break
 		}
-		j++
+		run = 0
 	}
 	return j
 }
 
-// enclosingQuote returns the unescaped quote character right before the key
-// that starts at msg[start], or 0 when there is none.
-func enclosingQuote(msg string, start int) byte {
-	if start == 0 || !isQuote(msg[start-1]) || (start > 1 && msg[start-2] == '\\') {
-		return 0
-	}
-	return msg[start-1]
-}
-
 // scanAssignmentValue returns the end of the value of an unquoted secret key
-// that starts at i, or i when there is none. A key right after an unescaped
-// quote (enclosing, or 0) sits inside that quoted string, so the string's
-// closing quote ends the value instead of opening a quoted segment: the label
-// in `"Password:" PGPASSWORD=x` has an empty value, and the next key is still
-// found.
+// that starts at i, or i when there is none. A key inside a quoted string of
+// the free text (enclosing, or 0) ends its value at that string's closing
+// quote instead of opening a quoted segment: the label in `"Password:"
+// PGPASSWORD=x` has an empty value, and the next key is still found. A quote
+// of the other kind inside such a string (the apostrophe in "password: it's")
+// opens a segment that ends at the latest at the enclosing closing quote.
 func scanAssignmentValue(msg string, i int, enclosing byte) int {
-	if enclosing != 0 && i < len(msg) && msg[i] == enclosing {
+	if enclosing != 0 && i < len(msg) && msg[i] == enclosing && closesQuotedText(msg, i) {
 		return i
 	}
 	j := i
-	if end, ok := scanLeadingQuotedOrStructured(msg, i, keyQuote{}); ok {
-		j = end
+	if i < len(msg) && (msg[i] == '{' || msg[i] == '[' || msg[i] == '\\') {
+		if end, ok := scanLeadingQuotedOrStructured(msg, i, keyQuote{}); ok {
+			j = end
+		}
 	}
 	for j < len(msg) {
 		c := msg[j]
 		switch {
-		case enclosing != 0 && c == enclosing:
+		case enclosing != 0 && c == enclosing && closesQuotedText(msg, j):
 			return j
 		case isQuote(c):
-			j = scanQuotedValue(msg, j+1, c, 0, len(msg))
+			end, closed := scanValueSegment(msg, j+1, c, enclosing)
+			if !closed {
+				return end
+			}
+			j = end
 		case c == '\\':
 			if j+1 == len(msg) {
 				return j
 			}
 			j += 2
-		case isSpace(c) || c == ';' || c == '&':
+		case isSpace(c),
+			(c == ';' || c == '&') && endsValueAfter(msg, j+1),
+			c == '%' && hasPrefixFold(msg[j:], "%26") && endsValueAfter(msg, j+3):
 			return j
 		default:
 			j++
@@ -331,10 +655,58 @@ func scanAssignmentValue(msg string, i int, enclosing byte) int {
 	return j
 }
 
+// scanValueSegment returns the end of a quoted segment of an unquoted value
+// whose content starts at i and whose quote character is q. Inside a quoted
+// string of the free text (enclosing) a segment of the other quote kind ends
+// at the string's closing quote, which then also ends the value (closed is
+// false): an apostrophe cannot pair with a quote outside the string.
+func scanValueSegment(msg string, i int, q, enclosing byte) (int, bool) {
+	if enclosing == 0 || q == enclosing {
+		return scanQuotedValue(msg, i, q, 0, len(msg)), true
+	}
+	run := 0
+	for j := i; j < len(msg); j++ {
+		c := msg[j]
+		switch {
+		case c == '\\':
+			run++
+			continue
+		case run%2 == 1:
+		case c == q:
+			return j + 1, true
+		case c == enclosing && closesQuotedText(msg, j):
+			return j, false
+		}
+		run = 0
+	}
+	return len(msg), true
+}
+
+// scanLineValue returns the end of a header value that runs to the end of the
+// line (Cookie: a=1; b=2), or to the closing quote of the free-text string
+// the key sits in (enclosing). A backslash-escaped line break continues it.
+func scanLineValue(msg string, i int, enclosing byte) int {
+	for j := i; j < len(msg); j++ {
+		c := msg[j]
+		switch {
+		case c == '\\':
+			j++
+		case c == '\n' || c == '\r':
+			return j
+		case enclosing != 0 && c == enclosing && closesQuotedText(msg, j):
+			return j
+		}
+	}
+	return len(msg)
+}
+
 // scanLeadingQuotedOrStructured scans a value that starts at i with a quoted
 // string (after any number of escaping backslashes) or with an object or
 // array, and returns its end. quote is the key's quoting (see
-// scanStructuredValue).
+// scanStructuredValue): the key's quote character escaped by fewer
+// backslashes than the key's own quotes does not open the value, it closes the
+// string the key is embedded in, so the value is empty (the key was cut off
+// after its separator) and must not pair that quote with the next one.
 func scanLeadingQuotedOrStructured(msg string, i int, quote keyQuote) (int, bool) {
 	if i == len(msg) {
 		return 0, false
@@ -345,6 +717,9 @@ func scanLeadingQuotedOrStructured(msg string, i int, quote keyQuote) (int, bool
 	j := i
 	for j < len(msg) && msg[j] == '\\' {
 		j++
+	}
+	if j < len(msg) && msg[j] == quote.char && j-i < quote.level {
+		return i, true
 	}
 	if j < len(msg) && isQuote(msg[j]) {
 		return scanQuotedValue(msg, j+1, msg[j], j-i, len(msg)), true

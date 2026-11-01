@@ -2,6 +2,7 @@ package logsafe
 
 import (
 	"encoding/json"
+	"html"
 	"strings"
 	"testing"
 )
@@ -74,7 +75,8 @@ func TestRedactDiagnosticMessageRedactsComponentKeyNames(t *testing.T) {
 
 // TestRedactDiagnosticMessageRedactsPluralSecretKeys covers the plural secret
 // words credentials, secrets, passwords, and passwds, which usually hold a
-// collection of secrets; tokens stays readable because it usually counts.
+// collection of secrets; tokens keeps a bare number readable because it
+// usually counts (see TestRedactDiagnosticMessageRedactsTokensUnlessCount).
 func TestRedactDiagnosticMessageRedactsPluralSecretKeys(t *testing.T) {
 	t.Parallel()
 
@@ -321,7 +323,8 @@ var fuzzSecretKeys = []string{
 	"client_secret_value", "GITHUB_TOKEN", "PGPASSWORD", "x-api-key",
 	"db.password", "api_key", "privateKey", "x-amz-signature", "credential",
 	"Secret", "pwd", "refresh-token", "APIKey", "credentials", "dbSecrets",
-	"USER_PASSWORDS", "passwds",
+	"USER_PASSWORDS", "passwds", "passphrase", "AccountKey", "signing_key",
+	"MASTER_KEY", "session_id", "tokens", "Client Secret", "auth/token",
 }
 
 var fuzzSeparators = []string{":", ": ", " : ", "=", " = ", ":\t"}
@@ -350,14 +353,21 @@ func fuzzSecretValue(t testing.TB, form int, sep, filler, planted string) string
 
 // FuzzRedactDiagnosticMessageSecretFields builds JSON-, dict-, and
 // assignment-style diagnostics around a planted secret value, at up to three
-// levels of JSON-string escaping, and checks the planted value never survives
-// redaction. Arbitrary input must never panic.
+// levels of JSON-string escaping or HTML-escaped, and checks the planted value
+// never survives redaction. Arbitrary input must never panic. The short key
+// words (pass, auth, session, ...) are not among the keys: unquoted, they do
+// not take ": " as a separator on purpose.
 func FuzzRedactDiagnosticMessageSecretFields(f *testing.F) {
 	f.Add("user", "alice", "a b", uint8(0), uint8(0), uint8(0), uint8(0))
 	f.Add("note", `x"}]\`, `{"[`, uint8(3), uint8(2), uint8(1), uint8(1))
 	f.Add("token=", "password: ", "}", uint8(7), uint8(3), uint8(3), uint8(2))
 	f.Add("tokenizer", `\"token\":\"`, `\\\"`, uint8(9), uint8(5), uint8(5), uint8(3))
 	f.Add("Bearer", "Bearer ", "; & ,", uint8(12), uint8(4), uint8(4), uint8(4))
+	// AUDIT-064: an assignment inside the quoted prefix must not pair the
+	// prefix's closing quote with the opening quote of the planted value.
+	f.Add("k", "x password: a", "0 s 0", uint8(7), uint8(0), uint8(0), uint8(3))
+	f.Add("k", "x password: it's", "0", uint8(7), uint8(0), uint8(5), uint8(3))
+	f.Add("note", `a"b <&>`, "x", uint8(0), uint8(1), uint8(0), uint8(4))
 	f.Fuzz(func(t *testing.T, k1, v1, filler string, keyIdx, sepIdx, formIdx, layout uint8) {
 		_ = RedactDiagnosticMessage(k1 + v1 + filler)
 
@@ -370,18 +380,17 @@ func FuzzRedactDiagnosticMessageSecretFields(f *testing.F) {
 		value := fuzzSecretValue(t, int(formIdx)%6, sep, filler, planted)
 		q := func(s string) string { return jsonQuote(t, s, 1) }
 
+		doc := "{" + q(k1) + sep + q(v1) + ", " + q(key) + sep + value + ", " + q(k1) + sep + q(v1) + "}"
 		var raw string
-		if layout%4 == 3 {
-			// Assignment style after a JSON-quoted fuzzed prefix. An unquoted
-			// value runs to the next whitespace outside its quoted segments,
-			// so a prefix that holds an assignment of its own ("x password:
-			// a") can pair its quotes with the next value; the prefix carries
-			// no separators so it cannot.
-			prefix := strings.NewReplacer(":", "", "=", "").Replace(v1)
-			raw = "error " + q(prefix) + " " + key + sep + value + " " + q(k1)
-		} else {
-			doc := "{" + q(k1) + sep + q(v1) + ", " + q(key) + sep + value + ", " + q(k1) + sep + q(v1) + "}"
-			raw = "upstream said: " + jsonQuote(t, doc, int(layout%4))
+		switch layout % 5 {
+		case 3:
+			// Assignment style after a JSON-quoted fuzzed prefix, which may
+			// hold an assignment of its own ("x password: a").
+			raw = "error " + q(v1) + " " + key + sep + value + " " + q(k1)
+		case 4:
+			raw = "rendered: " + html.EscapeString(doc)
+		default:
+			raw = "upstream said: " + jsonQuote(t, doc, int(layout%5))
 		}
 		if got := RedactDiagnosticMessage(raw); strings.Contains(got, planted) {
 			t.Fatalf("RedactDiagnosticMessage(%q) = %q, leaked the planted secret", raw, got)

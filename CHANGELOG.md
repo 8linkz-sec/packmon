@@ -124,6 +124,40 @@
   (`\\\"token\\\":\\\"a b\\\"`) is now redacted too. A value cut off inside
   embedded JSON now ends where the enclosing string closes, so the fields
   after that string stay readable.
+- Diagnostic redaction closes the remaining secret leaks in logs and error
+  messages:
+  - A quoted label with an assignment inside it (`"x password: a"
+    PGPASSWORD:"0 s 0"`) no longer leaves the tail of the next quoted value
+    readable: the scan now tracks the quoted strings of the free text, so the
+    label's closing quote ends the label's value. The same pairing of a quoted
+    key cut off inside escaped JSON (`\\\"token\\\":" x:"..."`) is fixed too.
+  - A PEM private key (`-----BEGIN ... PRIVATE KEY-----` through its END
+    marker, or the end of the message) is replaced with
+    `(redacted-private-key)`; an unquoted value used to stop at the first
+    space, leaving the base64 body readable.
+  - `tokens` is a secret key unless its value is a bare number, so
+    `{"tokens":["..."]}` and `tokens=ghp_...` no longer leak while token
+    counts stay readable.
+  - New secret key names: `access_key`, `accessKey`, `AccountKey`,
+    `SharedAccessKey`, `signing_key`, `encryption_key`, `master_key`,
+    `passphrase`, `session_id`, `JSESSIONID`, `PHPSESSID`, and, as the whole
+    last name component, `pass`, `pw`, `auth`, `cookie`, and `session`
+    (`DB_PASS=x`, `basic_auth=x`; unquoted they need `=` or a `:` without
+    following whitespace, so `admin auth: <error>` stays readable).
+    `Cookie:` and `Set-Cookie:` values run to the end of the line.
+  - `Authorization: Basic x`, an `Authorization` credential without a
+    scheme, and Bearer tokens shorter than eight characters are redacted;
+    the scheme stays readable.
+  - Quoted keys with spaces, `/`, or `:` (`"Client Secret"`, `"auth/token"`,
+    `"db:password"`), keys quoted with HTML character references
+    (`&quot;password&quot;`), URL-encoded separators (`password%3Dx`), and
+    space-separated command-line flags (`--password x`, `-token x`, `-p x`;
+    `-p` errs toward redaction even where it is a port) are recognized.
+  - An unquoted value no longer ends at a `;` or `&` inside it
+    (`password=a;b` leaked `b`); the delimiter ends it only before
+    whitespace, the end, or the next `key=` pair.
+  - A quote after an even number of backslashes (`\\"password=x"`) no longer
+    counts as escaped, which used to redact the rest of the message.
 - The CLI no longer creates its local SQLite database (and its WAL and
   journal files) in the working directory when the home directory cannot be
   resolved. The default `~/.packmon/db` used to fall back to `./.packmon/db`,
