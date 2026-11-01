@@ -889,12 +889,16 @@ Git hooks:
 - apart from writing the managed hook file, neither `packmon hook install` nor
   a hook run writes repository data, generated files, lockfiles,
   configuration, or Git metadata;
-- the managed hook runs `packmon scan --hook`, which refuses before scanning
-  any report destination or used local database directory that resolves
-  (relative to the repository working directory, through symlinks of existing
-  prefixes) inside the work tree, the Git directory, or the Git common
-  directory. Trusted user-global `output.file` values are subject to the same
-  check, because a relative path there would otherwise land in the repository.
+- the managed hook runs `packmon scan --hook`. A destination that resolves
+  (relative to the repository working directory, through symlinks including
+  dangling ones, and by file identity of its deepest existing ancestor so
+  letter case on case-insensitive filesystems does not matter) inside the work
+  tree, the Git directory, or the Git common directory is never written:
+  a config-derived `output.file` there (also a trusted user-global one, where
+  a relative path would otherwise land in the repository) is skipped with a
+  stderr warning while the scan still gates, and an explicit report flag or a
+  used local database directory there fails the scan with exit code `2`
+  before it runs.
 
 Local DB freshness is a policy input, not a hidden failure mode. When local DB
 age exceeds `PACKMON_DB_WARN_AFTER_DAYS` (default `7` days), canonical scan

@@ -916,18 +916,28 @@ still prints trust-changing warnings such as remote fallback and partial parse
 errors to stderr.
 
 Apart from writing the hook file itself, neither `hook install` nor a hook run
-writes into the repository. `--hook` makes the scan refuse, before it scans
-and with exit code `2`, any report destination (`output.file`,
-`--output-json`, `--output-sarif`, `--output-junit`, `--html`) or used local
-database directory (`PACKMON_DB_PATH`, `db.path`) that resolves inside the
-repository work tree or its Git directories. Relative paths resolve against
-the working directory, which is the repository when Git runs the hook, so a
-user-global `output.file: packmon.json` is refused there; use an absolute path
-outside the repository or drop the setting. Report destinations outside the
-repository are still written. `--hook` cannot be combined with
-`--list-packages`, `--outdated`, `--list-all`, or `--auto-sbom`. Hooks
-installed by an older packmon run the scan without `--hook`; `hook status`
-reports them as `outdated`, and `packmon hook install` updates them.
+writes into the repository. With `--hook`, a destination counts as inside the
+repository when it resolves into the work tree or its Git directories
+(relative paths resolve against the working directory, which is the
+repository when Git runs the hook; symlinks, including dangling ones, are
+followed):
+
+- a config `output.file` inside the repository is skipped with one stderr
+  warning, also under `--quiet`
+  (`warning: --hook: skipping output.file packmon.json (inside the repository)`),
+  and the scan still runs and gates on its findings;
+- an explicit `--output-json`, `--output-sarif`, `--output-junit`, or `--html`
+  path inside the repository fails the scan with exit code `2` before it runs;
+- a local database directory (`PACKMON_DB_PATH`, `db.path`, or the default
+  `~/.packmon/db`) inside the repository fails the scan with exit code `2`
+  when the scan opens it (local or auto mode, or scan history).
+
+Report destinations outside the repository are still written. `--hook` cannot
+be combined with `--list-packages`, `--outdated`, `--list-all`, or
+`--auto-sbom`. Hooks installed by an older packmon run the scan without
+`--hook`; `hook status` reports them as `outdated`, and `packmon hook install`
+updates them. See "Troubleshooting" in `docs/runbook.md` for a hook that exits
+with code `2`.
 
 `install` refuses to overwrite an existing hook that packmon did not create;
 `uninstall` only removes packmon-managed hooks. Every `install` (also an update

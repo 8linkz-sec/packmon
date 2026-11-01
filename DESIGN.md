@@ -337,16 +337,27 @@ Important behavior:
   `packmon hook install` nor a hook run may write repository data, generated
   files, lockfiles, configuration, or Git metadata; the hook's work is
   read-only for the repository. The managed hook runs
-  `packmon scan . --hook --fail-on <threshold> --quiet`. `--hook` refuses
-  (exit code `2`, before scanning) every report destination (`output.file`,
-  `--output-json`, `--output-sarif`, `--output-junit`, `--html`) and, when the
-  scan opens the local database (local checker or history), a database
-  directory (`PACKMON_DB_PATH`, `db.path`) that resolves inside the repository
-  work tree, the Git directory, or the Git common directory, following
-  symlinks of existing path prefixes. Relative paths resolve against the
-  working directory, which is the repository for a hook run. Destinations
-  outside the repository are still written. `--hook` cannot be combined with
-  `--list-packages`, `--outdated`, `--list-all`, or `--auto-sbom`.
+  `packmon scan . --hook --fail-on <threshold> --quiet`. A destination is
+  inside the repository when it resolves into the work tree, the Git
+  directory, or the Git common directory: relative paths resolve against the
+  working directory (the repository for a hook run), symlinks are followed
+  (a dangling symlink by its target path, and a link that lives in the
+  repository counts as inside), and the deepest existing ancestor is also
+  compared by file identity (`os.SameFile`) so case-insensitive filesystems
+  cannot bypass the check. For such destinations `--hook`:
+  - skips a config-derived report destination (`output.file`) with one stderr
+    warning, also under `--quiet`, and still runs the gated scan, because a
+    relative user-global `output.file` would otherwise block every commit;
+  - fails with exit code `2` before scanning for an explicit `--output-json`,
+    `--output-sarif`, `--output-junit`, or `--html` path;
+  - fails with exit code `2` before scanning when the scan opens the local
+    database (local checker or history) and its directory (`PACKMON_DB_PATH`,
+    `db.path`, or the default `~/.packmon/db`) is inside.
+
+  Destinations outside the repository are still written. With several
+  targets, the single-target rule for report outputs applies to what is left
+  after the skip. `--hook` cannot be combined with `--list-packages`,
+  `--outdated`, `--list-all`, or `--auto-sbom`.
   `packmon hook status` reports a managed hook without `--hook` (installed by
   an older version) as outdated; `packmon hook install` rewrites it.
 - Timeouts (`--timeout`, `PACKMON_TIMEOUT`, config `timeout`, and

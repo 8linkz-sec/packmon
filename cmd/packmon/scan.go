@@ -477,29 +477,33 @@ func runScanCommand(cmd *cobra.Command, args []string, flags scanFlagValues) err
 		return withExitCode(ExitOperational, err)
 	}
 	hasConfigOutput := cfg != nil && scanOutputConfigRequestsArtifact(cfg.Output)
-	if len(targets) > 1 && (hasConfigOutput || hasScanOutputArtifactFlags(flags)) {
-		return withExitCode(ExitOperational, fmt.Errorf("%s can only be used when scanning a single target, not multiple targets", scanOutputArtifactFlagList()))
-	}
-	if flags.Hook {
-		// Refuse in-repository write destinations for every target before
-		// the first one is scanned.
-		for _, target := range targets {
-			settings, err := resolveScanSettings(cmd, cfg, target, flags)
-			if err != nil {
-				return withExitCode(ExitOperational, err)
-			}
-			if err := validateHookScanWriteDestinations(settings); err != nil {
-				return withExitCode(ExitOperational, err)
-			}
-		}
+	// A hook scan skips in-repository config outputs, so its multi-target
+	// check runs on the guarded settings below instead.
+	if !flags.Hook && len(targets) > 1 && (hasConfigOutput || hasScanOutputArtifactFlags(flags)) {
+		return withExitCode(ExitOperational, errMultiTargetScanOutput())
 	}
 
-	finalExitCode := ExitOK
-	for i, target := range targets {
+	// Resolve (and, for a hook scan, guard) every target before the first one
+	// is scanned, so a refused destination stops the run up front.
+	targetSettings := make([]scanSettings, 0, len(targets))
+	for _, target := range targets {
 		settings, err := resolveScanSettings(cmd, cfg, target, flags)
 		if err != nil {
 			return withExitCode(ExitOperational, err)
 		}
+		settings, err = applyHookScanWriteGuard(cmd, settings, flags, os.Stderr)
+		if err != nil {
+			return withExitCode(ExitOperational, err)
+		}
+		if flags.Hook && len(targets) > 1 && hasScanOutputArtifactSettings(settings) {
+			return withExitCode(ExitOperational, errMultiTargetScanOutput())
+		}
+		targetSettings = append(targetSettings, settings)
+	}
+
+	finalExitCode := ExitOK
+	for i, target := range targets {
+		settings := targetSettings[i]
 
 		if len(targets) > 1 && !flags.Quiet {
 			if i > 0 {
@@ -520,6 +524,10 @@ func runScanCommand(cmd *cobra.Command, args []string, flags scanFlagValues) err
 		os.Exit(finalExitCode)
 	}
 	return nil
+}
+
+func errMultiTargetScanOutput() error {
+	return fmt.Errorf("%s can only be used when scanning a single target, not multiple targets", scanOutputArtifactFlagList())
 }
 
 func resolveSingleTargetScanSettings(cmd *cobra.Command, args []string, flags scanFlagValues, commandName string) (scanSettings, error) {
