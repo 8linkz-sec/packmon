@@ -24,11 +24,11 @@ func TestExportSyncDatasetsRunsEnabledQueriesInParallel(t *testing.T) {
 	resultCh := make(chan syncDatasetResult, 1)
 	go func() {
 		result, err := exportSyncDatasets(ctx, opts, cursor, snapshot, 42, syncDatasetExporters{
-			vulnerabilities: func(ctx context.Context, opts db.SyncExportOptions, snapshot time.Time, snapshotXID uint64) ([]db.SyncVulnerability, error) {
+			vulnerabilities: func(ctx context.Context, opts db.SyncExportOptions, snapshot time.Time, snapshotXID uint64) (syncVulnerabilityPage, error) {
 				if err := waitForParallelExportRelease(ctx, started, release, "vulnerabilities"); err != nil {
-					return nil, err
+					return syncVulnerabilityPage{}, err
 				}
-				return []db.SyncVulnerability{{ID: "CVE-2026-0001", Ecosystem: "npm", Name: "vuln-pkg"}}, nil
+				return syncVulnerabilityPage{rows: []db.SyncVulnerability{{ID: "CVE-2026-0001", Ecosystem: "npm", Name: "vuln-pkg"}}}, nil
 			},
 			malicious: func(ctx context.Context, opts db.SyncExportOptions, snapshot time.Time, snapshotXID uint64) ([]db.SyncMalicious, error) {
 				if err := waitForParallelExportRelease(ctx, started, release, "malicious"); err != nil {

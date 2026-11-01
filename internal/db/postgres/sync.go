@@ -32,86 +32,154 @@ func (s *Store) ExportSync(ctx context.Context, opts db.SyncExportOptions) (*db.
 	if err != nil {
 		return nil, err
 	}
+	paging := syncVulnerabilityPagingFor(syncOptionsWithOffset(opts, cursor.Vulnerabilities))
+	truncated, nextCursor := nextSyncExportCursor(cursor, paging, datasets, opts.Limit)
+
+	return &db.SyncExport{
+		SyncedAt:                      snapshot,
+		SyncedXID:                     snapshotXID,
+		Vulnerabilities:               datasets.vulnerabilities,
+		Malicious:                     datasets.malicious,
+		Reputation:                    datasets.reputation,
+		Lifecycle:                     datasets.lifecycle,
+		Truncated:                     truncated,
+		NextCursor:                    nextCursor,
+		VulnerabilityAffectedComplete: syncVulnerabilityAffectedComplete(opts, cursor),
+	}, nil
+}
+
+// syncVulnerabilityPaging selects how the vulnerability dataset is paged.
+type syncVulnerabilityPaging int
+
+const (
+	// syncVulnerabilityRowKeyset pages affected-package rows in (ecosystem,
+	// name, id) order with the legacy three-part row cursor or a dataset
+	// offset. Full exports use it, and so does a delta that continues a legacy
+	// row cursor an older server issued.
+	syncVulnerabilityRowKeyset syncVulnerabilityPaging = iota
+	// syncVulnerabilityDeltaRowOffset pages the rows of a delta by legacy
+	// offset in advisory order (id, ecosystem, name), the order of an
+	// advisory-paged first page, so an offset-only client continues where that
+	// page ended. Offset pages can split an advisory.
+	syncVulnerabilityDeltaRowOffset
+	// syncVulnerabilityAdvisoryPages pages a delta by whole advisories in ID
+	// order behind an advisory cursor (see
+	// buildExportSyncVulnerabilityAdvisoryPageQuery).
+	syncVulnerabilityAdvisoryPages
+)
+
+// syncVulnerabilityPagingFor returns the vulnerability paging of a request,
+// given the vulnerability dataset options (Offset set to the dataset offset,
+// see syncOptionsWithOffset). A keyset cursor string wins over a dataset
+// offset, as for every dataset.
+func syncVulnerabilityPagingFor(opts db.SyncExportOptions) syncVulnerabilityPaging {
+	if opts.Since == nil {
+		return syncVulnerabilityRowKeyset
+	}
+	if raw := opts.Cursor.VulnerabilitiesCursor; raw != "" {
+		if _, ok := db.DecodeSyncAdvisoryCursor(raw); ok {
+			return syncVulnerabilityAdvisoryPages
+		}
+		return syncVulnerabilityRowKeyset
+	}
+	if opts.Offset > 0 || opts.Cursor.Vulnerabilities > 0 {
+		return syncVulnerabilityDeltaRowOffset
+	}
+	return syncVulnerabilityAdvisoryPages
+}
+
+// syncVulnerabilityAffectedComplete reports whether this page may promise
+// vulnerability_affected_complete: every vulnerability on it carries its
+// complete current affected set (within the requested ecosystems). Every page
+// of an advisory-paged delta qualifies: a page is one statement, never splits
+// an advisory, and the delta query sends each changed vulnerability with all
+// of its current affected packages. A vulnerability changed between pages is
+// either delivered whole on a later page or sync, or excluded whole by the
+// snapshot bound. A full export bounds affected rows by the snapshot, and the
+// legacy row-cursor and offset pages of a delta can split an advisory, so
+// they never carry the flag.
+func syncVulnerabilityAffectedComplete(opts db.SyncExportOptions, cursor db.SyncCursor) bool {
+	return !cursor.VulnerabilitiesDone && syncVulnerabilityPagingFor(syncOptionsWithOffset(opts, cursor.Vulnerabilities)) == syncVulnerabilityAdvisoryPages
+}
+
+// nextSyncExportCursor reports whether more data may follow this page and
+// returns the per-dataset cursor of the next page. The row-paged datasets keep
+// the full-page heuristic: a dataset that filled the limit may continue. An
+// advisory page reports more only when its query left an advisory for the next
+// page, because the page may hold fewer rows than the limit (the next advisory
+// did not fit) or more (its only advisory has more rows than the limit).
+func nextSyncExportCursor(cursor db.SyncCursor, paging syncVulnerabilityPaging, datasets syncDatasets, limit int) (bool, *db.SyncCursor) {
 	vulns := datasets.vulnerabilities
 	malicious := datasets.malicious
 	reputation := datasets.reputation
 	lifecycle := datasets.lifecycle
 
-	// When pagination is active, signal that more data may follow if
-	// any result set filled the limit exactly.
-	truncated := opts.Limit > 0 &&
-		(len(vulns) == opts.Limit || len(malicious) == opts.Limit || len(reputation) == opts.Limit || len(lifecycle) == opts.Limit)
-	var nextCursor *db.SyncCursor
-	if truncated {
-		nextCursor = &db.SyncCursor{
-			Vulnerabilities: cursor.Vulnerabilities + len(vulns),
-			Malicious:       cursor.Malicious + len(malicious),
-			Reputation:      cursor.Reputation + len(reputation),
-			Lifecycle:       cursor.Lifecycle + len(lifecycle),
-		}
-		setNextDatasetCursor(nextCursor, cursor.VulnerabilitiesDone, len(vulns), opts.Limit, func() {
-			nextCursor.VulnerabilitiesDone = true
-		}, func() {
-			last := vulns[len(vulns)-1]
-			nextCursor.VulnerabilitiesCursor = encodeSyncCursorKey(last.Ecosystem, last.Name, last.ID)
-		})
-		setNextDatasetCursor(nextCursor, cursor.MaliciousDone, len(malicious), opts.Limit, func() {
-			nextCursor.MaliciousDone = true
-		}, func() {
-			last := malicious[len(malicious)-1]
-			nextCursor.MaliciousCursor = encodeSyncCursorKey(last.Ecosystem, last.Name, last.ID)
-		})
-		setNextDatasetCursor(nextCursor, cursor.ReputationDone, len(reputation), opts.Limit, func() {
-			nextCursor.ReputationDone = true
-		}, func() {
-			last := reputation[len(reputation)-1]
-			nextCursor.ReputationCursor = encodeSyncCursorKey(last.Ecosystem, last.Name, last.Version)
-		})
-		setNextDatasetCursor(nextCursor, cursor.LifecycleDone, len(lifecycle), opts.Limit, func() {
-			nextCursor.LifecycleDone = true
-		}, func() {
-			last := lifecycle[len(lifecycle)-1]
-			nextCursor.LifecycleCursor = encodeSyncCursorKey(last.Ecosystem, last.Name, last.ProductSlug, last.Cycle)
-		})
+	if limit <= 0 {
+		return false, nil
 	}
-
-	return &db.SyncExport{
-		SyncedAt:                      snapshot,
-		SyncedXID:                     snapshotXID,
-		Vulnerabilities:               vulns,
-		Malicious:                     malicious,
-		Reputation:                    reputation,
-		Lifecycle:                     lifecycle,
-		Truncated:                     truncated,
-		NextCursor:                    nextCursor,
-		VulnerabilityAffectedComplete: syncVulnerabilityAffectedComplete(opts, truncated),
-	}, nil
+	// When pagination is active, signal that more data may follow if
+	// any result set may continue.
+	if !datasets.vulnerabilitiesHaveMore && len(malicious) != limit && len(reputation) != limit && len(lifecycle) != limit {
+		return false, nil
+	}
+	nextCursor := &db.SyncCursor{
+		Vulnerabilities: cursor.Vulnerabilities + len(vulns),
+		Malicious:       cursor.Malicious + len(malicious),
+		Reputation:      cursor.Reputation + len(reputation),
+		Lifecycle:       cursor.Lifecycle + len(lifecycle),
+	}
+	switch {
+	case cursor.VulnerabilitiesDone || !datasets.vulnerabilitiesHaveMore:
+		nextCursor.VulnerabilitiesDone = true
+	case paging == syncVulnerabilityAdvisoryPages:
+		nextCursor.VulnerabilitiesCursor = db.EncodeSyncAdvisoryCursor(vulns[len(vulns)-1].ID)
+	case paging == syncVulnerabilityDeltaRowOffset:
+		// Continue by offset only: a row cursor would switch the order.
+	default:
+		last := vulns[len(vulns)-1]
+		nextCursor.VulnerabilitiesCursor = encodeSyncCursorKey(last.Ecosystem, last.Name, last.ID)
+	}
+	setNextDatasetCursor(nextCursor, cursor.MaliciousDone, len(malicious), limit, func() {
+		nextCursor.MaliciousDone = true
+	}, func() {
+		last := malicious[len(malicious)-1]
+		nextCursor.MaliciousCursor = encodeSyncCursorKey(last.Ecosystem, last.Name, last.ID)
+	})
+	setNextDatasetCursor(nextCursor, cursor.ReputationDone, len(reputation), limit, func() {
+		nextCursor.ReputationDone = true
+	}, func() {
+		last := reputation[len(reputation)-1]
+		nextCursor.ReputationCursor = encodeSyncCursorKey(last.Ecosystem, last.Name, last.Version)
+	})
+	setNextDatasetCursor(nextCursor, cursor.LifecycleDone, len(lifecycle), limit, func() {
+		nextCursor.LifecycleDone = true
+	}, func() {
+		last := lifecycle[len(lifecycle)-1]
+		nextCursor.LifecycleCursor = encodeSyncCursorKey(last.Ecosystem, last.Name, last.ProductSlug, last.Cycle)
+	})
+	return true, nextCursor
 }
 
-// syncVulnerabilityAffectedComplete reports whether this response may promise
-// vulnerability_affected_complete. Only a delta (since window) that fits in a
-// single page qualifies: that page is one statement, and the delta query sends
-// each changed vulnerability with all of its current affected packages. A full
-// export bounds affected rows by the snapshot, and the pages of a multi-page
-// delta are separate statements that re-evaluate the vulnerability bounds, so
-// a vulnerability changed between pages can arrive incomplete (whole-advisory
-// paging is a planned follow-up).
-func syncVulnerabilityAffectedComplete(opts db.SyncExportOptions, truncated bool) bool {
-	return opts.Since != nil && !truncated && opts.Cursor.IsZero() && opts.Offset == 0
+// syncVulnerabilityPage is one exported page of the vulnerability dataset.
+// hasMore reports that the dataset may continue on the next page.
+type syncVulnerabilityPage struct {
+	rows    []db.SyncVulnerability
+	hasMore bool
 }
 
 type syncDatasetExporters struct {
-	vulnerabilities func(context.Context, db.SyncExportOptions, time.Time, uint64) ([]db.SyncVulnerability, error)
+	vulnerabilities func(context.Context, db.SyncExportOptions, time.Time, uint64) (syncVulnerabilityPage, error)
 	malicious       func(context.Context, db.SyncExportOptions, time.Time, uint64) ([]db.SyncMalicious, error)
 	reputation      func(context.Context, db.SyncExportOptions, time.Time, uint64) ([]db.SyncReputationFinding, error)
 	lifecycle       func(context.Context, db.SyncExportOptions, time.Time, uint64) ([]db.SyncLifecycleRelease, error)
 }
 
 type syncDatasets struct {
-	vulnerabilities []db.SyncVulnerability
-	malicious       []db.SyncMalicious
-	reputation      []db.SyncReputationFinding
-	lifecycle       []db.SyncLifecycleRelease
+	vulnerabilities         []db.SyncVulnerability
+	vulnerabilitiesHaveMore bool
+	malicious               []db.SyncMalicious
+	reputation              []db.SyncReputationFinding
+	lifecycle               []db.SyncLifecycleRelease
 }
 
 type syncDatasetExportError struct {
@@ -130,8 +198,8 @@ func exportSyncDatasets(ctx context.Context, opts db.SyncExportOptions, cursor d
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			var err error
-			datasets.vulnerabilities, err = exporters.vulnerabilities(ctx, syncOptionsWithOffset(opts, cursor.Vulnerabilities), snapshot, snapshotXID)
+			page, err := exporters.vulnerabilities(ctx, syncOptionsWithOffset(opts, cursor.Vulnerabilities), snapshot, snapshotXID)
+			datasets.vulnerabilities, datasets.vulnerabilitiesHaveMore = page.rows, page.hasMore
 			if err != nil {
 				errCh <- syncDatasetExportError{order: 0, err: err}
 			}
@@ -369,25 +437,9 @@ func (q syncVulnerabilityQueryArgs) addSnapshotXIDFilters(query *string, delta b
 	}
 }
 
-// exportSyncVulnerabilitiesBaseSQL selects one row per affected package. A
-// delta joins the changed-ID CTE and exports every current affected package of
-// each selected vulnerability, without a per-row snapshot bound, so a delta
-// that fits in one page can promise vulnerability_affected_complete (see
-// syncVulnerabilityAffectedComplete): a client may drop local affected rows of
-// that vulnerability the page did not send. A package changed after the
-// snapshot is sent now and again by the next delta, which is idempotent. The
-// full export keeps the row-level bound.
-func exportSyncVulnerabilitiesBaseSQL(delta bool) string {
-	fromSQL := `FROM vulnerabilities v`
-	affectedBound := `
-	  AND ap.updated_at <= $1`
-	if delta {
-		fromSQL = `FROM vulnerabilities v
-	INNER JOIN changed_vulnerability_ids changed ON changed.id = v.id`
-		affectedBound = ""
-	}
-	return `
-	SELECT
+// syncVulnerabilityColumnsSQL is the exported column list of one affected
+// package row, in the order scanSyncVulnerabilityDest scans it.
+const syncVulnerabilityColumnsSQL = `
 		v.id,
 		ap.ecosystem,
 		ap.name,
@@ -401,18 +453,109 @@ func exportSyncVulnerabilitiesBaseSQL(delta bool) string {
 		v.cisa_kev,
 		v.summary,
 		COALESCE(NULLIF(TRIM(vs.source), ''), 'unknown') AS source,
-		(v.withdrawn IS NOT NULL) AS withdrawn
-	` + fromSQL + `
-	INNER JOIN affected_packages ap ON ap.vulnerability_id = v.id
+		(v.withdrawn IS NOT NULL) AS withdrawn`
+
+// syncVulnerabilityDetailJoinsSQL joins the references and the first source
+// of each exported vulnerability.
+func syncVulnerabilityDetailJoinsSQL() string {
+	return `
 	` + vulnerabilityReferencesLateralSQL("v.id") + `
 	LEFT JOIN LATERAL (
 		SELECT source FROM vulnerability_sources
 		WHERE vulnerability_id = v.id ORDER BY id LIMIT 1
-	) vs ON true
+	) vs ON true`
+}
+
+// exportSyncVulnerabilitiesBaseSQL selects one row per affected package for
+// row paging (full exports and legacy delta pages). A delta joins the
+// changed-ID CTE and exports every current affected package of each selected
+// vulnerability, without a per-row snapshot bound. A package changed after
+// the snapshot is sent now and again by the next delta, which is idempotent.
+// The full export keeps the row-level bound.
+func exportSyncVulnerabilitiesBaseSQL(delta bool) string {
+	fromSQL := `FROM vulnerabilities v`
+	affectedBound := `
+	  AND ap.updated_at <= $1`
+	if delta {
+		fromSQL = `FROM vulnerabilities v
+	INNER JOIN changed_vulnerability_ids changed ON changed.id = v.id`
+		affectedBound = ""
+	}
+	return `
+	SELECT` + syncVulnerabilityColumnsSQL + `
+	` + fromSQL + `
+	INNER JOIN affected_packages ap ON ap.vulnerability_id = v.id` + syncVulnerabilityDetailJoinsSQL() + `
 	WHERE v.updated_at <= $1` + affectedBound
 }
 
+// buildExportSyncVulnerabilityAdvisoryPageQuery builds one page of a delta
+// paged by whole advisories, as a single statement so every advisory on the
+// page is read from one snapshot. page_candidates lists the changed
+// advisories after the cursor in ID order with the running count of their
+// in-scope affected rows; the page takes advisories while that count stays
+// within the row limit, and always the first one, so an advisory with more
+// rows than the limit is a page of its own instead of being split. It then
+// exports every in-scope affected row of the page's advisories and reports in
+// has_more whether a candidate advisory was left for the next page. Like
+// every delta, only the vulnerability row is bounded by the snapshot after the
+// changed-ID CTE, so each advisory carries its complete current affected set.
+func buildExportSyncVulnerabilityAdvisoryPageQuery(opts db.SyncExportOptions, snapshot time.Time, snapshotXID uint64) (string, []any, error) {
+	queryArgs := newSyncVulnerabilityQueryArgs(opts, snapshot, snapshotXID)
+	candidateFilters := ""
+	queryArgs.addSnapshotXIDFilters(&candidateFilters, true)
+	ecosystemFilter := ""
+	if len(opts.Ecosystems) > 0 {
+		ecosystemFilter = fmt.Sprintf(` AND ap.ecosystem = ANY($%d)`, queryArgs.appendArg(opts.Ecosystems))
+	}
+	candidateFilters += ecosystemFilter
+	if raw := opts.Cursor.VulnerabilitiesCursor; raw != "" {
+		afterID, ok := db.DecodeSyncAdvisoryCursor(raw)
+		if !ok {
+			return "", nil, fmt.Errorf("postgres: invalid vulnerability sync cursor: not an advisory cursor")
+		}
+		candidateFilters += fmt.Sprintf(` AND v.id > $%d`, queryArgs.appendArg(afterID))
+	}
+	candidateLimit, pageFilter := "", "TRUE"
+	if opts.Limit > 0 {
+		limitArg := queryArgs.appendArg(opts.Limit)
+		// Every advisory has at least one row, so a page holds at most
+		// Limit advisories; one more candidate tells whether more follow.
+		candidateLimit = fmt.Sprintf(`
+		LIMIT $%d::bigint + 1`, limitArg)
+		pageFilter = fmt.Sprintf(`page_position = 1 OR cumulative_rows <= $%d::bigint`, limitArg)
+	}
+
+	query := queryArgs.changedIDsCTE() + `,
+	page_candidates AS (
+		SELECT
+			v.id,
+			SUM(COUNT(*)) OVER (ORDER BY v.id) AS cumulative_rows,
+			ROW_NUMBER() OVER (ORDER BY v.id) AS page_position
+		FROM vulnerabilities v
+		INNER JOIN changed_vulnerability_ids changed ON changed.id = v.id
+		INNER JOIN affected_packages ap ON ap.vulnerability_id = v.id
+		WHERE v.updated_at <= $1` + candidateFilters + `
+		GROUP BY v.id
+		ORDER BY v.id` + candidateLimit + `
+	),
+	page_vulnerabilities AS (
+		SELECT id FROM page_candidates WHERE ` + pageFilter + `
+	)
+	SELECT` + syncVulnerabilityColumnsSQL + `,
+		(SELECT COUNT(*) FROM page_candidates) > (SELECT COUNT(*) FROM page_vulnerabilities) AS has_more
+	FROM vulnerabilities v
+	INNER JOIN page_vulnerabilities page ON page.id = v.id
+	INNER JOIN affected_packages ap ON ap.vulnerability_id = v.id` + syncVulnerabilityDetailJoinsSQL() + `
+	WHERE TRUE` + ecosystemFilter + `
+	ORDER BY v.id ASC, ap.ecosystem ASC, ap.name ASC`
+	return query, queryArgs.args, nil
+}
+
 func buildExportSyncVulnerabilitiesQuery(opts db.SyncExportOptions, snapshot time.Time, snapshotXID uint64) (string, []any, error) {
+	paging := syncVulnerabilityPagingFor(opts)
+	if paging == syncVulnerabilityAdvisoryPages {
+		return buildExportSyncVulnerabilityAdvisoryPageQuery(opts, snapshot, snapshotXID)
+	}
 	queryArgs := newSyncVulnerabilityQueryArgs(opts, snapshot, snapshotXID)
 	query := queryArgs.changedIDsCTE() + exportSyncVulnerabilitiesBaseSQL(opts.Since != nil)
 	queryArgs.addSnapshotXIDFilters(&query, opts.Since != nil)
@@ -428,7 +571,11 @@ func buildExportSyncVulnerabilitiesQuery(opts db.SyncExportOptions, snapshot tim
 		query += fmt.Sprintf(` AND (ap.ecosystem, ap.name, v.id) > ($%d, $%d, $%d)`, len(queryArgs.args)+1, len(queryArgs.args)+2, len(queryArgs.args)+3)
 		queryArgs.args = append(queryArgs.args, cursor[0], cursor[1], cursor[2])
 	}
-	query += ` ORDER BY ap.ecosystem ASC, ap.name ASC, v.id ASC`
+	if paging == syncVulnerabilityDeltaRowOffset {
+		query += ` ORDER BY v.id ASC, ap.ecosystem ASC, ap.name ASC`
+	} else {
+		query += ` ORDER BY ap.ecosystem ASC, ap.name ASC, v.id ASC`
+	}
 	if opts.Limit > 0 {
 		query += fmt.Sprintf(` LIMIT $%d`, len(queryArgs.args)+1)
 		queryArgs.args = append(queryArgs.args, opts.Limit)
@@ -440,47 +587,58 @@ func buildExportSyncVulnerabilitiesQuery(opts db.SyncExportOptions, snapshot tim
 	return query, queryArgs.args, nil
 }
 
-func (s *Store) exportSyncVulnerabilities(ctx context.Context, opts db.SyncExportOptions, snapshot time.Time, snapshotXID uint64) ([]db.SyncVulnerability, error) {
+func scanSyncVulnerabilityDest(item *db.SyncVulnerability) []any {
+	return []any{
+		&item.ID,
+		&item.Ecosystem,
+		&item.Name,
+		&item.VersionRanges,
+		&item.VersionsAffected,
+		&item.References,
+		&item.Severity,
+		&item.CVSSScore,
+		&item.EPSSScore,
+		&item.EPSSPercentile,
+		&item.CISAKEV,
+		&item.Summary,
+		&item.Source,
+		&item.Withdrawn,
+	}
+}
+
+func (s *Store) exportSyncVulnerabilities(ctx context.Context, opts db.SyncExportOptions, snapshot time.Time, snapshotXID uint64) (syncVulnerabilityPage, error) {
 	query, args, err := buildExportSyncVulnerabilitiesQuery(opts, snapshot, snapshotXID)
 	if err != nil {
-		return nil, err
+		return syncVulnerabilityPage{}, err
 	}
+	advisoryPages := syncVulnerabilityPagingFor(opts) == syncVulnerabilityAdvisoryPages
 
 	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: export sync vulnerabilities: %w", err)
+		return syncVulnerabilityPage{}, fmt.Errorf("postgres: export sync vulnerabilities: %w", err)
 	}
 	defer ioutils.CloseSilently(rows)
 
-	out := make([]db.SyncVulnerability, 0)
+	page := syncVulnerabilityPage{rows: make([]db.SyncVulnerability, 0)}
 	for rows.Next() {
 		var item db.SyncVulnerability
-		if err := rows.Scan(
-			&item.ID,
-			&item.Ecosystem,
-			&item.Name,
-			&item.VersionRanges,
-			&item.VersionsAffected,
-			&item.References,
-			&item.Severity,
-			&item.CVSSScore,
-			&item.EPSSScore,
-			&item.EPSSPercentile,
-			&item.CISAKEV,
-			&item.Summary,
-			&item.Source,
-			&item.Withdrawn,
-		); err != nil {
-			return nil, fmt.Errorf("postgres: scan sync vulnerability row: %w", err)
+		dest := scanSyncVulnerabilityDest(&item)
+		if advisoryPages {
+			dest = append(dest, &page.hasMore)
+		}
+		if err := rows.Scan(dest...); err != nil {
+			return syncVulnerabilityPage{}, fmt.Errorf("postgres: scan sync vulnerability row: %w", err)
 		}
 		item.Severity = normalizeSeverity(item.Severity)
-		out = append(out, item)
+		page.rows = append(page.rows, item)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("postgres: iterate sync vulnerability rows: %w", err)
+		return syncVulnerabilityPage{}, fmt.Errorf("postgres: iterate sync vulnerability rows: %w", err)
 	}
-
-	return out, nil
+	if !advisoryPages {
+		page.hasMore = opts.Limit > 0 && len(page.rows) == opts.Limit
+	}
+	return page, nil
 }
 
 func (s *Store) exportSyncReputation(ctx context.Context, opts db.SyncExportOptions, snapshot time.Time, snapshotXID uint64) ([]db.SyncReputationFinding, error) {

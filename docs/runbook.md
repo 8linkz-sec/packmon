@@ -465,12 +465,17 @@ advisory it touches, so local clients refetch those advisories with their next
 incremental sync. Manual advisory edits that move coverage to another package
 are picked up the same way.
 
-Current clients drop de-listed packages of a changed advisory only on an
-incremental sync whose delta arrives in a single page (the server then sets
-`vulnerability_affected_complete`). Multi-page deltas, older servers, and
-older clients stay upsert-only and keep the old package until a later
-single-page incremental sync drops it or a full sync, which clears and reloads
-the local tables, replaces it:
+Current clients drop de-listed packages of a changed advisory on the next
+incremental sync, however many pages its delta takes: the server pages a delta
+by whole advisories and sets `vulnerability_affected_complete` on every page,
+and the client replaces the advisories of each flagged page. An advisory that
+changed again while the sync was paging is completed by the following
+incremental sync. Older servers (which flag only a delta that fits in one
+page) and older clients stay upsert-only on larger deltas and keep the old
+package until a later single-page incremental sync drops it or a full sync,
+which clears and reloads the local tables, replaces it. An ecosystem-filtered
+sync cannot drop the local rows of an advisory whose coverage moved entirely to
+another ecosystem; run an unfiltered sync or a full sync:
 
 ```bash
 packmon db sync --server https://packmon.internal:8080 --full

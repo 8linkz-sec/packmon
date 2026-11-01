@@ -72,6 +72,16 @@ func parseSyncCursor(r *http.Request) (db.SyncCursor, error) {
 		if raw == "" {
 			continue
 		}
+		// A delta paged by whole advisories continues with an advisory
+		// cursor; the legacy row cursor stays valid for sequences an older
+		// server started. Only a delta (since window) pages by advisory.
+		if _, ok := db.DecodeSyncAdvisoryCursor(raw); ok && param.target == &cursor.VulnerabilitiesCursor {
+			if strings.TrimSpace(query.Get("since")) == "" {
+				return db.SyncCursor{}, fmt.Errorf("invalid %s parameter: an advisory cursor requires since", param.name)
+			}
+			*param.target = raw
+			continue
+		}
 		if err := validateSyncCursorKey(raw, param.parts); err != nil {
 			return db.SyncCursor{}, fmt.Errorf("invalid %s parameter", param.name)
 		}

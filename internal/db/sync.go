@@ -1,6 +1,10 @@
 package db
 
-import "time"
+import (
+	"encoding/base64"
+	"encoding/json"
+	"time"
+)
 
 // SyncExportOptions controls the dataset returned by a server-side sync export.
 type SyncExportOptions struct {
@@ -29,12 +33,44 @@ type SyncExport struct {
 	Lifecycle       []SyncLifecycleRelease
 	Truncated       bool
 	NextCursor      *SyncCursor
-	// VulnerabilityAffectedComplete reports that this export is a single-page
-	// delta (since window, not paginated) that sends every vulnerability it
-	// includes with all of its current affected packages (within the requested
-	// ecosystems), so a delta client can drop local affected rows of that
-	// vulnerability the page did not send.
+	// VulnerabilityAffectedComplete reports that this export is a delta page
+	// (since window) that sends every vulnerability it includes with all of its
+	// current affected packages (within the requested ecosystems), so a delta
+	// client can drop local affected rows of those vulnerabilities the page did
+	// not send. It holds per page: a delta paged by whole advisories never
+	// splits a vulnerability across pages, and each page is one statement.
 	VulnerabilityAffectedComplete bool
+}
+
+// syncAdvisoryCursorTag versions the vulnerabilities_cursor of a delta that
+// pages by whole advisories. Its payload is the last advisory ID of the page;
+// the legacy row cursor carries three untagged parts (ecosystem, name, id).
+const syncAdvisoryCursorTag = "advisory-v2"
+
+// EncodeSyncAdvisoryCursor returns the vulnerabilities_cursor that continues
+// an advisory-paged delta after the advisory with the given ID. It uses the
+// same base64url JSON-array encoding as the other keyset cursors.
+func EncodeSyncAdvisoryCursor(id string) string {
+	payload, _ := json.Marshal([]string{syncAdvisoryCursorTag, id})
+	return base64.RawURLEncoding.EncodeToString(payload)
+}
+
+// DecodeSyncAdvisoryCursor returns the advisory ID of an advisory cursor. It
+// reports false for any other value, including the legacy row cursor, so
+// callers can fall back to legacy row paging for cursors older servers issued.
+func DecodeSyncAdvisoryCursor(raw string) (string, bool) {
+	payload, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return "", false
+	}
+	var values []string
+	if err := json.Unmarshal(payload, &values); err != nil {
+		return "", false
+	}
+	if len(values) != 2 || values[0] != syncAdvisoryCursorTag || values[1] == "" {
+		return "", false
+	}
+	return values[1], true
 }
 
 // SyncCursor carries per-dataset pagination state for /api/v1/sync exports.

@@ -36,18 +36,22 @@ type Response struct {
 	// omitted when reputation is served, which keeps older clients and servers
 	// compatible.
 	ReputationDisabled bool `json:"reputation_disabled,omitempty"`
-	// VulnerabilityAffectedComplete reports that this response is a delta
-	// (since window) delivered in a single page and that every vulnerability
-	// with a row in it is exported with all of its current affected packages
-	// (within the requested ecosystems), so the client can drop local affected
-	// rows of that vulnerability the page did not send. Full exports and pages
-	// of a multi-page delta never carry it. It is omitted when false, which
-	// keeps older clients and servers compatible.
+	// VulnerabilityAffectedComplete reports that this response is a delta page
+	// (since window) on which every vulnerability with a row is exported with
+	// all of its current affected packages (within the requested ecosystems),
+	// so the client can drop, in this page's transaction, local affected rows
+	// of those vulnerabilities the page did not send. It holds per page: the
+	// server pages a delta by whole advisories, so it may appear on every page
+	// of a multi-page delta. Full exports and legacy row-cursor or offset pages
+	// never carry it. It is omitted when false, which keeps older clients and
+	// servers compatible (older servers set it only on a single-page delta).
 	VulnerabilityAffectedComplete bool `json:"vulnerability_affected_complete,omitempty"`
 }
 
 // Cursor is the opaque paginated-sync cursor returned by the server and echoed
-// by clients on subsequent sync pages.
+// by clients on subsequent sync pages. A delta paged by whole advisories
+// carries a versioned advisory cursor in VulnerabilitiesCursor (see
+// db.EncodeSyncAdvisoryCursor); servers still accept the legacy row cursor.
 type Cursor struct {
 	Vulnerabilities int `json:"vulnerabilities"`
 	Malicious       int `json:"malicious"`
