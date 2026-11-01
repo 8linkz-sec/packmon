@@ -905,6 +905,11 @@ func packageQueries(pkgs []domain.Package) []PackageLookup {
 // - vulnerability and lifecycle findings block when severity meets fail-on
 // - informational reputation findings never block
 // - NONE disables severity-gated blocking only
+//
+// "Lifecycle findings" means finding type lifecycle only (risk_type eol_soon
+// or security_support_only). Already end-of-life releases are emitted by
+// lifecycle.FindingForRelease as supply_chain_risk with risk_type=eol, so they
+// always block, even at --fail-on NONE.
 func (s *Scanner) hasBlockingFindings(findings []domain.Finding) bool {
 	return domain.FindingsBlock(findings, s.cfg.FailOn)
 }
