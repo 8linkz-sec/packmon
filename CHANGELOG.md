@@ -109,6 +109,29 @@
   going through the feed merge: a `HIGH` -> `LOW` edit is stored as `LOW`, a
   cleared description is cleared, and moving coverage from package A to B no
   longer leaves A affected. Feed severity/details retention is unchanged.
+- Rejected admin credentials (a login with a wrong username or password, the
+  API-key create step-up, and the password-change current-password check)
+  are counted toward the IP and shared-account lockout and
+  `packmon_auth_login_failures_total` before the rejection audit row is
+  written. A failing audit write previously returned early, so the attempt
+  escaped lockout accounting; the request still fails closed.
+- The admin login and admin pages render the shared footer's terms link
+  (`PACKMON_WEB_TERMS_URL`, default `/terms`) like the public pages; the
+  admin renderer previously received only the privacy and legal URLs.
+- The 12-character minimum for bootstrap (`PACKMON_ADMIN_INITIAL_PASSWORD`)
+  and rotated admin passwords counts Unicode characters instead of bytes, so
+  a password of four three-byte characters no longer passes.
+- Overlapping `/admin/feeds` saves and resets no longer leave the running
+  feed configuration out of step with PostgreSQL. The request that lost the
+  revision race used to roll the runtime back to a snapshot taken before the
+  winner applied its change; apply, persistence and rollback now run as one
+  step ordered against other feed saves and resets.
+- `/admin/feeds` save and reset forms carry the stored override's revision
+  (`updated_at`) like the system settings form. Submitting a form that was
+  rendered before another admin saved or reset the feed is rejected with the
+  existing conflict message instead of silently overwriting that change;
+  a malformed revision is rejected as invalid. A blank API key still keeps
+  the stored key.
 
 ### Security updates
 

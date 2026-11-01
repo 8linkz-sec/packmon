@@ -45,6 +45,7 @@ type adminFeedFormRow struct {
 	PendingRestart          bool
 	HasUpdatedAt            bool
 	UpdatedAt               time.Time
+	Revision                string
 	RuntimeMode             string
 	RuntimeEnabled          bool
 	RuntimeSyncInterval     string
@@ -276,6 +277,7 @@ func buildAdminFeedFormRow(cfg *config.Config, runtimeFeed config.FeedSettings, 
 		row.OverrideActive = true
 		row.HasUpdatedAt = !override.UpdatedAt.IsZero()
 		row.UpdatedAt = override.UpdatedAt
+		row.Revision = formatFeedConfigRevision(&override)
 	}
 
 	row.Enabled = desired.Enabled

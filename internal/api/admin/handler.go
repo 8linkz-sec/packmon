@@ -143,6 +143,14 @@ type AdminHandler struct {
 
 	manualSyncMu sync.Mutex
 	manualSyncs  map[string]struct{}
+
+	// feedConfigSlot orders feed config saves and resets: each request runs
+	// its runtime apply, persistence, and rollback while holding the slot, so
+	// the runtime ends on the last committed configuration. It is a
+	// one-element channel rather than a mutex so a waiting request can give up
+	// when its context ends.
+	feedConfigSlotOnce sync.Once
+	feedConfigSlot     chan struct{}
 }
 
 // NewAdminHandler creates an AdminHandler with the given dependencies.
@@ -305,12 +313,14 @@ func (h *AdminHandler) processLogin(w http.ResponseWriter, r *http.Request) {
 	nextPath := auth.SafeAdminReturnTarget(r.PostForm.Get("next"))
 
 	if username != "admin" {
+		// Count the failure before the audit write so a failing audit store
+		// cannot exempt wrong credentials from lockout and metrics.
+		h.recordFailedAttempt(ip)
 		if !h.requireAudit(w, r, "login_failed", map[string]string{
 			"reason": "invalid username",
 		}) {
 			return
 		}
-		h.recordFailedAttempt(ip)
 		h.showLoginForm(w, r, "Invalid username or password.")
 		return
 	}
@@ -328,12 +338,12 @@ func (h *AdminHandler) processLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !auth.CheckPassword(adminAuth.PasswordHash, password) {
+		h.recordFailedAttempt(ip)
 		if !h.requireAudit(w, r, "login_failed", map[string]string{
 			"reason": "invalid password",
 		}) {
 			return
 		}
-		h.recordFailedAttempt(ip)
 		h.showLoginForm(w, r, "Invalid username or password.")
 		return
 	}

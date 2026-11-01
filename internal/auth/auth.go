@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -17,7 +18,8 @@ import (
 const bcryptCost = 12
 
 // MinAdminPasswordLength is the shared minimum length for bootstrap and
-// rotated admin passwords.
+// rotated admin passwords, counted in Unicode characters (code points), not
+// bytes.
 const MinAdminPasswordLength = 12
 
 // AdminBootstrapStore is the persistence surface needed to bootstrap the
@@ -42,9 +44,11 @@ type AdminBootstrapAuditEntry struct {
 	CorrelationID string
 }
 
-// ValidateAdminPassword enforces the shared admin password policy.
+// ValidateAdminPassword enforces the shared admin password policy. The
+// minimum counts code points so multi-byte characters cannot satisfy it with
+// fewer than MinAdminPasswordLength characters.
 func ValidateAdminPassword(password string) error {
-	if len(password) < MinAdminPasswordLength {
+	if utf8.RuneCountInString(password) < MinAdminPasswordLength {
 		return fmt.Errorf("auth: admin password must be at least %d characters", MinAdminPasswordLength)
 	}
 	return nil
