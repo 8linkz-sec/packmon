@@ -11,7 +11,8 @@ It must work as:
 
 - a local CLI for developers;
 - a central feed/API server for teams;
-- a CI/CD scanner for GitHub Actions and GitLab CI;
+- a CI/CD scanner (exit codes plus JSON/SARIF/JUnit output; GitLab consumer
+  template only);
 - an automation component for N8N workflows.
 
 The expected scale is internal organizational use: hundreds of developers and
@@ -19,8 +20,9 @@ tens of thousands of unique packages. Packmon is not designed as a public SaaS
 or a public internet-facing API.
 
 The canonical source repository and Go module path are
-`github.com/8linkz-sec/packmon`; release metadata, CI templates, generated
-report links, and internal imports must use that namespace consistently.
+`github.com/8linkz-sec/packmon`; release metadata, the GitLab consumer
+template, generated report links, and internal imports must use that namespace
+consistently.
 
 HTTP handlers and middleware own their persistence boundaries. API v1 scan/read,
 feed-import, admin, API-key auth, and admin bootstrap code depend on small
