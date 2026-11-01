@@ -36,6 +36,10 @@
 - One stored GHSA advisory with `affected: null` (or an object/scalar where an
   array is expected, or range `events` that are null or not an array) no
   longer aborts the GHSA affected-package repair for every advisory.
+- PostgreSQL `FindMaliciousBatch` keeps a versionless request for a package
+  when the same batch also asks for concrete versions of it, so the empty
+  version still returns every active malicious finding of the package, as
+  `FindMalicious(..., "")` and a versionless-only batch already did.
 
 ### Security updates
 

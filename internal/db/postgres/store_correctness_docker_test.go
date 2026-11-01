@@ -37,6 +37,54 @@ func TestPostgresStoreCorrectnessAgainstDocker(t *testing.T) {
 	t.Run("GHSA repair tolerates non-array affected and events", func(t *testing.T) {
 		testGHSARepairToleratesNonArrayAffectedAndEvents(ctx, t, store)
 	})
+	t.Run("malicious batch keeps empty version beside concrete versions", func(t *testing.T) {
+		testMaliciousBatchKeepsEmptyVersionBesideConcreteVersions(ctx, t, store)
+	})
+}
+
+func testMaliciousBatchKeepsEmptyVersionBesideConcreteVersions(ctx context.Context, t *testing.T, store *Store) {
+	t.Helper()
+
+	if err := store.UpsertMaliciousFinding(ctx, &db.MaliciousFinding{
+		ID:        "MAL-batch-empty-version",
+		Ecosystem: "npm",
+		Name:      "batch-empty-version",
+		Versions:  json.RawMessage(`["1.0.0"]`),
+		Source:    "openssf",
+		RiskType:  "malware",
+		Severity:  "CRITICAL",
+		Summary:   "affects only 1.0.0",
+		CreatedBy: "feed",
+	}); err != nil {
+		t.Fatalf("UpsertMaliciousFinding() error = %v", err)
+	}
+
+	single, err := store.FindMalicious(ctx, "npm", "batch-empty-version", "")
+	if err != nil {
+		t.Fatalf("FindMalicious(empty version) error = %v", err)
+	}
+	if len(single) != 1 {
+		t.Fatalf("FindMalicious(empty version) = %+v, want the all-versions match", single)
+	}
+
+	onlyEmpty, err := store.FindMaliciousBatch(ctx, []db.PackageQuery{{Ecosystem: "npm", Name: "batch-empty-version"}})
+	if err != nil {
+		t.Fatalf("FindMaliciousBatch(empty only) error = %v", err)
+	}
+	if len(onlyEmpty) != 1 || onlyEmpty[0].Version != "" {
+		t.Fatalf("FindMaliciousBatch(empty only) = %+v, want one versionless finding", onlyEmpty)
+	}
+
+	mixed, err := store.FindMaliciousBatch(ctx, []db.PackageQuery{
+		{Ecosystem: "npm", Name: "batch-empty-version", Version: ""},
+		{Ecosystem: "npm", Name: "batch-empty-version", Version: "2.0.0"},
+	})
+	if err != nil {
+		t.Fatalf("FindMaliciousBatch(empty + 2.0.0) error = %v", err)
+	}
+	if len(mixed) != 1 || mixed[0].Version != "" || mixed[0].AdvisoryID != "MAL-batch-empty-version" {
+		t.Fatalf("FindMaliciousBatch(empty + 2.0.0) = %+v, want only the versionless finding (2.0.0 is unaffected)", mixed)
+	}
 }
 
 func testGHSARepairToleratesNonArrayAffectedAndEvents(ctx context.Context, t *testing.T, store *Store) {
