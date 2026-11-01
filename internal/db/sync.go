@@ -54,13 +54,19 @@ type SyncExport struct {
 	// (the page that starts the split and every page that continues it), that
 	// advisory. It is empty on every other page.
 	VulnerabilitySplitAdvisory string
+	// VulnerabilitySplitStart marks the page that starts such a split: the
+	// first advisory of a whole-advisory delta page whose rows alone exceed
+	// the budget. A client replaces a split advisory only when it received
+	// this page and every later page of the split in one sequence.
+	VulnerabilitySplitStart bool
 	// VulnerabilitySplitComplete reports, on the last page of such a split,
 	// that the split pages of this request sequence together delivered every
 	// current affected row of the advisory (within the requested ecosystems):
 	// neither the advisory nor any of its affected rows changed after the
 	// pinned snapshot. A delta client that received every split page of the
-	// advisory in this sequence can then drop its local affected rows (within
-	// the requested ecosystems) that no split page delivered.
+	// advisory in this sequence, from the page marked VulnerabilitySplitStart
+	// on, can then drop its local affected rows (within the requested
+	// ecosystems) that no split page delivered.
 	VulnerabilitySplitComplete bool
 }
 
@@ -110,7 +116,9 @@ const syncAdvisoryRowCursorTag = "advisory-rows-v2"
 // synccontract.MaxResponseBytes): the vulnerability dataset, which repeats an
 // advisory's summary and references on every affected row, keeps the largest
 // share, the other datasets share the remaining headroom, and 4 MiB stay free
-// for the envelope and for a first row that alone exceeds its budget.
+// for the envelope and for a first row that alone exceeds its budget. First
+// rows several MiB over their budgets can still push a page past the cap; the
+// client then rejects that page on every retry.
 const (
 	// SyncVulnerabilityPageByteBudget bounds the vulnerability dataset. An
 	// advisory whose rows alone exceed it is split over several pages that do

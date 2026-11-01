@@ -60,6 +60,7 @@ func newSyncExport(opts db.SyncExportOptions, cursor db.SyncCursor, snapshot tim
 		VulnerabilityAffectedComplete:  complete,
 		VulnerabilitiesWithoutAffected: withoutAffected,
 		VulnerabilitySplitAdvisory:     datasets.vulnerabilitiesSplitAdvisory,
+		VulnerabilitySplitStart:        datasets.vulnerabilitiesSplitAdvisory != "" && datasets.vulnerabilitiesSplitStart,
 		VulnerabilitySplitComplete:     datasets.vulnerabilitiesSplitAdvisory != "" && datasets.vulnerabilitiesSplitComplete,
 	}
 }
@@ -223,10 +224,12 @@ type syncVulnerabilityPage struct {
 	split      bool
 	// splitAdvisoryID names the advisory a split page holds rows of, on the
 	// page that starts the split and on every page that continues it.
-	// splitLast marks the page that exhausts the advisory's rows, and
-	// splitComplete reports that the split pages delivered every current
-	// affected row of it (see buildSyncSplitAdvisoryUnchangedQuery).
+	// splitStart marks the page that starts the split, splitLast the page
+	// that exhausts the advisory's rows, and splitComplete reports that the
+	// split pages delivered every current affected row of it (see
+	// buildSyncSplitAdvisoryUnchangedQuery).
 	splitAdvisoryID string
+	splitStart      bool
 	splitLast       bool
 	splitComplete   bool
 }
@@ -265,6 +268,7 @@ type syncDatasets struct {
 	vulnerabilitiesNextCursor      string
 	vulnerabilitiesSplit           bool
 	vulnerabilitiesSplitAdvisory   string
+	vulnerabilitiesSplitStart      bool
 	vulnerabilitiesSplitComplete   bool
 	// Each other dataset carries the rows and hasMore of its syncRowPage.
 	malicious          []db.SyncMalicious
@@ -296,7 +300,8 @@ func exportSyncDatasets(ctx context.Context, opts db.SyncExportOptions, cursor d
 			datasets.vulnerabilitiesWithoutAffected = page.withoutAffected
 			datasets.vulnerabilitiesLastAdvisoryID = page.lastAdvisoryID
 			datasets.vulnerabilitiesNextCursor, datasets.vulnerabilitiesSplit = page.nextCursor, page.split
-			datasets.vulnerabilitiesSplitAdvisory, datasets.vulnerabilitiesSplitComplete = page.splitAdvisoryID, page.splitComplete
+			datasets.vulnerabilitiesSplitAdvisory = page.splitAdvisoryID
+			datasets.vulnerabilitiesSplitStart, datasets.vulnerabilitiesSplitComplete = page.splitStart, page.splitComplete
 			if err != nil {
 				errCh <- syncDatasetExportError{order: 0, err: err}
 			}
@@ -819,21 +824,44 @@ func (s *Store) exportSyncVulnerabilities(ctx context.Context, opts db.SyncExpor
 // snapshot may have been missed; both fail the check, so the client keeps
 // upserting and the next delta delivers the advisory again. Without a
 // snapshot transaction ID the check cannot prove this, and ok is false.
+//
+// The transaction ID comparison must hold past the first transaction ID
+// epoch: a row's xmin is a 32-bit transaction ID, while the snapshot ID is
+// the 64-bit, epoch-extended txid_snapshot_xmin. The check therefore compares
+// the xmin with the low 32 bits of the snapshot ID modulo 2^32 (see
+// syncXIDNotBeforeSnapshotSQL), and it holds only while the pinned snapshot
+// is at most 2^31 transactions old, which the query verifies with 64-bit IDs
+// (a snapshot ID from the future fails as well).
 func buildSyncSplitAdvisoryUnchangedQuery(id string, snapshot time.Time, snapshotXID uint64) (query string, args []any, ok bool) {
 	if snapshotXID == 0 {
 		return "", nil, false
 	}
 	return `
-	SELECT EXISTS (
+	SELECT txid_snapshot_xmax(txid_current_snapshot()) - $4::bigint BETWEEN 0 AND 2147483647
+	AND EXISTS (
 		SELECT 1 FROM vulnerabilities v
 		WHERE v.id = $2
 		  AND v.updated_at <= $1
-		  AND (v.xmin::text)::bigint < $3::bigint
+		  AND NOT ` + syncXIDNotBeforeSnapshotSQL("v.xmin", "$3") + `
 	) AND NOT EXISTS (
 		SELECT 1 FROM affected_packages ap
 		WHERE ap.vulnerability_id = $2
-		  AND (ap.updated_at > $1 OR (ap.xmin::text)::bigint >= $3::bigint)
-	)`, []any{snapshot, id, strconv.FormatUint(snapshotXID, 10)}, true
+		  AND (ap.updated_at > $1 OR ` + syncXIDNotBeforeSnapshotSQL("ap.xmin", "$3") + `)
+	)`, []any{snapshot, id, strconv.FormatUint(snapshotXID&0xffffffff, 10), strconv.FormatUint(snapshotXID, 10)}, true
+}
+
+// syncXIDNotBeforeSnapshotSQL returns a condition that holds unless the
+// 32-bit transaction ID column is provably older than the 32-bit snapshot
+// transaction ID in arg: the IDs are compared modulo 2^32, so an ID at most
+// 2^31 - 1 transactions at or after the snapshot ID counts as not before it.
+// Every row version a transaction at or after the snapshot wrote has such an
+// ID while the snapshot is at most 2^31 transactions old (PostgreSQL never
+// lets a live transaction ID age past 2^31), so such a change is never
+// missed. A frozen or otherwise ancient xmin may wrap into the same half and
+// count as not before the snapshot; that only fails the check, never passes
+// it wrongly.
+func syncXIDNotBeforeSnapshotSQL(column, arg string) string {
+	return fmt.Sprintf(`(((%s::text)::bigint - %s::bigint + 4294967296) %% 4294967296) < 2147483648`, column, arg)
 }
 
 // syncSplitAdvisoryUnchanged reports whether the split pages of the advisory

@@ -4,14 +4,18 @@ import (
 	"context"
 	"slices"
 	"testing"
+
+	"github.com/8linkz-sec/packmon/internal/db"
 )
 
 // splitSyncReplacePage returns a page of the advisory the server split over
-// several pages (vulnerability_split_advisory); complete marks the last page
-// of a split that delivered every current affected row of it.
-func splitSyncReplacePage(advisory string, complete bool, cursor string, vulnerabilities ...syncVulnerability) *syncResponse {
+// several pages (vulnerability_split_advisory); start marks the page that
+// started the split, and complete the last page of a split that delivered
+// every current affected row of it.
+func splitSyncReplacePage(advisory string, start, complete bool, cursor string, vulnerabilities ...syncVulnerability) *syncResponse {
 	page := truncatedSyncReplacePage(false, cursor, vulnerabilities...)
 	page.VulnerabilitySplitAdvisory = advisory
+	page.VulnerabilitySplitStart = start
 	page.VulnerabilitySplitComplete = complete
 	return page
 }
@@ -21,10 +25,13 @@ func splitSyncReplacePage(advisory string, complete bool, cursor string, vulnera
 // it over several unflagged pages. The client collects the rows the split
 // pages of one sequence delivered for it and, when the last split page
 // reports the split complete, drops its local rows (within the requested
-// ecosystems) that no split page delivered, in that page's transaction.
-// Without completeness, after an interrupted sequence, with a split page
-// that carries another advisory's row, or without having seen the split from
-// its first page, the split stays upsert-only.
+// ecosystems) that no split page delivered, in that page's transaction. It
+// replaces nothing unless it received the page that started the split
+// (marked as the start and not requested with an advisory row cursor) and
+// every later page of the split, each naming the advisory: a split that an
+// older server started or continued during a rolling upgrade, a split
+// without completeness, an interrupted sequence, or a split page that
+// carries another advisory's row stays upsert-only.
 func TestDeltaSyncReplacesASplitAdvisoryOnItsCompleteLastPage(t *testing.T) {
 	t.Parallel()
 
@@ -32,7 +39,13 @@ func TestDeltaSyncReplacesASplitAdvisoryOnItsCompleteLastPage(t *testing.T) {
 	rightPad := syncReplaceVulnerability("GHSA-move", "npm", "right-pad")
 	requests := syncReplaceVulnerability("GHSA-move", "pypi", "requests")
 	otherNew := syncReplaceVulnerability("GHSA-other", "npm", "other-new")
+	// Real advisory row cursors, as a server returns them while it splits
+	// GHSA-move.
+	rowCursor1 := db.EncodeSyncAdvisoryRowCursor("GHSA-move", "npm", "right-pad")
+	rowCursor2 := db.EncodeSyncAdvisoryRowCursor("GHSA-move", "pypi", "requests")
+	rowCursor3 := db.EncodeSyncAdvisoryRowCursor("GHSA-move", "pypi", "zz-last")
 	upserted := []string{"GHSA-move|npm|left-pad", "GHSA-move|npm|right-pad", "GHSA-move|pypi|requests", "GHSA-other|npm|other"}
+	replaced := []string{"GHSA-move|npm|right-pad", "GHSA-move|pypi|requests", "GHSA-other|npm|other"}
 	tests := []struct {
 		name       string
 		since      string
@@ -46,31 +59,31 @@ func TestDeltaSyncReplacesASplitAdvisoryOnItsCompleteLastPage(t *testing.T) {
 			name:  "complete split replaces the split advisory only",
 			since: since,
 			pages: map[string]*syncResponse{
-				"":   splitSyncReplacePage("GHSA-move", false, "c1", rightPad),
-				"c1": splitSyncReplacePage("GHSA-move", true, "c2", requests),
-				"c2": finalSyncReplacePage(false),
+				"":         splitSyncReplacePage("GHSA-move", true, false, rowCursor1, rightPad),
+				rowCursor1: splitSyncReplacePage("GHSA-move", false, true, "c2", requests),
+				"c2":       finalSyncReplacePage(false),
 			},
-			want: []string{"GHSA-move|npm|right-pad", "GHSA-move|pypi|requests", "GHSA-other|npm|other"},
+			want: replaced,
 		},
 		{
 			name:  "complete split whose last page holds no row",
 			since: since,
 			pages: map[string]*syncResponse{
-				"":   splitSyncReplacePage("GHSA-move", false, "c1", rightPad),
-				"c1": splitSyncReplacePage("GHSA-move", false, "c2", requests),
-				"c2": splitSyncReplacePage("GHSA-move", true, "c3"),
-				"c3": finalSyncReplacePage(false),
+				"":         splitSyncReplacePage("GHSA-move", true, false, rowCursor1, rightPad),
+				rowCursor1: splitSyncReplacePage("GHSA-move", false, false, rowCursor2, requests),
+				rowCursor2: splitSyncReplacePage("GHSA-move", false, true, "c3"),
+				"c3":       finalSyncReplacePage(false),
 			},
-			want: []string{"GHSA-move|npm|right-pad", "GHSA-move|pypi|requests", "GHSA-other|npm|other"},
+			want: replaced,
 		},
 		{
 			name:  "consecutive splits replace each advisory with its own rows",
 			since: since,
 			pages: map[string]*syncResponse{
-				"":   splitSyncReplacePage("GHSA-move", false, "c1", rightPad),
-				"c1": splitSyncReplacePage("GHSA-move", true, "c2", requests),
-				"c2": splitSyncReplacePage("GHSA-other", false, "c3", otherNew),
-				"c3": splitSyncReplacePage("GHSA-other", true, "c4"),
+				"":   splitSyncReplacePage("GHSA-move", true, false, "c1", rightPad),
+				"c1": splitSyncReplacePage("GHSA-move", false, true, "c2", requests),
+				"c2": splitSyncReplacePage("GHSA-other", true, false, "c3", otherNew),
+				"c3": splitSyncReplacePage("GHSA-other", false, true, "c4"),
 				"c4": finalSyncReplacePage(false),
 			},
 			want: []string{"GHSA-move|npm|right-pad", "GHSA-move|pypi|requests", "GHSA-other|npm|other-new"},
@@ -79,8 +92,8 @@ func TestDeltaSyncReplacesASplitAdvisoryOnItsCompleteLastPage(t *testing.T) {
 			name:  "split without completeness stays upsert-only",
 			since: since,
 			pages: map[string]*syncResponse{
-				"":   splitSyncReplacePage("GHSA-move", false, "c1", rightPad),
-				"c1": splitSyncReplacePage("GHSA-move", false, "c2", requests),
+				"":   splitSyncReplacePage("GHSA-move", true, false, "c1", rightPad),
+				"c1": splitSyncReplacePage("GHSA-move", false, false, "c2", requests),
 				"c2": finalSyncReplacePage(false),
 			},
 			want: upserted,
@@ -92,18 +105,71 @@ func TestDeltaSyncReplacesASplitAdvisoryOnItsCompleteLastPage(t *testing.T) {
 			name:  "interrupted split deletes nothing",
 			since: since,
 			pages: map[string]*syncResponse{
-				"":   splitSyncReplacePage("GHSA-move", false, "c1", rightPad),
+				"":   splitSyncReplacePage("GHSA-move", true, false, "c1", rightPad),
 				"c1": nil,
 			},
 			wantErr:   true,
-			want:      []string{"GHSA-move|npm|left-pad", "GHSA-move|npm|right-pad", "GHSA-move|pypi|requests", "GHSA-other|npm|other"},
+			want:      upserted,
 			wantSince: since,
 		},
 		{
-			name:  "complete marker without the earlier split pages replaces nothing",
+			// An older server started the split without markers; after an
+			// upgrade between two requests, the new server continues and
+			// completes it. The client never saw the start, so the rows of
+			// the first page would be missing from its collection.
+			name:  "split an older server started is not replaced",
 			since: since,
 			pages: map[string]*syncResponse{
-				"":   splitSyncReplacePage("GHSA-move", true, "c1", rightPad, requests),
+				"":         truncatedSyncReplacePage(false, rowCursor1, rightPad),
+				rowCursor1: splitSyncReplacePage("GHSA-move", false, false, rowCursor2, requests),
+				rowCursor2: splitSyncReplacePage("GHSA-move", false, true, "c3"),
+				"c3":       finalSyncReplacePage(false),
+			},
+			want: upserted,
+		},
+		{
+			// new -> old -> new: the older server's page in the middle carries
+			// no marker and ends the split on the client.
+			name:  "split an older server continued mid-way is not replaced",
+			since: since,
+			pages: map[string]*syncResponse{
+				"":         splitSyncReplacePage("GHSA-move", true, false, rowCursor1, rightPad),
+				rowCursor1: truncatedSyncReplacePage(false, rowCursor2, requests),
+				rowCursor2: splitSyncReplacePage("GHSA-move", false, false, rowCursor3),
+				rowCursor3: splitSyncReplacePage("GHSA-move", false, true, "c4"),
+				"c4":       finalSyncReplacePage(false),
+			},
+			want: upserted,
+		},
+		{
+			// A page requested with an advisory row cursor continues a split
+			// and can never start one, whatever it claims.
+			name:  "start marker on a page requested with an advisory row cursor is ignored",
+			since: since,
+			pages: map[string]*syncResponse{
+				"":         truncatedSyncReplacePage(false, rowCursor1, rightPad),
+				rowCursor1: splitSyncReplacePage("GHSA-move", true, false, rowCursor2, requests),
+				rowCursor2: splitSyncReplacePage("GHSA-move", false, true, "c3"),
+				"c3":       finalSyncReplacePage(false),
+			},
+			want: upserted,
+		},
+		{
+			name:  "second start marker of the same split replaces nothing",
+			since: since,
+			pages: map[string]*syncResponse{
+				"":   splitSyncReplacePage("GHSA-move", true, false, "c1", rightPad),
+				"c1": splitSyncReplacePage("GHSA-move", true, false, "c2", requests),
+				"c2": splitSyncReplacePage("GHSA-move", false, true, "c3"),
+				"c3": finalSyncReplacePage(false),
+			},
+			want: upserted,
+		},
+		{
+			name:  "complete marker on the start page replaces nothing",
+			since: since,
+			pages: map[string]*syncResponse{
+				"":   splitSyncReplacePage("GHSA-move", true, true, "c1", rightPad, requests),
 				"c1": finalSyncReplacePage(false),
 			},
 			want: upserted,
@@ -112,8 +178,8 @@ func TestDeltaSyncReplacesASplitAdvisoryOnItsCompleteLastPage(t *testing.T) {
 			name:  "complete marker of another advisory replaces nothing",
 			since: since,
 			pages: map[string]*syncResponse{
-				"":   splitSyncReplacePage("GHSA-move", false, "c1", rightPad),
-				"c1": splitSyncReplacePage("GHSA-other", true, "c2", requests),
+				"":   splitSyncReplacePage("GHSA-move", true, false, "c1", rightPad),
+				"c1": splitSyncReplacePage("GHSA-other", false, true, "c2", requests),
 				"c2": finalSyncReplacePage(false),
 			},
 			want: upserted,
@@ -122,8 +188,8 @@ func TestDeltaSyncReplacesASplitAdvisoryOnItsCompleteLastPage(t *testing.T) {
 			name:  "split page carrying another advisory's row replaces nothing",
 			since: since,
 			pages: map[string]*syncResponse{
-				"":   splitSyncReplacePage("GHSA-move", false, "c1", rightPad),
-				"c1": splitSyncReplacePage("GHSA-move", true, "c2", requests, otherNew),
+				"":   splitSyncReplacePage("GHSA-move", true, false, "c1", rightPad),
+				"c1": splitSyncReplacePage("GHSA-move", false, true, "c2", requests, otherNew),
 				"c2": finalSyncReplacePage(false),
 			},
 			want: []string{"GHSA-move|npm|left-pad", "GHSA-move|npm|right-pad", "GHSA-move|pypi|requests", "GHSA-other|npm|other", "GHSA-other|npm|other-new"},
@@ -133,17 +199,17 @@ func TestDeltaSyncReplacesASplitAdvisoryOnItsCompleteLastPage(t *testing.T) {
 			since:      since,
 			ecosystems: []string{" NPM "},
 			pages: map[string]*syncResponse{
-				"":   splitSyncReplacePage("GHSA-move", false, "c1", rightPad),
-				"c1": splitSyncReplacePage("GHSA-move", true, "c2"),
+				"":   splitSyncReplacePage("GHSA-move", true, false, "c1", rightPad),
+				"c1": splitSyncReplacePage("GHSA-move", false, true, "c2"),
 				"c2": finalSyncReplacePage(false),
 			},
-			want: []string{"GHSA-move|npm|right-pad", "GHSA-move|pypi|requests", "GHSA-other|npm|other"},
+			want: replaced,
 		},
 		{
 			name: "split without since stays upsert-only",
 			pages: map[string]*syncResponse{
-				"":   splitSyncReplacePage("GHSA-move", false, "c1", rightPad),
-				"c1": splitSyncReplacePage("GHSA-move", true, "c2", requests),
+				"":   splitSyncReplacePage("GHSA-move", true, false, "c1", rightPad),
+				"c1": splitSyncReplacePage("GHSA-move", false, true, "c2", requests),
 				"c2": finalSyncReplacePage(false),
 			},
 			want: upserted,
@@ -158,12 +224,10 @@ func TestDeltaSyncReplacesASplitAdvisoryOnItsCompleteLastPage(t *testing.T) {
 			seedSyncReplaceRows(t, store, tt.since)
 			server := newSyncReplaceServer(t, tt.pages)
 
-			var stats SyncStats
 			err := Sync(context.Background(), store, SyncConfig{
 				ServerURL:         server.URL,
 				Ecosystems:        tt.ecosystems,
 				AllowInsecureHTTP: true,
-				Stats:             &stats,
 			})
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("Sync() error = %v, wantErr %v", err, tt.wantErr)
@@ -189,8 +253,8 @@ func TestSyncSplitAdvisoryReplacementCountsDroppedRows(t *testing.T) {
 	store := newSQLiteTestStore(t)
 	seedSyncReplaceRows(t, store, "2026-05-30T09:00:00Z")
 	server := newSyncReplaceServer(t, map[string]*syncResponse{
-		"":   splitSyncReplacePage("GHSA-move", false, "c1", syncReplaceVulnerability("GHSA-move", "npm", "right-pad")),
-		"c1": splitSyncReplacePage("GHSA-move", true, "c2"),
+		"":   splitSyncReplacePage("GHSA-move", true, false, "c1", syncReplaceVulnerability("GHSA-move", "npm", "right-pad")),
+		"c1": splitSyncReplacePage("GHSA-move", false, true, "c2"),
 		"c2": finalSyncReplacePage(false),
 	})
 	var stats SyncStats

@@ -228,26 +228,32 @@ func mergeSyncAffectedReplacements(a, b *syncAffectedReplacement) *syncAffectedR
 // split names the advisory (vulnerability_split_advisory) and none carries
 // vulnerability_affected_complete; the last one reports with
 // vulnerability_split_complete that the split pages together delivered every
-// current affected row of the advisory (within the requested ecosystems). The
-// pages of a split follow each other within one sequence, so the client sees
-// a split from its first page; the state lives only in memory, so an
-// interrupted sequence replaces nothing.
+// current affected row of the advisory (within the requested ecosystems). A
+// split is usable only when the client received the page that started it --
+// marked vulnerability_split_start and requested without an advisory row
+// cursor, which only continues a split -- and every later page of it, each
+// naming the advisory. A page without the marker, for example from an older
+// server during a rolling upgrade, ends the split, so a split that an older
+// server started or continued is never replaced. The state lives only in
+// memory, so an interrupted sequence replaces nothing.
 type syncSplitAdvisory struct {
 	id string
 	// pages counts the split pages seen so far, including the current one.
 	pages int
 	// received holds the row keys the split pages delivered.
 	received map[string]struct{}
-	// unusable marks a split whose pages carried a row of another advisory or
-	// a withdrawn row; it is never replaced.
+	// unusable marks a split the client did not receive from its start page,
+	// or whose pages carried a second start marker, a row of another
+	// advisory, or a withdrawn row; it is never replaced.
 	unusable bool
 }
 
-// nextSyncSplitAdvisory returns the split state after resp: the state of the
-// split resp continues or starts, with its rows added, or nil when resp
-// belongs to no split or the pass may not replace affected rows (a full sync
-// or a sync without a since window, as for flagged pages).
-func nextSyncSplitAdvisory(prev *syncSplitAdvisory, pass syncPass, resp *syncResponse) *syncSplitAdvisory {
+// nextSyncSplitAdvisory returns the split state after resp, the page the
+// client requested with the cursor requested: the state of the split resp
+// continues or starts, with its rows added, or nil when resp belongs to no
+// split or the pass may not replace affected rows (a full sync or a sync
+// without a since window, as for flagged pages).
+func nextSyncSplitAdvisory(prev *syncSplitAdvisory, pass syncPass, requested syncCursor, resp *syncResponse) *syncSplitAdvisory {
 	id := strings.TrimSpace(resp.VulnerabilitySplitAdvisory)
 	if pass.full || pass.cursorState.Since == "" || id == "" {
 		return nil
@@ -255,6 +261,9 @@ func nextSyncSplitAdvisory(prev *syncSplitAdvisory, pass syncPass, resp *syncRes
 	split := prev
 	if split == nil || split.id != id {
 		split = &syncSplitAdvisory{id: id, received: make(map[string]struct{})}
+		split.unusable = !resp.VulnerabilitySplitStart || synccontract.IsAdvisoryRowCursor(requested.VulnerabilitiesCursor)
+	} else if resp.VulnerabilitySplitStart {
+		split.unusable = true
 	}
 	split.pages++
 	for _, v := range resp.Vulnerabilities {
@@ -270,7 +279,7 @@ func nextSyncSplitAdvisory(prev *syncSplitAdvisory, pass syncPass, resp *syncRes
 // replacement returns the replacement of the split advisory when resp, a
 // page of the split, completes it, or nil. The server reports completeness
 // only on the last page of a split, which never starts it, so a split seen
-// on fewer than two pages is incomplete on the client and is not replaced.
+// on fewer than two pages is not replaced either.
 func (s *syncSplitAdvisory) replacement(resp *syncResponse, ecosystems []string) *syncAffectedReplacement {
 	if s == nil || s.unusable || s.pages < 2 || !resp.VulnerabilitySplitComplete {
 		return nil
@@ -349,8 +358,10 @@ type (
 // deliver (syncSplitAdvisory), and when the last split page reports
 // vulnerability_split_complete, it drops, in that page's transaction, the
 // advisory's local affected rows (within the requested ecosystems) that no
-// split page delivered. A split that is incomplete, interrupted, or mixed
-// with another advisory's rows stays upsert-only.
+// split page delivered. A split the client did not receive from its start
+// page (vulnerability_split_start, not requested with an advisory row
+// cursor) through every later page, or that is incomplete, interrupted, or
+// mixed with another advisory's rows, stays upsert-only.
 func Sync(ctx context.Context, store *Store, cfg SyncConfig) error {
 	cfg, err := validateSyncConfig(cfg)
 	if err != nil {
@@ -502,7 +513,7 @@ func syncPaginatedResponses(ctx context.Context, store *Store, client *http.Clie
 			metadata.ClearReputationResync = pass.completesReputation && !reputationDisabled
 		}
 
-		split = nextSyncSplitAdvisory(split, pass, resp)
+		split = nextSyncSplitAdvisory(split, pass, cursor, resp)
 		page := syncPageApply{
 			metadata: metadata,
 			replaceAffected: mergeSyncAffectedReplacements(

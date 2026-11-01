@@ -67,16 +67,23 @@ type Response struct {
 	// page that starts the split and every page that continues it), that
 	// advisory. Such pages never carry VulnerabilityAffectedComplete.
 	VulnerabilitySplitAdvisory string `json:"vulnerability_split_advisory,omitempty"`
+	// VulnerabilitySplitStart marks the page that starts such a split. A
+	// client replaces a split advisory only when this page, which it did not
+	// request with an advisory row cursor, and every later page of the split
+	// reached it in one request sequence, so a split an older server started
+	// or continued without the markers is never replaced.
+	VulnerabilitySplitStart bool `json:"vulnerability_split_start,omitempty"`
 	// VulnerabilitySplitComplete reports, on the last page of such a split,
 	// that the split pages of this request sequence together delivered every
 	// current affected package of the advisory (within the requested
 	// ecosystems): neither the advisory nor any of its affected packages
 	// changed after the pinned snapshot. A delta client that received every
-	// split page of the advisory in this sequence then drops, in this page's
-	// transaction, its local affected rows of the advisory (within the
-	// requested ecosystems) that no split page delivered. Both fields are
-	// omitted when unset; older clients ignore them and stay upsert-only on
-	// split pages, and older servers omit them.
+	// split page of the advisory in this sequence, from the start page on,
+	// then drops, in this page's transaction, its local affected rows of the
+	// advisory (within the requested ecosystems) that no split page
+	// delivered. The split fields are omitted when unset; older clients
+	// ignore them and stay upsert-only on split pages, and older servers omit
+	// them.
 	VulnerabilitySplitComplete bool `json:"vulnerability_split_complete,omitempty"`
 }
 
@@ -221,7 +228,7 @@ func ResponseFromExport(exported *db.SyncExport, feedStatus string, feedVersions
 	if exported.VulnerabilityAffectedComplete {
 		resp.VulnerabilitiesWithoutAffected = exported.VulnerabilitiesWithoutAffected
 	}
-	resp.VulnerabilitySplitAdvisory, resp.VulnerabilitySplitComplete = SplitAdvisoryFromExport(exported)
+	resp.VulnerabilitySplitAdvisory, resp.VulnerabilitySplitStart, resp.VulnerabilitySplitComplete = SplitAdvisoryFromExport(exported)
 
 	for _, vuln := range exported.Vulnerabilities {
 		resp.Vulnerabilities = append(resp.Vulnerabilities, Vulnerability{
@@ -301,12 +308,21 @@ func ResponseFromExport(exported *db.SyncExport, feedStatus string, feedVersions
 }
 
 // SplitAdvisoryFromExport returns the split markers of an exported page for
-// the wire: the split advisory, and completeness only together with it.
-func SplitAdvisoryFromExport(exported *db.SyncExport) (advisory string, complete bool) {
+// the wire: the split advisory, and the start and completeness markers only
+// together with it.
+func SplitAdvisoryFromExport(exported *db.SyncExport) (advisory string, start, complete bool) {
 	if exported == nil || exported.VulnerabilitySplitAdvisory == "" {
-		return "", false
+		return "", false, false
 	}
-	return exported.VulnerabilitySplitAdvisory, exported.VulnerabilitySplitComplete
+	return exported.VulnerabilitySplitAdvisory, exported.VulnerabilitySplitStart, exported.VulnerabilitySplitComplete
+}
+
+// IsAdvisoryRowCursor reports whether a vulnerabilities_cursor continues an
+// advisory split over several pages. A page requested with such a cursor
+// continues a split and never starts one.
+func IsAdvisoryRowCursor(raw string) bool {
+	_, _, _, ok := db.DecodeSyncAdvisoryRowCursor(raw)
+	return ok
 }
 
 func cursorFromDB(cursor *db.SyncCursor) *Cursor {

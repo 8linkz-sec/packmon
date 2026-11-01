@@ -90,6 +90,7 @@ func TestResponseFromExportMapsAllWireFields(t *testing.T) {
 		VulnerabilityAffectedComplete:  true,
 		VulnerabilitiesWithoutAffected: []string{"GHSA-empty"},
 		VulnerabilitySplitAdvisory:     "GHSA-split",
+		VulnerabilitySplitStart:        true,
 		VulnerabilitySplitComplete:     true,
 	}
 
@@ -107,8 +108,8 @@ func TestResponseFromExportMapsAllWireFields(t *testing.T) {
 	if len(resp.VulnerabilitiesWithoutAffected) != 1 || resp.VulnerabilitiesWithoutAffected[0] != "GHSA-empty" {
 		t.Fatalf("vulnerabilities_without_affected = %q, want the exported advisory IDs passed through", resp.VulnerabilitiesWithoutAffected)
 	}
-	if resp.VulnerabilitySplitAdvisory != "GHSA-split" || !resp.VulnerabilitySplitComplete {
-		t.Fatalf("split markers = %q / %v, want the exported split advisory and completeness passed through", resp.VulnerabilitySplitAdvisory, resp.VulnerabilitySplitComplete)
+	if resp.VulnerabilitySplitAdvisory != "GHSA-split" || !resp.VulnerabilitySplitStart || !resp.VulnerabilitySplitComplete {
+		t.Fatalf("split markers = %q / %v / %v, want the exported split advisory, start, and completeness passed through", resp.VulnerabilitySplitAdvisory, resp.VulnerabilitySplitStart, resp.VulnerabilitySplitComplete)
 	}
 	if !resp.Truncated || !resp.HasMore {
 		t.Fatalf("pagination flags = truncated %v has_more %v, want both true", resp.Truncated, resp.HasMore)
@@ -211,13 +212,13 @@ func TestSyncPageByteBudgetLeavesRoomBelowTheClientCap(t *testing.T) {
 }
 
 // TestSplitAdvisoryMarkersStayOptional keeps the split markers off the wire
-// unless a page belongs to a split advisory, never reports completeness
-// without the advisory it belongs to, and checks that a client built before
-// the fields existed decodes a split page unchanged.
+// unless a page belongs to a split advisory, never reports a start or
+// completeness without the advisory it belongs to, and checks that a client
+// built before the fields existed decodes a split page unchanged.
 func TestSplitAdvisoryMarkersStayOptional(t *testing.T) {
 	t.Parallel()
 
-	for _, exported := range []*db.SyncExport{{}, {VulnerabilitySplitComplete: true}} {
+	for _, exported := range []*db.SyncExport{{}, {VulnerabilitySplitStart: true, VulnerabilitySplitComplete: true}} {
 		payload, err := json.Marshal(ResponseFromExport(exported, "healthy", nil))
 		if err != nil {
 			t.Fatalf("marshal response without a split advisory: %v", err)
@@ -244,6 +245,21 @@ func TestSplitAdvisoryMarkersStayOptional(t *testing.T) {
 	}
 	if len(older.Vulnerabilities) != 1 || older.VulnerabilityAffectedComplete {
 		t.Fatalf("older client decoded %+v, want the package row on an unflagged page", older)
+	}
+}
+
+// TestIsAdvisoryRowCursor recognizes only the cursor that continues a split
+// advisory, which a page that starts a split is never requested with.
+func TestIsAdvisoryRowCursor(t *testing.T) {
+	t.Parallel()
+
+	if !IsAdvisoryRowCursor(db.EncodeSyncAdvisoryRowCursor("GHSA-big", "npm", "big2")) {
+		t.Fatal("IsAdvisoryRowCursor(advisory row cursor) = false, want true")
+	}
+	for _, raw := range []string{"", "not-a-cursor", db.EncodeSyncAdvisoryCursor("GHSA-big")} {
+		if IsAdvisoryRowCursor(raw) {
+			t.Fatalf("IsAdvisoryRowCursor(%q) = true, want false", raw)
+		}
 	}
 }
 

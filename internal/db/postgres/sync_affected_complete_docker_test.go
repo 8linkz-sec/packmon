@@ -561,7 +561,8 @@ func testDeltaDeliversAdvisoriesWithoutAffectedPackages(ctx context.Context, t *
 // stay below that cap: the whole-advisory page before it ends at the advisory
 // boundary and stays flagged, the oversized advisory is split over several
 // unflagged pages with a row cursor that all name it in
-// VulnerabilitySplitAdvisory, the last of them reports the split complete
+// VulnerabilitySplitAdvisory, the first of them is marked as the start, the
+// last of them reports the split complete
 // (nothing of the advisory changed after the snapshot), and the advisory
 // after it is paged whole and flagged again. The real SQLite client completes
 // the sync, every row arrives exactly once, flagged pages drop their stale
@@ -616,6 +617,7 @@ func testDeltaSplitsAnAdvisoryLargerThanThePageBudget(ctx context.Context, t *te
 		ids           []string
 		complete      bool
 		splitAdvisory string
+		splitStart    bool
 		splitComplete bool
 	}
 	var (
@@ -635,7 +637,7 @@ func testDeltaSplitsAnAdvisoryLargerThanThePageBudget(ctx context.Context, t *te
 		if len(encoded) > synccontract.MaxResponseBytes {
 			t.Fatalf("delta page %d encodes to %d bytes, more than the %d-byte client cap", len(pages)+1, len(encoded), synccontract.MaxResponseBytes)
 		}
-		facts := pageFacts{complete: page.VulnerabilityAffectedComplete, splitAdvisory: page.VulnerabilitySplitAdvisory, splitComplete: page.VulnerabilitySplitComplete}
+		facts := pageFacts{complete: page.VulnerabilityAffectedComplete, splitAdvisory: page.VulnerabilitySplitAdvisory, splitStart: page.VulnerabilitySplitStart, splitComplete: page.VulnerabilitySplitComplete}
 		for id := range syncExportRowsByID(page.Vulnerabilities) {
 			facts.ids = append(facts.ids, id)
 		}
@@ -661,10 +663,13 @@ func testDeltaSplitsAnAdvisoryLargerThanThePageBudget(ctx context.Context, t *te
 	if len(bigSeen) != bigRows {
 		t.Fatalf("delta delivered %d rows of %s, want %d", len(bigSeen), idBig, bigRows)
 	}
-	var splitPages, lastSplitPage, completePages int
+	var splitPages, firstSplitPage, lastSplitPage, startPages, completePages int
 	for i, page := range pages {
 		if page.splitComplete {
 			completePages++
+		}
+		if page.splitStart {
+			startPages++
 		}
 		switch {
 		case slices.Equal(page.ids, []string{idBefore}) || slices.Equal(page.ids, []string{idAfter}):
@@ -675,6 +680,9 @@ func testDeltaSplitsAnAdvisoryLargerThanThePageBudget(ctx context.Context, t *te
 			if page.complete || page.splitAdvisory != idBig {
 				t.Fatalf("delta page %d of the split advisory is flagged or names %q (pages %+v)", i+1, page.splitAdvisory, pages)
 			}
+			if splitPages == 0 {
+				firstSplitPage = i
+			}
 			splitPages++
 			lastSplitPage = i
 		case len(page.ids) == 0:
@@ -684,6 +692,9 @@ func testDeltaSplitsAnAdvisoryLargerThanThePageBudget(ctx context.Context, t *te
 	}
 	if splitPages < 2 {
 		t.Fatalf("oversized advisory spans %d page(s), want it split (pages %+v)", splitPages, pages)
+	}
+	if startPages != 1 || !pages[firstSplitPage].splitStart {
+		t.Fatalf("split start on %d page(s), want only the first split page (pages %+v)", startPages, pages)
 	}
 	if completePages != 1 || !pages[lastSplitPage].splitComplete {
 		t.Fatalf("split complete on %d page(s), want only the last split page (pages %+v)", completePages, pages)

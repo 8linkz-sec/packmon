@@ -26,7 +26,11 @@
   vulnerability rows' 12 MiB (28 MiB in total). A page cut by its budget
   holds fewer rows than the `limit` but still continues after its last row,
   and every dataset with rows left delivers at least one row per page, so a
-  sync always makes progress. The wire format is unchanged: current and older
+  sync makes progress as long as a page fits the cap. Because the first row of
+  each dataset is always accepted, only pathological rows several MiB larger
+  than their budgets (for example one 13 MiB malicious row next to full
+  vulnerability, reputation, and lifecycle pages) can still push a page past
+  32 MiB and stall the sync. The wire format is unchanged: current and older
   clients already follow `truncated` and `next_cursor`, and a sequence that
   an older server started continues by its keyset cursors or offsets.
 - An incremental `packmon db sync` now drops the packages that an advisory too
@@ -34,17 +38,21 @@
   full sync. The server split such an advisory over several pages without
   `vulnerability_affected_complete`, so the client only upserted them. Every
   page of a split now names the advisory in the new optional
-  `vulnerability_split_advisory` field, and the last split page sets
+  `vulnerability_split_advisory` field, the page that starts the split also
+  sets `vulnerability_split_start`, and the last split page sets
   `vulnerability_split_complete` when the server finds that neither the
-  advisory nor any of its affected packages changed after the pinned snapshot,
-  so the split pages missed no package that still exists. The client collects
-  the packages the split pages of one sync delivered and, on that page, drops
-  the advisory's other local packages in the synced ecosystems in the page's
-  transaction. A split that changed on the server meanwhile, an interrupted
-  sync, or a split the client did not see from its first page drops nothing,
-  and the next delta delivers a changed advisory again. Older clients ignore
-  the fields and older servers omit them, so both keep the previous
-  upsert-only behavior.
+  advisory nor any of its affected packages changed after the pinned snapshot
+  (an epoch-safe transaction ID check), so the split pages missed no package
+  that still exists. The client collects the packages the split pages of one
+  sync delivered and, on that page, drops the advisory's other local packages
+  in the synced ecosystems in the page's transaction. It does so only when it
+  received the start page (marked, and not requested with an advisory row
+  cursor) and every later page of the split; a page without the markers, for
+  example from an older server during a rolling upgrade, ends the split. A
+  split that changed on the server meanwhile, an interrupted sync, or a split
+  that an older server started or continued drops nothing, and the next delta
+  delivers a changed advisory again. Older clients ignore the fields and older
+  servers omit them, so both keep the previous upsert-only behavior.
 - `packmon-server migrate` no longer keeps an `INVALID` index left by an
   interrupted `CREATE INDEX CONCURRENTLY` (connection drop, cancel, crash).
   A retry used to skip such an index because the migrations use

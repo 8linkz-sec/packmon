@@ -1746,6 +1746,14 @@ components:
             that continues it), and names that advisory. Such pages never carry
             vulnerability_affected_complete. Omitted on every other page; older
             clients ignore it and older servers never send it.
+        vulnerability_split_start:
+          type: boolean
+          description: >-
+            Present and true only on the page that starts a split (see
+            vulnerability_split_advisory): a page the client did not request
+            with an advisory row cursor, whose first advisory alone exceeds the
+            page byte budget. Omitted on every other page; older clients ignore
+            it and older servers never send it.
         vulnerability_split_complete:
           type: boolean
           description: >-
@@ -1754,16 +1762,22 @@ components:
             sequence together delivered every current affected package of the
             advisory within the requested ecosystems: neither the advisory nor
             any of its affected packages changed after the pinned snapshot. A
-            client that received every page of the split in this sequence, with
-            a since window and without a full sync, may then drop, in this
-            page's transaction, its local affected rows of the advisory in the
-            requested ecosystems that no split page delivered. A client that
-            did not see the split from its first page, or whose split pages
-            carried rows of another advisory or withdrawn rows, must not
-            replace. When the advisory changed during the split the field is
-            omitted and the pages stay upsert-only; the change makes the next
-            delta deliver the advisory again. Older clients ignore it and keep
-            such rows until a full sync, and older servers never send it.
+            client with a since window and without a full sync may then drop,
+            in this page's transaction, its local affected rows of the advisory
+            in the requested ecosystems that no split page delivered, but only
+            when it received in this sequence the page that started the split
+            (marked vulnerability_split_start and not requested with an
+            advisory row cursor) and every later page of the split, each naming
+            the advisory, and this page is not the start page. A page without
+            the split markers, such as one from an older server during a
+            rolling upgrade, ends the split, so a split an older server started
+            or continued must not be replaced; neither must one whose pages
+            carried a second start marker, rows of another advisory, or
+            withdrawn rows. When the advisory changed during the split the
+            field is omitted and the pages stay upsert-only; the change makes
+            the next delta deliver the advisory again. Older clients ignore it
+            and keep such rows until a full sync, and older servers never send
+            it.
 
     SyncCursor:
       type: object

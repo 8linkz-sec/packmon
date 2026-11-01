@@ -951,7 +951,10 @@ Local SQLite sync:
   byte budget (an upper bound of its rows' JSON encoding) besides the row
   `limit`: 12 MiB of vulnerability rows and 8, 4, and 4 MiB of malicious,
   reputation, and lifecycle rows, 28 MiB in total. Each dataset still delivers
-  at least one row per page, so a sync always makes progress; an advisory
+  at least one row per page, so a sync makes progress as long as the page fits
+  the cap; only pathological rows several MiB larger than their budgets can
+  together push a page past 32 MiB, which the client then rejects on every
+  retry instead of buffering it; an advisory
   whose affected rows alone exceed the vulnerability budget is split across
   several pages that never carry `vulnerability_affected_complete` and stay
   upsert-only unless the last of them reports the split complete (see the
@@ -990,12 +993,21 @@ Local SQLite sync:
   when that page carries `vulnerability_split_complete`, which the server sets
   after checking that neither the advisory nor any of its affected rows has a
   version newer than the pinned snapshot (so the split pages, which cover its
-  whole key space, missed no row that still exists). The client then drops
-  only the advisory's rows in the requested ecosystems that none of the split
-  pages it received in that sequence delivered, and replaces nothing when it
-  did not see the split from its first page or a split page carried another
-  advisory's row or a withdrawn row. The split rows are collected in memory,
-  so an interrupted sequence replaces nothing.
+  whole key space, missed no row that still exists). That check compares the
+  rows' 32-bit `xmin` with the 64-bit snapshot transaction ID modulo 2^32 and
+  fails unless the snapshot is at most 2^31 transactions old, so it stays
+  sound past the first transaction ID epoch and errs only toward not
+  replacing. The client then drops only the advisory's rows in the requested
+  ecosystems that none of the split pages it received in that sequence
+  delivered, and only when it received the page that started the split --
+  marked `vulnerability_split_start` and not requested with an advisory row
+  cursor -- and every later page of the split, each naming the advisory. A
+  page without the markers (an older server during a rolling upgrade) ends
+  the split on the client, so a split an older server started or continued
+  is never replaced; a second start marker, a row of another advisory, or a
+  withdrawn row on a split page, or a complete marker on the start page,
+  replaces nothing either. The split rows are collected in memory, so an
+  interrupted sequence replaces nothing.
   The replacement therefore never runs for full syncs (which clear and reload
   the local tables), syncs without `since`, unflagged pages other than the
   complete last page of such a split, or older servers' multi-page deltas. A

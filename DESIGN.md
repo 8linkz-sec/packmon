@@ -1166,11 +1166,17 @@ and 4 MiB (`db.SyncMaliciousPageByteBudget`, `db.SyncReputationPageByteBudget`,
 `db.SyncLifecyclePageByteBudget`). The budgets total 28 MiB and leave 4 MiB for
 the envelope. A malicious, reputation, or lifecycle page ends before the row
 that no longer fits its budget, never before its first row, so every dataset
-with rows left advances on every page and a single row larger than its budget
-is still delivered alone; such a page holds fewer rows than the `limit` and
-still continues after its last row (keyset cursor and offset), so clients
-follow `truncated` and the per-dataset `next_cursor` instead of comparing row
-counts with the `limit`. When the next
+with rows left delivers at least one row per page and a single row larger than
+its budget is still delivered alone; such a page holds fewer rows than the
+`limit` and still continues after its last row (keyset cursor and offset), so
+clients follow `truncated` and the per-dataset `next_cursor` instead of
+comparing row counts with the `limit`. Progress is therefore guaranteed only
+while the page fits the client cap: because the first row of each dataset is
+always accepted, pathological rows several MiB larger than their budgets (for
+example one 13 MiB malicious row next to full vulnerability, reputation, and
+lifecycle pages) can together exceed 32 MiB, and the client then rejects that
+page on every retry with `response too large`; no realistic feed row comes
+close to that size. When the next
 advisory no longer fits that budget, the page ends after the last whole
 advisory and stays flagged. When the first advisory of a page alone exceeds
 the budget (an unusually large affected set, whose summary and references
@@ -1181,25 +1187,38 @@ so the client only upserts them; the advisory after it is paged whole and
 flagged again. A split page that finds the advisory changed after the pinned
 snapshot delivers no further rows of it, and the next delta delivers it again.
 Every page of a split, including the one that starts it, names the advisory
-in the optional `vulnerability_split_advisory` field. The pages cover the
+in the optional `vulnerability_split_advisory` field, and the page that
+starts it also carries `vulnerability_split_start: true`. The pages cover the
 advisory's (ecosystem, name) key space in consecutive ranges, each in its own
 statement over the current affected rows, so on the last split page the
 server checks that neither the vulnerability row nor any affected row of the
 advisory (in any ecosystem) has a version newer than the pinned snapshot, by
-`updated_at` and by transaction ID. Only then can no split page have missed a
-row that still exists, and the page sets `vulnerability_split_complete: true`;
-an insert, re-insert, or update of the advisory during the split, or a
-missing snapshot transaction ID, leaves it unset. A non-full client with a
-stored `since` collects the row keys the split pages of one sequence
-delivered for the advisory in memory and, on the complete page, drops in that
-page's transaction its local affected rows of the advisory (within the
-requested ecosystems) that no split page delivered. It replaces nothing when
-it did not see the split from its first page (the complete page never starts
-a split), when a split page carries a row of another advisory or a withdrawn
-row, or when the sequence fails, and an incomplete split stays upsert-only
-until a later delta delivers the advisory again. Both fields are omitted on
-every other page; older clients ignore them and keep a split advisory's stale
-rows until a full sync, and older servers omit them.
+`updated_at` and by transaction ID. The transaction ID comparison is
+epoch-safe: a row's 32-bit `xmin` is compared with the low 32 bits of the
+64-bit snapshot ID modulo 2^32, which never mistakes a change after the
+snapshot for an older version while the snapshot is at most 2^31
+transactions old (the check verifies that with 64-bit IDs and fails
+otherwise); a frozen or ancient `xmin` can at worst fail the check. Only then
+can no split page have missed a row that still exists, and the page sets
+`vulnerability_split_complete: true`; an insert, re-insert, or update of the
+advisory during the split, or a missing snapshot transaction ID, leaves it
+unset. A non-full client with a stored `since` collects the row keys the
+split pages of one sequence delivered for the advisory in memory and, on the
+complete page, drops in that page's transaction its local affected rows of
+the advisory (within the requested ecosystems) that no split page delivered.
+It replaces only when it received, in that sequence, the page that started
+the split -- marked `vulnerability_split_start` and not requested with an
+advisory row cursor, which only continues a split -- and every later page of
+the split, each naming the advisory, with the complete page not being the
+start page. A page without the markers (for example from an older server
+during a rolling upgrade) ends the split on the client, so a split that an
+older server started or continued is never replaced. The client also
+replaces nothing when a split page carries a second start marker, a row of
+another advisory, or a withdrawn row, or when the sequence fails; an
+incomplete split stays upsert-only until a later delta delivers the advisory
+again. The split fields are omitted on every other page; older clients
+ignore them and keep a split advisory's stale rows until a full sync, and
+older servers omit them.
 Full exports and the legacy delta row pages honor the same byte budget and
 continue after the last delivered row. The server
 promises that the affected sets of a page are complete, with

@@ -124,8 +124,9 @@ func jsonStringWireBytes(s string) int {
 // syncVulnerabilityPageBuilder assembles one page of the vulnerability
 // dataset from the rows its query returns, in order, and bounds the page by
 // the estimated wire bytes of its rows (syncVulnerabilityWireBytes) as well
-// as by rows, so a sync response always stays below the size a client
-// accepts and the sync makes progress:
+// as by rows, so a sync response stays below the size a client accepts
+// (unless first rows far over their budgets add up past it, see
+// db.SyncVulnerabilityPageByteBudget) and the dataset advances on every page:
 //
 //   - An advisory page (syncVulnerabilityAdvisoryPages) keeps advisories
 //     whole. When the next advisory no longer fits the budget, the page ends
@@ -142,7 +143,8 @@ func jsonStringWireBytes(s string) int {
 //     exporter checks whether the split is complete. It is always split and
 //     always continues.
 //   - Every page of a split, including the one that starts it, names the
-//     split advisory (splitAdvisoryID).
+//     split advisory (splitAdvisoryID), and the page that starts it is
+//     marked as the start (splitStart).
 //   - Row pages (full exports and legacy deltas) end before the row that no
 //     longer fits, never before the first one; their row cursor or offset
 //     continues after the last delivered row.
@@ -237,7 +239,7 @@ func (b *syncVulnerabilityPageBuilder) stopAdvisoryPage() {
 	// rows of the first advisory are package rows.
 	last := b.page.rows[len(b.page.rows)-1]
 	b.page.split = true
-	b.page.splitAdvisoryID = last.ID
+	b.page.splitAdvisoryID, b.page.splitStart = last.ID, true
 	b.page.nextCursor = db.EncodeSyncAdvisoryRowCursor(last.ID, last.Ecosystem, last.Name)
 }
 
@@ -278,10 +280,11 @@ type syncRowPage[T any] struct {
 // its query returns, in order, and bounds it by the estimated wire bytes of
 // its rows (wireBytes) as well as by the row limit the query applies: the page
 // ends before the row that no longer fits the budget, never before the first
-// one, so a sync response stays below the size a client accepts and every
-// dataset advances on every page. A page cut by bytes, or one that filled the
-// row limit, reports more data; its keyset cursor or offset continues after
-// its last row.
+// one, so every dataset advances on every page and a sync response stays
+// below the size a client accepts unless first rows several MiB over their
+// budgets (see db.SyncMaliciousPageByteBudget) add up past it. A page cut by
+// bytes, or one that filled the row limit, reports more data; its keyset
+// cursor or offset continues after its last row.
 type syncRowPageBuilder[T any] struct {
 	limit     int
 	budget    int
