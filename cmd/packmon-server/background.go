@@ -42,6 +42,7 @@ type backgroundServices struct {
 	queueCancel      context.CancelFunc
 	queueDone        chan error
 	queueDones       []chan error
+	queueDeferred    chan error
 	retentionDone    chan error
 	managerStartDone chan struct{}
 	backgroundTasks  sync.WaitGroup
@@ -439,11 +440,74 @@ func (b *backgroundServices) restartQueueProcessor() error {
 
 	oldDone := b.stopQueueProcessorLocked()
 	if oldDone != nil && !b.waitForQueueProcessor(oldDone, "restart") {
-		b.queueDone = oldDone
+		b.deferQueueRestartLocked(oldDone)
 		return nil
 	}
 	b.removeQueueDoneLocked(oldDone)
+	if oldDone != nil && b.queueDeferred == oldDone {
+		b.queueDeferred = nil
+	}
 	return b.startQueueProcessorLocked()
+}
+
+// deferQueueRestartLocked keeps tracking a generation that missed the restart
+// deadline and starts its replacement once it exits. The new settings are
+// already in the config, and saving them again is a no-op, so without this
+// continuation the async workers would stay stopped until the next effective
+// change or a server restart.
+//
+// The continuation becomes the only reader of the old generation's channel and
+// forwards the exit result to a tracked channel, so a later restart or the
+// shutdown path can still wait for that generation.
+func (b *backgroundServices) deferQueueRestartLocked(oldDone chan error) {
+	if b.queueDeferred != nil && b.queueDeferred == oldDone {
+		// A continuation already waits for this generation and starts the
+		// replacement from the then-current settings.
+		b.queueDone = oldDone
+		return
+	}
+	forward := make(chan error, 1)
+	b.removeQueueDoneLocked(oldDone)
+	b.queueDones = append(b.queueDones, forward)
+	b.queueDone = forward
+	b.queueDeferred = forward
+	go b.finishDeferredQueueRestart(oldDone, forward)
+}
+
+func (b *backgroundServices) finishDeferredQueueRestart(oldDone, forward chan error) {
+	err := <-oldDone
+	// Publish the exit before taking the lock: a later restart holds queueMu
+	// while it waits on forward and must be able to finish.
+	forward <- err
+
+	b.queueMu.Lock()
+	defer b.queueMu.Unlock()
+	if b.queueDeferred == forward {
+		b.queueDeferred = nil
+	}
+	if b.queueDone != forward {
+		// A later restart already consumed the exit and started the
+		// replacement, or shutdown took over and waits on forward itself.
+		return
+	}
+	// Nobody else consumed the exit: restarts only read forward while holding
+	// queueMu, and shutdown clears queueDone before it reads.
+	<-forward
+	b.removeQueueDoneLocked(forward)
+	b.queueDone = nil
+	if err != nil && !errors.Is(err, context.Canceled) && b.logger != nil {
+		b.logger.Error("queue processor stopped with error", "reason", "deferred restart", "error", err)
+	}
+	if err := b.startQueueProcessorLocked(); err != nil {
+		if b.logger != nil {
+			b.logger.Error("queue processor replacement failed to start after delayed stop; queue worker settings are not applied",
+				"error", err)
+		}
+		return
+	}
+	if b.logger != nil && b.queueDone != nil {
+		b.logger.Info("queue processor replacement started after delayed stop")
+	}
 }
 
 func (b *backgroundServices) stopQueueProcessorLocked() chan error {
@@ -484,7 +548,7 @@ func (b *backgroundServices) waitForQueueProcessor(done chan error, reason strin
 		return true
 	case <-time.After(wait):
 		if b.logger != nil {
-			b.logger.Warn("queue processor did not stop before deadline; replacement not started",
+			b.logger.Warn("queue processor did not stop before deadline; replacement deferred until it exits",
 				"reason", reason,
 				slog.Duration("timeout", wait))
 		}

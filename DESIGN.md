@@ -1176,7 +1176,12 @@ are applied to the running process immediately and are also loaded on future
 server starts. Each save or reset applies the runtime change, persists it, and
 rolls the runtime back if persistence fails as one step ordered against other
 feed saves and resets, so overlapping changes leave the runtime on the last
-committed configuration. The save and reset forms carry the stored override's
+committed configuration. A change to a queue-worker feed (Socket.dev,
+ReversingLabs) restarts the refresh-queue processor; when the previous
+processor generation misses the shutdown-timeout deadline, it is left to
+finish and its replacement starts as soon as it exits, from the settings
+current at that time, so the change is never silently dropped. The save and
+reset forms carry the stored override's
 revision (`updated_at`) from the rendered page; a submitted revision that no
 longer matches the stored override is rejected with the conflict message
 instead of overwriting another admin's change. HTTP route wiring and API

@@ -16,6 +16,12 @@
 
 ### Fixed
 
+- A Socket.dev or ReversingLabs feed setting change no longer leaves the
+  refresh-queue workers stopped when the previous queue generation misses the
+  restart deadline. The replacement now starts as soon as that generation
+  exits, with the settings current at that time; before, both providers'
+  queue processing stayed stopped until another effective change or a server
+  restart, because saving the same settings again is a no-op.
 - Local scans no longer report ReversingLabs reputation findings that the
   server's `/api/v1/check` ignores. `GET /api/v1/sync` now exports reputation
   rows only while ReversingLabs is enabled in `self` mode; otherwise it sends
