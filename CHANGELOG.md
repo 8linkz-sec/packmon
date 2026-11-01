@@ -363,6 +363,19 @@
   the next delta. Older servers omit the field (or set it only on a delta that
   fits in one page) and older clients ignore it, so both keep the previous
   upsert-only behavior on larger deltas.
+- An incremental `packmon db sync` now also removes an advisory that lost every
+  affected package on the server. Such an advisory had no affected row left,
+  so no delta page ever delivered it and a local scan kept reporting it until a
+  full sync while `/api/v1/check` no longer did. A flagged delta page
+  (`vulnerability_affected_complete`) now lists the IDs of such changed
+  advisories in the new optional `vulnerabilities_without_affected` array, and
+  the client drops their local rows in that page's transaction. The list is
+  scoped to the requested ecosystems: an ecosystem-filtered sync also lists an
+  advisory without an affected package in those ecosystems (for example one
+  whose coverage moved to another ecosystem) and drops only its rows in those
+  ecosystems. Each listed advisory takes one row of the page's `limit`. Older
+  clients ignore the field and older servers omit it, so both keep the
+  previous behavior.
 - Manual advisory writes and deletes on PostgreSQL use the normalized
   (trimmed) advisory ID throughout. A padded ID such as ` manual:x ` no longer
   leaves both the vulnerability and the malicious record active after a type

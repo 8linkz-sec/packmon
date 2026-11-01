@@ -165,6 +165,99 @@ func TestBuildAdvisoryPageQueryNeverSplitsAnAdvisory(t *testing.T) {
 	}
 }
 
+// TestBuildAdvisoryPageQueryKeepsAdvisoriesWithoutAffectedRows pins how a
+// delta page reaches a changed advisory that has no affected row left within
+// the requested ecosystems: the page candidates and the exported rows LEFT JOIN
+// the in-scope affected packages, so such an advisory takes one slot of the
+// page and comes back as one marker row (without_affected) instead of
+// vanishing from every delta.
+func TestBuildAdvisoryPageQueryKeepsAdvisoriesWithoutAffectedRows(t *testing.T) {
+	t.Parallel()
+
+	since := time.Unix(1700000000, 0).UTC()
+	for _, tt := range []struct {
+		name       string
+		ecosystems []string
+		join       string
+	}{
+		{name: "unfiltered", join: "LEFT JOIN affected_packages ap ON ap.vulnerability_id = v.id LEFT JOIN LATERAL"},
+		{name: "filtered", ecosystems: []string{"npm"}, join: "LEFT JOIN affected_packages ap ON ap.vulnerability_id = v.id AND ap.ecosystem = ANY($"},
+	} {
+		query, _, err := buildExportSyncVulnerabilitiesQuery(db.SyncExportOptions{Since: &since, Ecosystems: tt.ecosystems, Limit: 2}, since.Add(time.Hour), 42)
+		if err != nil {
+			t.Fatalf("%s: build advisory page query: %v", tt.name, err)
+		}
+		normalized := strings.Join(strings.Fields(query), " ")
+		pageQuery := normalized[strings.Index(normalized, "page_candidates AS ("):]
+		if strings.Contains(pageQuery, "INNER JOIN affected_packages") {
+			t.Fatalf("%s: advisory page query inner-joins affected packages, dropping advisories without rows:\n%s", tt.name, query)
+		}
+		for _, want := range []string{
+			"SUM(COUNT(*)) OVER (ORDER BY v.id)",
+			"(ap.vulnerability_id IS NULL) AS without_affected",
+			"COALESCE(ap.ecosystem, '')",
+			"COALESCE(ap.version_ranges::text, '[]')",
+		} {
+			if !strings.Contains(pageQuery, want) {
+				t.Fatalf("%s: advisory page query missing %q in:\n%s", tt.name, want, query)
+			}
+		}
+		joins := strings.Count(pageQuery, "LEFT JOIN affected_packages ap ON ap.vulnerability_id = v.id")
+		if joins != 2 {
+			t.Fatalf("%s: advisory page query LEFT JOINs affected packages %d times, want 2:\n%s", tt.name, joins, query)
+		}
+		if tt.ecosystems != nil && strings.Count(pageQuery, tt.join) != 2 {
+			t.Fatalf("%s: advisory page query must scope both affected joins with %q:\n%s", tt.name, tt.join, query)
+		}
+		if strings.Contains(pageQuery, "WHERE TRUE AND ap.ecosystem") {
+			t.Fatalf("%s: advisory page query filters ecosystems in WHERE, dropping advisories without in-scope rows:\n%s", tt.name, query)
+		}
+	}
+}
+
+// TestSyncAdvisoryPageCollectsAdvisoriesWithoutAffectedRows feeds marker rows
+// of an advisory page into the page: they never become package rows, they
+// list the advisory ID once, and they still advance the advisory cursor, so a
+// page that ends with (or only holds) such advisories continues after them.
+func TestSyncAdvisoryPageCollectsAdvisoriesWithoutAffectedRows(t *testing.T) {
+	t.Parallel()
+
+	page := newSyncAdvisoryPage()
+	page.add(db.SyncVulnerability{ID: "GHSA-a", Ecosystem: "npm", Name: "left-pad"}, false)
+	page.add(db.SyncVulnerability{ID: "GHSA-b"}, true)
+	page.add(db.SyncVulnerability{ID: "GHSA-c", Withdrawn: true}, true)
+	if len(page.rows) != 1 || page.rows[0].ID != "GHSA-a" {
+		t.Fatalf("advisory page rows = %+v, want only the GHSA-a package row", page.rows)
+	}
+	if !slices.Equal(page.withoutAffected, []string{"GHSA-b", "GHSA-c"}) {
+		t.Fatalf("advisory page without-affected IDs = %q, want GHSA-b and GHSA-c", page.withoutAffected)
+	}
+	if page.lastAdvisoryID != "GHSA-c" {
+		t.Fatalf("advisory page last advisory = %q, want GHSA-c", page.lastAdvisoryID)
+	}
+
+	for _, tt := range []struct {
+		name string
+		page syncVulnerabilityPage
+		want string
+	}{
+		{name: "page ending with an advisory without rows", page: page, want: "GHSA-c"},
+		{name: "page holding only advisories without rows", page: syncVulnerabilityPage{withoutAffected: []string{"GHSA-d"}, lastAdvisoryID: "GHSA-d"}, want: "GHSA-d"},
+	} {
+		truncated, next := nextSyncExportCursor(db.SyncCursor{}, syncVulnerabilityAdvisoryPages, syncDatasets{
+			vulnerabilities:               tt.page.rows,
+			vulnerabilitiesHaveMore:       true,
+			vulnerabilitiesLastAdvisoryID: tt.page.lastAdvisoryID,
+		}, 2)
+		if !truncated || next == nil {
+			t.Fatalf("%s: truncated %v next %+v, want more data", tt.name, truncated, next)
+		}
+		if id, ok := db.DecodeSyncAdvisoryCursor(next.VulnerabilitiesCursor); !ok || id != tt.want {
+			t.Fatalf("%s: vulnerabilities_cursor decodes to %q, %v; want an advisory cursor after %s", tt.name, id, ok, tt.want)
+		}
+	}
+}
+
 // TestBuildLegacyVulnerabilityQueriesKeepRowPaging keeps full exports and
 // delta pages that continue a legacy row cursor on (ecosystem, name, id) row
 // paging, and pages a legacy offset delta in advisory row order.

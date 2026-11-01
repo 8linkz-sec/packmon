@@ -337,6 +337,9 @@ func newSyncResponseEnvelope(exported *db.SyncExport, feedStatus string, feedVer
 	resp.HasMore = exported.Truncated
 	resp.NextCursor = syncCursorResponse(exported.NextCursor)
 	resp.VulnerabilityAffectedComplete = exported.VulnerabilityAffectedComplete
+	if exported.VulnerabilityAffectedComplete {
+		resp.VulnerabilitiesWithoutAffected = exported.VulnerabilitiesWithoutAffected
+	}
 	return resp
 }
 

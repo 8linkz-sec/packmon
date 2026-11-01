@@ -143,7 +143,10 @@ type syncAffectedReplacement struct {
 // flagged page of a multi-page delta replaces the vulnerabilities it delivered
 // even when an earlier or later page of the sequence is unflagged.
 // Withdrawn vulnerabilities are deleted by applySyncVulnerabilities instead of
-// being replaced.
+// being replaced. A vulnerability the page lists in
+// vulnerabilities_without_affected has no affected package left on the server
+// (within the requested ecosystems), so it is replaced by an empty set; when
+// the page also delivers rows for it, the rows win.
 func newSyncAffectedReplacement(pass syncPass, resp *syncResponse, ecosystems []string) *syncAffectedReplacement {
 	if pass.full || pass.cursorState.Since == "" || !resp.VulnerabilityAffectedComplete {
 		return nil
@@ -165,6 +168,18 @@ func newSyncAffectedReplacement(pass syncPass, resp *syncResponse, ecosystems []
 			received[v.ID] = keys
 		}
 		keys[syncVulnerabilityRowKey(v.ID, v.Ecosystem, normalizePackageName(v.Ecosystem, v.Name))] = struct{}{}
+	}
+	for _, id := range resp.VulnerabilitiesWithoutAffected {
+		if id = strings.TrimSpace(id); id == "" {
+			continue
+		}
+		if _, ok := received[id]; ok {
+			continue
+		}
+		if _, ok := withdrawn[id]; ok {
+			continue
+		}
+		received[id] = map[string]struct{}{}
 	}
 	if len(received) == 0 {
 		return nil
@@ -232,8 +247,11 @@ type (
 // When a page of a delta with a since window reports
 // vulnerability_affected_complete, that page also drops, in its transaction,
 // local affected rows of each delivered vulnerability that it did not deliver
-// (syncAffectedReplacement). The flag holds per page, so flagged pages of a
-// multi-page delta replace too; unflagged pages stay upsert-only.
+// (syncAffectedReplacement), and drops the local affected rows of each
+// vulnerability it lists in vulnerabilities_without_affected (one that has no
+// affected package left within the requested ecosystems). The flag holds per
+// page, so flagged pages of a multi-page delta replace too; unflagged pages
+// stay upsert-only.
 func Sync(ctx context.Context, store *Store, cfg SyncConfig) error {
 	cfg, err := validateSyncConfig(cfg)
 	if err != nil {

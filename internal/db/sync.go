@@ -40,6 +40,13 @@ type SyncExport struct {
 	// not send. It holds per page: a delta paged by whole advisories never
 	// splits a vulnerability across pages, and each page is one statement.
 	VulnerabilityAffectedComplete bool
+	// VulnerabilitiesWithoutAffected lists, on a page that carries
+	// VulnerabilityAffectedComplete, the IDs of changed vulnerabilities on
+	// that page that have no affected package left (within the requested
+	// ecosystems). They have no row to export, so the delta client drops their
+	// local affected rows (within the requested ecosystems) instead. It is
+	// empty on every unflagged page.
+	VulnerabilitiesWithoutAffected []string
 }
 
 // syncAdvisoryCursorTag versions the vulnerabilities_cursor of a delta that

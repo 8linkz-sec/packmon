@@ -1101,9 +1101,19 @@ instead of requiring a full sync. Older servers set the field only on a delta
 that fits in one page, servers without the guarantee omit it, and clients that
 do not know it keep upserting rows, so older clients and servers remain
 compatible; a new client against an older server stays upsert-only on every
-multi-page delta. An ecosystem-filtered sync replaces rows only in its
-ecosystems and cannot see an advisory that moved entirely to another ecosystem
-(it has no in-scope affected row left to deliver); an unfiltered sync does.
+multi-page delta. A changed advisory without any affected row left within the
+requested ecosystems (it lost every package, or, on an ecosystem-filtered
+sync, every package in those ecosystems) has no row to deliver, so the page
+query LEFT JOINs the in-scope affected packages: such an advisory takes one
+row of the page's limit, and a flagged page lists its ID in the optional
+`vulnerabilities_without_affected` array instead of a package row. The client
+treats a listed ID as a delivered vulnerability with an empty affected set and
+drops its local rows in the requested ecosystems in that page's transaction;
+rows of other ecosystems stay, and rows the same page delivers for that ID
+win over the list. An ecosystem-filtered sync therefore replaces rows only in
+its ecosystems, including those of an advisory that moved entirely to another
+ecosystem. Unflagged pages never carry the list, older servers omit it, and
+older clients ignore it, so they keep such rows until a full sync.
 Malicious rows are keyed by ID, so a changed row already replaces the local
 one.
 Local scans query those reputation rows through explicit reputation lookup

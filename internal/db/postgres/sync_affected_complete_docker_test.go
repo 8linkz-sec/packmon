@@ -10,12 +10,14 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/8linkz-sec/packmon/internal/db"
 	"github.com/8linkz-sec/packmon/internal/db/sqlite"
+	"github.com/8linkz-sec/packmon/internal/domain"
 	"github.com/8linkz-sec/packmon/internal/ioutils"
 	"github.com/8linkz-sec/packmon/internal/synccontract"
 )
@@ -257,6 +259,9 @@ func newLoopbackSyncServer(t *testing.T, store *Store, limit int, beforePage fun
 		if since := parseTime(q.Get("since")); !since.IsZero() {
 			opts.Since = &since
 		}
+		if raw := q.Get("ecosystem"); raw != "" {
+			opts.Ecosystems = strings.Split(raw, ",")
+		}
 		exported, err := store.ExportSync(r.Context(), opts)
 		if err != nil {
 			t.Errorf("ExportSync() error = %v", err)
@@ -396,6 +401,157 @@ func testMultiPageDeltaReplacesWholeAdvisoriesChangedBetweenPages(ctx context.Co
 		if !slices.Equal(afterNext[id], want) {
 			t.Fatalf("local affected packages of %s after the next delta = %q, want %q (all local rows: %v)", id, afterNext[id], want, afterNext)
 		}
+	}
+}
+
+// seedLocalSyncRows stores npm-style local affected rows of one advisory in
+// the given ecosystem, matching what an earlier sync would have written.
+func seedLocalSyncRows(ctx context.Context, t *testing.T, local *sqlite.Store, id, ecosystem string, names ...string) {
+	t.Helper()
+	for _, name := range names {
+		if _, err := local.DB().ExecContext(ctx, `
+			INSERT INTO vulnerabilities_local(row_key, id, ecosystem, name, version_ranges, versions_affected, severity)
+			VALUES (?, ?, ?, ?, '[]', '[]', 'HIGH')`, id+"|"+ecosystem+"|"+name, id, ecosystem, name); err != nil {
+			t.Fatalf("seed local row %s/%s/%s: %v", id, ecosystem, name, err)
+		}
+	}
+}
+
+// localAndRemoteAdvisories returns the advisories among ids that a remote
+// check (the PostgreSQL lookup behind /api/v1/check) and a local scan (the
+// synced SQLite lookup) report for one package version.
+func localAndRemoteAdvisories(ctx context.Context, t *testing.T, store *Store, local *sqlite.Store, ecosystem, name string, ids ...string) (remote, localIDs []string) {
+	t.Helper()
+	pick := func(findings []domain.Finding) []string {
+		var out []string
+		for _, finding := range findings {
+			if slices.Contains(ids, finding.AdvisoryID) && !slices.Contains(out, finding.AdvisoryID) {
+				out = append(out, finding.AdvisoryID)
+			}
+		}
+		slices.Sort(out)
+		return out
+	}
+	remoteFindings, err := store.FindVulnerabilities(ctx, ecosystem, name, "1.0.0")
+	if err != nil {
+		t.Fatalf("remote FindVulnerabilities(%s/%s) error = %v", ecosystem, name, err)
+	}
+	localFindings, err := local.FindVulnerabilities(ctx, ecosystem, name, "1.0.0")
+	if err != nil {
+		t.Fatalf("local FindVulnerabilities(%s/%s) error = %v", ecosystem, name, err)
+	}
+	return pick(remoteFindings), pick(localFindings)
+}
+
+// testDeltaDeliversAdvisoriesWithoutAffectedPackages covers advisories that
+// lose every affected package on the server (within the requested
+// ecosystems): one loses all of its packages, one moves from npm to pypi. Such
+// an advisory has no row to deliver, so a flagged delta page lists it in
+// VulnerabilitiesWithoutAffected -- also when it is the only advisory on a
+// page -- and the real SQLite client drops its local rows in the requested
+// ecosystems. Afterwards a local scan reports exactly what a remote check
+// reports, and a filtered sync keeps rows of other ecosystems.
+func testDeltaDeliversAdvisoriesWithoutAffectedPackages(ctx context.Context, t *testing.T, store *Store) {
+	t.Helper()
+
+	const (
+		idGone  = "GHSA-no-affected-gone"
+		idMoved = "GHSA-no-affected-moved"
+		idKept  = "GHSA-no-affected-kept"
+	)
+	insertSyncPagingAdvisory(ctx, t, store, idGone, "gone-a", "gone-b")
+	insertSyncPagingAdvisory(ctx, t, store, idMoved, "moved-a")
+	insertSyncPagingAdvisory(ctx, t, store, idKept, "kept-a")
+
+	newLocal := func(withOtherEcosystem bool) *sqlite.Store {
+		local, err := sqlite.New(filepath.Join(t.TempDir(), "packmon.db"))
+		if err != nil {
+			t.Fatalf("sqlite.New() error = %v", err)
+		}
+		t.Cleanup(func() { ioutils.CloseSilently(local) })
+		seedLocalSyncRows(ctx, t, local, idGone, "npm", "gone-a", "gone-b")
+		seedLocalSyncRows(ctx, t, local, idMoved, "npm", "moved-a")
+		seedLocalSyncRows(ctx, t, local, idKept, "npm", "kept-a")
+		if withOtherEcosystem {
+			seedLocalSyncRows(ctx, t, local, idGone, "pypi", "gone-py")
+		}
+		return local
+	}
+	unfiltered, filtered := newLocal(false), newLocal(true)
+	since := syncDeltaBoundary(ctx, t, store)
+	for _, local := range []*sqlite.Store{unfiltered, filtered} {
+		if err := local.SetSyncMeta(ctx, "last_sync_at", since.Format(time.RFC3339Nano)); err != nil {
+			t.Fatalf("seed local last sync: %v", err)
+		}
+	}
+
+	for _, stmt := range []string{
+		`DELETE FROM affected_packages WHERE vulnerability_id = 'GHSA-no-affected-gone'`,
+		`DELETE FROM affected_packages WHERE vulnerability_id = 'GHSA-no-affected-moved'`,
+		`INSERT INTO affected_packages(vulnerability_id, ecosystem, name, version_ranges, versions_affected) VALUES ('GHSA-no-affected-moved', 'pypi', 'moved-a', '[]'::jsonb, '[]'::jsonb)`,
+		`UPDATE vulnerabilities SET updated_at = NOW() WHERE id IN ('GHSA-no-affected-gone', 'GHSA-no-affected-moved')`,
+	} {
+		if _, err := store.pool.Exec(ctx, stmt); err != nil {
+			t.Fatalf("drop affected packages before the delta: %v", err)
+		}
+	}
+
+	unfilteredExport, err := store.ExportSync(ctx, db.SyncExportOptions{Since: &since})
+	if err != nil {
+		t.Fatalf("ExportSync(unfiltered delta) error = %v", err)
+	}
+	if !unfilteredExport.VulnerabilityAffectedComplete || !slices.Equal(unfilteredExport.VulnerabilitiesWithoutAffected, []string{idGone}) {
+		t.Fatalf("unfiltered delta complete=%v without-affected=%q, want a flagged page listing only %s", unfilteredExport.VulnerabilityAffectedComplete, unfilteredExport.VulnerabilitiesWithoutAffected, idGone)
+	}
+	if got := syncExportRowsByID(unfilteredExport.Vulnerabilities); len(got) != 1 || !slices.Equal(got[idMoved], []string{"moved-a"}) {
+		t.Fatalf("unfiltered delta rows = %v, want only the pypi row of %s", got, idMoved)
+	}
+
+	// One advisory per page: each page holds only a marker and still
+	// continues after it.
+	opts := db.SyncExportOptions{Since: &since, Ecosystems: []string{"npm"}, Limit: 1}
+	var listed []string
+	for pages := 1; ; pages++ {
+		page, err := store.ExportSync(ctx, opts)
+		if err != nil {
+			t.Fatalf("ExportSync(filtered delta page %d) error = %v", pages, err)
+		}
+		if len(page.Vulnerabilities) != 0 || !page.VulnerabilityAffectedComplete {
+			t.Fatalf("filtered delta page %d rows=%d complete=%v, want a flagged page without npm rows", pages, len(page.Vulnerabilities), page.VulnerabilityAffectedComplete)
+		}
+		listed = append(listed, page.VulnerabilitiesWithoutAffected...)
+		if !page.Truncated {
+			break
+		}
+		if pages > 3 {
+			t.Fatalf("filtered delta did not finish after %d pages", pages)
+		}
+		opts.SnapshotAt, opts.SnapshotXID, opts.Cursor = page.SyncedAt, page.SyncedXID, *page.NextCursor
+	}
+	if !slices.Equal(listed, []string{idGone, idMoved}) {
+		t.Fatalf("filtered delta listed %q without affected npm packages, want %s and %s", listed, idGone, idMoved)
+	}
+
+	server := newLoopbackSyncServer(t, store, 1, func(int) {})
+	if err := sqlite.Sync(ctx, unfiltered, sqlite.SyncConfig{ServerURL: server.URL, AllowInsecureHTTP: true}); err != nil {
+		t.Fatalf("sqlite.Sync(unfiltered delta) error = %v", err)
+	}
+	if err := sqlite.Sync(ctx, filtered, sqlite.SyncConfig{ServerURL: server.URL, AllowInsecureHTTP: true, Ecosystems: []string{"npm"}}); err != nil {
+		t.Fatalf("sqlite.Sync(filtered delta) error = %v", err)
+	}
+
+	ids := []string{idGone, idMoved, idKept}
+	for _, pkg := range []struct{ ecosystem, name string }{
+		{"npm", "gone-a"}, {"npm", "gone-b"}, {"npm", "moved-a"}, {"pypi", "moved-a"}, {"npm", "kept-a"},
+	} {
+		remote, local := localAndRemoteAdvisories(ctx, t, store, unfiltered, pkg.ecosystem, pkg.name, ids...)
+		if !slices.Equal(local, remote) {
+			t.Fatalf("%s/%s after the delta: local scan reports %q, remote check reports %q", pkg.ecosystem, pkg.name, local, remote)
+		}
+	}
+	if got := localSyncPagingRows(ctx, t, filtered, idGone, idMoved, idKept); len(got) != 2 ||
+		!slices.Equal(got[idGone], []string{"gone-py"}) || !slices.Equal(got[idKept], []string{"kept-a"}) {
+		t.Fatalf("filtered local rows after the npm delta = %v, want only the pypi row of %s and %s/kept-a", got, idGone, idKept)
 	}
 }
 

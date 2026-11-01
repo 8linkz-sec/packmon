@@ -920,8 +920,12 @@ Local SQLite sync:
   not through malicious-package lookup methods;
 - drops local affected rows of a changed vulnerability only on a delta sync
   page with a stored `since` that carries `vulnerability_affected_complete`,
-  only for vulnerabilities that page delivered, only for rows in the requested
-  ecosystems, and only in that page's transaction. The server sets the flag on
+  only for vulnerabilities that page delivered (as package rows, or by ID in
+  `vulnerabilities_without_affected` when no affected package is left within
+  the requested ecosystems), only for rows in the requested ecosystems, and
+  only in that page's transaction. A listed ID is never stored as a package
+  row, and package rows the same page delivers for it win over the list. The
+  server sets the flag on
   a delta page only when the page is one statement that carries every
   vulnerability on it with its complete current affected set: it pages a delta
   by whole advisories and never splits an advisory across pages, so an

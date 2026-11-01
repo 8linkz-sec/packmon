@@ -1,7 +1,9 @@
 package synccontract
 
 import (
+	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -85,7 +87,8 @@ func TestResponseFromExportMapsAllWireFields(t *testing.T) {
 		Truncated:  true,
 		NextCursor: cursor,
 
-		VulnerabilityAffectedComplete: true,
+		VulnerabilityAffectedComplete:  true,
+		VulnerabilitiesWithoutAffected: []string{"GHSA-empty"},
 	}
 
 	resp := ResponseFromExport(exported, "degraded", map[string]string{"osv": "2026-06-28T00:00:00Z"})
@@ -98,6 +101,9 @@ func TestResponseFromExportMapsAllWireFields(t *testing.T) {
 	}
 	if !resp.VulnerabilityAffectedComplete {
 		t.Fatal("vulnerability_affected_complete = false, want the exporter guarantee passed through")
+	}
+	if len(resp.VulnerabilitiesWithoutAffected) != 1 || resp.VulnerabilitiesWithoutAffected[0] != "GHSA-empty" {
+		t.Fatalf("vulnerabilities_without_affected = %q, want the exported advisory IDs passed through", resp.VulnerabilitiesWithoutAffected)
 	}
 	if !resp.Truncated || !resp.HasMore {
 		t.Fatalf("pagination flags = truncated %v has_more %v, want both true", resp.Truncated, resp.HasMore)
@@ -131,6 +137,39 @@ func TestResponseFromExportMapsAllWireFields(t *testing.T) {
 	}
 	if len(resp.Lifecycle) != 1 || !reflect.DeepEqual(resp.Lifecycle[0], wantLifecycle) {
 		t.Fatalf("lifecycle wire row = %+v, want %+v", resp.Lifecycle, wantLifecycle)
+	}
+}
+
+// TestVulnerabilitiesWithoutAffectedStaysOptional keeps the advisory list off
+// the wire unless a page carries one, and checks that a client built before
+// the field existed decodes such a page without seeing a package row for it.
+func TestVulnerabilitiesWithoutAffectedStaysOptional(t *testing.T) {
+	t.Parallel()
+
+	empty, err := json.Marshal(ResponseFromExport(&db.SyncExport{}, "healthy", nil))
+	if err != nil {
+		t.Fatalf("marshal response without the list: %v", err)
+	}
+	if strings.Contains(string(empty), "vulnerabilities_without_affected") {
+		t.Fatalf("response without advisories lacking affected rows = %s, want the field omitted", empty)
+	}
+
+	payload, err := json.Marshal(ResponseFromExport(&db.SyncExport{
+		VulnerabilityAffectedComplete:  true,
+		VulnerabilitiesWithoutAffected: []string{"GHSA-empty"},
+	}, "healthy", nil))
+	if err != nil {
+		t.Fatalf("marshal response with the list: %v", err)
+	}
+	var older struct {
+		Vulnerabilities               []Vulnerability `json:"vulnerabilities"`
+		VulnerabilityAffectedComplete bool            `json:"vulnerability_affected_complete"`
+	}
+	if err := json.Unmarshal(payload, &older); err != nil {
+		t.Fatalf("older client decode error = %v", err)
+	}
+	if len(older.Vulnerabilities) != 0 || !older.VulnerabilityAffectedComplete {
+		t.Fatalf("older client decoded %+v, want no package rows and the flag", older)
 	}
 }
 

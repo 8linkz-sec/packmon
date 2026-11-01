@@ -151,6 +151,22 @@ func TestOpenAPIIncludesCanonicalScanAndSyncFields(t *testing.T) {
 	if fieldTag, ok := reflect.TypeOf(synccontract.Response{}).FieldByName("VulnerabilityAffectedComplete"); !ok || fieldTag.Tag.Get("json") != "vulnerability_affected_complete,omitempty" {
 		t.Fatalf("synccontract.Response.VulnerabilityAffectedComplete json tag = %q (found %v), want vulnerability_affected_complete,omitempty", fieldTag.Tag.Get("json"), ok)
 	}
+	withoutAffected := requireMap(t, syncResponseProperties, "vulnerabilities_without_affected")
+	if got := withoutAffected["type"]; got != "array" {
+		t.Fatalf("SyncResponse.vulnerabilities_without_affected type = %#v, want array", got)
+	}
+	if got := requireMap(t, withoutAffected, "items")["type"]; got != "string" {
+		t.Fatalf("SyncResponse.vulnerabilities_without_affected items type = %#v, want string", got)
+	}
+	withoutAffectedDescription, _ := withoutAffected["description"].(string)
+	for _, want := range []string{"vulnerability_affected_complete", "no affected package left", "requested ecosystems", "not package rows", "other ecosystems stay", "win over the list", "limit", "omitted", "older clients ignore"} {
+		if !strings.Contains(withoutAffectedDescription, want) {
+			t.Fatalf("SyncResponse.vulnerabilities_without_affected description missing %q: %q", want, withoutAffectedDescription)
+		}
+	}
+	if fieldTag, ok := reflect.TypeOf(synccontract.Response{}).FieldByName("VulnerabilitiesWithoutAffected"); !ok || fieldTag.Tag.Get("json") != "vulnerabilities_without_affected,omitempty" {
+		t.Fatalf("synccontract.Response.VulnerabilitiesWithoutAffected json tag = %q (found %v), want vulnerabilities_without_affected,omitempty", fieldTag.Tag.Get("json"), ok)
+	}
 
 	limit := requireOperationParameter(t, syncOperation, "limit", "query")
 	limitSchema := requireMap(t, limit, "schema")

@@ -1675,6 +1675,24 @@ components:
             guarantee omit the field (older servers set it only on a delta that
             fits in one page), and clients that do not know it keep upserting
             rows, so older clients and servers remain compatible.
+        vulnerabilities_without_affected:
+          type: array
+          items:
+            type: string
+          description: >-
+            Present only on a page with vulnerability_affected_complete. Lists
+            the IDs of changed vulnerabilities on this page that have no
+            affected package left within the requested ecosystems (all
+            packages removed, or, on an ecosystem-filtered sync, none left in
+            those ecosystems), so the page has no vulnerability row for them.
+            These IDs are not package rows. The client treats each one as a
+            delivered vulnerability with an empty affected set and drops its
+            local affected rows in the requested ecosystems in that page's
+            transaction; rows of other ecosystems stay, and rows the same page
+            delivers for an ID win over the list. Each listed vulnerability
+            takes one row of the page's limit. The field is omitted when the
+            list is empty; older clients ignore it and keep such rows until a
+            full sync, and older servers never send it.
 
     SyncCursor:
       type: object

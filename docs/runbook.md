@@ -473,9 +473,12 @@ changed again while the sync was paging is completed by the following
 incremental sync. Older servers (which flag only a delta that fits in one
 page) and older clients stay upsert-only on larger deltas and keep the old
 package until a later single-page incremental sync drops it or a full sync,
-which clears and reloads the local tables, replaces it. An ecosystem-filtered
-sync cannot drop the local rows of an advisory whose coverage moved entirely to
-another ecosystem; run an unfiltered sync or a full sync.
+which clears and reloads the local tables, replaces it. An advisory that lost
+every affected package (or, on an ecosystem-filtered sync, every package in
+the filtered ecosystems, for example after its coverage moved to another
+ecosystem) is listed by ID in `vulnerabilities_without_affected` on a flagged
+page, and current clients drop its local rows in the synced ecosystems; older
+clients and servers keep such rows until a full sync.
 
 During a rolling upgrade, a sync sequence that a new server started and an
 older server continues fails with `400` (the older server does not know the

@@ -46,6 +46,14 @@ type Response struct {
 	// never carry it. It is omitted when false, which keeps older clients and
 	// servers compatible (older servers set it only on a single-page delta).
 	VulnerabilityAffectedComplete bool `json:"vulnerability_affected_complete,omitempty"`
+	// VulnerabilitiesWithoutAffected lists, only on a page that carries
+	// VulnerabilityAffectedComplete, the IDs of changed vulnerabilities on that
+	// page that have no affected package left (within the requested
+	// ecosystems), so the page has no row for them. The client drops their
+	// local affected rows (within the requested ecosystems) in that page's
+	// transaction. The IDs are not package rows; older clients ignore the
+	// field and keep such rows until a full sync, and older servers omit it.
+	VulnerabilitiesWithoutAffected []string `json:"vulnerabilities_without_affected,omitempty"`
 }
 
 // Cursor is the opaque paginated-sync cursor returned by the server and echoed
@@ -183,6 +191,9 @@ func ResponseFromExport(exported *db.SyncExport, feedStatus string, feedVersions
 		NextCursor:      cursorFromDB(exported.NextCursor),
 
 		VulnerabilityAffectedComplete: exported.VulnerabilityAffectedComplete,
+	}
+	if exported.VulnerabilityAffectedComplete {
+		resp.VulnerabilitiesWithoutAffected = exported.VulnerabilitiesWithoutAffected
 	}
 
 	for _, vuln := range exported.Vulnerabilities {
