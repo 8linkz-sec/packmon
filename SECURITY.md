@@ -934,7 +934,7 @@ Local SQLite sync:
   server sets the flag on
   a delta page only when the page is one statement that carries every
   vulnerability on it with its complete current affected set: it pages a delta
-  by whole advisories and never splits an advisory across pages, so an
+  by whole advisories and never splits an advisory across flagged pages, so an
   advisory changed between pages is either delivered whole on a later page or
   by the next sync, or excluded whole, and never arrives partially. Full exports and the
   legacy row-cursor and offset pages of a delta, which can split an advisory,

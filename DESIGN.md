@@ -1068,8 +1068,9 @@ selects the next changed advisories in ID order after the advisory cursor and
 exports every in-scope affected row of each of them, ordered by advisory ID. A
 page takes advisories while their affected rows fit the `limit`; the first
 advisory always fits, so an advisory with more affected rows than the limit is
-a page of its own and that page holds more rows than the limit, instead of the
-advisory being split. `next_cursor.vulnerabilities_cursor` then carries a
+a page of its own and that page holds more rows than the limit; the row limit
+alone never splits an advisory (only the byte budget below can).
+`next_cursor.vulnerabilities_cursor` then carries a
 versioned advisory cursor (the last advisory ID of the page), and the dataset
 continues only while the page left an advisory for the next one. Every page is
 also bounded by bytes: the client rejects a response body above 32 MiB, so the

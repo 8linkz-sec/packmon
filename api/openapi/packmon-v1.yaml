@@ -619,7 +619,8 @@ paths:
             vulnerability dataset by whole advisories: a page takes advisories
             while their affected rows fit the limit, and an advisory with more
             affected rows than the limit is a page of its own, so that page
-            holds more rows than the limit instead of splitting the advisory.
+            holds more rows than the limit; the row limit alone never splits
+            an advisory.
             Independently of the limit, the server keeps the vulnerability rows
             of every page within an estimated byte budget well below the 32 MiB
             response size the client accepts: a page then ends after the last
