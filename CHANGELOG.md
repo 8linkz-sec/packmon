@@ -34,7 +34,11 @@
   plain-stderr fatal message printed before a logger is configured. A quoted
   secret value such as libpq's `password='two words'` (single or double
   quotes, with backslash-escaped quotes) is now redacted as a whole; before,
-  only its first word was hidden.
+  only its first word was hidden. The redacted value runs to the next
+  unquoted, unescaped whitespace, `;`, or `&`, so text after a closing quote
+  (`password="ab"cd`, `password=''secret`) or an escaped space
+  (`password=foo\ bar`) no longer leaks, and an unterminated quote redacts the
+  rest of the message.
 - `PACKMON_SERVER_PUBLIC_HOST` must now be a bare `host[:port]`. Values such
   as `packmon.internal#fragment`, `packmon.internal?x=1`, a host with
   whitespace, control characters, a percent-escape, a non-ASCII name, a

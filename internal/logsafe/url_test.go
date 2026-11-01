@@ -224,6 +224,40 @@ func TestRedactDiagnosticMessageRedactsWholeQuotedSecretValues(t *testing.T) {
 			leaked: []string{"unquoted-secret"},
 			want:   `password=[redacted]; next`,
 		},
+		{
+			raw:    `password=plain&next=1`,
+			leaked: []string{"plain"},
+			want:   `password=[redacted]&next=1`,
+		},
+		// A quote does not end the value: characters after the closing quote
+		// up to the next delimiter belong to the same value.
+		{
+			raw:    `password="ab"cd user=packmon`,
+			leaked: []string{"ab", "cd"},
+			want:   `password=[redacted] user=packmon`,
+		},
+		{
+			raw:    `password=''secret user=packmon`,
+			leaked: []string{"secret"},
+			want:   `password=[redacted] user=packmon`,
+		},
+		{
+			raw:    `password='a b'c d=1`,
+			leaked: []string{"a b", "'c"},
+			want:   `password=[redacted] d=1`,
+		},
+		// A backslash-escaped space does not end an unquoted value.
+		{
+			raw:    `password=foo\ bar user=packmon`,
+			leaked: []string{"foo", "bar"},
+			want:   `password=[redacted] user=packmon`,
+		},
+		// An unterminated quote redacts the rest of the message.
+		{
+			raw:    `password='never closed secret`,
+			leaked: []string{"never", "closed", "secret"},
+			want:   `password=[redacted]`,
+		},
 	} {
 		got := RedactDiagnosticMessage(tt.raw)
 		for _, leaked := range tt.leaked {
