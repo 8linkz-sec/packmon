@@ -463,6 +463,8 @@ func TestAPIV1FeedImportEnrichmentAuditsAreAtomic(t *testing.T) {
 		"h.store.ClearCISAKEV(ctx, cveIDs)",
 		"h.store.ReplaceEPSSScores(ctx, entries)",
 		"h.applyImportStatus(ctx, feed, req.Status",
+		"ReplaceEPSSScoresStream(ctx",
+		"h.applyImportStatus(",
 	} {
 		if strings.Contains(feedImportText, forbidden) {
 			t.Fatalf("feed import enrichment path still uses split-write marker %q", forbidden)
@@ -473,6 +475,7 @@ func TestAPIV1FeedImportEnrichmentAuditsAreAtomic(t *testing.T) {
 		"h.store.ImportCISAKEVWithAudit(ctx, feed, cveIDs, status, audit)",
 		"h.store.ReplaceCISAKEVWithAudit(ctx, feed, cveIDs, status, audit)",
 		"h.store.ImportEPSSWithAudit(ctx, feed, entries, status, audit)",
+		"importer.ImportEPSSStreamWithAudit(ctx, feed,",
 		"AuditRecorded: true",
 	} {
 		if !strings.Contains(feedImportText, want) {

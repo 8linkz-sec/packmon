@@ -791,7 +791,11 @@ component with its own store interface, separate from the scan/check handler.
 PostgreSQL applies vulnerability and malicious feed import mutations and the
 optional feed status row in one transaction, and successful imports write a
 durable `feed_import` audit row with feed name, imported/deleted counts,
-client IP, correlation ID, and API-key identity when available. Malicious feed
+client IP, correlation ID, and API-key identity when available. Enrichment
+imports (VulnCheck, CISA KEV, EPSS, including the streamed EPSS snapshot)
+follow the same rule: the complete feed status, after defaults derived from
+the imported entry count are applied, is validated before anything commits,
+and the enrichment change, status row, and audit row commit together. Malicious feed
 imports cannot persist malformed exact-version JSON; invalid rows fail the
 transaction instead of becoming all-version blocking findings.
 Feed import strictness must be visible to operators and server/agent users.

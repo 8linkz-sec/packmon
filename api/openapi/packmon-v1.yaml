@@ -175,6 +175,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        "415":
+          description: Request Content-Type is not application/json (error code unsupported)
+          headers: *apiCommonResponseHeaders
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "429":
           description: Rate limit exceeded
           headers: *apiCommonResponseHeaders
@@ -345,6 +352,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        "415":
+          description: Request Content-Type is not application/json (error code unsupported)
+          headers: *apiCommonResponseHeaders
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "429":
           description: Rate limit exceeded
           headers: *apiCommonResponseHeaders
@@ -496,6 +510,17 @@ paths:
           x-packmon-catch-all: true
           schema:
             type: string
+      requestBody:
+        required: false
+        description: >-
+          Optional. When present it must be an empty JSON object; null, arrays,
+          scalars, and any field (including version) are rejected with 400.
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              maxProperties: 0
       responses:
         "202":
           description: Refresh request accepted
@@ -534,6 +559,13 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "409":
           description: Refresh worker is unavailable
+          headers: *apiCommonResponseHeaders
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "415":
+          description: A request body was sent with a Content-Type other than application/json (error code unsupported)
           headers: *apiCommonResponseHeaders
           content:
             application/json:
@@ -1052,6 +1084,8 @@ components:
           type: integer
           format: int64
           minimum: 0
+          maximum: 9223372036854
+          description: Largest value that still fits a nanosecond duration; larger values are rejected with 400.
         last_sync_status:
           type: string
           enum: [success, error, running, skipped, disabled, pending]
@@ -1421,7 +1455,9 @@ components:
           description: >-
             Effective vulnerability/lifecycle severity threshold used to compute
             findings_blocking. Malicious and supply-chain risk findings still
-            block independently of this value.
+            block independently of this value, except supply_chain_risk findings
+            with risk_type malware_history: that historical reputation evidence is
+            informational, reported as LOW, and never blocks.
         feed_status:
           type: string
           enum: [healthy, degraded, error]
