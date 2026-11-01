@@ -107,11 +107,24 @@ func logFatalError(stderrPrefix, message string, err error) {
 	var fatalErr *configuredFatalError
 	if errors.As(err, &fatalErr) && fatalErr.logger != nil {
 		fatalErr.logger.Error(message,
-			slog.String("error", logsafe.BoundedDiagnosticValue(fatalErr.err.Error(), 512)),
+			slog.String("error", boundedErrorLogValue(fatalErr.err)),
 		)
 		return
 	}
 	fmt.Fprintf(os.Stderr, "%s: %v\n", stderrPrefix, err)
+}
+
+// errorLogMaxBytes bounds error values in startup and fatal log records.
+const errorLogMaxBytes = 512
+
+// boundedErrorLogValue redacts and bounds an error for a structured log
+// record. Database driver errors can carry the DSN, secret-bearing
+// diagnostics, or local filesystem paths.
+func boundedErrorLogValue(err error) string {
+	if err == nil {
+		return ""
+	}
+	return logsafe.BoundedDiagnosticValue(err.Error(), errorLogMaxBytes)
 }
 
 var (
@@ -309,7 +322,7 @@ func verifyProductionSchema(parent context.Context, cfg *config.Config, logger *
 	cancel()
 	if err != nil {
 		logger.Error("failed to read database schema version -- run 'packmon-server migrate' first",
-			slog.String("error", err.Error()),
+			slog.String("error", boundedErrorLogValue(err)),
 		)
 		return ver, fmt.Errorf("schema version check failed: %w", err)
 	}

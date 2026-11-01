@@ -22,6 +22,11 @@
   exits, with the settings current at that time; before, both providers'
   queue processing stayed stopped until another effective change or a server
   restart, because saving the same settings again is a no-op.
+- The production startup schema check now redacts and bounds the database
+  error it logs, like the fatal startup log already did. Driver errors that
+  echoed the connection URL, secret assignments, or local filesystem paths were
+  logged verbatim. Diagnostic redaction now also strips credentials, paths, and
+  query strings from `postgres://` and `postgresql://` URLs.
 - Local scans no longer report ReversingLabs reputation findings that the
   server's `/api/v1/check` ignores. `GET /api/v1/sync` now exports reputation
   rows only while ReversingLabs is enabled in `self` mode; otherwise it sends
