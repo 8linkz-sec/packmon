@@ -28,7 +28,11 @@
   ranges become `[]`, malicious-finding ranges `NULL`) before the constraints
   are re-validated. The store's own pre-write check now matches keys exactly,
   as the database does, so a case-variant key such as `"Introduced"` is
-  rejected before the write instead of failing the CHECK constraint.
+  rejected before the write instead of failing the CHECK constraint. The feed
+  import endpoint applies the same rule to `version_ranges` in vulnerability
+  and malicious imports, so such a range gets a `400` naming the failing
+  field (for example `version_ranges[0].events[0].fixed must be a string`)
+  instead of the generic store-rejection message.
 - Refresh-queue clear, purge and single-job admin audit details omit
   `requested_at` / `processed_at` for a job that has no such timestamp. They
   used to record an empty string (for example `"processed_at":""` for a job

@@ -764,8 +764,10 @@ least one nonblank string among `introduced`, `fixed`, `last_affected`, and
 `limit`; the other boundary keys may be absent, `null`, or blank strings, and
 keys such as `type` or `repo` are ignored. Keys match exactly (lowercase). `[]`
 stays valid and means "no range data", which matches every version unless
-exact versions are listed (fail-safe). The store checks this before every
-write, and PostgreSQL enforces the same rule through the
+exact versions are listed (fail-safe). One shared rule
+(`version.CheckRangesShape`) is applied by the feed import endpoint, which
+rejects a violating import with a `400` naming the failing field, and by the
+store before every write; PostgreSQL enforces the same rule through the
 `packmon_jsonb_version_ranges_valid` CHECK constraints (tightened in migration
 050, which repaired older rows that only passed the earlier key-presence check:
 affected-package ranges fell back to `[]`, malicious-finding ranges to `NULL`).

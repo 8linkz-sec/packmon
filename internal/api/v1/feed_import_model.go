@@ -20,6 +20,7 @@ import (
 	"github.com/8linkz-sec/packmon/internal/logsafe"
 	"github.com/8linkz-sec/packmon/internal/packageid"
 	"github.com/8linkz-sec/packmon/internal/requestctx"
+	"github.com/8linkz-sec/packmon/internal/version"
 )
 
 // HeaderFeedImportSecret carries the dedicated feed-import secret required for
@@ -178,18 +179,6 @@ type cisaKEVImportRequest struct {
 	CVEIDs       []string             `json:"cve_ids"`
 	ClearMissing bool                 `json:"clear_missing"`
 	Status       *feedSyncStatusInput `json:"status"`
-}
-
-type vulnerabilityImportVersionRange struct {
-	Type   string                          `json:"type"`
-	Events []vulnerabilityImportRangeEvent `json:"events"`
-}
-
-type vulnerabilityImportRangeEvent struct {
-	Introduced   string `json:"introduced,omitempty"`
-	Fixed        string `json:"fixed,omitempty"`
-	LastAffected string `json:"last_affected,omitempty"`
-	Limit        string `json:"limit,omitempty"`
 }
 
 type importResponse struct {
@@ -1081,27 +1070,17 @@ func validateStringArrayJSON(raw json.RawMessage, field string) error {
 	return nil
 }
 
+// validateVersionRangesJSON applies the shared stored-range rule
+// (version.CheckRangesShape), the same rule as the PostgreSQL store pre-check
+// and the database CHECK constraint, so a range the store would refuse gets a
+// field-specific 400 here instead of the generic store rejection.
 func validateVersionRangesJSON(raw json.RawMessage, field string) error {
 	trimmed := strings.TrimSpace(string(raw))
 	if trimmed == "" || trimmed == "null" {
 		return nil
 	}
-	var ranges []vulnerabilityImportVersionRange
-	if err := json.Unmarshal(raw, &ranges); err != nil {
-		return feedImportValidationErrorf("%s must be an array of range objects", field)
-	}
-	for i, versionRange := range ranges {
-		if len(versionRange.Events) == 0 {
-			return feedImportValidationErrorf("%s[%d].events must not be empty", field, i)
-		}
-		for j, event := range versionRange.Events {
-			if strings.TrimSpace(event.Introduced) == "" &&
-				strings.TrimSpace(event.Fixed) == "" &&
-				strings.TrimSpace(event.LastAffected) == "" &&
-				strings.TrimSpace(event.Limit) == "" {
-				return feedImportValidationErrorf("%s[%d].events[%d] must set introduced, fixed, last_affected, or limit", field, i, j)
-			}
-		}
+	if shapeErr := version.CheckRangesShape(raw); shapeErr != nil {
+		return feedImportValidationErrorf("%s%s %s", field, shapeErr.Path, shapeErr.Reason)
 	}
 	return nil
 }
