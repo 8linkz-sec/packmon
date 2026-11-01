@@ -70,6 +70,9 @@
   `packmon_auth_login_failures_total` before the rejection audit row is
   written. A failing audit write previously returned early, so the attempt
   escaped lockout accounting; the request still fails closed.
+- The admin login and admin pages render the shared footer's terms link
+  (`PACKMON_WEB_TERMS_URL`, default `/terms`) like the public pages; the
+  admin renderer previously received only the privacy and legal URLs.
 
 ### Security updates
 
