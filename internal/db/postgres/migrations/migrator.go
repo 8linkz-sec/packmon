@@ -23,7 +23,7 @@ var fs embed.FS
 
 // ExpectedVersion is the schema version that this binary expects.
 // It must match the highest migration number embedded in the binary.
-const ExpectedVersion = 49
+const ExpectedVersion = 50
 
 const (
 	migrationAdvisoryLockKey  int64 = 0x7061636b6d6f6e // ASCII "packmon"

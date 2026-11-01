@@ -1270,6 +1270,11 @@ components:
 
     VersionRangeEvent:
       type: object
+      description: >-
+        At least one of introduced, fixed, last_affected, or limit must be a
+        nonblank string; the others may be omitted or empty. Keys are matched
+        exactly (lowercase). Events that fail this rule reject the whole import
+        with 400.
       properties:
         introduced:
           type: string

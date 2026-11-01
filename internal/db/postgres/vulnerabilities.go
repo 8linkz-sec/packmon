@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -35,16 +36,12 @@ const canonicalPackageNameSQL = `CASE lower(btrim(ecosystem))
 				ELSE btrim(raw_name, E' \t\n\r\f\x0B')
 			END`
 
-type storedVersionRange struct {
-	Events []storedVersionEvent `json:"events"`
-}
-
-type storedVersionEvent struct {
-	Introduced   string `json:"introduced"`
-	Fixed        string `json:"fixed"`
-	LastAffected string `json:"last_affected"`
-	Limit        string `json:"limit"`
-}
+// storedVersionBoundaryKeys are the OSV range event keys that carry a version
+// boundary. Matching is exact, like the jsonb lookups in
+// packmon_jsonb_version_ranges_valid (migration 050); encoding/json struct
+// decoding would also accept "Introduced" or "FIXED", which the CHECK
+// constraint then refuses.
+var storedVersionBoundaryKeys = [...]string{"introduced", "fixed", "last_affected", "limit"}
 
 // coalesceStoredJSONArray converts an absent or JSON-null array value into an
 // empty array. affected_packages.version_ranges and .versions_affected are
@@ -88,22 +85,57 @@ func validateStoredVersionRangesJSON(id, field string, raw json.RawMessage, allo
 		}
 		return invalidFeedImportDataf("%s %s must be an array of range objects", id, field)
 	}
-	var ranges []storedVersionRange
+	var ranges []json.RawMessage
 	if err := json.Unmarshal(raw, &ranges); err != nil {
 		return invalidFeedImportDataf("%s %s must be an array of range objects: %v", id, field, err)
 	}
-	for i, versionRange := range ranges {
-		if len(versionRange.Events) == 0 {
-			return invalidFeedImportDataf("%s %s[%d].events must not be empty", id, field, i)
+	for i, rawRange := range ranges {
+		var versionRange map[string]json.RawMessage
+		if err := json.Unmarshal(rawRange, &versionRange); err != nil || versionRange == nil {
+			return invalidFeedImportDataf("%s %s[%d] must be a range object", id, field, i)
 		}
-		for j, event := range versionRange.Events {
-			if strings.TrimSpace(event.Introduced) == "" &&
-				strings.TrimSpace(event.Fixed) == "" &&
-				strings.TrimSpace(event.LastAffected) == "" &&
-				strings.TrimSpace(event.Limit) == "" {
-				return invalidFeedImportDataf("%s %s[%d].events[%d] must set introduced, fixed, last_affected, or limit", id, field, i, j)
+		var events []json.RawMessage
+		if rawEvents, ok := versionRange["events"]; ok {
+			if err := json.Unmarshal(rawEvents, &events); err != nil {
+				return invalidFeedImportDataf("%s %s[%d].events must be an array of event objects", id, field, i)
 			}
 		}
+		if len(events) == 0 {
+			return invalidFeedImportDataf("%s %s[%d].events must not be empty", id, field, i)
+		}
+		for j, rawEvent := range events {
+			if err := validateStoredVersionEventJSON(rawEvent); err != nil {
+				return invalidFeedImportDataf("%s %s[%d].events[%d] %s", id, field, i, j, err.Error())
+			}
+		}
+	}
+	return nil
+}
+
+// validateStoredVersionEventJSON checks one range event: an object whose
+// boundary keys, when present, hold a string or null, with at least one
+// nonblank string boundary. Other keys are ignored.
+func validateStoredVersionEventJSON(raw json.RawMessage) error {
+	var event map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &event); err != nil || event == nil {
+		return errors.New("must be an event object")
+	}
+	hasBoundary := false
+	for _, key := range storedVersionBoundaryKeys {
+		rawValue, ok := event[key]
+		if !ok {
+			continue
+		}
+		var value *string
+		if err := json.Unmarshal(rawValue, &value); err != nil {
+			return fmt.Errorf("%s must be a string", key)
+		}
+		if value != nil && strings.TrimSpace(*value) != "" {
+			hasBoundary = true
+		}
+	}
+	if !hasBoundary {
+		return errors.New("must set introduced, fixed, last_affected, or limit")
 	}
 	return nil
 }

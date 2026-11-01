@@ -700,6 +700,19 @@ being wholesale-replaced on every source import. Local sync clients can
 therefore use `updated_at` as a meaningful delta boundary across repeated feed
 imports and overlapping advisory sources.
 
+Stored OSV version ranges (`affected_packages.version_ranges` and the optional
+`malicious_findings.version_ranges`) are a JSON array of range objects. Each
+range needs a nonempty `events` array of event objects, and each event needs at
+least one nonblank string among `introduced`, `fixed`, `last_affected`, and
+`limit`; the other boundary keys may be absent, `null`, or blank strings, and
+keys such as `type` or `repo` are ignored. Keys match exactly (lowercase). `[]`
+stays valid and means "no range data", which matches every version unless
+exact versions are listed (fail-safe). The store checks this before every
+write, and PostgreSQL enforces the same rule through the
+`packmon_jsonb_version_ranges_valid` CHECK constraints (tightened in migration
+050, which repaired older rows that only passed the earlier key-presence check:
+affected-package ranges fell back to `[]`, malicious-finding ranges to `NULL`).
+
 Malicious findings are separate entities with stable IDs, package identity,
 source, risk type, severity, optional OSV version ranges, optional exact
 affected versions, summary, and description. OpenSSF/OSV range events such as

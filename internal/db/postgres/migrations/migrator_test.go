@@ -1023,6 +1023,60 @@ func TestVersionJSONConstraintMigrationDefinesExpectedChecks(t *testing.T) {
 	}
 }
 
+// TestVersionRangeBoundaryMigrationDefinesStrictCheck pins the shape of 050:
+// the stricter function, the 032-style repair of existing rows before the
+// constraints are re-added and validated, and a down migration that only
+// restores the previous function.
+func TestVersionRangeBoundaryMigrationDefinesStrictCheck(t *testing.T) {
+	t.Parallel()
+
+	up, err := ReadEmbeddedMigration(50, MigrationDirectionUp)
+	if err != nil {
+		t.Fatalf("read migration 050 up: %v", err)
+	}
+	if !migrationRunsInTransaction(migrationFile{sql: up.SQL}) {
+		t.Fatal("050 up must run in a transaction so the repair and the validated constraints commit together")
+	}
+	upSQL := strings.Join(strings.Fields(up.SQL), " ")
+	ordered := []string{
+		"CREATE OR REPLACE FUNCTION packmon_jsonb_version_ranges_valid(value JSONB)",
+		"FOREACH boundary_key IN ARRAY ARRAY['introduced', 'fixed', 'last_affected', 'limit']",
+		"UPDATE affected_packages SET version_ranges = '[]'::jsonb",
+		"UPDATE malicious_findings SET version_ranges = NULL",
+		"DROP CONSTRAINT IF EXISTS affected_packages_version_ranges_array_check",
+		"CHECK (packmon_jsonb_version_ranges_valid(version_ranges)) NOT VALID",
+		"CHECK (version_ranges IS NULL OR packmon_jsonb_version_ranges_valid(version_ranges)) NOT VALID",
+		"VALIDATE CONSTRAINT affected_packages_version_ranges_array_check",
+		"VALIDATE CONSTRAINT malicious_findings_version_ranges_array_check",
+	}
+	last := -1
+	for _, want := range ordered {
+		index := strings.Index(upSQL, want)
+		if index < 0 {
+			t.Fatalf("050 up missing %q:\n%s", want, up.SQL)
+		}
+		if index < last {
+			t.Fatalf("050 up has %q out of order: repair rows before re-adding and validating the constraints", want)
+		}
+		last = index
+	}
+	if strings.Contains(upSQL, "packmon_jsonb_string_array_valid") {
+		t.Fatal("050 up must leave the string-array check from 032 untouched")
+	}
+
+	down, err := ReadEmbeddedMigration(50, MigrationDirectionDown)
+	if err != nil {
+		t.Fatalf("read migration 050 down: %v", err)
+	}
+	if !strings.Contains(down.SQL, "CREATE OR REPLACE FUNCTION packmon_jsonb_version_ranges_valid(value JSONB)") ||
+		!strings.Contains(down.SQL, "event_item ? 'introduced'") {
+		t.Fatalf("050 down must restore the previous function:\n%s", down.SQL)
+	}
+	if strings.Contains(down.SQL, "DROP CONSTRAINT") || strings.Contains(down.SQL, "DROP FUNCTION") {
+		t.Fatalf("050 down must keep the constraints and the function from 001/032:\n%s", down.SQL)
+	}
+}
+
 func TestScanLogTotalsMigrationDefinesRollup(t *testing.T) {
 	t.Parallel()
 
@@ -1598,7 +1652,7 @@ func TestReadEmbeddedMigrationReadsSpecificDownMigration(t *testing.T) {
 		!strings.HasSuffix(migration.Name, ".down.sql") {
 		t.Fatalf("Name = %q, want current down migration", migration.Name)
 	}
-	if !strings.Contains(migration.SQL, "DROP INDEX CONCURRENTLY IF EXISTS idx_malicious_active_search_order") {
+	if !strings.Contains(migration.SQL, "CREATE OR REPLACE FUNCTION packmon_jsonb_version_ranges_valid") {
 		t.Fatalf("current down migration SQL does not include expected rollback marker:\n%s", migration.SQL)
 	}
 }

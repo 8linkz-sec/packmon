@@ -210,6 +210,19 @@ change.
    working space and durable-volume headroom for both index builds. The
    concurrent build avoids a long table-write lock but still consumes I/O and
    CPU; keep the server drained as required above and monitor PostgreSQL logs.
+   Migration 50 tightens the `version_ranges` CHECK constraints on
+   `affected_packages` and `malicious_findings` (every range needs a nonempty
+   `events` array and every event a nonblank string boundary). It scans both
+   tables once to repair rows that only passed the older check and once more to
+   validate the constraints, inside one transaction; expect it to take longer
+   on large databases. Repaired affected-package rows fall back to `[]`
+   (every version of that package is treated as affected) and repaired
+   malicious-finding rows to `NULL` ranges, so the affected packages may report
+   more findings until the next feed sync rewrites them with valid ranges.
+   Compare finding/blocking totals by feed source after the upgrade and run
+   the feed syncs before treating a spike as new risk. The repair is one-way:
+   the 050 down migration restores only the previous check function, so
+   restore the pre-upgrade backup if the original rows are needed.
 5. Run the explicit migration step:
    ```bash
    docker compose -f docker-compose.server.yml run --build --rm packmon-migrate

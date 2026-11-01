@@ -16,6 +16,19 @@
 
 ### Fixed
 
+- The PostgreSQL `version_ranges` CHECK constraints accepted malformed OSV
+  ranges: a range without an `events` key (`[{}]`) and events whose boundary
+  was `null`, a number, or blank (`{"introduced":null}`), because the check
+  only tested that a boundary key exists. Migration 050 replaces
+  `packmon_jsonb_version_ranges_valid` with the rule the store already applied
+  before writes (nonempty `events` arrays, event objects, at least one
+  nonblank string boundary among `introduced` / `fixed` / `last_affected` /
+  `limit`, other boundaries a string or `null`); `[]` stays valid. Existing
+  rows that fail it are repaired like migration 032 did (affected-package
+  ranges become `[]`, malicious-finding ranges `NULL`) before the constraints
+  are re-validated. The store's own pre-write check now matches keys exactly,
+  as the database does, so a case-variant key such as `"Introduced"` is
+  rejected before the write instead of failing the CHECK constraint.
 - The baseline down migration `001_initial.down.sql` can reverse the baseline
   schema on its own: it dropped `api_keys` before `scan_log`, whose
   `scan_log_api_key_id_fkey` references it, so PostgreSQL refused the drop. It
@@ -296,6 +309,14 @@
 
 ### Operator action
 
+- Run `packmon-server migrate` before starting the updated server: this
+  release adds schema migration 050 (schema version 49 -> 50), which tightens
+  the `version_ranges` CHECK constraints and repairs rows that fail them. It
+  scans `affected_packages` and `malicious_findings` twice in one transaction;
+  repaired affected-package rows match every version until the next feed sync
+  rewrites them, so finding totals for those packages can rise temporarily.
+  See "Upgrade And Rollback" in `docs/runbook.md`. The server refuses to start
+  on a schema version mismatch.
 - Run `packmon-server migrate` (or the `packmon-migrate` compose service)
   before starting the updated server: this release adds schema migration 047
   (schema version 46 -> 47), which widens the ecosystem CHECK constraints for
