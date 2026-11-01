@@ -16,6 +16,12 @@
 
 ### Fixed
 
+- `--outdated` / `--list-all` latest-version lookups whose registry response
+  broke off mid-body (connection reset or per-request timeout after the `200`
+  status) now count as refused registry requests. They used to count as
+  successes, which reset the consecutive-failure breaker and suppressed the
+  "registry requests were refused or failed" warning on stderr and in the
+  list-all HTML report.
 - A panicking latest-version, npm-metadata, or Git tag lookup in
   `--outdated` / `--list-all` no longer hangs the run. The shared in-flight
   lookup is now always completed, so other packages waiting on the same
