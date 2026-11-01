@@ -236,19 +236,77 @@ func TestInitSecretsRunsAsCheckoutOwner(t *testing.T) {
 		}
 	}
 
-	wrapper := repoFile(t, "scripts/init-secrets.sh")
-	for _, want := range []string{
-		`PACKMON_UID="$(id -u)"`,
-		`PACKMON_GID="$(id -g)"`,
-		"export PACKMON_UID PACKMON_GID",
-		"docker compose run --rm init-secrets",
-	} {
-		if !strings.Contains(wrapper, want) {
-			t.Fatalf("scripts/init-secrets.sh missing %q", want)
+	// The wrapper must, in this order and outside comments: detect rootless
+	// Docker, default to 0:0 there (container root is the invoking user) and
+	// to the host IDs otherwise, let explicit PACKMON_UID/PACKMON_GID win,
+	// export them, and only then run init-secrets.
+	assertOrderedCommandLines(t, "scripts/init-secrets.sh", shellCommandLines(repoFile(t, "scripts/init-secrets.sh")), []func(string) bool{
+		func(line string) bool {
+			return strings.Contains(line, "docker info") && strings.Contains(line, "{{.SecurityOptions}}")
+		},
+		func(line string) bool { return strings.HasPrefix(line, "if ") && strings.Contains(line, "rootless") },
+		exactLine("default_uid=0"),
+		exactLine("default_gid=0"),
+		exactLine("else"),
+		exactLine(`default_uid="$(id -u)"`),
+		exactLine(`default_gid="$(id -g)"`),
+		exactLine("fi"),
+		exactLine(`PACKMON_UID="${PACKMON_UID:-$default_uid}"`),
+		exactLine(`PACKMON_GID="${PACKMON_GID:-$default_gid}"`),
+		exactLine("export PACKMON_UID PACKMON_GID"),
+		exactLine("docker compose run --rm init-secrets"),
+	})
+
+	// Every runtime stage's effective (last) USER instruction stays packmon.
+	for name, stage := range dockerfileRuntimeStages(t, repoFile(t, "Dockerfile")) {
+		lastUser := ""
+		for _, line := range shellCommandLines(stage) {
+			if fields := strings.Fields(line); len(fields) == 2 && strings.EqualFold(fields[0], "USER") {
+				lastUser = fields[1]
+			}
+		}
+		if lastUser != "packmon" {
+			t.Fatalf("Dockerfile %s stage effective USER = %q, want packmon", name, lastUser)
 		}
 	}
+}
 
-	if !strings.Contains(repoFile(t, "Dockerfile"), "USER packmon") {
-		t.Fatal("Dockerfile must keep USER packmon for the runtime images")
+// shellCommandLines returns the trimmed, non-empty lines of a shell script or
+// Dockerfile, skipping full-line comments, so a commented-out command never
+// counts as evidence.
+func shellCommandLines(text string) []string {
+	var lines []string
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+func exactLine(want string) func(string) bool {
+	return func(line string) bool { return line == want }
+}
+
+// assertOrderedCommandLines requires one line per matcher, in matcher order.
+func assertOrderedCommandLines(t *testing.T, name string, lines []string, matchers []func(string) bool) {
+	t.Helper()
+
+	next := 0
+	for i, match := range matchers {
+		found := false
+		for next < len(lines) {
+			line := lines[next]
+			next++
+			if match(line) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("%s: step %d of the expected command sequence is missing or out of order", name, i+1)
+		}
 	}
 }

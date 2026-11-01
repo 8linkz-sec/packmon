@@ -501,8 +501,10 @@ stays owned by you with mode `0600`:
 bash scripts/init-secrets.sh
 ```
 
-Rootless Docker maps container root to your host user; there, run
-`PACKMON_UID=0 PACKMON_GID=0 docker compose run --rm init-secrets` instead.
+The wrapper detects rootless Docker (`docker info` lists `rootless` under
+security options) and uses `0:0` there, because rootless Docker maps container
+root to your host user. Explicit `PACKMON_UID` / `PACKMON_GID` values in your
+environment always win over the detected defaults.
 
 Admins can later adjust `.env`, feed-provider API keys, TLS/proxy settings, and
 other deployment-specific values before shared or production use.

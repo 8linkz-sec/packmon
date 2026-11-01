@@ -41,7 +41,8 @@
 - The local `init-secrets` Compose service runs as
   `${PACKMON_UID:-1000}:${PACKMON_GID:-1000}` instead of the image's `packmon`
   system account, and the new `scripts/init-secrets.sh` wrapper passes the
-  host UID/GID, so bootstrapping on native Linux no longer fails with
+  host UID/GID (or `0:0` under rootless Docker; explicit `PACKMON_UID` /
+  `PACKMON_GID` win), so bootstrapping on native Linux no longer fails with
   `permission denied` on a host-owned checkout or `.env`. The production
   server image still runs as `packmon`.
 - `packmon-server init-secrets` copies an existing `PACKMON_DB_PASSWORD` onto
