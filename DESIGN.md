@@ -808,9 +808,12 @@ client IP, correlation ID, and API-key identity when available. Enrichment
 imports (VulnCheck, CISA KEV, EPSS, including the streamed EPSS snapshot)
 follow the same rule: the complete feed status, after defaults derived from
 the imported entry count are applied, is validated before anything commits,
-and the enrichment change, status row, and audit row commit together. Malicious feed
-imports cannot persist malformed exact-version JSON; invalid rows fail the
-transaction instead of becoming all-version blocking findings.
+and the enrichment change, status row, and audit row commit together. The
+optional status `last_sync_duration_ms` is bounded to 0 through 9223372036854
+ms, the largest value that converts to a Go `time.Duration`; larger values are
+rejected with `400`. Malicious feed imports cannot persist malformed
+exact-version JSON; invalid rows fail the transaction instead of becoming
+all-version blocking findings.
 Feed import strictness must be visible to operators and server/agent users.
 Rejected imports must expose bounded diagnostics for feed name, rejected record
 count, rejection reason classes, correlation ID, client/API-key attribution when

@@ -30,12 +30,12 @@ It can run as a local CLI, as a central API server, or both together.
   so CI systems and humans read the same scan.
 
 It ships as a local CLI and a central API/web server whose JSON, SARIF, and
-JUnit outputs plug into CI pipelines, with production-oriented Docker Compose assets and example N8N workflow
-templates (CLI-based starting points, shipped disabled -- see
-`deploy/n8n/README.md`), onboarding scripts for Bash and PowerShell, a documented PostgreSQL backup and
-restore flow, localhost-only metrics exposure by default, CLI warnings for stale
-local advisory data, and operational documentation, ADRs, and integration/E2E
-test entry points. Vulnerability, lifecycle, and outdated-version coverage for
+JUnit outputs plug into CI pipelines, with production-oriented Docker Compose
+assets and example N8N workflow templates (CLI-based starting points, shipped
+disabled -- see `deploy/n8n/README.md`), onboarding scripts for Bash and
+PowerShell, a documented PostgreSQL backup and restore flow, localhost-only
+metrics exposure by default, CLI warnings for stale local advisory data, and
+operational documentation, ADRs, and integration/E2E test entry points. Vulnerability, lifecycle, and outdated-version coverage for
 the canonical package ecosystems comes from free public sources; the optional
 account/API-key reputation feeds are not required.
 
