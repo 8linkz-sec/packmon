@@ -985,6 +985,13 @@ func registryGetLimitedWithHeaders(ctx context.Context, url string, limit int64,
 	// Only a completely read body is an answer that resets the breaker streak.
 	phase.recordSuccess()
 	if int64(len(data)) > limit {
+		// The registry answered, so the streak stays reset: an oversized
+		// document says nothing about reachability. The lookup still got no
+		// usable data, so count it with the refused/failed requests that drive
+		// the stderr warning and the list-all HTML hint.
+		if phase != nil {
+			phase.refused.Add(1)
+		}
 		return nil, fmt.Errorf("registry response exceeds %d byte limit", limit)
 	}
 	return data, nil

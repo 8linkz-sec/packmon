@@ -634,11 +634,13 @@ Feed-degraded responses must be visible so CI/N8N can make policy decisions.
 SARIF, JUnit, and HTML artifacts must carry degraded-feed, stale-local-DB, and
 parse-error diagnostics instead of presenting incomplete coverage as a clean
 scan. Partial lockfile/SBOM parse errors exit with parser failure unless a
-blocking finding has already failed the scan, and in-scope discovery filesystem
-errors are reported as operational failures rather than silently reducing
-inventory. SARIF must mark parser and operational scan failures as unsuccessful
-invocations with error-level notifications; JUnit must expose the same state as
-errored diagnostic suites.
+blocking finding has already failed the scan (the `--list-packages` and
+`--outdated` inventory views, `--outdated --quiet` included, have no findings
+and exit with parser failure on any parse error), and in-scope discovery
+filesystem errors are reported as operational failures rather than silently
+reducing inventory. SARIF must mark parser and operational scan failures as
+unsuccessful invocations with error-level notifications; JUnit must expose the
+same state as errored diagnostic suites.
 
 ## Webhooks
 

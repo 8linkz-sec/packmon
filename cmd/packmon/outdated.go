@@ -103,9 +103,10 @@ type outdatedHTMLMessages struct {
 }
 
 func runOutdatedWithOptions(args []string, opts outdatedOptions) error {
-	if opts.Quiet && strings.TrimSpace(opts.OutputHTML) == "" {
-		return nil
-	}
+	// Quiet mode without an HTML report has no output to fill, so it skips the
+	// registry lookups. It still collects the inventory: discovery and parser
+	// failures must reach the exit code, and parse warnings still go to stderr.
+	exitCodeOnly := opts.Quiet && strings.TrimSpace(opts.OutputHTML) == ""
 
 	scanPath := "."
 	if len(args) > 0 {
@@ -133,10 +134,17 @@ func runOutdatedWithOptions(args []string, opts outdatedOptions) error {
 		return err
 	}
 	if len(packages) == 0 {
+		// Nothing parseable is a parser failure, not an empty inventory.
+		if err := inventoryParseError(collection); err != nil {
+			return err
+		}
 		if !opts.Quiet {
 			fmt.Println("No packages found.")
 		}
 		return withDefaultExitCode(ExitOperational, finishOutdatedReport(opts, report))
+	}
+	if exitCodeOnly {
+		return inventoryParseError(collection)
 	}
 
 	if !opts.Quiet {
@@ -149,7 +157,12 @@ func runOutdatedWithOptions(args []string, opts outdatedOptions) error {
 	if !opts.Quiet {
 		printOutdatedReport(report)
 	}
-	return withDefaultExitCode(ExitOperational, finishOutdatedReport(opts, report))
+	if err := finishOutdatedReport(opts, report); err != nil {
+		return withDefaultExitCode(ExitOperational, err)
+	}
+	// Partial parse errors leave the report incomplete, so the run still exits
+	// with parser failure after reporting what could be parsed.
+	return inventoryParseError(collection)
 }
 
 func defaultOutdatedHTMLMessages() outdatedHTMLMessages {
