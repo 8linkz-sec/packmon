@@ -35,11 +35,11 @@ func TestOverrideDefinesInitSecretsAndMigrateChain(t *testing.T) {
 		".:/workspace",
 		"packmon-migrate:",
 		"service_completed_successfully",
-		// The base binds metrics to 0.0.0.0 (so prod's Docker host can publish
-		// the port), but ValidateMetricsExposure fails closed in production
-		// unless /metrics is on loopback. The local override keeps production
-		// mode (real PostgreSQL store, not the in-memory dev store) and instead
-		// binds metrics to loopback so the server starts.
+		// ValidateMetricsExposure fails closed in production unless /metrics is
+		// on loopback. The local override keeps production mode (real
+		// PostgreSQL store, not the in-memory dev store) and pins metrics to
+		// loopback so the server starts even with an older .env that still
+		// carries the former 0.0.0.0 seed.
 		`PACKMON_METRICS_HOST: "127.0.0.1"`,
 	} {
 		if !strings.Contains(override, want) {
@@ -157,10 +157,17 @@ func TestServerComposeIsSelfContainedAndHardened(t *testing.T) {
 		"PACKMON_DB_HOST: ${PACKMON_DB_HOST:-postgres}",
 		"env_file:",
 		"required: false",
-		"restart: unless-stopped",
 	} {
 		if !strings.Contains(server, want) {
 			t.Fatalf("docker-compose.server.yml missing hardening marker %q", want)
+		}
+	}
+	// Restart policies are checked on the parsed file: a substring match also
+	// accepted a commented-out `# restart: unless-stopped`, which is no policy.
+	parsed := readComposeContract(t, "docker-compose.server.yml")
+	for _, name := range []string{"postgres", "packmon-server"} {
+		if got := parsed.Services[name].Restart; got != "unless-stopped" {
+			t.Fatalf("docker-compose.server.yml %s restart = %q, want a parsed unless-stopped policy", name, got)
 		}
 	}
 	if strings.Contains(server, "PACKMON_ALLOW_INSECURE_LOCAL_HTTP: ${PACKMON_ALLOW_INSECURE_LOCAL_HTTP:-true}") ||

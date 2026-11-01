@@ -555,11 +555,11 @@ func TestOpenAPIErrorResponsesUseJSONErrorEnvelope(t *testing.T) {
 		method   string
 		statuses []string
 	}{
-		{"/api/v1/check", "post", []string{"400", "401", "403", "409", "429", "503", "500"}},
+		{"/api/v1/check", "post", []string{"400", "401", "403", "409", "415", "429", "503", "500"}},
 		{"/api/v1/feeds/status", "get", []string{"401", "403", "429", "500"}},
-		{"/api/v1/feeds/{feed}/import", "post", []string{"400", "401", "403", "404", "429", "500"}},
+		{"/api/v1/feeds/{feed}/import", "post", []string{"400", "401", "403", "404", "415", "429", "500"}},
 		{"/api/v1/packages/{ecosystem}/{rest}", "get", []string{"400", "401", "403", "404", "429", "500"}},
-		{"/api/v1/packages/{ecosystem}/{rest}/refresh", "post", []string{"400", "401", "403", "409", "429", "500"}},
+		{"/api/v1/packages/{ecosystem}/{rest}/refresh", "post", []string{"400", "401", "403", "409", "415", "429", "500"}},
 		{"/api/v1/sync", "get", []string{"400", "401", "403", "429", "500"}},
 	}
 	for _, tt := range cases {
@@ -574,6 +574,47 @@ func TestOpenAPIErrorResponsesUseJSONErrorEnvelope(t *testing.T) {
 				t.Fatalf("%s %s response %s schema ref = %#v, want ErrorResponse", tt.method, tt.path, status, got)
 			}
 		}
+	}
+}
+
+func TestOpenAPIBlockThresholdDocumentsMalwareHistoryException(t *testing.T) {
+	data, err := os.ReadFile("../../api/openapi/packmon-v1.yaml")
+	if err != nil {
+		t.Fatalf("read OpenAPI spec: %v", err)
+	}
+	var spec map[string]any
+	if err := yaml.Unmarshal(data, &spec); err != nil {
+		t.Fatalf("parse OpenAPI spec: %v", err)
+	}
+
+	scanResult := requireMap(t, requireMap(t, requireMap(t, spec, "components"), "schemas"), "ScanResult")
+	blockThreshold := requireMap(t, requireMap(t, scanResult, "properties"), "block_threshold")
+	description, _ := blockThreshold["description"].(string)
+	for _, want := range []string{"malware_history", "LOW", "never block"} {
+		if !strings.Contains(description, want) {
+			t.Fatalf("ScanResult.block_threshold description must document the informational malware_history exception (missing %q): %q", want, description)
+		}
+	}
+}
+
+func TestOpenAPIRefreshDocumentsOptionalEmptyObjectBody(t *testing.T) {
+	data, err := os.ReadFile("../../api/openapi/packmon-v1.yaml")
+	if err != nil {
+		t.Fatalf("read OpenAPI spec: %v", err)
+	}
+	var spec map[string]any
+	if err := yaml.Unmarshal(data, &spec); err != nil {
+		t.Fatalf("parse OpenAPI spec: %v", err)
+	}
+
+	refresh := requireMap(t, requireMap(t, requireMap(t, spec, "paths"), "/api/v1/packages/{ecosystem}/{rest}/refresh"), "post")
+	requestBody := requireMap(t, refresh, "requestBody")
+	if required, _ := requestBody["required"].(bool); required {
+		t.Fatal("refresh request body must be optional")
+	}
+	schema := requireMap(t, requireMap(t, requireMap(t, requestBody, "content"), "application/json"), "schema")
+	if schema["type"] != "object" || schema["additionalProperties"] != false || schema["maxProperties"] != 0 {
+		t.Fatalf("refresh request body schema = %#v, want an empty object (type object, additionalProperties false, maxProperties 0)", schema)
 	}
 }
 
