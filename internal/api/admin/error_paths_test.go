@@ -1035,21 +1035,24 @@ func TestDesiredFeedSettingsStoredBranches(t *testing.T) {
 		APIKey:       "stored-key",
 		SyncInterval: &interval,
 	}
-	feed, err := handler.desiredFeedSettings(context.Background(), "vulncheck")
+	feed, stored, err := handler.desiredFeedSettings(context.Background(), "vulncheck")
 	if err != nil {
 		t.Fatalf("desiredFeedSettings: %v", err)
 	}
 	if feed.Mode != config.FeedModeSelf || feed.APIKey != "stored-key" || feed.SyncInterval != interval {
 		t.Fatalf("feed = %+v, want stored mode/api key/interval", feed)
 	}
+	if stored == nil || stored.APIKey != "stored-key" {
+		t.Fatalf("stored = %+v, want the override the settings were derived from", stored)
+	}
 
 	store.feedConfigs["vulncheck"] = db.FeedConfig{FeedName: "vulncheck", Enabled: true, Mode: "bad"}
-	if _, err := handler.desiredFeedSettings(context.Background(), "vulncheck"); err == nil || !strings.Contains(err.Error(), "invalid persisted mode") {
+	if _, _, err := handler.desiredFeedSettings(context.Background(), "vulncheck"); err == nil || !strings.Contains(err.Error(), "invalid persisted mode") {
 		t.Fatalf("desiredFeedSettings(invalid mode) = %v", err)
 	}
 
 	store.fail = map[string]error{"GetFeedConfig": errors.New("db down")}
-	if _, err := handler.desiredFeedSettings(context.Background(), "vulncheck"); err == nil || !strings.Contains(err.Error(), "load persisted") {
+	if _, _, err := handler.desiredFeedSettings(context.Background(), "vulncheck"); err == nil || !strings.Contains(err.Error(), "load persisted") {
 		t.Fatalf("desiredFeedSettings(load error) = %v", err)
 	}
 }
