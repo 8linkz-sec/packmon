@@ -905,9 +905,53 @@ func scanLeadingQuotedOrStructured(msg string, i int, quote keyQuote) (int, bool
 		return 0, false
 	}
 	if j < len(msg) && isQuote(msg[j]) {
-		return scanQuotedValue(msg, j+1, msg[j], j-i, len(msg)), true
+		return scanEscapedQuotedValue(msg, j+1, msg[j], j-i), true
 	}
 	return 0, false
+}
+
+// escapeLevel returns the embedding level of a quote that n backslashes
+// precede: one decoding step turns 2k backslashes into k and ends the string
+// at the quote (level 0), and turns 2k+1 backslashes into k before an escaped
+// quote, which is one level deeper than a quote after k backslashes.
+func escapeLevel(n int) int {
+	level := 0
+	for n%2 == 1 {
+		level++
+		n = (n - 1) / 2
+	}
+	return level
+}
+
+// scanEscapedQuotedValue returns the end of a quoted string whose content
+// starts at i, whose quote character is q, and whose opening quote n
+// backslashes precede. It is scanQuotedValue with quotes classified by their
+// embedding level (see escapeLevel): a quote at the opening quote's level
+// closes the string, a deeper one is content, and a shallower one, such as
+// the unescaped quote of \" after a \" value, closes a string the value is
+// embedded in, so the value ends before its backslashes. scanQuotedValue,
+// which the baseline scan shares, misses a shallower quote after more
+// backslashes than the opening quote has.
+func scanEscapedQuotedValue(msg string, i int, q byte, n int) int {
+	level := escapeLevel(n)
+	run := 0
+	for ; i < len(msg); i++ {
+		c := msg[i]
+		if c == '\\' {
+			run++
+			continue
+		}
+		if c == q {
+			switch quoteLevel := escapeLevel(run); {
+			case quoteLevel < level:
+				return i - run
+			case quoteLevel == level:
+				return i + 1
+			}
+		}
+		run = 0
+	}
+	return len(msg)
 }
 
 // closesEmbeddedString reports whether the quote at msg[i] is followed, after

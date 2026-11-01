@@ -132,7 +132,9 @@
     label's closing quote ends the label's value and the next value is found
     whole; the same applies to a quoted key cut off inside escaped JSON
     (`\\\"token\\\":" x:"..."`) and to an escaped backslash before a closing
-    quote (`"token:\\" x:{...}`). Because quote tracking is a heuristic, the
+    quote (`"token:\\" x:{...}`, `"token:\"\\" x:{...}`), which no longer
+    lets an escaped value run past the string it is embedded in. Because
+    quote tracking is a heuristic, the
     previous redaction is kept whole and every new rule only adds to it: the
     previous scan and its path patterns see exactly the text they always saw
     (only the URL and long-Bearer rewrites run first), and the new scan, PEM

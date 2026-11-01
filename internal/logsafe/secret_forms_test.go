@@ -233,6 +233,11 @@ func TestRedactDiagnosticMessageNeverRevealsBaselineRedactions(t *testing.T) {
 	})
 	assertExact(t, map[string]string{ //nolint:gosec // fake secret-bearing JSON verifies redaction.
 		`{"body":"{\"token\":qt-secret-10","user":"bob"}`: `{"body":"{\"token\":[redacted],"user":"bob"}`,
+		// Corpus entry df234dccf2610093: an escaped value (\") ends before an
+		// escaped backslash and an unescaped quote (\\"), which close the
+		// string the value is embedded in, instead of swallowing the key
+		// after that string.
+		"error \"token:\\\"\\\\\" credential:\t{\"a\":\t[\"0\", {\"b\":\t\"PLANTEDSECRET\"}], \"c\":\t\"0\"} \"0\"": `error "token:[redacted] "0"`,
 	})
 }
 
@@ -523,7 +528,6 @@ func TestRedactDiagnosticMessageKeepsCommonTextReadable(t *testing.T) {
 		`read session cookie: http: named cookie not present`,
 		`invalid cookie: missing name`,
 		`set-cookie: rejected by browser policy`,
-		`invalid cookie: missing name`,
 		`bypass=true compass=north passage=x passport=y`,
 		`auth_mode=basic auth_enabled=true cookie_name=sid session_count=3 pass_count=4 pw_hint=x`,
 		`primary_key=id public_key=ssh-ed25519 foreign_key=x keyboard=de keys=3`,
