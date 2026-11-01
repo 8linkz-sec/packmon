@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/8linkz-sec/packmon/internal/domain"
 	"github.com/8linkz-sec/packmon/internal/sbomgen"
@@ -94,7 +93,7 @@ func buildAutoSBOMConfig(settings scanSettings, auto autoSBOMFlags) sbomgen.Conf
 		KeepSBOMDir:  keepDir,
 		IncludeDev:   settings.IncludeDev,
 		MaxDepth:     settings.MaxDepth,
-		Timeout:      time.Duration(settings.Timeout) * time.Second,
+		Timeout:      boundedTimeoutDuration(settings.Timeout, 0),
 		Logger:       logger,
 	}
 }

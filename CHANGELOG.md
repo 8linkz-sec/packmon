@@ -102,6 +102,12 @@
   `--timeout`, config `timeout`, or `PACKMON_TIMEOUT`. Such values used to
   overflow `time.Duration` into a negative deadline, so the sync aborted at
   once with a context deadline error instead of a clear validation error.
+- `packmon scan` and `packmon config show` apply the same 9223372036-second
+  upper bound to `--timeout`, `PACKMON_TIMEOUT`, config `timeout`, and
+  `repos[].timeout` (config files are rejected on load). Larger values used to
+  overflow `time.Duration` into a negative or near-zero HTTP, SBOM-generation,
+  and per-request registry lookup timeout, so the scan failed or timed out at
+  once instead of reporting a validation error.
 - A project `.packmon.yaml` `repos:` entry that refers to a user-global repo
   (matched by name, then by path) now inherits that trusted repo's
   `send_repo_metadata: false`, server/API-key routing, and webhook. The
@@ -109,6 +115,31 @@
   own name, path (the project path wins on a name match), and scan policy.
   Previously a project entry naming a trusted repo silently re-enabled
   repository metadata that repo had disabled.
+- The managed Git hook no longer writes into the repository. It now runs
+  `packmon scan . --hook ...`. For destinations that resolve inside the
+  repository work tree or its Git directories, `--hook` skips a config
+  `output.file` with a stderr warning (also under `--quiet`) and still runs
+  the gated scan, and fails with exit code 2 before scanning for an explicit
+  `--output-json`, `--output-sarif`, `--output-junit`, or `--html` path or for
+  a used local database directory (`PACKMON_DB_PATH`, `db.path`). The check
+  follows symlinks (dangling ones by their target) and compares the deepest
+  existing ancestor by file identity, so a different letter case on a
+  case-insensitive filesystem does not bypass it. Previously a trusted
+  user-global `output.file` with a relative path was resolved against the
+  hook's working directory, so every hook run wrote a report file into the
+  repository. Destinations outside the repository still work. `--hook` cannot
+  be combined with `--list-packages`, `--outdated`, `--list-all`, or
+  `--auto-sbom`. `packmon hook status` reports hooks installed by older
+  versions as `outdated`; rerun `packmon hook install` to update them.
+  Multi-target scans (`--all`), with or without `--hook`, now resolve every
+  target's settings before the first scan, so a settings error on a later
+  target is reported before any target is scanned.
+- A project `.packmon.yaml` `repos:` entry whose name matches one user-global
+  repo and whose path matches another now inherits `send_repo_metadata: false`
+  from both. Routing (server, API key, webhook) still comes from the name
+  match. Previously only the name match was consulted, so reusing an
+  unrestricted repo name for an opted-out directory dropped that directory's
+  opt-out.
 - `packmon config show` escapes terminal control characters in every config-,
   flag-, and environment-derived value it prints: config file path, server,
   masked API key, API key env name, mode, fail_on, ecosystems, CA cert path,

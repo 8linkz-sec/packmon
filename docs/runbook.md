@@ -470,6 +470,35 @@ the local tables, replaces it:
 packmon db sync --server https://packmon.internal:8080 --full
 ```
 
+### Git hook fails with "hook scans never write inside the repository"
+
+The packmon Git hook (`packmon scan . --hook`) never writes into the
+repository. It exits with code `2` before scanning, which blocks the commit or
+push, when the scan was asked to write there and cannot skip the write:
+
+- an explicit `--output-json`, `--output-sarif`, `--output-junit`, or `--html`
+  path inside the repository. The managed hook passes none of these; a
+  hand-edited hook or a manual `packmon scan --hook` does. Remove the flag or
+  point it outside the repository.
+- the local database directory is inside the repository. The scan opens it in
+  local and auto mode and to record scan history. Typical causes: a relative
+  `PACKMON_DB_PATH` (it resolves against the repository for a hook run), a
+  `db.path` pointing into the repository, the home directory itself being a
+  Git repository (the default database lives in `~/.packmon/db`), or an
+  unknown home directory, where the default falls back to `./.packmon/db`.
+  Set `PACKMON_DB_PATH` or `db.path` to an absolute directory outside every
+  repository, or make `HOME` / `USERPROFILE` resolvable for the hook.
+
+A config `output.file` inside the repository does not fail the hook: it is
+skipped with `warning: --hook: skipping output.file <path> (inside the
+repository)` on stderr and the scan still runs. To keep that report for hook
+runs, set `output.file` to an absolute path outside the repository.
+
+If `packmon hook status` shows `packmon hook outdated`, the hook was written
+by an older packmon and runs the scan without `--hook`, so none of these
+protections apply. Rerun `packmon hook install` (with the same `--type`) in
+the repository to rewrite it.
+
 ### Server reports degraded feed status
 
 Symptoms:

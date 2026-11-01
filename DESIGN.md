@@ -346,6 +346,39 @@ Important behavior:
 - `--no-repo-metadata` omits the optional repository name from remote
   `/api/v1/check` requests and webhooks. `PACKMON_NO_REPO_METADATA=true` and
   `.packmon.yaml` `send_repo_metadata: false` provide the same privacy opt-out.
+- Git hooks: apart from writing the managed hook file itself, neither
+  `packmon hook install` nor a hook run may write repository data, generated
+  files, lockfiles, configuration, or Git metadata; the hook's work is
+  read-only for the repository. The managed hook runs
+  `packmon scan . --hook --fail-on <threshold> --quiet`. A destination is
+  inside the repository when it resolves into the work tree, the Git
+  directory, or the Git common directory: relative paths resolve against the
+  working directory (the repository for a hook run), symlinks are followed
+  (a dangling symlink by its target path, and a link that lives in the
+  repository counts as inside), and the deepest existing ancestor is also
+  compared by file identity (`os.SameFile`) so case-insensitive filesystems
+  cannot bypass the check. For such destinations `--hook`:
+  - skips a config-derived report destination (`output.file`) with one stderr
+    warning, also under `--quiet`, and still runs the gated scan, because a
+    relative user-global `output.file` would otherwise block every commit;
+  - fails with exit code `2` before scanning for an explicit `--output-json`,
+    `--output-sarif`, `--output-junit`, or `--html` path;
+  - fails with exit code `2` before scanning when the scan opens the local
+    database (local checker or history) and its directory (`PACKMON_DB_PATH`,
+    `db.path`, or the default `~/.packmon/db`) is inside.
+
+  Destinations outside the repository are still written. With several
+  targets, the single-target rule for report outputs applies to what is left
+  after the skip. `--hook` cannot be combined with `--list-packages`,
+  `--outdated`, `--list-all`, or `--auto-sbom`.
+  `packmon hook status` reports a managed hook without `--hook` (installed by
+  an older version) as outdated; `packmon hook install` rewrites it.
+- Timeouts (`--timeout`, `PACKMON_TIMEOUT`, config `timeout`, and
+  `repos[].timeout`) are whole seconds from 1 through 9223372036, the largest
+  value that fits a Go `time.Duration`. `scan`, `config show`, and `db sync`
+  reject larger values with a configuration error, and config files that set
+  them fail to load, instead of overflowing into a negative or near-zero HTTP,
+  SBOM-generation, registry lookup, or sync deadline.
 - Unknown `--ecosystems` values are configuration errors, not empty successful
   scans. The same validation applies to `PACKMON_ECOSYSTEMS` and
   `.packmon.yaml` ecosystem filters.
@@ -455,7 +488,8 @@ Important behavior:
   the trusted user-global config. A project `repos:` list replaces the
   user-global list, but a project entry that refers to a user-global entry
   (matched by name, then by path) inherits that entry's routing (`server`,
-  `api_key`, `api_key_env`, webhook) and `send_repo_metadata: false`; the
+  `api_key`, `api_key_env`, webhook), and it inherits `send_repo_metadata:
+  false` from every user-global entry that matches it by name or by path; the
   project entry keeps its own name, path (the project path wins on a name
   match), and scan policy.
   CLI errors for remote scans and local DB sync may show redacted server URL
