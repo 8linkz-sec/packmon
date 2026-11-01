@@ -128,7 +128,7 @@ func boundedErrorLogValue(err error) string {
 }
 
 var (
-	runDatabaseMigrationsContext        = migrations.RunContext
+	runDatabaseMigrationsContext        = migrations.RunContextWithOptions
 	readDatabaseMigrationVersionContext = migrations.VersionContext
 )
 
@@ -150,14 +150,33 @@ func runMigrate() error {
 		slog.Uint64("expected_version", uint64(migrations.ExpectedVersion)),
 	)
 
-	dbCtx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+	// The connect timeout bounds connecting and the advisory-lock wait only.
+	// The migrations themselves run until they finish or SIGINT/SIGTERM
+	// cancels them: a large catalog can need far longer than any connect
+	// timeout for the CREATE INDEX CONCURRENTLY builds or a data repair, and
+	// cutting those off leaves the schema dirty.
+	signalCtx, stop := serverSignalContext(context.Background())
+	defer stop()
+	go func() {
+		// After the first signal, restore default handling so a second one
+		// ends the process even while the cancelled run records its failure.
+		<-signalCtx.Done()
+		stop()
+	}()
 
-	if err := runDatabaseMigrationsContext(dbCtx, dsn); err != nil {
+	if err := runDatabaseMigrationsContext(signalCtx, dsn, migrations.RunOptions{SetupTimeout: timeout}); err != nil {
+		if signalCtx.Err() != nil {
+			// PostgreSQL reports a cancelled statement as "canceling statement
+			// due to user request"; name the actual cause.
+			return withConfiguredFatalLogger(fmt.Errorf("migrations cancelled by signal: %w", err), logger)
+		}
 		return withConfiguredFatalLogger(fmt.Errorf("migrations failed: %w", err), logger)
 	}
 
-	ver, dirty, err := readDatabaseMigrationVersionContext(dbCtx, dsn)
+	versionCtx, cancel := context.WithTimeout(signalCtx, timeout)
+	defer cancel()
+
+	ver, dirty, err := readDatabaseMigrationVersionContext(versionCtx, dsn)
 	if err != nil {
 		return withConfiguredFatalLogger(fmt.Errorf("failed to read schema version after migration: %w", err), logger)
 	}

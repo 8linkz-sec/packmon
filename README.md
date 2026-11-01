@@ -585,8 +585,10 @@ the schema version. On the self-contained server file
 (`docker compose -f docker-compose.server.yml`, which never loads the local
 override) `packmon-migrate` stays a manual Compose profile and receives only
 database/logging environment values, not admin or feed-provider secrets. Its
-database connection, advisory-lock wait, migration statements, and
-post-migration version read are bounded by `PACKMON_DB_CONNECT_TIMEOUT`.
+database connection, advisory-lock wait, and post-migration version read are
+bounded by `PACKMON_DB_CONNECT_TIMEOUT`; the migration statements are not, so
+long index builds or data repairs run until they finish or `SIGINT`/`SIGTERM`
+(Ctrl-C, `docker stop`) cancels the run.
 
 The local Compose database uses a digest-pinned Chainguard PostgreSQL image
 instead of the official `postgres:*-alpine` image, avoiding the vulnerable Go
@@ -1015,8 +1017,9 @@ Important environment variables:
 - `PACKMON_DB_SSLMODE` (default `verify-full` in production, `disable` in development)
 - `PACKMON_DB_MAX_CONNS=20`
 - `PACKMON_DB_MIN_CONNS=2`
-- `PACKMON_DB_CONNECT_TIMEOUT=10s` (startup schema-check, connection-pool, and
-  explicit migration-operation deadline)
+- `PACKMON_DB_CONNECT_TIMEOUT=10s` (startup schema-check and connection-pool
+  deadline; for `packmon-server migrate` it bounds connecting, the
+  advisory-lock wait, and the final version read, not the migrations)
 - `PACKMON_ENCRYPTION_KEY` (required in production; encrypts stored feed API
   keys at rest. Development mode may run without it.)
 - `PACKMON_ADMIN_AUDIT_HMAC_KEY` (required in production; base64-encoded 32

@@ -248,14 +248,8 @@ change.
      durable-volume headroom for both index builds. The concurrent build
      avoids a long table-write lock but still consumes I/O and CPU and takes
      longer on large catalogs; keep the server drained as required above and
-     monitor PostgreSQL logs. The whole migrate run, these builds included, is
-     bounded by `PACKMON_DB_CONNECT_TIMEOUT` (default `10s`); raise it for the
-     migrate run on a large catalog so the builds are not cancelled, for
-     example:
-     ```bash
-     docker compose -f docker-compose.server.yml run --build --rm \
-       -e PACKMON_DB_CONNECT_TIMEOUT=30m packmon-migrate
-     ```
+     monitor PostgreSQL logs. The builds have no time limit (see step 5), so
+     `PACKMON_DB_CONNECT_TIMEOUT` does not need raising for them.
      An interrupted build leaves schema 49 dirty and can leave an `INVALID`
      index behind. Restoring the backup is not needed; retry instead:
      1. Make sure no other migrate run is still active (a second run waits on
@@ -326,6 +320,16 @@ change.
    ```bash
    docker compose -f docker-compose.server.yml run --build --rm packmon-migrate
    ```
+   `PACKMON_DB_CONNECT_TIMEOUT` bounds only connecting, the wait for the
+   migration lock (another `migrate` run holds it), and the final version
+   read. The migrations themselves and the rebuild of an `INVALID` or missing
+   concurrently built index have no time limit, so the 49 index builds, such a
+   rebuild, and the 50 repair can take as long as the catalog needs; do not
+   raise the connect timeout for them. Ctrl-C or `SIGTERM` (`docker stop`) cancels the
+   run: PostgreSQL cancels the running statement, the failed attempt is
+   recorded in `schema_migration_events`, the migration lock is released, and
+   a migration that had started leaves its version dirty; recover as for any
+   failed migration in step 4.
 6. Start the new server build:
    ```bash
    docker compose -f docker-compose.server.yml up --build -d packmon-server

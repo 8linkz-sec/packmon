@@ -873,10 +873,12 @@ Requirements:
   admin audit digests;
 - migrations run through `packmon-server migrate`; the repository Compose
   wrapper uses a manual `packmon-migrate` service scoped to database and logging
-  environment values only, and migration database operations are bounded by
-  `PACKMON_DB_CONNECT_TIMEOUT`; the migrator writes durable
-  `schema_migration_events` rows for started, successful, and failed migration
-  attempts without storing environment values or feed secrets;
+  environment values only; connecting, the migration advisory-lock wait, and
+  the post-migration version read are bounded by `PACKMON_DB_CONNECT_TIMEOUT`,
+  while the migration statements run until they finish or `SIGINT`/`SIGTERM`
+  cancels them; the migrator writes durable `schema_migration_events` rows for
+  started, successful, and failed (including cancelled) migration attempts
+  without storing environment values or feed secrets;
 - query observability uses `pg_stat_statements` with utility tracking disabled
   and bind-parameter logging suppressed. Slow-query logs still contain SQL
   statement text and may expose literal values embedded by ad hoc SQL, so
