@@ -6,7 +6,7 @@ code. This map summarizes where data lives and which controls apply.
 | Data class | Location | Sensitivity | Controls |
 |---|---|---|---|
 | Advisory, malicious package, lifecycle, and reputation records | PostgreSQL; synced subset in SQLite | Internal operational data | Normalized at import, source-attributed, backed up with PostgreSQL, compact subset exposed through sync. |
-| API key secrets | One-time admin response only | Secret | Never stored plaintext; hashed at rest; shown only at creation; expire within 90 days; revocable and soft-deletable. |
+| API key secrets | One-time admin response only | Secret | Never stored plaintext; hashed at rest; shown only at creation; expire within 365 days; revocable and soft-deletable. |
 | API key metadata | PostgreSQL admin tables and admin UI | Sensitive audit metadata | Names bounded; lifecycle timestamps retained for audit; protected by admin session. |
 | Feed provider API keys | PostgreSQL encrypted fields; deployment secret source | Secret | Encrypted with `PACKMON_ENCRYPTION_KEY`; never rendered after save; audit records configured/not-configured only. |
 | `PACKMON_ENCRYPTION_KEY` | Deployment secret manager | Secret | Required in production; backed up with the recovery set; not stored in Packmon source or database. |

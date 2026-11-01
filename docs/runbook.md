@@ -5,7 +5,9 @@
 - API and web UI: port `8080` (`PACKMON_SERVER_PORT`; the Compose files use
   the same value for the in-container listener and both sides of the
   `127.0.0.1` port mapping, so point your reverse proxy at the same port)
-- metrics: `127.0.0.1:9090`
+- metrics: `127.0.0.1:9090` -- host loopback for bare-metal / non-Compose
+  starts; in both Compose deployments it is container loopback, so read it with
+  `docker compose exec` (see the note under `Restore`), not a host curl
 - PostgreSQL: port `5432`
 
 Persistent Docker volumes (project-scoped, by default `packmon_<name>`):
@@ -172,6 +174,7 @@ pg_restore --single-transaction --no-owner --no-privileges --role packmon -d pac
 curl -fsS http://127.0.0.1:8080/healthz
 curl -fsS http://127.0.0.1:8080/readyz
 curl -fsS http://127.0.0.1:8080/version
+# Bare-metal / non-Compose deployments only; under Compose see the note below.
 curl -fsS http://127.0.0.1:9090/metrics
 ```
 
@@ -241,11 +244,12 @@ For an operator rollback:
 
 ## API Key Rotation
 
-API keys expire no more than 90 days after creation. Rotate one client class at
-a time so scans and imports keep working while the old key remains available.
+API keys expire no more than 365 days after creation (legacy keys created
+before expiration support have no expiry). Rotate one client class at a time so
+scans and imports keep working while the old key remains available.
 
 1. In `/admin/keys`, create a replacement key with a clear name such as
-   `ci-main-2026-07` and a UTC expiration before the 90-day limit.
+   `ci-main-2026-07` and a lifetime in whole days within the 365-day limit.
 2. Update the matching client secret store, CI variable, N8N credential, or
    user environment variable. Prefer `PACKMON_API_KEY` or config `api_key_env`
    over plaintext command-line arguments.
