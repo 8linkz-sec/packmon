@@ -42,6 +42,51 @@ func TestSyncAdvisoryCursorRoundTrip(t *testing.T) {
 	}
 }
 
+// TestSyncAdvisoryRowCursorRoundTrip pins the vulnerabilities_cursor that
+// continues an advisory too large for one page inside that advisory: it
+// round-trips the advisory ID and the last delivered (ecosystem, name) row,
+// and is told apart from the advisory cursor and the legacy row cursor. It
+// has four parts, so an older server rejects it instead of misreading it as a
+// three-part legacy row cursor.
+func TestSyncAdvisoryRowCursorRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	for _, row := range [][3]string{
+		{"GHSA-aaaa-bbbb-cccc", "npm", "left-pad"},
+		{"manual:3f1c", "maven", "org.example:lib"},
+		{`odd "id"`, "pypi", "with spaces"},
+	} {
+		raw := EncodeSyncAdvisoryRowCursor(row[0], row[1], row[2])
+		id, ecosystem, name, ok := DecodeSyncAdvisoryRowCursor(raw)
+		if !ok || id != row[0] || ecosystem != row[1] || name != row[2] {
+			t.Fatalf("DecodeSyncAdvisoryRowCursor(EncodeSyncAdvisoryRowCursor(%q)) = %q %q %q %v; want the row", row, id, ecosystem, name, ok)
+		}
+		if _, ok := DecodeSyncAdvisoryCursor(raw); ok {
+			t.Fatalf("DecodeSyncAdvisoryCursor(row cursor %q) = true, want not an advisory cursor", raw)
+		}
+	}
+
+	encode := func(payload string) string { return base64.RawURLEncoding.EncodeToString([]byte(payload)) }
+	for _, raw := range []string{
+		EncodeSyncAdvisoryCursor("GHSA-1"),
+		encode(`["npm","left-pad","GHSA-1"]`), // legacy row cursor
+		"",
+		"not-base64!",
+		encode(`["advisory-rows-v2","GHSA-1","npm"]`),
+		encode(`["advisory-rows-v2","","npm","left-pad"]`),
+		encode(`["advisory-rows-v2","GHSA-1","","left-pad"]`),
+		encode(`["advisory-rows-v2","GHSA-1","npm",""]`),
+		encode(`["advisory-v2","GHSA-1","npm","left-pad"]`),
+	} {
+		if id, _, _, ok := DecodeSyncAdvisoryRowCursor(raw); ok {
+			t.Fatalf("DecodeSyncAdvisoryRowCursor(%q) = %q, true; want not an advisory row cursor", raw, id)
+		}
+	}
+	if got := EncodeSyncAdvisoryRowCursor("GHSA-1", "npm", "left-pad"); got != encode(`["advisory-rows-v2","GHSA-1","npm","left-pad"]`) {
+		t.Fatalf("EncodeSyncAdvisoryRowCursor() = %q, want base64url of the tagged JSON array", got)
+	}
+}
+
 func TestSyncCursorZeroAndEffectiveCursor(t *testing.T) {
 	t.Parallel()
 

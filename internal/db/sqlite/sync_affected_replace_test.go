@@ -252,6 +252,103 @@ func TestDeltaSyncReplacesAffectedPackagesOfChangedVulnerabilities(t *testing.T)
 	}
 }
 
+// TestDeltaSyncDropsVulnerabilitiesWithoutAffectedPackages covers an advisory
+// that lost every affected package on the server (within the requested
+// ecosystems). It has no row to deliver, so a flagged delta page lists its ID
+// in vulnerabilities_without_affected and the client drops its local rows in
+// the requested ecosystems -- never rows of other ecosystems, never on an
+// unflagged page, and never rows the same page delivers for that advisory.
+func TestDeltaSyncDropsVulnerabilitiesWithoutAffectedPackages(t *testing.T) {
+	t.Parallel()
+
+	const since = "2026-05-30T09:00:00Z"
+	withoutAffected := func(page *syncResponse, ids ...string) *syncResponse {
+		page.VulnerabilitiesWithoutAffected = ids
+		return page
+	}
+	tests := []struct {
+		name       string
+		since      string
+		pages      map[string]*syncResponse
+		ecosystems []string
+		want       []string
+		// wantReplaced is the AffectedReplaced count the sync reports.
+		wantReplaced int64
+	}{
+		{
+			name:         "flagged page drops every local row of the listed advisory",
+			since:        since,
+			pages:        map[string]*syncResponse{"": withoutAffected(finalSyncReplacePage(true), "GHSA-move")},
+			want:         []string{"GHSA-other|npm|other"},
+			wantReplaced: 2,
+		},
+		{
+			name:  "flagged pages of a multi-page delta drop the listed advisories",
+			since: since,
+			pages: map[string]*syncResponse{
+				"":   withoutAffected(truncatedSyncReplacePage(true, "c1"), "GHSA-move"),
+				"c1": finalSyncReplacePage(true, syncReplaceVulnerability("GHSA-other", "npm", "other-new")),
+			},
+			want:         []string{"GHSA-other|npm|other-new"},
+			wantReplaced: 3,
+		},
+		{
+			name:         "ecosystem-filtered sync drops only rows in its ecosystems",
+			since:        since,
+			pages:        map[string]*syncResponse{"": withoutAffected(finalSyncReplacePage(true), "GHSA-move")},
+			ecosystems:   []string{"npm"},
+			want:         []string{"GHSA-move|pypi|requests", "GHSA-other|npm|other"},
+			wantReplaced: 1,
+		},
+		{
+			name:  "unflagged page ignores the list",
+			since: since,
+			pages: map[string]*syncResponse{"": withoutAffected(finalSyncReplacePage(false), "GHSA-move")},
+			want:  []string{"GHSA-move|npm|left-pad", "GHSA-move|pypi|requests", "GHSA-other|npm|other"},
+		},
+		{
+			name:  "sync without a since window ignores the list",
+			pages: map[string]*syncResponse{"": withoutAffected(finalSyncReplacePage(true), "GHSA-move")},
+			want:  []string{"GHSA-move|npm|left-pad", "GHSA-move|pypi|requests", "GHSA-other|npm|other"},
+		},
+		{
+			name:  "rows the page delivers win over a contradicting list entry",
+			since: since,
+			pages: map[string]*syncResponse{"": withoutAffected(
+				finalSyncReplacePage(true, syncReplaceVulnerability("GHSA-move", "npm", "left-pad")), "GHSA-move", " ",
+			)},
+			want:         []string{"GHSA-move|npm|left-pad", "GHSA-other|npm|other"},
+			wantReplaced: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := newSQLiteTestStore(t)
+			seedSyncReplaceRows(t, store, tt.since)
+			server := newSyncReplaceServer(t, tt.pages)
+
+			var stats SyncStats
+			if err := Sync(context.Background(), store, SyncConfig{
+				ServerURL:         server.URL,
+				Ecosystems:        tt.ecosystems,
+				AllowInsecureHTTP: true,
+				Stats:             &stats,
+			}); err != nil {
+				t.Fatalf("Sync() error = %v", err)
+			}
+			if got := localVulnerabilityRowKeys(t, store); !slices.Equal(got, tt.want) {
+				t.Fatalf("local vulnerability rows = %q, want %q", got, tt.want)
+			}
+			if stats.AffectedReplaced.Vulnerabilities != tt.wantReplaced {
+				t.Fatalf("AffectedReplaced.Vulnerabilities = %d, want %d", stats.AffectedReplaced.Vulnerabilities, tt.wantReplaced)
+			}
+		})
+	}
+}
+
 // TestDeltaSyncReplacementUsesCanonicalPackageNames guards the received-row
 // bookkeeping against raw server names: rows are stored under the canonical
 // package name, so a non-canonical spelling of a kept package must not delete

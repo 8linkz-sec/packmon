@@ -921,6 +921,12 @@ Local SQLite sync:
   directory) instead of creating the database, WAL, and journal files in the
   working directory, which is usually a repository;
 - stores compact finding, reputation, and lifecycle data, not raw feed JSON;
+- rejects any `/api/v1/sync` response body larger than 32 MiB instead of
+  buffering it. The server keeps the vulnerability rows of each page within
+  an estimated 12 MiB (an upper bound of their JSON encoding) besides the row
+  `limit`, so a sync always makes progress; an advisory whose affected rows
+  alone exceed that budget is split across several pages that never carry
+  `vulnerability_affected_complete` and therefore stay upsert-only;
 - preserves user-facing source attribution for synced vulnerability and
   malicious findings;
 - maps synced malicious-table rows with `supply_chain` or `typosquatting` risk
@@ -935,15 +941,21 @@ Local SQLite sync:
   not through malicious-package lookup methods;
 - drops local affected rows of a changed vulnerability only on a delta sync
   page with a stored `since` that carries `vulnerability_affected_complete`,
-  only for vulnerabilities that page delivered, only for rows in the requested
-  ecosystems, and only in that page's transaction. The server sets the flag on
+  only for vulnerabilities that page delivered (as package rows, or by ID in
+  `vulnerabilities_without_affected` when no affected package is left within
+  the requested ecosystems), only for rows in the requested ecosystems, and
+  only in that page's transaction. A listed ID is never stored as a package
+  row, and package rows the same page delivers for it win over the list. The
+  server sets the flag on
   a delta page only when the page is one statement that carries every
   vulnerability on it with its complete current affected set: it pages a delta
-  by whole advisories and never splits an advisory across pages, so an
+  by whole advisories and never splits an advisory across flagged pages, so an
   advisory changed between pages is either delivered whole on a later page or
   by the next sync, or excluded whole, and never arrives partially. Full exports and the
   legacy row-cursor and offset pages of a delta, which can split an advisory,
-  are never flagged; older servers flag only a delta that fits in one page.
+  are never flagged, and neither are the pages of an advisory that the server
+  splits because its rows alone exceed the page byte budget; older servers
+  flag only a delta that fits in one page.
   The replacement therefore never runs for full syncs (which clear and reload
   the local tables), syncs without `since`, unflagged pages, or older servers'
   multi-page deltas. A failed sequence keeps only the replacements of its

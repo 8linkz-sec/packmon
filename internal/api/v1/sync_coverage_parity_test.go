@@ -121,6 +121,11 @@ func (s *coverageParityStore) ExportSync(_ context.Context, opts db.SyncExportOp
 		ids = ids[:min(len(ids), 1)]
 	}
 	for _, id := range ids {
+		// Like the PostgreSQL exporter, a flagged page lists a changed
+		// advisory without affected packages instead of dropping it.
+		if len(s.affected[id]) == 0 && export.VulnerabilityAffectedComplete {
+			export.VulnerabilitiesWithoutAffected = append(export.VulnerabilitiesWithoutAffected, id)
+		}
 		for _, name := range s.affected[id] {
 			export.Vulnerabilities = append(export.Vulnerabilities, db.SyncVulnerability{
 				ID:               id,
@@ -260,6 +265,35 @@ func TestCoverageParityLocalScanMatchesRemoteCheckAfterCoverageMove(t *testing.T
 	store.moveCoverage(coverageParityAdvisory, "right-pad")
 	p.sync(false)
 	p.requireParity("after the coverage move and a delta sync", map[string][]string{coverageParityAdvisory: {"right-pad"}})
+}
+
+// TestCoverageParityLocalScanMatchesRemoteCheckAfterAdvisoryLosesAllCoverage
+// removes every affected package of a synced advisory on the server. The delta
+// has no package row to deliver for it, so the flagged page lists it in
+// vulnerabilities_without_affected; after the delta sync a local scan must stop
+// reporting it, exactly like a remote check.
+func TestCoverageParityLocalScanMatchesRemoteCheckAfterAdvisoryLosesAllCoverage(t *testing.T) {
+	t.Parallel()
+
+	for _, pageByAdvisory := range []bool{false, true} {
+		store := &coverageParityStore{pageByAdvisory: pageByAdvisory}
+		store.moveCoverage(coverageParityAdvisory, "left-pad")
+		store.moveCoverage(coverageParityNextAdvisory, "right-pad")
+		p := newCoverageParityHarness(t, store)
+
+		p.sync(true)
+		p.requireParity("before the coverage loss", map[string][]string{
+			coverageParityAdvisory:     {"left-pad"},
+			coverageParityNextAdvisory: {"right-pad"},
+		})
+
+		store.moveCoverage(coverageParityAdvisory)
+		store.moveCoverage(coverageParityNextAdvisory, "left-pad", "right-pad")
+		p.sync(false)
+		p.requireParity("after the coverage loss and a delta sync", map[string][]string{
+			coverageParityNextAdvisory: {"left-pad", "right-pad"},
+		})
+	}
 }
 
 // TestCoverageParityLocalScanMatchesRemoteCheckAfterMultiPageCoverageMove
