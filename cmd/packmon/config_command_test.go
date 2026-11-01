@@ -582,6 +582,76 @@ func TestConfigCommandHelpers(t *testing.T) {
 	}
 }
 
+// assertNoTerminalControls fails when output carries a raw ESC or BEL, or a
+// line that a crafted value forged by smuggling a newline.
+func assertNoTerminalControls(t *testing.T, output string) {
+	t.Helper()
+
+	if strings.ContainsAny(output, "\x1b\x07\r") {
+		t.Fatalf("config show output contains raw terminal controls:\n%q", output)
+	}
+	for _, line := range strings.Split(output, "\n") {
+		if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(line)), "FORGED") {
+			t.Fatalf("config show output contains a forged line %q:\n%s", line, output)
+		}
+	}
+}
+
+// TestConfigShowSanitizesAutoDiscoveredProjectRepoValues covers the repository
+// list from an auto-discovered project `.packmon.yaml`: a crafted repo name or
+// path must not inject terminal controls or forge output lines.
+func TestConfigShowSanitizesAutoDiscoveredProjectRepoValues(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	if err := os.WriteFile(defaultCLIConfigFile, []byte(`
+repos:
+  - name: "app\e[2J\nFORGED: repo name"
+    path: "dir\e]0;title\a\nFORGED: repo path"
+`), 0o600); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+
+	cmd := newConfigShowCmd()
+	cmd.SetArgs(nil)
+	output := captureStdout(t, func() {
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("config show: %v", err)
+		}
+	})
+
+	assertNoTerminalControls(t, output)
+	if !strings.Contains(output, `app\x1B[2J\nFORGED: repo name`) {
+		t.Fatalf("config show output missing the sanitized repo name:\n%s", output)
+	}
+}
+
+// TestConfigShowSanitizesConfigAndEnvironmentValues covers the remaining
+// free-form strings `config show` echoes from a config file or the
+// environment.
+func TestConfigShowSanitizesConfigAndEnvironmentValues(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	configPath := filepath.Join(t.TempDir(), "packmon.yaml")
+	if err := os.WriteFile(configPath, []byte(`
+api_key_env: "KEY\e[31m\nFORGED: api_key_env"
+cacert: "ca\e[1m\nFORGED: cacert"
+db:
+  path: "db\e[1m\nFORGED: db"
+`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("PACKMON_ECOSYSTEMS", "npm\x1b[0m\nFORGED: ecosystems")
+	t.Setenv("PACKMON_MODE", "auto\x1b[5m\nFORGED: mode")
+
+	cmd := newConfigShowCmd()
+	cmd.SetArgs([]string{"--file", configPath})
+	output := captureStdout(t, func() {
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("config show: %v", err)
+		}
+	})
+
+	assertNoTerminalControls(t, output)
+}
+
 func captureStdout(t *testing.T, fn func()) string {
 	t.Helper()
 

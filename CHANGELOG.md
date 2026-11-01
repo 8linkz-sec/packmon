@@ -23,6 +23,13 @@
   opt it out of metadata, and project-only repos are added after the trusted
   ones. Previously a same-name project entry silently re-enabled repository
   metadata a trusted repo had disabled.
+- `packmon config show` escapes terminal control characters in every config-,
+  flag-, and environment-derived value it prints: config file path, server,
+  masked API key, API key env name, mode, fail_on, ecosystems, CA cert path,
+  webhook URL, masked webhook secret, DB path, repo names and paths, and log
+  level. A crafted value,
+  including one from an auto-discovered project `.packmon.yaml`, could
+  previously inject ANSI escape sequences or forge output lines.
 - SHA-pinned GitHub Actions are no longer compared as version strings in
   `--list-all` / `--outdated`. The `# vX.Y.Z` comment convention is used as
   the declared version; without it the pin is compared with the dereferenced

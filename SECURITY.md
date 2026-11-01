@@ -547,7 +547,11 @@ and literal link-local, multicast, or unspecified mirror addresses are rejected.
 latest-version registry URLs while redacting userinfo, fragments, and every
 query value. Server and webhook URLs retain their stricter host-only redaction.
 Malformed registry URL, Docker-mirror-map, and Chocolatey-feed-list values are
-rendered as a fixed redacted marker rather than echoed.
+rendered as a fixed redacted marker rather than echoed. Every config-, flag-,
+and environment-derived string `packmon config show` prints (including repo
+names and paths from an auto-discovered project config) has terminal control
+characters escaped, so a crafted value cannot inject escape sequences or forge
+output lines.
 Private registry credentials are not read. Failures degrade to `unknown` in
 reports. The server scan API rejects Docker packages because Packmon does not
 provide container-layer vulnerability coverage. Chocolatey inventory follows
