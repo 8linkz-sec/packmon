@@ -22,7 +22,9 @@
   around `:` or `=`. These values used to reach logs and error messages in
   clear text, because the separator had to follow the key name directly. Only
   the secret values are redacted; the other fields of the object stay
-  readable. A backslash-escaped newline inside a secret value
+  readable. An escaped value of JSON inside a JSON string
+  (`\"token\":\"a b\"`) is redacted up to its matching escaped closing quote,
+  so the part after its first space no longer leaks. A backslash-escaped newline inside a secret value
   (`password='ab\` followed by a line break) also no longer ends the redaction
   early and leaks the rest of the value.
 - `packmon report` exits `2` (operational error) when writing the report to

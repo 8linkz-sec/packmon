@@ -758,7 +758,10 @@ The redaction strips userinfo, paths, and queries from `http(s)://` and
 itself is quoted, as in JSON or dict-style text (`"password":"..."`,
 `"api_key" : "..."`, `'token':'...'`, or `\"token\":\"...\"` inside an escaped
 JSON string): the quoted value is redacted and the other, non-secret fields of
-the object stay readable. A backslash escapes any character inside a secret
+the object stay readable. An escaped value inside such a string
+(`\"token\":\"a b\"`) is redacted up to its matching escaped closing quote,
+spaces and escaped characters (including an escaped quote inside the value)
+included; an unterminated one redacts the rest of the message. A backslash escapes any character inside a secret
 value, a newline included, so an escaped line break does not end the redaction
 early.
 

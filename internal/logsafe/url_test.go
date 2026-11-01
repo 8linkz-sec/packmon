@@ -344,6 +344,86 @@ func TestRedactDiagnosticMessageRedactsQuotedKeySecrets(t *testing.T) {
 	}
 }
 
+// TestRedactDiagnosticMessageRedactsEscapedJSONStringValues covers JSON that is
+// embedded in a JSON string, where the inner quotes are backslash-escaped: the
+// value runs to the matching escaped closing quote, spaces and escaped
+// characters included, so no part of it is left after the first space.
+func TestRedactDiagnosticMessageRedactsEscapedJSONStringValues(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		raw    string
+		leaked []string
+		want   string
+	}{
+		{
+			raw:    `{"body":"{\"token\":\"first second esc-secret-1\",\"user\":\"bob\"}"}`,
+			leaked: []string{"first", "second", "esc-secret-1"},
+			want:   `{"body":"{\"token\":[redacted],\"user\":\"bob\"}"}`,
+		},
+		{
+			// The inner value a"b sec is encoded as a\\\"b sec: an escaped
+			// backslash before an escaped quote does not end the value.
+			raw:    `{"body":"{\"password\":\"a\\\"b esc-secret-2\",\"x\":1}"}`,
+			leaked: []string{"esc-secret-2", `b esc`},
+			want:   `{"body":"{\"password\":[redacted],\"x\":1}"}`,
+		},
+		{
+			// An inner value ending in an escaped backslash still closes at
+			// the following escaped quote.
+			raw:    `{"body":"{\"secret\":\"ends-with-backslash-3\\\\\",\"keep\":\"me\"}"}`,
+			leaked: []string{"ends-with-backslash-3"},
+			want:   `{"body":"{\"secret\":[redacted],\"keep\":\"me\"}"}`,
+		},
+		{
+			raw:    `params: {\"api_key\" : \"spaced esc-secret-4\"}`,
+			leaked: []string{"spaced", "esc-secret-4"},
+			want:   `{\"api_key\" : [redacted]}`,
+		},
+		{
+			raw:    `dict: {\'secret\': \'x y esc-secret-5\', \'user\': \'bob\'}`,
+			leaked: []string{"x y", "esc-secret-5"},
+			want:   `{\'secret\': [redacted], \'user\': \'bob\'}`,
+		},
+		{
+			// Other escapes (a newline written as \n) stay inside the value.
+			raw:    `{"body":"{\"token\":\"line one\nline two esc-secret-6\"}"}`,
+			leaked: []string{"line one", "esc-secret-6"},
+			want:   `{"body":"{\"token\":[redacted]}"}`,
+		},
+		{
+			// An unterminated escaped value redacts the rest of the message.
+			raw:    `{"body":"{\"password\":\"never closed esc-secret-7`,
+			leaked: []string{"never", "closed", "esc-secret-7"},
+			want:   `{"body":"{\"password\":[redacted]`,
+		},
+	} {
+		got := RedactDiagnosticMessage(tt.raw)
+		for _, leaked := range tt.leaked {
+			if strings.Contains(got, leaked) {
+				t.Fatalf("RedactDiagnosticMessage(%q) = %q, leaked %q", tt.raw, got, leaked)
+			}
+		}
+		if !strings.Contains(got, tt.want) {
+			t.Fatalf("RedactDiagnosticMessage(%q) = %q, want %q", tt.raw, got, tt.want)
+		}
+	}
+}
+
+// TestRedactDiagnosticMessageRedactsOnlySecretEscapedJSONFields keeps the
+// non-secret fields of an escaped JSON object readable.
+func TestRedactDiagnosticMessageRedactsOnlySecretEscapedJSONFields(t *testing.T) {
+	t.Parallel()
+
+	raw := `upstream said: {"error":"{\"user\":\"alice smith\",\"password\":\"p w-1\",` +
+		`\"host\":\"db internal\",\"token\":\"t \\\"q\\\" 2\",\"port\":5432,\"note\":\"keep me\"}"}`
+	want := `upstream said: {"error":"{\"user\":\"alice smith\",\"password\":[redacted],` +
+		`\"host\":\"db internal\",\"token\":[redacted],\"port\":5432,\"note\":\"keep me\"}"}`
+	if got := RedactDiagnosticMessage(raw); got != want {
+		t.Fatalf("RedactDiagnosticMessage() =\n%q\nwant\n%q", got, want)
+	}
+}
+
 // TestRedactDiagnosticMessageRedactsOnlySecretJSONFields keeps non-secret
 // fields of a JSON object readable while every secret value is redacted.
 func TestRedactDiagnosticMessageRedactsOnlySecretJSONFields(t *testing.T) {
