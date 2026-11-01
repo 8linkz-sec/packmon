@@ -1118,7 +1118,11 @@ Admin system settings can persist selected runtime values such as block
 threshold and rate-limit settings. Saving a `NONE` block threshold through the
 admin UI requires an explicit acknowledgement because it disables vulnerability
 blocking. System-setting audit entries record previous and new block-threshold
-and rate-limit values. Persisted values are loaded on server start.
+and rate-limit values. Persisted values are loaded on server start. A saved
+value set (block threshold, rate limits, metadata retention) is also applied to
+the running process immediately and as one unit; each save's commit and its
+runtime publication are ordered against other saves, so overlapping saves leave
+the live values equal to the last committed row.
 Admin feed settings can persist enablement, mode, cadence, and feed API keys.
 Production startup requires `PACKMON_ENCRYPTION_KEY` as base64-encoded 32
 random bytes so persisted feed API keys are encrypted at rest, and
