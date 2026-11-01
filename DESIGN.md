@@ -547,7 +547,8 @@ Important behavior:
   detail; the full diagnostics stay on stderr), followed by the registry
   lookup warnings for refused or failed requests, oversized responses, and the
   consecutive-failure breaker, worded as in the list-all report. A run without
-  such warnings renders no warning lines. For npm transitive packages with known immediate parents,
+  such warnings renders no warning lines. For npm transitive packages with known
+  immediate parents,
   Packmon resolves the highest version allowed by the parents' dependency
   ranges and does not report a registry-latest major as an actionable update
   when the parent range cannot select it. GitHub Actions pinned by commit SHA

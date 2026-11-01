@@ -22,7 +22,8 @@
   names (never their directories or full paths). It also shows the registry
   lookup warnings (refused or failed requests, oversized responses, lookups
   skipped after consecutive failures). Like the list-all report, it shows at
-  most five lines and counts the rest in one closing line. These diagnostics used to go
+  most five lines and counts the rest in one closing line. These diagnostics
+  used to go
   only to stderr, so a report from a partially parsed inventory, which exits
   `4`, looked complete. A run without warnings renders the report as before.
 - Diagnostic redaction now hides secrets whose key is quoted, as in JSON or
