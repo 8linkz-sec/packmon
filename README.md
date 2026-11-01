@@ -908,7 +908,10 @@ malicious package, or active supply-chain-risk finding is present, or when
 parser or operational errors prevent complete scan coverage. Quiet mode still prints
 trust-changing warnings such as remote fallback and partial parse errors to
 stderr. `install` refuses to overwrite an existing hook that packmon did not
-create; `uninstall` only removes packmon-managed hooks. Supported types:
+create; `uninstall` only removes packmon-managed hooks. Every `install` (also
+an update of an existing packmon hook) leaves the hook executable (mode
+`0755`), and `status` reports a packmon hook that lost its execute bit as
+`not executable`, because Git skips such a hook. Supported types:
 `pre-push` (default) and `pre-commit`. The hook type and fail-on threshold can
 also be set under a
 `hook:` block in `.packmon.yaml`.

@@ -198,8 +198,7 @@ func newHookInstallCmd() *cobra.Command {
 				os.Exit(ExitOperational)
 			}
 
-			// #nosec G306 -- hooks must be executable for Git to run them.
-			if err := os.WriteFile(hookPath, []byte(hookScript(failOn)), 0o755); err != nil {
+			if err := writeManagedHook(hookPath, hookScript(failOn)); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: cannot write hook file: %v\n", err)
 				os.Exit(ExitOperational)
 			}
@@ -212,6 +211,37 @@ func newHookInstallCmd() *cobra.Command {
 	cmd.Flags().StringVar(&flagType, "type", "", "hook type (pre-push|pre-commit; default: config hook.type or pre-push)")
 
 	return cmd
+}
+
+// managedHookMode is the mode every packmon-managed hook install or update
+// leaves on the hook file.
+const managedHookMode os.FileMode = 0o755
+
+// writeManagedHook writes the managed hook and then sets its mode explicitly.
+// os.WriteFile applies its mode only when it creates the file, so an update
+// would otherwise keep a managed hook that lost its execute bit (or one created
+// under a restrictive umask) non-executable, and Git would skip it. On Windows
+// the chmod only clears the read-only attribute, which is harmless.
+func writeManagedHook(path, script string) error {
+	// #nosec G306 -- hooks must be executable for Git to run them.
+	if err := os.WriteFile(path, []byte(script), managedHookMode); err != nil {
+		return err
+	}
+	// #nosec G302 -- hooks must be executable for Git to run them.
+	if err := os.Chmod(path, managedHookMode); err != nil {
+		return fmt.Errorf("make hook executable: %w", err)
+	}
+	return nil
+}
+
+// hookFileExecutable reports whether Git will run a hook file with this mode.
+// Git checks the owner execute bit on POSIX systems; Git for Windows does not
+// use mode bits for hooks (and Go reports no execute bits there).
+func hookFileExecutable(mode os.FileMode, goos string) bool {
+	if goos == "windows" {
+		return true
+	}
+	return mode.Perm()&0o100 != 0
 }
 
 func hookDefaultsFromConfig() (hookType, failOn string, err error) {
@@ -308,11 +338,15 @@ func newHookStatusCmd() *cobra.Command {
 					fmt.Printf("  %-12s error: %v\n", hookType+":", err)
 					continue
 				}
-				_ = info
-				if isPackmonHook(hookPath) {
-					fmt.Printf("  %-12s packmon hook installed\n", hookType+":")
-				} else {
+				switch {
+				case !isPackmonHook(hookPath):
 					fmt.Printf("  %-12s custom hook (not packmon)\n", hookType+":")
+				case !hookFileExecutable(info.Mode(), runtime.GOOS):
+					// Git skips a non-executable hook, so it is not installed
+					// in any useful sense; install restores the mode.
+					fmt.Printf("  %-12s packmon hook not executable (run packmon hook install to repair)\n", hookType+":")
+				default:
+					fmt.Printf("  %-12s packmon hook installed\n", hookType+":")
 				}
 			}
 			return nil

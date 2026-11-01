@@ -30,6 +30,12 @@
   level. A crafted value,
   including one from an auto-discovered project `.packmon.yaml`, could
   previously inject ANSI escape sequences or forge output lines.
+- `packmon hook install` sets the hook file's mode to `0755` explicitly after
+  writing it. Updating an existing packmon hook kept its old mode, so a managed
+  hook that had lost its execute bit stayed non-executable while install
+  reported success and Git skipped the scan. `packmon hook status` now reports
+  such a hook as `packmon hook not executable` instead of `installed` (POSIX
+  only; Git for Windows does not use mode bits for hooks).
 - SHA-pinned GitHub Actions are no longer compared as version strings in
   `--list-all` / `--outdated`. The `# vX.Y.Z` comment convention is used as
   the declared version; without it the pin is compared with the dereferenced
