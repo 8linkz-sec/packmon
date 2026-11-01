@@ -20,6 +20,10 @@
   `--list-all` / `--outdated`. The `# vX.Y.Z` comment convention is used as
   the declared version; without it the pin is compared with the dereferenced
   latest tag commit, and unresolvable tags report `unknown` instead of a guess.
+- The dashboard severity buckets and the `/metrics` finding-severity totals
+  count ReversingLabs `malware_history` (historical risk) reputation rows as
+  `LOW`, the severity of the informational finding they produce, instead of the
+  stored provider severity (often `HIGH`). Stored reputation data is unchanged.
 
 ### Security updates
 
