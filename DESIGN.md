@@ -678,8 +678,8 @@ Important behavior:
   lines (a trailing caret on such a line, even one followed by spaces, keeps
   the comment going onto the next line), and `#` is ordinary text there. A
   caret in a PowerShell file and a backtick in a batch file never continue a
-  line. Script `--source` arguments are
-  ignored; feeds come only from configuration. Chocolatey inventory is
+  line. Script `--source` arguments are ignored; feeds come only from
+  configuration. Chocolatey inventory is
   metadata-only: no vulnerability or malicious-package matching, no
   `/api/v1/check` submission, no `--outdated` rows, and no JSON/SARIF/JUnit
   entries.
