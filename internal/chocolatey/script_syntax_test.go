@@ -3,6 +3,7 @@ package chocolatey
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 type dialectCase struct {
@@ -81,6 +82,10 @@ func TestParseScriptBatchEscapedQuotesGroupArguments(t *testing.T) {
 		{"escaped quote keeps a redirection", "choco install a --params ^\"/x >nul y^\" b\r\n", "a@[unpinned] b@[unpinned]", "a@[unpinned] b@[unpinned]"},
 		{"escaped space inside escaped quotes groups", "choco install a --params ^\"/x^ y^\" b\r\n", "a@[unpinned] b@[unpinned]", "a@[unpinned] b@[unpinned]"},
 		{"real quote closes an escaped-quote group", "choco install a --params ^\"/x \"y b c\r\n", "a@[unpinned] b@[unpinned] c@[unpinned]", "a@[unpinned] b@[unpinned] c@[unpinned]"},
+		// PowerShell reads `b` as the version on purpose: Windows PowerShell
+		// (and PowerShell 7 with $PSNativeCommandArgumentPassing = 'Legacy')
+		// drops an empty "" argument when it starts a native program, so
+		// choco.exe receives `--version b`. cmd.exe passes the "" through.
 		{"empty double quotes are an argument", "choco install a --version \"\" b\r\n", "a@b[]", "a@[unpinned] b@[unpinned]"},
 	})
 }
@@ -106,7 +111,7 @@ func TestParseScriptCommandPositionFollowsScriptKind(t *testing.T) {
 		{"for set is data", "for %%i in (choco install x) do echo %%i\r\n", "x@[unpinned]", ""},
 		{"for without do", "for %%i in (x) choco install a\r\n", "a@[unpinned]", ""},
 		{"for header ends at a separator", "for %%i in (x & choco install a\r\n", "a@[unpinned]", "a@[unpinned]"},
-		{"do closing a multi-line for set", ") do choco install a\r\n", "", "a@[unpinned]"},
+		{"do closing a multi-line for set", "for %%i in (1\r\n2) do choco install a\r\n", "", "a@[unpinned]"},
 		{"do as a package id", "choco install a do b\r\n", "a@[unpinned] do@[unpinned] b@[unpinned]", "a@[unpinned] do@[unpinned] b@[unpinned]"},
 		{"do without a closing parenthesis", "do choco install a\r\n", "", ""},
 		{"if exist", "if exist C:\\x choco install a\r\n", "", "a@[unpinned]"},
@@ -143,21 +148,104 @@ func TestParseScriptCommandPositionFollowsScriptKind(t *testing.T) {
 	})
 }
 
+// TestParseScriptBatchParenthesesFollowBlockDepth pins the cmd.exe block
+// rules for batch files: a `(` opens a block only where a command starts (at
+// the start of a line, after `&`, `|`, or another `(`, after an `if`
+// condition, after `else` or `do` that follows a closing parenthesis, and as
+// the set of a `for` header), and a `)` closes one only while a block is open,
+// which a multi-line block keeps open across lines. Anywhere else both are
+// ordinary argument text, so `echo Installing (x86) choco install a` is one
+// echo command and a `^"...^"` group keeps its parentheses. PowerShell keeps
+// reading parentheses as separators.
+func TestParseScriptBatchParenthesesFollowBlockDepth(t *testing.T) {
+	t.Parallel()
+
+	runDialectCases(t, []dialectCase{
+		{"parenthesized echo text is no separator", "echo Installing (x86) choco install a\r\n", "a@[unpinned]", ""},
+		{"parenthesized argument stays in the package list", "choco install a (x86) b\r\n", "a@[unpinned]", "a@[unpinned] b@[unpinned]"},
+		{"block", "(choco install a)\r\n", "a@[unpinned]", "a@[unpinned]"},
+		{"echo-suppressed block", "@(choco install a)\r\n", "a@[unpinned]", "a@[unpinned]"},
+		{"multi-line block", "(\r\n  choco install a\r\n)\r\n", "a@[unpinned]", "a@[unpinned]"},
+		{"if else blocks", "if exist x (choco install a) else (choco install b)\r\n", "a@[unpinned] b@[unpinned]", "a@[unpinned] b@[unpinned]"},
+		{"if with an escaped blank in the operand", "if exist x^ y choco install a\r\n", "", "a@[unpinned]"},
+		{"if block with an escaped blank in the operand", "if not exist C:\\Program^ Files\\Git (choco install git)\r\n", "git@[unpinned]", "git@[unpinned]"},
+		{"if exist block with an escaped blank", "if exist x^ y (choco install a)\r\n", "a@[unpinned]", "a@[unpinned]"},
+		{"if defined block with an escaped blank", "if defined A^ B (choco install a)\r\n", "a@[unpinned]", "a@[unpinned]"},
+		{"if comparison with an escaped blank", "if a==b^ c (choco install a)\r\n", "a@[unpinned]", "a@[unpinned]"},
+		{"escaped blank in the command still separates", "if exist x choco^ install a\r\n", "", "a@[unpinned]"},
+		{"bare echo-suppression prefix", "@ choco install a\r\n", "", "a@[unpinned]"},
+		{"bare echo-suppression prefix before a block", "@ (choco install a)\r\n", "a@[unpinned]", "a@[unpinned]"},
+		{"tolerated if else blocks without spaces", "if exist x (choco install a)else(choco install b)\r\n", "a@[unpinned] b@[unpinned]", "a@[unpinned] b@[unpinned]"},
+		{"multi-line if else blocks", "if exist x (\r\n  choco install a\r\n) else (\r\n  choco install b\r\n)\r\n", "a@[unpinned] b@[unpinned]", "a@[unpinned] b@[unpinned]"},
+		{"nested blocks", "if exist x (if exist y (choco install a) else (choco install b))\r\n", "a@[unpinned] b@[unpinned]", "a@[unpinned] b@[unpinned]"},
+		{"nested multi-line blocks", "if exist x (\r\n  if exist y (\r\n    choco install a\r\n  )\r\n  echo done (ok^)\r\n  choco install b\r\n)\r\n", "a@[unpinned] b@[unpinned]", "a@[unpinned] b@[unpinned]"},
+		{"closing parenthesis inside a block ends it", "if exist x (\r\n  echo Installing (x86)\r\n  choco install a\r\n)\r\n", "a@[unpinned]", "a@[unpinned]"},
+		{"tolerated for do block without a space", "for %%i in (1) do(choco install a)\r\n", "a@[unpinned]", "a@[unpinned]"},
+		{"tolerated for set without a space", "for %%i in(1 2) do choco install a\r\n", "", "a@[unpinned]"},
+		{"multi-line for set", "for %%i in (\r\n  1 2\r\n) do choco install a\r\n", "", "a@[unpinned]"},
+		{"unbalanced closing parenthesis is text", "echo done) & choco install b\r\n", "b@[unpinned]", "b@[unpinned]"},
+		{"unbalanced closing parenthesis at a command start", ") choco install a\r\n", "a@[unpinned]", ""},
+		{"unbalanced do at a command start", ") do choco install a\r\n", "", ""},
+		{"parenthesis after a separator", "choco install a & echo (x)\r\n", "a@[unpinned]", "a@[unpinned]"},
+		{"block after a separator", "choco install a & (choco install b)\r\n", "a@[unpinned] b@[unpinned]", "a@[unpinned] b@[unpinned]"},
+		{"block after a redirection", ">nul (choco install a)\r\n", "a@[unpinned]", "a@[unpinned]"},
+		{"parenthesized if operands", "if (%1)==() choco install a\r\n", "a@[unpinned]", "a@[unpinned]"},
+		{"escaped-quote group with parentheses", "choco install a --params ^\"/InstallDir:C:\\Program Files (x86)\\x^\" b\r\n", "a@[unpinned] b@[unpinned]", "a@[unpinned] b@[unpinned]"},
+		{"redirection target with parentheses", "choco install a >out(1).log b\r\n", "a@[unpinned]", "a@[unpinned] b@[unpinned]"},
+		{"block closes a redirection target", "(choco install a >nul)\r\n", "a@[unpinned]", "a@[unpinned]"},
+	})
+}
+
 // TestParseScriptLongShellSyntaxIsLinear guards the lookahead added for
 // redirection targets, percent expansions, braced variables, and `for` / `if`
 // headers: a single logical line near the 1 MiB size bound that repeats one of
 // these constructs without ever closing it must finish quickly in both
 // dialects instead of rescanning the rest of the line for every repetition.
+// The same holds for batch block parentheses, opened or left as text, and for
+// a batch `if` whose long operand is followed by many caret-escaped blanks:
+// the tokenizer asks at every escaped blank whether the condition is complete
+// and must not rescan the operand to answer. A linear parse of one such line
+// takes a few seconds at most, even under -race with every subtest running in
+// parallel; a quadratic one takes minutes to hours, so linearParseDeadline
+// leaves ample room for a loaded machine and still fails such a regression
+// instead of hanging until the test binary's own timeout.
 func TestParseScriptLongShellSyntaxIsLinear(t *testing.T) {
 	t.Parallel()
 
-	for _, unit := range []string{"%a ", "%", "${", "${ x", "for ", "if ", "if not ", "> ", ">", "2>&", "^\"a ", "do ", ") do ", "\"a==\" "} {
-		t.Run(unit, func(t *testing.T) {
+	const linearParseDeadline = 2 * time.Minute
+	scripts := map[string]string{}
+	for _, unit := range []string{
+		"%a ", "%", "${", "${ x", "for ", "if ", "if not ", "> ", ">", "2>&", "^\"a ", "do ", ") do ", "\"a==\" ",
+		"(", ")", "( ", ") ", "(a ", "a) ", "if exist x (", ") else (", "@(", "for %%i in (", "^\"(a ", ">x(",
+	} {
+		scripts[unit] = "choco install a " + strings.Repeat(unit, 1<<20/len(unit))
+	}
+	// The `if` stands in command position here, so its condition stays open
+	// across all the escaped blanks that follow the long operand. Splitting
+	// the 1 MiB bound evenly between both maximizes the work of a parser that
+	// rescans the operand at every escaped blank.
+	operand := strings.Repeat("a", 1<<19)
+	escapedBlanks := strings.Repeat("x^ ", (1<<20-len(operand))/len("x^ "))
+	scripts["if operand then escaped blanks"] = "if " + operand + " " + escapedBlanks
+	scripts["if comparison then escaped blanks"] = "if " + operand + " == " + escapedBlanks
+	scripts["if case-insensitive not operand then escaped blanks"] = "if /i not " + operand + " " + escapedBlanks
+	for name, body := range scripts {
+		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			script := "choco install a " + strings.Repeat(unit, 1<<20/len(unit)) + "\r\n"
+			script := body + "\r\n"
 			for _, kind := range []Kind{KindPowerShellScript, KindBatchScript} {
-				if _, err := ParseScript(strings.NewReader(script), "x", kind); err != nil {
-					t.Fatalf("ParseScript(%s) error = %v", kind, err)
+				done := make(chan error, 1)
+				go func() {
+					_, err := ParseScript(strings.NewReader(script), "x", kind)
+					done <- err
+				}()
+				select {
+				case err := <-done:
+					if err != nil {
+						t.Fatalf("ParseScript(%s) error = %v", kind, err)
+					}
+				case <-time.After(linearParseDeadline):
+					t.Fatalf("ParseScript(%s) did not finish within %s", kind, linearParseDeadline)
 				}
 			}
 		})

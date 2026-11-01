@@ -608,7 +608,7 @@
   command's `choco` / `install` words as packages. A continued line is joined
   without an inserted space and the first character of the next line is
   escaped, as in cmd.exe. Only the cmd.exe separators `&`, `&&`, `||`, `|`,
-  and parentheses start a new batch command: `;`, `{`, `}`,
+  and block parentheses start a new batch command: `;`, `{`, `}`,
   and `=` are ordinary text, so `echo x;choco install a` and
   `set x = choco install a` no longer report `a`, and `choco install a ; b`
   reports `b` as well. A batch `--version='1.0'` keeps its single quotes, as
@@ -635,6 +635,25 @@
   parentheses no longer split a command (`Write-Host
   ${env:ProgramFiles(x86)} choco install a` no longer reports `a`).
   PowerShell `if` / `foreach` / `try` block bodies were already recognized.
+- Chocolatey script inventory reads batch parentheses with the cmd.exe block
+  rules instead of splitting a command at every `(` and `)`. A `(` opens a
+  block only where a command starts (line start, after `&` / `|` / `(`, after
+  an `if` condition, after `else` or `do` that follows a closing parenthesis,
+  as a `for` set, and after an `@`), and a `)` closes one only while a block
+  is open, which a multi-line block keeps open across lines; any other
+  parenthesis is argument text. So `echo Installing (x86) choco install a`
+  no longer reports `a`, `choco install a (x86) b` and
+  `choco install a >out(1).log b` report `b` as well, a `^"...^"` group such
+  as `--params ^"/InstallDir:C:\Program Files (x86)\x^" b` is no longer split
+  at its parentheses (so `b` is reported), and an unbalanced `)` outside any
+  block no longer starts a command (`) choco install a` reports nothing).
+  The attached forms `)else(`, `do(`, and `in(`, which cmd.exe rejects as a
+  syntax error, are tolerated and conservatively read as block openers. A
+  bare `@` prefix keeps command position, so `@ choco install a` now reports
+  `a`. A caret-escaped blank inside an `if` condition stays part of its
+  operand, as cmd.exe reads it, so
+  `if exist C:\Program^ Files\Git choco install git` now reports `git`.
+  PowerShell parsing is unchanged.
 - `packmon-server migrate` no longer bounds the migrations themselves by
   `PACKMON_DB_CONNECT_TIMEOUT` (default `10s`). The whole run used to share
   that deadline, so on a large catalog the 049 `CREATE INDEX CONCURRENTLY`

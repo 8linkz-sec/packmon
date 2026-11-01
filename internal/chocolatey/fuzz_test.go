@@ -62,6 +62,8 @@ func FuzzParseScript(f *testing.F) {
 	f.Add([]byte("for /f \"tokens=*\" %%a in (list.txt) do @call choco install %%a b\r\n) do choco install c\r\nfor %%i in (x & choco install d\r\n"))
 	f.Add([]byte("@if /i not \"%1\"==\"\" if exist %ProgramFiles(x86)%\\x if %x% equ 1 (choco install a) else choco install b\r\n"))
 	f.Add([]byte("if \"a==\" == b choco install c & if errorlevel 1 if cmdextversion 2 echo 50% & choco install d\r\n"))
+	f.Add([]byte("echo Installing (x86) choco install a & @(choco install b >out(1).log c)else(x)\r\nif exist x (\r\n echo (y^) ^\"(z\r\n) else (for %%i in(1) do(choco install d))\r\n) e\r\n"))
+	f.Add([]byte("if not exist C:\\Program^ Files\\Git (choco install git)\r\n@ choco install a & if a==b^ c choco^ install b\r\n"))
 	f.Add([]byte("try { if ($x) { choco install a } elseif ($y) { foreach ($p in $l) { choco install b > #x\r\n& ${env:ProgramFiles(x86)}\\c\\choco.exe install c ${ d\r\n"))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		for _, kind := range []Kind{KindPowerShellScript, KindBatchScript} {
