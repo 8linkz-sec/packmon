@@ -658,7 +658,12 @@ paths:
           in: query
           description: >-
             Legacy page offset used with the same since and snapshot values. Use
-            cursor parameters for larger paginated syncs.
+            cursor parameters for larger paginated syncs. It applies to every
+            dataset, and only when the request carries no per-dataset offset,
+            cursor, or done flag. The datasets of a page can hold fewer rows
+            than the limit (byte budgets, whole advisories), so a client must
+            continue with the per-dataset values of next_cursor instead of
+            advancing this offset by the limit.
           deprecated: true
           schema:
             type: integer
