@@ -145,7 +145,7 @@ func TestDBInfoAndExportCommandsUseLocalDatabase(t *testing.T) {
 			t.Fatalf("db info text: %v", err)
 		}
 	})
-	for _, want := range []string{"Initialized:     true", "Vulnerabilities: 1", "Malicious:       1", "Reputation:      1", "Lifecycle:       1", "Last sync:       never", "DB stale:"} {
+	for _, want := range []string{"Initialized:     true", "Vulnerabilities: 1", "Malicious:       1", "Reputation:      1", "Lifecycle:       1", "Last sync:       never", "DB stale:        true"} {
 		if !strings.Contains(textOutput, want) {
 			t.Fatalf("db info text missing %q:\n%s", want, textOutput)
 		}
