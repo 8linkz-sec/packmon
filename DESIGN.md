@@ -271,7 +271,14 @@ rules (`internal/version` dispatches `chocolatey` to the NuGet comparator).
 SwiftPM packages are identified by OSV/PURL SwiftURL name
 (`host/owner/repo`, without URL scheme or `.git`) when `Package.resolved`
 provides a repository location. URL userinfo and non-HTTP(S) repository
-schemes are not used as package identity. SwiftPM latest-version lookup is
+schemes are not used as package identity. The host of an `http(s)` URL, an
+SCP-like remote (`user@host:path`), or a bare `host/path` location must be a
+valid DNS hostname (non-empty labels of ASCII letters, digits, and hyphens,
+no leading or trailing dot or hyphen; bare hosts also need a dot, and
+`http(s)` URLs may also use an IPv6 literal); otherwise the location is
+ignored and the pin's identity is used. As in Git, a location with a slash
+before its first colon is a local path, not an SCP-like remote. SwiftPM
+latest-version lookup is
 limited to canonical public Git host identities on the built-in allowlist
 (`github.com`, `gitlab.com`, and `bitbucket.org`) plus trusted operator
 hostnames configured through `PACKMON_SWIFTPM_GIT_ALLOWED_HOSTS` or
@@ -634,7 +641,9 @@ Important behavior:
 - `--list-all` also inventories Chocolatey package declarations: FLARE-VM /
   VM-Packages style `config.xml` files (root `<config>` element with a
   `<packages><package name="..."/>` list, identified by content so unrelated
-  `config.xml` files are ignored silently) and `choco install|upgrade` /
+  `config.xml` files are ignored silently; a malformed or truncated file is a
+  parse error only once a `<packages>` section directly under `<config>` has
+  been read) and `choco install|upgrade` /
   `cinst` / `cup` command lines in `.ps1`, `.psm1`, `.bat`, and `.cmd`
   scripts. Rows use ecosystem `chocolatey`, source `config.xml` or
   `choco-install`, scope `runtime`, relation `declared`, and lowercase
@@ -642,10 +651,21 @@ Important behavior:
   under NuGet version rules; entries without a version (config.xml always
   installs latest) show INSTALLED `-`, the feed's latest version, UPDATE
   `unpinned`, and the `unpinned` flag, and are never counted as available
-  updates. Script `--source` arguments are ignored; feeds come only from
-  configuration. Chocolatey inventory is metadata-only: no vulnerability or
-  malicious-package matching, no `/api/v1/check` submission, no `--outdated`
-  rows, and no JSON/SARIF/JUnit entries.
+  updates. A script `choco` verb counts only in command position (line start,
+  after an unquoted `;`, `|`, `&`, `(`, `)`, `{`, `}`, redirection, or `=`,
+  or after `call` / `sudo`); quoted text is always an argument, so a quoted
+  `';'` neither starts a new command nor ends the package list. Script
+  syntax follows the file type: `.ps1` / `.psm1` files join backtick line
+  continuations and skip `#` comments, `<# ... #>` block comments, and
+  here-strings, where a backtick inside a `#` or block comment is comment text
+  and does not pull the next line into the comment; `.bat` / `.cmd` files join
+  caret line continuations and skip `REM` / `@REM` and `::` comment lines,
+  and `#` is ordinary text there. A caret in a PowerShell file and a backtick
+  in a batch file never continue a line. Script `--source` arguments are
+  ignored; feeds come only from configuration. Chocolatey inventory is
+  metadata-only: no vulnerability or malicious-package matching, no
+  `/api/v1/check` submission, no `--outdated` rows, and no JSON/SARIF/JUnit
+  entries.
 
 ## Server Behavior
 
@@ -1121,8 +1141,14 @@ Admin pages are protected by the shared admin session model described in
 `SECURITY.md`: one shared admin identity, an `/admin`-scoped session cookie,
 CSRF-protected write forms, an absolute session lifetime, a shorter inactivity
 timeout, and login lockout that tracks both client IP and the shared admin
-account. Failed current-password checks during admin password changes use the
-same lockout window.
+account. Bootstrap and rotated admin passwords must be at least 12 characters
+(Unicode code points) and at most 72 bytes (UTF-8, the bcrypt input limit);
+each violation has its own error and admin message. Failed current-password
+checks during admin password changes use the same lockout window. Logins with
+an unknown username or while no admin account exists count as failed logins
+too, and they pay for one production-cost bcrypt comparison against a dummy
+hash (generated at startup, with an embedded fallback), so they do not answer
+measurably faster than a wrong password.
 
 The admin UI exposes `/.well-known/change-password` as a redirect to the
 password settings page so password managers can discover the password-change
@@ -1238,7 +1264,10 @@ Important server environment variables:
 
 - `PACKMON_SERVER_MODE`;
 - `PACKMON_SERVER_PORT`;
-- `PACKMON_SERVER_PUBLIC_HOST`;
+- `PACKMON_SERVER_PUBLIC_HOST` (a bare `host[:port]`: hostname, IPv4 address,
+  or IPv6 literal with an optional numeric port 1-65535; startup rejects any
+  scheme, path, query, fragment, userinfo, percent-escape, whitespace, or
+  control character);
 - `PACKMON_TLS_CERT_FILE`;
 - `PACKMON_TLS_KEY_FILE`;
 - `PACKMON_TLS_MIN_VERSION`;
@@ -1253,7 +1282,8 @@ Important server environment variables:
 - `PACKMON_WEB_LEGAL_URL`;
 - `PACKMON_WEB_TERMS_URL`;
 - `PACKMON_DB_*`;
-- `PACKMON_ADMIN_INITIAL_PASSWORD`;
+- `PACKMON_ADMIN_INITIAL_PASSWORD` (bootstrap admin password; 12 characters
+  minimum, 72 bytes maximum);
 - `PACKMON_ADMIN_SESSION_TIMEOUT`;
 - `PACKMON_ADMIN_IDLE_TIMEOUT`;
 - `PACKMON_ADMIN_AUDIT_HMAC_KEY`;
@@ -1294,7 +1324,14 @@ are applied to the running process immediately and are also loaded on future
 server starts. Each save or reset applies the runtime change, persists it, and
 rolls the runtime back if persistence fails as one step ordered against other
 feed saves and resets, so overlapping changes leave the runtime on the last
-committed configuration. The save and reset forms carry the stored override's
+committed configuration. The rollback runs detached from the request context
+with its own 30-second timeout, so a client disconnect cannot cancel it and
+leave the runtime on an unpersisted configuration. A change to a queue-worker feed (Socket.dev,
+ReversingLabs) restarts the refresh-queue processor; when the previous
+processor generation misses the shutdown-timeout deadline, it is left to
+finish and its replacement starts as soon as it exits, from the settings
+current at that time, so the change is never silently dropped. The save and
+reset forms carry the stored override's
 revision (`updated_at`) from the rendered page; a submitted revision that no
 longer matches the stored override is rejected with the conflict message
 instead of overwriting another admin's change. HTTP route wiring and API
@@ -1417,7 +1454,9 @@ as bounded categories rather than attacker-sized decoder text.
 Feed syncers sanitize git subprocess diagnostics, filesystem walker errors, and
 persisted `feed_sync_status.last_error` values through the shared diagnostic
 redaction path; git-backed feed helpers capture child output instead of wiring
-it directly to process stderr.
+it directly to process stderr. `packmon-server` startup, schema-check,
+background-worker, and fatal error logs (and the stderr fatal fallback) use the
+same redaction, bounded to 512 bytes.
 
 Backups are intentionally simple: periodic `pg_dump`, seven-day local
 retention, and storage outside the application data path. External backup

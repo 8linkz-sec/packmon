@@ -42,6 +42,7 @@ type backgroundServices struct {
 	queueCancel      context.CancelFunc
 	queueDone        chan error
 	queueDones       []chan error
+	queueDeferred    chan error
 	retentionDone    chan error
 	managerStartDone chan struct{}
 	backgroundTasks  sync.WaitGroup
@@ -301,7 +302,7 @@ func (b *backgroundServices) startBackgroundTask(name string, fn func(context.Co
 			if b.logger != nil && !errors.Is(err, context.Canceled) {
 				b.logger.Warn("background startup task failed",
 					slog.String("task", name),
-					slog.String("error", err.Error()),
+					slog.String("error", boundedErrorLogValue(err)),
 				)
 			}
 			return
@@ -439,11 +440,74 @@ func (b *backgroundServices) restartQueueProcessor() error {
 
 	oldDone := b.stopQueueProcessorLocked()
 	if oldDone != nil && !b.waitForQueueProcessor(oldDone, "restart") {
-		b.queueDone = oldDone
+		b.deferQueueRestartLocked(oldDone)
 		return nil
 	}
 	b.removeQueueDoneLocked(oldDone)
+	if oldDone != nil && b.queueDeferred == oldDone {
+		b.queueDeferred = nil
+	}
 	return b.startQueueProcessorLocked()
+}
+
+// deferQueueRestartLocked keeps tracking a generation that missed the restart
+// deadline and starts its replacement once it exits. The new settings are
+// already in the config, and saving them again is a no-op, so without this
+// continuation the async workers would stay stopped until the next effective
+// change or a server restart.
+//
+// The continuation becomes the only reader of the old generation's channel and
+// forwards the exit result to a tracked channel, so a later restart or the
+// shutdown path can still wait for that generation.
+func (b *backgroundServices) deferQueueRestartLocked(oldDone chan error) {
+	if b.queueDeferred != nil && b.queueDeferred == oldDone {
+		// A continuation already waits for this generation and starts the
+		// replacement from the then-current settings.
+		b.queueDone = oldDone
+		return
+	}
+	forward := make(chan error, 1)
+	b.removeQueueDoneLocked(oldDone)
+	b.queueDones = append(b.queueDones, forward)
+	b.queueDone = forward
+	b.queueDeferred = forward
+	go b.finishDeferredQueueRestart(oldDone, forward)
+}
+
+func (b *backgroundServices) finishDeferredQueueRestart(oldDone, forward chan error) {
+	err := <-oldDone
+	// Publish the exit before taking the lock: a later restart holds queueMu
+	// while it waits on forward and must be able to finish.
+	forward <- err
+
+	b.queueMu.Lock()
+	defer b.queueMu.Unlock()
+	if b.queueDeferred == forward {
+		b.queueDeferred = nil
+	}
+	if b.queueDone != forward {
+		// A later restart already consumed the exit and started the
+		// replacement, or shutdown took over and waits on forward itself.
+		return
+	}
+	// Nobody else consumed the exit: restarts only read forward while holding
+	// queueMu, and shutdown clears queueDone before it reads.
+	<-forward
+	b.removeQueueDoneLocked(forward)
+	b.queueDone = nil
+	if err != nil && !errors.Is(err, context.Canceled) && b.logger != nil {
+		b.logger.Error("queue processor stopped with error", "reason", "deferred restart", "error", boundedErrorLogValue(err))
+	}
+	if err := b.startQueueProcessorLocked(); err != nil {
+		if b.logger != nil {
+			b.logger.Error("queue processor replacement failed to start after delayed stop; queue worker settings are not applied",
+				"error", boundedErrorLogValue(err))
+		}
+		return
+	}
+	if b.logger != nil && b.queueDone != nil {
+		b.logger.Info("queue processor replacement started after delayed stop")
+	}
 }
 
 func (b *backgroundServices) stopQueueProcessorLocked() chan error {
@@ -476,7 +540,7 @@ func (b *backgroundServices) waitForQueueProcessor(done chan error, reason strin
 	select {
 	case err := <-done:
 		if err != nil && !errors.Is(err, context.Canceled) && b.logger != nil {
-			b.logger.Error("queue processor stopped with error", "reason", reason, "error", err)
+			b.logger.Error("queue processor stopped with error", "reason", reason, "error", boundedErrorLogValue(err))
 		}
 		if b.logger != nil {
 			b.logger.Info("queue processor stopped", "reason", reason)
@@ -484,7 +548,7 @@ func (b *backgroundServices) waitForQueueProcessor(done chan error, reason strin
 		return true
 	case <-time.After(wait):
 		if b.logger != nil {
-			b.logger.Warn("queue processor did not stop before deadline; replacement not started",
+			b.logger.Warn("queue processor did not stop before deadline; replacement deferred until it exits",
 				"reason", reason,
 				slog.Duration("timeout", wait))
 		}
@@ -593,7 +657,7 @@ func (b *backgroundServices) stopAndWaitQueueProcessors(start time.Time) {
 		}
 		err := <-queueDone
 		if err != nil && !errors.Is(err, context.Canceled) && b.logger != nil {
-			b.logger.Error("queue processor stopped with error", "error", err)
+			b.logger.Error("queue processor stopped with error", "error", boundedErrorLogValue(err))
 		}
 		if b.logger != nil {
 			b.logger.Info("shutdown: queue processor stopped", slog.Duration("elapsed", time.Since(start)))
@@ -608,7 +672,7 @@ func (b *backgroundServices) waitRetentionWorker(start time.Time) {
 		}
 		err := <-b.retentionDone
 		if err != nil && !errors.Is(err, context.Canceled) && b.logger != nil {
-			b.logger.Error("audit retention worker stopped with error", "error", err)
+			b.logger.Error("audit retention worker stopped with error", "error", boundedErrorLogValue(err))
 		}
 		if b.logger != nil {
 			b.logger.Info("shutdown: audit retention worker stopped", slog.Duration("elapsed", time.Since(start)))
@@ -723,7 +787,7 @@ func recordQueueWorkerSkipped(ctx context.Context, store db.Store, logger *slog.
 		if logger != nil {
 			logger.Warn("failed to load current queue worker feed status",
 				slog.String("feed", feedName),
-				slog.String("error", err.Error()),
+				slog.String("error", boundedErrorLogValue(err)),
 			)
 		}
 		return err
@@ -738,7 +802,7 @@ func recordQueueWorkerSkipped(ctx context.Context, store db.Store, logger *slog.
 		if logger != nil {
 			logger.Warn("failed to record queue worker skipped status",
 				slog.String("feed", feedName),
-				slog.String("error", err.Error()),
+				slog.String("error", boundedErrorLogValue(err)),
 			)
 		}
 		return err
@@ -781,12 +845,12 @@ func registerFeedSyncer(manager *feed.Manager, cfg *config.Config, logger *slog.
 
 	if interval := cfg.EffectiveFeedInterval(name); interval > 0 && settings.SupportsSyncInterval {
 		if err := manager.RegisterWithInterval(feedCfg, interval); err != nil {
-			logger.Error("failed to register feed syncer", "feed", name, "error", err)
+			logger.Error("failed to register feed syncer", "feed", name, "error", boundedErrorLogValue(err))
 		}
 		return
 	}
 	if err := manager.Register(feedCfg); err != nil {
-		logger.Error("failed to register feed syncer", "feed", name, "error", err)
+		logger.Error("failed to register feed syncer", "feed", name, "error", boundedErrorLogValue(err))
 	}
 }
 

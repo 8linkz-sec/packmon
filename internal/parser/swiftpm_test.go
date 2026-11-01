@@ -213,6 +213,21 @@ func TestSwiftPMParser_Parse(t *testing.T) {
 			wantPkgs:  map[string]string{"github.com/apple/swift-nio": "2.65.0"},
 		},
 		{
+			name: "scp-style location with invalid host falls back to identity",
+			input: `{
+				"version": 2,
+				"pins": [
+					{
+						"identity": "private-lib",
+						"location": "git@.gitserver.example:org/private-lib.git",
+						"state": {"version": "1.2.3", "revision": "abc"}
+					}
+				]
+			}`,
+			wantCount: 1,
+			wantPkgs:  map[string]string{"private-lib": "1.2.3"},
+		},
+		{
 			name: "url userinfo is discarded from canonical identity",
 			input: `{
 				"version": 2,
@@ -569,6 +584,33 @@ func TestCanonicalSwiftPackageLocationRejectsInvalidHostsAndPaths(t *testing.T) 
 		{name: "trailing-dot bare host", raw: "gitserver.example./org/repo", want: ""},
 		{name: "http URL without a path", raw: "https://gitserver.example", want: ""},
 		{name: "query and git suffix are discarded", raw: "https://GitServer.Example/org/repo.git?ref=v1", want: "gitserver.example/org/repo"},
+		{name: "leading-dot bare host", raw: ".gitserver.example/org/repo", want: ""},
+		{name: "empty-label bare host", raw: "gitserver..example/org/repo", want: ""},
+		{name: "leading-hyphen bare host label", raw: "-gitserver.example/org/repo", want: ""},
+		{name: "trailing-hyphen bare host label", raw: "gitserver-.example/org/repo", want: ""},
+		{name: "invalid-character bare host", raw: "git_server.example/org/repo", want: ""},
+		{name: "scp remote", raw: "git@GitServer.Example:org/repo.git", want: "gitserver.example/org/repo"},
+		{name: "scp remote with single-label host", raw: "git@gitserver:org/repo.git", want: "gitserver/org/repo"},
+		{name: "scp remote with hyphenated host", raw: "git@git-server.example:org/repo", want: "git-server.example/org/repo"},
+		{name: "leading-dot scp host", raw: "git@.gitserver.example:org/repo", want: ""},
+		{name: "trailing-dot scp host", raw: "git@gitserver.example.:org/repo", want: ""},
+		{name: "dot-only scp host", raw: "git@.:org/repo", want: ""},
+		{name: "dot-dot scp host", raw: "git@..:org/repo", want: ""},
+		{name: "empty scp host", raw: "git@:org/repo", want: ""},
+		{name: "empty-label scp host", raw: "git@gitserver..example:org/repo", want: ""},
+		{name: "leading-hyphen scp host label", raw: "git@-gitserver.example:org/repo", want: ""},
+		{name: "trailing-hyphen scp host label", raw: "git@gitserver.example-:org/repo", want: ""},
+		{name: "invalid-character scp host", raw: "git@git_server.example:org/repo", want: ""},
+		{name: "path-separator scp host", raw: "git@gitserver/evil:org/repo", want: ""},
+		{name: "whitespace inside scp host", raw: "git@git server.example:org/repo", want: ""},
+		{name: "over-long scp host label", raw: "git@" + strings.Repeat("a", 64) + ".example:org/repo", want: ""},
+		{name: "over-long scp host", raw: "git@" + strings.Repeat("a.", 127) + "example:org/repo", want: ""},
+		{name: "local path containing at-sign and colon", raw: "../Private/Lib@v1:org/repo", want: ""},
+		{name: "scp remote without a path", raw: "git@gitserver.example:", want: ""},
+		{name: "http IPv6 literal host", raw: "https://[2001:db8::1]/org/repo", want: "2001:db8::1/org/repo"},
+		{name: "leading-dot http host", raw: "https://.gitserver.example/org/repo", want: ""},
+		{name: "empty-label http host", raw: "https://gitserver..example/org/repo", want: ""},
+		{name: "http host with port", raw: "https://gitserver.example:8443/org/repo", want: "gitserver.example/org/repo"},
 	}
 
 	for _, tt := range tests {
