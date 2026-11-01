@@ -232,8 +232,9 @@ change.
      every event a nonblank string boundary). Inside one transaction it scans
      both tables once to find and log the rows that only passed the older
      check, rewrites just the logged rows, and scans both tables once more to
-     validate the constraints; expect it to take longer on large databases. The re-added constraints hold an exclusive lock on both
-     tables until the transaction commits, so reads and writes to them wait
+     validate the constraints; expect it to take longer on large databases.
+     The re-added constraints hold an exclusive lock on both tables until the
+     transaction commits, so reads and writes to them wait
      during validation (another reason to keep the server drained). A failure
      rolls back every 50 change but still leaves the version dirty. The
      repair works per row:

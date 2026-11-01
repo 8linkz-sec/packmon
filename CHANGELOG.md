@@ -538,8 +538,9 @@
     `malicious_findings` to log the failing rows in
     `packmon_m050_version_range_repairs`, rewrites the logged rows, and scans
     both tables again to validate the constraints, holding an exclusive lock
-    on both tables from the constraint step until it commits. Repaired affected-package rows match every version until the
-    next feed sync rewrites them, so finding totals for those packages can
+    on both tables from the constraint step until it commits. Repaired
+    affected-package rows match every version until the next feed sync
+    rewrites them, so finding totals for those packages can
     rise temporarily. Malicious findings without exact versions are
     quarantined: they stop blocking until a feed import that contains them
     resurrects them, and quarantined manual advisories (`manual:` IDs) must
