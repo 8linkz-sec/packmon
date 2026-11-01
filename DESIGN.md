@@ -46,7 +46,12 @@ unrelated persistence capabilities do not leak across subsystem boundaries.
   - `3`: findings below the blocking threshold (non-blocking; treated as a
     passing pipeline by the GitLab consumer template);
   - `4`: parser error, including partial lockfile/SBOM parse errors when no
-    blocking finding has already failed the scan;
+    blocking finding has already failed the scan; `--list-packages` and
+    `--outdated` have no findings, so any lockfile/SBOM parse error makes them
+    exit `4` after they report the packages they could parse (terminal table
+    and, for `--outdated --html`, the HTML report), and an inventory where
+    nothing parsed exits `4` instead of reporting "No packages found." (no
+    `--outdated` HTML report is written in that case);
   - `10`: internal bug.
 - Treat malicious and active supply-chain risk findings as always blocking.
   Historical ReversingLabs malware-incident evidence is `LOW` reputation info
@@ -251,10 +256,14 @@ are normalized and validated against this list before scanning; `docker` and
 
 Feed-specific names must be mapped into this enum at the import boundary.
 Package identities are canonicalized anywhere they cross a scan, feed, sync,
-or storage boundary. NuGet package IDs are lowercased. PyPI package names use
-PEP 503 normalization: lowercase and replace each run of `.`, `_`, or `-` with
-a single `-`. Other ecosystem names preserve their registry casing unless a
-specific ecosystem rule is added. NuGet version matching follows NuGet's
+or storage boundary (`packageid.NormalizeName`). Surrounding whitespace is
+trimmed for every ecosystem. NuGet package IDs are lowercased. GitHub Actions
+`owner/repo` names (ecosystem `actions`, also spelled `github actions`) are
+lowercased. PyPI package names use PEP 503 normalization: lowercase and
+replace each run of `.`, `_`, or `-` with a single `-`. Other ecosystem names
+preserve their registry casing unless a specific ecosystem rule is added. The
+PostgreSQL startup package-name repair folds legacy rows into this canonical
+identity for every ecosystem. NuGet version matching follows NuGet's
 case-insensitive prerelease-label behavior for both ecosystem ranges and
 explicit affected-version lists. Chocolatey packages are NuGet packages:
 inventory IDs are lowercased and their versions compare under the same NuGet
@@ -285,7 +294,11 @@ Important behavior:
 
 - stdout is human-readable unless `--quiet` is used. `--quiet` suppresses
   routine stdout, but trust-changing warnings such as auto-mode local fallback
-  and partial parse errors still go to stderr.
+  and partial parse errors still go to stderr. `--outdated --quiet` without
+  `--html` has no output to produce, so it skips the registry lookups, but it
+  still discovers and parses the inventory: parse warnings go to stderr and
+  discovery, parser, and partial-parse failures keep their exit codes (`2` /
+  `4`) instead of exiting `0` unchecked.
 - Canonical `ScanResult.feed_status` is a compact machine-readable status:
   `healthy`, `degraded`, or `error`. Parser and operational failure details are
   carried in optional `scan_error`; partial inventory details remain in
@@ -351,7 +364,11 @@ Important behavior:
   omit the noisy `Via` and `Flags` columns, keep full source paths out of
   package rows, and render a deduplicated "Checked Inventory Sources" section
   at the bottom for lockfiles, SBOMs, Docker inventory files, and Chocolatey
-  inventory files. The HTML
+  inventory files. Source paths in the list-all and `--outdated` HTML reports
+  show inside the scan root as root-relative paths; every other absolute path,
+  including a Windows drive, UNC, or drive-rooted (`\Users\...`) path on a
+  Linux host and a POSIX or drive-rooted path on Windows, shows only its final
+  segment. The HTML
   "Packages Needing Attention" section is scoped to genuine security and
   lifecycle findings only: current ReversingLabs malware/removed-package
   findings, supply-chain-risk findings, lifecycle (end-of-life) findings,
@@ -434,7 +451,13 @@ Important behavior:
   URL/secret, `output.format`/`output.file`, and `db.path`); those values must
   come from flags, environment, user-global config, or an explicit `--config`.
   It may preserve `send_repo_metadata: false` as a privacy opt-out but cannot
-  re-enable repository metadata disabled by a higher-precedence source.
+  re-enable repository metadata disabled by a higher-precedence source or by
+  the trusted user-global config. A project `repos:` list replaces the
+  user-global list, but a project entry that refers to a user-global entry
+  (matched by name, then by path) inherits that entry's routing (`server`,
+  `api_key`, `api_key_env`, webhook) and `send_repo_metadata: false`; the
+  project entry keeps its own name, path (the project path wins on a name
+  match), and scan policy.
   CLI errors for remote scans and local DB sync may show redacted server URL
   context only: scheme, host, and a generic path marker without userinfo,
   query, fragment, or full path. User-visible CLI error snippets are truncated
@@ -549,8 +572,9 @@ Important behavior:
   loopback/private/link-local public-registry targets degrade to `unknown`
   without sending a registry request. `--list-all-offline` skips this registry digest phase. If
   the local Docker CLI can inspect the declared image, Packmon compares the
-  local repo digest with the current registry digest and marks `UPDATE yes`,
-  `-`, or `unknown`.
+  local repo digest of that repository and tag with the current registry
+  digest and marks `UPDATE yes`, `-`, or `unknown`; several installed tags of
+  one repository are compared separately.
 - Docker image inventory is not a container-layer vulnerability scan. Packmon
   does not pull images, scan OS packages inside images, or read private
   registry credentials as part of `--list-all`; `/api/v1/check` rejects
@@ -635,11 +659,14 @@ consistent `admin_auth` then `admin_audit_log` lock order. Destructive refresh-q
 clear/purge actions preserve a bounded sample of deleted job identities in
 audit details from the delete operation, including job ID, package coordinate,
 source, priority, prior status, timestamps, redacted bounded error text,
-`total_deleted`, `sample_count`, and `truncated`. PostgreSQL maintains
-cumulative scan package/finding totals in
-`scan_log_totals`; `InsertScanLog` increments the rollup and scan-log pruning
-subtracts deleted rows so `/metrics` does not aggregate the full `scan_log`
-table on every scrape. The production background services prune `scan_log` rows after
+`total_deleted`, `sample_count`, and `truncated`. PostgreSQL exposes the
+scan package/finding totals through the `scan_log_totals` view (migration
+043), which sums the retained `scan_log` rows on read; there is no separately
+maintained rollup, so `InsertScanLog` writes only the `scan_log` row and
+scan-log pruning only deletes rows. The totals therefore cover retained rows
+and drop when pruning removes old rows. `/metrics` caches the totals for 30
+seconds so frequent scrapes do not aggregate `scan_log` on every request. The
+production background services prune `scan_log` rows after
 `PACKMON_SCAN_LOG_RETENTION` (default `720h`, 30 days) and `admin_audit_log`
 rows after `PACKMON_ADMIN_AUDIT_LOG_RETENTION` (default `720h`, 30 days);
 admins can override both metadata-retention values from `/admin/settings`.
@@ -935,10 +962,41 @@ remote check nor a local scan. Once a later sync no longer reports
 sync would never resend rows that did not change in the meantime. An
 ecosystem-filtered sync refetches only its ecosystems and keeps the refetch
 pending until an unfiltered sync completes it.
+Local vulnerability rows are keyed by advisory, ecosystem, and package name, so
+a delta sync must also remove packages an advisory no longer affects. A delta
+`GET /api/v1/sync` exports every changed vulnerability with all of its current
+affected packages (within the requested ecosystems). The server promises that
+the affected sets are complete, with `vulnerability_affected_complete: true`,
+only where this is structurally true: on a delta (a `since` window was given)
+that is delivered in a single page. Only for such a response -- a non-full
+sync with a stored `since`, whose first page is not truncated and carries the
+flag -- does the client drop, in that page's transaction, the local affected
+rows of each delivered non-withdrawn vulnerability that the page did not
+deliver. Syncs without a `since` and multi-page deltas stay upsert-only (a
+full sync clears and reloads the local tables instead): the pages of a
+multi-page delta are separate statements, so an
+advisory changed between two pages can arrive incomplete, and the client must
+not delete its rows (whole-advisory paging is a planned follow-up). Server writes
+that only delete affected rows (the package-name repair merging a legacy row
+into an existing canonical one) also move the vulnerability's `updated_at`, so
+the change enters the next delta. A coverage move (a manual advisory edited to
+another package, a package-name repair) therefore reaches local scans with the
+next single-page incremental sync instead of requiring a full sync; after a
+larger delta it remains until a later single-page delta or a full sync.
+Servers without the guarantee omit the field and clients that do not know it
+keep upserting rows, so older clients and servers remain compatible. An
+ecosystem-filtered sync replaces rows only in its ecosystems and cannot see an
+advisory that moved entirely to another ecosystem; an unfiltered sync does.
+Malicious rows are keyed by ID, so a changed row already replaces the local
+one.
 Local scans query those reputation rows through explicit reputation lookup
 methods; `FindMalicious` and `FindMaliciousBatch` remain malicious-package-only
 boundaries so package detail views and scanner output do not double-count or
 misclassify supply-chain reputation rows.
+The vulnerability and malicious batch lookups (PostgreSQL and local SQLite)
+treat a versionless request as the all-versions match of the single-package
+lookup, also when the same batch requests concrete versions of that package;
+requested versions are deduplicated per package in request order.
 If a server response contains a `synced_at` timestamp beyond the allowed local
 clock-skew tolerance, the client may use it for the current paginated request
 sequence but does not persist it as the local freshness marker.
@@ -1286,7 +1344,8 @@ The metrics endpoint emits Prometheus text metrics for:
 
 - HTTP request count and duration histogram buckets for SLO/percentile
   alerting;
-- packages scanned and scan findings from the maintained scan-log rollup;
+- packages scanned and scan findings from the `scan_log_totals` view over
+  retained scan-log rows;
 - current finding totals for vulnerability, malicious, supply-chain-risk, and
   lifecycle finding types plus current severity totals from vulnerability,
   malicious, and reputation-backed findings;

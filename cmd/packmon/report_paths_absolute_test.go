@@ -21,6 +21,7 @@ func TestReportTargetReducesAbsolutePathsRegardlessOfSeparator(t *testing.T) {
 		`E:/Github/sample-app`:       "sample-app",
 		`C:\Users\Admin\my-service`:  "my-service",
 		`\\fileserver\share\project`: "project",
+		`\Users\Admin\my-service`:    "my-service",
 	}
 	for in, want := range cases {
 		if got := htmlReportDisplayTarget(in); got != want {
@@ -41,6 +42,39 @@ func TestReportSourcePathReducesForeignAbsolutePaths(t *testing.T) {
 	for in, want := range cases {
 		if got := htmlReportDisplaySourcePath("repo", in); got != want {
 			t.Errorf("htmlReportDisplaySourcePath(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestReportSourcePathReducesForeignAbsolutePathsUnderDotRoot pins the
+// containment check against the host convention. With root "." a Linux build
+// made the Windows drive and UNC forms "relative to the current directory":
+// filepath.Abs prefixed the working directory to both sides, filepath.Rel handed
+// the original path back as the in-root relative path, and the report showed
+// C:\Users\Alice\go.sum in full. The cases run on every OS.
+func TestReportSourcePathReducesForeignAbsolutePathsUnderDotRoot(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		path string
+	}{
+		{name: "windows drive backslash", path: `C:\Users\Alice\go.sum`},
+		{name: "windows drive forward slash", path: `C:/Users/Alice/go.sum`},
+		{name: "lowercase drive", path: `c:\Users\Alice\go.sum`},
+		{name: "unc backslash", path: `\\fileserver\share\Alice\go.sum`},
+		{name: "unc forward slash", path: `//fileserver/share/Alice/go.sum`},
+		{name: "windows rooted without drive", path: `\Users\Alice\go.sum`},
+		{name: "posix", path: `/home/alice/project/go.sum`},
+	}
+	for _, root := range []string{".", "repo", "sub/dir"} {
+		for _, tc := range cases {
+			t.Run(root+"/"+tc.name, func(t *testing.T) {
+				t.Parallel()
+				if got := htmlReportDisplaySourcePath(root, tc.path); got != "go.sum" {
+					t.Fatalf("htmlReportDisplaySourcePath(%q, %q) = %q, want go.sum", root, tc.path, got)
+				}
+			})
 		}
 	}
 }

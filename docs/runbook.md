@@ -456,6 +456,26 @@ Use the plain HTTP form only for local-only Docker or loopback troubleshooting.
 For shared deployments, use the HTTPS server URL or a TLS-terminating reverse
 proxy instead.
 
+### Local scan still reports a package the server no longer lists
+
+The startup package-name repair folds legacy package names into the canonical
+identity for every ecosystem (GitHub Actions lowercasing and whitespace
+trimming included, not only NuGet and PyPI) and moves `updated_at` of every
+advisory it touches, so local clients refetch those advisories with their next
+incremental sync. Manual advisory edits that move coverage to another package
+are picked up the same way.
+
+Current clients drop de-listed packages of a changed advisory only on an
+incremental sync whose delta arrives in a single page (the server then sets
+`vulnerability_affected_complete`). Multi-page deltas, older servers, and
+older clients stay upsert-only and keep the old package until a later
+single-page incremental sync drops it or a full sync, which clears and reloads
+the local tables, replaces it:
+
+```bash
+packmon db sync --server https://packmon.internal:8080 --full
+```
+
 ### Server reports degraded feed status
 
 Symptoms:

@@ -243,6 +243,144 @@ func TestRegistryGetAppliesPerRequestTimeout(t *testing.T) {
 	}
 }
 
+// TestRegistryGetIncompleteBodyIsARefusal covers failures after the 200
+// status line: the lookup got no usable answer, so it must count as a refusal
+// and must not reset the breaker streak the way a complete answer does.
+func TestRegistryGetIncompleteBodyIsARefusal(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		timeout int
+		handler http.HandlerFunc
+	}{
+		{
+			name: "connection closed mid-body",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				// Declaring more bytes than are written makes the server close
+				// the connection, so the client reads an unexpected EOF.
+				w.Header().Set("Content-Length", "100")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"version":`))
+			},
+		},
+		{
+			name:    "per-request timeout while reading the body",
+			timeout: 1,
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"version":`))
+				if flusher, ok := w.(http.Flusher); ok {
+					flusher.Flush()
+				}
+				<-r.Context().Done()
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(tt.handler)
+			defer server.Close()
+
+			ctx, phase := withRegistryLookupPhase(context.Background(), tt.timeout)
+			for i := 0; i < registryBreakerThreshold-1; i++ {
+				phase.recordRefusal()
+			}
+			if _, err := registryGet(ctx, server.URL); err == nil {
+				t.Fatal("registryGet with an incomplete body must return an error")
+			}
+			if got := phase.refusedCount(); got != registryBreakerThreshold {
+				t.Fatalf("refusedCount() = %d, want %d (an incomplete body is a refusal)", got, registryBreakerThreshold)
+			}
+			if !phase.breakerOpen() {
+				t.Fatal("breaker closed: an incomplete body reset the failure streak")
+			}
+		})
+	}
+}
+
+// TestRegistryGetOversizedBodyIsARefusal covers a 200 answer whose body
+// exceeds the read limit. The lookup gets no usable data and the row ends up
+// unknown, so the request must count in the refused/failed total that drives
+// the stderr warning and the list-all HTML hint. The registry did answer,
+// though, so the answer still resets the breaker streak: oversized documents
+// (large npm packuments, for one) say nothing about network reachability.
+func TestRegistryGetOversizedBodyIsARefusal(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"version":"1.0.0","padding":"` + strings.Repeat("x", 64) + `"}`))
+	}))
+	defer server.Close()
+
+	ctx, phase := withRegistryLookupPhase(context.Background(), 5)
+	for i := 0; i < registryBreakerThreshold-1; i++ {
+		phase.recordRefusal()
+	}
+	_, err := registryGetLimitedWithHeaders(ctx, server.URL, 16, nil)
+	if err == nil || !strings.Contains(err.Error(), "exceeds 16 byte limit") {
+		t.Fatalf("registryGetLimitedWithHeaders(oversized) error = %v, want size-limit error", err)
+	}
+	if got := phase.refusedCount(); got != registryBreakerThreshold {
+		t.Fatalf("refusedCount() = %d, want %d (an oversized body is a refusal)", got, registryBreakerThreshold)
+	}
+	if phase.breakerOpen() {
+		t.Fatal("breaker open: an oversized answer counted as a connectivity failure")
+	}
+	if got := phase.consecutive.Load(); got != 0 {
+		t.Fatalf("consecutive failures = %d, want 0 (the registry answered)", got)
+	}
+
+	// A body of exactly the limit is still a complete answer.
+	exact := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(strings.Repeat("x", 16)))
+	}))
+	defer exact.Close()
+	if _, err := registryGetLimitedWithHeaders(ctx, exact.URL, 16, nil); err != nil {
+		t.Fatalf("registryGetLimitedWithHeaders(limit-sized body) error = %v", err)
+	}
+	if got := phase.refusedCount(); got != registryBreakerThreshold {
+		t.Fatalf("refusedCount() after a limit-sized body = %d, want %d", got, registryBreakerThreshold)
+	}
+}
+
+func TestRegistryGetParentCancellationDuringBodyRecordsNothing(t *testing.T) {
+	t.Parallel()
+	headersSent := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"version":`))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		close(headersSent)
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	ctx, phase := withRegistryLookupPhase(context.Background(), 30)
+	for i := 0; i < registryBreakerThreshold-1; i++ {
+		phase.recordRefusal()
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		<-headersSent
+		cancel()
+	}()
+	if _, err := registryGet(ctx, server.URL); err == nil {
+		t.Fatal("registryGet canceled during the body read must return an error")
+	}
+	if got := phase.refusedCount(); got != registryBreakerThreshold-1 {
+		t.Fatalf("refusedCount() = %d, want %d (a canceled phase is no refusal)", got, registryBreakerThreshold-1)
+	}
+	if got := phase.consecutive.Load(); got != registryBreakerThreshold-1 {
+		t.Fatalf("consecutive failures = %d, want %d (a canceled read is no success either)", got, registryBreakerThreshold-1)
+	}
+}
+
 func TestPerRequestLookupContextBoundsGitLookups(t *testing.T) {
 	t.Parallel()
 	parent, phase := withRegistryLookupPhase(context.Background(), 7)

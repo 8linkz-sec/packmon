@@ -1789,19 +1789,25 @@ require github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc
 	}
 }
 
-func TestRunOutdatedReportsNoPackagesAfterParseErrors(t *testing.T) {
+func TestRunOutdatedReturnsParserExitWhenNothingParses(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "package-lock.json"), []byte(`not json`), 0o600); err != nil {
 		t.Fatalf("write package-lock: %v", err)
 	}
 
+	var err error
 	output := captureStdout(t, func() {
-		if err := runOutdatedForTest([]string{dir}, "npm", 2); err != nil {
-			t.Fatalf("run outdated: %v", err)
-		}
+		captureScanStderr(t, func() {
+			err = runOutdatedForTest([]string{dir}, "npm", 2)
+		})
 	})
-	if !strings.Contains(output, "No packages found.") {
-		t.Fatalf("run outdated output = %q, want no packages", output)
+	if code := exitCodeForError(err); err == nil || code != ExitParser {
+		t.Fatalf("run outdated(malformed lockfile) error = %v (exit %d), want parser exit %d", err, code, ExitParser)
+	}
+	// An inventory that could not be parsed at all must not read as an empty
+	// but complete one.
+	if strings.Contains(output, "No packages found.") {
+		t.Fatalf("malformed lockfile output claims an empty inventory:\n%s", output)
 	}
 }
 

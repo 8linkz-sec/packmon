@@ -84,6 +84,8 @@ func TestResponseFromExportMapsAllWireFields(t *testing.T) {
 		}},
 		Truncated:  true,
 		NextCursor: cursor,
+
+		VulnerabilityAffectedComplete: true,
 	}
 
 	resp := ResponseFromExport(exported, "degraded", map[string]string{"osv": "2026-06-28T00:00:00Z"})
@@ -93,6 +95,9 @@ func TestResponseFromExportMapsAllWireFields(t *testing.T) {
 	}
 	if resp.FeedStatus != "degraded" || resp.FeedVersions["osv"] != "2026-06-28T00:00:00Z" {
 		t.Fatalf("feed state = %q %#v", resp.FeedStatus, resp.FeedVersions)
+	}
+	if !resp.VulnerabilityAffectedComplete {
+		t.Fatal("vulnerability_affected_complete = false, want the exporter guarantee passed through")
 	}
 	if !resp.Truncated || !resp.HasMore {
 		t.Fatalf("pagination flags = truncated %v has_more %v, want both true", resp.Truncated, resp.HasMore)

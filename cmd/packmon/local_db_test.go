@@ -11,6 +11,7 @@ import (
 
 	"github.com/8linkz-sec/packmon/internal/db/sqlite"
 	"github.com/8linkz-sec/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/scanner"
 )
 
 func TestDBWarnAfterDays(t *testing.T) {
@@ -90,6 +91,57 @@ func TestLoadLocalDBInfoMarksStaleBySyncAge(t *testing.T) {
 	}
 	if !info.DBStale {
 		t.Fatal("DBStale = false, want true")
+	}
+}
+
+// TestLoadLocalDBInfoTreatsMissingSyncTimestampAsStale covers an initialized
+// database whose last_sync_at metadata is absent or blank. Its freshness is
+// unknown, which must count as stale rather than silently healthy.
+func TestLoadLocalDBInfoTreatsMissingSyncTimestampAsStale(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		seed     bool
+		lastSync string
+	}{
+		{name: "absent"},
+		{name: "blank", seed: true, lastSync: " 	 "},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("PACKMON_DB_WARN_AFTER_DAYS", "7")
+			store, _ := newTestSQLiteStore(t, t.TempDir())
+			if tt.seed {
+				if err := store.SetSyncMeta(context.Background(), "last_sync_at", tt.lastSync); err != nil {
+					t.Fatalf("set sync meta: %v", err)
+				}
+			}
+
+			info, err := loadLocalDBInfo(context.Background(), store)
+			if err != nil {
+				t.Fatalf("load local db info: %v", err)
+			}
+			if info.LastSyncAt != nil || info.DBAgeDays != nil {
+				t.Fatalf("LastSyncAt = %v, DBAgeDays = %v; want nil for unknown freshness", info.LastSyncAt, info.DBAgeDays)
+			}
+			if !info.DBStale {
+				t.Fatal("DBStale = false, want true when last_sync_at is missing")
+			}
+		})
+	}
+}
+
+func TestApplyLocalDBFreshnessTreatsMissingSyncTimestampAsStale(t *testing.T) {
+	store, _ := newTestSQLiteStore(t, t.TempDir())
+
+	result := &domain.ScanResult{Mode: domain.ScanModeLocal}
+	if err := applyLocalDBFreshness(context.Background(), store, result); err != nil {
+		t.Fatalf("applyLocalDBFreshness() error = %v", err)
+	}
+	if !result.DBStale || result.DBAgeDays != nil {
+		t.Fatalf("DBStale = %v, DBAgeDays = %v; want stale with unknown age", result.DBStale, result.DBAgeDays)
+	}
+	const want = "Local database freshness could not be verified. Results may be incomplete. Update with: packmon db sync."
+	if got := scanner.LocalDBStaleWarning(result); got != want {
+		t.Fatalf("LocalDBStaleWarning() = %q, want %q", got, want)
 	}
 }
 

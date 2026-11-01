@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 	"time"
 
@@ -103,22 +102,6 @@ func maliciousFindingAffectsVersion(ecosystem, version, rangesJSON, versionsJSON
 	return affected
 }
 
-// maliciousBatchVersions groups the distinct requested versions per canonical
-// package, in request order. An empty version is kept: as in
-// FindMalicious(..., ""), it asks for every active finding of the package
-// regardless of affected versions, also when the same batch requests concrete
-// versions of that package.
-func maliciousBatchVersions(packages []db.PackageQuery) map[packageLookupKey][]string {
-	versionMap := make(map[packageLookupKey][]string, len(packages))
-	for _, pkg := range packages {
-		key := packageKey(pkg)
-		if !slices.Contains(versionMap[key], pkg.Version) {
-			versionMap[key] = append(versionMap[key], pkg.Version)
-		}
-	}
-	return versionMap
-}
-
 func (s *Store) FindMaliciousBatch(ctx context.Context, packages []db.PackageQuery) ([]domain.Finding, error) {
 	if len(packages) == 0 {
 		return nil, nil
@@ -157,7 +140,7 @@ func (s *Store) FindMaliciousBatch(ctx context.Context, packages []db.PackageQue
 	}
 	defer ioutils.CloseSilently(rows)
 
-	versionMap := maliciousBatchVersions(packages)
+	versionMap := packageVersionsByKey(packages)
 
 	var findings []domain.Finding
 	for rows.Next() {

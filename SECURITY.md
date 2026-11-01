@@ -566,13 +566,18 @@ rejected when they target unsupported hosts, plain HTTP without an explicit
 insecure test override, loopback, link-local, private, multicast, or
 unspecified addresses. Configured latest-version registry base and mirror URLs
 must not contain credentials, queries (including an empty trailing `?`
-delimiter), or fragments; HTTPS is required except loopback HTTP test endpoints,
+delimiter), or fragments (including an empty trailing `#` marker); such values
+are rejected, never stripped. HTTPS is required except loopback HTTP test endpoints,
 and literal link-local, multicast, or unspecified mirror addresses are rejected.
 `packmon config show` preserves scheme, host, and path for configured
 latest-version registry URLs while redacting userinfo, fragments, and every
 query value. Server and webhook URLs retain their stricter host-only redaction.
 Malformed registry URL, Docker-mirror-map, and Chocolatey-feed-list values are
-rendered as a fixed redacted marker rather than echoed.
+rendered as a fixed redacted marker rather than echoed. Every config-, flag-,
+and environment-derived string `packmon config show` prints (including repo
+names and paths from an auto-discovered project config) has terminal control
+characters escaped, so a crafted value cannot inject escape sequences or forge
+output lines.
 Private registry credentials are not read. Failures degrade to `unknown` in
 reports. The server scan API rejects Docker packages because Packmon does not
 provide container-layer vulnerability coverage. Chocolatey inventory follows
@@ -650,11 +655,13 @@ Feed-degraded responses must be visible so CI/N8N can make policy decisions.
 SARIF, JUnit, and HTML artifacts must carry degraded-feed, stale-local-DB, and
 parse-error diagnostics instead of presenting incomplete coverage as a clean
 scan. Partial lockfile/SBOM parse errors exit with parser failure unless a
-blocking finding has already failed the scan, and in-scope discovery filesystem
-errors are reported as operational failures rather than silently reducing
-inventory. SARIF must mark parser and operational scan failures as unsuccessful
-invocations with error-level notifications; JUnit must expose the same state as
-errored diagnostic suites.
+blocking finding has already failed the scan (the `--list-packages` and
+`--outdated` inventory views, `--outdated --quiet` included, have no findings
+and exit with parser failure on any parse error), and in-scope discovery
+filesystem errors are reported as operational failures rather than silently
+reducing inventory. SARIF must mark parser and operational scan failures as
+unsuccessful invocations with error-level notifications; JUnit must expose the
+same state as errored diagnostic suites.
 
 ## Webhooks
 
@@ -898,6 +905,16 @@ Local SQLite sync:
   local `LOW` reputation context;
 - resolves synced reputation rows through explicit reputation lookup methods,
   not through malicious-package lookup methods;
+- drops local affected rows of a changed vulnerability only on a delta sync
+  with a stored `since` whose response is a single page (not truncated)
+  carrying `vulnerability_affected_complete`, only for rows in the requested
+  ecosystems, and only in that page's transaction. The server sets the flag
+  only on such single-page deltas, never on full exports or on any page of a
+  multi-page delta, whose separate statements can deliver an advisory changed
+  between pages incompletely. The replacement therefore never runs for full
+  syncs (which clear and reload the local tables), syncs without `since`,
+  multi-page deltas, failed sequences, or older servers, so none of them can
+  remove a still-valid local finding;
 - refuses to mark the local database fresh from a server `synced_at` timestamp
   that is beyond the allowed future clock-skew tolerance;
 - rejects semantically empty full-sync snapshots before clearing local finding
