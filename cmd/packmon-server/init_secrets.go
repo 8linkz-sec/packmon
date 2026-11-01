@@ -44,9 +44,25 @@ func runInitSecrets(args []string) error {
 	return nil
 }
 
-// ensureSecrets fills missing/empty required secrets, mirroring PACKMON_DB_PASSWORD
-// onto POSTGRES_PASSWORD when the DB password is blank. Existing non-empty values
-// are preserved.
+// databasePasswordPartner returns the other key of the database password
+// pair. The local Compose stack initializes the bundled PostgreSQL with
+// POSTGRES_PASSWORD and connects with PACKMON_DB_PASSWORD, so a blank half must
+// copy the other instead of getting a freshly generated, divergent value.
+func databasePasswordPartner(key string) (string, bool) {
+	switch key {
+	case "POSTGRES_PASSWORD":
+		return "PACKMON_DB_PASSWORD", true
+	case "PACKMON_DB_PASSWORD":
+		return "POSTGRES_PASSWORD", true
+	default:
+		return "", false
+	}
+}
+
+// ensureSecrets fills missing/empty required secrets. A blank half of the
+// database password pair mirrors the non-blank other half (in either
+// direction); when both are blank one value is generated and shared. Existing
+// non-empty values are preserved.
 func ensureSecrets(entries []envfile.Entry) (out []envfile.Entry, generated, kept int, err error) {
 	out = entries
 	for _, s := range config.RequiredSecrets() {
@@ -56,9 +72,9 @@ func ensureSecrets(entries []envfile.Entry) (out []envfile.Entry, generated, kep
 			continue
 		}
 		var value string
-		if s.Key == "PACKMON_DB_PASSWORD" {
-			if pg, ok := envfile.Value(out, "POSTGRES_PASSWORD"); ok && !envfile.IsBlank(pg) {
-				value = pg
+		if partner, paired := databasePasswordPartner(s.Key); paired {
+			if other, ok := envfile.Value(out, partner); ok && !envfile.IsBlank(other) {
+				value = other
 			}
 		}
 		if value == "" {

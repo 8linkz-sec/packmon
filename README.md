@@ -485,7 +485,9 @@ local-only secrets for `POSTGRES_PASSWORD`, `PACKMON_DB_PASSWORD`,
 `PACKMON_ADMIN_INITIAL_PASSWORD`, `PACKMON_ENCRYPTION_KEY`, and
 `PACKMON_ADMIN_AUDIT_HMAC_KEY` into a UTF-8 `.env`. It keeps existing
 non-empty values and never overwrites them; these commands do not print
-generated secret values. `docker compose up --build` then runs the database
+generated secret values. `POSTGRES_PASSWORD` and `PACKMON_DB_PASSWORD` are a
+pair: when only one is set, the other is copied from it, and when both are
+blank one shared value is generated. `docker compose up --build` then runs the database
 migration automatically before starting the server. The same two commands
 work identically on Windows, macOS, and Linux.
 

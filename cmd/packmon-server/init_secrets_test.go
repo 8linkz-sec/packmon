@@ -40,6 +40,64 @@ func TestEnsureSecretsFillsOnlyGaps(t *testing.T) {
 	}
 }
 
+// TestEnsureSecretsMirrorsDBPasswordOntoBlankPostgresPassword covers the
+// reverse sync direction: with only PACKMON_DB_PASSWORD set, generating a new
+// POSTGRES_PASSWORD would initialize the bundled database with a password
+// the server and migrator never use.
+func TestEnsureSecretsMirrorsDBPasswordOntoBlankPostgresPassword(t *testing.T) {
+	entries := envfile.Parse([]byte(
+		"POSTGRES_PASSWORD=\n" +
+			"PACKMON_DB_PASSWORD=app-db-password\n" +
+			"PACKMON_ADMIN_INITIAL_PASSWORD=\n" +
+			"PACKMON_ENCRYPTION_KEY=\n" +
+			"PACKMON_ADMIN_AUDIT_HMAC_KEY=\n",
+	))
+	out, generated, kept, err := ensureSecrets(entries)
+	if err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	if v, _ := envfile.Value(out, "PACKMON_DB_PASSWORD"); v != "app-db-password" {
+		t.Fatal("existing PACKMON_DB_PASSWORD was overwritten")
+	}
+	if v, _ := envfile.Value(out, "POSTGRES_PASSWORD"); v != "app-db-password" {
+		t.Fatal("POSTGRES_PASSWORD must mirror the existing PACKMON_DB_PASSWORD, not a newly generated value")
+	}
+	if kept != 1 || generated != 3 {
+		t.Fatalf("generated=%d kept=%d, want generated=3 kept=1", generated, kept)
+	}
+}
+
+func TestEnsureSecretsGeneratesOneSharedDatabasePassword(t *testing.T) {
+	entries := envfile.Parse([]byte("POSTGRES_PASSWORD=\nPACKMON_DB_PASSWORD=\n"))
+	out, generated, kept, err := ensureSecrets(entries)
+	if err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	pg, _ := envfile.Value(out, "POSTGRES_PASSWORD")
+	db, _ := envfile.Value(out, "PACKMON_DB_PASSWORD")
+	if envfile.IsBlank(pg) || pg != db {
+		t.Fatal("a fresh database password pair must be generated once and shared by both keys")
+	}
+	// One database password plus the three other required secrets.
+	if kept != 0 || generated != 4 {
+		t.Fatalf("generated=%d kept=%d, want generated=4 kept=0", generated, kept)
+	}
+}
+
+func TestEnsureSecretsKeepsDivergentExplicitDatabasePasswords(t *testing.T) {
+	entries := envfile.Parse([]byte("POSTGRES_PASSWORD=superuser-pw\nPACKMON_DB_PASSWORD=app-pw\n"))
+	out, _, _, err := ensureSecrets(entries)
+	if err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	if v, _ := envfile.Value(out, "POSTGRES_PASSWORD"); v != "superuser-pw" {
+		t.Fatal("explicit POSTGRES_PASSWORD was overwritten")
+	}
+	if v, _ := envfile.Value(out, "PACKMON_DB_PASSWORD"); v != "app-pw" {
+		t.Fatal("explicit PACKMON_DB_PASSWORD was overwritten")
+	}
+}
+
 func TestRunInitSecretsSeedsFromExample(t *testing.T) {
 	dir := t.TempDir()
 	example := filepath.Join(dir, ".env.example")

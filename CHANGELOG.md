@@ -44,6 +44,11 @@
   host UID/GID, so bootstrapping on native Linux no longer fails with
   `permission denied` on a host-owned checkout or `.env`. The production
   server image still runs as `packmon`.
+- `packmon-server init-secrets` copies an existing `PACKMON_DB_PASSWORD` onto
+  a blank `POSTGRES_PASSWORD` instead of generating a different value. The
+  bundled PostgreSQL was previously initialized with a password the server
+  and migrator did not use, so a fresh local stack failed authentication
+  although `init-secrets` reported success.
 - The starter Prometheus alerts `PackmonMetricsStoreReadFailure`,
   `PackmonDegradedResponses`, and `PackmonQueueErrors` in
   `docs/monitoring/packmon-alerts.yml` use `for: 0m`. Their `for` duration
