@@ -255,6 +255,19 @@ For an operator rollback:
 6. Record the rollback, release version, schema version, backup used, and
    operator action in the operator change log.
 
+Known limitation of migration 005 (`005_normalize_unknown_severity`): its up
+migration records the malicious-finding IDs it backs up from the affected
+entries flagged `malicious`, but inserts findings for every affected entry of
+those advisories, numbering them `<advisory id>-<index>` when an advisory has
+more than one. The two ID sets can differ, and an index-based ID can coincide
+with an unrelated existing finding ID. Its down migration therefore cannot be
+trusted to restore `malicious_findings` exactly. Applied migrations are
+checksum-verified on every `packmon-server migrate` run, so 005 cannot be
+changed for databases that already ran it, and on a fresh install it runs
+before any feed data exists, where the defect has no effect. Use the
+pre-upgrade backup, never the 005 down migration, to get back to a schema older
+than 5.
+
 ## API Key Rotation
 
 API keys expire no more than 365 days after creation (legacy keys created
