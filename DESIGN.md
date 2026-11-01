@@ -641,11 +641,14 @@ consistent `admin_auth` then `admin_audit_log` lock order. Destructive refresh-q
 clear/purge actions preserve a bounded sample of deleted job identities in
 audit details from the delete operation, including job ID, package coordinate,
 source, priority, prior status, timestamps, redacted bounded error text,
-`total_deleted`, `sample_count`, and `truncated`. PostgreSQL maintains
-cumulative scan package/finding totals in
-`scan_log_totals`; `InsertScanLog` increments the rollup and scan-log pruning
-subtracts deleted rows so `/metrics` does not aggregate the full `scan_log`
-table on every scrape. The production background services prune `scan_log` rows after
+`total_deleted`, `sample_count`, and `truncated`. PostgreSQL exposes the
+scan package/finding totals through the `scan_log_totals` view (migration
+043), which sums the retained `scan_log` rows on read; there is no separately
+maintained rollup, so `InsertScanLog` writes only the `scan_log` row and
+scan-log pruning only deletes rows. The totals therefore cover retained rows
+and drop when pruning removes old rows. `/metrics` caches the totals for 30
+seconds so frequent scrapes do not aggregate `scan_log` on every request. The
+production background services prune `scan_log` rows after
 `PACKMON_SCAN_LOG_RETENTION` (default `720h`, 30 days) and `admin_audit_log`
 rows after `PACKMON_ADMIN_AUDIT_LOG_RETENTION` (default `720h`, 30 days);
 admins can override both metadata-retention values from `/admin/settings`.
@@ -1275,7 +1278,8 @@ The metrics endpoint emits Prometheus text metrics for:
 
 - HTTP request count and duration histogram buckets for SLO/percentile
   alerting;
-- packages scanned and scan findings from the maintained scan-log rollup;
+- packages scanned and scan findings from the `scan_log_totals` view over
+  retained scan-log rows;
 - current finding totals for vulnerability, malicious, supply-chain-risk, and
   lifecycle finding types plus current severity totals from vulnerability,
   malicious, and reputation-backed findings;

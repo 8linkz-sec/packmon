@@ -26,6 +26,11 @@
   lockfile passes remotely. When ReversingLabs is enabled again, the next sync
   refetches the whole reputation dataset. The field is omitted while
   reputation is served, so older clients and servers remain compatible.
+  Clients older than this change ignore the unknown `reputation_disabled`
+  field, so their incremental syncs keep previously synced reputation rows
+  (and the local/remote mismatch) until the client is upgraded; only a full
+  sync (`packmon db sync --full`), which clears every local sync table first,
+  removes those rows on an older client.
 - `packmon db sync` now rejects timeouts above 9223372036 seconds from
   `--timeout`, config `timeout`, or `PACKMON_TIMEOUT`. Such values used to
   overflow `time.Duration` into a negative deadline, so the sync aborted at
