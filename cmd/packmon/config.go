@@ -392,8 +392,8 @@ func applyConfigShowEnvironmentScanPolicy(settings *configShowSettings) error {
 		if parseErr != nil {
 			return fmt.Errorf("PACKMON_TIMEOUT: %w", parseErr)
 		}
-		if parsed <= 0 {
-			return fmt.Errorf("PACKMON_TIMEOUT must be greater than zero")
+		if _, err := timeoutSecondsDuration("PACKMON_TIMEOUT", parsed); err != nil {
+			return err
 		}
 		settings.Timeout = parsed
 	}

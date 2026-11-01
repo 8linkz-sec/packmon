@@ -540,6 +540,9 @@ func validateTopLevelCLIConfig(c *cliConfig) error {
 	if c.Timeout < 0 {
 		return fmt.Errorf("timeout must not be negative")
 	}
+	if err := validateTimeoutUpperBound("timeout", c.Timeout); err != nil {
+		return err
+	}
 	if err := validateOutputConfig(c.Output); err != nil {
 		return err
 	}
@@ -615,6 +618,9 @@ func validateCLIRepoConfig(repo *cliRepoConfig, index int) error {
 	}
 	if repo.Timeout < 0 {
 		return fmt.Errorf("repos[%d].timeout must not be negative", index)
+	}
+	if err := validateTimeoutUpperBound(fmt.Sprintf("repos[%d].timeout", index), repo.Timeout); err != nil {
+		return err
 	}
 	return nil
 }

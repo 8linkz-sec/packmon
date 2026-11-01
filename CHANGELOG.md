@@ -30,6 +30,12 @@
   `--timeout`, config `timeout`, or `PACKMON_TIMEOUT`. Such values used to
   overflow `time.Duration` into a negative deadline, so the sync aborted at
   once with a context deadline error instead of a clear validation error.
+- `packmon scan` and `packmon config show` apply the same 9223372036-second
+  upper bound to `--timeout`, `PACKMON_TIMEOUT`, config `timeout`, and
+  `repos[].timeout` (config files are rejected on load). Larger values used to
+  overflow `time.Duration` into a negative or near-zero HTTP, SBOM-generation,
+  and per-request registry lookup timeout, so the scan failed or timed out at
+  once instead of reporting a validation error.
 - A project `.packmon.yaml` `repos:` entry that refers to a user-global repo
   (matched by name, then by path) now inherits that trusted repo's
   `send_repo_metadata: false`, server/API-key routing, and webhook. The

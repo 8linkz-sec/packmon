@@ -163,7 +163,7 @@ packages, supply-chain risk findings, and lifecycle risks.`,
 	f.StringVar(&flagFailOn, "fail-on", "CRITICAL", "block on vulnerability severity (CRITICAL|HIGH|MEDIUM|LOW|NONE); NONE disables vulnerability blocking only; malicious and active supply-chain risk findings still block")
 	f.StringVar(&flagEcosystems, "ecosystems", "", "comma-separated ecosystem filter")
 	f.IntVar(&flagMaxDepth, "max-depth", 10, "directory walk depth")
-	f.IntVar(&flagTimeout, "timeout", 30, "HTTP timeout in seconds")
+	f.IntVar(&flagTimeout, "timeout", defaultScanTimeoutSeconds, "HTTP timeout in seconds")
 	f.BoolVar(&flagIncludeDev, "include-dev", false, "include dev dependencies")
 	f.StringVar(&flagOutputJSON, "output-json", "", "write JSON results to file")
 	f.StringVar(&flagOutputSARIF, "output-sarif", "", "write SARIF 2.1.0 results to file")
@@ -654,7 +654,7 @@ func defaultScanSettings(target scanTarget, flags scanFlagValues) scanSettings {
 		Mode:           "auto",
 		FailOn:         string(defaultFailSeverity()),
 		MaxDepth:       flags.MaxDepth,
-		Timeout:        30,
+		Timeout:        defaultScanTimeoutSeconds,
 		Quiet:          flags.Quiet,
 		NoColor:        flags.NoColor,
 		LogLevel:       "INFO",
@@ -839,8 +839,8 @@ func applyScanTimeoutEnvSetting(settings *scanSettings) error {
 		if parseErr != nil {
 			return fmt.Errorf("PACKMON_TIMEOUT: %w", parseErr)
 		}
-		if parsed <= 0 {
-			return fmt.Errorf("PACKMON_TIMEOUT must be greater than zero")
+		if _, err := timeoutSecondsDuration("PACKMON_TIMEOUT", parsed); err != nil {
+			return err
 		}
 		settings.Timeout = parsed
 	}
@@ -955,8 +955,8 @@ func validateResolvedScanSettings(settings *scanSettings, flags scanFlagValues, 
 	if err := validateResolvedScanLogFormat(settings); err != nil {
 		return err
 	}
-	if settings.Timeout <= 0 {
-		return fmt.Errorf("timeout must be greater than zero")
+	if _, err := timeoutSecondsDuration("timeout", settings.Timeout); err != nil {
+		return err
 	}
 	if settings.MaxDepth < 0 {
 		return fmt.Errorf("max-depth must be zero or greater")
@@ -1242,7 +1242,7 @@ func buildScannerConfig(settings scanSettings, repoInfo *domain.RepoInfo, failOn
 		FailOn:               failOn,
 		Ecosystems:           settings.Ecosystems,
 		MaxDepth:             settings.MaxDepth,
-		Timeout:              time.Duration(settings.Timeout) * time.Second,
+		Timeout:              boundedTimeoutDuration(settings.Timeout, defaultScanTimeoutSeconds*time.Second),
 		IncludeDev:           settings.IncludeDev,
 		InventoryAllPackages: settings.InventoryAll,
 		Quiet:                settings.Quiet,
