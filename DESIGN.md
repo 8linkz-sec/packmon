@@ -1080,28 +1080,48 @@ pending until an unfiltered sync completes it.
 Local vulnerability rows are keyed by advisory, ecosystem, and package name, so
 a delta sync must also remove packages an advisory no longer affects. A delta
 `GET /api/v1/sync` exports every changed vulnerability with all of its current
-affected packages (within the requested ecosystems). The server promises that
-the affected sets are complete, with `vulnerability_affected_complete: true`,
-only where this is structurally true: on a delta (a `since` window was given)
-that is delivered in a single page. Only for such a response -- a non-full
-sync with a stored `since`, whose first page is not truncated and carries the
-flag -- does the client drop, in that page's transaction, the local affected
-rows of each delivered non-withdrawn vulnerability that the page did not
-deliver. Syncs without a `since` and multi-page deltas stay upsert-only (a
-full sync clears and reloads the local tables instead): the pages of a
-multi-page delta are separate statements, so an
-advisory changed between two pages can arrive incomplete, and the client must
-not delete its rows (whole-advisory paging is a planned follow-up). Server writes
-that only delete affected rows (the package-name repair merging a legacy row
-into an existing canonical one) also move the vulnerability's `updated_at`, so
-the change enters the next delta. A coverage move (a manual advisory edited to
-another package, a package-name repair) therefore reaches local scans with the
-next single-page incremental sync instead of requiring a full sync; after a
-larger delta it remains until a later single-page delta or a full sync.
-Servers without the guarantee omit the field and clients that do not know it
-keep upserting rows, so older clients and servers remain compatible. An
-ecosystem-filtered sync replaces rows only in its ecosystems and cannot see an
-advisory that moved entirely to another ecosystem; an unfiltered sync does.
+affected packages (within the requested ecosystems). A delta pages the
+vulnerability dataset by whole advisories: each page is one statement that
+selects the next changed advisories in ID order after the advisory cursor and
+exports every in-scope affected row of each of them, ordered by advisory ID. A
+page takes advisories while their affected rows fit the `limit`; the first
+advisory always fits, so an advisory with more affected rows than the limit is
+a page of its own and that page holds more rows than the limit, instead of the
+advisory being split. `next_cursor.vulnerabilities_cursor` then carries a
+versioned advisory cursor (the last advisory ID of the page), and the dataset
+continues only while the page left an advisory for the next one. The server
+promises that the affected sets of a page are complete, with
+`vulnerability_affected_complete: true`, on every such delta page: the flag
+means that every vulnerability delivered on this page carries its complete
+current affected set. For each flagged page of a non-full sync with a stored
+`since`, the client drops, in that page's transaction, the local affected rows
+of each delivered non-withdrawn vulnerability that the page did not deliver;
+unflagged pages stay upsert-only (a full sync clears and reloads the local
+tables instead). An advisory that changes between two pages is never delivered
+partially: an advisory an earlier page already delivered keeps the state that
+page read and reaches the client again with the next delta, and an advisory a
+later page selects is either exported whole with its current affected set or,
+when its vulnerability row changed after the pinned snapshot, excluded whole
+until the next delta. A failed sequence keeps the replacements of its committed
+pages, which match what the server listed, does not advance the `since`
+window, and leaves every advisory it did not deliver untouched. Full exports
+keep row paging in (ecosystem, name, id) order and are never flagged. A delta
+that continues a legacy three-part row cursor (a sequence an older server
+started) keeps legacy row paging, and a legacy offset delta pages rows in
+advisory order, so offset-only clients continue where the advisory-ordered
+first page ended; both can split an advisory and are never flagged. Server
+writes that only delete affected rows (the package-name repair merging a
+legacy row into an existing canonical one) also move the vulnerability's
+`updated_at`, so the change enters the next delta. A coverage move (a manual
+advisory edited to another package, a package-name repair) therefore reaches
+local scans with the next incremental sync, however many pages it takes,
+instead of requiring a full sync. Older servers set the field only on a delta
+that fits in one page, servers without the guarantee omit it, and clients that
+do not know it keep upserting rows, so older clients and servers remain
+compatible; a new client against an older server stays upsert-only on every
+multi-page delta. An ecosystem-filtered sync replaces rows only in its
+ecosystems and cannot see an advisory that moved entirely to another ecosystem
+(it has no in-scope affected row left to deliver); an unfiltered sync does.
 Malicious rows are keyed by ID, so a changed row already replaces the local
 one.
 Local scans query those reputation rows through explicit reputation lookup

@@ -107,12 +107,13 @@ func finalSyncReplacePage(complete bool, vulnerabilities ...syncVulnerability) *
 }
 
 // TestDeltaSyncReplacesAffectedPackagesOfChangedVulnerabilities covers a
-// server-side coverage move (GHSA-move: npm left-pad -> npm right-pad). Only a
-// single-page delta with a since window that the server marks with
-// vulnerability_affected_complete lets the client drop the moved-away package.
-// Every other sequence stays upsert-only: pages of a multi-page delta are
-// separate statements, so a vulnerability changed between them can arrive
-// incomplete, even when a (buggy or older) server flags every page.
+// server-side coverage move (GHSA-move: npm left-pad -> npm right-pad). A delta
+// page with a since window that the server marks with
+// vulnerability_affected_complete carries every vulnerability on it with its
+// complete current affected set, so the client drops the moved-away package in
+// that page's transaction -- on a single page and on every flagged page of a
+// multi-page delta. Unflagged pages (older servers, full exports, legacy
+// paging) stay upsert-only.
 func TestDeltaSyncReplacesAffectedPackagesOfChangedVulnerabilities(t *testing.T) {
 	t.Parallel()
 
@@ -121,6 +122,7 @@ func TestDeltaSyncReplacesAffectedPackagesOfChangedVulnerabilities(t *testing.T)
 		syncReplaceVulnerability("GHSA-move", "npm", "right-pad"),
 		syncReplaceVulnerability("GHSA-move", "pypi", "requests"),
 	}
+	otherMoved := syncReplaceVulnerability("GHSA-other", "npm", "other-new")
 	replaced := []string{"GHSA-move|npm|right-pad", "GHSA-move|pypi|requests", "GHSA-other|npm|other"}
 	upserted := []string{"GHSA-move|npm|left-pad", "GHSA-move|npm|right-pad", "GHSA-move|pypi|requests", "GHSA-other|npm|other"}
 	tests := []struct {
@@ -130,7 +132,52 @@ func TestDeltaSyncReplacesAffectedPackagesOfChangedVulnerabilities(t *testing.T)
 		ecosystems []string
 		wantErr    bool
 		want       []string
+		// wantSince is the durable since window after the sync; empty means
+		// the sync advanced it to the pages' synced_at.
+		wantSince string
 	}{
+		{
+			name:  "multi-page delta replaces on every flagged page",
+			since: since,
+			pages: map[string]*syncResponse{
+				"":   truncatedSyncReplacePage(true, "c1", moved...),
+				"c1": finalSyncReplacePage(true, otherMoved),
+			},
+			want: []string{"GHSA-move|npm|right-pad", "GHSA-move|pypi|requests", "GHSA-other|npm|other-new"},
+		},
+		{
+			name:  "multi-page delta replaces only on flagged pages",
+			since: since,
+			pages: map[string]*syncResponse{
+				"":   truncatedSyncReplacePage(true, "c1", moved...),
+				"c1": finalSyncReplacePage(false, otherMoved),
+			},
+			want: []string{"GHSA-move|npm|right-pad", "GHSA-move|pypi|requests", "GHSA-other|npm|other", "GHSA-other|npm|other-new"},
+		},
+		{
+			name:  "older server multi-page delta without the flag stays upsert-only",
+			since: since,
+			pages: map[string]*syncResponse{
+				"":   truncatedSyncReplacePage(false, "c1", moved[0]),
+				"c1": finalSyncReplacePage(false, moved[1]),
+			},
+			want: upserted,
+		},
+		{
+			// The committed first page replaced GHSA-move with the complete
+			// set the server delivered; GHSA-other, which the failed page would
+			// have carried, keeps every local row, and the since window does
+			// not advance, so the next delta repeats the whole sequence.
+			name:  "failed multi-page delta keeps every vulnerability no committed page delivered",
+			since: since,
+			pages: map[string]*syncResponse{
+				"":   truncatedSyncReplacePage(true, "c1", moved...),
+				"c1": nil,
+			},
+			wantErr:   true,
+			want:      replaced,
+			wantSince: since,
+		},
 		{
 			name:  "single complete page with since",
 			since: since,
@@ -143,29 +190,21 @@ func TestDeltaSyncReplacesAffectedPackagesOfChangedVulnerabilities(t *testing.T)
 			want:  upserted,
 		},
 		{
-			name:  "multi-page sequence stays upsert-only even when every page is flagged",
-			since: since,
-			pages: map[string]*syncResponse{
-				"":   truncatedSyncReplacePage(true, "c1", moved[0]),
-				"c1": finalSyncReplacePage(true, moved[1]),
-			},
-			want: upserted,
-		},
-		{
 			name:  "older server without the completeness flag keeps upsert-only behavior",
 			since: since,
 			pages: map[string]*syncResponse{"": finalSyncReplacePage(false, moved...)},
 			want:  upserted,
 		},
 		{
-			name:  "failed sequence deletes nothing",
+			name:  "failed sequence of unflagged pages deletes nothing",
 			since: since,
 			pages: map[string]*syncResponse{
-				"":   truncatedSyncReplacePage(true, "c1", moved[0]),
+				"":   truncatedSyncReplacePage(false, "c1", moved[0]),
 				"c1": nil,
 			},
-			wantErr: true,
-			want:    upserted,
+			wantErr:   true,
+			want:      upserted,
+			wantSince: since,
 		},
 		{
 			name:       "ecosystem-filtered sync replaces only filtered ecosystems",
@@ -202,6 +241,12 @@ func TestDeltaSyncReplacesAffectedPackagesOfChangedVulnerabilities(t *testing.T)
 			}
 			if got := localVulnerabilityRowKeys(t, store); !slices.Equal(got, tt.want) {
 				t.Fatalf("local vulnerability rows = %q, want %q", got, tt.want)
+			}
+			if tt.wantSince != "" {
+				got, err := store.GetSyncMeta(context.Background(), syncMetaKeyLastSync)
+				if err != nil || got != tt.wantSince {
+					t.Fatalf("last sync after the sequence = %q, %v; want %q", got, err, tt.wantSince)
+				}
 			}
 		})
 	}
