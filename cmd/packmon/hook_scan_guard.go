@@ -254,7 +254,14 @@ func danglingSymlinkTarget(path string) (string, bool) {
 		return "", false
 	}
 	if !filepath.IsAbs(target) {
-		target = filepath.Join(filepath.Dir(path), target)
+		// A relative target is resolved against the link's physical
+		// directory: through a symlinked ancestor, "../x" climbs out of the
+		// real directory, not out of the symlinked spelling of the path.
+		dir := filepath.Dir(path)
+		if physical, err := filepath.EvalSymlinks(dir); err == nil {
+			dir = physical
+		}
+		target = filepath.Join(dir, target)
 	}
 	return filepath.Clean(target), true
 }

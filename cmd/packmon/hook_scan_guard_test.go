@@ -388,6 +388,32 @@ func TestPathInsideAnyRootFollowsDanglingSymlinks(t *testing.T) {
 	}
 }
 
+// TestPathInsideAnyRootResolvesARelativeDanglingTargetFromThePhysicalDir
+// covers a dangling link with a relative target reached through a symlinked
+// directory: the kernel resolves "../repo/..." against the link's physical
+// directory, not against the symlinked spelling of the path.
+func TestPathInsideAnyRootResolvesARelativeDanglingTargetFromThePhysicalDir(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "repo")
+	physical := filepath.Join(base, "real")
+	for _, dir := range []string{root, physical} {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+	}
+	if err := os.Symlink(filepath.Join("..", "repo", "missing", "report.json"), filepath.Join(physical, "report.json")); err != nil {
+		skipOrFailSymlink(t, err)
+	}
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(physical, alias); err != nil {
+		skipOrFailSymlink(t, err)
+	}
+
+	if !pathInsideAnyRoot([]string{root}, filepath.Join(alias, "report.json")) {
+		t.Fatal("pathInsideAnyRoot() = false, want the relative dangling target resolved from the physical directory, inside the repository")
+	}
+}
+
 // TestPathInsideAnyRootIgnoresCaseOnCaseInsensitiveFilesystems compares by
 // file identity, so a destination spelled with different case still counts as
 // inside the repository where the filesystem treats both spellings as one

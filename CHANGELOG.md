@@ -59,6 +59,9 @@
   be combined with `--list-packages`, `--outdated`, `--list-all`, or
   `--auto-sbom`. `packmon hook status` reports hooks installed by older
   versions as `outdated`; rerun `packmon hook install` to update them.
+  Multi-target scans (`--all`), with or without `--hook`, now resolve every
+  target's settings before the first scan, so a settings error on a later
+  target is reported before any target is scanned.
 - A project `.packmon.yaml` `repos:` entry whose name matches one user-global
   repo and whose path matches another now inherits `send_repo_metadata: false`
   from both. Routing (server, API key, webhook) still comes from the name
