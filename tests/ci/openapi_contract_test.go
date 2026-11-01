@@ -133,6 +133,19 @@ func TestOpenAPIIncludesCanonicalScanAndSyncFields(t *testing.T) {
 	if fieldTag, ok := reflect.TypeOf(synccontract.Response{}).FieldByName("ReputationDisabled"); !ok || fieldTag.Tag.Get("json") != "reputation_disabled,omitempty" {
 		t.Fatalf("synccontract.Response.ReputationDisabled json tag = %q (found %v), want reputation_disabled,omitempty", fieldTag.Tag.Get("json"), ok)
 	}
+	affectedComplete := requireMap(t, syncResponseProperties, "vulnerability_affected_complete")
+	if got := affectedComplete["type"]; got != "boolean" {
+		t.Fatalf("SyncResponse.vulnerability_affected_complete type = %#v, want boolean", got)
+	}
+	affectedCompleteDescription, _ := affectedComplete["description"].(string)
+	for _, want := range []string{"all of its current affected", "final page", "every page", "omit", "compatible"} {
+		if !strings.Contains(affectedCompleteDescription, want) {
+			t.Fatalf("SyncResponse.vulnerability_affected_complete description missing %q: %q", want, affectedCompleteDescription)
+		}
+	}
+	if fieldTag, ok := reflect.TypeOf(synccontract.Response{}).FieldByName("VulnerabilityAffectedComplete"); !ok || fieldTag.Tag.Get("json") != "vulnerability_affected_complete,omitempty" {
+		t.Fatalf("synccontract.Response.VulnerabilityAffectedComplete json tag = %q (found %v), want vulnerability_affected_complete,omitempty", fieldTag.Tag.Get("json"), ok)
+	}
 
 	limit := requireOperationParameter(t, syncOperation, "limit", "query")
 	limitSchema := requireMap(t, limit, "schema")

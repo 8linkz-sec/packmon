@@ -49,6 +49,12 @@ func TestPostgresStoreCorrectnessAgainstDocker(t *testing.T) {
 	t.Run("manual vulnerability edit replaces severity details and packages", func(t *testing.T) {
 		testManualVulnerabilityEditReplacesState(ctx, t, store)
 	})
+	t.Run("manual edit delta sends the complete affected set", func(t *testing.T) {
+		testManualEditDeltaSendsCompleteAffectedSet(ctx, t, store)
+	})
+	t.Run("package name repair marks merged vulnerabilities changed", func(t *testing.T) {
+		testPackageNameRepairDeltaIncludesMergedVulnerability(ctx, t, store)
+	})
 	// Runs last: it asserts that a second repair over the shared database
 	// finds nothing left to repair.
 	t.Run("package name repair uses canonical names", func(t *testing.T) {

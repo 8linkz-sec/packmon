@@ -36,6 +36,13 @@ type Response struct {
 	// omitted when reputation is served, which keeps older clients and servers
 	// compatible.
 	ReputationDisabled bool `json:"reputation_disabled,omitempty"`
+	// VulnerabilityAffectedComplete reports that every vulnerability with a
+	// row in this request sequence is exported with all of its current
+	// affected packages (within the requested ecosystems), so a delta client
+	// can drop local affected rows of that vulnerability the sequence did not
+	// send. It is omitted by servers that do not make this guarantee, which
+	// keeps older clients and servers compatible.
+	VulnerabilityAffectedComplete bool `json:"vulnerability_affected_complete,omitempty"`
 }
 
 // Cursor is the opaque paginated-sync cursor returned by the server and echoed
@@ -169,6 +176,8 @@ func ResponseFromExport(exported *db.SyncExport, feedStatus string, feedVersions
 		Truncated:       exported.Truncated,
 		HasMore:         exported.Truncated,
 		NextCursor:      cursorFromDB(exported.NextCursor),
+
+		VulnerabilityAffectedComplete: exported.VulnerabilityAffectedComplete,
 	}
 
 	for _, vuln := range exported.Vulnerabilities {

@@ -75,7 +75,10 @@ func (s *Store) RepairCaseInsensitivePackageNamesWithAudit(ctx context.Context, 
 // behind. Rows of one advisory that collide on the canonical name are merged
 // into a single canonical row (union of their version ranges and versions),
 // and the non-canonical rows are deleted. Names that would canonicalize to an
-// empty string are left alone.
+// empty string are left alone. Every advisory the repair touches gets a new
+// updated_at: a merge can delete a row without changing the canonical one, and
+// only a changed vulnerability reaches local clients through the next delta
+// sync, which then replaces its local affected rows.
 const repairAffectedPackageNamesSQL = `
 	WITH changed AS (
 		SELECT id, vulnerability_id, ecosystem, normalized_name, version_ranges, versions_affected
@@ -164,6 +167,12 @@ const repairAffectedPackageNamesSQL = `
 		DELETE FROM affected_packages ap
 		USING changed c
 		WHERE ap.id = c.id
+		RETURNING 1
+	),
+	touched AS (
+		UPDATE vulnerabilities v
+		SET updated_at = NOW()
+		WHERE v.id IN (SELECT vulnerability_id FROM changed_groups)
 		RETURNING 1
 	)
 	SELECT

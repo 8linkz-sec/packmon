@@ -114,6 +114,20 @@
   (including untrimmed names an earlier repair left behind) are now merged
   into the canonical row, so their advisories and malicious findings match
   again instead of never being found by a lookup.
+- An incremental `packmon db sync` now removes packages a vulnerability no
+  longer affects. Local rows used to be only upserted (or deleted when the
+  advisory was withdrawn), so after a server-side coverage change -- a manual
+  advisory edited to another package, or the package-name repair -- a local
+  scan kept reporting the old package until a full sync while
+  `/api/v1/check` no longer did. Delta `GET /api/v1/sync` responses now carry
+  the optional `vulnerability_affected_complete: true` field: each changed
+  vulnerability is exported with its complete current affected set (the
+  delta no longer drops affected rows written after the snapshot), and the
+  client replaces that vulnerability's local affected rows in the final
+  page's transaction. The package-name repair also marks merged
+  vulnerabilities changed so they enter the next delta. Older servers omit
+  the field and older clients ignore it, so both keep the previous
+  upsert-only behavior.
 - Manual advisory writes and deletes on PostgreSQL use the normalized
   (trimmed) advisory ID throughout. A padded ID such as ` manual:x ` no longer
   leaves both the vulnerability and the malicious record active after a type

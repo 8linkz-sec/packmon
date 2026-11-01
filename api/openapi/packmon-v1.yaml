@@ -1642,6 +1642,22 @@ components:
             remote checks, and must refetch the whole reputation dataset (no
             since window, other datasets marked done) once a later sync no longer
             reports it. The field is omitted when reputation is served.
+        vulnerability_affected_complete:
+          type: boolean
+          description: >-
+            Present and true when every vulnerability with a row in this
+            request sequence is exported with all of its current affected
+            packages (within the requested ecosystems), possibly spread over
+            several pages. A delta client may then, in the transaction of the
+            final page, drop local affected rows of each such vulnerability
+            that the sequence did not send, so a coverage change on the server
+            (for example a manual advisory moved to another package or a
+            package-name repair) reaches local scans without a full sync. The
+            client applies this only when every page of the sequence carries
+            the flag; a sequence that fails before its final page drops
+            nothing. Servers without this guarantee omit the field, and
+            clients that do not know it keep upserting rows, so older clients
+            and servers remain compatible.
 
     SyncCursor:
       type: object

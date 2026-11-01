@@ -869,6 +869,11 @@ Local SQLite sync:
   local `LOW` reputation context;
 - resolves synced reputation rows through explicit reputation lookup methods,
   not through malicious-package lookup methods;
+- drops local affected rows of a changed vulnerability during a delta sync only
+  when every page of the request sequence carries
+  `vulnerability_affected_complete`, only for rows in the requested ecosystems,
+  and only in the final page's transaction, so a failed or interrupted
+  sequence, or an older server, never removes a local finding;
 - refuses to mark the local database fresh from a server `synced_at` timestamp
   that is beyond the allowed future clock-skew tolerance;
 - rejects semantically empty full-sync snapshots before clearing local finding
