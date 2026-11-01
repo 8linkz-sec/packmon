@@ -46,7 +46,9 @@ unrelated persistence capabilities do not leak across subsystem boundaries.
   - `3`: findings below the blocking threshold (non-blocking; treated as a
     passing pipeline by the GitLab consumer template);
   - `4`: parser error, including partial lockfile/SBOM parse errors when no
-    blocking finding has already failed the scan;
+    blocking finding has already failed the scan; `--list-packages` has no
+    findings, so any lockfile/SBOM parse error makes it exit `4` after it
+    prints the packages it could parse;
   - `10`: internal bug.
 - Treat malicious and active supply-chain risk findings as always blocking.
   Historical ReversingLabs malware-incident evidence is `LOW` reputation info
