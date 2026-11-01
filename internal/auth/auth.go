@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sync"
 	"unicode/utf8"
 
 	"golang.org/x/crypto/bcrypt"
@@ -87,6 +88,26 @@ func HashPassword(password string) (string, error) {
 // leaks timing information about the hash comparison.
 func CheckPassword(hash, password string) bool {
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
+}
+
+var (
+	dummyPasswordHashOnce sync.Once
+	dummyPasswordHash     []byte
+)
+
+// EqualizePasswordCheck spends the cost of one CheckPassword call on a login
+// failure that has no stored hash to compare against (an unknown username or
+// a missing admin account), so those failures cannot be told apart from a
+// wrong password by response time. The result is always discarded. The dummy
+// hash uses bcryptCost and is generated once, on first use.
+func EqualizePasswordCheck(password string) {
+	dummyPasswordHashOnce.Do(func() {
+		hash, err := bcrypt.GenerateFromPassword([]byte("packmon-login-timing-equalizer"), bcryptCost)
+		if err == nil {
+			dummyPasswordHash = hash
+		}
+	})
+	_ = bcrypt.CompareHashAndPassword(dummyPasswordHash, []byte(password))
 }
 
 // BootstrapAdmin creates the admin row in the database if it does not

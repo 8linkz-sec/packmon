@@ -1004,7 +1004,9 @@ Admin pages are protected by the shared admin session model described in
 CSRF-protected write forms, an absolute session lifetime, a shorter inactivity
 timeout, and login lockout that tracks both client IP and the shared admin
 account. Failed current-password checks during admin password changes use the
-same lockout window.
+same lockout window. Logins with an unknown username or while no admin account
+exists count as failed logins too, and they spend a dummy bcrypt comparison so
+they answer no faster than a wrong password.
 
 The admin UI exposes `/.well-known/change-password` as a redirect to the
 password settings page so password managers can discover the password-change
@@ -1176,7 +1178,9 @@ are applied to the running process immediately and are also loaded on future
 server starts. Each save or reset applies the runtime change, persists it, and
 rolls the runtime back if persistence fails as one step ordered against other
 feed saves and resets, so overlapping changes leave the runtime on the last
-committed configuration. A change to a queue-worker feed (Socket.dev,
+committed configuration. The rollback runs detached from the request context
+with its own 30-second timeout, so a client disconnect cannot cancel it and
+leave the runtime on an unpersisted configuration. A change to a queue-worker feed (Socket.dev,
 ReversingLabs) restarts the refresh-queue processor; when the previous
 processor generation misses the shutdown-timeout deadline, it is left to
 finish and its replacement starts as soon as it exits, from the settings

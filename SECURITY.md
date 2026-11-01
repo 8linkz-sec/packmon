@@ -313,6 +313,17 @@ Admin properties:
   lockout window, stale partial failures expire, lockout audit events are
   deduplicated per lockout window, and failed as well as locked-out attempts are
   counted in metrics;
+- every failed login -- unknown username, wrong password, or a login while no
+  admin account exists yet -- is counted toward the lockout and metrics before
+  its `login_failed` audit row is written, and fails closed when that row
+  cannot be persisted;
+- an unknown username and a wrong password are indistinguishable to the
+  client: the same "Invalid username or password." response, and the same
+  cost, because failures without a stored hash to compare (unknown username,
+  missing account) run a dummy bcrypt comparison at the production cost; only
+  the audit row's `reason` tells them apart. The unconfigured-account notice
+  is shown on purpose so operators know to set
+  `PACKMON_ADMIN_INITIAL_PASSWORD`;
 - security-sensitive admin writes must fail or roll back when the required
   admin audit row cannot be persisted. PostgreSQL commits API-key lifecycle
   changes, queue mutations, password changes, and manual advisory writes

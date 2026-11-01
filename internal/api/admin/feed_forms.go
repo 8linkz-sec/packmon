@@ -366,10 +366,19 @@ func (h *AdminHandler) restoreRuntimeFeedConfig(ctx context.Context, correlation
 		h.logger.Warn("admin feeds: skipped stale runtime rollback", adminLogAttrsForCorrelationID(correlationID, "feed", applied.Name, "reason", reason)...)
 		return
 	}
-	if err := h.applyFeedConfig(ctx, previous); err != nil {
+	// The rollback must finish even when the client disconnects: a cancelled
+	// request context would leave the runtime on a configuration that was never
+	// persisted. Detach it from the request and bound it with its own timeout.
+	restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), feedConfigRestoreTimeout)
+	defer cancel()
+	if err := h.applyFeedConfig(restoreCtx, previous); err != nil {
 		h.logger.Error("admin feeds: failed to roll back runtime config", adminLogAttrsForCorrelationID(correlationID, "feed", previous.Name, "reason", reason, "error", err)...)
 	}
 }
+
+// feedConfigRestoreTimeout bounds a runtime feed config rollback that runs
+// detached from the request.
+const feedConfigRestoreTimeout = 30 * time.Second
 
 func sameRuntimeFeedSettings(a, b config.FeedSettings) bool {
 	return config.NormalizeFeedName(a.Name) == config.NormalizeFeedName(b.Name) &&

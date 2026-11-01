@@ -42,6 +42,14 @@
   with a bcrypt hash error. The form now answers "Password must be at most 72
   bytes", and each policy error maps to its own message instead of every one
   being reported as too short.
+- Admin login and feed-config hardening: a feed save or reset that has to roll
+  the runtime back now does so on a context detached from the request (with a
+  30-second timeout), so a client disconnect can no longer cancel the rollback
+  and leave the server on an unpersisted feed configuration. A login while no
+  admin account exists now counts as a failed attempt (lockout, metrics, and a
+  `login_failed` audit row with reason `admin account not configured`), and
+  logins with an unknown username or without an admin account run a dummy
+  bcrypt comparison so they no longer answer faster than a wrong password.
 - Local scans no longer report ReversingLabs reputation findings that the
   server's `/api/v1/check` ignores. `GET /api/v1/sync` now exports reputation
   rows only while ReversingLabs is enabled in `self` mode; otherwise it sends

@@ -136,6 +136,9 @@ type AdminHandler struct {
 	applyFeedConfig FeedConfigApplyFunc
 	resetFeedConfig FeedConfigResetFunc
 	csrfToken       func(*auth.Session) (string, error)
+	// equalizePasswordCheck runs a dummy password comparison on login failures
+	// that have no stored hash to check; nil uses auth.EqualizePasswordCheck.
+	equalizePasswordCheck func(password string)
 
 	// loginMu protects the loginAttempts map.
 	loginMu       sync.Mutex
@@ -313,6 +316,9 @@ func (h *AdminHandler) processLogin(w http.ResponseWriter, r *http.Request) {
 	nextPath := auth.SafeAdminReturnTarget(r.PostForm.Get("next"))
 
 	if username != "admin" {
+		// Pay for a password comparison like the wrong-password branch so an
+		// unknown username does not answer measurably faster.
+		h.runEqualizingPasswordCheck(password)
 		// Count the failure before the audit write so a failing audit store
 		// cannot exempt wrong credentials from lockout and metrics.
 		h.recordFailedAttempt(ip)
@@ -332,7 +338,16 @@ func (h *AdminHandler) processLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if adminAuth == nil {
+		h.runEqualizingPasswordCheck(password)
+		// A login against the unconfigured account is a failed login like any
+		// other: it counts toward lockout and metrics and is audited.
+		h.recordFailedAttempt(ip)
 		h.logger.Warn("login attempt but no admin account exists", h.adminLogAttrs(r, "client_ip", ip)...)
+		if !h.requireAudit(w, r, "login_failed", map[string]string{
+			"reason": "admin account not configured",
+		}) {
+			return
+		}
 		h.showLoginForm(w, r, adminUnconfiguredLoginError)
 		return
 	}
@@ -602,6 +617,16 @@ func (h *AdminHandler) isLockedOut(ip string) bool {
 
 	now := time.Now()
 	return h.isAttemptLocked(ip, now) || h.isAttemptLocked(adminLoginAccountKey, now)
+}
+
+// runEqualizingPasswordCheck spends a dummy bcrypt comparison of the submitted
+// password on a login failure that has no stored hash to check.
+func (h *AdminHandler) runEqualizingPasswordCheck(password string) {
+	if h.equalizePasswordCheck != nil {
+		h.equalizePasswordCheck(password)
+		return
+	}
+	auth.EqualizePasswordCheck(password)
 }
 
 // recordFailedAttempt increments the failure count for the given IP.

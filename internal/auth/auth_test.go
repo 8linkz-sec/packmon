@@ -177,6 +177,26 @@ func TestValidateAdminPasswordCountsCharactersNotBytes(t *testing.T) {
 	}
 }
 
+// TestEqualizePasswordCheckUsesARealCostBcryptComparison keeps the dummy
+// comparison as expensive as a real CheckPassword call: it must run against a
+// valid hash with the production cost, or an unknown username would still
+// answer faster than a wrong password.
+func TestEqualizePasswordCheckUsesARealCostBcryptComparison(t *testing.T) {
+	EqualizePasswordCheck("any-submitted-password")
+	EqualizePasswordCheck(strings.Repeat("p", 100))
+
+	cost, err := bcrypt.Cost(dummyPasswordHash)
+	if err != nil {
+		t.Fatalf("dummy hash is not a valid bcrypt hash: %v", err)
+	}
+	if cost != bcryptCost {
+		t.Fatalf("dummy hash cost = %d, want bcryptCost %d", cost, bcryptCost)
+	}
+	if CheckPassword(string(dummyPasswordHash), "any-submitted-password") {
+		t.Fatal("dummy hash matched a submitted password")
+	}
+}
+
 // TestValidateAdminPasswordRejectsPasswordsOverBcryptLimit keeps the policy in
 // step with bcrypt, which refuses more than MaxAdminPasswordBytes bytes. A
 // longer password used to pass validation and then fail hashing, so a password
