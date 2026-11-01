@@ -892,7 +892,8 @@ recognized after `for ... in (...) do`, after an `if` condition (`exist`,
 `defined`, `errorlevel`, `==` and `EQU`-style comparisons, with `/i` and
 `not`), and after `else`, a `%name%` expansion such as `%ProgramFiles(x86)%`
 is one word, and `REM`, `@REM`, and `::` comment lines are skipped. In both
-languages a redirection (`>nul`, `2>&1`, `*> $null`, `> "out file.log"`, ...)
+languages a redirection (`>nul`, `2>&1`, `> "out file.log"`, and in PowerShell
+also `*> $null`, ...)
 is removed with its target wherever it stands, so `>nul choco install a` and
 `choco install a >nul b` report every package choco would install and never
 the redirect target. Quoted text is always an argument, so a quoted `';'`

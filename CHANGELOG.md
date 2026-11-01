@@ -424,7 +424,7 @@
   command's `choco` / `install` words as packages. A continued line is joined
   without an inserted space and the first character of the next line is
   escaped, as in cmd.exe. Only the cmd.exe separators `&`, `&&`, `||`, `|`,
-  parentheses, and redirections start a new batch command: `;`, `{`, `}`,
+  and parentheses start a new batch command: `;`, `{`, `}`,
   and `=` are ordinary text, so `echo x;choco install a` and
   `set x = choco install a` no longer report `a`, and `choco install a ; b`
   reports `b` as well. A batch `--version='1.0'` keeps its single quotes, as
