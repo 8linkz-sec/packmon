@@ -331,9 +331,12 @@ paths:
             itself refuses (for example an EPSS score too small for the stored
             precision, or a NUL character in a text field); those return the
             fixed message "feed import contains values the store cannot accept"
-            without store internals. Every 400 rejects the whole import:
-            nothing commits, a `rejected` feed status is recorded, and no
-            `feed_import` audit row is written.
+            without store internals. Nothing from a rejected import commits
+            and no `feed_import` audit row is written. A 400 caused by the
+            request body (malformed JSON, failed validation, or values the
+            store refuses) also records a `rejected` feed status for the
+            path feed; a 400 for the request itself, such as a missing feed
+            name, records no feed status.
           headers: *apiCommonResponseHeaders
           content:
             application/json:
