@@ -16,6 +16,13 @@
 
 ### Fixed
 
+- The baseline down migration `001_initial.down.sql` can reverse the baseline
+  schema on its own: it dropped `api_keys` before `scan_log`, whose
+  `scan_log_api_key_id_fkey` references it, so PostgreSQL refused the drop. It
+  now drops `scan_log` first and also removes the two JSON helper functions
+  the baseline creates. Down migrations are review and verification aids that
+  are never applied by `packmon-server migrate` or server startup; the
+  documented rollback path remains restoring the pre-upgrade backup.
 - `POST /api/v1/packages/{ecosystem}/{name}/refresh` accepts a chunked request
   with an empty body like a request without a body. Only `Content-Length: 0`
   counted as "no body" before, so an empty chunked body (`Content-Length`
