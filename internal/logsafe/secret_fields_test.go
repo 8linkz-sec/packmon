@@ -72,6 +72,32 @@ func TestRedactDiagnosticMessageRedactsComponentKeyNames(t *testing.T) {
 	})
 }
 
+// TestRedactDiagnosticMessageRedactsPluralSecretKeys covers the plural secret
+// words credentials, secrets, passwords, and passwds, which usually hold a
+// collection of secrets; tokens stays readable because it usually counts.
+func TestRedactDiagnosticMessageRedactsPluralSecretKeys(t *testing.T) {
+	t.Parallel()
+
+	assertRedactionCases(t, []redactionCase{
+		{raw: `{"credentials":"plural-1","user":"bob"}`, leaked: []string{"plural-1"}, want: `{"credentials":[redacted],"user":"bob"}`},
+		{raw: `{"secrets": ["plural-a-2", "plural-b-2"], "n": 2}`, leaked: []string{"plural-a-2", "plural-b-2"}, want: `{"secrets": [redacted], "n": 2}`},
+		{raw: `{"dbCredentials": {"user": "u", "pass": "plural-3"}, "x": 1}`, leaked: []string{"plural-3"}, want: `{"dbCredentials": [redacted], "x": 1}`},
+		{raw: `{\"user_passwords\":\"plural-4\"}`, leaked: []string{"plural-4"}, want: `{\"user_passwords\":[redacted]}`},
+		{raw: `PASSWDS=plural-5 next=1`, leaked: []string{"plural-5"}, want: `PASSWDS=[redacted] next=1`},
+		{raw: `app.secrets: plural-6`, leaked: []string{"plural-6"}, want: `app.secrets: [redacted]`},
+		{raw: `CREDENTIALS={"a": "plural-7"} next=1`, leaked: []string{"plural-7"}, want: `CREDENTIALS=[redacted] next=1`},
+	})
+
+	for _, raw := range []string{
+		`{"tokens":3,"tokens_count":12,"TOKENS":4}`,
+		`tokens=3 tokens_count=12 TOKENS=4`,
+	} {
+		if got := RedactDiagnosticMessage(raw); got != raw {
+			t.Errorf("RedactDiagnosticMessage(%q) = %q, want it unchanged", raw, got)
+		}
+	}
+}
+
 // TestRedactDiagnosticMessageKeepsLookalikeKeysReadable keeps keys readable in
 // which a secret word is only the start of a longer word: the secret word must
 // end a component of the key name.
@@ -294,7 +320,8 @@ var fuzzSecretKeys = []string{
 	"password", "authToken", "githubToken", "db_password", "DB_PASSWORD",
 	"client_secret_value", "GITHUB_TOKEN", "PGPASSWORD", "x-api-key",
 	"db.password", "api_key", "privateKey", "x-amz-signature", "credential",
-	"Secret", "pwd", "refresh-token", "APIKey",
+	"Secret", "pwd", "refresh-token", "APIKey", "credentials", "dbSecrets",
+	"USER_PASSWORDS", "passwds",
 }
 
 var fuzzSeparators = []string{":", ": ", " : ", "=", " = ", ":\t"}

@@ -766,12 +766,16 @@ escapes any character inside a secret value, a newline included, so an escaped
 line break does not end the redaction early. A key is a secret key, quoted or
 not, when one component of its name (split at `_`, `-`, `.`, digits, and
 camelCase boundaries) ends with a secret word (`password`, `passwd`, `pwd`,
-`secret`, `token`, `credential`, `signature`, `sig`, `apikey`, `privatekey`)
-or is `key` right after an `api` or `private` component: `authToken`,
-`db_password`, `DB_PASSWORD`, `client_secret_value`, `GITHUB_TOKEN`,
-`PGPASSWORD`, `x-api-key`, and `db.password` are secret keys. A secret word
+`secret`, `token`, `credential`, `signature`, `sig`, `apikey`, `privatekey`,
+and the plurals `passwords`, `passwds`, `secrets`, `credentials`) or is `key`
+right after an `api` or `private` component: `authToken`, `db_password`,
+`DB_PASSWORD`, `client_secret_value`, `GITHUB_TOKEN`, `PGPASSWORD`,
+`x-api-key`, `db.password`, and `dbCredentials` are secret keys. A secret word
 followed by more letters in the same component does not count, so
-`tokenizer`, `tokens_count`, `passwordless`, and `secretariat` stay readable.
+`tokenizer`, `tokens_count`, `passwordless`, and `secretariat` stay readable;
+`tokens` is not a secret word because it usually holds a count. The rule errs
+toward over-redaction: a key with a secret word as a whole component is
+redacted even where its value is harmless (`token_count`, `has_signature`).
 Escaped JSON is recognized at any embedding depth
 (`\\\"token\\\":\\\"a b\\\"`): a quoted key needs the same quote, escaped by
 the same number of backslashes, on both sides, and a quoted value ends at the

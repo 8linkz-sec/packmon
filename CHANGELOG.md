@@ -34,7 +34,9 @@
   clear text, because the key had to be exactly the secret word. The secret
   word must end a component of the name (split at `_`, `-`, `.`, digits, and
   camelCase boundaries), so `tokenizer`, `tokens_count`, `passwordless`, and
-  `secretariat` stay readable. An object or array assigned to a secret key
+  `secretariat` stay readable. The plurals `credentials`, `secrets`,
+  `passwords`, and `passwds` are secret words too; `tokens` is not, because
+  it usually holds a count. An object or array assigned to a secret key
   (`"token": {"value": "x"}`, `"password": ["a", "b"]`) is now redacted as a
   whole up to its balanced closing bracket; before, everything after its
   first delimiter leaked. JSON embedded in a JSON string more than once

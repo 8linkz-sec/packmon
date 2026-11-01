@@ -12,10 +12,14 @@ const maxSecretStructureBytes = 16 << 10
 // secretKeyWords are the secret words a component of a key name may end with.
 // The multi-word names are covered by their last word (access_token,
 // client_secret, x-amz-signature), by the run-together forms apikey and
-// privatekey, or by keySecretPrefixes (api_key, private_key).
+// privatekey, or by keySecretPrefixes (api_key, private_key). The plurals
+// credentials, secrets, passwords, and passwds usually hold a collection of
+// secrets and count as well; tokens does not, because it usually counts
+// (LLM or rate-limit tokens).
 var secretKeyWords = []string{
 	"password", "passwd", "pwd", "secret", "token", "credential",
 	"signature", "sig", "apikey", "privatekey",
+	"passwords", "passwds", "secrets", "credentials",
 }
 
 // keySecretPrefixes are the components that make a following "key" component
@@ -30,8 +34,9 @@ var keySecretPrefixes = []string{"api", "private"}
 // or is "key" right after an "api" or "private" component (x-api-key,
 // privateKey). A component may carry letters before the secret word
 // (PGPASSWORD, githubtoken) but not after it, so tokenizer, tokens_count,
-// passwordless, and secretariat stay readable; a whole-word component such as
-// token_count is redacted. Matching ignores case.
+// passwordless, and secretariat stay readable. A whole-word component is
+// redacted even where it is harmless (token_count, has_signature): the rule
+// errs toward over-redaction. Matching ignores case.
 func isSecretKeyName(name string) bool {
 	prevStart, prevEnd := -1, -1
 	secret := false
