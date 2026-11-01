@@ -741,6 +741,13 @@ Feed-sync diagnostics, including git subprocess stderr/stdout and filesystem
 walker errors, must pass through the same diagnostic redaction before they reach
 structured logs or `feed_sync_status.last_error`. Git-backed feed helpers must
 not stream child-process output directly to process stderr.
+Server startup, schema-check, background-worker, and fatal error logs,
+including the plain-stderr fatal fallback used before a logger is configured,
+must pass through the same diagnostic redaction and a 512-byte bound: database
+driver errors can echo the connection URL, secret assignments, or local paths.
+The redaction strips userinfo, paths, and queries from `http(s)://` and
+`postgres(ql)://` URLs and redacts quoted secret values (for example libpq's
+`password='...'`) as a whole.
 
 The built-in `/privacy` page is a deployment-neutral disclosure for the
 first-party admin session cookie and routine Packmon audit/scan metadata. It is

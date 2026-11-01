@@ -1315,7 +1315,9 @@ as bounded categories rather than attacker-sized decoder text.
 Feed syncers sanitize git subprocess diagnostics, filesystem walker errors, and
 persisted `feed_sync_status.last_error` values through the shared diagnostic
 redaction path; git-backed feed helpers capture child output instead of wiring
-it directly to process stderr.
+it directly to process stderr. `packmon-server` startup, schema-check,
+background-worker, and fatal error logs (and the stderr fatal fallback) use the
+same redaction, bounded to 512 bytes.
 
 Backups are intentionally simple: periodic `pg_dump`, seven-day local
 retention, and storage outside the application data path. External backup
