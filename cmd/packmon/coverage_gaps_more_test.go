@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/8linkz-sec/packmon/internal/domain"
 )
@@ -77,19 +78,35 @@ func TestScanOutputConfigRequestsArtifact(t *testing.T) {
 }
 
 // TestLocalDashboardDBWarningStaysSilentOnFreshData covers the freshness banner
-// the local dashboard renders. A database that was just created is not stale, so
-// the dashboard must show no warning at all -- a permanent banner would train
-// users to ignore it.
+// the local dashboard renders. A database synced just now is not stale, so the
+// dashboard must show no warning at all -- a permanent banner would train users
+// to ignore it.
 func TestLocalDashboardDBWarningStaysSilentOnFreshData(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestSQLiteStore(t, t.TempDir())
+	if err := store.SetSyncMeta(context.Background(), "last_sync_at", time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("set sync meta: %v", err)
+	}
 	if got := localDashboardDBWarning(context.Background(), store, slog.New(slog.DiscardHandler)); got != "" {
 		t.Fatalf("localDashboardDBWarning(fresh) = %q, want no warning", got)
 	}
 	// A nil logger must not turn the check into a panic.
 	if got := localDashboardDBWarning(context.Background(), store, nil); got != "" {
 		t.Fatalf("localDashboardDBWarning(nil logger) = %q, want no warning", got)
+	}
+}
+
+// TestLocalDashboardDBWarningReportsUnknownFreshnessWithoutSyncTimestamp proves
+// that a database without a recorded sync time (never synced, or blank
+// metadata) is not presented as current: its freshness is unknown.
+func TestLocalDashboardDBWarningReportsUnknownFreshnessWithoutSyncTimestamp(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestSQLiteStore(t, t.TempDir())
+	const wantWarning = "Local database freshness could not be verified. Results may be incomplete. Update with: packmon db sync."
+	if got := localDashboardDBWarning(context.Background(), store, nil); got != wantWarning {
+		t.Fatalf("localDashboardDBWarning(never synced) = %q, want %q", got, wantWarning)
 	}
 }
 
