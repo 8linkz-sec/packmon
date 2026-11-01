@@ -16,14 +16,41 @@
 
 ### Fixed
 
+- The CLI no longer creates its local SQLite database (and its WAL and
+  journal files) in the working directory when the home directory cannot be
+  resolved. The default `~/.packmon/db` used to fall back to `./.packmon/db`,
+  usually inside whatever repository the CLI ran in. Without a home directory
+  and without `PACKMON_DB_PATH` or `db.path`, commands that need the database
+  now fail with `the home directory is unknown; set PACKMON_DB_PATH or
+  db.path`, auto-mode fallback and scan history warn and skip it, a `--hook`
+  scan exits `2`, and `packmon config show` reports `db_path` as unresolved.
+- `--outdated` / `--list-all` start the per-request `--timeout` when a
+  registry request leaves the shared rate limiter. The deadline used to start
+  before the queue wait, so with a small `--timeout` and many packages a
+  request could expire before it was sent; the row ended up `unknown` and the
+  lookup counted as neither refused nor skipped, so no warning appeared. The
+  queue wait is now bounded only by the scan itself, and a queued lookup that
+  ends for any reason other than a user cancellation (for example a caller
+  deadline) counts as a refused request in the stderr warning and the
+  list-all HTML hint, without advancing the consecutive-failure breaker.
+- `--outdated` / `--list-all` resolve npm dependency ranges for popular
+  packages again. The npm metadata lookup read the full packument through the
+  general 512 KiB registry limit, which popular packages exceed, so their
+  rows ended up `unknown` with a refused-request warning. The lookup now
+  requests npm's abbreviated install document
+  (`Accept: application/vnd.npm.install-v1+json`, full packument as fallback)
+  under a dedicated 16 MiB limit. Responses discarded for exceeding a size
+  limit now get their own warning on stderr and in the list-all HTML hint
+  instead of the refused-request advice to rerun or raise `--timeout`, which
+  cannot help for them.
 - `packmon report` exits `2` (operational error) when writing the report to
   stdout fails. It used to discard every write error outside the history
   table, so a closed pipe or full disk ended the command with exit `0` and no
   (or a truncated) report, and the empty-history message never failed at all.
 - `--outdated` / `--list-all` latest-version lookups whose `200` registry
   response exceeds the read limit (512 KiB for most registries) now count as
-  refused or failed registry requests, so the stderr warning and the list-all
-  HTML hint report them. They used to count as successes without any warning
+  failed lookups, so the stderr warning and the list-all HTML hint report
+  them. They used to count as successes without any warning
   while the row silently ended up `unknown`. The registry did answer, so such
   a response does not advance the consecutive-failure breaker.
 - `packmon scan --outdated` exits `4` (parser error) when a lockfile or SBOM

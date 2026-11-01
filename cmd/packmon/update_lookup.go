@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -40,6 +41,17 @@ const (
 	maxRegistryErrorBodyDrain        = 64 * 1024
 	maxPackagistRegistryResponseSize = 4 * 1024 * 1024
 	maxPyPIRegistryResponseSize      = 16 * 1024 * 1024
+	// maxNPMMetadataResponseSize bounds one npm metadata document. Even the
+	// abbreviated install document of a popular package (thousands of
+	// published versions, each with its dependency maps) runs to several MiB,
+	// far beyond the general registry limit; at most
+	// maxConcurrentRegistryRequests of these are buffered at once.
+	maxNPMMetadataResponseSize = 16 * 1024 * 1024
+	// npmAbbreviatedMetadataMediaType selects npm's abbreviated install
+	// metadata document. It carries dist-tags and, per version, the version
+	// and dependency maps the range resolver reads, but drops readmes,
+	// maintainers and the time map, so it is a fraction of the full packument.
+	npmAbbreviatedMetadataMediaType = "application/vnd.npm.install-v1+json"
 )
 
 // lookupSlowCounts counts the packages that serialize behind a dedicated
@@ -914,17 +926,19 @@ func registryGetLimitedWithHeaders(ctx context.Context, url string, limit int64,
 		return nil, fmt.Errorf("lookup skipped: registry failure breaker open after %d consecutive failures", registryBreakerThreshold)
 	}
 	phaseCtx := ctx
+	// Space every registry request, whatever ecosystem it belongs to. This is
+	// the single choke point all latest-version and metadata lookups pass
+	// through, so throttling here covers npm, PyPI, Go, Maven, NuGet, Hex and
+	// the rest instead of crates.io alone. The wait is bounded by the caller's
+	// context only: the per-request timeout below starts once the request is
+	// about to be sent, so queueing behind other lookups cannot use it up.
+	if !waitForRegistryThrottle(phaseCtx, registryRequestThrottle) {
+		return nil, fmt.Errorf("registry request cancelled while rate limiting: %w", phaseCtx.Err())
+	}
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, phase.perRequestTimeout())
 		defer cancel()
-	}
-	// Space every registry request, whatever ecosystem it belongs to. This is
-	// the single choke point all latest-version and metadata lookups pass
-	// through, so throttling here covers npm, PyPI, Go, Maven, NuGet, Hex and
-	// the rest instead of crates.io alone.
-	if !registryRequestThrottle.wait(ctx) {
-		return nil, fmt.Errorf("registry request cancelled while rate limiting: %w", ctx.Err())
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -988,13 +1002,28 @@ func registryGetLimitedWithHeaders(ctx context.Context, url string, limit int64,
 		// The registry answered, so the streak stays reset: an oversized
 		// document says nothing about reachability. The lookup still got no
 		// usable data, so count it with the refused/failed requests that drive
-		// the stderr warning and the list-all HTML hint.
-		if phase != nil {
-			phase.refused.Add(1)
-		}
+		// the stderr warning and the list-all HTML hint, flagged as oversized
+		// so the advice does not blame a rate limit or the timeout.
+		phase.recordOversized()
 		return nil, fmt.Errorf("registry response exceeds %d byte limit", limit)
 	}
 	return data, nil
+}
+
+// waitForRegistryThrottle waits for the throttle's next slot and reports
+// whether the request may be sent. A user cancellation stays silent. Any other
+// end of the wait -- a caller deadline that expired in the queue -- left the
+// lookup without an answer, so it joins the refused requests behind the stderr
+// warning and the list-all hint; nothing was sent, so the breaker streak is
+// left alone.
+func waitForRegistryThrottle(ctx context.Context, t *registryThrottle) bool {
+	if t.wait(ctx) {
+		return true
+	}
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		registryLookupPhaseFrom(ctx).recordUnsent()
+	}
+	return false
 }
 
 func drainRegistryErrorBody(r io.Reader) {
@@ -1104,7 +1133,12 @@ func fetchNPMMetadata(ctx context.Context, name string) (npmRegistryMetadata, bo
 }
 
 func fetchNPMMetadataFromBase(ctx context.Context, baseURL, name string) (npmRegistryMetadata, bool) {
-	data, err := registryGet(ctx, registryEndpoint(baseURL, url.PathEscape(name)))
+	// Ask for the abbreviated install document, the format the npm CLI itself
+	// resolves ranges from; a registry or mirror without it falls back to the
+	// full packument, which decodes into the same fields.
+	headers := http.Header{}
+	headers.Set("Accept", npmAbbreviatedMetadataMediaType+"; q=1.0, application/json; q=0.8")
+	data, err := registryGetLimitedWithHeaders(ctx, registryEndpoint(baseURL, url.PathEscape(name)), maxNPMMetadataResponseSize, headers)
 	if err != nil {
 		return npmRegistryMetadata{}, false
 	}
@@ -1166,7 +1200,7 @@ func fetchCratesLatest(ctx context.Context, name string) string {
 }
 
 func fetchCratesLatestFromBase(ctx context.Context, baseURL, name string) string {
-	if !cratesIOThrottle.wait(ctx) {
+	if !waitForRegistryThrottle(ctx, cratesIOThrottle) {
 		return ""
 	}
 	headers := http.Header{}
@@ -1228,7 +1262,7 @@ func fetchChocolateyLatestFromFeeds(ctx context.Context, feeds []string, name st
 		if feed == "" {
 			continue
 		}
-		if !chocolateyFeedThrottle.wait(ctx) {
+		if !waitForRegistryThrottle(ctx, chocolateyFeedThrottle) {
 			return ""
 		}
 		// OData servers (notably community.chocolatey.org) do not treat "+" as a

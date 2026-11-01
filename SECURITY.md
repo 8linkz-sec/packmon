@@ -892,6 +892,10 @@ Requirements:
 Local SQLite sync:
 
 - pulls from Packmon server only;
+- keeps the database in `PACKMON_DB_PATH`, trusted `db.path`, or
+  `~/.packmon/db`, and fails with an error when none resolves (unknown home
+  directory) instead of creating the database, WAL, and journal files in the
+  working directory, which is usually a repository;
 - stores compact finding, reputation, and lifecycle data, not raw feed JSON;
 - preserves user-facing source attribution for synced vulnerability and
   malicious findings;
@@ -1058,7 +1062,13 @@ the ordered NuGet v2 feeds queried for Chocolatey inventory; HTTPS is required
 except loopback HTTP test endpoints. `PACKMON_GO_PROXY_URL=off` disables Go latest-version lookups
 without using direct VCS fallback. crates.io requests must use an identifying
 Packmon User-Agent and a one-request-per-second throttle; Chocolatey feed
-requests are throttled to two per second.
+requests are throttled to two per second. Registry response bodies are read
+through fixed size limits (512 KiB by default, 4 MiB for Packagist, 16 MiB for
+PyPI and npm metadata) so a hostile or misbehaving registry cannot exhaust CLI
+memory; at most ten lookups buffer a body at once. npm metadata is requested as
+the abbreviated install document to stay inside its limit. A response over its
+limit is discarded and reported as missing latest-version data, never
+partially parsed.
 
 Required checks:
 

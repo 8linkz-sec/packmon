@@ -25,8 +25,13 @@ const (
 // Counters count HTTP requests, not packages: a cached lookup issues no
 // request and cannot be refused, and a 404 is a definitive answer -- the
 // package does not exist on that registry -- rather than a failure to reach it.
+//
+// refused is the total of lookups that got no usable answer; oversized is the
+// subset whose answer arrived but exceeded the client-side read limit, which
+// needs different advice than a rate limit or a slow registry.
 type registryLookupPhase struct {
 	refused        atomic.Int64
+	oversized      atomic.Int64
 	skipped        atomic.Int64
 	consecutive    atomic.Int64
 	breakerTripped atomic.Bool
@@ -41,6 +46,28 @@ func (p *registryLookupPhase) recordRefusal() {
 	if p.consecutive.Add(1) >= registryBreakerThreshold {
 		p.breakerTripped.Store(true)
 	}
+}
+
+// recordOversized counts a complete answer that exceeded the read limit. The
+// lookup got no usable data, so it joins the refused total, but the registry
+// did answer: the breaker streak is left to the caller's recordSuccess.
+func (p *registryLookupPhase) recordOversized() {
+	if p == nil {
+		return
+	}
+	p.refused.Add(1)
+	p.oversized.Add(1)
+}
+
+// recordUnsent counts a lookup that was abandoned before its request was
+// sent, other than by a user cancellation. The lookup got no answer, so it
+// joins the refused total; the registry was never asked, so the breaker
+// streak is left alone.
+func (p *registryLookupPhase) recordUnsent() {
+	if p == nil {
+		return
+	}
+	p.refused.Add(1)
 }
 
 func (p *registryLookupPhase) recordSuccess() {
@@ -69,6 +96,13 @@ func (p *registryLookupPhase) refusedCount() int {
 		return 0
 	}
 	return int(p.refused.Load())
+}
+
+func (p *registryLookupPhase) oversizedCount() int {
+	if p == nil {
+		return 0
+	}
+	return int(p.oversized.Load())
 }
 
 func (p *registryLookupPhase) skippedCount() int {

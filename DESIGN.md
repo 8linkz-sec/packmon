@@ -372,7 +372,9 @@ Important behavior:
     `--output-sarif`, `--output-junit`, or `--html` path;
   - fails with exit code `2` before scanning when the scan opens the local
     database (local checker or history) and its directory (`PACKMON_DB_PATH`,
-    `db.path`, or the default `~/.packmon/db`) is inside.
+    `db.path`, or the default `~/.packmon/db`) is inside, or when the home
+    directory is unknown and neither override is set (see "Local SQLite
+    Mode").
 
   Destinations outside the repository are still written. With several
   targets, the single-target rule for report outputs applies to what is left
@@ -601,6 +603,22 @@ Important behavior:
   estimate that accounts for the slower crates.io and Chocolatey rates when
   those packages dominate the inventory, and prints a `done/total` progress
   line every 10 seconds until the phase completes (suppressed by `--quiet`).
+  The phase itself has no deadline; `--timeout` bounds each registry request
+  from the moment it leaves the rate limiter, so time spent queued behind
+  other lookups does not count against it. A lookup abandoned in the queue
+  for any reason other than a user cancellation counts as a refused request.
+  Registry response bodies are read up to a fixed limit: 512 KiB by default,
+  4 MiB for Packagist, and 16 MiB for PyPI and for npm metadata. npm range
+  resolution requests the abbreviated install document
+  (`Accept: application/vnd.npm.install-v1+json`), which carries the
+  dist-tags, versions, and dependency maps the resolver reads; a registry
+  without it returns the full packument, which decodes into the same fields.
+  A response over its limit is discarded, not partially parsed. Lookup
+  failures are reported on stderr and in the list-all HTML hint by kind:
+  refused or failed requests (rate limits, server errors, network errors,
+  timeouts) advise rerunning, raising `--timeout`, or using a mirror, while
+  discarded oversized responses are reported separately because neither a
+  rerun nor more time changes them.
 - `--list-all` also inventories Docker image declarations from `Dockerfile`,
   `Dockerfile.*`, `docker-compose.yml`, `docker-compose.yaml`, `compose.yml`,
   and `compose.yaml`. Docker rows use ecosystem `docker`, show declared
@@ -1000,6 +1018,14 @@ explainable after rows are gone.
 
 Local mode uses a compact SQLite database populated from `GET /api/v1/sync`.
 It stores enough data for equivalent finding quality but not full server detail.
+The database file is `packmon.db` in `PACKMON_DB_PATH`, else in the trusted
+config `db.path`, else in `~/.packmon/db`. When the home directory cannot be
+resolved and neither override is set, the database has no location: commands
+that need it (`db sync`, `db info`, `db export`, `history clear`, `report`,
+`dashboard`, local-mode scans) fail with an error that names both overrides,
+auto-mode fallback and scan-history recording warn and skip it, and
+`packmon config show` prints the `db_path` as unresolved. The CLI never falls
+back to the working directory, which is usually a repository.
 
 Remote and local modes should detect the same vulnerability, malicious, synced
 reputation, and lifecycle findings when local data is fresh. Local SQLite sync

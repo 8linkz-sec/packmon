@@ -766,6 +766,14 @@ func validateSeverityString(value string) error {
 	return fmt.Errorf("invalid severity %q (want CRITICAL|HIGH|MEDIUM|LOW|NONE)", value)
 }
 
+// errLocalDBHomeUnknown reports that the default local database location
+// (~/.packmon/db) cannot be resolved. There is deliberately no fallback: the
+// working directory is usually a repository, and the SQLite database with its
+// WAL and journal files must never be created inside one.
+var errLocalDBHomeUnknown = errors.New("resolve local database path: the home directory is unknown; set PACKMON_DB_PATH or db.path")
+
+// resolveLocalDBPath returns the local SQLite database file. Precedence:
+// PACKMON_DB_PATH, then db.path from trusted config, then ~/.packmon/db.
 func resolveLocalDBPath() (string, error) {
 	if p := strings.TrimSpace(os.Getenv("PACKMON_DB_PATH")); p != "" {
 		return filepath.Join(p, "packmon.db"), nil
@@ -777,18 +785,17 @@ func resolveLocalDBPath() (string, error) {
 	if cfg != nil && strings.TrimSpace(cfg.DB.Path) != "" {
 		return filepath.Join(cfg.DB.Path, "packmon.db"), nil
 	}
-	return defaultDBPath(), nil
+	return defaultLocalDBPath()
 }
 
-func defaultDBPath() string {
-	if p := os.Getenv("PACKMON_DB_PATH"); p != "" {
-		return filepath.Join(p, "packmon.db")
-	}
+// defaultLocalDBPath returns the binary-default database file
+// ~/.packmon/db/packmon.db, or errLocalDBHomeUnknown without a home directory.
+func defaultLocalDBPath() (string, error) {
 	home, err := os.UserHomeDir()
-	if err != nil {
-		home = "."
+	if err != nil || strings.TrimSpace(home) == "" {
+		return "", errLocalDBHomeUnknown
 	}
-	return filepath.Join(home, ".packmon", "db", "packmon.db")
+	return filepath.Join(home, ".packmon", "db", "packmon.db"), nil
 }
 
 func (c *cliConfig) findRepo(name string) *cliRepoConfig {
