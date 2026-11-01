@@ -953,7 +953,7 @@ deliver. Syncs without a `since` and multi-page deltas stay upsert-only (a
 full sync clears and reloads the local tables instead): the pages of a
 multi-page delta are separate statements, so an
 advisory changed between two pages can arrive incomplete, and the client must
-not delete its rows (whole-advisory paging is backlog AUDIT-046). Server writes
+not delete its rows (whole-advisory paging is a planned follow-up). Server writes
 that only delete affected rows (the package-name repair merging a legacy row
 into an existing canonical one) also move the vulnerability's `updated_at`, so
 the change enters the next delta. A coverage move (a manual advisory edited to

@@ -95,7 +95,7 @@ func (s *Store) ExportSync(ctx context.Context, opts db.SyncExportOptions) (*db.
 // export bounds affected rows by the snapshot, and the pages of a multi-page
 // delta are separate statements that re-evaluate the vulnerability bounds, so
 // a vulnerability changed between pages can arrive incomplete (whole-advisory
-// paging is backlog AUDIT-046).
+// paging is a planned follow-up).
 func syncVulnerabilityAffectedComplete(opts db.SyncExportOptions, truncated bool) bool {
 	return opts.Since != nil && !truncated && opts.Cursor.IsZero() && opts.Offset == 0
 }

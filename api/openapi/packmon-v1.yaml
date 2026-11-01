@@ -1657,7 +1657,7 @@ components:
             exports and every page of a multi-page delta omit the field: those
             pages are separate statements, so a vulnerability changed between
             them can arrive incomplete, and clients keep upserting rows for
-            such sequences (whole-advisory paging is backlog AUDIT-046).
+            such sequences (whole-advisory paging is a planned follow-up).
             Servers without this guarantee omit the field, and clients that do
             not know it keep upserting rows, so older clients and servers remain
             compatible.

@@ -129,7 +129,7 @@
   field, and the client applies the replacement only to a single-page delta
   with a stored `since`, so a vulnerability changed between two pages of a
   larger delta can never delete still-valid local rows; such deltas stay
-  upsert-only (whole-advisory paging is backlog AUDIT-046). The package-name
+  upsert-only (whole-advisory paging is a planned follow-up). The package-name
   repair also marks merged vulnerabilities changed so they enter the next
   delta. Older servers omit the field and older clients ignore it, so both
   keep the previous upsert-only behavior.
