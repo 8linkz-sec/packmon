@@ -73,6 +73,9 @@
 - The admin login and admin pages render the shared footer's terms link
   (`PACKMON_WEB_TERMS_URL`, default `/terms`) like the public pages; the
   admin renderer previously received only the privacy and legal URLs.
+- The 12-character minimum for bootstrap (`PACKMON_ADMIN_INITIAL_PASSWORD`)
+  and rotated admin passwords counts Unicode characters instead of bytes, so
+  a password of four three-byte characters no longer passes.
 
 ### Security updates
 
