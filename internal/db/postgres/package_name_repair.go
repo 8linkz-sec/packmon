@@ -67,43 +67,55 @@ func (s *Store) RepairCaseInsensitivePackageNamesWithAudit(ctx context.Context, 
 	return repaired, nil
 }
 
-func repairAffectedPackageNames(ctx context.Context, querier postgresQueryRower) (int, error) {
-	const query = `
-	WITH normalized AS (
-		SELECT
-			id,
-			vulnerability_id,
-			ecosystem,
-			name,
-			CASE
-				WHEN lower(ecosystem) = 'nuget' THEN lower(name)
-				WHEN lower(ecosystem) = 'pypi' THEN regexp_replace(lower(name), '[-_.]+', '-', 'g')
-				ELSE name
-			END AS normalized_name,
-			version_ranges,
-			versions_affected
-		FROM affected_packages
-		WHERE lower(ecosystem) IN ('pypi', 'nuget')
+// repairAffectedPackageNamesSQL folds affected_packages names into the
+// canonical identity (canonicalPackageNameSQL, the SQL form of
+// packageid.NormalizeName) for every ecosystem: legacy mixed-case GitHub
+// Actions names and names with surrounding whitespace, including the
+// lower-cased but untrimmed names an earlier pypi/nuget-only repair left
+// behind. Rows of one advisory that collide on the canonical name are merged
+// into a single canonical row (union of their version ranges and versions),
+// and the non-canonical rows are deleted. Names that would canonicalize to an
+// empty string are left alone.
+const repairAffectedPackageNamesSQL = `
+	WITH changed AS (
+		SELECT id, vulnerability_id, ecosystem, normalized_name, version_ranges, versions_affected
+		FROM (
+			SELECT
+				id,
+				vulnerability_id,
+				ecosystem,
+				name,
+				` + canonicalPackageNameSQL + ` AS normalized_name,
+				version_ranges,
+				versions_affected
+			FROM (
+				SELECT id, vulnerability_id, ecosystem, name, name AS raw_name, version_ranges, versions_affected
+				FROM affected_packages
+			) src
+		) canonical
+		WHERE name IS DISTINCT FROM normalized_name
+		  AND normalized_name <> ''
 	),
 	changed_groups AS (
-		SELECT vulnerability_id, ecosystem, normalized_name AS name
-		FROM normalized
-		GROUP BY vulnerability_id, ecosystem, normalized_name
-		HAVING bool_or(name IS DISTINCT FROM normalized_name) OR count(*) > 1
+		SELECT DISTINCT vulnerability_id, ecosystem, normalized_name AS name
+		FROM changed
+	),
+	members AS (
+		SELECT vulnerability_id, ecosystem, normalized_name AS name, version_ranges, versions_affected
+		FROM changed
+		UNION ALL
+		SELECT ap.vulnerability_id, ap.ecosystem, ap.name, ap.version_ranges, ap.versions_affected
+		FROM changed_groups g
+		INNER JOIN affected_packages ap
+			ON ap.vulnerability_id = g.vulnerability_id
+			AND ap.ecosystem = g.ecosystem
+			AND ap.name = g.name
 	),
 	range_items AS (
-		SELECT
-			n.vulnerability_id,
-			n.ecosystem,
-			n.normalized_name AS name,
-			r.item AS item
-		FROM normalized n
-		INNER JOIN changed_groups g
-			ON g.vulnerability_id = n.vulnerability_id
-			AND g.ecosystem = n.ecosystem
-			AND g.name = n.normalized_name
+		SELECT m.vulnerability_id, m.ecosystem, m.name, r.item AS item
+		FROM members m
 		CROSS JOIN LATERAL jsonb_array_elements(
-			CASE WHEN jsonb_typeof(n.version_ranges) = 'array' THEN n.version_ranges ELSE '[]'::jsonb END
+			CASE WHEN jsonb_typeof(m.version_ranges) = 'array' THEN m.version_ranges ELSE '[]'::jsonb END
 		) AS r(item)
 	),
 	merged_ranges AS (
@@ -112,18 +124,10 @@ func repairAffectedPackageNames(ctx context.Context, querier postgresQueryRower)
 		GROUP BY vulnerability_id, ecosystem, name
 	),
 	version_items AS (
-		SELECT
-			n.vulnerability_id,
-			n.ecosystem,
-			n.normalized_name AS name,
-			v.item AS item
-		FROM normalized n
-		INNER JOIN changed_groups g
-			ON g.vulnerability_id = n.vulnerability_id
-			AND g.ecosystem = n.ecosystem
-			AND g.name = n.normalized_name
+		SELECT m.vulnerability_id, m.ecosystem, m.name, v.item AS item
+		FROM members m
 		CROSS JOIN LATERAL jsonb_array_elements(
-			CASE WHEN jsonb_typeof(n.versions_affected) = 'array' THEN n.versions_affected ELSE '[]'::jsonb END
+			CASE WHEN jsonb_typeof(m.versions_affected) = 'array' THEN m.versions_affected ELSE '[]'::jsonb END
 		) AS v(item)
 	),
 	merged_versions AS (
@@ -158,38 +162,41 @@ func repairAffectedPackageNames(ctx context.Context, querier postgresQueryRower)
 	),
 	deleted AS (
 		DELETE FROM affected_packages ap
-		USING normalized n
-		INNER JOIN changed_groups g
-			ON g.vulnerability_id = n.vulnerability_id
-			AND g.ecosystem = n.ecosystem
-			AND g.name = n.normalized_name
-		WHERE ap.id = n.id
-		  AND n.name IS DISTINCT FROM n.normalized_name
+		USING changed c
+		WHERE ap.id = c.id
 		RETURNING 1
 	)
 	SELECT
 		(SELECT count(*) FROM upserted) +
 		(SELECT count(*) FROM deleted)`
 
+func repairAffectedPackageNames(ctx context.Context, querier postgresQueryRower) (int, error) {
 	var repaired int
-	if err := querier.QueryRow(ctx, query).Scan(&repaired); err != nil {
+	if err := querier.QueryRow(ctx, repairAffectedPackageNamesSQL).Scan(&repaired); err != nil {
 		return 0, fmt.Errorf("postgres: repair affected package names: %w", err)
 	}
 	return repaired, nil
 }
 
-func repairMaliciousPackageNames(ctx context.Context, querier postgresQueryRower) (int, error) {
-	const query = `
+// repairMaliciousPackageNamesSQL renames malicious_findings rows to the
+// canonical package identity (canonicalPackageNameSQL) for every ecosystem.
+// Rows are keyed by id, so there is nothing to merge; updated_at moves so the
+// renamed rows reach local clients through the next delta sync.
+const repairMaliciousPackageNamesSQL = `
 	WITH normalized AS (
-		SELECT
-			id,
-			CASE
-				WHEN lower(ecosystem) = 'nuget' THEN lower(name)
-				WHEN lower(ecosystem) = 'pypi' THEN regexp_replace(lower(name), '[-_.]+', '-', 'g')
-				ELSE name
-			END AS normalized_name
-		FROM malicious_findings
-		WHERE lower(ecosystem) IN ('pypi', 'nuget')
+		SELECT id, normalized_name
+		FROM (
+			SELECT
+				id,
+				name,
+				` + canonicalPackageNameSQL + ` AS normalized_name
+			FROM (
+				SELECT id, ecosystem, name, name AS raw_name
+				FROM malicious_findings
+			) src
+		) canonical
+		WHERE name IS DISTINCT FROM normalized_name
+		  AND normalized_name <> ''
 	),
 	repaired AS (
 		UPDATE malicious_findings mf
@@ -197,13 +204,13 @@ func repairMaliciousPackageNames(ctx context.Context, querier postgresQueryRower
 			updated_at = NOW()
 		FROM normalized n
 		WHERE mf.id = n.id
-		  AND mf.name IS DISTINCT FROM n.normalized_name
 		RETURNING 1
 	)
 	SELECT count(*) FROM repaired`
 
+func repairMaliciousPackageNames(ctx context.Context, querier postgresQueryRower) (int, error) {
 	var repaired int
-	if err := querier.QueryRow(ctx, query).Scan(&repaired); err != nil {
+	if err := querier.QueryRow(ctx, repairMaliciousPackageNamesSQL).Scan(&repaired); err != nil {
 		return 0, fmt.Errorf("postgres: repair malicious package names: %w", err)
 	}
 	return repaired, nil

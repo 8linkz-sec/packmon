@@ -107,6 +107,13 @@
   all-versions match, so a local scan and `/api/v1/check` return the same
   findings for such a batch. Requested versions are deduplicated per package
   in request order.
+- The PostgreSQL startup package-name repair now folds names with the same
+  canonical identity as every write and lookup (`packageid.NormalizeName`)
+  for all ecosystems instead of only lower-casing NuGet and folding PyPI.
+  Legacy mixed-case GitHub Actions rows and names with surrounding whitespace
+  (including untrimmed names an earlier repair left behind) are now merged
+  into the canonical row, so their advisories and malicious findings match
+  again instead of never being found by a lookup.
 - Manual advisory writes and deletes on PostgreSQL use the normalized
   (trimmed) advisory ID throughout. A padded ID such as ` manual:x ` no longer
   leaves both the vulnerability and the malicious record active after a type
