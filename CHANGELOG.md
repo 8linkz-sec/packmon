@@ -411,6 +411,25 @@
   only to PowerShell files (a batch `echo @"` no longer hides the rest of the
   file, and `#` is ordinary text in batch), and `REM` / `::` comment lines
   only to batch files.
+- Chocolatey script inventory reads batch files (`.bat`, `.cmd`) with cmd.exe
+  quoting and escaping instead of the PowerShell rules, so batch `choco
+  install` lines are no longer split or joined wrongly. A single quote is
+  ordinary text (`echo 'x & choco install b'` reports `b`, and
+  `choco install 'a'` no longer reports `a`); a caret inside double quotes is
+  literal and no longer continues the line, which used to swallow the next
+  command; an unquoted caret escapes the next character, so `^&`, `^|`,
+  `^<`, and `^>` are arguments rather than separators or redirects and `^"`
+  opens no quote; a line ending in `^^` (a literal caret) or in a caret
+  followed by spaces no longer continues and no longer reports the next
+  command's `choco` / `install` words as packages. A continued line is joined
+  without an inserted space and the first character of the next line is
+  escaped, as in cmd.exe. Only the cmd.exe separators `&`, `&&`, `||`, `|`,
+  parentheses, and redirections start a new batch command: `;`, `{`, `}`,
+  and `=` are ordinary text, so `echo x;choco install a` and
+  `set x = choco install a` no longer report `a`, and `choco install a ; b`
+  reports `b` as well. A batch `--version='1.0'` keeps its single quotes, as
+  cmd.exe passes them to choco.exe, and is reported unpinned instead of as
+  version `1.0`. PowerShell parsing is unchanged.
 
 ### Security updates
 

@@ -652,17 +652,34 @@ Important behavior:
   installs latest) show INSTALLED `-`, the feed's latest version, UPDATE
   `unpinned`, and the `unpinned` flag, and are never counted as available
   updates. A script `choco` verb counts only in command position (line start,
-  after an unquoted `;`, `|`, `&`, `(`, `)`, `{`, `}`, redirection, or `=`,
-  or after `call` / `sudo`); quoted text is always an argument, so a quoted
-  `';'` neither starts a new command nor ends the package list. Script
-  syntax follows the file type: `.ps1` / `.psm1` files join backtick line
-  continuations and skip `#` comments, `<# ... #>` block comments, and
-  here-strings, where a backtick inside a `#` or block comment is comment text
-  and does not pull the next line into the comment; `.bat` / `.cmd` files join
-  caret line continuations and skip `REM` / `@REM` and `::` comment lines,
-  and `#` is ordinary text there. A caret in a PowerShell file and a backtick
-  in a batch file never continue a line. Script `--source` arguments are
-  ignored; feeds come only from configuration. Chocolatey inventory is
+  after an unquoted command separator or redirection, or after `call` /
+  `sudo`). In `.ps1` / `.psm1` files the separators are `;`, `|`, `&`, `(`,
+  `)`, `{`, `}`, redirection, and `=`; in `.bat` / `.cmd` files they are only
+  the cmd.exe separators `&`, `&&`, `||`, `|`, the block parentheses `(` /
+  `)`, and redirection, while `;`, `{`, `}`, and `=` are ordinary argument
+  text. Quoted (and in batch files caret-escaped) text is always an argument,
+  so a quoted `';'` or `"&"` neither starts a new command nor ends the
+  package list. A `--version=value` pin has surrounding double quotes
+  stripped in both languages and surrounding single quotes stripped only in
+  PowerShell: cmd.exe passes single quotes to choco.exe unchanged, so a batch
+  `--version='1.0'` is not a version literal and the entry is unpinned. Script
+  syntax follows the file type: `.ps1` / `.psm1` files group single- and
+  double-quoted text, join backtick line continuations, and skip `#`
+  comments, `<# ... #>` block comments, and here-strings, where a backtick
+  inside a `#` or block comment is comment text and does not pull the next
+  line into the comment; `.bat` / `.cmd` files follow cmd.exe quoting and
+  escaping: only double quotes group (a single quote is ordinary text), a
+  caret inside double quotes is literal, an unquoted caret makes the next
+  character literal (`^&`, `^|`, `^<`, `^>`, and `^"` are argument text, `^^`
+  is a literal caret, and an escaped space still separates arguments), and
+  only an unquoted, unescaped caret that is the last character of the line
+  continues it; the next line is appended without a space and its first
+  character is escaped. Batch files skip `REM` / `@REM` and `::` comment
+  lines (a trailing caret on such a line, even one followed by spaces, keeps
+  the comment going onto the next line), and `#` is ordinary text there. A
+  caret in a PowerShell file and a backtick in a batch file never continue a
+  line. Script `--source` arguments are ignored; feeds come only from
+  configuration. Chocolatey inventory is
   metadata-only: no vulnerability or malicious-package matching, no
   `/api/v1/check` submission, no `--outdated` rows, and no JSON/SARIF/JUnit
   entries.
