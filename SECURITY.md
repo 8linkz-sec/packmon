@@ -317,13 +317,16 @@ Admin properties:
   admin account exists yet -- is counted toward the lockout and metrics before
   its `login_failed` audit row is written, and fails closed when that row
   cannot be persisted;
-- an unknown username and a wrong password are indistinguishable to the
-  client: the same "Invalid username or password." response, and the same
-  cost, because failures without a stored hash to compare (unknown username,
-  missing account) run a dummy bcrypt comparison at the production cost; only
-  the audit row's `reason` tells them apart. The unconfigured-account notice
-  is shown on purpose so operators know to set
-  `PACKMON_ADMIN_INITIAL_PASSWORD`;
+- an unknown username and a wrong password get the same "Invalid username or
+  password." response, and both pay for one bcrypt comparison at the
+  production cost: failures without a stored hash to compare (unknown
+  username, missing account) compare the submitted password against a dummy
+  hash that server startup generates before serving, falling back to an
+  embedded production-cost hash if generation fails. Timing is equalized for
+  the dominant bcrypt cost only, not exactly: the wrong-password branch also
+  reads the stored admin hash from the database, and the audit row's `reason`
+  differs. The unconfigured-account notice is shown on purpose so operators
+  know to set `PACKMON_ADMIN_INITIAL_PASSWORD`;
 - security-sensitive admin writes must fail or roll back when the required
   admin audit row cannot be persisted. PostgreSQL commits API-key lifecycle
   changes, queue mutations, password changes, and manual advisory writes

@@ -194,6 +194,9 @@ func run() error {
 
 	warnIfMetricsEndpointExposed(cfg, logger)
 	logRuntimeStarting(runtimeCfg)
+	// Pay for the login timing equalizer's dummy hash before serving, so
+	// failed logins never wait on its generation.
+	auth.PrepareLoginEqualizer()
 
 	runtime, err := buildRuntimeServer(runtimeCfg, runtimeStore, defaultFeeds)
 	if err != nil {

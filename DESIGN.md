@@ -1006,9 +1006,11 @@ timeout, and login lockout that tracks both client IP and the shared admin
 account. Bootstrap and rotated admin passwords must be at least 12 characters
 (Unicode code points) and at most 72 bytes (UTF-8, the bcrypt input limit);
 each violation has its own error and admin message. Failed current-password
-checks during admin password changes use the same lockout window. Logins with an unknown username or while no admin account
-exists count as failed logins too, and they spend a dummy bcrypt comparison so
-they answer no faster than a wrong password.
+checks during admin password changes use the same lockout window. Logins with
+an unknown username or while no admin account exists count as failed logins
+too, and they pay for one production-cost bcrypt comparison against a dummy
+hash (generated at startup, with an embedded fallback), so they do not answer
+measurably faster than a wrong password.
 
 The admin UI exposes `/.well-known/change-password` as a redirect to the
 password settings page so password managers can discover the password-change

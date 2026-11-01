@@ -50,7 +50,10 @@
   admin account exists now counts as a failed attempt (lockout, metrics, and a
   `login_failed` audit row with reason `admin account not configured`), and
   logins with an unknown username or without an admin account run a dummy
-  bcrypt comparison so they no longer answer faster than a wrong password.
+  bcrypt comparison at the production cost, so they no longer answer
+  measurably faster than a wrong password. The dummy hash is generated at
+  server startup before serving; if that fails, an embedded production-cost
+  hash is used instead, so the equalization cannot silently disappear.
 - Local scans no longer report ReversingLabs reputation findings that the
   server's `/api/v1/check` ignores. `GET /api/v1/sync` now exports reputation
   rows only while ReversingLabs is enabled in `self` mode; otherwise it sends
