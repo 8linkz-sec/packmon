@@ -235,6 +235,45 @@ func TestHTMLWriteExposesMachineReadableTimingHooks(t *testing.T) {
 	}
 }
 
+// TestHTMLReportLocaleScriptUsesValidDateTimeFormatOptions pins the
+// Intl.DateTimeFormat option set in the scan report script. ECMA-402 throws a
+// TypeError when dateStyle or timeStyle is combined with an explicit component
+// option such as timeZoneName; the script's catch then returned before
+// formatting anything, so every report timestamp kept the UTC fallback text.
+func TestHTMLReportLocaleScriptUsesValidDateTimeFormatOptions(t *testing.T) {
+	t.Parallel()
+
+	calls := regexp.MustCompile(`new Intl\.DateTimeFormat\([^,]*,\s*\{([^}]*)\}\)`).
+		FindAllStringSubmatch(htmlReportLocaleScript, -1)
+	if len(calls) == 0 || len(calls) != strings.Count(htmlReportLocaleScript, "Intl.DateTimeFormat(") {
+		t.Fatalf("found %d parsable Intl.DateTimeFormat option objects, want every call parsed", len(calls))
+	}
+	for _, call := range calls {
+		options := map[string]bool{}
+		for _, entry := range strings.Split(call[1], ",") {
+			key, _, ok := strings.Cut(entry, ":")
+			if !ok {
+				t.Fatalf("unparsable DateTimeFormat option %q in {%s}", entry, call[1])
+			}
+			options[strings.TrimSpace(key)] = true
+		}
+		if options["dateStyle"] || options["timeStyle"] {
+			for key := range options {
+				if key != "dateStyle" && key != "timeStyle" {
+					t.Fatalf("DateTimeFormat options {%s} combine dateStyle/timeStyle with %q; conforming engines throw", call[1], key)
+				}
+			}
+		}
+		// The localized text must keep what the UTC fallback shows: date,
+		// time to the minute, and the time zone.
+		for _, want := range []string{"year", "month", "day", "hour", "minute", "timeZoneName"} {
+			if !options[want] {
+				t.Fatalf("DateTimeFormat options {%s} miss %q", call[1], want)
+			}
+		}
+	}
+}
+
 func TestHTMLTemplateUsesMessageDataForStaticReportLabels(t *testing.T) {
 	for _, want := range []string{
 		`{{.Messages.ReportType}}`,

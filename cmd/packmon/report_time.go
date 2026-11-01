@@ -3,6 +3,8 @@ package main
 import (
 	"strings"
 	"time"
+
+	"github.com/8linkz-sec/packmon/internal/reporthtml"
 )
 
 const (
@@ -27,10 +29,8 @@ const generatedHTMLReportLocaleScript = `<script>
   function formatTimes(){
     if(typeof Intl === 'undefined' || !Intl.DateTimeFormat){return;}
     var formatter;
-    // Component options, not dateStyle/timeStyle: ECMA-402 rejects either
-    // style combined with timeZoneName.
     try{
-      formatter=new Intl.DateTimeFormat(reportLocale(),{year:'numeric',month:'short',day:'numeric',hour:'numeric',minute:'2-digit',timeZoneName:'short'});
+      formatter=new Intl.DateTimeFormat(reportLocale(),` + reporthtml.DateTimeFormatOptionsJS + `);
     }catch(_){return;}
     document.querySelectorAll('time[data-report-time][datetime]').forEach(function(node){
       var value=node.getAttribute('datetime');

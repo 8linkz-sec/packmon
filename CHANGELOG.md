@@ -35,6 +35,10 @@
   return before reading the inventory, so even fatal parse errors exited `0`;
   it still skips the registry lookups but now collects the inventory and keeps
   the discovery (`2`) and parser (`4`) exit codes.
+- The `packmon scan --html` report formats its timestamps in the viewer's
+  browser locale and time zone again; its inline script had the same
+  `dateStyle`/`timeStyle` plus `timeZoneName` combination as the list-all and
+  `--outdated` reports below. All three reports now share one Intl option set.
 - The list-all and `--outdated` HTML reports format their timestamps in the
   viewer's browser locale and time zone again. The inline script combined
   `dateStyle`/`timeStyle` with `timeZoneName`, which conforming JavaScript
