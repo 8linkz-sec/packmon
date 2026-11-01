@@ -652,14 +652,30 @@ Important behavior:
   installs latest) show INSTALLED `-`, the feed's latest version, UPDATE
   `unpinned`, and the `unpinned` flag, and are never counted as available
   updates. A script `choco` verb counts only in command position (line start,
-  after an unquoted command separator or redirection, or after `call` /
-  `sudo`). In `.ps1` / `.psm1` files the separators are `;`, `|`, `&`, `(`,
-  `)`, `{`, `}`, redirection, and `=`; in `.bat` / `.cmd` files they are only
-  the cmd.exe separators `&`, `&&`, `||`, `|`, the block parentheses `(` /
-  `)`, and redirection, while `;`, `{`, `}`, and `=` are ordinary argument
-  text. Quoted (and in batch files caret-escaped) text is always an argument,
-  so a quoted `';'` or `"&"` neither starts a new command nor ends the
-  package list. A `--version=value` pin has surrounding double quotes
+  after an unquoted command separator, or after `call` / `sudo`). In `.ps1` /
+  `.psm1` files the separators are `;`, `|`, `&`, `(`, `)`, `{`, `}`, and
+  `=`, so the bodies of `if (...) { ... }`, `foreach (...) { ... }`,
+  `try { ... }` and similar blocks are in command position; in `.bat` /
+  `.cmd` files they are only the cmd.exe separators `&`, `&&`, `||`, `|` and
+  the block parentheses `(` / `)`, while `;`, `{`, `}`, and `=` are ordinary
+  argument text. Batch files also hand command position on after a
+  `for ... in (...) do` header (the loop set is data, not commands), after
+  the condition of `if` (`exist`, `defined`, `errorlevel`, `cmdextversion`
+  with their operand, a `==` or `EQU` / `NEQ` / `LSS` / `LEQ` / `GTR` / `GEQ`
+  comparison, each optionally with `/i` and `not`), and after an `else` or
+  `do` that follows a closing parenthesis. A redirection (`>`, `>>`, `<`,
+  `2>`, `2>>`, `*>`, `2>&1`, `1>&2`, `>nul`, `>$null`, quoted targets) is
+  removed together with its target wherever it stands, as both shells do: it
+  neither ends the package list nor starts a command, and its target is never
+  a package ID, so `>nul choco install a` and `choco install a >nul b` report
+  `a` (and `b`). Quoted (and in batch files caret-escaped) text is always an
+  argument, so a quoted `';'` or `"&"` neither starts a new command nor ends
+  the package list. A batch `%name%` expansion and a PowerShell `${name}`
+  variable are one word, so `%ProgramFiles(x86)%` does not split a command
+  at its parentheses. Variables are never resolved: a `for` loop variable or
+  `$p` names no package, and delayed `!name!` expansion, backtick escapes
+  inside a PowerShell line, and choco.exe's backslash-quote rules are not
+  modeled. A `--version=value` pin has surrounding double quotes
   stripped in both languages and surrounding single quotes stripped only in
   PowerShell: cmd.exe passes single quotes to choco.exe unchanged, so a batch
   `--version='1.0'` is not a version literal and the entry is unpinned. Script
@@ -671,7 +687,9 @@ Important behavior:
   escaping: only double quotes group (a single quote is ordinary text), a
   caret inside double quotes is literal, an unquoted caret makes the next
   character literal (`^&`, `^|`, `^<`, `^>`, and `^"` are argument text, `^^`
-  is a literal caret, and an escaped space still separates arguments), and
+  is a literal caret, and an escaped space still separates arguments; a `^"`
+  opens no cmd.exe quote, so `&` and `|` still separate after it, but it
+  groups words for choco.exe, so `--params ^"/x y^"` is one argument), and
   only an unquoted, unescaped caret that is the last character of the line
   continues it; the next line is appended without a space and its first
   character is escaped. Batch files skip `REM` / `@REM` and `::` comment

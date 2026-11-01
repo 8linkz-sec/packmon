@@ -443,12 +443,33 @@
   command's `choco` / `install` words as packages. A continued line is joined
   without an inserted space and the first character of the next line is
   escaped, as in cmd.exe. Only the cmd.exe separators `&`, `&&`, `||`, `|`,
-  parentheses, and redirections start a new batch command: `;`, `{`, `}`,
+  and parentheses start a new batch command: `;`, `{`, `}`,
   and `=` are ordinary text, so `echo x;choco install a` and
   `set x = choco install a` no longer report `a`, and `choco install a ; b`
   reports `b` as well. A batch `--version='1.0'` keeps its single quotes, as
   cmd.exe passes them to choco.exe, and is reported unpinned instead of as
   version `1.0`. PowerShell parsing is unchanged.
+- Chocolatey script inventory removes a redirection together with its target
+  instead of treating it as a command separator, in PowerShell and batch
+  files alike. `>nul choco install a` used to report nothing and
+  `choco install a >nul b` only `a`, although the shell runs choco with both
+  packages; a word after a redirection such as `echo x > choco install a` is
+  no longer read as a command either. This covers `>`, `>>`, `<`, `2>`,
+  `2>>`, `*>`, `2>&1`, `1>&2`, `>nul`, `>$null`, and quoted targets.
+- Chocolatey script inventory groups a batch `^"...^"` for choco.exe's
+  argument splitting, so `choco install a --params ^"/x y z^"` no longer
+  reports `y` and `z` as packages; `&` and `|` after a `^"` still separate
+  commands. An empty `""` is an argument in batch files, so
+  `--version "" b` no longer reads `b` as the version.
+- Chocolatey script inventory recognizes batch `choco` commands after
+  `for ... in (...) do`, after an `if` condition (`if exist x`, `if not ...`,
+  `if errorlevel 1`, `if defined x`, `if "%1"==""`, `if %x% EQU 1`, with
+  `/i`), and after `else`; they used to be missed. The words of a `for` set
+  are no longer read as commands. A batch `%ProgramFiles(x86)%` expansion and
+  a PowerShell `${env:ProgramFiles(x86)}` variable stay one word, so their
+  parentheses no longer split a command (`Write-Host
+  ${env:ProgramFiles(x86)} choco install a` no longer reports `a`).
+  PowerShell `if` / `foreach` / `try` block bodies were already recognized.
 
 ### Security updates
 
