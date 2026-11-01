@@ -77,6 +77,24 @@ func TestReplaceEPSSScoresStreamStagesSnapshotBeforeTransaction(t *testing.T) {
 		t.Fatalf("ReplaceEPSSScoresStream stages after opening the transaction:\n%s", source)
 	}
 
+	importSource := postgresFunctionSource(t, "vulnerability_enrichment.go", "ImportEPSSStreamWithAudit")
+	importStageIndex := strings.Index(importSource, "stageEPSSSnapshotStream(ctx,")
+	importApplyIndex := strings.Index(importSource, "s.applyEPSSSnapshotWithAudit(ctx, snapshot, status, audit)")
+	if importStageIndex < 0 || importApplyIndex < 0 || importStageIndex > importApplyIndex {
+		t.Fatalf("ImportEPSSStreamWithAudit must finish staging the stream (and its status) before applying the snapshot:\n%s", importSource)
+	}
+	applySource := postgresFunctionSource(t, "vulnerability_enrichment.go", "applyEPSSSnapshotWithAudit")
+	for _, want := range []string{
+		"withTx(ctx, s.pool",
+		"replaceEPSSScoresStreamTx(ctx, tx, snapshot)",
+		"upsertFeedSyncStatusTx(ctx, tx, status)",
+		"insertAdminAuditLogTx(ctx, tx, &entry)",
+	} {
+		if !strings.Contains(applySource, want) {
+			t.Fatalf("applyEPSSSnapshotWithAudit missing transactional fragment %q:\n%s", want, applySource)
+		}
+	}
+
 	txSource := postgresFunctionSource(t, "vulnerability_enrichment.go", "replaceEPSSScoresStreamTx")
 	if strings.Contains(txSource, "normalizeEPSSSnapshotBatch(") {
 		t.Fatalf("replaceEPSSScoresStreamTx must consume pre-validated staged EPSS batches:\n%s", txSource)

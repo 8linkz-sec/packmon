@@ -21,6 +21,7 @@ import (
 	"github.com/8linkz-sec/packmon/internal/config"
 	"github.com/8linkz-sec/packmon/internal/correlation"
 	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/db/postgres"
 	"github.com/8linkz-sec/packmon/internal/domain"
 	"github.com/8linkz-sec/packmon/internal/feed/reputation"
 	"github.com/8linkz-sec/packmon/internal/requestctx"
@@ -4469,16 +4470,65 @@ func TestHandleFeedImportEnrichmentFeeds(t *testing.T) {
 	}
 }
 
+// The feed import discovers the streaming importers on the PostgreSQL store by
+// type assertion, so a signature drift would silently fall back to the
+// buffered import paths. Pin both contracts at compile time.
+var (
+	_ epssStreamImporter      = (*postgres.Store)(nil)
+	_ vulnCheckStreamImporter = (*postgres.Store)(nil)
+)
+
+// streamingEPSSImportStore models a store that stages a streamed EPSS snapshot
+// and commits it only after the stream finished without error. It also offers
+// the unaudited ReplaceEPSSScoresStream used by the EPSS syncer so tests can
+// prove the feed import never takes that commit-first path.
 type streamingEPSSImportStore struct {
 	stubStore
 	streamCalls            int
+	replaceStreamCalls     int
+	committedEntries       int
 	streamBatchLengths     []int
 	statusSeenDuringStream bool
 	auditSeenDuringStream  bool
 }
 
 func (s *streamingEPSSImportStore) ReplaceEPSSScoresStream(_ context.Context, stream func(func([]db.EPSSEntry) error) error) (int, int, int, error) {
+	s.replaceStreamCalls++
+	total, err := s.consumeEPSSStream(stream)
+	if err != nil {
+		return 0, 0, total, err
+	}
+	s.committedEntries += total
+	return total, 3, total, nil
+}
+
+func (s *streamingEPSSImportStore) ImportEPSSStreamWithAudit(ctx context.Context, _ string, stream func(func([]db.EPSSEntry) error) (*db.FeedSyncStatus, error), audit db.FeedImportAuditBuilder) (int, int, int, error) {
 	s.streamCalls++
+	var status *db.FeedSyncStatus
+	total, err := s.consumeEPSSStream(func(yield func([]db.EPSSEntry) error) error {
+		var streamErr error
+		status, streamErr = stream(yield)
+		return streamErr
+	})
+	if err != nil {
+		return 0, 0, total, err
+	}
+	// Commit the snapshot, status and audit row together.
+	s.committedEntries += total
+	if status != nil {
+		if err := s.UpsertFeedSyncStatus(ctx, status); err != nil {
+			return 0, 0, total, err
+		}
+	}
+	if audit != nil {
+		if err := s.InsertAdminAuditLog(ctx, ptr(audit(total, 3))); err != nil {
+			return 0, 0, total, err
+		}
+	}
+	return total, 3, total, nil
+}
+
+func (s *streamingEPSSImportStore) consumeEPSSStream(stream func(func([]db.EPSSEntry) error) error) (int, error) {
 	total := 0
 	err := stream(func(batch []db.EPSSEntry) error {
 		if len(s.upsertedStatuses) > 0 {
@@ -4494,10 +4544,46 @@ func (s *streamingEPSSImportStore) ReplaceEPSSScoresStream(_ context.Context, st
 		total += len(batch)
 		return nil
 	})
-	if err != nil {
-		return 0, 0, total, err
+	return total, err
+}
+
+func TestHandleFeedImportEPSSStreamRejectsInvalidStatusBeforeCommit(t *testing.T) {
+	t.Parallel()
+
+	for name, status := range map[string]string{
+		// Raw validation passes (entries_total omitted); only the defaulted
+		// status (entries_total = 1 streamed entry) is invalid.
+		"defaulted entries_synced exceeds entries_total": `{"entries_synced":2}`,
+		"last_sync_duration_ms overflows time.Duration":  `{"last_sync_duration_ms":9223372036855}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			store := &streamingEPSSImportStore{}
+			h := newTestFeedImportHandler(store)
+			body := `{"entries":[{"cve_id":"CVE-2026-1000","score":0.5,"percentile":0.9}],"status":` + status + `}`
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/feeds/epss/import", strings.NewReader(body))
+			req.SetPathValue("feed", "epss")
+			req.Header.Set("Content-Type", "application/json")
+			rr := httptest.NewRecorder()
+
+			h.HandleImport(rr, req)
+
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", rr.Code, rr.Body.String())
+			}
+			if store.committedEntries != 0 {
+				t.Fatalf("EPSS snapshot committed %d entries before status validation failed", store.committedEntries)
+			}
+			if store.replaceStreamCalls != 0 {
+				t.Fatalf("EPSS import used the unaudited ReplaceEPSSScoresStream path %d time(s)", store.replaceStreamCalls)
+			}
+			if len(store.auditEntries) != 0 {
+				t.Fatalf("EPSS audit entries = %d, want none for a rejected import", len(store.auditEntries))
+			}
+			assertSingleRejectedFeedStatus(t, store.upsertedStatuses, "epss")
+		})
 	}
-	return total, 3, total, nil
 }
 
 func TestHandleFeedImportStreamsEPSSImportInBatches(t *testing.T) {
@@ -4520,8 +4606,11 @@ func TestHandleFeedImportStreamsEPSSImportInBatches(t *testing.T) {
 	if resp.Imported != 5002 || resp.Deleted != 3 || resp.EntriesTotal != 5002 {
 		t.Fatalf("response = %+v, want imported=5002 deleted=3 entries_total=5002", resp)
 	}
-	if store.streamCalls != 1 {
-		t.Fatalf("ReplaceEPSSScoresStream calls = %d, want 1", store.streamCalls)
+	if store.streamCalls != 1 || store.replaceStreamCalls != 0 {
+		t.Fatalf("ImportEPSSStreamWithAudit calls = %d (want 1), unaudited ReplaceEPSSScoresStream calls = %d (want 0)", store.streamCalls, store.replaceStreamCalls)
+	}
+	if store.committedEntries != 5002 {
+		t.Fatalf("committed EPSS entries = %d, want 5002", store.committedEntries)
 	}
 	if store.epssReplaceCalls != 0 || len(store.epssEntries) != 0 {
 		t.Fatalf("EPSS import used full-array replacement path: calls=%d entries=%d", store.epssReplaceCalls, len(store.epssEntries))
