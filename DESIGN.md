@@ -1139,9 +1139,10 @@ feed saves and resets, so overlapping changes leave the runtime on the last
 committed configuration. The save and reset forms carry the stored override's
 revision (`updated_at`) from the rendered page; a submitted revision that no
 longer matches the stored override is rejected with the conflict message
-instead of overwriting another admin's change. HTTP route wiring and API handlers read mutable runtime feed
-state through `FeedsSnapshot()` so admin hot-reload writes cannot race with
-ReversingLabs scheduling or feed-import-secret decisions.
+instead of overwriting another admin's change. HTTP route wiring and API
+handlers read mutable runtime feed state through `FeedsSnapshot()` so admin
+hot-reload writes cannot race with ReversingLabs scheduling or
+feed-import-secret decisions.
 
 Production PostgreSQL connections default to `sslmode=verify-full` so the
 client verifies both transport encryption and database server identity. Local
