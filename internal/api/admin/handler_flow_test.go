@@ -29,6 +29,7 @@ type adminFlowStoreStub struct {
 	db.Store
 	mu             sync.Mutex
 	adminAuth      *db.AdminAuth
+	auditInsertErr error
 	onGetAdminAuth func(*adminFlowStoreStub)
 	apiKeys        []db.APIKey
 	nextAPIKeyID   int
@@ -122,6 +123,9 @@ func (s *adminFlowStoreStub) upsertAdminAuthLocked(passwordHash string, isBootst
 func (s *adminFlowStoreStub) InsertAdminAuditLog(_ context.Context, entry *db.AdminAuditEntry) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.auditInsertErr != nil {
+		return s.auditInsertErr
+	}
 	return s.insertAdminAuditLogLocked(entry)
 }
 

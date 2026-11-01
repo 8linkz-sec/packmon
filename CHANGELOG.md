@@ -64,6 +64,12 @@
   `docs/monitoring/packmon-alerts.yml` use `for: 0m`. Their `for` duration
   equalled the `increase()` range, so an isolated event left the range before
   the alert could fire. Re-import the rule file if you deployed it.
+- Rejected admin credentials (a login with a wrong username or password, the
+  API-key create step-up, and the password-change current-password check)
+  are counted toward the IP and shared-account lockout and
+  `packmon_auth_login_failures_total` before the rejection audit row is
+  written. A failing audit write previously returned early, so the attempt
+  escaped lockout accounting; the request still fails closed.
 
 ### Security updates
 

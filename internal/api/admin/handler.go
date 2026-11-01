@@ -305,12 +305,14 @@ func (h *AdminHandler) processLogin(w http.ResponseWriter, r *http.Request) {
 	nextPath := auth.SafeAdminReturnTarget(r.PostForm.Get("next"))
 
 	if username != "admin" {
+		// Count the failure before the audit write so a failing audit store
+		// cannot exempt wrong credentials from lockout and metrics.
+		h.recordFailedAttempt(ip)
 		if !h.requireAudit(w, r, "login_failed", map[string]string{
 			"reason": "invalid username",
 		}) {
 			return
 		}
-		h.recordFailedAttempt(ip)
 		h.showLoginForm(w, r, "Invalid username or password.")
 		return
 	}
@@ -328,12 +330,12 @@ func (h *AdminHandler) processLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !auth.CheckPassword(adminAuth.PasswordHash, password) {
+		h.recordFailedAttempt(ip)
 		if !h.requireAudit(w, r, "login_failed", map[string]string{
 			"reason": "invalid password",
 		}) {
 			return
 		}
-		h.recordFailedAttempt(ip)
 		h.showLoginForm(w, r, "Invalid username or password.")
 		return
 	}
