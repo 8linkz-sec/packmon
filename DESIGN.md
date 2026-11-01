@@ -46,7 +46,9 @@ unrelated persistence capabilities do not leak across subsystem boundaries.
   - `3`: findings below the blocking threshold (non-blocking; treated as a
     passing pipeline by the GitLab consumer template);
   - `4`: parser error, including partial lockfile/SBOM parse errors when no
-    blocking finding has already failed the scan;
+    blocking finding has already failed the scan; `--list-packages` has no
+    findings, so any lockfile/SBOM parse error makes it exit `4` after it
+    prints the packages it could parse;
   - `10`: internal bug.
 - Treat malicious and active supply-chain risk findings as always blocking.
   Historical ReversingLabs malware-incident evidence is `LOW` reputation info
@@ -438,7 +440,13 @@ Important behavior:
   URL/secret, `output.format`/`output.file`, and `db.path`); those values must
   come from flags, environment, user-global config, or an explicit `--config`.
   It may preserve `send_repo_metadata: false` as a privacy opt-out but cannot
-  re-enable repository metadata disabled by a higher-precedence source.
+  re-enable repository metadata disabled by a higher-precedence source or by
+  the trusted user-global config. A project `repos:` list replaces the
+  user-global list, but a project entry that refers to a user-global entry
+  (matched by name, then by path) inherits that entry's routing (`server`,
+  `api_key`, `api_key_env`, webhook) and `send_repo_metadata: false`; the
+  project entry keeps its own name, path (the project path wins on a name
+  match), and scan policy.
   CLI errors for remote scans and local DB sync may show redacted server URL
   context only: scheme, host, and a generic path marker without userinfo,
   query, fragment, or full path. User-visible CLI error snippets are truncated
@@ -553,8 +561,9 @@ Important behavior:
   loopback/private/link-local public-registry targets degrade to `unknown`
   without sending a registry request. `--list-all-offline` skips this registry digest phase. If
   the local Docker CLI can inspect the declared image, Packmon compares the
-  local repo digest with the current registry digest and marks `UPDATE yes`,
-  `-`, or `unknown`.
+  local repo digest of that repository and tag with the current registry
+  digest and marks `UPDATE yes`, `-`, or `unknown`; several installed tags of
+  one repository are compared separately.
 - Docker image inventory is not a container-layer vulnerability scan. Packmon
   does not pull images, scan OS packages inside images, or read private
   registry credentials as part of `--list-all`; `/api/v1/check` rejects
@@ -639,11 +648,14 @@ consistent `admin_auth` then `admin_audit_log` lock order. Destructive refresh-q
 clear/purge actions preserve a bounded sample of deleted job identities in
 audit details from the delete operation, including job ID, package coordinate,
 source, priority, prior status, timestamps, redacted bounded error text,
-`total_deleted`, `sample_count`, and `truncated`. PostgreSQL maintains
-cumulative scan package/finding totals in
-`scan_log_totals`; `InsertScanLog` increments the rollup and scan-log pruning
-subtracts deleted rows so `/metrics` does not aggregate the full `scan_log`
-table on every scrape. The production background services prune `scan_log` rows after
+`total_deleted`, `sample_count`, and `truncated`. PostgreSQL exposes the
+scan package/finding totals through the `scan_log_totals` view (migration
+043), which sums the retained `scan_log` rows on read; there is no separately
+maintained rollup, so `InsertScanLog` writes only the `scan_log` row and
+scan-log pruning only deletes rows. The totals therefore cover retained rows
+and drop when pruning removes old rows. `/metrics` caches the totals for 30
+seconds so frequent scrapes do not aggregate `scan_log` on every request. The
+production background services prune `scan_log` rows after
 `PACKMON_SCAN_LOG_RETENTION` (default `720h`, 30 days) and `admin_audit_log`
 rows after `PACKMON_ADMIN_AUDIT_LOG_RETENTION` (default `720h`, 30 days);
 admins can override both metadata-retention values from `/admin/settings`.
@@ -1208,9 +1220,16 @@ audit digests. Feed
 setting audit entries record previous and new enablement, mode, cadence, and
 whether an API key is configured, but never the raw API key. Feed setting changes
 are applied to the running process immediately and are also loaded on future
-server starts. HTTP route wiring and API handlers read mutable runtime feed
-state through `FeedsSnapshot()` so admin hot-reload writes cannot race with
-ReversingLabs scheduling or feed-import-secret decisions.
+server starts. Each save or reset applies the runtime change, persists it, and
+rolls the runtime back if persistence fails as one step ordered against other
+feed saves and resets, so overlapping changes leave the runtime on the last
+committed configuration. The save and reset forms carry the stored override's
+revision (`updated_at`) from the rendered page; a submitted revision that no
+longer matches the stored override is rejected with the conflict message
+instead of overwriting another admin's change. HTTP route wiring and API
+handlers read mutable runtime feed state through `FeedsSnapshot()` so admin
+hot-reload writes cannot race with ReversingLabs scheduling or
+feed-import-secret decisions.
 
 Production PostgreSQL connections default to `sslmode=verify-full` so the
 client verifies both transport encryption and database server identity. Local
@@ -1297,7 +1316,8 @@ The metrics endpoint emits Prometheus text metrics for:
 
 - HTTP request count and duration histogram buckets for SLO/percentile
   alerting;
-- packages scanned and scan findings from the maintained scan-log rollup;
+- packages scanned and scan findings from the `scan_log_totals` view over
+  retained scan-log rows;
 - current finding totals for vulnerability, malicious, supply-chain-risk, and
   lifecycle finding types plus current severity totals from vulnerability,
   malicious, and reputation-backed findings;

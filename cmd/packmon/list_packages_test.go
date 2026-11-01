@@ -72,3 +72,71 @@ func TestRunListPackagesRetainsDevPackagesAndReportsMultipleInputs(t *testing.T)
 		}
 	}
 }
+
+func TestRunListPackagesMalformedLockfileReturnsParserExit(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	projectDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(projectDir, "package-lock.json"), []byte(`{"lockfileVersion":3,"packages":`), 0o600); err != nil {
+		t.Fatalf("write malformed package lock: %v", err)
+	}
+
+	var err error
+	output := captureStdout(t, func() {
+		captureScanStderr(t, func() {
+			err = runListPackagesWithSettings(scanSettings{
+				Path:       projectDir,
+				MaxDepth:   2,
+				IncludeDev: true,
+			})
+		})
+	})
+	if code := exitCodeForError(err); err == nil || code != ExitParser {
+		t.Fatalf("runListPackagesWithSettings(malformed lockfile) error = %v (exit %d), want parser exit %d", err, code, ExitParser)
+	}
+	// An inventory that could not be parsed at all must not read as an empty
+	// but complete one.
+	if strings.Contains(output, "No packages found.") {
+		t.Fatalf("malformed lockfile output claims an empty inventory:\n%s", output)
+	}
+}
+
+func TestRunListPackagesPartialParseFailureListsPackagesAndReturnsParserExit(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	projectDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(projectDir, "package-lock.json"), []byte(`{
+  "lockfileVersion": 3,
+  "packages": {
+    "node_modules/good": {"version": "1.0.0"}
+  }
+}`), 0o600); err != nil {
+		t.Fatalf("write package lock: %v", err)
+	}
+	badDir := filepath.Join(projectDir, "broken")
+	if err := os.MkdirAll(badDir, 0o750); err != nil {
+		t.Fatalf("create broken dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(badDir, "package-lock.json"), []byte(`{"lockfileVersion":3,"packages":`), 0o600); err != nil {
+		t.Fatalf("write malformed package lock: %v", err)
+	}
+
+	var err error
+	var stderr string
+	output := captureStdout(t, func() {
+		stderr = captureScanStderr(t, func() {
+			err = runListPackagesWithSettings(scanSettings{
+				Path:       projectDir,
+				MaxDepth:   3,
+				IncludeDev: true,
+			})
+		})
+	})
+	if code := exitCodeForError(err); err == nil || code != ExitParser {
+		t.Fatalf("runListPackagesWithSettings(partial parse failure) error = %v (exit %d), want parser exit %d", err, code, ExitParser)
+	}
+	if !strings.Contains(output, "good") || !strings.Contains(output, "1 package found in 2 input files") {
+		t.Fatalf("partial parse failure output missing parsed inventory:\n%s", output)
+	}
+	if !strings.Contains(stderr, "warning: parse error in") {
+		t.Fatalf("partial parse failure stderr missing parse warning:\n%s", stderr)
+	}
+}

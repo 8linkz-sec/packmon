@@ -16,6 +16,34 @@
 
 ### Fixed
 
+- `packmon scan --list-all` compares each installed Docker image tag with its
+  own local repo digest. Local digests used to be keyed by repository name
+  only, so two installed tags of one repository (for example `postgres:17`
+  and `postgres:18`) shared one baseline and could be reported as
+  `UPDATE yes` while up to date, or `-` while outdated.
+- `--outdated` / `--list-all` latest-version lookups whose registry response
+  broke off mid-body (connection reset or per-request timeout after the `200`
+  status) now count as refused registry requests. They used to count as
+  successes, which reset the consecutive-failure breaker and suppressed the
+  "registry requests were refused or failed" warning on stderr and in the
+  list-all HTML report.
+- A panicking latest-version, npm-metadata, or Git tag lookup in
+  `--outdated` / `--list-all` no longer hangs the run. The shared in-flight
+  lookup is now always completed, so other packages waiting on the same
+  registry key get a failed lookup instead of blocking forever.
+- `packmon scan --outdated --quiet --html <file>` no longer prints the routine
+  "Checking N packages for updates..." line to stderr; `--quiet` now
+  suppresses it like the later lookup progress.
+- `packmon scan --list-packages` now exits with the parser-failure code `4`
+  when a lockfile or SBOM entry could not be parsed, as `packmon scan` does.
+  Partially parsed inventories are still listed before the error; a lockfile
+  set that could not be parsed at all no longer exits `0` with
+  "No packages found.".
+- `packmon scan --list-all` now writes the requested `--output-json`,
+  `--output-sarif`, and `--output-junit` files when the scan completes but the
+  local scan-history write fails, and returns the history error afterwards,
+  matching a normal `packmon scan`. Previously the artifacts were silently
+  omitted while the HTML report was still written.
 - Local scans no longer report ReversingLabs reputation findings that the
   server's `/api/v1/check` ignores. `GET /api/v1/sync` now exports reputation
   rows only while ReversingLabs is enabled in `self` mode; otherwise it sends
@@ -26,10 +54,46 @@
   lockfile passes remotely. When ReversingLabs is enabled again, the next sync
   refetches the whole reputation dataset. The field is omitted while
   reputation is served, so older clients and servers remain compatible.
+  Clients older than this change ignore the unknown `reputation_disabled`
+  field, so their incremental syncs keep previously synced reputation rows
+  (and the local/remote mismatch) until the client is upgraded; only a full
+  sync (`packmon db sync --full`), which clears every local sync table first,
+  removes those rows on an older client.
 - `packmon db sync` now rejects timeouts above 9223372036 seconds from
   `--timeout`, config `timeout`, or `PACKMON_TIMEOUT`. Such values used to
   overflow `time.Duration` into a negative deadline, so the sync aborted at
   once with a context deadline error instead of a clear validation error.
+- A project `.packmon.yaml` `repos:` entry that refers to a user-global repo
+  (matched by name, then by path) now inherits that trusted repo's
+  `send_repo_metadata: false`, server/API-key routing, and webhook. The
+  project's repos still replace the user-global list, and each entry keeps its
+  own name, path (the project path wins on a name match), and scan policy.
+  Previously a project entry naming a trusted repo silently re-enabled
+  repository metadata that repo had disabled.
+- `packmon config show` escapes terminal control characters in every config-,
+  flag-, and environment-derived value it prints: config file path, server,
+  masked API key, API key env name, mode, fail_on, ecosystems, CA cert path,
+  webhook URL, masked webhook secret, DB path, repo names and paths, and log
+  level. A crafted value,
+  including one from an auto-discovered project `.packmon.yaml`, could
+  previously inject ANSI escape sequences or forge output lines.
+- `packmon hook install` sets the hook file's mode to `0755` explicitly after
+  writing it. Updating an existing packmon hook kept its old mode, so a managed
+  hook that had lost its execute bit stayed non-executable while install
+  reported success and Git skipped the scan. `packmon hook status` now reports
+  such a hook as `packmon hook not executable` instead of `installed` (POSIX
+  only; Git for Windows does not use mode bits for hooks).
+- Latest-version registry base URLs, Docker registry mirrors, and Chocolatey
+  feed URLs ending in an empty fragment marker (`https://mirror.example/api#`)
+  are now rejected like any other fragment. `net/url` records no fragment for a
+  bare `#` and drops it on re-serialization, so the value was previously
+  accepted and silently rewritten.
+- A local database without a recorded sync time (absent or blank
+  `last_sync_at` metadata, for example one that was never synced) is now
+  reported as stale instead of fresh. Local scans set `db_stale: true` and show
+  the "Local database freshness could not be verified" warning, `packmon db
+  info` / `db export` report `db_stale: true`, and `packmon dashboard` shows
+  the same warning banner.
 - SHA-pinned GitHub Actions are no longer compared as version strings in
   `--list-all` / `--outdated`. The `# vX.Y.Z` comment convention is used as
   the declared version; without it the pin is compared with the dereferenced
@@ -141,6 +205,29 @@
   going through the feed merge: a `HIGH` -> `LOW` edit is stored as `LOW`, a
   cleared description is cleared, and moving coverage from package A to B no
   longer leaves A affected. Feed severity/details retention is unchanged.
+- Rejected admin credentials (a login with a wrong username or password, the
+  API-key create step-up, and the password-change current-password check)
+  are counted toward the IP and shared-account lockout and
+  `packmon_auth_login_failures_total` before the rejection audit row is
+  written. A failing audit write previously returned early, so the attempt
+  escaped lockout accounting; the request still fails closed.
+- The admin login and admin pages render the shared footer's terms link
+  (`PACKMON_WEB_TERMS_URL`, default `/terms`) like the public pages; the
+  admin renderer previously received only the privacy and legal URLs.
+- The 12-character minimum for bootstrap (`PACKMON_ADMIN_INITIAL_PASSWORD`)
+  and rotated admin passwords counts Unicode characters instead of bytes, so
+  a password of four three-byte characters no longer passes.
+- Overlapping `/admin/feeds` saves and resets no longer leave the running
+  feed configuration out of step with PostgreSQL. The request that lost the
+  revision race used to roll the runtime back to a snapshot taken before the
+  winner applied its change; apply, persistence and rollback now run as one
+  step ordered against other feed saves and resets.
+- `/admin/feeds` save and reset forms carry the stored override's revision
+  (`updated_at`) like the system settings form. Submitting a form that was
+  rendered before another admin saved or reset the feed is rejected with the
+  existing conflict message instead of silently overwriting that change;
+  a malformed revision is rejected as invalid. A blank API key still keeps
+  the stored key.
 
 ### Security updates
 

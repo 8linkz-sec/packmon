@@ -88,5 +88,6 @@ func adminLayoutLinks(cfg *config.Config) web.LayoutLinks {
 	return web.LayoutLinks{
 		PrivacyURL: cfg.Web.PrivacyURL,
 		LegalURL:   cfg.Web.LegalURL,
+		TermsURL:   cfg.Web.TermsURL,
 	}
 }

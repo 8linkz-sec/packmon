@@ -150,3 +150,29 @@ func TestHashPasswordRejectsPasswordOverBcryptLimit(t *testing.T) {
 		t.Fatalf("HashPassword() hash = %q, want empty hash on error", hash)
 	}
 }
+
+func TestValidateAdminPasswordCountsCharactersNotBytes(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name     string
+		password string
+		wantErr  bool
+	}{
+		{name: "eleven ASCII characters", password: strings.Repeat("a", 11), wantErr: true},
+		{name: "twelve ASCII characters", password: strings.Repeat("a", 12)},
+		// Four CJK runes are 12 bytes but only four characters.
+		{name: "four multi-byte characters", password: strings.Repeat("一", 4), wantErr: true},
+		{name: "eleven multi-byte characters", password: strings.Repeat("é", 11), wantErr: true},
+		{name: "twelve multi-byte characters", password: strings.Repeat("一", 12)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := ValidateAdminPassword(tt.password)
+			if gotErr := err != nil; gotErr != tt.wantErr {
+				t.Fatalf("ValidateAdminPassword(%d runes, %d bytes) error = %v, want error %v", len([]rune(tt.password)), len(tt.password), err, tt.wantErr)
+			}
+		})
+	}
+}

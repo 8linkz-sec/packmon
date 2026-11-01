@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -1138,6 +1139,59 @@ func TestWriteListAllOutputPhasePreservesExitCodeForEmptyInventory(t *testing.T)
 	}
 }
 
+func TestRunListAllWritesRequestedArtifactsBeforeReturningHistoryFailure(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	dbDir := t.TempDir()
+	t.Setenv("PACKMON_DB_PATH", dbDir)
+	seedListAllAdvisory(t, dbDir)
+	store, _ := newTestSQLiteStore(t, dbDir)
+	// Make the scan-history insert fail after a completed scan, the way a
+	// locked or read-only history database would.
+	if _, err := store.DB().ExecContext(context.Background(),
+		`CREATE TRIGGER block_scan_history BEFORE INSERT ON scan_history BEGIN SELECT RAISE(ABORT, 'history write blocked'); END`); err != nil {
+		t.Fatalf("create scan_history trigger: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close seed store: %v", err)
+	}
+
+	dir := t.TempDir()
+	writeListAllPackageLock(t, dir, listAllLockPackage{Name: "prod", Version: "1.0.0"})
+	outDir := t.TempDir()
+	jsonPath := filepath.Join(outDir, "result.json")
+	sarifPath := filepath.Join(outDir, "result.sarif")
+	junitPath := filepath.Join(outDir, "result.xml")
+
+	// Quiet without HTML returns straight after the scan phase, so the
+	// artifacts must already be written by then.
+	settings := listAllSettings(dir, true)
+	settings.OutputJSON = jsonPath
+	settings.OutputSARIF = sarifPath
+	settings.OutputJUnit = junitPath
+
+	var exitCode int
+	var err error
+	captureScanStderr(t, func() {
+		exitCode, err = runListAll(context.Background(), settings)
+	})
+	var historyErr *scanHistoryRecordError
+	if !errors.As(err, &historyErr) {
+		t.Fatalf("runListAll() error = %v, want scan history failure", err)
+	}
+	if exitCode != ExitOperational {
+		t.Fatalf("exitCode = %d, want %d", exitCode, ExitOperational)
+	}
+	for _, path := range []string{jsonPath, sarifPath, junitPath} {
+		data, readErr := os.ReadFile(path) // #nosec G304 -- test reads generated reports.
+		if readErr != nil {
+			t.Fatalf("requested artifact %s missing after history failure: %v", filepath.Base(path), readErr)
+		}
+		if len(data) == 0 {
+			t.Fatalf("requested artifact %s is empty", filepath.Base(path))
+		}
+	}
+}
+
 func TestWriteListAllOutputPhaseWritesHTMLBeforeReturningHistoryFailure(t *testing.T) {
 	htmlPath := filepath.Join(t.TempDir(), "list-all.html")
 	settings := listAllSettings(t.TempDir(), true)
@@ -1802,8 +1856,8 @@ func TestBuildListAllPackageReportBatchesDockerLocalDigests(t *testing.T) {
 			t.Fatalf("inspect packages = %d, want full report package set", len(packages))
 		}
 		return map[string]string{
-			"docker.io/library/postgres": "sha256:local-postgres",
-			"docker.io/library/nginx":    "sha256:local-nginx",
+			"docker.io/library/postgres:18-alpine": "sha256:local-postgres",
+			"docker.io/library/nginx:1.25":         "sha256:local-nginx",
 		}
 	}
 
@@ -1813,7 +1867,7 @@ func TestBuildListAllPackageReportBatchesDockerLocalDigests(t *testing.T) {
 		if localDigests == nil {
 			t.Fatal("local Docker digest map was not passed to Docker resolver")
 		}
-		if _, ok := localDigests[p.Name]; !ok {
+		if _, ok := localDigests[p.Name+":"+p.Version]; !ok {
 			t.Fatalf("local digest map missing %s: %#v", p.Name, localDigests)
 		}
 		return packageLatestStatus{Latest: "sha256:remote", Update: "unknown", Unknown: true}
@@ -1846,7 +1900,7 @@ func TestBuildListAllPackageReportCachesDuplicateDockerDigestLookups(t *testing.
 
 	const digest = "sha256:92cf5e2f488744c90d3df4378dfa3f0842704950cfa1353975d5510c945b072f"
 	inspectLocalDockerDigestsFn = func(context.Context, []listAllPackage) map[string]string {
-		return map[string]string{"docker.io/library/postgres": digest}
+		return map[string]string{"docker.io/library/postgres:18-alpine": digest}
 	}
 
 	var headRequests atomic.Int32
@@ -1900,7 +1954,7 @@ func TestBuildListAllPackageReportUsesConfiguredDockerRegistryMirror(t *testing.
 
 	const digest = "sha256:92cf5e2f488744c90d3df4378dfa3f0842704950cfa1353975d5510c945b072f"
 	inspectLocalDockerDigestsFn = func(context.Context, []listAllPackage) map[string]string {
-		return map[string]string{"docker.io/library/postgres": digest}
+		return map[string]string{"docker.io/library/postgres:18-alpine": digest}
 	}
 
 	var sawMirrorRequest atomic.Bool
@@ -4192,6 +4246,44 @@ func TestResolveDockerImageStatusLabelsMatchingPinnedTagDigestAsPinned(t *testin
 	}, nil)
 	if got.Unknown || got.Update != "pinned" || got.Latest != shortDigest(digest) || got.LatestCopy != digest {
 		t.Fatalf("resolveDockerImageStatus() = %+v, want pinned digest status", got)
+	}
+}
+
+// tagDigestResolver answers registry digest lookups per tag.
+type tagDigestResolver map[string]string
+
+func (r tagDigestResolver) ResolveDigest(_ context.Context, ref dockerimage.Ref) (string, error) {
+	return r[ref.Reference], nil
+}
+
+func TestResolveDockerImageStatusComparesEachInstalledTagWithItsOwnDigest(t *testing.T) {
+	const (
+		digest17 = "sha256:1717171717171717171717171717171717171717171717171717171717171717"
+		digest18 = "sha256:1818181818181818181818181818181818181818181818181818181818181818"
+		newer18  = "sha256:1919191919191919191919191919191919191919191919191919191919191919"
+	)
+	pkg17 := listAllPackage{Ecosystem: domain.EcosystemDocker, Name: "docker.io/library/postgres", Version: "17-alpine"}
+	pkg18 := listAllPackage{Ecosystem: domain.EcosystemDocker, Name: "docker.io/library/postgres", Version: "18-alpine"}
+	ref17, ok17 := dockerRefFromListAllPackage(pkg17)
+	ref18, ok18 := dockerRefFromListAllPackage(pkg18)
+	if !ok17 || !ok18 {
+		t.Fatal("test Docker refs did not parse")
+	}
+	// Both tags are installed locally with different digests; the registry
+	// moved only the 18 tag.
+	localDigests := map[string]string{
+		dockerimage.LocalDigestKey(ref17): digest17,
+		dockerimage.LocalDigestKey(ref18): digest18,
+	}
+	registry := tagDigestResolver{"17-alpine": digest17, "18-alpine": newer18}
+
+	got17 := resolveDockerImageStatusWithDigestResolver(context.Background(), pkg17, localDigests, registry)
+	if got17.Unknown || got17.Update != "-" {
+		t.Fatalf("postgres:17-alpine status = %+v, want up to date against its own local digest", got17)
+	}
+	got18 := resolveDockerImageStatusWithDigestResolver(context.Background(), pkg18, localDigests, registry)
+	if got18.Unknown || got18.Update != "yes" || got18.LatestCopy != newer18 {
+		t.Fatalf("postgres:18-alpine status = %+v, want update to %s", got18, newer18)
 	}
 }
 

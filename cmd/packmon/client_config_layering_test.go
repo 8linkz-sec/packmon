@@ -336,3 +336,210 @@ func loadCLIConfigError(t *testing.T) error {
 	_, _, err := loadCLIConfigWithOptions("", cliConfigLoadOptions{})
 	return err
 }
+
+// trustedRepoLayeringFixture writes a user-global config with two repositories:
+// "private" opts out of repository metadata and carries trusted per-repo routing,
+// "other" is untouched by the project layer. It returns both repository paths.
+func trustedRepoLayeringFixture(t *testing.T) (string, string) {
+	t.Helper()
+
+	privatePath := filepath.Join(t.TempDir(), "private")
+	otherPath := filepath.Join(t.TempDir(), "other")
+	writeUserGlobalConfig(t, `
+repos:
+  - name: private
+    path: `+yamlQuote(privatePath)+`
+    server: https://packmon.internal
+    send_repo_metadata: false
+    webhook:
+      url: https://hooks.internal/packmon
+  - name: other
+    path: `+yamlQuote(otherPath)+`
+    fail_on: CRITICAL
+`)
+	return privatePath, otherPath
+}
+
+// yamlQuote single-quotes a value for a YAML fixture, so Windows paths with
+// backslashes and drive colons stay literal.
+func yamlQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+}
+
+// TestLoadCLIConfigProjectRepoCannotReEnableATrustedRepoMetadataOptOut covers a
+// project `.packmon.yaml` naming the same repository as the trusted user-global
+// config. Whether the project entry omits send_repo_metadata or sets it to true
+// (which the strip step turns into "unset"), the trusted opt-out must survive:
+// the project layer may only restrict privacy, never re-enable metadata.
+func TestLoadCLIConfigProjectRepoCannotReEnableATrustedRepoMetadataOptOut(t *testing.T) {
+	cases := map[string]string{
+		"omitted":     "",
+		"set to true": "    send_repo_metadata: true\n",
+	}
+	for name, metadataLine := range cases {
+		t.Run(name, func(t *testing.T) {
+			isolateCLIConfigDiscovery(t)
+			t.Setenv("PACKMON_NO_REPO_METADATA", "")
+			privatePath, _ := trustedRepoLayeringFixture(t)
+			writeProjectConfig(t, `
+repos:
+  - name: private
+    path: `+yamlQuote(privatePath)+`
+    fail_on: LOW
+`+metadataLine)
+
+			cfg, _, err := loadCLIConfigWithOptions("", cliConfigLoadOptions{})
+			if err != nil {
+				t.Fatalf("loadCLIConfigWithOptions: %v", err)
+			}
+			repo := cfg.findRepo("private")
+			if repo == nil {
+				t.Fatalf("repos = %+v, want the trusted repo kept", cfg.Repos)
+			}
+			if repo.SendRepoMetadata == nil || *repo.SendRepoMetadata {
+				t.Fatalf("SendRepoMetadata = %v, want the trusted opt-out preserved", repo.SendRepoMetadata)
+			}
+			if repo.Server != "https://packmon.internal" || repo.Webhook.URL != "https://hooks.internal/packmon" {
+				t.Fatalf("trusted per-repo routing lost: %+v", repo)
+			}
+			if repo.FailOn != "LOW" {
+				t.Fatalf("FailOn = %q, want the project policy override applied", repo.FailOn)
+			}
+
+			targets, err := buildScanTargets(cfg, nil, scanFlagValues{Repo: "private"})
+			if err != nil {
+				t.Fatalf("buildScanTargets: %v", err)
+			}
+			settings, err := resolveScanSettings(newScanCmd(), cfg, targets[0], scanFlagValues{})
+			if err != nil {
+				t.Fatalf("resolveScanSettings: %v", err)
+			}
+			if !settings.OmitRepoMetadata {
+				t.Fatal("OmitRepoMetadata = false, want the trusted opt-out to reach the scan")
+			}
+		})
+	}
+}
+
+// TestLoadCLIConfigProjectRepoMatchedByPathKeepsTheTrustedOptOut covers a
+// project entry that renames the repository but points at the same directory:
+// renaming must not be a way around the trusted opt-out either. The project's
+// name is kept.
+func TestLoadCLIConfigProjectRepoMatchedByPathKeepsTheTrustedOptOut(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	privatePath, _ := trustedRepoLayeringFixture(t)
+	writeProjectConfig(t, `
+repos:
+  - name: renamed
+    path: `+yamlQuote(privatePath)+`
+    send_repo_metadata: true
+`)
+
+	cfg, _, err := loadCLIConfigWithOptions("", cliConfigLoadOptions{})
+	if err != nil {
+		t.Fatalf("loadCLIConfigWithOptions: %v", err)
+	}
+	if len(cfg.Repos) != 1 {
+		t.Fatalf("repos = %+v, want only the project's repo", cfg.Repos)
+	}
+	repo := cfg.Repos[0]
+	if repo.Name != "renamed" || !sameCLIRepoPath(repo.Path, privatePath) {
+		t.Fatalf("repo = %+v, want the project's name and path kept", repo)
+	}
+	if repo.SendRepoMetadata == nil || *repo.SendRepoMetadata {
+		t.Fatalf("SendRepoMetadata = %v, want the trusted opt-out inherited", repo.SendRepoMetadata)
+	}
+	if repo.Server != "https://packmon.internal" {
+		t.Fatalf("Server = %q, want the trusted routing inherited", repo.Server)
+	}
+}
+
+// TestLoadCLIConfigProjectReposReplaceTheTrustedList pins the layering of the
+// repos list: the project's repos, in project order, replace the trusted list,
+// so a trusted-only repo is not scanned by --all. A project entry that matches
+// a trusted entry inherits its routing and metadata opt-out, but keeps its own
+// scan policy as written.
+func TestLoadCLIConfigProjectReposReplaceTheTrustedList(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	t.Setenv("PACKMON_NO_REPO_METADATA", "")
+	privatePath, _ := trustedRepoLayeringFixture(t)
+	writeProjectConfig(t, `
+repos:
+  - name: app
+    path: .
+    mode: remote
+  - name: private
+    path: `+yamlQuote(privatePath)+`
+`)
+
+	cfg, _, err := loadCLIConfigWithOptions("", cliConfigLoadOptions{})
+	if err != nil {
+		t.Fatalf("loadCLIConfigWithOptions: %v", err)
+	}
+	targets, err := buildScanTargets(cfg, nil, scanFlagValues{All: true})
+	if err != nil {
+		t.Fatalf("buildScanTargets: %v", err)
+	}
+	names := make([]string, 0, len(targets))
+	for _, target := range targets {
+		names = append(names, target.Name)
+	}
+	if got := strings.Join(names, ","); got != "app,private" {
+		t.Fatalf("--all targets = %q, want the project's repos only, in project order", got)
+	}
+
+	private := cfg.findRepo("private")
+	if private.SendRepoMetadata == nil || *private.SendRepoMetadata {
+		t.Fatalf("private SendRepoMetadata = %v, want the trusted opt-out inherited", private.SendRepoMetadata)
+	}
+	if private.Server != "https://packmon.internal" || private.Webhook.URL != "https://hooks.internal/packmon" {
+		t.Fatalf("private = %+v, want the trusted routing inherited", private)
+	}
+	app := cfg.findRepo("app")
+	if app.Mode != "remote" || app.SendRepoMetadata != nil || app.Server != "" {
+		t.Fatalf("app = %+v, want the unmatched project repo kept as written", app)
+	}
+}
+
+// TestLoadCLIConfigProjectRepoNameMatchKeepsTheProjectPath covers a project
+// entry that reuses a trusted repo name for another directory: the project's
+// path wins (so `scan --repo private` scans what the project config says),
+// while the trusted opt-out and routing are still inherited.
+func TestLoadCLIConfigProjectRepoNameMatchKeepsTheProjectPath(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	t.Setenv("PACKMON_NO_REPO_METADATA", "")
+	trustedRepoLayeringFixture(t)
+	writeProjectConfig(t, `
+repos:
+  - name: private
+    path: .
+    fail_on: LOW
+`)
+	projectDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+
+	cfg, _, err := loadCLIConfigWithOptions("", cliConfigLoadOptions{})
+	if err != nil {
+		t.Fatalf("loadCLIConfigWithOptions: %v", err)
+	}
+	targets, err := buildScanTargets(cfg, nil, scanFlagValues{Repo: "private"})
+	if err != nil {
+		t.Fatalf("buildScanTargets: %v", err)
+	}
+	if !sameCLIRepoPath(targets[0].Path, projectDir) {
+		t.Fatalf("--repo private path = %q, want the project path %q", targets[0].Path, projectDir)
+	}
+	repo := targets[0].Repo
+	if repo.FailOn != "LOW" || repo.Server != "https://packmon.internal" {
+		t.Fatalf("repo = %+v, want project policy plus trusted routing", repo)
+	}
+	settings, err := resolveScanSettings(newScanCmd(), cfg, targets[0], scanFlagValues{})
+	if err != nil {
+		t.Fatalf("resolveScanSettings: %v", err)
+	}
+	if !settings.OmitRepoMetadata {
+		t.Fatal("OmitRepoMetadata = false, want the trusted opt-out inherited")
+	}
+}
