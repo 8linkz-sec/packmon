@@ -34,6 +34,71 @@ func TestPostgresStoreCorrectnessAgainstDocker(t *testing.T) {
 	t.Run("GHSA repair writes canonical package names", func(t *testing.T) {
 		testGHSARepairWritesCanonicalPackageNames(ctx, t, store)
 	})
+	t.Run("GHSA repair tolerates non-array affected and events", func(t *testing.T) {
+		testGHSARepairToleratesNonArrayAffectedAndEvents(ctx, t, store)
+	})
+}
+
+func testGHSARepairToleratesNonArrayAffectedAndEvents(ctx context.Context, t *testing.T, store *Store) {
+	t.Helper()
+
+	malformed := map[string]string{
+		"GHSA-repair-affected-null":   `{"affected": null}`,
+		"GHSA-repair-affected-object": `{"affected": {"package": {"ecosystem": "npm", "name": "object-affected"}}}`,
+		"GHSA-repair-affected-scalar": `{"affected": "not-an-array"}`,
+		"GHSA-repair-events-null": `{"affected": [{"package": {"ecosystem": "npm", "name": "events-null"},
+			"ranges": [{"type": "SEMVER", "events": null}],
+			"database_specific": {"last_known_affected_version_range": "<= 1.0.0"}}]}`,
+		"GHSA-repair-events-object": `{"affected": [{"package": {"ecosystem": "npm", "name": "events-object"},
+			"ranges": [{"type": "SEMVER", "events": {"introduced": "0"}}],
+			"database_specific": {"last_known_affected_version_range": "< 2.0.0"}}]}`,
+		"GHSA-repair-events-scalar": `{"affected": [{"package": {"ecosystem": "npm", "name": "events-scalar"},
+			"ranges": [{"type": "SEMVER", "events": 7}, "range-scalar"]}]}`,
+	}
+	for id, raw := range malformed {
+		upsertGHSARepairFixture(ctx, t, store, id, raw)
+	}
+	upsertGHSARepairFixture(ctx, t, store, "GHSA-repair-valid-beside-malformed", `{"affected": [
+		{"package": {"ecosystem": "npm", "name": "repair-only-valid"},
+		 "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}]}],
+		 "database_specific": {"last_known_affected_version_range": "< 4.0.0"}}
+	]}`)
+
+	if _, err := store.RepairGHSAAffectedPackages(ctx); err != nil {
+		t.Fatalf("RepairGHSAAffectedPackages() with malformed advisories error = %v, want the valid advisory repaired", err)
+	}
+
+	findings, err := store.FindVulnerabilities(ctx, "npm", "repair-only-valid", "3.0.0")
+	if err != nil {
+		t.Fatalf("FindVulnerabilities(repair-only-valid@3.0.0) error = %v", err)
+	}
+	if !findingsContainAdvisory(findings, "GHSA-repair-valid-beside-malformed") {
+		t.Fatalf("FindVulnerabilities(repair-only-valid@3.0.0) = %+v, want advisory repaired beside malformed ones", findings)
+	}
+	fixedFindings, err := store.FindVulnerabilities(ctx, "npm", "repair-only-valid", "4.0.0")
+	if err != nil {
+		t.Fatalf("FindVulnerabilities(repair-only-valid@4.0.0) error = %v", err)
+	}
+	if findingsContainAdvisory(fixedFindings, "GHSA-repair-valid-beside-malformed") {
+		t.Fatalf("FindVulnerabilities(repair-only-valid@4.0.0) = %+v, want fixed bound from last_known_affected_version_range", fixedFindings)
+	}
+
+	// Advisories whose ranges carry malformed events are still repaired; the
+	// malformed range is kept verbatim instead of being completed.
+	for _, pkg := range []string{"events-null", "events-object", "events-scalar"} {
+		if got := affectedPackageNames(ctx, t, store, "GHSA-repair-"+pkg, "npm"); !containsString(got, pkg) {
+			t.Fatalf("affected packages for GHSA-repair-%s = %v, want %s repaired", pkg, got, pkg)
+		}
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func testCanonicalPackageNameSQLMirrorsPackageID(ctx context.Context, t *testing.T, store *Store) {

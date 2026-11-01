@@ -33,6 +33,9 @@
   every feed upsert, so repair-only rows such as PyPI `My.Pkg_Name` or NuGet
   `Newtonsoft.Json` match canonical lookups and no longer sit beside the
   canonical row as duplicates.
+- One stored GHSA advisory with `affected: null` (or an object/scalar where an
+  array is expected, or range `events` that are null or not an array) no
+  longer aborts the GHSA affected-package repair for every advisory.
 
 ### Security updates
 

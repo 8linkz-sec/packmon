@@ -18,3 +18,29 @@ func TestRepairGHSAAffectedPackagesCanonicalizesNames(t *testing.T) {
 		t.Fatal("GHSA repair must derive affected_packages.name from canonicalPackageNameSQL")
 	}
 }
+
+// TestRepairGHSAAffectedPackagesGuardsJSONArrayFunctions guards the repair
+// against JSON null, objects, and scalars where it expects arrays: COALESCE
+// does not replace a JSON null, and jsonb_array_elements/jsonb_array_length
+// raise on non-arrays, which would abort the repair for every candidate.
+func TestRepairGHSAAffectedPackagesGuardsJSONArrayFunctions(t *testing.T) {
+	t.Parallel()
+
+	for _, unguarded := range []string{
+		"jsonb_array_elements(COALESCE(",
+		"jsonb_array_length(COALESCE(",
+		"COALESCE(r.item->'events'",
+	} {
+		if strings.Contains(repairGHSAAffectedPackagesSQL, unguarded) {
+			t.Fatalf("GHSA repair applies an array function without a jsonb_typeof guard: %q", unguarded)
+		}
+	}
+	for _, guard := range []string{
+		"jsonb_typeof(vs.raw_json->'affected') = 'array'",
+		"jsonb_typeof(r.item->'events') = 'array'",
+	} {
+		if !strings.Contains(repairGHSAAffectedPackagesSQL, guard) {
+			t.Fatalf("GHSA repair is missing array guard %q", guard)
+		}
+	}
+}

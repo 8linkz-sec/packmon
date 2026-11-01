@@ -23,7 +23,10 @@ func (s *Store) CountVulnerabilitiesBySource(ctx context.Context, source string)
 
 // repairGHSAAffectedPackagesSQL rebuilds affected_packages rows from stored
 // GHSA raw JSON. Package names go through canonicalPackageNameSQL so repaired
-// rows use the same canonical identity as feed upserts and lookups.
+// rows use the same canonical identity as feed upserts and lookups. Every
+// array function is guarded with jsonb_typeof: raw advisories may carry JSON
+// null, objects, or scalars where arrays are expected, and COALESCE does not
+// replace a JSON null.
 const repairGHSAAffectedPackagesSQL = `
 	WITH candidates AS (
 		SELECT
@@ -61,8 +64,9 @@ const repairGHSAAffectedPackagesSQL = `
 				'(^|,)\s*<\s*([^=,\s]+)'
 			))[2] AS fixed_bound
 			FROM vulnerability_sources vs
-			CROSS JOIN LATERAL jsonb_array_elements(COALESCE(vs.raw_json->'affected', '[]'::jsonb))
-				WITH ORDINALITY AS aff(item, ordinality)
+			CROSS JOIN LATERAL jsonb_array_elements(
+				CASE WHEN jsonb_typeof(vs.raw_json->'affected') = 'array' THEN vs.raw_json->'affected' ELSE '[]'::jsonb END
+			) WITH ORDINALITY AS aff(item, ordinality)
 			WHERE vs.source = 'ghsa'
 			  AND vs.raw_json IS NOT NULL
 		),
@@ -104,10 +108,10 @@ const repairGHSAAffectedPackagesSQL = `
 				n.affected_ordinal,
 				r.ordinality AS range_ordinal,
 				CASE
-					WHEN jsonb_array_length(COALESCE(r.item->'events', '[]'::jsonb)) > 0
+					WHEN jsonb_array_length(range_events.items) > 0
 					  AND NOT EXISTS (
 						SELECT 1
-						FROM jsonb_array_elements(COALESCE(r.item->'events', '[]'::jsonb)) AS event(item)
+						FROM jsonb_array_elements(range_events.items) AS event(item)
 						WHERE NULLIF(event.item->>'fixed', '') IS NOT NULL
 						   OR NULLIF(event.item->>'last_affected', '') IS NOT NULL
 					  )
@@ -115,13 +119,13 @@ const repairGHSAAffectedPackagesSQL = `
 						THEN jsonb_set(
 							r.item,
 							'{events}',
-							COALESCE(r.item->'events', '[]'::jsonb) ||
+							range_events.items ||
 								jsonb_build_array(jsonb_build_object('last_affected', n.last_affected_bound))
 						)
-					WHEN jsonb_array_length(COALESCE(r.item->'events', '[]'::jsonb)) > 0
+					WHEN jsonb_array_length(range_events.items) > 0
 					  AND NOT EXISTS (
 						SELECT 1
-						FROM jsonb_array_elements(COALESCE(r.item->'events', '[]'::jsonb)) AS event(item)
+						FROM jsonb_array_elements(range_events.items) AS event(item)
 						WHERE NULLIF(event.item->>'fixed', '') IS NOT NULL
 						   OR NULLIF(event.item->>'last_affected', '') IS NOT NULL
 					  )
@@ -129,7 +133,7 @@ const repairGHSAAffectedPackagesSQL = `
 						THEN jsonb_set(
 							r.item,
 							'{events}',
-							COALESCE(r.item->'events', '[]'::jsonb) ||
+							range_events.items ||
 								jsonb_build_array(jsonb_build_object('fixed', n.fixed_bound))
 						)
 					ELSE r.item
@@ -138,6 +142,12 @@ const repairGHSAAffectedPackagesSQL = `
 			CROSS JOIN LATERAL jsonb_array_elements(
 				CASE WHEN jsonb_typeof(n.version_ranges) = 'array' THEN n.version_ranges ELSE '[]'::jsonb END
 			) WITH ORDINALITY AS r(item, ordinality)
+			-- A range whose events are missing, JSON null, an object, or a
+			-- scalar has no events to complete; treat it as an empty array so
+			-- one malformed range cannot abort the repair of every advisory.
+			CROSS JOIN LATERAL (
+				SELECT CASE WHEN jsonb_typeof(r.item->'events') = 'array' THEN r.item->'events' ELSE '[]'::jsonb END AS items
+			) range_events
 		),
 		ranges AS (
 			SELECT
