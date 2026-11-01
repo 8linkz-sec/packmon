@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -925,17 +926,19 @@ func registryGetLimitedWithHeaders(ctx context.Context, url string, limit int64,
 		return nil, fmt.Errorf("lookup skipped: registry failure breaker open after %d consecutive failures", registryBreakerThreshold)
 	}
 	phaseCtx := ctx
+	// Space every registry request, whatever ecosystem it belongs to. This is
+	// the single choke point all latest-version and metadata lookups pass
+	// through, so throttling here covers npm, PyPI, Go, Maven, NuGet, Hex and
+	// the rest instead of crates.io alone. The wait is bounded by the caller's
+	// context only: the per-request timeout below starts once the request is
+	// about to be sent, so queueing behind other lookups cannot use it up.
+	if !waitForRegistryThrottle(phaseCtx, registryRequestThrottle) {
+		return nil, fmt.Errorf("registry request cancelled while rate limiting: %w", phaseCtx.Err())
+	}
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, phase.perRequestTimeout())
 		defer cancel()
-	}
-	// Space every registry request, whatever ecosystem it belongs to. This is
-	// the single choke point all latest-version and metadata lookups pass
-	// through, so throttling here covers npm, PyPI, Go, Maven, NuGet, Hex and
-	// the rest instead of crates.io alone.
-	if !registryRequestThrottle.wait(ctx) {
-		return nil, fmt.Errorf("registry request cancelled while rate limiting: %w", ctx.Err())
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -1005,6 +1008,22 @@ func registryGetLimitedWithHeaders(ctx context.Context, url string, limit int64,
 		return nil, fmt.Errorf("registry response exceeds %d byte limit", limit)
 	}
 	return data, nil
+}
+
+// waitForRegistryThrottle waits for the throttle's next slot and reports
+// whether the request may be sent. A user cancellation stays silent. Any other
+// end of the wait -- a caller deadline that expired in the queue -- left the
+// lookup without an answer, so it joins the refused requests behind the stderr
+// warning and the list-all hint; nothing was sent, so the breaker streak is
+// left alone.
+func waitForRegistryThrottle(ctx context.Context, t *registryThrottle) bool {
+	if t.wait(ctx) {
+		return true
+	}
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		registryLookupPhaseFrom(ctx).recordUnsent()
+	}
+	return false
 }
 
 func drainRegistryErrorBody(r io.Reader) {
@@ -1181,7 +1200,7 @@ func fetchCratesLatest(ctx context.Context, name string) string {
 }
 
 func fetchCratesLatestFromBase(ctx context.Context, baseURL, name string) string {
-	if !cratesIOThrottle.wait(ctx) {
+	if !waitForRegistryThrottle(ctx, cratesIOThrottle) {
 		return ""
 	}
 	headers := http.Header{}
@@ -1243,7 +1262,7 @@ func fetchChocolateyLatestFromFeeds(ctx context.Context, feeds []string, name st
 		if feed == "" {
 			continue
 		}
-		if !chocolateyFeedThrottle.wait(ctx) {
+		if !waitForRegistryThrottle(ctx, chocolateyFeedThrottle) {
 			return ""
 		}
 		// OData servers (notably community.chocolatey.org) do not treat "+" as a

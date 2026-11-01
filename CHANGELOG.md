@@ -16,6 +16,15 @@
 
 ### Fixed
 
+- `--outdated` / `--list-all` start the per-request `--timeout` when a
+  registry request leaves the shared rate limiter. The deadline used to start
+  before the queue wait, so with a small `--timeout` and many packages a
+  request could expire before it was sent; the row ended up `unknown` and the
+  lookup counted as neither refused nor skipped, so no warning appeared. The
+  queue wait is now bounded only by the scan itself, and a queued lookup that
+  ends for any reason other than a user cancellation (for example a caller
+  deadline) counts as a refused request in the stderr warning and the
+  list-all HTML hint, without advancing the consecutive-failure breaker.
 - `--outdated` / `--list-all` resolve npm dependency ranges for popular
   packages again. The npm metadata lookup read the full packument through the
   general 512 KiB registry limit, which popular packages exceed, so their

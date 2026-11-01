@@ -191,7 +191,8 @@ available-update information on top of the findings, querying public registries
 for latest versions -- add `--list-all-offline` when you have no outbound
 network. The lookup phase is rate-limited (crates.io lookups pace at one
 request per second, so a large Rust inventory takes several minutes) and
-reports its progress every 10 seconds. `--html` writes a self-contained report for a browser or a ticket, and
+reports its progress every 10 seconds; `--timeout` bounds each registry
+request, not the queue wait in front of it or the whole phase. `--html` writes a self-contained report for a browser or a ticket, and
 `--output-json` the same result in the canonical machine shape;
 `--output-sarif` and `--output-junit` exist for code scanning and CI test
 reporting.

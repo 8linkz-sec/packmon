@@ -594,6 +594,10 @@ Important behavior:
   estimate that accounts for the slower crates.io and Chocolatey rates when
   those packages dominate the inventory, and prints a `done/total` progress
   line every 10 seconds until the phase completes (suppressed by `--quiet`).
+  The phase itself has no deadline; `--timeout` bounds each registry request
+  from the moment it leaves the rate limiter, so time spent queued behind
+  other lookups does not count against it. A lookup abandoned in the queue
+  for any reason other than a user cancellation counts as a refused request.
   Registry response bodies are read up to a fixed limit: 512 KiB by default,
   4 MiB for Packagist, and 16 MiB for PyPI and for npm metadata. npm range
   resolution requests the abbreviated install document

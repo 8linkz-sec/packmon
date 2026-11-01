@@ -59,6 +59,17 @@ func (p *registryLookupPhase) recordOversized() {
 	p.oversized.Add(1)
 }
 
+// recordUnsent counts a lookup that was abandoned before its request was
+// sent, other than by a user cancellation. The lookup got no answer, so it
+// joins the refused total; the registry was never asked, so the breaker
+// streak is left alone.
+func (p *registryLookupPhase) recordUnsent() {
+	if p == nil {
+		return
+	}
+	p.refused.Add(1)
+}
+
 func (p *registryLookupPhase) recordSuccess() {
 	if p == nil {
 		return
