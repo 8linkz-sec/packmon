@@ -612,11 +612,29 @@ clients and servers keep such rows until a full sync.
 An advisory whose affected rows alone exceed the per-page byte budget of the
 sync (about 12 MiB of rows, against the 32 MiB a client accepts per response)
 is split across several pages. Those pages never carry
-`vulnerability_affected_complete`, so packages such an advisory no longer
-lists stay in the local database until a full sync; the advisories around it
-are still replaced. Before this split existed, such an advisory made every
+`vulnerability_affected_complete`; the advisories around it are still
+replaced. The last split page carries `vulnerability_split_complete` when
+nothing of the advisory changed on the server while the client paged through
+it, and current clients then drop the packages the advisory no longer lists
+(in the synced ecosystems). When the advisory changed during the split, or
+the sync was interrupted, its stale packages stay until a later incremental
+sync completes a split of it (the change itself makes the next delta deliver
+it again) or a full sync; older clients and servers keep them until a full
+sync. During a rolling upgrade, a split that an older server started or
+continued (its pages carry no split markers) is never replaced, so its stale
+packages also stay until a later sync completes a split of it. Before this
+split existed, such an advisory made every
 incremental sync fail with `response too large` and the local database never
 advanced; upgrading the server is the fix, a full sync is not needed for it.
+The malicious, reputation, and lifecycle rows of a page have byte budgets of
+their own (8 MiB, 4 MiB, and 4 MiB) as well, so large rows there (long version
+lists, references, or summaries) make the sync take more pages instead of
+failing with `response too large`; a server from before these budgets could
+fail that way on a sync with many such rows, and upgrading the server fixes
+it too. Each dataset still delivers its first row even when that row alone
+exceeds its budget, so only pathological rows several MiB larger than their
+budgets can still make one page exceed 32 MiB and fail every retry; such a
+row has to be fixed or removed on the server.
 
 During a rolling upgrade, a sync sequence that a new server started and an
 older server continues fails with `400` (the older server does not know the

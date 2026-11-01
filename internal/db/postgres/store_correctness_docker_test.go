@@ -67,6 +67,12 @@ func TestPostgresStoreCorrectnessAgainstDocker(t *testing.T) {
 	t.Run("delta splits an advisory larger than the page budget", func(t *testing.T) {
 		testDeltaSplitsAnAdvisoryLargerThanThePageBudget(ctx, t, store)
 	})
+	t.Run("split advisory changed mid-split stays upsert-only", func(t *testing.T) {
+		testSplitAdvisoryChangedMidSplitStaysUpsertOnly(ctx, t, store)
+	})
+	t.Run("malicious and reputation pages stay within their byte budgets", func(t *testing.T) {
+		testOtherDatasetPagesStayWithinTheirByteBudgets(ctx, t, store)
+	})
 	t.Run("package name repair marks merged vulnerabilities changed", func(t *testing.T) {
 		testPackageNameRepairDeltaIncludesMergedVulnerability(ctx, t, store)
 	})

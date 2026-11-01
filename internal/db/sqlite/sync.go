@@ -117,7 +117,9 @@ type syncPageApply struct {
 	clearReputationEcosystems []string
 	// replaceAffected, set only for a page of a delta with a since window that
 	// carries vulnerability_affected_complete, drops local affected rows of the
-	// vulnerabilities the page delivered that it did not deliver again.
+	// vulnerabilities the page delivered that it did not deliver again; on the
+	// page that completes a split advisory (syncSplitAdvisory) it drops the
+	// local rows of that advisory that no split page delivered.
 	replaceAffected *syncAffectedReplacement
 	metadata        syncApplyMetadata
 }
@@ -184,11 +186,108 @@ func newSyncAffectedReplacement(pass syncPass, resp *syncResponse, ecosystems []
 	if len(received) == 0 {
 		return nil
 	}
+	return &syncAffectedReplacement{ecosystems: syncReplacementScope(ecosystems), received: received}
+}
+
+// syncReplacementScope returns the requested ecosystems a replacement is
+// limited to; an empty scope covers every ecosystem.
+func syncReplacementScope(ecosystems []string) map[string]struct{} {
 	scope := make(map[string]struct{}, len(ecosystems))
 	for _, ecosystem := range ecosystems {
 		scope[strings.ToLower(strings.TrimSpace(ecosystem))] = struct{}{}
 	}
-	return &syncAffectedReplacement{ecosystems: scope, received: received}
+	return scope
+}
+
+// mergeSyncAffectedReplacements combines the replacements of one page. A
+// vulnerability in both keeps the union of its delivered rows, so the merge
+// never drops a row that either replacement keeps.
+func mergeSyncAffectedReplacements(a, b *syncAffectedReplacement) *syncAffectedReplacement {
+	if a == nil {
+		return b
+	}
+	if b == nil {
+		return a
+	}
+	for id, keys := range b.received {
+		existing, ok := a.received[id]
+		if !ok {
+			a.received[id] = keys
+			continue
+		}
+		for key := range keys {
+			existing[key] = struct{}{}
+		}
+	}
+	return a
+}
+
+// syncSplitAdvisory collects the affected rows that the pages of one request
+// sequence delivered for an advisory the server split over several pages
+// because its rows alone exceed the page byte budget. Every page of such a
+// split names the advisory (vulnerability_split_advisory) and none carries
+// vulnerability_affected_complete; the last one reports with
+// vulnerability_split_complete that the split pages together delivered every
+// current affected row of the advisory (within the requested ecosystems). A
+// split is usable only when the client received the page that started it --
+// marked vulnerability_split_start and requested without an advisory row
+// cursor, which only continues a split -- and every later page of it, each
+// naming the advisory. A page without the marker, for example from an older
+// server during a rolling upgrade, ends the split, so a split that an older
+// server started or continued is never replaced. The state lives only in
+// memory, so an interrupted sequence replaces nothing.
+type syncSplitAdvisory struct {
+	id string
+	// pages counts the split pages seen so far, including the current one.
+	pages int
+	// received holds the row keys the split pages delivered.
+	received map[string]struct{}
+	// unusable marks a split the client did not receive from its start page,
+	// or whose pages carried a second start marker, a row of another
+	// advisory, or a withdrawn row; it is never replaced.
+	unusable bool
+}
+
+// nextSyncSplitAdvisory returns the split state after resp, the page the
+// client requested with the cursor requested: the state of the split resp
+// continues or starts, with its rows added, or nil when resp belongs to no
+// split or the pass may not replace affected rows (a full sync or a sync
+// without a since window, as for flagged pages).
+func nextSyncSplitAdvisory(prev *syncSplitAdvisory, pass syncPass, requested syncCursor, resp *syncResponse) *syncSplitAdvisory {
+	id := strings.TrimSpace(resp.VulnerabilitySplitAdvisory)
+	if pass.full || pass.cursorState.Since == "" || id == "" {
+		return nil
+	}
+	split := prev
+	if split == nil || split.id != id {
+		split = &syncSplitAdvisory{id: id, received: make(map[string]struct{})}
+		split.unusable = !resp.VulnerabilitySplitStart || synccontract.IsAdvisoryRowCursor(requested.VulnerabilitiesCursor)
+	} else if resp.VulnerabilitySplitStart {
+		split.unusable = true
+	}
+	split.pages++
+	for _, v := range resp.Vulnerabilities {
+		if v.ID != id || v.Withdrawn {
+			split.unusable = true
+			continue
+		}
+		split.received[syncVulnerabilityRowKey(v.ID, v.Ecosystem, normalizePackageName(v.Ecosystem, v.Name))] = struct{}{}
+	}
+	return split
+}
+
+// replacement returns the replacement of the split advisory when resp, a
+// page of the split, completes it, or nil. The server reports completeness
+// only on the last page of a split, which never starts it, so a split seen
+// on fewer than two pages is not replaced either.
+func (s *syncSplitAdvisory) replacement(resp *syncResponse, ecosystems []string) *syncAffectedReplacement {
+	if s == nil || s.unusable || s.pages < 2 || !resp.VulnerabilitySplitComplete {
+		return nil
+	}
+	return &syncAffectedReplacement{
+		ecosystems: syncReplacementScope(ecosystems),
+		received:   map[string]map[string]struct{}{s.id: s.received},
+	}
 }
 
 func (r *syncAffectedReplacement) inScope(ecosystem string) bool {
@@ -252,6 +351,17 @@ type (
 // affected package left within the requested ecosystems). The flag holds per
 // page, so flagged pages of a multi-page delta replace too; unflagged pages
 // stay upsert-only.
+//
+// An advisory whose rows alone exceed the server's page byte budget arrives
+// split over several unflagged pages that name it in
+// vulnerability_split_advisory. The client collects the rows those pages
+// deliver (syncSplitAdvisory), and when the last split page reports
+// vulnerability_split_complete, it drops, in that page's transaction, the
+// advisory's local affected rows (within the requested ecosystems) that no
+// split page delivered. A split the client did not receive from its start
+// page (vulnerability_split_start, not requested with an advisory row
+// cursor) through every later page, or that is incomplete, interrupted, or
+// mixed with another advisory's rows, stays upsert-only.
 func Sync(ctx context.Context, store *Store, cfg SyncConfig) error {
 	cfg, err := validateSyncConfig(cfg)
 	if err != nil {
@@ -362,7 +472,10 @@ func syncPaginatedResponses(ctx context.Context, store *Store, client *http.Clie
 	correlationID := newSyncCorrelationID()
 	firstPage := true
 	reputationDisabled := false
-	var stats SyncStats
+	var (
+		stats SyncStats
+		split *syncSplitAdvisory
+	)
 
 	// Loop to handle paginated responses.
 	for {
@@ -400,9 +513,13 @@ func syncPaginatedResponses(ctx context.Context, store *Store, client *http.Clie
 			metadata.ClearReputationResync = pass.completesReputation && !reputationDisabled
 		}
 
+		split = nextSyncSplitAdvisory(split, pass, cursor, resp)
 		page := syncPageApply{
-			metadata:        metadata,
-			replaceAffected: newSyncAffectedReplacement(pass, resp, cfg.Ecosystems),
+			metadata: metadata,
+			replaceAffected: mergeSyncAffectedReplacements(
+				newSyncAffectedReplacement(pass, resp, cfg.Ecosystems),
+				split.replacement(resp, cfg.Ecosystems),
+			),
 		}
 		if firstPage {
 			page.full = pass.full

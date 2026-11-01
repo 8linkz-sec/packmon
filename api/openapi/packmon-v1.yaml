@@ -637,12 +637,18 @@ paths:
             affected rows than the limit is a page of its own, so that page
             holds more rows than the limit; the row limit alone never splits
             an advisory.
-            Independently of the limit, the server keeps the vulnerability rows
-            of every page within an estimated byte budget well below the 32 MiB
-            response size the client accepts: a page then ends after the last
-            whole advisory that fits, and an advisory whose rows alone exceed
-            the budget is split over several pages that omit
-            vulnerability_affected_complete.
+            Independently of the limit, the server keeps every dataset of a
+            page within an estimated byte budget (12 MiB of vulnerability rows,
+            8 MiB of malicious, 4 MiB of reputation, and 4 MiB of lifecycle
+            rows), together well below the 32 MiB response size the client
+            accepts. A vulnerability page then ends after the last whole
+            advisory that fits, and an advisory whose rows alone exceed the
+            budget is split over several pages that omit
+            vulnerability_affected_complete. A malicious, reputation, or
+            lifecycle page ends before the row that no longer fits, never
+            before its first row, and continues after its last row even when
+            it holds fewer rows than the limit, so clients follow truncated
+            and next_cursor rather than comparing row counts with the limit.
           schema:
             type: integer
             minimum: 1
@@ -652,7 +658,12 @@ paths:
           in: query
           description: >-
             Legacy page offset used with the same since and snapshot values. Use
-            cursor parameters for larger paginated syncs.
+            cursor parameters for larger paginated syncs. It applies to every
+            dataset, and only when the request carries no per-dataset offset,
+            cursor, or done flag. The datasets of a page can hold fewer rows
+            than the limit (byte budgets, whole advisories), so a client must
+            continue with the per-dataset values of next_cursor instead of
+            advancing this offset by the limit.
           deprecated: true
           schema:
             type: integer
@@ -1702,7 +1713,9 @@ components:
             sequence; it never arrives partially. Full exports, the legacy
             row-cursor or offset pages of a delta, and the pages of an advisory
             split because its rows alone exceed the page byte budget omit the
-            field, and clients keep upserting rows for unflagged pages. Servers without this
+            field, and clients keep upserting rows for unflagged pages (a split
+            advisory is replaced only through vulnerability_split_complete).
+            Servers without this
             guarantee omit the field (older servers set it only on a delta that
             fits in one page), and clients that do not know it keep upserting
             rows, so older clients and servers remain compatible.
@@ -1724,6 +1737,47 @@ components:
             takes one row of the page's limit. The field is omitted when the
             list is empty; older clients ignore it and keep such rows until a
             full sync, and older servers never send it.
+        vulnerability_split_advisory:
+          type: string
+          description: >-
+            Present on every page that carries rows of an advisory the server
+            splits over several pages because its affected rows alone exceed
+            the page byte budget (the page that starts the split and every page
+            that continues it), and names that advisory. Such pages never carry
+            vulnerability_affected_complete. Omitted on every other page; older
+            clients ignore it and older servers never send it.
+        vulnerability_split_start:
+          type: boolean
+          description: >-
+            Present and true only on the page that starts a split (see
+            vulnerability_split_advisory): a page the client did not request
+            with an advisory row cursor, whose first advisory alone exceeds the
+            page byte budget. Omitted on every other page; older clients ignore
+            it and older servers never send it.
+        vulnerability_split_complete:
+          type: boolean
+          description: >-
+            Present and true only on the last page of a split advisory (see
+            vulnerability_split_advisory) when the split pages of this request
+            sequence together delivered every current affected package of the
+            advisory within the requested ecosystems: neither the advisory nor
+            any of its affected packages changed after the pinned snapshot. A
+            client with a since window and without a full sync may then drop,
+            in this page's transaction, its local affected rows of the advisory
+            in the requested ecosystems that no split page delivered, but only
+            when it received in this sequence the page that started the split
+            (marked vulnerability_split_start and not requested with an
+            advisory row cursor) and every later page of the split, each naming
+            the advisory, and this page is not the start page. A page without
+            the split markers, such as one from an older server during a
+            rolling upgrade, ends the split, so a split an older server started
+            or continued must not be replaced; neither must one whose pages
+            carried a second start marker, rows of another advisory, or
+            withdrawn rows. When the advisory changed during the split the
+            field is omitted and the pages stay upsert-only; the change makes
+            the next delta deliver the advisory again. Older clients ignore it
+            and keep such rows until a full sync, and older servers never send
+            it.
 
     SyncCursor:
       type: object

@@ -947,11 +947,18 @@ Local SQLite sync:
   working directory, which is usually a repository;
 - stores compact finding, reputation, and lifecycle data, not raw feed JSON;
 - rejects any `/api/v1/sync` response body larger than 32 MiB instead of
-  buffering it. The server keeps the vulnerability rows of each page within
-  an estimated 12 MiB (an upper bound of their JSON encoding) besides the row
-  `limit`, so a sync always makes progress; an advisory whose affected rows
-  alone exceed that budget is split across several pages that never carry
-  `vulnerability_affected_complete` and therefore stay upsert-only;
+  buffering it. The server keeps each dataset of a page within an estimated
+  byte budget (an upper bound of its rows' JSON encoding) besides the row
+  `limit`: 12 MiB of vulnerability rows and 8, 4, and 4 MiB of malicious,
+  reputation, and lifecycle rows, 28 MiB in total. Each dataset still delivers
+  at least one row per page, so a sync makes progress as long as the page fits
+  the cap; only pathological rows several MiB larger than their budgets can
+  together push a page past 32 MiB, which the client then rejects on every
+  retry instead of buffering it; an advisory
+  whose affected rows alone exceed the vulnerability budget is split across
+  several pages that never carry `vulnerability_affected_complete` and stay
+  upsert-only unless the last of them reports the split complete (see the
+  affected-row replacement below);
 - preserves user-facing source attribution for synced vulnerability and
   malicious findings;
 - maps synced malicious-table rows with `supply_chain` or `typosquatting` risk
@@ -965,7 +972,8 @@ Local SQLite sync:
 - resolves synced reputation rows through explicit reputation lookup methods,
   not through malicious-package lookup methods;
 - drops local affected rows of a changed vulnerability only on a delta sync
-  page with a stored `since` that carries `vulnerability_affected_complete`,
+  page with a stored `since` that carries `vulnerability_affected_complete`
+  (or completes a split advisory, below),
   only for vulnerabilities that page delivered (as package rows, or by ID in
   `vulnerabilities_without_affected` when no affected package is left within
   the requested ecosystems), only for rows in the requested ecosystems, and
@@ -981,11 +989,31 @@ Local SQLite sync:
   are never flagged, and neither are the pages of an advisory that the server
   splits because its rows alone exceed the page byte budget; older servers
   flag only a delta that fits in one page.
+  A split advisory is replaced only on the last page of its split, and only
+  when that page carries `vulnerability_split_complete`, which the server sets
+  after checking that neither the advisory nor any of its affected rows has a
+  version newer than the pinned snapshot (so the split pages, which cover its
+  whole key space, missed no row that still exists). That check compares the
+  rows' 32-bit `xmin` with the 64-bit snapshot transaction ID modulo 2^32 and
+  fails unless the snapshot is at most 2^31 transactions old, so it stays
+  sound past the first transaction ID epoch and errs only toward not
+  replacing. The client then drops only the advisory's rows in the requested
+  ecosystems that none of the split pages it received in that sequence
+  delivered, and only when it received the page that started the split --
+  marked `vulnerability_split_start` and not requested with an advisory row
+  cursor -- and every later page of the split, each naming the advisory. A
+  page without the markers (an older server during a rolling upgrade) ends
+  the split on the client, so a split an older server started or continued
+  is never replaced; a second start marker, a row of another advisory, or a
+  withdrawn row on a split page, or a complete marker on the start page,
+  replaces nothing either. The split rows are collected in memory, so an
+  interrupted sequence replaces nothing.
   The replacement therefore never runs for full syncs (which clear and reload
-  the local tables), syncs without `since`, unflagged pages, or older servers'
-  multi-page deltas. A failed sequence keeps only the replacements of its
-  committed pages, which match what the server listed, and does not advance
-  the `since` window, so no sync can remove a still-valid local finding;
+  the local tables), syncs without `since`, unflagged pages other than the
+  complete last page of such a split, or older servers' multi-page deltas. A
+  failed sequence keeps only the replacements of its committed pages, which
+  match what the server listed, and does not advance the `since` window, so
+  no sync can remove a still-valid local finding;
 - refuses to mark the local database fresh from a server `synced_at` timestamp
   that is beyond the allowed future clock-skew tolerance;
 - rejects semantically empty full-sync snapshots before clearing local finding

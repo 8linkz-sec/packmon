@@ -360,8 +360,9 @@ func TestNextSyncExportCursorPagesWholeAdvisories(t *testing.T) {
 	// A short advisory page while another dataset continues marks the
 	// vulnerability dataset done.
 	truncated, next = nextSyncExportCursor(db.SyncCursor{VulnerabilitiesCursor: db.EncodeSyncAdvisoryCursor("GHSA-0")}, syncVulnerabilityAdvisoryPages, syncDatasets{
-		vulnerabilities: rows("GHSA-b"),
-		malicious:       []db.SyncMalicious{{ID: "MAL-1"}, {ID: "MAL-2"}},
+		vulnerabilities:   rows("GHSA-b"),
+		malicious:         []db.SyncMalicious{{ID: "MAL-1"}, {ID: "MAL-2"}},
+		maliciousHaveMore: true,
 	}, 2)
 	if !truncated || next == nil || !next.VulnerabilitiesDone || next.VulnerabilitiesCursor != "" || next.MaliciousCursor == "" {
 		t.Fatalf("finished advisory dataset cursor = truncated %v next %+v, want vulnerabilities done and malicious continued", truncated, next)

@@ -49,6 +49,25 @@ type SyncExport struct {
 	// local affected rows (within the requested ecosystems) instead. It is
 	// empty on every unflagged page.
 	VulnerabilitiesWithoutAffected []string
+	// VulnerabilitySplitAdvisory names, on every page that holds rows of an
+	// advisory split because its rows exceed SyncVulnerabilityPageByteBudget
+	// (the page that starts the split and every page that continues it), that
+	// advisory. It is empty on every other page.
+	VulnerabilitySplitAdvisory string
+	// VulnerabilitySplitStart marks the page that starts such a split: the
+	// first advisory of a whole-advisory delta page whose rows alone exceed
+	// the budget. A client replaces a split advisory only when it received
+	// this page and every later page of the split in one sequence.
+	VulnerabilitySplitStart bool
+	// VulnerabilitySplitComplete reports, on the last page of such a split,
+	// that the split pages of this request sequence together delivered every
+	// current affected row of the advisory (within the requested ecosystems):
+	// neither the advisory nor any of its affected rows changed after the
+	// pinned snapshot. A delta client that received every split page of the
+	// advisory in this sequence, from the page marked VulnerabilitySplitStart
+	// on, can then drop its local affected rows (within the requested
+	// ecosystems) that no split page delivered.
+	VulnerabilitySplitComplete bool
 }
 
 // syncAdvisoryCursorTag versions the vulnerabilities_cursor of a delta that
@@ -89,13 +108,30 @@ func DecodeSyncAdvisoryCursor(raw string) (string, bool) {
 // three-part legacy row cursor.
 const syncAdvisoryRowCursorTag = "advisory-rows-v2"
 
-// SyncVulnerabilityPageByteBudget bounds the estimated JSON bytes of the
-// vulnerability dataset on one /api/v1/sync page, in addition to the row
-// limit. It stays well below the response size a client accepts (32 MiB, see
-// synccontract.MaxResponseBytes), so the other datasets of the page and the
-// envelope still fit. An advisory whose rows alone exceed it is split over
-// several pages that do not carry VulnerabilityAffectedComplete.
-const SyncVulnerabilityPageByteBudget = 12 << 20
+// The sync page byte budgets bound the estimated JSON bytes of each dataset on
+// one /api/v1/sync page, in addition to the row limit. Each page of a dataset
+// takes rows while they fit its budget and always its first row, so every
+// dataset that has rows left advances on every page. Together they take 28 MiB
+// of the response size a client accepts (32 MiB, see
+// synccontract.MaxResponseBytes): the vulnerability dataset, which repeats an
+// advisory's summary and references on every affected row, keeps the largest
+// share, the other datasets share the remaining headroom, and 4 MiB stay free
+// for the envelope and for a first row that alone exceeds its budget. First
+// rows several MiB over their budgets can still push a page past the cap; the
+// client then rejects that page on every retry.
+const (
+	// SyncVulnerabilityPageByteBudget bounds the vulnerability dataset. An
+	// advisory whose rows alone exceed it is split over several pages that do
+	// not carry VulnerabilityAffectedComplete.
+	SyncVulnerabilityPageByteBudget = 12 << 20
+	// SyncMaliciousPageByteBudget bounds the malicious dataset, whose rows can
+	// carry long version lists and references.
+	SyncMaliciousPageByteBudget = 8 << 20
+	// SyncReputationPageByteBudget bounds the reputation dataset.
+	SyncReputationPageByteBudget = 4 << 20
+	// SyncLifecyclePageByteBudget bounds the lifecycle dataset.
+	SyncLifecyclePageByteBudget = 4 << 20
+)
 
 // EncodeSyncAdvisoryRowCursor returns the vulnerabilities_cursor that
 // continues the advisory with the given ID after its affected row (ecosystem,
