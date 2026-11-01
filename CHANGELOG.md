@@ -16,13 +16,13 @@
 
 ### Fixed
 
-- A project `.packmon.yaml` `repos:` list no longer replaces the trusted
-  user-global repo list. Entries are merged per repository (matched by name,
-  then by path): a trusted repo keeps its name, path, routing, and
-  `send_repo_metadata: false`, the project entry may refine its scan policy or
-  opt it out of metadata, and project-only repos are added after the trusted
-  ones. Previously a same-name project entry silently re-enabled repository
-  metadata a trusted repo had disabled.
+- A project `.packmon.yaml` `repos:` entry that refers to a user-global repo
+  (matched by name, then by path) now inherits that trusted repo's
+  `send_repo_metadata: false`, server/API-key routing, and webhook. The
+  project's repos still replace the user-global list, and each entry keeps its
+  own name, path (the project path wins on a name match), and scan policy.
+  Previously a project entry naming a trusted repo silently re-enabled
+  repository metadata that repo had disabled.
 - `packmon config show` escapes terminal control characters in every config-,
   flag-, and environment-derived value it prints: config file path, server,
   masked API key, API key env name, mode, fail_on, ecosystems, CA cert path,

@@ -402,31 +402,27 @@ func overlayCLIRegistryConfig(dst *cliRegistryConfig, src cliRegistryConfig) {
 	}
 }
 
-// overlayCLIReposConfig merges the overlay's repos into the base repos one
-// repository at a time instead of replacing the whole list. An overlay entry
-// that names a base repository, or points at the same path, refines that entry;
-// every other overlay entry is appended after the base entries. Replacing the
-// list used to drop a trusted repo's send_repo_metadata: false whenever the
-// project config listed the same repository.
+// overlayCLIReposConfig layers the project repos over the trusted repos. A
+// non-empty project list replaces the trusted list (project order, and repos
+// only the trusted config lists are dropped), but each project entry that
+// refers to a trusted entry inherits that entry's routing and privacy
+// restriction. Without the inheritance, a project entry naming a trusted repo
+// silently dropped its send_repo_metadata: false.
 func overlayCLIReposConfig(dst *cliConfig, src cliConfig) {
 	if len(src.Repos) == 0 {
 		return
 	}
-	merged := append([]cliRepoConfig(nil), dst.Repos...)
-	baseCount := len(merged)
-	for _, repo := range src.Repos {
-		if i := matchCLIRepoConfig(merged[:baseCount], repo); i >= 0 {
-			overlayCLIRepoConfig(&merged[i], repo)
-			continue
+	repos := append([]cliRepoConfig(nil), src.Repos...)
+	for i := range repos {
+		if j := matchCLIRepoConfig(dst.Repos, repos[i]); j >= 0 {
+			inheritTrustedCLIRepoConfig(&repos[i], dst.Repos[j])
 		}
-		repo.Ecosystems = append([]string(nil), repo.Ecosystems...)
-		merged = append(merged, repo)
 	}
-	dst.Repos = merged
+	dst.Repos = repos
 }
 
-// matchCLIRepoConfig returns the index of the base repo that the overlay repo
-// refers to: a name match wins, otherwise a path match, otherwise -1.
+// matchCLIRepoConfig returns the index of the trusted repo that the project
+// repo refers to: a name match wins, otherwise a path match, otherwise -1.
 func matchCLIRepoConfig(base []cliRepoConfig, repo cliRepoConfig) int {
 	for i := range base {
 		if base[i].Name == repo.Name {
@@ -449,40 +445,31 @@ func sameCLIRepoPath(a, b string) bool {
 	return a == b
 }
 
-// overlayCLIRepoConfig refines a base repo with an overlay entry. The base keeps
-// its identity (name and path), so the overlay cannot point a configured
-// repository at another directory. Repository metadata can only be restricted:
-// an overlay send_repo_metadata: false applies, but nothing in the overlay can
-// re-enable metadata the base repo disabled.
-func overlayCLIRepoConfig(dst *cliRepoConfig, src cliRepoConfig) {
-	if src.Server != "" {
-		dst.Server = src.Server
+// inheritTrustedCLIRepoConfig copies the trusted entry's routing and privacy
+// restriction into the matching project entry. The project entry keeps its
+// own name, path (it wins over a trusted path on a name match), and scan
+// policy (mode, fail_on, timeout, ecosystems, include_dev) as written.
+//
+// The empty checks on server/api_key/api_key_env never see a project value in
+// practice: stripUntrustedAutoProjectFields runs first and clears them, as it
+// clears the webhook block, which is therefore taken from the trusted entry as
+// a whole. A trusted send_repo_metadata: false always wins; the project may
+// still set false itself, and the strip step already turned a project true
+// into "unset".
+func inheritTrustedCLIRepoConfig(dst *cliRepoConfig, trusted cliRepoConfig) {
+	if dst.Server == "" {
+		dst.Server = trusted.Server
 	}
-	if src.APIKey != "" {
-		dst.APIKey = src.APIKey
+	if dst.APIKey == "" {
+		dst.APIKey = trusted.APIKey
 	}
-	if src.APIKeyEnv != "" {
-		dst.APIKeyEnv = src.APIKeyEnv
+	if dst.APIKeyEnv == "" {
+		dst.APIKeyEnv = trusted.APIKeyEnv
 	}
-	if src.Mode != "" {
-		dst.Mode = src.Mode
+	dst.Webhook = trusted.Webhook
+	if trusted.SendRepoMetadata != nil && !*trusted.SendRepoMetadata {
+		dst.SendRepoMetadata = trusted.SendRepoMetadata
 	}
-	if src.FailOn != "" {
-		dst.FailOn = src.FailOn
-	}
-	if src.Timeout != 0 {
-		dst.Timeout = src.Timeout
-	}
-	if len(src.Ecosystems) > 0 {
-		dst.Ecosystems = append([]string(nil), src.Ecosystems...)
-	}
-	if src.IncludeDev != nil {
-		dst.IncludeDev = src.IncludeDev
-	}
-	if src.SendRepoMetadata != nil && !*src.SendRepoMetadata {
-		dst.SendRepoMetadata = src.SendRepoMetadata
-	}
-	overlayCLIWebhookConfig(&dst.Webhook, src.Webhook)
 }
 
 // userGlobalConfigPath returns the path to the user-global CLI config

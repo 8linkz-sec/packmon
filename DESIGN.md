@@ -420,10 +420,12 @@ Important behavior:
   come from flags, environment, user-global config, or an explicit `--config`.
   It may preserve `send_repo_metadata: false` as a privacy opt-out but cannot
   re-enable repository metadata disabled by a higher-precedence source or by
-  the trusted user-global config. Project `repos:` entries are merged into the
-  user-global `repos:` per repository (matched by name, then by path) instead
-  of replacing the list: a matched trusted entry keeps its name, path, routing,
-  and metadata opt-out; unmatched project entries are appended.
+  the trusted user-global config. A project `repos:` list replaces the
+  user-global list, but a project entry that refers to a user-global entry
+  (matched by name, then by path) inherits that entry's routing (`server`,
+  `api_key`, `api_key_env`, webhook) and `send_repo_metadata: false`; the
+  project entry keeps its own name, path (the project path wins on a name
+  match), and scan policy.
   CLI errors for remote scans and local DB sync may show redacted server URL
   context only: scheme, host, and a generic path marker without userinfo,
   query, fragment, or full path. User-visible CLI error snippets are truncated

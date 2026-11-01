@@ -423,7 +423,8 @@ repos:
 
 // TestLoadCLIConfigProjectRepoMatchedByPathKeepsTheTrustedOptOut covers a
 // project entry that renames the repository but points at the same directory:
-// renaming must not be a way around the trusted opt-out either.
+// renaming must not be a way around the trusted opt-out either. The project's
+// name is kept.
 func TestLoadCLIConfigProjectRepoMatchedByPathKeepsTheTrustedOptOut(t *testing.T) {
 	isolateCLIConfigDiscovery(t)
 	privatePath, _ := trustedRepoLayeringFixture(t)
@@ -438,55 +439,107 @@ repos:
 	if err != nil {
 		t.Fatalf("loadCLIConfigWithOptions: %v", err)
 	}
-	if len(cfg.Repos) != 2 {
-		t.Fatalf("repos = %+v, want the renamed entry merged into the trusted one", cfg.Repos)
+	if len(cfg.Repos) != 1 {
+		t.Fatalf("repos = %+v, want only the project's repo", cfg.Repos)
 	}
-	for _, repo := range cfg.Repos {
-		if repo.Path != filepath.Clean(privatePath) {
-			continue
-		}
-		if repo.SendRepoMetadata == nil || *repo.SendRepoMetadata {
-			t.Fatalf("repo %q SendRepoMetadata = %v, want the trusted opt-out preserved", repo.Name, repo.SendRepoMetadata)
-		}
+	repo := cfg.Repos[0]
+	if repo.Name != "renamed" || !sameCLIRepoPath(repo.Path, privatePath) {
+		t.Fatalf("repo = %+v, want the project's name and path kept", repo)
+	}
+	if repo.SendRepoMetadata == nil || *repo.SendRepoMetadata {
+		t.Fatalf("SendRepoMetadata = %v, want the trusted opt-out inherited", repo.SendRepoMetadata)
+	}
+	if repo.Server != "https://packmon.internal" {
+		t.Fatalf("Server = %q, want the trusted routing inherited", repo.Server)
 	}
 }
 
-// TestLoadCLIConfigProjectReposMergeWithTrustedRepos pins the per-repository
-// merge: trusted entries the project does not mention stay, a project entry may
-// still opt a trusted repository out of metadata, and project-only entries are
-// added after the trusted ones.
-func TestLoadCLIConfigProjectReposMergeWithTrustedRepos(t *testing.T) {
+// TestLoadCLIConfigProjectReposReplaceTheTrustedList pins the layering of the
+// repos list: the project's repos, in project order, replace the trusted list,
+// so a trusted-only repo is not scanned by --all. A project entry that matches
+// a trusted entry inherits its routing and metadata opt-out, but keeps its own
+// scan policy as written.
+func TestLoadCLIConfigProjectReposReplaceTheTrustedList(t *testing.T) {
 	isolateCLIConfigDiscovery(t)
-	_, otherPath := trustedRepoLayeringFixture(t)
+	t.Setenv("PACKMON_NO_REPO_METADATA", "")
+	privatePath, _ := trustedRepoLayeringFixture(t)
 	writeProjectConfig(t, `
 repos:
-  - name: other
-    path: `+yamlQuote(otherPath)+`
-    send_repo_metadata: false
   - name: app
     path: .
     mode: remote
+  - name: private
+    path: `+yamlQuote(privatePath)+`
 `)
 
 	cfg, _, err := loadCLIConfigWithOptions("", cliConfigLoadOptions{})
 	if err != nil {
 		t.Fatalf("loadCLIConfigWithOptions: %v", err)
 	}
-	names := make([]string, 0, len(cfg.Repos))
-	for _, repo := range cfg.Repos {
-		names = append(names, repo.Name)
+	targets, err := buildScanTargets(cfg, nil, scanFlagValues{All: true})
+	if err != nil {
+		t.Fatalf("buildScanTargets: %v", err)
 	}
-	if got := strings.Join(names, ","); got != "private,other,app" {
-		t.Fatalf("repo names = %q, want trusted repos first, then project-only repos", got)
+	names := make([]string, 0, len(targets))
+	for _, target := range targets {
+		names = append(names, target.Name)
 	}
-	other := cfg.findRepo("other")
-	if other.SendRepoMetadata == nil || *other.SendRepoMetadata {
-		t.Fatalf("other SendRepoMetadata = %v, want the project opt-out applied", other.SendRepoMetadata)
+	if got := strings.Join(names, ","); got != "app,private" {
+		t.Fatalf("--all targets = %q, want the project's repos only, in project order", got)
 	}
-	if other.FailOn != "CRITICAL" {
-		t.Fatalf("other FailOn = %q, want the trusted policy kept when the project omits it", other.FailOn)
+
+	private := cfg.findRepo("private")
+	if private.SendRepoMetadata == nil || *private.SendRepoMetadata {
+		t.Fatalf("private SendRepoMetadata = %v, want the trusted opt-out inherited", private.SendRepoMetadata)
 	}
-	if app := cfg.findRepo("app"); app == nil || app.Mode != "remote" {
-		t.Fatalf("app = %+v, want the project-only repo added", app)
+	if private.Server != "https://packmon.internal" || private.Webhook.URL != "https://hooks.internal/packmon" {
+		t.Fatalf("private = %+v, want the trusted routing inherited", private)
+	}
+	app := cfg.findRepo("app")
+	if app.Mode != "remote" || app.SendRepoMetadata != nil || app.Server != "" {
+		t.Fatalf("app = %+v, want the unmatched project repo kept as written", app)
+	}
+}
+
+// TestLoadCLIConfigProjectRepoNameMatchKeepsTheProjectPath covers a project
+// entry that reuses a trusted repo name for another directory: the project's
+// path wins (so `scan --repo private` scans what the project config says),
+// while the trusted opt-out and routing are still inherited.
+func TestLoadCLIConfigProjectRepoNameMatchKeepsTheProjectPath(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	t.Setenv("PACKMON_NO_REPO_METADATA", "")
+	trustedRepoLayeringFixture(t)
+	writeProjectConfig(t, `
+repos:
+  - name: private
+    path: .
+    fail_on: LOW
+`)
+	projectDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+
+	cfg, _, err := loadCLIConfigWithOptions("", cliConfigLoadOptions{})
+	if err != nil {
+		t.Fatalf("loadCLIConfigWithOptions: %v", err)
+	}
+	targets, err := buildScanTargets(cfg, nil, scanFlagValues{Repo: "private"})
+	if err != nil {
+		t.Fatalf("buildScanTargets: %v", err)
+	}
+	if !sameCLIRepoPath(targets[0].Path, projectDir) {
+		t.Fatalf("--repo private path = %q, want the project path %q", targets[0].Path, projectDir)
+	}
+	repo := targets[0].Repo
+	if repo.FailOn != "LOW" || repo.Server != "https://packmon.internal" {
+		t.Fatalf("repo = %+v, want project policy plus trusted routing", repo)
+	}
+	settings, err := resolveScanSettings(newScanCmd(), cfg, targets[0], scanFlagValues{})
+	if err != nil {
+		t.Fatalf("resolveScanSettings: %v", err)
+	}
+	if !settings.OmitRepoMetadata {
+		t.Fatal("OmitRepoMetadata = false, want the trusted opt-out inherited")
 	}
 }

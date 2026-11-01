@@ -772,9 +772,8 @@ func TestOverlayCLISectionHelpersPreserveSparseSemantics(t *testing.T) {
 		dst.Registries.NuGetV3BaseURL != "https://nuget-override.example/v3" {
 		t.Fatalf("registries = %+v, want sparse overlay", dst.Registries)
 	}
-	if len(dst.Repos) != 2 || dst.Repos[0].Name != "base" || dst.Repos[0].Path != "base-path" ||
-		dst.Repos[1].Name != "override" || dst.Repos[1].Path != "override-path" {
-		t.Fatalf("repos = %+v, want base repos kept and copied override repos appended", dst.Repos)
+	if len(dst.Repos) != 1 || dst.Repos[0].Name != "override" || dst.Repos[0].Path != "override-path" {
+		t.Fatalf("repos = %+v, want copied override repos", dst.Repos)
 	}
 }
 
