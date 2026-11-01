@@ -133,12 +133,12 @@
     whole; the same applies to a quoted key cut off inside escaped JSON
     (`\\\"token\\\":" x:"..."`) and to an escaped backslash before a closing
     quote (`"token:\\" x:{...}`). Because quote tracking is a heuristic, the
-    redaction is now the union of the previous scan and the new one: a value
-    either finds is redacted, so nothing the previous scan hid can become
-    readable; where they disagree, the redaction runs from the first value to
-    the end of the last. Local paths are matched against the text as either
-    scan leaves it, and Bearer tokens of eight or more characters are still
-    redacted before the new short-token rule runs.
+    previous redaction is kept whole and every new rule only adds to it: the
+    previous scan and its path patterns see exactly the text they always saw
+    (only the URL and long-Bearer rewrites run first), and the new scan, PEM
+    private keys, and short Bearer tokens report ranges of that same text, so
+    nothing the previous redaction hid can become readable. Overlapping or
+    touching ranges merge into one marker.
   - A PEM private key (`-----BEGIN ... PRIVATE KEY-----` through its END
     marker, or the end of the message) is replaced with
     `(redacted-private-key)`; an unquoted value used to stop at the first
@@ -152,8 +152,10 @@
     last name component, `pass`, `pw`, `auth`, `cookie`, and `session`
     (`DB_PASS=x`, `basic_auth=x`; unquoted they need `=` or a `:` without
     following whitespace, so `admin auth: <error>` stays readable).
-    `Cookie:` and `Set-Cookie:` header values run to the end of the line;
-    lower-case `cookie: <error>` stays readable.
+    `Cookie:` and `Set-Cookie:` header values, and lower-case `cookie:` or
+    `set-cookie:` values that start with a `name=value` pair (HTTP/2, proxies),
+    run to the end of the line; lower-case prose such as `invalid cookie:
+    missing name` stays readable.
   - `Authorization: Basic x`, an `Authorization` credential without a
     scheme, and Bearer tokens shorter than eight characters are redacted;
     the scheme stays readable, and so do short prose words after `Bearer`

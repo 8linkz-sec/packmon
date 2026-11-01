@@ -91,9 +91,8 @@ func RedactDiagnosticMessage(raw string) string {
 		return ""
 	}
 
-	msg = redactPrivateKeyBlocks(msg)
 	msg = httpURLPattern.ReplaceAllStringFunc(msg, redactURLInMessage)
-	msg = redactBearerTokens(msg)
+	msg = longBearerTokenPattern.ReplaceAllString(msg, "Bearer "+redactedValue)
 	return redactSecretsAndPaths(msg)
 }
 

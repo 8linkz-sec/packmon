@@ -116,6 +116,53 @@ func TestRedactDiagnosticMessageTracksQuotedFreeText(t *testing.T) {
 	})
 }
 
+// TestRedactDiagnosticMessageRewritesNothingBeforeBaseline pins inputs on
+// which a new rule that rewrote the text before the baseline scan and the
+// path patterns (the short-token Bearer rule eating a path's drive letter or
+// a key, a PEM rewrite removing the quote that made the baseline redact to
+// the end) revealed a value the baseline hides. A short Bearer token, a PEM
+// block, and the baseline's findings are now spans of the same text.
+func TestRedactDiagnosticMessageRewritesNothingBeforeBaseline(t *testing.T) {
+	t.Parallel()
+
+	for raw, want := range map[string]string{ //nolint:gosec // fake secret-bearing text verifies redaction.
+		`read token from Bearer C:\Users\alice\zqdir\token.txt failed`: `read token from Bearer (redacted-path) failed`,
+		`invalid header value "Bearer C:\Users\alice\zqdir\token.txt"`: `invalid header value "Bearer (redacted-path)`,
+		`Bearer sig="zq a b"`:                            `Bearer [redacted]`,
+		`b cBasic Basic "msg":"Bearer =token=}ZQPLANTED`: `b cBasic Basic "msg":"Bearer [redacted]`,
+		`-----BEGIN PRIVATE KEY----- password: {-----END PRIVATE KEY-----ZQPLANTED"x password: PGPASSWORD-----END PRIVATE KEY-----"`: `[redacted]`,
+	} {
+		got := RedactDiagnosticMessage(raw)
+		if strings.Contains(strings.ToLower(got), "zq") {
+			t.Errorf("RedactDiagnosticMessage(%q) = %q, leaked a zq fragment", raw, got)
+		}
+		if got != want {
+			t.Errorf("RedactDiagnosticMessage(%q) =\n%q\nwant\n%q", raw, got, want)
+		}
+	}
+}
+
+// TestRedactDiagnosticMessageRedactsLowerCaseCookieHeaders covers cookie
+// headers as HTTP/2 and proxies write them, in lower case: a cookie key whose
+// value starts with a name=value pair runs to the end of the line like a
+// capitalized header, while lower-case cookie prose without '=' stays
+// readable.
+func TestRedactDiagnosticMessageRedactsLowerCaseCookieHeaders(t *testing.T) {
+	t.Parallel()
+
+	assertExact(t, map[string]string{
+		`cookie: sid=zqabc123; other=zqx`:                                "cookie: [redacted]",
+		`set-cookie: connect.sid=zqabc; Path=/; HttpOnly`:                "set-cookie: [redacted]",
+		`cookie: _gh_sess=zqabc`:                                         "cookie: [redacted]",
+		"> GET / HTTP/2\n> cookie: sid=zqabc; theme=dark\n> accept: */*": "> GET / HTTP/2\n> cookie: [redacted]\n> accept: */*",
+		`http: invalid cookie: name=foo`:                                 "http: invalid cookie: [redacted]",
+	})
+	assertUnchanged(t, []string{
+		`invalid cookie: missing name`,
+		`read session cookie: http: named cookie not present`,
+	})
+}
+
 // TestRedactDiagnosticMessageNeverRevealsBaselineRedactions pins inputs on
 // which an extended-scan interpretation (an unmatched quote taken to open a
 // string, a less escaped quote taken to close one) would reveal a value the
@@ -324,11 +371,11 @@ func TestRedactDiagnosticMessageRedactsAuthorizationCredentials(t *testing.T) {
 		"invalid bearer auth scheme",
 		`WWW-Authenticate: Bearer realm="packmon"`,
 	})
-	assertExact(t, map[string]string{
+	assertExact(t, map[string]string{ //nolint:gosec // fake Bearer tokens verify redaction.
 		"expected Bearer authentication": "expected Bearer [redacted]",
 		// A short-token match must not consume the "Bearer" in front of a
 		// long token (corpus entry 63e81639636a3115).
-		"BeArer BeArer ZQPLANTED0": "Bearer [redacted] [redacted]",
+		"BeArer BeArer ZQPLANTED0": "BeArer [redacted] [redacted]",
 	})
 }
 
@@ -476,6 +523,7 @@ func TestRedactDiagnosticMessageKeepsCommonTextReadable(t *testing.T) {
 		`read session cookie: http: named cookie not present`,
 		`invalid cookie: missing name`,
 		`set-cookie: rejected by browser policy`,
+		`invalid cookie: missing name`,
 		`bypass=true compass=north passage=x passport=y`,
 		`auth_mode=basic auth_enabled=true cookie_name=sid session_count=3 pass_count=4 pw_hint=x`,
 		`primary_key=id public_key=ssh-ed25519 foreign_key=x keyboard=de keys=3`,
@@ -584,6 +632,9 @@ func FuzzRedactDiagnosticMessageKeepsBaselineRedactions(f *testing.F) {
 		{`prompt "passwd: " PGPASSWORD:"0 `, ` 0"`},
 		{`error "token:\\" credential:{"b": "`, `"}`},
 		{`Authorization: Bearer `, ` next`},
+		{`read token from Bearer C:\Users\a\`, `\t.txt`},
+		{`Bearer sig="`, ` b"`},
+		{`-----BEGIN PRIVATE KEY----- password: {-----END PRIVATE KEY-----`, `"x password: PGPASSWORD-----END PRIVATE KEY-----"`},
 	} {
 		f.Add(seed[0], seed[1])
 	}

@@ -4,11 +4,15 @@ import "strings"
 
 // The baseline scan is the secret-field scan as it stood before the extended
 // scan in secret_fields.go (component key names, structured and deeply
-// escaped values, but none of the later interpretations). redactSecretValues
-// redacts the union of both, so an extension that reads ambiguous text
-// differently (a quote that closes a string rather than opening a value) can
-// only add redaction: anything the baseline hides stays hidden. Keep this file
-// unchanged unless a change only adds redaction.
+// escaped values, but none of the later interpretations).
+// redactSecretsAndPaths redacts the union of both, so an extension that reads
+// ambiguous text differently (a quote that closes a string rather than opening
+// a value) can only add redaction: anything the baseline hides stays hidden.
+// Keep this file unchanged unless a change only adds redaction. It shares
+// helpers with the extended scan (scanQuotedValue, scanStructuredValue,
+// skipSeparatorSpace, the key-name helpers); TestBaselineRedactionMatchesGolden
+// pins the baseline's outputs, so a change to a shared helper that changes the
+// baseline fails it.
 
 // baselineSecretKeyWords and baselineKeySecretPrefixes are the key-name rules
 // of the baseline scan (see baselineIsSecretKeyName).

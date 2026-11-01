@@ -808,9 +808,13 @@ after a `session` component: `authToken`, `db_password`, `DB_PASSWORD`,
 `basic_auth`, `Set-Cookie`, but not `bypass`, `auth_mode`, or
 `session_count`), and an unquoted short key needs `=` or a `:` that is not
 followed by whitespace, so Go-wrapped errors such as `admin auth: connection
-refused` stay readable; `Cookie:` and `Set-Cookie:` header values, capitalized
-as headers are, run to the end of the line, while lower-case `cookie` is prose
-(`invalid cookie: missing name`) and follows the short-word rule. An `Authorization` or `auth` value keeps a known scheme
+refused` stay readable. A cookie header value runs to the end of the line,
+because it holds `;`-separated pairs: after `Cookie:` or `Set-Cookie:`
+capitalized as headers are, and after a lower-case `cookie:` or `set-cookie:`
+(as HTTP/2 and proxies write them) whose first token, up to whitespace or
+`;`, is a `name=value` pair; lower-case prose without one (`invalid cookie:
+missing name`) follows the short-word rule. An `Authorization` or `auth` value
+keeps a known scheme
 readable and redacts the credential after it (`Authorization: Basic
 [redacted]`). A secret word followed by more letters in the same component
 does not count, so `tokenizer`, `passwordless`, and `secretariat` stay
@@ -848,18 +852,26 @@ value (`password="a b"`) never open one. An unquoted key inside such a string
 closing quote, and its value is empty only for a label, whose separator the
 closing quote follows after nothing but whitespace and which whitespace or the
 end follows (`"Password:" PGPASSWORD=...`). Because these readings of quotes
-are heuristics, the redaction is the union of two scans of the same text: the
-baseline scan (the rules as they stood before the component-based key names
-were extended: the original secret words, no quote tracking, a quote right
-before an unquoted key as the only enclosing quote, and values that end at any
-`;` or `&`) and the extended scan described here. A value either scan finds is
-redacted, so no extension can reveal a value the baseline scan hides; where
-the two disagree, the union redacts from the first value to the end of the
-last (`"x password: a" PGPASSWORD:"0 s 0"` becomes `"x password: [redacted]`).
-Local paths are matched after the secret values, once as the baseline scan
-leaves the text and once as both scans leave it, so every path the baseline
-redaction hides stays hidden as well.
-The redaction runs in time linear in the message length.
+are heuristics, the redaction keeps the baseline redaction (the rules as they
+stood before the component-based key names were extended: URL and Bearer
+tokens of eight or more characters, the original secret words, no quote
+tracking, a quote right before an unquoted key as the only enclosing quote,
+values that end at any `;` or `&`, then local paths) and adds every other
+rule to it. Only the URL and long-Bearer rewrites change the text; the
+baseline scan, the PEM private keys, the short Bearer tokens, and the
+extended scan described here all report the byte ranges they redact in that
+same text, the local paths are matched once with the baseline's ranges and
+once with all ranges taken out, and the union of all ranges is replaced at
+once. So the baseline scan and its path patterns see exactly the text they
+always saw, and no new rule can reveal a value or a path the baseline
+redaction hides. Ranges that overlap or touch become one marker:
+`(redacted-path)` when a path is among them, else `[redacted]`, else
+`(redacted-private-key)`. Where the two scans read the same text differently,
+overlapping ranges therefore merge (`"x password: a" PGPASSWORD:"0 s 0"`
+becomes `"x password: [redacted]`). A golden fixture of messages and their
+baseline outputs (`internal/logsafe/testdata/baseline_golden.json`) pins the
+baseline, and a differential fuzz target checks that a value it hides stays
+hidden. The redaction runs in time linear in the message length.
 
 The built-in `/privacy` page is a deployment-neutral disclosure for the
 first-party admin session cookie and routine Packmon audit/scan metadata. It is

@@ -15,8 +15,8 @@ var (
 	privateKeyBlockPattern = regexp.MustCompile(`(?is)-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----|\z)`)
 
 	// longBearerTokenPattern is the baseline Bearer rule (tokens of
-	// minBearerTokenLen or more characters); bearerTokenPattern then catches
-	// the shorter tokens left behind.
+	// minBearerTokenLen or more characters), which rewrites the text before
+	// any scan; bearerTokenPattern then finds the shorter tokens left behind.
 	longBearerTokenPattern = regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}`)
 	bearerTokenPattern     = regexp.MustCompile(`(?i)\bBearer\s+([A-Za-z0-9._~+/=-]+)`)
 )
@@ -33,33 +33,42 @@ var bearerProseWords = []string{
 // redacted, prose word or not.
 const minBearerTokenLen = 8
 
-// redactPrivateKeyBlocks replaces every PEM private key block with a marker.
-func redactPrivateKeyBlocks(msg string) string {
+// privateKeySpans returns every PEM private key block.
+func privateKeySpans(msg string) []span {
 	if !strings.Contains(msg, "-----") {
-		return msg
+		return nil
 	}
-	return privateKeyBlockPattern.ReplaceAllLiteralString(msg, redactedPrivateKey)
+	var spans []span
+	for _, m := range privateKeyBlockPattern.FindAllStringIndex(msg, -1) {
+		spans = append(spans, span{m[0], m[1]})
+	}
+	return spans
 }
 
-// redactBearerTokens redacts the credential after "Bearer", whatever its
-// length; a shorter token than minBearerTokenLen stays readable only when it
-// is a word of prose (see bearerProseWords). The long tokens are redacted
-// first with the baseline rule, so a short-token match ("Bearer Bearer x")
-// cannot consume the "Bearer" in front of a long token.
-func redactBearerTokens(msg string) string {
-	msg = longBearerTokenPattern.ReplaceAllString(msg, "Bearer "+redactedValue)
-	return bearerTokenPattern.ReplaceAllStringFunc(msg, func(match string) string {
-		token := bearerTokenPattern.FindStringSubmatch(match)[1]
-		if len(token) < minBearerTokenLen {
-			word := strings.TrimRight(token, "=")
-			for _, prose := range bearerProseWords {
-				if strings.EqualFold(word, prose) {
-					return match
-				}
-			}
+// bearerTokenSpans returns the credentials after "Bearer" that the baseline
+// rule (longBearerTokenPattern, already applied to msg) left behind: tokens
+// shorter than minBearerTokenLen that are not a word of prose (see
+// bearerProseWords). "Bearer" stays as it is.
+func bearerTokenSpans(msg string) []span {
+	var spans []span
+	for _, m := range bearerTokenPattern.FindAllStringSubmatchIndex(msg, -1) {
+		token := msg[m[2]:m[3]]
+		if len(token) < minBearerTokenLen && isBearerProseWord(token) {
+			continue
 		}
-		return "Bearer " + redactedValue
-	})
+		spans = append(spans, span{m[2], m[3]})
+	}
+	return spans
+}
+
+func isBearerProseWord(token string) bool {
+	word := strings.TrimRight(token, "=")
+	for _, prose := range bearerProseWords {
+		if strings.EqualFold(word, prose) {
+			return true
+		}
+	}
+	return false
 }
 
 // entityQuotes are the HTML character references of the two quote characters

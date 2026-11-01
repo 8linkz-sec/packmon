@@ -82,11 +82,13 @@ type secretKey struct {
 	// scheme is set for auth and authorization keys, whose value may start
 	// with a readable scheme (see authSchemes).
 	scheme bool
-	// line is set for the header names Cookie and Set-Cookie (capitalized as
-	// headers are): a "Cookie:" value runs to the end of the line, because
-	// it holds ';'-separated pairs. Lower-case cookie is prose ("invalid
-	// cookie: missing name") and follows the short-word separator rule.
-	line bool
+	// cookie is set for cookie keys (Cookie, set-cookie): a cookie header
+	// value runs to the end of the line, because it holds ';'-separated
+	// pairs (see cookieHeaderValue).
+	cookie bool
+	// header is set for a cookie key capitalized as a header name (Cookie,
+	// Set-Cookie).
+	header bool
 }
 
 // classifySecretKey classifies a key name. The name is split into components
@@ -125,7 +127,8 @@ func classifySecretKey(name string) secretKey {
 		}
 	}
 	key.scheme = strings.EqualFold(last, "auth") || hasSuffixFold(last, "authorization")
-	key.line = last == "Cookie"
+	key.cookie = strings.EqualFold(last, "cookie")
+	key.header = last == "Cookie"
 	return key
 }
 
@@ -257,7 +260,7 @@ func closesQuotedText(msg string, i int) bool {
 // skipped, so the quotes of password="a b" never open a string. A line break
 // ends any open string, so an unmatched quote in one line of multi-line
 // output does not reach the next. The state is a heuristic: whatever it gets
-// wrong, the baseline scan still redacts (see redactSecretValues).
+// wrong, the baseline scan still redacts (see redactSecretsAndPaths).
 type quotedText struct {
 	open byte
 }
@@ -285,32 +288,42 @@ type span struct {
 	start, end int
 }
 
-// redactSecretsAndPaths replaces the values of secret keys with "[redacted]"
-// and local filesystem paths with "(redacted-path)". It redacts the union of
-// two scans over the same text: the baseline scan (see baselineSecretSpans)
-// and the extended scan (quotedKeySecretSpans, entityQuotedKeySpans, and
-// assignmentSecretSpans). The extended scan reads ambiguous text in ways the
-// baseline does not (a quote that closes a quoted label instead of opening a
-// value), so the union makes every extension add redaction without ever
-// revealing a value the baseline hides. Within each scan the unquoted keys are
-// scanned after the quoted ones, with the values already found masked (see
-// maskSpans), so a quoted value is never cut at a ';' or space by an unquoted
-// assignment. Paths are matched after the secret values, as they always were,
-// once with the baseline values masked and once with all values masked, so a
-// path the baseline redaction exposes to the path patterns is redacted too.
-// Every scan is linear in the length of msg.
+// redactSecretsAndPaths redacts msg after the URL and long-Bearer rewrites,
+// which are the only rewrites before it: every other rule finds spans of
+// this same text, and the union of all spans is replaced at once (see
+// redactSpans). The baseline scan (see baselineSecretSpans) and the path
+// patterns on the baseline result therefore see exactly the text they always
+// saw, and every new rule (PEM private keys, short Bearer tokens, and the
+// extended scan of quotedKeySecretSpans, entityQuotedKeySpans, and
+// assignmentSecretSpans) can only add redaction: no value or path the
+// baseline hides becomes readable. The extended scan reads ambiguous text in
+// ways the baseline does not (a quote that closes a quoted label instead of
+// opening a value); it runs with the private keys and short Bearer tokens
+// masked (see maskSpans). Within each scan the unquoted keys are scanned
+// after the quoted ones, with the values already found masked, so a quoted
+// value is never cut at a ';' or space by an unquoted assignment. Paths are
+// matched after the secret values, as they always were, once with the
+// baseline values masked and once with all spans masked. Every scan is linear
+// in the length of msg.
 func redactSecretsAndPaths(msg string) string {
 	baselineQuoted := baselineSecretSpans(msg, true)
 	baseline := append(baselineQuoted, baselineSecretSpans(maskSpans(msg, baselineQuoted), false)...)
 
-	quoted := quotedKeySecretSpans(msg)
-	masked := maskSpans(msg, quoted)
+	keys := privateKeySpans(msg)
+	bearers := bearerTokenSpans(msg)
+	masked := maskSpans(msg, keys, bearers)
+	quoted := quotedKeySecretSpans(masked)
+	masked = maskSpans(masked, quoted)
 	entity := entityQuotedKeySpans(masked)
-	assigned := assignmentSecretSpans(maskSpans(masked, entity))
+	masked = maskSpans(masked, entity)
+	assigned := assignmentSecretSpans(masked)
 
 	baselineMasked := maskSpans(msg, baseline)
-	paths := append(pathSpans(baselineMasked), pathSpans(maskSpans(baselineMasked, append(quoted, append(entity, assigned...)...)))...)
-	return redactSpans(msg, paths, baseline, quoted, entity, assigned)
+	paths := append(pathSpans(baselineMasked), pathSpans(maskSpans(masked, baseline))...)
+	return redactSpans(msg,
+		spanGroup{redactedPrivateKey, keys},
+		spanGroup{redactedValue, slices.Concat(baseline, bearers, quoted, entity, assigned)},
+		spanGroup{redactedPath, paths})
 }
 
 // pathSpans returns the local filesystem paths in msg: Windows paths, then
@@ -332,40 +345,49 @@ func pathSpans(msg string) []span {
 // "(redacted-path)" marker it becomes (no quote, whitespace, backslash, slash,
 // or key character, and no word character at its edges), but at the original
 // offsets, so the spans of all scans share one coordinate system.
-func maskSpans(msg string, spans []span) string {
-	if len(spans) == 0 {
-		return msg
-	}
-	masked := []byte(msg)
-	for _, s := range spans {
-		for i := s.start; i < s.end; i++ {
-			masked[i] = 0
+func maskSpans(msg string, lists ...[]span) string {
+	var masked []byte
+	for _, list := range lists {
+		for _, s := range list {
+			if masked == nil {
+				masked = []byte(msg)
+			}
+			for i := s.start; i < s.end; i++ {
+				masked[i] = 0
+			}
 		}
+	}
+	if masked == nil {
+		return msg
 	}
 	return string(masked)
 }
 
-// replaceSpans replaces the union of the spans with "[redacted]"; overlapping
-// spans become one marker.
+// replaceSpans replaces the union of the spans with "[redacted]"; overlapping or
+// touching spans become one marker.
 func replaceSpans(msg string, lists ...[]span) string {
-	return redactSpans(msg, nil, lists...)
+	return redactSpans(msg, spanGroup{redactedValue, slices.Concat(lists...)})
 }
 
-// redactSpans replaces the union of the path spans and the secret spans:
-// overlapping spans become one marker, "(redacted-path)" when a path span is
-// among them and "[redacted]" otherwise.
-func redactSpans(msg string, paths []span, secrets ...[]span) string {
+// spanGroup is a list of spans and the marker that replaces them. In the
+// argument list of redactSpans, a later group's marker wins where spans of
+// several groups overlap.
+type spanGroup struct {
+	marker string
+	spans  []span
+}
+
+// redactSpans replaces the union of the spans of all groups: overlapping or
+// touching spans become one marker, that of the latest group among them.
+func redactSpans(msg string, groups ...spanGroup) string {
 	type marked struct {
 		span
-		path bool
+		group int
 	}
 	var all []marked
-	for _, s := range paths {
-		all = append(all, marked{s, true})
-	}
-	for _, list := range secrets {
-		for _, s := range list {
-			all = append(all, marked{s, false})
+	for g, group := range groups {
+		for _, s := range group.spans {
+			all = append(all, marked{s, g})
 		}
 	}
 	if len(all) == 0 {
@@ -375,17 +397,13 @@ func redactSpans(msg string, paths []span, secrets ...[]span) string {
 	var out strings.Builder
 	copied := 0
 	for i := 0; i < len(all); {
-		start, end, path := all[i].start, all[i].end, all[i].path
-		for i++; i < len(all) && all[i].start < end; i++ {
+		start, end, group := all[i].start, all[i].end, all[i].group
+		for i++; i < len(all) && all[i].start <= end; i++ {
 			end = max(end, all[i].end)
-			path = path || all[i].path
+			group = max(group, all[i].group)
 		}
 		out.WriteString(msg[copied:start])
-		if path {
-			out.WriteString(redactedPath)
-		} else {
-			out.WriteString(redactedValue)
-		}
+		out.WriteString(groups[group].marker)
 		copied = end
 	}
 	out.WriteString(msg[copied:])
@@ -493,7 +511,10 @@ func secretFieldValue(msg string, start, end int, quotedKeys bool, enclosing byt
 	switch {
 	case ok:
 		key = classifySecretKey(msg[start:end])
-		if !quotedKeys && key.match == matchShort && !key.line && !shortKeySeparator(msg, end) {
+		if !quotedKeys && cookieHeaderValue(msg, end, valueStart, key) {
+			return valueStart, scanLineValue(msg, valueStart, enclosing), key
+		}
+		if !quotedKeys && key.match == matchShort && !shortKeySeparator(msg, end) {
 			return 0, 0, secretKey{}
 		}
 	case !quotedKeys:
@@ -510,9 +531,6 @@ func secretFieldValue(msg string, start, end int, quotedKeys bool, enclosing byt
 	if quotedKeys {
 		return valueStart, scanQuotedKeyValue(msg, valueStart, quote), key
 	}
-	if key.line && strings.TrimLeft(msg[end:valueStart], " \t\n\f\r")[0] == ':' {
-		return valueStart, scanLineValue(msg, valueStart, enclosing), key
-	}
 	if key.scheme {
 		if credential := skipAuthScheme(msg, valueStart); credential > valueStart {
 			if credentialEnd := scanAssignmentValue(msg, credential, enclosing); credentialEnd > credential {
@@ -521,6 +539,27 @@ func secretFieldValue(msg string, start, end int, quotedKeys bool, enclosing byt
 		}
 	}
 	return valueStart, scanAssignmentValue(msg, valueStart, enclosing), key
+}
+
+// cookieHeaderValue reports whether the unquoted cookie key that ends at
+// msg[end] is a Cookie or Set-Cookie header whose value starts at valueStart:
+// the separator is ':', and the key is capitalized as a header name (Cookie:)
+// or the value's first token, up to whitespace or ';', is a name=value pair
+// (cookie: sid=x, as HTTP/2 and proxies write it). "invalid cookie: missing
+// name" is prose and follows the short-word separator rule.
+func cookieHeaderValue(msg string, end, valueStart int, key secretKey) bool {
+	if !key.cookie || strings.TrimLeft(msg[end:valueStart], " \t\n\f\r")[0] != ':' {
+		return false
+	}
+	if key.header {
+		return true
+	}
+	for i := valueStart; i < len(msg) && !isSpace(msg[i]) && msg[i] != ';'; i++ {
+		if msg[i] == '=' {
+			return true
+		}
+	}
+	return false
 }
 
 // shortKeySeparator reports whether the separator that secretKeySeparator
@@ -568,7 +607,7 @@ func flagValueStart(msg string, start, end int) (int, secretKey, bool) {
 	if i == end || i == len(msg) || msg[i] == '-' || isSpace(msg[i]) {
 		return 0, secretKey{}, false
 	}
-	key.line = false
+	key.cookie = false
 	return i, key, true
 }
 
