@@ -175,9 +175,12 @@ Packmon's maintained deployment surfaces are intentionally narrow:
   every image rebuild into the slowest and most failure-prone operation the
   server performs.
 - `deploy/n8n` contains workflow templates that call the Packmon server over
-  authenticated HTTPS APIs. Command-node templates use environment variables,
-  short-lived `mktemp` files with cleanup traps, and path-minimized webhook
-  responses.
+  authenticated HTTPS APIs. Command-node templates use environment variables
+  and path-minimized webhook responses and write no scan or report artifacts:
+  `deploy/n8n/on-demand-scan.sh` validates `PACKMON_SERVER`,
+  `PACKMON_API_KEY`, and a relative, traversal-free `PACKMON_SCAN_PATH`, then
+  runs `packmon scan` in `--mode remote --require-remote` with no output-file
+  flags.
 - The first-party GitHub Actions workflows and the GitLab CI template were
   removed in August 2026 (internal deployment, no hosted CI). Build, test,
   lint, and security gates run locally via the verification gate in
@@ -277,6 +280,16 @@ Important behavior:
   Malicious and active supply-chain risk findings still block independently of
   that threshold; historical ReversingLabs malware-incident evidence is `LOW`
   reputation info and does not block by itself.
+- The CLI's own `--fail-on` threshold is authoritative for the CLI result in
+  every mode. In `remote` mode (and auto mode served remotely) the CLI takes the
+  server's findings but recomputes `findings_blocking` locally from them with
+  its `--fail-on` value and records that value as `block_threshold`; the
+  server's `findings_blocking` and `block_threshold` are not carried over. The
+  CLI exit code, CLI JSON/SARIF/JUnit/HTML output, and CLI-sent webhooks
+  therefore follow `--fail-on`. The server's effective threshold
+  (`PACKMON_BLOCK_THRESHOLD` or the admin runtime setting) applies only to the
+  server's own `POST /api/v1/check` response and its scan log, so the two can
+  differ for the same scan.
 - Auto mode reports the actual execution path in `ScanResult.mode`: successful
   server-backed checks report `remote`, while local fallback reports `local`.
 - Discovery failures for in-scope files or directories are operational errors;
@@ -1152,7 +1165,10 @@ precedence.
 
 API keys are named with a bounded operator label, hashed at rest, track
 `last_used_at`, support revocation, permanent deletion after revocation, and
-require an RFC3339 UTC `expires_at` value no more than 90 days in the future.
+require a UTC `expires_at` value no more than 365 days in the future. The
+admin UI takes the lifetime in whole days (presets 1, 7, 14, 30, 90, 180, and
+365 days, default 30, or a custom value from 1 to 365) and stores creation time
+plus that many days.
 Creating a key in the admin UI requires current-password step-up verification
 before the secret is generated. Revoked or expired keys are not accepted by
 production `/api/v1/*` authentication. Deleting a revoked key permanently
@@ -1256,9 +1272,15 @@ Build and tagged test gate:
 ```bash
 go build -o .build/packmon ./cmd/packmon
 go build -o .build/packmon-server ./cmd/packmon-server
-GOTMPDIR="$PWD/.gotmp" PACKMON_TEST_BIN_DIR=.build go test -count=1 -tags integration ./tests/integration
+GOTMPDIR="$PWD/.gotmp" PACKMON_TEST_BIN_DIR=.build go test -count=1 -tags integration ./tests/integration ./internal/db/postgres ./internal/db/postgres/migrations ./internal/server
 GOTMPDIR="$PWD/.gotmp" PACKMON_TEST_BIN_DIR=.build go test -count=1 -tags e2e ./tests/e2e
 ```
+
+The `integration` tag gates tests in four packages: `./tests/integration`,
+`./internal/db/postgres`, `./internal/db/postgres/migrations`, and
+`./internal/server`. `make test-integration` builds both binaries and runs all
+four; running only `./tests/integration` skips the tagged PostgreSQL store,
+migration, and server tests.
 
 The Docker/PostgreSQL production integration test is the strongest local proxy
 for a real deployment:

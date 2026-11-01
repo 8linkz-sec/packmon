@@ -215,7 +215,10 @@ coverage loss in server/agent deployments.
 
 API keys are stored hashed. Plaintext keys are shown only at creation time.
 Keys have bounded labels/names for auditability, record `last_used_at`, must
-have an RFC3339 UTC `expires_at` timestamp no more than 90 days in the future,
+have a UTC `expires_at` timestamp no more than 365 days in the future (the
+admin UI takes a lifetime in whole days -- a preset of 1, 7, 14, 30, 90, 180,
+or 365 days, default 30, or a custom value from 1 to 365 -- and stores creation
+time plus that many days),
 may be revoked, and may be permanently deleted after revocation; the delete
 action stays recorded in the admin audit log, and scan history keeps its rows
 with the key reference cleared. Creating a new API key from the admin
