@@ -750,8 +750,8 @@ itself: index builds (including the rebuild of an `INVALID` or missing
 concurrently built index) and data repairs on a large catalog run until they
 finish or `SIGINT`/`SIGTERM` cancels the run. A cancelled run asks PostgreSQL to
 cancel the running statement, then records the failed attempt and releases the
-advisory lock on a separate short deadline, and the version stays dirty as for
-any other migration failure. Each applied migration also writes an append-only
+advisory lock on a separate short deadline; a migration that had started leaves
+its version dirty as for any other migration failure. Each applied migration also writes an append-only
 `schema_migration_events` row with start/finish timestamps, success state,
 dirty state, name, and checksum metadata.
 

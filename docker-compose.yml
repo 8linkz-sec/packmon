@@ -175,6 +175,9 @@ services:
 
   packmon-migrate:
     profiles: ["manual"]
+    # Give a cancelled migrate run time to cancel its statement server-side,
+    # record the failure and release the advisory lock before SIGKILL.
+    stop_grace_period: 30s
     logging: *default-logging
     build:
       context: .
