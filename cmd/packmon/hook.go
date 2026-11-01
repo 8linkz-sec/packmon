@@ -335,7 +335,9 @@ func newHookStatusCmd() *cobra.Command {
 					continue
 				}
 				if err != nil {
-					fmt.Printf("  %-12s error: %v\n", hookType+":", err)
+					// The stat error embeds the hook path, which comes from
+					// the repository's .git file.
+					fmt.Printf("  %-12s error: %s\n", hookType+":", termtext.Sanitize(err.Error()))
 					continue
 				}
 				switch {

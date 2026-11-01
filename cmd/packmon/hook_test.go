@@ -345,6 +345,41 @@ func TestHookStatusReportsANonExecutableManagedHook(t *testing.T) {
 	}
 }
 
+// TestHookStatusSanitizesStatErrors covers the status error line: the stat
+// error embeds the hook path, which comes from the repository's .git gitdir
+// file, so a crafted path must not reach the terminal raw.
+func TestHookStatusSanitizesStatErrors(t *testing.T) {
+	root := t.TempDir()
+	gitDir := filepath.Join(t.TempDir(), "gitdir\x1b[31m")
+	if runtime.GOOS != "windows" {
+		// A regular file in place of the git dir makes the hook stat fail
+		// with ENOTDIR. Windows rejects the control character in the name
+		// itself, which fails the stat the same way.
+		if err := os.WriteFile(gitDir, []byte("not a directory\n"), 0o600); err != nil {
+			t.Fatalf("write gitdir placeholder: %v", err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, ".git"), []byte("gitdir: "+gitDir+"\n"), 0o600); err != nil {
+		t.Fatalf("write .git file: %v", err)
+	}
+	t.Chdir(root)
+
+	output := captureStdout(t, func() {
+		if err := newHookStatusCmd().Execute(); err != nil {
+			t.Fatalf("hook status: %v", err)
+		}
+	})
+	if !strings.Contains(output, "error:") {
+		t.Fatalf("hook status output = %q, want a stat error line", output)
+	}
+	if strings.Contains(output, "\x1b") {
+		t.Fatalf("hook status error line contains a raw terminal control:\n%q", output)
+	}
+	if !strings.Contains(output, `gitdir\x1B[31m`) {
+		t.Fatalf("hook status output missing the sanitized path:\n%q", output)
+	}
+}
+
 func TestHookFileExecutable(t *testing.T) {
 	t.Parallel()
 
