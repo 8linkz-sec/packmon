@@ -62,7 +62,9 @@
   validation but the store rejects a value: an EPSS score or percentile too
   small for the stored precision, a NUL character in a text or JSON field, a
   record that fails the store's own version-JSON checks, or a CHECK
-  constraint. This covers every import path (OSV/GHSA, OpenSSF/Socket,
+  constraint. Only an allowlist of PostgreSQL value errors (SQLSTATE 22001,
+  22003, 22007, 22008, 22021, 22P02, 22P05) and CHECK violations (23514) are
+  treated this way; other database errors stay `500`. This covers every import path (OSV/GHSA, OpenSSF/Socket,
   VulnCheck, CISA KEV and EPSS, buffered and streamed). The response and the
   recorded `rejected` feed status carry the fixed message "feed import
   contains values the store cannot accept"; the detailed store error is only

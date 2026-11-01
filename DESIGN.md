@@ -928,14 +928,18 @@ ms, the largest value that converts to a Go `time.Duration`; larger values are
 rejected with `400`. Malicious feed imports cannot persist malformed
 exact-version JSON; invalid rows fail the transaction instead of becoming
 all-version blocking findings. Values that pass the request validation but
-that the store itself rejects -- its own record checks, a PostgreSQL data
-exception such as a `real` underflow or a NUL character, or a CHECK
-constraint -- are a client error as well: every import path (vulnerability,
+that the store itself rejects -- its own record checks, a CHECK constraint
+(SQLSTATE 23514), or one of the PostgreSQL value errors 22001 (too long),
+22003 (numeric out of range, including a `real` underflow), 22007/22008
+(datetime format/overflow), 22021 (a NUL byte in text), 22P02 (invalid text
+representation) or 22P05 (a `\u0000` escape in `jsonb`) -- are a client error
+as well: every import path (vulnerability,
 malicious, VulnCheck, CISA KEV, EPSS, buffered or streamed) answers `400` with
 the fixed message "feed import contains values the store cannot accept",
 records a `rejected` feed status, and commits nothing. The store's detailed
-error goes only to the server log. Store outages and other database errors
-stay `500`.
+error goes only to the server log. Store outages and all other database
+errors, including the remaining class 22 data exceptions, stay `500` and are
+logged at error level.
 Feed import strictness must be visible to operators and server/agent users.
 Rejected imports must expose bounded diagnostics for feed name, rejected record
 count, rejection reason classes, correlation ID, client/API-key attribution when

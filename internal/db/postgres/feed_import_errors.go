@@ -3,28 +3,40 @@ package postgres
 import (
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/8linkz-sec/packmon/internal/db"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// postgresCheckViolation is SQLSTATE check_violation: a row value failed a
-// CHECK constraint such as the version JSON shape checks.
-const postgresCheckViolation = "23514"
+// feedImportDataErrorCodes are the SQLSTATE codes that mean PostgreSQL refused
+// an imported value itself. Other data exceptions (class 22, for example
+// division by zero or an invalid parameter value) point at a query or server
+// problem and stay server errors.
+var feedImportDataErrorCodes = map[string]struct{}{
+	"22001": {}, // string_data_right_truncation: value too long for the column
+	"22003": {}, // numeric_value_out_of_range, including a real underflow
+	"22007": {}, // invalid_datetime_format
+	"22008": {}, // datetime_field_overflow
+	"22021": {}, // character_not_in_repertoire: a NUL byte in text
+	"22P02": {}, // invalid_text_representation
+	"22P05": {}, // untranslatable_character: a \u0000 escape in jsonb
+	"23514": {}, // check_violation, such as the version JSON shape checks
+}
 
 // classifyFeedImportDataError marks err as db.ErrInvalidFeedImportData when
-// PostgreSQL refused the imported values themselves: any data exception (SQLSTATE
-// class 22, for example a real underflow, a NUL byte in text or an unsupported
-// \u0000 escape in jsonb) or a CHECK violation. Every other error, including
-// connection loss, cancellation and unique/foreign-key conflicts, is returned
-// unchanged so it keeps surfacing as a server-side failure.
+// PostgreSQL refused the imported values themselves (feedImportDataErrorCodes).
+// Every other error, including connection loss, cancellation, unique and
+// foreign-key conflicts and other data exceptions, is returned unchanged so it
+// keeps surfacing as a server-side failure.
 func classifyFeedImportDataError(err error) error {
 	if err == nil || errors.Is(err, db.ErrInvalidFeedImportData) {
 		return err
 	}
 	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && (strings.HasPrefix(pgErr.Code, "22") || pgErr.Code == postgresCheckViolation) {
+	if !errors.As(err, &pgErr) {
+		return err
+	}
+	if _, ok := feedImportDataErrorCodes[pgErr.Code]; ok {
 		return fmt.Errorf("%w: %w", db.ErrInvalidFeedImportData, err)
 	}
 	return err

@@ -212,9 +212,11 @@ when available. The admin/web UI and feed-status API must surface rejected
 imports, the last successful usable import timestamp, and source-level finding
 or blocking spikes so operators can distinguish strict validation from hidden
 coverage loss in server/agent deployments. When the store rather than the
-request validation rejects imported values (a database data exception or CHECK
-violation), the response and the recorded rejection reason use a fixed generic
-message; table, column and database error text stay in the server log.
+request validation rejects imported values (a CHECK violation or one of an
+allowlist of PostgreSQL value errors, see DESIGN.md "Feed Sources"), the
+response and the recorded rejection reason use a fixed generic message; table,
+column and database error text stay in the server log. Other database errors
+are not reclassified as client errors.
 Schema repairs must not turn malformed malicious-finding data into broader
 blocking: migration 050 quarantines (tombstones) an active malicious finding
 whose ranges fail the stricter check and that has no exact versions, rather
