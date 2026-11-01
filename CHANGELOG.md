@@ -27,6 +27,14 @@
   echoed the connection URL, secret assignments, or local filesystem paths were
   logged verbatim. Diagnostic redaction now also strips credentials, paths, and
   query strings from `postgres://` and `postgresql://` URLs.
+- `PACKMON_SERVER_PUBLIC_HOST` must now be a bare `host[:port]`. Values such
+  as `packmon.internal#fragment`, `packmon.internal?x=1`, a host with
+  whitespace, control characters, a percent-escape, a non-ASCII name, a
+  zone-scoped or bracketed non-IPv6 literal, a signed (`:+443`) or empty port
+  were accepted and produced broken redirects such as
+  `https://packmon.internal#fragment/admin`; the server now refuses to start
+  with a clear configuration error. The HTTPS redirect builder also drops such
+  hosts.
 - Local scans no longer report ReversingLabs reputation findings that the
   server's `/api/v1/check` ignores. `GET /api/v1/sync` now exports reputation
   rows only while ReversingLabs is enabled in `self` mode; otherwise it sends

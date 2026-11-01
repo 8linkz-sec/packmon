@@ -369,7 +369,11 @@ If a proxy is not trusted:
 - host/proto behavior must not trust attacker-supplied headers.
 
 HTTPS redirect behavior must use configured public host data, not arbitrary
-request `Host` values.
+request `Host` values. Startup rejects a `PACKMON_SERVER_PUBLIC_HOST` that is
+not a bare `host[:port]` (a hostname, IPv4 address, or IPv6 literal with an
+optional numeric port): a scheme, path, query, fragment, userinfo,
+percent-escape, whitespace, or control character would change or truncate the
+generated `https://` redirect target.
 
 Production startup must fail unless transport security is configured through
 in-app TLS or a trusted TLS-terminating reverse proxy. The only exception is

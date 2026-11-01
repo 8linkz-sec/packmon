@@ -76,7 +76,12 @@ func redirectTargetHost(configuredHost, requestHost string) string {
 
 func sanitizeHost(raw string) string {
 	raw = strings.TrimSpace(raw)
-	if raw == "" || strings.ContainsAny(raw, "/\\@") {
+	// A path, userinfo, query, fragment, or percent-escape delimiter, or any
+	// whitespace or control character, is not part of a bare host[:port] and
+	// would change or truncate the redirect target.
+	if raw == "" || strings.ContainsAny(raw, "/\\@?#%") || strings.ContainsFunc(raw, func(r rune) bool {
+		return r <= ' ' || r == 0x7f
+	}) {
 		return ""
 	}
 	return raw
