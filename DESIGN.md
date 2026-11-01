@@ -172,7 +172,16 @@ Packmon's maintained deployment surfaces are intentionally narrow:
   Active malicious-package search uses partial covering indexes so broad and
   severity-filtered searches can aggregate the narrow index entries without
   scanning the wide finding heap. Those indexes are built concurrently by the
-  explicit migration command.
+  explicit migration command. Because an interrupted concurrent build leaves
+  an `INVALID` index that `IF NOT EXISTS` would keep, the migrator drops an
+  `INVALID` index of the same name before every concurrent build of a
+  no-transaction migration, fails the migration (dirty) unless the build left
+  a valid index, and on every migrate run rebuilds concurrently any `INVALID`
+  index of an already applied migration (only the index build is rerun). A
+  dirty migration that only builds indexes concurrently with `IF NOT EXISTS`
+  (049) is retry-safe: migrate still refuses the dirty database but names the
+  retry path (clear its dirty marker, rerun migrate) instead of a backup
+  restore. Dirty state is never cleared automatically.
 - `docker-compose.server.yml` is the self-contained production Compose model
   (no base or override file). It keeps PostgreSQL and `packmon-server` on
   `restart: unless-stopped` while the one-shot `packmon-migrate` and
