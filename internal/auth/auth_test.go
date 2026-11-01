@@ -176,3 +176,138 @@ func TestValidateAdminPasswordCountsCharactersNotBytes(t *testing.T) {
 		})
 	}
 }
+
+// TestEqualizePasswordCheckUsesARealCostBcryptComparison keeps the dummy
+// comparison as expensive as a real CheckPassword call: it must run against a
+// valid hash with the production cost, or an unknown username would still
+// answer faster than a wrong password.
+func TestEqualizePasswordCheckUsesARealCostBcryptComparison(t *testing.T) {
+	EqualizePasswordCheck("any-submitted-password")
+	EqualizePasswordCheck(strings.Repeat("p", 100))
+
+	cost, err := bcrypt.Cost(dummyPasswordHash)
+	if err != nil {
+		t.Fatalf("dummy hash is not a valid bcrypt hash: %v", err)
+	}
+	if cost != bcryptCost {
+		t.Fatalf("dummy hash cost = %d, want bcryptCost %d", cost, bcryptCost)
+	}
+	if CheckPassword(string(dummyPasswordHash), "any-submitted-password") {
+		t.Fatal("dummy hash matched a submitted password")
+	}
+}
+
+// TestPrepareLoginEqualizerGeneratesTheHashUpFront lets server startup pay for
+// the dummy hash, so the first unknown-username login costs one comparison,
+// not a generation plus a comparison.
+func TestPrepareLoginEqualizerGeneratesTheHashUpFront(t *testing.T) {
+	PrepareLoginEqualizer()
+
+	if cost, err := bcrypt.Cost(dummyPasswordHash); err != nil || cost != bcryptCost {
+		t.Fatalf("dummy hash after PrepareLoginEqualizer = cost %d, err %v; want a bcryptCost hash", cost, err)
+	}
+}
+
+// TestLoginEqualizerHashFallsBackToEmbeddedHash keeps equalization from
+// silently disappearing: when generation fails, or yields a hash cheaper than
+// the production cost, the embedded production-cost hash is used instead of a
+// nil hash that every comparison would reject instantly.
+func TestLoginEqualizerHashFallsBackToEmbeddedHash(t *testing.T) {
+	t.Parallel()
+
+	weak, err := bcrypt.GenerateFromPassword([]byte("weak"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("GenerateFromPassword(MinCost) error = %v", err)
+	}
+	for _, tt := range []struct {
+		name     string
+		generate func() ([]byte, error)
+	}{
+		{name: "generation error", generate: func() ([]byte, error) { return nil, errors.New("entropy unavailable") }},
+		{name: "empty hash", generate: func() ([]byte, error) { return nil, nil }},
+		{name: "cheaper cost", generate: func() ([]byte, error) { return weak, nil }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := loginEqualizerHash(tt.generate); string(got) != fallbackLoginEqualizerHash {
+				t.Fatalf("loginEqualizerHash() = %q, want the embedded fallback hash", got)
+			}
+		})
+	}
+}
+
+// TestFallbackLoginEqualizerHashIsAValidProductionCostHash proves the embedded
+// fallback performs a full-cost comparison rather than failing fast on a
+// malformed hash.
+func TestFallbackLoginEqualizerHashIsAValidProductionCostHash(t *testing.T) {
+	t.Parallel()
+
+	cost, err := bcrypt.Cost([]byte(fallbackLoginEqualizerHash))
+	if err != nil || cost != bcryptCost {
+		t.Fatalf("fallback hash cost = %d, err %v; want bcryptCost %d", cost, err, bcryptCost)
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(fallbackLoginEqualizerHash), []byte("any-submitted-password")); !errors.Is(err, bcrypt.ErrMismatchedHashAndPassword) {
+		t.Fatalf("fallback hash comparison error = %v, want a full comparison ending in a mismatch", err)
+	}
+}
+
+// TestLoginEqualizerHashKeepsAGeneratedProductionCostHash uses the generated
+// hash when it is valid.
+func TestLoginEqualizerHashKeepsAGeneratedProductionCostHash(t *testing.T) {
+	t.Parallel()
+
+	generated, err := bcrypt.GenerateFromPassword([]byte("generated"), bcryptCost)
+	if err != nil {
+		t.Fatalf("GenerateFromPassword() error = %v", err)
+	}
+	if got := loginEqualizerHash(func() ([]byte, error) { return generated, nil }); string(got) != string(generated) {
+		t.Fatal("loginEqualizerHash() replaced a valid generated hash")
+	}
+}
+
+// TestValidateAdminPasswordRejectsPasswordsOverBcryptLimit keeps the policy in
+// step with bcrypt, which refuses more than MaxAdminPasswordBytes bytes. A
+// longer password used to pass validation and then fail hashing, so a password
+// change showed the generic update failure and bootstrap a hash error.
+func TestValidateAdminPasswordRejectsPasswordsOverBcryptLimit(t *testing.T) {
+	t.Parallel()
+
+	if MaxAdminPasswordBytes != 72 {
+		t.Fatalf("MaxAdminPasswordBytes = %d, want the bcrypt input limit 72", MaxAdminPasswordBytes)
+	}
+	for _, tt := range []struct {
+		name     string
+		password string
+		wantErr  error
+	}{
+		{name: "72 ASCII bytes", password: strings.Repeat("a", 72)},
+		{name: "73 ASCII bytes", password: strings.Repeat("a", 73), wantErr: ErrAdminPasswordTooLong},
+		// 24 three-byte runes are exactly 72 bytes.
+		{name: "72 multi-byte bytes", password: strings.Repeat("一", 24)},
+		// 25 three-byte runes are only 25 characters but 75 bytes.
+		{name: "75 multi-byte bytes", password: strings.Repeat("一", 25), wantErr: ErrAdminPasswordTooLong},
+		{name: "too short", password: "short", wantErr: ErrAdminPasswordTooShort},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := ValidateAdminPassword(tt.password)
+			if tt.wantErr == nil {
+				if err != nil {
+					t.Fatalf("ValidateAdminPassword(%d bytes) error = %v, want nil", len(tt.password), err)
+				}
+				if _, hashErr := HashPassword(tt.password); hashErr != nil {
+					t.Fatalf("HashPassword(%d bytes) error = %v, want a password the policy accepts to hash", len(tt.password), hashErr)
+				}
+				return
+			}
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("ValidateAdminPassword(%d bytes) error = %v, want %v", len(tt.password), err, tt.wantErr)
+			}
+		})
+	}
+	if errors.Is(ErrAdminPasswordTooLong, ErrAdminPasswordTooShort) || !strings.Contains(ErrAdminPasswordTooLong.Error(), "72 bytes") {
+		t.Fatalf("ErrAdminPasswordTooLong = %v, want its own error naming the 72-byte maximum", ErrAdminPasswordTooLong)
+	}
+}

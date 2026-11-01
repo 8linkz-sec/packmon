@@ -83,6 +83,56 @@
   local scan-history write fails, and returns the history error afterwards,
   matching a normal `packmon scan`. Previously the artifacts were silently
   omitted while the HTML report was still written.
+- A Socket.dev or ReversingLabs feed setting change no longer leaves the
+  refresh-queue workers stopped when the previous queue generation misses the
+  restart deadline. The replacement now starts as soon as that generation
+  exits, with the settings current at that time; before, both providers'
+  queue processing stayed stopped until another effective change or a server
+  restart, because saving the same settings again is a no-op.
+- The production startup schema check now redacts and bounds the database
+  error it logs, like the fatal startup log already did. Driver errors that
+  echoed the connection URL, secret assignments, or local filesystem paths were
+  logged verbatim. Diagnostic redaction now also strips credentials, paths, and
+  query strings from `postgres://` and `postgresql://` URLs. The same
+  redact-and-bound step now covers the server's other error logs: the startup
+  package-name repair, background startup tasks, queue-worker status
+  reads/writes, audit-retention prunes, queue-processor and retention-worker
+  exits, feed-syncer registration, invalid persisted feed modes, and the
+  plain-stderr fatal message printed before a logger is configured. A quoted
+  secret value such as libpq's `password='two words'` (single or double
+  quotes, with backslash-escaped quotes) is now redacted as a whole; before,
+  only its first word was hidden. The redacted value runs to the next
+  unquoted, unescaped whitespace, `;`, or `&`, so text after a closing quote
+  (`password="ab"cd`, `password=''secret`) or an escaped space
+  (`password=foo\ bar`) no longer leaks, and an unterminated quote redacts the
+  rest of the message.
+- `PACKMON_SERVER_PUBLIC_HOST` must now be a bare `host[:port]`. Values such
+  as `packmon.internal#fragment`, `packmon.internal?x=1`, a host with
+  whitespace, control characters, a percent-escape, a non-ASCII name, a
+  zone-scoped or bracketed non-IPv6 literal, a signed (`:+443`) or empty port
+  were accepted and produced broken redirects such as
+  `https://packmon.internal#fragment/admin`; the server now refuses to start
+  with a clear configuration error. The HTTPS redirect builder also drops such
+  hosts.
+- Admin passwords longer than 72 bytes (bcrypt's input limit) are now rejected
+  by the password policy with their own error. A password change used to pass
+  validation and then fail hashing with the generic "Failed to update
+  password", and a too-long `PACKMON_ADMIN_INITIAL_PASSWORD` failed bootstrap
+  with a bcrypt hash error. The form now answers "Password must be at most 72
+  bytes", and each policy error maps to its own message instead of every one
+  being reported as too short. The password form's help text now states both
+  bounds ("Use at least 12 characters and at most 72 bytes.").
+- Admin login and feed-config hardening: a feed save or reset that has to roll
+  the runtime back now does so on a context detached from the request (with a
+  30-second timeout), so a client disconnect can no longer cancel the rollback
+  and leave the server on an unpersisted feed configuration. A login while no
+  admin account exists now counts as a failed attempt (lockout, metrics, and a
+  `login_failed` audit row with reason `admin account not configured`), and
+  logins with an unknown username or without an admin account run a dummy
+  bcrypt comparison at the production cost, so they no longer answer
+  measurably faster than a wrong password. The dummy hash is generated at
+  server startup before serving; if that fails, an embedded production-cost
+  hash is used instead, so the equalization cannot silently disappear.
 - Local scans no longer report ReversingLabs reputation findings that the
   server's `/api/v1/check` ignores. `GET /api/v1/sync` now exports reputation
   rows only while ReversingLabs is enabled in `self` mode; otherwise it sends

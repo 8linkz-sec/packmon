@@ -139,7 +139,7 @@ func logAuditRetentionResult(logger *slog.Logger, table string, retention time.D
 		logger.Warn("audit retention prune failed",
 			slog.String("table", table),
 			slog.Duration("retention", retention),
-			slog.String("error", err.Error()),
+			slog.String("error", boundedErrorLogValue(err)),
 		)
 		return
 	}

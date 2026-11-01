@@ -284,7 +284,10 @@ Admin properties:
 - bootstrap password comes from `PACKMON_ADMIN_INITIAL_PASSWORD` only when no
   admin hash exists yet;
 - bootstrap and rotated admin passwords must be at least 12 characters long,
-  counted as Unicode code points rather than bytes;
+  counted as Unicode code points rather than bytes, and at most 72 bytes
+  (UTF-8), the bcrypt input limit; a longer password is rejected by the
+  policy with its own error (bootstrap fails, the password-change form shows
+  the maximum) instead of failing later in hashing;
 - password is stored as a bcrypt hash;
 - existing admin hash takes precedence over bootstrap env;
 - sessions authenticated with the bootstrap password may only rotate that
@@ -310,6 +313,20 @@ Admin properties:
   lockout window, stale partial failures expire, lockout audit events are
   deduplicated per lockout window, and failed as well as locked-out attempts are
   counted in metrics;
+- every failed login -- unknown username, wrong password, or a login while no
+  admin account exists yet -- is counted toward the lockout and metrics before
+  its `login_failed` audit row is written, and fails closed when that row
+  cannot be persisted;
+- an unknown username and a wrong password get the same "Invalid username or
+  password." response, and both pay for one bcrypt comparison at the
+  production cost: failures without a stored hash to compare (unknown
+  username, missing account) compare the submitted password against a dummy
+  hash that server startup generates before serving, falling back to an
+  embedded production-cost hash if generation fails. Timing is equalized for
+  the dominant bcrypt cost only, not exactly: the wrong-password branch also
+  reads the stored admin hash from the database, and the audit row's `reason`
+  differs. The unconfigured-account notice is shown on purpose so operators
+  know to set `PACKMON_ADMIN_INITIAL_PASSWORD`;
 - security-sensitive admin writes must fail or roll back when the required
   admin audit row cannot be persisted. PostgreSQL commits API-key lifecycle
   changes, queue mutations, password changes, and manual advisory writes
@@ -369,7 +386,11 @@ If a proxy is not trusted:
 - host/proto behavior must not trust attacker-supplied headers.
 
 HTTPS redirect behavior must use configured public host data, not arbitrary
-request `Host` values.
+request `Host` values. Startup rejects a `PACKMON_SERVER_PUBLIC_HOST` that is
+not a bare `host[:port]` (a hostname, IPv4 address, or IPv6 literal with an
+optional numeric port): a scheme, path, query, fragment, userinfo,
+percent-escape, whitespace, or control character would change or truncate the
+generated `https://` redirect target.
 
 Production startup must fail unless transport security is configured through
 in-app TLS or a trusted TLS-terminating reverse proxy. The only exception is
@@ -727,6 +748,13 @@ Feed-sync diagnostics, including git subprocess stderr/stdout and filesystem
 walker errors, must pass through the same diagnostic redaction before they reach
 structured logs or `feed_sync_status.last_error`. Git-backed feed helpers must
 not stream child-process output directly to process stderr.
+Server startup, schema-check, background-worker, and fatal error logs,
+including the plain-stderr fatal fallback used before a logger is configured,
+must pass through the same diagnostic redaction and a 512-byte bound: database
+driver errors can echo the connection URL, secret assignments, or local paths.
+The redaction strips userinfo, paths, and queries from `http(s)://` and
+`postgres(ql)://` URLs and redacts quoted secret values (for example libpq's
+`password='...'`) as a whole.
 
 The built-in `/privacy` page is a deployment-neutral disclosure for the
 first-party admin session cookie and routine Packmon audit/scan metadata. It is

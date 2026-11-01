@@ -953,7 +953,9 @@ Important environment variables:
 
 - `PACKMON_SERVER_MODE=production|development`
 - `PACKMON_SERVER_PORT=8080`
-- `PACKMON_SERVER_PUBLIC_HOST` (host:port clients use to reach the server)
+- `PACKMON_SERVER_PUBLIC_HOST` (host:port clients use to reach the server; a
+  bare hostname, IPv4 address, or IPv6 literal with an optional numeric port --
+  startup rejects a scheme, path, query, fragment, userinfo, or whitespace)
 - `PACKMON_TLS_CERT_FILE`, `PACKMON_TLS_KEY_FILE`,
   `PACKMON_TLS_MIN_VERSION=1.2|1.3`
 - `PACKMON_ALLOW_INSECURE_LOCAL_HTTP=false` (loopback-only override for the
@@ -985,7 +987,7 @@ Important environment variables:
 - `PACKMON_ADMIN_AUDIT_HMAC_KEY` (required in production; base64-encoded 32
   random bytes used to HMAC new admin audit digest-chain rows. Development
   mode may run without it and writes legacy `sha256:` audit digests.)
-- `PACKMON_ADMIN_INITIAL_PASSWORD` (at least 12 characters)
+- `PACKMON_ADMIN_INITIAL_PASSWORD` (at least 12 characters, at most 72 bytes)
 - `PACKMON_ADMIN_SESSION_TIMEOUT=8h`
 - `PACKMON_ADMIN_IDLE_TIMEOUT=15m`
 - `PACKMON_SCAN_LOG_RETENTION=720h` (30-day retention for server `scan_log`;
@@ -1044,7 +1046,9 @@ Saving `NONE` requires an explicit acknowledgement because it disables
 vulnerability blocking.
 Feed enablement, mode, cadence, and feed API keys can be saved from
 `/admin/feeds`; saved values are applied immediately and persisted for future
-server starts.
+server starts. A Socket.dev or ReversingLabs change restarts the refresh-queue
+workers; if the running workers miss the shutdown-timeout deadline, the new
+workers start as soon as the old ones exit.
 Strict feed imports are operator-visible. When a server rejects imported feed
 data, `/admin/feeds` shows bounded rejection diagnostics: rejected-record
 counts and reason classes, correlation ID, client/API-key attribution when

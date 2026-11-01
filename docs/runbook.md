@@ -408,6 +408,12 @@ PACKMON_SERVER_PUBLIC_HOST to be localhost/127.0.0.1/::1` -- means the insecure
 override is set but the public host is not loopback. Either point the public
 host at loopback or configure real TLS / a trusted proxy.
 
+`config: invalid PACKMON_SERVER_PUBLIC_HOST (want a bare host[:port] ...)`
+means the value is not just a hostname, IPv4 address, or IPv6 literal plus an
+optional port 1-65535. Remove any scheme, path, `?query`, `#fragment`,
+`user@`, percent-escape, or whitespace (for example `packmon.internal:8443`
+or `[2001:db8::1]:8443`).
+
 ### ReversingLabs reputation feed (demand-driven)
 
 ReversingLabs is optional, self-mode only, and disabled by default
@@ -729,8 +735,8 @@ from the database. To reset it:
      -c "DELETE FROM admin_auth WHERE id = 1;"
    ```
 
-2. Ensure `PACKMON_ADMIN_INITIAL_PASSWORD` (at least 12 characters) is set in
-   the server environment.
+2. Ensure `PACKMON_ADMIN_INITIAL_PASSWORD` (at least 12 characters, at most
+   72 bytes) is set in the server environment.
 3. Restart the server: `docker compose restart packmon-server`. Startup
    re-creates the admin account from the bootstrap password because no admin
    hash exists anymore.
