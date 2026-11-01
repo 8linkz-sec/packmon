@@ -24,9 +24,14 @@
   before writes (nonempty `events` arrays, event objects, at least one
   nonblank string boundary among `introduced` / `fixed` / `last_affected` /
   `limit`, other boundaries a string or `null`); `[]` stays valid. Existing
-  rows that fail it are repaired like migration 032 did (affected-package
-  ranges become `[]`, malicious-finding ranges `NULL`) before the constraints
-  are re-validated. The store's own pre-write check now matches keys exactly,
+  rows that fail it are repaired before the constraints are re-validated:
+  affected-package ranges become `[]` (as in migration 032); a malicious
+  finding keeps its nonempty exact `versions` and loses only the ranges; an
+  active malicious finding without exact versions is quarantined (tombstoned
+  via `removed_at`, exported to local clients as withdrawn) instead of becoming
+  an all-version blocking finding. Each repaired row is recorded with its
+  original value in `packmon_m050_version_range_repairs`, and the 050 down
+  migration restores rows that still hold their repaired value. The store's own pre-write check now matches keys exactly,
   as the database does, so a case-variant key such as `"Introduced"` is
   rejected before the write instead of failing the CHECK constraint. The feed
   import endpoint applies the same rule to `version_ranges` in vulnerability
@@ -459,9 +464,14 @@
   - 050 tightens the `version_ranges` CHECK constraints and repairs rows that
     fail them. It scans `affected_packages` and `malicious_findings` twice in
     one transaction and holds an exclusive lock on both tables until it
-    commits; repaired affected-package rows match every version until the
+    commits. Repaired affected-package rows match every version until the
     next feed sync rewrites them, so finding totals for those packages can
-    rise temporarily.
+    rise temporarily. Malicious findings without exact versions are
+    quarantined: they stop blocking until a feed import that contains them
+    resurrects them, and quarantined manual advisories (`manual:` IDs) must
+    be re-entered in `/admin/advisories`. The migration reports its counts as
+    a PostgreSQL NOTICE; list the repaired rows afterwards with the query in
+    "Upgrade And Rollback" in `docs/runbook.md`.
 - `docker-compose.server.yml` deployments: the next `up` creates the new
   `<project>_feed-data` volume, so the first feed sync after the upgrade
   re-clones the GHSA and OpenSSF repositories once. A `PACKMON_FEED_DATA_DIR`

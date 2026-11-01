@@ -1041,8 +1041,12 @@ func TestVersionRangeBoundaryMigrationDefinesStrictCheck(t *testing.T) {
 	ordered := []string{
 		"CREATE OR REPLACE FUNCTION packmon_jsonb_version_ranges_valid(value JSONB)",
 		"FOREACH boundary_key IN ARRAY ARRAY['introduced', 'fixed', 'last_affected', 'limit']",
-		"UPDATE affected_packages SET version_ranges = '[]'::jsonb",
-		"UPDATE malicious_findings SET version_ranges = NULL",
+		"CREATE TABLE packmon_m050_version_range_repairs",
+		"UPDATE affected_packages ap SET version_ranges = '[]'::jsonb",
+		"THEN 'quarantined' ELSE 'ranges_cleared'",
+		"UPDATE malicious_findings mf SET version_ranges = NULL, removed_at = NOW(), updated_at = NOW()",
+		"UPDATE malicious_findings mf SET version_ranges = NULL, updated_at = NOW()",
+		"RAISE NOTICE 'migration 050:",
 		"DROP CONSTRAINT IF EXISTS affected_packages_version_ranges_array_check",
 		"CHECK (packmon_jsonb_version_ranges_valid(version_ranges)) NOT VALID",
 		"CHECK (version_ranges IS NULL OR packmon_jsonb_version_ranges_valid(version_ranges)) NOT VALID",
@@ -1074,6 +1078,13 @@ func TestVersionRangeBoundaryMigrationDefinesStrictCheck(t *testing.T) {
 	}
 	if strings.Contains(down.SQL, "DROP CONSTRAINT") || strings.Contains(down.SQL, "DROP FUNCTION") {
 		t.Fatalf("050 down must keep the constraints and the function from 001/032:\n%s", down.SQL)
+	}
+	downSQL := strings.Join(strings.Fields(down.SQL), " ")
+	functionIndex := strings.Index(downSQL, "CREATE OR REPLACE FUNCTION packmon_jsonb_version_ranges_valid")
+	restoreIndex := strings.Index(downSQL, "SET version_ranges = r.original_version_ranges")
+	dropIndex := strings.Index(downSQL, "DROP TABLE IF EXISTS packmon_m050_version_range_repairs")
+	if functionIndex < 0 || restoreIndex < functionIndex || dropIndex < restoreIndex {
+		t.Fatalf("050 down must restore the function, then the recorded rows, then drop the repair log:\n%s", down.SQL)
 	}
 }
 

@@ -215,6 +215,13 @@ coverage loss in server/agent deployments. When the store rather than the
 request validation rejects imported values (a database data exception or CHECK
 violation), the response and the recorded rejection reason use a fixed generic
 message; table, column and database error text stay in the server log.
+Schema repairs must not turn malformed malicious-finding data into broader
+blocking: migration 050 quarantines (tombstones) an active malicious finding
+whose ranges fail the stricter check and that has no exact versions, rather
+than clearing its ranges into an all-version match, and records each repaired
+row with its original value in `packmon_m050_version_range_repairs`. A
+quarantined feed finding returns with the next feed import that contains it; a
+quarantined manual advisory stays removed until an admin re-enters it.
 
 API keys are stored hashed. Plaintext keys are shown only at creation time.
 Keys have bounded labels/names for auditability, record `last_used_at`, must

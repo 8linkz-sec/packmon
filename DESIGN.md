@@ -769,8 +769,13 @@ exact versions are listed (fail-safe). One shared rule
 rejects a violating import with a `400` naming the failing field, and by the
 store before every write; PostgreSQL enforces the same rule through the
 `packmon_jsonb_version_ranges_valid` CHECK constraints (tightened in migration
-050, which repaired older rows that only passed the earlier key-presence check:
-affected-package ranges fell back to `[]`, malicious-finding ranges to `NULL`).
+050). Migration 050 repaired older rows that only passed the earlier
+key-presence check without widening malicious findings: affected-package
+ranges fell back to `[]`; a malicious finding with nonempty exact `versions`
+kept those and lost only its ranges; an active malicious finding without exact
+versions was quarantined with the normal `removed_at` tombstone instead of
+becoming an all-version blocking finding. Every repaired row is listed with its
+original value in `packmon_m050_version_range_repairs`.
 
 Malicious findings are separate entities with stable IDs, package identity,
 source, risk type, severity, optional OSV version ranges, optional exact

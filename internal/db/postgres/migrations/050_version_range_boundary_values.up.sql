@@ -9,11 +9,22 @@
 -- string or null when present, and at least one of them must be a nonblank
 -- string. [] and other keys (type, repo, database_specific) stay accepted.
 --
--- Existing rows the stricter check rejects are repaired the same way 032 did:
--- affected_packages.version_ranges falls back to [] (fail-safe: every version
--- is treated as affected until the next feed sync rewrites the row) and
--- malicious_findings.version_ranges to NULL. The repair is one-way; the down
--- migration restores only the previous function.
+-- Existing rows the stricter check rejects are repaired before the
+-- constraints are re-validated, and every repaired row is recorded in
+-- packmon_m050_version_range_repairs (original value included) so operators
+-- can list them and the down migration can restore them:
+-- - affected_packages.version_ranges falls back to [] (as in 032; fail-safe,
+--   every version is treated as affected until the next feed sync rewrites
+--   the row);
+-- - malicious_findings with nonempty exact versions get version_ranges NULL,
+--   so only those exact versions keep matching;
+-- - active malicious_findings without exact versions are quarantined with the
+--   normal tombstone (removed_at, updated_at), because NULL ranges plus NULL
+--   versions would turn them into all-version blocking findings. Delta sync
+--   exports the tombstone, so local clients drop them too; the next feed
+--   import that contains the finding resurrects it, manual advisories must be
+--   re-entered.
+-- The per-table counts are emitted as a NOTICE.
 
 CREATE OR REPLACE FUNCTION packmon_jsonb_version_ranges_valid(value JSONB)
 RETURNS BOOLEAN
@@ -75,16 +86,79 @@ BEGIN
 END;
 $$;
 
-UPDATE affected_packages
-SET version_ranges = '[]'::jsonb,
-    updated_at = NOW()
-WHERE NOT packmon_jsonb_version_ranges_valid(version_ranges);
+CREATE TABLE packmon_m050_version_range_repairs (
+    table_name              TEXT        NOT NULL,
+    row_id                  TEXT        NOT NULL,
+    action                  TEXT        NOT NULL,
+    original_version_ranges JSONB       NOT NULL,
+    original_removed_at     TIMESTAMPTZ,
+    repaired_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (table_name, row_id),
+    CONSTRAINT packmon_m050_version_range_repairs_action_check CHECK (
+        (table_name = 'affected_packages' AND action = 'ranges_reset')
+        OR (table_name = 'malicious_findings' AND action IN ('ranges_cleared', 'quarantined'))
+    )
+);
 
-UPDATE malicious_findings
-SET version_ranges = NULL,
-    updated_at = NOW()
-WHERE version_ranges IS NOT NULL
-  AND NOT packmon_jsonb_version_ranges_valid(version_ranges);
+DO $$
+DECLARE
+    ranges_reset   BIGINT;
+    ranges_cleared BIGINT;
+    quarantined    BIGINT;
+BEGIN
+    INSERT INTO packmon_m050_version_range_repairs (table_name, row_id, action, original_version_ranges)
+    SELECT 'affected_packages', id::text, 'ranges_reset', version_ranges
+    FROM affected_packages
+    WHERE NOT packmon_jsonb_version_ranges_valid(version_ranges);
+
+    UPDATE affected_packages ap
+    SET version_ranges = '[]'::jsonb,
+        updated_at = NOW()
+    FROM packmon_m050_version_range_repairs r
+    WHERE r.table_name = 'affected_packages'
+      AND r.row_id = ap.id::text;
+    GET DIAGNOSTICS ranges_reset = ROW_COUNT;
+
+    -- Nested CASE instead of AND: jsonb_array_length raises on a non-array,
+    -- and SQL does not guarantee the evaluation order of AND.
+    INSERT INTO packmon_m050_version_range_repairs (table_name, row_id, action, original_version_ranges, original_removed_at)
+    SELECT
+        'malicious_findings',
+        id,
+        CASE
+            WHEN removed_at IS NULL
+             AND NOT CASE WHEN jsonb_typeof(versions) = 'array' THEN jsonb_array_length(versions) > 0 ELSE FALSE END
+            THEN 'quarantined'
+            ELSE 'ranges_cleared'
+        END,
+        version_ranges,
+        removed_at
+    FROM malicious_findings
+    WHERE version_ranges IS NOT NULL
+      AND NOT packmon_jsonb_version_ranges_valid(version_ranges);
+
+    UPDATE malicious_findings mf
+    SET version_ranges = NULL,
+        removed_at = NOW(),
+        updated_at = NOW()
+    FROM packmon_m050_version_range_repairs r
+    WHERE r.table_name = 'malicious_findings'
+      AND r.action = 'quarantined'
+      AND r.row_id = mf.id;
+    GET DIAGNOSTICS quarantined = ROW_COUNT;
+
+    UPDATE malicious_findings mf
+    SET version_ranges = NULL,
+        updated_at = NOW()
+    FROM packmon_m050_version_range_repairs r
+    WHERE r.table_name = 'malicious_findings'
+      AND r.action = 'ranges_cleared'
+      AND r.row_id = mf.id;
+    GET DIAGNOSTICS ranges_cleared = ROW_COUNT;
+
+    RAISE NOTICE 'migration 050: affected_packages version_ranges reset to []: %; malicious_findings version_ranges cleared (exact versions apply): %; malicious_findings quarantined (removed_at set): %; details in packmon_m050_version_range_repairs',
+        ranges_reset, ranges_cleared, quarantined;
+END $$;
 
 -- Replacing a function does not re-check rows, so re-add both constraints and
 -- validate them against the stricter function.
