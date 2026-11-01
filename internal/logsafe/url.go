@@ -17,9 +17,12 @@ const (
 var (
 	// Database driver errors can echo the PostgreSQL connection URL, whose
 	// userinfo carries the database password.
-	httpURLPattern          = regexp.MustCompile(`(?i)\b(?:https?|postgres(?:ql)?)://[^\s<>"']+`)
-	bearerTokenPattern      = regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}`)
-	secretAssignmentPattern = regexp.MustCompile(`(?i)\b(api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|password|passwd|pwd|credential|token|secret|sig|signature|x-amz-signature)(\s*[:=]\s*)([^\s;&]+)`)
+	httpURLPattern     = regexp.MustCompile(`(?i)\b(?:https?|postgres(?:ql)?)://[^\s<>"']+`)
+	bearerTokenPattern = regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}`)
+	// A single- or double-quoted value (libpq key/value DSNs quote values with
+	// spaces and backslash-escape quotes inside them) is redacted as a whole;
+	// an unquoted value runs to the next whitespace, ';', or '&'.
+	secretAssignmentPattern = regexp.MustCompile(`(?i)\b(api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|password|passwd|pwd|credential|token|secret|sig|signature|x-amz-signature)(\s*[:=]\s*)('(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|[^\s;&]+)`)
 	windowsPathPattern      = regexp.MustCompile(`(?i)\b[A-Z]:\\(?:[^\\\s]+\\){2,}[^\\\s]+`)
 	unixPathPattern         = regexp.MustCompile(`(^|[\s=:])/(?:[^/\s]+/){2,}[^/\s]+`)
 )

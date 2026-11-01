@@ -192,6 +192,51 @@ func TestRedactDiagnosticMessageRedactsSecretAssignments(t *testing.T) {
 	}
 }
 
+// TestRedactDiagnosticMessageRedactsWholeQuotedSecretValues covers libpq-style
+// key/value DSNs, where a value with spaces is quoted: redacting only the first
+// token used to leave the rest of the secret in the message.
+func TestRedactDiagnosticMessageRedactsWholeQuotedSecretValues(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		raw    string
+		leaked []string
+		want   string
+	}{
+		{
+			raw:    `cannot parse dsn: host=db password='first second third' sslmode=require`,
+			leaked: []string{"first", "second", "third"},
+			want:   `host=db password=[redacted] sslmode=require`,
+		},
+		{
+			raw:    `cannot parse dsn: password="dq first dq-second" user=packmon`,
+			leaked: []string{"dq first", "dq-second"},
+			want:   `password=[redacted] user=packmon`,
+		},
+		{
+			// libpq escapes a quote inside a quoted value with a backslash.
+			raw:    `password='it\'s a secret' dbname=packmon`,
+			leaked: []string{"it", "s a secret"},
+			want:   `password=[redacted] dbname=packmon`,
+		},
+		{
+			raw:    `password=unquoted-secret; next`,
+			leaked: []string{"unquoted-secret"},
+			want:   `password=[redacted]; next`,
+		},
+	} {
+		got := RedactDiagnosticMessage(tt.raw)
+		for _, leaked := range tt.leaked {
+			if strings.Contains(got, leaked) {
+				t.Fatalf("RedactDiagnosticMessage(%q) = %q, leaked %q", tt.raw, got, leaked)
+			}
+		}
+		if !strings.Contains(got, tt.want) {
+			t.Fatalf("RedactDiagnosticMessage(%q) = %q, want %q", tt.raw, got, tt.want)
+		}
+	}
+}
+
 func TestBoundedDiagnosticValueRedactsControlsAndTruncates(t *testing.T) {
 	t.Parallel()
 
