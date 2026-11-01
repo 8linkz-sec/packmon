@@ -43,6 +43,18 @@
   own name, path (the project path wins on a name match), and scan policy.
   Previously a project entry naming a trusted repo silently re-enabled
   repository metadata that repo had disabled.
+- The managed Git hook no longer writes into the repository. It now runs
+  `packmon scan . --hook ...`, and `--hook` refuses (exit code 2, before
+  scanning) every report destination (`output.file`, `--output-json`,
+  `--output-sarif`, `--output-junit`, `--html`) and used local database
+  directory (`PACKMON_DB_PATH`, `db.path`) that resolves inside the repository
+  work tree or its Git directories. Previously a trusted user-global
+  `output.file` with a relative path was resolved against the hook's working
+  directory, so every hook run wrote a report file into the repository.
+  Destinations outside the repository still work. `--hook` cannot be combined
+  with `--list-packages`, `--outdated`, `--list-all`, or `--auto-sbom`.
+  `packmon hook status` reports hooks installed by older versions as
+  `outdated`; rerun `packmon hook install` to update them.
 - A project `.packmon.yaml` `repos:` entry whose name matches one user-global
   repo and whose path matches another now inherits `send_repo_metadata: false`
   from both. Routing (server, API key, webhook) still comes from the name

@@ -907,18 +907,33 @@ packmon hook uninstall                 # remove packmon-managed hooks
 packmon hook status                    # show hook status for this repo
 ```
 
-The installed hook runs `packmon scan . --fail-on CRITICAL --quiet`, so a push
-(or commit) is blocked when a CRITICAL vulnerability or lifecycle finding,
-malicious package, or active supply-chain-risk finding is present, or when
-parser or operational errors prevent complete scan coverage. Quiet mode still prints
-trust-changing warnings such as remote fallback and partial parse errors to
-stderr. `install` refuses to overwrite an existing hook that packmon did not
-create; `uninstall` only removes packmon-managed hooks. Every `install` (also
-an update of an existing packmon hook) leaves the hook executable (mode
-`0755`), and `status` reports a packmon hook that lost its execute bit as
-`not executable`, because Git skips such a hook. Supported types:
-`pre-push` (default) and `pre-commit`. The hook type and fail-on threshold can
-also be set under a
+The installed hook runs `packmon scan . --hook --fail-on CRITICAL --quiet`, so
+a push (or commit) is blocked when a CRITICAL vulnerability or lifecycle
+finding, malicious package, or active supply-chain-risk finding is present, or
+when parser or operational errors prevent complete scan coverage. Quiet mode
+still prints trust-changing warnings such as remote fallback and partial parse
+errors to stderr.
+
+Apart from writing the hook file itself, neither `hook install` nor a hook run
+writes into the repository. `--hook` makes the scan refuse, before it scans
+and with exit code `2`, any report destination (`output.file`,
+`--output-json`, `--output-sarif`, `--output-junit`, `--html`) or used local
+database directory (`PACKMON_DB_PATH`, `db.path`) that resolves inside the
+repository work tree or its Git directories. Relative paths resolve against
+the working directory, which is the repository when Git runs the hook, so a
+user-global `output.file: packmon.json` is refused there; use an absolute path
+outside the repository or drop the setting. Report destinations outside the
+repository are still written. `--hook` cannot be combined with
+`--list-packages`, `--outdated`, `--list-all`, or `--auto-sbom`. Hooks
+installed by an older packmon run the scan without `--hook`; `hook status`
+reports them as `outdated`, and `packmon hook install` updates them.
+
+`install` refuses to overwrite an existing hook that packmon did not create;
+`uninstall` only removes packmon-managed hooks. Every `install` (also an update
+of an existing packmon hook) leaves the hook executable (mode `0755`), and
+`status` reports a packmon hook that lost its execute bit as `not executable`,
+because Git skips such a hook. Supported types: `pre-push` (default) and
+`pre-commit`. The hook type and fail-on threshold can also be set under a
 `hook:` block in `.packmon.yaml`.
 
 ## Server Configuration

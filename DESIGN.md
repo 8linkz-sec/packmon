@@ -333,6 +333,22 @@ Important behavior:
 - `--no-repo-metadata` omits the optional repository name from remote
   `/api/v1/check` requests and webhooks. `PACKMON_NO_REPO_METADATA=true` and
   `.packmon.yaml` `send_repo_metadata: false` provide the same privacy opt-out.
+- Git hooks: apart from writing the managed hook file itself, neither
+  `packmon hook install` nor a hook run may write repository data, generated
+  files, lockfiles, configuration, or Git metadata; the hook's work is
+  read-only for the repository. The managed hook runs
+  `packmon scan . --hook --fail-on <threshold> --quiet`. `--hook` refuses
+  (exit code `2`, before scanning) every report destination (`output.file`,
+  `--output-json`, `--output-sarif`, `--output-junit`, `--html`) and, when the
+  scan opens the local database (local checker or history), a database
+  directory (`PACKMON_DB_PATH`, `db.path`) that resolves inside the repository
+  work tree, the Git directory, or the Git common directory, following
+  symlinks of existing path prefixes. Relative paths resolve against the
+  working directory, which is the repository for a hook run. Destinations
+  outside the repository are still written. `--hook` cannot be combined with
+  `--list-packages`, `--outdated`, `--list-all`, or `--auto-sbom`.
+  `packmon hook status` reports a managed hook without `--hook` (installed by
+  an older version) as outdated; `packmon hook install` rewrites it.
 - Unknown `--ecosystems` values are configuration errors, not empty successful
   scans. The same validation applies to `PACKMON_ECOSYSTEMS` and
   `.packmon.yaml` ecosystem filters.

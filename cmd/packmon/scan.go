@@ -56,6 +56,7 @@ func newScanCmd() *cobra.Command {
 		flagInstallTools   bool
 		flagKeepSBOM       string
 		flagSBOMOnly       bool
+		flagHook           bool
 	)
 
 	cmd := &cobra.Command{
@@ -92,12 +93,21 @@ packages, supply-chain risk findings, and lifecycle risks.`,
 				SBOMFiles:        flagSBOMFiles,
 				ListAll:          flagListAll,
 				ListAllOffline:   flagListAllOffline,
+				Hook:             flagHook,
 			}
 			auto := autoSBOMFlags{
 				Enabled:      flagAutoSBOM,
 				InstallTools: flagInstallTools,
 				KeepSBOM:     flagKeepSBOM,
 				SBOMOnly:     flagSBOMOnly,
+			}
+			if err := rejectHookWithReportModes(flagHook, map[string]bool{
+				"--list-packages": flagListPackages,
+				"--outdated":      flagOutdated,
+				"--list-all":      flagListAll,
+				"--auto-sbom":     flagAutoSBOM,
+			}); err != nil {
+				return withExitCode(ExitOperational, err)
 			}
 			if err := validateAutoSBOMFlags(auto, scanFlags, args); err != nil {
 				return withExitCode(ExitOperational, err)
@@ -186,6 +196,7 @@ packages, supply-chain risk findings, and lifecycle risks.`,
 	f.BoolVar(&flagInstallTools, "install-tools", false, "with --auto-sbom: auto-install supported missing CycloneDX generators (pinned versions)")
 	f.StringVar(&flagKeepSBOM, "keep-sbom", "", "with --auto-sbom: write timestamped generated SBOM snapshots to this dir and keep them")
 	f.BoolVar(&flagSBOMOnly, "sbom-only", false, "with --auto-sbom: only generate SBOMs, do not scan")
+	f.BoolVar(&flagHook, "hook", false, "run as the packmon-managed Git hook: refuse report files and a local database inside the repository")
 
 	return cmd
 }
@@ -233,6 +244,7 @@ type scanFlagValues struct {
 	SBOMFiles        []string
 	ListAll          bool
 	ListAllOffline   bool
+	Hook             bool
 }
 
 type scanTarget struct {
@@ -270,6 +282,7 @@ type scanSettings struct {
 	SBOMFiles        []string
 	ListAllOffline   bool
 	InventoryAll     bool
+	Hook             bool
 	LatestRegistry   latestRegistryConfig
 	resolver         packageUpdateResolver
 }
@@ -467,6 +480,19 @@ func runScanCommand(cmd *cobra.Command, args []string, flags scanFlagValues) err
 	if len(targets) > 1 && (hasConfigOutput || hasScanOutputArtifactFlags(flags)) {
 		return withExitCode(ExitOperational, fmt.Errorf("%s can only be used when scanning a single target, not multiple targets", scanOutputArtifactFlagList()))
 	}
+	if flags.Hook {
+		// Refuse in-repository write destinations for every target before
+		// the first one is scanned.
+		for _, target := range targets {
+			settings, err := resolveScanSettings(cmd, cfg, target, flags)
+			if err != nil {
+				return withExitCode(ExitOperational, err)
+			}
+			if err := validateHookScanWriteDestinations(settings); err != nil {
+				return withExitCode(ExitOperational, err)
+			}
+		}
+	}
 
 	finalExitCode := ExitOK
 	for i, target := range targets {
@@ -660,6 +686,7 @@ func defaultScanSettings(target scanTarget, flags scanFlagValues) scanSettings {
 		LogLevel:       "INFO",
 		LogFormat:      "text",
 		LatestRegistry: defaultLatestRegistryConfig(),
+		Hook:           flags.Hook,
 	}
 }
 
