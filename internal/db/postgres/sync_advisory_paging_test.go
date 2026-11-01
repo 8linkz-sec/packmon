@@ -145,12 +145,16 @@ func TestBuildAdvisoryPageQueryNeverSplitsAnAdvisory(t *testing.T) {
 	// Like every delta, only the vulnerability row is bounded by the snapshot
 	// after the changed-ID CTE; affected rows are exported complete.
 	outer := normalized[strings.Index(normalized, "page_candidates AS ("):]
-	for _, forbidden := range []string{"ap.updated_at <= $1", "(ap.xmin::text)::bigint <"} {
+	for _, forbidden := range []string{"ap.updated_at <= $1", "ap.xmin"} {
 		if strings.Contains(outer, forbidden) {
 			t.Fatalf("advisory page query bounds affected rows with %q:\n%s", forbidden, query)
 		}
 	}
-	for _, want := range []string{"v.updated_at <= $1", "(v.xmin::text)::bigint <"} {
+	snapshotXIDArg := slices.Index(args, any("42")) + 1
+	if snapshotXIDArg == 0 {
+		t.Fatalf("advisory page query args %v miss the snapshot xid", args)
+	}
+	for _, want := range []string{"v.updated_at <= $1", syncXIDBeforeSQL("v.xmin", "$"+strconv.Itoa(snapshotXIDArg))} {
 		if !strings.Contains(outer, want) {
 			t.Fatalf("advisory page query lost vulnerability snapshot bound %q:\n%s", want, query)
 		}

@@ -959,6 +959,16 @@ Local SQLite sync:
   several pages that never carry `vulnerability_affected_complete` and stay
   upsert-only unless the last of them reports the split complete (see the
   affected-row replacement below);
+- receives with each delta every row changed since its last sync: the server
+  bounds each page by the pinned snapshot and selects a delta by `since` or
+  `since_xid`, comparing the rows' 32-bit `xmin` with the 64-bit transaction
+  watermarks modulo 2^32 within the window up to the statement's next
+  transaction ID, so a row whose transaction committed after a snapshot with
+  an older `updated_at` reaches the next delta, also past the first
+  transaction ID epoch. A watermark outside a 2^31-transaction window, or one
+  ahead of the server's counter, errs toward resending rows, never toward
+  skipping them (a missed row would leave a malicious package or
+  vulnerability out of the local database until a full sync);
 - preserves user-facing source attribution for synced vulnerability and
   malicious findings;
 - maps synced malicious-table rows with `supply_chain` or `typosquatting` risk

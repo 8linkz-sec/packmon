@@ -432,9 +432,14 @@ func decodeSyncCursorKey(raw string, wantParts int) ([]string, error) {
 	return values, nil
 }
 
-func addSyncWindowFilters(query *string, args *[]any, opts db.SyncExportOptions, snapshotXID uint64, updatedExpr, xidExpr string) {
+// addSyncWindowFilters bounds a row-paged dataset by the snapshot and, on a
+// delta, by the since window: the row's transaction ID column (xmin) must
+// predate the snapshot ID, and a delta row must have changed at or after the
+// since timestamp or the since transaction ID (see syncXIDBeforeSQL and
+// syncXIDAtOrAfterSQL for the epoch-safe comparisons).
+func addSyncWindowFilters(query *string, args *[]any, opts db.SyncExportOptions, snapshotXID uint64, updatedExpr, xidColumn string) {
 	if snapshotXID > 0 {
-		*query += fmt.Sprintf(` AND %s < $%d::bigint`, xidExpr, len(*args)+1)
+		*query += ` AND ` + syncXIDBeforeSQL(xidColumn, fmt.Sprintf("$%d", len(*args)+1))
 		*args = append(*args, strconv.FormatUint(snapshotXID, 10))
 	}
 	if opts.Since == nil {
@@ -443,7 +448,7 @@ func addSyncWindowFilters(query *string, args *[]any, opts db.SyncExportOptions,
 
 	since := opts.Since.UTC()
 	if opts.SinceXID > 0 {
-		*query += fmt.Sprintf(` AND (%s >= $%d OR %s >= $%d::bigint)`, updatedExpr, len(*args)+1, xidExpr, len(*args)+2)
+		*query += fmt.Sprintf(` AND (%s >= $%d OR %s)`, updatedExpr, len(*args)+1, syncXIDAtOrAfterSQL(xidColumn, fmt.Sprintf("$%d", len(*args)+2)))
 		*args = append(*args, since, strconv.FormatUint(opts.SinceXID, 10))
 		return
 	}
@@ -479,6 +484,10 @@ func (q *syncVulnerabilityQueryArgs) appendArg(value any) int {
 	return len(q.args)
 }
 
+// changedIDsCTE selects the vulnerabilities a delta exports: those whose
+// vulnerability row or any affected row changed at or after the since
+// timestamp or the since transaction ID (syncXIDAtOrAfterSQL), each bounded by
+// the snapshot (vulnerabilityChangedIDUpperFilter).
 func (q syncVulnerabilityQueryArgs) changedIDsCTE() string {
 	if q.sinceArg == 0 {
 		return ""
@@ -498,32 +507,37 @@ func (q syncVulnerabilityQueryArgs) changedIDsCTE() string {
 		WHERE ap.updated_at >= $%[1]d
 		  AND ap.updated_at <= $1%[3]s`, q.sinceArg, vulnerabilityUpperFilter, affectedUpperFilter)
 	if q.sinceXIDArg > 0 {
+		sinceXID := fmt.Sprintf("$%d", q.sinceXIDArg)
 		query += fmt.Sprintf(`
 		UNION
 		SELECT v.id
 		FROM vulnerabilities v
-		WHERE (v.xmin::text)::bigint >= $%[1]d::bigint
-		  AND v.updated_at <= $1%[2]s
+		WHERE %[1]s
+		  AND v.updated_at <= $1%[3]s
 		UNION
 		SELECT ap.vulnerability_id AS id
 		FROM affected_packages ap
-		WHERE (ap.xmin::text)::bigint >= $%[1]d::bigint
-		  AND ap.updated_at <= $1%[3]s`, q.sinceXIDArg, vulnerabilityUpperFilter, affectedUpperFilter)
+		WHERE %[2]s
+		  AND ap.updated_at <= $1%[4]s`, syncXIDAtOrAfterSQL("v.xmin", sinceXID), syncXIDAtOrAfterSQL("ap.xmin", sinceXID), vulnerabilityUpperFilter, affectedUpperFilter)
 	}
 	query += `
 	)`
 	return query
 }
 
+// vulnerabilityChangedIDUpperFilter ignores, for the changed-ID CTE, row
+// versions a transaction at or after the snapshot wrote (syncXIDBeforeSQL);
+// the next delta, whose since_xid is this snapshot ID, selects them.
 func (q syncVulnerabilityQueryArgs) vulnerabilityChangedIDUpperFilter(alias string) string {
 	if q.snapshotXIDArg == 0 {
 		return ""
 	}
-	return fmt.Sprintf(`
-		  AND (%s.xmin::text)::bigint < $%d::bigint`, alias, q.snapshotXIDArg)
+	return `
+		  AND ` + syncXIDBeforeSQL(alias+".xmin", fmt.Sprintf("$%d", q.snapshotXIDArg))
 }
 
-// addSnapshotXIDFilters bounds the exported rows by the snapshot watermark.
+// addSnapshotXIDFilters bounds the exported rows by the snapshot watermark
+// (syncXIDBeforeSQL), on the split continuation query as well.
 // A delta bounds only the vulnerability row: the changed-ID CTE already
 // applied the snapshot to decide which vulnerabilities changed, and each of
 // them is then exported with its complete current affected set (see
@@ -532,9 +546,10 @@ func (q syncVulnerabilityQueryArgs) addSnapshotXIDFilters(query *string, delta b
 	if q.snapshotXIDArg == 0 {
 		return
 	}
-	*query += fmt.Sprintf(` AND (v.xmin::text)::bigint < $%d::bigint`, q.snapshotXIDArg)
+	snapshotXID := fmt.Sprintf("$%d", q.snapshotXIDArg)
+	*query += ` AND ` + syncXIDBeforeSQL("v.xmin", snapshotXID)
 	if !delta {
-		*query += fmt.Sprintf(` AND (ap.xmin::text)::bigint < $%d::bigint`, q.snapshotXIDArg)
+		*query += ` AND ` + syncXIDBeforeSQL("ap.xmin", snapshotXID)
 	}
 }
 
@@ -825,43 +840,85 @@ func (s *Store) exportSyncVulnerabilities(ctx context.Context, opts db.SyncExpor
 // upserting and the next delta delivers the advisory again. Without a
 // snapshot transaction ID the check cannot prove this, and ok is false.
 //
-// The transaction ID comparison must hold past the first transaction ID
-// epoch: a row's xmin is a 32-bit transaction ID, while the snapshot ID is
-// the 64-bit, epoch-extended txid_snapshot_xmin. The check therefore compares
-// the xmin with the low 32 bits of the snapshot ID modulo 2^32 (see
-// syncXIDNotBeforeSnapshotSQL), and it holds only while the pinned snapshot
-// is at most 2^31 transactions old, which the query verifies with 64-bit IDs
-// (a snapshot ID from the future fails as well).
+// Both rows are tested with syncXIDAtOrAfterSQL, which fails toward
+// "changed": the vulnerability row must provably predate the snapshot (NOT
+// at or after it), so a snapshot more than 2^31 transactions old, or one from
+// the future, fails the check.
 func buildSyncSplitAdvisoryUnchangedQuery(id string, snapshot time.Time, snapshotXID uint64) (query string, args []any, ok bool) {
 	if snapshotXID == 0 {
 		return "", nil, false
 	}
 	return `
-	SELECT txid_snapshot_xmax(txid_current_snapshot()) - $4::bigint BETWEEN 0 AND 2147483647
-	AND EXISTS (
+	SELECT EXISTS (
 		SELECT 1 FROM vulnerabilities v
 		WHERE v.id = $2
 		  AND v.updated_at <= $1
-		  AND NOT ` + syncXIDNotBeforeSnapshotSQL("v.xmin", "$3") + `
+		  AND NOT ` + syncXIDAtOrAfterSQL("v.xmin", "$3") + `
 	) AND NOT EXISTS (
 		SELECT 1 FROM affected_packages ap
 		WHERE ap.vulnerability_id = $2
-		  AND (ap.updated_at > $1 OR ` + syncXIDNotBeforeSnapshotSQL("ap.xmin", "$3") + `)
-	)`, []any{snapshot, id, strconv.FormatUint(snapshotXID&0xffffffff, 10), strconv.FormatUint(snapshotXID, 10)}, true
+		  AND (ap.updated_at > $1 OR ` + syncXIDAtOrAfterSQL("ap.xmin", "$3") + `)
+	)`, []any{snapshot, id, strconv.FormatUint(snapshotXID, 10)}, true
 }
 
-// syncXIDNotBeforeSnapshotSQL returns a condition that holds unless the
-// 32-bit transaction ID column is provably older than the 32-bit snapshot
-// transaction ID in arg: the IDs are compared modulo 2^32, so an ID at most
-// 2^31 - 1 transactions at or after the snapshot ID counts as not before it.
-// Every row version a transaction at or after the snapshot wrote has such an
-// ID while the snapshot is at most 2^31 transactions old (PostgreSQL never
-// lets a live transaction ID age past 2^31), so such a change is never
-// missed. A frozen or otherwise ancient xmin may wrap into the same half and
-// count as not before the snapshot; that only fails the check, never passes
-// it wrongly.
-func syncXIDNotBeforeSnapshotSQL(column, arg string) string {
-	return fmt.Sprintf(`(((%s::text)::bigint - %s::bigint + 4294967296) %% 4294967296) < 2147483648`, column, arg)
+// Sync transaction ID windows. A row's xmin is a 32-bit transaction ID, while
+// the since and snapshot watermarks are 64-bit, epoch-extended IDs
+// (txid_snapshot_xmin), so past the first transaction ID epoch (about 4
+// billion transactions) a plain comparison of the two is meaningless. The
+// filters therefore compare the xmin with a watermark modulo 2^32, within the
+// window from the watermark up to the statement's next transaction ID
+// (syncXIDWindowWidthSQL): every row version the statement sees and a
+// transaction at or after the watermark wrote has a 64-bit ID in that window,
+// so its 32-bit xmin lies at the same distance from the watermark's low 32
+// bits. A frozen tuple keeps its raw, possibly ancient xmin (as do the
+// special IDs 0 to 2), which may alias into the window; the window spans only
+// the transactions since the watermark, so that is rare, and both conditions
+// then treat the row like one written in the window: a delta delivers it once
+// more, the snapshot bound defers it to the next delta (whose since_xid
+// window covers it), and the split completeness check fails, so none of them
+// skips the row. The window is used only while it is at most 2^31 - 1
+// transactions wide (PostgreSQL never lets a live transaction ID age past
+// 2^31); a watermark older than that, or one from the future (a forged value
+// or a server restored from a backup), makes both conditions true for every
+// row, which errs toward delivering rows, never toward skipping them.
+
+// syncXIDDistanceSQL returns the distance, modulo 2^32, from the low 32 bits
+// of the 64-bit transaction ID watermark in arg to the 32-bit transaction ID
+// column.
+func syncXIDDistanceSQL(column, arg string) string {
+	return fmt.Sprintf(`((((%s::text)::bigint - %s::bigint) %% 4294967296 + 4294967296) %% 4294967296)`, column, arg)
+}
+
+// syncXIDWindowWidthSQL returns the number of transaction IDs from the 64-bit
+// watermark in arg up to the next transaction ID of the statement's snapshot
+// (txid_snapshot_xmax), or outOfRange when that window is negative or wider
+// than 2^31 - 1. It is an uncorrelated scalar subquery, so PostgreSQL
+// evaluates it once per statement rather than once per row.
+func syncXIDWindowWidthSQL(arg, outOfRange string) string {
+	return fmt.Sprintf(`(SELECT CASE WHEN xid_window.width BETWEEN 0 AND 2147483647 THEN xid_window.width ELSE %s END FROM (SELECT txid_snapshot_xmax(txid_current_snapshot()) - %s::bigint AS width) xid_window)`, outOfRange, arg)
+}
+
+// syncXIDAtOrAfterSQL returns a condition that holds for every row version
+// whose 32-bit transaction ID column a transaction at or after the 64-bit
+// watermark in arg wrote: a delta's "changed since" leg and the split
+// completeness check. It fails toward true: an out-of-range window counts
+// every row as changed (width 2^32 exceeds every distance).
+func syncXIDAtOrAfterSQL(column, arg string) string {
+	return syncXIDDistanceSQL(column, arg) + ` < ` + syncXIDWindowWidthSQL(arg, "4294967296")
+}
+
+// syncXIDBeforeSQL returns a condition that holds for every row version whose
+// 32-bit transaction ID column a transaction before the 64-bit watermark in
+// arg wrote, and fails only for row versions in the window from the watermark
+// to the statement's next transaction ID: the snapshot upper bound. Such a
+// row is excluded now and matched by syncXIDAtOrAfterSQL with the same
+// watermark on the next delta (whose since_xid is this snapshot ID), so the
+// two never leave a gap. It fails toward true: with an out-of-range window no
+// row is excluded (width 0 never exceeds a distance), because a row
+// delivered beyond the snapshot is only delivered again by the next delta,
+// while a row excluded wrongly would be missed by a full export.
+func syncXIDBeforeSQL(column, arg string) string {
+	return syncXIDDistanceSQL(column, arg) + ` >= ` + syncXIDWindowWidthSQL(arg, "0")
 }
 
 // syncSplitAdvisoryUnchanged reports whether the split pages of the advisory
@@ -892,7 +949,7 @@ func (s *Store) exportSyncReputation(ctx context.Context, opts db.SyncExportOpti
 	args := []any{snapshot, db.ReputationSourceReversingLabs}
 	addSyncWindowFilters(&query, &args, opts, snapshotXID,
 		`updated_at`,
-		`(prc.xmin::text)::bigint`,
+		`prc.xmin`,
 	)
 	if len(opts.Ecosystems) > 0 {
 		query += fmt.Sprintf(` AND ecosystem = ANY($%d)`, len(args)+1)
@@ -980,7 +1037,7 @@ func (s *Store) exportSyncMalicious(ctx context.Context, opts db.SyncExportOptio
 	args := []any{snapshot}
 	addSyncWindowFilters(&query, &args, opts, snapshotXID,
 		`updated_at`,
-		`(mf.xmin::text)::bigint`,
+		`mf.xmin`,
 	)
 	if opts.Since == nil {
 		query += ` AND removed_at IS NULL`
@@ -1077,14 +1134,14 @@ func (q *syncLifecycleQueryArgs) addSnapshotXID(snapshotXID uint64) {
 		return
 	}
 
-	xidArg := q.appendArg(strconv.FormatUint(snapshotXID, 10))
+	xidArg := fmt.Sprintf("$%d", q.appendArg(strconv.FormatUint(snapshotXID, 10)))
 	q.activeFilters = append(q.activeFilters,
-		fmt.Sprintf("(m.xmin::text)::bigint < $%d::bigint", xidArg),
-		fmt.Sprintf("(p.xmin::text)::bigint < $%d::bigint", xidArg),
-		fmt.Sprintf("(r.xmin::text)::bigint < $%d::bigint", xidArg),
+		syncXIDBeforeSQL("m.xmin", xidArg),
+		syncXIDBeforeSQL("p.xmin", xidArg),
+		syncXIDBeforeSQL("r.xmin", xidArg),
 	)
 	q.tombstoneFilters = append(q.tombstoneFilters,
-		fmt.Sprintf("(t.xmin::text)::bigint < $%d::bigint", xidArg),
+		syncXIDBeforeSQL("t.xmin", xidArg),
 	)
 }
 
@@ -1095,19 +1152,19 @@ func (q *syncLifecycleQueryArgs) addDeltaWindow(opts db.SyncExportOptions) {
 
 	sinceArg := q.appendArg(opts.Since.UTC())
 	if opts.SinceXID > 0 {
-		sinceXIDArg := q.appendArg(strconv.FormatUint(opts.SinceXID, 10))
+		sinceXIDArg := fmt.Sprintf("$%d", q.appendArg(strconv.FormatUint(opts.SinceXID, 10)))
 		q.activeFilters = append(q.activeFilters, fmt.Sprintf(`(
 				m.updated_at >= $%[1]d OR
 				p.updated_at >= $%[1]d OR
 				r.updated_at >= $%[1]d OR
-				(m.xmin::text)::bigint >= $%[2]d::bigint OR
-				(p.xmin::text)::bigint >= $%[2]d::bigint OR
-				(r.xmin::text)::bigint >= $%[2]d::bigint
-			)`, sinceArg, sinceXIDArg))
+				%[2]s OR
+				%[3]s OR
+				%[4]s
+			)`, sinceArg, syncXIDAtOrAfterSQL("m.xmin", sinceXIDArg), syncXIDAtOrAfterSQL("p.xmin", sinceXIDArg), syncXIDAtOrAfterSQL("r.xmin", sinceXIDArg)))
 		q.tombstoneFilters = append(q.tombstoneFilters, fmt.Sprintf(`(
 				t.updated_at >= $%[1]d OR
-				(t.xmin::text)::bigint >= $%[2]d::bigint
-			)`, sinceArg, sinceXIDArg))
+				%[2]s
+			)`, sinceArg, syncXIDAtOrAfterSQL("t.xmin", sinceXIDArg)))
 		return
 	}
 
