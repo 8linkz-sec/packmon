@@ -361,8 +361,9 @@ Important behavior:
   at the bottom for lockfiles, SBOMs, Docker inventory files, and Chocolatey
   inventory files. Source paths in the list-all and `--outdated` HTML reports
   show inside the scan root as root-relative paths; every other absolute path,
-  including a Windows drive or UNC path on a Linux host and a POSIX path on
-  Windows, shows only its final segment. The HTML
+  including a Windows drive, UNC, or drive-rooted (`\Users\...`) path on a
+  Linux host and a POSIX or drive-rooted path on Windows, shows only its final
+  segment. The HTML
   "Packages Needing Attention" section is scoped to genuine security and
   lifecycle findings only: current ReversingLabs malware/removed-package
   findings, supply-chain-risk findings, lifecycle (end-of-life) findings,

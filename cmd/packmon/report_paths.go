@@ -96,7 +96,10 @@ func looksAbsolutePath(path string) bool {
 	if filepath.IsAbs(path) {
 		return true
 	}
-	if strings.HasPrefix(path, "/") || strings.HasPrefix(path, `\\`) {
+	// A leading backslash covers UNC paths (\\server\share) and Windows paths
+	// rooted on the current drive (\Users\...); filepath.IsAbs rejects the
+	// latter even on Windows, so it used to render in full.
+	if strings.HasPrefix(path, "/") || strings.HasPrefix(path, `\`) {
 		return true
 	}
 	// Drive-letter form, with either separator: C:\... or C:/...

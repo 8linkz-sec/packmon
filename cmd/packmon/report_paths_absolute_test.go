@@ -21,6 +21,7 @@ func TestReportTargetReducesAbsolutePathsRegardlessOfSeparator(t *testing.T) {
 		`E:/Github/sample-app`:       "sample-app",
 		`C:\Users\Admin\my-service`:  "my-service",
 		`\\fileserver\share\project`: "project",
+		`\Users\Admin\my-service`:    "my-service",
 	}
 	for in, want := range cases {
 		if got := htmlReportDisplayTarget(in); got != want {
@@ -63,6 +64,7 @@ func TestReportSourcePathReducesForeignAbsolutePathsUnderDotRoot(t *testing.T) {
 		{name: "lowercase drive", path: `c:\Users\Alice\go.sum`},
 		{name: "unc backslash", path: `\\fileserver\share\Alice\go.sum`},
 		{name: "unc forward slash", path: `//fileserver/share/Alice/go.sum`},
+		{name: "windows rooted without drive", path: `\Users\Alice\go.sum`},
 		{name: "posix", path: `/home/alice/project/go.sum`},
 	}
 	for _, root := range []string{".", "repo", "sub/dir"} {

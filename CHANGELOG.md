@@ -50,6 +50,10 @@
   path was treated as "inside" the current directory and rendered in full;
   it now shows only its final segment, like every other path outside the scan
   root.
+- The list-all and `--outdated` HTML reports reduce a Windows path
+  rooted on the current drive (`\Users\Alice\go.sum`) to its final segment on
+  every OS. It was not recognized as absolute, so it rendered in full (as
+  `/Users/Alice/go.sum` on Windows) in the report target and source paths.
 - `packmon scan --list-all` compares each installed Docker image tag with its
   own local repo digest. Local digests used to be keyed by repository name
   only, so two installed tags of one repository (for example `postgres:17`
