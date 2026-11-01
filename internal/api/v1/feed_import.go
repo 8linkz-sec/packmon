@@ -184,6 +184,20 @@ func (h *FeedImportHandler) HandleImport(w http.ResponseWriter, r *http.Request)
 			errorResponseForRequest(w, r, http.StatusBadRequest, validationErr.Error())
 			return
 		}
+
+		// The store rejected the imported values themselves (its own record
+		// validation or a database data/check error). That is a client error,
+		// but the store's message names internals, so only the log carries it.
+		if errors.Is(err, db.ErrInvalidFeedImportData) {
+			h.logger.Warn("feed import rejected by store validation", "feed", feed, "error", err, "correlation_id", correlationID)
+			if statusErr := h.recordRejectedFeedImportStatus(r, feed, feedImportStoreRejectedMessage, entriesTotal, correlationID); statusErr != nil {
+				h.logger.Error("feed import reject status failed", "feed", feed, "error", statusErr, "correlation_id", correlationID)
+				errorResponseForRequest(w, r, http.StatusInternalServerError, "feed import rejected but reject status could not be recorded")
+				return
+			}
+			errorResponseForRequest(w, r, http.StatusBadRequest, feedImportStoreRejectedMessage)
+			return
+		}
 		h.logger.Error("feed import failed", "feed", feed, "error", err, "correlation_id", correlationID)
 		errorResponseForRequest(w, r, http.StatusInternalServerError, "feed import failed")
 		return

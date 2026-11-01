@@ -244,7 +244,7 @@ func (s *Store) importMaliciousFeed(ctx context.Context, feed string, items []db
 	if err == nil {
 		s.invalidateDashboardStats()
 	}
-	return imported, deleted, err
+	return imported, deleted, classifyFeedImportDataError(err)
 }
 
 func upsertMaliciousFindingTx(ctx context.Context, tx pgx.Tx, mf *db.MaliciousFinding) error {

@@ -12,6 +12,7 @@ import (
 	"github.com/8linkz-sec/packmon/internal/findinglinks"
 	"github.com/8linkz-sec/packmon/internal/ioutils"
 	"github.com/8linkz-sec/packmon/internal/packageid"
+	"github.com/8linkz-sec/packmon/internal/version"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -35,17 +36,6 @@ const canonicalPackageNameSQL = `CASE lower(btrim(ecosystem))
 				ELSE btrim(raw_name, E' \t\n\r\f\x0B')
 			END`
 
-type storedVersionRange struct {
-	Events []storedVersionEvent `json:"events"`
-}
-
-type storedVersionEvent struct {
-	Introduced   string `json:"introduced"`
-	Fixed        string `json:"fixed"`
-	LastAffected string `json:"last_affected"`
-	Limit        string `json:"limit"`
-}
-
 // coalesceStoredJSONArray converts an absent or JSON-null array value into an
 // empty array. affected_packages.version_ranges and .versions_affected are
 // constrained to be JSON arrays (not null), but OSV affected packages that
@@ -68,11 +58,11 @@ func validateStoredStringArrayJSON(id, field string, raw json.RawMessage, allowN
 		if allowNull {
 			return nil
 		}
-		return fmt.Errorf("%s %s must be an array of strings", id, field)
+		return invalidFeedImportDataf("%s %s must be an array of strings", id, field)
 	}
 	var values []string
 	if err := json.Unmarshal(raw, &values); err != nil {
-		return fmt.Errorf("%s %s must be an array of strings: %w", id, field, err)
+		return invalidFeedImportDataf("%s %s must be an array of strings: %v", id, field, err)
 	}
 	return nil
 }
@@ -86,24 +76,10 @@ func validateStoredVersionRangesJSON(id, field string, raw json.RawMessage, allo
 		if allowNull {
 			return nil
 		}
-		return fmt.Errorf("%s %s must be an array of range objects", id, field)
+		return invalidFeedImportDataf("%s %s must be an array of range objects", id, field)
 	}
-	var ranges []storedVersionRange
-	if err := json.Unmarshal(raw, &ranges); err != nil {
-		return fmt.Errorf("%s %s must be an array of range objects: %w", id, field, err)
-	}
-	for i, versionRange := range ranges {
-		if len(versionRange.Events) == 0 {
-			return fmt.Errorf("%s %s[%d].events must not be empty", id, field, i)
-		}
-		for j, event := range versionRange.Events {
-			if strings.TrimSpace(event.Introduced) == "" &&
-				strings.TrimSpace(event.Fixed) == "" &&
-				strings.TrimSpace(event.LastAffected) == "" &&
-				strings.TrimSpace(event.Limit) == "" {
-				return fmt.Errorf("%s %s[%d].events[%d] must set introduced, fixed, last_affected, or limit", id, field, i, j)
-			}
-		}
+	if shapeErr := version.CheckRangesShape(raw); shapeErr != nil {
+		return invalidFeedImportDataf("%s %s%s %s", id, field, shapeErr.Path, shapeErr.Reason)
 	}
 	return nil
 }
@@ -699,7 +675,7 @@ func (s *Store) importVulnerabilityFeed(ctx context.Context, feed string, items 
 	if err == nil {
 		s.invalidateDashboardStats()
 	}
-	return imported, deleted, err
+	return imported, deleted, classifyFeedImportDataError(err)
 }
 
 func (s *Store) DeleteVulnerability(ctx context.Context, id string) error {
