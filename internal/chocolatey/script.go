@@ -193,8 +193,19 @@ var chocoOptionsWithValue = map[string]bool{
 // while leaving it in command position.
 var commandPrefixes = map[string]bool{"call": true, "sudo": true}
 
-func isSeparatorToken(token string) bool {
-	switch token {
+// scriptToken is one token of a logical script line. quoted records that
+// some of its text came from inside single or double quotes: quoted text is
+// always an argument, so a quoted `;` or `|` never separates commands.
+type scriptToken struct {
+	text   string
+	quoted bool
+}
+
+func (t scriptToken) isSeparator() bool {
+	if t.quoted {
+		return false
+	}
+	switch t.text {
 	case ";", "|", "&", "(", ")", "{", "}", "&&", "||", "<", ">", "=":
 		return true
 	}
@@ -206,19 +217,18 @@ func isSeparatorToken(token string) bool {
 // be in command position (start of line, right after a command separator or
 // redirection, or after a wrapper such as `call`) so text inside strings such
 // as `Write-Host "run choco install x"` is ignored.
-func parseChocoTokens(tokens []string) []installEntry {
+func parseChocoTokens(tokens []scriptToken) []installEntry {
 	var entries []installEntry
 	commandPosition := true
 	for i := 0; i < len(tokens); i++ {
-		token := tokens[i]
-		if isSeparatorToken(token) {
+		if tokens[i].isSeparator() {
 			commandPosition = true
 			continue
 		}
 		if !commandPosition {
 			continue
 		}
-		if commandPrefixes[strings.ToLower(strings.TrimPrefix(token, "@"))] {
+		if commandPrefixes[strings.ToLower(strings.TrimPrefix(tokens[i].text, "@"))] {
 			continue
 		}
 		commandPosition = false
@@ -230,15 +240,15 @@ func parseChocoTokens(tokens []string) []installEntry {
 		version := ""
 		j := argStart
 		for ; j < len(tokens); j++ {
-			token := tokens[j]
-			if isSeparatorToken(token) {
+			if tokens[j].isSeparator() {
 				break
 			}
+			token := tokens[j].text
 			if isOptionToken(token) {
 				option, value, hasValue := splitOption(token)
-				if !hasValue && chocoOptionsWithValue[option] && j+1 < len(tokens) && !isSeparatorToken(tokens[j+1]) {
+				if !hasValue && chocoOptionsWithValue[option] && j+1 < len(tokens) && !tokens[j+1].isSeparator() {
 					j++
-					value = tokens[j]
+					value = tokens[j].text
 					hasValue = true
 				}
 				if option == "version" && hasValue {
@@ -278,13 +288,13 @@ func isOptionToken(token string) bool {
 // install/upgrade verb starting at tokens[i], if tokens[i] begins one. The
 // executable may be written with a path (`C:\...\bin\choco.exe`), an `.exe`
 // suffix, or a batch `@` echo-suppression prefix.
-func chocoCommandArgStart(tokens []string, i int) (int, bool) {
-	switch commandName(tokens[i]) {
+func chocoCommandArgStart(tokens []scriptToken, i int) (int, bool) {
+	switch commandName(tokens[i].text) {
 	case "choco":
 		if i+1 >= len(tokens) {
 			return 0, false
 		}
-		switch strings.ToLower(tokens[i+1]) {
+		switch strings.ToLower(tokens[i+1].text) {
 		case "install", "upgrade":
 			return i + 2, true
 		}
@@ -334,20 +344,22 @@ func isRedirectPrefix(token string) bool {
 }
 
 // tokenize splits a shell/PowerShell line into tokens: whitespace separates,
-// single/double quotes group (quotes removed), the characters ; | & ( ) { }
-// < > become standalone separator tokens (stream selectors such as `2>` are
-// dropped), an unquoted `#` at token start starts a comment that ends the
-// line, `<# ... #>` block comments are skipped (possibly across lines), and a
-// trailing `@"` / `@'` opens a here-string that suppresses following lines
-// until the matching `"@` / `'@` terminator.
-func (s *scriptScanner) tokenize(line string) []string {
-	var tokens []string
+// single/double quotes group (quotes removed, the token marked quoted), the
+// unquoted characters ; | & ( ) { } < > become standalone separator tokens
+// (stream selectors such as `2>` are dropped), an unquoted `#` at token start
+// starts a comment that ends the line, `<# ... #>` block comments are skipped
+// (possibly across lines), and a trailing `@"` / `@'` opens a here-string that
+// suppresses following lines until the matching `"@` / `'@` terminator.
+func (s *scriptScanner) tokenize(line string) []scriptToken {
+	var tokens []scriptToken
 	var current strings.Builder
+	quoted := false
 	flush := func() {
 		if current.Len() > 0 {
-			tokens = append(tokens, current.String())
+			tokens = append(tokens, scriptToken{text: current.String(), quoted: quoted})
 			current.Reset()
 		}
+		quoted = false
 	}
 	quote := byte(0)
 	for i := 0; i < len(line); i++ {
@@ -366,6 +378,7 @@ func (s *scriptScanner) tokenize(line string) []string {
 			}
 		case ch == '"' || ch == '\'':
 			quote = ch
+			quoted = true
 		case ch == '@' && current.Len() == 0 && i+1 < len(line) && (line[i+1] == '"' || line[i+1] == '\'') &&
 			strings.TrimSpace(line[i+2:]) == "":
 			s.hereString = line[i+1]
@@ -381,14 +394,14 @@ func (s *scriptScanner) tokenize(line string) []string {
 		case ch == ' ' || ch == '\t' || ch == '\r':
 			flush()
 		case ch == '<' || ch == '>':
-			if isRedirectPrefix(current.String()) {
+			if !quoted && isRedirectPrefix(current.String()) {
 				current.Reset()
 			}
 			flush()
-			tokens = append(tokens, string(ch))
+			tokens = append(tokens, scriptToken{text: string(ch)})
 		case ch == ';' || ch == '|' || ch == '&' || ch == '(' || ch == ')' || ch == '{' || ch == '}':
 			flush()
-			tokens = append(tokens, string(ch))
+			tokens = append(tokens, scriptToken{text: string(ch)})
 		default:
 			current.WriteByte(ch)
 		}

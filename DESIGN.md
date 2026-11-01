@@ -587,7 +587,11 @@ Important behavior:
   under NuGet version rules; entries without a version (config.xml always
   installs latest) show INSTALLED `-`, the feed's latest version, UPDATE
   `unpinned`, and the `unpinned` flag, and are never counted as available
-  updates. Script `--source` arguments are ignored; feeds come only from
+  updates. A script `choco` verb counts only in command position (line start,
+  after an unquoted `;`, `|`, `&`, `(`, `)`, `{`, `}`, redirection, or `=`,
+  or after `call` / `sudo`); quoted text is always an argument, so a quoted
+  `';'` neither starts a new command nor ends the package list. Script
+  `--source` arguments are ignored; feeds come only from
   configuration. Chocolatey inventory is metadata-only: no vulnerability or
   malicious-package matching, no `/api/v1/check` submission, no `--outdated`
   rows, and no JSON/SARIF/JUnit entries.

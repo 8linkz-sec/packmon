@@ -242,6 +242,11 @@
   as an unrelated file. It used to be reported as an "invalid config.xml
   package list" parse error; only a file whose `<packages>` section was
   already read reports a decoder error.
+- Chocolatey script inventory keeps quoted separator characters as
+  arguments. `Write-Host ';' choco install fake` no longer reports `fake`
+  (the quoted `;` used to put `choco` back into command position), and
+  `choco install a --params ';' b` reports `b` as well as `a` (the quoted
+  `;` used to end the package list).
 
 ### Security updates
 

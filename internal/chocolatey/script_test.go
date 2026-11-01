@@ -74,6 +74,17 @@ func TestParseChocoInstallLineEdgeCases(t *testing.T) {
 		{"batch double colon", `:: choco install 7zip`, nil},
 		{"invoke expression string", `Invoke-Expression "choco install 7zip"`, nil},
 		{"pipe to tee", `choco install 7zip | Tee-Object -FilePath x.log`, []string{"7zip@"}},
+		// quoted separator characters are argument text, never separators
+		{"quoted semicolon argument before choco", `Write-Host ';' choco install fake`, nil},
+		{"double-quoted pipe argument before choco", `Write-Host "|" choco install fake`, nil},
+		{"quoted brace argument before choco", `Write-Host '}' choco install fake`, nil},
+		{"quoted equals argument before choco", `Write-Host '=' choco install fake`, nil},
+		{"quoted ampersand argument before choco", `Write-Host "&" choco install fake`, nil},
+		{"quoted semicolon option value", `choco install a --params ';' b`, []string{"a@", "b@"}},
+		{"quoted redirect option value", `choco install a --installargs ">" b`, []string{"a@", "b@"}},
+		{"quoted semicolon argument", `choco install a ';' b`, []string{"a@", "b@"}},
+		{"unquoted separator after quoted text", `Write-Host ';'; choco install real`, []string{"real@"}},
+		{"quoted digit before redirect is an argument", `choco install a '2'> out.log`, []string{"a@", "2@"}},
 		{"empty", `   `, nil},
 		{"install only option", `choco install --version 1.0`, nil},
 	} {
