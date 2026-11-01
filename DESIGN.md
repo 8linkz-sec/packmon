@@ -50,7 +50,8 @@ unrelated persistence capabilities do not leak across subsystem boundaries.
     `--outdated` have no findings, so any lockfile/SBOM parse error makes them
     exit `4` after they report the packages they could parse (terminal table
     and, for `--outdated --html`, the HTML report), and an inventory where
-    nothing parsed exits `4` instead of reporting "No packages found.";
+    nothing parsed exits `4` instead of reporting "No packages found." (no
+    `--outdated` HTML report is written in that case);
   - `10`: internal bug.
 - Treat malicious and active supply-chain risk findings as always blocking.
   Historical ReversingLabs malware-incident evidence is `LOW` reputation info

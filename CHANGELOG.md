@@ -34,7 +34,8 @@
   printing "No packages found.". `--outdated --quiet` without `--html` used to
   return before reading the inventory, so even fatal parse errors exited `0`;
   it still skips the registry lookups but now collects the inventory and keeps
-  the discovery (`2`) and parser (`4`) exit codes.
+  the discovery (`2`) and parser (`4`) exit codes. CI jobs that relied on
+  `--outdated --quiet` always exiting `0` can now see `2` or `4`.
 - The `packmon scan --html` report formats its timestamps in the viewer's
   browser locale and time zone again; its inline script had the same
   `dateStyle`/`timeStyle` plus `timeZoneName` combination as the list-all and
