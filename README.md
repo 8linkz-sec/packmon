@@ -603,9 +603,21 @@ For local-only use, `.env.example` enables
 `PACKMON_ALLOW_INSECURE_LOCAL_HTTP=true` with explicit container bind mode
 while Compose publishes the host port on `127.0.0.1`; remove those local HTTP
 settings and configure TLS or a TLS-terminating reverse proxy for shared
-deployments. The same local Docker profile sets `PACKMON_METRICS_HOST=0.0.0.0`
-so the metrics listener is reachable through Compose's host-loopback
-`127.0.0.1:9090:9090` port mapping without exposing that port beyond the host.
+deployments.
+
+Metrics stay on container loopback. The local stack runs in production mode,
+and production startup rejects any non-loopback `PACKMON_METRICS_HOST`
+(`Config.ValidateMetricsExposure`), so `.env.example` seeds `127.0.0.1` and
+`docker-compose.override.yml` pins it. The metrics listener therefore binds
+`127.0.0.1:9090` inside the container only: the `127.0.0.1:9090` host mapping
+in `docker-compose.yml` forwards to the container's network interface, not its
+loopback, so a host `curl http://127.0.0.1:9090/metrics` does not reach it.
+Read metrics from inside the container instead, or scrape them with a sidecar
+that shares the server's network namespace:
+
+```bash
+docker compose exec packmon-server wget -qO- http://127.0.0.1:9090/metrics
+```
 
 The PostgreSQL cluster is stored in a project-scoped Docker volume
 (`<project>_postgres-data`, by default `packmon_postgres-data`), so normal

@@ -51,8 +51,8 @@ services:
   packmon-server:
     environment:
       PACKMON_ALLOW_INSECURE_LOCAL_HTTP: ${PACKMON_ALLOW_INSECURE_LOCAL_HTTP:-true}
-      # Literal (not ${...:-}) so it wins even when .env sets METRICS_HOST=0.0.0.0
-      # (the .env.example seed does); a ${VAR:-default} would inherit that value.
+      # Literal (not ${...:-}) so it wins even when an older .env still carries
+      # the former METRICS_HOST=0.0.0.0 seed; a ${VAR:-default} would inherit it.
       PACKMON_METRICS_HOST: "127.0.0.1"
     depends_on:
       postgres:

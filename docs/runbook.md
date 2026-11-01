@@ -175,8 +175,10 @@ curl -fsS http://127.0.0.1:8080/version
 curl -fsS http://127.0.0.1:9090/metrics
 ```
 
-Note: `docker-compose.server.yml` does not publish the metrics port (metrics
-stay on container loopback). Verify metrics with
+Note: in both Compose deployments metrics stay on container loopback
+(production rejects a non-loopback `PACKMON_METRICS_HOST`), so a host curl
+cannot reach them; `docker-compose.server.yml` does not publish the metrics
+port at all. Verify metrics with
 `docker compose -f docker-compose.server.yml exec packmon-server wget -qO- http://127.0.0.1:9090/metrics`
 instead of a host curl.
 

@@ -35,11 +35,11 @@ func TestOverrideDefinesInitSecretsAndMigrateChain(t *testing.T) {
 		".:/workspace",
 		"packmon-migrate:",
 		"service_completed_successfully",
-		// The base binds metrics to 0.0.0.0 (so prod's Docker host can publish
-		// the port), but ValidateMetricsExposure fails closed in production
-		// unless /metrics is on loopback. The local override keeps production
-		// mode (real PostgreSQL store, not the in-memory dev store) and instead
-		// binds metrics to loopback so the server starts.
+		// ValidateMetricsExposure fails closed in production unless /metrics is
+		// on loopback. The local override keeps production mode (real
+		// PostgreSQL store, not the in-memory dev store) and pins metrics to
+		// loopback so the server starts even with an older .env that still
+		// carries the former 0.0.0.0 seed.
 		`PACKMON_METRICS_HOST: "127.0.0.1"`,
 	} {
 		if !strings.Contains(override, want) {
