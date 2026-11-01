@@ -406,7 +406,7 @@ bash scripts/check-requirements.sh --profile agent
 bash scripts/check-requirements.sh --profile server
 mkdir -p .build
 go build -o .build/packmon ./cmd/packmon
-bash scripts/init-secrets.sh           # first run: generate .env as your host user
+bash scripts/init-secrets.sh           # first run: generate .env as your user
 docker compose up --build              # migrate runs automatically before the server
 ```
 
@@ -487,9 +487,9 @@ local-only secrets for `POSTGRES_PASSWORD`, `PACKMON_DB_PASSWORD`,
 non-empty values and never overwrites them; these commands do not print
 generated secret values. `POSTGRES_PASSWORD` and `PACKMON_DB_PASSWORD` are a
 pair: when only one is set, the other is copied from it, and when both are
-blank one shared value is generated. `docker compose up --build` then runs the database
-migration automatically before starting the server. The same two commands
-work identically on Windows, macOS, and Linux.
+blank one shared value is generated. `docker compose up --build` then runs
+the database migration automatically before starting the server. The same two
+commands work identically on Windows, macOS, and Linux.
 
 `init-secrets` writes into the bind-mounted checkout, so it runs as
 `${PACKMON_UID:-1000}:${PACKMON_GID:-1000}` instead of the image's `packmon`

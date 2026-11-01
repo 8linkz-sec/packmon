@@ -21,7 +21,8 @@ In `docker-compose.server.yml`, `postgres` and `packmon-server` run with
 `restart: unless-stopped`, so they come back after a crash, a Docker daemon
 restart, or a host reboot. A container stopped explicitly with
 `docker compose -f docker-compose.server.yml stop` (or removed with `down`)
-stays down, including across daemon restarts. The one-shot `packmon-migrate` and `packmon-backup` jobs never restart.
+stays down, including across daemon restarts. The one-shot `packmon-migrate`
+and `packmon-backup` jobs never restart.
 
 ## Transport security (read before first production start)
 
