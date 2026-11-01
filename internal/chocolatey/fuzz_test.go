@@ -51,20 +51,23 @@ func FuzzParseScript(f *testing.F) {
 	f.Add([]byte("choco install a `"))
 	f.Add([]byte("choco install \"unterminated\n"))
 	f.Add([]byte("\xff\xfe\xfd choco install x\n"))
+	f.Add([]byte("REM note ^\r\n:: x `\r\nchoco install a # b ^\r\n c\r\n"))
 	f.Fuzz(func(t *testing.T, data []byte) {
-		pkgs, err := ParseScript(bytes.NewReader(data), "x.ps1")
-		if err != nil {
-			t.Fatalf("ParseScript() error = %v", err)
-		}
-		for _, pkg := range pkgs {
-			if !packageIDPattern.MatchString(pkg.Name) || pkg.Name != strings.ToLower(pkg.Name) || pkg.Name == "all" {
-				t.Fatalf("invalid package id %q", pkg.Name)
+		for _, kind := range []Kind{KindPowerShellScript, KindBatchScript} {
+			pkgs, err := ParseScript(bytes.NewReader(data), "x", kind)
+			if err != nil {
+				t.Fatalf("ParseScript() error = %v", err)
 			}
-			if pkg.Version != "" && !versionPattern.MatchString(pkg.Version) {
-				t.Fatalf("invalid version %q", pkg.Version)
-			}
-			if (pkg.Version == "") != (len(pkg.Flags) == 1 && pkg.Flags[0] == FlagUnpinned) {
-				t.Fatalf("flags %v inconsistent with version %q", pkg.Flags, pkg.Version)
+			for _, pkg := range pkgs {
+				if !packageIDPattern.MatchString(pkg.Name) || pkg.Name != strings.ToLower(pkg.Name) || pkg.Name == "all" {
+					t.Fatalf("invalid package id %q", pkg.Name)
+				}
+				if pkg.Version != "" && !versionPattern.MatchString(pkg.Version) {
+					t.Fatalf("invalid version %q", pkg.Version)
+				}
+				if (pkg.Version == "") != (len(pkg.Flags) == 1 && pkg.Flags[0] == FlagUnpinned) {
+					t.Fatalf("flags %v inconsistent with version %q", pkg.Flags, pkg.Version)
+				}
 			}
 		}
 	})

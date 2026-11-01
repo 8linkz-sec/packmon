@@ -494,11 +494,18 @@ push, when the scan was asked to write there and cannot skip the write:
 - the local database directory is inside the repository. The scan opens it in
   local and auto mode and to record scan history. Typical causes: a relative
   `PACKMON_DB_PATH` (it resolves against the repository for a hook run), a
-  `db.path` pointing into the repository, the home directory itself being a
-  Git repository (the default database lives in `~/.packmon/db`), or an
-  unknown home directory, where the default falls back to `./.packmon/db`.
-  Set `PACKMON_DB_PATH` or `db.path` to an absolute directory outside every
-  repository, or make `HOME` / `USERPROFILE` resolvable for the hook.
+  `db.path` pointing into the repository, or the home directory itself being
+  a Git repository (the default database lives in `~/.packmon/db`). Set
+  `PACKMON_DB_PATH` or `db.path` to an absolute directory outside every
+  repository.
+- the home directory is unknown (`HOME` / `USERPROFILE` unset or empty in the
+  hook environment), neither `PACKMON_DB_PATH` nor `db.path` is set, and the
+  scan opens the local database. The default database then has no location,
+  and the hook fails with
+  `the home directory is unknown; set PACKMON_DB_PATH or db.path` instead of
+  creating the database in the repository. Set one of the two to an absolute
+  directory outside every repository, or make `HOME` / `USERPROFILE`
+  resolvable for the hook.
 
 A config `output.file` inside the repository does not fail the hook: it is
 skipped with `warning: --hook: skipping output.file <path> (inside the

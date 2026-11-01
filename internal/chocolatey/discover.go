@@ -15,8 +15,12 @@ type Kind string
 const (
 	// KindConfigXML is a candidate `config.xml` package list.
 	KindConfigXML Kind = "config-xml"
-	// KindScript is a Windows script that may contain `choco install` lines.
-	KindScript Kind = "script"
+	// KindPowerShellScript is a PowerShell script or module (.ps1, .psm1)
+	// that may contain `choco install` lines.
+	KindPowerShellScript Kind = "powershell-script"
+	// KindBatchScript is a cmd.exe batch script (.bat, .cmd) that may contain
+	// `choco install` lines.
+	KindBatchScript Kind = "batch-script"
 )
 
 // File is a discovered inventory input with its absolute path, display path
@@ -96,8 +100,10 @@ func classifyFile(base string) (Kind, bool) {
 		return KindConfigXML, true
 	}
 	switch filepath.Ext(lower) {
-	case ".ps1", ".psm1", ".bat", ".cmd":
-		return KindScript, true
+	case ".ps1", ".psm1":
+		return KindPowerShellScript, true
+	case ".bat", ".cmd":
+		return KindBatchScript, true
 	}
 	return "", false
 }

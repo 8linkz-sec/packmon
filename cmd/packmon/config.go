@@ -74,7 +74,7 @@ func newConfigShowCmd() *cobra.Command {
 				fmt.Printf("send_repo_metadata: %v\n", effective.SendRepoMetadata)
 				fmt.Printf("webhook_url:  %s\n", show(valueOrDefault(logsafe.RedactURL(effective.WebhookURL), "(not set)")))
 				fmt.Printf("webhook_secret: %s\n", show(maskSecret(effective.WebhookSecret)))
-				fmt.Printf("db_path:      %s\n", show(effective.DBPath))
+				fmt.Printf("db_path:      %s\n", show(valueOrDefault(effective.DBPath, "(unresolved: home directory unknown; set PACKMON_DB_PATH or db.path)")))
 				fmt.Printf("repos:        %d\n", len(cfg.Repos))
 				if len(cfg.Repos) > 0 {
 					for _, repo := range cfg.Repos {
@@ -297,11 +297,22 @@ func defaultConfigShowSettings() configShowSettings { // #nosec G101 -- this rea
 		Mode:             "auto",
 		FailOn:           string(defaultFailSeverity()),
 		Timeout:          30,
-		DBPath:           defaultDBPath(),
+		DBPath:           defaultConfigShowDBPath(),
 		APIKey:           configShowEnvValue("PACKMON_API_KEY"),
 		APIKeyEnv:        "PACKMON_API_KEY",
 		SendRepoMetadata: true,
 	}
+}
+
+// defaultConfigShowDBPath is the binary-default database file, or empty
+// without a home directory so config show reports it as unresolved; env and
+// config overrides still apply on top.
+func defaultConfigShowDBPath() string {
+	path, err := defaultLocalDBPath()
+	if err != nil {
+		return ""
+	}
+	return path
 }
 
 func applyConfigShowFileSettings(settings *configShowSettings, cfg *cliConfig) {

@@ -191,7 +191,9 @@ available-update information on top of the findings, querying public registries
 for latest versions -- add `--list-all-offline` when you have no outbound
 network. The lookup phase is rate-limited (crates.io lookups pace at one
 request per second, so a large Rust inventory takes several minutes) and
-reports its progress every 10 seconds. `--html` writes a self-contained report for a browser or a ticket, and
+reports its progress every 10 seconds; `--timeout` bounds each registry
+request, not the queue wait in front of it or the whole phase. `--html` writes
+a self-contained report for a browser or a ticket, and
 `--output-json` the same result in the canonical machine shape;
 `--output-sarif` and `--output-junit` exist for code scanning and CI test
 reporting.
@@ -851,7 +853,11 @@ rows render latest status as `unknown`.
 A package status of `Unknown` in the report always means the latest version
 could not be determined (offline mode, unreachable registry, or an
 unsupported/private source as described below); it is not a security signal,
-and security findings for that package are unaffected. Independent of the
+and security findings for that package are unaffected. When registry lookups
+failed, stderr and the report hint say how: refused or failed requests (a
+rate limit, a slow registry) are worth a rerun, a higher `--timeout`, or a
+mirror; responses discarded for exceeding the CLI's response size limit are
+reported separately, because neither changes them. Independent of the
 `Unknown` status: for additional reputation and malware coverage on top of the
 vulnerability feeds, configure the optional server-side ReversingLabs Spectra
 Assure key (`PACKMON_REVERSINGLABS_API_KEY`, see Server Configuration).
@@ -869,8 +875,16 @@ unsafe network targets are shown as `unknown`.
 Chocolatey inventory is metadata-only as well. Packmon reads FLARE-VM /
 VM-Packages style `config.xml` package lists (a root `<config>` element with
 `<packages><package name="..."/>` entries; other `config.xml` files are ignored
-by content) and `choco install|upgrade` / `cinst` / `cup` lines in `.ps1`,
-`.psm1`, `.bat`, and `.cmd` scripts. Pinned `--version` entries are compared
+by content, and a malformed or truncated file is reported as a parse error only
+once its `<packages>` section has been read) and `choco install|upgrade` /
+`cinst` / `cup` lines in `.ps1`, `.psm1`, `.bat`, and `.cmd` scripts. Scripts
+are read with their own language's rules: `.ps1` / `.psm1` files continue lines
+with a trailing backtick and skip `#` comments, `<# ... #>` block comments, and
+here-strings (a backtick inside a comment does not continue the line);
+`.bat` / `.cmd` files continue lines with a trailing caret and skip `REM`,
+`@REM`, and `::` comment lines. Quoted text is always an argument, so a quoted
+`';'` or `'|'` neither starts a new command nor ends the package list.
+Pinned `--version` entries are compared
 with the feed's latest release; unpinned entries (config.xml always installs
 latest) show `INSTALLED -`, the feed's latest version, and status `unpinned`
 and are never counted as available updates. Lookups query the ordered feeds
@@ -893,7 +907,10 @@ enabling direct VCS fallback.
 SwiftPM Git freshness can additionally allow trusted self-hosted or mirrored
 Git hosts with `PACKMON_SWIFTPM_GIT_ALLOWED_HOSTS`; values are bare hostnames,
 and Packmon still builds the remote as `https://host/path.git` rather than
-passing raw lockfile URLs to Git.
+passing raw lockfile URLs to Git. A `Package.resolved` location whose host is
+not a valid DNS hostname (for example `git@.gitserver.example:org/repo`, or a
+non-ASCII host not written in punycode) is not used as package identity; the
+pin's identity is used instead.
 
 ## Git Hooks
 
@@ -930,7 +947,10 @@ followed):
   path inside the repository fails the scan with exit code `2` before it runs;
 - a local database directory (`PACKMON_DB_PATH`, `db.path`, or the default
   `~/.packmon/db`) inside the repository fails the scan with exit code `2`
-  when the scan opens it (local or auto mode, or scan history).
+  when the scan opens it (local or auto mode, or scan history). So does an
+  unknown home directory without `PACKMON_DB_PATH` or `db.path`: the default
+  database then has no location, and packmon never falls back to the
+  repository (the working directory).
 
 Report destinations outside the repository are still written. `--hook` cannot
 be combined with `--list-packages`, `--outdated`, `--list-all`, or

@@ -57,23 +57,55 @@ func TestSecretAndTimeoutHelpers(t *testing.T) {
 	}
 }
 
-func TestDefaultDBPathHonorsEnvDirectory(t *testing.T) {
+func TestResolveLocalDBPathHonorsEnvDirectory(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
 	dir := t.TempDir()
 	t.Setenv("PACKMON_DB_PATH", dir)
 
-	if got := defaultDBPath(); got != filepath.Join(dir, "packmon.db") {
-		t.Fatalf("defaultDBPath() = %q, want env directory packmon.db", got)
+	if got, err := resolveLocalDBPath(); err != nil || got != filepath.Join(dir, "packmon.db") {
+		t.Fatalf("resolveLocalDBPath() = %q, %v; want env directory packmon.db", got, err)
 	}
 }
 
-func TestDefaultDBPathUsesHomeWhenEnvIsEmpty(t *testing.T) {
+func TestDefaultLocalDBPathUsesHomeDirectory(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
 	home := t.TempDir()
 	t.Setenv("PACKMON_DB_PATH", "")
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 
-	if got := defaultDBPath(); got != filepath.Join(home, ".packmon", "db", "packmon.db") {
-		t.Fatalf("defaultDBPath() = %q, want home-local path", got)
+	want := filepath.Join(home, ".packmon", "db", "packmon.db")
+	if got, err := defaultLocalDBPath(); err != nil || got != want {
+		t.Fatalf("defaultLocalDBPath() = %q, %v; want home-local path", got, err)
+	}
+	if got, err := resolveLocalDBPath(); err != nil || got != want {
+		t.Fatalf("resolveLocalDBPath() = %q, %v; want the home-local default", got, err)
+	}
+}
+
+// TestConfigShowReportsAnUnresolvableDefaultDBPath keeps config show usable
+// without a home directory and says why there is no database path.
+func TestConfigShowReportsAnUnresolvableDefaultDBPath(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	unsetHomeDirectory(t)
+	t.Setenv("PACKMON_DB_PATH", "")
+	configPath := filepath.Join(t.TempDir(), "packmon.yaml")
+	if err := os.WriteFile(configPath, []byte("mode: auto\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cmd := newConfigShowCmd()
+	cmd.SetArgs([]string{"--file", configPath})
+	output := captureStdout(t, func() {
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("config show: %v", err)
+		}
+	})
+	if !strings.Contains(output, "db_path:      (unresolved: home directory unknown; set PACKMON_DB_PATH or db.path)") {
+		t.Fatalf("config show output lacks the unresolved db_path note:\n%s", output)
+	}
+	if strings.Contains(output, filepath.Join(".packmon", "db")) {
+		t.Fatalf("config show reports a working-directory database path:\n%s", output)
 	}
 }
 

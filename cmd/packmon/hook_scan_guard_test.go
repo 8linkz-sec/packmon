@@ -291,6 +291,25 @@ func TestApplyHookScanWriteGuardRejectsALocalDatabaseInsideTheRepository(t *test
 	}
 }
 
+// TestApplyHookScanWriteGuardRejectsAnUnresolvableDefaultDatabase covers a
+// hook run without a resolvable home directory: the default database has no
+// location then, and the hook must fail with the way out instead of placing
+// the database in the repository.
+func TestApplyHookScanWriteGuardRejectsAnUnresolvableDefaultDatabase(t *testing.T) {
+	root := hookGuardRepo(t)
+
+	settings, flags := hookGuardResolve(t, scanFlagValues{})
+	t.Setenv("PACKMON_DB_PATH", "")
+	unsetHomeDirectory(t)
+	_, _, err := applyHookGuard(t, settings, flags)
+	if err == nil || !strings.Contains(err.Error(), "home directory") || !strings.Contains(err.Error(), "PACKMON_DB_PATH or db.path") {
+		t.Fatalf("applyHookScanWriteGuard() error = %v, want the unknown home directory reported", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, ".packmon")); !os.IsNotExist(statErr) {
+		t.Fatalf("hook guard created %s/.packmon (stat err = %v)", root, statErr)
+	}
+}
+
 // TestApplyHookScanWriteGuardSkipsAnUnusedLocalDatabase covers a remote-only
 // hook scan with history disabled: it never opens the local database, so its
 // location does not matter.

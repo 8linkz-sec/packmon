@@ -69,17 +69,25 @@ func TestParseChocoInstallLineEdgeCases(t *testing.T) {
 		{"trailing comment", `choco install 7zip # installs 7zip`, []string{"7zip@"}},
 		{"hash inside quotes", `choco install 7zip --params "/a#b" git`, []string{"7zip@", "git@"}},
 		{"hash mid token is not a comment", `choco install 7zip --params=/a#b git`, []string{"7zip@", "git@"}},
-		{"batch rem", `REM choco install 7zip`, nil},
-		{"batch @rem", `@REM choco install 7zip`, nil},
-		{"batch double colon", `:: choco install 7zip`, nil},
 		{"invoke expression string", `Invoke-Expression "choco install 7zip"`, nil},
 		{"pipe to tee", `choco install 7zip | Tee-Object -FilePath x.log`, []string{"7zip@"}},
+		// quoted separator characters are argument text, never separators
+		{"quoted semicolon argument before choco", `Write-Host ';' choco install fake`, nil},
+		{"double-quoted pipe argument before choco", `Write-Host "|" choco install fake`, nil},
+		{"quoted brace argument before choco", `Write-Host '}' choco install fake`, nil},
+		{"quoted equals argument before choco", `Write-Host '=' choco install fake`, nil},
+		{"quoted ampersand argument before choco", `Write-Host "&" choco install fake`, nil},
+		{"quoted semicolon option value", `choco install a --params ';' b`, []string{"a@", "b@"}},
+		{"quoted redirect option value", `choco install a --installargs ">" b`, []string{"a@", "b@"}},
+		{"quoted semicolon argument", `choco install a ';' b`, []string{"a@", "b@"}},
+		{"unquoted separator after quoted text", `Write-Host ';'; choco install real`, []string{"real@"}},
+		{"quoted digit before redirect is an argument", `choco install a '2'> out.log`, []string{"a@", "2@"}},
 		{"empty", `   `, nil},
 		{"install only option", `choco install --version 1.0`, nil},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := lineKeys(parseChocoInstallLine(tt.line))
+			got := lineKeys(parseChocoInstallLine(KindPowerShellScript, tt.line))
 			if got != strings.Join(tt.want, " ") {
 				t.Errorf("parseChocoInstallLine(%q) = %q, want %q", tt.line, got, strings.Join(tt.want, " "))
 			}
@@ -87,9 +95,53 @@ func TestParseChocoInstallLineEdgeCases(t *testing.T) {
 	}
 }
 
-func scriptKeys(t *testing.T, script string) string {
+func TestParseChocoInstallLineCommentsFollowScriptKind(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name string
+		kind Kind
+		line string
+		want []string // name@version
+	}{
+		{"batch rem", KindBatchScript, `REM choco install 7zip`, nil},
+		{"batch @rem", KindBatchScript, `@REM choco install 7zip`, nil},
+		{"batch double colon", KindBatchScript, `:: choco install 7zip`, nil},
+		{"batch hash is an argument", KindBatchScript, `choco install a # b`, []string{"a@", "b@"}},
+		{"batch hash line is a command", KindBatchScript, `# x & choco install a`, []string{"a@"}},
+		{"powershell hash comment", KindPowerShellScript, `# choco install 7zip`, nil},
+		{"powershell trailing hash comment", KindPowerShellScript, `choco install a # b`, []string{"a@"}},
+		{"powershell rem is a command word", KindPowerShellScript, `REM x; choco install a`, []string{"a@"}},
+		{"powershell double colon is a command word", KindPowerShellScript, `:: x; choco install a`, []string{"a@"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := lineKeys(parseChocoInstallLine(tt.kind, tt.line))
+			if got != strings.Join(tt.want, " ") {
+				t.Errorf("parseChocoInstallLine(%q, %q) = %q, want %q", tt.kind, tt.line, got, strings.Join(tt.want, " "))
+			}
+		})
+	}
+}
+
+func TestParseScriptRejectsNonScriptKind(t *testing.T) {
+	t.Parallel()
+
+	pkgs, err := ParseScript(strings.NewReader("choco install a\n"), "config.xml", KindConfigXML)
+	if err == nil || !strings.Contains(err.Error(), "config.xml: unsupported chocolatey script kind") {
+		t.Fatalf("ParseScript(KindConfigXML) error = %v, want unsupported script kind", err)
+	}
+	if pkgs != nil {
+		t.Fatalf("ParseScript(KindConfigXML) packages = %+v, want nil", pkgs)
+	}
+}
+
+func scriptKeys(t *testing.T, kind Kind, script string) string {
 	t.Helper()
-	pkgs, err := ParseScript(strings.NewReader(script), "x.ps1")
+	if kind == "" {
+		kind = KindPowerShellScript
+	}
+	pkgs, err := ParseScript(strings.NewReader(script), "x", kind)
 	if err != nil {
 		t.Fatalf("ParseScript() error = %v", err)
 	}
@@ -105,6 +157,7 @@ func TestParseScriptMultiLineConstructs(t *testing.T) {
 
 	for _, tt := range []struct {
 		name   string
+		kind   Kind
 		script string
 		want   string
 	}{
@@ -115,8 +168,50 @@ func TestParseScriptMultiLineConstructs(t *testing.T) {
 		},
 		{
 			name:   "batch caret continuation",
+			kind:   KindBatchScript,
 			script: "choco install 7zip ^\r\n --version 1.0\r\n",
 			want:   "7zip@1.0[]",
+		},
+		{
+			name:   "batch caret continuation at eof",
+			kind:   KindBatchScript,
+			script: "choco install 7zip ^",
+			want:   "7zip@[unpinned]",
+		},
+		{
+			name:   "powershell caret does not continue",
+			script: "choco install a ^\r\nchoco install b\r\n",
+			want:   "a@[unpinned] b@[unpinned]",
+		},
+		{
+			name:   "batch backtick does not continue",
+			kind:   KindBatchScript,
+			script: "choco install a `\r\nchoco install b\r\n",
+			want:   "a@[unpinned] b@[unpinned]",
+		},
+		{
+			name:   "batch hash is not a comment",
+			kind:   KindBatchScript,
+			script: "choco install a # b\r\n",
+			want:   "a@[unpinned] b@[unpinned]",
+		},
+		{
+			name:   "batch hash is an argument and the caret still continues",
+			kind:   KindBatchScript,
+			script: "choco install a # note ^\r\n b\r\n",
+			want:   "a@[unpinned] note@[unpinned] b@[unpinned]",
+		},
+		{
+			name:   "batch has no block comments",
+			kind:   KindBatchScript,
+			script: "<#\r\nchoco install a\r\n#>\r\n",
+			want:   "a@[unpinned]",
+		},
+		{
+			name:   "batch has no here-strings",
+			kind:   KindBatchScript,
+			script: "echo @\"\r\nchoco install a\r\n",
+			want:   "a@[unpinned]",
 		},
 		{
 			name:   "continuation at eof",
@@ -159,6 +254,61 @@ func TestParseScriptMultiLineConstructs(t *testing.T) {
 			want:   "bar@[unpinned]",
 		},
 		{
+			name:   "backtick in line comment does not continue",
+			script: "# note `\nchoco install git\n",
+			want:   "git@[unpinned]",
+		},
+		{
+			name:   "backtick in indented line comment does not continue",
+			script: "  # note `\r\nchoco install git\r\n",
+			want:   "git@[unpinned]",
+		},
+		{
+			name:   "backtick in trailing comment does not continue",
+			script: "choco install a # note `\nchoco install git\n",
+			want:   "a@[unpinned] git@[unpinned]",
+		},
+		{
+			name:   "backtick in comment after a continued line ends the command",
+			script: "choco install a `\n# note `\nchoco install git\n",
+			want:   "a@[unpinned] git@[unpinned]",
+		},
+		{
+			name:   "backtick in unterminated block comment does not continue",
+			script: "choco install a <# note `\n#> choco install git\n",
+			want:   "a@[unpinned] git@[unpinned]",
+		},
+		{
+			name:   "backtick inside multi-line block comment does not continue",
+			script: "<#\nnote `\n#>\nchoco install git\n",
+			want:   "git@[unpinned]",
+		},
+		{
+			name:   "backtick after a closed block comment continues",
+			script: "<# note #> choco install a `\n b\n",
+			want:   "a@[unpinned] b@[unpinned]",
+		},
+		{
+			name:   "backtick after a block comment closed on this line continues",
+			script: "<# doc\ncomment #> choco install a `\n b\n",
+			want:   "a@[unpinned] b@[unpinned]",
+		},
+		{
+			name:   "hash inside quotes before backtick continues",
+			script: "choco install a --params \"#x\" `\n b\n",
+			want:   "a@[unpinned] b@[unpinned]",
+		},
+		{
+			name:   "hash mid token before backtick continues",
+			script: "choco install a --params=/a#b `\n b\n",
+			want:   "a@[unpinned] b@[unpinned]",
+		},
+		{
+			name:   "quote spanning a continuation hides a hash",
+			script: "choco install a --params \"x `\n #y\" `\n b\n",
+			want:   "a@[unpinned] b@[unpinned]",
+		},
+		{
 			name:   "same package pinned twice yields two rows",
 			script: "choco install a --version 1.0\nchoco install a\n",
 			want:   "a@1.0[] a@[unpinned]",
@@ -166,7 +316,7 @@ func TestParseScriptMultiLineConstructs(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := scriptKeys(t, tt.script); got != tt.want {
+			if got := scriptKeys(t, tt.kind, tt.script); got != tt.want {
 				t.Errorf("ParseScript(%q) = %q, want %q", tt.script, got, tt.want)
 			}
 		})
