@@ -1511,6 +1511,7 @@ func TestHandleSyncAcceptsAdvisoryAndLegacyVulnerabilityCursors(t *testing.T) {
 
 	for _, cursor := range []string{
 		db.EncodeSyncAdvisoryCursor("GHSA-aaaa-bbbb-cccc"),
+		db.EncodeSyncAdvisoryRowCursor("GHSA-aaaa-bbbb-cccc", "npm", "left-pad"),
 		base64.RawURLEncoding.EncodeToString([]byte(`["npm","left-pad","GHSA-aaaa-bbbb-cccc"]`)),
 	} {
 		store := &syncExportStore{export: &db.SyncExport{SyncedAt: time.Date(2026, 5, 30, 12, 0, 0, 0, time.UTC)}}
@@ -1538,6 +1539,8 @@ func TestHandleSyncRejectsAdvisoryCursorOutsideADelta(t *testing.T) {
 
 	for _, target := range []string{
 		"/api/v1/sync?vulnerabilities_cursor=" + db.EncodeSyncAdvisoryCursor("GHSA-aaaa-bbbb-cccc"),
+		"/api/v1/sync?vulnerabilities_cursor=" + db.EncodeSyncAdvisoryRowCursor("GHSA-aaaa-bbbb-cccc", "npm", "left-pad"),
+		"/api/v1/sync?since=2026-05-30T11:00:00Z&malicious_cursor=" + db.EncodeSyncAdvisoryRowCursor("MAL-1", "npm", "evil"),
 		"/api/v1/sync?since=2026-05-30T11:00:00Z&vulnerabilities_cursor=" + base64.RawURLEncoding.EncodeToString([]byte(`["other-v2","GHSA-1"]`)),
 		"/api/v1/sync?since=2026-05-30T11:00:00Z&malicious_cursor=" + db.EncodeSyncAdvisoryCursor("MAL-1"),
 	} {

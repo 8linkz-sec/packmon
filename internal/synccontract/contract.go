@@ -15,6 +15,11 @@ const (
 	// client requests this value to minimize pagination roundtrips while staying
 	// inside the server contract.
 	MaxLimit = 10000
+
+	// MaxResponseBytes is the largest /api/v1/sync response body the SQLite
+	// client accepts. The server keeps the vulnerability dataset of a page
+	// within db.SyncVulnerabilityPageByteBudget, well below this cap.
+	MaxResponseBytes = 32 * 1024 * 1024
 )
 
 // Response is the JSON envelope returned by the server sync endpoint.
@@ -42,8 +47,9 @@ type Response struct {
 	// so the client can drop, in this page's transaction, local affected rows
 	// of those vulnerabilities the page did not send. It holds per page: the
 	// server pages a delta by whole advisories, so it may appear on every page
-	// of a multi-page delta. Full exports and legacy row-cursor or offset pages
-	// never carry it. It is omitted when false, which keeps older clients and
+	// of a multi-page delta. Full exports, legacy row-cursor or offset pages,
+	// and the pages of an advisory split because its rows exceed the page
+	// byte budget never carry it. It is omitted when false, which keeps older clients and
 	// servers compatible (older servers set it only on a single-page delta).
 	VulnerabilityAffectedComplete bool `json:"vulnerability_affected_complete,omitempty"`
 	// VulnerabilitiesWithoutAffected lists, only on a page that carries
@@ -59,7 +65,9 @@ type Response struct {
 // Cursor is the opaque paginated-sync cursor returned by the server and echoed
 // by clients on subsequent sync pages. A delta paged by whole advisories
 // carries a versioned advisory cursor in VulnerabilitiesCursor (see
-// db.EncodeSyncAdvisoryCursor); servers still accept the legacy row cursor.
+// db.EncodeSyncAdvisoryCursor), or an advisory row cursor while it splits an
+// advisory that exceeds the page byte budget (db.EncodeSyncAdvisoryRowCursor);
+// servers still accept the legacy row cursor.
 type Cursor struct {
 	Vulnerabilities int `json:"vulnerabilities"`
 	Malicious       int `json:"malicious"`

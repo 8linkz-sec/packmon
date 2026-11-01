@@ -620,6 +620,12 @@ paths:
             while their affected rows fit the limit, and an advisory with more
             affected rows than the limit is a page of its own, so that page
             holds more rows than the limit instead of splitting the advisory.
+            Independently of the limit, the server keeps the vulnerability rows
+            of every page within an estimated byte budget well below the 32 MiB
+            response size the client accepts: a page then ends after the last
+            whole advisory that fits, and an advisory whose rows alone exceed
+            the budget is split over several pages that omit
+            vulnerability_affected_complete.
           schema:
             type: integer
             minimum: 1
@@ -672,7 +678,9 @@ paths:
           description: >-
             Opaque keyset cursor for the vulnerability dataset, echoed from
             next_cursor. A delta paged by whole advisories returns an advisory
-            cursor, which is valid only together with since. The server still
+            cursor, or an advisory row cursor while it splits an advisory that
+            exceeds the page byte budget; both are valid only together with
+            since. The server still
             accepts the legacy row cursor that older servers returned and
             continues such a sequence with legacy row paging (pages without
             vulnerability_affected_complete).
@@ -1669,9 +1677,10 @@ components:
             or a package-name repair) reaches local scans without a full sync.
             An advisory that changes between two pages is either delivered
             whole on a later page or sync, or excluded whole from the
-            sequence; it never arrives partially. Full exports and the legacy
-            row-cursor or offset pages of a delta omit the field, and clients
-            keep upserting rows for unflagged pages. Servers without this
+            sequence; it never arrives partially. Full exports, the legacy
+            row-cursor or offset pages of a delta, and the pages of an advisory
+            split because its rows alone exceed the page byte budget omit the
+            field, and clients keep upserting rows for unflagged pages. Servers without this
             guarantee omit the field (older servers set it only on a delta that
             fits in one page), and clients that do not know it keep upserting
             rows, so older clients and servers remain compatible.

@@ -555,6 +555,142 @@ func testDeltaDeliversAdvisoriesWithoutAffectedPackages(ctx context.Context, t *
 	}
 }
 
+// testDeltaSplitsAnAdvisoryLargerThanThePageBudget syncs a delta whose middle
+// advisory has 12,000 affected packages with a 3,000-byte summary, about 40 MB
+// of JSON -- more than the 32 MiB a client accepts in one response. The pages
+// stay below that cap: the whole-advisory page before it ends at the advisory
+// boundary and stays flagged, the oversized advisory is split over several
+// unflagged (upsert-only) pages with a row cursor, and the advisory after it
+// is paged whole and flagged again. The real SQLite client completes the
+// sync, every row arrives exactly once, flagged pages drop their stale rows,
+// and the stale row of the split advisory stays until a full sync.
+func testDeltaSplitsAnAdvisoryLargerThanThePageBudget(ctx context.Context, t *testing.T, store *Store) {
+	t.Helper()
+
+	const (
+		idBefore = "GHSA-budget-a-before"
+		idBig    = "GHSA-budget-b-giant"
+		idAfter  = "GHSA-budget-c-after"
+		bigRows  = 12000
+	)
+	insertSyncPagingAdvisory(ctx, t, store, idBefore, "budget-a1", "budget-a-stale")
+	insertSyncPagingAdvisory(ctx, t, store, idAfter, "budget-c1", "budget-c-stale")
+	if _, err := store.pool.Exec(ctx, `
+		INSERT INTO vulnerabilities(id, summary, severity, published, modified)
+		VALUES ($1, repeat('x', 3000), 'HIGH', NOW(), NOW())`, idBig); err != nil {
+		t.Fatalf("insert oversized vulnerability: %v", err)
+	}
+	if _, err := store.pool.Exec(ctx, `
+		INSERT INTO affected_packages(vulnerability_id, ecosystem, name, version_ranges, versions_affected)
+		SELECT $1, 'npm', 'budget-big-' || lpad(g::text, 5, '0'), '[]'::jsonb, '[]'::jsonb
+		FROM generate_series(1, $2::int) g
+		UNION ALL
+		SELECT $1, 'npm', 'budget-big-stale', '[]'::jsonb, '[]'::jsonb`, idBig, bigRows); err != nil {
+		t.Fatalf("insert oversized affected packages: %v", err)
+	}
+
+	local, err := sqlite.New(filepath.Join(t.TempDir(), "packmon.db"))
+	if err != nil {
+		t.Fatalf("sqlite.New() error = %v", err)
+	}
+	t.Cleanup(func() { ioutils.CloseSilently(local) })
+	seedLocalSyncRows(ctx, t, local, idBefore, "npm", "budget-a1", "budget-a-stale")
+	seedLocalSyncRows(ctx, t, local, idBig, "npm", "budget-big-stale")
+	seedLocalSyncRows(ctx, t, local, idAfter, "npm", "budget-c1", "budget-c-stale")
+	since := syncDeltaBoundary(ctx, t, store)
+	if err := local.SetSyncMeta(ctx, "last_sync_at", since.Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("seed local last sync: %v", err)
+	}
+	for _, stmt := range []string{
+		`DELETE FROM affected_packages WHERE vulnerability_id = ANY($1) AND name LIKE '%-stale'`,
+		`UPDATE vulnerabilities SET updated_at = NOW() WHERE id = ANY($1)`,
+	} {
+		if _, err := store.pool.Exec(ctx, stmt, []string{idBefore, idBig, idAfter}); err != nil {
+			t.Fatalf("drop stale packages before the delta: %v", err)
+		}
+	}
+
+	type pageFacts struct {
+		ids      []string
+		complete bool
+	}
+	var (
+		pages   []pageFacts
+		bigSeen = make(map[string]struct{}, bigRows)
+	)
+	opts := db.SyncExportOptions{Since: &since, Limit: synccontract.MaxLimit}
+	for {
+		page, err := store.ExportSync(ctx, opts)
+		if err != nil {
+			t.Fatalf("ExportSync(delta page %d) error = %v", len(pages)+1, err)
+		}
+		encoded, err := json.Marshal(synccontract.ResponseFromExport(page, "healthy", nil))
+		if err != nil {
+			t.Fatalf("encode delta page %d: %v", len(pages)+1, err)
+		}
+		if len(encoded) > synccontract.MaxResponseBytes {
+			t.Fatalf("delta page %d encodes to %d bytes, more than the %d-byte client cap", len(pages)+1, len(encoded), synccontract.MaxResponseBytes)
+		}
+		facts := pageFacts{complete: page.VulnerabilityAffectedComplete}
+		for id := range syncExportRowsByID(page.Vulnerabilities) {
+			facts.ids = append(facts.ids, id)
+		}
+		slices.Sort(facts.ids)
+		for _, row := range page.Vulnerabilities {
+			if row.ID != idBig {
+				continue
+			}
+			if _, dup := bigSeen[row.Name]; dup {
+				t.Fatalf("delta page %d repeats %s/%s", len(pages)+1, idBig, row.Name)
+			}
+			bigSeen[row.Name] = struct{}{}
+		}
+		pages = append(pages, facts)
+		if !page.Truncated {
+			break
+		}
+		if len(pages) > 20 {
+			t.Fatalf("delta did not finish after %d pages", len(pages))
+		}
+		opts.SnapshotAt, opts.SnapshotXID, opts.Cursor = page.SyncedAt, page.SyncedXID, *page.NextCursor
+	}
+	if len(bigSeen) != bigRows {
+		t.Fatalf("delta delivered %d rows of %s, want %d", len(bigSeen), idBig, bigRows)
+	}
+	var splitPages int
+	for i, page := range pages {
+		switch {
+		case slices.Equal(page.ids, []string{idBefore}) || slices.Equal(page.ids, []string{idAfter}):
+			if !page.complete {
+				t.Fatalf("delta page %d with %q is unflagged, want whole advisories flagged (pages %+v)", i+1, page.ids, pages)
+			}
+		case slices.Equal(page.ids, []string{idBig}):
+			if page.complete {
+				t.Fatalf("delta page %d of the split advisory is flagged (pages %+v)", i+1, pages)
+			}
+			splitPages++
+		case len(page.ids) == 0:
+		default:
+			t.Fatalf("delta page %d mixes advisories %q (pages %+v)", i+1, page.ids, pages)
+		}
+	}
+	if splitPages < 2 {
+		t.Fatalf("oversized advisory spans %d page(s), want it split (pages %+v)", splitPages, pages)
+	}
+
+	server := newLoopbackSyncServer(t, store, synccontract.MaxLimit, func(int) {})
+	if err := sqlite.Sync(ctx, local, sqlite.SyncConfig{ServerURL: server.URL, AllowInsecureHTTP: true}); err != nil {
+		t.Fatalf("sqlite.Sync(delta with an oversized advisory) error = %v", err)
+	}
+	got := localSyncPagingRows(ctx, t, local, idBefore, idBig, idAfter)
+	if !slices.Equal(got[idBefore], []string{"budget-a1"}) || !slices.Equal(got[idAfter], []string{"budget-c1"}) {
+		t.Fatalf("local rows of the whole advisories = %q / %q, want their stale rows dropped", got[idBefore], got[idAfter])
+	}
+	if len(got[idBig]) != bigRows+1 || !slices.Contains(got[idBig], "budget-big-stale") {
+		t.Fatalf("local rows of the split advisory = %d (stale kept %v), want all %d rows plus the stale row kept by upsert-only pages", len(got[idBig]), slices.Contains(got[idBig], "budget-big-stale"), bigRows)
+	}
+}
+
 // syncDeltaBoundary returns a database timestamp after every committed write
 // so far, usable as the since bound of the next delta export.
 func syncDeltaBoundary(ctx context.Context, t *testing.T, store *Store) time.Time {

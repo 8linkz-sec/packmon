@@ -480,9 +480,19 @@ ecosystem) is listed by ID in `vulnerabilities_without_affected` on a flagged
 page, and current clients drop its local rows in the synced ecosystems; older
 clients and servers keep such rows until a full sync.
 
+An advisory whose affected rows alone exceed the per-page byte budget of the
+sync (about 12 MiB of rows, against the 32 MiB a client accepts per response)
+is split across several pages. Those pages never carry
+`vulnerability_affected_complete`, so packages such an advisory no longer
+lists stay in the local database until a full sync; the advisories around it
+are still replaced. Before this split existed, such an advisory made every
+incremental sync fail with `response too large` and the local database never
+advanced; upgrading the server is the fix, a full sync is not needed for it.
+
 During a rolling upgrade, a sync sequence that a new server started and an
 older server continues fails with `400` (the older server does not know the
-whole-advisory cursor); nothing is deleted and the next sync starts over.
+whole-advisory cursor or the advisory row cursor of a split advisory);
+nothing is deleted and the next sync starts over.
 Clients that page by `offset` only, without the cursor, should not switch
 between old and new servers mid-sequence, because the two order offset pages
 differently. When in doubt, run a full sync:

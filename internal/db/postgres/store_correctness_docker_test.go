@@ -64,6 +64,9 @@ func TestPostgresStoreCorrectnessAgainstDocker(t *testing.T) {
 	t.Run("delta delivers advisories without affected packages", func(t *testing.T) {
 		testDeltaDeliversAdvisoriesWithoutAffectedPackages(ctx, t, store)
 	})
+	t.Run("delta splits an advisory larger than the page budget", func(t *testing.T) {
+		testDeltaSplitsAnAdvisoryLargerThanThePageBudget(ctx, t, store)
+	})
 	t.Run("package name repair marks merged vulnerabilities changed", func(t *testing.T) {
 		testPackageNameRepairDeltaIncludesMergedVulnerability(ctx, t, store)
 	})

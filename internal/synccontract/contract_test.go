@@ -173,6 +173,21 @@ func TestVulnerabilitiesWithoutAffectedStaysOptional(t *testing.T) {
 	}
 }
 
+// TestSyncPageByteBudgetLeavesRoomBelowTheClientCap keeps the server's byte
+// budget for the vulnerabilities of one sync page well below the response
+// size a client accepts, so the other datasets of the page and the envelope
+// still fit.
+func TestSyncPageByteBudgetLeavesRoomBelowTheClientCap(t *testing.T) {
+	t.Parallel()
+
+	if MaxResponseBytes != 32<<20 {
+		t.Fatalf("MaxResponseBytes = %d, want the 32 MiB client cap", MaxResponseBytes)
+	}
+	if db.SyncVulnerabilityPageByteBudget <= 0 || 2*db.SyncVulnerabilityPageByteBudget > MaxResponseBytes {
+		t.Fatalf("SyncVulnerabilityPageByteBudget = %d, want a positive budget of at most half of MaxResponseBytes (%d)", db.SyncVulnerabilityPageByteBudget, MaxResponseBytes)
+	}
+}
+
 func stringPtr(value string) *string {
 	return &value
 }

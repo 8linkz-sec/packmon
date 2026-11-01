@@ -1071,7 +1071,24 @@ advisory always fits, so an advisory with more affected rows than the limit is
 a page of its own and that page holds more rows than the limit, instead of the
 advisory being split. `next_cursor.vulnerabilities_cursor` then carries a
 versioned advisory cursor (the last advisory ID of the page), and the dataset
-continues only while the page left an advisory for the next one. The server
+continues only while the page left an advisory for the next one. Every page is
+also bounded by bytes: the client rejects a response body above 32 MiB, so the
+server keeps the vulnerability rows of a page within an estimated 12 MiB
+(`db.SyncVulnerabilityPageByteBudget`, an upper bound of their JSON encoding
+with escaping), leaving room for the other datasets of the page. When the next
+advisory no longer fits that budget, the page ends after the last whole
+advisory and stays flagged. When the first advisory of a page alone exceeds
+the budget (an unusually large affected set, whose summary and references
+repeat on every row), the server falls back to splitting that advisory only:
+its pages carry as many of its rows as fit, at least one, in (ecosystem, name)
+order behind a versioned four-part advisory row cursor, and are never flagged,
+so the client only upserts them; the advisory after it is paged whole and
+flagged again. The completeness guarantee therefore never covers a split
+advisory, and local rows that such an advisory no longer lists stay until a
+full sync. A split page that finds the advisory changed after the pinned
+snapshot delivers no further rows of it, and the next delta delivers it again.
+Full exports and the legacy delta row pages honor the same byte budget and
+continue after the last delivered row. The server
 promises that the affected sets of a page are complete, with
 `vulnerability_affected_complete: true`, on every such delta page: the flag
 means that every vulnerability delivered on this page carries its complete

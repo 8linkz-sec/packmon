@@ -138,7 +138,7 @@ func TestOpenAPIIncludesCanonicalScanAndSyncFields(t *testing.T) {
 		t.Fatalf("SyncResponse.vulnerability_affected_complete type = %#v, want boolean", got)
 	}
 	affectedCompleteDescription, _ := affectedComplete["description"].(string)
-	for _, want := range []string{"since window", "this page", "every page of a multi-page delta", "whole advisories", "all of its current affected", "legacy", "compatible"} {
+	for _, want := range []string{"since window", "this page", "every page of a multi-page delta", "whole advisories", "all of its current affected", "legacy", "byte budget omit the", "compatible"} {
 		if !strings.Contains(affectedCompleteDescription, want) {
 			t.Fatalf("SyncResponse.vulnerability_affected_complete description missing %q: %q", want, affectedCompleteDescription)
 		}
@@ -177,14 +177,14 @@ func TestOpenAPIIncludesCanonicalScanAndSyncFields(t *testing.T) {
 		t.Fatalf("/api/v1/sync limit maximum = %d, want %d", got, synccontract.MaxLimit)
 	}
 	limitDescription, _ := limit["description"].(string)
-	for _, want := range []string{"whole advisories", "more affected rows than the limit"} {
+	for _, want := range []string{"whole advisories", "more affected rows than the limit", "byte budget", "32 MiB", "split over several pages", "omit vulnerability_affected_complete"} {
 		if !strings.Contains(limitDescription, want) {
 			t.Fatalf("/api/v1/sync limit description missing %q: %q", want, limitDescription)
 		}
 	}
 	vulnerabilitiesCursorParameter := requireOperationParameter(t, syncOperation, "vulnerabilities_cursor", "query")
 	vulnerabilitiesCursorDescription, _ := vulnerabilitiesCursorParameter["description"].(string)
-	for _, want := range []string{"advisory cursor", "since", "legacy row cursor"} {
+	for _, want := range []string{"advisory cursor", "advisory row cursor", "page byte budget", "since", "legacy row cursor"} {
 		if !strings.Contains(vulnerabilitiesCursorDescription, want) {
 			t.Fatalf("/api/v1/sync vulnerabilities_cursor description missing %q: %q", want, vulnerabilitiesCursorDescription)
 		}

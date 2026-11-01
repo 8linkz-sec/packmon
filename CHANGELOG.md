@@ -376,6 +376,22 @@
   ecosystems. Each listed advisory takes one row of the page's `limit`. Older
   clients ignore the field and older servers omit it, so both keep the
   previous behavior.
+- An incremental `packmon db sync` no longer fails on every retry when one
+  advisory has an unusually large affected set. Whole-advisory paging always
+  delivered the first advisory of a page complete, so such an advisory (its
+  summary and references repeat on every affected row) could make one page
+  larger than the 32 MiB a client accepts; the client rejected it with
+  `response too large` and the local database never advanced. The server now
+  bounds the vulnerability rows of every sync page by an estimated 12 MiB as
+  well as by the row `limit`: a page ends after the last whole advisory that
+  fits and stays flagged, and an advisory whose rows alone exceed the budget is
+  split over several pages in (ecosystem, name) order behind a new opaque
+  advisory row cursor. Those pages omit `vulnerability_affected_complete`, so
+  the client only upserts them and packages such an advisory no longer lists
+  stay until a full sync; the advisories around it are still replaced. Full
+  exports and legacy delta row pages honor the same budget. An older server
+  rejects the new cursor with `400` if it continues a sequence a new server
+  started, and the next sync starts over.
 - Manual advisory writes and deletes on PostgreSQL use the normalized
   (trimmed) advisory ID throughout. A padded ID such as ` manual:x ` no longer
   leaves both the vulnerability and the malicious record active after a type

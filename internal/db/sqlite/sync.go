@@ -40,7 +40,7 @@ const syncMetaKeyReputationResync = "reputation_resync_required"
 
 const (
 	syncPageLimit       = synccontract.MaxLimit
-	maxSyncResponseSize = 32 * 1024 * 1024
+	maxSyncResponseSize = synccontract.MaxResponseBytes
 	maxSyncFutureSkew   = 5 * time.Minute
 	syncMax429Retries   = 5
 	syncDefault429Delay = time.Second
