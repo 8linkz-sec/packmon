@@ -1003,8 +1003,10 @@ Admin pages are protected by the shared admin session model described in
 `SECURITY.md`: one shared admin identity, an `/admin`-scoped session cookie,
 CSRF-protected write forms, an absolute session lifetime, a shorter inactivity
 timeout, and login lockout that tracks both client IP and the shared admin
-account. Failed current-password checks during admin password changes use the
-same lockout window. Logins with an unknown username or while no admin account
+account. Bootstrap and rotated admin passwords must be at least 12 characters
+(Unicode code points) and at most 72 bytes (UTF-8, the bcrypt input limit);
+each violation has its own error and admin message. Failed current-password
+checks during admin password changes use the same lockout window. Logins with an unknown username or while no admin account
 exists count as failed logins too, and they spend a dummy bcrypt comparison so
 they answer no faster than a wrong password.
 
@@ -1122,7 +1124,10 @@ Important server environment variables:
 
 - `PACKMON_SERVER_MODE`;
 - `PACKMON_SERVER_PORT`;
-- `PACKMON_SERVER_PUBLIC_HOST`;
+- `PACKMON_SERVER_PUBLIC_HOST` (a bare `host[:port]`: hostname, IPv4 address,
+  or IPv6 literal with an optional numeric port 1-65535; startup rejects any
+  scheme, path, query, fragment, userinfo, percent-escape, whitespace, or
+  control character);
 - `PACKMON_TLS_CERT_FILE`;
 - `PACKMON_TLS_KEY_FILE`;
 - `PACKMON_TLS_MIN_VERSION`;
@@ -1137,7 +1142,8 @@ Important server environment variables:
 - `PACKMON_WEB_LEGAL_URL`;
 - `PACKMON_WEB_TERMS_URL`;
 - `PACKMON_DB_*`;
-- `PACKMON_ADMIN_INITIAL_PASSWORD`;
+- `PACKMON_ADMIN_INITIAL_PASSWORD` (bootstrap admin password; 12 characters
+  minimum, 72 bytes maximum);
 - `PACKMON_ADMIN_SESSION_TIMEOUT`;
 - `PACKMON_ADMIN_IDLE_TIMEOUT`;
 - `PACKMON_ADMIN_AUDIT_HMAC_KEY`;
