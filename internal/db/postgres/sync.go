@@ -76,15 +76,28 @@ func (s *Store) ExportSync(ctx context.Context, opts db.SyncExportOptions) (*db.
 	}
 
 	return &db.SyncExport{
-		SyncedAt:        snapshot,
-		SyncedXID:       snapshotXID,
-		Vulnerabilities: vulns,
-		Malicious:       malicious,
-		Reputation:      reputation,
-		Lifecycle:       lifecycle,
-		Truncated:       truncated,
-		NextCursor:      nextCursor,
+		SyncedAt:                      snapshot,
+		SyncedXID:                     snapshotXID,
+		Vulnerabilities:               vulns,
+		Malicious:                     malicious,
+		Reputation:                    reputation,
+		Lifecycle:                     lifecycle,
+		Truncated:                     truncated,
+		NextCursor:                    nextCursor,
+		VulnerabilityAffectedComplete: syncVulnerabilityAffectedComplete(opts, truncated),
 	}, nil
+}
+
+// syncVulnerabilityAffectedComplete reports whether this response may promise
+// vulnerability_affected_complete. Only a delta (since window) that fits in a
+// single page qualifies: that page is one statement, and the delta query sends
+// each changed vulnerability with all of its current affected packages. A full
+// export bounds affected rows by the snapshot, and the pages of a multi-page
+// delta are separate statements that re-evaluate the vulnerability bounds, so
+// a vulnerability changed between pages can arrive incomplete (whole-advisory
+// paging is a planned follow-up).
+func syncVulnerabilityAffectedComplete(opts db.SyncExportOptions, truncated bool) bool {
+	return opts.Since != nil && !truncated && opts.Cursor.IsZero() && opts.Offset == 0
 }
 
 type syncDatasetExporters struct {
@@ -341,18 +354,37 @@ func (q syncVulnerabilityQueryArgs) vulnerabilityChangedIDUpperFilter(alias stri
 		  AND (%s.xmin::text)::bigint < $%d::bigint`, alias, q.snapshotXIDArg)
 }
 
-func (q syncVulnerabilityQueryArgs) addSnapshotXIDFilters(query *string) {
+// addSnapshotXIDFilters bounds the exported rows by the snapshot watermark.
+// A delta bounds only the vulnerability row: the changed-ID CTE already
+// applied the snapshot to decide which vulnerabilities changed, and each of
+// them is then exported with its complete current affected set (see
+// exportSyncVulnerabilitiesBaseSQL).
+func (q syncVulnerabilityQueryArgs) addSnapshotXIDFilters(query *string, delta bool) {
 	if q.snapshotXIDArg == 0 {
 		return
 	}
-	*query += fmt.Sprintf(` AND (v.xmin::text)::bigint < $%[1]d::bigint AND (ap.xmin::text)::bigint < $%[1]d::bigint`, q.snapshotXIDArg)
+	*query += fmt.Sprintf(` AND (v.xmin::text)::bigint < $%d::bigint`, q.snapshotXIDArg)
+	if !delta {
+		*query += fmt.Sprintf(` AND (ap.xmin::text)::bigint < $%d::bigint`, q.snapshotXIDArg)
+	}
 }
 
+// exportSyncVulnerabilitiesBaseSQL selects one row per affected package. A
+// delta joins the changed-ID CTE and exports every current affected package of
+// each selected vulnerability, without a per-row snapshot bound, so a delta
+// that fits in one page can promise vulnerability_affected_complete (see
+// syncVulnerabilityAffectedComplete): a client may drop local affected rows of
+// that vulnerability the page did not send. A package changed after the
+// snapshot is sent now and again by the next delta, which is idempotent. The
+// full export keeps the row-level bound.
 func exportSyncVulnerabilitiesBaseSQL(delta bool) string {
 	fromSQL := `FROM vulnerabilities v`
+	affectedBound := `
+	  AND ap.updated_at <= $1`
 	if delta {
 		fromSQL = `FROM vulnerabilities v
 	INNER JOIN changed_vulnerability_ids changed ON changed.id = v.id`
+		affectedBound = ""
 	}
 	return `
 	SELECT
@@ -377,14 +409,13 @@ func exportSyncVulnerabilitiesBaseSQL(delta bool) string {
 		SELECT source FROM vulnerability_sources
 		WHERE vulnerability_id = v.id ORDER BY id LIMIT 1
 	) vs ON true
-	WHERE v.updated_at <= $1
-	  AND ap.updated_at <= $1`
+	WHERE v.updated_at <= $1` + affectedBound
 }
 
 func buildExportSyncVulnerabilitiesQuery(opts db.SyncExportOptions, snapshot time.Time, snapshotXID uint64) (string, []any, error) {
 	queryArgs := newSyncVulnerabilityQueryArgs(opts, snapshot, snapshotXID)
 	query := queryArgs.changedIDsCTE() + exportSyncVulnerabilitiesBaseSQL(opts.Since != nil)
-	queryArgs.addSnapshotXIDFilters(&query)
+	queryArgs.addSnapshotXIDFilters(&query, opts.Since != nil)
 	if len(opts.Ecosystems) > 0 {
 		query += fmt.Sprintf(` AND ap.ecosystem = ANY($%d)`, len(queryArgs.args)+1)
 		queryArgs.args = append(queryArgs.args, opts.Ecosystems)

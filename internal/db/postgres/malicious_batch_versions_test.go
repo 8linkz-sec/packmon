@@ -7,14 +7,15 @@ import (
 	"github.com/8linkz-sec/packmon/internal/db"
 )
 
-// TestMaliciousBatchVersionsKeepsEmptyVersion pins FindMaliciousBatch to the
+// TestMaliciousBatchVersionsKeepsEmptyVersion pins FindMaliciousBatch (which
+// groups its requested versions with packageVersionsByKey) to the
 // FindMalicious contract: an empty requested version asks for every active
 // finding of the package, so it must survive next to concrete versions of the
 // same package instead of being dropped.
 func TestMaliciousBatchVersionsKeepsEmptyVersion(t *testing.T) {
 	t.Parallel()
 
-	got := maliciousBatchVersions([]db.PackageQuery{
+	got := packageVersionsByKey([]db.PackageQuery{
 		{Ecosystem: "npm", Name: "pkg", Version: ""},
 		{Ecosystem: "npm", Name: "pkg", Version: "2.0.0"},
 		{Ecosystem: "npm", Name: "pkg", Version: "2.0.0"},
@@ -30,11 +31,11 @@ func TestMaliciousBatchVersionsKeepsEmptyVersion(t *testing.T) {
 		{ecosystem: "nuget", name: "only.empty"}: {""},
 	}
 	if len(got) != len(want) {
-		t.Fatalf("maliciousBatchVersions() = %v, want %v", got, want)
+		t.Fatalf("packageVersionsByKey() = %v, want %v", got, want)
 	}
 	for key, versions := range want {
 		if !slices.Equal(got[key], versions) {
-			t.Fatalf("maliciousBatchVersions()[%v] = %q, want %q", key, got[key], versions)
+			t.Fatalf("packageVersionsByKey()[%v] = %q, want %q", key, got[key], versions)
 		}
 	}
 }

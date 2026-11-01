@@ -875,6 +875,16 @@ Local SQLite sync:
   local `LOW` reputation context;
 - resolves synced reputation rows through explicit reputation lookup methods,
   not through malicious-package lookup methods;
+- drops local affected rows of a changed vulnerability only on a delta sync
+  with a stored `since` whose response is a single page (not truncated)
+  carrying `vulnerability_affected_complete`, only for rows in the requested
+  ecosystems, and only in that page's transaction. The server sets the flag
+  only on such single-page deltas, never on full exports or on any page of a
+  multi-page delta, whose separate statements can deliver an advisory changed
+  between pages incompletely. The replacement therefore never runs for full
+  syncs (which clear and reload the local tables), syncs without `since`,
+  multi-page deltas, failed sequences, or older servers, so none of them can
+  remove a still-valid local finding;
 - refuses to mark the local database fresh from a server `synced_at` timestamp
   that is beyond the allowed future clock-skew tolerance;
 - rejects semantically empty full-sync snapshots before clearing local finding

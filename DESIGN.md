@@ -253,10 +253,14 @@ are normalized and validated against this list before scanning; `docker` and
 
 Feed-specific names must be mapped into this enum at the import boundary.
 Package identities are canonicalized anywhere they cross a scan, feed, sync,
-or storage boundary. NuGet package IDs are lowercased. PyPI package names use
-PEP 503 normalization: lowercase and replace each run of `.`, `_`, or `-` with
-a single `-`. Other ecosystem names preserve their registry casing unless a
-specific ecosystem rule is added. NuGet version matching follows NuGet's
+or storage boundary (`packageid.NormalizeName`). Surrounding whitespace is
+trimmed for every ecosystem. NuGet package IDs are lowercased. GitHub Actions
+`owner/repo` names (ecosystem `actions`, also spelled `github actions`) are
+lowercased. PyPI package names use PEP 503 normalization: lowercase and
+replace each run of `.`, `_`, or `-` with a single `-`. Other ecosystem names
+preserve their registry casing unless a specific ecosystem rule is added. The
+PostgreSQL startup package-name repair folds legacy rows into this canonical
+identity for every ecosystem. NuGet version matching follows NuGet's
 case-insensitive prerelease-label behavior for both ecosystem ranges and
 explicit affected-version lists. Chocolatey packages are NuGet packages:
 inventory IDs are lowercased and their versions compare under the same NuGet
@@ -947,10 +951,41 @@ remote check nor a local scan. Once a later sync no longer reports
 sync would never resend rows that did not change in the meantime. An
 ecosystem-filtered sync refetches only its ecosystems and keeps the refetch
 pending until an unfiltered sync completes it.
+Local vulnerability rows are keyed by advisory, ecosystem, and package name, so
+a delta sync must also remove packages an advisory no longer affects. A delta
+`GET /api/v1/sync` exports every changed vulnerability with all of its current
+affected packages (within the requested ecosystems). The server promises that
+the affected sets are complete, with `vulnerability_affected_complete: true`,
+only where this is structurally true: on a delta (a `since` window was given)
+that is delivered in a single page. Only for such a response -- a non-full
+sync with a stored `since`, whose first page is not truncated and carries the
+flag -- does the client drop, in that page's transaction, the local affected
+rows of each delivered non-withdrawn vulnerability that the page did not
+deliver. Syncs without a `since` and multi-page deltas stay upsert-only (a
+full sync clears and reloads the local tables instead): the pages of a
+multi-page delta are separate statements, so an
+advisory changed between two pages can arrive incomplete, and the client must
+not delete its rows (whole-advisory paging is a planned follow-up). Server writes
+that only delete affected rows (the package-name repair merging a legacy row
+into an existing canonical one) also move the vulnerability's `updated_at`, so
+the change enters the next delta. A coverage move (a manual advisory edited to
+another package, a package-name repair) therefore reaches local scans with the
+next single-page incremental sync instead of requiring a full sync; after a
+larger delta it remains until a later single-page delta or a full sync.
+Servers without the guarantee omit the field and clients that do not know it
+keep upserting rows, so older clients and servers remain compatible. An
+ecosystem-filtered sync replaces rows only in its ecosystems and cannot see an
+advisory that moved entirely to another ecosystem; an unfiltered sync does.
+Malicious rows are keyed by ID, so a changed row already replaces the local
+one.
 Local scans query those reputation rows through explicit reputation lookup
 methods; `FindMalicious` and `FindMaliciousBatch` remain malicious-package-only
 boundaries so package detail views and scanner output do not double-count or
 misclassify supply-chain reputation rows.
+The vulnerability and malicious batch lookups (PostgreSQL and local SQLite)
+treat a versionless request as the all-versions match of the single-package
+lookup, also when the same batch requests concrete versions of that package;
+requested versions are deduplicated per package in request order.
 If a server response contains a `synced_at` timestamp beyond the allowed local
 clock-skew tolerance, the client may use it for the current paginated request
 sequence but does not persist it as the local freshness marker.

@@ -165,6 +165,38 @@
   when the same batch also asks for concrete versions of it, so the empty
   version still returns every active malicious finding of the package, as
   `FindMalicious(..., "")` and a versionless-only batch already did.
+- The vulnerability batch lookup (PostgreSQL and local SQLite) and the local
+  SQLite malicious batch lookup apply the same rule: a versionless request
+  next to a concrete version of the same package no longer drops the
+  all-versions match, so a local scan and `/api/v1/check` return the same
+  findings for such a batch. Requested versions are deduplicated per package
+  in request order.
+- The PostgreSQL startup package-name repair now folds names with the same
+  canonical identity as every write and lookup (`packageid.NormalizeName`)
+  for all ecosystems instead of only lower-casing NuGet and folding PyPI.
+  Legacy mixed-case GitHub Actions rows and names with surrounding whitespace
+  (including untrimmed names an earlier repair left behind) are now merged
+  into the canonical row, so their advisories and malicious findings match
+  again instead of never being found by a lookup.
+- An incremental `packmon db sync` now removes packages a vulnerability no
+  longer affects. Local rows used to be only upserted (or deleted when the
+  advisory was withdrawn), so after a server-side coverage change -- a manual
+  advisory edited to another package, or the package-name repair -- a local
+  scan kept reporting the old package until a full sync while
+  `/api/v1/check` no longer did. A delta `GET /api/v1/sync` now exports each
+  changed vulnerability with its complete current affected set (it no longer
+  drops affected rows written after the snapshot). A delta with a `since`
+  window that fits in a single page carries the new optional
+  `vulnerability_affected_complete: true` field, and the client then replaces
+  the local affected rows of each delivered vulnerability in that page's
+  transaction. Full exports and every page of a multi-page delta omit the
+  field, and the client applies the replacement only to a single-page delta
+  with a stored `since`, so a vulnerability changed between two pages of a
+  larger delta can never delete still-valid local rows; such deltas stay
+  upsert-only (whole-advisory paging is a planned follow-up). The package-name
+  repair also marks merged vulnerabilities changed so they enter the next
+  delta. Older servers omit the field and older clients ignore it, so both
+  keep the previous upsert-only behavior.
 - Manual advisory writes and deletes on PostgreSQL use the normalized
   (trimmed) advisory ID throughout. A padded ID such as ` manual:x ` no longer
   leaves both the vulnerability and the malicious record active after a type
