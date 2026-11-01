@@ -680,7 +680,13 @@ Important behavior:
   `try { ... }` and similar blocks are in command position; in `.bat` /
   `.cmd` files they are only the cmd.exe separators `&`, `&&`, `||`, `|` and
   the block parentheses `(` / `)`, while `;`, `{`, `}`, and `=` are ordinary
-  argument text. Batch files also hand command position on after a
+  argument text. As in cmd.exe, a batch `(` opens a block only where a
+  command starts (also as a `for` set and in `@(`, `)else(`, `do(`), and a
+  `)` closes one only while a block is open, which a multi-line block keeps
+  open across lines; any other parenthesis is argument text, so
+  `echo Installing (x86) choco install a` is one `echo` command, a
+  `^"...^"` group keeps its parentheses, and an unbalanced `)` outside any
+  block starts nothing. Batch files also hand command position on after a
   `for ... in (...) do` header (the loop set is data, not commands), after
   the condition of `if` (`exist`, `defined`, `errorlevel`, `cmdextversion`
   with their operand, a `==` or `EQU` / `NEQ` / `LSS` / `LEQ` / `GTR` / `GEQ`

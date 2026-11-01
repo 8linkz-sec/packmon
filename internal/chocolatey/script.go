@@ -19,16 +19,21 @@ import (
 // comments, and here-strings; KindBatchScript (.bat, .cmd) follows cmd.exe:
 // only double quotes group, an unquoted caret makes the next character
 // literal, a caret that ends the line joins the next line, only `&`, `|`, and
-// parentheses separate commands, `for ... in (...) do`, `if <condition>`, and
-// `else` hand command position on, and `REM` and `::` comment lines are
-// skipped. In both languages a redirection and its target are removed from
-// wherever they stand without ending the command. Any other kind is an error.
-// UTF-8/UTF-16 byte-order marks and CRLF line endings are tolerated.
+// block parentheses separate commands (a `(` opens a block only where a
+// command starts, a `)` closes one only while a block is open, possibly from
+// an earlier line, and any other parenthesis is argument text), `for ... in
+// (...) do`, `if <condition>`, and `else` hand command position on, and `REM`
+// and `::` comment lines are skipped. In both languages a redirection and its
+// target are removed from wherever they stand without ending the command. Any
+// other kind is an error. UTF-8/UTF-16 byte-order marks and CRLF line endings
+// are tolerated.
 //
 // Not modeled: variables are never resolved (a `for` loop variable or `$p`
 // names no package), delayed `!name!` expansion, `%name%` values that hold
-// parentheses closing an enclosing block, PowerShell backtick escapes inside a
-// line, and choco.exe's backslash-quote argument rules.
+// parentheses closing an enclosing block, cmd.exe ignoring the rest of a line
+// after a `)` that starts a command outside any block (such a `)` is read as
+// an ordinary command word), PowerShell backtick escapes inside a line, and
+// choco.exe's backslash-quote argument rules.
 func ParseScript(r io.Reader, sourceFile string, kind Kind) ([]Package, error) {
 	if kind != KindPowerShellScript && kind != KindBatchScript {
 		return nil, fmt.Errorf("%s: unsupported chocolatey script kind %q", sourceFile, kind)
@@ -111,6 +116,10 @@ type scriptScanner struct {
 	// keeps its trailing caret, so text appended after the caret can never
 	// turn a command into a comment or back.
 	pendingComment bool
+	// blockDepth counts the batch blocks (and `for` sets) opened by a `(` and
+	// not yet closed by a `)`, so a block that spans lines keeps its
+	// parentheses balanced (see tokenizeBatch).
+	blockDepth int
 }
 
 // feed consumes one physical line and returns the install entries of any
@@ -316,7 +325,7 @@ func (s *scriptScanner) parseLine(line string) []installEntry {
 		}
 	}
 	if !s.powerShell() {
-		return parseChocoTokens(tokenizeBatch(line), true)
+		return parseChocoTokens(tokenizeBatch(line, &s.blockDepth), true)
 	}
 	return parseChocoTokens(s.tokenize(line), false)
 }
@@ -390,17 +399,110 @@ func (t scriptToken) isSeparator() bool {
 	return false
 }
 
+// commandTracker follows command position through the tokens of one logical
+// line, one token at a time. parseChocoTokens reads the finished tokens with
+// it, and tokenizeBatch runs its own copy over the tokens it has emitted so
+// far to decide whether a `(` opens a block; both see the same tokens in the
+// same order, so they always agree.
+type commandTracker struct {
+	batch bool
+	// command reports that the next word stands in command position: at the
+	// start of the line, after a command separator, or after a wrapper such
+	// as `call`.
+	command bool
+	// forHeader is set while reading a batch `for` header (`for %%i in
+	// (set)`), whose words are loop syntax and data rather than commands. Its
+	// `do` hands command position to the loop body; `&` or `|` ends a header
+	// that has none. forSet records that the header's set has been opened.
+	forHeader bool
+	forSet    bool
+	// ifStart is the index of the batch `if` whose condition is being read,
+	// else -1.
+	ifStart int
+}
+
+func newCommandTracker(batch bool) commandTracker {
+	return commandTracker{batch: batch, command: true, ifStart: -1}
+}
+
+// next consumes tokens[i], the token after those already consumed (tokens
+// past i are never read), and reports whether it is a word in command
+// position, the only place a choco verb counts. batch selects the cmd.exe
+// rules: a `for` header up to its `) do`, the condition of an `if`, and an
+// `else` or `do` right after a closing parenthesis all hand command position
+// on, and a bare `@` echo-suppression prefix keeps it.
+func (c *commandTracker) next(tokens []scriptToken, i int) bool {
+	token := tokens[i]
+	if c.forHeader {
+		switch {
+		case token.isSeparator() && (token.text == "&" || token.text == "|"), isBatchKeywordAfterParen(tokens, i, "do"):
+			c.forHeader = false
+			c.command = true
+		case token.isSeparator() && token.text == "(":
+			c.forSet = true
+		}
+		return false
+	}
+	if token.isSeparator() {
+		c.command = true
+		c.ifStart = -1
+		return false
+	}
+	if c.ifStart >= 0 {
+		if end, _ := batchIfCommandStart(tokens[:i+1], c.ifStart); end > i {
+			return false
+		}
+		// tokens[i] is the command the `if` runs.
+		c.ifStart = -1
+	}
+	if !c.command {
+		return false
+	}
+	word := strings.ToLower(strings.TrimPrefix(token.text, "@"))
+	if commandPrefixes[word] {
+		return false
+	}
+	if c.batch {
+		switch {
+		case token.text == "@", isBatchKeywordAfterParen(tokens, i, "do"), isBatchKeywordAfterParen(tokens, i, "else"):
+			return false
+		case word == "for":
+			c.forHeader, c.forSet = true, false
+			return false
+		case word == "if":
+			c.ifStart = i
+			return false
+		}
+	}
+	c.command = false
+	return true
+}
+
+// opensBlock reports whether a batch `(` that starts a word right after
+// tokens, which the tracker has consumed, opens a block: cmd.exe reads it so
+// only where the next command starts (after an `if` condition that is
+// complete) or as the set of a `for` header. Anywhere else it is argument
+// text, so `echo Installing (x86)` and `if (%1)==()` open nothing.
+func (c *commandTracker) opensBlock(tokens []scriptToken) bool {
+	switch {
+	case c.forHeader:
+		return !c.forSet
+	case c.ifStart >= 0:
+		_, complete := batchIfCommandStart(tokens, c.ifStart)
+		return complete
+	}
+	return c.command
+}
+
 // parseChocoTokens walks a tokenized logical line and extracts package IDs
 // from every choco install/upgrade command it contains. The choco verb must
-// be in command position (start of line, right after a command separator, or
-// after a wrapper such as `call`) so text inside strings such as
+// be in command position (see commandTracker) so text inside strings such as
 // `Write-Host "run choco install x"` is ignored. The tokenizers have already
 // removed redirections with their targets, so a redirection is transparent
-// here. batch selects the cmd.exe rules: a `for` header up to its `) do`, the
-// condition of an `if`, and an `else` or `do` right after a closing
-// parenthesis all hand command position on, and only double quotes are
-// stripped from `--option=value` values, because cmd.exe hands single quotes
-// to choco.exe unchanged (only double quotes group on a Windows command line,
+// here. batch selects the cmd.exe rules: command position follows the batch
+// `for`, `if`, `else` and `do` syntax, and only double quotes are stripped
+// from `--option=value` values, because cmd.exe hands single quotes to
+// choco.exe unchanged (only double quotes group on a Windows command line,
 // so `--version='1.0'` carries the value `'1.0'`, which is not a version
 // literal; see splitOption).
 func parseChocoTokens(tokens []scriptToken, batch bool) []installEntry {
@@ -409,44 +511,11 @@ func parseChocoTokens(tokens []scriptToken, batch bool) []installEntry {
 		valueQuotes = `"`
 	}
 	var entries []installEntry
-	commandPosition := true
-	// forHeader is set while reading a batch `for` header (`for %%i in
-	// (set)`), whose words are loop syntax and data rather than commands. Its
-	// `do` hands command position to the loop body; a command separator ends
-	// a header that has none.
-	forHeader := false
+	tracker := newCommandTracker(batch)
 	for i := 0; i < len(tokens); i++ {
-		if forHeader {
-			if tokens[i].isSeparator() && (tokens[i].text == "&" || tokens[i].text == "|") || isBatchKeywordAfterParen(tokens, i, "do") {
-				forHeader = false
-				commandPosition = true
-			}
+		if !tracker.next(tokens, i) {
 			continue
 		}
-		if tokens[i].isSeparator() {
-			commandPosition = true
-			continue
-		}
-		if !commandPosition {
-			continue
-		}
-		word := strings.ToLower(strings.TrimPrefix(tokens[i].text, "@"))
-		if commandPrefixes[word] {
-			continue
-		}
-		if batch {
-			switch {
-			case word == "for":
-				forHeader = true
-				continue
-			case word == "if":
-				i = batchIfCommandStart(tokens, i) - 1
-				continue
-			case isBatchKeywordAfterParen(tokens, i, "do"), isBatchKeywordAfterParen(tokens, i, "else"):
-				continue
-			}
-		}
-		commandPosition = false
 		argStart, ok := chocoCommandArgStart(tokens, i)
 		if !ok {
 			continue
@@ -721,6 +790,17 @@ func (s *scriptScanner) tokenize(line string) []scriptToken {
 // without separating anything, as cmd.exe removes it before running the
 // command. A `%name%` expansion is one word (see batchVariableEnd).
 //
+// Parentheses follow the cmd.exe block rules. A `(` opens a block (depth
+// goes up) only where it starts a word in command position, which the
+// tokenizer learns by running a commandTracker over the tokens it has
+// emitted (see commandTracker.opensBlock); an `@`, `else`, `do`, or `for` set
+// `in` written directly before the `(` is split off first, so `@(`,
+// `)else(`, `do(`, and `in(` still open one. A `)` closes a block (depth goes
+// down) wherever it stands while depth is above zero. Any other parenthesis
+// is argument text, so `echo Installing (x86) choco install a` is one echo
+// command and an unbalanced `)` at depth zero splits nothing. depth carries
+// the open blocks from one logical line to the next.
+//
 // Word splitting follows the invoked program, which sees every double quote
 // that reaches it: an escaped `^"` opens no cmd.exe quote, so `&` and `|`
 // still separate commands after it, but it still groups words for choco.exe,
@@ -728,8 +808,13 @@ func (s *scriptScanner) tokenize(line string) []scriptToken {
 // separately from the cmd.exe quote state and ends with the command at a
 // separator. An empty `""` is an (empty) argument. Batch files have no inline
 // comments, block comments, or here-strings.
-func tokenizeBatch(line string) []scriptToken {
+func tokenizeBatch(line string, depth *int) []scriptToken {
 	var tokens []scriptToken
+	tracker := newCommandTracker(true)
+	emit := func(token scriptToken) {
+		tokens = append(tokens, token)
+		tracker.next(tokens, len(tokens)-1)
+	}
 	var current strings.Builder
 	quoted := false // the current word has quoted or escaped text
 	start := -1     // index in line where the current word starts, else -1
@@ -740,7 +825,7 @@ func tokenizeBatch(line string) []scriptToken {
 	}
 	flush := func(end int) {
 		if current.Len() > 0 || quoted {
-			tokens = append(tokens, scriptToken{text: current.String(), literal: true, raw: line[start:end]})
+			emit(scriptToken{text: current.String(), literal: true, raw: line[start:end]})
 			current.Reset()
 		}
 		quoted = false
@@ -791,11 +876,23 @@ func tokenizeBatch(line string) []scriptToken {
 				}
 				flush(i)
 			}
-			i = batchRedirectionEnd(line, i) - 1
-		case ch == '|' || ch == '&' || ch == '(' || ch == ')':
+			i = batchRedirectionEnd(line, i, *depth > 0) - 1
+		case ch == '(' && start >= 0 && !quoted && opensAfterWord(current.String(), tokens, &tracker):
+			flush(i)
+			fallthrough
+		case ch == '(' && start < 0 && tracker.opensBlock(tokens), ch == ')' && *depth > 0:
 			flush(i)
 			argQuote = false
-			tokens = append(tokens, scriptToken{text: string(ch)})
+			if ch == '(' {
+				*depth++
+			} else {
+				*depth--
+			}
+			emit(scriptToken{text: string(ch)})
+		case ch == '|' || ch == '&':
+			flush(i)
+			argQuote = false
+			emit(scriptToken{text: string(ch)})
 		default:
 			begin(i)
 			current.WriteByte(ch)
@@ -805,11 +902,33 @@ func tokenizeBatch(line string) []scriptToken {
 	return tokens
 }
 
+// opensAfterWord reports whether a batch `(` written directly after word, an
+// unquoted word tokenizeBatch has not emitted yet, opens a block once the word
+// is split off, because cmd.exe ends that word at the `(`: an `@`
+// echo-suppression prefix in command position, an `else` or `do` right after
+// a closing block parenthesis (`)else(`, `do(`), or the `in` of a `for`
+// header before its set (`in(`).
+func opensAfterWord(word string, tokens []scriptToken, tracker *commandTracker) bool {
+	afterParen := len(tokens) > 0 && tokens[len(tokens)-1].isSeparator() && tokens[len(tokens)-1].text == ")"
+	switch {
+	case word == "@":
+		return tracker.opensBlock(tokens)
+	case strings.EqualFold(word, "do"):
+		return afterParen
+	case strings.EqualFold(word, "else"):
+		return afterParen && !tracker.forHeader
+	case strings.EqualFold(word, "in"):
+		return tracker.forHeader && !tracker.forSet
+	}
+	return false
+}
+
 // batchRedirectionEnd returns the index just past the batch redirection that
 // starts at line[i]: its operator and, unless it duplicates a handle, its
 // target. The target may follow after blanks and runs to the next blank or
-// cmd.exe separator that is neither quoted nor caret-escaped.
-func batchRedirectionEnd(line string, i int) int {
+// cmd.exe separator that is neither quoted nor caret-escaped; a `)` ends it
+// only inBlock, while a block is open, and a `(` never does.
+func batchRedirectionEnd(line string, i int, inBlock bool) int {
 	i, dup := redirectionOperatorEnd(line, i)
 	if dup {
 		return i
@@ -826,7 +945,7 @@ func batchRedirectionEnd(line string, i int) int {
 		case inQuote:
 		case ch == '^':
 			i++
-		case isBlank(ch) || strings.IndexByte("<>|&()", ch) >= 0:
+		case isBlank(ch) || strings.IndexByte("<>|&", ch) >= 0 || ch == ')' && inBlock:
 			return i
 		}
 	}
@@ -881,9 +1000,21 @@ var batchCompareOps = map[string]bool{"equ": true, "neq": true, "lss": true, "le
 // `==` count only unquoted (they are read from the raw word), so
 // `if "%1"=="" ...` is a whole comparison. A separator ends the condition
 // early; a malformed condition hands command position to its second word.
-func batchIfCommandStart(tokens []scriptToken, i int) int {
+// complete reports that the condition has all its words, so the next token
+// is the command; it is false when tokens end (or a separator comes) first,
+// which tells commandTracker.opensBlock that a `(` there is still part of the
+// condition, as in `if (%1)==() ...`.
+func batchIfCommandStart(tokens []scriptToken, i int) (end int, complete bool) {
 	isWord := func(k int) bool { return k < len(tokens) && !tokens[k].isSeparator() }
 	keyword := func(k int) string { return strings.ToLower(tokens[k].raw) }
+	// operand returns the end of a condition whose last part, the operand
+	// at k, is optional in the token list.
+	operand := func(k int) (int, bool) {
+		if isWord(k) {
+			return k + 1, true
+		}
+		return k, false
+	}
 	j := i + 1
 	if isWord(j) && keyword(j) == "/i" {
 		j++
@@ -892,31 +1023,28 @@ func batchIfCommandStart(tokens []scriptToken, i int) int {
 		j++
 	}
 	if !isWord(j) {
-		return j
+		return j, false
 	}
 	if batchIfConditions[keyword(j)] {
-		if isWord(j + 1) {
-			return j + 2
-		}
-		return j + 1
+		return operand(j + 1)
 	}
 	if found, tail := unquotedEquals(tokens[j].raw); found {
-		if !tail && isWord(j+1) {
-			return j + 2
+		if tail {
+			return j + 1, true
 		}
-		return j + 1
+		return operand(j + 1)
 	}
 	j++
 	if !isWord(j) {
-		return j
+		return j, false
 	}
 	if found, tail := unquotedEquals(tokens[j].raw); found || batchCompareOps[keyword(j)] {
-		if !tail && isWord(j+1) {
-			return j + 2
+		if tail {
+			return j + 1, true
 		}
-		return j + 1
+		return operand(j + 1)
 	}
-	return j
+	return j, true
 }
 
 // unquotedEquals reports whether a raw batch word holds `==` outside double

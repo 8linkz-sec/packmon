@@ -888,8 +888,10 @@ here-strings (a backtick inside a comment does not continue the line);
 character outside double quotes (`^&` is an argument, `^^` a literal caret,
 and `^"` groups words for choco.exe without hiding a later `&`), a caret that
 is the last character of the line (not inside double quotes, not escaped, no
-trailing spaces) continues it, only `&`, `&&`, `||`, `|`, and parentheses
-separate commands (`;`, `{`, `}`, and `=` are ordinary text), `choco` is
+trailing spaces) continues it, only `&`, `&&`, `||`, `|`, and block
+parentheses separate commands (`;`, `{`, `}`, and `=` are ordinary text; a
+`(` opens a block only where a command starts and a `)` closes one only while
+a block is open, so `echo Installing (x86)` is plain text), `choco` is
 recognized after `for ... in (...) do`, after an `if` condition (`exist`,
 `defined`, `errorlevel`, `==` and `EQU`-style comparisons, with `/i` and
 `not`), and after `else`, a `%name%` expansion such as `%ProgramFiles(x86)%`
