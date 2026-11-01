@@ -349,6 +349,12 @@ Important behavior:
   `--list-packages`, `--outdated`, `--list-all`, or `--auto-sbom`.
   `packmon hook status` reports a managed hook without `--hook` (installed by
   an older version) as outdated; `packmon hook install` rewrites it.
+- Timeouts (`--timeout`, `PACKMON_TIMEOUT`, config `timeout`, and
+  `repos[].timeout`) are whole seconds from 1 through 9223372036, the largest
+  value that fits a Go `time.Duration`. `scan`, `config show`, and `db sync`
+  reject larger values with a configuration error, and config files that set
+  them fail to load, instead of overflowing into a negative or near-zero HTTP,
+  SBOM-generation, registry lookup, or sync deadline.
 - Unknown `--ecosystems` values are configuration errors, not empty successful
   scans. The same validation applies to `PACKMON_ECOSYSTEMS` and
   `.packmon.yaml` ecosystem filters.

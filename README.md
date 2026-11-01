@@ -664,6 +664,7 @@ Example:
 ```yaml
 mode: auto
 fail_on: CRITICAL
+# Whole seconds, 1 through 9223372036 (also for PACKMON_TIMEOUT and --timeout).
 timeout: 30
 # Set to false to omit the optional repository name from remote scan requests and webhooks.
 # send_repo_metadata: false
