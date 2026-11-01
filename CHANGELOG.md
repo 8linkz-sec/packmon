@@ -16,6 +16,13 @@
 
 ### Fixed
 
+- A project `.packmon.yaml` `repos:` list no longer replaces the trusted
+  user-global repo list. Entries are merged per repository (matched by name,
+  then by path): a trusted repo keeps its name, path, routing, and
+  `send_repo_metadata: false`, the project entry may refine its scan policy or
+  opt it out of metadata, and project-only repos are added after the trusted
+  ones. Previously a same-name project entry silently re-enabled repository
+  metadata a trusted repo had disabled.
 - SHA-pinned GitHub Actions are no longer compared as version strings in
   `--list-all` / `--outdated`. The `# vX.Y.Z` comment convention is used as
   the declared version; without it the pin is compared with the dereferenced

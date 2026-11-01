@@ -419,7 +419,11 @@ Important behavior:
   URL/secret, `output.format`/`output.file`, and `db.path`); those values must
   come from flags, environment, user-global config, or an explicit `--config`.
   It may preserve `send_repo_metadata: false` as a privacy opt-out but cannot
-  re-enable repository metadata disabled by a higher-precedence source.
+  re-enable repository metadata disabled by a higher-precedence source or by
+  the trusted user-global config. Project `repos:` entries are merged into the
+  user-global `repos:` per repository (matched by name, then by path) instead
+  of replacing the list: a matched trusted entry keeps its name, path, routing,
+  and metadata opt-out; unmatched project entries are appended.
   CLI errors for remote scans and local DB sync may show redacted server URL
   context only: scheme, host, and a generic path marker without userinfo,
   query, fragment, or full path. User-visible CLI error snippets are truncated

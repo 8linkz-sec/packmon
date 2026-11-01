@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -401,10 +402,87 @@ func overlayCLIRegistryConfig(dst *cliRegistryConfig, src cliRegistryConfig) {
 	}
 }
 
+// overlayCLIReposConfig merges the overlay's repos into the base repos one
+// repository at a time instead of replacing the whole list. An overlay entry
+// that names a base repository, or points at the same path, refines that entry;
+// every other overlay entry is appended after the base entries. Replacing the
+// list used to drop a trusted repo's send_repo_metadata: false whenever the
+// project config listed the same repository.
 func overlayCLIReposConfig(dst *cliConfig, src cliConfig) {
-	if len(src.Repos) > 0 {
-		dst.Repos = append([]cliRepoConfig(nil), src.Repos...)
+	if len(src.Repos) == 0 {
+		return
 	}
+	merged := append([]cliRepoConfig(nil), dst.Repos...)
+	baseCount := len(merged)
+	for _, repo := range src.Repos {
+		if i := matchCLIRepoConfig(merged[:baseCount], repo); i >= 0 {
+			overlayCLIRepoConfig(&merged[i], repo)
+			continue
+		}
+		repo.Ecosystems = append([]string(nil), repo.Ecosystems...)
+		merged = append(merged, repo)
+	}
+	dst.Repos = merged
+}
+
+// matchCLIRepoConfig returns the index of the base repo that the overlay repo
+// refers to: a name match wins, otherwise a path match, otherwise -1.
+func matchCLIRepoConfig(base []cliRepoConfig, repo cliRepoConfig) int {
+	for i := range base {
+		if base[i].Name == repo.Name {
+			return i
+		}
+	}
+	for i := range base {
+		if sameCLIRepoPath(base[i].Path, repo.Path) {
+			return i
+		}
+	}
+	return -1
+}
+
+func sameCLIRepoPath(a, b string) bool {
+	a, b = filepath.Clean(a), filepath.Clean(b)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
+}
+
+// overlayCLIRepoConfig refines a base repo with an overlay entry. The base keeps
+// its identity (name and path), so the overlay cannot point a configured
+// repository at another directory. Repository metadata can only be restricted:
+// an overlay send_repo_metadata: false applies, but nothing in the overlay can
+// re-enable metadata the base repo disabled.
+func overlayCLIRepoConfig(dst *cliRepoConfig, src cliRepoConfig) {
+	if src.Server != "" {
+		dst.Server = src.Server
+	}
+	if src.APIKey != "" {
+		dst.APIKey = src.APIKey
+	}
+	if src.APIKeyEnv != "" {
+		dst.APIKeyEnv = src.APIKeyEnv
+	}
+	if src.Mode != "" {
+		dst.Mode = src.Mode
+	}
+	if src.FailOn != "" {
+		dst.FailOn = src.FailOn
+	}
+	if src.Timeout != 0 {
+		dst.Timeout = src.Timeout
+	}
+	if len(src.Ecosystems) > 0 {
+		dst.Ecosystems = append([]string(nil), src.Ecosystems...)
+	}
+	if src.IncludeDev != nil {
+		dst.IncludeDev = src.IncludeDev
+	}
+	if src.SendRepoMetadata != nil && !*src.SendRepoMetadata {
+		dst.SendRepoMetadata = src.SendRepoMetadata
+	}
+	overlayCLIWebhookConfig(&dst.Webhook, src.Webhook)
 }
 
 // userGlobalConfigPath returns the path to the user-global CLI config

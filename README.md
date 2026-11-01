@@ -703,7 +703,9 @@ mirror URLs, or local write destinations such as `server`, `api_key`,
 `output.format`/`output.file`, or `db.path`. It may opt out of remote
 repository-name metadata with `send_repo_metadata: false`, but it cannot
 re-enable metadata if a higher-precedence user config, environment variable,
-or flag disabled it.
+or flag disabled it. Project `repos:` entries are merged into the user-global
+`repos:` per repository (matched by name, then by path) rather than replacing
+the list, so a trusted repo's `send_repo_metadata: false` and routing survive.
 Store API keys in environment variables, CI secrets, OS secret stores, or the
 user-global config. Use `api_key_env` in trusted user-global or explicit config
 files rather than writing plaintext keys.
