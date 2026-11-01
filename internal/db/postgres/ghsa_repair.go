@@ -26,7 +26,9 @@ func (s *Store) CountVulnerabilitiesBySource(ctx context.Context, source string)
 // rows use the same canonical identity as feed upserts and lookups. Every
 // array function is guarded with jsonb_typeof: raw advisories may carry JSON
 // null, objects, or scalars where arrays are expected, and COALESCE does not
-// replace a JSON null.
+// replace a JSON null. Packages whose reconstructed constraints fail the
+// affected_packages CHECK predicates are skipped rather than written, in line
+// with the feed path rejecting malformed version ranges.
 const repairGHSAAffectedPackagesSQL = `
 	WITH candidates AS (
 		SELECT
@@ -144,7 +146,7 @@ const repairGHSAAffectedPackagesSQL = `
 			) WITH ORDINALITY AS r(item, ordinality)
 			-- A range whose events are missing, JSON null, an object, or a
 			-- scalar has no events to complete; treat it as an empty array so
-			-- one malformed range cannot abort the repair of every advisory.
+			-- one malformed range cannot raise and abort the whole repair.
 			CROSS JOIN LATERAL (
 				SELECT CASE WHEN jsonb_typeof(r.item->'events') = 'array' THEN r.item->'events' ELSE '[]'::jsonb END AS items
 			) range_events
@@ -200,6 +202,12 @@ const repairGHSAAffectedPackagesSQL = `
 				version_ranges,
 				versions_affected
 			FROM deduped
+			-- Skip a package whose reconstructed constraints the schema would
+			-- reject (for example a range without a non-empty events array):
+			-- its stored row stays as the feed wrote it, and the violation
+			-- cannot abort the repair of every other advisory.
+			WHERE packmon_jsonb_version_ranges_valid(version_ranges)
+			  AND packmon_jsonb_string_array_valid(versions_affected)
 			ON CONFLICT (vulnerability_id, ecosystem, name) DO UPDATE SET
 				version_ranges = EXCLUDED.version_ranges,
 				versions_affected = EXCLUDED.versions_affected,

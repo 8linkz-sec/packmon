@@ -38,6 +38,8 @@ func TestRepairGHSAAffectedPackagesGuardsJSONArrayFunctions(t *testing.T) {
 	for _, guard := range []string{
 		"jsonb_typeof(vs.raw_json->'affected') = 'array'",
 		"jsonb_typeof(r.item->'events') = 'array'",
+		"WHERE packmon_jsonb_version_ranges_valid(version_ranges)",
+		"AND packmon_jsonb_string_array_valid(versions_affected)",
 	} {
 		if !strings.Contains(repairGHSAAffectedPackagesSQL, guard) {
 			t.Fatalf("GHSA repair is missing array guard %q", guard)

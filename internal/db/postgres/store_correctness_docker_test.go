@@ -255,6 +255,8 @@ func testGHSARepairToleratesNonArrayAffectedAndEvents(ctx context.Context, t *te
 			"database_specific": {"last_known_affected_version_range": "< 2.0.0"}}]}`,
 		"GHSA-repair-events-scalar": `{"affected": [{"package": {"ecosystem": "npm", "name": "events-scalar"},
 			"ranges": [{"type": "SEMVER", "events": 7}, "range-scalar"]}]}`,
+		"GHSA-repair-versions-numeric": `{"affected": [{"package": {"ecosystem": "npm", "name": "versions-numeric"},
+			"versions": [1, 2]}]}`,
 	}
 	for id, raw := range malformed {
 		upsertGHSARepairFixture(ctx, t, store, id, raw)
@@ -284,11 +286,15 @@ func testGHSARepairToleratesNonArrayAffectedAndEvents(ctx context.Context, t *te
 		t.Fatalf("FindVulnerabilities(repair-only-valid@4.0.0) = %+v, want fixed bound from last_known_affected_version_range", fixedFindings)
 	}
 
-	// Advisories whose ranges carry malformed events are still repaired; the
-	// malformed range is kept verbatim instead of being completed.
-	for _, pkg := range []string{"events-null", "events-object", "events-scalar"} {
-		if got := affectedPackageNames(ctx, t, store, "GHSA-repair-"+pkg, "npm"); !containsString(got, pkg) {
-			t.Fatalf("affected packages for GHSA-repair-%s = %v, want %s repaired", pkg, got, pkg)
+	// Packages whose reconstructed ranges or versions the schema rejects are
+	// skipped, like the feed path rejects them; the advisory's other rows stay.
+	for _, pkg := range []string{"events-null", "events-object", "events-scalar", "versions-numeric"} {
+		got := affectedPackageNames(ctx, t, store, "GHSA-repair-"+pkg, "npm")
+		if containsString(got, pkg) {
+			t.Fatalf("affected packages for GHSA-repair-%s = %v, want malformed %s skipped", pkg, got, pkg)
+		}
+		if !containsString(got, "ghsa-repair-anchor-ghsa-repair-"+pkg) {
+			t.Fatalf("affected packages for GHSA-repair-%s = %v, want the feed-written anchor row kept", pkg, got)
 		}
 	}
 }
