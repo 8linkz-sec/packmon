@@ -692,15 +692,15 @@ func (h *AdminHandler) requireAPIKeyCreateStepUp(w http.ResponseWriter, r *http.
 	ip := clientIP(r)
 	if h.isLockedOut(ip) {
 		telemetry.Default().IncAuthLoginFailures()
-		if h.markLockoutAudited(ip) {
+		if claim, ok := h.claimLockoutAudit(ip); ok {
 			h.logger.Warn("api key create attempt from locked out principal", h.adminLogAttrs(r, "client_ip", ip)...)
 			if err := h.auditLog(r, "login_lockout", map[string]string{
 				"reason": "too many failed attempts",
 			}); err != nil {
+				h.releaseLockoutAudit(claim)
 				redirectAPIKeyCreateError(w, r, web.Message("admin.keys.error.audit_log"), name)
 				return false
 			}
-			h.markLockoutAuditWritten(ip)
 		}
 		redirectAPIKeyCreateError(w, r, web.Message("admin.keys.error.too_many_attempts"), name)
 		return false
@@ -712,13 +712,15 @@ func (h *AdminHandler) requireAPIKeyCreateStepUp(w http.ResponseWriter, r *http.
 		return false
 	}
 	if !auth.CheckPassword(adminAuth.PasswordHash, r.PostForm.Get("current_password")) {
+		// Count the failure before the audit write so a failing audit store
+		// cannot exempt wrong passwords from lockout and metrics.
+		h.recordFailedAttempt(ip)
 		if err := h.auditLog(r, "api_key_create_failed", map[string]string{
 			"reason": "invalid current password",
 		}); err != nil {
 			redirectAPIKeyCreateError(w, r, web.Message("admin.keys.error.audit_log"), name)
 			return false
 		}
-		h.recordFailedAttempt(ip)
 		redirectAPIKeyCreateError(w, r, web.Message("admin.keys.error.current_password_incorrect"), name)
 		return false
 	}
@@ -1229,15 +1231,15 @@ func (h *AdminHandler) HandlePasswordChange(w http.ResponseWriter, r *http.Reque
 	ip := clientIP(r)
 	if h.isLockedOut(ip) {
 		telemetry.Default().IncAuthLoginFailures()
-		if h.markLockoutAudited(ip) {
+		if claim, ok := h.claimLockoutAudit(ip); ok {
 			h.logger.Warn("password change attempt from locked out principal", h.adminLogAttrs(r, "client_ip", ip)...)
 			if err := h.auditLog(r, "login_lockout", map[string]string{
 				"reason": "too many failed attempts",
 			}); err != nil {
+				h.releaseLockoutAudit(claim)
 				http.Redirect(w, r, "/admin/settings?err="+url.QueryEscape(web.Message("admin.settings.error.audit_log")), http.StatusSeeOther)
 				return
 			}
-			h.markLockoutAuditWritten(ip)
 		}
 		http.Redirect(w, r, "/admin/settings?err="+url.QueryEscape(web.Message("admin.settings.error.password.too_many_attempts")), http.StatusSeeOther)
 		return
@@ -1264,13 +1266,15 @@ func (h *AdminHandler) HandlePasswordChange(w http.ResponseWriter, r *http.Reque
 	}
 
 	if !auth.CheckPassword(adminAuth.PasswordHash, currentPassword) {
+		// Count the failure before the audit write so a failing audit store
+		// cannot exempt wrong passwords from lockout and metrics.
+		h.recordFailedAttempt(ip)
 		if err := h.auditLog(r, "password_change_failed", map[string]string{
 			"reason": "invalid current password",
 		}); err != nil {
 			http.Redirect(w, r, "/admin/settings?err="+url.QueryEscape(web.Message("admin.settings.error.audit_log")), http.StatusSeeOther)
 			return
 		}
-		h.recordFailedAttempt(ip)
 		http.Redirect(w, r, "/admin/settings?err="+url.QueryEscape(web.Message("admin.settings.error.password.current_incorrect")), http.StatusSeeOther)
 		return
 	}

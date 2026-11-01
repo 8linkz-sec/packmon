@@ -32,7 +32,9 @@ Current local scope:
 - `docker compose run --rm init-secrets` followed by `docker compose up` starts
   PostgreSQL, runs migrations automatically, and starts `packmon-server`;
 - the admin UI and API are reachable through `http://localhost:8080`;
-- metrics are reachable locally through `127.0.0.1:9090`;
+- metrics stay on container loopback (`127.0.0.1:9090` inside the container)
+  and are read with
+  `docker compose exec packmon-server wget -qO- http://127.0.0.1:9090/metrics`;
 - the CLI/agent can scan against the local server with
   `--insecure-allow-http --require-remote`;
 - Compose port mappings, Docker healthchecks, local migrations, and local

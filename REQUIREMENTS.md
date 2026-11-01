@@ -115,8 +115,9 @@ can use the pinned CycloneDX Maven plugin, but it cannot install the JDK or
 Maven 3.9.9 or newer plus the Maven runtime's JDK 17 or newer.
 
 Go auto-SBOM generation uses the Go toolchain directly through `go list`.
-`cyclonedx-gomod` is retained only for release SBOM generation, where the
-release workflow publishes the repository-level Go SBOM artifact.
+`cyclonedx-gomod` is retained only for release SBOM generation, run locally
+when building release artifacts from source; the hosted release workflow that
+used to publish the repository-level Go SBOM artifact was removed.
 
 ## Build From Source
 

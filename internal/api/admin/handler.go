@@ -143,6 +143,14 @@ type AdminHandler struct {
 
 	manualSyncMu sync.Mutex
 	manualSyncs  map[string]struct{}
+
+	// feedConfigSlot orders feed config saves and resets: each request runs
+	// its runtime apply, persistence, and rollback while holding the slot, so
+	// the runtime ends on the last committed configuration. It is a
+	// one-element channel rather than a mutex so a waiting request can give up
+	// when its context ends.
+	feedConfigSlotOnce sync.Once
+	feedConfigSlot     chan struct{}
 }
 
 // NewAdminHandler creates an AdminHandler with the given dependencies.
@@ -274,14 +282,14 @@ func (h *AdminHandler) processLogin(w http.ResponseWriter, r *http.Request) {
 	// Check rate limit before doing any work.
 	if h.isLockedOut(ip) {
 		telemetry.Default().IncAuthLoginFailures()
-		if h.markLockoutAudited(ip) {
+		if claim, ok := h.claimLockoutAudit(ip); ok {
 			h.logger.Warn("login attempt from locked out principal", h.adminLogAttrs(r, "client_ip", ip)...)
 			if !h.requireAudit(w, r, "login_lockout", map[string]string{
 				"reason": "too many failed attempts",
 			}) {
+				h.releaseLockoutAudit(claim)
 				return
 			}
-			h.markLockoutAuditWritten(ip)
 		}
 		h.showLoginForm(w, r, "Too many failed login attempts. Please try again later.")
 		return
@@ -305,12 +313,14 @@ func (h *AdminHandler) processLogin(w http.ResponseWriter, r *http.Request) {
 	nextPath := auth.SafeAdminReturnTarget(r.PostForm.Get("next"))
 
 	if username != "admin" {
+		// Count the failure before the audit write so a failing audit store
+		// cannot exempt wrong credentials from lockout and metrics.
+		h.recordFailedAttempt(ip)
 		if !h.requireAudit(w, r, "login_failed", map[string]string{
 			"reason": "invalid username",
 		}) {
 			return
 		}
-		h.recordFailedAttempt(ip)
 		h.showLoginForm(w, r, "Invalid username or password.")
 		return
 	}
@@ -328,12 +338,12 @@ func (h *AdminHandler) processLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !auth.CheckPassword(adminAuth.PasswordHash, password) {
+		h.recordFailedAttempt(ip)
 		if !h.requireAudit(w, r, "login_failed", map[string]string{
 			"reason": "invalid password",
 		}) {
 			return
 		}
-		h.recordFailedAttempt(ip)
 		h.showLoginForm(w, r, "Invalid username or password.")
 		return
 	}
@@ -643,37 +653,57 @@ func (h *AdminHandler) isAttemptLocked(key string, now time.Time) bool {
 	return false
 }
 
-func (h *AdminHandler) markLockoutAudited(ip string) bool {
-	h.loginMu.Lock()
-	defer h.loginMu.Unlock()
-
-	now := time.Now()
-	shouldAudit := false
-	for _, key := range []string{ip, adminLoginAccountKey} {
-		a, ok := h.loginAttempts[key]
-		if !ok || !h.isAttemptLocked(key, now) {
-			continue
-		}
-		if a.lockoutAuditedAt.IsZero() || a.lockoutAuditedAt.Before(a.lockedAt) {
-			shouldAudit = true
-		}
-	}
-	return shouldAudit
+// lockoutAuditClaim is a reservation of the login_lockout audit row for the
+// active lockout window of one or more login-attempt keys.
+type lockoutAuditClaim struct {
+	marks []lockoutAuditMark
 }
 
-func (h *AdminHandler) markLockoutAuditWritten(ip string) {
+type lockoutAuditMark struct {
+	key       string
+	attempt   *loginAttempt
+	previous  time.Time
+	claimedAt time.Time
+}
+
+// claimLockoutAudit decides, atomically with the reservation, whether this
+// request writes the login_lockout audit row for the active lockout of ip or
+// the shared admin account. Claiming marks the window as audited before the
+// row is written, so concurrent requests in the same window do not write a
+// second row. A caller whose audit write fails must hand the claim back with
+// releaseLockoutAudit so a later attempt can still audit the window.
+func (h *AdminHandler) claimLockoutAudit(ip string) (lockoutAuditClaim, bool) {
 	h.loginMu.Lock()
 	defer h.loginMu.Unlock()
 
 	now := time.Now()
+	var claim lockoutAuditClaim
 	for _, key := range []string{ip, adminLoginAccountKey} {
 		a, ok := h.loginAttempts[key]
 		if !ok || !h.isAttemptLocked(key, now) {
 			continue
 		}
 		if a.lockoutAuditedAt.IsZero() || a.lockoutAuditedAt.Before(a.lockedAt) {
+			claim.marks = append(claim.marks, lockoutAuditMark{key: key, attempt: a, previous: a.lockoutAuditedAt, claimedAt: now})
 			a.lockoutAuditedAt = now
 		}
+	}
+	return claim, len(claim.marks) > 0
+}
+
+// releaseLockoutAudit undoes a claim whose audit row could not be written.
+// Keys whose attempt record was reset or re-marked since the claim are left
+// alone.
+func (h *AdminHandler) releaseLockoutAudit(claim lockoutAuditClaim) {
+	h.loginMu.Lock()
+	defer h.loginMu.Unlock()
+
+	for _, mark := range claim.marks {
+		a, ok := h.loginAttempts[mark.key]
+		if !ok || a != mark.attempt || !a.lockoutAuditedAt.Equal(mark.claimedAt) {
+			continue
+		}
+		a.lockoutAuditedAt = mark.previous
 	}
 }
 

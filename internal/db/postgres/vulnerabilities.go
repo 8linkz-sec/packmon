@@ -20,6 +20,20 @@ func normalizePackageName(ecosystem, name string) string {
 	return packageid.NormalizeName(ecosystem, name)
 }
 
+// canonicalPackageNameSQL is the SQL form of packageid.NormalizeName for
+// set-based repairs that derive package names inside PostgreSQL. It reads the
+// `ecosystem` and `raw_name` columns of the enclosing row source. Trimming
+// covers ASCII whitespace; lower() follows the database collation, which
+// matches Go for the ASCII names these registries use. Keep it in lockstep
+// with packageid.NormalizeName; the Docker-backed parity test compares both.
+const canonicalPackageNameSQL = `CASE lower(btrim(ecosystem))
+				WHEN 'actions' THEN lower(btrim(raw_name, E' \t\n\r\f\x0B'))
+				WHEN 'github actions' THEN lower(btrim(raw_name, E' \t\n\r\f\x0B'))
+				WHEN 'nuget' THEN lower(btrim(raw_name, E' \t\n\r\f\x0B'))
+				WHEN 'pypi' THEN regexp_replace(lower(btrim(raw_name, E' \t\n\r\f\x0B')), '[-_.]+', '-', 'g')
+				ELSE btrim(raw_name, E' \t\n\r\f\x0B')
+			END`
+
 type storedVersionRange struct {
 	Events []storedVersionEvent `json:"events"`
 }

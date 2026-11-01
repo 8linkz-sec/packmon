@@ -75,39 +75,66 @@ func (s *Store) UpsertFeedConfigWithAudit(ctx context.Context, cfg *db.FeedConfi
 		return err
 	}
 	return withTx(ctx, s.pool, func(tx pgx.Tx) error {
-		if err := checkFeedConfigRevisionTx(ctx, tx, cfg); err != nil {
-			return err
-		}
-		if err := s.upsertFeedConfigTx(ctx, tx, cfg); err != nil {
-			return err
-		}
-		if err := insertAdminAuditLogTx(ctx, tx, audit); err != nil {
-			return fmt.Errorf("%w: %v", db.ErrAdminAuditLog, err)
-		}
-		return nil
+		return s.upsertFeedConfigWithAuditTx(ctx, tx, cfg, audit)
 	})
 }
 
-func checkFeedConfigRevisionTx(ctx context.Context, tx pgx.Tx, cfg *db.FeedConfig) error {
-	expected, ok := expectedFeedConfigUpdatedAt(cfg)
-	if !ok {
-		return nil
-	}
-
-	current, found, err := getFeedConfigUpdatedAtTx(ctx, tx, cfg.FeedName)
-	if err != nil {
+func (s *Store) upsertFeedConfigWithAuditTx(ctx context.Context, tx pgx.Tx, cfg *db.FeedConfig, audit *db.AdminAuditEntry) error {
+	if err := s.writeFeedConfigAtRevisionTx(ctx, tx, cfg); err != nil {
 		return err
 	}
-	if expected.IsZero() {
-		if found {
-			return db.ErrConflict
-		}
-		return nil
-	}
-	if !found || !current.Equal(expected.UTC()) {
-		return db.ErrConflict
+	if err := insertAdminAuditLogTx(ctx, tx, audit); err != nil {
+		return fmt.Errorf("%w: %v", db.ErrAdminAuditLog, err)
 	}
 	return nil
+}
+
+const (
+	upsertFeedConfigSQL = `
+		INSERT INTO feed_configs (feed_name, enabled, mode, sync_interval, api_key)
+		VALUES ($1, $2, $3, ($4 * interval '1 microsecond'), $5)
+		ON CONFLICT (feed_name) DO UPDATE SET
+			enabled = EXCLUDED.enabled,
+			mode = EXCLUDED.mode,
+			sync_interval = EXCLUDED.sync_interval,
+			api_key = EXCLUDED.api_key,
+			updated_at = NOW()`
+
+	// insertNewFeedConfigSQL is the first save of a revision-checked write: it
+	// only inserts when no row exists. A concurrent first save that commits
+	// first makes this a no-op instead of an overwrite.
+	insertNewFeedConfigSQL = `
+		INSERT INTO feed_configs (feed_name, enabled, mode, sync_interval, api_key)
+		VALUES ($1, $2, $3, ($4 * interval '1 microsecond'), $5)
+		ON CONFLICT (feed_name) DO NOTHING`
+
+	// updateFeedConfigAtRevisionSQL compares the revision in the same statement
+	// that writes the row. Under READ COMMITTED a writer that waited for a
+	// concurrent commit re-evaluates the WHERE clause against the new row
+	// version, so a stale revision matches no row instead of overwriting.
+	updateFeedConfigAtRevisionSQL = `
+		UPDATE feed_configs SET
+			enabled = $2,
+			mode = $3,
+			sync_interval = ($4 * interval '1 microsecond'),
+			api_key = $5,
+			updated_at = NOW()
+		WHERE feed_name = $1 AND updated_at = $6`
+)
+
+// writeFeedConfigAtRevisionTx writes cfg only when the stored revision still
+// matches the expected one. The check and the write are a single statement so
+// two transactions holding the same revision cannot both succeed; the loser
+// gets db.ErrConflict before any audit row is written.
+func (s *Store) writeFeedConfigAtRevisionTx(ctx context.Context, execer postgresExecer, cfg *db.FeedConfig) error {
+	expected, ok := expectedFeedConfigUpdatedAt(cfg)
+	if !ok {
+		return s.upsertFeedConfigTx(ctx, execer, cfg)
+	}
+	if expected.IsZero() {
+		return s.execFeedConfigWrite(ctx, execer, insertNewFeedConfigSQL, cfg, true)
+	}
+	return s.execFeedConfigWrite(ctx, execer, updateFeedConfigAtRevisionSQL, cfg, true, expected.UTC())
 }
 
 func expectedFeedConfigUpdatedAt(cfg *db.FeedConfig) (time.Time, bool) {
@@ -123,32 +150,17 @@ func expectedFeedConfigUpdatedAt(cfg *db.FeedConfig) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-func getFeedConfigUpdatedAtTx(ctx context.Context, tx pgx.Tx, feedName string) (time.Time, bool, error) {
-	var updatedAt time.Time
-	err := tx.QueryRow(ctx, `SELECT updated_at FROM feed_configs WHERE feed_name = $1`, feedName).Scan(&updatedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return time.Time{}, false, nil
-	}
-	if err != nil {
-		return time.Time{}, false, fmt.Errorf("postgres: get feed config revision %s: %w", feedName, err)
-	}
-	return updatedAt, true, nil
+func (s *Store) upsertFeedConfigTx(ctx context.Context, execer postgresExecer, cfg *db.FeedConfig) error {
+	return s.execFeedConfigWrite(ctx, execer, upsertFeedConfigSQL, cfg, false)
 }
 
-func (s *Store) upsertFeedConfigTx(ctx context.Context, execer postgresExecer, cfg *db.FeedConfig) error {
+// execFeedConfigWrite runs one of the feed config write statements with the
+// shared column arguments ($1-$5) followed by extra. When requireRow is set,
+// a statement that wrote no row is a lost revision race: db.ErrConflict.
+func (s *Store) execFeedConfigWrite(ctx context.Context, execer postgresExecer, query string, cfg *db.FeedConfig, requireRow bool, extra ...any) error {
 	if err := validateFeedConfigSyncInterval(cfg); err != nil {
 		return err
 	}
-
-	const query = `
-		INSERT INTO feed_configs (feed_name, enabled, mode, sync_interval, api_key)
-		VALUES ($1, $2, $3, ($4 * interval '1 microsecond'), $5)
-		ON CONFLICT (feed_name) DO UPDATE SET
-			enabled = EXCLUDED.enabled,
-			mode = EXCLUDED.mode,
-			sync_interval = EXCLUDED.sync_interval,
-			api_key = EXCLUDED.api_key,
-			updated_at = NOW()`
 
 	var intervalMicros any
 	if cfg.SyncInterval != nil {
@@ -165,15 +177,19 @@ func (s *Store) upsertFeedConfigTx(ctx context.Context, execer postgresExecer, c
 		apiKeyVal = encrypted
 	}
 
-	_, err := execer.Exec(ctx, query,
+	args := append([]any{
 		cfg.FeedName,
 		cfg.Enabled,
 		cfg.Mode,
 		intervalMicros,
 		nullableString(apiKeyVal),
-	)
+	}, extra...)
+	tag, err := execer.Exec(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("postgres: upsert feed config %s: %w", cfg.FeedName, err)
+	}
+	if requireRow && tag.RowsAffected() == 0 {
+		return db.ErrConflict
 	}
 	return nil
 }
@@ -194,35 +210,45 @@ func (s *Store) DeleteFeedConfig(ctx context.Context, feedName string) error {
 
 func (s *Store) DeleteFeedConfigWithAudit(ctx context.Context, feedName string, expectedUpdatedAt *time.Time, audit *db.AdminAuditEntry) error {
 	return withTx(ctx, s.pool, func(tx pgx.Tx) error {
-		if err := checkFeedConfigDeleteRevisionTx(ctx, tx, feedName, expectedUpdatedAt); err != nil {
-			return err
-		}
-		if err := deleteFeedConfigTx(ctx, tx, feedName); err != nil {
-			return err
-		}
-		if err := insertAdminAuditLogTx(ctx, tx, audit); err != nil {
-			return fmt.Errorf("%w: %v", db.ErrAdminAuditLog, err)
-		}
-		return nil
+		return deleteFeedConfigWithAuditTx(ctx, tx, feedName, expectedUpdatedAt, audit)
 	})
 }
 
-func checkFeedConfigDeleteRevisionTx(ctx context.Context, tx pgx.Tx, feedName string, expectedUpdatedAt *time.Time) error {
-	if expectedUpdatedAt == nil {
-		return nil
-	}
-	current, found, err := getFeedConfigUpdatedAtTx(ctx, tx, feedName)
-	if err != nil {
+func deleteFeedConfigWithAuditTx(ctx context.Context, tx pgx.Tx, feedName string, expectedUpdatedAt *time.Time, audit *db.AdminAuditEntry) error {
+	if err := deleteFeedConfigAtRevisionTx(ctx, tx, feedName, expectedUpdatedAt); err != nil {
 		return err
+	}
+	if err := insertAdminAuditLogTx(ctx, tx, audit); err != nil {
+		return fmt.Errorf("%w: %v", db.ErrAdminAuditLog, err)
+	}
+	return nil
+}
+
+// deleteFeedConfigAtRevisionTx deletes the row only when it still carries the
+// expected revision, compared in the DELETE itself so a concurrent save or
+// delete that commits first turns this delete into db.ErrConflict. A nil
+// expectation deletes unconditionally; a zero expectation asserts that no row
+// exists and therefore deletes nothing.
+func deleteFeedConfigAtRevisionTx(ctx context.Context, tx pgx.Tx, feedName string, expectedUpdatedAt *time.Time) error {
+	if expectedUpdatedAt == nil {
+		return deleteFeedConfigTx(ctx, tx, feedName)
 	}
 	expected := expectedUpdatedAt.UTC()
 	if expected.IsZero() {
-		if found {
+		var exists bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM feed_configs WHERE feed_name = $1)`, feedName).Scan(&exists); err != nil {
+			return fmt.Errorf("postgres: get feed config revision %s: %w", feedName, err)
+		}
+		if exists {
 			return db.ErrConflict
 		}
 		return nil
 	}
-	if !found || !current.Equal(expected) {
+	tag, err := tx.Exec(ctx, `DELETE FROM feed_configs WHERE feed_name = $1 AND updated_at = $2`, feedName, expected)
+	if err != nil {
+		return fmt.Errorf("postgres: delete feed config %s: %w", feedName, err)
+	}
+	if tag.RowsAffected() == 0 {
 		return db.ErrConflict
 	}
 	return nil

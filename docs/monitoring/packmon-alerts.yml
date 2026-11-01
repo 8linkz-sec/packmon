@@ -1,6 +1,11 @@
 # Starter Prometheus alert rules for Packmon internal deployments.
 # Tune thresholds and route labels to match the deployment's feed cadence,
 # queue volume, and incident response policy.
+#
+# Event-counter alerts (increase(counter[R]) > 0) use `for: 0m`: one event
+# keeps the expression true for at most R, so a pending duration of R or more
+# would never fire for an isolated event. Raise the range, not `for`, to
+# smooth them.
 groups:
   - name: packmon-health
     rules:
@@ -17,18 +22,18 @@ groups:
 
       - alert: PackmonMetricsStoreReadFailure
         expr: increase(packmon_metrics_store_read_failures_total[10m]) > 0
-        for: 10m
+        for: 0m
         labels:
           severity: warning
           service: packmon
         annotations:
           summary: Packmon metrics store reads are failing
-          description: Store-derived metrics are failing during scrapes, so feed, queue, scan, or dashboard gauges may be stale or missing.
+          description: At least one store-derived metrics read failed during the last 10 minutes, so feed, queue, scan, or dashboard gauges may be stale or missing.
           runbook_url: docs/runbook.md#database-pool-saturation
 
       - alert: PackmonDegradedResponses
         expr: increase(packmon_degraded_responses_total[10m]) > 0
-        for: 10m
+        for: 0m
         labels:
           severity: warning
           service: packmon
@@ -72,7 +77,7 @@ groups:
 
       - alert: PackmonQueueErrors
         expr: increase(packmon_queue_error_total[15m]) > 0
-        for: 15m
+        for: 0m
         labels:
           severity: warning
           service: packmon

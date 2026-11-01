@@ -41,6 +41,7 @@ var (
 	errFeedConfigSaveApplyFailed   = errors.New(web.Message("admin.feeds.error.save_apply_failed"))
 	errFeedConfigApplyUnavailable  = errors.New(web.Message("admin.feeds.error.apply_unavailable"))
 	errFeedConfigSaveConflict      = errors.New(web.Message("admin.feeds.error.save_conflict"))
+	errInvalidFeedConfigRevision   = errors.New(web.Message("admin.feeds.error.invalid_revision"))
 	errFeedConfigSaveAuditFailed   = errors.New(web.Message("admin.feeds.error.audit_log"))
 	errFeedConfigSavePersistFailed = errors.New(web.Message("admin.feeds.error.save_persist"))
 	errFeedConfigResetUnavailable  = errors.New(web.Message("admin.feeds.error.reset_unavailable"))
@@ -133,7 +134,10 @@ func (h *AdminHandler) HandleFeedConfigSave(w http.ResponseWriter, r *http.Reque
 	}
 
 	feedName := r.PostForm.Get("feed_name")
-	feed, err := h.desiredFeedSettings(r.Context(), feedName)
+	// The kept API key and the expected revision come from the same read: a
+	// second read could pair a newer revision with an older kept key and let a
+	// "keep existing key" save restore a key that was rotated in between.
+	feed, previous, err := h.desiredFeedSettings(r.Context(), feedName)
 	if err != nil {
 		errMsg := desiredFeedSettingsRedirectError(err)
 		if errMsg == failedFeedConfigLoadMessage && h.logger != nil {
@@ -142,10 +146,8 @@ func (h *AdminHandler) HandleFeedConfigSave(w http.ResponseWriter, r *http.Reque
 		redirectAdminFeedsError(w, r, errMsg, feedName)
 		return
 	}
-	previous, err := h.store.GetFeedConfig(r.Context(), feed.Name)
-	if err != nil {
-		h.logger.Error("admin feeds: failed to load previous config", h.adminLogAttrs(r, "feed", feed.Name, "error", err)...)
-		redirectAdminFeedsError(w, r, failedFeedConfigLoadMessage, feed.Name)
+	if err := checkFeedConfigFormRevision(r.PostForm, previous); err != nil {
+		redirectAdminFeedsError(w, r, err.Error(), feed.Name)
 		return
 	}
 
@@ -245,14 +247,41 @@ func feedConfigRecordFromRuntimeSetting(feed config.FeedSettings, previous *db.F
 	return record
 }
 
+// acquireFeedConfigSlot waits for the feed config ordering slot and returns
+// its release function. When ctx ends first, nothing is held and ctx's error
+// is returned.
+func (h *AdminHandler) acquireFeedConfigSlot(ctx context.Context) (func(), error) {
+	h.feedConfigSlotOnce.Do(func() { h.feedConfigSlot = make(chan struct{}, 1) })
+	select {
+	case h.feedConfigSlot <- struct{}{}:
+		return func() { <-h.feedConfigSlot }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// persistAndApplyFeedConfig applies feed to the runtime, persists record, and
+// rolls the runtime back when persistence fails. The whole sequence runs in
+// the feed config ordering slot: a concurrent save or reset that loses the
+// revision race would otherwise roll back to a snapshot taken before the
+// winner applied, leaving the runtime behind PostgreSQL.
 func (h *AdminHandler) persistAndApplyFeedConfig(r *http.Request, feed config.FeedSettings, previous, record *db.FeedConfig) (bool, error) {
-	previousRuntime, previousRuntimeOK := h.cfg.FeedSettings(feed.Name)
 	correlationID := adminRequestCorrelationID(r)
 
 	if h.applyFeedConfig == nil {
 		h.logger.Error("admin feeds: runtime apply callback is not configured", adminLogAttrsForCorrelationID(correlationID, "feed", feed.Name)...)
 		return false, errFeedConfigApplyUnavailable
 	}
+
+	release, err := h.acquireFeedConfigSlot(r.Context())
+	if err != nil {
+		h.logger.Warn("admin feeds: save abandoned while waiting for a concurrent feed config change", adminLogAttrsForCorrelationID(correlationID, "feed", feed.Name, "error", err)...)
+		return false, errFeedConfigSavePersistFailed
+	}
+	defer release()
+	// Snapshot inside the slot so a rollback restores the last committed
+	// runtime configuration.
+	previousRuntime, previousRuntimeOK := h.cfg.FeedSettings(feed.Name)
 
 	appliedRuntime := false
 	if err := h.applyFeedConfig(r.Context(), feed); err != nil {
@@ -280,6 +309,40 @@ func (h *AdminHandler) persistAndApplyFeedConfig(r *http.Request, feed config.Fe
 	}
 
 	return appliedRuntime, nil
+}
+
+// formatFeedConfigRevision renders the revision of a stored override for the
+// feed save and reset forms; "" means no override is stored.
+func formatFeedConfigRevision(cfg *db.FeedConfig) string {
+	if cfg == nil || cfg.UpdatedAt.IsZero() {
+		return ""
+	}
+	return cfg.UpdatedAt.UTC().Format(time.RFC3339Nano)
+}
+
+// checkFeedConfigFormRevision rejects a save or reset whose form was rendered
+// for a different override revision than previous, the override this request
+// read: another admin changed the feed after the form was rendered. The
+// request keeps previous as its kept-API-key source and revision baseline, and
+// the conditional store write rejects a change committed after that read. A
+// form without the field (a client predating it) relies on that baseline
+// alone, as the system settings form does.
+func checkFeedConfigFormRevision(form url.Values, previous *db.FeedConfig) error {
+	if _, submitted := form["updated_at"]; !submitted {
+		return nil
+	}
+	rendered, ok := parseAdminFormRevision(form.Get("updated_at"))
+	if !ok {
+		return errInvalidFeedConfigRevision
+	}
+	stored := time.Time{}
+	if previous != nil {
+		stored = previous.UpdatedAt.UTC()
+	}
+	if !rendered.Equal(stored) {
+		return errFeedConfigSaveConflict
+	}
+	return nil
 }
 
 func feedConfigRevisionExpectation(previous *db.FeedConfig) *time.Time {
@@ -326,8 +389,7 @@ func (h *AdminHandler) HandleFeedConfigReset(w http.ResponseWriter, r *http.Requ
 	}
 
 	feedName := config.NormalizeFeedName(r.PostForm.Get("feed_name"))
-	previousRuntime, previousRuntimeOK := h.cfg.FeedSettings(feedName)
-	if !previousRuntimeOK {
+	if _, ok := h.cfg.FeedSettings(feedName); !ok {
 		redirectAdminFeedsError(w, r, web.Message("admin.feeds.error.unknown_feed"), feedName)
 		return
 	}
@@ -342,63 +404,69 @@ func (h *AdminHandler) HandleFeedConfigReset(w http.ResponseWriter, r *http.Requ
 		redirectAdminFeedsError(w, r, web.Message("admin.feeds.error.load_config"), feedName)
 		return
 	}
+	if err := checkFeedConfigFormRevision(r.PostForm, previous); err != nil {
+		redirectAdminFeedsError(w, r, err.Error(), feedName)
+		return
+	}
 
-	appliedRuntime := false
-	var resetRuntime config.FeedSettings
-	resetRuntimeOK := false
+	if errMsg := h.resetAndPersistFeedConfig(r, feedName, previous); errMsg != "" {
+		redirectAdminFeedsError(w, r, errMsg, feedName)
+		return
+	}
+	http.Redirect(w, r, "/admin/feeds?msg="+url.QueryEscape(web.Message("admin.feeds.flash.reset_applied")), http.StatusSeeOther)
+}
+
+// resetAndPersistFeedConfig applies the startup defaults to the runtime,
+// deletes the persisted override at previous's revision, and rolls the runtime
+// back when the delete fails. Like persistAndApplyFeedConfig it runs in the
+// feed config ordering slot. It returns the user-facing error message, or ""
+// on success.
+func (h *AdminHandler) resetAndPersistFeedConfig(r *http.Request, feedName string, previous *db.FeedConfig) string {
 	correlationID := adminRequestCorrelationID(r)
 	if h.resetFeedConfig == nil {
 		h.logger.Error("admin feeds: runtime reset callback is not configured", adminLogAttrsForCorrelationID(correlationID, "feed", feedName)...)
-		redirectAdminFeedsError(w, r, errFeedConfigResetUnavailable.Error(), feedName)
-		return
+		return errFeedConfigResetUnavailable.Error()
 	}
-	var resetErr error
-	resetRuntime, resetRuntimeOK, resetErr = h.resetFeedConfig(r.Context(), feedName)
+
+	release, err := h.acquireFeedConfigSlot(r.Context())
+	if err != nil {
+		h.logger.Warn("admin feeds: reset abandoned while waiting for a concurrent feed config change", adminLogAttrsForCorrelationID(correlationID, "feed", feedName, "error", err)...)
+		return web.Message("admin.feeds.error.reset_persist")
+	}
+	defer release()
+	// Snapshot inside the slot so a rollback restores the last committed
+	// runtime configuration.
+	previousRuntime, previousRuntimeOK := h.cfg.FeedSettings(feedName)
+
+	resetRuntime, resetRuntimeOK, resetErr := h.resetFeedConfig(r.Context(), feedName)
 	if resetErr != nil {
 		h.logger.Error("admin feeds: failed to apply reset config", adminLogAttrsForCorrelationID(correlationID, "feed", feedName, "error", resetErr)...)
 		h.restoreRuntimeFeedConfig(r.Context(), correlationID, previousRuntime, previousRuntimeOK, resetRuntime, resetRuntimeOK, "reset apply failure")
-		redirectAdminFeedsError(w, r, web.Message("admin.feeds.error.reset_apply_failed"), feedName)
-		return
+		return web.Message("admin.feeds.error.reset_apply_failed")
 	}
 	if !resetRuntimeOK {
 		h.logger.Error("admin feeds: runtime reset callback did not apply config", adminLogAttrsForCorrelationID(correlationID, "feed", feedName)...)
-		redirectAdminFeedsError(w, r, errFeedConfigResetUnavailable.Error(), feedName)
-		return
+		return errFeedConfigResetUnavailable.Error()
 	}
-	appliedRuntime = true
 
 	audit := h.adminAuditEntry(r, "feed_config_reset", feedConfigAuditDetails(feedName, previous, nil))
 	auditCtx, cancel := h.adminAuditContext()
 	defer cancel()
 	if err := h.store.DeleteFeedConfigWithAudit(auditCtx, feedName, feedConfigRevisionExpectation(previous), audit); err != nil {
 		h.logger.Error("admin feeds: failed to reset config", adminLogAttrsForCorrelationID(correlationID, "feed", feedName, "error", err)...)
-		if appliedRuntime {
-			h.restoreRuntimeFeedConfig(r.Context(), correlationID, previousRuntime, previousRuntimeOK, resetRuntime, resetRuntimeOK, "reset persistence failure")
-		}
+		h.restoreRuntimeFeedConfig(r.Context(), correlationID, previousRuntime, previousRuntimeOK, resetRuntime, resetRuntimeOK, "reset persistence failure")
 		if errors.Is(err, db.ErrConflict) {
-			redirectAdminFeedsError(w, r, web.Message("admin.feeds.error.save_conflict"), feedName)
-			return
+			return web.Message("admin.feeds.error.save_conflict")
 		}
 		if errors.Is(err, db.ErrAdminAuditLog) {
-			redirectAdminFeedsError(w, r, web.Message("admin.feeds.error.audit_log"), feedName)
-			return
+			return web.Message("admin.feeds.error.audit_log")
 		}
-		redirectAdminFeedsError(w, r, web.Message("admin.feeds.error.reset_persist"), feedName)
-		return
+		return web.Message("admin.feeds.error.reset_persist")
 	}
-
-	if appliedRuntime {
-		http.Redirect(w, r, "/admin/feeds?msg="+url.QueryEscape(web.Message("admin.feeds.flash.reset_applied")), http.StatusSeeOther)
-		return
-	}
-	http.Redirect(w, r, "/admin/feeds?msg="+url.QueryEscape(web.Message("admin.feeds.flash.reset")), http.StatusSeeOther)
+	return ""
 }
 
 func redirectAdminFeedsError(w http.ResponseWriter, r *http.Request, message, feedName string) {
-	//nolint:gosec // G710: adminFeedsRedirectURL always returns the fixed relative
-	// path /admin/feeds, so the target host cannot be influenced; the taint
-	// analysis cannot see that the caller-supplied parts only reach the query and
-	// fragment, both of which are escaped.
 	http.Redirect(w, r, adminFeedsRedirectURL("err", message, feedName), http.StatusSeeOther)
 }
 
@@ -578,24 +646,27 @@ func isHTMXRequest(r *http.Request) bool {
 	return strings.EqualFold(strings.TrimSpace(r.Header.Get("HX-Request")), "true")
 }
 
-func (h *AdminHandler) desiredFeedSettings(ctx context.Context, feedName string) (config.FeedSettings, error) {
+// desiredFeedSettings returns the runtime settings overlaid with the persisted
+// override, plus that override itself (nil when none is stored). Callers use the
+// returned override as the revision baseline of their save.
+func (h *AdminHandler) desiredFeedSettings(ctx context.Context, feedName string) (config.FeedSettings, *db.FeedConfig, error) {
 	name := config.NormalizeFeedName(feedName)
 	current, ok := h.cfg.FeedSettings(name)
 	if !ok {
-		return config.FeedSettings{}, errors.New(web.Message("admin.feeds.error.unknown_feed"))
+		return config.FeedSettings{}, nil, errors.New(web.Message("admin.feeds.error.unknown_feed"))
 	}
 
 	stored, err := h.store.GetFeedConfig(ctx, name)
 	if err != nil {
-		return config.FeedSettings{}, fmt.Errorf("load persisted feed config: %w", err)
+		return config.FeedSettings{}, nil, fmt.Errorf("load persisted feed config: %w", err)
 	}
 	if stored == nil {
-		return current, nil
+		return current, nil, nil
 	}
 
 	mode, err := config.ParseFeedMode(stored.Mode)
 	if err != nil {
-		return config.FeedSettings{}, fmt.Errorf("%s: invalid persisted mode: %w", web.Message("admin.feeds.error.load_config"), err)
+		return config.FeedSettings{}, nil, fmt.Errorf("%s: invalid persisted mode: %w", web.Message("admin.feeds.error.load_config"), err)
 	}
 
 	current.Enabled = stored.Enabled
@@ -608,7 +679,7 @@ func (h *AdminHandler) desiredFeedSettings(ctx context.Context, feedName string)
 	if current.SupportsAPIKey || strings.TrimSpace(stored.APIKey) != "" {
 		current.APIKey = strings.TrimSpace(stored.APIKey)
 	}
-	return current, nil
+	return current, stored, nil
 }
 
 func feedConfigAuditDetails(feedName string, previous, next *db.FeedConfig) map[string]string {

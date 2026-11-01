@@ -2,7 +2,14 @@
 
 ## Status
 
-Accepted
+Accepted; amended August 2026.
+
+Amendment: the first-party GitHub Actions workflows and the hosted release
+pipeline were removed in August 2026. Release binaries are built locally from
+source, and no release workflow publishes artifacts or provenance any more.
+`ci/gitlab/.packmon-scan.yml` remains only as an unoperated, unvalidated
+consumer template whose hardening is deferred (`docs/deferred-scope.md`). The
+decision below is kept as the historical record.
 
 ## Decision
 
