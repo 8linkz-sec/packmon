@@ -21,6 +21,7 @@ import (
 	"github.com/8linkz-sec/packmon/internal/config"
 	"github.com/8linkz-sec/packmon/internal/correlation"
 	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/db/postgres"
 	"github.com/8linkz-sec/packmon/internal/domain"
 	"github.com/8linkz-sec/packmon/internal/feed/reputation"
 	"github.com/8linkz-sec/packmon/internal/requestctx"
@@ -3333,6 +3334,78 @@ func TestEffectiveBlockThresholdFollowsRuntime(t *testing.T) {
 	}
 }
 
+// thresholdChangingFeedStatusStore runs onFeedStatus when the check path reads
+// feed state, which happens after the blocking decision and before the scan
+// log is persisted. It deterministically models an admin threshold update that
+// lands inside that window.
+type thresholdChangingFeedStatusStore struct {
+	*stubStore
+	onFeedStatus func()
+}
+
+func (s *thresholdChangingFeedStatusStore) ListFeedSyncStatuses(ctx context.Context) ([]db.FeedSyncStatus, error) {
+	if s.onFeedStatus != nil {
+		s.onFeedStatus()
+	}
+	return s.stubStore.ListFeedSyncStatuses(ctx)
+}
+
+func TestHandleCheckPersistsDecisionThresholdWhenRuntimeChangesBeforeScanLog(t *testing.T) {
+	t.Parallel()
+
+	runtime := config.NewRuntimeSettings("CRITICAL", 60, 60)
+	inner := &stubStore{
+		vulnBatchFindings: []domain.Finding{{
+			Name:       "express",
+			Version:    "4.18.0",
+			Ecosystem:  domain.EcosystemNPM,
+			Type:       domain.FindingTypeVulnerability,
+			Severity:   domain.SeverityHigh,
+			AdvisoryID: "CVE-2026-0002",
+			Source:     "osv",
+		}},
+	}
+	store := &thresholdChangingFeedStatusStore{
+		stubStore:    inner,
+		onFeedStatus: func() { runtime.Update("HIGH", 0, 0) },
+	}
+	h := NewHandlerWithRuntime(store, newDiscardLogger(), runtime)
+
+	body := `{"packages":[{"name":"express","version":"4.18.0","ecosystem":"npm"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/check", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	h.HandleCheck(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+	var result domain.ScanResult
+	if err := json.Unmarshal(rr.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if result.BlockThreshold != domain.SeverityCritical || result.FindingsBlocking {
+		t.Fatalf("response decision = threshold %q blocking %v, want CRITICAL non-blocking", result.BlockThreshold, result.FindingsBlocking)
+	}
+	if got := runtime.BlockThreshold(); got != "HIGH" {
+		t.Fatalf("runtime threshold = %q, want HIGH after the injected update", got)
+	}
+	if len(inner.scanLogEntries) != 1 {
+		t.Fatalf("scan log entries = %d, want 1", len(inner.scanLogEntries))
+	}
+	entry := inner.scanLogEntries[0]
+	if entry.BlockThreshold != string(result.BlockThreshold) {
+		t.Fatalf("persisted block_threshold = %q, want response block_threshold %q", entry.BlockThreshold, result.BlockThreshold)
+	}
+	if entry.FindingsBlocking != result.FindingsBlocking {
+		t.Fatalf("persisted findings_blocking = %v, want response findings_blocking %v", entry.FindingsBlocking, result.FindingsBlocking)
+	}
+	if entry.ResultDigest != scanResultDigest(rr.Body.Bytes()) {
+		t.Fatalf("persisted result_digest = %q, want digest of the returned body", entry.ResultDigest)
+	}
+}
+
 func TestHandlePackageDetailIncludesReversingLabsReputation(t *testing.T) {
 	t.Parallel()
 
@@ -4397,16 +4470,65 @@ func TestHandleFeedImportEnrichmentFeeds(t *testing.T) {
 	}
 }
 
+// The feed import discovers the streaming importers on the PostgreSQL store by
+// type assertion, so a signature drift would silently fall back to the
+// buffered import paths. Pin both contracts at compile time.
+var (
+	_ epssStreamImporter      = (*postgres.Store)(nil)
+	_ vulnCheckStreamImporter = (*postgres.Store)(nil)
+)
+
+// streamingEPSSImportStore models a store that stages a streamed EPSS snapshot
+// and commits it only after the stream finished without error. It also offers
+// the unaudited ReplaceEPSSScoresStream used by the EPSS syncer so tests can
+// prove the feed import never takes that commit-first path.
 type streamingEPSSImportStore struct {
 	stubStore
 	streamCalls            int
+	replaceStreamCalls     int
+	committedEntries       int
 	streamBatchLengths     []int
 	statusSeenDuringStream bool
 	auditSeenDuringStream  bool
 }
 
 func (s *streamingEPSSImportStore) ReplaceEPSSScoresStream(_ context.Context, stream func(func([]db.EPSSEntry) error) error) (int, int, int, error) {
+	s.replaceStreamCalls++
+	total, err := s.consumeEPSSStream(stream)
+	if err != nil {
+		return 0, 0, total, err
+	}
+	s.committedEntries += total
+	return total, 3, total, nil
+}
+
+func (s *streamingEPSSImportStore) ImportEPSSStreamWithAudit(ctx context.Context, _ string, stream func(func([]db.EPSSEntry) error) (*db.FeedSyncStatus, error), audit db.FeedImportAuditBuilder) (int, int, int, error) {
 	s.streamCalls++
+	var status *db.FeedSyncStatus
+	total, err := s.consumeEPSSStream(func(yield func([]db.EPSSEntry) error) error {
+		var streamErr error
+		status, streamErr = stream(yield)
+		return streamErr
+	})
+	if err != nil {
+		return 0, 0, total, err
+	}
+	// Commit the snapshot, status and audit row together.
+	s.committedEntries += total
+	if status != nil {
+		if err := s.UpsertFeedSyncStatus(ctx, status); err != nil {
+			return 0, 0, total, err
+		}
+	}
+	if audit != nil {
+		if err := s.InsertAdminAuditLog(ctx, ptr(audit(total, 3))); err != nil {
+			return 0, 0, total, err
+		}
+	}
+	return total, 3, total, nil
+}
+
+func (s *streamingEPSSImportStore) consumeEPSSStream(stream func(func([]db.EPSSEntry) error) error) (int, error) {
 	total := 0
 	err := stream(func(batch []db.EPSSEntry) error {
 		if len(s.upsertedStatuses) > 0 {
@@ -4422,10 +4544,46 @@ func (s *streamingEPSSImportStore) ReplaceEPSSScoresStream(_ context.Context, st
 		total += len(batch)
 		return nil
 	})
-	if err != nil {
-		return 0, 0, total, err
+	return total, err
+}
+
+func TestHandleFeedImportEPSSStreamRejectsInvalidStatusBeforeCommit(t *testing.T) {
+	t.Parallel()
+
+	for name, status := range map[string]string{
+		// Raw validation passes (entries_total omitted); only the defaulted
+		// status (entries_total = 1 streamed entry) is invalid.
+		"defaulted entries_synced exceeds entries_total": `{"entries_synced":2}`,
+		"last_sync_duration_ms overflows time.Duration":  `{"last_sync_duration_ms":9223372036855}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			store := &streamingEPSSImportStore{}
+			h := newTestFeedImportHandler(store)
+			body := `{"entries":[{"cve_id":"CVE-2026-1000","score":0.5,"percentile":0.9}],"status":` + status + `}`
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/feeds/epss/import", strings.NewReader(body))
+			req.SetPathValue("feed", "epss")
+			req.Header.Set("Content-Type", "application/json")
+			rr := httptest.NewRecorder()
+
+			h.HandleImport(rr, req)
+
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", rr.Code, rr.Body.String())
+			}
+			if store.committedEntries != 0 {
+				t.Fatalf("EPSS snapshot committed %d entries before status validation failed", store.committedEntries)
+			}
+			if store.replaceStreamCalls != 0 {
+				t.Fatalf("EPSS import used the unaudited ReplaceEPSSScoresStream path %d time(s)", store.replaceStreamCalls)
+			}
+			if len(store.auditEntries) != 0 {
+				t.Fatalf("EPSS audit entries = %d, want none for a rejected import", len(store.auditEntries))
+			}
+			assertSingleRejectedFeedStatus(t, store.upsertedStatuses, "epss")
+		})
 	}
-	return total, 3, total, nil
 }
 
 func TestHandleFeedImportStreamsEPSSImportInBatches(t *testing.T) {
@@ -4448,8 +4606,11 @@ func TestHandleFeedImportStreamsEPSSImportInBatches(t *testing.T) {
 	if resp.Imported != 5002 || resp.Deleted != 3 || resp.EntriesTotal != 5002 {
 		t.Fatalf("response = %+v, want imported=5002 deleted=3 entries_total=5002", resp)
 	}
-	if store.streamCalls != 1 {
-		t.Fatalf("ReplaceEPSSScoresStream calls = %d, want 1", store.streamCalls)
+	if store.streamCalls != 1 || store.replaceStreamCalls != 0 {
+		t.Fatalf("ImportEPSSStreamWithAudit calls = %d (want 1), unaudited ReplaceEPSSScoresStream calls = %d (want 0)", store.streamCalls, store.replaceStreamCalls)
+	}
+	if store.committedEntries != 5002 {
+		t.Fatalf("committed EPSS entries = %d, want 5002", store.committedEntries)
 	}
 	if store.epssReplaceCalls != 0 || len(store.epssEntries) != 0 {
 		t.Fatalf("EPSS import used full-array replacement path: calls=%d entries=%d", store.epssReplaceCalls, len(store.epssEntries))
@@ -4900,6 +5061,76 @@ func TestHandleRefreshRejectsVersionBody(t *testing.T) {
 
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("expected status 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestHandleRefreshRejectsNonObjectBodyBeforeEnqueue(t *testing.T) {
+	t.Parallel()
+
+	for name, body := range map[string]string{
+		"null":   `null`,
+		"array":  `[]`,
+		"string": `"refresh"`,
+		"number": `1`,
+		"bool":   `true`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			store := &stubStore{}
+			h := newTestHandler(store)
+			h.ConfigureSocketRefresh(config.FeedsConfig{
+				SocketEnabled: true,
+				SocketMode:    config.FeedModeSelf,
+				SocketAPIKey:  "socket-token",
+			})
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/packages/npm/lodash/refresh", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			rr := httptest.NewRecorder()
+
+			h.handleRefresh(rr, req, "npm", "lodash")
+
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", rr.Code, rr.Body.String())
+			}
+			var errBody errorJSON
+			if err := json.Unmarshal(rr.Body.Bytes(), &errBody); err != nil {
+				t.Fatalf("error response body is not JSON: %v; body=%q", err, rr.Body.String())
+			}
+			if jobs := store.enqueuedRefreshJobsSnapshot(); len(jobs) != 0 {
+				t.Fatalf("refresh enqueued jobs after body rejection: %+v", jobs)
+			}
+			store.mu.Lock()
+			audits := len(store.auditEntries)
+			store.mu.Unlock()
+			if audits != 0 {
+				t.Fatalf("refresh wrote %d audit entries after body rejection", audits)
+			}
+		})
+	}
+}
+
+func TestHandleRefreshAcceptsEmptyObjectBody(t *testing.T) {
+	t.Parallel()
+
+	store := &stubStore{}
+	h := newTestHandler(store)
+	h.ConfigureSocketRefresh(config.FeedsConfig{
+		SocketEnabled: true,
+		SocketMode:    config.FeedModeSelf,
+		SocketAPIKey:  "socket-token",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/packages/npm/lodash/refresh", strings.NewReader(` {} `))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	h.handleRefresh(rr, req, "npm", "lodash")
+
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202: %s", rr.Code, rr.Body.String())
+	}
+	if jobs := store.enqueuedRefreshJobsSnapshot(); len(jobs) != 1 {
+		t.Fatalf("enqueued jobs = %d, want 1", len(jobs))
 	}
 }
 
