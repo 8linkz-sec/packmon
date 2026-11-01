@@ -348,6 +348,42 @@
   existing conflict message instead of silently overwriting that change;
   a malformed revision is rejected as invalid. A blank API key still keeps
   the stored key.
+- SwiftPM `Package.resolved` locations only become a `host/owner/repo`
+  identity when their host is a valid DNS hostname or IP address (IPv6 only
+  in an `http(s)` URL). SCP-like remotes such as
+  `git@.gitserver.example:org/repo` were canonicalized without any host
+  check, so a dot-prefixed, empty-label, hyphen-edged, or otherwise malformed
+  host (even `git@..:org/repo` -> `../org/repo`) became the package name; the
+  same rules now apply to bare `host/path` and `http(s)` locations. Hosts with
+  non-ASCII (IDN) characters or underscores are no longer canonicalized
+  either; write internationalized hosts in their punycode (`xn--`) form. A
+  location with a slash before its first colon is a local path, as in Git,
+  not an SCP-like remote. Rejected locations fall back to the pin's identity.
+- Chocolatey inventory ignores a malformed or truncated `config.xml` with a
+  `<config>` root but no `<packages>` section (for example `<config><envs>`)
+  as an unrelated file. It used to be reported as an "invalid config.xml
+  package list" parse error; only a file whose `<packages>` section was
+  already read reports a decoder error.
+- Chocolatey script inventory keeps quoted separator characters as
+  arguments. `Write-Host ';' choco install fake` no longer reports `fake`
+  (the quoted `;` used to put `choco` back into command position), and
+  `choco install a --params ';' b` reports `b` as well as `a` (the quoted
+  `;` used to end the package list).
+- Chocolatey script inventory no longer treats a backtick at the end of a
+  PowerShell comment as a line continuation. ``# note ` `` followed by
+  `choco install git` used to join both lines into one comment and drop
+  `git`; the same applied to trailing `#` comments and to lines ending inside
+  a `<# ... #>` block comment. A continued command that ends after a closed
+  block comment (``<# doc #> choco install a ` `` + `b`) now keeps `b`.
+- Chocolatey script inventory reads each script with its own language's
+  rules. PowerShell files (`.ps1`, `.psm1`) continue lines only with a
+  backtick and batch files (`.bat`, `.cmd`) only with a caret; either marker
+  in the other language used to join the next line, so `choco install a ^`
+  followed by `choco install b` in a `.ps1` reported `choco` and `install` as
+  packages. `#` comments, `<# ... #>` block comments, and here-strings apply
+  only to PowerShell files (a batch `echo @"` no longer hides the rest of the
+  file, and `#` is ordinary text in batch), and `REM` / `::` comment lines
+  only to batch files.
 
 ### Security updates
 

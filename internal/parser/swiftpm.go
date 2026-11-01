@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"strings"
 
@@ -188,13 +189,22 @@ func canonicalSwiftPackageLocation(raw string) string {
 	if strings.Contains(raw, "://") {
 		parsed, err := url.Parse(raw)
 		if err == nil && parsed.Host != "" && isSwiftHTTPURLScheme(parsed.Scheme) {
-			return canonicalSwiftHostPath(parsed.Hostname(), parsed.Path)
+			host := parsed.Hostname()
+			if !isSwiftHostname(host) && net.ParseIP(host) == nil {
+				return ""
+			}
+			return canonicalSwiftHostPath(host, parsed.Path)
 		}
 		return ""
 	}
 
-	if _, rest, ok := strings.Cut(raw, "@"); ok {
-		if host, path, ok := strings.Cut(rest, ":"); ok {
+	// SCP-like remote (user@host:path). As in Git, a slash before the first
+	// colon makes the location a local path rather than a remote.
+	if userHost, path, ok := strings.Cut(raw, ":"); ok && !strings.Contains(userHost, "/") {
+		if _, host, ok := strings.Cut(userHost, "@"); ok {
+			if !isSwiftHostname(host) {
+				return ""
+			}
 			return canonicalSwiftHostPath(host, path)
 		}
 	}
@@ -230,12 +240,42 @@ func isSwiftHTTPURLScheme(scheme string) bool {
 	}
 }
 
+// isSwiftBareHost reports whether host can start a scheme-less "host/path"
+// location. It must be a valid hostname with at least one dot, so relative
+// paths such as "vendor/lib" are not mistaken for a repository host.
 func isSwiftBareHost(host string) bool {
-	host = strings.ToLower(strings.TrimSpace(host))
-	if host == "" || host == "." || host == ".." || strings.HasPrefix(host, ".") || strings.HasSuffix(host, ".") {
+	return isSwiftHostname(host) && strings.Contains(host, ".")
+}
+
+// isSwiftHostname reports whether host is a syntactically valid DNS hostname:
+// at most 253 characters of non-empty, dot-separated labels of at most 63
+// ASCII letters, digits, or hyphens that neither start nor end with a hyphen.
+// Leading, trailing, or repeated dots, whitespace, and any other character
+// reject the host, so a malformed repository location never becomes a package
+// identity.
+func isSwiftHostname(host string) bool {
+	if host == "" || len(host) > 253 {
 		return false
 	}
-	return strings.Contains(host, ".")
+	for _, label := range strings.Split(host, ".") {
+		if !isSwiftHostLabel(label) {
+			return false
+		}
+	}
+	return true
+}
+
+func isSwiftHostLabel(label string) bool {
+	if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+		return false
+	}
+	for i := 0; i < len(label); i++ {
+		c := label[i]
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '-' {
+			return false
+		}
+	}
+	return true
 }
 
 func canonicalSwiftHostPath(host, path string) string {

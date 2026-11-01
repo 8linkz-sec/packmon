@@ -1018,7 +1018,9 @@ not leave the overwritten report group/world-readable on POSIX filesystems.
 
 SwiftPM outdated/list-all lookups must not turn repository-controlled lockfile
 or SBOM strings into arbitrary Git egress. Package identities are normalized to
-the documented `host/owner/repo` form without URL userinfo, and Git latest-tag
+the documented `host/owner/repo` form without URL userinfo, only from
+locations whose host is a syntactically valid hostname (malformed hosts such as
+`.gitserver.example` or `..` fall back to the pin identity), and Git latest-tag
 lookups are limited to the built-in public Git host allowlist plus trusted
 operator-configured bare hostnames from `PACKMON_SWIFTPM_GIT_ALLOWED_HOSTS` or
 `registries.swiftpm_git_allowed_hosts`. Unsupported schemes, full URLs,

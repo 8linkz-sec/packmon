@@ -87,8 +87,8 @@ func parseFileFromRoot(root *os.Root, file File) ([]Package, error) {
 	switch file.Kind {
 	case KindConfigXML:
 		return ParseConfigXML(r, file.RelPath)
-	case KindScript:
-		return ParseScript(r, file.RelPath)
+	case KindPowerShellScript, KindBatchScript:
+		return ParseScript(r, file.RelPath, file.Kind)
 	default:
 		return nil, fmt.Errorf("%s: unsupported chocolatey inventory file kind %q", file.RelPath, file.Kind)
 	}
