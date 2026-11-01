@@ -157,7 +157,7 @@ func localDashboardDBWarning(ctx context.Context, store *sqlite.Store, logger *s
 	if info.DBAgeDays != nil {
 		return fmt.Sprintf("Local database last synced %s ago. Results may be incomplete. Update with: packmon db sync.", plural.Count(*info.DBAgeDays, "day", "days"))
 	}
-	return "Local database is stale. Results may be incomplete. Update with: packmon db sync."
+	return "Local database freshness could not be verified. Results may be incomplete. Update with: packmon db sync."
 }
 
 func newLocalDashboardServer(handler http.Handler) *http.Server {

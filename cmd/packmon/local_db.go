@@ -124,7 +124,9 @@ func loadLocalDBInfoWithWarnAfterDays(ctx context.Context, store *sqlite.Store, 
 	}
 	info.LastSyncAt = lastSyncAt
 	info.DBAgeDays = dbAgeDays
-	info.DBStale = dbAgeDays != nil && *dbAgeDays >= warnAfterDays
+	// Absent or blank last_sync_at metadata means freshness is unknown, which
+	// counts as stale so it is never reported as silently healthy.
+	info.DBStale = dbAgeDays == nil || *dbAgeDays >= warnAfterDays
 
 	return info, nil
 }

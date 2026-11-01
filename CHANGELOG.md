@@ -83,6 +83,12 @@
   are now rejected like any other fragment. `net/url` records no fragment for a
   bare `#` and drops it on re-serialization, so the value was previously
   accepted and silently rewritten.
+- A local database without a recorded sync time (absent or blank
+  `last_sync_at` metadata, for example one that was never synced) is now
+  reported as stale instead of fresh. Local scans set `db_stale: true` and show
+  the "Local database freshness could not be verified" warning, `packmon db
+  info` / `db export` report `db_stale: true`, and `packmon dashboard` shows
+  the same warning banner.
 - SHA-pinned GitHub Actions are no longer compared as version strings in
   `--list-all` / `--outdated`. The `# vX.Y.Z` comment convention is used as
   the declared version; without it the pin is compared with the dereferenced

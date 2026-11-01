@@ -1110,7 +1110,10 @@ For CLI local freshness warnings:
 When local DB age exceeds this threshold, scan artifacts expose `db_stale` and
 `db_age_days`, and `packmon dashboard` must show a visible stale-data warning to
 all dashboard viewers. Treat the warning as degraded local coverage and sync the
-local DB from the server; stale data alone does not block scans.
+local DB from the server; stale data alone does not block scans. A local DB
+without a recorded sync time (never synced, or missing sync metadata) has
+unknown freshness and is treated as stale: `db_stale` is `true` and
+`db_age_days` is absent.
 
 ## Testing
 
