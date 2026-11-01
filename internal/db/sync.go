@@ -38,8 +38,17 @@ type SyncExport struct {
 	// current affected packages (within the requested ecosystems), so a delta
 	// client can drop local affected rows of those vulnerabilities the page did
 	// not send. It holds per page: a delta paged by whole advisories never
-	// splits a vulnerability across pages, and each page is one statement.
+	// splits a vulnerability across flagged pages, and each page is one
+	// statement. The pages of an advisory split because its rows exceed
+	// SyncVulnerabilityPageByteBudget never carry it.
 	VulnerabilityAffectedComplete bool
+	// VulnerabilitiesWithoutAffected lists, on a page that carries
+	// VulnerabilityAffectedComplete, the IDs of changed vulnerabilities on
+	// that page that have no affected package left (within the requested
+	// ecosystems). They have no row to export, so the delta client drops their
+	// local affected rows (within the requested ecosystems) instead. It is
+	// empty on every unflagged page.
+	VulnerabilitiesWithoutAffected []string
 }
 
 // syncAdvisoryCursorTag versions the vulnerabilities_cursor of a delta that
@@ -71,6 +80,48 @@ func DecodeSyncAdvisoryCursor(raw string) (string, bool) {
 		return "", false
 	}
 	return values[1], true
+}
+
+// syncAdvisoryRowCursorTag versions the vulnerabilities_cursor that continues
+// an advisory too large for one page inside that advisory. Its payload is the
+// advisory ID and the last delivered (ecosystem, name) row. It has four parts,
+// so a server that does not know it rejects it instead of reading it as a
+// three-part legacy row cursor.
+const syncAdvisoryRowCursorTag = "advisory-rows-v2"
+
+// SyncVulnerabilityPageByteBudget bounds the estimated JSON bytes of the
+// vulnerability dataset on one /api/v1/sync page, in addition to the row
+// limit. It stays well below the response size a client accepts (32 MiB, see
+// synccontract.MaxResponseBytes), so the other datasets of the page and the
+// envelope still fit. An advisory whose rows alone exceed it is split over
+// several pages that do not carry VulnerabilityAffectedComplete.
+const SyncVulnerabilityPageByteBudget = 12 << 20
+
+// EncodeSyncAdvisoryRowCursor returns the vulnerabilities_cursor that
+// continues the advisory with the given ID after its affected row (ecosystem,
+// name), for an advisory split across pages because its rows exceed
+// SyncVulnerabilityPageByteBudget.
+func EncodeSyncAdvisoryRowCursor(id, ecosystem, name string) string {
+	payload, _ := json.Marshal([]string{syncAdvisoryRowCursorTag, id, ecosystem, name})
+	return base64.RawURLEncoding.EncodeToString(payload)
+}
+
+// DecodeSyncAdvisoryRowCursor returns the advisory ID and the last delivered
+// (ecosystem, name) row of an advisory row cursor. It reports false for any
+// other value, including advisory cursors and legacy row cursors.
+func DecodeSyncAdvisoryRowCursor(raw string) (id, ecosystem, name string, ok bool) {
+	payload, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return "", "", "", false
+	}
+	var values []string
+	if err := json.Unmarshal(payload, &values); err != nil {
+		return "", "", "", false
+	}
+	if len(values) != 4 || values[0] != syncAdvisoryRowCursorTag || values[1] == "" || values[2] == "" || values[3] == "" {
+		return "", "", "", false
+	}
+	return values[1], values[2], values[3], true
 }
 
 // SyncCursor carries per-dataset pagination state for /api/v1/sync exports.

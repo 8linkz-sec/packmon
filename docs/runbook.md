@@ -200,7 +200,32 @@ change.
    applies every pending migration in one run. Apart from the 48 prerequisite
    check, a migration that fails is recorded as dirty at its version, and
    migrate and server startup then refuse that database; recover by restoring
-   the pre-upgrade backup (see the rollback steps below).
+   the pre-upgrade backup (see the rollback steps below). The exception is a
+   migration that only builds indexes concurrently (currently 49): it is safe
+   to retry, and migrate names the retry path in its dirty error (see the 49
+   note below).
+   An interrupted `CREATE INDEX CONCURRENTLY` leaves an `INVALID` index
+   behind: PostgreSQL keeps updating it on writes but never reads from it, so
+   the queries it exists for fall back to sequential scans. Migrate therefore
+   drops an `INVALID` index of the same name before each concurrent build and
+   fails, leaving that migration dirty, if the build does not leave a valid
+   index. Every `packmon-server migrate` run, including one with nothing
+   pending, also checks every index that an already applied migration builds
+   concurrently: an `INVALID` one is dropped and rebuilt, and a missing one
+   (for example after a rebuild cancelled between its drop and its build) is
+   built again when its table exists, both concurrently and outside a
+   transaction; valid indexes are left alone. This repair runs before any
+   pending migration. A failed
+   repair names the index and aborts the run before pending migrations are
+   applied, so the schema version stays clean; rerun migrate to retry. The
+   repair's `DROP INDEX CONCURRENTLY` waits behind a still-running abandoned
+   build of the same index, so check `pg_stat_activity` for one first. To
+   list `INVALID` indexes yourself:
+   ```sql
+   SELECT indexrelid::regclass AS index_name, indrelid::regclass AS table_name
+   FROM pg_index
+   WHERE NOT indisvalid;
+   ```
    - Migration 48 (`048_pg_stat_statements`, schema 47 -> 48) creates the
      `pg_stat_statements` extension in schema `public` for PostgreSQL query
      observability. Follow
@@ -223,9 +248,24 @@ change.
      durable-volume headroom for both index builds. The concurrent build
      avoids a long table-write lock but still consumes I/O and CPU and takes
      longer on large catalogs; keep the server drained as required above and
-     monitor PostgreSQL logs. An interrupted concurrent build can leave an
-     `INVALID` index behind, and a retry would keep it because the statements
-     use `IF NOT EXISTS`; restore the backup rather than retrying by hand.
+     monitor PostgreSQL logs. The builds have no time limit (see step 5), so
+     `PACKMON_DB_CONNECT_TIMEOUT` does not need raising for them.
+     An interrupted build leaves schema 49 dirty and can leave an `INVALID`
+     index behind. Restoring the backup is not needed; retry instead:
+     1. Make sure no other migrate run is still active (a second run waits on
+        the migration advisory lock, and an abandoned build stays visible in
+        `pg_stat_activity` until PostgreSQL finishes or cancels it).
+     2. Clear the dirty marker (bundled database shown):
+        ```bash
+        docker compose -f docker-compose.server.yml exec postgres \
+          psql -U packmon -d packmon \
+          -c "DELETE FROM schema_migrations WHERE version = 49 AND dirty;"
+        ```
+     3. Rerun the migrate step (step 5). 49 runs again: it skips an index that
+        already exists and is valid (`IF NOT EXISTS`), drops and rebuilds an
+        `INVALID` one, and records 49 clean only once both indexes are valid.
+
+     The 49 failure events stay in `schema_migration_events`.
    - Migration 50 (`050_version_range_boundary_values`, schema 49 -> 50)
      tightens the `version_ranges` CHECK constraints on `affected_packages`
      and `malicious_findings` (every range needs a nonempty `events` array and
@@ -282,9 +322,10 @@ change.
    ```
    `PACKMON_DB_CONNECT_TIMEOUT` bounds only connecting, the wait for the
    migration lock (another `migrate` run holds it), and the final version
-   read. The migrations themselves have no time limit, so the 49 index builds
-   and the 50 repair can take as long as the catalog needs; do not raise the
-   connect timeout for them. Ctrl-C or `SIGTERM` (`docker stop`) cancels the
+   read. The migrations themselves and the rebuild of an `INVALID` or missing
+   concurrently built index have no time limit, so the 49 index builds, such a
+   rebuild, and the 50 repair can take as long as the catalog needs; do not
+   raise the connect timeout for them. Ctrl-C or `SIGTERM` (`docker stop`) cancels the
    run: PostgreSQL cancels the running statement, the failed attempt is
    recorded in `schema_migration_events`, the migration lock is released, and
    a migration that had started leaves its version dirty; recover as for any
@@ -561,13 +602,26 @@ changed again while the sync was paging is completed by the following
 incremental sync. Older servers (which flag only a delta that fits in one
 page) and older clients stay upsert-only on larger deltas and keep the old
 package until a later single-page incremental sync drops it or a full sync,
-which clears and reloads the local tables, replaces it. An ecosystem-filtered
-sync cannot drop the local rows of an advisory whose coverage moved entirely to
-another ecosystem; run an unfiltered sync or a full sync.
+which clears and reloads the local tables, replaces it. An advisory that lost
+every affected package (or, on an ecosystem-filtered sync, every package in
+the filtered ecosystems, for example after its coverage moved to another
+ecosystem) is listed by ID in `vulnerabilities_without_affected` on a flagged
+page, and current clients drop its local rows in the synced ecosystems; older
+clients and servers keep such rows until a full sync.
+
+An advisory whose affected rows alone exceed the per-page byte budget of the
+sync (about 12 MiB of rows, against the 32 MiB a client accepts per response)
+is split across several pages. Those pages never carry
+`vulnerability_affected_complete`, so packages such an advisory no longer
+lists stay in the local database until a full sync; the advisories around it
+are still replaced. Before this split existed, such an advisory made every
+incremental sync fail with `response too large` and the local database never
+advanced; upgrading the server is the fix, a full sync is not needed for it.
 
 During a rolling upgrade, a sync sequence that a new server started and an
 older server continues fails with `400` (the older server does not know the
-whole-advisory cursor); nothing is deleted and the next sync starts over.
+whole-advisory cursor or the advisory row cursor of a split advisory);
+nothing is deleted and the next sync starts over.
 Clients that page by `offset` only, without the cursor, should not switch
 between old and new servers mid-sequence, because the two order offset pages
 differently. When in doubt, run a full sync:

@@ -184,11 +184,11 @@ func TestMaliciousActiveSearchIndexMigrationRoundTripAgainstPostgres(t *testing.
 	if err != nil {
 		t.Fatalf("read migration 49 down: %v", err)
 	}
-	if err := applyMigrationWithoutTransaction(ctx, db, toMigrationFile(down)); err != nil {
+	if err := applyMigrationWithoutTransaction(ctx, catalogStatementConn{db: db}, toMigrationFile(down)); err != nil {
 		t.Fatalf("apply migration 49 down: %v", err)
 	}
 	assertMaliciousActiveSearchIndexes(t, ctx, db, false)
-	if err := applyMigrationWithoutTransaction(ctx, db, toMigrationFile(down)); err != nil {
+	if err := applyMigrationWithoutTransaction(ctx, catalogStatementConn{db: db}, toMigrationFile(down)); err != nil {
 		t.Fatalf("reapply guarded migration 49 down: %v", err)
 	}
 
@@ -196,11 +196,11 @@ func TestMaliciousActiveSearchIndexMigrationRoundTripAgainstPostgres(t *testing.
 	if err != nil {
 		t.Fatalf("read migration 49 up: %v", err)
 	}
-	if err := applyMigrationWithoutTransaction(ctx, db, toMigrationFile(up)); err != nil {
+	if err := applyMigrationWithoutTransaction(ctx, catalogStatementConn{db: db}, toMigrationFile(up)); err != nil {
 		t.Fatalf("apply migration 49 up: %v", err)
 	}
 	assertMaliciousActiveSearchIndexes(t, ctx, db, true)
-	if err := applyMigrationWithoutTransaction(ctx, db, toMigrationFile(up)); err != nil {
+	if err := applyMigrationWithoutTransaction(ctx, catalogStatementConn{db: db}, toMigrationFile(up)); err != nil {
 		t.Fatalf("reapply guarded migration 49 up: %v", err)
 	}
 }
@@ -340,27 +340,7 @@ func TestPGStatStatementsPrecreatedExtensionRequiresPublicSchema(t *testing.T) {
 
 func applyEmbeddedMigrationsBeforePGStatStatements(t *testing.T, dsn string) {
 	t.Helper()
-	db, err := sql.Open("pgx", dsn)
-	if err != nil {
-		t.Fatalf("sql.Open() error = %v", err)
-	}
-	defer ioutils.CloseSilently(db)
-	ctx := context.Background()
-	if err := ensureVersionTable(ctx, db); err != nil {
-		t.Fatalf("ensureVersionTable() error = %v", err)
-	}
-	migrations, err := embeddedUpMigrations()
-	if err != nil {
-		t.Fatalf("embeddedUpMigrations() error = %v", err)
-	}
-	for _, migration := range migrations {
-		if migration.version >= 48 {
-			continue
-		}
-		if err := applyMigration(ctx, db, migration); err != nil {
-			t.Fatalf("apply migration %s: %v", migration.name, err)
-		}
-	}
+	applyEmbeddedMigrationsBefore(t, dsn, 48)
 }
 
 func TestRunRecordsMigrationChecksumsAgainstPostgres(t *testing.T) {

@@ -1,0 +1,8 @@
+go test fuzz v1
+string("0")
+string("token\":\"")
+string("\"00")
+byte('\t')
+byte('\x05')
+byte('\f')
+byte('\x1e')

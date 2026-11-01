@@ -138,7 +138,7 @@ func TestOpenAPIIncludesCanonicalScanAndSyncFields(t *testing.T) {
 		t.Fatalf("SyncResponse.vulnerability_affected_complete type = %#v, want boolean", got)
 	}
 	affectedCompleteDescription, _ := affectedComplete["description"].(string)
-	for _, want := range []string{"since window", "this page", "every page of a multi-page delta", "whole advisories", "all of its current affected", "legacy", "compatible"} {
+	for _, want := range []string{"since window", "this page", "every page of a multi-page delta", "whole advisories", "all of its current affected", "legacy", "byte budget omit the", "compatible"} {
 		if !strings.Contains(affectedCompleteDescription, want) {
 			t.Fatalf("SyncResponse.vulnerability_affected_complete description missing %q: %q", want, affectedCompleteDescription)
 		}
@@ -151,6 +151,22 @@ func TestOpenAPIIncludesCanonicalScanAndSyncFields(t *testing.T) {
 	if fieldTag, ok := reflect.TypeOf(synccontract.Response{}).FieldByName("VulnerabilityAffectedComplete"); !ok || fieldTag.Tag.Get("json") != "vulnerability_affected_complete,omitempty" {
 		t.Fatalf("synccontract.Response.VulnerabilityAffectedComplete json tag = %q (found %v), want vulnerability_affected_complete,omitempty", fieldTag.Tag.Get("json"), ok)
 	}
+	withoutAffected := requireMap(t, syncResponseProperties, "vulnerabilities_without_affected")
+	if got := withoutAffected["type"]; got != "array" {
+		t.Fatalf("SyncResponse.vulnerabilities_without_affected type = %#v, want array", got)
+	}
+	if got := requireMap(t, withoutAffected, "items")["type"]; got != "string" {
+		t.Fatalf("SyncResponse.vulnerabilities_without_affected items type = %#v, want string", got)
+	}
+	withoutAffectedDescription, _ := withoutAffected["description"].(string)
+	for _, want := range []string{"vulnerability_affected_complete", "no affected package left", "requested ecosystems", "not package rows", "other ecosystems stay", "win over the list", "limit", "omitted", "older clients ignore"} {
+		if !strings.Contains(withoutAffectedDescription, want) {
+			t.Fatalf("SyncResponse.vulnerabilities_without_affected description missing %q: %q", want, withoutAffectedDescription)
+		}
+	}
+	if fieldTag, ok := reflect.TypeOf(synccontract.Response{}).FieldByName("VulnerabilitiesWithoutAffected"); !ok || fieldTag.Tag.Get("json") != "vulnerabilities_without_affected,omitempty" {
+		t.Fatalf("synccontract.Response.VulnerabilitiesWithoutAffected json tag = %q (found %v), want vulnerabilities_without_affected,omitempty", fieldTag.Tag.Get("json"), ok)
+	}
 
 	limit := requireOperationParameter(t, syncOperation, "limit", "query")
 	limitSchema := requireMap(t, limit, "schema")
@@ -161,14 +177,14 @@ func TestOpenAPIIncludesCanonicalScanAndSyncFields(t *testing.T) {
 		t.Fatalf("/api/v1/sync limit maximum = %d, want %d", got, synccontract.MaxLimit)
 	}
 	limitDescription, _ := limit["description"].(string)
-	for _, want := range []string{"whole advisories", "more affected rows than the limit"} {
+	for _, want := range []string{"whole advisories", "more affected rows than the limit", "byte budget", "32 MiB", "split over several pages", "omit vulnerability_affected_complete"} {
 		if !strings.Contains(limitDescription, want) {
 			t.Fatalf("/api/v1/sync limit description missing %q: %q", want, limitDescription)
 		}
 	}
 	vulnerabilitiesCursorParameter := requireOperationParameter(t, syncOperation, "vulnerabilities_cursor", "query")
 	vulnerabilitiesCursorDescription, _ := vulnerabilitiesCursorParameter["description"].(string)
-	for _, want := range []string{"advisory cursor", "since", "legacy row cursor"} {
+	for _, want := range []string{"advisory cursor", "advisory row cursor", "page byte budget", "since", "legacy row cursor"} {
 		if !strings.Contains(vulnerabilitiesCursorDescription, want) {
 			t.Fatalf("/api/v1/sync vulnerabilities_cursor description missing %q: %q", want, vulnerabilitiesCursorDescription)
 		}

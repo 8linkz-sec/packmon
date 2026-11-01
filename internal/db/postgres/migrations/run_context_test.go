@@ -35,6 +35,25 @@ type scriptedMigrationDB struct {
 	lockWait           func(context.Context) error
 	migrationStatement func(context.Context) error
 	unlockErr          error
+
+	// invalidIndex is reported INVALID by the catalog until a statement that
+	// builds it has run, so the concurrent-index repair step rebuilds it.
+	invalidIndex string
+	indexRebuilt bool
+}
+
+func (db *scriptedMigrationDB) indexValid(name string) bool {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	return name != db.invalidIndex || db.indexRebuilt
+}
+
+func (db *scriptedMigrationDB) noteStatement(query string) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if db.invalidIndex != "" && strings.Contains(query, "CREATE INDEX") && strings.Contains(query, db.invalidIndex) {
+		db.indexRebuilt = true
+	}
 }
 
 func (db *scriptedMigrationDB) record(ctx context.Context, query string) error {
@@ -131,6 +150,7 @@ func (c *scriptedConn) ExecContext(ctx context.Context, query string, _ []driver
 			return nil, err
 		}
 	}
+	c.db.noteStatement(query)
 	return driver.RowsAffected(1), nil
 }
 
@@ -163,6 +183,11 @@ func (c *scriptedConn) QueryContext(ctx context.Context, query string, args []dr
 		return nil, fmt.Errorf("scripted metadata query for unknown version %d", version)
 	case strings.Contains(query, "RETURNING id"):
 		return scriptedRows([]any{int64(7)}), nil
+	case strings.Contains(query, "FROM pg_index"):
+		name, _ := args[0].Value.(string)
+		return scriptedRows([]any{c.db.indexValid(strings.Trim(name, `"`))}), nil
+	case strings.Contains(query, "to_regclass($1::text) IS NOT NULL"):
+		return scriptedRows([]any{true}), nil
 	}
 	return nil, fmt.Errorf("scripted driver has no answer for query %q", query)
 }
@@ -217,11 +242,21 @@ func TestRunContextWithOptionsMigrationOutlivesSetupTimeout(t *testing.T) {
 				return nil
 			}
 		},
+		// The concurrent-index repair step rebuilds this 049 index before the
+		// pending migration runs; the slow rebuild must outlive the timeout too.
+		invalidIndex: "idx_malicious_active_search_order",
 	}
 	useScriptedMigrationDB(t, db)
 
 	if err := RunContextWithOptions(context.Background(), "scripted", RunOptions{SetupTimeout: setupTimeout}); err != nil {
-		t.Fatalf("RunContextWithOptions() error = %v, want the slow migration to finish", err)
+		t.Fatalf("RunContextWithOptions() error = %v, want the slow repair and migration to finish", err)
+	}
+
+	if !db.indexValid(db.invalidIndex) {
+		t.Fatal("concurrent-index repair did not rebuild the INVALID index")
+	}
+	if _, rebuild := db.lastEvent(t, "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_malicious_active_search_order"); rebuild.hasDeadline || rebuild.ctxErr != nil {
+		t.Fatalf("index rebuild ran with deadline=%v ctxErr=%v, want neither", rebuild.hasDeadline, rebuild.ctxErr)
 	}
 
 	if _, lock := db.lastEvent(t, "pg_advisory_lock"); !lock.hasDeadline {

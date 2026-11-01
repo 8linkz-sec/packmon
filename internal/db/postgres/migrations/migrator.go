@@ -126,26 +126,29 @@ func RunContextWithOptions(ctx context.Context, dsn string, opts RunOptions) (er
 		return err
 	}
 
+	migrations, err := embeddedUpMigrations()
+	if err != nil {
+		return err
+	}
 	current, dirty, hasVersion, err := currentVersion(ctx, conn)
 	if err != nil {
 		return err
 	}
 	if dirty {
-		return fmt.Errorf("migrations: database is dirty at version %d", current)
+		return dirtyDatabaseError(current, migrations)
 	}
 	if hasVersion && current > ExpectedVersion {
 		return fmt.Errorf("migrations: database schema version %d is newer than binary expected version %d", current, ExpectedVersion)
 	}
 
-	migrations, err := embeddedUpMigrations()
-	if err != nil {
-		return err
-	}
 	if hasVersion {
 		if err := backfillAppliedMigrationMetadata(ctx, conn, migrations, current); err != nil {
 			return err
 		}
 		if err := validateAppliedMigrationMetadata(ctx, conn, migrations, current); err != nil {
+			return err
+		}
+		if err := repairInvalidConcurrentIndexes(ctx, catalogStatementConn{db: conn}, migrations, current); err != nil {
 			return err
 		}
 	}
@@ -500,7 +503,7 @@ func applyMigration(ctx context.Context, db migrationConn, migration migrationFi
 	}()
 
 	if !migrationRunsInTransaction(migration) {
-		if err := applyMigrationWithoutTransaction(ctx, db, migration); err != nil {
+		if err := applyMigrationWithoutTransaction(ctx, catalogStatementConn{db: db}, migration); err != nil {
 			return err
 		}
 		if err := finishSuccessfulMigrationEvent(ctx, db, eventID, migration); err != nil {
@@ -688,14 +691,14 @@ func migrationRunsInTransaction(migration migrationFile) bool {
 	return !strings.Contains(migration.sql, noTransactionDirective)
 }
 
-func applyMigrationWithoutTransaction(ctx context.Context, db sqlExecutor, migration migrationFile) error {
+func applyMigrationWithoutTransaction(ctx context.Context, db noTransactionConn, migration migrationFile) error {
 	statements, err := splitSQLStatements(migration.sql)
 	if err != nil {
 		return fmt.Errorf("migrations: parse %s: %w", migration.name, err)
 	}
 	for _, statement := range statements {
-		if _, err := db.ExecContext(ctx, statement); err != nil {
-			return fmt.Errorf("migrations: apply %s: %w", migration.name, err)
+		if err := applyNoTransactionStatement(ctx, db, migration, statement); err != nil {
+			return err
 		}
 	}
 	return nil

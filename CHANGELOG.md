@@ -16,6 +16,21 @@
 
 ### Fixed
 
+- `packmon-server migrate` no longer keeps an `INVALID` index left by an
+  interrupted `CREATE INDEX CONCURRENTLY` (connection drop, cancel, crash).
+  A retry used to skip such an index because the migrations use
+  `IF NOT EXISTS`, so the schema reported the new version while the index
+  was never used and its queries fell back to sequential scans. The migrator
+  now drops an `INVALID` index of the same name before each concurrent build,
+  fails the migration (dirty) unless the build left a valid index, and on
+  every run, before any pending migration, rebuilds concurrently any
+  `INVALID` or missing index of an already applied migration (010, 011, 021
+  and 049 build indexes concurrently); a failed repair aborts the run with
+  the schema version clean. A database
+  left dirty by an interrupted 049 no longer needs a backup restore: migrate
+  still refuses it, but its error names the retry path (clear the 49 dirty
+  marker, rerun migrate), documented in "Upgrade And Rollback" in
+  `docs/runbook.md`. No migration is added.
 - The PostgreSQL `version_ranges` CHECK constraints accepted malformed OSV
   ranges: a range without an `events` key (`[{}]`) and events whose boundary
   was `null`, a number, or blank (`{"introduced":null}`), because the check
@@ -93,6 +108,22 @@
   so the part after its first space no longer leaks. A backslash-escaped
   newline inside a secret value (`password='ab\` followed by a line break)
   also no longer ends the redaction early and leaks the rest of the value.
+- Diagnostic redaction now also hides secrets whose key name carries a secret
+  word as one component: `"authToken":"x"`, `"db_password":"x"`,
+  `"DB_PASSWORD":"x"`, `"client_secret_value":"x"`, `GITHUB_TOKEN=x`,
+  `PGPASSWORD=x`, and `x-api-key: x` used to reach logs and error messages in
+  clear text, because the key had to be exactly the secret word. The secret
+  word must end a component of the name (split at `_`, `-`, `.`, digits, and
+  camelCase boundaries), so `tokenizer`, `tokens_count`, `passwordless`, and
+  `secretariat` stay readable. The plurals `credentials`, `secrets`,
+  `passwords`, and `passwds` are secret words too; `tokens` is not, because
+  it usually holds a count. An object or array assigned to a secret key
+  (`"token": {"value": "x"}`, `"password": ["a", "b"]`) is now redacted as a
+  whole up to its balanced closing bracket; before, everything after its
+  first delimiter leaked. JSON embedded in a JSON string more than once
+  (`\\\"token\\\":\\\"a b\\\"`) is now redacted too. A value cut off inside
+  embedded JSON now ends where the enclosing string closes, so the fields
+  after that string stay readable.
 - The CLI no longer creates its local SQLite database (and its WAL and
   journal files) in the working directory when the home directory cannot be
   resolved. The default `~/.packmon/db` used to fall back to `./.packmon/db`,
@@ -429,6 +460,35 @@
   the next delta. Older servers omit the field (or set it only on a delta that
   fits in one page) and older clients ignore it, so both keep the previous
   upsert-only behavior on larger deltas.
+- An incremental `packmon db sync` now also removes an advisory that lost every
+  affected package on the server. Such an advisory had no affected row left,
+  so no delta page ever delivered it and a local scan kept reporting it until a
+  full sync while `/api/v1/check` no longer did. A flagged delta page
+  (`vulnerability_affected_complete`) now lists the IDs of such changed
+  advisories in the new optional `vulnerabilities_without_affected` array, and
+  the client drops their local rows in that page's transaction. The list is
+  scoped to the requested ecosystems: an ecosystem-filtered sync also lists an
+  advisory without an affected package in those ecosystems (for example one
+  whose coverage moved to another ecosystem) and drops only its rows in those
+  ecosystems. Each listed advisory takes one row of the page's `limit`. Older
+  clients ignore the field and older servers omit it, so both keep the
+  previous behavior.
+- An incremental `packmon db sync` no longer fails on every retry when one
+  advisory has an unusually large affected set. Whole-advisory paging always
+  delivered the first advisory of a page complete, so such an advisory (its
+  summary and references repeat on every affected row) could make one page
+  larger than the 32 MiB a client accepts; the client rejected it with
+  `response too large` and the local database never advanced. The server now
+  bounds the vulnerability rows of every sync page by an estimated 12 MiB as
+  well as by the row `limit`: a page ends after the last whole advisory that
+  fits and stays flagged, and an advisory whose rows alone exceed the budget is
+  split over several pages in (ecosystem, name) order behind a new opaque
+  advisory row cursor. Those pages omit `vulnerability_affected_complete`, so
+  the client only upserts them and packages such an advisory no longer lists
+  stay until a full sync; the advisories around it are still replaced. Full
+  exports and legacy delta row pages honor the same budget. An older server
+  rejects the new cursor with `400` if it continues a sequence a new server
+  started, and the next sync starts over.
 - Manual advisory writes and deletes on PostgreSQL use the normalized
   (trimmed) advisory ID throughout. A padded ID such as ` manual:x ` no longer
   leaves both the vulnerability and the malicious record active after a type
@@ -542,7 +602,8 @@
   builds or the single-transaction 050 repair were cancelled, leaving the
   database dirty at that version (049 also with `INVALID` indexes). The
   timeout now bounds connecting, the migration advisory-lock wait and the
-  post-migration version read only; the migrations run until they finish or
+  post-migration version read only; the migrations and the rebuild of
+  `INVALID` or missing concurrently built indexes run until they finish or
   `SIGINT`/`SIGTERM` cancels the run. A cancelled run asks PostgreSQL to
   cancel the running statement instead of dropping the connection, then
   records the failed attempt (with `finished_at`) in `schema_migration_events`
@@ -563,9 +624,10 @@
   start on a schema version mismatch. Read "Upgrade And Rollback" in
   `docs/runbook.md` first; a failed migration other than a 048 prerequisite
   failure leaves the database dirty, and the documented recovery is restoring
-  the pre-upgrade backup. The run has no overall time limit (049 and 050 can
-  take a while on a large catalog); `PACKMON_DB_CONNECT_TIMEOUT` does not need
-  raising for it, and Ctrl-C or `SIGTERM` cancels it.
+  the pre-upgrade backup, except for an interrupted 049 (see below). The run
+  has no overall time limit (index builds and 050 can take a while on a large
+  catalog); `PACKMON_DB_CONNECT_TIMEOUT` does not need raising for it, and
+  Ctrl-C or `SIGTERM` cancels it.
   - 047 widens the ecosystem CHECK constraints for the inventory-only
     `chocolatey` ecosystem. Rolling 047 back removes any `chocolatey` rows
     (none are written by the scan path).
@@ -579,7 +641,10 @@
   - 049 builds two partial indexes over active `malicious_findings` rows with
     `CREATE INDEX CONCURRENTLY`, outside a transaction. It avoids a long
     write lock but can run for a while on large catalogs; check PostgreSQL
-    temporary space and volume headroom before starting.
+    temporary space and volume headroom before starting. If 049 is
+    interrupted, clear its dirty marker
+    (`DELETE FROM schema_migrations WHERE version = 49 AND dirty;`) and rerun
+    migrate; it replaces any `INVALID` index the interrupted run left.
   - 050 tightens the `version_ranges` CHECK constraints and repairs rows that
     fail them. In one transaction it scans `affected_packages` and
     `malicious_findings` to log the failing rows in
@@ -594,6 +659,14 @@
     be re-entered in `/admin/advisories`. The migration reports its counts as
     a PostgreSQL NOTICE; list the repaired rows afterwards with the query in
     "Upgrade And Rollback" in `docs/runbook.md`.
+- Databases already past a concurrent index migration (010, 011, 021, 049),
+  including those already at schema 49 or 50: the next `packmon-server
+  migrate` run rebuilds any `INVALID` or missing index such a migration
+  builds (it needs no pending migration). It is a no-op when every index is
+  valid; to
+  check beforehand, run `SELECT indexrelid::regclass FROM pg_index WHERE NOT
+  indisvalid;`. A rebuild takes as long as the original build, so drain the
+  server first.
 - `docker-compose.server.yml` deployments: the next `up` creates the new
   `<project>_feed-data` volume, so the first feed sync after the upgrade
   re-clones the GHSA and OpenSSF repositories once. A `PACKMON_FEED_DATA_DIR`

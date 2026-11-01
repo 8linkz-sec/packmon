@@ -172,7 +172,20 @@ Packmon's maintained deployment surfaces are intentionally narrow:
   Active malicious-package search uses partial covering indexes so broad and
   severity-filtered searches can aggregate the narrow index entries without
   scanning the wide finding heap. Those indexes are built concurrently by the
-  explicit migration command.
+  explicit migration command. Because an interrupted concurrent build leaves
+  an `INVALID` index that `IF NOT EXISTS` would keep, the migrator drops an
+  `INVALID` index of the same name before every concurrent build of a
+  no-transaction migration, fails the migration (dirty) unless the build left
+  a valid index, and on every migrate run, before any pending migration,
+  rebuilds concurrently any `INVALID` or missing index of an already applied
+  migration (only the index build is rerun; a down migration that drops such
+  an index also lowers the version, so a missing one is never intended; a
+  missing index whose table is gone too is left alone). A
+  failed repair aborts the run with the schema version clean. A
+  dirty migration that only builds indexes concurrently with `IF NOT EXISTS`
+  (049) is retry-safe: migrate still refuses the dirty database but names the
+  retry path (clear its dirty marker, rerun migrate) instead of a backup
+  restore. Dirty state is never cleared automatically.
 - `docker-compose.server.yml` is the self-contained production Compose model
   (no base or override file). It keeps PostgreSQL and `packmon-server` on
   `restart: unless-stopped` while the one-shot `packmon-migrate` and
@@ -733,8 +746,9 @@ startup bounds schema-version and pool-connect checks with
 before HTTP listeners are created. The explicit `packmon-server migrate`
 operator step uses the same timeout to bound its database connection,
 advisory-lock wait, and post-migration version read, but not the migration SQL
-itself: index builds and data repairs on a large catalog run until they finish
-or `SIGINT`/`SIGTERM` cancels the run. A cancelled run asks PostgreSQL to
+itself: index builds (including the rebuild of an `INVALID` or missing
+concurrently built index) and data repairs on a large catalog run until they
+finish or `SIGINT`/`SIGTERM` cancels the run. A cancelled run asks PostgreSQL to
 cancel the running statement, then records the failed attempt and releases the
 advisory lock on a separate short deadline, and the version stays dirty as for
 any other migration failure. Each applied migration also writes an append-only
@@ -1138,10 +1152,28 @@ selects the next changed advisories in ID order after the advisory cursor and
 exports every in-scope affected row of each of them, ordered by advisory ID. A
 page takes advisories while their affected rows fit the `limit`; the first
 advisory always fits, so an advisory with more affected rows than the limit is
-a page of its own and that page holds more rows than the limit, instead of the
-advisory being split. `next_cursor.vulnerabilities_cursor` then carries a
+a page of its own and that page holds more rows than the limit; the row limit
+alone never splits an advisory (only the byte budget below can).
+`next_cursor.vulnerabilities_cursor` then carries a
 versioned advisory cursor (the last advisory ID of the page), and the dataset
-continues only while the page left an advisory for the next one. The server
+continues only while the page left an advisory for the next one. Every page is
+also bounded by bytes: the client rejects a response body above 32 MiB, so the
+server keeps the vulnerability rows of a page within an estimated 12 MiB
+(`db.SyncVulnerabilityPageByteBudget`, an upper bound of their JSON encoding
+with escaping), leaving room for the other datasets of the page. When the next
+advisory no longer fits that budget, the page ends after the last whole
+advisory and stays flagged. When the first advisory of a page alone exceeds
+the budget (an unusually large affected set, whose summary and references
+repeat on every row), the server falls back to splitting that advisory only:
+its pages carry as many of its rows as fit, at least one, in (ecosystem, name)
+order behind a versioned four-part advisory row cursor, and are never flagged,
+so the client only upserts them; the advisory after it is paged whole and
+flagged again. The completeness guarantee therefore never covers a split
+advisory, and local rows that such an advisory no longer lists stay until a
+full sync. A split page that finds the advisory changed after the pinned
+snapshot delivers no further rows of it, and the next delta delivers it again.
+Full exports and the legacy delta row pages honor the same byte budget and
+continue after the last delivered row. The server
 promises that the affected sets of a page are complete, with
 `vulnerability_affected_complete: true`, on every such delta page: the flag
 means that every vulnerability delivered on this page carries its complete
@@ -1171,9 +1203,19 @@ instead of requiring a full sync. Older servers set the field only on a delta
 that fits in one page, servers without the guarantee omit it, and clients that
 do not know it keep upserting rows, so older clients and servers remain
 compatible; a new client against an older server stays upsert-only on every
-multi-page delta. An ecosystem-filtered sync replaces rows only in its
-ecosystems and cannot see an advisory that moved entirely to another ecosystem
-(it has no in-scope affected row left to deliver); an unfiltered sync does.
+multi-page delta. A changed advisory without any affected row left within the
+requested ecosystems (it lost every package, or, on an ecosystem-filtered
+sync, every package in those ecosystems) has no row to deliver, so the page
+query LEFT JOINs the in-scope affected packages: such an advisory takes one
+row of the page's limit, and a flagged page lists its ID in the optional
+`vulnerabilities_without_affected` array instead of a package row. The client
+treats a listed ID as a delivered vulnerability with an empty affected set and
+drops its local rows in the requested ecosystems in that page's transaction;
+rows of other ecosystems stay, and rows the same page delivers for that ID
+win over the list. An ecosystem-filtered sync therefore replaces rows only in
+its ecosystems, including those of an advisory that moved entirely to another
+ecosystem. Unflagged pages never carry the list, older servers omit it, and
+older clients ignore it, so they keep such rows until a full sync.
 Malicious rows are keyed by ID, so a changed row already replaces the local
 one.
 Local scans query those reputation rows through explicit reputation lookup
