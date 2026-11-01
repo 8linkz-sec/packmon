@@ -1,6 +1,10 @@
 package logsafe
 
-import "strings"
+import (
+	"cmp"
+	"slices"
+	"strings"
+)
 
 const redactedValue = "[redacted]"
 
@@ -78,8 +82,10 @@ type secretKey struct {
 	// scheme is set for auth and authorization keys, whose value may start
 	// with a readable scheme (see authSchemes).
 	scheme bool
-	// line is set for cookie keys: a "Cookie:" header value runs to the end
-	// of the line, because it holds ';'-separated pairs.
+	// line is set for the header names Cookie and Set-Cookie (capitalized as
+	// headers are): a "Cookie:" value runs to the end of the line, because
+	// it holds ';'-separated pairs. Lower-case cookie is prose ("invalid
+	// cookie: missing name") and follows the short-word separator rule.
 	line bool
 }
 
@@ -119,7 +125,7 @@ func classifySecretKey(name string) secretKey {
 		}
 	}
 	key.scheme = strings.EqualFold(last, "auth") || hasSuffixFold(last, "authorization")
-	key.line = strings.EqualFold(last, "cookie")
+	key.line = last == "Cookie"
 	return key
 }
 
@@ -248,7 +254,10 @@ func closesQuotedText(msg string, i int) bool {
 // far left a quoted string open, and with which quote character. A key inside
 // an open string ("x password: a" or {"msg":"password=a b"}) ends its value at
 // the string's closing quote (see scanAssignmentValue). Redacted values are
-// skipped, so the quotes of password="a b" never open a string.
+// skipped, so the quotes of password="a b" never open a string. A line break
+// ends any open string, so an unmatched quote in one line of multi-line
+// output does not reach the next. The state is a heuristic: whatever it gets
+// wrong, the baseline scan still redacts (see redactSecretValues).
 type quotedText struct {
 	open byte
 }
@@ -256,6 +265,10 @@ type quotedText struct {
 // observe updates the state for the free-text byte msg[i].
 func (q *quotedText) observe(msg string, i int) {
 	c := msg[i]
+	if c == '\n' || c == '\r' {
+		q.open = 0
+		return
+	}
 	if !isQuote(c) || escapedAt(msg, i) {
 		return
 	}
@@ -267,25 +280,134 @@ func (q *quotedText) observe(msg string, i int) {
 	}
 }
 
-// redactQuotedKeySecrets redacts the values of quoted secret keys in JSON- and
+// span is a byte range [start, end) of a message.
+type span struct {
+	start, end int
+}
+
+// redactSecretsAndPaths replaces the values of secret keys with "[redacted]"
+// and local filesystem paths with "(redacted-path)". It redacts the union of
+// two scans over the same text: the baseline scan (see baselineSecretSpans)
+// and the extended scan (quotedKeySecretSpans, entityQuotedKeySpans, and
+// assignmentSecretSpans). The extended scan reads ambiguous text in ways the
+// baseline does not (a quote that closes a quoted label instead of opening a
+// value), so the union makes every extension add redaction without ever
+// revealing a value the baseline hides. Within each scan the unquoted keys are
+// scanned after the quoted ones, with the values already found masked (see
+// maskSpans), so a quoted value is never cut at a ';' or space by an unquoted
+// assignment. Paths are matched after the secret values, as they always were,
+// once with the baseline values masked and once with all values masked, so a
+// path the baseline redaction exposes to the path patterns is redacted too.
+// Every scan is linear in the length of msg.
+func redactSecretsAndPaths(msg string) string {
+	baselineQuoted := baselineSecretSpans(msg, true)
+	baseline := append(baselineQuoted, baselineSecretSpans(maskSpans(msg, baselineQuoted), false)...)
+
+	quoted := quotedKeySecretSpans(msg)
+	masked := maskSpans(msg, quoted)
+	entity := entityQuotedKeySpans(masked)
+	assigned := assignmentSecretSpans(maskSpans(masked, entity))
+
+	baselineMasked := maskSpans(msg, baseline)
+	paths := append(pathSpans(baselineMasked), pathSpans(maskSpans(baselineMasked, append(quoted, append(entity, assigned...)...)))...)
+	return redactSpans(msg, paths, baseline, quoted, entity, assigned)
+}
+
+// pathSpans returns the local filesystem paths in msg: Windows paths, then
+// Unix paths in msg with the Windows paths masked, as the two patterns ran
+// one after the other.
+func pathSpans(msg string) []span {
+	var spans []span
+	for _, m := range windowsPathPattern.FindAllStringIndex(msg, -1) {
+		spans = append(spans, span{m[0], m[1]})
+	}
+	for _, m := range unixPathPattern.FindAllStringSubmatchIndex(maskSpans(msg, spans), -1) {
+		spans = append(spans, span{m[3], m[1]})
+	}
+	return spans
+}
+
+// maskSpans returns msg with the bytes of spans replaced by NUL bytes. A later
+// scan or path pattern sees a masked value like the "[redacted]" or
+// "(redacted-path)" marker it becomes (no quote, whitespace, backslash, slash,
+// or key character, and no word character at its edges), but at the original
+// offsets, so the spans of all scans share one coordinate system.
+func maskSpans(msg string, spans []span) string {
+	if len(spans) == 0 {
+		return msg
+	}
+	masked := []byte(msg)
+	for _, s := range spans {
+		for i := s.start; i < s.end; i++ {
+			masked[i] = 0
+		}
+	}
+	return string(masked)
+}
+
+// replaceSpans replaces the union of the spans with "[redacted]"; overlapping
+// spans become one marker.
+func replaceSpans(msg string, lists ...[]span) string {
+	return redactSpans(msg, nil, lists...)
+}
+
+// redactSpans replaces the union of the path spans and the secret spans:
+// overlapping spans become one marker, "(redacted-path)" when a path span is
+// among them and "[redacted]" otherwise.
+func redactSpans(msg string, paths []span, secrets ...[]span) string {
+	type marked struct {
+		span
+		path bool
+	}
+	var all []marked
+	for _, s := range paths {
+		all = append(all, marked{s, true})
+	}
+	for _, list := range secrets {
+		for _, s := range list {
+			all = append(all, marked{s, false})
+		}
+	}
+	if len(all) == 0 {
+		return msg
+	}
+	slices.SortFunc(all, func(a, b marked) int { return cmp.Compare(a.start, b.start) })
+	var out strings.Builder
+	copied := 0
+	for i := 0; i < len(all); {
+		start, end, path := all[i].start, all[i].end, all[i].path
+		for i++; i < len(all) && all[i].start < end; i++ {
+			end = max(end, all[i].end)
+			path = path || all[i].path
+		}
+		out.WriteString(msg[copied:start])
+		if path {
+			out.WriteString(redactedPath)
+		} else {
+			out.WriteString(redactedValue)
+		}
+		copied = end
+	}
+	out.WriteString(msg[copied:])
+	return out.String()
+}
+
+// quotedKeySecretSpans returns the values of quoted secret keys in JSON- and
 // dict-style text: "password":"x", 'token': 'x', or \"token\":\"x\" and
 // \\\"token\\\":\\\"x\\\" inside JSON embedded once or more in a JSON string,
 // with optional whitespace around ':' or '='. The key name runs between two
 // equal quotes escaped by the same number of backslashes (see
 // secretKeySeparator), may hold spaces, '/', and ':' ("Client Secret"), and
 // must name a secret (see classifySecretKey); the value may start after any
-// number of escaping backslashes. The value is one quoted string (see
+// odd number of escaping backslashes. The value is one quoted string (see
 // scanQuotedValue), one object or array (see scanStructuredValue), or an
 // unquoted scalar that ends at whitespace or a JSON delimiter, so the
-// neighbouring non-secret fields of an object stay readable. It runs before
-// redactSecretAssignments, which does not match a key followed by a quote, so
-// a quoted value is never cut at a ';' or space by an earlier unquoted
-// assignment.
-func redactQuotedKeySecrets(msg string) string {
-	return redactSecretFields(msg, true)
+// neighbouring non-secret fields of an object stay readable.
+func quotedKeySecretSpans(msg string) []span {
+	return secretFieldSpans(msg, true)
 }
 
-// redactSecretAssignments redacts the values of unquoted secret keys followed
+// assignmentSecretSpans returns the values of unquoted secret keys followed
 // by ':' or '=' (password=x, GITHUB_TOKEN=x, x-api-key: x), by a URL-encoded
 // '=' or ':' (password%3Dx), or, for a command-line flag, by whitespace
 // (--password x, -p x; see flagValueStart). The value runs to the next
@@ -301,8 +423,8 @@ func redactQuotedKeySecrets(msg string) string {
 // a", see quotedText) ends its value at that string's closing quote. An
 // unterminated quote redacts the rest of the message. A backslash escapes any
 // character, a newline included.
-func redactSecretAssignments(msg string) string {
-	return redactSecretFields(msg, false)
+func assignmentSecretSpans(msg string) []span {
+	return secretFieldSpans(msg, false)
 }
 
 // keyQuote describes the quotes around a quoted key: the quote character and
@@ -313,14 +435,13 @@ type keyQuote struct {
 	level int
 }
 
-// redactSecretFields scans msg once, left to right, for key names followed by
-// a separator and replaces the value of every secret key with "[redacted]".
-// Each key-name run is examined once and each redacted value is skipped as a
-// whole, so the scan is linear in the length of msg.
-func redactSecretFields(msg string, quotedKeys bool) string {
-	var out strings.Builder
+// secretFieldSpans scans msg once, left to right, for key names followed by a
+// separator and returns the value of every secret key. Each key-name run is
+// examined once and each value found is skipped as a whole, so the scan is
+// linear in the length of msg.
+func secretFieldSpans(msg string, quotedKeys bool) []span {
+	var spans []span
 	var text quotedText
-	copied := 0
 	for i := 0; i < len(msg); {
 		keyEnd := keyRunEnd(msg, i, quotedKeys)
 		if keyEnd == i {
@@ -336,16 +457,10 @@ func redactSecretFields(msg string, quotedKeys bool) string {
 			i = keyEnd
 			continue
 		}
-		out.WriteString(msg[copied:valueStart])
-		out.WriteString(redactedValue)
-		copied = valueEnd
+		spans = append(spans, span{valueStart, valueEnd})
 		i = valueEnd
 	}
-	if copied == 0 {
-		return msg
-	}
-	out.WriteString(msg[copied:])
-	return out.String()
+	return spans
 }
 
 // keyRunEnd returns the end of the key name that starts at msg[i], or i when
@@ -586,21 +701,26 @@ func isBareNumber(value string) bool {
 
 // scanQuotedKeyValue returns the end of the value of a quoted secret key that
 // starts at i, or i when there is none. The key's quote character escaped by
-// fewer backslashes than the key's own quotes closes the string the key is
-// embedded in, so an unquoted scalar ends before it.
+// fewer backslashes than the key's own quotes, followed by a JSON delimiter,
+// whitespace, or the end, closes the string the key is embedded in, so an
+// unquoted scalar ends before it (see closesEmbeddedString).
 func scanQuotedKeyValue(msg string, i int, quote keyQuote) int {
 	if end, ok := scanLeadingQuotedOrStructured(msg, i, quote); ok {
 		return end
 	}
-	j, run := i, 0
+	j, run, checkedUntil := i, 0, 0
 	for ; j < len(msg); j++ {
 		c := msg[j]
 		if c == '\\' {
 			run++
 			continue
 		}
-		if c == quote.char && run < quote.level {
-			return j - run
+		if c == quote.char && run < quote.level && j >= checkedUntil {
+			closes, next := closesEmbeddedStringAt(msg, j)
+			if closes {
+				return j - run
+			}
+			checkedUntil = next
 		}
 		if run%2 == 0 && (isSpace(c) || strings.IndexByte(",}]", c) >= 0 ||
 			(c == ';' || c == '&') && endsValueAfter(msg, j+1)) {
@@ -614,12 +734,16 @@ func scanQuotedKeyValue(msg string, i int, quote keyQuote) int {
 // scanAssignmentValue returns the end of the value of an unquoted secret key
 // that starts at i, or i when there is none. A key inside a quoted string of
 // the free text (enclosing, or 0) ends its value at that string's closing
-// quote instead of opening a quoted segment: the label in `"Password:"
-// PGPASSWORD=x` has an empty value, and the next key is still found. A quote
-// of the other kind inside such a string (the apostrophe in "password: it's")
-// opens a segment that ends at the latest at the enclosing closing quote.
+// quote instead of opening a quoted segment. The value is empty only for a
+// label, whose separator the closing quote follows after nothing but
+// whitespace and which whitespace or the end follows (`"Password:"
+// PGPASSWORD=x`, `"passwd: " next`), so the next key is still found; any
+// other value that starts with the enclosing quote takes it as a quoted
+// segment. A quote of the other kind inside such a string (the
+// apostrophe in "password: it's") opens a segment that ends at the latest at
+// the enclosing closing quote.
 func scanAssignmentValue(msg string, i int, enclosing byte) int {
-	if enclosing != 0 && i < len(msg) && msg[i] == enclosing && closesQuotedText(msg, i) {
+	if enclosing != 0 && i < len(msg) && msg[i] == enclosing && endsLabel(msg, i) {
 		return i
 	}
 	j := i
@@ -631,7 +755,7 @@ func scanAssignmentValue(msg string, i int, enclosing byte) int {
 	for j < len(msg) {
 		c := msg[j]
 		switch {
-		case enclosing != 0 && c == enclosing && closesQuotedText(msg, j):
+		case enclosing != 0 && c == enclosing && j > i && closesQuotedText(msg, j):
 			return j
 		case isQuote(c):
 			end, closed := scanValueSegment(msg, j+1, c, enclosing)
@@ -653,6 +777,20 @@ func scanAssignmentValue(msg string, i int, enclosing byte) int {
 		}
 	}
 	return j
+}
+
+// endsLabel reports whether the quote at msg[i] closes a quoted label: only
+// whitespace separates it from the ':' or '=' before it, and whitespace or the
+// end follows it.
+func endsLabel(msg string, i int) bool {
+	if i+1 < len(msg) && !isSpace(msg[i+1]) {
+		return false
+	}
+	j := i - 1
+	for j >= 0 && isSpace(msg[j]) {
+		j--
+	}
+	return j >= 0 && (msg[j] == ':' || msg[j] == '=')
 }
 
 // scanValueSegment returns the end of a quoted segment of an unquoted value
@@ -701,12 +839,15 @@ func scanLineValue(msg string, i int, enclosing byte) int {
 }
 
 // scanLeadingQuotedOrStructured scans a value that starts at i with a quoted
-// string (after any number of escaping backslashes) or with an object or
-// array, and returns its end. quote is the key's quoting (see
-// scanStructuredValue): the key's quote character escaped by fewer
-// backslashes than the key's own quotes does not open the value, it closes the
-// string the key is embedded in, so the value is empty (the key was cut off
-// after its separator) and must not pair that quote with the next one.
+// string (unescaped, or after an odd number of escaping backslashes: an even
+// number escapes only themselves) or with an object or array, and returns its
+// end. quote is the key's quoting (see scanStructuredValue): the key's quote
+// character escaped by fewer backslashes than the key's own quotes and
+// followed by a JSON delimiter, whitespace, or the end does not open the
+// value, it closes the string the key is embedded in, so the value is empty
+// (the key was cut off after its separator) and that quote is not paired with
+// the next one. Any other such quote opens the value as before, so ambiguous
+// text errs toward redaction.
 func scanLeadingQuotedOrStructured(msg string, i int, quote keyQuote) (int, bool) {
 	if i == len(msg) {
 		return 0, false
@@ -718,13 +859,36 @@ func scanLeadingQuotedOrStructured(msg string, i int, quote keyQuote) (int, bool
 	for j < len(msg) && msg[j] == '\\' {
 		j++
 	}
-	if j < len(msg) && msg[j] == quote.char && j-i < quote.level {
+	if j < len(msg) && msg[j] == quote.char && j-i < quote.level && closesEmbeddedString(msg, j) {
 		return i, true
+	}
+	if j < len(msg) && isQuote(msg[j]) && (j-i)%2 == 0 && j > i {
+		return 0, false
 	}
 	if j < len(msg) && isQuote(msg[j]) {
 		return scanQuotedValue(msg, j+1, msg[j], j-i, len(msg)), true
 	}
 	return 0, false
+}
+
+// closesEmbeddedString reports whether the quote at msg[i] is followed, after
+// any further backslashes and quotes (the closing quotes of the less escaped
+// strings around it, as in \"\\"), by a JSON delimiter (',', '}', ']'),
+// whitespace, or the end, as the closing quote of a string is.
+func closesEmbeddedString(msg string, i int) bool {
+	closes, _ := closesEmbeddedStringAt(msg, i)
+	return closes
+}
+
+// closesEmbeddedStringAt is closesEmbeddedString that also returns where the
+// run of backslashes and quotes after msg[i] ends; every quote before that
+// position gets the same answer.
+func closesEmbeddedStringAt(msg string, i int) (bool, int) {
+	j := i + 1
+	for j < len(msg) && (msg[j] == '\\' || isQuote(msg[j])) {
+		j++
+	}
+	return j == len(msg) || isSpace(msg[j]) || strings.IndexByte(",}]", msg[j]) >= 0, j
 }
 
 // scanQuotedValue returns the end of a quoted string whose content starts at

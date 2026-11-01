@@ -10,6 +10,7 @@ import (
 
 const (
 	redactedURL      = "(redacted-url)"
+	redactedPath     = "(redacted-path)"
 	truncationMarker = "...[truncated]"
 	unmatchedRoute   = "(unmatched-route)"
 )
@@ -93,12 +94,7 @@ func RedactDiagnosticMessage(raw string) string {
 	msg = redactPrivateKeyBlocks(msg)
 	msg = httpURLPattern.ReplaceAllStringFunc(msg, redactURLInMessage)
 	msg = redactBearerTokens(msg)
-	msg = redactQuotedKeySecrets(msg)
-	msg = redactEntityQuotedKeySecrets(msg)
-	msg = redactSecretAssignments(msg)
-	msg = windowsPathPattern.ReplaceAllString(msg, "(redacted-path)")
-	msg = unixPathPattern.ReplaceAllString(msg, "${1}(redacted-path)")
-	return msg
+	return redactSecretsAndPaths(msg)
 }
 
 // BoundedValue strips control characters, collapses whitespace, and truncates

@@ -14,16 +14,24 @@ var (
 	// spans spaces and line breaks, so no key=value scan can bound it.
 	privateKeyBlockPattern = regexp.MustCompile(`(?is)-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----|\z)`)
 
-	bearerTokenPattern = regexp.MustCompile(`(?i)\bBearer\s+([A-Za-z0-9._~+/=-]+)`)
+	// longBearerTokenPattern is the baseline Bearer rule (tokens of
+	// minBearerTokenLen or more characters); bearerTokenPattern then catches
+	// the shorter tokens left behind.
+	longBearerTokenPattern = regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}`)
+	bearerTokenPattern     = regexp.MustCompile(`(?i)\bBearer\s+([A-Za-z0-9._~+/=-]+)`)
 )
 
-// bearerProseWords are words that follow "Bearer" in prose ("missing Bearer
-// token", `Bearer realm="x"`) rather than a credential, so they stay readable.
+// bearerProseWords are words shorter than minBearerTokenLen that follow
+// "Bearer" in prose ("missing Bearer token", `Bearer realm="x"`) rather than
+// a credential, so they stay readable.
 var bearerProseWords = []string{
-	"token", "tokens", "auth", "authentication", "authorization", "scheme",
-	"realm", "header", "prefix", "credential", "credentials", "required",
-	"missing", "invalid", "expected",
+	"token", "tokens", "auth", "scheme", "realm", "header", "prefix",
+	"missing", "invalid",
 }
+
+// minBearerTokenLen is the length from which the text after "Bearer" is always
+// redacted, prose word or not.
+const minBearerTokenLen = 8
 
 // redactPrivateKeyBlocks replaces every PEM private key block with a marker.
 func redactPrivateKeyBlocks(msg string) string {
@@ -34,14 +42,20 @@ func redactPrivateKeyBlocks(msg string) string {
 }
 
 // redactBearerTokens redacts the credential after "Bearer", whatever its
-// length, unless it is a word of prose (see bearerProseWords).
+// length; a shorter token than minBearerTokenLen stays readable only when it
+// is a word of prose (see bearerProseWords). The long tokens are redacted
+// first with the baseline rule, so a short-token match ("Bearer Bearer x")
+// cannot consume the "Bearer" in front of a long token.
 func redactBearerTokens(msg string) string {
+	msg = longBearerTokenPattern.ReplaceAllString(msg, "Bearer "+redactedValue)
 	return bearerTokenPattern.ReplaceAllStringFunc(msg, func(match string) string {
 		token := bearerTokenPattern.FindStringSubmatch(match)[1]
-		word := strings.TrimRight(token, "=")
-		for _, prose := range bearerProseWords {
-			if strings.EqualFold(word, prose) {
-				return match
+		if len(token) < minBearerTokenLen {
+			word := strings.TrimRight(token, "=")
+			for _, prose := range bearerProseWords {
+				if strings.EqualFold(word, prose) {
+					return match
+				}
 			}
 		}
 		return "Bearer " + redactedValue
@@ -76,22 +90,21 @@ func entityQuoteAt(msg string, i int) (byte, int) {
 	return 0, 0
 }
 
-// redactEntityQuotedKeySecrets redacts the values of secret keys quoted with
-// HTML character references, as in HTML-escaped JSON
+// entityQuotedKeySpans returns the values of secret keys quoted with HTML
+// character references, as in HTML-escaped JSON
 // (&quot;password&quot;:&quot;x&quot;, &#34;token&#34;: &#34;x&#34;). The key
-// name follows the rules of redactQuotedKeySecrets. The value is one
+// name follows the rules of quotedKeySecretSpans. The value is one
 // entity-quoted string up to the matching entity quote that no backslash
 // escapes, one object or array up to its balanced closing bracket (ignoring
 // brackets inside entity-quoted strings), or a scalar that ends at whitespace,
 // ',', '}', ']', or '&'. An unterminated string, or an unbalanced structure or
 // one larger than maxSecretStructureBytes, redacts the rest of the message.
 // Like the other scans it is linear in the length of msg.
-func redactEntityQuotedKeySecrets(msg string) string {
+func entityQuotedKeySpans(msg string) []span {
 	if !strings.Contains(msg, "&") {
-		return msg
+		return nil
 	}
-	var out strings.Builder
-	copied := 0
+	var spans []span
 	for i := 0; i < len(msg); {
 		q, n := entityQuoteAt(msg, i)
 		if n == 0 {
@@ -130,20 +143,14 @@ func redactEntityQuotedKeySecrets(msg string) string {
 			i = keyEnd
 			continue
 		}
-		out.WriteString(msg[copied:valueStart])
-		out.WriteString(redactedValue)
-		copied = valueEnd
+		spans = append(spans, span{valueStart, valueEnd})
 		i = valueEnd
 	}
-	if copied == 0 {
-		return msg
-	}
-	out.WriteString(msg[copied:])
-	return out.String()
+	return spans
 }
 
 // scanEntityQuotedValue returns the end of the value that starts at msg[i]
-// after an entity-quoted key (see redactEntityQuotedKeySecrets).
+// after an entity-quoted key (see entityQuotedKeySpans).
 func scanEntityQuotedValue(msg string, i int) int {
 	if i == len(msg) {
 		return i

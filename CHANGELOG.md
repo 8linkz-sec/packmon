@@ -128,9 +128,17 @@
   messages:
   - A quoted label with an assignment inside it (`"x password: a"
     PGPASSWORD:"0 s 0"`) no longer leaves the tail of the next quoted value
-    readable: the scan now tracks the quoted strings of the free text, so the
-    label's closing quote ends the label's value. The same pairing of a quoted
-    key cut off inside escaped JSON (`\\\"token\\\":" x:"..."`) is fixed too.
+    readable. A new scan tracks the quoted strings of the free text, so the
+    label's closing quote ends the label's value and the next value is found
+    whole; the same applies to a quoted key cut off inside escaped JSON
+    (`\\\"token\\\":" x:"..."`) and to an escaped backslash before a closing
+    quote (`"token:\\" x:{...}`). Because quote tracking is a heuristic, the
+    redaction is now the union of the previous scan and the new one: a value
+    either finds is redacted, so nothing the previous scan hid can become
+    readable; where they disagree, the redaction runs from the first value to
+    the end of the last. Local paths are matched against the text as either
+    scan leaves it, and Bearer tokens of eight or more characters are still
+    redacted before the new short-token rule runs.
   - A PEM private key (`-----BEGIN ... PRIVATE KEY-----` through its END
     marker, or the end of the message) is replaced with
     `(redacted-private-key)`; an unquoted value used to stop at the first
@@ -144,10 +152,12 @@
     last name component, `pass`, `pw`, `auth`, `cookie`, and `session`
     (`DB_PASS=x`, `basic_auth=x`; unquoted they need `=` or a `:` without
     following whitespace, so `admin auth: <error>` stays readable).
-    `Cookie:` and `Set-Cookie:` values run to the end of the line.
+    `Cookie:` and `Set-Cookie:` header values run to the end of the line;
+    lower-case `cookie: <error>` stays readable.
   - `Authorization: Basic x`, an `Authorization` credential without a
     scheme, and Bearer tokens shorter than eight characters are redacted;
-    the scheme stays readable.
+    the scheme stays readable, and so do short prose words after `Bearer`
+    (`Bearer token`, `Bearer realm=`).
   - Quoted keys with spaces, `/`, or `:` (`"Client Secret"`, `"auth/token"`,
     `"db:password"`), keys quoted with HTML character references
     (`&quot;password&quot;`), URL-encoded separators (`password%3Dx`), and
@@ -156,8 +166,6 @@
   - An unquoted value no longer ends at a `;` or `&` inside it
     (`password=a;b` leaked `b`); the delimiter ends it only before
     whitespace, the end, or the next `key=` pair.
-  - A quote after an even number of backslashes (`\\"password=x"`) no longer
-    counts as escaped, which used to redact the rest of the message.
 - The CLI no longer creates its local SQLite database (and its WAL and
   journal files) in the working directory when the home directory cannot be
   resolved. The default `~/.packmon/db` used to fall back to `./.packmon/db`,

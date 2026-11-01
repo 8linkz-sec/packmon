@@ -1,6 +1,7 @@
 package logsafe
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -25,12 +26,26 @@ func assertExact(t *testing.T, cases map[string]string) {
 	}
 }
 
+// assertExtendedAssignments checks the exact result of the extended scan of
+// unquoted keys alone (see assignmentSecretSpans), which the union with the
+// baseline scan can hide behind wider redaction.
+func assertExtendedAssignments(t *testing.T, cases map[string]string) {
+	t.Helper()
+	for raw, want := range cases {
+		if got := replaceSpans(raw, assignmentSecretSpans(raw)); got != want {
+			t.Errorf("assignmentSecretSpans(%q) =\n%q\nwant\n%q", raw, got, want)
+		}
+	}
+}
+
 // TestRedactDiagnosticMessageTracksQuotedFreeText covers AUDIT-064: an
 // unquoted key in the middle of a quoted label ("x password: a") used to treat
 // the label's closing quote as the opening quote of a value segment, which then
 // paired with the opening quote of the next value and left that value's tail
-// readable. The scan now tracks the quoted strings of the free text, so the
-// label's closing quote ends the label's value.
+// readable. The extended scan tracks the quoted strings of the free text, so
+// the label's closing quote ends the label's value and the next value is found
+// whole; the baseline scan still redacts what it always did, so the union
+// redacts from the label's value to the end of the next value.
 func TestRedactDiagnosticMessageTracksQuotedFreeText(t *testing.T) {
 	t.Parallel()
 
@@ -38,19 +53,17 @@ func TestRedactDiagnosticMessageTracksQuotedFreeText(t *testing.T) {
 		{
 			raw:    `"x password: a" PGPASSWORD:"0 s 0"`,
 			leaked: []string{"s 0"},
-			want:   `"x password: [redacted]" PGPASSWORD:[redacted]`,
+			want:   `"x password: [redacted]`,
 		},
 		{
-			raw:    `'x password: a' PGPASSWORD:'0 qt-secret-1 0'`,
+			raw:    `'x password: a' PGPASSWORD:'0 qt-secret-1 0' next`,
 			leaked: []string{"qt-secret-1"},
-			want:   `'x password: [redacted]' PGPASSWORD:[redacted]`,
+			want:   `'x password: [redacted] next`,
 		},
 		{
-			// An apostrophe inside the double-quoted label does not open a
-			// value segment that runs past the label's closing quote.
 			raw:    `"x password: it's" PGPASSWORD:'0 qt-secret-2 0'`,
 			leaked: []string{"qt-secret-2"},
-			want:   `PGPASSWORD:[redacted]`,
+			want:   `"x password: [redacted]`,
 		},
 		{
 			raw:    `{"msg":"login password=qt-secret-3 failed","user":"bob"}`,
@@ -58,48 +71,121 @@ func TestRedactDiagnosticMessageTracksQuotedFreeText(t *testing.T) {
 			want:   `{"msg":"login password=[redacted] failed","user":"bob"}`,
 		},
 		{
-			// A quoted value of an unquoted key is not mistaken for a string
-			// the key sits in: password="a b" is redacted whole.
 			raw:    `user="a b" password="qt c qt-secret-4" host=db`,
 			leaked: []string{"qt c", "qt-secret-4"},
 			want:   `user="a b" password=[redacted] host=db`,
 		},
 		{
-			// An apostrophe inside a word does not open a quoted string, so the
-			// libpq-quoted value after it is still redacted whole.
 			raw:    `can't connect: host=db password='qt d qt-secret-5' sslmode=require`,
 			leaked: []string{"qt d", "qt-secret-5"},
 			want:   `host=db password=[redacted] sslmode=require`,
 		},
 		{
-			// A quote followed by a letter does not close the string, it
-			// quotes a segment of the value.
 			raw:    `"x password=ab"qt-secret-6" next`,
 			leaked: []string{"qt-secret-6"},
 			want:   `"x password=[redacted] next`,
 		},
+		{
+			raw:    `\\"password=qt-secret-7" next`,
+			leaked: []string{"qt-secret-7"},
+			want:   `\\"password=[redacted]`,
+		},
 	})
 
-	// The same pairing for a quoted key cut off inside escaped JSON: a quote
-	// less escaped than the key's quotes closes the enclosing string, so it
-	// neither opens the key's value nor ends up inside it.
+	// The extended scan on its own: the label's value ends at the label's
+	// closing quote, an apostrophe inside the label opens no segment past it,
+	// a quoted value of an unquoted key is not mistaken for a string the key
+	// sits in, an apostrophe inside a word opens no string, a quote followed
+	// by a letter quotes a segment of the value, an even number of backslashes
+	// does not escape a quote, and a line break closes an open string.
+	assertExtendedAssignments(t, map[string]string{ //nolint:gosec // fake secret assignments verify redaction.
+		`"x password: a" PGPASSWORD:"0 s 0"`:                  `"x password: [redacted]" PGPASSWORD:[redacted]`,
+		`'x password: a' PGPASSWORD:'0 s 0' next`:             `'x password: [redacted]' PGPASSWORD:[redacted] next`,
+		`"x password: it's" PGPASSWORD:'0 s 0'`:               `"x password: [redacted]" PGPASSWORD:[redacted]`,
+		`user="a b" password="c d" host=db`:                   `user="a b" password=[redacted] host=db`,
+		`can't connect: password='c d' sslmode=require`:       `can't connect: password=[redacted] sslmode=require`,
+		`"x password=ab"cd" next`:                             `"x password=[redacted] next`,
+		`\\"password=ab" next`:                                `\\"password=[redacted]" next`,
+		`\"password=ab next`:                                  `\"password=[redacted] next`,
+		"missing \" in line 3\npassword=\"a b\" next":         "missing \" in line 3\npassword=[redacted] next",
+		`"x password=a'b c'd" next`:                           `"x password=[redacted]" next`,
+		`"x password=a'b\'c d'e" n`:                           `"x password=[redacted]" n`,
+		`"x password=a'b c`:                                   `"x password=[redacted]`,
+		`"x password=a'b\" c'd" next`:                         `"x password=[redacted]" next`,
+		`error "token:\\" credential:{"a": ["0", "b c"]} "0"`: `error "token:[redacted]" credential:[redacted] "0"`,
+	})
+}
+
+// TestRedactDiagnosticMessageNeverRevealsBaselineRedactions pins inputs on
+// which an extended-scan interpretation (an unmatched quote taken to open a
+// string, a less escaped quote taken to close one) would reveal a value the
+// baseline scan redacts. The union with the baseline scan keeps them hidden.
+func TestRedactDiagnosticMessageNeverRevealsBaselineRedactions(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]string{ //nolint:gosec // fake secret-bearing text verifies redaction.
+		// A quote less escaped than an escaped key's quotes that is not
+		// followed by a delimiter opens the value.
+		`{\"token\":"ghp_zqsecret"}`:                     `{\"token\":[redacted]}`,
+		`log: {\"api_key\": "zqabc", \"user\": \"bob\"}`: `log: {\"api_key\": [redacted], \"user\": \"bob\"}`,
+		`{\\\"token\\\":\"zqabc\"}`:                      `{\\\"token\\\":[redacted]}`,
+		`\"token\":zqab"zqcd ef`:                         `\"token\":[redacted] ef`,
+		// An unmatched quote earlier in the text does not cut or empty a
+		// later value.
+		`unmatched " here password="!zqabc"`:                   `unmatched " here password=[redacted]`,
+		"stderr: missing \" in line 3\npassword=\"#zq1abc\"":   "stderr: missing \" in line 3\npassword=[redacted]",
+		`unmatched " here token: "!zqabc"`:                     `unmatched " here token: [redacted]`,
+		`unmatched " here password=" zq abc"`:                  `unmatched " here password=[redacted]`,
+		`unmatched " here password=zqsec"!zqret`:               `unmatched " here password=[redacted]`,
+		"stderr: missing \" in line 3\nPGPASSWORD=zqab\".zqcd": "stderr: missing \" in line 3\nPGPASSWORD=[redacted]",
+		`(see 'docs) password=zqab'-zqcd`:                      `(see 'docs) password=[redacted]`,
+		`(see 'docs) password="zq a' zqb"`:                     `(see 'docs) password=[redacted]`,
+		`he said "hello password=zqab"!zqcd`:                   `he said "hello password=[redacted]`,
+		// A value that starts with the quote of the string the key seems to
+		// sit in is empty only for a label ("Password:" next), not for a
+		// flag value or a quote followed by more text.
+		`unmatched " here --password "!zqabc"`: `unmatched " here --password [redacted]`,
+		// A path the baseline redaction exposes to the path patterns stays
+		// redacted although the extended scan redacts a separator of it
+		// (corpus entry 8c2ac8caa769b5b8).
+		`A:\0\!"Apikey:0":\""ZQPLANTED0`: `(redacted-path)`,
+		// A less escaped quote followed by the closing quotes of the strings
+		// around it closes the embedded string (corpus entry
+		// 0a97657c18d0c2f4).
+		"error \"\\\\\\\"token\\\\\\\":\\\"\\\\\" db.password:\t'\" zqsecret \"' \"0\"": "error \"\\\\\\\"token\\\\\\\":[redacted] \"0\"",
+		`"x password: "zq abc" next`: `"x password: [redacted] next`,
+	}
+	for raw, want := range cases {
+		got := RedactDiagnosticMessage(raw)
+		if strings.Contains(got, "zq") {
+			t.Errorf("RedactDiagnosticMessage(%q) = %q, leaked a zq fragment", raw, got)
+		}
+		if got != want {
+			t.Errorf("RedactDiagnosticMessage(%q) =\n%q\nwant\n%q", raw, got, want)
+		}
+	}
+
+	// A quoted key cut off after its separator inside escaped JSON: the less
+	// escaped quote followed by whitespace closes the enclosing string, so the
+	// extended scan finds the key after it and redacts its whole value, which
+	// the baseline scan cut off; the union redacts from the cut-off key on.
 	assertRedactionCases(t, []redactionCase{
 		{
 			raw:    `error "\\\"token\\\":" credential:"0 qt-secret-9 0" "0"`,
 			leaked: []string{"qt-secret-9"},
-			want:   `credential:[redacted] "0"`,
+			want:   `[redacted] "0"`,
+		},
+		{
+			// The fuzz input of corpus entry 89c6a23c17bdad2d: an escaped
+			// backslash before a closing quote does not open an escaped value
+			// that swallows the next key.
+			raw:    "error \"token:\\\\\" credential:\t{\"a\":\t[\"0\", {\"b\":\t\"PLANTEDSECRET\"}], \"c\":\t\"0\"} \"0\"",
+			leaked: []string{"PLANTEDSECRET"},
+			want:   `error "token:[redacted] "0"`,
 		},
 	})
 	assertExact(t, map[string]string{ //nolint:gosec // fake secret-bearing JSON verifies redaction.
-		`{"body":"{\"token\":qt-secret-10","user":"bob"}`: `{"body":"{\"token\":[redacted]","user":"bob"}`,
-	})
-
-	// A quote after an even number of backslashes is unescaped; it used to
-	// count as escaped when only one backslash was checked, which redacted the
-	// rest of the message (the safe direction).
-	assertExact(t, map[string]string{
-		`\\"password=qt-secret-7" next`: `\\"password=[redacted]" next`,
-		`\"password=qt-secret-8 next`:   `\"password=[redacted] next`,
+		`{"body":"{\"token\":qt-secret-10","user":"bob"}`: `{"body":"{\"token\":[redacted],"user":"bob"}`,
 	})
 }
 
@@ -181,7 +267,7 @@ func TestRedactDiagnosticMessageRedactsMoreSecretKeyNames(t *testing.T) {
 			leaked: []string{"kn-secret-3"},
 			want:   `AccountName=acct;AccountKey=[redacted];EndpointSuffix=core.windows.net`,
 		},
-		{raw: `SharedAccessKey=kn-secret-4= next`, leaked: []string{"kn-secret-4"}, want: `SharedAccessKey=[redacted] next`},
+		{raw: `SharedAccessKey=kn-sak-4= next`, leaked: []string{"kn-sak-4"}, want: `SharedAccessKey=[redacted] next`},
 		{raw: `{"signing_key":"kn-secret-5"}`, leaked: []string{"kn-secret-5"}, want: `{"signing_key":[redacted]}`},
 		{raw: `encryption_key=kn-secret-6`, leaked: []string{"kn-secret-6"}, want: `encryption_key=[redacted]`},
 		{raw: `MASTER_KEY: kn-secret-7`, leaked: []string{"kn-secret-7"}, want: `MASTER_KEY: [redacted]`},
@@ -230,12 +316,19 @@ func TestRedactDiagnosticMessageRedactsAuthorizationCredentials(t *testing.T) {
 		{raw: `map[Authorization:[Basic az-secret-4]]`, leaked: []string{"az-secret-4"}, want: `map[Authorization:[redacted]`},
 	})
 
-	// Words that commonly follow "Bearer" in prose are not credentials.
+	// Short words that commonly follow "Bearer" in prose are not
+	// credentials; from eight characters on everything after "Bearer" is
+	// redacted, prose or not.
 	assertUnchanged(t, []string{
 		"missing Bearer token",
 		"invalid bearer auth scheme",
 		`WWW-Authenticate: Bearer realm="packmon"`,
-		"expected Bearer authentication",
+	})
+	assertExact(t, map[string]string{
+		"expected Bearer authentication": "expected Bearer [redacted]",
+		// A short-token match must not consume the "Bearer" in front of a
+		// long token (corpus entry 63e81639636a3115).
+		"BeArer BeArer ZQPLANTED0": "Bearer [redacted] [redacted]",
 	})
 }
 
@@ -380,6 +473,9 @@ func TestRedactDiagnosticMessageKeepsCommonTextReadable(t *testing.T) {
 		`pass 2 of 3 complete`,
 		`postgres: get admin auth: connection refused`,
 		`session: expired`,
+		`read session cookie: http: named cookie not present`,
+		`invalid cookie: missing name`,
+		`set-cookie: rejected by browser policy`,
 		`bypass=true compass=north passage=x passport=y`,
 		`auth_mode=basic auth_enabled=true cookie_name=sid session_count=3 pass_count=4 pw_hint=x`,
 		`primary_key=id public_key=ssh-ed25519 foreign_key=x keyboard=de keys=3`,
@@ -395,12 +491,14 @@ func TestRedactDiagnosticMessageLinearOnRepeatedKeys(t *testing.T) {
 	t.Parallel()
 
 	for unit, forbidden := range map[string]string{
-		`"x password: a" `:         `password: a`,
-		`--password `:              "",
-		`&quot;token&quot;:&quot;`: "",
-		`password=a;b&c%26d `:      `a;b`,
-		`'a password=b`:            `password=b`,
-		`Authorization: Basic `:    "",
+		`"x password: a" `:          `password: a`,
+		`--password `:               "",
+		`&quot;token&quot;:&quot;`:  "",
+		`password=a;b&c%26d `:       `a;b`,
+		`'a password=b`:             `password=b`,
+		`Authorization: Basic `:     "",
+		`\"token\":a\"\"\"\"x`:      "",
+		`C:\a\b\c password=x /a/b `: "",
 	} {
 		raw := strings.Repeat(unit, 20000)
 		if got := RedactDiagnosticMessage(raw); forbidden != "" && strings.Contains(got, forbidden) {
@@ -426,13 +524,6 @@ func TestRedactDiagnosticMessageSecretFormEdgeCases(t *testing.T) {
 		`see auth:` + "\n":             `see auth:`,
 		`tokens=+5 tokens=1. tokens=-`: `tokens=+5 tokens=1. tokens=[redacted]`,
 		`tokens=1..2 tokens=_1`:        `tokens=[redacted] tokens=[redacted]`,
-		// A segment of the other quote kind inside a quoted string closes
-		// normally, keeps escaped characters, and runs to the end when it
-		// never closes.
-		`"x password=a'b c'd" next`:   `"x password=[redacted]" next`,
-		`"x password=a'b\'c d'e" n`:   `"x password=[redacted]" n`,
-		`"x password=a'b c`:           `"x password=[redacted]`,
-		`"x password=a'b\" c'd" next`: `"x password=[redacted]" next`,
 		// A cookie header ends at a line break, a carriage return, or the
 		// closing quote of the string it sits in; an escaped line break
 		// continues it.
@@ -447,5 +538,66 @@ func TestRedactDiagnosticMessageSecretFormEdgeCases(t *testing.T) {
 		`&quot;token&quot;:{&quot;a&quot;:&quot;}&quot;},&quot;n&quot;:1`: `&quot;token&quot;:[redacted],&quot;n&quot;:1`,
 		`&quot;token&quot; x &quot;pwd&apos;:x`:                           `&quot;token&quot; x &quot;pwd&apos;:x`,
 		`&quot;tokens&quot;:7`:                                            `&quot;tokens&quot;:7`,
+	})
+}
+
+// baselineBearerTokenPattern is the Bearer rule of the baseline: tokens of
+// eight or more characters.
+var baselineBearerTokenPattern = regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}`)
+
+// baselineRedactDiagnosticMessage is RedactDiagnosticMessage as it stood
+// before the extended scan: URL, Bearer, baseline secret-field, and path
+// redaction.
+func baselineRedactDiagnosticMessage(raw string) string {
+	msg := strings.TrimSpace(raw)
+	if msg == "" {
+		return ""
+	}
+	msg = httpURLPattern.ReplaceAllStringFunc(msg, redactURLInMessage)
+	msg = baselineBearerTokenPattern.ReplaceAllString(msg, "Bearer [redacted]")
+	quoted := baselineSecretSpans(msg, true)
+	msg = replaceSpans(msg, quoted, baselineSecretSpans(maskSpans(msg, quoted), false))
+	msg = windowsPathPattern.ReplaceAllString(msg, "(redacted-path)")
+	return unixPathPattern.ReplaceAllString(msg, "${1}(redacted-path)")
+}
+
+// FuzzRedactDiagnosticMessageKeepsBaselineRedactions plants a value between
+// two fuzzed halves of a message and checks that RedactDiagnosticMessage
+// hides it whenever the baseline redaction does: no extension may reveal a
+// value the baseline hides.
+func FuzzRedactDiagnosticMessageKeepsBaselineRedactions(f *testing.F) {
+	for _, seed := range [][2]string{
+		{`{\"token\":"`, `"}`},
+		{`log: {\"api_key\": "`, `", \"user\": \"bob\"}`},
+		{`{\\\"token\\\":\"`, `\"}`},
+		{`\"token\":ab"`, ` ef`},
+		{`unmatched " here password="!`, `"`},
+		{"stderr: missing \" in line 3\npassword=\"#", `"`},
+		{`unmatched " here token: "!`, `"`},
+		{`unmatched " here password=" `, ` abc"`},
+		{`unmatched " here password=sec"!`, ``},
+		{"stderr: missing \" in line 3\nPGPASSWORD=ab\".", ``},
+		{`(see 'docs) password=ab'-`, ``},
+		{`(see 'docs) password="a' `, `"`},
+		{`he said "hello password=ab"!`, ``},
+		{`"x password: a" PGPASSWORD:"0 `, ` 0"`},
+		{`prompt "passwd: " PGPASSWORD:"0 `, ` 0"`},
+		{`error "token:\\" credential:{"b": "`, `"}`},
+		{`Authorization: Bearer `, ` next`},
+	} {
+		f.Add(seed[0], seed[1])
+	}
+	f.Fuzz(func(t *testing.T, before, after string) {
+		const planted = "ZQPLANTED"
+		if strings.Contains(before+"\x00"+after, "ZQ") {
+			t.Skip("fuzzed text already contains the planted marker")
+		}
+		raw := before + planted + after
+		if strings.Contains(baselineRedactDiagnosticMessage(raw), planted) {
+			return
+		}
+		if got := RedactDiagnosticMessage(raw); strings.Contains(got, planted) {
+			t.Fatalf("RedactDiagnosticMessage(%q) = %q reveals the value the baseline redacts", raw, got)
+		}
 	})
 }
