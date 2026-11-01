@@ -111,7 +111,7 @@ func logFatalError(stderrPrefix, message string, err error) {
 		)
 		return
 	}
-	fmt.Fprintf(os.Stderr, "%s: %v\n", stderrPrefix, err)
+	fmt.Fprintf(os.Stderr, "%s: %s\n", stderrPrefix, boundedErrorLogValue(err))
 }
 
 // errorLogMaxBytes bounds error values in startup and fatal log records.

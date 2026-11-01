@@ -302,7 +302,7 @@ func (b *backgroundServices) startBackgroundTask(name string, fn func(context.Co
 			if b.logger != nil && !errors.Is(err, context.Canceled) {
 				b.logger.Warn("background startup task failed",
 					slog.String("task", name),
-					slog.String("error", err.Error()),
+					slog.String("error", boundedErrorLogValue(err)),
 				)
 			}
 			return
@@ -496,12 +496,12 @@ func (b *backgroundServices) finishDeferredQueueRestart(oldDone, forward chan er
 	b.removeQueueDoneLocked(forward)
 	b.queueDone = nil
 	if err != nil && !errors.Is(err, context.Canceled) && b.logger != nil {
-		b.logger.Error("queue processor stopped with error", "reason", "deferred restart", "error", err)
+		b.logger.Error("queue processor stopped with error", "reason", "deferred restart", "error", boundedErrorLogValue(err))
 	}
 	if err := b.startQueueProcessorLocked(); err != nil {
 		if b.logger != nil {
 			b.logger.Error("queue processor replacement failed to start after delayed stop; queue worker settings are not applied",
-				"error", err)
+				"error", boundedErrorLogValue(err))
 		}
 		return
 	}
@@ -540,7 +540,7 @@ func (b *backgroundServices) waitForQueueProcessor(done chan error, reason strin
 	select {
 	case err := <-done:
 		if err != nil && !errors.Is(err, context.Canceled) && b.logger != nil {
-			b.logger.Error("queue processor stopped with error", "reason", reason, "error", err)
+			b.logger.Error("queue processor stopped with error", "reason", reason, "error", boundedErrorLogValue(err))
 		}
 		if b.logger != nil {
 			b.logger.Info("queue processor stopped", "reason", reason)
@@ -657,7 +657,7 @@ func (b *backgroundServices) stopAndWaitQueueProcessors(start time.Time) {
 		}
 		err := <-queueDone
 		if err != nil && !errors.Is(err, context.Canceled) && b.logger != nil {
-			b.logger.Error("queue processor stopped with error", "error", err)
+			b.logger.Error("queue processor stopped with error", "error", boundedErrorLogValue(err))
 		}
 		if b.logger != nil {
 			b.logger.Info("shutdown: queue processor stopped", slog.Duration("elapsed", time.Since(start)))
@@ -672,7 +672,7 @@ func (b *backgroundServices) waitRetentionWorker(start time.Time) {
 		}
 		err := <-b.retentionDone
 		if err != nil && !errors.Is(err, context.Canceled) && b.logger != nil {
-			b.logger.Error("audit retention worker stopped with error", "error", err)
+			b.logger.Error("audit retention worker stopped with error", "error", boundedErrorLogValue(err))
 		}
 		if b.logger != nil {
 			b.logger.Info("shutdown: audit retention worker stopped", slog.Duration("elapsed", time.Since(start)))
@@ -787,7 +787,7 @@ func recordQueueWorkerSkipped(ctx context.Context, store db.Store, logger *slog.
 		if logger != nil {
 			logger.Warn("failed to load current queue worker feed status",
 				slog.String("feed", feedName),
-				slog.String("error", err.Error()),
+				slog.String("error", boundedErrorLogValue(err)),
 			)
 		}
 		return err
@@ -802,7 +802,7 @@ func recordQueueWorkerSkipped(ctx context.Context, store db.Store, logger *slog.
 		if logger != nil {
 			logger.Warn("failed to record queue worker skipped status",
 				slog.String("feed", feedName),
-				slog.String("error", err.Error()),
+				slog.String("error", boundedErrorLogValue(err)),
 			)
 		}
 		return err
@@ -845,12 +845,12 @@ func registerFeedSyncer(manager *feed.Manager, cfg *config.Config, logger *slog.
 
 	if interval := cfg.EffectiveFeedInterval(name); interval > 0 && settings.SupportsSyncInterval {
 		if err := manager.RegisterWithInterval(feedCfg, interval); err != nil {
-			logger.Error("failed to register feed syncer", "feed", name, "error", err)
+			logger.Error("failed to register feed syncer", "feed", name, "error", boundedErrorLogValue(err))
 		}
 		return
 	}
 	if err := manager.Register(feedCfg); err != nil {
-		logger.Error("failed to register feed syncer", "feed", name, "error", err)
+		logger.Error("failed to register feed syncer", "feed", name, "error", boundedErrorLogValue(err))
 	}
 }
 

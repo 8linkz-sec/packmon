@@ -26,7 +26,12 @@
   error it logs, like the fatal startup log already did. Driver errors that
   echoed the connection URL, secret assignments, or local filesystem paths were
   logged verbatim. Diagnostic redaction now also strips credentials, paths, and
-  query strings from `postgres://` and `postgresql://` URLs.
+  query strings from `postgres://` and `postgresql://` URLs. The same
+  redact-and-bound step now covers the server's other error logs: the startup
+  package-name repair, background startup tasks, queue-worker status
+  reads/writes, audit-retention prunes, queue-processor and retention-worker
+  exits, feed-syncer registration, invalid persisted feed modes, and the
+  plain-stderr fatal message printed before a logger is configured.
 - `PACKMON_SERVER_PUBLIC_HOST` must now be a bare `host[:port]`. Values such
   as `packmon.internal#fragment`, `packmon.internal?x=1`, a host with
   whitespace, control characters, a percent-escape, a non-ASCII name, a

@@ -8,6 +8,7 @@ import (
 
 	"github.com/8linkz-sec/packmon/internal/config"
 	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/logsafe"
 )
 
 func applyStoredFeedConfigOverrides(ctx context.Context, cfg *config.Config, store db.Store, logger *slog.Logger) error {
@@ -35,7 +36,7 @@ func applyStoredFeedConfigOverrides(ctx context.Context, cfg *config.Config, sto
 		mode, err := config.ParseFeedMode(override.Mode)
 		if err != nil {
 			if logger != nil {
-				logger.Warn("ignoring invalid persisted feed mode", "feed", override.FeedName, "mode", override.Mode, "error", err)
+				logger.Warn("ignoring invalid persisted feed mode", "feed", override.FeedName, "mode", logsafe.BoundedDiagnosticValue(override.Mode, 64), "error", boundedErrorLogValue(err))
 			}
 			continue
 		}

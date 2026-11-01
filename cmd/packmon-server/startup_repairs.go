@@ -56,7 +56,7 @@ func runPackageNameStartupRepair(ctx context.Context, timeout time.Duration, log
 	if err != nil {
 		if logger != nil {
 			logger.Warn("startup repair: failed to normalize package names",
-				slog.String("error", err.Error()),
+				slog.String("error", boundedErrorLogValue(err)),
 			)
 		}
 	} else if logger != nil {
