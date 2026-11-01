@@ -406,7 +406,7 @@ bash scripts/check-requirements.sh --profile agent
 bash scripts/check-requirements.sh --profile server
 mkdir -p .build
 go build -o .build/packmon ./cmd/packmon
-docker compose run --rm init-secrets   # first run: generate .env with local secrets
+bash scripts/init-secrets.sh           # first run: generate .env as your host user
 docker compose up --build              # migrate runs automatically before the server
 ```
 
@@ -488,6 +488,19 @@ non-empty values and never overwrites them; these commands do not print
 generated secret values. `docker compose up --build` then runs the database
 migration automatically before starting the server. The same two commands
 work identically on Windows, macOS, and Linux.
+
+`init-secrets` writes into the bind-mounted checkout, so it runs as
+`${PACKMON_UID:-1000}:${PACKMON_GID:-1000}` instead of the image's `packmon`
+system account. Docker Desktop (Windows/macOS) accepts any ID. On native
+Linux, run it through the wrapper, which passes your own UID/GID so `.env`
+stays owned by you with mode `0600`:
+
+```bash
+bash scripts/init-secrets.sh
+```
+
+Rootless Docker maps container root to your host user; there, run
+`PACKMON_UID=0 PACKMON_GID=0 docker compose run --rm init-secrets` instead.
 
 Admins can later adjust `.env`, feed-provider API keys, TLS/proxy settings, and
 other deployment-specific values before shared or production use.
@@ -1238,6 +1251,10 @@ with a BOM (PowerShell's default), which Docker Compose cannot parse. Check with
 regenerating it: delete `.env` and run `docker compose run --rm init-secrets`
 (writes UTF-8/LF from inside the container). Bind mounting to write `.env` requires
 Docker Desktop file sharing for the drive.
+
+**`init-secrets` fails with `permission denied` (native Linux)**
+The container user cannot write the checkout or read an existing `.env`. Run
+`bash scripts/init-secrets.sh`, which runs `init-secrets` with your own UID/GID.
 
 **`PACKMON_ENCRYPTION_KEY` / `PACKMON_ADMIN_AUDIT_HMAC_KEY` invalid**
 These must be base64-encoded 32-byte values. Regenerate with

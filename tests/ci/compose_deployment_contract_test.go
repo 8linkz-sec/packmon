@@ -15,6 +15,7 @@ import (
 // matching) matters: a commented-out `# restart: unless-stopped` or a port
 // mapping without the matching environment entry must not count as evidence.
 type composeServiceContract struct {
+	User        string            `yaml:"user"`
 	Restart     string            `yaml:"restart"`
 	Ports       []string          `yaml:"ports"`
 	Environment map[string]string `yaml:"environment"`
@@ -206,5 +207,48 @@ func TestDockerignoreMirrorsGitignore(t *testing.T) {
 	// form is not enough for AGENTS.md.
 	if !dockerignoreContains(dockerignore, "**/AGENTS.md") {
 		t.Fatal(".dockerignore must exclude AGENTS.md at every depth via **/AGENTS.md")
+	}
+}
+
+// TestInitSecretsRunsAsCheckoutOwner pins the native-Linux bootstrap fix:
+// init-secrets writes .env into the bind-mounted checkout, so it must run as
+// the checkout owner instead of the image's packmon system account (which
+// cannot create the temp file in a host-owned 0755 directory or read an
+// existing host-owned 0600 .env). The wrapper script supplies the host IDs;
+// the production server image keeps USER packmon.
+func TestInitSecretsRunsAsCheckoutOwner(t *testing.T) {
+	t.Parallel()
+
+	override := readComposeContract(t, "docker-compose.override.yml")
+	initSecrets, ok := override.Services["init-secrets"]
+	if !ok {
+		t.Fatal("docker-compose.override.yml has no init-secrets service")
+	}
+	const wantUser = "${PACKMON_UID:-1000}:${PACKMON_GID:-1000}"
+	if initSecrets.User != wantUser {
+		t.Fatalf("init-secrets user = %q, want %q", initSecrets.User, wantUser)
+	}
+
+	server := readComposeContract(t, "docker-compose.server.yml")
+	for name, service := range server.Services {
+		if service.User != "" {
+			t.Fatalf("docker-compose.server.yml %s overrides user %q; production services keep the image's non-root user", name, service.User)
+		}
+	}
+
+	wrapper := repoFile(t, "scripts/init-secrets.sh")
+	for _, want := range []string{
+		`PACKMON_UID="$(id -u)"`,
+		`PACKMON_GID="$(id -g)"`,
+		"export PACKMON_UID PACKMON_GID",
+		"docker compose run --rm init-secrets",
+	} {
+		if !strings.Contains(wrapper, want) {
+			t.Fatalf("scripts/init-secrets.sh missing %q", want)
+		}
+	}
+
+	if !strings.Contains(repoFile(t, "Dockerfile"), "USER packmon") {
+		t.Fatal("Dockerfile must keep USER packmon for the runtime images")
 	}
 }

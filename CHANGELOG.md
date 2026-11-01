@@ -38,6 +38,12 @@
   `TESTING.md`, `WORKFLOW.md`, `Roadmap.txt`, `docs/superpowers/`) and the
   default `backups/` dump directory, so they no longer enter the build
   context.
+- The local `init-secrets` Compose service runs as
+  `${PACKMON_UID:-1000}:${PACKMON_GID:-1000}` instead of the image's `packmon`
+  system account, and the new `scripts/init-secrets.sh` wrapper passes the
+  host UID/GID, so bootstrapping on native Linux no longer fails with
+  `permission denied` on a host-owned checkout or `.env`. The production
+  server image still runs as `packmon`.
 
 ### Security updates
 
