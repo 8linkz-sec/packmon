@@ -549,8 +549,9 @@ Important behavior:
   loopback/private/link-local public-registry targets degrade to `unknown`
   without sending a registry request. `--list-all-offline` skips this registry digest phase. If
   the local Docker CLI can inspect the declared image, Packmon compares the
-  local repo digest with the current registry digest and marks `UPDATE yes`,
-  `-`, or `unknown`.
+  local repo digest of that repository and tag with the current registry
+  digest and marks `UPDATE yes`, `-`, or `unknown`; several installed tags of
+  one repository are compared separately.
 - Docker image inventory is not a container-layer vulnerability scan. Packmon
   does not pull images, scan OS packages inside images, or read private
   registry credentials as part of `--list-all`; `/api/v1/check` rejects

@@ -16,6 +16,11 @@
 
 ### Fixed
 
+- `packmon scan --list-all` compares each installed Docker image tag with its
+  own local repo digest. Local digests used to be keyed by repository name
+  only, so two installed tags of one repository (for example `postgres:17`
+  and `postgres:18`) shared one baseline and could be reported as
+  `UPDATE yes` while up to date, or `-` while outdated.
 - `--outdated` / `--list-all` latest-version lookups whose registry response
   broke off mid-body (connection reset or per-request timeout after the `200`
   status) now count as refused registry requests. They used to count as

@@ -30,6 +30,9 @@ type LocalInspector struct {
 	Runner ImageInspectRunner
 }
 
+// Digests returns the local repo digest of each installed tag in refs, keyed
+// by LocalDigestKey. Missing images, a missing docker CLI, or unparseable
+// output leave the affected references out.
 func (i LocalInspector) Digests(ctx context.Context, refs []Ref) map[string]string {
 	if len(refs) == 0 {
 		return nil
@@ -44,7 +47,7 @@ func (i LocalInspector) Digests(ctx context.Context, refs []Ref) map[string]stri
 		if ref.Registry == "" || strings.HasPrefix(ref.Name, "local/") {
 			continue
 		}
-		displayRef := ref.Name + ":" + ref.Reference
+		displayRef := LocalDigestKey(ref)
 		refByTag[displayRef] = ref
 		inspectRefs = append(inspectRefs, displayRef)
 	}
@@ -65,25 +68,30 @@ func (i LocalInspector) Digests(ctx context.Context, refs []Ref) map[string]stri
 	}
 	digests := make(map[string]string)
 	for _, image := range inspected {
-		var matched Ref
+		// One image can carry several requested tags; each gets the digest.
 		for _, tag := range image.RepoTags {
-			if ref, ok := refByTag[normalizeLocalRepoTag(tag)]; ok {
-				matched = ref
-				break
+			key := normalizeLocalRepoTag(tag)
+			matched, ok := refByTag[key]
+			if !ok {
+				continue
 			}
-		}
-		if matched.Name == "" {
-			continue
-		}
-		for _, repoDigest := range image.RepoDigests {
-			name, digest, ok := strings.Cut(repoDigest, "@")
-			if ok && normalizeLocalRepoName(name) == matched.Name {
-				digests[matched.Name] = digest
-				break
+			for _, repoDigest := range image.RepoDigests {
+				name, digest, ok := strings.Cut(repoDigest, "@")
+				if ok && normalizeLocalRepoName(name) == matched.Name {
+					digests[key] = digest
+					break
+				}
 			}
 		}
 	}
 	return digests
+}
+
+// LocalDigestKey is the key of a reference in the map Digests returns: the
+// repository plus its tag. Several tags of one repository are separate local
+// images with their own digests, so the repository name alone is not unique.
+func LocalDigestKey(ref Ref) string {
+	return ref.Name + ":" + ref.Reference
 }
 
 func normalizeLocalRepoTag(raw string) string {
@@ -91,7 +99,7 @@ func normalizeLocalRepoTag(raw string) string {
 	if !ok {
 		return raw
 	}
-	return ref.Name + ":" + ref.Reference
+	return LocalDigestKey(ref)
 }
 
 func normalizeLocalRepoName(raw string) string {

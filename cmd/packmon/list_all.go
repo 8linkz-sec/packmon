@@ -799,7 +799,9 @@ func resolveDockerImageStatusWithDigestResolver(ctx context.Context, p listAllPa
 			return dockerimage.LocalInspector{}.Digests(inspectCtx, []dockerimage.Ref{ref})
 		}()
 	}
-	localDigest := localDigests[ref.Name]
+	// Keyed per tag: two installed tags of one repository are separate images
+	// and must not share a comparison baseline.
+	localDigest := localDigests[dockerimage.LocalDigestKey(ref)]
 	if localDigest == "" {
 		return packageLatestStatus{Latest: shortDigest(remoteDigest), LatestCopy: remoteDigest, Update: "unknown", Unknown: true}
 	}
