@@ -98,6 +98,71 @@ func TestEnsureSecretsKeepsDivergentExplicitDatabasePasswords(t *testing.T) {
 	}
 }
 
+// TestInitSecretsWarnsAboutDivergentDatabasePasswordsWithoutValues pins the
+// warning for two explicit, different database passwords: a fresh bundled
+// PostgreSQL is initialized with POSTGRES_PASSWORD and would reject the
+// server login with PACKMON_DB_PASSWORD. The warning names both variables but
+// must never print a secret value, explicit or generated.
+func TestInitSecretsWarnsAboutDivergentDatabasePasswordsWithoutValues(t *testing.T) {
+	dir := t.TempDir()
+	env := filepath.Join(dir, ".env")
+	if err := os.WriteFile(env, []byte(
+		"POSTGRES_PASSWORD=superuser-secret-value\n"+
+			"PACKMON_DB_PASSWORD=application-secret-value\n"+
+			"PACKMON_ADMIN_INITIAL_PASSWORD=\nPACKMON_ENCRYPTION_KEY=\n"+
+			"PACKMON_ADMIN_AUDIT_HMAC_KEY=\n",
+	), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr strings.Builder
+	if err := initSecrets([]string{"--env", env}, &stdout, &stderr); err != nil {
+		t.Fatalf("init-secrets: %v", err)
+	}
+	warning := stderr.String()
+	if strings.Count(warning, "\n") != 1 || !strings.Contains(warning, "warning") ||
+		!strings.Contains(warning, "POSTGRES_PASSWORD") || !strings.Contains(warning, "PACKMON_DB_PASSWORD") {
+		t.Fatalf("want one warning line naming both variables, got %q", warning)
+	}
+
+	data, err := os.ReadFile(env) //nolint:gosec // test reads a path built from t.TempDir()
+	if err != nil {
+		t.Fatalf("read .env: %v", err)
+	}
+	output := stdout.String() + stderr.String()
+	for _, s := range config.RequiredSecrets() {
+		value, _ := envfile.Value(envfile.Parse(data), s.Key)
+		if envfile.IsBlank(value) {
+			t.Fatalf("%s left blank", s.Key)
+		}
+		if strings.Contains(output, value) {
+			t.Fatalf("init-secrets output leaks the %s value", s.Key)
+		}
+	}
+}
+
+func TestInitSecretsDoesNotWarnForMatchingOrMirroredDatabasePasswords(t *testing.T) {
+	for name, content := range map[string]string{
+		"matching": "POSTGRES_PASSWORD=same-value\nPACKMON_DB_PASSWORD=same-value\n",
+		"mirrored": "POSTGRES_PASSWORD=\nPACKMON_DB_PASSWORD=only-app-value\n",
+		"fresh":    "POSTGRES_PASSWORD=\nPACKMON_DB_PASSWORD=\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			env := filepath.Join(t.TempDir(), ".env")
+			if err := os.WriteFile(env, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr strings.Builder
+			if err := initSecrets([]string{"--env", env}, &stdout, &stderr); err != nil {
+				t.Fatalf("init-secrets: %v", err)
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("unexpected warning: %q", stderr.String())
+			}
+		})
+	}
+}
+
 func TestRunInitSecretsSeedsFromExample(t *testing.T) {
 	dir := t.TempDir()
 	example := filepath.Join(dir, ".env.example")

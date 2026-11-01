@@ -3,6 +3,9 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
+	"os"
+	"strings"
 
 	"github.com/8linkz-sec/packmon/internal/config"
 	"github.com/8linkz-sec/packmon/internal/envfile"
@@ -12,6 +15,13 @@ import (
 // seeding a fresh file from .env.example. Existing non-empty values are never
 // overwritten. It never prints secret values.
 func runInitSecrets(args []string) error {
+	return initSecrets(args, os.Stdout, os.Stderr)
+}
+
+// initSecrets is runInitSecrets with injectable output streams. The status
+// line goes to stdout and warnings to stderr; neither ever contains a secret
+// value.
+func initSecrets(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("init-secrets", flag.ContinueOnError)
 	envPath := fs.String("env", ".env", "path to the .env file to create or complete")
 	examplePath := fs.String("example", ".env.example", "path to the .env template")
@@ -40,8 +50,27 @@ func runInitSecrets(args []string) error {
 		return fmt.Errorf("write %s: %w", *envPath, err)
 	}
 
-	fmt.Printf("init-secrets: %d generated, %d kept — %s ready\n", generated, kept, *envPath)
+	if _, err := fmt.Fprintf(stdout, "init-secrets: %d generated, %d kept — %s ready\n", generated, kept, *envPath); err != nil {
+		return err
+	}
+	if databasePasswordsDiverge(out) {
+		// Names only, never values.
+		if _, err := fmt.Fprintln(stderr, "init-secrets: warning: POSTGRES_PASSWORD and PACKMON_DB_PASSWORD are both set and differ; "+
+			"a fresh bundled PostgreSQL is initialized with POSTGRES_PASSWORD and will reject the server login "+
+			"unless that database role was configured separately"); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// databasePasswordsDiverge reports whether both halves of the database
+// password pair are set to different values. ensureSecrets never overwrites
+// explicit values, so this can only come from operator input.
+func databasePasswordsDiverge(entries []envfile.Entry) bool {
+	pg, _ := envfile.Value(entries, "POSTGRES_PASSWORD")
+	db, _ := envfile.Value(entries, "PACKMON_DB_PASSWORD")
+	return !envfile.IsBlank(pg) && !envfile.IsBlank(db) && strings.TrimSpace(pg) != strings.TrimSpace(db)
 }
 
 // databasePasswordPartner returns the other key of the database password

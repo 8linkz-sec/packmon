@@ -56,7 +56,9 @@
   a blank `POSTGRES_PASSWORD` instead of generating a different value. The
   bundled PostgreSQL was previously initialized with a password the server
   and migrator did not use, so a fresh local stack failed authentication
-  although `init-secrets` reported success.
+  although `init-secrets` reported success. When both are set to different
+  values it keeps them and prints a one-line warning naming the variables,
+  never their values.
 - The starter Prometheus alerts `PackmonMetricsStoreReadFailure`,
   `PackmonDegradedResponses`, and `PackmonQueueErrors` in
   `docs/monitoring/packmon-alerts.yml` use `for: 0m`. Their `for` duration
