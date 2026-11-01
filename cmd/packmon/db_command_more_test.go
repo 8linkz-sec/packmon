@@ -311,6 +311,9 @@ func TestPrintSyncRemovalStatsReportsMixedCounters(t *testing.T) {
 			Malicious: 3,
 			Lifecycle: 4,
 		},
+		ReputationDisabled: sqlite.SyncRemovalStats{
+			Reputation: 5,
+		},
 	}
 
 	output := captureStdout(t, func() {
@@ -320,6 +323,7 @@ func TestPrintSyncRemovalStatsReportsMixedCounters(t *testing.T) {
 		"Removed cached rows:",
 		"Full sync clear: vulnerabilities=2 malicious=0 reputation=1 lifecycle=0",
 		"Tombstones: vulnerabilities=0 malicious=3 reputation=0 lifecycle=4",
+		"Reputation disabled on server: vulnerabilities=0 malicious=0 reputation=5 lifecycle=0",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("printSyncRemovalStats() output missing %q:\n%s", want, output)

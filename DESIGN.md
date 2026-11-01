@@ -548,7 +548,8 @@ Important behavior:
 The server provides:
 
 - `POST /api/v1/check` for package-list checks;
-- `GET /api/v1/sync` for local SQLite sync;
+- `GET /api/v1/sync` for local SQLite sync (reputation rows only while
+  ReversingLabs is enabled in `self` mode; see "Local SQLite Mode");
 - feed status and import endpoints;
 - refresh queue endpoints;
 - health, readiness, version, and metrics endpoints;
@@ -878,6 +879,22 @@ reputation context. Synced `risk` rows are exposed as `LOW`
 `malware_history` reputation info, not as their upstream severity, and benign
 `clean`, `not_found`, `unsupported`, or transient `error` observations are not
 synced.
+Reputation sync follows the same gate as the `/api/v1/check` reputation
+lookup: the server exports reputation rows only while ReversingLabs is enabled
+in `self` mode. Otherwise `GET /api/v1/sync` returns an empty `reputation`
+array, reports the dataset as done in `next_cursor` (`reputation_done=true`, no
+`reputation_cursor`), and sets `reputation_disabled: true`; the field is
+omitted while reputation is served, so older clients and servers stay
+compatible. A client that sees `reputation_disabled` drops every previously
+synced local reputation row in the same transaction, including on incremental
+syncs, and records a pending reputation refetch. Leftover `malicious` or
+`removed` cache rows from an earlier enabled period therefore block neither a
+remote check nor a local scan. Once a later sync no longer reports
+`reputation_disabled`, the client refetches the whole reputation dataset
+(no `since` window, the other datasets requested as done), because a delta
+sync would never resend rows that did not change in the meantime. An
+ecosystem-filtered sync refetches only its ecosystems and keeps the refetch
+pending until an unfiltered sync completes it.
 Local scans query those reputation rows through explicit reputation lookup
 methods; `FindMalicious` and `FindMaliciousBatch` remain malicious-package-only
 boundaries so package detail views and scanner output do not double-count or

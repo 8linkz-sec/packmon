@@ -457,6 +457,9 @@ func printSyncRemovalStats(stats sqlite.SyncStats) {
 	if stats.TombstoneDeleted.Any() {
 		printSyncRemovalLine("Tombstones", stats.TombstoneDeleted)
 	}
+	if stats.ReputationDisabled.Any() {
+		printSyncRemovalLine("Reputation disabled on server", stats.ReputationDisabled)
+	}
 }
 
 func printSyncRemovalLine(label string, stats sqlite.SyncRemovalStats) {

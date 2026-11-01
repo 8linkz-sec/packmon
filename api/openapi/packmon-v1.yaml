@@ -1595,6 +1595,17 @@ components:
           deprecated: true
         next_cursor:
           $ref: "#/components/schemas/SyncCursor"
+        reputation_disabled:
+          type: boolean
+          description: >-
+            Present and true when the server does not serve package reputation
+            rows because ReversingLabs is not enabled in self mode, so
+            /api/v1/check ignores cached reputation rows as well. The reputation
+            array is then empty and next_cursor reports reputation_done. Clients
+            must drop previously synced reputation rows so local scans match
+            remote checks, and must refetch the whole reputation dataset (no
+            since window, other datasets marked done) once a later sync no longer
+            reports it. The field is omitted when reputation is served.
 
     SyncCursor:
       type: object

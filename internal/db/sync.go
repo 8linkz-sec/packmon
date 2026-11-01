@@ -12,6 +12,11 @@ type SyncExportOptions struct {
 	Limit       int
 	Offset      int
 	Cursor      SyncCursor
+	// ExcludeReputation omits the package reputation dataset. The API sets it
+	// when /api/v1/check would not read reputation rows either (ReversingLabs
+	// not enabled in self mode), so local sync never exports findings that a
+	// remote check would ignore. EffectiveCursor reports the dataset as done.
+	ExcludeReputation bool
 }
 
 // SyncExport is the server-side payload consumed by local SQLite sync.
@@ -79,19 +84,24 @@ func (c SyncCursor) IsZero() bool {
 // legacy top-level Offset was provided, it expands that offset to all datasets
 // so older offset-only clients keep paginating through the same export path.
 // Non-positive offsets leave the cursor at its zero-value first-page state.
+// With ExcludeReputation the reputation dataset is reported as done and its
+// keyset cursor is dropped, so exporters skip it and every next_cursor keeps
+// reputation_done=true.
 func (opts SyncExportOptions) EffectiveCursor() SyncCursor {
-	if !opts.Cursor.IsZero() {
-		return opts.Cursor
+	cursor := opts.Cursor
+	if cursor.IsZero() && opts.Offset > 0 {
+		cursor = SyncCursor{
+			Vulnerabilities: opts.Offset,
+			Malicious:       opts.Offset,
+			Reputation:      opts.Offset,
+			Lifecycle:       opts.Offset,
+		}
 	}
-	if opts.Offset <= 0 {
-		return SyncCursor{}
+	if opts.ExcludeReputation {
+		cursor.ReputationCursor = ""
+		cursor.ReputationDone = true
 	}
-	return SyncCursor{
-		Vulnerabilities: opts.Offset,
-		Malicious:       opts.Offset,
-		Reputation:      opts.Offset,
-		Lifecycle:       opts.Offset,
-	}
+	return cursor
 }
 
 // SyncVulnerability is the flattened vulnerability row exported to local SQLite.
