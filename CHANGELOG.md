@@ -76,6 +76,11 @@
 - The 12-character minimum for bootstrap (`PACKMON_ADMIN_INITIAL_PASSWORD`)
   and rotated admin passwords counts Unicode characters instead of bytes, so
   a password of four three-byte characters no longer passes.
+- Overlapping `/admin/feeds` saves and resets no longer leave the running
+  feed configuration out of step with PostgreSQL. The request that lost the
+  revision race used to roll the runtime back to a snapshot taken before the
+  winner applied its change; apply, persistence and rollback now run as one
+  step ordered against other feed saves and resets.
 
 ### Security updates
 

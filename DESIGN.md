@@ -1133,7 +1133,10 @@ audit digests. Feed
 setting audit entries record previous and new enablement, mode, cadence, and
 whether an API key is configured, but never the raw API key. Feed setting changes
 are applied to the running process immediately and are also loaded on future
-server starts. HTTP route wiring and API handlers read mutable runtime feed
+server starts. Each save or reset applies the runtime change, persists it, and
+rolls the runtime back if persistence fails as one step ordered against other
+feed saves and resets, so overlapping changes leave the runtime on the last
+committed configuration. HTTP route wiring and API handlers read mutable runtime feed
 state through `FeedsSnapshot()` so admin hot-reload writes cannot race with
 ReversingLabs scheduling or feed-import-secret decisions.
 

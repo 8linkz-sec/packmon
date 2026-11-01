@@ -143,6 +143,14 @@ type AdminHandler struct {
 
 	manualSyncMu sync.Mutex
 	manualSyncs  map[string]struct{}
+
+	// feedConfigSlot orders feed config saves and resets: each request runs
+	// its runtime apply, persistence, and rollback while holding the slot, so
+	// the runtime ends on the last committed configuration. It is a
+	// one-element channel rather than a mutex so a waiting request can give up
+	// when its context ends.
+	feedConfigSlotOnce sync.Once
+	feedConfigSlot     chan struct{}
 }
 
 // NewAdminHandler creates an AdminHandler with the given dependencies.
