@@ -105,6 +105,61 @@ func TestSetAdminAuditQueueJobsDetail(t *testing.T) {
 	}
 }
 
+// TestSetAdminAuditQueueJobsDetailOmitsAbsentTimestamps checks the raw JSON: a
+// job that was never requested or processed has no timestamp key at all, not an
+// empty string that reads like a recorded but blank time.
+func TestSetAdminAuditQueueJobsDetailOmitsAbsentTimestamps(t *testing.T) {
+	t.Parallel()
+
+	requested := time.Date(2026, 6, 24, 12, 0, 0, 0, time.UTC)
+	zeroProcessed := time.Time{}
+	entry := &AdminAuditEntry{}
+	jobs := []RefreshJob{
+		{ID: 1, Ecosystem: "npm", Name: "never-processed", Source: "socket", Status: "pending", RequestedAt: requested},
+		{ID: 2, Ecosystem: "npm", Name: "zero-processed", Source: "socket", Status: "pending", RequestedAt: requested, ProcessedAt: &zeroProcessed},
+		{ID: 3, Ecosystem: "npm", Name: "no-timestamps", Source: "socket", Status: "pending"},
+	}
+	if err := SetAdminAuditQueueJobsDetail(entry, "jobs", jobs); err != nil {
+		t.Fatalf("SetAdminAuditQueueJobsDetail() error = %v", err)
+	}
+
+	var details map[string]string
+	if err := json.Unmarshal(entry.Details, &details); err != nil {
+		t.Fatalf("details JSON = %s: %v", entry.Details, err)
+	}
+	var rows []map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(details["jobs"]), &rows); err != nil {
+		t.Fatalf("jobs detail JSON = %s: %v", details["jobs"], err)
+	}
+	if len(rows) != len(jobs) {
+		t.Fatalf("rows = %d, want %d", len(rows), len(jobs))
+	}
+	wantKeys := []struct {
+		requested bool
+		processed bool
+	}{
+		{requested: true},
+		{requested: true},
+		{},
+	}
+	for i, row := range rows {
+		for key, want := range map[string]bool{"requested_at": wantKeys[i].requested, "processed_at": wantKeys[i].processed} {
+			raw, ok := row[key]
+			if ok != want {
+				t.Fatalf("row %d %s present = %t, want %t: %s", i, key, ok, want, details["jobs"])
+			}
+			if ok && string(raw) == `""` {
+				t.Fatalf("row %d %s = \"\", want a timestamp: %s", i, key, details["jobs"])
+			}
+		}
+		for _, key := range []string{"id", "ecosystem", "name", "source", "priority", "status", "error"} {
+			if _, ok := row[key]; !ok {
+				t.Fatalf("row %d missing identity key %s: %s", i, key, details["jobs"])
+			}
+		}
+	}
+}
+
 func TestStoreLifecycleSyncContractRequiresAtomicReplacement(t *testing.T) {
 	t.Parallel()
 

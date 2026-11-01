@@ -195,21 +195,87 @@ change.
    `/version`, `packmon_build_info`, and `packmon_db_migration_version`.
 2. Take and verify a fresh backup with the command in `Backup`.
 3. Stop or drain `packmon-server` so clients do not write during migration.
-4. Apply release-specific database prerequisites before running migrations.
-   Migration 48 introduces PostgreSQL query observability; follow
-   [`postgres-query-observability.md`](postgres-query-observability.md) first.
-   For the bundled database, recreate and wait for PostgreSQL so the new
-   preload setting is active while preserving its named volume:
-   ```bash
-   docker compose -f docker-compose.server.yml up -d --force-recreate --wait postgres
-   ```
-   External PostgreSQL requires the documented administrator preload, restart,
-   query-ID setting, and extension creation instead.
-   Migration 49 concurrently builds two partial covering indexes over active
-   `malicious_findings`. Before starting it, verify PostgreSQL has temporary
-   working space and durable-volume headroom for both index builds. The
-   concurrent build avoids a long table-write lock but still consumes I/O and
-   CPU; keep the server drained as required above and monitor PostgreSQL logs.
+4. Apply release-specific database prerequisites before running migrations,
+   and plan for the per-migration notes below. `packmon-server migrate`
+   applies every pending migration in one run. Apart from the 48 prerequisite
+   check, a migration that fails is recorded as dirty at its version, and
+   migrate and server startup then refuse that database; recover by restoring
+   the pre-upgrade backup (see the rollback steps below).
+   - Migration 48 (`048_pg_stat_statements`, schema 47 -> 48) creates the
+     `pg_stat_statements` extension in schema `public` for PostgreSQL query
+     observability. Follow
+     [`postgres-query-observability.md`](postgres-query-observability.md)
+     first. For the bundled database, recreate and wait for PostgreSQL so the
+     new preload setting is active while preserving its named volume:
+     ```bash
+     docker compose -f docker-compose.server.yml up -d --force-recreate --wait postgres
+     ```
+     External PostgreSQL requires the documented administrator preload,
+     restart, query-ID setting, and extension creation instead. The migration
+     itself is quick; its prerequisites are checked before anything is marked
+     dirty, so a missing preload, query-ID setting or extension leaves schema
+     47 clean and retryable. Its down migration keeps the extension, which may
+     be shared with other users of the database.
+   - Migration 49 (`049_malicious_active_search_indexes`, schema 48 -> 49)
+     builds two partial covering indexes over active `malicious_findings`
+     rows with `CREATE INDEX CONCURRENTLY`, outside a transaction. Before
+     starting it, verify PostgreSQL has temporary working space and
+     durable-volume headroom for both index builds. The concurrent build
+     avoids a long table-write lock but still consumes I/O and CPU and takes
+     longer on large catalogs; keep the server drained as required above and
+     monitor PostgreSQL logs. An interrupted concurrent build can leave an
+     `INVALID` index behind, and a retry would keep it because the statements
+     use `IF NOT EXISTS`; restore the backup rather than retrying by hand.
+   - Migration 50 (`050_version_range_boundary_values`, schema 49 -> 50)
+     tightens the `version_ranges` CHECK constraints on `affected_packages`
+     and `malicious_findings` (every range needs a nonempty `events` array and
+     every event a nonblank string boundary). Inside one transaction it scans
+     both tables once to find and log the rows that only passed the older
+     check, rewrites just the logged rows, and scans both tables once more to
+     validate the constraints; expect it to take longer on large databases.
+     The re-added constraints hold an exclusive lock on both tables until the
+     transaction commits, so reads and writes to them wait
+     during validation (another reason to keep the server drained). A failure
+     rolls back every 50 change but still leaves the version dirty. The
+     repair works per row:
+     - affected-package rows fall back to `[]` (every version of that package
+       is treated as affected), so those packages may report more findings
+       until the next feed sync rewrites them with valid ranges;
+     - malicious findings with nonempty exact `versions` lose only their
+       ranges and keep blocking exactly those versions;
+     - active malicious findings without exact versions are quarantined: they
+       get the normal `removed_at` tombstone, stop blocking, and local clients
+       drop them on their next delta sync. A feed finding returns with the
+       next feed import that contains it; a quarantined manual advisory
+       (`manual:` ID) stays removed until you re-enter it in
+       `/admin/advisories`.
+
+     The migration emits the counts as a PostgreSQL NOTICE (shown by `psql`,
+     not by `packmon-server migrate`). Every repaired row is recorded with its
+     original value; list them after migrating:
+     ```sql
+     SELECT r.table_name, r.row_id, r.action, r.repaired_at,
+            mf.source, mf.ecosystem, mf.name, mf.versions, mf.risk_type,
+            mf.severity, mf.summary, mf.description, mf.reference_urls,
+            mf.origin_ref, r.original_version_ranges
+     FROM packmon_m050_version_range_repairs r
+     LEFT JOIN malicious_findings mf
+       ON r.table_name = 'malicious_findings' AND mf.id = r.row_id
+     ORDER BY r.table_name, r.action, r.row_id;
+     ```
+     Quarantined manual advisories no longer appear in `/admin/advisories`,
+     so take what you need to re-enter them (ecosystem, package name, exact
+     versions, risk type, severity, summary, description, references and
+     the original ranges, corrected) from this result.
+     `action` is `ranges_reset` (affected package), `ranges_cleared`
+     (malicious finding, exact versions kept) or `quarantined`; re-enter the
+     quarantined rows whose `source` is `manual`. Compare finding/blocking
+     totals by feed source after the upgrade and run the feed syncs before
+     treating a spike as new risk. The 050 down migration restores the
+     previous check function and every recorded row that is unchanged since
+     the repair, then drops the repair table. Rows changed since the repair
+     (re-imported, tombstoned again, deleted or re-entered by an admin) keep
+     their current state.
 5. Run the explicit migration step:
    ```bash
    docker compose -f docker-compose.server.yml run --build --rm packmon-migrate
@@ -241,6 +307,19 @@ For an operator rollback:
    `/metrics`; then run a remote CLI smoke scan with a non-production test key.
 6. Record the rollback, release version, schema version, backup used, and
    operator action in the operator change log.
+
+Known limitation of migration 005 (`005_normalize_unknown_severity`): its up
+migration records the malicious-finding IDs it backs up from the affected
+entries flagged `malicious`, but inserts findings for every affected entry of
+those advisories, numbering them `<advisory id>-<index>` when an advisory has
+more than one. The two ID sets can differ, and an index-based ID can coincide
+with an unrelated existing finding ID. Its down migration therefore cannot be
+trusted to restore `malicious_findings` exactly. Applied migrations are
+checksum-verified on every `packmon-server migrate` run, so 005 cannot be
+changed for databases that already ran it, and on a fresh install it runs
+before any feed data exists, where the defect has no effect. Use the
+pre-upgrade backup, never the 005 down migration, to get back to a schema older
+than 5.
 
 ## API Key Rotation
 
@@ -571,6 +650,11 @@ Actions:
 8. Compare recent finding/blocking totals by feed source before treating a
    spike as real dependency risk. If strict validation rejected the import,
    keep the previous good data and fix the importer payload before retrying.
+   The rejection reason "feed import contains values the store cannot accept"
+   means the request passed validation but PostgreSQL refused a value (for
+   example an EPSS score below the stored precision or a NUL character); the
+   server log line `feed import rejected by store validation` with the same
+   correlation ID names the record and field.
 
 Avoid launching overlapping manual syncs for the same feed. Manual sync is not
 available for disabled feeds, external feeds, or demand-driven queue sources

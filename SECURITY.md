@@ -211,7 +211,19 @@ count, correlation ID, trusted client IP, and authenticated API-key identity
 when available. The admin/web UI and feed-status API must surface rejected
 imports, the last successful usable import timestamp, and source-level finding
 or blocking spikes so operators can distinguish strict validation from hidden
-coverage loss in server/agent deployments.
+coverage loss in server/agent deployments. When the store rather than the
+request validation rejects imported values (a CHECK violation or one of an
+allowlist of PostgreSQL value errors, see DESIGN.md "Feed Sources"), the
+response and the recorded rejection reason use a fixed generic message; table,
+column and database error text stay in the server log. Other database errors
+are not reclassified as client errors.
+Schema repairs must not turn malformed malicious-finding data into broader
+blocking: migration 050 quarantines (tombstones) an active malicious finding
+whose ranges fail the stricter check and that has no exact versions, rather
+than clearing its ranges into an all-version match, and records each repaired
+row with its original value in `packmon_m050_version_range_repairs`. A
+quarantined feed finding returns with the next feed import that contains it; a
+quarantined manual advisory stays removed until an admin re-enters it.
 
 API keys are stored hashed. Plaintext keys are shown only at creation time.
 Keys have bounded labels/names for auditability, record `last_used_at`, must
@@ -335,7 +347,8 @@ Admin properties:
   mutations acquire locks in `admin_auth` then `admin_audit_log` order.
   Refresh-queue clear/purge audit rows must
   preserve an affected-job sample with job IDs, package coordinates, sources,
-  priorities, prior statuses, timestamps, redacted bounded error text, and
+  priorities, prior statuses, timestamps (a timestamp the job never had is
+  omitted, not recorded as an empty string), redacted bounded error text, and
   total/sample/truncation metadata from the same delete operation;
 - new production admin audit rows carry an `hmac-sha256:` previous-row digest
   chain keyed by `PACKMON_ADMIN_AUDIT_HMAC_KEY`; older `sha256:` rows remain
@@ -654,7 +667,9 @@ do not put free-form operational text back into `feed_status`.
 Feed-degraded responses must be visible so CI/N8N can make policy decisions.
 SARIF, JUnit, and HTML artifacts must carry degraded-feed, stale-local-DB, and
 parse-error diagnostics instead of presenting incomplete coverage as a clean
-scan. Partial lockfile/SBOM parse errors exit with parser failure unless a
+scan. That includes the `--outdated` HTML report, which names each unparsed
+lockfile or SBOM by file name only, never by full path. Partial lockfile/SBOM
+parse errors exit with parser failure unless a
 blocking finding has already failed the scan (the `--list-packages` and
 `--outdated` inventory views, `--outdated --quiet` included, have no findings
 and exit with parser failure on any parse error), and in-scope discovery

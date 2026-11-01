@@ -57,6 +57,12 @@ func FuzzParseScript(f *testing.F) {
 	f.Add([]byte("choco install a --params \"x ^\r\nchoco install b ^^\r\nchoco install c ^^^\r\n d ^ \r\n"))
 	f.Add([]byte("choco install sev^\r\nen ^\r\n& x ^\r\n\"y ^\r\n^\r\n^"))
 	f.Add([]byte("echo x;choco install a ; b { c } = d && e || f | g\r\nset x = choco install --version='1.0' h --version=^\"2.0^\" i\r\n"))
+	f.Add([]byte(">nul choco install a >nul b 2>&1 1>&2 c *> $null d 2>> \"e f.log\" g < 'h i' j >\r\n"))
+	f.Add([]byte("choco install a --params ^\"/x >nul y^\" b ^\"c & choco install d --params ^\"/x \"y z\" \"\"\r\n"))
+	f.Add([]byte("for /f \"tokens=*\" %%a in (list.txt) do @call choco install %%a b\r\n) do choco install c\r\nfor %%i in (x & choco install d\r\n"))
+	f.Add([]byte("@if /i not \"%1\"==\"\" if exist %ProgramFiles(x86)%\\x if %x% equ 1 (choco install a) else choco install b\r\n"))
+	f.Add([]byte("if \"a==\" == b choco install c & if errorlevel 1 if cmdextversion 2 echo 50% & choco install d\r\n"))
+	f.Add([]byte("try { if ($x) { choco install a } elseif ($y) { foreach ($p in $l) { choco install b > #x\r\n& ${env:ProgramFiles(x86)}\\c\\choco.exe install c ${ d\r\n"))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		for _, kind := range []Kind{KindPowerShellScript, KindBatchScript} {
 			pkgs, err := ParseScript(bytes.NewReader(data), "x", kind)

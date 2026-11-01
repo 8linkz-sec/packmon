@@ -75,6 +75,10 @@ type outdatedReport struct {
 	LockFiles         int
 	SBOMFiles         int
 	PackageWord       string
+	// Warnings are the diagnostics shown at the top of the HTML report:
+	// unparsed inventory files and failed registry lookups. The HTML writer
+	// caps them; the terminal prints its own warnings to stderr.
+	Warnings []string
 }
 
 type outdatedHTMLMessages struct {
@@ -152,8 +156,9 @@ func runOutdatedWithOptions(args []string, opts outdatedOptions) error {
 		fmt.Fprintf(os.Stderr, "Checking %s for updates...\n", plural.Count(len(packages), "package", "packages"))
 	}
 
-	results := resolveOutdatedStatuses(packages, opts)
+	results, lookupWarnings := resolveOutdatedStatuses(packages, opts)
 	report = applyOutdatedStatusesToReport(report, packages, results)
+	report.Warnings = outdatedReportWarnings(collection, lookupWarnings)
 
 	if !opts.Quiet {
 		printOutdatedReport(report)
@@ -267,7 +272,10 @@ func buildInitialOutdatedReport(scanPath string, collection *scanner.PackageColl
 	return report
 }
 
-func resolveOutdatedStatuses(packages []outdatedPackage, opts outdatedOptions) []packageLatestStatus {
+// resolveOutdatedStatuses looks up the latest version of each package. It
+// also returns the lookup-phase warnings for the HTML report; the terminal
+// copy goes to stderr unless the run is quiet.
+func resolveOutdatedStatuses(packages []outdatedPackage, opts outdatedOptions) ([]packageLatestStatus, []string) {
 	ctx, phase := withRegistryLookupPhase(opts.Context, opts.Timeout)
 
 	fallbackResolver := opts.resolver
@@ -289,7 +297,63 @@ func resolveOutdatedStatuses(packages []outdatedPackage, opts outdatedOptions) [
 		writeOutdatedLookupPhaseWarnings(os.Stderr, phase)
 	}
 
-	return statuses
+	return statuses, outdatedLookupPhaseReportWarnings(phase, ctx.Err() != nil)
+}
+
+// outdatedLookupPhaseReportWarnings returns the lookup-phase warnings for the
+// HTML report, worded like the list-all report's. A canceled phase stays
+// silent: the user aborted, nothing failed.
+func outdatedLookupPhaseReportWarnings(phase *registryLookupPhase, canceled bool) []string {
+	if canceled {
+		return nil
+	}
+	oversized := phase.oversizedCount()
+	return registryLookupPhaseReportWarnings(phase.refusedCount()-oversized, oversized, phase.skippedCount(), phase.breakerOpen())
+}
+
+// outdatedReportWarnings orders the HTML report warnings: the incomplete
+// inventory first, then the lookup failures.
+func outdatedReportWarnings(collection *scanner.PackageCollection, lookupWarnings []string) []string {
+	var warnings []string
+	if warning := outdatedInventoryWarning(collection); warning != "" {
+		warnings = append(warnings, warning)
+	}
+	return append(warnings, lookupWarnings...)
+}
+
+// outdatedInventoryWarning summarizes the inventory files that could not be
+// parsed. Each parse diagnostic starts with the scan-relative path of its file
+// (or an external SBOM's file name); the report names the file by its final
+// path segment only, so it reveals neither the directory layout nor the
+// parser's error detail. The full diagnostics stay on stderr.
+func outdatedInventoryWarning(collection *scanner.PackageCollection) string {
+	if collection == nil {
+		return ""
+	}
+	seen := make(map[string]struct{}, len(collection.ParseErrors))
+	var names []string
+	for _, parseErr := range collection.ParseErrors {
+		parseErr = strings.TrimSpace(parseErr)
+		if parseErr == "" {
+			continue
+		}
+		// An SBOM with several skipped components reports one diagnostic per
+		// component; the file still counts once.
+		source, _, _ := strings.Cut(parseErr, ": ")
+		if _, ok := seen[source]; ok {
+			continue
+		}
+		seen[source] = struct{}{}
+		names = append(names, termtext.Sanitize(safeHTMLExternalPath(source)))
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	listed := strings.Join(names[:min(len(names), scanner.MaxUserFacingParseDiagnostics)], ", ")
+	if omitted := len(names) - scanner.MaxUserFacingParseDiagnostics; omitted > 0 {
+		listed += fmt.Sprintf(", and %d more", omitted)
+	}
+	return fmt.Sprintf("Inventory incomplete: %s could not be parsed: %s", plural.Count(len(names), "file", "files"), listed)
 }
 
 // writeOutdatedLookupPhaseWarnings reports the lookup failures by kind, so
@@ -487,6 +551,7 @@ func htmlOutdatedReport(report outdatedReport) outdatedReport {
 		report.Lang = defaultGeneratedHTMLReportLang
 	}
 	report.Messages = defaultOutdatedHTMLMessages()
+	report.Warnings = limitHTMLReportWarnings(report.Warnings)
 	report.ScannedAtDateTime = reportTimestampDateTime(report.ScannedAt, report.ScannedAtDateTime)
 	root := report.Target
 	report.Target = htmlReportDisplayTarget(root)
