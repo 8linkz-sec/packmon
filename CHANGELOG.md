@@ -16,6 +16,12 @@
 
 ### Fixed
 
+- `POST /api/v1/packages/{ecosystem}/{name}/refresh` accepts a chunked request
+  with an empty body like a request without a body. Only `Content-Length: 0`
+  counted as "no body" before, so an empty chunked body (`Content-Length`
+  unknown) got `400 empty JSON body`, or `415` without a JSON Content-Type,
+  although the body is optional. Bodies that carry bytes keep the strict
+  empty-object rules.
 - Feed imports answer `400` instead of `500` when the request passes
   validation but the store rejects a value: an EPSS score or percentile too
   small for the stored precision, a NUL character in a text or JSON field, a

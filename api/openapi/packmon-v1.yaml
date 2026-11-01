@@ -521,8 +521,13 @@ paths:
       requestBody:
         required: false
         description: >-
-          Optional. When present it must be an empty JSON object; null, arrays,
-          scalars, and any field (including version) are rejected with 400.
+          Optional. A request without body bytes counts as having no body,
+          whatever its Content-Length or Transfer-Encoding (an empty chunked
+          body is accepted like an absent one, and needs no Content-Type).
+          When body bytes are present the Content-Type must be
+          application/json (otherwise 415) and the body must be an empty JSON
+          object; null, arrays, scalars, whitespace-only bodies, trailing data,
+          and any field (including version) are rejected with 400.
         content:
           application/json:
             schema:

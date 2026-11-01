@@ -5134,6 +5134,101 @@ func TestHandleRefreshAcceptsEmptyObjectBody(t *testing.T) {
 	}
 }
 
+// TestHandleRefreshTreatsEmptyBodyAsAbsentRegardlessOfContentLength covers a
+// chunked request (ContentLength -1) whose body turns out to be empty: the body
+// is optional, so it must enqueue exactly like a request with no body at all,
+// with or without a JSON Content-Type.
+func TestHandleRefreshTreatsEmptyBodyAsAbsentRegardlessOfContentLength(t *testing.T) {
+	t.Parallel()
+
+	for name, contentType := range map[string]string{
+		"no content type":   "",
+		"json content type": "application/json",
+		"other media type":  "text/plain",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			store := &stubStore{}
+			h := newTestHandler(store)
+			h.ConfigureSocketRefresh(config.FeedsConfig{
+				SocketEnabled: true,
+				SocketMode:    config.FeedModeSelf,
+				SocketAPIKey:  "socket-token",
+			})
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/packages/npm/lodash/refresh", nil)
+			req.Body = io.NopCloser(strings.NewReader(""))
+			req.ContentLength = -1
+			req.TransferEncoding = []string{"chunked"}
+			if contentType != "" {
+				req.Header.Set("Content-Type", contentType)
+			}
+			rr := httptest.NewRecorder()
+
+			h.handleRefresh(rr, req, "npm", "lodash")
+
+			if rr.Code != http.StatusAccepted {
+				t.Fatalf("status = %d, want 202: %s", rr.Code, rr.Body.String())
+			}
+			if jobs := store.enqueuedRefreshJobsSnapshot(); len(jobs) != 1 {
+				t.Fatalf("enqueued jobs = %d, want 1", len(jobs))
+			}
+		})
+	}
+}
+
+// TestHandleRefreshValidatesChunkedNonEmptyBody keeps the strict checks for a
+// chunked body that does carry content.
+func TestHandleRefreshValidatesChunkedNonEmptyBody(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		body        string
+		contentType string
+		wantStatus  int
+	}{
+		"empty object":   {body: `{}`, contentType: "application/json", wantStatus: http.StatusAccepted},
+		"null":           {body: `null`, contentType: "application/json", wantStatus: http.StatusBadRequest},
+		"array":          {body: `[]`, contentType: "application/json", wantStatus: http.StatusBadRequest},
+		"unknown field":  {body: `{"version":"1.0.0"}`, contentType: "application/json", wantStatus: http.StatusBadRequest},
+		"trailing data":  {body: `{} {}`, contentType: "application/json", wantStatus: http.StatusBadRequest},
+		"whitespace":     {body: " \n", contentType: "application/json", wantStatus: http.StatusBadRequest},
+		"wrong media":    {body: `{}`, contentType: "text/plain", wantStatus: http.StatusUnsupportedMediaType},
+		"oversized body": {body: `{"` + strings.Repeat("a", int(maxRequestBody)) + `":1}`, contentType: "application/json", wantStatus: http.StatusBadRequest},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			store := &stubStore{}
+			h := newTestHandler(store)
+			h.ConfigureSocketRefresh(config.FeedsConfig{
+				SocketEnabled: true,
+				SocketMode:    config.FeedModeSelf,
+				SocketAPIKey:  "socket-token",
+			})
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/packages/npm/lodash/refresh", nil)
+			req.Body = io.NopCloser(strings.NewReader(tc.body))
+			req.ContentLength = -1
+			req.TransferEncoding = []string{"chunked"}
+			req.Header.Set("Content-Type", tc.contentType)
+			rr := httptest.NewRecorder()
+
+			h.handleRefresh(rr, req, "npm", "lodash")
+
+			if rr.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d: %s", rr.Code, tc.wantStatus, rr.Body.String())
+			}
+			wantJobs := 0
+			if tc.wantStatus == http.StatusAccepted {
+				wantJobs = 1
+			}
+			if jobs := store.enqueuedRefreshJobsSnapshot(); len(jobs) != wantJobs {
+				t.Fatalf("enqueued jobs = %d, want %d", len(jobs), wantJobs)
+			}
+		})
+	}
+}
+
 func TestHandleRefreshRejectsNonJSONContentTypeWhenBodyIsPresent(t *testing.T) {
 	t.Parallel()
 
