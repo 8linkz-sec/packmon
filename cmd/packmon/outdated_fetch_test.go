@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -1858,5 +1861,78 @@ func TestFetchLatestVersionReturnsEmptyForInvalidRegistryJSON(t *testing.T) {
 				t.Fatalf("fetchLatestVersion(%s invalid JSON) = %q, want empty", ecosystem, got)
 			}
 		})
+	}
+}
+
+// TestFetchNPMMetadataRequestsAbbreviatedDocument pins the npm install
+// metadata format: the abbreviated document carries everything the range
+// resolver reads (dist-tags, versions and their dependency maps) at a fraction
+// of the full packument size.
+func TestFetchNPMMetadataRequestsAbbreviatedDocument(t *testing.T) {
+	t.Parallel()
+	var accept atomic.Value
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		accept.Store(r.Header.Get("Accept"))
+		w.Header().Set("Content-Type", npmAbbreviatedMetadataMediaType)
+		_, _ = w.Write([]byte(`{"name":"pkg","dist-tags":{"latest":"2.0.0"},"versions":{` +
+			`"1.0.0":{"version":"1.0.0","dependencies":{"a":"^1.0.0"},"optionalDependencies":{"b":"^2.0.0"},"peerDependencies":{"c":"^3.0.0"}},` +
+			`"2.0.0":{"version":"2.0.0"}}}`))
+	}))
+	defer server.Close()
+
+	meta, ok := fetchNPMMetadataFromBase(context.Background(), server.URL, "pkg")
+	if !ok {
+		t.Fatal("fetchNPMMetadataFromBase() failed on an abbreviated document")
+	}
+	got, _ := accept.Load().(string)
+	if !strings.HasPrefix(got, npmAbbreviatedMetadataMediaType) {
+		t.Fatalf("Accept = %q, want the abbreviated npm metadata media type first", got)
+	}
+	if !strings.Contains(got, "application/json") {
+		t.Fatalf("Accept = %q, want an application/json fallback for registries without abbreviated documents", got)
+	}
+	if meta.DistTags["latest"] != "2.0.0" {
+		t.Fatalf("dist-tags = %v, want latest 2.0.0", meta.DistTags)
+	}
+	v1 := meta.Versions["1.0.0"]
+	if v1.Dependencies["a"] != "^1.0.0" || v1.OptionalDependencies["b"] != "^2.0.0" || v1.PeerDependencies["c"] != "^3.0.0" {
+		t.Fatalf("version 1.0.0 dependency maps = %+v", v1)
+	}
+}
+
+// TestFetchNPMMetadataAcceptsDocumentsAboveGeneralRegistryLimit is the
+// regression pin for popular packages: their metadata exceeds the general
+// registry read limit, and capping it there turned every such row into an
+// unknown latest version.
+func TestFetchNPMMetadataAcceptsDocumentsAboveGeneralRegistryLimit(t *testing.T) {
+	t.Parallel()
+	versions := make(map[string]map[string]string)
+	padding := strings.Repeat("x", 512)
+	for i := 0; int64(len(versions))*int64(len(padding)) <= 2*maxRegistryResponseSize; i++ {
+		v := fmt.Sprintf("1.%d.0", i)
+		versions[v] = map[string]string{"version": v, "description": padding}
+	}
+	body, err := json.Marshal(map[string]any{"dist-tags": map[string]string{"latest": "1.0.0"}, "versions": versions})
+	if err != nil {
+		t.Fatalf("marshal metadata: %v", err)
+	}
+	if int64(len(body)) <= maxRegistryResponseSize {
+		t.Fatalf("test document is %d bytes, want more than the general %d byte limit", len(body), maxRegistryResponseSize)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(body)
+	}))
+	defer server.Close()
+
+	ctx, phase := withRegistryLookupPhase(context.Background(), 30)
+	meta, ok := fetchNPMMetadataFromBase(ctx, server.URL, "popular")
+	if !ok {
+		t.Fatalf("fetchNPMMetadataFromBase() failed on a %d byte document", len(body))
+	}
+	if len(meta.Versions) != len(versions) {
+		t.Fatalf("parsed %d versions, want %d", len(meta.Versions), len(versions))
+	}
+	if got := phase.refusedCount(); got != 0 {
+		t.Fatalf("refusedCount() = %d, want 0", got)
 	}
 }

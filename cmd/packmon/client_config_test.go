@@ -552,6 +552,67 @@ func TestResolveLocalDBPathEnvOverridesAutoProjectDBPath(t *testing.T) {
 	}
 }
 
+// unsetHomeDirectory makes os.UserHomeDir fail on every supported OS.
+func unsetHomeDirectory(t *testing.T) {
+	t.Helper()
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+	t.Setenv("home", "")
+	if _, err := os.UserHomeDir(); err == nil {
+		t.Skip("os.UserHomeDir() still resolves with HOME and USERPROFILE unset on this platform")
+	}
+}
+
+// TestResolveLocalDBPathFailsWithoutHomeDirectory is the regression pin for
+// the working-directory fallback: with no resolvable home directory the
+// default database (and its WAL and journal files) used to land in
+// ./.packmon/db of whatever repository the CLI ran in.
+func TestResolveLocalDBPathFailsWithoutHomeDirectory(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	unsetHomeDirectory(t)
+	t.Setenv("PACKMON_DB_PATH", "")
+
+	path, err := resolveLocalDBPath()
+	if err == nil {
+		t.Fatalf("resolveLocalDBPath() = %q, want an error instead of a working-directory fallback", path)
+	}
+	if path != "" {
+		t.Fatalf("resolveLocalDBPath() path = %q, want none", path)
+	}
+	if !strings.Contains(err.Error(), "home directory") || !strings.Contains(err.Error(), "PACKMON_DB_PATH or db.path") {
+		t.Fatalf("resolveLocalDBPath() error = %v, want the unknown home directory and the override named", err)
+	}
+	if _, err := defaultLocalDBPath(); err == nil {
+		t.Fatal("defaultLocalDBPath() error = nil without a home directory")
+	}
+}
+
+// TestResolveLocalDBPathOverridesWorkWithoutHomeDirectory keeps the documented
+// way out: an explicit PACKMON_DB_PATH or db.path needs no home directory.
+func TestResolveLocalDBPathOverridesWorkWithoutHomeDirectory(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	unsetHomeDirectory(t)
+
+	envDir := filepath.Join(t.TempDir(), "env-db")
+	t.Setenv("PACKMON_DB_PATH", "  "+envDir+"  ")
+	path, err := resolveLocalDBPath()
+	if err != nil || path != filepath.Join(envDir, "packmon.db") {
+		t.Fatalf("resolveLocalDBPath(env) = %q, %v; want the trimmed env directory", path, err)
+	}
+
+	t.Setenv("PACKMON_DB_PATH", "")
+	cfgDir := filepath.Join(t.TempDir(), "cfg-db")
+	configPath := filepath.Join(t.TempDir(), "packmon.yaml")
+	if err := os.WriteFile(configPath, []byte("db:\n  path: "+strconvQuoteForYAML(cfgDir)+"\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	flagConfig = configPath
+	path, err = resolveLocalDBPath()
+	if err != nil || path != filepath.Join(cfgDir, "packmon.db") {
+		t.Fatalf("resolveLocalDBPath(config) = %q, %v; want the configured directory", path, err)
+	}
+}
+
 func TestLoadCLIConfigRejectsDuplicateRepoNames(t *testing.T) {
 	t.Parallel()
 

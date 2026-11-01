@@ -191,7 +191,9 @@ available-update information on top of the findings, querying public registries
 for latest versions -- add `--list-all-offline` when you have no outbound
 network. The lookup phase is rate-limited (crates.io lookups pace at one
 request per second, so a large Rust inventory takes several minutes) and
-reports its progress every 10 seconds. `--html` writes a self-contained report for a browser or a ticket, and
+reports its progress every 10 seconds; `--timeout` bounds each registry
+request, not the queue wait in front of it or the whole phase. `--html` writes
+a self-contained report for a browser or a ticket, and
 `--output-json` the same result in the canonical machine shape;
 `--output-sarif` and `--output-junit` exist for code scanning and CI test
 reporting.
@@ -851,7 +853,11 @@ rows render latest status as `unknown`.
 A package status of `Unknown` in the report always means the latest version
 could not be determined (offline mode, unreachable registry, or an
 unsupported/private source as described below); it is not a security signal,
-and security findings for that package are unaffected. Independent of the
+and security findings for that package are unaffected. When registry lookups
+failed, stderr and the report hint say how: refused or failed requests (a
+rate limit, a slow registry) are worth a rerun, a higher `--timeout`, or a
+mirror; responses discarded for exceeding the CLI's response size limit are
+reported separately, because neither changes them. Independent of the
 `Unknown` status: for additional reputation and malware coverage on top of the
 vulnerability feeds, configure the optional server-side ReversingLabs Spectra
 Assure key (`PACKMON_REVERSINGLABS_API_KEY`, see Server Configuration).
@@ -875,9 +881,15 @@ once its `<packages>` section has been read) and `choco install|upgrade` /
 are read with their own language's rules: `.ps1` / `.psm1` files continue lines
 with a trailing backtick and skip `#` comments, `<# ... #>` block comments, and
 here-strings (a backtick inside a comment does not continue the line);
-`.bat` / `.cmd` files continue lines with a trailing caret and skip `REM`,
-`@REM`, and `::` comment lines. Quoted text is always an argument, so a quoted
-`';'` or `'|'` neither starts a new command nor ends the package list.
+`.bat` / `.cmd` files follow cmd.exe rules: only double quotes group text
+(a single-quoted `--version='1.0'` stays unpinned), a caret escapes the next
+character outside double quotes (`^&` is an argument, `^^` a literal caret), a
+caret that is the last character of the line (not inside double quotes, not
+escaped, no trailing spaces) continues it, only `&`, `&&`, `||`, `|`,
+parentheses, and redirections separate commands (`;`, `{`, `}`, and `=` are
+ordinary text), and `REM`, `@REM`, and `::` comment lines are skipped. Quoted
+text is always an argument, so a quoted `';'` (PowerShell) or `"&"` neither
+starts a new command nor ends the package list.
 Pinned `--version` entries are compared
 with the feed's latest release; unpinned entries (config.xml always installs
 latest) show `INSTALLED -`, the feed's latest version, and status `unpinned`
@@ -941,7 +953,10 @@ followed):
   path inside the repository fails the scan with exit code `2` before it runs;
 - a local database directory (`PACKMON_DB_PATH`, `db.path`, or the default
   `~/.packmon/db`) inside the repository fails the scan with exit code `2`
-  when the scan opens it (local or auto mode, or scan history).
+  when the scan opens it (local or auto mode, or scan history). So does an
+  unknown home directory without `PACKMON_DB_PATH` or `db.path`: the default
+  database then has no location, and packmon never falls back to the
+  repository (the working directory).
 
 Report destinations outside the repository are still written. `--hook` cannot
 be combined with `--list-packages`, `--outdated`, `--list-all`, or

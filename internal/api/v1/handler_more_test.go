@@ -1501,6 +1501,63 @@ func TestHandleSyncRejectsMalformedKeysetCursorsBeforeStore(t *testing.T) {
 	}
 }
 
+// TestHandleSyncAcceptsAdvisoryAndLegacyVulnerabilityCursors keeps both
+// vulnerabilities_cursor kinds valid on a delta: the advisory cursor of a delta
+// paged by whole advisories, and the legacy (ecosystem, name, id) row cursor an
+// older server issued to a client still paging through its sequence. Both
+// reach the store unchanged.
+func TestHandleSyncAcceptsAdvisoryAndLegacyVulnerabilityCursors(t *testing.T) {
+	t.Parallel()
+
+	for _, cursor := range []string{
+		db.EncodeSyncAdvisoryCursor("GHSA-aaaa-bbbb-cccc"),
+		base64.RawURLEncoding.EncodeToString([]byte(`["npm","left-pad","GHSA-aaaa-bbbb-cccc"]`)),
+	} {
+		store := &syncExportStore{export: &db.SyncExport{SyncedAt: time.Date(2026, 5, 30, 12, 0, 0, 0, time.UTC)}}
+		h := newTestHandler(&store.stubStore)
+		h.store = store
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/sync?since=2026-05-30T11:00:00Z&vulnerabilities_cursor="+cursor, nil)
+		rr := httptest.NewRecorder()
+
+		h.HandleSync(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("cursor %q status = %d, want 200: %s", cursor, rr.Code, rr.Body.String())
+		}
+		if store.opts.Cursor.VulnerabilitiesCursor != cursor {
+			t.Fatalf("store cursor = %q, want %q", store.opts.Cursor.VulnerabilitiesCursor, cursor)
+		}
+	}
+}
+
+// TestHandleSyncRejectsAdvisoryCursorOutsideADelta rejects an advisory cursor
+// without a since window and other two-part cursors before the store runs: a
+// full export pages rows and cannot continue an advisory cursor.
+func TestHandleSyncRejectsAdvisoryCursorOutsideADelta(t *testing.T) {
+	t.Parallel()
+
+	for _, target := range []string{
+		"/api/v1/sync?vulnerabilities_cursor=" + db.EncodeSyncAdvisoryCursor("GHSA-aaaa-bbbb-cccc"),
+		"/api/v1/sync?since=2026-05-30T11:00:00Z&vulnerabilities_cursor=" + base64.RawURLEncoding.EncodeToString([]byte(`["other-v2","GHSA-1"]`)),
+		"/api/v1/sync?since=2026-05-30T11:00:00Z&malicious_cursor=" + db.EncodeSyncAdvisoryCursor("MAL-1"),
+	} {
+		store := &syncExportStore{export: &db.SyncExport{SyncedAt: time.Date(2026, 5, 30, 12, 0, 0, 0, time.UTC)}}
+		h := newTestHandler(&store.stubStore)
+		h.store = store
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		rr := httptest.NewRecorder()
+
+		h.HandleSync(rr, req)
+
+		if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "cursor") {
+			t.Fatalf("%s status = %d body %s, want 400 cursor validation error", target, rr.Code, rr.Body.String())
+		}
+		if store.calls != 0 {
+			t.Fatalf("%s ExportSync calls = %d, want 0", target, store.calls)
+		}
+	}
+}
+
 func TestHandleSyncWritesAttributedAccessAudit(t *testing.T) {
 	t.Parallel()
 

@@ -1,9 +1,46 @@
 package db
 
 import (
+	"encoding/base64"
 	"testing"
 	"time"
 )
+
+// TestSyncAdvisoryCursorRoundTrip pins the versioned vulnerabilities_cursor of
+// a delta paged by whole advisories: it round-trips the last advisory ID and is
+// told apart from the legacy (ecosystem, name, id) row cursor, which older
+// servers issued and which a delta request may still echo.
+func TestSyncAdvisoryCursorRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	for _, id := range []string{"GHSA-aaaa-bbbb-cccc", "manual:3f1c", `odd "id" with spaces`} {
+		raw := EncodeSyncAdvisoryCursor(id)
+		got, ok := DecodeSyncAdvisoryCursor(raw)
+		if !ok || got != id {
+			t.Fatalf("DecodeSyncAdvisoryCursor(EncodeSyncAdvisoryCursor(%q)) = %q, %v; want the ID", id, got, ok)
+		}
+	}
+
+	encode := func(payload string) string { return base64.RawURLEncoding.EncodeToString([]byte(payload)) }
+	for _, raw := range []string{
+		encode(`["npm","left-pad","GHSA-1"]`), // legacy row cursor
+		"",
+		"not-base64!",
+		encode(`["advisory-v2"]`),           // tag without an ID
+		encode(`["advisory-v2",""]`),        // empty ID
+		encode(`["other-v2","GHSA-1"]`),     // unknown tag
+		encode(`["advisory-v2","a","b"]`),   // too many parts
+		encode(`{"advisory-v2":"GHSA-1"}`),  // not an array
+		encode(`["advisory-v2","GHSA-1"]x`), // trailing data
+	} {
+		if id, ok := DecodeSyncAdvisoryCursor(raw); ok {
+			t.Fatalf("DecodeSyncAdvisoryCursor(%q) = %q, true; want not an advisory cursor", raw, id)
+		}
+	}
+	if got := EncodeSyncAdvisoryCursor("GHSA-1"); got != encode(`["advisory-v2","GHSA-1"]`) {
+		t.Fatalf("EncodeSyncAdvisoryCursor() = %q, want base64url of the tagged JSON array", got)
+	}
+}
 
 func TestSyncCursorZeroAndEffectiveCursor(t *testing.T) {
 	t.Parallel()

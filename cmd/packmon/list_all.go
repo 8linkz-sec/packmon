@@ -56,10 +56,14 @@ type listAllPackageReport struct {
 	Vulnerable        int
 	Unknown           int
 	Warnings          []string
-	RefusedRequests   int
-	SkippedRequests   int
-	BreakerTripped    bool
-	Offline           bool
+	// RefusedRequests and OversizedResponses are disjoint: a response the
+	// client discarded for exceeding its read limit is counted only in
+	// OversizedResponses, because it needs different advice.
+	RefusedRequests    int
+	OversizedResponses int
+	SkippedRequests    int
+	BreakerTripped     bool
+	Offline            bool
 }
 
 type listAllRow struct {
@@ -536,7 +540,8 @@ func buildListAllPackageReportWithOptions(parent context.Context, packages []lis
 // the matching warnings. A canceled phase records counters but stays silent:
 // the user aborted, nothing failed.
 func appendLookupPhaseWarnings(report *listAllPackageReport, phase *registryLookupPhase, canceled bool) {
-	report.RefusedRequests = phase.refusedCount()
+	report.OversizedResponses = phase.oversizedCount()
+	report.RefusedRequests = phase.refusedCount() - report.OversizedResponses
 	report.SkippedRequests = phase.skippedCount()
 	report.BreakerTripped = phase.breakerOpen()
 	if canceled {
@@ -546,6 +551,13 @@ func appendLookupPhaseWarnings(report *listAllPackageReport, phase *registryLook
 		report.Warnings = append(report.Warnings, fmt.Sprintf(
 			"%d registry requests were refused or failed, so some latest-version data is missing and the update status of the affected rows is incomplete. A registry rate limit or a slow registry is the usual cause -- rerun the scan, raise --timeout, or route the lookups through a mirror.",
 			report.RefusedRequests,
+		))
+	}
+	if report.OversizedResponses > 0 {
+		report.Warnings = append(report.Warnings, fmt.Sprintf(
+			"%d registry responses exceeded the CLI's response size limit and were discarded, so some latest-version data is missing and the update status of the affected rows is incomplete. "+
+				"The limit bounds memory use; this is not a rate limit or a timeout, so rerunning the scan or allowing more time does not help.",
+			report.OversizedResponses,
 		))
 	}
 	if report.BreakerTripped {

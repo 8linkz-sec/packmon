@@ -372,7 +372,9 @@ Important behavior:
     `--output-sarif`, `--output-junit`, or `--html` path;
   - fails with exit code `2` before scanning when the scan opens the local
     database (local checker or history) and its directory (`PACKMON_DB_PATH`,
-    `db.path`, or the default `~/.packmon/db`) is inside.
+    `db.path`, or the default `~/.packmon/db`) is inside, or when the home
+    directory is unknown and neither override is set (see "Local SQLite
+    Mode").
 
   Destinations outside the repository are still written. With several
   targets, the single-target rule for report outputs applies to what is left
@@ -601,6 +603,22 @@ Important behavior:
   estimate that accounts for the slower crates.io and Chocolatey rates when
   those packages dominate the inventory, and prints a `done/total` progress
   line every 10 seconds until the phase completes (suppressed by `--quiet`).
+  The phase itself has no deadline; `--timeout` bounds each registry request
+  from the moment it leaves the rate limiter, so time spent queued behind
+  other lookups does not count against it. A lookup abandoned in the queue
+  for any reason other than a user cancellation counts as a refused request.
+  Registry response bodies are read up to a fixed limit: 512 KiB by default,
+  4 MiB for Packagist, and 16 MiB for PyPI and for npm metadata. npm range
+  resolution requests the abbreviated install document
+  (`Accept: application/vnd.npm.install-v1+json`), which carries the
+  dist-tags, versions, and dependency maps the resolver reads; a registry
+  without it returns the full packument, which decodes into the same fields.
+  A response over its limit is discarded, not partially parsed. Lookup
+  failures are reported on stderr and in the list-all HTML hint by kind:
+  refused or failed requests (rate limits, server errors, network errors,
+  timeouts) advise rerunning, raising `--timeout`, or using a mirror, while
+  discarded oversized responses are reported separately because neither a
+  rerun nor more time changes them.
 - `--list-all` also inventories Docker image declarations from `Dockerfile`,
   `Dockerfile.*`, `docker-compose.yml`, `docker-compose.yaml`, `compose.yml`,
   and `compose.yaml`. Docker rows use ecosystem `docker`, show declared
@@ -634,17 +652,34 @@ Important behavior:
   installs latest) show INSTALLED `-`, the feed's latest version, UPDATE
   `unpinned`, and the `unpinned` flag, and are never counted as available
   updates. A script `choco` verb counts only in command position (line start,
-  after an unquoted `;`, `|`, `&`, `(`, `)`, `{`, `}`, redirection, or `=`,
-  or after `call` / `sudo`); quoted text is always an argument, so a quoted
-  `';'` neither starts a new command nor ends the package list. Script
-  syntax follows the file type: `.ps1` / `.psm1` files join backtick line
-  continuations and skip `#` comments, `<# ... #>` block comments, and
-  here-strings, where a backtick inside a `#` or block comment is comment text
-  and does not pull the next line into the comment; `.bat` / `.cmd` files join
-  caret line continuations and skip `REM` / `@REM` and `::` comment lines,
-  and `#` is ordinary text there. A caret in a PowerShell file and a backtick
-  in a batch file never continue a line. Script `--source` arguments are
-  ignored; feeds come only from configuration. Chocolatey inventory is
+  after an unquoted command separator or redirection, or after `call` /
+  `sudo`). In `.ps1` / `.psm1` files the separators are `;`, `|`, `&`, `(`,
+  `)`, `{`, `}`, redirection, and `=`; in `.bat` / `.cmd` files they are only
+  the cmd.exe separators `&`, `&&`, `||`, `|`, the block parentheses `(` /
+  `)`, and redirection, while `;`, `{`, `}`, and `=` are ordinary argument
+  text. Quoted (and in batch files caret-escaped) text is always an argument,
+  so a quoted `';'` or `"&"` neither starts a new command nor ends the
+  package list. A `--version=value` pin has surrounding double quotes
+  stripped in both languages and surrounding single quotes stripped only in
+  PowerShell: cmd.exe passes single quotes to choco.exe unchanged, so a batch
+  `--version='1.0'` is not a version literal and the entry is unpinned. Script
+  syntax follows the file type: `.ps1` / `.psm1` files group single- and
+  double-quoted text, join backtick line continuations, and skip `#`
+  comments, `<# ... #>` block comments, and here-strings, where a backtick
+  inside a `#` or block comment is comment text and does not pull the next
+  line into the comment; `.bat` / `.cmd` files follow cmd.exe quoting and
+  escaping: only double quotes group (a single quote is ordinary text), a
+  caret inside double quotes is literal, an unquoted caret makes the next
+  character literal (`^&`, `^|`, `^<`, `^>`, and `^"` are argument text, `^^`
+  is a literal caret, and an escaped space still separates arguments), and
+  only an unquoted, unescaped caret that is the last character of the line
+  continues it; the next line is appended without a space and its first
+  character is escaped. Batch files skip `REM` / `@REM` and `::` comment
+  lines (a trailing caret on such a line, even one followed by spaces, keeps
+  the comment going onto the next line), and `#` is ordinary text there. A
+  caret in a PowerShell file and a backtick in a batch file never continue a
+  line. Script `--source` arguments are ignored; feeds come only from
+  configuration. Chocolatey inventory is
   metadata-only: no vulnerability or malicious-package matching, no
   `/api/v1/check` submission, no `--outdated` rows, and no JSON/SARIF/JUnit
   entries.
@@ -1020,6 +1055,14 @@ explainable after rows are gone.
 
 Local mode uses a compact SQLite database populated from `GET /api/v1/sync`.
 It stores enough data for equivalent finding quality but not full server detail.
+The database file is `packmon.db` in `PACKMON_DB_PATH`, else in the trusted
+config `db.path`, else in `~/.packmon/db`. When the home directory cannot be
+resolved and neither override is set, the database has no location: commands
+that need it (`db sync`, `db info`, `db export`, `history clear`, `report`,
+`dashboard`, local-mode scans) fail with an error that names both overrides,
+auto-mode fallback and scan-history recording warn and skip it, and
+`packmon config show` prints the `db_path` as unresolved. The CLI never falls
+back to the working directory, which is usually a repository.
 
 Remote and local modes should detect the same vulnerability, malicious, synced
 reputation, and lifecycle findings when local data is fresh. Local SQLite sync
@@ -1056,28 +1099,48 @@ pending until an unfiltered sync completes it.
 Local vulnerability rows are keyed by advisory, ecosystem, and package name, so
 a delta sync must also remove packages an advisory no longer affects. A delta
 `GET /api/v1/sync` exports every changed vulnerability with all of its current
-affected packages (within the requested ecosystems). The server promises that
-the affected sets are complete, with `vulnerability_affected_complete: true`,
-only where this is structurally true: on a delta (a `since` window was given)
-that is delivered in a single page. Only for such a response -- a non-full
-sync with a stored `since`, whose first page is not truncated and carries the
-flag -- does the client drop, in that page's transaction, the local affected
-rows of each delivered non-withdrawn vulnerability that the page did not
-deliver. Syncs without a `since` and multi-page deltas stay upsert-only (a
-full sync clears and reloads the local tables instead): the pages of a
-multi-page delta are separate statements, so an
-advisory changed between two pages can arrive incomplete, and the client must
-not delete its rows (whole-advisory paging is a planned follow-up). Server writes
-that only delete affected rows (the package-name repair merging a legacy row
-into an existing canonical one) also move the vulnerability's `updated_at`, so
-the change enters the next delta. A coverage move (a manual advisory edited to
-another package, a package-name repair) therefore reaches local scans with the
-next single-page incremental sync instead of requiring a full sync; after a
-larger delta it remains until a later single-page delta or a full sync.
-Servers without the guarantee omit the field and clients that do not know it
-keep upserting rows, so older clients and servers remain compatible. An
-ecosystem-filtered sync replaces rows only in its ecosystems and cannot see an
-advisory that moved entirely to another ecosystem; an unfiltered sync does.
+affected packages (within the requested ecosystems). A delta pages the
+vulnerability dataset by whole advisories: each page is one statement that
+selects the next changed advisories in ID order after the advisory cursor and
+exports every in-scope affected row of each of them, ordered by advisory ID. A
+page takes advisories while their affected rows fit the `limit`; the first
+advisory always fits, so an advisory with more affected rows than the limit is
+a page of its own and that page holds more rows than the limit, instead of the
+advisory being split. `next_cursor.vulnerabilities_cursor` then carries a
+versioned advisory cursor (the last advisory ID of the page), and the dataset
+continues only while the page left an advisory for the next one. The server
+promises that the affected sets of a page are complete, with
+`vulnerability_affected_complete: true`, on every such delta page: the flag
+means that every vulnerability delivered on this page carries its complete
+current affected set. For each flagged page of a non-full sync with a stored
+`since`, the client drops, in that page's transaction, the local affected rows
+of each delivered non-withdrawn vulnerability that the page did not deliver;
+unflagged pages stay upsert-only (a full sync clears and reloads the local
+tables instead). An advisory that changes between two pages is never delivered
+partially: an advisory an earlier page already delivered keeps the state that
+page read and reaches the client again with the next delta, and an advisory a
+later page selects is either exported whole with its current affected set or,
+when its vulnerability row changed after the pinned snapshot, excluded whole
+until the next delta. A failed sequence keeps the replacements of its committed
+pages, which match what the server listed, does not advance the `since`
+window, and leaves every advisory it did not deliver untouched. Full exports
+keep row paging in (ecosystem, name, id) order and are never flagged. A delta
+that continues a legacy three-part row cursor (a sequence an older server
+started) keeps legacy row paging, and a legacy offset delta pages rows in
+advisory order, so offset-only clients continue where the advisory-ordered
+first page ended; both can split an advisory and are never flagged. Server
+writes that only delete affected rows (the package-name repair merging a
+legacy row into an existing canonical one) also move the vulnerability's
+`updated_at`, so the change enters the next delta. A coverage move (a manual
+advisory edited to another package, a package-name repair) therefore reaches
+local scans with the next incremental sync, however many pages it takes,
+instead of requiring a full sync. Older servers set the field only on a delta
+that fits in one page, servers without the guarantee omit it, and clients that
+do not know it keep upserting rows, so older clients and servers remain
+compatible; a new client against an older server stays upsert-only on every
+multi-page delta. An ecosystem-filtered sync replaces rows only in its
+ecosystems and cannot see an advisory that moved entirely to another ecosystem
+(it has no in-scope affected row left to deliver); an unfiltered sync does.
 Malicious rows are keyed by ID, so a changed row already replaces the local
 one.
 Local scans query those reputation rows through explicit reputation lookup

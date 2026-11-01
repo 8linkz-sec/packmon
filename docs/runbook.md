@@ -536,12 +536,24 @@ advisory it touches, so local clients refetch those advisories with their next
 incremental sync. Manual advisory edits that move coverage to another package
 are picked up the same way.
 
-Current clients drop de-listed packages of a changed advisory only on an
-incremental sync whose delta arrives in a single page (the server then sets
-`vulnerability_affected_complete`). Multi-page deltas, older servers, and
-older clients stay upsert-only and keep the old package until a later
-single-page incremental sync drops it or a full sync, which clears and reloads
-the local tables, replaces it:
+Current clients drop de-listed packages of a changed advisory on the next
+incremental sync, however many pages its delta takes: the server pages a delta
+by whole advisories and sets `vulnerability_affected_complete` on every page,
+and the client replaces the advisories of each flagged page. An advisory that
+changed again while the sync was paging is completed by the following
+incremental sync. Older servers (which flag only a delta that fits in one
+page) and older clients stay upsert-only on larger deltas and keep the old
+package until a later single-page incremental sync drops it or a full sync,
+which clears and reloads the local tables, replaces it. An ecosystem-filtered
+sync cannot drop the local rows of an advisory whose coverage moved entirely to
+another ecosystem; run an unfiltered sync or a full sync.
+
+During a rolling upgrade, a sync sequence that a new server started and an
+older server continues fails with `400` (the older server does not know the
+whole-advisory cursor); nothing is deleted and the next sync starts over.
+Clients that page by `offset` only, without the cursor, should not switch
+between old and new servers mid-sequence, because the two order offset pages
+differently. When in doubt, run a full sync:
 
 ```bash
 packmon db sync --server https://packmon.internal:8080 --full
@@ -560,11 +572,18 @@ push, when the scan was asked to write there and cannot skip the write:
 - the local database directory is inside the repository. The scan opens it in
   local and auto mode and to record scan history. Typical causes: a relative
   `PACKMON_DB_PATH` (it resolves against the repository for a hook run), a
-  `db.path` pointing into the repository, the home directory itself being a
-  Git repository (the default database lives in `~/.packmon/db`), or an
-  unknown home directory, where the default falls back to `./.packmon/db`.
-  Set `PACKMON_DB_PATH` or `db.path` to an absolute directory outside every
-  repository, or make `HOME` / `USERPROFILE` resolvable for the hook.
+  `db.path` pointing into the repository, or the home directory itself being
+  a Git repository (the default database lives in `~/.packmon/db`). Set
+  `PACKMON_DB_PATH` or `db.path` to an absolute directory outside every
+  repository.
+- the home directory is unknown (`HOME` / `USERPROFILE` unset or empty in the
+  hook environment), neither `PACKMON_DB_PATH` nor `db.path` is set, and the
+  scan opens the local database. The default database then has no location,
+  and the hook fails with
+  `the home directory is unknown; set PACKMON_DB_PATH or db.path` instead of
+  creating the database in the repository. Set one of the two to an absolute
+  directory outside every repository, or make `HOME` / `USERPROFILE`
+  resolvable for the hook.
 
 A config `output.file` inside the repository does not fail the hook: it is
 skipped with `warning: --hook: skipping output.file <path> (inside the

@@ -31,9 +31,10 @@
   via `removed_at`, exported to local clients as withdrawn) instead of becoming
   an all-version blocking finding. Each repaired row is recorded with its
   original value in `packmon_m050_version_range_repairs`, and the 050 down
-  migration restores rows that still hold their repaired value. The store's own pre-write check now matches keys exactly,
-  as the database does, so a case-variant key such as `"Introduced"` is
-  rejected before the write instead of failing the CHECK constraint. The feed
+  migration restores rows that still hold their repaired value. The store's
+  own pre-write check now matches keys exactly, as the database does, so a
+  case-variant key such as `"Introduced"` is rejected before the write
+  instead of failing the CHECK constraint. The feed
   import endpoint applies the same rule to `version_ranges` in vulnerability
   and malicious imports, so such a range gets a `400` naming the failing
   field (for example `version_ranges[0].events[0].fixed must be a string`)
@@ -64,19 +65,58 @@
   record that fails the store's own version-JSON checks, or a CHECK
   constraint. Only an allowlist of PostgreSQL value errors (SQLSTATE 22001,
   22003, 22007, 22008, 22021, 22P02, 22P05) and CHECK violations (23514) are
-  treated this way; other database errors stay `500`. This covers every import path (OSV/GHSA, OpenSSF/Socket,
-  VulnCheck, CISA KEV and EPSS, buffered and streamed). The response and the
+  treated this way; other database errors stay `500`. This covers every
+  import path (OSV/GHSA, OpenSSF/Socket, VulnCheck, CISA KEV and EPSS,
+  buffered and streamed). The response and the
   recorded `rejected` feed status carry the fixed message "feed import
   contains values the store cannot accept"; the detailed store error is only
   logged. Nothing from the rejected import commits.
+- Diagnostic redaction now hides secrets whose key is quoted, as in JSON or
+  dict-style error text: `"password":"x"`, `"api_key": "x"`, `'token':'x'`, and
+  `\"token\":\"x\"` inside an escaped JSON string, with optional whitespace
+  around `:` or `=`. These values used to reach logs and error messages in
+  clear text, because the separator had to follow the key name directly. Only
+  the secret values are redacted; the other fields of the object stay
+  readable. An escaped value of JSON inside a JSON string
+  (`\"token\":\"a b\"`) is redacted up to its matching escaped closing quote,
+  so the part after its first space no longer leaks. A backslash-escaped
+  newline inside a secret value (`password='ab\` followed by a line break)
+  also no longer ends the redaction early and leaks the rest of the value.
+- The CLI no longer creates its local SQLite database (and its WAL and
+  journal files) in the working directory when the home directory cannot be
+  resolved. The default `~/.packmon/db` used to fall back to `./.packmon/db`,
+  usually inside whatever repository the CLI ran in. Without a home directory
+  and without `PACKMON_DB_PATH` or `db.path`, commands that need the database
+  now fail with `the home directory is unknown; set PACKMON_DB_PATH or
+  db.path`, auto-mode fallback and scan history warn and skip it, a `--hook`
+  scan exits `2`, and `packmon config show` reports `db_path` as unresolved.
+- `--outdated` / `--list-all` start the per-request `--timeout` when a
+  registry request leaves the shared rate limiter. The deadline used to start
+  before the queue wait, so with a small `--timeout` and many packages a
+  request could expire before it was sent; the row ended up `unknown` and the
+  lookup counted as neither refused nor skipped, so no warning appeared. The
+  queue wait is now bounded only by the scan itself, and a queued lookup that
+  ends for any reason other than a user cancellation (for example a caller
+  deadline) counts as a refused request in the stderr warning and the
+  list-all HTML hint, without advancing the consecutive-failure breaker.
+- `--outdated` / `--list-all` resolve npm dependency ranges for popular
+  packages again. The npm metadata lookup read the full packument through the
+  general 512 KiB registry limit, which popular packages exceed, so their
+  rows ended up `unknown` with a refused-request warning. The lookup now
+  requests npm's abbreviated install document
+  (`Accept: application/vnd.npm.install-v1+json`, full packument as fallback)
+  under a dedicated 16 MiB limit. Responses discarded for exceeding a size
+  limit now get their own warning on stderr and in the list-all HTML hint
+  instead of the refused-request advice to rerun or raise `--timeout`, which
+  cannot help for them.
 - `packmon report` exits `2` (operational error) when writing the report to
   stdout fails. It used to discard every write error outside the history
   table, so a closed pipe or full disk ended the command with exit `0` and no
   (or a truncated) report, and the empty-history message never failed at all.
 - `--outdated` / `--list-all` latest-version lookups whose `200` registry
   response exceeds the read limit (512 KiB for most registries) now count as
-  refused or failed registry requests, so the stderr warning and the list-all
-  HTML hint report them. They used to count as successes without any warning
+  failed lookups, so the stderr warning and the list-all HTML hint report
+  them. They used to count as successes without any warning
   while the row silently ended up `unknown`. The registry did answer, so such
   a response does not advance the consecutive-failure breaker.
 - `packmon scan --outdated` exits `4` (parser error) when a lockfile or SBOM
@@ -358,18 +398,26 @@
   scan kept reporting the old package until a full sync while
   `/api/v1/check` no longer did. A delta `GET /api/v1/sync` now exports each
   changed vulnerability with its complete current affected set (it no longer
-  drops affected rows written after the snapshot). A delta with a `since`
-  window that fits in a single page carries the new optional
+  drops affected rows written after the snapshot). A delta now pages the
+  vulnerability dataset by whole advisories: every page is one statement,
+  ordered by advisory ID behind a versioned advisory cursor, and never splits
+  an advisory across pages; an advisory with more affected rows than the
+  `limit` is a page of its own, so that page holds more rows than the limit.
+  Every such delta page carries the new optional
   `vulnerability_affected_complete: true` field, and the client then replaces
-  the local affected rows of each delivered vulnerability in that page's
-  transaction. Full exports and every page of a multi-page delta omit the
-  field, and the client applies the replacement only to a single-page delta
-  with a stored `since`, so a vulnerability changed between two pages of a
-  larger delta can never delete still-valid local rows; such deltas stay
-  upsert-only (whole-advisory paging is a planned follow-up). The package-name
-  repair also marks merged vulnerabilities changed so they enter the next
-  delta. Older servers omit the field and older clients ignore it, so both
-  keep the previous upsert-only behavior.
+  the local affected rows of each vulnerability delivered on that page in the
+  page's transaction -- on a single-page delta and on every page of a larger
+  one. An advisory that changes between two pages is delivered whole on a
+  later page or by the next delta, or excluded whole, never partially, so no
+  page can delete still-valid local rows; a failed sequence does not advance
+  the `since` window. Full exports and delta pages that continue a legacy row
+  cursor or offset keep row paging and omit the field, and unflagged pages stay
+  upsert-only. The server still accepts the legacy row cursor of a sequence an
+  older server started, and rejects an advisory cursor without `since`. The
+  package-name repair also marks merged vulnerabilities changed so they enter
+  the next delta. Older servers omit the field (or set it only on a delta that
+  fits in one page) and older clients ignore it, so both keep the previous
+  upsert-only behavior on larger deltas.
 - Manual advisory writes and deletes on PostgreSQL use the normalized
   (trimmed) advisory ID throughout. A padded ID such as ` manual:x ` no longer
   leaves both the vulnerability and the malicious record active after a type
@@ -437,6 +485,25 @@
   only to PowerShell files (a batch `echo @"` no longer hides the rest of the
   file, and `#` is ordinary text in batch), and `REM` / `::` comment lines
   only to batch files.
+- Chocolatey script inventory reads batch files (`.bat`, `.cmd`) with cmd.exe
+  quoting and escaping instead of the PowerShell rules, so batch `choco
+  install` lines are no longer split or joined wrongly. A single quote is
+  ordinary text (`echo 'x & choco install b'` reports `b`, and
+  `choco install 'a'` no longer reports `a`); a caret inside double quotes is
+  literal and no longer continues the line, which used to swallow the next
+  command; an unquoted caret escapes the next character, so `^&`, `^|`,
+  `^<`, and `^>` are arguments rather than separators or redirects and `^"`
+  opens no quote; a line ending in `^^` (a literal caret) or in a caret
+  followed by spaces no longer continues and no longer reports the next
+  command's `choco` / `install` words as packages. A continued line is joined
+  without an inserted space and the first character of the next line is
+  escaped, as in cmd.exe. Only the cmd.exe separators `&`, `&&`, `||`, `|`,
+  parentheses, and redirections start a new batch command: `;`, `{`, `}`,
+  and `=` are ordinary text, so `echo x;choco install a` and
+  `set x = choco install a` no longer report `a`, and `choco install a ; b`
+  reports `b` as well. A batch `--version='1.0'` keeps its single quotes, as
+  cmd.exe passes them to choco.exe, and is reported unpinned instead of as
+  version `1.0`. PowerShell parsing is unchanged.
 
 ### Security updates
 
