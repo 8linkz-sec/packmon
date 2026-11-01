@@ -16,6 +16,10 @@
 
 ### Fixed
 
+- `packmon report` exits `2` (operational error) when writing the report to
+  stdout fails. It used to discard every write error outside the history
+  table, so a closed pipe or full disk ended the command with exit `0` and no
+  (or a truncated) report, and the empty-history message never failed at all.
 - `packmon scan --list-all` compares each installed Docker image tag with its
   own local repo digest. Local digests used to be keyed by repository name
   only, so two installed tags of one repository (for example `postgres:17`

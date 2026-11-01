@@ -454,3 +454,66 @@ func insertReportEntry(t *testing.T, store *sqlite.Store, entry sqlite.ScanEntry
 		t.Fatalf("insert report entry: %v", err)
 	}
 }
+
+func TestWriteReportOutputPropagatesEveryWriteError(t *testing.T) {
+	t.Parallel()
+
+	entries := []sqlite.ScanEntry{{
+		RepoName:          "app",
+		ScannedAt:         time.Date(2026, 5, 30, 12, 0, 0, 0, time.UTC),
+		PackagesCount:     2,
+		FindingsCount:     1,
+		FindingSeverities: []string{"HIGH"},
+	}}
+	tests := []struct {
+		name    string
+		repo    string
+		entries []sqlite.ScanEntry
+	}{
+		{name: "empty history", entries: nil},
+		{name: "empty filtered history", repo: "app", entries: nil},
+		{name: "summary", entries: entries},
+		{name: "filtered summary", repo: "app", entries: entries},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			counter := &failListAllTerminalWriter{}
+			if err := writeReportOutput(counter, tt.repo, tt.entries); err != nil {
+				t.Fatalf("writeReportOutput() into counting writer: %v", err)
+			}
+			if counter.writes == 0 {
+				t.Fatal("writeReportOutput() made no writes")
+			}
+			// Fail every single write in turn, including the final newline
+			// after the table: each one must surface as an error.
+			for failAt := 1; failAt <= counter.writes; failAt++ {
+				writer := &failListAllTerminalWriter{failAt: failAt}
+				err := writeReportOutput(writer, tt.repo, tt.entries)
+				if !errors.Is(err, errListAllTerminalWrite) {
+					t.Fatalf("write %d of %d failed: writeReportOutput() error = %v, want writer failure",
+						failAt, counter.writes, err)
+				}
+			}
+		})
+	}
+}
+
+func TestRunReportCommandReturnsOutputWriteErrorForEmptyHistory(t *testing.T) {
+	t.Parallel()
+
+	err := runReportCommand(context.Background(), reportCommandOptions{}, reportCommandDeps{
+		resolveDBPath: func() (string, error) { return "local.db", nil },
+		openStore: func(string) (reportScanStore, error) {
+			return &reportCommandTestStore{}, nil
+		},
+		output: failingWriter{err: errListAllTerminalWrite},
+	})
+	if !errors.Is(err, errListAllTerminalWrite) {
+		t.Fatalf("runReportCommand() error = %v, want output write failure", err)
+	}
+	if code := exitCodeForError(err); code != ExitOperational {
+		t.Fatalf("exit code = %d, want operational %d", code, ExitOperational)
+	}
+}
