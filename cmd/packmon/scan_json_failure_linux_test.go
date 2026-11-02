@@ -3,9 +3,11 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -26,5 +28,8 @@ func TestWriteJSONFileReportsBrokenPipeWriteFailure(t *testing.T) {
 	err = writeJSONFile(path, &domain.ScanResult{ScannedAt: time.Now().UTC()})
 	if err == nil || !strings.Contains(err.Error(), "write file "+path+":") {
 		t.Fatalf("writeJSONFile() error = %v, want contextual write failure", err)
+	}
+	if !errors.Is(err, syscall.EPIPE) {
+		t.Fatalf("writeJSONFile() error = %v, want errors.Is(err, syscall.EPIPE)", err)
 	}
 }
