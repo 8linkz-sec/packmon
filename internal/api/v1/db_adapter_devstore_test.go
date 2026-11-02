@@ -58,7 +58,8 @@ func TestDBStoreAdapterDelegatesToBackingStore(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	adapter := NewDBStoreAdapter(devstore.NewStore())
+	backing := devstore.NewStore()
+	adapter := NewDBStoreAdapter(backing)
 	if adapter == nil {
 		t.Fatal("NewDBStoreAdapter(devstore) = nil, want adapter")
 	}
@@ -69,14 +70,28 @@ func TestDBStoreAdapterDelegatesToBackingStore(t *testing.T) {
 		ID:       "CVE-2024-0001",
 		Summary:  "test vulnerability",
 		Severity: "HIGH",
+		Sources:  []db.VulnerabilitySource{{Source: "osv", SourceID: "OSV-1"}},
+		AffectedPackages: []db.AffectedPackage{{
+			Ecosystem:        "npm",
+			Name:             "lodash",
+			VersionsAffected: json.RawMessage(`["4.17.20"]`),
+		}},
 	}); err != nil {
 		t.Fatalf("UpsertVulnerability() error = %v", err)
 	}
-	if _, err := adapter.FindVulnerabilities(ctx, "npm", "lodash", "4.17.20"); err != nil {
+	vulnerabilityFindings, err := adapter.FindVulnerabilities(ctx, "npm", "lodash", "4.17.20")
+	if err != nil {
 		t.Fatalf("FindVulnerabilities() error = %v", err)
 	}
-	if _, err := adapter.FindVulnerabilitiesBatch(ctx, lookups); err != nil {
+	if len(vulnerabilityFindings) != 1 || vulnerabilityFindings[0].AdvisoryID != "CVE-2024-0001" || vulnerabilityFindings[0].Source != "osv" || vulnerabilityFindings[0].Version != "4.17.20" {
+		t.Fatalf("FindVulnerabilities() = %+v, want the persisted vulnerability", vulnerabilityFindings)
+	}
+	vulnerabilityBatch, err := adapter.FindVulnerabilitiesBatch(ctx, lookups)
+	if err != nil {
 		t.Fatalf("FindVulnerabilitiesBatch() error = %v", err)
+	}
+	if len(vulnerabilityBatch) != 1 || vulnerabilityBatch[0].AdvisoryID != "CVE-2024-0001" {
+		t.Fatalf("FindVulnerabilitiesBatch() = %+v, want persisted vulnerability", vulnerabilityBatch)
 	}
 
 	if err := adapter.UpsertMaliciousFinding(ctx, &db.MaliciousFinding{
@@ -92,17 +107,35 @@ func TestDBStoreAdapterDelegatesToBackingStore(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("UpsertMaliciousFinding() error = %v", err)
 	}
-	if _, err := adapter.FindMalicious(ctx, "npm", "evil-package", "1.0.0"); err != nil {
+	maliciousFindings, err := adapter.FindMalicious(ctx, "npm", "evil-package", "1.0.0")
+	if err != nil {
 		t.Fatalf("FindMalicious() error = %v", err)
 	}
-	if _, err := adapter.FindMaliciousBatch(ctx, lookups); err != nil {
+	if len(maliciousFindings) != 1 || maliciousFindings[0].AdvisoryID != "MAL-0001" || maliciousFindings[0].RiskType != "malware" || maliciousFindings[0].Source != "openssf" {
+		t.Fatalf("FindMalicious() = %+v, want persisted malicious finding", maliciousFindings)
+	}
+	maliciousLookups := []PackageLookup{{Ecosystem: "npm", Name: "evil-package", Version: "1.0.0"}}
+	maliciousBatch, err := adapter.FindMaliciousBatch(ctx, maliciousLookups)
+	if err != nil {
 		t.Fatalf("FindMaliciousBatch() error = %v", err)
 	}
-	if _, err := adapter.FindReputationFindingsBatch(ctx, lookups, "socket"); err != nil {
+	if len(maliciousBatch) != 1 || maliciousBatch[0].AdvisoryID != "MAL-0001" {
+		t.Fatalf("FindMaliciousBatch() = %+v, want persisted malicious finding", maliciousBatch)
+	}
+	reputationFindings, err := adapter.FindReputationFindingsBatch(ctx, lookups, "socket")
+	if err != nil {
 		t.Fatalf("FindReputationFindingsBatch() error = %v", err)
 	}
-	if _, err := adapter.FindLifecycleFindingsBatch(ctx, lookups, time.Now().UTC()); err != nil {
+	if reputationFindings != nil {
+		t.Fatalf("FindReputationFindingsBatch() = %+v, want nil devstore result", reputationFindings)
+	}
+	lifecycleNow := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	lifecycleFindings, err := adapter.FindLifecycleFindingsBatch(ctx, lookups, lifecycleNow)
+	if err != nil {
 		t.Fatalf("FindLifecycleFindingsBatch() error = %v", err)
+	}
+	if lifecycleFindings != nil {
+		t.Fatalf("FindLifecycleFindingsBatch() = %+v, want nil devstore result", lifecycleFindings)
 	}
 
 	if err := adapter.UpsertFeedSyncStatus(ctx, &db.FeedSyncStatus{
@@ -125,21 +158,41 @@ func TestDBStoreAdapterDelegatesToBackingStore(t *testing.T) {
 		t.Fatalf("ListFeedSyncStatuses() = %+v, want upserted osv status", statuses)
 	}
 
-	if _, _, err := adapter.EnqueueRefresh(ctx, &db.RefreshJob{
+	created, position, err := adapter.EnqueueRefresh(ctx, &db.RefreshJob{
 		Ecosystem: "npm",
 		Name:      "lodash",
 		Source:    "socket",
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("EnqueueRefresh() error = %v", err)
 	}
-	if _, _, err := adapter.EnqueueRefreshWithAudit(ctx, &db.RefreshJob{
+	if !created || position != 1 {
+		t.Fatalf("EnqueueRefresh() = created %v, position %d; want true, 1", created, position)
+	}
+	queueAuditCalls := 0
+	created, position, err = adapter.EnqueueRefreshWithAudit(ctx, &db.RefreshJob{
 		Ecosystem: "pypi",
 		Name:      "requests",
 		Source:    "socket",
-	}, func(bool, int) db.AdminAuditEntry {
+	}, func(gotCreated bool, gotPosition int) db.AdminAuditEntry {
+		queueAuditCalls++
+		if !gotCreated || gotPosition != 2 {
+			t.Errorf("refresh audit callback = created %v, position %d; want true, 2", gotCreated, gotPosition)
+		}
 		return adapterTestAudit("refresh_enqueue")
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("EnqueueRefreshWithAudit() error = %v", err)
+	}
+	if !created || position != 2 || queueAuditCalls != 1 {
+		t.Fatalf("EnqueueRefreshWithAudit() = created %v, position %d; audit calls %d", created, position, queueAuditCalls)
+	}
+	auditRows, err := backing.ListAdminAuditLog(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListAdminAuditLog() error = %v", err)
+	}
+	if len(auditRows) != 1 || auditRows[0].Action != "refresh_enqueue" {
+		t.Fatalf("admin audit rows = %+v, want persisted refresh_enqueue action", auditRows)
 	}
 
 	if err := adapter.InsertScanLog(ctx, &db.ScanLogEntry{
@@ -150,20 +203,42 @@ func TestDBStoreAdapterDelegatesToBackingStore(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("InsertScanLog() error = %v", err)
 	}
-	if _, err := adapter.GetScanLogByIdempotencyKey(ctx, "adapter-idem-key"); err != nil {
+	scanLog, err := adapter.GetScanLogByIdempotencyKey(ctx, "adapter-idem-key")
+	if err != nil {
 		t.Fatalf("GetScanLogByIdempotencyKey() error = %v", err)
 	}
+	if scanLog == nil || scanLog.ScanID != "scan-adapter-test" || scanLog.RepoName != "packmon" || scanLog.IdempotencyKey != "adapter-idem-key" {
+		t.Fatalf("GetScanLogByIdempotencyKey() = %+v, want inserted scan log", scanLog)
+	}
 
-	if _, _, err := adapter.ImportVulnerabilityFeedWithAudit(ctx, "osv", []db.Vulnerability{{
+	imported, deleted, err := adapter.ImportVulnerabilityFeedWithAudit(ctx, "osv", []db.Vulnerability{{
 		ID:       "CVE-2024-0002",
 		Summary:  "imported vulnerability",
 		Severity: "MEDIUM",
+		Sources:  []db.VulnerabilitySource{{Source: "osv", SourceID: "OSV-2"}},
+		AffectedPackages: []db.AffectedPackage{{
+			Ecosystem:        "npm",
+			Name:             "imported-package",
+			VersionsAffected: json.RawMessage(`["2.0.0"]`),
+		}},
 	}}, nil, nil, func(imported, deleted int) db.AdminAuditEntry {
+		if imported != 1 || deleted != 0 {
+			t.Errorf("vulnerability import audit counts = %d/%d, want 1/0", imported, deleted)
+		}
 		return adapterTestAudit("feed_import_osv")
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("ImportVulnerabilityFeedWithAudit() error = %v", err)
 	}
-	if _, _, err := adapter.ImportMaliciousFeedWithAudit(ctx, "openssf", []db.MaliciousFinding{{
+	if imported != 1 || deleted != 0 {
+		t.Fatalf("ImportVulnerabilityFeedWithAudit() = %d/%d, want 1/0", imported, deleted)
+	}
+	importedVulnerabilities, err := adapter.FindVulnerabilities(ctx, "npm", "imported-package", "2.0.0")
+	if err != nil || len(importedVulnerabilities) != 1 || importedVulnerabilities[0].AdvisoryID != "CVE-2024-0002" {
+		t.Fatalf("imported vulnerability lookup = %+v, %v", importedVulnerabilities, err)
+	}
+
+	imported, deleted, err = adapter.ImportMaliciousFeedWithAudit(ctx, "openssf", []db.MaliciousFinding{{
 		ID:        "MAL-0002",
 		Ecosystem: "pypi",
 		Name:      "evil-wheel",
@@ -174,59 +249,119 @@ func TestDBStoreAdapterDelegatesToBackingStore(t *testing.T) {
 		Summary:   "imported malicious finding",
 		CreatedBy: "feed",
 	}}, nil, nil, func(imported, deleted int) db.AdminAuditEntry {
+		if imported != 1 || deleted != 0 {
+			t.Errorf("malicious import audit counts = %d/%d, want 1/0", imported, deleted)
+		}
 		return adapterTestAudit("feed_import_openssf")
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("ImportMaliciousFeedWithAudit() error = %v", err)
 	}
-	if _, err := adapter.ImportVulnCheckWithAudit(ctx, "vulncheck", []db.VulnCheckEntry{{
+	if imported != 1 || deleted != 0 {
+		t.Fatalf("ImportMaliciousFeedWithAudit() = %d/%d, want 1/0", imported, deleted)
+	}
+	importedMalicious, err := adapter.FindMalicious(ctx, "pypi", "evil-wheel", "2.0.0")
+	if err != nil || len(importedMalicious) != 1 || importedMalicious[0].AdvisoryID != "MAL-0002" {
+		t.Fatalf("imported malicious lookup = %+v, %v", importedMalicious, err)
+	}
+
+	updated, err := adapter.ImportVulnCheckWithAudit(ctx, "vulncheck", []db.VulnCheckEntry{{
 		CVEID:         "CVE-2024-0001",
 		ExploitExists: true,
 	}}, nil, func(imported, deleted int) db.AdminAuditEntry {
+		if imported != 0 || deleted != 0 {
+			t.Errorf("VulnCheck audit counts = %d/%d, want devstore 0/0", imported, deleted)
+		}
 		return adapterTestAudit("feed_import_vulncheck")
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("ImportVulnCheckWithAudit() error = %v", err)
 	}
-	if _, err := adapter.ImportCISAKEVWithAudit(ctx, "cisakev", []string{"CVE-2024-0001"}, nil, func(imported, deleted int) db.AdminAuditEntry {
+	if updated != 0 {
+		t.Fatalf("ImportVulnCheckWithAudit() = %d, want devstore 0", updated)
+	}
+	updated, err = adapter.ImportCISAKEVWithAudit(ctx, "cisakev", []string{"CVE-2024-0001"}, nil, func(imported, deleted int) db.AdminAuditEntry {
+		if imported != 0 || deleted != 0 {
+			t.Errorf("CISA KEV import audit counts = %d/%d, want devstore 0/0", imported, deleted)
+		}
 		return adapterTestAudit("feed_import_cisakev")
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("ImportCISAKEVWithAudit() error = %v", err)
 	}
-	if _, _, err := adapter.ReplaceCISAKEVWithAudit(ctx, "cisakev", []string{"CVE-2024-0001"}, nil, func(imported, deleted int) db.AdminAuditEntry {
+	if updated != 0 {
+		t.Fatalf("ImportCISAKEVWithAudit() = %d, want devstore 0", updated)
+	}
+	updated, cleared, err := adapter.ReplaceCISAKEVWithAudit(ctx, "cisakev", []string{"CVE-2024-0001"}, nil, func(imported, deleted int) db.AdminAuditEntry {
+		if imported != 0 || deleted != 0 {
+			t.Errorf("CISA KEV replace audit counts = %d/%d, want devstore 0/0", imported, deleted)
+		}
 		return adapterTestAudit("feed_replace_cisakev")
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("ReplaceCISAKEVWithAudit() error = %v", err)
 	}
-	if _, _, err := adapter.ImportEPSSWithAudit(ctx, "epss", []db.EPSSEntry{{
+	if updated != 0 || cleared != 0 {
+		t.Fatalf("ReplaceCISAKEVWithAudit() = %d/%d, want devstore 0/0", updated, cleared)
+	}
+	updated, cleared, err = adapter.ImportEPSSWithAudit(ctx, "epss", []db.EPSSEntry{{
 		CVEID:      "CVE-2024-0001",
 		Score:      0.42,
 		Percentile: 0.9,
 	}}, nil, func(imported, deleted int) db.AdminAuditEntry {
+		if imported != 0 || deleted != 0 {
+			t.Errorf("EPSS audit counts = %d/%d, want devstore 0/0", imported, deleted)
+		}
 		return adapterTestAudit("feed_import_epss")
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("ImportEPSSWithAudit() error = %v", err)
 	}
+	if updated != 0 || cleared != 0 {
+		t.Fatalf("ImportEPSSWithAudit() = %d/%d, want devstore 0/0", updated, cleared)
+	}
 
-	if _, err := adapter.EnrichVulnCheck(ctx, []db.VulnCheckEntry{{
+	updated, err = adapter.EnrichVulnCheck(ctx, []db.VulnCheckEntry{{
 		CVEID:         "CVE-2024-0001",
 		ExploitExists: true,
-	}}); err != nil {
+	}})
+	if err != nil {
 		t.Fatalf("EnrichVulnCheck() error = %v", err)
 	}
-	if _, err := adapter.SetCISAKEV(ctx, []string{"CVE-2024-0001"}); err != nil {
+	if updated != 0 {
+		t.Fatalf("EnrichVulnCheck() = %d, want devstore 0", updated)
+	}
+	updated, err = adapter.SetCISAKEV(ctx, []string{"CVE-2024-0001"})
+	if err != nil {
 		t.Fatalf("SetCISAKEV() error = %v", err)
 	}
-	if _, err := adapter.ClearCISAKEV(ctx, []string{"CVE-2024-0001"}); err != nil {
+	if updated != 0 {
+		t.Fatalf("SetCISAKEV() = %d, want devstore 0", updated)
+	}
+	cleared, err = adapter.ClearCISAKEV(ctx, []string{"CVE-2024-0001"})
+	if err != nil {
 		t.Fatalf("ClearCISAKEV() error = %v", err)
 	}
-	if _, _, err := adapter.ReplaceCISAKEV(ctx, []string{"CVE-2024-0001"}); err != nil {
+	if cleared != 0 {
+		t.Fatalf("ClearCISAKEV() = %d, want 0", cleared)
+	}
+	updated, cleared, err = adapter.ReplaceCISAKEV(ctx, []string{"CVE-2024-0001"})
+	if err != nil {
 		t.Fatalf("ReplaceCISAKEV() error = %v", err)
 	}
-	if _, _, err := adapter.ReplaceEPSSScores(ctx, []db.EPSSEntry{{
+	if updated != 0 || cleared != 0 {
+		t.Fatalf("ReplaceCISAKEV() = %d/%d, want devstore 0/0", updated, cleared)
+	}
+	updated, cleared, err = adapter.ReplaceEPSSScores(ctx, []db.EPSSEntry{{
 		CVEID:      "CVE-2024-0001",
 		Score:      0.13,
 		Percentile: 0.5,
-	}}); err != nil {
+	}})
+	if err != nil {
 		t.Fatalf("ReplaceEPSSScores() error = %v", err)
+	}
+	if updated != 0 || cleared != 0 {
+		t.Fatalf("ReplaceEPSSScores() = %d/%d, want devstore 0/0", updated, cleared)
 	}
 
 	if err := adapter.InsertAdminAuditLog(ctx, ptr(adapterTestAudit("adapter_direct_audit"))); err != nil {
