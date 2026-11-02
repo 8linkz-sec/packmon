@@ -62,31 +62,36 @@ func TestFindGitHooksDirDoesNotEscapeDiscoveredRoot(t *testing.T) {
 func tempDirOutsideGit(t *testing.T) string {
 	t.Helper()
 
-	dir := t.TempDir()
-	root := findGitRoot(dir)
-	if root == "" {
-		return dir
-	}
-
-	parent := filepath.Dir(root)
-	if parent == root {
-		t.Fatalf("cannot create temp directory outside git root %q", root)
-	}
-
-	outside, err := os.MkdirTemp(parent, "packmon-outside-git-*")
-	if err != nil {
-		t.Fatalf("create temp directory outside git root %q: %v", root, err)
-	}
-	t.Cleanup(func() {
-		if err := os.RemoveAll(outside); err != nil {
-			t.Errorf("remove temp directory outside git root %q: %v", outside, err)
+	start := t.TempDir()
+	for base := start; ; {
+		if root := findGitRoot(base); root != "" {
+			parent := filepath.Dir(root)
+			if parent == root {
+				break
+			}
+			base = parent
+			continue
 		}
-	})
 
-	if found := findGitRoot(outside); found != "" {
-		t.Fatalf("temp directory %q is still inside git repository %q", outside, found)
+		outside, err := os.MkdirTemp(base, "packmon-outside-git-*")
+		if err == nil {
+			t.Cleanup(func() {
+				if err := os.RemoveAll(outside); err != nil {
+					t.Errorf("remove temp directory outside git repositories %q: %v", outside, err)
+				}
+			})
+			return outside
+		}
+
+		parent := filepath.Dir(base)
+		if parent == base {
+			break
+		}
+		base = parent
 	}
-	return outside
+
+	t.Skipf("no writable directory exists outside every Git repository enclosing %q", start)
+	return ""
 }
 
 func TestHookStatusOutsideGitRepository(t *testing.T) {

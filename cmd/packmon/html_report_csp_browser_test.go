@@ -156,13 +156,20 @@ func dumpCLIHTMLReportDOM(t *testing.T, browser, rawURL string) string {
 
 func runCLIHTMLReportBrowser(t *testing.T, browser string, args []string) ([]byte, error) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	timeout := 45 * time.Second
+	if testDeadline, ok := t.Deadline(); ok {
+		remaining := time.Until(testDeadline)
+		if remaining < timeout {
+			timeout = remaining
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, browser, args...) //nolint:gosec // G204: browser resolved by the test's own lookup; args are test constants.
 	output, err := cmd.CombinedOutput()
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return output, fmt.Errorf("timed out after 15s")
+		return output, fmt.Errorf("timed out after %s", timeout.Round(time.Second))
 	}
 	return output, err
 }

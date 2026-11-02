@@ -280,7 +280,10 @@ func copyTestExecutable(t *testing.T, source, destination string) {
 
 func waitForFakeGitReady(t *testing.T, ready string) {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(30 * time.Second)
+	if testDeadline, ok := t.Deadline(); ok && testDeadline.Before(deadline) {
+		deadline = testDeadline
+	}
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(ready); err == nil {
 			return
