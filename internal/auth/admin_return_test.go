@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -126,8 +127,19 @@ func TestAdminLoginRedirectTargetRejectsMissingOrUnsafeRequestTargets(t *testing
 func TestAdminLoginURLRejectsUnsafeTarget(t *testing.T) {
 	t.Parallel()
 
-	if got := AdminLoginURL("https://evil.example/admin"); got != "/admin/login" {
-		t.Fatalf("AdminLoginURL() = %q, want /admin/login", got)
+	for name, target := range map[string]string{
+		"empty":             "",
+		"external absolute": "https://evil.example/admin",
+		"protocol relative": "//evil.example/admin",
+		"public path":       "/search",
+		"login loop":        "/admin/login",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if got := AdminLoginURL(target); got != AdminLoginPath {
+				t.Fatalf("AdminLoginURL(%q) = %q, want %q", target, got, AdminLoginPath)
+			}
+		})
 	}
 }
 
@@ -139,5 +151,113 @@ func TestSameOriginTargetRejectsMalformedEscapes(t *testing.T) {
 	}
 	if got := SafeSameOriginRedirectTarget("/admin/%zz", "/"); got != "/" {
 		t.Fatalf("SafeSameOriginRedirectTarget() = %q, want /", got)
+	}
+}
+
+func TestAdminReturnTargetsNormalizeAdversarialInputs(t *testing.T) {
+	t.Parallel()
+
+	adminCases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "whitespace dot query and fragment", raw: "  /admin/./settings?tab=security#ignored  ", want: "/admin/settings?tab=security"},
+		{name: "encoded traversal leaves admin", raw: "/admin%2F..%2Fsearch", want: ""},
+		{name: "encoded login loop", raw: "/admin%2Flogin", want: ""},
+		{name: "encoded dot and repeated separator", raw: "/admin/%2e/queue//", want: "/admin/queue"},
+		{name: "encoded backslash is preserved", raw: "/admin/%5Cprivate", want: "/admin/%5Cprivate"},
+		{name: "literal control is rejected", raw: "/admin/settings\x00private", want: ""},
+	}
+	for _, tc := range adminCases {
+		t.Run("admin "+tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := SafeAdminReturnTarget(tc.raw)
+			if got != tc.want {
+				t.Fatalf("SafeAdminReturnTarget(%q) = %q, want %q", tc.raw, got, tc.want)
+			}
+			if got == "" {
+				return
+			}
+			parsed, err := url.Parse(got)
+			if err != nil || parsed.IsAbs() || parsed.Host != "" {
+				t.Fatalf("normalized admin target is not same-origin: %q (%v)", got, err)
+			}
+			if parsed.Path != "/admin" && !strings.HasPrefix(parsed.Path, "/admin/") {
+				t.Fatalf("normalized admin target escaped admin namespace: %q", got)
+			}
+			if parsed.Path == AdminLoginPath {
+				t.Fatalf("normalized admin target created a login loop: %q", got)
+			}
+			if again := SafeAdminReturnTarget(got); again != got {
+				t.Fatalf("admin normalization is not idempotent: first %q, second %q", got, again)
+			}
+		})
+	}
+
+	sameOriginCases := []struct {
+		name     string
+		raw      string
+		fallback string
+		want     string
+	}{
+		{name: "whitespace repeated dot and fragment", raw: "  /admin//./settings?x=1#ignored  ", fallback: "/", want: "/admin/settings?x=1"},
+		{name: "encoded leading separators", raw: "/%2F%2Fevil.example/admin", fallback: "/", want: "/evil.example/admin"},
+		{name: "encoded backslash is preserved", raw: "/%5Cevil.example/admin", fallback: "/", want: "/%5Cevil.example/admin"},
+		{name: "encoded dot keeps trailing slash", raw: "/admin/%2e/queue/", fallback: "/", want: "/admin/queue/"},
+		{name: "literal control selects safe fallback", raw: "/admin/settings\x00private", fallback: "/admin/safe", want: "/admin/safe"},
+		{name: "literal control and unsafe fallback select root", raw: "/admin/settings\x00private", fallback: "https://evil.example", want: "/"},
+	}
+	for _, tc := range sameOriginCases {
+		t.Run("same origin "+tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := SafeSameOriginRedirectTarget(tc.raw, tc.fallback)
+			if got != tc.want {
+				t.Fatalf("SafeSameOriginRedirectTarget(%q, %q) = %q, want %q", tc.raw, tc.fallback, got, tc.want)
+			}
+			parsed, err := url.Parse(got)
+			if err != nil || parsed.IsAbs() || parsed.Host != "" {
+				t.Fatalf("normalized redirect target is not same-origin: %q (%v)", got, err)
+			}
+			if again := SafeSameOriginRedirectTarget(got, "/different"); again != got {
+				t.Fatalf("same-origin normalization is not idempotent: first %q, second %q", got, again)
+			}
+		})
+	}
+}
+
+func TestRedirectSameOriginNormalizesAdversarialLocation(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		target string
+		want   string
+	}{
+		{name: "canonical whitespace and dot", target: "  /admin/./settings?x=1#ignored  ", want: "/admin/settings?x=1"},
+		{name: "encoded leading separators", target: "/%2F%2Fevil.example/admin", want: "/evil.example/admin"},
+		{name: "encoded backslash", target: "/%5Cevil.example/admin", want: "/%5Cevil.example/admin"},
+		{name: "literal control", target: "/admin/settings\x00private", want: "/"},
+		{name: "malformed escape", target: "/admin/%zz", want: "/"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/admin", nil)
+
+			RedirectSameOrigin(rec, req, tc.target, http.StatusSeeOther)
+
+			if rec.Code != http.StatusSeeOther {
+				t.Fatalf("status = %d, want %d", rec.Code, http.StatusSeeOther)
+			}
+			location := rec.Header().Get("Location")
+			if location != tc.want {
+				t.Fatalf("Location = %q, want %q", location, tc.want)
+			}
+			parsed, err := url.Parse(location)
+			if err != nil || parsed.IsAbs() || parsed.Host != "" {
+				t.Fatalf("Location is not same-origin: %q (%v)", location, err)
+			}
+		})
 	}
 }
