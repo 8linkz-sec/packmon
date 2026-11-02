@@ -3,12 +3,17 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/8linkz-sec/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/ioutils"
 	"github.com/8linkz-sec/packmon/internal/sbomgen"
 	"github.com/spf13/cobra"
 )
@@ -24,6 +29,7 @@ func TestValidateAutoSBOMFlags(t *testing.T) {
 		{name: "install tools requires auto", auto: autoSBOMFlags{InstallTools: true}, want: "require --auto-sbom"},
 		{name: "keep requires auto", auto: autoSBOMFlags{KeepSBOM: "out"}, want: "require --auto-sbom"},
 		{name: "sbom only requires auto", auto: autoSBOMFlags{SBOMOnly: true}, want: "require --auto-sbom"},
+		{name: "disabled without dependent options"},
 		{name: "all incompatible", auto: autoSBOMFlags{Enabled: true}, flags: scanFlagValues{All: true}, want: "cannot be combined with --all"},
 		{name: "multiple args incompatible", auto: autoSBOMFlags{Enabled: true}, args: []string{"a", "b"}, want: "exactly one target"},
 		{name: "sbom only rejects raw sbom", auto: autoSBOMFlags{Enabled: true, SBOMOnly: true}, flags: scanFlagValues{SBOMFiles: []string{"manual.json"}}, want: "cannot be combined with --sbom"},
@@ -99,6 +105,19 @@ func TestBuildAutoSBOMConfigUsesResolvedSettings(t *testing.T) {
 	cfg = buildAutoSBOMConfig(settings, autoSBOMFlags{Enabled: true, KeepSBOM: "out"})
 	if cfg.KeepSBOMDir != "out" {
 		t.Fatalf("--keep-sbom dir = %q, want out", cfg.KeepSBOMDir)
+	}
+}
+
+func TestAutoSBOMEcosystemFiltersNormalizeAndDropEmptyValues(t *testing.T) {
+	got := autoSBOMEcosystemFilters([]string{" NPM ", "", " Go ", " npm", "\tPYPI\t", "  "})
+	want := []domain.Ecosystem{domain.EcosystemNPM, domain.EcosystemGo, domain.EcosystemNPM, domain.EcosystemPyPI}
+	if len(got) != len(want) {
+		t.Fatalf("autoSBOMEcosystemFilters() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("autoSBOMEcosystemFilters()[%d] = %q, want %q; got %v", i, got[i], want[i], got)
+		}
 	}
 }
 
@@ -276,6 +295,190 @@ func TestRunAutoSBOMCommandReturnsCleanupError(t *testing.T) {
 	if !errors.Is(err, cleanupErr) || !strings.Contains(err.Error(), "cleanup generated SBOMs") {
 		t.Fatalf("cleanup error = %v, want wrapped cleanup failure", err)
 	}
+	if code := exitCodeForError(err); code != ExitOperational {
+		t.Fatalf("cleanup exit code = %d, want %d; err=%v", code, ExitOperational, err)
+	}
+}
+
+func TestRunAutoSBOMCommandRejectsMissingRepoAndInvalidSettingsBeforeGeneration(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	isolateLatestRegistryEnvironment(t)
+	for _, key := range []string{
+		"PACKMON_SERVER", "PACKMON_API_KEY", "PACKMON_CA_CERT", "PACKMON_CA_CERT_FILE",
+		"PACKMON_INSECURE_ALLOW_HTTP", "PACKMON_MODE", "PACKMON_FAIL_ON", "PACKMON_ECOSYSTEMS",
+		"PACKMON_WEBHOOK_URL", "PACKMON_WEBHOOK_SECRET", "PACKMON_LOG_LEVEL", "PACKMON_LOG_FORMAT",
+		"PACKMON_TIMEOUT", "PACKMON_REQUIRE_REMOTE", "PACKMON_NO_REPO_METADATA", "PACKMON_ALLOW_SECRET_FLAGS",
+	} {
+		t.Setenv(key, "")
+	}
+
+	root := t.TempDir()
+	tests := []struct {
+		name  string
+		args  []string
+		flags scanFlagValues
+		cfg   *cliConfig
+		want  string
+	}{
+		{
+			name:  "missing configured repo",
+			flags: scanFlagValues{Repo: "missing"},
+			cfg:   &cliConfig{Repos: []cliRepoConfig{{Name: "present", Path: root}}},
+			want:  `configured repo "missing" not found`,
+		},
+		{
+			name: "invalid resolved ecosystem settings",
+			args: []string{root},
+			cfg:  &cliConfig{Ecosystems: []string{"not-an-ecosystem"}},
+			want: "unknown ecosystem filter",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := &cobra.Command{}
+			cmd.SetContext(context.Background())
+			generationCalls := 0
+			err := runAutoSBOMCommandWithDeps(cmd, tt.args, tt.flags, autoSBOMFlags{Enabled: true}, autoSBOMDeps{
+				loadConfig: func() (*cliConfig, string, error) { return tt.cfg, "", nil },
+				generate: func(context.Context, sbomgen.Config) (sbomgen.Result, error) {
+					generationCalls++
+					return sbomgen.Result{}, nil
+				},
+			})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("runAutoSBOMCommandWithDeps() error = %v, want substring %q", err, tt.want)
+			}
+			if code := exitCodeForError(err); code != ExitOperational {
+				t.Fatalf("exit code = %d, want %d; err=%v", code, ExitOperational, err)
+			}
+			if generationCalls != 0 {
+				t.Fatalf("generator calls = %d, want 0", generationCalls)
+			}
+		})
+	}
+}
+
+func TestRunAutoSBOMCommandPreservesScanAndCleanupErrors(t *testing.T) {
+	root := t.TempDir()
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	scanErr := errors.New("scan parser failure")
+	cleanupErr := errors.New("generated file cleanup failure")
+	cleanupCalls := 0
+
+	err := runAutoSBOMCommandWithDeps(cmd, []string{root}, scanFlagValues{}, autoSBOMFlags{Enabled: true}, autoSBOMDeps{
+		loadConfig: func() (*cliConfig, string, error) { return nil, "", nil },
+		generate: func(context.Context, sbomgen.Config) (sbomgen.Result, error) {
+			return sbomgen.Result{SBOMPaths: []string{"generated.cdx.json"}, Cleanup: func() error {
+				cleanupCalls++
+				return cleanupErr
+			}}, nil
+		},
+		scan: func(context.Context, scanSettings) (int, error) {
+			return ExitParser, scanErr
+		},
+	})
+	if !errors.Is(err, scanErr) || !errors.Is(err, cleanupErr) {
+		t.Fatalf("combined error = %v, want both scan and cleanup failures", err)
+	}
+	if code := exitCodeForError(err); code != ExitParser {
+		t.Fatalf("combined error exit code = %d, want %d; err=%v", code, ExitParser, err)
+	}
+	if cleanupCalls != 1 {
+		t.Fatalf("cleanup calls = %d, want 1", cleanupCalls)
+	}
+}
+
+const autoSBOMProcessExitHelper = "packmon-auto-sbom-process-exit-helper"
+
+func autoSBOMProcessExitHelperPath(args []string) (string, bool) {
+	if len(args) < 3 {
+		return "", false
+	}
+	tail := args[len(args)-3:]
+	if tail[0] != "--" || tail[1] != autoSBOMProcessExitHelper || strings.TrimSpace(tail[2]) == "" {
+		return "", false
+	}
+	return tail[2], true
+}
+
+func runAutoSBOMProcessExitHelper(sbomPath string) error {
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	return runAutoSBOMCommandWithDeps(cmd, []string{filepath.Dir(sbomPath)}, scanFlagValues{}, autoSBOMFlags{Enabled: true}, autoSBOMDeps{
+		loadConfig: func() (*cliConfig, string, error) { return nil, "", nil },
+		generate: func(context.Context, sbomgen.Config) (sbomgen.Result, error) {
+			file, err := ioutils.OpenPrivateFile(sbomPath)
+			if err != nil {
+				return sbomgen.Result{}, err
+			}
+			if _, err := file.Write([]byte(`{"bomFormat":"CycloneDX"}`)); err != nil {
+				ioutils.CloseSilently(file)
+				return sbomgen.Result{}, err
+			}
+			if err := file.Close(); err != nil {
+				return sbomgen.Result{}, err
+			}
+			if runtime.GOOS != "windows" {
+				info, err := os.Stat(sbomPath)
+				if err != nil {
+					return sbomgen.Result{}, err
+				}
+				if got := info.Mode().Perm(); got != 0o600 {
+					return sbomgen.Result{}, fmt.Errorf("generated SBOM mode = %o, want 0600", got)
+				}
+			}
+			return sbomgen.Result{SBOMPaths: []string{sbomPath}, Cleanup: func() error {
+				return os.Remove(sbomPath)
+			}}, nil
+		},
+		scan: func(_ context.Context, settings scanSettings) (int, error) {
+			if len(settings.SBOMFiles) != 1 || settings.SBOMFiles[0] != sbomPath {
+				return ExitInternal, fmt.Errorf("scan SBOM files = %v, want [%s]", settings.SBOMFiles, sbomPath)
+			}
+			if _, err := os.Stat(sbomPath); err != nil {
+				return ExitInternal, fmt.Errorf("generated SBOM unavailable during scan: %w", err)
+			}
+			return ExitUnderThreshold, nil
+		},
+	})
+}
+
+func TestRunAutoSBOMCommandCleansUpBeforeProcessExit(t *testing.T) {
+	if sbomPath, helper := autoSBOMProcessExitHelperPath(os.Args); helper {
+		if err := runAutoSBOMProcessExitHelper(sbomPath); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "auto-SBOM process-exit helper: %v\n", err)
+			os.Exit(97)
+		}
+		return
+	}
+
+	sbomPath := filepath.Join(t.TempDir(), "generated.cdx.json")
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatalf("resolve test executable: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	// #nosec G204 -- reexecutes this exact test binary with fixed helper arguments and one parent-owned temporary path.
+	child := exec.CommandContext(ctx, executable,
+		"-test.run=^TestRunAutoSBOMCommandCleansUpBeforeProcessExit$",
+		"--", autoSBOMProcessExitHelper, sbomPath)
+	child.Env = []string{"GOTRACEBACK=none"}
+	output, err := child.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("auto-SBOM helper exceeded deadline: %v; output=%s", ctx.Err(), output)
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("auto-SBOM helper error = %v, want process exit %d; output=%s", err, ExitUnderThreshold, output)
+	}
+	if code := exitErr.ExitCode(); code != ExitUnderThreshold {
+		t.Fatalf("auto-SBOM helper exit code = %d, want %d; output=%s", code, ExitUnderThreshold, output)
+	}
+	if _, statErr := os.Stat(sbomPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("generated SBOM still exists after process exit: stat error=%v", statErr)
+	}
 }
 
 func TestRunAutoSBOMInstallDisclosureVisibleWhenQuiet(t *testing.T) {
@@ -393,6 +596,9 @@ func TestRunAutoSBOMCommandWithDepsErrorBranches(t *testing.T) {
 	if !errors.Is(err, loadErr) {
 		t.Fatalf("load config error = %v, want wrapped config error", err)
 	}
+	if code := exitCodeForError(err); code != ExitOperational {
+		t.Fatalf("load config exit code = %d, want %d", code, ExitOperational)
+	}
 
 	cfg := &cliConfig{
 		Repos: []cliRepoConfig{
@@ -406,6 +612,9 @@ func TestRunAutoSBOMCommandWithDepsErrorBranches(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "exactly one target") {
 		t.Fatalf("multi-target error = %v, want exactly one target", err)
 	}
+	if code := exitCodeForError(err); code != ExitOperational {
+		t.Fatalf("multi-target exit code = %d, want %d", code, ExitOperational)
+	}
 
 	err = runAutoSBOMCommandWithDeps(cmd, []string{root}, scanFlagValues{}, autoSBOMFlags{Enabled: true, SBOMOnly: true}, autoSBOMDeps{
 		loadConfig: func() (*cliConfig, string, error) {
@@ -415,6 +624,9 @@ func TestRunAutoSBOMCommandWithDepsErrorBranches(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "report outputs") {
 		t.Fatalf("sbom-only output error = %v, want report outputs", err)
 	}
+	if code := exitCodeForError(err); code != ExitOperational {
+		t.Fatalf("sbom-only output exit code = %d, want %d", code, ExitOperational)
+	}
 
 	generateErr := errors.New("generator failed")
 	err = runAutoSBOMCommandWithDeps(cmd, []string{root}, scanFlagValues{}, autoSBOMFlags{Enabled: true}, autoSBOMDeps{
@@ -423,6 +635,9 @@ func TestRunAutoSBOMCommandWithDepsErrorBranches(t *testing.T) {
 	})
 	if !errors.Is(err, generateErr) {
 		t.Fatalf("generate error = %v, want wrapped generator error", err)
+	}
+	if code := exitCodeForError(err); code != ExitOperational {
+		t.Fatalf("generator exit code = %d, want %d", code, ExitOperational)
 	}
 
 	scanErr := errors.New("scan failed")
@@ -437,6 +652,9 @@ func TestRunAutoSBOMCommandWithDepsErrorBranches(t *testing.T) {
 	})
 	if !errors.Is(err, scanErr) {
 		t.Fatalf("scan error = %v, want wrapped scan error", err)
+	}
+	if code := exitCodeForError(err); code != ExitOperational {
+		t.Fatalf("scan exit code = %d, want %d", code, ExitOperational)
 	}
 }
 

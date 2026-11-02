@@ -18,7 +18,32 @@ import (
 	"github.com/8linkz-sec/packmon/internal/ioutils"
 
 	"github.com/8linkz-sec/packmon/internal/testutil"
+	"github.com/spf13/cobra"
 )
+
+func TestDBCommandRegistersSupportedSubcommands(t *testing.T) {
+	commands := newDBCmd().Commands()
+	got := make(map[string]struct{}, len(commands))
+	for _, command := range commands {
+		got[command.Name()] = struct{}{}
+	}
+	want := map[string]struct{}{
+		"export": {},
+		"info":   {},
+		"sync":   {},
+	}
+	if len(commands) != len(want) {
+		t.Fatalf("db command count = %d, want %d: %v", len(commands), len(want), got)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("db subcommands = %v, want exactly %v", got, want)
+	}
+	for name := range want {
+		if _, ok := got[name]; !ok {
+			t.Fatalf("db subcommands = %v, missing %q", got, name)
+		}
+	}
+}
 
 func TestSplitCSVTrimsEmptyValues(t *testing.T) {
 	t.Parallel()
@@ -995,6 +1020,96 @@ func TestResolveDBSyncSettingsAppliesFlagEnvConfigPrecedence(t *testing.T) {
 	}
 	if settings.timeout != 7*time.Second {
 		t.Fatalf("timeout = %s, want 7s", settings.timeout)
+	}
+}
+
+func TestResolveDBSyncSettingsPropagatesFlagReaderErrors(t *testing.T) {
+	tests := []struct {
+		name         string
+		wrongFlag    string
+		wrongType    string
+		setChanged   bool
+		changedValue string
+		wantError    string
+	}{
+		{name: "source", wrongFlag: "source", wrongType: "bool", wantError: "get string value of flag of type bool"},
+		{name: "server", wrongFlag: "server", wrongType: "bool", setChanged: true, changedValue: "true", wantError: "get string value of flag of type bool"},
+		{name: "cacert", wrongFlag: "cacert", wrongType: "bool", setChanged: true, changedValue: "true", wantError: "get string value of flag of type bool"},
+		{name: "insecure allow HTTP", wrongFlag: "insecure-allow-http", wrongType: "string", setChanged: true, changedValue: "false", wantError: "get bool value of flag of type string"},
+		{name: "ecosystems", wrongFlag: "ecosystems", wrongType: "bool", setChanged: true, changedValue: "true", wantError: "get string value of flag of type bool"},
+		{name: "timeout", wrongFlag: "timeout", wrongType: "string", wantError: "get int value of flag of type string"},
+		{name: "full", wrongFlag: "full", wrongType: "string", wantError: "get bool value of flag of type string"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, key := range []string{
+				"PACKMON_SERVER", "PACKMON_API_KEY", "PACKMON_CA_CERT", "PACKMON_CA_CERT_FILE",
+				"PACKMON_INSECURE_ALLOW_HTTP", "PACKMON_ECOSYSTEMS", "PACKMON_TIMEOUT", "PACKMON_ALLOW_SECRET_FLAGS",
+			} {
+				t.Setenv(key, "")
+			}
+			isolateLatestRegistryEnvironment(t)
+
+			cmd := &cobra.Command{}
+			flags := cmd.Flags()
+			addString := func(name, value string) {
+				if tt.wrongFlag == name && tt.wrongType == "bool" {
+					flags.Bool(name, false, "")
+					return
+				}
+				if tt.wrongFlag == name && tt.wrongType == "string" {
+					flags.String(name, value, "")
+					return
+				}
+				flags.String(name, value, "")
+			}
+			addBool := func(name string, value bool) {
+				if tt.wrongFlag == name && tt.wrongType == "string" {
+					flags.String(name, "false", "")
+					return
+				}
+				flags.Bool(name, value, "")
+			}
+			addInt := func(name string, value int) {
+				if tt.wrongFlag == name && tt.wrongType == "string" {
+					flags.String(name, strconv.Itoa(value), "")
+					return
+				}
+				flags.Int(name, value, "")
+			}
+
+			addString("source", "server")
+			addString("server", "https://flag.example")
+			addString("api-key", "")
+			addString("cacert", "")
+			addBool("insecure-allow-http", false)
+			addString("ecosystems", "")
+			addInt("timeout", 60)
+			addBool("full", false)
+			if tt.setChanged {
+				if err := flags.Set(tt.wrongFlag, tt.changedValue); err != nil {
+					t.Fatalf("mark malformed --%s changed: %v", tt.wrongFlag, err)
+				}
+				if !flags.Changed(tt.wrongFlag) {
+					t.Fatalf("--%s Changed = false, want true", tt.wrongFlag)
+				}
+			}
+
+			settings, err := resolveDBSyncSettings(cmd, &cliConfig{
+				Server: "https://config.example",
+				DB:     cliDBConfig{SyncSource: "server"},
+			})
+			if err == nil {
+				t.Fatalf("resolveDBSyncSettings() = %+v, nil; want --%s type error", settings, tt.wrongFlag)
+			}
+			if settings.serverURL != "" || settings.apiKey != "" || settings.caCertFile != "" ||
+				settings.allowInsecureHTTP || len(settings.ecosystems) != 0 || settings.full || settings.timeout != 0 {
+				t.Fatalf("resolveDBSyncSettings() returned partial settings after --%s error: %+v", tt.wrongFlag, settings)
+			}
+			if !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("resolveDBSyncSettings() error = %v for --%s, want substring %q", err, tt.wrongFlag, tt.wantError)
+			}
+		})
 	}
 }
 
