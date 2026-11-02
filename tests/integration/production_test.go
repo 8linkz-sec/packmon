@@ -426,20 +426,7 @@ func TestProductionAdminRoutesExerciseCriticalWorkflows(t *testing.T) {
 		"feed settings")
 	assertPostgresCountAtLeast(t, containerName, `SELECT COUNT(*) FROM admin_audit_log WHERE action = 'feed_config_save'`, 1, "feed settings audit")
 
-	queueJobID := queryPostgresValueInContainer(t, containerName,
-		`INSERT INTO refresh_queue (ecosystem, name, source, priority, status) VALUES ('npm', 'admin-queue-prod', 'osv', 3, 'pending') RETURNING id`)
-	queueBody := adminGETBody(t, adminClient, baseURL+"/admin/queue")
-	csrf = extractInputValue(t, queueBody, "_csrf")
-	adminPostForm(t, adminClient, baseURL+"/admin/queue/priority", url.Values{
-		"_csrf":    {csrf},
-		"job_id":   {queueJobID},
-		"priority": {"0"},
-	}, "/admin/queue?")
-	assertPostgresValue(t, containerName,
-		fmt.Sprintf(`SELECT priority::text FROM refresh_queue WHERE id = %s`, queueJobID),
-		"0",
-		"queue job priority")
-	assertPostgresCountAtLeast(t, containerName, `SELECT COUNT(*) FROM admin_audit_log WHERE action = 'queue_priority_update'`, 1, "queue priority audit")
+	exerciseProductionAdminQueueRoutes(t, containerName, baseURL, adminClient)
 
 	keysBody := adminGETBody(t, adminClient, baseURL+"/admin/keys")
 	csrf = extractInputValue(t, keysBody, "_csrf")
@@ -934,6 +921,233 @@ func assertPostgresCountAtLeast(t *testing.T, containerName, sql string, wantMin
 	}
 }
 
+type productionQueueAuditJob struct {
+	ID          int    `json:"id"`
+	Ecosystem   string `json:"ecosystem"`
+	Name        string `json:"name"`
+	Source      string `json:"source"`
+	Priority    int    `json:"priority"`
+	Status      string `json:"status"`
+	RequestedAt string `json:"requested_at"`
+	ProcessedAt string `json:"processed_at"`
+	Error       string `json:"error"`
+}
+
+const productionQueueDynamicTimestamp = "<dynamic>"
+
+func exerciseProductionAdminQueueRoutes(t *testing.T, containerName, baseURL string, client *http.Client) {
+	t.Helper()
+
+	priorityID := insertProductionQueueJob(t, containerName, "admin-priority-prod", 3, "pending", "2026-01-01T00:00:00Z", "", "")
+	pauseResumeID := insertProductionQueueJob(t, containerName, "admin-pause-resume-prod", 2, "pending", "2026-01-02T00:00:00Z", "", "")
+	retryID := insertProductionQueueJob(t, containerName, "admin-retry-prod", 1, "error", "2026-01-03T00:00:00Z", "2026-01-03T01:00:00Z", "retry fixture failure")
+	clearID := insertProductionQueueJob(t, containerName, "admin-clear-prod", 3, "paused", "2026-01-04T00:00:00Z", "", "")
+	purgeDoneID := insertProductionQueueJob(t, containerName, "admin-purge-done-prod", 2, "done", "2026-01-05T00:00:00Z", "2026-01-05T01:00:00Z", "")
+	purgeErrorID := insertProductionQueueJob(t, containerName, "admin-purge-error-prod", 1, "error", "2026-01-06T00:00:00Z", "2026-01-06T01:00:00Z", "purge fixture failure")
+	processingID := insertProductionQueueJob(t, containerName, "admin-processing-control-prod", 0, "processing", "2026-01-07T00:00:00Z", "2026-01-07T01:00:00Z", "")
+
+	queueBody := adminGETBody(t, client, baseURL+"/admin/queue")
+	csrf := extractInputValue(t, queueBody, "_csrf")
+
+	priorityCorrelation := "00000000-0000-4000-8000-000000000061"
+	adminPostFormWithCorrelation(t, client, baseURL+"/admin/queue/priority", url.Values{
+		"_csrf":    {csrf},
+		"job_id":   {strconv.Itoa(priorityID)},
+		"priority": {"0"},
+	}, "/admin/queue?", priorityCorrelation)
+	assertPostgresValue(t, containerName,
+		fmt.Sprintf(`SELECT status || '|' || priority::text FROM refresh_queue WHERE id = %d`, priorityID),
+		"pending|0", "queue priority state")
+	assertProductionQueueTransitionAudit(t, containerName, "queue_priority_update", priorityCorrelation,
+		productionQueueAuditJob{ID: priorityID, Ecosystem: "npm", Name: "admin-priority-prod", Source: "osv", Priority: 3, Status: "pending", RequestedAt: "2026-01-01T00:00:00Z"},
+		productionQueueAuditJob{ID: priorityID, Ecosystem: "npm", Name: "admin-priority-prod", Source: "osv", Priority: 0, Status: "pending", RequestedAt: "2026-01-01T00:00:00Z"})
+
+	pauseCorrelation := "00000000-0000-4000-8000-000000000062"
+	adminPostFormWithCorrelation(t, client, baseURL+"/admin/queue/pause", url.Values{
+		"_csrf":  {csrf},
+		"job_id": {strconv.Itoa(pauseResumeID)},
+	}, "/admin/queue?", pauseCorrelation)
+	assertPostgresValue(t, containerName,
+		fmt.Sprintf(`SELECT status || '|' || priority::text FROM refresh_queue WHERE id = %d`, pauseResumeID),
+		"paused|2", "queue pause state")
+	assertProductionQueueTransitionAudit(t, containerName, "queue_pause", pauseCorrelation,
+		productionQueueAuditJob{ID: pauseResumeID, Ecosystem: "npm", Name: "admin-pause-resume-prod", Source: "osv", Priority: 2, Status: "pending", RequestedAt: "2026-01-02T00:00:00Z"},
+		productionQueueAuditJob{ID: pauseResumeID, Ecosystem: "npm", Name: "admin-pause-resume-prod", Source: "osv", Priority: 2, Status: "paused", RequestedAt: "2026-01-02T00:00:00Z"})
+
+	resumeCorrelation := "00000000-0000-4000-8000-000000000063"
+	adminPostFormWithCorrelation(t, client, baseURL+"/admin/queue/resume", url.Values{
+		"_csrf":  {csrf},
+		"job_id": {strconv.Itoa(pauseResumeID)},
+	}, "/admin/queue?", resumeCorrelation)
+	assertPostgresValue(t, containerName,
+		fmt.Sprintf(`SELECT status || '|' || priority::text || '|' || (processed_at IS NULL)::text || '|' || (error IS NULL)::text FROM refresh_queue WHERE id = %d`, pauseResumeID),
+		"pending|2|true|true", "queue resume state")
+	assertProductionQueueTransitionAudit(t, containerName, "queue_resume", resumeCorrelation,
+		productionQueueAuditJob{ID: pauseResumeID, Ecosystem: "npm", Name: "admin-pause-resume-prod", Source: "osv", Priority: 2, Status: "paused", RequestedAt: "2026-01-02T00:00:00Z"},
+		productionQueueAuditJob{ID: pauseResumeID, Ecosystem: "npm", Name: "admin-pause-resume-prod", Source: "osv", Priority: 2, Status: "pending", RequestedAt: "2026-01-02T00:00:00Z"})
+
+	retryCorrelation := "00000000-0000-4000-8000-000000000064"
+	adminPostFormWithCorrelation(t, client, baseURL+"/admin/queue/retry", url.Values{
+		"_csrf":  {csrf},
+		"job_id": {strconv.Itoa(retryID)},
+	}, "/admin/queue?", retryCorrelation)
+	assertPostgresValue(t, containerName,
+		fmt.Sprintf(`SELECT status || '|' || priority::text || '|' || (processed_at IS NULL)::text || '|' || (error IS NULL)::text FROM refresh_queue WHERE id = %d`, retryID),
+		"pending|1|true|true", "queue retry state")
+	_, retryAfter := assertProductionQueueTransitionAudit(t, containerName, "queue_retry", retryCorrelation,
+		productionQueueAuditJob{ID: retryID, Ecosystem: "npm", Name: "admin-retry-prod", Source: "osv", Priority: 1, Status: "error", RequestedAt: "2026-01-03T00:00:00Z", ProcessedAt: "2026-01-03T01:00:00Z", Error: "retry fixture failure"},
+		productionQueueAuditJob{ID: retryID, Ecosystem: "npm", Name: "admin-retry-prod", Source: "osv", Priority: 1, Status: "pending", RequestedAt: productionQueueDynamicTimestamp})
+	assertPostgresValue(t, containerName,
+		fmt.Sprintf(`SELECT COUNT(*)::text FROM refresh_queue WHERE id = %d AND requested_at = %s::timestamptz`, retryID, postgresLiteral(retryAfter.RequestedAt)),
+		"1", "queue retry timestamp matches audit")
+
+	clearCorrelation := "00000000-0000-4000-8000-000000000065"
+	adminPostFormWithCorrelation(t, client, baseURL+"/admin/queue/clear", url.Values{
+		"_csrf":  {csrf},
+		"status": {"paused"},
+	}, "/admin/queue?", clearCorrelation)
+	assertPostgresValue(t, containerName,
+		fmt.Sprintf(`SELECT COUNT(*)::text FROM refresh_queue WHERE id = %d`, clearID),
+		"0", "queue clear deletion")
+	assertProductionQueueDeleteAudit(t, containerName, "queue_clear", clearCorrelation, "cleared_jobs", "cleared", "paused", []productionQueueAuditJob{{
+		ID: clearID, Ecosystem: "npm", Name: "admin-clear-prod", Source: "osv", Priority: 3, Status: "paused", RequestedAt: "2026-01-04T00:00:00Z",
+	}})
+
+	purgeCorrelation := "00000000-0000-4000-8000-000000000066"
+	adminPostFormWithCorrelation(t, client, baseURL+"/admin/queue/purge", url.Values{
+		"_csrf": {csrf},
+	}, "/admin/queue?", purgeCorrelation)
+	assertPostgresValue(t, containerName,
+		fmt.Sprintf(`SELECT COUNT(*)::text FROM refresh_queue WHERE id IN (%d,%d)`, purgeDoneID, purgeErrorID),
+		"0", "queue purge deletion")
+	assertProductionQueueDeleteAudit(t, containerName, "queue_purge", purgeCorrelation, "purged_jobs", "purged", "", []productionQueueAuditJob{
+		{ID: purgeDoneID, Ecosystem: "npm", Name: "admin-purge-done-prod", Source: "osv", Priority: 2, Status: "done", RequestedAt: "2026-01-05T00:00:00Z", ProcessedAt: "2026-01-05T01:00:00Z"},
+		{ID: purgeErrorID, Ecosystem: "npm", Name: "admin-purge-error-prod", Source: "osv", Priority: 1, Status: "error", RequestedAt: "2026-01-06T00:00:00Z", ProcessedAt: "2026-01-06T01:00:00Z", Error: "purge fixture failure"},
+	})
+	assertPostgresValue(t, containerName,
+		fmt.Sprintf(`SELECT status || '|' || priority::text FROM refresh_queue WHERE id = %d`, processingID),
+		"processing|0", "processing control survives destructive actions")
+}
+
+func insertProductionQueueJob(t *testing.T, containerName, name string, priority int, status, requestedAt, processedAt, errorText string) int {
+	t.Helper()
+	processedSQL := "NULL"
+	if processedAt != "" {
+		processedSQL = postgresLiteral(processedAt) + "::timestamptz"
+	}
+	errorSQL := "NULL"
+	if errorText != "" {
+		errorSQL = postgresLiteral(errorText)
+	}
+	raw := queryPostgresValueInContainer(t, containerName, fmt.Sprintf(`
+		INSERT INTO refresh_queue (ecosystem, name, source, priority, status, requested_at, processed_at, error)
+		VALUES ('npm', %s, 'osv', %d, %s, %s::timestamptz, %s, %s)
+		RETURNING id`, postgresLiteral(name), priority, postgresLiteral(status), postgresLiteral(requestedAt), processedSQL, errorSQL))
+	id, err := strconv.Atoi(raw)
+	if err != nil {
+		t.Fatalf("queue fixture %q ID = %q: %v", name, raw, err)
+	}
+	return id
+}
+
+func assertProductionQueueTransitionAudit(
+	t *testing.T,
+	containerName, action, correlationID string,
+	wantBefore, wantAfter productionQueueAuditJob,
+) (productionQueueAuditJob, productionQueueAuditJob) {
+	t.Helper()
+	details := productionQueueAuditDetails(t, containerName, action, correlationID)
+	before := decodeProductionQueueAuditJobs(t, details["previous_job"], action+" previous_job")
+	after := decodeProductionQueueAuditJobs(t, details["new_job"], action+" new_job")
+	if len(before) != 1 || len(after) != 1 {
+		t.Fatalf("%s transition arrays = previous %+v/new %+v, want one complete job each", action, before, after)
+	}
+	assertProductionQueueAuditJob(t, before[0], wantBefore, action+" previous_job")
+	assertProductionQueueAuditJob(t, after[0], wantAfter, action+" new_job")
+	for key, want := range map[string]string{
+		"previous_status":   wantBefore.Status,
+		"new_status":        wantAfter.Status,
+		"previous_priority": strconv.Itoa(wantBefore.Priority),
+		"new_priority":      strconv.Itoa(wantAfter.Priority),
+	} {
+		if got := details[key]; got != want {
+			t.Fatalf("%s audit detail %s = %q, want %q", action, key, got, want)
+		}
+	}
+	return before[0], after[0]
+}
+
+func assertProductionQueueDeleteAudit(
+	t *testing.T,
+	containerName, action, correlationID, jobsKey, countKey, status string,
+	wantJobs []productionQueueAuditJob,
+) {
+	t.Helper()
+	details := productionQueueAuditDetails(t, containerName, action, correlationID)
+	jobs := decodeProductionQueueAuditJobs(t, details[jobsKey], action+" "+jobsKey)
+	if len(jobs) != len(wantJobs) {
+		t.Fatalf("%s audit jobs = %+v, want %+v", action, jobs, wantJobs)
+	}
+	for i := range wantJobs {
+		assertProductionQueueAuditJob(t, jobs[i], wantJobs[i], fmt.Sprintf("%s %s[%d]", action, jobsKey, i))
+	}
+	wantCount := strconv.Itoa(len(wantJobs))
+	for key, want := range map[string]string{
+		countKey:        wantCount,
+		"total_deleted": wantCount,
+		"sample_count":  wantCount,
+		"truncated":     "false",
+	} {
+		if got := details[key]; got != want {
+			t.Fatalf("%s audit detail %s = %q, want %q", action, key, got, want)
+		}
+	}
+	if status != "" && details["status"] != status {
+		t.Fatalf("%s audit status = %q, want %q", action, details["status"], status)
+	}
+}
+
+func productionQueueAuditDetails(t *testing.T, containerName, action, correlationID string) map[string]string {
+	t.Helper()
+	where := fmt.Sprintf("action = %s AND correlation_id = %s", postgresLiteral(action), postgresLiteral(correlationID))
+	assertPostgresValue(t, containerName,
+		"SELECT COUNT(*)::text FROM admin_audit_log WHERE "+where,
+		"1", action+" correlated audit cardinality")
+	raw := queryPostgresValueInContainer(t, containerName,
+		"SELECT details::text FROM admin_audit_log WHERE "+where)
+	details := map[string]string{}
+	if err := json.Unmarshal([]byte(raw), &details); err != nil {
+		t.Fatalf("decode %s audit details %q: %v", action, raw, err)
+	}
+	return details
+}
+
+func decodeProductionQueueAuditJobs(t *testing.T, raw, label string) []productionQueueAuditJob {
+	t.Helper()
+	var jobs []productionQueueAuditJob
+	if err := json.Unmarshal([]byte(raw), &jobs); err != nil {
+		t.Fatalf("decode %s %q: %v", label, raw, err)
+	}
+	return jobs
+}
+
+func assertProductionQueueAuditJob(t *testing.T, got, want productionQueueAuditJob, label string) {
+	t.Helper()
+	wantRequestedAt := want.RequestedAt
+	if wantRequestedAt == productionQueueDynamicTimestamp {
+		if got.RequestedAt == "" {
+			t.Fatalf("%s requested_at is empty", label)
+		}
+		if _, err := time.Parse(time.RFC3339Nano, got.RequestedAt); err != nil {
+			t.Fatalf("%s requested_at = %q: %v", label, got.RequestedAt, err)
+		}
+		want.RequestedAt = got.RequestedAt
+	}
+	if got != want {
+		t.Fatalf("%s = %+v, want %+v", label, got, want)
+	}
+}
+
 func postgresLiteral(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
@@ -991,6 +1205,39 @@ func adminPostForm(t *testing.T, client *http.Client, endpoint string, values ur
 	}
 	if got := resp.Header.Get("Location"); wantLocationPrefix != "" && !strings.HasPrefix(got, wantLocationPrefix) {
 		t.Fatalf("POST %s Location = %q, want prefix %q", endpoint, got, wantLocationPrefix)
+	}
+}
+
+func adminPostFormWithCorrelation(
+	t *testing.T,
+	client *http.Client,
+	endpoint string,
+	values url.Values,
+	wantLocationPrefix,
+	correlationID string,
+) {
+	t.Helper()
+
+	req, err := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(values.Encode()))
+	if err != nil {
+		t.Fatalf("NewRequest POST %s: %v", endpoint, err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("X-Correlation-ID", correlationID)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("POST %s: %v", endpoint, err)
+	}
+	defer closeSilently(resp.Body)
+	if resp.StatusCode != http.StatusSeeOther {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("POST %s status = %d, want 303; body = %s", endpoint, resp.StatusCode, string(body))
+	}
+	if got := resp.Header.Get("Location"); wantLocationPrefix != "" && !strings.HasPrefix(got, wantLocationPrefix) {
+		t.Fatalf("POST %s Location = %q, want prefix %q", endpoint, got, wantLocationPrefix)
+	}
+	if got := resp.Header.Get("X-Correlation-ID"); got != correlationID {
+		t.Fatalf("POST %s correlation response = %q, want %q", endpoint, got, correlationID)
 	}
 }
 
