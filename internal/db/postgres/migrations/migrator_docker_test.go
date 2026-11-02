@@ -64,8 +64,13 @@ func startMigrationPostgresInstance(t *testing.T, observability bool) migrationP
 	}
 	containerID := strings.TrimSpace(string(out))
 	t.Cleanup(func() {
-		_ = exec.Command("docker", "rm", "-f", containerName).Run() // #nosec G204 -- cleanup uses generated test container name.
-		_ = exec.Command("docker", "rm", "-f", containerID).Run()   // #nosec G204 -- cleanup uses docker-returned test container ID.
+		nameCtx, cancelName := context.WithTimeout(context.Background(), 15*time.Second)
+		_ = exec.CommandContext(nameCtx, "docker", "rm", "-f", containerName).Run() // #nosec G204 -- cleanup uses generated test container name.
+		cancelName()
+
+		idCtx, cancelID := context.WithTimeout(context.Background(), 15*time.Second)
+		_ = exec.CommandContext(idCtx, "docker", "rm", "-f", containerID).Run() // #nosec G204 -- cleanup uses docker-returned test container ID.
+		cancelID()
 	})
 
 	port := dockerMigrationPublishedPort(t, containerName, "5432/tcp")
