@@ -17,6 +17,37 @@ release blockers for this fork:
   account-gated flows, NVD API-key rate-limit paths, and N8N feed-import
   workflows.
 
+## Dormant GitLab Template Test Boundary
+
+`ci/gitlab/.packmon-scan.yml` is retained as an unoperated consumer template.
+The only maintained automated assertion that currently reads it is
+`TestDeploymentAndIntegrationContainerImagesAreDigestPinned` in
+`tests/ci/docker_hardening_test.go`; that assertion verifies the exact
+digest-pinned Alpine image reference. It does not validate the rest of the
+template contract.
+
+There is intentionally no maintained test for the template's YAML job shape,
+variables, rules, artifacts, or report mapping. There is also no maintained
+shell harness for its bootstrap, release download and verification, scan
+invocation, diagnostics, exit-status mapping, signing, or artifact generation.
+The corresponding local test opportunities recorded as `F011-gaps-1` through
+`F011-gaps-9` are deferred, not passed or fixed. Real GitLab runner execution,
+OIDC and attestation-network behavior, and GitLab artifact/report UI behavior
+(`F011-gaps-10`) require external validation and are deferred as well.
+
+The known input-validation defects `F011-bugs-1` and `F011-bugs-2` remain
+unfixed. They do not affect the current local/source-build workflow, but they
+must be reassessed and fixed before the template is operated again. Deferred
+does not mean that the template has a complete or passing contract suite.
+
+Reopen the F011 test work before any repository consumes the template, before
+Packmon scans become a required GitLab security gate, before release binaries
+or attestations are distributed through that path, or before GitLab runner,
+OIDC, signing, or report behavior is relied upon. Reopening requires a focused
+parsed-YAML contract suite, a hermetic shell harness exercising the actual
+template commands with stubbed external tools, and real-runner validation for
+the external GitLab boundary.
+
 Core no-key public feed behavior remains in scope. Optional provider findings
 must be re-opened before storing provider API keys, enabling provider workers,
 or routing feed imports through N8N.
