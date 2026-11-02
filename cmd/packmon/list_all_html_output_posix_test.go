@@ -15,6 +15,28 @@ import (
 	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
+func TestWriteListAllHTMLReportsOutputDirectoryCreationFailure(t *testing.T) {
+	blocker := filepath.Join(t.TempDir(), "regular-file")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("write regular-file output-directory blocker: %v", err)
+	}
+	output := filepath.Join(blocker, "list-all.html")
+	err := writeListAllHTML(output, "output directory failure", &domain.ScanResult{Mode: "local"}, listAllPackageReport{})
+	if err == nil {
+		t.Fatal("writeListAllHTML() error = nil, want output-directory creation failure")
+	}
+	wantPrefix := "prepare HTML output: create output directory " + blocker + ": "
+	if !strings.HasPrefix(err.Error(), wantPrefix) {
+		t.Fatalf("writeListAllHTML() error = %q, want exact context prefix %q", err, wantPrefix)
+	}
+	if !errors.Is(err, syscall.ENOTDIR) {
+		t.Fatalf("writeListAllHTML() error = %v, want errors.Is(ENOTDIR)", err)
+	}
+	if _, statErr := os.Stat(output); !errors.Is(statErr, syscall.ENOTDIR) {
+		t.Fatalf("output stat error = %v, want absent child with ENOTDIR", statErr)
+	}
+}
+
 func TestWriteListAllHTMLReportsRenderFailureWhenPipeReaderCloses(t *testing.T) {
 	pipePath := filepath.Join(t.TempDir(), "list-all.html")
 	if err := syscall.Mkfifo(pipePath, 0o600); err != nil {

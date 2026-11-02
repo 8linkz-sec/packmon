@@ -150,6 +150,69 @@ func TestListAllHTMLKnownLatestDiffersRejectsUnknownOrMissingVersions(t *testing
 	}
 }
 
+func TestListAllUnknownStatusHintOperationalContracts(t *testing.T) {
+	const (
+		unaffected = "security findings for these packages are unaffected."
+		apiKeyNote = " For additional reputation and malware-history coverage, configure the server-side ReversingLabs Spectra Assure key (PACKMON_REVERSINGLABS_API_KEY)."
+	)
+	tests := []struct {
+		name   string
+		report listAllPackageReport
+		want   string
+	}{
+		{
+			name: "offline takes precedence over operational counters",
+			report: listAllPackageReport{
+				Offline:            true,
+				RefusedRequests:    2,
+				OversizedResponses: 3,
+				BreakerTripped:     true,
+				SkippedRequests:    4,
+			},
+			want: "Unknown status means the latest version was not looked up in offline mode; " + unaffected + apiKeyNote,
+		},
+		{
+			name: "clean run explains private and unsupported packages",
+			want: "The unknown rows are packages the public registry does not carry (workspace or private packages) or sources Packmon intentionally does not query; no action is needed, and " + unaffected + apiKeyNote,
+		},
+		{
+			name:   "refused requests explain retry options",
+			report: listAllPackageReport{RefusedRequests: 2},
+			want:   "Unknown status means the latest version could not be determined; " + unaffected + " 2 registry requests were refused or failed -- rerun the scan, raise --timeout, or configure a registry mirror." + apiKeyNote,
+		},
+		{
+			name:   "oversized responses explain the memory bound",
+			report: listAllPackageReport{OversizedResponses: 3},
+			want:   "Unknown status means the latest version could not be determined; " + unaffected + " 3 registry responses exceeded the CLI's response size limit and were discarded -- a memory bound, not a rate limit or a timeout." + apiKeyNote,
+		},
+		{
+			name:   "breaker reports skipped requests",
+			report: listAllPackageReport{BreakerTripped: true, SkippedRequests: 4},
+			want:   "Unknown status means the latest version could not be determined; " + unaffected + " Lookups were aborted after consecutive registry failures (4 skipped) -- check network connectivity and proxy settings." + apiKeyNote,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := listAllUnknownStatusHint(tt.report)
+			if got != tt.want {
+				t.Fatalf("listAllUnknownStatusHint() = %q, want exact %q", got, tt.want)
+			}
+			if strings.Count(got, unaffected) != 1 || strings.Count(got, "PACKMON_REVERSINGLABS_API_KEY") != 1 {
+				t.Fatalf("listAllUnknownStatusHint() shared wording counts = unaffected:%d API-key:%d, want 1/1", strings.Count(got, unaffected), strings.Count(got, "PACKMON_REVERSINGLABS_API_KEY"))
+			}
+		})
+	}
+}
+
+func TestListAllHTMLPackageStatusReportsUnpinned(t *testing.T) {
+	for _, update := range []string{"unpinned", " UnPiNnEd "} {
+		row := listAllRow{Installed: "1.0.0", Latest: "2.0.0", Update: update}
+		if got := listAllHTMLPackageStatus(row, nil); got != "Unpinned" {
+			t.Errorf("listAllHTMLPackageStatus(Update: %q) = %q, want Unpinned", update, got)
+		}
+	}
+}
+
 func assertListAllHTMLCopyStatusRegion(t *testing.T, snapshot listAllHTMLClipboardSnapshot, successMessage, failureMessage string, success bool) {
 	t.Helper()
 	if snapshot.StatusRole != "status" || snapshot.StatusLive != "polite" {
