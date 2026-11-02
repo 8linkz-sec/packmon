@@ -289,10 +289,11 @@ func TestF065LogoutCleanupTickerAndAuditContext(t *testing.T) {
 	t.Run("real cleanup ticker", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			now := time.Now()
+			current := &loginAttempt{count: 1, lastFailedAt: now}
 			h := &AdminHandler{loginAttempts: map[string]*loginAttempt{
 				"nil":     nil,
-				"partial": {count: 1, lastFailedAt: now.Add(-loginLockoutDuration - time.Nanosecond)},
-				"locked":  {count: loginMaxAttempts, lockedAt: now.Add(-loginLockoutDuration - time.Nanosecond)},
+				"stale":   {count: loginMaxAttempts, lockedAt: now.Add(-loginLockoutDuration - time.Nanosecond)},
+				"current": current,
 			}}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -302,10 +303,27 @@ func TestF065LogoutCleanupTickerAndAuditContext(t *testing.T) {
 				close(done)
 			}()
 			synctest.Wait()
-			time.Sleep(5 * time.Minute)
+			time.Sleep(5*time.Minute - time.Nanosecond)
 			synctest.Wait()
-			if len(h.loginAttempts) != 0 {
-				t.Fatalf("login attempts after tick = %+v, want empty", h.loginAttempts)
+			h.loginMu.Lock()
+			beforeTick := len(h.loginAttempts)
+			_, hadNil := h.loginAttempts["nil"]
+			_, hadStale := h.loginAttempts["stale"]
+			beforeCurrent := h.loginAttempts["current"]
+			h.loginMu.Unlock()
+			if beforeTick != 3 || !hadNil || !hadStale || beforeCurrent != current {
+				t.Fatalf("login attempts before first tick = count %d/nil %t/stale %t/current %p, want all three original entries", beforeTick, hadNil, hadStale, beforeCurrent)
+			}
+			time.Sleep(time.Nanosecond)
+			synctest.Wait()
+			h.loginMu.Lock()
+			afterTick := len(h.loginAttempts)
+			_, keptNil := h.loginAttempts["nil"]
+			_, keptStale := h.loginAttempts["stale"]
+			remainingCurrent := h.loginAttempts["current"]
+			h.loginMu.Unlock()
+			if afterTick != 1 || keptNil || keptStale || remainingCurrent != current {
+				t.Fatalf("login attempts after first tick = count %d/nil %t/stale %t/current %p, want only current %p", afterTick, keptNil, keptStale, remainingCurrent, current)
 			}
 			cancel()
 			synctest.Wait()
@@ -318,19 +336,23 @@ func TestF065LogoutCleanupTickerAndAuditContext(t *testing.T) {
 	})
 
 	t.Run("audit contexts", func(t *testing.T) {
-		h := &AdminHandler{}
-		ctx, cancel := h.adminAuditContext()
-		deadline, ok := ctx.Deadline()
-		if !ok || deadline.Sub(time.Now()) < adminAuditWriteTimeout-time.Second || deadline.Sub(time.Now()) > adminAuditWriteTimeout {
+		synctest.Test(t, func(t *testing.T) {
+			h := &AdminHandler{}
+			start := time.Now()
+			ctx, cancel := h.adminAuditContext()
+			deadline, ok := ctx.Deadline()
+			if !ok || deadline.Sub(start) != 5*time.Second {
+				cancel()
+				t.Fatalf("nil-root deadline delta = %s ok=%t, want exactly 5s", deadline.Sub(start), ok)
+			}
 			cancel()
-			t.Fatalf("nil-root deadline = %v ok=%t, want approximately %s", deadline, ok, adminAuditWriteTimeout)
-		}
-		cancel()
+		})
 
+		h := &AdminHandler{}
 		root, rootCancel := context.WithCancel(context.Background())
 		h.rootCtx = root
 		rootCancel()
-		ctx, cancel = h.adminAuditContext()
+		ctx, cancel := h.adminAuditContext()
 		defer cancel()
 		if !errors.Is(ctx.Err(), context.Canceled) {
 			t.Fatalf("root-cancelled context error = %v, want canceled", ctx.Err())
