@@ -94,9 +94,11 @@ func TestRegistryLookupPhaseNilSafety(t *testing.T) {
 	t.Parallel()
 	var phase *registryLookupPhase
 	phase.recordRefusal()
+	phase.recordOversized()
+	phase.recordUnsent()
 	phase.recordSuccess()
 	phase.recordSkipped()
-	if phase.breakerOpen() || phase.refusedCount() != 0 || phase.skippedCount() != 0 {
+	if phase.breakerOpen() || phase.refusedCount() != 0 || phase.oversizedCount() != 0 || phase.skippedCount() != 0 {
 		t.Fatal("nil phase must be inert")
 	}
 	if got := phase.perRequestTimeout(); got != defaultPerRequestLookupTimeout {
@@ -107,6 +109,30 @@ func TestRegistryLookupPhaseNilSafety(t *testing.T) {
 	}
 	if got := registryLookupPhaseFrom(nil); got != nil { //nolint:staticcheck // SA1012: the nil-context case is under test.
 		t.Fatalf("registryLookupPhaseFrom(nil) = %v, want nil", got)
+	}
+}
+
+func TestRegistryLookupPhaseNonRequestFailuresDoNotAdvanceBreakerStreak(t *testing.T) {
+	t.Parallel()
+	_, phase := withRegistryLookupPhase(context.Background(), 0)
+	for i := 0; i < registryBreakerThreshold-1; i++ {
+		phase.recordRefusal()
+	}
+
+	phase.recordOversized()
+	phase.recordUnsent()
+
+	if got := phase.refusedCount(); got != registryBreakerThreshold+1 {
+		t.Fatalf("refusedCount() = %d, want %d", got, registryBreakerThreshold+1)
+	}
+	if got := phase.oversizedCount(); got != 1 {
+		t.Fatalf("oversizedCount() = %d, want 1", got)
+	}
+	if got := phase.consecutive.Load(); got != registryBreakerThreshold-1 {
+		t.Fatalf("consecutive refusals = %d, want %d", got, registryBreakerThreshold-1)
+	}
+	if phase.breakerOpen() {
+		t.Fatal("breaker open after non-request failures, want closed")
 	}
 }
 
