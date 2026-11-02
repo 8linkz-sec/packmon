@@ -47,28 +47,50 @@ func TestDockerignoreEffectiveBuildContextContract(t *testing.T) {
 	}
 
 	ignore := repoFile(t, ".dockerignore")
-	fixtureProtected := append(append([]string(nil), protected...), nestedProtected...)
-	contextDir := writeDockerignoreFixture(t, ignore, fixtureProtected, required)
-	exported := exportDockerContext(t, contextDir)
-	if violations := dockerContextViolations(exported, protected, required); len(violations) != 0 {
-		t.Fatalf("effective .dockerignore contract violations:\n%s", strings.Join(violations, "\n"))
-	}
-	t.Run("nested protected paths", func(t *testing.T) {
-		t.Skip("OPEN F001-bugs-1: tracked .dockerignore root-only patterns currently export nested secret/config paths")
-		if violations := dockerContextViolations(exported, nestedProtected, nil); len(violations) != 0 {
-			t.Fatalf("effective nested .dockerignore contract violations:\n%s", strings.Join(violations, "\n"))
+	t.Run("root protected paths", func(t *testing.T) {
+		contextDir := writeDockerignoreFixture(t, ignore, protected, nil)
+		exported := exportDockerContext(t, contextDir)
+		if violations := dockerContextViolations(exported, protected, nil); len(violations) != 0 {
+			t.Fatalf("effective root .dockerignore contract violations:\n%s", strings.Join(violations, "\n"))
 		}
+	})
+	t.Run("required paths", func(t *testing.T) {
+		contextDir := writeDockerignoreFixture(t, ignore, nil, required)
+		exported := exportDockerContext(t, contextDir)
+		if violations := dockerContextViolations(exported, nil, required); len(violations) != 0 {
+			t.Fatalf("effective required-path .dockerignore contract violations:\n%s", strings.Join(violations, "\n"))
+		}
+	})
+	t.Run("nested protected paths", func(t *testing.T) {
+		contextDir := writeDockerignoreFixture(t, ignore, nestedProtected, nil)
+		exported := exportDockerContext(t, contextDir)
+		violations := dockerContextViolations(exported, nestedProtected, nil)
+		want := []string{
+			"protected path included: nested/.git/config",
+			"protected path included: nested/.env",
+			"protected path included: nested/.env.production",
+			"protected path included: nested/node_modules/module/index.js",
+			"protected path included: nested/secrets/private.key",
+			"protected path included: nested/config/server.pem",
+			"protected path included: nested/config/.packmon.yaml",
+		}
+		if !slices.Equal(violations, want) {
+			t.Fatalf("nested violation set changed; got %#v, want exact F001-bugs-1 set %#v", violations, want)
+		}
+		t.Skip("OPEN F001-bugs-1: exact known nested secret/config export set reproduced")
 	})
 
 	// Mutation guard: prove the contract observes a later negation instead of
 	// merely checking that the expected exclusion text appears somewhere.
-	mutatedContext := writeDockerignoreFixture(t, ignore+"\n!.env.production\n", protected, required)
-	mutatedExport := exportDockerContext(t, mutatedContext)
-	violations := dockerContextViolations(mutatedExport, protected, required)
-	const want = "protected path included: .env.production"
-	if !slices.Contains(violations, want) {
-		t.Fatalf("later negation was not detected; violations = %#v, want %q", violations, want)
-	}
+	t.Run("later negation mutation", func(t *testing.T) {
+		mutatedContext := writeDockerignoreFixture(t, ignore+"\n!.env.production\n", protected, nil)
+		mutatedExport := exportDockerContext(t, mutatedContext)
+		violations := dockerContextViolations(mutatedExport, protected, nil)
+		const want = "protected path included: .env.production"
+		if !slices.Contains(violations, want) {
+			t.Fatalf("later negation was not detected; violations = %#v, want %q", violations, want)
+		}
+	})
 }
 
 func requireBuildKit(t *testing.T) {

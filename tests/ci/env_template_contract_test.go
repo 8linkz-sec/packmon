@@ -34,7 +34,7 @@ PACKMON_DB_SSLMODE PACKMON_DB_MAX_CONNS PACKMON_DB_MIN_CONNS PACKMON_DB_CONNECT_
 PACKMON_BACKUP_DIR PACKMON_LOG_LEVEL PACKMON_LOG_FORMAT
 PACKMON_ADMIN_INITIAL_PASSWORD PACKMON_ADMIN_SESSION_TIMEOUT PACKMON_ADMIN_IDLE_TIMEOUT
 PACKMON_SCAN_LOG_RETENTION PACKMON_SCAN_LOG_IDENTITY_MODE PACKMON_ADMIN_AUDIT_LOG_RETENTION
-PACKMON_REFRESH_QUEUE_RETENTION PACKMON_AUDIT_RETENTION_INTERVAL
+PACKMON_REFRESH_QUEUE_RETENTION PACKMON_PACKAGE_CHECK_STATUS_RETENTION PACKMON_AUDIT_RETENTION_INTERVAL
 PACKMON_ENCRYPTION_KEY PACKMON_ADMIN_AUDIT_HMAC_KEY
 PACKMON_FEED_SYNC_INTERVAL PACKMON_FEED_SYNC_ON_STARTUP PACKMON_FEED_DATA_DIR PACKMON_FEED_IMPORT_SECRET
 PACKMON_FEED_OSV_ENABLED PACKMON_FEED_GHSA_ENABLED PACKMON_FEED_OPENSSF_ENABLED
@@ -64,15 +64,32 @@ PACKMON_REVERSINGLABS_EXCLUDED_NAMESPACES`)
 			t.Errorf(".env.example has %d active %s assignments, want exactly one", count, key)
 		}
 	}
+	const knownMissing = "PACKMON_PACKAGE_CHECK_STATUS_RETENTION"
 	for _, key := range wantKeys {
+		if key == knownMissing {
+			continue
+		}
 		if seen[key] != 1 {
 			t.Errorf(".env.example has %d total %s assignments, want exactly one", seen[key], key)
 		}
 		delete(seen, key)
 	}
+	delete(seen, knownMissing)
 	for key, count := range seen {
 		t.Errorf(".env.example has unexpected or misspelled assignment %s (%d occurrences)", key, count)
 	}
+	t.Run("known missing package-check retention", func(t *testing.T) {
+		var missing []string
+		for _, key := range wantKeys {
+			if seenCount := countAssignments(assignments, key); seenCount == 0 {
+				missing = append(missing, key)
+			}
+		}
+		if !slices.Equal(missing, []string{knownMissing}) {
+			t.Fatalf("missing template keys = %v, want exact F002-bugs-2 omission [%s]", missing, knownMissing)
+		}
+		t.Skip("OPEN F002-bugs-2: .env.example omits PACKMON_PACKAGE_CHECK_STATUS_RETENTION=2160h")
+	})
 }
 
 func TestEnvExampleKeepsBootstrapSecretsEmptyAndOptionalCredentialsCommented(t *testing.T) {
@@ -121,7 +138,6 @@ func TestEnvExampleImageOverridesAreDigestPinnedAndMatchRuntimeDefaults(t *testi
 	}
 	digestPinned := regexp.MustCompile(`^[A-Za-z0-9._/-]+:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}$`)
 	dockerfile := repoFile(t, "Dockerfile")
-	composeFiles := []string{repoFile(t, "docker-compose.yml"), repoFile(t, "docker-compose.server.yml")}
 	for _, key := range []string{"PACKMON_GO_BUILDER_IMAGE", "PACKMON_ALPINE_RUNTIME_IMAGE", "PACKMON_POSTGRES_IMAGE"} {
 		value := values[key]
 		if !digestPinned.MatchString(value) {
@@ -130,11 +146,52 @@ func TestEnvExampleImageOverridesAreDigestPinnedAndMatchRuntimeDefaults(t *testi
 		if key != "PACKMON_POSTGRES_IMAGE" && !strings.Contains(dockerfile, "ARG "+key+"="+value+"\n") {
 			t.Errorf("Dockerfile default for %s does not match .env.example value %q", key, value)
 		}
-		wantExpression := "${" + key + ":-" + value + "}"
-		for index, compose := range composeFiles {
-			if !strings.Contains(compose, wantExpression) {
-				t.Errorf("Compose file %d does not use .env.example %s default %q", index+1, key, value)
+	}
+
+	imageDefault := regexp.MustCompile(`\$\{([A-Z][A-Z0-9_]*_IMAGE):-([^}]*)\}`)
+	composeFiles := []struct {
+		name string
+		text string
+		want map[string]int
+	}{
+		{
+			name: "docker-compose.yml",
+			text: repoFile(t, "docker-compose.yml"),
+			want: map[string]int{
+				"PACKMON_POSTGRES_IMAGE":       2,
+				"PACKMON_GO_BUILDER_IMAGE":     2,
+				"PACKMON_ALPINE_RUNTIME_IMAGE": 2,
+			},
+		},
+		{
+			name: "docker-compose.server.yml",
+			text: repoFile(t, "docker-compose.server.yml"),
+			want: map[string]int{
+				"PACKMON_POSTGRES_IMAGE":       2,
+				"PACKMON_GO_BUILDER_IMAGE":     2,
+				"PACKMON_ALPINE_RUNTIME_IMAGE": 2,
+			},
+		},
+	}
+	for _, compose := range composeFiles {
+		gotCounts := make(map[string]int)
+		for _, match := range imageDefault.FindAllStringSubmatch(compose.text, -1) {
+			key, defaultValue := match[1], match[2]
+			gotCounts[key]++
+			if got := values[key]; got == "" {
+				t.Errorf("%s has image default for %s without an active non-empty .env.example assignment", compose.name, key)
+			} else if defaultValue != got {
+				t.Errorf("%s %s occurrence %d default = %q, want .env.example value %q", compose.name, key, gotCounts[key], defaultValue, got)
 			}
+		}
+		for key, wantCount := range compose.want {
+			if gotCounts[key] != wantCount {
+				t.Errorf("%s has %d %s default occurrences, want %d", compose.name, gotCounts[key], key, wantCount)
+			}
+			delete(gotCounts, key)
+		}
+		for key, count := range gotCounts {
+			t.Errorf("%s has %d unexpected %s default occurrences", compose.name, count, key)
 		}
 	}
 }
@@ -155,6 +212,16 @@ func TestEnvExamplePinsRefreshQueueRetentionAndIdentityMode(t *testing.T) {
 	if got := values["PACKMON_SCAN_LOG_IDENTITY_MODE"]; got != "full" {
 		t.Fatalf("PACKMON_SCAN_LOG_IDENTITY_MODE = %q, want full", got)
 	}
+}
+
+func countAssignments(assignments []envTemplateAssignment, key string) int {
+	count := 0
+	for _, assignment := range assignments {
+		if assignment.key == key {
+			count++
+		}
+	}
+	return count
 }
 
 func parseEnvTemplateAssignments(t *testing.T, text string) []envTemplateAssignment {

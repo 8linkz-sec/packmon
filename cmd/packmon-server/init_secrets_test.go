@@ -301,6 +301,11 @@ func TestInitSecretsBootstrapsTrackedTemplateForCompose(t *testing.T) {
 			t.Fatalf("init-secrets output leaks generated %s", spec.Key)
 		}
 	}
+	postgresPassword, postgresOK := envfile.Value(entries, "POSTGRES_PASSWORD")
+	databasePassword, databaseOK := envfile.Value(entries, "PACKMON_DB_PASSWORD")
+	if !postgresOK || !databaseOK || postgresPassword != databasePassword {
+		t.Fatal("generated POSTGRES_PASSWORD and PACKMON_DB_PASSWORD must both exist and match")
+	}
 	for _, raw := range strings.Split(string(exampleBefore), "\n") {
 		if line := strings.TrimSpace(raw); strings.HasPrefix(line, "#") && !strings.Contains(string(data), raw) {
 			t.Fatalf("generated .env lost tracked template comment %q", raw)
@@ -332,6 +337,19 @@ func TestInitSecretsBootstrapsTrackedTemplateForCompose(t *testing.T) {
 	if output, err := version.CombinedOutput(); err != nil {
 		t.Skipf("Docker Compose unavailable; generated env-file render not executed: %v: %s", err, output)
 	}
+	t.Setenv("PACKMON_DB_PASSWORD", "host-packmon-password-must-not-override-env-file")
+	t.Setenv("POSTGRES_PASSWORD", "host-postgres-password-must-not-override-env-file")
+	t.Setenv("COMPOSE_FILE", filepath.Join(t.TempDir(), "must-not-be-used.yml"))
+	validationEnv := composeValidationEnv(os.Environ())
+	for _, entry := range validationEnv {
+		key, _, _ := strings.Cut(entry, "=")
+		upperKey := strings.ToUpper(key)
+		if strings.HasPrefix(upperKey, "PACKMON_") ||
+			strings.HasPrefix(upperKey, "POSTGRES_") ||
+			strings.HasPrefix(upperKey, "COMPOSE_") {
+			t.Fatalf("Compose validation environment retained forbidden host override %s", key)
+		}
+	}
 	cmd := exec.Command( // #nosec G204 -- fixed Compose arguments and test/repository paths.
 		"docker", "compose",
 		"--env-file", env,
@@ -340,9 +358,31 @@ func TestInitSecretsBootstrapsTrackedTemplateForCompose(t *testing.T) {
 		"-f", filepath.Join(repoRoot, "docker-compose.override.yml"),
 		"config", "--quiet",
 	)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("docker compose rejected generated .env: %v:\n%s", err, output)
+	cmd.Env = validationEnv
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("docker compose rejected generated .env: %v (output suppressed because the env file contains secrets)", err)
 	}
+}
+
+func composeValidationEnv(environ []string) []string {
+	filtered := make([]string, 0, len(environ))
+	for _, entry := range environ {
+		key, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			filtered = append(filtered, entry)
+			continue
+		}
+		upperKey := strings.ToUpper(key)
+		if strings.HasPrefix(upperKey, "PACKMON_") ||
+			strings.HasPrefix(upperKey, "POSTGRES_") ||
+			strings.HasPrefix(upperKey, "COMPOSE_") {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	return filtered
 }
 
 func TestRunInitSecretsIsIdempotent(t *testing.T) {
