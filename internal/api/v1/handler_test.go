@@ -4996,7 +4996,11 @@ func TestHandleFeedImportCISAKEVClearMissingTruthTable(t *testing.T) {
 		{name: "true with empty cve_ids", body: `{"clear_missing":true,"cve_ids":[]}`, wantStatus: http.StatusBadRequest},
 		{name: "true with nonempty cve_ids", body: `{"clear_missing":true,"cve_ids":["CVE-2026-1001"]}`, wantStatus: http.StatusOK, wantReplaced: []string{"CVE-2026-1001"}},
 		{name: "false with absent cve_ids", body: `{"clear_missing":false}`, wantStatus: http.StatusOK},
+		{name: "false with empty cve_ids", body: `{"clear_missing":false,"cve_ids":[]}`, wantStatus: http.StatusOK},
+		{name: "false with nonempty cve_ids", body: `{"clear_missing":false,"cve_ids":["CVE-2026-1002"]}`, wantStatus: http.StatusOK, wantImported: []string{"CVE-2026-1002"}},
 		{name: "absent clear_missing and cve_ids", body: `{}`, wantStatus: http.StatusOK},
+		{name: "absent clear_missing with empty cve_ids", body: `{"cve_ids":[]}`, wantStatus: http.StatusOK},
+		{name: "absent clear_missing with nonempty cve_ids", body: `{"cve_ids":["CVE-2026-1003"]}`, wantStatus: http.StatusOK, wantImported: []string{"CVE-2026-1003"}},
 	}
 
 	for _, tt := range tests {

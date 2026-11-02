@@ -408,7 +408,11 @@ func TestOpenAPICISAKEVClearMissingTruthTable(t *testing.T) {
 		{name: "true with empty cve_ids", instance: map[string]any{"clear_missing": true, "cve_ids": []any{}}, wantAccepted: false},
 		{name: "true with nonempty cve_ids", instance: map[string]any{"clear_missing": true, "cve_ids": []any{"CVE-2026-1001"}}, wantAccepted: true},
 		{name: "false with absent cve_ids", instance: map[string]any{"clear_missing": false}, wantAccepted: true},
+		{name: "false with empty cve_ids", instance: map[string]any{"clear_missing": false, "cve_ids": []any{}}, wantAccepted: true},
+		{name: "false with nonempty cve_ids", instance: map[string]any{"clear_missing": false, "cve_ids": []any{"CVE-2026-1002"}}, wantAccepted: true},
 		{name: "absent clear_missing and cve_ids", instance: map[string]any{}, wantAccepted: true},
+		{name: "absent clear_missing with empty cve_ids", instance: map[string]any{"cve_ids": []any{}}, wantAccepted: true},
+		{name: "absent clear_missing with nonempty cve_ids", instance: map[string]any{"cve_ids": []any{"CVE-2026-1003"}}, wantAccepted: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			gotAccepted := schema.Validate(tt.instance) == nil
