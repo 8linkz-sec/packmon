@@ -212,6 +212,7 @@ func TestHandleFeedImportFallbackAuditFailurePreservesAppliedState(t *testing.T)
 	errAudit := errors.New("audit persistence unavailable")
 	store := &fallbackAuditFailureStore{auditErr: errAudit}
 	const (
+		importSecret  = "retry-secret"
 		requestBody   = `{"ignored":"request-body-marker"}`
 		requestMarker = "request-body-marker"
 	)
@@ -219,35 +220,55 @@ func TestHandleFeedImportFallbackAuditFailurePreservesAppliedState(t *testing.T)
 		t.Helper()
 		var logs bytes.Buffer
 		h := newLogCaptureFeedImportHandler(store, &logs)
-		h.ConfigureFeedImportSecret("retry-secret", true)
+		h.ConfigureFeedImportSecret(importSecret, true)
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/feeds/epss/import", strings.NewReader(requestBody))
 		req.SetPathValue("feed", "epss")
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set(HeaderFeedImportSecret, "retry-secret")
+		req.Header.Set(HeaderFeedImportSecret, importSecret)
 		req = withCorrelationID(req, correlationID)
 		rr := httptest.NewRecorder()
 
 		h.HandleImport(rr, req)
 
+		responseText := rr.Body.String()
+		if strings.Contains(responseText, importSecret) {
+			t.Fatal("client response leaked the configured import secret")
+		}
+		for name, values := range rr.Header() {
+			if strings.Contains(name, importSecret) {
+				t.Fatal("response header name leaked the configured import secret")
+			}
+			for _, value := range values {
+				if strings.Contains(value, importSecret) {
+					t.Fatal("response header value leaked the configured import secret")
+				}
+			}
+		}
+		logText := logs.String()
+		if strings.Contains(logText, importSecret) {
+			t.Fatal("request logs leaked the configured import secret")
+		}
+		if strings.Contains(responseText, requestMarker) {
+			t.Fatal("client response leaked request data")
+		}
+		if strings.Contains(logText, requestMarker) {
+			t.Fatal("logs leaked request body data")
+		}
 		if rr.Code != http.StatusInternalServerError {
-			t.Fatalf("status = %d, want 500: %s", rr.Code, rr.Body.String())
+			t.Fatalf("status = %d, want 500: %s", rr.Code, responseText)
 		}
 		var body errorJSON
 		if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
-			t.Fatalf("decode error response: %v; body=%q", err, rr.Body.String())
+			t.Fatalf("decode error response: %v; body=%q", err, responseText)
 		}
 		if body.Error != "feed import audit failed" {
 			t.Fatalf("error = %q, want fixed audit diagnostic", body.Error)
 		}
-		if strings.Contains(rr.Body.String(), errAudit.Error()) || strings.Contains(rr.Body.String(), requestMarker) {
-			t.Fatalf("client response leaked internal or request data: %s", rr.Body.String())
+		if strings.Contains(responseText, errAudit.Error()) {
+			t.Fatal("client response leaked internal audit data")
 		}
-		logText := logs.String()
 		if !strings.Contains(logText, "feed import audit failed") || !strings.Contains(logText, correlationID) || !strings.Contains(logText, errAudit.Error()) {
 			t.Fatalf("logs do not identify the failed audit and correlation ID: %s", logText)
-		}
-		if strings.Contains(logText, requestMarker) {
-			t.Fatalf("logs leaked request body data: %s", logText)
 		}
 		return rr, logText
 	}
