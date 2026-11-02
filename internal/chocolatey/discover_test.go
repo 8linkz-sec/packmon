@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -186,6 +187,181 @@ func TestDiscoverFilesWithWarningsRejectsFileRoot(t *testing.T) {
 	_, _, err := DiscoverFilesWithWarnings(root, 1)
 	if !errors.Is(err, fs.ErrInvalid) {
 		t.Fatalf("DiscoverFilesWithWarnings() error = %v, want fs.ErrInvalid", err)
+	}
+}
+
+func TestDiscoverFilesWithWarningsRejectsMissingRoot(t *testing.T) {
+	t.Parallel()
+
+	root := filepath.Join(t.TempDir(), "missing")
+	files, warnings, err := DiscoverFilesWithWarnings(root, 1)
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("DiscoverFilesWithWarnings(%q) error = %v, want fs.ErrNotExist", root, err)
+	}
+	if files != nil || warnings != nil {
+		t.Fatalf("DiscoverFilesWithWarnings(%q) = (%v, %v), want nil results", root, files, warnings)
+	}
+}
+
+func TestCleanRelPathBoundaries(t *testing.T) {
+	t.Parallel()
+
+	absolute := filepath.Join(t.TempDir(), "absolute.ps1")
+	for _, tt := range []struct {
+		name    string
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{name: "nested local", input: "scripts/install.ps1", want: filepath.Join("scripts", "install.ps1")},
+		{name: "cleaned local", input: "scripts/../install.ps1", want: "install.ps1"},
+		{name: "dot", input: ".", wantErr: true},
+		{name: "parent traversal", input: "../outside.ps1", wantErr: true},
+		{name: "absolute", input: absolute, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := cleanRelPath(tt.input)
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "escapes scan root") {
+					t.Fatalf("cleanRelPath(%q) = (%q, %v), want root-escape error", tt.input, got, err)
+				}
+				if filepath.IsAbs(tt.input) && strings.Contains(err.Error(), filepath.Dir(tt.input)) {
+					t.Fatalf("cleanRelPath(%q) error leaks host directory: %v", tt.input, err)
+				}
+				return
+			}
+			if err != nil || got != tt.want {
+				t.Fatalf("cleanRelPath(%q) = (%q, %v), want (%q, nil)", tt.input, got, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestDiscoverFilesWithWarningsHandlesCrossVolumePath(t *testing.T) {
+	// not parallel: swaps the package-level walk hook
+	if runtime.GOOS != "windows" {
+		t.Skip("cross-volume filepath.Rel failure is Windows-specific")
+	}
+	root := t.TempDir()
+	rootVolume := filepath.VolumeName(root)
+	var otherRoot string
+	for drive := 'A'; drive <= 'Z'; drive++ {
+		candidate := string(drive) + ":" + string(filepath.Separator)
+		if strings.EqualFold(filepath.VolumeName(candidate), rootVolume) {
+			continue
+		}
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			otherRoot = candidate
+			break
+		}
+	}
+	if otherRoot == "" {
+		t.Skipf("no volume distinct from %q is available", rootVolume)
+	}
+	crossVolumePath := filepath.Join(otherRoot, "outside.ps1")
+	withFakeWalk(t, func(_ string, fn fs.WalkDirFunc) error {
+		return fn(crossVolumePath, fakeDirEntry{name: "outside.ps1"}, nil)
+	})
+
+	files, warnings, err := DiscoverFilesWithWarnings(root, 1)
+	if err != nil {
+		t.Fatalf("DiscoverFilesWithWarnings() error = %v", err)
+	}
+	if len(files) != 0 {
+		t.Fatalf("files = %v, want none", files)
+	}
+	if len(warnings) != 1 || !strings.HasPrefix(warnings[0], "outside.ps1: ") {
+		t.Fatalf("warnings = %v, want one cross-volume warning for outside.ps1", warnings)
+	}
+}
+
+func TestDiscoverFilesWithWarningsSignalsDirectoryExclusions(t *testing.T) {
+	// not parallel: swaps the package-level walk hook
+	root := t.TempDir()
+	want := map[string]error{
+		".hidden":      fs.SkipDir,
+		"node_modules": fs.SkipDir,
+		"vendor":       fs.SkipDir,
+		"__pycache__":  fs.SkipDir,
+		".github":      nil,
+		"src":          nil,
+	}
+	withFakeWalk(t, func(walkRoot string, fn fs.WalkDirFunc) error {
+		for name, wantErr := range want {
+			gotErr := fn(filepath.Join(walkRoot, name), fakeDirEntry{name: name, dir: true}, nil)
+			if !errors.Is(gotErr, wantErr) || (wantErr == nil && gotErr != nil) {
+				t.Errorf("walk callback for %q = %v, want %v", name, gotErr, wantErr)
+			}
+		}
+		return nil
+	})
+
+	files, warnings, err := DiscoverFilesWithWarnings(root, 5)
+	if err != nil || len(files) != 0 || len(warnings) != 0 {
+		t.Fatalf("DiscoverFilesWithWarnings() = (%v, %v, %v), want empty success", files, warnings, err)
+	}
+}
+
+func TestDiscoverFilesWithWarningsHonorsZeroDepth(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "root.ps1"), "choco install root\n")
+	writeTestFile(t, filepath.Join(root, "nested", "hidden.ps1"), "choco install nested\n")
+
+	files, warnings, err := DiscoverFilesWithWarnings(root, 0)
+	if err != nil {
+		t.Fatalf("DiscoverFilesWithWarnings() error = %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %v, want none", warnings)
+	}
+	if len(files) != 1 || files[0].RelPath != "root.ps1" || files[0].Kind != KindPowerShellScript {
+		t.Fatalf("files = %+v, want only root.ps1", files)
+	}
+}
+
+func TestDiscoverFilesWithWarningsReturnsPartialResultsWithWalkerError(t *testing.T) {
+	// not parallel: swaps the package-level walk hook
+	root := t.TempDir()
+	walkErr := errors.New("walker stopped")
+	withFakeWalk(t, func(walkRoot string, fn fs.WalkDirFunc) error {
+		if err := fn(filepath.Join(walkRoot, "denied"), nil, &fs.PathError{Op: "read", Path: filepath.Join(walkRoot, "denied"), Err: fs.ErrPermission}); err != nil {
+			return err
+		}
+		if err := fn(filepath.Join(walkRoot, "kept.cmd"), fakeDirEntry{name: "kept.cmd"}, nil); err != nil {
+			return err
+		}
+		return walkErr
+	})
+
+	files, warnings, err := DiscoverFilesWithWarnings(root, 1)
+	if !errors.Is(err, walkErr) {
+		t.Fatalf("DiscoverFilesWithWarnings() error = %v, want %v", err, walkErr)
+	}
+	if len(files) != 1 || files[0].RelPath != "kept.cmd" || files[0].Kind != KindBatchScript {
+		t.Fatalf("files = %+v, want kept.cmd partial result", files)
+	}
+	if len(warnings) != 1 || !strings.HasPrefix(warnings[0], "denied: ") {
+		t.Fatalf("warnings = %v, want one relative denied warning", warnings)
+	}
+}
+
+func TestDiscoverFilesWithWarningsAllowsExplicitGitHubRoot(t *testing.T) {
+	t.Parallel()
+
+	root := filepath.Join(t.TempDir(), ".github")
+	writeTestFile(t, filepath.Join(root, "bootstrap.ps1"), "choco install bootstrap\n")
+
+	files, warnings, err := DiscoverFilesWithWarnings(root, 0)
+	if err != nil {
+		t.Fatalf("DiscoverFilesWithWarnings() error = %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %v, want none", warnings)
+	}
+	if len(files) != 1 || files[0].RelPath != "bootstrap.ps1" {
+		t.Fatalf("files = %+v, want bootstrap.ps1 from explicit .github root", files)
 	}
 }
 

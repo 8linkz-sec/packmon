@@ -2,6 +2,8 @@ package chocolatey
 
 import (
 	"encoding/binary"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -276,6 +278,175 @@ func TestCollectReturnsDiscoveryErrorForMissingRoot(t *testing.T) {
 	}
 	if collection != nil {
 		t.Fatalf("Collect(%q) collection = %+v, want nil", missing, collection)
+	}
+}
+
+func TestCollectRejectsFileRoot(t *testing.T) {
+	t.Parallel()
+
+	root := filepath.Join(t.TempDir(), "inventory.ps1")
+	writeTestFile(t, root, "choco install alpha\n")
+
+	collection, err := Collect(root, 1)
+	if !errors.Is(err, fs.ErrInvalid) {
+		t.Fatalf("Collect(%q) error = %v, want fs.ErrInvalid", root, err)
+	}
+	if collection != nil {
+		t.Fatalf("Collect(%q) collection = %+v, want nil", root, collection)
+	}
+}
+
+func TestCollectFailsWhenRootDisappearsAfterDiscovery(t *testing.T) {
+	// not parallel: swaps the package-level walk hook
+	root := t.TempDir()
+	withFakeWalk(t, func(walkRoot string, _ fs.WalkDirFunc) error {
+		if err := os.RemoveAll(walkRoot); err != nil {
+			t.Fatalf("RemoveAll(%q): %v", walkRoot, err)
+		}
+		return nil
+	})
+
+	collection, err := Collect(root, 1)
+	if err == nil {
+		t.Fatal("Collect() error = nil, want root-open failure")
+	}
+	if collection != nil {
+		t.Fatalf("Collect() collection = %+v, want nil", collection)
+	}
+}
+
+func TestParseFileFromRootSkipsNonRegularFiles(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "directory.ps1"), 0o750); err != nil {
+		t.Fatalf("Mkdir(directory.ps1): %v", err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("OpenRoot(%q): %v", dir, err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+
+	packages, err := parseFileFromRoot(root, File{RelPath: "directory.ps1", Kind: KindPowerShellScript})
+	if err != nil {
+		t.Fatalf("parseFileFromRoot() error = %v", err)
+	}
+	if packages != nil {
+		t.Fatalf("parseFileFromRoot() packages = %+v, want nil", packages)
+	}
+}
+
+func TestDedupPackagesMergesFlagsWithinIdentity(t *testing.T) {
+	t.Parallel()
+
+	packages := []Package{
+		{Name: "alpha", Version: "1.0", SourceFile: "one.ps1", Flags: []string{"direct", ""}},
+		{Name: "alpha", Version: "1.0", SourceFile: "one.ps1", Flags: []string{"direct", "reviewed"}},
+		{Name: "alpha", Version: "2.0", SourceFile: "one.ps1", Flags: []string{"pinned"}},
+		{Name: "alpha", Version: "1.0", SourceFile: "two.ps1", Flags: []string{"other-source"}},
+	}
+
+	got := dedupPackages(packages)
+	if len(got) != 3 {
+		t.Fatalf("dedupPackages() = %+v, want three distinct identities", got)
+	}
+	if got[0].Name != "alpha" || got[0].Version != "1.0" || got[0].SourceFile != "one.ps1" {
+		t.Fatalf("dedupPackages()[0] = %+v, want first identity preserved", got[0])
+	}
+	if flags := strings.Join(got[0].Flags, ","); flags != "direct,reviewed" {
+		t.Fatalf("dedupPackages()[0].Flags = %q, want %q", flags, "direct,reviewed")
+	}
+	if got[1].Version != "2.0" || got[2].SourceFile != "two.ps1" {
+		t.Fatalf("dedupPackages() reordered or merged distinct identities: %+v", got)
+	}
+}
+
+func TestCollectContinuesAfterWarningsAndParseErrors(t *testing.T) {
+	// not parallel: swaps the package-level walk hook
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "broken", "config.xml"), `<config><packages><package name="broken"`)
+	writeTestFile(t, filepath.Join(dir, "good.ps1"), "choco install good --version 1.2.3\n")
+	withFakeWalk(t, func(root string, fn fs.WalkDirFunc) error {
+		if err := fn(filepath.Join(root, "unreadable"), nil, &fs.PathError{Op: "open", Path: filepath.Join(root, "unreadable"), Err: fs.ErrPermission}); err != nil {
+			return err
+		}
+		if err := fn(filepath.Join(root, "broken", "config.xml"), fakeDirEntry{name: "config.xml"}, nil); err != nil {
+			return err
+		}
+		return fn(filepath.Join(root, "good.ps1"), fakeDirEntry{name: "good.ps1"}, nil)
+	})
+
+	collection, err := Collect(dir, 5)
+	if err != nil {
+		t.Fatalf("Collect() error = %v", err)
+	}
+	if collection.Files != 2 {
+		t.Fatalf("Files = %d, want 2", collection.Files)
+	}
+	if len(collection.DiscoveryWarnings) != 1 || !strings.HasPrefix(collection.DiscoveryWarnings[0], "unreadable: ") {
+		t.Fatalf("DiscoveryWarnings = %v, want one relative unreadable warning", collection.DiscoveryWarnings)
+	}
+	if len(collection.ParseErrors) != 1 || !strings.HasPrefix(collection.ParseErrors[0], "broken/config.xml: ") {
+		t.Fatalf("ParseErrors = %v, want one relative broken/config.xml error", collection.ParseErrors)
+	}
+	if len(collection.Packages) != 1 || collection.Packages[0].Name != "good" || collection.Packages[0].Version != "1.2.3" {
+		t.Fatalf("Packages = %+v, want valid file after parse failure", collection.Packages)
+	}
+	for _, message := range append(collection.DiscoveryWarnings, collection.ParseErrors...) {
+		if strings.Contains(message, dir) || strings.Contains(message, filepath.ToSlash(dir)) {
+			t.Fatalf("diagnostic %q leaks root %q", message, dir)
+		}
+	}
+}
+
+func TestCollectAcceptsInputsAtExactSizeLimits(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		path        string
+		prefix      string
+		padding     string
+		limit       int
+		packageName string
+	}{
+		{
+			name:        "script",
+			path:        "exact.ps1",
+			prefix:      "choco install exact-script\n#",
+			padding:     "x",
+			limit:       maxScriptFileSize,
+			packageName: "exact-script",
+		},
+		{
+			name:        "config",
+			path:        "config.xml",
+			prefix:      `<config><packages><package name="exact-config"/></packages></config>`,
+			padding:     " ",
+			limit:       maxConfigFileSize,
+			packageName: "exact-config",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+			content := tt.prefix + strings.Repeat(tt.padding, tt.limit-len(tt.prefix))
+			writeTestFile(t, filepath.Join(dir, tt.path), content)
+
+			collection, err := Collect(dir, 1)
+			if err != nil {
+				t.Fatalf("Collect() error = %v", err)
+			}
+			if len(collection.ParseErrors) != 0 || len(collection.DiscoveryWarnings) != 0 {
+				t.Fatalf("ParseErrors = %v, DiscoveryWarnings = %v, want none", collection.ParseErrors, collection.DiscoveryWarnings)
+			}
+			if len(collection.Packages) != 1 || collection.Packages[0].Name != tt.packageName {
+				t.Fatalf("Packages = %+v, want %q", collection.Packages, tt.packageName)
+			}
+			if info, statErr := os.Stat(filepath.Join(dir, tt.path)); statErr != nil || info.Size() != int64(tt.limit) {
+				t.Fatalf("Stat(%q) = (%v, %v), want size %d", tt.path, info, statErr, tt.limit)
+			}
+		})
 	}
 }
 
