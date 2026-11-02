@@ -637,14 +637,20 @@ func f129F132AssertTombstoneCatalog(t *testing.T, leaf f129F132Leaf) {
 
 func f129F132AssertTombstoneKeyset(t *testing.T, leaf f129F132Leaf) {
 	t.Helper()
-	lower := time.Now().UTC()
+	var lower time.Time
+	if err := leaf.conn.QueryRowContext(leaf.ctx, `SELECT clock_timestamp()`).Scan(&lower); err != nil {
+		t.Fatalf("read lower PostgreSQL clock bound for tombstone default: %v", err)
+	}
 	f129F132Exec(t, leaf, `
 		INSERT INTO lifecycle_sync_tombstones(id,ecosystem,name,product_slug,cycle,updated_at) VALUES
 		('key-a','npm','a','product','1','2026-06-01T00:00:00Z'),
 		('key-b','npm','b','product','1','2026-06-01T00:00:00Z'),
 		('key-c','npm','c','product','1','2026-06-02T00:00:00Z')`)
 	f129F132Exec(t, leaf, `INSERT INTO lifecycle_sync_tombstones(id,ecosystem,name,product_slug,cycle) VALUES('default-time','npm','d','product','1')`)
-	upper := time.Now().UTC()
+	var upper time.Time
+	if err := leaf.conn.QueryRowContext(leaf.ctx, `SELECT clock_timestamp()`).Scan(&upper); err != nil {
+		t.Fatalf("read upper PostgreSQL clock bound for tombstone default: %v", err)
+	}
 	var defaultTime time.Time
 	if err := leaf.conn.QueryRowContext(leaf.ctx, `SELECT updated_at FROM lifecycle_sync_tombstones WHERE id='default-time'`).Scan(&defaultTime); err != nil {
 		t.Fatalf("read tombstone default updated_at: %v", err)
