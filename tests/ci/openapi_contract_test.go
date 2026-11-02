@@ -1,6 +1,7 @@
 package ci
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"reflect"
@@ -334,6 +335,87 @@ func TestOpenAPICISAKEVClearMissingRequiresCVEs(t *testing.T) {
 	cveIDs := requireMap(t, thenProperties, "cve_ids")
 	if got := requireInt(t, cveIDs, "minItems"); got != 1 {
 		t.Fatalf("CISAKEVImportRequest.then.cve_ids minItems = %d, want 1", got)
+	}
+}
+
+func TestOpenAPIScanPackageSchemaInstances(t *testing.T) {
+	compiler := newOpenAPIInstanceCompiler(t)
+	schema := compileOpenAPIFragment(t, compiler, "#/components/schemas/ScanPackage")
+
+	tests := []struct {
+		name         string
+		packageName  string
+		version      string
+		wantAccepted bool
+	}{
+		{name: "ordinary coordinate", packageName: "left-pad", version: "1.0.0", wantAccepted: true},
+		{name: "blank name", packageName: " \t ", version: "1.0.0", wantAccepted: false},
+		{name: "blank version", packageName: "left-pad", version: " \t ", wantAccepted: false},
+		{name: "embedded version whitespace", packageName: "left-pad", version: "1.0 0", wantAccepted: false},
+		{name: "exact name limit", packageName: strings.Repeat("n", checkcontract.MaxPackageNameLength), version: "1.0.0", wantAccepted: true},
+		{name: "over name limit", packageName: strings.Repeat("n", checkcontract.MaxPackageNameLength+1), version: "1.0.0", wantAccepted: false},
+		{name: "exact version limit", packageName: "left-pad", version: strings.Repeat("1", checkcontract.MaxPackageVersionLength), wantAccepted: true},
+		{name: "over version limit", packageName: "left-pad", version: strings.Repeat("1", checkcontract.MaxPackageVersionLength+1), wantAccepted: false},
+		{name: "exact multibyte name byte limit", packageName: strings.Repeat("é", checkcontract.MaxPackageNameLength/2), version: "1.0.0", wantAccepted: true},
+		{name: "exact multibyte version byte limit", packageName: "left-pad", version: strings.Repeat("é", checkcontract.MaxPackageVersionLength/2), wantAccepted: true},
+		{name: "ordinary surrounding whitespace", packageName: " left-pad ", version: " 1.0.0 ", wantAccepted: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			instance := map[string]any{"ecosystem": "npm", "name": tt.packageName, "version": tt.version}
+			gotAccepted := schema.Validate(instance) == nil
+			if gotAccepted != tt.wantAccepted {
+				t.Fatalf("ScanPackage schema accepted = %t, want %t for %#v", gotAccepted, tt.wantAccepted, instance)
+			}
+		})
+	}
+
+	t.Run("OPEN F010-bugs-4 runtime length and normalization mismatch", func(t *testing.T) {
+		mismatches := []struct {
+			name                string
+			packageName         string
+			version             string
+			wantSchemaAccepted  bool
+			wantRuntimeAccepted bool
+		}{
+			{name: "Unicode name counts code points in schema but bytes at runtime", packageName: strings.Repeat("é", checkcontract.MaxPackageNameLength/2+1), version: "1.0.0", wantSchemaAccepted: true, wantRuntimeAccepted: false},
+			{name: "Unicode version counts code points in schema but bytes at runtime", packageName: "left-pad", version: strings.Repeat("é", checkcontract.MaxPackageVersionLength/2+1), wantSchemaAccepted: true, wantRuntimeAccepted: false},
+			{name: "name whitespace counts before schema limit but is trimmed at runtime", packageName: " " + strings.Repeat("n", checkcontract.MaxPackageNameLength) + " ", version: "1.0.0", wantSchemaAccepted: false, wantRuntimeAccepted: true},
+			{name: "version whitespace counts before schema limit but is trimmed at runtime", packageName: "left-pad", version: " " + strings.Repeat("1", checkcontract.MaxPackageVersionLength) + " ", wantSchemaAccepted: false, wantRuntimeAccepted: true},
+		}
+		for _, tt := range mismatches {
+			instance := map[string]any{"ecosystem": "npm", "name": tt.packageName, "version": tt.version}
+			gotSchemaAccepted := schema.Validate(instance) == nil
+			gotRuntimeAccepted := runtimeCheckCoordinateAccepted(tt.packageName, tt.version)
+			if gotSchemaAccepted != tt.wantSchemaAccepted || gotRuntimeAccepted != tt.wantRuntimeAccepted || gotSchemaAccepted == gotRuntimeAccepted {
+				t.Fatalf("%s: schema/runtime accepted = %t/%t, want %t/%t", tt.name, gotSchemaAccepted, gotRuntimeAccepted, tt.wantSchemaAccepted, tt.wantRuntimeAccepted)
+			}
+		}
+		t.Skip("OPEN F010-bugs-4: ScanPackage uses raw Unicode code-point lengths while the handler enforces post-trim byte lengths")
+	})
+}
+
+func TestOpenAPICISAKEVClearMissingTruthTable(t *testing.T) {
+	compiler := newOpenAPIInstanceCompiler(t)
+	schema := compileOpenAPIFragment(t, compiler, "#/components/schemas/CISAKEVImportRequest")
+
+	for _, tt := range []struct {
+		name         string
+		instance     map[string]any
+		wantAccepted bool
+	}{
+		{name: "true with absent cve_ids", instance: map[string]any{"clear_missing": true}, wantAccepted: false},
+		{name: "true with empty cve_ids", instance: map[string]any{"clear_missing": true, "cve_ids": []any{}}, wantAccepted: false},
+		{name: "true with nonempty cve_ids", instance: map[string]any{"clear_missing": true, "cve_ids": []any{"CVE-2026-1001"}}, wantAccepted: true},
+		{name: "false with absent cve_ids", instance: map[string]any{"clear_missing": false}, wantAccepted: true},
+		{name: "absent clear_missing and cve_ids", instance: map[string]any{}, wantAccepted: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			gotAccepted := schema.Validate(tt.instance) == nil
+			if gotAccepted != tt.wantAccepted {
+				t.Fatalf("CISAKEVImportRequest accepted = %t, want %t for %#v", gotAccepted, tt.wantAccepted, tt.instance)
+			}
+		})
 	}
 }
 
@@ -819,6 +901,82 @@ func TestOpenAPIDocumentsOperationalHEADMethods(t *testing.T) {
 				t.Fatalf("HEAD %s response %s documents body content: %#v", tt.path, status, response["content"])
 			}
 		}
+	}
+}
+
+func TestOpenAPISecurityInheritanceMatrix(t *testing.T) {
+	spec := readOpenAPISpecMap(t)
+	globalSecurity, ok := spec["security"].([]any)
+	if !ok || len(globalSecurity) != 1 {
+		t.Fatalf("global security = %#v, want one bearerAuth requirement", spec["security"])
+	}
+	requirement, ok := globalSecurity[0].(map[string]any)
+	if !ok || len(requirement) != 1 {
+		t.Fatalf("global security requirement = %#v, want only bearerAuth", globalSecurity[0])
+	}
+	scopes, ok := requirement["bearerAuth"].([]any)
+	if !ok || len(scopes) != 0 {
+		t.Fatalf("global bearerAuth scopes = %#v, want empty array", requirement["bearerAuth"])
+	}
+
+	protected := map[string]bool{
+		"post /api/v1/check":                               true,
+		"get /api/v1/feeds/status":                         true,
+		"head /api/v1/feeds/status":                        true,
+		"post /api/v1/feeds/{feed}/import":                 true,
+		"get /api/v1/packages/{ecosystem}/{rest}":          true,
+		"head /api/v1/packages/{ecosystem}/{rest}":         true,
+		"post /api/v1/packages/{ecosystem}/{rest}/refresh": true,
+		"get /api/v1/sync":                                 true,
+		"head /api/v1/sync":                                true,
+		"get /healthz":                                     false,
+		"head /healthz":                                    false,
+		"get /readyz":                                      false,
+		"head /readyz":                                     false,
+		"get /version":                                     false,
+		"head /version":                                    false,
+	}
+	paths := requireMap(t, spec, "paths")
+	actualOperations := make(map[string]struct{}, len(protected))
+	for path, rawPathItem := range paths {
+		pathItem, ok := rawPathItem.(map[string]any)
+		if !ok {
+			t.Fatalf("path item %s = %#v, want object", path, rawPathItem)
+		}
+		for _, method := range []string{"get", "head", "post", "put", "patch", "delete", "options", "trace", "query"} {
+			if _, exists := pathItem[method]; exists {
+				actualOperations[method+" "+path] = struct{}{}
+			}
+		}
+	}
+	if len(actualOperations) != 15 {
+		t.Fatalf("documented path-operation count = %d (%v), want exhaustive 15", len(actualOperations), enumKeys(actualOperations))
+	}
+	for operationKey := range actualOperations {
+		if _, ok := protected[operationKey]; !ok {
+			t.Fatalf("security matrix missing documented operation %q", operationKey)
+		}
+	}
+	for operationKey, wantProtected := range protected {
+		parts := strings.SplitN(operationKey, " ", 2)
+		operation := requireMap(t, requireMap(t, paths, parts[1]), parts[0])
+		security, hasOverride := operation["security"]
+		if wantProtected {
+			if hasOverride {
+				t.Fatalf("%s security = %#v, want no override so global bearerAuth is inherited", operationKey, security)
+			}
+			continue
+		}
+		publicSecurity, ok := security.([]any)
+		if !hasOverride || !ok || len(publicSecurity) != 0 {
+			t.Fatalf("%s security = %#v, want explicit public security []", operationKey, security)
+		}
+	}
+
+	webhookPost := requireMap(t, requireMap(t, requireMap(t, spec, "webhooks"), "scanCompleted"), "post")
+	webhookSecurity, ok := webhookPost["security"].([]any)
+	if !ok || len(webhookSecurity) != 0 {
+		t.Fatalf("scanCompleted webhook security = %#v, want separate explicit []", webhookPost["security"])
 	}
 }
 
@@ -1416,6 +1574,144 @@ func TestOpenAPIDocumentsFeedImportSchemas(t *testing.T) {
 	}
 }
 
+func TestOpenAPIFeedImportExactRequestReferences(t *testing.T) {
+	spec := readOpenAPISpecMap(t)
+	post := requireMap(t, requireMap(t, requireMap(t, spec, "paths"), "/api/v1/feeds/{feed}/import"), "post")
+	requestBody := requireMap(t, post, "requestBody")
+	media := requireMap(t, requireMap(t, requestBody, "content"), "application/json")
+	requestSchema := requireMap(t, media, "schema")
+	anyOf, ok := requestSchema["anyOf"].([]any)
+	if !ok {
+		t.Fatalf("feed import request anyOf = %#v, want array", requestSchema["anyOf"])
+	}
+	if len(anyOf) != 5 {
+		t.Fatalf("feed import request anyOf count = %d, want exactly 5", len(anyOf))
+	}
+
+	want := map[string]struct{}{
+		"#/components/schemas/VulnerabilityImportRequest": {},
+		"#/components/schemas/MaliciousImportRequest":     {},
+		"#/components/schemas/VulnCheckImportRequest":     {},
+		"#/components/schemas/CISAKEVImportRequest":       {},
+		"#/components/schemas/EPSSImportRequest":          {},
+	}
+	seen := make(map[string]struct{}, len(anyOf))
+	for i, raw := range anyOf {
+		branch, ok := raw.(map[string]any)
+		if !ok {
+			t.Fatalf("feed import anyOf[%d] = %#v, want reference object", i, raw)
+		}
+		if len(branch) != 1 {
+			t.Fatalf("feed import anyOf[%d] = %#v, want only $ref", i, branch)
+		}
+		ref, ok := branch["$ref"].(string)
+		if !ok {
+			t.Fatalf("feed import anyOf[%d].$ref = %#v, want string", i, branch["$ref"])
+		}
+		if _, duplicate := seen[ref]; duplicate {
+			t.Fatalf("feed import request anyOf contains duplicate ref %q", ref)
+		}
+		seen[ref] = struct{}{}
+	}
+	if !reflect.DeepEqual(seen, want) {
+		t.Fatalf("feed import request refs = %v, want exact set %v", enumKeys(seen), enumKeys(want))
+	}
+}
+
+func TestOpenAPIFeedImportSelectorSchemaMapping(t *testing.T) {
+	compiler := newOpenAPIInstanceCompiler(t)
+	tests := []struct {
+		feed       string
+		schemaName string
+		body       string
+	}{
+		{feed: "osv", schemaName: "VulnerabilityImportRequest", body: `{"vulnerabilities":[{"id":"OSV-selector","severity":"HIGH"}]}`},
+		{feed: "ghsa", schemaName: "VulnerabilityImportRequest", body: `{"vulnerabilities":[{"id":"GHSA-selector","severity":"HIGH"}]}`},
+		{feed: "openssf", schemaName: "MaliciousImportRequest", body: `{"malicious":[{"id":"MAL-openssf","ecosystem":"npm","name":"bad-openssf","severity":"HIGH"}]}`},
+		{feed: "malicious", schemaName: "MaliciousImportRequest", body: `{"malicious":[{"id":"MAL-alias","ecosystem":"npm","name":"bad-alias","severity":"HIGH"}]}`},
+		{feed: "socket", schemaName: "MaliciousImportRequest", body: `{"malicious":[{"id":"MAL-socket","ecosystem":"npm","name":"bad-socket","severity":"HIGH"}]}`},
+		{feed: "vulncheck", schemaName: "VulnCheckImportRequest", body: `{"entries":[{"cve_id":"CVE-2026-2001","exploit_exists":true}]}`},
+		{feed: "cisakev", schemaName: "CISAKEVImportRequest", body: `{"cve_ids":["CVE-2026-2002"]}`},
+		{feed: "epss", schemaName: "EPSSImportRequest", body: `{"entries":[{"cve_id":"CVE-2026-2003","score":0.5,"percentile":0.75}]}`},
+	}
+	if got := apiv1.FeedImportPathFeedNames(); len(got) != len(tests) {
+		t.Fatalf("documented feed selector count = %d (%v), want exact %d-case schema matrix", len(got), got, len(tests))
+	}
+
+	seen := make(map[string]struct{}, len(tests))
+	for _, tt := range tests {
+		t.Run(tt.feed, func(t *testing.T) {
+			seen[tt.feed] = struct{}{}
+			schema := compileOpenAPIFragment(t, compiler, "#/components/schemas/"+tt.schemaName)
+			instance := decodeJSONInstance(t, tt.body)
+			if err := schema.Validate(instance); err != nil {
+				t.Fatalf("%s payload does not validate against selected %s: %v", tt.feed, tt.schemaName, err)
+			}
+		})
+	}
+	documented := make(map[string]struct{}, len(tests))
+	for _, feed := range apiv1.FeedImportPathFeedNames() {
+		if _, duplicate := documented[feed]; duplicate {
+			t.Fatalf("documented feed selectors contain duplicate %q", feed)
+		}
+		documented[feed] = struct{}{}
+	}
+	if !reflect.DeepEqual(seen, documented) {
+		t.Fatalf("feed selector matrix = %v, want exact documented set %v", enumKeys(seen), enumKeys(documented))
+	}
+}
+
+func TestOpenAPIFeedImportStatusOnlySchemaMatrix(t *testing.T) {
+	compiler := newOpenAPIInstanceCompiler(t)
+	statusOnly := decodeJSONInstance(t, `{"status":{"last_sync_status":"error","last_error":"status-only import"}}`)
+	selected := []struct {
+		feed         string
+		schemaName   string
+		wantAccepted bool
+	}{
+		{feed: "osv", schemaName: "VulnerabilityImportRequest", wantAccepted: true},
+		{feed: "ghsa", schemaName: "VulnerabilityImportRequest", wantAccepted: true},
+		{feed: "openssf", schemaName: "MaliciousImportRequest", wantAccepted: true},
+		{feed: "malicious", schemaName: "MaliciousImportRequest", wantAccepted: true},
+		{feed: "socket", schemaName: "MaliciousImportRequest", wantAccepted: true},
+		{feed: "vulncheck", schemaName: "VulnCheckImportRequest", wantAccepted: true},
+		{feed: "cisakev", schemaName: "CISAKEVImportRequest", wantAccepted: true},
+		{feed: "epss", schemaName: "EPSSImportRequest", wantAccepted: false},
+	}
+	for _, tt := range selected {
+		t.Run(tt.feed, func(t *testing.T) {
+			schema := compileOpenAPIFragment(t, compiler, "#/components/schemas/"+tt.schemaName)
+			gotAccepted := schema.Validate(statusOnly) == nil
+			if gotAccepted != tt.wantAccepted {
+				t.Fatalf("status-only %s schema accepted = %t, want %t", tt.schemaName, gotAccepted, tt.wantAccepted)
+			}
+		})
+	}
+
+	rawBranchSchemas := []string{
+		"VulnerabilityImportRequest",
+		"MaliciousImportRequest",
+		"VulnCheckImportRequest",
+		"CISAKEVImportRequest",
+		"EPSSImportRequest",
+	}
+	matchingBranches := 0
+	for _, schemaName := range rawBranchSchemas {
+		schema := compileOpenAPIFragment(t, compiler, "#/components/schemas/"+schemaName)
+		if schema.Validate(statusOnly) == nil {
+			matchingBranches++
+		}
+	}
+	if matchingBranches != 4 {
+		t.Fatalf("status-only payload matches %d raw feed-import branches, want exactly 4", matchingBranches)
+	}
+	rawSchema := compileOpenAPIFragment(t, compiler, "#/paths/~1api~1v1~1feeds~1%7Bfeed%7D~1import/post/requestBody/content/application~1json/schema")
+	if err := rawSchema.Validate(statusOnly); err != nil {
+		t.Fatalf("raw anyOf rejected status-only payload despite four matching branches: %v", err)
+	}
+	t.Skip("OPEN F010-bugs-3: the feed-import anyOf accepts status-only payloads through four indistinguishable branches and cannot identify the selector-specific request schema")
+}
+
 func TestOpenAPIDocumentsPackageDetailResponse(t *testing.T) {
 	data, err := os.ReadFile("../../api/openapi/packmon-v1.yaml")
 	if err != nil {
@@ -1545,6 +1841,65 @@ func TestOpenAPIDocumentsPackageCatchAllPaths(t *testing.T) {
 			t.Fatalf("%s %s rest example = %q, want scoped package", tt.method, tt.path, example)
 		}
 	}
+}
+
+const openAPIInstanceResourceURL = "https://packmon.test/openapi/packmon-v1.yaml"
+
+func readOpenAPISpecMap(t *testing.T) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile("../../api/openapi/packmon-v1.yaml")
+	if err != nil {
+		t.Fatalf("read OpenAPI spec: %v", err)
+	}
+	var spec map[string]any
+	if err := yaml.Unmarshal(data, &spec); err != nil {
+		t.Fatalf("parse OpenAPI spec: %v", err)
+	}
+	return spec
+}
+
+func newOpenAPIInstanceCompiler(t *testing.T) *jsonschema.Compiler {
+	t.Helper()
+	data, err := os.ReadFile("../../api/openapi/packmon-v1.yaml")
+	if err != nil {
+		t.Fatalf("read OpenAPI spec: %v", err)
+	}
+	var document any
+	if err := yaml.Unmarshal(data, &document); err != nil {
+		t.Fatalf("parse OpenAPI spec: %v", err)
+	}
+	compiler := jsonschema.NewCompiler()
+	compiler.DefaultDraft(jsonschema.Draft2020)
+	if err := compiler.AddResource(openAPIInstanceResourceURL, document); err != nil {
+		t.Fatalf("add whole OpenAPI document as JSON Schema resource: %v", err)
+	}
+	return compiler
+}
+
+func compileOpenAPIFragment(t *testing.T, compiler *jsonschema.Compiler, fragment string) *jsonschema.Schema {
+	t.Helper()
+	schema, err := compiler.Compile(openAPIInstanceResourceURL + fragment)
+	if err != nil {
+		t.Fatalf("compile OpenAPI schema fragment %s: %v", fragment, err)
+	}
+	return schema
+}
+
+func decodeJSONInstance(t *testing.T, raw string) any {
+	t.Helper()
+	var instance any
+	if err := json.Unmarshal([]byte(raw), &instance); err != nil {
+		t.Fatalf("decode JSON instance: %v", err)
+	}
+	return instance
+}
+
+func runtimeCheckCoordinateAccepted(name, version string) bool {
+	name = strings.TrimSpace(name)
+	version = strings.TrimSpace(version)
+	return name != "" && len(name) <= checkcontract.MaxPackageNameLength &&
+		version != "" && len(version) <= checkcontract.MaxPackageVersionLength &&
+		len(strings.Fields(version)) == 1
 }
 
 func requireMap(t *testing.T, parent map[string]any, key string) map[string]any {

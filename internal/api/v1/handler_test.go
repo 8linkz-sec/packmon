@@ -2538,6 +2538,73 @@ func TestHandleCheck_MaxPackagesAtDocumentedCoordinateLengths(t *testing.T) {
 	}
 }
 
+func TestHandleCheckPackageCoordinateContract(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		packageName string
+		version     string
+		wantStatus  int
+		wantName    string
+		wantVersion string
+	}{
+		{name: "ordinary coordinate", packageName: "left-pad", version: "1.0.0", wantStatus: http.StatusOK, wantName: "left-pad", wantVersion: "1.0.0"},
+		{name: "blank name", packageName: " \t ", version: "1.0.0", wantStatus: http.StatusBadRequest},
+		{name: "blank version", packageName: "left-pad", version: " \t ", wantStatus: http.StatusBadRequest},
+		{name: "embedded version whitespace", packageName: "left-pad", version: "1.0 0", wantStatus: http.StatusBadRequest},
+		{name: "exact name byte limit", packageName: strings.Repeat("n", checkcontract.MaxPackageNameLength), version: "1.0.0", wantStatus: http.StatusOK, wantName: strings.Repeat("n", checkcontract.MaxPackageNameLength), wantVersion: "1.0.0"},
+		{name: "over name byte limit", packageName: strings.Repeat("n", checkcontract.MaxPackageNameLength+1), version: "1.0.0", wantStatus: http.StatusBadRequest},
+		{name: "exact version byte limit", packageName: "left-pad", version: strings.Repeat("1", checkcontract.MaxPackageVersionLength), wantStatus: http.StatusOK, wantName: "left-pad", wantVersion: strings.Repeat("1", checkcontract.MaxPackageVersionLength)},
+		{name: "over version byte limit", packageName: "left-pad", version: strings.Repeat("1", checkcontract.MaxPackageVersionLength+1), wantStatus: http.StatusBadRequest},
+		{name: "exact multibyte name byte limit", packageName: strings.Repeat("é", checkcontract.MaxPackageNameLength/2), version: "1.0.0", wantStatus: http.StatusOK, wantName: strings.Repeat("é", checkcontract.MaxPackageNameLength/2), wantVersion: "1.0.0"},
+		{name: "over multibyte name byte limit", packageName: strings.Repeat("é", checkcontract.MaxPackageNameLength/2+1), version: "1.0.0", wantStatus: http.StatusBadRequest},
+		{name: "exact multibyte version byte limit", packageName: "left-pad", version: strings.Repeat("é", checkcontract.MaxPackageVersionLength/2), wantStatus: http.StatusOK, wantName: "left-pad", wantVersion: strings.Repeat("é", checkcontract.MaxPackageVersionLength/2)},
+		{name: "over multibyte version byte limit", packageName: "left-pad", version: strings.Repeat("é", checkcontract.MaxPackageVersionLength/2+1), wantStatus: http.StatusBadRequest},
+		{name: "surrounding whitespace is normalized before name limit", packageName: " \t" + strings.Repeat("n", checkcontract.MaxPackageNameLength) + "\n", version: "1.0.0", wantStatus: http.StatusOK, wantName: strings.Repeat("n", checkcontract.MaxPackageNameLength), wantVersion: "1.0.0"},
+		{name: "surrounding whitespace is normalized before version limit", packageName: "left-pad", version: " \t" + strings.Repeat("1", checkcontract.MaxPackageVersionLength) + "\n", wantStatus: http.StatusOK, wantName: "left-pad", wantVersion: strings.Repeat("1", checkcontract.MaxPackageVersionLength)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := &stubStore{}
+			h := newTestHandler(store)
+			body, err := json.Marshal(domain.ScanRequest{Packages: []domain.Package{{
+				Name:      tt.packageName,
+				Version:   tt.version,
+				Ecosystem: domain.EcosystemNPM,
+			}}})
+			if err != nil {
+				t.Fatalf("marshal check request: %v", err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/check", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			rr := httptest.NewRecorder()
+
+			h.HandleCheck(rr, req)
+
+			if rr.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d: %s", rr.Code, tt.wantStatus, rr.Body.String())
+			}
+			if tt.wantStatus != http.StatusOK {
+				if len(store.vulnerabilityQueries) != 0 || len(store.maliciousQueries) != 0 {
+					t.Fatalf("rejected coordinate reached lookups: vulnerability=%+v malicious=%+v", store.vulnerabilityQueries, store.maliciousQueries)
+				}
+				return
+			}
+			if len(store.vulnerabilityQueries) != 1 {
+				t.Fatalf("vulnerability queries = %+v, want one normalized coordinate", store.vulnerabilityQueries)
+			}
+			got := store.vulnerabilityQueries[0]
+			if got.Name != tt.wantName || got.Version != tt.wantVersion || got.Ecosystem != string(domain.EcosystemNPM) {
+				t.Fatalf("normalized coordinate = %+v, want npm/%q@%q", got, tt.wantName, tt.wantVersion)
+			}
+		})
+	}
+}
+
 func TestHandleCheck_InvalidPackageFields(t *testing.T) {
 	t.Parallel()
 
@@ -4912,6 +4979,184 @@ func TestHandleFeedImportCISAKEVClearMissingUsesReplacePath(t *testing.T) {
 	}
 	if len(store.upsertedStatuses) != 1 || len(store.auditEntries) != 1 {
 		t.Fatalf("status/audit counts = %d/%d, want 1/1", len(store.upsertedStatuses), len(store.auditEntries))
+	}
+}
+
+func TestHandleFeedImportCISAKEVClearMissingTruthTable(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		body         string
+		wantStatus   int
+		wantImported []string
+		wantReplaced []string
+	}{
+		{name: "true with absent cve_ids", body: `{"clear_missing":true}`, wantStatus: http.StatusBadRequest},
+		{name: "true with empty cve_ids", body: `{"clear_missing":true,"cve_ids":[]}`, wantStatus: http.StatusBadRequest},
+		{name: "true with nonempty cve_ids", body: `{"clear_missing":true,"cve_ids":["CVE-2026-1001"]}`, wantStatus: http.StatusOK, wantReplaced: []string{"CVE-2026-1001"}},
+		{name: "false with absent cve_ids", body: `{"clear_missing":false}`, wantStatus: http.StatusOK},
+		{name: "absent clear_missing and cve_ids", body: `{}`, wantStatus: http.StatusOK},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := &stubStore{}
+			h := newTestFeedImportHandler(store)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/feeds/cisakev/import", strings.NewReader(tt.body))
+			req.SetPathValue("feed", "cisakev")
+			req.Header.Set("Content-Type", "application/json")
+			rr := httptest.NewRecorder()
+
+			h.HandleImport(rr, req)
+
+			if rr.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d: %s", rr.Code, tt.wantStatus, rr.Body.String())
+			}
+			if !reflect.DeepEqual(store.cisaKEVIDs, tt.wantImported) {
+				t.Fatalf("incremental CISA KEV IDs = %#v, want %#v", store.cisaKEVIDs, tt.wantImported)
+			}
+			if !reflect.DeepEqual(store.replacedCISAKEVIDs, tt.wantReplaced) {
+				t.Fatalf("replacement CISA KEV IDs = %#v, want %#v", store.replacedCISAKEVIDs, tt.wantReplaced)
+			}
+			if len(store.clearedCISAKEVIDs) != 0 {
+				t.Fatalf("legacy clear path received IDs: %#v", store.clearedCISAKEVIDs)
+			}
+		})
+	}
+}
+
+func TestHandleFeedImportSelectorMapping(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		feed             string
+		body             string
+		wantResponseFeed string
+		wantMutation     string
+	}{
+		{feed: "osv", body: `{"vulnerabilities":[{"id":"OSV-selector","severity":"HIGH"}]}`, wantResponseFeed: "osv", wantMutation: "vulnerability"},
+		{feed: "ghsa", body: `{"vulnerabilities":[{"id":"GHSA-selector","severity":"HIGH"}]}`, wantResponseFeed: "ghsa", wantMutation: "vulnerability"},
+		{feed: "openssf", body: `{"malicious":[{"id":"MAL-openssf","ecosystem":"npm","name":"bad-openssf","severity":"HIGH"}]}`, wantResponseFeed: "openssf", wantMutation: "malicious"},
+		{feed: "malicious", body: `{"malicious":[{"id":"MAL-alias","ecosystem":"npm","name":"bad-alias","severity":"HIGH"}]}`, wantResponseFeed: "openssf", wantMutation: "malicious"},
+		{feed: "socket", body: `{"malicious":[{"id":"MAL-socket","ecosystem":"npm","name":"bad-socket","severity":"HIGH"}]}`, wantResponseFeed: "socket", wantMutation: "malicious"},
+		{feed: "vulncheck", body: `{"entries":[{"cve_id":"CVE-2026-2001","exploit_exists":true}]}`, wantResponseFeed: "vulncheck", wantMutation: "vulncheck"},
+		{feed: "cisakev", body: `{"cve_ids":["CVE-2026-2002"]}`, wantResponseFeed: "cisakev", wantMutation: "cisakev"},
+		{feed: "epss", body: `{"entries":[{"cve_id":"CVE-2026-2003","score":0.5,"percentile":0.75}]}`, wantResponseFeed: "epss", wantMutation: "epss"},
+	}
+	wantSelectors := make(map[string]struct{}, len(tests))
+	for _, tt := range tests {
+		wantSelectors[tt.feed] = struct{}{}
+	}
+	gotSelectors := make(map[string]struct{}, len(tests))
+	for _, feed := range FeedImportPathFeedNames() {
+		if _, duplicate := gotSelectors[feed]; duplicate {
+			t.Fatalf("feed import path selectors contain duplicate %q", feed)
+		}
+		gotSelectors[feed] = struct{}{}
+	}
+	if !reflect.DeepEqual(gotSelectors, wantSelectors) {
+		t.Fatalf("feed import path selectors = %v, want exact matrix %v", gotSelectors, wantSelectors)
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.feed, func(t *testing.T) {
+			t.Parallel()
+
+			store := &stubStore{}
+			h := newTestFeedImportHandler(store)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/feeds/"+tt.feed+"/import", strings.NewReader(tt.body))
+			req.SetPathValue("feed", tt.feed)
+			req.Header.Set("Content-Type", "application/json")
+			rr := httptest.NewRecorder()
+
+			h.HandleImport(rr, req)
+
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body.String())
+			}
+			var resp importResponse
+			if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if resp.Feed != tt.wantResponseFeed {
+				t.Fatalf("response feed = %q, want %q", resp.Feed, tt.wantResponseFeed)
+			}
+			mutationCounts := map[string]int{
+				"vulnerability": len(store.upsertedVulns),
+				"malicious":     len(store.upsertedMalicious),
+				"vulncheck":     len(store.vulnCheckEntries),
+				"cisakev":       len(store.cisaKEVIDs) + len(store.replacedCISAKEVIDs),
+				"epss":          len(store.epssEntries),
+			}
+			for mutation, count := range mutationCounts {
+				want := 0
+				if mutation == tt.wantMutation {
+					want = 1
+				}
+				if count != want {
+					t.Fatalf("%s mutation count = %d, want %d; all counts=%v", mutation, count, want, mutationCounts)
+				}
+			}
+			if tt.wantMutation == "malicious" && store.upsertedMalicious[0].Source != tt.wantResponseFeed {
+				t.Fatalf("malicious source = %q, want normalized route feed %q", store.upsertedMalicious[0].Source, tt.wantResponseFeed)
+			}
+		})
+	}
+}
+
+func TestHandleFeedImportStatusOnlyMatrix(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		feed             string
+		wantStatus       int
+		wantResponseFeed string
+	}{
+		{feed: "osv", wantStatus: http.StatusOK, wantResponseFeed: "osv"},
+		{feed: "ghsa", wantStatus: http.StatusOK, wantResponseFeed: "ghsa"},
+		{feed: "openssf", wantStatus: http.StatusOK, wantResponseFeed: "openssf"},
+		{feed: "malicious", wantStatus: http.StatusOK, wantResponseFeed: "openssf"},
+		{feed: "socket", wantStatus: http.StatusOK, wantResponseFeed: "socket"},
+		{feed: "vulncheck", wantStatus: http.StatusOK, wantResponseFeed: "vulncheck"},
+		{feed: "cisakev", wantStatus: http.StatusOK, wantResponseFeed: "cisakev"},
+		{feed: "epss", wantStatus: http.StatusBadRequest},
+	} {
+		t.Run(tt.feed, func(t *testing.T) {
+			t.Parallel()
+
+			store := &stubStore{}
+			h := newTestFeedImportHandler(store)
+			body := `{"status":{"last_sync_status":"error","last_error":"status-only import"}}`
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/feeds/"+tt.feed+"/import", strings.NewReader(body))
+			req.SetPathValue("feed", tt.feed)
+			req.Header.Set("Content-Type", "application/json")
+			rr := httptest.NewRecorder()
+
+			h.HandleImport(rr, req)
+
+			if rr.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d: %s", rr.Code, tt.wantStatus, rr.Body.String())
+			}
+			if len(store.upsertedVulns)+len(store.upsertedMalicious)+len(store.vulnCheckEntries)+len(store.cisaKEVIDs)+len(store.replacedCISAKEVIDs)+len(store.epssEntries) != 0 {
+				t.Fatalf("status-only import mutated feed data: %+v", store)
+			}
+			if tt.wantStatus != http.StatusOK {
+				return
+			}
+			var resp importResponse
+			if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if resp.Feed != tt.wantResponseFeed || resp.Imported != 0 || resp.Deleted != 0 || resp.EntriesTotal != 0 {
+				t.Fatalf("status-only response = %+v, want feed=%q and zero counts", resp, tt.wantResponseFeed)
+			}
+			if len(store.upsertedStatuses) != 1 || store.upsertedStatuses[0].LastSyncStatus != "error" {
+				t.Fatalf("stored status = %+v, want one error status", store.upsertedStatuses)
+			}
+		})
 	}
 }
 
