@@ -215,10 +215,9 @@ func TestHandleCheckIdempotencyLookupFailuresAreSanitizedAndNotCached(t *testing
 	}{
 		{name: "initial generic failure", failAt: 1, lookupErr: errors.New("database lookup diagnostic"), wantStatus: http.StatusInternalServerError, wantCode: "internal_error", wantInserts: 0, wantSchedule: 0},
 		{name: "initial deadline", failAt: 1, lookupErr: context.DeadlineExceeded, wantStatus: http.StatusServiceUnavailable, wantCode: "service_unavailable", wantInserts: 0, wantSchedule: 0},
-		// Current behavior: post-insert verification happens after finding
-		// collection has already scheduled the external reputation refresh.
-		// The OPEN production bug tracks whether failed requests may retain this
-		// irreversible side effect; this test makes the observed sequence explicit.
+		// Post-insert verification occurs after finding collection has scheduled
+		// exactly one external reputation refresh, while an initial lookup failure
+		// schedules none. These expectations make the observed ordering explicit.
 		{name: "post-insert generic failure", failAt: 3, lookupErr: errors.New("database verification diagnostic"), wantStatus: http.StatusInternalServerError, wantCode: "internal_error", wantInserts: 1, wantSchedule: 1},
 		{name: "post-insert deadline", failAt: 3, lookupErr: context.DeadlineExceeded, wantStatus: http.StatusServiceUnavailable, wantCode: "service_unavailable", wantInserts: 1, wantSchedule: 1},
 	} {
