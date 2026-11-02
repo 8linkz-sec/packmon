@@ -159,6 +159,22 @@ func TestF106F108PostgresContracts(t *testing.T) {
 		if !reflectFindingSlices(single, want) {
 			t.Fatalf("findings = %+v, want %+v", single, want)
 		}
+		allVersions, err := store.FindMalicious(ctx, "npm", "f107-lookup", "")
+		if err != nil || len(allVersions) != 2 {
+			t.Fatalf("FindMalicious(empty version) = %+v, %v", allVersions, err)
+		}
+		mixed, err := store.FindMaliciousBatch(ctx, []db.PackageQuery{
+			{Ecosystem: "npm", Name: "f107-lookup", Version: ""},
+			{Ecosystem: "npm", Name: "f107-lookup", Version: "1.0.0"},
+			{Ecosystem: "npm", Name: "f107-lookup", Version: "1.0.0"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantMixed := []domain.Finding{allVersions[0], single[0], allVersions[1], single[1]}
+		if len(mixed) != 4 || !reflectFindingSlices(mixed, wantMixed) {
+			t.Fatalf("mixed empty/concrete batch = %+v, want exact ordered single-lookup parity %+v", mixed, wantMixed)
+		}
 	})
 
 	t.Run("F107 import delete directives preserve foreign ownership and commit status audit atomically", func(t *testing.T) {
@@ -202,6 +218,14 @@ func TestF106F108PostgresContracts(t *testing.T) {
 			t.Fatalf("status=%+v err=%v", gotStatus, err)
 		}
 		f106RequireAuditActionCount(t, store, ctx, "f107_import_delete", 1)
+		auditRows := f106AuditEntriesForAction(t, store, ctx, "f107_import_delete")
+		var persistedCounts map[string]int
+		if err := json.Unmarshal(auditRows[0].Details, &persistedCounts); err != nil {
+			t.Fatalf("decode import audit details %q: %v", auditRows[0].Details, err)
+		}
+		if !reflect.DeepEqual(persistedCounts, map[string]int{"imported": 0, "deleted": 4}) {
+			t.Fatalf("import audit details = %v, want exact imported=0/deleted=4", persistedCounts)
+		}
 		plain := db.MaliciousFinding{ID: "F107-plain-import", Ecosystem: "npm", Name: "plain", Source: "openssf", RiskType: "malware", Severity: "LOW"}
 		if imported, deleted, err := store.ImportMaliciousFeed(ctx, "f107-plain", []db.MaliciousFinding{plain}, nil, nil); err != nil || imported != 1 || deleted != 0 {
 			t.Fatalf("ImportMaliciousFeed() = %d,%d,%v", imported, deleted, err)
@@ -239,13 +263,21 @@ func TestF106F108PostgresContracts(t *testing.T) {
 		if err != nil || len(listed) != 2 || listed[0].ID != "F107-list-b" || listed[1].ID != "F107-list-a" {
 			t.Fatalf("list=%+v err=%v", listed, err)
 		}
-		got := listed[0]
-		if string(got.VersionRanges) != "[]" || string(got.Versions) != `["1"]` || got.Description != "desc" || string(got.ReferenceURLs) != `["https://example.invalid"]` || got.OriginRef != "origin" || got.Published == nil || !got.Published.Equal(published) || got.CreatedBy != "creator" {
-			t.Fatalf("optional fields = %+v", got)
+		first := listed[0]
+		if first.ID != "F107-list-b" || first.Ecosystem != "npm" || first.Name != "list-b" || first.Source != "f107-list" || first.RiskType != "malware" || first.Severity != "HIGH" || first.Summary != "b" || string(first.VersionRanges) != "[]" || string(first.Versions) != `["1"]` || first.Description != "desc" || string(first.ReferenceURLs) != `["https://example.invalid"]` || first.OriginRef != "origin" || first.Published == nil || !first.Published.Equal(published) || first.CreatedBy != "creator" {
+			t.Fatalf("first full listed row = %+v", first)
+		}
+		second := listed[1]
+		if second.ID != "F107-list-a" || second.Ecosystem != "npm" || second.Name != "list-a" || second.Source != "f107-list" || second.RiskType != "supply_chain" || second.Severity != "LOW" || second.Summary != "a" || len(second.VersionRanges) != 0 || len(second.Versions) != 0 || second.Description != "" || string(second.ReferenceURLs) != "[]" || second.OriginRef != "" || second.Published != nil || second.CreatedBy != "" {
+			t.Fatalf("second full listed row = %+v", second)
 		}
 		limited, err := store.ListMaliciousFindings(ctx, "f107-limit", 501)
 		if err != nil || len(limited) != 500 {
 			t.Fatalf("limit 501 = %d, %v; want 500", len(limited), err)
+		}
+		defaultLimited, err := store.ListMaliciousFindings(ctx, "f107-limit", 0)
+		if err != nil || len(defaultLimited) != 100 {
+			t.Fatalf("limit 0 = %d, %v; want default 100", len(defaultLimited), err)
 		}
 		if unscoped, err := store.ListMaliciousFindings(ctx, "", 1); err != nil || len(unscoped) != 1 {
 			t.Fatalf("unscoped list = %d, %v", len(unscoped), err)
@@ -354,7 +386,8 @@ func TestF106F108PostgresContracts(t *testing.T) {
 			t.Fatalf("loaded=%+v err=%v", loaded, err)
 		}
 		edit := &db.ManualAdvisory{ID: id, FindingType: "vulnerability", Ecosystem: "pypi", Name: "F108.New_Pkg", Severity: "LOW", Summary: "new", Description: "", UpdatedAt: loaded.UpdatedAt}
-		if err := store.UpsertManualAdvisoryWithAudit(ctx, edit, &db.AdminAuditEntry{Action: "f108_update"}); err != nil {
+		updateDetails := json.RawMessage(`{"advisory_id":"manual:f108-update","previous_severity":"HIGH","new_severity":"LOW","new_package":"pypi/f108-new-pkg"}`)
+		if err := store.UpsertManualAdvisoryWithAudit(ctx, edit, &db.AdminAuditEntry{Action: "f108_update", Details: updateDetails}); err != nil {
 			t.Fatal(err)
 		}
 		rows := manualAdvisoriesWithID(ctx, t, store, id)
@@ -367,6 +400,17 @@ func TestF106F108PostgresContracts(t *testing.T) {
 			t.Fatalf("old=%+v moved=%+v", old, moved)
 		}
 		f106RequireAuditActionCount(t, store, ctx, "f108_update", 1)
+		updateAudit := f106AuditEntriesForAction(t, store, ctx, "f108_update")
+		var gotUpdateDetails, wantUpdateDetails map[string]string
+		if err := json.Unmarshal(updateAudit[0].Details, &gotUpdateDetails); err != nil {
+			t.Fatalf("decode replacement audit details %q: %v", updateAudit[0].Details, err)
+		}
+		if err := json.Unmarshal(updateDetails, &wantUpdateDetails); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(gotUpdateDetails, wantUpdateDetails) {
+			t.Fatalf("replacement audit details = %v, want %v", gotUpdateDetails, wantUpdateDetails)
+		}
 		err = store.UpsertManualAdvisoryWithAudit(ctx, &db.ManualAdvisory{ID: "manual:f108-audit-fail", FindingType: "vulnerability", Ecosystem: "npm", Name: "audit-fail", Severity: "LOW"}, &db.AdminAuditEntry{})
 		if !errors.Is(err, db.ErrAdminAuditLog) {
 			t.Fatalf("anonymous manual audit error = %v", err)
@@ -597,13 +641,18 @@ func f106SyncDelta(t *testing.T, store *Store, ctx context.Context, baseline *db
 
 func f106AssertLifecycleDelta(t *testing.T, got []db.SyncLifecycleRelease, want map[string]bool) {
 	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("lifecycle delta length = %d, want exactly %d; got=%+v want=%v", len(got), len(want), got, want)
+	}
 	seen := make(map[string]int, len(got))
 	for _, item := range got {
-		if _, relevant := want[item.ID]; relevant {
-			seen[item.ID]++
-			if item.Withdrawn != want[item.ID] {
-				t.Fatalf("lifecycle %s withdrawn=%v, want %v", item.ID, item.Withdrawn, want[item.ID])
-			}
+		withdrawn, ok := want[item.ID]
+		if !ok {
+			t.Fatalf("lifecycle delta contains unexpected ID %q: %+v", item.ID, item)
+		}
+		seen[item.ID]++
+		if item.Withdrawn != withdrawn {
+			t.Fatalf("lifecycle %s withdrawn=%v, want %v", item.ID, item.Withdrawn, withdrawn)
 		}
 	}
 	if len(seen) != len(want) {
@@ -631,19 +680,25 @@ func f106AssertMaliciousDelta(t *testing.T, got []db.SyncMalicious, id string, w
 
 func f106RequireAuditActionCount(t *testing.T, store *Store, ctx context.Context, action string, want int) {
 	t.Helper()
+	rows := f106AuditEntriesForAction(t, store, ctx, action)
+	if len(rows) != want {
+		t.Fatalf("audit action %q count=%d, want %d", action, len(rows), want)
+	}
+}
+
+func f106AuditEntriesForAction(t *testing.T, store *Store, ctx context.Context, action string) []db.AdminAuditLogEntry {
+	t.Helper()
 	rows, err := store.ListAdminAuditLog(ctx, 500)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := 0
+	matching := make([]db.AdminAuditLogEntry, 0, 1)
 	for _, row := range rows {
 		if row.Action == action {
-			got++
+			matching = append(matching, row)
 		}
 	}
-	if got != want {
-		t.Fatalf("audit action %q count=%d, want %d", action, got, want)
-	}
+	return matching
 }
 
 func reflectFindingSlices(a, b []domain.Finding) bool {

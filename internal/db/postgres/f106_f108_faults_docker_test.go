@@ -228,6 +228,50 @@ func TestF106F108PostgresFaultAtomicity(t *testing.T) {
 		if _, err := store.pool.Exec(ctx, `INSERT INTO malicious_findings(id,ecosystem,name,source,risk_type,severity,summary) VALUES('manual:f108-fault','npm','old','manual','malware','CRITICAL','old')`); err != nil {
 			t.Fatal(err)
 		}
+		assertRollbackState := func(stage string, expectReplacement bool) {
+			t.Helper()
+			var ecosystem, name, source, riskType, severity, summary string
+			var reverseActive bool
+			var reverseVulnerabilities int
+			if err := store.pool.QueryRow(ctx, `SELECT ecosystem,name,source,risk_type,severity,summary,removed_at IS NULL,
+				(SELECT count(*) FROM vulnerabilities WHERE id='manual:f108-fault')
+				FROM malicious_findings WHERE id='manual:f108-fault'`).Scan(&ecosystem, &name, &source, &riskType, &severity, &summary, &reverseActive, &reverseVulnerabilities); err != nil {
+				t.Fatalf("%s: read reverse original: %v", stage, err)
+			}
+			if ecosystem != "npm" || name != "old" || source != "manual" || riskType != "malware" || severity != "CRITICAL" || summary != "old" || !reverseActive || reverseVulnerabilities != 0 {
+				t.Fatalf("%s: reverse original changed: ecosystem=%q name=%q source=%q risk=%q severity=%q summary=%q active=%v vulnerabilities=%d", stage, ecosystem, name, source, riskType, severity, summary, reverseActive, reverseVulnerabilities)
+			}
+			var failedMalicious, failedVulnerabilities, failedSources, failedAffected, lockRows, audits int
+			if err := store.pool.QueryRow(ctx, `SELECT
+				(SELECT count(*) FROM malicious_findings WHERE id='manual:f108-malicious-fault'),
+				(SELECT count(*) FROM vulnerabilities WHERE id IN ('manual:f108-malicious-fault','manual:f108-vulnerability-fault')),
+				(SELECT count(*) FROM vulnerability_sources WHERE vulnerability_id IN ('manual:f108-malicious-fault','manual:f108-vulnerability-fault')),
+				(SELECT count(*) FROM affected_packages WHERE vulnerability_id IN ('manual:f108-malicious-fault','manual:f108-vulnerability-fault')),
+				((SELECT count(*) FROM malicious_findings WHERE id='manual:f108-lock-fault') + (SELECT count(*) FROM vulnerabilities WHERE id='manual:f108-lock-fault')),
+				(SELECT count(*) FROM admin_audit_log)`).Scan(&failedMalicious, &failedVulnerabilities, &failedSources, &failedAffected, &lockRows, &audits); err != nil {
+				t.Fatalf("%s: read failed-create state: %v", stage, err)
+			}
+			if failedMalicious != 0 || failedVulnerabilities != 0 || failedSources != 0 || failedAffected != 0 || lockRows != 0 || audits != 0 {
+				t.Fatalf("%s: leaked state malicious=%d vulnerabilities=%d sources=%d affected=%d lock=%d audits=%d", stage, failedMalicious, failedVulnerabilities, failedSources, failedAffected, lockRows, audits)
+			}
+			if !expectReplacement {
+				return
+			}
+			var replacementRows, oldPackages, newPackages, allPackages int
+			var replacementSeverity string
+			if err := store.pool.QueryRow(ctx, `SELECT
+				(SELECT count(*) FROM vulnerabilities WHERE id='manual:f108-replace-fault'),
+				COALESCE((SELECT severity FROM vulnerabilities WHERE id='manual:f108-replace-fault'),''),
+				(SELECT count(*) FROM affected_packages WHERE vulnerability_id='manual:f108-replace-fault' AND ecosystem='npm' AND name='old-pkg'),
+				(SELECT count(*) FROM affected_packages WHERE vulnerability_id='manual:f108-replace-fault' AND name='new-pkg'),
+				(SELECT count(*) FROM affected_packages WHERE vulnerability_id='manual:f108-replace-fault')`).Scan(&replacementRows, &replacementSeverity, &oldPackages, &newPackages, &allPackages); err != nil {
+				t.Fatalf("%s: read replacement state: %v", stage, err)
+			}
+			if replacementRows != 1 || replacementSeverity != "HIGH" || oldPackages != 1 || newPackages != 0 || allPackages != 1 {
+				t.Fatalf("%s: replacement state rows=%d severity=%q old=%d new=%d all=%d", stage, replacementRows, replacementSeverity, oldPackages, newPackages, allPackages)
+			}
+		}
+		assertRollbackState("baseline", false)
 		f106InstallTrigger(t, store.pool, "malicious_findings", "UPDATE", "f108_fail_counterpart", "P6108", "OLD.id = 'manual:f108-fault' AND NEW.removed_at IS NOT NULL")
 		plain := &db.ManualAdvisory{ID: "manual:f108-fault", FindingType: "vulnerability", Ecosystem: "npm", Name: "new", Severity: "LOW"}
 		if err := store.UpsertManualAdvisory(ctx, plain); err == nil {
@@ -235,23 +279,30 @@ func TestF106F108PostgresFaultAtomicity(t *testing.T) {
 		} else {
 			f106RequirePgError(t, err, "P6108", "forced f108_fail_counterpart failure")
 		}
+		assertRollbackState("plain reverse failure", false)
 		err := store.UpsertManualAdvisoryWithAudit(ctx, plain, &db.AdminAuditEntry{Action: "f108_fault_reverse"})
 		f106RequirePgError(t, err, "P6108", "forced f108_fail_counterpart failure")
+		assertRollbackState("audited reverse failure", false)
 		f106InstallTrigger(t, store.pool, "malicious_findings", "INSERT", "f108_fail_malicious_insert", "P6110", "NEW.id = 'manual:f108-malicious-fault'")
 		err = store.UpsertManualAdvisoryWithAudit(ctx, &db.ManualAdvisory{ID: "manual:f108-malicious-fault", FindingType: "malicious", Ecosystem: "npm", Name: "bad", Severity: "HIGH", RiskType: "malware"}, &db.AdminAuditEntry{Action: "f108_fault_malicious"})
 		f106RequirePgError(t, err, "P6110", "forced f108_fail_malicious_insert failure")
+		assertRollbackState("malicious create failure", false)
 		f106InstallTrigger(t, store.pool, "vulnerabilities", "INSERT", "f108_fail_vulnerability_insert", "P6111", "NEW.id = 'manual:f108-vulnerability-fault'")
 		err = store.UpsertManualAdvisoryWithAudit(ctx, &db.ManualAdvisory{ID: "manual:f108-vulnerability-fault", FindingType: "vulnerability", Ecosystem: "npm", Name: "bad", Severity: "LOW"}, &db.AdminAuditEntry{Action: "f108_fault_vulnerability"})
 		f106RequirePgError(t, err, "P6111", "forced f108_fail_vulnerability_insert failure")
+		assertRollbackState("vulnerability create failure", false)
 		if err := store.UpsertManualAdvisory(ctx, &db.ManualAdvisory{ID: "manual:f108-replace-fault", FindingType: "vulnerability", Ecosystem: "npm", Name: "old-pkg", Severity: "HIGH", Summary: "same"}); err != nil {
 			t.Fatal(err)
 		}
+		assertRollbackState("replacement baseline", true)
 		f106InstallTrigger(t, store.pool, "vulnerabilities", "UPDATE", "f108_fail_replace_update", "P6112", "OLD.id = 'manual:f108-replace-fault' AND OLD.severity = 'HIGH' AND NEW.severity = 'LOW'")
 		err = store.UpsertManualAdvisoryWithAudit(ctx, &db.ManualAdvisory{ID: "manual:f108-replace-fault", FindingType: "vulnerability", Ecosystem: "npm", Name: "old-pkg", Severity: "LOW", Summary: "same"}, &db.AdminAuditEntry{Action: "f108_fault_replace"})
 		f106RequirePgError(t, err, "P6112", "forced f108_fail_replace_update failure")
+		assertRollbackState("replacement update failure", true)
 		f106InstallTrigger(t, store.pool, "affected_packages", "DELETE", "f108_fail_package_delete", "P6113", "OLD.vulnerability_id = 'manual:f108-replace-fault' AND OLD.name = 'old-pkg'")
 		err = store.UpsertManualAdvisoryWithAudit(ctx, &db.ManualAdvisory{ID: "manual:f108-replace-fault", FindingType: "vulnerability", Ecosystem: "npm", Name: "new-pkg", Severity: "HIGH", Summary: "same"}, &db.AdminAuditEntry{Action: "f108_fault_package"})
 		f106RequirePgError(t, err, "P6113", "forced f108_fail_package_delete failure")
+		assertRollbackState("replacement package failure", true)
 		external, err := pgxpool.New(ctx, dsn)
 		if err != nil {
 			t.Fatal(err)
@@ -279,16 +330,7 @@ func TestF106F108PostgresFaultAtomicity(t *testing.T) {
 		}
 		conn.Release()
 		external.Close()
-		var activeMalicious, vulnerabilities, audits int
-		if err := store.pool.QueryRow(ctx, `SELECT
-			(SELECT count(*) FROM malicious_findings WHERE id='manual:f108-fault' AND removed_at IS NULL),
-			(SELECT count(*) FROM vulnerabilities WHERE id='manual:f108-fault'),
-			(SELECT count(*) FROM admin_audit_log)`).Scan(&activeMalicious, &vulnerabilities, &audits); err != nil {
-			t.Fatal(err)
-		}
-		if activeMalicious != 1 || vulnerabilities != 0 || audits != 0 {
-			t.Fatalf("rollback malicious=%d vulnerabilities=%d audits=%d", activeMalicious, vulnerabilities, audits)
-		}
+		assertRollbackState("lock timeout and final", true)
 	})
 
 	t.Run("F108 manual list reports second row scan failure without partial rows", func(t *testing.T) {
