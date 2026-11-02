@@ -58,6 +58,24 @@ func TestExitCodeErrorHelpers(t *testing.T) {
 	if code := exitCodeForError(got); code != ExitInternal {
 		t.Fatalf("exitCodeForError(withDefaultExitCode(...)) = %d, want %d", code, ExitInternal)
 	}
+
+	got = withDefaultExitCode(ExitParser, base)
+	if got == nil {
+		t.Fatal("withDefaultExitCode returned nil for non-nil ordinary error")
+	}
+	if !errors.Is(got, base) {
+		t.Fatal("withDefaultExitCode ordinary error does not unwrap base error")
+	}
+	codeErr = exitCodeError{}
+	if !errors.As(got, &codeErr) {
+		t.Fatalf("withDefaultExitCode ordinary error %T does not unwrap as exitCodeError", got)
+	}
+	if codeErr.Code() != ExitParser {
+		t.Fatalf("Code() for default-wrapped error = %d, want %d", codeErr.Code(), ExitParser)
+	}
+	if code := exitCodeForError(got); code != ExitParser {
+		t.Fatalf("exitCodeForError(default-wrapped error) = %d, want %d", code, ExitParser)
+	}
 }
 
 func TestUsageErrorsUseOperationalExitCode(t *testing.T) {

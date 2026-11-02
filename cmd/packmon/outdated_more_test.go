@@ -672,6 +672,9 @@ func TestRunOutdatedQuietHTMLSuppressesCheckingBanner(t *testing.T) {
 			if err != nil {
 				t.Fatalf("runOutdatedWithOptions: %v", err)
 			}
+			if tc.quiet && stderr != "" {
+				t.Fatalf("quiet outdated stderr = %q, want empty", stderr)
+			}
 			if got := strings.Contains(stderr, "Checking 1 package for updates..."); got != tc.wantBanner {
 				t.Fatalf("checking banner on stderr = %v, want %v:\n%s", got, tc.wantBanner, stderr)
 			}
