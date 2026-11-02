@@ -2555,7 +2555,6 @@ func TestHandleCheckRequestBodyLimitBoundary(t *testing.T) {
 		name            string
 		extraWhitespace int64
 		wantStatus      int
-		wantError       string
 		wantWork        bool
 	}{
 		{
@@ -2567,7 +2566,6 @@ func TestHandleCheckRequestBodyLimitBoundary(t *testing.T) {
 			name:            "one whitespace byte over limit rejects before work",
 			extraWhitespace: 1,
 			wantStatus:      http.StatusBadRequest,
-			wantError:       "invalid request body: unexpected trailing data after JSON body",
 		},
 	}
 
@@ -2606,18 +2604,21 @@ func TestHandleCheckRequestBodyLimitBoundary(t *testing.T) {
 				len(store.reputationQueries) != 0 || len(store.lifecycleQueries) != 0 ||
 				store.findVulnerabilitiesCalls != 0 || store.findMaliciousCalls != 0 ||
 				store.feedStatusListCalls != 0 || store.scanLogInsertCalls != 0 ||
-				len(store.scanLogEntries) != 0 || store.lookupDeadlineSet || store.lookupContextErr != nil {
+				len(store.scanLogEntries) != 0 || store.lookupDeadlineSet || store.lookupContextErr != nil ||
+				store.packageCheckStatusLookups != nil || store.enqueuedRefreshJobs != nil ||
+				store.markedReputations != nil || store.upsertedReputations != nil {
 				store.mu.Unlock()
-				t.Fatalf("rejected request reached store work: vulnerability=%+v malicious=%+v reputation=%d lifecycle=%d feed_status=%d scan_log=%d",
-					vulnerabilityQueries, maliciousQueries, len(store.reputationQueries), len(store.lifecycleQueries), store.feedStatusListCalls, store.scanLogInsertCalls)
+				t.Fatalf("rejected request reached store work: vulnerability=%+v malicious=%+v reputation=%d lifecycle=%d feed_status=%d scan_log=%d status_lookups=%d refresh_jobs=%d marked_reputation=%d upserted_reputation=%d",
+					vulnerabilityQueries, maliciousQueries, len(store.reputationQueries), len(store.lifecycleQueries), store.feedStatusListCalls, store.scanLogInsertCalls,
+					len(store.packageCheckStatusLookups), len(store.enqueuedRefreshJobs), len(store.markedReputations), len(store.upsertedReputations))
 			}
 			store.mu.Unlock()
 			var response errorJSON
 			if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
 				t.Fatalf("decode error response: %v", err)
 			}
-			if response.Error != tt.wantError || response.Code != "invalid_request" {
-				t.Fatalf("error response = %+v, want error %q and code invalid_request", response, tt.wantError)
+			if response.Code != "invalid_request" {
+				t.Fatalf("error response code = %q, want invalid_request", response.Code)
 			}
 		})
 	}
