@@ -18,11 +18,12 @@ import (
 
 const stubScript = `#!/bin/sh
 tool=${0##*/}
-log_line="$PWD	${PACKMON_TEST_BIN_DIR-}	$tool"
+log_line="$PWD	${PACKMON_TEST_BIN_DIR-}	${STUB_TARGET-}	$tool"
 for arg do
 	log_line="$log_line	$arg"
 done
 printf '%s\n' "$log_line" >> "$STUB_LOG"
+printf 'start\t%s\n' "$log_line" >> "$STUB_EVENT_LOG"
 
 if [ "$tool" = "gofumpt" ] && [ "${1-}" = "-version" ]; then
 	printf '%s\n' 'gofumpt v0.9.2'
@@ -49,12 +50,21 @@ if [ "$tool" = "npm" ] && [ "${1-}" = "ci" ] && [ -n "${NPM_BARRIER_DIR-}" ]; th
 	fi
 	: > "$NPM_BARRIER_DIR/attempt.$id"
 	if [ -f "$NPM_BARRIER_DIR/owner-release" ]; then
-		: > "$NPM_BARRIER_DIR/post-owner.$id"
+		decision=post-owner
 	elif (set -C; : > "$NPM_BARRIER_DIR/lock") 2>/dev/null; then
-		while [ ! -f "$NPM_BARRIER_DIR/owner-release" ]; do :; done
+		decision=owner
 	else
-		: > "$NPM_BARRIER_DIR/overlap"
+		decision=overlap
 	fi
+	printf '%s\n' "$decision" > "$NPM_BARRIER_DIR/decision.$id.tmp"
+	/bin/mv -- "$NPM_BARRIER_DIR/decision.$id.tmp" "$NPM_BARRIER_DIR/decision.$id"
+	if [ "$decision" = owner ]; then
+		while [ ! -f "$NPM_BARRIER_DIR/owner-release" ]; do :; done
+	fi
+fi
+
+if [ "$tool" = "npm" ] && [ "${1-}" = "ci" ]; then
+	printf 'complete\t%s\n' "$log_line" >> "$STUB_EVENT_LOG"
 fi
 
 if [ "$tool" = "split-sentinel" ]; then
@@ -69,10 +79,11 @@ exit 0
 `
 
 type makeFixture struct {
-	dir     string
-	makeBin string
-	logPath string
-	stubs   string
+	dir       string
+	makeBin   string
+	logPath   string
+	eventPath string
+	stubs     string
 }
 
 func TestMakeVerifyPropagatesGateFailures(t *testing.T) {
@@ -146,6 +157,7 @@ func TestMakeIntegrationTargetCoversAllTaggedPackages(t *testing.T) {
 func TestParallelMakeTargetsSerializeNPMCI(t *testing.T) {
 	makeBin := requireGNMake(t)
 	fixture := newMakeFixture(t, makeBin, "checkout")
+	instrumentParallelNPMTargets(t, fixture.dir)
 	barrierDir := filepath.Join(fixture.dir, "npm-barrier")
 	if err := os.Mkdir(barrierDir, 0o750); err != nil {
 		t.Fatalf("create npm barrier: %v", err)
@@ -170,9 +182,9 @@ func TestParallelMakeTargetsSerializeNPMCI(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(barrierDir, "release"), nil, 0o600); err != nil {
 		t.Fatalf("release npm barrier: %v", err)
 	}
-	waitForBarrierFiles(t, barrierDir, "attempt", ready, 3*time.Second)
-	if ready > 1 {
-		waitForFile(filepath.Join(barrierDir, "overlap"), 3*time.Second)
+	decided := waitForBarrierFiles(t, barrierDir, "decision", ready, 3*time.Second)
+	if decided != ready {
+		t.Fatalf("npm participants deciding before owner release = %d, want all %d ready participants", decided, ready)
 	}
 	if err := os.WriteFile(filepath.Join(barrierDir, "owner-release"), nil, 0o600); err != nil {
 		t.Fatalf("release npm lock owner: %v", err)
@@ -182,7 +194,7 @@ func TestParallelMakeTargetsSerializeNPMCI(t *testing.T) {
 		t.Fatalf("parallel make targets: %v\n%s", completed.err, completed.output)
 	}
 	attempts := countBarrierFiles(barrierDir, "attempt", 3)
-	postOwner := countBarrierFiles(barrierDir, "post-owner", 3)
+	decisions := readBarrierDecisions(t, barrierDir, 3)
 
 	calls := readStubCallRecords(t, fixture.logPath)
 	var npmCalls []stubCall
@@ -199,15 +211,23 @@ func TestParallelMakeTargetsSerializeNPMCI(t *testing.T) {
 			t.Fatalf("npm ci cwd = %q, want fixture checkout %q", call.cwd, fixture.dir)
 		}
 	}
-	overlapped := fileExists(filepath.Join(barrierDir, "overlap"))
-	if overlapped {
-		if ready != 3 || attempts != 3 || postOwner != 0 || len(npmCalls) != 3 {
-			t.Fatalf("npm overlap did not match the known bug: ready=%d attempts=%d post-owner=%d exact calls=%d, want 3/3/0/3\ncalls:\n%s", ready, attempts, postOwner, len(npmCalls), formatStubCalls(calls))
+	assertParallelTargetCalls(t, fixture, calls, npmCalls)
+	assertParallelTargetEventOrder(t, fixture, npmCalls)
+
+	owners := countDecision(decisions, "owner")
+	overlaps := countDecision(decisions, "overlap")
+	postOwner := countDecision(decisions, "post-owner")
+	if overlaps > 0 {
+		if ready != 3 || attempts != 3 || len(decisions) != 3 || owners != 1 || overlaps != 2 || postOwner != 0 || len(npmCalls) != 3 {
+			t.Fatalf("npm overlap did not match the known bug: ready=%d attempts=%d decisions=%v exact calls=%d, want 3/3/(one owner, two overlap, zero post-owner)/3\ncalls:\n%s", ready, attempts, decisions, len(npmCalls), formatStubCalls(calls))
 		}
 		t.Skip("OPEN F008-bugs-4: parallel lint-web, lint-openapi, and security recipes overlap npm ci in the shared checkout")
 	}
 	if len(npmCalls) != 1 && len(npmCalls) != 3 {
 		t.Fatalf("serialized npm ci call count = %d, want either one shared install or three serialized installs\ncalls:\n%s", len(npmCalls), formatStubCalls(calls))
+	}
+	if len(npmCalls) == 3 {
+		assertNPMEventNonoverlap(t, fixture.eventPath)
 	}
 	if ready != 1 {
 		t.Fatalf("serialized npm ci ready participant count = %d, want exactly 1 before release", ready)
@@ -215,9 +235,8 @@ func TestParallelMakeTargetsSerializeNPMCI(t *testing.T) {
 	if attempts != len(npmCalls) {
 		t.Fatalf("npm barrier attempts = %d, want one per exact npm ci call (%d)", attempts, len(npmCalls))
 	}
-	wantPostOwner := len(npmCalls) - 1
-	if postOwner != wantPostOwner {
-		t.Fatalf("serialized npm ci post-owner calls = %d, want %d", postOwner, wantPostOwner)
+	if len(decisions) != len(npmCalls) || owners != 1 || postOwner != len(npmCalls)-1 {
+		t.Fatalf("serialized npm ci decisions = %v, want one owner and %d post-owner", decisions, len(npmCalls)-1)
 	}
 }
 
@@ -340,10 +359,61 @@ func newMakeFixture(t *testing.T, makeBin, checkoutName string) makeFixture {
 		t.Fatalf("write dummy Dockerfile: %v", err)
 	}
 	return makeFixture{
-		dir:     dir,
-		makeBin: makeBin,
-		logPath: filepath.Join(dir, "calls.log"),
-		stubs:   stubs,
+		dir:       dir,
+		makeBin:   makeBin,
+		logPath:   filepath.Join(dir, "calls.log"),
+		eventPath: filepath.Join(dir, "events.log"),
+		stubs:     stubs,
+	}
+}
+
+func instrumentParallelNPMTargets(t *testing.T, fixtureDir string) {
+	t.Helper()
+	path := filepath.Join(fixtureDir, "Makefile")
+	data, err := os.ReadFile(path) //nolint:gosec // test-owned fixture path.
+	if err != nil {
+		t.Fatalf("read fixture Makefile for target instrumentation: %v", err)
+	}
+	type targetSpec struct {
+		characteristic string
+		seen           int
+	}
+	specs := map[string]*targetSpec{
+		"lint-web":     {characteristic: "npm run lint:web"},
+		"lint-openapi": {characteristic: "npm run lint:openapi"},
+		"security":     {characteristic: "npm audit --audit-level=high"},
+	}
+	lines := strings.Split(string(data), "\n")
+	current := ""
+	for index, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "\t") && strings.HasSuffix(trimmed, ":") {
+			candidate := strings.TrimSuffix(trimmed, ":")
+			if _, ok := specs[candidate]; ok {
+				current = candidate
+			} else {
+				current = ""
+			}
+			continue
+		}
+		if current == "" || !strings.HasPrefix(line, "\t") {
+			continue
+		}
+		command := strings.TrimPrefix(line, "\t")
+		if command == "npm ci --ignore-scripts" || command == specs[current].characteristic {
+			lines[index] = "\tSTUB_TARGET=" + current + " " + command
+			if command == specs[current].characteristic {
+				specs[current].seen++
+			}
+		}
+	}
+	for target, spec := range specs {
+		if spec.seen != 1 {
+			t.Fatalf("fixture Makefile %s characteristic command %q count = %d, want 1", target, spec.characteristic, spec.seen)
+		}
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o600); err != nil { //nolint:gosec // test-owned fixture path.
+		t.Fatalf("write instrumented fixture Makefile: %v", err)
 	}
 }
 
@@ -366,7 +436,7 @@ func (f makeFixture) command(ctx context.Context, extraEnv []string, args ...str
 	}
 	cmd := exec.CommandContext(ctx, f.makeBin, append(variables, args...)...) //nolint:gosec // fixed absolute GNU Make prerequisite.
 	cmd.Dir = f.dir
-	cmd.Env = append(os.Environ(), "PATH="+f.stubs, "STUB_LOG="+f.logPath)
+	cmd.Env = append(os.Environ(), "PATH="+f.stubs, "STUB_LOG="+f.logPath, "STUB_EVENT_LOG="+f.eventPath)
 	cmd.Env = append(cmd.Env, extraEnv...)
 	return cmd
 }
@@ -394,6 +464,7 @@ func readStubCallFields(t *testing.T, path string) [][]string {
 type stubCall struct {
 	cwd       string
 	binaryDir string
+	target    string
 	argv      []string
 }
 
@@ -421,13 +492,14 @@ func readStubCallRecords(t *testing.T, path string) []stubCall {
 	records := make([]stubCall, 0, len(lines))
 	for index, line := range lines {
 		fields := strings.Split(line, "\t")
-		if len(fields) < 3 || fields[0] == "" || fields[2] == "" {
+		if len(fields) < 4 || fields[0] == "" || fields[3] == "" {
 			t.Fatalf("stub log line %d is malformed: %q", index+1, line)
 		}
 		records = append(records, stubCall{
 			cwd:       fields[0],
 			binaryDir: fields[1],
-			argv:      slices.Clone(fields[2:]),
+			target:    fields[2],
+			argv:      slices.Clone(fields[3:]),
 		})
 	}
 	return records
@@ -436,13 +508,191 @@ func readStubCallRecords(t *testing.T, path string) []stubCall {
 func formatStubCalls(calls []stubCall) string {
 	lines := make([]string, 0, len(calls))
 	for _, call := range calls {
-		lines = append(lines, fmt.Sprintf("cwd=%q PACKMON_TEST_BIN_DIR=%q argv=%q", call.cwd, call.binaryDir, call.argv))
+		lines = append(lines, fmt.Sprintf("cwd=%q PACKMON_TEST_BIN_DIR=%q target=%q argv=%q", call.cwd, call.binaryDir, call.target, call.argv))
 	}
 	return strings.Join(lines, "\n")
 }
 
 func sameStubCall(left, right stubCall) bool {
-	return left.cwd == right.cwd && left.binaryDir == right.binaryDir && slices.Equal(left.argv, right.argv)
+	return left.cwd == right.cwd && left.binaryDir == right.binaryDir && left.target == right.target && slices.Equal(left.argv, right.argv)
+}
+
+type stubEvent struct {
+	kind string
+	call stubCall
+}
+
+func readStubEvents(t *testing.T, path string) []stubEvent {
+	t.Helper()
+	data, err := os.ReadFile(path) //nolint:gosec // test-owned fixture path.
+	if err != nil {
+		t.Fatalf("read stub event log: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	events := make([]stubEvent, 0, len(lines))
+	for index, line := range lines {
+		fields := strings.Split(line, "\t")
+		if len(fields) < 5 || (fields[0] != "start" && fields[0] != "complete") || fields[1] == "" || fields[4] == "" {
+			t.Fatalf("stub event line %d is malformed: %q", index+1, line)
+		}
+		events = append(events, stubEvent{
+			kind: fields[0],
+			call: stubCall{
+				cwd:       fields[1],
+				binaryDir: fields[2],
+				target:    fields[3],
+				argv:      slices.Clone(fields[4:]),
+			},
+		})
+	}
+	return events
+}
+
+func parallelTargetCharacteristics() map[string][]string {
+	return map[string][]string{
+		"lint-web":     {"npm", "run", "lint:web"},
+		"lint-openapi": {"npm", "run", "lint:openapi"},
+		"security":     {"npm", "audit", "--audit-level=high"},
+	}
+}
+
+func assertParallelTargetCalls(t *testing.T, fixture makeFixture, calls, npmCalls []stubCall) {
+	t.Helper()
+	for target, wantArgv := range parallelTargetCharacteristics() {
+		var matches []stubCall
+		for _, call := range calls {
+			if slices.Equal(call.argv, wantArgv) {
+				matches = append(matches, call)
+			}
+		}
+		if len(matches) != 1 || matches[0].target != target || matches[0].cwd != fixture.dir {
+			t.Fatalf("%s characteristic calls = %s, want exactly one target=%q cwd=%q argv=%q", target, formatStubCalls(matches), target, fixture.dir, wantArgv)
+		}
+	}
+	if len(npmCalls) != 3 {
+		return
+	}
+	counts := make(map[string]int, 3)
+	for _, call := range npmCalls {
+		counts[call.target]++
+	}
+	for target := range parallelTargetCharacteristics() {
+		if counts[target] != 1 {
+			t.Fatalf("three-install npm ci target mapping = %v, want exactly one install for each parallel target\ncalls:\n%s", counts, formatStubCalls(npmCalls))
+		}
+	}
+	if len(counts) != 3 {
+		t.Fatalf("three-install npm ci includes unexpected target mapping %v\ncalls:\n%s", counts, formatStubCalls(npmCalls))
+	}
+}
+
+func assertParallelTargetEventOrder(t *testing.T, fixture makeFixture, npmCalls []stubCall) {
+	t.Helper()
+	events := readStubEvents(t, fixture.eventPath)
+	completeByTarget := make(map[string][]int)
+	characteristicStart := make(map[string][]int)
+	characteristics := parallelTargetCharacteristics()
+	for index, event := range events {
+		if event.kind == "complete" && slices.Equal(event.call.argv, []string{"npm", "ci", "--ignore-scripts"}) {
+			completeByTarget[event.call.target] = append(completeByTarget[event.call.target], index)
+		}
+		if event.kind != "start" {
+			continue
+		}
+		for target, wantArgv := range characteristics {
+			if slices.Equal(event.call.argv, wantArgv) {
+				if event.call.target != target || event.call.cwd != fixture.dir {
+					t.Fatalf("%s characteristic event has target/cwd %q/%q, want %q/%q", target, event.call.target, event.call.cwd, target, fixture.dir)
+				}
+				characteristicStart[target] = append(characteristicStart[target], index)
+			}
+		}
+	}
+	if len(npmCalls) == 1 {
+		var completions []int
+		for _, indexes := range completeByTarget {
+			completions = append(completions, indexes...)
+		}
+		if len(completions) != 1 {
+			t.Fatalf("one-install completion events = %v, want exactly one", completeByTarget)
+		}
+		for target := range characteristics {
+			starts := characteristicStart[target]
+			if len(starts) != 1 || completions[0] >= starts[0] {
+				t.Fatalf("shared npm install completion index %d must precede the one %s characteristic start; starts=%v", completions[0], target, starts)
+			}
+		}
+		return
+	}
+	if len(npmCalls) != 3 {
+		return
+	}
+	for target := range characteristics {
+		completions := completeByTarget[target]
+		starts := characteristicStart[target]
+		if len(completions) != 1 || len(starts) != 1 || completions[0] >= starts[0] {
+			t.Fatalf("%s install/characteristic event order = completions %v, starts %v; want one mapped completion before one mapped start", target, completions, starts)
+		}
+	}
+}
+
+func assertNPMEventNonoverlap(t *testing.T, path string) {
+	t.Helper()
+	active := 0
+	starts := 0
+	completions := 0
+	for _, event := range readStubEvents(t, path) {
+		if !slices.Equal(event.call.argv, []string{"npm", "ci", "--ignore-scripts"}) {
+			continue
+		}
+		switch event.kind {
+		case "start":
+			if active != 0 {
+				t.Fatalf("serialized three-install path started target %q while another npm ci remained active", event.call.target)
+			}
+			active = 1
+			starts++
+		case "complete":
+			if active != 1 {
+				t.Fatalf("serialized three-install path completed target %q without one active npm ci", event.call.target)
+			}
+			active = 0
+			completions++
+		}
+	}
+	if active != 0 || starts != 3 || completions != 3 {
+		t.Fatalf("serialized three-install npm event counts = starts %d, completions %d, active %d; want 3/3/0", starts, completions, active)
+	}
+}
+
+func readBarrierDecisions(t *testing.T, dir string, maxID int) map[int]string {
+	t.Helper()
+	decisions := make(map[int]string, maxID)
+	for id := 1; id <= maxID; id++ {
+		data, err := os.ReadFile(filepath.Join(dir, fmt.Sprintf("decision.%d", id))) //nolint:gosec // test-owned fixture path.
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			t.Fatalf("read npm barrier decision %d: %v", id, err)
+		}
+		decision := strings.TrimSpace(string(data))
+		if decision != "owner" && decision != "overlap" && decision != "post-owner" {
+			t.Fatalf("npm barrier decision %d = %q, want owner, overlap, or post-owner", id, decision)
+		}
+		decisions[id] = decision
+	}
+	return decisions
+}
+
+func countDecision(decisions map[int]string, want string) int {
+	count := 0
+	for _, decision := range decisions {
+		if decision == want {
+			count++
+		}
+	}
+	return count
 }
 
 func fileExists(path string) bool {
@@ -578,17 +828,4 @@ func countBarrierFiles(dir, prefix string, maxID int) int {
 		}
 	}
 	return found
-}
-
-func waitForFile(path string, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for {
-		if fileExists(path) {
-			return true
-		}
-		if time.Now().After(deadline) {
-			return false
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
 }
