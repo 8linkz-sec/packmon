@@ -343,8 +343,13 @@ func TestF153F158MigrationContractsAgainstPostgres(t *testing.T) {
 			foreignKeyAfterReapply := f153F158HasScanAPIKeyForeignKey(t, leaf)
 			f153F158AssertEqual(t, "API keys after reapply through v043", f153F158APIKeySnapshot(t, leaf), beforeKeys)
 			f153F158AssertEqual(t, "scan references after reapply through v043", f153F158APIKeyScanSnapshot(t, leaf), beforeScans)
-			if !foreignKeyBefore042Down || foreignKeyAfter042Down || !foreignKeyAfterReapply || !foreignKeyAtV25 || !foreignKeyAtV24 {
+			switch {
+			case foreignKeyBefore042Down && foreignKeyAfter042Down && foreignKeyAtV25 && foreignKeyAtV24 && foreignKeyAfterReapply:
+				// The foreign key survived the complete down/up lifecycle.
+			case foreignKeyBefore042Down && !foreignKeyAfter042Down && !foreignKeyAtV25 && !foreignKeyAtV24 && foreignKeyAfterReapply:
 				t.Skipf("known production defect F157-bugs-1: migration 042 down drops the 001-owned scan_log_api_key_id_fkey (before 042 down=%t, after 042 down=%t, at v25=%t, at v24=%t, after reapply=%t)", foreignKeyBefore042Down, foreignKeyAfter042Down, foreignKeyAtV25, foreignKeyAtV24, foreignKeyAfterReapply)
+			default:
+				t.Fatalf("unexpected scan_log_api_key_id_fkey lifecycle (before 042 down=%t, after 042 down=%t, at v25=%t, at v24=%t, after reapply=%t)", foreignKeyBefore042Down, foreignKeyAfter042Down, foreignKeyAtV25, foreignKeyAtV24, foreignKeyAfterReapply)
 			}
 		})
 	})
