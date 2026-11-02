@@ -128,7 +128,7 @@ function measure(frame,isNarrow){
     outlineStyle:outlineStyle,
     outlineWidth:outlineWidth,
     focusTokenWidth:focusTokenWidth,
-    longValuesRendered:text.indexOf(longToken+"name")!==-1 && text.indexOf(longToken+"installed")!==-1 && text.indexOf(longToken+"latest")!==-1 && text.indexOf(longToken+"via")!==-1 && text.indexOf(longToken+"lockfile.json")!==-1
+    longValuesRendered:text.indexOf(longToken+"target")!==-1 && text.indexOf(longToken+"name")!==-1 && text.indexOf(longToken+"installed")!==-1 && text.indexOf(longToken+"latest")!==-1 && text.indexOf(longToken+"via")!==-1 && text.indexOf(longToken+"lockfile.json")!==-1
   };
   result[isNarrow?"narrow":"desktop"]=measurement;
   pending--;

@@ -91,8 +91,16 @@ func TestOutdatedHTMLRendersAllCurrentEmptyStateWithoutOutdatedViews(t *testing.
 		}
 	}
 	empty := f040SingleElementByClass(t, doc, "empty")
-	if got := f040NormalizedText(empty); got != "All 3 packages are up to date." {
-		t.Errorf("empty-state text = %q", got)
+	if empty.Type != htmlnode.ElementNode || empty.Data != "div" {
+		t.Errorf("empty-state node = type %v <%s>, want a div element", empty.Type, empty.Data)
+	}
+	if len(empty.Attr) != 1 || empty.Attr[0].Key != "class" || empty.Attr[0].Val != "empty" {
+		t.Errorf("empty-state attributes = %#v, want only class=empty", empty.Attr)
+	}
+	if empty.FirstChild == nil || empty.FirstChild != empty.LastChild || empty.FirstChild.Type != htmlnode.TextNode {
+		t.Errorf("empty-state children do not consist of exactly one text node")
+	} else if got := empty.FirstChild.Data; got != "All 3 packages are up to date." {
+		t.Errorf("empty-state text = %q, want %q", got, "All 3 packages are up to date.")
 	}
 	if f040HasClass(empty, "empty-unknown") {
 		t.Error("all-current empty state unexpectedly has empty-unknown class")
