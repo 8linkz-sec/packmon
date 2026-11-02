@@ -541,7 +541,7 @@ func TestCheckRemoteChunksRequestsAtServerLimit(t *testing.T) {
 
 func TestCheckRemoteChunksExactMultiplesAndThreePlusChunks(t *testing.T) {
 	var calls atomic.Int32
-	requestSizes := make(chan int, 6)
+	requestChunks := make(chan []domain.Package, 6)
 	requestErrs := make(chan string, 6)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request domain.ScanRequest
@@ -550,7 +550,7 @@ func TestCheckRemoteChunksExactMultiplesAndThreePlusChunks(t *testing.T) {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		requestSizes <- len(request.Packages)
+		requestChunks <- append([]domain.Package(nil), request.Packages...)
 		call := calls.Add(1)
 		status := string(domain.ScanFeedStatusHealthy)
 		blocking := false
@@ -589,18 +589,21 @@ func TestCheckRemoteChunksExactMultiplesAndThreePlusChunks(t *testing.T) {
 	})
 	tests := []struct {
 		name           string
+		packagePrefix  string
 		totalPackages  int
 		wantSizes      []int
 		wantFeedStatus string
 	}{
 		{
 			name:           "exact two chunk multiple",
+			packagePrefix:  "two-chunks",
 			totalPackages:  2 * checkcontract.MaxPackagesPerCheck,
 			wantSizes:      []int{checkcontract.MaxPackagesPerCheck, checkcontract.MaxPackagesPerCheck},
 			wantFeedStatus: string(domain.ScanFeedStatusDegraded),
 		},
 		{
 			name:           "three full chunks plus remainder",
+			packagePrefix:  "four-chunks",
 			totalPackages:  3*checkcontract.MaxPackagesPerCheck + 7,
 			wantSizes:      []int{checkcontract.MaxPackagesPerCheck, checkcontract.MaxPackagesPerCheck, checkcontract.MaxPackagesPerCheck, 7},
 			wantFeedStatus: string(domain.ScanFeedStatusError),
@@ -610,45 +613,77 @@ func TestCheckRemoteChunksExactMultiplesAndThreePlusChunks(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			packages := make([]domain.Package, tt.totalPackages)
+			expectedPackages := make([]domain.Package, tt.totalPackages)
 			for i := range packages {
-				packages[i] = domain.Package{
-					Name:      fmt.Sprintf("%s-package-%d", tt.name, i),
-					Version:   "1.0.0",
-					Ecosystem: domain.EcosystemNPM,
+				ecosystem := domain.EcosystemNPM
+				if i%2 != 0 {
+					ecosystem = domain.EcosystemPyPI
 				}
+				expectedPackages[i] = domain.Package{
+					Name:      fmt.Sprintf("%s-package-%05d", tt.packagePrefix, i),
+					Version:   fmt.Sprintf("1.%d.0", i),
+					Ecosystem: ecosystem,
+				}
+				packages[i] = expectedPackages[i]
+				packages[i].Dev = true
+				packages[i].Direct = true
+				packages[i].Via = []string{"client-only"}
 			}
-			firstCall := int(calls.Load()) + 1
-			findings, feedVersions, feedStatus, blocking, err := scanner.checkRemote(context.Background(), packages)
+			callsBefore := int(calls.Load())
+			remoteResult, err := scanner.checkRemoteResult(context.Background(), packages)
 			if err != nil {
-				t.Fatalf("checkRemote() error = %v", err)
+				t.Fatalf("checkRemoteResult() error = %v", err)
 			}
-			gotSizes := make([]int, len(tt.wantSizes))
-			for i := range gotSizes {
-				gotSizes[i] = <-requestSizes
+			if got := int(calls.Load()) - callsBefore; got != len(tt.wantSizes) {
+				t.Fatalf("remote requests for case = %d, want exactly %d", got, len(tt.wantSizes))
 			}
-			if !reflect.DeepEqual(gotSizes, tt.wantSizes) {
-				t.Fatalf("request sizes = %v, want %v", gotSizes, tt.wantSizes)
+			flattenedPackages := make([]domain.Package, 0, len(expectedPackages))
+			start := 0
+			for chunkIndex, wantSize := range tt.wantSizes {
+				chunk := <-requestChunks
+				if len(chunk) != wantSize {
+					t.Fatalf("chunk %d size = %d, want %d", chunkIndex, len(chunk), wantSize)
+				}
+				end := start + wantSize
+				if !reflect.DeepEqual(chunk, expectedPackages[start:end]) {
+					t.Fatalf("chunk %d identities/order do not match input range [%d:%d]", chunkIndex, start, end)
+				}
+				flattenedPackages = append(flattenedPackages, chunk...)
+				start = end
 			}
-			if len(findings) != len(tt.wantSizes) {
-				t.Fatalf("merged findings = %d, want %d", len(findings), len(tt.wantSizes))
+			if !reflect.DeepEqual(flattenedPackages, expectedPackages) {
+				t.Fatal("flattened chunk identities/order do not exactly match the complete input")
 			}
-			if len(feedVersions) != len(tt.wantSizes) {
-				t.Fatalf("merged feed versions = %+v, want %d entries", feedVersions, len(tt.wantSizes))
+
+			if remoteResult.PreserveIdentity {
+				t.Fatal("chunked result PreserveIdentity = true, want merged result identity")
 			}
+			result := remoteResult.Result
+			wantFindings := make([]domain.Finding, 0, len(tt.wantSizes))
+			wantFeedVersions := make(map[string]string, len(tt.wantSizes))
 			for offset := range tt.wantSizes {
-				call := firstCall + offset
-				if got := findings[offset].AdvisoryID; got != fmt.Sprintf("GHSA-chunk-%d", call) {
-					t.Fatalf("finding %d advisory = %q, want chunk %d", offset, got, call)
-				}
+				call := callsBefore + offset + 1
+				wantFindings = append(wantFindings, domain.Finding{
+					Name:       fmt.Sprintf("finding-%d", call),
+					Version:    "1.0.0",
+					Ecosystem:  domain.EcosystemNPM,
+					Type:       domain.FindingTypeVulnerability,
+					Severity:   domain.SeverityLow,
+					AdvisoryID: fmt.Sprintf("GHSA-chunk-%d", call),
+				})
 				key := fmt.Sprintf("feed-%d", call)
-				if got := feedVersions[key]; got != fmt.Sprintf("snapshot-%d", call) {
-					t.Fatalf("feedVersions[%q] = %q, want snapshot-%d", key, got, call)
-				}
+				wantFeedVersions[key] = fmt.Sprintf("snapshot-%d", call)
 			}
-			if feedStatus != tt.wantFeedStatus {
-				t.Fatalf("feed status = %q, want %q", feedStatus, tt.wantFeedStatus)
+			if result.FindingsCount != len(wantFindings) || !reflect.DeepEqual(result.Findings, wantFindings) {
+				t.Fatalf("merged findings count/order = %d, %+v; want %d, %+v", result.FindingsCount, result.Findings, len(wantFindings), wantFindings)
 			}
-			if !blocking {
+			if !reflect.DeepEqual(result.FeedVersions, wantFeedVersions) {
+				t.Fatalf("merged feed versions = %+v, want %+v", result.FeedVersions, wantFeedVersions)
+			}
+			if result.FeedStatus != tt.wantFeedStatus {
+				t.Fatalf("feed status = %q, want worst status %q", result.FeedStatus, tt.wantFeedStatus)
+			}
+			if !result.FindingsBlocking {
 				t.Fatal("merged blocking = false, want true")
 			}
 		})

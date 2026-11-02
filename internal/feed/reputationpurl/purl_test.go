@@ -98,6 +98,9 @@ func TestBuildReversingLabsPURLExactUnicodeByteLimits(t *testing.T) {
 			if got != tt.want || ok != tt.wantOK {
 				t.Fatalf("BuildReversingLabsPURL() = %q, %v; want %q, %v", got, ok, tt.want, tt.wantOK)
 			}
+			if supported := SupportsReversingLabsPackage("npm", tt.pkg, tt.version); supported != tt.wantOK {
+				t.Fatalf("SupportsReversingLabsPackage() = %v, want %v", supported, tt.wantOK)
+			}
 		})
 	}
 }

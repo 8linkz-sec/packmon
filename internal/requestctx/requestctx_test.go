@@ -59,41 +59,60 @@ func TestClientIPAndStripPort(t *testing.T) {
 }
 
 func TestCorrelationContextIsolationRejectsTypedKeySpoofs(t *testing.T) {
-	type correlationKey struct{}
-	type apiKeyIdentityKey struct{}
-	type clientIPContextKey struct{}
+	type siblingCorrelationKey struct{}
+	type siblingAPIKeyIdentityKey struct{}
+	type siblingClientIPKey struct{}
 
-	ctx := context.Background()
-	ctx = context.WithValue(ctx, correlationKey{}, "spoofed-correlation")
-	ctx = context.WithValue(ctx, apiKeyIdentityKey{}, APIKeyIdentity{ID: 99, Name: "spoofed-key"})
-	ctx = context.WithValue(ctx, clientIPContextKey{}, "203.0.113.99")
+	parent := ContextWithCorrelationID(context.Background(), "parent-correlation")
+	parent = ContextWithAPIKeyIdentity(parent, APIKeyIdentity{ID: 41, Name: "parent-key"})
+	parent = ContextWithClientIP(parent, "198.51.100.41")
+	sibling := context.WithValue(parent, siblingCorrelationKey{}, "spoofed-correlation")
+	sibling = context.WithValue(sibling, siblingAPIKeyIdentityKey{}, APIKeyIdentity{ID: 99, Name: "spoofed-key"})
+	sibling = context.WithValue(sibling, siblingClientIPKey{}, "203.0.113.99")
 
-	if got := CorrelationIDFromContext(ctx); got != "" {
-		t.Fatalf("CorrelationIDFromContext(spoofed key) = %q, want empty", got)
+	assertContextValues := func(t *testing.T, ctx context.Context, wantCorrelation string, wantIdentity APIKeyIdentity, wantIP string) {
+		t.Helper()
+		if got := CorrelationIDFromContext(ctx); got != wantCorrelation {
+			t.Fatalf("CorrelationIDFromContext() = %q, want %q", got, wantCorrelation)
+		}
+		if identity, ok := APIKeyIdentityFromContext(ctx); !ok || identity != wantIdentity {
+			t.Fatalf("APIKeyIdentityFromContext() = %+v, %v; want %+v, true", identity, ok, wantIdentity)
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://example.test", nil)
+		if err != nil {
+			t.Fatalf("NewRequestWithContext: %v", err)
+		}
+		req.RemoteAddr = "192.0.2.10:443"
+		if got := ClientIP(req); got != wantIP {
+			t.Fatalf("ClientIP() = %q, want %q", got, wantIP)
+		}
 	}
-	if identity, ok := APIKeyIdentityFromContext(ctx); ok || identity != (APIKeyIdentity{}) {
-		t.Fatalf("APIKeyIdentityFromContext(spoofed key) = %+v, %v; want zero, false", identity, ok)
+
+	assertContextValues(t, parent, "parent-correlation", APIKeyIdentity{ID: 41, Name: "parent-key"}, "198.51.100.41")
+	assertContextValues(t, sibling, "parent-correlation", APIKeyIdentity{ID: 41, Name: "parent-key"}, "198.51.100.41")
+	if got := sibling.Value(siblingCorrelationKey{}); got != "spoofed-correlation" {
+		t.Fatalf("sibling lookalike correlation value = %#v", got)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://example.test", nil)
+	if got := sibling.Value(siblingAPIKeyIdentityKey{}); got != (APIKeyIdentity{ID: 99, Name: "spoofed-key"}) {
+		t.Fatalf("sibling lookalike API-key value = %#v", got)
+	}
+	if got := sibling.Value(siblingClientIPKey{}); got != "203.0.113.99" {
+		t.Fatalf("sibling lookalike client-IP value = %#v", got)
+	}
+
+	child := ContextWithCorrelationID(sibling, "child-correlation")
+	child = ContextWithAPIKeyIdentity(child, APIKeyIdentity{ID: 42, Name: "child-key"})
+	child = ContextWithClientIP(child, "198.51.100.42")
+	assertContextValues(t, child, "child-correlation", APIKeyIdentity{ID: 42, Name: "child-key"}, "198.51.100.42")
+	assertContextValues(t, sibling, "parent-correlation", APIKeyIdentity{ID: 41, Name: "parent-key"}, "198.51.100.41")
+	assertContextValues(t, parent, "parent-correlation", APIKeyIdentity{ID: 41, Name: "parent-key"}, "198.51.100.41")
+
+	req, err := http.NewRequestWithContext(child, http.MethodGet, "https://example.test", nil)
 	if err != nil {
 		t.Fatalf("NewRequestWithContext: %v", err)
 	}
 	req.RemoteAddr = "192.0.2.10:443"
-	if got := ClientIP(req); got != "192.0.2.10" {
-		t.Fatalf("ClientIP(spoofed key) = %q, want RemoteAddr fallback", got)
-	}
-
-	realCtx := ContextWithCorrelationID(ctx, "real-correlation")
-	realCtx = ContextWithAPIKeyIdentity(realCtx, APIKeyIdentity{ID: 42, Name: "real-key"})
-	realCtx = ContextWithClientIP(realCtx, "198.51.100.7")
-	if got := CorrelationIDFromContext(realCtx); got != "real-correlation" {
-		t.Fatalf("CorrelationIDFromContext(real key) = %q", got)
-	}
-	if identity, ok := APIKeyIdentityFromContext(realCtx); !ok || identity != (APIKeyIdentity{ID: 42, Name: "real-key"}) {
-		t.Fatalf("APIKeyIdentityFromContext(real key) = %+v, %v", identity, ok)
-	}
-	req = req.WithContext(realCtx)
-	if got := ClientIP(req); got != "198.51.100.7" {
-		t.Fatalf("ClientIP(real key) = %q", got)
+	if got := ClientIP(req); got != "198.51.100.42" {
+		t.Fatalf("child ClientIP() = %q, want child override", got)
 	}
 }

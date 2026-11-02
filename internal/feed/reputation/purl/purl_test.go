@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/8linkz-sec/packmon/internal/checkcontract"
+	"github.com/8linkz-sec/packmon/internal/feed/reputationpurl"
 )
 
 func TestBuildReversingLabsPURL(t *testing.T) {
@@ -91,6 +92,15 @@ func TestCompatibilityPURLExactUnicodeByteLimits(t *testing.T) {
 			got, ok := BuildReversingLabsPURL("npm", tt.pkg, tt.version)
 			if got != tt.want || ok != tt.wantOK {
 				t.Fatalf("BuildReversingLabsPURL() = %q, %v; want %q, %v", got, ok, tt.want, tt.wantOK)
+			}
+			canonical, canonicalOK := reputationpurl.BuildReversingLabsPURL("npm", tt.pkg, tt.version)
+			if got != canonical || ok != canonicalOK {
+				t.Fatalf("compatibility BuildReversingLabsPURL() = %q, %v; canonical = %q, %v", got, ok, canonical, canonicalOK)
+			}
+			supported := SupportsReversingLabsPackage("npm", tt.pkg, tt.version)
+			canonicalSupported := reputationpurl.SupportsReversingLabsPackage("npm", tt.pkg, tt.version)
+			if supported != tt.wantOK || supported != canonicalSupported {
+				t.Fatalf("compatibility SupportsReversingLabsPackage() = %v; want %v and canonical %v", supported, tt.wantOK, canonicalSupported)
 			}
 		})
 	}

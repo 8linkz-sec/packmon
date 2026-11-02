@@ -2552,11 +2552,11 @@ func TestHandleCheckRequestBodyLimitBoundary(t *testing.T) {
 	}
 
 	tests := []struct {
-		name       string
-		extraBytes int64
-		wantStatus int
-		wantError  string
-		wantWork   bool
+		name            string
+		extraWhitespace int64
+		wantStatus      int
+		wantError       string
+		wantWork        bool
 	}{
 		{
 			name:       "exact limit accepts legal trailing whitespace",
@@ -2564,10 +2564,10 @@ func TestHandleCheckRequestBodyLimitBoundary(t *testing.T) {
 			wantWork:   true,
 		},
 		{
-			name:       "one byte over limit rejects before lookups",
-			extraBytes: 1,
-			wantStatus: http.StatusBadRequest,
-			wantError:  fmt.Sprintf("request body exceeds %d bytes", maxRequestBody),
+			name:            "one whitespace byte over limit rejects before work",
+			extraWhitespace: 1,
+			wantStatus:      http.StatusBadRequest,
+			wantError:       "invalid request body: unexpected trailing data after JSON body",
 		},
 	}
 
@@ -2575,18 +2575,9 @@ func TestHandleCheckRequestBodyLimitBoundary(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			store := &stubStore{}
 			h := newTestHandler(store)
-			var body []byte
-			if tt.extraBytes == 0 {
-				paddingLength := maxRequestBody - int64(len(baseBody))
-				body = append(append([]byte(nil), baseBody...), bytes.Repeat([]byte{' '}, int(paddingLength))...)
-			} else {
-				prefix := append(append([]byte(nil), baseBody[:len(baseBody)-1]...), []byte(`,"repo":{"name":"`)...)
-				suffix := []byte(`"}}`)
-				nameLength := maxRequestBody + tt.extraBytes - int64(len(prefix)) - int64(len(suffix))
-				body = append(prefix, bytes.Repeat([]byte{'a'}, int(nameLength))...)
-				body = append(body, suffix...)
-			}
-			if got, want := int64(len(body)), maxRequestBody+tt.extraBytes; got != want {
+			paddingLength := maxRequestBody - int64(len(baseBody)) + tt.extraWhitespace
+			body := append(append([]byte(nil), baseBody...), bytes.Repeat([]byte{' '}, int(paddingLength))...)
+			if got, want := int64(len(body)), maxRequestBody+tt.extraWhitespace; got != want {
 				t.Fatalf("request body size = %d, want %d", got, want)
 			}
 
@@ -2604,17 +2595,29 @@ func TestHandleCheckRequestBodyLimitBoundary(t *testing.T) {
 				if len(vulnerabilityQueries) != 1 || len(maliciousQueries) != 1 {
 					t.Fatalf("lookup counts = vulnerability %d, malicious %d; want 1,1", len(vulnerabilityQueries), len(maliciousQueries))
 				}
+				wantLookup := PackageLookup{Ecosystem: string(domain.EcosystemNPM), Name: "left-pad", Version: "1.0.0"}
+				if vulnerabilityQueries[0] != wantLookup || maliciousQueries[0] != wantLookup {
+					t.Fatalf("lookups = vulnerability %+v, malicious %+v; want %+v", vulnerabilityQueries[0], maliciousQueries[0], wantLookup)
+				}
 				return
 			}
-			if len(vulnerabilityQueries) != 0 || len(maliciousQueries) != 0 {
-				t.Fatalf("rejected request reached lookups: vulnerability=%+v malicious=%+v", vulnerabilityQueries, maliciousQueries)
+			store.mu.Lock()
+			if len(vulnerabilityQueries) != 0 || len(maliciousQueries) != 0 ||
+				len(store.reputationQueries) != 0 || len(store.lifecycleQueries) != 0 ||
+				store.findVulnerabilitiesCalls != 0 || store.findMaliciousCalls != 0 ||
+				store.feedStatusListCalls != 0 || store.scanLogInsertCalls != 0 ||
+				len(store.scanLogEntries) != 0 || store.lookupDeadlineSet || store.lookupContextErr != nil {
+				store.mu.Unlock()
+				t.Fatalf("rejected request reached store work: vulnerability=%+v malicious=%+v reputation=%d lifecycle=%d feed_status=%d scan_log=%d",
+					vulnerabilityQueries, maliciousQueries, len(store.reputationQueries), len(store.lifecycleQueries), store.feedStatusListCalls, store.scanLogInsertCalls)
 			}
+			store.mu.Unlock()
 			var response errorJSON
 			if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
 				t.Fatalf("decode error response: %v", err)
 			}
-			if response.Error != "invalid request body: "+tt.wantError || response.Code != "invalid_request" {
-				t.Fatalf("error response = %+v, want size error %q and code invalid_request", response, tt.wantError)
+			if response.Error != tt.wantError || response.Code != "invalid_request" {
+				t.Fatalf("error response = %+v, want error %q and code invalid_request", response, tt.wantError)
 			}
 		})
 	}
