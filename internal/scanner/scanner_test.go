@@ -539,6 +539,131 @@ func TestCheckRemoteChunksRequestsAtServerLimit(t *testing.T) {
 	}
 }
 
+func TestCheckRemoteChunksExactMultiplesAndThreePlusChunks(t *testing.T) {
+	var calls atomic.Int32
+	requestSizes := make(chan int, 6)
+	requestErrs := make(chan string, 6)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request domain.ScanRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			requestErrs <- "decode request: " + err.Error()
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		requestSizes <- len(request.Packages)
+		call := calls.Add(1)
+		status := string(domain.ScanFeedStatusHealthy)
+		blocking := false
+		switch call {
+		case 2, 4:
+			status = string(domain.ScanFeedStatusDegraded)
+			blocking = true
+		case 5:
+			status = string(domain.ScanFeedStatusError)
+			blocking = true
+		}
+		writeJSONForScannerTest(t, w, domain.ScanResult{
+			ScanID:           fmt.Sprintf("chunk-%d", call),
+			Mode:             domain.ScanModeRemote,
+			ScannedAt:        time.Unix(int64(call), 0).UTC(),
+			FindingsCount:    1,
+			FindingsBlocking: blocking,
+			Findings: []domain.Finding{{
+				Name:       fmt.Sprintf("finding-%d", call),
+				Version:    "1.0.0",
+				Ecosystem:  domain.EcosystemNPM,
+				Type:       domain.FindingTypeVulnerability,
+				Severity:   domain.SeverityLow,
+				AdvisoryID: fmt.Sprintf("GHSA-chunk-%d", call),
+			}},
+			FeedStatus:   status,
+			FeedVersions: map[string]string{fmt.Sprintf("feed-%d", call): fmt.Sprintf("snapshot-%d", call)},
+		})
+	}))
+	defer ioutils.CloseSilently(server)
+
+	scanner := New(nil, Config{
+		ServerURL:         server.URL,
+		AllowInsecureHTTP: true,
+		Timeout:           5 * time.Second,
+	})
+	tests := []struct {
+		name           string
+		totalPackages  int
+		wantSizes      []int
+		wantFeedStatus string
+	}{
+		{
+			name:           "exact two chunk multiple",
+			totalPackages:  2 * checkcontract.MaxPackagesPerCheck,
+			wantSizes:      []int{checkcontract.MaxPackagesPerCheck, checkcontract.MaxPackagesPerCheck},
+			wantFeedStatus: string(domain.ScanFeedStatusDegraded),
+		},
+		{
+			name:           "three full chunks plus remainder",
+			totalPackages:  3*checkcontract.MaxPackagesPerCheck + 7,
+			wantSizes:      []int{checkcontract.MaxPackagesPerCheck, checkcontract.MaxPackagesPerCheck, checkcontract.MaxPackagesPerCheck, 7},
+			wantFeedStatus: string(domain.ScanFeedStatusError),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			packages := make([]domain.Package, tt.totalPackages)
+			for i := range packages {
+				packages[i] = domain.Package{
+					Name:      fmt.Sprintf("%s-package-%d", tt.name, i),
+					Version:   "1.0.0",
+					Ecosystem: domain.EcosystemNPM,
+				}
+			}
+			firstCall := int(calls.Load()) + 1
+			findings, feedVersions, feedStatus, blocking, err := scanner.checkRemote(context.Background(), packages)
+			if err != nil {
+				t.Fatalf("checkRemote() error = %v", err)
+			}
+			gotSizes := make([]int, len(tt.wantSizes))
+			for i := range gotSizes {
+				gotSizes[i] = <-requestSizes
+			}
+			if !reflect.DeepEqual(gotSizes, tt.wantSizes) {
+				t.Fatalf("request sizes = %v, want %v", gotSizes, tt.wantSizes)
+			}
+			if len(findings) != len(tt.wantSizes) {
+				t.Fatalf("merged findings = %d, want %d", len(findings), len(tt.wantSizes))
+			}
+			if len(feedVersions) != len(tt.wantSizes) {
+				t.Fatalf("merged feed versions = %+v, want %d entries", feedVersions, len(tt.wantSizes))
+			}
+			for offset := range tt.wantSizes {
+				call := firstCall + offset
+				if got := findings[offset].AdvisoryID; got != fmt.Sprintf("GHSA-chunk-%d", call) {
+					t.Fatalf("finding %d advisory = %q, want chunk %d", offset, got, call)
+				}
+				key := fmt.Sprintf("feed-%d", call)
+				if got := feedVersions[key]; got != fmt.Sprintf("snapshot-%d", call) {
+					t.Fatalf("feedVersions[%q] = %q, want snapshot-%d", key, got, call)
+				}
+			}
+			if feedStatus != tt.wantFeedStatus {
+				t.Fatalf("feed status = %q, want %q", feedStatus, tt.wantFeedStatus)
+			}
+			if !blocking {
+				t.Fatal("merged blocking = false, want true")
+			}
+		})
+	}
+
+	if got := calls.Load(); got != 6 {
+		t.Fatalf("remote requests = %d, want exactly 6", got)
+	}
+	select {
+	case err := <-requestErrs:
+		t.Fatal(err)
+	default:
+	}
+}
+
 func TestMergeRemoteFeedStatusPreservesWorstStatus(t *testing.T) {
 	t.Parallel()
 

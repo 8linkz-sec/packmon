@@ -2538,6 +2538,88 @@ func TestHandleCheck_MaxPackagesAtDocumentedCoordinateLengths(t *testing.T) {
 	}
 }
 
+func TestHandleCheckRequestBodyLimitBoundary(t *testing.T) {
+	baseBody, err := json.Marshal(domain.ScanRequest{Packages: []domain.Package{{
+		Name:      "left-pad",
+		Version:   "1.0.0",
+		Ecosystem: domain.EcosystemNPM,
+	}}})
+	if err != nil {
+		t.Fatalf("marshal check request: %v", err)
+	}
+	if int64(len(baseBody)) >= maxRequestBody {
+		t.Fatalf("base request size = %d, want less than body limit %d", len(baseBody), maxRequestBody)
+	}
+
+	tests := []struct {
+		name       string
+		extraBytes int64
+		wantStatus int
+		wantError  string
+		wantWork   bool
+	}{
+		{
+			name:       "exact limit accepts legal trailing whitespace",
+			wantStatus: http.StatusOK,
+			wantWork:   true,
+		},
+		{
+			name:       "one byte over limit rejects before lookups",
+			extraBytes: 1,
+			wantStatus: http.StatusBadRequest,
+			wantError:  fmt.Sprintf("request body exceeds %d bytes", maxRequestBody),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &stubStore{}
+			h := newTestHandler(store)
+			var body []byte
+			if tt.extraBytes == 0 {
+				paddingLength := maxRequestBody - int64(len(baseBody))
+				body = append(append([]byte(nil), baseBody...), bytes.Repeat([]byte{' '}, int(paddingLength))...)
+			} else {
+				prefix := append(append([]byte(nil), baseBody[:len(baseBody)-1]...), []byte(`,"repo":{"name":"`)...)
+				suffix := []byte(`"}}`)
+				nameLength := maxRequestBody + tt.extraBytes - int64(len(prefix)) - int64(len(suffix))
+				body = append(prefix, bytes.Repeat([]byte{'a'}, int(nameLength))...)
+				body = append(body, suffix...)
+			}
+			if got, want := int64(len(body)), maxRequestBody+tt.extraBytes; got != want {
+				t.Fatalf("request body size = %d, want %d", got, want)
+			}
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/check", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			rr := httptest.NewRecorder()
+			h.HandleCheck(rr, req)
+
+			if rr.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d: %s", rr.Code, tt.wantStatus, rr.Body.String())
+			}
+			vulnerabilityQueries := store.vulnerabilityQueriesSnapshot()
+			maliciousQueries := store.maliciousQueriesSnapshot()
+			if tt.wantWork {
+				if len(vulnerabilityQueries) != 1 || len(maliciousQueries) != 1 {
+					t.Fatalf("lookup counts = vulnerability %d, malicious %d; want 1,1", len(vulnerabilityQueries), len(maliciousQueries))
+				}
+				return
+			}
+			if len(vulnerabilityQueries) != 0 || len(maliciousQueries) != 0 {
+				t.Fatalf("rejected request reached lookups: vulnerability=%+v malicious=%+v", vulnerabilityQueries, maliciousQueries)
+			}
+			var response errorJSON
+			if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+				t.Fatalf("decode error response: %v", err)
+			}
+			if response.Error != "invalid request body: "+tt.wantError || response.Code != "invalid_request" {
+				t.Fatalf("error response = %+v, want size error %q and code invalid_request", response, tt.wantError)
+			}
+		})
+	}
+}
+
 func TestHandleCheckPackageCoordinateContract(t *testing.T) {
 	t.Parallel()
 

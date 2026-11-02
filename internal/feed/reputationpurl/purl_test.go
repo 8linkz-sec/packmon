@@ -56,3 +56,48 @@ func TestBuildReversingLabsPURLRejectsOverlongCoordinates(t *testing.T) {
 		t.Fatalf("overlong version = %q, %v", got, ok)
 	}
 }
+
+func TestBuildReversingLabsPURLExactUnicodeByteLimits(t *testing.T) {
+	exactName := strings.Repeat("é", 255) + "ab"
+	exactVersion := strings.Repeat("é", 127) + "ab"
+	encodedName := strings.Repeat("%C3%A9", 255) + "ab"
+	encodedVersion := strings.Repeat("%C3%A9", 127) + "ab"
+	if len(exactName) != checkcontract.MaxPackageNameLength || len(exactVersion) != checkcontract.MaxPackageVersionLength {
+		t.Fatalf("fixture byte lengths = name %d, version %d; want %d,%d", len(exactName), len(exactVersion), checkcontract.MaxPackageNameLength, checkcontract.MaxPackageVersionLength)
+	}
+
+	tests := []struct {
+		name    string
+		pkg     string
+		version string
+		want    string
+		wantOK  bool
+	}{
+		{
+			name:    "exact name and version byte limits",
+			pkg:     exactName,
+			version: exactVersion,
+			want:    "pkg:npm/" + encodedName + "@" + encodedVersion,
+			wantOK:  true,
+		},
+		{
+			name:    "one byte over name limit",
+			pkg:     exactName + "c",
+			version: exactVersion,
+		},
+		{
+			name:    "one byte over version limit",
+			pkg:     exactName,
+			version: exactVersion + "c",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := BuildReversingLabsPURL("npm", tt.pkg, tt.version)
+			if got != tt.want || ok != tt.wantOK {
+				t.Fatalf("BuildReversingLabsPURL() = %q, %v; want %q, %v", got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}
