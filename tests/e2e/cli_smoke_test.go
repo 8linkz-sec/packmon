@@ -493,7 +493,7 @@ func TestAutoSBOMOnlySmoke(t *testing.T) {
 func readNonEmptyFile(t *testing.T, path string) []byte {
 	t.Helper()
 
-	body, err := os.ReadFile(path)
+	body, err := os.ReadFile(path) // #nosec G304 -- e2e helper reads only paths created by its test caller.
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
 	}

@@ -1,11 +1,19 @@
 package ci
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -231,49 +239,238 @@ func TestMakefileGateStepsFailOnFindingsAndIgnoreScratchDirs(t *testing.T) {
 	}
 }
 
-func TestGolangCINolintlintRequiresSpecificExplanations(t *testing.T) {
-	t.Parallel()
-
+func TestGolangCIConfigContract(t *testing.T) {
 	var cfg struct {
+		Version string `yaml:"version"`
 		Linters struct {
+			Default  string   `yaml:"default"`
+			Enable   []string `yaml:"enable"`
 			Settings struct {
+				Misspell struct {
+					IgnoreRules []string `yaml:"ignore-rules"`
+				} `yaml:"misspell"`
 				Nolintlint struct {
 					RequireExplanation bool `yaml:"require-explanation"`
 					RequireSpecific    bool `yaml:"require-specific"`
 				} `yaml:"nolintlint"`
+				Gosec struct {
+					Excludes []string `yaml:"excludes"`
+				} `yaml:"gosec"`
 			} `yaml:"settings"`
 		} `yaml:"linters"`
+		Formatters struct {
+			Enable   []string `yaml:"enable"`
+			Settings struct {
+				Gofumpt struct {
+					Extra struct {
+						GroupParams   bool `yaml:"group-params"`
+						ClotheReturns bool `yaml:"clothe-returns"`
+						BalanceCalls  bool `yaml:"balance-calls"`
+					} `yaml:"extra"`
+				} `yaml:"gofumpt"`
+			} `yaml:"settings"`
+		} `yaml:"formatters"`
 	}
-	if err := yaml.Unmarshal([]byte(readRepoFile(t, ".golangci.yml")), &cfg); err != nil {
+	decoder := yaml.NewDecoder(strings.NewReader(readRepoFile(t, ".golangci.yml")))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&cfg); err != nil {
 		t.Fatalf("parse .golangci.yml: %v", err)
 	}
+
+	if cfg.Version != "2" {
+		t.Fatalf(".golangci.yml version = %q, want 2", cfg.Version)
+	}
+	if cfg.Linters.Default != "none" {
+		t.Fatalf(".golangci.yml linters.default = %q, want none", cfg.Linters.Default)
+	}
+	assertStringSet(t, ".golangci.yml linters.enable", cfg.Linters.Enable, []string{
+		"errcheck", "gosec", "govet", "ineffassign", "misspell", "nolintlint", "staticcheck", "unused",
+	})
+	assertStringSet(t, ".golangci.yml misspell.ignore-rules", cfg.Linters.Settings.Misspell.IgnoreRules, []string{"packageid"})
 	if !cfg.Linters.Settings.Nolintlint.RequireExplanation {
 		t.Fatal(".golangci.yml nolintlint.require-explanation must be true")
 	}
 	if !cfg.Linters.Settings.Nolintlint.RequireSpecific {
 		t.Fatal(".golangci.yml nolintlint.require-specific must be true")
 	}
-}
-
-func TestGolangCIGosecDoesNotGloballyExcludeUncheckedErrors(t *testing.T) {
-	t.Parallel()
-
-	var cfg struct {
-		Linters struct {
-			Settings struct {
-				Gosec struct {
-					Excludes []string `yaml:"excludes"`
-				} `yaml:"gosec"`
-			} `yaml:"settings"`
-		} `yaml:"linters"`
-	}
-	if err := yaml.Unmarshal([]byte(readRepoFile(t, ".golangci.yml")), &cfg); err != nil {
-		t.Fatalf("parse .golangci.yml: %v", err)
-	}
-
 	if stringSliceContains(cfg.Linters.Settings.Gosec.Excludes, "G104") {
 		t.Fatal(".golangci.yml must not globally exclude gosec G104; use narrow inline suppressions with rationale")
 	}
+	if len(cfg.Linters.Settings.Gosec.Excludes) != 0 {
+		t.Fatalf(".golangci.yml gosec.excludes = %#v, want no global security-rule exclusions", cfg.Linters.Settings.Gosec.Excludes)
+	}
+	assertStringSet(t, ".golangci.yml formatters.enable", cfg.Formatters.Enable, []string{"gofumpt"})
+	if !cfg.Formatters.Settings.Gofumpt.Extra.GroupParams ||
+		!cfg.Formatters.Settings.Gofumpt.Extra.ClotheReturns ||
+		!cfg.Formatters.Settings.Gofumpt.Extra.BalanceCalls {
+		t.Fatalf(".golangci.yml gofumpt extra settings = group-params:%t clothe-returns:%t balance-calls:%t; all must be true",
+			cfg.Formatters.Settings.Gofumpt.Extra.GroupParams,
+			cfg.Formatters.Settings.Gofumpt.Extra.ClotheReturns,
+			cfg.Formatters.Settings.Gofumpt.Extra.BalanceCalls)
+	}
+}
+
+func TestGolangCIConfigSchemaAndBehavior(t *testing.T) {
+	golangciLint, err := exec.LookPath("golangci-lint")
+	if err != nil {
+		t.Fatalf("golangci-lint is required for its configuration contract: %v", err)
+	}
+	configPath, err := filepath.Abs(filepath.Join("..", "..", ".golangci.yml"))
+	if err != nil {
+		t.Fatalf("resolve absolute .golangci.yml path: %v", err)
+	}
+
+	t.Run("schema accepts repository config", func(t *testing.T) {
+		output, runErr := runBoundedCommand(t, "golangci config verify", golangciLint, []string{"config", "verify", "--config", configPath}, filepath.Dir(configPath), nil)
+		if runErr != nil {
+			t.Fatalf("golangci-lint rejected repository config: %v\n%s", runErr, output)
+		}
+	})
+
+	t.Run("schema rejects unknown keys", func(t *testing.T) {
+		invalidConfig := filepath.Join(t.TempDir(), ".golangci.yml")
+		contents := readRepoFile(t, ".golangci.yml") + "\nunknown-contract-key: true\n"
+		if err := os.WriteFile(invalidConfig, []byte(contents), 0o600); err != nil {
+			t.Fatalf("write invalid config fixture: %v", err)
+		}
+		output, runErr := runBoundedCommand(t, "golangci invalid config verify", golangciLint, []string{"config", "verify", "--config", invalidConfig}, filepath.Dir(invalidConfig), nil)
+		if runErr == nil {
+			t.Fatalf("golangci-lint accepted config with unknown key\n%s", output)
+		}
+		if !strings.Contains(output, "unknown-contract-key") {
+			t.Fatalf("golangci-lint unknown-key failure did not identify the key: %v\n%s", runErr, output)
+		}
+	})
+
+	fixtures := []struct {
+		name       string
+		source     string
+		wantPass   bool
+		wantMarker string
+	}{
+		{
+			name: "full config reports G304",
+			source: `package fixture
+
+import "os"
+
+func ReadPath(path string) error {
+	_, err := os.ReadFile(path)
+	return err
+}
+`,
+			wantMarker: "G304",
+		},
+		{
+			name: "nonspecific nolint fails",
+			source: `package fixture
+
+import "os"
+
+func ReadPath(path string) error {
+	_, err := os.ReadFile(path) //nolint // fixture intentionally exercises nolintlint
+	return err
+}
+`,
+			wantMarker: "should mention specific linter",
+		},
+		{
+			name: "unexplained nolint fails",
+			source: `package fixture
+
+import "os"
+
+func ReadPath(path string) error {
+	_, err := os.ReadFile(path) //nolint:gosec
+	return err
+}
+`,
+			wantMarker: "should provide explanation",
+		},
+		{
+			name: "specific explained nolint passes",
+			source: `package fixture
+
+import "os"
+
+func ReadPath(path string) error {
+	_, err := os.ReadFile(path) //nolint:gosec // fixture deliberately accepts its caller-provided path
+	return err
+}
+`,
+			wantPass: true,
+		},
+	}
+	for _, fixture := range fixtures {
+		t.Run(fixture.name, func(t *testing.T) {
+			output, runErr := runGolangCIFixture(t, golangciLint, configPath, fixture.source)
+			if fixture.wantPass {
+				if runErr != nil {
+					t.Fatalf("golangci-lint fixture failed: %v\n%s", runErr, output)
+				}
+				return
+			}
+			if runErr == nil {
+				t.Fatalf("golangci-lint fixture unexpectedly passed\n%s", output)
+			}
+			if !strings.Contains(output, fixture.wantMarker) {
+				t.Fatalf("golangci-lint output missing %q: %v\n%s", fixture.wantMarker, runErr, output)
+			}
+		})
+	}
+}
+
+func assertStringSet(t *testing.T, label string, got, want []string) {
+	t.Helper()
+
+	gotCopy := append([]string(nil), got...)
+	wantCopy := append([]string(nil), want...)
+	sort.Strings(gotCopy)
+	sort.Strings(wantCopy)
+	if !reflect.DeepEqual(gotCopy, wantCopy) {
+		t.Fatalf("%s = %#v, want order-independent set %#v", label, got, want)
+	}
+}
+
+func runGolangCIFixture(t *testing.T, binary, configPath, source string) (string, error) {
+	t.Helper()
+
+	fixtureDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(fixtureDir, "go.mod"), []byte("module example.test/toolingfixture\n\ngo 1.25\n"), 0o600); err != nil {
+		t.Fatalf("write fixture go.mod: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(fixtureDir, "fixture.go"), []byte(source), 0o600); err != nil {
+		t.Fatalf("write fixture source: %v", err)
+	}
+
+	cacheRoot := t.TempDir()
+	env := []string{
+		"GOCACHE=" + filepath.Join(cacheRoot, "go-build"),
+		"GOLANGCI_LINT_CACHE=" + filepath.Join(cacheRoot, "golangci-lint"),
+		"GOMODCACHE=" + filepath.Join(cacheRoot, "go-mod"),
+		"GOPROXY=off",
+		"GOWORK=off",
+		"GOFLAGS=-mod=readonly",
+	}
+	return runBoundedCommand(t, "golangci fixture", binary, []string{"run", "--config", configPath, "--max-issues-per-linter=0", "--max-same-issues=0", "./..."}, fixtureDir, env)
+}
+
+func runBoundedCommand(t *testing.T, label, binary string, args []string, dir string, extraEnv []string) (string, error) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, binary, args...) // #nosec G204 -- test executes an explicitly resolved tooling binary with fixed or test-controlled arguments.
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), extraEnv...)
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	err := cmd.Run()
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return output.String(), fmt.Errorf("%s timed out after 90s", label)
+	}
+	return output.String(), err
 }
 
 func readRepoFile(t *testing.T, rel string) string {

@@ -339,7 +339,7 @@ func TestProductionServerWithPostgresAndAPIKey(t *testing.T) {
     }
   }
 }`
-	if err := os.WriteFile(filepath.Join(projectDir, "package-lock.json"), []byte(lockContent), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(projectDir, "package-lock.json"), []byte(lockContent), 0o600); err != nil {
 		t.Fatalf("write package-lock.json: %v", err)
 	}
 
@@ -529,7 +529,7 @@ func TestProductionServerRefusesUnmigratedPostgres(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, serverBin)
+	cmd := exec.CommandContext(ctx, serverBin) // #nosec G204 -- integration test executes the configured Packmon server test binary.
 	cmd.Env = env
 	output, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
@@ -627,7 +627,7 @@ func startProductionServerWithPostgres(t *testing.T, namePrefix, feedImportSecre
 func readScanResultFile(t *testing.T, path string) domain.ScanResult {
 	t.Helper()
 
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- integration helper reads only scan-result paths created by its test caller.
 	if err != nil {
 		t.Fatalf("read scan result %s: %v", path, err)
 	}

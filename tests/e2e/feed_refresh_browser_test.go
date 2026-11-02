@@ -223,7 +223,7 @@ func runBrowser(t *testing.T, browser string, args []string) ([]byte, error) {
 	defer cancel()
 
 	start := time.Now()
-	cmd := exec.CommandContext(ctx, browser, args...)
+	cmd := exec.CommandContext(ctx, browser, args...) // #nosec G204 -- e2e test executes the discovered browser with fixed test-controlled arguments.
 	output, err := cmd.CombinedOutput()
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return output, fmt.Errorf("timed out after %s", browserRunTimeout)
@@ -250,6 +250,6 @@ func readRepoFile(t *testing.T, path ...string) []byte {
 }
 
 func fileExists(path string) bool {
-	info, err := os.Stat(path)
+	info, err := os.Stat(path) // #nosec G703 -- e2e helper checks only browser paths assembled by the test harness.
 	return err == nil && !info.IsDir()
 }

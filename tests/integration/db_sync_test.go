@@ -75,7 +75,7 @@ func TestDBSyncAndLocalScan(t *testing.T) {
     }
   }
 }`
-	if err := os.WriteFile(filepath.Join(projectDir, "package-lock.json"), []byte(lockContent), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(projectDir, "package-lock.json"), []byte(lockContent), 0o600); err != nil {
 		t.Fatalf("write package-lock.json: %v", err)
 	}
 
@@ -85,7 +85,7 @@ func TestDBSyncAndLocalScan(t *testing.T) {
 		t.Fatalf("packmon scan exit=%d stdout=%s stderr=%s", exitCode, stdout, stderr)
 	}
 
-	data, err := os.ReadFile(outputJSON)
+	data, err := os.ReadFile(outputJSON) // #nosec G304 -- integration test reads its own output path below t.TempDir.
 	if err != nil {
 		t.Fatalf("read scan result: %v", err)
 	}

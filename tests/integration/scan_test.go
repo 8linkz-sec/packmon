@@ -231,7 +231,7 @@ func TestScanEmptyDirectory(t *testing.T) {
 	}
 
 	// Verify JSON output structure.
-	data, err := os.ReadFile(jsonFile)
+	data, err := os.ReadFile(jsonFile) // #nosec G304 -- integration test reads its own output path below t.TempDir.
 	if err != nil {
 		t.Fatalf("failed to read JSON output: %v", err)
 	}
@@ -291,7 +291,7 @@ func TestScanWithPackageLock(t *testing.T) {
 }`
 
 	lockPath := filepath.Join(tmpDir, "package-lock.json")
-	if err := os.WriteFile(lockPath, []byte(lockContent), 0o644); err != nil {
+	if err := os.WriteFile(lockPath, []byte(lockContent), 0o600); err != nil {
 		t.Fatalf("failed to write package-lock.json: %v", err)
 	}
 
@@ -307,7 +307,7 @@ func TestScanWithPackageLock(t *testing.T) {
 		t.Fatalf("expected exit code 0, got %d\nstdout:\n%s\nstderr:\n%s", exitCode, stdout, stderr)
 	}
 
-	data, err := os.ReadFile(jsonFile)
+	data, err := os.ReadFile(jsonFile) // #nosec G304 -- integration test reads its own output path below t.TempDir.
 	if err != nil {
 		t.Fatalf("failed to read JSON output: %v", err)
 	}
@@ -369,7 +369,7 @@ func TestScanAutoModeNoServerNoLocalDB(t *testing.T) {
 }`
 
 	lockPath := filepath.Join(tmpDir, "package-lock.json")
-	if err := os.WriteFile(lockPath, []byte(lockContent), 0o644); err != nil {
+	if err := os.WriteFile(lockPath, []byte(lockContent), 0o600); err != nil {
 		t.Fatalf("failed to write package-lock.json: %v", err)
 	}
 
@@ -396,7 +396,7 @@ func TestScanMalformedLockFile(t *testing.T) {
 	// Write a file that the npm parser will attempt to parse but fail on.
 	malformed := `{{{ this is not valid JSON at all !!!`
 	lockPath := filepath.Join(tmpDir, "package-lock.json")
-	if err := os.WriteFile(lockPath, []byte(malformed), 0o644); err != nil {
+	if err := os.WriteFile(lockPath, []byte(malformed), 0o600); err != nil {
 		t.Fatalf("failed to write malformed lock file: %v", err)
 	}
 
@@ -434,10 +434,10 @@ func TestScanEcosystemFilter(t *testing.T) {
 golang.org/x/text v0.3.7/go.mod h1:def456=
 `
 
-	if err := os.WriteFile(filepath.Join(tmpDir, "package-lock.json"), []byte(lockContent), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(tmpDir, "package-lock.json"), []byte(lockContent), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(tmpDir, "go.sum"), []byte(goSumContent), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(tmpDir, "go.sum"), []byte(goSumContent), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -454,7 +454,7 @@ golang.org/x/text v0.3.7/go.mod h1:def456=
 		t.Fatalf("expected exit code %d, got %d\nstdout:\n%s\nstderr:\n%s", scanner.ExitUnderThreshold, exitCode, stdout, stderr)
 	}
 
-	data, err := os.ReadFile(jsonFile)
+	data, err := os.ReadFile(jsonFile) // #nosec G304 -- integration test reads its own output path below t.TempDir.
 	if err != nil {
 		t.Fatalf("failed to read JSON output: %v", err)
 	}

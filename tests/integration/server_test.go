@@ -91,9 +91,9 @@ func startServerWithMetrics(t *testing.T) (baseURL, metricsURL string, cleanup f
 	}
 
 	if !ready {
-		cmd.Process.Kill()
-		cmd.Wait()
-		t.Fatalf("server did not become ready within 10 seconds; logs: %s", logs.String())
+		killErr := cmd.Process.Kill()
+		waitErr := cmd.Wait()
+		t.Fatalf("server did not become ready within 10 seconds; stop errors: kill=%v wait=%v; logs: %s", killErr, waitErr, logs.String())
 	}
 
 	cleanup = func() {
