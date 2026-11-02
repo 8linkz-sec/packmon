@@ -227,7 +227,7 @@ func TestValidateCSRFRequestSourcePrecedence(t *testing.T) {
 		want        bool
 	}{
 		{name: "query only", queryValues: []string{token}, want: true},
-		{name: "urlencoded body only", encoding: "urlencoded", bodyValues: []string{token}, want: true},
+		{name: "multipart body only", encoding: "multipart", bodyValues: []string{token}, want: true},
 		{name: "urlencoded body precedes query", encoding: "urlencoded", queryValues: []string{wrong}, bodyValues: []string{token}, want: true},
 		{name: "urlencoded invalid body masks query", encoding: "urlencoded", queryValues: []string{token}, bodyValues: []string{wrong}},
 		{name: "urlencoded first duplicate wins", encoding: "urlencoded", bodyValues: []string{token, wrong}, want: true},

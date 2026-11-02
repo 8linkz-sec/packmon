@@ -558,7 +558,9 @@ func TestNewSessionManagerWithIdleTimeoutDefaultsNonPositiveIdleTimeout(t *testi
 		{name: "negative", idleTimeout: -time.Second},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			sm := NewSessionManagerWithIdleTimeout(context.Background(), time.Hour, tt.idleTimeout, false)
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			sm := NewSessionManagerWithIdleTimeout(ctx, time.Hour, tt.idleTimeout, false)
 			if sm.idleTimeout != DefaultAdminIdleTimeout {
 				t.Fatalf("idle timeout = %v, want default %v", sm.idleTimeout, DefaultAdminIdleTimeout)
 			}
