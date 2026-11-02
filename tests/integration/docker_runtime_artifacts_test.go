@@ -229,7 +229,7 @@ func assertDockerAPKPackageAbsent(t *testing.T, image, apkPackage string) {
 func assertDockerFileMatches(t *testing.T, image, imagePath, sourcePath string) {
 	t.Helper()
 
-	want, err := os.ReadFile(sourcePath)
+	want, err := os.ReadFile(sourcePath) //nolint:gosec // test helper is called only with the fixed repository LICENSE and SECURITY.md paths.
 	if err != nil {
 		t.Fatalf("read source artifact %s: %v", filepath.Base(sourcePath), err)
 	}

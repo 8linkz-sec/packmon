@@ -147,11 +147,82 @@ func TestMakeIntegrationTargetCoversAllTaggedPackages(t *testing.T) {
 		}
 		seen[pkg] = true
 	}
-	wantPackages := integrationTaggedPackages(t)
+	wantPackages := taggedTestPackages(t, "integration")
 	slices.Sort(gotPackages)
 	if !slices.Equal(gotPackages, wantPackages) {
 		t.Fatalf("integration package argv = %q, want exact tagged package inventory %q", gotPackages, wantPackages)
 	}
+}
+
+func TestMakeLintRunsTagAwareGolangCIGate(t *testing.T) {
+	makeBin := requireGNMake(t)
+	wantTaggedPackages := taggedTestPackages(t, "integration", "e2e")
+	wantTaggedArgs := append([]string{"run", "--build-tags", "integration,e2e"}, wantTaggedPackages...)
+	wantTaggedCall := "golangci-lint:" + strings.Join(wantTaggedArgs, " ")
+
+	assertCalls := func(t *testing.T, fixture makeFixture) {
+		t.Helper()
+		calls := readStubCallFields(t, fixture.logPath)
+		normalCount := 0
+		var runCalls [][]string
+		var taggedCalls [][]string
+		for _, fields := range calls {
+			if len(fields) >= 2 && slices.Equal(fields[:2], []string{"golangci-lint", "run"}) {
+				runCalls = append(runCalls, fields)
+			}
+			if slices.Equal(fields, []string{"golangci-lint", "run", "./..."}) {
+				normalCount++
+			}
+			if len(fields) >= 4 && slices.Equal(fields[:4], []string{"golangci-lint", "run", "--build-tags", "integration,e2e"}) {
+				taggedCalls = append(taggedCalls, fields)
+			}
+		}
+		if normalCount != 1 {
+			t.Fatalf("normal golangci-lint invocation count = %d, want 1; calls:\n%s", normalCount, strings.Join(readStubCalls(t, fixture.logPath), "\n"))
+		}
+		if len(runCalls) != 2 {
+			t.Fatalf("golangci-lint run invocation count = %d, want exactly the normal and tag-aware gates; calls:\n%s", len(runCalls), strings.Join(readStubCalls(t, fixture.logPath), "\n"))
+		}
+		if len(taggedCalls) != 1 {
+			t.Fatalf("tag-aware golangci-lint invocation count = %d, want 1; calls:\n%s", len(taggedCalls), strings.Join(readStubCalls(t, fixture.logPath), "\n"))
+		}
+		gotPackages := taggedCalls[0][4:]
+		seen := make(map[string]bool, len(gotPackages))
+		for _, pkg := range gotPackages {
+			if seen[pkg] {
+				t.Fatalf("tag-aware lint package %q appears more than once in argv %q", pkg, taggedCalls[0])
+			}
+			seen[pkg] = true
+		}
+		if !slices.Equal(taggedCalls[0][1:], wantTaggedArgs) {
+			t.Fatalf("tag-aware golangci-lint argv = %q, want exact argv %q", taggedCalls[0], append([]string{"golangci-lint"}, wantTaggedArgs...))
+		}
+		slices.Sort(gotPackages)
+		if !slices.Equal(gotPackages, wantTaggedPackages) {
+			t.Fatalf("tag-aware lint package argv = %q, want exact tagged package inventory %q", gotPackages, wantTaggedPackages)
+		}
+	}
+
+	t.Run("success", func(t *testing.T) {
+		fixture := newMakeFixture(t, makeBin, "checkout")
+		output, err := fixture.run(t, nil, "lint")
+		if err != nil {
+			t.Fatalf("make lint with successful stubs: %v\n%s", err, output)
+		}
+		assertCalls(t, fixture)
+	})
+
+	t.Run("tag-aware failure propagates", func(t *testing.T) {
+		fixture := newMakeFixture(t, makeBin, "checkout")
+		output, err := fixture.run(t, []string{"FAIL_CALL=" + wantTaggedCall}, "lint")
+		if err == nil {
+			t.Fatalf("make lint succeeded after injected tag-aware golangci-lint exit 42\n%s", output)
+		}
+		assertCalls(t, fixture)
+		if countExactCall(readStubCalls(t, fixture.logPath), wantTaggedCall) != 1 {
+			t.Fatalf("injected tag-aware golangci-lint invocation count = %d, want 1", countExactCall(readStubCalls(t, fixture.logPath), wantTaggedCall))
+		}
+	})
 }
 
 func TestParallelMakeTargetsSerializeNPMCI(t *testing.T) {
@@ -671,8 +742,11 @@ func countExactCall(calls []string, want string) int {
 	return count
 }
 
-func integrationTaggedPackages(t *testing.T) []string {
+func taggedTestPackages(t *testing.T, tags ...string) []string {
 	t.Helper()
+	if len(tags) == 0 {
+		t.Fatal("derive tagged test packages: no build tags provided")
+	}
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatalf("resolve repository root: %v", err)
@@ -695,11 +769,11 @@ func integrationTaggedPackages(t *testing.T) []string {
 		if parseErr != nil {
 			return parseErr
 		}
-		if !ok || !mentionsBuildTag(expr, "integration") {
+		if !ok || !mentionsAnyBuildTag(expr, tags) {
 			return nil
 		}
 		context := build.Default
-		context.BuildTags = []string{"integration"}
+		context.BuildTags = slices.Clone(tags)
 		matched, matchErr := context.MatchFile(filepath.Dir(path), entry.Name())
 		if matchErr != nil {
 			return matchErr
@@ -714,7 +788,7 @@ func integrationTaggedPackages(t *testing.T) []string {
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("derive integration-tagged packages: %v", err)
+		t.Fatalf("derive %s-tagged packages: %v", strings.Join(tags, ","), err)
 	}
 	result := make([]string, 0, len(packages))
 	for pkg := range packages {
@@ -722,6 +796,15 @@ func integrationTaggedPackages(t *testing.T) []string {
 	}
 	slices.Sort(result)
 	return result
+}
+
+func mentionsAnyBuildTag(expr constraint.Expr, tags []string) bool {
+	for _, tag := range tags {
+		if mentionsBuildTag(expr, tag) {
+			return true
+		}
+	}
+	return false
 }
 
 func testFileBuildConstraint(path string) (constraint.Expr, bool, error) {

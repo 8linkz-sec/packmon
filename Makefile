@@ -9,6 +9,7 @@ export GOFLAGS
 GO_PACKAGES ?= $(shell go list ./... | grep -v /node_modules/)
 GOSEC_DIRS ?= $(shell go list -f '{{.Dir}}' ./...)
 GOFMT_FILES ?= $(shell git ls-files '*.go')
+TAGGED_LINT_DIRS ?= ./internal/db/postgres ./internal/db/postgres/migrations ./internal/server ./tests/e2e ./tests/integration
 GOLANGCI_LINT_VERSION ?= v2.14.0
 GOFUMPT_VERSION ?= v0.9.2
 GOLANGCI_LINT_VERSION_NUMBER := $(patsubst v%,%,$(GOLANGCI_LINT_VERSION))
@@ -52,6 +53,7 @@ vet:
 
 lint: check-go-lint-tools lint-nongo lint-web lint-openapi lint-shell lint-docker lint-actions lint-powershell
 	golangci-lint run ./...
+	golangci-lint run --build-tags integration,e2e $(TAGGED_LINT_DIRS)
 	@test -z "$$(gofumpt -extra -l $(GOFMT_FILES))" || (echo "gofumpt needed on:"; gofumpt -extra -l $(GOFMT_FILES); exit 1)
 
 fmt: check-gofumpt-tool
