@@ -251,14 +251,19 @@ func TestMakeTestTargetsSetGOTMPDIR(t *testing.T) {
 		`go run ./tools/checkcoverage -profile=coverage.out -min=$(COVERAGE_MIN)`,
 		`GOTMPDIR="$(GOTMPDIR)" go vet $(GO_PACKAGES)`,
 		`GOTMPDIR="$(GOTMPDIR)" go test -count=1 ./tests/ci`,
-		`GOTMPDIR="$(GOTMPDIR)" PACKMON_TEST_BIN_DIR=$(CURDIR) go test -count=1 -tags integration`,
-		`GOTMPDIR="$(GOTMPDIR)" PACKMON_TEST_BIN_DIR=$(CURDIR) go test -count=1 -tags e2e`,
 		"GOFMT_FILES ?= $(shell git ls-files '*.go')",
 		`gofumpt -extra -l $(GOFMT_FILES)`,
 		`gofumpt -extra -w $(GOFMT_FILES)`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("Makefile missing %q", want)
+		}
+	}
+	for _, tag := range []string{"integration", "e2e"} {
+		unquoted := `GOTMPDIR="$(GOTMPDIR)" PACKMON_TEST_BIN_DIR=$(CURDIR) go test -count=1 -tags ` + tag
+		quoted := `GOTMPDIR="$(GOTMPDIR)" PACKMON_TEST_BIN_DIR="$(CURDIR)" go test -count=1 -tags ` + tag
+		if !strings.Contains(text, unquoted) && !strings.Contains(text, quoted) {
+			t.Fatalf("Makefile missing tagged %s command with GOTMPDIR and PACKMON_TEST_BIN_DIR", tag)
 		}
 	}
 }
