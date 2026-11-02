@@ -112,6 +112,20 @@ func TestF099F102PostgresContracts(t *testing.T) {
 
 	t.Run("audit pagination HMAC and pruning", func(t *testing.T) {
 		f099ResetContractTables(t, store)
+		if _, err := store.pool.Exec(ctx, `
+			INSERT INTO admin_audit_log(action, created_at) VALUES
+				('tie_oldest', '2026-01-01T00:00:00Z'),
+				('tie_middle', '2026-01-01T00:00:00Z'),
+				('tie_newest', '2026-01-01T00:00:00Z')`); err != nil {
+			t.Fatalf("seed tied audit rows: %v", err)
+		}
+		tied, err := store.ListAdminAuditLogPage(ctx, 3, 0)
+		if err != nil || len(tied) != 3 || tied[0].Action != "tie_newest" || tied[1].Action != "tie_middle" || tied[2].Action != "tie_oldest" {
+			t.Fatalf("tied audit order = %+v, %v", tied, err)
+		}
+		if _, err := store.pool.Exec(ctx, `DELETE FROM admin_audit_log`); err != nil {
+			t.Fatalf("clear tied audit rows: %v", err)
+		}
 		db.SetAdminAuditDigestHMACKey([]byte("0123456789abcdef0123456789abcdef"))
 		defer db.ClearAdminAuditDigestHMACKey()
 		if pruned, err := store.PruneAdminAuditLogs(ctx, 0); err != nil || pruned != 0 {
@@ -136,6 +150,18 @@ func TestF099F102PostgresContracts(t *testing.T) {
 			if entry.IntegrityStatus != db.AdminAuditIntegrityVerified || !strings.HasPrefix(entry.RowDigest, "hmac-sha256:") || !strings.HasPrefix(entry.IP, "2001:db8::101") || entry.CorrelationID == "" || len(entry.Details) == 0 {
 				t.Fatalf("audit round trip = %+v", entry)
 			}
+		}
+		zeroOffset, err := store.ListAdminAuditLogPage(ctx, 3, 0)
+		if err != nil || !f099SameAuditIDs(first, zeroOffset) {
+			t.Fatalf("negative audit offset page = %+v, zero page = %+v, error=%v", first, zeroOffset, err)
+		}
+		defaultPage, err := store.ListAdminAuditLogPage(ctx, 0, 0)
+		if err != nil || len(defaultPage) != 100 {
+			t.Fatalf("default audit page len=%d, error=%v; want 100", len(defaultPage), err)
+		}
+		maxPage, err := store.ListAdminAuditLogPage(ctx, 999, 0)
+		if err != nil || len(maxPage) != 200 {
+			t.Fatalf("max audit page len=%d, error=%v; want 200", len(maxPage), err)
 		}
 		last, err := store.ListAdminAuditLogPage(ctx, 10, 203)
 		if err != nil || len(last) != 2 || last[0].Action != "paged_001" || last[1].Action != "paged_000" {
@@ -163,9 +189,34 @@ func TestF099F102PostgresContracts(t *testing.T) {
 		if err := store.UpsertAdminAuth(ctx, "before-trigger", false); err != nil {
 			t.Fatalf("seed auth: %v", err)
 		}
+		locker, err := store.pool.Acquire(ctx)
+		if err != nil {
+			t.Fatalf("acquire audit table locker: %v", err)
+		}
+		lockTx, err := locker.Begin(ctx)
+		if err != nil {
+			locker.Release()
+			t.Fatalf("begin audit table locker: %v", err)
+		}
+		if _, err := lockTx.Exec(ctx, `LOCK TABLE admin_audit_log IN ACCESS EXCLUSIVE MODE`); err != nil {
+			_ = lockTx.Rollback(ctx)
+			locker.Release()
+			t.Fatalf("lock admin audit table: %v", err)
+		}
+		lockCtx, cancelLock := context.WithTimeout(ctx, 100*time.Millisecond)
+		lockErr := store.InsertAdminAuditLog(lockCtx, &db.AdminAuditEntry{Action: "blocked_table_lock"})
+		cancelLock()
+		if err := lockTx.Rollback(ctx); err != nil {
+			locker.Release()
+			t.Fatalf("rollback audit table locker: %v", err)
+		}
+		locker.Release()
+		if lockErr == nil || !strings.Contains(lockErr.Error(), "lock admin audit log") {
+			t.Fatalf("InsertAdminAuditLog(blocked table lock) = %v, want lock error", lockErr)
+		}
 		restore := f099InstallRejectingTrigger(t, store, "f099_reject_audit", "admin_audit_log")
 		defer restore()
-		err := store.ChangeAdminPasswordWithAudit(ctx, "must-rollback", "before-trigger", &db.AdminAuditEntry{Action: "password_change"})
+		err = store.ChangeAdminPasswordWithAudit(ctx, "must-rollback", "before-trigger", &db.AdminAuditEntry{Action: "password_change"})
 		if !errors.Is(err, db.ErrAdminAuditLog) {
 			t.Fatalf("ChangeAdminPasswordWithAudit(trigger) = %v, want ErrAdminAuditLog", err)
 		}
@@ -191,6 +242,30 @@ func TestF099F102PostgresContracts(t *testing.T) {
 			t.Fatalf("ListAdminAuditLog(nullable action) = %+v, %v; want nil scan error", rows, err)
 		}
 		restore()
+		if _, err := store.pool.Exec(ctx, `DELETE FROM admin_audit_log`); err != nil {
+			t.Fatalf("clear audit scan fixture: %v", err)
+		}
+		if _, err := store.pool.Exec(ctx, `
+			INSERT INTO admin_audit_log(action, created_at) VALUES
+				('iteration_valid', NOW() + INTERVAL '2 seconds'),
+				('iteration_fault', NOW() + INTERVAL '1 second')`); err != nil {
+			t.Fatalf("seed audit iteration fixture: %v", err)
+		}
+		restoreView := f099SwapTableForFaultView(t, store, "admin_audit_log", "admin_audit_log_f099_base",
+			[]string{`DROP FUNCTION IF EXISTS f099_fail_audit_text(text)`},
+			`CREATE FUNCTION f099_fail_audit_text(value text) RETURNS text LANGUAGE plpgsql STABLE AS $$ BEGIN RAISE EXCEPTION 'forced audit iteration failure'; END $$`,
+			`CREATE VIEW admin_audit_log AS
+			 SELECT id,
+				CASE WHEN action = 'iteration_fault' THEN f099_fail_audit_text(action) ELSE action END AS action,
+				details, ip, correlation_id, created_at, previous_digest, row_digest
+			 FROM admin_audit_log_f099_base`,
+		)
+		defer restoreView()
+		rows, err = store.ListAdminAuditLog(ctx, 10)
+		if err == nil || rows != nil || !strings.Contains(err.Error(), "iterate admin audit log") {
+			t.Fatalf("ListAdminAuditLog(iteration fault) = %+v, %v; want nil iteration error", rows, err)
+		}
+		restoreView()
 	})
 
 	t.Run("API key lifecycle is audited and rolls back", func(t *testing.T) {
@@ -224,6 +299,26 @@ func TestF099F102PostgresContracts(t *testing.T) {
 		if err != nil || len(keys) != 0 {
 			t.Fatalf("ListAPIKeys(after delete) = %+v, %v", keys, err)
 		}
+		plainID, err := store.CreateAPIKey(ctx, "plain-lifecycle", "hash-plain-lifecycle", nil)
+		if err != nil || plainID == 0 {
+			t.Fatalf("CreateAPIKey() = %d, %v", plainID, err)
+		}
+		if err := store.TouchAPIKeyLastUsed(ctx, plainID); err != nil {
+			t.Fatalf("TouchAPIKeyLastUsed() error = %v", err)
+		}
+		plain, err := store.FindAPIKeyByHash(ctx, "hash-plain-lifecycle")
+		if err != nil || plain == nil || plain.LastUsedAt == nil {
+			t.Fatalf("FindAPIKeyByHash(plain) = %+v, %v", plain, err)
+		}
+		if err := store.RevokeAPIKey(ctx, plainID); err != nil {
+			t.Fatalf("RevokeAPIKey() error = %v", err)
+		}
+		if err := store.DeleteAPIKey(ctx, plainID); err != nil {
+			t.Fatalf("DeleteAPIKey() error = %v", err)
+		}
+		if keys, err := store.ListAPIKeys(ctx); err != nil || len(keys) != 0 {
+			t.Fatalf("ListAPIKeys(after plain delete) = %+v, %v", keys, err)
+		}
 		audits, err := store.ListAdminAuditLog(ctx, 10)
 		if err != nil || len(audits) != 3 || audits[0].Action != "api_key_delete" || audits[1].Action != "api_key_revoke" || audits[2].Action != "api_key_create" {
 			t.Fatalf("API lifecycle audits = %+v, %v", audits, err)
@@ -256,6 +351,14 @@ func TestF099F102PostgresContracts(t *testing.T) {
 		if err != nil || len(page) != 2 || page[0].Name != "expired-boundary" || page[1].Name != "deleted-only" {
 			t.Fatalf("ListAPIKeysPage(negative) = %+v, %v", page, err)
 		}
+		zeroPage, err := store.ListAPIKeysPage(ctx, 2, 0)
+		if err != nil || !f099SameAPIKeyIDs(page, zeroPage) {
+			t.Fatalf("negative API key offset page = %+v, zero page = %+v, error=%v", page, zeroPage, err)
+		}
+		allKeys, err := store.ListAPIKeysPage(ctx, 10, 0)
+		if err != nil || len(allKeys) != 4 || allKeys[2].Name != "active-high" || allKeys[3].Name != "active-low" || allKeys[2].CreatedAt != allKeys[3].CreatedAt || allKeys[2].ID <= allKeys[3].ID {
+			t.Fatalf("tied API key ordering = %+v, %v", allKeys, err)
+		}
 		if none, err := store.ListAPIKeysPage(ctx, 0, 0); err != nil || none != nil {
 			t.Fatalf("ListAPIKeysPage(nonpositive) = %+v, %v; want nil, nil", none, err)
 		}
@@ -282,6 +385,32 @@ func TestF099F102PostgresContracts(t *testing.T) {
 			t.Fatalf("ListAPIKeysPage(nullable hash) = %+v, %v; want nil scan error", rows, err)
 		}
 		restore()
+		if _, err := store.pool.Exec(ctx, `DELETE FROM api_keys`); err != nil {
+			t.Fatalf("clear API key scan fixtures: %v", err)
+		}
+		if _, err := store.pool.Exec(ctx, `
+			INSERT INTO api_keys(name, key_hash, created_at) VALUES
+				('iteration-valid', 'iteration-valid-hash', NOW() + INTERVAL '2 seconds'),
+				('iteration-fault', 'iteration-fault-hash', NOW() + INTERVAL '1 second')`); err != nil {
+			t.Fatalf("seed API key iteration fixture: %v", err)
+		}
+		restoreView := f099SwapTableForFaultView(t, store, "api_keys", "api_keys_f101_base",
+			[]string{`DROP FUNCTION IF EXISTS f101_fail_key_text(text)`},
+			`CREATE FUNCTION f101_fail_key_text(value text) RETURNS text LANGUAGE plpgsql STABLE AS $$ BEGIN RAISE EXCEPTION 'forced API key iteration failure'; END $$`,
+			`CREATE VIEW api_keys AS
+			 SELECT id, name,
+				CASE WHEN name = 'iteration-fault' THEN f101_fail_key_text(key_hash) ELSE key_hash END AS key_hash,
+				created_at, revoked_at, last_used_at, expires_at, deleted_at
+			 FROM api_keys_f101_base`,
+		)
+		defer restoreView()
+		if rows, err := store.ListAPIKeys(ctx); err == nil || rows != nil || !strings.Contains(err.Error(), "iterate API keys") {
+			t.Fatalf("ListAPIKeys(iteration fault) = %+v, %v; want nil iteration error", rows, err)
+		}
+		if rows, err := store.ListAPIKeysPage(ctx, 10, 0); err == nil || rows != nil || !strings.Contains(err.Error(), "iterate API key page") {
+			t.Fatalf("ListAPIKeysPage(iteration fault) = %+v, %v; want nil iteration error", rows, err)
+		}
+		restoreView()
 	})
 
 	t.Run("recent vulnerabilities defaults and selection", func(t *testing.T) {
@@ -297,7 +426,7 @@ func TestF099F102PostgresContracts(t *testing.T) {
 	})
 
 	t.Run("dashboard defensive database outcomes", func(t *testing.T) {
-		f102DashboardDefensiveContracts(t, store)
+		f102DashboardDefensiveContracts(t, store, dsn)
 	})
 }
 
@@ -344,11 +473,47 @@ func f099RunBounded(t *testing.T, work []func(context.Context) error) []error {
 			t.Fatalf("concurrent PostgreSQL operations exceeded 30 seconds: %v", ctx.Err())
 		}
 	}
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("concurrent PostgreSQL operations produced results but workers did not finish")
+	}
+	for err := range results {
+		out = append(out, err)
+	}
+	if len(out) != len(work) {
+		t.Fatalf("concurrent PostgreSQL operations returned %d results, want %d", len(out), len(work))
+	}
 	return out
+}
+
+func f099SameAuditIDs(left, right []db.AdminAuditLogEntry) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i].ID != right[i].ID {
+			return false
+		}
+	}
+	return true
+}
+
+func f099SameAPIKeyIDs(left, right []db.APIKey) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i].ID != right[i].ID {
+			return false
+		}
+	}
+	return true
 }
 
 func f099ResetContractTables(t *testing.T, store *Store) {
 	t.Helper()
+	t.Cleanup(store.invalidateDashboardStats)
 	db.ClearAdminAuditDigestHMACKey()
 	statements := []string{
 		`DELETE FROM admin_audit_log`,
@@ -394,8 +559,10 @@ func f099InstallRejectingTrigger(t *testing.T, store *Store, name, table string)
 			fmt.Sprintf(`DROP TRIGGER IF EXISTS %s ON %s`, name, table),
 			fmt.Sprintf(`DROP FUNCTION IF EXISTS %s()`, functionName),
 		)
+		verifyCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
 		var count int
-		if err := store.pool.QueryRow(context.Background(), `SELECT COUNT(*) FROM pg_trigger WHERE tgname = $1 AND NOT tgisinternal`, name).Scan(&count); err != nil || count != 0 {
+		if err := store.pool.QueryRow(verifyCtx, `SELECT COUNT(*) FROM pg_trigger WHERE tgname = $1 AND NOT tgisinternal`, name).Scan(&count); err != nil || count != 0 {
 			t.Fatalf("trigger restore verification count=%d, error=%v", count, err)
 		}
 	}
@@ -411,8 +578,10 @@ func f099MakeColumnNullable(t *testing.T, store *Store, table, column, deleteInv
 	t.Helper()
 	restore := func() {
 		f099Transaction(t, store, deleteInvalid, fmt.Sprintf(`ALTER TABLE %s ALTER COLUMN %s SET NOT NULL`, table, column))
+		verifyCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
 		var notNull bool
-		if err := store.pool.QueryRow(context.Background(), `
+		if err := store.pool.QueryRow(verifyCtx, `
 			SELECT attnotnull FROM pg_attribute
 			WHERE attrelid = $1::regclass AND attname = $2 AND NOT attisdropped`, table, column).Scan(&notNull); err != nil || !notNull {
 			t.Fatalf("restore %s.%s not-null = %t, error=%v", table, column, notNull, err)
@@ -433,14 +602,52 @@ func f099RelaxDeletedRequiresRevoked(t *testing.T, store *Store) func() {
 			`ALTER TABLE api_keys ADD CONSTRAINT api_keys_deleted_requires_revoked_check CHECK (deleted_at IS NULL OR revoked_at IS NOT NULL) NOT VALID`,
 			`ALTER TABLE api_keys VALIDATE CONSTRAINT api_keys_deleted_requires_revoked_check`,
 		)
+		verifyCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
 		var valid bool
 		var definition string
-		if err := store.pool.QueryRow(context.Background(), `SELECT convalidated, pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = $1`, constraint).Scan(&valid, &definition); err != nil || !valid || !strings.Contains(definition, "deleted_at IS NULL") || !strings.Contains(definition, "revoked_at IS NOT NULL") {
+		if err := store.pool.QueryRow(verifyCtx, `SELECT convalidated, pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = $1`, constraint).Scan(&valid, &definition); err != nil || !valid || !strings.Contains(definition, "deleted_at IS NULL") || !strings.Contains(definition, "revoked_at IS NOT NULL") {
 			t.Fatalf("restored API key constraint valid=%t definition=%q error=%v", valid, definition, err)
 		}
 	}
 	t.Cleanup(restore)
 	f099Transaction(t, store, `ALTER TABLE api_keys DROP CONSTRAINT api_keys_deleted_requires_revoked_check`)
+	return restore
+}
+
+func f099SwapTableForFaultView(t *testing.T, store *Store, table, backup string, restoreExtra []string, createStatements ...string) func() {
+	t.Helper()
+	restore := func() {
+		statements := []string{fmt.Sprintf(`
+			DO $$
+			BEGIN
+				IF EXISTS (
+					SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+					WHERE n.nspname = current_schema() AND c.relname = '%s' AND c.relkind = 'v'
+				) THEN
+					EXECUTE 'DROP VIEW %s';
+				END IF;
+				IF to_regclass('%s') IS NOT NULL THEN
+					EXECUTE 'ALTER TABLE %s RENAME TO %s';
+				END IF;
+			END $$`, table, table, backup, backup, table)}
+		statements = append(statements, restoreExtra...)
+		f099Transaction(t, store, statements...)
+		verifyCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		var kind string
+		var backupExists bool
+		if err := store.pool.QueryRow(verifyCtx, `
+			SELECT c.relkind::text, to_regclass($2) IS NOT NULL
+			FROM pg_class c
+			WHERE c.oid = to_regclass($1)`, table, backup).Scan(&kind, &backupExists); err != nil || kind != "r" || backupExists {
+			t.Fatalf("restore %s catalog kind=%q backup_exists=%t error=%v", table, kind, backupExists, err)
+		}
+	}
+	t.Cleanup(restore)
+	statements := []string{fmt.Sprintf(`ALTER TABLE %s RENAME TO %s`, table, backup)}
+	statements = append(statements, createStatements...)
+	f099Transaction(t, store, statements...)
 	return restore
 }
 
@@ -484,6 +691,31 @@ func f102RecentVulnerabilityContracts(t *testing.T, store *Store) {
 	if err != nil || len(limited) != 2 || limited[0].ID != "F102-RECENT-22" || limited[1].ID != "F102-RECENT-21" {
 		t.Fatalf("ListRecentVulnerabilities(limit=2) = %+v, %v", limited, err)
 	}
+	restore := f099MakeColumnNullable(t, store, "vulnerabilities", "severity", `DELETE FROM vulnerabilities WHERE id = 'F102-RECENT-NULL-SEVERITY'`)
+	defer restore()
+	if _, err := store.pool.Exec(ctx, `
+		INSERT INTO vulnerabilities(id, summary, severity, published, modified)
+		VALUES ('F102-RECENT-NULL-SEVERITY', 'invalid scan fixture', NULL, NOW() + INTERVAL '1 second', NOW())`); err != nil {
+		t.Fatalf("insert nullable recent severity: %v", err)
+	}
+	if got, err := store.ListRecentVulnerabilities(ctx, 7, 20); err == nil || got != nil || !strings.Contains(err.Error(), "scan recent vulnerability row") {
+		t.Fatalf("ListRecentVulnerabilities(nullable severity) = %+v, %v; want nil scan error", got, err)
+	}
+	restore()
+	restoreIterationFault := f099SwapTableForFaultView(t, store, "vulnerabilities", "vulnerabilities_f102_base",
+		[]string{`DROP FUNCTION IF EXISTS f102_fail_recent_text(text)`},
+		`CREATE FUNCTION f102_fail_recent_text(value text) RETURNS text LANGUAGE plpgsql STABLE AS $$ BEGIN RAISE EXCEPTION 'forced recent iteration failure'; END $$`,
+		`CREATE VIEW vulnerabilities AS
+		 SELECT id,
+			CASE WHEN id = 'F102-RECENT-21' THEN f102_fail_recent_text(summary) ELSE summary END AS summary,
+			severity, published, withdrawn
+		 FROM vulnerabilities_f102_base`,
+	)
+	defer restoreIterationFault()
+	if _, err := store.ListRecentVulnerabilities(ctx, 7, 20); err == nil || !strings.Contains(err.Error(), "forced recent iteration failure") {
+		t.Fatalf("ListRecentVulnerabilities(iteration fault) error = %v; want forced iteration failure", err)
+	}
+	restoreIterationFault()
 }
 
 func f102DailyScanContracts(t *testing.T, store *Store, dsn string) {
@@ -505,6 +737,12 @@ func f102DailyScanContracts(t *testing.T, store *Store, dsn string) {
 			second.Release()
 			first.Release()
 			t.Fatalf("set UTC on pooled session %d: %v", i, err)
+		}
+		var zone string
+		if err := conn.QueryRow(ctx, `SHOW TIME ZONE`).Scan(&zone); err != nil || zone != "UTC" {
+			second.Release()
+			first.Release()
+			t.Fatalf("pooled session %d time zone = %q, error=%v; want UTC", i, zone, err)
 		}
 	}
 	second.Release()
@@ -540,6 +778,10 @@ func f102DailyScanContracts(t *testing.T, store *Store, dsn string) {
 	if !days[2].Date.Equal(today) || days[2].ScanCount != 2 || int64(days[2].FindingsCount) != 3_000_000_000 {
 		t.Fatalf("current UTC day = %+v, want two scans and bigint findings", days[2])
 	}
+	defaultDays, err := store.CountScansByDay(ctx, 0)
+	if err != nil || len(defaultDays) != 7 || !defaultDays[6].Date.Equal(today) {
+		t.Fatalf("CountScansByDay(nonpositive) = %+v, %v; want seven UTC days ending today", defaultDays, err)
+	}
 
 	dstStore, err := New(ctx, dsn, nil, &PoolConfig{MaxConns: 1, MinConns: 1})
 	if err != nil {
@@ -557,6 +799,20 @@ func f102DailyScanContracts(t *testing.T, store *Store, dsn string) {
 	if _, err := dstConn.Exec(ctx, `SET TIME ZONE 'Europe/Berlin'`); err != nil {
 		dstConn.Release()
 		t.Fatalf("set DST session zone: %v", err)
+	}
+	var nonUTCZone string
+	if err := dstConn.QueryRow(ctx, `SHOW TIME ZONE`).Scan(&nonUTCZone); err != nil || nonUTCZone != "Europe/Berlin" {
+		dstConn.Release()
+		t.Fatalf("non-UTC session time zone = %q, error=%v; want Europe/Berlin", nonUTCZone, err)
+	}
+	dstConn.Release()
+	nonUTCDays, err := dstStore.CountScansByDay(ctx, 3)
+	if err != nil || len(nonUTCDays) != 3 || nonUTCDays[2].ScanCount != 2 || int64(nonUTCDays[2].FindingsCount) != 3_000_000_000 {
+		t.Fatalf("CountScansByDay(non-UTC session, recent window) = %+v, %v", nonUTCDays, err)
+	}
+	dstConn, err = dstStore.pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("reacquire DST session for reset: %v", err)
 	}
 	if _, err := dstConn.Exec(ctx, `RESET TIME ZONE`); err != nil {
 		dstConn.Release()
@@ -587,6 +843,25 @@ func f102DailyScanContracts(t *testing.T, store *Store, dsn string) {
 			t.Fatalf("DST UTC bucket %s = %+v (present=%t), want scans=%d findings=%d", date, got, ok, want.scans, want.findings)
 		}
 	}
+	if _, err := store.pool.Exec(ctx, `
+		INSERT INTO scan_log(scan_id, scanned_at, packages_count, findings_count, duration_ms) VALUES
+			('f102-daily-iteration-valid', NOW(), 1, 1, 1),
+			('f102-daily-iteration-fault', NOW(), 1, 1, 1)`); err != nil {
+		t.Fatalf("seed daily iteration fixtures: %v", err)
+	}
+	restoreView := f099SwapTableForFaultView(t, store, "scan_log", "scan_log_f102_base",
+		[]string{`DROP FUNCTION IF EXISTS f102_fail_daily_int(integer)`},
+		`CREATE FUNCTION f102_fail_daily_int(value integer) RETURNS integer LANGUAGE plpgsql STABLE AS $$ BEGIN RAISE EXCEPTION 'forced daily iteration failure'; END $$`,
+		`CREATE VIEW scan_log AS
+		 SELECT id, scanned_at,
+			CASE WHEN scan_id = 'f102-daily-iteration-fault' THEN f102_fail_daily_int(findings_count) ELSE findings_count END AS findings_count
+		 FROM scan_log_f102_base`,
+	)
+	defer restoreView()
+	if got, err := store.CountScansByDay(ctx, 7); err == nil || got != nil || !strings.Contains(err.Error(), "iterate daily stats") {
+		t.Fatalf("CountScansByDay(iteration fault) = %+v, %v; want nil iteration error", got, err)
+	}
+	restoreView()
 }
 
 func f102DashboardCategoryContracts(t *testing.T, store *Store) {
@@ -612,7 +887,10 @@ func f102DashboardCategoryContracts(t *testing.T, store *Store) {
 		INSERT INTO lifecycle_package_map(ecosystem, name, product_slug) VALUES ('npm', 'f102-lifecycle', 'f102-product');
 		INSERT INTO lifecycle_releases(product_slug, cycle, eol_from) VALUES
 			('f102-product', '1', CURRENT_DATE - 1),
-			('f102-product', '2', CURRENT_DATE + 30);
+			('f102-product', '2', CURRENT_DATE + 30),
+			('f102-product', '3', CURRENT_DATE),
+			('f102-product', '4', CURRENT_DATE + 90),
+			('f102-product', '5', CURRENT_DATE + 91);
 	`); err != nil {
 		t.Fatalf("seed dashboard categories: %v", err)
 	}
@@ -621,8 +899,8 @@ func f102DashboardCategoryContracts(t *testing.T, store *Store) {
 	if err != nil {
 		t.Fatalf("DashboardStats() error = %v", err)
 	}
-	if stats.TotalPackages != 6 || stats.TotalVulnerabilities != 1 || stats.TotalMalicious != 2 || stats.TotalSupplyChainRisk != 3 || stats.TotalLifecycle != 1 {
-		t.Fatalf("DashboardStats totals = %+v, want packages=6 vulnerabilities=1 malicious=2 supply=3 lifecycle=1", stats)
+	if stats.TotalPackages != 6 || stats.TotalVulnerabilities != 1 || stats.TotalMalicious != 2 || stats.TotalSupplyChainRisk != 4 || stats.TotalLifecycle != 2 {
+		t.Fatalf("DashboardStats totals = %+v, want packages=6 vulnerabilities=1 malicious=2 supply=4 lifecycle=2", stats)
 	}
 	wantSeverity := map[string]int{"CRITICAL": 2, "MEDIUM": 1, "LOW": 1, "UNKNOWN": 1}
 	if len(stats.BySeverity) != len(wantSeverity) {
@@ -633,9 +911,13 @@ func f102DashboardCategoryContracts(t *testing.T, store *Store) {
 			t.Fatalf("DashboardStats BySeverity[%s] = %d, want %d; all=%+v", severity, got, want, stats.BySeverity)
 		}
 	}
+	unknown, err := store.CountUnknownSeverityFindings(ctx)
+	if err != nil || unknown != 1 {
+		t.Fatalf("CountUnknownSeverityFindings() = %d, %v; want one active UNKNOWN malicious row", unknown, err)
+	}
 }
 
-func f102DashboardDefensiveContracts(t *testing.T, store *Store) {
+func f102DashboardDefensiveContracts(t *testing.T, store *Store, dsn string) {
 	t.Helper()
 	f099ResetContractTables(t, store)
 	ctx := context.Background()
@@ -646,6 +928,9 @@ func f102DashboardDefensiveContracts(t *testing.T, store *Store) {
 		t.Fatalf("ScanTotals(empty view) = %+v, %v; want zero totals", totals, err)
 	}
 	restoreView()
+	if totals, err := store.ScanTotals(ctx); err != nil || totals == nil || totals.PackagesScanned != 0 || totals.Findings != 0 {
+		t.Fatalf("ScanTotals(restored view) = %+v, %v; want zero totals", totals, err)
+	}
 
 	restore := f099MakeColumnNullable(t, store, "malicious_findings", "severity", `DELETE FROM malicious_findings WHERE severity IS NULL`)
 	defer restore()
@@ -663,6 +948,80 @@ func f102DashboardDefensiveContracts(t *testing.T, store *Store) {
 	if stats, err := store.DashboardStats(ctx); err != nil || stats == nil {
 		t.Fatalf("DashboardStats(after restore) = %+v, %v", stats, err)
 	}
+	if _, err := store.pool.Exec(ctx, `
+		INSERT INTO malicious_findings(id, ecosystem, name, source, risk_type, severity, summary, reference_urls) VALUES
+			('F102-DASH-ITERATION-VALID', 'npm', 'f102-dashboard-iteration-valid', 'openssf', 'malware', 'LOW', 'valid', '[]'),
+			('F102-DASH-ITERATION-FAULT', 'npm', 'f102-dashboard-iteration-fault', 'openssf', 'malware', 'LOW', 'fault', '[]')`); err != nil {
+		t.Fatalf("seed dashboard iteration fixtures: %v", err)
+	}
+	restoreDashboardView := f099SwapTableForFaultView(t, store, "malicious_findings", "malicious_findings_f102_base",
+		[]string{`DROP FUNCTION IF EXISTS f102_fail_dashboard_text(text)`},
+		`CREATE FUNCTION f102_fail_dashboard_text(value text) RETURNS text LANGUAGE plpgsql STABLE AS $$ BEGIN RAISE EXCEPTION 'forced dashboard iteration failure'; END $$`,
+		`CREATE VIEW malicious_findings AS
+		 SELECT id, ecosystem, name, removed_at,
+			CASE WHEN id = 'F102-DASH-ITERATION-FAULT' THEN f102_fail_dashboard_text(severity) ELSE severity END AS severity
+		 FROM malicious_findings_f102_base`,
+	)
+	defer restoreDashboardView()
+	store.invalidateDashboardStats()
+	if stats, err := store.DashboardStats(ctx); err == nil || stats != nil || !strings.Contains(err.Error(), "iterate dashboard severities") {
+		t.Fatalf("DashboardStats(iteration fault) = %+v, %v; want nil iteration error", stats, err)
+	}
+	restoreDashboardView()
+	store.invalidateDashboardStats()
+	restoreTotalsFault := f099SwapTableForFaultView(t, store, "malicious_findings", "malicious_findings_f102_totals_base", nil,
+		`CREATE VIEW malicious_findings AS
+		 SELECT id, ecosystem, removed_at, severity
+		 FROM malicious_findings_f102_totals_base`,
+	)
+	defer restoreTotalsFault()
+	if stats, err := store.DashboardStats(ctx); err == nil || stats != nil || !strings.Contains(err.Error(), "dashboard totals") {
+		t.Fatalf("DashboardStats(totals query fault) = %+v, %v; want totals error", stats, err)
+	}
+	restoreTotalsFault()
+	store.invalidateDashboardStats()
+	restoreSeverityQueryFault := f099SwapTableForFaultView(t, store, "malicious_findings", "malicious_findings_f102_query_base", nil,
+		`CREATE VIEW malicious_findings AS
+		 SELECT id, ecosystem, name, removed_at
+		 FROM malicious_findings_f102_query_base`,
+	)
+	defer restoreSeverityQueryFault()
+	if stats, err := store.DashboardStats(ctx); err == nil || stats != nil || !strings.Contains(err.Error(), "dashboard severities") {
+		t.Fatalf("DashboardStats(severity query fault) = %+v, %v; want severity query error", stats, err)
+	}
+	restoreSeverityQueryFault()
+	store.invalidateDashboardStats()
+
+	closedStore, err := New(ctx, dsn, nil, &PoolConfig{MaxConns: 1, MinConns: 1})
+	if err != nil {
+		t.Fatalf("New(closed fault store) error = %v", err)
+	}
+	if err := closedStore.Close(); err != nil {
+		t.Fatalf("Close(fault store) error = %v", err)
+	}
+	faults := []struct {
+		name string
+		call func() error
+	}{
+		{name: "admin auth query", call: func() error { _, err := closedStore.GetAdminAuth(ctx); return err }},
+		{name: "audit list query", call: func() error { _, err := closedStore.ListAdminAuditLogPage(ctx, 10, 0); return err }},
+		{name: "API list query", call: func() error { _, err := closedStore.ListAPIKeys(ctx); return err }},
+		{name: "API page query", call: func() error { _, err := closedStore.ListAPIKeysPage(ctx, 10, 0); return err }},
+		{name: "API touch query", call: func() error { return closedStore.TouchAPIKeyLastUsed(ctx, 1) }},
+		{name: "API create query", call: func() error { _, err := closedStore.CreateAPIKey(ctx, "closed", "closed-hash", nil); return err }},
+		{name: "API revoke query", call: func() error { return closedStore.RevokeAPIKey(ctx, 1) }},
+		{name: "API delete query", call: func() error { return closedStore.DeleteAPIKey(ctx, 1) }},
+		{name: "recent query", call: func() error { _, err := closedStore.ListRecentVulnerabilities(ctx, 7, 20); return err }},
+		{name: "daily query", call: func() error { _, err := closedStore.CountScansByDay(ctx, 7); return err }},
+		{name: "totals query", call: func() error { _, err := closedStore.ScanTotals(ctx); return err }},
+		{name: "dashboard begin", call: func() error { _, err := closedStore.DashboardStats(ctx); return err }},
+		{name: "unknown query", call: func() error { _, err := closedStore.CountUnknownSeverityFindings(ctx); return err }},
+	}
+	for _, fault := range faults {
+		if err := fault.call(); err == nil {
+			t.Errorf("%s error = nil, want closed-pool failure", fault.name)
+		}
+	}
 }
 
 func f102InstallEmptyScanTotalsView(t *testing.T, store *Store) func() {
@@ -677,8 +1036,10 @@ func f102InstallEmptyScanTotalsView(t *testing.T, store *Store) func() {
 		FROM scan_log`
 	restore := func() {
 		f099Transaction(t, store, `DROP VIEW IF EXISTS scan_log_totals`, productionView)
+		verifyCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
 		var definition string
-		if err := store.pool.QueryRow(context.Background(), `SELECT pg_get_viewdef('scan_log_totals'::regclass, true)`).Scan(&definition); err != nil || !strings.Contains(definition, "sum(packages_count)") || !strings.Contains(definition, "sum(findings_count)") {
+		if err := store.pool.QueryRow(verifyCtx, `SELECT pg_get_viewdef('scan_log_totals'::regclass, true)`).Scan(&definition); err != nil || !strings.Contains(definition, "sum(packages_count)") || !strings.Contains(definition, "sum(findings_count)") {
 			t.Fatalf("restored scan_log_totals definition = %q, error=%v", definition, err)
 		}
 	}

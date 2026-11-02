@@ -71,17 +71,17 @@ func f099SuccessfulAuditTx(t *testing.T, action string) *f099ScriptedTx {
 			switch {
 			case strings.Contains(sql, "nextval"):
 				return f099ScriptedRow{scan: func(dest ...any) error {
-					*(dest[0].(*int)) = 17
+					*dest[0].(*int) = 17
 					return nil
 				}}
 			case strings.Contains(sql, "SELECT row_digest"):
 				return f099ScriptedRow{scan: func(...any) error { return pgx.ErrNoRows }}
 			case strings.Contains(sql, "INSERT INTO admin_audit_log"):
 				return f099ScriptedRow{scan: func(dest ...any) error {
-					*(dest[0].(*string)) = `{"phase":"test"}`
-					*(dest[1].(*string)) = "2001:db8::1"
-					*(dest[2].(*string)) = "corr-f099"
-					*(dest[3].(*time.Time)) = createdAt
+					*dest[0].(*string) = `{"phase":"test"}`
+					*dest[1].(*string) = "2001:db8::1"
+					*dest[2].(*string) = "corr-f099"
+					*dest[3].(*time.Time) = createdAt
 					return nil
 				}}
 			default:
@@ -185,7 +185,7 @@ func TestF099AdminAuthAuditFailureBranches(t *testing.T) {
 		tx := &f099ScriptedTx{queryRow: func(string, ...any) pgx.Row {
 			calls++
 			if calls == 1 {
-				return f099ScriptedRow{scan: func(dest ...any) error { *(dest[0].(*int)) = 18; return nil }}
+				return f099ScriptedRow{scan: func(dest ...any) error { *dest[0].(*int) = 18; return nil }}
 			}
 			return f099ScriptedRow{scan: func(...any) error { return want }}
 		}}
@@ -202,7 +202,7 @@ func TestF099AdminAuthAuditFailureBranches(t *testing.T) {
 			calls++
 			switch calls {
 			case 1:
-				return f099ScriptedRow{scan: func(dest ...any) error { *(dest[0].(*int)) = 19; return nil }}
+				return f099ScriptedRow{scan: func(dest ...any) error { *dest[0].(*int) = 19; return nil }}
 			case 2:
 				return f099ScriptedRow{scan: func(...any) error { return pgx.ErrNoRows }}
 			default:
