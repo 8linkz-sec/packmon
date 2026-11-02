@@ -23,18 +23,22 @@ type n8nConnectionTarget struct {
 type n8nConnections map[string]map[string][][]n8nConnectionTarget
 
 type n8nWorkflowNode struct {
-	ID             string          `json:"id"`
-	Name           string          `json:"name"`
-	Type           string          `json:"type"`
-	TypeVersion    int             `json:"typeVersion"`
-	Parameters     map[string]any  `json:"parameters"`
-	Credentials    map[string]any  `json:"credentials"`
-	ContinueOnFail json.RawMessage `json:"continueOnFail"`
-	OnError        json.RawMessage `json:"onError"`
+	ID               string          `json:"id"`
+	Name             string          `json:"name"`
+	Type             string          `json:"type"`
+	TypeVersion      int             `json:"typeVersion"`
+	Parameters       map[string]any  `json:"parameters"`
+	Credentials      json.RawMessage `json:"credentials"`
+	AlwaysOutputData json.RawMessage `json:"alwaysOutputData"`
+	ContinueOnFail   json.RawMessage `json:"continueOnFail"`
+	OnError          json.RawMessage `json:"onError"`
+	RetryOnFail      json.RawMessage `json:"retryOnFail"`
 }
 
 type n8nWorkflow struct {
 	Active      *bool             `json:"active"`
+	Name        string            `json:"name"`
+	Settings    map[string]any    `json:"settings"`
 	Nodes       []n8nWorkflowNode `json:"nodes"`
 	Connections n8nConnections    `json:"connections"`
 }
@@ -274,7 +278,7 @@ func TestN8NDailySyncPinsCompleteWorkflowTopology(t *testing.T) {
 	t.Parallel()
 
 	workflow := readN8NWorkflow(t, "daily-sync.json")
-	assertN8NDisabled(t, workflow, "daily sync")
+	assertN8NWorkflowEnvelope(t, workflow, "daily sync", "Packmon Daily Sync")
 	nodes := indexN8NNodes(t, workflow.Nodes, "daily sync")
 	assertN8NNodeTuples(t, nodes, "daily sync", map[string]n8nNodeTuple{
 		"Daily Trigger": {ID: "daily-trigger", Type: "n8n-nodes-base.scheduleTrigger", TypeVersion: 1},
@@ -282,6 +286,8 @@ func TestN8NDailySyncPinsCompleteWorkflowTopology(t *testing.T) {
 		"Result":        {ID: "result", Type: "n8n-nodes-base.code", TypeVersion: 2},
 	})
 	assertN8NNodesHaveNoErrorOverrides(t, workflow.Nodes, "daily sync")
+	assertN8NNodesHaveNoCredentials(t, workflow.Nodes, "daily sync")
+	assertN8NErrorOverrideMutationResistance(t, workflow)
 
 	rule, ok := nodes["Daily Trigger"].Parameters["rule"].(map[string]any)
 	if !ok {
@@ -377,7 +383,7 @@ func TestN8NOnDemandScanPinsCompleteWorkflowTopology(t *testing.T) {
 	t.Parallel()
 
 	workflow := readN8NWorkflow(t, "on-demand-scan.json")
-	assertN8NDisabled(t, workflow, "on-demand scan")
+	assertN8NWorkflowEnvelope(t, workflow, "on-demand scan", "Packmon On Demand Scan")
 	nodes := indexN8NNodes(t, workflow.Nodes, "on-demand scan")
 	assertN8NNodeTuples(t, nodes, "on-demand scan", map[string]n8nNodeTuple{
 		"Webhook":  {ID: "webhook", Type: "n8n-nodes-base.webhook", TypeVersion: 1},
@@ -401,8 +407,17 @@ func TestN8NOnDemandScanPinsCompleteWorkflowTopology(t *testing.T) {
 			"name": "Packmon On-Demand Webhook Header Auth",
 		},
 	}
-	if got := nodes["Webhook"].Credentials; !reflect.DeepEqual(got, wantCredentials) {
-		t.Fatalf("webhook credentials = %#v, want exact %#v", got, wantCredentials)
+	var gotCredentials map[string]any
+	if err := json.Unmarshal(nodes["Webhook"].Credentials, &gotCredentials); err != nil {
+		t.Fatalf("parse webhook credentials: %v", err)
+	}
+	if !reflect.DeepEqual(gotCredentials, wantCredentials) {
+		t.Fatalf("webhook credentials = %#v, want exact %#v", gotCredentials, wantCredentials)
+	}
+	for _, name := range []string{"Run Scan", "Respond"} {
+		if len(nodes[name].Credentials) != 0 {
+			t.Fatalf("on-demand node %q credentials = %s, want field absent", name, nodes[name].Credentials)
+		}
 	}
 	if got, want := nodes["Run Scan"].Parameters, map[string]any{"command": "sh /opt/packmon/n8n/on-demand-scan.sh"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("run-scan parameters = %#v, want exact %#v", got, want)
@@ -502,13 +517,14 @@ func TestN8NWeeklyMaintenancePinsTopology(t *testing.T) {
 	t.Parallel()
 
 	workflow := readN8NWorkflow(t, "weekly-maintenance.json")
-	assertN8NDisabled(t, workflow, "weekly maintenance")
+	assertN8NWorkflowEnvelope(t, workflow, "weekly maintenance", "Packmon Weekly Maintenance")
 	nodes := indexN8NNodes(t, workflow.Nodes, "weekly maintenance")
 	assertN8NNodeTuples(t, nodes, "weekly maintenance", map[string]n8nNodeTuple{
 		"Weekly Trigger": {ID: "weekly-trigger", Type: "n8n-nodes-base.scheduleTrigger", TypeVersion: 1},
 		"Fetch Metrics":  {ID: "fetch-metrics", Type: "n8n-nodes-base.httpRequest", TypeVersion: 4},
 	})
 	assertN8NNodesHaveNoErrorOverrides(t, workflow.Nodes, "weekly maintenance")
+	assertN8NNodesHaveNoCredentials(t, workflow.Nodes, "weekly maintenance")
 
 	trigger := nodes["Weekly Trigger"]
 	rule, ok := trigger.Parameters["rule"].(map[string]any)
@@ -573,14 +589,23 @@ func cloneN8NWorkflow(t *testing.T, workflow n8nWorkflow) n8nWorkflow {
 	return cloned
 }
 
-func assertN8NDisabled(t *testing.T, workflow n8nWorkflow, label string) {
+func assertN8NWorkflowEnvelope(t *testing.T, workflow n8nWorkflow, label, wantName string) {
 	t.Helper()
 
+	if workflow.Name != wantName {
+		t.Fatalf("%s workflow name = %q, want exact %q", label, workflow.Name, wantName)
+	}
 	if workflow.Active == nil {
 		t.Fatalf("%s workflow is missing active=false", label)
 	}
 	if *workflow.Active {
 		t.Fatalf("%s workflow must remain disabled by default", label)
+	}
+	if workflow.Settings == nil {
+		t.Fatalf("%s workflow is missing settings={}", label)
+	}
+	if len(workflow.Settings) != 0 {
+		t.Fatalf("%s workflow settings = %#v, want present empty object", label, workflow.Settings)
 	}
 }
 
@@ -626,9 +651,61 @@ func assertN8NNodeTuples(t *testing.T, nodes map[string]n8nWorkflowNode, label s
 func assertN8NNodesHaveNoErrorOverrides(t *testing.T, nodes []n8nWorkflowNode, label string) {
 	t.Helper()
 
+	if err := validateN8NNodesHaveNoErrorOverrides(nodes); err != nil {
+		t.Fatalf("%s: %v", label, err)
+	}
+}
+
+func validateN8NNodesHaveNoErrorOverrides(nodes []n8nWorkflowNode) error {
 	for _, node := range nodes {
-		if len(node.ContinueOnFail) != 0 || len(node.OnError) != 0 {
-			t.Fatalf("%s node %q overrides failure propagation: continueOnFail=%s onError=%s", label, node.Name, node.ContinueOnFail, node.OnError)
+		fields := []struct {
+			name  string
+			value json.RawMessage
+		}{
+			{name: "alwaysOutputData", value: node.AlwaysOutputData},
+			{name: "continueOnFail", value: node.ContinueOnFail},
+			{name: "onError", value: node.OnError},
+			{name: "retryOnFail", value: node.RetryOnFail},
+		}
+		for _, field := range fields {
+			if len(field.value) != 0 {
+				return fmt.Errorf("node %q overrides failure propagation via %s=%s", node.Name, field.name, field.value)
+			}
+		}
+	}
+	return nil
+}
+
+func assertN8NErrorOverrideMutationResistance(t *testing.T, workflow n8nWorkflow) {
+	t.Helper()
+
+	mutations := map[string]func(*n8nWorkflowNode){
+		"alwaysOutputData": func(node *n8nWorkflowNode) { node.AlwaysOutputData = json.RawMessage("true") },
+		"continueOnFail":   func(node *n8nWorkflowNode) { node.ContinueOnFail = json.RawMessage("true") },
+		"onError":          func(node *n8nWorkflowNode) { node.OnError = json.RawMessage(`"continueRegularOutput"`) },
+		"retryOnFail":      func(node *n8nWorkflowNode) { node.RetryOnFail = json.RawMessage("true") },
+	}
+	for name, mutate := range mutations {
+		t.Run("rejects "+name, func(t *testing.T) {
+			mutatedNodes := append([]n8nWorkflowNode(nil), workflow.Nodes...)
+			mutate(&mutatedNodes[0])
+			err := validateN8NNodesHaveNoErrorOverrides(mutatedNodes)
+			if err == nil {
+				t.Fatalf("workflow with %s unexpectedly satisfied the no-error-override contract", name)
+			}
+			if !strings.Contains(err.Error(), name) {
+				t.Fatalf("workflow with %s failed for the wrong field: %v", name, err)
+			}
+		})
+	}
+}
+
+func assertN8NNodesHaveNoCredentials(t *testing.T, nodes []n8nWorkflowNode, label string) {
+	t.Helper()
+
+	for _, node := range nodes {
+		if len(node.Credentials) != 0 {
+			t.Fatalf("%s node %q credentials = %s, want field absent", label, node.Name, node.Credentials)
 		}
 	}
 }
