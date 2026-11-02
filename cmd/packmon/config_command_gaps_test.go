@@ -163,14 +163,26 @@ func TestConfigValidateUsesDefaultPathAndReturnsLoadErrors(t *testing.T) {
 }
 
 func TestEffectiveConfigShowSettingsAcceptsNilConfigAndRejectsNonpositiveTimeouts(t *testing.T) {
-	isolateCLIConfigDiscovery(t)
+	isolateConfigShowInputs(t)
 
 	settings, err := effectiveConfigShowSettings(nil)
 	if err != nil {
 		t.Fatalf("effectiveConfigShowSettings(nil): %v", err)
 	}
-	if settings.Mode != "auto" || settings.Timeout != 30 || !settings.SendRepoMetadata {
-		t.Fatalf("nil config settings = %+v, want defaults", settings)
+	modeMatches := settings.Mode == "auto"
+	timeoutMatches := settings.Timeout == 30
+	metadataMatches := settings.SendRepoMetadata
+	apiKeyEmpty := settings.APIKey == ""
+	webhookSecretEmpty := settings.WebhookSecret == ""
+	if !modeMatches || !timeoutMatches || !metadataMatches || !apiKeyEmpty || !webhookSecretEmpty {
+		t.Fatalf(
+			"nil config defaults: mode_matches=%t timeout_matches=%t metadata_matches=%t api_key_empty=%t webhook_secret_empty=%t",
+			modeMatches,
+			timeoutMatches,
+			metadataMatches,
+			apiKeyEmpty,
+			webhookSecretEmpty,
+		)
 	}
 
 	for _, value := range []string{"0", "-1"} {
@@ -206,7 +218,7 @@ func TestConfiguredAPIKeyEnvVarsDeduplicatesAndHandlesNil(t *testing.T) {
 }
 
 func TestConfigShowPathSelectionPrefersLocalFileThenGlobalConfigFlag(t *testing.T) {
-	isolateCLIConfigDiscovery(t)
+	isolateConfigShowInputs(t)
 	globalPath := filepath.Join(t.TempDir(), "global.yaml")
 	localPath := filepath.Join(t.TempDir(), "local.yaml")
 	for path, mode := range map[string]string{globalPath: "local", localPath: "remote"} {
@@ -222,8 +234,10 @@ func TestConfigShowPathSelectionPrefersLocalFileThenGlobalConfigFlag(t *testing.
 			t.Fatalf("config show with global --config fallback: %v", err)
 		}
 	})
-	if !strings.Contains(output, "config_file:  "+globalPath) || !strings.Contains(output, "mode:         local") {
-		t.Fatalf("global config fallback output = %q", output)
+	globalPathMatches := strings.Contains(output, "config_file:  "+globalPath)
+	globalModeMatches := strings.Contains(output, "mode:         local")
+	if !globalPathMatches || !globalModeMatches {
+		t.Fatalf("global config fallback: path_matches=%t mode_matches=%t", globalPathMatches, globalModeMatches)
 	}
 
 	cmd = newConfigShowCmd()
@@ -233,8 +247,34 @@ func TestConfigShowPathSelectionPrefersLocalFileThenGlobalConfigFlag(t *testing.
 			t.Fatalf("config show with local --file: %v", err)
 		}
 	})
-	if !strings.Contains(output, "config_file:  "+localPath) || !strings.Contains(output, "mode:         remote") {
-		t.Fatalf("local file precedence output = %q", output)
+	localPathMatches := strings.Contains(output, "config_file:  "+localPath)
+	localModeMatches := strings.Contains(output, "mode:         remote")
+	if !localPathMatches || !localModeMatches {
+		t.Fatalf("local file precedence: path_matches=%t mode_matches=%t", localPathMatches, localModeMatches)
+	}
+}
+
+func isolateConfigShowInputs(t *testing.T) {
+	t.Helper()
+	isolateCLIConfigDiscovery(t)
+
+	for _, key := range []string{
+		"PACKMON_SERVER",
+		"PACKMON_API_KEY",
+		"PACKMON_MODE",
+		"PACKMON_FAIL_ON",
+		"PACKMON_TIMEOUT",
+		"PACKMON_ECOSYSTEMS",
+		"PACKMON_NO_REPO_METADATA",
+		clientCACertFileEnv,
+		clientCACertLegacyFileEnv,
+		"PACKMON_INSECURE_ALLOW_HTTP",
+		"PACKMON_REQUIRE_REMOTE",
+		"PACKMON_WEBHOOK_URL",
+		"PACKMON_WEBHOOK_SECRET",
+		"PACKMON_DB_PATH",
+	} {
+		t.Setenv(key, "")
 	}
 }
 
