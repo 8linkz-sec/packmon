@@ -127,3 +127,21 @@ func TestRejectSecretFlagValueRedactsMalformedCompatibilityEnvironment(t *testin
 		}
 	}
 }
+
+func TestRejectSecretFlagValueIgnoresUnchangedNonemptyFlagBeforeCompatibilityParsing(t *testing.T) {
+	const invalidCompatibilityValue = "invalid-compatibility-sentinel"
+	t.Setenv(allowSecretFlagsEnv, invalidCompatibilityValue)
+
+	cmd := &cobra.Command{Use: "test"}
+	cmd.Flags().String("token", "nonempty-default-secret-sentinel", "test-only secret flag")
+	if cmd.Flags().Changed("token") {
+		t.Fatal("token flag unexpectedly marked changed")
+	}
+
+	if err := rejectSecretFlagValue(cmd, "token", "PACKMON_TOKEN"); err != nil {
+		if strings.Contains(err.Error(), invalidCompatibilityValue) || strings.Contains(err.Error(), "nonempty-default-secret-sentinel") {
+			t.Fatalf("rejectSecretFlagValue() disclosed unparsed values: %v", err)
+		}
+		t.Fatalf("rejectSecretFlagValue() error = %v, want unchanged flag to return before value/environment parsing", err)
+	}
+}
