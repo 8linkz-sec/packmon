@@ -16,18 +16,23 @@ import (
 type startupAuditRepairStub struct {
 	auditedCalled   bool
 	unauditedCalled bool
+	auditedCalls    int
+	unauditedCalls  int
 	audit           *db.AdminAuditEntry
+	auditedErr      error
 }
 
 func (s *startupAuditRepairStub) RepairCaseInsensitivePackageNames(context.Context) (int, error) {
 	s.unauditedCalled = true
+	s.unauditedCalls++
 	return 0, nil
 }
 
 func (s *startupAuditRepairStub) RepairCaseInsensitivePackageNamesWithAudit(_ context.Context, audit *db.AdminAuditEntry) (int, error) {
 	s.auditedCalled = true
+	s.auditedCalls++
 	s.audit = audit
-	return 7, nil
+	return 7, s.auditedErr
 }
 
 func TestRunStartupRepairs_UsesAuditedPackageNameRepairWhenSupported(t *testing.T) {
@@ -68,6 +73,7 @@ type startupRepairStub struct {
 	namesRepaired      int
 	namesErr           error
 	namesCalled        bool
+	namesCalls         int
 }
 
 func (s *startupRepairStub) RepairGHSAAffectedPackages(context.Context) (int, error) {
@@ -82,6 +88,7 @@ func (s *startupRepairStub) RemovePacketStormReferences(context.Context) (int, e
 
 func (s *startupRepairStub) RepairCaseInsensitivePackageNames(context.Context) (int, error) {
 	s.namesCalled = true
+	s.namesCalls++
 	return s.namesRepaired, s.namesErr
 }
 
@@ -231,5 +238,149 @@ func TestRunStartupRepairsWithTimeoutNormalizesNilContextAndDefaultTimeout(t *te
 	}
 	if remaining := deadline.Sub(before); remaining < startupRepairTimeout-time.Second || remaining > startupRepairTimeout+time.Second {
 		t.Fatalf("repair deadline remaining = %v, want approximately %v", remaining, startupRepairTimeout)
+	}
+}
+
+func TestRunStartupRepairsWithTimeoutDefaultsNegativeTimeout(t *testing.T) {
+	t.Parallel()
+
+	store := &startupRepairContextCapture{}
+	before := time.Now().Add(startupRepairTimeout)
+	runStartupRepairsWithTimeout(context.Background(), store, nil, -time.Second)
+	after := time.Now().Add(startupRepairTimeout)
+
+	if store.ctx == nil {
+		t.Fatal("repair received a nil context")
+	}
+	deadline, ok := store.ctx.Deadline()
+	if !ok {
+		t.Fatal("repair context had no deadline")
+	}
+	if deadline.Before(before) || deadline.After(after) {
+		t.Fatalf("repair deadline = %v, want within [%v, %v]", deadline, before, after)
+	}
+}
+
+func TestRunPackageNameStartupRepairStructuredLogs(t *testing.T) {
+	t.Parallel()
+
+	t.Run("success", func(t *testing.T) {
+		t.Parallel()
+
+		var logs bytes.Buffer
+		logger := slog.New(slog.NewJSONHandler(&logs, nil))
+		runPackageNameStartupRepair(context.Background(), time.Second, logger, func(context.Context) (int, error) {
+			return 4, nil
+		})
+
+		var record map[string]any
+		if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
+			t.Fatalf("decode success log: %v; log = %q", err, logs.String())
+		}
+		if record["level"] != "INFO" {
+			t.Fatalf("level = %v, want INFO", record["level"])
+		}
+		if record["msg"] != "startup repair: normalized package names" {
+			t.Fatalf("msg = %v, want normalized-package success message", record["msg"])
+		}
+		if record["repaired"] != float64(4) {
+			t.Fatalf("repaired = %v, want 4", record["repaired"])
+		}
+		if _, ok := record["error"]; ok {
+			t.Fatalf("success log unexpectedly has error field: %v", record["error"])
+		}
+	})
+
+	t.Run("failure", func(t *testing.T) {
+		t.Parallel()
+
+		var logs bytes.Buffer
+		logger := slog.New(slog.NewJSONHandler(&logs, nil))
+		longError := errors.New(strings.Repeat("x", errorLogMaxBytes*2))
+		runPackageNameStartupRepair(context.Background(), time.Second, logger, func(context.Context) (int, error) {
+			return 9, longError
+		})
+
+		var record map[string]any
+		if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
+			t.Fatalf("decode failure log: %v; log = %q", err, logs.String())
+		}
+		if record["level"] != "WARN" {
+			t.Fatalf("level = %v, want WARN", record["level"])
+		}
+		if record["msg"] != "startup repair: failed to normalize package names" {
+			t.Fatalf("msg = %v, want package-name failure message", record["msg"])
+		}
+		if _, ok := record["repaired"]; ok {
+			t.Fatalf("failure log unexpectedly has repaired field: %v", record["repaired"])
+		}
+		loggedError, ok := record["error"].(string)
+		if !ok {
+			t.Fatalf("error = %T(%v), want string", record["error"], record["error"])
+		}
+		if len(loggedError) > errorLogMaxBytes {
+			t.Fatalf("logged error length = %d, want at most %d bytes", len(loggedError), errorLogMaxBytes)
+		}
+		if !strings.HasSuffix(loggedError, "...[truncated]") {
+			t.Fatalf("logged error = %q, want truncation marker", loggedError)
+		}
+	})
+}
+
+func TestRunStartupRepairsWithNilLogger(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{name: "success"},
+		{name: "failure", err: errors.New("repair failed")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := &startupRepairStub{namesErr: tc.err}
+			runStartupRepairs(context.Background(), store, nil)
+			if store.namesCalls != 1 {
+				t.Fatalf("repair callbacks = %d, want exactly one", store.namesCalls)
+			}
+		})
+	}
+}
+
+func TestRunStartupRepairsAuditedFailureDoesNotFallback(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	store := &startupAuditRepairStub{auditedErr: errors.New("audited repair failed")}
+	runStartupRepairs(context.Background(), store, slog.New(slog.NewJSONHandler(&logs, nil)))
+
+	if store.auditedCalls != 1 {
+		t.Fatalf("audited repair callbacks = %d, want exactly one", store.auditedCalls)
+	}
+	if store.unauditedCalls != 0 {
+		t.Fatalf("unaudited repair callbacks = %d, want none", store.unauditedCalls)
+	}
+	if store.audit == nil {
+		t.Fatal("audited repair received no audit entry")
+	}
+	if store.audit.Action != "startup_package_name_repair" {
+		t.Fatalf("audit action = %q, want startup_package_name_repair", store.audit.Action)
+	}
+	var details map[string]string
+	if err := json.Unmarshal(store.audit.Details, &details); err != nil {
+		t.Fatalf("audit details are invalid JSON: %v", err)
+	}
+	if details["repair"] != "case_insensitive_package_names" {
+		t.Fatalf("audit repair detail = %q, want case_insensitive_package_names", details["repair"])
+	}
+
+	var record map[string]any
+	if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
+		t.Fatalf("decode failure log: %v; log = %q", err, logs.String())
+	}
+	if record["level"] != "WARN" {
+		t.Fatalf("level = %v, want WARN", record["level"])
 	}
 }

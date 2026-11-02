@@ -20,21 +20,25 @@ type recordingBootstrapStore struct {
 	record       *db.AdminAuth
 	getErr       error
 	upsertErr    error
+	getCtx       context.Context
+	upsertCtx    context.Context
 	passwordHash string
 	isBootstrap  bool
 	audit        *db.AdminAuditEntry
 	upserts      int
 }
 
-func (s *recordingBootstrapStore) GetAdminAuth(context.Context) (*db.AdminAuth, error) {
+func (s *recordingBootstrapStore) GetAdminAuth(ctx context.Context) (*db.AdminAuth, error) {
+	s.getCtx = ctx
 	if s.getErr != nil {
 		return nil, s.getErr
 	}
 	return s.record, nil
 }
 
-func (s *recordingBootstrapStore) UpsertAdminAuthWithAudit(_ context.Context, passwordHash string, isBootstrap bool, audit *db.AdminAuditEntry) error {
+func (s *recordingBootstrapStore) UpsertAdminAuthWithAudit(ctx context.Context, passwordHash string, isBootstrap bool, audit *db.AdminAuditEntry) error {
 	s.upserts++
+	s.upsertCtx = ctx
 	s.passwordHash, s.isBootstrap, s.audit = passwordHash, isBootstrap, audit
 	return s.upsertErr
 }
@@ -182,6 +186,64 @@ func TestAdminBootstrapStoreAdapterPropagatesWriteErrors(t *testing.T) {
 	)
 	if !errors.Is(err, writeErr) {
 		t.Fatalf("error = %v, want the write failure", err)
+	}
+}
+
+func TestAdminBootstrapStoreAdapterForwardsCallerContext(t *testing.T) {
+	t.Parallel()
+
+	t.Run("read", func(t *testing.T) {
+		t.Parallel()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		store := &recordingBootstrapStore{}
+
+		if _, err := newAdminBootstrapStore(store).GetAdminBootstrapAuth(ctx); err != nil {
+			t.Fatalf("GetAdminBootstrapAuth: %v", err)
+		}
+		if store.getCtx != ctx {
+			t.Fatal("GetAdminBootstrapAuth did not forward the caller context instance")
+		}
+		if !errors.Is(store.getCtx.Err(), context.Canceled) {
+			t.Fatalf("forwarded read context error = %v, want context canceled", store.getCtx.Err())
+		}
+	})
+
+	t.Run("write", func(t *testing.T) {
+		t.Parallel()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		store := &recordingBootstrapStore{}
+
+		if err := newAdminBootstrapStore(store).UpsertAdminBootstrapAuthWithAudit(ctx, "hash", false, nil); err != nil {
+			t.Fatalf("UpsertAdminBootstrapAuthWithAudit: %v", err)
+		}
+		if store.upsertCtx != ctx {
+			t.Fatal("UpsertAdminBootstrapAuthWithAudit did not forward the caller context instance")
+		}
+		if !errors.Is(store.upsertCtx.Err(), context.Canceled) {
+			t.Fatalf("forwarded write context error = %v, want context canceled", store.upsertCtx.Err())
+		}
+	})
+}
+
+func TestAdminBootstrapStoreAdapterForwardsNilAuditOnce(t *testing.T) {
+	t.Parallel()
+
+	store := &recordingBootstrapStore{}
+	if err := newAdminBootstrapStore(store).UpsertAdminBootstrapAuthWithAudit(
+		context.Background(), testAdminPasswordHash, false, nil,
+	); err != nil {
+		t.Fatalf("UpsertAdminBootstrapAuthWithAudit: %v", err)
+	}
+
+	if store.upserts != 1 {
+		t.Fatalf("audited upserts = %d, want exactly one", store.upserts)
+	}
+	if store.audit != nil {
+		t.Fatalf("forwarded audit = %+v, want nil", store.audit)
 	}
 }
 
