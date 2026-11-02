@@ -1,6 +1,9 @@
 package auth
 
 import (
+	"bytes"
+	"encoding/hex"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -24,6 +27,13 @@ func TestCSRFTokenGeneratesNonEmptyToken(t *testing.T) {
 	// Token should be 64 hex characters (32 bytes).
 	if len(token) != 64 {
 		t.Fatalf("token length = %d, want 64", len(token))
+	}
+	decoded, err := hex.DecodeString(token)
+	if err != nil {
+		t.Fatalf("token is not valid hex: %v", err)
+	}
+	if len(decoded) != 32 {
+		t.Fatalf("decoded token length = %d bytes, want 32", len(decoded))
 	}
 }
 
@@ -162,6 +172,113 @@ func TestValidateCSRFFailsWithWrongToken(t *testing.T) {
 
 	if ValidateCSRF(req, sess) {
 		t.Fatal("ValidateCSRF returned true for wrong token")
+	}
+}
+
+func TestValidateCSRFRejectsEqualLengthAndCrossSessionTokens(t *testing.T) {
+	t.Parallel()
+
+	sess := &Session{ID: "session-1"}
+	token, err := CSRFToken(sess)
+	if err != nil {
+		t.Fatalf("CSRFToken(session-1) returned error: %v", err)
+	}
+	other := &Session{ID: "session-2"}
+	otherToken, err := CSRFToken(other)
+	if err != nil {
+		t.Fatalf("CSRFToken(session-2) returned error: %v", err)
+	}
+
+	equalLengthMismatch := token[:len(token)-1] + "0"
+	if equalLengthMismatch == token {
+		equalLengthMismatch = token[:len(token)-1] + "1"
+	}
+	for label, submitted := range map[string]string{
+		"equal-length mismatch": equalLengthMismatch,
+		"cross-session token":   otherToken,
+	} {
+		form := url.Values{CSRFFieldName: {submitted}}
+		req := httptest.NewRequest(http.MethodPost, "/admin/action", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		if ValidateCSRF(req, sess) {
+			t.Fatalf("ValidateCSRF accepted %s", label)
+		}
+	}
+}
+
+func TestValidateCSRFRequestSourcePrecedence(t *testing.T) {
+	t.Parallel()
+
+	sess := &Session{ID: "source-precedence"}
+	token, err := CSRFToken(sess)
+	if err != nil {
+		t.Fatalf("CSRFToken returned error: %v", err)
+	}
+	wrong := token[:len(token)-1] + "0"
+	if wrong == token {
+		wrong = token[:len(token)-1] + "1"
+	}
+
+	tests := []struct {
+		name        string
+		encoding    string
+		queryValues []string
+		bodyValues  []string
+		want        bool
+	}{
+		{name: "query only", queryValues: []string{token}, want: true},
+		{name: "urlencoded body only", encoding: "urlencoded", bodyValues: []string{token}, want: true},
+		{name: "urlencoded body precedes query", encoding: "urlencoded", queryValues: []string{wrong}, bodyValues: []string{token}, want: true},
+		{name: "urlencoded invalid body masks query", encoding: "urlencoded", queryValues: []string{token}, bodyValues: []string{wrong}},
+		{name: "urlencoded first duplicate wins", encoding: "urlencoded", bodyValues: []string{token, wrong}, want: true},
+		{name: "urlencoded later duplicate does not win", encoding: "urlencoded", bodyValues: []string{wrong, token}},
+		{name: "multipart query precedes body", encoding: "multipart", queryValues: []string{token}, bodyValues: []string{wrong}, want: true},
+		{name: "multipart body does not mask query", encoding: "multipart", queryValues: []string{wrong}, bodyValues: []string{token}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			query := url.Values{}
+			for _, value := range tt.queryValues {
+				query.Add(CSRFFieldName, value)
+			}
+			target := "/admin/action"
+			if encoded := query.Encode(); encoded != "" {
+				target += "?" + encoded
+			}
+
+			var req *http.Request
+			switch tt.encoding {
+			case "":
+				req = httptest.NewRequest(http.MethodPost, target, nil)
+			case "urlencoded":
+				body := url.Values{}
+				for _, value := range tt.bodyValues {
+					body.Add(CSRFFieldName, value)
+				}
+				req = httptest.NewRequest(http.MethodPost, target, strings.NewReader(body.Encode()))
+				req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			case "multipart":
+				var body bytes.Buffer
+				writer := multipart.NewWriter(&body)
+				for _, value := range tt.bodyValues {
+					if err := writer.WriteField(CSRFFieldName, value); err != nil {
+						t.Fatalf("WriteField() error = %v", err)
+					}
+				}
+				if err := writer.Close(); err != nil {
+					t.Fatalf("multipart writer Close() error = %v", err)
+				}
+				req = httptest.NewRequest(http.MethodPost, target, &body)
+				req.Header.Set("Content-Type", writer.FormDataContentType())
+			default:
+				t.Fatalf("unknown test encoding %q", tt.encoding)
+			}
+
+			if got := ValidateCSRF(req, sess); got != tt.want {
+				t.Fatalf("ValidateCSRF() = %t, want %t", got, tt.want)
+			}
+		})
 	}
 }
 

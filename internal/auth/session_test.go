@@ -547,6 +547,94 @@ func TestNewSessionManagerWithIdleTimeoutDefaultsMaxAge(t *testing.T) {
 	t.Fatal("no session cookie found")
 }
 
+func TestNewSessionManagerWithIdleTimeoutDefaultsNonPositiveIdleTimeout(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name        string
+		idleTimeout time.Duration
+	}{
+		{name: "zero", idleTimeout: 0},
+		{name: "negative", idleTimeout: -time.Second},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			sm := NewSessionManagerWithIdleTimeout(context.Background(), time.Hour, tt.idleTimeout, false)
+			if sm.idleTimeout != DefaultAdminIdleTimeout {
+				t.Fatalf("idle timeout = %v, want default %v", sm.idleTimeout, DefaultAdminIdleTimeout)
+			}
+		})
+	}
+}
+
+func TestCloneSessionHandlesNilCSRFAndCopiesFlash(t *testing.T) {
+	t.Parallel()
+
+	if got := cloneSession(nil); got != nil {
+		t.Fatalf("cloneSession(nil) = %+v, want nil", got)
+	}
+
+	original := &Session{ID: "original"}
+	clone := cloneSession(original)
+	if clone == nil {
+		t.Fatal("cloneSession(original) returned nil")
+	}
+	if original.csrf != nil {
+		t.Fatal("cloneSession initialized CSRF state on the source session")
+	}
+	if clone.csrf == nil {
+		t.Fatal("cloneSession left cloned CSRF state nil")
+	}
+	if _, err := CSRFToken(clone); err != nil {
+		t.Fatalf("CSRFToken(clone) error = %v", err)
+	}
+	if original.csrf != nil {
+		t.Fatal("CSRFToken(clone) mutated the source session's nil CSRF state")
+	}
+
+	sm := newTestSessionManager(time.Hour)
+	managed, managedID := createSession(t, sm)
+	sm.SetFlash(managed.ID, "notice", "original value")
+	managedClone := sm.Get(requestWithSession(managedID))
+	if managedClone == nil || managedClone.flash == nil {
+		t.Fatalf("Get() clone = %+v, want copied flash map", managedClone)
+	}
+	managedClone.flash["notice"] = "changed on clone"
+	managedClone.flash["extra"] = "clone only"
+	if got := sm.PeekFlash(managed.ID, "notice"); got != "original value" {
+		t.Fatalf("manager flash value = %q, want original value", got)
+	}
+	if got := sm.PeekFlash(managed.ID, "extra"); got != "" {
+		t.Fatalf("manager flash contains clone-only value %q", got)
+	}
+}
+
+func TestSessionCleanupStopsPromptlyWhenContextIsCancelled(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sm := &SessionManager{sessions: make(map[string]*Session)}
+	started := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		close(started)
+		sm.cleanup(ctx)
+		close(done)
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("cleanup goroutine did not start within one second")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("cleanup goroutine did not stop within one second of cancellation")
+	}
+}
+
 func TestCSRFTokenIsSetOnSession(t *testing.T) {
 	t.Parallel()
 
