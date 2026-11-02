@@ -225,6 +225,48 @@ func TestMakeLintRunsTagAwareGolangCIGate(t *testing.T) {
 	})
 }
 
+func TestTaggedTestPackagesIgnoreUntrackedIgnoredCopies(t *testing.T) {
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("resolve repository root: %v", err)
+	}
+	ignoredRoot := filepath.Join(root, ".gotmp")
+	if err := os.MkdirAll(ignoredRoot, 0o750); err != nil {
+		t.Fatalf("create ignored test root: %v", err)
+	}
+	fixtureDir, err := os.MkdirTemp(ignoredRoot, "tagged-inventory-")
+	if err != nil {
+		t.Fatalf("create ignored tagged-test copy: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(fixtureDir); err != nil {
+			t.Errorf("remove ignored tagged-test copy: %v", err)
+		}
+	})
+
+	fixturePath := filepath.Join(fixtureDir, "linux-source", "tests", "integration", "copied_test.go")
+	if err := os.MkdirAll(filepath.Dir(fixturePath), 0o750); err != nil {
+		t.Fatalf("create ignored tagged-test package: %v", err)
+	}
+	if err := os.WriteFile(fixturePath, []byte("//go:build integration\n\npackage integration\n"), 0o600); err != nil { //nolint:gosec // test-owned ignored fixture.
+		t.Fatalf("write ignored tagged-test copy: %v", err)
+	}
+	rel, err := filepath.Rel(root, fixturePath)
+	if err != nil {
+		t.Fatalf("resolve ignored tagged-test path: %v", err)
+	}
+	ignoreCmd := exec.Command("git", "check-ignore", "--quiet", "--", filepath.ToSlash(rel))
+	ignoreCmd.Dir = root
+	if err := ignoreCmd.Run(); err != nil {
+		t.Fatalf("fixture %s is not ignored by Git: %v", filepath.ToSlash(rel), err)
+	}
+
+	ignoredPackage := "./" + filepath.ToSlash(filepath.Dir(rel))
+	if packages := taggedTestPackages(t, "integration", "e2e"); slices.Contains(packages, ignoredPackage) {
+		t.Fatalf("tagged package inventory includes ignored untracked copy %q: %q", ignoredPackage, packages)
+	}
+}
+
 func TestParallelMakeTargetsSerializeNPMCI(t *testing.T) {
 	makeBin := requireGNMake(t)
 	fixture := newMakeFixture(t, makeBin, "checkout")
@@ -751,44 +793,39 @@ func taggedTestPackages(t *testing.T, tags ...string) []string {
 	if err != nil {
 		t.Fatalf("resolve repository root: %v", err)
 	}
+	cmd := exec.Command("git", "ls-files", "-z", "--", "*_test.go")
+	cmd.Dir = root
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("list tracked Go test files: %v", err)
+	}
 	packages := make(map[string]bool)
-	err = filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
+	for _, rel := range strings.Split(string(output), "\x00") {
+		if rel == "" {
+			continue
 		}
-		if entry.IsDir() {
-			if entry.Name() == ".git" || entry.Name() == "node_modules" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !strings.HasSuffix(entry.Name(), "_test.go") {
-			return nil
-		}
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		name := filepath.Base(path)
 		expr, ok, parseErr := testFileBuildConstraint(path)
 		if parseErr != nil {
-			return parseErr
+			t.Fatalf("parse tracked test constraint %s: %v", rel, parseErr)
 		}
 		if !ok || !mentionsAnyBuildTag(expr, tags) {
-			return nil
+			continue
 		}
 		context := build.Default
 		context.BuildTags = slices.Clone(tags)
-		matched, matchErr := context.MatchFile(filepath.Dir(path), entry.Name())
+		matched, matchErr := context.MatchFile(filepath.Dir(path), name)
 		if matchErr != nil {
-			return matchErr
+			t.Fatalf("match tracked test file %s: %v", rel, matchErr)
 		}
 		if matched {
-			rel, relErr := filepath.Rel(root, filepath.Dir(path))
+			packageDir, relErr := filepath.Rel(root, filepath.Dir(path))
 			if relErr != nil {
-				return relErr
+				t.Fatalf("resolve tracked test package %s: %v", rel, relErr)
 			}
-			packages["./"+filepath.ToSlash(rel)] = true
+			packages["./"+filepath.ToSlash(packageDir)] = true
 		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("derive %s-tagged packages: %v", strings.Join(tags, ","), err)
 	}
 	result := make([]string, 0, len(packages))
 	for pkg := range packages {
