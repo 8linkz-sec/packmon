@@ -178,6 +178,29 @@ func TestDiscoverFilesWithWarningsHonorsDepthAndDirectoryExclusions(t *testing.T
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("discovered files = %v, want %v", got, want)
 	}
+
+	wantCallbackError := map[string]error{
+		".hidden":      fs.SkipDir,
+		"node_modules": fs.SkipDir,
+		"vendor":       fs.SkipDir,
+		"__pycache__":  fs.SkipDir,
+		".github":      nil,
+		"src":          nil,
+	}
+	withFakeWalk(t, func(walkRoot string, fn fs.WalkDirFunc) error {
+		for name, wantErr := range wantCallbackError {
+			gotErr := fn(filepath.Join(walkRoot, name), fakeDirEntry{name: name, dir: true}, nil)
+			if !errors.Is(gotErr, wantErr) || (wantErr == nil && gotErr != nil) {
+				t.Errorf("walk callback for %q = %v, want %v", name, gotErr, wantErr)
+			}
+		}
+		return nil
+	})
+
+	files, warnings, err = DiscoverFilesWithWarnings(root, 5)
+	if err != nil || len(files) != 0 || len(warnings) != 0 {
+		t.Fatalf("hooked DiscoverFilesWithWarnings() = (%v, %v, %v), want empty success", files, warnings, err)
+	}
 }
 
 func TestDiscoverFilesWithWarningsRejectsFileRoot(t *testing.T) {
@@ -203,7 +226,7 @@ func TestDiscoverFilesWithWarningsRejectsMissingRoot(t *testing.T) {
 	}
 }
 
-func TestCleanRelPathBoundaries(t *testing.T) {
+func TestCleanRelPathAcceptsLocalAndRejectsUnsafePaths(t *testing.T) {
 	t.Parallel()
 
 	absolute := filepath.Join(t.TempDir(), "absolute.ps1")
@@ -237,7 +260,7 @@ func TestCleanRelPathBoundaries(t *testing.T) {
 	}
 }
 
-func TestDiscoverFilesWithWarningsHandlesCrossVolumePath(t *testing.T) {
+func TestDiscoverFilesWithWarningsReportsCrossVolumeCallbackFailure(t *testing.T) {
 	// not parallel: swaps the package-level walk hook
 	if runtime.GOOS != "windows" {
 		t.Skip("cross-volume filepath.Rel failure is Windows-specific")
@@ -275,33 +298,6 @@ func TestDiscoverFilesWithWarningsHandlesCrossVolumePath(t *testing.T) {
 	}
 }
 
-func TestDiscoverFilesWithWarningsSignalsDirectoryExclusions(t *testing.T) {
-	// not parallel: swaps the package-level walk hook
-	root := t.TempDir()
-	want := map[string]error{
-		".hidden":      fs.SkipDir,
-		"node_modules": fs.SkipDir,
-		"vendor":       fs.SkipDir,
-		"__pycache__":  fs.SkipDir,
-		".github":      nil,
-		"src":          nil,
-	}
-	withFakeWalk(t, func(walkRoot string, fn fs.WalkDirFunc) error {
-		for name, wantErr := range want {
-			gotErr := fn(filepath.Join(walkRoot, name), fakeDirEntry{name: name, dir: true}, nil)
-			if !errors.Is(gotErr, wantErr) || (wantErr == nil && gotErr != nil) {
-				t.Errorf("walk callback for %q = %v, want %v", name, gotErr, wantErr)
-			}
-		}
-		return nil
-	})
-
-	files, warnings, err := DiscoverFilesWithWarnings(root, 5)
-	if err != nil || len(files) != 0 || len(warnings) != 0 {
-		t.Fatalf("DiscoverFilesWithWarnings() = (%v, %v, %v), want empty success", files, warnings, err)
-	}
-}
-
 func TestDiscoverFilesWithWarningsHonorsZeroDepth(t *testing.T) {
 	t.Parallel()
 
@@ -321,7 +317,7 @@ func TestDiscoverFilesWithWarningsHonorsZeroDepth(t *testing.T) {
 	}
 }
 
-func TestDiscoverFilesWithWarningsReturnsPartialResultsWithWalkerError(t *testing.T) {
+func TestDiscoverFilesWithWarningsPreservesPartialResultsAndWalkerError(t *testing.T) {
 	// not parallel: swaps the package-level walk hook
 	root := t.TempDir()
 	walkErr := errors.New("walker stopped")
@@ -347,7 +343,7 @@ func TestDiscoverFilesWithWarningsReturnsPartialResultsWithWalkerError(t *testin
 	}
 }
 
-func TestDiscoverFilesWithWarningsAllowsExplicitGitHubRoot(t *testing.T) {
+func TestDiscoverFilesWithWarningsScansExplicitGitHubRoot(t *testing.T) {
 	t.Parallel()
 
 	root := filepath.Join(t.TempDir(), ".github")

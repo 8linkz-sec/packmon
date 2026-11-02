@@ -281,7 +281,7 @@ func TestCollectReturnsDiscoveryErrorForMissingRoot(t *testing.T) {
 	}
 }
 
-func TestCollectRejectsFileRoot(t *testing.T) {
+func TestCollectReturnsDiscoveryErrorForFileRoot(t *testing.T) {
 	t.Parallel()
 
 	root := filepath.Join(t.TempDir(), "inventory.ps1")
@@ -296,7 +296,7 @@ func TestCollectRejectsFileRoot(t *testing.T) {
 	}
 }
 
-func TestCollectFailsWhenRootDisappearsAfterDiscovery(t *testing.T) {
+func TestCollectReturnsRootOpenErrorAfterDiscovery(t *testing.T) {
 	// not parallel: swaps the package-level walk hook
 	root := t.TempDir()
 	withFakeWalk(t, func(walkRoot string, _ fs.WalkDirFunc) error {
@@ -315,7 +315,7 @@ func TestCollectFailsWhenRootDisappearsAfterDiscovery(t *testing.T) {
 	}
 }
 
-func TestParseFileFromRootSkipsNonRegularFiles(t *testing.T) {
+func TestParseFileFromRootSkipsNonRegularInput(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -337,7 +337,7 @@ func TestParseFileFromRootSkipsNonRegularFiles(t *testing.T) {
 	}
 }
 
-func TestDedupPackagesMergesFlagsWithinIdentity(t *testing.T) {
+func TestDedupPackagesPreservesIdentityAndMergesFlags(t *testing.T) {
 	t.Parallel()
 
 	packages := []Package{
@@ -362,7 +362,7 @@ func TestDedupPackagesMergesFlagsWithinIdentity(t *testing.T) {
 	}
 }
 
-func TestCollectContinuesAfterWarningsAndParseErrors(t *testing.T) {
+func TestCollectContinuesAfterParseErrorsAndRetainsDiscoveryWarnings(t *testing.T) {
 	// not parallel: swaps the package-level walk hook
 	dir := t.TempDir()
 	writeTestFile(t, filepath.Join(dir, "broken", "config.xml"), `<config><packages><package name="broken"`)
@@ -400,7 +400,7 @@ func TestCollectContinuesAfterWarningsAndParseErrors(t *testing.T) {
 	}
 }
 
-func TestCollectAcceptsInputsAtExactSizeLimits(t *testing.T) {
+func TestCollectAcceptsExactFileSizeLimits(t *testing.T) {
 	for _, tt := range []struct {
 		name        string
 		path        string
