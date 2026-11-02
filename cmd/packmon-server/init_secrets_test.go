@@ -71,6 +71,134 @@ func TestEnsureSecretsMirrorsDBPasswordOntoBlankPostgresPassword(t *testing.T) {
 	}
 }
 
+func TestInitSecretsFillsQuotedAndMissingSecretsWithoutReplacingNonEmptyValues(t *testing.T) {
+	dir := t.TempDir()
+	env := filepath.Join(dir, ".env")
+	const preservedEncryptionKey = "invalid-but-explicit-encryption-key"
+	if err := os.WriteFile(env, []byte(
+		"POSTGRES_PASSWORD=''\n"+
+			"PACKMON_ADMIN_INITIAL_PASSWORD=\"\"\n"+
+			"PACKMON_ENCRYPTION_KEY="+preservedEncryptionKey+"\n",
+	), 0o600); err != nil {
+		t.Fatalf("write fixture .env: %v", err)
+	}
+
+	var stdout, stderr strings.Builder
+	if err := initSecrets([]string{"--env", env}, &stdout, &stderr); err != nil {
+		t.Fatalf("initSecrets() error = %v", err)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("initSecrets() stderr = %q, want empty", stderr.String())
+	}
+	if got := stdout.String(); strings.Count(got, "\n") != 1 ||
+		!strings.HasPrefix(got, "init-secrets: 3 generated, 1 kept") ||
+		!strings.HasSuffix(strings.TrimSuffix(got, "\n"), env+" ready") {
+		t.Fatalf("initSecrets() stdout = %q, want one 3-generated/1-kept status line for %s", got, env)
+	}
+
+	data, err := os.ReadFile(env) //nolint:gosec // test reads a path built from t.TempDir().
+	if err != nil {
+		t.Fatalf("read completed .env: %v", err)
+	}
+	entries := envfile.Parse(data)
+	for _, spec := range config.RequiredSecrets() {
+		count := 0
+		for _, entry := range entries {
+			if entry.Key == spec.Key {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Fatalf("%s assignment count = %d, want 1", spec.Key, count)
+		}
+		value, ok := envfile.Value(entries, spec.Key)
+		if !ok || envfile.IsBlank(value) {
+			t.Fatalf("%s = %q, want one non-blank value", spec.Key, value)
+		}
+		if spec.Key != "PACKMON_ENCRYPTION_KEY" {
+			if err := spec.Validate(value); err != nil {
+				t.Fatalf("filled %s is invalid: %v", spec.Key, err)
+			}
+		}
+		if strings.Contains(stdout.String()+stderr.String(), value) {
+			t.Fatalf("init-secrets output leaks %s", spec.Key)
+		}
+	}
+	if value, _ := envfile.Value(entries, "PACKMON_ENCRYPTION_KEY"); value != preservedEncryptionKey {
+		t.Fatalf("PACKMON_ENCRYPTION_KEY = %q, want preserved explicit invalid value", value)
+	}
+	postgresPassword, _ := envfile.Value(entries, "POSTGRES_PASSWORD")
+	databasePassword, _ := envfile.Value(entries, "PACKMON_DB_PASSWORD")
+	if postgresPassword != databasePassword {
+		t.Fatal("missing PACKMON_DB_PASSWORD did not mirror the generated POSTGRES_PASSWORD")
+	}
+}
+
+func TestInitSecretsCreatesFreshFileWhenEnvironmentAndTemplateAreMissing(t *testing.T) {
+	dir := t.TempDir()
+	env := filepath.Join(dir, ".env")
+	example := filepath.Join(dir, ".env.example")
+
+	var stdout, stderr strings.Builder
+	if err := initSecrets([]string{"--env", env, "--example", example}, &stdout, &stderr); err != nil {
+		t.Fatalf("initSecrets() error = %v", err)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("initSecrets() stderr = %q, want empty", stderr.String())
+	}
+	if got := stdout.String(); strings.Count(got, "\n") != 1 ||
+		!strings.HasPrefix(got, "init-secrets: 4 generated, 0 kept") ||
+		!strings.HasSuffix(strings.TrimSuffix(got, "\n"), env+" ready") {
+		t.Fatalf("initSecrets() stdout = %q, want one 4-generated/0-kept status line for %s", got, env)
+	}
+
+	data, err := os.ReadFile(env) //nolint:gosec // test reads a path built from t.TempDir().
+	if err != nil {
+		t.Fatalf("read fresh .env: %v", err)
+	}
+	entries := envfile.Parse(data)
+	if len(entries) != len(config.RequiredSecrets()) {
+		t.Fatalf("fresh .env entry count = %d, want %d required secret assignments", len(entries), len(config.RequiredSecrets()))
+	}
+	uniqueGenerated := make(map[string]string)
+	output := stdout.String() + stderr.String()
+	for _, spec := range config.RequiredSecrets() {
+		count := 0
+		for _, entry := range entries {
+			if entry.Key == spec.Key {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Fatalf("%s assignment count = %d, want 1", spec.Key, count)
+		}
+		value, ok := envfile.Value(entries, spec.Key)
+		if !ok {
+			t.Fatalf("fresh .env is missing %s", spec.Key)
+		}
+		if err := spec.Validate(value); err != nil {
+			t.Fatalf("fresh %s is invalid: %v", spec.Key, err)
+		}
+		if strings.Contains(output, value) {
+			t.Fatalf("init-secrets output leaks generated %s", spec.Key)
+		}
+		if spec.Key != "PACKMON_DB_PASSWORD" {
+			if previous, exists := uniqueGenerated[value]; exists {
+				t.Fatalf("generated %s duplicates %s", spec.Key, previous)
+			}
+			uniqueGenerated[value] = spec.Key
+		}
+	}
+	postgresPassword, _ := envfile.Value(entries, "POSTGRES_PASSWORD")
+	databasePassword, _ := envfile.Value(entries, "PACKMON_DB_PASSWORD")
+	if postgresPassword != databasePassword {
+		t.Fatal("fresh database password pair must share one generated value")
+	}
+	if len(uniqueGenerated) != 4 {
+		t.Fatalf("unique generated value count = %d, want 4 including one shared database password", len(uniqueGenerated))
+	}
+}
+
 func TestEnsureSecretsGeneratesOneSharedDatabasePassword(t *testing.T) {
 	entries := envfile.Parse([]byte("POSTGRES_PASSWORD=\nPACKMON_DB_PASSWORD=\n"))
 	out, generated, kept, err := ensureSecrets(entries)
@@ -408,48 +536,95 @@ func TestRunInitSecretsIsIdempotent(t *testing.T) {
 }
 
 func TestRunInitSecretsReportsInvalidInputPaths(t *testing.T) {
-	dir := t.TempDir()
-	example := filepath.Join(dir, ".env.example")
-	if err := os.WriteFile(example, []byte("POSTGRES_PASSWORD=\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	t.Run("invalid flag preserves selected environment", func(t *testing.T) {
+		dir := t.TempDir()
+		env := filepath.Join(dir, ".env")
+		const original = "UNCHANGED=operator-content\n"
+		if err := os.WriteFile(env, []byte(original), 0o600); err != nil {
+			t.Fatalf("write existing environment: %v", err)
+		}
 
-	tests := []struct {
-		name string
-		args []string
-		want string
-	}{
-		{
-			name: "invalid flag",
-			args: []string{"--unknown"},
-			want: "flag provided but not defined",
-		},
-		{
-			name: "environment path is directory",
-			args: []string{"--env", dir, "--example", example},
-			want: "read " + dir,
-		},
-		{
-			name: "template path is directory for fresh environment",
-			args: []string{"--env", filepath.Join(dir, ".env"), "--example", dir},
-			want: "read " + dir,
-		},
-		{
-			name: "environment parent cannot be created",
-			args: []string{"--env", filepath.Join(dir, "missing", ".env"), "--example", example},
-			want: "write " + filepath.Join(dir, "missing", ".env"),
-		},
-	}
+		err := runInitSecrets([]string{"--env", env, "--unknown"})
+		if err == nil || err.Error() != "flag provided but not defined: -unknown" {
+			t.Fatalf("runInitSecrets() error = %v, want exact invalid-flag error", err)
+		}
+		data, readErr := os.ReadFile(env) //nolint:gosec // test reads a path built from t.TempDir().
+		if readErr != nil {
+			t.Fatalf("read existing environment: %v", readErr)
+		}
+		if string(data) != original {
+			t.Fatalf("invalid flag changed existing environment: %q", data)
+		}
+		assertNoInitSecretsTempFiles(t, filepath.Join(dir, ".env-*.tmp"))
+	})
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := runInitSecrets(tt.args)
-			if err == nil {
-				t.Fatal("runInitSecrets succeeded, want error")
-			}
-			if !strings.Contains(err.Error(), tt.want) {
-				t.Fatalf("error = %q, want it to contain %q", err, tt.want)
-			}
-		})
+	t.Run("environment path is directory", func(t *testing.T) {
+		dir := t.TempDir()
+		example := filepath.Join(dir, ".env.example")
+		if err := os.WriteFile(example, []byte("POSTGRES_PASSWORD=\n"), 0o600); err != nil {
+			t.Fatalf("write example: %v", err)
+		}
+
+		err := runInitSecrets([]string{"--env", dir, "--example", example})
+		var pathErr *os.PathError
+		if !errors.As(err, &pathErr) || pathErr.Op != "read" || pathErr.Path != dir {
+			t.Fatalf("runInitSecrets() error = %v, want read PathError for %s", err, dir)
+		}
+		if info, statErr := os.Stat(dir); statErr != nil || !info.IsDir() {
+			t.Fatalf("environment directory after failure = %v, %v; want preserved directory", info, statErr)
+		}
+		assertNoInitSecretsTempFiles(t, filepath.Join(dir, ".env-*.tmp"))
+	})
+
+	t.Run("template path is directory for fresh environment", func(t *testing.T) {
+		dir := t.TempDir()
+		env := filepath.Join(dir, ".env")
+
+		err := runInitSecrets([]string{"--env", env, "--example", dir})
+		var pathErr *os.PathError
+		if !errors.As(err, &pathErr) || pathErr.Op != "read" || pathErr.Path != dir {
+			t.Fatalf("runInitSecrets() error = %v, want read PathError for %s", err, dir)
+		}
+		if _, statErr := os.Stat(env); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("fresh environment stat error = %v, want os.ErrNotExist", statErr)
+		}
+		assertNoInitSecretsTempFiles(t, filepath.Join(dir, ".env-*.tmp"))
+	})
+
+	t.Run("environment parent cannot be created", func(t *testing.T) {
+		dir := t.TempDir()
+		example := filepath.Join(dir, ".env.example")
+		if err := os.WriteFile(example, []byte("POSTGRES_PASSWORD=\n"), 0o600); err != nil {
+			t.Fatalf("write example: %v", err)
+		}
+		missingDir := filepath.Join(dir, "missing")
+		env := filepath.Join(missingDir, ".env")
+
+		err := runInitSecrets([]string{"--env", env, "--example", example})
+		if err == nil || !strings.HasPrefix(err.Error(), "write "+env+": ") || !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("runInitSecrets() error = %v, want wrapped write error with os.ErrNotExist", err)
+		}
+		var pathErr *os.PathError
+		if !errors.As(err, &pathErr) || pathErr.Op != "open" ||
+			filepath.Dir(pathErr.Path) != missingDir ||
+			!strings.HasPrefix(filepath.Base(pathErr.Path), ".env-") ||
+			!strings.HasSuffix(filepath.Base(pathErr.Path), ".tmp") {
+			t.Fatalf("runInitSecrets() path error = %+v, want open of an atomic .env-*.tmp file below %s", pathErr, missingDir)
+		}
+		if _, statErr := os.Stat(env); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("failed destination stat error = %v, want os.ErrNotExist", statErr)
+		}
+		assertNoInitSecretsTempFiles(t, filepath.Join(missingDir, ".env-*.tmp"))
+	})
+}
+
+func assertNoInitSecretsTempFiles(t *testing.T, pattern string) {
+	t.Helper()
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		t.Fatalf("glob init-secrets temporary files: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("init-secrets left temporary files matching %s: %v", pattern, matches)
 	}
 }
