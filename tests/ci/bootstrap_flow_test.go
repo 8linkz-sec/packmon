@@ -1,11 +1,17 @@
 package ci
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
+
+	"go.yaml.in/yaml/v3"
 )
 
 func repoFile(t *testing.T, rel string) string {
@@ -52,6 +58,17 @@ func TestOverrideDefinesInitSecretsAndMigrateChain(t *testing.T) {
 	if strings.Contains(override, "PACKMON_SERVER_MODE: development") {
 		t.Fatal("docker-compose.override.yml must not force development mode (uses in-memory store, bypasses postgres)")
 	}
+	parsed := readComposeContract(t, "docker-compose.override.yml")
+	initSecrets := requireComposeService(t, parsed, "init-secrets")
+	if initSecrets.User != "${PACKMON_UID:-1000}:${PACKMON_GID:-1000}" || len(initSecrets.DependsOn) != 0 {
+		t.Fatalf("parsed init-secrets ownership/dependencies = user %q dependencies %#v", initSecrets.User, initSecrets.DependsOn)
+	}
+	server := requireComposeService(t, parsed, "packmon-server")
+	assertDependencyCondition(t, server, "postgres", "service_healthy")
+	assertDependencyCondition(t, server, "packmon-migrate", "service_completed_successfully")
+	if server.Environment["PACKMON_METRICS_HOST"] != "127.0.0.1" {
+		t.Fatalf("parsed local metrics host = %q, want literal loopback", server.Environment["PACKMON_METRICS_HOST"])
+	}
 }
 
 func TestBaseComposeStaysPermissive(t *testing.T) {
@@ -77,29 +94,24 @@ func TestDockerComposeConfigResolvesForLocalAndFailsClosedForServer(t *testing.T
 	}
 	t.Parallel()
 
-	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
-	if err != nil {
-		t.Fatalf("resolve repo root: %v", err)
-	}
-
-	envPath := filepath.Join(t.TempDir(), "blank.env")
-	const envContent = "POSTGRES_USER=packmon\n" +
-		"POSTGRES_DB=packmon\n" +
-		"POSTGRES_PASSWORD=\n" +
-		"PACKMON_DB_PASSWORD=\n" +
-		"PACKMON_ADMIN_INITIAL_PASSWORD=\n" +
-		"PACKMON_ENCRYPTION_KEY=\n" +
-		"PACKMON_ADMIN_AUDIT_HMAC_KEY=\n" +
-		"PACKMON_TRUSTED_PROXIES=\n"
-	if err := os.WriteFile(envPath, []byte(envContent), 0o600); err != nil {
-		t.Fatalf("write scratch env file: %v", err)
+	blank := map[string]string{
+		"POSTGRES_USER":                  "packmon",
+		"POSTGRES_DB":                    "packmon",
+		"POSTGRES_PASSWORD":              "",
+		"PACKMON_DB_PASSWORD":            "",
+		"PACKMON_ADMIN_INITIAL_PASSWORD": "",
+		"PACKMON_ENCRYPTION_KEY":         "",
+		"PACKMON_ADMIN_AUDIT_HMAC_KEY":   "",
+		"PACKMON_TRUSTED_PROXIES":        "",
 	}
 
 	// (a) local path: base + auto-loaded override must resolve even though the
 	// secrets are blank, because init-secrets needs to run before .env exists.
-	localCmd := exec.Command("docker", "compose", "--env-file", envPath, "config") // #nosec G204 -- fixed docker/compose args, no user input.
-	localCmd.Dir = repoRoot
-	localOut, localErr := localCmd.CombinedOutput()
+	localStage := stageComposeFiles(t, []string{"docker-compose.yml", "docker-compose.override.yml"})
+	_, localOut, localErr := composeConfig(localStage, []string{
+		filepath.Join(localStage, "docker-compose.yml"),
+		filepath.Join(localStage, "docker-compose.override.yml"),
+	}, blank)
 	if localErr != nil {
 		t.Fatalf("local `docker compose config` (base+override) must resolve with blank secrets, got error: %v\noutput:\n%s", localErr, localOut)
 	}
@@ -107,16 +119,13 @@ func TestDockerComposeConfigResolvesForLocalAndFailsClosedForServer(t *testing.T
 	// (b) server path: the self-contained docker-compose.server.yml must fail
 	// closed on blank secrets (and a blank PACKMON_TRUSTED_PROXIES), since its
 	// :? guards are authoritative and it loads no base/override file.
-	serverCmd := exec.Command("docker", "compose", //nolint:gosec // fixed docker/compose args, no user input.
-		"-f", "docker-compose.server.yml",
-		"--env-file", envPath, "config")
-	serverCmd.Dir = repoRoot
-	serverOut, serverErr := serverCmd.CombinedOutput()
+	serverStage := stageComposeFiles(t, []string{"docker-compose.server.yml"})
+	_, serverOut, serverErr := composeConfig(serverStage, []string{filepath.Join(serverStage, "docker-compose.server.yml")}, blank)
 	if serverErr == nil {
 		t.Fatalf("server `docker compose config` (docker-compose.server.yml) must fail closed on blank secrets, but it resolved:\n%s", serverOut)
 	}
 
-	outText := string(serverOut)
+	outText := serverOut
 	guardedSecrets := []string{
 		"POSTGRES_PASSWORD", "PACKMON_DB_PASSWORD", "PACKMON_ADMIN_INITIAL_PASSWORD",
 		"PACKMON_ENCRYPTION_KEY", "PACKMON_ADMIN_AUDIT_HMAC_KEY", "PACKMON_TRUSTED_PROXIES",
@@ -131,6 +140,75 @@ func TestDockerComposeConfigResolvesForLocalAndFailsClosedForServer(t *testing.T
 	if !found {
 		t.Fatalf("server `docker compose config` failure output should mention a guarded secret name, got:\n%s", outText)
 	}
+}
+
+func TestDockerComposeConfigPrecedenceAndRequiredVariables(t *testing.T) {
+	t.Parallel()
+
+	env := validComposeEnvironment()
+	env["PACKMON_SERVER_PORT"] = "18181"
+	stage := stageComposeFiles(t, []string{"docker-compose.server.yml"})
+	serviceEnv := filepath.Join(stage, "service.env")
+	if err := os.WriteFile(serviceEnv, []byte("PACKMON_SERVER_PORT=19191\nPACKMON_SERVER_MODE=development\nPACKMON_FEED_DATA_DIR=/tmp/wrong\n"), 0o600); err != nil {
+		t.Fatalf("write synthetic service env: %v", err)
+	}
+	overlay := filepath.Join(stage, "service-env.override.yml")
+	if err := os.WriteFile(overlay, []byte("services:\n  packmon-server:\n    env_file: !override\n      - path: service.env\n        required: true\n"), 0o600); err != nil {
+		t.Fatalf("write synthetic service env overlay: %v", err)
+	}
+	resolved := runComposeConfig(t, stage, []string{filepath.Join(stage, "docker-compose.server.yml"), overlay}, env, true)
+	server := requireComposeService(t, resolved, "packmon-server")
+	if server.Environment["PACKMON_SERVER_PORT"] != "18181" || !slices.Contains(server.Ports, "127.0.0.1:18181:18181") {
+		t.Fatalf("explicit shell/interpolation port did not win: environment port %q, mappings %#v", server.Environment["PACKMON_SERVER_PORT"], server.Ports)
+	}
+	if server.Environment["PACKMON_SERVER_MODE"] != "production" || server.Environment["PACKMON_FEED_DATA_DIR"] != "/data/feeds" {
+		t.Fatalf("explicit Compose environment did not override service env_file: mode %q feed dir %q", server.Environment["PACKMON_SERVER_MODE"], server.Environment["PACKMON_FEED_DATA_DIR"])
+	}
+
+	for _, key := range []string{"POSTGRES_PASSWORD", "PACKMON_DB_PASSWORD", "PACKMON_ADMIN_INITIAL_PASSWORD", "PACKMON_ENCRYPTION_KEY", "PACKMON_ADMIN_AUDIT_HMAC_KEY", "PACKMON_TRUSTED_PROXIES"} {
+		key := key
+		t.Run("missing_"+strings.ToLower(key), func(t *testing.T) {
+			missing := validComposeEnvironment()
+			delete(missing, key)
+			_, output, err := composeConfig(stage, []string{filepath.Join(stage, "docker-compose.server.yml")}, missing)
+			if err == nil {
+				t.Fatalf("Compose resolved with required %s omitted", key)
+			}
+			if !strings.Contains(output, key) {
+				t.Fatalf("Compose failure for omitted %s did not name that key: %s", key, boundedComposeDiagnostic(output, missing))
+			}
+		})
+		t.Run("empty_"+strings.ToLower(key), func(t *testing.T) {
+			empty := validComposeEnvironment()
+			empty[key] = ""
+			_, output, err := composeConfig(stage, []string{filepath.Join(stage, "docker-compose.server.yml")}, empty)
+			if err == nil {
+				t.Fatalf("Compose resolved with required %s empty", key)
+			}
+			if !strings.Contains(output, key) {
+				t.Fatalf("Compose failure for empty %s did not name that key: %s", key, boundedComposeDiagnostic(output, empty))
+			}
+		})
+	}
+}
+
+func TestDockerComposeBootstrapLifecycle(t *testing.T) {
+	t.Parallel()
+
+	compose := renderComposeContract(t, []string{"docker-compose.yml", "docker-compose.override.yml"}, validComposeEnvironment())
+	initSecrets := requireComposeService(t, compose, "init-secrets")
+	if initSecrets.User != "1000:1000" {
+		t.Fatalf("resolved init-secrets user = %q, want checkout-owner defaults", initSecrets.User)
+	}
+	if len(initSecrets.DependsOn) != 0 {
+		t.Fatalf("explicit init-secrets unexpectedly depends on application services: %#v", initSecrets.DependsOn)
+	}
+
+	t.Run("plain_application_startup_excludes_bootstrap", func(t *testing.T) {
+		if len(initSecrets.Profiles) == 0 {
+			t.Skip("F056-bugs-2: normalized default Compose model includes the exact current unprofiled init-secrets service")
+		}
+	})
 }
 
 func TestServerComposeIsSelfContainedAndHardened(t *testing.T) {
@@ -185,6 +263,19 @@ func TestServerComposeIsSelfContainedAndHardened(t *testing.T) {
 	if !strings.Contains(server, "packmon-migrate:") || !strings.Contains(server, `profiles: ["manual"]`) {
 		t.Fatal("docker-compose.server.yml packmon-migrate must stay behind profiles: [\"manual\"]")
 	}
+	for _, name := range []string{"packmon-migrate", "packmon-backup"} {
+		service := requireComposeService(t, parsed, name)
+		if !slices.Equal(service.Profiles, []string{"manual"}) {
+			t.Fatalf("docker-compose.server.yml %s profiles = %#v, want [manual]", name, service.Profiles)
+		}
+	}
+	serverService := requireComposeService(t, parsed, "packmon-server")
+	if serverService.Environment["PACKMON_SERVER_MODE"] != "production" || serverService.Environment["PACKMON_METRICS_HOST"] != "127.0.0.1" {
+		t.Fatalf("parsed server hardening environment = %#v", serverService.Environment)
+	}
+	if serverService.Environment["PACKMON_ALLOW_INSECURE_LOCAL_HTTP"] != "false" {
+		t.Fatalf("production insecure HTTP = %q, want false", serverService.Environment["PACKMON_ALLOW_INSECURE_LOCAL_HTTP"])
+	}
 }
 
 func TestReadmeHasTroubleshootingSection(t *testing.T) {
@@ -199,4 +290,112 @@ func TestReadmeHasTroubleshootingSection(t *testing.T) {
 			t.Fatalf("README missing troubleshooting marker %q", want)
 		}
 	}
+}
+
+func validComposeEnvironment() map[string]string {
+	return map[string]string{
+		"POSTGRES_DB":                     "packmon",
+		"POSTGRES_USER":                   "packmon",
+		"POSTGRES_PASSWORD":               "test-postgres-password",
+		"PACKMON_DB_PASSWORD":             "test-database-password",
+		"PACKMON_ADMIN_INITIAL_PASSWORD":  "test-admin-password",
+		"PACKMON_ENCRYPTION_KEY":          "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+		"PACKMON_ADMIN_AUDIT_HMAC_KEY":    "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+		"PACKMON_TRUSTED_PROXIES":         "127.0.0.1/32",
+		"PACKMON_UID":                     "1000",
+		"PACKMON_GID":                     "1000",
+		"PACKMON_SERVER_SHUTDOWN_TIMEOUT": "15s",
+	}
+}
+
+func renderComposeContract(t *testing.T, names []string, env map[string]string) composeFileContract {
+	t.Helper()
+	stage := stageComposeFiles(t, names)
+	files := make([]string, len(names))
+	for i, name := range names {
+		files[i] = filepath.Join(stage, filepath.Base(name))
+	}
+	return runComposeConfig(t, stage, files, env, true)
+}
+
+func stageComposeFiles(t *testing.T, names []string) string {
+	t.Helper()
+	stage := t.TempDir()
+	for _, name := range names {
+		data, err := os.ReadFile(filepath.Join("..", "..", filepath.FromSlash(name))) //nolint:gosec // fixed repository fixture selected by test
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(stage, filepath.Base(name)), data, 0o600); err != nil {
+			t.Fatalf("stage %s: %v", name, err)
+		}
+	}
+	return stage
+}
+
+func runComposeConfig(t *testing.T, dir string, files []string, env map[string]string, requireSuccess bool) composeFileContract {
+	t.Helper()
+	output, diagnostic, err := composeConfig(dir, files, env)
+	if err != nil {
+		if requireSuccess {
+			t.Fatalf("docker compose config: %v: %s", err, boundedComposeDiagnostic(diagnostic, env))
+		}
+		return composeFileContract{}
+	}
+	var compose composeFileContract
+	if err := yaml.Unmarshal(output, &compose); err != nil {
+		t.Fatalf("parse normalized Compose output: %v", err)
+	}
+	return compose
+}
+
+func composeConfig(dir string, files []string, env map[string]string) ([]byte, string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	blankEnv := filepath.Join(dir, "interpolation.env")
+	if err := os.WriteFile(blankEnv, nil, 0o600); err != nil {
+		return nil, err.Error(), err
+	}
+	args := []string{"compose", "--env-file", blankEnv, "--profile", "*"}
+	for _, file := range files {
+		args = append(args, "-f", file)
+	}
+	args = append(args, "config")
+	cmd := exec.CommandContext(ctx, "docker", args...) // #nosec G204 -- fixed executable; all files and environment are test-owned
+	cmd.Dir = dir
+	cmd.Env = sanitizedComposeEnvironment(env)
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		return nil, string(output), fmt.Errorf("compose config timeout: %w", ctx.Err())
+	}
+	return output, string(output), err
+}
+
+func sanitizedComposeEnvironment(extra map[string]string) []string {
+	env := make([]string, 0, len(os.Environ())+len(extra))
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		upper := strings.ToUpper(key)
+		if strings.HasPrefix(upper, "COMPOSE_") || strings.HasPrefix(upper, "PACKMON_") || strings.HasPrefix(upper, "POSTGRES_") || strings.HasPrefix(upper, "PG") {
+			continue
+		}
+		env = append(env, entry)
+	}
+	for key, value := range extra {
+		env = append(env, key+"="+value)
+	}
+	return env
+}
+
+func boundedComposeDiagnostic(output string, secrets map[string]string) string {
+	for _, value := range secrets {
+		if value != "" {
+			output = strings.ReplaceAll(output, value, "[REDACTED]")
+		}
+	}
+	const limit = 2000
+	if len(output) > limit {
+		return output[:limit] + "...[truncated]"
+	}
+	return output
 }

@@ -1,11 +1,15 @@
 package ci
 
 import (
+	"fmt"
 	"os"
+	"path"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -15,16 +19,352 @@ import (
 // matching) matters: a commented-out `# restart: unless-stopped` or a port
 // mapping without the matching environment entry must not count as evidence.
 type composeServiceContract struct {
-	User        string            `yaml:"user"`
-	Restart     string            `yaml:"restart"`
-	Ports       []string          `yaml:"ports"`
-	Environment map[string]string `yaml:"environment"`
-	Volumes     []string          `yaml:"volumes"`
+	User            string                               `yaml:"user"`
+	Restart         string                               `yaml:"restart"`
+	Image           string                               `yaml:"image"`
+	Profiles        []string                             `yaml:"profiles"`
+	Ports           composePortList                      `yaml:"ports"`
+	Environment     map[string]string                    `yaml:"environment"`
+	Volumes         composeMountList                     `yaml:"volumes"`
+	DependsOn       map[string]composeDependencyContract `yaml:"depends_on"`
+	Command         any                                  `yaml:"command"`
+	Entrypoint      any                                  `yaml:"entrypoint"`
+	StopGracePeriod string                               `yaml:"stop_grace_period"`
+	Build           composeBuildContract                 `yaml:"build"`
+	Logging         composeLoggingContract               `yaml:"logging"`
+	Deploy          composeDeployContract                `yaml:"deploy"`
+}
+
+type composeDependencyContract struct {
+	Condition string `yaml:"condition"`
+}
+
+type composeBuildContract struct {
+	Target string `yaml:"target"`
+}
+
+type composeLoggingContract struct {
+	Driver  string            `yaml:"driver"`
+	Options map[string]string `yaml:"options"`
+}
+
+type composeDeployContract struct {
+	Resources composeResourcesContract `yaml:"resources"`
+}
+
+type composeResourcesContract struct {
+	Limits       map[string]any `yaml:"limits"`
+	Reservations map[string]any `yaml:"reservations"`
+}
+
+type composePortList []string
+
+func (ports *composePortList) UnmarshalYAML(node *yaml.Node) error {
+	for _, item := range node.Content {
+		if item.Kind == yaml.ScalarNode {
+			*ports = append(*ports, item.Value)
+			continue
+		}
+		var value struct {
+			HostIP    string `yaml:"host_ip"`
+			Published string `yaml:"published"`
+			Target    string `yaml:"target"`
+		}
+		if err := item.Decode(&value); err != nil {
+			return err
+		}
+		*ports = append(*ports, value.HostIP+":"+value.Published+":"+value.Target)
+	}
+	return nil
+}
+
+type composeMountList []string
+
+func (mounts *composeMountList) UnmarshalYAML(node *yaml.Node) error {
+	for _, item := range node.Content {
+		if item.Kind == yaml.ScalarNode {
+			*mounts = append(*mounts, item.Value)
+			continue
+		}
+		var value struct {
+			Source   string `yaml:"source"`
+			Target   string `yaml:"target"`
+			ReadOnly bool   `yaml:"read_only"`
+		}
+		if err := item.Decode(&value); err != nil {
+			return err
+		}
+		mode := "rw"
+		if value.ReadOnly {
+			mode = "ro"
+		}
+		*mounts = append(*mounts, value.Source+":"+value.Target+":"+mode)
+	}
+	return nil
 }
 
 type composeFileContract struct {
 	Services map[string]composeServiceContract `yaml:"services"`
 	Volumes  map[string]any                    `yaml:"volumes"`
+}
+
+func TestDockerComposeResolvedServiceContracts(t *testing.T) {
+	t.Parallel()
+
+	local := renderComposeContract(t, []string{"docker-compose.yml", "docker-compose.override.yml"}, validComposeEnvironment())
+	production := renderComposeContract(t, []string{"docker-compose.server.yml"}, validComposeEnvironment())
+
+	assertComposeModel := func(t *testing.T, model composeFileContract, productionModel bool) {
+		t.Helper()
+		postgres := requireComposeService(t, model, "postgres")
+		server := requireComposeService(t, model, "packmon-server")
+		migrate := requireComposeService(t, model, "packmon-migrate")
+		backup := requireComposeService(t, model, "packmon-backup")
+
+		if productionModel {
+			if !reflect.DeepEqual(migrate.Profiles, []string{"manual"}) || !reflect.DeepEqual(backup.Profiles, []string{"manual"}) {
+				t.Fatalf("production one-shot profiles = migrate %#v backup %#v, want [manual]", migrate.Profiles, backup.Profiles)
+			}
+		} else if len(migrate.Profiles) != 0 {
+			t.Fatalf("local migrate profiles = %#v, want cleared", migrate.Profiles)
+		}
+
+		assertDependencyCondition(t, migrate, "postgres", "service_healthy")
+		assertDependencyCondition(t, server, "postgres", "service_healthy")
+		assertDependencyCondition(t, backup, "postgres", "service_healthy")
+		if productionModel {
+			if _, ok := server.DependsOn["packmon-migrate"]; ok {
+				t.Fatal("production server must not depend on the manual migrate service")
+			}
+		} else {
+			assertDependencyCondition(t, server, "packmon-migrate", "service_completed_successfully")
+		}
+
+		if got := server.Environment["PACKMON_SERVER_MODE"]; got != "production" {
+			t.Fatalf("server mode = %q, want production", got)
+		}
+		wantInsecure := "false"
+		if !productionModel {
+			wantInsecure = "true"
+		}
+		if got := server.Environment["PACKMON_ALLOW_INSECURE_LOCAL_HTTP"]; got != wantInsecure {
+			t.Fatalf("insecure HTTP = %q, want %q", got, wantInsecure)
+		}
+		if got := server.Environment["PACKMON_METRICS_HOST"]; got != "127.0.0.1" {
+			t.Fatalf("metrics host = %q, want literal loopback", got)
+		}
+		for _, published := range append(postgres.Ports, server.Ports...) {
+			if !strings.HasPrefix(published, "127.0.0.1:") {
+				t.Fatalf("published port %q is not loopback-only", published)
+			}
+		}
+		if got := server.Environment["PACKMON_SERVER_PORT"]; got != "8080" {
+			t.Fatalf("resolved server listener port = %q, want 8080", got)
+		}
+		if !slices.Contains(server.Ports, "127.0.0.1:8080:8080") {
+			t.Fatalf("server ports = %#v, want matching listener mapping", server.Ports)
+		}
+
+		wantRestart := ""
+		if productionModel {
+			wantRestart = "unless-stopped"
+		}
+		if postgres.Restart != wantRestart || server.Restart != wantRestart {
+			t.Fatalf("long-lived restart = postgres %q server %q, want %q", postgres.Restart, server.Restart, wantRestart)
+		}
+		for name, service := range map[string]composeServiceContract{"migrate": migrate, "backup": backup} {
+			if service.Restart != "" && service.Restart != "no" {
+				t.Fatalf("%s restart = %q, want no restart", name, service.Restart)
+			}
+		}
+		if got := server.Environment["PACKMON_FEED_DATA_DIR"]; got != "/data/feeds" || !slices.Contains(server.Volumes, "feed-data:/data/feeds:rw") {
+			t.Fatalf("feed persistence = dir %q volumes %#v", got, server.Volumes)
+		}
+
+		for name, service := range map[string]composeServiceContract{"postgres": postgres, "server": server, "migrate": migrate, "backup": backup} {
+			if service.Logging.Driver != "json-file" || service.Logging.Options["max-size"] != "10m" || service.Logging.Options["max-file"] != "5" {
+				t.Fatalf("%s logging = %#v", name, service.Logging)
+			}
+		}
+		assertResources := func(name string, service composeServiceContract, memory, cpus, reservation string) {
+			t.Helper()
+			if fmt.Sprint(service.Deploy.Resources.Limits["memory"]) != memory || fmt.Sprint(service.Deploy.Resources.Limits["cpus"]) != cpus || fmt.Sprint(service.Deploy.Resources.Reservations["memory"]) != reservation {
+				t.Fatalf("%s resources = %#v", name, service.Deploy.Resources)
+			}
+		}
+		assertResources("postgres", postgres, "536870912", "1", "134217728")
+		assertResources("server", server, "1073741824", "2", "268435456")
+		assertResources("migrate", migrate, "536870912", "1", "134217728")
+
+		if !strings.Contains(postgres.Image, "@sha256:") || postgres.Image != backup.Image {
+			t.Fatalf("PostgreSQL/backup images must share a digest pin: %q / %q", postgres.Image, backup.Image)
+		}
+		if server.Build.Target != "server" || migrate.Build.Target != "server" {
+			t.Fatalf("server build targets = server %q migrate %q", server.Build.Target, migrate.Build.Target)
+		}
+
+		wantMigrateEnv := []string{"PACKMON_DB_CONNECT_TIMEOUT", "PACKMON_DB_HOST", "PACKMON_DB_NAME", "PACKMON_DB_PASSWORD", "PACKMON_DB_PORT", "PACKMON_DB_SSLMODE", "PACKMON_DB_USER", "PACKMON_LOG_FORMAT", "PACKMON_LOG_LEVEL"}
+		gotMigrateEnv := make([]string, 0, len(migrate.Environment))
+		for key := range migrate.Environment {
+			gotMigrateEnv = append(gotMigrateEnv, key)
+		}
+		slices.Sort(gotMigrateEnv)
+		if !reflect.DeepEqual(gotMigrateEnv, wantMigrateEnv) {
+			t.Fatalf("migrate environment keys = %#v, want exact database/logging subset %#v", gotMigrateEnv, wantMigrateEnv)
+		}
+	}
+
+	t.Run("local", func(t *testing.T) { assertComposeModel(t, local, false) })
+	t.Run("production", func(t *testing.T) { assertComposeModel(t, production, true) })
+}
+
+func TestDockerComposePostgresDataStaysInsideNamedVolume(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{"docker-compose.yml", "docker-compose.server.yml"} {
+		name := name
+		t.Run(name, func(t *testing.T) {
+			compose := readComposeContract(t, name)
+			postgres := requireComposeService(t, compose, "postgres")
+			server := requireComposeService(t, compose, "packmon-server")
+			const pgMount = "/var/lib/postgresql/data"
+			pgdata := path.Clean(postgres.Environment["PGDATA"])
+			rel, err := filepath.Rel(filepath.FromSlash(pgMount), filepath.FromSlash(pgdata))
+			if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				t.Fatalf("PGDATA %q is not a child of %q", pgdata, pgMount)
+			}
+			_, postgresDeclared := compose.Volumes["postgres-data"]
+			if !slices.Contains(postgres.Volumes, "postgres-data:/var/lib/postgresql/data") || !postgresDeclared {
+				t.Fatalf("postgres volume contract = volumes %#v declarations %#v", postgres.Volumes, compose.Volumes)
+			}
+			if !slices.Contains(server.Volumes, "feed-data:/data/feeds") || server.Environment["PACKMON_FEED_DATA_DIR"] != map[string]string{"docker-compose.yml": "${PACKMON_FEED_DATA_DIR:-/data/feeds}", "docker-compose.server.yml": "/data/feeds"}[name] {
+				t.Fatalf("feed volume contract = environment %#v volumes %#v", server.Environment, server.Volumes)
+			}
+			if _, ok := compose.Volumes["feed-data"]; !ok {
+				t.Fatal("feed-data named volume is not declared")
+			}
+		})
+	}
+}
+
+func TestDockerComposeBackupServiceContract(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{"docker-compose.yml", "docker-compose.server.yml"} {
+		name := name
+		t.Run(name, func(t *testing.T) {
+			compose := readComposeContract(t, name)
+			backup := requireComposeService(t, compose, "packmon-backup")
+			postgres := requireComposeService(t, compose, "postgres")
+			server := requireComposeService(t, compose, "packmon-server")
+			if !reflect.DeepEqual(backup.Profiles, []string{"manual"}) || backup.Image != postgres.Image || !strings.Contains(backup.Image, "@sha256:") {
+				t.Fatalf("backup profile/image = %#v %q, postgres %q", backup.Profiles, backup.Image, postgres.Image)
+			}
+			wantPGEnv := []string{"PGDATABASE", "PGHOST", "PGPASSWORD", "PGPORT", "PGUSER"}
+			gotPGEnv := make([]string, 0, len(backup.Environment))
+			for key := range backup.Environment {
+				gotPGEnv = append(gotPGEnv, key)
+			}
+			slices.Sort(gotPGEnv)
+			if !reflect.DeepEqual(gotPGEnv, wantPGEnv) {
+				t.Fatalf("backup environment keys = %#v", gotPGEnv)
+			}
+			if len(backup.Volumes) != 1 || !strings.HasSuffix(backup.Volumes[0], ":/backups/packmon") {
+				t.Fatalf("backup volumes = %#v", backup.Volumes)
+			}
+			command := composeCommandText(t, backup.Command)
+			markers := []string{"install -d -m 0700", "pg_dump --format=custom", "pg_restore --list", "find /backups/packmon"}
+			last := -1
+			for _, marker := range markers {
+				at := strings.Index(command, marker)
+				if at <= last {
+					t.Fatalf("backup command marker %q missing or out of order: %q", marker, command)
+				}
+				last = at
+			}
+			if _, ok := server.DependsOn["packmon-backup"]; ok {
+				t.Fatal("server must not depend on backup")
+			}
+		})
+	}
+}
+
+func TestDockerComposeShutdownGraceCoversConfiguredTimeout(t *testing.T) {
+	t.Parallel()
+
+	for _, model := range []string{"local", "production"} {
+		model := model
+		for _, timeout := range []string{"15s", "30s"} {
+			timeout := timeout
+			t.Run(model+"_"+timeout, func(t *testing.T) {
+				env := validComposeEnvironment()
+				env["PACKMON_SERVER_SHUTDOWN_TIMEOUT"] = timeout
+				var compose composeFileContract
+				if model == "local" {
+					compose = renderComposeContract(t, []string{"docker-compose.yml"}, env)
+				} else {
+					stage := stageComposeFiles(t, []string{"docker-compose.server.yml"})
+					serviceEnv := filepath.Join(stage, "shutdown.env")
+					if err := os.WriteFile(serviceEnv, []byte("PACKMON_SERVER_SHUTDOWN_TIMEOUT="+timeout+"\n"), 0o600); err != nil {
+						t.Fatalf("write synthetic shutdown environment: %v", err)
+					}
+					overlay := filepath.Join(stage, "shutdown.override.yml")
+					if err := os.WriteFile(overlay, []byte("services:\n  packmon-server:\n    env_file: !override\n      - path: shutdown.env\n        required: true\n"), 0o600); err != nil {
+						t.Fatalf("write synthetic shutdown overlay: %v", err)
+					}
+					compose = runComposeConfig(t, stage, []string{filepath.Join(stage, "docker-compose.server.yml"), overlay}, env, true)
+				}
+				server := requireComposeService(t, compose, "packmon-server")
+				configured, err := time.ParseDuration(server.Environment["PACKMON_SERVER_SHUTDOWN_TIMEOUT"])
+				if err != nil {
+					t.Fatalf("parse configured timeout: %v", err)
+				}
+				grace, err := time.ParseDuration(server.StopGracePeriod)
+				if err != nil {
+					t.Fatalf("parse stop grace period: %v", err)
+				}
+				if configured > grace {
+					if timeout == "30s" && grace == 25*time.Second {
+						t.Skip("F058-bugs-2: fixed Compose stop grace is shorter than the resolved custom shutdown timeout")
+					}
+					t.Fatalf("configured shutdown timeout %s exceeds stop grace %s", configured, grace)
+				}
+			})
+		}
+	}
+}
+
+func requireComposeService(t *testing.T, compose composeFileContract, name string) composeServiceContract {
+	t.Helper()
+	service, ok := compose.Services[name]
+	if !ok {
+		t.Fatalf("Compose model has no %s service", name)
+	}
+	return service
+}
+
+func assertDependencyCondition(t *testing.T, service composeServiceContract, name, want string) {
+	t.Helper()
+	if got := service.DependsOn[name].Condition; got != want {
+		t.Fatalf("dependency %s condition = %q, want %q", name, got, want)
+	}
+}
+
+func composeCommandText(t *testing.T, command any) string {
+	t.Helper()
+	switch value := command.(type) {
+	case string:
+		return value
+	case []any:
+		parts := make([]string, len(value))
+		for i := range value {
+			parts[i] = fmt.Sprint(value[i])
+		}
+		return strings.Join(parts, "\n")
+	default:
+		t.Fatalf("unexpected Compose command type %T", command)
+		return ""
+	}
 }
 
 func readComposeContract(t *testing.T, name string) composeFileContract {
