@@ -2,10 +2,25 @@ package chocolatey
 
 import (
 	"encoding/binary"
+	"errors"
 	"strings"
 	"testing"
 	"unicode/utf16"
 )
+
+type failingReader struct {
+	data []byte
+	err  error
+	done bool
+}
+
+func (r *failingReader) Read(p []byte) (int, error) {
+	if r.done {
+		return 0, r.err
+	}
+	r.done = true
+	return copy(p, r.data), r.err
+}
 
 func configNames(t *testing.T, doc string) ([]string, error) {
 	t.Helper()
@@ -29,6 +44,125 @@ func utf16LE(s string) string {
 		encoded = binary.LittleEndian.AppendUint16(encoded, unit)
 	}
 	return string(encoded)
+}
+
+func utf16BE(s string) string {
+	encoded := []byte{0xFE, 0xFF}
+	for _, unit := range utf16.Encode([]rune(s)) {
+		encoded = binary.BigEndian.AppendUint16(encoded, unit)
+	}
+	return string(encoded)
+}
+
+func TestParseConfigXMLReadErrorsDiscardPartialPackages(t *testing.T) {
+	t.Parallel()
+
+	sentinel := errors.New("config reader failed")
+	for _, tt := range []struct {
+		name string
+		data string
+	}{
+		{"immediate error", ""},
+		{"partial package list", `<config><packages><package name="do-not-return"/></packages></config>`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			packages, err := ParseConfigXML(&failingReader{data: []byte(tt.data), err: sentinel}, "inventory/config.xml")
+			if !errors.Is(err, sentinel) {
+				t.Fatalf("ParseConfigXML() error = %v, want sentinel", err)
+			}
+			if packages != nil {
+				t.Fatalf("ParseConfigXML() packages = %+v, want nil", packages)
+			}
+			if got := err.Error(); got != sentinel.Error() || strings.Contains(got, "do-not-return") {
+				t.Fatalf("ParseConfigXML() error = %q, want generic content-free error", got)
+			}
+		})
+	}
+}
+
+func TestParseConfigXMLPackageIDLengthBoundaries(t *testing.T) {
+	t.Parallel()
+
+	accepted := strings.Repeat("a", 100)
+	rejected := strings.Repeat("b", 101)
+	doc := `<config><packages><package name="` + accepted + `"/><package name="` + rejected + `"/></packages></config>`
+	names, err := configNames(t, doc)
+	if err != nil {
+		t.Fatalf("ParseConfigXML() error = %v", err)
+	}
+	if got := strings.Join(names, " "); got != accepted {
+		t.Fatalf("names = %q, want only the 100-byte package ID", got)
+	}
+}
+
+func TestParseConfigXMLSupportedEncodings(t *testing.T) {
+	t.Parallel()
+
+	aliases := []string{
+		"utf-8", "utf8", "us-ascii", "ascii", "utf-16", "utf-16le", "utf-16be",
+		"iso-8859-1", "iso8859-1", "latin1", "latin-1", "iso-8859-15", "iso8859-15",
+		"windows-1252", "cp1252", "windows-1250", "cp1250", "windows-1251", "cp1251",
+	}
+	const list = `<config><packages><package name="Encoded.Package"/></packages></config>`
+	for _, alias := range aliases {
+		t.Run(alias, func(t *testing.T) {
+			t.Parallel()
+			doc := `<?xml version="1.0" encoding="` + alias + `"?>` + list
+			names, err := configNames(t, doc)
+			if err != nil {
+				t.Fatalf("ParseConfigXML() error = %v", err)
+			}
+			if got := strings.Join(names, " "); got != "encoded.package" {
+				t.Fatalf("names = %q, want %q", got, "encoded.package")
+			}
+		})
+	}
+	t.Run("utf-16be bytes", func(t *testing.T) {
+		t.Parallel()
+		doc := utf16BE(`<?xml version="1.0" encoding="utf-16be"?>` + list)
+		names, err := configNames(t, doc)
+		if err != nil {
+			t.Fatalf("ParseConfigXML() error = %v", err)
+		}
+		if got := strings.Join(names, " "); got != "encoded.package" {
+			t.Fatalf("names = %q, want %q", got, "encoded.package")
+		}
+	})
+}
+
+func TestParseConfigXMLMalformedDocumentBoundaries(t *testing.T) {
+	t.Parallel()
+
+	t.Run("malformed before packages is ignored", func(t *testing.T) {
+		t.Parallel()
+		packages, err := ParseConfigXML(strings.NewReader(`<config><envs><`), "config.xml")
+		if err != nil || packages != nil {
+			t.Fatalf("ParseConfigXML() = (%+v, %v), want (nil, nil)", packages, err)
+		}
+	})
+	t.Run("malformed package documents discard partial rows", func(t *testing.T) {
+		t.Parallel()
+		for _, doc := range []string{
+			`<config><packages><package name="partial"/>`,
+			`<config><packages><package name="partial"/></packages></config><`,
+		} {
+			packages, err := ParseConfigXML(strings.NewReader(doc), "config.xml")
+			if err == nil || packages != nil {
+				t.Fatalf("ParseConfigXML(%q) = (%+v, %v), want (nil, error)", doc, packages, err)
+			}
+			if got := err.Error(); got != "config.xml: invalid config.xml package list" || strings.Contains(got, "partial") {
+				t.Fatalf("ParseConfigXML() error = %q, want generic content-free error", got)
+			}
+		}
+	})
+	t.Run("multiple roots documents current acceptance", func(t *testing.T) {
+		t.Parallel()
+		packages, err := ParseConfigXML(strings.NewReader(`<config><packages><package name="discarded"/></packages></config><other/>`), "config.xml")
+		if err != nil || packages != nil {
+			t.Fatalf("ParseConfigXML() = (%+v, %v), want current silent multi-root acceptance with discarded rows", packages, err)
+		}
+	})
 }
 
 func TestParseConfigXMLShapes(t *testing.T) {

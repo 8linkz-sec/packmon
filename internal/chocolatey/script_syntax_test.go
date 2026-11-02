@@ -63,6 +63,7 @@ func TestParseScriptRedirectionsFollowScriptKind(t *testing.T) {
 		{"hash after redirect", "choco install a > #x\r\n", "a@[unpinned]", "a@[unpinned]"},
 		{"braced variable target", "choco install a > ${env:TEMP}\\x.log b\r\n", "a@[unpinned] b@[unpinned]", "a@[unpinned] b@[unpinned]"},
 		{"escaped redirect takes no batch target", "choco install a ^> nul b\r\n", "a@[unpinned] b@[unpinned]", "a@[unpinned] nul@[unpinned] b@[unpinned]"},
+		{"caret-escaped blank stays inside a batch target", "choco install a > out^ file.log b\r\n", "a@[unpinned] file.log@[unpinned] b@[unpinned]", "a@[unpinned] b@[unpinned]"},
 	})
 }
 

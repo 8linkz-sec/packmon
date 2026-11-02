@@ -1,6 +1,8 @@
 package chocolatey
 
 import (
+	"errors"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -133,6 +135,104 @@ func TestParseScriptRejectsNonScriptKind(t *testing.T) {
 	}
 	if pkgs != nil {
 		t.Fatalf("ParseScript(KindConfigXML) packages = %+v, want nil", pkgs)
+	}
+}
+
+func TestParseScriptReadErrorsDiscardPartialPackages(t *testing.T) {
+	t.Parallel()
+
+	sentinel := errors.New("script reader failed")
+	for _, tt := range []struct {
+		name string
+		data string
+	}{
+		{"immediate error", ""},
+		{"partial command", "choco install do-not-return\r\n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			packages, err := ParseScript(&failingReader{data: []byte(tt.data), err: sentinel}, "scripts/install.ps1", KindPowerShellScript)
+			if !errors.Is(err, sentinel) {
+				t.Fatalf("ParseScript() error = %v, want sentinel", err)
+			}
+			if packages != nil {
+				t.Fatalf("ParseScript() packages = %+v, want nil", packages)
+			}
+			if got := err.Error(); got != sentinel.Error() || strings.Contains(got, "do-not-return") {
+				t.Fatalf("ParseScript() error = %q, want generic content-free error", got)
+			}
+		})
+	}
+}
+
+func TestParseChocoInstallLineBareChocoIsIgnored(t *testing.T) {
+	t.Parallel()
+
+	if got := parseChocoInstallLine(KindPowerShellScript, "choco"); got != nil {
+		t.Fatalf("parseChocoInstallLine(%q) = %+v, want nil", "choco", got)
+	}
+}
+
+func TestDecodeTextBytesUTF16Boundaries(t *testing.T) {
+	t.Parallel()
+
+	surrogatePair := "A" + string(rune(0x1F642))
+	for _, tt := range []struct {
+		name string
+		data []byte
+		want string
+	}{
+		{"little endian surrogate pair", []byte(utf16LE(surrogatePair)), surrogatePair},
+		{"big endian surrogate pair", []byte(utf16BE(surrogatePair)), surrogatePair},
+		{"little endian truncated unit", []byte{0xFF, 0xFE, 0x41, 0x00, 0xFF}, "A"},
+		{"big endian truncated unit", []byte{0xFE, 0xFF, 0x00, 0x41, 0xFF}, "A"},
+		{"unpaired surrogate", []byte{0xFF, 0xFE, 0x00, 0xD8}, "\uFFFD"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := decodeTextBytes(tt.data); got != tt.want {
+				t.Fatalf("decodeTextBytes(%x) = %q, want %q", tt.data, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseScriptUTF16BEProducesExactPackage(t *testing.T) {
+	t.Parallel()
+
+	packages, err := ParseScript(strings.NewReader(utf16BE("choco install Git.Install --version 2.47.0\r\n")), "scripts/install.ps1", KindPowerShellScript)
+	if err != nil {
+		t.Fatalf("ParseScript() error = %v", err)
+	}
+	want := []Package{{
+		Name:       "git.install",
+		Version:    "2.47.0",
+		SourceFile: "scripts/install.ps1",
+		SourceType: SourceChocoInstall,
+	}}
+	if !reflect.DeepEqual(packages, want) {
+		t.Fatalf("ParseScript() packages = %#v, want %#v", packages, want)
+	}
+}
+
+func TestParseChocoInstallLineVersionLengthBoundaries(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name    string
+		version string
+		want    string
+	}{
+		{"64 bytes accepted", strings.Repeat("1", 64), strings.Repeat("1", 64)},
+		{"65 bytes rejected", strings.Repeat("1", 65), ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := parseChocoInstallLine(KindPowerShellScript, "choco install package --version "+tt.version)
+			if len(got) != 1 || got[0] != (installEntry{name: "package", version: tt.want}) {
+				t.Fatalf("parseChocoInstallLine() = %+v, want package@%q", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -307,6 +407,22 @@ func TestParseScriptMultiLineConstructs(t *testing.T) {
 			name:   "quote spanning a continuation hides a hash",
 			script: "choco install a --params \"x `\n #y\" `\n b\n",
 			want:   "a@[unpinned] b@[unpinned]",
+		},
+		{
+			name:   "braced variable before a continuation keeps the separator",
+			script: "Write-Host ${env:ProgramFiles(x86)} `\n; choco install a\n",
+			want:   "a@[unpinned]",
+		},
+		{
+			name:   "multiline quote keeps comments and separators as argument text",
+			script: "choco install a --params \"x `\n#not-a-comment; still-quoted\" `\n; choco install b\n",
+			want:   "a@[unpinned] b@[unpinned]",
+		},
+		{
+			name:   "batch comment continuation stays a comment",
+			kind:   KindBatchScript,
+			script: "REM choco install hidden ^\r\nchoco install still-hidden\r\nchoco install visible\r\n",
+			want:   "visible@[unpinned]",
 		},
 		{
 			name:   "same package pinned twice yields two rows",
@@ -530,6 +646,12 @@ func TestParseScriptQuotingAndEscapingFollowScriptKind(t *testing.T) {
 			script:     "choco install a ^\r\n^\r\nchoco install b\r\n",
 			powerShell: "a@[unpinned] b@[unpinned]",
 			batch:      "a@[unpinned] b@[unpinned]",
+		},
+		{
+			name:       "terminal percent sign is not an expansion",
+			script:     "choco install a %\r\n",
+			powerShell: "a@[unpinned]",
+			batch:      "a@[unpinned]",
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

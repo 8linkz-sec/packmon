@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sort"
 	"strings"
@@ -135,13 +136,42 @@ func TestCollectFindsConfigXMLPackagesAndChocoInstallLines(t *testing.T) {
 func TestPackageConvertsToChocolateyDomainPackage(t *testing.T) {
 	t.Parallel()
 
-	pkg := Package{Name: "7zip.vm", Version: "", SourceFile: "config.xml", SourceType: SourceConfigXML}
-	got := pkg.Package()
-	if got.Ecosystem != domain.EcosystemChocolatey || got.Name != "7zip.vm" || got.Version != "" || !got.Direct {
-		t.Fatalf("Package() = %+v, want direct chocolatey package", got)
-	}
-	if !got.Ecosystem.InventoryOnly() {
-		t.Fatalf("chocolatey must be inventory-only")
+	for _, tt := range []struct {
+		name string
+		pkg  Package
+		want domain.Package
+	}{
+		{
+			name: "unpinned config package",
+			pkg: Package{
+				Name:       "7zip.vm",
+				SourceFile: "config.xml",
+				SourceType: SourceConfigXML,
+				Flags:      []string{FlagUnpinned},
+			},
+			want: domain.Package{Name: "7zip.vm", Ecosystem: domain.EcosystemChocolatey, Direct: true},
+		},
+		{
+			name: "pinned script package",
+			pkg: Package{
+				Name:       "git.install",
+				Version:    "2.47.0",
+				SourceFile: "scripts/install.ps1",
+				SourceType: SourceChocoInstall,
+				Flags:      []string{"reviewed"},
+			},
+			want: domain.Package{Name: "git.install", Version: "2.47.0", Ecosystem: domain.EcosystemChocolatey, Direct: true},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tt.pkg.Package(); !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("Package() = %#v, want %#v", got, tt.want)
+			}
+			if !tt.want.Ecosystem.InventoryOnly() {
+				t.Fatalf("chocolatey must be inventory-only")
+			}
+		})
 	}
 }
 
