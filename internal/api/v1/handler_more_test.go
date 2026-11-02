@@ -10,6 +10,8 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -1438,6 +1440,124 @@ func TestHandleSyncValidationAndOptions(t *testing.T) {
 	}
 	if got := rr.Header().Get("Allow"); got != "GET, HEAD" {
 		t.Fatalf("Allow = %q, want GET, HEAD", got)
+	}
+}
+
+func TestHandleSyncOpenAPIPaginationRequestMatrix(t *testing.T) {
+	t.Parallel()
+
+	validQuery := url.Values{
+		"since":                  {"2026-11-01T10:00:00.123456789Z"},
+		"since_xid":              {"9223372036854775807"},
+		"snapshot":               {"2026-11-02T10:00:00.987654321Z"},
+		"snapshot_xid":           {"9223372036854775807"},
+		"limit":                  {strconv.Itoa(synccontract.MaxLimit)},
+		"offset":                 {"10000"},
+		"vulnerabilities_offset": {"10000"},
+		"malicious_offset":       {"10000"},
+		"reputation_offset":      {"10000"},
+		"lifecycle_offset":       {"10000"},
+		"vulnerabilities_cursor": {db.EncodeSyncAdvisoryCursor("GHSA-openapi-page")},
+		"malicious_cursor":       {testSyncCursorKey("npm", "evil-package", "MAL-openapi")},
+		"reputation_cursor":      {testSyncCursorKey("npm", "history-package", "1.0.0")},
+		"lifecycle_cursor":       {testSyncCursorKey("npm", "node", "nodejs", "24")},
+		"vulnerabilities_done":   {"true"},
+		"malicious_done":         {"true"},
+		"reputation_done":        {"true"},
+		"lifecycle_done":         {"true"},
+		"ecosystem":              {"npm,go"},
+	}
+	store := &syncExportStore{export: &db.SyncExport{SyncedAt: time.Date(2026, 11, 2, 10, 0, 0, 0, time.UTC)}}
+	h := newTestHandler(&store.stubStore)
+	h.store = store
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sync?"+validQuery.Encode(), nil)
+	rr := httptest.NewRecorder()
+	h.HandleSync(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("complete pagination request status = %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+	if store.calls != 1 || len(store.auditEntries) != 1 {
+		t.Fatalf("complete pagination request store/audit calls = %d/%d, want 1/1", store.calls, len(store.auditEntries))
+	}
+	wantSince := time.Date(2026, 11, 1, 10, 0, 0, 123456789, time.UTC)
+	wantSnapshot := time.Date(2026, 11, 2, 10, 0, 0, 987654321, time.UTC)
+	if store.opts.Since == nil || !store.opts.Since.Equal(wantSince) || !store.opts.SnapshotAt.Equal(wantSnapshot) {
+		t.Fatalf("forwarded since/snapshot = %v/%v, want %v/%v", store.opts.Since, store.opts.SnapshotAt, wantSince, wantSnapshot)
+	}
+	if store.opts.SinceXID != math.MaxInt64 || store.opts.SnapshotXID != math.MaxInt64 {
+		t.Fatalf("forwarded XIDs = %d/%d, want exact %d", store.opts.SinceXID, store.opts.SnapshotXID, int64(math.MaxInt64))
+	}
+	if store.opts.Limit != synccontract.MaxLimit || store.opts.Offset != 10000 {
+		t.Fatalf("forwarded limit/offset = %d/%d, want %d/10000", store.opts.Limit, store.opts.Offset, synccontract.MaxLimit)
+	}
+	if !reflect.DeepEqual(store.opts.Ecosystems, []string{"npm", "go"}) {
+		t.Fatalf("forwarded ecosystems = %#v, want [npm go]", store.opts.Ecosystems)
+	}
+	cursor := store.opts.Cursor
+	if cursor.Vulnerabilities != 10000 || cursor.Malicious != 10000 || cursor.Reputation != 10000 || cursor.Lifecycle != 10000 {
+		t.Fatalf("forwarded legacy offsets = %+v, want every dataset at 10000", cursor)
+	}
+	if cursor.VulnerabilitiesCursor != validQuery.Get("vulnerabilities_cursor") ||
+		cursor.MaliciousCursor != validQuery.Get("malicious_cursor") ||
+		cursor.ReputationCursor != validQuery.Get("reputation_cursor") ||
+		cursor.LifecycleCursor != validQuery.Get("lifecycle_cursor") {
+		t.Fatalf("forwarded keyset cursors = %+v, want exact request values", cursor)
+	}
+	if !cursor.VulnerabilitiesDone || !cursor.MaliciousDone || !cursor.ReputationDone || !cursor.LifecycleDone {
+		t.Fatalf("forwarded done flags = %+v, want all true", cursor)
+	}
+
+	minimumQuery := "/api/v1/sync?since_xid=0&snapshot_xid=0&limit=1&offset=0&vulnerabilities_offset=0&malicious_offset=0&reputation_offset=0&lifecycle_offset=0&vulnerabilities_done=false&malicious_done=false&reputation_done=false&lifecycle_done=false"
+	minimumStore := &syncExportStore{export: &db.SyncExport{SyncedAt: time.Date(2026, 11, 2, 10, 0, 0, 0, time.UTC)}}
+	minimumHandler := newTestHandler(&minimumStore.stubStore)
+	minimumHandler.store = minimumStore
+	minimumRequest := httptest.NewRequest(http.MethodGet, minimumQuery, nil)
+	minimumRecorder := httptest.NewRecorder()
+	minimumHandler.HandleSync(minimumRecorder, minimumRequest)
+	if minimumRecorder.Code != http.StatusOK || minimumStore.calls != 1 || minimumStore.opts.Limit != 1 {
+		t.Fatalf("minimum pagination request status/calls/limit = %d/%d/%d, want 200/1/1: %s", minimumRecorder.Code, minimumStore.calls, minimumStore.opts.Limit, minimumRecorder.Body.String())
+	}
+
+	invalidCases := []string{
+		"since=not-a-date-time",
+		"snapshot=not-a-date-time",
+		"since_xid=9223372036854775808",
+		"snapshot_xid=9223372036854775808",
+		"limit=0",
+		"limit=10001",
+		"offset=-1",
+		"offset=10001",
+		"vulnerabilities_offset=10001",
+		"malicious_offset=10001",
+		"reputation_offset=10001",
+		"lifecycle_offset=10001",
+		"vulnerabilities_cursor=not-base64",
+		"malicious_cursor=not-base64",
+		"reputation_cursor=not-base64",
+		"lifecycle_cursor=not-base64",
+		"vulnerabilities_done=not-bool",
+		"malicious_done=not-bool",
+		"reputation_done=not-bool",
+		"lifecycle_done=not-bool",
+		"ecosystem=npmm",
+	}
+	for _, rawQuery := range invalidCases {
+		rawQuery := rawQuery
+		t.Run(rawQuery, func(t *testing.T) {
+			t.Parallel()
+			invalidStore := &syncExportStore{export: &db.SyncExport{SyncedAt: time.Date(2026, 11, 2, 10, 0, 0, 0, time.UTC)}}
+			invalidHandler := newTestHandler(&invalidStore.stubStore)
+			invalidHandler.store = invalidStore
+			invalidRequest := httptest.NewRequest(http.MethodGet, "/api/v1/sync?"+rawQuery, nil)
+			invalidRecorder := httptest.NewRecorder()
+			invalidHandler.HandleSync(invalidRecorder, invalidRequest)
+			if invalidRecorder.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", invalidRecorder.Code, invalidRecorder.Body.String())
+			}
+			if invalidStore.calls != 0 || len(invalidStore.auditEntries) != 0 {
+				t.Fatalf("invalid request ExportSync/audit calls = %d/%d, want 0/0", invalidStore.calls, len(invalidStore.auditEntries))
+			}
+		})
 	}
 }
 

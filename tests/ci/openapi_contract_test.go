@@ -1,16 +1,19 @@
 package ci
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	apiv1 "github.com/8linkz-sec/packmon/internal/api/v1"
 	"github.com/8linkz-sec/packmon/internal/checkcontract"
 	"github.com/8linkz-sec/packmon/internal/domain"
+	"github.com/8linkz-sec/packmon/internal/feed/socket"
 	"github.com/8linkz-sec/packmon/internal/synccontract"
 	"github.com/pb33f/libopenapi"
 	"github.com/pb33f/libopenapi/datamodel"
@@ -1716,6 +1719,390 @@ func TestOpenAPIFeedImportStatusOnlySchemaMatrix(t *testing.T) {
 	t.Skip("OPEN F010-bugs-3: the feed-import anyOf accepts status-only payloads through four indistinguishable branches and cannot identify the selector-specific request schema")
 }
 
+func TestOpenAPIPublishedExamplesValidateAgainstSchemas(t *testing.T) {
+	spec := readOpenAPISpecMap(t)
+	paths := requireMap(t, spec, "paths")
+	checkPost := requireMap(t, requireMap(t, paths, "/api/v1/check"), "post")
+	checkRequestMedia := requireMap(t, requireMap(t, requireMap(t, checkPost, "requestBody"), "content"), "application/json")
+	checkRequestExamples := requireMap(t, checkRequestMedia, "examples")
+	checkRequestExample := requireMap(t, requireMap(t, checkRequestExamples, "npmVulnerabilityCheck"), "value")
+	checkResponseMedia := requireMap(t, requireMap(t, requireMap(t, requireMap(t, requireMap(t, checkPost, "responses"), "200"), "content"), "application/json"), "examples")
+	checkResponseExample := requireMap(t, requireMap(t, checkResponseMedia, "blockingFinding"), "value")
+
+	packagePath := requireMap(t, paths, "/api/v1/packages/{ecosystem}/{rest}")
+	packageGetRest := requireOperationParameter(t, requireMap(t, packagePath, "get"), "rest", "path")
+	packageHeadRest := requireOperationParameter(t, requireMap(t, packagePath, "head"), "rest", "path")
+	refreshRest := requireOperationParameter(t, requireMap(t, requireMap(t, paths, "/api/v1/packages/{ecosystem}/{rest}/refresh"), "post"), "rest", "path")
+	bearerChallenge := requireMap(t, requireMap(t, requireMap(t, spec, "components"), "headers"), "BearerChallenge")
+
+	examples := []struct {
+		location string
+		fragment string
+		value    any
+	}{
+		{
+			location: "paths//api/v1/check/post/requestBody/content/application/json/examples/npmVulnerabilityCheck/value",
+			fragment: "#/paths/~1api~1v1~1check/post/requestBody/content/application~1json/schema",
+			value:    checkRequestExample,
+		},
+		{
+			location: "paths//api/v1/check/post/responses/200/content/application/json/examples/blockingFinding/value",
+			fragment: "#/paths/~1api~1v1~1check/post/responses/200/content/application~1json/schema",
+			value:    checkResponseExample,
+		},
+		{
+			location: "paths//api/v1/packages/{ecosystem}/{rest}/get/parameters/2/example",
+			fragment: "#/paths/~1api~1v1~1packages~1%7Becosystem%7D~1%7Brest%7D/get/parameters/2/schema",
+			value:    packageGetRest["example"],
+		},
+		{
+			location: "paths//api/v1/packages/{ecosystem}/{rest}/head/parameters/2/example",
+			fragment: "#/paths/~1api~1v1~1packages~1%7Becosystem%7D~1%7Brest%7D/head/parameters/2/schema",
+			value:    packageHeadRest["example"],
+		},
+		{
+			location: "paths//api/v1/packages/{ecosystem}/{rest}/refresh/post/parameters/2/example",
+			fragment: "#/paths/~1api~1v1~1packages~1%7Becosystem%7D~1%7Brest%7D~1refresh/post/parameters/2/schema",
+			value:    refreshRest["example"],
+		},
+		{
+			location: "components/headers/BearerChallenge/schema/example",
+			fragment: "#/components/headers/BearerChallenge/schema",
+			value:    requireMap(t, bearerChallenge, "schema")["example"],
+		},
+	}
+
+	discovered := make(map[string]struct{})
+	collectOpenAPIExampleLocations(spec, "", discovered)
+	wantLocations := make(map[string]struct{}, len(examples))
+	compiler := newOpenAPIInstanceCompiler(t)
+	for _, example := range examples {
+		wantLocations[example.location] = struct{}{}
+		schema := compileOpenAPIFragment(t, compiler, example.fragment)
+		if err := schema.Validate(example.value); err != nil {
+			t.Errorf("published example %s does not validate against adjacent schema %s: %v", example.location, example.fragment, err)
+		}
+	}
+	if !reflect.DeepEqual(discovered, wantLocations) {
+		t.Fatalf("published semantic example locations = %v, want exact six locations %v", enumKeys(discovered), enumKeys(wantLocations))
+	}
+}
+
+func TestOpenAPICanonicalWirePayloadsValidateAgainstSchemas(t *testing.T) {
+	compiler := newOpenAPIInstanceCompiler(t)
+	now := time.Date(2026, 11, 2, 12, 34, 56, 123456789, time.UTC)
+	age := 2
+
+	emptyResult := domain.ScanResult{
+		ScanID:                "scan-empty",
+		Mode:                  domain.ScanModeLocal,
+		ScannedAt:             now,
+		DurationMs:            5,
+		PackagesScanned:       1,
+		FindingsCount:         0,
+		FindingsBlocking:      false,
+		BlockThreshold:        domain.SeverityNone,
+		FeedStatus:            string(domain.ScanFeedStatusHealthy),
+		DBAgeDays:             &age,
+		DBStale:               false,
+		Summary:               domain.EmptyScanSummary(),
+		Findings:              []domain.Finding{},
+		ParseErrors:           []string{},
+		FeedVersions:          map[string]string{},
+		ManualAdvisoriesCount: 0,
+	}
+	finding := domain.Finding{
+		Name:       "left-pad",
+		Version:    "1.3.0",
+		Ecosystem:  domain.EcosystemNPM,
+		Type:       domain.FindingTypeVulnerability,
+		Severity:   domain.SeverityHigh,
+		AdvisoryID: "GHSA-canonical",
+		Title:      "Canonical vulnerability",
+		URL:        "https://example.test/advisories/GHSA-canonical",
+		Source:     "osv",
+	}
+	degradedResult := emptyResult
+	degradedResult.ScanID = "scan-degraded"
+	degradedResult.Mode = domain.ScanModeRemote
+	degradedResult.FeedStatus = string(domain.ScanFeedStatusDegraded)
+	degradedResult.Findings = []domain.Finding{finding}
+	degradedResult.FindingsCount = 1
+	degradedResult.FindingsBlocking = true
+	degradedResult.BlockThreshold = domain.SeverityHigh
+	degradedResult.Summary = domain.BuildScanSummary(degradedResult.Findings)
+	degradedResult.FeedVersions = map[string]string{"osv": now.Format(time.RFC3339Nano)}
+	errorResult := emptyResult
+	errorResult.ScanID = "scan-error"
+	errorResult.Mode = domain.ScanModeAuto
+	errorResult.FeedStatus = string(domain.ScanFeedStatusError)
+	errorResult.ScanError = "feed unavailable"
+	errorResult.DBStale = true
+
+	validateMarshaledOpenAPIInstance(t, compiler, "#/components/schemas/ScanResult", emptyResult)
+	validateMarshaledOpenAPIInstance(t, compiler, "#/components/schemas/ScanResult", degradedResult)
+	validateMarshaledOpenAPIInstance(t, compiler, "#/components/schemas/ScanResult", errorResult)
+	validateMarshaledOpenAPIInstance(t, compiler, "#/components/schemas/WebhookEnvelope", domain.WebhookEnvelope{
+		Event:      "scan_completed",
+		Version:    "1",
+		Timestamp:  now,
+		Source:     "packmon",
+		Repository: &domain.RemoteRepoInfo{Name: "web-api"},
+		Result:     degradedResult,
+	})
+
+	activeVulnerability := synccontract.Vulnerability{
+		ID: "GHSA-active", Ecosystem: "npm", Name: "left-pad", VersionRanges: `[]`, VersionsAffected: `["1.3.0"]`, References: `[]`,
+		Severity: "HIGH", CISAKEV: true, Summary: "active vulnerability", Source: "osv",
+	}
+	activeMalicious := synccontract.Malicious{
+		ID: "MAL-active", Ecosystem: "npm", Name: "evil-package", VersionRanges: `[]`, Versions: `[]`, ReferenceURLs: `[]`,
+		RiskType: "malware", Severity: "CRITICAL", Summary: "active malicious package", Source: "openssf",
+	}
+	activeReputation := synccontract.Reputation{
+		ID: "RL-active", Ecosystem: "npm", Name: "history-package", Version: "1.0.0", Type: "supply_chain_risk",
+		RiskType: domain.RiskTypeMalwareHistory, Severity: "LOW", Summary: "historical reputation context",
+	}
+	releaseDate := "2026-01-15"
+	isEOES := false
+	activeLifecycle := synccontract.Lifecycle{
+		ID: "EOL-active", Ecosystem: "npm", Name: "node", ProductSlug: "nodejs", ProductLabel: "Node.js", Cycle: "24", Latest: "24.1.0",
+		ReleaseDate: &releaseDate, IsLTS: true, LTSFrom: &releaseDate, IsEOAS: false, EOASFrom: nil, IsEOL: false, EOLFrom: nil,
+		IsDiscontinued: false, DiscontinuedFrom: nil, IsEOES: &isEOES, EOESFrom: nil, IsMaintained: true,
+	}
+	withdrawnVulnerability := activeVulnerability
+	withdrawnVulnerability.ID = "GHSA-withdrawn"
+	withdrawnVulnerability.Withdrawn = true
+	withdrawnMalicious := activeMalicious
+	withdrawnMalicious.ID = "MAL-withdrawn"
+	withdrawnMalicious.Withdrawn = true
+	withdrawnReputation := synccontract.Reputation{ID: "RL-withdrawn", Ecosystem: "npm", Name: "removed", Withdrawn: true}
+	nullLifecycle := synccontract.Lifecycle{
+		ID: "EOL-null-dates", Ecosystem: "npm", Name: "runtime", ProductSlug: "runtime", ProductLabel: "Runtime", Cycle: "1", Latest: "1.0.0",
+		ReleaseDate: nil, LTSFrom: nil, EOASFrom: nil, EOLFrom: nil, DiscontinuedFrom: nil, IsEOES: nil, EOESFrom: nil, Withdrawn: true,
+	}
+
+	firstPage := synccontract.Response{
+		SyncedAt: now.Format(time.RFC3339Nano), SyncedXID: 9223372036854775807, FeedStatus: string(domain.ScanFeedStatusHealthy),
+		FeedVersions: map[string]string{"osv": now.Format(time.RFC3339Nano)}, Vulnerabilities: []synccontract.Vulnerability{activeVulnerability},
+		Malicious: []synccontract.Malicious{activeMalicious}, Reputation: []synccontract.Reputation{activeReputation}, Lifecycle: []synccontract.Lifecycle{activeLifecycle},
+		Truncated: true, HasMore: true, NextCursor: &synccontract.Cursor{VulnerabilitiesCursor: "vuln-cursor", MaliciousCursor: "mal-cursor", ReputationCursor: "rep-cursor", LifecycleCursor: "life-cursor"},
+	}
+	continuationPage := synccontract.Response{
+		SyncedAt: firstPage.SyncedAt, SyncedXID: firstPage.SyncedXID, FeedStatus: string(domain.ScanFeedStatusDegraded), FeedVersions: map[string]string{},
+		Vulnerabilities: []synccontract.Vulnerability{withdrawnVulnerability}, Malicious: []synccontract.Malicious{withdrawnMalicious},
+		Reputation: []synccontract.Reputation{withdrawnReputation}, Lifecycle: []synccontract.Lifecycle{nullLifecycle}, Truncated: true, HasMore: true,
+		NextCursor: &synccontract.Cursor{VulnerabilitiesDone: true, MaliciousDone: true, ReputationDone: true, LifecycleCursor: "life-next"},
+	}
+	finalPage := synccontract.Response{
+		SyncedAt: firstPage.SyncedAt, SyncedXID: firstPage.SyncedXID, FeedStatus: string(domain.ScanFeedStatusError), FeedVersions: map[string]string{},
+		Vulnerabilities: []synccontract.Vulnerability{}, Malicious: []synccontract.Malicious{}, Reputation: []synccontract.Reputation{}, Lifecycle: []synccontract.Lifecycle{},
+		Truncated: false, HasMore: false,
+	}
+	for _, page := range []synccontract.Response{firstPage, continuationPage, finalPage} {
+		instance := marshalJSONInstance(t, page)
+		gotXID, ok := instance.(map[string]any)["synced_xid"].(json.Number)
+		if !ok || gotXID.String() != "9223372036854775807" {
+			t.Fatalf("marshaled synced_xid = %#v, want exact json.Number 9223372036854775807", instance.(map[string]any)["synced_xid"])
+		}
+		if err := compileOpenAPIFragment(t, compiler, "#/components/schemas/SyncResponse").Validate(instance); err != nil {
+			t.Fatalf("canonical SyncResponse does not validate: %v", err)
+		}
+	}
+
+	for _, fixture := range []struct {
+		schema string
+		value  any
+	}{
+		{schema: "SyncVulnerability", value: activeVulnerability},
+		{schema: "SyncVulnerability", value: withdrawnVulnerability},
+		{schema: "SyncMalicious", value: activeMalicious},
+		{schema: "SyncMalicious", value: withdrawnMalicious},
+		{schema: "SyncReputation", value: activeReputation},
+		{schema: "SyncReputation", value: withdrawnReputation},
+		{schema: "SyncLifecycle", value: activeLifecycle},
+		{schema: "SyncLifecycle", value: nullLifecycle},
+	} {
+		validateMarshaledOpenAPIInstance(t, compiler, "#/components/schemas/"+fixture.schema, fixture.value)
+	}
+}
+
+func TestOpenAPIMalwareHistoryExampleIsNonBlocking(t *testing.T) {
+	spec := readOpenAPISpecMap(t)
+	schemas := requireMap(t, requireMap(t, spec, "components"), "schemas")
+	finding := requireMap(t, schemas, "Finding")
+	riskType := requireMap(t, requireMap(t, finding, "properties"), "risk_type")
+	riskDescription, _ := riskType["description"].(string)
+	descriptionDocumentsSemantics := strings.Contains(riskDescription, domain.RiskTypeMalwareHistory) &&
+		strings.Contains(riskDescription, "informational") && strings.Contains(riskDescription, "LOW") &&
+		(strings.Contains(riskDescription, "never blocks") || strings.Contains(riskDescription, "non-blocking"))
+
+	checkPost := requireMap(t, requireMap(t, requireMap(t, spec, "paths"), "/api/v1/check"), "post")
+	examples := requireMap(t, requireMap(t, requireMap(t, requireMap(t, requireMap(t, checkPost, "responses"), "200"), "content"), "application/json"), "examples")
+	hasHistoryOnlyNonBlockingExample := false
+	for _, raw := range examples {
+		example, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		value, ok := example["value"].(map[string]any)
+		if !ok || value["findings_blocking"] != false {
+			continue
+		}
+		findings, ok := value["findings"].([]any)
+		if !ok || len(findings) == 0 {
+			continue
+		}
+		historyOnly := true
+		for _, rawFinding := range findings {
+			finding, ok := rawFinding.(map[string]any)
+			if !ok || finding["type"] != string(domain.FindingTypeSupplyChainRisk) || finding["risk_type"] != domain.RiskTypeMalwareHistory || finding["severity"] != string(domain.SeverityLow) {
+				historyOnly = false
+				break
+			}
+		}
+		if historyOnly {
+			hasHistoryOnlyNonBlockingExample = true
+			break
+		}
+	}
+
+	violations := make([]string, 0, 2)
+	if !descriptionDocumentsSemantics {
+		violations = append(violations, "Finding.risk_type malware_history semantics missing")
+	}
+	if !hasHistoryOnlyNonBlockingExample {
+		violations = append(violations, "history-only non-blocking scan example missing")
+	}
+	wantViolations := []string{
+		"Finding.risk_type malware_history semantics missing",
+		"history-only non-blocking scan example missing",
+	}
+	if !reflect.DeepEqual(violations, wantViolations) {
+		t.Fatalf("OPEN F010-bugs-5 current violations = %v, want exactly %v; update the bug guard only when the contract changes intentionally", violations, wantViolations)
+	}
+	t.Skip("OPEN F010-bugs-5: Finding.risk_type omits malware_history informational/LOW/non-blocking semantics and the published scan examples omit a history-only non-blocking result")
+}
+
+func TestOpenAPISyncPaginationContract(t *testing.T) {
+	spec := readOpenAPISpecMap(t)
+	paths := requireMap(t, spec, "paths")
+	compiler := newOpenAPIInstanceCompiler(t)
+	for _, method := range []string{"get", "head"} {
+		operation := requireMap(t, requireMap(t, paths, "/api/v1/sync"), method)
+		for _, name := range []string{"vulnerabilities_cursor", "malicious_cursor", "reputation_cursor", "lifecycle_cursor"} {
+			parameter := requireOperationParameter(t, operation, name, "query")
+			if got := requireMap(t, parameter, "schema")["type"]; got != "string" {
+				t.Fatalf("%s sync %s type = %#v, want string", method, name, got)
+			}
+		}
+		for _, name := range []string{"vulnerabilities_done", "malicious_done", "reputation_done", "lifecycle_done"} {
+			parameter := requireOperationParameter(t, operation, name, "query")
+			if got := requireMap(t, parameter, "schema")["type"]; got != "boolean" {
+				t.Fatalf("%s sync %s type = %#v, want boolean", method, name, got)
+			}
+		}
+		ecosystem := requireOperationParameter(t, operation, "ecosystem", "query")
+		if ecosystem["style"] != "form" || ecosystem["explode"] != false {
+			t.Fatalf("%s sync ecosystem serialization = style %#v explode %#v, want form/false", method, ecosystem["style"], ecosystem["explode"])
+		}
+		ecosystemSchema := requireMap(t, ecosystem, "schema")
+		if ecosystemSchema["type"] != "array" || requireMap(t, ecosystemSchema, "items")["$ref"] != "#/components/schemas/Ecosystem" {
+			t.Fatalf("%s sync ecosystem schema = %#v, want array of Ecosystem refs", method, ecosystemSchema)
+		}
+
+		limit := requireMap(t, requireOperationParameter(t, operation, "limit", "query"), "schema")
+		if requireInt(t, limit, "minimum") != 1 || requireInt(t, limit, "maximum") != synccontract.MaxLimit || requireInt(t, limit, "default") != synccontract.DefaultLimit {
+			t.Fatalf("%s sync limit schema = %#v, want min 1 max %d default %d", method, limit, synccontract.MaxLimit, synccontract.DefaultLimit)
+		}
+		for _, name := range []string{"offset", "vulnerabilities_offset", "malicious_offset", "reputation_offset", "lifecycle_offset"} {
+			parameter := requireOperationParameter(t, operation, name, "query")
+			schema := requireMap(t, parameter, "schema")
+			if requireInt(t, schema, "minimum") != 0 || requireInt(t, schema, "maximum") != 10000 || parameter["deprecated"] != true {
+				t.Fatalf("%s sync %s contract = %#v, want deprecated integer range 0..10000", method, name, parameter)
+			}
+		}
+		for _, name := range []string{"since_xid", "snapshot_xid"} {
+			schema := requireMap(t, requireOperationParameter(t, operation, name, "query"), "schema")
+			if schema["type"] != "integer" || requireInt(t, schema, "minimum") != 0 || requireInt(t, schema, "maximum") != 9223372036854775807 {
+				t.Fatalf("%s sync %s schema = %#v, want exact signed-bigint bounds", method, name, schema)
+			}
+		}
+		for _, name := range []string{"since", "snapshot"} {
+			parameter := requireOperationParameter(t, operation, name, "query")
+			schemaMap := requireMap(t, parameter, "schema")
+			if schemaMap["format"] != "date-time" {
+				t.Fatalf("%s sync %s format = %#v, want date-time annotation", method, name, schemaMap["format"])
+			}
+			parameterIndex := operationParameterIndex(t, operation, name, "query")
+			fragment := fmt.Sprintf("#/paths/~1api~1v1~1sync/%s/parameters/%d/schema", method, parameterIndex)
+			if err := compileOpenAPIFragment(t, compiler, fragment).Validate("not-a-date-time"); err != nil {
+				t.Fatalf("%s sync %s format unexpectedly rejects an instance; compiler must keep OpenAPI format annotation-only: %v", method, name, err)
+			}
+		}
+	}
+}
+
+func TestOpenAPIEnumsExactlyMatchDomainCapabilities(t *testing.T) {
+	spec := readOpenAPISpecMap(t)
+	schemas := requireMap(t, requireMap(t, spec, "components"), "schemas")
+	allEcosystems := []domain.Ecosystem{
+		domain.EcosystemNPM, domain.EcosystemPyPI, domain.EcosystemGo, domain.EcosystemMaven, domain.EcosystemCargo,
+		domain.EcosystemNuGet, domain.EcosystemComposer, domain.EcosystemGem, domain.EcosystemPub, domain.EcosystemGitHubActions,
+		domain.EcosystemCocoaPods, domain.EcosystemSwiftPM, domain.EcosystemHex, domain.EcosystemCRAN, domain.EcosystemDocker, domain.EcosystemChocolatey,
+	}
+	wantEcosystems := make([]string, 0, len(allEcosystems))
+	wantScanEcosystems := make([]string, 0, len(allEcosystems))
+	wantRefreshEcosystems := make([]string, 0, len(allEcosystems))
+	for _, ecosystem := range allEcosystems {
+		if !ecosystem.Valid() {
+			t.Fatalf("canonical ecosystem %q is not valid", ecosystem)
+		}
+		wantEcosystems = append(wantEcosystems, string(ecosystem))
+		if ecosystem.ScanInput() {
+			wantScanEcosystems = append(wantScanEcosystems, string(ecosystem))
+		}
+		if socket.SupportsEcosystem(string(ecosystem)) {
+			wantRefreshEcosystems = append(wantRefreshEcosystems, string(ecosystem))
+		}
+	}
+	requireExactStringEnumValues(t, requireMap(t, schemas, "Ecosystem"), "Ecosystem", wantEcosystems)
+	requireExactStringEnumValues(t, requireMap(t, schemas, "ScanEcosystem"), "ScanEcosystem", wantScanEcosystems)
+	requireExactStringEnumValues(t, requireMap(t, schemas, "RefreshEcosystem"), "RefreshEcosystem", wantRefreshEcosystems)
+
+	scanResultProperties := requireMap(t, requireMap(t, schemas, "ScanResult"), "properties")
+	requireExactStringEnumValues(t, requireMap(t, scanResultProperties, "mode"), "ScanResult.mode", scanModeStrings(domain.ScanModeValues()))
+	requireExactStringEnumValues(t, requireMap(t, scanResultProperties, "feed_status"), "ScanResult.feed_status", scanFeedStatusStrings(domain.ScanFeedStatusValues()))
+	requireExactStringEnumValues(t, requireMap(t, scanResultProperties, "block_threshold"), "ScanResult.block_threshold", []string{
+		string(domain.SeverityCritical), string(domain.SeverityHigh), string(domain.SeverityMedium), string(domain.SeverityLow), string(domain.SeverityNone),
+	})
+	findingProperties := requireMap(t, requireMap(t, schemas, "Finding"), "properties")
+	requireExactStringEnumValues(t, requireMap(t, findingProperties, "type"), "Finding.type", []string{
+		string(domain.FindingTypeVulnerability), string(domain.FindingTypeMalicious), string(domain.FindingTypeSupplyChainRisk), string(domain.FindingTypeLifecycle),
+	})
+	requireExactStringEnumValues(t, requireMap(t, findingProperties, "severity"), "Finding.severity", []string{
+		string(domain.SeverityCritical), string(domain.SeverityHigh), string(domain.SeverityMedium), string(domain.SeverityLow), string(domain.SeverityUnknown),
+	})
+	requireExactStringEnumValues(t, requireMap(t, findingProperties, "risk_type"), "Finding.risk_type", []string{
+		"malware", "typosquatting", "supply_chain", "removed_package", domain.RiskTypeMalwareHistory, "eol", "eol_soon", "security_support_only", "other",
+	})
+	requireExactStringEnumValues(t, requireMap(t, requireMap(t, requireMap(t, schemas, "SyncResponse"), "properties"), "feed_status"), "SyncResponse.feed_status", scanFeedStatusStrings(domain.ScanFeedStatusValues()))
+
+	syncProperties := requireMap(t, requireMap(t, schemas, "SyncResponse"), "properties")
+	wantRowRefs := map[string]string{
+		"vulnerabilities": "#/components/schemas/SyncVulnerability",
+		"malicious":       "#/components/schemas/SyncMalicious",
+		"reputation":      "#/components/schemas/SyncReputation",
+		"lifecycle":       "#/components/schemas/SyncLifecycle",
+	}
+	for field, wantRef := range wantRowRefs {
+		property := requireMap(t, syncProperties, field)
+		if property["type"] != "array" || requireMap(t, property, "items")["$ref"] != wantRef {
+			t.Fatalf("SyncResponse.%s = %#v, want array items ref %s", field, property, wantRef)
+		}
+	}
+}
+
 func TestOpenAPIDocumentsPackageDetailResponse(t *testing.T) {
 	data, err := os.ReadFile("../../api/openapi/packmon-v1.yaml")
 	if err != nil {
@@ -1896,6 +2283,129 @@ func decodeJSONInstance(t *testing.T, raw string) any {
 		t.Fatalf("decode JSON instance: %v", err)
 	}
 	return instance
+}
+
+func marshalJSONInstance(t *testing.T, value any) any {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("marshal canonical JSON instance: %v", err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	var instance any
+	if err := decoder.Decode(&instance); err != nil {
+		t.Fatalf("decode canonical JSON instance with exact numbers: %v", err)
+	}
+	return instance
+}
+
+func validateMarshaledOpenAPIInstance(t *testing.T, compiler *jsonschema.Compiler, fragment string, value any) {
+	t.Helper()
+	instance := marshalJSONInstance(t, value)
+	if err := compileOpenAPIFragment(t, compiler, fragment).Validate(instance); err != nil {
+		t.Fatalf("canonical payload does not validate against %s: %v", fragment, err)
+	}
+}
+
+func collectOpenAPIExampleLocations(value any, path string, out map[string]struct{}) {
+	switch value := value.(type) {
+	case map[string]any:
+		for key, child := range value {
+			childPath := key
+			if path != "" {
+				childPath = path + "/" + key
+			}
+			switch key {
+			case "example":
+				out[childPath] = struct{}{}
+			case "examples":
+				examples, ok := child.(map[string]any)
+				if !ok {
+					continue
+				}
+				for name, rawExample := range examples {
+					example, ok := rawExample.(map[string]any)
+					if !ok {
+						continue
+					}
+					if _, ok := example["value"]; ok {
+						out[childPath+"/"+name+"/value"] = struct{}{}
+					}
+				}
+			default:
+				collectOpenAPIExampleLocations(child, childPath, out)
+			}
+		}
+	case []any:
+		for index, child := range value {
+			collectOpenAPIExampleLocations(child, fmt.Sprintf("%s/%d", path, index), out)
+		}
+	}
+}
+
+func operationParameterIndex(t *testing.T, operation map[string]any, name, in string) int {
+	t.Helper()
+	parameters, ok := operation["parameters"].([]any)
+	if !ok {
+		t.Fatalf("operation parameters = %#v, want array", operation["parameters"])
+	}
+	for index, raw := range parameters {
+		parameter, ok := raw.(map[string]any)
+		if ok && parameter["name"] == name && parameter["in"] == in {
+			return index
+		}
+	}
+	t.Fatalf("operation missing %s parameter %q", in, name)
+	return -1
+}
+
+func requireExactStringEnumValues(t *testing.T, schema map[string]any, name string, want []string) {
+	t.Helper()
+	raw, ok := schema["enum"].([]any)
+	if !ok {
+		t.Fatalf("%s enum = %#v, want array", name, schema["enum"])
+	}
+	if len(raw) != len(want) {
+		t.Fatalf("%s enum length = %d (%v), want exact %d values %v", name, len(raw), raw, len(want), want)
+	}
+	got := make(map[string]struct{}, len(raw))
+	for _, value := range raw {
+		text, ok := value.(string)
+		if !ok {
+			t.Fatalf("%s enum value = %#v, want string", name, value)
+		}
+		if _, duplicate := got[text]; duplicate {
+			t.Fatalf("%s enum contains duplicate %q", name, text)
+		}
+		got[text] = struct{}{}
+	}
+	wantSet := make(map[string]struct{}, len(want))
+	for _, value := range want {
+		if _, duplicate := wantSet[value]; duplicate {
+			t.Fatalf("%s expected capability list contains duplicate %q", name, value)
+		}
+		wantSet[value] = struct{}{}
+	}
+	if !reflect.DeepEqual(got, wantSet) {
+		t.Fatalf("%s enum = %v, want exact capabilities %v", name, enumKeys(got), enumKeys(wantSet))
+	}
+}
+
+func scanModeStrings(values []domain.ScanMode) []string {
+	out := make([]string, len(values))
+	for index, value := range values {
+		out[index] = string(value)
+	}
+	return out
+}
+
+func scanFeedStatusStrings(values []domain.ScanFeedStatus) []string {
+	out := make([]string, len(values))
+	for index, value := range values {
+		out[index] = string(value)
+	}
+	return out
 }
 
 func runtimeCheckCoordinateAccepted(name, version string) bool {
