@@ -1,7 +1,9 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -96,13 +98,17 @@ func TestReportPathsKeepRelativeInputs(t *testing.T) {
 	}
 }
 
-// TestReportSourcePathGapOneSentinels covers the display values that must not
-// reveal a scan root or turn an empty value into a misleading pathname.
-func TestReportSourcePathGapOneSentinels(t *testing.T) {
-	t.Parallel()
-
+// TestReportPathHelpersCoverEmptyAndBlankRootContracts covers display values
+// that must not reveal a scan root or turn an empty value into a misleading
+// pathname.
+func TestReportPathHelpersCoverEmptyAndBlankRootContracts(t *testing.T) {
 	root := t.TempDir()
 	rootBase := filepath.Base(root)
+	for _, blankTarget := range []string{"", " \t "} {
+		if got := htmlReportDisplayTarget(blankTarget); got != "" {
+			t.Fatalf("htmlReportDisplayTarget(%q) = %q, want empty", blankTarget, got)
+		}
+	}
 	cases := []struct {
 		name string
 		root string
@@ -124,6 +130,39 @@ func TestReportSourcePathGapOneSentinels(t *testing.T) {
 				t.Fatalf("htmlReportDisplaySourcePath(%q, %q) = %q, want %q", tc.root, tc.path, got, tc.want)
 			}
 		})
+	}
+
+	for _, blankRoot := range []string{"", " \t "} {
+		if rel, ok := htmlReportRelativePath(blankRoot, filepath.Join(root, "go.sum")); ok || rel != "" {
+			t.Fatalf("htmlReportRelativePath(%q, path) = (%q, %t), want empty, false", blankRoot, rel, ok)
+		}
+	}
+	if got := reportPathLastSegment("go.sum"); got != "go.sum" {
+		t.Fatalf("reportPathLastSegment(separator-free basename) = %q, want go.sum", got)
+	}
+}
+
+func TestHTMLReportRelativePathRejectsSiblingPrefixContainment(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "repo")
+	sibling := filepath.Join(parent, "repo-sibling")
+	source := filepath.Join(sibling, "nested", "go.sum")
+	if err := os.MkdirAll(filepath.Dir(source), 0o755); err != nil {
+		t.Fatalf("create sibling fixture: %v", err)
+	}
+	if err := os.WriteFile(source, []byte("fixture"), 0o600); err != nil {
+		t.Fatalf("write sibling fixture: %v", err)
+	}
+
+	if rel, ok := htmlReportRelativePath(root, source); ok || rel != "" {
+		t.Fatalf("htmlReportRelativePath(%q, %q) = (%q, %t), want outside root", root, source, rel, ok)
+	}
+	got := htmlReportDisplaySourcePath(root, source)
+	if got != "go.sum" {
+		t.Fatalf("htmlReportDisplaySourcePath(%q, %q) = %q, want basename only", root, source, got)
+	}
+	if strings.Contains(got, "repo-sibling") || filepath.IsAbs(got) {
+		t.Fatalf("external sibling path leaked into report display: %q", got)
 	}
 }
 
