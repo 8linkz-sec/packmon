@@ -1,12 +1,43 @@
 package ci
 
 import (
+	"context"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
+
+type n8nConnectionTarget struct {
+	Node  string `json:"node"`
+	Type  string `json:"type"`
+	Index int    `json:"index"`
+}
+
+type n8nConnections map[string]map[string][][]n8nConnectionTarget
+
+type n8nWorkflowNode struct {
+	ID             string          `json:"id"`
+	Name           string          `json:"name"`
+	Type           string          `json:"type"`
+	TypeVersion    int             `json:"typeVersion"`
+	Parameters     map[string]any  `json:"parameters"`
+	Credentials    map[string]any  `json:"credentials"`
+	ContinueOnFail json.RawMessage `json:"continueOnFail"`
+	OnError        json.RawMessage `json:"onError"`
+}
+
+type n8nWorkflow struct {
+	Active      *bool             `json:"active"`
+	Nodes       []n8nWorkflowNode `json:"nodes"`
+	Connections n8nConnections    `json:"connections"`
+}
 
 func TestN8NOnDemandScanDoesNotInterpolateWebhookPathIntoShell(t *testing.T) {
 	t.Parallel()
@@ -242,58 +273,15 @@ func TestN8NDailySyncKeepsAPIKeyOutOfCommandArguments(t *testing.T) {
 func TestN8NDailySyncPinsCompleteWorkflowTopology(t *testing.T) {
 	t.Parallel()
 
-	path := filepath.Join("..", "..", "deploy", "n8n", "daily-sync.json")
-	data, err := os.ReadFile(path) //nolint:gosec // static repository fixture path
-	if err != nil {
-		t.Fatalf("read daily-sync.json: %v", err)
-	}
-
-	var workflow struct {
-		Active bool `json:"active"`
-		Nodes  []struct {
-			Name       string         `json:"name"`
-			Type       string         `json:"type"`
-			Parameters map[string]any `json:"parameters"`
-		} `json:"nodes"`
-		Connections map[string]map[string][][]struct {
-			Node  string `json:"node"`
-			Type  string `json:"type"`
-			Index int    `json:"index"`
-		} `json:"connections"`
-	}
-	if err := json.Unmarshal(data, &workflow); err != nil {
-		t.Fatalf("parse daily-sync.json: %v", err)
-	}
-	if workflow.Active {
-		t.Fatal("daily sync workflow must remain disabled by default")
-	}
-	if len(workflow.Nodes) != 3 {
-		t.Fatalf("daily sync node count = %d, want exactly 3", len(workflow.Nodes))
-	}
-
-	nodes := make(map[string]struct {
-		Type       string
-		Parameters map[string]any
-	}, len(workflow.Nodes))
-	for _, node := range workflow.Nodes {
-		if _, duplicate := nodes[node.Name]; duplicate {
-			t.Fatalf("daily sync has duplicate node name %q", node.Name)
-		}
-		nodes[node.Name] = struct {
-			Type       string
-			Parameters map[string]any
-		}{Type: node.Type, Parameters: node.Parameters}
-	}
-	for name, wantType := range map[string]string{
-		"Daily Trigger": "n8n-nodes-base.scheduleTrigger",
-		"Sync Local DB": "n8n-nodes-base.executeCommand",
-		"Result":        "n8n-nodes-base.code",
-	} {
-		node, ok := nodes[name]
-		if !ok || node.Type != wantType {
-			t.Fatalf("daily sync node %q = %+v, want type %q", name, node, wantType)
-		}
-	}
+	workflow := readN8NWorkflow(t, "daily-sync.json")
+	assertN8NDisabled(t, workflow, "daily sync")
+	nodes := indexN8NNodes(t, workflow.Nodes, "daily sync")
+	assertN8NNodeTuples(t, nodes, "daily sync", map[string]n8nNodeTuple{
+		"Daily Trigger": {ID: "daily-trigger", Type: "n8n-nodes-base.scheduleTrigger", TypeVersion: 1},
+		"Sync Local DB": {ID: "sync-db", Type: "n8n-nodes-base.executeCommand", TypeVersion: 1},
+		"Result":        {ID: "result", Type: "n8n-nodes-base.code", TypeVersion: 2},
+	})
+	assertN8NNodesHaveNoErrorOverrides(t, workflow.Nodes, "daily sync")
 
 	rule, ok := nodes["Daily Trigger"].Parameters["rule"].(map[string]any)
 	if !ok {
@@ -307,108 +295,139 @@ func TestN8NDailySyncPinsCompleteWorkflowTopology(t *testing.T) {
 	if !ok || cron["field"] != "cronExpression" || cron["expression"] != "0 3 * * *" {
 		t.Fatalf("daily trigger cron = %#v, want 0 3 * * *", interval[0])
 	}
-	if got := nodes["Sync Local DB"].Parameters["command"]; got != "packmon db sync" {
-		t.Fatalf("daily sync command = %#v, want packmon db sync", got)
+	wantTriggerParameters := map[string]any{"rule": map[string]any{"interval": []any{map[string]any{
+		"field": "cronExpression", "expression": "0 3 * * *",
+	}}}}
+	if got := nodes["Daily Trigger"].Parameters; !reflect.DeepEqual(got, wantTriggerParameters) {
+		t.Fatalf("daily trigger parameters = %#v, want exact %#v", got, wantTriggerParameters)
+	}
+	if got, want := nodes["Sync Local DB"].Parameters, map[string]any{"command": "packmon db sync"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("daily sync parameters = %#v, want exact %#v", got, want)
+	}
+	if got, want := nodes["Result"].Parameters, map[string]any{"jsCode": n8nDailySyncResultCode}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("daily result parameters = %#v, want %#v", got, want)
 	}
 
-	assertN8NMainConnection(t, workflow.Connections, "Daily Trigger", "Sync Local DB")
-	assertN8NMainConnection(t, workflow.Connections, "Sync Local DB", "Result")
-	if len(workflow.Connections) != 2 {
-		t.Fatalf("daily sync connection sources = %d, want exactly 2", len(workflow.Connections))
+	wantConnections := n8nConnections{
+		"Daily Trigger": {"main": {{{Node: "Sync Local DB", Type: "main", Index: 0}}}},
+		"Sync Local DB": {"main": {{{Node: "Result", Type: "main", Index: 0}}}},
+	}
+	if !reflect.DeepEqual(workflow.Connections, wantConnections) {
+		t.Fatalf("daily sync connections = %#v, want exact map %#v", workflow.Connections, wantConnections)
+	}
+}
+
+const n8nDailySyncResultCode = "return [{ json: { workflow: 'daily-sync', status: 'ok', finishedAt: new Date().toISOString() } }];"
+
+func TestN8NDailySyncResultCodeExecutesExactSuccessEnvelope(t *testing.T) {
+	t.Parallel()
+
+	nodePath, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is required to execute the n8n code-node contract")
+	}
+	workflow := readN8NWorkflow(t, "daily-sync.json")
+	nodes := indexN8NNodes(t, workflow.Nodes, "daily sync")
+	resultNode, ok := nodes["Result"]
+	if !ok {
+		t.Fatal("daily sync has no Result node")
+	}
+	jsCode, ok := resultNode.Parameters["jsCode"].(string)
+	if !ok {
+		t.Fatalf("daily result jsCode = %T, want string", resultNode.Parameters["jsCode"])
+	}
+	if jsCode != n8nDailySyncResultCode {
+		t.Fatalf("daily result jsCode = %q, want byte-identical %q", jsCode, n8nDailySyncResultCode)
+	}
+
+	const fixedTime = "2026-10-31T03:04:05.678Z"
+	const harness = `
+const jsCode = Buffer.from(process.argv[1], 'base64').toString('utf8');
+const expectedCode = Buffer.from(process.argv[2], 'base64').toString('utf8');
+if (jsCode !== expectedCode) throw new Error('decoded jsCode is not byte-identical');
+const RealDate = Date;
+class FixedDate extends RealDate {
+  constructor(...args) {
+    if (args.length !== 0) throw new Error('production code supplied unexpected Date arguments');
+    super(process.argv[3]);
+  }
+}
+const execute = new Function('Date', jsCode);
+process.stdout.write(JSON.stringify(execute(FixedDate)));
+`
+	encodedCode := base64.StdEncoding.EncodeToString([]byte(jsCode))
+	encodedExpected := base64.StdEncoding.EncodeToString([]byte(n8nDailySyncResultCode))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, nodePath, "-e", harness, encodedCode, encodedExpected, fixedTime) //nolint:gosec // fixed executable and static test script
+	output, err := command.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("execute daily result code: %v", ctx.Err())
+	}
+	if err != nil {
+		t.Fatalf("execute daily result code: %v\n%s", err, output)
+	}
+	want := `[{"json":{"workflow":"daily-sync","status":"ok","finishedAt":"` + fixedTime + `"}}]`
+	if string(output) != want {
+		t.Fatalf("daily result envelope = %s, want exact %s", output, want)
 	}
 }
 
 func TestN8NOnDemandScanPinsCompleteWorkflowTopology(t *testing.T) {
 	t.Parallel()
 
-	path := filepath.Join("..", "..", "deploy", "n8n", "on-demand-scan.json")
-	data, err := os.ReadFile(path) //nolint:gosec // static repository fixture path
-	if err != nil {
-		t.Fatalf("read on-demand-scan.json: %v", err)
-	}
+	workflow := readN8NWorkflow(t, "on-demand-scan.json")
+	assertN8NDisabled(t, workflow, "on-demand scan")
+	nodes := indexN8NNodes(t, workflow.Nodes, "on-demand scan")
+	assertN8NNodeTuples(t, nodes, "on-demand scan", map[string]n8nNodeTuple{
+		"Webhook":  {ID: "webhook", Type: "n8n-nodes-base.webhook", TypeVersion: 1},
+		"Run Scan": {ID: "run-scan", Type: "n8n-nodes-base.executeCommand", TypeVersion: 1},
+		"Respond":  {ID: "respond", Type: "n8n-nodes-base.respondToWebhook", TypeVersion: 1},
+	})
+	assertN8NNodesHaveNoErrorOverrides(t, workflow.Nodes, "on-demand scan")
 
-	var workflow struct {
-		Active bool `json:"active"`
-		Nodes  []struct {
-			Name       string         `json:"name"`
-			Type       string         `json:"type"`
-			Parameters map[string]any `json:"parameters"`
-		} `json:"nodes"`
-		Connections map[string]map[string][][]struct {
-			Node  string `json:"node"`
-			Type  string `json:"type"`
-			Index int    `json:"index"`
-		} `json:"connections"`
-	}
-	if err := json.Unmarshal(data, &workflow); err != nil {
-		t.Fatalf("parse on-demand-scan.json: %v", err)
-	}
-	if workflow.Active {
-		t.Fatal("on-demand scan workflow must remain disabled by default")
-	}
-	if len(workflow.Nodes) != 3 {
-		t.Fatalf("on-demand scan node count = %d, want exactly 3", len(workflow.Nodes))
-	}
-
-	nodes := make(map[string]struct {
-		Type       string
-		Parameters map[string]any
-	}, len(workflow.Nodes))
-	for _, node := range workflow.Nodes {
-		if _, duplicate := nodes[node.Name]; duplicate {
-			t.Fatalf("on-demand scan has duplicate node name %q", node.Name)
-		}
-		nodes[node.Name] = struct {
-			Type       string
-			Parameters map[string]any
-		}{Type: node.Type, Parameters: node.Parameters}
-	}
-	for name, wantType := range map[string]string{
-		"Webhook":  "n8n-nodes-base.webhook",
-		"Run Scan": "n8n-nodes-base.executeCommand",
-		"Respond":  "n8n-nodes-base.respondToWebhook",
-	} {
-		node, ok := nodes[name]
-		if !ok || node.Type != wantType {
-			t.Fatalf("on-demand scan node %q = %+v, want type %q", name, node, wantType)
-		}
-	}
-
-	for key, want := range map[string]string{
+	wantWebhookParameters := map[string]any{
 		"httpMethod":     "POST",
 		"path":           "packmon/scan",
 		"authentication": "headerAuth",
 		"responseMode":   "responseNode",
-	} {
-		if got := nodes["Webhook"].Parameters[key]; got != want {
-			t.Fatalf("webhook parameter %q = %#v, want %q", key, got, want)
-		}
 	}
-	if got := nodes["Respond"].Parameters["respondWith"]; got != "json" {
-		t.Fatalf("response format = %#v, want json", got)
+	if got := nodes["Webhook"].Parameters; !reflect.DeepEqual(got, wantWebhookParameters) {
+		t.Fatalf("webhook parameters = %#v, want exact %#v", got, wantWebhookParameters)
+	}
+	wantCredentials := map[string]any{
+		"httpHeaderAuth": map[string]any{
+			"id":   "replace-with-packmon-webhook-header-auth",
+			"name": "Packmon On-Demand Webhook Header Auth",
+		},
+	}
+	if got := nodes["Webhook"].Credentials; !reflect.DeepEqual(got, wantCredentials) {
+		t.Fatalf("webhook credentials = %#v, want exact %#v", got, wantCredentials)
+	}
+	if got, want := nodes["Run Scan"].Parameters, map[string]any{"command": "sh /opt/packmon/n8n/on-demand-scan.sh"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("run-scan parameters = %#v, want exact %#v", got, want)
 	}
 
-	assertN8NMainConnection(t, workflow.Connections, "Webhook", "Run Scan")
-	assertN8NMainConnection(t, workflow.Connections, "Run Scan", "Respond")
-	if len(workflow.Connections) != 2 {
-		t.Fatalf("on-demand scan connection sources = %d, want exactly 2", len(workflow.Connections))
+	const responseBody = `={"workflow":"on-demand-scan","status":"completed"}`
+	wantRespondParameters := map[string]any{"respondWith": "json", "responseBody": responseBody}
+	if got := nodes["Respond"].Parameters; !reflect.DeepEqual(got, wantRespondParameters) {
+		t.Fatalf("respond parameters = %#v, want exact %#v", got, wantRespondParameters)
 	}
-}
+	var response map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(responseBody, "=")), &response); err != nil {
+		t.Fatalf("parse responseBody literal: %v", err)
+	}
+	wantResponse := map[string]any{"workflow": "on-demand-scan", "status": "completed"}
+	if !reflect.DeepEqual(response, wantResponse) {
+		t.Fatalf("responseBody JSON = %#v, want exact %#v", response, wantResponse)
+	}
 
-func assertN8NMainConnection(t *testing.T, connections map[string]map[string][][]struct {
-	Node  string `json:"node"`
-	Type  string `json:"type"`
-	Index int    `json:"index"`
-}, from, wantNode string,
-) {
-	t.Helper()
-	branches := connections[from]["main"]
-	if len(branches) != 1 || len(branches[0]) != 1 {
-		t.Fatalf("connection %q main = %#v, want one target", from, branches)
+	wantConnections := n8nConnections{
+		"Webhook":  {"main": {{{Node: "Run Scan", Type: "main", Index: 0}}}},
+		"Run Scan": {"main": {{{Node: "Respond", Type: "main", Index: 0}}}},
 	}
-	target := branches[0][0]
-	if target.Node != wantNode || target.Type != "main" || target.Index != 0 {
-		t.Fatalf("connection %q target = %+v, want main -> %q index 0", from, target, wantNode)
+	if !reflect.DeepEqual(workflow.Connections, wantConnections) {
+		t.Fatalf("on-demand connections = %#v, want exact map %#v", workflow.Connections, wantConnections)
 	}
 }
 
@@ -441,102 +460,57 @@ func TestN8NWeeklyMaintenanceDoesNotWriteUnusedExportFile(t *testing.T) {
 func TestN8NWeeklyMaintenanceUsesConfiguredMetricsURL(t *testing.T) {
 	t.Parallel()
 
-	path := filepath.Join("..", "..", "deploy", "n8n", "weekly-maintenance.json")
-	data, err := os.ReadFile(path) //nolint:gosec // static repository fixture path
-	if err != nil {
-		t.Fatalf("read weekly-maintenance.json: %v", err)
+	workflow := readN8NWorkflow(t, "weekly-maintenance.json")
+	if err := validateN8NWeeklyMetricsRequest(workflow); err != nil {
+		t.Fatalf("weekly maintenance metrics request: %v", err)
 	}
 
-	var workflow struct {
-		Nodes []struct {
-			Type       string         `json:"type"`
-			Parameters map[string]any `json:"parameters"`
-		} `json:"nodes"`
+	mutations := map[string]func(*n8nWorkflow){
+		"altered URL expression": func(mutated *n8nWorkflow) {
+			for i := range mutated.Nodes {
+				if mutated.Nodes[i].Name == "Fetch Metrics" {
+					mutated.Nodes[i].Parameters["url"] = "prefix={{$env.PACKMON_METRICS_URL}}"
+				}
+			}
+		},
+		"nonempty request options": func(mutated *n8nWorkflow) {
+			for i := range mutated.Nodes {
+				if mutated.Nodes[i].Name == "Fetch Metrics" {
+					mutated.Nodes[i].Parameters["options"] = map[string]any{"timeout": float64(1000)}
+				}
+			}
+		},
+		"additional HTTP destination": func(mutated *n8nWorkflow) {
+			extra := mutated.Nodes[1]
+			extra.ID = "unexpected-request"
+			extra.Name = "Unexpected Request"
+			mutated.Nodes = append(mutated.Nodes, extra)
+		},
 	}
-	if err := json.Unmarshal(data, &workflow); err != nil {
-		t.Fatalf("parse weekly-maintenance.json: %v", err)
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			mutated := cloneN8NWorkflow(t, workflow)
+			mutate(&mutated)
+			if err := validateN8NWeeklyMetricsRequest(mutated); err == nil {
+				t.Fatal("mutated workflow unexpectedly satisfied the exact metrics-request contract")
+			}
+		})
 	}
-
-	for _, node := range workflow.Nodes {
-		if node.Type != "n8n-nodes-base.httpRequest" {
-			continue
-		}
-		url, ok := node.Parameters["url"].(string)
-		if !ok {
-			t.Fatalf("weekly maintenance metrics URL has type %T, want string", node.Parameters["url"])
-		}
-		if !strings.Contains(url, "PACKMON_METRICS_URL") {
-			t.Fatalf("weekly maintenance must use PACKMON_METRICS_URL, got %q", url)
-		}
-		if strings.Contains(url, "127.0.0.1:9090") || strings.Contains(url, "localhost") {
-			t.Fatalf("weekly maintenance must not hard-code a localhost metrics URL, got %q", url)
-		}
-		return
-	}
-	t.Fatal("weekly maintenance workflow has no httpRequest node")
 }
 
 func TestN8NWeeklyMaintenancePinsTopology(t *testing.T) {
 	t.Parallel()
 
-	path := filepath.Join("..", "..", "deploy", "n8n", "weekly-maintenance.json")
-	data, err := os.ReadFile(path) //nolint:gosec // static repository fixture path
-	if err != nil {
-		t.Fatalf("read weekly-maintenance.json: %v", err)
-	}
+	workflow := readN8NWorkflow(t, "weekly-maintenance.json")
+	assertN8NDisabled(t, workflow, "weekly maintenance")
+	nodes := indexN8NNodes(t, workflow.Nodes, "weekly maintenance")
+	assertN8NNodeTuples(t, nodes, "weekly maintenance", map[string]n8nNodeTuple{
+		"Weekly Trigger": {ID: "weekly-trigger", Type: "n8n-nodes-base.scheduleTrigger", TypeVersion: 1},
+		"Fetch Metrics":  {ID: "fetch-metrics", Type: "n8n-nodes-base.httpRequest", TypeVersion: 4},
+	})
+	assertN8NNodesHaveNoErrorOverrides(t, workflow.Nodes, "weekly maintenance")
 
-	var workflow struct {
-		Active bool `json:"active"`
-		Nodes  []struct {
-			ID         string         `json:"id"`
-			Name       string         `json:"name"`
-			Type       string         `json:"type"`
-			Parameters map[string]any `json:"parameters"`
-		} `json:"nodes"`
-		Connections map[string]map[string][][]struct {
-			Node  string `json:"node"`
-			Type  string `json:"type"`
-			Index int    `json:"index"`
-		} `json:"connections"`
-	}
-	if err := json.Unmarshal(data, &workflow); err != nil {
-		t.Fatalf("parse weekly-maintenance.json: %v", err)
-	}
-	if workflow.Active {
-		t.Fatal("weekly maintenance workflow must be disabled by default")
-	}
-	if len(workflow.Nodes) != 2 {
-		t.Fatalf("weekly maintenance nodes = %d, want 2", len(workflow.Nodes))
-	}
-
-	nodes := make(map[string]struct {
-		ID         string
-		Type       string
-		Parameters map[string]any
-	}, len(workflow.Nodes))
-	ids := make(map[string]struct{}, len(workflow.Nodes))
-	for _, node := range workflow.Nodes {
-		if node.Name == "" || node.ID == "" {
-			t.Fatalf("weekly maintenance node must have name and id: %+v", node)
-		}
-		if _, exists := nodes[node.Name]; exists {
-			t.Fatalf("duplicate weekly maintenance node name %q", node.Name)
-		}
-		if _, exists := ids[node.ID]; exists {
-			t.Fatalf("duplicate weekly maintenance node id %q", node.ID)
-		}
-		nodes[node.Name] = struct {
-			ID         string
-			Type       string
-			Parameters map[string]any
-		}{node.ID, node.Type, node.Parameters}
-		ids[node.ID] = struct{}{}
-	}
-
-	trigger, ok := nodes["Weekly Trigger"]
-	if !ok || trigger.Type != "n8n-nodes-base.scheduleTrigger" {
-		t.Fatalf("weekly trigger = %+v, want schedule trigger", trigger)
-	}
+	trigger := nodes["Weekly Trigger"]
 	rule, ok := trigger.Parameters["rule"].(map[string]any)
 	if !ok {
 		t.Fatalf("weekly trigger rule = %#v, want object", trigger.Parameters["rule"])
@@ -549,13 +523,137 @@ func TestN8NWeeklyMaintenancePinsTopology(t *testing.T) {
 	if !ok || interval["field"] != "cronExpression" || interval["expression"] != "0 4 * * 0" {
 		t.Fatalf("weekly trigger interval = %#v, want Sunday 04:00 cron", intervals[0])
 	}
+	wantTriggerParameters := map[string]any{"rule": map[string]any{"interval": []any{map[string]any{
+		"field": "cronExpression", "expression": "0 4 * * 0",
+	}}}}
+	if got := trigger.Parameters; !reflect.DeepEqual(got, wantTriggerParameters) {
+		t.Fatalf("weekly trigger parameters = %#v, want exact %#v", got, wantTriggerParameters)
+	}
 
-	fetch, ok := nodes["Fetch Metrics"]
-	if !ok || fetch.Type != "n8n-nodes-base.httpRequest" {
-		t.Fatalf("fetch metrics node = %+v, want HTTP request", fetch)
+	wantConnections := n8nConnections{
+		"Weekly Trigger": {"main": {{{Node: "Fetch Metrics", Type: "main", Index: 0}}}},
 	}
-	assertN8NMainConnection(t, workflow.Connections, "Weekly Trigger", "Fetch Metrics")
-	if len(workflow.Connections) != 1 {
-		t.Fatalf("weekly maintenance connection sources = %d, want exactly 1", len(workflow.Connections))
+	if !reflect.DeepEqual(workflow.Connections, wantConnections) {
+		t.Fatalf("weekly maintenance connections = %#v, want exact map %#v", workflow.Connections, wantConnections)
 	}
+}
+
+type n8nNodeTuple struct {
+	ID          string
+	Type        string
+	TypeVersion int
+}
+
+func readN8NWorkflow(t *testing.T, name string) n8nWorkflow {
+	t.Helper()
+
+	path := filepath.Join("..", "..", "deploy", "n8n", name)
+	data, err := os.ReadFile(path) //nolint:gosec // static repository fixture path
+	if err != nil {
+		t.Fatalf("read %s: %v", name, err)
+	}
+	var workflow n8nWorkflow
+	if err := json.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("parse %s: %v", name, err)
+	}
+	return workflow
+}
+
+func cloneN8NWorkflow(t *testing.T, workflow n8nWorkflow) n8nWorkflow {
+	t.Helper()
+
+	data, err := json.Marshal(workflow)
+	if err != nil {
+		t.Fatalf("marshal workflow clone: %v", err)
+	}
+	var cloned n8nWorkflow
+	if err := json.Unmarshal(data, &cloned); err != nil {
+		t.Fatalf("unmarshal workflow clone: %v", err)
+	}
+	return cloned
+}
+
+func assertN8NDisabled(t *testing.T, workflow n8nWorkflow, label string) {
+	t.Helper()
+
+	if workflow.Active == nil {
+		t.Fatalf("%s workflow is missing active=false", label)
+	}
+	if *workflow.Active {
+		t.Fatalf("%s workflow must remain disabled by default", label)
+	}
+}
+
+func indexN8NNodes(t *testing.T, workflowNodes []n8nWorkflowNode, label string) map[string]n8nWorkflowNode {
+	t.Helper()
+
+	nodes := make(map[string]n8nWorkflowNode, len(workflowNodes))
+	ids := make(map[string]struct{}, len(workflowNodes))
+	for _, node := range workflowNodes {
+		if node.Name == "" || node.ID == "" {
+			t.Fatalf("%s node must have name and id: %+v", label, node)
+		}
+		if _, duplicate := nodes[node.Name]; duplicate {
+			t.Fatalf("%s has duplicate node name %q", label, node.Name)
+		}
+		if _, duplicate := ids[node.ID]; duplicate {
+			t.Fatalf("%s has duplicate node id %q", label, node.ID)
+		}
+		nodes[node.Name] = node
+		ids[node.ID] = struct{}{}
+	}
+	return nodes
+}
+
+func assertN8NNodeTuples(t *testing.T, nodes map[string]n8nWorkflowNode, label string, want map[string]n8nNodeTuple) {
+	t.Helper()
+
+	if len(nodes) != len(want) {
+		t.Fatalf("%s node count = %d, want exactly %d", label, len(nodes), len(want))
+	}
+	for name, wantTuple := range want {
+		node, ok := nodes[name]
+		if !ok {
+			t.Fatalf("%s is missing node %q", label, name)
+		}
+		got := n8nNodeTuple{ID: node.ID, Type: node.Type, TypeVersion: node.TypeVersion}
+		if got != wantTuple {
+			t.Fatalf("%s node %q tuple = %+v, want %+v", label, name, got, wantTuple)
+		}
+	}
+}
+
+func assertN8NNodesHaveNoErrorOverrides(t *testing.T, nodes []n8nWorkflowNode, label string) {
+	t.Helper()
+
+	for _, node := range nodes {
+		if len(node.ContinueOnFail) != 0 || len(node.OnError) != 0 {
+			t.Fatalf("%s node %q overrides failure propagation: continueOnFail=%s onError=%s", label, node.Name, node.ContinueOnFail, node.OnError)
+		}
+	}
+}
+
+func validateN8NWeeklyMetricsRequest(workflow n8nWorkflow) error {
+	const httpRequestType = "n8n-nodes-base.httpRequest"
+	wantParameters := map[string]any{
+		"url":     "={{$env.PACKMON_METRICS_URL}}",
+		"options": map[string]any{},
+	}
+	httpNodes := 0
+	for _, node := range workflow.Nodes {
+		if node.Type != httpRequestType {
+			continue
+		}
+		httpNodes++
+		if node.Name != "Fetch Metrics" {
+			return fmt.Errorf("unexpected HTTP request node %q", node.Name)
+		}
+		if !reflect.DeepEqual(node.Parameters, wantParameters) {
+			return fmt.Errorf("Fetch Metrics parameters = %#v, want exact %#v", node.Parameters, wantParameters)
+		}
+	}
+	if httpNodes != 1 {
+		return fmt.Errorf("HTTP request node count = %d, want exactly 1", httpNodes)
+	}
+	return nil
 }
