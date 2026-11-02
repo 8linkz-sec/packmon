@@ -7,7 +7,13 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"path/filepath"
 	"reflect"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -242,6 +248,7 @@ func TestF149F152MigrationContractsAgainstPostgres(t *testing.T) {
 		f149F152ApplyThrough(t, leaf, 21)
 		f149F152SeedQueue(t, leaf)
 		before := f149F152QueueSnapshot(t, leaf)
+		unrelatedIndexOID, unrelatedIndexDefinition := f149F152QueueIndexIdentity(t, leaf, "idx_queue_priority")
 
 		f149F152Apply(t, leaf, 22, MigrationDirectionUp)
 		f149F152AssertQueueIndex(t, leaf, true)
@@ -255,8 +262,18 @@ func TestF149F152MigrationContractsAgainstPostgres(t *testing.T) {
 		if got := f149F152QueueSnapshot(t, leaf); got != before {
 			t.Fatalf("022 down changed queue rows\ngot:  %s\nwant: %s", got, before)
 		}
+		f149F152AssertQueueIndexIdentity(t, leaf, "idx_queue_priority", unrelatedIndexOID, unrelatedIndexDefinition)
+
+		f149F152ApplyDownAndDelete(t, leaf, 22)
+		f149F152AssertQueueIndex(t, leaf, false)
+		if got := f149F152QueueSnapshot(t, leaf); got != before {
+			t.Fatalf("repeated 022 down with target index absent changed queue rows\ngot:  %s\nwant: %s", got, before)
+		}
+		f149F152AssertQueueIndexIdentity(t, leaf, "idx_queue_priority", unrelatedIndexOID, unrelatedIndexDefinition)
+
 		f149F152Apply(t, leaf, 22, MigrationDirectionUp)
 		f149F152AssertQueueIndex(t, leaf, true)
+		f149F152AssertQueueIndexIdentity(t, leaf, "idx_queue_priority", unrelatedIndexOID, unrelatedIndexDefinition)
 		f149F152AssertPrunePlan(t, leaf, true)
 
 		store, err := postgresstore.New(leaf.ctx, leaf.dsn, nil, &postgresstore.PoolConfig{MaxConns: 1, MinConns: 1})
@@ -291,7 +308,7 @@ func TestF149F152MigrationContractsAgainstPostgres(t *testing.T) {
 		if err := rows.Err(); err != nil {
 			t.Fatalf("iterate retained queue IDs: %v", err)
 		}
-		if want := []int64{2203, 2204, 2205}; !reflect.DeepEqual(ids, want) {
+		if want := []int64{2203, 2204, 2205, 2206}; !reflect.DeepEqual(ids, want) {
 			t.Fatalf("retained queue IDs = %v, want %v", ids, want)
 		}
 	})
@@ -521,7 +538,8 @@ func f149F152SeedQueue(t *testing.T, leaf f149F152Leaf) {
 		(2202,'pypi','old-error','ghsa',1,'error','2000-01-03Z',NULL,'fixture'),
 		(2203,'go','fresh-done','osv',1,'done','2999-01-01Z','2999-01-02Z',NULL),
 		(2204,'maven','old-pending','osv',1,'pending','2000-01-04Z',NULL,NULL),
-		(2205,'cargo','old-paused','ghsa',1,'paused','2000-01-05Z',NULL,NULL)`)
+		(2205,'cargo','old-paused','ghsa',1,'paused','2000-01-05Z',NULL,NULL),
+		(2206,'npm','old-request-recently-done','osv',1,'done','2000-01-06Z','2999-01-03Z',NULL)`)
 }
 
 func f149F152QueueSnapshot(t *testing.T, leaf f149F152Leaf) string {
@@ -556,10 +574,34 @@ func f149F152AssertQueueIndex(t *testing.T, leaf f149F152Leaf, want bool) {
 	}
 }
 
+func f149F152QueueIndexIdentity(t *testing.T, leaf f149F152Leaf, name string) (int64, string) {
+	t.Helper()
+	var oid int64
+	var definition string
+	if err := leaf.conn.QueryRowContext(leaf.ctx, `
+		SELECT i.indexrelid::bigint,pg_get_indexdef(i.indexrelid)
+		FROM pg_index i
+		WHERE i.indexrelid=to_regclass($1)`, name).Scan(&oid, &definition); err != nil {
+		t.Fatalf("inspect queue index %s identity: %v", name, err)
+	}
+	return oid, definition
+}
+
+func f149F152AssertQueueIndexIdentity(t *testing.T, leaf f149F152Leaf, name string, wantOID int64, wantDefinition string) {
+	t.Helper()
+	gotOID, gotDefinition := f149F152QueueIndexIdentity(t, leaf, name)
+	if gotOID != wantOID || gotDefinition != wantDefinition {
+		t.Fatalf("queue index %s identity = oid:%d definition:%q, want oid:%d definition:%q", name, gotOID, gotDefinition, wantOID, wantDefinition)
+	}
+}
+
 func f149F152AssertPrunePlan(t *testing.T, leaf f149F152Leaf, checkGeneric bool) {
 	t.Helper()
 	if got, want := packmondb.TerminalRefreshStatuses(), []string{"done", "error"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("TerminalRefreshStatuses() = %v, want %v for the production prune plan", got, want)
+	}
+	if production, prepared := f149F152NormalizeSQL(f149F152PruneRefreshQueueSourceSQL(t)), f149F152NormalizeSQL(f149F152ProductionPruneSQL); prepared != production {
+		t.Fatalf("prepared prune SQL = %q, production PruneRefreshQueue SQL = %q", prepared, production)
 	}
 	f149F152Exec(t, leaf, `SET enable_seqscan=off`)
 	f149F152Exec(t, leaf, `PREPARE f152_prune(timestamptz,text[]) AS `+f149F152ProductionPruneSQL)
@@ -587,6 +629,54 @@ func f149F152AssertPrunePlan(t *testing.T, leaf f149F152Leaf, checkGeneric bool)
 		}
 	})
 	f149F152Exec(t, leaf, `DEALLOCATE f152_prune`)
+}
+
+func f149F152PruneRefreshQueueSourceSQL(t *testing.T) string {
+	t.Helper()
+	_, currentFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("locate migration contract test source")
+	}
+	productionFile := filepath.Join(filepath.Dir(currentFile), "..", "refresh_queue_admin.go")
+	parsed, err := parser.ParseFile(token.NewFileSet(), productionFile, nil, 0)
+	if err != nil {
+		t.Fatalf("parse production refresh queue source: %v", err)
+	}
+	var queries []string
+	for _, declaration := range parsed.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if !ok || function.Name.Name != "PruneRefreshQueue" || function.Body == nil {
+			continue
+		}
+		ast.Inspect(function.Body, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok || len(call.Args) < 2 {
+				return true
+			}
+			selector, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || selector.Sel.Name != "Exec" {
+				return true
+			}
+			literal, ok := call.Args[1].(*ast.BasicLit)
+			if !ok || literal.Kind != token.STRING {
+				return true
+			}
+			query, err := strconv.Unquote(literal.Value)
+			if err != nil {
+				t.Fatalf("decode production prune SQL literal: %v", err)
+			}
+			queries = append(queries, query)
+			return true
+		})
+	}
+	if len(queries) != 1 {
+		t.Fatalf("PruneRefreshQueue production Exec SQL literals = %d, want exactly 1", len(queries))
+	}
+	return queries[0]
+}
+
+func f149F152NormalizeSQL(query string) string {
+	return strings.Join(strings.Fields(query), " ")
 }
 
 func f149F152ExplainPreparedPrune(t *testing.T, leaf f149F152Leaf) []byte {
