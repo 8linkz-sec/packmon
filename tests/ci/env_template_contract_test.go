@@ -78,18 +78,6 @@ PACKMON_REVERSINGLABS_EXCLUDED_NAMESPACES`)
 	for key, count := range seen {
 		t.Errorf(".env.example has unexpected or misspelled assignment %s (%d occurrences)", key, count)
 	}
-	t.Run("known missing package-check retention", func(t *testing.T) {
-		var missing []string
-		for _, key := range wantKeys {
-			if seenCount := countAssignments(assignments, key); seenCount == 0 {
-				missing = append(missing, key)
-			}
-		}
-		if !slices.Equal(missing, []string{knownMissing}) {
-			t.Fatalf("missing template keys = %v, want exact F002-bugs-2 omission [%s]", missing, knownMissing)
-		}
-		t.Skip("OPEN F002-bugs-2: .env.example omits PACKMON_PACKAGE_CHECK_STATUS_RETENTION=2160h")
-	})
 }
 
 func TestEnvExampleKeepsBootstrapSecretsEmptyAndOptionalCredentialsCommented(t *testing.T) {
@@ -196,32 +184,82 @@ func TestEnvExampleImageOverridesAreDigestPinnedAndMatchRuntimeDefaults(t *testi
 	}
 }
 
-func TestEnvExamplePinsRefreshQueueRetentionAndIdentityMode(t *testing.T) {
+func TestEnvExamplePinsRefreshQueueRetention(t *testing.T) {
 	t.Parallel()
 
 	assignments := parseEnvTemplateAssignments(t, repoFile(t, ".env.example"))
-	values := make(map[string]string, len(assignments))
+	var active []envTemplateAssignment
 	for _, assignment := range assignments {
-		if !assignment.commented {
-			values[assignment.key] = assignment.value
+		if assignment.key == "PACKMON_REFRESH_QUEUE_RETENTION" && !assignment.commented {
+			active = append(active, assignment)
 		}
 	}
-	if got := values["PACKMON_REFRESH_QUEUE_RETENTION"]; got != "720h" {
-		t.Fatalf("PACKMON_REFRESH_QUEUE_RETENTION = %q, want 720h", got)
+	if len(active) != 1 {
+		t.Fatalf("active PACKMON_REFRESH_QUEUE_RETENTION assignments = %d, want exactly one", len(active))
 	}
-	if got := values["PACKMON_SCAN_LOG_IDENTITY_MODE"]; got != "full" {
-		t.Fatalf("PACKMON_SCAN_LOG_IDENTITY_MODE = %q, want full", got)
+	if got := active[0].value; got != "720h" {
+		t.Fatalf("PACKMON_REFRESH_QUEUE_RETENTION = %q, want 720h", got)
 	}
 }
 
-func countAssignments(assignments []envTemplateAssignment, key string) int {
-	count := 0
+func TestEnvExamplePinsPackageCheckStatusRetention(t *testing.T) {
+	t.Parallel()
+
+	const key = "PACKMON_PACKAGE_CHECK_STATUS_RETENTION"
+	text := repoFile(t, ".env.example")
+	assignments := parseEnvTemplateAssignments(t, text)
+	if t.Failed() {
+		t.FailNow()
+	}
+
+	var matches []envTemplateAssignment
 	for _, assignment := range assignments {
 		if assignment.key == key {
-			count++
+			matches = append(matches, assignment)
 		}
 	}
-	return count
+	fragmentCount := 0
+	for _, line := range strings.Split(text, "\n") {
+		if strings.Contains(line, key) {
+			fragmentCount++
+		}
+	}
+	if len(matches) == 0 {
+		if fragmentCount != 0 {
+			t.Fatalf(".env.example contains %d malformed or commented %s fragments without a structured assignment", fragmentCount, key)
+		}
+		t.Skip("OPEN F002-bugs-2: .env.example wholly omits PACKMON_PACKAGE_CHECK_STATUS_RETENTION=2160h")
+	}
+	if fragmentCount != len(matches) {
+		t.Fatalf(".env.example contains %d %s fragments but only %d structured assignments", fragmentCount, key, len(matches))
+	}
+	if len(matches) != 1 {
+		t.Fatalf("%s assignments = %d, want exactly one active assignment", key, len(matches))
+	}
+	if matches[0].commented {
+		t.Fatalf("%s is commented, want one active assignment", key)
+	}
+	if got := matches[0].value; got != "2160h" {
+		t.Fatalf("%s = %q, want 2160h", key, got)
+	}
+}
+
+func TestEnvExamplePinsScanLogIdentityMode(t *testing.T) {
+	t.Parallel()
+
+	assignments := parseEnvTemplateAssignments(t, repoFile(t, ".env.example"))
+	var active []envTemplateAssignment
+	for _, assignment := range assignments {
+		if assignment.key == "PACKMON_SCAN_LOG_IDENTITY_MODE" && !assignment.commented {
+			active = append(active, assignment)
+		}
+	}
+	if len(active) != 1 {
+		t.Fatalf("active PACKMON_SCAN_LOG_IDENTITY_MODE assignments = %d, want exactly one", len(active))
+	}
+	if got := active[0].value; got != "full" {
+		t.Fatalf("PACKMON_SCAN_LOG_IDENTITY_MODE = %q, want full", got)
+	}
 }
 
 func parseEnvTemplateAssignments(t *testing.T, text string) []envTemplateAssignment {
