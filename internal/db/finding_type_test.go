@@ -18,6 +18,9 @@ func TestFindingTypeForMaliciousRiskType(t *testing.T) {
 		{riskType: "supply_chain", want: domain.FindingTypeSupplyChainRisk},
 		{riskType: "typosquatting", want: domain.FindingTypeSupplyChainRisk},
 		{riskType: " SUPPLY_CHAIN ", want: domain.FindingTypeSupplyChainRisk},
+		{riskType: " TyPoSqUaTtInG ", want: domain.FindingTypeSupplyChainRisk},
+		{riskType: "", want: domain.FindingTypeMalicious},
+		{riskType: "supply-chain", want: domain.FindingTypeMalicious},
 		{riskType: "unknown", want: domain.FindingTypeMalicious},
 	}
 

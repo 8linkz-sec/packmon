@@ -61,6 +61,52 @@ func TestSetAdminAuditDetail(t *testing.T) {
 	}
 }
 
+func TestSetAdminAuditDetailJSONBoundaries(t *testing.T) {
+	t.Parallel()
+
+	for _, initial := range []json.RawMessage{nil, {}, json.RawMessage(`null`), json.RawMessage(`{}`)} {
+		entry := &AdminAuditEntry{Details: initial}
+		if err := SetAdminAuditDetail(entry, "unicode", "snowman ☃"); err != nil {
+			t.Fatalf("SetAdminAuditDetail(%q) error = %v", initial, err)
+		}
+		var got map[string]string
+		if err := json.Unmarshal(entry.Details, &got); err != nil {
+			t.Fatalf("details %s are invalid JSON: %v", entry.Details, err)
+		}
+		if !reflect.DeepEqual(got, map[string]string{"unicode": "snowman ☃"}) {
+			t.Fatalf("details from %q = %#v", initial, got)
+		}
+	}
+
+	entry := &AdminAuditEntry{Details: json.RawMessage(`{"same":"old","preserved":"value"}`)}
+	if err := SetAdminAuditDetail(entry, "same", "new"); err != nil {
+		t.Fatalf("SetAdminAuditDetail(overwrite) error = %v", err)
+	}
+	var got map[string]string
+	if err := json.Unmarshal(entry.Details, &got); err != nil {
+		t.Fatalf("details %s are invalid JSON: %v", entry.Details, err)
+	}
+	if !reflect.DeepEqual(got, map[string]string{"same": "new", "preserved": "value"}) {
+		t.Fatalf("overwritten details = %#v", got)
+	}
+
+	for _, invalid := range []json.RawMessage{
+		json.RawMessage(`[]`),
+		json.RawMessage(`{"number":1}`),
+		json.RawMessage(`{"nested":{}}`),
+		json.RawMessage(`true`),
+	} {
+		entry := &AdminAuditEntry{Details: invalid}
+		before := string(entry.Details)
+		if err := SetAdminAuditDetail(entry, "x", "y"); err == nil {
+			t.Fatalf("SetAdminAuditDetail(%s) error = nil", invalid)
+		}
+		if string(entry.Details) != before {
+			t.Fatalf("failed update mutated details from %s to %s", before, entry.Details)
+		}
+	}
+}
+
 func TestSetAdminAuditQueueJobsDetail(t *testing.T) {
 	t.Parallel()
 
@@ -156,6 +202,71 @@ func TestSetAdminAuditQueueJobsDetailOmitsAbsentTimestamps(t *testing.T) {
 			if _, ok := row[key]; !ok {
 				t.Fatalf("row %d missing identity key %s: %s", i, key, details["jobs"])
 			}
+		}
+	}
+}
+
+func TestSetAdminAuditQueueJobsDetailSerializationBoundaries(t *testing.T) {
+	t.Parallel()
+
+	if err := SetAdminAuditQueueJobsDetail(nil, "jobs", nil); err != nil {
+		t.Fatalf("SetAdminAuditQueueJobsDetail(nil entry) error = %v", err)
+	}
+
+	entry := &AdminAuditEntry{Details: json.RawMessage(`{"preserved":"yes","jobs":"old"}`)}
+	if err := SetAdminAuditQueueJobsDetail(entry, "jobs", nil); err != nil {
+		t.Fatalf("SetAdminAuditQueueJobsDetail(nil jobs) error = %v", err)
+	}
+	var details map[string]string
+	if err := json.Unmarshal(entry.Details, &details); err != nil {
+		t.Fatalf("details JSON = %s: %v", entry.Details, err)
+	}
+	if details["preserved"] != "yes" || details["jobs"] != "[]" {
+		t.Fatalf("nil jobs details = %#v, want preserved field and []", details)
+	}
+
+	requested := time.Date(2026, 6, 24, 12, 0, 0, 123456789, time.FixedZone("CEST", 2*60*60))
+	processed := time.Date(2026, 6, 24, 11, 0, 1, 987654321, time.UTC)
+	jobs := []RefreshJob{
+		{
+			ID: 9, Ecosystem: "pypi", Name: "private-package", Source: "socket", Priority: 0,
+			Status: "error", RequestedAt: requested, ProcessedAt: &processed,
+			Error: strings.Repeat("a", 511) + "é" + strings.Repeat("z", 50),
+		},
+		{ID: -1, Priority: -1, Error: "line one\nline two\twith control\x00suffix"},
+	}
+	if err := SetAdminAuditQueueJobsDetail(entry, "jobs", jobs); err != nil {
+		t.Fatalf("SetAdminAuditQueueJobsDetail(boundaries) error = %v", err)
+	}
+	if err := json.Unmarshal(entry.Details, &details); err != nil {
+		t.Fatalf("details JSON = %s: %v", entry.Details, err)
+	}
+	var rows []map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(details["jobs"]), &rows); err != nil {
+		t.Fatalf("jobs detail JSON = %s: %v", details["jobs"], err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("serialized jobs = %d, want 2", len(rows))
+	}
+	var decoded []adminAuditQueueJob
+	if err := json.Unmarshal([]byte(details["jobs"]), &decoded); err != nil {
+		t.Fatalf("decode jobs: %v", err)
+	}
+	if got, want := decoded[0].RequestedAt, "2026-06-24T10:00:00.123456789Z"; got != want {
+		t.Fatalf("requested_at = %q, want %q", got, want)
+	}
+	if got, want := decoded[0].ProcessedAt, "2026-06-24T11:00:01.987654321Z"; got != want {
+		t.Fatalf("processed_at = %q, want %q", got, want)
+	}
+	if len(decoded[0].Error) > 512 {
+		t.Fatalf("bounded error length = %d, want at most 512 bytes", len(decoded[0].Error))
+	}
+	if strings.ContainsAny(decoded[1].Error, "\n\r\t\x00") {
+		t.Fatalf("control characters remain in error %q", decoded[1].Error)
+	}
+	for _, key := range []string{"requested_at", "processed_at"} {
+		if _, ok := rows[1][key]; ok {
+			t.Fatalf("zero timestamp row contains %s: %s", key, details["jobs"])
 		}
 	}
 }
