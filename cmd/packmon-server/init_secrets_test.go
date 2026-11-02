@@ -1,7 +1,11 @@
 package main
 
 import (
+	"encoding/base64"
+	"errors"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -163,6 +167,54 @@ func TestInitSecretsDoesNotWarnForMatchingOrMirroredDatabasePasswords(t *testing
 	}
 }
 
+type initSecretsErrorWriter struct{}
+
+func (initSecretsErrorWriter) Write([]byte) (int, error) {
+	return 0, errors.New("output failure")
+}
+
+func TestInitSecretsPropagatesOutputErrors(t *testing.T) {
+	key := base64.StdEncoding.EncodeToString(make([]byte, 32))
+	for _, tt := range []struct {
+		name     string
+		postgres string
+		database string
+		stdout   io.Writer
+		stderr   io.Writer
+	}{
+		{
+			name:     "status output",
+			postgres: "same-password",
+			database: "same-password",
+			stdout:   initSecretsErrorWriter{},
+			stderr:   &strings.Builder{},
+		},
+		{
+			name:     "warning output",
+			postgres: "postgres-password",
+			database: "database-password",
+			stdout:   &strings.Builder{},
+			stderr:   initSecretsErrorWriter{},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			env := filepath.Join(t.TempDir(), ".env")
+			content := "POSTGRES_PASSWORD=" + tt.postgres + "\n" +
+				"PACKMON_DB_PASSWORD=" + tt.database + "\n" +
+				"PACKMON_ADMIN_INITIAL_PASSWORD=admin-password\n" +
+				"PACKMON_ENCRYPTION_KEY=" + key + "\n" +
+				"PACKMON_ADMIN_AUDIT_HMAC_KEY=" + key + "\n"
+			if err := os.WriteFile(env, []byte(content), 0o600); err != nil {
+				t.Fatalf("write fixture .env: %v", err)
+			}
+			err := initSecrets([]string{"--env", env}, tt.stdout, tt.stderr)
+			if err == nil || err.Error() != "output failure" {
+				t.Fatalf("initSecrets error = %v, want output failure", err)
+			}
+		})
+	}
+}
+
 func TestRunInitSecretsSeedsFromExample(t *testing.T) {
 	dir := t.TempDir()
 	example := filepath.Join(dir, ".env.example")
@@ -202,6 +254,94 @@ func TestRunInitSecretsSeedsFromExample(t *testing.T) {
 		if fi, _ := os.Stat(env); fi.Mode().Perm() != 0o600 {
 			t.Fatalf("perm = %v, want 0600", fi.Mode().Perm())
 		}
+	}
+}
+
+// TestInitSecretsBootstrapsTrackedTemplateForCompose covers the real checkout
+// handoff: the tracked template is completed without losing comments, its
+// generated secrets stay out of command output, and Docker Compose accepts the
+// resulting env file.
+func TestInitSecretsBootstrapsTrackedTemplateForCompose(t *testing.T) {
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("resolve repository root: %v", err)
+	}
+	example := filepath.Join(repoRoot, ".env.example")
+	exampleBefore, err := os.ReadFile(example) // #nosec G304 -- fixed tracked repository fixture path.
+	if err != nil {
+		t.Fatalf("read tracked .env.example: %v", err)
+	}
+	env := filepath.Join(t.TempDir(), ".env")
+
+	var stdout, stderr strings.Builder
+	if err := initSecrets([]string{"--env", env, "--example", example}, &stdout, &stderr); err != nil {
+		t.Fatalf("init-secrets from tracked template: %v", err)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("init-secrets emitted an unexpected warning: %q", stderr.String())
+	}
+	data, err := os.ReadFile(env) //nolint:gosec // test reads a path built from t.TempDir().
+	if err != nil {
+		t.Fatalf("read generated .env: %v", err)
+	}
+	if len(data) == 0 || data[len(data)-1] != '\n' {
+		t.Fatal("generated .env must be non-empty and LF-terminated")
+	}
+	entries := envfile.Parse(data)
+	output := stdout.String() + stderr.String()
+	for _, spec := range config.RequiredSecrets() {
+		value, ok := envfile.Value(entries, spec.Key)
+		if !ok {
+			t.Fatalf("generated .env is missing %s", spec.Key)
+		}
+		if err := spec.Validate(value); err != nil {
+			t.Fatalf("generated %s is invalid: %v", spec.Key, err)
+		}
+		if strings.Contains(output, value) {
+			t.Fatalf("init-secrets output leaks generated %s", spec.Key)
+		}
+	}
+	for _, raw := range strings.Split(string(exampleBefore), "\n") {
+		if line := strings.TrimSpace(raw); strings.HasPrefix(line, "#") && !strings.Contains(string(data), raw) {
+			t.Fatalf("generated .env lost tracked template comment %q", raw)
+		}
+	}
+	for _, key := range []string{
+		"PACKMON_FEED_IMPORT_SECRET",
+		"PACKMON_VULNCHECK_API_KEY",
+		"PACKMON_NVD_API_KEY",
+		"PACKMON_SOCKET_API_KEY",
+		"PACKMON_REVERSINGLABS_API_KEY",
+	} {
+		if !strings.Contains(string(data), "# "+key+"=") {
+			t.Fatalf("generated .env lost commented optional credential %s", key)
+		}
+	}
+	exampleAfter, err := os.ReadFile(example) // #nosec G304 -- fixed tracked repository fixture path.
+	if err != nil {
+		t.Fatalf("re-read tracked .env.example: %v", err)
+	}
+	if string(exampleAfter) != string(exampleBefore) {
+		t.Fatal("init-secrets modified the tracked .env.example")
+	}
+
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skipf("Docker Compose unavailable; generated env-file render not executed: %v", err)
+	}
+	version := exec.Command("docker", "compose", "version") // #nosec G204 -- fixed availability probe.
+	if output, err := version.CombinedOutput(); err != nil {
+		t.Skipf("Docker Compose unavailable; generated env-file render not executed: %v: %s", err, output)
+	}
+	cmd := exec.Command( // #nosec G204 -- fixed Compose arguments and test/repository paths.
+		"docker", "compose",
+		"--env-file", env,
+		"--project-directory", repoRoot,
+		"-f", filepath.Join(repoRoot, "docker-compose.yml"),
+		"-f", filepath.Join(repoRoot, "docker-compose.override.yml"),
+		"config", "--quiet",
+	)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("docker compose rejected generated .env: %v:\n%s", err, output)
 	}
 }
 
