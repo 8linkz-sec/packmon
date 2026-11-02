@@ -293,6 +293,8 @@ func TestF103F105PostgresContracts(t *testing.T) {
 			{name: "normal-late", priority: 3, requested: base.Add(2 * time.Microsecond), status: db.RefreshStatusPending},
 			{name: "high", priority: 1, requested: base.Add(3 * time.Microsecond), status: db.RefreshStatusPending},
 			{name: "normal-early", priority: 3, requested: base, status: db.RefreshStatusPending},
+			{name: "tie-first", priority: 2, requested: base.Add(5 * time.Microsecond), status: db.RefreshStatusPending},
+			{name: "tie-second", priority: 2, requested: base.Add(5 * time.Microsecond), status: db.RefreshStatusPending},
 			{name: "paused", priority: 0, requested: base, status: db.RefreshStatusPaused},
 		}
 		ids := map[string]int{}
@@ -303,9 +305,12 @@ func TestF103F105PostgresContracts(t *testing.T) {
 			}
 			ids[item.name] = id
 		}
+		if ids["tie-first"] >= ids["tie-second"] {
+			t.Fatalf("equal-priority/equal-time IDs = %d/%d, want first ID lower", ids["tie-first"], ids["tie-second"])
+		}
 		created, pos, err := store.EnqueueRefresh(ctx, &db.RefreshJob{Ecosystem: "npm", Name: prefix + "-new", Source: source, Priority: 2})
-		if err != nil || !created || pos != 2 {
-			t.Fatalf("EnqueueRefresh(new) = %v/%d/%v, want true/2/nil", created, pos, err)
+		if err != nil || !created || pos != 4 {
+			t.Fatalf("EnqueueRefresh(new) = %v/%d/%v, want true/4/nil", created, pos, err)
 		}
 		created, pos, err = store.EnqueueRefresh(ctx, &db.RefreshJob{Ecosystem: "npm", Name: prefix + "-normal-late", Source: source, Priority: 0})
 		if err != nil || created || pos != 1 {
@@ -314,6 +319,19 @@ func TestF103F105PostgresContracts(t *testing.T) {
 		_, priority, _, _ := f103F105QueueRow(t, ctx, store, ids["normal-late"])
 		if priority != 0 {
 			t.Fatalf("improved priority = %d, want 0", priority)
+		}
+		for _, tt := range []struct {
+			name string
+			want int
+		}{
+			{name: "tie-first", want: 3},
+			{name: "tie-second", want: 4},
+			{name: "new", want: 5},
+		} {
+			created, position, err := store.EnqueueRefresh(ctx, &db.RefreshJob{Ecosystem: "npm", Name: prefix + "-" + tt.name, Source: source, Priority: 2})
+			if err != nil || created || position != tt.want {
+				t.Fatalf("EnqueueRefresh(position %s) = %v/%d/%v, want false/%d/nil", tt.name, created, position, err, tt.want)
+			}
 		}
 		_, _, err = store.EnqueueRefresh(ctx, &db.RefreshJob{Ecosystem: "npm", Name: prefix + "-normal-late", Source: source, Priority: 3})
 		if err != nil {
@@ -332,7 +350,7 @@ func TestF103F105PostgresContracts(t *testing.T) {
 			t.Fatalf("paused duplicate status = %s", status)
 		}
 		var dequeued []string
-		for i := 0; i < 4; i++ {
+		for i := 0; i < 6; i++ {
 			job, err := store.DequeueRefresh(ctx, source)
 			if err != nil || job == nil {
 				t.Fatalf("DequeueRefresh(%d) = %+v, %v", i, job, err)
@@ -342,7 +360,7 @@ func TestF103F105PostgresContracts(t *testing.T) {
 				t.Fatalf("complete dequeued job: %v", err)
 			}
 		}
-		want := []string{prefix + "-normal-late", prefix + "-high", prefix + "-new", prefix + "-normal-early"}
+		want := []string{prefix + "-normal-late", prefix + "-high", prefix + "-tie-first", prefix + "-tie-second", prefix + "-new", prefix + "-normal-early"}
 		if fmt.Sprint(dequeued) != fmt.Sprint(want) {
 			t.Fatalf("dequeue order = %v, want %v", dequeued, want)
 		}
@@ -357,6 +375,7 @@ func TestF103F105PostgresContracts(t *testing.T) {
 		defer cancel()
 		source, name := prefix+"-concurrent", prefix+"-same"
 		start := make(chan struct{})
+		ready := make(chan struct{}, 2)
 		results := make(chan struct {
 			created bool
 			err     error
@@ -366,6 +385,7 @@ func TestF103F105PostgresContracts(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
+				ready <- struct{}{}
 				<-start
 				created, _, err := store.EnqueueRefresh(ctx, &db.RefreshJob{Ecosystem: "npm", Name: name, Source: source, Priority: db.RefreshPriorityNormal})
 				results <- struct {
@@ -373,6 +393,13 @@ func TestF103F105PostgresContracts(t *testing.T) {
 					err     error
 				}{created: created, err: err}
 			}()
+		}
+		for i := 0; i < 2; i++ {
+			select {
+			case <-ready:
+			case <-ctx.Done():
+				t.Fatalf("concurrent enqueue worker %d did not reach rendezvous: %v", i, ctx.Err())
+			}
 		}
 		close(start)
 		wg.Wait()
@@ -489,25 +516,39 @@ func TestF103F105PostgresContracts(t *testing.T) {
 		}
 		old, young := now.Add(-2*time.Hour), now.Add(-30*time.Minute)
 		var oldID, youngID, nullID, otherID int
-		seed := func(name, src string, processed *time.Time) int {
+		seed := func(name, src string, processed *time.Time, diagnostic string) int {
 			var id int
-			if err := store.pool.QueryRow(ctx, `INSERT INTO refresh_queue(ecosystem,name,source,priority,status,processed_at) VALUES('npm',$1,$2,1,'processing',$3) RETURNING id`, name, src, processed).Scan(&id); err != nil {
+			if err := store.pool.QueryRow(ctx, `INSERT INTO refresh_queue(ecosystem,name,source,priority,status,processed_at,error) VALUES('npm',$1,$2,1,'processing',$3,$4) RETURNING id`, name, src, processed, diagnostic).Scan(&id); err != nil {
 				t.Fatalf("seed ownership row: %v", err)
 			}
 			return id
 		}
-		oldID = seed(prefix+"-old", source, &old)
-		youngID = seed(prefix+"-young", source, &young)
-		nullID = seed(prefix+"-null", source, nil)
-		otherID = seed(prefix+"-other", source+"-other", &old)
+		oldID = seed(prefix+"-old", source, &old, "seed-error-old")
+		youngID = seed(prefix+"-young", source, &young, "seed-error-young")
+		nullID = seed(prefix+"-null", source, nil, "seed-error-null")
+		otherID = seed(prefix+"-other", source+"-other", &old, "seed-error-other")
 		reset, err := store.ResetStuckJobs(ctx, source, time.Hour)
 		if err != nil || reset != 1 {
 			t.Fatalf("ResetStuckJobs = %d, %v, want 1", reset, err)
 		}
-		for id, want := range map[int]string{oldID: db.RefreshStatusPending, youngID: db.RefreshStatusProcessing, nullID: db.RefreshStatusProcessing, otherID: db.RefreshStatusProcessing} {
-			status, _, _, _ := f103F105QueueRow(t, ctx, store, id)
-			if status != want {
-				t.Fatalf("row %d status=%s, want %s", id, status, want)
+		type queueState struct {
+			id          int
+			status      string
+			processedAt *time.Time
+			diagnostic  *string
+		}
+		stringPtr := func(value string) *string { return &value }
+		for _, want := range []queueState{
+			{id: oldID, status: db.RefreshStatusPending},
+			{id: youngID, status: db.RefreshStatusProcessing, processedAt: &young, diagnostic: stringPtr("seed-error-young")},
+			{id: nullID, status: db.RefreshStatusProcessing, diagnostic: stringPtr("seed-error-null")},
+			{id: otherID, status: db.RefreshStatusProcessing, processedAt: &old, diagnostic: stringPtr("seed-error-other")},
+		} {
+			status, _, processedAt, diagnostic := f103F105QueueRow(t, ctx, store, want.id)
+			processedMatches := processedAt == nil && want.processedAt == nil || processedAt != nil && want.processedAt != nil && processedAt.Equal(*want.processedAt)
+			diagnosticMatches := diagnostic == nil && want.diagnostic == nil || diagnostic != nil && want.diagnostic != nil && *diagnostic == *want.diagnostic
+			if status != want.status || !processedMatches || !diagnosticMatches {
+				t.Fatalf("row %d state=%s/%v/%v, want %s/%v/%v", want.id, status, processedAt, diagnostic, want.status, want.processedAt, want.diagnostic)
 			}
 		}
 		if err := store.CompleteRefresh(ctx, youngID, errors.New("explicit completion error")); err != nil {
@@ -527,11 +568,13 @@ func TestF103F105PostgresContracts(t *testing.T) {
 			t.Fatalf("claim reset row = %+v, %v", claimed, err)
 		}
 		equivalent := claimed.ProcessedAt.In(time.FixedZone("offset", 9*60*60))
-		if err := store.CompleteClaimedRefresh(ctx, claimed.ID, &equivalent, errors.New(strings.Repeat("ä", 600))); err != nil {
+		longErr := errors.New(strings.Repeat("ä", 600))
+		if err := store.CompleteClaimedRefresh(ctx, claimed.ID, &equivalent, longErr); err != nil {
 			t.Fatalf("complete equivalent claim: %v", err)
 		}
 		status, _, completedAt, diagnostic := f103F105QueueRow(t, ctx, store, claimed.ID)
-		if status != db.RefreshStatusError || completedAt == nil || diagnostic == nil || len(*diagnostic) > 512 || !utf8.ValidString(*diagnostic) {
+		wantDiagnostic := refreshQueueErrorText(longErr)
+		if status != db.RefreshStatusError || completedAt == nil || completedAt.Before(*claimed.ProcessedAt) || diagnostic == nil || *diagnostic != wantDiagnostic || len(*diagnostic) > 512 || !utf8.ValidString(*diagnostic) {
 			t.Fatalf("completed error row = %s/%v/%v", status, completedAt, diagnostic)
 		}
 		var reclaimID int
@@ -542,9 +585,12 @@ func TestF103F105PostgresContracts(t *testing.T) {
 		if err != nil || first == nil || first.ID != reclaimID {
 			t.Fatalf("first reclaim claim = %+v, %v", first, err)
 		}
-		f103F105Exec(t, ctx, store, `UPDATE refresh_queue SET processed_at=$2 WHERE id=$1`, reclaimID, old)
+		f103F105Exec(t, ctx, store, `UPDATE refresh_queue SET processed_at=$2,error='stale-claim-error' WHERE id=$1`, reclaimID, old)
 		if n, err := store.ResetStuckJobs(ctx, source, time.Hour); err != nil || n != 1 {
 			t.Fatalf("reset reclaimed = %d, %v", n, err)
+		}
+		if status, _, processedAt, diagnostic := f103F105QueueRow(t, ctx, store, reclaimID); status != db.RefreshStatusPending || processedAt != nil || diagnostic != nil {
+			t.Fatalf("reset reclaimed state = %s/%v/%v, want pending/nil/nil", status, processedAt, diagnostic)
 		}
 		second, err := store.DequeueRefresh(ctx, source)
 		if err != nil || second == nil || second.ID != reclaimID || second.ProcessedAt == nil {
@@ -553,16 +599,23 @@ func TestF103F105PostgresContracts(t *testing.T) {
 		if err := store.CompleteClaimedRefresh(ctx, reclaimID, first.ProcessedAt, nil); err != nil {
 			t.Fatalf("stale completion: %v", err)
 		}
-		status, _, _, _ = f103F105QueueRow(t, ctx, store, reclaimID)
-		if status != db.RefreshStatusProcessing {
-			t.Fatalf("stale completion status = %s, want processing", status)
+		status, _, staleProcessedAt, staleDiagnostic := f103F105QueueRow(t, ctx, store, reclaimID)
+		if status != db.RefreshStatusProcessing || staleProcessedAt == nil || !staleProcessedAt.Equal(*second.ProcessedAt) || staleDiagnostic != nil {
+			t.Fatalf("stale completion state = %s/%v/%v, want unchanged processing/%v/nil", status, staleProcessedAt, staleDiagnostic, second.ProcessedAt)
+		}
+		var beforeComplete, afterComplete time.Time
+		if err := store.pool.QueryRow(ctx, `SELECT date_trunc('microseconds', clock_timestamp())`).Scan(&beforeComplete); err != nil {
+			t.Fatalf("database clock before current completion: %v", err)
 		}
 		if err := store.CompleteClaimedRefresh(ctx, reclaimID, second.ProcessedAt, nil); err != nil {
 			t.Fatalf("current completion: %v", err)
 		}
-		status, _, _, _ = f103F105QueueRow(t, ctx, store, reclaimID)
-		if status != db.RefreshStatusDone {
-			t.Fatalf("current completion status = %s", status)
+		if err := store.pool.QueryRow(ctx, `SELECT date_trunc('microseconds', clock_timestamp())`).Scan(&afterComplete); err != nil {
+			t.Fatalf("database clock after current completion: %v", err)
+		}
+		status, _, currentProcessedAt, currentDiagnostic := f103F105QueueRow(t, ctx, store, reclaimID)
+		if status != db.RefreshStatusDone || currentProcessedAt == nil || currentProcessedAt.Before(beforeComplete) || currentProcessedAt.After(afterComplete) || currentDiagnostic != nil {
+			t.Fatalf("current completion state = %s/%v/%v, want done within [%v,%v] with nil error", status, currentProcessedAt, currentDiagnostic, beforeComplete, afterComplete)
 		}
 		if err := store.CompleteClaimedRefresh(ctx, reclaimID, nil, nil); err == nil || !strings.Contains(err.Error(), "missing claim timestamp") {
 			t.Fatalf("nil claim completion error = %v", err)
@@ -824,14 +877,18 @@ func TestF103F105PostgresContracts(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ExportSync(delta): %v", err)
 		}
-		seenCanonical := false
+		seenUpdatedPyPI := false
+		seenInsertedNuGet := false
 		for _, item := range exported.Vulnerabilities {
-			if item.ID == ids[1] && ((item.Ecosystem == "pypi" && item.Name == "requests-pkg") || (item.Ecosystem == "nuget" && item.Name == "newtonsoft.json")) {
-				seenCanonical = true
+			if item.ID == ids[1] && item.Ecosystem == "pypi" && item.Name == "requests-pkg" {
+				seenUpdatedPyPI = true
+			}
+			if item.ID == ids[1] && item.Ecosystem == "nuget" && item.Name == "newtonsoft.json" {
+				seenInsertedNuGet = true
 			}
 		}
-		if !seenCanonical {
-			t.Fatalf("delta export missing canonical repaired row: %+v", exported.Vulnerabilities)
+		if !seenUpdatedPyPI || !seenInsertedNuGet {
+			t.Fatalf("delta export updated PyPI/inserted NuGet = %v/%v, want both; rows: %+v", seenUpdatedPyPI, seenInsertedNuGet, exported.Vulnerabilities)
 		}
 		f103F105Exec(t, ctx, store, `DELETE FROM vulnerabilities WHERE id=ANY($1)`, ids)
 		var remaining int
