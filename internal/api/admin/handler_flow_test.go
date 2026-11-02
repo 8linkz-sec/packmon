@@ -304,16 +304,10 @@ func (s *adminFlowStoreStub) DeleteAPIKeyWithAudit(_ context.Context, keyID int,
 	if s.apiKeys[index].RevokedAt == nil {
 		return fmt.Errorf("api key %d is not revoked", keyID)
 	}
-	if s.apiKeys[index].DeletedAt != nil {
-		return fmt.Errorf("api key %d not found", keyID)
-	}
 	if err := s.insertAdminAuditLogLocked(audit); err != nil {
 		return err
 	}
-	now := time.Now().UTC()
-	s.apiKeys[index].DeletedAt = &now
-	s.apiKeys[index].Name = ""
-	s.apiKeys[index].KeyHash = fmt.Sprintf("deleted:%d", keyID)
+	s.apiKeys = append(s.apiKeys[:index], s.apiKeys[index+1:]...)
 	return nil
 }
 
@@ -323,13 +317,7 @@ func (s *adminFlowStoreStub) deleteAPIKeyLocked(keyID int) error {
 			if s.apiKeys[i].RevokedAt == nil {
 				return fmt.Errorf("api key %d is not revoked", keyID)
 			}
-			if s.apiKeys[i].DeletedAt != nil {
-				return fmt.Errorf("api key %d not found", keyID)
-			}
-			now := time.Now().UTC()
-			s.apiKeys[i].DeletedAt = &now
-			s.apiKeys[i].Name = ""
-			s.apiKeys[i].KeyHash = fmt.Sprintf("deleted:%d", keyID)
+			s.apiKeys = append(s.apiKeys[:i], s.apiKeys[i+1:]...)
 			return nil
 		}
 	}
@@ -1615,8 +1603,8 @@ func TestAdminKeyLifecycleUsesFlashAndAudit(t *testing.T) {
 		t.Fatalf("HandleKeyDelete status = %d, want 303", rec.Code)
 	}
 	keys, _ = store.ListAPIKeys(context.Background())
-	if len(keys) != 1 || keys[0].DeletedAt == nil || keys[0].Name != "" || keys[0].KeyHash == "" || keys[0].KeyHash == "hash-ci" || keys[0].RevokedAt == nil || keys[0].ExpiresAt == nil {
-		t.Fatalf("keys after delete = %+v, want soft-deleted lifecycle metadata retained with label/hash scrubbed", keys)
+	if len(keys) != 0 {
+		t.Fatalf("keys after delete = %+v, want permanent removal", keys)
 	}
 
 	audit, err = store.ListAdminAuditLog(context.Background(), 10)
@@ -1779,8 +1767,8 @@ func TestHandleKeyRevokeDeleteEnforceGuardsMutateStateAndAudit(t *testing.T) {
 				if err != nil {
 					t.Fatalf("ListAPIKeys() error = %v", err)
 				}
-				if len(keys) != 1 || keys[0].ID != 18 || keys[0].Name != "" || keys[0].KeyHash == "" || keys[0].KeyHash == "hash-delete" || keys[0].RevokedAt == nil || keys[0].DeletedAt == nil {
-					t.Fatalf("keys after delete = %+v, want soft-deleted key with label/hash scrubbed", keys)
+				if len(keys) != 0 {
+					t.Fatalf("keys after delete = %+v, want permanent removal", keys)
 				}
 			},
 			auditDetails: map[string]string{

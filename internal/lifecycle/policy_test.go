@@ -208,7 +208,7 @@ func TestLifecycleSearchQueriesUsePolicyParameters(t *testing.T) {
 	t.Parallel()
 
 	checks := map[string][]string{
-		"../db/postgres/admin_stats.go": {
+		"../db/postgres/package_search.go": {
 			"INTERVAL '90 days'",
 			"'CRITICAL' AS severity",
 			"THEN 'MEDIUM'",

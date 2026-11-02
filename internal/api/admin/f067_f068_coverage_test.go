@@ -371,7 +371,7 @@ func TestF068RegisterRoutesDispatchesEveryPOSTMutation(t *testing.T) {
 			},
 			assertState: func(t *testing.T, store *adminFlowStoreStub, _ *auth.SessionManager, _ *http.Request, _ *httptest.ResponseRecorder) {
 				keys, err := store.ListAPIKeys(context.Background())
-				if err != nil || len(keys) != 1 || keys[0].DeletedAt == nil || keys[0].Name != "" {
+				if err != nil || len(keys) != 0 {
 					t.Fatalf("keys after delete = %+v, err %v", keys, err)
 				}
 			},
