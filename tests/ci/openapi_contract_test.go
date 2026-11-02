@@ -2176,7 +2176,7 @@ func TestOpenAPIDocumentsPackageDetailResponse(t *testing.T) {
 	hasRefreshSuffixDocumentation := false
 	for _, raw := range parameters {
 		parameter, ok := raw.(map[string]any)
-		if !ok || parameter["in"] != "query" {
+		if !ok {
 			continue
 		}
 		if parameter["name"] == "version" && parameter["in"] == "query" {
