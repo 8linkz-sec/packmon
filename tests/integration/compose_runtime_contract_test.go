@@ -43,10 +43,52 @@ type composeRuntimeHarness struct {
 
 type composeRuntimeScenario struct {
 	h       *composeRuntimeHarness
+	t       *testing.T
 	dir     string
 	project string
 	files   []string
 	envFile string
+}
+
+func TestComposeRuntimeScenarioAttributesFailureToChild(t *testing.T) {
+	const helperEnv = "PACKMON_COMPOSE_SCENARIO_CHILD_FAILURE_HELPER"
+	if os.Getenv(helperEnv) == "1" {
+		h := &composeRuntimeHarness{t: t}
+		t.Run("child", func(t *testing.T) {
+			s := &composeRuntimeScenario{
+				h:       h,
+				t:       t,
+				envFile: filepath.Join(t.TempDir(), "missing", "runtime.env"),
+			}
+			s.env("PACKMON_SERVER_PORT", "8080")
+		})
+		t.Run("sibling", func(t *testing.T) {
+			t.Log("sibling ran after the expected child failure")
+		})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestComposeRuntimeScenarioAttributesFailureToChild$", "-test.v") // #nosec G204 -- executes the current test binary with fixed arguments
+	cmd.Env = append(os.Environ(), helperEnv+"=1")
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("child-attribution helper timed out: %v", ctx.Err())
+	}
+	if err == nil {
+		t.Fatalf("child-attribution helper unexpectedly passed:\n%s", output)
+	}
+	text := string(output)
+	for _, want := range []string{
+		"--- FAIL: TestComposeRuntimeScenarioAttributesFailureToChild/child",
+		"--- PASS: TestComposeRuntimeScenarioAttributesFailureToChild/sibling",
+		"sibling ran after the expected child failure",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("child-attribution helper output does not contain %q:\n%s", want, text)
+		}
+	}
 }
 
 func TestComposeRuntimeContracts(t *testing.T) {
@@ -513,6 +555,7 @@ func (h *composeRuntimeHarness) newScenario(t *testing.T, composeNames []string,
 	writeRuntimeEnv(t, envFile, h.secrets)
 	s := &composeRuntimeScenario{
 		h:       h,
+		t:       t,
 		dir:     dir,
 		project: "packmoncontract" + strconv.FormatInt(time.Now().UnixNano(), 36),
 		files:   files,
@@ -523,18 +566,19 @@ func (h *composeRuntimeHarness) newScenario(t *testing.T, composeNames []string,
 }
 
 func (s *composeRuntimeScenario) env(key, value string) {
-	s.h.t.Helper()
+	s.t.Helper()
 	data, err := os.ReadFile(s.envFile)
 	if err != nil {
-		s.h.t.Fatalf("read test-owned environment file: %v", err)
+		s.t.Fatalf("read test-owned environment file: %v", err)
 	}
 	data = append(data, []byte(key+"="+value+"\n")...)
 	if err := os.WriteFile(s.envFile, data, 0o600); err != nil {
-		s.h.t.Fatalf("update test-owned environment file: %v", err)
+		s.t.Fatalf("update test-owned environment file: %v", err)
 	}
 }
 
 func (s *composeRuntimeScenario) composeArgs(args ...string) []string {
+	s.t.Helper()
 	result := []string{"compose", "--env-file", s.envFile, "--project-name", s.project}
 	for _, file := range s.files {
 		result = append(result, "-f", file)
@@ -543,6 +587,7 @@ func (s *composeRuntimeScenario) composeArgs(args ...string) []string {
 }
 
 func (s *composeRuntimeScenario) command(timeout time.Duration, args ...string) (string, string, error) {
+	s.t.Helper()
 	ctx, cancel, effectiveTimeout, ok := s.h.workContext(timeout)
 	if !ok {
 		return "", "", fmt.Errorf("Compose runtime work budget exhausted before docker compose %s", args[0])
@@ -559,20 +604,22 @@ func (s *composeRuntimeScenario) command(timeout time.Duration, args ...string) 
 }
 
 func (s *composeRuntimeScenario) run(timeout time.Duration, args ...string) string {
-	s.h.t.Helper()
+	s.t.Helper()
 	output, diagnostic, err := s.command(timeout, args...)
 	if err != nil {
-		s.h.t.Fatalf("docker compose %s: %v: %s", args[0], err, s.diagnostic(diagnostic))
+		s.t.Fatalf("docker compose %s: %v: %s", args[0], err, s.diagnostic(diagnostic))
 	}
 	return output
 }
 
 func (s *composeRuntimeScenario) runAllowFailure(timeout time.Duration, args ...string) string {
+	s.t.Helper()
 	output, _, _ := s.command(timeout, args...)
 	return output
 }
 
 func (s *composeRuntimeScenario) down() {
+	s.t.Helper()
 	ctx, cancel, _, ok := s.h.cleanupContext(time.Minute)
 	if !ok {
 		return
@@ -585,11 +632,12 @@ func (s *composeRuntimeScenario) down() {
 }
 
 func (s *composeRuntimeScenario) downKeepVolumes() {
+	s.t.Helper()
 	s.run(time.Minute, "down", "--remove-orphans")
 }
 
 func (s *composeRuntimeScenario) waitHealthy(service string, timeout time.Duration) {
-	s.h.t.Helper()
+	s.t.Helper()
 	deadline := earlierTime(time.Now().Add(timeout), s.h.deadline.Add(-composeRuntimeCleanupBudget))
 	for time.Now().Before(deadline) {
 		id := strings.TrimSpace(s.runAllowFailure(30*time.Second, "ps", "-q", service))
@@ -601,21 +649,21 @@ func (s *composeRuntimeScenario) waitHealthy(service string, timeout time.Durati
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
-	s.h.t.Fatalf("%s did not become healthy: %s", service, s.diagnostic(s.runAllowFailure(30*time.Second, "ps", "-a")))
+	s.t.Fatalf("%s did not become healthy: %s", service, s.diagnostic(s.runAllowFailure(30*time.Second, "ps", "-a")))
 }
 
 func (s *composeRuntimeScenario) publishedPort(service, target string) string {
-	s.h.t.Helper()
+	s.t.Helper()
 	output := strings.TrimSpace(s.run(30*time.Second, "port", service, target))
 	_, port, ok := strings.Cut(output, ":")
 	if !ok || port == "" {
-		s.h.t.Fatalf("parse published port from %q", output)
+		s.t.Fatalf("parse published port from %q", output)
 	}
 	return port
 }
 
 func (s *composeRuntimeScenario) waitHTTP(address string, timeout time.Duration) {
-	s.h.t.Helper()
+	s.t.Helper()
 	deadline := earlierTime(time.Now().Add(timeout), s.h.deadline.Add(-composeRuntimeCleanupBudget))
 	client := &http.Client{Timeout: 2 * time.Second}
 	for time.Now().Before(deadline) {
@@ -629,11 +677,11 @@ func (s *composeRuntimeScenario) waitHTTP(address string, timeout time.Duration)
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
-	s.h.t.Fatalf("HTTP endpoint did not become ready: %s; services: %s", strings.ReplaceAll(address, s.dir, "[TMP]"), s.diagnostic(s.runAllowFailure(30*time.Second, "ps", "-a")))
+	s.t.Fatalf("HTTP endpoint did not become ready: %s; services: %s", strings.ReplaceAll(address, s.dir, "[TMP]"), s.diagnostic(s.runAllowFailure(30*time.Second, "ps", "-a")))
 }
 
 func (s *composeRuntimeScenario) waitContainerMetrics(timeout time.Duration) string {
-	s.h.t.Helper()
+	s.t.Helper()
 	deadline := earlierTime(time.Now().Add(timeout), s.h.deadline.Add(-composeRuntimeCleanupBudget))
 	for time.Now().Before(deadline) {
 		output, _, err := s.command(30*time.Second, "exec", "-T", "packmon-server", "/bin/busybox", "wget", "-qO-", "http://127.0.0.1:9090/metrics")
@@ -642,34 +690,35 @@ func (s *composeRuntimeScenario) waitContainerMetrics(timeout time.Duration) str
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
-	s.h.t.Fatalf("in-container metrics endpoint did not become ready: %s", s.diagnostic(s.runAllowFailure(30*time.Second, "logs", "--no-color", "packmon-server")))
+	s.t.Fatalf("in-container metrics endpoint did not become ready: %s", s.diagnostic(s.runAllowFailure(30*time.Second, "logs", "--no-color", "packmon-server")))
 	return ""
 }
 
 func (s *composeRuntimeScenario) startPostgresAndMigrate() {
-	s.h.t.Helper()
+	s.t.Helper()
 	s.run(2*time.Minute, "up", "-d", "postgres")
 	s.waitHealthy("postgres", 2*time.Minute)
 	s.run(2*time.Minute, "run", "--rm", "--no-deps", "packmon-migrate")
 }
 
 func (s *composeRuntimeScenario) startMigratedServer() {
-	s.h.t.Helper()
+	s.t.Helper()
 	s.startPostgresAndMigrate()
 	s.run(2*time.Minute, "up", "-d", "--no-deps", "packmon-server")
 }
 
 func (s *composeRuntimeScenario) assertNoProviderActivity() {
-	s.h.t.Helper()
+	s.t.Helper()
 	logs := strings.ToLower(s.runAllowFailure(30*time.Second, "logs", "--no-color", "packmon-server"))
 	for _, marker := range []string{"starting provider sync", "starting feed sync", "provider lookup started", "external lookup started"} {
 		if strings.Contains(logs, marker) {
-			s.h.t.Fatalf("server logs show prohibited provider egress marker %q: %s", marker, s.diagnostic(logs))
+			s.t.Fatalf("server logs show prohibited provider egress marker %q: %s", marker, s.diagnostic(logs))
 		}
 	}
 }
 
 func (s *composeRuntimeScenario) diagnostic(output string) string {
+	s.t.Helper()
 	output = strings.ReplaceAll(output, s.dir, "[SCENARIO]")
 	output = strings.ReplaceAll(output, filepath.ToSlash(s.dir), "[SCENARIO]")
 	return s.h.diagnostic(output)
