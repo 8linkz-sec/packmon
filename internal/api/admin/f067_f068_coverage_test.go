@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -18,6 +19,7 @@ import (
 	"github.com/8linkz-sec/packmon/internal/config"
 	"github.com/8linkz-sec/packmon/internal/db"
 	"github.com/8linkz-sec/packmon/internal/requestctx"
+	"github.com/8linkz-sec/packmon/internal/web"
 )
 
 type f067QueueReadStore struct {
@@ -130,33 +132,35 @@ func TestF067QueueJobActionsRejectInvalidIDsWithoutMutation(t *testing.T) {
 		{name: "resume", target: "/admin/queue/resume", action: "queue_resume", startState: db.RefreshStatusPaused, call: (*AdminHandler).HandleQueueResume},
 		{name: "retry", target: "/admin/queue/retry", action: "queue_retry", startState: db.RefreshStatusError, call: (*AdminHandler).HandleQueueRetry},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			store := newAdminStoreStub()
-			jobID := store.addQueueJob(tc.startState)
-			h, sm, _ := newAdminFlowHandler(t, store, adminFlowConfig())
-			req, _ := authenticatedAdminFormRequest(t, sm, tc.target, url.Values{"job_id": {"not-an-id"}})
-			rec := httptest.NewRecorder()
+		for _, invalidID := range []string{"not-an-id", "0", "-1"} {
+			t.Run(tc.name+"/"+invalidID, func(t *testing.T) {
+				store := newAdminStoreStub()
+				jobID := store.addQueueJob(tc.startState)
+				h, sm, _ := newAdminFlowHandler(t, store, adminFlowConfig())
+				req, _ := authenticatedAdminFormRequest(t, sm, tc.target, url.Values{"job_id": {invalidID}})
+				rec := httptest.NewRecorder()
 
-			tc.call(h, rec, req)
+				tc.call(h, rec, req)
 
-			if rec.Code != http.StatusSeeOther || !strings.Contains(rec.Header().Get("Location"), "Invalid+queue+job+ID") {
-				t.Fatalf("invalid %s response = %d %q, want invalid-ID redirect", tc.name, rec.Code, rec.Header().Get("Location"))
-			}
-			jobs, err := store.ListQueueJobs(context.Background(), "", 10)
-			if err != nil {
-				t.Fatalf("ListQueueJobs: %v", err)
-			}
-			if len(jobs) != 1 || jobs[0].ID != jobID || jobs[0].Status != tc.startState {
-				t.Fatalf("jobs after invalid %s = %+v, want unchanged %s job %d", tc.name, jobs, tc.startState, jobID)
-			}
-			audit, err := store.ListAdminAuditLog(context.Background(), 10)
-			if err != nil {
-				t.Fatalf("ListAdminAuditLog: %v", err)
-			}
-			if adminFlowAuditContains(audit, tc.action) {
-				t.Fatalf("invalid %s recorded %s audit: %+v", tc.name, tc.action, audit)
-			}
-		})
+				if rec.Code != http.StatusSeeOther || !strings.Contains(rec.Header().Get("Location"), "Invalid+queue+job+ID") {
+					t.Fatalf("invalid %s ID %q response = %d %q, want invalid-ID redirect", tc.name, invalidID, rec.Code, rec.Header().Get("Location"))
+				}
+				jobs, err := store.ListQueueJobs(context.Background(), "", 10)
+				if err != nil {
+					t.Fatalf("ListQueueJobs: %v", err)
+				}
+				if len(jobs) != 1 || jobs[0].ID != jobID || jobs[0].Status != tc.startState {
+					t.Fatalf("jobs after invalid %s ID %q = %+v, want unchanged %s job %d", tc.name, invalidID, jobs, tc.startState, jobID)
+				}
+				audit, err := store.ListAdminAuditLog(context.Background(), 10)
+				if err != nil {
+					t.Fatalf("ListAdminAuditLog: %v", err)
+				}
+				if adminFlowAuditContains(audit, tc.action) {
+					t.Fatalf("invalid %s ID %q recorded %s audit: %+v", tc.name, invalidID, tc.action, audit)
+				}
+			})
+		}
 	}
 }
 
@@ -236,10 +240,24 @@ type f068RouteCase struct {
 	name         string
 	path         string
 	auditAction  string
+	targetAction string
 	wantLocation string
 	setup        func(*testing.T, *adminFlowStoreStub) url.Values
 	assertState  func(*testing.T, *adminFlowStoreStub, *auth.SessionManager, *http.Request, *httptest.ResponseRecorder)
 	login        bool
+}
+
+type f068CallbackCounts struct {
+	mu    sync.Mutex
+	apply int
+	reset int
+	sync  int
+}
+
+func (c *f068CallbackCounts) values() (int, int, int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.apply, c.reset, c.sync
 }
 
 func TestF068RegisterRoutesDispatchesEveryPOSTMutation(t *testing.T) {
@@ -267,7 +285,7 @@ func TestF068RegisterRoutesDispatchesEveryPOSTMutation(t *testing.T) {
 			},
 		},
 		{
-			name: "logout", path: "/admin/logout", auditAction: "logout", wantLocation: "/admin/login",
+			name: "logout", path: "/admin/logout", auditAction: "logout", targetAction: "logout", wantLocation: "/admin/login",
 			setup: func(*testing.T, *adminFlowStoreStub) url.Values { return url.Values{} },
 			assertState: func(t *testing.T, _ *adminFlowStoreStub, sm *auth.SessionManager, req *http.Request, _ *httptest.ResponseRecorder) {
 				if sess := sm.Get(req); sess != nil {
@@ -276,7 +294,7 @@ func TestF068RegisterRoutesDispatchesEveryPOSTMutation(t *testing.T) {
 			},
 		},
 		{
-			name: "feed save", path: "/admin/feeds/save", auditAction: "feed_config_save", wantLocation: "/admin/feeds?msg=",
+			name: "feed save", path: "/admin/feeds/save", auditAction: "feed_config_save", targetAction: "feed_config_save", wantLocation: "/admin/feeds?msg=" + url.QueryEscape(web.Message("admin.feeds.flash.saved_applied")),
 			setup: func(*testing.T, *adminFlowStoreStub) url.Values {
 				return url.Values{"feed_name": {"osv"}, "enabled": {"on"}, "mode": {"self"}, "sync_interval": {"45m"}}
 			},
@@ -288,7 +306,7 @@ func TestF068RegisterRoutesDispatchesEveryPOSTMutation(t *testing.T) {
 			},
 		},
 		{
-			name: "feed reset", path: "/admin/feeds/reset", auditAction: "feed_config_reset", wantLocation: "/admin/feeds?msg=",
+			name: "feed reset", path: "/admin/feeds/reset", auditAction: "feed_config_reset", targetAction: "feed_config_reset", wantLocation: "/admin/feeds?msg=" + url.QueryEscape(web.Message("admin.feeds.flash.reset_applied")),
 			setup: func(t *testing.T, store *adminFlowStoreStub) url.Values {
 				interval := 30 * time.Minute
 				if err := store.UpsertFeedConfig(context.Background(), &db.FeedConfig{FeedName: "osv", Enabled: true, Mode: "self", SyncInterval: &interval}); err != nil {
@@ -304,7 +322,7 @@ func TestF068RegisterRoutesDispatchesEveryPOSTMutation(t *testing.T) {
 			},
 		},
 		{
-			name: "feed sync", path: "/admin/feeds/sync", auditAction: "feed_sync_trigger", wantLocation: "/admin/feeds?msg=",
+			name: "feed sync", path: "/admin/feeds/sync", auditAction: "feed_sync_trigger", targetAction: "feed_sync_trigger", wantLocation: "/admin/feeds?msg=" + url.QueryEscape(web.Message("admin.feeds.sync.flash.started", "OSV")),
 			setup: func(*testing.T, *adminFlowStoreStub) url.Values { return url.Values{"feed_name": {"osv"}} },
 			assertState: func(t *testing.T, store *adminFlowStoreStub, _ *auth.SessionManager, _ *http.Request, _ *httptest.ResponseRecorder) {
 				status, err := store.GetFeedSyncStatus(context.Background(), "osv")
@@ -318,11 +336,11 @@ func TestF068RegisterRoutesDispatchesEveryPOSTMutation(t *testing.T) {
 		f068QueueRouteCase("queue pause", "/admin/queue/pause", "queue_pause", db.RefreshStatusPending, "", db.RefreshStatusPaused),
 		f068QueueRouteCase("queue resume", "/admin/queue/resume", "queue_resume", db.RefreshStatusPaused, "", db.RefreshStatusPending),
 		f068QueueRouteCase("queue retry", "/admin/queue/retry", "queue_retry", db.RefreshStatusError, "", db.RefreshStatusPending),
-		f068QueueRouteCase("queue clear", "/admin/queue/clear", "queue_clear", db.RefreshStatusPaused, "", ""),
+		f068QueueRouteCase("queue clear", "/admin/queue/clear", "queue_clear", db.RefreshStatusPending, "", ""),
 		{
-			name: "key create", path: "/admin/keys/create", auditAction: "api_key_create", wantLocation: "/admin/keys?msg=",
+			name: "key create", path: "/admin/keys/create", auditAction: "api_key_create", targetAction: "api_key_create", wantLocation: "/admin/keys?msg=" + url.QueryEscape(web.Message("admin.keys.flash.created")),
 			setup: func(*testing.T, *adminFlowStoreStub) url.Values {
-				return url.Values{"name": {"route-created"}, "expires_in_days": {"1"}, "current_password": {"current-password"}}
+				return url.Values{"name": {"route-created"}, "expires_in_days": {"1"}, "current_password": {"current-password"}, apiKeyCreateNonceField: {"route-nonce"}}
 			},
 			assertState: func(t *testing.T, store *adminFlowStoreStub, _ *auth.SessionManager, _ *http.Request, _ *httptest.ResponseRecorder) {
 				keys, err := store.ListAPIKeys(context.Background())
@@ -332,7 +350,7 @@ func TestF068RegisterRoutesDispatchesEveryPOSTMutation(t *testing.T) {
 			},
 		},
 		{
-			name: "key revoke", path: "/admin/keys/revoke", auditAction: "api_key_revoke", wantLocation: "/admin/keys?msg=",
+			name: "key revoke", path: "/admin/keys/revoke", auditAction: "api_key_revoke", targetAction: "api_key_revoke", wantLocation: "/admin/keys?msg=" + url.QueryEscape(web.Message("admin.keys.flash.revoked")),
 			setup: func(_ *testing.T, store *adminFlowStoreStub) url.Values {
 				store.apiKeys = []db.APIKey{{ID: 41, Name: "route-revoke", KeyHash: "hash", CreatedAt: time.Now().UTC()}}
 				return url.Values{"key_id": {"41"}}
@@ -345,7 +363,7 @@ func TestF068RegisterRoutesDispatchesEveryPOSTMutation(t *testing.T) {
 			},
 		},
 		{
-			name: "key delete", path: "/admin/keys/delete", auditAction: "api_key_delete", wantLocation: "/admin/keys?msg=",
+			name: "key delete", path: "/admin/keys/delete", auditAction: "api_key_delete", targetAction: "api_key_delete", wantLocation: "/admin/keys?msg=" + url.QueryEscape(web.Message("admin.keys.flash.deleted")),
 			setup: func(_ *testing.T, store *adminFlowStoreStub) url.Values {
 				now := time.Now().UTC()
 				store.apiKeys = []db.APIKey{{ID: 42, Name: "route-delete", KeyHash: "hash", CreatedAt: now, RevokedAt: &now}}
@@ -359,7 +377,7 @@ func TestF068RegisterRoutesDispatchesEveryPOSTMutation(t *testing.T) {
 			},
 		},
 		{
-			name: "advisory create", path: "/admin/advisories/create", auditAction: "advisory_create", wantLocation: "/admin/advisories?msg=",
+			name: "advisory create", path: "/admin/advisories/create", auditAction: "advisory_create", targetAction: "advisory_create", wantLocation: "/admin/advisories?msg=" + url.QueryEscape(web.Message("admin.advisories.flash.created")),
 			setup: func(*testing.T, *adminFlowStoreStub) url.Values {
 				return url.Values{"id": {"manual:f068-route"}, "finding_type": {"vulnerability"}, "ecosystem": {"npm"}, "name": {"route-package"}, "severity": {"HIGH"}, "summary": {"route advisory"}}
 			},
@@ -371,7 +389,7 @@ func TestF068RegisterRoutesDispatchesEveryPOSTMutation(t *testing.T) {
 			},
 		},
 		{
-			name: "advisory delete", path: "/admin/advisories/delete", auditAction: "advisory_delete", wantLocation: "/admin/advisories?msg=",
+			name: "advisory delete", path: "/admin/advisories/delete", auditAction: "advisory_delete", targetAction: "advisory_delete", wantLocation: "/admin/advisories?msg=" + url.QueryEscape(web.Message("admin.advisories.flash.deleted")),
 			setup: func(_ *testing.T, store *adminFlowStoreStub) url.Values {
 				store.manual["manual:f068-delete"] = db.ManualAdvisory{ID: "manual:f068-delete", FindingType: "vulnerability", Ecosystem: "npm", Name: "delete-package", Severity: "LOW", Summary: "delete me"}
 				return url.Values{"id": {"manual:f068-delete"}, "confirm_id": {"manual:f068-delete"}}
@@ -384,7 +402,7 @@ func TestF068RegisterRoutesDispatchesEveryPOSTMutation(t *testing.T) {
 			},
 		},
 		{
-			name: "system settings", path: "/admin/settings/system", auditAction: "system_settings_save", wantLocation: "/admin/settings?msg=",
+			name: "system settings", path: "/admin/settings/system", auditAction: "system_settings_save", targetAction: "system_settings_save", wantLocation: "/admin/settings?msg=" + url.QueryEscape(web.Message("admin.settings.flash.saved")),
 			setup: func(*testing.T, *adminFlowStoreStub) url.Values {
 				return url.Values{"block_threshold": {"HIGH"}, "rate_limit_per_minute": {"121"}, "rate_limit_burst": {"31"}}
 			},
@@ -396,7 +414,7 @@ func TestF068RegisterRoutesDispatchesEveryPOSTMutation(t *testing.T) {
 			},
 		},
 		{
-			name: "password change", path: "/admin/settings/password", auditAction: "password_change", wantLocation: "/admin/settings?msg=",
+			name: "password change", path: "/admin/settings/password", auditAction: "password_change", targetAction: "password_change", wantLocation: "/admin/settings?msg=" + url.QueryEscape(web.Message("admin.settings.flash.password_changed")),
 			setup: func(*testing.T, *adminFlowStoreStub) url.Values {
 				return url.Values{"current_password": {"current-password"}, "new_password": {"new-route-password-123"}, "confirm_password": {"new-route-password-123"}}
 			},
@@ -421,49 +439,321 @@ func TestF068RegisterRoutesDispatchesEveryPOSTMutation(t *testing.T) {
 
 	for index, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			store := newAdminStoreStub()
-			store.adminAuth = &db.AdminAuth{PasswordHash: passwordHash, PasswordIsBootstrap: false, CreatedAt: time.Now().UTC()}
-			cfg := adminFlowConfig()
-			syncDone := make(chan struct{})
-			var syncOnce sync.Once
-			mux, sm, cancel := f068RegisteredMux(t, store, cfg, func(context.Context, string) error {
-				syncOnce.Do(func() { close(syncDone) })
-				return nil
-			})
-			defer cancel()
+			if tc.login {
+				f068AssertLoginCSRFContracts(t, passwordHash)
+			} else if tc.path == "/admin/logout" {
+				f068AssertLogoutCSRFContracts(t, passwordHash)
+			} else {
+				f068AssertProtectedRouteGates(t, passwordHash, tc, index)
+			}
 
+			store, mux, sm, callbacks, cancel := f068RouteFixture(t, passwordHash)
+			defer cancel()
 			values := tc.setup(t, store)
 			var req *http.Request
 			if tc.login {
 				req = f068LoginRequest(t, sm, tc.path, values)
 			} else {
-				req, _ = authenticatedAdminFormRequest(t, sm, tc.path, values)
+				var sess *auth.Session
+				req, sess = authenticatedAdminFormRequest(t, sm, tc.path, values)
+				if tc.path == "/admin/keys/create" {
+					sm.SetFlash(sess.ID, apiKeyCreateNonceFlashKey, values.Get(apiKeyCreateNonceField))
+				}
 			}
-			correlationID := fmt.Sprintf("f068-route-%02d", index+1)
+			correlationID := fmt.Sprintf("f068-route-%02d-success", index+1)
 			req = req.WithContext(requestctx.ContextWithCorrelationID(req.Context(), correlationID))
 			rec := httptest.NewRecorder()
 
 			mux.ServeHTTP(rec, req)
 
-			if rec.Code != http.StatusSeeOther || !strings.HasPrefix(rec.Header().Get("Location"), tc.wantLocation) {
-				t.Fatalf("POST %s = %d %q, want 303 prefix %q; body=%s", tc.path, rec.Code, rec.Header().Get("Location"), tc.wantLocation, rec.Body.String())
+			if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != tc.wantLocation {
+				t.Fatalf("POST %s = %d %q, want 303 %q; body=%s", tc.path, rec.Code, rec.Header().Get("Location"), tc.wantLocation, rec.Body.String())
 			}
-			if tc.auditAction == "feed_sync_trigger" {
-				select {
-				case <-syncDone:
-				case <-time.After(2 * time.Second):
-					t.Fatal("manual feed sync callback did not run")
-				}
-			}
+			f068WaitForCallback(t, tc.auditAction, callbacks)
+			f068AssertCallbackCounts(t, callbacks, tc.auditAction)
 			f068AssertSingleAudit(t, store, tc.auditAction, correlationID)
 			tc.assertState(t, store, sm, req, rec)
 		})
 	}
 }
 
+func f068RouteFixture(t *testing.T, passwordHash string) (*adminFlowStoreStub, *http.ServeMux, *auth.SessionManager, *f068CallbackCounts, context.CancelFunc) {
+	t.Helper()
+	store := newAdminStoreStub()
+	store.adminAuth = &db.AdminAuth{PasswordHash: passwordHash, PasswordIsBootstrap: false, CreatedAt: time.Now().UTC()}
+	callbacks := &f068CallbackCounts{}
+	mux, sm, cancel := f068RegisteredMux(t, store, adminFlowConfig(), callbacks)
+	return store, mux, sm, callbacks, cancel
+}
+
+func f068AssertLoginCSRFContracts(t *testing.T, passwordHash string) {
+	t.Helper()
+	for _, tc := range []struct {
+		name      string
+		preAuth   bool
+		csrfValue string
+	}{
+		{name: "missing preauth session"},
+		{name: "bad preauth csrf", preAuth: true, csrfValue: "invalid-token"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, mux, sm, callbacks, cancel := f068RouteFixture(t, passwordHash)
+			defer cancel()
+			values := url.Values{"username": {"admin"}, "password": {"current-password"}}
+			var req *http.Request
+			if tc.preAuth {
+				req = f068LoginRequest(t, sm, "/admin/login", values)
+				values.Set(auth.CSRFFieldName, tc.csrfValue)
+				f068ReplaceForm(req, values)
+			} else {
+				req = f068RawFormRequest("/admin/login", values)
+			}
+			req = req.WithContext(requestctx.ContextWithCorrelationID(req.Context(), "f068-login-"+strings.ReplaceAll(tc.name, " ", "-")))
+			before := f068BusinessSnapshot(t, store)
+			rec := httptest.NewRecorder()
+
+			mux.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Invalid request. Please try again.") {
+				t.Fatalf("login %s = %d body %q, want 200 invalid-request form", tc.name, rec.Code, rec.Body.String())
+			}
+			f068AssertNoAudit(t, store)
+			f068AssertBusinessUnchanged(t, store, before)
+			f068AssertCallbackCounts(t, callbacks, "")
+		})
+	}
+}
+
+func f068AssertLogoutCSRFContracts(t *testing.T, passwordHash string) {
+	t.Helper()
+	for _, tc := range []struct {
+		name          string
+		authenticated bool
+	}{
+		{name: "missing session"},
+		{name: "bad csrf", authenticated: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, mux, sm, callbacks, cancel := f068RouteFixture(t, passwordHash)
+			defer cancel()
+			values := url.Values{}
+			var req *http.Request
+			var sess *auth.Session
+			if tc.authenticated {
+				req, sess = authenticatedAdminFormRequest(t, sm, "/admin/logout", values)
+				values.Set(auth.CSRFFieldName, "invalid-token")
+				f068ReplaceForm(req, values)
+			} else {
+				req = f068RawFormRequest("/admin/logout", values)
+			}
+			correlationID := "f068-logout-" + strings.ReplaceAll(tc.name, " ", "-")
+			req = req.WithContext(requestctx.ContextWithCorrelationID(req.Context(), correlationID))
+			before := f068BusinessSnapshot(t, store)
+			rec := httptest.NewRecorder()
+
+			mux.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/admin/login" {
+				t.Fatalf("logout %s = %d %q, want 303 /admin/login", tc.name, rec.Code, rec.Header().Get("Location"))
+			}
+			f068AssertRejectedAudit(t, store, correlationID, "logout", "/admin/logout")
+			f068AssertBusinessUnchanged(t, store, before)
+			f068AssertCallbackCounts(t, callbacks, "")
+			if sess != nil {
+				if got := sm.Get(req); got == nil || got.ID != sess.ID || !got.Admin {
+					t.Fatalf("bad-CSRF logout changed authenticated session: got %+v, want %s", got, sess.ID)
+				}
+			}
+		})
+	}
+}
+
+func f068AssertProtectedRouteGates(t *testing.T, passwordHash string, tc f068RouteCase, index int) {
+	t.Helper()
+	for _, gate := range []string{"unauthenticated", "bad csrf"} {
+		t.Run(gate, func(t *testing.T) {
+			store, mux, sm, callbacks, cancel := f068RouteFixture(t, passwordHash)
+			defer cancel()
+			values := tc.setup(t, store)
+			before := f068BusinessSnapshot(t, store)
+			var req *http.Request
+			var sess *auth.Session
+			if gate == "unauthenticated" {
+				req = f068RawFormRequest(tc.path, values)
+			} else {
+				req, sess = authenticatedAdminFormRequest(t, sm, tc.path, values)
+				values.Set(auth.CSRFFieldName, "invalid-token")
+				f068ReplaceForm(req, values)
+			}
+			correlationID := fmt.Sprintf("f068-route-%02d-%s", index+1, strings.ReplaceAll(gate, " ", "-"))
+			req = req.WithContext(requestctx.ContextWithCorrelationID(req.Context(), correlationID))
+			rec := httptest.NewRecorder()
+
+			mux.ServeHTTP(rec, req)
+
+			if gate == "unauthenticated" {
+				if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/admin/login" {
+					t.Fatalf("unauthenticated POST %s = %d %q, want 303 /admin/login", tc.path, rec.Code, rec.Header().Get("Location"))
+				}
+				f068AssertNoAudit(t, store)
+			} else {
+				wantLocation := f068CSRFErrorLocation(tc.path)
+				if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != wantLocation {
+					t.Fatalf("bad-CSRF POST %s = %d %q, want 303 %q", tc.path, rec.Code, rec.Header().Get("Location"), wantLocation)
+				}
+				f068AssertRejectedAudit(t, store, correlationID, tc.targetAction, tc.path)
+				if got := sm.Get(req); got == nil || got.ID != sess.ID || !got.Admin {
+					t.Fatalf("bad-CSRF POST %s changed authenticated session: got %+v, want %s", tc.path, got, sess.ID)
+				}
+			}
+			f068AssertBusinessUnchanged(t, store, before)
+			f068AssertCallbackCounts(t, callbacks, "")
+		})
+	}
+}
+
+func f068RawFormRequest(target string, values url.Values) *http.Request {
+	req := httptest.NewRequest(http.MethodPost, target, strings.NewReader(values.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	return req
+}
+
+func f068ReplaceForm(req *http.Request, values url.Values) {
+	encoded := values.Encode()
+	req.Body = io.NopCloser(strings.NewReader(encoded))
+	req.ContentLength = int64(len(encoded))
+	req.PostForm = nil
+	req.Form = nil
+}
+
+func f068CSRFErrorLocation(path string) string {
+	base := "/admin/"
+	for _, section := range []string{"feeds", "queue", "keys", "advisories", "settings"} {
+		if strings.HasPrefix(path, "/admin/"+section+"/") {
+			base = "/admin/" + section
+			break
+		}
+	}
+	return base + "?err=" + url.QueryEscape(adminInvalidRequestMessage)
+}
+
+func f068BusinessSnapshot(t *testing.T, store *adminFlowStoreStub) string {
+	t.Helper()
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	state := struct {
+		AdminAuth      *db.AdminAuth
+		APIKeys        []db.APIKey
+		NextAPIKeyID   int
+		FeedStatuses   map[string]db.FeedSyncStatus
+		FeedConfigs    map[string]db.FeedConfig
+		SystemSettings *db.SystemSettings
+		Manual         map[string]db.ManualAdvisory
+		QueueJobs      []db.RefreshJob
+		NextJobID      int
+	}{
+		store.adminAuth,
+		store.apiKeys,
+		store.nextAPIKeyID,
+		store.feedStatuses,
+		store.feedConfigs,
+		store.systemSettings,
+		store.manual,
+		store.queueJobs,
+		store.nextJobID,
+	}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("marshal business snapshot: %v", err)
+	}
+	return string(raw)
+}
+
+func f068AssertBusinessUnchanged(t *testing.T, store *adminFlowStoreStub, before string) {
+	t.Helper()
+	if after := f068BusinessSnapshot(t, store); after != before {
+		t.Fatalf("business state changed across rejected request\nbefore: %s\nafter:  %s", before, after)
+	}
+}
+
+func f068AssertNoAudit(t *testing.T, store *adminFlowStoreStub) {
+	t.Helper()
+	audit, err := store.ListAdminAuditLog(context.Background(), 100)
+	if err != nil {
+		t.Fatalf("ListAdminAuditLog: %v", err)
+	}
+	if len(audit) != 0 {
+		t.Fatalf("unexpected audit rows: %+v", audit)
+	}
+}
+
+func f068AssertRejectedAudit(t *testing.T, store *adminFlowStoreStub, correlationID, targetAction, path string) {
+	t.Helper()
+	f068AssertSingleAudit(t, store, "admin_csrf_rejected", correlationID)
+	audit, err := store.ListAdminAuditLog(context.Background(), 100)
+	if err != nil {
+		t.Fatalf("ListAdminAuditLog: %v", err)
+	}
+	details := map[string]string{}
+	if err := json.Unmarshal(audit[0].Details, &details); err != nil {
+		t.Fatalf("decode rejected-CSRF audit details: %v", err)
+	}
+	if details["target_action"] != targetAction || details["path"] != path || len(details) != 2 {
+		t.Fatalf("rejected-CSRF details = %#v, want target_action %q and path %q only", details, targetAction, path)
+	}
+}
+
+func f068WaitForCallback(t *testing.T, action string, callbacks *f068CallbackCounts) {
+	t.Helper()
+	if action != "feed_sync_trigger" {
+		return
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		_, _, syncCalls := callbacks.values()
+		if syncCalls == 1 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("manual feed sync callback did not run exactly once")
+}
+
+func f068AssertCallbackCounts(t *testing.T, callbacks *f068CallbackCounts, action string) {
+	t.Helper()
+	wantApply, wantReset, wantSync := 0, 0, 0
+	switch action {
+	case "feed_config_save":
+		wantApply = 1
+	case "feed_config_reset":
+		wantReset = 1
+	case "feed_sync_trigger":
+		wantSync = 1
+	}
+	applyCalls, resetCalls, syncCalls := callbacks.values()
+	if applyCalls != wantApply || resetCalls != wantReset || syncCalls != wantSync {
+		t.Fatalf("callback counts after %s = apply %d/reset %d/sync %d, want %d/%d/%d", action, applyCalls, resetCalls, syncCalls, wantApply, wantReset, wantSync)
+	}
+}
+
 func f068QueueRouteCase(name, path, action, startStatus, priority, wantStatus string) f068RouteCase {
+	wantMessage := ""
+	switch action {
+	case "queue_purge":
+		wantMessage = web.Message("admin.queue.flash.purged", 1, web.Message("admin.queue.count.purge.singular"))
+	case "queue_priority_update":
+		wantMessage = web.Message("admin.queue.flash.priority_updated")
+	case "queue_pause":
+		wantMessage = web.Message("admin.queue.flash.job_paused")
+	case "queue_resume":
+		wantMessage = web.Message("admin.queue.flash.job_resumed")
+	case "queue_retry":
+		wantMessage = web.Message("admin.queue.flash.job_retry")
+	case "queue_clear":
+		wantMessage = web.Message("admin.queue.flash.cleared", 1, web.Message("admin.queue.count.queue_job.singular"))
+	}
 	return f068RouteCase{
-		name: name, path: path, auditAction: action, wantLocation: "/admin/queue?msg=",
+		name: name, path: path, auditAction: action, targetAction: action, wantLocation: "/admin/queue?msg=" + url.QueryEscape(wantMessage),
 		setup: func(_ *testing.T, store *adminFlowStoreStub) url.Values {
 			jobID := store.addQueueJob(startStatus)
 			values := url.Values{"job_id": {strconv.Itoa(jobID)}}
@@ -499,8 +789,11 @@ func f068QueueRouteCase(name, path, action, startStatus, priority, wantStatus st
 	}
 }
 
-func f068RegisteredMux(t *testing.T, store *adminFlowStoreStub, cfg *config.Config, syncFeed FeedSyncFunc) (*http.ServeMux, *auth.SessionManager, context.CancelFunc) {
+func f068RegisteredMux(t *testing.T, store *adminFlowStoreStub, cfg *config.Config, callbacks *f068CallbackCounts) (*http.ServeMux, *auth.SessionManager, context.CancelFunc) {
 	t.Helper()
+	if callbacks == nil {
+		callbacks = &f068CallbackCounts{}
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	sm := auth.NewSessionManagerWithIdleTimeout(ctx, time.Hour, auth.DefaultAdminIdleTimeout, false)
 	runtime := config.NewRuntimeSettingsFromConfig(cfg)
@@ -513,9 +806,22 @@ func f068RegisteredMux(t *testing.T, store *adminFlowStoreStub, cfg *config.Conf
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		cfg,
 		runtime,
-		syncFeed,
-		func(context.Context, config.FeedSettings) error { return nil },
+		func(context.Context, string) error {
+			callbacks.mu.Lock()
+			callbacks.sync++
+			callbacks.mu.Unlock()
+			return nil
+		},
+		func(context.Context, config.FeedSettings) error {
+			callbacks.mu.Lock()
+			callbacks.apply++
+			callbacks.mu.Unlock()
+			return nil
+		},
 		func(_ context.Context, feedName string) (config.FeedSettings, bool, error) {
+			callbacks.mu.Lock()
+			callbacks.reset++
+			callbacks.mu.Unlock()
 			feed, ok := cfg.FeedSettings(feedName)
 			return feed, ok, nil
 		},
