@@ -129,7 +129,16 @@ func TestListInventoryCommandsReportDeletedWorkingDirectory(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			runListInventoryHelperProcess(t, "TestListInventoryCommandsReportDeletedWorkingDirectory", tt.mode, "", false)
+			base, err := os.MkdirTemp("", "packmon-deleted-cwd-")
+			if err != nil {
+				t.Fatalf("create deleted-cwd fixture: %v", err)
+			}
+			t.Cleanup(func() {
+				if removeErr := os.RemoveAll(base); removeErr != nil {
+					t.Errorf("remove deleted-cwd fixture: %v", removeErr)
+				}
+			})
+			runListInventoryHelperProcess(t, "TestListInventoryCommandsReportDeletedWorkingDirectory", tt.mode, base, false)
 		})
 	}
 }
@@ -139,16 +148,13 @@ func runListInventoryDeletedWorkingDirectoryHelper(t *testing.T, mode string) {
 	if err != nil {
 		t.Fatalf("get original cwd: %v", err)
 	}
-	base, err := os.MkdirTemp("", "packmon-deleted-cwd-")
-	if err != nil {
-		t.Fatalf("create deleted-cwd fixture: %v", err)
+	base := os.Getenv(listInventoryHelperRootEnv)
+	if base == "" {
+		t.Fatal("deleted-cwd helper fixture root is empty")
 	}
 	t.Cleanup(func() {
 		if chdirErr := os.Chdir(original); chdirErr != nil {
 			t.Errorf("restore original cwd: %v", chdirErr)
-		}
-		if removeErr := os.RemoveAll(base); removeErr != nil {
-			t.Errorf("remove deleted-cwd fixture: %v", removeErr)
 		}
 	})
 	deleted := filepath.Join(base, "deleted")
@@ -248,6 +254,9 @@ func copyListInventoryHelperExecutable(t *testing.T) string {
 	}
 	if err := destination.Close(); err != nil {
 		t.Fatalf("close helper executable: %v", err)
+	}
+	if err := os.Chmod(destinationPath, 0o755); err != nil {
+		t.Fatalf("make helper executable runnable: %v", err)
 	}
 	return destinationPath
 }
