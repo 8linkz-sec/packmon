@@ -215,13 +215,16 @@ func (s *adapterContractStore) GetScanLogByIdempotencyKey(ctx context.Context, k
 
 type adapterLegacyDeletionStore struct {
 	db.Store
-	wantCtx       context.Context
-	err           error
-	vulnerability string
-	malicious     string
+	wantCtx            context.Context
+	err                error
+	vulnerability      string
+	malicious          string
+	vulnerabilityCalls int
+	maliciousCalls     int
 }
 
 func (s *adapterLegacyDeletionStore) DeleteVulnerability(ctx context.Context, id string) error {
+	s.vulnerabilityCalls++
 	if ctx != s.wantCtx {
 		return errors.New("unexpected vulnerability context")
 	}
@@ -230,6 +233,7 @@ func (s *adapterLegacyDeletionStore) DeleteVulnerability(ctx context.Context, id
 }
 
 func (s *adapterLegacyDeletionStore) DeleteMaliciousFinding(ctx context.Context, id string) error {
+	s.maliciousCalls++
 	if ctx != s.wantCtx {
 		return errors.New("unexpected malicious context")
 	}
@@ -239,11 +243,14 @@ func (s *adapterLegacyDeletionStore) DeleteMaliciousFinding(ctx context.Context,
 
 type adapterScopedDeletionStore struct {
 	*adapterLegacyDeletionStore
-	scopedVulnerability []string
-	scopedMalicious     []string
+	scopedVulnerability      []string
+	scopedMalicious          []string
+	scopedVulnerabilityCalls int
+	scopedMaliciousCalls     int
 }
 
 func (s *adapterScopedDeletionStore) DeleteVulnerabilityForSource(ctx context.Context, id, source string) error {
+	s.scopedVulnerabilityCalls++
 	if ctx != s.wantCtx {
 		return errors.New("unexpected scoped vulnerability context")
 	}
@@ -252,6 +259,7 @@ func (s *adapterScopedDeletionStore) DeleteVulnerabilityForSource(ctx context.Co
 }
 
 func (s *adapterScopedDeletionStore) DeleteMaliciousFindingForSource(ctx context.Context, id, source string) error {
+	s.scopedMaliciousCalls++
 	if ctx != s.wantCtx {
 		return errors.New("unexpected scoped malicious context")
 	}
@@ -276,6 +284,15 @@ func TestDBStoreAdapterSourceDeletionSelectsScopedAndLegacyContracts(t *testing.
 	if legacy.vulnerability != "CVE-legacy" || legacy.malicious != "MAL-legacy" {
 		t.Fatalf("legacy IDs = %q/%q, want exact IDs", legacy.vulnerability, legacy.malicious)
 	}
+	if legacy.vulnerabilityCalls != 1 || legacy.maliciousCalls != 1 {
+		t.Fatalf("legacy generic deletion calls = %d/%d, want exactly 1/1", legacy.vulnerabilityCalls, legacy.maliciousCalls)
+	}
+	if _, ok := any(legacy).(db.SourceVulnerabilityDeleter); ok {
+		t.Fatal("legacy store unexpectedly exposes scoped vulnerability deletion")
+	}
+	if _, ok := any(legacy).(db.SourceMaliciousFindingDeleter); ok {
+		t.Fatal("legacy store unexpectedly exposes scoped malicious deletion")
+	}
 
 	scopedBase := &adapterLegacyDeletionStore{Store: devstore.NewStore(), wantCtx: ctx, err: errSentinel}
 	scoped := &adapterScopedDeletionStore{adapterLegacyDeletionStore: scopedBase}
@@ -289,8 +306,12 @@ func TestDBStoreAdapterSourceDeletionSelectsScopedAndLegacyContracts(t *testing.
 	if !reflect.DeepEqual(scoped.scopedVulnerability, []string{"CVE-scoped", "osv"}) || !reflect.DeepEqual(scoped.scopedMalicious, []string{"MAL-scoped", "openssf"}) {
 		t.Fatalf("scoped arguments = %+v/%+v", scoped.scopedVulnerability, scoped.scopedMalicious)
 	}
-	if scopedBase.vulnerability != "" || scopedBase.malicious != "" {
-		t.Fatalf("scoped deletion fell back to generic methods: %q/%q", scopedBase.vulnerability, scopedBase.malicious)
+	if scoped.scopedVulnerabilityCalls != 1 || scoped.scopedMaliciousCalls != 1 {
+		t.Fatalf("scoped deletion calls = %d/%d, want exactly 1/1", scoped.scopedVulnerabilityCalls, scoped.scopedMaliciousCalls)
+	}
+	if scopedBase.vulnerabilityCalls != 0 || scopedBase.maliciousCalls != 0 || scopedBase.vulnerability != "" || scopedBase.malicious != "" {
+		t.Fatalf("scoped deletion fell back to generic methods: calls=%d/%d args=%q/%q",
+			scopedBase.vulnerabilityCalls, scopedBase.maliciousCalls, scopedBase.vulnerability, scopedBase.malicious)
 	}
 }
 

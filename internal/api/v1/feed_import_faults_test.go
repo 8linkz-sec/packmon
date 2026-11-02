@@ -135,14 +135,29 @@ func TestHandleFeedImportRejectedStatusPersistenceFailures(t *testing.T) {
 
 type fallbackAuditFailureStore struct {
 	stubStore
-	replacedEPSS []db.EPSSEntry
-	auditCalls   int
-	auditErr     error
+	replacedEPSS  []db.EPSSEntry
+	currentStatus *db.FeedSyncStatus
+	replaceCalls  int
+	statusCalls   int
+	auditCalls    int
+	auditErr      error
 }
 
 func (s *fallbackAuditFailureStore) ReplaceEPSSScores(_ context.Context, entries []db.EPSSEntry) (int, int, error) {
+	s.replaceCalls++
 	s.replacedEPSS = append([]db.EPSSEntry(nil), entries...)
 	return len(entries), 0, nil
+}
+
+func (s *fallbackAuditFailureStore) UpsertFeedSyncStatus(_ context.Context, status *db.FeedSyncStatus) error {
+	s.statusCalls++
+	if status == nil {
+		s.currentStatus = nil
+		return nil
+	}
+	copyValue := *status
+	s.currentStatus = &copyValue
+	return nil
 }
 
 func (s *fallbackAuditFailureStore) InsertAdminAuditLog(_ context.Context, _ *db.AdminAuditEntry) error {
@@ -196,45 +211,68 @@ func TestHandleFeedImportFallbackAuditFailurePreservesAppliedState(t *testing.T)
 
 	errAudit := errors.New("audit persistence unavailable")
 	store := &fallbackAuditFailureStore{auditErr: errAudit}
-	var logs bytes.Buffer
-	h := newLogCaptureFeedImportHandler(store, &logs)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/feeds/epss/import", strings.NewReader(`{"ignored":"request-body-marker"}`))
-	req.SetPathValue("feed", "epss")
-	req.Header.Set("Content-Type", "application/json")
-	req = withCorrelationID(req, "corr-fallback-audit")
-	rr := httptest.NewRecorder()
+	const (
+		requestBody   = `{"ignored":"request-body-marker"}`
+		requestMarker = "request-body-marker"
+	)
+	run := func(correlationID string) (*httptest.ResponseRecorder, string) {
+		t.Helper()
+		var logs bytes.Buffer
+		h := newLogCaptureFeedImportHandler(store, &logs)
+		h.ConfigureFeedImportSecret("retry-secret", true)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/feeds/epss/import", strings.NewReader(requestBody))
+		req.SetPathValue("feed", "epss")
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(HeaderFeedImportSecret, "retry-secret")
+		req = withCorrelationID(req, correlationID)
+		rr := httptest.NewRecorder()
 
-	h.HandleImport(rr, req)
+		h.HandleImport(rr, req)
 
-	if rr.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want 500: %s", rr.Code, rr.Body.String())
+		if rr.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500: %s", rr.Code, rr.Body.String())
+		}
+		var body errorJSON
+		if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode error response: %v; body=%q", err, rr.Body.String())
+		}
+		if body.Error != "feed import audit failed" {
+			t.Fatalf("error = %q, want fixed audit diagnostic", body.Error)
+		}
+		if strings.Contains(rr.Body.String(), errAudit.Error()) || strings.Contains(rr.Body.String(), requestMarker) {
+			t.Fatalf("client response leaked internal or request data: %s", rr.Body.String())
+		}
+		logText := logs.String()
+		if !strings.Contains(logText, "feed import audit failed") || !strings.Contains(logText, correlationID) || !strings.Contains(logText, errAudit.Error()) {
+			t.Fatalf("logs do not identify the failed audit and correlation ID: %s", logText)
+		}
+		if strings.Contains(logText, requestMarker) {
+			t.Fatalf("logs leaked request body data: %s", logText)
+		}
+		return rr, logText
 	}
-	var body errorJSON
-	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode error response: %v; body=%q", err, rr.Body.String())
+
+	firstResponse, firstLogs := run("corr-fallback-audit-first")
+	if store.replaceCalls != 1 || store.statusCalls != 1 || store.auditCalls != 1 {
+		t.Fatalf("first attempt apply/status/audit calls = %d/%d/%d, want 1/1/1", store.replaceCalls, store.statusCalls, store.auditCalls)
 	}
-	if body.Error != "feed import audit failed" {
-		t.Fatalf("error = %q, want fixed audit diagnostic", body.Error)
+	secondResponse, secondLogs := run("corr-fallback-audit-second")
+	if store.replaceCalls != 2 || store.statusCalls != 2 || store.auditCalls != 2 {
+		t.Fatalf("retry apply/status/audit calls = %d/%d/%d, want 2/2/2", store.replaceCalls, store.statusCalls, store.auditCalls)
 	}
-	if strings.Contains(rr.Body.String(), errAudit.Error()) || strings.Contains(rr.Body.String(), "request-body-marker") {
-		t.Fatalf("client response leaked internal or request data: %s", rr.Body.String())
+	if firstResponse.Body.String() != secondResponse.Body.String() {
+		t.Fatalf("retry response = %q, want the same generic response as first attempt %q", secondResponse.Body.String(), firstResponse.Body.String())
 	}
-	if store.auditCalls != 1 || len(store.auditEntries) != 0 {
-		t.Fatalf("audit attempts/rows = %d/%d, want one failed attempt and no row", store.auditCalls, len(store.auditEntries))
+	if strings.Contains(firstLogs, "corr-fallback-audit-second") || strings.Contains(secondLogs, "corr-fallback-audit-first") {
+		t.Fatalf("request logs mixed correlation IDs: first=%s second=%s", firstLogs, secondLogs)
+	}
+	if len(store.auditEntries) != 0 {
+		t.Fatalf("persisted audit rows = %d, want none after two failed attempts", len(store.auditEntries))
 	}
 	if len(store.replacedEPSS) != 1 || store.replacedEPSS[0].CVEID != "CVE-2026-7402" || store.replacedEPSS[0].Score != 0.41 || store.replacedEPSS[0].Percentile != 0.73 {
-		t.Fatalf("applied EPSS state = %+v, want the complete replacement", store.replacedEPSS)
+		t.Fatalf("EPSS state after retry = %+v, want one complete replacement without duplicates", store.replacedEPSS)
 	}
-	if len(store.upsertedStatuses) != 1 || store.upsertedStatuses[0].FeedName != "epss" || store.upsertedStatuses[0].LastSyncStatus != "success" || store.upsertedStatuses[0].EntriesSynced != 1 || store.upsertedStatuses[0].EntriesTotal != 1 {
-		t.Fatalf("applied feed status = %+v, want one successful 1/1 status", store.upsertedStatuses)
+	if store.currentStatus == nil || store.currentStatus.FeedName != "epss" || store.currentStatus.LastSyncStatus != "success" || store.currentStatus.EntriesSynced != 1 || store.currentStatus.EntriesTotal != 1 {
+		t.Fatalf("feed status after retry = %+v, want one valid successful 1/1 current status", store.currentStatus)
 	}
-	logText := logs.String()
-	if !strings.Contains(logText, "feed import audit failed") || !strings.Contains(logText, "corr-fallback-audit") || !strings.Contains(logText, errAudit.Error()) {
-		t.Fatalf("logs do not identify the failed audit and correlation ID: %s", logText)
-	}
-	if strings.Contains(logText, "request-body-marker") {
-		t.Fatalf("logs leaked request body data: %s", logText)
-	}
-	// A retry is therefore not a clean first attempt: it will replace the same
-	// already-applied snapshot/status again before making a new audit attempt.
 }
