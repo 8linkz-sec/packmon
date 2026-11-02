@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +15,29 @@ import (
 	"github.com/8linkz-sec/packmon/internal/config"
 	"github.com/8linkz-sec/packmon/internal/db"
 )
+
+func decodeJSONLogRecords(t *testing.T, output string) map[string]map[string]any {
+	t.Helper()
+
+	records := make(map[string]map[string]any)
+	decoder := json.NewDecoder(strings.NewReader(output))
+	for decoder.More() {
+		var record map[string]any
+		if err := decoder.Decode(&record); err != nil {
+			t.Fatalf("decode structured log %q: %v", output, err)
+		}
+		delete(record, "time")
+		message, ok := record["msg"].(string)
+		if !ok || message == "" {
+			t.Fatalf("structured log record has no message: %#v", record)
+		}
+		if _, duplicate := records[message]; duplicate {
+			t.Fatalf("duplicate structured log message %q in %q", message, output)
+		}
+		records[message] = record
+	}
+	return records
+}
 
 func TestApplyStoredFeedConfigOverrides(t *testing.T) {
 	store := newNoopStore()
@@ -89,27 +115,106 @@ func TestApplyStoredFeedConfigOverridesErrorAndIgnoredBranches(t *testing.T) {
 		t.Fatalf("applyStoredFeedConfigOverrides(error store) = %v", err)
 	}
 
+	osvBefore, ok := cfg.FeedSettings("osv")
+	if !ok {
+		t.Fatal("cfg.FeedSettings(osv) = !ok")
+	}
+	osvBefore.Enabled = false
+	osvBefore.Mode = config.FeedModeExternal
+	osvBefore.SyncInterval = 45 * time.Minute
+	if err := cfg.SetFeedSettings(osvBefore); err != nil {
+		t.Fatalf("cfg.SetFeedSettings(osv) error = %v", err)
+	}
+	osvBefore, _ = cfg.FeedSettings("osv")
+
 	store := newNoopStore()
+	ignoredInterval := 2 * time.Hour
+	invalidMode := strings.Repeat("x", 600)
 	for _, override := range []*db.FeedConfig{
 		{FeedName: "unknown", Enabled: true, Mode: "self"},
-		{FeedName: "osv", Enabled: true, Mode: "sideways"},
-		{FeedName: "vulncheck", Enabled: true, Mode: "external", APIKey: "  persisted-key  "}, //nolint:gosec // fake persisted test credential.
+		{FeedName: "osv", Enabled: true, Mode: invalidMode, SyncInterval: &ignoredInterval, APIKey: "ignored-key"}, //nolint:gosec // fake ignored test credential.
+		{FeedName: "vulncheck", Enabled: true, Mode: "external", APIKey: "  persisted-key  "},                      //nolint:gosec // fake persisted test credential.
 	} {
 		if err := store.UpsertFeedConfig(context.Background(), override); err != nil {
 			t.Fatalf("UpsertFeedConfig(%s) error = %v", override.FeedName, err)
 		}
 	}
-	if err := applyStoredFeedConfigOverrides(context.Background(), cfg, store, slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
+	var logs bytes.Buffer
+	if err := applyStoredFeedConfigOverrides(context.Background(), cfg, store, slog.New(slog.NewJSONHandler(&logs, nil))); err != nil {
 		t.Fatalf("applyStoredFeedConfigOverrides(ignored branches) error = %v", err)
 	}
 
 	osv, _ := cfg.FeedSettings("osv")
-	if osv.Mode == config.FeedMode("sideways") {
-		t.Fatalf("invalid OSV mode was applied: %+v", osv)
+	if osv != osvBefore {
+		t.Fatalf("OSV settings changed for ignored record: got %+v, want %+v", osv, osvBefore)
 	}
 	vulncheck, _ := cfg.FeedSettings("vulncheck")
-	if vulncheck.Mode != config.FeedModeExternal || vulncheck.APIKey != "persisted-key" {
-		t.Fatalf("vulncheck override = %+v, want external mode with trimmed key", vulncheck)
+	if !vulncheck.Enabled || vulncheck.Mode != config.FeedModeExternal || vulncheck.SyncInterval != 0 || vulncheck.APIKey != "persisted-key" {
+		t.Fatalf("vulncheck override = %+v, want enabled external mode with default cadence and trimmed key", vulncheck)
+	}
+
+	wantLogs := map[string]map[string]any{
+		"ignoring unknown persisted feed override": {
+			"level": "WARN",
+			"msg":   "ignoring unknown persisted feed override",
+			"feed":  "unknown",
+		},
+		"ignoring invalid persisted feed mode": {
+			"level": "WARN",
+			"msg":   "ignoring invalid persisted feed mode",
+			"feed":  "osv",
+			"mode":  strings.Repeat("x", 50) + "...[truncated]",
+			"error": `invalid feed mode "` + strings.Repeat("x", 479) + "...[truncated]",
+		},
+		"applied persisted feed configuration overrides": {
+			"level": "INFO",
+			"msg":   "applied persisted feed configuration overrides",
+			"count": float64(1),
+		},
+	}
+	if got := decodeJSONLogRecords(t, logs.String()); !reflect.DeepEqual(got, wantLogs) {
+		t.Fatalf("structured feed logs = %#v, want %#v", got, wantLogs)
+	}
+}
+
+func TestApplyStoredFeedConfigOverridesClearsStaleValues(t *testing.T) {
+	t.Parallel()
+
+	cfg := testAdminConfig()
+	current, ok := cfg.FeedSettings("vulncheck")
+	if !ok {
+		t.Fatal("cfg.FeedSettings(vulncheck) = !ok")
+	}
+	current.Enabled = false
+	current.Mode = config.FeedModeSelf
+	current.SyncInterval = 90 * time.Minute
+	current.APIKey = "stale-key"
+	if err := cfg.SetFeedSettings(current); err != nil {
+		t.Fatalf("cfg.SetFeedSettings(vulncheck) error = %v", err)
+	}
+
+	store := newNoopStore()
+	if err := store.UpsertFeedConfig(context.Background(), &db.FeedConfig{
+		FeedName: "vulncheck",
+		Enabled:  true,
+		Mode:     "external",
+		APIKey:   "   ",
+	}); err != nil {
+		t.Fatalf("UpsertFeedConfig(vulncheck) error = %v", err)
+	}
+	if err := applyStoredFeedConfigOverrides(context.Background(), cfg, store, nil); err != nil {
+		t.Fatalf("applyStoredFeedConfigOverrides() error = %v", err)
+	}
+
+	got, _ := cfg.FeedSettings("vulncheck")
+	if !got.Enabled || got.Mode != config.FeedModeExternal {
+		t.Fatalf("vulncheck successful fields = enabled:%v mode:%q, want true/external", got.Enabled, got.Mode)
+	}
+	if got.SyncInterval != 0 {
+		t.Fatalf("vulncheck sync interval = %s, want cleared to zero", got.SyncInterval)
+	}
+	if got.APIKey != "" {
+		t.Fatalf("vulncheck API key = %q, want cleared", got.APIKey)
 	}
 }
 
