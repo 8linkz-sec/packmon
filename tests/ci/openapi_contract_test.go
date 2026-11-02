@@ -1898,15 +1898,30 @@ func TestOpenAPICanonicalWirePayloadsValidateAgainstSchemas(t *testing.T) {
 		SyncedAt: firstPage.SyncedAt, SyncedXID: firstPage.SyncedXID, FeedStatus: string(domain.ScanFeedStatusError), FeedVersions: map[string]string{},
 		Vulnerabilities: []synccontract.Vulnerability{}, Malicious: []synccontract.Malicious{}, Reputation: []synccontract.Reputation{}, Lifecycle: []synccontract.Lifecycle{},
 		Truncated: false, HasMore: false,
+		NextCursor: &synccontract.Cursor{
+			VulnerabilitiesDone: true,
+			MaliciousDone:       true,
+			ReputationDone:      true,
+			LifecycleDone:       true,
+		},
 	}
-	for _, page := range []synccontract.Response{firstPage, continuationPage, finalPage} {
+	for index, page := range []synccontract.Response{firstPage, continuationPage, finalPage} {
 		instance := marshalJSONInstance(t, page)
-		gotXID, ok := instance.(map[string]any)["synced_xid"].(json.Number)
+		response := instance.(map[string]any)
+		gotXID, ok := response["synced_xid"].(json.Number)
 		if !ok || gotXID.String() != "9223372036854775807" {
-			t.Fatalf("marshaled synced_xid = %#v, want exact json.Number 9223372036854775807", instance.(map[string]any)["synced_xid"])
+			t.Fatalf("marshaled synced_xid = %#v, want exact json.Number 9223372036854775807", response["synced_xid"])
 		}
 		if err := compileOpenAPIFragment(t, compiler, "#/components/schemas/SyncResponse").Validate(instance); err != nil {
 			t.Fatalf("canonical SyncResponse does not validate: %v", err)
+		}
+		if index == 2 {
+			cursor := requireMap(t, response, "next_cursor")
+			for _, field := range []string{"vulnerabilities_done", "malicious_done", "reputation_done", "lifecycle_done"} {
+				if cursor[field] != true {
+					t.Fatalf("final SyncCursor.%s = %#v, want true in marshaled wire fixture", field, cursor[field])
+				}
+			}
 		}
 	}
 
@@ -1990,17 +2005,37 @@ func TestOpenAPISyncPaginationContract(t *testing.T) {
 	compiler := newOpenAPIInstanceCompiler(t)
 	for _, method := range []string{"get", "head"} {
 		operation := requireMap(t, requireMap(t, paths, "/api/v1/sync"), method)
+		requireExactSyncParameterFamily(t, operation, "cursor", []string{
+			"vulnerabilities_cursor", "malicious_cursor", "reputation_cursor", "lifecycle_cursor",
+		})
+		requireExactSyncParameterFamily(t, operation, "done", []string{
+			"vulnerabilities_done", "malicious_done", "reputation_done", "lifecycle_done",
+		})
+		requireExactSyncParameterFamily(t, operation, "offset", []string{
+			"offset", "vulnerabilities_offset", "malicious_offset", "reputation_offset", "lifecycle_offset",
+		})
+
 		for _, name := range []string{"vulnerabilities_cursor", "malicious_cursor", "reputation_cursor", "lifecycle_cursor"} {
 			parameter := requireOperationParameter(t, operation, name, "query")
 			if got := requireMap(t, parameter, "schema")["type"]; got != "string" {
 				t.Fatalf("%s sync %s type = %#v, want string", method, name, got)
 			}
+			schema := compileOpenAPISyncParameterSchema(t, compiler, operation, method, name)
+			requireSchemaInstances(t, schema, method+" sync "+name,
+				[]any{"opaque-runtime-cursor"},
+				[]any{true, json.Number("1"), []any{}},
+			)
 		}
 		for _, name := range []string{"vulnerabilities_done", "malicious_done", "reputation_done", "lifecycle_done"} {
 			parameter := requireOperationParameter(t, operation, name, "query")
 			if got := requireMap(t, parameter, "schema")["type"]; got != "boolean" {
 				t.Fatalf("%s sync %s type = %#v, want boolean", method, name, got)
 			}
+			schema := compileOpenAPISyncParameterSchema(t, compiler, operation, method, name)
+			requireSchemaInstances(t, schema, method+" sync "+name,
+				[]any{true, false},
+				[]any{"true", json.Number("1"), nil},
+			)
 		}
 		ecosystem := requireOperationParameter(t, operation, "ecosystem", "query")
 		if ecosystem["style"] != "form" || ecosystem["explode"] != false {
@@ -2010,23 +2045,39 @@ func TestOpenAPISyncPaginationContract(t *testing.T) {
 		if ecosystemSchema["type"] != "array" || requireMap(t, ecosystemSchema, "items")["$ref"] != "#/components/schemas/Ecosystem" {
 			t.Fatalf("%s sync ecosystem schema = %#v, want array of Ecosystem refs", method, ecosystemSchema)
 		}
+		requireSchemaInstances(t, compileOpenAPISyncParameterSchema(t, compiler, operation, method, "ecosystem"), method+" sync ecosystem",
+			[]any{[]any{string(domain.EcosystemNPM)}, []any{string(domain.EcosystemNPM), string(domain.EcosystemGo)}},
+			[]any{"npm", []any{"not-an-ecosystem"}, []any{json.Number("1")}},
+		)
 
 		limit := requireMap(t, requireOperationParameter(t, operation, "limit", "query"), "schema")
 		if requireInt(t, limit, "minimum") != 1 || requireInt(t, limit, "maximum") != synccontract.MaxLimit || requireInt(t, limit, "default") != synccontract.DefaultLimit {
 			t.Fatalf("%s sync limit schema = %#v, want min 1 max %d default %d", method, limit, synccontract.MaxLimit, synccontract.DefaultLimit)
 		}
+		requireSchemaInstances(t, compileOpenAPISyncParameterSchema(t, compiler, operation, method, "limit"), method+" sync limit",
+			[]any{json.Number("1"), json.Number("10000")},
+			[]any{json.Number("0"), json.Number("10001"), json.Number("1.5"), "1"},
+		)
 		for _, name := range []string{"offset", "vulnerabilities_offset", "malicious_offset", "reputation_offset", "lifecycle_offset"} {
 			parameter := requireOperationParameter(t, operation, name, "query")
 			schema := requireMap(t, parameter, "schema")
 			if requireInt(t, schema, "minimum") != 0 || requireInt(t, schema, "maximum") != 10000 || parameter["deprecated"] != true {
 				t.Fatalf("%s sync %s contract = %#v, want deprecated integer range 0..10000", method, name, parameter)
 			}
+			requireSchemaInstances(t, compileOpenAPISyncParameterSchema(t, compiler, operation, method, name), method+" sync "+name,
+				[]any{json.Number("0"), json.Number("10000")},
+				[]any{json.Number("-1"), json.Number("10001"), json.Number("1.5"), "0"},
+			)
 		}
 		for _, name := range []string{"since_xid", "snapshot_xid"} {
 			schema := requireMap(t, requireOperationParameter(t, operation, name, "query"), "schema")
 			if schema["type"] != "integer" || requireInt(t, schema, "minimum") != 0 || requireInt(t, schema, "maximum") != 9223372036854775807 {
 				t.Fatalf("%s sync %s schema = %#v, want exact signed-bigint bounds", method, name, schema)
 			}
+			requireSchemaInstances(t, compileOpenAPISyncParameterSchema(t, compiler, operation, method, name), method+" sync "+name,
+				[]any{json.Number("0"), json.Number("9223372036854775807")},
+				[]any{json.Number("-1"), json.Number("9223372036854775808")},
+			)
 		}
 		for _, name := range []string{"since", "snapshot"} {
 			parameter := requireOperationParameter(t, operation, name, "query")
@@ -2125,7 +2176,7 @@ func TestOpenAPIDocumentsPackageDetailResponse(t *testing.T) {
 	hasRefreshSuffixDocumentation := false
 	for _, raw := range parameters {
 		parameter, ok := raw.(map[string]any)
-		if !ok {
+		if !ok || parameter["in"] != "query" {
 			continue
 		}
 		if parameter["name"] == "version" && parameter["in"] == "query" {
@@ -2358,6 +2409,68 @@ func operationParameterIndex(t *testing.T, operation map[string]any, name, in st
 	}
 	t.Fatalf("operation missing %s parameter %q", in, name)
 	return -1
+}
+
+func compileOpenAPISyncParameterSchema(t *testing.T, compiler *jsonschema.Compiler, operation map[string]any, method, name string) *jsonschema.Schema {
+	t.Helper()
+	parameterIndex := operationParameterIndex(t, operation, name, "query")
+	fragment := fmt.Sprintf("#/paths/~1api~1v1~1sync/%s/parameters/%d/schema", method, parameterIndex)
+	return compileOpenAPIFragment(t, compiler, fragment)
+}
+
+func requireSchemaInstances(t *testing.T, schema *jsonschema.Schema, name string, accepted, rejected []any) {
+	t.Helper()
+	for _, instance := range accepted {
+		if err := schema.Validate(instance); err != nil {
+			t.Errorf("%s rejected valid instance %#v: %v", name, instance, err)
+		}
+	}
+	for _, instance := range rejected {
+		if err := schema.Validate(instance); err == nil {
+			t.Errorf("%s accepted invalid instance %#v", name, instance)
+		}
+	}
+}
+
+func requireExactSyncParameterFamily(t *testing.T, operation map[string]any, family string, wantNames []string) {
+	t.Helper()
+	parameters, ok := operation["parameters"].([]any)
+	if !ok {
+		t.Fatalf("operation parameters = %#v, want array", operation["parameters"])
+	}
+	want := make(map[string]struct{}, len(wantNames))
+	for _, name := range wantNames {
+		want[name] = struct{}{}
+	}
+	got := make(map[string]struct{}, len(wantNames))
+	for _, raw := range parameters {
+		parameter, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := parameter["name"].(string)
+		matches := false
+		switch family {
+		case "cursor":
+			matches = strings.HasSuffix(name, "_cursor")
+		case "done":
+			matches = strings.HasSuffix(name, "_done")
+		case "offset":
+			matches = name == "offset" || strings.HasSuffix(name, "_offset")
+		default:
+			t.Fatalf("unknown sync parameter family %q", family)
+		}
+		if !matches {
+			continue
+		}
+		if _, duplicate := got[name]; duplicate {
+			t.Fatalf("sync %s parameter %q is duplicated", family, name)
+		}
+		got[name] = struct{}{}
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("sync %s parameters = %v, want exact duplicate-free set %v", family, got, want)
+	}
 }
 
 func requireExactStringEnumValues(t *testing.T, schema map[string]any, name string, want []string) {
