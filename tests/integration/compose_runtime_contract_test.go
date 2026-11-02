@@ -24,7 +24,11 @@ import (
 	"time"
 )
 
-const composeRuntimePostgresImage = "cgr.dev/chainguard/postgres:18@sha256:891139a6d9036632791857fb7585425f1bf0c64516fc52bc39da94305ee92461"
+const (
+	composeRuntimePostgresImage = "cgr.dev/chainguard/postgres:18@sha256:891139a6d9036632791857fb7585425f1bf0c64516fc52bc39da94305ee92461"
+	composeRuntimeOverallBudget = 25 * time.Minute
+	composeRuntimeCleanupBudget = 90 * time.Second
+)
 
 type composeRuntimeHarness struct {
 	t            *testing.T
@@ -34,6 +38,7 @@ type composeRuntimeHarness struct {
 	image        string
 	builds       int
 	secrets      map[string]string
+	deadline     time.Time
 }
 
 type composeRuntimeScenario struct {
@@ -54,16 +59,20 @@ func TestComposeRuntimeContracts(t *testing.T) {
 	if _, err := exec.LookPath("docker"); err != nil {
 		t.Fatalf("Docker prerequisite unavailable: %v", err)
 	}
+	runtimeDeadline := requireComposeRuntimePackageBudget(t)
 	requireDockerOutput(t, 30*time.Second, []string{"version", "--format", "{{.Server.Os}}"}, "linux")
 	requireDockerOutput(t, 30*time.Second, []string{"compose", "version", "--short"}, "")
 	if output, err := dockerCommandOutput(30*time.Second, nil, "image", "inspect", composeRuntimePostgresImage); err != nil {
 		t.Fatalf("pinned PostgreSQL image must already be available; runtime tests never pull: %v: %s", err, boundedRuntimeDiagnostic(string(output), nil))
 	}
 
-	h := newComposeRuntimeHarness(t)
+	h := newComposeRuntimeHarness(t, runtimeDeadline)
 	h.buildServerImage()
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		ctx, cancel, _, ok := h.cleanupContext(time.Minute)
+		if !ok {
+			return
+		}
 		defer cancel()
 		cmd := exec.CommandContext(ctx, "docker", "image", "rm", "--force", h.image) // #nosec G204 -- exact test-owned image tag
 		cmd.Env = runtimeDockerEnvironment(nil)
@@ -82,7 +91,27 @@ func TestComposeRuntimeContracts(t *testing.T) {
 	}
 }
 
-func newComposeRuntimeHarness(t *testing.T) *composeRuntimeHarness {
+// The runtime contract intentionally has a larger budget than Go's default
+// ten-minute package timeout because it may spend up to fifteen minutes on the
+// one exact-SHA image build. Run it with:
+//
+//	go test -timeout 30m -count=1 -tags integration ./tests/integration -run '^TestComposeRuntimeContracts$'
+//
+// Every long-running child process is also capped by the 25-minute test budget,
+// with the final 90 seconds reserved for project/image cleanup.
+func requireComposeRuntimePackageBudget(t *testing.T) time.Time {
+	t.Helper()
+	now := time.Now()
+	if packageDeadline, ok := t.Deadline(); ok {
+		const packageMargin = time.Minute
+		if remaining := time.Until(packageDeadline); remaining < composeRuntimeOverallBudget+packageMargin {
+			t.Fatalf("Compose runtime contracts need a package timeout longer than %s (remaining %s); run `go test -timeout 30m -count=1 -tags integration ./tests/integration -run '^TestComposeRuntimeContracts$'`", composeRuntimeOverallBudget, remaining.Round(time.Second))
+		}
+	}
+	return now.Add(composeRuntimeOverallBudget)
+}
+
+func newComposeRuntimeHarness(t *testing.T, deadline time.Time) *composeRuntimeHarness {
 	t.Helper()
 	repo, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -110,6 +139,7 @@ func newComposeRuntimeHarness(t *testing.T) *composeRuntimeHarness {
 		sha:          sha,
 		image:        "packmon-compose-contract:" + sha[:12] + "-" + strconv.Itoa(os.Getpid()),
 		secrets:      generatedComposeEnvironment(t),
+		deadline:     deadline,
 	}
 }
 
@@ -119,18 +149,21 @@ func (h *composeRuntimeHarness) buildServerImage() {
 	if h.builds != 1 {
 		h.t.Fatal("server image build helper may run only once")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	ctx, cancel, effectiveTimeout, ok := h.workContext(15 * time.Minute)
+	if !ok {
+		h.t.Fatal("Compose runtime budget exhausted before the exact-SHA server image build")
+	}
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "docker", "build", "--pull=false", "--target", "server", "--build-arg", "COMMIT="+h.sha, "--tag", h.image, h.buildContext) // #nosec G204 -- exact reviewed archive and test-owned tag
 	cmd.Env = runtimeDockerEnvironment(nil)
 	output, err := cmd.CombinedOutput()
 	if ctx.Err() != nil {
-		h.t.Fatalf("exact-SHA server image build exceeded 15 minutes: %v", ctx.Err())
+		h.t.Fatalf("exact-SHA server image build exceeded its bounded %s budget: %v", effectiveTimeout.Round(time.Second), ctx.Err())
 	}
 	if err != nil {
 		h.t.Fatalf("build exact-SHA server image: %v: %s", err, h.diagnostic(string(output)))
 	}
-	version, err := dockerCommandOutput(30*time.Second, nil, "run", "--rm", "--pull=never", h.image, "version")
+	version, err := h.dockerCommandOutput(30*time.Second, nil, "run", "--rm", "--pull=never", h.image, "version")
 	if err != nil || !strings.Contains(string(version), h.sha) {
 		h.t.Fatalf("built image version does not contain reviewed SHA %s: %v: %s", h.sha, err, h.diagnostic(string(version)))
 	}
@@ -143,7 +176,7 @@ func (h *composeRuntimeHarness) testBootstrapOwnerAndExplicitRun(t *testing.T) {
 		t.Fatalf("seed owner-only environment file: %v", err)
 	}
 	uid, gid := os.Getuid(), os.Getgid()
-	imageUID, err := dockerCommandOutput(30*time.Second, nil, "run", "--rm", "--pull=never", "--entrypoint", "/bin/sh", h.image, "-ec", "id -u")
+	imageUID, err := h.dockerCommandOutput(30*time.Second, nil, "run", "--rm", "--pull=never", "--entrypoint", "/bin/sh", h.image, "-ec", "id -u")
 	if err != nil {
 		t.Fatalf("inspect image user: %v: %s", err, h.diagnostic(string(imageUID)))
 	}
@@ -208,7 +241,7 @@ func (h *composeRuntimeHarness) testMigrationOrdersServerStartup(t *testing.T) {
 	}
 	serverID := strings.TrimSpace(s.runAllowFailure(30*time.Second, "ps", "-q", "packmon-server"))
 	if serverID != "" {
-		state, _ := dockerCommandOutput(30*time.Second, nil, "inspect", "--format", "{{.State.Running}}", serverID)
+		state, _ := h.dockerCommandOutput(30*time.Second, nil, "inspect", "--format", "{{.State.Running}}", serverID)
 		if strings.TrimSpace(string(state)) == "true" {
 			t.Fatal("server reached running state after migrate failure")
 		}
@@ -217,10 +250,32 @@ func (h *composeRuntimeHarness) testMigrationOrdersServerStartup(t *testing.T) {
 	s.down()
 	s = h.newScenario(t, []string{"docker-compose.yml", "docker-compose.override.yml"}, h.commonOverlay(true, "127.0.0.1::8080"))
 	s.down()
-	s.run(2*time.Minute, "up", "-d", "postgres")
-	s.waitHealthy("postgres", 2*time.Minute)
-	s.run(2*time.Minute, "run", "--rm", "--no-deps", "packmon-migrate")
-	s.run(2*time.Minute, "up", "-d", "--no-deps", "packmon-server")
+	s.run(3*time.Minute, "up", "-d", "--wait", "packmon-server")
+	migrateID := strings.TrimSpace(s.run(30*time.Second, "ps", "-a", "-q", "packmon-migrate"))
+	if migrateID == "" {
+		t.Fatal("normal dependency startup did not create the packmon-migrate container")
+	}
+	migrateState := strings.TrimSpace(string(h.mustDockerOutput(t, 30*time.Second, "inspect", "--format", "{{.State.Status}} {{.State.ExitCode}} {{.State.FinishedAt}}", migrateID)))
+	migrateFields := strings.Fields(migrateState)
+	if len(migrateFields) != 3 || migrateFields[0] != "exited" || migrateFields[1] != "0" {
+		t.Fatalf("packmon-migrate state after normal dependency startup = %q, want exited 0 with completion timestamp", migrateState)
+	}
+	migrateFinished, err := time.Parse(time.RFC3339Nano, migrateFields[2])
+	if err != nil || migrateFinished.IsZero() {
+		t.Fatalf("parse packmon-migrate completion timestamp %q: %v", migrateFields[2], err)
+	}
+	successServerID := strings.TrimSpace(s.run(30*time.Second, "ps", "-q", "packmon-server"))
+	if successServerID == "" {
+		t.Fatal("normal dependency startup did not create the packmon-server container")
+	}
+	serverStartedText := strings.TrimSpace(string(h.mustDockerOutput(t, 30*time.Second, "inspect", "--format", "{{.State.StartedAt}}", successServerID)))
+	serverStarted, err := time.Parse(time.RFC3339Nano, serverStartedText)
+	if err != nil {
+		t.Fatalf("parse packmon-server start timestamp %q: %v", serverStartedText, err)
+	}
+	if serverStarted.Before(migrateFinished) {
+		t.Fatalf("server started at %s before migration completed at %s", serverStarted, migrateFinished)
+	}
 	port := s.publishedPort("packmon-server", "8080")
 	s.waitHTTP("http://127.0.0.1:"+port+"/readyz", 2*time.Minute)
 	s.assertNoProviderActivity()
@@ -237,7 +292,9 @@ func (h *composeRuntimeHarness) testProductionLifecycleProxyAndPersistence(t *te
 	target, _ := url.Parse("http://127.0.0.1:" + port)
 	proxy := httptest.NewTLSServer(httputil.NewSingleHostReverseProxy(target))
 	defer proxy.Close()
-	response, err := proxy.Client().Get(proxy.URL + "/version")
+	proxyClient := proxy.Client()
+	proxyClient.Timeout = 5 * time.Second
+	response, err := proxyClient.Get(proxy.URL + "/version")
 	if err != nil {
 		t.Fatalf("HTTPS request through test-owned TLS reverse proxy: %v", err)
 	}
@@ -256,7 +313,7 @@ func (h *composeRuntimeHarness) testProductionLifecycleProxyAndPersistence(t *te
 	// an unless-stopped restart instead of exercising the restart policy.
 	_, _, _ = s.command(30*time.Second, "exec", "-T", "packmon-server", "/bin/busybox", "kill", "-9", "1")
 	s.waitHTTP(readyURL, 2*time.Minute)
-	restarts := strings.TrimSpace(string(mustDockerOutput(t, 30*time.Second, "inspect", "--format", "{{.RestartCount}}", containerID)))
+	restarts := strings.TrimSpace(string(h.mustDockerOutput(t, 30*time.Second, "inspect", "--format", "{{.RestartCount}}", containerID)))
 	if restarts == "0" || restarts == "" {
 		t.Fatalf("unless-stopped policy did not record a restart: %q", restarts)
 	}
@@ -321,7 +378,7 @@ func (h *composeRuntimeHarness) testConfiguredBackupEntrypointProbe(t *testing.T
 	}
 
 	t.Run("F058-bugs-4_configured_entrypoint", func(t *testing.T) {
-		entrypoint := string(mustDockerOutput(t, 30*time.Second, "image", "inspect", "--format", "{{json .Config.Entrypoint}}", composeRuntimePostgresImage))
+		entrypoint := string(h.mustDockerOutput(t, 30*time.Second, "image", "inspect", "--format", "{{json .Config.Entrypoint}}", composeRuntimePostgresImage))
 		failure := strings.ToLower(output)
 		entrypointRetained := strings.Contains(entrypoint, "docker-entrypoint") && strings.Contains(entrypoint, "postgres")
 		commandPassedAsArgs := strings.Contains(failure, "sh") && (strings.Contains(failure, "postgres") || strings.Contains(failure, "invalid"))
@@ -486,14 +543,17 @@ func (s *composeRuntimeScenario) composeArgs(args ...string) []string {
 }
 
 func (s *composeRuntimeScenario) command(timeout time.Duration, args ...string) (string, string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel, effectiveTimeout, ok := s.h.workContext(timeout)
+	if !ok {
+		return "", "", fmt.Errorf("Compose runtime work budget exhausted before docker compose %s", args[0])
+	}
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "docker", s.composeArgs(args...)...) // #nosec G204 -- exact test-owned project/files and fixed caller arguments
 	cmd.Dir = s.dir
 	cmd.Env = runtimeDockerEnvironment(nil)
 	output, err := cmd.CombinedOutput()
 	if ctx.Err() != nil {
-		return "", string(output), fmt.Errorf("docker compose %s timed out after %s", args[0], timeout)
+		return "", string(output), fmt.Errorf("docker compose %s timed out after bounded %s", args[0], effectiveTimeout.Round(time.Second))
 	}
 	return string(output), string(output), err
 }
@@ -513,7 +573,15 @@ func (s *composeRuntimeScenario) runAllowFailure(timeout time.Duration, args ...
 }
 
 func (s *composeRuntimeScenario) down() {
-	_, _, _ = s.command(time.Minute, "down", "--volumes", "--remove-orphans")
+	ctx, cancel, _, ok := s.h.cleanupContext(time.Minute)
+	if !ok {
+		return
+	}
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "docker", s.composeArgs("down", "--volumes", "--remove-orphans")...) // #nosec G204 -- exact test-owned project/files and fixed cleanup arguments
+	cmd.Dir = s.dir
+	cmd.Env = runtimeDockerEnvironment(nil)
+	_, _ = cmd.CombinedOutput()
 }
 
 func (s *composeRuntimeScenario) downKeepVolumes() {
@@ -522,11 +590,11 @@ func (s *composeRuntimeScenario) downKeepVolumes() {
 
 func (s *composeRuntimeScenario) waitHealthy(service string, timeout time.Duration) {
 	s.h.t.Helper()
-	deadline := time.Now().Add(timeout)
+	deadline := earlierTime(time.Now().Add(timeout), s.h.deadline.Add(-composeRuntimeCleanupBudget))
 	for time.Now().Before(deadline) {
 		id := strings.TrimSpace(s.runAllowFailure(30*time.Second, "ps", "-q", service))
 		if id != "" {
-			output, err := dockerCommandOutput(30*time.Second, nil, "inspect", "--format", "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}", id)
+			output, err := s.h.dockerCommandOutput(30*time.Second, nil, "inspect", "--format", "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}", id)
 			if err == nil && strings.TrimSpace(string(output)) == "healthy" {
 				return
 			}
@@ -548,7 +616,7 @@ func (s *composeRuntimeScenario) publishedPort(service, target string) string {
 
 func (s *composeRuntimeScenario) waitHTTP(address string, timeout time.Duration) {
 	s.h.t.Helper()
-	deadline := time.Now().Add(timeout)
+	deadline := earlierTime(time.Now().Add(timeout), s.h.deadline.Add(-composeRuntimeCleanupBudget))
 	client := &http.Client{Timeout: 2 * time.Second}
 	for time.Now().Before(deadline) {
 		response, err := client.Get(address)
@@ -566,7 +634,7 @@ func (s *composeRuntimeScenario) waitHTTP(address string, timeout time.Duration)
 
 func (s *composeRuntimeScenario) waitContainerMetrics(timeout time.Duration) string {
 	s.h.t.Helper()
-	deadline := time.Now().Add(timeout)
+	deadline := earlierTime(time.Now().Add(timeout), s.h.deadline.Add(-composeRuntimeCleanupBudget))
 	for time.Now().Before(deadline) {
 		output, _, err := s.command(30*time.Second, "exec", "-T", "packmon-server", "/bin/busybox", "wget", "-qO-", "http://127.0.0.1:9090/metrics")
 		if err == nil && strings.Contains(output, "packmon_") {
@@ -615,6 +683,55 @@ func (h *composeRuntimeHarness) diagnostic(output string) string {
 		}
 	}
 	return boundedRuntimeDiagnostic(output, replacements)
+}
+
+func (h *composeRuntimeHarness) workContext(requested time.Duration) (context.Context, context.CancelFunc, time.Duration, bool) {
+	return boundedRuntimeContext(h.deadline.Add(-composeRuntimeCleanupBudget), requested)
+}
+
+func (h *composeRuntimeHarness) cleanupContext(requested time.Duration) (context.Context, context.CancelFunc, time.Duration, bool) {
+	return boundedRuntimeContext(h.deadline, requested)
+}
+
+func (h *composeRuntimeHarness) dockerCommandOutput(timeout time.Duration, env map[string]string, args ...string) ([]byte, error) {
+	ctx, cancel, effectiveTimeout, ok := h.workContext(timeout)
+	if !ok {
+		return nil, fmt.Errorf("Compose runtime work budget exhausted before docker %s", args[0])
+	}
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "docker", args...) // #nosec G204 -- fixed Docker executable and controlled test arguments
+	cmd.Env = runtimeDockerEnvironment(env)
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		return output, fmt.Errorf("docker %s timed out after bounded %s", args[0], effectiveTimeout.Round(time.Second))
+	}
+	return output, err
+}
+
+func (h *composeRuntimeHarness) mustDockerOutput(t *testing.T, timeout time.Duration, args ...string) []byte {
+	t.Helper()
+	output, err := h.dockerCommandOutput(timeout, nil, args...)
+	if err != nil {
+		t.Fatalf("docker %s: %v: %s", args[0], err, h.diagnostic(string(output)))
+	}
+	return output
+}
+
+func boundedRuntimeContext(deadline time.Time, requested time.Duration) (context.Context, context.CancelFunc, time.Duration, bool) {
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return nil, nil, 0, false
+	}
+	effective := min(requested, remaining)
+	ctx, cancel := context.WithTimeout(context.Background(), effective)
+	return ctx, cancel, effective, true
+}
+
+func earlierTime(left, right time.Time) time.Time {
+	if left.Before(right) {
+		return left
+	}
+	return right
 }
 
 func generatedComposeEnvironment(t *testing.T) map[string]string {
