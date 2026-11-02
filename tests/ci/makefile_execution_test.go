@@ -211,8 +211,7 @@ func TestParallelMakeTargetsSerializeNPMCI(t *testing.T) {
 			t.Fatalf("npm ci cwd = %q, want fixture checkout %q", call.cwd, fixture.dir)
 		}
 	}
-	assertParallelTargetCalls(t, fixture, calls, npmCalls)
-	assertParallelTargetEventOrder(t, fixture, npmCalls)
+	assertParallelTargetCalls(t, fixture, calls)
 
 	owners := countDecision(decisions, "owner")
 	overlaps := countDecision(decisions, "overlap")
@@ -221,23 +220,13 @@ func TestParallelMakeTargetsSerializeNPMCI(t *testing.T) {
 		if ready != 3 || attempts != 3 || len(decisions) != 3 || owners != 1 || overlaps != 2 || postOwner != 0 || len(npmCalls) != 3 {
 			t.Fatalf("npm overlap did not match the known bug: ready=%d attempts=%d decisions=%v exact calls=%d, want 3/3/(one owner, two overlap, zero post-owner)/3\ncalls:\n%s", ready, attempts, decisions, len(npmCalls), formatStubCalls(calls))
 		}
+		assertKnownParallelNPMBugTargets(t, npmCalls)
 		t.Skip("OPEN F008-bugs-4: parallel lint-web, lint-openapi, and security recipes overlap npm ci in the shared checkout")
 	}
-	if len(npmCalls) != 1 && len(npmCalls) != 3 {
-		t.Fatalf("serialized npm ci call count = %d, want either one shared install or three serialized installs\ncalls:\n%s", len(npmCalls), formatStubCalls(calls))
+	if len(npmCalls) != 1 || npmCalls[0].target != "" || ready != 1 || attempts != 1 || len(decisions) != 1 || owners != 1 || postOwner != 0 {
+		t.Fatalf("shared npm prerequisite state = calls %d target %q ready %d attempts %d decisions %v, want one target-neutral call and 1/1/(one owner, zero post-owner)\ncalls:\n%s", len(npmCalls), firstCallTarget(npmCalls), ready, attempts, decisions, formatStubCalls(calls))
 	}
-	if len(npmCalls) == 3 {
-		assertNPMEventNonoverlap(t, fixture.eventPath)
-	}
-	if ready != 1 {
-		t.Fatalf("serialized npm ci ready participant count = %d, want exactly 1 before release", ready)
-	}
-	if attempts != len(npmCalls) {
-		t.Fatalf("npm barrier attempts = %d, want one per exact npm ci call (%d)", attempts, len(npmCalls))
-	}
-	if len(decisions) != len(npmCalls) || owners != 1 || postOwner != len(npmCalls)-1 {
-		t.Fatalf("serialized npm ci decisions = %v, want one owner and %d post-owner", decisions, len(npmCalls)-1)
-	}
+	assertSharedNPMEventOrder(t, fixture)
 }
 
 func TestMakeTaggedTargetsPreserveBinaryDirWithSpaces(t *testing.T) {
@@ -387,14 +376,17 @@ func instrumentParallelNPMTargets(t *testing.T, fixtureDir string) {
 	current := ""
 	for index, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "\t") && strings.HasSuffix(trimmed, ":") {
-			candidate := strings.TrimSuffix(trimmed, ":")
+		if !strings.HasPrefix(line, "\t") {
+			candidate, _, hasColon := strings.Cut(trimmed, ":")
+			candidate = strings.TrimSpace(candidate)
 			if _, ok := specs[candidate]; ok {
 				current = candidate
 			} else {
 				current = ""
 			}
-			continue
+			if hasColon {
+				continue
+			}
 		}
 		if current == "" || !strings.HasPrefix(line, "\t") {
 			continue
@@ -556,7 +548,7 @@ func parallelTargetCharacteristics() map[string][]string {
 	}
 }
 
-func assertParallelTargetCalls(t *testing.T, fixture makeFixture, calls, npmCalls []stubCall) {
+func assertParallelTargetCalls(t *testing.T, fixture makeFixture, calls []stubCall) {
 	t.Helper()
 	for target, wantArgv := range parallelTargetCharacteristics() {
 		var matches []stubCall
@@ -569,32 +561,43 @@ func assertParallelTargetCalls(t *testing.T, fixture makeFixture, calls, npmCall
 			t.Fatalf("%s characteristic calls = %s, want exactly one target=%q cwd=%q argv=%q", target, formatStubCalls(matches), target, fixture.dir, wantArgv)
 		}
 	}
-	if len(npmCalls) != 3 {
-		return
-	}
+}
+
+func assertKnownParallelNPMBugTargets(t *testing.T, npmCalls []stubCall) {
+	t.Helper()
 	counts := make(map[string]int, 3)
 	for _, call := range npmCalls {
 		counts[call.target]++
 	}
 	for target := range parallelTargetCharacteristics() {
 		if counts[target] != 1 {
-			t.Fatalf("three-install npm ci target mapping = %v, want exactly one install for each parallel target\ncalls:\n%s", counts, formatStubCalls(npmCalls))
+			t.Fatalf("known parallel npm bug target mapping = %v, want exactly one install for each parallel target\ncalls:\n%s", counts, formatStubCalls(npmCalls))
 		}
 	}
 	if len(counts) != 3 {
-		t.Fatalf("three-install npm ci includes unexpected target mapping %v\ncalls:\n%s", counts, formatStubCalls(npmCalls))
+		t.Fatalf("known parallel npm bug includes unexpected target mapping %v\ncalls:\n%s", counts, formatStubCalls(npmCalls))
 	}
 }
 
-func assertParallelTargetEventOrder(t *testing.T, fixture makeFixture, npmCalls []stubCall) {
+func firstCallTarget(calls []stubCall) string {
+	if len(calls) == 0 {
+		return ""
+	}
+	return calls[0].target
+}
+
+func assertSharedNPMEventOrder(t *testing.T, fixture makeFixture) {
 	t.Helper()
 	events := readStubEvents(t, fixture.eventPath)
-	completeByTarget := make(map[string][]int)
+	var completions []int
 	characteristicStart := make(map[string][]int)
 	characteristics := parallelTargetCharacteristics()
 	for index, event := range events {
 		if event.kind == "complete" && slices.Equal(event.call.argv, []string{"npm", "ci", "--ignore-scripts"}) {
-			completeByTarget[event.call.target] = append(completeByTarget[event.call.target], index)
+			if event.call.target != "" {
+				t.Fatalf("shared npm install completion target = %q, want target-neutral", event.call.target)
+			}
+			completions = append(completions, index)
 		}
 		if event.kind != "start" {
 			continue
@@ -608,60 +611,14 @@ func assertParallelTargetEventOrder(t *testing.T, fixture makeFixture, npmCalls 
 			}
 		}
 	}
-	if len(npmCalls) == 1 {
-		var completions []int
-		for _, indexes := range completeByTarget {
-			completions = append(completions, indexes...)
-		}
-		if len(completions) != 1 {
-			t.Fatalf("one-install completion events = %v, want exactly one", completeByTarget)
-		}
-		for target := range characteristics {
-			starts := characteristicStart[target]
-			if len(starts) != 1 || completions[0] >= starts[0] {
-				t.Fatalf("shared npm install completion index %d must precede the one %s characteristic start; starts=%v", completions[0], target, starts)
-			}
-		}
-		return
-	}
-	if len(npmCalls) != 3 {
-		return
+	if len(completions) != 1 {
+		t.Fatalf("shared npm install completion events = %v, want exactly one", completions)
 	}
 	for target := range characteristics {
-		completions := completeByTarget[target]
 		starts := characteristicStart[target]
-		if len(completions) != 1 || len(starts) != 1 || completions[0] >= starts[0] {
-			t.Fatalf("%s install/characteristic event order = completions %v, starts %v; want one mapped completion before one mapped start", target, completions, starts)
+		if len(starts) != 1 || completions[0] >= starts[0] {
+			t.Fatalf("shared npm install completion index %d must precede the one %s characteristic start; starts=%v", completions[0], target, starts)
 		}
-	}
-}
-
-func assertNPMEventNonoverlap(t *testing.T, path string) {
-	t.Helper()
-	active := 0
-	starts := 0
-	completions := 0
-	for _, event := range readStubEvents(t, path) {
-		if !slices.Equal(event.call.argv, []string{"npm", "ci", "--ignore-scripts"}) {
-			continue
-		}
-		switch event.kind {
-		case "start":
-			if active != 0 {
-				t.Fatalf("serialized three-install path started target %q while another npm ci remained active", event.call.target)
-			}
-			active = 1
-			starts++
-		case "complete":
-			if active != 1 {
-				t.Fatalf("serialized three-install path completed target %q without one active npm ci", event.call.target)
-			}
-			active = 0
-			completions++
-		}
-	}
-	if active != 0 || starts != 3 || completions != 3 {
-		t.Fatalf("serialized three-install npm event counts = starts %d, completions %d, active %d; want 3/3/0", starts, completions, active)
 	}
 }
 
