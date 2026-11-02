@@ -118,10 +118,13 @@ func TestAdminFeedStatusMetadataRedactsSecrets(t *testing.T) {
 	}
 	for _, check := range checks {
 		if strings.Contains(check.got, check.secret) {
-			t.Errorf("%s leaked secret %q in %q", check.name, check.secret, check.got)
+			t.Errorf("%s was not redacted", check.name)
 		}
-		if !strings.Contains(check.got, check.context) || !strings.Contains(check.got, check.marker) {
-			t.Errorf("%s = %q, want safe context %q and marker %q", check.name, check.got, check.context, check.marker)
+		if !strings.Contains(check.got, check.context) {
+			t.Errorf("%s did not preserve its safe context", check.name)
+		}
+		if !strings.Contains(check.got, check.marker) {
+			t.Errorf("%s did not include a redaction marker", check.name)
 		}
 	}
 }
