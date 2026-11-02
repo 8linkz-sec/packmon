@@ -23,6 +23,18 @@ func TestVersionCommandPrintsBuildMetadata(t *testing.T) {
 }
 
 func TestVersionCommandRendersExactMetadataLine(t *testing.T) {
+	originalVersion := version
+	originalCommit := commit
+	originalDate := date
+	t.Cleanup(func() {
+		version = originalVersion
+		commit = originalCommit
+		date = originalDate
+	})
+	version = "1.2.3-test"
+	commit = "abcdef0123456789"
+	date = "2030-01-02T03:04:05Z"
+
 	cmd := newVersionCmd()
 	output := captureStdout(t, func() {
 		if err := cmd.Execute(); err != nil {
@@ -30,7 +42,7 @@ func TestVersionCommandRendersExactMetadataLine(t *testing.T) {
 		}
 	})
 
-	want := "packmon " + version + " (" + commit + ") built " + date + " " + runtime.GOOS + "/" + runtime.GOARCH + "\n"
+	want := "packmon 1.2.3-test (abcdef0123456789) built 2030-01-02T03:04:05Z " + runtime.GOOS + "/" + runtime.GOARCH + "\n"
 	if output != want {
 		t.Fatalf("version output = %q, want %q", output, want)
 	}
