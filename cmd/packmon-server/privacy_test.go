@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -383,6 +384,28 @@ func TestRunPrivacyExportStoreFailureMatrix(t *testing.T) {
 			t.Fatalf("store closes = %d, want 1", store.closes)
 		}
 	})
+}
+
+func TestRunPrivacyDefaultStoreOpenerRejectsUnavailableDatabase(t *testing.T) {
+	originalOpen := openPrivacyExportStore
+	t.Cleanup(func() { openPrivacyExportStore = originalOpen })
+
+	port := f018ClosedLoopbackPort(t)
+	timeout := 50 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	dsn := fmt.Sprintf("postgres://packmon:packmon@127.0.0.1:%d/packmon?sslmode=disable", port)
+
+	store, err := originalOpen(ctx, dsn, timeout)
+	if err == nil {
+		if store != nil {
+			_ = store.Close()
+		}
+		t.Fatal("openPrivacyExportStore() error = nil, want bounded PostgreSQL connection failure")
+	}
+	if !strings.Contains(err.Error(), "postgres: ping") {
+		t.Fatalf("openPrivacyExportStore() error = %v, want PostgreSQL ping failure", err)
+	}
 }
 
 func TestRunPrivacyExportEncoderFailureClosesStore(t *testing.T) {
