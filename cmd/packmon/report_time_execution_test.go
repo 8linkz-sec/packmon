@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestGeneratedHTMLReportLocaleScriptExecutesFormattingContracts(t *testing.T) {
@@ -28,9 +30,15 @@ func TestGeneratedHTMLReportLocaleScriptExecutesFormattingContracts(t *testing.T
 	}
 
 	encoded := base64.StdEncoding.EncodeToString([]byte(body))
-	cmd := exec.Command(node, "-e", reportLocaleNodeHarness, encoded)
+	const nodeTimeout = 10 * time.Second
+	ctx, cancel := context.WithTimeout(t.Context(), nodeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, node, "-e", reportLocaleNodeHarness, encoded)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			t.Fatalf("execute locale script with Node timed out after %s\n%s", nodeTimeout, output)
+		}
 		t.Fatalf("execute locale script with Node: %v\n%s", err, output)
 	}
 	if got := strings.TrimSpace(string(output)); got != "ok" {
