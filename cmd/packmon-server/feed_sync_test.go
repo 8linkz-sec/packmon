@@ -40,7 +40,9 @@ type blockingTriggerSyncer struct {
 func (s *blockingTriggerSyncer) Name() string { return s.name }
 
 func (s *blockingTriggerSyncer) Sync(ctx context.Context, _ db.Store) (*feed.SyncResult, error) {
-	s.calls.Add(1)
+	if s.calls.Add(1) > 1 {
+		return &feed.SyncResult{}, nil
+	}
 	close(s.started)
 	select {
 	case <-s.release:

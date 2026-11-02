@@ -76,8 +76,8 @@ func TestInitSecretsFillsQuotedAndMissingSecretsWithoutReplacingNonEmptyValues(t
 	env := filepath.Join(dir, ".env")
 	const preservedEncryptionKey = "invalid-but-explicit-encryption-key"
 	if err := os.WriteFile(env, []byte(
-		"POSTGRES_PASSWORD=''\n"+
-			"PACKMON_ADMIN_INITIAL_PASSWORD=\"\"\n"+
+		"POSTGRES_PASSWORD=\"\"\n"+
+			"PACKMON_DB_PASSWORD=''\n"+
 			"PACKMON_ENCRYPTION_KEY="+preservedEncryptionKey+"\n",
 	), 0o600); err != nil {
 		t.Fatalf("write fixture .env: %v", err)
@@ -559,21 +559,59 @@ func TestRunInitSecretsReportsInvalidInputPaths(t *testing.T) {
 	})
 
 	t.Run("environment path is directory", func(t *testing.T) {
-		dir := t.TempDir()
-		example := filepath.Join(dir, ".env.example")
+		root := t.TempDir()
+		env := filepath.Join(root, "environment")
+		if err := os.Mkdir(env, 0o700); err != nil {
+			t.Fatalf("create environment directory: %v", err)
+		}
+		const original = "operator-owned fixture content\n"
+		fixture := filepath.Join(env, "operator-file")
+		if err := os.WriteFile(fixture, []byte(original), 0o600); err != nil {
+			t.Fatalf("write environment fixture: %v", err)
+		}
+		if err := os.Mkdir(filepath.Join(env, "operator-directory"), 0o700); err != nil {
+			t.Fatalf("create nested environment directory: %v", err)
+		}
+		beforeEntries, err := os.ReadDir(env)
+		if err != nil {
+			t.Fatalf("read environment directory before init-secrets: %v", err)
+		}
+		example := filepath.Join(root, ".env.example")
 		if err := os.WriteFile(example, []byte("POSTGRES_PASSWORD=\n"), 0o600); err != nil {
 			t.Fatalf("write example: %v", err)
 		}
 
-		err := runInitSecrets([]string{"--env", dir, "--example", example})
+		err = runInitSecrets([]string{"--env", env, "--example", example})
 		var pathErr *os.PathError
-		if !errors.As(err, &pathErr) || pathErr.Op != "read" || pathErr.Path != dir {
-			t.Fatalf("runInitSecrets() error = %v, want read PathError for %s", err, dir)
+		if !errors.As(err, &pathErr) || pathErr.Op != "read" || pathErr.Path != env {
+			t.Fatalf("runInitSecrets() error = %v, want read PathError for %s", err, env)
 		}
-		if info, statErr := os.Stat(dir); statErr != nil || !info.IsDir() {
+		if info, statErr := os.Stat(env); statErr != nil || !info.IsDir() {
 			t.Fatalf("environment directory after failure = %v, %v; want preserved directory", info, statErr)
 		}
-		assertNoInitSecretsTempFiles(t, filepath.Join(dir, ".env-*.tmp"))
+		afterEntries, readErr := os.ReadDir(env)
+		if readErr != nil {
+			t.Fatalf("read environment directory after init-secrets: %v", readErr)
+		}
+		if len(afterEntries) != len(beforeEntries) {
+			t.Fatalf("environment directory entry count = %d, want unchanged %d", len(afterEntries), len(beforeEntries))
+		}
+		for i := range beforeEntries {
+			if afterEntries[i].Name() != beforeEntries[i].Name() ||
+				afterEntries[i].Type() != beforeEntries[i].Type() ||
+				afterEntries[i].IsDir() != beforeEntries[i].IsDir() {
+				t.Fatalf("environment directory entry %d = %s (%v), want unchanged %s (%v)",
+					i, afterEntries[i].Name(), afterEntries[i].Type(), beforeEntries[i].Name(), beforeEntries[i].Type())
+			}
+		}
+		data, readErr := os.ReadFile(fixture) //nolint:gosec // test reads a path built from t.TempDir().
+		if readErr != nil {
+			t.Fatalf("read preserved environment fixture: %v", readErr)
+		}
+		if string(data) != original {
+			t.Fatalf("environment fixture content = %q, want unchanged %q", data, original)
+		}
+		assertNoInitSecretsTempFiles(t, filepath.Join(env, ".env-*.tmp"))
 	})
 
 	t.Run("template path is directory for fresh environment", func(t *testing.T) {
