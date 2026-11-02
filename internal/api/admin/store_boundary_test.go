@@ -3,8 +3,10 @@ package admin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/8linkz-sec/packmon/internal/db"
 	"github.com/8linkz-sec/packmon/internal/devstore"
@@ -16,6 +18,257 @@ import (
 // interface hides the extension methods the concrete store happens to have.
 type plainDBStore struct {
 	db.Store
+}
+
+func TestAdaptAdminStorePreservesAdminStoreIdentity(t *testing.T) {
+	t.Parallel()
+
+	adapted := adaptAdminStore(devstore.NewStore())
+	if adapted == nil {
+		t.Fatal("adaptAdminStore(db.Store) = nil")
+	}
+	if got := adaptAdminStore(adapted); got != adapted {
+		t.Fatalf("adaptAdminStore(Store) = %T %v, want identical %T %v", got, got, adapted, adapted)
+	}
+}
+
+func TestAdminStoreAdapterForwardsPagingAndPreservesErrors(t *testing.T) {
+	t.Parallel()
+
+	type contextKey struct{}
+	ctx := context.WithValue(context.Background(), contextKey{}, "paging-context")
+	spy := &adminPagingSpyStore{
+		Store:     devstore.NewStore(),
+		queueJobs: []db.RefreshJob{{ID: 17}},
+		auditRows: []db.AdminAuditLogEntry{{ID: 19}},
+	}
+	adapter := dbAdminStoreAdapter{Store: spy}
+
+	jobs, err := adapter.ListQueueJobsPage(ctx, "processing", 17, 34)
+	if err != nil {
+		t.Fatalf("ListQueueJobsPage: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].ID != 17 {
+		t.Fatalf("queue jobs = %+v", jobs)
+	}
+	if spy.queueCtx != ctx || spy.queueStatus != "processing" || spy.queueLimit != 17 || spy.queueOffset != 34 {
+		t.Fatalf("queue paging arguments = ctx:%v status:%q limit:%d offset:%d", spy.queueCtx == ctx, spy.queueStatus, spy.queueLimit, spy.queueOffset)
+	}
+
+	auditRows, err := adapter.ListAdminAuditLogPage(ctx, 19, 38)
+	if err != nil {
+		t.Fatalf("ListAdminAuditLogPage: %v", err)
+	}
+	if len(auditRows) != 1 || auditRows[0].ID != 19 {
+		t.Fatalf("audit rows = %+v", auditRows)
+	}
+	if spy.auditCtx != ctx || spy.auditLimit != 19 || spy.auditOffset != 38 {
+		t.Fatalf("audit paging arguments = ctx:%v limit:%d offset:%d", spy.auditCtx == ctx, spy.auditLimit, spy.auditOffset)
+	}
+
+	queueErr := errors.New("native queue paging failed")
+	auditErr := errors.New("native audit paging failed")
+	failingPager := &adminPagingSpyStore{Store: devstore.NewStore(), queueErr: queueErr, auditErr: auditErr}
+	failingAdapter := dbAdminStoreAdapter{Store: failingPager}
+	if rows, gotErr := failingAdapter.ListQueueJobsPage(ctx, "error", 5, 10); rows != nil || gotErr != queueErr {
+		t.Fatalf("native queue failure = rows:%+v err:%v, want nil and sentinel", rows, gotErr)
+	}
+	if rows, gotErr := failingAdapter.ListAdminAuditLogPage(ctx, 5, 10); rows != nil || gotErr != auditErr {
+		t.Fatalf("native audit failure = rows:%+v err:%v, want nil and sentinel", rows, gotErr)
+	}
+
+	unpagedErr := errors.New("unpaged queue failed")
+	unpagedStore := plainDBStore{Store: &adminListQueueErrorStore{Store: devstore.NewStore(), err: unpagedErr}}
+	unpagedAdapter := dbAdminStoreAdapter{Store: unpagedStore}
+	if rows, gotErr := unpagedAdapter.ListQueueJobsPage(ctx, "pending", 7, 0); rows != nil || gotErr != unpagedErr {
+		t.Fatalf("unpaged queue failure = rows:%+v err:%v, want nil and sentinel", rows, gotErr)
+	}
+	if rows, gotErr := unpagedAdapter.ListQueueJobsPage(ctx, "pending", 7, 1); rows != nil || gotErr == nil || !strings.Contains(gotErr.Error(), "pagination") {
+		t.Fatalf("unsupported offset = rows:%+v err:%v, want nil pagination error", rows, gotErr)
+	}
+}
+
+func TestAdminQueueStatsConversionAndAdapterErrors(t *testing.T) {
+	t.Parallel()
+
+	if got := adminQueueStatsFromDB(nil); got != nil {
+		t.Fatalf("adminQueueStatsFromDB(nil) = %+v, want nil", got)
+	}
+	got := adminQueueStatsFromDB(&db.QueueStatsResult{Pending: 1, Processing: 2, Done: 3, Error: 4, Paused: 5})
+	want := adminQueueStats{Pending: 1, Processing: 2, Done: 3, Error: 4, Paused: 5}
+	if got == nil || *got != want {
+		t.Fatalf("adminQueueStatsFromDB = %+v, want %+v", got, want)
+	}
+
+	sentinel := errors.New("queue stats failed")
+	adapter := dbAdminStoreAdapter{Store: &adminQueueStatsErrorStore{Store: devstore.NewStore(), err: sentinel}}
+	if stats, err := adapter.QueueStats(context.Background()); stats != nil || err != sentinel {
+		t.Fatalf("QueueStats = stats:%+v err:%v, want nil and sentinel", stats, err)
+	}
+}
+
+func TestAdminQueueJobsConversionCopiesEveryFieldAndTimestamp(t *testing.T) {
+	t.Parallel()
+
+	requestedAt := time.Date(2026, time.November, 2, 10, 0, 0, 0, time.UTC)
+	processedAt := requestedAt.Add(5 * time.Minute)
+	sourceProcessedAt := processedAt
+	jobs := adminQueueJobsFromDB([]db.RefreshJob{{
+		ID:          41,
+		Ecosystem:   "npm",
+		Name:        "left-pad",
+		Source:      "socket",
+		Priority:    2,
+		Status:      "done",
+		RequestedAt: requestedAt,
+		ProcessedAt: &sourceProcessedAt,
+		Error:       "safe diagnostic",
+	}})
+	if len(jobs) != 1 {
+		t.Fatalf("jobs = %+v", jobs)
+	}
+	got := jobs[0]
+	if got.ID != 41 || got.Ecosystem != "npm" || got.Name != "left-pad" || got.Source != "socket" ||
+		got.Priority != 2 || got.Status != "done" || !got.RequestedAt.Equal(requestedAt) || got.Error != "safe diagnostic" {
+		t.Fatalf("converted job dropped fields: %+v", got)
+	}
+	if got.ProcessedAt == nil || !got.ProcessedAt.Equal(processedAt) {
+		t.Fatalf("ProcessedAt = %v, want %v", got.ProcessedAt, processedAt)
+	}
+	if got.ProcessedAt == &sourceProcessedAt {
+		t.Fatal("ProcessedAt aliases the source pointer")
+	}
+
+	sourceProcessedAt = sourceProcessedAt.Add(time.Hour)
+	if !got.ProcessedAt.Equal(processedAt) {
+		t.Fatalf("ProcessedAt changed after source mutation: %v", got.ProcessedAt)
+	}
+}
+
+func TestCountUnknownSeverityFindingsCoversFallbackAndErrors(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nonzero dashboard fallback", func(t *testing.T) {
+		store := &adminDashboardStatsStore{Store: devstore.NewStore(), stats: &db.DashboardStatsResult{BySeverity: map[string]int{"UNKNOWN": 9}}}
+		count, err := (dbAdminStoreAdapter{Store: store}).CountUnknownSeverityFindings(context.Background())
+		if err != nil || count != 9 {
+			t.Fatalf("CountUnknownSeverityFindings = %d, %v; want 9, nil", count, err)
+		}
+	})
+
+	t.Run("dashboard error", func(t *testing.T) {
+		sentinel := errors.New("dashboard failed")
+		store := &adminDashboardStatsStore{Store: devstore.NewStore(), err: sentinel}
+		count, err := (dbAdminStoreAdapter{Store: store}).CountUnknownSeverityFindings(context.Background())
+		if count != 0 || err != sentinel {
+			t.Fatalf("CountUnknownSeverityFindings = %d, %v; want 0 and sentinel", count, err)
+		}
+	})
+
+	t.Run("nil dashboard", func(t *testing.T) {
+		store := &adminDashboardStatsStore{Store: devstore.NewStore()}
+		count, err := (dbAdminStoreAdapter{Store: store}).CountUnknownSeverityFindings(context.Background())
+		if count != 0 || err != nil {
+			t.Fatalf("CountUnknownSeverityFindings = %d, %v; want 0, nil", count, err)
+		}
+	})
+
+	t.Run("dedicated counter error does not fall back", func(t *testing.T) {
+		sentinel := errors.New("dedicated counter failed")
+		dashboard := &adminDashboardStatsStore{
+			Store: devstore.NewStore(),
+			stats: &db.DashboardStatsResult{BySeverity: map[string]int{"UNKNOWN": 99}},
+		}
+		store := &adminUnknownSeverityCounterStore{adminDashboardStatsStore: dashboard, err: sentinel}
+		count, err := (dbAdminStoreAdapter{Store: store}).CountUnknownSeverityFindings(context.Background())
+		if count != 0 || err != sentinel {
+			t.Fatalf("CountUnknownSeverityFindings = %d, %v; want 0 and sentinel", count, err)
+		}
+		if !store.called {
+			t.Fatal("dedicated counter was not called")
+		}
+		if dashboard.calls != 0 {
+			t.Fatalf("DashboardStats called %d times after dedicated counter error", dashboard.calls)
+		}
+	})
+}
+
+type adminPagingSpyStore struct {
+	db.Store
+	queueCtx    context.Context
+	queueStatus string
+	queueLimit  int
+	queueOffset int
+	queueJobs   []db.RefreshJob
+	queueErr    error
+	auditCtx    context.Context
+	auditLimit  int
+	auditOffset int
+	auditRows   []db.AdminAuditLogEntry
+	auditErr    error
+}
+
+func (s *adminPagingSpyStore) ListQueueJobsPage(ctx context.Context, status string, limit, offset int) ([]db.RefreshJob, error) {
+	s.queueCtx = ctx
+	s.queueStatus = status
+	s.queueLimit = limit
+	s.queueOffset = offset
+	if s.queueErr != nil {
+		return nil, s.queueErr
+	}
+	return s.queueJobs, nil
+}
+
+func (s *adminPagingSpyStore) ListAdminAuditLogPage(ctx context.Context, limit, offset int) ([]db.AdminAuditLogEntry, error) {
+	s.auditCtx = ctx
+	s.auditLimit = limit
+	s.auditOffset = offset
+	if s.auditErr != nil {
+		return nil, s.auditErr
+	}
+	return s.auditRows, nil
+}
+
+type adminListQueueErrorStore struct {
+	db.Store
+	err error
+}
+
+func (s *adminListQueueErrorStore) ListQueueJobs(context.Context, string, int) ([]db.RefreshJob, error) {
+	return nil, s.err
+}
+
+type adminQueueStatsErrorStore struct {
+	db.Store
+	err error
+}
+
+func (s *adminQueueStatsErrorStore) QueueStats(context.Context) (*db.QueueStatsResult, error) {
+	return nil, s.err
+}
+
+type adminDashboardStatsStore struct {
+	db.Store
+	stats *db.DashboardStatsResult
+	err   error
+	calls int
+}
+
+func (s *adminDashboardStatsStore) DashboardStats(context.Context) (*db.DashboardStatsResult, error) {
+	s.calls++
+	return s.stats, s.err
+}
+
+type adminUnknownSeverityCounterStore struct {
+	*adminDashboardStatsStore
+	count  int
+	err    error
+	called bool
+}
+
+func (s *adminUnknownSeverityCounterStore) CountUnknownSeverityFindings(context.Context) (int, error) {
+	s.called = true
+	return s.count, s.err
 }
 
 // TestAdaptAdminStoreRecognisesBothStoreShapes covers the entry point. A store

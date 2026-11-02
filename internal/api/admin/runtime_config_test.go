@@ -4,11 +4,240 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/8linkz-sec/packmon/internal/config"
 	"github.com/8linkz-sec/packmon/internal/db"
 )
+
+func TestAdminFeedRunningStatusTimingBoundaries(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now()
+		lastSync := now.Add(-9 * time.Hour)
+		feed := config.FeedSettings{Name: "osv", DisplayName: "OSV", Enabled: true, Mode: config.FeedModeSelf}
+
+		tests := []struct {
+			name   string
+			status db.FeedSyncStatus
+			want   string
+		}{
+			{
+				name: "updated at takes precedence",
+				status: db.FeedSyncStatus{
+					LastSyncStatus: db.FeedSyncStatusRunning,
+					LastSyncAt:     &lastSync,
+					UpdatedAt:      now.Add(-2 * time.Minute),
+				},
+				want: "running for 2m0s",
+			},
+			{
+				name: "last sync is the fallback",
+				status: db.FeedSyncStatus{
+					LastSyncStatus: db.FeedSyncStatusRunning,
+					LastSyncAt:     func() *time.Time { value := now.Add(-3 * time.Minute); return &value }(),
+				},
+				want: "running for 3m0s",
+			},
+			{
+				name:   "no timestamps leaves duration empty",
+				status: db.FeedSyncStatus{LastSyncStatus: db.FeedSyncStatusRunning},
+				want:   "",
+			},
+			{
+				name: "future start is clamped",
+				status: db.FeedSyncStatus{
+					LastSyncStatus: db.FeedSyncStatusRunning,
+					UpdatedAt:      now.Add(time.Hour),
+				},
+				want: "running for 0s",
+			},
+		}
+
+		for _, tt := range tests {
+			row := buildAdminFeedRow(nil, feed, true, tt.status)
+			if row.DurationStr != tt.want {
+				t.Errorf("%s: DurationStr = %q, want %q", tt.name, row.DurationStr, tt.want)
+			}
+		}
+	})
+}
+
+func TestAdminFeedPresentationFallbacksAndClasses(t *testing.T) {
+	t.Parallel()
+
+	if got := (adminFeedFormRow{OverrideActive: true}).OverrideClass(); got != "pm-badge-status-configured" {
+		t.Fatalf("active OverrideClass = %q", got)
+	}
+	if got := (adminFeedFormRow{}).OverrideClass(); got != "pm-badge-status-default" {
+		t.Fatalf("default OverrideClass = %q", got)
+	}
+	if got := (adminFeedFormRow{PendingRestart: true}).RuntimeMatchClass(); got != "pm-badge-status-warning" {
+		t.Fatalf("pending RuntimeMatchClass = %q", got)
+	}
+	if got := (adminFeedFormRow{}).RuntimeMatchClass(); got != "pm-badge-status-healthy" {
+		t.Fatalf("matching RuntimeMatchClass = %q", got)
+	}
+	if got := adminFeedAPIKeyStateClass(adminFeedAPIKeyStateMissingCode); got != "pm-badge-status-warning" {
+		t.Fatalf("missing APIKeyStateClass = %q", got)
+	}
+
+	row := buildAdminFeedRow(nil, config.FeedSettings{Name: "custom-feed", Enabled: true}, false, db.FeedSyncStatus{})
+	if row.FeedName != "CUSTOM-FEED" {
+		t.Fatalf("FeedName = %q, want uppercase fallback", row.FeedName)
+	}
+	if row.ConfigMode != "unknown" {
+		t.Fatalf("ConfigMode = %q, want runtime-unknown fallback", row.ConfigMode)
+	}
+	if got := configuredEditableFeeds(nil); got != nil {
+		t.Fatalf("configuredEditableFeeds(nil) = %+v, want nil", got)
+	}
+}
+
+func TestAdminFeedStatusMetadataRedactsSecrets(t *testing.T) {
+	t.Parallel()
+
+	row := buildAdminFeedRow(nil, config.FeedSettings{Name: "ghsa", DisplayName: "GHSA"}, true, db.FeedSyncStatus{
+		Metadata: json.RawMessage(`{
+			"client_ip":"client=192.0.2.10 password=client-ip-secret",
+			"api_key_name":"importer token=api-name-secret",
+			"correlation_id":"corr-safe Authorization: Bearer correlation-secret-token"
+		}`),
+	})
+
+	checks := []struct {
+		name    string
+		got     string
+		secret  string
+		context string
+		marker  string
+	}{
+		{"client IP", row.RejectedClientIP, "client-ip-secret", "client=192.0.2.10", "[redacted]"},
+		{"API key name", row.RejectedAPIKeyName, "api-name-secret", "importer", "[redacted]"},
+		{"correlation ID", row.RejectedCorrelationID, "correlation-secret-token", "corr-safe", "Bearer [redacted]"},
+	}
+	for _, check := range checks {
+		if strings.Contains(check.got, check.secret) {
+			t.Errorf("%s leaked secret %q in %q", check.name, check.secret, check.got)
+		}
+		if !strings.Contains(check.got, check.context) || !strings.Contains(check.got, check.marker) {
+			t.Errorf("%s = %q, want safe context %q and marker %q", check.name, check.got, check.context, check.marker)
+		}
+	}
+}
+
+func TestAdminFeedFormRestartMismatchDimensions(t *testing.T) {
+	t.Parallel()
+
+	runtimeFeed := config.FeedSettings{
+		Name:                 "osv",
+		DisplayName:          "OSV",
+		Enabled:              true,
+		Mode:                 config.FeedModeSelf,
+		SyncInterval:         time.Hour,
+		APIKey:               "runtime-key",
+		SupportsAPIKey:       true,
+		SupportsSyncInterval: true,
+	}
+	tests := []struct {
+		name         string
+		mutate       func(*db.FeedConfig)
+		wantPending  bool
+		wantInterval string
+	}{
+		{"enabled", func(override *db.FeedConfig) { override.Enabled = false }, true, "1h"},
+		{"mode", func(override *db.FeedConfig) { override.Mode = string(config.FeedModeExternal) }, true, "1h"},
+		{"interval", func(override *db.FeedConfig) { value := 2 * time.Hour; override.SyncInterval = &value }, true, "2h"},
+		{"API key", func(override *db.FeedConfig) { override.APIKey = "override-key" }, true, "1h"},
+		{"whitespace-equivalent API key", func(override *db.FeedConfig) { override.APIKey = "  runtime-key\t" }, false, "1h"},
+		{"nil override interval", func(override *db.FeedConfig) { override.SyncInterval = nil }, true, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			interval := runtimeFeed.SyncInterval
+			override := db.FeedConfig{
+				FeedName:     runtimeFeed.Name,
+				Enabled:      runtimeFeed.Enabled,
+				Mode:         string(runtimeFeed.Mode),
+				SyncInterval: &interval,
+				APIKey:       runtimeFeed.APIKey,
+			}
+			tt.mutate(&override)
+
+			row := buildAdminFeedFormRow(nil, runtimeFeed, override, true)
+			if row.PendingRestart != tt.wantPending {
+				t.Fatalf("PendingRestart = %v, want %v: %+v", row.PendingRestart, tt.wantPending, row)
+			}
+			if row.SyncInterval != tt.wantInterval {
+				t.Fatalf("SyncInterval = %q, want %q", row.SyncInterval, tt.wantInterval)
+			}
+			if row.OverrideClass() != "pm-badge-status-configured" {
+				t.Fatalf("OverrideClass = %q", row.OverrideClass())
+			}
+			wantClass := "pm-badge-status-healthy"
+			if tt.wantPending {
+				wantClass = "pm-badge-status-warning"
+			}
+			if row.RuntimeMatchClass() != wantClass {
+				t.Fatalf("RuntimeMatchClass = %q, want %q", row.RuntimeMatchClass(), wantClass)
+			}
+		})
+	}
+}
+
+func TestRuntimeConfigCadenceAndAPIKeyFallbacks(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name string
+		feed config.FeedSettings
+		want string
+	}{
+		{"display name", config.FeedSettings{Name: "private", DisplayName: "Private Feed", RequiresAPIKey: true}, "Private Feed"},
+		{"feed name fallback", config.FeedSettings{Name: "custom-feed", RequiresAPIKey: true}, "custom-feed"},
+	} {
+		t.Run("required key help uses "+tt.name, func(t *testing.T) {
+			help := adminFeedAPIKeyHelp(tt.feed)
+			if !strings.Contains(help, "Required") || !strings.Contains(help, tt.want) {
+				t.Fatalf("adminFeedAPIKeyHelp = %q, want required help containing %q", help, tt.want)
+			}
+		})
+	}
+
+	queueDriven := config.FeedSettings{Name: "socket"}
+	if got := runtimeIntervalLabel(nil, queueDriven); got != "queue-driven" {
+		t.Fatalf("queue-driven runtime label = %q", got)
+	}
+	if got := formRuntimeIntervalLabel(nil, queueDriven); got != "queue-driven" {
+		t.Fatalf("queue-driven form label = %q", got)
+	}
+
+	periodic := config.FeedSettings{Name: "osv", SupportsSyncInterval: true}
+	if got := runtimeIntervalLabel(nil, periodic); got != "unknown" {
+		t.Fatalf("nil-config runtime label = %q", got)
+	}
+	if got := formRuntimeIntervalLabel(nil, periodic); got != "default" {
+		t.Fatalf("nil-config form label = %q", got)
+	}
+
+	cfg := &config.Config{FeedSync: config.FeedSyncConfig{Interval: 6 * time.Hour}}
+	if got := runtimeIntervalLabel(cfg, periodic); got != "6h (default)" {
+		t.Fatalf("default runtime label = %q", got)
+	}
+	if got := formRuntimeIntervalLabel(cfg, periodic); got != "default (6h)" {
+		t.Fatalf("default form label = %q", got)
+	}
+
+	periodic.SyncInterval = 45 * time.Minute
+	cfg.Feeds.OSVInterval = periodic.SyncInterval
+	if got := runtimeIntervalLabel(cfg, periodic); got != "45m (override)" {
+		t.Fatalf("override runtime label = %q", got)
+	}
+	if got := formRuntimeIntervalLabel(cfg, periodic); got != "45m" {
+		t.Fatalf("explicit form label = %q", got)
+	}
+}
 
 func TestAdminFeedRowsMergeRuntimeConfigAndStoreStatus(t *testing.T) {
 	t.Parallel()
