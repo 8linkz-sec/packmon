@@ -123,19 +123,28 @@ func TestAdminFeedConfigSaveAndResetFailurePathsPreserveState(t *testing.T) {
 
 func reacquireManualSyncWithoutSleep(t *testing.T, h *AdminHandler, feedName string) {
 	t.Helper()
-	done := make(chan struct{})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	acquired := make(chan bool, 1)
 	go func() {
-		defer close(done)
-		for !h.beginManualFeedSync(feedName) {
+		for {
+			if h.beginManualFeedSync(feedName) {
+				acquired <- true
+				return
+			}
+			select {
+			case <-ctx.Done():
+				acquired <- false
+				return
+			default:
+			}
 			runtime.Gosched()
 		}
 	}()
-	select {
-	case <-done:
-		h.endManualFeedSync(feedName)
-	case <-time.After(time.Second):
+	if !<-acquired {
 		t.Fatalf("manual sync reservation for %s was not released", feedName)
 	}
+	h.endManualFeedSync(feedName)
 }
 
 func TestAdminFeedSyncFailureReleasesReservation(t *testing.T) {
@@ -198,11 +207,22 @@ func TestConcurrentAdminFeedSyncAdmissionAndAudit(t *testing.T) {
 	h := &AdminHandler{}
 	ready := make(chan struct{}, 2)
 	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseAll := func() {
+		releaseOnce.Do(func() { close(release) })
+	}
 	var auditsMu sync.Mutex
 	audits := 0
 	results := make(chan bool, 2)
+	var workers sync.WaitGroup
+	workers.Add(2)
+	defer func() {
+		releaseAll()
+		workers.Wait()
+	}()
 	for range 2 {
 		go func() {
+			defer workers.Done()
 			started, err := h.beginManualFeedSyncAfterAudit("osv", func() error {
 				auditsMu.Lock()
 				audits++
@@ -218,20 +238,28 @@ func TestConcurrentAdminFeedSyncAdmissionAndAudit(t *testing.T) {
 			results <- started
 		}()
 	}
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
 	for range 2 {
 		select {
 		case <-ready:
-		case <-time.After(time.Second):
+		case <-deadline.C:
 			t.Fatal("both concurrent audits did not reach the barrier")
 		}
 	}
-	close(release)
+	releaseAll()
 	started := 0
 	for range 2 {
-		if <-results {
-			started++
+		select {
+		case result := <-results:
+			if result {
+				started++
+			}
+		case <-deadline.C:
+			t.Fatal("concurrent admission result was not returned")
 		}
 	}
+	workers.Wait()
 	if started != 1 {
 		t.Fatalf("started syncs = %d, want 1", started)
 	}
