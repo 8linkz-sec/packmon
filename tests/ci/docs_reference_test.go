@@ -267,6 +267,126 @@ func TestPrometheusStarterAlertsCoverPackmonHealthSignals(t *testing.T) {
 	}
 }
 
+func TestPrometheusStarterAlertsHaveUniqueValidMetadataAndRunbookAnchors(t *testing.T) {
+	t.Parallel()
+
+	type alertMetadata struct {
+		severity string
+		anchor   string
+	}
+	expected := map[string]alertMetadata{
+		"PackmonDBPoolSaturation":        {severity: "warning", anchor: "database-pool-saturation"},
+		"PackmonDegradedResponses":       {severity: "warning", anchor: "server-reports-degraded-feed-status"},
+		"PackmonFeedStale":               {severity: "warning", anchor: "feed-scheduler-controls"},
+		"PackmonFeedSyncDegraded":        {severity: "warning", anchor: "server-reports-degraded-feed-status"},
+		"PackmonMetricsScrapeDown":       {severity: "critical", anchor: "metrics-are-unreachable-remotely"},
+		"PackmonMetricsStoreReadFailure": {severity: "warning", anchor: "database-pool-saturation"},
+		"PackmonQueueErrors":             {severity: "warning", anchor: "queue-is-not-draining"},
+		"PackmonQueueStalled":            {severity: "warning", anchor: "queue-is-not-draining"},
+	}
+
+	root := filepath.Join("..", "..")
+	rulesRel := filepath.Join("docs", "monitoring", "packmon-alerts.yml")
+	rulesData, err := os.ReadFile(filepath.Join(root, rulesRel)) //nolint:gosec // static repository documentation fixture path.
+	if err != nil {
+		t.Fatalf("read %s: %v", rulesRel, err)
+	}
+	var rules prometheusRulesFile
+	if err := yaml.Unmarshal(rulesData, &rules); err != nil {
+		t.Fatalf("parse %s: %v", rulesRel, err)
+	}
+
+	runbookData, err := os.ReadFile(filepath.Join(root, "docs", "runbook.md")) //nolint:gosec // static repository documentation fixture path.
+	if err != nil {
+		t.Fatalf("read docs/runbook.md: %v", err)
+	}
+	runbookAnchors := markdownHeadingAnchors(string(runbookData))
+
+	groupNames := make(map[string]struct{}, len(rules.Groups))
+	alertNames := make(map[string]struct{}, len(expected))
+	for _, group := range rules.Groups {
+		groupName := strings.TrimSpace(group.Name)
+		if groupName == "" {
+			t.Fatalf("%s contains an unnamed rule group", rulesRel)
+		}
+		if _, duplicate := groupNames[groupName]; duplicate {
+			t.Fatalf("%s contains duplicate rule group name %q", rulesRel, groupName)
+		}
+		groupNames[groupName] = struct{}{}
+
+		for _, rule := range group.Rules {
+			name := strings.TrimSpace(rule.Alert)
+			metadata, known := expected[name]
+			if !known {
+				t.Fatalf("%s contains unexpected alert %q; starter rules must remain the exact documented set", rulesRel, name)
+			}
+			if _, duplicate := alertNames[name]; duplicate {
+				t.Fatalf("%s contains duplicate alert %q", rulesRel, name)
+			}
+			alertNames[name] = struct{}{}
+
+			if got := rule.Labels["service"]; got != "packmon" {
+				t.Fatalf("%s alert %s service label = %q, want packmon", rulesRel, name, got)
+			}
+			if got := rule.Labels["severity"]; got != metadata.severity {
+				t.Fatalf("%s alert %s severity label = %q, want %q", rulesRel, name, got, metadata.severity)
+			}
+			for _, annotation := range []string{"summary", "description"} {
+				if strings.TrimSpace(rule.Annotations[annotation]) == "" {
+					t.Fatalf("%s alert %s missing %s annotation", rulesRel, name, annotation)
+				}
+			}
+			wantRunbook := "docs/runbook.md#" + metadata.anchor
+			if got := rule.Annotations["runbook_url"]; got != wantRunbook {
+				t.Fatalf("%s alert %s runbook_url = %q, want %q", rulesRel, name, got, wantRunbook)
+			}
+			if count := runbookAnchors[metadata.anchor]; count != 1 {
+				t.Fatalf("%s alert %s runbook anchor %q resolves to %d headings, want exactly one", rulesRel, name, metadata.anchor, count)
+			}
+		}
+	}
+
+	if len(alertNames) != len(expected) {
+		for name := range expected {
+			if _, found := alertNames[name]; !found {
+				t.Errorf("%s missing starter alert %s", rulesRel, name)
+			}
+		}
+		t.Fatalf("%s contains %d unique starter alerts, want exactly %d", rulesRel, len(alertNames), len(expected))
+	}
+}
+
+func markdownHeadingAnchors(markdown string) map[string]int {
+	anchors := make(map[string]int)
+	for _, line := range strings.Split(markdown, "\n") {
+		heading := strings.TrimSpace(line)
+		heading = strings.TrimLeft(heading, "#")
+		if heading == strings.TrimSpace(line) {
+			continue
+		}
+		heading = strings.TrimSpace(heading)
+		var anchor strings.Builder
+		previousHyphen := false
+		for _, r := range strings.ToLower(heading) {
+			switch {
+			case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+				anchor.WriteRune(r)
+				previousHyphen = false
+			case r == ' ' || r == '-':
+				if anchor.Len() > 0 && !previousHyphen {
+					anchor.WriteByte('-')
+					previousHyphen = true
+				}
+			}
+		}
+		value := strings.TrimSuffix(anchor.String(), "-")
+		if value != "" {
+			anchors[value]++
+		}
+	}
+	return anchors
+}
+
 type prometheusRulesFile struct {
 	Groups []prometheusRuleGroup `yaml:"groups"`
 }

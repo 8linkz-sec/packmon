@@ -1,0 +1,142 @@
+rule_files:
+  - ../../../../docs/monitoring/packmon-alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: sustained alerts respect exact pending boundaries and pool labels
+    interval: 1m
+    input_series:
+      - series: 'up{job="packmon-server"}'
+        values: '0+0x20'
+      - series: 'packmon_db_pool_connections{pool="primary",state="acquired"}'
+        values: '9+0x20'
+      - series: 'packmon_db_pool_connections{pool="primary",state="max"}'
+        values: '10+0x20'
+      - series: 'packmon_db_pool_connections{pool="secondary",state="acquired"}'
+        values: '4+0x20'
+      - series: 'packmon_db_pool_connections{pool="secondary",state="max"}'
+        values: '10+0x20'
+      - series: 'packmon_feed_sync_status{status="error"}'
+        values: '1+0x20'
+      - series: 'packmon_queue_oldest_job_seconds'
+        values: '8000+0x20'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: PackmonMetricsScrapeDown
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: PackmonMetricsScrapeDown
+        exp_alerts:
+          - exp_labels:
+              job: packmon-server
+              service: packmon
+              severity: critical
+            exp_annotations:
+              summary: Packmon metrics target is down
+              description: Prometheus has not successfully scraped a Packmon metrics target for 5 minutes.
+              runbook_url: docs/runbook.md#metrics-are-unreachable-remotely
+      - eval_time: 9m
+        alertname: PackmonDBPoolSaturation
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: PackmonDBPoolSaturation
+        exp_alerts:
+          - exp_labels:
+              pool: primary
+              service: packmon
+              severity: warning
+            exp_annotations:
+              summary: Packmon PostgreSQL pool is near saturation
+              description: Acquired PostgreSQL connections have exceeded 80 percent of the configured Packmon pool maximum for 10 minutes.
+              runbook_url: docs/runbook.md#database-pool-saturation
+      - eval_time: 14m
+        alertname: PackmonFeedSyncDegraded
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: PackmonFeedSyncDegraded
+        exp_alerts:
+          - exp_labels:
+              status: error
+              service: packmon
+              severity: warning
+            exp_annotations:
+              summary: Packmon feed sync is degraded
+              description: A Packmon feed has remained in an error, permanent_error, or rejected state for 15 minutes.
+              runbook_url: docs/runbook.md#server-reports-degraded-feed-status
+      - eval_time: 14m
+        alertname: PackmonQueueStalled
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: PackmonQueueStalled
+        exp_alerts:
+          - exp_labels:
+              service: packmon
+              severity: warning
+            exp_annotations:
+              summary: Packmon refresh queue is stalled
+              description: The oldest Packmon refresh queue job has exceeded the starter 2 hour age threshold.
+              runbook_url: docs/runbook.md#queue-is-not-draining
+
+  - name: recovered scrape does not cross the firing boundary
+    interval: 1m
+    input_series:
+      - series: 'up{job="packmon-server"}'
+        values: '0+0x4 1+0x10'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: PackmonMetricsScrapeDown
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: PackmonMetricsScrapeDown
+        exp_alerts: []
+
+  - name: isolated counter events survive reset and leave their ranges
+    interval: 1m
+    input_series:
+      - series: 'packmon_metrics_store_read_failures_total'
+        values: '0 1 1 0 1+0x20'
+      - series: 'packmon_degraded_responses_total'
+        values: '0 1 1 0 1+0x20'
+      - series: 'packmon_queue_error_total'
+        values: '0 1 1 0 1+0x20'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: PackmonMetricsStoreReadFailure
+        exp_alerts:
+          - exp_labels:
+              service: packmon
+              severity: warning
+            exp_annotations:
+              summary: Packmon metrics store reads are failing
+              description: At least one store-derived metrics read failed during the last 10 minutes, so feed, queue, scan, or dashboard gauges may be stale or missing.
+              runbook_url: docs/runbook.md#database-pool-saturation
+      - eval_time: 4m
+        alertname: PackmonDegradedResponses
+        exp_alerts:
+          - exp_labels:
+              service: packmon
+              severity: warning
+            exp_annotations:
+              summary: Packmon is returning degraded scan responses
+              description: At least one scan response reported degraded coverage during the last 10 minutes.
+              runbook_url: docs/runbook.md#server-reports-degraded-feed-status
+      - eval_time: 4m
+        alertname: PackmonQueueErrors
+        exp_alerts:
+          - exp_labels:
+              service: packmon
+              severity: warning
+            exp_annotations:
+              summary: Packmon refresh queue jobs are erroring
+              description: At least one Packmon refresh queue job failed during the last 15 minutes.
+              runbook_url: docs/runbook.md#queue-is-not-draining
+      - eval_time: 14m
+        alertname: PackmonMetricsStoreReadFailure
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: PackmonDegradedResponses
+        exp_alerts: []
+      - eval_time: 19m
+        alertname: PackmonQueueErrors
+        exp_alerts: []
