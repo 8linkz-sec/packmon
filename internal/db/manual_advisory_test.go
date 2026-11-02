@@ -52,14 +52,19 @@ func TestManualAdvisoryToVulnerabilityDefaultsAndMetadata(t *testing.T) {
 	t.Parallel()
 
 	before := time.Now().UTC()
-	vuln := ManualAdvisoryToVulnerability(&ManualAdvisory{
+	input := &ManualAdvisory{
 		ID:          " manual:test-1 ",
 		Ecosystem:   " NPM ",
 		Name:        " left-pad ",
 		Summary:     " summary ",
 		Description: " description ",
-	})
+	}
+	original := *input
+	vuln := ManualAdvisoryToVulnerability(input)
 	after := time.Now().UTC()
+	if !reflect.DeepEqual(*input, original) {
+		t.Fatalf("ManualAdvisoryToVulnerability mutated input from %+v to %+v", original, *input)
+	}
 	if vuln.ID != "manual:test-1" || vuln.Severity != "UNKNOWN" || vuln.Summary != "summary" || vuln.Details != "description" {
 		t.Fatalf("converted vulnerability = %+v", vuln)
 	}
@@ -85,6 +90,13 @@ func TestManualAdvisoryToVulnerabilityDefaultsAndMetadata(t *testing.T) {
 	affected := vuln.AffectedPackages[0]
 	if affected.Ecosystem != "npm" || affected.Name != "left-pad" || string(affected.VersionRanges) != "[]" || string(affected.VersionsAffected) != "[]" {
 		t.Fatalf("affected package = %+v", affected)
+	}
+	vuln.Aliases[0].AliasID = "changed"
+	vuln.Sources[0].RawJSON[0] = '['
+	vuln.AffectedPackages[0].Name = "changed"
+	second := ManualAdvisoryToVulnerability(input)
+	if !reflect.DeepEqual(*input, original) || second.ID != "manual:test-1" || second.Aliases[0].AliasID != "manual:test-1" || second.AffectedPackages[0].Name != "left-pad" || !json.Valid(second.Sources[0].RawJSON) {
+		t.Fatalf("vulnerability conversion retained mutable output state: input=%+v second=%+v", *input, second)
 	}
 
 	fallback := ManualAdvisoryToVulnerability(&ManualAdvisory{Ecosystem: " Unsupported ", Severity: " low "})
@@ -115,7 +127,7 @@ func TestManualAdvisoryToMaliciousFindingAliasesAndFallbacks(t *testing.T) {
 		}
 	}
 
-	got := ManualAdvisoryToMaliciousFinding(&ManualAdvisory{
+	input := &ManualAdvisory{
 		ID:          " manual:malicious-1 ",
 		Ecosystem:   " PyPI ",
 		Name:        " Demo_Package ",
@@ -123,9 +135,19 @@ func TestManualAdvisoryToMaliciousFindingAliasesAndFallbacks(t *testing.T) {
 		RiskType:    " unsupported-risk ",
 		Summary:     " summary ",
 		Description: " description ",
-	})
+	}
+	original := *input
+	got := ManualAdvisoryToMaliciousFinding(input)
+	if !reflect.DeepEqual(*input, original) {
+		t.Fatalf("ManualAdvisoryToMaliciousFinding mutated input from %+v to %+v", original, *input)
+	}
 	if got.ID != "manual:malicious-1" || got.Ecosystem != "pypi" || got.Name != "Demo_Package" || got.Severity != "CRITICAL" || got.RiskType != "unsupported-risk" || got.Summary != "summary" || got.Description != "description" || got.Source != domain.ManualAdvisorySource || got.CreatedBy != "admin" {
 		t.Fatalf("converted malicious finding = %+v", got)
+	}
+	got.Name = "changed"
+	second := ManualAdvisoryToMaliciousFinding(input)
+	if !reflect.DeepEqual(*input, original) || second.Name != "Demo_Package" {
+		t.Fatalf("malicious conversion retained mutable output state: input=%+v second=%+v", *input, second)
 	}
 
 	invalidEcosystem := ManualAdvisoryToMaliciousFinding(&ManualAdvisory{Ecosystem: " Invalid Ecosystem "})

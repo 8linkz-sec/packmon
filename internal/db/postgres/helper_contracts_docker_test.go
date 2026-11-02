@@ -111,6 +111,10 @@ func TestDBHelperPersistenceContractsAgainstPostgres(t *testing.T) {
 
 	t.Run("F096 status vocabulary persists and constraint rejects invalid raw values", func(t *testing.T) {
 		for i, status := range db.FeedSyncStatusValues() {
+			mixedCase := " \t" + strings.ToUpper(status) + "\n "
+			if !db.IsValidFeedSyncStatus(mixedCase) {
+				t.Fatalf("IsValidFeedSyncStatus(%q) = false, want true", mixedCase)
+			}
 			feedName := fmt.Sprintf("f096-%d-%s-%s", i, status, suffix)
 			input := &db.FeedSyncStatus{FeedName: feedName, LastSyncStatus: status, EntriesSynced: i, EntriesTotal: i}
 			if err := store.UpsertFeedSyncStatus(ctx, input); err != nil {

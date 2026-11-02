@@ -44,6 +44,8 @@ func TestAdminAuditIntegrityStatus(t *testing.T) {
 }
 
 func TestAdminAuditIntegritySupportsKeyedHMACAndLegacySHA(t *testing.T) {
+	t.Cleanup(ClearAdminAuditDigestHMACKey)
+
 	created := time.Date(2026, 6, 24, 12, 0, 0, 123456000, time.UTC)
 	entry := AdminAuditLogEntry{
 		ID:             20,
@@ -62,7 +64,6 @@ func TestAdminAuditIntegritySupportsKeyedHMACAndLegacySHA(t *testing.T) {
 	}
 
 	SetAdminAuditDigestHMACKey([]byte("0123456789abcdef0123456789abcdef"))
-	defer ClearAdminAuditDigestHMACKey()
 
 	keyedDigest := ComputeAdminAuditDigest(entry)
 	if got, wantPrefix := keyedDigest[:len("hmac-sha256:")], "hmac-sha256:"; got != wantPrefix {
@@ -177,6 +178,8 @@ func TestAnnotateAdminAuditIntegrityLeavesBoundaryAndUnavailableLinksVerified(t 
 }
 
 func TestAdminAuditIntegrityRejectsUnavailableKeyAndUnknownAlgorithm(t *testing.T) {
+	t.Cleanup(ClearAdminAuditDigestHMACKey)
+
 	entry := AdminAuditLogEntry{
 		ID:        31,
 		Action:    "settings.update",
@@ -243,8 +246,26 @@ func TestAnnotateAdminAuditIntegrityHandlesNonVerifiedRowsAndPageBoundaries(t *t
 		t.Fatalf("verified-to-broken statuses = %q, %q", entries[0].IntegrityStatus, entries[1].IntegrityStatus)
 	}
 
+	older := verified(6, "")
+	middleLegacy := AdminAuditLogEntry{ID: 5, Action: "legacy-middle", PreviousDigest: older.RowDigest}
+	newest = verified(4, "sha256:unavailable-legacy-digest")
+	entries = []AdminAuditLogEntry{newest, middleLegacy, older}
+	AnnotateAdminAuditIntegrity(entries)
+	if entries[0].IntegrityStatus != AdminAuditIntegrityVerified || entries[1].IntegrityStatus != AdminAuditIntegrityLegacy || entries[2].IntegrityStatus != AdminAuditIntegrityVerified {
+		t.Fatalf("three-row legacy-middle statuses = %q, %q, %q", entries[0].IntegrityStatus, entries[1].IntegrityStatus, entries[2].IntegrityStatus)
+	}
+
+	middleBroken := verified(8, older.RowDigest)
+	middleBroken.Action = "tampered-middle"
+	newest = verified(9, middleBroken.RowDigest)
+	entries = []AdminAuditLogEntry{newest, middleBroken, older}
+	AnnotateAdminAuditIntegrity(entries)
+	if entries[0].IntegrityStatus != AdminAuditIntegrityVerified || entries[1].IntegrityStatus != AdminAuditIntegrityBroken || entries[2].IntegrityStatus != AdminAuditIntegrityVerified {
+		t.Fatalf("three-row broken-middle statuses = %q, %q, %q", entries[0].IntegrityStatus, entries[1].IntegrityStatus, entries[2].IntegrityStatus)
+	}
+
 	newest = verified(6, "sha256:wrong")
-	older := verified(7, "")
+	older = verified(7, "")
 	entries = []AdminAuditLogEntry{newest, older}
 	AnnotateAdminAuditIntegrity(entries)
 	if entries[0].IntegrityStatus != AdminAuditIntegrityBroken || entries[1].IntegrityStatus != AdminAuditIntegrityVerified {
@@ -253,6 +274,8 @@ func TestAnnotateAdminAuditIntegrityHandlesNonVerifiedRowsAndPageBoundaries(t *t
 }
 
 func TestAdminAuditDigestCanonicalVectorsAndFieldMutations(t *testing.T) {
+	t.Cleanup(ClearAdminAuditDigestHMACKey)
+
 	// The exact vectors pin canonical JSON field order, UTC microsecond time
 	// formatting, and the version switch when a correlation ID is present.
 	base := AdminAuditLogEntry{
@@ -281,12 +304,19 @@ func TestAdminAuditDigestCanonicalVectorsAndFieldMutations(t *testing.T) {
 	if want := "sha256:5b32e2e119c3d81d14a19eaa129661253f848189f531a9302adda670f08e1181"; v2 != want {
 		t.Fatalf("version 2 SHA digest = %q, want %q", v2, want)
 	}
+	sameInstant := base
+	sameInstant.CreatedAt = base.CreatedAt.In(time.FixedZone("alternate", -7*60*60))
+	if got, want := string(adminAuditDigestPayloadBytes(sameInstant)), string(adminAuditDigestPayloadBytes(base)); got != want {
+		t.Fatalf("same instant in alternate location payload = %s, want %s", got, want)
+	}
+	if got := ComputeAdminAuditDigest(sameInstant); got != v1 {
+		t.Fatalf("same instant in alternate location digest = %q, want %q", got, v1)
+	}
 
 	key := []byte("0123456789abcdef0123456789abcdef")
 	SetAdminAuditDigestHMACKey(key)
 	hmacV1 := ComputeAdminAuditDigest(base)
 	hmacV2 := ComputeAdminAuditDigest(withCorrelation)
-	defer ClearAdminAuditDigestHMACKey()
 	if want := "hmac-sha256:af7758d85fed379cc207e4c40e2b148272dd29b0e8389ee9e3572caf31c0e69f"; hmacV1 != want {
 		t.Fatalf("version 1 HMAC digest = %q, want %q", hmacV1, want)
 	}
@@ -316,6 +346,8 @@ func TestAdminAuditDigestCanonicalVectorsAndFieldMutations(t *testing.T) {
 }
 
 func TestAdminAuditDigestKeyBuffersAndConcurrentAccess(t *testing.T) {
+	t.Cleanup(ClearAdminAuditDigestHMACKey)
+
 	entry := AdminAuditLogEntry{ID: 51, Action: "concurrent", CreatedAt: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)}
 	key := []byte("0123456789abcdef0123456789abcdef")
 	SetAdminAuditDigestHMACKey(key)

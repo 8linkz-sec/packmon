@@ -212,6 +212,14 @@ func TestSetAdminAuditQueueJobsDetailSerializationBoundaries(t *testing.T) {
 	if err := SetAdminAuditQueueJobsDetail(nil, "jobs", nil); err != nil {
 		t.Fatalf("SetAdminAuditQueueJobsDetail(nil entry) error = %v", err)
 	}
+	malformed := &AdminAuditEntry{Details: json.RawMessage(`{"broken"`)}
+	malformedBefore := append(json.RawMessage(nil), malformed.Details...)
+	if err := SetAdminAuditQueueJobsDetail(malformed, "jobs", []RefreshJob{{ID: 1}}); err == nil {
+		t.Fatal("SetAdminAuditQueueJobsDetail(malformed outer JSON) error = nil")
+	}
+	if !reflect.DeepEqual(malformed.Details, malformedBefore) {
+		t.Fatalf("failed queue detail update mutated Details from %q to %q", malformedBefore, malformed.Details)
+	}
 
 	entry := &AdminAuditEntry{Details: json.RawMessage(`{"preserved":"yes","jobs":"old"}`)}
 	if err := SetAdminAuditQueueJobsDetail(entry, "jobs", nil); err != nil {
