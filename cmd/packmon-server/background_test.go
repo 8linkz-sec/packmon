@@ -8,10 +8,13 @@ import (
 	"go/token"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"reflect"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -213,9 +216,25 @@ func TestNewNVDSyncerForwardsConfiguredAPIKey(t *testing.T) {
 	t.Parallel()
 
 	//nolint:gosec // G101: fixture credential, deliberately fake.
+	const apiKey = "test-nvd-api-key"
+	var requested []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requested = append(requested, r.URL.Query().Get("cveId"))
+		if got := r.Header.Get("apiKey"); got != apiKey {
+			t.Errorf("apiKey header = %q, want configured fixture key", got)
+		}
+		if r.URL.Query().Get("cveId") == "CVE-2026-14002" {
+			http.Error(w, "temporary upstream failure", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"vulnerabilities":[{"cve":{"id":"CVE-2026-14001","metrics":{"cvssMetricV31":[{"cvssData":{"baseScore":8.7,"baseSeverity":"HIGH"}}]}}}]}`)
+	}))
+	defer server.Close()
+
 	cfg := &config.Config{Feeds: config.FeedsConfig{
-		NVDAPIKey: "test-nvd-api-key",
-		NVDAPIURL: "https://mirror.example/nvd/rest/json/cves/2.0",
+		NVDAPIKey: apiKey,
+		NVDAPIURL: server.URL,
 	}}
 
 	syncer := newFeedSyncer("nvd", cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -223,12 +242,22 @@ func TestNewNVDSyncerForwardsConfiguredAPIKey(t *testing.T) {
 		t.Fatal("newFeedSyncer(nvd) = nil")
 	}
 
-	value := reflect.Indirect(reflect.ValueOf(syncer))
-	if got := value.FieldByName("apiKey").String(); got != cfg.Feeds.NVDAPIKey {
-		t.Fatalf("NVD syncer apiKey = %q, want configured API key", got)
+	store := &f014NVDStore{
+		Store:  newNoopStore(),
+		cveIDs: []string{"CVE-2026-14001", "CVE-2026-14002"},
 	}
-	if got := value.FieldByName("apiURL").String(); got != cfg.Feeds.NVDAPIURL {
-		t.Fatalf("NVD syncer apiURL = %q, want %q", got, cfg.Feeds.NVDAPIURL)
+	result, err := syncer.Sync(context.Background(), store)
+	if err == nil || !strings.Contains(err.Error(), "CVE-2026-14002") {
+		t.Fatalf("Sync() error = %v, want second CVE diagnostic", err)
+	}
+	if result != nil {
+		t.Fatalf("Sync() result = %+v, want nil when one CVE request fails", result)
+	}
+	if !slices.Equal(requested, store.cveIDs) {
+		t.Fatalf("requested CVEs = %v, want %v", requested, store.cveIDs)
+	}
+	if len(store.updates) != 1 || store.updates[0] != (f014NVDUpdate{cveID: "CVE-2026-14001", severity: "HIGH", score: 8.7}) {
+		t.Fatalf("severity updates = %+v, want exact successful first-CVE update", store.updates)
 	}
 }
 
