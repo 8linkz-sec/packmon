@@ -1,16 +1,194 @@
 package config
 
 import (
+	"encoding/base64"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestF089LoadRejectsLateSectionValuesWithoutSecretDisclosure(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{name: "invalid insecure local HTTP boolean", key: "PACKMON_ALLOW_INSECURE_LOCAL_HTTP", value: "boolean-secret-marker"},
+		{name: "invalid database connection timeout", key: "PACKMON_DB_CONNECT_TIMEOUT", value: "timeout-secret-marker"},
+		{name: "invalid admin audit retention", key: "PACKMON_ADMIN_AUDIT_LOG_RETENTION", value: "retention-secret-marker"},
+		{name: "invalid retention cadence", key: "PACKMON_AUDIT_RETENTION_INTERVAL", value: "cadence-secret-marker"},
+		{name: "invalid database maximum connections integer", key: "PACKMON_DB_MAX_CONNS", value: "max-connections-secret-marker"},
+		{name: "invalid ReversingLabs schedule cap integer", key: "PACKMON_REVERSINGLABS_MAX_SCHEDULE_PER_CHECK", value: "schedule-cap-secret-marker"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			clearPackmonEnv(t)
+			t.Setenv(tt.key, tt.value)
+
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("Load() error = nil, want rejection for %s", tt.key)
+			}
+			message := err.Error()
+			if !strings.Contains(message, tt.key) {
+				t.Fatalf("Load() error = %q, want label %s", message, tt.key)
+			}
+			if strings.Contains(message, tt.value) {
+				t.Fatalf("Load() error disclosed configured value %q: %q", tt.value, message)
+			}
+		})
+	}
+}
+
+func TestF089LoadRejectsEveryInvalidFeedEnabledValue(t *testing.T) {
+	keys := []string{
+		"PACKMON_FEED_OSV_ENABLED",
+		"PACKMON_FEED_GHSA_ENABLED",
+		"PACKMON_FEED_OPENSSF_ENABLED",
+		"PACKMON_FEED_VULNCHECK_ENABLED",
+		"PACKMON_FEED_SOCKET_ENABLED",
+		"PACKMON_FEED_REVERSINGLABS_ENABLED",
+		"PACKMON_FEED_CISAKEV_ENABLED",
+		"PACKMON_FEED_EPSS_ENABLED",
+		"PACKMON_FEED_NVD_ENABLED",
+		"PACKMON_FEED_ENDOFLIFE_ENABLED",
+	}
+	for _, key := range keys {
+		t.Run(key, func(t *testing.T) {
+			clearPackmonEnv(t)
+			t.Setenv(key, "invalid-secret-marker")
+
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), key) {
+				t.Fatalf("Load() error = %v, want invalid %s rejection", err, key)
+			}
+			if strings.Contains(err.Error(), "invalid-secret-marker") {
+				t.Fatalf("Load() error disclosed configured value: %q", err)
+			}
+		})
+	}
+}
+
+func TestF089LoadRejectsEveryInvalidFeedModeValue(t *testing.T) {
+	keys := []string{
+		"PACKMON_FEED_REVERSINGLABS_MODE",
+		"PACKMON_FEED_ENDOFLIFE_MODE",
+		"PACKMON_FEED_OSV_MODE",
+		"PACKMON_FEED_GHSA_MODE",
+		"PACKMON_FEED_OPENSSF_MODE",
+		"PACKMON_FEED_VULNCHECK_MODE",
+		"PACKMON_FEED_CISAKEV_MODE",
+		"PACKMON_FEED_EPSS_MODE",
+		"PACKMON_FEED_NVD_MODE",
+		"PACKMON_FEED_SOCKET_MODE",
+	}
+	for _, key := range keys {
+		t.Run(key, func(t *testing.T) {
+			clearPackmonEnv(t)
+			t.Setenv(key, "invalid-secret-marker")
+
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), key) {
+				t.Fatalf("Load() error = %v, want invalid %s rejection", err, key)
+			}
+			if strings.Contains(err.Error(), "invalid-secret-marker") {
+				t.Fatalf("Load() error disclosed configured value: %q", err)
+			}
+		})
+	}
+
+	t.Run("endoflife external mode", func(t *testing.T) {
+		clearPackmonEnv(t)
+		t.Setenv("PACKMON_FEED_ENDOFLIFE_MODE", "external")
+
+		_, err := Load()
+		if err == nil || !strings.Contains(err.Error(), "PACKMON_FEED_ENDOFLIFE_MODE") || !strings.Contains(err.Error(), "does not support external") {
+			t.Fatalf("Load() error = %v, want unsupported endoflife external-mode rejection", err)
+		}
+	})
+}
+
+func TestF089LoadContainerRetentionHMACAndMirrorBoundaries(t *testing.T) {
+	t.Run("container HTTP override and zero retention", func(t *testing.T) {
+		clearPackmonEnv(t)
+		t.Setenv("PACKMON_ALLOW_INSECURE_LOCAL_HTTP", "true")
+		t.Setenv("PACKMON_INSECURE_LOCAL_HTTP_BIND_MODE", "container")
+		for _, key := range []string{
+			"PACKMON_SCAN_LOG_RETENTION",
+			"PACKMON_ADMIN_AUDIT_LOG_RETENTION",
+			"PACKMON_REFRESH_QUEUE_RETENTION",
+			"PACKMON_PACKAGE_CHECK_STATUS_RETENTION",
+		} {
+			t.Setenv(key, "0")
+		}
+
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if got := cfg.Server.Addr(); got != ":8080" {
+			t.Fatalf("Server.Addr() = %q, want container-wide :8080", got)
+		}
+		if cfg.Retention.ScanLog != 0 || cfg.Retention.AdminAuditLog != 0 || cfg.Retention.RefreshQueue != 0 || cfg.Retention.PackageCheckStatus != 0 {
+			t.Fatalf("retention = %+v, want all datasets disabled", cfg.Retention)
+		}
+	})
+
+	for _, size := range []int{31, 33} {
+		t.Run("HMAC key wrong length "+strconv.Itoa(size), func(t *testing.T) {
+			clearPackmonEnv(t)
+			t.Setenv("PACKMON_ADMIN_AUDIT_HMAC_KEY", base64.StdEncoding.EncodeToString(make([]byte, size)))
+
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), "PACKMON_ADMIN_AUDIT_HMAC_KEY") || !strings.Contains(err.Error(), "32 random bytes") {
+				t.Fatalf("Load() error = %v, want exact-length HMAC rejection", err)
+			}
+		})
+	}
+
+	for _, tt := range []struct {
+		name string
+		key  string
+	}{
+		{name: "malformed endoflife URL", key: "PACKMON_ENDOFLIFE_API_BASE_URL"},
+		{name: "malformed general mirror URL", key: "PACKMON_FEED_OSV_BASE_URL"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			clearPackmonEnv(t)
+			t.Setenv(tt.key, "http://%zz")
+
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), tt.key) {
+				t.Fatalf("Load() error = %v, want malformed %s rejection", err, tt.key)
+			}
+		})
+	}
+
+	for _, raw := range []string{
+		"http://localhost:8080/mirror",
+		"http://127.0.0.1:8080/mirror",
+		"http://[::1]:8080/mirror",
+	} {
+		t.Run("loopback mirror "+raw, func(t *testing.T) {
+			clearPackmonEnv(t)
+			t.Setenv("PACKMON_FEED_OSV_BASE_URL", raw)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v, want loopback HTTP mirror accepted", err)
+			}
+			if cfg.Feeds.OSVBaseURL != raw {
+				t.Fatalf("OSVBaseURL = %q, want %q", cfg.Feeds.OSVBaseURL, raw)
+			}
+		})
+	}
+}
 
 // clearPackmonEnv unsets all PACKMON_* environment variables so tests start
 // from a clean state. t.Setenv cannot unset vars, but we can set them to ""

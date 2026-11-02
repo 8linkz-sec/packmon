@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -14,6 +15,60 @@ import (
 
 	"github.com/8linkz-sec/packmon/internal/config"
 )
+
+func TestF091AuditRetentionWorkerUsesRuntimeUpdatesBetweenTicks(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cfg := &config.Config{
+			Retention: config.RetentionConfig{
+				Interval:           time.Hour,
+				ScanLog:            24 * time.Hour,
+				AdminAuditLog:      48 * time.Hour,
+				RefreshQueue:       72 * time.Hour,
+				PackageCheckStatus: 96 * time.Hour,
+			},
+			Feeds: config.FeedsConfig{ReversingLabsCacheRetention: 120 * time.Hour},
+		}
+		runtime := config.NewRuntimeSettingsFromConfig(cfg)
+		store := &runtimeUpdatingAuditRetentionStore{noopStore: newNoopStore()}
+		services := &backgroundServices{cfg: cfg, runtime: runtime, rootCtx: ctx, store: store}
+		services.startAuditRetentionWorker()
+
+		time.Sleep(time.Hour)
+		synctest.Wait()
+		runtime.UpdateRetention(168*time.Hour, 336*time.Hour)
+		time.Sleep(time.Hour)
+		synctest.Wait()
+
+		cancel()
+		synctest.Wait()
+		if err := <-services.retentionDone; !errors.Is(err, context.Canceled) {
+			t.Fatalf("retention worker error = %v, want context canceled", err)
+		}
+
+		got := store.snapshot()
+		want := []runtimeUpdatingAuditRetentionCall{
+			{name: "scan_log", retention: 24 * time.Hour},
+			{name: "admin_audit_log", retention: 48 * time.Hour},
+			{name: "refresh_queue", retention: 72 * time.Hour},
+			{name: "package_check_status", retention: 96 * time.Hour},
+			{name: "package_reputation_cache", retention: 120 * time.Hour},
+			{name: "scan_log", retention: 168 * time.Hour},
+			{name: "admin_audit_log", retention: 336 * time.Hour},
+			{name: "refresh_queue", retention: 72 * time.Hour},
+			{name: "package_check_status", retention: 96 * time.Hour},
+			{name: "package_reputation_cache", retention: 120 * time.Hour},
+		}
+		if len(got) != len(want) {
+			t.Fatalf("prune calls = %d, want exact %d: %+v", len(got), len(want), got)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("prune call %d = %+v, want %+v", i, got[i], want[i])
+			}
+		}
+	})
+}
 
 func TestStartAuditRetentionWorkerRejectsIncompleteConfiguration(t *testing.T) {
 	t.Run("nil receiver", func(t *testing.T) {
@@ -420,6 +475,50 @@ func TestRunAuditRetentionOnceUsesBackgroundForNilContext(t *testing.T) {
 type auditRetentionWorkerStore struct {
 	*noopStore
 	scanCalls int
+}
+
+type runtimeUpdatingAuditRetentionCall struct {
+	name      string
+	retention time.Duration
+}
+
+type runtimeUpdatingAuditRetentionStore struct {
+	*noopStore
+	mu    sync.Mutex
+	calls []runtimeUpdatingAuditRetentionCall
+}
+
+func (s *runtimeUpdatingAuditRetentionStore) record(name string, retention time.Duration) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls = append(s.calls, runtimeUpdatingAuditRetentionCall{name: name, retention: retention})
+	return 0, nil
+}
+
+func (s *runtimeUpdatingAuditRetentionStore) snapshot() []runtimeUpdatingAuditRetentionCall {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]runtimeUpdatingAuditRetentionCall(nil), s.calls...)
+}
+
+func (s *runtimeUpdatingAuditRetentionStore) PruneScanLogs(_ context.Context, retention time.Duration) (int, error) {
+	return s.record("scan_log", retention)
+}
+
+func (s *runtimeUpdatingAuditRetentionStore) PruneAdminAuditLogs(_ context.Context, retention time.Duration) (int, error) {
+	return s.record("admin_audit_log", retention)
+}
+
+func (s *runtimeUpdatingAuditRetentionStore) PruneRefreshQueue(_ context.Context, retention time.Duration) (int, error) {
+	return s.record("refresh_queue", retention)
+}
+
+func (s *runtimeUpdatingAuditRetentionStore) PrunePackageCheckStatus(_ context.Context, retention time.Duration) (int, error) {
+	return s.record("package_check_status", retention)
+}
+
+func (s *runtimeUpdatingAuditRetentionStore) PrunePackageReputation(_ context.Context, _ string, retention time.Duration) (int, error) {
+	return s.record("package_reputation_cache", retention)
 }
 
 func (s *auditRetentionWorkerStore) PruneScanLogs(ctx context.Context, retention time.Duration) (int, error) {

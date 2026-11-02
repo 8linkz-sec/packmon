@@ -11,7 +11,39 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/8linkz-sec/packmon/internal/config"
 )
+
+func TestF091RateLimiterUsesUpdatedRuntimePolicyForExistingBucket(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runtime := config.NewRuntimeSettings("CRITICAL", 1, 1)
+	rl := newRateLimiter(ctx, 1.0/60, 1)
+	rl.source = runtime
+	const ip = "203.0.113.91"
+
+	if !rl.allow(ip) {
+		t.Fatal("initial request was denied")
+	}
+	shard := &rl.shards[rl.shardIndex(ip)]
+	shard.mu.Lock()
+	shard.buckets[ip].lastSeen = time.Now().Add(-2 * time.Second)
+	shard.mu.Unlock()
+	if rl.allow(ip) {
+		t.Fatal("existing empty bucket was admitted under the original 1/minute policy")
+	}
+
+	runtime.Update("", 60, 2)
+	shard.mu.Lock()
+	shard.buckets[ip].lastSeen = time.Now().Add(-2 * time.Second)
+	shard.mu.Unlock()
+	if !rl.allow(ip) {
+		t.Fatal("existing bucket was not admitted under the updated 60/minute burst-2 policy")
+	}
+}
 
 func TestRateLimiter_AllowsUnderLimit(t *testing.T) {
 	t.Parallel()

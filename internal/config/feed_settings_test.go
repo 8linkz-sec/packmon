@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"reflect"
 	"strings"
@@ -8,6 +9,146 @@ import (
 	"testing"
 	"time"
 )
+
+func TestF090NilConfigFeedAccessorsReturnZeroValues(t *testing.T) {
+	var cfg *Config
+	if got := cfg.FeedsSnapshot(); !reflect.DeepEqual(got, FeedsConfig{}) {
+		t.Fatalf("FeedsSnapshot() = %+v, want zero value", got)
+	}
+	if got, ok := cfg.FeedSettings("osv"); ok || !reflect.DeepEqual(got, FeedSettings{}) {
+		t.Fatalf("FeedSettings(osv) = %+v, %t, want zero value/false", got, ok)
+	}
+	if got := cfg.EffectiveFeedInterval("osv"); got != 0 {
+		t.Fatalf("EffectiveFeedInterval(osv) = %s, want zero", got)
+	}
+	if err := cfg.SetFeedSettings(FeedSettings{Name: "osv", Mode: FeedModeSelf}); err == nil || err.Error() != "nil config" {
+		t.Fatalf("SetFeedSettings() error = %v, want nil config", err)
+	}
+}
+
+func TestF090FeedsSnapshotCopiesNamespaceSlices(t *testing.T) {
+	cfg := &Config{Feeds: FeedsConfig{
+		ReversingLabsExcludedNamespaces: []string{"npm/@private/", "maven/com.example:"},
+		SocketExcludedNamespaces:        []string{"npm/@socket/", "pypi/internal-"},
+	}}
+
+	first := cfg.FeedsSnapshot()
+	first.ReversingLabsExcludedNamespaces[0] = "mutated"
+	first.SocketExcludedNamespaces[1] = "mutated"
+
+	second := cfg.FeedsSnapshot()
+	wantRL := []string{"npm/@private/", "maven/com.example:"}
+	wantSocket := []string{"npm/@socket/", "pypi/internal-"}
+	if !reflect.DeepEqual(second.ReversingLabsExcludedNamespaces, wantRL) {
+		t.Fatalf("second ReversingLabs snapshot = %#v, want %#v", second.ReversingLabsExcludedNamespaces, wantRL)
+	}
+	if !reflect.DeepEqual(second.SocketExcludedNamespaces, wantSocket) {
+		t.Fatalf("second Socket snapshot = %#v, want %#v", second.SocketExcludedNamespaces, wantSocket)
+	}
+	if !reflect.DeepEqual(cfg.Feeds.ReversingLabsExcludedNamespaces, wantRL) || !reflect.DeepEqual(cfg.Feeds.SocketExcludedNamespaces, wantSocket) {
+		t.Fatalf("snapshot mutation changed live config: %+v", cfg.Feeds)
+	}
+}
+
+func TestF090ConcurrentFeedReadersObserveCompleteTuples(t *testing.T) {
+	tupleA := FeedSettings{Name: "vulncheck", Enabled: true, Mode: FeedModeSelf, SyncInterval: 15 * time.Minute, APIKey: "key-a"}
+	tupleB := FeedSettings{Name: "vulncheck", Enabled: false, Mode: FeedModeExternal, SyncInterval: 2 * time.Hour, APIKey: "key-b"}
+	cfg := &Config{FeedSync: FeedSyncConfig{Interval: time.Hour}}
+	if err := cfg.SetFeedSettings(tupleA); err != nil {
+		t.Fatalf("seed SetFeedSettings() error = %v", err)
+	}
+
+	isTuple := func(got, want FeedSettings) bool {
+		return got.Name == want.Name && got.Enabled == want.Enabled && got.Mode == want.Mode && got.SyncInterval == want.SyncInterval && got.APIKey == want.APIKey
+	}
+	start := make(chan struct{})
+	errs := make(chan error, 1)
+	report := func(err error) {
+		select {
+		case errs <- err:
+		default:
+		}
+	}
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < 500; i++ {
+			want := tupleA
+			if i%2 != 0 {
+				want = tupleB
+			}
+			if err := cfg.SetFeedSettings(want); err != nil {
+				report(fmt.Errorf("writer SetFeedSettings: %w", err))
+				return
+			}
+		}
+	}()
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for range 500 {
+				got, ok := cfg.FeedSettings("vulncheck")
+				if !ok {
+					report(fmt.Errorf("FeedSettings(vulncheck) returned ok=false"))
+					return
+				}
+				if !isTuple(got, tupleA) && !isTuple(got, tupleB) {
+					report(fmt.Errorf("reader observed mixed tuple: %+v", got))
+					return
+				}
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	select {
+	case err := <-errs:
+		t.Fatal(err)
+	default:
+	}
+}
+
+func TestF090RejectedFeedUpdatePreservesStateAndNormalizedRoundTrip(t *testing.T) {
+	cfg := &Config{
+		FeedSync: FeedSyncConfig{Interval: 8 * time.Hour},
+		Feeds: FeedsConfig{
+			OSVEnabled:                      false,
+			OSVMode:                         FeedModeSelf,
+			OSVInterval:                     time.Hour,
+			ReversingLabsEnabled:            true,
+			ReversingLabsMode:               FeedModeSelf,
+			ReversingLabsAPIKey:             "retained-key",
+			ReversingLabsExcludedNamespaces: []string{"npm/@private/"},
+			SocketExcludedNamespaces:        []string{"npm/@socket/"},
+		},
+	}
+	before := cfg.FeedsSnapshot()
+	if err := cfg.SetFeedSettings(FeedSettings{Name: " ReversingLabs ", Enabled: false, Mode: FeedModeExternal, APIKey: "replacement"}); err == nil {
+		t.Fatal("SetFeedSettings(reversinglabs external) error = nil")
+	}
+	if after := cfg.FeedsSnapshot(); !reflect.DeepEqual(after, before) {
+		t.Fatalf("rejected update changed state:\nbefore=%+v\nafter=%+v", before, after)
+	}
+
+	want := FeedSettings{Name: " OSV ", Enabled: true, Mode: FeedMode(" EXTERNAL "), SyncInterval: 3 * time.Hour}
+	if err := cfg.SetFeedSettings(want); err != nil {
+		t.Fatalf("SetFeedSettings(normalized OSV) error = %v", err)
+	}
+	got, ok := cfg.FeedSettings("  OsV  ")
+	if !ok {
+		t.Fatal("FeedSettings(normalized OSV) ok = false")
+	}
+	if got.Name != "osv" || !got.Enabled || got.Mode != FeedModeExternal || got.SyncInterval != 3*time.Hour {
+		t.Fatalf("normalized OSV round trip = %+v", got)
+	}
+	if gotSnapshot := cfg.FeedsSnapshot(); !reflect.DeepEqual(gotSnapshot.ReversingLabsExcludedNamespaces, before.ReversingLabsExcludedNamespaces) || !reflect.DeepEqual(gotSnapshot.SocketExcludedNamespaces, before.SocketExcludedNamespaces) {
+		t.Fatalf("normalized update changed unrelated namespace state: %+v", gotSnapshot)
+	}
+}
 
 func TestNormalizeAndParseFeedMode(t *testing.T) {
 	if got := NormalizeFeedName("  OSV  "); got != "osv" {
