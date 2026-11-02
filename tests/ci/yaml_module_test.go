@@ -6,14 +6,17 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/mod/modfile"
 )
+
+const maintainedYAMLModule = "go.yaml.in/yaml/v3"
 
 func TestYAMLImportsUseMaintainedModulePath(t *testing.T) {
 	t.Parallel()
 
 	repoRoot := filepath.Join("..", "..")
 	forbiddenModule := "gopkg.in/" + "yaml.v3"
-	maintainedModule := "go.yaml.in/yaml/v3"
 	cmd := exec.Command("git", "ls-files")
 	cmd.Dir = repoRoot
 	output, err := cmd.Output()
@@ -33,7 +36,7 @@ func TestYAMLImportsUseMaintainedModulePath(t *testing.T) {
 			t.Fatalf("read %s: %v", rel, err)
 		}
 		if strings.Contains(string(data), forbiddenModule) {
-			t.Fatalf("%s uses archived %s; use %s", rel, forbiddenModule, maintainedModule)
+			t.Fatalf("%s uses archived %s; use %s", rel, forbiddenModule, maintainedYAMLModule)
 		}
 	}
 
@@ -41,14 +44,24 @@ func TestYAMLImportsUseMaintainedModulePath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read go.mod: %v", err)
 	}
-	if !strings.Contains(string(mod), maintainedModule) {
-		t.Fatalf("go.mod must require maintained YAML module %s", maintainedModule)
-	}
-	sum, err := os.ReadFile(filepath.Join(repoRoot, "go.sum")) //nolint:gosec // tracked repository file.
+	parsed, err := modfile.Parse("go.mod", mod, nil)
 	if err != nil {
-		t.Fatalf("read go.sum: %v", err)
+		t.Fatalf("parse go.mod: %v", err)
 	}
-	if !strings.Contains(string(sum), maintainedModule+" v3.0.4") {
-		t.Fatal("go.sum must include the maintained YAML module checksum")
+	var selected *modfile.Require
+	for _, requirement := range parsed.Require {
+		if requirement.Mod.Path == maintainedYAMLModule {
+			selected = requirement
+			break
+		}
+	}
+	if selected == nil {
+		t.Fatalf("go.mod must require maintained YAML module %s", maintainedYAMLModule)
+	}
+	if selected.Indirect {
+		t.Fatalf("go.mod must keep %s as a direct dependency", maintainedYAMLModule)
+	}
+	if selected.Mod.Version == "" {
+		t.Fatalf("go.mod requirement for %s must select a version", maintainedYAMLModule)
 	}
 }

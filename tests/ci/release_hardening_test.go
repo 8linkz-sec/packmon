@@ -6,6 +6,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	goversion "go/version"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -40,6 +41,57 @@ func moduleToolchainGoVersion(t *testing.T) string {
 		t.Fatalf("go.mod toolchain %q must pin a full patch version", toolchain)
 	}
 	return version
+}
+
+func TestGoToolchainSatisfiesLanguageDirective(t *testing.T) {
+	t.Parallel()
+
+	data, err := os.ReadFile(filepath.Join("..", "..", "go.mod"))
+	if err != nil {
+		t.Fatalf("read go.mod: %v", err)
+	}
+	modFile, err := modfile.Parse("go.mod", data, nil)
+	if err != nil {
+		t.Fatalf("parse go.mod: %v", err)
+	}
+	if modFile.Go == nil {
+		t.Fatal("go.mod must declare a go language version")
+	}
+	if modFile.Toolchain == nil {
+		t.Fatal("go.mod must declare an explicit toolchain")
+	}
+	language := "go" + modFile.Go.Version
+	toolchain := modFile.Toolchain.Name
+	if !regexp.MustCompile(`^go\d+\.\d+\.\d+$`).MatchString(toolchain) {
+		t.Fatalf("go.mod toolchain %q must pin a full patch version", toolchain)
+	}
+	if !goToolchainSatisfiesLanguage(toolchain, language) {
+		t.Fatalf("go.mod toolchain %q is older than language directive %q", toolchain, language)
+	}
+
+	for _, test := range []struct {
+		name      string
+		toolchain string
+		language  string
+		satisfies bool
+	}{
+		{name: "equal language release", toolchain: "go1.27.0", language: "go1.27", satisfies: true},
+		{name: "equal patch", toolchain: "go1.27.3", language: "go1.27.3", satisfies: true},
+		{name: "newer minor", toolchain: "go1.28.0", language: "go1.27", satisfies: true},
+		{name: "older patch", toolchain: "go1.27.2", language: "go1.27.3", satisfies: false},
+		{name: "older minor", toolchain: "go1.26.9", language: "go1.27", satisfies: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := goToolchainSatisfiesLanguage(test.toolchain, test.language); got != test.satisfies {
+				t.Fatalf("goToolchainSatisfiesLanguage(%q, %q) = %t, want %t", test.toolchain, test.language, got, test.satisfies)
+			}
+		})
+	}
+}
+
+func goToolchainSatisfiesLanguage(toolchain, language string) bool {
+	return goversion.IsValid(toolchain) && goversion.IsValid(language) && goversion.Compare(toolchain, language) >= 0
 }
 
 func TestHTMLReportTemplatesAreParsedLazily(t *testing.T) {
