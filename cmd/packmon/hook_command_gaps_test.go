@@ -264,6 +264,8 @@ func TestHookInstallReportsFilesystemFailures(t *testing.T) {
 		if statErr != nil {
 			t.Fatalf("stat external managed hook after install: %v", statErr)
 		}
+		currentSuccessOutput := "Installed packmon pre-push hook in " + hookPath + "\n"
+		currentInstalledData := []byte(hookScript("CRITICAL"))
 
 		if exitCode == ExitOperational {
 			if strings.Contains(output, "Installed packmon") || string(gotData) != string(wantData) || after.Mode() != before.Mode() {
@@ -271,9 +273,8 @@ func TestHookInstallReportsFilesystemFailures(t *testing.T) {
 			}
 			return
 		}
-		if exitCode == 0 && strings.Contains(output, "Installed packmon pre-push hook") &&
-			string(gotData) != string(wantData) && strings.Contains(string(gotData), "packmon scan . --hook ") &&
-			after.Mode().Perm() == managedHookMode {
+		if exitCode == 0 && output == currentSuccessOutput &&
+			bytes.Equal(gotData, currentInstalledData) && after.Mode() == managedHookMode {
 			t.Skip("[F029-bugs-2] hook install follows an existing managed-hook symlink and overwrites/chmods its external target")
 		}
 		t.Fatalf("unexpected managed-hook symlink result: exit=%d output=%q data=%q mode=%v", exitCode, output, gotData, after.Mode())
@@ -315,8 +316,10 @@ func TestHookInstallReportsFilesystemFailures(t *testing.T) {
 		if statErr != nil {
 			t.Fatalf("stat external dangling-link target after install: %v", statErr)
 		}
-		if exitCode == 0 && strings.Contains(output, "Installed packmon pre-push hook") &&
-			strings.Contains(string(data), "packmon scan . --hook ") && info.Mode().Perm() == managedHookMode {
+		currentSuccessOutput := "Installed packmon pre-push hook in " + hookPath + "\n"
+		currentInstalledData := []byte(hookScript("CRITICAL"))
+		if exitCode == 0 && output == currentSuccessOutput &&
+			bytes.Equal(data, currentInstalledData) && info.Mode() == managedHookMode {
 			t.Skip("[F029-bugs-2] hook install follows a dangling managed-hook path and creates/chmods its external target")
 		}
 		t.Fatalf("unexpected dangling hook symlink result: exit=%d output=%q data=%q mode=%v", exitCode, output, data, info.Mode())
@@ -428,16 +431,25 @@ func TestHookUninstallReportsStatFailure(t *testing.T) {
 	assertHookFileState(t, hookPath, wantData, before.Mode())
 
 	if exitCode == ExitOperational {
-		if strings.Contains(output, "Removed packmon") {
-			t.Fatalf("hook uninstall reported removal after stat failure: %q", output)
+		if !strings.Contains(output, "Error:") || !strings.Contains(output, "pre-push hook") {
+			t.Fatalf("hook uninstall stat failure output = %q, want operational pre-push diagnostic", output)
+		}
+		for _, forbidden := range []string{
+			"Skipping pre-push: not a packmon-managed hook.",
+			"Skipping pre-commit: not a packmon-managed hook.",
+			"No packmon-managed hooks found.",
+			"Removed packmon",
+		} {
+			if strings.Contains(output, forbidden) {
+				t.Fatalf("hook uninstall stat failure output = %q, must not contain %q", output, forbidden)
+			}
 		}
 		return
 	}
-	if exitCode == 0 &&
-		strings.Contains(output, "Skipping pre-push: not a packmon-managed hook.") &&
-		strings.Contains(output, "Skipping pre-commit: not a packmon-managed hook.") &&
-		strings.Contains(output, "No packmon-managed hooks found.") &&
-		!strings.Contains(output, "Error:") && !strings.Contains(output, "Removed packmon") {
+	const currentMisleadingOutput = "Skipping pre-push: not a packmon-managed hook.\n" +
+		"Skipping pre-commit: not a packmon-managed hook.\n" +
+		"No packmon-managed hooks found.\n"
+	if exitCode == 0 && output == currentMisleadingOutput {
 		t.Skip("[F029-bugs-3] hook uninstall treats non-ENOENT stat failures as custom/missing hooks and exits successfully")
 	}
 	t.Fatalf("unexpected hook uninstall stat-failure result: exit=%d output=%q", exitCode, output)
