@@ -299,8 +299,8 @@ ENTRYPOINT ["/fixture"]
 			}
 			runArgs = append(runArgs, fixtureImage, "-ready="+marker)
 			runArgs = append(runArgs, testCase.fixtureArgs...)
-			runDockerCommand(t, dockerCommandTimeout, "start Docker health fixture", runArgs...)
 			t.Cleanup(func() { removeDockerArtifactContainer(t, container) })
+			runDockerCommand(t, dockerCommandTimeout, "start Docker health fixture", runArgs...)
 			waitForDockerFixture(t, container, marker)
 
 			output, err := tryDockerCommand(t, dockerCommandTimeout, "exec", container, "/bin/sh", "-c", healthCommand)
