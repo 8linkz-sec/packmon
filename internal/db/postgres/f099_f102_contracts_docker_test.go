@@ -214,15 +214,19 @@ func TestF099F102PostgresContracts(t *testing.T) {
 		if lockErr == nil || !strings.Contains(lockErr.Error(), "lock admin audit log") {
 			t.Fatalf("InsertAdminAuditLog(blocked table lock) = %v, want lock error", lockErr)
 		}
-		restore := f099InstallRejectingTrigger(t, store, "f099_reject_audit", "admin_audit_log")
+		restore := f099InstallAfterInsertRejectingTrigger(t, store, "f099_reject_audit", "admin_audit_log")
 		defer restore()
 		err = store.ChangeAdminPasswordWithAudit(ctx, "must-rollback", "before-trigger", &db.AdminAuditEntry{Action: "password_change"})
-		if !errors.Is(err, db.ErrAdminAuditLog) {
-			t.Fatalf("ChangeAdminPasswordWithAudit(trigger) = %v, want ErrAdminAuditLog", err)
+		if !errors.Is(err, db.ErrAdminAuditLog) || !strings.Contains(err.Error(), "insert admin audit log") || !strings.Contains(err.Error(), "forced contract failure") {
+			t.Fatalf("ChangeAdminPasswordWithAudit(AFTER INSERT trigger) = %v, want ErrAdminAuditLog with insert context", err)
 		}
 		authInfo, getErr := store.GetAdminAuth(ctx)
 		if getErr != nil || authInfo == nil || authInfo.PasswordHash != "before-trigger" {
 			t.Fatalf("auth after rollback = %+v, %v", authInfo, getErr)
+		}
+		var auditCount int
+		if countErr := store.pool.QueryRow(ctx, `SELECT COUNT(*) FROM admin_audit_log`).Scan(&auditCount); countErr != nil || auditCount != 0 {
+			t.Fatalf("audit rows after late rollback = %d, %v; want complete rollback", auditCount, countErr)
 		}
 		restore()
 	})
@@ -551,7 +555,7 @@ func f099Transaction(t *testing.T, store *Store, statements ...string) {
 	}
 }
 
-func f099InstallRejectingTrigger(t *testing.T, store *Store, name, table string) func() {
+func f099InstallAfterInsertRejectingTrigger(t *testing.T, store *Store, name, table string) func() {
 	t.Helper()
 	functionName := name + "_fn"
 	restore := func() {
@@ -569,7 +573,7 @@ func f099InstallRejectingTrigger(t *testing.T, store *Store, name, table string)
 	t.Cleanup(restore)
 	f099Transaction(t, store,
 		fmt.Sprintf(`CREATE OR REPLACE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'forced contract failure'; END $$`, functionName),
-		fmt.Sprintf(`CREATE TRIGGER %s BEFORE INSERT ON %s FOR EACH ROW EXECUTE FUNCTION %s()`, name, table, functionName),
+		fmt.Sprintf(`CREATE TRIGGER %s AFTER INSERT ON %s FOR EACH ROW EXECUTE FUNCTION %s()`, name, table, functionName),
 	)
 	return restore
 }
