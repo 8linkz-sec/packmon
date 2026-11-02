@@ -43,6 +43,144 @@ func TestFindGitRootAndIsPackmonHook(t *testing.T) {
 	}
 }
 
+func TestFindGitRootReturnsEmptyAfterWorkingDirectoryRemoval(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("removing a process working directory is a POSIX-only filesystem behavior")
+	}
+
+	originalDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get original working directory: %v", err)
+	}
+	removedDir := filepath.Join(t.TempDir(), "removed-working-directory")
+	if err := os.Mkdir(removedDir, 0o750); err != nil {
+		t.Fatalf("create removable working directory: %v", err)
+	}
+	if err := os.Chdir(removedDir); err != nil {
+		t.Fatalf("chdir to removable working directory: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(originalDir); err != nil {
+			t.Errorf("restore original working directory: %v", err)
+		}
+	})
+
+	if err := os.Remove(removedDir); err != nil {
+		t.Fatalf("remove current working directory: %v", err)
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		t.Fatalf("os.Getwd() = %q, nil; want an error after working directory removal", cwd)
+	}
+	if got := findGitRoot("."); got != "" {
+		t.Fatalf("findGitRoot(.) = %q, want empty after working directory removal", got)
+	}
+}
+
+func TestWriteManagedHookReportsFilesystemErrors(t *testing.T) {
+	t.Run("parent path is a file", func(t *testing.T) {
+		parentPath := filepath.Join(t.TempDir(), "hooks")
+		wantData := []byte("parent sentinel\n")
+		if err := os.WriteFile(parentPath, wantData, 0o640); err != nil {
+			t.Fatalf("write parent sentinel: %v", err)
+		}
+		before, err := os.Stat(parentPath)
+		if err != nil {
+			t.Fatalf("stat parent sentinel: %v", err)
+		}
+
+		err = writeManagedHook(filepath.Join(parentPath, "pre-push"), hookScript("HIGH"))
+		if err == nil {
+			t.Fatal("writeManagedHook(parent file) error = nil")
+		}
+		gotData, readErr := os.ReadFile(parentPath) // #nosec G304 -- test reads its fixed fixture path.
+		if readErr != nil {
+			t.Fatalf("read parent sentinel after failure: %v", readErr)
+		}
+		after, statErr := os.Stat(parentPath)
+		if statErr != nil {
+			t.Fatalf("stat parent sentinel after failure: %v", statErr)
+		}
+		if string(gotData) != string(wantData) || after.Mode() != before.Mode() {
+			t.Fatalf("parent sentinel changed after failure: data=%q mode=%v, want data=%q mode=%v", gotData, after.Mode(), wantData, before.Mode())
+		}
+	})
+
+	t.Run("target path is a directory", func(t *testing.T) {
+		targetPath := filepath.Join(t.TempDir(), "pre-push")
+		if err := os.Mkdir(targetPath, 0o750); err != nil {
+			t.Fatalf("create unusable target directory: %v", err)
+		}
+		sentinelPath := filepath.Join(targetPath, "sentinel")
+		wantData := []byte("target sentinel\n")
+		if err := os.WriteFile(sentinelPath, wantData, 0o640); err != nil {
+			t.Fatalf("write target sentinel: %v", err)
+		}
+		beforeDir, err := os.Stat(targetPath)
+		if err != nil {
+			t.Fatalf("stat target directory: %v", err)
+		}
+		beforeSentinel, err := os.Stat(sentinelPath)
+		if err != nil {
+			t.Fatalf("stat target sentinel: %v", err)
+		}
+
+		err = writeManagedHook(targetPath, hookScript("HIGH"))
+		if err == nil {
+			t.Fatal("writeManagedHook(directory target) error = nil")
+		}
+		gotData, readErr := os.ReadFile(sentinelPath) // #nosec G304 -- test reads its fixed fixture path.
+		if readErr != nil {
+			t.Fatalf("read target sentinel after failure: %v", readErr)
+		}
+		afterDir, statErr := os.Stat(targetPath)
+		if statErr != nil {
+			t.Fatalf("stat target directory after failure: %v", statErr)
+		}
+		afterSentinel, statErr := os.Stat(sentinelPath)
+		if statErr != nil {
+			t.Fatalf("stat target sentinel after failure: %v", statErr)
+		}
+		if !afterDir.IsDir() || afterDir.Mode() != beforeDir.Mode() {
+			t.Fatalf("target directory changed after failure: mode=%v, want directory mode=%v", afterDir.Mode(), beforeDir.Mode())
+		}
+		if string(gotData) != string(wantData) || afterSentinel.Mode() != beforeSentinel.Mode() {
+			t.Fatalf("target sentinel changed after failure: data=%q mode=%v, want data=%q mode=%v", gotData, afterSentinel.Mode(), wantData, beforeSentinel.Mode())
+		}
+	})
+}
+
+func TestIsHookModePackmonHookRecognizesCurrentInvocation(t *testing.T) {
+	root := t.TempDir()
+	currentPath := filepath.Join(root, "current")
+	if err := os.WriteFile(currentPath, []byte(hookScript("HIGH")), 0o700); err != nil {
+		t.Fatalf("write current managed hook: %v", err)
+	}
+	legacyPath := filepath.Join(root, "legacy")
+	legacy := "#!/bin/sh\n" + hookMarker + "\npackmon scan . --fail-on HIGH --quiet\n"
+	if err := os.WriteFile(legacyPath, []byte(legacy), 0o700); err != nil {
+		t.Fatalf("write legacy managed hook: %v", err)
+	}
+	unusablePath := filepath.Join(root, "unusable")
+	if err := os.Mkdir(unusablePath, 0o750); err != nil {
+		t.Fatalf("create unusable hook path: %v", err)
+	}
+
+	if !isHookModePackmonHook(currentPath) {
+		t.Fatal("isHookModePackmonHook(current hook) = false")
+	}
+	for name, path := range map[string]string{
+		"legacy":   legacyPath,
+		"missing":  filepath.Join(root, "missing"),
+		"unusable": unusablePath,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if isHookModePackmonHook(path) {
+				t.Fatalf("isHookModePackmonHook(%s) = true", name)
+			}
+		})
+	}
+}
+
 func TestFindGitHooksDirDoesNotEscapeDiscoveredRoot(t *testing.T) {
 	git := requireGit(t)
 

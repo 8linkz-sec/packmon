@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 const hookExitHelperEnv = "PACKMON_F029_HOOK_EXIT_HELPER"
@@ -153,17 +156,376 @@ func TestHookInstallOperationalFailuresPreserveHooks(t *testing.T) {
 	}
 }
 
+func TestHookInstallReportsFilesystemFailures(t *testing.T) {
+	t.Run("hooks_directory_is_a_file", func(t *testing.T) {
+		root := t.TempDir()
+		gitDir := filepath.Join(root, ".git")
+		if err := os.Mkdir(gitDir, 0o750); err != nil {
+			t.Fatalf("create git directory: %v", err)
+		}
+		hooksPath := filepath.Join(gitDir, "hooks")
+		wantData := []byte("hooks path sentinel\n")
+		if err := os.WriteFile(hooksPath, wantData, 0o640); err != nil {
+			t.Fatalf("write hooks-path sentinel: %v", err)
+		}
+		before, err := os.Stat(hooksPath)
+		if err != nil {
+			t.Fatalf("stat hooks-path sentinel: %v", err)
+		}
+
+		output, exitCode := runHookExitHelper(t, root, "install", "")
+		if exitCode != ExitOperational || !strings.Contains(output, "cannot create hooks directory") {
+			t.Fatalf("hook install result = exit %d, output %q; want operational hooks-directory error", exitCode, output)
+		}
+		if strings.Contains(output, "Installed packmon") {
+			t.Fatalf("hook install reported success after hooks-directory failure: %q", output)
+		}
+		gotData, readErr := os.ReadFile(hooksPath) // #nosec G304 -- test reads its fixed fixture path.
+		if readErr != nil {
+			t.Fatalf("read hooks-path sentinel after failure: %v", readErr)
+		}
+		after, statErr := os.Stat(hooksPath)
+		if statErr != nil {
+			t.Fatalf("stat hooks-path sentinel after failure: %v", statErr)
+		}
+		if string(gotData) != string(wantData) || after.Mode() != before.Mode() {
+			t.Fatalf("hooks-path sentinel changed: data=%q mode=%v, want data=%q mode=%v", gotData, after.Mode(), wantData, before.Mode())
+		}
+	})
+
+	t.Run("read_only_hooks_directory", func(t *testing.T) {
+		requireNativeHookPermissionFailures(t)
+
+		root := t.TempDir()
+		hooksDir := filepath.Join(root, ".git", "hooks")
+		if err := os.MkdirAll(hooksDir, 0o750); err != nil {
+			t.Fatalf("create hooks directory: %v", err)
+		}
+		t.Cleanup(func() {
+			if err := os.Chmod(hooksDir, 0o750); err != nil && !os.IsNotExist(err) {
+				t.Errorf("restore hooks directory mode: %v", err)
+			}
+		})
+		if err := os.Chmod(hooksDir, 0o500); err != nil {
+			t.Fatalf("make hooks directory read-only: %v", err)
+		}
+		probePath := filepath.Join(hooksDir, "permission-probe")
+		if err := os.WriteFile(probePath, []byte("probe"), 0o600); err == nil {
+			_ = os.Remove(probePath)
+			t.Fatal("read-only hooks directory still permits file creation")
+		} else if !errors.Is(err, os.ErrPermission) {
+			t.Fatalf("permission probe error = %v, want permission denied", err)
+		}
+
+		output, exitCode := runHookExitHelper(t, root, "install", "")
+		if exitCode != ExitOperational || !strings.Contains(output, "cannot write hook file") {
+			t.Fatalf("hook install result = exit %d, output %q; want operational write error", exitCode, output)
+		}
+		if strings.Contains(output, "Installed packmon") {
+			t.Fatalf("hook install reported success after write failure: %q", output)
+		}
+		if _, err := os.Lstat(filepath.Join(hooksDir, "pre-push")); !os.IsNotExist(err) {
+			t.Fatalf("pre-push hook exists after denied write: %v", err)
+		}
+	})
+
+	t.Run("existing_managed_symlink", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("managed-hook symlink behavior is covered on POSIX filesystems")
+		}
+
+		root := t.TempDir()
+		hooksDir := filepath.Join(root, ".git", "hooks")
+		if err := os.MkdirAll(hooksDir, 0o750); err != nil {
+			t.Fatalf("create hooks directory: %v", err)
+		}
+		externalPath := filepath.Join(t.TempDir(), "external-managed-hook")
+		wantData := []byte("#!/bin/sh\n" + hookMarker + "\necho external sentinel\n")
+		if err := os.WriteFile(externalPath, wantData, 0o700); err != nil {
+			t.Fatalf("write external managed hook: %v", err)
+		}
+		before, err := os.Stat(externalPath)
+		if err != nil {
+			t.Fatalf("stat external managed hook: %v", err)
+		}
+		hookPath := filepath.Join(hooksDir, "pre-push")
+		if err := os.Symlink(externalPath, hookPath); err != nil {
+			t.Fatalf("create managed-hook symlink: %v", err)
+		}
+		assertHookSymlinkTarget(t, hookPath, externalPath)
+
+		output, exitCode := runHookExitHelper(t, root, "install", "")
+		assertHookSymlinkTarget(t, hookPath, externalPath)
+		gotData, readErr := os.ReadFile(externalPath) // #nosec G304 -- test reads its fixed fixture path.
+		if readErr != nil {
+			t.Fatalf("read external managed hook after install: %v", readErr)
+		}
+		after, statErr := os.Stat(externalPath)
+		if statErr != nil {
+			t.Fatalf("stat external managed hook after install: %v", statErr)
+		}
+
+		if exitCode == ExitOperational {
+			if strings.Contains(output, "Installed packmon") || string(gotData) != string(wantData) || after.Mode() != before.Mode() {
+				t.Fatalf("rejected symlink changed external hook: output=%q data=%q mode=%v, want data=%q mode=%v", output, gotData, after.Mode(), wantData, before.Mode())
+			}
+			return
+		}
+		if exitCode == 0 && strings.Contains(output, "Installed packmon pre-push hook") &&
+			string(gotData) != string(wantData) && strings.Contains(string(gotData), "packmon scan . --hook ") &&
+			after.Mode().Perm() == managedHookMode {
+			t.Skip("[F029-bugs-2] hook install follows an existing managed-hook symlink and overwrites/chmods its external target")
+		}
+		t.Fatalf("unexpected managed-hook symlink result: exit=%d output=%q data=%q mode=%v", exitCode, output, gotData, after.Mode())
+	})
+
+	t.Run("dangling_hook_symlink", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("managed-hook symlink behavior is covered on POSIX filesystems")
+		}
+
+		root := t.TempDir()
+		hooksDir := filepath.Join(root, ".git", "hooks")
+		if err := os.MkdirAll(hooksDir, 0o750); err != nil {
+			t.Fatalf("create hooks directory: %v", err)
+		}
+		externalPath := filepath.Join(t.TempDir(), "created-through-dangling-link")
+		hookPath := filepath.Join(hooksDir, "pre-push")
+		if err := os.Symlink(externalPath, hookPath); err != nil {
+			t.Fatalf("create dangling hook symlink: %v", err)
+		}
+		assertHookSymlinkTarget(t, hookPath, externalPath)
+		if _, err := os.Stat(externalPath); !os.IsNotExist(err) {
+			t.Fatalf("external dangling-link target exists before install: %v", err)
+		}
+
+		output, exitCode := runHookExitHelper(t, root, "install", "")
+		assertHookSymlinkTarget(t, hookPath, externalPath)
+		data, readErr := os.ReadFile(externalPath) // #nosec G304 -- test reads its fixed fixture path.
+		if exitCode == ExitOperational {
+			if !os.IsNotExist(readErr) || strings.Contains(output, "Installed packmon") {
+				t.Fatalf("rejected dangling symlink created external target: output=%q read error=%v data=%q", output, readErr, data)
+			}
+			return
+		}
+		if readErr != nil {
+			t.Fatalf("read external dangling-link target after install: %v", readErr)
+		}
+		info, statErr := os.Stat(externalPath)
+		if statErr != nil {
+			t.Fatalf("stat external dangling-link target after install: %v", statErr)
+		}
+		if exitCode == 0 && strings.Contains(output, "Installed packmon pre-push hook") &&
+			strings.Contains(string(data), "packmon scan . --hook ") && info.Mode().Perm() == managedHookMode {
+			t.Skip("[F029-bugs-2] hook install follows a dangling managed-hook path and creates/chmods its external target")
+		}
+		t.Fatalf("unexpected dangling hook symlink result: exit=%d output=%q data=%q mode=%v", exitCode, output, data, info.Mode())
+	})
+}
+
+func TestHookCommandsReportDeletedWorkingDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("removing a helper process working directory is a POSIX-only filesystem behavior")
+	}
+
+	for _, operation := range []string{"install", "uninstall", "status"} {
+		t.Run(operation, func(t *testing.T) {
+			output, exitCode := runHookDeletedWorkingDirectoryHelper(t, operation)
+			if exitCode != ExitOperational || !strings.Contains(output, "cannot determine working directory") {
+				t.Fatalf("hook %s result = exit %d, output %q; want operational working-directory error", operation, exitCode, output)
+			}
+			for _, success := range []string{"Installed packmon", "Removed packmon", "Repository:"} {
+				if strings.Contains(output, success) {
+					t.Fatalf("hook %s reported success after working-directory failure: %q", operation, output)
+				}
+			}
+		})
+	}
+}
+
+func TestHookUninstallReportsRemovalFailure(t *testing.T) {
+	requireNativeHookPermissionFailures(t)
+
+	root := t.TempDir()
+	hooksDir := filepath.Join(root, ".git", "hooks")
+	if err := os.MkdirAll(hooksDir, 0o750); err != nil {
+		t.Fatalf("create hooks directory: %v", err)
+	}
+	hookPath := filepath.Join(hooksDir, "pre-push")
+	wantData := []byte(hookScript("HIGH"))
+	if err := os.WriteFile(hookPath, wantData, managedHookMode); err != nil { //nolint:gosec // G306: fixture is an executable Git hook.
+		t.Fatalf("write managed hook: %v", err)
+	}
+	probePath := filepath.Join(hooksDir, "permission-probe")
+	if err := os.WriteFile(probePath, []byte("probe"), 0o600); err != nil {
+		t.Fatalf("write removal probe: %v", err)
+	}
+	before, err := os.Stat(hookPath)
+	if err != nil {
+		t.Fatalf("stat managed hook: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(hooksDir, 0o750); err != nil && !os.IsNotExist(err) {
+			t.Errorf("restore hooks directory mode: %v", err)
+		}
+	})
+	if err := os.Chmod(hooksDir, 0o500); err != nil {
+		t.Fatalf("make hooks directory non-writable: %v", err)
+	}
+	if err := os.Remove(probePath); err == nil {
+		t.Fatal("non-writable hooks directory still permits removal")
+	} else if !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("removal permission probe error = %v, want permission denied", err)
+	}
+
+	output, exitCode := runHookExitHelper(t, root, "uninstall")
+	if exitCode != ExitOperational || !strings.Contains(output, "cannot remove pre-push hook") {
+		t.Fatalf("hook uninstall result = exit %d, output %q; want operational removal error", exitCode, output)
+	}
+	if strings.Contains(output, "Removed packmon") {
+		t.Fatalf("hook uninstall reported removal after denied delete: %q", output)
+	}
+	if err := os.Chmod(hooksDir, 0o750); err != nil {
+		t.Fatalf("restore hooks directory for verification: %v", err)
+	}
+	assertHookFileState(t, hookPath, wantData, before.Mode())
+}
+
+func TestHookUninstallReportsStatFailure(t *testing.T) {
+	requireNativeHookPermissionFailures(t)
+
+	root := t.TempDir()
+	gitDir := filepath.Join(root, ".git")
+	hooksDir := filepath.Join(gitDir, "hooks")
+	if err := os.MkdirAll(hooksDir, 0o750); err != nil {
+		t.Fatalf("create hooks directory: %v", err)
+	}
+	hookPath := filepath.Join(hooksDir, "pre-push")
+	wantData := []byte(hookScript("HIGH"))
+	if err := os.WriteFile(hookPath, wantData, managedHookMode); err != nil { //nolint:gosec // G306: fixture is an executable Git hook.
+		t.Fatalf("write managed hook: %v", err)
+	}
+	before, err := os.Stat(hookPath)
+	if err != nil {
+		t.Fatalf("stat managed hook before restriction: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(gitDir, 0o750); err != nil && !os.IsNotExist(err) {
+			t.Errorf("restore git directory mode: %v", err)
+		}
+	})
+	if err := os.Chmod(gitDir, 0); err != nil {
+		t.Fatalf("make git directory inaccessible: %v", err)
+	}
+	if _, err := os.Stat(hookPath); err == nil || os.IsNotExist(err) || !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("restricted managed-hook stat error = %v, want non-ENOENT permission error", err)
+	}
+
+	output, exitCode := runHookExitHelper(t, root, "uninstall")
+	if err := os.Chmod(gitDir, 0o750); err != nil {
+		t.Fatalf("restore git directory for verification: %v", err)
+	}
+	assertHookFileState(t, hookPath, wantData, before.Mode())
+
+	if exitCode == ExitOperational {
+		if strings.Contains(output, "Removed packmon") {
+			t.Fatalf("hook uninstall reported removal after stat failure: %q", output)
+		}
+		return
+	}
+	if exitCode == 0 &&
+		strings.Contains(output, "Skipping pre-push: not a packmon-managed hook.") &&
+		strings.Contains(output, "Skipping pre-commit: not a packmon-managed hook.") &&
+		strings.Contains(output, "No packmon-managed hooks found.") &&
+		!strings.Contains(output, "Error:") && !strings.Contains(output, "Removed packmon") {
+		t.Skip("[F029-bugs-3] hook uninstall treats non-ENOENT stat failures as custom/missing hooks and exits successfully")
+	}
+	t.Fatalf("unexpected hook uninstall stat-failure result: exit=%d output=%q", exitCode, output)
+}
+
 func TestHookInstallExitHelper(t *testing.T) {
 	if os.Getenv(hookExitHelperEnv) != "1" {
 		return
 	}
 
-	cmd := newHookInstallCmd()
-	cmd.SetArgs(os.Args[3:])
+	args := hookExitHelperArgs(t)
+	if args[0] == "deleted-cwd" {
+		if len(args) != 4 {
+			t.Fatalf("deleted-CWD helper args = %#v, want mode, ready path, release path, operation", args)
+		}
+		if err := os.WriteFile(args[1], []byte("ready\n"), 0o600); err != nil {
+			t.Fatalf("write deleted-CWD ready marker: %v", err)
+		}
+		waitForHookHelperRelease(t, args[2])
+		if cwd, err := os.Getwd(); err == nil {
+			t.Fatalf("os.Getwd() = %q, nil; want deleted working-directory error", cwd)
+		}
+		if got := findGitRoot("."); got != "" {
+			t.Fatalf("findGitRoot(.) = %q, want empty after working-directory removal", got)
+		}
+		if args[3] == "install" {
+			args = []string{"install", ""}
+		} else {
+			args = []string{args[3]}
+		}
+	}
+
+	var cmdArgs []string
+	var cmd interface {
+		SetArgs([]string)
+		Execute() error
+	}
+	switch args[0] {
+	case "install":
+		if len(args) < 2 {
+			t.Fatalf("install helper args = %#v, want explicit config slot", args)
+		}
+		flagNoProjectConfig = true
+		flagConfig = args[1]
+		cmd = newHookInstallCmd()
+		cmdArgs = args[2:]
+	case "uninstall":
+		cmd = newHookUninstallCmd()
+		cmdArgs = args[1:]
+	case "status":
+		cmd = newHookStatusCmd()
+		cmdArgs = args[1:]
+	default:
+		t.Fatalf("unknown hook helper operation %q", args[0])
+	}
+
+	cmd.SetArgs(cmdArgs)
 	if err := cmd.Execute(); err != nil {
 		os.Exit(99)
 	}
 	os.Exit(0)
+}
+
+func hookExitHelperArgs(t *testing.T) []string {
+	t.Helper()
+	for index, arg := range os.Args {
+		if arg == "--" && index+1 < len(os.Args) {
+			return os.Args[index+1:]
+		}
+	}
+	t.Fatal("hook exit helper arguments are missing")
+	return nil
+}
+
+func waitForHookHelperRelease(t *testing.T, releasePath string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(releasePath); err == nil {
+			return
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("stat deleted-CWD release marker: %v", err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for deleted-CWD release marker %q", releasePath)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func setGitCommandOutputForHookTest(t *testing.T, output func(context.Context, ...string) ([]byte, error)) {
@@ -178,18 +540,159 @@ func setGitCommandOutputForHookTest(t *testing.T, output func(context.Context, .
 func runHookInstallExitHelper(t *testing.T, directory string, args []string) (string, int) {
 	t.Helper()
 
-	//nolint:gosec // G204: the test re-executes its own binary as a helper process.
-	cmd := exec.Command(os.Args[0], append([]string{"-test.run=^TestHookInstallExitHelper$", "--"}, args...)...)
+	configPath := filepath.Join(directory, defaultCLIConfigFile)
+	if info, err := os.Stat(configPath); err != nil || info.IsDir() {
+		configPath = ""
+	}
+	helperArgs := append([]string{"install", configPath}, args...)
+	return runHookExitHelper(t, directory, helperArgs...)
+}
+
+func runHookExitHelper(t *testing.T, directory string, args ...string) (string, int) {
+	t.Helper()
+
+	cmd := newHookExitHelperCommand(t, directory, args...)
+	output, err := cmd.CombinedOutput()
+	return string(output), hookExitCode(t, err)
+}
+
+func newHookExitHelperCommand(t *testing.T, directory string, args ...string) *exec.Cmd {
+	t.Helper()
+
+	commandArgs := append([]string{"-test.run=^TestHookInstallExitHelper$", "--"}, args...)
+	//nolint:gosec // G204: the test re-executes its own binary with fixed helper protocol arguments.
+	cmd := exec.Command(os.Args[0], commandArgs...)
 	cmd.Dir = directory
 	home := t.TempDir()
-	cmd.Env = append(os.Environ(), hookExitHelperEnv+"=1", "HOME="+home, "USERPROFILE="+home)
-	output, err := cmd.CombinedOutput()
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		hookExitHelperEnv + "=1",
+		"HOME=" + home,
+		"USERPROFILE=" + home,
+	}
+	if coverDir := os.Getenv("GOCOVERDIR"); coverDir != "" {
+		cmd.Env = append(cmd.Env, "GOCOVERDIR="+coverDir)
+	}
+	return cmd
+}
+
+func hookExitCode(t *testing.T, err error) int {
+	t.Helper()
 	if err == nil {
-		return string(output), 0
+		return 0
 	}
 	exitErr, ok := err.(*exec.ExitError)
 	if !ok {
 		t.Fatalf("start hook helper: %v", err)
 	}
-	return string(output), exitErr.ExitCode()
+	return exitErr.ExitCode()
+}
+
+func runHookDeletedWorkingDirectoryHelper(t *testing.T, operation string) (string, int) {
+	t.Helper()
+
+	workingParent := t.TempDir()
+	workingDir := filepath.Join(workingParent, "deleted-working-directory")
+	if err := os.Mkdir(workingDir, 0o750); err != nil {
+		t.Fatalf("create helper working directory: %v", err)
+	}
+	controlDir := t.TempDir()
+	readyPath := filepath.Join(controlDir, "ready")
+	releasePath := filepath.Join(controlDir, "release")
+	cmd := newHookExitHelperCommand(t, workingDir, "deleted-cwd", readyPath, releasePath, operation)
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start deleted-CWD hook helper: %v", err)
+	}
+	waitResult := make(chan error, 1)
+	go func() {
+		waitResult <- cmd.Wait()
+	}()
+
+	readyDeadline := time.NewTimer(10 * time.Second)
+	readyTicker := time.NewTicker(10 * time.Millisecond)
+	defer readyDeadline.Stop()
+	defer readyTicker.Stop()
+	ready := false
+	for !ready {
+		select {
+		case err := <-waitResult:
+			t.Fatalf("deleted-CWD helper exited before ready: %v\n%s", err, output.String())
+		case <-readyDeadline.C:
+			_ = cmd.Process.Kill()
+			t.Fatalf("timed out waiting for deleted-CWD helper readiness\n%s", output.String())
+		case <-readyTicker.C:
+			if _, err := os.Stat(readyPath); err == nil {
+				ready = true
+			} else if !os.IsNotExist(err) {
+				_ = cmd.Process.Kill()
+				t.Fatalf("stat deleted-CWD ready marker: %v", err)
+			}
+		}
+	}
+
+	if err := os.Remove(workingDir); err != nil {
+		_ = cmd.Process.Kill()
+		t.Fatalf("remove helper working directory: %v", err)
+	}
+	if err := os.WriteFile(releasePath, []byte("release\n"), 0o600); err != nil {
+		_ = cmd.Process.Kill()
+		t.Fatalf("write deleted-CWD release marker: %v", err)
+	}
+
+	completionTimer := time.NewTimer(10 * time.Second)
+	defer completionTimer.Stop()
+	select {
+	case err := <-waitResult:
+		return output.String(), hookExitCode(t, err)
+	case <-completionTimer.C:
+		_ = cmd.Process.Kill()
+		t.Fatalf("timed out waiting for deleted-CWD helper completion\n%s", output.String())
+	}
+	return "", 0
+}
+
+func requireNativeHookPermissionFailures(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("directory permission failures require POSIX mode enforcement")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("directory permission failures cannot be asserted while running as root")
+	}
+}
+
+func assertHookSymlinkTarget(t *testing.T, hookPath, wantTarget string) {
+	t.Helper()
+	info, err := os.Lstat(hookPath)
+	if err != nil {
+		t.Fatalf("lstat hook symlink: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("hook path mode = %v, want symlink", info.Mode())
+	}
+	target, err := os.Readlink(hookPath)
+	if err != nil {
+		t.Fatalf("read hook symlink: %v", err)
+	}
+	if target != wantTarget {
+		t.Fatalf("hook symlink target = %q, want %q", target, wantTarget)
+	}
+}
+
+func assertHookFileState(t *testing.T, path string, wantData []byte, wantMode os.FileMode) {
+	t.Helper()
+	data, err := os.ReadFile(path) // #nosec G304 -- test reads its fixed fixture path.
+	if err != nil {
+		t.Fatalf("read managed hook after failure: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat managed hook after failure: %v", err)
+	}
+	if string(data) != string(wantData) || info.Mode() != wantMode {
+		t.Fatalf("managed hook changed after failure: data=%q mode=%v, want data=%q mode=%v", data, info.Mode(), wantData, wantMode)
+	}
 }
