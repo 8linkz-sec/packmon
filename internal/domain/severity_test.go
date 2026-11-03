@@ -69,3 +69,27 @@ func TestSeverityBlocks(t *testing.T) {
 		}
 	}
 }
+
+func TestSeverityRank(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		severity Severity
+		want     int
+	}{
+		{SeverityCritical, 4},
+		{SeverityHigh, 3},
+		{SeverityMedium, 2},
+		{SeverityLow, 1},
+		{SeverityUnknown, 1},
+		{SeverityNone, 0},
+		{Severity("CUSTOM"), 0},
+		{Severity(""), 0},
+	}
+
+	for _, tt := range tests {
+		if got := tt.severity.Rank(); got != tt.want {
+			t.Errorf("Severity(%q).Rank() = %d, want %d", tt.severity, got, tt.want)
+		}
+	}
+}
