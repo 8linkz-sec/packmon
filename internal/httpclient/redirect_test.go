@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSafeRedirectPolicy(t *testing.T) {
@@ -106,24 +107,60 @@ func TestCloneWithSafeRedirectPolicy(t *testing.T) {
 		}
 	})
 
-	t.Run("preserves existing policy", func(t *testing.T) {
-		existingCalled := false
-		client := CloneWithSafeRedirectPolicy(&http.Client{
+	t.Run("chains existing and safe policies without mutating original", func(t *testing.T) {
+		existingCalls := 0
+		original := &http.Client{
+			Transport: http.DefaultTransport,
+			Timeout:   3 * time.Second,
 			CheckRedirect: func(*http.Request, []*http.Request) error {
-				existingCalled = true
+				existingCalls++
 				return nil
 			},
-		})
-
-		err := client.CheckRedirect(
-			&http.Request{URL: mustURL("https://other.test/next")},
-			[]*http.Request{{URL: mustURL("https://example.test/start")}},
-		)
-		if err != nil {
-			t.Fatalf("CheckRedirect() error = %v", err)
 		}
-		if !existingCalled {
-			t.Fatal("existing CheckRedirect policy was not called")
+		client := CloneWithSafeRedirectPolicy(original)
+		if client == original {
+			t.Fatal("CloneWithSafeRedirectPolicy returned original client, want shallow copy")
+		}
+		if client.Transport != original.Transport || client.Timeout != original.Timeout {
+			t.Fatalf("clone fields = (%T, %v), want original fields (%T, %v)", client.Transport, client.Timeout, original.Transport, original.Timeout)
+		}
+
+		originalNext := &http.Request{
+			URL:    mustURL("http://other.test/next"),
+			Header: http.Header{"Authorization": {"Bearer secret"}},
+		}
+		if err := original.CheckRedirect(
+			originalNext,
+			[]*http.Request{{URL: mustURL("https://example.test/start")}},
+		); err != nil {
+			t.Fatalf("original CheckRedirect() error = %v", err)
+		}
+		if got := originalNext.Header.Get("Authorization"); got != "Bearer secret" {
+			t.Fatalf("original policy Authorization = %q, want unchanged", got)
+		}
+
+		crossOrigin := &http.Request{
+			URL:    mustURL("https://other.test/next"),
+			Header: http.Header{"Authorization": {"Bearer secret"}},
+		}
+		if err := client.CheckRedirect(
+			crossOrigin,
+			[]*http.Request{{URL: mustURL("https://example.test/start")}},
+		); err != nil {
+			t.Fatalf("chained cross-origin CheckRedirect() error = %v", err)
+		}
+		if got := crossOrigin.Header.Get("Authorization"); got != "" {
+			t.Fatalf("chained cross-origin Authorization = %q, want empty", got)
+		}
+
+		if err := client.CheckRedirect(
+			&http.Request{URL: mustURL("http://example.test/next")},
+			[]*http.Request{{URL: mustURL("https://example.test/start")}},
+		); err == nil || !strings.Contains(err.Error(), "https to http") {
+			t.Fatalf("chained downgrade error = %v, want HTTPS downgrade refusal", err)
+		}
+		if existingCalls != 3 {
+			t.Fatalf("existing policy calls = %d, want 3", existingCalls)
 		}
 	})
 
