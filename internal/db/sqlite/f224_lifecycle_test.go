@@ -163,7 +163,10 @@ func TestF224FindLifecycleFindingsBatchEmptyNormalizedAndZeroNow(t *testing.T) {
 			('f224-zero-now', 'npm', 'f224-zero-now', 'f224-zero-now', 'F224 Zero Now', '1', '1.2.3', '2000-01-01')`); err != nil {
 		t.Fatalf("seed zero-now lifecycle row: %v", err)
 	}
-	query := []db.PackageQuery{{Ecosystem: " npm ", Name: " f224-zero-now ", Version: " 1.2.0 "}}
+	query := []db.PackageQuery{
+		{Ecosystem: " npm ", Name: " f224-zero-now ", Version: " 1.2.0 "},
+		{Ecosystem: "npm", Name: "  ", Version: "invalid-package-is-ignored"},
+	}
 	beforeEOL, err := store.FindLifecycleFindingsBatch(ctx, query, time.Date(1999, 1, 1, 0, 0, 0, 0, time.UTC))
 	if err != nil || len(beforeEOL) != 0 {
 		t.Fatalf("FindLifecycleFindingsBatch(before EOL) = (%+v, %v), want no finding", beforeEOL, err)
