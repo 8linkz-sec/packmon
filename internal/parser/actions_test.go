@@ -33,6 +33,14 @@ func TestActionsParserCanParseOnlyWorkflowFiles(t *testing.T) {
 	}
 }
 
+func TestActionsParserEcosystem(t *testing.T) {
+	t.Parallel()
+
+	if got := NewActionsParser().Ecosystem(); got != domain.EcosystemGitHubActions {
+		t.Fatalf("Ecosystem() = %q, want %q", got, domain.EcosystemGitHubActions)
+	}
+}
+
 func TestActionsParserParseUsesReferences(t *testing.T) {
 	t.Parallel()
 
@@ -210,6 +218,19 @@ func TestParseActionsVersionCommentRejectsInvalidSuffixCharacters(t *testing.T) 
 	} {
 		if got := parseActionsVersionComment(comment); got != "" {
 			t.Errorf("parseActionsVersionComment(%q) = %q, want empty", comment, got)
+		}
+	}
+}
+
+func TestActionsVersionTokenRejectsEmptySuffix(t *testing.T) {
+	t.Parallel()
+
+	for _, token := range []string{"v1.2.3-", "v1.2.3+"} {
+		if isActionsVersionToken(token) {
+			t.Errorf("isActionsVersionToken(%q) = true, want false", token)
+		}
+		if got := parseActionsVersionComment("# " + token); got != "" {
+			t.Errorf("parseActionsVersionComment(%q) = %q, want empty", token, got)
 		}
 	}
 }
