@@ -4,9 +4,12 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func TestF186NVDCVSSNegativeCachePersistenceAgainstPostgres(t *testing.T) {
@@ -36,12 +39,21 @@ func TestF186NVDCVSSNegativeCachePersistenceAgainstPostgres(t *testing.T) {
 		}
 		return slices.Contains(ids, cve)
 	}
+	requireSQLState := func(t *testing.T, err error, want string) {
+		t.Helper()
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != want {
+			t.Fatalf("PostgreSQL error = %v (pg=%+v), want SQLSTATE %s", err, pgErr, want)
+		}
+	}
 
 	t.Run("normalised_persistence_refresh_defaults_and_constraints", func(t *testing.T) {
 		reset(t)
 		const cve = "CVE-2026-18601"
-		updatedAt := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Microsecond)
-		seed(t, "GO-2026-18601", cve, updatedAt)
+		olderUpdatedAt := time.Now().UTC().Add(-4 * time.Hour).Truncate(time.Microsecond)
+		newestUpdatedAt := olderUpdatedAt.Add(2 * time.Hour)
+		seed(t, "GO-2026-18601-A", cve, olderUpdatedAt)
+		seed(t, "GO-2026-18601-B", cve, newestUpdatedAt)
 		if err := store.RecordNVDCVSSNegativeLookup(ctx, "  cve-2026-18601  "); err != nil {
 			t.Fatalf("RecordNVDCVSSNegativeLookup(normalised): %v", err)
 		}
@@ -49,8 +61,8 @@ func TestF186NVDCVSSNegativeCachePersistenceAgainstPostgres(t *testing.T) {
 		if err := store.pool.QueryRow(ctx, `SELECT checked_at,vulnerability_updated_at FROM nvd_cvss_negative_cache WHERE cve_id=$1`, cve).Scan(&checkedAt, &cachedUpdatedAt); err != nil {
 			t.Fatalf("read persisted negative-cache row: %v", err)
 		}
-		if checkedAt.IsZero() || !cachedUpdatedAt.Equal(updatedAt) {
-			t.Fatalf("persisted timestamps = checked:%v vulnerability:%v, want nonzero/%v", checkedAt, cachedUpdatedAt, updatedAt)
+		if checkedAt.IsZero() || !cachedUpdatedAt.Equal(newestUpdatedAt) {
+			t.Fatalf("persisted timestamps = checked:%v vulnerability:%v, want nonzero/MAX(%v,%v)=%v", checkedAt, cachedUpdatedAt, olderUpdatedAt, newestUpdatedAt, newestUpdatedAt)
 		}
 		if _, err := store.pool.Exec(ctx, `INSERT INTO nvd_cvss_negative_cache(cve_id) VALUES ('CVE-2026-18601-DEFAULTS')`); err != nil {
 			t.Fatalf("insert negative-cache row through database defaults: %v", err)
@@ -69,9 +81,8 @@ func TestF186NVDCVSSNegativeCachePersistenceAgainstPostgres(t *testing.T) {
 		if err := store.pool.QueryRow(ctx, `SELECT checked_at FROM nvd_cvss_negative_cache WHERE cve_id=$1`, cve).Scan(&refreshed); err != nil || !refreshed.After(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)) {
 			t.Fatalf("refreshed checked_at = %v, error=%v", refreshed, err)
 		}
-		if _, err := store.pool.Exec(ctx, `INSERT INTO nvd_cvss_negative_cache(cve_id) VALUES ($1)`, cve); err == nil {
-			t.Fatal("duplicate negative-cache primary key was accepted")
-		}
+		_, err := store.pool.Exec(ctx, `INSERT INTO nvd_cvss_negative_cache(cve_id) VALUES ($1)`, cve)
+		requireSQLState(t, err, "23505")
 		for _, column := range []string{"cve_id", "checked_at", "vulnerability_updated_at"} {
 			statement := `INSERT INTO nvd_cvss_negative_cache(cve_id,checked_at,vulnerability_updated_at) VALUES ('CVE-2026-NULL-',NOW(),NOW())`
 			switch column {
@@ -82,9 +93,8 @@ func TestF186NVDCVSSNegativeCachePersistenceAgainstPostgres(t *testing.T) {
 			case "vulnerability_updated_at":
 				statement = `INSERT INTO nvd_cvss_negative_cache(cve_id,checked_at,vulnerability_updated_at) VALUES ('CVE-2026-NULL-UPDATED',NOW(),NULL)`
 			}
-			if _, err := store.pool.Exec(ctx, statement); err == nil {
-				t.Fatalf("NULL %s was accepted", column)
-			}
+			_, err := store.pool.Exec(ctx, statement)
+			requireSQLState(t, err, "23502")
 		}
 	})
 
