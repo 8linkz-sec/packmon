@@ -388,17 +388,21 @@ func TestF159F164MigrationContractsAgainstPostgres(t *testing.T) {
 		f159F164SeedLegacyScans(t, leaf)
 		f159F164ApplyRange(t, leaf, 26, 28)
 		f159F164Exec(t, leaf, `INSERT INTO scan_log(scan_id,repo_name,packages_count,findings_count,duration_ms,idempotency_key,request_digest) VALUES ('post-026','org/post',6,2,8,'post-key','post-digest')`)
+		f159F164Exec(t, leaf, `UPDATE scan_log_totals SET packages_scanned=987,findings=654,updated_at='2026-03-04T05:06:07Z' WHERE id=TRUE`)
 		beforeSurviving := f159F164ScanSurvivingSnapshot(t, leaf)
+		beforeTotals := f159F164TotalsSnapshot(t, leaf)
 
 		f159F164DescendAndDelete(t, leaf, 28, 26)
 		f159F164Assert026Absent(t, leaf)
 		f159F164AssertEqual(t, "surviving scan fields after 028-to-026 descent", f159F164ScanSurvivingSnapshot(t, leaf), beforeSurviving)
+		f159F164AssertEqual(t, "scan totals after 028-to-026 descent", f159F164TotalsSnapshot(t, leaf), beforeTotals)
 
 		f159F164ApplyRange(t, leaf, 26, 28)
 		f159F164Assert026Catalog(t, leaf)
 		f159F164AssertSeverityConstraints(t, leaf)
 		f159F164Assert028Index(t, leaf)
 		f159F164AssertEqual(t, "surviving scan fields after reapply", f159F164ScanSurvivingSnapshot(t, leaf), beforeSurviving)
+		f159F164AssertEqual(t, "scan totals after descending reapply", f159F164TotalsSnapshot(t, leaf), beforeTotals)
 		var nonnullKeys, nonemptyDigests int
 		if err := leaf.conn.QueryRowContext(leaf.ctx, `SELECT COUNT(*) FILTER(WHERE idempotency_key IS NOT NULL),COUNT(*) FILTER(WHERE request_digest<>'') FROM scan_log`).Scan(&nonnullKeys, &nonemptyDigests); err != nil {
 			t.Fatalf("inspect defaults after descending reapply: %v", err)
@@ -786,6 +790,12 @@ func f159F164AssertSeverityAcceptanceMatrix(t *testing.T, leaf f159F164Leaf) {
 	}
 	_, err := leaf.conn.ExecContext(leaf.ctx, `INSERT INTO package_reputation_cache(ecosystem,name,version,source,status,severity) VALUES ('npm','matrix-reputation-unknown','1','matrix','clean','UNKNOWN')`)
 	f159F164ExpectConstraint(t, err, "package_reputation_cache_severity_check")
+	_, err = leaf.conn.ExecContext(leaf.ctx, `UPDATE package_reputation_cache SET severity='UNKNOWN' WHERE name='r-canonical'`)
+	f159F164ExpectConstraint(t, err, "package_reputation_cache_severity_check")
+	_, err = leaf.conn.ExecContext(leaf.ctx, `INSERT INTO vulnerabilities(id,summary,severity,published,modified) VALUES ('matrix-vulnerability-unknown','matrix','UNKNOWN','2020-01-01Z','2020-01-02Z')`)
+	f159F164ExpectConstraint(t, err, "vulnerabilities_severity_check")
+	_, err = leaf.conn.ExecContext(leaf.ctx, `UPDATE vulnerabilities SET severity='UNKNOWN' WHERE id='v-canonical'`)
+	f159F164ExpectConstraint(t, err, "vulnerabilities_severity_check")
 	if _, err := leaf.conn.ExecContext(leaf.ctx, `INSERT INTO malicious_findings(id,ecosystem,name,source,risk_type,severity,summary) VALUES ('matrix-malicious-unknown','npm','matrix-malicious-unknown','fixture','malware','UNKNOWN','matrix')`); err != nil {
 		t.Fatalf("malicious_findings INSERT UNKNOWN error = %v", err)
 	}
