@@ -4,9 +4,18 @@ package postgres
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 )
+
+type f208ReferenceRow struct {
+	id              int64
+	vulnerabilityID string
+	referenceType   string
+	url             string
+	source          string
+}
 
 func TestF208RemovePacketStormReferencesIsAtomicAndRepeatable(t *testing.T) {
 	store, _ := startDockerPostgresStore(t)
@@ -21,27 +30,39 @@ func TestF208RemovePacketStormReferencesIsAtomicAndRepeatable(t *testing.T) {
 			('F208-REFS', 'WEB', 'https://example.com/packetstormsecurity.com-is-a-path', 'f208'),
 			('F208-REFS', 'WEB', 'https://example.com/advisory', 'f208');
 		CREATE FUNCTION f208_reject_reference_delete() RETURNS trigger LANGUAGE plpgsql AS $$
+		DECLARE
+			remaining_targets integer;
 		BEGIN
-			IF lower(OLD.url) LIKE '%packetstorm.news%' THEN
-				RAISE EXCEPTION 'F208 forced delete failure';
+			SELECT COUNT(*) INTO remaining_targets
+			FROM vulnerability_references
+			WHERE lower(url) LIKE '%packetstormsecurity.com%'
+			   OR lower(url) LIKE '%packetstorm.news%';
+			IF remaining_targets <> 0 THEN
+				RAISE EXCEPTION 'F208 cleanup left % matching references before rollback', remaining_targets;
 			END IF;
-			RETURN OLD;
+			RAISE EXCEPTION 'F208 forced delete failure after deleting all matching references';
+			RETURN NULL;
 		END
 		$$;
 		CREATE TRIGGER f208_reject_reference_delete
-			BEFORE DELETE ON vulnerability_references
-			FOR EACH ROW EXECUTE FUNCTION f208_reject_reference_delete()`); err != nil {
+			AFTER DELETE ON vulnerability_references
+			FOR EACH STATEMENT EXECUTE FUNCTION f208_reject_reference_delete()`); err != nil {
 		t.Fatalf("create F208 fixtures: %v", err)
 	}
+	before := readF208References(t, ctx, store)
+	assertF208SeedReferences(t, before)
 
 	removed, err := store.RemovePacketStormReferences(ctx)
-	if err == nil || !strings.Contains(err.Error(), "postgres: remove Packet Storm references") || !strings.Contains(err.Error(), "F208 forced delete failure") {
+	if err == nil || !strings.Contains(err.Error(), "postgres: remove Packet Storm references") ||
+		!strings.Contains(err.Error(), "F208 forced delete failure after deleting all matching references") {
 		t.Fatalf("RemovePacketStormReferences(forced failure) = %d, %v; want wrapped trigger error", removed, err)
 	}
 	if removed != 0 {
 		t.Fatalf("RemovePacketStormReferences(forced failure) removed = %d, want 0", removed)
 	}
-	assertF208ReferenceCount(t, ctx, store, 4)
+	if afterFailure := readF208References(t, ctx, store); !slices.Equal(afterFailure, before) {
+		t.Fatalf("references after forced failure = %#v, want exact pre-delete rows %#v", afterFailure, before)
+	}
 
 	if _, err := store.pool.Exec(ctx, `
 		DROP TRIGGER f208_reject_reference_delete ON vulnerability_references;
@@ -56,7 +77,10 @@ func TestF208RemovePacketStormReferencesIsAtomicAndRepeatable(t *testing.T) {
 	if removed != 3 {
 		t.Fatalf("RemovePacketStormReferences(success) = %d, want 3", removed)
 	}
-	assertF208ReferenceCount(t, ctx, store, 1)
+	wantSurvivors := []f208ReferenceRow{before[3]}
+	if afterSuccess := readF208References(t, ctx, store); !slices.Equal(afterSuccess, wantSurvivors) {
+		t.Fatalf("references after cleanup = %#v, want exact unrelated row %#v", afterSuccess, wantSurvivors)
+	}
 
 	removed, err = store.RemovePacketStormReferences(ctx)
 	if err != nil {
@@ -65,20 +89,56 @@ func TestF208RemovePacketStormReferencesIsAtomicAndRepeatable(t *testing.T) {
 	if removed != 0 {
 		t.Fatalf("RemovePacketStormReferences(no-op) = %d, want 0", removed)
 	}
-	assertF208ReferenceCount(t, ctx, store, 1)
+	if afterNoop := readF208References(t, ctx, store); !slices.Equal(afterNoop, wantSurvivors) {
+		t.Fatalf("references after repeated cleanup = %#v, want unchanged row %#v", afterNoop, wantSurvivors)
+	}
 }
 
-func assertF208ReferenceCount(t *testing.T, ctx context.Context, store *Store, want int) {
+func readF208References(t *testing.T, ctx context.Context, store *Store) []f208ReferenceRow {
 	t.Helper()
 
-	var got int
-	if err := store.pool.QueryRow(ctx, `
-		SELECT COUNT(*)
+	rows, err := store.pool.Query(ctx, `
+		SELECT id, vulnerability_id, COALESCE(type, ''), url, source
 		FROM vulnerability_references
-		WHERE vulnerability_id = 'F208-REFS'`).Scan(&got); err != nil {
-		t.Fatalf("count F208 references: %v", err)
+		WHERE vulnerability_id = 'F208-REFS'
+		ORDER BY id`)
+	if err != nil {
+		t.Fatalf("query F208 references: %v", err)
 	}
-	if got != want {
-		t.Fatalf("F208 reference count = %d, want %d", got, want)
+	defer rows.Close()
+
+	var got []f208ReferenceRow
+	for rows.Next() {
+		var row f208ReferenceRow
+		if err := rows.Scan(&row.id, &row.vulnerabilityID, &row.referenceType, &row.url, &row.source); err != nil {
+			t.Fatalf("scan F208 reference: %v", err)
+		}
+		got = append(got, row)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate F208 references: %v", err)
+	}
+	return got
+}
+
+func assertF208SeedReferences(t *testing.T, got []f208ReferenceRow) {
+	t.Helper()
+
+	wantURLs := []string{
+		"https://packetstormsecurity.com/files/100/first.html",
+		"HTTPS://PACKETSTORM.NEWS/files/200/second.html",
+		"https://example.com/packetstormsecurity.com-is-a-path",
+		"https://example.com/advisory",
+	}
+	if len(got) != len(wantURLs) {
+		t.Fatalf("seed reference count = %d, want %d: %#v", len(got), len(wantURLs), got)
+	}
+	for i, row := range got {
+		if row.id <= 0 || (i > 0 && row.id <= got[i-1].id) {
+			t.Fatalf("seed reference IDs are not positive and increasing: %#v", got)
+		}
+		if row.vulnerabilityID != "F208-REFS" || row.referenceType != "WEB" || row.url != wantURLs[i] || row.source != "f208" {
+			t.Fatalf("seed reference %d = %#v, want advisory F208-REFS, type WEB, URL %q, source f208", i, row, wantURLs[i])
+		}
 	}
 }
