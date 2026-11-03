@@ -179,6 +179,34 @@ func TestClearHistoryExecFailureLeavesRowsUntouched(t *testing.T) {
 	}
 }
 
+func TestClearHistoryRowsAffectedFailureReportsErrorAfterSuccessfulDelete(t *testing.T) {
+	database, fired := f223OpenRowsAffectedFaultDB(t)
+	f223CreateScanHistoryTable(t, database)
+	if _, err := database.Exec(`INSERT INTO scan_history (scanned_at)
+		VALUES ('2026-05-04T12:00:00Z'), ('2026-05-05T12:00:00Z')`); err != nil {
+		t.Fatalf("seed scan history: %v", err)
+	}
+	store := &Store{db: database}
+
+	count, err := store.ClearHistory(context.Background(), nil, "")
+	if count != 0 || err == nil || !errors.Is(err, errInjectedFault) || !strings.Contains(err.Error(), "sqlite: clear history rows affected") {
+		t.Fatalf("ClearHistory() = (%d, %v), want zero and wrapped RowsAffected fault", count, err)
+	}
+	if !fired.Load() {
+		t.Fatal("the injected RowsAffected fault did not fire")
+	}
+
+	// RowsAffected is inspected only after ExecContext has completed. Its error
+	// cannot roll back the successful DELETE, so the rows must already be gone.
+	var remaining int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM scan_history`).Scan(&remaining); err != nil {
+		t.Fatalf("count remaining history: %v", err)
+	}
+	if remaining != 0 {
+		t.Fatalf("remaining row count = %d after successful delete, want 0", remaining)
+	}
+}
+
 func TestGetRecentScansPageBoundariesAndNullableValues(t *testing.T) {
 	store := newSQLiteTestStore(t)
 	ctx := context.Background()
@@ -330,8 +358,9 @@ func f223CreateScanHistoryTable(t *testing.T, database *sql.DB) {
 }
 
 type f223IterationFaultDriver struct {
-	inner driver.Driver
-	fired *atomic.Bool
+	inner             driver.Driver
+	iterationFired    *atomic.Bool
+	rowsAffectedFired *atomic.Bool
 }
 
 func (d *f223IterationFaultDriver) Open(name string) (driver.Conn, error) {
@@ -339,12 +368,17 @@ func (d *f223IterationFaultDriver) Open(name string) (driver.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &f223IterationFaultConn{Conn: conn, fired: d.fired}, nil
+	return &f223IterationFaultConn{
+		Conn:              conn,
+		iterationFired:    d.iterationFired,
+		rowsAffectedFired: d.rowsAffectedFired,
+	}, nil
 }
 
 type f223IterationFaultConn struct {
 	driver.Conn
-	fired *atomic.Bool
+	iterationFired    *atomic.Bool
+	rowsAffectedFired *atomic.Bool
 }
 
 func (c *f223IterationFaultConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
@@ -352,7 +386,11 @@ func (c *f223IterationFaultConn) ExecContext(ctx context.Context, query string, 
 	if !ok {
 		return nil, driver.ErrSkip
 	}
-	return execer.ExecContext(ctx, query, args)
+	result, err := execer.ExecContext(ctx, query, args)
+	if err != nil || c.rowsAffectedFired == nil || !strings.Contains(strings.ToUpper(query), "DELETE FROM SCAN_HISTORY") {
+		return result, err
+	}
+	return &f223RowsAffectedFaultResult{Result: result, fired: c.rowsAffectedFired}, nil
 }
 
 func (c *f223IterationFaultConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
@@ -361,10 +399,10 @@ func (c *f223IterationFaultConn) QueryContext(ctx context.Context, query string,
 		return nil, driver.ErrSkip
 	}
 	rows, err := queryer.QueryContext(ctx, query, args)
-	if err != nil || !strings.Contains(strings.ToUpper(query), "SELECT ID, REPO_NAME") {
+	if err != nil || c.iterationFired == nil || !strings.Contains(strings.ToUpper(query), "SELECT ID, REPO_NAME") {
 		return rows, err
 	}
-	return &f223IterationFaultRows{Rows: rows, fired: c.fired}, nil
+	return &f223IterationFaultRows{Rows: rows, fired: c.iterationFired}, nil
 }
 
 type f223IterationFaultRows struct {
@@ -385,6 +423,16 @@ func (r *f223IterationFaultRows) Next(dest []driver.Value) error {
 	return err
 }
 
+type f223RowsAffectedFaultResult struct {
+	driver.Result
+	fired *atomic.Bool
+}
+
+func (r *f223RowsAffectedFaultResult) RowsAffected() (int64, error) {
+	r.fired.Store(true)
+	return 0, errInjectedFault
+}
+
 var f223IterationFaultDriverSequence atomic.Uint64
 
 func f223OpenIterationFaultDB(t *testing.T) (*sql.DB, *atomic.Bool) {
@@ -401,10 +449,34 @@ func f223OpenIterationFaultDB(t *testing.T) (*sql.DB, *atomic.Bool) {
 
 	fired := &atomic.Bool{}
 	driverName := fmt.Sprintf("sqlite-f223-iteration-%d", f223IterationFaultDriverSequence.Add(1))
-	sql.Register(driverName, &f223IterationFaultDriver{inner: inner, fired: fired})
+	sql.Register(driverName, &f223IterationFaultDriver{inner: inner, iterationFired: fired})
 	database, err := sql.Open(driverName, filepath.Join(t.TempDir(), "iteration.db"))
 	if err != nil {
 		t.Fatalf("open iteration-fault database: %v", err)
+	}
+	database.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = database.Close() })
+	return database, fired
+}
+
+func f223OpenRowsAffectedFaultDB(t *testing.T) (*sql.DB, *atomic.Bool) {
+	t.Helper()
+
+	probe, err := sql.Open(realDriverName, ":memory:")
+	if err != nil {
+		t.Fatalf("open SQLite driver probe: %v", err)
+	}
+	inner := probe.Driver()
+	if err := probe.Close(); err != nil {
+		t.Fatalf("close SQLite driver probe: %v", err)
+	}
+
+	fired := &atomic.Bool{}
+	driverName := fmt.Sprintf("sqlite-f223-rows-affected-%d", f223IterationFaultDriverSequence.Add(1))
+	sql.Register(driverName, &f223IterationFaultDriver{inner: inner, rowsAffectedFired: fired})
+	database, err := sql.Open(driverName, filepath.Join(t.TempDir(), "rows-affected.db"))
+	if err != nil {
+		t.Fatalf("open RowsAffected-fault database: %v", err)
 	}
 	database.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = database.Close() })
@@ -415,4 +487,5 @@ var (
 	_ driver.ExecerContext  = (*f223IterationFaultConn)(nil)
 	_ driver.QueryerContext = (*f223IterationFaultConn)(nil)
 	_ driver.Rows           = (*f223IterationFaultRows)(nil)
+	_ driver.Result         = (*f223RowsAffectedFaultResult)(nil)
 )
