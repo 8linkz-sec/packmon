@@ -88,18 +88,64 @@ func TestPackageNameRepairAuditFailuresRollBackRepairs(t *testing.T) {
 			label = "audited lock failure"
 		}
 		t.Run(label, func(t *testing.T) {
-			lockCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
-			defer cancel()
-			var repaired int
-			var err error
-			if audited {
-				repaired, err = store.RepairCaseInsensitivePackageNamesWithAudit(lockCtx, &db.AdminAuditEntry{Action: "startup_package_name_repair"})
-			} else {
-				repaired, err = store.RepairCaseInsensitivePackageNames(lockCtx)
+			readyConn, err := store.pool.Acquire(ctx)
+			if err != nil {
+				t.Fatalf("prewarm repair connection: %v", err)
 			}
-			assertRolledBack(t, label, repaired, err, "acquire OpenSSF finding source lock")
-			if !errors.Is(err, context.DeadlineExceeded) {
-				t.Fatalf("%s error = %v, want context deadline exceeded", label, err)
+			var repairPID int
+			if err := readyConn.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&repairPID); err != nil {
+				readyConn.Release()
+				t.Fatalf("read prewarmed repair backend: %v", err)
+			}
+			readyConn.Release()
+
+			type repairResult struct {
+				repaired int
+				err      error
+			}
+			lockCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			result := make(chan repairResult, 1)
+			go func() {
+				var outcome repairResult
+				if audited {
+					outcome.repaired, outcome.err = store.RepairCaseInsensitivePackageNamesWithAudit(lockCtx, &db.AdminAuditEntry{Action: "startup_package_name_repair"})
+				} else {
+					outcome.repaired, outcome.err = store.RepairCaseInsensitivePackageNames(lockCtx)
+				}
+				result <- outcome
+			}()
+
+			waitDeadline := time.Now().Add(3 * time.Second)
+			blockedOnAdvisoryLock := false
+			for !blockedOnAdvisoryLock && time.Now().Before(waitDeadline) {
+				if err := lockConn.QueryRow(ctx, `
+					SELECT EXISTS (
+						SELECT 1
+						FROM pg_stat_activity
+						WHERE pid = $1
+						  AND wait_event_type = 'Lock'
+						  AND wait_event = 'advisory'
+						  AND query LIKE '%pg_advisory_xact_lock%'
+					)`, repairPID).Scan(&blockedOnAdvisoryLock); err != nil {
+					cancel()
+					<-result
+					t.Fatalf("observe repair advisory-lock wait: %v", err)
+				}
+				if !blockedOnAdvisoryLock {
+					time.Sleep(10 * time.Millisecond)
+				}
+			}
+			if !blockedOnAdvisoryLock {
+				cancel()
+				outcome := <-result
+				t.Fatalf("repair backend %d never reached advisory-lock wait; result = (%d, %v)", repairPID, outcome.repaired, outcome.err)
+			}
+
+			cancel()
+			outcome := <-result
+			assertRolledBack(t, label, outcome.repaired, outcome.err, "acquire OpenSSF finding source lock")
+			if !errors.Is(outcome.err, context.Canceled) {
+				t.Fatalf("%s error = %v, want context canceled after observed advisory-lock wait", label, outcome.err)
 			}
 		})
 	}
@@ -234,42 +280,80 @@ func assertF204PackageNameRepairState(t *testing.T, store *Store, committed bool
 	t.Helper()
 
 	ctx := context.Background()
-	var affectedName, maliciousName string
+	wantAffected, forbiddenAffected := " F204.Pkg_Name ", "f204-pkg-name"
+	wantMalicious := " F204.Evil_Pkg "
+	if committed {
+		wantAffected, forbiddenAffected = forbiddenAffected, wantAffected
+		wantMalicious = "f204-evil-pkg"
+	}
+
+	var affectedRows, wantedAffectedRows, forbiddenAffectedRows int
+	if err := store.pool.QueryRow(ctx, `
+		SELECT count(*),
+		       count(*) FILTER (WHERE name = $1),
+		       count(*) FILTER (WHERE name = $2)
+		FROM affected_packages
+		WHERE vulnerability_id = 'PYSEC-f204-audit-rollback'`, wantAffected, forbiddenAffected).Scan(
+		&affectedRows, &wantedAffectedRows, &forbiddenAffectedRows,
+	); err != nil {
+		t.Fatalf("count affected package-name repair rows: %v", err)
+	}
+	if affectedRows != 1 || wantedAffectedRows != 1 || forbiddenAffectedRows != 0 {
+		t.Fatalf("affected repair rows = total %d, wanted %q %d, forbidden %q %d; want 1, 1, 0", affectedRows, wantAffected, wantedAffectedRows, forbiddenAffected, forbiddenAffectedRows)
+	}
+
+	var affectedRanges, affectedVersions string
+	if err := store.pool.QueryRow(ctx, `
+		SELECT version_ranges::text, versions_affected::text
+		FROM affected_packages
+		WHERE vulnerability_id = 'PYSEC-f204-audit-rollback' AND name = $1`, wantAffected).Scan(
+		&affectedRanges, &affectedVersions,
+	); err != nil {
+		t.Fatalf("read exact affected package-name repair row %q: %v", wantAffected, err)
+	}
+	if affectedRanges != `[]` || affectedVersions != `["1.0.0"]` {
+		t.Fatalf("affected repair JSON = (%s, %s), want ([], [\"1.0.0\"])", affectedRanges, affectedVersions)
+	}
+
+	var vulnerabilityUpdated time.Time
+	if err := store.pool.QueryRow(ctx, `
+		SELECT updated_at FROM vulnerabilities WHERE id = 'PYSEC-f204-audit-rollback'`).Scan(&vulnerabilityUpdated); err != nil {
+		t.Fatalf("read repaired vulnerability timestamp: %v", err)
+	}
+	if committed == vulnerabilityUpdated.Equal(legacyTime) {
+		t.Fatalf("vulnerability updated_at = %v with committed=%v, want seed timestamp preserved on rollback and advanced on commit", vulnerabilityUpdated, committed)
+	}
+
+	var maliciousName, maliciousReferences string
 	var maliciousRangesNull, maliciousVersionsNull bool
 	var maliciousUpdated time.Time
 	if err := store.pool.QueryRow(ctx, `
-		SELECT ap.name, mf.name, mf.version_ranges IS NULL, mf.versions IS NULL, mf.updated_at
-		FROM affected_packages ap
-		CROSS JOIN malicious_findings mf
-		WHERE ap.vulnerability_id = 'PYSEC-f204-audit-rollback'
-		  AND mf.id = 'MAL-f204-audit-rollback'`).Scan(
-		&affectedName, &maliciousName, &maliciousRangesNull, &maliciousVersionsNull, &maliciousUpdated,
+		SELECT name, version_ranges IS NULL, versions IS NULL, reference_urls::text, updated_at
+		FROM malicious_findings
+		WHERE id = 'MAL-f204-audit-rollback'`).Scan(
+		&maliciousName, &maliciousRangesNull, &maliciousVersionsNull, &maliciousReferences, &maliciousUpdated,
 	); err != nil {
-		t.Fatalf("read package-name repair state: %v", err)
+		t.Fatalf("read exact malicious package-name repair row: %v", err)
 	}
-	wantAffected, wantMalicious := " F204.Pkg_Name ", " F204.Evil_Pkg "
-	if committed {
-		wantAffected, wantMalicious = "f204-pkg-name", "f204-evil-pkg"
-	}
-	if affectedName != wantAffected || maliciousName != wantMalicious {
-		t.Fatalf("package names = (%q, %q), want (%q, %q)", affectedName, maliciousName, wantAffected, wantMalicious)
-	}
-	if !maliciousRangesNull || !maliciousVersionsNull {
-		t.Fatalf("malicious nullable versions = ranges-null %v, versions-null %v; want both preserved NULL", maliciousRangesNull, maliciousVersionsNull)
+	if maliciousName != wantMalicious || !maliciousRangesNull || !maliciousVersionsNull || maliciousReferences != `[]` {
+		t.Fatalf("malicious repair row = name %q, ranges-null %v, versions-null %v, references %s; want %q, true, true, []", maliciousName, maliciousRangesNull, maliciousVersionsNull, maliciousReferences, wantMalicious)
 	}
 	if committed == maliciousUpdated.Equal(legacyTime) {
-		t.Fatalf("malicious updated_at = %v with committed=%v, want timestamp to advance only on commit", maliciousUpdated, committed)
+		t.Fatalf("malicious updated_at = %v with committed=%v, want seed timestamp preserved on rollback and advanced on commit", maliciousUpdated, committed)
 	}
 
-	var emptyName string
+	var emptyName, emptyReferences string
+	var emptyRangesNull, emptyVersionsNull bool
 	var emptyUpdated time.Time
 	if err := store.pool.QueryRow(ctx, `
-		SELECT name, updated_at FROM malicious_findings WHERE id = 'MAL-f204-empty-name'`).Scan(
-		&emptyName, &emptyUpdated,
+		SELECT name, version_ranges IS NULL, versions IS NULL, reference_urls::text, updated_at
+		FROM malicious_findings
+		WHERE id = 'MAL-f204-empty-name'`).Scan(
+		&emptyName, &emptyRangesNull, &emptyVersionsNull, &emptyReferences, &emptyUpdated,
 	); err != nil {
 		t.Fatalf("read empty-name malicious fixture: %v", err)
 	}
-	if emptyName != " \t " || !emptyUpdated.Equal(legacyTime) {
-		t.Fatalf("empty canonical malicious row = (%q, %v), want untouched whitespace and timestamp %v", emptyName, emptyUpdated, legacyTime)
+	if emptyName != " \t " || !emptyRangesNull || !emptyVersionsNull || emptyReferences != `[]` || !emptyUpdated.Equal(legacyTime) {
+		t.Fatalf("empty canonical malicious row = name %q, ranges-null %v, versions-null %v, references %s, updated %v; want untouched whitespace, NULL, NULL, [], %v", emptyName, emptyRangesNull, emptyVersionsNull, emptyReferences, emptyUpdated, legacyTime)
 	}
 }
