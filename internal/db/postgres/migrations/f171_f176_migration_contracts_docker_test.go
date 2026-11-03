@@ -56,12 +56,12 @@ func TestF171F176MigrationContractsAgainstPostgres(t *testing.T) {
 			f159F164ApplyThrough(t, leaf, 31)
 			f171F176Drop032Checks(t, leaf)
 			f171F176Seed032Dirty(t, leaf)
-			untouched := f159F164Snapshot(t, leaf, `SELECT id,version_ranges,versions_affected,updated_at,xmin::text FROM affected_packages WHERE id=3`)
+			beforeVersions := f171F176032RowVersions(t, leaf)
 
 			f159F164Apply(t, leaf, 32, MigrationDirectionUp)
 			f171F176Assert032Catalog(t, leaf)
 			f171F176Assert032Repairs(t, leaf)
-			f159F164AssertEqual(t, "valid version JSON row", f159F164Snapshot(t, leaf, `SELECT id,version_ranges,versions_affected,updated_at,xmin::text FROM affected_packages WHERE id=3`), untouched)
+			f171F176Assert032RepairVersions(t, beforeVersions, f171F176032RowVersions(t, leaf))
 			f171F176Assert032TruthTables(t, leaf)
 			f171F176Assert032Enforcement(t, leaf)
 			stable := f159F164Snapshot(t, leaf, `SELECT 'a',id,version_ranges,versions_affected,updated_at,xmin::text FROM affected_packages UNION ALL SELECT 'm',0,version_ranges,versions,updated_at,xmin::text FROM malicious_findings WHERE id='f171-dirty' ORDER BY 1,2`)
@@ -125,30 +125,63 @@ func TestF171F176MigrationContractsAgainstPostgres(t *testing.T) {
 			leaf := newLeaf(t)
 			f159F164ApplyThrough(t, leaf, 32)
 			f171F176Make033Legacy(t, leaf)
-			f159F164Exec(t, leaf, `INSERT INTO vulnerabilities(id,summary,severity,published,modified) VALUES ('f173-legacy','legacy','LOW','2025-01-01Z','2025-01-01Z'); INSERT INTO vulnerability_references(vulnerability_id,type,url,source) VALUES ('f173-legacy','WEB','https://example.test/legacy',NULL)`)
+			f159F164Exec(t, leaf, `
+					INSERT INTO vulnerabilities(id,summary,severity,published,modified) VALUES
+						('f173-legacy','legacy','LOW','2025-01-01Z','2025-01-01Z'),
+						('f173-independent','independent','LOW','2025-01-01Z','2025-01-01Z');
+					INSERT INTO vulnerability_references(vulnerability_id,type,url,source) VALUES
+						('f173-legacy','ADVISORY','https://example.test/legacy',NULL),
+						('f173-legacy','REPORT','https://example.test/preserved','kept')`)
 			fkIndex := f171F176033FKIndex(t, leaf)
 			f159F164Apply(t, leaf, 33, MigrationDirectionUp)
 			f171F176Assert033Catalog(t, leaf)
 			if got := f171F176033FKIndex(t, leaf); got != fkIndex {
 				t.Fatalf("033 FK/index changed: got %q, want %q", got, fkIndex)
 			}
-			f159F164Exec(t, leaf, `INSERT INTO vulnerability_references(vulnerability_id,type,url,source) VALUES ('f173-legacy','WEB','https://example.test/legacy','other')`)
+			if got := f159F164Snapshot(t, leaf, `SELECT vulnerability_id,type,url,source FROM vulnerability_references WHERE vulnerability_id='f173-legacy' ORDER BY url`); got != `[{"url": "https://example.test/legacy", "type": "ADVISORY", "source": "", "vulnerability_id": "f173-legacy"}, {"url": "https://example.test/preserved", "type": "REPORT", "source": "kept", "vulnerability_id": "f173-legacy"}]` {
+				t.Fatalf("033 normalized and preserved legacy rows = %s", got)
+			}
+			f159F164Exec(t, leaf, `INSERT INTO vulnerability_references(vulnerability_id,type,url) VALUES ('f173-legacy','WEB','https://example.test/defaulted')`)
+			if got := f159F164Snapshot(t, leaf, `SELECT type,url,source FROM vulnerability_references WHERE vulnerability_id='f173-legacy' AND url='https://example.test/defaulted'`); got != `[{"url": "https://example.test/defaulted", "type": "WEB", "source": ""}]` {
+				t.Fatalf("033 omitted source default row = %s", got)
+			}
+			_, err := leaf.conn.ExecContext(leaf.ctx, `INSERT INTO vulnerability_references(vulnerability_id,type,url,source) VALUES ('f173-legacy','WEB','https://example.test/null-rejected',NULL)`)
+			f159F164ExpectSQLState(t, err, "23502")
+			_, err = leaf.conn.ExecContext(leaf.ctx, `INSERT INTO vulnerability_references(vulnerability_id,type,url,source) VALUES ('f173-legacy','OTHER','https://example.test/preserved','kept')`)
+			f159F164ExpectSQLState(t, err, "23505")
+			f159F164Exec(t, leaf, `
+					INSERT INTO vulnerability_references(vulnerability_id,type,url,source) VALUES
+						('f173-legacy','OTHER','https://example.test/legacy','other'),
+						('f173-independent','WEB','https://example.test/preserved','kept')`)
+			stableRows := f159F164Snapshot(t, leaf, `SELECT id,vulnerability_id,type,url,source,xmin::text FROM vulnerability_references WHERE vulnerability_id IN ('f173-legacy','f173-independent') ORDER BY vulnerability_id,id`)
 			f159F164Apply(t, leaf, 33, MigrationDirectionUp)
 			f171F176Assert033Catalog(t, leaf)
+			f159F164AssertEqual(t, "033 replay reference rows", f159F164Snapshot(t, leaf, `SELECT id,vulnerability_id,type,url,source,xmin::text FROM vulnerability_references WHERE vulnerability_id IN ('f173-legacy','f173-independent') ORDER BY vulnerability_id,id`), stableRows)
 		})
 
 		t.Run("populated_down_repeat_up_round_trip_preserves_min_id_and_irreversible_loss", func(t *testing.T) {
 			leaf := newLeaf(t)
 			f159F164ApplyThrough(t, leaf, 33)
-			f159F164Exec(t, leaf, `INSERT INTO vulnerabilities(id,summary,severity,published,modified) VALUES ('f174-round','round','LOW','2025-01-01Z','2025-01-01Z'); INSERT INTO vulnerability_references(id,vulnerability_id,type,url,source) VALUES (3301,'f174-round','WEB','https://example.test/same','a'),(3302,'f174-round','WEB','https://example.test/same','b'),(3303,'f174-round','WEB','https://example.test/same','c'),(3304,'f174-round','WEB','https://example.test/other','z')`)
+			f159F164Exec(t, leaf, `INSERT INTO vulnerabilities(id,summary,severity,published,modified) VALUES ('f174-round','round','LOW','2025-01-01Z','2025-01-01Z'); INSERT INTO vulnerability_references(id,vulnerability_id,type,url,source) VALUES (3301,'f174-round','ADVISORY','https://example.test/same','a'),(3302,'f174-round','WEB','https://example.test/same','b'),(3303,'f174-round','REPORT','https://example.test/same','c'),(3304,'f174-round','PACKAGE','https://example.test/other','z')`)
 			f159F164ApplyDownAndDelete(t, leaf, 33)
 			f171F176Assert033Legacy(t, leaf)
-			if got := f159F164Snapshot(t, leaf, `SELECT id,url,source FROM vulnerability_references WHERE vulnerability_id='f174-round' ORDER BY id`); got != `[{"id": 3301, "url": "https://example.test/same", "source": "a"}, {"id": 3304, "url": "https://example.test/other", "source": "z"}]` {
+			if got := f159F164Snapshot(t, leaf, `SELECT id,vulnerability_id,type,url,source FROM vulnerability_references WHERE vulnerability_id='f174-round' ORDER BY id`); got != `[{"id": 3301, "url": "https://example.test/same", "type": "ADVISORY", "source": "a", "vulnerability_id": "f174-round"}, {"id": 3304, "url": "https://example.test/other", "type": "PACKAGE", "source": "z", "vulnerability_id": "f174-round"}]` {
 				t.Fatalf("033 down rows = %s", got)
 			}
+			f159F164Exec(t, leaf, `
+					INSERT INTO vulnerability_references(vulnerability_id,type,url) VALUES ('f174-round','OMITTED','https://example.test/omitted');
+					INSERT INTO vulnerability_references(vulnerability_id,type,url,source) VALUES ('f174-round','EXPLICIT_NULL','https://example.test/explicit-null',NULL)`)
+			if got := f159F164Snapshot(t, leaf, `SELECT type,url,source FROM vulnerability_references WHERE vulnerability_id='f174-round' AND type IN ('OMITTED','EXPLICIT_NULL') ORDER BY type`); got != `[{"url": "https://example.test/explicit-null", "type": "EXPLICIT_NULL", "source": null}, {"url": "https://example.test/omitted", "type": "OMITTED", "source": null}]` {
+				t.Fatalf("033 legacy NULL source inserts = %s", got)
+			}
+			_, err := leaf.conn.ExecContext(leaf.ctx, `INSERT INTO vulnerability_references(vulnerability_id,type,url,source) VALUES ('f174-round','CROSS_SOURCE','https://example.test/same','different')`)
+			f159F164ExpectSQLState(t, err, "23505")
 			f159F164ApplyDownAndDelete(t, leaf, 33)
 			f159F164Apply(t, leaf, 33, MigrationDirectionUp)
 			f171F176Assert033Catalog(t, leaf)
+			if got := f159F164Snapshot(t, leaf, `SELECT type,url,source FROM vulnerability_references WHERE vulnerability_id='f174-round' AND type IN ('OMITTED','EXPLICIT_NULL') ORDER BY type`); got != `[{"url": "https://example.test/explicit-null", "type": "EXPLICIT_NULL", "source": ""}, {"url": "https://example.test/omitted", "type": "OMITTED", "source": ""}]` {
+				t.Fatalf("033 re-up normalized legacy NULL sources = %s", got)
+			}
 			var lost int
 			if err := leaf.conn.QueryRowContext(leaf.ctx, `SELECT COUNT(*) FROM vulnerability_references WHERE id IN (3302,3303)`).Scan(&lost); err != nil || lost != 0 {
 				t.Fatalf("irreversibly lost higher IDs count=%d error=%v, want 0", lost, err)
@@ -201,11 +234,16 @@ func TestF171F176MigrationContractsAgainstPostgres(t *testing.T) {
 		t.Run("down_partial_repeat_reapply_and_ownership_probe", func(t *testing.T) {
 			leaf := newLeaf(t)
 			f159F164ApplyThrough(t, leaf, 34)
+			f159F164Exec(t, leaf, `INSERT INTO feed_sync_status(feed_name,last_sync_at,last_sync_duration,last_sync_status,last_error,entries_synced,entries_total,last_etag,last_commit_hash,metadata,updated_at) VALUES ('f175-sentinel','2024-01-02T03:04:05Z','2 seconds','success','sentinel error',2,3,'etag-sentinel','commit-sentinel','{"sentinel":true}','2024-01-03T04:05:06Z')`)
+			sentinel := f171F176034Sentinel(t, leaf)
 			f159F164Exec(t, leaf, `ALTER TABLE feed_sync_status DROP CONSTRAINT feed_sync_status_entries_order_check`)
 			f159F164ApplyDownAndDelete(t, leaf, 34)
 			f171F176Assert034Absent(t, leaf)
 			f159F164ApplyDownAndDelete(t, leaf, 34)
 			f171F176Assert034Absent(t, leaf)
+			f159F164AssertEqual(t, "034 sentinel after repeated down", f171F176034Sentinel(t, leaf), sentinel)
+			f171F176Seed034InvalidWhileDown(t, leaf)
+			f171F176Assert034InvalidAcceptedWhileDown(t, leaf)
 
 			t.Run("known_bug_F175_bugs_1", func(t *testing.T) {
 				f159F164Exec(t, leaf, `CREATE TABLE public.f175_unrelated_index_owner(id INTEGER, source TEXT, ecosystem TEXT, name TEXT, version TEXT, updated_at TIMESTAMPTZ, status TEXT); CREATE INDEX idx_reputation_reportable_sync ON public.f175_unrelated_index_owner(id)`)
@@ -222,6 +260,9 @@ func TestF171F176MigrationContractsAgainstPostgres(t *testing.T) {
 
 			f159F164Apply(t, leaf, 34, MigrationDirectionUp)
 			f171F176Assert034Catalog(t, leaf)
+			f171F176Assert034DownRowsRepaired(t, leaf)
+			f159F164AssertEqual(t, "034 sentinel after re-up", f171F176034Sentinel(t, leaf), sentinel)
+			f159F164Exec(t, leaf, `DELETE FROM feed_sync_status WHERE feed_name LIKE 'f175-down-%'`)
 		})
 
 		t.Run("unrelated_constraint_name_collision_is_atomic_dirty_and_recoverable", func(t *testing.T) {
@@ -281,7 +322,18 @@ func f171F176Drop032Checks(t *testing.T, leaf f159F164Leaf) {
 
 func f171F176Seed032Dirty(t *testing.T, leaf f159F164Leaf) {
 	t.Helper()
-	f159F164Exec(t, leaf, `INSERT INTO vulnerabilities(id,summary,severity,published,modified) VALUES ('f171-vuln','dirty','LOW','2025-01-01Z','2025-01-01Z'); INSERT INTO affected_packages(id,vulnerability_id,ecosystem,name,version_ranges,versions_affected) VALUES (1,'f171-vuln','npm','invalid-range','{}','["1"]'),(2,'f171-vuln','npm','invalid-versions','[]','{"bad":true}'),(3,'f171-vuln','npm','valid','[{"events":[{"introduced":"0"}]}]','["1"]'); INSERT INTO malicious_findings(id,ecosystem,name,version_ranges,versions,source,risk_type,severity,summary) VALUES ('f171-dirty','npm','dirty','{}','{"bad":true}','fixture','malware','LOW','dirty')`)
+	f159F164Exec(t, leaf, `
+		INSERT INTO vulnerabilities(id,summary,severity,published,modified)
+		VALUES ('f171-vuln','dirty','LOW','2025-01-01Z','2025-01-01Z');
+		INSERT INTO affected_packages(id,vulnerability_id,ecosystem,name,version_ranges,versions_affected,updated_at)
+		VALUES
+			(1,'f171-vuln','npm','invalid-range','{}','["1"]','2020-01-01Z'),
+			(2,'f171-vuln','npm','invalid-versions','[]','{"bad":true}','2020-01-01Z'),
+			(3,'f171-vuln','npm','valid','[{"events":[{"introduced":"0"}]}]','["1"]','2020-01-01Z');
+		INSERT INTO malicious_findings(id,ecosystem,name,version_ranges,versions,source,risk_type,severity,summary,updated_at)
+		VALUES
+			('f171-dirty','npm','dirty','{}','{"bad":true}','fixture','malware','LOW','dirty','2020-01-01Z'),
+			('f171-null','npm','nulls',NULL,NULL,'fixture','malware','LOW','preexisting SQL NULLs','2020-01-01Z')`)
 }
 
 func f171F176Assert032Repairs(t *testing.T, leaf f159F164Leaf) {
@@ -292,6 +344,69 @@ func f171F176Assert032Repairs(t *testing.T, leaf f159F164Leaf) {
 	if got := f159F164Snapshot(t, leaf, `SELECT version_ranges,versions FROM malicious_findings WHERE id='f171-dirty'`); got != `[{"versions": null, "version_ranges": null}]` {
 		t.Fatalf("032 malicious repairs = %s", got)
 	}
+	if got := f159F164Snapshot(t, leaf, `SELECT version_ranges,versions FROM malicious_findings WHERE id='f171-null'`); got != `[{"versions": null, "version_ranges": null}]` {
+		t.Fatalf("032 preexisting malicious SQL NULLs = %s", got)
+	}
+}
+
+type f171F176RowVersion struct {
+	updatedAt time.Time
+	xmin      string
+}
+
+func f171F176032RowVersions(t *testing.T, leaf f159F164Leaf) map[string]f171F176RowVersion {
+	t.Helper()
+	rows, err := leaf.conn.QueryContext(leaf.ctx, `
+		SELECT 'affected:'||id::text,updated_at,xmin::text
+		FROM affected_packages WHERE id IN (1,2,3)
+		UNION ALL
+		SELECT 'malicious:'||id,updated_at,xmin::text
+		FROM malicious_findings WHERE id IN ('f171-dirty','f171-null')`)
+	if err != nil {
+		t.Fatalf("query 032 row versions: %v", err)
+	}
+	defer ioutils.CloseSilently(rows)
+
+	versions := make(map[string]f171F176RowVersion)
+	for rows.Next() {
+		var key string
+		var version f171F176RowVersion
+		if err := rows.Scan(&key, &version.updatedAt, &version.xmin); err != nil {
+			t.Fatalf("scan 032 row version: %v", err)
+		}
+		versions[key] = version
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate 032 row versions: %v", err)
+	}
+	if len(versions) != 5 {
+		t.Fatalf("032 versioned fixture rows = %d, want 5", len(versions))
+	}
+	return versions
+}
+
+func f171F176Assert032RepairVersions(t *testing.T, before, after map[string]f171F176RowVersion) {
+	t.Helper()
+	repaired := map[string]bool{
+		"affected:1":           true,
+		"affected:2":           true,
+		"malicious:f171-dirty": true,
+	}
+	for key, beforeVersion := range before {
+		afterVersion, ok := after[key]
+		if !ok {
+			t.Fatalf("032 row %s disappeared during repair", key)
+		}
+		if repaired[key] {
+			if !afterVersion.updatedAt.After(beforeVersion.updatedAt) || afterVersion.xmin == beforeVersion.xmin {
+				t.Fatalf("032 repaired row %s version before=%+v after=%+v, want advanced timestamp and xmin", key, beforeVersion, afterVersion)
+			}
+			continue
+		}
+		if !afterVersion.updatedAt.Equal(beforeVersion.updatedAt) || afterVersion.xmin != beforeVersion.xmin {
+			t.Fatalf("032 untouched row %s version before=%+v after=%+v", key, beforeVersion, afterVersion)
+		}
+	}
 }
 
 func f171F176Assert032TruthTables(t *testing.T, leaf f159F164Leaf) {
@@ -299,18 +414,44 @@ func f171F176Assert032TruthTables(t *testing.T, leaf f159F164Leaf) {
 	stringCases := []struct {
 		value string
 		want  bool
-	}{{`[]`, true}, {`["1",""]`, true}, {`[1]`, false}, {`{}`, false}, {`null`, false}}
+	}{{`[]`, true}, {`["1",""]`, true}, {`["1",2]`, false}, {`[1]`, false}, {`{}`, false}, {`null`, false}}
 	for _, tt := range stringCases {
 		var got bool
 		if err := leaf.conn.QueryRowContext(leaf.ctx, `SELECT packmon_jsonb_string_array_valid($1::jsonb)`, tt.value).Scan(&got); err != nil || got != tt.want {
 			t.Fatalf("string-array validator(%s)=%t error=%v, want %t", tt.value, got, err, tt.want)
 		}
 	}
-	// Migration 032 historically checks shape only; migration 050 later tightens blank and non-string event boundaries.
+	// Migration 032 historically checks only the container shape and presence of a recognized event key.
+	// Null, numeric, and blank values are accepted, and a missing events member passes because the
+	// PL/pgSQL IF condition evaluates to SQL NULL. Migration 050 tightens these boundaries later.
 	rangeCases := []struct {
 		value string
 		want  bool
-	}{{`[]`, true}, {`[{"events":[{"introduced":"0"}]}]`, true}, {`[{"events":[{"fixed":1}]}]`, true}, {`[{"events":[{"limit":""}]}]`, true}, {`[{"events":[]}]`, false}, {`{}`, false}}
+	}{
+		{`[]`, true},
+		{`[{"events":[{"introduced":null}]}]`, true},
+		{`[{"events":[{"introduced":1}]}]`, true},
+		{`[{"events":[{"introduced":""}]}]`, true},
+		{`[{"events":[{"introduced":"0"}]}]`, true},
+		{`[{"events":[{"fixed":null}]}]`, true},
+		{`[{"events":[{"fixed":1}]}]`, true},
+		{`[{"events":[{"fixed":""}]}]`, true},
+		{`[{"events":[{"fixed":"1.0.0"}]}]`, true},
+		{`[{"events":[{"last_affected":null}]}]`, true},
+		{`[{"events":[{"last_affected":1}]}]`, true},
+		{`[{"events":[{"last_affected":""}]}]`, true},
+		{`[{"events":[{"last_affected":"1.0.0"}]}]`, true},
+		{`[{"events":[{"limit":null}]}]`, true},
+		{`[{"events":[{"limit":1}]}]`, true},
+		{`[{"events":[{"limit":""}]}]`, true},
+		{`[{"events":[{"limit":"2.0.0"}]}]`, true},
+		{`[{"events":[]}]`, false},
+		{`[{}]`, true},
+		{`[{"events":{}}]`, false},
+		{`[{"events":["introduced"]}]`, false},
+		{`[{"events":[{"unknown":"0"}]}]`, false},
+		{`{}`, false},
+	}
 	for _, tt := range rangeCases {
 		var got bool
 		if err := leaf.conn.QueryRowContext(leaf.ctx, `SELECT packmon_jsonb_version_ranges_valid($1::jsonb)`, tt.value).Scan(&got); err != nil || got != tt.want {
@@ -415,13 +556,53 @@ func f171F176Drop034Objects(t *testing.T, leaf f159F164Leaf) {
 
 func f171F176Seed034Dirty(t *testing.T, leaf f159F164Leaf) {
 	t.Helper()
-	f159F164Exec(t, leaf, `INSERT INTO feed_sync_status(feed_name,last_sync_status,last_error,entries_synced,entries_total,last_sync_duration) VALUES ('f175-status',' SUCCESS ',NULL,1,1,'1 second'),('f175-invalid','BOGUS','',1,1,'1 second'),('f175-negative','pending',NULL,-2,-3,'1 second'),('f175-order','pending',NULL,5,3,'1 second'),('f175-duration','pending',NULL,1,1,'-1 second')`)
+	f159F164Exec(t, leaf, `
+		INSERT INTO feed_sync_status(feed_name,last_sync_status,last_error,entries_synced,entries_total,last_sync_duration) VALUES
+			('f175-status',' SUCCESS ',NULL,1,1,'1 second'),
+			('f175-empty-status',' ',NULL,1,1,'1 second'),
+			('f175-invalid-existing','BOGUS','keep existing error',1,1,'1 second'),
+			('f175-negative-synced','pending',NULL,-2,3,'1 second'),
+			('f175-negative-total','pending',NULL,0,-3,'1 second'),
+			('f175-order','pending',NULL,5,3,'1 second'),
+			('f175-duration','pending',NULL,1,1,'-1 second'),
+			('f175-zero-duration','pending',NULL,1,1,'0 seconds'),
+			('f175-null-duration','pending',NULL,1,1,NULL)`)
 }
 
 func f171F176Assert034Repairs(t *testing.T, leaf f159F164Leaf) {
 	t.Helper()
-	if got := f171F176034Rows(t, leaf); got != `[{"feed_name": "f175-duration", "last_error": null, "entries_total": 1, "entries_synced": 1, "last_sync_status": "pending", "last_sync_duration": null}, {"feed_name": "f175-invalid", "last_error": "normalized invalid feed sync status during migration 034", "entries_total": 1, "entries_synced": 1, "last_sync_status": "error", "last_sync_duration": "00:00:01"}, {"feed_name": "f175-negative", "last_error": null, "entries_total": 0, "entries_synced": 0, "last_sync_status": "pending", "last_sync_duration": "00:00:01"}, {"feed_name": "f175-order", "last_error": null, "entries_total": 5, "entries_synced": 5, "last_sync_status": "pending", "last_sync_duration": "00:00:01"}, {"feed_name": "f175-status", "last_error": null, "entries_total": 1, "entries_synced": 1, "last_sync_status": "success", "last_sync_duration": "00:00:01"}]` {
+	if got := f171F176034Rows(t, leaf); got != `[{"feed_name": "f175-duration", "last_error": null, "entries_total": 1, "entries_synced": 1, "last_sync_status": "pending", "last_sync_duration": null}, {"feed_name": "f175-empty-status", "last_error": "normalized invalid feed sync status during migration 034", "entries_total": 1, "entries_synced": 1, "last_sync_status": "error", "last_sync_duration": "00:00:01"}, {"feed_name": "f175-invalid-existing", "last_error": "keep existing error", "entries_total": 1, "entries_synced": 1, "last_sync_status": "error", "last_sync_duration": "00:00:01"}, {"feed_name": "f175-negative-synced", "last_error": null, "entries_total": 3, "entries_synced": 0, "last_sync_status": "pending", "last_sync_duration": "00:00:01"}, {"feed_name": "f175-negative-total", "last_error": null, "entries_total": 0, "entries_synced": 0, "last_sync_status": "pending", "last_sync_duration": "00:00:01"}, {"feed_name": "f175-null-duration", "last_error": null, "entries_total": 1, "entries_synced": 1, "last_sync_status": "pending", "last_sync_duration": null}, {"feed_name": "f175-order", "last_error": null, "entries_total": 5, "entries_synced": 5, "last_sync_status": "pending", "last_sync_duration": "00:00:01"}, {"feed_name": "f175-status", "last_error": null, "entries_total": 1, "entries_synced": 1, "last_sync_status": "success", "last_sync_duration": "00:00:01"}, {"feed_name": "f175-zero-duration", "last_error": null, "entries_total": 1, "entries_synced": 1, "last_sync_status": "pending", "last_sync_duration": "00:00:00"}]` {
 		t.Fatalf("034 repaired rows = %s", got)
+	}
+}
+
+func f171F176034Sentinel(t *testing.T, leaf f159F164Leaf) string {
+	t.Helper()
+	return f159F164Snapshot(t, leaf, `SELECT feed_name,last_sync_at,last_sync_duration,last_sync_status,last_error,entries_synced,entries_total,last_etag,last_commit_hash,metadata,updated_at,xmin::text FROM feed_sync_status WHERE feed_name='f175-sentinel'`)
+}
+
+func f171F176Seed034InvalidWhileDown(t *testing.T, leaf f159F164Leaf) {
+	t.Helper()
+	f159F164Exec(t, leaf, `
+		INSERT INTO feed_sync_status(feed_name,last_sync_status,entries_synced,entries_total,last_sync_duration) VALUES
+			('f175-down-status','invalid',0,0,'0 seconds'),
+			('f175-down-negative-synced','pending',-1,0,'0 seconds'),
+			('f175-down-negative-total','pending',0,-1,'0 seconds'),
+			('f175-down-order','pending',2,1,'0 seconds'),
+			('f175-down-duration','pending',0,0,'-1 second')`)
+}
+
+func f171F176Assert034InvalidAcceptedWhileDown(t *testing.T, leaf f159F164Leaf) {
+	t.Helper()
+	if got := f159F164Snapshot(t, leaf, `SELECT feed_name,last_sync_status,entries_synced,entries_total,last_sync_duration FROM feed_sync_status WHERE feed_name LIKE 'f175-down-%' ORDER BY feed_name`); got != `[{"feed_name": "f175-down-duration", "entries_total": 0, "entries_synced": 0, "last_sync_status": "pending", "last_sync_duration": "-00:00:01"}, {"feed_name": "f175-down-negative-synced", "entries_total": 0, "entries_synced": -1, "last_sync_status": "pending", "last_sync_duration": "00:00:00"}, {"feed_name": "f175-down-negative-total", "entries_total": -1, "entries_synced": 0, "last_sync_status": "pending", "last_sync_duration": "00:00:00"}, {"feed_name": "f175-down-order", "entries_total": 1, "entries_synced": 2, "last_sync_status": "pending", "last_sync_duration": "00:00:00"}, {"feed_name": "f175-down-status", "entries_total": 0, "entries_synced": 0, "last_sync_status": "invalid", "last_sync_duration": "00:00:00"}]` {
+		t.Fatalf("034 invalid rows accepted while constraints are down = %s", got)
+	}
+}
+
+func f171F176Assert034DownRowsRepaired(t *testing.T, leaf f159F164Leaf) {
+	t.Helper()
+	if got := f159F164Snapshot(t, leaf, `SELECT feed_name,last_sync_status,last_error,entries_synced,entries_total,last_sync_duration FROM feed_sync_status WHERE feed_name LIKE 'f175-down-%' ORDER BY feed_name`); got != `[{"feed_name": "f175-down-duration", "last_error": null, "entries_total": 0, "entries_synced": 0, "last_sync_status": "pending", "last_sync_duration": null}, {"feed_name": "f175-down-negative-synced", "last_error": null, "entries_total": 0, "entries_synced": 0, "last_sync_status": "pending", "last_sync_duration": "00:00:00"}, {"feed_name": "f175-down-negative-total", "last_error": null, "entries_total": 0, "entries_synced": 0, "last_sync_status": "pending", "last_sync_duration": "00:00:00"}, {"feed_name": "f175-down-order", "last_error": null, "entries_total": 2, "entries_synced": 2, "last_sync_status": "pending", "last_sync_duration": "00:00:00"}, {"feed_name": "f175-down-status", "last_error": "normalized invalid feed sync status during migration 034", "entries_total": 0, "entries_synced": 0, "last_sync_status": "error", "last_sync_duration": "00:00:00"}]` {
+		t.Fatalf("034 down-state rows after re-up repair = %s", got)
 	}
 }
 
@@ -468,11 +649,13 @@ func f171F176Assert034Matrix(t *testing.T, leaf f159F164Leaf) {
 	}
 	invalid := []string{
 		`INSERT INTO feed_sync_status(feed_name,last_sync_status) VALUES ('f175-bad-status','invalid')`,
-		`INSERT INTO feed_sync_status(feed_name,entries_synced,entries_total) VALUES ('f175-bad-negative',-1,0)`,
+		`INSERT INTO feed_sync_status(feed_name,entries_synced,entries_total) VALUES ('f175-bad-negative-synced',-1,0)`,
+		`INSERT INTO feed_sync_status(feed_name,entries_synced,entries_total) VALUES ('f175-bad-negative-total',0,-1)`,
 		`INSERT INTO feed_sync_status(feed_name,entries_synced,entries_total) VALUES ('f175-bad-order',2,1)`,
 		`INSERT INTO feed_sync_status(feed_name,last_sync_duration) VALUES ('f175-bad-duration','-1 second')`,
 		`UPDATE feed_sync_status SET last_sync_status='invalid' WHERE feed_name='f175-status'`,
 		`UPDATE feed_sync_status SET entries_synced=-1 WHERE feed_name='f175-status'`,
+		`UPDATE feed_sync_status SET entries_total=-1 WHERE feed_name='f175-status'`,
 		`UPDATE feed_sync_status SET entries_synced=3,entries_total=2 WHERE feed_name='f175-status'`,
 		`UPDATE feed_sync_status SET last_sync_duration='-1 second' WHERE feed_name='f175-status'`,
 	}
