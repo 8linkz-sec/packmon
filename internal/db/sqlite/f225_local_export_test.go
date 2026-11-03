@@ -107,19 +107,21 @@ func TestF225StreamLocalExportsConvertNullableValuesAndOrderRows(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("StreamLocalVulnerabilities() error = %v", err)
 	}
-	if len(vulnerabilities) != 2 {
-		t.Fatalf("vulnerability count = %d, want 2", len(vulnerabilities))
+	if len(vulnerabilities) != 4 {
+		t.Fatalf("vulnerability count = %d, want 4", len(vulnerabilities))
 	}
-	if got := []string{vulnerabilities[0].ID, vulnerabilities[1].ID}; !reflect.DeepEqual(got, []string{"vuln-a", "vuln-z"}) {
-		t.Fatalf("vulnerability order = %v, want [vuln-a vuln-z]", got)
+	if got := f225VulnerabilityIDs(vulnerabilities); !reflect.DeepEqual(got, []string{"vuln-z", "vuln-y", "vuln-a", "vuln-b"}) {
+		t.Fatalf("vulnerability order = %v, want ecosystem, name, then ID ordering", got)
 	}
-	if string(vulnerabilities[0].VersionRanges) != "[]" || vulnerabilities[0].Severity != "HIGH" ||
-		vulnerabilities[0].CVSSScore != nil || vulnerabilities[0].EPSSScore != nil || vulnerabilities[0].EPSSPercentile != nil ||
-		vulnerabilities[0].CISAKEV || vulnerabilities[0].Summary != "" || vulnerabilities[0].Source != "local" {
-		t.Fatalf("nullable vulnerability = %+v", vulnerabilities[0])
+	nullableVulnerability := vulnerabilities[0]
+	if string(nullableVulnerability.VersionRanges) != "[]" || nullableVulnerability.Severity != "HIGH" ||
+		nullableVulnerability.CVSSScore != nil || nullableVulnerability.EPSSScore != nil || nullableVulnerability.EPSSPercentile != nil ||
+		nullableVulnerability.CISAKEV || nullableVulnerability.Summary != "" || nullableVulnerability.Source != "local" {
+		t.Fatalf("nullable vulnerability = %+v", nullableVulnerability)
 	}
-	if string(vulnerabilities[1].VersionRanges) != `[{"fixed":"2.0.0"}]` || !vulnerabilities[1].CISAKEV || vulnerabilities[1].Source != "osv" {
-		t.Fatalf("populated vulnerability = %+v", vulnerabilities[1])
+	populatedVulnerability := vulnerabilities[1]
+	if string(populatedVulnerability.VersionRanges) != `[{"fixed":"2.0.0"}]` || !populatedVulnerability.CISAKEV || populatedVulnerability.Source != "osv" {
+		t.Fatalf("populated vulnerability = %+v", populatedVulnerability)
 	}
 
 	var malicious []LocalMaliciousEntry
@@ -129,17 +131,19 @@ func TestF225StreamLocalExportsConvertNullableValuesAndOrderRows(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("StreamLocalMalicious() error = %v", err)
 	}
-	if len(malicious) != 2 {
-		t.Fatalf("malicious count = %d, want 2", len(malicious))
+	if len(malicious) != 4 {
+		t.Fatalf("malicious count = %d, want 4", len(malicious))
 	}
-	if got := []string{malicious[0].ID, malicious[1].ID}; !reflect.DeepEqual(got, []string{"mal-a", "mal-z"}) {
-		t.Fatalf("malicious order = %v, want [mal-a mal-z]", got)
+	if got := f225MaliciousIDs(malicious); !reflect.DeepEqual(got, []string{"mal-z", "mal-y", "mal-a", "mal-b"}) {
+		t.Fatalf("malicious order = %v, want ecosystem, name, then ID ordering", got)
 	}
-	if malicious[0].VersionRanges != nil || malicious[0].Versions != nil || malicious[0].Severity != "CRITICAL" || malicious[0].Summary != "" || malicious[0].Source != "local" {
-		t.Fatalf("nullable malicious row = %+v", malicious[0])
+	nullableMalicious := malicious[0]
+	if nullableMalicious.VersionRanges != nil || nullableMalicious.Versions != nil || nullableMalicious.Severity != "CRITICAL" || nullableMalicious.Summary != "" || nullableMalicious.Source != "local" {
+		t.Fatalf("nullable malicious row = %+v", nullableMalicious)
 	}
-	if string(malicious[1].VersionRanges) != `[{"introduced":"0"}]` || string(malicious[1].Versions) != `["1.0.0"]` {
-		t.Fatalf("populated malicious row = %+v", malicious[1])
+	populatedMalicious := malicious[1]
+	if string(populatedMalicious.VersionRanges) != `[{"introduced":"0"}]` || string(populatedMalicious.Versions) != `["1.0.0"]` {
+		t.Fatalf("populated malicious row = %+v", populatedMalicious)
 	}
 
 	var reputation []LocalReputationEntry
@@ -149,11 +153,11 @@ func TestF225StreamLocalExportsConvertNullableValuesAndOrderRows(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("StreamLocalReputation() error = %v", err)
 	}
-	if len(reputation) != 2 {
-		t.Fatalf("reputation count = %d, want 2", len(reputation))
+	if len(reputation) != 4 {
+		t.Fatalf("reputation count = %d, want 4", len(reputation))
 	}
-	if got := []string{reputation[0].ID, reputation[1].ID}; !reflect.DeepEqual(got, []string{"rep-a", "rep-z"}) {
-		t.Fatalf("reputation order = %v, want [rep-a rep-z]", got)
+	if got := f225ReputationIDs(reputation); !reflect.DeepEqual(got, []string{"rep-z", "rep-y", "rep-a", "rep-b"}) {
+		t.Fatalf("reputation order = %v, want ecosystem, name, then ID ordering", got)
 	}
 	if reputation[0].Severity != "HIGH" || reputation[0].Summary != "" || reputation[1].Severity != "LOW" {
 		t.Fatalf("normalized reputation rows = %+v", reputation)
@@ -166,20 +170,27 @@ func TestF225StreamLocalExportsConvertNullableValuesAndOrderRows(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("StreamLocalLifecycle() error = %v", err)
 	}
-	if len(lifecycle) != 2 {
-		t.Fatalf("lifecycle count = %d, want 2", len(lifecycle))
+	if len(lifecycle) != 6 {
+		t.Fatalf("lifecycle count = %d, want 6", len(lifecycle))
 	}
-	if got := []string{lifecycle[0].ID, lifecycle[1].ID}; !reflect.DeepEqual(got, []string{"life-a", "life-z"}) {
-		t.Fatalf("lifecycle order = %v, want [life-a life-z]", got)
+	if got := f225LifecycleIDs(lifecycle); !reflect.DeepEqual(got, []string{"life-z", "life-y", "life-x", "life-a", "life-b", "life-w"}) {
+		t.Fatalf("lifecycle order = %v, want ecosystem, name, product, cycle, then ID ordering", got)
 	}
-	if lifecycle[0].ReleaseDate != nil || lifecycle[0].IsLTS || lifecycle[0].LTSFrom != nil || lifecycle[0].IsEOAS || lifecycle[0].EOASFrom != nil ||
-		lifecycle[0].IsEOL || lifecycle[0].EOLFrom != nil || lifecycle[0].IsDiscontinued || lifecycle[0].DiscontinuedFrom != nil ||
-		lifecycle[0].IsEOES != nil || lifecycle[0].EOESFrom != nil || lifecycle[0].IsMaintained {
-		t.Fatalf("nullable lifecycle row = %+v", lifecycle[0])
+	nullableLifecycle := lifecycle[0]
+	if nullableLifecycle.ReleaseDate != nil || nullableLifecycle.IsLTS || nullableLifecycle.LTSFrom != nil || nullableLifecycle.IsEOAS || nullableLifecycle.EOASFrom != nil ||
+		nullableLifecycle.IsEOL || nullableLifecycle.EOLFrom != nil || nullableLifecycle.IsDiscontinued || nullableLifecycle.DiscontinuedFrom != nil ||
+		nullableLifecycle.IsEOES != nil || nullableLifecycle.EOESFrom != nil || nullableLifecycle.IsMaintained {
+		t.Fatalf("nullable lifecycle row = %+v", nullableLifecycle)
 	}
-	if lifecycle[1].ReleaseDate == nil || *lifecycle[1].ReleaseDate != "2026-01-01" || !lifecycle[1].IsLTS ||
-		lifecycle[1].IsEOES == nil || *lifecycle[1].IsEOES || !lifecycle[1].IsMaintained {
-		t.Fatalf("populated lifecycle row = %+v", lifecycle[1])
+	populatedLifecycle := lifecycle[1]
+	if populatedLifecycle.ReleaseDate == nil || *populatedLifecycle.ReleaseDate != "2026-01-01" ||
+		!populatedLifecycle.IsLTS || populatedLifecycle.LTSFrom == nil || *populatedLifecycle.LTSFrom != "2026-01-02" ||
+		!populatedLifecycle.IsEOAS || populatedLifecycle.EOASFrom == nil || *populatedLifecycle.EOASFrom != "2026-01-03" ||
+		!populatedLifecycle.IsEOL || populatedLifecycle.EOLFrom == nil || *populatedLifecycle.EOLFrom != "2026-01-04" ||
+		!populatedLifecycle.IsDiscontinued || populatedLifecycle.DiscontinuedFrom == nil || *populatedLifecycle.DiscontinuedFrom != "2026-01-05" ||
+		populatedLifecycle.IsEOES == nil || *populatedLifecycle.IsEOES || populatedLifecycle.EOESFrom == nil || *populatedLifecycle.EOESFrom != "2026-01-06" ||
+		!populatedLifecycle.IsMaintained {
+		t.Fatalf("populated lifecycle row = %+v", populatedLifecycle)
 	}
 
 	var history []ScanEntry
@@ -192,7 +203,7 @@ func TestF225StreamLocalExportsConvertNullableValuesAndOrderRows(t *testing.T) {
 	if len(history) != 2 {
 		t.Fatalf("scan-history count = %d, want 2", len(history))
 	}
-	if got := []int{history[0].ID, history[1].ID}; !reflect.DeepEqual(got, []int{2, 1}) {
+	if got := []int{history[0].ID, history[1].ID}; !reflect.DeepEqual(got, []int{10, 20}) {
 		t.Fatalf("scan-history order = %v, want newest row first", got)
 	}
 	if history[0].RepoName != "" || history[0].Branch != "" || history[0].Commit != "" || history[0].FindingIDs != nil || history[0].FindingSeverities != nil {
@@ -363,38 +374,84 @@ func TestF225LocalExportHelperEdges(t *testing.T) {
 	}
 }
 
+func f225VulnerabilityIDs(items []LocalVulnerabilityEntry) []string {
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		ids = append(ids, item.ID)
+	}
+	return ids
+}
+
+func f225MaliciousIDs(items []LocalMaliciousEntry) []string {
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		ids = append(ids, item.ID)
+	}
+	return ids
+}
+
+func f225ReputationIDs(items []LocalReputationEntry) []string {
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		ids = append(ids, item.ID)
+	}
+	return ids
+}
+
+func f225LifecycleIDs(items []LocalLifecycleEntry) []string {
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		ids = append(ids, item.ID)
+	}
+	return ids
+}
+
 func f225SeedExportRows(t *testing.T, database *sql.DB) {
 	t.Helper()
 	statements := []string{
 		`INSERT INTO vulnerabilities_local
 			(row_key, id, ecosystem, name, version_ranges, severity, cvss_score, epss_score, epss_percentile, cisa_kev, summary, source)
 		 VALUES
-			('v-z', 'vuln-z', 'npm', 'z-package', '[{"fixed":"2.0.0"}]', ' LOW ', 7.5, 0.5, 0.8, 2, 'z summary', ' osv '),
-			('v-a', 'vuln-a', 'go', 'a-package', '  ', ' HIGH ', NULL, NULL, NULL, -1, NULL, '   ')`,
+			('v-b', 'vuln-b', 'npm', 'same-package', NULL, 'MEDIUM', NULL, NULL, NULL, 0, NULL, 'local'),
+			('v-y', 'vuln-y', 'npm', 'alpha-package', '[{"fixed":"2.0.0"}]', ' LOW ', 7.5, 0.5, 0.8, 2, 'y summary', ' osv '),
+			('v-a', 'vuln-a', 'npm', 'same-package', NULL, 'MEDIUM', NULL, NULL, NULL, 0, NULL, 'local'),
+			('v-z', 'vuln-z', 'go', 'omega-package', '  ', ' HIGH ', NULL, NULL, NULL, -1, NULL, '   ')`,
 		`INSERT INTO malicious_local
 			(id, ecosystem, name, version_ranges, versions, risk_type, severity, summary, source)
 		 VALUES
-			('mal-z', 'npm', 'z-package', '[{"introduced":"0"}]', '["1.0.0"]', 'malware', ' HIGH ', 'z summary', 'socket'),
-			('mal-a', 'go', 'a-package', NULL, '', 'malware', ' CRITICAL ', NULL, '  ')`,
+			('mal-b', 'npm', 'same-package', NULL, NULL, 'malware', 'MEDIUM', NULL, 'local'),
+			('mal-y', 'npm', 'alpha-package', '[{"introduced":"0"}]', '["1.0.0"]', 'malware', ' HIGH ', 'y summary', 'socket'),
+			('mal-a', 'npm', 'same-package', NULL, NULL, 'malware', 'MEDIUM', NULL, 'local'),
+			('mal-z', 'go', 'omega-package', NULL, '', 'malware', ' CRITICAL ', NULL, '  ')`,
 		`INSERT INTO reputation_findings_local
 			(id, ecosystem, name, version, type, risk_type, severity, summary)
 		 VALUES
-			('rep-z', 'npm', 'z-package', '1.0.0', 'supply_chain_risk', 'malware_history', ' HIGH ', 'history'),
-			('rep-a', 'go', 'a-package', '1.0.0', 'malicious', 'malware', ' HIGH ', NULL)`,
+			('rep-b', 'npm', 'same-package', '1.0.0', 'malicious', 'malware', 'MEDIUM', NULL),
+			('rep-y', 'npm', 'alpha-package', '1.0.0', 'supply_chain_risk', 'malware_history', ' HIGH ', 'history'),
+			('rep-a', 'npm', 'same-package', '1.0.0', 'malicious', 'malware', 'MEDIUM', NULL),
+			('rep-z', 'go', 'omega-package', '1.0.0', 'malicious', 'malware', ' HIGH ', NULL)`,
 		`INSERT INTO lifecycle_releases_local
 			(id, ecosystem, name, product_slug, product_label, cycle, latest, release_date,
 			 is_lts, lts_from, is_eoas, eoas_from, is_eol, eol_from,
 			 is_discontinued, discontinued_from, is_eoes, eoes_from, is_maintained)
 		 VALUES
-			('life-z', 'npm', 'z-package', 'z-product', 'Z', '2', '2.0.0', '2026-01-01',
+			('life-b', 'npm', 'same-package', 'same-product', 'B', '1', '1.0.0', NULL,
+			 0, NULL, 0, NULL, 0, NULL, 0, NULL, NULL, NULL, 0),
+			('life-x', 'npm', 'same-package', 'beta-product', 'X', '9', '9.0.0', NULL,
+			 0, NULL, 0, NULL, 0, NULL, 0, NULL, NULL, NULL, 0),
+			('life-w', 'npm', 'same-package', 'same-product', 'W', '2', '2.0.0', NULL,
+			 0, NULL, 0, NULL, 0, NULL, 0, NULL, NULL, NULL, 0),
+			('life-y', 'npm', 'alpha-package', 'q-product', 'Y', '9', '9.0.0', '2026-01-01',
 			 2, '2026-01-02', 1, '2026-01-03', 1, '2026-01-04', 1, '2026-01-05', 0, '2026-01-06', 3),
-			('life-a', 'go', 'a-package', 'a-product', 'A', '1', '1.0.0', NULL,
+			('life-a', 'npm', 'same-package', 'same-product', 'A', '1', '1.0.0', NULL,
+			 0, NULL, 0, NULL, 0, NULL, 0, NULL, NULL, NULL, 0),
+			('life-z', 'go', 'omega-package', 'q-product', 'Z', '9', '9.0.0', NULL,
 			 -1, '  ', 0, NULL, 0, '', -2, NULL, NULL, ' ', 0)`,
 		`INSERT INTO scan_history
-			(repo_name, branch, "commit", scanned_at, packages_count, findings_count, finding_ids, finding_severities)
+			(id, repo_name, branch, "commit", scanned_at, packages_count, findings_count, finding_ids, finding_severities)
 		 VALUES
-			('repo', 'main', 'abc', '2026-01-01T00:00:00Z', 2, 1, '["GHSA-1"]', '["HIGH"]'),
-			(NULL, NULL, NULL, '2026-01-02T00:00:00Z', 0, 0, '', NULL)`,
+			(20, 'repo', 'main', 'abc', '2026-01-01T00:00:00Z', 2, 1, '["GHSA-1"]', '["HIGH"]'),
+			(10, NULL, NULL, NULL, '2026-01-02T00:00:00Z', 0, 0, '', NULL)`,
 	}
 	for _, statement := range statements {
 		if _, err := database.Exec(statement); err != nil {
