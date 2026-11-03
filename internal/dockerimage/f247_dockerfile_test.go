@@ -26,7 +26,7 @@ func TestF247ParseDockerfileImagesEdges(t *testing.T) {
 		{
 			name: "full and inline comments",
 			input: `# FROM private.example/ignored:latest
-FROM alpine:3.23 # FROM private.example/also-ignored:latest
+FROM alpine:3.23 # AS commented-stage
 # trailing comment
 `,
 			wantRefs:  []string{"docker.io/library/alpine:3.23"},
@@ -74,6 +74,28 @@ FROM $BASE:1.36
 			}
 			if !reflect.DeepEqual(gotRefs, tc.wantRefs) || !reflect.DeepEqual(gotFlags, tc.wantFlags) {
 				t.Fatalf("ParseDockerfileImages() = refs %v, flags %v; want refs %v, flags %v", gotRefs, gotFlags, tc.wantRefs, tc.wantFlags)
+			}
+		})
+	}
+}
+
+func TestF247StripDockerfileComment(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		line string
+		want string
+	}{
+		{name: "full comment", line: "# FROM private.example/ignored:latest", want: ""},
+		{name: "inline comment", line: "FROM alpine:3.23 # AS commented-stage", want: "FROM alpine:3.23"},
+		{name: "no comment", line: "FROM busybox:1.36", want: "FROM busybox:1.36"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := stripDockerfileComment(tc.line); got != tc.want {
+				t.Fatalf("stripDockerfileComment(%q) = %q, want %q", tc.line, got, tc.want)
 			}
 		})
 	}
