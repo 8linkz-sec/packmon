@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -127,6 +128,87 @@ func TestLongestMatchingReleasesRejectsBlankAndNearMatchingCycles(t *testing.T) 
 	}
 }
 
+func TestLongestMatchingReleasesKeepsFirstEqualLengthMatch(t *testing.T) {
+	t.Parallel()
+
+	got := LongestMatchingReleases([]ReleaseRow{
+		{ID: "first", ProductSlug: "django", Release: Release{Cycle: "3.2"}},
+		{ID: "second", ProductSlug: "django", Release: Release{Cycle: "3.2"}},
+	}, "3.2.25")
+	if len(got) != 1 || got[0].ID != "first" {
+		t.Fatalf("LongestMatchingReleases() = %+v, want first equal-length row", got)
+	}
+}
+
+func TestCycleMatchesRejectsEmptyVersionOrCycle(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name    string
+		version string
+		cycle   string
+	}{
+		{name: "empty version", cycle: "3.2"},
+		{name: "empty cycle", version: "3.2.25"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if cycleMatches(tt.version, tt.cycle) {
+				t.Fatalf("cycleMatches(%q, %q) = true, want false", tt.version, tt.cycle)
+			}
+		})
+	}
+}
+
+func TestFindingForReleaseUsesBooleanAndDatePriorityEdges(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC)
+	atEOLSoonBoundary := now.Add(EOLSoonWindow)
+	afterEOLSoonBoundary := atEOLSoonBoundary.Add(time.Nanosecond)
+	tests := []struct {
+		name     string
+		release  Release
+		wantRisk string
+	}{
+		{
+			name:     "eol boolean precedes eoas boolean",
+			release:  Release{IsEOL: true, IsEOAS: true},
+			wantRisk: RiskTypeEOL,
+		},
+		{
+			name:     "eol date at now precedes eoas boolean",
+			release:  Release{EOLFrom: &now, IsEOAS: true},
+			wantRisk: RiskTypeEOL,
+		},
+		{
+			name:     "eol soon includes window boundary and precedes eoas",
+			release:  Release{EOLFrom: &atEOLSoonBoundary, IsEOAS: true},
+			wantRisk: RiskTypeEOLSoon,
+		},
+		{
+			name:     "eol beyond window falls through to eoas boolean",
+			release:  Release{EOLFrom: &afterEOLSoonBoundary, IsEOAS: true},
+			wantRisk: RiskTypeSecuritySupportOnly,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, ok := FindingForRelease(PackageQuery{}, ReleaseRow{
+				ProductSlug: "django",
+				Release:     tt.release,
+			}, now)
+			if !ok || got.RiskType != tt.wantRisk {
+				t.Fatalf("FindingForRelease() = risk %q, %t; want %q, true", got.RiskType, ok, tt.wantRisk)
+			}
+		})
+	}
+}
+
 func TestFindingForReleaseUsesSlugFallbackAndLeavesHealthyReleaseUnreported(t *testing.T) {
 	t.Parallel()
 
@@ -143,8 +225,32 @@ func TestFindingForReleaseUsesSlugFallbackAndLeavesHealthyReleaseUnreported(t *t
 	if !ok {
 		t.Fatal("FindingForRelease(IsEOL) ok = false")
 	}
-	if got.Title != "django 3.2 is end-of-life" {
-		t.Fatalf("FindingForRelease(IsEOL) title = %q", got.Title)
+	want := domain.Finding{
+		Name:       "django",
+		Version:    "3.2.25",
+		Ecosystem:  domain.EcosystemPyPI,
+		Type:       domain.FindingTypeSupplyChainRisk,
+		Severity:   SeverityEOL,
+		AdvisoryID: "endoflife:django:3.2:eol",
+		Title:      "django 3.2 is end-of-life",
+		URL:        "https://endoflife.date/django",
+		Resources: []domain.ResourceLink{
+			{Label: Source, URL: "https://endoflife.date/django"},
+		},
+		RiskType: RiskTypeEOL,
+		Source:   Source,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("FindingForRelease(IsEOL) = %+v, want %+v", got, want)
+	}
+
+	namedRow := ReleaseRow{
+		ProductSlug: "django",
+		ProductName: " Django ",
+		Release:     Release{Cycle: "3.2", IsEOL: true},
+	}
+	if named, ok := FindingForRelease(pkg, namedRow, now); !ok || named.Title != "Django 3.2 is end-of-life" {
+		t.Fatalf("FindingForRelease(product name) = title %q, %t; want trimmed product name", named.Title, ok)
 	}
 
 	if got, ok := FindingForRelease(pkg, ReleaseRow{ProductSlug: "django", Release: Release{Cycle: "4.2"}}, now); ok || got.AdvisoryID != "" || got.Name != "" || len(got.Resources) != 0 {
