@@ -6,6 +6,26 @@ import (
 	"testing"
 )
 
+func TestBoundedParseDiagnosticsEmptyInputReturnsNil(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		parseErrors []string
+	}{
+		{name: "nil"},
+		{name: "empty", parseErrors: []string{}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			visible, omitted := BoundedParseDiagnostics(test.parseErrors)
+			if visible != nil {
+				t.Fatalf("visible diagnostics = %#v, want nil", visible)
+			}
+			if omitted != 0 {
+				t.Fatalf("omitted diagnostics = %d, want 0", omitted)
+			}
+		})
+	}
+}
+
 func TestBoundedParseDiagnosticsTrimsBlanksBeforeApplyingLimit(t *testing.T) {
 	parseErrors := []string{"\tfirst\n", " ", "second"}
 	for index := 3; index <= MaxUserFacingParseDiagnostics; index++ {
