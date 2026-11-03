@@ -33,6 +33,54 @@ func TestMaliciousRiskTypeHelpersNormalizeSharedFeedMetadata(t *testing.T) {
 	}
 }
 
+func TestMaliciousRiskTypeFromJSONRejectsInvalidMetadataAndUsesCandidateOrder(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "malformed JSON", raw: `{"risk_type":`, want: ""},
+		{name: "empty metadata", raw: `{}`, want: ""},
+		{
+			name: "unrecognized metadata",
+			raw:  `{"risk_type":"unknown","type":"other","classification":"noise","categories":["benign",""]}`,
+			want: "",
+		},
+		{
+			name: "risk type precedes later candidates",
+			raw:  `{"risk_type":"typosquat","type":"supply-chain","classification":"malware","categories":["malware"]}`,
+			want: "typosquatting",
+		},
+		{
+			name: "type follows unrecognized risk type",
+			raw:  `{"risk_type":"unknown","type":"supply-chain","classification":"typosquat","categories":["malware"]}`,
+			want: "supply_chain",
+		},
+		{
+			name: "classification follows unrecognized fields",
+			raw:  `{"risk_type":"unknown","type":"other","classification":"typosquat","categories":["malware"]}`,
+			want: "typosquatting",
+		},
+		{
+			name: "first recognized category wins",
+			raw:  `{"categories":["unknown","typosquat","malware"]}`,
+			want: "typosquatting",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := MaliciousRiskTypeFromJSON(json.RawMessage(tt.raw)); got != tt.want {
+				t.Fatalf("MaliciousRiskTypeFromJSON(%s) = %q, want %q", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestClassifyMaliciousRiskTypeUsesExplicitMetadataBeforeHeuristics(t *testing.T) {
 	t.Parallel()
 
