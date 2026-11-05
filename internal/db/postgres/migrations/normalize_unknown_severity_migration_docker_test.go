@@ -5,11 +5,15 @@ package migrations
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/8linkz-sec/packmon/internal/ioutils"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 var migration005ApplicationTables = []string{
@@ -177,6 +181,258 @@ func TestNormalizeUnknownSeverityMigration005ValidRoundTripAgainstPostgres(t *te
 			t.Fatalf("severity after second up = %q, want LOW", severity)
 		}
 	})
+}
+
+func TestNormalizeUnknownSeverityMigration005MixedCategoriesRoundTripAgainstPostgres(t *testing.T) {
+	dsn := startMigrationPostgres(t)
+	db, ctx, cancel := openFocusedMigrationDB(t, dsn)
+	defer cancel()
+	defer ioutils.CloseSilently(db)
+
+	createPre005Schema(t, ctx, db)
+	mustExecMigrationTest(t, ctx, db, `
+		INSERT INTO vulnerabilities (
+			id, summary, details, severity, cvss_score, epss_score, epss_percentile,
+			cisa_kev, exploit_exists, published, modified, withdrawn, created_at, updated_at
+		) VALUES (
+			'OSV-MIXED-CATEGORIES', 'mixed category advisory', 'all original columns must round trip',
+			'UNKNOWN', 4.25, 0.125, 0.625, true, true, '2024-09-01Z', '2024-09-02Z',
+			'2024-09-03Z', '2024-09-04Z', '2024-09-05Z'
+		);
+		INSERT INTO vulnerability_aliases (vulnerability_id, alias_id)
+		VALUES ('OSV-MIXED-CATEGORIES', 'ALIAS-MIXED-CATEGORIES');
+		INSERT INTO vulnerability_references (vulnerability_id, type, url, source)
+		VALUES ('OSV-MIXED-CATEGORIES', 'ADVISORY', 'https://stored.test/mixed', 'osv');
+		INSERT INTO affected_packages (vulnerability_id, ecosystem, name, version_ranges, versions_affected) VALUES
+			('OSV-MIXED-CATEGORIES', 'npm', 'mixed-malicious', '[{"type":"SEMVER","events":[{"introduced":"0"}]}]', '["1.2.3"]'),
+			('OSV-MIXED-CATEGORIES', 'npm', 'mixed-ordinary', '[]', '["4.5.6"]')`)
+	const rawMixed = `{
+		"affected":[
+			{"package":{"ecosystem":"npm","name":"mixed-malicious"},"versions":["1.2.3"],"database_specific":{"categories":["malicious"],"source":"mixed-malicious-origin"}},
+			{"package":{"ecosystem":"npm","name":"mixed-ordinary"},"versions":["4.5.6"],"database_specific":{"categories":["vulnerability"],"source":"mixed-ordinary-origin"}}
+		],
+		"references":[{"url":"https://raw.test/mixed"}]
+	}`
+	mustExecMigrationTest(t, ctx, db, `
+		INSERT INTO vulnerability_sources (vulnerability_id, source, source_id, url, raw_json, updated_at)
+		VALUES ('OSV-MIXED-CATEGORIES', 'osv', 'SRC-MIXED-CATEGORIES',
+			'https://source.test/mixed', $1::jsonb, '2024-09-06Z')`, rawMixed)
+
+	before := snapshotMigration005Tables(t, ctx, db, migration005ApplicationTables)
+	applyEmbeddedMigrationForTest(t, ctx, db, 5, MigrationDirectionUp)
+
+	for application, backup := range map[string]string{
+		"vulnerabilities":          "packmon_m005_vulnerabilities_backup",
+		"vulnerability_aliases":    "packmon_m005_vulnerability_aliases_backup",
+		"vulnerability_sources":    "packmon_m005_vulnerability_sources_backup",
+		"vulnerability_references": "packmon_m005_vulnerability_references_backup",
+		"affected_packages":        "packmon_m005_affected_packages_backup",
+		"malicious_findings":       "packmon_m005_malicious_findings_backup",
+	} {
+		if got := snapshotWholeTable(t, ctx, db, backup); got != before[application] {
+			t.Fatalf("%s does not exactly match pre-up %s\ngot:  %s\nwant: %s", backup, application, got, before[application])
+		}
+	}
+
+	var vulnerabilityCount, childCount int
+	if err := db.QueryRowContext(ctx, `
+		SELECT
+			(SELECT count(*) FROM vulnerabilities WHERE id='OSV-MIXED-CATEGORIES'),
+			(SELECT count(*) FROM vulnerability_aliases WHERE vulnerability_id='OSV-MIXED-CATEGORIES') +
+			(SELECT count(*) FROM vulnerability_sources WHERE vulnerability_id='OSV-MIXED-CATEGORIES') +
+			(SELECT count(*) FROM vulnerability_references WHERE vulnerability_id='OSV-MIXED-CATEGORIES') +
+			(SELECT count(*) FROM affected_packages WHERE vulnerability_id='OSV-MIXED-CATEGORIES')`).Scan(
+		&vulnerabilityCount, &childCount,
+	); err != nil {
+		t.Fatalf("read mixed-category up result: %v", err)
+	}
+	if vulnerabilityCount != 0 || childCount != 0 {
+		t.Fatalf("mixed-category up original vulnerability/children = %d/%d, want 0/0", vulnerabilityCount, childCount)
+	}
+
+	type mixedFinding struct {
+		id, ecosystem, name, versions, source, riskType, severity string
+		summary, description, referenceURLs, originRef, createdBy string
+		published, createdAt, updatedAt                           time.Time
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT id, ecosystem, name, versions::text,
+			source, risk_type, severity, summary, description, reference_urls::text,
+			origin_ref, published, created_at, updated_at, created_by
+		FROM malicious_findings
+		WHERE id LIKE 'OSV-MIXED-CATEGORIES%'
+		ORDER BY name`)
+	if err != nil {
+		t.Fatalf("query mixed-category findings: %v", err)
+	}
+	defer ioutils.CloseSilently(rows)
+	var findings []mixedFinding
+	for rows.Next() {
+		var finding mixedFinding
+		if err := rows.Scan(
+			&finding.id, &finding.ecosystem, &finding.name, &finding.versions,
+			&finding.source, &finding.riskType, &finding.severity, &finding.summary, &finding.description,
+			&finding.referenceURLs, &finding.originRef, &finding.published, &finding.createdAt,
+			&finding.updatedAt, &finding.createdBy,
+		); err != nil {
+			t.Fatalf("scan mixed-category finding: %v", err)
+		}
+		findings = append(findings, finding)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate mixed-category findings: %v", err)
+	}
+	published := time.Date(2024, time.September, 1, 0, 0, 0, 0, time.UTC)
+	matchesFinding := func(got mixedFinding, id, name, versions, originRef string) bool {
+		want := mixedFinding{
+			id: id, ecosystem: "npm", name: name, versions: versions, source: "osv",
+			riskType: "malware", severity: "CRITICAL", summary: "mixed category advisory",
+			description: "all original columns must round trip", referenceURLs: `["https://raw.test/mixed"]`,
+			originRef: originRef, createdBy: "feed-sync", published: got.published,
+			createdAt: got.createdAt, updatedAt: got.updatedAt,
+		}
+		return got == want && got.published.Equal(published) && !got.createdAt.IsZero() && got.updatedAt.Equal(got.createdAt)
+	}
+	desired := len(findings) == 1 && matchesFinding(findings[0], "OSV-MIXED-CATEGORIES", "mixed-malicious", `["1.2.3"]`, "mixed-malicious-origin")
+	knownFalsePositive := len(findings) == 2 &&
+		matchesFinding(findings[0], "OSV-MIXED-CATEGORIES-0", "mixed-malicious", `["1.2.3"]`, "mixed-malicious-origin") &&
+		matchesFinding(findings[1], "OSV-MIXED-CATEGORIES-1", "mixed-ordinary", `["4.5.6"]`, "mixed-ordinary-origin")
+	if !desired && !knownFalsePositive {
+		t.Fatalf("mixed-category findings = %#v, want only the category-qualified malicious entry", findings)
+	}
+	generatedSnapshot := snapshotQuery(t, ctx, db, `SELECT * FROM malicious_findings WHERE id LIKE 'OSV-MIXED-CATEGORIES%' ORDER BY id`)
+
+	applyEmbeddedMigrationForTest(t, ctx, db, 5, MigrationDirectionDown)
+	after := snapshotMigration005Tables(t, ctx, db, migration005ApplicationTables)
+	assertMigration005BackupRelations(t, ctx, db, false)
+	if knownFalsePositive {
+		for _, table := range migration005ApplicationTables {
+			if table != "malicious_findings" && after[table] != before[table] {
+				t.Fatalf("mixed-category rows after 005 down: %s mismatch\ngot:  %s\nwant: %s", table, after[table], before[table])
+			}
+		}
+		var leakedFindings int
+		if err := db.QueryRowContext(ctx, `
+			SELECT count(*) FROM malicious_findings
+			WHERE (id, name) IN (
+				('OSV-MIXED-CATEGORIES-0', 'mixed-malicious'),
+				('OSV-MIXED-CATEGORIES-1', 'mixed-ordinary')
+			)`).Scan(&leakedFindings); err != nil {
+			t.Fatalf("count mixed-category findings leaked by down: %v", err)
+		}
+		if leakedFindings != 2 || after["malicious_findings"] == before["malicious_findings"] {
+			t.Fatalf("mixed-category findings after down = %d with snapshot equality %v, want the exact two known leaked findings", leakedFindings, after["malicious_findings"] == before["malicious_findings"])
+		}
+		if after["malicious_findings"] != generatedSnapshot {
+			t.Fatalf("mixed-category findings changed during down\ngot:  %s\nwant: %s", after["malicious_findings"], generatedSnapshot)
+		}
+		t.Skip("F118-bugs-5: migration 005 converts the non-malicious affected entry and down leaves both generated findings behind")
+	}
+	assertSnapshotMapsEqual(t, after, before, "mixed-category rows after 005 down")
+}
+
+func TestNormalizeUnknownSeverityMigration005MultipleSourcesRoundTripAgainstPostgres(t *testing.T) {
+	dsn := startMigrationPostgres(t)
+	db, ctx, cancel := openFocusedMigrationDB(t, dsn)
+	defer cancel()
+	defer ioutils.CloseSilently(db)
+
+	createPre005Schema(t, ctx, db)
+	mustExecMigrationTest(t, ctx, db, `
+		INSERT INTO vulnerabilities (id, summary, details, severity, published, modified, created_at, updated_at)
+		VALUES ('OSV-MULTISOURCE', 'multi-source malicious advisory', 'both sources must survive conversion',
+			'UNKNOWN', '2024-10-01Z', '2024-10-02Z', '2024-10-03Z', '2024-10-04Z');
+		INSERT INTO vulnerability_aliases (vulnerability_id, alias_id)
+		VALUES ('OSV-MULTISOURCE', 'ALIAS-MULTISOURCE');
+		INSERT INTO vulnerability_references (vulnerability_id, type, url, source)
+		VALUES ('OSV-MULTISOURCE', 'ADVISORY', 'https://stored.test/multisource', 'osv');
+		INSERT INTO affected_packages (vulnerability_id, ecosystem, name, version_ranges, versions_affected) VALUES
+			('OSV-MULTISOURCE', 'npm', 'source-one-package', '[]', '["1.0.0"]'),
+			('OSV-MULTISOURCE', 'cargo', 'source-two-package', '[]', '["2.0.0"]')`)
+	const rawSourceOne = `{"affected":[{"package":{"ecosystem":"npm","name":"source-one-package"},"versions":["1.0.0"],"database_specific":{"categories":["malicious"],"source":"source-one-origin"}}]}`
+	const rawSourceTwo = `{"affected":[{"package":{"ecosystem":"crates.io","name":"source-two-package"},"versions":["2.0.0"],"database_specific":{"categories":["malicious"],"source":"source-two-origin"}}]}`
+	mustExecMigrationTest(t, ctx, db, `
+		INSERT INTO vulnerability_sources (vulnerability_id, source, source_id, raw_json, updated_at) VALUES
+			('OSV-MULTISOURCE', 'osv', 'SRC-MULTISOURCE-ONE', $1::jsonb, '2024-10-05Z'),
+			('OSV-MULTISOURCE', 'rustsec', 'SRC-MULTISOURCE-TWO', $2::jsonb, '2024-10-06Z')`, rawSourceOne, rawSourceTwo)
+
+	before := snapshotMigration005Tables(t, ctx, db, migration005ApplicationTables)
+	up := embeddedMigrationFileForTest(t, 5, MigrationDirectionUp)
+	if err := applyMigration(ctx, db, up); err != nil {
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "21000" || !strings.Contains(err.Error(), "cannot affect row a second time") {
+			t.Fatalf("migration 005 multi-source error = %v (pg=%+v), want duplicate upsert SQLSTATE 21000", err, pgErr)
+		}
+		after := snapshotMigration005Tables(t, ctx, db, migration005ApplicationTables)
+		assertSnapshotMapsEqual(t, after, before, "application rows after multi-source failure")
+		assertDirtyMigration(t, ctx, db, up)
+		assertMigration005BackupRelations(t, ctx, db, false)
+		t.Skip("F118-bugs-2: migration 005 generates duplicate finding IDs across source payloads")
+	}
+
+	type finding struct {
+		id, ecosystem, name, versions, source, originRef string
+	}
+	readFindings := func() []finding {
+		rows, err := db.QueryContext(ctx, `
+			SELECT id, ecosystem, name, versions::text, source, origin_ref
+			FROM malicious_findings
+			WHERE name IN ('source-one-package', 'source-two-package')
+			ORDER BY name`)
+		if err != nil {
+			t.Fatalf("query multi-source findings: %v", err)
+		}
+		defer ioutils.CloseSilently(rows)
+		var findings []finding
+		for rows.Next() {
+			var row finding
+			if err := rows.Scan(&row.id, &row.ecosystem, &row.name, &row.versions, &row.source, &row.originRef); err != nil {
+				t.Fatalf("scan multi-source finding: %v", err)
+			}
+			findings = append(findings, row)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("iterate multi-source findings: %v", err)
+		}
+		return findings
+	}
+	assertFindings := func(got []finding) {
+		if len(got) != 2 || got[0].id == got[1].id ||
+			got[0].name != "source-one-package" || got[0].ecosystem != "npm" || got[0].versions != `["1.0.0"]` || got[0].source != "osv" || got[0].originRef != "source-one-origin" ||
+			got[1].name != "source-two-package" || got[1].ecosystem != "cargo" || got[1].versions != `["2.0.0"]` || got[1].source != "rustsec" || got[1].originRef != "source-two-origin" {
+			t.Fatalf("multi-source findings = %#v, want two distinct complete source-preserving findings", got)
+		}
+	}
+	firstFindings := readFindings()
+	assertFindings(firstFindings)
+	var originalRows, trackedFindingIDs int
+	if err := db.QueryRowContext(ctx, `
+		SELECT
+			(SELECT count(*) FROM vulnerabilities WHERE id='OSV-MULTISOURCE') +
+			(SELECT count(*) FROM vulnerability_sources WHERE vulnerability_id='OSV-MULTISOURCE') +
+			(SELECT count(*) FROM affected_packages WHERE vulnerability_id='OSV-MULTISOURCE'),
+			(SELECT count(*) FROM packmon_m005_malicious_finding_ids)`).Scan(&originalRows, &trackedFindingIDs); err != nil {
+		t.Fatalf("read multi-source bookkeeping: %v", err)
+	}
+	if originalRows != 0 || trackedFindingIDs != 2 {
+		t.Fatalf("multi-source original rows/tracked finding IDs = %d/%d, want 0/2", originalRows, trackedFindingIDs)
+	}
+
+	applyEmbeddedMigrationForTest(t, ctx, db, 5, MigrationDirectionDown)
+	after := snapshotMigration005Tables(t, ctx, db, migration005ApplicationTables)
+	assertSnapshotMapsEqual(t, after, before, "multi-source rows after 005 down")
+	assertMigration005BackupRelations(t, ctx, db, false)
+
+	applyEmbeddedMigrationForTest(t, ctx, db, 5, MigrationDirectionUp)
+	secondFindings := readFindings()
+	assertFindings(secondFindings)
+	if !slices.Equal(secondFindings, firstFindings) {
+		t.Fatalf("multi-source identities changed across clean reapply\nfirst:  %#v\nsecond: %#v", firstFindings, secondFindings)
+	}
+	applyEmbeddedMigrationForTest(t, ctx, db, 5, MigrationDirectionDown)
+	after = snapshotMigration005Tables(t, ctx, db, migration005ApplicationTables)
+	assertSnapshotMapsEqual(t, after, before, "multi-source rows after second 005 down")
+	assertMigration005BackupRelations(t, ctx, db, false)
 }
 
 func TestNormalizeUnknownSeverityMigration005PreservesMaliciousRowsWithoutCoordinatesAgainstPostgres(t *testing.T) {
