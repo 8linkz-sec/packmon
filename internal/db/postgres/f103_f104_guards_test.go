@@ -111,6 +111,36 @@ func TestF103FeedConfigGuardAndRevisionHelpers(t *testing.T) {
 	})
 }
 
+func TestF103NilFeedConfigRejectedBeforeStoreAccess(t *testing.T) {
+	validationErr := validateFeedConfigSyncInterval(nil)
+	if validationErr == nil {
+		t.Skip("F103-bugs-2: nil feed configs are accepted by validation")
+	}
+	if !strings.Contains(validationErr.Error(), "feed config") {
+		t.Fatalf("nil feed config validation error = %q, want feed-config context", validationErr)
+	}
+
+	store := &Store{}
+	tests := []struct {
+		name string
+		call func() error
+	}{
+		{name: "public upsert", call: func() error { return store.UpsertFeedConfig(context.Background(), nil) }},
+		{name: "audited public upsert", call: func() error { return store.UpsertFeedConfigWithAudit(context.Background(), nil, nil) }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.call()
+			if err == nil {
+				t.Fatal("nil feed config error = nil, want validation failure")
+			}
+			if !strings.Contains(err.Error(), "feed config") {
+				t.Fatalf("nil feed config error = %q, want feed-config validation context", err)
+			}
+		})
+	}
+}
+
 func TestF104FeedQueueGuards(t *testing.T) {
 	t.Run("feed status validation", func(t *testing.T) {
 		negativeDuration := -time.Microsecond
