@@ -24,6 +24,7 @@ type f368FeedConfigStore struct {
 	db.Store
 	mu      sync.Mutex
 	configs map[string]db.FeedConfig
+	jobs    []db.RefreshJob
 }
 
 func (*f368FeedConfigStore) GetAdminAuth(context.Context) (*db.AdminAuth, error) {
@@ -55,6 +56,27 @@ func (s *f368FeedConfigStore) DeleteFeedConfigWithAudit(_ context.Context, feedN
 	defer s.mu.Unlock()
 	delete(s.configs, config.NormalizeFeedName(feedName))
 	return nil
+}
+
+func (s *f368FeedConfigStore) EnqueueRefreshWithAudit(_ context.Context, job *db.RefreshJob, audit db.RefreshEnqueueAuditBuilder) (bool, int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.jobs = append(s.jobs, *job)
+	position := len(s.jobs)
+	if audit != nil {
+		_ = audit(true, position)
+	}
+	return true, position, nil
+}
+
+func (*f368FeedConfigStore) GetPackageCheckStatus(context.Context, string, string, string) (*db.PackageCheckStatus, error) {
+	return nil, nil
+}
+
+func (s *f368FeedConfigStore) refreshJobs() []db.RefreshJob {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]db.RefreshJob(nil), s.jobs...)
 }
 
 type f368ReputationStore struct {
@@ -106,6 +128,13 @@ func f368AdminFormRequest(t *testing.T, sm *auth.SessionManager, target string, 
 	return req
 }
 
+func f368RequestPackageRefresh(mux *http.ServeMux) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/packages/npm/left-pad/refresh", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	return rec
+}
+
 func TestF368RegisterRoutesRefreshesAPIFeedHandlersAfterSaveAndReset(t *testing.T) {
 	t.Run("save", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -129,21 +158,30 @@ func TestF368RegisterRoutesRefreshesAPIFeedHandlersAfterSaveAndReset(t *testing.
 				return cfg.SetFeedSettings(feed)
 			},
 		})
+		if rec := f368RequestPackageRefresh(mux); rec.Code != http.StatusConflict {
+			t.Fatalf("refresh before Socket save status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+		}
 
 		req := f368AdminFormRequest(t, sm, "/admin/feeds/save", url.Values{
-			"feed_name":     {"vulncheck"},
-			"enabled":       {"on"},
-			"mode":          {"self"},
-			"api_key":       {"runtime-key"},
-			"sync_interval": {"1h"},
+			"feed_name": {"socket"},
+			"enabled":   {"on"},
+			"mode":      {"self"},
+			"api_key":   {"runtime-key"},
 		})
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, req)
 		if rec.Code != http.StatusSeeOther {
 			t.Fatalf("save status = %d, want 303; body=%s", rec.Code, rec.Body.String())
 		}
-		if applied.Name != "vulncheck" || applied.APIKey != "runtime-key" {
+		if applied.Name != "socket" || applied.APIKey != "runtime-key" {
 			t.Fatalf("applied feed = %+v", applied)
+		}
+		if rec := f368RequestPackageRefresh(mux); rec.Code != http.StatusAccepted {
+			t.Fatalf("refresh after Socket save status = %d, want 202; body=%s", rec.Code, rec.Body.String())
+		}
+		jobs := store.refreshJobs()
+		if len(jobs) != 1 || jobs[0].Source != "socket" || jobs[0].Name != "left-pad" {
+			t.Fatalf("refresh jobs after Socket save = %+v", jobs)
 		}
 	})
 
@@ -151,6 +189,9 @@ func TestF368RegisterRoutesRefreshesAPIFeedHandlersAfterSaveAndReset(t *testing.
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		cfg := f368RouteConfig()
+		cfg.Feeds.SocketEnabled = true
+		cfg.Feeds.SocketMode = config.FeedModeSelf
+		cfg.Feeds.SocketAPIKey = "runtime-key"
 		store := &f368FeedConfigStore{configs: make(map[string]db.FeedConfig)}
 		mux := http.NewServeMux()
 		sm := auth.NewSessionManagerWithIdleTimeout(ctx, time.Hour, auth.DefaultAdminIdleTimeout, false)
@@ -167,12 +208,22 @@ func TestF368RegisterRoutesRefreshesAPIFeedHandlersAfterSaveAndReset(t *testing.
 			resetFeedConfig: func(_ context.Context, feedName string) (config.FeedSettings, bool, error) {
 				resetName = feedName
 				feed, ok := cfg.FeedSettings(feedName)
+				if ok {
+					feed.Enabled = false
+					feed.APIKey = ""
+					if err := cfg.SetFeedSettings(feed); err != nil {
+						return config.FeedSettings{}, false, err
+					}
+				}
 				return feed, ok, nil
 			},
 		})
+		if rec := f368RequestPackageRefresh(mux); rec.Code != http.StatusAccepted {
+			t.Fatalf("refresh before Socket reset status = %d, want 202; body=%s", rec.Code, rec.Body.String())
+		}
 
 		req := f368AdminFormRequest(t, sm, "/admin/feeds/reset", url.Values{
-			"feed_name":     {"vulncheck"},
+			"feed_name":     {"socket"},
 			"confirm_reset": {"on"},
 		})
 		rec := httptest.NewRecorder()
@@ -180,8 +231,14 @@ func TestF368RegisterRoutesRefreshesAPIFeedHandlersAfterSaveAndReset(t *testing.
 		if rec.Code != http.StatusSeeOther {
 			t.Fatalf("reset status = %d, want 303; body=%s", rec.Code, rec.Body.String())
 		}
-		if resetName != "vulncheck" {
-			t.Fatalf("reset feed = %q, want vulncheck", resetName)
+		if resetName != "socket" {
+			t.Fatalf("reset feed = %q, want socket", resetName)
+		}
+		if rec := f368RequestPackageRefresh(mux); rec.Code != http.StatusConflict {
+			t.Fatalf("refresh after Socket reset status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+		}
+		if jobs := store.refreshJobs(); len(jobs) != 1 {
+			t.Fatalf("refresh jobs after Socket reset = %+v, want only pre-reset job", jobs)
 		}
 	})
 }
