@@ -933,6 +933,8 @@ type vulncheckStoreStub struct {
 	entries    []db.VulnCheckEntry
 	status     *db.FeedSyncStatus
 	err        error
+	statusErr  error
+	upsertErr  error
 }
 
 func (s *vulncheckStoreStub) EnrichVulnCheck(_ context.Context, entries []db.VulnCheckEntry) (int, error) {
@@ -945,6 +947,9 @@ func (s *vulncheckStoreStub) EnrichVulnCheck(_ context.Context, entries []db.Vul
 }
 
 func (s *vulncheckStoreStub) GetFeedSyncStatus(_ context.Context, feedName string) (*db.FeedSyncStatus, error) {
+	if s.statusErr != nil {
+		return nil, s.statusErr
+	}
 	if s.status == nil || s.status.FeedName != feedName {
 		return nil, nil
 	}
@@ -964,6 +969,9 @@ func (s *vulncheckStoreStub) GetFeedSyncStatus(_ context.Context, feedName strin
 }
 
 func (s *vulncheckStoreStub) UpsertFeedSyncStatus(_ context.Context, status *db.FeedSyncStatus) error {
+	if s.upsertErr != nil {
+		return s.upsertErr
+	}
 	if status == nil {
 		s.status = nil
 		return nil

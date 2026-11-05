@@ -644,6 +644,29 @@ func TestSyncerName(t *testing.T) {
 	}
 }
 
+func TestValidateCatalogRejectsPositiveCountWithoutEntries(t *testing.T) {
+	t.Parallel()
+
+	_, err := validateCatalog(catalog{CatalogVersion: "2026.11.05", Count: 1, Vulnerabilities: []catalogVulnEntry{}})
+	if err == nil || !strings.Contains(err.Error(), "vulnerabilities must not be empty") {
+		t.Fatalf("validateCatalog() error = %v, want empty vulnerabilities error", err)
+	}
+}
+
+func TestCatalogHelperEmptyBranches(t *testing.T) {
+	t.Parallel()
+
+	if got := (catalogSyncMetadata{ETag: "stored"}).mergeResponseValidators(nil); got.ETag != "stored" {
+		t.Fatalf("mergeResponseValidators(nil) = %+v", got)
+	}
+	if synced, total := statusCounts(nil); synced != 0 || total != 0 {
+		t.Fatalf("statusCounts(nil) = %d, %d", synced, total)
+	}
+	if got := metadataJSON(catalogSyncMetadata{}); got != nil {
+		t.Fatalf("metadataJSON(empty) = %s, want nil", got)
+	}
+}
+
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }

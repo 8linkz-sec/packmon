@@ -38,6 +38,8 @@ type osvStoreStub struct {
 	statusHistory    []db.FeedSyncStatus
 	statusErr        error
 	upsertErr        error
+	deleteErr        error
+	maliciousErr     error
 	vulnUpsertErrIDs map[string]error
 	rejectCanceled   bool
 }
@@ -57,6 +59,9 @@ func (s *osvStoreStub) UpsertVulnerability(_ context.Context, vuln *db.Vulnerabi
 func (s *osvStoreStub) UpsertMaliciousFinding(_ context.Context, finding *db.MaliciousFinding) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.maliciousErr != nil {
+		return s.maliciousErr
+	}
 	s.malicious = append(s.malicious, finding)
 	return nil
 }
@@ -71,6 +76,9 @@ func (s *osvStoreStub) DeleteVulnerability(_ context.Context, id string) error {
 func (s *osvStoreStub) DeleteVulnerabilityForSource(_ context.Context, id, source string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.deleteErr != nil {
+		return s.deleteErr
+	}
 	s.deletedVulns = append(s.deletedVulns, id)
 	s.deletedSources = append(s.deletedSources, source)
 	return nil

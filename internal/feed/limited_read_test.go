@@ -107,3 +107,20 @@ func TestReadRootFileLimitedPropagatesOpenError(t *testing.T) {
 		t.Fatalf("ReadRootFileLimited() error = %v, want not-exist error", err)
 	}
 }
+
+func TestReadRootFileLimitedPropagatesDirectoryReadError(t *testing.T) {
+	rootPath := t.TempDir()
+	if err := os.Mkdir(filepath.Join(rootPath, "advisory.json"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+
+	_, err = ReadRootFileLimited(root, "advisory.json", 1)
+	if err == nil {
+		t.Fatal("ReadRootFileLimited(directory) error = nil, want read error")
+	}
+}
