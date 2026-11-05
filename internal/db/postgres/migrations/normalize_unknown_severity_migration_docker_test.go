@@ -179,6 +179,79 @@ func TestNormalizeUnknownSeverityMigration005ValidRoundTripAgainstPostgres(t *te
 	})
 }
 
+func TestNormalizeUnknownSeverityMigration005PreservesMaliciousRowsWithoutCoordinatesAgainstPostgres(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		ecosystem   string
+		packageName string
+	}{
+		{name: "empty package name", ecosystem: "npm"},
+		{name: "empty ecosystem", packageName: "missing-ecosystem"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dsn := startMigrationPostgres(t)
+			db, ctx, cancel := openFocusedMigrationDB(t, dsn)
+			defer cancel()
+			defer ioutils.CloseSilently(db)
+
+			createPre005Schema(t, ctx, db)
+			mustExecMigrationTest(t, ctx, db, `
+				INSERT INTO vulnerabilities (
+					id, summary, details, severity, cvss_score, epss_score, epss_percentile,
+					cisa_kev, exploit_exists, published, modified, withdrawn, created_at, updated_at
+				) VALUES (
+					'OSV-MISSING-COORDINATES', 'malicious advisory without coordinates', 'must remain representable',
+					'UNKNOWN', 4.5, 0.25, 0.5, true, true, '2024-07-01Z', '2024-07-02Z', NULL,
+					'2024-07-03Z', '2024-07-04Z'
+				);
+				INSERT INTO vulnerability_aliases (vulnerability_id, alias_id)
+				VALUES ('OSV-MISSING-COORDINATES', 'ALIAS-MISSING-COORDINATES');
+				INSERT INTO vulnerability_references (vulnerability_id, type, url, source)
+				VALUES ('OSV-MISSING-COORDINATES', 'ADVISORY', 'https://stored.test/missing-coordinates', 'osv');
+				INSERT INTO affected_packages (vulnerability_id, ecosystem, name, version_ranges, versions_affected)
+				VALUES ('OSV-MISSING-COORDINATES', 'npm', 'legacy-coordinate', '[]'::jsonb, '["1.0.0"]'::jsonb)`)
+			rawJSON := fmt.Sprintf(`{"affected":[{"package":{"ecosystem":%q,"name":%q},"database_specific":{"categories":["malicious"]}}],"references":[{"url":"https://reference.test/missing-coordinates"}]}`, tt.ecosystem, tt.packageName)
+			mustExecMigrationTest(t, ctx, db, `
+				INSERT INTO vulnerability_sources (vulnerability_id, source, source_id, url, raw_json, updated_at)
+				VALUES ('OSV-MISSING-COORDINATES', 'osv', 'SRC-MISSING-COORDINATES',
+					'https://source.test/missing-coordinates', $1::jsonb, '2024-07-05Z')`, rawJSON)
+
+			before := snapshotMigration005Tables(t, ctx, db, migration005ApplicationTables)
+			applyEmbeddedMigrationForTest(t, ctx, db, 5, MigrationDirectionUp)
+
+			var vulnerabilityCount, aliasCount, sourceCount, referenceCount, affectedCount, findingCount int
+			var severity string
+			if err := db.QueryRowContext(ctx, `
+				SELECT
+					(SELECT count(*) FROM vulnerabilities WHERE id='OSV-MISSING-COORDINATES'),
+					COALESCE((SELECT severity FROM vulnerabilities WHERE id='OSV-MISSING-COORDINATES'), ''),
+					(SELECT count(*) FROM vulnerability_aliases WHERE vulnerability_id='OSV-MISSING-COORDINATES'),
+					(SELECT count(*) FROM vulnerability_sources WHERE vulnerability_id='OSV-MISSING-COORDINATES'),
+					(SELECT count(*) FROM vulnerability_references WHERE vulnerability_id='OSV-MISSING-COORDINATES'),
+					(SELECT count(*) FROM affected_packages WHERE vulnerability_id='OSV-MISSING-COORDINATES'),
+					(SELECT count(*) FROM malicious_findings WHERE id LIKE 'OSV-MISSING-COORDINATES%')`).Scan(
+				&vulnerabilityCount, &severity, &aliasCount, &sourceCount, &referenceCount, &affectedCount, &findingCount,
+			); err != nil {
+				t.Fatalf("read coordinate-less rows after up: %v", err)
+			}
+
+			knownDestructiveResult := vulnerabilityCount == 0 && severity == "" && aliasCount == 0 && sourceCount == 0 && referenceCount == 0 && affectedCount == 0 && findingCount == 0
+			preservedResult := vulnerabilityCount == 1 && severity == "LOW" && aliasCount == 1 && sourceCount == 1 && referenceCount == 1 && affectedCount == 1 && findingCount == 0
+			if !knownDestructiveResult && !preservedResult {
+				t.Fatalf("coordinate-less up result = vulnerability %d severity %q alias/source/reference/affected %d/%d/%d/%d findings %d, want complete LOW preservation and no finding", vulnerabilityCount, severity, aliasCount, sourceCount, referenceCount, affectedCount, findingCount)
+			}
+
+			applyEmbeddedMigrationForTest(t, ctx, db, 5, MigrationDirectionDown)
+			after := snapshotMigration005Tables(t, ctx, db, migration005ApplicationTables)
+			assertSnapshotMapsEqual(t, after, before, "coordinate-less rows after 005 down")
+			assertMigration005BackupRelations(t, ctx, db, false)
+			if knownDestructiveResult {
+				t.Skip("F118-bugs-3: migration 005 deletes a malicious vulnerability when no usable package coordinate can produce a finding")
+			}
+		})
+	}
+}
+
 func TestNormalizeUnknownSeverityMigration005MissingBackupFailsAtomicallyAgainstPostgres(t *testing.T) {
 	dsn := startMigrationPostgres(t)
 	db, ctx, cancel := openFocusedMigrationDB(t, dsn)
