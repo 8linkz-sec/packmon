@@ -895,47 +895,56 @@ func boundedRuntimeDiagnostic(output string, replacements map[string]string) str
 
 func extractTar(t *testing.T, archivePath, destination string) {
 	t.Helper()
+	if err := extractTarArchive(archivePath, destination); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func extractTarArchive(archivePath, destination string) error {
 	file, err := os.Open(archivePath) // #nosec G304 -- test-owned archive path
 	if err != nil {
-		t.Fatalf("open reviewed archive: %v", err)
+		return fmt.Errorf("open reviewed archive: %w", err)
 	}
 	defer file.Close()
 	reader := tar.NewReader(file)
 	for {
 		header, err := reader.Next()
 		if err == io.EOF {
-			return
+			return nil
 		}
 		if err != nil {
-			t.Fatalf("read reviewed archive: %v", err)
+			return fmt.Errorf("read reviewed archive: %w", err)
+		}
+		if header.Typeflag == tar.TypeXGlobalHeader {
+			continue
 		}
 		target := filepath.Join(destination, filepath.FromSlash(header.Name))
 		rel, err := filepath.Rel(destination, target)
 		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			t.Fatalf("reviewed archive contains unsafe path %q", header.Name)
+			return fmt.Errorf("reviewed archive contains unsafe path %q", header.Name)
 		}
 		switch header.Typeflag {
 		case tar.TypeDir:
 			if err := os.MkdirAll(target, 0o755); err != nil {
-				t.Fatalf("create reviewed archive directory: %v", err)
+				return fmt.Errorf("create reviewed archive directory: %w", err)
 			}
 		case tar.TypeReg:
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-				t.Fatalf("create reviewed archive parent: %v", err)
+				return fmt.Errorf("create reviewed archive parent: %w", err)
 			}
 			out, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, os.FileMode(header.Mode)&0o777) // #nosec G304 -- target was constrained to test-owned destination
 			if err != nil {
-				t.Fatalf("create reviewed archive file: %v", err)
+				return fmt.Errorf("create reviewed archive file: %w", err)
 			}
 			if _, err := io.Copy(out, reader); err != nil {
 				_ = out.Close()
-				t.Fatalf("extract reviewed archive file: %v", err)
+				return fmt.Errorf("extract reviewed archive file: %w", err)
 			}
 			if err := out.Close(); err != nil {
-				t.Fatalf("close reviewed archive file: %v", err)
+				return fmt.Errorf("close reviewed archive file: %w", err)
 			}
 		default:
-			t.Fatalf("reviewed archive contains unsupported entry %q type %d", header.Name, header.Typeflag)
+			return fmt.Errorf("reviewed archive contains unsupported entry %q type %d", header.Name, header.Typeflag)
 		}
 	}
 }
