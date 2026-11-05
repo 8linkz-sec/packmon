@@ -185,17 +185,17 @@ func TestF251RegistryLookupBranches(t *testing.T) {
 	}
 
 	client.LookupIP = nil
-	ips, err := client.lookupHost(t.Context(), "localhost")
-	if err != nil {
-		t.Fatalf("lookupHost(localhost): %v", err)
-	}
-	if len(ips) == 0 {
-		t.Fatal("lookupHost(localhost) returned no addresses")
-	}
-
 	canceled, cancel := context.WithCancel(t.Context())
 	cancel()
-	if _, err := defaultLookupIP(canceled, "unresolvable.invalid"); err == nil {
-		t.Fatal("defaultLookupIP(canceled context) error = nil")
+	if _, err := client.lookupHost(canceled, "registry.invalid"); err == nil {
+		t.Fatal("lookupHost(nil fallback with canceled context) error = nil")
+	}
+
+	ips, err := defaultLookupIP(t.Context(), "192.0.2.1")
+	if err != nil {
+		t.Fatalf("defaultLookupIP(literal address): %v", err)
+	}
+	if len(ips) != 1 || !ips[0].Equal(net.ParseIP("192.0.2.1")) {
+		t.Fatalf("defaultLookupIP(literal address) = %v, want 192.0.2.1", ips)
 	}
 }
