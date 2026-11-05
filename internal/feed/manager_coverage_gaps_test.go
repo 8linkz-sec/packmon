@@ -132,7 +132,8 @@ func TestManagerPendingAndInterruptedRecoveryBranches(t *testing.T) {
 func TestManagerPhaseReleasePreviousCancellationAndStatusFallbacks(t *testing.T) {
 	t.Parallel()
 
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logHandler, logSink := newManagerLogHandler()
+	logger := slog.New(logHandler)
 	ctx, cancel := context.WithCancel(context.Background())
 	manager := NewManager(&managerStoreStub{}, logger, time.Hour)
 	manager.ctx = ctx
@@ -141,7 +142,14 @@ func TestManagerPhaseReleasePreviousCancellationAndStatusFallbacks(t *testing.T)
 	manager.feeds["epss"] = rf
 	manager.startFeedLocked(rf, time.Hour, nil, feedStartOptions{waitForPhase1: true, syncOnStartup: false})
 	close(manager.phase1Done)
-	time.Sleep(10 * time.Millisecond)
+	deadline := time.After(time.Second)
+	for logSink.count("phase 1 complete, starting enrichment feed", "epss") == 0 || logSink.count("starting feed sync loop", "epss") == 0 {
+		select {
+		case <-logSink.ch:
+		case <-deadline:
+			t.Fatal("enrichment feed did not enter its loop after phase 1 completed")
+		}
+	}
 	cancel()
 	manager.Wait()
 

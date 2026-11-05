@@ -98,7 +98,7 @@ func TestNVDZeroBatchUsesWholeSliceAndRateLimitRetryWithoutLimiter(t *testing.T)
 	var requests atomic.Int32
 	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		if requests.Add(1) == 1 {
-			return &http.Response{StatusCode: http.StatusTooManyRequests, Header: http.Header{"Retry-After": []string{"0"}}, Body: io.NopCloser(strings.NewReader(""))}, nil
+			return &http.Response{StatusCode: http.StatusTooManyRequests, Header: http.Header{"Retry-After": []string{"1"}}, Body: io.NopCloser(strings.NewReader(""))}, nil
 		}
 		return &http.Response{StatusCode: http.StatusNotFound, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
 	})}
