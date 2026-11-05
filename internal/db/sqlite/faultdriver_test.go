@@ -6,7 +6,6 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -138,7 +137,7 @@ func openFaultyDB(t *testing.T, contains string, skip int) (*sql.DB, *faultRule)
 	faultDriverMu.Unlock()
 	sql.Register(name, &faultDriver{inner: inner, rule: rule})
 
-	db, err := sql.Open(name, filepath.Join(t.TempDir(), "faulty.db"))
+	db, err := sql.Open(name, ":memory:")
 	if err != nil {
 		t.Fatalf("open faulty database: %v", err)
 	}
