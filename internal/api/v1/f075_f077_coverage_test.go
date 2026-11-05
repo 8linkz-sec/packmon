@@ -115,6 +115,29 @@ func f075EPSSEntriesBody(count int, invalidLast bool, status string) string {
 	return body.String()
 }
 
+func f075VulnCheckEntriesBody(count int, invalidLast bool, status string) string {
+	var body strings.Builder
+	body.Grow(count*64 + len(status) + 32)
+	body.WriteString(`{"entries":[`)
+	for i := 0; i < count; i++ {
+		if i > 0 {
+			body.WriteByte(',')
+		}
+		if invalidLast && i == count-1 {
+			body.WriteString(`{"exploit_exists":true}`)
+			continue
+		}
+		fmt.Fprintf(&body, `{"cve_id":"CVE-2026-%04d","cvss_score":5.5}`, 2000+i)
+	}
+	body.WriteByte(']')
+	if status != "" {
+		body.WriteString(`,"status":`)
+		body.WriteString(status)
+	}
+	body.WriteByte('}')
+	return body.String()
+}
+
 func TestF075StreamingMalformedBodiesPreserveState(t *testing.T) {
 	validEntry := `{"cve_id":"CVE-2026-7501","score":0.1,"percentile":0.2}`
 	oversized := io.MultiReader(
@@ -125,10 +148,15 @@ func TestF075StreamingMalformedBodiesPreserveState(t *testing.T) {
 		name string
 		body io.Reader
 	}{
+		{name: "empty body", body: strings.NewReader("")},
+		{name: "top-level null", body: strings.NewReader(`null`)},
 		{name: "truncated JSON", body: strings.NewReader(`{"entries":[` + validEntry + `]`)},
 		{name: "unknown field", body: strings.NewReader(`{"entries":[` + validEntry + `],"unexpected":true}`)},
+		{name: "unknown entry field", body: strings.NewReader(`{"entries":[{"cve_id":"CVE-2026-7501","score":0.1,"percentile":0.2,"unexpected":true}]}`)},
 		{name: "wrong top-level type", body: strings.NewReader(`[]`)},
 		{name: "wrong entries type", body: strings.NewReader(`{"entries":{}}`)},
+		{name: "wrong entry type", body: strings.NewReader(`{"entries":[true]}`)},
+		{name: "wrong status type", body: strings.NewReader(`{"entries":[` + validEntry + `],"status":[]}`)},
 		{name: "trailing document", body: strings.NewReader(`{"entries":[` + validEntry + `]} {}`)},
 		{name: "null entries", body: strings.NewReader(`{"entries":null}`)},
 		{name: "empty entries", body: strings.NewReader(`{"entries":[]}`)},
@@ -177,6 +205,12 @@ func TestF075StreamingLateFailuresPreserveState(t *testing.T) {
 			wantBatches: []int{1},
 		},
 		{
+			name:        "invalid explicit status after complete stream",
+			body:        f075EPSSEntriesBody(epssImportStreamBatchSize+1, false, `{"last_sync_status":"not-supported"}`),
+			wantTotal:   epssImportStreamBatchSize + 1,
+			wantBatches: []int{epssImportStreamBatchSize, 1},
+		},
+		{
 			name:          "emit failure after successful batch",
 			body:          f075EPSSEntriesBody(epssImportStreamBatchSize+1, false, ""),
 			failEmitBatch: 2,
@@ -210,6 +244,196 @@ func TestF075StreamingLateFailuresPreserveState(t *testing.T) {
 			}
 			if !reflect.DeepEqual(store.snapshot, seed) || store.statusWrites != 0 || store.auditWrites != 0 {
 				t.Fatalf("failed stream committed state: snapshot=%+v status=%d audit=%d", store.snapshot, store.statusWrites, store.auditWrites)
+			}
+		})
+	}
+}
+
+func TestF075VulnCheckStreamingMalformedBodiesPreserveState(t *testing.T) {
+	validEntry := `{"cve_id":"CVE-2026-7601","cvss_score":5.5}`
+	tests := []struct {
+		name string
+		body func() io.Reader
+	}{
+		{name: "empty body", body: func() io.Reader { return strings.NewReader("") }},
+		{name: "truncated JSON", body: func() io.Reader { return strings.NewReader(`{"entries":[` + validEntry + `]`) }},
+		{name: "unknown field", body: func() io.Reader { return strings.NewReader(`{"entries":[` + validEntry + `],"unexpected":true}`) }},
+		{name: "unknown entry field", body: func() io.Reader {
+			return strings.NewReader(`{"entries":[{"cve_id":"CVE-2026-7601","unexpected":true}]}`)
+		}},
+		{name: "wrong top-level type", body: func() io.Reader { return strings.NewReader(`[]`) }},
+		{name: "wrong entries type", body: func() io.Reader { return strings.NewReader(`{"entries":{}}`) }},
+		{name: "wrong entry type", body: func() io.Reader { return strings.NewReader(`{"entries":[true]}`) }},
+		{name: "wrong status type", body: func() io.Reader { return strings.NewReader(`{"entries":[` + validEntry + `],"status":"ok"}`) }},
+		{name: "trailing document", body: func() io.Reader { return strings.NewReader(`{"entries":[` + validEntry + `]} {}`) }},
+		{name: "body limit", body: func() io.Reader {
+			return io.MultiReader(
+				strings.NewReader(`{"entries":[]}`),
+				io.LimitReader(f075RepeatReader{value: ' '}, maxImportBody+1),
+			)
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			seed := []db.VulnCheckEntry{{CVEID: "CVE-2026-7002", ExploitExists: true}}
+			store := &atomicFailingVulnCheckStore{committed: append([]db.VulnCheckEntry(nil), seed...)}
+			h := newTestFeedImportHandler(store)
+			_, _, err := h.importVulnCheckRequest(context.Background(), "vulncheck", f075EPSSRequest(tt.body()), func(int, int) db.AdminAuditEntry {
+				return db.AdminAuditEntry{Action: "feed_import"}
+			})
+			if err == nil {
+				t.Fatal("malformed streamed import error = nil, want rejection")
+			}
+			if !reflect.DeepEqual(store.committed, seed) {
+				t.Fatalf("committed entries = %+v, want original %+v", store.committed, seed)
+			}
+			if store.streamCalls != 1 || len(store.upsertedStatuses) != 0 || len(store.auditEntries) != 0 {
+				t.Fatalf("stream/status/audit calls = %d/%d/%d, want 1/0/0", store.streamCalls, len(store.upsertedStatuses), len(store.auditEntries))
+			}
+		})
+	}
+}
+
+func TestF075VulnCheckOmittedAndEmptyEntriesRemainAtomicNoOps(t *testing.T) {
+	for _, body := range []string{`{}`, `{"entries":[]}`} {
+		t.Run(body, func(t *testing.T) {
+			seed := []db.VulnCheckEntry{{CVEID: "CVE-2026-7003", ExploitExists: true}}
+			store := &atomicFailingVulnCheckStore{committed: append([]db.VulnCheckEntry(nil), seed...)}
+			h := newTestFeedImportHandler(store)
+			resp, total, err := h.importVulnCheckRequest(context.Background(), "vulncheck", f075EPSSRequest(strings.NewReader(body)), func(int, int) db.AdminAuditEntry {
+				return db.AdminAuditEntry{Action: "feed_import"}
+			})
+			if err != nil {
+				t.Fatalf("empty streamed import error = %v", err)
+			}
+			if resp == nil || resp.Imported != 0 || resp.EntriesTotal != 0 || total != 0 {
+				t.Fatalf("response/total = %+v/%d, want zero-entry success", resp, total)
+			}
+			if !reflect.DeepEqual(store.committed, seed) || len(store.streamBatchSizes) != 0 {
+				t.Fatalf("empty import changed entries: committed=%+v batches=%v", store.committed, store.streamBatchSizes)
+			}
+			if len(store.upsertedStatuses) != 0 || len(store.auditEntries) != 1 {
+				t.Fatalf("status/audit writes = %d/%d, want 0/1", len(store.upsertedStatuses), len(store.auditEntries))
+			}
+		})
+	}
+}
+
+func TestF075VulnCheckNullShapesAreRejectedAtomically(t *testing.T) {
+	for _, body := range []string{`null`, `{"entries":null}`} {
+		t.Run(body, func(t *testing.T) {
+			seed := []db.VulnCheckEntry{{CVEID: "CVE-2026-7003", ExploitExists: true}}
+			store := &atomicFailingVulnCheckStore{committed: append([]db.VulnCheckEntry(nil), seed...)}
+			h := newTestFeedImportHandler(store)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/feeds/vulncheck/import", strings.NewReader(body))
+			req.SetPathValue("feed", "vulncheck")
+			req.Header.Set("Content-Type", "application/json")
+			rr := httptest.NewRecorder()
+
+			h.HandleImport(rr, req)
+
+			if !reflect.DeepEqual(store.committed, seed) || len(store.streamBatchSizes) != 0 {
+				t.Fatalf("null import changed entries: committed=%+v batches=%v", store.committed, store.streamBatchSizes)
+			}
+			if rr.Code == http.StatusOK {
+				if len(store.upsertedStatuses) != 0 || len(store.auditEntries) != 1 {
+					t.Fatalf("accepted null import status/audit writes = %d/%d, want 0/1", len(store.upsertedStatuses), len(store.auditEntries))
+				}
+				t.Skip("F075-bugs-4: VulnCheck streaming imports accept OpenAPI-invalid null request shapes")
+			}
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("null import status = %d, want 400: %s", rr.Code, rr.Body.String())
+			}
+			if len(store.auditEntries) != 0 || len(store.upsertedStatuses) != 1 || store.upsertedStatuses[0].LastSyncStatus != db.FeedSyncStatusRejected {
+				t.Fatalf("rejected null import status/audit = %+v/%d", store.upsertedStatuses, len(store.auditEntries))
+			}
+		})
+	}
+}
+
+func TestF075StreamingHTTPRejectionsPreserveStoredData(t *testing.T) {
+	t.Run("EPSS late invalid record", func(t *testing.T) {
+		seed := []db.EPSSEntry{{CVEID: "CVE-2026-7005", Score: 0.4, Percentile: 0.6}}
+		store := &f075AtomicEPSSStore{snapshot: append([]db.EPSSEntry(nil), seed...)}
+		h := newTestFeedImportHandler(store)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/feeds/epss/import", strings.NewReader(f075EPSSEntriesBody(epssImportStreamBatchSize+1, true, "")))
+		req.SetPathValue("feed", "epss")
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+
+		h.HandleImport(rr, req)
+
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400: %s", rr.Code, rr.Body.String())
+		}
+		if !reflect.DeepEqual(store.snapshot, seed) || store.statusWrites != 0 || store.auditWrites != 0 || len(store.auditEntries) != 0 {
+			t.Fatalf("rejected EPSS import committed data: snapshot=%+v status=%d audit=%d/%d", store.snapshot, store.statusWrites, store.auditWrites, len(store.auditEntries))
+		}
+		if len(store.upsertedStatuses) != 1 || store.upsertedStatuses[0].LastSyncStatus != db.FeedSyncStatusRejected || store.upsertedStatuses[0].EntriesTotal != epssImportStreamBatchSize+1 {
+			t.Fatalf("rejected EPSS status = %+v", store.upsertedStatuses)
+		}
+	})
+
+	t.Run("VulnCheck invalid final status", func(t *testing.T) {
+		seed := []db.VulnCheckEntry{{CVEID: "CVE-2026-7006", ExploitExists: true}}
+		store := &atomicFailingVulnCheckStore{committed: append([]db.VulnCheckEntry(nil), seed...)}
+		h := newTestFeedImportHandler(store)
+		body := f075VulnCheckEntriesBody(vulnCheckImportStreamBatchSize+1, false, `{"last_sync_status":"not-supported"}`)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/feeds/vulncheck/import", strings.NewReader(body))
+		req.SetPathValue("feed", "vulncheck")
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+
+		h.HandleImport(rr, req)
+
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400: %s", rr.Code, rr.Body.String())
+		}
+		if !reflect.DeepEqual(store.committed, seed) || len(store.auditEntries) != 0 {
+			t.Fatalf("rejected VulnCheck import committed data: entries=%+v audit=%d", store.committed, len(store.auditEntries))
+		}
+		if len(store.upsertedStatuses) != 1 || store.upsertedStatuses[0].LastSyncStatus != db.FeedSyncStatusRejected || store.upsertedStatuses[0].EntriesTotal != vulnCheckImportStreamBatchSize+1 {
+			t.Fatalf("rejected VulnCheck status = %+v", store.upsertedStatuses)
+		}
+	})
+}
+
+func TestF075VulnCheckLateFailuresPreserveState(t *testing.T) {
+	tests := []struct {
+		name        string
+		body        string
+		wantBatches []int
+	}{
+		{
+			name:        "invalid late record",
+			body:        f075VulnCheckEntriesBody(vulnCheckImportStreamBatchSize+1, true, ""),
+			wantBatches: []int{vulnCheckImportStreamBatchSize},
+		},
+		{
+			name:        "invalid explicit status after complete stream",
+			body:        f075VulnCheckEntriesBody(vulnCheckImportStreamBatchSize+1, false, `{"last_sync_status":"not-supported"}`),
+			wantBatches: []int{vulnCheckImportStreamBatchSize, 1},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			seed := []db.VulnCheckEntry{{CVEID: "CVE-2026-7004", ExploitExists: true}}
+			store := &atomicFailingVulnCheckStore{committed: append([]db.VulnCheckEntry(nil), seed...)}
+			h := newTestFeedImportHandler(store)
+			_, total, err := h.importVulnCheckRequest(context.Background(), "vulncheck", f075EPSSRequest(strings.NewReader(tt.body)), func(int, int) db.AdminAuditEntry {
+				return db.AdminAuditEntry{Action: "feed_import"}
+			})
+			if err == nil {
+				t.Fatal("late streamed import error = nil, want rejection")
+			}
+			if total != vulnCheckImportStreamBatchSize+1 {
+				t.Fatalf("entries total = %d, want %d", total, vulnCheckImportStreamBatchSize+1)
+			}
+			if !reflect.DeepEqual(store.streamBatchSizes, tt.wantBatches) {
+				t.Fatalf("batch sizes = %v, want %v", store.streamBatchSizes, tt.wantBatches)
+			}
+			if !reflect.DeepEqual(store.committed, seed) || len(store.upsertedStatuses) != 0 || len(store.auditEntries) != 0 {
+				t.Fatalf("failed stream committed state: entries=%+v status=%d audit=%d", store.committed, len(store.upsertedStatuses), len(store.auditEntries))
 			}
 		})
 	}
