@@ -125,3 +125,70 @@ func TestSystemSettingsSaveOverlappingRequestsKeepRuntimeEqualToLastCommit(t *te
 		cancel()
 	})
 }
+
+// TestSystemSettingsSaveCommitSlotWaitFailureUsesGenericSaveMessage pins the
+// response contract for a settings save that cannot acquire the runtime commit
+// slot before its audit context is cancelled or reaches its deadline. Neither
+// context error is an audit-write failure or an optimistic-lock conflict, and
+// neither may expose concurrency details to the admin response.
+func TestSystemSettingsSaveCommitSlotWaitFailureUsesGenericSaveMessage(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		cancelRoot bool
+	}{
+		{name: "cancelled", cancelRoot: true},
+		{name: "deadline exceeded"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				rootCtx, cancelRoot := context.WithCancel(context.Background())
+				defer cancelRoot()
+
+				store := &f070SettingsStore{adminFlowStoreStub: newAdminStoreStub()}
+				cfg := adminFlowConfig()
+				runtime := config.NewRuntimeSettingsFromConfig(cfg)
+				sm := auth.NewSessionManagerWithIdleTimeout(rootCtx, time.Hour, auth.DefaultAdminIdleTimeout, false)
+				logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+				handler := NewAdminHandler(rootCtx, store, sm, web.NewRendererWithLayoutLinks(web.TemplateFS(), false, web.LayoutLinks{}), logger, cfg, runtime, nil)
+
+				releaseSlot := make(chan struct{})
+				slotAcquired := make(chan struct{})
+				blockerDone := make(chan error, 1)
+				go func() {
+					blockerDone <- runtime.CommitAndPublish(context.Background(), config.SystemSettingsValues{}, func() error {
+						close(slotAcquired)
+						<-releaseSlot
+						return nil
+					})
+				}()
+				<-slotAcquired
+
+				req, _ := authenticatedAdminFormRequest(t, sm, "/admin/settings/system", f070ValidSettingsFormWithRetention("1", "2"))
+				rec := httptest.NewRecorder()
+				saveDone := make(chan struct{})
+				startedAt := time.Now()
+				go func() {
+					handler.HandleSystemSettingsSave(rec, req)
+					close(saveDone)
+				}()
+				if tc.cancelRoot {
+					cancelRoot()
+				}
+				<-saveDone
+				if !tc.cancelRoot && time.Since(startedAt) < adminAuditWriteTimeout {
+					t.Fatalf("settings save returned after %s, want it to wait for the %s commit-slot deadline", time.Since(startedAt), adminAuditWriteTimeout)
+				}
+
+				assertF070Redirect(t, rec, web.Message("admin.settings.error.save"), true)
+				if store.upsertCalls != 0 {
+					t.Fatalf("settings upsert calls = %d, want none while the commit slot is unavailable", store.upsertCalls)
+				}
+
+				close(releaseSlot)
+				if err := <-blockerDone; err != nil {
+					t.Fatalf("commit-slot blocker error = %v", err)
+				}
+			})
+		})
+	}
+}

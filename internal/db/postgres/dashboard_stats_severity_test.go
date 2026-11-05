@@ -51,9 +51,14 @@ func TestDashboardReputationSeverityMatchesFindingContract(t *testing.T) {
 func TestScanTotalQueriesKeepBigintTotals(t *testing.T) {
 	t.Parallel()
 
-	narrowingCast := regexp.MustCompile(`::int\b`)
+	narrowingCast := regexp.MustCompile(`(?i)::\s*(?:int|int4|integer)\b`)
+	for _, cast := range []string{"::int", "::int4", "::integer", ":: INTEGER"} {
+		if !narrowingCast.MatchString(cast) {
+			t.Fatalf("narrowing-cast guard does not recognize %q", cast)
+		}
+	}
 	if narrowingCast.MatchString(scanTotalsSQL) {
-		t.Fatalf("scanTotalsSQL narrows BIGINT totals to int:\n%s", scanTotalsSQL)
+		t.Fatalf("scanTotalsSQL narrows BIGINT totals to a 32-bit integer:\n%s", scanTotalsSQL)
 	}
 	if !strings.Contains(countScansByDaySQL, "COALESCE(SUM(scan_log.findings_count), 0)::bigint") {
 		t.Fatalf("countScansByDaySQL must keep the daily findings sum as bigint:\n%s", countScansByDaySQL)

@@ -4,12 +4,121 @@ package postgres
 
 import (
 	"context"
+	"fmt"
+	"os/exec"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/8linkz-sec/packmon/internal/db"
+	"github.com/8linkz-sec/packmon/internal/db/postgres/migrations"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// postgresEpochDockerTestImage uses the shell-bearing official Alpine image
+// because the normal hardened test image intentionally has no shell. The shell
+// is needed only before startup to run initdb and pg_resetwal against a stopped
+// test cluster.
+const postgresEpochDockerTestImage = "postgres@sha256:10a5c69a83035ab5239f5620d708520e8b28f5aa1f2b20143e6024532edadfb5"
+
+func startDockerPostgresStoreAtXIDEpoch(t *testing.T, epoch int) (*Store, string) {
+	t.Helper()
+
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Fatalf("docker not available; past-epoch PostgreSQL tests require the explicit integration gate to run against Docker: %v", err)
+	}
+
+	containerName := fmt.Sprintf("packmon-pg-epoch-%d-%d", epoch, time.Now().UnixNano())
+	const initAtEpoch = `
+set -eu
+mkdir -p "$PGDATA"
+password_file=/tmp/packmon-postgres-password
+printf '%s\n' "$POSTGRES_PASSWORD" > "$password_file"
+initdb -D "$PGDATA" --username="$POSTGRES_USER" --pwfile="$password_file" --auth-local=trust --auth-host=scram-sha-256
+rm -f "$password_file"
+printf '\nhost all all all scram-sha-256\n' >> "$PGDATA/pg_hba.conf"
+pg_resetwal -f -e "$PACKMON_TEST_XID_EPOCH" "$PGDATA"
+exec postgres -D "$PGDATA" \
+  -c listen_addresses='*' \
+  -c shared_preload_libraries=pg_stat_statements \
+  -c compute_query_id=on \
+  -c track_io_timing=on \
+  -c pg_stat_statements.track=top \
+  -c pg_stat_statements.track_utility=off
+`
+	run := exec.Command("docker", "run", "-d", "--rm", // #nosec G204 -- test launches a fixed image with generated container name/port and numeric epoch.
+		"--name", containerName,
+		"--user", "postgres",
+		"--entrypoint", "sh",
+		"-e", "POSTGRES_USER=packmon",
+		"-e", "POSTGRES_PASSWORD=packmon",
+		"-e", "PGDATA=/tmp/packmon-pgdata",
+		"-e", "PACKMON_TEST_XID_EPOCH="+strconv.Itoa(epoch),
+		"-p", "127.0.0.1::5432",
+		postgresEpochDockerTestImage,
+		"-ec", initAtEpoch,
+	)
+	out, err := run.CombinedOutput()
+	if err != nil {
+		t.Fatalf("start past-epoch docker postgres: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	containerID := strings.TrimSpace(string(out))
+	t.Cleanup(func() {
+		_ = exec.Command("docker", "rm", "-f", containerName).Run() // #nosec G204 -- cleanup uses generated test container name.
+		_ = exec.Command("docker", "rm", "-f", containerID).Run()   // #nosec G204 -- cleanup uses docker-returned test container ID.
+	})
+
+	port := dockerPostgresPublishedPort(t, containerName, "5432/tcp")
+	adminDSN := fmt.Sprintf("postgres://packmon:packmon@127.0.0.1:%d/postgres?sslmode=disable", port)
+	waitForPostgresDSN(t, adminDSN)
+	adminPool, err := pgxpool.New(context.Background(), adminDSN)
+	if err != nil {
+		t.Fatalf("open past-epoch postgres admin pool: %v", err)
+	}
+	if _, err := adminPool.Exec(context.Background(), `CREATE DATABASE packmon`); err != nil {
+		adminPool.Close()
+		t.Fatalf("create past-epoch packmon database: %v", err)
+	}
+	adminPool.Close()
+
+	dsn := fmt.Sprintf("postgres://packmon:packmon@127.0.0.1:%d/packmon?sslmode=disable", port)
+	waitForPostgresDSN(t, dsn)
+	if err := migrations.Run(dsn); err != nil {
+		t.Fatalf("migrate past-epoch postgres: %v", err)
+	}
+	store, err := New(context.Background(), dsn, nil, &PoolConfig{MaxConns: 2, MinConns: 1})
+	if err != nil {
+		t.Fatalf("open past-epoch postgres store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Fatalf("close past-epoch postgres store: %v", err)
+		}
+	})
+	return store, dsn
+}
+
+// TestSyncXIDWindowsAgainstPastEpochPostgres proves the SQL window helpers and
+// a real delta hand-off while PostgreSQL itself is running in transaction-ID
+// epoch 5. Evaluating an epoch-5 watermark on an epoch-0 server exercises only
+// the fail-open out-of-window branch and cannot prove the modulo arithmetic in
+// the normal in-window path past the first 2^32 transactions.
+func TestSyncXIDWindowsAgainstPastEpochPostgres(t *testing.T) {
+	store, _ := startDockerPostgresStoreAtXIDEpoch(t, 5)
+	ctx := context.Background()
+
+	var current int64
+	if err := store.pool.QueryRow(ctx, `SELECT txid_current()`).Scan(&current); err != nil {
+		t.Fatalf("read current past-epoch transaction ID: %v", err)
+	}
+	if got := current / 4294967296; got != 5 {
+		t.Fatalf("PostgreSQL transaction ID %d is in epoch %d, want epoch 5", current, got)
+	}
+
+	testSyncXIDConditionsMatchTheirModel(ctx, t, store)
+	testDeltaDeliversRowCommittedAfterTheSnapshot(ctx, t, store)
+}
 
 // testSyncXIDConditionsMatchTheirModel evaluates syncXIDAtOrAfterSQL and
 // syncXIDBeforeSQL on PostgreSQL for 32-bit xmin values around the
