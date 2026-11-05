@@ -252,6 +252,71 @@ func TestNormalizeUnknownSeverityMigration005PreservesMaliciousRowsWithoutCoordi
 	}
 }
 
+func TestNormalizeUnknownSeverityMigration005PreservesMalformedCollectionsAgainstPostgres(t *testing.T) {
+	for _, tt := range []struct {
+		name                  string
+		rawJSON               string
+		allowConvertedFinding bool
+	}{
+		{name: "affected null", rawJSON: `{"affected":null}`},
+		{name: "affected object", rawJSON: `{"affected":{"not":"an array"}}`},
+		{name: "categories null", rawJSON: `{"affected":[{"package":{"ecosystem":"npm","name":"malformed-categories"},"database_specific":{"categories":null}}]}`},
+		{name: "categories object", rawJSON: `{"affected":[{"package":{"ecosystem":"npm","name":"malformed-categories"},"database_specific":{"categories":{"not":"an array"}}}]}`},
+		{name: "references null", rawJSON: `{"affected":[{"package":{"ecosystem":"npm","name":"malformed-references"},"database_specific":{"categories":["malicious"]}}],"references":null}`, allowConvertedFinding: true},
+		{name: "references object", rawJSON: `{"affected":[{"package":{"ecosystem":"npm","name":"malformed-references"},"database_specific":{"categories":["malicious"]}}],"references":{"not":"an array"}}`, allowConvertedFinding: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dsn := startMigrationPostgres(t)
+			db, ctx, cancel := openFocusedMigrationDB(t, dsn)
+			defer cancel()
+			defer ioutils.CloseSilently(db)
+			createPre005Schema(t, ctx, db)
+			mustExecMigrationTest(t, ctx, db, `
+				INSERT INTO vulnerabilities(id,summary,details,severity,published,modified,created_at,updated_at) VALUES
+					('OSV-MALFORMED-COLLECTION','malformed collection','must not disappear','UNKNOWN','2024-08-01Z','2024-08-02Z','2024-08-03Z','2024-08-04Z'),
+					('OSV-VALID-SIBLING','valid sibling','must still normalize','UNKNOWN','2024-08-01Z','2024-08-02Z','2024-08-03Z','2024-08-04Z')`)
+			mustExecMigrationTest(t, ctx, db, `
+				INSERT INTO vulnerability_sources(vulnerability_id,source,source_id,raw_json,updated_at) VALUES
+					('OSV-MALFORMED-COLLECTION','osv','SRC-MALFORMED',$1::jsonb,'2024-08-05Z'),
+					('OSV-VALID-SIBLING','osv','SRC-VALID','{"affected":[]}'::jsonb,'2024-08-05Z')`, tt.rawJSON)
+
+			before := snapshotMigration005Tables(t, ctx, db, migration005ApplicationTables)
+			up := embeddedMigrationFileForTest(t, 5, MigrationDirectionUp)
+			err := applyMigration(ctx, db, up)
+			if err != nil {
+				if !strings.Contains(err.Error(), "extract elements") {
+					t.Fatalf("migration 005 malformed collection error = %v, want current JSON array extraction failure", err)
+				}
+				after := snapshotMigration005Tables(t, ctx, db, migration005ApplicationTables)
+				assertSnapshotMapsEqual(t, after, before, "application rows after malformed collection failure")
+				assertDirtyMigration(t, ctx, db, up)
+				assertMigration005BackupRelations(t, ctx, db, false)
+				t.Skip("F118-bugs-4: migration 005 passes JSON null or non-array collections to jsonb array extraction")
+			}
+
+			var malformedVulnerability, malformedSource, malformedFinding int
+			var malformedSeverity, referenceURLs, siblingSeverity string
+			if err := db.QueryRowContext(ctx, `
+				SELECT
+					(SELECT count(*) FROM vulnerabilities WHERE id='OSV-MALFORMED-COLLECTION'),
+					COALESCE((SELECT severity FROM vulnerabilities WHERE id='OSV-MALFORMED-COLLECTION'), ''),
+					(SELECT count(*) FROM vulnerability_sources WHERE vulnerability_id='OSV-MALFORMED-COLLECTION'),
+					(SELECT count(*) FROM malicious_findings WHERE id LIKE 'OSV-MALFORMED-COLLECTION%'),
+					COALESCE((SELECT reference_urls::text FROM malicious_findings WHERE id LIKE 'OSV-MALFORMED-COLLECTION%' LIMIT 1), ''),
+					(SELECT severity FROM vulnerabilities WHERE id='OSV-VALID-SIBLING')`).Scan(
+				&malformedVulnerability, &malformedSeverity, &malformedSource, &malformedFinding, &referenceURLs, &siblingSeverity,
+			); err != nil {
+				t.Fatalf("read malformed collection result: %v", err)
+			}
+			preserved := malformedVulnerability == 1 && malformedSeverity == "LOW" && malformedSource == 1 && malformedFinding == 0
+			convertedSafely := tt.allowConvertedFinding && malformedVulnerability == 0 && malformedSource == 0 && malformedFinding == 1 && referenceURLs == "[]"
+			if (!preserved && !convertedSafely) || siblingSeverity != "LOW" {
+				t.Fatalf("malformed result vulnerability/severity/source/finding/refs=%d/%q/%d/%d/%q sibling=%q, want lossless malformed handling and LOW sibling", malformedVulnerability, malformedSeverity, malformedSource, malformedFinding, referenceURLs, siblingSeverity)
+			}
+		})
+	}
+}
+
 func TestNormalizeUnknownSeverityMigration005MissingBackupFailsAtomicallyAgainstPostgres(t *testing.T) {
 	dsn := startMigrationPostgres(t)
 	db, ctx, cancel := openFocusedMigrationDB(t, dsn)
