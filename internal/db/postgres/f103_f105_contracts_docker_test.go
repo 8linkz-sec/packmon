@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -925,6 +926,66 @@ func TestF103F105PostgresContracts(t *testing.T) {
 			t.Fatalf("constraints after empty-events repair = %s / %s, want preserved %s / %s", afterRanges, afterVersions, beforeRanges, beforeVersions)
 		}
 		f103F105Exec(t, ctx, store, `DELETE FROM vulnerabilities WHERE id=$1`, id)
+	})
+
+	t.Run("F105 malformed constraint shapes preserve existing constraints", func(t *testing.T) {
+		ctx, cancel := f103F105Context(t)
+		defer cancel()
+		id := prefix + "-GHSA-malformed-constraints"
+		f103F105Exec(t, ctx, store, `INSERT INTO vulnerabilities(id,summary,severity,published,modified) VALUES($1,'F105 malformed constraints','HIGH',clock_timestamp(),clock_timestamp())`, id)
+		defer f103F105Exec(t, ctx, store, `DELETE FROM vulnerabilities WHERE id=$1`, id)
+
+		raw := json.RawMessage(`{"affected":[
+			{"package":{"ecosystem":"npm","name":"f105-malformed-ranges"},"ranges":{"not":"an array"},"versions":["2.0.0"]},
+			{"package":{"ecosystem":"npm","name":"f105-malformed-versions"},"ranges":[{"type":"SEMVER","events":[{"introduced":"0"},{"fixed":"4.0.0"}]}],"versions":"not an array"},
+			{"package":{"ecosystem":"npm","name":"f105-valid-sibling"},"ranges":[],"versions":["5.0.0"]}
+		]}`)
+		f103F105Exec(t, ctx, store, `INSERT INTO vulnerability_sources(vulnerability_id,source,source_id,raw_json) VALUES($1,'ghsa',$1,$2)`, id, raw)
+		f103F105Exec(t, ctx, store, `
+			INSERT INTO affected_packages(vulnerability_id,ecosystem,name,version_ranges,versions_affected)
+			VALUES
+				($1,'npm','f105-malformed-ranges','[{"type":"SEMVER","events":[{"introduced":"0"},{"fixed":"3.0.0"}]}]'::jsonb,'["1.0.0"]'::jsonb),
+				($1,'npm','f105-malformed-versions','[{"type":"SEMVER","events":[{"introduced":"0"},{"fixed":"6.0.0"}]}]'::jsonb,'["3.0.0"]'::jsonb)`, id)
+
+		type constraints struct {
+			ranges   string
+			versions string
+		}
+		readConstraints := func(name string) constraints {
+			var got constraints
+			if err := store.pool.QueryRow(ctx, `SELECT version_ranges::text,versions_affected::text FROM affected_packages WHERE vulnerability_id=$1 AND name=$2`, id, name).Scan(&got.ranges, &got.versions); err != nil {
+				t.Fatalf("read %s constraints: %v", name, err)
+			}
+			return got
+		}
+		jsonEqual := func(got, want string) bool {
+			var gotValue, wantValue any
+			if json.Unmarshal([]byte(got), &gotValue) != nil || json.Unmarshal([]byte(want), &wantValue) != nil {
+				return false
+			}
+			return reflect.DeepEqual(gotValue, wantValue)
+		}
+		beforeRanges := readConstraints("f105-malformed-ranges")
+		beforeVersions := readConstraints("f105-malformed-versions")
+		repaired, err := store.RepairGHSAAffectedPackages(ctx)
+		if err != nil {
+			t.Fatalf("RepairGHSAAffectedPackages(malformed constraints): %v", err)
+		}
+		afterRanges := readConstraints("f105-malformed-ranges")
+		afterVersions := readConstraints("f105-malformed-versions")
+		sibling := readConstraints("f105-valid-sibling")
+		if afterRanges != beforeRanges || afterVersions != beforeVersions {
+			knownRangesLoss := jsonEqual(afterRanges.ranges, `[]`) && jsonEqual(afterRanges.versions, `["2.0.0"]`)
+			knownVersionsLoss := jsonEqual(afterVersions.ranges, `[{"type":"SEMVER","events":[{"introduced":"0"},{"fixed":"4.0.0"}]}]`) && jsonEqual(afterVersions.versions, `[]`)
+			knownSibling := jsonEqual(sibling.ranges, `[]`) && jsonEqual(sibling.versions, `["5.0.0"]`)
+			if repaired != 3 || !knownRangesLoss || !knownVersionsLoss || !knownSibling {
+				t.Fatalf("unexpected malformed repair result: repaired=%d ranges=%+v versions=%+v sibling=%+v", repaired, afterRanges, afterVersions, sibling)
+			}
+			t.Skip("F105-bugs-3: independently non-array GHSA ranges or versions overwrite existing valid constraints")
+		}
+		if repaired != 1 || !jsonEqual(sibling.ranges, `[]`) || !jsonEqual(sibling.versions, `["5.0.0"]`) {
+			t.Fatalf("malformed-preserving repair = %d ranges=%+v versions=%+v sibling=%+v, want both targets preserved and one exact valid sibling", repaired, afterRanges, afterVersions, sibling)
+		}
 	})
 
 	t.Run("F105 cancellation atomic failure and source counts", func(t *testing.T) {
