@@ -361,6 +361,30 @@ func TestDiscoverFilesWithWarningsScansExplicitGitHubRoot(t *testing.T) {
 	}
 }
 
+func TestDiscoverFilesWithWarningsDoesNotTraverseDirectorySymlinks(t *testing.T) {
+	t.Parallel()
+
+	outside := t.TempDir()
+	writeTestFile(t, filepath.Join(outside, "config.xml"), `<config><packages><package name="outside"/></packages></config>`)
+	root := t.TempDir()
+	link := filepath.Join(root, "linked-directory")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("directory symlinks are unavailable: %v", err)
+	}
+	writeTestFile(t, filepath.Join(root, "local.ps1"), "choco install local\n")
+
+	files, warnings, err := DiscoverFilesWithWarnings(root, 5)
+	if err != nil {
+		t.Fatalf("DiscoverFilesWithWarnings() error = %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %v, want none for an untraversed directory symlink", warnings)
+	}
+	if len(files) != 1 || files[0].RelPath != "local.ps1" || files[0].Kind != KindPowerShellScript {
+		t.Fatalf("files = %+v, want only the local script and no symlink target contents", files)
+	}
+}
+
 func TestRelDisplayNeverReturnsAbsoluteHostPath(t *testing.T) {
 	absFile := filepath.Join(t.TempDir(), "sensitive.ps1")
 	absRoot := filepath.VolumeName(absFile) + string(filepath.Separator)
