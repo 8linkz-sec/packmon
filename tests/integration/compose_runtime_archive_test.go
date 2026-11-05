@@ -4,6 +4,7 @@ package integration
 
 import (
 	"archive/tar"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,12 +32,27 @@ func TestExtractTarArchiveAcceptsPAXGlobalHeaderAndRejectsUnsafeEntries(t *testi
 		}
 	})
 
+	t.Run("parent traversal", func(t *testing.T) {
+		archivePath := writeComposeRuntimeArchiveFixture(t, []tarFixtureEntry{{name: "../escape", typeflag: tar.TypeReg}})
+		root := t.TempDir()
+		destination := filepath.Join(root, "destination")
+		if err := os.Mkdir(destination, 0o700); err != nil {
+			t.Fatalf("create extraction destination: %v", err)
+		}
+		err := extractTarArchive(archivePath, destination)
+		if err == nil || (!errors.Is(err, tar.ErrInsecurePath) && !strings.Contains(err.Error(), "unsafe path")) {
+			t.Fatalf("extract error = %v, want tar insecure-path or helper unsafe-path error", err)
+		}
+		if _, err := os.Lstat(filepath.Join(root, "escape")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("unsafe archive created an outside file: %v", err)
+		}
+	})
+
 	for _, tc := range []struct {
 		name      string
 		entry     tarFixtureEntry
 		wantError string
 	}{
-		{name: "parent traversal", entry: tarFixtureEntry{name: "../escape", typeflag: tar.TypeReg}, wantError: "unsafe path"},
 		{name: "symlink", entry: tarFixtureEntry{name: "link", typeflag: tar.TypeSymlink}, wantError: "unsupported entry"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -46,6 +62,18 @@ func TestExtractTarArchiveAcceptsPAXGlobalHeaderAndRejectsUnsafeEntries(t *testi
 				t.Fatalf("extract error = %v, want text %q", err, tc.wantError)
 			}
 		})
+	}
+}
+
+func TestYAMLVolumeMountQuotesTheCompleteShortSyntax(t *testing.T) {
+	t.Parallel()
+	got := yamlVolumeMount(filepath.Join("temporary root", "checkout"), "/workspace")
+	want := `"temporary root/checkout:/workspace"`
+	if got != want {
+		t.Fatalf("quoted volume mount = %q, want %q", got, want)
+	}
+	if strings.Contains(got, `":/workspace`) {
+		t.Fatalf("quoted volume mount closes the scalar before the container target: %s", got)
 	}
 }
 

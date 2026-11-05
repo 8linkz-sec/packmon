@@ -228,8 +228,8 @@ func (h *composeRuntimeHarness) testBootstrapOwnerAndExplicitRun(t *testing.T) {
 	overlay := fmt.Sprintf(`services:
   init-secrets:
     volumes: !override
-      - %s:/workspace
-`, yamlQuote(checkout))
+      - %s
+`, yamlVolumeMount(checkout, "/workspace"))
 	s := h.newScenario(t, []string{"docker-compose.yml", "docker-compose.override.yml"}, h.commonOverlay(true, ""), overlay)
 	s.env("PACKMON_UID", strconv.Itoa(uid))
 	s.env("PACKMON_GID", strconv.Itoa(gid))
@@ -405,8 +405,8 @@ func (h *composeRuntimeHarness) testConfiguredBackupEntrypointProbe(t *testing.T
 	overlay := fmt.Sprintf(`services:
   packmon-backup:
     volumes: !override
-      - %s:/backups/packmon
-`, yamlQuote(backupDir))
+      - %s
+`, yamlVolumeMount(backupDir, "/backups/packmon"))
 	s := h.newScenario(t, []string{"docker-compose.server.yml"}, h.commonOverlay(false, ""), overlay)
 	s.down()
 	s.startPostgresAndMigrate()
@@ -440,8 +440,8 @@ func (h *composeRuntimeHarness) testBackupCreateRestoreFailureAndRetention(t *te
   packmon-backup:
     entrypoint: !override []
     volumes: !override
-      - %s:/backups/packmon
-`, yamlQuote(backupDir))
+      - %s
+`, yamlVolumeMount(backupDir, "/backups/packmon"))
 	s := h.newScenario(t, []string{"docker-compose.server.yml"}, h.commonOverlay(false, ""), overlay)
 	s.down()
 	s.startPostgresAndMigrate()
@@ -951,6 +951,10 @@ func extractTarArchive(archivePath, destination string) error {
 
 func yamlQuote(value string) string {
 	return strconv.Quote(filepath.ToSlash(value))
+}
+
+func yamlVolumeMount(source, target string) string {
+	return yamlQuote(filepath.ToSlash(source) + ":" + target)
 }
 
 func newestDump(t *testing.T, dir string) string {
