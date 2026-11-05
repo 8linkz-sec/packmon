@@ -664,6 +664,70 @@ func TestRequirementsParserReturnsPartialResultWithReaderError(t *testing.T) {
 	}
 }
 
+func TestPyPILockParsersSkipIncompleteEntries(t *testing.T) {
+	t.Parallel()
+
+	pipfile, err := NewPipfileParser().Parse(strings.NewReader(`{
+  "default": {"requests": {"version": "==2.31.0"}},
+  "develop": {"missing-version": {"version": ""}}
+}`))
+	if err != nil {
+		t.Fatalf("Pipfile Parse: %v", err)
+	}
+	if len(pipfile) != 1 || pipfile[0].Name != "requests" {
+		t.Fatalf("Pipfile packages = %#v, want only requests", pipfile)
+	}
+
+	uv, err := NewUVParser().Parse(strings.NewReader(`
+[[package]]
+name = "complete"
+version = "1.0.0"
+
+[[package]]
+name = ""
+version = "2.0.0"
+
+[[package]]
+name = "missing-version"
+version = ""
+`))
+	if err != nil {
+		t.Fatalf("uv Parse: %v", err)
+	}
+	if len(uv) != 1 || uv[0].Name != "complete" || uv[0].Version != "1.0.0" {
+		t.Fatalf("uv packages = %#v, want only complete 1.0.0", uv)
+	}
+}
+
+func TestRequirementHelpersCoverContinuationAndNeutralInputs(t *testing.T) {
+	t.Parallel()
+
+	packages, err := NewRequirementsParser().Parse(strings.NewReader("; python_version > '3.10'\ncontinued==1.2.3\\"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(packages) != 1 || packages[0].Name != "continued" || packages[0].Version != "1.2.3" {
+		t.Fatalf("packages = %#v, want trailing continued requirement", packages)
+	}
+
+	if !shouldSkipRequirementLine(" \t ") {
+		t.Fatal("whitespace-only requirement must be skipped")
+	}
+	current := []string{"https://index.example/simple"}
+	if got := updateRequirementSourceRefs(" \t ", current); !equalStrings(got, current) {
+		t.Fatalf("whitespace source update = %q, want %q", got, current)
+	}
+	if got := updateRequirementSourceRefs("--extra-index-url=", current); !equalStrings(got, current) {
+		t.Fatalf("empty inline source update = %q, want %q", got, current)
+	}
+	if got := parseEditableRequirement("--editable git+https://example.test/repo.git"); got != "" {
+		t.Fatalf("unversioned editable requirement = %q, want empty", got)
+	}
+	if name, version, pinned := parseRequirementLine("bare-package"); name != "bare-package" || version != "" || pinned {
+		t.Fatalf("bare requirement = (%q, %q, %v)", name, version, pinned)
+	}
+}
+
 type pypiReadThenError struct {
 	data []byte
 	err  error

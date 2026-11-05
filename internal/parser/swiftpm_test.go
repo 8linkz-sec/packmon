@@ -622,3 +622,23 @@ func TestCanonicalSwiftPackageLocationRejectsInvalidHostsAndPaths(t *testing.T) 
 		})
 	}
 }
+
+func TestSwiftPMFocusedHelperBoundaries(t *testing.T) {
+	t.Parallel()
+
+	if _, err := parseSwiftV2([]byte(`{"pins":`)); err == nil || !strings.Contains(err.Error(), "swiftpm v2: parsing JSON") {
+		t.Fatalf("parseSwiftV2(invalid JSON) = %v, want contextual error", err)
+	}
+	if _, err := parseSwiftV1([]byte(`{"object":`)); err == nil || !strings.Contains(err.Error(), "swiftpm v1: parsing JSON") {
+		t.Fatalf("parseSwiftV1(invalid JSON) = %v, want contextual error", err)
+	}
+	if got := canonicalSwiftPackageLocation("GitServer.Example/org/repo.git"); got != "gitserver.example/org/repo" {
+		t.Fatalf("bare-host canonical location = %q", got)
+	}
+	if got := canonicalSwiftHostPath(" GitServer.Example ", "/org/repo.git?ref=v1"); got != "gitserver.example/org/repo" {
+		t.Fatalf("canonicalSwiftHostPath(query) = %q", got)
+	}
+	if got := swiftLocationForError("git@GitServer.Example:org/private.git"); got != "gitserver.example:..." {
+		t.Fatalf("swiftLocationForError(SCP remote) = %q", got)
+	}
+}
