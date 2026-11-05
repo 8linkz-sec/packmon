@@ -897,6 +897,36 @@ func TestF103F105PostgresContracts(t *testing.T) {
 		}
 	})
 
+	t.Run("F105 empty range events preserve existing constraints", func(t *testing.T) {
+		ctx, cancel := f103F105Context(t)
+		defer cancel()
+		id := prefix + "-GHSA-empty-events"
+		f103F105Exec(t, ctx, store, `INSERT INTO vulnerabilities(id,summary,severity,published,modified) VALUES($1,'F105 empty events','HIGH',clock_timestamp(),clock_timestamp())`, id)
+		f103F105Exec(t, ctx, store, `
+			INSERT INTO vulnerability_sources(vulnerability_id,source,source_id,raw_json)
+			VALUES($1,'ghsa',$1,'{"affected":[{"package":{"ecosystem":"npm","name":"f105-empty-events"},"ranges":[{"type":"SEMVER","events":[]}],"versions":[]}]}'::jsonb)`, id)
+		f103F105Exec(t, ctx, store, `
+			INSERT INTO affected_packages(vulnerability_id,ecosystem,name,version_ranges,versions_affected)
+			VALUES($1,'npm','f105-empty-events','[{"type":"SEMVER","events":[{"introduced":"0"},{"fixed":"2.0.0"}]}]'::jsonb,'["1.0.0"]'::jsonb)`, id)
+
+		var beforeRanges, beforeVersions string
+		if err := store.pool.QueryRow(ctx, `SELECT version_ranges::text,versions_affected::text FROM affected_packages WHERE vulnerability_id=$1`, id).Scan(&beforeRanges, &beforeVersions); err != nil {
+			t.Fatalf("read constraints before repair: %v", err)
+		}
+		repaired, err := store.RepairGHSAAffectedPackages(ctx)
+		if err != nil || repaired != 0 {
+			t.Fatalf("RepairGHSAAffectedPackages(empty events) = %d, %v, want no repaired row", repaired, err)
+		}
+		var afterRanges, afterVersions string
+		if err := store.pool.QueryRow(ctx, `SELECT version_ranges::text,versions_affected::text FROM affected_packages WHERE vulnerability_id=$1`, id).Scan(&afterRanges, &afterVersions); err != nil {
+			t.Fatalf("read constraints after repair: %v", err)
+		}
+		if afterRanges != beforeRanges || afterVersions != beforeVersions {
+			t.Fatalf("constraints after empty-events repair = %s / %s, want preserved %s / %s", afterRanges, afterVersions, beforeRanges, beforeVersions)
+		}
+		f103F105Exec(t, ctx, store, `DELETE FROM vulnerabilities WHERE id=$1`, id)
+	})
+
 	t.Run("F105 cancellation atomic failure and source counts", func(t *testing.T) {
 		ctx, cancel := f103F105Context(t)
 		defer cancel()
