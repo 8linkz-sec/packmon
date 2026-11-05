@@ -309,10 +309,17 @@ func TestNoopQueueStatusAndRetentionEdges(t *testing.T) {
 	if err != nil || !created || position != 1 {
 		t.Fatalf("EnqueueRefresh(invalid status) = %t, %d, %v; want pending position 1", created, position, err)
 	}
-	if _, _, err := store.EnqueueRefresh(ctx, &db.RefreshJob{
+	duplicateCreated, duplicatePosition, err := store.EnqueueRefresh(ctx, &db.RefreshJob{
 		Ecosystem: "npm", Name: "invalid", Source: "socket", Priority: 99,
-	}); err != nil {
-		t.Fatalf("EnqueueRefresh(duplicate without priority improvement) error = %v", err)
+	})
+	if err != nil || duplicateCreated || duplicatePosition != 1 {
+		t.Fatalf("EnqueueRefresh(duplicate without priority improvement) = %t, %d, %v; want existing position 1", duplicateCreated, duplicatePosition, err)
+	}
+	if len(store.refreshJobs) != 2 {
+		t.Fatalf("duplicate enqueue left %d jobs, want the original two", len(store.refreshJobs))
+	}
+	if got := store.refreshJobs[1]; got.Name != "invalid" || got.Priority != 0 || got.Status != db.RefreshStatusPending {
+		t.Fatalf("duplicate enqueue changed existing job to %+v, want unchanged priority 0 pending job", got)
 	}
 
 	old := time.Now().UTC().Add(-48 * time.Hour)
@@ -341,8 +348,8 @@ func TestNoopQueueStatusAndRetentionEdges(t *testing.T) {
 
 	store.mu.Lock()
 	store.refreshJobs = append(store.refreshJobs,
-		db.RefreshJob{ID: 20, Status: db.RefreshStatusPaused, Source: "socket", RequestedAt: old},
-		db.RefreshJob{ID: 21, Status: db.RefreshStatusPending, Source: "", RequestedAt: old},
+		db.RefreshJob{ID: 20, Name: "newest-paused", Status: db.RefreshStatusPaused, Source: "socket", RequestedAt: old},
+		db.RefreshJob{ID: 21, Name: "newest-pending", Status: db.RefreshStatusPending, Source: "", RequestedAt: old},
 	)
 	store.mu.Unlock()
 	stats, err := store.QueueStats(ctx)
@@ -356,8 +363,10 @@ func TestNoopQueueStatusAndRetentionEdges(t *testing.T) {
 	if _, ok := oldest[""]; ok {
 		t.Fatalf("OldestQueueJobs() retained empty source: %+v", oldest)
 	}
-	jobs, err := store.ListQueueJobsPage(ctx, "not-a-status", 1, -1)
-	if err != nil || len(jobs) != 1 {
+	jobs, err := store.ListQueueJobsPage(ctx, "not-a-status", 2, -1)
+	if err != nil || len(jobs) != 2 ||
+		jobs[0].ID != 21 || jobs[0].Name != "newest-pending" || jobs[0].Status != db.RefreshStatusPending ||
+		jobs[1].ID != 20 || jobs[1].Name != "newest-paused" || jobs[1].Status != db.RefreshStatusPaused {
 		t.Fatalf("ListQueueJobsPage(invalid, negative offset) = %+v, %v", jobs, err)
 	}
 	jobs, err = store.ListQueueJobsPage(ctx, "", 10, 99)
@@ -474,7 +483,7 @@ func TestNoopScanLogPaginationAndSearchEdges(t *testing.T) {
 		t.Fatalf("SearchPackages(severity mismatch) = %+v, %v", results, err)
 	}
 	results, err = store.SearchPackages(ctx, db.PackageSearchParams{Query: "other", Limit: 1, Offset: 1})
-	if err != nil || len(results) != 1 || results[0].Ecosystem != "pypi" {
+	if err != nil || len(results) != 1 || results[0].Ecosystem != "pypi" || results[0].Name != "other-vuln" || results[0].VulnerabilityCount != 1 {
 		t.Fatalf("SearchPackages(limit/offset) = %+v, %v", results, err)
 	}
 	results, err = store.SearchPackages(ctx, db.PackageSearchParams{Query: "absent"})
