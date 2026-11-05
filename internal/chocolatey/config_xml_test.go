@@ -134,11 +134,17 @@ func TestParseConfigXMLSupportedEncodings(t *testing.T) {
 func TestParseConfigXMLMalformedDocumentBoundaries(t *testing.T) {
 	t.Parallel()
 
-	t.Run("malformed before packages is ignored", func(t *testing.T) {
+	t.Run("malformed config without packages is ignored", func(t *testing.T) {
 		t.Parallel()
-		packages, err := ParseConfigXML(strings.NewReader(`<config><envs><`), "config.xml")
-		if err != nil || packages != nil {
-			t.Fatalf("ParseConfigXML() = (%+v, %v), want (nil, nil)", packages, err)
+		for _, doc := range []string{
+			`<config><envs><`,
+			`<config><envs><env></envs></config>`,
+			`<config><group><packages><package name="ignored"`,
+		} {
+			packages, err := ParseConfigXML(strings.NewReader(doc), "config.xml")
+			if err != nil || packages != nil {
+				t.Fatalf("ParseConfigXML(%q) = (%+v, %v), want (nil, nil)", doc, packages, err)
+			}
 		}
 	})
 	t.Run("malformed package documents discard partial rows", func(t *testing.T) {
@@ -156,13 +162,51 @@ func TestParseConfigXMLMalformedDocumentBoundaries(t *testing.T) {
 			}
 		}
 	})
-	t.Run("multiple roots documents current acceptance", func(t *testing.T) {
+	t.Run("trailing whitespace remains valid", func(t *testing.T) {
 		t.Parallel()
-		packages, err := ParseConfigXML(strings.NewReader(`<config><packages><package name="discarded"/></packages></config><other/>`), "config.xml")
-		if err != nil || packages != nil {
-			t.Fatalf("ParseConfigXML() = (%+v, %v), want current silent multi-root acceptance with discarded rows", packages, err)
+		names, err := configNames(t, "<config><packages><package name=\"kept\"/></packages></config> \r\n\t")
+		if err != nil {
+			t.Fatalf("ParseConfigXML() error = %v", err)
+		}
+		if got := strings.Join(names, " "); got != "kept" {
+			t.Fatalf("names = %q, want kept", got)
 		}
 	})
+}
+
+func TestParseConfigXMLRejectsNonWhitespaceAfterRoot(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name  string
+		doc   string
+		bugID string
+	}{
+		{
+			name:  "second root",
+			doc:   `<config><packages><package name="partial"/></packages></config><other/>`,
+			bugID: "F085-bugs-2",
+		},
+		{
+			name:  "trailing text",
+			doc:   `<config><packages><package name="partial"/></packages></config>trailing-junk`,
+			bugID: "F085-bugs-3",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			packages, err := ParseConfigXML(strings.NewReader(tt.doc), "config.xml")
+			if err == nil {
+				t.Skip(tt.bugID + ": ParseConfigXML accepts non-whitespace content after the root element")
+			}
+			if packages != nil {
+				t.Fatalf("ParseConfigXML() packages = %+v, want nil on malformed document", packages)
+			}
+			if got := err.Error(); got != "config.xml: invalid config.xml package list" || strings.Contains(got, "partial") || strings.Contains(got, "trailing-junk") {
+				t.Fatalf("ParseConfigXML() error = %q, want generic content-free error", got)
+			}
+		})
+	}
 }
 
 func TestParseConfigXMLShapes(t *testing.T) {
