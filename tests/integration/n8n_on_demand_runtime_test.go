@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -45,12 +46,14 @@ func TestN8NOnDemandWebhookRuntime(t *testing.T) {
 	t.Cleanup(func() {
 		removeN8NOnDemandNetwork(t, network)
 	})
+	client := "packmon-n8n-on-demand-client-" + randomN8NSuffix(t)
+	startN8NOnDemandHTTPClient(t, contract, resources, client)
 
 	successServer := "packmon-n8n-on-demand-success-" + randomN8NSuffix(t)
-	successState := startN8NOnDemandServer(t, contract, resources, fixtureRoot, successServer)
+	successState := startN8NOnDemandServer(t, contract, resources, fixtureRoot, successServer, client)
 
 	t.Run("unauthenticated request does not invoke helper", func(t *testing.T) {
-		response := requestN8NOnDemandWebhook(t, contract, network, successServer, "")
+		response := requestN8NOnDemandWebhook(t, client, successServer, "")
 		if response.Status != 401 && response.Status != 403 {
 			t.Fatalf("unauthenticated webhook status = %d, want an authentication rejection; body = %q", response.Status, response.Body)
 		}
@@ -58,7 +61,7 @@ func TestN8NOnDemandWebhookRuntime(t *testing.T) {
 	})
 
 	t.Run("authenticated successful scan returns completed JSON", func(t *testing.T) {
-		response := requestN8NOnDemandWebhook(t, contract, network, successServer, n8nWebhookHeaderValue)
+		response := requestN8NOnDemandWebhook(t, client, successServer, n8nWebhookHeaderValue)
 		if response.Status != 200 {
 			t.Fatalf("authenticated webhook status = %d, want 200; body = %q", response.Status, response.Body)
 		}
@@ -77,9 +80,9 @@ func TestN8NOnDemandWebhookRuntime(t *testing.T) {
 
 	t.Run("helper failure cannot return success", func(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(successState, "helper-exit"), []byte("23\n"), 0o644); err != nil { //nolint:gosec // non-secret fixture must be readable by the container UID
-			t.Fatalf("configure Packmon helper failure fixture: %v", err)
+			t.Fatalf("configure Packmon helper failure fixture: %s", n8nOnDemandDiagnostic(err.Error(), "", successState))
 		}
-		response := requestN8NOnDemandWebhook(t, contract, network, successServer, n8nWebhookHeaderValue)
+		response := requestN8NOnDemandWebhook(t, client, successServer, n8nWebhookHeaderValue)
 		if response.Status >= 200 && response.Status < 300 {
 			t.Fatalf("exit-23 helper returned successful HTTP status %d; body = %q", response.Status, response.Body)
 		}
@@ -90,11 +93,30 @@ func TestN8NOnDemandWebhookRuntime(t *testing.T) {
 	})
 }
 
+func TestN8NOnDemandDiagnosticRedactsHostPaths(t *testing.T) {
+	fixtureRoot := filepath.Join(string(filepath.Separator), "private", "fixture-root")
+	stateRoot := filepath.Join(string(filepath.Separator), "private", "state-root")
+	fixtureError := (&os.PathError{Op: "open", Path: filepath.Join(fixtureRoot, "workflow.json"), Err: os.ErrPermission}).Error()
+	stateError := (&os.PathError{Op: "write", Path: filepath.Join(stateRoot, "helper-exit"), Err: os.ErrPermission}).Error()
+	input := fixtureError + " " + stateError + " slash=" + filepath.ToSlash(stateRoot) + " case=" + strings.ToUpper(filepath.ToSlash(fixtureRoot))
+	got := n8nOnDemandDiagnostic(input, fixtureRoot, stateRoot)
+	for _, forbidden := range []string{fixtureRoot, stateRoot, filepath.ToSlash(fixtureRoot), filepath.ToSlash(stateRoot), strings.ToUpper(filepath.ToSlash(fixtureRoot))} {
+		if forbidden != "" && strings.Contains(got, forbidden) {
+			t.Fatalf("diagnostic retained host path %q: %q", forbidden, got)
+		}
+	}
+	for _, want := range []string{"[FIXTURE]", "[STATE]"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("diagnostic = %q, want redaction marker %q", got, want)
+		}
+	}
+}
+
 func createN8NOnDemandRuntimeFixtures(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
 	if err := os.Chmod(root, 0o755); err != nil { //nolint:gosec // disposable fixture must be traversable by the container UID
-		t.Fatalf("make n8n on-demand fixture root container-readable: %v", err)
+		t.Fatalf("make n8n on-demand fixture root container-readable: %s", n8nOnDemandDiagnostic(err.Error(), root))
 	}
 
 	workflowSource := filepath.Join("..", "..", "deploy", "n8n", "on-demand-scan.json")
@@ -107,7 +129,13 @@ func createN8NOnDemandRuntimeFixtures(t *testing.T) string {
 		t.Fatalf("parse on-demand workflow: %v", err)
 	}
 	workflow["id"] = "packmonOnDemandRuntime"
-	writeN8NRuntimeWorkflow(t, filepath.Join(root, "workflow.json"), workflow)
+	workflowData, err = json.Marshal(workflow)
+	if err != nil {
+		t.Fatalf("marshal on-demand workflow fixture: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "workflow.json"), append(workflowData, '\n'), 0o644); err != nil { //nolint:gosec // fixture must be readable by the container UID
+		t.Fatalf("write on-demand workflow fixture: %s", n8nOnDemandDiagnostic(err.Error(), root))
+	}
 
 	credential := []map[string]any{{
 		"id":   "replace-with-packmon-webhook-header-auth",
@@ -123,7 +151,7 @@ func createN8NOnDemandRuntimeFixtures(t *testing.T) string {
 		t.Fatalf("marshal safe n8n credential fixture: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(root, "credential.json"), append(credentialData, '\n'), 0o644); err != nil { //nolint:gosec // safe fixture must be readable by the container UID
-		t.Fatalf("write safe n8n credential fixture: %v", err)
+		t.Fatalf("write safe n8n credential fixture: %s", n8nOnDemandDiagnostic(err.Error(), root))
 	}
 
 	helperSource := filepath.Join("..", "..", "deploy", "n8n", "on-demand-scan.sh")
@@ -133,28 +161,43 @@ func createN8NOnDemandRuntimeFixtures(t *testing.T) string {
 	}
 	helperDir := filepath.Join(root, "helper")
 	if err := os.MkdirAll(helperDir, 0o755); err != nil { //nolint:gosec // disposable fixture must be traversable by the container UID
-		t.Fatalf("create n8n on-demand helper fixture directory: %v", err)
+		t.Fatalf("create n8n on-demand helper fixture directory: %s", n8nOnDemandDiagnostic(err.Error(), root))
 	}
 	if err := os.WriteFile(filepath.Join(helperDir, "on-demand-scan.sh"), helperData, 0o644); err != nil { //nolint:gosec // repository helper must be readable by the container UID
-		t.Fatalf("copy on-demand helper into fixture: %v", err)
+		t.Fatalf("copy on-demand helper into fixture: %s", n8nOnDemandDiagnostic(err.Error(), root))
 	}
 
 	binDir := filepath.Join(root, "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil { //nolint:gosec // disposable fixture must be traversable by the container UID
-		t.Fatalf("create n8n on-demand binary fixture directory: %v", err)
+		t.Fatalf("create n8n on-demand binary fixture directory: %s", n8nOnDemandDiagnostic(err.Error(), root))
 	}
 	stub := "#!/bin/sh\nprintf 'invoked\\n' >> \"$PACKMON_STUB_RECORD\"\nexit_code=0\nif [ -f \"$PACKMON_STUB_EXIT_FILE\" ]; then read -r exit_code < \"$PACKMON_STUB_EXIT_FILE\"; fi\nexit \"$exit_code\"\n"
 	if err := os.WriteFile(filepath.Join(binDir, "packmon"), []byte(stub), 0o755); err != nil { //nolint:gosec // executable test stub
-		t.Fatalf("write Packmon command stub: %v", err)
+		t.Fatalf("write Packmon command stub: %s", n8nOnDemandDiagnostic(err.Error(), root))
 	}
 	return root
 }
 
-func startN8NOnDemandServer(t *testing.T, contract n8nDockerRuntimeContract, resources *n8nOnDemandRuntimeResources, fixtureRoot, name string) string {
+func startN8NOnDemandHTTPClient(t *testing.T, contract n8nDockerRuntimeContract, resources *n8nOnDemandRuntimeResources, name string) {
+	t.Helper()
+	resources.containers = append(resources.containers, name)
+	t.Cleanup(func() {
+		removeN8NOnDemandContainer(t, name)
+	})
+	args := []string{
+		"run", "-d", "--rm", "--pull=never", "--network", resources.network, "--name", name,
+		"--entrypoint=/bin/sh", contract.Image, "-ec", "while :; do sleep 3600; done",
+	}
+	if output, err := n8nDockerCommand(30*time.Second, args...); err != nil {
+		t.Fatalf("start isolated n8n on-demand HTTP client: %v: %s", err, n8nOnDemandDiagnostic(output))
+	}
+}
+
+func startN8NOnDemandServer(t *testing.T, contract n8nDockerRuntimeContract, resources *n8nOnDemandRuntimeResources, fixtureRoot, name, client string) string {
 	t.Helper()
 	state := t.TempDir()
 	if err := os.Chmod(state, 0o777); err != nil { //nolint:gosec // disposable bind mount must be writable by the image's non-root UID
-		t.Fatalf("make isolated n8n on-demand state writable by its container user: %v", err)
+		t.Fatalf("make isolated n8n on-demand state writable by its container user: %s", n8nOnDemandDiagnostic(err.Error(), "", state))
 	}
 	resources.containers = append(resources.containers, name)
 	t.Cleanup(func() {
@@ -189,29 +232,29 @@ func startN8NOnDemandServer(t *testing.T, contract n8nDockerRuntimeContract, res
 	}
 	args = append(args, "--entrypoint=/bin/sh", contract.Image, "-ec", command)
 	if output, err := n8nDockerCommand(30*time.Second, args...); err != nil {
-		t.Fatalf("start isolated n8n on-demand server: %v: %s", err, n8nRuntimeDiagnostic(output, fixtureRoot))
+		t.Fatalf("start isolated n8n on-demand server: %v: %s", err, n8nOnDemandDiagnostic(output, fixtureRoot, state))
 	}
-	waitForN8NOnDemandServer(t, contract, resources.network, name, fixtureRoot)
+	waitForN8NOnDemandServer(t, client, name, fixtureRoot, state)
 	return state
 }
 
-func waitForN8NOnDemandServer(t *testing.T, contract n8nDockerRuntimeContract, network, name, fixtureRoot string) {
+func waitForN8NOnDemandServer(t *testing.T, client, name, fixtureRoot, stateRoot string) {
 	t.Helper()
 	deadline := time.Now().Add(90 * time.Second)
 	for time.Now().Before(deadline) {
-		response, err := runN8NHTTPClient(contract, network, n8nOnDemandWebhookURL(name), "")
+		response, err := runN8NHTTPClient(client, n8nOnDemandWebhookURL(name), "")
 		if err == nil && (response.Status == 401 || response.Status == 403) {
 			return
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
 	output, _ := n8nDockerCommand(10*time.Second, "logs", name)
-	t.Fatalf("isolated n8n on-demand server did not become ready: %s", n8nRuntimeDiagnostic(output, fixtureRoot))
+	t.Fatalf("isolated n8n on-demand server did not become ready: %s", n8nOnDemandDiagnostic(output, fixtureRoot, stateRoot))
 }
 
-func requestN8NOnDemandWebhook(t *testing.T, contract n8nDockerRuntimeContract, network, server, credential string) n8nWebhookResponse {
+func requestN8NOnDemandWebhook(t *testing.T, client, server, credential string) n8nWebhookResponse {
 	t.Helper()
-	response, err := runN8NHTTPClient(contract, network, n8nOnDemandWebhookURL(server), credential)
+	response, err := runN8NHTTPClient(client, n8nOnDemandWebhookURL(server), credential)
 	if err != nil {
 		t.Fatalf("request n8n on-demand webhook: %v", err)
 	}
@@ -224,14 +267,33 @@ func n8nOnDemandWebhookURL(server string) string {
 	return "http://" + server + ":5678/webhook/packmonOnDemandRuntime/webhook/packmon/scan"
 }
 
-func runN8NHTTPClient(contract n8nDockerRuntimeContract, network, target, credential string) (n8nWebhookResponse, error) {
-	const script = `const headers={'Content-Type':'application/json'};if(process.env.HEADER_VALUE){headers[process.env.HEADER_NAME]=process.env.HEADER_VALUE}fetch(process.env.TARGET_URL,{method:'POST',headers,body:'{}'}).then(async response=>console.log(JSON.stringify({status:response.status,body:await response.text()}))).catch(error=>{console.error(error.message);process.exit(2)})`
+func n8nOnDemandDiagnostic(output string, roots ...string) string {
+	labels := []string{"[FIXTURE]", "[STATE]"}
+	for index, root := range roots {
+		if root == "" {
+			continue
+		}
+		label := fmt.Sprintf("[TEMP-%d]", index+1)
+		if index < len(labels) {
+			label = labels[index]
+		}
+		for _, form := range []string{root, filepath.Clean(root), filepath.ToSlash(root), strings.ReplaceAll(root, `\`, `\\`)} {
+			if form != "" {
+				output = regexp.MustCompile(`(?i)`+regexp.QuoteMeta(form)).ReplaceAllString(output, label)
+			}
+		}
+	}
+	return n8nRuntimeDiagnostic(output, "")
+}
+
+func runN8NHTTPClient(client, target, credential string) (n8nWebhookResponse, error) {
+	const script = `const headers={'Content-Type':'application/json'};if(process.env.HEADER_VALUE){headers[process.env.HEADER_NAME]=process.env.HEADER_VALUE}fetch(process.env.TARGET_URL,{method:'POST',headers,body:'{}',signal:AbortSignal.timeout(5000)}).then(async response=>console.log(JSON.stringify({status:response.status,body:await response.text()}))).catch(error=>{console.error(error.message);process.exit(2)})`
 	args := []string{
-		"run", "--rm", "--pull=never", "--network", network,
+		"exec",
 		"--env", "TARGET_URL=" + target,
 		"--env", "HEADER_NAME=" + n8nWebhookHeaderName,
 		"--env", "HEADER_VALUE=" + credential,
-		"--entrypoint=/usr/local/bin/node", contract.Image, "-e", script,
+		client, "/usr/local/bin/node", "-e", script,
 	}
 	output, err := n8nDockerCommand(30*time.Second, args...)
 	if err != nil {
@@ -254,7 +316,7 @@ func assertN8NHelperInvocationCount(t *testing.T, state string, want int) {
 		t.Fatalf("Packmon helper invocation count = 0, want %d", want)
 	}
 	if err != nil {
-		t.Fatalf("read Packmon helper invocation record: %v", err)
+		t.Fatalf("read Packmon helper invocation record: %s", n8nOnDemandDiagnostic(err.Error(), "", state))
 	}
 	if got := strings.Count(string(data), "invoked\n"); got != want {
 		t.Fatalf("Packmon helper invocation count = %d, want %d", got, want)
