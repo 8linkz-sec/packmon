@@ -517,7 +517,10 @@ Important behavior:
   `~/.packmon/config/packmon.yaml`, defaults for non-sensitive scan policy.
   For `packmon config init`, a destination entry that already exists when
   config init checks it, including a dangling symlink, is rejected before
-  directory creation/write.
+  directory creation/write. The final destination leaf is then created
+  exclusively, so a file or leaf symlink that appears after the check is
+  rejected with the same existing-destination result instead of being
+  overwritten or followed.
   Each explicit, user-global, or auto-discovered project config file may contain
   at most one YAML document. An empty, zero-document stream remains an allowed
   no-op; any additional valid, empty, or malformed document rejects the whole

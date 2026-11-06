@@ -619,7 +619,9 @@ characters escaped, so a crafted value cannot inject escape sequences or forge
 output lines.
 For `packmon config init`, a destination entry that already exists when config
 init checks it, including a dangling symlink, is rejected before directory
-creation/write.
+creation/write. The final destination leaf is then created exclusively, so a
+file or leaf symlink that appears after the check is rejected with the same
+existing-destination result instead of being overwritten or followed.
 Private registry credentials are not read. Failures degrade to `unknown` in
 reports. The server scan API rejects Docker packages because Packmon does not
 provide container-layer vulnerability coverage. Chocolatey inventory follows

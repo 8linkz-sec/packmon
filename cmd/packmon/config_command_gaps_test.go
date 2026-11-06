@@ -87,6 +87,117 @@ func TestConfigInitRefusesExistingFileWithoutChangingIt(t *testing.T) {
 	}
 }
 
+func TestConfigInitRefusesFileCreatedImmediatelyBeforeExclusiveCreate(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	target := filepath.Join(t.TempDir(), "nested", "packmon.yaml")
+	want := []byte("sentinel: preserve exactly\n")
+	var wantMode os.FileMode
+	hookCalls := 0
+
+	cmd := newConfigInitCmdWithBeforeCreate(func(gotTarget string) error {
+		hookCalls++
+		if gotTarget != target {
+			return errors.New("before-create hook received unexpected target")
+		}
+		if err := os.WriteFile(gotTarget, want, 0o640); err != nil {
+			return err
+		}
+		info, err := os.Stat(gotTarget)
+		if err != nil {
+			return err
+		}
+		wantMode = info.Mode()
+		return nil
+	})
+	cmd.SetArgs([]string{"--file", target})
+	var err error
+	output := captureStdout(t, func() {
+		err = cmd.Execute()
+	})
+
+	if err == nil || err.Error() != target+" already exists" {
+		t.Fatalf("config init error = %v, want exact existing-destination refusal", err)
+	}
+	if hookCalls != 1 {
+		t.Fatalf("before-create hook calls = %d, want 1", hookCalls)
+	}
+	if output != "" {
+		t.Fatalf("config init output = %q, want no success output", output)
+	}
+	got, readErr := os.ReadFile(target)
+	if readErr != nil {
+		t.Fatalf("read intervening file: %v", readErr)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("intervening file changed: got %q, want %q", got, want)
+	}
+	gotInfo, statErr := os.Stat(target)
+	if statErr != nil {
+		t.Fatalf("stat intervening file: %v", statErr)
+	}
+	if gotInfo.Mode() != wantMode {
+		t.Fatalf("intervening file mode = %v, want unchanged %v", gotInfo.Mode(), wantMode)
+	}
+}
+
+func TestConfigInitRefusesDanglingSymlinkCreatedImmediatelyBeforeExclusiveCreate(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	linkTree := t.TempDir()
+	externalTree := t.TempDir()
+	link := filepath.Join(linkTree, "nested", "packmon.yaml")
+	referent := filepath.Join(externalTree, "created-outside-link-tree.yaml")
+	hookCalls := 0
+
+	cmd := newConfigInitCmdWithBeforeCreate(func(gotTarget string) error {
+		hookCalls++
+		if gotTarget != link {
+			return errors.New("before-create hook received unexpected target")
+		}
+		if err := os.Symlink(referent, gotTarget); err != nil {
+			if runtime.GOOS == "windows" {
+				t.Skipf("symlink creation is unavailable on this Windows host: %v", err)
+			}
+			return err
+		}
+		return nil
+	})
+	cmd.SetArgs([]string{"--file", link})
+	var err error
+	output := captureStdout(t, func() {
+		err = cmd.Execute()
+	})
+
+	if err == nil || err.Error() != link+" already exists" {
+		t.Fatalf("config init error = %v, want exact existing-destination refusal", err)
+	}
+	if hookCalls != 1 {
+		t.Fatalf("before-create hook calls = %d, want 1", hookCalls)
+	}
+	if output != "" {
+		t.Fatalf("config init output = %q, want no success output", output)
+	}
+	info, lstatErr := os.Lstat(link)
+	if lstatErr != nil {
+		t.Fatalf("lstat intervening symlink: %v", lstatErr)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("intervening path mode = %v, want unchanged symlink", info.Mode())
+	}
+	if gotTarget, readlinkErr := os.Readlink(link); readlinkErr != nil {
+		t.Fatalf("read intervening symlink: %v", readlinkErr)
+	} else if gotTarget != referent {
+		t.Fatalf("intervening symlink target = %q, want unchanged %q", gotTarget, referent)
+	}
+	if _, statErr := os.Stat(referent); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("external referent state error = %v, want absent", statErr)
+	}
+	if entries, readErr := os.ReadDir(externalTree); readErr != nil {
+		t.Fatalf("read external tree: %v", readErr)
+	} else if len(entries) != 0 {
+		t.Fatalf("external tree entries = %v, want empty", entries)
+	}
+}
+
 func TestConfigInitReportsDirectoryAndWriteFailures(t *testing.T) {
 	t.Run("parent component is a file", func(t *testing.T) {
 		isolateCLIConfigDiscovery(t)
