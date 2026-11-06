@@ -4,7 +4,6 @@ package integration
 
 import (
 	"archive/tar"
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -23,6 +22,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/8linkz-sec/packmon/internal/config"
+	"github.com/8linkz-sec/packmon/internal/envfile"
 )
 
 const (
@@ -43,12 +45,13 @@ type composeRuntimeHarness struct {
 }
 
 type composeRuntimeScenario struct {
-	h       *composeRuntimeHarness
-	t       *testing.T
-	dir     string
-	project string
-	files   []string
-	envFile string
+	h                      *composeRuntimeHarness
+	t                      *testing.T
+	dir                    string
+	project                string
+	files                  []string
+	envFile                string
+	diagnosticReplacements map[string]string
 }
 
 func TestComposeRuntimeScenarioAttributesFailureToChild(t *testing.T) {
@@ -237,6 +240,8 @@ func (h *composeRuntimeHarness) testBootstrapOwnerAndExplicitRun(t *testing.T) {
       - %s
 `, yamlVolumeMount(checkout, "/workspace"))
 	s := h.newScenario(t, []string{"docker-compose.yml", "docker-compose.override.yml"}, h.commonOverlay(true, ""), overlay)
+	s.redactDiagnosticPath(checkout, "[CHECKOUT]")
+	s.redactDiagnosticPath(envPath, "[CHECKOUT_ENV]")
 	s.env("PACKMON_UID", strconv.Itoa(uid))
 	s.env("PACKMON_GID", strconv.Itoa(gid))
 	s.down()
@@ -256,23 +261,8 @@ func (h *composeRuntimeHarness) testBootstrapOwnerAndExplicitRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read generated environment structure: %v", err)
 	}
-	for _, preserved := range []struct {
-		name       string
-		assignment string
-	}{
-		{name: "POSTGRES_USER", assignment: "POSTGRES_USER=existing-owner\n"},
-		{name: "POSTGRES_DB", assignment: "POSTGRES_DB=existing-database\n"},
-		{name: "POSTGRES_PASSWORD", assignment: "POSTGRES_PASSWORD=" + preservedDatabasePassword + "\n"},
-		{name: "PACKMON_DB_PASSWORD", assignment: "PACKMON_DB_PASSWORD=" + preservedDatabasePassword + "\n"},
-	} {
-		if count := bytes.Count(data, []byte(preserved.assignment)); count != 1 {
-			t.Fatalf("completed %s assignment count = %d, want exactly one preserved or mirrored value", preserved.name, count)
-		}
-	}
-	for _, key := range []string{"POSTGRES_PASSWORD=", "PACKMON_DB_PASSWORD=", "PACKMON_ADMIN_INITIAL_PASSWORD=", "PACKMON_ENCRYPTION_KEY=", "PACKMON_ADMIN_AUDIT_HMAC_KEY="} {
-		if !bytes.Contains(data, []byte(key)) {
-			t.Fatalf("generated environment is missing key %s", strings.TrimSuffix(key, "="))
-		}
+	if err := validateCompletedBootstrapEnvironment(data, preservedDatabasePassword); err != nil {
+		t.Fatal(err)
 	}
 
 	t.Run("F056-bugs-2_plain_model", func(t *testing.T) {
@@ -634,12 +624,13 @@ func (h *composeRuntimeHarness) newScenario(t *testing.T, composeNames []string,
 	envFile := filepath.Join(dir, "runtime.env")
 	writeRuntimeEnv(t, envFile, h.secrets)
 	s := &composeRuntimeScenario{
-		h:       h,
-		t:       t,
-		dir:     dir,
-		project: "packmoncontract" + strconv.FormatInt(time.Now().UnixNano(), 36),
-		files:   files,
-		envFile: envFile,
+		h:                      h,
+		t:                      t,
+		dir:                    dir,
+		project:                "packmoncontract" + strconv.FormatInt(time.Now().UnixNano(), 36),
+		files:                  files,
+		envFile:                envFile,
+		diagnosticReplacements: make(map[string]string),
 	}
 	t.Cleanup(s.down)
 	return s
@@ -801,7 +792,19 @@ func (s *composeRuntimeScenario) diagnostic(output string) string {
 	s.t.Helper()
 	output = strings.ReplaceAll(output, s.dir, "[SCENARIO]")
 	output = strings.ReplaceAll(output, filepath.ToSlash(s.dir), "[SCENARIO]")
+	for path, replacement := range s.diagnosticReplacements {
+		output = strings.ReplaceAll(output, path, replacement)
+	}
 	return s.h.diagnostic(output)
+}
+
+func (s *composeRuntimeScenario) redactDiagnosticPath(path, replacement string) {
+	s.t.Helper()
+	if s.diagnosticReplacements == nil {
+		s.diagnosticReplacements = make(map[string]string)
+	}
+	s.diagnosticReplacements[path] = replacement
+	s.diagnosticReplacements[filepath.ToSlash(path)] = replacement
 }
 
 func (h *composeRuntimeHarness) diagnostic(output string) string {
@@ -812,6 +815,45 @@ func (h *composeRuntimeHarness) diagnostic(output string) string {
 		}
 	}
 	return boundedRuntimeDiagnostic(output, replacements)
+}
+
+func validateCompletedBootstrapEnvironment(data []byte, preservedDatabasePassword string) error {
+	entries := envfile.Parse(data)
+	counts := make(map[string]int)
+	values := make(map[string]string)
+	for _, entry := range entries {
+		if entry.Key == "" {
+			continue
+		}
+		counts[entry.Key]++
+		if counts[entry.Key] == 1 {
+			values[entry.Key] = entry.Value
+		}
+	}
+
+	for key, want := range map[string]string{
+		"POSTGRES_USER":       "existing-owner",
+		"POSTGRES_DB":         "existing-database",
+		"POSTGRES_PASSWORD":   preservedDatabasePassword,
+		"PACKMON_DB_PASSWORD": preservedDatabasePassword,
+	} {
+		if counts[key] != 1 {
+			return fmt.Errorf("completed %s assignment count = %d, want exactly one", key, counts[key])
+		}
+		if values[key] != want {
+			return fmt.Errorf("completed %s did not preserve or mirror the expected fixture value", key)
+		}
+	}
+
+	for _, spec := range config.RequiredSecrets() {
+		if counts[spec.Key] != 1 {
+			return fmt.Errorf("completed %s assignment count = %d, want exactly one", spec.Key, counts[spec.Key])
+		}
+		if err := spec.Validate(values[spec.Key]); err != nil {
+			return fmt.Errorf("completed %s is invalid: %w", spec.Key, err)
+		}
+	}
+	return nil
 }
 
 func (h *composeRuntimeHarness) workContext(requested time.Duration) (context.Context, context.CancelFunc, time.Duration, bool) {

@@ -4,6 +4,7 @@ package integration
 
 import (
 	"archive/tar"
+	"encoding/base64"
 	"errors"
 	"os"
 	"path/filepath"
@@ -74,6 +75,94 @@ func TestYAMLVolumeMountQuotesTheCompleteShortSyntax(t *testing.T) {
 	}
 	if strings.Contains(got, `":/workspace`) {
 		t.Fatalf("quoted volume mount closes the scalar before the container target: %s", got)
+	}
+}
+
+func TestValidateCompletedBootstrapEnvironmentUsesEffectiveAssignments(t *testing.T) {
+	t.Parallel()
+
+	const preservedDatabasePassword = "fixture-owner-only-database-password"
+	validKey := base64.StdEncoding.EncodeToString(make([]byte, 32))
+	valid := strings.Join([]string{
+		"POSTGRES_USER=existing-owner",
+		"POSTGRES_DB=existing-database",
+		"POSTGRES_PASSWORD=" + preservedDatabasePassword,
+		"PACKMON_DB_PASSWORD=" + preservedDatabasePassword,
+		"PACKMON_ADMIN_INITIAL_PASSWORD=generated-admin-password",
+		"PACKMON_ENCRYPTION_KEY=" + validKey,
+		"PACKMON_ADMIN_AUDIT_HMAC_KEY=" + validKey,
+	}, "\n") + "\n"
+	if err := validateCompletedBootstrapEnvironment([]byte(valid), preservedDatabasePassword); err != nil {
+		t.Fatalf("valid completed bootstrap environment: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name    string
+		data    string
+		wantErr string
+	}{
+		{
+			name:    "comment is not an assignment",
+			data:    strings.Replace(valid, "POSTGRES_USER=existing-owner", "# POSTGRES_USER=existing-owner", 1),
+			wantErr: "POSTGRES_USER assignment count = 0",
+		},
+		{
+			name:    "prepended duplicate is rejected",
+			data:    "POSTGRES_PASSWORD=ineffective-prepended-value\n" + valid,
+			wantErr: "POSTGRES_PASSWORD assignment count = 2",
+		},
+		{
+			name:    "preserved value must remain exact",
+			data:    strings.Replace(valid, "POSTGRES_DB=existing-database", "POSTGRES_DB=replaced", 1),
+			wantErr: "POSTGRES_DB did not preserve",
+		},
+		{
+			name:    "generated secret must be valid",
+			data:    strings.Replace(valid, "PACKMON_ENCRYPTION_KEY="+validKey, "PACKMON_ENCRYPTION_KEY=not-base64", 1),
+			wantErr: "PACKMON_ENCRYPTION_KEY is invalid",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateCompletedBootstrapEnvironment([]byte(tc.data), preservedDatabasePassword)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("validation error = %v, want text %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestComposeRuntimeScenarioDiagnosticRedactsExternalMountPaths(t *testing.T) {
+	t.Parallel()
+
+	scenarioDir := filepath.Join(t.TempDir(), "scenario")
+	checkout := filepath.Join(t.TempDir(), "owner checkout")
+	envPath := filepath.Join(checkout, ".env")
+	s := &composeRuntimeScenario{
+		h:                      &composeRuntimeHarness{},
+		t:                      t,
+		dir:                    scenarioDir,
+		diagnosticReplacements: make(map[string]string),
+	}
+	s.redactDiagnosticPath(checkout, "[CHECKOUT]")
+	s.redactDiagnosticPath(envPath, "[CHECKOUT_ENV]")
+
+	diagnostic := s.diagnostic(strings.Join([]string{
+		scenarioDir,
+		filepath.ToSlash(scenarioDir),
+		checkout,
+		filepath.ToSlash(checkout),
+		envPath,
+		filepath.ToSlash(envPath),
+	}, "\n"))
+	for _, path := range []string{scenarioDir, filepath.ToSlash(scenarioDir), checkout, filepath.ToSlash(checkout), envPath, filepath.ToSlash(envPath)} {
+		if strings.Contains(diagnostic, path) {
+			t.Fatalf("diagnostic retained an absolute scenario or bind path: %s", diagnostic)
+		}
+	}
+	for _, marker := range []string{"[SCENARIO]", "[CHECKOUT]"} {
+		if !strings.Contains(diagnostic, marker) {
+			t.Fatalf("diagnostic = %q, want redaction marker %s", diagnostic, marker)
+		}
 	}
 }
 
