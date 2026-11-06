@@ -281,6 +281,13 @@ case-insensitive prerelease-label behavior for both ecosystem ranges and
 explicit affected-version lists. Chocolatey packages are NuGet packages:
 inventory IDs are lowercased and their versions compare under the same NuGet
 rules (`internal/version` dispatches `chocolatey` to the NuGet comparator).
+The `/api/v1/check` `ScanPackage` boundary measures the decoded raw `name` and
+`version` before that normalization: names may contain at most 512 Unicode code
+points and versions at most 256 Unicode code points. Surrounding whitespace
+counts toward those limits and is trimmed only after the raw values pass
+validation. Package-detail and refresh path/query inputs retain their existing
+UTF-8 byte limits; these non-`ScanPackage` limits are not OpenAPI `maxLength`
+semantics.
 SwiftPM packages are identified by OSV/PURL SwiftURL name
 (`host/owner/repo`, without URL scheme or `.git`) when `Package.resolved`
 provides a repository location. URL userinfo and non-HTTP(S) repository
@@ -984,9 +991,12 @@ part of the required free core coverage:
   demand-driven reputation source. Demand scheduling runs behind a feed-layer
   scheduler, requires a configured ReversingLabs API key, deduplicates package
   coordinates per check request, and caps newly scheduled lookups per request.
-  Package coordinates must fit the documented API name/version limits and are
-  percent-encoded as PURLs before outbound lookup. Operators can suppress
-  private package namespaces before any external lookup.
+  Package coordinates must fit the documented API name/version limits.
+  ReversingLabs PURL construction separately caps the normalized name at 512
+  UTF-8 bytes and the version at 256 UTF-8 bytes before percent-encoding; a
+  larger API-valid Unicode coordinate is not sent to that optional provider.
+  Operators can suppress private package namespaces before any external
+  lookup.
   The server stores normalized package reputation cache rows and refreshes a
   package version at most once per 24 hours when it appears in a check request
   and no non-ReversingLabs feed already covers it. Non-finding cache rows are

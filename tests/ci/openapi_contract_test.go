@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	apiv1 "github.com/8linkz-sec/packmon/internal/api/v1"
 	"github.com/8linkz-sec/packmon/internal/checkcontract"
@@ -401,12 +402,24 @@ func TestOpenAPIScanPackageSchemaInstances(t *testing.T) {
 		{name: "blank name", packageName: " \t ", version: "1.0.0", wantAccepted: false},
 		{name: "blank version", packageName: "left-pad", version: " \t ", wantAccepted: false},
 		{name: "embedded version whitespace", packageName: "left-pad", version: "1.0 0", wantAccepted: false},
-		{name: "exact name limit", packageName: strings.Repeat("n", checkcontract.MaxPackageNameLength), version: "1.0.0", wantAccepted: true},
-		{name: "over name limit", packageName: strings.Repeat("n", checkcontract.MaxPackageNameLength+1), version: "1.0.0", wantAccepted: false},
-		{name: "exact version limit", packageName: "left-pad", version: strings.Repeat("1", checkcontract.MaxPackageVersionLength), wantAccepted: true},
-		{name: "over version limit", packageName: "left-pad", version: strings.Repeat("1", checkcontract.MaxPackageVersionLength+1), wantAccepted: false},
-		{name: "exact multibyte name byte limit", packageName: strings.Repeat("é", checkcontract.MaxPackageNameLength/2), version: "1.0.0", wantAccepted: true},
-		{name: "exact multibyte version byte limit", packageName: "left-pad", version: strings.Repeat("é", checkcontract.MaxPackageVersionLength/2), wantAccepted: true},
+		{name: "exact ASCII name code-point limit", packageName: strings.Repeat("n", checkcontract.MaxScanPackageNameCodePoints), version: "1.0.0", wantAccepted: true},
+		{name: "over ASCII name code-point limit", packageName: strings.Repeat("n", checkcontract.MaxScanPackageNameCodePoints+1), version: "1.0.0", wantAccepted: false},
+		{name: "exact ASCII version code-point limit", packageName: "left-pad", version: strings.Repeat("1", checkcontract.MaxScanPackageVersionCodePoints), wantAccepted: true},
+		{name: "over ASCII version code-point limit", packageName: "left-pad", version: strings.Repeat("1", checkcontract.MaxScanPackageVersionCodePoints+1), wantAccepted: false},
+		{name: "exact two-byte name code-point limit", packageName: strings.Repeat("é", checkcontract.MaxScanPackageNameCodePoints), version: "1.0.0", wantAccepted: true},
+		{name: "over two-byte name code-point limit", packageName: strings.Repeat("é", checkcontract.MaxScanPackageNameCodePoints+1), version: "1.0.0", wantAccepted: false},
+		{name: "exact two-byte version code-point limit", packageName: "left-pad", version: strings.Repeat("é", checkcontract.MaxScanPackageVersionCodePoints), wantAccepted: true},
+		{name: "over two-byte version code-point limit", packageName: "left-pad", version: strings.Repeat("é", checkcontract.MaxScanPackageVersionCodePoints+1), wantAccepted: false},
+		{name: "exact supplementary name code-point limit", packageName: strings.Repeat("\U0001F600", checkcontract.MaxScanPackageNameCodePoints), version: "1.0.0", wantAccepted: true},
+		{name: "over supplementary name code-point limit", packageName: strings.Repeat("\U0001F600", checkcontract.MaxScanPackageNameCodePoints+1), version: "1.0.0", wantAccepted: false},
+		{name: "exact supplementary version code-point limit", packageName: "left-pad", version: strings.Repeat("\U0001F600", checkcontract.MaxScanPackageVersionCodePoints), wantAccepted: true},
+		{name: "over supplementary version code-point limit", packageName: "left-pad", version: strings.Repeat("\U0001F600", checkcontract.MaxScanPackageVersionCodePoints+1), wantAccepted: false},
+		{name: "exact raw name limit includes whitespace", packageName: " " + strings.Repeat("n", checkcontract.MaxScanPackageNameCodePoints-2) + " ", version: "1.0.0", wantAccepted: true},
+		{name: "name whitespace pushes raw value over limit", packageName: " " + strings.Repeat("n", checkcontract.MaxScanPackageNameCodePoints) + " ", version: "1.0.0", wantAccepted: false},
+		{name: "exact raw version limit includes whitespace", packageName: "left-pad", version: " " + strings.Repeat("1", checkcontract.MaxScanPackageVersionCodePoints-2) + " ", wantAccepted: true},
+		{name: "version whitespace pushes raw value over limit", packageName: "left-pad", version: " " + strings.Repeat("1", checkcontract.MaxScanPackageVersionCodePoints) + " ", wantAccepted: false},
+		{name: "exact raw name may shrink during canonicalization", packageName: strings.Repeat("_", checkcontract.MaxScanPackageNameCodePoints), version: "1.0.0", wantAccepted: true},
+		{name: "canonicalization cannot shrink raw over-limit name", packageName: strings.Repeat("_", checkcontract.MaxScanPackageNameCodePoints+1), version: "1.0.0", wantAccepted: false},
 		{name: "ordinary surrounding whitespace", packageName: " left-pad ", version: " 1.0.0 ", wantAccepted: true},
 	}
 	for _, tt := range tests {
@@ -416,32 +429,12 @@ func TestOpenAPIScanPackageSchemaInstances(t *testing.T) {
 			if gotAccepted != tt.wantAccepted {
 				t.Fatalf("ScanPackage schema accepted = %t, want %t for %#v", gotAccepted, tt.wantAccepted, instance)
 			}
+			gotRuntimeAccepted := runtimeCheckCoordinateAccepted(tt.packageName, tt.version)
+			if gotRuntimeAccepted != tt.wantAccepted || gotRuntimeAccepted != gotAccepted {
+				t.Fatalf("ScanPackage schema/runtime accepted = %t/%t, want %t for %#v", gotAccepted, gotRuntimeAccepted, tt.wantAccepted, instance)
+			}
 		})
 	}
-
-	t.Run("OPEN F010-bugs-4 runtime length and normalization mismatch", func(t *testing.T) {
-		mismatches := []struct {
-			name                string
-			packageName         string
-			version             string
-			wantSchemaAccepted  bool
-			wantRuntimeAccepted bool
-		}{
-			{name: "Unicode name counts code points in schema but bytes at runtime", packageName: strings.Repeat("é", checkcontract.MaxPackageNameLength/2+1), version: "1.0.0", wantSchemaAccepted: true, wantRuntimeAccepted: false},
-			{name: "Unicode version counts code points in schema but bytes at runtime", packageName: "left-pad", version: strings.Repeat("é", checkcontract.MaxPackageVersionLength/2+1), wantSchemaAccepted: true, wantRuntimeAccepted: false},
-			{name: "name whitespace counts before schema limit but is trimmed at runtime", packageName: " " + strings.Repeat("n", checkcontract.MaxPackageNameLength) + " ", version: "1.0.0", wantSchemaAccepted: false, wantRuntimeAccepted: true},
-			{name: "version whitespace counts before schema limit but is trimmed at runtime", packageName: "left-pad", version: " " + strings.Repeat("1", checkcontract.MaxPackageVersionLength) + " ", wantSchemaAccepted: false, wantRuntimeAccepted: true},
-		}
-		for _, tt := range mismatches {
-			instance := map[string]any{"ecosystem": "npm", "name": tt.packageName, "version": tt.version}
-			gotSchemaAccepted := schema.Validate(instance) == nil
-			gotRuntimeAccepted := runtimeCheckCoordinateAccepted(tt.packageName, tt.version)
-			if gotSchemaAccepted != tt.wantSchemaAccepted || gotRuntimeAccepted != tt.wantRuntimeAccepted || gotSchemaAccepted == gotRuntimeAccepted {
-				t.Fatalf("%s: schema/runtime accepted = %t/%t, want %t/%t", tt.name, gotSchemaAccepted, gotRuntimeAccepted, tt.wantSchemaAccepted, tt.wantRuntimeAccepted)
-			}
-		}
-		t.Skip("OPEN F010-bugs-4: ScanPackage uses raw Unicode code-point lengths while the handler enforces post-trim byte lengths")
-	})
 }
 
 func TestOpenAPICISAKEVClearMissingTruthTable(t *testing.T) {
@@ -622,21 +615,33 @@ func TestOpenAPIScanRequestDocumentsPackageCoordinateLimits(t *testing.T) {
 	if got := requireInt(t, name, "minLength"); got != 1 {
 		t.Fatalf("ScanPackage.name minLength = %d, want 1", got)
 	}
-	if got := requireInt(t, name, "maxLength"); got != checkcontract.MaxPackageNameLength {
-		t.Fatalf("ScanPackage.name maxLength = %d, want %d", got, checkcontract.MaxPackageNameLength)
+	if got := requireInt(t, name, "maxLength"); got != checkcontract.MaxScanPackageNameCodePoints {
+		t.Fatalf("ScanPackage.name maxLength = %d, want %d", got, checkcontract.MaxScanPackageNameCodePoints)
 	}
 	if got := name["pattern"]; got != `.*\S.*` {
 		t.Fatalf("ScanPackage.name pattern = %#v, want non-blank pattern", got)
+	}
+	nameDescription, _ := name["description"].(string)
+	for _, want := range []string{"Unicode code points", "before trimming", "Surrounding whitespace counts"} {
+		if !strings.Contains(nameDescription, want) {
+			t.Fatalf("ScanPackage.name description missing %q contract guidance: %q", want, nameDescription)
+		}
 	}
 	version := requireMap(t, scanProperties, "version")
 	if got := requireInt(t, version, "minLength"); got != 1 {
 		t.Fatalf("ScanPackage.version minLength = %d, want 1", got)
 	}
-	if got := requireInt(t, version, "maxLength"); got != checkcontract.MaxPackageVersionLength {
-		t.Fatalf("ScanPackage.version maxLength = %d, want %d", got, checkcontract.MaxPackageVersionLength)
+	if got := requireInt(t, version, "maxLength"); got != checkcontract.MaxScanPackageVersionCodePoints {
+		t.Fatalf("ScanPackage.version maxLength = %d, want %d", got, checkcontract.MaxScanPackageVersionCodePoints)
 	}
 	if got := version["pattern"]; got != `^\s*\S+\s*$` {
 		t.Fatalf("ScanPackage.version pattern = %#v, want single-token version pattern", got)
+	}
+	versionDescription, _ := version["description"].(string)
+	for _, want := range []string{"Unicode code points", "before trimming", "Surrounding whitespace counts"} {
+		if !strings.Contains(versionDescription, want) {
+			t.Fatalf("ScanPackage.version description missing %q contract guidance: %q", want, versionDescription)
+		}
 	}
 
 	for _, field := range []string{"dev", "direct", "indirect", "optional", "peer"} {
@@ -2633,10 +2638,13 @@ func scanFeedStatusStrings(values []domain.ScanFeedStatus) []string {
 }
 
 func runtimeCheckCoordinateAccepted(name, version string) bool {
+	if utf8.RuneCountInString(name) > checkcontract.MaxScanPackageNameCodePoints ||
+		utf8.RuneCountInString(version) > checkcontract.MaxScanPackageVersionCodePoints {
+		return false
+	}
 	name = strings.TrimSpace(name)
 	version = strings.TrimSpace(version)
-	return name != "" && len(name) <= checkcontract.MaxPackageNameLength &&
-		version != "" && len(version) <= checkcontract.MaxPackageVersionLength &&
+	return name != "" && version != "" &&
 		len(strings.Fields(version)) == 1
 }
 
