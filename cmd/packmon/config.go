@@ -1,7 +1,10 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -130,6 +133,10 @@ func newConfigShowCmd() *cobra.Command {
 }
 
 func newConfigInitCmd() *cobra.Command {
+	return newConfigInitCmdWithBeforeCreate(nil)
+}
+
+func newConfigInitCmdWithBeforeCreate(beforeCreate func(string) error) *cobra.Command {
 	var flagPath string
 
 	cmd := &cobra.Command{
@@ -225,7 +232,15 @@ repos:
 			if err := os.MkdirAll(dir, 0o750); err != nil {
 				return fmt.Errorf("create config directory %s: %w", dir, err)
 			}
-			if err := os.WriteFile(target, []byte(template), 0o600); err != nil {
+			if beforeCreate != nil {
+				if err := beforeCreate(target); err != nil {
+					return fmt.Errorf("prepare config destination %s: %w", target, err)
+				}
+			}
+			if err := writeExclusiveConfigFile(target, []byte(template)); err != nil {
+				if errors.Is(err, fs.ErrExist) {
+					return fmt.Errorf("%s already exists", target)
+				}
 				return fmt.Errorf("write %s: %w", target, err)
 			}
 			fmt.Printf("Created %s\n", target)
@@ -235,6 +250,24 @@ repos:
 
 	cmd.Flags().StringVar(&flagPath, "file", "", "path to config file (default: .packmon.yaml)")
 	return cmd
+}
+
+func writeExclusiveConfigFile(path string, content []byte) (err error) {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := file.Close(); err == nil {
+			err = closeErr
+		}
+	}()
+
+	written, err := file.Write(content)
+	if err == nil && written < len(content) {
+		err = io.ErrShortWrite
+	}
+	return err
 }
 
 func newConfigValidateCmd() *cobra.Command {
