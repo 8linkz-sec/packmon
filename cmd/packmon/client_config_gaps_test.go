@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -183,18 +184,80 @@ func TestLoadExplicitCLIConfigRejectsRepoNameThatCannotBeDerivedFromRoot(t *test
 }
 
 func TestLoadExplicitCLIConfigRejectsTrailingYAMLDocuments(t *testing.T) {
+	tests := []struct {
+		name      string
+		data      string
+		forbidden []string
+	}{
+		{
+			name:      "valid second document",
+			data:      "mode: local\n---\nmode: remote\napi_key: second-doc-secret-marker\n",
+			forbidden: []string{"api_key", "second-doc-secret-marker", "mode: remote"},
+		},
+		{
+			name:      "empty second document",
+			data:      "mode: local\n---\n",
+			forbidden: []string{"line ", "yaml: line"},
+		},
+		{
+			name: "malformed second document",
+			data: "mode: local\n---\n" +
+				"api_key: second-doc-secret-marker\n" +
+				"fail_on: [second-doc-policy-marker\n",
+			forbidden: []string{
+				"api_key", "fail_on", "second-doc-secret-marker", "second-doc-policy-marker",
+				"did not find expected", "line ", "yaml: line",
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "packmon.yaml")
+			if err := os.WriteFile(path, []byte(test.data), 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+
+			cfg, source, err := loadExplicitCLIConfig(path)
+			if !errors.Is(err, errCLIConfigAdditionalYAMLDocument) {
+				t.Fatalf("loadExplicitCLIConfig() error = %v, want additional-document sentinel", err)
+			}
+			wantError := "parse " + path + ": " + errCLIConfigAdditionalYAMLDocument.Error()
+			if err.Error() != wantError {
+				t.Fatalf("loadExplicitCLIConfig() error = %q, want %q", err, wantError)
+			}
+			if cfg != nil || source != "" {
+				t.Fatalf("rejected config returned cfg/source = %+v/%q, want nil/empty", cfg, source)
+			}
+			for _, forbidden := range test.forbidden {
+				if strings.Contains(err.Error(), forbidden) {
+					t.Fatalf("loadExplicitCLIConfig() error contains trailing YAML detail %q: %q", forbidden, err)
+				}
+			}
+		})
+	}
+}
+
+func TestLoadExplicitCLIConfigAcceptsTrailingWhitespaceAndComments(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "packmon.yaml")
-	data := "mode: local\n---\nmode: remote\napi_key: hidden-policy-value\n"
+	data := "mode: local\r\n\r\n  \r\n# trailing comment\r\n  # indented trailing comment\r\n"
 	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 
-	cfg, _, err := loadExplicitCLIConfig(path)
-	if err == nil {
-		if cfg == nil || cfg.Mode != "local" || cfg.APIKey != "" {
-			t.Fatalf("first-document behavior changed unexpectedly: cfg = %+v", cfg)
-		}
-		t.Skip("known bug F023-bugs-2: trailing YAML documents are silently ignored")
+	cfg, source, err := loadExplicitCLIConfig(path)
+	if err != nil {
+		t.Fatalf("loadExplicitCLIConfig() error = %v", err)
+	}
+	if cfg == nil || cfg.Mode != "local" {
+		t.Fatalf("loadExplicitCLIConfig() config = %+v, want local mode", cfg)
+	}
+	wantSource, err := filepath.Abs(path)
+	if err != nil {
+		t.Fatalf("resolve config path: %v", err)
+	}
+	if source != wantSource {
+		t.Fatalf("loadExplicitCLIConfig() source = %q, want %q", source, wantSource)
 	}
 }
 

@@ -510,6 +510,10 @@ Important behavior:
   For `packmon config init`, a destination entry that already exists when
   config init checks it, including a dangling symlink, is rejected before
   directory creation/write.
+  Each explicit, user-global, or auto-discovered project config file may contain
+  at most one YAML document. An empty, zero-document stream remains an allowed
+  no-op; any additional valid, empty, or malformed document rejects the whole
+  file before config layering or normalization.
   Auto-discovered project config is untrusted for credential/server/webhook/DB
   routing and local write-destination fields (`server`, `api_key`,
   `api_key_env`, `cacert`, `insecure_allow_http`, `require_remote`, webhook
