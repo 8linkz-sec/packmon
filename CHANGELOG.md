@@ -16,6 +16,11 @@
 
 ### Fixed
 
+- Chocolatey inventory discovery now applies its `node_modules`, `vendor`,
+  `__pycache__`, and `.github` directory policy case-insensitively on Windows.
+  Mixed-case dependency caches are no longer scanned, mixed-case `.github`
+  directories remain discoverable, and reported paths retain their original
+  spelling. POSIX matching remains case-sensitive.
 - Chocolatey inventory discovery warnings no longer expose the absolute scan
   root and candidate path if an injected or future Windows walker callback
   supplies a file on another volume. The candidate is still rejected, later

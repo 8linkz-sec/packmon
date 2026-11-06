@@ -709,7 +709,11 @@ Important behavior:
   been read, and a second top-level element after that identification is a
   parse error that discards every parsed package row) and `choco install|upgrade` /
   `cinst` / `cup` command lines in `.ps1`, `.psm1`, `.bat`, and `.cmd`
-  scripts. Rows use ecosystem `chocolatey`, source `config.xml` or
+  scripts. Directory discovery prunes hidden directories except `.github` and
+  the common dependency caches `node_modules`, `vendor`, and `__pycache__`.
+  These policy names match case-insensitively only on Windows; discovered paths
+  retain their filesystem spelling on every platform. Rows use ecosystem
+  `chocolatey`, source `config.xml` or
   `choco-install`, scope `runtime`, relation `declared`, and lowercase
   package IDs. A `--version` pin is compared with the feed's latest release
   under NuGet version rules; entries without a version (config.xml always

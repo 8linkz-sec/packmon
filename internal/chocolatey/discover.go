@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -62,10 +63,7 @@ func DiscoverFilesWithWarnings(root string, maxDepth int) ([]File, []string, err
 		}
 		if d.IsDir() {
 			name := d.Name()
-			if name != "." && name != ".github" && strings.HasPrefix(name, ".") {
-				return fs.SkipDir
-			}
-			if name == "node_modules" || name == "vendor" || name == "__pycache__" {
+			if inventoryDirectoryExcluded(name, runtime.GOOS == "windows") {
 				return fs.SkipDir
 			}
 			depth := strings.Count(filepath.ToSlash(path), "/") - rootDepth
@@ -92,6 +90,17 @@ func DiscoverFilesWithWarnings(root string, maxDepth int) ([]File, []string, err
 		return nil
 	})
 	return files, warnings, err
+}
+
+func inventoryDirectoryExcluded(name string, caseInsensitive bool) bool {
+	comparisonName := name
+	if caseInsensitive {
+		comparisonName = strings.ToLower(comparisonName)
+	}
+	if comparisonName != "." && comparisonName != ".github" && strings.HasPrefix(comparisonName, ".") {
+		return true
+	}
+	return comparisonName == "node_modules" || comparisonName == "vendor" || comparisonName == "__pycache__"
 }
 
 func classifyFile(base string) (Kind, bool) {

@@ -2,6 +2,7 @@ package chocolatey
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -203,6 +204,63 @@ func TestDiscoverFilesWithWarningsHonorsDepthAndDirectoryExclusions(t *testing.T
 	}
 }
 
+func TestInventoryDirectoryExcludedUsesExplicitCaseSemantics(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name            string
+		caseInsensitive bool
+		want            bool
+	}{
+		{name: "vendor", want: true},
+		{name: "VENDOR", want: false},
+		{name: "Node_Modules", want: false},
+		{name: "__PYCACHE__", want: false},
+		{name: ".github", want: false},
+		{name: ".GITHUB", want: true},
+		{name: ".hidden", want: true},
+		{name: "src", want: false},
+		{name: ".", want: false},
+		{name: "VENDOR", caseInsensitive: true, want: true},
+		{name: "Node_Modules", caseInsensitive: true, want: true},
+		{name: "__PYCACHE__", caseInsensitive: true, want: true},
+		{name: ".GITHUB", caseInsensitive: true, want: false},
+		{name: ".Hidden", caseInsensitive: true, want: true},
+		{name: "src", caseInsensitive: true, want: false},
+	} {
+		t.Run(tt.name+fmt.Sprintf("/case_insensitive_%t", tt.caseInsensitive), func(t *testing.T) {
+			t.Parallel()
+			if got := inventoryDirectoryExcluded(tt.name, tt.caseInsensitive); got != tt.want {
+				t.Fatalf("inventoryDirectoryExcluded(%q, %t) = %t, want %t", tt.name, tt.caseInsensitive, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDiscoverFilesWithWarningsAppliesCaseInsensitiveDirectoryPolicyOnWindows(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows directory policy is case-insensitive")
+	}
+
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "VENDOR", "vendor.ps1"), "choco install vendor\n")
+	writeTestFile(t, filepath.Join(root, "Node_Modules", "node.ps1"), "choco install node\n")
+	writeTestFile(t, filepath.Join(root, "__PYCACHE__", "cache.ps1"), "choco install cache\n")
+	writeTestFile(t, filepath.Join(root, ".GITHUB", "kept.cmd"), "choco install kept\n")
+
+	files, warnings, err := DiscoverFilesWithWarnings(root, 2)
+	if err != nil {
+		t.Fatalf("DiscoverFilesWithWarnings() error = %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %v, want none", warnings)
+	}
+	if len(files) != 1 || files[0].RelPath != ".GITHUB/kept.cmd" || files[0].Kind != KindBatchScript {
+		t.Fatalf("files = %+v, want only .GITHUB/kept.cmd with original spelling", files)
+	}
+}
+
 func TestDiscoverFilesWithWarningsRejectsFileRoot(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "not-a-directory.ps1")
 	writeTestFile(t, root, "choco install alpha")
@@ -373,6 +431,27 @@ func TestDiscoverFilesWithWarningsScansExplicitGitHubRoot(t *testing.T) {
 	}
 	if len(files) != 1 || files[0].RelPath != "bootstrap.ps1" {
 		t.Fatalf("files = %+v, want bootstrap.ps1 from explicit .github root", files)
+	}
+}
+
+func TestDiscoverFilesWithWarningsScansExplicitUppercaseGitHubRootOnWindows(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS != "windows" {
+		t.Skip("uppercase .GITHUB exception is Windows-specific")
+	}
+
+	root := filepath.Join(t.TempDir(), ".GITHUB")
+	writeTestFile(t, filepath.Join(root, "bootstrap.ps1"), "choco install bootstrap\n")
+
+	files, warnings, err := DiscoverFilesWithWarnings(root, 0)
+	if err != nil {
+		t.Fatalf("DiscoverFilesWithWarnings() error = %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %v, want none", warnings)
+	}
+	if len(files) != 1 || files[0].RelPath != "bootstrap.ps1" {
+		t.Fatalf("files = %+v, want bootstrap.ps1 from explicit .GITHUB root", files)
 	}
 }
 
