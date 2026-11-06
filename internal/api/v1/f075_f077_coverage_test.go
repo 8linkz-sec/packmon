@@ -392,58 +392,103 @@ func TestF075VulnCheckStreamingMalformedBodiesPreserveState(t *testing.T) {
 
 func TestF075VulnCheckOmittedAndEmptyEntriesRemainAtomicNoOps(t *testing.T) {
 	for _, body := range []string{`{}`, `{"entries":[]}`} {
-		t.Run(body, func(t *testing.T) {
-			seed := []db.VulnCheckEntry{{CVEID: "CVE-2026-7003", ExploitExists: true}}
-			store := &atomicFailingVulnCheckStore{committed: append([]db.VulnCheckEntry(nil), seed...)}
-			h := newTestFeedImportHandler(store)
-			resp, total, err := h.importVulnCheckRequest(context.Background(), "vulncheck", f075EPSSRequest(strings.NewReader(body)), func(int, int) db.AdminAuditEntry {
-				return db.AdminAuditEntry{Action: "feed_import"}
+		for _, capability := range []string{"buffered", "streaming"} {
+			t.Run(body+"/"+capability, func(t *testing.T) {
+				seed := []db.VulnCheckEntry{{CVEID: "CVE-2026-7003", ExploitExists: true}}
+				var store FeedImportStore
+				if capability == "buffered" {
+					store = &stubStore{vulnCheckEntries: append([]db.VulnCheckEntry(nil), seed...)}
+				} else {
+					store = &atomicFailingVulnCheckStore{committed: append([]db.VulnCheckEntry(nil), seed...)}
+				}
+
+				h := newTestFeedImportHandler(store)
+				resp, total, err := h.importVulnCheckRequest(context.Background(), "vulncheck", f075EPSSRequest(strings.NewReader(body)), func(int, int) db.AdminAuditEntry {
+					return db.AdminAuditEntry{Action: "feed_import"}
+				})
+				if err != nil {
+					t.Fatalf("empty import error = %v", err)
+				}
+				if resp == nil || resp.Imported != 0 || resp.EntriesTotal != 0 || total != 0 {
+					t.Fatalf("response/total = %+v/%d, want zero-entry success", resp, total)
+				}
+
+				switch got := store.(type) {
+				case *stubStore:
+					if !reflect.DeepEqual(got.vulnCheckEntries, seed) {
+						t.Fatalf("buffered import changed entries: %+v", got.vulnCheckEntries)
+					}
+					if len(got.upsertedStatuses) != 0 || len(got.auditEntries) != 1 {
+						t.Fatalf("buffered status/audit writes = %d/%d, want 0/1", len(got.upsertedStatuses), len(got.auditEntries))
+					}
+				case *atomicFailingVulnCheckStore:
+					if !reflect.DeepEqual(got.committed, seed) || len(got.streamBatchSizes) != 0 {
+						t.Fatalf("streaming import changed entries: committed=%+v batches=%v", got.committed, got.streamBatchSizes)
+					}
+					if len(got.upsertedStatuses) != 0 || len(got.auditEntries) != 1 {
+						t.Fatalf("streaming status/audit writes = %d/%d, want 0/1", len(got.upsertedStatuses), len(got.auditEntries))
+					}
+				default:
+					t.Fatalf("unexpected test store type %T", store)
+				}
 			})
-			if err != nil {
-				t.Fatalf("empty streamed import error = %v", err)
-			}
-			if resp == nil || resp.Imported != 0 || resp.EntriesTotal != 0 || total != 0 {
-				t.Fatalf("response/total = %+v/%d, want zero-entry success", resp, total)
-			}
-			if !reflect.DeepEqual(store.committed, seed) || len(store.streamBatchSizes) != 0 {
-				t.Fatalf("empty import changed entries: committed=%+v batches=%v", store.committed, store.streamBatchSizes)
-			}
-			if len(store.upsertedStatuses) != 0 || len(store.auditEntries) != 1 {
-				t.Fatalf("status/audit writes = %d/%d, want 0/1", len(store.upsertedStatuses), len(store.auditEntries))
-			}
-		})
+		}
 	}
 }
 
 func TestF075VulnCheckNullShapesAreRejectedAtomically(t *testing.T) {
 	for _, body := range []string{`null`, `{"entries":null}`} {
-		t.Run(body, func(t *testing.T) {
-			seed := []db.VulnCheckEntry{{CVEID: "CVE-2026-7003", ExploitExists: true}}
-			store := &atomicFailingVulnCheckStore{committed: append([]db.VulnCheckEntry(nil), seed...)}
-			h := newTestFeedImportHandler(store)
-			req := httptest.NewRequest(http.MethodPost, "/api/v1/feeds/vulncheck/import", strings.NewReader(body))
-			req.SetPathValue("feed", "vulncheck")
-			req.Header.Set("Content-Type", "application/json")
-			rr := httptest.NewRecorder()
-
-			h.HandleImport(rr, req)
-
-			if !reflect.DeepEqual(store.committed, seed) || len(store.streamBatchSizes) != 0 {
-				t.Fatalf("null import changed entries: committed=%+v batches=%v", store.committed, store.streamBatchSizes)
-			}
-			if rr.Code == http.StatusOK {
-				if len(store.upsertedStatuses) != 0 || len(store.auditEntries) != 1 {
-					t.Fatalf("accepted null import status/audit writes = %d/%d, want 0/1", len(store.upsertedStatuses), len(store.auditEntries))
+		for _, capability := range []string{"buffered", "streaming"} {
+			t.Run(body+"/"+capability, func(t *testing.T) {
+				seed := []db.VulnCheckEntry{{CVEID: "CVE-2026-7003", ExploitExists: true}}
+				var store FeedImportStore
+				if capability == "buffered" {
+					store = &stubStore{vulnCheckEntries: append([]db.VulnCheckEntry(nil), seed...)}
+				} else {
+					store = &atomicFailingVulnCheckStore{committed: append([]db.VulnCheckEntry(nil), seed...)}
 				}
-				t.Skip("F075-bugs-4: VulnCheck streaming imports accept OpenAPI-invalid null request shapes")
-			}
-			if rr.Code != http.StatusBadRequest {
-				t.Fatalf("null import status = %d, want 400: %s", rr.Code, rr.Body.String())
-			}
-			if len(store.auditEntries) != 0 || len(store.upsertedStatuses) != 1 || store.upsertedStatuses[0].LastSyncStatus != db.FeedSyncStatusRejected {
-				t.Fatalf("rejected null import status/audit = %+v/%d", store.upsertedStatuses, len(store.auditEntries))
-			}
-		})
+
+				h := newTestFeedImportHandler(store)
+				req := httptest.NewRequest(http.MethodPost, "/api/v1/feeds/vulncheck/import", strings.NewReader(body))
+				req.SetPathValue("feed", "vulncheck")
+				req.Header.Set("Content-Type", "application/json")
+				rr := httptest.NewRecorder()
+
+				h.HandleImport(rr, req)
+
+				if rr.Code != http.StatusBadRequest {
+					t.Fatalf("null import status = %d, want 400: %s", rr.Code, rr.Body.String())
+				}
+				var response errorJSON
+				if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+					t.Fatalf("decode error response: %v", err)
+				}
+				if response.Error != "invalid JSON body: json body has invalid field type" {
+					t.Fatalf("error = %q, want controlled invalid-type error", response.Error)
+				}
+
+				switch got := store.(type) {
+				case *stubStore:
+					if !reflect.DeepEqual(got.vulnCheckEntries, seed) {
+						t.Fatalf("buffered null import changed entries: %+v", got.vulnCheckEntries)
+					}
+					if len(got.auditEntries) != 0 {
+						t.Fatalf("buffered audit entries = %d, want 0", len(got.auditEntries))
+					}
+					assertSingleRejectedFeedStatus(t, got.upsertedStatuses, "vulncheck")
+				case *atomicFailingVulnCheckStore:
+					if !reflect.DeepEqual(got.committed, seed) || len(got.streamBatchSizes) != 0 {
+						t.Fatalf("streaming null import changed entries: committed=%+v batches=%v", got.committed, got.streamBatchSizes)
+					}
+					if len(got.auditEntries) != 0 {
+						t.Fatalf("streaming audit entries = %d, want 0", len(got.auditEntries))
+					}
+					assertSingleRejectedFeedStatus(t, got.upsertedStatuses, "vulncheck")
+				default:
+					t.Fatalf("unexpected test store type %T", store)
+				}
+			})
+		}
 	}
 }
 
@@ -578,6 +623,7 @@ func TestF075DispatchAndAdapterCapabilityGuards(t *testing.T) {
 	if _, _, err := streamImportEntriesObject[epssImportEntry, db.EPSSEntry](
 		f075EPSSRequest(strings.NewReader(`{"entries":[]}`)),
 		"epss",
+		streamImportEntriesOptions{},
 		0,
 		normalizeEPSSImportEntriesBatch,
 		func([]db.EPSSEntry) error { return nil },
@@ -587,6 +633,7 @@ func TestF075DispatchAndAdapterCapabilityGuards(t *testing.T) {
 	if _, _, err := streamImportEntriesObject[epssImportEntry, db.EPSSEntry](
 		f075EPSSRequest(strings.NewReader(`{"entries":[]}`)),
 		"epss",
+		streamImportEntriesOptions{},
 		1,
 		nil,
 		func([]db.EPSSEntry) error { return nil },

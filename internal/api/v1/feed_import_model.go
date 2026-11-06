@@ -617,6 +617,7 @@ func (h *FeedImportHandler) importVulnCheckRequest(ctx context.Context, feed str
 		statusInput, entriesTotal, err := streamImportEntriesObject[vulnCheckImportEntry, db.VulnCheckEntry](
 			r,
 			"vulncheck",
+			streamImportEntriesOptions{rejectNullContainers: true},
 			vulnCheckImportStreamBatchSize,
 			normalizeVulnCheckImportEntriesBatch,
 			func(batch []db.VulnCheckEntry) error {
@@ -638,6 +639,7 @@ func (h *FeedImportHandler) importVulnCheckRequest(ctx context.Context, feed str
 		statusInput, entriesTotal, streamErr = streamImportEntriesObject[vulnCheckImportEntry, db.VulnCheckEntry](
 			r,
 			"vulncheck",
+			streamImportEntriesOptions{rejectNullContainers: true},
 			vulnCheckImportStreamBatchSize,
 			normalizeVulnCheckImportEntriesBatch,
 			yield,
@@ -746,6 +748,7 @@ func (h *FeedImportHandler) importEPSSRequest(ctx context.Context, feed string, 
 		statusInput, entriesTotal, err := streamImportEntriesObject[epssImportEntry, db.EPSSEntry](
 			r,
 			"epss",
+			streamImportEntriesOptions{},
 			epssImportStreamBatchSize,
 			normalizeEPSSImportEntriesBatch,
 			func(batch []db.EPSSEntry) error {
@@ -769,6 +772,7 @@ func (h *FeedImportHandler) importEPSSRequest(ctx context.Context, feed string, 
 		statusInput, entriesTotal, streamErr = streamImportEntriesObject[epssImportEntry, db.EPSSEntry](
 			r,
 			"epss",
+			streamImportEntriesOptions{},
 			epssImportStreamBatchSize,
 			normalizeEPSSImportEntriesBatch,
 			yield,
@@ -1201,7 +1205,11 @@ func importDeleteIDValues(items []importDeleteID) []string {
 	return out
 }
 
-func streamImportEntriesObject[Raw, Normalized any](r *http.Request, bodyName string, batchSize int, normalize func([]Raw, int) ([]Normalized, error), emit func([]Normalized) error) (*feedSyncStatusInput, int, error) {
+type streamImportEntriesOptions struct {
+	rejectNullContainers bool
+}
+
+func streamImportEntriesObject[Raw, Normalized any](r *http.Request, bodyName string, options streamImportEntriesOptions, batchSize int, normalize func([]Raw, int) ([]Normalized, error), emit func([]Normalized) error) (*feedSyncStatusInput, int, error) {
 	if batchSize <= 0 {
 		return nil, 0, errors.New("feed import stream batch size is not configured")
 	}
@@ -1218,6 +1226,9 @@ func streamImportEntriesObject[Raw, Normalized any](r *http.Request, bodyName st
 		return nil, 0, feedImportJSONDecodeError(bodyName, err)
 	}
 	if tok == nil {
+		if options.rejectNullContainers {
+			return nil, 0, feedImportControlledDecodeError(bodyName, "json body has invalid field type")
+		}
 		return nil, 0, requireNoTrailingImportJSON(dec, bodyName)
 	}
 	open, ok := tok.(json.Delim)
@@ -1243,7 +1254,7 @@ func streamImportEntriesObject[Raw, Normalized any](r *http.Request, bodyName st
 				return statusInput, entriesTotal, feedImportControlledDecodeError(bodyName, "json body contains duplicate top-level field")
 			}
 			seenFields[key] = struct{}{}
-			count, err := streamImportEntriesArray(dec, bodyName, entriesTotal, batchSize, normalize, emit)
+			count, err := streamImportEntriesArray(dec, bodyName, options, entriesTotal, batchSize, normalize, emit)
 			entriesTotal += count
 			if err != nil {
 				return statusInput, entriesTotal, err
@@ -1280,12 +1291,15 @@ func streamImportEntriesObject[Raw, Normalized any](r *http.Request, bodyName st
 	return statusInput, entriesTotal, nil
 }
 
-func streamImportEntriesArray[Raw, Normalized any](dec *json.Decoder, bodyName string, offset, batchSize int, normalize func([]Raw, int) ([]Normalized, error), emit func([]Normalized) error) (int, error) {
+func streamImportEntriesArray[Raw, Normalized any](dec *json.Decoder, bodyName string, options streamImportEntriesOptions, offset, batchSize int, normalize func([]Raw, int) ([]Normalized, error), emit func([]Normalized) error) (int, error) {
 	tok, err := dec.Token()
 	if err != nil {
 		return 0, feedImportJSONDecodeError(bodyName, err)
 	}
 	if tok == nil {
+		if options.rejectNullContainers {
+			return 0, feedImportControlledDecodeError(bodyName, "json body has invalid field type")
+		}
 		return 0, nil
 	}
 	open, ok := tok.(json.Delim)
