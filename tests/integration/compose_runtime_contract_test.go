@@ -7,11 +7,13 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/exec"
@@ -158,6 +160,7 @@ func TestComposeRuntimeContracts(t *testing.T) {
 	t.Run("bootstrap_owner_and_explicit_run", h.testBootstrapOwnerAndExplicitRun)
 	t.Run("migration_orders_server_startup", h.testMigrationOrdersServerStartup)
 	t.Run("production_lifecycle_proxy_and_persistence", h.testProductionLifecycleProxyAndPersistence)
+	t.Run("trusted_forwarding_discrimination", h.testTrustedForwardingDiscrimination)
 	t.Run("metrics_loopback_access", h.testMetricsLoopbackAccess)
 	t.Run("server_shutdown_grace_contract", h.testServerShutdownGraceContract)
 	t.Run("configured_backup_entrypoint_probe", h.testConfiguredBackupEntrypointProbe)
@@ -458,6 +461,131 @@ func (h *composeRuntimeHarness) testProductionLifecycleProxyAndPersistence(t *te
 		}
 		s.assertNoProviderActivity()
 	})
+}
+
+func (h *composeRuntimeHarness) testTrustedForwardingDiscrimination(t *testing.T) {
+	proxyBinary := h.buildTrustedProxyBinary(t)
+	overlay := fmt.Sprintf(`services:
+  packmon-server:
+    environment:
+      PACKMON_RATE_LIMIT_PER_MINUTE: "1"
+      PACKMON_RATE_LIMIT_BURST: "1"
+  trusted-proxy:
+    image: %s
+    pull_policy: never
+    build: !reset null
+    entrypoint: !override [%s]
+    command: !reset null
+    environment:
+      PACKMON_TEST_PROXY_LISTEN_ADDR: ":18080"
+      PACKMON_TEST_PROXY_TARGET: "http://packmon-server:8080"
+    ports:
+      - "127.0.0.1::18080"
+    volumes:
+      - %s
+    restart: "no"
+`, yamlQuote(h.image), yamlQuote("/test-bin/trusted-proxy"), yamlVolumeMount(proxyBinary, "/test-bin/trusted-proxy:ro"))
+	s := h.newScenario(t, []string{"docker-compose.server.yml"}, h.commonOverlay(false, "127.0.0.1::8080"), overlay)
+	s.redactDiagnosticPath(proxyBinary, "[PROXY_BINARY]")
+	s.down()
+	s.run(2*time.Minute, "up", "-d", "--no-deps", "trusted-proxy")
+
+	proxyID := s.serviceContainerID("trusted-proxy")
+	proxyImageID := strings.TrimSpace(string(h.mustDockerOutput(t, 30*time.Second, "inspect", "--format", "{{.Image}}", proxyID)))
+	reviewedImageID := strings.TrimSpace(string(h.mustDockerOutput(t, 30*time.Second, "image", "inspect", "--format", "{{.Id}}", h.image)))
+	if proxyImageID == "" || proxyImageID != reviewedImageID {
+		t.Fatalf("trusted proxy image ID = %q, want exact reviewed image ID", proxyImageID)
+	}
+	proxyUser := strings.TrimSpace(string(h.mustDockerOutput(t, 30*time.Second, "inspect", "--format", "{{.Config.User}}", proxyID)))
+	if proxyUser == "" || proxyUser == "0" || strings.EqualFold(proxyUser, "root") {
+		t.Fatalf("trusted proxy container user = %q, want the reviewed non-root image user", proxyUser)
+	}
+	proxyIP := strings.TrimSpace(string(h.mustDockerOutput(t, 30*time.Second, "inspect", "--format", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", proxyID)))
+	if parsed, err := netip.ParseAddr(proxyIP); err != nil || !parsed.Is4() {
+		t.Fatalf("trusted proxy container IP is not one exact IPv4 address: %q", proxyIP)
+	}
+	trustedProxyCIDR := proxyIP + "/32"
+	s.env("PACKMON_TRUSTED_PROXIES", trustedProxyCIDR)
+	s.startMigratedServer()
+	s.assertLoopbackPublishedPort("packmon-server", "8080")
+	s.assertLoopbackPublishedPort("trusted-proxy", "18080")
+	serverPort := s.publishedPort("packmon-server", "8080")
+	s.waitHTTP("http://127.0.0.1:"+serverPort+"/readyz", 2*time.Minute)
+	s.run(30*time.Second, "exec", "-T", "packmon-server", "/bin/sh", "-ec", `test "$PACKMON_TRUSTED_PROXIES" = "$1" && test "$PACKMON_RATE_LIMIT_PER_MINUTE:$PACKMON_RATE_LIMIT_BURST" = "1:1"`, "--", trustedProxyCIDR)
+
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	directURL := "http://127.0.0.1:" + serverPort + "/trusted-forwarding-probe"
+	assertRuntimeStatusSequence(t, client, directURL, []runtimeProbeRequest{
+		{forwardedFor: "203.0.113.10", realIP: "203.0.113.10", want: http.StatusNotFound},
+		{forwardedFor: "198.51.100.20", realIP: "198.51.100.20", want: http.StatusTooManyRequests},
+	})
+
+	proxyPort := s.publishedPort("trusted-proxy", "18080")
+	proxyURL := "http://127.0.0.1:" + proxyPort + "/trusted-forwarding-probe"
+	assertRuntimeStatusSequence(t, client, proxyURL, []runtimeProbeRequest{
+		{proxyClientIP: "192.0.2.30", want: http.StatusNotFound},
+		{proxyClientIP: "192.0.2.30", want: http.StatusTooManyRequests},
+		{proxyClientIP: "192.0.2.31", want: http.StatusNotFound},
+	})
+	s.assertNoProviderActivity()
+}
+
+type runtimeProbeRequest struct {
+	forwardedFor  string
+	realIP        string
+	proxyClientIP string
+	want          int
+}
+
+func assertRuntimeStatusSequence(t *testing.T, client *http.Client, endpoint string, requests []runtimeProbeRequest) {
+	t.Helper()
+	for index, probe := range requests {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, endpoint, nil)
+		if err != nil {
+			t.Fatalf("build trusted-forwarding probe %d: %v", index, err)
+		}
+		req.Header.Set("User-Agent", "packmon-cli/compose-runtime-contract")
+		if probe.forwardedFor != "" {
+			req.Header.Set("X-Forwarded-For", probe.forwardedFor)
+		}
+		if probe.realIP != "" {
+			req.Header.Set("X-Real-IP", probe.realIP)
+		}
+		if probe.proxyClientIP != "" {
+			req.Header.Set("X-Packmon-Test-Client-IP", probe.proxyClientIP)
+		}
+		response, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("trusted-forwarding probe %d: %v", index, err)
+		}
+		_, copyErr := io.Copy(io.Discard, response.Body)
+		closeErr := response.Body.Close()
+		if copyErr != nil || closeErr != nil {
+			t.Fatalf("consume trusted-forwarding probe %d response: copy=%v close=%v", index, copyErr, closeErr)
+		}
+		if response.StatusCode != probe.want {
+			t.Fatalf("trusted-forwarding probe %d status = %d, want %d", index, response.StatusCode, probe.want)
+		}
+	}
+}
+
+func (h *composeRuntimeHarness) buildTrustedProxyBinary(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatalf("make trusted proxy binary directory traversable: %v", err)
+	}
+	binary := filepath.Join(dir, "trusted-proxy")
+	runHostCommand(t, h.buildContext, 2*time.Minute, map[string]string{"CGO_ENABLED": "0"}, "go", "build", "-trimpath", "-o", binary, "./tests/integration/testdata/trustedproxy")
+	if err := os.Chmod(binary, 0o755); err != nil {
+		t.Fatalf("make trusted proxy binary executable: %v", err)
+	}
+	return binary
 }
 
 func (h *composeRuntimeHarness) testMetricsLoopbackAccess(t *testing.T) {
@@ -891,6 +1019,22 @@ func (s *composeRuntimeScenario) publishedPort(service, target string) string {
 		s.t.Fatalf("parse published port from %q", output)
 	}
 	return port
+}
+
+func (s *composeRuntimeScenario) assertLoopbackPublishedPort(service, target string) {
+	s.t.Helper()
+	containerID := s.serviceContainerID(service)
+	format := fmt.Sprintf("{{json (index .NetworkSettings.Ports %q)}}", target+"/tcp")
+	output := s.h.mustDockerOutput(s.t, 30*time.Second, "inspect", "--format", format, containerID)
+	var bindings []struct {
+		HostIP string `json:"HostIp"`
+	}
+	if err := json.Unmarshal(output, &bindings); err != nil {
+		s.t.Fatalf("parse %s published port binding: %v: %s", service, err, s.diagnostic(string(output)))
+	}
+	if len(bindings) != 1 || bindings[0].HostIP != "127.0.0.1" {
+		s.t.Fatalf("%s published port binding = %#v, want one loopback-only binding", service, bindings)
+	}
 }
 
 func (s *composeRuntimeScenario) waitHTTP(address string, timeout time.Duration) {
