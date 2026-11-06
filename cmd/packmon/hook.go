@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -304,8 +305,12 @@ func newHookUninstallCmd() *cobra.Command {
 			removed := 0
 			for _, hookType := range hookTypes {
 				hookPath := filepath.Join(findGitHooksDir(root), hookType)
-				if _, err := os.Stat(hookPath); os.IsNotExist(err) {
-					continue
+				if _, err := os.Stat(hookPath); err != nil {
+					if errors.Is(err, os.ErrNotExist) {
+						continue
+					}
+					fmt.Fprintf(os.Stderr, "Error: cannot inspect %s hook.\n", hookType)
+					os.Exit(ExitOperational)
 				}
 				if !isPackmonHook(hookPath) {
 					fmt.Printf("Skipping %s: not a packmon-managed hook.\n", hookType)

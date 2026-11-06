@@ -1149,6 +1149,10 @@ Git hooks:
   mutates the referent. Git-resolved external hooks directories and symlinks in
   their parent layout remain supported; this check applies only to the final
   hook entry;
+- uninstall treats only `ENOENT` as an absent hook. Any other inspection error
+  exits operationally with a fixed, path-free diagnostic before reading a
+  managed marker or attempting removal. Inspection and removal failures never
+  report that entry as skipped, absent, or removed;
 - the managed hook runs `packmon scan --hook`. A destination that resolves
   (relative to the repository working directory, through symlinks including
   dangling ones, and by file identity of its deepest existing ancestor so
