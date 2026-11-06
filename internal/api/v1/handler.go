@@ -1744,18 +1744,21 @@ func readJSONWithLimit(r *http.Request, v any, limit int64) error {
 
 	// Reject trailing content after the first JSON value.
 	var extra struct{}
-	if err := dec.Decode(&extra); err == nil || !errors.Is(err, io.EOF) {
-		return fmt.Errorf("unexpected trailing data after JSON body")
+	err := dec.Decode(&extra)
+	if isMaxBytesError(err) {
+		return sanitizedJSONDecodeError(err, limit)
 	}
-
-	return nil
+	if errors.Is(err, io.EOF) {
+		return nil
+	}
+	return fmt.Errorf("unexpected trailing data after JSON body")
 }
 
 func sanitizedJSONDecodeError(err error, limit int64) error {
 	if err == nil {
 		return nil
 	}
-	if strings.Contains(err.Error(), "http: request body too large") {
+	if isMaxBytesError(err) {
 		return fmt.Errorf("request body exceeds %d bytes", limit)
 	}
 	if errors.Is(err, io.EOF) {
@@ -1776,6 +1779,11 @@ func sanitizedJSONDecodeError(err error, limit int64) error {
 	}
 
 	return fmt.Errorf("invalid JSON body")
+}
+
+func isMaxBytesError(err error) bool {
+	var maxBytesErr *http.MaxBytesError
+	return errors.As(err, &maxBytesErr)
 }
 
 // errorJSON is the standard JSON error envelope.

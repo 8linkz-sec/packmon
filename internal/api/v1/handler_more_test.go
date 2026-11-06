@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math"
 	"net/http"
@@ -1909,6 +1910,90 @@ func TestAPIHelperBranches(t *testing.T) {
 	if err := readJSONWithLimit(req, &huge, 4); err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("readJSONWithLimit small limit error = %v", err)
 	}
+}
+
+func TestReadJSONWithLimitClassifiesBodyLimitAcrossDecodePhases(t *testing.T) {
+	t.Parallel()
+
+	type payload struct {
+		Name string `json:"name"`
+	}
+
+	t.Run("first decode limit", func(t *testing.T) {
+		t.Parallel()
+
+		const limit int64 = 8
+		req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"name":"too long"}`))
+		var decoded payload
+		err := readJSONWithLimit(req, &decoded, limit)
+		if got, want := errorString(err), "request body exceeds 8 bytes"; got != want {
+			t.Fatalf("first decode error = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("second decode limit", func(t *testing.T) {
+		t.Parallel()
+
+		const body = `{"name":"ok"}`
+		const limit int64 = int64(len(body) + 8)
+		req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body+strings.Repeat(" ", 9)))
+		var decoded payload
+		err := readJSONWithLimit(req, &decoded, limit)
+		if got, want := errorString(err), "request body exceeds 21 bytes"; got != want {
+			t.Fatalf("second decode error = %q, want %q", got, want)
+		}
+		if decoded.Name != "ok" {
+			t.Fatalf("decoded name = %q, want ok before the second-decode failure", decoded.Name)
+		}
+	})
+
+	t.Run("exact limit EOF", func(t *testing.T) {
+		t.Parallel()
+
+		const body = `{"name":"ok"}`
+		const limit int64 = int64(len(body) + 8)
+		req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body+strings.Repeat(" ", 8)))
+		var decoded payload
+		if err := readJSONWithLimit(req, &decoded, limit); err != nil {
+			t.Fatalf("exact-limit decode error = %v", err)
+		}
+	})
+
+	t.Run("genuine trailing value", func(t *testing.T) {
+		t.Parallel()
+
+		req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"name":"ok"}{"name":"second"}`))
+		var decoded payload
+		err := readJSONWithLimit(req, &decoded, 1024)
+		if got, want := errorString(err), "unexpected trailing data after JSON body"; got != want {
+			t.Fatalf("trailing-value error = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("wrapped limit error", func(t *testing.T) {
+		t.Parallel()
+
+		err := fmt.Errorf("wrapped: %w", &http.MaxBytesError{Limit: 99})
+		if got, want := sanitizedJSONDecodeError(err, 99).Error(), "request body exceeds 99 bytes"; got != want {
+			t.Fatalf("wrapped limit error = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("spoofed limit text", func(t *testing.T) {
+		t.Parallel()
+
+		err := errors.New("http: request body too large")
+		if got, want := sanitizedJSONDecodeError(err, 99).Error(), "invalid JSON body"; got != want {
+			t.Fatalf("spoofed limit error = %q, want %q", got, want)
+		}
+	})
+}
+
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func TestValidateCheckPackagesNormalizesCaseInsensitiveNames(t *testing.T) {

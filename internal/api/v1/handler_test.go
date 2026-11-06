@@ -2556,6 +2556,8 @@ func TestHandleCheckRequestBodyLimitBoundary(t *testing.T) {
 		extraWhitespace int64
 		wantStatus      int
 		wantWork        bool
+		wantError       string
+		forbiddenError  string
 	}{
 		{
 			name:       "exact limit accepts legal trailing whitespace",
@@ -2566,6 +2568,8 @@ func TestHandleCheckRequestBodyLimitBoundary(t *testing.T) {
 			name:            "one whitespace byte over limit rejects before work",
 			extraWhitespace: 1,
 			wantStatus:      http.StatusBadRequest,
+			wantError:       fmt.Sprintf("request body exceeds %d bytes", maxCheckRequestBody),
+			forbiddenError:  "unexpected trailing data",
 		},
 	}
 
@@ -2619,6 +2623,12 @@ func TestHandleCheckRequestBodyLimitBoundary(t *testing.T) {
 			}
 			if response.Code != "invalid_request" {
 				t.Fatalf("error response code = %q, want invalid_request", response.Code)
+			}
+			if !strings.Contains(response.Error, tt.wantError) {
+				t.Fatalf("error response = %q, want containing %q", response.Error, tt.wantError)
+			}
+			if tt.forbiddenError != "" && strings.Contains(response.Error, tt.forbiddenError) {
+				t.Fatalf("error response = %q, must not contain %q", response.Error, tt.forbiddenError)
 			}
 		})
 	}
