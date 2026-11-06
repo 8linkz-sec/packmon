@@ -172,6 +172,23 @@ func TestParseConfigXMLMalformedDocumentBoundaries(t *testing.T) {
 			t.Fatalf("names = %q, want kept", got)
 		}
 	})
+	t.Run("internal text remains ignored", func(t *testing.T) {
+		t.Parallel()
+		names, err := configNames(t, `<config>before<packages><package name="kept"/></packages>after</config>`)
+		if err != nil {
+			t.Fatalf("ParseConfigXML() error = %v", err)
+		}
+		if got := strings.Join(names, " "); got != "kept" {
+			t.Fatalf("names = %q, want kept", got)
+		}
+	})
+	t.Run("trailing text on unrelated config remains ignored", func(t *testing.T) {
+		t.Parallel()
+		packages, err := ParseConfigXML(strings.NewReader(`<config><envs/></config>unrelated-trailing-text`), "config.xml")
+		if err != nil || packages != nil {
+			t.Fatalf("ParseConfigXML() = (%+v, %v), want (nil, nil)", packages, err)
+		}
+	})
 }
 
 func TestParseConfigXMLRejectsNonWhitespaceAfterRoot(t *testing.T) {
@@ -180,7 +197,6 @@ func TestParseConfigXMLRejectsNonWhitespaceAfterRoot(t *testing.T) {
 	for _, tt := range []struct {
 		name       string
 		doc        string
-		openBugID  string
 		secretText string
 	}{
 		{
@@ -191,7 +207,6 @@ func TestParseConfigXMLRejectsNonWhitespaceAfterRoot(t *testing.T) {
 		{
 			name:       "trailing text",
 			doc:        `<config><packages><package name="partial"/></packages></config>trailing-junk`,
-			openBugID:  "F085-bugs-3",
 			secretText: "trailing-junk",
 		},
 	} {
@@ -199,9 +214,6 @@ func TestParseConfigXMLRejectsNonWhitespaceAfterRoot(t *testing.T) {
 			t.Parallel()
 			packages, err := ParseConfigXML(strings.NewReader(tt.doc), "config.xml")
 			if err == nil {
-				if tt.openBugID != "" {
-					t.Skip(tt.openBugID + ": ParseConfigXML accepts non-whitespace content after the root element")
-				}
 				t.Fatal("ParseConfigXML() error = nil, want generic malformed-document error")
 			}
 			if packages != nil {

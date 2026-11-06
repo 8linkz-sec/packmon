@@ -21,6 +21,10 @@
   Mixed-case dependency caches are no longer scanned, mixed-case `.github`
   directories remain discoverable, and reported paths retain their original
   spelling. POSIX matching remains case-sensitive.
+- Chocolatey `config.xml` package lists now reject non-whitespace text after
+  the identified document root with a generic, content-free parse error and no
+  partial package rows. Trailing whitespace, text inside the root, and trailing
+  text on unrelated config files remain accepted as before.
 - Chocolatey inventory discovery warnings no longer expose the absolute scan
   root and candidate path if an injected or future Windows walker callback
   supplies a file on another volume. The candidate is still rejected, later
