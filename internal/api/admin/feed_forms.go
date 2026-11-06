@@ -522,7 +522,7 @@ func (h *AdminHandler) HandleFeedSyncNow(w http.ResponseWriter, r *http.Request)
 		h.respondFeedSyncResult(w, r, "", web.Message("admin.feeds.sync.error.unavailable_mode"), http.StatusBadRequest, false)
 		return
 	}
-	started, err := h.beginManualFeedSyncAfterAudit(feed.Name, func() error {
+	started, err := h.beginManualFeedSyncWithAudit(feed.Name, func() error {
 		return h.auditLog(r, "feed_sync_trigger", map[string]string{
 			"feed": feed.Name,
 			"mode": string(feed.Mode),
@@ -564,20 +564,21 @@ func (h *AdminHandler) HandleFeedSyncNow(w http.ResponseWriter, r *http.Request)
 	h.respondFeedSyncResult(w, r, web.Message("admin.feeds.sync.flash.started", feed.DisplayName), "", http.StatusOK, true)
 }
 
-func (h *AdminHandler) beginManualFeedSyncAfterAudit(feedName string, audit func() error) (bool, error) {
-	if h == nil {
+// beginManualFeedSyncWithAudit reserves the feed before writing the admission
+// audit so only the winning request can emit a success row. The reservation is
+// rolled back on an audit error or panic, and the mutex is never held during
+// the audit write so unrelated feeds remain independent.
+func (h *AdminHandler) beginManualFeedSyncWithAudit(feedName string, audit func() error) (bool, error) {
+	if !h.beginManualFeedSync(feedName) {
 		return false, nil
 	}
-	name := config.NormalizeFeedName(feedName)
-	h.manualSyncMu.Lock()
-	if h.manualSyncs == nil {
-		h.manualSyncs = make(map[string]struct{})
-	}
-	if _, exists := h.manualSyncs[name]; exists {
-		h.manualSyncMu.Unlock()
-		return false, nil
-	}
-	h.manualSyncMu.Unlock()
+
+	keepReservation := false
+	defer func() {
+		if !keepReservation {
+			h.endManualFeedSync(feedName)
+		}
+	}()
 
 	if audit != nil {
 		if err := audit(); err != nil {
@@ -585,18 +586,25 @@ func (h *AdminHandler) beginManualFeedSyncAfterAudit(feedName string, audit func
 		}
 	}
 
-	h.manualSyncMu.Lock()
-	defer h.manualSyncMu.Unlock()
-	if _, exists := h.manualSyncs[name]; exists {
-		return false, nil
-	}
-	h.manualSyncs[name] = struct{}{}
+	keepReservation = true
 	return true, nil
 }
 
 func (h *AdminHandler) beginManualFeedSync(feedName string) bool {
-	started, err := h.beginManualFeedSyncAfterAudit(feedName, nil)
-	return err == nil && started
+	if h == nil {
+		return false
+	}
+	name := config.NormalizeFeedName(feedName)
+	h.manualSyncMu.Lock()
+	defer h.manualSyncMu.Unlock()
+	if h.manualSyncs == nil {
+		h.manualSyncs = make(map[string]struct{})
+	}
+	if _, exists := h.manualSyncs[name]; exists {
+		return false
+	}
+	h.manualSyncs[name] = struct{}{}
+	return true
 }
 
 func (h *AdminHandler) endManualFeedSync(feedName string) {

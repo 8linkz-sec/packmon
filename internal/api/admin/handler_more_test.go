@@ -1020,7 +1020,7 @@ func (s blockingAuditStore) InsertAdminAuditLog(ctx context.Context, entry *db.A
 	return s.adminFlowStoreStub.InsertAdminAuditLog(ctx, entry)
 }
 
-func TestAdminFeedSyncNowDoesNotReserveSlotBeforeAuditSucceeds(t *testing.T) {
+func TestAdminFeedSyncNowReservesSlotDuringAuditAndReleasesOnFailure(t *testing.T) {
 	baseStore := newAdminStoreStub()
 	called := make(chan string, 1)
 	handler, sm, _ := newAdminFlowHandler(t, baseStore, adminFlowConfig(), func(_ context.Context, feedName string) error {
@@ -1060,32 +1060,45 @@ func TestAdminFeedSyncNowDoesNotReserveSlotBeforeAuditSucceeds(t *testing.T) {
 		}
 	}
 
-	reserved := make(chan bool, 1)
+	sameFeedReserved := make(chan bool, 1)
 	go func() {
-		reserved <- handler.beginManualFeedSync("osv")
+		sameFeedReserved <- handler.beginManualFeedSync("osv")
 	}()
 	select {
-	case ok := <-reserved:
-		if !ok {
+	case ok := <-sameFeedReserved:
+		if ok {
+			handler.endManualFeedSync("osv")
 			releaseBlockedAudit()
-			t.Fatal("manual sync slot was reserved before audit succeeded")
+			t.Fatal("second request reserved the feed while its audit was pending")
 		}
 	case <-time.After(250 * time.Millisecond):
 		releaseBlockedAudit()
 		select {
-		case ok := <-reserved:
-			if ok {
-				handler.endManualFeedSync("osv")
-			}
+		case <-done:
 		case <-time.After(time.Second):
 		}
+		t.Fatal("same-feed reservation check blocked while audit was pending")
+	}
+
+	otherFeedReserved := make(chan bool, 1)
+	go func() {
+		otherFeedReserved <- handler.beginManualFeedSync("ghsa")
+	}()
+	select {
+	case ok := <-otherFeedReserved:
+		if !ok {
+			releaseBlockedAudit()
+			t.Fatal("different feed was blocked by the pending audit")
+		}
+		handler.endManualFeedSync("ghsa")
+	case <-time.After(250 * time.Millisecond):
+		releaseBlockedAudit()
 		select {
 		case <-done:
 		case <-time.After(time.Second):
 		}
-		t.Fatal("manual sync slot check blocked before audit succeeded")
+		t.Fatal("different-feed reservation blocked while audit was pending")
 	}
-	handler.endManualFeedSync("osv")
 
 	releaseBlockedAudit()
 	select {
@@ -1101,6 +1114,10 @@ func TestAdminFeedSyncNowDoesNotReserveSlotBeforeAuditSucceeds(t *testing.T) {
 		t.Fatalf("syncFeed called despite audit failure for %q", got)
 	case <-time.After(50 * time.Millisecond):
 	}
+	if !handler.beginManualFeedSync("osv") {
+		t.Fatal("manual sync slot remained reserved after audit failure")
+	}
+	handler.endManualFeedSync("osv")
 }
 
 func TestMarkFeedSyncRunningPreservesStatusMetadataAndHandlesErrors(t *testing.T) {
