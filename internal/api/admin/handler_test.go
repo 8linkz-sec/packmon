@@ -243,10 +243,14 @@ func TestHandleLoginSuccessFailsClosedWhenAuditFails(t *testing.T) {
 	if resp.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500 when login audit fails", resp.StatusCode)
 	}
-	for _, c := range resp.Cookies() {
-		if c.Name == auth.SessionCookieName && c.Value != "" && c.MaxAge >= 0 {
-			t.Fatalf("new admin session cookie set despite audit failure: %+v", c)
+	var finalAdminCookie *http.Cookie
+	for _, cookie := range resp.Cookies() {
+		if cookie.Name == auth.SessionCookieName && cookie.Path == auth.SessionCookiePath {
+			finalAdminCookie = cookie
 		}
+	}
+	if finalAdminCookie == nil || finalAdminCookie.Value != "" || finalAdminCookie.MaxAge >= 0 {
+		t.Fatalf("final admin session cookie after audit failure = %+v, want deletion", finalAdminCookie)
 	}
 }
 

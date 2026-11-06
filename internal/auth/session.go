@@ -255,9 +255,16 @@ func (sm *SessionManager) Delete(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
+	sm.DeleteByID(w, cookie.Value)
+}
 
+// DeleteByID destroys the exact session identified by sessionID and clears
+// both the current admin-scoped cookie and the legacy root-scoped cookie. It is
+// used when a newly created authenticated session must be rolled back before
+// the response is committed.
+func (sm *SessionManager) DeleteByID(w http.ResponseWriter, sessionID string) {
 	sm.mu.Lock()
-	delete(sm.sessions, cookie.Value)
+	delete(sm.sessions, sessionID)
 	sm.mu.Unlock()
 
 	sm.clearCookie(w, SessionCookiePath)

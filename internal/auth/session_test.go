@@ -125,6 +125,44 @@ func TestCreateAdminCanMarkBootstrapAuthenticatedSession(t *testing.T) {
 	}
 }
 
+func TestDeleteByIDRemovesOnlyTargetAndClearsCurrentAndLegacyCookies(t *testing.T) {
+	t.Parallel()
+
+	sm := newTestSessionManager(time.Hour)
+	target, _ := createSession(t, sm)
+	other, _ := createSession(t, sm)
+	preAuth, err := sm.CreatePreAuth(httptest.NewRecorder())
+	if err != nil {
+		t.Fatalf("CreatePreAuth returned error: %v", err)
+	}
+	rec := httptest.NewRecorder()
+
+	sm.DeleteByID(rec, target.ID)
+
+	if got := sm.Get(requestWithSession(target.ID)); got != nil {
+		t.Fatalf("target session still exists: %+v", got)
+	}
+	if got := sm.Get(requestWithSession(other.ID)); got == nil || !got.Admin {
+		t.Fatalf("unrelated admin session was removed: %+v", got)
+	}
+	if got := sm.Get(requestWithSession(preAuth.ID)); got == nil || got.Admin {
+		t.Fatalf("unrelated pre-auth session changed: %+v", got)
+	}
+
+	latest := make(map[string]*http.Cookie)
+	for _, cookie := range rec.Result().Cookies() {
+		if cookie.Name == SessionCookieName {
+			latest[cookie.Path] = cookie
+		}
+	}
+	for _, path := range []string{SessionCookiePath, "/"} {
+		cookie := latest[path]
+		if cookie == nil || cookie.Value != "" || cookie.MaxAge >= 0 || !cookie.HttpOnly || cookie.SameSite != http.SameSiteStrictMode {
+			t.Fatalf("deletion cookie for path %q = %+v", path, cookie)
+		}
+	}
+}
+
 func TestCreateExclusiveAdminReplacesOnlyAdminSessions(t *testing.T) {
 	t.Parallel()
 

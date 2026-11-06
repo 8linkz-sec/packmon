@@ -1387,7 +1387,12 @@ Admin pages are protected by the shared admin session model described in
 `SECURITY.md`: one shared admin identity, an `/admin`-scoped session cookie,
 CSRF-protected write forms, an absolute session lifetime, a shorter inactivity
 timeout, and login lockout that tracks both client IP and the shared admin
-account. Bootstrap and rotated admin passwords must be at least 12 characters
+account. A successful login creates its authenticated server-side session
+before writing the required `login_success` audit row. This is a compensated,
+fail-closed sequence rather than a database transaction: if the audit write
+fails or panics, the handler revokes that exact new session and clears its
+cookies before a failure response can be committed. Bootstrap and rotated
+admin passwords must be at least 12 characters
 (Unicode code points) and at most 72 bytes (UTF-8, the bcrypt input limit);
 each violation has its own error and admin message. Failed current-password
 checks during admin password changes use the same lockout window. Logins with

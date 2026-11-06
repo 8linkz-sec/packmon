@@ -136,6 +136,9 @@ type AdminHandler struct {
 	applyFeedConfig FeedConfigApplyFunc
 	resetFeedConfig FeedConfigResetFunc
 	csrfToken       func(*auth.Session) (string, error)
+	// createAdminSession is a deterministic failure seam for the successful
+	// login commit path; nil delegates to SessionManager.CreateAdmin.
+	createAdminSession func(http.ResponseWriter, bool) (*auth.Session, error)
 	// equalizePasswordCheck runs a dummy password comparison on login failures
 	// that have no stored hash to check; nil uses auth.EqualizePasswordCheck.
 	equalizePasswordCheck func(password string)
@@ -363,22 +366,50 @@ func (h *AdminHandler) processLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !h.requireAudit(w, r, "login_success", map[string]string{}) {
-		return
-	}
-
-	// Successful login -- reset attempts and create session.
-	h.resetAttempts(ip)
-
-	_, err = h.sm.CreateAdmin(w, adminAuth.PasswordIsBootstrap)
-	if err != nil {
+	// Create the authenticated session before recording login success. The
+	// cookie remains buffered in the response headers until the handler writes
+	// its response, so an audit failure can revoke the exact new session and
+	// replace the cookie before anything reaches the browser.
+	adminSession, err := h.newAdminSession(w, adminAuth.PasswordIsBootstrap)
+	if err != nil || adminSession == nil {
 		h.logger.Error("failed to create admin session", h.adminLogAttrs(r, "error", err)...)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
+	// Arm rollback immediately so an unexpected audit panic cannot strand an
+	// authenticated session. Expected audit errors explicitly roll back before
+	// http.Error commits the 500 response; OnceFunc keeps the deferred rollback
+	// harmless on that path.
+	rollbackSession := sync.OnceFunc(func() {
+		h.sm.DeleteByID(w, adminSession.ID)
+	})
+	loginCommitted := false
+	defer func() {
+		if !loginCommitted {
+			rollbackSession()
+		}
+	}()
+
+	if err := h.auditLog(r, "login_success", map[string]string{}); err != nil {
+		rollbackSession()
+		http.Error(w, "failed to record audit log", http.StatusInternalServerError)
+		return
+	}
+	loginCommitted = true
+
+	// Only a fully established and audited login clears prior failures.
+	h.resetAttempts(ip)
+
 	h.logger.Info("admin login successful", h.adminLogAttrs(r)...)
 	auth.RedirectSameOrigin(w, r, adminLoginSuccessRedirect(nextPath), http.StatusSeeOther)
+}
+
+func (h *AdminHandler) newAdminSession(w http.ResponseWriter, authenticatedWithBootstrap bool) (*auth.Session, error) {
+	if h.createAdminSession != nil {
+		return h.createAdminSession(w, authenticatedWithBootstrap)
+	}
+	return h.sm.CreateAdmin(w, authenticatedWithBootstrap)
 }
 
 func adminLoginSuccessRedirect(nextPath string) string {
