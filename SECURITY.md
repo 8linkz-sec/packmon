@@ -259,6 +259,20 @@ Expected clients include:
 - N8N workflows;
 - controlled internal automation.
 
+The command-based n8n templates require the exact self-hosted runtime policy in
+`deploy/n8n/command-runtime.json`. That policy enables Execute Command but keeps
+Local File Trigger excluded and keeps environment access from expressions and
+Code nodes blocked. It must be identical on all n8n main, worker, and webhook
+processes that load or execute workflows. This is not an untrusted multi-tenant
+boundary: Execute Command permits arbitrary shell execution as the n8n user and
+its child process inherits the executor's environment even when
+`N8N_BLOCK_ENV_ACCESS_IN_NODE=true`. Only fully trusted editors and workflow
+importers may use the dedicated non-root runtime. It must not receive a Docker
+socket, host-root mount, or unrelated secrets; Packmon binaries, helpers, and
+inputs are read-only, writable state is dedicated, and egress is restricted to
+the required internal destinations. `NODES_EXCLUDE=[]` and n8n Cloud are not
+supported for these templates.
+
 User-Agent validation is a hygiene control, not a primary auth control. It
 helps reject accidental or malformed traffic but must not replace API keys.
 

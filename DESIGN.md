@@ -220,7 +220,14 @@ Packmon's maintained deployment surfaces are intentionally narrow:
   `deploy/n8n/on-demand-scan.sh` validates `PACKMON_SERVER`,
   `PACKMON_API_KEY`, and a relative, traversal-free `PACKMON_SCAN_PATH`, then
   runs `packmon scan` in `--mode remote --require-remote` with no output-file
-  flags.
+  flags. Packmon does not operate an n8n service. Operators that use the local
+  CLI command templates provide a self-hosted n8n runtime matching
+  `deploy/n8n/command-runtime.json`: the reviewed, digest-pinned n8n 2.46.6
+  image enables Execute Command while Local File Trigger remains excluded and
+  environment access from expressions and Code nodes remains blocked. The same
+  policy applies to every main, worker, and webhook process that loads or
+  executes the workflows. The templates remain disabled until the operator has
+  reviewed that runtime and its mounts, credentials, and network policy.
 - The first-party GitHub Actions workflows and the hosted release pipeline
   were removed in August 2026 (internal deployment, no hosted CI);
   `ci/gitlab/.packmon-scan.yml` remains only as an unoperated consumer

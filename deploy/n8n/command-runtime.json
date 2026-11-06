@@ -1,0 +1,7 @@
+{
+  "image": "docker.io/n8nio/n8n:2.46.6@sha256:8602f5dfacbe2c931eeafd010de0e68182310e9f309921e780ab69182e92b3ae",
+  "environment": {
+    "NODES_EXCLUDE": "[\"n8n-nodes-base.localFileTrigger\"]",
+    "N8N_BLOCK_ENV_ACCESS_IN_NODE": "true"
+  }
+}
