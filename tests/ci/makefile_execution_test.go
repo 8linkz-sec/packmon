@@ -334,12 +334,72 @@ func TestParallelMakeTargetsSerializeNPMCI(t *testing.T) {
 			t.Fatalf("npm overlap did not match the known bug: ready=%d attempts=%d decisions=%v exact calls=%d, want 3/3/(one owner, two overlap, zero post-owner)/3\ncalls:\n%s", ready, attempts, decisions, len(npmCalls), formatStubCalls(calls))
 		}
 		assertKnownParallelNPMBugTargets(t, npmCalls)
-		t.Skip("OPEN F008-bugs-4: parallel lint-web, lint-openapi, and security recipes overlap npm ci in the shared checkout")
+		t.Fatalf("parallel lint-web, lint-openapi, and security recipes overlapped npm ci in the shared checkout\ncalls:\n%s", formatStubCalls(calls))
 	}
 	if len(npmCalls) != 1 || npmCalls[0].target != "" || ready != 1 || attempts != 1 || len(decisions) != 1 || owners != 1 || postOwner != 0 {
 		t.Fatalf("shared npm prerequisite state = calls %d target %q ready %d attempts %d decisions %v, want one target-neutral call and 1/1/(one owner, zero post-owner)\ncalls:\n%s", len(npmCalls), firstCallTarget(npmCalls), ready, attempts, decisions, formatStubCalls(calls))
 	}
 	assertSharedNPMEventOrder(t, fixture)
+}
+
+func TestMakeNPMCIPrerequisiteDoesNotTrustExistingNodeModules(t *testing.T) {
+	makeBin := requireGNMake(t)
+	fixture := newMakeFixture(t, makeBin, "checkout")
+	instrumentParallelNPMTargets(t, fixture.dir)
+
+	nodeModules := filepath.Join(fixture.dir, "node_modules")
+	if err := os.Mkdir(nodeModules, 0o750); err != nil {
+		t.Fatalf("create stale node_modules: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nodeModules, "stale-module"), []byte("stale\n"), 0o600); err != nil {
+		t.Fatalf("write stale node_modules marker: %v", err)
+	}
+
+	for invocation := 1; invocation <= 2; invocation++ {
+		output, err := fixture.run(t, nil, "lint-web")
+		if err != nil {
+			t.Fatalf("make lint-web invocation %d: %v\n%s", invocation, err, output)
+		}
+	}
+
+	calls := readStubCallRecords(t, fixture.logPath)
+	var npmCalls []stubCall
+	var lintWebCalls []stubCall
+	for _, call := range calls {
+		switch {
+		case slices.Equal(call.argv, []string{"npm", "ci", "--ignore-scripts"}):
+			npmCalls = append(npmCalls, call)
+		case slices.Equal(call.argv, []string{"npm", "run", "lint:web"}):
+			lintWebCalls = append(lintWebCalls, call)
+		}
+	}
+	if len(npmCalls) != 2 {
+		t.Fatalf("npm ci calls = %d, want one for each make invocation despite existing node_modules\ncalls:\n%s", len(npmCalls), formatStubCalls(calls))
+	}
+	for _, call := range npmCalls {
+		if call.target != "" || call.cwd != fixture.dir {
+			t.Fatalf("shared npm prerequisite call = target %q cwd %q, want target-neutral call in %q", call.target, call.cwd, fixture.dir)
+		}
+	}
+	if len(lintWebCalls) != 2 {
+		t.Fatalf("lint:web calls = %d, want one for each make invocation\ncalls:\n%s", len(lintWebCalls), formatStubCalls(calls))
+	}
+
+	events := readStubEvents(t, fixture.eventPath)
+	var npmCompletions []int
+	var lintWebStarts []int
+	for index, event := range events {
+		if event.kind == "complete" && slices.Equal(event.call.argv, []string{"npm", "ci", "--ignore-scripts"}) {
+			npmCompletions = append(npmCompletions, index)
+		}
+		if event.kind == "start" && slices.Equal(event.call.argv, []string{"npm", "run", "lint:web"}) {
+			lintWebStarts = append(lintWebStarts, index)
+		}
+	}
+	if len(npmCompletions) != 2 || len(lintWebStarts) != 2 ||
+		npmCompletions[0] >= lintWebStarts[0] || lintWebStarts[0] >= npmCompletions[1] || npmCompletions[1] >= lintWebStarts[1] {
+		t.Fatalf("npm completion/lint start order = %v/%v, want install-before-lint for both invocations", npmCompletions, lintWebStarts)
+	}
 }
 
 func TestMakeTaggedTargetsPreserveBinaryDirWithSpaces(t *testing.T) {

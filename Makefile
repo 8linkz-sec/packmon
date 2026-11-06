@@ -22,7 +22,7 @@ SERVER_IMAGE ?= packmon-server:local
 CLI_IMAGE ?= packmon-cli:local
 LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 
-.PHONY: build build-server test test-ci test-integration test-e2e vet lint fmt security security-images verify clean check-go-lint-tools check-gofumpt-tool check-golangci-lint-tool lint-nongo lint-web lint-openapi lint-shell lint-docker lint-actions lint-powershell
+.PHONY: build build-server test test-ci test-integration test-e2e vet lint fmt security security-images verify clean check-go-lint-tools check-gofumpt-tool check-golangci-lint-tool npm-ci lint-nongo lint-web lint-openapi lint-shell lint-docker lint-actions lint-powershell
 
 build:
 	CGO_ENABLED=0 go build -ldflags="$(LDFLAGS)" -o packmon$(GOEXE) ./cmd/packmon
@@ -70,12 +70,13 @@ check-golangci-lint-tool:
 lint-nongo:
 	bash scripts/check-non-go-format.sh
 
-lint-web:
+npm-ci:
 	npm ci --ignore-scripts
+
+lint-web: npm-ci
 	npm run lint:web
 
-lint-openapi:
-	npm ci --ignore-scripts
+lint-openapi: npm-ci
 	npm run lint:openapi
 
 lint-shell:
@@ -94,8 +95,7 @@ lint-actions:
 lint-powershell:
 	pwsh -NoLogo -NoProfile -Command 'Install-Module -Name PSScriptAnalyzer -RequiredVersion $(PSSCRIPTANALYZER_VERSION) -Scope CurrentUser -Force; $$findings = Invoke-ScriptAnalyzer -Path scripts -Recurse -Severity Error; if ($$findings) { $$findings; exit 1 }'
 
-security:
-	npm ci --ignore-scripts
+security: npm-ci
 	npm audit --audit-level=high
 	govulncheck $(GO_PACKAGES)
 	gosec -nosec-require-rules -nosec-require-justification $(GOSEC_DIRS)
