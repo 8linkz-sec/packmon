@@ -29,6 +29,7 @@ const (
 	syncMaxXID = math.MaxInt64
 
 	maxSyncAuditDetailValueLength = 128
+	maxSyncLogErrorValueLength    = 512
 )
 
 type syncResponsePayload = synccontract.Response
@@ -304,7 +305,10 @@ func (h *Handler) exportSyncData(r *http.Request, req syncRequest) (*db.SyncExpo
 		return nil, &syncExportFailure{
 			logMessage:      "sync export failed",
 			responseMessage: "failed to export sync data",
-			attrs:           []any{"error", err, "correlation_id", req.correlationID},
+			attrs: []any{
+				"error", syncExportErrorLogValue(err),
+				"correlation_id", req.correlationID,
+			},
 		}
 	}
 	return exported, nil
@@ -552,7 +556,7 @@ func syncExportAuditDetails(r *http.Request, opts db.SyncExportOptions, correlat
 
 func syncExportLogAttrs(r *http.Request, correlationID string, err error) []any {
 	attrs := []any{
-		"error", err,
+		"error", syncExportErrorLogValue(err),
 		"correlation_id", logsafe.BoundedDiagnosticValue(correlationID, maxSyncAuditDetailValueLength),
 		"client_ip", clientIP(r),
 	}
@@ -563,6 +567,13 @@ func syncExportLogAttrs(r *http.Request, correlationID string, err error) []any 
 		)
 	}
 	return attrs
+}
+
+func syncExportErrorLogValue(err error) string {
+	if err == nil {
+		return ""
+	}
+	return logsafe.BoundedDiagnosticValue(err.Error(), maxSyncLogErrorValueLength)
 }
 
 func addSyncCursorAuditDetails(details map[string]any, cursor db.SyncCursor) {
