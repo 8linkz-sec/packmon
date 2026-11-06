@@ -32,10 +32,20 @@ import (
 )
 
 const (
-	// maxRequestBody is derived from the /check contract so a valid
-	// MaxPackagesPerCheck request with maximum-size coordinates is not rejected
-	// before package validation runs.
+	// maxRequestBody is the standard JSON request cap retained for endpoints
+	// other than /check.
 	maxRequestBody int64 = checkcontract.MaxPackagesPerCheck*(checkcontract.MaxPackageNameLength+checkcontract.MaxPackageVersionLength+128) + 1024
+
+	// A JSON string byte can require six encoded bytes (for example, "<" is
+	// emitted as \u003c). The per-package margin covers fully escaped field
+	// names, the longest accepted ecosystem value, and JSON punctuation. Keep
+	// /check bounded while allowing maximum-size package coordinates.
+	maxJSONEncodedByteLength              = 6
+	maxCheckPackageEncodedOverhead        = 256
+	maxCheckRequestEnvelopeOverhead       = 1024
+	maxCheckRequestBody             int64 = checkcontract.MaxPackagesPerCheck*
+		(maxJSONEncodedByteLength*(checkcontract.MaxPackageNameLength+checkcontract.MaxPackageVersionLength)+maxCheckPackageEncodedOverhead) +
+		maxCheckRequestEnvelopeOverhead
 
 	// scanLogInsertTimeout bounds audit logging in the response critical path
 	// when the backing database is slow or locked.
@@ -444,7 +454,7 @@ func (h *Handler) parseCheckRequest(w http.ResponseWriter, r *http.Request, corr
 		errorResponseForRequest(w, r, http.StatusUnsupportedMediaType, err.Error())
 		return checkRequestParts{}, false
 	}
-	if err := readJSON(r, &wireReq); err != nil {
+	if err := readJSONWithLimit(r, &wireReq, maxCheckRequestBody); err != nil {
 		h.logger.Warn("invalid check request body", "error", err, "correlation_id", correlationID)
 		errorResponseForRequest(w, r, http.StatusBadRequest, "invalid request body: "+err.Error())
 		return checkRequestParts{}, false
