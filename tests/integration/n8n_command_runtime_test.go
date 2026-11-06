@@ -14,7 +14,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -112,7 +111,7 @@ func TestN8NCommandRuntimeDockerContract(t *testing.T) {
 		network, server := startN8NSyncServer(t, contract, fixtureRoot)
 		databaseRoot := t.TempDir()
 		if err := os.Chmod(databaseRoot, 0o777); err != nil { //nolint:gosec // disposable bind mount must be writable by the image's non-root UID
-			t.Fatalf("make persistent Packmon database directory writable by its container user: %v", err)
+			t.Fatalf("make persistent Packmon database directory writable by its container user: %s", n8nRuntimeDiagnostic(err.Error(), databaseRoot))
 		}
 
 		workflowID := "packmonRealSync" + randomN8NSuffix(t)
@@ -131,19 +130,19 @@ func TestN8NCommandRuntimeDockerContract(t *testing.T) {
 			},
 		})
 		if err != nil {
-			t.Fatalf("real Packmon daily sync failed under the supported deployment: %v\n%s", err, n8nRuntimeDiagnostic(output, fixtureRoot))
+			t.Fatalf("real Packmon daily sync failed under the supported deployment: %v\n%s", err, n8nRuntimeDiagnostic(output, fixtureRoot, databaseRoot))
 		}
 		compactOutput := strings.NewReplacer(" ", "", "\t", "", "\r", "", "\n", "").Replace(output)
 		for _, want := range []string{`"workflow":"daily-sync"`, `"status":"ok"`, `"finishedAt"`} {
 			if !strings.Contains(compactOutput, want) {
-				t.Fatalf("real Packmon daily sync output is missing %s:\n%s", want, n8nRuntimeDiagnostic(output, fixtureRoot))
+				t.Fatalf("real Packmon daily sync output is missing %s:\n%s", want, n8nRuntimeDiagnostic(output, fixtureRoot, databaseRoot))
 			}
 		}
 
 		databasePath := filepath.Join(databaseRoot, "packmon.db")
 		info, statErr := os.Stat(databasePath)
 		if statErr != nil {
-			t.Fatalf("stat persistent local database after n8n container removal: %v", statErr)
+			t.Fatalf("stat persistent local database after n8n container removal: %s", n8nRuntimeDiagnostic(statErr.Error(), databaseRoot))
 		}
 		if info.Size() == 0 {
 			t.Fatal("persistent local database is empty after successful daily sync")
@@ -153,6 +152,44 @@ func TestN8NCommandRuntimeDockerContract(t *testing.T) {
 }
 
 const n8nRuntimeAPIKey = "packmon-n8n-runtime-test-key"
+
+func TestN8NRuntimeHarnessRedactsMultipleRootsAndMatchesExactNotFound(t *testing.T) {
+	firstRoot := filepath.Join("sensitive", "fixture-root")
+	secondRoot := filepath.Join("sensitive", "database-root")
+	diagnostic := firstRoot + " " + filepath.ToSlash(firstRoot) + " " + secondRoot + " " + filepath.ToSlash(secondRoot)
+	redacted := n8nRuntimeDiagnostic(diagnostic, firstRoot, secondRoot)
+	for _, forbidden := range []string{firstRoot, filepath.ToSlash(firstRoot), secondRoot, filepath.ToSlash(secondRoot)} {
+		if strings.Contains(redacted, forbidden) {
+			t.Fatalf("runtime diagnostic retained sensitive root %q: %s", forbidden, redacted)
+		}
+	}
+	if got := strings.Count(redacted, "[REDACTED]"); got != 4 {
+		t.Fatalf("runtime diagnostic redaction count = %d, want 4: %s", got, redacted)
+	}
+
+	container := "packmon-test-container"
+	network := "packmon-test-network"
+	if !n8nDockerCleanupNotFound("Error response from daemon: No such container: "+container+"\n", "container", container) {
+		t.Fatal("exact container not-found diagnostic was not recognized")
+	}
+	if !n8nDockerCleanupNotFound("Error response from daemon: network "+network+" not found\n", "network", network) {
+		t.Fatal("exact network not-found diagnostic was not recognized")
+	}
+	for _, mismatch := range []struct {
+		output       string
+		resourceType string
+		name         string
+	}{
+		{output: "Error response from daemon: No such container: " + container + " extra", resourceType: "container", name: container},
+		{output: "Error response from daemon: network " + network + " not found extra", resourceType: "network", name: network},
+		{output: "Error response from daemon: No such container: another", resourceType: "container", name: container},
+		{output: "Error response from daemon: network another not found", resourceType: "network", name: network},
+	} {
+		if n8nDockerCleanupNotFound(mismatch.output, mismatch.resourceType, mismatch.name) {
+			t.Fatalf("inexact %s cleanup diagnostic was accepted: %q", mismatch.resourceType, mismatch.output)
+		}
+	}
+}
 
 func readN8NDockerRuntimeContract(t *testing.T) n8nDockerRuntimeContract {
 	t.Helper()
@@ -309,7 +346,7 @@ func startN8NSyncServer(t *testing.T, contract n8nDockerRuntimeContract, fixture
 		t.Fatalf("create isolated n8n runtime network: %v: %s", err, n8nRuntimeDiagnostic(output, fixtureRoot))
 	}
 	t.Cleanup(func() {
-		_, _ = n8nDockerCommand(30*time.Second, "network", "rm", network)
+		cleanupN8NSyncRuntime(t, server, network, fixtureRoot)
 	})
 	fixtureMount := "type=bind,source=" + filepath.Clean(fixtureRoot) + ",target=/fixtures,readonly"
 	args := []string{
@@ -319,9 +356,6 @@ func startN8NSyncServer(t *testing.T, contract n8nDockerRuntimeContract, fixture
 	if output, err := n8nDockerCommand(30*time.Second, args...); err != nil {
 		t.Fatalf("start isolated Packmon sync server: %v: %s", err, n8nRuntimeDiagnostic(output, fixtureRoot))
 	}
-	t.Cleanup(func() {
-		_, _ = n8nDockerCommand(30*time.Second, "rm", "-f", server)
-	})
 
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
@@ -336,6 +370,59 @@ func startN8NSyncServer(t *testing.T, contract n8nDockerRuntimeContract, fixture
 	return "", ""
 }
 
+func cleanupN8NSyncRuntime(t *testing.T, server, network string, sensitiveRoots ...string) {
+	t.Helper()
+	output, err := n8nDockerCommand(30*time.Second, "rm", "-f", server)
+	if err != nil && !n8nDockerCleanupNotFound(output, "container", server) {
+		t.Errorf("remove isolated Packmon sync server: %v: %s", err, n8nRuntimeDiagnostic(output, sensitiveRoots...))
+	}
+	assertN8NDockerResourceAbsent(t, "container", server, sensitiveRoots...)
+
+	output, err = n8nDockerCommand(30*time.Second, "network", "rm", network)
+	if err != nil && !n8nDockerCleanupNotFound(output, "network", network) {
+		t.Errorf("remove isolated n8n runtime network: %v: %s", err, n8nRuntimeDiagnostic(output, sensitiveRoots...))
+	}
+	assertN8NDockerResourceAbsent(t, "network", network, sensitiveRoots...)
+}
+
+func n8nDockerCleanupNotFound(output, resourceType, name string) bool {
+	trimmed := strings.TrimSpace(output)
+	switch resourceType {
+	case "container":
+		return trimmed == "Error response from daemon: No such container: "+name ||
+			trimmed == "Error: No such container: "+name
+	case "network":
+		return trimmed == "Error response from daemon: network "+name+" not found"
+	default:
+		return false
+	}
+}
+
+func assertN8NDockerResourceAbsent(t *testing.T, resourceType, name string, sensitiveRoots ...string) {
+	t.Helper()
+	var args []string
+	switch resourceType {
+	case "container":
+		args = []string{"container", "ls", "--all", "--format", "{{.Names}}"}
+	case "network":
+		args = []string{"network", "ls", "--format", "{{.Name}}"}
+	default:
+		t.Errorf("verify Docker cleanup for unsupported resource type %q", resourceType)
+		return
+	}
+	output, err := n8nDockerCommand(30*time.Second, args...)
+	if err != nil {
+		t.Errorf("verify isolated Docker %s cleanup: %v: %s", resourceType, err, n8nRuntimeDiagnostic(output, sensitiveRoots...))
+		return
+	}
+	for _, candidate := range strings.Fields(output) {
+		if candidate == name {
+			t.Errorf("isolated Docker %s %q remains after cleanup", resourceType, name)
+			return
+		}
+	}
+}
+
 func assertN8NPersistentDatabase(t *testing.T, contract n8nDockerRuntimeContract, fixtureRoot, databaseRoot string) {
 	t.Helper()
 	fixtureMount := "type=bind,source=" + filepath.Clean(fixtureRoot) + ",target=/fixtures,readonly"
@@ -348,14 +435,14 @@ func assertN8NPersistentDatabase(t *testing.T, contract n8nDockerRuntimeContract
 	}
 	output, err := n8nDockerCommand(n8nCommandRuntimeTimeout, args...)
 	if err != nil {
-		t.Fatalf("reopen persistent Packmon database after n8n container removal: %v\n%s", err, n8nRuntimeDiagnostic(output, fixtureRoot))
+		t.Fatalf("reopen persistent Packmon database after n8n container removal: %v\n%s", err, n8nRuntimeDiagnostic(output, fixtureRoot, databaseRoot))
 	}
 	var info struct {
 		Exists          bool `json:"exists"`
 		Vulnerabilities int  `json:"vulnerabilities"`
 	}
 	if err := json.Unmarshal([]byte(output), &info); err != nil {
-		t.Fatalf("parse persistent Packmon database info: %v\n%s", err, n8nRuntimeDiagnostic(output, fixtureRoot))
+		t.Fatalf("parse persistent Packmon database info: %v\n%s", err, n8nRuntimeDiagnostic(output, fixtureRoot, databaseRoot))
 	}
 	if !info.Exists || info.Vulnerabilities != 1 {
 		t.Fatalf("persistent Packmon database info = %+v, want one synced vulnerability", info)
@@ -541,12 +628,25 @@ func n8nDockerClientEnvironment() []string {
 	return environment
 }
 
-func n8nRuntimeDiagnostic(output, fixtureRoot string) string {
-	if fixtureRoot != "" {
-		output = strings.ReplaceAll(output, fixtureRoot, "[FIXTURE]")
-		if runtime.GOOS == "windows" {
-			output = strings.ReplaceAll(output, filepath.ToSlash(fixtureRoot), "[FIXTURE]")
+func n8nRuntimeDiagnostic(output string, sensitiveRoots ...string) string {
+	seen := make(map[string]struct{})
+	var variants []string
+	for _, root := range sensitiveRoots {
+		if strings.TrimSpace(root) == "" {
+			continue
 		}
+		for _, variant := range []string{root, filepath.Clean(root), filepath.ToSlash(root), filepath.ToSlash(filepath.Clean(root))} {
+			if variant != "." {
+				if _, exists := seen[variant]; !exists {
+					seen[variant] = struct{}{}
+					variants = append(variants, variant)
+				}
+			}
+		}
+	}
+	sort.Slice(variants, func(i, j int) bool { return len(variants[i]) > len(variants[j]) })
+	for _, variant := range variants {
+		output = strings.ReplaceAll(output, variant, "[REDACTED]")
 	}
 	const limit = 4000
 	if len(output) > limit {
