@@ -22,6 +22,8 @@ const (
 	maxAutoProjectCLIConfigFileBytes = 64 * 1024
 )
 
+var errCLIConfigAdditionalYAMLDocument = errors.New("config must contain at most one YAML document")
+
 type cliConfig struct {
 	Server            string            `yaml:"server"`
 	APIKey            string            `yaml:"api_key"`
@@ -208,9 +210,9 @@ func loadExplicitCLIConfig(configPath string) (*cliConfig, string, error) {
 	return &cfg, absPath, nil
 }
 
-// decodeCLIConfig decodes YAML into cfg, overlaying onto any existing values.
-// An empty document is a no-op so a present-but-empty file does not clear the
-// base layer.
+// decodeCLIConfig decodes one YAML document into cfg, overlaying onto any
+// existing values. An empty stream is a no-op so a present-but-empty file does
+// not clear the base layer.
 func decodeCLIConfig(data []byte, cfg *cliConfig) error {
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	decoder.KnownFields(true)
@@ -219,6 +221,11 @@ func decodeCLIConfig(data []byte, cfg *cliConfig) error {
 			return nil
 		}
 		return err
+	}
+
+	var trailing yaml.Node
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return errCLIConfigAdditionalYAMLDocument
 	}
 	return nil
 }

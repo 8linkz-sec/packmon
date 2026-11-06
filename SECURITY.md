@@ -276,6 +276,10 @@ Client key handling:
   choose API-key environment variables, Packmon server URLs, TLS trust settings,
   webhook URLs/secrets, report output paths, local advisory database paths, or
   latest-version registry mirror URLs;
+- allow at most one YAML document in explicit, user-global, and auto-discovered
+  project config files. Empty files remain valid no-ops, but every additional
+  valid, empty, or malformed document must fail closed with a fixed diagnostic
+  that does not expose YAML keys, values, file contents, or parser details;
 - rotate keys before their required expiration;
 - review `last_used_at` before revoking stale keys.
 
