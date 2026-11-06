@@ -95,6 +95,28 @@ func TestComposeRuntimeScenarioAttributesFailureToChild(t *testing.T) {
 	}
 }
 
+func TestDockerInspectOutputConfirmsContainerMissing(t *testing.T) {
+	containerID := strings.Repeat("a", 64)
+	for _, tc := range []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{name: "exact docker response", output: "[]\nerror: no such object: " + containerID + "\n", want: true},
+		{name: "empty output", output: "", want: false},
+		{name: "timeout", output: "context deadline exceeded", want: false},
+		{name: "daemon failure", output: "cannot connect to the Docker daemon", want: false},
+		{name: "different object", output: "error: no such object: " + strings.Repeat("b", 64), want: false},
+		{name: "ID is only a prefix", output: "error: no such object: " + containerID[:12], want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := dockerInspectOutputConfirmsMissing(tc.output, containerID); got != tc.want {
+				t.Fatalf("dockerInspectOutputConfirmsMissing() = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestComposeRuntimeContracts(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("Compose ownership/runtime contracts require a native Linux host")
@@ -795,9 +817,19 @@ func (s *composeRuntimeScenario) assertContainerRemoved(containerID string) {
 	if err == nil {
 		s.t.Fatalf("container %s still exists after Compose replacement boundary", containerID[:min(12, len(containerID))])
 	}
-	if len(output) > 0 && !strings.Contains(strings.ToLower(string(output)), "no such") {
+	if !dockerInspectOutputConfirmsMissing(string(output), containerID) {
 		s.t.Fatalf("inspect removed container failed for an unexpected reason: %s", s.diagnostic(string(output)))
 	}
+}
+
+func dockerInspectOutputConfirmsMissing(output, containerID string) bool {
+	want := "error: no such object: " + strings.ToLower(containerID)
+	for line := range strings.SplitSeq(output, "\n") {
+		if strings.TrimSpace(strings.ToLower(line)) == want {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *composeRuntimeScenario) assertProjectRemoved() {
