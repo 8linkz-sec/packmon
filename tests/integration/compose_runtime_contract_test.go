@@ -216,7 +216,11 @@ func (h *composeRuntimeHarness) buildServerImage() {
 func (h *composeRuntimeHarness) testBootstrapOwnerAndExplicitRun(t *testing.T) {
 	checkout := t.TempDir()
 	envPath := filepath.Join(checkout, ".env")
-	if err := os.WriteFile(envPath, []byte("POSTGRES_USER=packmon\nPOSTGRES_DB=packmon\n"), 0o600); err != nil {
+	const preservedDatabasePassword = "fixture-owner-only-database-password"
+	seed := "POSTGRES_USER=existing-owner\n" +
+		"POSTGRES_DB=existing-database\n" +
+		"POSTGRES_PASSWORD=" + preservedDatabasePassword + "\n"
+	if err := os.WriteFile(envPath, []byte(seed), 0o600); err != nil {
 		t.Fatalf("seed owner-only environment file: %v", err)
 	}
 	uid, gid := os.Getuid(), os.Getgid()
@@ -251,6 +255,19 @@ func (h *composeRuntimeHarness) testBootstrapOwnerAndExplicitRun(t *testing.T) {
 	data, err := os.ReadFile(envPath)
 	if err != nil {
 		t.Fatalf("read generated environment structure: %v", err)
+	}
+	for _, preserved := range []struct {
+		name       string
+		assignment string
+	}{
+		{name: "POSTGRES_USER", assignment: "POSTGRES_USER=existing-owner\n"},
+		{name: "POSTGRES_DB", assignment: "POSTGRES_DB=existing-database\n"},
+		{name: "POSTGRES_PASSWORD", assignment: "POSTGRES_PASSWORD=" + preservedDatabasePassword + "\n"},
+		{name: "PACKMON_DB_PASSWORD", assignment: "PACKMON_DB_PASSWORD=" + preservedDatabasePassword + "\n"},
+	} {
+		if count := bytes.Count(data, []byte(preserved.assignment)); count != 1 {
+			t.Fatalf("completed %s assignment count = %d, want exactly one preserved or mirrored value", preserved.name, count)
+		}
 	}
 	for _, key := range []string{"POSTGRES_PASSWORD=", "PACKMON_DB_PASSWORD=", "PACKMON_ADMIN_INITIAL_PASSWORD=", "PACKMON_ENCRYPTION_KEY=", "PACKMON_ADMIN_AUDIT_HMAC_KEY="} {
 		if !bytes.Contains(data, []byte(key)) {
