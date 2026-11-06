@@ -112,8 +112,13 @@ func dockerInventoryRelDisplay(rel string) string {
 
 func dockerInventoryWalkWarning(root, path string, cause error) string {
 	display := filepath.ToSlash(path)
-	if rel, err := filepath.Rel(root, path); err == nil && rel != "." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != ".." {
-		display = filepath.ToSlash(rel)
+	if rel, err := filepath.Rel(root, path); err == nil {
+		switch {
+		case rel == ".":
+			display = dockerInventoryRelDisplay(rel)
+		case rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)):
+			display = filepath.ToSlash(rel)
+		}
 	}
 	if pathErr, ok := cause.(*fs.PathError); ok {
 		return fmt.Sprintf("%s: %v", display, pathErr.Err)

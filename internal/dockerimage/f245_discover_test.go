@@ -22,6 +22,14 @@ func TestF245DiscoverFilesWalkerErrorControlFlow(t *testing.T) {
 		if err != nil || files != nil || len(warnings) != 1 || !strings.Contains(warnings[0], "permission") {
 			t.Fatalf("DiscoverFilesWithWarnings(root error) = (%+v, %+v, %v)", files, warnings, err)
 		}
+		if !strings.HasPrefix(warnings[0], "docker-inventory-file: ") {
+			t.Fatalf("root warning = %q, want bounded Docker inventory placeholder", warnings[0])
+		}
+		for _, leaked := range []string{root, filepath.ToSlash(root)} {
+			if strings.Contains(warnings[0], leaked) {
+				t.Fatalf("root warning leaks absolute scan root %q: %q", leaked, warnings[0])
+			}
+		}
 	})
 
 	t.Run("nested errors skip directories and continue files before final error", func(t *testing.T) {
