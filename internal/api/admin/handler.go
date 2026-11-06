@@ -139,6 +139,10 @@ type AdminHandler struct {
 	// createAdminSession is a deterministic failure seam for the successful
 	// login commit path; nil delegates to SessionManager.CreateAdmin.
 	createAdminSession func(http.ResponseWriter, bool) (*auth.Session, error)
+	// createExclusiveAdminSession is a deterministic failure seam for the
+	// post-password-commit session rotation; nil delegates to
+	// SessionManager.CreateExclusiveAdmin.
+	createExclusiveAdminSession func(http.ResponseWriter) (*auth.Session, error)
 	// equalizePasswordCheck runs a dummy password comparison on login failures
 	// that have no stored hash to check; nil uses auth.EqualizePasswordCheck.
 	equalizePasswordCheck func(password string)
@@ -410,6 +414,13 @@ func (h *AdminHandler) newAdminSession(w http.ResponseWriter, authenticatedWithB
 		return h.createAdminSession(w, authenticatedWithBootstrap)
 	}
 	return h.sm.CreateAdmin(w, authenticatedWithBootstrap)
+}
+
+func (h *AdminHandler) newExclusiveAdminSession(w http.ResponseWriter) (*auth.Session, error) {
+	if h.createExclusiveAdminSession != nil {
+		return h.createExclusiveAdminSession(w)
+	}
+	return h.sm.CreateExclusiveAdmin(w)
 }
 
 func adminLoginSuccessRedirect(nextPath string) string {

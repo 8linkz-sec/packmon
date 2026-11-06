@@ -129,11 +129,7 @@ func (sm *SessionManager) createAdmin(w http.ResponseWriter, authenticatedWithBo
 
 	sm.mu.Lock()
 	if exclusive {
-		for existingID, existing := range sm.sessions {
-			if existing.Admin {
-				delete(sm.sessions, existingID)
-			}
-		}
+		sm.deleteAdminSessionsLocked()
 	}
 	sm.sessions[id] = sess
 	sm.mu.Unlock()
@@ -270,6 +266,27 @@ func (sm *SessionManager) DeleteByID(w http.ResponseWriter, sessionID string) {
 	sm.clearCookie(w, SessionCookiePath)
 	// Also clear the legacy root-scoped cookie used by older Packmon builds.
 	sm.clearCookie(w, "/")
+}
+
+// DeleteAllAdminSessions destroys every authenticated admin session while
+// preserving the short-lived, non-admin sessions used by public login forms.
+// Both current and legacy cookies are cleared for the calling browser.
+func (sm *SessionManager) DeleteAllAdminSessions(w http.ResponseWriter) {
+	sm.mu.Lock()
+	sm.deleteAdminSessionsLocked()
+	sm.mu.Unlock()
+
+	sm.clearCookie(w, SessionCookiePath)
+	// Also clear the legacy root-scoped cookie used by older Packmon builds.
+	sm.clearCookie(w, "/")
+}
+
+func (sm *SessionManager) deleteAdminSessionsLocked() {
+	for sessionID, sess := range sm.sessions {
+		if sess.Admin {
+			delete(sm.sessions, sessionID)
+		}
+	}
 }
 
 func (sm *SessionManager) clearCookie(w http.ResponseWriter, path string) {

@@ -163,6 +163,44 @@ func TestDeleteByIDRemovesOnlyTargetAndClearsCurrentAndLegacyCookies(t *testing.
 	}
 }
 
+func TestDeleteAllAdminSessionsPreservesPreAuthAndClearsCookies(t *testing.T) {
+	t.Parallel()
+
+	sm := newTestSessionManager(time.Hour)
+	firstAdmin, _ := createSession(t, sm)
+	secondAdmin, _ := createSession(t, sm)
+	preAuth, err := sm.CreatePreAuth(httptest.NewRecorder())
+	if err != nil {
+		t.Fatalf("CreatePreAuth returned error: %v", err)
+	}
+	rec := httptest.NewRecorder()
+
+	sm.DeleteAllAdminSessions(rec)
+	sm.DeleteAllAdminSessions(rec)
+
+	for _, sessionID := range []string{firstAdmin.ID, secondAdmin.ID} {
+		if got := sm.Get(requestWithSession(sessionID)); got != nil {
+			t.Fatalf("admin session %q still exists: %+v", sessionID, got)
+		}
+	}
+	if got := sm.Get(requestWithSession(preAuth.ID)); got == nil || got.Admin {
+		t.Fatalf("pre-auth session was removed or promoted: %+v", got)
+	}
+
+	latest := make(map[string]*http.Cookie)
+	for _, cookie := range rec.Result().Cookies() {
+		if cookie.Name == SessionCookieName {
+			latest[cookie.Path] = cookie
+		}
+	}
+	for _, path := range []string{SessionCookiePath, "/"} {
+		cookie := latest[path]
+		if cookie == nil || cookie.Value != "" || cookie.MaxAge >= 0 || !cookie.HttpOnly || cookie.SameSite != http.SameSiteStrictMode {
+			t.Fatalf("deletion cookie for path %q = %+v", path, cookie)
+		}
+	}
+}
+
 func TestCreateExclusiveAdminReplacesOnlyAdminSessions(t *testing.T) {
 	t.Parallel()
 
