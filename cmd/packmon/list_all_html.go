@@ -461,7 +461,7 @@ func listAllHTMLKnownLatestDiffers(row listAllRow) bool {
 	latest := strings.TrimSpace(row.Latest)
 	installed := strings.TrimSpace(row.Installed)
 	if latest == "" || installed == "" || latest == "-" || installed == "-" ||
-		strings.EqualFold(latest, "unknown") {
+		strings.EqualFold(latest, "unknown") || strings.EqualFold(installed, "unknown") {
 		return false
 	}
 	return !strings.EqualFold(latest, installed)

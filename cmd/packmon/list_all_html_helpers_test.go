@@ -72,3 +72,21 @@ func TestListAllHTMLPackageStatusExplicitContracts(t *testing.T) {
 		t.Fatalf("copy context = %q, %q", label, message)
 	}
 }
+
+func TestListAllHTMLVulnerabilityUpdatePathExplicitSignalsOverrideUnknownInstalled(t *testing.T) {
+	t.Parallel()
+
+	row := listAllRow{
+		Installed: " unknown ",
+		Latest:    "v4.2.2",
+		Ecosystem: string(domain.EcosystemGitHubActions),
+	}
+	row.Update = " yes "
+	if !listAllHTMLVulnerabilityHasUpdatePath(row, listAllHTMLFindingState{}) {
+		t.Fatal("explicit update=yes must remain an update path for an unknown installed version")
+	}
+	row.Update = "-"
+	if !listAllHTMLVulnerabilityHasUpdatePath(row, listAllHTMLFindingState{HasFixedVersion: true}) {
+		t.Fatal("a fixed version must remain an update path for an unknown installed version")
+	}
+}
