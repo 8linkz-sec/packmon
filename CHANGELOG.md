@@ -21,6 +21,11 @@
   supplies a file on another volume. The candidate is still rejected, later
   valid candidates are retained, and the warning now uses only its base name
   with a fixed reason.
+- Chocolatey `config.xml` inventory now rejects a second top-level XML element
+  after a direct `<config><packages>` section. Such malformed multi-root input
+  previously discarded the packages it had parsed and returned an empty,
+  successful inventory; it now returns a generic parse error and no partial
+  package rows.
 - Clean server and CLI container builds work again with Alpine 3.24 after
   updating their exact `tzdata` package pin from `2026e-r0`, which the current
   repository no longer provides, to `2026f-r0`. The digest-pinned Alpine base

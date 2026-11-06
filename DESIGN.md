@@ -706,7 +706,8 @@ Important behavior:
   `<packages><package name="..."/>` list, identified by content so unrelated
   `config.xml` files are ignored silently; a malformed or truncated file is a
   parse error only once a `<packages>` section directly under `<config>` has
-  been read) and `choco install|upgrade` /
+  been read, and a second top-level element after that identification is a
+  parse error that discards every parsed package row) and `choco install|upgrade` /
   `cinst` / `cup` command lines in `.ps1`, `.psm1`, `.bat`, and `.cmd`
   scripts. Rows use ecosystem `chocolatey`, source `config.xml` or
   `choco-install`, scope `runtime`, relation `declared`, and lowercase

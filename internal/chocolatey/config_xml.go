@@ -57,6 +57,10 @@ func ParseConfigXML(r io.Reader, sourceFile string) ([]Package, error) {
 	// such a document has identified itself as a package list, so only its
 	// decoder errors are reported.
 	sawPackages := false
+	// sawRoot distinguishes the first document element from any later
+	// top-level element. A later root is an error only after the document has
+	// identified itself as a package list.
+	sawRoot := false
 	depth := 0
 	inPackages := false
 	var packages []Package
@@ -76,6 +80,10 @@ func ParseConfigXML(r io.Reader, sourceFile string) ([]Package, error) {
 			depth++
 			name := strings.ToLower(t.Name.Local)
 			if depth == 1 {
+				if sawRoot && sawPackages {
+					return nil, fmt.Errorf("%s: invalid config.xml package list", sourceFile)
+				}
+				sawRoot = true
 				if name != "config" {
 					return nil, nil
 				}
