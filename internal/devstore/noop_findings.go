@@ -174,6 +174,9 @@ func (s *Store) UpsertMaliciousFinding(_ context.Context, mf *db.MaliciousFindin
 }
 
 func (s *Store) upsertMaliciousFindingLocked(mf *db.MaliciousFinding) error {
+	if mf == nil {
+		return fmt.Errorf("devstore: malicious finding is nil")
+	}
 	copyValue := cloneMaliciousFinding(*mf)
 	if copyValue.ID == "" {
 		s.nextManualID++
