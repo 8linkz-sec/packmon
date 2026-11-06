@@ -7,8 +7,8 @@ import (
 )
 
 const (
-	MaxPackageNameLength    = checkcontract.MaxPackageNameLength
-	MaxPackageVersionLength = checkcontract.MaxPackageVersionLength
+	MaxPackageNameLength    = checkcontract.MaxPackageNameUTF8Bytes
+	MaxPackageVersionLength = checkcontract.MaxPackageVersionUTF8Bytes
 )
 
 // BuildReversingLabsPURL maps a Packmon package coordinate to the

@@ -2514,8 +2514,8 @@ func TestHandleCheck_MaxPackagesAtDocumentedCoordinateLengths(t *testing.T) {
 	packages := make([]domain.Package, checkcontract.MaxPackagesPerCheck)
 	for i := range packages {
 		packages[i] = domain.Package{
-			Name:      strings.Repeat("a", checkcontract.MaxPackageNameLength),
-			Version:   strings.Repeat("1", checkcontract.MaxPackageVersionLength),
+			Name:      strings.Repeat("a", checkcontract.MaxScanPackageNameCodePoints),
+			Version:   strings.Repeat("1", checkcontract.MaxScanPackageVersionCodePoints),
 			Ecosystem: domain.EcosystemNPM,
 		}
 	}
@@ -2629,6 +2629,7 @@ func TestHandleCheckPackageCoordinateContract(t *testing.T) {
 
 	tests := []struct {
 		name        string
+		ecosystem   domain.Ecosystem
 		packageName string
 		version     string
 		wantStatus  int
@@ -2639,28 +2640,40 @@ func TestHandleCheckPackageCoordinateContract(t *testing.T) {
 		{name: "blank name", packageName: " \t ", version: "1.0.0", wantStatus: http.StatusBadRequest},
 		{name: "blank version", packageName: "left-pad", version: " \t ", wantStatus: http.StatusBadRequest},
 		{name: "embedded version whitespace", packageName: "left-pad", version: "1.0 0", wantStatus: http.StatusBadRequest},
-		{name: "exact name byte limit", packageName: strings.Repeat("n", checkcontract.MaxPackageNameLength), version: "1.0.0", wantStatus: http.StatusOK, wantName: strings.Repeat("n", checkcontract.MaxPackageNameLength), wantVersion: "1.0.0"},
-		{name: "over name byte limit", packageName: strings.Repeat("n", checkcontract.MaxPackageNameLength+1), version: "1.0.0", wantStatus: http.StatusBadRequest},
-		{name: "exact version byte limit", packageName: "left-pad", version: strings.Repeat("1", checkcontract.MaxPackageVersionLength), wantStatus: http.StatusOK, wantName: "left-pad", wantVersion: strings.Repeat("1", checkcontract.MaxPackageVersionLength)},
-		{name: "over version byte limit", packageName: "left-pad", version: strings.Repeat("1", checkcontract.MaxPackageVersionLength+1), wantStatus: http.StatusBadRequest},
-		{name: "exact multibyte name byte limit", packageName: strings.Repeat("é", checkcontract.MaxPackageNameLength/2), version: "1.0.0", wantStatus: http.StatusOK, wantName: strings.Repeat("é", checkcontract.MaxPackageNameLength/2), wantVersion: "1.0.0"},
-		{name: "over multibyte name byte limit", packageName: strings.Repeat("é", checkcontract.MaxPackageNameLength/2+1), version: "1.0.0", wantStatus: http.StatusBadRequest},
-		{name: "exact multibyte version byte limit", packageName: "left-pad", version: strings.Repeat("é", checkcontract.MaxPackageVersionLength/2), wantStatus: http.StatusOK, wantName: "left-pad", wantVersion: strings.Repeat("é", checkcontract.MaxPackageVersionLength/2)},
-		{name: "over multibyte version byte limit", packageName: "left-pad", version: strings.Repeat("é", checkcontract.MaxPackageVersionLength/2+1), wantStatus: http.StatusBadRequest},
-		{name: "surrounding whitespace is normalized before name limit", packageName: " \t" + strings.Repeat("n", checkcontract.MaxPackageNameLength) + "\n", version: "1.0.0", wantStatus: http.StatusOK, wantName: strings.Repeat("n", checkcontract.MaxPackageNameLength), wantVersion: "1.0.0"},
-		{name: "surrounding whitespace is normalized before version limit", packageName: "left-pad", version: " \t" + strings.Repeat("1", checkcontract.MaxPackageVersionLength) + "\n", wantStatus: http.StatusOK, wantName: "left-pad", wantVersion: strings.Repeat("1", checkcontract.MaxPackageVersionLength)},
+		{name: "exact ASCII name code-point limit", packageName: strings.Repeat("n", checkcontract.MaxScanPackageNameCodePoints), version: "1.0.0", wantStatus: http.StatusOK, wantName: strings.Repeat("n", checkcontract.MaxScanPackageNameCodePoints), wantVersion: "1.0.0"},
+		{name: "over ASCII name code-point limit", packageName: strings.Repeat("n", checkcontract.MaxScanPackageNameCodePoints+1), version: "1.0.0", wantStatus: http.StatusBadRequest},
+		{name: "exact ASCII version code-point limit", packageName: "left-pad", version: strings.Repeat("1", checkcontract.MaxScanPackageVersionCodePoints), wantStatus: http.StatusOK, wantName: "left-pad", wantVersion: strings.Repeat("1", checkcontract.MaxScanPackageVersionCodePoints)},
+		{name: "over ASCII version code-point limit", packageName: "left-pad", version: strings.Repeat("1", checkcontract.MaxScanPackageVersionCodePoints+1), wantStatus: http.StatusBadRequest},
+		{name: "exact two-byte name code-point limit", packageName: strings.Repeat("é", checkcontract.MaxScanPackageNameCodePoints), version: "1.0.0", wantStatus: http.StatusOK, wantName: strings.Repeat("é", checkcontract.MaxScanPackageNameCodePoints), wantVersion: "1.0.0"},
+		{name: "over two-byte name code-point limit", packageName: strings.Repeat("é", checkcontract.MaxScanPackageNameCodePoints+1), version: "1.0.0", wantStatus: http.StatusBadRequest},
+		{name: "exact two-byte version code-point limit", packageName: "left-pad", version: strings.Repeat("é", checkcontract.MaxScanPackageVersionCodePoints), wantStatus: http.StatusOK, wantName: "left-pad", wantVersion: strings.Repeat("é", checkcontract.MaxScanPackageVersionCodePoints)},
+		{name: "over two-byte version code-point limit", packageName: "left-pad", version: strings.Repeat("é", checkcontract.MaxScanPackageVersionCodePoints+1), wantStatus: http.StatusBadRequest},
+		{name: "exact supplementary name code-point limit", packageName: strings.Repeat("\U0001F600", checkcontract.MaxScanPackageNameCodePoints), version: "1.0.0", wantStatus: http.StatusOK, wantName: strings.Repeat("\U0001F600", checkcontract.MaxScanPackageNameCodePoints), wantVersion: "1.0.0"},
+		{name: "over supplementary name code-point limit", packageName: strings.Repeat("\U0001F600", checkcontract.MaxScanPackageNameCodePoints+1), version: "1.0.0", wantStatus: http.StatusBadRequest},
+		{name: "exact supplementary version code-point limit", packageName: "left-pad", version: strings.Repeat("\U0001F600", checkcontract.MaxScanPackageVersionCodePoints), wantStatus: http.StatusOK, wantName: "left-pad", wantVersion: strings.Repeat("\U0001F600", checkcontract.MaxScanPackageVersionCodePoints)},
+		{name: "over supplementary version code-point limit", packageName: "left-pad", version: strings.Repeat("\U0001F600", checkcontract.MaxScanPackageVersionCodePoints+1), wantStatus: http.StatusBadRequest},
+		{name: "exact raw name limit includes surrounding whitespace", packageName: " " + strings.Repeat("n", checkcontract.MaxScanPackageNameCodePoints-2) + " ", version: "1.0.0", wantStatus: http.StatusOK, wantName: strings.Repeat("n", checkcontract.MaxScanPackageNameCodePoints-2), wantVersion: "1.0.0"},
+		{name: "name whitespace pushes raw value over limit", packageName: " " + strings.Repeat("n", checkcontract.MaxScanPackageNameCodePoints) + " ", version: "1.0.0", wantStatus: http.StatusBadRequest},
+		{name: "exact raw version limit includes surrounding whitespace", packageName: "left-pad", version: " " + strings.Repeat("1", checkcontract.MaxScanPackageVersionCodePoints-2) + " ", wantStatus: http.StatusOK, wantName: "left-pad", wantVersion: strings.Repeat("1", checkcontract.MaxScanPackageVersionCodePoints-2)},
+		{name: "version whitespace pushes raw value over limit", packageName: "left-pad", version: " " + strings.Repeat("1", checkcontract.MaxScanPackageVersionCodePoints) + " ", wantStatus: http.StatusBadRequest},
+		{name: "exact raw name canonicalizes only after length validation", ecosystem: domain.EcosystemPyPI, packageName: strings.Repeat("_", checkcontract.MaxScanPackageNameCodePoints), version: "1.0.0", wantStatus: http.StatusOK, wantName: "-", wantVersion: "1.0.0"},
+		{name: "canonicalization cannot shrink raw over-limit name", ecosystem: domain.EcosystemPyPI, packageName: strings.Repeat("_", checkcontract.MaxScanPackageNameCodePoints+1), version: "1.0.0", wantStatus: http.StatusBadRequest},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
+			ecosystem := tt.ecosystem
+			if ecosystem == "" {
+				ecosystem = domain.EcosystemNPM
+			}
 			store := &stubStore{}
 			h := newTestHandler(store)
 			body, err := json.Marshal(domain.ScanRequest{Packages: []domain.Package{{
 				Name:      tt.packageName,
 				Version:   tt.version,
-				Ecosystem: domain.EcosystemNPM,
+				Ecosystem: ecosystem,
 			}}})
 			if err != nil {
 				t.Fatalf("marshal check request: %v", err)
@@ -2684,10 +2697,30 @@ func TestHandleCheckPackageCoordinateContract(t *testing.T) {
 				t.Fatalf("vulnerability queries = %+v, want one normalized coordinate", store.vulnerabilityQueries)
 			}
 			got := store.vulnerabilityQueries[0]
-			if got.Name != tt.wantName || got.Version != tt.wantVersion || got.Ecosystem != string(domain.EcosystemNPM) {
-				t.Fatalf("normalized coordinate = %+v, want npm/%q@%q", got, tt.wantName, tt.wantVersion)
+			if got.Name != tt.wantName || got.Version != tt.wantVersion || got.Ecosystem != string(ecosystem) {
+				t.Fatalf("normalized coordinate = %+v, want %s/%q@%q", got, ecosystem, tt.wantName, tt.wantVersion)
 			}
 		})
+	}
+}
+
+func TestPackagePathAndVersionQueryRetainUTF8ByteLimits(t *testing.T) {
+	t.Parallel()
+
+	exactName := strings.Repeat("é", checkcontract.MaxPackageNameUTF8Bytes/2)
+	if _, got, err := normalizePackagePath("npm", exactName); err != nil || got != exactName {
+		t.Fatalf("normalizePackagePath(exact byte limit) = %q, %v", got, err)
+	}
+	if _, _, err := normalizePackagePath("npm", exactName+"é"); err == nil {
+		t.Fatal("normalizePackagePath(over byte limit) error = nil")
+	}
+
+	exactVersion := strings.Repeat("é", checkcontract.MaxPackageVersionUTF8Bytes/2)
+	if got, err := normalizePackageVersionQuery(exactVersion); err != nil || got != exactVersion {
+		t.Fatalf("normalizePackageVersionQuery(exact byte limit) = %q, %v", got, err)
+	}
+	if _, err := normalizePackageVersionQuery(exactVersion + "é"); err == nil {
+		t.Fatal("normalizePackageVersionQuery(over byte limit) error = nil")
 	}
 }
 
@@ -2717,13 +2750,13 @@ func TestHandleCheck_InvalidPackageFields(t *testing.T) {
 		},
 		{
 			name: "name too long",
-			body: `{"packages":[{"ecosystem":"npm","name":"` + strings.Repeat("a", checkcontract.MaxPackageNameLength+1) + `","version":"1.0.0"}]}`,
-			want: fmt.Sprintf("packages[1].name exceeds %d characters", checkcontract.MaxPackageNameLength),
+			body: `{"packages":[{"ecosystem":"npm","name":"` + strings.Repeat("a", checkcontract.MaxScanPackageNameCodePoints+1) + `","version":"1.0.0"}]}`,
+			want: fmt.Sprintf("packages[1].name exceeds %d Unicode code points", checkcontract.MaxScanPackageNameCodePoints),
 		},
 		{
 			name: "version too long",
-			body: `{"packages":[{"ecosystem":"npm","name":"left-pad","version":"` + strings.Repeat("1", checkcontract.MaxPackageVersionLength+1) + `"}]}`,
-			want: fmt.Sprintf("packages[1].version exceeds %d characters", checkcontract.MaxPackageVersionLength),
+			body: `{"packages":[{"ecosystem":"npm","name":"left-pad","version":"` + strings.Repeat("1", checkcontract.MaxScanPackageVersionCodePoints+1) + `"}]}`,
+			want: fmt.Sprintf("packages[1].version exceeds %d Unicode code points", checkcontract.MaxScanPackageVersionCodePoints),
 		},
 		{
 			name: "invalid ecosystem",
@@ -3855,7 +3888,7 @@ func TestHandlePackageDetailRejectsTooLongVersionBeforeLookup(t *testing.T) {
 
 	store := &stubStore{vulnErr: errors.New("unexpected vulnerability lookup")}
 	h := newTestHandler(store)
-	version := strings.Repeat("1", checkcontract.MaxPackageVersionLength+1)
+	version := strings.Repeat("1", checkcontract.MaxPackageVersionUTF8Bytes+1)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/packages/npm/lodash?version="+version, nil)
 	req.SetPathValue("ecosystem", "npm")
@@ -5823,7 +5856,7 @@ func TestHandleRefreshRejectsLongPackageNameBeforeEnqueue(t *testing.T) {
 		SocketMode:    config.FeedModeSelf,
 		SocketAPIKey:  "socket-token",
 	})
-	name := strings.Repeat("a", checkcontract.MaxPackageNameLength+1)
+	name := strings.Repeat("a", checkcontract.MaxPackageNameUTF8Bytes+1)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/packages/npm/"+name+"/refresh", nil)
 	req.SetPathValue("ecosystem", "npm")
 	req.SetPathValue("rest", name+"/refresh")

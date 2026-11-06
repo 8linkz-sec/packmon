@@ -440,6 +440,11 @@ scripts, inline styles, or htmx inline evaluation.
 Production API behavior must enforce:
 
 - maximum package count per check request;
+- `ScanPackage` raw names and versions bounded to 512 and 256 Unicode code
+  points respectively before whitespace trimming or canonicalization;
+- a bounded `/api/v1/check` body budget that accounts for up to 12 JSON bytes
+  per accepted code point when a supplementary character is encoded as an
+  escaped UTF-16 surrogate pair;
 - global per-IP rate limiting;
 - login-specific rate limiting;
 - bounded request body parsing;
@@ -523,7 +528,10 @@ Demand-driven ReversingLabs scheduling requires a configured API key, applies
 per-request admission limits, deduplicates package coordinates, and supports
 operator-configured private namespace exclusions before package coordinates are
 sent to the external service. Coordinates are length-bounded before reputation
-cache writes and percent-encoded before PURL lookup. Non-finding ReversingLabs
+cache writes and percent-encoded before PURL lookup. The outbound PURL boundary
+retains separate 512-byte name and 256-byte version UTF-8 caps, so accepting a
+larger multibyte `ScanPackage` under the public Unicode-code-point contract does
+not expand optional provider egress. Non-finding ReversingLabs
 cache rows are pruned by retention policy so clean/unsupported/error rows do
 not become a permanent server-side package inventory.
 ReversingLabs rate-limit, capacity, and network failures degrade that source

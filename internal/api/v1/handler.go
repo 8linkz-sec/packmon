@@ -18,6 +18,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/8linkz-sec/packmon/internal/checkcontract"
 	"github.com/8linkz-sec/packmon/internal/config"
@@ -34,17 +35,17 @@ import (
 const (
 	// maxRequestBody is the standard JSON request cap retained for endpoints
 	// other than /check.
-	maxRequestBody int64 = checkcontract.MaxPackagesPerCheck*(checkcontract.MaxPackageNameLength+checkcontract.MaxPackageVersionLength+128) + 1024
+	maxRequestBody int64 = checkcontract.MaxPackagesPerCheck*(checkcontract.MaxPackageNameUTF8Bytes+checkcontract.MaxPackageVersionUTF8Bytes+128) + 1024
 
-	// A JSON string byte can require six encoded bytes (for example, "<" is
-	// emitted as \u003c). The per-package margin covers fully escaped field
-	// names, the longest accepted ecosystem value, and JSON punctuation. Keep
-	// /check bounded while allowing maximum-size package coordinates.
-	maxJSONEncodedByteLength              = 6
+	// A decoded Unicode code point can require twelve JSON bytes when represented
+	// as an escaped UTF-16 surrogate pair. The per-package margin covers fully
+	// escaped field names, the longest accepted ecosystem value, and JSON
+	// punctuation. Keep /check bounded while allowing maximum-size coordinates.
+	maxJSONEncodedBytesPerCodePoint       = 12
 	maxCheckPackageEncodedOverhead        = 256
 	maxCheckRequestEnvelopeOverhead       = 1024
 	maxCheckRequestBody             int64 = checkcontract.MaxPackagesPerCheck*
-		(maxJSONEncodedByteLength*(checkcontract.MaxPackageNameLength+checkcontract.MaxPackageVersionLength)+maxCheckPackageEncodedOverhead) +
+		(maxJSONEncodedBytesPerCodePoint*(checkcontract.MaxScanPackageNameCodePoints+checkcontract.MaxScanPackageVersionCodePoints)+maxCheckPackageEncodedOverhead) +
 		maxCheckRequestEnvelopeOverhead
 
 	// scanLogInsertTimeout bounds audit logging in the response critical path
@@ -643,23 +644,24 @@ func writeCheckResponseHeaders(w http.ResponseWriter, correlationID string, dura
 func validateCheckPackages(packages []domain.Package) error {
 	for i := range packages {
 		pkg := &packages[i]
+		position := i + 1
+		if utf8.RuneCountInString(pkg.Name) > checkcontract.MaxScanPackageNameCodePoints {
+			return fmt.Errorf("packages[%d].name exceeds %d Unicode code points", position, checkcontract.MaxScanPackageNameCodePoints)
+		}
+		if utf8.RuneCountInString(pkg.Version) > checkcontract.MaxScanPackageVersionCodePoints {
+			return fmt.Errorf("packages[%d].version exceeds %d Unicode code points", position, checkcontract.MaxScanPackageVersionCodePoints)
+		}
+
 		pkg.Name = strings.TrimSpace(pkg.Name)
 		pkg.Version = strings.TrimSpace(pkg.Version)
 		pkg.Ecosystem = domain.Ecosystem(strings.ToLower(strings.TrimSpace(string(pkg.Ecosystem))))
 		pkg.Name = packageid.NormalizeName(string(pkg.Ecosystem), pkg.Name)
 
-		position := i + 1
 		if pkg.Name == "" {
 			return fmt.Errorf("packages[%d].name is required", position)
 		}
-		if len(pkg.Name) > checkcontract.MaxPackageNameLength {
-			return fmt.Errorf("packages[%d].name exceeds %d characters", position, checkcontract.MaxPackageNameLength)
-		}
 		if pkg.Version == "" {
 			return fmt.Errorf("packages[%d].version is required", position)
-		}
-		if len(pkg.Version) > checkcontract.MaxPackageVersionLength {
-			return fmt.Errorf("packages[%d].version exceeds %d characters", position, checkcontract.MaxPackageVersionLength)
 		}
 		if len(strings.Fields(pkg.Version)) != 1 {
 			return fmt.Errorf("packages[%d].version is invalid", position)
@@ -1521,8 +1523,8 @@ func normalizePackagePath(ecosystem, name string) (string, string, error) {
 	if ecosystem == "" || name == "" {
 		return "", "", fmt.Errorf("ecosystem and package name are required")
 	}
-	if len(name) > checkcontract.MaxPackageNameLength {
-		return "", "", fmt.Errorf("package name exceeds %d characters", checkcontract.MaxPackageNameLength)
+	if len(name) > checkcontract.MaxPackageNameUTF8Bytes {
+		return "", "", fmt.Errorf("package name exceeds %d characters", checkcontract.MaxPackageNameUTF8Bytes)
 	}
 	if !domain.Ecosystem(ecosystem).Valid() {
 		return "", "", fmt.Errorf("unsupported ecosystem: %s", ecosystem)
@@ -1532,8 +1534,8 @@ func normalizePackagePath(ecosystem, name string) (string, string, error) {
 
 func normalizePackageVersionQuery(version string) (string, error) {
 	version = strings.TrimSpace(version)
-	if len(version) > checkcontract.MaxPackageVersionLength {
-		return "", fmt.Errorf("package version exceeds %d characters", checkcontract.MaxPackageVersionLength)
+	if len(version) > checkcontract.MaxPackageVersionUTF8Bytes {
+		return "", fmt.Errorf("package version exceeds %d characters", checkcontract.MaxPackageVersionUTF8Bytes)
 	}
 	return version, nil
 }

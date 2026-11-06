@@ -1232,11 +1232,21 @@ components:
           minLength: 1
           maxLength: 512
           pattern: '.*\S.*'
+          description: >-
+            Package name in the decoded raw request. The 512 limit counts
+            Unicode code points before trimming or ecosystem-specific
+            canonicalization. Surrounding whitespace counts toward the limit
+            and is trimmed only after the raw value passes validation.
         version:
           type: string
           minLength: 1
           maxLength: 256
           pattern: '^\s*\S+\s*$'
+          description: >-
+            Package version in the decoded raw request. The 256 limit counts
+            Unicode code points before trimming. Surrounding whitespace counts
+            toward the limit and is trimmed only after validation; the
+            normalized version must remain one non-whitespace token.
         ecosystem:
           $ref: "#/components/schemas/ScanEcosystem"
 

@@ -38,16 +38,16 @@ func TestBuildReversingLabsPURL(t *testing.T) {
 }
 
 func TestBuildReversingLabsPURLRejectsOverlongCoordinates(t *testing.T) {
-	if MaxPackageNameLength != checkcontract.MaxPackageNameLength {
-		t.Fatalf("MaxPackageNameLength = %d, want shared contract %d", MaxPackageNameLength, checkcontract.MaxPackageNameLength)
+	if MaxPackageNameLength != checkcontract.MaxPackageNameUTF8Bytes {
+		t.Fatalf("MaxPackageNameLength = %d, want shared byte contract %d", MaxPackageNameLength, checkcontract.MaxPackageNameUTF8Bytes)
 	}
-	if MaxPackageVersionLength != checkcontract.MaxPackageVersionLength {
-		t.Fatalf("MaxPackageVersionLength = %d, want shared contract %d", MaxPackageVersionLength, checkcontract.MaxPackageVersionLength)
+	if MaxPackageVersionLength != checkcontract.MaxPackageVersionUTF8Bytes {
+		t.Fatalf("MaxPackageVersionLength = %d, want shared byte contract %d", MaxPackageVersionLength, checkcontract.MaxPackageVersionUTF8Bytes)
 	}
-	if got, ok := BuildReversingLabsPURL("npm", strings.Repeat("a", checkcontract.MaxPackageNameLength+1), "1.0.0"); ok || got != "" {
+	if got, ok := BuildReversingLabsPURL("npm", strings.Repeat("a", checkcontract.MaxPackageNameUTF8Bytes+1), "1.0.0"); ok || got != "" {
 		t.Fatalf("overlong name = %q, %v", got, ok)
 	}
-	if got, ok := BuildReversingLabsPURL("npm", "left-pad", strings.Repeat("1", checkcontract.MaxPackageVersionLength+1)); ok || got != "" {
+	if got, ok := BuildReversingLabsPURL("npm", "left-pad", strings.Repeat("1", checkcontract.MaxPackageVersionUTF8Bytes+1)); ok || got != "" {
 		t.Fatalf("overlong version = %q, %v", got, ok)
 	}
 }
@@ -57,8 +57,8 @@ func TestCompatibilityPURLExactUnicodeByteLimits(t *testing.T) {
 	exactVersion := strings.Repeat("é", 127) + "ab"
 	encodedName := strings.Repeat("%C3%A9", 255) + "ab"
 	encodedVersion := strings.Repeat("%C3%A9", 127) + "ab"
-	if len(exactName) != checkcontract.MaxPackageNameLength || len(exactVersion) != checkcontract.MaxPackageVersionLength {
-		t.Fatalf("fixture byte lengths = name %d, version %d; want %d,%d", len(exactName), len(exactVersion), checkcontract.MaxPackageNameLength, checkcontract.MaxPackageVersionLength)
+	if len(exactName) != checkcontract.MaxPackageNameUTF8Bytes || len(exactVersion) != checkcontract.MaxPackageVersionUTF8Bytes {
+		t.Fatalf("fixture byte lengths = name %d, version %d; want %d,%d", len(exactName), len(exactVersion), checkcontract.MaxPackageNameUTF8Bytes, checkcontract.MaxPackageVersionUTF8Bytes)
 	}
 
 	tests := []struct {
