@@ -13,6 +13,11 @@ import (
 
 const n8nMetricsFixtureBody = "packmon_test_metric 1"
 
+type n8nMetricsRuntimeResources struct {
+	network    string
+	containers []string
+}
+
 func TestN8NWeeklyMetricsRuntime(t *testing.T) {
 	if _, err := n8nDockerCommand(30*time.Second, "version"); err != nil {
 		t.Fatalf("Docker prerequisite unavailable: %v", err)
@@ -21,11 +26,15 @@ func TestN8NWeeklyMetricsRuntime(t *testing.T) {
 	requireN8NDockerPrerequisites(t, contract)
 	fixtureRoot := createN8NRuntimeFixtures(t)
 	network := "packmon-n8n-metrics-" + randomN8NSuffix(t)
+	resources := &n8nMetricsRuntimeResources{network: network}
+	t.Cleanup(func() {
+		assertN8NMetricsResourcesAbsent(t, resources)
+	})
 	if output, err := n8nDockerCommand(30*time.Second, "network", "create", "--internal", network); err != nil {
 		t.Fatalf("create isolated n8n metrics network: %v: %s", err, n8nRuntimeDiagnostic(output, fixtureRoot))
 	}
 	t.Cleanup(func() {
-		_, _ = n8nDockerCommand(30*time.Second, "network", "rm", network)
+		removeN8NMetricsNetwork(t, network)
 	})
 	internal, err := n8nDockerCommand(30*time.Second, "network", "inspect", network, "--format", "{{.Internal}}")
 	if err != nil {
@@ -36,13 +45,13 @@ func TestN8NWeeklyMetricsRuntime(t *testing.T) {
 	}
 
 	endpoint := "packmon-metrics-" + randomN8NSuffix(t)
-	startN8NMetricsEndpoint(t, contract, network, endpoint)
+	startN8NMetricsEndpoint(t, contract, resources, endpoint)
 
 	t.Run("configured URL fetches metrics", func(t *testing.T) {
 		workflowID := "packmonMetricsSuccess" + randomN8NSuffix(t)
 		workflow := filepath.Join(fixtureRoot, "metrics-success", "workflow.json")
 		writeN8NWeeklyMetricsWorkflow(t, workflow, workflowID, "http://"+endpoint+":8080/metrics")
-		output, err := runN8NWeeklyMetricsScenario(t, contract, fixtureRoot, network, workflow, workflowID)
+		output, err := runN8NWeeklyMetricsScenario(t, contract, resources, fixtureRoot, workflow, workflowID)
 		if err != nil {
 			t.Fatalf("configured weekly metrics workflow failed: %v\n%s", err, n8nRuntimeDiagnostic(output, fixtureRoot))
 		}
@@ -55,7 +64,7 @@ func TestN8NWeeklyMetricsRuntime(t *testing.T) {
 		workflowID := "packmonMetricsMissing" + randomN8NSuffix(t)
 		workflow := filepath.Join(fixtureRoot, "metrics-missing", "workflow.json")
 		writeN8NWeeklyMetricsWorkflow(t, workflow, workflowID, "")
-		output, err := runN8NWeeklyMetricsScenario(t, contract, fixtureRoot, network, workflow, workflowID)
+		output, err := runN8NWeeklyMetricsScenario(t, contract, resources, fixtureRoot, workflow, workflowID)
 		if err == nil {
 			t.Fatalf("empty weekly metrics URL unexpectedly succeeded:\n%s", n8nRuntimeDiagnostic(output, fixtureRoot))
 		}
@@ -70,7 +79,7 @@ func TestN8NWeeklyMetricsRuntime(t *testing.T) {
 		workflow := filepath.Join(fixtureRoot, "metrics-unreachable", "workflow.json")
 		const unreachableHost = "packmon-metrics-unreachable"
 		writeN8NWeeklyMetricsWorkflow(t, workflow, workflowID, "http://"+unreachableHost+":8080/metrics")
-		output, err := runN8NWeeklyMetricsScenario(t, contract, fixtureRoot, network, workflow, workflowID)
+		output, err := runN8NWeeklyMetricsScenario(t, contract, resources, fixtureRoot, workflow, workflowID)
 		if err == nil {
 			t.Fatalf("unreachable weekly metrics URL unexpectedly succeeded:\n%s", n8nRuntimeDiagnostic(output, fixtureRoot))
 		}
@@ -81,14 +90,15 @@ func TestN8NWeeklyMetricsRuntime(t *testing.T) {
 	})
 }
 
-func startN8NMetricsEndpoint(t *testing.T, contract n8nDockerRuntimeContract, network, name string) {
+func startN8NMetricsEndpoint(t *testing.T, contract n8nDockerRuntimeContract, resources *n8nMetricsRuntimeResources, name string) {
 	t.Helper()
+	resources.containers = append(resources.containers, name)
 	t.Cleanup(func() {
-		_, _ = n8nDockerCommand(30*time.Second, "rm", "-f", name)
+		removeN8NMetricsContainer(t, name, false)
 	})
 	script := `const http=require('http');http.createServer((request,response)=>{if(request.url!=='/metrics'){response.statusCode=404;response.end('not found');return}response.setHeader('Content-Type','text/plain');response.end('` + n8nMetricsFixtureBody + `\n')}).listen(8080,'0.0.0.0',()=>console.log('READY'))`
 	args := []string{
-		"run", "-d", "--pull=never", "--network", network, "--name", name,
+		"run", "-d", "--pull=never", "--network", resources.network, "--name", name,
 		"--entrypoint=/usr/local/bin/node", contract.Image, "-e", script,
 	}
 	if output, err := n8nDockerCommand(30*time.Second, args...); err != nil {
@@ -146,15 +156,16 @@ func writeN8NWeeklyMetricsWorkflow(t *testing.T, path, workflowID, metricsURL st
 	writeN8NRuntimeWorkflow(t, path, workflow)
 }
 
-func runN8NWeeklyMetricsScenario(t *testing.T, contract n8nDockerRuntimeContract, fixtureRoot, network, workflow, workflowID string) (string, error) {
+func runN8NWeeklyMetricsScenario(t *testing.T, contract n8nDockerRuntimeContract, resources *n8nMetricsRuntimeResources, fixtureRoot, workflow, workflowID string) (string, error) {
 	t.Helper()
 	state := t.TempDir()
 	if err := os.Chmod(state, 0o777); err != nil { //nolint:gosec // disposable bind mount must be writable by the image's non-root UID
 		t.Fatalf("make isolated n8n metrics state writable by its container user: %v", err)
 	}
 	name := "packmon-n8n-metrics-run-" + randomN8NSuffix(t)
+	resources.containers = append(resources.containers, name)
 	t.Cleanup(func() {
-		_, _ = n8nDockerCommand(30*time.Second, "rm", "-f", name)
+		removeN8NMetricsContainer(t, name, true)
 	})
 
 	fixtureMount := "type=bind,source=" + filepath.Clean(fixtureRoot) + ",target=/fixtures,readonly"
@@ -163,7 +174,7 @@ func runN8NWeeklyMetricsScenario(t *testing.T, contract n8nDockerRuntimeContract
 	command := "n8n import:workflow --input=" + containerWorkflow + " && " +
 		"n8n execute --id=" + workflowID + " --rawOutput"
 	args := []string{
-		"run", "--rm", "--pull=never", "--network", network, "--name", name,
+		"run", "--rm", "--pull=never", "--network", resources.network, "--name", name,
 		"--mount", fixtureMount, "--mount", stateMount,
 		"--env", "N8N_DIAGNOSTICS_ENABLED=false",
 		"--env", "N8N_PERSONALIZATION_ENABLED=false",
@@ -174,6 +185,58 @@ func runN8NWeeklyMetricsScenario(t *testing.T, contract n8nDockerRuntimeContract
 	}
 	args = append(args, "--entrypoint=/bin/sh", contract.Image, "-ec", command)
 	return n8nDockerCommand(n8nCommandRuntimeTimeout, args...)
+}
+
+func removeN8NMetricsContainer(t *testing.T, name string, allowAlreadyRemoved bool) {
+	t.Helper()
+	output, err := n8nDockerCommand(30*time.Second, "rm", "-f", name)
+	if err == nil {
+		return
+	}
+	trimmed := strings.TrimSpace(output)
+	wantAlreadyRemoved := "Error response from daemon: No such container: " + name
+	if allowAlreadyRemoved && trimmed == wantAlreadyRemoved {
+		return
+	}
+	t.Errorf("remove n8n metrics container %q: %v: %s", name, err, n8nRuntimeDiagnostic(output, ""))
+}
+
+func removeN8NMetricsNetwork(t *testing.T, name string) {
+	t.Helper()
+	output, err := n8nDockerCommand(30*time.Second, "network", "rm", name)
+	if err != nil {
+		t.Errorf("remove n8n metrics network %q: %v: %s", name, err, n8nRuntimeDiagnostic(output, ""))
+	}
+}
+
+func assertN8NMetricsResourcesAbsent(t *testing.T, resources *n8nMetricsRuntimeResources) {
+	t.Helper()
+	containerOutput, err := n8nDockerCommand(30*time.Second, "ps", "-a", "--format", "{{.Names}}")
+	if err != nil {
+		t.Errorf("inventory Docker containers after n8n metrics cleanup: %v: %s", err, n8nRuntimeDiagnostic(containerOutput, ""))
+	} else {
+		present := n8nMetricsInventoryNames(containerOutput)
+		for _, name := range resources.containers {
+			if _, exists := present[name]; exists {
+				t.Errorf("n8n metrics container %q remains after cleanup", name)
+			}
+		}
+	}
+
+	networkOutput, err := n8nDockerCommand(30*time.Second, "network", "ls", "--format", "{{.Name}}")
+	if err != nil {
+		t.Errorf("inventory Docker networks after n8n metrics cleanup: %v: %s", err, n8nRuntimeDiagnostic(networkOutput, ""))
+	} else if _, exists := n8nMetricsInventoryNames(networkOutput)[resources.network]; exists {
+		t.Errorf("n8n metrics network %q remains after cleanup", resources.network)
+	}
+}
+
+func n8nMetricsInventoryNames(output string) map[string]struct{} {
+	names := make(map[string]struct{})
+	for _, name := range strings.Fields(output) {
+		names[name] = struct{}{}
+	}
+	return names
 }
 
 func assertN8NMetricsFailureHasNoEnvironmentDependency(t *testing.T, output, fixtureRoot string) {
