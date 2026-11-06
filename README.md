@@ -397,8 +397,8 @@ cd <path-to-cloned-packmon>
 .\scripts\check-requirements.ps1 -Profile server
 New-Item -ItemType Directory -Force .build | Out-Null
 go build -o .build\packmon.exe .\cmd\packmon
-docker compose run --rm init-secrets   # first run: generate .env with local secrets
-docker compose up --build              # migrate runs automatically before the server
+docker compose --profile bootstrap run --rm --no-deps init-secrets  # generate .env
+docker compose up --build              # separate invocation; migrate, then server
 ```
 
 Linux/macOS, or WSL on Windows:
@@ -479,7 +479,7 @@ bash scripts/check-requirements.sh --profile server
 Start the local stack:
 
 ```bash
-docker compose run --rm init-secrets
+docker compose --profile bootstrap run --rm --no-deps init-secrets
 docker compose up --build
 ```
 
@@ -495,7 +495,12 @@ blank one shared value is generated. If both are set to different values,
 (never their values), because a fresh bundled PostgreSQL would reject the
 server login. `docker compose up --build` then runs the database migration
 automatically before starting the server. The same two commands work
-identically on Windows, macOS, and Linux.
+identically on Windows, macOS, and Linux. They must remain separate Compose
+invocations: Compose reads `.env` and interpolates the project before it starts
+a container, so the bootstrap container cannot update values for that same
+invocation. The dedicated `bootstrap` profile keeps `init-secrets` out of plain
+`docker compose up`; skipping the first command does not make normal startup
+generate missing secrets.
 
 `init-secrets` writes into the bind-mounted checkout, so it runs as
 `${PACKMON_UID:-1000}:${PACKMON_GID:-1000}` instead of the image's `packmon`
@@ -1352,16 +1357,18 @@ rollback, key rotation, alerting, and incident response.
 ## Troubleshooting
 
 **`required variable ... is missing a value` / the server won't start**
-Run the two commands in order: `docker compose run --rm init-secrets` (creates
-`.env`), then `docker compose up`. Compose's `:?` guard fails the same way whether
-a secret is unset *or* empty.
+Run the two commands in order:
+`docker compose --profile bootstrap run --rm --no-deps init-secrets` (creates
+`.env`), then start a separate `docker compose up` invocation. Compose's `:?`
+guard fails the same way whether a secret is unset or empty.
 
 **All variables appear "missing" even though `.env` exists (Windows)**
 Symptom: every `${VAR}` reports missing. Cause: the `.env` was written as UTF-16 /
 with a BOM (PowerShell's default), which Docker Compose cannot parse. Check with
 `Format-Hex .env | Select-Object -First 1` -- a leading `FF FE` means UTF-16. Fix by
-regenerating it: delete `.env` and run `docker compose run --rm init-secrets`
-(writes UTF-8/LF from inside the container). Bind mounting to write `.env` requires
+regenerating it: delete `.env` and run
+`docker compose --profile bootstrap run --rm --no-deps init-secrets` (writes
+UTF-8/LF from inside the container). Bind mounting to write `.env` requires
 Docker Desktop file sharing for the drive.
 
 **`init-secrets` fails with `permission denied` (native Linux)**
@@ -1370,7 +1377,7 @@ The container user cannot write the checkout or read an existing `.env`. Run
 
 **`PACKMON_ENCRYPTION_KEY` / `PACKMON_ADMIN_AUDIT_HMAC_KEY` invalid**
 These must be base64-encoded 32-byte values. Regenerate with
-`docker compose run --rm init-secrets`.
+`docker compose --profile bootstrap run --rm --no-deps init-secrets`.
 
 **A scan reports no findings at all**
 Check whether the server's feeds have finished their first sync under

@@ -100,7 +100,7 @@ func ValidateProductionSecrets(getenv func(string) string) error {
 		return nil
 	}
 	return fmt.Errorf("configuration incomplete — %d secret(s) missing or invalid:\n%s\n"+
-		"Fix locally:  docker compose run --rm init-secrets\n"+
+		"Fix locally:  docker compose --profile bootstrap run --rm --no-deps init-secrets\n"+
 		"Details:      README → Troubleshooting",
 		len(problems), strings.Join(problems, "\n"))
 }

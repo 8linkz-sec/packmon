@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -234,7 +235,7 @@ func (h *composeRuntimeHarness) testBootstrapOwnerAndExplicitRun(t *testing.T) {
 	s.env("PACKMON_UID", strconv.Itoa(uid))
 	s.env("PACKMON_GID", strconv.Itoa(gid))
 	s.down()
-	s.run(2*time.Minute, "run", "--rm", "--no-deps", "init-secrets")
+	s.run(2*time.Minute, "--profile", "bootstrap", "run", "--rm", "--no-deps", "init-secrets")
 	info, err := os.Stat(envPath)
 	if err != nil {
 		t.Fatalf("stat generated environment file: %v", err)
@@ -258,9 +259,13 @@ func (h *composeRuntimeHarness) testBootstrapOwnerAndExplicitRun(t *testing.T) {
 
 	t.Run("F056-bugs-2_plain_model", func(t *testing.T) {
 		services := s.run(30*time.Second, "config", "--services")
-		for _, service := range strings.Fields(services) {
-			if service == "init-secrets" {
-				t.Skip("F056-bugs-2: the exact unprofiled init-secrets service participates in the plain default model")
+		fields := strings.Fields(services)
+		if slices.Contains(fields, "init-secrets") {
+			t.Fatalf("plain Compose model services = %q, must exclude init-secrets", fields)
+		}
+		for _, want := range []string{"postgres", "packmon-migrate", "packmon-server"} {
+			if !slices.Contains(fields, want) {
+				t.Fatalf("plain Compose model services = %q, missing %s", fields, want)
 			}
 		}
 	})

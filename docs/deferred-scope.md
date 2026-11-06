@@ -60,8 +60,10 @@ later.
 
 Current local scope:
 
-- `docker compose run --rm init-secrets` followed by `docker compose up` starts
-  PostgreSQL, runs migrations automatically, and starts `packmon-server`;
+- `docker compose --profile bootstrap run --rm --no-deps init-secrets`
+  followed by a separate `docker compose up` invocation starts PostgreSQL,
+  runs migrations automatically, and starts `packmon-server`; plain startup
+  excludes the bootstrap service;
 - the admin UI and API are reachable through `http://localhost:8080`;
 - metrics stay on container loopback (`127.0.0.1:9090` inside the container)
   and are read with

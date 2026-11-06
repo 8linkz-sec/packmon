@@ -60,8 +60,9 @@ func TestOverrideDefinesInitSecretsAndMigrateChain(t *testing.T) {
 	}
 	parsed := readComposeContract(t, "docker-compose.override.yml")
 	initSecrets := requireComposeService(t, parsed, "init-secrets")
-	if initSecrets.User != "${PACKMON_UID:-1000}:${PACKMON_GID:-1000}" || len(initSecrets.DependsOn) != 0 {
-		t.Fatalf("parsed init-secrets ownership/dependencies = user %q dependencies %#v", initSecrets.User, initSecrets.DependsOn)
+	if initSecrets.User != "${PACKMON_UID:-1000}:${PACKMON_GID:-1000}" || len(initSecrets.DependsOn) != 0 ||
+		!slices.Equal(initSecrets.Profiles, []string{"bootstrap"}) {
+		t.Fatalf("parsed init-secrets contract = user %q dependencies %#v profiles %#v", initSecrets.User, initSecrets.DependsOn, initSecrets.Profiles)
 	}
 	server := requireComposeService(t, parsed, "packmon-server")
 	assertDependencyCondition(t, server, "postgres", "service_healthy")
@@ -203,10 +204,19 @@ func TestDockerComposeBootstrapLifecycle(t *testing.T) {
 	if len(initSecrets.DependsOn) != 0 {
 		t.Fatalf("explicit init-secrets unexpectedly depends on application services: %#v", initSecrets.DependsOn)
 	}
+	if !slices.Equal(initSecrets.Profiles, []string{"bootstrap"}) {
+		t.Fatalf("resolved init-secrets profiles = %#v, want [bootstrap]", initSecrets.Profiles)
+	}
 
 	t.Run("plain_application_startup_excludes_bootstrap", func(t *testing.T) {
-		if len(initSecrets.Profiles) == 0 {
-			t.Skip("F056-bugs-2: normalized default Compose model includes the exact current unprofiled init-secrets service")
+		services := renderDefaultComposeServices(t, []string{"docker-compose.yml", "docker-compose.override.yml"}, validComposeEnvironment())
+		if slices.Contains(services, "init-secrets") {
+			t.Fatalf("plain Compose model services = %#v, must exclude init-secrets", services)
+		}
+		for _, want := range []string{"postgres", "packmon-migrate", "packmon-server"} {
+			if !slices.Contains(services, want) {
+				t.Fatalf("plain Compose model services = %#v, missing %s", services, want)
+			}
 		}
 	})
 }
@@ -283,7 +293,7 @@ func TestReadmeHasTroubleshootingSection(t *testing.T) {
 	readme := repoFile(t, "README.md")
 	for _, want := range []string{
 		"## Troubleshooting",
-		"docker compose run --rm init-secrets",
+		"docker compose --profile bootstrap run --rm --no-deps init-secrets",
 		"UTF-16",
 	} {
 		if !strings.Contains(readme, want) {
@@ -316,6 +326,33 @@ func renderComposeContract(t *testing.T, names []string, env map[string]string) 
 		files[i] = filepath.Join(stage, filepath.Base(name))
 	}
 	return runComposeConfig(t, stage, files, env, true)
+}
+
+func renderDefaultComposeServices(t *testing.T, names []string, env map[string]string) []string {
+	t.Helper()
+	stage := stageComposeFiles(t, names)
+	blankEnv := filepath.Join(stage, "interpolation.env")
+	if err := os.WriteFile(blankEnv, nil, 0o600); err != nil {
+		t.Fatalf("write blank Compose environment: %v", err)
+	}
+	args := []string{"compose", "--env-file", blankEnv}
+	for _, name := range names {
+		args = append(args, "-f", filepath.Join(stage, filepath.Base(name)))
+	}
+	args = append(args, "config", "--services")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "docker", args...) // #nosec G204 -- fixed executable and staged repository Compose files
+	cmd.Dir = stage
+	cmd.Env = sanitizedComposeEnvironment(env)
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("plain Compose service model timed out: %v", ctx.Err())
+	}
+	if err != nil {
+		t.Fatalf("resolve plain Compose service model: %v: %s", err, boundedComposeDiagnostic(string(output), env))
+	}
+	return strings.Fields(string(output))
 }
 
 func stageComposeFiles(t *testing.T, names []string) string {

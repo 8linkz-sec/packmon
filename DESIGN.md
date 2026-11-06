@@ -186,6 +186,15 @@ Packmon's maintained deployment surfaces are intentionally narrow:
   (049) is retry-safe: migrate still refuses the dirty database but names the
   retry path (clear its dirty marker, rerun migrate) instead of a backup
   restore. Dirty state is never cleared automatically.
+- The auto-loaded local Compose override exposes `init-secrets` only through
+  the dedicated `bootstrap` profile. Local secret initialization is a separate
+  one-shot phase:
+  `docker compose --profile bootstrap run --rm --no-deps init-secrets` writes
+  `.env`, then a new `docker compose up --build` invocation reloads that file
+  before starting PostgreSQL, migrations, and the server. Plain
+  `docker compose up` never includes the secret writer, and a bootstrap
+  container cannot change values Compose already interpolated for its current
+  invocation.
 - `docker-compose.server.yml` is the self-contained production Compose model
   (no base or override file). It keeps PostgreSQL and `packmon-server` on
   `restart: unless-stopped` while the one-shot `packmon-migrate` and

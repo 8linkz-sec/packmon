@@ -26,6 +26,23 @@ restart, or a host reboot. A container stopped explicitly with
 stays down, including across daemon restarts. The one-shot `packmon-migrate`
 and `packmon-backup` jobs never restart.
 
+## Local Compose bootstrap
+
+Initialize a fresh local checkout in two separate Compose invocations:
+
+```bash
+docker compose --profile bootstrap run --rm --no-deps init-secrets
+docker compose up --build
+```
+
+The first command is the only supported containerized secret-bootstrap phase.
+It writes or completes `.env` without starting application dependencies. On
+native Linux, prefer `bash scripts/init-secrets.sh` so the generated owner-only
+file stays owned by the checkout user. Compose resolves `.env` and interpolates
+the project before it starts a container, so the second command must be a new
+invocation. Plain `docker compose up` excludes the profiled `init-secrets`
+service and cannot bootstrap missing values as part of application startup.
+
 ## Transport security (read before first production start)
 
 In production mode (`PACKMON_SERVER_MODE=production`, the default) the server is

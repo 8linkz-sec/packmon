@@ -963,6 +963,13 @@ Server persistence uses PostgreSQL. Local CLI persistence uses SQLite.
 Requirements:
 
 - PostgreSQL credentials come from configuration/secrets;
+- the local Compose secret writer is an explicit, dependency-free one-shot
+  behind the dedicated `bootstrap` profile. Operators run
+  `docker compose --profile bootstrap run --rm --no-deps init-secrets`, then
+  start the application in a separate `docker compose up` invocation that can
+  load the generated `.env`. Plain startup never runs the secret writer, and
+  generated values are never treated as if they could change interpolation
+  that already happened for the current Compose invocation;
 - production PostgreSQL connections default to `sslmode=verify-full`; local
   development and the repository Compose example may explicitly set
   `PACKMON_DB_SSLMODE=disable` only for the bundled local database;

@@ -594,7 +594,7 @@ func TestInitSecretsRunsAsCheckoutOwner(t *testing.T) {
 		exactLine(`PACKMON_UID="${PACKMON_UID:-$default_uid}"`),
 		exactLine(`PACKMON_GID="${PACKMON_GID:-$default_gid}"`),
 		exactLine("export PACKMON_UID PACKMON_GID"),
-		exactLine("docker compose run --rm init-secrets"),
+		exactLine("docker compose --profile bootstrap run --rm --no-deps init-secrets"),
 	})
 
 	// Every runtime stage's effective (last) USER instruction stays packmon.
