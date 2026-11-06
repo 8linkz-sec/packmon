@@ -6,21 +6,21 @@ import (
 	"testing"
 )
 
-// TestBeginManualFeedSyncAfterAuditAdmitsOnlyOneSyncPerFeed covers the guard
+// TestBeginManualFeedSyncWithAuditAdmitsOnlyOneSyncPerFeed covers the guard
 // behind the admin "sync now" button. Two concurrent manual syncs of the same
 // feed would double the load on an upstream that is often rate-limited, and the
 // second run's status write would race the first.
-func TestBeginManualFeedSyncAfterAuditAdmitsOnlyOneSyncPerFeed(t *testing.T) {
+func TestBeginManualFeedSyncWithAuditAdmitsOnlyOneSyncPerFeed(t *testing.T) {
 	t.Parallel()
 
 	handler := &AdminHandler{}
 
-	started, err := handler.beginManualFeedSyncAfterAudit("osv", nil)
+	started, err := handler.beginManualFeedSyncWithAudit("osv", nil)
 	if err != nil || !started {
 		t.Fatalf("first sync = %v, %v; want it started", started, err)
 	}
 
-	started, err = handler.beginManualFeedSyncAfterAudit("osv", nil)
+	started, err = handler.beginManualFeedSyncWithAudit("osv", nil)
 	if err != nil {
 		t.Fatalf("second sync error = %v, want none", err)
 	}
@@ -29,13 +29,13 @@ func TestBeginManualFeedSyncAfterAuditAdmitsOnlyOneSyncPerFeed(t *testing.T) {
 	}
 
 	// A different feed is unaffected.
-	if started, err := handler.beginManualFeedSyncAfterAudit("ghsa", nil); err != nil || !started {
+	if started, err := handler.beginManualFeedSyncWithAudit("ghsa", nil); err != nil || !started {
 		t.Fatalf("second feed = %v, %v; want it started", started, err)
 	}
 
 	// After the run finishes the feed can be synced again.
 	handler.endManualFeedSync("osv")
-	if started, err := handler.beginManualFeedSyncAfterAudit("osv", nil); err != nil || !started {
+	if started, err := handler.beginManualFeedSyncWithAudit("osv", nil); err != nil || !started {
 		t.Fatalf("sync after release = %v, %v; want it started", started, err)
 	}
 }
@@ -59,17 +59,16 @@ func TestBeginManualFeedSyncNormalisesTheFeedName(t *testing.T) {
 	}
 }
 
-// TestBeginManualFeedSyncAfterAuditDoesNotClaimTheFeedOnAuditFailure is the
-// important ordering property. The audit entry is written before the feed is
-// claimed, so a failed audit must leave the feed free -- otherwise a sync that
-// never ran would block every later attempt until the process restarts.
-func TestBeginManualFeedSyncAfterAuditDoesNotClaimTheFeedOnAuditFailure(t *testing.T) {
+// TestBeginManualFeedSyncWithAuditReleasesTheFeedOnAuditFailure ensures a
+// failed admission audit rolls back the reservation instead of blocking every
+// later attempt until the process restarts.
+func TestBeginManualFeedSyncWithAuditReleasesTheFeedOnAuditFailure(t *testing.T) {
 	t.Parallel()
 
 	handler := &AdminHandler{}
 	auditErr := errors.New("audit log write failed")
 
-	started, err := handler.beginManualFeedSyncAfterAudit("osv", func() error { return auditErr })
+	started, err := handler.beginManualFeedSyncWithAudit("osv", func() error { return auditErr })
 	if !errors.Is(err, auditErr) {
 		t.Fatalf("error = %v, want the audit failure", err)
 	}
@@ -78,21 +77,21 @@ func TestBeginManualFeedSyncAfterAuditDoesNotClaimTheFeedOnAuditFailure(t *testi
 	}
 
 	// The feed must still be claimable.
-	if started, err := handler.beginManualFeedSyncAfterAudit("osv", nil); err != nil || !started {
+	if started, err := handler.beginManualFeedSyncWithAudit("osv", nil); err != nil || !started {
 		t.Fatalf("after a failed audit = %v, %v; want the feed still free", started, err)
 	}
 }
 
-// TestBeginManualFeedSyncAfterAuditRunsTheAuditBeforeClaiming pins the order
-// itself: the audit callback must observe the feed as not yet claimed, which is
-// what lets a failed audit abort cleanly.
-func TestBeginManualFeedSyncAfterAuditRunsTheAuditBeforeClaiming(t *testing.T) {
+// TestBeginManualFeedSyncWithAuditReservesBeforeAuditing pins the order itself:
+// the audit callback must observe the feed as already reserved so no concurrent
+// request can write another successful admission audit for the same worker.
+func TestBeginManualFeedSyncWithAuditReservesBeforeAuditing(t *testing.T) {
 	t.Parallel()
 
 	handler := &AdminHandler{}
 	var claimedDuringAudit bool
 
-	started, err := handler.beginManualFeedSyncAfterAudit("osv", func() error {
+	started, err := handler.beginManualFeedSyncWithAudit("osv", func() error {
 		handler.manualSyncMu.Lock()
 		_, claimedDuringAudit = handler.manualSyncs["osv"]
 		handler.manualSyncMu.Unlock()
@@ -101,15 +100,14 @@ func TestBeginManualFeedSyncAfterAuditRunsTheAuditBeforeClaiming(t *testing.T) {
 	if err != nil || !started {
 		t.Fatalf("sync = %v, %v; want it started", started, err)
 	}
-	if claimedDuringAudit {
-		t.Fatal("the feed was already claimed while its audit entry was being written")
+	if !claimedDuringAudit {
+		t.Fatal("the feed was not reserved while its audit entry was being written")
 	}
 }
 
-// TestBeginManualFeedSyncAfterAuditIsRaceFree drives the guard concurrently.
-// Exactly one caller may win, because the audit window between the two checks is
-// where a naive implementation would let a second sync slip through.
-func TestBeginManualFeedSyncAfterAuditIsRaceFree(t *testing.T) {
+// TestBeginManualFeedSyncWithAuditIsRaceFree drives the guard concurrently.
+// Exactly one caller may reserve the feed and therefore reach the audit.
+func TestBeginManualFeedSyncWithAuditIsRaceFree(t *testing.T) {
 	t.Parallel()
 
 	handler := &AdminHandler{}
@@ -125,7 +123,7 @@ func TestBeginManualFeedSyncAfterAuditIsRaceFree(t *testing.T) {
 		go func() {
 			defer done.Done()
 			start.Wait()
-			started, err := handler.beginManualFeedSyncAfterAudit("osv", func() error { return nil })
+			started, err := handler.beginManualFeedSyncWithAudit("osv", func() error { return nil })
 			if err == nil {
 				results[i] = started
 			}
@@ -145,6 +143,29 @@ func TestBeginManualFeedSyncAfterAuditIsRaceFree(t *testing.T) {
 	}
 }
 
+// TestBeginManualFeedSyncWithAuditReleasesTheFeedOnPanic preserves the old
+// availability behavior when an audit implementation panics: recovery remains
+// the HTTP middleware's job, but the in-memory reservation must not leak.
+func TestBeginManualFeedSyncWithAuditReleasesTheFeedOnPanic(t *testing.T) {
+	t.Parallel()
+
+	handler := &AdminHandler{}
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("audit panic was not propagated")
+			}
+		}()
+		_, _ = handler.beginManualFeedSyncWithAudit("osv", func() error {
+			panic("audit panic")
+		})
+	}()
+
+	if !handler.beginManualFeedSync("osv") {
+		t.Fatal("manual sync slot remained reserved after audit panic")
+	}
+}
+
 // TestManualFeedSyncHelpersToleratePartialState covers the nil paths. The
 // helpers run from request handlers and from a deferred release in a background
 // goroutine, so neither may panic on a half-built handler.
@@ -152,7 +173,7 @@ func TestManualFeedSyncHelpersToleratePartialState(t *testing.T) {
 	t.Parallel()
 
 	var nilHandler *AdminHandler
-	if started, err := nilHandler.beginManualFeedSyncAfterAudit("osv", nil); started || err != nil {
+	if started, err := nilHandler.beginManualFeedSyncWithAudit("osv", nil); started || err != nil {
 		t.Errorf("nil handler = %v, %v; want false, nil", started, err)
 	}
 	nilHandler.endManualFeedSync("osv")

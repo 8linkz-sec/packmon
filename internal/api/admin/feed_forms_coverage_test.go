@@ -205,75 +205,65 @@ func TestAdminFeedSyncFailureReleasesReservation(t *testing.T) {
 
 func TestConcurrentAdminFeedSyncAdmissionAndAudit(t *testing.T) {
 	h := &AdminHandler{}
-	ready := make(chan struct{}, 2)
-	release := make(chan struct{})
+	firstAuditStarted := make(chan struct{})
+	releaseFirstAudit := make(chan struct{})
 	var releaseOnce sync.Once
 	releaseAll := func() {
-		releaseOnce.Do(func() { close(release) })
+		releaseOnce.Do(func() { close(releaseFirstAudit) })
 	}
-	var auditsMu sync.Mutex
-	audits := 0
-	results := make(chan bool, 2)
+	type admissionResult struct {
+		started bool
+		err     error
+	}
+	firstResult := make(chan admissionResult, 1)
 	var workers sync.WaitGroup
-	workers.Add(2)
+	workers.Add(1)
 	defer func() {
 		releaseAll()
 		workers.Wait()
 	}()
-	for range 2 {
-		go func() {
-			defer workers.Done()
-			started, err := h.beginManualFeedSyncAfterAudit("osv", func() error {
-				auditsMu.Lock()
-				audits++
-				auditsMu.Unlock()
-				ready <- struct{}{}
-				<-release
-				return nil
-			})
-			if err != nil {
-				results <- false
-				return
-			}
-			results <- started
-		}()
+	go func() {
+		defer workers.Done()
+		started, err := h.beginManualFeedSyncWithAudit("osv", func() error {
+			close(firstAuditStarted)
+			<-releaseFirstAudit
+			return nil
+		})
+		firstResult <- admissionResult{started: started, err: err}
+	}()
+
+	select {
+	case <-firstAuditStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first admission audit did not reach the barrier")
 	}
-	deadline := time.NewTimer(time.Second)
-	defer deadline.Stop()
-	for range 2 {
-		select {
-		case <-ready:
-		case <-deadline.C:
-			t.Fatal("both concurrent audits did not reach the barrier")
-		}
+
+	secondAuditCalled := false
+	secondStarted, secondErr := h.beginManualFeedSyncWithAudit("osv", func() error {
+		secondAuditCalled = true
+		return nil
+	})
+	if secondErr != nil {
+		t.Fatalf("second admission error = %v, want nil", secondErr)
 	}
+	if secondStarted {
+		t.Fatal("second concurrent request reserved the same feed")
+	}
+	if secondAuditCalled {
+		t.Fatal("second concurrent request wrote an admission audit")
+	}
+
 	releaseAll()
-	started := 0
-	for range 2 {
-		select {
-		case result := <-results:
-			if result {
-				started++
-			}
-		case <-deadline.C:
-			t.Fatal("concurrent admission result was not returned")
+	select {
+	case result := <-firstResult:
+		if result.err != nil || !result.started {
+			t.Fatalf("first admission = %v, %v; want started", result.started, result.err)
 		}
+	case <-time.After(time.Second):
+		t.Fatal("first admission did not return after releasing its audit")
 	}
 	workers.Wait()
-	if started != 1 {
-		t.Fatalf("started syncs = %d, want 1", started)
-	}
-	auditsMu.Lock()
-	gotAudits := audits
-	auditsMu.Unlock()
-	if gotAudits != 2 {
-		t.Fatalf("successful audits = %d, want current behavior 2", gotAudits)
-	}
 	h.endManualFeedSync("osv")
-
-	t.Run("desired_single_audit_per_started_sync", func(t *testing.T) {
-		t.Skip("F064-bugs-2: concurrent admission currently records two successful audits for one started sync")
-	})
 }
 
 func TestAdminFeedSyncResponsesHandleRendererFailureAndRedirect(t *testing.T) {
