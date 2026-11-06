@@ -26,7 +26,7 @@ type n8nWorkflowNode struct {
 	ID               string          `json:"id"`
 	Name             string          `json:"name"`
 	Type             string          `json:"type"`
-	TypeVersion      int             `json:"typeVersion"`
+	TypeVersion      float64         `json:"typeVersion"`
 	Parameters       map[string]any  `json:"parameters"`
 	Credentials      json.RawMessage `json:"credentials"`
 	AlwaysOutputData json.RawMessage `json:"alwaysOutputData"`
@@ -481,11 +481,35 @@ func TestN8NWeeklyMaintenanceUsesConfiguredMetricsURL(t *testing.T) {
 	}
 
 	mutations := map[string]func(*n8nWorkflow){
-		"altered URL expression": func(mutated *n8nWorkflow) {
+		"environment URL expression": func(mutated *n8nWorkflow) {
 			for i := range mutated.Nodes {
 				if mutated.Nodes[i].Name == "Fetch Metrics" {
-					mutated.Nodes[i].Parameters["url"] = "prefix={{$env.PACKMON_METRICS_URL}}"
+					mutated.Nodes[i].Parameters["url"] = "={{$env.PACKMON_METRICS_URL}}"
 				}
+			}
+		},
+		"nonempty configured default": func(mutated *n8nWorkflow) {
+			assignment := n8nWeeklyMetricsAssignment(mutated)
+			assignment["value"] = "http://metrics.example.invalid/metrics"
+		},
+		"renamed configured field": func(mutated *n8nWorkflow) {
+			assignment := n8nWeeklyMetricsAssignment(mutated)
+			assignment["name"] = "url"
+		},
+		"non-string configured field": func(mutated *n8nWorkflow) {
+			assignment := n8nWeeklyMetricsAssignment(mutated)
+			assignment["type"] = "number"
+		},
+		"additional configured field": func(mutated *n8nWorkflow) {
+			for i := range mutated.Nodes {
+				if mutated.Nodes[i].Name != "Configure Metrics URL" {
+					continue
+				}
+				container := mutated.Nodes[i].Parameters["assignments"].(map[string]any)
+				assignments := container["assignments"].([]any)
+				container["assignments"] = append(assignments, map[string]any{
+					"id": "unexpected", "name": "unexpected", "value": "", "type": "string",
+				})
 			}
 		},
 		"nonempty request options": func(mutated *n8nWorkflow) {
@@ -496,10 +520,18 @@ func TestN8NWeeklyMaintenanceUsesConfiguredMetricsURL(t *testing.T) {
 			}
 		},
 		"additional HTTP destination": func(mutated *n8nWorkflow) {
-			extra := mutated.Nodes[1]
+			extra := mutated.Nodes[2]
 			extra.ID = "unexpected-request"
 			extra.Name = "Unexpected Request"
 			mutated.Nodes = append(mutated.Nodes, extra)
+		},
+		"missing configuration node": func(mutated *n8nWorkflow) {
+			mutated.Nodes = append(mutated.Nodes[:1], mutated.Nodes[2:]...)
+		},
+		"configuration node bypassed": func(mutated *n8nWorkflow) {
+			mutated.Connections = n8nConnections{
+				"Weekly Trigger": {"main": {{{Node: "Fetch Metrics", Type: "main", Index: 0}}}},
+			}
 		},
 	}
 	for name, mutate := range mutations {
@@ -520,8 +552,9 @@ func TestN8NWeeklyMaintenancePinsTopology(t *testing.T) {
 	assertN8NWorkflowEnvelope(t, workflow, "weekly maintenance", "Packmon Weekly Maintenance")
 	nodes := indexN8NNodes(t, workflow.Nodes, "weekly maintenance")
 	assertN8NNodeTuples(t, nodes, "weekly maintenance", map[string]n8nNodeTuple{
-		"Weekly Trigger": {ID: "weekly-trigger", Type: "n8n-nodes-base.scheduleTrigger", TypeVersion: 1},
-		"Fetch Metrics":  {ID: "fetch-metrics", Type: "n8n-nodes-base.httpRequest", TypeVersion: 4},
+		"Weekly Trigger":        {ID: "weekly-trigger", Type: "n8n-nodes-base.scheduleTrigger", TypeVersion: 1},
+		"Configure Metrics URL": {ID: "configure-metrics-url", Type: "n8n-nodes-base.set", TypeVersion: 3.5},
+		"Fetch Metrics":         {ID: "fetch-metrics", Type: "n8n-nodes-base.httpRequest", TypeVersion: 4},
 	})
 	assertN8NNodesHaveNoErrorOverrides(t, workflow.Nodes, "weekly maintenance")
 	assertN8NNodesHaveNoCredentials(t, workflow.Nodes, "weekly maintenance")
@@ -547,7 +580,8 @@ func TestN8NWeeklyMaintenancePinsTopology(t *testing.T) {
 	}
 
 	wantConnections := n8nConnections{
-		"Weekly Trigger": {"main": {{{Node: "Fetch Metrics", Type: "main", Index: 0}}}},
+		"Weekly Trigger":        {"main": {{{Node: "Configure Metrics URL", Type: "main", Index: 0}}}},
+		"Configure Metrics URL": {"main": {{{Node: "Fetch Metrics", Type: "main", Index: 0}}}},
 	}
 	if !reflect.DeepEqual(workflow.Connections, wantConnections) {
 		t.Fatalf("weekly maintenance connections = %#v, want exact map %#v", workflow.Connections, wantConnections)
@@ -557,7 +591,7 @@ func TestN8NWeeklyMaintenancePinsTopology(t *testing.T) {
 type n8nNodeTuple struct {
 	ID          string
 	Type        string
-	TypeVersion int
+	TypeVersion float64
 }
 
 func readN8NWorkflow(t *testing.T, name string) n8nWorkflow {
@@ -711,26 +745,75 @@ func assertN8NNodesHaveNoCredentials(t *testing.T, nodes []n8nWorkflowNode, labe
 }
 
 func validateN8NWeeklyMetricsRequest(workflow n8nWorkflow) error {
-	const httpRequestType = "n8n-nodes-base.httpRequest"
-	wantParameters := map[string]any{
-		"url":     "={{$env.PACKMON_METRICS_URL}}",
+	serialized, err := json.Marshal(workflow)
+	if err != nil {
+		return fmt.Errorf("marshal weekly workflow: %w", err)
+	}
+	for _, forbidden := range []string{"$env", "PACKMON_METRICS_URL"} {
+		if strings.Contains(string(serialized), forbidden) {
+			return fmt.Errorf("weekly workflow contains forbidden environment reference %q", forbidden)
+		}
+	}
+
+	wantConfigureParameters := map[string]any{
+		"assignments": map[string]any{
+			"assignments": []any{map[string]any{
+				"id": "metrics-url", "name": "metricsUrl", "value": "", "type": "string",
+			}},
+		},
 		"options": map[string]any{},
 	}
+	wantRequestParameters := map[string]any{
+		"url":     "={{$json.metricsUrl}}",
+		"options": map[string]any{},
+	}
+	wantConnections := n8nConnections{
+		"Weekly Trigger":        {"main": {{{Node: "Configure Metrics URL", Type: "main", Index: 0}}}},
+		"Configure Metrics URL": {"main": {{{Node: "Fetch Metrics", Type: "main", Index: 0}}}},
+	}
+
+	configureNodes := 0
 	httpNodes := 0
 	for _, node := range workflow.Nodes {
-		if node.Type != httpRequestType {
-			continue
+		switch node.Type {
+		case "n8n-nodes-base.set":
+			configureNodes++
+			if node.Name != "Configure Metrics URL" {
+				return fmt.Errorf("unexpected Edit Fields node %q", node.Name)
+			}
+			if !reflect.DeepEqual(node.Parameters, wantConfigureParameters) {
+				return fmt.Errorf("Configure Metrics URL parameters = %#v, want exact %#v", node.Parameters, wantConfigureParameters)
+			}
+		case "n8n-nodes-base.httpRequest":
+			httpNodes++
+			if node.Name != "Fetch Metrics" {
+				return fmt.Errorf("unexpected HTTP request node %q", node.Name)
+			}
+			if !reflect.DeepEqual(node.Parameters, wantRequestParameters) {
+				return fmt.Errorf("Fetch Metrics parameters = %#v, want exact %#v", node.Parameters, wantRequestParameters)
+			}
 		}
-		httpNodes++
-		if node.Name != "Fetch Metrics" {
-			return fmt.Errorf("unexpected HTTP request node %q", node.Name)
-		}
-		if !reflect.DeepEqual(node.Parameters, wantParameters) {
-			return fmt.Errorf("Fetch Metrics parameters = %#v, want exact %#v", node.Parameters, wantParameters)
-		}
+	}
+	if configureNodes != 1 {
+		return fmt.Errorf("Edit Fields node count = %d, want exactly 1", configureNodes)
 	}
 	if httpNodes != 1 {
 		return fmt.Errorf("HTTP request node count = %d, want exactly 1", httpNodes)
 	}
+	if !reflect.DeepEqual(workflow.Connections, wantConnections) {
+		return fmt.Errorf("weekly maintenance connections = %#v, want exact %#v", workflow.Connections, wantConnections)
+	}
 	return nil
+}
+
+func n8nWeeklyMetricsAssignment(workflow *n8nWorkflow) map[string]any {
+	for i := range workflow.Nodes {
+		if workflow.Nodes[i].Name != "Configure Metrics URL" {
+			continue
+		}
+		container := workflow.Nodes[i].Parameters["assignments"].(map[string]any)
+		assignments := container["assignments"].([]any)
+		return assignments[0].(map[string]any)
+	}
+	panic("Configure Metrics URL node not found in baseline workflow")
 }

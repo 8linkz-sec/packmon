@@ -41,18 +41,19 @@ file visible to its executor.
 
 ## Workflow variables
 
-The templates expect their required environment variables to be injected by
-n8n.
+The command templates expect their required environment variables to be
+injected by n8n. The weekly metrics template does not read process environment
+variables.
 
 Recommended variables:
 
 - `PACKMON_SERVER`
 - `PACKMON_API_KEY`
 - `PACKMON_SCAN_PATH`
-- `PACKMON_METRICS_URL` for the weekly maintenance metrics request
 - `PACKMON_FEED_IMPORT_SECRET` when a workflow calls Packmon feed import endpoints
 
-The templates pass Packmon credentials through process environment variables.
+The command templates pass Packmon credentials through process environment
+variables.
 Do not add `--api-key` to Execute Command nodes; command-line arguments can be
 visible to process listings and workflow execution logs.
 Keep command inputs as quoted runtime environment variables, not raw n8n
@@ -73,11 +74,14 @@ n8n credentials or an external secret store. The helper runs `packmon scan` with
 `PACKMON_API_KEY` from the process environment, so a missing server or API key
 fails the workflow instead of falling back to local mode.
 
-The weekly maintenance workflow reads metrics from `PACKMON_METRICS_URL`. Set it
-to an endpoint reachable from the n8n runtime, such as a node-local listener,
-sidecar, tunnel, or private service. Packmon metrics still bind to localhost by
-default; do not expose the metrics listener to untrusted networks just to satisfy
-this workflow.
+Before enabling the weekly maintenance workflow, edit its
+`Configure Metrics URL` node and replace the empty `metricsUrl` string with an
+endpoint reachable from the n8n runtime, such as a node-local listener, sidecar,
+tunnel, or private service. The HTTP Request node reads only that workflow-local
+field; it does not require environment access, and an empty value fails the
+execution. Keep `N8N_BLOCK_ENV_ACCESS_IN_NODE=true`. Packmon metrics still bind
+to localhost by default; do not expose the metrics listener to untrusted
+networks just to satisfy this workflow.
 
 The workflows are templates, not fully opinionated production flows. Adjust commands, credentials, and notification nodes for your environment.
 

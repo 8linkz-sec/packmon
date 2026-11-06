@@ -21,19 +21,50 @@
       }
     },
     {
+      "id": "configure-metrics-url",
+      "name": "Configure Metrics URL",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [540, 260],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "metrics-url",
+              "name": "metricsUrl",
+              "value": "",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
       "id": "fetch-metrics",
       "name": "Fetch Metrics",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4,
-      "position": [540, 260],
+      "position": [820, 260],
       "parameters": {
-        "url": "={{$env.PACKMON_METRICS_URL}}",
+        "url": "={{$json.metricsUrl}}",
         "options": {}
       }
     }
   ],
   "connections": {
     "Weekly Trigger": {
+      "main": [
+        [
+          {
+            "node": "Configure Metrics URL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Configure Metrics URL": {
       "main": [
         [
           {
