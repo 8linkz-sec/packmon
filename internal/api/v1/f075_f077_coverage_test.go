@@ -138,6 +138,102 @@ func f075VulnCheckEntriesBody(count int, invalidLast bool, status string) string
 	return body.String()
 }
 
+func TestF075DuplicateTopLevelMembersAreRejectedAcrossCapabilities(t *testing.T) {
+	epssEntry := `{"cve_id":"CVE-2026-7401","score":0.2,"percentile":0.8}`
+	vulnCheckEntry := `{"cve_id":"CVE-2026-7402","cvss_score":5.5}`
+	tests := []struct {
+		feed string
+		body map[string]string
+	}{
+		{
+			feed: "epss",
+			body: map[string]string{
+				"entries": `{"entries":[` + epssEntry + `],"status":{"last_sync_status":"success"},"entries":[{"cve_id":"CVE-2026-7499","score":0.4,"percentile":0.9}]}`,
+				"status":  `{"status":{"last_sync_status":"success"},"entries":[` + epssEntry + `],"status":{"last_sync_status":"error"}}`,
+			},
+		},
+		{
+			feed: "vulncheck",
+			body: map[string]string{
+				"entries": `{"entries":[` + vulnCheckEntry + `],"status":{"last_sync_status":"success"},"entries":[{"cve_id":"CVE-2026-7499","exploit_exists":true}]}`,
+				"status":  `{"status":{"last_sync_status":"success"},"entries":[` + vulnCheckEntry + `],"status":{"last_sync_status":"error"}}`,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		for duplicate, body := range tt.body {
+			for _, capability := range []string{"buffered", "streaming"} {
+				t.Run(tt.feed+"/duplicate_"+duplicate+"/"+capability, func(t *testing.T) {
+					var store FeedImportStore
+					switch {
+					case tt.feed == "epss" && capability == "buffered":
+						store = &stubStore{epssEntries: []db.EPSSEntry{{CVEID: "CVE-2026-7000", Score: 0.7, Percentile: 0.9}}}
+					case tt.feed == "epss":
+						store = &f075AtomicEPSSStore{snapshot: []db.EPSSEntry{{CVEID: "CVE-2026-7000", Score: 0.7, Percentile: 0.9}}}
+					case capability == "buffered":
+						store = &stubStore{vulnCheckEntries: []db.VulnCheckEntry{{CVEID: "CVE-2026-7001", ExploitExists: true}}}
+					default:
+						store = &atomicFailingVulnCheckStore{committed: []db.VulnCheckEntry{{CVEID: "CVE-2026-7001", ExploitExists: true}}}
+					}
+
+					h := newTestFeedImportHandler(store)
+					req := httptest.NewRequest(http.MethodPost, "/api/v1/feeds/"+tt.feed+"/import", strings.NewReader(body))
+					req.SetPathValue("feed", tt.feed)
+					req.Header.Set("Content-Type", "application/json")
+					rr := httptest.NewRecorder()
+
+					h.HandleImport(rr, req)
+
+					if rr.Code != http.StatusBadRequest {
+						t.Fatalf("status = %d, want 400: %s", rr.Code, rr.Body.String())
+					}
+					var response errorJSON
+					if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+						t.Fatalf("decode error response: %v", err)
+					}
+					if response.Error != "invalid JSON body: json body contains duplicate top-level field" {
+						t.Fatalf("error = %q, want controlled duplicate-field error", response.Error)
+					}
+
+					switch got := store.(type) {
+					case *stubStore:
+						if tt.feed == "epss" {
+							want := []db.EPSSEntry{{CVEID: "CVE-2026-7000", Score: 0.7, Percentile: 0.9}}
+							if !reflect.DeepEqual(got.epssEntries, want) || got.epssReplaceCalls != 0 {
+								t.Fatalf("buffered EPSS state = %+v calls=%d, want original state and no import", got.epssEntries, got.epssReplaceCalls)
+							}
+						} else {
+							want := []db.VulnCheckEntry{{CVEID: "CVE-2026-7001", ExploitExists: true}}
+							if !reflect.DeepEqual(got.vulnCheckEntries, want) {
+								t.Fatalf("buffered VulnCheck state = %+v, want original state", got.vulnCheckEntries)
+							}
+						}
+						if len(got.auditEntries) != 0 {
+							t.Fatalf("buffered audit entries = %d, want 0", len(got.auditEntries))
+						}
+						assertSingleRejectedFeedStatus(t, got.upsertedStatuses, tt.feed)
+					case *f075AtomicEPSSStore:
+						want := []db.EPSSEntry{{CVEID: "CVE-2026-7000", Score: 0.7, Percentile: 0.9}}
+						if !reflect.DeepEqual(got.snapshot, want) || !reflect.DeepEqual(got.batchSizes, []int{1}) || got.statusWrites != 0 || got.auditWrites != 0 {
+							t.Fatalf("streaming EPSS state = %+v batches=%v status=%d audit=%d, want original state, one staged batch, no commit", got.snapshot, got.batchSizes, got.statusWrites, got.auditWrites)
+						}
+						assertSingleRejectedFeedStatus(t, got.upsertedStatuses, tt.feed)
+					case *atomicFailingVulnCheckStore:
+						want := []db.VulnCheckEntry{{CVEID: "CVE-2026-7001", ExploitExists: true}}
+						if !reflect.DeepEqual(got.committed, want) || !reflect.DeepEqual(got.streamBatchSizes, []int{1}) || len(got.auditEntries) != 0 {
+							t.Fatalf("streaming VulnCheck state = %+v batches=%v audit=%d, want original state, one staged batch, no audit", got.committed, got.streamBatchSizes, len(got.auditEntries))
+						}
+						assertSingleRejectedFeedStatus(t, got.upsertedStatuses, tt.feed)
+					default:
+						t.Fatalf("unexpected test store type %T", store)
+					}
+				})
+			}
+		}
+	}
+}
+
 func TestF075StreamingMalformedBodiesPreserveState(t *testing.T) {
 	validEntry := `{"cve_id":"CVE-2026-7501","score":0.1,"percentile":0.2}`
 	oversized := io.MultiReader(

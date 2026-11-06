@@ -1508,7 +1508,19 @@ func TestOpenAPIDocumentsFeedImportSchemas(t *testing.T) {
 	}
 	requestBody := requireMap(t, post, "requestBody")
 	requestBodyDescription, _ := requestBody["description"].(string)
-	for _, want := range []string{"Compatibility", "concrete feed operation", "selector-specific request schema"} {
+	for _, want := range []string{
+		"Compatibility",
+		"concrete feed operation",
+		"selector-specific request schema",
+		"osv/ghsa",
+		"openssf/malicious/socket",
+		"vulncheck",
+		"cisakev",
+		"epss",
+		"repeated top-level entries",
+		"status member names",
+		"buffered and streamed",
+	} {
 		if !strings.Contains(requestBodyDescription, want) {
 			t.Fatalf("generic feed import request body description missing %q guidance: %q", want, requestBodyDescription)
 		}
@@ -1543,6 +1555,13 @@ func TestOpenAPIDocumentsFeedImportSchemas(t *testing.T) {
 	}
 
 	responses := requireMap(t, post, "responses")
+	badRequestResponse := requireMap(t, responses, "400")
+	badRequestDescription, _ := badRequestResponse["description"].(string)
+	for _, want := range []string{"Repeated top-level entries or status", "VulnCheck and EPSS", "rejected-import"} {
+		if !strings.Contains(badRequestDescription, want) {
+			t.Fatalf("feed import 400 description missing duplicate-member policy %q: %q", want, badRequestDescription)
+		}
+	}
 	okResponse := requireMap(t, responses, "200")
 	responseContent := requireMap(t, requireMap(t, okResponse, "content"), "application/json")
 	responseSchema := requireMap(t, responseContent, "schema")

@@ -1028,7 +1028,11 @@ imports (VulnCheck, CISA KEV, EPSS, including the streamed EPSS snapshot)
 follow the same rule: the complete feed status, after defaults derived from
 the imported entry count are applied, is validated before anything commits,
 and the enrichment change, status row, and audit row commit together. The
-optional status `last_sync_duration_ms` is bounded to 0 through 9223372036854
+EPSS and VulnCheck request objects reject repeated top-level `entries` or
+`status` members with `400` before commit. This policy is identical for stores
+that consume the import in bounded batches and stores that buffer the decoded
+entries before writing them. The optional status `last_sync_duration_ms` is
+bounded to 0 through 9223372036854
 ms, the largest value that converts to a Go `time.Duration`; larger values are
 rejected with `400`. Malicious feed imports cannot persist malformed
 exact-version JSON; invalid rows fail the transaction instead of becoming
