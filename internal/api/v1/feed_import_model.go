@@ -585,8 +585,11 @@ func (h *FeedImportHandler) importVulnCheck(ctx context.Context, feed string, re
 	if err != nil {
 		return nil, err
 	}
+	return h.importNormalizedVulnCheck(ctx, feed, entries, req.Status, audit)
+}
 
-	status, err := importStatusFromInput(feed, req.Status, len(entries), len(entries))
+func (h *FeedImportHandler) importNormalizedVulnCheck(ctx context.Context, feed string, entries []db.VulnCheckEntry, statusInput *feedSyncStatusInput, audit db.FeedImportAuditBuilder) (*importResponse, error) {
+	status, err := importStatusFromInput(feed, statusInput, len(entries), len(entries))
 	if err != nil {
 		return nil, err
 	}
@@ -610,12 +613,22 @@ type vulnCheckStreamImporter interface {
 func (h *FeedImportHandler) importVulnCheckRequest(ctx context.Context, feed string, r *http.Request, audit feedImportAuditFunc) (*importResponse, int, error) {
 	importer, ok := vulnCheckStreamImporterFor(h.store)
 	if !ok {
-		req := &vulnCheckImportRequest{}
-		if err := readJSONWithLimit(r, req, maxImportBody); err != nil {
-			return nil, 0, &feedImportDecodeError{bodyName: "vulncheck", err: err}
+		entries := make([]db.VulnCheckEntry, 0)
+		statusInput, entriesTotal, err := streamImportEntriesObject[vulnCheckImportEntry, db.VulnCheckEntry](
+			r,
+			"vulncheck",
+			vulnCheckImportStreamBatchSize,
+			normalizeVulnCheckImportEntriesBatch,
+			func(batch []db.VulnCheckEntry) error {
+				entries = append(entries, batch...)
+				return nil
+			},
+		)
+		if err != nil {
+			return nil, entriesTotal, err
 		}
-		resp, err := h.importVulnCheck(ctx, feed, req, audit)
-		return resp, len(req.Entries), err
+		resp, err := h.importNormalizedVulnCheck(ctx, feed, entries, statusInput, audit)
+		return resp, entriesTotal, err
 	}
 
 	entriesTotal := 0
@@ -702,8 +715,14 @@ func (h *FeedImportHandler) importEPSS(ctx context.Context, feed string, req *ep
 	if err != nil {
 		return nil, err
 	}
+	return h.importNormalizedEPSS(ctx, feed, entries, req.Status, audit)
+}
 
-	status, err := importStatusFromInput(feed, req.Status, len(entries), len(entries))
+func (h *FeedImportHandler) importNormalizedEPSS(ctx context.Context, feed string, entries []db.EPSSEntry, statusInput *feedSyncStatusInput, audit db.FeedImportAuditBuilder) (*importResponse, error) {
+	if len(entries) == 0 {
+		return nil, feedImportValidationErrorf("epss import entries must contain at least one score")
+	}
+	status, err := importStatusFromInput(feed, statusInput, len(entries), len(entries))
 	if err != nil {
 		return nil, err
 	}
@@ -723,12 +742,22 @@ func (h *FeedImportHandler) importEPSS(ctx context.Context, feed string, req *ep
 func (h *FeedImportHandler) importEPSSRequest(ctx context.Context, feed string, r *http.Request, audit feedImportAuditFunc) (*importResponse, int, error) {
 	importer, ok := epssStreamImporterFor(h.store)
 	if !ok {
-		req := &epssImportRequest{}
-		if err := readJSONWithLimit(r, req, maxImportBody); err != nil {
-			return nil, 0, &feedImportDecodeError{bodyName: "epss", err: err}
+		entries := make([]db.EPSSEntry, 0)
+		statusInput, entriesTotal, err := streamImportEntriesObject[epssImportEntry, db.EPSSEntry](
+			r,
+			"epss",
+			epssImportStreamBatchSize,
+			normalizeEPSSImportEntriesBatch,
+			func(batch []db.EPSSEntry) error {
+				entries = append(entries, batch...)
+				return nil
+			},
+		)
+		if err != nil {
+			return nil, entriesTotal, err
 		}
-		resp, err := h.importEPSS(ctx, feed, req, audit)
-		return resp, len(req.Entries), err
+		resp, err := h.importNormalizedEPSS(ctx, feed, entries, statusInput, audit)
+		return resp, entriesTotal, err
 	}
 
 	entriesTotal := 0
@@ -1198,6 +1227,7 @@ func streamImportEntriesObject[Raw, Normalized any](r *http.Request, bodyName st
 
 	var statusInput *feedSyncStatusInput
 	entriesTotal := 0
+	seenFields := make(map[string]struct{}, 2)
 	for dec.More() {
 		keyToken, err := dec.Token()
 		if err != nil {
@@ -1209,12 +1239,20 @@ func streamImportEntriesObject[Raw, Normalized any](r *http.Request, bodyName st
 		}
 		switch key {
 		case "entries":
+			if _, seen := seenFields[key]; seen {
+				return statusInput, entriesTotal, feedImportControlledDecodeError(bodyName, "json body contains duplicate top-level field")
+			}
+			seenFields[key] = struct{}{}
 			count, err := streamImportEntriesArray(dec, bodyName, entriesTotal, batchSize, normalize, emit)
 			entriesTotal += count
 			if err != nil {
 				return statusInput, entriesTotal, err
 			}
 		case "status":
+			if _, seen := seenFields[key]; seen {
+				return statusInput, entriesTotal, feedImportControlledDecodeError(bodyName, "json body contains duplicate top-level field")
+			}
+			seenFields[key] = struct{}{}
 			var input *feedSyncStatusInput
 			if err := dec.Decode(&input); err != nil {
 				return nil, entriesTotal, feedImportJSONDecodeError(bodyName, err)

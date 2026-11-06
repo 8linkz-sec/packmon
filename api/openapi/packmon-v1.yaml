@@ -71,7 +71,9 @@ x-packmon-feed-import-responses:
       Nothing from a rejected import commits and no `feed_import` audit row is
       written. A 400 caused by the request body (malformed JSON, failed
       validation, or values the store refuses) also records a `rejected` feed
-      status for the selected feed.
+      status for the selected feed. Repeated top-level entries or status member
+      names in VulnCheck and EPSS request objects are malformed JSON for this
+      endpoint and follow the rejected-import behavior.
     headers: *apiCommonResponseHeaders
     content:
       application/json:
@@ -382,6 +384,13 @@ paths:
         description: |
           Compatibility request body. Use the concrete feed operation for a
           selector-specific request schema and generated client type.
+          Feed-to-body mapping: osv/ghsa -> VulnerabilityImportRequest;
+          openssf/malicious/socket -> MaliciousImportRequest;
+          vulncheck -> VulnCheckImportRequest; cisakev -> CISAKEVImportRequest;
+          epss -> EPSSImportRequest.
+          VulnCheck and EPSS request objects reject repeated top-level entries
+          or status member names with 400 in both buffered and streamed storage
+          modes.
         content:
           application/json:
             schema:

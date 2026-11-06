@@ -208,8 +208,11 @@ and API-key identity when available.
 Rejected imports are security-relevant events. They must preserve bounded,
 log-safe diagnostics for the feed, rejection reason class, rejected-record
 count, correlation ID, trusted client IP, and authenticated API-key identity
-when available. The admin/web UI and feed-status API must surface rejected
-imports, the last successful usable import timestamp, and source-level finding
+when available. Ambiguous EPSS and VulnCheck request objects with repeated
+top-level `entries` or `status` members are rejected before commit, with the
+same result for buffered and streamed stores. The admin/web UI and feed-status
+API must surface rejected imports, the last successful usable import timestamp,
+and source-level finding
 or blocking spikes so operators can distinguish strict validation from hidden
 coverage loss in server/agent deployments. When the store rather than the
 request validation rejects imported values (a CHECK violation or one of an
