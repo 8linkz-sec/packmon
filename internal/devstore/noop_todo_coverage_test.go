@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -162,6 +163,22 @@ func TestNoopFeedRevisionFallbacksAndCopies(t *testing.T) {
 	}
 	if _, ok := expectedNoopSystemSettingsUpdatedAt(nil); ok {
 		t.Fatal("expectedNoopSystemSettingsUpdatedAt(nil) reported a revision")
+	}
+}
+
+func TestNoopUpsertMaliciousFindingRejectsNil(t *testing.T) {
+	t.Parallel()
+
+	store := newNoopStore()
+	err := store.UpsertMaliciousFinding(context.Background(), nil)
+	if err == nil {
+		t.Fatal("UpsertMaliciousFinding(nil) error = nil")
+	}
+	if message := err.Error(); !strings.Contains(message, "malicious finding") || !strings.Contains(message, "nil") {
+		t.Fatalf("UpsertMaliciousFinding(nil) error = %q, want nil malicious-finding context", message)
+	}
+	if len(store.malicious) != 0 || len(store.maliciousDel) != 0 || store.nextManualID != 0 {
+		t.Fatalf("UpsertMaliciousFinding(nil) mutated store: malicious=%d tombstones=%d nextManualID=%d", len(store.malicious), len(store.maliciousDel), store.nextManualID)
 	}
 }
 
