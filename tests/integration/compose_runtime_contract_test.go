@@ -362,53 +362,80 @@ func (h *composeRuntimeHarness) testMigrationOrdersServerStartup(t *testing.T) {
 }
 
 func (h *composeRuntimeHarness) testProductionLifecycleProxyAndPersistence(t *testing.T) {
-	s := h.newScenario(t, []string{"docker-compose.server.yml"}, h.commonOverlay(false, "127.0.0.1::8080"))
-	s.down()
-	s.startMigratedServer()
-	port := s.publishedPort("packmon-server", "8080")
-	readyURL := "http://127.0.0.1:" + port + "/readyz"
-	s.waitHTTP(readyURL, 2*time.Minute)
+	t.Run("proxy_and_crash_recovery", func(t *testing.T) {
+		s := h.newScenario(t, []string{"docker-compose.server.yml"}, h.commonOverlay(false, "127.0.0.1::8080"))
+		s.down()
+		s.startMigratedServer()
+		port := s.publishedPort("packmon-server", "8080")
+		readyURL := "http://127.0.0.1:" + port + "/readyz"
+		s.waitHTTP(readyURL, 2*time.Minute)
 
-	target, _ := url.Parse("http://127.0.0.1:" + port)
-	proxy := httptest.NewTLSServer(httputil.NewSingleHostReverseProxy(target))
-	defer proxy.Close()
-	proxyClient := proxy.Client()
-	proxyClient.Timeout = 5 * time.Second
-	response, err := proxyClient.Get(proxy.URL + "/version")
-	if err != nil {
-		t.Fatalf("HTTPS request through test-owned TLS reverse proxy: %v", err)
-	}
-	_, _ = io.Copy(io.Discard, response.Body)
-	_ = response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("TLS reverse proxy /version status = %d, want 200", response.StatusCode)
-	}
+		target, _ := url.Parse("http://127.0.0.1:" + port)
+		proxy := httptest.NewTLSServer(httputil.NewSingleHostReverseProxy(target))
+		defer proxy.Close()
+		proxyClient := proxy.Client()
+		proxyClient.Timeout = 5 * time.Second
+		response, err := proxyClient.Get(proxy.URL + "/version")
+		if err != nil {
+			t.Fatalf("HTTPS request through test-owned TLS reverse proxy: %v", err)
+		}
+		_, _ = io.Copy(io.Discard, response.Body)
+		_ = response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("TLS reverse proxy /version status = %d, want 200", response.StatusCode)
+		}
 
-	containerID := strings.TrimSpace(s.run(30*time.Second, "ps", "-q", "packmon-server"))
-	if containerID == "" {
-		t.Fatal("server container ID is empty")
-	}
-	// Kill PID 1 from inside the container so Docker observes a crash. A
-	// `docker stop`/`docker kill` API call is an operator stop and can suppress
-	// an unless-stopped restart instead of exercising the restart policy.
-	_, _, _ = s.command(30*time.Second, "exec", "-T", "packmon-server", "/bin/busybox", "kill", "-9", "1")
-	s.waitHTTP(readyURL, 2*time.Minute)
-	restarts := strings.TrimSpace(string(h.mustDockerOutput(t, 30*time.Second, "inspect", "--format", "{{.RestartCount}}", containerID)))
-	if restarts == "0" || restarts == "" {
-		t.Fatalf("unless-stopped policy did not record a restart: %q", restarts)
-	}
+		containerID := s.serviceContainerID("packmon-server")
+		// Kill PID 1 from inside the container so Docker observes a crash. A
+		// `docker stop`/`docker kill` API call is an operator stop and can suppress
+		// an unless-stopped restart instead of exercising the restart policy.
+		_, _, _ = s.command(30*time.Second, "exec", "-T", "packmon-server", "/bin/busybox", "kill", "-9", "1")
+		s.waitHTTP(readyURL, 2*time.Minute)
+		restarts := strings.TrimSpace(string(h.mustDockerOutput(t, 30*time.Second, "inspect", "--format", "{{.RestartCount}}", containerID)))
+		if restarts == "0" || restarts == "" {
+			t.Fatalf("unless-stopped policy did not record a restart: %q", restarts)
+		}
+		s.assertNoProviderActivity()
+	})
 
-	s.run(30*time.Second, "exec", "-T", "postgres", "psql", "-U", "packmon", "-d", "packmon", "-v", "ON_ERROR_STOP=1", "-c", "CREATE TABLE compose_contract_sentinel(value text PRIMARY KEY); INSERT INTO compose_contract_sentinel VALUES ('persisted');")
-	s.run(30*time.Second, "exec", "-T", "packmon-server", "/bin/sh", "-ec", "printf persisted > /data/feeds/compose-contract-marker")
-	s.downKeepVolumes()
-	s.startMigratedServer()
-	if output := s.run(30*time.Second, "exec", "-T", "postgres", "psql", "-At", "-U", "packmon", "-d", "packmon", "-c", "SELECT value FROM compose_contract_sentinel"); strings.TrimSpace(output) != "persisted" {
-		t.Fatalf("database sentinel after container recreation = %q", output)
-	}
-	if output := s.run(30*time.Second, "exec", "-T", "packmon-server", "/bin/sh", "-ec", "cat /data/feeds/compose-contract-marker"); strings.TrimSpace(output) != "persisted" {
-		t.Fatalf("feed marker after container recreation = %q", output)
-	}
-	s.assertNoProviderActivity()
+	t.Run("persistence_across_container_replacement", func(t *testing.T) {
+		s := h.newScenario(t, []string{"docker-compose.server.yml"}, h.commonOverlay(false, "127.0.0.1::8080"))
+		s.down()
+		s.startMigratedServer()
+		port := s.publishedPort("packmon-server", "8080")
+		s.waitHTTP("http://127.0.0.1:"+port+"/readyz", 2*time.Minute)
+
+		oldPostgresID := s.serviceContainerID("postgres")
+		oldServerID := s.serviceContainerID("packmon-server")
+		postgresVolume := s.namedVolumeAt("postgres", "/var/lib/postgresql/data")
+		feedVolume := s.namedVolumeAt("packmon-server", "/data/feeds")
+
+		s.run(30*time.Second, "exec", "-T", "postgres", "psql", "-U", "packmon", "-d", "packmon", "-v", "ON_ERROR_STOP=1", "-c", "CREATE TABLE compose_contract_sentinel(value text PRIMARY KEY); INSERT INTO compose_contract_sentinel VALUES ('persisted');")
+		s.run(30*time.Second, "exec", "-T", "packmon-server", "/bin/sh", "-ec", "printf persisted > /data/feeds/compose-contract-marker")
+		s.downKeepVolumes()
+		s.assertContainerRemoved(oldPostgresID)
+		s.assertContainerRemoved(oldServerID)
+
+		s.startMigratedServer()
+		newPostgresID := s.serviceContainerID("postgres")
+		newServerID := s.serviceContainerID("packmon-server")
+		if newPostgresID == oldPostgresID || newServerID == oldServerID {
+			t.Fatalf("Compose did not replace both service containers: postgres replaced=%t server replaced=%t", newPostgresID != oldPostgresID, newServerID != oldServerID)
+		}
+		if got := s.namedVolumeAt("postgres", "/var/lib/postgresql/data"); got != postgresVolume {
+			t.Fatalf("PostgreSQL named volume changed across container replacement: %q != %q", got, postgresVolume)
+		}
+		if got := s.namedVolumeAt("packmon-server", "/data/feeds"); got != feedVolume {
+			t.Fatalf("feed named volume changed across container replacement: %q != %q", got, feedVolume)
+		}
+		if output := s.run(30*time.Second, "exec", "-T", "postgres", "psql", "-At", "-U", "packmon", "-d", "packmon", "-c", "SELECT value FROM compose_contract_sentinel"); strings.TrimSpace(output) != "persisted" {
+			t.Fatalf("database sentinel after container replacement = %q", output)
+		}
+		if output := s.run(30*time.Second, "exec", "-T", "packmon-server", "/bin/sh", "-ec", "cat /data/feeds/compose-contract-marker"); strings.TrimSpace(output) != "persisted" {
+			t.Fatalf("feed marker after container replacement = %q", output)
+		}
+		s.assertNoProviderActivity()
+	})
 }
 
 func (h *composeRuntimeHarness) testMetricsLoopbackAccess(t *testing.T) {
@@ -716,9 +743,9 @@ func (s *composeRuntimeScenario) runAllowFailure(timeout time.Duration, args ...
 
 func (s *composeRuntimeScenario) down() {
 	s.t.Helper()
-	ctx, cancel, _, ok := s.h.cleanupContext(time.Minute)
+	ctx, cancel, effectiveTimeout, ok := s.h.cleanupContext(time.Minute)
 	if !ok {
-		s.t.Error("Compose runtime cleanup budget exhausted before project cleanup")
+		s.t.Errorf("Compose runtime cleanup budget exhausted before removing project %s", s.project)
 		return
 	}
 	defer cancel()
@@ -727,17 +754,85 @@ func (s *composeRuntimeScenario) down() {
 	cmd.Env = runtimeDockerEnvironment(nil)
 	output, err := cmd.CombinedOutput()
 	if ctx.Err() != nil {
-		s.t.Errorf("clean up Compose runtime project within the cleanup budget: %v: %s", ctx.Err(), s.diagnostic(string(output)))
+		s.t.Errorf("remove test-owned Compose project timed out after bounded %s: %v: %s", effectiveTimeout.Round(time.Second), ctx.Err(), s.diagnostic(string(output)))
 		return
 	}
 	if err != nil {
-		s.t.Errorf("clean up Compose runtime project: %v: %s", err, s.diagnostic(string(output)))
+		s.t.Errorf("remove test-owned Compose project: %v: %s", err, s.diagnostic(string(output)))
+		return
 	}
+	s.assertProjectRemoved()
 }
 
 func (s *composeRuntimeScenario) downKeepVolumes() {
 	s.t.Helper()
 	s.run(time.Minute, "down", "--remove-orphans")
+}
+
+func (s *composeRuntimeScenario) serviceContainerID(service string) string {
+	s.t.Helper()
+	id := strings.TrimSpace(s.run(30*time.Second, "ps", "-q", service))
+	if id == "" {
+		s.t.Fatalf("%s container ID is empty", service)
+	}
+	return id
+}
+
+func (s *composeRuntimeScenario) namedVolumeAt(service, destination string) string {
+	s.t.Helper()
+	containerID := s.serviceContainerID(service)
+	format := fmt.Sprintf("{{range .Mounts}}{{if eq .Destination %q}}{{.Name}}{{end}}{{end}}", destination)
+	name := strings.TrimSpace(string(s.h.mustDockerOutput(s.t, 30*time.Second, "inspect", "--format", format, containerID)))
+	if name == "" {
+		s.t.Fatalf("%s has no named volume mounted at %s", service, destination)
+	}
+	return name
+}
+
+func (s *composeRuntimeScenario) assertContainerRemoved(containerID string) {
+	s.t.Helper()
+	output, err := s.h.dockerCommandOutput(30*time.Second, nil, "inspect", containerID)
+	if err == nil {
+		s.t.Fatalf("container %s still exists after Compose replacement boundary", containerID[:min(12, len(containerID))])
+	}
+	if len(output) > 0 && !strings.Contains(strings.ToLower(string(output)), "no such") {
+		s.t.Fatalf("inspect removed container failed for an unexpected reason: %s", s.diagnostic(string(output)))
+	}
+}
+
+func (s *composeRuntimeScenario) assertProjectRemoved() {
+	s.t.Helper()
+	checks := []struct {
+		name string
+		args []string
+	}{
+		{name: "containers", args: []string{"ps", "--all", "--quiet", "--filter", "label=com.docker.compose.project=" + s.project}},
+		{name: "volumes", args: []string{"volume", "ls", "--quiet", "--filter", "label=com.docker.compose.project=" + s.project}},
+		{name: "networks", args: []string{"network", "ls", "--quiet", "--filter", "label=com.docker.compose.project=" + s.project}},
+	}
+	for _, check := range checks {
+		ctx, cancel, effectiveTimeout, ok := s.h.cleanupContext(20 * time.Second)
+		if !ok {
+			s.t.Errorf("Compose runtime cleanup budget exhausted before inventorying project %s", check.name)
+			continue
+		}
+		cmd := exec.CommandContext(ctx, "docker", check.args...) // #nosec G204 -- exact test-owned project label and fixed inventory arguments
+		cmd.Env = runtimeDockerEnvironment(nil)
+		output, err := cmd.CombinedOutput()
+		ctxErr := ctx.Err()
+		cancel()
+		if ctxErr != nil {
+			s.t.Errorf("inventory test-owned Compose project %s timed out after bounded %s: %s", check.name, effectiveTimeout.Round(time.Second), s.diagnostic(string(output)))
+			continue
+		}
+		if err != nil {
+			s.t.Errorf("inventory test-owned Compose project %s: %v: %s", check.name, err, s.diagnostic(string(output)))
+			continue
+		}
+		if strings.TrimSpace(string(output)) != "" {
+			s.t.Errorf("test-owned Compose project left %s behind: %s", check.name, s.diagnostic(string(output)))
+		}
+	}
 }
 
 func (s *composeRuntimeScenario) waitHealthy(service string, timeout time.Duration) {
