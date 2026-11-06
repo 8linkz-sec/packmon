@@ -35,6 +35,10 @@
   previously discarded the packages it had parsed and returned an empty,
   successful inventory; it now returns a generic parse error and no partial
   package rows.
+- List-all HTML reports no longer advertise a GitHub Actions vulnerability as
+  having an update path merely because an unknown installed version differs
+  from a known latest tag. Explicit update results and advisory fixed versions
+  still render as available updates.
 - Clean server and CLI container builds work again with Alpine 3.24 after
   updating their exact `tzdata` package pin from `2026e-r0`, which the current
   repository no longer provides, to `2026f-r0`. The digest-pinned Alpine base

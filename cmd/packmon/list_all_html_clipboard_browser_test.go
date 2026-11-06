@@ -140,6 +140,7 @@ func TestListAllHTMLKnownLatestDiffersRejectsUnknownOrMissingVersions(t *testing
 		{name: "unknown latest ignoring trim and case", row: listAllRow{Installed: "1.0.0", Latest: " UnKnOwN "}},
 		{name: "blank installed", row: listAllRow{Latest: "2.0.0"}},
 		{name: "missing installed marker", row: listAllRow{Installed: " - ", Latest: "2.0.0"}},
+		{name: "unknown installed ignoring trim and case", row: listAllRow{Installed: " UnKnOwN ", Latest: "2.0.0"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -147,6 +148,44 @@ func TestListAllHTMLKnownLatestDiffersRejectsUnknownOrMissingVersions(t *testing
 				t.Fatalf("listAllHTMLKnownLatestDiffers(%+v) = true, want false", tt.row)
 			}
 		})
+	}
+}
+
+func TestWriteListAllHTMLUnknownInstalledGitHubActionStaysVulnerable(t *testing.T) {
+	t.Parallel()
+
+	row := listAllRow{
+		Name:      "actions/checkout",
+		Installed: " UnKnOwN ",
+		Latest:    "v4.2.2",
+		Update:    "-",
+		Ecosystem: string(domain.EcosystemGitHubActions),
+		Source:    "workflow",
+		Scope:     "ci",
+		Relation:  "workflow",
+	}
+	result := &domain.ScanResult{Mode: "local", Findings: []domain.Finding{{
+		Name:       row.Name,
+		Version:    row.Installed,
+		Ecosystem:  domain.EcosystemGitHubActions,
+		Type:       domain.FindingTypeVulnerability,
+		Severity:   domain.SeverityHigh,
+		AdvisoryID: "GHSA-unknown-installed",
+	}}}
+	path := filepath.Join(t.TempDir(), "unknown-installed-action.html")
+	if err := writeListAllHTML(path, "Unknown installed action", result, listAllPackageReport{Rows: []listAllRow{row}}); err != nil {
+		t.Fatalf("writeListAllHTML() error = %v", err)
+	}
+	raw, err := os.ReadFile(path) // #nosec G304 -- test reads its generated report.
+	if err != nil {
+		t.Fatalf("read generated report: %v", err)
+	}
+	report := string(raw)
+	if !strings.Contains(report, `<td class="package-status">Vulnerable</td>`) {
+		t.Fatalf("generated report does not render the unknown-installed action as Vulnerable")
+	}
+	if strings.Contains(report, `id="available-updates"`) || strings.Contains(report, `>Update available</td>`) {
+		t.Fatalf("generated report advertises an update for an unknown installed action version")
 	}
 }
 
