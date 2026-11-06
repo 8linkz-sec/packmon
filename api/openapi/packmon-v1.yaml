@@ -73,7 +73,8 @@ x-packmon-feed-import-responses:
       validation, or values the store refuses) also records a `rejected` feed
       status for the selected feed. Repeated top-level entries or status member
       names in VulnCheck and EPSS request objects are malformed JSON for this
-      endpoint and follow the rejected-import behavior.
+      endpoint and follow the rejected-import behavior. A top-level `null` or
+      an `entries: null` member is likewise malformed for VulnCheck.
     headers: *apiCommonResponseHeaders
     content:
       application/json:
@@ -527,7 +528,10 @@ paths:
   /api/v1/feeds/vulncheck/import:
     post:
       summary: Import VulnCheck enrichment data
-      description: Accepts VulnCheck enrichment entries and optional status-only updates.
+      description: |
+        Accepts VulnCheck enrichment entries and optional status-only updates.
+        The entries member may be omitted or an empty array, but neither the
+        request object nor the entries member may be null.
       operationId: importVulnCheckFeed
       tags: [feeds]
       parameters: *feedImportCommonParameters

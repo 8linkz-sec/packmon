@@ -1562,7 +1562,7 @@ func TestOpenAPIDocumentsFeedImportSchemas(t *testing.T) {
 	responses := requireMap(t, post, "responses")
 	badRequestResponse := requireMap(t, responses, "400")
 	badRequestDescription, _ := badRequestResponse["description"].(string)
-	for _, want := range []string{"Repeated top-level entries or status", "VulnCheck and EPSS", "rejected-import"} {
+	for _, want := range []string{"Repeated top-level entries or status", "VulnCheck and EPSS", "rejected-import", "top-level `null`", "`entries: null`", "malformed for VulnCheck"} {
 		if !strings.Contains(badRequestDescription, want) {
 			t.Fatalf("feed import 400 description missing duplicate-member policy %q: %q", want, badRequestDescription)
 		}
@@ -1832,6 +1832,29 @@ func TestOpenAPIFeedImportStatusOnlySchemaMatrix(t *testing.T) {
 		if _, exists := genericSchema[composition]; exists {
 			t.Fatalf("generic feed import request retains ambiguous %s: %#v", composition, genericSchema[composition])
 		}
+	}
+}
+
+func TestOpenAPIVulnCheckNullContainerMatrix(t *testing.T) {
+	compiler := newOpenAPIInstanceCompiler(t)
+	schema := compileOpenAPIFragment(t, compiler, "#/paths/~1api~1v1~1feeds~1vulncheck~1import/post/requestBody/content/application~1json/schema")
+
+	for _, tt := range []struct {
+		name         string
+		body         string
+		wantAccepted bool
+	}{
+		{name: "omitted entries", body: `{}`, wantAccepted: true},
+		{name: "empty entries", body: `{"entries":[]}`, wantAccepted: true},
+		{name: "top-level null", body: `null`},
+		{name: "null entries", body: `{"entries":null}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			gotAccepted := schema.Validate(decodeJSONInstance(t, tt.body)) == nil
+			if gotAccepted != tt.wantAccepted {
+				t.Fatalf("VulnCheck schema accepted %s = %t, want %t", tt.body, gotAccepted, tt.wantAccepted)
+			}
+		})
 	}
 }
 
