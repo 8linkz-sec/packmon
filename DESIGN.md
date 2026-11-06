@@ -507,6 +507,9 @@ Important behavior:
   registries.
 - config precedence is flags, environment, project `.packmon.yaml`, user-global
   `~/.packmon/config/packmon.yaml`, defaults for non-sensitive scan policy.
+  For `packmon config init`, a destination entry that already exists when
+  config init checks it, including a dangling symlink, is rejected before
+  directory creation/write.
   Auto-discovered project config is untrusted for credential/server/webhook/DB
   routing and local write-destination fields (`server`, `api_key`,
   `api_key_env`, `cacert`, `insecure_allow_http`, `require_remote`, webhook

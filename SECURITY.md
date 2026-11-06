@@ -613,6 +613,9 @@ and environment-derived string `packmon config show` prints (including repo
 names and paths from an auto-discovered project config) has terminal control
 characters escaped, so a crafted value cannot inject escape sequences or forge
 output lines.
+For `packmon config init`, a destination entry that already exists when config
+init checks it, including a dangling symlink, is rejected before directory
+creation/write.
 Private registry credentials are not read. Failures degrade to `unknown` in
 reports. The server scan API rejects Docker packages because Packmon does not
 provide container-layer vulnerability coverage. Chocolatey inventory follows
