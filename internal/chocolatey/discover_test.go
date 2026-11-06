@@ -267,34 +267,49 @@ func TestDiscoverFilesWithWarningsReportsCrossVolumeCallbackFailure(t *testing.T
 	}
 	root := t.TempDir()
 	rootVolume := filepath.VolumeName(root)
-	var otherRoot string
+	var otherVolume string
 	for drive := 'A'; drive <= 'Z'; drive++ {
-		candidate := string(drive) + ":" + string(filepath.Separator)
-		if strings.EqualFold(filepath.VolumeName(candidate), rootVolume) {
+		candidate := string(drive) + ":"
+		if strings.EqualFold(candidate, rootVolume) {
 			continue
 		}
-		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
-			otherRoot = candidate
-			break
+		otherVolume = candidate
+		break
+	}
+	if otherVolume == "" {
+		t.Fatalf("could not construct a volume distinct from %q", rootVolume)
+	}
+	crossVolumePath := otherVolume + string(filepath.Separator) + "outside.ps1"
+	keptPath := filepath.Join(root, "kept.cmd")
+	withFakeWalk(t, func(walkRoot string, fn fs.WalkDirFunc) error {
+		if err := fn(crossVolumePath, fakeDirEntry{name: "outside.ps1"}, nil); err != nil {
+			return err
 		}
-	}
-	if otherRoot == "" {
-		t.Skipf("no volume distinct from %q is available", rootVolume)
-	}
-	crossVolumePath := filepath.Join(otherRoot, "outside.ps1")
-	withFakeWalk(t, func(_ string, fn fs.WalkDirFunc) error {
-		return fn(crossVolumePath, fakeDirEntry{name: "outside.ps1"}, nil)
+		return fn(filepath.Join(walkRoot, "kept.cmd"), fakeDirEntry{name: "kept.cmd"}, nil)
 	})
 
 	files, warnings, err := DiscoverFilesWithWarnings(root, 1)
 	if err != nil {
 		t.Fatalf("DiscoverFilesWithWarnings() error = %v", err)
 	}
-	if len(files) != 0 {
-		t.Fatalf("files = %v, want none", files)
+	if len(files) != 1 || files[0].Path != keptPath || files[0].RelPath != "kept.cmd" || files[0].Kind != KindBatchScript {
+		t.Fatalf("files = %+v, want later valid candidate kept.cmd", files)
 	}
-	if len(warnings) != 1 || !strings.HasPrefix(warnings[0], "outside.ps1: ") {
-		t.Fatalf("warnings = %v, want one cross-volume warning for outside.ps1", warnings)
+	const wantWarning = "outside.ps1: cannot make path relative to scan root"
+	if len(warnings) != 1 || warnings[0] != wantWarning {
+		t.Fatalf("warnings = %v, want %q", warnings, wantWarning)
+	}
+	for _, hostPath := range []string{
+		root,
+		filepath.ToSlash(root),
+		crossVolumePath,
+		filepath.ToSlash(crossVolumePath),
+		rootVolume,
+		otherVolume,
+	} {
+		if hostPath != "" && strings.Contains(warnings[0], hostPath) {
+			t.Fatalf("warning %q leaks host path or volume %q", warnings[0], hostPath)
+		}
 	}
 }
 

@@ -630,6 +630,10 @@ size-bounded before parsing, script scanning for `choco install` lines is
 bounded per file, feed URLs come only from trusted configuration (never from
 `--source` arguments found in repository scripts), and the server scan API and
 manual advisories reject `chocolatey` packages (`Ecosystem.InventoryOnly`).
+Chocolatey discovery warnings show only root-relative paths or a candidate's
+base name. If a candidate cannot be made relative to the scan root, including
+across Windows volumes, the warning uses a fixed reason instead of the
+filesystem error that contains the absolute root and candidate paths.
 The local Docker inspector abstraction accepts only image references; the
 executable and `image inspect` subcommand remain fixed in production code.
 CLI ecosystem filters are validated before package discovery so a typo cannot
