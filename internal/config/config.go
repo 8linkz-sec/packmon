@@ -159,6 +159,7 @@ type ServerConfig struct {
 	ReadTimeout            time.Duration
 	WriteTimeout           time.Duration
 	ShutdownTimeout        time.Duration
+	StopGracePeriod        time.Duration
 	TLS                    TLSConfig
 }
 
@@ -406,6 +407,16 @@ func loadServerConfig(mode ServerMode) (ServerConfig, error) {
 	if err != nil {
 		return ServerConfig{}, err
 	}
+	stopGracePeriod := time.Duration(0)
+	if os.Getenv("PACKMON_SERVER_STOP_GRACE_PERIOD") != "" {
+		stopGracePeriod, err = envPositiveDurationOrDefault("PACKMON_SERVER_STOP_GRACE_PERIOD", 0)
+		if err != nil {
+			return ServerConfig{}, err
+		}
+		if stopGracePeriod < shutdownTimeout || stopGracePeriod-shutdownTimeout < 5*time.Second {
+			return ServerConfig{}, fmt.Errorf("config: PACKMON_SERVER_STOP_GRACE_PERIOD must be at least PACKMON_SERVER_SHUTDOWN_TIMEOUT plus 5s")
+		}
+	}
 	tlsConfig, err := loadTLSConfig()
 	if err != nil {
 		return ServerConfig{}, err
@@ -433,6 +444,7 @@ func loadServerConfig(mode ServerMode) (ServerConfig, error) {
 		ReadTimeout:            readTimeout,
 		WriteTimeout:           writeTimeout,
 		ShutdownTimeout:        shutdownTimeout,
+		StopGracePeriod:        stopGracePeriod,
 		TLS:                    tlsConfig,
 	}, nil
 }

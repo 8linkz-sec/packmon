@@ -238,6 +238,9 @@ func TestLoadWithNoEnvVarsReturnsDefaults(t *testing.T) {
 	if cfg.Server.ShutdownTimeout != 5*time.Second {
 		t.Errorf("Server.ShutdownTimeout = %v, want 5s", cfg.Server.ShutdownTimeout)
 	}
+	if cfg.Server.StopGracePeriod != 0 {
+		t.Errorf("Server.StopGracePeriod = %v, want unset", cfg.Server.StopGracePeriod)
+	}
 	if cfg.Server.BlockThreshold != "CRITICAL" {
 		t.Errorf("Server.BlockThreshold = %q, want CRITICAL", cfg.Server.BlockThreshold)
 	}
@@ -1875,6 +1878,7 @@ func TestLoadReadsCustomTimeouts(t *testing.T) {
 	t.Setenv("PACKMON_SERVER_READ_TIMEOUT", "60s")
 	t.Setenv("PACKMON_SERVER_WRITE_TIMEOUT", "45s")
 	t.Setenv("PACKMON_SERVER_SHUTDOWN_TIMEOUT", "30s")
+	t.Setenv("PACKMON_SERVER_STOP_GRACE_PERIOD", "35s")
 	t.Setenv("PACKMON_ADMIN_SESSION_TIMEOUT", "4h")
 	t.Setenv("PACKMON_ADMIN_IDLE_TIMEOUT", "10m")
 
@@ -1891,6 +1895,9 @@ func TestLoadReadsCustomTimeouts(t *testing.T) {
 	}
 	if cfg.Server.ShutdownTimeout != 30*time.Second {
 		t.Errorf("Server.ShutdownTimeout = %v, want 30s", cfg.Server.ShutdownTimeout)
+	}
+	if cfg.Server.StopGracePeriod != 35*time.Second {
+		t.Errorf("Server.StopGracePeriod = %v, want 35s", cfg.Server.StopGracePeriod)
 	}
 	if cfg.Admin.SessionTimeout != 4*time.Hour {
 		t.Errorf("Admin.SessionTimeout = %v, want 4h", cfg.Admin.SessionTimeout)
@@ -1936,6 +1943,8 @@ func TestLoadRejectsNonPositiveServerTimeouts(t *testing.T) {
 		{name: "write negative", key: "PACKMON_SERVER_WRITE_TIMEOUT", value: "-1s"},
 		{name: "shutdown zero", key: "PACKMON_SERVER_SHUTDOWN_TIMEOUT", value: "0s"},
 		{name: "shutdown negative", key: "PACKMON_SERVER_SHUTDOWN_TIMEOUT", value: "-1s"},
+		{name: "stop grace zero", key: "PACKMON_SERVER_STOP_GRACE_PERIOD", value: "0s"},
+		{name: "stop grace negative", key: "PACKMON_SERVER_STOP_GRACE_PERIOD", value: "-1s"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clearPackmonEnv(t)
@@ -1951,6 +1960,56 @@ func TestLoadRejectsNonPositiveServerTimeouts(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLoadValidatesServerStopGracePeriod(t *testing.T) {
+	const relationError = "config: PACKMON_SERVER_STOP_GRACE_PERIOD must be at least PACKMON_SERVER_SHUTDOWN_TIMEOUT plus 5s"
+	maxDuration := time.Duration(1<<63 - 1)
+
+	tests := []struct {
+		name     string
+		shutdown time.Duration
+		grace    time.Duration
+		wantErr  string
+	}{
+		{name: "exact boundary", shutdown: 30 * time.Second, grace: 35 * time.Second},
+		{name: "one nanosecond below boundary", shutdown: 30 * time.Second, grace: 35*time.Second - time.Nanosecond, wantErr: relationError},
+		{name: "grace below shutdown", shutdown: 30 * time.Second, grace: 25 * time.Second, wantErr: relationError},
+		{name: "largest exact boundary", shutdown: maxDuration - 5*time.Second, grace: maxDuration},
+		{name: "overflowing required boundary", shutdown: maxDuration - 5*time.Second + time.Nanosecond, grace: maxDuration, wantErr: relationError},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			clearPackmonEnv(t)
+			t.Setenv("PACKMON_SERVER_SHUTDOWN_TIMEOUT", tc.shutdown.String())
+			t.Setenv("PACKMON_SERVER_STOP_GRACE_PERIOD", tc.grace.String())
+
+			cfg, err := Load()
+			if tc.wantErr != "" {
+				if err == nil || err.Error() != tc.wantErr {
+					t.Fatalf("Load() error = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if cfg.Server.StopGracePeriod != tc.grace {
+				t.Fatalf("Server.StopGracePeriod = %s, want %s", cfg.Server.StopGracePeriod, tc.grace)
+			}
+		})
+	}
+
+	t.Run("invalid duration", func(t *testing.T) {
+		clearPackmonEnv(t)
+		t.Setenv("PACKMON_SERVER_STOP_GRACE_PERIOD", "later")
+
+		_, err := Load()
+		const want = "config: invalid PACKMON_SERVER_STOP_GRACE_PERIOD (want duration, for example 30s, 5m, or 1h)"
+		if err == nil || err.Error() != want {
+			t.Fatalf("Load() error = %v, want %q", err, want)
+		}
+	})
 }
 
 func TestLoadReadsMetricsConfig(t *testing.T) {

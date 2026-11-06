@@ -332,23 +332,29 @@ func TestDockerComposeStopGraceExceedsServerShutdownTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read .env.example: %v", err)
 	}
-	composeData, err := os.ReadFile(filepath.Join("..", "..", "docker-compose.yml"))
-	if err != nil {
-		t.Fatalf("read docker-compose.yml: %v", err)
-	}
 
 	values := activeEnvExampleValues(string(envData))
 	shutdownTimeout, err := time.ParseDuration(values["PACKMON_SERVER_SHUTDOWN_TIMEOUT"])
 	if err != nil {
 		t.Fatalf("PACKMON_SERVER_SHUTDOWN_TIMEOUT = %q is not a duration: %v", values["PACKMON_SERVER_SHUTDOWN_TIMEOUT"], err)
 	}
-	stopGrace, err := time.ParseDuration(composeScalarValue(string(composeData), "stop_grace_period"))
+	stopGrace, err := time.ParseDuration(values["PACKMON_SERVER_STOP_GRACE_PERIOD"])
 	if err != nil {
-		t.Fatalf("docker-compose.yml stop_grace_period is not a duration: %v", err)
+		t.Fatalf("PACKMON_SERVER_STOP_GRACE_PERIOD = %q is not a duration: %v", values["PACKMON_SERVER_STOP_GRACE_PERIOD"], err)
 	}
-	minimum := shutdownTimeout + 5*time.Second
-	if stopGrace < minimum {
-		t.Fatalf("docker-compose.yml stop_grace_period = %s, want at least %s for shutdown timeout %s plus hard-exit buffer", stopGrace, minimum, shutdownTimeout)
+	if stopGrace < shutdownTimeout || stopGrace-shutdownTimeout < 5*time.Second {
+		t.Fatalf("PACKMON_SERVER_STOP_GRACE_PERIOD = %s, want at least shutdown timeout %s plus five-second buffer", stopGrace, shutdownTimeout)
+	}
+
+	const wantStopGrace = "${PACKMON_SERVER_STOP_GRACE_PERIOD:-25s}"
+	for _, name := range []string{"docker-compose.yml", "docker-compose.server.yml"} {
+		composeData, err := os.ReadFile(filepath.Join("..", "..", name)) // #nosec G304 -- names are fixed repository fixtures.
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		if got := composeScalarValue(string(composeData), "stop_grace_period"); got != wantStopGrace {
+			t.Errorf("%s stop_grace_period = %q, want %q", name, got, wantStopGrace)
+		}
 	}
 }
 

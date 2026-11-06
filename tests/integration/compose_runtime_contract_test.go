@@ -126,6 +126,7 @@ func TestComposeRuntimeContracts(t *testing.T) {
 	t.Run("migration_orders_server_startup", h.testMigrationOrdersServerStartup)
 	t.Run("production_lifecycle_proxy_and_persistence", h.testProductionLifecycleProxyAndPersistence)
 	t.Run("metrics_loopback_access", h.testMetricsLoopbackAccess)
+	t.Run("server_shutdown_grace_contract", h.testServerShutdownGraceContract)
 	t.Run("configured_backup_entrypoint_probe", h.testConfiguredBackupEntrypointProbe)
 	t.Run("backup_create_restore_failure_and_retention", h.testBackupCreateRestoreFailureAndRetention)
 
@@ -400,6 +401,63 @@ func (h *composeRuntimeHarness) testMetricsLoopbackAccess(t *testing.T) {
 		t.Fatalf("in-container metrics output has no Packmon metric: %s", s.diagnostic(metrics))
 	}
 	s.assertNoProviderActivity()
+}
+
+func (h *composeRuntimeHarness) testServerShutdownGraceContract(t *testing.T) {
+	developmentOverlay := `services:
+  packmon-server:
+    environment:
+      PACKMON_SERVER_MODE: development
+      PACKMON_ALLOW_INSECURE_LOCAL_HTTP: "true"
+`
+
+	t.Run("safe_30s_35s_starts", func(t *testing.T) {
+		s := h.newScenario(t, []string{"docker-compose.server.yml"}, h.commonOverlay(false, ""), developmentOverlay)
+		s.env("PACKMON_SERVER_SHUTDOWN_TIMEOUT", "30s")
+		s.env("PACKMON_SERVER_STOP_GRACE_PERIOD", "35s")
+		s.down()
+		s.run(2*time.Minute, "up", "-d", "--no-deps", "packmon-server")
+
+		containerID := strings.TrimSpace(s.run(30*time.Second, "ps", "-q", "packmon-server"))
+		if containerID == "" {
+			t.Fatal("safe shutdown/grace pair did not create a running server container")
+		}
+		running := strings.TrimSpace(string(h.mustDockerOutput(t, 30*time.Second, "inspect", "--format", "{{.State.Running}}", containerID)))
+		if running != "true" {
+			t.Fatalf("safe shutdown/grace pair left server running = %q, want true", running)
+		}
+		stopTimeout := strings.TrimSpace(string(h.mustDockerOutput(t, 30*time.Second, "inspect", "--format", "{{.Config.StopTimeout}}", containerID)))
+		if stopTimeout != "35" {
+			t.Fatalf("container stop timeout = %q, want 35 seconds", stopTimeout)
+		}
+		containerEnv := string(h.mustDockerOutput(t, 30*time.Second, "inspect", "--format", "{{range .Config.Env}}{{println .}}{{end}}", containerID))
+		for _, want := range []string{"PACKMON_SERVER_SHUTDOWN_TIMEOUT=30s", "PACKMON_SERVER_STOP_GRACE_PERIOD=35s"} {
+			if !strings.Contains(containerEnv, want+"\n") {
+				t.Fatalf("running server environment is missing %q", want)
+			}
+		}
+	})
+
+	t.Run("unsafe_30s_25s_rejected_without_values", func(t *testing.T) {
+		s := h.newScenario(t, []string{"docker-compose.server.yml"}, h.commonOverlay(false, ""), developmentOverlay)
+		s.env("PACKMON_SERVER_SHUTDOWN_TIMEOUT", "30s")
+		s.env("PACKMON_SERVER_STOP_GRACE_PERIOD", "25s")
+		s.down()
+
+		_, output, err := s.command(time.Minute, "run", "--rm", "--no-deps", "packmon-server")
+		if err == nil {
+			t.Fatal("unsafe shutdown/grace pair unexpectedly started the server")
+		}
+		const want = "PACKMON_SERVER_STOP_GRACE_PERIOD must be at least PACKMON_SERVER_SHUTDOWN_TIMEOUT plus 5s"
+		if !strings.Contains(output, want) {
+			t.Fatalf("unsafe shutdown/grace pair failed for the wrong reason: %v: %s", err, s.diagnostic(output))
+		}
+		for _, forbidden := range []string{"30s", "25s"} {
+			if strings.Contains(output, forbidden) {
+				t.Fatalf("unsafe shutdown/grace rejection exposed configured value %q: %s", forbidden, s.diagnostic(output))
+			}
+		}
+	})
 }
 
 func (h *composeRuntimeHarness) testConfiguredBackupEntrypointProbe(t *testing.T) {

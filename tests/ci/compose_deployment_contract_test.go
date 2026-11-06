@@ -292,20 +292,43 @@ func TestDockerComposeBackupServiceContract(t *testing.T) {
 func TestDockerComposeShutdownGraceCoversConfiguredTimeout(t *testing.T) {
 	t.Parallel()
 
+	const (
+		shutdownExpression = "${PACKMON_SERVER_SHUTDOWN_TIMEOUT:-15s}"
+		graceExpression    = "${PACKMON_SERVER_STOP_GRACE_PERIOD:-25s}"
+	)
+	for _, name := range []string{"docker-compose.yml", "docker-compose.server.yml"} {
+		compose := readComposeContract(t, name)
+		server := requireComposeService(t, compose, "packmon-server")
+		if server.StopGracePeriod != graceExpression || server.Environment["PACKMON_SERVER_STOP_GRACE_PERIOD"] != graceExpression {
+			t.Fatalf("%s stop grace = Compose %q container %q, want identical expression %q", name, server.StopGracePeriod, server.Environment["PACKMON_SERVER_STOP_GRACE_PERIOD"], graceExpression)
+		}
+		if server.Environment["PACKMON_SERVER_SHUTDOWN_TIMEOUT"] != shutdownExpression {
+			t.Fatalf("%s container shutdown timeout = %q, want explicit expression %q", name, server.Environment["PACKMON_SERVER_SHUTDOWN_TIMEOUT"], shutdownExpression)
+		}
+	}
+
 	for _, model := range []string{"local", "production"} {
 		model := model
-		for _, timeout := range []string{"15s", "30s"} {
-			timeout := timeout
-			t.Run(model+"_"+timeout, func(t *testing.T) {
+		for _, values := range []struct {
+			name     string
+			shutdown string
+			grace    string
+		}{
+			{name: "defaults", shutdown: "15s", grace: "25s"},
+			{name: "custom", shutdown: "30s", grace: "35s"},
+		} {
+			values := values
+			t.Run(model+"_"+values.name, func(t *testing.T) {
 				env := validComposeEnvironment()
-				env["PACKMON_SERVER_SHUTDOWN_TIMEOUT"] = timeout
+				env["PACKMON_SERVER_SHUTDOWN_TIMEOUT"] = values.shutdown
+				env["PACKMON_SERVER_STOP_GRACE_PERIOD"] = values.grace
 				var compose composeFileContract
 				if model == "local" {
 					compose = renderComposeContract(t, []string{"docker-compose.yml"}, env)
 				} else {
 					stage := stageComposeFiles(t, []string{"docker-compose.server.yml"})
 					serviceEnv := filepath.Join(stage, "shutdown.env")
-					if err := os.WriteFile(serviceEnv, []byte("PACKMON_SERVER_SHUTDOWN_TIMEOUT="+timeout+"\n"), 0o600); err != nil {
+					if err := os.WriteFile(serviceEnv, []byte("PACKMON_SERVER_SHUTDOWN_TIMEOUT=2s\nPACKMON_SERVER_STOP_GRACE_PERIOD=3s\n"), 0o600); err != nil {
 						t.Fatalf("write synthetic shutdown environment: %v", err)
 					}
 					overlay := filepath.Join(stage, "shutdown.override.yml")
@@ -319,19 +342,32 @@ func TestDockerComposeShutdownGraceCoversConfiguredTimeout(t *testing.T) {
 				if err != nil {
 					t.Fatalf("parse configured timeout: %v", err)
 				}
+				containerGrace, err := time.ParseDuration(server.Environment["PACKMON_SERVER_STOP_GRACE_PERIOD"])
+				if err != nil {
+					t.Fatalf("parse configured container stop grace: %v", err)
+				}
 				grace, err := time.ParseDuration(server.StopGracePeriod)
 				if err != nil {
 					t.Fatalf("parse stop grace period: %v", err)
 				}
-				if configured > grace {
-					if timeout == "30s" && grace == 25*time.Second {
-						t.Skip("F058-bugs-2: fixed Compose stop grace is shorter than the resolved custom shutdown timeout")
-					}
-					t.Fatalf("configured shutdown timeout %s exceeds stop grace %s", configured, grace)
+				if configured != mustParseComposeDuration(t, values.shutdown) || grace != mustParseComposeDuration(t, values.grace) || containerGrace != grace {
+					t.Fatalf("resolved shutdown/grace = %s/%s (container grace %s), want %s/%s", configured, grace, containerGrace, values.shutdown, values.grace)
+				}
+				if grace < configured || grace-configured < 5*time.Second {
+					t.Fatalf("configured shutdown timeout %s lacks the five-second stop-grace buffer in %s", configured, grace)
 				}
 			})
 		}
 	}
+}
+
+func mustParseComposeDuration(t *testing.T, value string) time.Duration {
+	t.Helper()
+	duration, err := time.ParseDuration(value)
+	if err != nil {
+		t.Fatalf("parse test duration %q: %v", value, err)
+	}
+	return duration
 }
 
 func requireComposeService(t *testing.T, compose composeFileContract, name string) composeServiceContract {
