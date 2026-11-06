@@ -141,7 +141,7 @@ func newConfigInitCmd() *cobra.Command {
 				target = defaultCLIConfigFile
 			}
 			target = filepath.Clean(target)
-			if _, err := os.Stat(target); err == nil {
+			if _, err := os.Lstat(target); err == nil {
 				return fmt.Errorf("%s already exists", target)
 			}
 

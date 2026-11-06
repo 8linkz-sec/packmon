@@ -294,6 +294,9 @@ func TestConfigInitDanglingSymlinkDoesNotCreateExternalReferent(t *testing.T) {
 	cmd := newConfigInitCmd()
 	cmd.SetArgs([]string{"--file", link})
 	err := cmd.Execute()
+	if err == nil || err.Error() != link+" already exists" {
+		t.Fatalf("config init error = %v, want exact existing-destination refusal", err)
+	}
 	info, lstatErr := os.Lstat(link)
 	if lstatErr != nil {
 		t.Fatalf("lstat config symlink: %v", lstatErr)
@@ -301,18 +304,75 @@ func TestConfigInitDanglingSymlinkDoesNotCreateExternalReferent(t *testing.T) {
 	if info.Mode()&os.ModeSymlink == 0 {
 		t.Fatalf("config path mode = %v, want unchanged symlink", info.Mode())
 	}
+	if gotTarget, readlinkErr := os.Readlink(link); readlinkErr != nil {
+		t.Fatalf("read config symlink: %v", readlinkErr)
+	} else if gotTarget != referent {
+		t.Fatalf("config symlink target = %q, want unchanged %q", gotTarget, referent)
+	}
 
 	_, referentErr := os.Stat(referent)
-	if referentErr == nil {
-		if err != nil {
-			t.Fatalf("config init created external referent and returned error: %v", err)
-		}
-		t.Skip("known bug F024-bugs-4: config init follows a dangling symlink and creates its external referent")
-	}
 	if !errors.Is(referentErr, os.ErrNotExist) {
 		t.Fatalf("external referent state error = %v, want absent", referentErr)
 	}
-	if err == nil {
-		t.Fatal("config init succeeded without creating the external referent")
+	if entries, readErr := os.ReadDir(externalTree); readErr != nil {
+		t.Fatalf("read external tree: %v", readErr)
+	} else if len(entries) != 0 {
+		t.Fatalf("external tree entries = %v, want empty", entries)
+	}
+}
+
+func TestConfigInitResolvedSymlinkDoesNotChangeExternalReferent(t *testing.T) {
+	isolateCLIConfigDiscovery(t)
+	linkTree := t.TempDir()
+	externalTree := t.TempDir()
+	link := filepath.Join(linkTree, "packmon.yaml")
+	referent := filepath.Join(externalTree, "existing-outside-link-tree.yaml")
+	want := []byte("sentinel: preserve exactly\n")
+	if err := os.WriteFile(referent, want, 0o640); err != nil {
+		t.Fatalf("write external referent: %v", err)
+	}
+	wantInfo, err := os.Stat(referent)
+	if err != nil {
+		t.Fatalf("stat external referent before config init: %v", err)
+	}
+	if err := os.Symlink(referent, link); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("symlink creation is unavailable on this Windows host: %v", err)
+		}
+		t.Fatalf("create resolved symlink: %v", err)
+	}
+
+	cmd := newConfigInitCmd()
+	cmd.SetArgs([]string{"--file", link})
+	err = cmd.Execute()
+	if err == nil || err.Error() != link+" already exists" {
+		t.Fatalf("config init error = %v, want exact existing-destination refusal", err)
+	}
+	info, lstatErr := os.Lstat(link)
+	if lstatErr != nil {
+		t.Fatalf("lstat config symlink: %v", lstatErr)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("config path mode = %v, want unchanged symlink", info.Mode())
+	}
+	if gotTarget, readlinkErr := os.Readlink(link); readlinkErr != nil {
+		t.Fatalf("read config symlink: %v", readlinkErr)
+	} else if gotTarget != referent {
+		t.Fatalf("config symlink target = %q, want unchanged %q", gotTarget, referent)
+	}
+
+	got, readErr := os.ReadFile(referent)
+	if readErr != nil {
+		t.Fatalf("read external referent after config init: %v", readErr)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("external referent changed: got %q, want %q", got, want)
+	}
+	gotInfo, statErr := os.Stat(referent)
+	if statErr != nil {
+		t.Fatalf("stat external referent after config init: %v", statErr)
+	}
+	if gotInfo.Mode() != wantInfo.Mode() {
+		t.Fatalf("external referent mode = %v, want unchanged %v", gotInfo.Mode(), wantInfo.Mode())
 	}
 }
