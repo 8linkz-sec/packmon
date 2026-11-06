@@ -117,12 +117,20 @@ func TestComposeRuntimeContracts(t *testing.T) {
 	t.Cleanup(func() {
 		ctx, cancel, _, ok := h.cleanupContext(time.Minute)
 		if !ok {
+			t.Error("Compose runtime cleanup budget exhausted before removing the test-owned server image")
 			return
 		}
 		defer cancel()
 		cmd := exec.CommandContext(ctx, "docker", "image", "rm", "--force", h.image) // #nosec G204 -- exact test-owned image tag
 		cmd.Env = runtimeDockerEnvironment(nil)
-		_, _ = cmd.CombinedOutput()
+		output, err := cmd.CombinedOutput()
+		if ctx.Err() != nil {
+			t.Errorf("remove test-owned server image within the cleanup budget: %v: %s", ctx.Err(), h.diagnostic(string(output)))
+			return
+		}
+		if err != nil {
+			t.Errorf("remove test-owned server image: %v: %s", err, h.diagnostic(string(output)))
+		}
 	})
 
 	t.Run("bootstrap_owner_and_explicit_run", h.testBootstrapOwnerAndExplicitRun)
@@ -291,14 +299,31 @@ func (h *composeRuntimeHarness) testMigrationOrdersServerStartup(t *testing.T) {
 	if err == nil {
 		t.Fatal("server startup unexpectedly succeeded after synthetic migrate failure")
 	}
-	if !strings.Contains(output, "42") && !strings.Contains(strings.ToLower(output), "failed") {
+	if !strings.Contains(output, "42") {
 		t.Fatalf("migration failure was not attributable to the synthetic nonzero migrate: %s", s.diagnostic(output))
 	}
-	serverID := strings.TrimSpace(s.runAllowFailure(30*time.Second, "ps", "-q", "packmon-server"))
+	failureMigrateID := strings.TrimSpace(s.run(30*time.Second, "ps", "-a", "-q", "packmon-migrate"))
+	if failureMigrateID == "" {
+		t.Fatal("synthetic migration failure did not create the packmon-migrate container")
+	}
+	failureMigrateState := strings.TrimSpace(string(h.mustDockerOutput(t, 30*time.Second, "inspect", "--format", "{{.State.Status}} {{.State.ExitCode}} {{.State.StartedAt}} {{.State.FinishedAt}}", failureMigrateID)))
+	failureMigrateFields := strings.Fields(failureMigrateState)
+	if len(failureMigrateFields) != 4 || failureMigrateFields[0] != "exited" || failureMigrateFields[1] != "42" {
+		t.Fatalf("synthetic packmon-migrate state = %q, want exited 42 with start and completion timestamps", failureMigrateState)
+	}
+	for index, timestamp := range failureMigrateFields[2:] {
+		parsed, parseErr := time.Parse(time.RFC3339Nano, timestamp)
+		if parseErr != nil || parsed.IsZero() {
+			t.Fatalf("parse synthetic packmon-migrate timestamp %d %q: %v", index, timestamp, parseErr)
+		}
+	}
+
+	serverID := strings.TrimSpace(s.run(30*time.Second, "ps", "-a", "-q", "packmon-server"))
 	if serverID != "" {
-		state, _ := h.dockerCommandOutput(30*time.Second, nil, "inspect", "--format", "{{.State.Running}}", serverID)
-		if strings.TrimSpace(string(state)) == "true" {
-			t.Fatal("server reached running state after migrate failure")
+		state := strings.TrimSpace(string(h.mustDockerOutput(t, 30*time.Second, "inspect", "--format", "{{.State.Status}} {{.State.StartedAt}}", serverID)))
+		fields := strings.Fields(state)
+		if len(fields) != 2 || fields[0] != "created" || fields[1] != "0001-01-01T00:00:00Z" {
+			t.Fatalf("packmon-server state after migrate failure = %q, want never-started created container", state)
 		}
 	}
 
@@ -693,13 +718,21 @@ func (s *composeRuntimeScenario) down() {
 	s.t.Helper()
 	ctx, cancel, _, ok := s.h.cleanupContext(time.Minute)
 	if !ok {
+		s.t.Error("Compose runtime cleanup budget exhausted before project cleanup")
 		return
 	}
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "docker", s.composeArgs("down", "--volumes", "--remove-orphans")...) // #nosec G204 -- exact test-owned project/files and fixed cleanup arguments
 	cmd.Dir = s.dir
 	cmd.Env = runtimeDockerEnvironment(nil)
-	_, _ = cmd.CombinedOutput()
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		s.t.Errorf("clean up Compose runtime project within the cleanup budget: %v: %s", ctx.Err(), s.diagnostic(string(output)))
+		return
+	}
+	if err != nil {
+		s.t.Errorf("clean up Compose runtime project: %v: %s", err, s.diagnostic(string(output)))
+	}
 }
 
 func (s *composeRuntimeScenario) downKeepVolumes() {
