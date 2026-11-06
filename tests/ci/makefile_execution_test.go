@@ -427,6 +427,10 @@ func TestMakeTaggedTargetsPreserveBinaryDirWithSpaces(t *testing.T) {
 			splitLog := filepath.Join(fixture.dir, "split.log")
 			output, err := fixture.run(t, []string{"SPLIT_LOG=" + splitLog}, test.target)
 			calls := readStubCallRecords(t, fixture.logPath)
+			if err != nil {
+				t.Fatalf("make %s with a checkout path containing spaces: %v\n%s\ncalls:\n%s", test.target, err, output, formatStubCalls(calls))
+			}
+
 			wantTaggedArgv := append([]string{"go", "test", "-count=1", "-tags", test.tag}, test.packages...)
 			var taggedCalls []stubCall
 			var sentinelCalls []stubCall
@@ -438,32 +442,15 @@ func TestMakeTaggedTargetsPreserveBinaryDirWithSpaces(t *testing.T) {
 					sentinelCalls = append(sentinelCalls, call)
 				}
 			}
-			if err == nil {
-				if len(taggedCalls) != 1 {
-					t.Fatalf("successful make %s exact tagged invocation count = %d, want 1\ncalls:\n%s", test.target, len(taggedCalls), formatStubCalls(calls))
-				}
-				if taggedCalls[0].cwd != fixture.dir || taggedCalls[0].binaryDir != fixture.dir {
-					t.Fatalf("successful make %s tagged invocation cwd/binary dir = %q/%q, want full fixture path %q", test.target, taggedCalls[0].cwd, taggedCalls[0].binaryDir, fixture.dir)
-				}
-				if len(sentinelCalls) != 0 || fileExists(splitLog) {
-					t.Fatalf("successful make %s invoked split sentinel\ncalls:\n%s", test.target, formatStubCalls(calls))
-				}
-				return
+			if len(taggedCalls) != 1 {
+				t.Fatalf("successful make %s exact tagged invocation count = %d, want 1\ncalls:\n%s", test.target, len(taggedCalls), formatStubCalls(calls))
 			}
-
-			if len(taggedCalls) != 0 || len(sentinelCalls) != 1 {
-				t.Fatalf("failed make %s did not match the known split-path bug: tagged=%d sentinel=%d\n%s\ncalls:\n%s", test.target, len(taggedCalls), len(sentinelCalls), output, formatStubCalls(calls))
+			if taggedCalls[0].cwd != fixture.dir || taggedCalls[0].binaryDir != fixture.dir {
+				t.Fatalf("successful make %s tagged invocation cwd/binary dir = %q/%q, want full fixture path %q", test.target, taggedCalls[0].cwd, taggedCalls[0].binaryDir, fixture.dir)
 			}
-			wantTruncatedDir := filepath.Join(filepath.Dir(fixture.dir), "checkout")
-			wantSentinelArgv := append([]string{"split-sentinel", "tail", "go", "test", "-count=1", "-tags", test.tag}, test.packages...)
-			if sentinelCalls[0].cwd != fixture.dir || sentinelCalls[0].binaryDir != wantTruncatedDir || !slices.Equal(sentinelCalls[0].argv, wantSentinelArgv) {
-				t.Fatalf("split sentinel record = cwd %q, binary dir %q, argv %q; want cwd %q, binary dir %q, argv %q", sentinelCalls[0].cwd, sentinelCalls[0].binaryDir, sentinelCalls[0].argv, fixture.dir, wantTruncatedDir, wantSentinelArgv)
+			if len(sentinelCalls) != 0 || fileExists(splitLog) {
+				t.Fatalf("successful make %s invoked split sentinel\ncalls:\n%s", test.target, formatStubCalls(calls))
 			}
-			splitCalls := readStubCallRecords(t, splitLog)
-			if len(splitCalls) != 1 || !sameStubCall(splitCalls[0], sentinelCalls[0]) {
-				t.Fatalf("split interception log = %s, want exactly the sentinel record", formatStubCalls(splitCalls))
-			}
-			t.Skipf("OPEN F008-bugs-5: Makefile %s leaves PACKMON_TEST_BIN_DIR unquoted and splits checkout paths containing spaces", test.target)
 		})
 	}
 }
@@ -676,10 +663,6 @@ func formatStubCalls(calls []stubCall) string {
 		lines = append(lines, fmt.Sprintf("cwd=%q PACKMON_TEST_BIN_DIR=%q target=%q argv=%q", call.cwd, call.binaryDir, call.target, call.argv))
 	}
 	return strings.Join(lines, "\n")
-}
-
-func sameStubCall(left, right stubCall) bool {
-	return left.cwd == right.cwd && left.binaryDir == right.binaryDir && left.target == right.target && slices.Equal(left.argv, right.argv)
 }
 
 type stubEvent struct {

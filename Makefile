@@ -41,11 +41,11 @@ test-ci:
 
 test-integration: build build-server
 	mkdir -p "$(GOTMPDIR)"
-	GOTMPDIR="$(GOTMPDIR)" PACKMON_TEST_BIN_DIR=$(CURDIR) go test -count=1 -tags integration ./tests/integration ./internal/db/postgres ./internal/db/postgres/migrations ./internal/server
+	GOTMPDIR="$(GOTMPDIR)" PACKMON_TEST_BIN_DIR="$(CURDIR)" go test -count=1 -tags integration ./tests/integration ./internal/db/postgres ./internal/db/postgres/migrations ./internal/server
 
 test-e2e: build
 	mkdir -p "$(GOTMPDIR)"
-	GOTMPDIR="$(GOTMPDIR)" PACKMON_TEST_BIN_DIR=$(CURDIR) go test -count=1 -tags e2e ./tests/e2e
+	GOTMPDIR="$(GOTMPDIR)" PACKMON_TEST_BIN_DIR="$(CURDIR)" go test -count=1 -tags e2e ./tests/e2e
 
 vet:
 	mkdir -p "$(GOTMPDIR)"
