@@ -21,6 +21,41 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
+type feedImportContractCase struct {
+	feed               string
+	path               string
+	schemaName         string
+	operationID        string
+	deprecated         bool
+	statusOnlyAccepted bool
+	body               string
+	wrongBody          string
+}
+
+func feedImportContractCases() []feedImportContractCase {
+	const (
+		vulnerabilityBody = `{"vulnerabilities":[{"id":"OSV-selector","severity":"HIGH"}]}`
+		maliciousBody     = `{"malicious":[{"id":"MAL-selector","ecosystem":"npm","name":"bad-package","severity":"HIGH"}]}`
+		vulnCheckBody     = `{"entries":[{"cve_id":"CVE-2026-2001","exploit_exists":true}]}`
+		cisaKEVBody       = `{"cve_ids":["CVE-2026-2002"]}`
+		epssBody          = `{"entries":[{"cve_id":"CVE-2026-2003","score":0.5,"percentile":0.75}]}`
+	)
+	return []feedImportContractCase{
+		{feed: "osv", path: "/api/v1/feeds/osv/import", schemaName: "VulnerabilityImportRequest", operationID: "importOSVFeed", statusOnlyAccepted: true, body: vulnerabilityBody, wrongBody: maliciousBody},
+		{feed: "ghsa", path: "/api/v1/feeds/ghsa/import", schemaName: "VulnerabilityImportRequest", operationID: "importGHSAFeed", statusOnlyAccepted: true, body: vulnerabilityBody, wrongBody: maliciousBody},
+		{feed: "openssf", path: "/api/v1/feeds/openssf/import", schemaName: "MaliciousImportRequest", operationID: "importOpenSSFFeed", statusOnlyAccepted: true, body: maliciousBody, wrongBody: vulnerabilityBody},
+		{feed: "malicious", path: "/api/v1/feeds/malicious/import", schemaName: "MaliciousImportRequest", operationID: "importMaliciousFeed", deprecated: true, statusOnlyAccepted: true, body: maliciousBody, wrongBody: vulnerabilityBody},
+		{feed: "socket", path: "/api/v1/feeds/socket/import", schemaName: "MaliciousImportRequest", operationID: "importSocketFeed", statusOnlyAccepted: true, body: maliciousBody, wrongBody: vulnerabilityBody},
+		{feed: "vulncheck", path: "/api/v1/feeds/vulncheck/import", schemaName: "VulnCheckImportRequest", operationID: "importVulnCheckFeed", statusOnlyAccepted: true, body: vulnCheckBody, wrongBody: maliciousBody},
+		{feed: "cisakev", path: "/api/v1/feeds/cisakev/import", schemaName: "CISAKEVImportRequest", operationID: "importCISAKEVFeed", statusOnlyAccepted: true, body: cisaKEVBody, wrongBody: vulnCheckBody},
+		{feed: "epss", path: "/api/v1/feeds/epss/import", schemaName: "EPSSImportRequest", operationID: "importEPSSFeed", body: epssBody, wrongBody: vulnCheckBody},
+	}
+}
+
+func openAPIJSONPointerToken(value string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(value, "~", "~0"), "/", "~1")
+}
+
 func TestOpenAPIIncludesCanonicalScanAndSyncFields(t *testing.T) {
 	data, err := os.ReadFile("../../api/openapi/packmon-v1.yaml")
 	if err != nil {
@@ -58,6 +93,17 @@ func TestOpenAPIIncludesCanonicalScanAndSyncFields(t *testing.T) {
 	for _, want := range wantFeedEnums {
 		if _, ok := feedEnums[want]; !ok {
 			t.Fatalf("feed import path enum missing %q; got %v", want, enumKeys(feedEnums))
+		}
+	}
+	if len(feedImportContractCases()) != len(wantFeedEnums) {
+		t.Fatalf("concrete feed import operation count = %d, want %d API capabilities", len(feedImportContractCases()), len(wantFeedEnums))
+	}
+	for _, tt := range feedImportContractCases() {
+		if _, ok := feedEnums[tt.feed]; !ok {
+			t.Fatalf("concrete feed import operation %s is not present in the compatibility selector enum", tt.path)
+		}
+		if _, ok := paths[tt.path]; !ok {
+			t.Fatalf("OpenAPI paths missing concrete feed import operation %s", tt.path)
 		}
 	}
 
@@ -711,6 +757,13 @@ func TestOpenAPIErrorResponsesUseJSONErrorEnvelope(t *testing.T) {
 		{"/api/v1/packages/{ecosystem}/{rest}/refresh", "post", []string{"400", "401", "403", "409", "415", "429", "500"}},
 		{"/api/v1/sync", "get", []string{"400", "401", "403", "429", "500"}},
 	}
+	for _, feedImport := range feedImportContractCases() {
+		cases = append(cases, struct {
+			path     string
+			method   string
+			statuses []string
+		}{feedImport.path, "post", []string{"400", "401", "403", "415", "429", "500"}})
+	}
 	for _, tt := range cases {
 		operation := requireMap(t, requireMap(t, paths, tt.path), tt.method)
 		responses := requireMap(t, operation, "responses")
@@ -868,6 +921,12 @@ func TestOpenAPIDocumentsRequiredAPIUserAgent(t *testing.T) {
 		{"/api/v1/sync", "get"},
 		{"/api/v1/sync", "head"},
 	}
+	for _, feedImport := range feedImportContractCases() {
+		cases = append(cases, struct {
+			path   string
+			method string
+		}{feedImport.path, "post"})
+	}
 	for _, tt := range cases {
 		operation := requireMap(t, requireMap(t, paths, tt.path), tt.method)
 		if !operationHasParameterRef(operation, "#/components/parameters/PackmonUserAgent") {
@@ -943,6 +1002,9 @@ func TestOpenAPISecurityInheritanceMatrix(t *testing.T) {
 		"get /version":                                     false,
 		"head /version":                                    false,
 	}
+	for _, feedImport := range feedImportContractCases() {
+		protected["post "+feedImport.path] = true
+	}
 	paths := requireMap(t, spec, "paths")
 	actualOperations := make(map[string]struct{}, len(protected))
 	for path, rawPathItem := range paths {
@@ -956,8 +1018,8 @@ func TestOpenAPISecurityInheritanceMatrix(t *testing.T) {
 			}
 		}
 	}
-	if len(actualOperations) != 15 {
-		t.Fatalf("documented path-operation count = %d (%v), want exhaustive 15", len(actualOperations), enumKeys(actualOperations))
+	if len(actualOperations) != len(protected) {
+		t.Fatalf("documented path-operation count = %d (%v), want exhaustive %d", len(actualOperations), enumKeys(actualOperations), len(protected))
 	}
 	for operationKey := range actualOperations {
 		if _, ok := protected[operationKey]; !ok {
@@ -985,6 +1047,42 @@ func TestOpenAPISecurityInheritanceMatrix(t *testing.T) {
 	if !ok || len(webhookSecurity) != 0 {
 		t.Fatalf("scanCompleted webhook security = %#v, want separate explicit []", webhookPost["security"])
 	}
+}
+
+func TestOpenAPIOperationIDsAreUnique(t *testing.T) {
+	spec := readOpenAPISpecMap(t)
+	seen := make(map[string]string)
+	methods := []string{"get", "head", "post", "put", "patch", "delete", "options", "trace", "query"}
+	checkPathItems := func(group string, pathItems map[string]any) {
+		t.Helper()
+		for path, rawPathItem := range pathItems {
+			pathItem, ok := rawPathItem.(map[string]any)
+			if !ok {
+				t.Fatalf("%s path item %s = %#v, want object", group, path, rawPathItem)
+			}
+			for _, method := range methods {
+				rawOperation, exists := pathItem[method]
+				if !exists {
+					continue
+				}
+				operation, ok := rawOperation.(map[string]any)
+				if !ok {
+					t.Fatalf("%s %s %s operation = %#v, want object", group, method, path, rawOperation)
+				}
+				operationID, ok := operation["operationId"].(string)
+				if !ok || operationID == "" {
+					t.Fatalf("%s %s %s operationId = %#v, want nonempty string", group, method, path, operation["operationId"])
+				}
+				location := group + " " + method + " " + path
+				if previous, duplicate := seen[operationID]; duplicate {
+					t.Fatalf("operationId %q is duplicated by %s and %s", operationID, previous, location)
+				}
+				seen[operationID] = location
+			}
+		}
+	}
+	checkPathItems("path", requireMap(t, spec, "paths"))
+	checkPathItems("webhook", requireMap(t, spec, "webhooks"))
 }
 
 func TestOpenAPIDocumentsHEADForGETResources(t *testing.T) {
@@ -1380,6 +1478,12 @@ func TestOpenAPIDocumentsFeedImportSchemas(t *testing.T) {
 	paths := requireMap(t, spec, "paths")
 	feedImport := requireMap(t, paths, "/api/v1/feeds/{feed}/import")
 	post := requireMap(t, feedImport, "post")
+	if got := post["operationId"]; got != "importFeed" {
+		t.Fatalf("generic feed import operationId = %#v, want importFeed", got)
+	}
+	if deprecated, ok := post["deprecated"].(bool); !ok || !deprecated {
+		t.Fatalf("generic feed import deprecated = %#v, want true", post["deprecated"])
+	}
 	feedParameter := requireOperationParameter(t, post, "feed", "path")
 	feedDescription, _ := feedParameter["description"].(string)
 	for _, want := range []string{"malicious", "deprecated legacy alias", "openssf"} {
@@ -1397,35 +1501,27 @@ func TestOpenAPIDocumentsFeedImportSchemas(t *testing.T) {
 	}
 
 	operationDescription, _ := post["description"].(string)
-	for _, want := range []string{
-		"osv and ghsa use VulnerabilityImportRequest",
-		"openssf, malicious, and socket use MaliciousImportRequest",
-		"vulncheck uses VulnCheckImportRequest",
-		"cisakev uses CISAKEVImportRequest",
-		"epss uses EPSSImportRequest",
-	} {
+	for _, want := range []string{"Deprecated", "concrete feed operation", "selector-specific schema"} {
 		if !strings.Contains(operationDescription, want) {
-			t.Fatalf("feed import operation description missing feed-to-schema guidance %q: %q", want, operationDescription)
+			t.Fatalf("generic feed import operation description missing %q compatibility guidance: %q", want, operationDescription)
 		}
 	}
 	requestBody := requireMap(t, post, "requestBody")
 	requestBodyDescription, _ := requestBody["description"].(string)
-	for _, want := range []string{
-		"osv/ghsa",
-		"openssf/malicious/socket",
-		"vulncheck",
-		"cisakev",
-		"epss",
-	} {
+	for _, want := range []string{"Compatibility", "concrete feed operation", "selector-specific request schema"} {
 		if !strings.Contains(requestBodyDescription, want) {
-			t.Fatalf("feed import request body description missing %q mapping: %q", want, requestBodyDescription)
+			t.Fatalf("generic feed import request body description missing %q guidance: %q", want, requestBodyDescription)
 		}
 	}
 	requestContent := requireMap(t, requireMap(t, requestBody, "content"), "application/json")
 	requestSchema := requireMap(t, requestContent, "schema")
-	anyOf, ok := requestSchema["anyOf"].([]any)
-	if !ok || len(anyOf) < 5 {
-		t.Fatalf("feed import request schema anyOf = %#v, want path-dispatched feed request refs", requestSchema["anyOf"])
+	if requestSchema["type"] != "object" {
+		t.Fatalf("generic feed import request schema type = %#v, want object", requestSchema["type"])
+	}
+	for _, composition := range []string{"anyOf", "oneOf"} {
+		if _, exists := requestSchema[composition]; exists {
+			t.Fatalf("generic feed import request schema retains ambiguous %s: %#v", composition, requestSchema[composition])
+		}
 	}
 	parameters, ok := post["parameters"].([]any)
 	if !ok {
@@ -1458,6 +1554,53 @@ func TestOpenAPIDocumentsFeedImportSchemas(t *testing.T) {
 	}
 	if _, ok := responses["404"]; !ok {
 		t.Fatal("feed import is missing 404 response for unknown feed path")
+	}
+
+	seenConcreteFeeds := make(map[string]struct{}, len(feedImportContractCases()))
+	for _, tt := range feedImportContractCases() {
+		operation := requireMap(t, requireMap(t, paths, tt.path), "post")
+		seenConcreteFeeds[tt.feed] = struct{}{}
+		if got := operation["operationId"]; got != tt.operationID {
+			t.Fatalf("%s operationId = %#v, want %s", tt.path, got, tt.operationID)
+		}
+		deprecated, _ := operation["deprecated"].(bool)
+		if deprecated != tt.deprecated {
+			t.Fatalf("%s deprecated = %t, want %t", tt.path, deprecated, tt.deprecated)
+		}
+		if !operationHasParameterRef(operation, "#/components/parameters/PackmonUserAgent") {
+			t.Fatalf("%s missing PackmonUserAgent parameter ref", tt.path)
+		}
+		operationParameters, ok := operation["parameters"].([]any)
+		if !ok {
+			t.Fatalf("%s parameters = %#v, want array", tt.path, operation["parameters"])
+		}
+		hasImportSecretHeader := false
+		for _, rawParameter := range operationParameters {
+			parameter, ok := rawParameter.(map[string]any)
+			if ok && parameter["name"] == "X-Packmon-Feed-Import-Secret" && parameter["in"] == "header" {
+				hasImportSecretHeader = true
+			}
+		}
+		if !hasImportSecretHeader {
+			t.Fatalf("%s is missing X-Packmon-Feed-Import-Secret header parameter", tt.path)
+		}
+		concreteRequestBody := requireMap(t, operation, "requestBody")
+		concreteSchema := requireMap(t, requireMap(t, requireMap(t, concreteRequestBody, "content"), "application/json"), "schema")
+		if got := concreteSchema["$ref"]; got != "#/components/schemas/"+tt.schemaName {
+			t.Fatalf("%s request schema ref = %#v, want %s", tt.path, got, tt.schemaName)
+		}
+		concreteResponses := requireMap(t, operation, "responses")
+		if _, ok := concreteResponses["404"]; ok {
+			t.Fatalf("known-selector operation %s documents impossible unknown-feed 404", tt.path)
+		}
+		concreteOK := requireMap(t, concreteResponses, "200")
+		concreteResponseSchema := requireMap(t, requireMap(t, requireMap(t, concreteOK, "content"), "application/json"), "schema")
+		if got := concreteResponseSchema["$ref"]; got != "#/components/schemas/ImportResponse" {
+			t.Fatalf("%s 200 schema ref = %#v, want ImportResponse", tt.path, got)
+		}
+	}
+	if len(seenConcreteFeeds) != len(feedSchema["enum"].([]any)) {
+		t.Fatalf("concrete feed import selectors = %v, want exact generic enum", enumKeys(seenConcreteFeeds))
 	}
 
 	schemas := requireMap(t, requireMap(t, spec, "components"), "schemas")
@@ -1583,64 +1726,35 @@ func TestOpenAPIDocumentsFeedImportSchemas(t *testing.T) {
 
 func TestOpenAPIFeedImportExactRequestReferences(t *testing.T) {
 	spec := readOpenAPISpecMap(t)
-	post := requireMap(t, requireMap(t, requireMap(t, spec, "paths"), "/api/v1/feeds/{feed}/import"), "post")
-	requestBody := requireMap(t, post, "requestBody")
-	media := requireMap(t, requireMap(t, requestBody, "content"), "application/json")
-	requestSchema := requireMap(t, media, "schema")
-	anyOf, ok := requestSchema["anyOf"].([]any)
-	if !ok {
-		t.Fatalf("feed import request anyOf = %#v, want array", requestSchema["anyOf"])
-	}
-	if len(anyOf) != 5 {
-		t.Fatalf("feed import request anyOf count = %d, want exactly 5", len(anyOf))
+	paths := requireMap(t, spec, "paths")
+	genericPost := requireMap(t, requireMap(t, paths, "/api/v1/feeds/{feed}/import"), "post")
+	genericSchema := requireMap(t, requireMap(t, requireMap(t, requireMap(t, genericPost, "requestBody"), "content"), "application/json"), "schema")
+	for _, composition := range []string{"anyOf", "oneOf"} {
+		if _, exists := genericSchema[composition]; exists {
+			t.Fatalf("generic feed import request retains %s ambiguity: %#v", composition, genericSchema[composition])
+		}
 	}
 
-	want := map[string]struct{}{
-		"#/components/schemas/VulnerabilityImportRequest": {},
-		"#/components/schemas/MaliciousImportRequest":     {},
-		"#/components/schemas/VulnCheckImportRequest":     {},
-		"#/components/schemas/CISAKEVImportRequest":       {},
-		"#/components/schemas/EPSSImportRequest":          {},
-	}
-	seen := make(map[string]struct{}, len(anyOf))
-	for i, raw := range anyOf {
-		branch, ok := raw.(map[string]any)
-		if !ok {
-			t.Fatalf("feed import anyOf[%d] = %#v, want reference object", i, raw)
+	seenPaths := make(map[string]struct{}, len(feedImportContractCases()))
+	for _, tt := range feedImportContractCases() {
+		if _, duplicate := seenPaths[tt.path]; duplicate {
+			t.Fatalf("feed import contract matrix contains duplicate path %q", tt.path)
 		}
-		if len(branch) != 1 {
-			t.Fatalf("feed import anyOf[%d] = %#v, want only $ref", i, branch)
+		seenPaths[tt.path] = struct{}{}
+		post := requireMap(t, requireMap(t, paths, tt.path), "post")
+		requestSchema := requireMap(t, requireMap(t, requireMap(t, requireMap(t, post, "requestBody"), "content"), "application/json"), "schema")
+		if len(requestSchema) != 1 {
+			t.Fatalf("%s request schema = %#v, want direct reference only", tt.path, requestSchema)
 		}
-		ref, ok := branch["$ref"].(string)
-		if !ok {
-			t.Fatalf("feed import anyOf[%d].$ref = %#v, want string", i, branch["$ref"])
+		if got := requestSchema["$ref"]; got != "#/components/schemas/"+tt.schemaName {
+			t.Fatalf("%s request schema ref = %#v, want %s", tt.path, got, tt.schemaName)
 		}
-		if _, duplicate := seen[ref]; duplicate {
-			t.Fatalf("feed import request anyOf contains duplicate ref %q", ref)
-		}
-		seen[ref] = struct{}{}
-	}
-	if !reflect.DeepEqual(seen, want) {
-		t.Fatalf("feed import request refs = %v, want exact set %v", enumKeys(seen), enumKeys(want))
 	}
 }
 
 func TestOpenAPIFeedImportSelectorSchemaMapping(t *testing.T) {
 	compiler := newOpenAPIInstanceCompiler(t)
-	tests := []struct {
-		feed       string
-		schemaName string
-		body       string
-	}{
-		{feed: "osv", schemaName: "VulnerabilityImportRequest", body: `{"vulnerabilities":[{"id":"OSV-selector","severity":"HIGH"}]}`},
-		{feed: "ghsa", schemaName: "VulnerabilityImportRequest", body: `{"vulnerabilities":[{"id":"GHSA-selector","severity":"HIGH"}]}`},
-		{feed: "openssf", schemaName: "MaliciousImportRequest", body: `{"malicious":[{"id":"MAL-openssf","ecosystem":"npm","name":"bad-openssf","severity":"HIGH"}]}`},
-		{feed: "malicious", schemaName: "MaliciousImportRequest", body: `{"malicious":[{"id":"MAL-alias","ecosystem":"npm","name":"bad-alias","severity":"HIGH"}]}`},
-		{feed: "socket", schemaName: "MaliciousImportRequest", body: `{"malicious":[{"id":"MAL-socket","ecosystem":"npm","name":"bad-socket","severity":"HIGH"}]}`},
-		{feed: "vulncheck", schemaName: "VulnCheckImportRequest", body: `{"entries":[{"cve_id":"CVE-2026-2001","exploit_exists":true}]}`},
-		{feed: "cisakev", schemaName: "CISAKEVImportRequest", body: `{"cve_ids":["CVE-2026-2002"]}`},
-		{feed: "epss", schemaName: "EPSSImportRequest", body: `{"entries":[{"cve_id":"CVE-2026-2003","score":0.5,"percentile":0.75}]}`},
-	}
+	tests := feedImportContractCases()
 	if got := apiv1.FeedImportPathFeedNames(); len(got) != len(tests) {
 		t.Fatalf("documented feed selector count = %d (%v), want exact %d-case schema matrix", len(got), got, len(tests))
 	}
@@ -1649,10 +1763,15 @@ func TestOpenAPIFeedImportSelectorSchemaMapping(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.feed, func(t *testing.T) {
 			seen[tt.feed] = struct{}{}
-			schema := compileOpenAPIFragment(t, compiler, "#/components/schemas/"+tt.schemaName)
+			fragment := "#/paths/" + openAPIJSONPointerToken(tt.path) + "/post/requestBody/content/application~1json/schema"
+			schema := compileOpenAPIFragment(t, compiler, fragment)
 			instance := decodeJSONInstance(t, tt.body)
 			if err := schema.Validate(instance); err != nil {
-				t.Fatalf("%s payload does not validate against selected %s: %v", tt.feed, tt.schemaName, err)
+				t.Fatalf("%s payload does not validate against concrete operation %s: %v", tt.feed, tt.path, err)
+			}
+			wrongInstance := decodeJSONInstance(t, tt.wrongBody)
+			if err := schema.Validate(wrongInstance); err == nil {
+				t.Fatalf("%s operation accepted payload for a different feed schema: %s", tt.path, tt.wrongBody)
 			}
 		})
 	}
@@ -1671,52 +1790,25 @@ func TestOpenAPIFeedImportSelectorSchemaMapping(t *testing.T) {
 func TestOpenAPIFeedImportStatusOnlySchemaMatrix(t *testing.T) {
 	compiler := newOpenAPIInstanceCompiler(t)
 	statusOnly := decodeJSONInstance(t, `{"status":{"last_sync_status":"error","last_error":"status-only import"}}`)
-	selected := []struct {
-		feed         string
-		schemaName   string
-		wantAccepted bool
-	}{
-		{feed: "osv", schemaName: "VulnerabilityImportRequest", wantAccepted: true},
-		{feed: "ghsa", schemaName: "VulnerabilityImportRequest", wantAccepted: true},
-		{feed: "openssf", schemaName: "MaliciousImportRequest", wantAccepted: true},
-		{feed: "malicious", schemaName: "MaliciousImportRequest", wantAccepted: true},
-		{feed: "socket", schemaName: "MaliciousImportRequest", wantAccepted: true},
-		{feed: "vulncheck", schemaName: "VulnCheckImportRequest", wantAccepted: true},
-		{feed: "cisakev", schemaName: "CISAKEVImportRequest", wantAccepted: true},
-		{feed: "epss", schemaName: "EPSSImportRequest", wantAccepted: false},
-	}
-	for _, tt := range selected {
+	for _, tt := range feedImportContractCases() {
 		t.Run(tt.feed, func(t *testing.T) {
-			schema := compileOpenAPIFragment(t, compiler, "#/components/schemas/"+tt.schemaName)
+			fragment := "#/paths/" + openAPIJSONPointerToken(tt.path) + "/post/requestBody/content/application~1json/schema"
+			schema := compileOpenAPIFragment(t, compiler, fragment)
 			gotAccepted := schema.Validate(statusOnly) == nil
-			if gotAccepted != tt.wantAccepted {
-				t.Fatalf("status-only %s schema accepted = %t, want %t", tt.schemaName, gotAccepted, tt.wantAccepted)
+			if gotAccepted != tt.statusOnlyAccepted {
+				t.Fatalf("status-only %s operation accepted = %t, want %t", tt.path, gotAccepted, tt.statusOnlyAccepted)
 			}
 		})
 	}
 
-	rawBranchSchemas := []string{
-		"VulnerabilityImportRequest",
-		"MaliciousImportRequest",
-		"VulnCheckImportRequest",
-		"CISAKEVImportRequest",
-		"EPSSImportRequest",
-	}
-	matchingBranches := 0
-	for _, schemaName := range rawBranchSchemas {
-		schema := compileOpenAPIFragment(t, compiler, "#/components/schemas/"+schemaName)
-		if schema.Validate(statusOnly) == nil {
-			matchingBranches++
+	spec := readOpenAPISpecMap(t)
+	genericPost := requireMap(t, requireMap(t, requireMap(t, spec, "paths"), "/api/v1/feeds/{feed}/import"), "post")
+	genericSchema := requireMap(t, requireMap(t, requireMap(t, requireMap(t, genericPost, "requestBody"), "content"), "application/json"), "schema")
+	for _, composition := range []string{"anyOf", "oneOf"} {
+		if _, exists := genericSchema[composition]; exists {
+			t.Fatalf("generic feed import request retains ambiguous %s: %#v", composition, genericSchema[composition])
 		}
 	}
-	if matchingBranches != 4 {
-		t.Fatalf("status-only payload matches %d raw feed-import branches, want exactly 4", matchingBranches)
-	}
-	rawSchema := compileOpenAPIFragment(t, compiler, "#/paths/~1api~1v1~1feeds~1%7Bfeed%7D~1import/post/requestBody/content/application~1json/schema")
-	if err := rawSchema.Validate(statusOnly); err != nil {
-		t.Fatalf("raw anyOf rejected status-only payload despite four matching branches: %v", err)
-	}
-	t.Skip("OPEN F010-bugs-3: the feed-import anyOf accepts status-only payloads through four indistinguishable branches and cannot identify the selector-specific request schema")
 }
 
 func TestOpenAPIPublishedExamplesValidateAgainstSchemas(t *testing.T) {

@@ -1009,6 +1009,17 @@ key and the dedicated `X-Packmon-Feed-Import-Secret` header configured through
 `PACKMON_FEED_IMPORT_SECRET`; scan/sync API keys alone cannot mutate feed data.
 The external feed-import endpoint is handled by a dedicated write-side API v1
 component with its own store interface, separate from the scan/check handler.
+Its selector-to-body contract is fixed: `osv` and `ghsa` use
+`VulnerabilityImportRequest`; `openssf`, its deprecated `malicious` alias, and
+`socket` use `MaliciousImportRequest`; `vulncheck` uses
+`VulnCheckImportRequest`; `cisakev` uses `CISAKEVImportRequest`; and `epss` uses
+`EPSSImportRequest`. The seven non-EPSS selectors accept a status-only request;
+EPSS always requires a nonempty score snapshot. OpenAPI publishes one concrete,
+directly typed operation for every selector so generated clients and validators
+can select the request schema without an ambiguous union. The generic
+`/api/v1/feeds/{feed}/import` operation remains documented as deprecated API v1
+compatibility surface; its runtime path dispatch and supported URLs are
+unchanged.
 PostgreSQL applies vulnerability and malicious feed import mutations and the
 optional feed status row in one transaction, and successful imports write a
 durable `feed_import` audit row with feed name, imported/deleted counts,

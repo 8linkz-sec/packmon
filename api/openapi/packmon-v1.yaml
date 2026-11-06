@@ -43,6 +43,83 @@ x-packmon-response-headers:
     WWW-Authenticate:
       $ref: "#/components/headers/BearerChallenge"
 
+x-packmon-feed-import-parameters:
+  common: &feedImportCommonParameters
+    - $ref: "#/components/parameters/PackmonUserAgent"
+    - name: X-Packmon-Feed-Import-Secret
+      in: header
+      required: false
+      description: Required in production and whenever a feed import secret is configured.
+      schema:
+        type: string
+
+x-packmon-feed-import-responses:
+  accepted: &feedImportAcceptedResponse
+    description: Import accepted
+    headers: *apiCommonResponseHeaders
+    content:
+      application/json:
+        schema:
+          $ref: "#/components/schemas/ImportResponse"
+  badRequest: &feedImportBadRequestResponse
+    description: |
+      Invalid import payload or semantic validation failure. This also covers
+      values that pass request validation but that the store itself refuses
+      (for example an EPSS score too small for the stored precision, or a NUL
+      character in a text field); those return the fixed message "feed import
+      contains values the store cannot accept" without store internals.
+      Nothing from a rejected import commits and no `feed_import` audit row is
+      written. A 400 caused by the request body (malformed JSON, failed
+      validation, or values the store refuses) also records a `rejected` feed
+      status for the selected feed.
+    headers: *apiCommonResponseHeaders
+    content:
+      application/json:
+        schema:
+          $ref: "#/components/schemas/ErrorResponse"
+  unauthorized: &feedImportUnauthorizedResponse
+    description: Missing or invalid API key
+    headers: *apiUnauthorizedResponseHeaders
+    content:
+      application/json:
+        schema:
+          $ref: "#/components/schemas/ErrorResponse"
+  forbidden: &feedImportForbiddenResponse
+    description: Missing or invalid feed import secret
+    headers: *apiCommonResponseHeaders
+    content:
+      application/json:
+        schema:
+          $ref: "#/components/schemas/ErrorResponse"
+  notFound: &feedImportNotFoundResponse
+    description: Unknown feed import path
+    headers: *apiCommonResponseHeaders
+    content:
+      application/json:
+        schema:
+          $ref: "#/components/schemas/ErrorResponse"
+  unsupportedMediaType: &feedImportUnsupportedMediaTypeResponse
+    description: Request Content-Type is not application/json (error code unsupported)
+    headers: *apiCommonResponseHeaders
+    content:
+      application/json:
+        schema:
+          $ref: "#/components/schemas/ErrorResponse"
+  rateLimited: &feedImportRateLimitedResponse
+    description: Rate limit exceeded
+    headers: *apiCommonResponseHeaders
+    content:
+      application/json:
+        schema:
+          $ref: "#/components/schemas/ErrorResponse"
+  internalError: &feedImportInternalErrorResponse
+    description: Internal server error
+    headers: *apiCommonResponseHeaders
+    content:
+      application/json:
+        schema:
+          $ref: "#/components/schemas/ErrorResponse"
+
 webhooks:
   scanCompleted:
     post:
@@ -271,15 +348,15 @@ paths:
 
   /api/v1/feeds/{feed}/import:
     post:
-      summary: Import feed data (for N8N integration)
+      summary: Import feed data through the deprecated generic operation
       description: |
-        The path feed selects the expected request schema:
-        osv and ghsa use VulnerabilityImportRequest.
-        openssf, malicious, and socket use MaliciousImportRequest.
-        vulncheck uses VulnCheckImportRequest.
-        cisakev uses CISAKEVImportRequest.
-        epss uses EPSSImportRequest.
+        Deprecated generated-client compatibility operation. Existing callers
+        may continue to select a feed with the path parameter, but new clients
+        should use the concrete feed operation whose request body directly
+        references its selector-specific schema. Runtime dispatch still
+        validates this compatibility body against the selected feed.
       operationId: importFeed
+      deprecated: true
       tags: [feeds]
       parameters:
         - $ref: "#/components/parameters/PackmonUserAgent"
@@ -303,87 +380,152 @@ paths:
       requestBody:
         required: true
         description: |
-          Feed-to-body mapping: osv/ghsa -> VulnerabilityImportRequest;
-          openssf/malicious/socket -> MaliciousImportRequest;
-          vulncheck -> VulnCheckImportRequest; cisakev -> CISAKEVImportRequest;
-          epss -> EPSSImportRequest.
+          Compatibility request body. Use the concrete feed operation for a
+          selector-specific request schema and generated client type.
         content:
           application/json:
             schema:
-              anyOf:
-                - $ref: "#/components/schemas/VulnerabilityImportRequest"
-                - $ref: "#/components/schemas/MaliciousImportRequest"
-                - $ref: "#/components/schemas/VulnCheckImportRequest"
-                - $ref: "#/components/schemas/CISAKEVImportRequest"
-                - $ref: "#/components/schemas/EPSSImportRequest"
+              type: object
       responses:
-        "200":
-          description: Import accepted
-          headers: *apiCommonResponseHeaders
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ImportResponse"
-        "400":
-          description: |
-            Invalid import payload or semantic validation failure. This also
-            covers values that pass request validation but that the store
-            itself refuses (for example an EPSS score too small for the stored
-            precision, or a NUL character in a text field); those return the
-            fixed message "feed import contains values the store cannot accept"
-            without store internals. Nothing from a rejected import commits
-            and no `feed_import` audit row is written. A 400 caused by the
-            request body (malformed JSON, failed validation, or values the
-            store refuses) also records a `rejected` feed status for the
-            path feed; a 400 for the request itself, such as a missing feed
-            name, records no feed status.
-          headers: *apiCommonResponseHeaders
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "401":
-          description: Missing or invalid API key
-          headers: *apiUnauthorizedResponseHeaders
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "403":
-          description: Missing or invalid feed import secret
-          headers: *apiCommonResponseHeaders
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "404":
-          description: Unknown feed import path
-          headers: *apiCommonResponseHeaders
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "415":
-          description: Request Content-Type is not application/json (error code unsupported)
-          headers: *apiCommonResponseHeaders
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "429":
-          description: Rate limit exceeded
-          headers: *apiCommonResponseHeaders
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "500":
-          description: Internal server error
-          headers: *apiCommonResponseHeaders
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
+        "200": *feedImportAcceptedResponse
+        "400": *feedImportBadRequestResponse
+        "401": *feedImportUnauthorizedResponse
+        "403": *feedImportForbiddenResponse
+        "404": *feedImportNotFoundResponse
+        "415": *feedImportUnsupportedMediaTypeResponse
+        "429": *feedImportRateLimitedResponse
+        "500": *feedImportInternalErrorResponse
+
+  /api/v1/feeds/osv/import:
+    post:
+      summary: Import OSV vulnerability data
+      description: Accepts OSV vulnerability mutations and optional status-only updates.
+      operationId: importOSVFeed
+      tags: [feeds]
+      parameters: *feedImportCommonParameters
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VulnerabilityImportRequest"
+      responses: &concreteFeedImportResponses
+        "200": *feedImportAcceptedResponse
+        "400": *feedImportBadRequestResponse
+        "401": *feedImportUnauthorizedResponse
+        "403": *feedImportForbiddenResponse
+        "415": *feedImportUnsupportedMediaTypeResponse
+        "429": *feedImportRateLimitedResponse
+        "500": *feedImportInternalErrorResponse
+
+  /api/v1/feeds/ghsa/import:
+    post:
+      summary: Import GHSA vulnerability data
+      description: Accepts GHSA vulnerability mutations and optional status-only updates.
+      operationId: importGHSAFeed
+      tags: [feeds]
+      parameters: *feedImportCommonParameters
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VulnerabilityImportRequest"
+      responses: *concreteFeedImportResponses
+
+  /api/v1/feeds/openssf/import:
+    post:
+      summary: Import OpenSSF malicious-package data
+      description: Accepts OpenSSF malicious-package mutations and optional status-only updates.
+      operationId: importOpenSSFFeed
+      tags: [feeds]
+      parameters: *feedImportCommonParameters
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MaliciousImportRequest"
+      responses: *concreteFeedImportResponses
+
+  /api/v1/feeds/malicious/import:
+    post:
+      summary: Import OpenSSF data through the deprecated malicious alias
+      description: |
+        Deprecated legacy alias for the OpenSSF import. Use
+        /api/v1/feeds/openssf/import for new clients. The response feed is
+        normalized to openssf. Status-only updates remain accepted.
+      operationId: importMaliciousFeed
+      deprecated: true
+      tags: [feeds]
+      parameters: *feedImportCommonParameters
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MaliciousImportRequest"
+      responses: *concreteFeedImportResponses
+
+  /api/v1/feeds/socket/import:
+    post:
+      summary: Import Socket.dev malicious-package data
+      description: Accepts Socket.dev malicious-package mutations and optional status-only updates.
+      operationId: importSocketFeed
+      tags: [feeds]
+      parameters: *feedImportCommonParameters
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MaliciousImportRequest"
+      responses: *concreteFeedImportResponses
+
+  /api/v1/feeds/vulncheck/import:
+    post:
+      summary: Import VulnCheck enrichment data
+      description: Accepts VulnCheck enrichment entries and optional status-only updates.
+      operationId: importVulnCheckFeed
+      tags: [feeds]
+      parameters: *feedImportCommonParameters
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VulnCheckImportRequest"
+      responses: *concreteFeedImportResponses
+
+  /api/v1/feeds/cisakev/import:
+    post:
+      summary: Import CISA KEV enrichment data
+      description: Accepts CISA KEV mutations and optional status-only updates.
+      operationId: importCISAKEVFeed
+      tags: [feeds]
+      parameters: *feedImportCommonParameters
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CISAKEVImportRequest"
+      responses: *concreteFeedImportResponses
+
+  /api/v1/feeds/epss/import:
+    post:
+      summary: Import an EPSS score snapshot
+      description: Requires a nonempty EPSS entries snapshot; status-only requests are rejected.
+      operationId: importEPSSFeed
+      tags: [feeds]
+      parameters: *feedImportCommonParameters
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EPSSImportRequest"
+      responses: *concreteFeedImportResponses
 
   /api/v1/packages/{ecosystem}/{rest}:
     get:
