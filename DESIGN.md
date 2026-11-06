@@ -706,8 +706,11 @@ Important behavior:
   `<packages><package name="..."/>` list, identified by content so unrelated
   `config.xml` files are ignored silently; a malformed or truncated file is a
   parse error only once a `<packages>` section directly under `<config>` has
-  been read, and a second top-level element after that identification is a
-  parse error that discards every parsed package row) and `choco install|upgrade` /
+  been read). A second top-level element after that identification, or
+  non-whitespace character data after the identified root closes, is a generic
+  parse error that discards every parsed package row. Trailing whitespace
+  remains valid, and text inside the root or after an unrelated config document
+  remains ignored. Chocolatey inventory also reads `choco install|upgrade` /
   `cinst` / `cup` command lines in `.ps1`, `.psm1`, `.bat`, and `.cmd`
   scripts. Directory discovery prunes hidden directories except `.github` and
   the common dependency caches `node_modules`, `vendor`, and `__pycache__`.

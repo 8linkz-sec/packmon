@@ -63,6 +63,7 @@ func ParseConfigXML(r io.Reader, sourceFile string) ([]Package, error) {
 	sawRoot := false
 	depth := 0
 	inPackages := false
+	packageDocumentRootClosed := false
 	var packages []Package
 	for {
 		token, err := decoder.Token()
@@ -113,7 +114,14 @@ func ParseConfigXML(r io.Reader, sourceFile string) ([]Package, error) {
 			if depth == 2 && inPackages {
 				inPackages = false
 			}
+			if depth == 1 && sawPackages {
+				packageDocumentRootClosed = true
+			}
 			depth--
+		case xml.CharData:
+			if packageDocumentRootClosed && strings.TrimSpace(string(t)) != "" {
+				return nil, fmt.Errorf("%s: invalid config.xml package list", sourceFile)
+			}
 		}
 	}
 	if !sawPackages {
